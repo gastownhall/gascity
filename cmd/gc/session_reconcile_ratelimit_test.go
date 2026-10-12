@@ -305,6 +305,7 @@ func TestCheckStability_RateLimitScreen_EmptyPaneStillCountsAsCrash(t *testing.T
 
 	peek := func(_ int) (string, error) { return "", nil }
 
+	store.persistRow(session) // the row the accrual reads fresh (mc-uhvqj)
 	_, stab := checkStability(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), clk, peek)
 	syncBeadFromStore(&session, store)
 	if !stab {
@@ -330,6 +331,7 @@ func TestCheckStability_RateLimitScreen_NilPeekFallsBackToCrash(t *testing.T) {
 		"wake_attempts": "0",
 	})
 
+	store.persistRow(session) // the row the accrual reads fresh (mc-uhvqj)
 	_, stab := checkStability(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), clk, nil)
 	syncBeadFromStore(&session, store)
 	if !stab {
@@ -355,6 +357,7 @@ func TestCheckStability_RateLimitScreen_PeekErrorFallsBackToCrash(t *testing.T) 
 		return "", errors.New("peek failed")
 	}
 
+	store.persistRow(session) // the row the accrual reads fresh (mc-uhvqj)
 	_, stab := checkStability(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), clk, peek)
 	syncBeadFromStore(&session, store)
 	if !stab {

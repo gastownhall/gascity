@@ -32,6 +32,17 @@ package main
 // reports none) holds too. That is the #312 lesson stated in the one place it
 // applies: never nudge on "we cannot tell".
 //
+// Stale activity is not always an ended turn: tmux measures pane output, so a
+// long model turn or a quiet tool call can age past the grace while the TUI
+// still shows its busy indicator. For a busy-readable provider family
+// (tmux.BusyIndicatorReadable) on a non-ACP transport, the predicate therefore
+// also holds while a point-in-time snapshot shows that indicator, or when the
+// snapshot fails. Only the indicator vetoes: a pane showing neither it nor a
+// ready prompt (scrolled away, overwritten by a broadcast, or never repainted
+// by an idle TUI) proves nothing, and holding on it would keep an abandoned
+// claim forever. That pane, every other session, and a runtime that cannot
+// take a snapshot keep the activity clock alone.
+//
 // # Exhaustion hands the session to a lane that already converges
 //
 // At the attempt cap the stall becomes a typed event and the session is handed
@@ -53,6 +64,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -66,6 +78,8 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/tmux"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 // Session-bead metadata keys for the execution backstop. Persisted for the same
@@ -98,6 +112,12 @@ const (
 const (
 	executionHoldMultiClaim = "multi_claim"
 	executionHoldNotQuiet   = "not_quiet"
+	// executionHoldSnapshotNotIdle and executionHoldSnapshotError name the
+	// idle-snapshot gate apart from the activity clock: activity is already
+	// stale, but the snapshot still showed the busy indicator, or could not be
+	// taken.
+	executionHoldSnapshotNotIdle = "snapshot_not_idle"
+	executionHoldSnapshotError   = "snapshot_error"
 )
 
 // executionStalledLatchRetryAfter bounds how long a latch silences
@@ -238,7 +258,7 @@ func (p poolExecutionBackstop) governs(s beads.Bead) bool {
 
 // resolve reports an outstanding stall only when all of it holds: the session
 // holds exactly ONE in-progress claim under a current identity, and the runtime
-// says the session has been quiet for at least the grace window.
+// says the session has been quiet for at least the grace window (quietHold).
 //
 // Exactly one, because the pacing state names a single bead: a session juggling
 // several claims is demonstrably doing something, and picking one of them to
@@ -257,8 +277,8 @@ func (p poolExecutionBackstop) resolve(s beads.Bead, _ map[string]beads.Bead, se
 		p.observeHold(p.store, &s, executionHoldMultiClaim, p.stdout)
 		return backstopTarget{}, backstopResolutionHold
 	}
-	if !p.sessionIsQuiet(sessName) {
-		p.observeHold(p.store, &s, executionHoldNotQuiet, p.stdout)
+	if hold := p.quietHold(s, sessName); hold != "" {
+		p.observeHold(p.store, &s, hold, p.stdout)
 		return backstopTarget{}, backstopResolutionHold
 	}
 	claim := claims[0]
@@ -271,16 +291,74 @@ func (p poolExecutionBackstop) resolve(s beads.Bead, _ map[string]beads.Bead, se
 	}, backstopResolutionOutstanding
 }
 
-// sessionIsQuiet reports whether the runtime has observed no activity for at
-// least the grace window. An unreadable or unset activity signal is NOT quiet: a
-// backstop that treats "unknown" as "idle" nudges working agents, which is
-// exactly how the reverted idle-session nudger produced restart storms.
-func (p poolExecutionBackstop) sessionIsQuiet(sessName string) bool {
+// quietHold names the gate that keeps session s from counting as quiet, or
+// returns "" when it is quiet: the runtime has observed no activity for at
+// least the grace window and, for a busy-readable provider family on a
+// non-ACP transport (executionSnapshotVetoApplies), a point-in-time snapshot
+// does not show the busy indicator. An unreadable or unset activity signal is
+// NOT quiet: a backstop that treats "unknown" as "idle" nudges working agents,
+// which is exactly how the reverted idle-session nudger produced restart
+// storms. The snapshot is taken only once activity is stale, so a session still
+// producing output costs no pane capture.
+func (p poolExecutionBackstop) quietHold(s beads.Bead, sessName string) string {
 	last, err := p.sp.GetLastActivity(sessName)
-	if err != nil || last.IsZero() {
+	if err != nil || last.IsZero() || p.now.Sub(last) < idleClaimNudgeGrace {
+		return executionHoldNotQuiet
+	}
+	if !executionSnapshotVetoApplies(s.Metadata) {
+		return ""
+	}
+	return p.snapshotHold(sessName)
+}
+
+// snapshotHold asks the runtime whether a session whose activity clock is
+// already stale still shows its provider's busy indicator. Tmux activity
+// measures pane output, not whether an agent turn is still running, so a long
+// model turn or a quiet tool call can age past the grace while the indicator
+// stays on screen. That busy reading holds, and so does a failed snapshot:
+// neither is proof that the turn ended. The reading is a string match on the
+// capture, so a frozen frame or transcript text that still shows an indicator
+// string holds too, for as long as it stays in the captured lines. Every other
+// answer leaves the activity clock's verdict standing: an idle pane, an
+// indeterminate one (ErrIdleIndeterminate, which an abandoned pane whose prompt
+// was displaced reports indefinitely), and a runtime that cannot take the
+// observation, whether it lacks IdleSnapshotProvider or is a composite (auto,
+// hybrid) whose routed backend reports ErrInteractionUnsupported.
+func (p poolExecutionBackstop) snapshotHold(sessName string) string {
+	snap, ok := p.sp.(runtime.IdleSnapshotProvider)
+	if !ok {
+		return ""
+	}
+	idle, err := snap.SnapshotIdle(sessName)
+	switch {
+	case errors.Is(err, runtime.ErrInteractionUnsupported),
+		errors.Is(err, runtime.ErrIdleIndeterminate):
+		return ""
+	case err != nil:
+		return executionHoldSnapshotError
+	case !idle:
+		return executionHoldSnapshotNotIdle
+	default:
+		return ""
+	}
+}
+
+// executionSnapshotVetoApplies reports whether a snapshot may veto the activity
+// clock for the session whose metadata is meta: its provider family (resolved
+// the way the pane's GC_PROVIDER is) is busy-readable
+// (tmux.BusyIndicatorReadable), and its transport is not ACP. Busy-readable is
+// a policy, tmux's submitVerifyEligibleFamilies, not a property of the pane
+// scan: the scan does not tell families apart and also matches Gemini's busy
+// strings, yet a gemini session, like every unlisted family, keeps the
+// activity clock alone. Adding a family to submitVerifyEligibleFamilies widens
+// this set. It is the claude, non-ACP restriction the idle tracker's content
+// clock applies (idleTrackerContentClockApplies), taken to the full
+// busy-readable set.
+func executionSnapshotVetoApplies(meta map[string]string) bool {
+	if strings.TrimSpace(meta["transport"]) == "acp" {
 		return false
 	}
-	return p.now.Sub(last) >= idleClaimNudgeGrace
+	return tmux.BusyIndicatorReadable(sessionpkg.ProviderFamilyFromMetadata(meta, ""))
 }
 
 func (p poolExecutionBackstop) state(s beads.Bead, target backstopTarget) (same bool, attempts int, last time.Time) {

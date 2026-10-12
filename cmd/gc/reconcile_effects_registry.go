@@ -29,24 +29,35 @@ type effectPass struct {
 	// held are the capabilities the pass holds beyond its writers; an
 	// effect reaches each only through txCaps, as its spec grants (capsFor).
 	held heldCaps
-	// reads are the read-only city and rig stores of the live work read.
+	// reads are what the live work read (L5) reads.
 	reads effectReads
 	seam  txSeamFunc // the planner's: runs at the effect's seams (tests, staging)
 }
 
-// effectReads are read-only city and rig stores.
+// effectReads are the city work legs, every leg read-only.
 type effectReads struct {
+	legs WorkLegs
+	// city and rigs are the sessions store and the rig stores, read-only,
+	// which the start effect's prepare reads (template overrides, the task
+	// work dir, the claimed-work probe); the live work read uses legs.
 	city beads.Store
 	rigs map[string]beads.Store
+	// cityPath keys the city's identifier locks (A7's alias lock).
+	cityPath string
 }
 
 // heldCaps are a pass's capabilities. create is what the pass hands its
 // creates, raw stores included: a create's guarded row write is v5 R1's
-// exception 1 (§13). creates runs them. The planner sets both, the first on
-// its first admitted create (planner.submit).
+// exception 1 (§13). creates runs them. release is the closes' raw work
+// legs, for their releases and cascades. The planner sets them, create on
+// its first admitted create and release on its first close (planner.submit).
 type heldCaps struct {
 	create  *createPass
 	creates *createEffects
+	start   startCaps           // the breaker and its recorder; capsFor adds the provider and clock
+	episode startupHealthRecord // over the sessions store
+	retire  retiredCleanup      // over the sessions store
+	release *closeReleases
 }
 
 // newEffectPass is w's and a's effectPass.
@@ -60,14 +71,17 @@ func newEffectPass(w *World, a *allocDecision) *effectPass {
 	}
 	if w.SessionsStore != nil {
 		p.reads.city = readOnlyStore{blindWriteRefusingStore{inner: w.SessionsStore}}
+		p.held.episode = startupHealthRecord{store: w.SessionsStore}
+		p.held.retire = retiredCleanup{store: w.SessionsStore}
 	}
 	p.reads.rigs = make(map[string]beads.Store, len(w.RigStores))
 	for rig, store := range w.RigStores {
 		p.reads.rigs[rig] = readOnlyStore{blindWriteRefusingStore{inner: store}}
 	}
+	p.reads.legs, p.reads.cityPath = w.WorkLegs.readOnly(), w.CityPath
 	stripped := *w
 	stripped.LegStores, stripped.Demand.AssignedStores = nil, nil
-	stripped.SessionsStore, stripped.RigStores = nil, nil
+	stripped.SessionsStore, stripped.RigStores, stripped.WorkLegs = nil, nil, WorkLegs{}
 	if w.Env != nil {
 		env := *w.Env
 		env.SP = nil
@@ -77,23 +91,30 @@ func newEffectPass(w *World, a *allocDecision) *effectPass {
 	return p
 }
 
+// effectSpecs is the kind table. Its functions are effects, run by the
+// executor, never by the decide that reads the table for a kind's class
+// (v2purity reaches a function stored in a field only through a read of
+// that field):
 var effectSpecs = map[string]effectSpec{
-	intentStart:           {class: capStarts, tokens: 1},
-	intentAdopt:           {class: capProbing},
-	intentCreate:          {class: capCreates, caps: capCreate, body: createBody},                    // C1, C2
-	intentRekey:           {class: capProbing, needs: needs{Runtime: true}, sections: rekeySections}, // A3
-	intentZombie:          {class: capProbing, bootGated: true},
-	intentDrainBegin:      {class: capRowWrites, bootGated: true},
-	intentDrainBeginFresh: {class: capProbing, bootGated: true},
-	intentSignal:          {class: capRowWrites, bootGated: true},
-	intentSignalFresh:     {class: capProbing, bootGated: true},
-	intentDrainCancel:     {class: capRowWrites, sections: drainClearSections}, // A19 (C6a)
-	intentDrainVoid:       {class: capRowWrites, sections: drainClearSections}, // A19 (C6a)
-	intentStop:            {class: capProbing, bootGated: true},
-	intentClose:           {class: capProbing, bootGated: true},
-	intentRollback:        {class: capProbing, bootGated: true},
-	intentRowMetadata:     {class: capRowWrites},
-	intentBaseline:        {class: capRowWrites},
-	intentRowHeal:         {class: capRowWrites, sections: rowWriteSections},                        // A6
-	intentRowHealFresh:    {class: capProbing, needs: needs{Runtime: true}, sections: healSections}, // A6
+	intentStart:           {class: capStarts, tokens: 1, needs: needs{Runtime: true, Lease: true}, caps: capReadStores | capProviderStart | capEpisode | capRetire, sections: startSections, around: retireAround},
+	intentAdopt:           {class: capProbing, needs: needs{Runtime: true, Lease: true}, caps: capReadStores, sections: adoptSections},
+	intentCreate:          {class: capCreates, caps: capCreate, body: createBody},                                     // C1, C2
+	intentDriftRepair:     {class: capProbing, needs: needs{Runtime: true}, sections: healSections},                   // A14 (C7b2): the fresh heal's, under its own kind
+	intentLiveApply:       {class: capProbing, needs: needs{Runtime: true, Lease: true}, sections: liveApplySections}, // A14 (C7b2)
+	intentRekey:           {class: capProbing, needs: needs{Runtime: true, Lease: true}, sections: rekeySections},     // A3: writes the incarnation under the row's lease record
+	intentZombie:          {class: capProbing, bootGated: true, needs: needs{Lease: true}},
+	intentDrainBegin:      {class: capRowWrites, bootGated: true, needsFor: drainBeginNeeds, sections: drainBeginSections},                                                                               // A20 (C6a2)
+	intentDrainBeginFresh: {class: capProbing, bootGated: true, needsFor: drainBeginNeeds, sections: drainBeginSections},                                                                                 // A20 (C6a2)
+	intentSignal:          {class: capRowWrites, bootGated: true, sections: signalSections},                                                                                                              // A20's signal (C6b1)
+	intentSignalFresh:     {class: capProbing, bootGated: true, needs: signalFreshNeeds, sections: signalSections},                                                                                       // A20's signal (C6b1)
+	intentDrainCancel:     {class: capRowWrites, sections: drainClearSections},                                                                                                                           // A19 (C6a)
+	intentDrainVoid:       {class: capRowWrites, sections: drainClearSections},                                                                                                                           // A19 (C6a)
+	intentStop:            {class: capProbing, bootGated: true, needs: needs{Runtime: true, Lease: true}, needsFor: stopNeeds, caps: capReadStores | capProviderStop, sections: stopSections},            // A4 (C6b2)
+	intentClose:           {class: capProbing, bootGated: true, needs: needs{Runtime: true, Legs: legWork, Lease: true}, caps: capReadStores | capRelease, sections: closeSections, around: closeAround}, // A21 (C5c1)
+	intentRollback:        {class: capProbing, bootGated: true, needs: needs{Runtime: true, Lease: true}, caps: capProviderStart | capRetire, sections: rollbackSections, around: retireAround},          // A10 (C3)
+	intentRowMetadata:     {class: capRowWrites, caps: capReadStores, around: aliasLockAround, sections: rowMetadataSections},                                                                            // A7 (C7d): a row write, lease-free
+	intentRuntimeAlias:    {class: capProbing, needs: needs{Runtime: true, Lease: true}, caps: capProviderStart, sections: runtimeAliasSections},                                                         // A7 (C7d)
+	intentBaseline:        {class: capRowWrites, sections: baselineSections},                                                                                                                             // A8 (C7c)
+	intentRowHeal:         {class: capRowWrites, sections: rowWriteSections},                                                                                                                             // A6
+	intentRowHealFresh:    {class: capProbing, needs: needs{Runtime: true}, sections: healSections},                                                                                                      // A6
 }

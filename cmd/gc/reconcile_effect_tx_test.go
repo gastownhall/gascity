@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
@@ -28,6 +29,15 @@ import (
 // effect test kit: one session row on a CachingStore over a stamped,
 // revisioned MemStore (the simulator's leg) and the pass that decided on
 // it. Effect tests build on it rather than on a fake leaf of their own.
+
+// The keys the tx tests write: registered advisory keys no premise
+// compares, so a write lands without moving a fact the premise reads. The
+// session field registry's guard fails a production write of any other key.
+const (
+	txKeyA    = "usage_compute_emitted_at"
+	txKeyB    = "usage_model_swept_at"
+	txKeyNote = "invocation_usage_cursor"
+)
 
 // lockObserver counts, per row, the sections holding its session mutation
 // lock, through withRowMutationLock.
@@ -63,13 +73,6 @@ func (o *lockObserver) holds(id string) bool {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	return o.held[id] > 0
-}
-
-// nameLocked reports whether city's runtime name lock on name is held.
-func nameLocked(city, name string) bool {
-	runtimeNames.mu.Lock()
-	defer runtimeNames.mu.Unlock()
-	return runtimeNames.held[runtimeNameKey{city, name}]
 }
 
 // txKit is the kit: row gc-1, runtime name s-gc-1, the pass, its runtime
@@ -134,6 +137,7 @@ func newTxKitOn(t *testing.T, m, backing beads.Store) *txKit {
 		Census: readCensus(t, gatherNow, censusLegs(rowLeg, cache)), Mislabelled: map[rowKey]bool{},
 		LegStores: map[string]beads.Store{rowLeg: cache}, SessionsStore: cache,
 	}
+	w.WorkLegs = workLegsFromCensus(w.CityPath, w.Env.Cfg, cityWorkLeg{store: cache}, nil)
 	k.p = newEffectPass(w, &allocDecision{Snapshot: &selectionSnapshot{Entries: map[rowKey]*selectionEntry{}}})
 	k.p.Clock, k.p.Runtime = newFakePlannerClock(gatherNow), k.leaf
 	k.p.seam = func(_ context.Context, at txSeam, _ intent, section, attempt int) error {
@@ -195,7 +199,7 @@ func TestTxLockScope(t *testing.T) {
 	k := newTxKit(t)
 	var problems []string
 	expect := func(where string, row bool) {
-		if k.locks.holds(k.it.Key.ID) != row || !nameLocked(k.p.World.CityPath, "s-gc-1") {
+		if k.locks.holds(k.it.Key.ID) != row || !nameHeld(k.t, k.p.World.CityPath, "s-gc-1") {
 			problems = append(problems, where)
 		}
 	}
@@ -205,7 +209,12 @@ func TestTxLockScope(t *testing.T) {
 		return nil
 	}
 	callErr := errors.New("start failed")
-	first := called(section{Decide: func(v txView) txStep { s := mark("a")(v); s.Write["state"] = "creating"; s.Pass = "prepared"; return s }},
+	first := called(callStart, section{Decide: func(v txView) txStep {
+		s := mark(txKeyA)(v)
+		s.Write["state"] = "creating"
+		s.Pass = "prepared"
+		return s
+	}},
 		func(_ context.Context, _ txCaps, in string) (int, error) {
 			expect("during the call", false)
 			if in != "prepared" {
@@ -217,17 +226,17 @@ func TestTxLockScope(t *testing.T) {
 		if out, err := callResult[int](v); out != 7 || !errors.Is(err, callErr) {
 			problems = append(problems, "the second section's view")
 		}
-		return mark("b")(v)
+		return mark(txKeyB)(v)
 	}}
 	spec := effectSpec{sections: []section{first, second}}
 	if s := k.run(context.Background(), spec); s.Outcome != settledLanded {
 		t.Fatalf("settlement %+v, want landed", s)
 	}
 	want := []txSeam{seamAfterReads, seamAfterRowRead, seamBeforeCAS, seamAfterWrite, seamBeforeCall, seamAfterCall, seamAfterReads, seamAfterRowRead, seamBeforeCAS, seamAfterWrite}
-	if len(problems) > 0 || !slices.Equal(k.seen, want) || k.meta("a") != "1" || k.meta("b") != "1" {
-		t.Fatalf("problems %v, seams %v, a=%q b=%q; want both locks in each section, the name lock alone over the call, both writes", problems, k.seen, k.meta("a"), k.meta("b"))
+	if len(problems) > 0 || !slices.Equal(k.seen, want) || k.meta(txKeyA) != "1" || k.meta(txKeyB) != "1" {
+		t.Fatalf("problems %v, seams %v, a=%q b=%q; want both locks in each section, the name lock alone over the call, both writes", problems, k.seen, k.meta(txKeyA), k.meta(txKeyB))
 	}
-	if nameLocked(k.p.World.CityPath, "s-gc-1") || k.locks.holds(k.it.Key.ID) {
+	if nameHeld(k.t, k.p.World.CityPath, "s-gc-1") || k.locks.holds(k.it.Key.ID) {
 		t.Fatal("a lock outlived the transaction")
 	}
 	k = newTxKit(t) // the first run moved the row to creating
@@ -235,8 +244,7 @@ func TestTxLockScope(t *testing.T) {
 	if s := k.run(context.Background(), spec); s.Outcome != settledFailed || s.Cause != causeCallError || !errors.Is(s.Err, callErr) {
 		t.Fatalf("last call failed: settlement %+v, want failed with cause %q", s, causeCallError)
 	}
-	unlock := runtimeNames.tryLock(k.p.World.CityPath, "s-gc-1")
-	defer unlock()
+	holdName(t, k.p.World.CityPath, "s-gc-1")
 	if s := k.run(context.Background(), spec); s.Outcome != settledRefused || s.Cause != causeNameBusy {
 		t.Fatalf("busy name: settlement %+v, want refused with cause %q", s, causeNameBusy)
 	}
@@ -250,7 +258,7 @@ func TestTxCallIsGatedLikeAWrite(t *testing.T) {
 	latch := new(writeLatch)
 	k.on(seamAfterRowRead, func() { latch.abandon() }) // the executor gives up here
 	ran := false
-	call := called(section{Decide: func(txView) txStep { return txStep{} }}, func(context.Context, txCaps, any) (any, error) { ran = true; return nil, nil })
+	call := called(callStop, section{Decide: func(txView) txStep { return txStep{} }}, func(context.Context, txCaps, any) (any, error) { ran = true; return nil, nil })
 	if s := runTx(context.Background(), k.p, k.it, effectSpec{sections: []section{call}}, latch); ran || s.Outcome != settledFailed {
 		t.Fatalf("settlement %+v (called %t), want no call after the abandonment", s, ran)
 	}
@@ -262,7 +270,7 @@ func TestTxCallIsGatedLikeAWrite(t *testing.T) {
 	clk := newFakePlannerClock(plannerT0)
 	x, posted := fakeClockExecutor(clk)
 	inCall, release := make(chan struct{}), make(chan struct{})
-	slow := called(section{Decide: func(txView) txStep { return txStep{} }}, func(context.Context, txCaps, any) (any, error) {
+	slow := called(callStop, section{Decide: func(txView) txStep { return txStep{} }}, func(context.Context, txCaps, any) (any, error) {
 		close(inCall)
 		<-release
 		return nil, nil
@@ -293,8 +301,8 @@ func TestTxCallIsGatedLikeAWrite(t *testing.T) {
 // event; the section after a Call reads since that section began.
 func TestTxCallKeepsFactsAndTheNextSectionReadsAfterIt(t *testing.T) {
 	k := newTxKit(t)
-	sec := called(section{Decide: func(v txView) txStep {
-		s := mark("a")(v)
+	sec := called(callStop, section{Decide: func(v txView) txStep {
+		s := mark(txKeyA)(v)
 		s.Facts.Events = []events.Event{{Type: "landed"}}
 		return s
 	}}, func(context.Context, txCaps, any) (any, error) { return nil, errors.New("provider failed") })
@@ -305,7 +313,7 @@ func TestTxCallKeepsFactsAndTheNextSectionReadsAfterIt(t *testing.T) {
 	clk := k.p.Clock.(*fakePlannerClock)
 	t0 := clk.Now()
 	spec := effectSpec{needs: needs{Runtime: true}, sections: []section{
-		called(section{Decide: func(txView) txStep { return txStep{} }}, func(context.Context, txCaps, any) (any, error) { clk.Advance(time.Minute); return nil, nil }),
+		called(callStop, section{Decide: func(txView) txStep { return txStep{} }}, func(context.Context, txCaps, any) (any, error) { clk.Advance(time.Minute); return nil, nil }),
 		{Decide: func(txView) txStep { return txStep{} }},
 	}}
 	k.run(context.Background(), spec)
@@ -329,7 +337,7 @@ func TestTxVerdicts(t *testing.T) {
 	}{
 		{"fail", txStep{Fail: "prepare", Err: boom}, settledFailed, "prepare"},
 		{"done without a write", txStep{Done: true, Cause: "already-running"}, settledNoop, "already-running"},
-		{"done after a write", txStep{Write: session.MetadataPatch{"a": "1"}, Done: true}, settledLanded, ""},
+		{"done after a write", txStep{Write: session.MetadataPatch{txKeyA: "1"}, Done: true}, settledLanded, ""},
 	} {
 		k := newTxKit(t)
 		ran = false
@@ -340,11 +348,13 @@ func TestTxVerdicts(t *testing.T) {
 	}
 }
 
-// Kills S2's own-token rule checking too much or too little (review pins):
-// after the effect's own write and its Call it ignores a hold, and refuses
-// another token, a closed row, and `gc session kill`'s fence (asleep, the
-// same token) landed during the Call; with no own write before it, it
-// refuses even a row in S2's states (another writer's wake since the pass).
+// Kills S2's own-token rule checking too much or too little (review pins,
+// the F2 ruling: the registry's FactsCommit site): after the effect's own
+// write and its start Call it ignores an agent's heartbeat hold and the keys
+// the started runtime writes, and refuses an operator suspend, another
+// token, a closed row, and `gc session kill`'s fence (asleep, the same
+// token) landed during the Call; with no own write before it, it refuses
+// even a row in S2's states (another writer's wake since the pass).
 func TestTxPremiseOwnToken(t *testing.T) {
 	kill := session.KillPendingPatch(gatherNow)
 	for _, c := range []struct {
@@ -352,7 +362,9 @@ func TestTxPremiseOwnToken(t *testing.T) {
 		outside func(k *txKit)
 		lands   bool
 	}{
-		{"a hold", func(k *txKit) { k.outside("held_until", rowAt(time.Hour)) }, true},
+		{"an agent's heartbeat hold", func(k *txKit) { k.outside("held_until", rowAt(time.Hour)) }, true},
+		{"the started runtime's session key", func(k *txKit) { k.outside("session_key", "k-2") }, true},
+		{"an operator suspend", func(k *txKit) { k.outside("state", "suspended", "suspended_at", rowAt(0)) }, false},
 		{"another token", func(k *txKit) { k.outside("instance_token", "tok-other") }, false},
 		{"closed", func(k *txKit) {
 			if err := k.backing.Close("gc-1"); err != nil {
@@ -367,17 +379,17 @@ func TestTxPremiseOwnToken(t *testing.T) {
 	} {
 		k := newTxKit(t)
 		k.on(seamAfterCall, func() { c.outside(k) }) // out of process, during the Start
-		preWake := called(section{Decide: func(txView) txStep { return txStep{Write: session.MetadataPatch{"state": "creating"}} }},
+		preWake := called(callStart, section{Decide: func(txView) txStep { return txStep{Write: session.MetadataPatch{"state": "creating"}} }},
 			func(context.Context, txCaps, any) (any, error) { return nil, nil })
-		commit := section{Premise: premiseOwnToken, Decide: mark("a")}
+		commit := section{Premise: premiseOwnToken, Decide: mark(txKeyA)}
 		s := k.run(context.Background(), effectSpec{needs: needs{NameLock: true}, sections: []section{preWake, commit}})
-		if landed := k.meta("a") == "1"; landed != c.lands || !c.lands && s.Cause != causePremise {
+		if landed := k.meta(txKeyA) == "1"; landed != c.lands || !c.lands && s.Cause != causePremise {
 			t.Fatalf("%s: settlement %+v (commit landed %t), want landed %t", c.name, s, landed, c.lands)
 		}
 	}
 	k := newTxKit(t)
 	k.outside("state", "active", "held_until", rowAt(time.Hour))
-	if s := k.run(context.Background(), effectSpec{sections: []section{{Premise: premiseOwnToken, Decide: mark("a")}}}); s.Cause != causePremise || k.meta("a") != "" {
+	if s := k.run(context.Background(), effectSpec{sections: []section{{Premise: premiseOwnToken, Decide: mark(txKeyA)}}}); s.Cause != causePremise || k.meta(txKeyA) != "" {
 		t.Fatalf("no own write: settlement %+v, want refused %q", s, causePremise)
 	}
 }
@@ -440,11 +452,11 @@ func TestTxReadsTheFenceLegs(t *testing.T) {
 	if f.Attach != "" || f.Pending != "" || f.Idle || f.Work.Free {
 		t.Fatalf("fence %+v (work %+v), want detached, nothing pending, active since the pass, work found", f, f.Work)
 	}
-	k.p.reads.city = blindWriteRefusingStore{inner: failingList{k.cache}}
+	k.p.reads.legs = workLegsFromCensus("", nil, cityWorkLeg{store: blindWriteRefusingStore{inner: failingList{k.cache}}}, nil)
 	if k.run(context.Background(), spec); f.Work.Free || f.Work.Err == nil {
 		t.Fatalf("failed work read: %+v, want work assumed, with its error", f.Work)
 	}
-	k.p.reads.city = nil
+	k.p.reads.legs = WorkLegs{}
 	if k.run(context.Background(), spec); f.Work.Free || !errors.Is(f.Work.Err, errNoReadStore) {
 		t.Fatalf("no store: %+v, want work assumed", f.Work)
 	}
@@ -462,7 +474,7 @@ func TestTxProbe(t *testing.T) {
 	var got string
 	var gotErr error
 	sec := probed(func(_ context.Context, _ effectReads, v txView) (string, error) {
-		if !k.locks.holds(k.it.Key.ID) || !nameLocked(k.p.World.CityPath, "s-gc-1") {
+		if !k.locks.holds(k.it.Key.ID) || !nameHeld(k.t, k.p.World.CityPath, "s-gc-1") {
 			t.Error("the probe ran outside a lock")
 		}
 		return v.Row.SessionName, nil
@@ -487,13 +499,13 @@ func TestTxRetriesALostCASOnAFreshRead(t *testing.T) {
 		decides := 0
 		spec := effectSpec{needs: needs{Attempts: c.attempts}, sections: []section{{Decide: func(v txView) txStep {
 			if decides++; decides <= c.races {
-				k.outside("note", string(rune('a'+decides)))
+				k.outside(txKeyNote, string(rune('a'+decides)))
 			}
-			return mark("a")(v)
+			return mark(txKeyA)(v)
 		}}}}
 		s := k.run(context.Background(), spec)
-		if decides != c.decides || (s.Outcome == settledLanded) != c.landed || (!c.landed && s.Cause != causeCAS) || (k.meta("a") == "1") != c.landed || k.meta("note") == "" {
-			t.Fatalf("attempts %d, %d races: settlement %+v after %d decisions, a=%q; want landed %t after %d", c.attempts, c.races, s, decides, k.meta("a"), c.landed, c.decides)
+		if decides != c.decides || (s.Outcome == settledLanded) != c.landed || (!c.landed && s.Cause != causeCAS) || (k.meta(txKeyA) == "1") != c.landed || k.meta(txKeyNote) == "" {
+			t.Fatalf("attempts %d, %d races: settlement %+v after %d decisions, a=%q; want landed %t after %d", c.attempts, c.races, s, decides, k.meta(txKeyA), c.landed, c.decides)
 		}
 	}
 }
@@ -502,11 +514,11 @@ func TestTxRetriesALostCASOnAFreshRead(t *testing.T) {
 // not yet delivered) is what Decide sees, on its first attempt.
 func TestTxDecidesOnTheBackingRow(t *testing.T) {
 	k := newTxKit(t)
-	k.outside("note", "behind")
+	k.outside(txKeyNote, "behind")
 	var seen []string
 	spec := effectSpec{sections: []section{{Decide: func(v txView) txStep {
-		seen = append(seen, v.Meta["note"])
-		return mark("a")(v)
+		seen = append(seen, v.Meta[txKeyNote])
+		return mark(txKeyA)(v)
 	}}}}
 	if s := k.run(context.Background(), spec); s.Outcome != settledLanded || !slices.Equal(seen, []string{"behind"}) {
 		t.Fatalf("settlement %+v, Decide saw note %q; want the backing's on its one attempt", s, seen)
@@ -522,11 +534,11 @@ func TestTxReadsTheRuntimeBeforeTheRow(t *testing.T) {
 	k.leaf.during = func() {
 		if !once {
 			once = true
-			k.outside("note", "during-read")
+			k.outside(txKeyNote, "during-read")
 		}
 	}
 	decides := 0
-	spec := effectSpec{needs: needs{Runtime: true}, sections: []section{{Decide: func(v txView) txStep { decides++; return mark("a")(v) }}}}
+	spec := effectSpec{needs: needs{Runtime: true}, sections: []section{{Decide: func(v txView) txStep { decides++; return mark(txKeyA)(v) }}}}
 	if s := k.run(context.Background(), spec); s.Outcome != settledLanded || decides != 1 {
 		t.Fatalf("settlement %+v after %d decisions, want landed on the first", s, decides)
 	}
@@ -543,9 +555,9 @@ func TestTxReadsTheRuntimeEachAttempt(t *testing.T) {
 	spec := effectSpec{needs: needs{Runtime: true}, sections: []section{{Decide: func(v txView) txStep {
 		if rt = v.RT; !lost { // lose the first CAS: a second attempt reads again
 			lost = true
-			k.outside("note", "x")
+			k.outside(txKeyNote, "x")
 		}
-		return mark("a")(v)
+		return mark(txKeyA)(v)
 	}}}}
 	if s := k.run(context.Background(), spec); s.Outcome != settledLanded || rt == nil || rt.Class != rtAbsent {
 		t.Fatalf("settlement %+v, runtime %+v; want landed on a fresh read", s, rt)
@@ -573,7 +585,7 @@ func TestTxPremise(t *testing.T) {
 		k := newTxKit(t)
 		move(k)
 		decided := false
-		spec := effectSpec{needs: needs{NameLock: true}, sections: []section{{Decide: func(v txView) txStep { decided = true; return mark("a")(v) }}}}
+		spec := effectSpec{needs: needs{NameLock: true}, sections: []section{{Decide: func(v txView) txStep { decided = true; return mark(txKeyA)(v) }}}}
 		if s := k.run(context.Background(), spec); s.Outcome != settledRefused || s.Cause != causePremise || decided {
 			t.Fatalf("%s: settlement %+v (decided %t), want refused %q before Decide", name, s, decided, causePremise)
 		}
@@ -581,10 +593,79 @@ func TestTxPremise(t *testing.T) {
 	k := newTxKit(t)
 	two := effectSpec{sections: []section{
 		{Decide: func(txView) txStep { return txStep{Write: session.MetadataPatch{"state": "awake", "generation": "2"}} }},
-		{Decide: mark("b")},
+		{Decide: mark(txKeyB)},
 	}}
-	if s := k.run(context.Background(), two); s.Outcome != settledLanded || k.meta("b") != "1" {
-		t.Fatalf("after a landed section: settlement %+v, b=%q; want the second to expect the first's row", s, k.meta("b"))
+	if s := k.run(context.Background(), two); s.Outcome != settledLanded || k.meta(txKeyB) != "1" {
+		t.Fatalf("after a landed section: settlement %+v, b=%q; want the second to expect the first's row", s, k.meta(txKeyB))
+	}
+}
+
+// Kills a premise that compares other keys than the registry's (F2): a key
+// of each premise class moved since the pass refuses, one outside the
+// session codec (a stop request) included; an advisory, a baseline or a
+// lease key does not; an assignment identity key refuses only an effect
+// that reads the row's work; after a start Call the keys the started
+// runtime writes (session.FactsAfterStart: its session key and claim) do
+// not, while a lifecycle key, detached_at or the current bead still do;
+// after a stop Call, a start's included, the full premise holds. A refusal
+// names the key that moved.
+func TestTxPremiseComparesTheRegistryFacts(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		kv      []string
+		work    bool
+		calls   []callKind // the Calls before the section, if any
+		refuses bool
+	}{
+		{"lifecycle", []string{"state_reason", "x"}, false, nil, true},
+		{"operator intent", []string{"held_until", rowAt(time.Hour)}, false, nil, true},
+		{"request", []string{"restart_requested", "true"}, false, nil, true},
+		{"stop request", []string{"drain_intent_reason", "idle"}, false, nil, true},
+		{"counter", []string{"wake_attempts", "3"}, false, nil, true},
+		{"marker", []string{"detached_at", rowAt(0)}, false, nil, true},
+		{"advisory", []string{"synced_at", rowAt(0)}, false, nil, false},
+		{"baseline", []string{"started_provision_hash", "h"}, false, nil, false},
+		{"lease", []string{session.RuntimeLeaseEpochKey, "7", session.RuntimeLeaseHolderKey, "other"}, false, nil, false},
+		{"assignment identity, no work read", []string{"alias", "a2"}, false, nil, false},
+		{"assignment identity, work read", []string{"alias", "a2"}, true, nil, true},
+		{"after a start: its session key", []string{"session_key", "k2"}, false, []callKind{callStart}, false},
+		{"after a start: detached_at", []string{"detached_at", rowAt(0)}, false, []callKind{callStart}, true},
+		{"after a start: the current bead", []string{session.CurrentBeadIDKey, "b-1"}, false, []callKind{callStart}, true},
+		{"after a start: the current claim", []string{beadmeta.CurrentClaimBeadIDMetadataKey, "b-1"}, false, []callKind{callStart}, false},
+		{"after a start: lifecycle", []string{"state_reason", "x"}, false, []callKind{callStart}, true},
+		{"after a stop: an agent's heartbeat", []string{"held_until", rowAt(time.Hour)}, false, []callKind{callStop}, false},
+		{"after a stop: its ack", []string{"drain_ack_at", rowAt(0)}, false, []callKind{callStop}, false},
+		{"after a stop: a session key", []string{"session_key", "k2"}, false, []callKind{callStop}, false},
+		{"after a stop: the operator's intent", []string{"sleep_intent", "user-hold"}, false, []callKind{callStop}, true},
+		{"after a stop: a wake request", []string{"wake_request", "explicit"}, false, []callKind{callStop}, true},
+		{"after a stop: the state", []string{"state_reason", "x"}, false, []callKind{callStop}, true},
+		{"after a start, then a stop: a session key", []string{"session_key", "k2"}, false, []callKind{callStart, callStop}, false},
+	} {
+		k := newTxKit(t)
+		spec := effectSpec{sections: []section{{Decide: mark(txKeyA)}}}
+		if c.work {
+			spec.needs.Legs = legWork
+		}
+		if len(c.calls) > 0 {
+			spec = effectSpec{needs: needs{NameLock: true}}
+			for i, kind := range c.calls {
+				spec.sections = append(spec.sections, called(kind, section{Decide: func(txView) txStep { return txStep{} }}, func(context.Context, txCaps, any) (any, error) { return nil, nil }))
+				if i < len(c.calls)-1 {
+					k.on(seamAfterCall, func() {})
+				}
+			}
+			spec.sections = append(spec.sections, section{Decide: mark(txKeyA)})
+			k.on(seamAfterCall, func() { k.outside(c.kv...) })
+		} else {
+			k.outside(c.kv...)
+		}
+		s := k.run(context.Background(), spec)
+		if refused := s.Cause == causePremise && k.meta(txKeyA) == ""; refused != c.refuses {
+			t.Errorf("%s: settlement %+v, %s=%q; want refused on the premise %t", c.name, s, txKeyA, k.meta(txKeyA), c.refuses)
+		}
+		if c.refuses && (!errors.Is(s.Err, errPremiseMoved) || !strings.Contains(s.Err.Error(), c.kv[0])) {
+			t.Errorf("%s: refusal error %v, want it to name %s", c.name, s.Err, c.kv[0])
+		}
 	}
 }
 
@@ -594,12 +675,12 @@ func TestTxPremise(t *testing.T) {
 func TestTxMergesFacts(t *testing.T) {
 	ev := func(typ string) effectFacts { return effectFacts{Events: []events.Event{{Type: typ}}} }
 	k := newTxKit(t)
-	if s := k.run(context.Background(), effectSpec{sections: []section{{Decide: mark("a")}, {Decide: func(txView) txStep { return txStep{} }}}}); s.Outcome != settledLanded {
+	if s := k.run(context.Background(), effectSpec{sections: []section{{Decide: mark(txKeyA)}, {Decide: func(txView) txStep { return txStep{} }}}}); s.Outcome != settledLanded {
 		t.Fatalf("a no-op after a landing: settlement %+v, want landed", s)
 	}
 	k = newTxKit(t)
 	s := k.run(context.Background(), effectSpec{sections: []section{
-		{Decide: func(txView) txStep { return txStep{Write: session.MetadataPatch{"a": "1"}, Facts: ev("woke")} }},
+		{Decide: func(txView) txStep { return txStep{Write: session.MetadataPatch{txKeyA: "1"}, Facts: ev("woke")} }},
 		{Decide: func(txView) txStep { return txStep{Refuse: "commit-lost", Facts: ev("refused")} }},
 	}})
 	if s.Outcome != settledRefused || s.Cause != "commit-lost" || len(s.Facts.Events) != 2 {
@@ -629,15 +710,15 @@ func TestTxChecksItsContextAndLatchLast(t *testing.T) {
 			defer cancel(nil)
 			latch := new(writeLatch)
 			k.on(seamBeforeCAS, func() { c.end(cancel, latch) })
-			s := runTx(ctx, k.p, k.it, effectSpec{sections: []section{{Decide: mark("a")}}}, latch)
-			if s.Outcome != settledFailed || s.Cause != c.cause || k.meta("a") != "" || latch.begun() {
-				t.Fatalf("settlement %+v, a=%q, latch begun %t; want failed %q, nothing written or begun", s, k.meta("a"), latch.begun(), c.cause)
+			s := runTx(ctx, k.p, k.it, effectSpec{sections: []section{{Decide: mark(txKeyA)}}}, latch)
+			if s.Outcome != settledFailed || s.Cause != c.cause || k.meta(txKeyA) != "" || latch.begun() {
+				t.Fatalf("settlement %+v, a=%q, latch begun %t; want failed %q, nothing written or begun", s, k.meta(txKeyA), latch.begun(), c.cause)
 			}
 		})
 	}
 	k := newTxKit(t)
 	latch := new(writeLatch)
-	if s := runTx(context.Background(), k.p, k.it, effectSpec{sections: []section{{Decide: mark("a")}}}, latch); s.Outcome != settledLanded || !latch.begun() {
+	if s := runTx(context.Background(), k.p, k.it, effectSpec{sections: []section{{Decide: mark(txKeyA)}}}, latch); s.Outcome != settledLanded || !latch.begun() {
 		t.Fatalf("settlement %+v, want landed with its latch begun", s)
 	}
 }
@@ -659,10 +740,10 @@ func TestWriteLatchAbandonIsTerminal(t *testing.T) {
 // locks: it runs outside both, and a second run fails, writing nothing more.
 func TestTxAroundRunsTheEffectAtMostOnce(t *testing.T) {
 	k := newTxKit(t)
-	spec := effectSpec{needs: needs{NameLock: true}, sections: []section{{Decide: mark("a")}}}
+	spec := effectSpec{needs: needs{NameLock: true}, sections: []section{{Decide: mark(txKeyA)}}}
 	var second settlement
 	spec.around = func(_ context.Context, _ aroundCaps, run func() settlement) settlement {
-		if k.locks.holds(k.it.Key.ID) || nameLocked(k.p.World.CityPath, "s-gc-1") {
+		if k.locks.holds(k.it.Key.ID) || nameHeld(k.t, k.p.World.CityPath, "s-gc-1") {
 			t.Error("around ran inside a lock")
 		}
 		first := run()
@@ -719,7 +800,7 @@ func TestExecutorSettlesAnAbandonedEffectByItsLatch(t *testing.T) {
 	if err := x.submit(rowKey{Leg: rowLeg, ID: "shutdown"}, hungEffect(intentRowHeal, 2, plannerT0.Add(time.Hour), release)); err != nil {
 		t.Fatal(err)
 	}
-	x.cancel()
+	x.cancel(errEffectShutdown)
 	if s := receive(t, posted); s.Cause != causeShutdown {
 		t.Fatalf("abandoned at shutdown: settlement %+v, want cause %q", s, causeShutdown)
 	}
@@ -728,8 +809,9 @@ func TestExecutorSettlesAnAbandonedEffectByItsLatch(t *testing.T) {
 // Kills a spec table that loses a kind's admission facts or runs an effect
 // that has not merged, a body anywhere but the create, and a capability
 // reached without its grant: every kind has a cap class, only the merged
-// kinds run, the create's body declares no needs and alone holds a
-// capability, and caps without capCreate hold no create handle.
+// kinds run, the create's body declares no needs, each kind holds exactly
+// the capabilities effectCapGrants lists, and caps without capCreate hold no
+// create handle.
 func TestEffectSpecsCoverEveryKind(t *testing.T) {
 	var running []string
 	for kind, spec := range effectSpecs {
@@ -739,8 +821,8 @@ func TestEffectSpecsCoverEveryKind(t *testing.T) {
 		if spec.runs() {
 			running = append(running, kind)
 		}
-		if spec.caps != 0 && kind != intentCreate {
-			t.Errorf("%s holds capabilities %b", kind, spec.caps)
+		if granted := effectCapGrants[kind]; spec.caps != granted {
+			t.Errorf("%s holds capabilities %b, want %b", kind, spec.caps, granted)
 		}
 	}
 	slices.Sort(running)
@@ -749,16 +831,30 @@ func TestEffectSpecsCoverEveryKind(t *testing.T) {
 			t.Errorf("%s: only the create has a body, and a body declares no needs or sections", kind)
 		}
 	}
-	if want := []string{intentCreate, intentDrainCancel, intentDrainVoid, intentRekey, intentRowHeal, intentRowHealFresh}; !slices.Equal(running, want) {
+	if want := []string{intentAdopt, intentBaseline, intentClose, intentCreate, intentDrainBegin, intentDrainBeginFresh, intentDrainCancel, intentDrainVoid, intentDriftRepair, intentLiveApply, intentRekey, intentRollback, intentRowHeal, intentRowHealFresh, intentRowMetadata, intentRuntimeAlias, intentSignal, intentSignalFresh, intentStart, intentStop}; !slices.Equal(running, want) {
 		t.Fatalf("running kinds %v, want %v", running, want)
 	}
 	p := &effectPass{held: heldCaps{create: &createPass{}, creates: &createEffects{}}}
 	if c := p.capsFor(intent{}, 0, nil); c.create != nil || c.creates != nil {
 		t.Fatal("caps without capCreate hold the create runner")
 	}
+	p.held.release = &closeReleases{}
+	if c := p.capsFor(intent{}, capReadStores, nil); c.release != nil {
+		t.Fatal("caps without capRelease hold the close's release handles")
+	}
 	if c := p.capsFor(intent{}, capCreate, nil); c.create == nil || c.creates == nil {
 		t.Fatal("capCreate does not reach the create runner")
 	}
+}
+
+// effectCapGrants are the capabilities each kind holds: the create its
+// runner, the adopt the read-only stores its prepare reads.
+var effectCapGrants = map[string]caps{
+	intentCreate: capCreate, intentAdopt: capReadStores, intentStart: capReadStores | capProviderStart | capEpisode | capRetire,
+	intentRollback:    capProviderStart | capRetire,
+	intentClose:       capReadStores | capRelease,
+	intentRowMetadata: capReadStores, intentRuntimeAlias: capProviderStart, // the alias probe's store; the runtime alias sync
+	intentStop: capReadStores | capProviderStop,
 }
 
 // Kills a fact the planner drops: every effectFacts field, set, is consumed
@@ -768,22 +864,42 @@ func TestApplyFactsConsumesEveryField(t *testing.T) {
 	rec := &memRecorder{}
 	p := newPlanner(newFakePlannerClock(plannerT0), func() time.Duration { return time.Minute }, nil, newInflightMap(), nil, io.Discard)
 	p.rec = rec
+	cache := newObserveCache()
+	p.observations = func() *ObservationCache { return cache.ObservationCache }
 	var transitions []string
 	saved := recordDrainTransition
 	recordDrainTransition = func(_ context.Context, name, reason, transition string) {
 		transitions = append(transitions, name+"/"+reason+"/"+transition)
 	}
 	t.Cleanup(func() { recordDrainTransition = saved })
+	var quarantined []string
+	savedQ := recordAgentQuarantine
+	recordAgentQuarantine = func(_ context.Context, agent string) { quarantined = append(quarantined, agent) }
+	t.Cleanup(func() { recordAgentQuarantine = savedQ })
+	var stops []string
+	savedS := recordAgentStop
+	recordAgentStop = func(_ context.Context, name, identity, reason string, _ error) {
+		stops = append(stops, name+"/"+identity+"/"+reason)
+	}
+	t.Cleanup(func() { recordAgentStop = savedS })
 	f := effectFacts{
-		Events:     []events.Event{{Type: "session.test"}},
-		Transition: &drainTransition{Name: "s", Reason: "idle", Transition: "cancel"},
-		Work:       &workVerdict{BeadID: "gc-w1", Refused: true},
+		Events:      []events.Event{{Type: "session.test"}},
+		Transition:  &drainTransition{Name: "s", Reason: "idle", Transition: "cancel"},
+		Work:        &workVerdict{BeadID: "gc-w1", Refused: true},
+		Noted:       &notedRuntime{Name: "s1", At: plannerT0},
+		Quarantined: "worker-1",
+		AliasOwed:   &rowKey{Leg: rowLeg, ID: "gc-a"},
+		Stopped:     &agentStop{Name: "s1", Identity: "worker"},
 	}
 	p.applyFacts(f, plannerT0)
 	consumed := map[string]bool{
-		"Events":     len(rec.events) == 1,
-		"Transition": slices.Equal(transitions, []string{"s/idle/cancel"}),
-		"Work":       p.backoff.Snapshot()[workBackoffKey("gc-w1")].Cause == createStageWorktree,
+		"Events":      len(rec.events) == 1,
+		"Transition":  slices.Equal(transitions, []string{"s/idle/cancel"}),
+		"Work":        p.backoff.Snapshot()[workBackoffKey("gc-w1")].Cause == createStageWorktree,
+		"Noted":       cache.Snapshot().ByName["s1"].Listed.Value == ObsYes,
+		"Quarantined": slices.Equal(quarantined, []string{"worker-1"}),
+		"AliasOwed":   p.aliasOwed[rowKey{Leg: rowLeg, ID: "gc-a"}],
+		"Stopped":     slices.Equal(stops, []string{"s1/worker/drain-ack"}),
 	}
 	ft := reflect.TypeOf(f)
 	for i := range ft.NumField() {
@@ -803,7 +919,7 @@ func TestTxChecksItsContextAfterTheReads(t *testing.T) {
 	ctx, cancel := context.WithCancelCause(context.Background())
 	k.leaf.during = func() { cancel(context.DeadlineExceeded) }
 	decided := false
-	spec := effectSpec{needs: needs{Runtime: true}, sections: []section{{Decide: func(v txView) txStep { decided = true; return mark("a")(v) }}}}
+	spec := effectSpec{needs: needs{Runtime: true}, sections: []section{{Decide: func(v txView) txStep { decided = true; return mark(txKeyA)(v) }}}}
 	if s := k.run(ctx, spec); s.Outcome != settledFailed || s.Cause != causeDeadline || decided {
 		t.Fatalf("settlement %+v (decided %t), want failed at the deadline before Decide", s, decided)
 	}
@@ -823,7 +939,7 @@ func (b racingBacking) Get(id string) (beads.Bead, error) {
 	got, err := b.simBacking.Get(id)
 	if id == b.id && *b.armed {
 		*b.armed = false
-		_ = (*b.cache).SetMetadata(id, "note", "racing")
+		_ = (*b.cache).SetMetadata(id, txKeyNote, "racing")
 	}
 	return got, err
 }
@@ -846,9 +962,9 @@ func TestTxRetriesAFencedRefresh(t *testing.T) {
 	armed = true
 	k.p.Writers[rowLeg] = fencedWriter{store: cache}
 	decides := 0
-	s := k.run(context.Background(), effectSpec{sections: []section{{Decide: func(v txView) txStep { decides++; return mark("a")(v) }}}})
+	s := k.run(context.Background(), effectSpec{sections: []section{{Decide: func(v txView) txStep { decides++; return mark(txKeyA)(v) }}}})
 	b, _ := m.Get("gc-1")
-	if armed || s.Outcome != settledLanded || b.Metadata["a"] != "1" || b.Metadata["note"] != "racing" {
+	if armed || s.Outcome != settledLanded || b.Metadata[txKeyA] != "1" || b.Metadata[txKeyNote] != "racing" {
 		t.Fatalf("settlement %+v after %d decisions, row %v; want the retry to land beside the racing write", s, decides, b.Metadata)
 	}
 }
@@ -895,18 +1011,18 @@ func TestTxSeamsInjectFailures(t *testing.T) {
 	for _, at := range []txSeam{seamAfterReads, seamAfterRowRead, seamBeforeCAS, seamAfterWrite} {
 		k := newTxKit(t)
 		k.fail = map[txSeam]error{at: boom}
-		s := k.run(context.Background(), effectSpec{sections: []section{{Decide: mark("a")}}})
+		s := k.run(context.Background(), effectSpec{sections: []section{{Decide: mark(txKeyA)}}})
 		want := settledFailed
 		if at == seamAfterWrite {
 			want = settledAmbiguous
 		}
-		if s.Outcome != want || s.Cause != causeInjected || !errors.Is(s.Err, boom) || (k.meta("a") == "1") != (at == seamAfterWrite) {
-			t.Fatalf("seam %d: settlement %+v, a=%q; want outcome %d %q, written only past the write", at, s, k.meta("a"), want, causeInjected)
+		if s.Outcome != want || s.Cause != causeInjected || !errors.Is(s.Err, boom) || (k.meta(txKeyA) == "1") != (at == seamAfterWrite) {
+			t.Fatalf("seam %d: settlement %+v, a=%q; want outcome %d %q, written only past the write", at, s, k.meta(txKeyA), want, causeInjected)
 		}
 	}
 	k := newTxKit(t)
-	k.on(seamBeforeCAS, func() { k.outside("note", "x") }) // loses the first CAS
-	k.run(context.Background(), effectSpec{sections: []section{{Decide: mark("a")}, {Decide: mark("b")}}})
+	k.on(seamBeforeCAS, func() { k.outside(txKeyNote, "x") }) // loses the first CAS
+	k.run(context.Background(), effectSpec{sections: []section{{Decide: mark(txKeyA)}, {Decide: mark(txKeyB)}}})
 	if !slices.Contains(k.attempts, 2) || k.attempts[0] != 1 || k.sections[0] != 0 || k.sections[len(k.sections)-1] != 1 {
 		t.Fatalf("sections %v, attempts %v at seams %v, want attempts 1 then 2 in section 0, then section 1", k.sections, k.attempts, k.seen)
 	}
@@ -947,13 +1063,22 @@ func TestOnlyStagingCodeAssignsTheStagingSeam(t *testing.T) {
 
 // Kills a hook reaching handles its place forbids: around, outside every
 // lock, holds only these fields, and a Probe only the read-only stores; a
-// Call's handles (provider start, routing, release, kill) go on txCaps
-// alone.
+// Call's handles (provider start, routing, kill) go on txCaps alone. The one
+// write handle an around holds is the close's release (capRelease), for the
+// post-close cascade it runs only once its close landed (settlement.Closed),
+// as runTx's design names; only the close's spec grants it.
 func TestAroundCapsAreScoped(t *testing.T) {
 	if got := reflect.TypeOf(section{}.probe).In(1); got != reflect.TypeFor[effectReads]() {
 		t.Errorf("a Probe holds %v, want effectReads alone", got)
 	}
-	allowed := map[string]bool{"it": true, "reads": true}
+	for kind, spec := range effectSpecs {
+		if spec.caps&capRelease != 0 && kind != intentClose {
+			t.Errorf("%s holds the close's release handles", kind)
+		}
+	}
+	// retire is a closed row's cleanup after its close (C3 step 5): its
+	// waits and bindings, never a session row.
+	allowed := map[string]bool{"it": true, "reads": true, "release": true, "retire": true}
 	for i, ty := 0, reflect.TypeFor[aroundCaps](); i < ty.NumField(); i++ {
 		if f := ty.Field(i).Name; !allowed[f] {
 			t.Errorf("aroundCaps.%s: around runs outside every lock; a write or provider handle belongs to a Call", f)
@@ -967,7 +1092,7 @@ func TestAroundCapsAreScoped(t *testing.T) {
 func TestTxOnExitResolvesEveryExit(t *testing.T) {
 	admit := func(got *[]settlement) section {
 		pre := section{Decide: func(txView) txStep { return txStep{Write: session.MetadataPatch{"state": "creating"}} }}
-		return called(pre, func(_ context.Context, c txCaps, _ any) (any, error) {
+		return called(callStart, pre, func(_ context.Context, c txCaps, _ any) (any, error) {
 			c.onExit(func(final settlement) { *got = append(*got, final) })
 			return nil, nil
 		})
@@ -978,7 +1103,7 @@ func TestTxOnExitResolvesEveryExit(t *testing.T) {
 		want   settleOutcome
 		panics bool
 	}{
-		{"lands", mark("a"), settledLanded, false},
+		{"lands", mark(txKeyA), settledLanded, false},
 		{"refused after the call", func(txView) txStep { return txStep{Refuse: "commit-lost"} }, settledRefused, false},
 		{"panics", func(txView) txStep { panic("boom") }, settledFailed, true},
 	} {
@@ -1008,16 +1133,16 @@ func TestTxReadStoresNeedsForProbeResetAndCallSeam(t *testing.T) {
 	var reads effectReads
 	probe := probed(func(_ context.Context, r effectReads, _ txView) (int, error) { reads = r; return 7, nil }, func(txView, int, error) txStep { return txStep{} })
 	k.run(context.Background(), effectSpec{sections: []section{probe}})
-	if reads.city != nil {
+	if reads.legs.work != nil {
 		t.Fatal("a Probe reached the stores without capReadStores")
 	}
 	var leaked any
 	next := section{Decide: func(v txView) txStep { leaked = v.probe; return txStep{} }}
 	k.run(context.Background(), effectSpec{caps: capReadStores, sections: []section{probe, next}})
-	if reads.city == nil || leaked != nil {
+	if reads.legs.work == nil || leaked != nil {
 		t.Fatalf("stores %+v, next section's probe %v; want the stores granted and the result not carried", reads, leaked)
 	}
-	if _, err := reads.city.Create(beads.Bead{}); !errors.Is(err, errBlindWriteRefused) {
+	if _, err := reads.legs.work.Create(beads.Bead{}); !errors.Is(err, errBlindWriteRefused) {
 		t.Fatalf("the granted city store wrote: %v", err)
 	}
 	var sawWorld *World
@@ -1040,7 +1165,7 @@ func TestTxReadStoresNeedsForProbeResetAndCallSeam(t *testing.T) {
 
 // callOnly is a section that writes nothing and calls ran.
 func callOnly(ran func()) section {
-	return called(section{Decide: func(txView) txStep { return txStep{} }}, func(context.Context, txCaps, any) (any, error) { ran(); return nil, nil })
+	return called(callStop, section{Decide: func(txView) txStep { return txStep{} }}, func(context.Context, txCaps, any) (any, error) { ran(); return nil, nil })
 }
 
 // panickingList is a store whose list reads panic.
@@ -1064,7 +1189,7 @@ func TestTxBoundedReadsFailClosed(t *testing.T) {
 	if s := k.run(context.Background(), effectSpec{sections: []section{sec}}); s.Outcome != settledNoop || probeErr == nil || !bounded {
 		t.Fatalf("settlement %+v, probe error %v, bounded %t; want the panic read as a failed, bounded Probe", s, probeErr, bounded)
 	}
-	k.p.reads.city = blindWriteRefusingStore{inner: panickingList{k.cache}}
+	k.p.reads.legs = workLegsFromCensus("", nil, cityWorkLeg{store: blindWriteRefusingStore{inner: panickingList{k.cache}}}, nil)
 	var w *txWork
 	k.run(context.Background(), effectSpec{needs: needs{Legs: legWork}, sections: []section{{Decide: func(v txView) txStep { w = v.Fence.Work; return txStep{} }}}})
 	if w == nil || w.Free || w.Err == nil {
@@ -1137,7 +1262,7 @@ func TestTxReadStoresAreReadOnly(t *testing.T) {
 	var w beads.ConditionalWriter
 	var err error
 	sec := probed(func(_ context.Context, r effectReads, _ txView) (int, error) {
-		w, _, err = beads.ResolveConditionalWriter(r.city)
+		w, _, err = beads.ResolveConditionalWriter(r.legs.work)
 		return 0, nil
 	}, func(txView, int, error) txStep { return txStep{} })
 	var around effectReads
@@ -1145,8 +1270,8 @@ func TestTxReadStoresAreReadOnly(t *testing.T) {
 		around = a.reads
 		return run()
 	}})
-	if w != nil || around.city == nil {
-		t.Fatalf("the read-only city store resolved a conditional writer (%v); around got stores %t", err, around.city != nil)
+	if w != nil || around.legs.work == nil {
+		t.Fatalf("the read-only city store resolved a conditional writer (%v); around got stores %t", err, around.legs.work != nil)
 	}
 }
 
@@ -1157,7 +1282,7 @@ func TestTxReadStoresAreReadOnly(t *testing.T) {
 func TestTxOnExitRunsEveryFinalizer(t *testing.T) {
 	k := newTxKit(t)
 	var order []int
-	sec := called(section{Decide: func(txView) txStep { return txStep{} }}, func(_ context.Context, c txCaps, _ any) (any, error) {
+	sec := called(callStart, section{Decide: func(txView) txStep { return txStep{} }}, func(_ context.Context, c txCaps, _ any) (any, error) {
 		c.onExit(func(settlement) { order = append(order, 1) }) // the ticket, registered first
 		c.onExit(func(settlement) { order = append(order, 2); panic("a later finalizer") })
 		c.onExit(func(settlement) { order = append(order, 3) })
@@ -1205,7 +1330,7 @@ func (k *txKit) status() string {
 // §3.
 func TestTxCloseVerb(t *testing.T) {
 	ran := false
-	later := section{Premise: premiseOwnToken, Decide: func(v txView) txStep { ran = true; return mark("b")(v) }}
+	later := section{Premise: premiseOwnToken, Decide: func(v txView) txStep { ran = true; return mark(txKeyB)(v) }}
 	k := newCloseTxKit(t)
 	if s := k.run(context.Background(), effectSpec{sections: []section{closeSec(), later}}); s.Outcome != settledLanded || len(s.Facts.Events) != 1 || ran || k.status() != "closed" || k.meta("close_reason") != "orphaned" {
 		t.Fatalf("close: settlement %+v (later ran %t), row %s; want landed and closed, nothing after", s, ran, k.status())
@@ -1268,9 +1393,9 @@ var terminal = section{Premise: premiseClose, Decide: func(txView) txStep {
 // writing nothing, with no write begun.
 func TestTxCloseSectionFailsAWrite(t *testing.T) {
 	k := newCloseTxKit(t)
-	sec := section{Premise: premiseClose, Decide: func(txView) txStep { return txStep{Write: session.MetadataPatch{"note": "x"}} }}
+	sec := section{Premise: premiseClose, Decide: func(txView) txStep { return txStep{Write: session.MetadataPatch{txKeyNote: "x"}} }}
 	latch := new(writeLatch)
-	if s := runTx(context.Background(), k.p, k.it, effectSpec{sections: []section{sec}}, latch); s.Cause != causeStep || latch.begun() || k.meta("note") != "" {
+	if s := runTx(context.Background(), k.p, k.it, effectSpec{sections: []section{sec}}, latch); s.Cause != causeStep || latch.begun() || k.meta(txKeyNote) != "" {
 		t.Fatalf("settlement %+v (latch begun %t), want failed %q", s, latch.begun(), causeStep)
 	}
 }
@@ -1302,7 +1427,7 @@ func (b racingCloseBacking) Get(id string) (beads.Bead, error) {
 	got, err := b.exactBacking.Get(id)
 	if id == "gc-1" && *b.cache != nil && !*b.fired {
 		*b.fired = true
-		_ = (*b.cache).SetMetadata(id, "note", "racing")
+		_ = (*b.cache).SetMetadata(id, txKeyNote, "racing")
 	}
 	return got, err
 }
@@ -1328,7 +1453,7 @@ func TestTxCloseRetries(t *testing.T) {
 		t.Fatalf("raced %t: settlement %+v, row %s; want the retry to close", fired, s, k.status())
 	}
 	k = newCloseTxKit(t)
-	k.on(seamBeforeCAS, func() { k.outside("note", "x") }) // loses the first close's fence
+	k.on(seamBeforeCAS, func() { k.outside(txKeyNote, "x") }) // loses the first close's fence
 	if s := k.run(context.Background(), effectSpec{sections: []section{terminal}}); s.Outcome != settledLanded || k.attempts[len(k.attempts)-1] != 2 {
 		t.Fatalf("settlement %+v, attempts %v at seams %v; want the close landed on attempt 2", s, k.attempts, k.seen)
 	}
@@ -1339,7 +1464,7 @@ func TestTxCloseRetries(t *testing.T) {
 // marks only a close that landed, not an earlier write before a row already
 // closed; a fault injected after a landed close settles ambiguous, closed.
 func TestTxCloseLandedSignal(t *testing.T) {
-	stamp := section{Decide: mark("a")}
+	stamp := section{Decide: mark(txKeyA)}
 	for _, c := range []struct {
 		name     string
 		closed   bool // another writer closed the row first
@@ -1362,5 +1487,124 @@ func TestTxCloseLandedSignal(t *testing.T) {
 	k.fail = map[txSeam]error{seamAfterWrite: errors.New("staging fault")}
 	if s := k.run(context.Background(), effectSpec{sections: []section{terminal}}); s.Cause != causeInjected || s.Outcome != settledAmbiguous || !s.Closed || k.status() != "closed" {
 		t.Fatalf("settlement %+v, row %s; want ambiguous and closed, the fault injected", s, k.status())
+	}
+}
+
+// Kills a cause attached to a landing its last step did not write (the C5b-3
+// review): a section that writes, then one that ends with a cause and no
+// write (C5c1's already-closed), settles landed with no cause; a step whose
+// own write ends the effect with a cause keeps it (healInstead).
+func TestLandedCauseOnlyFromTheWritingStep(t *testing.T) {
+	ends := section{Decide: func(txView) txStep { return txStep{Done: true, Cause: "already-closed"} }}
+	k := newTxKit(t)
+	if s := k.run(context.Background(), effectSpec{sections: []section{{Decide: mark(txKeyA)}, ends}}); s.Outcome != settledLanded || s.Cause != "" {
+		t.Fatalf("settlement %+v, want landed with no cause", s)
+	}
+	writes := section{Decide: func(txView) txStep {
+		return txStep{Write: session.MetadataPatch{txKeyA: "1"}, Done: true, Cause: causeHeld}
+	}}
+	if s := newTxKit(t).run(context.Background(), effectSpec{sections: []section{writes}}); s.Outcome != settledLanded || s.Cause != causeHeld {
+		t.Fatalf("settlement %+v, want landed with cause %q", s, causeHeld)
+	}
+}
+
+// Kills a step's title or label deltas dropped, or written apart from its
+// metadata (v5 M1; C7d): a step's Title, AddLabels and RemoveLabels land
+// with its Write, in its one CAS.
+func TestTxWritesTitleAndLabelsWithTheMetadata(t *testing.T) {
+	k := newTxKit(t)
+	if err := k.backing.Update(k.it.Key.ID, beads.UpdateOpts{Labels: []string{"agent:old"}}); err != nil {
+		t.Fatal(err)
+	}
+	title := "worker-1"
+	spec := effectSpec{sections: []section{{Decide: func(txView) txStep {
+		return txStep{Write: session.MetadataPatch{txKeyA: "1"}, Title: &title, AddLabels: []string{"agent:new"}, RemoveLabels: []string{"agent:old"}}
+	}}}}
+	if s := k.run(context.Background(), spec); s.Outcome != settledLanded {
+		t.Fatalf("settlement %+v, want landed", s)
+	}
+	b, err := k.backing.Get(k.it.Key.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Metadata[txKeyA] != "1" || b.Title != title || !slices.Contains(b.Labels, "agent:new") || slices.Contains(b.Labels, "agent:old") {
+		t.Fatalf("row title %q labels %v meta %v, want the title and label deltas with the write", b.Title, b.Labels, b.Metadata)
+	}
+}
+
+// labelRefusingBacking is a backing whose conditional write cannot guard
+// labels, as a FileStore's (LL1).
+type labelRefusingBacking struct{ simBacking }
+
+func (b labelRefusingBacking) UpdateIfMatch(id string, rev int64, opts beads.UpdateOpts) error {
+	if len(opts.Labels)+len(opts.RemoveLabels) > 0 {
+		return &beads.ConditionalUpdateFieldUnsupportedError{Field: "labels"}
+	}
+	return b.MemStore.UpdateIfMatch(id, rev, opts)
+}
+
+// Kills a label write the store cannot guard settled as a plain failure
+// (C7d-1 review should-fix 4): it refuses with its own cause, which A7's
+// deferral reads, and writes nothing.
+func TestTxRefusesUnguardedLabels(t *testing.T) {
+	m := beads.NewMemStoreFrom(0, []beads.Bead{poolRow("gc-1", "worker", 1, "asleep")}, nil)
+	k := newTxKitOn(t, m, labelRefusingBacking{simBacking{m}})
+	spec := effectSpec{sections: []section{{Decide: func(txView) txStep {
+		return txStep{Write: session.MetadataPatch{txKeyA: "1"}, AddLabels: []string{"agent:new"}}
+	}}}}
+	if s := k.run(context.Background(), spec); s.Outcome != settledRefused || s.Cause != causeLabelsUnguarded || k.meta(txKeyA) != "" {
+		t.Fatalf("settlement %+v, a=%q; want refused with cause %q and nothing written", s, k.meta(txKeyA), causeLabelsUnguarded)
+	}
+}
+
+// Kills an abandon (S3) that writes nothing or settles landed, and a Last
+// step whose effect runs on past its Call: a Fail with a Write lands the
+// write and settles failed with the cause; a Last step's Call runs, the
+// effect stays landed, and the section after it never runs.
+func TestTxAbandonAndLast(t *testing.T) {
+	k := newTxKit(t)
+	abandon := effectSpec{needs: needs{NameLock: true}, sections: []section{{Decide: func(txView) txStep {
+		return txStep{Write: session.MetadataPatch{"sleep_reason": "idle"}, Fail: "gave-up"}
+	}}, {Decide: mark("detached_at")}}}
+	if s := k.run(context.Background(), abandon); s.Outcome != settledFailed || s.Cause != "gave-up" || k.meta("sleep_reason") != "idle" || k.meta("detached_at") != "" {
+		t.Fatalf("abandon: settlement %+v, reason %q detached %q; want failed gave-up with a written, b not", s, k.meta("sleep_reason"), k.meta("detached_at"))
+	}
+	k = newTxKit(t)
+	ran := false
+	last := effectSpec{needs: needs{NameLock: true}, sections: []section{
+		called(0, section{Decide: func(txView) txStep { return txStep{Write: session.MetadataPatch{"sleep_reason": "idle"}, Last: true} }},
+			func(context.Context, txCaps, struct{}) (struct{}, error) { ran = true; return struct{}{}, nil }),
+		{Decide: mark("detached_at")},
+	}}
+	if s := k.run(context.Background(), last); s.Outcome != settledLanded || !ran || k.meta("detached_at") != "" {
+		t.Fatalf("last: settlement %+v, call ran %v, detached %q; want landed, the Call run, b not", s, ran, k.meta("detached_at"))
+	}
+}
+
+// Kills a skipped Call that still runs, or still opens the latch: a
+// calledWhen section whose Pass it declines runs no Call and no seam, so an
+// abandonment after it settles failed, never ambiguous; a Pass it accepts
+// calls, gated like a write.
+func TestTxCalledWhenSkipsWithoutOpeningTheLatch(t *testing.T) {
+	k := newTxKit(t)
+	ran := 0
+	call := calledWhen(callStop, section{Decide: func(v txView) txStep {
+		return txStep{Pass: v.It.Reason == "go"}
+	}}, func(run bool) bool { return run }, func(context.Context, txCaps, bool) (struct{}, error) { ran++; return struct{}{}, nil })
+	var seams []txSeam
+	k.on(seamBeforeCall, func() { seams = append(seams, seamBeforeCall) })
+	latch := new(writeLatch)
+	after := section{Decide: func(txView) txStep {
+		latch.abandon() // the executor gives up after the skipped step
+		return txStep{Done: true}
+	}}
+	if s := runTx(context.Background(), k.p, k.it, effectSpec{sections: []section{call, after}}, latch); ran != 0 || len(seams) != 0 || s.Outcome == settledAmbiguous || latch.begun() {
+		t.Fatalf("settlement %+v (called %d, seams %v, begun %t), want the Call skipped and the latch unopened", s, ran, seams, latch.begun())
+	}
+	it := k.it
+	it.Reason = "go"
+	latch = new(writeLatch)
+	if s := runTx(context.Background(), k.p, it, effectSpec{sections: []section{call}}, latch); ran != 1 || len(seams) != 1 || !latch.begun() || s.Outcome == settledFailed {
+		t.Fatalf("settlement %+v (called %d, seams %v, begun %t), want the Call run behind the latch", s, ran, seams, latch.begun())
 	}
 }

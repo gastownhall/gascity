@@ -89,11 +89,13 @@ func historyTail(ctx context.Context, t *testing.T, path string, f Filter, limit
 func TestReadFilteredHistoryTailMatchesFullScan(t *testing.T) {
 	path := seedHistoryTailLayout(t)
 	filters := map[string]Filter{
-		"none":         {},
-		"rare subject": {Subject: "s7"},
-		"after seq":    {AfterSeq: 50},
-		"all by type":  {Type: string(BeadCreated)},
-		"no match":     {Type: "no.such.type"},
+		"none":          {},
+		"rare subject":  {Subject: "s7"},
+		"after seq":     {AfterSeq: 50},
+		"all by type":   {Type: string(BeadCreated)},
+		"no match":      {Type: "no.such.type"},
+		"any of types":  {Types: []string{"no.such.type", string(BeadCreated)}},
+		"none of types": {Types: []string{"no.such.type"}},
 	}
 	for name, base := range filters {
 		for _, before := range []uint64{0, 131, 125, 121, 120, 100, 81, 80, 60, 41, 40, 8, 2, 1} {

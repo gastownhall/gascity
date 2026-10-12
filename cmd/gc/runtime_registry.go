@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionacp "github.com/gastownhall/gascity/internal/runtime/acp"
@@ -58,6 +59,9 @@ func buildRuntimeRegistry() *registry.Registry {
 	must(r.Register("acp", func(_ string, sc config.SessionConfig, _, cityPath string) (runtime.Provider, error) {
 		cfg := acpProviderConfig(sc.ACP)
 		if cityPath != "" {
+			// Capture transcripts are city-rooted so they survive a
+			// supervisor restart; a city-less provider captures nothing.
+			cfg.TranscriptRoot = citylayout.ACPTranscriptsDir(cityPath)
 			return sessionacp.NewSeamBackedWithDir(providerStateDir("acp", cityPath), cfg), nil
 		}
 		return sessionacp.NewSeamBacked(cfg), nil

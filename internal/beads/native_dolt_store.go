@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -369,6 +370,27 @@ type NativeDoltStore struct {
 	// backend; see row_witness.go for what a caller may conclude from it.
 	sawRows atomic.Bool
 
+	// listCounters counts the backend listing requests List issues; see
+	// ListRequestStatsOf.
+	listCounters nativeListCounters
+
+	// listPushableTypes is the issue types a listing of this scope may push,
+	// read from the scope's types.infra setting at open (loadListPushableTypes)
+	// and never written again, not even by a reconnect: a setting changed after
+	// open reaches a long-lived store only when its process restarts. Nil
+	// pushes no type: a store whose setting could not be read, or one built
+	// directly over a storage value.
+	listPushableTypes map[string]bool
+
+	// typePushdownOff latches when the backend refused a pushed issue type:
+	// the scope was provisioned without gc's type vocabulary. Listings then
+	// filter type Go-side only, for the store's lifetime.
+	typePushdownOff atomic.Bool
+
+	// logger receives the list pushdown's diagnostics. Nil is slog.Default(),
+	// read at call time.
+	logger *slog.Logger
+
 	// poolStale marks a handle whose pooled connections point at a proxy
 	// generation that has already been replaced, so the next read must reconnect
 	// BEFORE it is served rather than after it fails.
@@ -606,6 +628,7 @@ func newNativeDoltStoreAtWithCredentialCommand(parent context.Context, scopeRoot
 	for _, opt := range opts {
 		opt(store)
 	}
+	store.loadListPushableTypes(ctx)
 	return store, nil
 }
 
@@ -621,6 +644,7 @@ func newNativeDoltStoreAtWithoutAmbientEnv(parent context.Context, scopeRoot, cr
 	for _, opt := range opts {
 		opt(store)
 	}
+	store.loadListPushableTypes(ctx)
 	return store, nil
 }
 
@@ -714,6 +738,7 @@ func NewNativeDoltStoreOverStorageForTest(storage NativeStorage) *NativeDoltStor
 
 func newNativeDoltStoreForTest(storage beadslib.Storage, opts ...NativeDoltStoreOption) *NativeDoltStore {
 	store := newNativeDoltStoreWithStorage(storage, "native-test")
+	store.listPushableTypes = nativeListDefaultPushableTypes
 	for _, opt := range opts {
 		opt(store)
 	}
@@ -1460,6 +1485,7 @@ func (s *NativeDoltStore) SupportsEphemeralGraphApply() bool {
 // facade commits the issue and every edge in one transaction, so a partial
 // create can no longer be observed and needs no compensation.
 func (s *NativeDoltStore) Create(b Bead) (Bead, error) {
+	noteSessionCreate(b)
 	return s.create(b, false)
 }
 
@@ -1602,6 +1628,7 @@ func nativeCreateRequestFromIssue(actor string, issue *beadslib.Issue) (issueops
 // "gc: update bead <id>" where the backing has one (see rewriteExternalParent);
 // without one, the edge roles record their own default labels.
 func (s *NativeDoltStore) Update(id string, opts UpdateOpts) error {
+	noteSessionKeysByID(s.Get, id, opts.Metadata)
 	if err := s.readOnlyGuard(); err != nil {
 		return err
 	}
@@ -2216,6 +2243,15 @@ func (s *NativeDoltStore) Reopen(id string) error {
 	if err := s.readOnlyGuard(); err != nil {
 		return err
 	}
+	// ReopenIssue clears the close_reason column but not metadata.close_reason,
+	// which Close forwards as the reason; clear it first, outside the reopen's
+	// single write (see reopenOnce), so a later close without a reason does not
+	// report the old one (staleCloseReasonToClear).
+	if b, err := s.Get(id); err == nil && staleCloseReasonToClear(b) {
+		if err := s.SetMetadata(id, closeReasonMetadataKey, ""); err != nil {
+			return fmt.Errorf("reopening bead %q: clearing close_reason: %w", id, err)
+		}
+	}
 	storage, release, err := s.acquireStorage()
 	if err != nil {
 		return err
@@ -2271,6 +2307,9 @@ func (s *NativeDoltStore) reopenOnce(ctx context.Context, storage beadslib.Stora
 // re-walking the whole input under the loop would report only what the
 // remaining chunks closed.
 func (s *NativeDoltStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	for _, id := range ids {
+		noteSessionKeysByID(s.Get, id, metadata)
+	}
 	if err := s.readOnlyGuard(); err != nil {
 		return 0, err
 	}
@@ -2431,14 +2470,7 @@ func (s *NativeDoltStore) stampAndClose(id string, metadata map[string]string) e
 
 // ListOpen returns non-closed beads by default, or beads with the given status.
 func (s *NativeDoltStore) ListOpen(status ...string) ([]Bead, error) {
-	query := ListQuery{AllowScan: true}
-	if len(status) > 0 {
-		query.Status = status[0]
-		if status[0] == "closed" {
-			query.IncludeClosed = true
-		}
-	}
-	return s.List(query)
+	return s.List(ListOpenQuery(status...))
 }
 
 // Children returns all beads whose parent-child dependency points at parentID.
@@ -2450,12 +2482,7 @@ func (s *NativeDoltStore) ListOpen(status ...string) ([]Bead, error) {
 // backing answer is a superset and ListQuery.Matches cuts it to the exact set —
 // which is what it did for the raw filter's parent predicate too.
 func (s *NativeDoltStore) Children(parentID string, opts ...QueryOpt) ([]Bead, error) {
-	return s.List(ListQuery{
-		ParentID:      parentID,
-		IncludeClosed: HasOpt(opts, IncludeClosed),
-		AllowScan:     true,
-		TierMode:      TierModeFromOpts(opts),
-	})
+	return s.List(ChildrenQuery(parentID, opts...))
 }
 
 // WaitForParentProjection blocks until native dependency queries reflect a
@@ -2518,29 +2545,17 @@ func (s *NativeDoltStore) parentProjectionMatches(id, oldParentID, newParentID s
 
 // ListByLabel returns beads with an exact label match.
 func (s *NativeDoltStore) ListByLabel(label string, limit int, opts ...QueryOpt) ([]Bead, error) {
-	return s.List(ListQuery{
-		Label:         label,
-		Limit:         limit,
-		IncludeClosed: HasOpt(opts, IncludeClosed),
-		AllowScan:     true,
-		TierMode:      TierModeFromOpts(opts),
-	})
+	return s.List(ListByLabelQuery(label, limit, opts...))
 }
 
 // ListByAssignee returns beads assigned to assignee with the requested status.
 func (s *NativeDoltStore) ListByAssignee(assignee, status string, limit int) ([]Bead, error) {
-	return s.List(ListQuery{Assignee: assignee, Status: status, Limit: limit, AllowScan: true})
+	return s.List(ListByAssigneeQuery(assignee, status, limit))
 }
 
 // ListByMetadata returns beads whose metadata contains all filters.
 func (s *NativeDoltStore) ListByMetadata(filters map[string]string, limit int, opts ...QueryOpt) ([]Bead, error) {
-	return s.List(ListQuery{
-		Metadata:      filters,
-		Limit:         limit,
-		IncludeClosed: HasOpt(opts, IncludeClosed),
-		AllowScan:     true,
-		TierMode:      TierModeFromOpts(opts),
-	})
+	return s.List(ListByMetadataQuery(filters, limit, opts...))
 }
 
 // SetMetadata sets a single metadata key on a bead.
@@ -2558,6 +2573,7 @@ func (s *NativeDoltStore) SetMetadata(id, key, value string) error {
 // TestNativeDoltStoreSetMetadataBatchKeepsAnotherSessionsUpdate and
 // TestNativeDoltStoreMetadataMergeSurvivesAConcurrentUpdateLoop.
 func (s *NativeDoltStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	noteSessionKeysByID(s.Get, id, kvs)
 	if err := s.readOnlyGuard(); err != nil {
 		return err
 	}
@@ -2762,6 +2778,7 @@ type nativeDoltTx struct {
 }
 
 func (t *nativeDoltTx) Create(b Bead) (Bead, error) {
+	noteSessionCreate(b)
 	return t.store.applyCreateInTx(t.ctx, t.tx, b)
 }
 
@@ -2773,11 +2790,26 @@ func (t *nativeDoltTx) Update(id string, opts UpdateOpts) error {
 }
 
 func (t *nativeDoltTx) SetMetadataBatch(id string, kvs map[string]string) error {
+	if len(kvs) > 0 && sessionHooked() {
+		issue, _ := t.tx.GetIssue(t.ctx, id) // read inside the transaction it writes in
+		noteNativeSessionKeys(issue, kvs)
+	}
 	return t.store.applySetMetadataBatchInTx(t.ctx, t.tx, id, kvs)
 }
 
 func (t *nativeDoltTx) Close(id string) error {
 	return t.store.applyCloseInTx(t.ctx, t.tx, id)
+}
+
+// noteNativeSessionKeys reports kvs when issue is a session row's, read where
+// the write already holds the row.
+func noteNativeSessionKeys(issue *beadslib.Issue, kvs map[string]string) {
+	if issue == nil || !sessionHooked() {
+		return
+	}
+	if b, err := beadFromNativeIssue(issue); err == nil {
+		noteSessionKeys(b, kvs)
+	}
 }
 
 type nativeIssueGetter interface {
@@ -2821,6 +2853,7 @@ func (s *NativeDoltStore) nativeUpdates(ctx context.Context, storage nativeIssue
 		if issue == nil {
 			return nil, fmt.Errorf("bead %q: %w", id, ErrNotFound)
 		}
+		noteNativeSessionKeys(issue, opts.Metadata)
 		raw, err := metadataRawWithOverrides(issue.Metadata, opts.Metadata)
 		if err != nil {
 			return nil, fmt.Errorf("parsing metadata for bead %q: %w", id, err)

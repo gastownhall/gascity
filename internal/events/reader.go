@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"time"
 )
@@ -21,6 +22,7 @@ var readRotationDir = os.ReadDir
 // Filter specifies predicates for ReadFiltered. Zero values are ignored.
 type Filter struct {
 	Type     string    // match events with this Type
+	Types    []string  // match events whose Type is any of these (empty = no filter)
 	Actor    string    // match events with this Actor
 	Subject  string    // match events with this Subject
 	Since    time.Time // match events at or after this time
@@ -54,6 +56,9 @@ func matchesFilter(e Event, f Filter) bool {
 		return false
 	}
 	if f.Type != "" && e.Type != f.Type {
+		return false
+	}
+	if len(f.Types) > 0 && !slices.Contains(f.Types, e.Type) {
 		return false
 	}
 	if f.Actor != "" && e.Actor != f.Actor {

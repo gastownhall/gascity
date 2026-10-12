@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/runtime/tmux"
 )
 
@@ -171,17 +172,17 @@ func TestInterruptStrategyUsesPiProviderFamilyAlias(t *testing.T) {
 func TestSubmitDefaultResumesSuspendedClaudeSessionAndWaitsForIdleNudge(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := newTestManager(t, store, sp)
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
-	outcome, err := mgr.Submit(context.Background(), info.ID, "hello", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault, ResumeOperator)
+	outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault)
 	if err != nil {
 		t.Fatalf("Submit(default): %v", err)
 	}
@@ -206,17 +207,17 @@ func TestSubmitDefaultResumesSuspendedClaudeSessionAndWaitsForIdleNudge(t *testi
 func TestSubmitDefaultResumesSuspendedCodexSessionAndNudgesImmediately(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := newTestManager(t, store, sp)
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
-	outcome, err := mgr.Submit(context.Background(), info.ID, "hello", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault, ResumeOperator)
+	outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault)
 	if err != nil {
 		t.Fatalf("Submit(default): %v", err)
 	}
@@ -238,14 +239,14 @@ func TestSubmitDefaultResumesSuspendedCodexSessionAndNudgesImmediately(t *testin
 func TestSubmitDefaultCodexDismissesDeferredDialogsOnFirstDelivery(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := newTestManager(t, store, sp)
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
-	outcome, err := mgr.Submit(context.Background(), info.ID, "hello", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault, ResumeOperator)
+	outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault)
 	if err != nil {
 		t.Fatalf("Submit(default): %v", err)
 	}
@@ -271,10 +272,68 @@ func TestSubmitDefaultCodexDismissesDeferredDialogsOnFirstDelivery(t *testing.T)
 	}
 }
 
+// TestSubmitDefaultCodexDismissesDialogsThroughAutoProvider covers a city
+// whose provider is auto-wrapped: the deferred dismissal must reach the tmux
+// leg hosting the session (mc-zndi7.92).
+func TestSubmitDefaultCodexDismissesDialogsThroughAutoProvider(t *testing.T) {
+	store := beads.NewMemStore()
+	tmuxLeg := runtime.NewFake()
+	mgr := newTestManager(t, store, sessionauto.New(tmuxLeg, runtime.NewFake()))
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault); err != nil {
+		t.Fatalf("Submit(default): %v", err)
+	}
+	dismissals := 0
+	for _, call := range tmuxLeg.Calls {
+		if call.Method == "DismissKnownDialogs" && call.Name == info.SessionName {
+			dismissals++
+		}
+	}
+	if dismissals != 2 {
+		t.Fatalf("tmux leg DismissKnownDialogs calls = %d, want 2; calls = %#v", dismissals, tmuxLeg.Calls)
+	}
+	updated, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get updated bead: %v", err)
+	}
+	if got := updated.Metadata[startupDialogVerifiedKey]; got != "true" {
+		t.Fatalf("%s = %q, want true", startupDialogVerifiedKey, got)
+	}
+}
+
+// TestSubmitDefaultCodexLeavesDialogsUnverifiedWhenUnsupported: a composite
+// whose backend for the session cannot dismiss dialogs answers
+// ErrInteractionUnsupported, and the session must not be marked verified.
+func TestSubmitDefaultCodexLeavesDialogsUnverifiedWhenUnsupported(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := newTestManager(t, store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sp.DialogErrors[info.SessionName] = runtime.ErrInteractionUnsupported
+	if _, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault); err != nil {
+		t.Fatalf("Submit(default): %v", err)
+	}
+	updated, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get updated bead: %v", err)
+	}
+	if got := updated.Metadata[startupDialogVerifiedKey]; got != "" {
+		t.Fatalf("%s = %q, want unset", startupDialogVerifiedKey, got)
+	}
+}
+
 func TestSubmitDefaultCodexSkipsDeferredDialogsAfterVerification(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := newTestManager(t, store, sp)
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
@@ -284,7 +343,7 @@ func TestSubmitDefaultCodexSkipsDeferredDialogsAfterVerification(t *testing.T) {
 		t.Fatalf("SetMetadata(%s): %v", startupDialogVerifiedKey, err)
 	}
 
-	outcome, err := mgr.Submit(context.Background(), info.ID, "hello", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault, ResumeOperator)
+	outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault)
 	if err != nil {
 		t.Fatalf("Submit(default): %v", err)
 	}
@@ -302,17 +361,17 @@ func TestSubmitDefaultCodexSkipsDeferredDialogsAfterVerification(t *testing.T) {
 func TestSubmitDefaultResumesSuspendedGeminiSessionAndNudgesImmediately(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := newTestManager(t, store, sp)
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "gemini", WorkDir: t.TempDir(), Provider: "gemini", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
-	outcome, err := mgr.Submit(context.Background(), info.ID, "hello", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault, ResumeOperator)
+	outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault)
 	if err != nil {
 		t.Fatalf("Submit(default): %v", err)
 	}
@@ -340,14 +399,14 @@ func TestSubmitDefaultResumesSuspendedGeminiSessionAndNudgesImmediately(t *testi
 func TestSubmitDefaultToRunningGeminiSessionWaitsForIdleNudge(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := newTestManager(t, store, sp)
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "gemini", WorkDir: t.TempDir(), Provider: "gemini", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
-	outcome, err := mgr.Submit(context.Background(), info.ID, "hello", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault, ResumeOperator)
+	outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault)
 	if err != nil {
 		t.Fatalf("Submit(default): %v", err)
 	}
@@ -375,7 +434,7 @@ func TestSubmitDefaultToRunningGeminiSessionWaitsForIdleNudge(t *testing.T) {
 func TestSubmitDefaultConfirmsLiveCreatingSession(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := newTestManager(t, store, sp)
 
 	workDir := t.TempDir()
 	sessionName := "s-live-create"
@@ -400,7 +459,7 @@ func TestSubmitDefaultConfirmsLiveCreatingSession(t *testing.T) {
 		t.Fatalf("Create bead: %v", err)
 	}
 
-	if _, err := mgr.Submit(context.Background(), created.ID, "hello", "gemini", runtime.Config{WorkDir: workDir}, SubmitIntentDefault, ResumeOperator); err != nil {
+	if _, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), created.ID, "hello", "gemini", runtime.Config{WorkDir: workDir}, SubmitIntentDefault); err != nil {
 		t.Fatalf("Submit(default): %v", err)
 	}
 
@@ -423,7 +482,7 @@ func TestSubmitFollowUpQueuesDeferredMessageAndStartsCodexPoller(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	cityPath := t.TempDir()
-	mgr := NewManagerWithOptions(store, sp, WithCityPath(cityPath))
+	mgr := newTestManager(t, store, sp, WithCityPath(cityPath))
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
@@ -450,7 +509,7 @@ func TestSubmitFollowUpQueuesDeferredMessageAndStartsCodexPoller(t *testing.T) {
 	}
 	defer func() { startSessionSubmitPoller = origPoller }()
 
-	outcome, err := mgr.Submit(context.Background(), info.ID, "follow up later", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentFollowUp, ResumeOperator)
+	outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "follow up later", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentFollowUp)
 	if err != nil {
 		t.Fatalf("Submit(follow_up): %v", err)
 	}
@@ -841,7 +900,7 @@ func TestSubmitFollowUpQueuesDeferredMessageForPoolManagedSession(t *testing.T) 
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	cityPath := t.TempDir()
-	mgr := NewManagerWithOptions(store, sp, WithCityPath(cityPath))
+	mgr := newTestManager(t, store, sp, WithCityPath(cityPath))
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
@@ -856,7 +915,7 @@ func TestSubmitFollowUpQueuesDeferredMessageForPoolManagedSession(t *testing.T) 
 		t.Fatalf("Update: %v", err)
 	}
 
-	outcome, err := mgr.Submit(context.Background(), info.ID, "follow up later", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentFollowUp, ResumeOperator)
+	outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "follow up later", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentFollowUp)
 	if err != nil {
 		t.Fatalf("Submit(follow_up): %v", err)
 	}
@@ -876,17 +935,17 @@ func TestSubmitFollowUpOnSuspendedSessionFallsBackToImmediateSend(t *testing.T) 
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	cityPath := t.TempDir()
-	mgr := NewManagerWithOptions(store, sp, WithCityPath(cityPath))
+	mgr := newTestManager(t, store, sp, WithCityPath(cityPath))
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
-	outcome, err := mgr.Submit(context.Background(), info.ID, "send this now", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentFollowUp, ResumeOperator)
+	outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "send this now", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentFollowUp)
 	if err != nil {
 		t.Fatalf("Submit(follow_up): %v", err)
 	}
@@ -919,7 +978,7 @@ func TestSubmitFollowUpOnAsleepSessionFallsBackToImmediateSend(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	cityPath := t.TempDir()
-	mgr := NewManagerWithOptions(store, sp, WithCityPath(cityPath))
+	mgr := newTestManager(t, store, sp, WithCityPath(cityPath))
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
@@ -932,7 +991,7 @@ func TestSubmitFollowUpOnAsleepSessionFallsBackToImmediateSend(t *testing.T) {
 		t.Fatalf("SetMetadata(state): %v", err)
 	}
 
-	outcome, err := mgr.Submit(context.Background(), info.ID, "wake and send", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentFollowUp, ResumeOperator)
+	outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "wake and send", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentFollowUp)
 	if err != nil {
 		t.Fatalf("Submit(follow_up): %v", err)
 	}
@@ -965,7 +1024,7 @@ func TestSubmitDefaultQueuesWhenWakeAlreadyRequested(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	cityPath := t.TempDir()
-	mgr := NewManagerWithOptions(store, sp, WithCityPath(cityPath))
+	mgr := newTestManager(t, store, sp, WithCityPath(cityPath))
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
@@ -982,7 +1041,7 @@ func TestSubmitDefaultQueuesWhenWakeAlreadyRequested(t *testing.T) {
 	}
 	callsBefore := len(sp.Calls)
 
-	outcome, err := mgr.Submit(context.Background(), info.ID, "deliver after wake", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault, ResumeOperator)
+	outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "deliver after wake", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault)
 	if err != nil {
 		t.Fatalf("Submit(default): %v", err)
 	}
@@ -1074,7 +1133,7 @@ func TestSubmissionCapabilitiesDisableInterruptNowForWrappedAntigravity(t *testi
 func TestSubmitInterruptNowRejectsAntigravitySession(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := newTestManager(t, store, sp)
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "antigravity", WorkDir: t.TempDir(), Provider: "antigravity", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
@@ -1082,7 +1141,7 @@ func TestSubmitInterruptNowRejectsAntigravitySession(t *testing.T) {
 	}
 	callsBefore := len(sp.Calls)
 
-	outcome, err := mgr.Submit(context.Background(), info.ID, "take this now", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow, ResumeOperator)
+	outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "take this now", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow)
 	if !errors.Is(err, ErrInteractionUnsupported) {
 		t.Fatalf("Submit(interrupt_now) error = %v, want ErrInteractionUnsupported", err)
 	}
@@ -1099,14 +1158,14 @@ func TestSubmitInterruptNowRejectsAntigravitySession(t *testing.T) {
 func TestSubmitInterruptNowUsesInterruptAndIdleWaitForGemini(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := newTestManager(t, store, sp)
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "gemini", WorkDir: t.TempDir(), Provider: "gemini", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
-	outcome, err := mgr.Submit(context.Background(), info.ID, "take this now", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow, ResumeOperator)
+	outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "take this now", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow)
 	if err != nil {
 		t.Fatalf("Submit(interrupt_now): %v", err)
 	}
@@ -1168,7 +1227,7 @@ func TestSubmitInterruptNowUsesInterruptAndIdleWaitForGemini(t *testing.T) {
 func TestSubmitInterruptNowAllowsPoolManagedCodexSession(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := newTestManager(t, store, sp)
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
@@ -1183,7 +1242,7 @@ func TestSubmitInterruptNowAllowsPoolManagedCodexSession(t *testing.T) {
 		t.Fatalf("Update: %v", err)
 	}
 
-	outcome, err := mgr.Submit(context.Background(), info.ID, "take this now", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow, ResumeOperator)
+	outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "take this now", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow)
 	if err != nil {
 		t.Fatalf("Submit(interrupt_now): %v", err)
 	}
@@ -1229,14 +1288,14 @@ func TestSubmitInterruptNowAllowsPoolManagedCodexSession(t *testing.T) {
 func TestSubmitInterruptNowUsesInterruptAndIdleWaitForClaude(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := newTestManager(t, store, sp)
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
-	outcome, err := mgr.Submit(context.Background(), info.ID, "replace the current turn", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow, ResumeOperator)
+	outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "replace the current turn", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow)
 	if err != nil {
 		t.Fatalf("Submit(interrupt_now): %v", err)
 	}
@@ -1254,7 +1313,7 @@ func TestSubmitInterruptNowUsesInterruptAndIdleWaitForClaude(t *testing.T) {
 		if call.Method == "WaitForIdle" && call.Name == info.SessionName {
 			sawWaitForIdle = true
 		}
-		if call.Method == "SendKeys" && call.Name == info.SessionName && call.Message == "C-u" {
+		if call.Method == "ClearInput" && call.Name == info.SessionName {
 			sawClear = true
 			clearIdx = i
 		}
@@ -1267,10 +1326,10 @@ func TestSubmitInterruptNowUsesInterruptAndIdleWaitForClaude(t *testing.T) {
 		}
 	}
 	if !sawInterrupt || !sawWaitForIdle || !sawClear || !sawNudge {
-		t.Fatalf("calls = %#v, want interrupt + WaitForIdle + SendKeys(C-u) + nudge", sp.Calls)
+		t.Fatalf("calls = %#v, want interrupt + WaitForIdle + ClearInput + nudge", sp.Calls)
 	}
 	if clearIdx < 0 || nudgeIdx < 0 || clearIdx > nudgeIdx {
-		t.Fatalf("calls = %#v, want SendKeys(C-u) before nudge", sp.Calls)
+		t.Fatalf("calls = %#v, want ClearInput before nudge", sp.Calls)
 	}
 	if sawStop {
 		t.Fatalf("calls = %#v, did not want Stop for claude interrupt_now", sp.Calls)
@@ -1281,7 +1340,7 @@ func TestSubmitInterruptNowFallsBackToRestartOnIdleTimeout(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	sp.WaitForIdleErrors = map[string]error{}
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := newTestManager(t, store, sp)
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
@@ -1292,7 +1351,7 @@ func TestSubmitInterruptNowFallsBackToRestartOnIdleTimeout(t *testing.T) {
 	// WaitForIdle fails → fallback stops session → restart also calls
 	// WaitForIdle which still fails. The error propagates from the restart
 	// path, confirming the fallback was attempted.
-	_, err = mgr.Submit(context.Background(), info.ID, "replace the current turn", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow, ResumeOperator)
+	_, err = mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "replace the current turn", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow)
 	if err == nil {
 		t.Fatal("Submit(interrupt_now) should error when idle wait persistently fails")
 	}
@@ -1317,7 +1376,7 @@ func TestSubmitInterruptNowFallsBackToRestartOnIdleTimeout(t *testing.T) {
 func TestSubmitInterruptNowUsesControlCFallbackAfterSoftEscapeTimeoutForCodex(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := newTestManager(t, store, sp)
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
@@ -1325,7 +1384,7 @@ func TestSubmitInterruptNowUsesControlCFallbackAfterSoftEscapeTimeoutForCodex(t 
 	}
 	sp.WaitForIdleSequence[info.SessionName] = []error{fmt.Errorf("not idle yet"), nil}
 
-	outcome, err := mgr.Submit(context.Background(), info.ID, "replace the current turn", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow, ResumeOperator)
+	outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "replace the current turn", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow)
 	if err != nil {
 		t.Fatalf("Submit(interrupt_now): %v", err)
 	}
@@ -1366,7 +1425,7 @@ func TestSubmitInterruptNowUsesControlCFallbackAfterSoftEscapeTimeoutForCodex(t 
 func TestSubmitInterruptNowFallsBackToRestartOnInterruptBoundaryTimeoutForCodex(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := newTestManager(t, store, sp)
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
@@ -1374,7 +1433,7 @@ func TestSubmitInterruptNowFallsBackToRestartOnInterruptBoundaryTimeoutForCodex(
 	}
 	sp.InterruptBoundaryErrors[info.SessionName] = fmt.Errorf("no turn_aborted marker yet")
 
-	outcome, err := mgr.Submit(context.Background(), info.ID, "replace the current turn", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow, ResumeOperator)
+	outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "replace the current turn", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow)
 	if err != nil {
 		t.Fatalf("Submit(interrupt_now): %v", err)
 	}
@@ -1407,7 +1466,7 @@ func TestSubmitInterruptNowFallsBackToRestartOnInterruptBoundaryTimeoutForCodex(
 func TestSubmitInterruptNowRestartFallbackAbsorbsDownedServer(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := newTestManager(t, store, sp)
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
@@ -1416,7 +1475,7 @@ func TestSubmitInterruptNowRestartFallbackAbsorbsDownedServer(t *testing.T) {
 	sp.InterruptBoundaryErrors[info.SessionName] = fmt.Errorf("no turn_aborted marker yet")
 	sp.StopErrors[info.SessionName] = fmt.Errorf("killing session %s: %w", info.SessionName, tmux.ErrNoServer)
 
-	outcome, err := mgr.Submit(context.Background(), info.ID, "replace the current turn", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow, ResumeOperator)
+	outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "replace the current turn", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow)
 	if err != nil {
 		t.Fatalf("Submit(interrupt_now) with a downed server on the fallback stop: %v", err)
 	}
@@ -1444,7 +1503,7 @@ func TestSubmitInterruptNowRestartFallbackAbsorbsDownedServer(t *testing.T) {
 func TestSubmitInterruptNowRestartFallbackStopFailurePropagates(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := newTestManager(t, store, sp)
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
@@ -1454,7 +1513,7 @@ func TestSubmitInterruptNowRestartFallbackStopFailurePropagates(t *testing.T) {
 	stopErr := errors.New("permission denied")
 	sp.StopErrors[info.SessionName] = stopErr
 
-	_, err = mgr.Submit(context.Background(), info.ID, "replace the current turn", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow, ResumeOperator)
+	_, err = mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "replace the current turn", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow)
 	if !errors.Is(err, stopErr) {
 		t.Fatalf("Submit(interrupt_now) with a real fallback stop failure = %v, want %v", err, stopErr)
 	}
@@ -1468,7 +1527,7 @@ func TestSubmitInterruptNowRestartFallbackStopFailurePropagates(t *testing.T) {
 func TestSubmitInterruptNowHardRestartsAndTruncatesPiPendingTurn(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := newTestManager(t, store, sp)
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "pi --session abc123", WorkDir: t.TempDir(), Provider: "pi", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
@@ -1499,7 +1558,7 @@ func TestSubmitInterruptNowHardRestartsAndTruncatesPiPendingTurn(t *testing.T) {
 			"GC_PI_TRANSCRIPT_DIR":        mirrorDir,
 		},
 	}
-	outcome, err := mgr.Submit(context.Background(), info.ID, "replace the current turn", BuildResumeCommand(info), hints, SubmitIntentInterruptNow, ResumeOperator)
+	outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "replace the current turn", BuildResumeCommand(info), hints, SubmitIntentInterruptNow)
 	if err != nil {
 		t.Fatalf("Submit(interrupt_now): %v", err)
 	}
@@ -1570,21 +1629,21 @@ func TestSubmitInterruptNowHardRestartsAndTruncatesPiPendingTurn(t *testing.T) {
 }
 
 func TestSubmitInterruptNowRestoresPiSessionWhenTranscriptResetFails(t *testing.T) {
-	testPiRestoreAfterTranscriptResetFailure(t, ResumeOperator, "")
+	testPiRestoreAfterTranscriptResetFailure(t, ActorOperator, "")
 }
 
 // TestPiRestoreKeepsHeartbeatHold is the re-review's N1 on the restore path:
 // a background interrupt_now to a live pi row with a heartbeat held_until
 // restores the runtime it stopped without re-reading the hold.
 func TestPiRestoreKeepsHeartbeatHold(t *testing.T) {
-	testPiRestoreAfterTranscriptResetFailure(t, ResumeIfUnheld, "2099-01-01T00:00:00Z")
+	testPiRestoreAfterTranscriptResetFailure(t, ActorAgent, "2099-01-01T00:00:00Z")
 }
 
-func testPiRestoreAfterTranscriptResetFailure(t *testing.T, policy ResumePolicy, heldUntil string) {
+func testPiRestoreAfterTranscriptResetFailure(t *testing.T, policy ActorKind, heldUntil string) {
 	t.Helper()
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := newTestManager(t, store, sp)
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "pi --session abc123", WorkDir: t.TempDir(), Provider: "pi", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
@@ -1622,7 +1681,7 @@ func testPiRestoreAfterTranscriptResetFailure(t *testing.T, policy ResumePolicy,
 			"PI_CODING_AGENT_SESSION_DIR": sessionDir,
 		},
 	}
-	_, err = mgr.Submit(context.Background(), info.ID, "replace the current turn", BuildResumeCommand(info), hints, SubmitIntentInterruptNow, policy)
+	_, err = mgr.Submit(context.Background(), testActor(mgr, policy), info.ID, "replace the current turn", BuildResumeCommand(info), hints, SubmitIntentInterruptNow)
 	if err == nil {
 		t.Fatal("Submit(interrupt_now) error = nil, want transcript reset failure")
 	}
@@ -1663,7 +1722,7 @@ func testPiRestoreAfterTranscriptResetFailure(t *testing.T, policy ResumePolicy,
 func TestSubmitInterruptNowTruncatesPiTranscriptBySessionKey(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp, WithStaleKeyDetectionWaiter(immediateStaleKeyDetectionWaiter))
+	mgr := newTestManager(t, store, sp, WithStaleKeyDetectionWaiter(immediateStaleKeyDetectionWaiter))
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "pi --session target", WorkDir: t.TempDir(), Provider: "pi", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
@@ -1707,7 +1766,7 @@ func TestSubmitInterruptNowTruncatesPiTranscriptBySessionKey(t *testing.T) {
 			"PI_CODING_AGENT_SESSION_DIR": sessionDir,
 		},
 	}
-	outcome, err := mgr.Submit(context.Background(), info.ID, "replacement prompt", BuildResumeCommand(info), hints, SubmitIntentInterruptNow, ResumeOperator)
+	outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "replacement prompt", BuildResumeCommand(info), hints, SubmitIntentInterruptNow)
 	if err != nil {
 		t.Fatalf("Submit(interrupt_now): %v", err)
 	}
@@ -1734,7 +1793,7 @@ func TestSubmitInterruptNowTruncatesPiTranscriptBySessionKey(t *testing.T) {
 func TestSubmitInterruptNowFailsClosedOnPiSessionKeyMismatch(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := newTestManager(t, store, sp)
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "pi --session target", WorkDir: t.TempDir(), Provider: "pi", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
@@ -1761,7 +1820,7 @@ func TestSubmitInterruptNowFailsClosedOnPiSessionKeyMismatch(t *testing.T) {
 			"PI_CODING_AGENT_SESSION_DIR": sessionDir,
 		},
 	}
-	if _, err := mgr.Submit(context.Background(), info.ID, "replacement prompt", BuildResumeCommand(info), hints, SubmitIntentInterruptNow, ResumeOperator); err == nil || !strings.Contains(err.Error(), "session_key") {
+	if _, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "replacement prompt", BuildResumeCommand(info), hints, SubmitIntentInterruptNow); err == nil || !strings.Contains(err.Error(), "session_key") {
 		t.Fatalf("Submit(interrupt_now) error = %v, want session_key mismatch error", err)
 	}
 	for _, call := range sp.Calls {
@@ -1781,7 +1840,7 @@ func TestSubmitInterruptNowFailsClosedOnPiSessionKeyMismatch(t *testing.T) {
 func TestSubmitInterruptNowFailsClosedOnAmbiguousPiTranscript(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := newTestManager(t, store, sp)
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "pi", WorkDir: t.TempDir(), Provider: "pi", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
@@ -1814,7 +1873,7 @@ func TestSubmitInterruptNowFailsClosedOnAmbiguousPiTranscript(t *testing.T) {
 			"PI_CODING_AGENT_SESSION_DIR": sessionDir,
 		},
 	}
-	if _, err := mgr.Submit(context.Background(), info.ID, "replacement prompt", BuildResumeCommand(info), hints, SubmitIntentInterruptNow, ResumeOperator); err == nil || !strings.Contains(err.Error(), "ambiguous pi session file") {
+	if _, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "replacement prompt", BuildResumeCommand(info), hints, SubmitIntentInterruptNow); err == nil || !strings.Contains(err.Error(), "ambiguous pi session file") {
 		t.Fatalf("Submit(interrupt_now) error = %v, want ambiguous pi session file", err)
 	}
 	for _, call := range sp.Calls {
@@ -1838,7 +1897,7 @@ func TestSubmitInterruptNowFailsClosedOnAmbiguousPiTranscript(t *testing.T) {
 func TestSubmitInterruptNowPiContinuesWhenSessionFileMissing(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := newTestManager(t, store, sp)
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "pi --session missing", WorkDir: t.TempDir(), Provider: "pi", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
@@ -1851,7 +1910,7 @@ func TestSubmitInterruptNowPiContinuesWhenSessionFileMissing(t *testing.T) {
 		},
 	}
 
-	outcome, err := mgr.Submit(context.Background(), info.ID, "replacement prompt", BuildResumeCommand(info), hints, SubmitIntentInterruptNow, ResumeOperator)
+	outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "replacement prompt", BuildResumeCommand(info), hints, SubmitIntentInterruptNow)
 	if err != nil {
 		t.Fatalf("Submit(interrupt_now): %v", err)
 	}
@@ -1879,7 +1938,7 @@ func TestSubmitInterruptNowPiContinuesWhenSessionFileMissing(t *testing.T) {
 func TestSubmitInterruptNowFindsPiDefaultSessionPath(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := newTestManager(t, store, sp)
 
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -1904,7 +1963,7 @@ func TestSubmitInterruptNowFindsPiDefaultSessionPath(t *testing.T) {
 		t.Fatalf("WriteFile pi session: %v", err)
 	}
 
-	outcome, err := mgr.Submit(context.Background(), info.ID, "replace the current turn", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow, ResumeOperator)
+	outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "replace the current turn", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow)
 	if err != nil {
 		t.Fatalf("Submit(interrupt_now): %v", err)
 	}
@@ -1916,7 +1975,7 @@ func TestSubmitInterruptNowFindsPiDefaultSessionPath(t *testing.T) {
 func TestStopTurnUsesSoftEscapeAndIdleWaitForCodex(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := newTestManager(t, store, sp)
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
@@ -1953,7 +2012,7 @@ func TestStopTurnUsesSoftEscapeAndIdleWaitForCodex(t *testing.T) {
 func TestStopTurnUsesControlCFallbackAfterSoftEscapeTimeoutForCodex(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := newTestManager(t, store, sp)
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
@@ -2013,7 +2072,7 @@ func TestSubmitDefaultDeferredResetPendingStampsEmptyEpochToSurviveRotation(t *t
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	cityPath := t.TempDir()
-	mgr := NewManagerWithOptions(store, sp, WithCityPath(cityPath))
+	mgr := newTestManager(t, store, sp, WithCityPath(cityPath))
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
@@ -2029,7 +2088,7 @@ func TestSubmitDefaultDeferredResetPendingStampsEmptyEpochToSurviveRotation(t *t
 		t.Fatalf("SetMetadataBatch: %v", err)
 	}
 
-	outcome, err := mgr.Submit(context.Background(), info.ID, "deliver after reset", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault, ResumeOperator)
+	outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "deliver after reset", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault)
 	if err != nil {
 		t.Fatalf("Submit(default): %v", err)
 	}
@@ -2060,7 +2119,7 @@ func TestSubmitDefaultDeferredRestartRequestedKeepsCurrentEpoch(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	cityPath := t.TempDir()
-	mgr := NewManagerWithOptions(store, sp, WithCityPath(cityPath))
+	mgr := newTestManager(t, store, sp, WithCityPath(cityPath))
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
@@ -2076,7 +2135,7 @@ func TestSubmitDefaultDeferredRestartRequestedKeepsCurrentEpoch(t *testing.T) {
 		t.Fatalf("SetMetadataBatch: %v", err)
 	}
 
-	outcome, err := mgr.Submit(context.Background(), info.ID, "deliver after restart", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault, ResumeOperator)
+	outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "deliver after restart", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault)
 	if err != nil {
 		t.Fatalf("Submit(default): %v", err)
 	}
@@ -2092,5 +2151,97 @@ func TestSubmitDefaultDeferredRestartRequestedKeepsCurrentEpoch(t *testing.T) {
 	}
 	if got := state.Pending[0].ContinuationEpoch; got != "4" {
 		t.Fatalf("ContinuationEpoch = %q, want 4 (plain restart keeps the current epoch)", got)
+	}
+}
+
+// TestSubmitInterruptNowRejectsPendingInteraction pins that interrupt_now does
+// not barrel through a pending permission prompt: its interrupt keystroke
+// would dismiss (reject) the prompt as a side effect and the text would
+// follow. The caller must answer the prompt through Respond first (#2892).
+func TestSubmitInterruptNowRejectsPendingInteraction(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := newTestManager(t, store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "gemini", WorkDir: t.TempDir(), Provider: "gemini", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{
+		RequestID: "tmux-abc",
+		Kind:      "approval",
+		Prompt:    "Bash: rm -rf build",
+	})
+
+	outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "take this now", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow)
+	if !errors.Is(err, ErrPendingInteraction) {
+		t.Fatalf("Submit(interrupt_now) error = %v, want ErrPendingInteraction", err)
+	}
+	if outcome.Queued {
+		t.Fatal("Submit(interrupt_now) unexpectedly queued")
+	}
+	for _, call := range sp.Calls {
+		if call.Name != info.SessionName {
+			continue
+		}
+		switch call.Method {
+		case "SendKeys", "Interrupt", "Nudge", "NudgeNow", "Stop":
+			t.Fatalf("unexpected %s while a permission prompt is pending", call.Method)
+		}
+	}
+}
+
+// TestPendingInteractionErrorNamesThePrompt pins that the refusal says what
+// is pending, so an API or CLI caller can tell the operator what to answer.
+func TestPendingInteractionErrorNamesThePrompt(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := newTestManager(t, store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{
+		RequestID: "tmux-abc",
+		Kind:      "approval",
+		Prompt:    "Bash: rm -rf build",
+	})
+
+	_, err = mgr.Send(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello?", "", runtime.Config{})
+	if !errors.Is(err, ErrPendingInteraction) || !errors.Is(err, runtime.ErrPendingInteraction) {
+		t.Fatalf("Send error = %v, want session and runtime ErrPendingInteraction", err)
+	}
+	for _, want := range []string{"tmux-abc", "Bash: rm -rf build"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("Send error = %q, want it to mention %q", err, want)
+		}
+	}
+}
+
+type respondErrorProvider struct {
+	*runtime.Fake
+	err error
+}
+
+func (p *respondErrorProvider) Respond(string, runtime.InteractionResponse) error { return p.err }
+
+// TestRespondReportsUnavailableActionAsMismatch pins that a provider refusing
+// to guess an option (no single menu entry matches the action) surfaces as
+// an interaction mismatch, not an internal error.
+func TestRespondReportsUnavailableActionAsMismatch(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := &respondErrorProvider{Fake: runtime.NewFake(), err: fmt.Errorf("%w: 0 menu options match action \"deny\"", runtime.ErrInteractionActionUnavailable)}
+	mgr := newTestManager(t, store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{RequestID: "tmux-abc", Kind: "approval"})
+
+	err = mgr.Respond(info.ID, runtime.InteractionResponse{Action: "deny"})
+	if !errors.Is(err, ErrInteractionMismatch) {
+		t.Fatalf("Respond error = %v, want ErrInteractionMismatch", err)
 	}
 }

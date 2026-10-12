@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -208,6 +207,8 @@ type selection struct {
 
 // decideAllocation is the allocator's whole decision for one pass. It is
 // pure: identical inputs give identical outputs.
+//
+//gc:pure
 func decideAllocation(in allocInputs) (allocDecision, error) {
 	if in.Now.IsZero() {
 		return allocDecision{}, errDecideNoClock
@@ -278,19 +279,15 @@ func (p *decidePass) finish() allocDecision {
 // allocator does not manage are set aside with legacy's predicates. They
 // keep the slots and names legacy gives them (fail-closed): every one stays
 // in occupancy. A pending create (one holding pending_create_claim) is a
-// rollback candidate only when its own runtime is absent, absent-unconfirmed
-// or a name another row holds. Unknown liveness keeps it managed, and so does
+// rollback candidate only past A10's never-started deadline, with no lease
+// predicate (v5 P4, SC A5), and only when its own runtime is absent,
+// absent-unconfirmed or a name another row holds. Unknown liveness keeps it managed, and so does
 // a dead pane: legacy's IsRunning reads a corpse as not running, but v2's
 // start path recycles it. A creating row with no claim is never one (v5 C3,
 // B5): it stays managed and reusable, as legacy's is, and A6 heals it.
 // Any other row whose name another bead's runtime holds is None (C11).
 func (p *decidePass) classifyRows() {
 	c := p.in.Census
-	var startupTimeout time.Duration
-	if p.in.Cfg != nil {
-		startupTimeout = p.cfg.Session.StartupTimeoutDuration()
-	}
-	clk := &clock.Fake{Time: p.in.Now}
 	keys := make([]rowKey, 0, len(c.Rows))
 	for k := range c.Rows {
 		keys = append(keys, k)
@@ -331,7 +328,7 @@ func (p *decidePass) classifyRows() {
 			p.none[k] = reasonUnknownState
 		case isFailedCreateSessionInfo(info):
 			p.none[k] = reasonFailedCreate
-		case notRunning && info.PendingCreateClaim && pendingCreateLeaseExpiredForRollbackInfo(info, clk, startupTimeout) &&
+		case notRunning && pendingCreateNeverStartedExpiredAt(info, p.in.Now) && // A10's never-started deadline, no lease (v5 P4, SC A5)
 			!endpointHolds:
 			p.none[k] = reasonRollbackCandidate
 		case o.Liveness == livenessOccupied:
@@ -479,7 +476,7 @@ func (p *decidePass) keepReason(e *selectionEntry, info session.Info) string {
 		return reasonObservationUncertain
 	case !p.in.CitySuspended:
 		return ""
-	case pendingCreateSessionStillLeasedInfo(info, p.cfg, &clock.Fake{Time: p.in.Now}):
+	case pendingCreateSessionStillLeasedAt(info, p.cfg, p.in.Now):
 		return reasonPendingCreate
 	case e.AssignedWork != nil:
 		return reasonAssignedWork
@@ -557,13 +554,13 @@ func (p *decidePass) configSleepSuppressed(info session.Info, o rowObservation, 
 			ref.DetachedAt = obs.LastActivity.UTC().Format(time.RFC3339Nano)
 		}
 	}
-	if !configWakeSuppressedInfo(ref, policy, nil, &clock.Fake{Time: p.in.Now}) {
+	if suppressed, _ := configWakeSuppressedAt(ref, policy, nil, p.in.Now); !suppressed {
 		return false
 	}
 	eval := awakeSetToWakeEvals(map[string]AwakeDecision{info.SessionNameMetadata: d},
 		[]AwakeSessionBead{{ID: info.ID, SessionName: info.SessionNameMetadata}})[info.ID]
 	template := normalizedSessionTemplateInfo(info, p.cfg)
-	return !wakeDemandOverridesSleepSuppression(d, eval, policy, p.poolDesired, template, info.SleepIntent != "", explicitWakePendingInfo(info))
+	return !wakeDemandOverridesSleepSuppression(d, eval, policy, p.poolDesired, template, explicitSleepIntentInfo(info), explicitWakePendingInfo(info))
 }
 
 // classify is step 12 (CONTRACT §2.2): InDesired ∧ ShouldWake is Wake,
@@ -603,7 +600,7 @@ func (p *decidePass) classify(decisions map[string]AwakeDecision) {
 			e.Desired, e.Reason = desireSleep, firstNonEmpty(d.Reason, reasonNoWake)
 		default:
 			e.Desired, e.Reason = desireDrain, firstNonEmpty(d.Reason, reasonNoWake)
-			e.DrainReason = drainOrphaned
+			e.DrainReason, e.OpenWork = drainOrphaned, p.openAssignedWork(info)
 			if p.agentSuspended(e.Template) {
 				e.DrainReason = drainSuspended
 			}

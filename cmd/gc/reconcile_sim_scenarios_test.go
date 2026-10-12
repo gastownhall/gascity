@@ -3,12 +3,15 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -139,12 +142,19 @@ func TestSimR14PartialListingConcludesNoAbsence(t *testing.T) {
 }
 
 // Scenario R17 (INC-006; I10): an event replayed many times, and rescans,
-// mark the planner dirty and write nothing: no write loop.
+// mark the planner dirty and write nothing: no write loop. The city first
+// settles: the heal lands, then the freed slot's close (A21).
 func TestSimR17ReplayedEventsWriteNothing(t *testing.T) {
 	s := scripted(t, nil, heldRow())
 	s.inventory()
 	s.pass()
 	s.release(0)
+	for range 3 {
+		s.pass()
+		for len(s.parked) > 0 {
+			s.release(0)
+		}
+	}
 	s.audit("v2")
 	ev := s.operator("gc-1", "held_until", s.rel(time.Hour))
 	for range 5 {
@@ -183,6 +193,9 @@ func TestSimR34R35ServerGone(t *testing.T) {
 			gone := s.liveness("gc-1") == livenessGone
 			if gone != confirmed || coldBoot && s.p.boot.InventoryComplete != confirmed {
 				t.Errorf("cold boot %t, confirmed dead %t: gc-1 gone %t, boot inventory complete %t", coldBoot, confirmed, gone, s.p.boot.InventoryComplete)
+			}
+			for len(s.parked) > 0 { // a confirmed-gone row's close (A21) runs out
+				s.release(0)
 			}
 			s.audit("v2")
 			s.noViolations(t)
@@ -241,9 +254,10 @@ func (s *sim) settle() {
 	s.audit("v2")
 }
 
-// workFor is in-progress work routed to the worker pool and assigned to id.
-func workFor(id string) beads.Bead {
-	return beads.Bead{ID: "gw-" + id, Title: "work", Type: "task", Status: "in_progress", Assignee: id, Metadata: map[string]string{"gc.routed_to": "worker"}}
+// gc1Work is in-progress work routed to the worker pool and assigned to
+// gc-1.
+func gc1Work() beads.Bead {
+	return beads.Bead{ID: "gw-gc-1", Title: "work", Type: "task", Status: "in_progress", Assignee: "gc-1", Metadata: map[string]string{"gc.routed_to": "worker"}}
 }
 
 // gc1 is the city row gc-1's metadata on the backing.
@@ -284,9 +298,10 @@ func TestSimStabilityClearsAcrossTime(t *testing.T) {
 // Kills the detached-at marker (v5.8 A6 item 7; SESS-533/535/536) lost or
 // stuck across time, on an interactive row under a sleep policy: a detach
 // stamps the pass time, an attach clears it, the next detach stamps its own
-// time, and the runtime's death clears it in the dead-runtime heal's one CAS.
+// time, and the runtime's death clears it in the same-pass restart's PreWake
+// CAS, which carries the dead-runtime heal.
 func TestSimDetachedAtFollowsTheAttachFact(t *testing.T) {
-	s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-1", "session_key", "k-1"), workFor("gc-1"))
+	s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-1", "session_key", "k-1"), gc1Work())
 	s.cfg.Agents[0].SleepAfterIdle = "5m"
 	attach := func(on bool) {
 		s.sp.mu.Lock()
@@ -309,8 +324,8 @@ func TestSimDetachedAtFollowsTheAttachFact(t *testing.T) {
 			t.Fatalf("at %s: detached_at %q, want %q", s.clk.Now().Sub(plannerT0), got, want)
 		}
 	}
-	if m := s.gc1(); m["state"] != "asleep" {
-		t.Fatalf("row %v, want the dead runtime healed asleep", m)
+	if m := s.gc1(); m["state"] != "awake" || m["generation"] != "2" {
+		t.Fatalf("row %v, want the wanted row restarted in the pass its runtime died", m)
 	}
 	s.noViolations(t)
 }
@@ -319,8 +334,8 @@ func TestSimDetachedAtFollowsTheAttachFact(t *testing.T) {
 // or named rows: a pool row AL1 wants asleep (quarantined, its work waiting)
 // whose runtime dies heals to asleep with runtime-missing and its
 // continuation reset, which A21's pool-slot close can free. A heartbeat-held
-// row waits for A17 while its hold runs, and heals once the timer heal has
-// cleared the expired hold.
+// one heals alike: A17 would respawn it through its hold, but its quarantine
+// holds the respawn.
 func TestSimDeadRuntimeHealFreesAnUnwantedRow(t *testing.T) {
 	for _, held := range []bool{false, true} {
 		t.Run(fmt.Sprintf("held %t", held), func(t *testing.T) { deadRuntimeHealAcrossTime(t, held) })
@@ -332,14 +347,14 @@ func deadRuntimeHealAcrossTime(t *testing.T, held bool) {
 	if held {
 		meta = append(meta, "held_until", rowAt(2*time.Minute))
 	}
-	s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", meta...), workFor("gc-1"))
+	s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", meta...), gc1Work())
 	s.settle()
 	s.sp.mu.Lock()
 	s.sp.drop("s-gc-1")
 	s.sp.mu.Unlock()
 	s.advance(simPatrol)
 	s.settle()
-	if got := s.gc1()["state"]; held != (got == "active") {
+	if got := s.gc1()["state"]; got != "asleep" {
 		t.Fatalf("held %t: state %q after the runtime died", held, got)
 	}
 	s.advance(2 * time.Minute)
@@ -359,8 +374,8 @@ func deadRuntimeHealAcrossTime(t *testing.T, held bool) {
 // the 30s, on a dead runtime or on an uncommitted row is reported, and so is,
 // on a stable row, a rewrite of the quarantine or a stop request.
 func TestSimI15StabilityCarveOut(t *testing.T) {
-	quarantined := func(state string, woke time.Duration) beads.Bead {
-		return poolRow("gc-1", "worker", 1, state, "instance_token", "tok-1", "last_woke_at", rowAt(woke), "quarantined_until", rowAt(time.Hour))
+	quarantined := func(state string, woke time.Duration, meta ...string) beads.Bead {
+		return poolRow("gc-1", "worker", 1, state, append([]string{"instance_token", "tok-1", "last_woke_at", rowAt(woke), "quarantined_until", rowAt(time.Hour)}, meta...)...)
 	}
 	clearQ := session.MetadataPatch{"quarantined_until": ""}
 	for _, tc := range []struct {
@@ -373,16 +388,30 @@ func TestSimI15StabilityCarveOut(t *testing.T) {
 		{"dead runtime", quarantined("active", -time.Hour), true, clearQ},
 		{"uncommitted", quarantined("creating", -time.Hour), false, clearQ},
 		{"stable, the quarantine rewritten", quarantined("active", -time.Hour), false, session.MetadataPatch{"quarantined_until": rowAt(2 * time.Hour)}},
-		{"stable, a stop request", quarantined("active", -time.Hour), false, session.MetadataPatch{"quarantined_until": "", session.DrainIntentReasonKey: "idle"}},
+		{"stable, a stop request on a user-hold row", quarantined("active", -time.Hour, "sleep_intent", "user-hold"), false, session.MetadataPatch{"quarantined_until": "", session.DrainIntentReasonKey: "idle"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			write := func(r *rowFacts) (intent, bool) {
 				if r.row.Info.QuarantinedUntil == tc.patch["quarantined_until"] {
 					return intent{}, false
 				}
-				return r.heal(intentRowHeal, decideStabilityClear, tc.patch)
+				// The quarantine's write is the Quarantine cell's, to the
+				// scenario's deadline (none: cleared); the rest is the patch.
+				until, _ := time.Parse(time.RFC3339, tc.patch["quarantined_until"])
+				class := session.CellInfo(r.row.Info, session.ActorController, session.DispEvent{Kind: session.EvQuarantine, Until: until}, r.w.Now)
+				patch := maps.Clone(tc.patch)
+				delete(patch, "quarantined_until")
+				return r.healClass(intentRowHeal, decideStabilityClear, patch, class)
 			}
-			s := scriptedWith(t, simOpts{arms: mutateHeal(write)}, []string{"gc-1"}, tc.row)
+			arms := mutateHeal(write)
+			if tc.row.Metadata["sleep_intent"] == "user-hold" {
+				// A4's direct stop of the live user-hold row would preempt the
+				// seeded write; the oracle under test is I15's, not A4's.
+				arms = func(in []rowArm) []rowArm {
+					return slices.DeleteFunc(mutateHeal(write)(in), func(a rowArm) bool { return a.name == "A4" })
+				}
+			}
+			s := scriptedWith(t, simOpts{arms: arms}, []string{"gc-1"}, tc.row)
 			if tc.zombie {
 				s.sp.mu.Lock()
 				s.sp.rts["s-gc-1"].zombie = true
@@ -412,7 +441,7 @@ func TestSimDeadRuntimeHealSkipsCensusOnlyRigRows(t *testing.T) {
 	meta := []string{"instance_token", "tok-1", "session_key", "k-1", "last_woke_at", rowAt(0), "quarantined_until", rowAt(time.Hour)}
 	rig := poolRow("rg-1", "worker", 11, "active", meta...)
 	s := newSim(t, 1, simOpts{rows: func(*sim) ([]beads.Bead, []beads.Bead) {
-		return []beads.Bead{poolRow("gc-1", "worker", 1, "active", meta...), workFor("gc-1")}, []beads.Bead{rig}
+		return []beads.Bead{poolRow("gc-1", "worker", 1, "active", meta...), gc1Work()}, []beads.Bead{rig}
 	}})
 	s.lag = false
 	for range 2 {
@@ -446,10 +475,10 @@ func TestSimTxDecidesAgainInsideTheEffect(t *testing.T) {
 		healed    bool
 		attempts  int
 	}{
-		{"an unrelated write before the CAS", "note", seamBeforeCAS, true, 2},
-		{"an unrelated write after the fresh read", "note", seamAfterRowRead, true, 2},
+		{"an unrelated write before the CAS", "test_note", seamBeforeCAS, true, 2},
+		{"an unrelated write after the fresh read", "test_note", seamAfterRowRead, true, 2},
 		{"a re-hold before the CAS", "held_until", seamBeforeCAS, false, 1},
-		{"an unrelated write before the heal runs", "note", 0, true, 1},
+		{"an unrelated write before the heal runs", "test_note", 0, true, 1},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			s := scripted(t, nil, heldRow())
@@ -479,4 +508,246 @@ func TestSimTxDecidesAgainInsideTheEffect(t *testing.T) {
 			s.noViolations(t)
 		})
 	}
+}
+
+// Kills a pool seat stranded by its young death (staging J23): AL1 never
+// wakes a persistent pool's asleep seat that has no work assigned (A21's
+// pool-slot close replaces it, C5c1), so a death that accrues churn
+// restarts the seat in place in the pass that records it, for a singleton
+// pool and for a pool at its max serving routed work, with no seat created
+// beside it.
+func TestSimYoungDeathRestartsAPoolSeatInPlace(t *testing.T) {
+	ids := []string{"gc-s", "gc-1", "gc-2"}
+	s := newSim(t, 1, simOpts{rows: func(s *sim) ([]beads.Bead, []beads.Bead) {
+		s.cfg.Agents[0].MaxActiveSessions = intPtr(2)
+		s.cfg.Agents = append(s.cfg.Agents, config.Agent{Name: "solo", StartCommand: "true", MaxActiveSessions: intPtr(1)})
+		var rows []beads.Bead
+		for i, id := range ids {
+			template, slot := "worker", i
+			if id == "gc-s" {
+				template, slot = "solo", 1
+			}
+			row := poolRow(id, template, slot, "active", "instance_token", "tok-"+id, "session_key", "k-"+id, "last_woke_at", rowAt(-2*time.Minute))
+			s.sp.put(row.Metadata["session_name"], id, "1", "tok-"+id)
+			work := beads.Bead{ID: "gw-" + id, Title: "work", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": template}}
+			rows = append(rows, row, work)
+		}
+		return rows, nil
+	}})
+	s.lag = false
+	s.advance(time.Second)
+	s.sp.mu.Lock()
+	for _, id := range ids {
+		s.sp.drop("s-" + id)
+	}
+	s.sp.mu.Unlock()
+	s.advance(simPatrol)
+	s.settle()
+	s.settle()
+	for _, id := range ids {
+		b, err := s.legs[0].backing.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if m := b.Metadata; m["state"] != "awake" || m["churn_count"] != "1" || !s.livePane(b) {
+			t.Errorf("%s: row %v, want it restarted in place with its churn recorded", id, m)
+		}
+	}
+	if rows, _ := s.legs[0].backing.List(beads.ListQuery{Label: session.LabelSession}); len(rows) != len(ids) {
+		t.Errorf("%d session rows, want the %d seats and none beside them", len(rows), len(ids))
+	}
+	s.noViolations(t)
+}
+
+// Kills a deferred stranded death reclassified by a later pass (review J1,
+// the budget shape): three seats rapid-crash together with one wake per
+// pass (and room for their row writes); each records a wake failure, as
+// legacy records it in the tick it sees it, and is restarted in turn.
+func TestSimDeferredStrandedDeathsRecordOnce(t *testing.T) {
+	ids := []string{"gc-1", "gc-2", "gc-3"}
+	s := newSim(t, 1, simOpts{rows: func(s *sim) ([]beads.Bead, []beads.Bead) {
+		one := 1
+		s.cfg.Daemon.MaxWakesPerTick, s.cfg.Daemon.ProbeConcurrency = &one, intPtr(4)
+		var rows []beads.Bead
+		for i, id := range ids {
+			row := poolRow(id, "worker", i+1, "active", "instance_token", "tok-"+id, "session_key", "k-"+id, "last_woke_at", plannerT0.Add(-10*time.Second).Format(time.RFC3339), "wake_attempts", "1")
+			s.sp.put(row.Metadata["session_name"], id, "1", "tok-"+id)
+			rows = append(rows, row, beads.Bead{ID: "gw-" + id, Title: "work", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}})
+		}
+		return rows, nil
+	}})
+	s.lag = false
+	s.sp.mu.Lock()
+	for _, id := range ids {
+		s.sp.drop("s-" + id)
+	}
+	s.sp.mu.Unlock()
+	for range len(ids) { // inside 30s of the last restart, before its stability clear
+		s.advance(simPatrol)
+		s.settle()
+	}
+	for _, id := range ids {
+		b, err := s.legs[0].backing.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if m := b.Metadata; m["wake_attempts"] != "2" || m["churn_count"] != "" || !s.livePane(b) {
+			t.Errorf("%s: wake_attempts %q churn_count %q live %v, want the rapid crash recorded once and the seat restarted", id, m["wake_attempts"], m["churn_count"], s.livePane(b))
+		}
+	}
+	s.noViolations(t)
+}
+
+// Kills a cutover drain storm (v5 M2, I21, Gate R R18; staging J13): a live
+// seat whose stored hashes carry the previous fingerprint version is
+// rebaselined to this binary's, all six keys, with no stop and no start.
+func TestSimCutoverV5HashesRebaselineNotDrain(t *testing.T) {
+	v5 := []string{"started_config_hash", "v5:core", "started_provision_hash", "v5:prov", "started_launch_hash", "v5:launch", "started_live_hash", "v5:live", "live_hash", "v5:live", "core_hash_breakdown", "{}"}
+	s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", append([]string{"instance_token", "tok-1", "last_woke_at", rowAt(-time.Hour)}, v5...)...), gc1Work())
+	for range 4 { // A7 converges the row's identity first, then A8 hashes it (v5 B4)
+		s.settle()
+	}
+	m := s.gc1()
+	for i := 0; i < len(v5); i += 2 {
+		if k := v5[i]; k != "core_hash_breakdown" && !strings.HasPrefix(m[k], runtime.FingerprintVersion+":") || m[k] == v5[i+1] {
+			t.Errorf("%s = %q, want rebaselined under %s", k, m[k], runtime.FingerprintVersion)
+		}
+	}
+	if len(s.sp.kills) != 0 || len(s.sp.starts) != 0 || m["state"] != "active" {
+		t.Errorf("kills %v starts %v state %q, want the seat left running", s.sp.kills, s.sp.starts, m["state"])
+	}
+	s.noViolations(t)
+}
+
+// Kills a soft reload under v2 that accepts nothing, accepts a row twice,
+// or never replies (MAINT-025, v5 M2): a request for the env's generation
+// accepts a live seat's drifted config, with no stop and no start, counts it
+// once, and closes when no drifted row is left, so the reply carries it; a
+// newer request closes the older at once.
+func TestSimSoftReloadAcceptsDriftOnce(t *testing.T) {
+	stale := runtime.FingerprintVersion + ":stale"
+	s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-1", "last_woke_at", rowAt(-time.Hour), "started_config_hash", stale), gc1Work())
+	q := newSoftReloadRequest(1)
+	s.p.openSoftReload(q)
+	for range 5 { // A7 converges the row's identity first (v5 B4)
+		s.settle()
+	}
+	select {
+	case <-q.done:
+	default:
+		t.Fatal("the request is still open with no drifted row left")
+	}
+	var r reloadControlReply
+	q.reply(&r)
+	if m := s.gc1(); r.AcceptedDriftCount == nil || *r.AcceptedDriftCount != 1 || m["started_config_hash"] == stale || !strings.HasPrefix(m["started_config_hash"], runtime.FingerprintVersion+":") {
+		t.Fatalf("reply %+v, row hash %q: want one accepted and the row's hash current", r, m["started_config_hash"])
+	}
+	if len(s.sp.kills) != 0 || len(s.sp.starts) != 0 {
+		t.Fatalf("kills %v starts %v, want the seat left running", s.sp.kills, s.sp.starts)
+	}
+	older, newer := newSoftReloadRequest(1), newSoftReloadRequest(1)
+	s.p.openSoftReload(older)
+	s.p.openSoftReload(newer)
+	select {
+	case <-older.done:
+	default:
+		t.Fatal("a newer request left the older open")
+	}
+	s.noViolations(t)
+}
+
+// Kills A8 hashing a row before A7 rewrites its identity (v5 B4; R43): a
+// live seat with the previous fingerprint's hashes and no origin is given
+// its identity first, by A7 alone, then rebaselined by A8, with no stop and
+// no start. (An alias A7 writes rebaselines in A7's own CAS, as legacy's
+// does: the hashes are taken on the rewritten row either way.)
+func TestSimR43IdentityBeforeRebaseline(t *testing.T) {
+	v5 := []string{"started_config_hash", "v5:core", "started_provision_hash", "v5:prov", "started_launch_hash", "v5:launch", "started_live_hash", "v5:live", "live_hash", "v5:live", "core_hash_breakdown", "{}"}
+	s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", append([]string{"instance_token", "tok-1", "last_woke_at", rowAt(-time.Hour)}, v5...)...), gc1Work())
+	identityFirst := false
+	for range 4 {
+		s.settle()
+		m := s.gc1()
+		rebaselined := m["started_config_hash"] != "v5:core"
+		if rebaselined && m["session_origin"] == "" {
+			t.Fatalf("row %v: rebaselined before its identity was written", m)
+		}
+		identityFirst = identityFirst || !rebaselined && m["session_origin"] == "ephemeral"
+	}
+	m := s.gc1()
+	if !identityFirst || !strings.HasPrefix(m["started_config_hash"], runtime.FingerprintVersion+":") {
+		t.Fatalf("row %v: want the identity written alone, then the rebaseline", m)
+	}
+	if len(s.sp.kills) != 0 || len(s.sp.starts) != 0 || m["state"] != "active" {
+		t.Errorf("kills %v starts %v state %q, want the seat left running", s.sp.kills, s.sp.starts, m["state"])
+	}
+	s.noViolations(t)
+}
+
+// Kills a rollback that stops a foreign occupant outside C8.2(a), and an I4
+// that flags the stop C8.2(a) admits (the C5a2 review): a pending create
+// whose bead-scoped name another row's runtime holds is rolled back, the
+// occupant stopped by name, with no violation. (A Foreign runtime under any
+// other name is rolled back without a stop: TestRollbackRuntime.)
+func TestSimRollbackStopsABeadScopedNameOnly(t *testing.T) {
+	run := func(t *testing.T, row beads.Bead) *sim {
+		t.Helper()
+		s := newSim(t, 1, simOpts{rows: func(s *sim) ([]beads.Bead, []beads.Bead) {
+			s.sp.put(row.Metadata["session_name"], "gc-other", "1", "tok-other")
+			return []beads.Bead{row}, nil
+		}})
+		s.lag = false
+		for range 3 {
+			s.advance(simPatrol)
+			s.settle()
+		}
+		s.noViolations(t)
+		return s
+	}
+	started := plannerT0.Add(-time.Minute).Format(time.RFC3339)
+	s := run(t, poolRow("gc-1", "worker", 1, "creating", "instance_token", "tok-gc-1", "pending_create_claim", "true", "pending_create_started_at", started))
+	if b, _ := s.legs[0].backing.Get("gc-1"); b.Status != "closed" || len(s.sp.kills) != 1 {
+		t.Fatalf("bead-scoped: row %s kills %+v, want rolled back with the occupant stopped", b.Status, s.sp.kills)
+	}
+}
+
+// Kills a drift drain over an attached human (GUAR-006, SESS-553/554/561):
+// a drifted seat that is attached stamps its deferral and is never drained
+// or stopped; detached, it waits out the recent-deferral window, then its
+// config-drift request is written, and nothing kills its runtime (the stop
+// is C6b2's).
+func TestSimConfigDriftWaitsForTheHumanThenDrains(t *testing.T) {
+	stale := runtime.FingerprintVersion + ":stale"
+	s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-1", "last_woke_at", rowAt(-time.Hour), "started_config_hash", stale))
+	s.cfg.Agents[0].MinActiveSessions = intPtr(1)
+	attach := func(on bool) {
+		s.sp.mu.Lock()
+		s.sp.rts["s-gc-1"].attached = on
+		s.sp.touch("s-gc-1")
+		s.sp.mu.Unlock()
+	}
+	attach(true)
+	for range 3 {
+		s.advance(simPatrol)
+		s.settle()
+	}
+	if m := s.gc1(); m["attached_config_drift_deferred_key"] == "" || m[session.DrainIntentReasonKey] != "" {
+		t.Fatalf("attached: row %v, want the deferral stamped and no request", m)
+	}
+	attach(false)
+	s.advance(time.Minute)
+	s.settle()
+	if m := s.gc1(); m[session.DrainIntentReasonKey] != "" {
+		t.Fatalf("detached inside the window: request %q, want none", m[session.DrainIntentReasonKey])
+	}
+	s.advance(6 * time.Minute)
+	s.settle()
+	s.settle()
+	if m := s.gc1(); m[session.DrainIntentReasonKey] != drainConfigDrift {
+		t.Fatalf("past the window: row %v, want the config-drift request", m)
+	}
+	if len(s.sp.kills) != 0 {
+		t.Fatalf("kills %v, want none", s.sp.kills)
+	}
+	s.noViolations(t)
 }

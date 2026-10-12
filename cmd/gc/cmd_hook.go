@@ -128,7 +128,12 @@ func cmdHookRun(args []string, opts hookRunOptions, stdin io.Reader, stdout, std
 	// parked the instant it is won; the claim path refuses on this marker (F-A,
 	// hookClaimNonTurnMarker). Every other hook use of a callback lane —
 	// --inject, nudge drain, mail check — is read-only and unaffected.
-	cmd.Env = append(os.Environ(), "GC_HOOK_CALLBACK_LANE=1")
+	//
+	// The child also gets the deadline its output must beat (hookDeadlineEnv),
+	// so it can skip a destructive step it would not finish in time
+	// (childHookDeadline).
+	cmd.Env = append(removeEnvKey(os.Environ(), hookDeadlineEnv),
+		"GC_HOOK_CALLBACK_LANE=1", hookDeadlineEnv+"="+hookDeadlineEnvValue(childHookDeadline(ctx)))
 	// Read the provider's hook stdin FULLY into a buffer before running the
 	// wrapped command, then hand it that buffer. Forwarding the live stdin
 	// (cmd.Stdin = stdin) let the wrapped command exit — on its fast path or on
@@ -1427,28 +1432,29 @@ func isSelfBlockedHookCandidate(item map[string]any) bool {
 // labels:null for an unlabeled bead — so this fails open exactly like the
 // is_blocked projection above it.
 //
-// Scope (ga-5736js): this filters what the hook SERVES as work. It does not
-// touch the assignee-scoped demand/liveness tiers, which stay hold-transparent
-// by design so a held assignment still keeps its owner visible to the pool and
-// to crash recovery.
+// Scope (ga-5736js): this filters what the hook SERVES as work, on every hook
+// path. The controller applies the same predicate (beadmeta.HasDispatchHold)
+// to assigned OPEN work, so a held OPEN row carries no wake readiness, does not
+// keep its assignee awake, and is not a drain-ack strand. The rest of the
+// assignment's accounting stays hold-transparent: the assigned-work snapshot,
+// orphan release, pool accounting and the in_progress tiers still count it, so
+// a held assignment keeps its owner visible to the pool and to crash recovery.
 func isHeldHookCandidate(item map[string]any) bool {
 	raw, ok := item["labels"].([]any)
 	if !ok {
 		return false
 	}
+	labels := make([]string, 0, len(raw))
 	for _, entry := range raw {
-		label, ok := entry.(string)
-		if !ok {
-			continue
-		}
-		label = strings.TrimSpace(label)
-		for _, hold := range beadmeta.DispatchHoldLabels {
-			if strings.EqualFold(label, hold) {
-				return true
-			}
+		if label, ok := entry.(string); ok {
+			labels = append(labels, label)
 		}
 	}
-	return false
+	// One predicate for "held": the controller's wake-demand and drain-ack
+	// claimability gates (assignedOpenWorkHeld, classifyDemandRowClaimability)
+	// answer with the same function, so they cannot drift from what the hook
+	// actually refuses to serve.
+	return beadmeta.HasDispatchHold(labels)
 }
 
 // isClosedHookCandidate reports whether item is a closed bead. Defense-in-depth

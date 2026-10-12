@@ -25,6 +25,7 @@ var (
 	_ runtime.IdleSnapshotProvider          = (*Provider)(nil)
 	_ runtime.InterruptBoundaryWaitProvider = (*Provider)(nil)
 	_ runtime.InterruptedTurnResetProvider  = (*Provider)(nil)
+	_ runtime.InputClearProvider            = (*Provider)(nil)
 	_ runtime.RelaunchProvider              = (*Provider)(nil)
 	_ runtime.LivenessObserver              = (*Provider)(nil)
 	_ runtime.UnattendedSessionStopper      = (*Provider)(nil)
@@ -36,6 +37,11 @@ var (
 	_ runtime.ListingAttestation            = (*Provider)(nil)
 	_ runtime.Router                        = (*Provider)(nil)
 	_ runtime.ServerDeathConfirmer          = (*Provider)(nil)
+	_ runtime.DialogProvider                = (*Provider)(nil)
+	_ runtime.EnvironmentBatchProvider      = (*Provider)(nil)
+	_ runtime.ServerLifecycleProvider       = (*Provider)(nil)
+	_ runtime.SessionRosterProvider         = (*Provider)(nil)
+	_ runtime.SessionObjectKiller           = (*Provider)(nil)
 )
 
 // New creates a hybrid provider. isRemote returns true for sessions
@@ -203,6 +209,15 @@ func (p *Provider) ResetInterruptedTurn(ctx context.Context, name string) error 
 	return runtime.ErrInteractionUnsupported
 }
 
+// ClearInput delegates to the routed backend when it can empty a session's
+// input box and confirm it is empty.
+func (p *Provider) ClearInput(ctx context.Context, name string, restoreWindow time.Duration) error {
+	if cp, ok := p.route(name).(runtime.InputClearProvider); ok {
+		return cp.ClearInput(ctx, name, restoreWindow)
+	}
+	return runtime.ErrInteractionUnsupported
+}
+
 // Relaunch forwards a warm-box agent relaunch to the routed backend when it
 // supports one, so the reconciler's RelaunchProvider type-assert is not masked
 // by the hybrid router.
@@ -238,6 +253,60 @@ func (p *Provider) Respond(name string, response runtime.InteractionResponse) er
 		return ip.Respond(name, response)
 	}
 	return runtime.ErrInteractionUnsupported
+}
+
+// DismissKnownDialogs delegates to the routed backend when it can dismiss
+// startup dialogs.
+func (p *Provider) DismissKnownDialogs(ctx context.Context, name string, timeout time.Duration) error {
+	if dp, ok := p.route(name).(runtime.DialogProvider); ok {
+		return dp.DismissKnownDialogs(ctx, name, timeout)
+	}
+	return runtime.ErrInteractionUnsupported
+}
+
+// GetAllEnvironment delegates to the routed backend when it has a batched
+// environment read.
+func (p *Provider) GetAllEnvironment(name string) (map[string]string, error) {
+	if ep, ok := p.route(name).(runtime.EnvironmentBatchProvider); ok {
+		return ep.GetAllEnvironment(name)
+	}
+	return nil, fmt.Errorf("%w: session %q", runtime.ErrEnvironmentBatchUnsupported, name)
+}
+
+// ConfigureServer configures the server of every backend that has one.
+func (p *Provider) ConfigureServer() error {
+	return runtime.ConfigureServers(p.Backends())
+}
+
+// TeardownServer tears down the server of every backend that has one, so a
+// full stop through the composite still ends the local tmux server.
+func (p *Provider) TeardownServer() error {
+	return runtime.TeardownServers(p.Backends())
+}
+
+// SessionRoster merges the backends' rosters ([runtime.MergeSessionRosters]).
+func (p *Provider) SessionRoster() (map[string]runtime.SessionRosterEntry, error) {
+	return runtime.MergeSessionRosters(p, p.Backends())
+}
+
+// KillCorpseObject forwards to the routed backend when it kills session
+// objects by id (local tmux). The route is a pure function of the name, so no
+// other backend can host the object.
+func (p *Provider) KillCorpseObject(name, objectID, created string) (runtime.SessionObjectKillResult, error) {
+	killer, ok := p.route(name).(runtime.SessionObjectKiller)
+	if !ok {
+		return runtime.SessionObjectNotKilled, fmt.Errorf("%w: session %q", runtime.ErrSessionObjectKillUnsupported, name)
+	}
+	return killer.KillCorpseObject(name, objectID, created)
+}
+
+// KillZombieObject forwards like KillCorpseObject.
+func (p *Provider) KillZombieObject(name, objectID, created, panePID string) (runtime.SessionObjectKillResult, error) {
+	killer, ok := p.route(name).(runtime.SessionObjectKiller)
+	if !ok {
+		return runtime.SessionObjectNotKilled, fmt.Errorf("%w: session %q", runtime.ErrSessionObjectKillUnsupported, name)
+	}
+	return killer.KillZombieObject(name, objectID, created, panePID)
 }
 
 // SetMeta delegates to the routed backend.

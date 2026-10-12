@@ -339,10 +339,10 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 	// A SessionStart hook proves its live managed session against the city
 	// store; the SessionStart mail context below reuses that same handle rather
 	// than resolving the city and opening its store again.
-	var sessionStartStore beads.Store
+	var sessionStart *primeSessionStart
 	if hookMode && primeHookSessionStart(hookContext) {
-		sessionStartStore = primeHookLiveManagedSessionStore(cityPath)
-		if sessionStartStore == nil {
+		sessionStart = primeHookLiveManagedSession(cityPath, stderr)
+		if sessionStart == nil {
 			writePrimePromptWithFormat(stdout, "", "", "", hookMode, hookFormat, false, "", nil)
 			return 0, nil
 		}
@@ -356,7 +356,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 			fmt.Fprintf(stderr, "gc prime: loading city config: %v\n", err) //nolint:errcheck
 			return 1, nil
 		}
-		injection := primeHookContextSuffix(cityPath, sessionStartStore, hookMode, hookContext, stderr, consumeHandoff)
+		injection := primeHookContextSuffix(cityPath, sessionStart, hookMode, hookContext, stderr, consumeHandoff)
 		writePrimePromptWithFormat(stdout, "", "", defaultPrimePrompt, hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)
 		return 0, nil
 	}
@@ -439,7 +439,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 			if sessionName == "" {
 				sessionName = cliSessionName(cityPath, cityName, a.QualifiedName(), cfg.Workspace.SessionTemplate)
 			}
-			maybeStartNudgePoller(withNudgeTargetFence(openNudgeBeadStore(cityPath).Store, nudgeTarget{
+			maybeStartNudgePoller(withNudgeTargetFenceFromLiveSession(openNudgeBeadStore(cityPath).Store, sessionStart.liveInfo(), nudgeTarget{
 				cityPath:          cityPath,
 				cityName:          cityName,
 				cfg:               cfg,
@@ -476,7 +476,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 						return 1, budget
 					}
 				}
-				injection := primeHookContextSuffix(cityPath, sessionStartStore, hookMode, hookContext, stderr, consumeHandoff)
+				injection := primeHookContextSuffix(cityPath, sessionStart, hookMode, hookContext, stderr, consumeHandoff)
 				writePrimePromptWithFormat(stdout, cityName, ctx.AgentName, prompt, hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)
 				return 0, budget
 			}
@@ -508,7 +508,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 				content := renderPrompt(fsys.OSFS{}, cityPath, cityName, promptFile, ctx, cfg.Workspace.SessionTemplate, stderr,
 					cfg.PackDirsForRig(ctx.RigName), nil, nil)
 				if content != "" {
-					injection := primeHookContextSuffix(cityPath, sessionStartStore, hookMode, hookContext, stderr, consumeHandoff)
+					injection := primeHookContextSuffix(cityPath, sessionStart, hookMode, hookContext, stderr, consumeHandoff)
 					writePrimePromptWithFormat(stdout, cityName, ctx.AgentName, content, hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)
 					return 0, nil
 				}
@@ -520,7 +520,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 	// when the agent has no prompt_template and doesn't match a builtin
 	// worker prompt — a supported config shape, so the default prompt is
 	// the correct output even under --strict.
-	injection := primeHookContextSuffix(cityPath, sessionStartStore, hookMode, hookContext, stderr, consumeHandoff)
+	injection := primeHookContextSuffix(cityPath, sessionStart, hookMode, hookContext, stderr, consumeHandoff)
 	writePrimePromptWithFormat(stdout, cityName, agentName, defaultPrimePrompt, hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)
 	return 0, nil
 }
@@ -674,11 +674,20 @@ func hookHasManagedIdentity() bool {
 	return false
 }
 
-// primeHookLiveManagedSessionStore returns the city store only after its
-// session-class projection proves the hook's exact live managed-session
-// identity, and nil otherwise. The caller may reuse the handle for the rest of
-// this one SessionStart invocation instead of opening the store again.
-func primeHookLiveManagedSessionStore(cityPath string) beads.Store {
+// primeSessionStart is a SessionStart hook's proven live managed session: the
+// city store the proof read, and the session it read. The rest of the one
+// SessionStart invocation reuses both instead of opening the store or reading
+// the session again.
+type primeSessionStart struct {
+	store beads.Store
+	info  sessionpkg.Info
+}
+
+// primeHookLiveManagedSession returns the city store and the hook's session
+// only after the session-class projection proves the hook's exact live
+// managed-session identity, and nil otherwise. A closed session bead is said
+// so on stderr: its SessionStart surfaces no mail, rather than a successor's.
+func primeHookLiveManagedSession(cityPath string, stderr io.Writer) *primeSessionStart {
 	sessionID := strings.TrimSpace(os.Getenv("GC_SESSION_ID"))
 	if sessionID == "" {
 		return nil
@@ -705,6 +714,7 @@ func primeHookLiveManagedSessionStore(cityPath string) beads.Store {
 		return nil
 	}
 	if info.Closed {
+		fmt.Fprintf(stderr, "gc prime: %v; surfacing no mail\n", closedHookSessionError(info.ID)) //nolint:errcheck // best-effort hook diagnostics
 		return nil
 	}
 	// Use the RAW session_name mirror (SessionNameMetadata), not SessionName which
@@ -720,10 +730,18 @@ func primeHookLiveManagedSessionStore(cityPath string) beads.Store {
 	// beads, so the raw mirror preserves the original exact comparison.
 	switch sessionpkg.State(strings.TrimSpace(info.MetadataState)) {
 	case sessionpkg.StateActive, sessionpkg.StateAwake, sessionpkg.StateCreating, sessionpkg.StateStartPending:
-		return store
+		return &primeSessionStart{store: store, info: info}
 	default:
 		return nil
 	}
+}
+
+// liveInfo is the proven live session, or nil without one.
+func (p *primeSessionStart) liveInfo() *sessionpkg.Info {
+	if p == nil {
+		return nil
+	}
+	return &p.info
 }
 
 func writePrimePromptWithFormat(stdout io.Writer, cityName, agentName, prompt string, hookMode bool, hookFormat string, suppressPrompt bool, hookContextSuffix string, afterDelivery func()) {

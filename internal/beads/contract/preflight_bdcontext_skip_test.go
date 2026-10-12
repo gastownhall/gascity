@@ -223,3 +223,73 @@ func TestPreflightConsultsBDContextFreshOnEveryCheck(t *testing.T) {
 		t.Fatalf("after reverting to postgres: bd context calls = %d, want 3", calls)
 	}
 }
+
+// TestPreflightUnsupportedBackendDialsNothing pins that a scope already blocked
+// by metadata_backend consults no prober at all — not bd context, not the
+// database identity reader, not the schema cursor reader — while a dolt scope
+// still runs each exactly once.
+func TestPreflightUnsupportedBackendDialsNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		metadata  string
+		wantDials int
+	}{
+		{"unsupported", `{"backend": "examplekv", "project_id": "gc-rig"}`, 0},
+		{"dolt", skipTestDoltMetadata, 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := fsys.NewFake()
+			writeSkipTestMetadata(fs, "/city", tc.metadata)
+			dials := 0
+			checker := skipTestChecker(fs, "bd", func(string) (PreflightBDContext, error) {
+				dials++
+				return PreflightBDContext{Backend: "dolt", DoltMode: "server", BDVersion: "1.0.4"}, nil
+			})
+			checker.DatabaseProjectID = func(string) (string, bool, error) {
+				dials++
+				return "gc-rig", true, nil
+			}
+			checker.DatabaseSchemaCursors = func(string) (PreflightSchemaCursors, bool, error) {
+				dials++
+				return PreflightSchemaCursors{Main: 1, Ignored: 1, IgnoredChecked: true}, true, nil
+			}
+			result, err := checker.Check("/city")
+			if err != nil {
+				t.Fatalf("Check() error = %v", err)
+			}
+			assertCheckOrder(t, result)
+			if dials != tc.wantDials {
+				t.Fatalf("probes = %d, want %d", dials, tc.wantDials)
+			}
+			if tc.wantDials == 0 {
+				assertPreflightVerdict(t, result, PreflightVerdictBlocked, false)
+				assertCheckState(t, result, PreflightCheckIdentityMatch, PreflightCheckWarn)
+			}
+		})
+	}
+}
+
+// TestNativeStoreServesBackendSet pins the native store's supported set at the
+// contract level: dolt only. doltlite in particular stays refused — adding a
+// backend here is a decision that must change this test, not just a factory
+// fixture.
+func TestNativeStoreServesBackendSet(t *testing.T) {
+	for backend, want := range map[string]bool{
+		"dolt":      true,
+		"doltlite":  false,
+		"":          false,
+		"examplekv": false,
+	} {
+		if got := NativeStoreServesBackend(backend); got != want {
+			t.Errorf("NativeStoreServesBackend(%q) = %v, want %v", backend, got, want)
+		}
+	}
+	fs := fsys.NewFake()
+	writeSkipTestMetadata(fs, "/city", `{"backend": "doltlite", "project_id": "gc-rig"}`)
+	result, err := skipTestChecker(fs, "bd", countingBDContext(map[string]int{})).Check("/city")
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+	assertPreflightVerdict(t, result, PreflightVerdictBlocked, false)
+	assertCheckState(t, result, PreflightCheckMetadataBackend, PreflightCheckFail)
+}

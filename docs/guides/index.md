@@ -21,6 +21,7 @@ the rest are task-oriented.
 - [Find and Import Public Packs](/guides/registry-showcase) — find and import first-party packs from the public Gas City registry.
 - [Configure the Gastown Pack](/guides/gastown-config-recipes) — task-oriented config overrides for the Gastown pack: register rigs, scale pools, swap providers, patch agents, and tweak prompts.
 - [Use JSON from the gc CLI](/guides/using-json-from-gc) — drive `gc --json` and `gc --json-schema` from scripts, agents, tests, and other software.
+- [Connect an External Client](/guides/connected-clients) — bring a chat, voice, or bot front end into a city conversation: send turns to an agent over HTTP and receive its replies on a callback.
 - [Set Up a Multi-Agent Engineering Environment](/guides/multi-agent-engineering-environment) — give a by-hand multi-human, multi-agent workflow a better home by writing the method down once.
 
 See also the [Troubleshooting runbooks](/troubleshooting/dolt-bloat-recovery)

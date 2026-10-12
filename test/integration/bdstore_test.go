@@ -106,14 +106,11 @@ func startSharedDoltServer(t *testing.T, env []string, dataDir string) string {
 		t.Fatalf("creating dolt data dir: %v", err)
 	}
 
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	reserved, err := reserveLoopbackPort()
 	if err != nil {
 		t.Fatalf("allocating dolt port: %v", err)
 	}
-	port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
-	if err := listener.Close(); err != nil {
-		t.Fatalf("closing dolt port probe: %v", err)
-	}
+	port := strconv.Itoa(reserved)
 
 	logPath := filepath.Join(dataDir, "sql-server.log")
 	logFile, err := os.Create(logPath)
@@ -190,25 +187,7 @@ func runBDInit(t *testing.T, env []string, dir, prefix, port string) {
 // BdStore → bd create --ephemeral → Dolt → wisp_events INSERT path directly.
 func TestBdStoreMailWispInsert(t *testing.T) {
 	requireDoltIntegration(t)
-	env := newIsolatedToolEnv(t, true)
-
-	rootDir := t.TempDir()
-	doltDataDir := filepath.Join(rootDir, "dolt")
-	wsDir := filepath.Join(rootDir, "ws")
-	serverPort := startSharedDoltServer(t, env, doltDataDir)
-
-	if err := os.MkdirAll(wsDir, 0o755); err != nil {
-		t.Fatalf("creating workspace: %v", err)
-	}
-	gitCmd := exec.Command("git", "init", "--quiet")
-	gitCmd.Dir = wsDir
-	if out, err := gitCmd.CombinedOutput(); err != nil {
-		t.Fatalf("git init: %v: %s", err, out)
-	}
-	runBDInit(t, env, wsDir, "mc", serverPort)
-	configureCustomTypes(t, env, wsDir, doctor.RequiredCustomTypes)
-
-	store := beads.NewBdStore(wsDir, isolatedBdStoreCommandRunner(env))
+	store := newRealBdStoreWorkspace(t, "mc")
 
 	// Create an ephemeral message bead — exercises bd create --ephemeral →
 	// Dolt SQL INSERT INTO wisps + INSERT INTO wisp_events.
@@ -247,6 +226,32 @@ func TestBdStoreMailWispInsert(t *testing.T) {
 	if !found {
 		t.Fatalf("sent bead %s not in BdStore List(TierWisps); got %d beads total", sent.ID, len(results))
 	}
+}
+
+// newRealBdStoreWorkspace starts a Dolt server, initializes one bd workspace
+// against it with prefix, and returns a BdStore over it running the isolated
+// tool environment's bd.
+func newRealBdStoreWorkspace(t *testing.T, prefix string) *beads.BdStore {
+	t.Helper()
+	env := newIsolatedToolEnv(t, true)
+
+	rootDir := t.TempDir()
+	doltDataDir := filepath.Join(rootDir, "dolt")
+	wsDir := filepath.Join(rootDir, "ws")
+	serverPort := startSharedDoltServer(t, env, doltDataDir)
+
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatalf("creating workspace: %v", err)
+	}
+	gitCmd := exec.Command("git", "init", "--quiet")
+	gitCmd.Dir = wsDir
+	if out, err := gitCmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	runBDInit(t, env, wsDir, prefix, serverPort)
+	configureCustomTypes(t, env, wsDir, doctor.RequiredCustomTypes)
+
+	return beads.NewBdStore(wsDir, isolatedBdStoreCommandRunner(env))
 }
 
 // TestBdStoreMailWispInsertIsolatesHOMEFromSharedServerConfig mirrors

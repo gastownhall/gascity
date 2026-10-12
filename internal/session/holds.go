@@ -7,6 +7,12 @@ import (
 
 // Hold is one operator intent that holds a row (CONTRACT v5.9 D8 7(a)),
 // shaped after ARCH-RESTRUCTURE R3's concept kernel.
+//
+// HoldSet is the disposition's older view (disposition.go, R7): a reader
+// switches to DecodeDisposition or DispositionOfInfo and its projections
+// (SuppressesWake, BlocksConsume, KeepsSlot for HoldUser) with no change in
+// what it decides; TestDispositionProjectionsMatchHolds holds the two to the
+// same answers over every combination of the keys.
 type Hold uint8
 
 const (
@@ -77,8 +83,15 @@ func HoldVerdict(meta map[string]string, runtimeRunning bool, now time.Time) boo
 
 // HoldVerdictInfo is HoldVerdict over a typed row.
 func HoldVerdictInfo(info Info, runtimeRunning bool, now time.Time) bool {
-	return HoldVerdict(map[string]string{
+	return HoldVerdict(holdMeta(info), runtimeRunning, now)
+}
+
+// HoldsInfo is Holds over a typed row.
+func HoldsInfo(info Info, now time.Time) HoldSet { return Holds(holdMeta(info), now) }
+
+func holdMeta(info Info) map[string]string {
+	return map[string]string{
 		"state": info.MetadataState, "held_until": info.HeldUntil, "quarantined_until": info.QuarantinedUntil,
 		"sleep_intent": info.SleepIntent, "wait_hold": info.WaitHold,
-	}, runtimeRunning, now)
+	}
 }

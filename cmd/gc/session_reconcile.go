@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"strconv"
 	"strings"
@@ -207,6 +208,17 @@ func sessionWithinDesiredConfig(session beads.Bead, cfg *config.City, poolDesire
 // derives as strings.TrimSpace(pending_create_claim) == "true" — identical to the
 // raw read), and keeps the literal "creating" state compare the original uses.
 func sessionStartRequestedInfo(i sessionpkg.Info, clk clock.Clock) bool {
+	return sessionStartRequested(i, staleCreatingStateInfo(i, clk))
+}
+
+// sessionStartRequestedAt is sessionStartRequestedInfo at now; past the
+// creating compare, staleCreatingStateInfo is pendingCreateAttemptStale.
+func sessionStartRequestedAt(i sessionpkg.Info, now time.Time) bool {
+	return sessionStartRequested(i, pendingCreateAttemptStaleAt(i, now))
+}
+
+// sessionStartRequested composes the stale-creating answer.
+func sessionStartRequested(i sessionpkg.Info, staleCreating bool) bool {
 	if strings.TrimSpace(i.MetadataState) == string(sessionpkg.StateStartPending) {
 		return true
 	}
@@ -216,7 +228,7 @@ func sessionStartRequestedInfo(i sessionpkg.Info, clk clock.Clock) bool {
 	if strings.TrimSpace(i.MetadataState) != "creating" {
 		return false
 	}
-	return !staleCreatingStateInfo(i, clk)
+	return !staleCreating
 }
 
 // staleCreatingStateTimeout bounds how long a state=creating bead may sit
@@ -450,34 +462,40 @@ func agentTemplateIdentitiesEquivalent(cfg *config.City, a, b string) bool {
 }
 
 // healExpiredTimersInfo is the fold form of the Phase-0 timer heal: it clears expired
-// held_until / quarantined_until through the front door and returns the input
-// Info advanced by each successful clear (write-returns-Info), with NO raw
-// session.Metadata mirror. The reconciler's fold-then-build order (§2.3) applies
-// this before the infoByID snapshot is built, so the returned Info is what the
-// build projects — the mirror the raw form kept for the later re-projection is
-// therefore unnecessary here.
+// held_until / quarantined_until through the front door, in one write, and returns the
+// input Info advanced by it (write-returns-Info), with NO raw session.Metadata mirror.
+// The reconciler's fold-then-build order (§2.3) applies this before the infoByID
+// snapshot is built, so the returned Info is what the build projects.
 //
-// The hold-clear fold BEFORE the quarantine check is preserved from the raw body:
-// ClearExpiredHoldPatch can blank sleep_reason, and ClearExpiredQuarantinePatch
-// reads the post-hold sleep_reason (info.SleepReason), so the ordering is
-// load-bearing. On a persist error the segment is returned unchanged, matching the
-// raw `err == nil` mirror gate.
+// The timers are the disposition's TimerTick cell: an expired heartbeat or quarantine
+// goes, and an expired finite operator suspend goes whole (D-J 2). The lifecycle is
+// the expired-timer builders': ClearExpiredHoldPatch can blank sleep_reason, and
+// ClearExpiredQuarantinePatch reads the post-hold sleep_reason. On a persist error the
+// Info is returned unchanged, matching the raw `err == nil` mirror gate.
 func healExpiredTimersInfo(info sessionpkg.Info, sessFront *sessionpkg.Store, clk clock.Clock) sessionpkg.Info {
-	if h := info.HeldUntil; h != "" {
-		if t, _ := time.Parse(time.RFC3339, h); !t.IsZero() && clk.Now().After(t) {
-			batch := sessionpkg.ClearExpiredHoldPatch(info.SleepReason)
-			if err := sessFront.ApplyPatch(info.ID, batch); err == nil {
-				info = info.ApplyPatch(batch)
-			}
+	now := clk.Now()
+	expired := func(raw string) bool {
+		t, _ := time.Parse(time.RFC3339, raw)
+		return !t.IsZero() && now.After(t)
+	}
+	hold, quarantine := expired(info.HeldUntil), expired(info.QuarantinedUntil)
+	if !hold && !quarantine {
+		return info
+	}
+	batch := sessionpkg.MetadataPatch{}
+	reason := info.SleepReason
+	if hold {
+		maps.Copy(batch, sessionpkg.ClearExpiredHoldPatch(reason))
+		if r, ok := batch["sleep_reason"]; ok {
+			reason = r
 		}
 	}
-	if q := info.QuarantinedUntil; q != "" {
-		if t, _ := time.Parse(time.RFC3339, q); !t.IsZero() && clk.Now().After(t) {
-			batch := sessionpkg.ClearExpiredQuarantinePatch(info.SleepReason)
-			if err := sessFront.ApplyPatch(info.ID, batch); err == nil {
-				info = info.ApplyPatch(batch)
-			}
-		}
+	if quarantine {
+		maps.Copy(batch, sessionpkg.ClearExpiredQuarantinePatch(reason))
+	}
+	batch = sessionpkg.CellIntoInfo(info, sessionpkg.ActorController, sessionpkg.DispEvent{Kind: sessionpkg.EvTimerTick}, now, batch)
+	if err := sessFront.ApplyPatch(info.ID, batch); err == nil {
+		info = info.ApplyPatch(batch)
 	}
 	return info
 }
@@ -504,6 +522,9 @@ func checkStability(info sessionpkg.Info, cfg *config.City, alive bool, dt *drai
 	}
 	if sessionpkg.DecideSessionExit(sessionExitFactsInfo(info, cfg, alive, dt, clk)) != sessionpkg.ExitRapidCrash {
 		return info, false
+	}
+	if !exitAccrualHolds(info, sessFront) {
+		return info, true
 	}
 	info = recordWakeFailure(info, sessFront, clk, sessionAgentMetricIdentityInfo(info, cfg))
 	info = clearLastWokeAt(info, sessFront)
@@ -573,6 +594,7 @@ func sessionExitFactsInfo(info sessionpkg.Info, cfg *config.City, alive bool, dt
 		DrainPending:               dt != nil && dt.get(info.ID) != nil,
 		PendingCreateClaim:         info.PendingCreateClaim,
 		PendingCreateStartInFlight: pendingCreateStartInFlightInfo(info, clk, startupTimeout),
+		StartUncommitted:           strings.TrimSpace(info.PendingCreateStartedAt) != "",
 		SleepReason:                info.SleepReason,
 		LastWokeAt:                 info.LastWokeAt,
 		Now:                        clk.Now(),
@@ -598,7 +620,8 @@ func clearLastWokeAt(info sessionpkg.Info, sessFront *sessionpkg.Store) sessionp
 // Step 6d, write-returns-Info); returns (info unchanged, err) on persist failure
 // (ApplyPatchInfo leaves the snapshot pinned to the rejected write).
 func recordRateLimitQuarantine(info sessionpkg.Info, sessFront *sessionpkg.Store, clk clock.Clock) (sessionpkg.Info, error) {
-	batch := sessionpkg.RateLimitQuarantinePatch(clk.Now().Add(defaultRateLimitQuarantineDuration))
+	now := clk.Now()
+	batch := sessionpkg.CellIntoInfo(info, sessionpkg.ActorController, sessionpkg.DispEvent{Kind: sessionpkg.EvQuarantine, Until: now.Add(defaultRateLimitQuarantineDuration)}, now, sessionpkg.RateLimitQuarantinePatch())
 	next, err := sessFront.ApplyPatchInfo(info, batch)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "recordRateLimitQuarantine: SetMetadataBatch %s: %v\n", info.ID, err) //nolint:errcheck
@@ -723,7 +746,7 @@ func recordWakeFailure(info sessionpkg.Info, sessFront *sessionpkg.Store, clk cl
 	}
 	accrual := sessionpkg.WakeFailureAccrualPatch(attempts, defaultMaxWakeAttempts, clk.Now().Add(defaultQuarantineDuration))
 	if accrual.Quarantined {
-		if next, err := sessFront.ApplyPatchInfo(info, accrual.Patch); err == nil {
+		if next, err := sessFront.ApplyPatchInfo(info, accrual.PatchFor(info, clk.Now())); err == nil {
 			telemetry.RecordAgentQuarantine(context.Background(), agentIdentity)
 			info = next
 		}
@@ -740,14 +763,15 @@ func recordWakeFailure(info sessionpkg.Info, sessFront *sessionpkg.Store, clk cl
 // migration Step 6d), or the input Info unchanged when there is nothing to clear
 // (both fields already absent/zero) or the persist failed.
 func clearWakeFailures(info sessionpkg.Info, sessFront *sessionpkg.Store) sessionpkg.Info {
-	batch := make(map[string]string, 2)
+	batch := make(sessionpkg.MetadataPatch, 2)
 	// WakeAttemptsMetadata (the raw string mirror), not the parsed WakeAttempts int:
 	// the != "0" distinction distinguishes an absent counter from a persisted "0".
 	if info.WakeAttemptsMetadata != "" && info.WakeAttemptsMetadata != "0" {
 		batch["wake_attempts"] = "0"
 	}
 	if info.QuarantinedUntil != "" {
-		batch["quarantined_until"] = ""
+		// The Quarantine cell with no deadline: the quarantine ends.
+		batch = sessionpkg.CellIntoInfo(info, sessionpkg.ActorController, sessionpkg.DispEvent{Kind: sessionpkg.EvQuarantine}, time.Time{}, batch)
 	}
 	if len(batch) == 0 {
 		return info
@@ -772,6 +796,9 @@ func clearWakeFailures(info sessionpkg.Info, sessFront *sessionpkg.Store) sessio
 func checkChurn(info sessionpkg.Info, cfg *config.City, alive bool, dt *drainTracker, sessFront *sessionpkg.Store, clk clock.Clock) (sessionpkg.Info, bool) {
 	switch sessionpkg.DecideSessionExit(sessionExitFactsInfo(info, cfg, alive, dt, clk)) {
 	case sessionpkg.ExitChurn:
+		if !exitAccrualHolds(info, sessFront) {
+			return info, true
+		}
 		info = recordChurn(info, sessFront, clk, sessionAgentMetricIdentityInfo(info, cfg))
 		// Clear last_woke_at so this death is not re-counted next tick
 		// (edge-triggered, same pattern as checkStability).
@@ -785,6 +812,18 @@ func checkChurn(info sessionpkg.Info, cfg *config.City, alive bool, dt *drainTra
 		// Rapid crashes belong to checkStability, which ran first.
 		return info, false
 	}
+}
+
+// exitAccrualHolds reports whether the row, read fresh, still carries the
+// facts a rapid-crash or churn accrual was decided on (CONTRACT §12.5: a
+// destructive decision decides on a fresh read). A tick's snapshot read before
+// an operator's `gc session kill` still names the killed wake, and the dead
+// runtime it then observes is the kill, not a crash: accruing it would count
+// the operator's kill against the session (mc-uhvqj). A moved row, or a failed
+// read, accrues nothing; the next tick decides again.
+func exitAccrualHolds(info sessionpkg.Info, sessFront *sessionpkg.Store) bool {
+	held, err := sessFront.Holds(sessionpkg.Decide(info, sessionpkg.FactsLegacyExitAccrual))
+	return err == nil && held
 }
 
 func isDeliberateSleepReason(reason string) bool {
@@ -819,7 +858,7 @@ func recordChurn(info sessionpkg.Info, sessFront *sessionpkg.Store, clk clock.Cl
 
 	accrual := sessionpkg.ChurnAccrualPatch(count, defaultMaxChurnCycles, clk.Now().Add(defaultQuarantineDuration))
 	if accrual.Quarantined {
-		if next, err := sessFront.ApplyPatchInfo(info, accrual.Patch); err == nil {
+		if next, err := sessFront.ApplyPatchInfo(info, accrual.PatchFor(info, clk.Now())); err == nil {
 			telemetry.RecordAgentQuarantine(context.Background(), agentIdentity)
 			info = next
 		}
@@ -1128,7 +1167,11 @@ func pendingCreateAttemptStaleInfo(i sessionpkg.Info, clk clock.Clock) bool {
 	if clk == nil {
 		return false
 	}
-	now := clk.Now()
+	return pendingCreateAttemptStaleAt(i, clk.Now())
+}
+
+// pendingCreateAttemptStaleAt is pendingCreateAttemptStaleInfo at now.
+func pendingCreateAttemptStaleAt(i sessionpkg.Info, now time.Time) bool {
 	if started, ok := parseRFC3339Metadata(i.PendingCreateStartedAt); ok {
 		return !now.Before(started.Add(staleCreatingStateTimeout))
 	}

@@ -31,7 +31,6 @@ import (
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
-	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/telemetry"
 )
@@ -190,33 +189,68 @@ func isDrainAckStopPendingInfo(info sessionpkg.Info) bool {
 		strings.TrimSpace(info.StateReason) == sessionpkg.DrainAckStopPendingReason
 }
 
-// markDrainAckStopPending persists the drain-ack stop-pending transition through
-// the session front door and returns the refreshed Info as a LOCAL fold
-// (write-returns-Info, Step 6d): ApplyPatchInfo emits DrainAckStopPendingPatch and
-// folds the same patch onto the caller's coherent snapshot Info in one step, so
-// the two callers assign the returned Info directly instead of reconstructing the
-// patch. It no longer mirrors onto a raw *beads.Bead: no later this-tick reader
-// consumes the raw bead for these keys — a drain-acked session `continue`s before
-// the wakeTargets/startCandidates append, and the post-loop scans read only
-// orderedBeads[i].ID. On a persist error the input Info is returned unchanged with a
-// false ok, so the caller skips the fold (identical to the old bool-return).
-func markDrainAckStopPending(info sessionpkg.Info, sessFront *sessionpkg.Store, clk clock.Clock, stderr io.Writer) (sessionpkg.Info, bool) {
-	if info.ID == "" || sessFront == nil {
-		return info, false
+// markDrainAckStopPending persists the drain-ack stop-pending transition
+// (legacyAct.MarkStopPending) and returns the refreshed Info as a LOCAL fold
+// (write-returns-Info, Step 6d), so the two callers assign it directly, and
+// the decision the async stop executes against.
+//
+// The mark is decided on the drain's basis when the ack is the controller's
+// own and the controller still tracks its drain (drainState.basis), and on
+// info otherwise (an agent's own ack, or a drain the tracker lost). A tick decides on its snapshot, but the mark lands
+// only while the row still carries the deciding facts, so a stale snapshot's
+// decision never executes: an operator's resume that consumed the hold the
+// drain began under refuses it (SR3-1), on this tick or a later one (SR2-1).
+// A controller drain whose basis moved is void: its reconciler-owned ack
+// and tracker entry are cleared and the runtime left up. An agent's ack is
+// never cleared here. On a deferral or a
+// refusal the input Info is returned unchanged with a false ok, so the caller
+// skips the fold and the stop.
+func markDrainAckStopPending(act legacyAct, info sessionpkg.Info, dops drainOps, dt *drainTracker, clk clock.Clock) (sessionpkg.Info, sessionpkg.Decided, bool) {
+	if info.ID == "" || act.store == nil {
+		return info, sessionpkg.Decided{}, false
 	}
-	if stderr == nil {
-		stderr = io.Discard
+	if act.stderr == nil {
+		act.stderr = io.Discard
 	}
-	updated, err := sessFront.ApplyPatchInfo(info, sessionpkg.DrainAckStopPendingPatch(clk.Now().UTC()))
-	if err != nil {
-		name := strings.TrimSpace(info.SessionNameMetadata)
-		if name == "" {
-			name = info.ID
+	name := strings.TrimSpace(info.SessionNameMetadata)
+	if name == "" {
+		name = info.ID
+	}
+	// The controller's drain basis decides only the controller's own ack. An
+	// agent's ack is the agent's decision, made on the row as it is now. An
+	// ack whose source cannot be read defers: no mark, no void, no clear.
+	d, tracked := sessionpkg.Decide(info, sessionpkg.FactsLegacyStopPending), false
+	switch drainAckOwnerOf(act.sp, name) {
+	case drainAckOwnerUnknown:
+		fmt.Fprintf(act.stderr, "session reconciler: marking drain-ack stop-pending %s deferred: its ack's source is unreadable\n", name) //nolint:errcheck
+		return info, sessionpkg.Decided{}, false
+	case drainAckOwnerController:
+		if dt != nil {
+			if ds := dt.get(info.ID); ds != nil {
+				d, tracked = ds.basis, true
+			}
 		}
-		fmt.Fprintf(stderr, "session reconciler: marking drain-ack stop-pending %s: %v\n", name, err) //nolint:errcheck
-		return info, false
 	}
-	return updated, true
+	now := clk.Now().UTC()
+	res, stop, err := act.MarkStopPending(d, now)
+	switch {
+	case errors.Is(err, errActDeferred):
+		fmt.Fprintf(act.stderr, "session reconciler: marking drain-ack stop-pending %s %v\n", name, err) //nolint:errcheck
+	case err != nil:
+		fmt.Fprintf(act.stderr, "session reconciler: marking drain-ack stop-pending %s: %v\n", name, err) //nolint:errcheck
+	case res == sessionpkg.CommitLanded:
+		return info.ApplyPatch(sessionpkg.DrainAckStopPendingPatch(now)), stop, true
+	case res == sessionpkg.CommitMoved && tracked:
+		fmt.Fprintf(act.stderr, "session reconciler: drain of %s void: the row moved off the basis the drain began on\n", name) //nolint:errcheck
+		_ = clearReconcilerDrainAckMetadata(act.sp, name)
+		if dops != nil {
+			_ = dops.clearDrain(name)
+		}
+		clearDrainTrackerForStopPending(info.ID, dt)
+	default:
+		fmt.Fprintf(act.stderr, "session reconciler: marking drain-ack stop-pending %s refused (%v); deciding again next tick\n", name, res) //nolint:errcheck
+	}
+	return info, sessionpkg.Decided{}, false
 }
 
 func clearDrainTrackerForStopPending(id string, dt *drainTracker) {
@@ -413,7 +447,10 @@ func recordResetStallIfDue(
 	// and this kill (IsSessionGone) is the expected steady state, not a
 	// failure.
 	if running && sp != nil {
-		if err := workerKillSessionTargetWithConfig(cityPath, store, sp, cfg, name); err != nil && !runtime.IsSessionGone(err) {
+		// Decided again under the lease: the same reset is still pending.
+		// A row that moved on is no longer stalled; nothing to evict.
+		evict := sessionpkg.Decide(info, sessionpkg.FactsLegacyResetEvict)
+		if err := (legacyAct{cityPath: cityPath, store: store, sp: sp, cfg: cfg}).Stop(evict); err != nil && !runtime.IsSessionGone(err) && !errors.Is(err, sessionpkg.ErrKillPremiseMoved) {
 			fmt.Fprintf(stderr, "session reconciler: evicting stale reset-pending runtime %s: %v\n", name, err) //nolint:errcheck
 		}
 	}
@@ -474,7 +511,11 @@ var (
 	drainAckStopConfirmDeadPoll    = 250 * time.Millisecond
 )
 
-func queueDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, sessionID, name, expectedToken string, processNames []string, tracker *asyncStartTracker, dt *drainTracker, stderr io.Writer) {
+// queueDrainAckAsyncStop stops d's stop-pending runtime off-tick. d is the
+// decision the stop executes against (sessionpkg.FactsLegacyDrainStop): the
+// row with its stop-pending mark, on the basis the mark landed on.
+func queueDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, d sessionpkg.Decided, name string, processNames []string, tracker *asyncStartTracker, dt *drainTracker, stderr io.Writer) {
+	sessionID, expectedToken := d.Info().ID, d.Info().InstanceToken
 	name = strings.TrimSpace(name)
 	if name == "" || sp == nil {
 		return
@@ -526,7 +567,26 @@ func queueDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provi
 				return
 			}
 		}
-		if err := workerKillSessionTargetWithConfig(cityPath, store, sp, cfg, name); err != nil && !runtime.IsSessionGone(err) {
+		// The kill and its confirm-dead re-kills run under one runtime lease,
+		// released before the poke. A busy lease defers: the stop-pending row
+		// re-queues its stop next tick.
+		by, release, err := controllerStopLease(store, cityPath, name, sessionID, stderr)
+		if err != nil {
+			fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s deferred: %v\n", name, err) //nolint:errcheck
+			return
+		}
+		defer release()
+		// Decide again under the lease, on a fresh read: the row may have left
+		// d since this stop was queued (a new incarnation, a close, an
+		// operator's intent or request). A live restart in place writes
+		// nothing this read sees; only the kill's exact-object fence tells
+		// that one apart. Every kill below re-checks.
+		ctx := sessionpkg.WithKillDecided(context.Background(), d)
+		if holds, _ := sessionFrontDoor(store).Holds(d); !holds {
+			fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s skipped: the row moved since its stop was decided\n", name) //nolint:errcheck
+			return
+		}
+		if err := controllerKillRowCtx(ctx, by, cityPath, store, sp, cfg, sessionID); err != nil && !runtime.IsSessionGone(err) {
 			fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s: %v\n", name, err) //nolint:errcheck
 			return
 		}
@@ -538,7 +598,8 @@ func queueDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provi
 		// (the reassigned next step stays runtime-missing). The expected token is
 		// threaded through so each re-kill stays fenced against a re-woken
 		// same-name replacement. Mirrors #4089's confirm-dead contract.
-		confirmDrainAckRuntimeDead(cityPath, store, sp, cfg, name, expectedToken, processNames, stderr, confirmTimeout, confirmPoll)
+		confirmDrainAckRuntimeDead(ctx, by, cityPath, store, sp, cfg, sessionID, name, expectedToken, processNames, stderr, confirmTimeout, confirmPoll)
+		release()
 		// The runtime session is now confirmed dead (or the confirm-dead
 		// deadline passed and we proceed best-effort), but its pool session
 		// bead stays open (occupying the pool slot) until
@@ -570,7 +631,7 @@ func queueDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provi
 // timeout/poll are passed in rather than read from the package globals so a
 // detached caller can bind them on its own goroutine at queue time; see
 // queueDrainAckAsyncStop. Synchronous callers pass the globals directly.
-func confirmDrainAckRuntimeDead(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, name, expectedToken string, processNames []string, stderr io.Writer, timeout, poll time.Duration) bool {
+func confirmDrainAckRuntimeDead(ctx context.Context, by sessionpkg.Actor, cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, sessionID, name, expectedToken string, processNames []string, stderr io.Writer, timeout, poll time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for {
 		running, alive, livenessErr := observeRuntimeProviderLiveness(sp, name, processNames)
@@ -612,7 +673,7 @@ func confirmDrainAckRuntimeDead(cityPath string, store beads.Store, sp runtime.P
 				return false
 			}
 		}
-		if err := workerKillSessionTargetWithConfig(cityPath, store, sp, cfg, name); err != nil && !runtime.IsSessionGone(err) {
+		if err := controllerKillRowCtx(ctx, by, cityPath, store, sp, cfg, sessionID); err != nil && !runtime.IsSessionGone(err) {
 			fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s re-kill: %v\n", name, err) //nolint:errcheck
 		}
 		time.Sleep(poll)
@@ -620,10 +681,7 @@ func confirmDrainAckRuntimeDead(cityPath string, store beads.Store, sp runtime.P
 }
 
 func recordDrainAckAssignedWorkEvent(
-	cityPath string,
-	cfg *config.City,
-	store beads.Store,
-	rigStores map[string]beads.Store,
+	sw *SeatWork,
 	info sessionpkg.Info,
 	subject string,
 	template string,
@@ -635,7 +693,7 @@ func recordDrainAckAssignedWorkEvent(
 	if rec == nil {
 		return
 	}
-	strandedBead, found, beadLookupErr := drainAckClaimableAnomalyBead(cityPath, cfg, store, rigStores, info, now)
+	strandedBead, found, beadLookupErr := drainAckClaimableAnomalyBead(sw, info, now)
 	if beadLookupErr != nil {
 		fmt.Fprintf(stderr, "session reconciler: classifying drain-acked work for %s: %v\n", name, beadLookupErr) //nolint:errcheck
 	}
@@ -712,18 +770,15 @@ func recordDrainAckAssignedWorkEvent(
 // never counted), so a flaky store never manufactures the alarm this classifier
 // exists to keep honest.
 func drainAckClaimableAnomalyBead(
-	cityPath string,
-	cfg *config.City,
-	store beads.Store,
-	rigStores map[string]beads.Store,
+	sw *SeatWork,
 	info sessionpkg.Info,
 	now time.Time,
 ) (beads.Bead, bool, error) {
-	inProgressBead, inProgressFound, inProgressErr := firstInProgressAssignedWorkBeadForReachableStore(cityPath, cfg, store, rigStores, info)
+	inProgressBead, inProgressFound, inProgressErr := firstInProgressAssignedWorkBeadForReachableStore(sw, info)
 	if inProgressFound {
 		return inProgressBead, true, inProgressErr
 	}
-	openBead, openFound, openErr := firstOpenClaimableAssignedWorkBeadForReachableStore(cityPath, cfg, store, rigStores, info, now)
+	openBead, openFound, openErr := firstOpenClaimableAssignedWorkBeadForReachableStore(sw, info, now)
 	if openFound {
 		// Carry the in_progress arm's error out with the found bead rather than
 		// dropping it: a partial scan of the MOST-URGENT arm must still reach the
@@ -797,10 +852,9 @@ func (r drainAckFinalizeResult) applyTo(info sessionpkg.Info) sessionpkg.Info {
 }
 
 func finalizeDrainAckStoppedSession(
-	cityPath string,
 	cfg *config.City,
 	store beads.Store,
-	rigStores map[string]beads.Store,
+	sw *SeatWork,
 	info sessionpkg.Info,
 	template string,
 	closeIfUnassigned bool,
@@ -848,13 +902,21 @@ func finalizeDrainAckStoppedSession(
 			Payload:   api.SessionLifecyclePayloadJSON(info.ID, template, "drain acknowledged"),
 		})
 	}
-	hasAssignedWork, assignedErr := sessionHasOpenAssignedWorkForReachableStoreForCloseGate(cityPath, cfg, store, rigStores, info)
+	hasAssignedWork, assignedErr := sessionHasOpenAssignedWorkForReachableStoreForCloseGate(sw, info)
 	if assignedErr != nil {
 		fmt.Fprintf(stderr, "session reconciler: checking assigned work for drain-acked %s: %v\n", name, assignedErr) //nolint:errcheck
 		hasAssignedWork = true
 	}
-	if closeIfUnassigned && !hasAssignedWork {
-		if closeSessionBeadIfReachableStoreUnassigned(cityPath, cfg, store, rigStores, info, "drained", clk.Now().UTC(), stderr, true) {
+	evidence := sw // the read the assigned-work event names its bead from
+	// A row an operator holds keeps its seat: never closed as drained.
+	facts := finalizeFacts{
+		Now: clk.Now().UTC(), CloseIfUnassigned: closeIfUnassigned, HasWork: hasAssignedWork,
+		OperatorHeld: sessionpkg.HoldsInfo(info, clk.Now()).In&sessionpkg.HoldUser != 0,
+		FreshWake:    info.WakeMode == "fresh", RestartRequested: info.RestartRequested == "true",
+	}
+	choice := finalizePatch(facts)
+	if choice.CloseSeat {
+		if closeSessionBeadIfReachableStoreUnassigned(store, sw, info, "drained", clk.Now().UTC(), stderr, true) {
 			closePatch := sessionpkg.ClosePatch(clk.Now().UTC(), "drained")
 			if dops != nil {
 				_ = dops.clearDrain(name)
@@ -894,30 +956,39 @@ func finalizeDrainAckStoppedSession(
 			recordStopped(false)
 			return drainAckFinalizeResult{witnessInfo: &witnessInfo}
 		}
-		assignedAfterCloseGate, closeGateAssignedErr := sessionHasOpenAssignedWorkForReachableStoreForCloseGate(cityPath, cfg, store, rigStores, info)
+		// The close refused, maybe over work assigned since sw's read: ask the
+		// seat's legs now, not the snapshot that let the close try.
+		evidence = sw.fresh(releaseScope(info, sw.Legs().cfg))
+		assignedAfterCloseGate, closeGateAssignedErr := sessionHasOpenAssignedWorkForReachableStoreForCloseGate(evidence, info)
 		if closeGateAssignedErr != nil {
 			fmt.Fprintf(stderr, "session reconciler: checking assigned work after failed drain-ack close gate for %s: %v\n", name, closeGateAssignedErr) //nolint:errcheck
 			assignedAfterCloseGate = true
 		}
 		if assignedAfterCloseGate {
 			hasAssignedWork = true
+			facts.HasWork = true
+			choice = finalizePatch(facts)
 		}
 	}
-	batch := sessionpkg.AcknowledgeDrainPatch(clk.Now().UTC(), info.WakeMode == "fresh")
-	if hasAssignedWork {
-		batch = sessionpkg.CompleteDrainPatch(clk.Now().UTC(), string(sessionpkg.SleepReasonIdle), info.WakeMode == "fresh")
+	// finalizePatch clears restart_requested: a drain-ack that completes a
+	// restart-request cycle (gc session reset → agent drain-ack) must
+	// consume it, or a later cache-reconcile re-emission resurrects it as a
+	// phantom second restart that rotates session_key (#2574).
+	batch := choice.Patch
+	// Decided from the tick's snapshot, so written on a fresh read. A drain
+	// that keeps assigned work completes as a sleep: the disposition's Sleep
+	// cell (ApplySleep). A bare drain-ack is no disposition move, so an idle
+	// stop's intent stays for the next pass's idle sleep
+	// (recoverPendingIdleSleepInfo): ApplyLifecycle.
+	write := sessionFrontDoor(store).ApplyLifecycle
+	if choice.AsSleep {
+		write = sessionFrontDoor(store).ApplySleep
 	}
-	// A drain-ack that completes a restart-request cycle (gc session reset →
-	// agent drain-ack) must also consume restart_requested. The drain-ack
-	// branch handles the stop and continues before the restart-requested
-	// branch runs, so nothing else clears the flag; if it survives in the
-	// store, a later cache-reconcile re-emission resurrects it and the
-	// controller honors it as a fresh restart request — a phantom second
-	// restart that rotates session_key and destroys resume continuity (#2574).
-	if info.RestartRequested == "true" {
-		batch["restart_requested"] = ""
+	written, err := write(info.ID, batch)
+	if err == nil && written == nil {
+		err = errors.New("row closed")
 	}
-	foldedInfo, err := sessionFrontDoor(store).ApplyPatchInfo(info, batch)
+	foldedInfo := info.ApplyPatch(written)
 	if err != nil {
 		fmt.Fprintf(stderr, "session reconciler: finalizing drain-ack stopped %s: %v\n", name, err) //nolint:errcheck
 		// Store write failed, so nothing changed — the snapshot must stay unchanged
@@ -939,7 +1010,7 @@ func finalizeDrainAckStoppedSession(
 	}
 	recordStopped(true)
 	if hasAssignedWork {
-		recordDrainAckAssignedWorkEvent(cityPath, cfg, store, rigStores, info, template, template, name, clk.Now().UTC(), rec, stderr)
+		recordDrainAckAssignedWorkEvent(evidence, info, template, template, name, clk.Now().UTC(), rec, stderr)
 	}
 	// Non-close drain-ack: the snapshot fold is the ApplyPatchInfo result above.
 	return drainAckFinalizeResult{folded: &foldedInfo}
@@ -950,7 +1021,7 @@ func reconcileDrainAckStopPending(
 	cfg *config.City,
 	sp runtime.Provider,
 	store beads.Store,
-	rigStores map[string]beads.Store,
+	sw *SeatWork,
 	info sessionpkg.Info,
 	tp TemplateParams,
 	desired bool,
@@ -971,11 +1042,11 @@ func reconcileDrainAckStopPending(
 		// the async tracker, so the snapshot stays coherent — a zero result (applyTo
 		// no-op) matches the unmutated session. The token fence reads the typed
 		// instance_token off the Info snapshot (mirrors verifiedStop).
-		queueDrainAckAsyncStop(cityPath, store, sp, cfg, info.ID, name, info.InstanceToken, tp.Hints.ProcessNames, asyncStopTracker, dt, stderr)
+		queueDrainAckAsyncStop(cityPath, store, sp, cfg, sessionpkg.Decide(info, sessionpkg.FactsLegacyDrainStop), name, tp.Hints.ProcessNames, asyncStopTracker, dt, stderr)
 		return true, drainAckFinalizeResult{}
 	}
 	return true, finalizeDrainAckStoppedSession(
-		cityPath, cfg, store, rigStores, info, tp.TemplateName,
+		cfg, store, sw, info, tp.TemplateName,
 		!desired || isPoolManagedSessionInfo(info),
 		dops, dt, clk, rec, stderr,
 	)
@@ -1004,7 +1075,7 @@ func finalizeDrainAckStopPendingSessions(
 	cfg *config.City,
 	sp runtime.Provider,
 	sessStore beads.SessionStore,
-	rigStores map[string]beads.Store,
+	sw *SeatWork,
 	infos []sessionpkg.Info,
 	dops drainOps,
 	dt *drainTracker,
@@ -1040,7 +1111,7 @@ func finalizeDrainAckStopPendingSessions(
 			// Observation unavailable, not "still alive". Re-queue the stop and
 			// say nothing to the agent: a reminder is a claim about the row's
 			// state, and this tick has none.
-			queueDrainAckAsyncStop(cityPath, store, sp, cfg, info.ID, name, info.InstanceToken, processNames, asyncStopTracker, dt, stderr)
+			queueDrainAckAsyncStop(cityPath, store, sp, cfg, sessionpkg.Decide(info, sessionpkg.FactsLegacyDrainStop), name, processNames, asyncStopTracker, dt, stderr)
 			continue
 		}
 		if obs.Running || obs.Alive {
@@ -1058,8 +1129,8 @@ func finalizeDrainAckStopPendingSessions(
 			// Nothing is closed here; a later tick's own liveness observation owns
 			// that. Every gate fails closed, so a false return leaves the historical
 			// behavior untouched. See drain_ack_escalation.go.
-			if !escalateWedgedDrainAckStopPending(cityPath, cfg, sp, store, rigStores, info, name, processNames, asyncStopTracker, clk, rec, dt, stderr) {
-				queueDrainAckAsyncStop(cityPath, store, sp, cfg, info.ID, name, info.InstanceToken, processNames, asyncStopTracker, dt, stderr)
+			if !escalateWedgedDrainAckStopPending(cityPath, cfg, sp, store, sw, info, name, processNames, asyncStopTracker, clk, rec, dt, stderr) {
+				queueDrainAckAsyncStop(cityPath, store, sp, cfg, sessionpkg.Decide(info, sessionpkg.FactsLegacyDrainStop), name, processNames, asyncStopTracker, dt, stderr)
 			}
 			continue
 		}
@@ -1067,7 +1138,7 @@ func finalizeDrainAckStopPendingSessions(
 		// state=drained: open pool session beads occupy slots in the next demand
 		// calculation, while closed beads remain only as lifecycle history.
 		finalizeDrainAckStoppedSession(
-			cityPath, cfg, store, rigStores, info,
+			cfg, store, sw, info,
 			normalizedSessionTemplateInfo(info, cfg),
 			isPoolManagedSessionInfo(info),
 			dops, dt, clk, rec, stderr,
@@ -1215,17 +1286,33 @@ func allDependenciesAlive(
 
 // pendingCreateSessionStillLeasedInfo reports whether a session bead's pending
 // create is still holding its lease (the raw sibling was retired in WI-6 R1).
-// Template resolution uses normalizedSessionTemplateInfo with an Info.Template
-// fallback (Info.Template is the raw metadata["template"] mirror), and
-// findAgentByTemplate keys off the resolved template. The claim branch and the
-// sessionStartRequestedInfo fallback both compose already-proven Info siblings.
+// The claim branch and the sessionStartRequestedInfo fallback both compose
+// already-proven Info siblings.
 func pendingCreateSessionStillLeasedInfo(i sessionpkg.Info, cfg *config.City, clk clock.Clock) bool {
 	var startupTimeout time.Duration
 	if cfg != nil {
 		startupTimeout = cfg.Session.StartupTimeoutDuration()
 	}
+	return pendingCreateSessionStillLeased(i, cfg, pendingCreateLeaseActiveInfo(i, clk, startupTimeout), sessionStartRequestedInfo(i, clk))
+}
+
+// pendingCreateSessionStillLeasedAt is pendingCreateSessionStillLeasedInfo at
+// now, which the decide passes so it reads no clock.
+func pendingCreateSessionStillLeasedAt(i sessionpkg.Info, cfg *config.City, now time.Time) bool {
+	var startupTimeout time.Duration
+	if cfg != nil {
+		startupTimeout = cfg.Session.StartupTimeoutDuration()
+	}
+	return pendingCreateSessionStillLeased(i, cfg, pendingCreateLeaseActiveAt(i, now, startupTimeout), sessionStartRequestedAt(i, now))
+}
+
+// pendingCreateSessionStillLeased composes the lease answers. Template
+// resolution uses normalizedSessionTemplateInfo with an Info.Template fallback
+// (Info.Template is the raw metadata["template"] mirror), and
+// findAgentByTemplate keys off the resolved template.
+func pendingCreateSessionStillLeased(i sessionpkg.Info, cfg *config.City, leaseActive, startRequested bool) bool {
 	if i.PendingCreateClaim {
-		if !pendingCreateLeaseActiveInfo(i, clk, startupTimeout) {
+		if !leaseActive {
 			return false
 		}
 		template := normalizedSessionTemplateInfo(i, cfg)
@@ -1238,7 +1325,7 @@ func pendingCreateSessionStillLeasedInfo(i sessionpkg.Info, cfg *config.City, cl
 		}
 		return true
 	}
-	if !sessionStartRequestedInfo(i, clk) {
+	if !startRequested {
 		return false
 	}
 	template := normalizedSessionTemplateInfo(i, cfg)
@@ -1255,6 +1342,15 @@ func pendingCreateSessionStillLeasedInfo(i sessionpkg.Info, cfg *config.City, cl
 // pendingCreateStartInFlightInfo reports whether a pending-create start is still
 // within its in-flight lease window.
 func pendingCreateStartInFlightInfo(i sessionpkg.Info, clk clock.Clock, startupTimeout time.Duration) bool {
+	now := time.Now()
+	if clk != nil {
+		now = clk.Now()
+	}
+	return pendingCreateStartInFlightAt(i, now, startupTimeout)
+}
+
+// pendingCreateStartInFlightAt is pendingCreateStartInFlightInfo at now.
+func pendingCreateStartInFlightAt(i sessionpkg.Info, now time.Time, startupTimeout time.Duration) bool {
 	if !i.PendingCreateClaim &&
 		sessionpkg.State(strings.TrimSpace(i.MetadataState)) != sessionpkg.StateCreating {
 		return false
@@ -1270,26 +1366,34 @@ func pendingCreateStartInFlightInfo(i sessionpkg.Info, clk clock.Clock, startupT
 	if startupTimeout <= 0 {
 		startupTimeout = time.Minute
 	}
-	now := time.Now()
-	if clk != nil {
-		now = clk.Now()
-	}
 	return now.Before(started.Add(startupTimeout + staleKeyDetectDelay + 5*time.Second))
 }
 
 // pendingCreateLeaseActiveInfo reports whether a pending-create claim still
 // holds a live lease.
 func pendingCreateLeaseActiveInfo(i sessionpkg.Info, clk clock.Clock, startupTimeout time.Duration) bool {
+	return pendingCreateLeaseActive(i, pendingCreateStartInFlightInfo(i, clk, startupTimeout),
+		pendingCreateNeverStartedLeaseExpiredInfo(i, clk), pendingCreateAttemptStaleInfo(i, clk))
+}
+
+// pendingCreateLeaseActiveAt is pendingCreateLeaseActiveInfo at now.
+func pendingCreateLeaseActiveAt(i sessionpkg.Info, now time.Time, startupTimeout time.Duration) bool {
+	return pendingCreateLeaseActive(i, pendingCreateStartInFlightAt(i, now, startupTimeout),
+		pendingCreateNeverStartedLeaseExpiredAt(i, now), pendingCreateAttemptStaleAt(i, now))
+}
+
+// pendingCreateLeaseActive composes the lease leaves' answers.
+func pendingCreateLeaseActive(i sessionpkg.Info, inFlight, neverStartedExpired, attemptStale bool) bool {
 	if !i.PendingCreateClaim {
 		return false
 	}
-	if pendingCreateStartInFlightInfo(i, clk, startupTimeout) {
+	if inFlight {
 		return true
 	}
 	if strings.TrimSpace(i.LastWokeAt) == "" {
-		return !pendingCreateNeverStartedLeaseExpiredInfo(i, clk)
+		return !neverStartedExpired
 	}
-	return !pendingCreateAttemptStaleInfo(i, clk)
+	return !attemptStale
 }
 
 // pendingCreateNeverStartedTimeout is the rollback floor for pending creates
@@ -1344,19 +1448,39 @@ func wakeGracePreservesUndesiredRow(info sessionpkg.Info, now time.Time) bool {
 // pending-create lease in a rollback state has expired. Info.MetadataState is the
 // RAW state metadata handed to pendingCreateRollbackState (which trims internally).
 func pendingCreateNeverStartedExpiredInfo(i sessionpkg.Info, clk clock.Clock) bool {
+	now := time.Now()
+	if clk != nil {
+		now = clk.Now()
+	}
+	return pendingCreateNeverStartedExpiredAt(i, now)
+}
+
+// pendingCreateNeverStartedExpiredAt is pendingCreateNeverStartedExpiredInfo at
+// now.
+func pendingCreateNeverStartedExpiredAt(i sessionpkg.Info, now time.Time) bool {
 	if !i.PendingCreateClaim {
 		return false
 	}
 	if !pendingCreateRollbackState(i.MetadataState) {
 		return false
 	}
-	return pendingCreateNeverStartedLeaseExpiredInfo(i, clk)
+	return pendingCreateNeverStartedLeaseExpiredAt(i, now)
 }
 
 // pendingCreateNeverStartedLeaseExpiredInfo reports whether a pending-create
 // claim that never recorded a start (no last_woke_at) has aged past the
 // never-started timeout.
 func pendingCreateNeverStartedLeaseExpiredInfo(i sessionpkg.Info, clk clock.Clock) bool {
+	now := time.Now()
+	if clk != nil {
+		now = clk.Now()
+	}
+	return pendingCreateNeverStartedLeaseExpiredAt(i, now)
+}
+
+// pendingCreateNeverStartedLeaseExpiredAt is
+// pendingCreateNeverStartedLeaseExpiredInfo at now.
+func pendingCreateNeverStartedLeaseExpiredAt(i sessionpkg.Info, now time.Time) bool {
 	if !i.PendingCreateClaim {
 		return false
 	}
@@ -1370,43 +1494,46 @@ func pendingCreateNeverStartedLeaseExpiredInfo(i sessionpkg.Info, clk clock.Cloc
 	if anchor.IsZero() {
 		return true
 	}
-	now := time.Now()
-	if clk != nil {
-		now = clk.Now()
-	}
 	return now.After(anchor.Add(pendingCreateNeverStartedTimeout))
 }
 
 // pendingCreateLeaseExpiredForRollbackInfo reports whether a pending-create
 // lease has expired such that the reconciler should roll it back. Each sub-leaf
 // it composes (pendingCreateStartInFlightInfo, pendingCreateNeverStartedExpiredInfo,
-// pendingCreateAttemptStaleInfo) is equivalence-proven; the state read uses the
-// RAW Info.MetadataState.
+// pendingCreateAttemptStaleInfo) is equivalence-proven.
 func pendingCreateLeaseExpiredForRollbackInfo(i sessionpkg.Info, clk clock.Clock, startupTimeout time.Duration) bool {
+	return pendingCreateLeaseExpiredForRollback(i, pendingCreateStartInFlightInfo(i, clk, startupTimeout),
+		pendingCreateNeverStartedExpiredInfo(i, clk), pendingCreateAttemptStaleInfo(i, clk))
+}
+
+// pendingCreateLeaseExpiredForRollbackAt is
+// pendingCreateLeaseExpiredForRollbackInfo at now, which the decide passes so
+// it reads no clock.
+func pendingCreateLeaseExpiredForRollbackAt(i sessionpkg.Info, now time.Time, startupTimeout time.Duration) bool {
+	return pendingCreateLeaseExpiredForRollback(i, pendingCreateStartInFlightAt(i, now, startupTimeout),
+		pendingCreateNeverStartedExpiredAt(i, now), pendingCreateAttemptStaleAt(i, now))
+}
+
+// pendingCreateLeaseExpiredForRollback composes the lease leaves' answers; the
+// state read uses the RAW Info.MetadataState.
+func pendingCreateLeaseExpiredForRollback(i sessionpkg.Info, inFlight, neverStartedExpired, attemptStale bool) bool {
 	if !i.PendingCreateClaim {
 		return false
 	}
-	state := sessionpkg.State(strings.TrimSpace(i.MetadataState))
-	if !pendingCreateRollbackState(string(state)) {
+	if !pendingCreateRollbackState(i.MetadataState) {
 		return false
 	}
 	// The lifecycle projection can mark a dead-looking creating runtime asleep
 	// after the generic one-minute stale window. That advisory state must not
 	// bypass the longer configured provider Start lease: use the same in-flight
 	// decision before every state-specific rollback path.
-	if pendingCreateStartInFlightInfo(i, clk, startupTimeout) {
+	if inFlight {
 		return false
 	}
-	if state == sessionpkg.StateAsleep {
-		if strings.TrimSpace(i.LastWokeAt) == "" {
-			return pendingCreateNeverStartedExpiredInfo(i, clk)
-		}
-		return pendingCreateAttemptStaleInfo(i, clk)
-	}
 	if strings.TrimSpace(i.LastWokeAt) == "" {
-		return pendingCreateNeverStartedExpiredInfo(i, clk)
+		return neverStartedExpired
 	}
-	return pendingCreateAttemptStaleInfo(i, clk)
+	return attemptStale
 }
 
 func pendingCreateQueuedOrCreatingState(state string) bool {
@@ -1485,6 +1612,16 @@ func explicitWakePendingInfo(info sessionpkg.Info) bool {
 	return true
 }
 
+// explicitSleepIntentInfo reports a sleep intent the idle latch's demand
+// override must honor: any but a wait's own wait-hold. A wait hold already
+// suppresses every demand wake but pending-create, an explicit wake and its
+// wait turning ready (computeAwakeSet), and a sleeping waiter keeps its
+// intent (D-J 3), so counting it here would refuse the wait-ready wake of a
+// waiter holding work under an idle policy and strand its claim.
+func explicitSleepIntentInfo(info sessionpkg.Info) bool {
+	return info.SleepIntent != "" && strings.TrimSpace(info.SleepIntent) != string(sessionpkg.SleepReasonWaitHold)
+}
+
 // wakeDemandOverridesSleepSuppression reports whether a wake the awake set
 // wants survives the session's config sleep suppression (the idle latch:
 // asleep with sleep_reason=idle under an unchanged sleep-policy fingerprint).
@@ -1528,101 +1665,6 @@ func wakeDemandOverridesSleepSuppression(
 	return decision.Reason == "min-active" && containsWakeReason(eval.Reasons, WakeConfig)
 }
 
-// reconcileSessionBeads performs bead-driven reconciliation using wake/sleep
-// semantics. For each session bead, it determines if the session should be
-// awake (has a matching entry in the desired state) and manages lifecycle
-// transitions using the Phase 2 building blocks.
-//
-// The function assumes session beads are already synced (syncSessionBeads
-// called before this function). When the bead reconciler is active,
-// syncSessionBeads does NOT close orphan/suspended beads (skipClose=true),
-// so the sessions slice may include beads with no matching desired entry.
-// These are handled by the orphan/suspended drain phase.
-//
-// desiredState maps sessionName → TemplateParams for all agents that should
-// be running. Built by buildDesiredState from config + scale_check results.
-//
-// configuredNames is the set of ALL configured agent session names (including
-// suspended agents). Used to distinguish "orphaned" (removed from config)
-// from "suspended" (still in config, not runnable) when closing beads.
-//
-// Returns the number of start attempts issued or enqueued this tick.
-//
-//nolint:unparam // compatibility wrapper retains the full production signature.
-func reconcileSessionBeads(
-	ctx context.Context,
-	sessions []beads.Bead,
-	desiredState map[string]TemplateParams,
-	configuredNames map[string]bool,
-	cfg *config.City,
-	sp runtime.Provider,
-	store beads.Store,
-	dops drainOps,
-	assignedWorkBeads []beads.Bead,
-	readyWaitSet map[string]bool,
-	dt *drainTracker,
-	poolDesired map[string]int,
-	storeQueryPartial bool,
-	workSet map[string]bool,
-	cityName string,
-	it idleTracker,
-	clk clock.Clock,
-	rec events.Recorder,
-	startupTimeout time.Duration,
-	driftDrainTimeout time.Duration,
-	stdout, stderr io.Writer,
-	startOptions ...startExecutionOption,
-) int {
-	return reconcileSessionBeadsAtPath(
-		ctx, "", sessions, desiredState, configuredNames, cfg, sp, store, dops, assignedWorkBeads, nil, readyWaitSet, dt,
-		poolDesired, storeQueryPartial, workSet, cityName, it, clk, rec, startupTimeout, driftDrainTimeout, stdout, stderr,
-		startOptions...,
-	)
-}
-
-// reconcileSessionBeadsAtPath runs the reconciler for a specific city
-// path. rigStores supplies the attached rig bead stores so live
-// cross-store ownership checks (sessionHasOpenAssignedWork) can see
-// work that lives outside the primary store. Pass nil when no rig
-// stores are attached; the reconciler will fall back to primary-store-
-// only queries.
-//
-//nolint:unparam // compatibility wrapper keeps the established test/helper signature.
-func reconcileSessionBeadsAtPath(
-	ctx context.Context,
-	cityPath string,
-	sessions []beads.Bead,
-	desiredState map[string]TemplateParams,
-	configuredNames map[string]bool,
-	cfg *config.City,
-	sp runtime.Provider,
-	store beads.Store,
-	dops drainOps,
-	assignedWorkBeads []beads.Bead,
-	rigStores map[string]beads.Store,
-	readyWaitSet map[string]bool,
-	dt *drainTracker,
-	poolDesired map[string]int,
-	storeQueryPartial bool,
-	workSet map[string]bool,
-	cityName string,
-	it idleTracker,
-	clk clock.Clock,
-	rec events.Recorder,
-	startupTimeout time.Duration,
-	driftDrainTimeout time.Duration,
-	stdout, stderr io.Writer,
-	startOptions ...startExecutionOption,
-) int {
-	// Compat wrapper (tests): build the row feed + carrier snapshot from raw beads.
-	snap := newSessionBeadSnapshotFromReconcileRows(sessionpkg.ReconcileRowsFromBeads(sessions))
-	return reconcileSessionBeadsAtPathWithNamedDemand(
-		ctx, cityPath, snap.OpenForReconcile(), snap, desiredState, configuredNames, cfg, sp, store, dops, assignedWorkBeads, rigStores, readyWaitSet, dt, nil,
-		poolDesired, nil, nil, storeQueryPartial, workSet, cityName, it, clk, rec, startupTimeout, driftDrainTimeout, stdout, stderr,
-		startOptions...,
-	)
-}
-
 func reconcileSessionBeadsAtPathWithNamedDemand(
 	ctx context.Context,
 	cityPath string,
@@ -1633,6 +1675,7 @@ func reconcileSessionBeadsAtPathWithNamedDemand(
 	cfg *config.City,
 	sp runtime.Provider,
 	store beads.Store,
+	sw *SeatWork,
 	dops drainOps,
 	assignedWorkBeads []beads.Bead,
 	rigStores map[string]beads.Store,
@@ -1657,52 +1700,34 @@ func reconcileSessionBeadsAtPathWithNamedDemand(
 	// directly (the config-change tick and cmd_start pass OpenForReconcile rows;
 	// reconcileSessionBeadsAtPath builds them from raw beads for tests).
 	return reconcileSessionBeadsTracedWithNamedDemand(
-		ctx, cityPath, rows, snapshot, desiredState, configuredNames, cfg, sp, beads.SessionStore{Store: store}, dops, assignedWorkBeads, rigStores, readyWaitSet, dt, gate,
+		ctx, cityPath, rows, snapshot, desiredState, configuredNames, cfg, sp, beads.SessionStore{Store: store}, sw, dops, assignedWorkBeads, rigStores, readyWaitSet, dt, gate,
 		poolDesired, namedSessionDemand, namedRoutedDemand, storeQueryPartial, workSet, cityName, it, clk, rec, startupTimeout, driftDrainTimeout, stdout, stderr, nil,
 		startOptions...,
 	)
 }
 
-//nolint:unparam // compatibility wrapper keeps the established traced test/helper signature.
-func reconcileSessionBeadsTraced(
-	ctx context.Context,
-	cityPath string,
-	sessions []beads.Bead,
-	desiredState map[string]TemplateParams,
-	configuredNames map[string]bool,
-	cfg *config.City,
-	sp runtime.Provider,
-	store beads.Store,
-	dops drainOps,
-	assignedWorkBeads []beads.Bead,
-	rigStores map[string]beads.Store,
-	readyWaitSet map[string]bool,
-	dt *drainTracker,
-	poolDesired map[string]int,
-	storeQueryPartial bool,
-	workSet map[string]bool,
-	cityName string,
-	it idleTracker,
-	clk clock.Clock,
-	rec events.Recorder,
-	startupTimeout time.Duration,
-	driftDrainTimeout time.Duration,
-	stdout, stderr io.Writer,
-	trace *sessionReconcilerTraceCycle,
-	startOptions ...startExecutionOption,
-) int {
-	// Compat wrapper: build the tick's row feed + carrier snapshot from the raw
-	// session beads the test/helper caller supplies (production callers pass
-	// sessionBeads.OpenForReconcile() directly). The snapshot constructor drops closed
-	// beads, exactly as the production store-load feed does.
-	snap := newSessionBeadSnapshotFromReconcileRows(sessionpkg.ReconcileRowsFromBeads(sessions))
-	return reconcileSessionBeadsTracedWithNamedDemand(
-		ctx, cityPath, snap.OpenForReconcile(), snap, desiredState, configuredNames, cfg, sp, beads.SessionStore{Store: store}, dops, assignedWorkBeads, rigStores, readyWaitSet, dt, nil,
-		poolDesired, nil, nil, storeQueryPartial, workSet, cityName, it, clk, rec, startupTimeout, driftDrainTimeout, stdout, stderr, trace,
-		startOptions...,
-	)
-}
-
+// reconcileSessionBeadsTracedWithNamedDemand performs bead-driven reconciliation using wake/sleep
+// semantics. For each session bead, it determines if the session should be
+// awake (has a matching entry in the desired state) and manages lifecycle
+// transitions using the Phase 2 building blocks.
+//
+// The function assumes session beads are already synced (syncSessionBeads
+// called before this function). When the bead reconciler is active,
+// syncSessionBeads does NOT close orphan/suspended beads (skipClose=true),
+// so the sessions slice may include beads with no matching desired entry.
+// These are handled by the orphan/suspended drain phase.
+//
+// desiredState maps sessionName → TemplateParams for all agents that should
+// be running. Built by buildDesiredState from config + scale_check results.
+//
+// configuredNames is the set of ALL configured agent session names (including
+// suspended agents). Used to distinguish "orphaned" (removed from config)
+// from "suspended" (still in config, not runnable) when closing beads.
+//
+// sw is the pass's read of the city's work legs (seat_work.go), from which
+// every "does this seat still hold work?" question is answered.
+//
+// Returns the number of start attempts issued or enqueued this tick.
 func reconcileSessionBeadsTracedWithNamedDemand(
 	ctx context.Context,
 	cityPath string,
@@ -1713,6 +1738,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	cfg *config.City,
 	sp runtime.Provider,
 	sessStore beads.SessionStore,
+	sw *SeatWork,
 	dops drainOps,
 	assignedWorkBeads []beads.Bead,
 	rigStores map[string]beads.Store,
@@ -1783,7 +1809,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	}
 	// Starts and launch-drift relaunches read the same dispatch option sources, so
 	// a relaunch applies the trigger-bead pins its fresh start would.
-	dispatchSources := reconcileDispatchOptionSources(reconcileOpts, cityPath, cfg, store, rigStores, suspendedRigPathsWithState(cfg, suspState))
+	dispatchSources := reconcileDispatchOptionSources(reconcileOpts, sw)
 	effectiveStartOptions = append(append([]startExecutionOption(nil), effectiveStartOptions...), withClaimedWorkProbe(dispatchSources.claimedWork))
 	if startupTimeout <= 0 && cfg != nil {
 		startupTimeout = cfg.Session.StartupTimeoutDuration()
@@ -1832,7 +1858,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	// rows, returning the folded row set (retired losers carry their retire batch).
 	if cfg != nil {
 		rows = retireDuplicateConfiguredNamedSessionRows(
-			cityPath, store, rigStores, sp, cfg, cityName, rows, clk.Now().UTC(), stderr,
+			cityPath, store, sw, sp, cfg, cityName, rows, clk.Now().UTC(), stderr,
 		)
 	}
 	recordPhase(TraceSiteSessionReconcileHealRetire, "session_reconcile.heal_and_retire_duplicates", phaseStart, map[string]any{
@@ -1947,7 +1973,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	// the close is store-only, so a raw re-projection of *session still sees it
 	// open — the fold must match that.
 	attemptRollbackPendingCreate := func(info sessionpkg.Info, templateName, name, action, detail string, clearClaim bool) map[string]string {
-		if !releaseBeadScopedPoolRuntime(info, sp, stderr) {
+		if !releaseBeadScopedPoolRuntimeLeased(cityPath, info, sp, stderr) {
 			return nil
 		}
 		rollbacksThisTick++
@@ -2003,7 +2029,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			continue
 		}
 
-		if handled, result := reconcileDrainAckStopPending(cityPath, cfg, sp, store, rigStores, info, tp, desired, dops, dt, asyncStopTracker, clk, rec, stderr); handled {
+		if handled, result := reconcileDrainAckStopPending(cityPath, cfg, sp, store, sw, info, tp, desired, dops, dt, asyncStopTracker, clk, rec, stderr); handled {
 			// finalizeDrainAckStoppedSession (inside reconcileDrainAckStopPending)
 			// may close the bead in memory (Status=closed) on this true/continue
 			// path; fold that close onto the snapshot so the cross-session min-floor
@@ -2028,7 +2054,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// cannot route around its own name, so the template falls to zero seats
 		// until someone kills the pane by hand. See
 		// retirePoolSlotAtDrainDeadline for the gates.
-		if fold, retired := retirePoolSlotAtDrainDeadline(cityPath, cfg, sp, store, rigStores, info, tp.TemplateName, tp.Hints.ProcessNames, storeQueryPartial, reconcileOpts.deferSessionClosesOnBoot, clk, rec, dt, stderr); retired {
+		if fold, retired := retirePoolSlotAtDrainDeadline(cityPath, cfg, sp, store, sw, info, tp.TemplateName, tp.Hints.ProcessNames, storeQueryPartial, reconcileOpts.deferSessionClosesOnBoot, clk, rec, dt, stderr); retired {
 			tick.apply(id, fold)
 			tick.markClosed(id)
 			continue
@@ -2242,8 +2268,8 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						}
 						continue
 					}
-					closedFailedCreate := releaseBeadScopedPoolRuntime(infoByID[id], sp, stderr) &&
-						closeSessionBeadIfReachableStoreUnassigned(cityPath, cfg, store, rigStores, infoByID[id], string(sessionpkg.StateFailedCreate), clk.Now().UTC(), stderr, false)
+					closedFailedCreate := releaseBeadScopedPoolRuntimeLeased(cityPath, infoByID[id], sp, stderr) &&
+						closeSessionBeadIfReachableStoreUnassigned(store, sw, infoByID[id], string(sessionpkg.StateFailedCreate), clk.Now().UTC(), stderr, false)
 					if closedFailedCreate {
 						// Reflect the in-memory close on the snapshot: the cross-session
 						// min-floor scan (below) reads Info.Closed off infoByID, so a
@@ -2378,7 +2404,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							continue
 						}
 						ackReason := assignedWorkDrainCancelReasonInfo(infoPostHeal, sp, dt, name)
-						hasAssignedWork, assignedErr := sessionHasAwakeAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, infoByID[id])
+						hasAssignedWork, assignedErr := sessionHasAwakeAssignedWorkForReachableStore(sw, infoByID[id])
 						if assignedErr != nil {
 							fmt.Fprintf(stderr, "session reconciler: checking assigned work for drain-acked %s: %v\n", name, assignedErr) //nolint:errcheck
 							hasAssignedWork = true
@@ -2390,7 +2416,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						// false verdict — cancel it rather than stopping the worker.
 						if providerAlive && !hasAssignedWork && orphanedDrainInFlightInfo(infoPostHeal, sp, dt, name) &&
 							liveClaimVetoApplies(cityPath, cfg, infoPostHeal, suspState) {
-							if vetoed, claimID := liveClaimVeto(cityPath, cfg, store, rigStores, infoPostHeal, dt, name, "orphaned", stdout, stderr); vetoed &&
+							if vetoed, claimID := liveClaimVeto(cityPath, cfg, store, sw, infoPostHeal, dt, name, "orphaned", stdout, stderr); vetoed &&
 								cancelOrphanedDrainForLiveClaimInfo(infoPostHeal, sp, dt, name) {
 								_ = dops.clearDrain(name)
 								template := normalizedSessionTemplateInfo(infoPostHeal, cfg)
@@ -2437,17 +2463,15 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 								}
 								continue
 							}
-							if updated, ok := markDrainAckStopPending(infoByID[id], sessFront, clk, stderr); ok {
+							if updated, stop, ok := markDrainAckStopPending(legacyAct{cityPath: cityPath, store: store, sp: sp, cfg: cfg, stderr: stderr}, infoByID[id], dops, dt, clk); ok {
 								// markDrainAckStopPending persisted the stop-pending transition and
 								// returned the folded snapshot Info (write-returns-Info, Step 6d) —
 								// assign it directly. Cross-session isDrainAckStopPendingInfo reader.
 								// Pre-pass-masked (STEP6-PREPASS-AUDIT group 3).
 								tick.set(id, updated)
 								clearDrainTrackerForStopPending(id, dt)
-								// Token fence off the typed snapshot: the stop-pending fold
-								// preserves instance_token, so infoByID[id].InstanceToken is the
-								// token we intend to stop (mirrors verifiedStop).
-								queueDrainAckAsyncStop(cityPath, store, sp, cfg, id, name, infoByID[id].InstanceToken, tp.Hints.ProcessNames, asyncStopTracker, dt, stderr)
+								// The stop executes against the decision the mark landed on.
+								queueDrainAckAsyncStop(cityPath, store, sp, cfg, stop, name, tp.Hints.ProcessNames, asyncStopTracker, dt, stderr)
 								if trace != nil {
 									trace.RecordDecision(TraceSiteReconcilerDrainAck, TraceReasonOrphaned, TraceOutcomeStopPending, template, name, nil)
 								}
@@ -2474,7 +2498,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							continue
 						}
 						result := finalizeDrainAckStoppedSession(
-							cityPath, cfg, store, rigStores, infoByID[id], template,
+							cfg, store, sw, infoByID[id], template,
 							!configuredNames[name], dops, dt, clk, rec, stderr,
 						)
 						// finalizeDrainAckStoppedSession may close the bead in memory; fold
@@ -2501,7 +2525,8 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					if configuredNames[name] {
 						reason = "suspended"
 					}
-					hasAssignedWork, assignedErr := sessionHasOpenAssignedWorkForConfigInfo(cityPath, cfg, store, rigStores, infoByID[id])
+					// The drain ends a live runtime: the wide set, read live (O4).
+					hasAssignedWork, assignedErr := sessionHasOpenAssignedWorkInStores(sw, refuseScope(infoByID[id], cfg))
 					if assignedErr != nil {
 						fmt.Fprintf(stderr, "session reconciler: checking assigned work before %s drain for %s: %v\n", reason, name, assignedErr) //nolint:errcheck
 						continue
@@ -2530,7 +2555,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					// began). Config removal and suspension are not vetoed
 					// (liveClaimVetoApplies).
 					if reason == "orphaned" && liveClaimVetoApplies(cityPath, cfg, infoPostHeal, suspState) {
-						if vetoed, claimID := liveClaimVeto(cityPath, cfg, store, rigStores, infoPostHeal, dt, name, reason, stdout, stderr); vetoed {
+						if vetoed, claimID := liveClaimVeto(cityPath, cfg, store, sw, infoPostHeal, dt, name, reason, stdout, stderr); vetoed {
 							drainCanceled := cancelOrphanedDrainForLiveClaimInfo(infoPostHeal, sp, dt, name)
 							if trace != nil {
 								template := normalizedSessionTemplateInfo(infoPostHeal, cfg)
@@ -2677,7 +2702,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						if rn := config.NamedSessionRuntimeName(cityName, cfg.Workspace, identity); rn != "" && rn != identity {
 							preserve = append(preserve, rn)
 						}
-						if closeBeadPreservingAssignees(store, infoByID[id], reason, preserve, clk.Now().UTC(), stderr) {
+						if closeBeadPreservingAssignees(store, sw, infoByID[id], reason, preserve, clk.Now().UTC(), stderr) {
 							tick.markClosed(id)
 							fmt.Fprintf(stdout, "Recycled dead named-session phantom '%s' (squats configured identity %q; process gone)\n", name, identity) //nolint:errcheck
 							if trace != nil {
@@ -2688,7 +2713,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						}
 						continue
 					}
-					closed := closeSessionBeadIfReachableStoreUnassigned(cityPath, cfg, store, rigStores, infoByID[id], reason, clk.Now().UTC(), stderr, false)
+					closed := closeSessionBeadIfReachableStoreUnassigned(store, sw, infoByID[id], reason, clk.Now().UTC(), stderr, false)
 					if !closed && reason == "orphaned" {
 						// The guard refused because the seat still holds work. Nothing
 						// else can resolve that: the wake path is blocked on the orphaned
@@ -2700,9 +2725,16 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						//
 						// Restricted to "orphaned": a "suspended" seat is configured and
 						// merely scaled down, so its work stays put for its return.
-						if released := releaseConfirmedOrphanSessionWork(cfg, store, rigStores, assignedWorkBeads, orphanReleaseStores, infoByID[id]); len(released) > 0 {
+						if released := releaseConfirmedOrphanSessionWork(cfg, sw.Legs().workStore(), sw.Legs().rigs, assignedWorkBeads, orphanReleaseStores, infoByID[id]); len(released) > 0 {
 							emitDeadAssigneeReopenedEvents(rec, assignedWorkBeads, released, clk.Now().UTC())
-							closed = closeSessionBeadIfReachableStoreUnassigned(cityPath, cfg, store, rigStores, infoByID[id], reason, clk.Now().UTC(), stderr, false)
+						}
+						closed = closeSessionBeadIfReachableStoreUnassigned(store, sw, infoByID[id], reason, clk.Now().UTC(), stderr, false)
+						// What the release kept for want of a lane does not keep the
+						// seat (O5, revised): its agent is gone, the claims stay on the
+						// closed row, and the cascade alerts. A claim a lane serves (one
+						// moved, or detached and alive) still blocks.
+						if !closed && onlyStrandedWork(sw, infoByID[id]) {
+							closed = closeBead(store, sw, infoByID[id], reason, clk.Now().UTC(), stderr)
 						}
 					}
 					if closed {
@@ -2911,6 +2943,22 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						continue
 					}
 					ackReason, reconcilerOwnedAck := reconcilerDrainAckMatchesSessionInfo(infoByID[id], sp, name)
+					// A user-hold ack whose row no longer carries the hold is
+					// stale: an operator's resume consumed the hold after the
+					// drain began. Clear it and leave the runtime up.
+					if reconcilerOwnedAck && userHoldDrainReleased(ackReason, infoByID[id], clk.Now()) {
+						_ = clearReconcilerDrainAckMetadata(sp, name)
+						_ = dops.clearDrain(name)
+						if dt != nil {
+							dt.clearIdleProbe(id)
+							dt.remove(id)
+						}
+						telemetry.RecordDrainTransition(context.Background(), name, ackReason, "cancel")
+						if trace != nil {
+							trace.RecordDecision(TraceSiteReconcilerDrainAck, TraceReasonCode(ackReason), TraceOutcomeClear, tp.TemplateName, name, nil)
+						}
+						continue
+					}
 					// gc-kkgak: a reconciler-owned drain ack is minted from the
 					// desired-state / assigned-work view. During a partial store
 					// query that view is unreliable, so defer the reconciler-owned
@@ -2930,7 +2978,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					}
 					if alive && reconcilerOwnedAck && ackReason == idleRespawnDrainReason {
 						unsafe, unsafeReason, unsafeErr := idleRespawnAckUnsafeToStop(
-							cityPath, cfg, store, rigStores, infoByID[id], sp, dt, name,
+							cityPath, cfg, store, sw, infoByID[id], sp, dt, name,
 						)
 						if unsafe {
 							if unsafeErr != nil {
@@ -2954,7 +3002,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						}
 					}
 					if reconcilerOwnedAck && assignedWorkDrainReasonCancelable(ackReason) {
-						hasAssignedWork, assignedErr := sessionHasAwakeAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, infoByID[id])
+						hasAssignedWork, assignedErr := sessionHasAwakeAssignedWorkForReachableStore(sw, infoByID[id])
 						if assignedErr != nil {
 							fmt.Fprintf(stderr, "session reconciler: checking assigned work for drain-acked %s: %v\n", name, assignedErr) //nolint:errcheck
 							hasAssignedWork = true
@@ -2964,7 +3012,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						// cannot see still cancels the drain.
 						if alive && !hasAssignedWork && liveClaimDrainReasonCancelable(ackReason) &&
 							liveClaimVetoApplies(cityPath, cfg, infoByID[id], suspState) {
-							hasAssignedWork, _ = liveClaimVeto(cityPath, cfg, store, rigStores, infoByID[id], dt, name, ackReason, stdout, stderr)
+							hasAssignedWork, _ = liveClaimVeto(cityPath, cfg, store, sw, infoByID[id], dt, name, ackReason, stdout, stderr)
 						}
 						if alive && hasAssignedWork &&
 							(cancelSessionDrainForAssignedWorkInfo(infoByID[id], sp, dt) || cancelRecoveredDrainForAssignedWorkInfo(infoByID[id], sp, name)) {
@@ -3060,15 +3108,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						continue
 					}
 					if alive {
-						if updated, ok := markDrainAckStopPending(infoByID[id], sessFront, clk, stderr); ok {
+						if updated, stop, ok := markDrainAckStopPending(legacyAct{cityPath: cityPath, store: store, sp: sp, cfg: cfg, stderr: stderr}, infoByID[id], dops, dt, clk); ok {
 							// markDrainAckStopPending persisted + folded the stop-pending
 							// transition (write-returns-Info, Step 6d) — assign the returned Info,
 							// same as the orphan-arm site above (STEP6-PREPASS-AUDIT group 3).
 							tick.set(id, updated)
 							clearDrainTrackerForStopPending(id, dt)
-							// Token fence off the typed snapshot (mirrors verifiedStop); the
-							// stop-pending fold preserves instance_token.
-							queueDrainAckAsyncStop(cityPath, store, sp, cfg, id, name, infoByID[id].InstanceToken, tp.Hints.ProcessNames, asyncStopTracker, dt, stderr)
+							// The stop executes against the decision the mark landed on.
+							queueDrainAckAsyncStop(cityPath, store, sp, cfg, stop, name, tp.Hints.ProcessNames, asyncStopTracker, dt, stderr)
 							if trace != nil {
 								trace.RecordDecision(TraceSiteReconcilerDrainAck, TraceReasonAcknowledged, TraceOutcomeStopPending, tp.TemplateName, name, nil)
 							}
@@ -3080,7 +3127,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						finalizeDT = nil
 					}
 					result := finalizeDrainAckStoppedSession(
-						cityPath, cfg, store, rigStores, infoByID[id], tp.TemplateName,
+						cfg, store, sw, infoByID[id], tp.TemplateName,
 						isPoolManagedSessionInfo(infoByID[id]),
 						dops, finalizeDT,
 						clk, rec, stderr,
@@ -3156,7 +3203,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				holdsClaim := false
 				claimKnown := true
 				if !exempt && (!floorExempt || claimHolderThreshold > 0) {
-					has, err := sessionHasInProgressAssignedWorkForConfig(cityPath, cfg, store, rigStores, infoByID[id])
+					has, err := sessionHasInProgressAssignedWorkForConfig(sw, infoByID[id])
 					if err != nil {
 						// Fail safe: an unreadable claim check must not recycle a
 						// session that may hold in-progress work. Mirrors the drain
@@ -3195,7 +3242,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					demand := namedSessionDemand[identity] || namedRoutedDemand[identity] ||
 						workSet[tp.TemplateName] || poolDesired[tp.TemplateName] > 0 || readyWaitSet[id]
 					if !demand {
-						hasOpen, openErr := sessionHasOpenAssignedWorkForConfigInfo(cityPath, cfg, store, rigStores, infoByID[id])
+						hasOpen, openErr := sessionHasOpenAssignedWorkForConfigInfo(sw, infoByID[id])
 						if openErr != nil {
 							// Fail safe: an unreadable open-work check must not recycle
 							// a session that may hold assigned work. Mirrors the
@@ -3274,7 +3321,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					continue
 				}
 				if runtimeRunning {
-					if err := workerKillSessionTargetWithConfig("", store, sp, cfg, name); err != nil {
+					if err := controllerKillSessionRow(cityPath, store, sp, cfg, infoByID[id]); err != nil {
 						fmt.Fprintf(stderr, "session reconciler: stopping restart-requested %s: %v\n", name, err) //nolint:errcheck
 						continue
 					}
@@ -3394,7 +3441,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// one of the forward-pass writers the blanket pre-pass still masks; folding it
 		// is a prerequisite for that pre-pass's deletion (STEP6-PREPASS-AUDIT group 4).
 		tick.apply(id, healBatch)
-		if recoverPendingIdleSleepInfo(infoByID[id], sessFront, running, clk) {
+		if recovered := recoverPendingIdleSleepInfo(infoByID[id], sessFront, running, clk); recovered != nil {
 			alive = false
 			// Fold the idle-stop-pending recovery sleep onto the snapshot (Step 6d).
 			// recoverPendingIdleSleep mirrors SleepPatch(now,"idle") only on this true
@@ -3402,7 +3449,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// the same SleepPatch reproduces the mirror exactly (slept_at /
 			// sleep_policy_fingerprint are non-Info). Pre-pass-masked (STEP6-PREPASS-AUDIT
 			// group 6).
-			tick.apply(id, sessionpkg.SleepPatch(clk.Now().UTC(), string(sessionpkg.SleepReasonIdle)))
+			tick.apply(id, recovered)
 		}
 		// Fold detached_at change onto the snapshot (Step 6d write-returns-Info).
 		// reconcileDetachedAt returns the {"detached_at": <value>} batch it mirrored,
@@ -3479,7 +3526,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// (session_key/continuation_reset_pending) stay unthreaded — neither has a
 			// same-tick Info reader whose verdict the residue changes — and self-heal on
 			// the next tick's store reload.
-			ok, commitBatch := recoverRunningPendingCreate(infoByID[id], tp, cfg, store, clk, trace)
+			ok, commitBatch := recoverRunningPendingCreate(cityPath, infoByID[id], tp, cfg, store, clk, trace)
 			if !ok {
 				fmt.Fprintf(stderr, "session reconciler: recovering pending create %s: metadata repair incomplete\n", name) //nolint:errcheck
 			}
@@ -3642,7 +3689,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							// write-returns-Info). The alive lane falls through to the
 							// aggregating refresh @~2710 today, but folding here future-proofs
 							// that refresh's retirement (STEP6-PREPASS-AUDIT group 10).
-							tick.apply(id, resetConfiguredNamedSessionForConfigDriftInfo(infoByID[id], tp, store, sp, name, alive, string(sessionpkg.StateStartPending), clk.Now().UTC(), stderr))
+							tick.apply(id, resetConfiguredNamedSessionForConfigDriftInfo(cityPath, infoByID[id], tp, store, sp, name, alive, string(sessionpkg.StateStartPending), clk.Now().UTC(), stderr))
 							if trace != nil {
 								trace.RecordDecision(TraceSiteReconcilerConfigDrift, TraceReasonConfigDrift, TraceOutcomeRestartInPlace, tp.TemplateName, name, configDriftTracePayload(storedHash, currentHash, driftedFields, nil))
 							}
@@ -3685,7 +3732,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							// assigned work and drain naturally. The same shape
 							// of protection is already applied to the
 							// orphan/suspended drain at line 754.
-							hasAssignedWork, assignedErr := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, infoByID[id])
+							hasAssignedWork, assignedErr := sessionHasOpenAssignedWorkForReachableStore(sw, infoByID[id])
 							if assignedErr != nil {
 								fmt.Fprintf(stderr, "session reconciler: checking assigned work before config-drift drain for %s: %v\n", name, assignedErr) //nolint:errcheck
 								continue
@@ -3862,7 +3909,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						// write-returns-Info); this asleep lane `continue`s, so the fold must
 						// run before the continue. Clears restart_requested on the snapshot
 						// (#2574). Pre-pass-masked (STEP6-PREPASS-AUDIT group 10).
-						tick.apply(id, resetConfiguredNamedSessionForConfigDriftInfo(infoByID[id], tp, store, sp, name, false, "asleep", clk.Now().UTC(), stderr))
+						tick.apply(id, resetConfiguredNamedSessionForConfigDriftInfo(cityPath, infoByID[id], tp, store, sp, name, false, "asleep", clk.Now().UTC(), stderr))
 						if trace != nil {
 							trace.RecordDecision(TraceSiteReconcilerConfigDrift, TraceReasonConfigDrift, TraceOutcomeRepairInPlace, tp.TemplateName, name, configDriftTracePayload(storedHash, currentHash, driftedFields, nil))
 						}
@@ -3904,7 +3951,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						facts.Pending = sessionpkg.PendingYes
 					}
 				} else {
-					hasWork, assignedErr := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, infoByID[id])
+					hasWork, assignedErr := sessionHasOpenAssignedWorkForReachableStore(sw, infoByID[id])
 					if assignedErr != nil {
 						// Fail closed: treat error as "has work" so a transient
 						// store blip doesn't kill a session that may still hold
@@ -3935,7 +3982,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					reason, outcome := timerTraceCodes(dec)
 					trace.RecordDecision(TraceSiteReconcilerMaxSessionAge, reason, outcome, tp.TemplateName, name, nil)
 				}
-				if err := workerKillSessionTargetWithConfig("", store, sp, cfg, name); err != nil {
+				if err := controllerKillSessionRow(cityPath, store, sp, cfg, infoByID[id]); err != nil {
 					fmt.Fprintf(stderr, "session reconciler: stopping aged %s: %v\n", name, err) //nolint:errcheck // best-effort stderr
 				} else {
 					_ = sp.ClearScrollback(name)
@@ -3950,7 +3997,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					// the sleep MUST land on the snapshot even if its persistence fails —
 					// the same-tick re-wake's awake-scan read of state=asleep needs it, and
 					// a dropped fold would leave the killed session looking awake and
-					// respawn it this same tick (council finding 2). applyOptimistic writes
+					// respawn it this same tick (council finding 2). applySleepOptimistic writes
 					// through the front door (error discarded, matching the former
 					// `_ = ApplyPatch`) and always folds locally. Base is coherent (the
 					// aggregating refresh @~2692 synced it and the intervening drift blocks
@@ -3959,7 +4006,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					// with SleepPatch's cleared last_woke_at. The former raw session.Metadata
 					// coupling mirror is gone (WI-6 R4): its only consumer was the
 					// start-execution cluster's raw bead pointer, now deleted.
-					tick.applyOptimistic(id, sessionFrontDoor(store), batch)
+					tick.applySleepOptimistic(id, sessionFrontDoor(store), batch)
 					alive = false
 				}
 			}
@@ -4007,7 +4054,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						facts.Pending = sessionpkg.PendingYes
 					}
 				case sessionpkg.TimerActionGatherAssignedWork:
-					hasWork, assignedErr := sessionHasAwakeAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, infoByID[id])
+					hasWork, assignedErr := sessionHasAwakeAssignedWorkForReachableStore(sw, infoByID[id])
 					if assignedErr != nil {
 						// Fail closed: treat error as "has work" so a transient
 						// store blip doesn't idle-kill a session that may still
@@ -4084,7 +4131,16 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					reason, outcome := timerTraceCodes(dec)
 					trace.RecordDecision(TraceSiteReconcilerIdleTimeout, reason, outcome, tp.TemplateName, name, nil)
 				}
-				if err := workerKillSessionTargetWithConfig("", store, sp, cfg, name); err != nil {
+				if dec.TraceReason != string(TraceReasonAssignedWorkExhausted) {
+					// A claim made since the tick's read (the gather above read the
+					// index) defers the kill, as a claim the gather saw would have.
+					late, err := lateSeatWork(sw.Legs(), releaseScope(infoByID[id], cfg), []string{"in_progress"}, nil)
+					if err != nil || len(late) > 0 {
+						fmt.Fprintf(stderr, "session reconciler: idle timeout for %s deferred: work claimed since this tick's read (%v)\n", name, err) //nolint:errcheck // best-effort stderr
+						continue
+					}
+				}
+				if err := controllerKillSessionRow(cityPath, store, sp, cfg, infoByID[id]); err != nil {
 					fmt.Fprintf(stderr, "session reconciler: stopping idle %s: %v\n", name, err) //nolint:errcheck // best-effort stderr
 				} else {
 					_ = sp.ClearScrollback(name)
@@ -4104,7 +4160,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					// awake-scan read of state=asleep drives the same-tick re-wake decision;
 					// a dropped fold on write failure would leave the killed session looking
 					// awake and respawn it this same tick (council finding 2).
-					// applyOptimistic writes through the front door (error discarded,
+					// applySleepOptimistic writes through the front door (error discarded,
 					// matching the former `_ = ApplyPatch`) and always folds locally. Base
 					// coherent (aggregating refresh @~2692 + intervening `continue`s). Wake
 					// fairness reads the captured Info twin (wakeFairnessTime →
@@ -4112,7 +4168,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					// cleared last_woke_at. The former raw session.Metadata coupling mirror
 					// is gone (WI-6 R4): its only consumer was the start-execution cluster's
 					// raw bead pointer, now deleted.
-					tick.applyOptimistic(id, sessionFrontDoor(store), batch)
+					tick.applySleepOptimistic(id, sessionFrontDoor(store), batch)
 					alive = false
 				}
 			}
@@ -4218,7 +4274,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// Explicit sleep_intent always wins — if the session has
 			// signaled it wants to sleep, honor that regardless of demand.
 			template := normalizedSessionTemplateInfo(info, cfg)
-			hasExplicitSleepIntent := info.SleepIntent != ""
+			hasExplicitSleepIntent := explicitSleepIntentInfo(info)
 			explicitWake := explicitWakePendingInfo(info)
 			demandOverrides := wakeDemandOverridesSleepSuppression(decision, eval, policy, poolDesired, template, hasExplicitSleepIntent, explicitWake)
 			if !demandOverrides {
@@ -4369,7 +4425,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					continue // startup-health crash-loop protection (pending-create failures)
 				}
 			}
-			if pendingCreateStartInFlightInfo(info, clk, startupTimeout) {
+			// A start is in flight only while its holder lives: one a crashed
+			// controller left between PreWake and its commit is relaunched
+			// now, under this pass's own lease, once the row read under the
+			// lease still carries the marker this pass read (mc-5a1ma).
+			if pendingCreateStartInFlightInfo(info, clk, startupTimeout) && !startAbandoned(store, cityPath, info) {
 				if trace != nil {
 					trace.RecordDecision(TraceSiteReconcilerWakeDecision, TraceReasonWake, TraceOutcomeStartInFlight, target.tp.TemplateName, name, traceRecordPayload{
 						"pending_create_claim": strings.TrimSpace(info.PendingCreateClaimMetadata),
@@ -4483,7 +4543,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							}
 						}
 					}
-					if ran, fold := cycleAliveSessionForFreshReassign(infoByID[target.info.ID], target.tp, sp, store, cfg, cb, name, decision.AssignedWorkBeadID, clk.Now(), stdout, stderr, trace); ran {
+					if ran, fold := cycleAliveSessionForFreshReassign(cityPath, infoByID[target.info.ID], target.tp, sp, store, cfg, cb, name, decision.AssignedWorkBeadID, clk.Now(), stdout, stderr, trace); ran {
 						if fold != nil {
 							tick.apply(target.info.ID, fold)
 						}
@@ -4549,7 +4609,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				// session.Metadata mirror. The single-key clear rides the front door's
 				// SetMetadataBatch (empty-string clear), byte-equivalent to the raw
 				// SetMetadata it replaced.
-				tick.applyOptimistic(target.info.ID, sessionFrontDoor(store), sessionpkg.MetadataPatch{"sleep_intent": ""})
+				tick.clearIdleStopPending(target.info.ID, sessionFrontDoor(store))
 			}
 		}
 
@@ -4608,7 +4668,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				(intent == "" || intent == "idle-stop-pending") &&
 				dt.get(target.info.ID) == nil &&
 				liveClaimVetoApplies(cityPath, cfg, info, suspState) {
-				if vetoed, claimID := liveClaimVeto(cityPath, cfg, store, rigStores, info, dt, name, reason, stdout, stderr); vetoed {
+				if vetoed, claimID := liveClaimVeto(cityPath, cfg, store, sw, info, dt, name, reason, stdout, stderr); vetoed {
 					if trace != nil {
 						trace.RecordDecision(TraceSiteReconcilerDrainDecision, TraceReasonCode(reason), TraceOutcomeKeptOpen, target.tp.TemplateName, name, traceRecordPayload{
 							"sleep_intent": intent,
@@ -4635,6 +4695,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				if intent != "idle-stop-pending" {
 					if fold := markIdleSleepPendingInfo(info, sessFront); fold != nil {
 						tick.apply(target.info.ID, fold)
+						info = infoByID[target.info.ID] // the drain's basis is the row as stored
 					}
 				}
 			}
@@ -4673,12 +4734,12 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		hasAssignedWork := false
 		poolFreeable := !shouldWake && !target.alive && isPoolSessionSlotFreeableInfo(info, clk.Now()) && isPoolManagedSessionInfo(info) && !isNamedSessionInfo(info)
 		killedSeat := poolFreeable && strings.TrimSpace(info.SleepReason) == string(sessionpkg.SleepReasonKilled)
-		if killedSeat && killedSeatSnapshotHasReleasableClaim(cfg, assignedWorkBeads, info) {
-			releaseUnexecutedClaimsOnKill(cityPath, cfg, store, rigStores, clk.Now(), info, drainAckReleaseBudget, stderr)
+		if killedSeat && killedSeatSnapshotHasRoutedClaim(cfg, assignedWorkBeads, info) {
+			releaseUnexecutedClaimsOnKill(sw, store, clk.Now(), info, stderr)
 		}
 		if poolFreeable {
 			var assignedErr error
-			hasAssignedWork, assignedErr = sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, info)
+			hasAssignedWork, assignedErr = sessionHasOpenAssignedWorkForReachableStore(sw, info)
 			if assignedErr != nil {
 				fmt.Fprintf(stderr, "session reconciler: checking assigned work for drained %s: %v\n", name, assignedErr) //nolint:errcheck
 				hasAssignedWork = true
@@ -4694,7 +4755,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// happened. Emit a single diagnostic per session bead
 			// generation; the throttle marker on the bead itself
 			// keeps subsequent reconciler ticks quiet.
-			if fold := emitSessionStrandedDiagnostic(cityPath, cfg, store, rigStores, infoByID[target.info.ID], snapshot, target.tp.TemplateName, rec, clk, stderr); fold != nil {
+			if fold := emitSessionStrandedDiagnostic(store, sw, infoByID[target.info.ID], snapshot, target.tp.TemplateName, rec, clk, stderr); fold != nil {
 				tick.apply(target.info.ID, fold)
 			}
 			// Beyond diagnosis: once THIS stranding episode has been confirmed
@@ -4712,7 +4773,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// unclaimWorkAssignedToRetiredSessionInfo, the Info form of the same detach primitive
 			// named-session retirement uses.
 			if !storeQueryPartial &&
-				repairStrandedPoolWorkerBead(cityPath, cfg, store, rigStores, infoByID[target.info.ID], retiredSessionFallbackRouteInfo(infoByID[target.info.ID]), clk, stderr) {
+				repairStrandedPoolWorkerBead(sw, store, infoByID[target.info.ID], clk, stderr) {
 				tick.markClosed(target.info.ID)
 				pruneAgentHomeWorktreeIfSafeInfo(infoByID[target.info.ID], cityPath, cfg, stderr)
 			}
@@ -4732,7 +4793,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			if closeReason == "" {
 				closeReason = "drained"
 			}
-			if closeBead(store, infoByID[target.info.ID], closeReason, clk.Now().UTC(), stderr) {
+			if closeBeadUnlessLateWork(store, sw, infoByID[target.info.ID], closeReason, clk.Now().UTC(), stderr, nil) {
 				// Store-only close family: mirror the close onto the snapshot
 				// (write-returns-Info) so a later reader sees Closed=true.
 				tick.markClosed(target.info.ID)
@@ -4788,7 +4849,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		info, ok := infoByID[id]
 		return info, ok
 	}
-	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookup, wakeEvals, cfg, clk, trace)
+	advanceSessionDrainsWithSessionsTraced(cityPath, dt, sp, store, infoLookup, wakeEvals, cfg, clk, trace)
 	clearMissingIdleProbes(dt, infoByID)
 	// Drain-skip lines print on transition (session_drain_skip_log.go); a
 	// session this pass saw without a skip is re-armed here.
@@ -4876,10 +4937,24 @@ func resolvePreservedConfiguredNamedSessionTemplate(
 	} else {
 		info = bound
 	}
+	tp, err := resolveConfiguredNamedSessionTemplate(bp, spec, identity, info)
+	if err != nil {
+		return TemplateParams{}, info, err
+	}
+	installAgentSideEffects(bp, spec.Agent, tp, stderr)
+	return tp, info, nil
+}
+
+// resolveConfiguredNamedSessionTemplate is the resolution half of
+// resolvePreservedConfiguredNamedSessionTemplate: info's template under bp
+// for spec, with the named adjustments. It never rebinds the trigger bead
+// (no store write) and installs no agent side effects; the v2 start's
+// resolver calls it directly.
+func resolveConfiguredNamedSessionTemplate(bp *agentBuildParams, spec namedSessionSpec, identity string, info sessionpkg.Info) (TemplateParams, error) {
 	fpExtra := buildFingerprintExtra(spec.Agent)
 	tp, err := resolveTemplateForSessionBeadInfo(bp, spec.Agent, identity, fpExtra, info)
 	if err != nil {
-		return TemplateParams{}, info, err
+		return TemplateParams{}, err
 	}
 	tp.Alias = identity
 	tp.TemplateName = namedSessionBackingTemplate(spec)
@@ -4893,8 +4968,7 @@ func resolvePreservedConfiguredNamedSessionTemplate(
 	tp.Env["GC_ALIAS"] = identity
 	tp.Env["GC_AGENT"] = identity
 	tp.Env["GC_SESSION_ORIGIN"] = "named"
-	installAgentSideEffects(bp, spec.Agent, tp, stderr)
-	return tp, info, nil
+	return tp, nil
 }
 
 // sessionHasOpenAssignedWorkForConfig uses the same configured-named-session
@@ -4911,23 +4985,23 @@ func resolvePreservedConfiguredNamedSessionTemplate(
 // live worker. On a work-led plane the relocated binding was exactly such a leg
 // (ga-j4ob9), and this gate was invisible to the boundary census too, because it
 // ranged a map rather than calling a named enumerator.
-func sessionHasOpenAssignedWorkForConfig(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, session beads.Bead) (bool, error) {
-	return sessionHasOpenAssignedWorkInStores(cityPath, cfg, store, rigStores, sessionAssignmentIdentifiersForConfig(session, cfg))
+func sessionHasOpenAssignedWorkForConfig(sw *SeatWork, session beads.Bead) (bool, error) {
+	return sessionHasOpenAssignedWorkInStores(sw, releaseScopeOfBead(session, sw.Legs().cfg))
 }
 
 // sessionHasOpenAssignedWorkForConfigInfo is the session.Info form of
 // sessionHasOpenAssignedWorkForConfig for the reconciler forward pass (the raw
 // form stays for the repair/cleanup lanes that hold a raw bead). The work-store
 // probe stays bead-shaped; only the assignment-identifier derivation reads Info.
-func sessionHasOpenAssignedWorkForConfigInfo(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, info sessionpkg.Info) (bool, error) {
-	return sessionHasOpenAssignedWorkInStores(cityPath, cfg, store, rigStores, sessionAssignmentIdentifiersForConfigInfo(info, cfg))
+func sessionHasOpenAssignedWorkForConfigInfo(sw *SeatWork, info sessionpkg.Info) (bool, error) {
+	return sessionHasOpenAssignedWorkInStores(sw, releaseScope(info, sw.Legs().cfg))
 }
 
 // sessionHasInProgressAssignedWorkForConfig reports only claimed work for
 // progress-stall recycle. Open assigned work has not been claimed yet and must
 // not suppress claim-less parked-session recovery.
-func sessionHasInProgressAssignedWorkForConfig(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, info sessionpkg.Info) (bool, error) {
-	return sessionHasAssignedWorkInStoresForStatuses(cityPath, cfg, store, rigStores, sessionAssignmentIdentifiersForConfigInfo(info, cfg), []string{"in_progress"})
+func sessionHasInProgressAssignedWorkForConfig(sw *SeatWork, info sessionpkg.Info) (bool, error) {
+	return sessionHasAssignedWorkInStoresForStatuses(sw, releaseScope(info, sw.Legs().cfg), []string{"in_progress"})
 }
 
 // idleRespawnAckUnsafeToStop revalidates the two facts that can change after
@@ -4939,13 +5013,13 @@ func idleRespawnAckUnsafeToStop(
 	cityPath string,
 	cfg *config.City,
 	store beads.Store,
-	rigStores map[string]beads.Store,
+	sw *SeatWork,
 	info sessionpkg.Info,
 	sp runtime.Provider,
 	dt *drainTracker,
 	name string,
 ) (bool, string, error) {
-	holdsClaim, err := sessionHasInProgressAssignedWorkForConfig(cityPath, cfg, store, rigStores, info)
+	holdsClaim, err := sessionHasInProgressAssignedWorkForConfig(sw, info)
 	if err != nil {
 		return true, "claim-observation-error", err
 	}
@@ -4970,80 +5044,27 @@ func idleRespawnAckUnsafeToStop(
 }
 
 // sessionHasOpenAssignedWorkForReachableStore reports whether any open or
-// in-progress work bead is assigned to the given session in the store its
-// configured agent can query and claim from.
-func sessionHasOpenAssignedWorkForReachableStore(
-	cityPath string,
-	cfg *config.City,
-	store beads.Store,
-	rigStores map[string]beads.Store,
-	info sessionpkg.Info,
-) (bool, error) {
-	identifiers := sessionAssignmentIdentifiersForConfigInfo(info, cfg)
-	return assignedWorkExistsForSession(cityPath, cfg, store, rigStores, info, func(s beads.Store) (bool, error) {
-		return sessionHasOpenAssignedWorkInStoreByIdentifiers(s, identifiers)
-	})
-}
-
-// assignedWorkExistsForSession is the existence probe every "does this session
-// still hold work?" gate runs: the resolver's leg set, read in plan order,
-// stopping at the first leg that answers yes.
-//
-// It fails CLOSED on a leg that could not be read. A rig going dark is a
-// PartialDegrade leg in the plan, so the pass completes and reports Partial
-// instead of aborting — but for THIS question a smaller answer presented as
-// authoritative is "the session holds nothing", and the drain arm acts on it.
-// Every caller already refuses its decision on an error, so the honest report is
-// an error (gc-ft31x: retain rather than reap).
-func assignedWorkExistsForSession(
-	cityPath string,
-	cfg *config.City,
-	store beads.Store,
-	rigStores map[string]beads.Store,
-	info sessionpkg.Info,
-	probe func(beads.Store) (bool, error),
-) (bool, error) {
-	plan, err := assignedWorkPlanForSessionInfo(cityPath, cfg, store, rigStores, info)
-	if err != nil {
-		return false, err
-	}
-	var found bool
-	res, err := storeref.Walk(plan, func(leg storeref.Leg) (bool, error) {
-		has, err := probe(leg.Store)
-		if err != nil {
-			return false, err
-		}
-		found = has
-		return has, nil
-	})
-	if err != nil {
-		return false, err
-	}
-	if !found {
-		if err := assignedWorkScanComplete(res); err != nil {
-			return false, err
-		}
-	}
-	return found, nil
+// in-progress work bead is assigned to the given session on sw's legs. It
+// fails CLOSED on a leg that could not be read: a smaller answer presented as
+// authoritative is "the session holds nothing", and the drain arm acts on it
+// (gc-ft31x: retain rather than reap).
+func sessionHasOpenAssignedWorkForReachableStore(sw *SeatWork, info sessionpkg.Info) (bool, error) {
+	return sw.has(seatWorkQuery{scope: releaseScope(info, sw.Legs().cfg), statuses: seatWorkStatuses})
 }
 
 // sessionHasOpenAssignedWorkForReachableStoreForCloseGate is the drain-ack
-// close-gate form of sessionHasOpenAssignedWorkForReachableStore: identical
-// reachability/identifier resolution, but the per-store probe additionally
-// excludes the session's own mol-do-work "drain" step. That
+// close-gate form of sessionHasOpenAssignedWorkForReachableStore: the same
+// SeatWork and ReleaseScope, but the query additionally excludes the
+// session's own mol-do-work "drain" step. That
 // step's title is literally "Close drain step and signal completion" — counting
 // it as assigned work means a session that has already signaled completion is
 // judged to still have work, so the session bead never closes and the pool
 // controller respawns a fresh session onto the same still-open step forever.
 //
-// This is a deliberately SEPARATE chain from sessionHasOpenAssignedWorkForReachableStore,
-// not a shared-helper change: sessionHasOpenAssignedWorkForTier and
-// sessionHasOpenAssignedWispWork (the functions that would otherwise need the
-// exclusion) are also called from the awake-work chain
-// (sessionHasInProgressAssignedWorkForTier), which gates unrelated decisions
-// (config-drift drain deferral, the max-session-age timer, the pool-slot-freeable
-// check, wake-on-assigned-work). None of those should start ignoring a session's
-// own drain step — only the drain-ack close decision should. Use this function
+// The exclusion is this query's alone: the other seat-work questions gate
+// unrelated decisions (config-drift drain deferral, the max-session-age timer,
+// the pool-slot-freeable check, wake-on-assigned-work), and none of those
+// should start ignoring a session's own drain step. Use this function
 // (and closeSessionBeadIfReachableStoreUnassigned's excludeOwnDrainStep=true form)
 // ONLY from the drain-ack finalize path.
 // The identifier set here stays NARROW deliberately: {ID, session_name,
@@ -5063,85 +5084,18 @@ func assignedWorkExistsForSession(
 // (drainAckAssigneeIdentities): over-refusing a kill merely leaves a row wedged,
 // which is the safe direction, whereas under-refusing one ends a live agent's
 // turn.
-func sessionHasOpenAssignedWorkForReachableStoreForCloseGate(
-	cityPath string,
-	cfg *config.City,
-	store beads.Store,
-	rigStores map[string]beads.Store,
-	info sessionpkg.Info,
-) (bool, error) {
-	identifiers := sessionAssignmentIdentifiersForConfigInfo(info, cfg)
-	return assignedWorkExistsForSession(cityPath, cfg, store, rigStores, info, func(s beads.Store) (bool, error) {
-		return sessionHasOpenAssignedWorkInStoreByIdentifiersForCloseGate(s, identifiers)
-	})
+func sessionHasOpenAssignedWorkForReachableStoreForCloseGate(sw *SeatWork, info sessionpkg.Info) (bool, error) {
+	return seatHasWorkForCloseGate(sw, releaseScope(info, sw.Legs().cfg))
 }
 
-func sessionHasOpenAssignedWorkInStoreByIdentifiersForCloseGate(store beads.Store, identifiers []string) (bool, error) {
-	return sessionHasAssignedWorkInStoreByIdentifiersForStatusesForCloseGate(store, identifiers, []string{"open", "in_progress"})
+// seatHasWorkForCloseGate is the close-gate existence probe over scope:
+// open or in_progress work, the seat's own drain step excluded.
+func seatHasWorkForCloseGate(sw *SeatWork, scope workScope) (bool, error) {
+	return sw.has(seatWorkQuery{scope: scope, statuses: seatWorkStatuses, keep: notOwnDrainStep})
 }
 
-func sessionHasAssignedWorkInStoreByIdentifiersForStatusesForCloseGate(store beads.Store, identifiers []string, statuses []string) (bool, error) {
-	if store == nil {
-		return false, nil
-	}
-	seen := make(map[string]struct{}, len(identifiers))
-	for _, status := range statuses {
-		for _, assignee := range identifiers {
-			if assignee == "" {
-				continue
-			}
-			key := status + "\x00" + assignee
-			if _, ok := seen[key]; ok {
-				continue
-			}
-			seen[key] = struct{}{}
-			if has, err := sessionHasOpenAssignedWorkForTierForCloseGate(store, assignee, status, beads.TierIssues, true); err != nil || has {
-				return has, err
-			}
-			if has, err := sessionHasOpenAssignedWispWorkForCloseGate(store, assignee, status); err != nil || has {
-				return has, err
-			}
-		}
-	}
-	return false, nil
-}
-
-// sessionHasOpenAssignedWorkForTierForCloseGate mirrors sessionHasOpenAssignedWorkForTier
-// but filters through hasNonSessionNonOwnDrainStepWork instead of the shared
-// wa.HasNonSessionWork, so the drain-step exclusion cannot leak into
-// sessionHasOpenAssignedWorkForTier's other caller (the awake-work chain).
-func sessionHasOpenAssignedWorkForTierForCloseGate(store beads.Store, assignee, status string, tierMode beads.TierMode, live bool) (bool, error) {
-	wa := workAssignmentForStore(beads.WorkStore{Store: store})
-	items, err := wa.OpenAssignedTo(assignee, status, tierMode, live)
-	if err != nil {
-		return false, err
-	}
-	return hasNonSessionNonOwnDrainStepWork(store, items), nil
-}
-
-// sessionHasOpenAssignedWispWorkForCloseGate mirrors sessionHasOpenAssignedWispWork
-// for the close gate. It intentionally skips the CachedOpenAssignedWisps fast
-// path: that cache is a positive-only accelerator built on the shared
-// wa.HasNonSessionWork filter, and drain-ack is not a hot loop, so the extra
-// live read here is cheap and keeps the exclusion correct rather than stale.
-func sessionHasOpenAssignedWispWorkForCloseGate(store beads.Store, assignee, status string) (bool, error) {
-	return sessionHasOpenAssignedWorkForTierForCloseGate(store, assignee, status, beads.TierWisps, true)
-}
-
-// hasNonSessionNonOwnDrainStepWork is wa.HasNonSessionWork plus the own-drain-step
-// exclusion: skips session beads/repairable session beads (as HasNonSessionWork
-// already does) AND the session's own mol-do-work drain step.
-func hasNonSessionNonOwnDrainStepWork(store beads.Store, items []beads.Bead) bool {
-	for _, item := range items {
-		if sessionpkg.IsSessionBeadOrRepairable(item) {
-			continue
-		}
-		if isSessionOwnDrainStepBead(store, item) {
-			continue
-		}
-		return true
-	}
-	return false
+func notOwnDrainStep(store beads.Store, b beads.Bead) (bool, error) {
+	return !isSessionOwnDrainStepBead(store, b), nil
 }
 
 // isSessionOwnDrainStepBead reports whether item is a mol-do-work "drain" step
@@ -5191,70 +5145,26 @@ func drainStepRootFormulaName(root beads.Bead) string {
 }
 
 // sessionHasAwakeAssignedWorkForReachableStore reports whether assigned work
-// should keep a session awake: in-progress work always counts, while open work
-// counts only when it is ready: unblocked, not deferred, and not ready-excluded.
-func sessionHasAwakeAssignedWorkForReachableStore(
-	cityPath string,
-	cfg *config.City,
-	store beads.Store,
-	rigStores map[string]beads.Store,
-	info sessionpkg.Info,
-) (bool, error) {
-	identifiers := sessionAssignmentIdentifiersForConfigInfo(info, cfg)
-	return assignedWorkExistsForSession(cityPath, cfg, store, rigStores, info, func(s beads.Store) (bool, error) {
-		return sessionHasAwakeAssignedWorkInStoreByIdentifiers(s, identifiers)
-	})
-}
-
-// firstAssignedWorkBeadForSession walks the session's reachable work-store legs
-// in plan order and returns the first bead a per-leg probe reports, plus whether
-// one was found. It is the bead-returning peer of assignedWorkExistsForSession:
-// the probe answers a single leg, and the walk stops at the first leg whose probe
-// returns found=true. A probe that must skip benign rows (the stranded in_progress
-// finder) simply returns found=false for a leg holding only benign matches, so
-// the walk continues to later legs — a benign earlier-leg row can never mask a
-// genuine match in a later leg. Fails CLOSED: a leg read error aborts, and an
-// incomplete scan with no match is surfaced through assignedWorkScanComplete so a
-// dark rig is never reported as "no work".
-func firstAssignedWorkBeadForSession(
-	cityPath string,
-	cfg *config.City,
-	store beads.Store,
-	rigStores map[string]beads.Store,
-	info sessionpkg.Info,
-	probe func(beads.Store) (beads.Bead, bool, error),
-) (beads.Bead, bool, error) {
-	plan, err := assignedWorkPlanForSessionInfo(cityPath, cfg, store, rigStores, info)
-	if err != nil {
-		return beads.Bead{}, false, err
-	}
-	var (
-		bead  beads.Bead
-		found bool
-	)
-	res, err := storeref.Walk(plan, func(leg storeref.Leg) (bool, error) {
-		b, ok, err := probe(leg.Store)
-		if err != nil {
-			return false, err
-		}
-		bead, found = b, ok
-		return ok, nil
-	})
-	if err != nil {
-		return beads.Bead{}, false, err
-	}
-	if !found {
-		if err := assignedWorkScanComplete(res); err != nil {
-			return beads.Bead{}, false, err
+// should keep a session awake: in-progress work always counts, held or not,
+// while open work counts only when it is ready (unblocked, not deferred, and not
+// ready-excluded) and not parked on a dispatch hold (assignedOpenWorkHeld).
+func sessionHasAwakeAssignedWorkForReachableStore(sw *SeatWork, info sessionpkg.Info) (bool, error) {
+	scope := releaseScope(info, sw.Legs().cfg)
+	// Readiness is not sw's to answer, so it only picks the legs: a leg with
+	// no open or in_progress row for the seat holds no awake work.
+	legs, unknown := sw.stores(seatWorkQuery{scope: scope, statuses: seatWorkStatuses})
+	for _, s := range legs {
+		if has, err := sessionHasAwakeAssignedWorkInStoreByIdentifiers(s, scope.scopeIDs()); err != nil || has {
+			return has, err
 		}
 	}
-	return bead, found, nil
+	return false, unknown
 }
 
 // firstOpenClaimableAssignedWorkBeadForReachableStore returns the first OPEN,
 // claimable-now work bead still assigned to the given session in the store the
 // session's configured agent can query, plus whether one was found. "Claimable"
-// here means open and neither blocked nor deferred — the open arm of the
+// here means open and not blocked, deferred or held — the open arm of the
 // drain-ack anomaly classifier (drainAckClaimableAnomalyBead), which suppresses
 // only provably-non-claimable rows. Returns (zero-bead, false, nil) when nothing
 // matches.
@@ -5263,79 +5173,18 @@ func firstAssignedWorkBeadForSession(
 // evaluated at, threaded from the reconciler's clock so a frozen-clock harness
 // drives it the same way the divergence half's ops.Now seam does. One instant is
 // read for the whole walk, so every leg answers as of the same moment.
-func firstOpenClaimableAssignedWorkBeadForReachableStore(
-	cityPath string,
-	cfg *config.City,
-	store beads.Store,
-	rigStores map[string]beads.Store,
-	info sessionpkg.Info,
-	now time.Time,
-) (beads.Bead, bool, error) {
-	identifiers := sessionAssignmentIdentifiersForConfigInfo(info, cfg)
-	return firstAssignedWorkBeadForSession(cityPath, cfg, store, rigStores, info, func(s beads.Store) (beads.Bead, bool, error) {
-		return firstOpenClaimableAssignedWorkBeadInStoreByIdentifiers(s, identifiers, now)
-	})
-}
-
-// firstOpenClaimableAssignedWorkBeadInStoreByIdentifiers returns the first OPEN
-// non-session, non-mail work bead in store assigned to any of the given
-// identifiers that a worker could claim right now, plus whether one was found.
-//
-// It walks the raw OpenAssignedTo list (status=open) and suppresses a row ONLY
-// when openAssignedRowProvablyNonClaimable says it is — deferred (defer_until /
-// indefinite deferral, fresh bead-local fields) or confirmed blocked on a
-// genuinely unmet plain `blocks` dependency. That helper owns the whole
-// suppression policy, including why bd's DENORMALIZED is_blocked projection is
-// never trusted on its own here; a row whose flag is stale-true but whose
-// blocking deps are met is a genuine strand and FIRES.
-// Every other open assigned row FIRES regardless of type. This deliberately does
-// NOT reuse the beads.Ready projection: Ready's type exclusions (step, molecule,
-// gate, merge-request, …) and label exclusions (gc:order-tracking, gc:session)
-// encode "not pull-claimable", not "not stranded", so an OPEN step bead assigned
-// straight to a seat at dispatch — sitting open before the agent claims it —
-// would be silenced by Ready even though it is a genuine strand
-// (gastownhall/gascity#2293). It also skips the seat's own mol-do-work drain step
-// (isSessionOwnDrainStepBead), mirroring the close gate's
-// hasNonSessionNonOwnDrainStepWork so a session's own open drain step is never
-// reported as a claimable strand. identifiers are pre-compacted (deduped, no
-// empties) by sessionAssignmentIdentifiersForConfigInfo, so no extra dedupe is
-// needed here.
-func firstOpenClaimableAssignedWorkBeadInStoreByIdentifiers(store beads.Store, identifiers []string, now time.Time) (beads.Bead, bool, error) {
-	if store == nil {
-		return beads.Bead{}, false, nil
-	}
+func firstOpenClaimableAssignedWorkBeadForReachableStore(sw *SeatWork, info sessionpkg.Info, now time.Time) (beads.Bead, bool, error) {
 	if now.IsZero() {
-		// A caller driving this finder directly never opened a tick clock; wall
-		// time is what the reconciler's own clock would have reported anyway. The
-		// fallback lives here rather than at each call site so a zero instant can
-		// never reach beads.IsDeferred, where it would read every future
-		// defer_until as deferred and suppress a genuine strand.
 		now = time.Now()
 	}
-	wa := workAssignmentForStore(beads.WorkStore{Store: store})
-	for _, assignee := range identifiers {
-		items, err := wa.OpenAssignedTo(assignee, "open", beads.TierBoth, true)
-		if err != nil {
-			return beads.Bead{}, false, err
+	q := seatWorkQuery{scope: releaseScope(info, sw.Legs().cfg), statuses: []string{"open"}, keep: func(s beads.Store, b beads.Bead) (bool, error) {
+		if isSessionOwnDrainStepBead(s, b) {
+			return false, nil
 		}
-		for _, item := range items {
-			if sessionpkg.IsSessionBeadOrRepairable(item) {
-				continue
-			}
-			if isSessionOwnDrainStepBead(store, item) {
-				continue
-			}
-			suppress, err := openAssignedRowProvablyNonClaimable(store, item, now)
-			if err != nil {
-				return beads.Bead{}, false, err
-			}
-			if suppress {
-				continue
-			}
-			return item, true, nil
-		}
-	}
-	return beads.Bead{}, false, nil
+		suppress, err := openAssignedRowProvablyNonClaimable(s, b, now)
+		return !suppress, err
+	}}
+	return sw.first(q)
 }
 
 // openAssignedRowProvablyNonClaimable reports whether an OPEN assigned row is
@@ -5350,6 +5199,9 @@ func firstOpenClaimableAssignedWorkBeadInStoreByIdentifiers(store beads.Store, i
 //   - deferred — defer_until and bd's indefinite deferral are fresh bead-local
 //     fields, never stale, so this is PROOF: no worker could have claimed the row
 //     and draining past it was correct pull.
+//   - held — a canonical dispatch hold label (beadmeta.HasDispatchHold) is a
+//     fresh bead-local field too, and the hook refuses to serve a held row on
+//     every path, so this is PROOF as well: draining past it was correct pull.
 //   - blockedness_unproven — bd's is_blocked projection reads STALE-CAPABLE true,
 //     or (the production reading) is absent entirely. Neither is proof, so the
 //     row's real blockedness is settled against live deps first
@@ -5363,11 +5215,9 @@ func firstOpenClaimableAssignedWorkBeadInStoreByIdentifiers(store beads.Store, i
 // blocker", so the caller surfaces it instead of manufacturing the alarm from an
 // unreadable store. Know how far that reaches: it is wide precisely because the
 // production reading is ABSENT, so every non-deferred row settles against live
-// deps. The error returns straight out of
-// firstOpenClaimableAssignedWorkBeadInStoreByIdentifiers, abandoning the rest of
-// that assignee's rows AND every remaining identifier, and it aborts
-// storeref.Walk inside firstAssignedWorkBeadForSession, abandoning every
-// remaining leg. So ONE unreadable row suppresses the seat's entire open-arm scan
+// deps. The error returns straight out of the seat's SeatWork query
+// (firstOpenClaimableAssignedWorkBeadForReachableStore), abandoning every
+// remaining row, identifier and leg. So ONE unreadable row suppresses the seat's entire open-arm scan
 // for that finalize — which is one-shot (finalizeDrainAckStoppedSession), so the
 // alarm is dropped rather than retried, and a suppression that broad is not the
 // "provably non-claimable" proof this helper otherwise insists on. That polarity
@@ -5381,7 +5231,7 @@ func firstOpenClaimableAssignedWorkBeadInStoreByIdentifiers(store beads.Store, i
 // TestReconcileSessionBeads_DrainAckDepConfirmReadErrorNoFireAndLogsError.
 func openAssignedRowProvablyNonClaimable(store beads.Store, item beads.Bead, now time.Time) (bool, error) {
 	switch classifyDemandRowClaimability(item, now) {
-	case demandRowDeferred:
+	case demandRowDeferred, demandRowHeld:
 		return true, nil
 	case demandRowBlockednessUnproven:
 		return beadHasUnmetPlainBlocksDep(store, item.ID)
@@ -5401,46 +5251,8 @@ func openAssignedRowProvablyNonClaimable(store beads.Store, item beads.Bead, now
 // drainAckClaimableAnomalyBead — a false negative is worse than the residual
 // false-positive). Returns (zero-bead, false, nil) when the seat holds no
 // in_progress row (only its own drain step and session beads are skipped).
-func firstInProgressAssignedWorkBeadForReachableStore(
-	cityPath string,
-	cfg *config.City,
-	store beads.Store,
-	rigStores map[string]beads.Store,
-	info sessionpkg.Info,
-) (beads.Bead, bool, error) {
-	identifiers := sessionAssignmentIdentifiersForConfigInfo(info, cfg)
-	return firstAssignedWorkBeadForSession(cityPath, cfg, store, rigStores, info, func(s beads.Store) (beads.Bead, bool, error) {
-		return firstInProgressAssignedWorkBeadInStoreByIdentifiers(s, identifiers)
-	})
-}
-
-// firstInProgressAssignedWorkBeadInStoreByIdentifiers returns the first
-// in_progress non-session work bead in store assigned to one of the given
-// identifiers. The seat's own mol-do-work drain step (isSessionOwnDrainStepBead)
-// is skipped for parity with the ready finder and the close gate; everything else
-// fires. identifiers are pre-compacted (deduped, no empties) by
-// sessionAssignmentIdentifiersForConfigInfo.
-func firstInProgressAssignedWorkBeadInStoreByIdentifiers(store beads.Store, identifiers []string) (beads.Bead, bool, error) {
-	if store == nil {
-		return beads.Bead{}, false, nil
-	}
-	wa := workAssignmentForStore(beads.WorkStore{Store: store})
-	for _, assignee := range identifiers {
-		items, err := wa.OpenAssignedTo(assignee, "in_progress", beads.TierBoth, true)
-		if err != nil {
-			return beads.Bead{}, false, err
-		}
-		for _, item := range items {
-			if sessionpkg.IsSessionBeadOrRepairable(item) {
-				continue
-			}
-			if isSessionOwnDrainStepBead(store, item) {
-				continue
-			}
-			return item, true, nil
-		}
-	}
-	return beads.Bead{}, false, nil
+func firstInProgressAssignedWorkBeadForReachableStore(sw *SeatWork, info sessionpkg.Info) (beads.Bead, bool, error) {
+	return sw.first(seatWorkQuery{scope: releaseScope(info, sw.Legs().cfg), statuses: []string{"in_progress"}, keep: notOwnDrainStep})
 }
 
 // Unknown-state throttle markers. unknownStateFirstSeenKey records when the
@@ -5642,10 +5454,8 @@ const strandedWorkIDListLimit = 10
 // for cross-restart durability; the in-memory marker is the
 // load-bearing single-emission guarantee within a controller lifetime.
 func emitSessionStrandedDiagnostic(
-	cityPath string,
-	cfg *config.City,
 	store beads.Store,
-	rigStores map[string]beads.Store,
+	sw *SeatWork,
 	info sessionpkg.Info,
 	snapshot *sessionBeadSnapshot,
 	template string,
@@ -5659,7 +5469,7 @@ func emitSessionStrandedDiagnostic(
 	if strings.TrimSpace(info.StrandedEventEmittedAt) != "" {
 		return nil
 	}
-	assignedWork, err := collectSessionAssignedWorkInfo(cityPath, cfg, store, rigStores, info)
+	assignedWork, err := collectSessionAssignedWorkInfo(sw, info)
 	if err != nil {
 		fmt.Fprintf(stderr, "session reconciler: collecting stranded work ids for %s: %v\n", info.SessionNameMetadata, err) //nolint:errcheck
 	}
@@ -5893,76 +5703,36 @@ func formatStrandedMessage(template, sessionName string, ids []string) string {
 
 // collectSessionAssignedWorkInfo returns the open/in_progress work beads
 // assigned to the session, excluding session beads themselves, along with the
-// store that owns each work bead. It reads the same leg set the gate read
-// (assignedWorkPlanForSessionInfo) so the diagnostic lists and mutates exactly
-// the beads the gate considered when deciding to emit.
+// store that owns each work bead. It reads the same SeatWork and scope the gate
+// read, so the diagnostic lists and mutates exactly the beads the gate
+// considered when deciding to emit.
 //
 // Without that alignment the gate could see assigned work — via the
 // config-derived named-session identity, via a rig-store-routed query, or in a
 // relocated class binding — while the collector queried somewhere else,
 // producing a "0 stranded beads" message in the exact failure mode the
 // diagnostic exists to surface.
-func collectSessionAssignedWorkInfo(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, info sessionpkg.Info) ([]strandedAssignedWork, error) {
-	identifiers := sessionAssignmentIdentifiersForConfigInfo(info, cfg)
+func collectSessionAssignedWorkInfo(sw *SeatWork, info sessionpkg.Info) ([]strandedAssignedWork, error) {
+	hits, err := sw.match(seatWorkQuery{scope: releaseScope(info, sw.Legs().cfg), statuses: seatWorkStatuses}, false)
 	seen := make(map[string]struct{})
 	out := make([]strandedAssignedWork, 0, 4)
-	collect := func(s beads.Store) error {
-		if s == nil {
-			return nil
+	for _, hit := range hits {
+		// FIRST LEG WINS, across legs — this key is the bare id, not (leg, id)
+		// like the release sweeps'. For a DUAL-RESIDENT id (the same id claimed
+		// in both the work ledger and the binding, which `gc storage migrate`
+		// preserving ids makes real) only the first leg's copy is collected, so
+		// a caller that mutates what this returns leaves the binding copy
+		// in_progress. That is the ga-dk345 dual-resident carry-forward,
+		// deliberately unresolved: this collector's consumers report ONE
+		// stranded bead per id, and a doubled list reads as double the strand.
+		if _, dup := seen[hit.bead.ID]; !dup {
+			seen[hit.bead.ID] = struct{}{}
+			out = append(out, strandedAssignedWork{bead: hit.bead, store: hit.store})
 		}
-		wa := workAssignmentForStore(beads.WorkStore{Store: s})
-		for _, status := range []string{"open", "in_progress"} {
-			for _, assignee := range identifiers {
-				if assignee == "" {
-					continue
-				}
-				items, err := wa.OpenAssignedTo(assignee, status, beads.TierBoth, true)
-				if err != nil {
-					return err
-				}
-				for _, item := range items {
-					if sessionpkg.IsSessionBeadOrRepairable(item) {
-						continue
-					}
-					// FIRST LEG WINS, across legs — this key is the bare id, not
-					// (leg, id) like the release sweeps'. For a DUAL-RESIDENT id
-					// (the same id claimed in both the work ledger and the
-					// binding, which `gc storage migrate` preserving ids makes
-					// real) only the first leg's copy is collected, so a caller
-					// that mutates what this returns leaves the binding copy
-					// in_progress. That is the ga-dk345 dual-resident
-					// carry-forward, deliberately unresolved in S2: making it
-					// coherent is a placement question, not a lookup one, and it
-					// belongs with S5's create routing. Do not "fix" it by
-					// keying on (leg, id) here — this collector's consumers
-					// report ONE stranded bead per id, and a doubled list reads
-					// as double the strand.
-					if _, dup := seen[item.ID]; dup {
-						continue
-					}
-					seen[item.ID] = struct{}{}
-					out = append(out, strandedAssignedWork{bead: item, store: s})
-				}
-			}
-		}
-		return nil
-	}
-	plan, err := assignedWorkPlanForSessionInfo(cityPath, cfg, store, rigStores, info)
-	if err != nil {
-		return out, err
-	}
-	res, err := storeref.Walk(plan, func(leg storeref.Leg) (bool, error) {
-		return false, collect(leg.Store)
-	})
-	if err != nil {
-		return out, err
 	}
 	// A leg that went dark cannot be reported as "nothing stranded there": the
 	// diagnostic's whole job is to name what a session left behind.
-	if err := assignedWorkScanComplete(res); err != nil {
-		return out, err
-	}
-	return out, nil
+	return out, err
 }
 
 func strandedAssignedWorkIDs(work []strandedAssignedWork) []string {
@@ -5973,71 +5743,15 @@ func strandedAssignedWorkIDs(work []strandedAssignedWork) []string {
 	return ids
 }
 
-func sessionHasOpenAssignedWorkInStore(store beads.Store, session beads.Bead) (bool, error) {
-	return sessionHasOpenAssignedWorkInStoreByIdentifiers(store, sessionAssignmentIdentifiers(session))
+func sessionHasOpenAssignedWorkInStores(sw *SeatWork, scope workScope) (bool, error) {
+	return sessionHasAssignedWorkInStoresForStatuses(sw, scope, seatWorkStatuses)
 }
 
-func sessionHasOpenAssignedWorkInStores(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, identifiers []string) (bool, error) {
-	return sessionHasAssignedWorkInStoresForStatuses(cityPath, cfg, store, rigStores, identifiers, []string{"open", "in_progress"})
-}
-
-// sessionHasAssignedWorkInStoresForStatuses is the cross-store existence probe:
-// the whole city's assigned-work leg set, read in plan order, stopping at the
-// first leg that answers. It fails CLOSED on a leg that went dark for the same
-// reason assignedWorkExistsForSession does — the callers are close decisions.
-func sessionHasAssignedWorkInStoresForStatuses(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, identifiers []string, statuses []string) (bool, error) {
-	plan, err := assignedWorkSweepPlan(cityPath, cfg, store, rigStores, identifiers)
-	if err != nil {
-		return false, err
-	}
-	var found bool
-	res, err := storeref.Walk(plan, func(leg storeref.Leg) (bool, error) {
-		has, err := sessionHasAssignedWorkInStoreByIdentifiersForStatuses(leg.Store, identifiers, statuses)
-		if err != nil {
-			return false, err
-		}
-		found = has
-		return has, nil
-	})
-	if err != nil {
-		return false, err
-	}
-	if !found {
-		if err := assignedWorkScanComplete(res); err != nil {
-			return false, err
-		}
-	}
-	return found, nil
-}
-
-func sessionHasOpenAssignedWorkInStoreByIdentifiers(store beads.Store, identifiers []string) (bool, error) {
-	return sessionHasAssignedWorkInStoreByIdentifiersForStatuses(store, identifiers, []string{"open", "in_progress"})
-}
-
-func sessionHasAssignedWorkInStoreByIdentifiersForStatuses(store beads.Store, identifiers []string, statuses []string) (bool, error) {
-	if store == nil {
-		return false, nil
-	}
-	seen := make(map[string]struct{}, len(identifiers))
-	for _, status := range statuses {
-		for _, assignee := range identifiers {
-			if assignee == "" {
-				continue
-			}
-			key := status + "\x00" + assignee
-			if _, ok := seen[key]; ok {
-				continue
-			}
-			seen[key] = struct{}{}
-			if has, err := sessionHasOpenAssignedWorkForTier(store, assignee, status, beads.TierIssues, true); err != nil || has {
-				return has, err
-			}
-			if has, err := sessionHasOpenAssignedWispWork(store, assignee, status); err != nil || has {
-				return has, err
-			}
-		}
-	}
-	return false, nil
+// sessionHasAssignedWorkInStoresForStatuses is the cross-store existence probe
+// over sw's legs. It fails CLOSED on a leg that went dark: the callers are
+// close decisions.
+func sessionHasAssignedWorkInStoresForStatuses(sw *SeatWork, scope workScope, statuses []string) (bool, error) {
+	return sw.has(seatWorkQuery{scope: scope, statuses: statuses})
 }
 
 func sessionHasAwakeAssignedWorkInStoreByIdentifiers(store beads.Store, identifiers []string) (bool, error) {
@@ -6091,7 +5805,16 @@ func sessionHasReadyAssignedWorkForTier(store beads.Store, assignee string, tier
 	if err != nil {
 		return false, err
 	}
-	return wa.HasNonSessionWork(items), nil
+	// Ready is hold-transparent; the hook is not. Held open work cannot be
+	// served to this session, so it does not keep it awake (assignedOpenWorkHeld,
+	// the same gate desired-state wake demand applies in markReadyAssigned).
+	unheld := items[:0:0]
+	for _, item := range items {
+		if !assignedOpenWorkHeld(item) {
+			unheld = append(unheld, item)
+		}
+	}
+	return wa.HasNonSessionWork(unheld), nil
 }
 
 func sessionHasOpenAssignedWorkForTier(store beads.Store, assignee, status string, tierMode beads.TierMode, live bool) (bool, error) {
@@ -6314,6 +6037,16 @@ func recordSessionAttachedConfigDriftDeferral(info sessionpkg.Info, sessFront *s
 }
 
 func recentlyDeferredSessionAttachedConfigDrift(info sessionpkg.Info, clk clock.Clock, driftKey string) bool {
+	now := time.Now()
+	if clk != nil {
+		now = clk.Now()
+	}
+	return attachedConfigDriftDeferredAt(info, now, driftKey)
+}
+
+// attachedConfigDriftDeferredAt is recentlyDeferredSessionAttachedConfigDrift
+// at now, which reads no clock: v2's arm A19 passes its pass's time.
+func attachedConfigDriftDeferredAt(info sessionpkg.Info, now time.Time, driftKey string) bool {
 	if driftKey == "" || info.AttachedConfigDriftDeferredKey != driftKey {
 		return false
 	}
@@ -6325,10 +6058,7 @@ func recentlyDeferredSessionAttachedConfigDrift(info sessionpkg.Info, clk clock.
 	if err != nil {
 		return false
 	}
-	now := time.Now().UTC()
-	if clk != nil {
-		now = clk.Now().UTC()
-	}
+	now = now.UTC()
 	if now.Before(deferredAt) {
 		return true
 	}
@@ -6592,6 +6322,7 @@ func namedSessionActiveUseReasonInfo(info sessionpkg.Info, sp runtime.Provider, 
 // reads the folded ConfigDriftResetPatch (cleared last_woke_at) and the consumed
 // restart_requested stays off the snapshot (#2574).
 func resetConfiguredNamedSessionForConfigDriftInfo(
+	cityPath string,
 	info sessionpkg.Info,
 	tp TemplateParams,
 	store beads.Store,
@@ -6609,8 +6340,11 @@ func resetConfiguredNamedSessionForConfigDriftInfo(
 		nextState = "asleep"
 	}
 	if alive && sp != nil && sessionName != "" {
-		if err := workerKillSessionTargetWithConfig("", store, sp, nil, sessionName); err != nil {
+		if err := controllerKillSessionRow(cityPath, store, sp, nil, info); err != nil {
 			fmt.Fprintf(stderr, "session reconciler: stopping config-drift named session %s: %v\n", sessionName, err) //nolint:errcheck
+			if errors.Is(err, sessionpkg.ErrRuntimeLeaseBusy) || errors.Is(err, sessionpkg.ErrKillPremiseMoved) {
+				return nil // another holder moved or holds it: decide again next tick
+			}
 		}
 	}
 	nextSessionState := sessionpkg.State(nextState)
@@ -6772,13 +6506,30 @@ func beginIdleRespawnDrainIfIdle(
 		idleRespawnAttemptsMetadataKey: "1",
 		idleRespawnBeadIDMetadataKey:   strings.TrimSpace(eval.AssignedWorkBeadID),
 	}
+	if info.SleepIntent == "idle-stop-pending" {
+		// The tick clears the idle intent after this (clearIdleStopPending):
+		// clear it here (the IdleStopEnd cell), so the drain's basis is the
+		// row the tick leaves.
+		if ended, err := sessionpkg.DispositionOfInfo(info).Apply(sessionpkg.ActorController, sessionpkg.DispEvent{Kind: sessionpkg.EvIdleStopEnd}, sessionpkg.State(info.MetadataState), time.Time{}); err == nil {
+			ended.Changed().Into(info.ID, patch)
+		}
+	}
 	if sessFront == nil {
 		return false, nil, errors.New("session store is unavailable")
 	}
-	if err := sessFront.ApplyPatch(info.ID, patch); err != nil {
+	// Record the attempt on the row the drain decides on, fenced on it, and
+	// fold it in: the drain's basis is then the row as stored.
+	res, err := sessFront.Commit(sessionpkg.Decide(info, sessionpkg.FactsLegacyStopPending), patch)
+	if err != nil || res != sessionpkg.CommitLanded {
+		sessionpkg.UnmintDisposition(info.ID, patch)
+	}
+	if err != nil {
 		return false, nil, fmt.Errorf("record idle-respawn attempt: %w", err)
 	}
-	return beginSessionDrainInfo(info, sp, dt, idleRespawnDrainReason, clk, defaultDrainTimeout), patch, nil
+	if res != sessionpkg.CommitLanded {
+		return false, nil, nil // the row moved: decided again next tick
+	}
+	return beginSessionDrainInfo(info.ApplyPatch(patch), sp, dt, idleRespawnDrainReason, clk, defaultDrainTimeout), patch, nil
 }
 
 func selectIdleProbeTargets(
@@ -6894,7 +6645,7 @@ func launchIdleProbes(
 			continue
 		}
 		go func(beadID, sessionName string, probe *idleProbeState) {
-			err := wp.WaitForIdle(ctx, sessionName, idleSleepProbeTimeout)
+			err := wp.WaitForIdle(ctx, sessionName, idleSleepProbeTimeoutFor(sp, sessionName))
 			dt.finishIdleProbe(beadID, probe, err == nil, clk.Now().UTC())
 		}(target.info.ID, name, probe)
 	}
@@ -7116,27 +6867,24 @@ type dispatchOptionSources struct {
 // reconcileDispatchOptionSources returns the dispatch option sources a reconcile
 // pass's starts and launch-drift relaunches read: the caller's, with the
 // cross-leg claimed-work probe filled in when the caller supplied none. The
-// probe reads only the serving rigs: a suspended rig gets no bd call at all
-// (suspension is quiescence), so a claim held there does not beat the trigger.
-func reconcileDispatchOptionSources(opts startExecutionOptions, cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, suspendedRigPaths map[string]bool) dispatchOptionSources {
+// probe reads sw's legs, which hold only the serving rigs: a suspended rig gets
+// no bd call at all (suspension is quiescence), so a claim held there does not
+// beat the trigger.
+func reconcileDispatchOptionSources(opts startExecutionOptions, sw *SeatWork) dispatchOptionSources {
 	sources := opts.dispatchOptionSources
 	if sources.claimedWork == nil {
-		sources.claimedWork = reachableClaimedWorkProbe(cityPath, cfg, store, servingRigStores(cfg, rigStores, suspendedRigPaths))
+		sources.claimedWork = reachableClaimedWorkProbe(sw)
 	}
 	return sources
 }
 
 // reachableClaimedWorkProbe returns the claimedWorkProbe a reconcile pass hands
 // its launches: whether in-progress work is assigned to the session on any of
-// rigStores or the leading store its agent can claim from, or on a relocated
-// class binding, planned the way the drain gates plan their reads. A leg that
-// cannot be read is an error, not "holds nothing" (assignedWorkExistsForSession).
-func reachableClaimedWorkProbe(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store) claimedWorkProbe {
+// sw's legs, the ones the drain gates read. A leg that cannot be read is an
+// error, not "holds nothing".
+func reachableClaimedWorkProbe(sw *SeatWork) claimedWorkProbe {
 	return func(info sessionpkg.Info) (bool, error) {
-		identifiers := sessionAssignmentIdentifiersForConfigInfo(info, cfg)
-		return assignedWorkExistsForSession(cityPath, cfg, store, rigStores, info, func(s beads.Store) (bool, error) {
-			return sessionHasAssignedWorkInStoreByIdentifiersForStatuses(s, identifiers, []string{"in_progress"})
-		})
+		return sessionHasInProgressAssignedWorkForConfig(sw, info)
 	}
 }
 
@@ -7439,7 +7187,9 @@ func silentRebaselineSessionHashes(id string, sessFront *sessionpkg.Store, agent
 //
 // Returns (true, launchBatch) iff the agent was relaunched and hashes were
 // rebaselined (the caller folds launchBatch onto the typed snapshot and
-// `continue`s). Returns (false, fold) when the provider cannot relaunch,
+// `continue`s), and (true, nil) when another holder has the runtime lease (a
+// later tick decides again); any other lease failure is (false, nil), the
+// full-restart fallback. Returns (false, fold) when the provider cannot relaunch,
 // buildPreparedStart minted a speculative resume key (a warm relaunch would
 // --resume a key naming a conversation that was never created), the
 // prepare/precondition/relaunch step failed, or the rebaseline failed — the
@@ -7477,6 +7227,30 @@ func relaunchAgentForLaunchDrift(
 		// RelaunchProvider; fall through to the full restart. No side effects yet —
 		// no buildPreparedStart residue to fold.
 		return false, nil
+	}
+	// The relaunch starts the row's agent again: it runs under the runtime
+	// lease (I-LEASE), taken without waiting before the preparation's writes,
+	// and its provider call runs on the lease's Watch. A name another holder
+	// has defers it, writing nothing and skipping the full restart too: the
+	// next tick decides again. Any other lease failure falls back to the full
+	// restart (whose stop takes the lease itself), so drift is never stuck.
+	if leaseName := strings.TrimSpace(name); leaseName != "" {
+		lease, release, err := tryRuntimeLease(store, cityPath, leaseName, info.ID, sessionpkg.RuntimeLeaseTTLFor(cfg))
+		if err != nil {
+			if errors.Is(err, sessionpkg.ErrRuntimeLeaseBusy) {
+				fmt.Fprintf(stderr, "session reconciler: relaunch %s deferred: %v\n", name, err) //nolint:errcheck
+				return true, nil
+			}
+			fmt.Fprintf(stderr, "session reconciler: relaunch %s: %v; falling back to full restart\n", name, err) //nolint:errcheck
+			return false, nil
+		}
+		defer release()
+		if lease != nil && lease.Epoch() != 0 {
+			if watched, cancel, err := lease.Watch(ctx, startLeaseWatchEvery); err == nil {
+				defer cancel()
+				ctx = watched
+			}
+		}
 	}
 	// Capture whether the bead already tracked a resumable conversation BEFORE
 	// buildPreparedStart runs. An empty session_key means any key the preparation

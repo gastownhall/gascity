@@ -75,6 +75,13 @@ const startCommitMaxAttempts = 3
 // require-mode store that cannot fence, and a store that reports
 // beads.ErrConditionalWriteUnsupported at call time, return an error.
 func (s *Store) CommitStartedIfCurrent(expected Info, patch MetadataPatch) (bool, error) {
+	return s.CommitStartedIfCurrentUnder(expected, patch, nil)
+}
+
+// CommitStartedIfCurrentUnder is CommitStartedIfCurrent for a start run under
+// lease: a re-read row that no longer records the lease is not current, so a
+// start whose lease was taken over commits nothing. A nil lease checks none.
+func (s *Store) CommitStartedIfCurrentUnder(expected Info, patch MetadataPatch, lease *RuntimeLease) (bool, error) {
 	writer, _, err := beads.ResolveConditionalWriter(s.store)
 	if err != nil {
 		return false, fmt.Errorf("committing start of session %q: %w", expected.ID, err)
@@ -87,7 +94,8 @@ func (s *Store) CommitStartedIfCurrent(expected Info, patch MetadataPatch) (bool
 			if err != nil {
 				return err
 			}
-			if LeaseFromInfo(expected).CommitVerdict(LeaseFromInfo(infoFromPersistedBead(bead))) != LeaseCommit {
+			if LeaseFromInfo(expected).CommitVerdict(LeaseFromInfo(infoFromPersistedBead(bead))) != LeaseCommit ||
+				(lease != nil && !lease.HoldsMeta(bead.Metadata)) {
 				return nil
 			}
 			if writer == nil || len(patch) == 0 {
@@ -165,38 +173,66 @@ func (s *Store) WithPendingCreateRollback(expected Info, fn func() error) (bool,
 // beads.ErrConditionalWriteUnsupported at call time, return an error rather
 // than falling back to an unconditional write.
 func (s *Store) ApplyPatchIfLifecycleUnchanged(expected Info, patch MetadataPatch) (bool, error) {
+	return s.applyPatchIfLifecycleUnchanged(expected, patch, nil, 1)
+}
+
+// ApplyPatchIfLifecycleUnchangedUnder is ApplyPatchIfLifecycleUnchanged for a
+// writer holding lease: the re-read row must also still record the lease, or
+// the patch is refused with (false, nil). The write is fenced at that read's
+// revision, so a takeover that lands after the read refuses it too; a fence
+// lost to another writer re-reads and checks again, up to three times, as the
+// start commit does. A nil lease checks none.
+func (s *Store) ApplyPatchIfLifecycleUnchangedUnder(expected Info, patch MetadataPatch, lease *RuntimeLease) (bool, error) {
+	return s.applyPatchIfLifecycleUnchanged(expected, patch, lease, startCommitMaxAttempts)
+}
+
+func (s *Store) applyPatchIfLifecycleUnchanged(expected Info, patch MetadataPatch, lease *RuntimeLease, attempts int) (bool, error) {
+	res, err := s.commitIf(expected.ID, patch, lease, attempts, s.validatedBead, func(b beads.Bead) bool {
+		return sameLifecycleFacts(expected, infoFromPersistedBead(b))
+	})
+	return res == CommitLanded, err
+}
+
+// commitIf writes patch to row id while holds accepts read's read of it
+// (and, with lease, the read still records the lease), fenced at that read's
+// revision; a fence lost to another writer re-reads, up to attempts times.
+// Without conditional writes the write is unfenced: its window runs from the
+// read to the write, plus the cache's lag when read goes through the cache
+// (ApplyPatchIfLifecycleUnchanged; Commit reads live).
+func (s *Store) commitIf(id string, patch MetadataPatch, lease *RuntimeLease, attempts int, read func(string) (beads.Bead, error), holds func(beads.Bead) bool) (CommitResult, error) {
 	if len(patch) == 0 {
-		return false, nil
-	}
-	bead, err := s.validatedBead(expected.ID)
-	if err != nil {
-		return false, err
-	}
-	if bead.Status == "closed" {
-		return false, nil
-	}
-	if !sameLifecycleFacts(expected, infoFromPersistedBead(bead)) {
-		return false, nil
+		return 0, nil // nothing to write
 	}
 	writer, _, err := beads.ResolveConditionalWriter(s.store)
 	if err != nil {
-		return false, fmt.Errorf("updating session %q: %w", expected.ID, err)
+		return 0, fmt.Errorf("updating session %q: %w", id, err)
 	}
-	if writer == nil {
-		if err := s.ApplyPatch(expected.ID, patch); err != nil {
-			return false, err
+	for attempt := 0; attempt < attempts; attempt++ {
+		bead, err := read(id)
+		if err != nil {
+			return 0, err
 		}
-		return true, nil
+		if bead.Status == "closed" {
+			return CommitClosed, nil
+		}
+		if !holds(bead) || (lease != nil && !lease.HoldsMeta(bead.Metadata)) {
+			return CommitMoved, nil
+		}
+		if writer == nil {
+			if err := s.ApplyPatch(id, patch); err != nil {
+				return 0, err
+			}
+			return CommitLanded, nil
+		}
+		err = writer.UpdateIfMatch(id, bead.Revision, beads.UpdateOpts{Metadata: map[string]string(patch)})
+		switch {
+		case err == nil:
+			return CommitLanded, nil
+		case !beads.IsPreconditionFailed(err):
+			return 0, fmt.Errorf("updating session %q: %w", id, err)
+		}
 	}
-	err = writer.UpdateIfMatch(expected.ID, bead.Revision, beads.UpdateOpts{Metadata: map[string]string(patch)})
-	switch {
-	case err == nil:
-		return true, nil
-	case beads.IsPreconditionFailed(err):
-		return false, nil
-	default:
-		return false, fmt.Errorf("updating session %q: %w", expected.ID, err)
-	}
+	return CommitContended, nil
 }
 
 // UpdateMetadataFenced writes a patch decided from a fresh read of the row. It
@@ -225,11 +261,15 @@ func (s *Store) UpdateMetadataFenced(id string, attempts int, decide func(Info, 
 		opts := beads.UpdateOpts{Metadata: map[string]string(patch)}
 		if writer == nil {
 			if err := s.store.Update(id, opts); err != nil {
+				UnmintDisposition(id, patch)
 				return false, err
 			}
 			return true, nil
 		}
 		err = writer.UpdateIfMatch(id, bead.Revision, opts)
+		if err != nil {
+			UnmintDisposition(id, patch) // decide mints again on the next attempt
+		}
 		switch {
 		case err == nil:
 			return true, nil
@@ -242,17 +282,18 @@ func (s *Store) UpdateMetadataFenced(id string, attempts int, decide func(Info, 
 	return false, nil
 }
 
-// RowPatch is one fenced row write: a metadata patch, a title (nil leaves it)
-// and label deltas. Labels travel as deltas, never as a whole set.
+// RowPatch is one fenced row write: a metadata patch, a title and a type
+// (nil leaves them) and label deltas. Labels travel as deltas, never as a whole set.
 type RowPatch struct {
 	Metadata     MetadataPatch
 	Title        *string
+	Type         *string // an empty type's repair (RepairType's, in the same CAS)
 	AddLabels    []string
 	RemoveLabels []string
 }
 
 func (p RowPatch) empty() bool {
-	return len(p.Metadata) == 0 && p.Title == nil && len(p.AddLabels) == 0 && len(p.RemoveLabels) == 0
+	return len(p.Metadata) == 0 && p.Title == nil && p.Type == nil && len(p.AddLabels) == 0 && len(p.RemoveLabels) == 0
 }
 
 // UpdateRowFenced writes metadata, title and labels decided from a fresh read
@@ -265,7 +306,7 @@ func (p RowPatch) empty() bool {
 // way nothing is written. A success means the deltas applied, not that the
 // label set equals the read set plus the deltas (a legacy label-only write on
 // native Dolt does not move the revision). It reports whether it wrote.
-func (s *Store) UpdateRowFenced(id string, attempts int, decide func(Info) (RowPatch, bool)) (bool, error) {
+func (s *Store) UpdateRowFenced(id string, attempts int, decide func(Info, PersistedResponse) (RowPatch, bool)) (bool, error) {
 	writer, _, err := beads.ResolveConditionalWriter(s.store)
 	if err != nil {
 		return false, fmt.Errorf("updating session %q: %w", id, err)
@@ -278,16 +319,20 @@ func (s *Store) UpdateRowFenced(id string, attempts int, decide func(Info) (RowP
 		if err != nil {
 			return false, err
 		}
-		patch, ok := decide(infoFromPersistedBead(bead))
+		patch, ok := decide(infoFromPersistedBead(bead), PersistedResponseFromBead(bead))
 		if !ok || patch.empty() {
 			return false, nil
 		}
 		err = writer.UpdateIfMatch(id, bead.Revision, beads.UpdateOpts{
 			Metadata:     map[string]string(patch.Metadata),
 			Title:        patch.Title,
+			Type:         patch.Type,
 			Labels:       patch.AddLabels,
 			RemoveLabels: patch.RemoveLabels,
 		})
+		if err != nil {
+			UnmintDisposition(id, patch.Metadata) // the write did not land
+		}
 		switch {
 		case err == nil:
 			return true, nil
@@ -381,45 +426,70 @@ func (s *Store) SetState(id string, state State, reason string) error {
 	})
 }
 
-// Sleep records a non-terminal sleep/drain result via SleepPatch. It replaces
-// the max-age and idle-timeout sleep writes in session_reconciler.go.
+// Sleep records a non-terminal sleep/drain result: SleepPatch's lifecycle
+// with the disposition's Sleep cell (ApplySleep), which keeps an operator's
+// user hold. The city stop writes it.
 func (s *Store) Sleep(id, reason string, now time.Time) error {
-	return s.ApplyPatch(id, SleepPatch(now, reason))
+	_, err := s.ApplySleep(id, SleepPatch(now, reason))
+	return err
 }
 
-// BeginDrainAckStopPending moves a drain-acked session into durable
-// stop-pending state via DrainAckStopPendingPatch. Replaces markDrainAckStopPending.
-func (s *Store) BeginDrainAckStopPending(id string, now time.Time) error {
-	return s.ApplyPatch(id, DrainAckStopPendingPatch(now))
-}
+// operatorSuspendAttempts bounds an operator's or agent's own disposition
+// write (ApplyDispositionFresh), and the failed-stop rollback: an operator's
+// write competes with every controller write to the row.
+const operatorSuspendAttempts = 8
 
-// RequestRestart records a controller handoff to a fresh provider conversation
-// via RestartRequestPatch. Replaces the restart-request write in session_reconciler.go.
-func (s *Store) RequestRestart(id, sessionKey string, now time.Time) error {
-	return s.ApplyPatch(id, RestartRequestPatch(sessionKey, now))
-}
-
-// ResetConfigDrift records an in-place named-session repair after core config
-// drift via ConfigDriftResetPatch. Replaces the config-drift reset writes in
-// session_reconciler.go and soft_reload.go.
-func (s *Store) ResetConfigDrift(id string, next State, sessionKey string, now time.Time) error {
-	return s.ApplyPatch(id, ConfigDriftResetPatch(next, sessionKey, now))
-}
-
-// SetWaitHold sets or clears the wait-hold + sleep-intent markers. Replaces the
-// SetMetadataBatch(sessionID, {wait_hold, sleep_intent}) writes in cmd_wait.go.
-// When on is false both keys are cleared (empty-string write).
-func (s *Store) SetWaitHold(id string, on bool, reason string) error {
-	if on {
-		return s.ApplyPatch(id, MetadataPatch{
-			"wait_hold":    reason,
-			"sleep_intent": reason,
-		})
+// OperatorSuspend writes an operator's suspend: the disposition table's
+// Suspend cell, decided on each fresh read of the row, with its lifecycle
+// (operatorSuspendLife). Every suspend writes, a suspend already in force
+// included: it is stamped again, so an operator's resume that read the old
+// stamp refuses its consume. A row closed since the caller read it is refused
+// with an illegal-transition error and written nothing; a CAS lost on every
+// attempt writes nothing and returns an error to retry. It returns what it
+// wrote, for a failed stop's rollback.
+func (s *Store) OperatorSuspend(id string, now time.Time) (DispositionWrite, error) {
+	w, err := s.ApplyDispositionFresh(id, ActorOperator, DispEvent{Kind: EvSuspend}, operatorSuspendLife, now)
+	switch {
+	case err != nil:
+		return DispositionWrite{}, err
+	case w.Result == CommitClosed:
+		return DispositionWrite{}, &IllegalTransitionError{From: StateClosed, Command: CmdSuspend}
+	case w.Result != CommitLanded:
+		return DispositionWrite{}, fmt.Errorf("suspending session %q: lost to concurrent writes; retry", id)
 	}
-	return s.ApplyPatch(id, MetadataPatch{
-		"wait_hold":    "",
-		"sleep_intent": "",
-	})
+	return w, nil
+}
+
+// operatorSuspendLife is the lifecycle of an operator's suspend:
+// state=suspended, and the pending wake cleared as newer intent (D7.3).
+func operatorSuspendLife(Disposition, Disposition, Info) MetadataPatch {
+	patch := ClearWakeRequestPatch()
+	patch["state"] = string(StateSuspended)
+	patch["slept_at"] = ""
+	patch["sleep_reason"] = ""
+	return patch
+}
+
+// SetWaitHold begins (on) or ends an agent's wait on the row: the
+// disposition's WaitBegin or WaitEnd cell, decided on a fresh read. A wait
+// never replaces an operator's user-hold intent. reason is the wait's, which
+// the wait hold no longer records. A closed row takes no write and no error,
+// as main's blind write succeeded there (`gc session wait --sleep` exits 0).
+func (s *Store) SetWaitHold(id string, on bool, _ string) error {
+	ev := DispEvent{Kind: EvWaitEnd}
+	if on {
+		ev.Kind = EvWaitBegin
+	}
+	w, err := s.ApplyDispositionFresh(id, ActorAgent, ev, nil, time.Now())
+	switch {
+	case err != nil:
+		return err
+	case w.Result == CommitClosed:
+		return nil
+	case w.Result != CommitLanded:
+		return fmt.Errorf("session %s: wait hold lost to concurrent writes; retry", id)
+	}
+	return nil
 }
 
 // setMetadataValue is the single-key write chokepoint. It is the byte-identical
@@ -694,7 +764,8 @@ func closePremiseHolds(decided, open Info) bool {
 // (false, nil). decide returning false, or a row already closed, writes
 // nothing. Without an atomic conditional closer it returns
 // beads.ErrConditionalWriteUnsupported and writes nothing: there is no
-// two-write fallback.
+// two-write fallback. The close clears the runtime lease record, which a
+// closed row holds no more.
 func (s *Store) CloseWithMetadataIfMatch(id string, decide func(Info, PersistedResponse) (MetadataPatch, bool)) (bool, error) {
 	closer, ok := beads.AtomicConditionalCloserFor(s.store)
 	if !ok {
@@ -708,7 +779,11 @@ func (s *Store) CloseWithMetadataIfMatch(id string, decide func(Info, PersistedR
 	if !ok {
 		return false, nil
 	}
-	switch _, err = closer.CloseWithMetadataIfMatch(id, bead.Revision, map[string]string(patch)); {
+	_, err = closer.CloseWithMetadataIfMatch(id, bead.Revision, map[string]string(withRuntimeLeaseCleared(patch)))
+	if err != nil {
+		UnmintDisposition(id, patch) // the close did not land
+	}
+	switch {
 	case err == nil:
 		return true, nil
 	case beads.IsPreconditionFailed(err):
@@ -796,6 +871,13 @@ func (s *Store) closeAtomically(closer beads.AtomicConditionalCloser, bead beads
 // Close: a writer that lands after the read, or between the Tx's two writes,
 // is still closed over, because nothing fences the write on that read.
 func (s *Store) CloseWithTerminalPatch(expected Info, patch MetadataPatch, commitMsg string, now time.Time) (bool, error) {
+	return s.CloseWithTerminalPatchUnder(expected, patch, commitMsg, now, nil)
+}
+
+// CloseWithTerminalPatchUnder is CloseWithTerminalPatch for a closer holding
+// held: every row it reads must also still record the lease, or it returns
+// ErrRuntimeLeaseLost with nothing written. A nil lease checks none.
+func (s *Store) CloseWithTerminalPatchUnder(expected Info, patch MetadataPatch, commitMsg string, now time.Time, held *RuntimeLease) (bool, error) {
 	id := expected.ID
 	bead, err := s.validatedBead(id)
 	if err != nil {
@@ -811,6 +893,9 @@ func (s *Store) CloseWithTerminalPatch(expected Info, patch MetadataPatch, commi
 		}
 		if !closePremiseHolds(expected, row) {
 			return fmt.Errorf("closing session %q: %w", id, ErrSessionCloseSuperseded)
+		}
+		if held != nil && !held.HoldsMeta(open.Metadata) {
+			return fmt.Errorf("closing session %q: %w", id, ErrRuntimeLeaseLost)
 		}
 		return nil
 	}
@@ -876,6 +961,13 @@ var errPendingCreateRollbackSuperseded = errors.New("pending create is no longer
 //     with closed false and nothing written. The caller then keeps its
 //     transaction.
 func (s *Store) RollbackPendingCreateAtomically(expected Info, closePatch, postClosePatch MetadataPatch) (closed, postClosed bool, err error) {
+	return s.RollbackPendingCreateAtomicallyUnder(expected, closePatch, postClosePatch, nil)
+}
+
+// RollbackPendingCreateAtomicallyUnder is RollbackPendingCreateAtomically for
+// a start holding held: a row that no longer records the lease is not rolled
+// back, as a superseded one is not. A nil lease checks none.
+func (s *Store) RollbackPendingCreateAtomicallyUnder(expected Info, closePatch, postClosePatch MetadataPatch, held *RuntimeLease) (closed, postClosed bool, err error) {
 	closer, ok := beads.AtomicConditionalCloserFor(s.store)
 	if !ok {
 		return false, false, beads.ErrConditionalWriteUnsupported
@@ -890,7 +982,7 @@ func (s *Store) RollbackPendingCreateAtomically(expected Info, closePatch, postC
 			return nil
 		}
 		closed, err = s.closeAtomically(closer, bead, closePatch, func(open beads.Bead) error {
-			if !lease.CanRollback(LeaseFromInfo(infoFromPersistedBead(open))) {
+			if !lease.CanRollback(LeaseFromInfo(infoFromPersistedBead(open))) || (held != nil && !held.HoldsMeta(open.Metadata)) {
 				return errPendingCreateRollbackSuperseded
 			}
 			return nil

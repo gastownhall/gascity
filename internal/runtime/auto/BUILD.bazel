@@ -15,6 +15,7 @@ go_test(
     name = "auto_test",
     srcs = [
         "auto_test.go",
+        "composite_forward_test.go",
         "conformance_test.go",
         "corpse_fallthrough_test.go",
         "liveness_forwarding_test.go",

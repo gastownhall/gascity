@@ -271,3 +271,19 @@ func TestExecutionStalledKeepsARowAPartialCensusMissed(t *testing.T) {
 		t.Fatalf("after a complete census without gc-1: %v, want it forgotten", got)
 	}
 }
+
+// Kills an owed runtime-alias sync kept for a closed row, or forgotten on a
+// partial read (the C7d-1 land review): a complete census that holds the
+// row closed drops it; a partial one keeps it.
+func TestAliasOwedForgetsAClosedRow(t *testing.T) {
+	p := newPlanner(newFakePlannerClock(plannerT0), func() time.Duration { return time.Minute }, nil, newInflightMap(), nil, io.Discard)
+	k := rowKey{Leg: "sessions", ID: "gc-1"}
+	p.aliasOwed[k] = true
+	partial := &sessionCensus{Legs: []censusLeg{{Ref: "sessions", Err: errors.New("down")}}, Rows: map[rowKey]censusRow{}}
+	if got := p.aliasOwedFor(partial); !got[k] {
+		t.Fatalf("after a partial census: %v, want gc-1's sync kept", got)
+	}
+	if got := p.aliasOwedFor(&sessionCensus{Legs: []censusLeg{{Ref: "sessions"}}, Rows: map[rowKey]censusRow{}}); len(got) != 0 || len(p.aliasOwed) != 0 {
+		t.Fatalf("after a complete census without gc-1: %v, want it forgotten", got)
+	}
+}

@@ -1236,6 +1236,44 @@ func isBdOperationUnsupported(err error) bool {
 	return strings.Contains(strings.ToLower(err.Error()), "not supported")
 }
 
+// isBdNotFoundEnvelope reports whether bd's --json stdout is its not-found
+// error envelope ({"error": "no issues found matching the provided IDs"}).
+// bd show prints that one constant sentence whenever no requested ID
+// resolved, whatever the per-ID cause: a missing bead, but equally a rejected
+// token, an unreachable bd serve, or a lookup that failed against Dolt. It
+// proves only that bd show resolved nothing, never that the bead is absent.
+// Against a remote bd serve (BEADS_SERVER_URL) it is still the only sign of a
+// miss, because stderr carries just an unrelated "not served over HTTP" line,
+// so Get takes it as a trigger to confirm absence (bdShowMissError).
+func isBdNotFoundEnvelope(out []byte) bool {
+	detail := bdStdoutErrorDetail(out)
+	return detail != "" && isBdBeadNotFound(errors.New(detail))
+}
+
+// isExactIDQueryable reports whether id can travel verbatim as the quoted
+// value of an exact `id="<id>"` bd query clause. bd's query lexer copies a
+// quoted string through as is, so the clause carries the three forms Get is
+// asked about besides plain bead IDs: child bead IDs ("ga-abc.1"), slash
+// aliases ("rig/agent.name") and runtime session names ("rig--pack__agent").
+// The literal cannot carry a '"', which ends it, or a '\', which starts an
+// escape. The lexer also reads one byte at a time, so a non-ASCII byte would
+// come back re-encoded as a different ID. Such IDs are refused, along with
+// control characters, which no ID contains, leaving absence unproven rather
+// than confirmed for an ID bd was never asked about. A trailing '*' turns the
+// clause into a prefix match, whose empty answer still proves the exact ID
+// absent.
+func isExactIDQueryable(id string) bool {
+	if id == "" {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		if c := id[i]; c < ' ' || c > '~' || c == '"' || c == '\\' {
+			return false
+		}
+	}
+	return true
+}
+
 func isBdClaimConflictMessage(msg string) bool {
 	msg = strings.ToLower(msg)
 	return strings.Contains(msg, "already assigned") ||
@@ -1313,6 +1351,7 @@ func (b optionalBool) ptr() *bool {
 
 // Create persists a new bead via bd create.
 func (s *BdStore) Create(b Bead) (Bead, error) {
+	noteSessionCreate(b)
 	return s.CreateWithStorage(b, StorageDefault)
 }
 
@@ -1443,8 +1482,10 @@ func (s *BdStore) Get(id string) (Bead, error) {
 		// Only a bead-level miss may become ErrNotFound. Callers treat
 		// ErrNotFound as "confirmed absent" (the process-table orphan sweep
 		// SIGTERMs a live runtime on it), so an infrastructure failure whose
-		// text happens to say "not found" must surface as itself.
-		if !isBdBeadNotFound(err) {
+		// text happens to say "not found" must surface as itself. bd's
+		// not-found envelope only admits the failure to the checks below;
+		// bdShowMissError must still confirm it before it is ErrNotFound.
+		if !isBdBeadNotFound(err) && !isBdNotFoundEnvelope(out) {
 			return Bead{}, fmt.Errorf("getting bead %q: %w", id, err)
 		}
 		// bd show only queries the issues table; ephemeral beads live in the
@@ -1468,7 +1509,7 @@ func (s *BdStore) Get(id string) (Bead, error) {
 				return Bead{}, fmt.Errorf("getting bead %q: %w", id, queryErr)
 			}
 		}
-		return Bead{}, fmt.Errorf("getting bead %q: %w", id, ErrNotFound)
+		return Bead{}, s.bdShowMissError(id, err)
 	}
 	var issues []bdIssue
 	if err := json.Unmarshal(extractJSON(out), &issues); err != nil {
@@ -1492,6 +1533,39 @@ func (s *BdStore) Get(id string) (Bead, error) {
 		return Bead{}, fmt.Errorf("getting bead %q (resolved to %q): %w", id, bead.ID, ErrIDCollision)
 	}
 	return bead, nil
+}
+
+// bdShowMissError is Get's verdict on a bd show failure that read as a miss
+// and that the wisp fallback could not answer. A miss on stderr names the
+// requested bead, so it is ErrNotFound as is. bd's not-found envelope alone
+// cannot tell a missing bead from a failed lookup (isBdNotFoundEnvelope), so
+// absence must be confirmed by an exact-ID bd query that succeeds with no
+// rows. That query matches wisps too, which is why it runs only after the
+// wisp fallback has had its chance at the bead. Any other outcome (an ID the
+// query cannot carry, a query error, a row, unparseable output) leaves
+// absence unproven and returns the bd show error.
+func (s *BdStore) bdShowMissError(id string, showErr error) error {
+	if isBdBeadNotFound(showErr) {
+		return fmt.Errorf("getting bead %q: %w", id, ErrNotFound)
+	}
+	unproven := fmt.Errorf("getting bead %q: %w", id, showErr)
+	if !isExactIDQueryable(id) {
+		return unproven
+	}
+	// isExactIDQueryable admits only printable ASCII without '"' or '\',
+	// which strconv.Quote leaves unescaped, so this is exactly id="<id>".
+	out, err := s.runBDTransientRead("query", "--json", "id="+strconv.Quote(id), "--all", "--limit", "1")
+	if err != nil {
+		return fmt.Errorf("%w (confirming absence: bd query: %w)", unproven, err)
+	}
+	rows, err := bdListIssueRows(extractJSON(out))
+	if err != nil {
+		return fmt.Errorf("%w (confirming absence: parsing bd query: %w)", unproven, err)
+	}
+	if len(rows) > 0 {
+		return unproven
+	}
+	return fmt.Errorf("getting bead %q: %w (bd show: %w)", id, ErrNotFound, showErr)
 }
 
 // bdUpdateArgs builds the `bd update` argv for opts, fanning each set field to
@@ -1544,6 +1618,7 @@ func bdUpdateArgs(id string, opts UpdateOpts) []string {
 
 // Update modifies fields of an existing bead via bd update.
 func (s *BdStore) Update(id string, opts UpdateOpts) error {
+	noteSessionKeysByID(s.Get, id, opts.Metadata)
 	args := bdUpdateArgs(id, opts)
 	// No fields to update — no-op (bd errors on empty update).
 	if len(args) == 3 {
@@ -2059,6 +2134,7 @@ func beadSliceContains(items []Bead, id string) bool {
 
 // SetMetadata sets a key-value metadata pair on a bead via bd update.
 func (s *BdStore) SetMetadata(id, key, value string) error {
+	noteSessionKeysByID(s.Get, id, map[string]string{key: value})
 	err := s.runBDTransientWrite("update", "--json", id,
 		"--set-metadata", key+"="+value)
 	if err != nil {
@@ -2074,6 +2150,7 @@ func (s *BdStore) SetMetadata(id, key, value string) error {
 // sequential bd update calls. Note: not truly atomic for external stores,
 // but each individual call is idempotent.
 func (s *BdStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	noteSessionKeysByID(s.Get, id, kvs)
 	if len(kvs) == 0 {
 		return nil
 	}
@@ -2591,6 +2668,9 @@ func (s *BdStore) Ping() error {
 // back to per-id closes, the same shared reason is forwarded to every
 // fallback close.
 func (s *BdStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	for _, id := range ids {
+		noteSessionKeysByID(s.Get, id, metadata)
+	}
 	if len(ids) == 0 {
 		return 0, nil
 	}
@@ -2750,6 +2830,14 @@ func (s *BdStore) close(id, reason string) error {
 
 // Reopen sets a closed bead's status to open via bd reopen.
 func (s *BdStore) Reopen(id string) error {
+	// bd reopen clears its close_reason column but not metadata.close_reason,
+	// which Close forwards as --reason; clear it first (staleCloseReasonToClear)
+	// so a later close without a reason does not report the old one.
+	if b, err := s.Get(id); err == nil && staleCloseReasonToClear(b) {
+		if err := s.SetMetadata(id, closeReasonMetadataKey, ""); err != nil {
+			return fmt.Errorf("reopening bead %q: clearing close_reason: %w", id, err)
+		}
+	}
 	err := s.runBDTransientWrite("reopen", "--json", id)
 	if err != nil {
 		if isBdNotFound(err) {

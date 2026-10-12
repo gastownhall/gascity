@@ -52,6 +52,33 @@ func (w fencedWriter) front() (*session.Store, error) {
 	return sessionFrontDoor(blindWriteRefusingStore{inner: w.store}), nil
 }
 
+// leaseFront is the session front door a runtime lease takes the row's
+// record through: the refusing store whose reads of the row go to the
+// backing (leaseRowStore), so the lease's own fresh reads see past the
+// leg's cache, or errNoConditionalWriter.
+func (w fencedWriter) leaseFront() (*session.Store, error) {
+	if _, err := w.front(); err != nil {
+		return nil, err
+	}
+	if cache, ok := demandLabelKey(w.store).(*beads.CachingStore); ok {
+		return sessionFrontDoor(leaseRowStore{freshRowStore{blindWriteRefusingStore: blindWriteRefusingStore{inner: w.store}, cache: cache}}), nil
+	}
+	return sessionFrontDoor(w.freshStore()), nil
+}
+
+// leaseRowStore is freshRowStore for the lease's own reads (its acquire,
+// Watch and Release): a refresh a newer write fenced reads the backing
+// instead, for the lease decides nothing a lost race would make stale.
+type leaseRowStore struct{ freshRowStore }
+
+func (s leaseRowStore) Get(id string) (beads.Bead, error) {
+	b, err := s.freshRowStore.Get(id)
+	if errors.Is(err, beads.ErrRowRefreshFenced) {
+		return s.cache.Backing().Get(id)
+	}
+	return b, err
+}
+
 // closeFront is front for a close verb: it also requires the atomic
 // conditional closer.
 func (w fencedWriter) closeFront() (*session.Store, error) {
@@ -73,7 +100,7 @@ func (w fencedWriter) updateMetadataFenced(id string, attempts int, decide func(
 
 // updateRowFenced is LL4's session.Store.UpdateRowFenced: metadata, title
 // and labels in one UpdateIfMatch.
-func (w fencedWriter) updateRowFenced(id string, attempts int, decide func(session.Info) (session.RowPatch, bool)) (bool, error) {
+func (w fencedWriter) updateRowFenced(id string, attempts int, decide func(session.Info, session.PersistedResponse) (session.RowPatch, bool)) (bool, error) {
 	front, err := w.front()
 	if err != nil {
 		return false, err
@@ -85,11 +112,13 @@ func (w fencedWriter) updateRowFenced(id string, attempts int, decide func(sessi
 // row from the backing through the leg's cache (CachingStore.RefreshRow), so
 // decide never sees a cached copy. A newer write racing the read returns
 // beads.ErrRowRefreshFenced, wrapped.
-func (w fencedWriter) casRow(id string, decide func(session.Info, session.PersistedResponse) session.MetadataPatch) (bool, error) {
+func (w fencedWriter) casRow(id string, decide func(session.Info, session.PersistedResponse) session.RowPatch) (bool, error) {
 	if _, err := w.front(); err != nil {
 		return false, err
 	}
-	return sessionFrontDoor(w.freshStore()).UpdateMetadataFenced(id, 1, decide)
+	return sessionFrontDoor(w.freshStore()).UpdateRowFenced(id, 1, func(row session.Info, resp session.PersistedResponse) (session.RowPatch, bool) {
+		return decide(row, resp), true
+	})
 }
 
 // closeRow is runTx's one close attempt: CloseWithMetadataIfMatch at the
@@ -156,6 +185,13 @@ func (w fencedWriter) rollbackPendingCreate(expected session.Info, closePatch, p
 		return false, false, err
 	}
 	return front.RollbackPendingCreateAtomically(expected, closePatch, postClosePatch)
+}
+
+// foldInfo is info.ApplyPatch(patch), a pure fold that writes nothing. The
+// effect lint matches selector names, and the blind session.Store method
+// shares this one's, so effects fold through here.
+func foldInfo(info session.Info, patch session.MetadataPatch) session.Info {
+	return info.ApplyPatch(patch)
 }
 
 // blindWriteRefusingStore is a beads.Store that forwards a read allowlist

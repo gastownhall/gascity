@@ -32,6 +32,37 @@ var ErrSessionInitializing = errors.New("session is initializing")
 // structured pending/respond interaction capability for the requested session.
 var ErrInteractionUnsupported = errors.New("session interaction is unsupported")
 
+// ErrPendingInteraction reports that a session is showing a blocking
+// interaction (for example a tool permission prompt) that must be answered
+// before any text is delivered to it. Typing into such a prompt can select
+// one of its options, so providers refuse the delivery instead.
+var ErrPendingInteraction = errors.New("session has a pending interaction")
+
+// ErrInputClearSkipped reports that a runtime left a session's input box
+// alone, or stopped clearing it partway: a client is attached (or the runtime
+// cannot tell whether one is), so a human may be typing there, and wiping
+// their draft is worse than leaving a stale one (#5192). The runtime checks
+// before every key it sends, so no key follows the check that failed; keys
+// sent before it may already have deleted part of the draft.
+var ErrInputClearSkipped = errors.New("input box left alone: a client may be attached")
+
+// ErrInteractionActionUnavailable reports that the pending interaction offers
+// no single option matching the requested response action, so the provider
+// sent nothing rather than guess which option to pick.
+var ErrInteractionActionUnavailable = errors.New("pending interaction has no option for the requested action")
+
+// ErrInteractionResponseInvalid reports that a response to a pending
+// interaction cannot be applied: it names no outstanding request, or its
+// action is unknown or not offered by the interaction. The interaction stays
+// pending so the caller can answer again.
+var ErrInteractionResponseInvalid = errors.New("interaction response is invalid")
+
+// ErrNudgeRefusedPendingInteraction reports that a nudge was refused because
+// the session is blocked on a pending interaction, such as a tool-call
+// approval a client has not answered yet. Delivery layers translate it into
+// their own refusal (session.ErrPendingInteraction).
+var ErrNudgeRefusedPendingInteraction = errors.New("nudge refused: session has a pending interaction")
+
 // ErrSessionDiedDuringStartup reports that a provider created a session
 // process, but it exited before startup completed successfully.
 var ErrSessionDiedDuringStartup = errors.New("session died during startup")
@@ -142,10 +173,52 @@ func MetaValue(v string, err error) (string, error) {
 // still return raw strings). Callers that treat a missing session as
 // benign (e.g. bulk Stop) use this helper so the semantics live in one
 // place.
+//
+// A joined error is gone only when every leaf is: a composite's Stop joins a
+// failed backend's error with another backend's "not found", and errors.Is
+// (or a substring of the joined message) would read that failed kill as gone.
+// A wrap over a join is judged by the join, not by the wrap's text. An error
+// tree with no join keeps the single-error rule below.
 func IsSessionGone(err error) bool {
-	if err == nil {
+	switch wrapped := err.(type) { //nolint:errorlint // walks the error tree by hand: every leaf of a join must be gone, which errors.Is cannot express
+	case nil:
 		return false
+	case interface{ Unwrap() []error }:
+		children := wrapped.Unwrap()
+		if len(children) == 0 {
+			return isSessionGoneLeaf(err)
+		}
+		for _, child := range children {
+			if !IsSessionGone(child) {
+				return false
+			}
+		}
+		return true
+	case interface{ Unwrap() error }:
+		if wrapsJoin(wrapped.Unwrap()) {
+			return IsSessionGone(wrapped.Unwrap())
+		}
 	}
+	return isSessionGoneLeaf(err)
+}
+
+// wrapsJoin reports whether err's single-wrap chain reaches a non-empty join.
+func wrapsJoin(err error) bool {
+	for err != nil {
+		switch wrapped := err.(type) { //nolint:errorlint // walks the wrap chain by hand to find a join
+		case interface{ Unwrap() []error }:
+			return len(wrapped.Unwrap()) > 0
+		case interface{ Unwrap() error }:
+			err = wrapped.Unwrap()
+		default:
+			return false
+		}
+	}
+	return false
+}
+
+// isSessionGoneLeaf is IsSessionGone's rule for an error tree with no join.
+func isSessionGoneLeaf(err error) bool {
 	if errors.Is(err, ErrSessionNotFound) {
 		return true
 	}
@@ -468,6 +541,15 @@ type IdleWaitProvider interface {
 	WaitForIdle(ctx context.Context, name string, timeout time.Duration) error
 }
 
+// IdleProbeBudgetProvider is an optional extension for runtimes whose pane
+// observations are remote round trips. IdleProbeBudget reports the timeout
+// one idle proof (a [IdleWaitProvider.WaitForIdle] that needs two pane
+// observations) requires on this runtime; zero means the caller's default.
+// Callers clamp the answer to their own bounds.
+type IdleProbeBudgetProvider interface {
+	IdleProbeBudget() time.Duration
+}
+
 // IdleSnapshotProvider is an optional extension for runtimes that can report,
 // in a single non-blocking observation, whether a session is at an idle
 // interactive boundary right now (a ready prompt with no active-processing
@@ -479,15 +561,30 @@ type IdleWaitProvider interface {
 // idleness for interactive TUIs whose coarse activity clock (last pane
 // output) cannot distinguish an idle-but-repainting TUI from a working one —
 // a TUI that continuously repaints its status line keeps the activity clock
-// perpetually fresh even while genuinely idle.
+// perpetually fresh even while genuinely idle. The pool execution backstop
+// uses its busy reading the other way, to keep a stale activity clock from
+// counting a session that is still working as quiet.
 //
-// idle reports whether the session currently looks idle. A non-nil err means
-// the observation could not be made (the caller must not treat the session as
-// idle on error); a session that has gone away is reported as an error, not as
-// idle.
+// idle reports whether the session currently looks idle; idle=false with a nil
+// err is the provider's busy reading. What that proves is provider-specific:
+// for ACP a prompt response is outstanding, while a pane scan found an
+// active-processing indicator string in its capture, usually the live
+// indicator but possibly a stale frame or transcript text.
+// [ErrIdleIndeterminate] means the observation was made but matched neither a
+// ready prompt nor a busy indicator, so it says neither idle nor busy. Any
+// other non-nil err means the observation could not be made (the caller must
+// not treat the session as idle on error); a session that has gone away is
+// reported as an error, not as idle.
 type IdleSnapshotProvider interface {
 	SnapshotIdle(name string) (idle bool, err error)
 }
+
+// ErrIdleIndeterminate reports that an [IdleSnapshotProvider] observation saw
+// neither a ready prompt nor an active-processing indicator: the prompt may be
+// scrolled away, covered by an alternate screen, or overwritten by a broadcast
+// message. It is not evidence of a running turn; callers fall back to the
+// signal they would use without a snapshot.
+var ErrIdleIndeterminate = errors.New("session idle state is indeterminate")
 
 // ExecProvider is an optional extension for runtimes that expose the RPP
 // connection primitive: run a command inside the box and return its standard
@@ -531,11 +628,14 @@ type DialogProvider interface {
 // presence in the roster as "running" therefore reports crashed agents as
 // idle.
 type SessionRosterProvider interface {
-	// SessionRoster returns attributes for every session currently known
-	// to the runtime, keyed by session name. A name absent from the
-	// result is not running, but the converse does not hold: a name
-	// present in the result is not necessarily running. See the
-	// interface doc.
+	// SessionRoster returns attributes for sessions known to the runtime,
+	// keyed by session name. A leaf runtime (tmux) reports every session it
+	// knows, so a name absent from its result is not running there; a
+	// composite merges only the backends that report a roster
+	// ([MergeSessionRosters]), so a name absent from its result proves
+	// nothing. In neither case is a name present in the result necessarily
+	// running. Callers must fall back to per-session reads for an absent
+	// name. See the interface doc.
 	SessionRoster() (map[string]SessionRosterEntry, error)
 }
 
@@ -578,6 +678,12 @@ type InventoryEntry struct {
 	// tmux the count includes gc's own hidden attach client, so a session gc
 	// is briefly attached to reads attached.
 	AttachedKnown, Attached bool
+	// ActivityKnown and LastActivity report the session's last I/O activity
+	// as [Provider.GetLastActivity] reads it (on tmux the latest
+	// #{window_activity} over its panes, less a gc poke), read in the same
+	// batch. LastActivity is meaningless unless ActivityKnown.
+	ActivityKnown bool
+	LastActivity  time.Time
 }
 
 // EnvironmentBatchProvider is an optional extension exposing a single-exec
@@ -621,6 +727,21 @@ type ImmediateNudgeProvider interface {
 // the canceled request and the replacement request in one combined turn.
 type InterruptedTurnResetProvider interface {
 	ResetInterruptedTurn(ctx context.Context, name string) error
+}
+
+// InputClearProvider is an optional extension for runtimes that can empty a
+// session's input box and confirm it is empty.
+//
+// Claude Code puts a prompt that was interrupted before its first response
+// back into the input box, sometimes after the interrupt has settled. Left
+// there, the next submitted message is appended to it and both go out as one.
+// ClearInput waits up to restoreWindow for such a draft to appear, clears it,
+// and confirms the input box reads empty. It sends no keys when the input box
+// stays empty, and returns an error when a draft is visible but cannot be
+// cleared. When a client is attached (or the runtime cannot tell) it sends no
+// further keys and returns an error wrapping [ErrInputClearSkipped].
+type InputClearProvider interface {
+	ClearInput(ctx context.Context, name string, restoreWindow time.Duration) error
 }
 
 // InterruptBoundaryWaitProvider is an optional extension for runtimes that can

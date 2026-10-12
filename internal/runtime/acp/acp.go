@@ -33,6 +33,10 @@ type Config struct {
 	HandshakeTimeout  time.Duration // default 30s
 	NudgeBusyTimeout  time.Duration // default 60s
 	OutputBufferLines int           // default 1000
+	// TranscriptRoot is the directory receiving JSON-RPC capture transcripts
+	// (citylayout.ACPTranscriptsDir for a city). Empty disables capture. See
+	// capture.go for the file layout and format.
+	TranscriptRoot string
 	// StopGrace is how long Stop waits after SIGTERM before escalating to
 	// SIGKILL. Default runtime.ManagedProcessStopGrace.
 	StopGrace time.Duration
@@ -83,6 +87,7 @@ type Provider struct {
 	conns         map[string]*sessionConn // in-process tracking
 	workDirs      map[string]string       // session name → workDir (for CopyTo)
 	cfg           Config
+	events        *sessionEventHub
 	activityWrite func(path string, data []byte) error                                         // test seam
 	handshakeFunc func(context.Context, *sessionConn, string, []runtime.MCPServerConfig) error // test seam
 	dial          func(network, addr string, timeout time.Duration) (net.Conn, error)          // test seam
@@ -93,6 +98,8 @@ var (
 	_ runtime.Provider                    = (*Provider)(nil)
 	_ runtime.InteractionProvider         = (*Provider)(nil)
 	_ runtime.TransportCapabilityProvider = (*Provider)(nil)
+	_ runtime.IdleWaitProvider            = (*Provider)(nil)
+	_ runtime.IdleSnapshotProvider        = (*Provider)(nil)
 	_ runtime.LivenessObserverWithError   = (*Provider)(nil)
 	_ runtime.ListingAttestation          = (*Provider)(nil)
 )
@@ -125,6 +132,7 @@ func NewProviderWithDir(dir string, cfg Config) *Provider {
 		conns:    make(map[string]*sessionConn),
 		workDirs: make(map[string]string),
 		cfg:      cfg,
+		events:   newSessionEventHub(),
 	}
 }
 
@@ -324,6 +332,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 
 	sc := newSessionConn(cmd, stdinPipe, lis, p.cfg.outputBufferLines(), processDone)
 	sc.token = seedMeta["GC_INSTANCE_TOKEN"]
+	sc.capture = p.openCapture(name, cfg.Env, cmd.Process.Pid)
 
 	// Start readLoop before handshake so we can receive responses.
 	go sc.readLoop(stdoutPipe)
@@ -343,13 +352,15 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		// the stdout read end itself, so bytes still unread at that point are
 		// not guaranteed to be dispatched.
 		<-sc.readDone
-		sc.drainPending()
+		sc.capture.close(captureCloseTimeout)
+		sc.drainPending(nil)
 		sc.closeActivityPublisher()
 		_ = os.Remove(p.sockNamePath(name))
 		// Close unlinks the Unix socket. Do not remove its path again: another
 		// provider can bind a replacement as soon as Close makes it disappear.
 		lis.Close() //nolint:errcheck
 		close(processDone)
+		sc.markExited()
 	}()
 
 	// Perform ACP handshake with a deadline. hsCtx (created above with
@@ -443,6 +454,9 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		clearSentinel()
 		return fmt.Errorf("session %q was stopped during startup", name)
 	}
+	// Attach before publishing the connection so Stop, which finds it only
+	// through p.conns, always reports closed after the attached exit.
+	p.attachSessionEvents(name, sc)
 	p.conns[name] = sc
 	p.mu.Unlock()
 	// Stop must be able to close stdin even if initial delivery blocks. Failed
@@ -472,6 +486,34 @@ func acpHandshakeStartError(name string, hsErr error, exitCode int, stderr strin
 		return &runtime.CapacityError{ExitCode: exitCode, Source: runtime.CapacitySourceExitStatus, Err: err}
 	}
 	return err
+}
+
+// openCapture opens the JSON-RPC capture transcript for one agent start, or
+// returns nil (capture disabled) when no transcript root is configured, the
+// session environment lacks GC_SESSION_ID or GC_CONTINUATION_EPOCH, or the file
+// cannot be opened. Capture problems are reported on stderr and never fail
+// the session.
+func (p *Provider) openCapture(name string, env map[string]string, pid int) *transcriptCapture {
+	if p.cfg.TranscriptRoot == "" {
+		return nil
+	}
+	id := captureIdentity{
+		SessionID:         env["GC_SESSION_ID"],
+		SessionName:       name,
+		ContinuationEpoch: env["GC_CONTINUATION_EPOCH"],
+		RuntimeEpoch:      env["GC_RUNTIME_EPOCH"],
+		PID:               pid,
+	}
+	if id.SessionID == "" || id.ContinuationEpoch == "" {
+		fmt.Fprintf(os.Stderr, "acp: transcript capture for %q disabled: session env lacks GC_SESSION_ID or GC_CONTINUATION_EPOCH\n", name)
+		return nil
+	}
+	c, err := openTranscriptCapture(p.cfg.TranscriptRoot, id)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "acp: transcript capture for %q disabled: %v\n", name, err)
+		return nil
+	}
+	return c
 }
 
 func envWithoutKey(env []string, key string) []string {
@@ -514,7 +556,13 @@ func (p *Provider) handshake(ctx context.Context, sc *sessionConn, workDir strin
 
 	// Step 3: Send "session/new" request.
 	newReq, _ := newSessionNewRequest(workDir, mcpServers)
-	ch, err = sc.sendRequest(newReq)
+	// session/new carries MCP server env, headers and URLs; the capture
+	// transcript gets a redacted copy.
+	redactedParams, err := redactedSessionNewParams(workDir, mcpServers)
+	if err != nil {
+		return fmt.Errorf("sending session/new: %w", err)
+	}
+	ch, err = sc.sendRequestRedacted(newReq, redactedParams)
 	if err != nil {
 		return fmt.Errorf("sending session/new: %w", err)
 	}
@@ -592,12 +640,22 @@ func (p *Provider) Stop(name string) error {
 	if ok {
 		if !sc.alive() {
 			p.cleanupOwnMeta(name, sc.token)
+			// cmd != nil is the observable proxy for "this conn came from
+			// newSessionConn", which is what guarantees exitReported is
+			// non-nil; emitClosed waits on that channel, and waiting on a nil
+			// one would block Stop forever. Start's sentinel conn is the only
+			// conn built outside newSessionConn, and Stop returns above before
+			// reaching here for it.
+			if sc.cmd != nil {
+				sc.emitClosed()
+			}
 			return nil
 		}
 		_ = sc.stdin.Close()
 		err := terminateProcess(sc, p.cfg.stopGrace())
 		if err == nil || runtime.IsSessionGone(err) {
 			p.cleanupOwnMeta(name, sc.token)
+			sc.emitClosed()
 			return nil
 		}
 		return err
@@ -612,8 +670,11 @@ func (p *Provider) Stop(name string) error {
 	return err
 }
 
-// Interrupt sends SIGINT to the named session's process.
-// Best-effort: returns nil if the session doesn't exist.
+// Interrupt sends SIGINT to the named session's process. When this provider
+// instance owns the connection, it first cancels the outstanding permission
+// requests. Another process interrupts through the control socket, which only
+// signals; held requests are then canceled when the turn ends or the agent
+// exits. Best-effort: returns nil if the session doesn't exist.
 func (p *Provider) Interrupt(name string) error {
 	p.mu.Lock()
 	sc, ok := p.conns[name]
@@ -623,6 +684,7 @@ func (p *Provider) Interrupt(name string) error {
 		if sc.cmd == nil {
 			return nil
 		}
+		sc.cancelOutstandingPermissions()
 		return syscall.Kill(-sc.cmd.Process.Pid, syscall.SIGINT)
 	}
 
@@ -703,9 +765,13 @@ func (p *Provider) nudgeConn(name string, sc *sessionConn, content []runtime.Con
 		return nil
 	}
 
-	// Wait for agent to become idle.
-	if !sc.waitIdle(p.cfg.nudgeBusyTimeout()) {
-		return fmt.Errorf("agent %q busy, timed out waiting for idle", name)
+	// Wait for agent to become idle. A turn held open by a permission
+	// request refuses instead, so the answer is not stuck behind this wait.
+	if err := sc.waitNudgeable(p.cfg.nudgeBusyTimeout()); err != nil {
+		if errors.Is(err, runtime.ErrNudgeRefusedPendingInteraction) {
+			return fmt.Errorf("%w: %s", err, name)
+		}
+		return fmt.Errorf("agent %q busy, %w", name, err)
 	}
 
 	sc.mu.Lock()
@@ -720,11 +786,26 @@ func (p *Provider) nudgeConn(name string, sc *sessionConn, content []runtime.Con
 	// Set busy state BEFORE sendRequest so that dispatch can match the
 	// response ID and clear it. If we set it after, a fast agent could
 	// respond before setActivePrompt runs, leaving busy set permanently.
-	sc.setActivePrompt(id)
+	if !sc.setActivePrompt(id) {
+		// The stdout reader has drained, so no response could settle this
+		// turn. An exiting agent keeps the best-effort nil contract. The bound
+		// is stopGrace() for the same reason the pipe-write branch below uses
+		// it: both wait out the identical "agent is exiting" race, so they must
+		// move together when Config.StopGrace is tuned. A live agent whose
+		// output can no longer be read is reported as an error instead of
+		// receiving a turn that can never finish, but only after the full
+		// bound, which is runtime.ManagedProcessStopGrace by default.
+		select {
+		case <-sc.done:
+			return nil
+		case <-time.After(p.cfg.stopGrace()):
+			return fmt.Errorf("sending prompt to %q: %w", name, errACPConnClosed(name))
+		}
+	}
 
 	ch, err := sc.sendRequest(msg)
 	if err != nil {
-		sc.clearActivePrompt(id)
+		sc.abandonPrompt(id, err)
 		// Non-pipe failures (e.g., marshal errors) have nothing to do with
 		// the agent lifecycle, so surface them immediately rather than
 		// stalling the caller on sc.done.
@@ -751,8 +832,8 @@ func (p *Provider) nudgeConn(name string, sc *sessionConn, content []runtime.Con
 		}
 	}
 
-	// Drain the response channel in the background. If the agent
-	// returns a JSON-RPC error, log it rather than silently dropping.
+	// Drain the response channel in the background. The read loop records
+	// the turn outcome; a JSON-RPC error is also logged for operators.
 	go func() {
 		resp, ok := <-ch
 		if !ok {
@@ -766,20 +847,6 @@ func (p *Provider) nudgeConn(name string, sc *sessionConn, content []runtime.Con
 	}()
 
 	return nil
-}
-
-// Pending reports structured pending interactions. ACP only tracks whether an
-// outbound prompt is in flight; that busy state is not a user-facing blocking
-// interaction, so the provider intentionally reports this capability as
-// unsupported.
-func (p *Provider) Pending(_ string) (*runtime.PendingInteraction, error) {
-	return nil, runtime.ErrInteractionUnsupported
-}
-
-// Respond resolves a pending structured interaction. ACP does not currently
-// expose those interactions over the protocol, so responses are unsupported.
-func (p *Provider) Respond(_ string, _ runtime.InteractionResponse) error {
-	return runtime.ErrInteractionUnsupported
 }
 
 // SendKeys is a no-op for ACP sessions (no terminal).

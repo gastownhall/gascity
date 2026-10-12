@@ -20,12 +20,14 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/graphv2"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/spf13/cobra"
@@ -311,16 +313,7 @@ func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.
 			if graphStore != store {
 				opts.MemberStores = []beads.Store{store} // residency:allow route-gated work-leg tail for the retry lane's cross-store required-artifact source read; same shape as the drain arm above
 			}
-			sp, err := dispatchControlSessionProvider()
-			if err != nil {
-				return err
-			}
-			opts.RecycleSession = func(subject beads.Bead) error {
-				if strings.TrimSpace(subject.Assignee) == "" {
-					return fmt.Errorf("subject %s missing assignee for pooled retry recycle", subject.ID)
-				}
-				return workerKillSessionTargetWithConfig("", store, sp, cfg, subject.Assignee)
-			}
+			opts.RecycleSession = recycleDispatchSubjectSession(cityPath, store, cfg)
 		case "retry", "ralph":
 			opts.FormulaSearchPaths = workflowFormulaSearchPaths(cfg, bead)
 			// Same cross-store required-artifact source resolution as
@@ -328,16 +321,7 @@ func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.
 			if graphStore != store {
 				opts.MemberStores = []beads.Store{store} // residency:allow route-gated work-leg tail for the retry lane's cross-store required-artifact source read; same shape as the drain arm above
 			}
-			sp, err := dispatchControlSessionProvider()
-			if err != nil {
-				return err
-			}
-			opts.RecycleSession = func(subject beads.Bead) error {
-				if strings.TrimSpace(subject.Assignee) == "" {
-					return fmt.Errorf("subject %s missing assignee for pooled retry recycle", subject.ID)
-				}
-				return workerKillSessionTargetWithConfig("", store, sp, cfg, subject.Assignee)
-			}
+			opts.RecycleSession = recycleDispatchSubjectSession(cityPath, store, cfg)
 		}
 	}
 
@@ -371,6 +355,47 @@ func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.
 		fmt.Fprintln(stdout) //nolint:errcheck
 	}
 	return nil
+}
+
+// validateDispatchSessionProviderConfig checks, once when a control
+// dispatcher starts, that the city's session provider can be constructed, so a
+// broken [session] config fails the dispatcher at startup with a clear error
+// instead of surfacing only when a retry first recycles a session. It builds the
+// provider from config alone, without the session snapshot the recycle path
+// reads, so it costs no bd call.
+func validateDispatchSessionProviderConfig(cfg *config.City, cityPath string) error {
+	ctx := sessionProviderContextForCity(cfg, cityPath, os.Getenv("GC_SESSION"))
+	sp, err := newSessionProviderFromContext(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("control dispatcher: session provider config is invalid (retry session recycling would fail): constructing session provider: %w", err)
+	}
+	if sp == nil {
+		return fmt.Errorf("control dispatcher: session provider config is invalid: no provider for %q", ctx.providerName)
+	}
+	return nil
+}
+
+// recycleDispatchSubjectSession returns the RecycleSession hook for a retry
+// lane control. Only a pooled transient retry recycles its subject's session,
+// so the session provider (two bd reads for its session snapshot) is built on
+// the first recycle rather than for every retry, ralph and retry-eval control
+// the dispatcher processes. A provider that cannot be built fails the recycle
+// that needs it, through ProcessControl's error return.
+func recycleDispatchSubjectSession(cityPath string, store beads.Store, cfg *config.City) func(beads.Bead) error {
+	var sp runtime.Provider
+	return func(subject beads.Bead) error {
+		if strings.TrimSpace(subject.Assignee) == "" {
+			return fmt.Errorf("subject %s missing assignee for pooled retry recycle", subject.ID)
+		}
+		if sp == nil {
+			provider, err := dispatchControlSessionProvider()
+			if err != nil {
+				return err
+			}
+			sp = provider
+		}
+		return workerKillSessionTargetWithConfig(cityPath, store, sp, cfg, subject.Assignee)
+	}
 }
 
 // handleControlDispatchError resolves a failed ProcessControl call into the
@@ -2559,6 +2584,7 @@ func cmdWorkflowReopenSource(sourceBeadID string, selector sourceWorkflowStoreSe
 		// exists to end.
 		clearSourceWorkflowTwins(cfg, cityPath, write, target.sourceBeadID, stderr)
 		_, _ = fmt.Fprintf(stdout, "result=reopened source_bead_id=%s\n", sourceBeadID)
+		reopenTrackingConvoysForReopenedSource(target.storeView.store, currentSource.ID, stdout, stderr)
 		return nil
 	})
 	if runErr != nil {
@@ -2566,6 +2592,53 @@ func cmdWorkflowReopenSource(sourceBeadID string, selector sourceWorkflowStoreSe
 		return 1
 	}
 	return resultCode
+}
+
+// reopenTrackingConvoysForReopenedSource is the mirror image of
+// autocloseConvoyIfComplete on the reopen side of ga-6045: closing a convoy
+// via autoclose only fires once every tracked child has reached a terminal
+// status, but nothing previously reversed that when a caller later reopened
+// one of those children through `gc workflow reopen-source`. A closed convoy
+// could then sit invisible to `gc convoy check` (its listing query excludes
+// closed convoys) for an entire second work cycle on a child it no longer
+// accurately describes as done.
+//
+// Only autoclosed convoys are reopened: status closed with close_reason
+// convoyAutocloseReason. Convoys closed by an operator, by land, or by
+// graphv2, tombstoned convoys, and owned convoys are left alone. A reopened
+// convoy has its close_reason cleared so a later reasonless close cannot be
+// mistaken for autoclose.
+//
+// This covers only the reopen-source path. It intentionally does not touch
+// `bd update --status open` or the REST `/bead/{id}/reopen` route, which can
+// reopen a tracked child the same way and remain exposed to the same staleness
+// (see gascity#6045 for the fuller discussion and the other two candidate
+// fixes this deliberately leaves out of scope).
+//
+// Best-effort by design: sourceID's own reopen has already succeeded and been
+// reported by the time this runs, so a lookup or convoy-update failure here is
+// surfaced as a warning rather than failing the overall command.
+func reopenTrackingConvoysForReopenedSource(store beads.Store, sourceID string, stdout, stderr io.Writer) {
+	convoys, err := convoycore.TrackingConvoysForItem(store, sourceID)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "warning: gc workflow reopen-source: listing tracking convoys for %s: %v\n", sourceID, err)
+		return
+	}
+	open := "open"
+	for _, convoy := range convoys {
+		if convoy.Type != "convoy" || convoy.Status != "closed" || hasLabel(convoy.Labels, "owned") ||
+			strings.TrimSpace(convoy.Metadata["close_reason"]) != convoyAutocloseReason {
+			continue
+		}
+		if err := store.Update(convoy.ID, beads.UpdateOpts{Status: &open}); err != nil {
+			_, _ = fmt.Fprintf(stderr, "warning: gc workflow reopen-source: reopening tracking convoy %s: %v\n", convoy.ID, err)
+			continue
+		}
+		if err := store.SetMetadata(convoy.ID, "close_reason", ""); err != nil {
+			_, _ = fmt.Fprintf(stderr, "warning: gc workflow reopen-source: clearing close_reason on convoy %s: %v\n", convoy.ID, err)
+		}
+		_, _ = fmt.Fprintf(stdout, "result=reopened_tracking_convoy convoy_id=%s source_bead_id=%s\n", convoy.ID, sourceID)
+	}
 }
 
 // findWorkflowBeads returns all beads belonging to a workflow resolved by

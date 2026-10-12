@@ -8,6 +8,7 @@ import (
 	"log"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
@@ -112,22 +113,19 @@ func boundSessionNameLength(name string) string {
 	return name[:session.MaxExplicitSessionNameLen-len(suffix)] + suffix
 }
 
-// GCSweepSessionBeads closes open session beads that have no remaining
-// open/in-progress work beads anywhere — primary store OR any attached
-// rig store. Work-bead assignment is verified by a live cross-store
-// query inside closeSessionInfoIfUnassigned, so the caller does not
-// pass a work snapshot — that pattern was retired to prevent pre-close
-// tick snapshots from poisoning close decisions. Candidates arrive as the
-// typed session.Info projection (WI-5 W4); the close is a session-class op
-// routed through the session front door. Returns the IDs of session beads
-// that were closed.
-func GCSweepSessionBeads(cityPath string, store beads.Store, rigStores map[string]beads.Store, sessionInfos []session.Info) []string {
+// gcSweepSessionBeadsAt closes open session beads that have no remaining
+// open/in-progress work beads on sw's legs, stamping its closes at now. The
+// guard (closeSessionInfoIfUnassigned) reads sw, never a pre-close tick
+// snapshot of the caller's. Candidates arrive as the typed session.Info
+// projection; the close is a session-class op routed through the session
+// front door. Returns the IDs of session beads that were closed.
+func gcSweepSessionBeadsAt(store beads.Store, sw *SeatWork, sessionInfos []session.Info, now time.Time) []string {
 	var closed []string
 	for _, info := range sessionInfos {
 		if info.Closed {
 			continue
 		}
-		if !closeSessionInfoIfUnassigned(cityPath, store, rigStores, nil, info, "gc_swept", time.Now().UTC(), nil) {
+		if !closeSessionInfoIfUnassigned(store, sw, info, "gc_swept", now.UTC(), nil) {
 			continue
 		}
 		closed = append(closed, info.ID)
@@ -147,6 +145,7 @@ func releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(
 	rigStores map[string]beads.Store,
 	protectedWakeWork map[storeScopedBeadKey]struct{},
 	recordPhase func(TraceSiteCode, string, time.Time, map[string]any),
+	keeps *deadAssigneeKeepLog,
 ) []releasedPoolAssignment {
 	// Partial input snapshots can make active work look orphaned for this
 	// tick only: missing work affects drain decisions, and missing sessions
@@ -154,7 +153,7 @@ func releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(
 	if result.snapshotQueryPartial() {
 		return nil
 	}
-	return releaseOrphanedPoolAssignments(store, sessionStore, cfg, cityPath, openSessionInfos, result.AssignedWorkBeads, result.AssignedWorkStores, result.AssignedWorkStoreRefs, rigStores, protectedWakeWork, recordPhase)
+	return releaseOrphanedPoolAssignments(store, sessionStore, cfg, cityPath, openSessionInfos, result.AssignedWorkBeads, result.AssignedWorkStores, result.AssignedWorkStoreRefs, rigStores, protectedWakeWork, recordPhase, keeps)
 }
 
 // protectedWakeWorkKeys indexes the wake-candidate slice by store ref + bead ID
@@ -220,6 +219,7 @@ func releaseOrphanedPoolAssignments(
 	rigStores map[string]beads.Store,
 	protectedWakeWork map[storeScopedBeadKey]struct{},
 	recordPhase func(TraceSiteCode, string, time.Time, map[string]any),
+	keepLog *deadAssigneeKeepLog, // nil: log every keep
 ) []releasedPoolAssignment {
 	if store == nil || cfg == nil || len(assignedWorkBeads) == 0 {
 		return nil
@@ -368,14 +368,10 @@ func releaseOrphanedPoolAssignments(
 			}
 			continue
 		}
-		if !liveWorkAssignmentStillReleasable(ownerStore, wb.ID, wb.Status, assignee) {
-			continue
-		}
-		allowsRelease, clearDetached := detachedProbeAllowsOrphanRelease(wb)
-		if !allowsRelease {
-			continue
-		}
-		if !releaseOrphanedPoolAssignment(ownerStore, wb, clearDetached) {
+		// The verb's route guard is the one this sweep's pre-filter lacks:
+		// an expanded workflow root's run_target is no lane (NEW-5).
+		if out := releaseListed([]seatWorkHit{{store: ownerStore, bead: wb}}, releaseOrphan, releaseSeat{}, cfg, ReleaseOpts{}); len(out.Released) == 0 {
+			keepLog.log(wb.ID, assignee, out.Why[wb.ID])
 			continue
 		}
 		released = append(released, releasedPoolAssignment{ID: wb.ID, Index: i})
@@ -388,6 +384,37 @@ func releaseOrphanedPoolAssignments(
 		})
 	}
 	return released
+}
+
+// deadAssigneeKeepLog is the last logged keep reason by bead, so a claim the
+// sweep keeps every tick (a detached probe alive, an unserved route) logs
+// once per reason, not per tick. Its owner (the controller, the v2 lane)
+// keeps it across ticks; a nil log logs every keep.
+type deadAssigneeKeepLog struct {
+	mu   sync.Mutex
+	last map[string]string
+}
+
+// log logs why the dead-assignee sweep kept id, when the reason changed
+// since the last log, and reports whether it logged.
+func (l *deadAssigneeKeepLog) log(id, assignee, why string) bool {
+	if why == "" {
+		return false
+	}
+	if l != nil {
+		l.mu.Lock()
+		repeat := l.last[id] == why
+		if l.last == nil {
+			l.last = make(map[string]string)
+		}
+		l.last[id] = why
+		l.mu.Unlock()
+		if repeat {
+			return false
+		}
+	}
+	log.Printf("releaseOrphanedPoolAssignments: kept %q of dead assignee %q: %s", id, assignee, why)
+	return true
 }
 
 // releaseConfirmedOrphanSessionWork releases the pool-routed work still held by
@@ -445,23 +472,9 @@ func releaseConfirmedOrphanSessionWork(
 	}
 
 	var released []releasedPoolAssignment
+	seat := releaseSeatOfInfo(info)
 	for i, wb := range assignedWorkBeads {
-		if wb.Status != "open" && wb.Status != "in_progress" {
-			continue
-		}
-		assignee := strings.TrimSpace(wb.Assignee)
-		if assignee == "" {
-			continue
-		}
-		if _, ok := identifiers[assignee]; !ok {
-			continue
-		}
-		template := routedToOrLegacyWorkflowTarget(wb)
-		if template == "" {
-			continue
-		}
-		agentCfg := findAgentByTemplate(cfg, template)
-		if agentCfg == nil || !agentCfg.SupportsGenericEphemeralSessions() {
+		if _, ok := identifiers[strings.TrimSpace(wb.Assignee)]; !ok {
 			continue
 		}
 		ownerStore := assignedWorkOwnerStore(cfg, store, rigStores, assignedWorkStores, i, wb)
@@ -471,17 +484,9 @@ func releaseConfirmedOrphanSessionWork(
 			}
 			continue
 		}
-		if !liveWorkAssignmentStillReleasable(ownerStore, wb.ID, wb.Status, assignee) {
-			continue
+		if out := releaseListed([]seatWorkHit{{store: ownerStore, bead: wb}}, releaseOrphan, seat, cfg, ReleaseOpts{}); len(out.Released) > 0 {
+			released = append(released, releasedPoolAssignment{ID: wb.ID, Index: i})
 		}
-		allowsRelease, clearDetached := detachedProbeAllowsOrphanRelease(wb)
-		if !allowsRelease {
-			continue
-		}
-		if !releaseOrphanedPoolAssignment(ownerStore, wb, clearDetached) {
-			continue
-		}
-		released = append(released, releasedPoolAssignment{ID: wb.ID, Index: i})
 	}
 	return released
 }
@@ -666,6 +671,13 @@ func isCanonicalWorkflowRoot(wb beads.Bead) bool {
 //
 // Release order:
 //
+// First, when conditional_writes resolves a writer and wb carries a revision,
+// release assignment and metadata in one UpdateIfMatch guarded by that
+// revision. Conflicts are left for a later tick's fresh snapshot.
+// Required-but-unavailable capability refuses the release. Otherwise,
+// including for snapshots listed from the native store (or a CachingStore over
+// it), which carry no revision, the legacy paths below apply:
+//
 //  1. beads.ConditionalAssignmentReleaser.ReleaseIfCurrent when the store
 //     offers it for this snapshot shape (in_progress with a non-empty assignee
 //     — the verb's contract) AND the bead carries no active continuation-group
@@ -685,7 +697,21 @@ func releaseOrphanedPoolAssignment(store beads.Store, wb beads.Bead, clearDetach
 	if store == nil || strings.TrimSpace(wb.ID) == "" {
 		return false
 	}
-	// Continuation-group beads bypass the CAS fast path: ReleaseIfCurrent swaps
+	update := beads.UpdateOpts{
+		Assignee: stringPtr(""),
+		Status:   stringPtr("open"),
+		Metadata: clearedSessionAffinityMetadata(),
+	}
+	if clearDetached {
+		update.Metadata[detachedProbeMetadataKey] = ""
+	}
+	if released, handled, err := releaseWorkAssignmentIfRevisionMatches(store, wb, update); handled {
+		if err != nil {
+			log.Printf("releaseOrphanedPoolAssignments: %v", err)
+		}
+		return released
+	}
+	// On the legacy path, continuation-group beads bypass ReleaseIfCurrent: it swaps
 	// only status/assignee, so clearing the group would need a second write, and
 	// that gap would expose the routing vector on a claimable bead. The fenced
 	// fallback clears status, assignee, and affinity metadata in one write.

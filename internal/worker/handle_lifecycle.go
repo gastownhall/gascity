@@ -12,7 +12,7 @@ import (
 )
 
 // Start ensures the worker exists and its runtime is live.
-func (h *SessionHandle) Start(ctx context.Context) (err error) {
+func (h *SessionHandle) Start(ctx context.Context, by sessionpkg.Actor) (err error) {
 	event := h.beginOperationEvent(ctx, workerOperationStart)
 	defer func() { event.finish(err) }()
 
@@ -24,7 +24,7 @@ func (h *SessionHandle) Start(ctx context.Context) (err error) {
 	if err != nil {
 		return err
 	}
-	err = h.manager.Start(ctx, id, startCommand, h.runtimeHints(), sessionpkg.ResumeIfUnheld)
+	err = h.manager.Start(ctx, by, id, startCommand, h.runtimeHints())
 	return err
 }
 
@@ -32,7 +32,7 @@ func (h *SessionHandle) Start(ctx context.Context) (err error) {
 // command and hints. This is a migration bridge for higher layers that already
 // materialize provider-specific runtime config but should still delegate the
 // provider-specific runtime bring-up through the worker boundary.
-func (h *SessionHandle) StartResolved(ctx context.Context, startCommand string, hints runtime.Config) (err error) {
+func (h *SessionHandle) StartResolved(ctx context.Context, by sessionpkg.Actor, startCommand string, hints runtime.Config) (err error) {
 	event := h.beginOperationEvent(ctx, workerOperationStartResolved)
 	defer func() { event.finish(err) }()
 
@@ -51,13 +51,13 @@ func (h *SessionHandle) StartResolved(ctx context.Context, startCommand string, 
 	if strings.TrimSpace(startHints.Command) == "" {
 		startHints = h.runtimeHints()
 	}
-	err = h.manager.StartRuntimeOnly(ctx, id, command, startHints)
+	err = h.manager.StartRuntimeOnly(ctx, by, id, command, startHints)
 	return err
 }
 
 // Attach ensures the worker runtime is live and then attaches the caller's
 // terminal using the underlying session transport.
-func (h *SessionHandle) Attach(ctx context.Context) (err error) {
+func (h *SessionHandle) Attach(ctx context.Context, by sessionpkg.Actor) (err error) {
 	event := h.beginOperationEvent(ctx, workerOperationAttach)
 	defer func() { event.finish(err) }()
 
@@ -69,7 +69,7 @@ func (h *SessionHandle) Attach(ctx context.Context) (err error) {
 	if err != nil {
 		return err
 	}
-	err = h.manager.Attach(ctx, id, resumeCommand, h.runtimeHints())
+	err = h.manager.Attach(ctx, by, id, resumeCommand, h.runtimeHints())
 	return err
 }
 
@@ -121,7 +121,7 @@ func (h *SessionHandle) Reset(ctx context.Context) (err error) {
 // API mux), so a state the machine cannot suspend still returns the illegal
 // transition rather than tearing a runtime down anyway. The city stop/restart
 // sweep uses StopForShutdown instead.
-func (h *SessionHandle) Stop(ctx context.Context) (err error) {
+func (h *SessionHandle) Stop(ctx context.Context, by sessionpkg.Actor) (err error) {
 	event := h.beginOperationEvent(ctx, workerOperationStop)
 	defer func() { event.finish(err) }()
 
@@ -129,7 +129,7 @@ func (h *SessionHandle) Stop(ctx context.Context) (err error) {
 	if id == "" {
 		return nil
 	}
-	err = h.manager.Suspend(id)
+	err = h.manager.Suspend(ctx, by, id, false)
 	return err
 }
 
@@ -151,12 +151,27 @@ func (h *SessionHandle) StopForShutdown(ctx context.Context) (err error) {
 	if id == "" {
 		return nil
 	}
-	err = h.manager.SuspendForShutdown(id)
+	err = h.manager.Suspend(ctx, sessionpkg.Actor{Kind: sessionpkg.ActorSweep}, id, false)
+	return err
+}
+
+// StopIdle is Stop for the chat idle auto-suspend ([chat_sessions]
+// idle_timeout): it suspends without the operator's hold, so the session
+// resumes on its next wake reason.
+func (h *SessionHandle) StopIdle(ctx context.Context, by sessionpkg.Actor) (err error) {
+	event := h.beginOperationEvent(ctx, workerOperationStop)
+	defer func() { event.finish(err) }()
+
+	id := h.currentSessionID()
+	if id == "" {
+		return nil
+	}
+	err = h.manager.Suspend(ctx, by, id, true)
 	return err
 }
 
 // Kill terminates the live runtime without mutating the persisted lifecycle.
-func (h *SessionHandle) Kill(ctx context.Context) (err error) {
+func (h *SessionHandle) Kill(ctx context.Context, by sessionpkg.Actor) (err error) {
 	event := h.beginOperationEvent(ctx, workerOperationKill)
 	defer func() { event.finish(err) }()
 
@@ -164,18 +179,18 @@ func (h *SessionHandle) Kill(ctx context.Context) (err error) {
 	if id == "" {
 		return nil
 	}
-	err = h.manager.Kill(id)
+	err = h.manager.Kill(ctx, by, id)
 	return err
 }
 
 // Close permanently ends the worker session.
-func (h *SessionHandle) Close(ctx context.Context) (err error) {
-	_, err = h.CloseDetailed(ctx)
+func (h *SessionHandle) Close(ctx context.Context, by sessionpkg.Actor) (err error) {
+	_, err = h.CloseDetailed(ctx, by)
 	return err
 }
 
 // CloseDetailed permanently ends the worker session and reports cleanup artifacts.
-func (h *SessionHandle) CloseDetailed(ctx context.Context) (result sessionpkg.CloseResult, err error) {
+func (h *SessionHandle) CloseDetailed(ctx context.Context, by sessionpkg.Actor) (result sessionpkg.CloseResult, err error) {
 	event := h.beginOperationEvent(ctx, workerOperationClose)
 	defer func() { event.finish(err) }()
 
@@ -183,7 +198,7 @@ func (h *SessionHandle) CloseDetailed(ctx context.Context) (result sessionpkg.Cl
 	if id == "" {
 		return result, nil
 	}
-	result, err = h.manager.CloseDetailed(id)
+	result, err = h.manager.CloseDetailed(ctx, by, id)
 	return result, err
 }
 
@@ -264,6 +279,17 @@ func (h *SessionHandle) State(ctx context.Context) (State, error) {
 		// families keep the history-backed probe, whose tail read is not fenced
 		// to the adapter's search roots.
 		if strings.TrimSpace(info.SessionKey) == "" && !sessionlog.DerivesActivityFromHistory(provider) {
+			// A gc ACP capture records turn state at its tail, so a bounded
+			// backward scan decides activity without parsing the whole
+			// capture, which grows with every streamed chunk.
+			if info.Transport == "acp" {
+				if path, pathErr := h.manager.TranscriptPath(id, h.adapter.SearchPaths); pathErr == nil && sessionlog.IsACPCapturePath(path) {
+					if activity, actErr := h.adapter.TailActivityForProvider(provider, path); actErr == nil && activity == TailActivityInTurn {
+						state.Phase = PhaseBusy
+					}
+					return state, nil
+				}
+			}
 			if history, histErr := h.historyWithRequest(HistoryRequest{TailCompactions: 1}); histErr == nil && history != nil {
 				if history.TailState.Activity == TailActivityInTurn {
 					state.Phase = PhaseBusy
@@ -289,7 +315,7 @@ func (h *SessionHandle) State(ctx context.Context) (State, error) {
 }
 
 // Message sends a user turn to the worker.
-func (h *SessionHandle) Message(ctx context.Context, req MessageRequest) (result MessageResult, err error) {
+func (h *SessionHandle) Message(ctx context.Context, by sessionpkg.Actor, req MessageRequest) (result MessageResult, err error) {
 	event := h.beginOperationEvent(ctx, workerOperationMessage)
 	defer func() {
 		event.payload.Queued = boolPointer(result.Queued)
@@ -311,7 +337,7 @@ func (h *SessionHandle) Message(ctx context.Context, req MessageRequest) (result
 	if err != nil {
 		return MessageResult{}, err
 	}
-	outcome, err := h.manager.Submit(ctx, id, req.Text, resumeCommand, h.runtimeHints(), submitIntent(req.Delivery), req.Resume)
+	outcome, err := h.manager.Submit(ctx, by, id, req.Text, resumeCommand, h.runtimeHints(), submitIntent(req.Delivery))
 	if err != nil {
 		return MessageResult{}, err
 	}
@@ -333,7 +359,7 @@ func (h *SessionHandle) Interrupt(ctx context.Context, _ InterruptRequest) (err 
 }
 
 // Nudge sends a best-effort redirect message to the worker.
-func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) (result NudgeResult, err error) {
+func (h *SessionHandle) Nudge(ctx context.Context, by sessionpkg.Actor, req NudgeRequest) (result NudgeResult, err error) {
 	event := h.beginOperationEvent(ctx, workerOperationNudge)
 	defer func() {
 		event.payload.Delivered = boolPointer(result.Delivered)
@@ -365,7 +391,7 @@ func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 			result = NudgeResult{Delivered: delivered}
 			return result, nil
 		}
-		outcome, err := h.manager.Send(ctx, id, req.Text, resumeCommand, h.runtimeHints(), req.Resume)
+		outcome, err := h.manager.Send(ctx, by, id, req.Text, resumeCommand, h.runtimeHints())
 		if err != nil {
 			return NudgeResult{}, err
 		}
@@ -380,7 +406,7 @@ func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 			result = NudgeResult{Delivered: delivered}
 			return result, nil
 		}
-		outcome, err := h.manager.SendImmediate(ctx, id, req.Text, resumeCommand, h.runtimeHints(), req.Resume)
+		outcome, err := h.manager.SendImmediate(ctx, by, id, req.Text, resumeCommand, h.runtimeHints())
 		if err != nil {
 			return NudgeResult{}, err
 		}
@@ -395,7 +421,7 @@ func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 			result = NudgeResult{Delivered: delivered}
 			return result, nil
 		}
-		delivered, err := h.manager.TryWaitIdleNudge(ctx, id, req.Source, req.Text, resumeCommand, h.runtimeHints(), req.Resume)
+		delivered, err := h.manager.TryWaitIdleNudge(ctx, by, id, req.Source, req.Text, resumeCommand, h.runtimeHints())
 		if errors.Is(err, sessionpkg.ErrResumeHeld) {
 			// Not queued: the caller queues it and prints the held note.
 			return NudgeResult{Undelivered: NudgeUndeliveredHeld}, nil

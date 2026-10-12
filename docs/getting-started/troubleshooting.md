@@ -375,6 +375,28 @@ gc restart
 Do not bypass or disable the `dolt_mode_safe` check — it guards the store-mode
 contract that keeps `bd` and gc in agreement.
 
+## Listings Miss Durable Beads After Changing `types.infra`
+
+**Symptom:** after a type is added to a store's `types.infra` setting, a
+running city's listings of that type return only its ephemeral beads.
+
+The native store asks the server to filter a listing by type only for types
+the server keeps durable, and it reads which types those are from the store's
+stored `types.infra` setting when it opens. A running city keeps what it read
+for the stores it holds open. `gc` commands, and the stores the city opens for
+a single tick, read the current setting every time.
+
+**Remedy:** change the stored setting, then restart the city:
+
+```bash
+gc bd config set types.infra "<types>"   # add --rig <name> for a rig's store
+gc restart
+```
+
+Gas City reads only the stored setting. If the server of a remote beads
+workspace names `types.infra` in its own `.beads/config.yaml`, put the same
+types in the stored setting too.
+
 ## flock Not Found (macOS)
 
 macOS does not ship `flock`. Install it via Homebrew:
@@ -675,6 +697,57 @@ git remotes on every run:
 On each run `jsonl-export` logs the active mode to stderr on transitions
 (e.g. after you add or remove `origin`) and re-logs it at least weekly so
 that an operator reading the log file can always find the current mode.
+
+### Archive object maintenance
+
+Every snapshot commit creates loose Git objects, including in local-only
+mode. The exporter checks the archive before each export and after each new
+commit. It runs a foreground, low-priority `git gc` when either of these
+defaults is reached:
+
+- `GC_JSONL_GC_LOOSE_OBJECTS=2000`
+- `GC_JSONL_GC_LOOSE_KB=262144` (256 MiB)
+
+Packing is deliberately single-threaded and uses
+`GC_JSONL_GC_WINDOW_MEMORY=256m` (a positive byte count, without leading
+zeros, with an optional `k`, `m`, or `g` suffix in either case) to avoid
+competing with the Dolt server and worker sessions for memory. These values
+can be lowered for small hosts.
+
+Packing writes a new copy of the archive's objects before it deletes the old
+ones. It starts only when the archive's filesystem can hold that copy and
+still keep `GC_JSONL_GC_MIN_FREE_KB=512000` (500 MiB) free; otherwise the
+order fails with a message giving the free space. The check counts loose
+objects at their full size, though snapshots usually pack to a small fraction
+of it: one archive's 9.01 GiB of loose objects packed to 67.40 MiB. So an
+archive with a large backlog of loose objects can be refused on every run
+even when packing it would fit. To recover, pack it once by hand with the
+command the failure message prints (or the lower-memory one below), free disk
+space, or set `GC_JSONL_GC_MIN_FREE_KB=0` to disable the check. If `df`
+cannot report the free space, packing goes ahead with a warning.
+
+An invalid setting fails the order before it exports anything. A refused
+free-space check or a failed `git gc` fails the order visibly, and later runs
+export no new snapshots until packing succeeds. Snapshots already committed
+still reach `origin`: a run packs only after its push, and a run that finds
+the archive cannot be packed pushes any waiting snapshot before it stops. A
+spike halt sends its alert, or saves it for retry, before it packs.
+
+To inspect the archive without changing it:
+
+```bash
+# The default location. GC_JSONL_ARCHIVE_REPO overrides it, and cities
+# migrated from the gastown maintenance pack keep their legacy path.
+ARCHIVE="$(gc status --json | jq -r '.city_path')/.gc/runtime/packs/core/jsonl-archive"
+git -C "$ARCHIVE" count-objects -vH
+git -C "$ARCHIVE" fsck --connectivity-only
+```
+
+To pack it once by hand with less memory:
+
+```bash
+git -C "$ARCHIVE" -c pack.windowMemory=64m -c pack.threads=1 gc
+```
 
 ### Enabling off-box backup
 

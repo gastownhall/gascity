@@ -729,6 +729,9 @@ func (s *Server) acceptSessionSubmit(ctx context.Context, input *SessionSubmitIn
 		// synchronous message twin) instead of a 500 from humaStoreError.
 		return asyncAcceptedBody{}, humaResolveError(err)
 	}
+	if err := s.rejectPendingInteraction(ctx, store.Store, input.ID); err != nil {
+		return asyncAcceptedBody{}, err
+	}
 
 	intent := input.Body.Intent
 	if intent == "" {
@@ -796,6 +799,9 @@ func (s *Server) acceptSessionMessage(ctx context.Context, input *SessionMessage
 		// helper so they surface as 409 (matching /stop, /respond, and the
 		// synchronous message twin) instead of a 500 from humaStoreError.
 		return asyncAcceptedBody{}, humaResolveError(err)
+	}
+	if err := s.rejectPendingInteraction(ctx, store.Store, input.ID); err != nil {
+		return asyncAcceptedBody{}, err
 	}
 
 	reqID, reqIDErr := newRequestID()
@@ -928,7 +934,7 @@ func (s *Server) humaHandleSessionKill(_ context.Context, input *SessionIDInput)
 	}
 
 	mgr := s.sessionManager(store.Store)
-	if err := mgr.Kill(id); err != nil {
+	if err := mgr.Kill(context.Background(), s.actor(session.ActorOperator), id); err != nil {
 		if errors.Is(err, session.ErrSessionClosed) {
 			out := &OKWithIDResponse{}
 			out.Body.Status = "ok"
@@ -1011,8 +1017,8 @@ func (s *Server) humaHandleSessionRespond(_ context.Context, input *SessionRespo
 	if err != nil {
 		return nil, err
 	}
-	// Publish the session.pending_cleared now rather than on the next tick.
-	s.pokePendingMonitor()
+	// Publish the session.pending_cleared now rather than on the next pass.
+	s.pokePendingInteractions(id)
 
 	out := &SessionRespondOutput{}
 	out.Body.Status = "accepted"
@@ -1035,7 +1041,7 @@ func (s *Server) humaHandleSessionSuspend(ctx context.Context, input *SessionIDI
 	if err != nil {
 		return nil, humaResolveError(err)
 	}
-	if err := mgr.Suspend(id); err != nil {
+	if err := mgr.Suspend(ctx, s.actor(session.ActorOperator), id, false); err != nil {
 		return nil, humaSessionManagerError(err)
 	}
 	out := &OKResponse{}
@@ -1068,7 +1074,7 @@ func (s *Server) humaHandleSessionClose(ctx context.Context, input *SessionClose
 	if err != nil {
 		return nil, humaSessionManagerError(err)
 	}
-	closeResult, err := handle.CloseDetailed(ctx)
+	closeResult, err := handle.CloseDetailed(ctx, s.actor(session.ActorOperator))
 	if err != nil {
 		return nil, humaSessionManagerError(err)
 	}

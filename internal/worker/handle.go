@@ -30,29 +30,34 @@ type StateHandle interface {
 
 // LifecycleHandle exposes worker lifecycle control operations.
 type LifecycleHandle interface {
-	Start(context.Context) error
-	StartResolved(context.Context, string, runtime.Config) error
-	Attach(context.Context) error
+	Start(context.Context, sessionpkg.Actor) error
+	StartResolved(context.Context, sessionpkg.Actor, string, runtime.Config) error
+	Attach(context.Context, sessionpkg.Actor) error
 	Create(context.Context, CreateMode) (sessionpkg.Info, error)
 	Reset(context.Context) error
-	Stop(context.Context) error
-	// StopForShutdown is Stop with CITY-SHUTDOWN intent, for the `gc stop` /
-	// `gc restart` sweep only. It carries latitude on lifecycle states that have
-	// no live turn to suspend (notably draining), which a targeted operator Stop
-	// must keep rejecting.
+	Stop(context.Context, sessionpkg.Actor) error
+	// StopForShutdown is Stop with CITY-SHUTDOWN intent (an ActorSweep), for
+	// the `gc stop` / `gc restart` sweep only. It carries latitude on lifecycle
+	// states that have no live turn to suspend (notably draining), which a
+	// targeted operator Stop must keep rejecting.
 	StopForShutdown(context.Context) error
-	Kill(context.Context) error
-	Close(context.Context) error
-	CloseDetailed(context.Context) (sessionpkg.CloseResult, error)
+	// StopIdle is Stop for the chat idle auto-suspend: the operator's
+	// transition rules, no operator hold.
+	StopIdle(context.Context, sessionpkg.Actor) error
+	Kill(context.Context, sessionpkg.Actor) error
+	Close(context.Context, sessionpkg.Actor) error
+	CloseDetailed(context.Context, sessionpkg.Actor) (sessionpkg.CloseResult, error)
 	Rename(context.Context, string) error
 	StateHandle
 }
 
 // MessagingHandle exposes live input delivery operations.
 type MessagingHandle interface {
-	Message(context.Context, MessageRequest) (MessageResult, error)
+	// Message and Nudge may start or resume the session as the Actor may
+	// (CONTRACT v5.9 D8).
+	Message(context.Context, sessionpkg.Actor, MessageRequest) (MessageResult, error)
 	Interrupt(context.Context, InterruptRequest) error
-	Nudge(context.Context, NudgeRequest) (NudgeResult, error)
+	Nudge(context.Context, sessionpkg.Actor, NudgeRequest) (NudgeResult, error)
 }
 
 // HistoryHandle exposes normalized transcript history reads.
@@ -145,15 +150,12 @@ const (
 type MessageRequest struct {
 	Text     string         `json:"text"`
 	Delivery DeliveryIntent `json:"delivery,omitempty"`
-	// Resume says whether the turn may resume a held session (CONTRACT v5.9
-	// D8); the zero value queues it there.
-	Resume sessionpkg.ResumePolicy `json:"-"`
 }
 
 // MessageResult reports whether a worker turn was queued or delivered now.
 type MessageResult struct {
 	Queued bool `json:"queued"`
-	// Deferred: the resume policy queued it (session.SubmitOutcome.Deferred).
+	// Deferred: the actor queued it (session.SubmitOutcome.Deferred).
 	Deferred bool `json:"-"`
 }
 
@@ -188,9 +190,6 @@ type NudgeRequest struct {
 	Delivery NudgeDelivery   `json:"delivery,omitempty"`
 	Source   string          `json:"source,omitempty"`
 	Wake     NudgeWakePolicy `json:"wake,omitempty"`
-	// Resume is the resume policy a nudge that may wake runs under; the zero
-	// value never consumes a hold (CONTRACT v5.9 D8).
-	Resume sessionpkg.ResumePolicy `json:"-"`
 }
 
 // NudgeResult reports whether the requested live delivery actually happened.
@@ -217,11 +216,15 @@ const (
 	// NudgeUndeliveredNoIdleBoundary means the provider CAN take live delivery
 	// but the session never reached the idle boundary within the wait window.
 	NudgeUndeliveredNoIdleBoundary NudgeUndeliveredReason = "no_idle_boundary"
+	// NudgeUndeliveredPendingInteraction means the session is waiting on a
+	// pending interaction such as a tool permission prompt. Typing into it
+	// would answer the prompt, so the nudge waits until it is resolved.
+	NudgeUndeliveredPendingInteraction NudgeUndeliveredReason = "pending_interaction"
 	// NudgeUndeliveredHeld means the session is held, which a nudge does not
 	// resume (CONTRACT v5.9 D8), and nothing queued the nudge: the caller
 	// must queue it (a wait-idle nudge).
 	NudgeUndeliveredHeld NudgeUndeliveredReason = "session_held"
-	// NudgeQueuedHeld means the session is held, or (ResumeViaController) not
+	// NudgeQueuedHeld means the session is held, or (ActorBackground) not
 	// running, and queued the nudge itself; the caller must not queue it again.
 	NudgeQueuedHeld NudgeUndeliveredReason = "session_held_queued"
 )
