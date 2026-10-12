@@ -38,9 +38,8 @@ const (
 const (
 	drainIdle        = string(session.SleepReasonIdle)
 	drainConfigDrift = "config-drift"
-	// drainOperator is `gc runtime drain`'s request in a v2 city: an
-	// operator's, which only the agent's ack stops (A11) and only
-	// `gc runtime undrain` clears.
+	// drainOperator names the signal of an ack an operator's `gc runtime
+	// drain` explains (stopRequest.Operator).
 	drainOperator    = "operator-drain"
 	reasonIdleSleep  = "idle-sleep"
 	sleepIntentIdle  = "idle-stop-pending"
@@ -77,11 +76,6 @@ func drainPolicyOf(reason string) drainPolicy {
 		return drainPolicy{authorized: func(*rowFacts, string) bool { return true }}
 	case idleRespawnDrainReason:
 		return drainPolicy{} // C6d: eligibility and its revalidation
-	case drainOperator:
-		// No controller authorization: A19 never voids or cancels it and
-		// A20 never signals it; the agent's ack does (A11), as legacy's
-		// GC_DRAIN waits for it, and `gc runtime undrain` clears it.
-		return drainPolicy{}
 	}
 	return drainPolicy{authorized: func(r *rowFacts, reason string) bool { return strings.TrimSpace(r.row.Info.SleepIntent) == reason }}
 }
@@ -231,9 +225,10 @@ func workKeepsNoWakeRow(r *rowFacts) bool {
 // legacy's lowest-bead-id membership) is the agent's own idle ack, and
 // stopping the seat only recreates it (sc-j27j0d): the ack is canceled,
 // its half voided, and the seat stays warm, whatever the allocation
-// wants of it (Keep, Sleep or Drain, as legacy cancels them). A request
-// the row carries outranks the floor: the controller's own drains, and an
-// operator's `gc runtime drain` (drainOperator, legacy's GC_DRAIN).
+// wants of it (Keep, Sleep or Drain, as legacy cancels them), while its
+// runtime is alive. A request the row carries outranks the floor: the
+// controller's own drains, and an operator's `gc runtime drain`
+// (stopRequest.Operator, legacy's GC_DRAIN).
 func armAck(r *rowFacts) (intent, bool) {
 	req, ok := activeStop(r.row)
 	if !ok || req.Phase != stopAcked {
@@ -245,11 +240,19 @@ func armAck(r *rowFacts) (intent, bool) {
 	}
 	// The floor check stays after the stale-ack void: that check records
 	// the runtime rest the probing kind needs, so a cancel decided first
-	// would defer at admission (rests-missing).
-	if req.Reason == "" && r.entry.Floor != nil {
+	// would defer at admission (rests-missing). Legacy cancels only on a
+	// live runtime: a dead floor seat's ack signals, and the seat is
+	// stopped and recreated.
+	// TODO(#7626, mc-7is1r): when A12 restarts a dead pane in place, lift
+	// the liveness gate and assert the seat runs again.
+	if req.Reason == "" && !req.Operator && r.entry.Floor != nil && r.entry.Liveness == livenessAlive {
 		return intent{Kind: intentSignalAck, Reason: decideFloorAckCancel, Basis: basis, Patch: stopAckVoidPatch()}, true
 	}
-	return intent{Kind: intentSignalAck, Reason: decideDrainSignal + req.Reason, Basis: basis, Patch: session.DrainAckStopPendingPatch(r.w.Now)}, true
+	reason := req.Reason
+	if reason == "" && req.Operator {
+		reason = drainOperator
+	}
+	return intent{Kind: intentSignalAck, Reason: decideDrainSignal + reason, Basis: basis, Patch: session.DrainAckStopPendingPatch(r.w.Now)}, true
 }
 
 // ackPredatesRuntime reports, on the effect's fresh read, a runtime object

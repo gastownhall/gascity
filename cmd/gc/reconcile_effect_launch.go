@@ -191,7 +191,7 @@ func preWakeStep(v txView, f preWakeFold, probeErr error) txStep {
 		patch = session.MetadataPatch{}
 	}
 	_, _, wake, wakeClass := preWakePatch(base, v.Now, f.token)
-	for _, more := range []session.MetadataPatch{wake, f.bind, stopVoidResiduePatch(), f.repair, f.reset} {
+	for _, more := range []session.MetadataPatch{wake, f.bind, stopEndPatch(), f.repair, f.reset} {
 		maps.Copy(patch, more)
 	}
 	// The heal's cells and then the PreWake cell, minted at the write.

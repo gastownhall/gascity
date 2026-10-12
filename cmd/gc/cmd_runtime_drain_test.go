@@ -1615,40 +1615,57 @@ func TestFindAgentByNameNoMatch(t *testing.T) {
 	}
 }
 
-// TestOperatorDrainRow (PAR-FLOORACK review ruling 1): in a v2 city `gc
-// runtime drain` writes an operator's request on the row (the controller
-// half, reason operator-drain, at the row's generation), which leaves a
-// request already there; `gc runtime undrain` clears an operator's request
-// and leaves a controller's.
+// TestOperatorDrainRow (PAR-FLOORACK, CONTRACT v5.9p): in a v2 city `gc
+// runtime drain` marks the row with its generation in its own key
+// (operator_drain), whatever controller request the row carries, which it
+// never touches; `gc runtime undrain` clears the mark and leaves the
+// request.
 func TestOperatorDrainRow(t *testing.T) {
-	now := time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC)
 	for _, c := range []struct {
-		name           string
-		meta           map[string]string
-		drain, undrain string // the request's reason after each
+		name    string
+		meta    map[string]string
+		request string // the controller request, before and after
 	}{
-		{"a bare row", map[string]string{"generation": "3"}, drainOperator, ""},
-		{"a controller's request stands", map[string]string{"generation": "3", session.DrainIntentReasonKey: drainConfigDrift, session.DrainIntentAtKey: now.Format(time.RFC3339), session.DrainIntentIncarnationKey: "3"}, drainConfigDrift, drainConfigDrift},
-		{"a request of an older generation is replaced", map[string]string{"generation": "3", session.DrainIntentReasonKey: drainConfigDrift, session.DrainIntentIncarnationKey: "2"}, drainOperator, ""},
+		{"a bare row", map[string]string{"generation": "3"}, ""},
+		{"a row a controller request holds", map[string]string{
+			"generation": "3", session.DrainIntentReasonKey: drainConfigDrift, session.DrainIntentAtKey: "2026-10-12T12:00:00Z", session.DrainIntentIncarnationKey: "3",
+		}, drainConfigDrift},
+		{"a mark of an older generation", map[string]string{"generation": "3", session.OperatorDrainKey: "2"}, ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			store, id := stampedMem(t, gate.Require)
 			if err := store.SetMetadataBatch(id, c.meta); err != nil {
 				t.Fatal(err)
 			}
-			if err := writeOperatorDrainRow(store, id, now); err != nil {
+			if err := writeOperatorDrainRow(store, id); err != nil {
 				t.Fatal(err)
 			}
 			b, _ := store.Get(id)
-			if got := b.Metadata[session.DrainIntentReasonKey]; got != c.drain || c.drain == drainOperator && b.Metadata[session.DrainIntentIncarnationKey] != "3" {
-				t.Fatalf("after drain: request %q at %q, want %q at 3", got, b.Metadata[session.DrainIntentIncarnationKey], c.drain)
+			if b.Metadata[session.OperatorDrainKey] != "3" || b.Metadata[session.DrainIntentReasonKey] != c.request {
+				t.Fatalf("after drain: mark %q, request %q; want the mark at 3 and the request %q untouched", b.Metadata[session.OperatorDrainKey], b.Metadata[session.DrainIntentReasonKey], c.request)
 			}
 			if err := clearOperatorDrainRow(store, id); err != nil {
 				t.Fatal(err)
 			}
-			if b, _ := store.Get(id); b.Metadata[session.DrainIntentReasonKey] != c.undrain {
-				t.Fatalf("after undrain: request %q, want %q", b.Metadata[session.DrainIntentReasonKey], c.undrain)
+			if b, _ := store.Get(id); b.Metadata[session.OperatorDrainKey] != "" || b.Metadata[session.DrainIntentReasonKey] != c.request {
+				t.Fatalf("after undrain: mark %q, request %q; want no mark and the request %q", b.Metadata[session.OperatorDrainKey], b.Metadata[session.DrainIntentReasonKey], c.request)
 			}
 		})
+	}
+}
+
+// TestDrainRuntimeRowWriteFailure (O9): a failed row mark in a v2 city
+// sets no env drain flag, records nothing and exits 1.
+func TestDrainRuntimeRowWriteFailure(t *testing.T) {
+	dops := newFakeDrainOps()
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "echo"}); err != nil {
+		t.Fatal(err)
+	}
+	rec := events.NewFake()
+	var stdout, stderr bytes.Buffer
+	code := drainRuntime(dops, func() error { return errors.New("store down") }, sp, rec, "worker", "worker", false, &stdout, &stderr)
+	if code != 1 || dops.draining["worker"] || len(rec.Events) != 0 || !strings.Contains(stderr.String(), "store down") {
+		t.Fatalf("drain = %d (draining %v, events %v, stderr %q), want 1 with nothing set", code, dops.draining["worker"], rec.Events, stderr.String())
 	}
 }

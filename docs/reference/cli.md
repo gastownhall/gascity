@@ -3964,8 +3964,8 @@ Sets a GC_DRAIN metadata flag on the session. The agent should check
 for drain status periodically (via "gc runtime drain-check") and finish
 its current task before exiting. Pass a session alias or ID. Use
 "gc runtime undrain" to cancel. Under session_reconciler = "v2" it also
-writes an operator's drain request on the session row, which the agent's
-drain-ack then stops.
+marks the session row, so the agent's drain-ack stops the session even on a
+min_active_sessions floor.
 
 ```
 gc runtime drain <name> [flags]
@@ -4072,7 +4072,7 @@ Cancel a pending drain signal on a session.
 Clears the GC_DRAIN and GC_DRAIN_ACK metadata flags, allowing the
 session to continue normal operation. Pass a session alias or ID. Under
 session_reconciler = "v2" it also clears the session row's drain-ack and
-an operator's drain request.
+its operator drain mark.
 
 ```
 gc runtime undrain <name> [flags]

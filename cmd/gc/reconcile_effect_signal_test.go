@@ -542,6 +542,8 @@ func TestOperatorStartClearsARequestBegunBeforeItsLease(t *testing.T) {
 	}
 	if _, active := activeStop(censusRowOf(t, got)); active || !sp.Fake.IsRunning("s-gc-1") {
 		t.Fatalf("row %v: want the runtime started and the request begun before the lease cleared", got.Metadata)
+	}
+}
 
 // onFloor makes the entry a member of its template's min_active_sessions
 // floor (the allocator's floor set) and a Wake entry.
@@ -573,7 +575,9 @@ func TestFloorAckCancels(t *testing.T) {
 		{"a bare ack on a Sleep floor member", ackMeta("3"), floorWith(desireSleep), decideFloorAckCancel},
 		{"a bare ack on a Drain floor member", ackMeta("3"), floorWith(desireDrain), decideFloorAckCancel},
 		// An operator's `gc runtime drain` explains the ack (legacy's GC_DRAIN).
-		{"an ack an operator's drain explains, on the floor", append(ackMeta("3"), intentBegunAt(drainOperator, time.Minute)...), onFloor, decideDrainSignal + drainOperator},
+		{"an ack an operator's drain explains, on the floor", append(ackMeta("3"), session.OperatorDrainKey, "3"), onFloor, decideDrainSignal + drainOperator},
+		{"an ack beside an operator's drain of an older generation, on the floor", append(ackMeta("3"), session.OperatorDrainKey, "2"), onFloor, decideFloorAckCancel},
+		{"a bare ack on a floor member whose runtime is dead", ackMeta("3"), func(e *selectionEntry) { onFloor(e); e.Liveness = livenessDead }, decideDrainSignal},
 	} {
 		it, _ := decideDrain(t, c.meta, c.entry)
 		switch {

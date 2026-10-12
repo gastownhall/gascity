@@ -22,6 +22,7 @@ import (
 type rawStopKeys struct {
 	rawIntentReason, rawIntentAt, rawIntentIncarnation string
 	rawAckIncarnation, rawAckAt                        string
+	rawOperatorDrain                                   string
 }
 
 // readStopKeys is the census's projection of a row's metadata.
@@ -32,6 +33,7 @@ func readStopKeys(meta map[string]string) rawStopKeys {
 		rawIntentIncarnation: strings.TrimSpace(meta[session.DrainIntentIncarnationKey]),
 		rawAckIncarnation:    strings.TrimSpace(meta[session.DrainAckIncarnationKey]),
 		rawAckAt:             strings.TrimSpace(meta[session.DrainAckAtKey]),
+		rawOperatorDrain:     strings.TrimSpace(meta[session.OperatorDrainKey]),
 	}
 }
 
@@ -52,6 +54,10 @@ type stopRequest struct {
 	AckAt  time.Time // when an acked request's ack landed; zero when unparseable
 	// Synthesized marks a bare legacy stop-pending row (rule 3).
 	Synthesized bool
+	// Operator marks an acked request that an operator's `gc runtime drain`
+	// of the row's generation explains (session.OperatorDrainKey, legacy's
+	// GC_DRAIN): A11 reads it, and nothing else does.
+	Operator bool
 	// Residue marks, on no request, a half of the row's generation that
 	// rule 2 ended. The void clears both halves, so a runtime restarted
 	// later at the same generation (Manager.ensureRunning bumps neither the
@@ -73,6 +79,7 @@ func activeStop(row censusRow) (stopRequest, bool) {
 	k, gen := row.StopKeys, strconv.FormatInt(row.Incarnation, 10)
 	intent := k.rawIntentReason != "" && k.rawIntentIncarnation == gen
 	acked := k.rawAckIncarnation == gen
+	operator := k.rawOperatorDrain == gen
 	pending := isDrainAckStopPendingInfo(row.Info)
 	if !pending && !sessionBeadClaimsLiveRuntime(row.Info) {
 		return stopRequest{Residue: intent || acked}, false
@@ -88,6 +95,7 @@ func activeStop(row censusRow) (stopRequest, bool) {
 	case acked:
 		req.Phase = stopAcked
 		req.AckAt, _ = parseRFC3339Metadata(k.rawAckAt)
+		req.Operator = operator
 	case intent:
 		req.Phase = stopRequested
 	default:
@@ -100,16 +108,10 @@ func activeStop(row censusRow) (stopRequest, bool) {
 // the row's generation. It never writes state (no BeginDrainPatch: legacy
 // skips state=draining without stop-pending as an unknown state).
 func stopBeginPatch(row censusRow, reason string, now time.Time) session.MetadataPatch {
-	return stopBeginPatchAt(row.Incarnation, reason, now)
-}
-
-// stopBeginPatchAt is stopBeginPatch for a row of generation incarnation:
-// `gc runtime drain`'s operator request (drainOperator) writes it too.
-func stopBeginPatchAt(incarnation int64, reason string, now time.Time) session.MetadataPatch {
 	return session.MetadataPatch{
 		session.DrainIntentReasonKey:      reason,
 		session.DrainIntentAtKey:          now.UTC().Format(time.RFC3339),
-		session.DrainIntentIncarnationKey: strconv.FormatInt(incarnation, 10),
+		session.DrainIntentIncarnationKey: strconv.FormatInt(row.Incarnation, 10),
 	}
 }
 
@@ -132,31 +134,39 @@ func stopAckVoidPatch() session.MetadataPatch {
 	return session.MetadataPatch{session.DrainAckIncarnationKey: "", session.DrainAckAtKey: ""}
 }
 
+// stopEndPatch is stopVoidResiduePatch and the operator's drain mark: what a
+// row's PreWake and its stop's finalize clear, so neither the runtime they
+// start nor the one they stopped keeps the operator's drain.
+func stopEndPatch() session.MetadataPatch {
+	p := stopVoidResiduePatch()
+	p[session.OperatorDrainKey] = ""
+	return p
+}
+
 // stopVoidResiduePatch clears both halves of a request rule 2 ended.
 func stopVoidResiduePatch() session.MetadataPatch {
 	return session.ClearStopRequestPatch()
 }
 
-// operatorDrainPatch is `gc runtime drain`'s request on a v2 row: the
-// controller half, reason drainOperator, at the row's generation as read. A
-// row already carrying a request of its generation keeps it (a controller
-// drain stands; a repeated drain keeps its begin), so it returns nil.
-func operatorDrainPatch(meta map[string]string, now time.Time) session.MetadataPatch {
-	k, gen := readStopKeys(meta), rowGeneration(meta)
-	if k.rawIntentReason != "" && k.rawIntentIncarnation == strconv.FormatInt(gen, 10) {
+// operatorDrainPatch is `gc runtime drain`'s mark on a v2 row: the row's
+// generation as read, in its own key (session.OperatorDrainKey), so no
+// controller request's begin, signal, cancel or close reads it. A mark of
+// the row's generation already there returns nil.
+func operatorDrainPatch(meta map[string]string) session.MetadataPatch {
+	gen := strconv.FormatInt(rowGeneration(meta), 10)
+	if readStopKeys(meta).rawOperatorDrain == gen {
 		return nil
 	}
-	return stopBeginPatchAt(gen, drainOperator, now)
+	return session.MetadataPatch{session.OperatorDrainKey: gen}
 }
 
-// operatorUndrainPatch is `gc runtime undrain`'s clear of an operator's
-// request (stopCancelPatch); a controller's request it leaves, so it
-// returns nil.
+// operatorUndrainPatch is `gc runtime undrain`'s clear of the operator's
+// mark, or nil when the row carries none.
 func operatorUndrainPatch(meta map[string]string) session.MetadataPatch {
-	if readStopKeys(meta).rawIntentReason != drainOperator {
+	if readStopKeys(meta).rawOperatorDrain == "" {
 		return nil
 	}
-	return stopCancelPatch()
+	return session.MetadataPatch{session.OperatorDrainKey: ""}
 }
 
 // rowGeneration is a row's generation as the drain tracker reads it: an

@@ -570,6 +570,21 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 			[]string{session.DrainAckIncarnationKey, "3", session.DrainAckAtKey, ago(time.Minute)},
 			patchSite(func(session.Info) session.MetadataPatch { return stopVoidResiduePatch() }),
 		},
+		"cmd/gc/reconcile_stop_request.go:stopEndPatch": {
+			[]string{session.DrainAckIncarnationKey, "3", session.DrainAckAtKey, ago(time.Minute), session.OperatorDrainKey, "3"},
+			patchSite(func(session.Info) session.MetadataPatch { return stopEndPatch() }),
+		},
+		"cmd/gc/reconcile_stop_request.go:operatorUndrainPatch": {
+			[]string{session.OperatorDrainKey, "3"},
+			func(t *testing.T, meta []string) map[string]string {
+				m, _ := stampedMem(t, gate.Require)
+				id := fieldRow(t, m, meta...)
+				if err := clearOperatorDrainRow(m, id); err != nil {
+					t.Fatal(err)
+				}
+				return fieldBead(t, m, id).Metadata
+			},
+		},
 		"cmd/gc/reconcile_stop_request.go:stopAckVoidPatch": {
 			[]string{session.DrainAckIncarnationKey, "3", session.DrainAckAtKey, ago(time.Minute)},
 			patchSite(func(session.Info) session.MetadataPatch { return stopAckVoidPatch() }),
@@ -668,6 +683,7 @@ func staleStopRequest() []string {
 	return []string{
 		session.DrainIntentReasonKey, "idle", session.DrainIntentAtKey, rowAt(-time.Hour), session.DrainIntentIncarnationKey, "3",
 		session.DrainAckIncarnationKey, "3", session.DrainAckAtKey, rowAt(-time.Hour),
+		session.OperatorDrainKey, "3",
 	}
 }
 
