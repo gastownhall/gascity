@@ -72,20 +72,11 @@ func TestAgentSliceWrapsRespawnPane(t *testing.T) {
 	t.Setenv(AgentSliceEnv, "gascity-agents.slice")
 	tm, exec := newSliceTestTmux(t)
 
-	if err := tm.RespawnPane("%0", "claude --resume"); err != nil {
-		t.Fatalf("RespawnPane: %v", err)
-	}
-	args := exec.calls[0]
-	got := args[len(args)-1]
 	want := "systemd-run --user --scope --slice=gascity-agents.slice --collect --quiet -- sh -c 'claude --resume'"
-	if got != want {
-		t.Fatalf("respawn command = %q, want %q", got, want)
-	}
-
 	if err := tm.RespawnPaneWithWorkDir("%0", "/work", "claude --resume"); err != nil {
 		t.Fatalf("RespawnPaneWithWorkDir: %v", err)
 	}
-	args = exec.calls[1]
+	args := exec.calls[0]
 	if got := args[len(args)-1]; got != want {
 		t.Fatalf("respawn-with-workdir command = %q, want %q", got, want)
 	}

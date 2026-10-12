@@ -109,6 +109,7 @@ func TestArmCloseDecides(t *testing.T) {
 		partial  bool
 		// citySuspended is a city suspend.
 		citySuspended bool
+		suspendCause  string // the row's operator suspend cause (World.OperatorSuspend)
 		want          string // decide reason, "" for none
 		check         func(t *testing.T, it intent)
 	}{
@@ -205,7 +206,9 @@ func TestArmCloseDecides(t *testing.T) {
 			},
 		},
 		{name: "a live runtime", liveness: livenessAlive, desired: desireDrain, drain: drainOrphaned, meta: []string{"state", "asleep"}},
-		{name: "a dead row that claims a live runtime is C5c2's", liveness: livenessDead, desired: desireDrain, drain: drainOrphaned, meta: []string{"state", "active"}},
+		{name: "a dead row that claims a live runtime closes (MAINT-031, C5c2)", liveness: livenessDead, desired: desireDrain, drain: drainOrphaned, meta: []string{"state", "active"}, want: decideCloseOrphan},
+		{name: "a dead row woken inside INC-003's grace waits it out", liveness: livenessDead, desired: desireDrain, drain: drainOrphaned, meta: []string{"state", "active", "last_woke_at", at(-time.Minute)}},
+		{name: "an operator-suspended dead row gets no grace", liveness: livenessDead, desired: desireDrain, drain: drainOrphaned, meta: []string{"state", "active", "last_woke_at", at(-time.Minute)}, suspendCause: "agent", want: decideCloseOrphan},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := newCloseCase(t, tc.liveness, tc.desired, tc.meta...)
@@ -217,6 +220,9 @@ func TestArmCloseDecides(t *testing.T) {
 				c.a.Snapshot.Mode, c.a.Snapshot.Partial.Global = modeSuspended, []string{causeStoreQueryPartial}
 			}
 			c.w.CitySuspended = tc.citySuspended
+			if tc.suspendCause != "" {
+				c.w.OperatorSuspend = map[rowKey]string{c.k: tc.suspendCause}
+			}
 			it := c.decide()
 			if it.Reason != tc.want && (tc.want != "" || it.Kind == intentClose) {
 				t.Fatalf("decideRow = (%q, %q), want %q", it.Kind, it.Reason, tc.want)
@@ -280,6 +286,15 @@ func closeEffectCases(t *testing.T, bare bool) {
 		b := c.row(t)
 		if b.Status != "closed" || b.Metadata["sleep_intent"] != "" || b.Metadata["wait_hold"] != "" || b.Metadata["quarantined_until"] != "" {
 			t.Fatalf("row %s %v, want closed with every hold cleared", b.Status, b.Metadata)
+		}
+	})
+	t.Run("a wake or restart request on the row holds no close", func(t *testing.T) {
+		for _, req := range [][]string{{"wake_request", "explicit"}, {"restart_requested", "true"}} {
+			c := mk(t, livenessGone, desireDrain, "state", "asleep", req[0], req[1])
+			c.entry().DrainReason = drainOrphaned
+			if s := c.run(t, gone().tmux()); s.Outcome != settledLanded || !s.Closed {
+				t.Fatalf("%s: settlement %+v, want the close landed", req[0], s)
+			}
 		}
 	})
 	t.Run("work holds the close, with no lease taken", func(t *testing.T) {
@@ -480,12 +495,91 @@ func TestCloseEffectEdges(t *testing.T) {
 			t.Fatalf("kills %d, want none: the read did not pin one object", n)
 		}
 	})
-	t.Run("a corpse on a row that claims a live runtime is not A21's", func(t *testing.T) {
+	t.Run("an undesired row's dead runtime is removed, then the row closes (MAINT-031)", func(t *testing.T) {
 		c := newCloseCase(t, livenessGone, desireDrain, "state", "active")
 		c.entry().DrainReason = drainOrphaned
 		f := corpseRead(c, false, false)
-		if s := c.run(t, f.tmux()); s.Cause != causeRedecided || c.row(t).Status == "closed" || f.Fake.CountCalls("KillCorpseObject", "s-close") != 0 {
-			t.Fatalf("settlement %+v kills %d, want refused redecided with no kill", s, f.Fake.CountCalls("KillCorpseObject", "s-close"))
+		if s := c.run(t, f.tmux()); !s.Closed || f.Fake.CountCalls("KillCorpseObject", "s-close") != 1 {
+			t.Fatalf("settlement %+v kills %d, want the corpse removed and the row closed", s, f.Fake.CountCalls("KillCorpseObject", "s-close"))
+		}
+	})
+	t.Run("an undesired row's zombie is removed by object and recorded stopped, then the row closes", func(t *testing.T) {
+		for _, tc := range []struct {
+			name             string
+			attached, absent bool // absent: the kill finds no zombie (another object)
+			kills, stopped   int
+			closed           bool
+		}{
+			{"removed", false, false, 1, 1, true},
+			{"attached: refuses live-pane, nothing stopped", true, false, 0, 0, false},
+			{"the kill finds no zombie: nothing recorded stopped", false, true, 1, 0, false},
+			{"another row's zombie by the fresh read: never killed", false, false, 0, 0, false},
+		} {
+			c := newCloseCase(t, livenessDead, desireDrain, "state", "active")
+			c.entry().DrainReason = drainOrphaned
+			f := corpseRead(c, tc.attached, false)
+			f.l = runtime.Liveness{Running: true, ObjectID: "$1", ObjectCreated: "1", PanePID: "42"}
+			if err := f.Fake.Start(context.Background(), "s-close", runtime.Config{}); err != nil {
+				t.Fatal(err)
+			}
+			f.Fake.Zombies["s-close"] = !tc.absent
+			if tc.kills == 0 && !tc.attached {
+				f.env["GC_SESSION_ID"], f.env["GC_INSTANCE_TOKEN"] = "gc-other", "theirs"
+			}
+			f.read = func() { // the kill removes it
+				if f.Fake.CountCalls("KillZombieObject", "s-close") > 0 && !tc.absent {
+					f.l = runtime.Liveness{}
+				}
+			}
+			s := c.run(t, f.tmux())
+			stopped := 0
+			for _, e := range s.Facts.Events {
+				if e.Type == events.SessionStopped && e.Subject == "worker" && e.SessionID == c.k.ID {
+					stopped++
+				}
+			}
+			if kills := f.Fake.CountCalls("KillZombieObject", "s-close"); kills != tc.kills || stopped != tc.stopped || s.Closed != tc.closed {
+				t.Fatalf("%s: settlement %+v kills %d session.stopped %d, want %d %d closed %v", tc.name, s, kills, stopped, tc.kills, tc.stopped, tc.closed)
+			}
+			if tc.kills == 0 && s.Cause != causeLivePane {
+				t.Fatalf("%s: settlement %+v, want refused live-pane", tc.name, s)
+			}
+		}
+	})
+	t.Run("a dead row inside INC-003's grace requeues at its end", func(t *testing.T) {
+		woke := gatherNow.Add(-time.Minute)
+		c := newCloseCase(t, livenessDead, desireDrain, "state", "active", "last_woke_at", woke.Format(time.RFC3339))
+		c.entry().DrainReason = drainOrphaned
+		if it, next := decideRow(c.w, c.a, c.k); it.Kind == intentClose || !next.Equal(woke.Add(wakeUndesiredGrace)) {
+			t.Fatalf("decideRow = (%q, %v), want no close and a requeue at %v", it.Kind, next, woke.Add(wakeUndesiredGrace))
+		}
+	})
+	t.Run("legacy's exclusions keep a live-claiming row's dead runtime off A21", func(t *testing.T) {
+		for name, meta := range map[string][]string{
+			"named": {"configured_named_session", "true", "configured_named_identity", "worker"},
+			// A wanted seat the start parked: AL1's pool count skips a row
+			// with a terminal error, so it reads Drain (orphaned), and must
+			// never close as orphaned (§12.2 #19).
+			"a wanted seat parked": {"provider_terminal_error", "model_not_found", "sleep_reason", string(session.SleepReasonProviderTerminalError)},
+			"stop requested":       {session.DrainIntentReasonKey, "orphaned", session.DrainIntentAtKey, gatherNow.Format(time.RFC3339), session.DrainIntentIncarnationKey, "3"},
+		} {
+			c := newCloseCase(t, livenessDead, desireDrain, append([]string{"state", "active"}, meta...)...)
+			c.entry().DrainReason = drainOrphaned
+			c.w.Classified = map[rowKey]string{c.k: deadToken(c.w.Observed[c.k].Identity)} // A12 is done with it
+			if it := c.decide(); it.Kind == intentClose {
+				t.Fatalf("%s: decide proposed %q, want no close", name, it.Reason)
+			}
+		}
+		for name, meta := range map[string][]string{
+			"control":                    nil,
+			"a stale terminal mark only": {"provider_terminal_error", "quota_exceeded"}, // nothing clears it: the park is the sleep reason
+		} {
+			c := newCloseCase(t, livenessDead, desireDrain, append([]string{"state", "active"}, meta...)...)
+			c.entry().DrainReason = drainOrphaned
+			c.w.Classified = map[rowKey]string{c.k: deadToken(c.w.Observed[c.k].Identity)}
+			if it := c.decide(); it.Kind != intentClose {
+				t.Fatalf("%s: decide = (%q, %q), want the close", name, it.Kind, it.Reason)
+			}
 		}
 	})
 	t.Run("a live pane refuses live-pane", func(t *testing.T) {
@@ -756,5 +850,24 @@ func TestReadWorkScopeByKind(t *testing.T) {
 	}
 	if got := p.readWork(row, intentDrainBegin); got.Free {
 		t.Fatalf("a drain's L5 = %+v, want work: the live seat may hold a prior alias's claim", got)
+	}
+}
+
+// Kills the close re-deciding on another row's zombie (the C5c2 delta
+// review): on the fresh read only the row's own zombie is a dead runtime
+// A21 closes over; another row's is a live pane, so no work branch runs
+// ahead of the live-pane refusal.
+func TestFreshClosableOwnZombieOnly(t *testing.T) {
+	c := newCloseCase(t, livenessDead, desireDrain, "state", "active")
+	c.entry().DrainReason = drainOrphaned
+	row := c.w.Census.Rows[c.k]
+	for name, id := range map[string]runtimeIdentity{
+		"own":     {Known: true, SessionID: c.k.ID, Epoch: "3", Token: "tok-3"},
+		"another": {Known: true, SessionID: "gc-other", Epoch: "1", Token: "theirs"},
+	} {
+		r := &rowFacts{w: c.w, k: c.k, row: row, found: true, entry: c.entry(), fresh: &txRuntime{Class: rtZombie, Same: true, Identity: id}}
+		if got := r.freshClosable(); got != (name == "own") {
+			t.Fatalf("%s zombie: freshClosable = %v", name, got)
+		}
 	}
 }

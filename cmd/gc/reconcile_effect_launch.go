@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -42,13 +43,13 @@ const (
 var errEndpointGate = errors.New("v2 start: the endpoint admits no start now")
 
 // startSections are bringUp's sections.
-var startSections = []section{
-	called(0, probed(prepareAdoption, verbStep(false)), admitTicket),
+var startSections = append(slices.Clone(recycleSections),
+	called(0, probed(prepareAdoption, verbStep(false)), verbCall),
 	called(callStart, probed(foldPreWake, preWakeStep), startLaunch),
 	called(0, section{Premise: premiseOwnToken, Decide: commitStep}, afterStart),
 	called(0, section{Premise: premiseOwnToken, Decide: abandonStep}, stopOwnRuntime),
-	{Premise: premiseClose, Decide: rollbackClose},
-}
+	section{Premise: premiseClose, Decide: rollbackClose},
+)
 
 // launchRow is the row, template and pass a Launch's Calls act on.
 type launchRow struct {
@@ -158,15 +159,8 @@ type launchPass struct {
 	relaunched bool        // the PreWake found the row creating (#7570)
 }
 
-// preWakeHolds are the holds that refuse a PreWake (S1: not held or
-// quarantined). A wait hold does not: the allocation wakes a wait-held row
-// whose wait is ready, and the hold clears only once its nudge reaches the
-// running session (POOL-077/080). Nor does an unparseable timer, which no
-// heal clears.
-const preWakeHolds = session.HoldTimer | session.HoldQuarantine | session.HoldUser | session.HoldSuspended
-
 // preWakeStep is the PreWake's Decide: the ticket admitted, START-012's
-// name, no hold (preWakeHolds) or kill fence, the runtime still absent; then
+// name, no hold (preWakeRefused) or kill fence, the runtime still absent; then
 // PreWakePatch with the binding, the stop request cleared (D1), the repair,
 // the stale-resume clear with its continuation rotation (legacy's
 // commitPendingContinuationReset at the start) and the set-once key fill
@@ -185,7 +179,7 @@ func preWakeStep(v txView, f preWakeFold, probeErr error) txStep {
 		return txStep{Refuse: causeLivenessUnknown, Err: probeErr}
 	case !session.IsSessionNameSyntaxValid(strings.TrimSpace(v.Row.SessionNameMetadata)):
 		return healInstead(v, txStep{Refuse: causeSessionName})
-	case session.HoldsInfo(foldInfo(v.Row, v.It.folded()), v.Now).In&preWakeHoldsFor(v) != 0 || session.IsKillPendingInfo(v.Row, v.Now): // the hold the intent's own patch writes too; TODO(R7): Disposition
+	case preWakeRefused(v) || session.IsKillPendingInfo(v.Row, v.Now): // the hold the intent's own patch writes too
 		return healInstead(v, txStep{Refuse: causeHeld})
 	case v.RT.Class != rtAbsent:
 		return txStep{Refuse: causeRuntimePresent}
@@ -237,14 +231,19 @@ func preWakeUndoOf(v txView, patch session.MetadataPatch, staleKey bool) preWake
 	return u
 }
 
-// preWakeHoldsFor is preWakeHolds for v's intent: A17's respawn is not held
-// by the agent heartbeat's hold it respawns through (v5.9i), which the
-// premise holds the fresh row to.
-func preWakeHoldsFor(v txView) session.Hold {
+// preWakeRefused reports a hold that refuses v's PreWake (S1: not held or
+// quarantined), over the row as the intent's own patch leaves it: the
+// disposition's RefusesPreWake. A wait does not refuse: the allocation wakes a
+// wait-held row whose wait is ready, and the hold clears only once its nudge
+// reaches the running session (POOL-077/080); nor does an unparseable timer,
+// which no heal clears. A17's respawn is not held by the agent heartbeat's
+// hold it respawns through (v5.9i), which the premise holds the fresh row to.
+func preWakeRefused(v txView) bool {
+	d := session.DispositionOfInfo(foldInfo(v.Row, v.It.folded()))
 	if v.It.Reason == decideHeartbeatRespawn {
-		return preWakeHolds &^ session.HoldTimer
+		return d.RefusesHeartbeatRespawn(v.Now)
 	}
-	return preWakeHolds
+	return d.RefusesPreWake(v.Now)
 }
 
 // triggerEnvKeys are the template env keys a row's trigger stamps

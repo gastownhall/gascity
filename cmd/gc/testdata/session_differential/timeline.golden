@@ -404,6 +404,53 @@ runtime:s-gc-1=id=gc-1 epoch=2 token=<set> alive attached=false
 @ +8m20s
 row:gc-1:state=awake
 ## 4 the next pass (+10m0s)
+=== a manual create read between its two writes
+## 0 seed (+20s)
+@ +0s
+row:gc-1:work_dir=<city>
+## 1 its session_name lands (+42s)
+~ op
+@ +22s
+event:session.woke worker null=1
+provider:RemoveMeta s-gc-1=5
+provider:Start s-gc-1=1
+row:gc-1:awake_started_at=T+22s
+row:gc-1:core_hash_breakdown.AcceptStartupDialogs=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.Command=b5bea41b6c623f7c
+row:gc-1:core_hash_breakdown.CopyFiles=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.Env=<changed>
+row:gc-1:core_hash_breakdown.FPExtra=730fa5bc1a6062f2
+row:gc-1:core_hash_breakdown.Lifecycle=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.MCPServers=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.MouseOn=f1e020dfac3290bf
+row:gc-1:core_hash_breakdown.OverlayDir=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.OverlayProviders=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.PreStart=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.SessionSetup=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.SessionSetupScript=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.version=v6
+row:gc-1:creation_complete_at=T+22s
+row:gc-1:effective_sleep_after_idle=off
+row:gc-1:generation=2
+row:gc-1:last_woke_at=T+22s
+row:gc-1:live_hash=<changed>
+row:gc-1:pending_create_claim=
+row:gc-1:pending_create_started_at=
+row:gc-1:primed_at=T+22s
+row:gc-1:prompt_hash=<changed>
+row:gc-1:requested_sleep_after_idle=off
+row:gc-1:sleep_capability=full
+row:gc-1:sleep_policy_fingerprint=value=off|class=interactive_resume|source=legacy_off|wake=resume|cap=full|deps=|template=worker
+row:gc-1:sleep_policy_source=legacy_off
+row:gc-1:started_config_hash=<changed>
+row:gc-1:started_launch_hash=<changed>
+row:gc-1:started_live_hash=<changed>
+row:gc-1:started_provision_hash=<changed>
+row:gc-1:state=active
+row:gc-1:state_reason=creation_complete
+runtime:s-gc-1=id=gc-1 epoch=2 token=<set> alive attached=false
+@ +32s
+row:gc-1:state=awake
 === a provider swap stops the runtime
 ## 0 seed (+20s)
 @ +0s

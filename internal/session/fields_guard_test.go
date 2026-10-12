@@ -245,6 +245,29 @@ func TestUpdateRowFencedUnmintsALostWrite(t *testing.T) {
 	}
 }
 
+// TestCommitCloseUnmintsARefusedClose: a close its premise refuses leaves no
+// mint of its terminal patch's cell open.
+func TestCommitCloseUnmintsARefusedClose(t *testing.T) {
+	stamped := beads.NewAtomicCloseMemStore()
+	b, err := stamped.Create(beads.Bead{Title: "w", Type: BeadType, Labels: []string{LabelSession}, Metadata: map[string]string{"state": string(StateAsleep), "wait_hold": "true"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	front := NewStore(beads.SessionStore{Store: stamped})
+	info := infoFromPersistedBead(b)
+	if err := stamped.SetMetadata(b.ID, "state", string(StateAwake)); err != nil { // a wake after the decision
+		t.Fatal(err)
+	}
+	before := OpenDispositionMints(b.ID)
+	terminal := CellInfo(info, ActorController, DispEvent{Kind: EvRetire}, dispT0).Into(b.ID, ClosePatch(dispT0, "orphaned"))
+	if res, err := front.CommitClose(Decide(info, FactsLegacyClose), terminal, dispT0); res != CommitMoved || err != nil {
+		t.Fatalf("close over a woken row = %v, %v; want moved", res, err)
+	}
+	if n := OpenDispositionMints(b.ID) - before; n != 0 {
+		t.Errorf("the refused close left %d open mints", n)
+	}
+}
+
 // TestStoreWriteMethodIsPlumbing: a test's store adapter (a _test.go method
 // named for a store write verb) is plumbing, so a production writer behind
 // it is judged; a test function, a non-verb method and a production method

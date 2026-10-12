@@ -2545,12 +2545,12 @@ func TestCloseSessionBeadIfRuntimeStoppedAndUnassigned_RunningSessionDeclinesWit
 	}
 
 	var stderr bytes.Buffer
-	closed := closeSessionBeadIfRuntimeStoppedAndUnassigned(
-		store, testSeatWork(testCity, nil, store, nil), sp, b, "orphaned", "orphaned session", now, &stderr,
+	closed := closeSeatIfRuntimeStopped(
+		store, testSeatWork(testCity, nil, store, nil), sp, sessionInfoFromBead(b), closeWhy{reason: "orphaned", gate: closeGated}, now, &stderr,
 	)
 
 	if closed {
-		t.Fatal("closeSessionBeadIfRuntimeStoppedAndUnassigned closed bead while runtime was still running -- it must decline, not kill-then-close")
+		t.Fatal("closeSeatIfRuntimeStopped closed bead while runtime was still running -- it must decline, not kill-then-close")
 	}
 	if gotCalls := sp.CountCalls("Stop", "worker"); gotCalls != 0 {
 		t.Fatalf("Stop call count for %q = %d, want 0 -- a running session must never be killed as a side effect of a close check", "worker", gotCalls)
@@ -2598,12 +2598,12 @@ func TestCloseSessionBeadIfRuntimeStoppedAndUnassigned_AlreadyStoppedClosesAsBef
 	}
 
 	var stderr bytes.Buffer
-	closed := closeSessionBeadIfRuntimeStoppedAndUnassigned(
-		store, testSeatWork(testCity, nil, store, nil), sp, b, "suspended", "suspended session", now, &stderr,
+	closed := closeSeatIfRuntimeStopped(
+		store, testSeatWork(testCity, nil, store, nil), sp, sessionInfoFromBead(b), closeWhy{reason: "suspended", gate: closeGated}, now, &stderr,
 	)
 
 	if !closed {
-		t.Fatalf("closeSessionBeadIfRuntimeStoppedAndUnassigned did not close bead for an already-stopped, unassigned session; stderr=%q", stderr.String())
+		t.Fatalf("closeSeatIfRuntimeStopped did not close bead for an already-stopped, unassigned session; stderr=%q", stderr.String())
 	}
 	if gotCalls := sp.CountCalls("Stop", "worker"); gotCalls != 0 {
 		t.Fatalf("Stop call count for %q = %d, want 0 -- runtime was already stopped, nothing to stop", "worker", gotCalls)
@@ -2663,12 +2663,12 @@ func TestCloseSessionBeadIfRuntimeStoppedAndUnassignedPreservesConfiguredNamedSe
 	}
 
 	var stderr bytes.Buffer
-	closed := closeSessionBeadIfRuntimeStoppedAndUnassigned(
-		store, testSeatWork(testCity, cfg, store, nil), sp, b, "suspended", "suspended session", now, &stderr,
+	closed := closeSeatIfRuntimeStopped(
+		store, testSeatWork(testCity, cfg, store, nil), sp, sessionInfoFromBead(b), closeWhy{reason: "suspended", gate: closeGated}, now, &stderr,
 	)
 
 	if closed {
-		t.Fatal("closeSessionBeadIfRuntimeStoppedAndUnassigned closed bead with QualifiedName-assigned work")
+		t.Fatal("closeSeatIfRuntimeStopped closed bead with QualifiedName-assigned work")
 	}
 	got, err := store.Get(b.ID)
 	if err != nil {
@@ -9429,8 +9429,8 @@ func TestCloseSessionBeadIfUnassignedRefusesWhenRigStoreWorkAssignedBySessionNam
 
 	var stderr bytes.Buffer
 	now := time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC)
-	if closeSessionBeadIfUnassigned(store, testSeatWork("", declaredRigsConfig("demo"), store, map[string]beads.Store{"demo": rigStore}), sessionBead, "stale-session", now, &stderr) {
-		t.Fatal("closeSessionBeadIfUnassigned returned true; want false because rig-store work is still assigned by session_name")
+	if closeSeat(store, testSeatWork("", declaredRigsConfig("demo"), store, map[string]beads.Store{"demo": rigStore}), sessionInfoFromBead(sessionBead), closeWhy{reason: "stale-session", gate: closeGated}, now, &stderr) {
+		t.Fatal("closeSeat returned true; want false because rig-store work is still assigned by session_name")
 	}
 	got, err := store.Get(sessionBead.ID)
 	if err != nil {

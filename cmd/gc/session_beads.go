@@ -1590,7 +1590,7 @@ func repairStrandedPoolWorkerBead(
 	}
 	// A claim no lane serves stayed assigned (O5): the close completes, and
 	// its cascade reports it stranded.
-	return closeBead(store, sw, info, strandedRepairCloseReason, now, stderr)
+	return closeSeat(store, sw, info, closeWhy{reason: strandedRepairCloseReason, gate: closeReleasing}, now, stderr)
 }
 
 func reassignStateAssignedToRetiredSessionBead(store beads.Store, oldSessionID, newSessionID string, now time.Time, stderr io.Writer) {
@@ -1746,7 +1746,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		if b.Status == "closed" || !isNamedSessionBead(b) || !isFailedCreateSessionBead(b) {
 			continue
 		}
-		if closeFailedCreateBead(sessFront, sessionInfoFromBead(b), now, stderr) {
+		if closeSeat(store, sw, sessionInfoFromBead(b), closeWhy{reason: string(session.StateFailedCreate), gate: closeRollback}, now, stderr) {
 			openBeads[i].Status = "closed"
 		}
 	}
@@ -1782,7 +1782,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		}
 		canonical, ok := bySessionName[sn]
 		if ok && canonical.ID != b.ID {
-			if closeSessionBeadIfUnassigned(store, sw, b, "duplicate", clk.Now().UTC(), stderr) {
+			if closeSeat(store, sw, sessionInfoFromBead(b), closeWhy{reason: "duplicate", gate: closeGated}, clk.Now().UTC(), stderr) {
 				openBeads[i].Status = "closed"
 			}
 		}
@@ -1855,7 +1855,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			// real reconfiguration conflict to begin with. The step-aside name is
 			// bounded exactly as poolRuntimeSessionName bounds it.
 			carveOut := spec.Agent != nil && spec.Agent.UsesCanonicalSingletonPoolIdentity() && beadSessionName == boundSessionNameLength(spec.SessionName+poolRuntimeNameSuffix)
-			if !closeSessionBeadIfRuntimeStoppedAndUnassigned(store, sw, sp, b, "reconfigured", "reconfigured named session", now, stderr) {
+			if !closeSeatIfRuntimeStopped(store, sw, sp, sessionInfoFromBead(b), closeWhy{reason: "reconfigured", gate: closeGated}, now, stderr) {
 				if !carveOut {
 					blockedReconfiguredNamedIdentities[identity] = true
 				}
@@ -1943,7 +1943,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 					if strings.TrimSpace(open.Metadata["session_name"]) != sn {
 						continue
 					}
-					if closeSessionBeadIfUnassigned(store, sw, open, "duplicate", now, stderr) {
+					if closeSeat(store, sw, sessionInfoFromBead(open), closeWhy{reason: "duplicate", gate: closeGated}, now, stderr) {
 						openBeads[i].Status = "closed"
 					}
 				}
@@ -2036,7 +2036,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 					if err := sessFront.SetMarker(newBead.ID, "session_name", createdSessionName); err != nil {
 						finalizeErr = err
 						fmt.Fprintf(stderr, "session beads: setting pool session_name for %s: %v\n", agentName, err) //nolint:errcheck
-						closeFailedCreateBead(sessFront, sessionInfoFromBead(newBead), now, stderr)
+						closeSeat(store, sw, sessionInfoFromBead(newBead), closeWhy{reason: string(session.StateFailedCreate), gate: closeRollback}, now, stderr)
 						return
 					}
 					if newBead.Metadata == nil {
@@ -2493,7 +2493,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 				continue
 			}
 			if configuredNames[sn] {
-				if closeSessionBeadIfRuntimeStoppedAndUnassigned(store, sw, sp, b, "suspended", "suspended session", now, stderr) {
+				if closeSeatIfRuntimeStopped(store, sw, sp, sessionInfoFromBead(b), closeWhy{reason: "suspended", gate: closeGated}, now, stderr) {
 					if idx, ok := indexBySessionName[sn]; ok {
 						openBeads[idx].Status = "closed"
 					}
@@ -2507,7 +2507,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 						}
 					}
 				}
-				if closeSessionBeadIfRuntimeStoppedAndUnassigned(store, sw, sp, b, "orphaned", "orphaned session", now, stderr) {
+				if closeSeatIfRuntimeStopped(store, sw, sp, sessionInfoFromBead(b), closeWhy{reason: "orphaned", gate: closeGated}, now, stderr) {
 					if idx, ok := indexBySessionName[sn]; ok {
 						openBeads[idx].Status = "closed"
 					}
@@ -2837,7 +2837,7 @@ func sessionFrontDoor(store beads.Store) *session.Store {
 }
 
 // sessionInfoFromBead projects a session bead a caller decided to close into
-// the Info the terminal close fences on (session.Store.CloseWithTerminalPatch).
+// the Info the terminal close fences on (session.Store.CommitClose).
 func sessionInfoFromBead(b beads.Bead) session.Info {
 	return session.ReconcileRowsFromBeads([]beads.Bead{b})[0].Info
 }
@@ -2882,6 +2882,23 @@ func failedCreateCloseLife(now time.Time) session.MetadataPatch {
 	return patch
 }
 
+// commitLegacyClose is CommitClose for a close the controller decided on
+// expected (legacy.close), its refusal or failure logged for what it closes.
+// A failure is 0.
+func commitLegacyClose(front *session.Store, expected session.Info, terminal session.MetadataPatch, now time.Time, stderr io.Writer, what string) session.CommitResult {
+	res, err := front.CommitClose(session.Decide(expected, session.FactsLegacyClose), terminal, now)
+	switch {
+	case err != nil:
+		fmt.Fprintf(stderr, "session beads: closing %s %s: %v\n", what, expected.ID, err) //nolint:errcheck
+		return 0
+	case res == session.CommitKillFenced:
+		fmt.Fprintf(stderr, "session beads: closing %s %s: refused (%s): %v\n", what, expected.ID, res, session.ErrSessionKillPending) //nolint:errcheck
+	case res != session.CommitLanded && res != session.CommitClosed:
+		fmt.Fprintf(stderr, "session beads: closing %s %s: refused (%s): %v\n", what, expected.ID, res, session.ErrSessionCloseSuperseded) //nolint:errcheck
+	}
+	return res
+}
+
 // closeFailedCreateBead closes the session expected describes as failed-create.
 // expected is the row the caller decided to close on.
 func closeFailedCreateBead(sessFront *session.Store, expected session.Info, now time.Time, stderr io.Writer) bool {
@@ -2901,8 +2918,9 @@ func closeFailedCreateBead(sessFront *session.Store, expected session.Info, now 
 	// would ping-pong the reconciler
 	// (TestCloseBeadClearsPendingCreateClaimEvenWhenCloseFails). A failure
 	// reports false either way, so the reconciler re-runs the close.
-	if _, err := sessFront.CloseWithTerminalPatch(expected, failedCreateClosePatch(expected, now), "gc: close failed-create session "+id, now); err != nil {
-		fmt.Fprintf(stderr, "session beads: closing failed-create bead %s: %v\n", id, err) //nolint:errcheck
+	switch commitLegacyClose(sessFront, expected, failedCreateClosePatch(expected, now), now, stderr, "failed-create bead") {
+	case session.CommitLanded, session.CommitClosed:
+	default:
 		return false
 	}
 	// Defense in depth: a startup race between bead creation and an early
@@ -3060,7 +3078,7 @@ func reapStaleSessionBeads(
 		if !releaseBeadScopedPoolRuntimeLeased(cityPath, info, sp, stderr) {
 			continue
 		}
-		if closeBead(store, sw, info, "stale-session", now.UTC(), stderr) {
+		if closeSeat(store, sw, info, closeWhy{reason: "stale-session", gate: closeReleasing}, now.UTC(), stderr) {
 			fmt.Fprintf(stderr, "WARN: reconciler: reaped stuck-creating session bead %s — tmux session %q not found\n", info.ID, sn) //nolint:errcheck
 			reaped++
 		}
@@ -3194,7 +3212,7 @@ func reapPreBootSessionBeads(
 		if store == nil {
 			continue
 		}
-		if closeBead(store, sw, info, "stale-session", clk.Now().UTC(), stderr) {
+		if closeSeat(store, sw, info, closeWhy{reason: "stale-session", gate: closeReleasing}, clk.Now().UTC(), stderr) {
 			fmt.Fprintf(stderr, "session reconciler: reaped pre-boot session bead %s (session %q last started %s, host booted %s) — runtime server absent\n", //nolint:errcheck
 				info.ID, strings.TrimSpace(info.SessionNameMetadata), startedAt.UTC().Format(time.RFC3339), boot.UTC().Format(time.RFC3339))
 			reaped++
@@ -3424,7 +3442,7 @@ func cleanDeadRuntimeCorpse(store beads.Store, sw *SeatWork, info session.Info, 
 	// frees the name for that wake.
 	if claimsLive {
 		fmt.Fprintf(stderr, "session reconciler: closing session bead %s as dead-runtime (session %s, state %q)\n", info.ID, name, strings.TrimSpace(info.MetadataState)) //nolint:errcheck
-		closeBead(store, sw, info, "dead-runtime", clk.Now().UTC(), stderr)
+		closeSeat(store, sw, info, closeWhy{reason: "dead-runtime", gate: closeReleasing}, clk.Now().UTC(), stderr)
 	}
 	return true
 }
@@ -3853,44 +3871,17 @@ func sweepProcessTableOrphans(
 	return reaped
 }
 
-func closeSessionBeadIfRuntimeStoppedAndUnassigned(
-	store beads.Store,
-	sw *SeatWork,
-	sp runtime.Provider,
-	b beads.Bead,
-	closeReason string,
-	_ string, // stopReason: unused -- a running session is declined here, never stopped
-	now time.Time,
-	stderr io.Writer,
-) bool {
+// closeSeatIfRuntimeStopped is closeSeat for a row whose runtime must be
+// stopped first: a running runtime declines the close, never stopped here.
+func closeSeatIfRuntimeStopped(store beads.Store, sw *SeatWork, sp runtime.Provider, info session.Info, why closeWhy, now time.Time, stderr io.Writer) bool {
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	hasAssignedWork, err := sessionHasOpenAssignedWorkForConfig(sw, b)
-	if err != nil {
-		fmt.Fprintf(stderr, "session work guard: checking assigned work for %s: %v\n", b.ID, err) //nolint:errcheck
+	if name := strings.TrimSpace(info.SessionNameMetadata); name != "" && sp != nil && sp.IsRunning(name) {
+		fmt.Fprintf(stderr, "session work guard: declining to close %s: runtime %q is still running\n", info.ID, name) //nolint:errcheck
 		return false
 	}
-	if hasAssignedWork {
-		return false
-	}
-	sessionName := strings.TrimSpace(b.Metadata["session_name"])
-	if sessionName != "" && sp != nil && sp.IsRunning(sessionName) {
-		fmt.Fprintf(stderr, "session work guard: declining to close %s: runtime %q is still running\n", b.ID, sessionName) //nolint:errcheck
-		return false
-	}
-	hasAssignedWork, err = sessionHasOpenAssignedWorkForConfig(sw, b)
-	if err != nil {
-		fmt.Fprintf(stderr, "session work guard: checking assigned work for %s: %v\n", b.ID, err) //nolint:errcheck
-		return false
-	}
-	if hasAssignedWork {
-		return false
-	}
-	if isFailedCreateSessionBead(b) {
-		return closeFailedCreateBead(sessionFrontDoor(store), sessionInfoFromBead(b), now, stderr)
-	}
-	return closeBeadUnlessLateWork(store, sw, sessionInfoFromBead(b), closeReason, now, stderr, nil)
+	return closeSeat(store, sw, info, why, now, stderr)
 }
 
 func stopRuntimeBeforeSessionBeadMutation(
@@ -4000,11 +3991,9 @@ func staleReapStartBoundaryInfo(i session.Info) (time.Time, bool) {
 // is only called if all writes succeed. If any write fails, the bead stays
 // open so the next tick retries the entire sequence.
 //
-// Ownership checks live in closeSessionBeadIfUnassigned, which can see the
-// full cross-store, multi-identifier assignment picture. closeBead remains
-// the low-level metadata+close helper used once a caller has already decided
-// the bead is safe to retire (or the close reason is unrelated to work
-// ownership, such as failed-create cleanup).
+// Ownership checks live in closeAllowed (closeSeat), which can see the full
+// cross-store, multi-identifier assignment picture. closeBead remains the
+// low-level commit+cascade closeSeat runs once the close is allowed.
 //
 // After a successful close, any non-closed work beads still assigned to
 // this session (by bead ID, session_name, or configured named identity)
@@ -4038,9 +4027,8 @@ func closeBeadPreservingAssignees(store beads.Store, sw *SeatWork, expected sess
 		stderr = io.Discard
 	}
 	preserveSet := assigneePreserveSet(preserve)
-	// Idempotence: closeBead is reached from three reconciler paths
-	// (closeSessionBeadIfUnassigned, closeSessionBeadIfRuntimeStoppedAndUnassigned,
-	// closeSessionBeadIfReachableStoreUnassigned). On an already-closed
+	// Idempotence: closeBead is reached from every legacy close path
+	// (closeSeat). On an already-closed
 	// session bead each path can keep firing, with each call writing a
 	// different terminal state via session.ClosePatch (gc_swept vs.
 	// orphaned). The result is an unbounded metadata.state flap on the
@@ -4068,7 +4056,7 @@ func closeBeadPreservingAssignees(store beads.Store, sw *SeatWork, expected sess
 	// reads, the first included, must still carry the lifecycle facts and
 	// incarnation of expected, the row the caller decided on. A wake, wake
 	// request, or new incarnation that landed after that decision makes it
-	// write nothing and report false (session.ErrSessionCloseSuperseded), and
+	// write nothing and report false (session.CommitMoved), and
 	// the next tick decides again. If a concurrent closer wins instead, this call reports false and
 	// leaves the release cascade to that closer. If the row it reads carries a
 	// fresh `gc session kill` fence (#6749), the kill owns the row: the close
@@ -4077,12 +4065,7 @@ func closeBeadPreservingAssignees(store beads.Store, sw *SeatWork, expected sess
 	// with the metadata ordered first. There the metadata may land while the
 	// Close fails; the helper then reports failure and the reconciler re-runs
 	// the close next tick, so no bead is durably left half-closed.
-	closed, err := sessionFrontDoor(store).CloseWithTerminalPatch(expected, session.ClosePatch(now, reason), "gc: close session "+id, now)
-	if err != nil {
-		fmt.Fprintf(stderr, "session beads: closing %s: %v\n", id, err) //nolint:errcheck
-		return false
-	}
-	if !closed {
+	if commitLegacyClose(sessionFrontDoor(store), expected, session.ClosePatch(now, reason), now, stderr, "session") != session.CommitLanded {
 		return false
 	}
 	// Cascade extmsg cleanup. Pool retirement funnels through closeBead;

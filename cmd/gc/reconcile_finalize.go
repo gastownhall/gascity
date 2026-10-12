@@ -17,7 +17,7 @@ type finalizeFacts struct {
 	// (sessionHasOpenAssignedWorkForReachableStoreForCloseGate); an error
 	// counts as work.
 	HasWork bool
-	// OperatorHeld is an operator's hold (HoldUser): the seat is kept.
+	// OperatorHeld is an operator's hold (Disposition.KeepsSlot): the seat is kept.
 	OperatorHeld bool
 	// HonoredWake is a pending explicit wake AL1 honors (D7 rule 4): no
 	// close lands over it. Legacy has none.

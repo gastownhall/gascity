@@ -152,11 +152,11 @@ type fakeClaudePane struct {
 	promptKeys []string
 
 	// captureErr fails one capture-pane: the captureErrOnCapture'th
-	// (1-based), or the first after the first literal text when
-	// captureErrAfterPaste is set, the way a capture can fail under load.
+	// (1-based), or the captureErrAfterPaste'th (1-based) after the first
+	// literal text, the way a capture can fail under load.
 	captureErr           error
 	captureErrOnCapture  int
-	captureErrAfterPaste bool
+	captureErrAfterPaste int
 
 	captures    int
 	keys        []string // every non-literal send-keys key, in order
@@ -393,9 +393,9 @@ func (f *fakeClaudePane) sendKeys(args []string) {
 		if f.prompt != "" && f.promptAfterPaste {
 			defer func() { f.promptShown = true }()
 		}
-		if f.captureErr != nil && f.captureErrAfterPaste {
-			f.captureErrAfterPaste = false
-			f.captureErrOnCapture = f.captures + 1
+		if f.captureErr != nil && f.captureErrAfterPaste > 0 {
+			f.captureErrOnCapture = f.captures + f.captureErrAfterPaste
+			f.captureErrAfterPaste = 0
 		}
 		text := strings.Join(keys, " ")
 		c := f.cur()

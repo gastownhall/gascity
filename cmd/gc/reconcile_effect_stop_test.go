@@ -367,6 +367,11 @@ func TestWantedPoolSeatWithoutWorkClosesAsLegacy(t *testing.T) {
 		if s.Outcome != settledLanded || got.Status != "closed" || got.Metadata["state"] != "drained" || got.Metadata["close_reason"] != session.CanonicalCloseReason("drained") {
 			t.Errorf("%s: settlement %+v, status %s, row %v; want legacy's drained close", reason, s, got.Status, got.Metadata)
 		}
+		for _, k := range []string{session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey} {
+			if got.Metadata[k] != "" {
+				t.Errorf("%s: the closed row keeps %s=%q, want the stop request cleared", reason, k, got.Metadata[k])
+			}
+		}
 	}
 }
 

@@ -21,4 +21,4 @@ cmd/gc/soft_reload.go 1
 internal/session/chat.go 7
 internal/session/manager.go 2
 internal/session/runtime_lease.go 2
-internal/session/store.go 4
+internal/session/store.go 3

@@ -97,7 +97,7 @@ func TestStartResolutionTable(t *testing.T) {
 			v.Row = r
 			k.resolvesAs(row, r)
 			step := verbStep(c.adopt)(v, prepared, nil)
-			if step.Refuse != c.refuse || (len(step.Write) > 0) != c.write || step.Done != c.done {
+			if step.Refuse != c.refuse || (len(step.Write) > 0) != c.write || (step.Done || step.Last) != c.done {
 				t.Fatalf("step %+v, want refuse %q, write %v, done %v", step, c.refuse, c.write, c.done)
 			}
 			if c.done && (step.Facts.Noted == nil || step.Facts.Noted.Name != "s-gc-1") {
@@ -367,7 +367,6 @@ var stateWriters = map[string]string{
 	"cmd/gc/session_reconcile.go:providerTerminalErrorPatch":                  "patch builder (C5a2's abandon)",
 	"cmd/gc/session_reconciler.go:reconcileSessionBeadsTracedWithNamedDemand": "legacy reconciler",
 	"internal/session/chat.go:Manager.confirmLiveSessionState":                "Manager: CLI/API start confirms active",
-	"internal/session/holds.go:holdMeta":                                      "read model, not a write",
 	"internal/session/disposition.go:dispositionMeta":                         "read model, not a write",
 	"internal/session/resume_user_hold.go:consumeUserHoldLife":                "patch builder (operator resume consumes a user hold)",
 	"internal/session/lifecycle_exits.go:RateLimitQuarantinePatch":            "patch builder",

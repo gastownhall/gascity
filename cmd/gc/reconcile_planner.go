@@ -126,9 +126,12 @@ type planner struct {
 	creates     *createEffects           // runs create effects on effects; nil defers creates (no-effect)
 	rec         events.Recorder          // settlements' events; nil records none
 	stranded    *strandedClaimAlerts     // the controller's session.stranded_claims alerter
-	stderr      io.Writer
-	metrics     *passMetrics
-	emitRecord  func(fields map[string]any) // the reconcile.pass record; nil emits none
+	// classified is each row's last classified dead runtime, by its token
+	// (A12; v5 S5, X10): in memory, so a restart classifies once more.
+	classified map[rowKey]string
+	stderr     io.Writer
+	metrics    *passMetrics
+	emitRecord func(fields map[string]any) // the reconcile.pass record; nil emits none
 
 	// observations is the cache a fresh read's Noted fact is written to; nil
 	// notes none. capacity is the endpoint breaker a start admits its ticket
@@ -396,6 +399,12 @@ func (p *planner) applyFacts(f effectFacts, at time.Time) {
 	default:
 		p.backoff.Succeed(workBackoffKey(f.Work.BeadID))
 	}
+	if c := f.Classified; c != nil {
+		if p.classified == nil {
+			p.classified = make(map[rowKey]string)
+		}
+		p.classified[c.Key] = c.Token
+	}
 	if n := f.Noted; n != nil && p.observations != nil {
 		if cache := p.observations(); cache != nil {
 			// Listed, running and the agent alive, at the read's issue time,
@@ -413,6 +422,7 @@ var (
 	recordDrainTransition = telemetry.RecordDrainTransition
 	recordAgentQuarantine = telemetry.RecordAgentQuarantine
 	recordAgentStop       = telemetry.RecordAgentStop
+	recordAgentCrash      = telemetry.RecordAgentCrash // the recycle's and A12's crash metric
 )
 
 // record records ev, counting the stop-outstanding alerts (v5 D6) for the
@@ -433,15 +443,21 @@ func (p *planner) record(ev events.Event) {
 // resets its record; a refusal (a landing with a cause, a heal written in a
 // refusal's stead, included), failure or ambiguous outcome (an abandoned
 // write) backs it off with its cause, except a swap pause and an endpoint-gate
-// refusal, deferrals the gate itself paces.
+// refusal, deferrals the gate itself paces. A drift's landing, its restart
+// or its bounded deferral's stamp (whose bound paces what follows), and a
+// row's plain start each end the drift's episode: its record resets.
 func (p *planner) backoffSettled(s settlement) {
 	key := s.BackoffKey
 	if key == "" && s.Key.ID != "" {
-		key = rowBackoffKey(s.Key)
+		key = settledBackoffKey(s.Kind, s.Key)
+	}
+	drift := s.Key.ID != "" && key == driftBackoffKey(s.Key)
+	if s.Kind == intentStart && s.Outcome == settledLanded && s.Cause == "" && s.Key.ID != "" {
+		p.backoff.Succeed(driftBackoffKey(s.Key))
 	}
 	switch {
 	case key == "":
-	case s.Outcome == settledLanded && s.Cause == "" || s.Outcome == settledNoop:
+	case s.Outcome == settledLanded && (s.Cause == "" || drift) || s.Outcome == settledNoop:
 		p.backoff.Succeed(key)
 	case (s.Outcome == settledRefused || s.Outcome == settledLanded || s.Outcome == settledFailed || s.Outcome == settledAmbiguous) && s.Cause != causeSwapPause && s.Cause != causeEndpointGate && s.Cause != causeCapacity:
 		p.backoff.Refuse(key, s.At, time.Time{}, s.Cause, s.Fingerprint)
@@ -531,3 +547,17 @@ type realPlannerTimer struct{ t *time.Timer }
 func (r realPlannerTimer) C() <-chan time.Time   { return r.t.C }
 func (r realPlannerTimer) Reset(d time.Duration) { r.t.Reset(d) }
 func (r realPlannerTimer) Stop()                 { r.t.Stop() }
+
+// classifiedOf is the planner's classified memory for the census's rows,
+// forgetting a row that left the census or whose runtime the pass reads
+// alive or gone (SESS-090: a runtime that recovers and dies again is
+// classified again).
+func (p *planner) classifiedOf(c *sessionCensus, observed map[rowKey]rowObservation) map[rowKey]string {
+	for k := range p.classified {
+		_, ok := c.Rows[k]
+		if l := observed[k].Liveness; !ok || l == livenessAlive || l == livenessGone {
+			delete(p.classified, k)
+		}
+	}
+	return maps.Clone(p.classified)
+}

@@ -324,7 +324,7 @@ func v2Class(kind string) string {
 		return "start"
 	case intentDrainBegin, intentDrainBeginFresh:
 		return "drain"
-	case intentSignal, intentSignalFresh:
+	case intentSignal, intentSignalFresh, intentSignalAck:
 		return "signal"
 	case intentDrainVoid:
 		return "drain-cancel"

@@ -32,7 +32,7 @@ func (t *tx) readFence(ctx context.Context) string {
 	if t.view.RT != nil {
 		leaf = t.view.RT.leaf // the leaf the runtime read used
 	}
-	if leaf == nil && (t.needs.Legs&(legAttach|legPending) != 0 || t.needs.Idle) { // L5 alone needs no route
+	if leaf == nil && (t.needs.Legs&(legAttach|legPending) != 0 || t.needs.Idle || t.needs.Activity) { // L5 alone needs no route
 		var known bool
 		if leaf, _, known = runtime.ResolveBackend(t.p.Runtime, t.name); t.p.Runtime == nil || !known || leaf == nil {
 			return causeRouteUnknown
@@ -67,6 +67,20 @@ func readLegs(ctx context.Context, leaf runtime.Provider, name string, n needs, 
 	}
 	if n.Idle {
 		f.Idle = provedIdle(ctx, leaf, name, passNow)
+	}
+	if n.Activity {
+		a := activityRead{Reportable: sessionActivityReportable(leaf, name)}
+		if a.Reportable {
+			last, ok := boundedProbe(ctx, func() activityRead {
+				at, err := leaf.GetLastActivity(name)
+				return activityRead{Last: at, Err: err}
+			})
+			a.Last, a.Err = last.Last, last.Err
+			if !ok {
+				a.Err = errProbeExpired
+			}
+		}
+		f.Activity = &a
 	}
 	return f
 }

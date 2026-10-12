@@ -75,7 +75,7 @@ func TestNudgeNowSendsNoEnterWhenTheLookBeforeItCannotReadThePane(t *testing.T) 
 	pane := promptGuardPane(t)
 	pane.promptAfterPaste = true
 	pane.captureErr = errors.New("capture-pane: timed out")
-	pane.captureErrAfterPaste = true
+	pane.captureErrAfterPaste = 2 // capture 1 is submitEnterAndConfirm's busy baseline
 
 	err := nudgeNowText(t, pane, "run the tests")
 	if !errors.Is(err, pane.captureErr) {
@@ -128,7 +128,7 @@ func TestSubmitEnterAndConfirmStopsAtPendingPrompt(t *testing.T) {
 	}
 	notBusy := func() (bool, error) { return false, nil }
 
-	confirmed, err := submitEnterAndConfirm(send, func() {}, notBusy, func(time.Duration) {})
+	confirmed, _, err := submitEnterAndConfirm(send, func() {}, notBusy, func(time.Duration) {})
 	if confirmed || !errors.Is(err, runtime.ErrPendingInteraction) {
 		t.Fatalf("submitEnterAndConfirm = (%v, %v), want (false, ErrPendingInteraction)", confirmed, err)
 	}
@@ -150,7 +150,7 @@ func TestSubmitEnterAndConfirmStopsWhenALookCannotReadThePane(t *testing.T) {
 	}
 	notBusy := func() (bool, error) { return false, nil }
 
-	confirmed, err := submitEnterAndConfirm(send, func() {}, notBusy, func(time.Duration) {})
+	confirmed, _, err := submitEnterAndConfirm(send, func() {}, notBusy, func(time.Duration) {})
 	if confirmed || !errors.Is(err, errPromptLookFailed) {
 		t.Fatalf("submitEnterAndConfirm = (%v, %v), want (false, errPromptLookFailed)", confirmed, err)
 	}

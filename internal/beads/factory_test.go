@@ -21,8 +21,10 @@ import (
 // TestLogNativeUnavailableDowngradesBDContextAgreementToDebug pins the noise
 // fix: the bd_context_agreement gate (a benign degrade-not-block check that
 // fires on every non-git city root) logs at Debug so it is silent at the
-// default Info threshold, while identity_match keeps Error and every other
-// gate keeps Warn. The structured BeadsDiagnostic still carries the signal.
+// default Info threshold, while identity_match keeps Error and a gate that
+// was not demoted on purpose keeps Warn (native_transport_off is the other
+// demotion, pinned below). The structured BeadsDiagnostic still carries the
+// signal.
 func TestLogNativeUnavailableDowngradesBDContextAgreementToDebug(t *testing.T) {
 	newLogger := func(buf *bytes.Buffer, level slog.Level) *slog.Logger {
 		return slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: level}))
@@ -54,6 +56,27 @@ func TestLogNativeUnavailableDowngradesBDContextAgreementToDebug(t *testing.T) {
 	logNativeUnavailable(newLogger(&buf, slog.LevelInfo), "scope", "force_fallback", "reason")
 	if !strings.Contains(buf.String(), "level=WARN") {
 		t.Fatalf("a non-special gate should log at WARN, got: %q", buf.String())
+	}
+}
+
+// TestLogNativeUnavailableDowngradesNativeTransportOffToDebug pins the
+// native_transport_off demotion. The gate fires on every store open of a
+// city that set beads.native_transport = "off" and on every control-plane
+// open, which pins the bd store, so it is silent at the default Info
+// threshold. It still emits at Debug: downgraded, not deleted.
+func TestLogNativeUnavailableDowngradesNativeTransportOffToDebug(t *testing.T) {
+	var buf bytes.Buffer
+	logNativeUnavailable(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})),
+		"scope", nativeTransportOffGate, "reason")
+	if buf.Len() != 0 {
+		t.Fatalf("native_transport_off at Info threshold should be silent (Debug), got: %q", buf.String())
+	}
+
+	buf.Reset()
+	logNativeUnavailable(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		"scope", nativeTransportOffGate, "reason")
+	if !strings.Contains(buf.String(), "level=DEBUG") || !strings.Contains(buf.String(), "gate="+nativeTransportOffGate) {
+		t.Fatalf("native_transport_off should log at DEBUG under its gate, got: %q", buf.String())
 	}
 }
 
@@ -826,12 +849,16 @@ func TestStampOpenedStoreRequireRefusesCarrierless(t *testing.T) {
 	})
 }
 
-// TestOpenStoreAtForCityNilPreflightCheckerFallsBackToBd pins the control-
-// plane routing contract: a caller that supplies no PreflightChecker can
-// never be given the native store — the factory treats the missing checker
-// as preflight-unavailable and takes the bd fallback, stamping it like every
-// other path. (The control dispatcher routes its raw bd store through the
-// factory this way; native selection there would be a behavior change.)
+// TestOpenStoreAtForCityNilPreflightCheckerFallsBackToBd pins that a caller
+// that supplies no PreflightChecker is never given the native store through
+// the preflight route: the factory treats the missing checker as
+// preflight-unavailable and takes the bd fallback, stamping it like every
+// other path. The library-extension arm runs before preflight and consults no
+// checker, so a caller that must never be native says so with
+// NativeTransportOff instead, as the control dispatcher does (pinned by
+// TestOpenStoreAtForCityLibraryExtensionBackendHonorsNativeTransportOff here
+// and by cmd/gc's
+// TestOpenControlStoreAtForCityKeepsTheBdStoreForALibraryBackendScope).
 func TestOpenStoreAtForCityNilPreflightCheckerFallsBackToBd(t *testing.T) {
 	t.Setenv(nativeForceFallbackEnv, "")
 	bd := NewMemStore()

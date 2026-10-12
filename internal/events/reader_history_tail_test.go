@@ -382,6 +382,26 @@ func TestReadFilteredHistoryTailStopsWhenCanceled(t *testing.T) {
 			filter: Filter{Type: "no.such.type"},
 			nthErr: 3,
 		},
+		// 1 at entry, 2 and 3 before the first two chunks of the Since walk.
+		// Uncanceled, the walk closes the window on the old run at the head
+		// and answers without an error.
+		"inside the Since walk of the active log": {
+			setup: func(t *testing.T) string {
+				path := filepath.Join(t.TempDir(), "events.jsonl")
+				now := time.Now().UTC()
+				evts := pastRun(1, now.Add(-72*time.Hour), 31)
+				for seq := uint64(32); seq < 72; seq++ {
+					evts = append(evts, Event{
+						Seq: seq, Type: "new.type", Actor: "api",
+						Ts: now.Add(-time.Minute), Message: strings.Repeat("x", 4*1024),
+					})
+				}
+				writeLog(t, path, evts)
+				return path
+			},
+			filter: Filter{Type: "no.such.type", Since: time.Now().UTC().Add(-5 * time.Minute)},
+			nthErr: 3,
+		},
 		// 1 at entry, 2 at line 4096 of the forward read of the active log.
 		"inside the forward read of the active log (count)": {
 			setup: func(t *testing.T) string {
@@ -418,7 +438,9 @@ func TestReadFilteredHistoryTailStopsWhenCanceled(t *testing.T) {
 }
 
 // ReadFilteredEach yields exactly what ReadFiltered returns, in the same
-// order, for every filter, including a Limit.
+// order, for every filter without Since, including a Limit.
+// TestReadFilteredSinceKeepsRecordsAroundBackdatedOnes compares them on Since
+// layouts that keep sinceScanSkew's invariant.
 func TestReadFilteredEachMatchesReadFiltered(t *testing.T) {
 	path := seedHistoryTailLayout(t)
 	for name, f := range map[string]Filter{

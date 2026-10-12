@@ -54,5 +54,5 @@ func operatorDormantStop(info session.Info) bool {
 	case session.SleepReason(strings.TrimSpace(info.SleepReason)) == session.SleepReasonKilled:
 		return true
 	}
-	return strings.TrimSpace(info.SleepIntent) == string(session.SleepReasonUserHold)
+	return session.DispositionOfInfo(info).KeepsSlot()
 }

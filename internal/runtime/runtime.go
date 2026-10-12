@@ -63,6 +63,11 @@ var ErrInteractionResponseInvalid = errors.New("interaction response is invalid"
 // their own refusal (session.ErrPendingInteraction).
 var ErrNudgeRefusedPendingInteraction = errors.New("nudge refused: session has a pending interaction")
 
+// ErrInterruptNotSettled reports that Interrupt asked the session to stop its
+// current turn but the turn had not ended when the provider's settle bound
+// ran out. The session is left running; ending it is an explicit Stop.
+var ErrInterruptNotSettled = errors.New("interrupt did not settle the session's turn")
+
 // ErrSessionDiedDuringStartup reports that a provider created a session
 // process, but it exited before startup completed successfully.
 var ErrSessionDiedDuringStartup = errors.New("session died during startup")
@@ -107,6 +112,14 @@ func IsProviderCapacity(err error) bool { return errors.Is(err, ErrProviderCapac
 // internal "not found" conditions with this sentinel so callers can
 // dispatch with errors.Is.
 var ErrSessionNotFound = errors.New("session not found")
+
+// ErrNudgeDeliveredUnobserved reports that a nudge reached the session and
+// was consumed, but the provider never observed the session start the turn.
+// Delivery is proven, so callers must treat the nudge as delivered and must
+// not retry it: a retry delivers the message twice. Providers wrap their own
+// unobserved-delivery conditions with this sentinel so callers can dispatch
+// with errors.Is.
+var ErrNudgeDeliveredUnobserved = errors.New("nudge delivered but unobserved")
 
 // ErrExecUnsupported reports that a provider implements [ExecProvider] but the
 // underlying runtime does not implement the RPP `exec` wire op (it answered
@@ -376,7 +389,12 @@ type Provider interface {
 
 	// Interrupt sends a soft interrupt signal (e.g., Ctrl-C / SIGINT) to
 	// the named session. Best-effort: returns nil if the session doesn't
-	// exist. Used for graceful shutdown before Stop.
+	// exist. Used for graceful shutdown before Stop. A provider with a
+	// protocol-level cancel may instead wait a bounded time for the
+	// interrupted turn to end and return [ErrInterruptNotSettled] if it
+	// does not. That wait blocks the caller for up to the provider's whole
+	// bound (ACP: cancel_timeout plus two 1s SIGINT waits, 12s by default),
+	// and any lock the caller holds across the call is held that long too.
 	Interrupt(name string) error
 
 	// IsRunning reports whether the named provider runtime exists. It does not

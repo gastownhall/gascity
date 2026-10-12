@@ -724,6 +724,54 @@ func TestDeliverSessionNudgeWithWorkerAcksDeliveredUnobservedInsteadOfFailing(t 
 	assertSessionLastNudgeDeliveredAtStamped(t, store, info.ID)
 }
 
+// A running session is nudged through its runtime handle, so the CLI sees the
+// provider's own delivered-but-unobserved error rather than the session
+// manager's plain delivery, and must still report and stamp a delivery.
+func TestDeliverSessionNudgeWithWorkerAcksDeliveredUnobservedFromRunningSession(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "claude", WorkDir: dir, Provider: "claude", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if !fake.IsRunning(info.SessionName) {
+		t.Fatalf("session %q is not running; this test needs the runtime-handle path", info.SessionName)
+	}
+	fake.NudgeErrors = map[string]error{info.SessionName: tmux.ErrNudgeSubmitDeliveredUnobserved}
+
+	target := nudgeTarget{
+		cityPath:    dir,
+		sessionID:   info.ID,
+		sessionName: info.SessionName,
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := deliverSessionNudgeWithWorker(target, store, fake, "check deploy status", nudgeDeliveryImmediate, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("deliverSessionNudgeWithWorker = %d, want 0: a drained-but-unobserved submit is proven delivery, not a CLI failure; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Nudged "+info.ID) {
+		t.Fatalf("stdout = %q, want nudge confirmation", stdout.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	nudges := 0
+	for _, call := range fake.Calls {
+		if (call.Method == "Nudge" || call.Method == "NudgeNow") && call.Name == info.SessionName {
+			nudges++
+		}
+	}
+	if nudges != 1 {
+		t.Fatalf("nudge calls = %d, want exactly 1 (delivered once, never retried)", nudges)
+	}
+	assertSessionLastNudgeDeliveredAtStamped(t, store, info.ID)
+}
+
 func TestDeliverSessionNudgeWithWorkerWaitIdleResumesUnheldClaudeSession(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()

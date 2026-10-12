@@ -21,11 +21,12 @@ import (
 // runs for a row with an effect in flight: the pass skips it (R5), nor for a
 // census-only row, which legacy never reconciles (armCensusOnly).
 //
-// The asleep heals act only on a runtime the inventory reads gone. A dead
-// one (a corpse, or a live pane whose agent reads dead, which a booting agent
-// can) waits for A12 to classify it first, so its crash, rate-limit or
-// terminal screen is never lost to the heal's continuation reset (SESS-057,
-// SESS-530); once A12 lands, a classified (row, runtime token) may heal here.
+// The asleep heals act on a runtime the inventory reads gone, or on a dead
+// one (a corpse, or a live pane whose agent reads dead) once A12 classified
+// its (row, runtime token), so its crash, rate-limit or terminal screen is
+// never lost to the heal's continuation reset (SESS-057, SESS-530). A
+// classified zombie heals too, its rapid crash counted, as legacy heals it
+// (CONTRACT v5.9m).
 
 // A6's other reasons.
 const (
@@ -58,6 +59,28 @@ func (r *rowFacts) freshGone() bool {
 		return r.fresh.Class == rtAbsent
 	}
 	return r.gone()
+}
+
+// freshGoneOrClassified is freshGone for A6's asleep heals, which take a
+// dead runtime A12 classified too (CONTRACT A6, v5.9m): on the effect's
+// fresh read, a dead object read on one session object whose token A12
+// classified. A4 and A14 keep freshGone: a classified zombie is no gone
+// runtime to finalize a stop over or repair drift on.
+func (r *rowFacts) freshGoneOrClassified() bool {
+	if r.freshGone() {
+		return true
+	}
+	if r.fresh != nil {
+		dead := r.fresh.Class == rtCorpse || r.fresh.Class == rtZombie
+		return dead && r.fresh.Same && r.classified(r.fresh.Identity)
+	}
+	return r.entry != nil && r.entry.Liveness == livenessDead && r.classified(r.w.Observed[r.k].Identity)
+}
+
+// classified reports that A12 classified the row's dead runtime id.
+func (r *rowFacts) classified(id runtimeIdentity) bool {
+	c, ok := r.w.Classified[r.k]
+	return ok && c == deadToken(id)
 }
 
 // freshIdentity is the row's runtime identity for a fresh kind's arm (A3's
@@ -133,7 +156,7 @@ func armClaimClear(r *rowFacts) (intent, bool) {
 // running, or one that just settled deferred with its runtime up.
 func armCreatingHeal(r *rowFacts) (intent, bool) {
 	info := r.row.Info
-	if strings.TrimSpace(info.MetadataState) != string(session.StateCreating) || info.PendingCreateClaim || r.wake() || !r.freshGone() {
+	if strings.TrimSpace(info.MetadataState) != string(session.StateCreating) || info.PendingCreateClaim || r.wake() || !r.freshGoneOrClassified() {
 		return intent{}, false
 	}
 	return r.heal(intentRowHealFresh, decideCreatingHeal, asleepHealPatch(info))
@@ -153,7 +176,7 @@ func armCreatingHeal(r *rowFacts) (intent, bool) {
 // decideRow composes it with the row's restart (startHealed).
 func armDeadRuntimeHeal(r *rowFacts) (intent, bool) {
 	info := r.row.Info
-	if r.entry == nil || !committed(info) || r.entry.Desired == desireDrain || !r.freshGone() {
+	if r.entry == nil || !committed(info) || r.entry.Desired == desireDrain || !r.freshGoneOrClassified() {
 		return intent{}, false
 	}
 	patch, class, _ := deadRuntimePatch(r, true)
@@ -182,7 +205,7 @@ func deadRuntimePatch(r *rowFacts, heal bool) (patch session.MetadataPatch, clas
 	if heal {
 		patch = asleepHealPatch(info)
 	}
-	if strings.TrimSpace(info.SleepIntent) == sleepIntentIdle {
+	if session.DispositionOfInfo(info).IdleStop {
 		// SESS-532: an idle stop was pending, so the death is the idle
 		// sleep it asked for, which accrues nothing. Legacy heals the state
 		// first (its continuation reset), then writes SleepPatch(idle) over
@@ -241,31 +264,16 @@ func heartbeatHeld(info session.Info, now time.Time) bool {
 // effect proves it again fresh. Without it a runtime started outside the
 // controller on an asleep row (`gc session attach`) stays orphaned, as S1
 // reads the shape as Noop. Unlike legacy, a row an operator holds dormant is
-// never woken (I15, I-STOP-3/4; operatorDormant): its runtime is the
+// never woken (I15, I-STOP-3/4; Disposition.OperatorDormant): its runtime is the
 // operator-dormant stop path's (C5a3's lost-commit stop, C6b2). That covers a
 // `gc session kill` that lands between a PreWake and its provider Start,
 // before any runtime exists to fence.
 func armAwakeHeal(r *rowFacts) (intent, bool) {
 	info := r.row.Info
-	if strings.TrimSpace(info.MetadataState) != string(session.StateAsleep) || operatorDormant(info, r.w.Now) || !r.freshOwnAlive() {
+	if strings.TrimSpace(info.MetadataState) != string(session.StateAsleep) || session.DispositionOfInfo(info).OperatorDormant(r.w.Now) || !r.freshOwnAlive() {
 		return intent{}, false
 	}
 	return r.heal(intentRowHealFresh, decideAwakeHeal, session.MetadataPatch{"state": string(session.StateAwake)})
-}
-
-// operatorDormant reports an asleep row an operator holds dormant: a kill
-// fence, a sleep an operator owns (killed, user-hold, city-stop), a user-hold
-// sleep intent (a suspend), a wait hold, or a live hold or quarantine. The
-// timers are trimmed here: metadataTimeInFuture, which legacy shares, does
-// not trim, and a padded timer must not read as no hold.
-func operatorDormant(info session.Info, now time.Time) bool {
-	switch session.SleepReason(strings.TrimSpace(info.SleepReason)) {
-	case session.SleepReasonKilled, session.SleepReasonUserHold, session.SleepReasonCityStop:
-		return true
-	}
-	return session.IsKillPendingInfo(info, now) || strings.TrimSpace(info.SleepIntent) == string(session.SleepReasonUserHold) ||
-		strings.TrimSpace(info.WaitHold) != "" || metadataTimeInFuture(strings.TrimSpace(info.HeldUntil), now) ||
-		metadataTimeInFuture(strings.TrimSpace(info.QuarantinedUntil), now)
 }
 
 // armStabilityClear is SESS-539/540 (clearWakeFailures, clearChurn; v5.8

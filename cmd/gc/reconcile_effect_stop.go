@@ -58,7 +58,7 @@ func stopNeeds(_ *World, it intent) needs {
 
 // stopLegs are the fence legs the stop's origin keeps (v5 F1, F2).
 func stopLegs(it intent) fenceLegs {
-	if it.Reason == decideDormantStop {
+	if it.Reason == decideDormantStop || it.Kind == intentDriftRestart || it.Kind == intentDriftRelaunch { // A14's restart: the Full fence (D3)
 		return legsFull
 	}
 	return legToken | legAttach
@@ -99,7 +99,7 @@ type stopped struct {
 // fence. It refuses a stop A4 no longer decides, or one the fence holds.
 func stopDecide(v txView) txStep {
 	w := v.World.withRow(v.It.Key, v.Row, v.Meta).withRuntime(v.It.Key, v.RT)
-	if fresh, _ := decideRow(&w, v.Alloc, v.It.Key); fresh.Kind != intentStop {
+	if fresh, _ := decideRow(&w, v.Alloc, v.It.Key); fresh.Kind != v.It.Kind { // the stop's, or A14's restart that runs it
 		return txStep{Refuse: causeRedecided}
 	}
 	name := strings.TrimSpace(v.Row.SessionName)
@@ -196,7 +196,7 @@ func finalizeWorkProbe(_ context.Context, r effectReads, v txView) (finalizeWork
 func stopChoice(v txView, work finalizeWork) finalizeChoice {
 	f := finalizeFacts{
 		Now: v.Now, CloseIfUnassigned: closeIfUnassigned(v), HasWork: work.has || work.err != nil,
-		OperatorHeld: session.HoldsInfo(v.Row, v.Now).In&session.HoldUser != 0,
+		OperatorHeld: session.DispositionOfInfo(v.Row).KeepsSlot(),
 		HonoredWake:  honoredWake(v),
 		FreshWake:    v.Row.WakeMode == "fresh", RestartRequested: v.Row.RestartRequested == "true",
 	}
@@ -270,7 +270,9 @@ func stopCloseStep(v txView, work finalizeWork, _ error) txStep {
 	if !stopChoice(v, work).CloseSeat {
 		return txStep{Refuse: causeRedecided}
 	}
-	return txStep{Terminal: session.ClosePatch(v.Now, "drained"), Facts: stopFacts(v, out, nil), Done: true}
+	terminal := session.ClosePatch(v.Now, "drained")
+	maps.Copy(terminal, stopVoidResiduePatch()) // a closed row keeps no stop request
+	return txStep{Terminal: terminal, Facts: stopFacts(v, out, nil), Done: true}
 }
 
 // passStopped hands the stop's outcome to the premise close.
@@ -295,7 +297,7 @@ func stopFinalizeStep(v txView, work finalizeWork, _ error) txStep {
 	// the fresh row in the same CAS, as legacy's ApplySleep splits it: the
 	// cell keeps an operator's hold, a wait's intent and an intent it cannot
 	// read, and clears the idle stop's transient.
-	patch := choice.Patch
+	patch := maps.Clone(choice.Patch) // a builder may hand back a shared map
 	if _, ok := activeStop(newCensusRow(v.It.Key, v.Row)); ok {
 		maps.Copy(patch, stopVoidResiduePatch())
 	}

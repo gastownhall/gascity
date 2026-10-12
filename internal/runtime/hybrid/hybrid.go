@@ -42,6 +42,7 @@ var (
 	_ runtime.ServerLifecycleProvider       = (*Provider)(nil)
 	_ runtime.SessionRosterProvider         = (*Provider)(nil)
 	_ runtime.SessionObjectKiller           = (*Provider)(nil)
+	_ runtime.TurnEventProvider             = (*Provider)(nil)
 )
 
 // New creates a hybrid provider. isRemote returns true for sessions
@@ -416,4 +417,15 @@ func (p *Provider) SubscribeSessionEvents(ctx context.Context) (<-chan runtime.S
 	return runtime.SubscribeSessionEventSources(ctx,
 		runtime.SessionEventSource{Name: "local", Provider: p.local},
 		runtime.SessionEventSource{Name: "remote", Provider: p.remote})
+}
+
+// SubscribeTurnEvents forwards the turn-event streams of the backends that
+// implement runtime.TurnEventProvider, merging them when both do, the same
+// way SubscribeSessionEvents does. A nested composite without a turn-event
+// backend is skipped, so ACP turns behind an inner composite still arrive.
+// See runtime.SubscribeTurnEventSources.
+func (p *Provider) SubscribeTurnEvents(ctx context.Context) (<-chan runtime.TurnEvent, error) {
+	return runtime.SubscribeTurnEventSources(ctx,
+		runtime.TurnEventSource{Name: "local", Provider: p.local},
+		runtime.TurnEventSource{Name: "remote", Provider: p.remote})
 }

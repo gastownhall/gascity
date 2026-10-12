@@ -20,12 +20,13 @@ const (
 	decideAdopt             = "adopt"
 	decideRollback          = "rollback"
 	decideStart             = "start"
-	decideHeartbeatRespawn  = "heartbeat-respawn"         // A17, SESS-602
-	decideStartAccrued      = "start-held:death-accrual"  // SESS-537/538: legacy restarts the next tick
-	decideStartFailedCreate = "start-held:failed-create"  // SESS-605
-	decideStartQuarantine   = "start-held:quarantine"     // SESS-606
-	decideStartEpisode      = "start-held:startup-health" // SESS-607, #46
-	decideStartProviderRed  = "start-held:provider-red"   // SESS-610, GUAR-034
+	decideHeartbeatRespawn  = "heartbeat-respawn"                  // A17, SESS-602
+	decideStartAccrued      = "start-held:death-accrual"           // SESS-537/538: legacy restarts the next tick
+	decideStartFailedCreate = "start-held:failed-create"           // SESS-605
+	decideStartParked       = "start-held:provider-terminal-error" // §12.2 #19: parked until a wake request releases it
+	decideStartQuarantine   = "start-held:quarantine"              // SESS-606
+	decideStartEpisode      = "start-held:startup-health"          // SESS-607, #46
+	decideStartProviderRed  = "start-held:provider-red"            // SESS-610, GUAR-034
 )
 
 // armAdopt is A10's adopt: an uncommitted intent (a creating row) whose own
@@ -68,8 +69,8 @@ func armRollback(r *rowFacts) (intent, bool) {
 // not wake because an agent heartbeat holds it (held_until with no intent),
 // whose runtime is gone or dead and which still has assigned work, is
 // restarted through its hold; its PreWake exempts that hold for this intent
-// alone. The start gates still apply.
-// TODO(R7): Disposition tells the heartbeat hold apart.
+// alone. The start gates still apply. The disposition tells the heartbeat
+// hold apart (heartbeatHeld: Disposition.HeartbeatHeld).
 func armHeartbeatRespawn(r *rowFacts) (intent, bool) {
 	e := r.entry
 	if e == nil || e.Desired == desireWake || e.Desired == desireDrain || e.AssignedWork == nil || !e.Liveness.startCandidate() || !heartbeatHeld(r.row.Info, r.w.Now) {
@@ -130,7 +131,10 @@ func (r *rowFacts) startIntent(reason string) (intent, bool) {
 	if isFailedCreateSessionInfo(info) {
 		return intent{Reason: decideStartFailedCreate}, true
 	}
-	if until, ok := parseRFC3339Metadata(info.QuarantinedUntil); ok && now.Before(until) {
+	if parkedTerminal(info) && strings.TrimSpace(info.WakeRequest) != string(session.WakeCauseExplicit) {
+		return intent{Reason: decideStartParked}, true // any explicit wake request releases it for one launch (§12.2 #19)
+	}
+	if until := session.DispositionOfInfo(info).Quarantine; until.After(now) {
 		r.after(requeueUntil(now, until))
 		return intent{Reason: decideStartQuarantine}, true
 	}
@@ -201,4 +205,12 @@ func (r *rowFacts) asleepStranded() bool {
 	}
 	agent := findAgentByTemplate(r.w.Env.Cfg, r.entry.Template)
 	return agent != nil && agent.Lifecycle != config.AgentLifecycleOneShot
+}
+
+// parkedTerminal reports the terminal park itself: the sleep reason S5's and
+// legacy's terminal patch write, which every start commit clears. Not the
+// provider_terminal_error mark, which nothing clears: legacy restarts a
+// named row past it, so a stale mark parks nothing.
+func parkedTerminal(info session.Info) bool {
+	return session.SleepReason(strings.TrimSpace(info.SleepReason)) == session.SleepReasonProviderTerminalError
 }

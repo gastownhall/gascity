@@ -513,7 +513,7 @@ func TestWaitForRuntimeReadyCapturesPromptAboveBlankFooter(t *testing.T) {
 // `-r` and not `-u`: -u deletes the session entry and lets the server's global
 // value show through again, which is the leak rather than the fix.
 func TestRespawnAgentMarksControllerTokenRemovedFromSessionEnv(t *testing.T) {
-	exec := &fakeExecutor{}
+	exec := &fakeExecutor{out: "%0"}
 	tm := NewTmux()
 	tm.exec = exec
 	ops := &tmuxStartOps{tm: tm}
@@ -525,8 +525,8 @@ func TestRespawnAgentMarksControllerTokenRemovedFromSessionEnv(t *testing.T) {
 	if err := ops.respawnAgent("gc-test-token-pin", "/proj", "claude", env); err != nil {
 		t.Fatalf("respawnAgent: %v", err)
 	}
-	if len(exec.calls) != 2 {
-		t.Fatalf("tmux calls = %d (%v), want 2 (set-environment then respawn-pane)", len(exec.calls), exec.calls)
+	if len(exec.calls) != 3 {
+		t.Fatalf("tmux calls = %d (%v), want 3 (set-environment, list-panes, respawn-pane)", len(exec.calls), exec.calls)
 	}
 
 	setEnv := strings.Join(exec.calls[0], " ")
@@ -536,8 +536,8 @@ func TestRespawnAgentMarksControllerTokenRemovedFromSessionEnv(t *testing.T) {
 	if strings.Contains(setEnv, "-u GC_CONTROLLER_TOKEN") {
 		t.Errorf("first call = %q uses -u; that unsets the session entry and re-exposes the server's global value", setEnv)
 	}
-	if respawn := strings.Join(exec.calls[1], " "); !strings.Contains(respawn, "respawn-pane") {
-		t.Errorf("second call = %q, want respawn-pane", respawn)
+	if respawn := strings.Join(exec.calls[2], " "); !strings.Contains(respawn, "respawn-pane") {
+		t.Errorf("third call = %q, want respawn-pane", respawn)
 	}
 	// A non-empty key is a real value, not a withholding, and must not be
 	// marked for removal.
@@ -546,7 +546,7 @@ func TestRespawnAgentMarksControllerTokenRemovedFromSessionEnv(t *testing.T) {
 	}
 
 	t.Run("hosted beads namespace", func(t *testing.T) {
-		exec := &fakeExecutor{}
+		exec := &fakeExecutor{out: "%0"}
 		tm := NewTmux()
 		tm.exec = exec
 		ops := &tmuxStartOps{tm: tm}
@@ -560,8 +560,8 @@ func TestRespawnAgentMarksControllerTokenRemovedFromSessionEnv(t *testing.T) {
 		if err := ops.respawnAgent("gc-test-beads-pin", "/proj", "claude", env); err != nil {
 			t.Fatalf("respawnAgent: %v", err)
 		}
-		if len(exec.calls) != 3 {
-			t.Fatalf("tmux calls = %d (%v), want two set-environment calls then respawn-pane", len(exec.calls), exec.calls)
+		if len(exec.calls) != 4 {
+			t.Fatalf("tmux calls = %d (%v), want two set-environment calls, list-panes, then respawn-pane", len(exec.calls), exec.calls)
 		}
 		for i, key := range []string{"BEADS_DB", "BEADS_FUTURE_AUTHORITY"} {
 			setEnv := strings.Join(exec.calls[i], " ")
@@ -569,8 +569,8 @@ func TestRespawnAgentMarksControllerTokenRemovedFromSessionEnv(t *testing.T) {
 				t.Errorf("call %d = %q, want %s marked removed from the session env", i, setEnv, key)
 			}
 		}
-		if respawn := strings.Join(exec.calls[2], " "); !strings.Contains(respawn, "respawn-pane") {
-			t.Errorf("third call = %q, want respawn-pane", respawn)
+		if respawn := strings.Join(exec.calls[3], " "); !strings.Contains(respawn, "respawn-pane") {
+			t.Errorf("fourth call = %q, want respawn-pane", respawn)
 		}
 	})
 }
@@ -582,7 +582,7 @@ func TestRespawnAgentMarksControllerTokenRemovedFromSessionEnv(t *testing.T) {
 // no gain. Scope is a correctness property, not just a cost one — a marker
 // failure is fatal, so every key marked is a key that can fail a launch.
 func TestRespawnAgentSkipsSessionEnvMarkingWhenNoCredentialWithheld(t *testing.T) {
-	exec := &fakeExecutor{}
+	exec := &fakeExecutor{out: "%0"}
 	tm := NewTmux()
 	tm.exec = exec
 	ops := &tmuxStartOps{tm: tm}
@@ -597,8 +597,96 @@ func TestRespawnAgentSkipsSessionEnvMarkingWhenNoCredentialWithheld(t *testing.T
 	if err := ops.respawnAgent("gc-test-no-pins", "/proj", "claude", env); err != nil {
 		t.Fatalf("respawnAgent: %v", err)
 	}
-	if len(exec.calls) != 1 {
-		t.Fatalf("tmux calls = %d (%v), want 1 (respawn-pane only; nesting flags must not be marked)", len(exec.calls), exec.calls)
+	if len(exec.calls) != 2 {
+		t.Fatalf("tmux calls = %d (%v), want 2 (list-panes and respawn-pane only; nesting flags must not be marked)", len(exec.calls), exec.calls)
+	}
+}
+
+// Relaunch respawns the agent pane, never the active one. "=name:" resolves to
+// the current window's active pane, so a human who left another window or pane
+// focused would have that pane killed and the old agent left running. The
+// session name is resolved to the first pane of the first window (list-panes
+// lists in index order, so this holds under any pane-base-index) and respawned
+// by that pane id fenced to the session; a pane id passes through without the
+// lookup.
+func TestRespawnTargetsAgentPaneNotActivePane(t *testing.T) {
+	lookup := []string{"list-panes", "-t", "=gc-test-agent-pane:^", "-F", "#{pane_id}"}
+	cases := []struct {
+		name string
+		run  func(*Tmux, *tmuxStartOps) error
+		want [][]string // each call's argv after runCtx's "-u"
+	}{
+		{"respawnAgent", func(_ *Tmux, ops *tmuxStartOps) error {
+			return ops.respawnAgent("gc-test-agent-pane", "/proj", "claude", nil)
+		}, [][]string{lookup, {"respawn-pane", "-k", "-t", "=gc-test-agent-pane:^.%7", "-c", "/proj", "claude"}}},
+		{"no workdir", func(tm *Tmux, _ *tmuxStartOps) error {
+			return tm.RespawnPaneWithWorkDir("gc-test-agent-pane", "", "claude")
+		}, [][]string{lookup, {"respawn-pane", "-k", "-t", "=gc-test-agent-pane:^.%7", "claude"}}},
+		{"pane id", func(tm *Tmux, _ *tmuxStartOps) error {
+			return tm.RespawnPaneWithWorkDir("%3", "", "claude")
+		}, [][]string{{"respawn-pane", "-k", "-t", "%3", "claude"}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// The window's first pane is %7; %8 (a later pane) must not be picked.
+			exec := &fakeExecutor{out: "%7\n%8\n"}
+			tm := NewTmux()
+			tm.exec = exec
+			if err := tc.run(tm, &tmuxStartOps{tm: tm}); err != nil {
+				t.Fatalf("respawn: %v", err)
+			}
+			if len(exec.calls) != len(tc.want) {
+				t.Fatalf("tmux calls = %q, want %q", exec.calls, tc.want)
+			}
+			for i, want := range tc.want {
+				if got := exec.calls[i][1:]; !slices.Equal(got, want) {
+					t.Errorf("call %d = %q, want %q", i, got, want)
+				}
+			}
+		})
+	}
+}
+
+// A failed agent-pane lookup fails the respawn closed. Falling back to the
+// session target would respawn the active pane, and an empty id would make
+// tmux respawn some other session's pane (respawn-pane -t "").
+func TestRespawnFailsClosedWhenAgentPaneLookupFails(t *testing.T) {
+	cases := []struct {
+		name   string
+		exec   *fakeExecutor
+		wantIs error
+	}{
+		{"session gone", &fakeExecutor{errs: []error{ErrSessionNotFound}}, ErrSessionNotFound},
+		{"no panes", &fakeExecutor{outs: []string{""}}, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tm := NewTmux()
+			tm.exec = tc.exec
+			err := tm.RespawnPaneWithWorkDir("gc-test-agent-pane", "/proj", "claude")
+			if err == nil {
+				t.Fatal("RespawnPaneWithWorkDir succeeded, want the lookup failure")
+			}
+			if tc.wantIs != nil && !errors.Is(err, tc.wantIs) {
+				t.Errorf("err = %v, want errors.Is %v", err, tc.wantIs)
+			}
+			if len(tc.exec.calls) != 1 || slices.Contains(tc.exec.calls[0], "respawn-pane") {
+				t.Errorf("tmux calls = %q, want only the list-panes lookup", tc.exec.calls)
+			}
+		})
+	}
+}
+
+// GetPaneID passes a pane id through: "%3:^" is not a session tmux can list.
+func TestGetPaneIDPassesPaneIDThrough(t *testing.T) {
+	exec := &fakeExecutor{}
+	tm := NewTmux()
+	tm.exec = exec
+	if got, err := tm.GetPaneID("%3"); err != nil || got != "%3" {
+		t.Fatalf("GetPaneID(%%3) = (%q, %v), want (%%3, nil)", got, err)
+	}
+	if len(exec.calls) != 0 {
+		t.Errorf("tmux calls = %q, want none", exec.calls)
 	}
 }
 

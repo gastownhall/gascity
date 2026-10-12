@@ -87,6 +87,11 @@ const (
 	// FactsResumeConsume is an operator's resume consuming the suspend it
 	// read before its start.
 	FactsResumeConsume FactsSite = "op.resume-consume"
+	// FactsLegacyClose is a controller close decided on a tick's row.
+	FactsLegacyClose FactsSite = "legacy.close"
+	// FactsOpClose is an operator's close, read under its start lock and the
+	// runtime lease.
+	FactsOpClose FactsSite = "op.close"
 )
 
 // factsSite is how a site compares Facts: without Drop's keys, or only
@@ -111,8 +116,26 @@ var drainBasisKeys = []string{
 	"wake_request", "restart_requested",
 }
 
+// legacyCloseKeys are the keys a legacy close rests on: LifecycleInput's and
+// the incarnation's (FactsLegacyClose).
+var legacyCloseKeys = []string{
+	"state", "sleep_reason", "continuity_eligible", "configured_named_identity", "held_until", "quarantined_until",
+	"pending_create_claim", "last_woke_at", "session_key", "started_config_hash", "pending_create_started_at",
+	"pin_awake", "wake_request", "generation", "instance_token",
+}
+
 // factsSites are the premise sites that do not compare every key.
 var factsSites = map[FactsSite]factsSite{
+	// TODO(R8 ratchet, mc-z9o37): widen toward FactsDefault, caller by
+	// caller, with a test each.
+	FactsLegacyClose: {
+		Only:   legacyCloseKeys,
+		Reason: "the closePremiseHolds keys R8b replaced, unwidened: the lifecycle facts (state, sleep reason, holds, the pending-create lease, a wake request, pin_awake, continuity) and the incarnation. A wake, a wake request or a new incarnation that landed after the decision owns the next one; a `gc session kill` fence moves state and sleep_reason",
+	},
+	FactsOpClose: {
+		Only:   []string{"generation", "instance_token"},
+		Reason: "an operator's close is deliberate whatever the controller writes meanwhile; it refuses only a new incarnation, whose runtime its stop never saw",
+	},
 	FactsAfterStart: {
 		Drop:   []string{"session_key", beadmeta.CurrentClaimBeadIDMetadataKey},
 		Reason: "a runtime the Call started writes its own resumable session key and the claim it took while the start is in flight; those do not make the row another row. Nothing writes the current bead or detached_at then, so they stay compared",

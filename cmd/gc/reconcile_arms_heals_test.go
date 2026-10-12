@@ -250,7 +250,7 @@ func TestCreatingHealSkipsPendingCreateAndWakeRows(t *testing.T) {
 		{"occupied", livenessOccupied, desireNone, nil, decideNoAction},
 		{"unknown", livenessUnknown, desireNone, nil, decideLivenessUnknown},
 		{"start-pending", livenessGone, desireNone, []string{"state", "start-pending"}, decideNoAction},
-		{"dead, before A12 classifies it", livenessDead, desireSleep, nil, decideNoAction},
+		{"dead: A12 classifies it first", livenessDead, desireSleep, nil, decideZombie},
 		{"gone, asleep desired", livenessGone, desireSleep, nil, decideCreatingHeal},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -860,5 +860,82 @@ func TestNoArmActsOnACensusOnlyRow(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Kills a classified dead runtime never healed (the C5c2 review's
+// must-fix; CONTRACT A6, v5.9m): a committed row whose corpse or zombie A12
+// classified for this token heals asleep by the fresh heal, the zombie's
+// rapid crash counted as legacy counts it; an unclassified one, or one
+// classified under another token, is A12's first.
+func TestDeadRuntimeHealTakesAClassifiedDeadRuntime(t *testing.T) {
+	woke := rowAt(-10 * time.Second)
+	for _, tc := range []struct {
+		name     string
+		zombie   bool
+		token    string // the classified token; "" unclassified
+		heal     bool
+		attempts string
+		fresh    string // the fresh read's token
+	}{
+		{"classified corpse", false, "tok-3", true, "1", "tok-3"},
+		{"classified zombie", true, "tok-3", true, "1", "tok-3"},
+		{"unclassified zombie", true, "", false, "", ""},
+		{"classified under another token", false, "tok-2", false, "", ""},
+		{"classified, another runtime by the fresh read", false, "tok-3", true, "", "tok-9"},
+		{"classified, the object moving across the fresh read", false, "tok-3", true, "", "moving"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newHealCase(t, livenessDead, desireSleep, "state", "active", "last_woke_at", woke)
+			id := runtimeIdentity{Known: true, SessionID: c.k.ID, Epoch: "3", Token: "tok-3"}
+			c.w.Observed = map[rowKey]rowObservation{c.k: {Liveness: livenessDead, Identity: id}}
+			if tc.token != "" {
+				c.w.Classified = map[rowKey]string{c.k: c.k.ID + "/" + tc.token}
+			}
+			it := c.decide()
+			if got := it.Reason == decideDeadRuntimeHeal; got != tc.heal {
+				t.Fatalf("decideRow = (%q, %q), want the dead-runtime heal %v", it.Kind, it.Reason, tc.heal)
+			}
+			if !tc.heal {
+				return
+			}
+			l := runtime.Liveness{Corpse: true, ObjectID: "$1", ObjectCreated: "1"}
+			if tc.zombie {
+				l = runtime.Liveness{Running: true, ObjectID: "$1", ObjectCreated: "1", PanePID: "42"}
+			}
+			f := &freshObserver{Fake: runtime.NewFake(), l: l, env: map[string]string{"GC_SESSION_ID": c.k.ID, "GC_INSTANCE_TOKEN": tc.fresh, "GC_RUNTIME_EPOCH": "3"}}
+			if tc.fresh == "moving" {
+				n := 0
+				f.env["GC_INSTANCE_TOKEN"] = "tok-3"
+				f.read = func() { n++; f.l.ObjectID = "$" + string(rune('0'+n)) }
+			}
+			_, s := c.run(t, f.tmux(), nil)
+			if tc.attempts == "" {
+				if m := c.meta(t); s.Outcome == settledLanded || m["state"] != "active" {
+					t.Fatalf("settlement %+v, row %v, want the heal refused on the fresh read", s, m)
+				}
+				return
+			}
+			if m := c.meta(t); s.Outcome != settledLanded || m["state"] != "asleep" || m["wake_attempts"] != tc.attempts || m["last_woke_at"] != "" {
+				t.Fatalf("settlement %+v, row %v, want healed asleep with wake_attempts %s", s, m, tc.attempts)
+			}
+		})
+	}
+}
+
+// Kills the creating heal's classified path lost (E03, the C5c2 delta
+// review): a claimless creating row AL1 wants asleep whose corpse A12
+// classified is healed by the creating heal; unclassified, it is A12's.
+func TestCreatingHealTakesAClassifiedCorpse(t *testing.T) {
+	for _, classified := range []bool{true, false} {
+		c := newHealCase(t, livenessDead, desireSleep, "state", "creating")
+		id := runtimeIdentity{Known: true, SessionID: c.k.ID, Epoch: "3", Token: "tok-3"}
+		c.w.Observed = map[rowKey]rowObservation{c.k: {Liveness: livenessDead, Identity: id}}
+		if classified {
+			c.w.Classified = map[rowKey]string{c.k: deadToken(id)}
+		}
+		if it := c.decide(); (it.Reason == decideCreatingHeal) != classified {
+			t.Fatalf("classified %v: decideRow = (%q, %q), want the creating heal %v", classified, it.Kind, it.Reason, classified)
+		}
 	}
 }

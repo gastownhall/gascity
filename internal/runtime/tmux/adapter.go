@@ -1346,9 +1346,10 @@ func (o *tmuxStartOps) createSession(name, workDir, command string, env map[stri
 	return o.tm.NewSession(name, workDir)
 }
 
-// respawnAgent relaunches the agent command in the session's existing pane
-// (respawn-pane -k), reusing the warm box and its session environment. The
-// launch-half of the un-weld relaunch path.
+// respawnAgent relaunches the agent command in the session's existing agent
+// pane (respawn-pane -k on the GetPaneID pane, never the active one), reusing
+// the warm box and its session environment. The launch-half of the un-weld
+// relaunch path.
 //
 // respawn-pane takes no env argument: the new process inherits the tmux server's
 // global environment as filtered by the SESSION environment, so a withheld
