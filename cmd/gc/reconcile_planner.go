@@ -433,15 +433,21 @@ func (p *planner) record(ev events.Event) {
 // resets its record; a refusal (a landing with a cause, a heal written in a
 // refusal's stead, included), failure or ambiguous outcome (an abandoned
 // write) backs it off with its cause, except a swap pause and an endpoint-gate
-// refusal, deferrals the gate itself paces.
+// refusal, deferrals the gate itself paces. A drift's landing, its restart
+// or its bounded deferral's stamp (whose bound paces what follows), and a
+// row's plain start each end the drift's episode: its record resets.
 func (p *planner) backoffSettled(s settlement) {
 	key := s.BackoffKey
 	if key == "" && s.Key.ID != "" {
 		key = settledBackoffKey(s.Kind, s.Key)
 	}
+	drift := s.Key.ID != "" && key == driftBackoffKey(s.Key)
+	if s.Kind == intentStart && s.Outcome == settledLanded && s.Cause == "" && s.Key.ID != "" {
+		p.backoff.Succeed(driftBackoffKey(s.Key))
+	}
 	switch {
 	case key == "":
-	case s.Outcome == settledLanded && s.Cause == "" || s.Outcome == settledNoop:
+	case s.Outcome == settledLanded && (s.Cause == "" || drift) || s.Outcome == settledNoop:
 		p.backoff.Succeed(key)
 	case (s.Outcome == settledRefused || s.Outcome == settledLanded || s.Outcome == settledFailed || s.Outcome == settledAmbiguous) && s.Cause != causeSwapPause && s.Cause != causeEndpointGate && s.Cause != causeCapacity:
 		p.backoff.Refuse(key, s.At, time.Time{}, s.Cause, s.Fingerprint)

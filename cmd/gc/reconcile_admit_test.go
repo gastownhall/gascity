@@ -623,3 +623,41 @@ func TestDriftBackoffPacesOnlyTheDrift(t *testing.T) {
 		t.Fatal("a landed drift kept its backoff")
 	}
 }
+
+// Kills a drift episode's backoff that outlives it (the round-three
+// review's R7, R8): the bounded deferral's stamp landing (the prompt
+// answered, recent activity's 30s bound now pacing) resets the drift's
+// record, and so does a plain start of the row, so a new drift a day later
+// starts at the base window; a start that landed with a cause does not.
+func TestDriftBackoffResetsWithItsEpisode(t *testing.T) {
+	k := admitRow(1)
+	for _, tc := range []struct {
+		name  string
+		end   settlement
+		reset bool
+	}{
+		{"the stamp lands", settlement{Kind: intentDriftRestart, Outcome: settledLanded, Cause: causeDriftDeferred + "recent_activity"}, true},
+		{"a start lands", settlement{Kind: intentStart, Outcome: settledLanded}, true},
+		{"a start lands with a cause", settlement{Kind: intentStart, Outcome: settledLanded, Cause: causeSessionName}, false},
+		{"another kind lands", settlement{Kind: intentRowHeal, Outcome: settledLanded}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newPlanner(realPlannerClock{}, func() time.Duration { return time.Minute }, nil, newInflightMap(), nil, io.Discard)
+			at := admitT0
+			for range 6 {
+				p.backoffSettled(settlement{Key: k, Kind: intentDriftRestart, Outcome: settledRefused, Cause: causeDriftDeferred + fencePending, At: at})
+				at = p.backoff.Record(driftBackoffKey(k)).Until.Add(time.Second)
+			}
+			tc.end.Key, tc.end.At = k, at
+			p.backoffSettled(tc.end)
+			if reset := p.backoff.Record(driftBackoffKey(k)).Consecutive == 0; reset != tc.reset {
+				t.Fatalf("drift record %+v, want reset %v", p.backoff.Record(driftBackoffKey(k)), tc.reset)
+			}
+			later := at.Add(24 * time.Hour)
+			p.backoffSettled(settlement{Key: k, Kind: intentDriftRestart, Outcome: settledRefused, Cause: causeDriftDeferred + fenceAttached, At: later})
+			if w := p.backoff.Record(driftBackoffKey(k)).Until.Sub(later); tc.reset && w != backoffBase {
+				t.Fatalf("a new episode's first deferral backs off %v, want %v", w, backoffBase)
+			}
+		})
+	}
+}
