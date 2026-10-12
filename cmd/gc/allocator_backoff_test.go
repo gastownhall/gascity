@@ -264,10 +264,10 @@ func TestExecutionStalledKeepsARowAPartialCensusMissed(t *testing.T) {
 	p := newPlanner(newFakePlannerClock(plannerT0), func() time.Duration { return time.Minute }, nil, newInflightMap(), nil, io.Discard)
 	p.postExecutionStalled(executionStalledRequest{ID: "gc-1", Generation: "1"})
 	partial := &sessionCensus{Legs: []censusLeg{{Ref: "sessions"}, {Ref: "rig", Err: errors.New("rig down")}}, Rows: map[rowKey]censusRow{}}
-	if got := p.executionStalled(partial); len(got) != 1 {
+	if got := p.executionStalled(partial, nil, plannerT0, time.Minute); len(got) != 1 {
 		t.Fatalf("after a partial census: %v, want gc-1's request kept", got)
 	}
-	if got := p.executionStalled(&sessionCensus{Legs: []censusLeg{{Ref: "sessions"}}, Rows: map[rowKey]censusRow{}}); len(got) != 0 {
+	if got := p.executionStalled(&sessionCensus{Legs: []censusLeg{{Ref: "sessions"}}, Rows: map[rowKey]censusRow{}}, nil, plannerT0, time.Minute); len(got) != 0 {
 		t.Fatalf("after a complete census without gc-1: %v, want it forgotten", got)
 	}
 }

@@ -175,7 +175,7 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 	if w.Census, err = readSessionCensus(now, legs); err != nil {
 		return World{}, fmt.Errorf("gather: %w", err)
 	}
-	w.ExecutionStalled = p.executionStalled(w.Census)
+	w.ExecutionStalled = p.executionStalled(w.Census, w.Obs, now, 2*env.patrol()) // w.ObsMaxAge, set below
 	w.AliasOwed = p.aliasOwedFor(w.Census)
 	w.Phantoms = censusPhantoms(w.Census, cfg, e.CityName)
 	if e.ReadyWaits != nil {

@@ -14,6 +14,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 )
@@ -175,8 +176,14 @@ func TestNudgeStepsReadImmutableSummary(t *testing.T) {
 // gather carries it in World.ExecutionStalled; a row the census dropped is
 // forgotten, and a row that cannot be read posts nothing.
 func TestExecutionStalledRequestReachesPlanner(t *testing.T) {
-	row := routerSessionBead("s1", map[string]string{"session_name": "s-s1", "state": "asleep", "template": "worker", "generation": "3"})
+	row := routerSessionBead("s1", map[string]string{"session_name": "s-s1", "state": "active", "template": "worker", "generation": "3"})
 	f := newGatherFixture(t, row)
+	// A live seat: a dormant one, or one whose runtime is gone, spends its
+	// request (mc-uinl0).
+	clk := &clock.Fake{Time: gatherNow}
+	obs := NewObservationCache(clk, time.Minute, "e1")
+	obs.PublishInventory(obsPass(clk, 1, 1, completeBackend("", "s-s1")), nil)
+	f.env.Observations = func() *ObservationCache { return obs }
 	env := externalReadsEnv{CityStore: f.cache}
 	lane, _ := newPoolStepsTestLane(env, nil, f.p.postExecutionStalled)
 	request := lane.requestExecutionStalled(env)
