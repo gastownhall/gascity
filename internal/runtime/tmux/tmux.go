@@ -582,6 +582,7 @@ func (t *Tmux) NewSession(name, workDir string) error {
 	if err != nil {
 		return err
 	}
+	t.markAgentPane(name)
 	_ = t.ConfigureServer()
 	// tmux 3.3+ sets window-size=manual on detached sessions, locking them
 	// at 80x24 even after a client attaches. Reset to "latest" so the window
@@ -612,6 +613,7 @@ func (t *Tmux) NewSessionWithCommand(name, workDir, command string) error {
 	if err != nil {
 		return err
 	}
+	t.markAgentPane(name)
 	_ = t.ConfigureServer()
 	// tmux 3.3+: reset window-size from manual to latest (see NewSession).
 	t.run("set-option", "-wt", name, "window-size", "latest") //nolint:errcheck // best-effort
@@ -787,6 +789,7 @@ func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env ma
 	if err := t.runNewSession(args, env); err != nil {
 		return err
 	}
+	t.markAgentPane(name)
 	// Carry the CREDENTIAL withholding into the session environment, so it
 	// survives into every later process — above all respawn-pane, which the
 	// warm-box relaunch path uses and which takes no env argument at all. Fail
@@ -3407,11 +3410,17 @@ func (t *Tmux) DismissKnownDialogs(ctx context.Context, sess string, timeout tim
 	// stays empty and the external-imports modal is left unaccepted.
 	paneDir, _ := t.GetPaneWorkDir(sess)
 	trustRoot := runtime.WorkspaceImportTrustRoot(ctx, paneDir)
+	// Resolve the agent pane once: the dialogs are the agent's, and keys sent
+	// to the active pane would land in a human's split or window.
+	target, err := t.agentPaneTarget(sess)
+	if err != nil {
+		return err
+	}
 	return runtime.AcceptStartupDialogsWithTimeout(ctx, timeout,
-		func(lines int) (string, error) { return t.CapturePane(sess, lines) },
+		func(lines int) (string, error) { return t.CapturePane(target, lines) },
 		func(keys ...string) error {
 			for _, k := range keys {
-				if _, err := t.run("send-keys", "-t", paneTarget(sess), k); err != nil {
+				if _, err := t.run("send-keys", "-t", target, k); err != nil {
 					return err
 				}
 			}
@@ -3645,11 +3654,8 @@ func (t *Tmux) DismissFeedbackSurveyModalIfPresent(session string) error {
 // GetPaneCommand returns the current command running in a pane.
 // Returns "bash", "zsh", "claude", "node", etc.
 func (t *Tmux) GetPaneCommand(session string) (string, error) {
-	// Use :^.0 (first window, first pane) to target the agent pane
-	// regardless of tmux's base-index setting. The literal :0.0 fails
-	// when base-index is 1 (a common tmux.conf setting), causing tmux
-	// to resolve against the active window instead.
-	out, err := t.run("display-message", "-t", primaryPaneTarget(session), "-p", "#{pane_current_command}")
+	// The agent pane, never the active one (see readAgentPane).
+	out, err := t.readAgentPane(t.run, session, "#{pane_current_command}")
 	if err != nil {
 		return "", err
 	}
@@ -3723,45 +3729,105 @@ func (t *Tmux) FindAgentPane(session string) (string, error) {
 	return "", nil
 }
 
-// GetPaneID returns the pane identifier of a session's agent pane, taken to be
-// the first pane of its first window: every start path creates the session
-// with the agent as its only pane. A pane id passes through unchanged.
+// GetPaneID returns the pane identifier of a session's agent pane (see
+// readAgentPane). A pane id passes through unchanged.
 // Returns a pane ID like "%0" that can be used with RespawnPaneWithWorkDir.
-//
-// list-panes over the first window (":^") lists panes in index order, so the
-// first line is that pane whatever pane-base-index is. ":^.0" names pane index
-// 0, which does not exist under pane-base-index 1: respawn-pane rejects it
-// ("can't find pane: 0") and display-message silently answers for the
-// window's active pane instead.
-//
-// The position is not durable identity. A human who reorders panes
-// (split-window -b, swap-pane, rotate-window, break-pane, new-window -b, or
-// killing the agent's window) moves another pane first, and this returns that
-// pane. Marking the agent pane at creation is follow-up work (mc-zndi7.100).
 func (t *Tmux) GetPaneID(session string) (string, error) {
 	if strings.HasPrefix(session, "%") {
 		return session, nil
 	}
-	target := session + ":^"
-	if validSessionNameRe.MatchString(session) {
-		target = paneTarget(session) + "^"
-	}
-	out, err := t.run("list-panes", "-t", target, "-F", "#{pane_id}")
+	out, err := t.readAgentPane(t.run, session, "#{pane_id}")
 	if err != nil {
 		return "", err
 	}
-	result, _, _ := strings.Cut(strings.TrimSpace(out), "\n")
+	result := strings.TrimSpace(out)
 	if result == "" {
 		return "", fmt.Errorf("no panes found in session %s", session)
 	}
 	return result, nil
 }
 
-// GetPaneWorkDir returns the current working directory of a pane.
-// Targets first window (:^.0) to avoid returning the active pane's
-// working directory in multi-pane sessions.
+// agentPaneOption is the pane user option that marks a session's agent pane.
+// Every create path sets it on the session's only pane (markAgentPane). A pane
+// option belongs to the pane, not its position: it survives respawn-pane,
+// split-window -b, swap-pane, rotate-window, break-pane and new-window -b, and
+// a pane a human adds does not inherit it.
+//
+// list-panes rows lead with agentPaneMarkerFormat, which expands to a word
+// ("agent" or "pane") rather than the raw option: the executor trims output,
+// so an empty leading field would vanish from the first row.
+const (
+	agentPaneOption       = "@gc_agent"
+	agentPaneMarkerFormat = "#{?" + agentPaneOption + ",agent,pane}"
+	agentPaneMarked       = "agent"
+)
+
+// markAgentPane marks a just-created session's only pane as the agent pane.
+// Best-effort, like the window-size reset beside it: an unmarked session falls
+// back to its first pane, exactly as one created before the marker existed.
+func (t *Tmux) markAgentPane(session string) {
+	t.run("set-option", "-p", "-t", paneTarget(session), agentPaneOption, "1") //nolint:errcheck // best-effort
+}
+
+// readAgentPane expands format for target's agent pane. A pane id or other
+// explicit target is read directly. A session name is resolved in one
+// list-panes call over all its windows: the pane carrying the agent-pane
+// marker, else (a session created before the marker) the first pane of the
+// first window, which list-panes lists first whatever base-index and
+// pane-base-index are.
+//
+// Never the active pane, and never ":^.0": under pane-base-index 1 there is
+// no pane index 0, and display-message silently answers for the window's
+// active pane, which may be a human's split.
+func (t *Tmux) readAgentPane(run func(...string) (string, error), target, format string) (string, error) {
+	if !validSessionNameRe.MatchString(target) {
+		return run("display-message", "-t", target, "-p", format)
+	}
+	out, err := run("list-panes", "-s", "-t", paneTarget(target), "-F", agentPaneMarkerFormat+"\t"+format)
+	if err != nil {
+		return "", err
+	}
+	return pickAgentPaneRow(out), nil
+}
+
+// pickAgentPaneRow returns the fields of the marked row of list-panes output
+// whose rows are "agent|pane\t<fields>", else the first row's. Empty output
+// yields "", which each reader reports as its own empty-answer error.
+func pickAgentPaneRow(out string) string {
+	rows := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	for _, row := range rows {
+		if mark, fields, _ := strings.Cut(row, "\t"); mark == agentPaneMarked {
+			return fields
+		}
+	}
+	_, fields, _ := strings.Cut(rows[0], "\t")
+	return fields
+}
+
+// agentPaneTarget returns a tmux target for a session's agent pane, fenced to
+// the session and window it was found in ("=name:@W.%P"): pane ids are
+// server-global and restart at %0 with a new server, so a bare stale id could
+// name another session's pane, while a fenced one fails ("can't find pane" or
+// "can't find window"). Pane ids and explicit targets pass through unchanged.
+// A failed lookup is returned, never answered with the session's active pane.
+func (t *Tmux) agentPaneTarget(target string) (string, error) {
+	if !validSessionNameRe.MatchString(target) {
+		return target, nil
+	}
+	out, err := t.readAgentPane(t.run, target, "#{window_id}.#{pane_id}")
+	if err != nil {
+		return "", err
+	}
+	if !strings.HasPrefix(out, "@") || !strings.Contains(out, ".%") {
+		return "", fmt.Errorf("no panes found in session %s (got %q)", target, out)
+	}
+	return paneTarget(target) + strings.TrimSpace(out), nil
+}
+
+// GetPaneWorkDir returns the current working directory of a session's agent
+// pane (see readAgentPane), or of a pane id.
 func (t *Tmux) GetPaneWorkDir(session string) (string, error) {
-	out, err := t.run("display-message", "-t", primaryPaneTarget(session), "-p", "#{pane_current_path}")
+	out, err := t.readAgentPane(t.run, session, "#{pane_current_path}")
 	if err != nil {
 		return "", err
 	}
@@ -3772,13 +3838,11 @@ func (t *Tmux) GetPaneWorkDir(session string) (string, error) {
 	return result, nil
 }
 
-// GetPanePID returns the PID of the pane's main process.
-// When target is a session name, explicitly targets pane 0 (:0.0) to avoid
-// returning the active pane's PID in multi-pane sessions. When target is
-// a pane ID (e.g., "%5"), uses it directly.
+// GetPanePID returns the PID of the pane's main process. A session name
+// reads its agent pane (see readAgentPane); a pane ID (e.g., "%5") is read
+// directly.
 func (t *Tmux) GetPanePID(target string) (string, error) {
-	tmuxTarget := primaryPaneTarget(target)
-	out, err := t.run("display-message", "-t", tmuxTarget, "-p", "#{pane_pid}")
+	out, err := t.readAgentPane(t.run, target, "#{pane_pid}")
 	if err != nil {
 		return "", err
 	}
@@ -3789,20 +3853,8 @@ func (t *Tmux) GetPanePID(target string) (string, error) {
 	return result, nil
 }
 
-// primaryPaneTarget targets a session's first pane (":^.0", independent of
-// base-index) by exact session name. Pane ids pass through unchanged.
-func primaryPaneTarget(target string) string {
-	if validSessionNameRe.MatchString(target) {
-		return paneTarget(target) + "^.0"
-	}
-	if strings.HasPrefix(target, "%") {
-		return target
-	}
-	return target + ":^.0"
-}
-
 func (t *Tmux) paneProcessState(target string) (paneProcessState, error) {
-	out, err := t.run("display-message", "-t", primaryPaneTarget(target), "-p", "#{pane_pid}\t#{pane_dead}")
+	out, err := t.readAgentPane(t.run, target, "#{pane_pid}\t#{pane_dead}")
 	if err != nil {
 		return paneProcessState{}, err
 	}
@@ -3842,7 +3894,7 @@ func (t *Tmux) capturePaneProcessKillPlan(target string, exclude map[int]bool) (
 
 // IsPaneDead reports whether the target pane's process has exited while the
 // pane remains visible (for example because remain-on-exit is enabled).
-// When target is a session name, pane 0 is queried explicitly.
+// When target is a session name, its agent pane is queried (see readAgentPane).
 func (t *Tmux) IsPaneDead(target string) (bool, error) {
 	return t.isPaneDead(target, false)
 }
@@ -3852,12 +3904,11 @@ func (t *Tmux) isPaneDeadForAttach(target string) (bool, error) {
 }
 
 func (t *Tmux) isPaneDead(target string, noStart bool) (bool, error) {
-	tmuxTarget := primaryPaneTarget(target)
 	run := t.run
 	if noStart {
 		run = t.runForAttach
 	}
-	out, err := run("display-message", "-t", tmuxTarget, "-p", "#{pane_dead}")
+	out, err := t.readAgentPane(run, target, "#{pane_dead}")
 	if err != nil {
 		return false, err
 	}
@@ -3872,13 +3923,13 @@ func (t *Tmux) isPaneDead(target string, noStart bool) (bool, error) {
 }
 
 // PaneDeadInfo returns the exit status and terminating signal of a dead pane
-// (a remain-on-exit corpse) for the target session's primary pane. tmux
+// (a remain-on-exit corpse) for the target session's agent pane. tmux
 // reports these via #{pane_dead_status} (exit code) and #{pane_dead_signal}
 // (signal name/number). Both are best-effort: empty strings when the pane is
 // not dead or tmux cannot report them, so callers can record whatever is
 // available without failing.
 func (t *Tmux) PaneDeadInfo(session string) (status, signal string) {
-	out, err := t.run("display-message", "-t", primaryPaneTarget(session), "-p", "#{pane_dead_status}|#{pane_dead_signal}")
+	out, err := t.readAgentPane(t.run, session, "#{pane_dead_status}|#{pane_dead_signal}")
 	if err != nil {
 		return "", ""
 	}
@@ -5385,11 +5436,11 @@ func (t *Tmux) SetMailClickBinding(_ string) error {
 // RespawnPaneWithWorkDir kills all processes in a pane and starts a new command
 // in the specified working directory, instantly restarting an agent in place.
 // The pane parameter is a pane ID (e.g., "%0"), a session:window.pane target,
-// or a session name. A session name is resolved to its agent pane (GetPaneID),
-// never the active pane: "=name:" would kill whichever pane a human left
-// focused and leave the old agent running. GetPaneID's reorder limit applies.
+// or a session name. A session name is resolved to its agent pane
+// (agentPaneTarget), never the active pane: "=name:" would kill whichever pane
+// a human left focused and leave the old agent running.
 func (t *Tmux) RespawnPaneWithWorkDir(pane, workDir, command string) error {
-	target, err := t.respawnTarget(pane)
+	target, err := t.agentPaneTarget(pane)
 	if err != nil {
 		return err
 	}
@@ -5402,28 +5453,16 @@ func (t *Tmux) RespawnPaneWithWorkDir(pane, workDir, command string) error {
 	return err
 }
 
-// respawnTarget resolves a session name to its agent pane, fenced to that
-// session ("=name:^.%N"): pane ids are server-global and restart at %0 with a
-// new server, so a bare stale id could name another session's pane, while a
-// fenced one fails "can't find pane" (ErrSessionNotFound). Pane ids and
-// explicit targets pass through unchanged. A failed lookup is returned, never
-// answered by falling back to the session's active pane.
-func (t *Tmux) respawnTarget(pane string) (string, error) {
-	if !validSessionNameRe.MatchString(pane) {
-		return pane, nil
-	}
-	id, err := t.GetPaneID(pane)
-	if err != nil {
-		return "", err
-	}
-	return paneTarget(pane) + "^." + id, nil
-}
-
 // ClearHistory clears the scrollback history buffer for a pane.
 // This resets copy-mode display from [0/N] to [0/0].
-// The pane parameter should be a pane ID (e.g., "%0") or session:window.pane format.
+// The pane parameter is a pane ID (e.g., "%0"), a session:window.pane target,
+// or a session name, which clears its agent pane (agentPaneTarget).
 func (t *Tmux) ClearHistory(pane string) error {
-	_, err := t.run("clear-history", "-t", paneTarget(pane))
+	target, err := t.agentPaneTarget(pane)
+	if err != nil {
+		return err
+	}
+	_, err = t.run("clear-history", "-t", target)
 	return err
 }
 

@@ -184,7 +184,7 @@ func TestSendKeysHiddenAttachedRecordsPoke(t *testing.T) {
 // wrote the Enter to the hidden client, then fell through and re-sent BOTH keys
 // via SendKeysRaw — a double-delivered Enter.
 func TestSendKeysHiddenAttachedUnknownKeyFallsThroughWithoutPartialWrite(t *testing.T) {
-	fe := &fakeExecutor{}
+	fe := &fakeExecutor{out: "pane\t@1.%0"}
 	tm := NewTmux()
 	tm.exec = fe
 
@@ -214,11 +214,12 @@ func TestSendKeysHiddenAttachedUnknownKeyFallsThroughWithoutPartialWrite(t *test
 		t.Fatal("unknown-key fallthrough recorded a poke; nothing was delivered through the hidden client")
 	}
 
-	// The raw fallback must still deliver BOTH keys, in order, via send-keys.
+	// The raw fallback must still deliver BOTH keys, in order, via send-keys
+	// to the agent pane.
 	var sent []string
 	for _, call := range fe.calls {
 		for i, arg := range call {
-			if arg == "send-keys" && len(call) > i+3 && call[i+1] == "-t" && call[i+2] == "="+sess+":" {
+			if arg == "send-keys" && len(call) > i+3 && call[i+1] == "-t" && call[i+2] == "="+sess+":@1.%0" {
 				sent = append(sent, call[i+3])
 			}
 		}

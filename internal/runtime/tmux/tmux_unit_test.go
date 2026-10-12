@@ -30,7 +30,7 @@ func TestCapturePaneProcessKillPlanBindsStableLivePaneToSnapshot(t *testing.T) {
 	}
 
 	t.Run("tmux observes PID and dead state atomically", func(t *testing.T) {
-		executor := &fakeExecutor{out: "100\t0\n"}
+		executor := &fakeExecutor{out: "pane\t100\t0\n"}
 		tmux := NewTmux()
 		tmux.exec = executor
 		state, err := tmux.paneProcessState("session")
@@ -43,7 +43,7 @@ func TestCapturePaneProcessKillPlanBindsStableLivePaneToSnapshot(t *testing.T) {
 		if len(executor.calls) != 1 {
 			t.Fatalf("tmux calls = %d, want one atomic observation", len(executor.calls))
 		}
-		want := []string{"-u", "display-message", "-t", "=session:^.0", "-p", "#{pane_pid}\t#{pane_dead}"}
+		want := []string{"-u", "list-panes", "-s", "-t", "=session:", "-F", agentPaneMarkerFormat + "\t#{pane_pid}\t#{pane_dead}"}
 		if !slices.Equal(executor.calls[0], want) {
 			t.Fatalf("tmux args = %q, want atomic pid/dead format %q", executor.calls[0], want)
 		}

@@ -235,16 +235,17 @@ func (e *wrappedWaitExecutor) execute(args []string) (string, error) {
 	// subcommand token.
 	for _, a := range args {
 		switch a {
-		case "display-message":
+		case "list-panes":
+			// Agent-pane reads: the session's one, unmarked pane.
 			switch args[len(args)-1] {
-			case "#{pane_current_command}":
-				return "systemd-run", nil
-			case "#{pane_pid}":
+			case agentPaneMarkerFormat + "\t#{pane_current_command}":
+				return "pane\tsystemd-run", nil
+			case agentPaneMarkerFormat + "\t#{pane_pid}":
 				e.pidRequests++
 				if e.pidRequests <= e.livePIDAfter {
-					return e.deadPID, nil
+					return "pane\t" + e.deadPID, nil
 				}
-				return e.livePID, nil
+				return "pane\t" + e.livePID, nil
 			}
 			return "", nil
 		case "show-environment":
