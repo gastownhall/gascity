@@ -943,3 +943,21 @@ func TestCreatingHealTakesAClassifiedCorpse(t *testing.T) {
 		}
 	}
 }
+
+// Kills §12.2 #57's end state keeping the late quarantine's sleep reason on
+// an awake row (mc-bwvzv): the stability clear that ends the quarantine
+// clears quarantine and rate_limit, so a later death counts as a crash, and
+// leaves any other reason.
+func TestStabilityClearEndsTheQuarantinesReason(t *testing.T) {
+	for _, c := range []struct {
+		reason string
+		clear  bool
+	}{{"quarantine", true}, {"rate_limit", true}, {"idle", false}} {
+		h := newHealCase(t, livenessAlive, desireKeep, "state", "awake", "last_woke_at", rowAt(-time.Minute), "quarantined_until", rowAt(time.Hour), "sleep_reason", c.reason)
+		it := h.decide()
+		got, ok := it.Patch["sleep_reason"]
+		if it.Reason != decideStabilityClear || ok != c.clear || ok && got != "" {
+			t.Fatalf("%s: decideRow = (%q, %v), want the clear, sleep_reason cleared %v", c.reason, it.Reason, it.Patch, c.clear)
+		}
+	}
+}

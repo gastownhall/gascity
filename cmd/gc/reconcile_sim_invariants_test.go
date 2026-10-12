@@ -364,8 +364,9 @@ func closeEndsSuspend(b beads.Bead, k string, t time.Time) bool {
 // reason, a suspend the row's state (but for the dormant stop's drain
 // completion, asleep or drained), and an unexpired hold or quarantine its
 // timer and sleep reason, though A6's stability clear may clear the
-// quarantine's timer on a row its pass read stable (v5.8, SESS-539; stable,
-// sim.stable). No such row is woken. Only an operator-dormant row (D1 rule
+// quarantine's timer, and with it its own quarantine or rate_limit reason
+// (§12.2 #57, mc-bwvzv), on a row its pass read stable (v5.8, SESS-539;
+// stable, sim.stable). No such row is woken. Only an operator-dormant row (D1 rule
 // 2: killed, suspended, or sleep_intent=user-hold) is never given a stop
 // request, though one it holds may be cleared; a hold or quarantine alone
 // is not dormant, and legacy drains under one (owner ruling at C6a2).
@@ -390,10 +391,14 @@ func dormantChange(b beads.Bead, a map[string]string, t time.Time, stable bool) 
 	}
 	quarantined := until("quarantined_until")
 	if quarantined {
-		if !stable || a["quarantined_until"] != "" {
+		ended := stable && a["quarantined_until"] == "" // A6's stability clear ends it (SESS-539)
+		if !ended {
 			owned = append(owned, "quarantined_until")
 		}
-		if slices.Contains([]session.SleepReason{session.SleepReasonQuarantine, session.SleepReasonContextChurn, session.SleepReasonRateLimit}, reason) {
+		// The clear ends a quarantine's own reason with it (§12.2 #57,
+		// mc-bwvzv); a churn sleep's stays the quarantine's to keep.
+		ownReason := reason == session.SleepReasonQuarantine || reason == session.SleepReasonRateLimit
+		if slices.Contains([]session.SleepReason{session.SleepReasonQuarantine, session.SleepReasonContextChurn, session.SleepReasonRateLimit}, reason) && (!ended || !ownReason) {
 			owned = append(owned, "sleep_reason")
 		}
 	}

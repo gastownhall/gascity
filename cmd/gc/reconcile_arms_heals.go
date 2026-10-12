@@ -300,6 +300,13 @@ func armStabilityClear(r *rowFacts) (intent, bool) {
 	if info.ChurnCount != "" && info.ChurnCount != "0" && r.w.Now.Sub(woke) >= churnProductivityThreshold {
 		patch["churn_count"] = "0"
 	}
+	switch session.SleepReason(strings.TrimSpace(info.SleepReason)) {
+	case session.SleepReasonQuarantine, session.SleepReasonRateLimit:
+		// §12.2 #57: a late quarantine an awake row's commit kept ends here
+		// with its sleep reason, as legacy's commit wipes it, so a later
+		// death reads as a crash, not a deliberate sleep (mc-bwvzv).
+		patch["sleep_reason"] = ""
+	}
 	if len(patch) == 0 && class.Len() == 0 {
 		return intent{}, false
 	}

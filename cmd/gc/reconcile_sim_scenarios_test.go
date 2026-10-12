@@ -425,13 +425,24 @@ func TestSimI15StabilityCarveOut(t *testing.T) {
 			}
 		})
 	}
-	// The real clear, on a stable row, is not.
-	s := scripted(t, []string{"gc-1"}, quarantined("active", -time.Hour))
-	s.settle()
-	if s.gc1()["quarantined_until"] != "" {
-		t.Fatalf("quarantined_until %q, want A6's stability clear", s.gc1()["quarantined_until"])
+	// The real clear, on a stable row, is not, its quarantine's own reason
+	// ended with it (mc-bwvzv).
+	for _, reason := range []string{"", "quarantine", "rate_limit"} {
+		s := scripted(t, []string{"gc-1"}, quarantined("active", -time.Hour, "sleep_reason", reason))
+		s.settle()
+		if m := s.gc1(); m["quarantined_until"] != "" || m["sleep_reason"] != "" {
+			t.Fatalf("reason %q: row %v, want A6's stability clear, the reason ended", reason, m)
+		}
+		s.noViolations(t)
 	}
-	s.noViolations(t)
+	// A quarantine's reason cleared while the quarantine stands is still
+	// the quarantine's to keep.
+	b := quarantined("active", -time.Hour, "sleep_reason", "quarantine")
+	a := maps.Clone(b.Metadata)
+	a["sleep_reason"] = ""
+	if k := dormantChange(b, a, plannerT0, true); k != "sleep_reason" {
+		t.Fatalf("dormantChange = %q, want sleep_reason: the quarantine stands", k)
+	}
 }
 
 // Kills the dead-runtime heal (v5.8e A6 item 4) reaching past the sessions
@@ -819,8 +830,8 @@ func TestSimLateQuarantineCommitsThenClears(t *testing.T) {
 		s.settle()
 	}
 	s.noViolations(t)
-	if m := s.gc1(); m["quarantined_until"] != "" {
-		t.Fatalf("row %v: want the quarantine ended", m)
+	if m := s.gc1(); m["quarantined_until"] != "" || m["sleep_reason"] != "" || m["state"] != "awake" {
+		t.Fatalf("row %v: want the quarantine ended with its sleep reason, the row awake (mc-bwvzv)", m)
 	}
 }
 
