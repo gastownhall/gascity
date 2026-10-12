@@ -3,3 +3,7 @@
 ga-
 bin
 frontend
+internal/api/dashboardspa/web/node_modules
+internal/api/dashboardspa/web/frontend/node_modules
+internal/api/dashboardspa/web/shared/node_modules
+contrib/openclaw-bridge/node_modules

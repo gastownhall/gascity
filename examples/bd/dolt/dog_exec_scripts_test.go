@@ -247,6 +247,7 @@ func (f compactScriptFixture) runWithArgs(t *testing.T, mode string, args []stri
 		"GC_DOLT_COMPACT_SKIP_FETCH_DBS",
 		"GC_DOLT_RIG_LIST_TIMEOUT_SECS",
 		"GC_DOLT_COMPACT_ALERT_TO",
+		"GC_DOLT_CONFIG_FILE",
 		"GC_FAKE_DOLT_COMPACT_MODE",
 		"GC_FAKE_DOLT_COUNT_FILE",
 		"GC_FAKE_DOLT_STATE_FILE",
@@ -1390,6 +1391,9 @@ case "$query" in
       printf 'commit rejected after external writer advanced HEAD\n' >&2
       exit 44
     fi
+    if [ "$mode" = "gc_read_timeout_after_slow_flatten" ]; then
+      sleep 3
+    fi
     set_head compactcommit
     if [ "$mode" = "same_row_count_writer" ]; then
       set_hash hash-after-writer
@@ -1416,6 +1420,21 @@ case "$query" in
     if [ "$mode" = "gc_failure" ]; then
       printf 'gc exploded\n' >&2
       exit 45
+    fi
+    if [ "$mode" = "gc_read_timeout_slow" ]; then
+      sleep 2
+    fi
+    if [ "$mode" = "gc_read_timeout" ] || [ "$mode" = "gc_read_timeout_slow" ] || [ "$mode" = "gc_read_timeout_after_slow_flatten" ]; then
+      printf "error on line 1 for query CALL DOLT_GC('--full'): Error 1105 (HY000): Error in SaveHashes call: SaveHashes, error calling getManyCompressed: context canceled\n" >&2
+      exit 1
+    fi
+    if [ "$mode" = "gc_connection_closed" ]; then
+      printf "error on line 1 for query CALL DOLT_GC('--full'): Error 1105 (HY000): connection was closed\n" >&2
+      exit 1
+    fi
+    if [ "$mode" = "gc_row_read_wait" ]; then
+      printf "error on line 1 for query CALL DOLT_GC('--full'): Error 1105 (HY000): row read wait bigger than connection timeout\n" >&2
+      exit 1
     fi
     rm -rf -- "${GC_DOLT_DATA_DIR:-}/$db/.dolt/noms/oldgen"
     exit 0
@@ -3905,6 +3924,207 @@ func TestCompactScriptSurfacesGCFailureStderr(t *testing.T) {
 	}
 }
 
+// writeCompactDoltConfig renders a sql-server config the way both managed
+// config writers do, with the given listener.read_timeout_millis.
+func writeCompactDoltConfig(t *testing.T, path, readTimeoutMillis string) {
+	t.Helper()
+	config := "listener:\n  port: 3307\n  read_timeout_millis: " + readTimeoutMillis + "\n  write_timeout_millis: 300000\n"
+	if err := os.WriteFile(path, []byte(config), 0o644); err != nil {
+		t.Fatalf("write dolt config: %v", err)
+	}
+}
+
+// The listener's read_timeout_millis is a wall-clock cap on any statement that
+// produces no rows, and DOLT_GC produces none until it finishes. The server
+// reports the kill as "context canceled", "connection was closed" or "row read
+// wait bigger than connection timeout", which read like a network fault. A GC
+// that ran as long as the rendered ceiling must be blamed on it, with the live
+// value and the city.toml override. A GC canceled well short of the ceiling
+// was ended by something else, so the ceiling must not be blamed. Either way
+// the pending-GC marker stays behind.
+func TestCompactScriptNamesReadTimeoutWhenFullGCIsCanceled(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		mode        string
+		serverError string
+		// The fake GC fails at once unless its mode sleeps, so a 1000 ms
+		// ceiling is one the run reached and a 120000 ms ceiling is one it
+		// fell far short of. The slow modes pin which clock is compared: a
+		// GC that sleeps 2s reaches a 2000 ms ceiling, while a 3s flatten
+		// before an instant GC takes the whole run to a 4000 ms ceiling but
+		// leaves the GC itself short of it.
+		readTimeoutMillis string
+		blamed            bool
+	}{
+		{name: "context_canceled", mode: "gc_read_timeout", serverError: "context canceled", readTimeoutMillis: "1000", blamed: true},
+		{name: "connection_was_closed", mode: "gc_connection_closed", serverError: "connection was closed", readTimeoutMillis: "1000", blamed: true},
+		{name: "row_read_wait", mode: "gc_row_read_wait", serverError: "row read wait bigger than connection timeout", readTimeoutMillis: "1000", blamed: true},
+		{name: "canceled_before_ceiling", mode: "gc_read_timeout", serverError: "context canceled", readTimeoutMillis: "120000"},
+		{name: "slow_gc_reaches_ceiling", mode: "gc_read_timeout_slow", serverError: "context canceled", readTimeoutMillis: "2000", blamed: true},
+		{name: "slow_flatten_does_not_count", mode: "gc_read_timeout_after_slow_flatten", serverError: "context canceled", readTimeoutMillis: "4000"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+			stateDir := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt")
+			managedConfig := filepath.Join(stateDir, "dolt-config.yaml")
+			writeCompactDoltConfig(t, managedConfig, tc.readTimeoutMillis)
+
+			out, err := fixture.run(t, tc.mode, "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+			if err == nil {
+				t.Fatalf("compact succeeded despite DOLT_GC cancellation:\n%s", out)
+			}
+			if !strings.Contains(out, tc.serverError) {
+				t.Fatalf("output missing the server's own error text %q:\n%s", tc.serverError, out)
+			}
+			ceiling := "listener.read_timeout_millis=" + tc.readTimeoutMillis + " ceiling in " + managedConfig
+			want := []string{
+				"before the " + ceiling + ", so that timeout did not end it",
+				"look in the sql-server log for a stop, restart, or dropped connection",
+			}
+			unwanted := []string{"ended DOLT_GC", "city.toml", "gc dolt restart"}
+			if tc.blamed {
+				want = []string{
+					"the managed sql-server ended DOLT_GC after ",
+					"s at its " + ceiling,
+					"the next full GC hits the same ceiling",
+					"raise it via city.toml [dolt] read_timeout_millis (keep it under half of write_timeout_millis), then gc dolt restart",
+				}
+				unwanted = []string{"so that timeout did not end it", "pending-GC retry fails"}
+			}
+			for _, w := range want {
+				if !strings.Contains(out, w) {
+					t.Fatalf("output missing %q:\n%s", w, out)
+				}
+			}
+			for _, u := range unwanted {
+				if strings.Contains(out, u) {
+					t.Fatalf("output must not contain %q:\n%s", u, out)
+				}
+			}
+			marker := filepath.Join(stateDir, "compact-pending-gc", "beads")
+			if _, err := os.Stat(marker); err != nil {
+				t.Fatalf("canceled GC should still write the pending-GC marker: %v", err)
+			}
+		})
+	}
+}
+
+// Without a readable rendered config the run time cannot be checked against
+// the ceiling, so the diagnostic names the setting, hedges, and sends the
+// operator to the server log before the remedy.
+func TestCompactScriptNamesReadTimeoutWithoutRenderedConfig(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "gc_read_timeout", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("compact succeeded despite DOLT_GC cancellation:\n%s", out)
+	}
+	for _, want := range []string{
+		"most likely by the managed sql-server at its listener.read_timeout_millis ceiling",
+		"if the sql-server log shows an i/o timeout on that connection, raise it via city.toml [dolt] read_timeout_millis",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output missing %q:\n%s", want, out)
+		}
+	}
+	for _, unwanted := range []string{"read_timeout_millis=", "ended DOLT_GC"} {
+		if strings.Contains(out, unwanted) {
+			t.Fatalf("no rendered config, so the output must not contain %q:\n%s", unwanted, out)
+		}
+	}
+}
+
+// An explicit external-local target is a sql-server Gas City does not manage.
+// The server reads its own config, never the managed pack state, and
+// city.toml cannot reconfigure it, so a leftover managed config must not be
+// quoted and the remedy must be target-neutral. GC_DOLT_CONFIG_FILE names the
+// server's config when the caller knows it.
+func TestCompactScriptNamesReadTimeoutForExternalLocalTarget(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// configFile returns GC_DOLT_CONFIG_FILE, or "" to leave it unset.
+		configFile func(t *testing.T, externalRoot string) string
+		quoted     bool
+	}{
+		{
+			name: "order_sentinel_config_absent",
+			configFile: func(_ *testing.T, externalRoot string) string {
+				return filepath.Join(externalRoot, "dolt-config.yaml")
+			},
+		},
+		{
+			name:       "config_file_unset",
+			configFile: func(*testing.T, string) string { return "" },
+		},
+		{
+			name: "server_config_rendered",
+			configFile: func(t *testing.T, externalRoot string) string {
+				path := filepath.Join(externalRoot, "server-config.yaml")
+				writeCompactDoltConfig(t, path, "1000")
+				return path
+			},
+			quoted: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+			stateDir := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt")
+			managedConfig := filepath.Join(stateDir, "dolt-config.yaml")
+			writeCompactDoltConfig(t, managedConfig, "1000")
+			externalRoot := filepath.Join(stateDir, "external-target")
+			if err := os.MkdirAll(filepath.Join(externalRoot, "beads", ".dolt"), 0o755); err != nil {
+				t.Fatalf("mkdir external target db: %v", err)
+			}
+			env := []string{
+				"GC_DOLT_MANAGED_LOCAL=0",
+				"GC_DOLT_HOST=127.0.0.2",
+				"GC_DOLT_DATA_DIR=" + externalRoot,
+				"GC_DOLT_STATE_FILE=" + filepath.Join(externalRoot, "dolt-state.json"),
+				"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+			}
+			configFile := tc.configFile(t, externalRoot)
+			if configFile != "" {
+				env = append(env, "GC_DOLT_CONFIG_FILE="+configFile)
+			}
+
+			out, err := fixture.run(t, "gc_read_timeout", env...)
+			if err == nil {
+				t.Fatalf("compact succeeded despite DOLT_GC cancellation:\n%s", out)
+			}
+			want := []string{"most likely by the sql-server at its listener.read_timeout_millis ceiling"}
+			unwanted := []string{"read_timeout_millis="}
+			if tc.quoted {
+				want = []string{"the sql-server ended DOLT_GC after ", "s at its listener.read_timeout_millis=1000 ceiling in " + configFile}
+				unwanted = nil
+			}
+			want = append(want, "raise it in that sql-server's own config, then restart the server")
+			unwanted = append(unwanted, managedConfig, "managed sql-server", "city.toml", "gc dolt restart")
+			for _, w := range want {
+				if !strings.Contains(out, w) {
+					t.Fatalf("output missing %q:\n%s", w, out)
+				}
+			}
+			for _, u := range unwanted {
+				if strings.Contains(out, u) {
+					t.Fatalf("external-local target output must not contain %q:\n%s", u, out)
+				}
+			}
+		})
+	}
+}
+
+// An ordinary GC failure carries none of the read-deadline signatures and must
+// not be blamed on the listener timeout.
+func TestCompactScriptDoesNotBlameReadTimeoutForOtherGCFailures(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "gc_failure", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("compact succeeded despite DOLT_GC failure:\n%s", out)
+	}
+	if strings.Contains(out, "read_timeout_millis") {
+		t.Fatalf("plain GC failure must not mention the read timeout:\n%s", out)
+	}
+}
+
 func TestCompactScriptRetriesFullGCForBelowThresholdPendingMarker(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 
@@ -5351,108 +5571,6 @@ func TestPhantomDBScriptEscalatesAndPreservesAllDatabases(t *testing.T) {
 	}
 }
 
-func writeBackupFakeDolt(t *testing.T, binDir, version string, syncExit int, sqlDatabases ...string) string {
-	t.Helper()
-	logPath := filepath.Join(binDir, "dolt.log")
-	dbCSV := "Database\n" + strings.Join(sqlDatabases, "\n") + "\n"
-	writeExecutable(t, filepath.Join(binDir, "dolt"), fmt.Sprintf(`#!/usr/bin/env bash
-set -euo pipefail
-printf 'dolt %%s\n' "$*" >> %s
-if [ "${1:-}" = "version" ]; then
-  printf 'dolt version %%s\n' %s
-  exit 0
-fi
-case "$*" in
-  *"SHOW DATABASES"*)
-    printf %%s %s
-    exit 0
-    ;;
-esac
-if [ "${1:-}" = "backup" ] && [ "$#" -eq 1 ]; then
-  db="$(basename "$PWD")"
-  printf '%%s-backup file:///backups/%%s\n' "$db" "$db"
-  exit 0
-fi
-if [ "${1:-}" = "remote" ]; then
-  printf 'remote should not be used\n' >&2
-  exit 64
-fi
-if [ "${1:-} ${2:-}" = "backup sync" ]; then
-  exit %d
-fi
-exit 0
-`, shellQuote(logPath), shellQuote(version), shellQuote(dbCSV), syncExit))
-	return logPath
-}
-
-func writeBackupFakeRsync(t *testing.T, binDir string, exitCodes ...int) string {
-	t.Helper()
-	exitCode := 0
-	if len(exitCodes) > 0 {
-		exitCode = exitCodes[0]
-	}
-	logPath := filepath.Join(binDir, "rsync.log")
-	writeExecutable(t, filepath.Join(binDir, "rsync"), fmt.Sprintf(`#!/bin/sh
-printf 'rsync %s\n' "$*" >> %s
-exit %d
-`, "%s", shellQuote(logPath), exitCode))
-	return logPath
-}
-
-func writeBSDLikeGrep(t *testing.T, binDir string) {
-	t.Helper()
-	realGrep, err := exec.LookPath("grep")
-	if err != nil {
-		t.Fatalf("find grep: %v", err)
-	}
-	writeExecutable(t, filepath.Join(binDir, "grep"), fmt.Sprintf(`#!/usr/bin/env bash
-set -euo pipefail
-bre_alternation='\|'
-if [ "$#" -ge 2 ] && { [ "$1" = "-vi" ] || [ "$1" = "-i" ]; } && [[ "$2" == *"$bre_alternation"* ]]; then
-  if [ "$1" = "-vi" ]; then
-    shift 2
-    cat "$@"
-    exit 0
-  fi
-  exit 1
-fi
-exec %s "$@"
-`, shellQuote(realGrep)))
-}
-
-func TestBackupScriptSkipsOldDoltBeforeSync(t *testing.T) {
-	cityPath := t.TempDir()
-	dataDir := filepath.Join(cityPath, "dolt-data")
-	if err := os.MkdirAll(filepath.Join(dataDir, "prod", ".dolt"), 0o755); err != nil {
-		t.Fatalf("mkdir db: %v", err)
-	}
-	binDir := t.TempDir()
-	gcLogPath := writeDogFakeGC(t, binDir)
-	doltLogPath := writeBackupFakeDolt(t, binDir, "1.86.1", 0)
-
-	out, err := runDogScriptCommand(t, "mol-dog-backup.sh", binDir, cityPath, dataDir, "GC_BACKUP_DATABASES=prod")
-	if err == nil {
-		t.Fatalf("old Dolt preflight succeeded; want failure\n%s", out)
-	}
-	if !strings.Contains(out, "dolt-too-old") {
-		t.Fatalf("output missing dolt-too-old skip:\n%s", out)
-	}
-	doltLog, err := os.ReadFile(doltLogPath)
-	if err != nil {
-		t.Fatalf("read dolt log: %v", err)
-	}
-	if strings.Contains(string(doltLog), "backup sync") {
-		t.Fatalf("old dolt must not reach backup sync:\n%s", doltLog)
-	}
-	gcLog, err := os.ReadFile(gcLogPath)
-	if err != nil {
-		t.Fatalf("read gc log: %v", err)
-	}
-	if !strings.Contains(string(gcLog), "mail send human -s Dolt backup: dolt-too-old for backup sync [HIGH]") {
-		t.Fatalf("old-Dolt backup escalation must use the generic default recipient:\n%s", gcLog)
-	}
-}
-
 func TestBackupOrderTimeoutCoversScriptBudget(t *testing.T) {
 	root := repoRoot(t)
 	data, err := os.ReadFile(filepath.Join(root, "orders", "mol-dog-backup.toml"))
@@ -5468,443 +5586,6 @@ func TestBackupOrderTimeoutCoversScriptBudget(t *testing.T) {
 	required := 30*time.Second + intendedDBs*120*time.Second + 300*time.Second
 	if got := order.TimeoutOrDefault(); got < required {
 		t.Fatalf("backup order timeout = %s, want at least %s for SQL probe + %d DB syncs + offsite rsync", got, required, intendedDBs)
-	}
-}
-
-func TestBackupScriptDiscoversNamedBackupsAndSyncsArtifactsOffsite(t *testing.T) {
-	cityPath := t.TempDir()
-	dataDir := filepath.Join(cityPath, "dolt-data")
-	artifactDir := filepath.Join(cityPath, ".dolt-backup")
-	offsiteDir := filepath.Join(cityPath, "offsite")
-	for _, path := range []string{
-		filepath.Join(dataDir, "prod", ".dolt"),
-		artifactDir,
-		offsiteDir,
-	} {
-		if err := os.MkdirAll(path, 0o755); err != nil {
-			t.Fatalf("mkdir %s: %v", path, err)
-		}
-	}
-	binDir := t.TempDir()
-	_ = writeDogFakeGC(t, binDir)
-	doltLogPath := writeBackupFakeDolt(t, binDir, "2.1.0", 0, "prod")
-	rsyncLogPath := writeBackupFakeRsync(t, binDir)
-
-	out := runDogScript(t, "mol-dog-backup.sh", binDir, cityPath, dataDir, "GC_BACKUP_OFFSITE_PATH="+offsiteDir)
-	if !strings.Contains(out, "synced: 1/1") || !strings.Contains(out, "offsite: ok") {
-		t.Fatalf("unexpected backup summary:\n%s", out)
-	}
-	doltLog, err := os.ReadFile(doltLogPath)
-	if err != nil {
-		t.Fatalf("read dolt log: %v", err)
-	}
-	for _, want := range []string{"SHOW DATABASES", "backup", "backup sync prod-backup"} {
-		if !strings.Contains(string(doltLog), want) {
-			t.Fatalf("dolt log missing %q:\n%s", want, doltLog)
-		}
-	}
-	if strings.Contains(string(doltLog), "remote") {
-		t.Fatalf("backup discovery should not use dolt remote:\n%s", doltLog)
-	}
-	rsyncLog, err := os.ReadFile(rsyncLogPath)
-	if err != nil {
-		t.Fatalf("read rsync log: %v", err)
-	}
-	if !strings.Contains(string(rsyncLog), artifactDir+"/") {
-		t.Fatalf("rsync should use backup artifact dir, log:\n%s", rsyncLog)
-	}
-	if strings.Contains(string(rsyncLog), dataDir+"/") {
-		t.Fatalf("rsync must not use live data dir, log:\n%s", rsyncLog)
-	}
-}
-
-func TestBackupScriptEscalatesOffsiteFailureWithConfiguredBound(t *testing.T) {
-	cityPath := t.TempDir()
-	dataDir := filepath.Join(cityPath, "dolt-data")
-	artifactDir := filepath.Join(cityPath, ".dolt-backup")
-	offsiteDir := filepath.Join(cityPath, "offsite")
-	for _, dir := range []string{
-		filepath.Join(dataDir, "prod", ".dolt"),
-		artifactDir,
-		offsiteDir,
-	} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatalf("mkdir %s: %v", dir, err)
-		}
-	}
-
-	binDir := t.TempDir()
-	gcLogPath := writeDogFakeGC(t, binDir)
-	_ = writeBackupFakeDolt(t, binDir, "2.1.0", 0, "prod")
-	_ = writeBackupFakeRsync(t, binDir, 1)
-	timeoutLogPath := filepath.Join(binDir, "timeout.log")
-	writeExecutable(t, filepath.Join(binDir, "timeout"), fmt.Sprintf(`#!/bin/sh
-printf 'timeout %%s\n' "$*" >> %s
-[ "$1" = "--kill-after=2" ] && shift
-shift
-exec "$@"
-`, shellQuote(timeoutLogPath)))
-
-	out := runDogScript(t, "mol-dog-backup.sh", binDir, cityPath, dataDir,
-		"GC_BACKUP_OFFSITE_PATH="+offsiteDir,
-		"GC_BACKUP_OFFSITE_TIMEOUT=17",
-	)
-	if !strings.Contains(out, "synced: 1/1") || !strings.Contains(out, "offsite: failed") {
-		t.Fatalf("offsite failure should stay non-fatal and remain visible in the summary:\n%s", out)
-	}
-
-	timeoutLog, err := os.ReadFile(timeoutLogPath)
-	if err != nil {
-		t.Fatalf("read timeout log: %v", err)
-	}
-	if !strings.Contains(string(timeoutLog), "--kill-after=2 17 rsync -a --delete") {
-		t.Fatalf("offsite rsync did not use GC_BACKUP_OFFSITE_TIMEOUT=17:\n%s", timeoutLog)
-	}
-
-	gcLog, err := os.ReadFile(gcLogPath)
-	if err != nil {
-		t.Fatalf("read gc log: %v", err)
-	}
-	for _, want := range []string{
-		"mail send human -s Dolt backup: offsite publication failed [MEDIUM]",
-		"Status: failed. Bound: 17s (raise with GC_BACKUP_OFFSITE_TIMEOUT).",
-		"Until this clears, the only copy of these databases is on this host.",
-	} {
-		if !strings.Contains(string(gcLog), want) {
-			t.Fatalf("offsite failure escalation missing %q:\n%s", want, gcLog)
-		}
-	}
-}
-
-func TestBackupScriptRejectsUnusableOffsiteTimeout(t *testing.T) {
-	// 0 is the dangerous one: GNU `timeout 0` drops the bound entirely while
-	// the python3 fallback in runtime.sh expires immediately. Both it and a
-	// non-numeric value must fall back to the documented 300s default.
-	for _, configured := range []string{"0", "not-a-number"} {
-		t.Run(configured, func(t *testing.T) {
-			cityPath := t.TempDir()
-			dataDir := filepath.Join(cityPath, "dolt-data")
-			artifactDir := filepath.Join(cityPath, ".dolt-backup")
-			offsiteDir := filepath.Join(cityPath, "offsite")
-			for _, dir := range []string{
-				filepath.Join(dataDir, "prod", ".dolt"),
-				artifactDir,
-				offsiteDir,
-			} {
-				if err := os.MkdirAll(dir, 0o755); err != nil {
-					t.Fatalf("mkdir %s: %v", dir, err)
-				}
-			}
-
-			binDir := t.TempDir()
-			_ = writeDogFakeGC(t, binDir)
-			_ = writeBackupFakeDolt(t, binDir, "2.1.0", 0, "prod")
-			_ = writeBackupFakeRsync(t, binDir)
-			timeoutLogPath := filepath.Join(binDir, "timeout.log")
-			writeExecutable(t, filepath.Join(binDir, "timeout"), fmt.Sprintf(`#!/bin/sh
-printf 'timeout %%s\n' "$*" >> %s
-[ "$1" = "--kill-after=2" ] && shift
-shift
-exec "$@"
-`, shellQuote(timeoutLogPath)))
-
-			out := runDogScript(t, "mol-dog-backup.sh", binDir, cityPath, dataDir,
-				"GC_BACKUP_OFFSITE_PATH="+offsiteDir,
-				"GC_BACKUP_OFFSITE_TIMEOUT="+configured,
-			)
-			if !strings.Contains(out, "offsite: ok") {
-				t.Fatalf("offsite rsync should still run with an unusable bound:\n%s", out)
-			}
-
-			timeoutLog, err := os.ReadFile(timeoutLogPath)
-			if err != nil {
-				t.Fatalf("read timeout log: %v", err)
-			}
-			if !strings.Contains(string(timeoutLog), "--kill-after=2 300 rsync -a --delete") {
-				t.Fatalf("GC_BACKUP_OFFSITE_TIMEOUT=%q should fall back to 300s:\n%s", configured, timeoutLog)
-			}
-		})
-	}
-}
-
-func TestBackupScriptSkipsConcurrentRunBeforeBackupSync(t *testing.T) {
-	if _, err := exec.LookPath("flock"); err != nil {
-		t.Skip("flock not installed; skipping")
-	}
-
-	cityPath := t.TempDir()
-	dataDir := filepath.Join(cityPath, "dolt-data")
-	if err := os.MkdirAll(filepath.Join(dataDir, "prod", ".dolt"), 0o755); err != nil {
-		t.Fatalf("mkdir db: %v", err)
-	}
-	binDir := t.TempDir()
-	_ = writeDogFakeGC(t, binDir)
-
-	doltLogPath := filepath.Join(binDir, "dolt.log")
-	startedFile := filepath.Join(binDir, "sync-started")
-	releaseFile := filepath.Join(binDir, "sync-release")
-	writeExecutable(t, filepath.Join(binDir, "dolt"), fmt.Sprintf(`#!/usr/bin/env bash
-set -euo pipefail
-printf 'dolt %%s\n' "$*" >> %s
-if [ "${1:-}" = "version" ]; then
-  printf 'dolt version 2.1.0\n'
-  exit 0
-fi
-case "$*" in
-  *"SHOW DATABASES"*)
-    printf 'Database\nprod\n'
-    exit 0
-    ;;
-esac
-if [ "${1:-}" = "backup" ] && [ "$#" -eq 1 ]; then
-  db="$(basename "$PWD")"
-  printf '%%s-backup file:///backups/%%s\n' "$db" "$db"
-  exit 0
-fi
-if [ "${1:-} ${2:-}" = "backup sync" ]; then
-  : > %s
-  while [ ! -f %s ]; do sleep 0.05; done
-  exit 0
-fi
-exit 0
-`, shellQuote(doltLogPath), shellQuote(startedFile), shellQuote(releaseFile)))
-
-	firstDone := make(chan struct{})
-	var firstOut string
-	var firstErr error
-	go func() {
-		firstOut, firstErr = runDogScriptCommand(t, "mol-dog-backup.sh", binDir, cityPath, dataDir, "GC_BACKUP_DATABASES=prod")
-		close(firstDone)
-	}()
-
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if _, err := os.Stat(startedFile); err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("first backup run did not reach backup sync")
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
-
-	secondDone := make(chan struct{})
-	var secondOut string
-	var secondErr error
-	go func() {
-		secondOut, secondErr = runDogScriptCommand(t, "mol-dog-backup.sh", binDir, cityPath, dataDir,
-			"GC_BACKUP_DATABASES=prod",
-			"GC_DOLT_BACKUP_LOCK_WAIT_SECONDS=0",
-		)
-		close(secondDone)
-	}()
-	select {
-	case <-secondDone:
-	case <-time.After(2 * time.Second):
-		if err := os.WriteFile(releaseFile, []byte("ok\n"), 0o644); err != nil {
-			t.Fatalf("release blocked backup runs: %v", err)
-		}
-		<-secondDone
-		t.Fatalf("second backup run blocked instead of skipping while lock is held:\n%s", secondOut)
-	}
-	if secondErr != nil {
-		t.Fatalf("second backup run failed: %v\n%s", secondErr, secondOut)
-	}
-	if !strings.Contains(secondOut, "already running") {
-		t.Fatalf("second backup run should skip while lock is held:\n%s", secondOut)
-	}
-
-	if err := os.WriteFile(releaseFile, []byte("ok\n"), 0o644); err != nil {
-		t.Fatalf("release first backup run: %v", err)
-	}
-	select {
-	case <-firstDone:
-	case <-time.After(5 * time.Second):
-		t.Fatal("first backup run did not finish after release")
-	}
-	if firstErr != nil {
-		t.Fatalf("first backup run failed: %v\n%s", firstErr, firstOut)
-	}
-
-	doltLog, err := os.ReadFile(doltLogPath)
-	if err != nil {
-		t.Fatalf("read dolt log: %v", err)
-	}
-	if got := strings.Count(string(doltLog), "backup sync prod-backup"); got != 1 {
-		t.Fatalf("backup sync count = %d, want 1 while concurrent run skipped:\n%s", got, doltLog)
-	}
-}
-
-func TestBackupScriptIgnoresDocumentedSystemSchemasForAutoDiscoveryWithBSDGrep(t *testing.T) {
-	cityPath := t.TempDir()
-	dataDir := filepath.Join(cityPath, "dolt-data")
-	for _, db := range []string{"prod", "performance_schema", "sys"} {
-		if err := os.MkdirAll(filepath.Join(dataDir, db, ".dolt"), 0o755); err != nil {
-			t.Fatalf("mkdir %s: %v", db, err)
-		}
-	}
-	binDir := t.TempDir()
-	_ = writeDogFakeGC(t, binDir)
-	writeBSDLikeGrep(t, binDir)
-	doltLogPath := writeBackupFakeDolt(t, binDir, "2.1.0", 0, "prod", "performance_schema", "sys")
-
-	out := runDogScript(t, "mol-dog-backup.sh", binDir, cityPath, dataDir)
-	if !strings.Contains(out, "synced: 1/1") {
-		t.Fatalf("unexpected backup summary:\n%s", out)
-	}
-	doltLog, err := os.ReadFile(doltLogPath)
-	if err != nil {
-		t.Fatalf("read dolt log: %v", err)
-	}
-	for _, systemDB := range []string{"performance_schema", "sys"} {
-		if strings.Contains(string(doltLog), "backup sync "+systemDB+"-backup") {
-			t.Fatalf("backup auto-discovery should ignore %s, log:\n%s", systemDB, doltLog)
-		}
-	}
-}
-
-func TestBackupScriptCountsFailedDatabasesByDatabase(t *testing.T) {
-	cityPath := t.TempDir()
-	dataDir := filepath.Join(cityPath, "dolt-data")
-	if err := os.MkdirAll(filepath.Join(dataDir, "prod", ".dolt"), 0o755); err != nil {
-		t.Fatalf("mkdir db: %v", err)
-	}
-	binDir := t.TempDir()
-	gcLogPath := writeDogFakeGC(t, binDir)
-	_ = writeBackupFakeDolt(t, binDir, "2.1.0", 1)
-
-	out := runDogScript(t, "mol-dog-backup.sh", binDir, cityPath, dataDir, "GC_BACKUP_DATABASES=prod")
-	if !strings.Contains(out, "synced: 0/1") {
-		t.Fatalf("unexpected backup summary:\n%s", out)
-	}
-	gcLog, err := os.ReadFile(gcLogPath)
-	if err != nil {
-		t.Fatalf("read gc log: %v", err)
-	}
-	if !strings.Contains(string(gcLog), "Dolt backup: 1/1 databases failed to sync") {
-		t.Fatalf("failure mail should count databases, log:\n%s", gcLog)
-	}
-	if !strings.Contains(string(gcLog), "mail send human -s Dolt backup: 1/1 databases failed to sync [MEDIUM]") {
-		t.Fatalf("backup failure escalation must use the generic default recipient:\n%s", gcLog)
-	}
-}
-
-// writeAutoConfigureFakeDolt fakes a server with prod + archive where only
-// prod has a prod-backup remote. `backup add` exits with addExit so tests can
-// exercise both the auto-configure happy path and the failure accounting.
-func writeAutoConfigureFakeDolt(t *testing.T, binDir string, addExit int) string {
-	t.Helper()
-	logPath := filepath.Join(binDir, "dolt.log")
-	writeExecutable(t, filepath.Join(binDir, "dolt"), fmt.Sprintf(`#!/usr/bin/env bash
-set -euo pipefail
-printf 'dolt %%s\n' "$*" >> %s
-if [ "${1:-}" = "version" ]; then
-  printf 'dolt version 2.1.0\n'
-  exit 0
-fi
-case "$*" in
-  *"SHOW DATABASES"*)
-    printf 'Database\nprod\narchive\n'
-    exit 0
-    ;;
-esac
-if [ "${1:-}" = "backup" ] && [ "$#" -eq 1 ]; then
-  if [ "$(basename "$PWD")" = "prod" ]; then
-    printf 'prod-backup file:///backups/prod\n'
-  fi
-  exit 0
-fi
-if [ "${1:-} ${2:-}" = "backup add" ]; then
-  exit %d
-fi
-if [ "${1:-} ${2:-}" = "backup sync" ]; then
-  exit 0
-fi
-exit 0
-`, shellQuote(logPath), addExit))
-	return logPath
-}
-
-// TestBackupScriptAutoConfiguresMissingBackupRemotes asserts auto-discovery
-// covers every user database: DBs without a "<db>-backup" remote get one
-// auto-configured under the backup artifact dir and are then synced. The old
-// behavior silently skipped them, leaving production DBs with zero backup
-// coverage until journal corruption made them unrecoverable (#3176).
-func TestBackupScriptAutoConfiguresMissingBackupRemotes(t *testing.T) {
-	cityPath := t.TempDir()
-	dataDir := filepath.Join(cityPath, "dolt-data")
-	for _, db := range []string{"prod", "archive"} {
-		if err := os.MkdirAll(filepath.Join(dataDir, db, ".dolt"), 0o755); err != nil {
-			t.Fatalf("mkdir %s: %v", db, err)
-		}
-	}
-	binDir := t.TempDir()
-	_ = writeDogFakeGC(t, binDir)
-	doltLogPath := writeAutoConfigureFakeDolt(t, binDir, 0)
-
-	out := runDogScript(t, "mol-dog-backup.sh", binDir, cityPath, dataDir)
-	if !strings.Contains(out, "synced: 2/2") {
-		t.Fatalf("unexpected backup summary:\n%s", out)
-	}
-	if !strings.Contains(out, "auto-configured missing backup remote archive-backup") {
-		t.Fatalf("auto-configuration must be logged loudly, output:\n%s", out)
-	}
-	doltLog, err := os.ReadFile(doltLogPath)
-	if err != nil {
-		t.Fatalf("read dolt log: %v", err)
-	}
-	artifactURL := "file://" + filepath.Join(cityPath, ".dolt-backup", "archive")
-	if !strings.Contains(string(doltLog), "backup add archive-backup "+artifactURL) {
-		t.Fatalf("dolt log missing backup add for archive -> %s:\n%s", artifactURL, doltLog)
-	}
-	if strings.Contains(string(doltLog), "backup add prod-backup") {
-		t.Fatalf("prod already has a remote; backup add must not run for it:\n%s", doltLog)
-	}
-	for _, want := range []string{"backup sync prod-backup", "backup sync archive-backup"} {
-		if !strings.Contains(string(doltLog), want) {
-			t.Fatalf("dolt log missing %q:\n%s", want, doltLog)
-		}
-	}
-	if _, err := os.Stat(filepath.Join(cityPath, ".dolt-backup", "archive")); err != nil {
-		t.Fatalf("backup artifact dir for archive should be created: %v", err)
-	}
-}
-
-// TestBackupScriptCountsFailedRemoteAutoConfiguration asserts a DB whose
-// backup-remote auto-configuration fails is counted as failed (and escalated
-// via the failure mail) instead of being silently dropped from coverage.
-func TestBackupScriptCountsFailedRemoteAutoConfiguration(t *testing.T) {
-	cityPath := t.TempDir()
-	dataDir := filepath.Join(cityPath, "dolt-data")
-	for _, db := range []string{"prod", "archive"} {
-		if err := os.MkdirAll(filepath.Join(dataDir, db, ".dolt"), 0o755); err != nil {
-			t.Fatalf("mkdir %s: %v", db, err)
-		}
-	}
-	binDir := t.TempDir()
-	gcLogPath := writeDogFakeGC(t, binDir)
-	doltLogPath := writeAutoConfigureFakeDolt(t, binDir, 1)
-
-	out := runDogScript(t, "mol-dog-backup.sh", binDir, cityPath, dataDir)
-	if !strings.Contains(out, "synced: 1/2") {
-		t.Fatalf("unexpected backup summary:\n%s", out)
-	}
-	doltLog, err := os.ReadFile(doltLogPath)
-	if err != nil {
-		t.Fatalf("read dolt log: %v", err)
-	}
-	if strings.Contains(string(doltLog), "backup sync archive-backup") {
-		t.Fatalf("sync must not run for a DB whose remote could not be configured:\n%s", doltLog)
-	}
-	gcLog, err := os.ReadFile(gcLogPath)
-	if err != nil {
-		t.Fatalf("read gc log: %v", err)
-	}
-	if !strings.Contains(string(gcLog), "1/2 databases failed to sync") {
-		t.Fatalf("failure mail should count the unconfigurable database, log:\n%s", gcLog)
-	}
-	if !strings.Contains(string(gcLog), "archive(backup add failed)") {
-		t.Fatalf("failure mail should name the failed auto-configuration, log:\n%s", gcLog)
 	}
 }
 
@@ -5990,6 +5671,145 @@ exit 0
 	if strings.Contains(string(gcLog), "prod backup is") {
 		t.Fatalf("fresh prod backup should not be reported stale, log:\n%s", gcLog)
 	}
+}
+
+// TestDoctorReadsBackupFreshnessFromTheManifestNotTheNewestChunk asserts the
+// doctor ages a Dolt backup remote by its manifest rather than by whatever file
+// in the directory was touched last.
+//
+// `dolt backup sync` writes chunk data first and adopts it by rewriting the
+// manifest last, so a sync the server kills in between leaves chunk files newer
+// than anything the manifest references. On the city that produced this test an
+// hq remote held a chunk written at 21:04 beside a manifest still reading 15:04,
+// and the manifest did not reference that chunk: the newest restorable backup
+// was six hours old while the directory read as nine minutes old.
+//
+// Both directions are asserted from one fixture. The stale-manifest database
+// has the fresher chunk, so a file-mtime reading calls it fresh; the
+// fresh-manifest database has the older chunk, so a reading that took the
+// oldest file instead would call it stale.
+func TestDoctorReadsBackupFreshnessFromTheManifestNotTheNewestChunk(t *testing.T) {
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "dolt-data")
+	artifactDir := filepath.Join(cityPath, ".dolt-backup")
+	for _, db := range []string{"prod", "archive"} {
+		if err := os.MkdirAll(filepath.Join(dataDir, db, ".dolt"), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", db, err)
+		}
+		if err := os.MkdirAll(filepath.Join(artifactDir, db), 0o755); err != nil {
+			t.Fatalf("mkdir backup remote %s: %v", db, err)
+		}
+	}
+	now := time.Now()
+	old := now.Add(-2 * time.Hour)
+
+	// archive: the incident shape — a half-written sync left a fresh chunk
+	// behind a manifest that never adopted it.
+	writeBackupRemoteFile(t, filepath.Join(artifactDir, "archive", "manifest"), old)
+	writeBackupRemoteFile(t, filepath.Join(artifactDir, "archive", "chunk.darc"), now)
+
+	// prod: a sync that completed. Its chunk is the older file of the two.
+	writeBackupRemoteFile(t, filepath.Join(artifactDir, "prod", "chunk.darc"), old)
+	writeBackupRemoteFile(t, filepath.Join(artifactDir, "prod", "manifest"), now)
+
+	binDir := t.TempDir()
+	gcLogPath := writeDogFakeGC(t, binDir)
+	writeDoctorFakeDoltWithBackupRemotes(t, binDir, "prod", "archive")
+
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, doctorBackupStaleEnv)
+	if !strings.Contains(out, "server: ok") {
+		t.Fatalf("unexpected doctor output:\n%s", out)
+	}
+	gcLog, err := os.ReadFile(gcLogPath)
+	if err != nil {
+		t.Fatalf("read gc log: %v", err)
+	}
+	if !strings.Contains(string(gcLog), "archive backup is") {
+		t.Fatalf("doctor read the fresh chunk instead of the stale manifest, log:\n%s", gcLog)
+	}
+	if strings.Contains(string(gcLog), "prod backup is") {
+		t.Fatalf("a completed sync with an older chunk was reported stale, log:\n%s", gcLog)
+	}
+}
+
+// TestDoctorReportsBackupRemoteWithNoManifestAsMissing asserts a Dolt remote
+// directory holding chunk data but no manifest reports as missing rather than
+// as a backup as fresh as its newest chunk. Nothing in it is restorable: the
+// manifest is what names the root chunk, so without one there is no backup to
+// restore however recently the chunks were written.
+func TestDoctorReportsBackupRemoteWithNoManifestAsMissing(t *testing.T) {
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "dolt-data")
+	artifactDir := filepath.Join(cityPath, ".dolt-backup")
+	if err := os.MkdirAll(filepath.Join(dataDir, "prod", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir prod: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(artifactDir, "prod"), 0o755); err != nil {
+		t.Fatalf("mkdir backup remote: %v", err)
+	}
+	writeBackupRemoteFile(t, filepath.Join(artifactDir, "prod", "chunk.darc"), time.Now())
+
+	binDir := t.TempDir()
+	gcLogPath := writeDogFakeGC(t, binDir)
+	writeDoctorFakeDoltWithBackupRemotes(t, binDir, "prod")
+
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, doctorBackupStaleEnv)
+	if !strings.Contains(out, "server: ok") {
+		t.Fatalf("unexpected doctor output:\n%s", out)
+	}
+	gcLog, err := os.ReadFile(gcLogPath)
+	if err != nil {
+		t.Fatalf("read gc log: %v", err)
+	}
+	if !strings.Contains(string(gcLog), "prod backup missing") {
+		t.Fatalf("a remote with chunks but no manifest should report missing, log:\n%s", gcLog)
+	}
+}
+
+// writeBackupRemoteFile creates one file inside a fake Dolt backup remote and
+// stamps it, so a fixture can order a manifest against the chunks around it.
+func writeBackupRemoteFile(t *testing.T, path string, mtime time.Time) {
+	t.Helper()
+	writeTestFile(t, path, "backup")
+	if err := os.Chtimes(path, mtime, mtime); err != nil {
+		t.Fatalf("chtimes %s: %v", path, err)
+	}
+}
+
+// writeDoctorFakeDoltWithBackupRemotes stands in for the dolt CLI the doctor
+// shells out to, reporting every named database as having its <db>-backup
+// remote configured so each one reaches the freshness check.
+func writeDoctorFakeDoltWithBackupRemotes(t *testing.T, binDir string, dbs ...string) {
+	t.Helper()
+	var backupCases strings.Builder
+	var showDatabases strings.Builder
+	showDatabases.WriteString("Database\\n")
+	for _, db := range dbs {
+		fmt.Fprintf(&backupCases, "      %s) printf '%s-backup\\n' ;;\n", db, db)
+		fmt.Fprintf(&showDatabases, "%s\\n", db)
+	}
+	writeExecutable(t, filepath.Join(binDir, "dolt"), fmt.Sprintf(`#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  backup)
+    case "$(basename "$PWD")" in
+%s
+    esac
+    exit 0
+    ;;
+esac
+case "$*" in
+  *"COUNT(*) FROM information_schema.PROCESSLIST"*)
+    printf 'COUNT(*)\\n1\\n'
+    exit 0
+    ;;
+  *"SHOW DATABASES"*)
+    printf '%s'
+    exit 0
+    ;;
+esac
+exit 0
+`, backupCases.String(), showDatabases.String()))
 }
 
 func TestDoctorScriptIgnoresDocumentedSystemSchemasForBackupFreshness(t *testing.T) {
@@ -6201,6 +6021,132 @@ exit 0
 	}
 	if strings.Contains(string(gcLog), "prod_dev backup") {
 		t.Fatalf("fresh prod_dev backup should not be reported stale, log:\n%s", gcLog)
+	}
+}
+
+// TestDoctorDatesADatabaseRemoteOnlyByItsOwnManifest asserts a db-named backup
+// remote is aged by its own root manifest even when a sibling directory that
+// the prefix arms of backup_path_matches_db also accept holds a fresher one.
+// Bash case `*` spans `/`, so prod-dev/manifest (the remote of a database whose
+// name merely starts with "prod-") and prod.broken/manifest (a remote moved
+// aside) both match prod. Crediting either would report prod's stale or
+// never-completed remote as fresh, which is the reading the manifest rule
+// exists to prevent.
+func TestDoctorDatesADatabaseRemoteOnlyByItsOwnManifest(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		databases []string
+		stale     []string // remote files stamped two hours back
+		fresh     []string // remote files stamped now
+		want      string
+		dontWant  string
+	}{
+		{
+			name:      "stale manifest beside a fresh hyphenated sibling remote",
+			databases: []string{"prod", "prod-dev"},
+			stale:     []string{"prod/chunk.darc", "prod/manifest"},
+			fresh:     []string{"prod-dev/chunk.darc", "prod-dev/manifest"},
+			want:      "prod backup is 2h old",
+			// The sibling is still dated by its own fresh manifest.
+			dontWant: "prod-dev backup",
+		},
+		{
+			name:      "no manifest beside a fresh moved-aside remote",
+			databases: []string{"prod"},
+			fresh:     []string{"prod/chunk.darc", "prod.broken/chunk.darc", "prod.broken/manifest"},
+			want:      "prod backup missing",
+			dontWant:  "prod backup is",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			dataDir := filepath.Join(cityPath, "dolt-data")
+			artifactDir := filepath.Join(cityPath, ".dolt-backup")
+			for _, db := range tc.databases {
+				if err := os.MkdirAll(filepath.Join(dataDir, db, ".dolt"), 0o755); err != nil {
+					t.Fatalf("mkdir %s: %v", db, err)
+				}
+			}
+			now := time.Now()
+			stamp := func(rel string, mtime time.Time) {
+				path := filepath.Join(artifactDir, filepath.FromSlash(rel))
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatalf("mkdir backup remote for %s: %v", rel, err)
+				}
+				writeBackupRemoteFile(t, path, mtime)
+			}
+			for _, rel := range tc.stale {
+				stamp(rel, now.Add(-2*time.Hour))
+			}
+			for _, rel := range tc.fresh {
+				stamp(rel, now)
+			}
+
+			binDir := t.TempDir()
+			gcLogPath := writeDogFakeGC(t, binDir)
+			writeDoctorFakeDoltWithBackupRemotes(t, binDir, tc.databases...)
+
+			out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, doctorBackupStaleEnv)
+			if !strings.Contains(out, "server: ok") {
+				t.Fatalf("unexpected doctor output:\n%s", out)
+			}
+			// No log means the doctor sent no advisory at all, which is how
+			// the sibling's manifest hides prod; let the assertion report it.
+			gcLog, err := os.ReadFile(gcLogPath)
+			if err != nil && !os.IsNotExist(err) {
+				t.Fatalf("read gc log: %v", err)
+			}
+			if !strings.Contains(string(gcLog), tc.want) {
+				t.Fatalf("doctor dated prod by a sibling's manifest, want %q in log:\n%s", tc.want, gcLog)
+			}
+			if strings.Contains(string(gcLog), tc.dontWant) {
+				t.Fatalf("unexpected %q in log:\n%s", tc.dontWant, gcLog)
+			}
+		})
+	}
+}
+
+// TestDoctorFallbackScanReadsTheManifestNotTheNewestChunk asserts the fallback
+// scan, which dates a database that has no db-named remote directory, still
+// prefers a matched manifest over a fresher chunk. prod.backup/ holds the
+// orphan-chunk shape of
+// TestDoctorReadsBackupFreshnessFromTheManifestNotTheNewestChunk: a manifest
+// two hours old beside a chunk written now. There is no prod/ directory, so
+// the db-named branch never runs and only the manifest preference keeps the
+// fresh chunk from dating prod.
+func TestDoctorFallbackScanReadsTheManifestNotTheNewestChunk(t *testing.T) {
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "dolt-data")
+	artifactDir := filepath.Join(cityPath, ".dolt-backup")
+	if err := os.MkdirAll(filepath.Join(dataDir, "prod", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir prod: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(artifactDir, "prod.backup"), 0o755); err != nil {
+		t.Fatalf("mkdir prod.backup: %v", err)
+	}
+	now := time.Now()
+	writeBackupRemoteFile(t, filepath.Join(artifactDir, "prod.backup", "manifest"), now.Add(-2*time.Hour))
+	writeBackupRemoteFile(t, filepath.Join(artifactDir, "prod.backup", "chunk.darc"), now)
+
+	binDir := t.TempDir()
+	gcLogPath := writeDogFakeGC(t, binDir)
+	writeDoctorFakeDoltWithBackupRemotes(t, binDir, "prod")
+
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, doctorBackupStaleEnv)
+	if !strings.Contains(out, "server: ok") {
+		t.Fatalf("unexpected doctor output:\n%s", out)
+	}
+	// No log means the doctor sent no advisory at all, which is how the fresh
+	// chunk hides prod's stale manifest; let the assertion report it.
+	gcLog, err := os.ReadFile(gcLogPath)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("read gc log: %v", err)
+	}
+	if !strings.Contains(string(gcLog), "prod backup is 2h old") {
+		t.Fatalf("fallback scan dated prod by its fresh chunk instead of its stale manifest, log:\n%s", gcLog)
+	}
+	if strings.Contains(string(gcLog), "prod backup missing") {
+		t.Fatalf("fallback scan found no backup for prod.backup/, log:\n%s", gcLog)
 	}
 }
 
@@ -6795,130 +6741,23 @@ func TestCompactScriptSkipFetchRejectsInvalidValue(t *testing.T) {
 	}
 }
 
-// writeFlakyBackupFakeDolt fakes a dolt whose `backup sync` fails its first
-// failUntil attempts and then succeeds, counting attempts in a file so the
-// test can assert the retry actually happened rather than inferring it from
-// the outcome. stderr carries the diagnostic a real managed server emits when
-// it ends an operation at its listener read deadline.
-func writeFlakyBackupFakeDolt(t *testing.T, binDir string, failUntil int) (counterPath string) {
+func writeBSDLikeGrep(t *testing.T, binDir string) {
 	t.Helper()
-	logPath := filepath.Join(binDir, "dolt.log")
-	counterPath = filepath.Join(binDir, "sync-attempts")
-	writeExecutable(t, filepath.Join(binDir, "dolt"), fmt.Sprintf(`#!/usr/bin/env bash
+	realGrep, err := exec.LookPath("grep")
+	if err != nil {
+		t.Fatalf("find grep: %v", err)
+	}
+	writeExecutable(t, filepath.Join(binDir, "grep"), fmt.Sprintf(`#!/usr/bin/env bash
 set -euo pipefail
-printf 'dolt %%s\n' "$*" >> %s
-if [ "${1:-}" = "version" ]; then
-  printf 'dolt version 2.1.0\n'
-  exit 0
-fi
-case "$*" in
-  *"SHOW DATABASES"*)
-    printf 'Database\nprod\n'
+bre_alternation='\|'
+if [ "$#" -ge 2 ] && { [ "$1" = "-vi" ] || [ "$1" = "-i" ]; } && [[ "$2" == *"$bre_alternation"* ]]; then
+  if [ "$1" = "-vi" ]; then
+    shift 2
+    cat "$@"
     exit 0
-    ;;
-esac
-if [ "${1:-}" = "backup" ] && [ "$#" -eq 1 ]; then
-  db="$(basename "$PWD")"
-  printf '%%s-backup file:///backups/%%s\n' "$db" "$db"
-  exit 0
-fi
-if [ "${1:-} ${2:-}" = "backup sync" ]; then
-  printf 'x' >> %s
-  attempts=$(wc -c < %s | tr -d ' ')
-  if [ "$attempts" -le %d ]; then
-    printf 'Error 1105 (HY000): connection was closed\n' >&2
-    exit 1
   fi
-  exit 0
+  exit 1
 fi
-exit 0
-`, shellQuote(logPath), shellQuote(counterPath), shellQuote(counterPath), failUntil))
-	return counterPath
-}
-
-// TestBackupScriptRetriesMarginalSyncFailure pins that a database whose sync
-// fails once is retried rather than abandoned until the next interval.
-//
-// The backup is a marginal operation, not a reliably-fast one: on a busy city
-// the managed sql-server serializes it against live agent traffic, so the same
-// delta can land either side of the server's read deadline depending on what
-// else is running. One city measured four consecutive scheduled failures at
-// ~30s over twelve hours, then a manual retry that succeeded in 28s against
-// the same data — a whole day of backup coverage lost to a single attempt.
-func TestBackupScriptRetriesMarginalSyncFailure(t *testing.T) {
-	cityPath := t.TempDir()
-	dataDir := filepath.Join(cityPath, "dolt-data")
-	if err := os.MkdirAll(filepath.Join(dataDir, "prod", ".dolt"), 0o755); err != nil {
-		t.Fatalf("mkdir db: %v", err)
-	}
-	binDir := t.TempDir()
-	gcLogPath := writeDogFakeGC(t, binDir)
-	counterPath := writeFlakyBackupFakeDolt(t, binDir, 1)
-
-	out := runDogScript(t, "mol-dog-backup.sh", binDir, cityPath, dataDir, "GC_BACKUP_DATABASES=prod")
-
-	if !strings.Contains(out, "synced: 1/1") {
-		t.Fatalf("a sync that succeeds on retry must count as synced:\n%s", out)
-	}
-	attempts, err := os.ReadFile(counterPath)
-	if err != nil {
-		t.Fatalf("read attempt counter: %v", err)
-	}
-	if len(attempts) != 2 {
-		t.Fatalf("backup sync attempted %d times, want 2 (one failure then one success)", len(attempts))
-	}
-	gcLog, _ := os.ReadFile(gcLogPath)
-	if strings.Contains(string(gcLog), "databases failed to sync") {
-		t.Errorf("a database that succeeded on retry must not escalate:\n%s", gcLog)
-	}
-}
-
-// TestBackupScriptSurfacesSyncDiagnosticInEscalation pins that the underlying
-// failure reaches the operator.
-//
-// The regression: the sync ran as `... 2>/dev/null`, so the only evidence that
-// left the script was the literal string "prod(sync failed)". One city sat 18
-// hours with no bead-store backup and the operator had nothing to act on,
-// because the cause — the managed sql-server ending the operation at its own
-// read deadline — was written to /dev/null every six hours. The sibling
-// `gc dolt sync` in this same pack captures and replays that stderr; this is
-// the backup half catching up.
-func TestBackupScriptSurfacesSyncDiagnosticInEscalation(t *testing.T) {
-	cityPath := t.TempDir()
-	dataDir := filepath.Join(cityPath, "dolt-data")
-	if err := os.MkdirAll(filepath.Join(dataDir, "prod", ".dolt"), 0o755); err != nil {
-		t.Fatalf("mkdir db: %v", err)
-	}
-	binDir := t.TempDir()
-	gcLogPath := writeDogFakeGC(t, binDir)
-	// failUntil far above the attempt count: every attempt fails.
-	counterPath := writeFlakyBackupFakeDolt(t, binDir, 99)
-
-	out := runDogScript(t, "mol-dog-backup.sh", binDir, cityPath, dataDir,
-		"GC_BACKUP_DATABASES=prod", "GC_DOLT_BACKUP_SYNC_ATTEMPTS=2")
-
-	if !strings.Contains(out, "synced: 0/1") {
-		t.Fatalf("unexpected backup summary:\n%s", out)
-	}
-	attempts, err := os.ReadFile(counterPath)
-	if err != nil {
-		t.Fatalf("read attempt counter: %v", err)
-	}
-	if len(attempts) != 2 {
-		t.Fatalf("backup sync attempted %d times, want GC_DOLT_BACKUP_SYNC_ATTEMPTS=2", len(attempts))
-	}
-	gcLog, err := os.ReadFile(gcLogPath)
-	if err != nil {
-		t.Fatalf("read gc log: %v", err)
-	}
-	body := string(gcLog)
-	if !strings.Contains(body, "Dolt backup: 1/1 databases failed to sync") {
-		t.Fatalf("failure escalation missing:\n%s", body)
-	}
-	if !strings.Contains(body, "connection was closed") {
-		t.Fatalf("escalation must carry the underlying dolt diagnostic, not just the symptom:\n%s", body)
-	}
-	if !strings.Contains(body, "read_timeout_millis") {
-		t.Errorf("a read-deadline kill must name the setting that caused it, or the operator hunts a phantom disconnect:\n%s", body)
-	}
+exec %s "$@"
+`, shellQuote(realGrep)))
 }

@@ -69,9 +69,8 @@ func desiredSessionIdentity(in sessionIdentityInputs) map[string]string {
 		meta["pool_slot"] = strconv.Itoa(in.PoolSlot)
 	}
 	if in.ConfigResolved && in.AgentName != "" {
-		// convergecompare:recorded-by-caller — desiredSessionIdentity is a pure
-		// builder with no bead ID; the S19 Stage 3 shadow recorder is fed by the
-		// callers that persist this map (adoptionBarrier.create, syncSessionBeads.create).
+		// desiredSessionIdentity is a pure builder with no bead ID; the callers
+		// that persist this map (adoption barrier, syncSessionBeads create) stamp it.
 		meta[session.CanonicalInstanceNameMetadata] = in.AgentName
 		if in.PoolSlot > 0 {
 			meta[session.CanonicalPoolSlotMetadata] = strconv.Itoa(in.PoolSlot)

@@ -1,12 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"syscall"
@@ -854,6 +857,10 @@ func stopManagedDoltProcessesUnderTestCity(t *testing.T, cityPath string) {
 	}
 }
 
+// managedDoltTestSIGTERMGrace is how long stopManagedDoltTestPID waits for a
+// dolt test process to exit after SIGTERM before it escalates to SIGKILL.
+const managedDoltTestSIGTERMGrace = 5 * time.Second
+
 func stopManagedDoltTestPID(t *testing.T, pid int) {
 	t.Helper()
 	if pid <= 0 || !managedStopPIDAlive(pid) {
@@ -862,7 +869,7 @@ func stopManagedDoltTestPID(t *testing.T, pid int) {
 	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && err != syscall.ESRCH {
 		t.Fatalf("signal dolt test pid %d with SIGTERM: %v", pid, err)
 	}
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(managedDoltTestSIGTERMGrace)
 	for managedStopPIDAlive(pid) && time.Now().Before(deadline) {
 		time.Sleep(50 * time.Millisecond)
 	}
@@ -878,5 +885,245 @@ func stopManagedDoltTestPID(t *testing.T, pid int) {
 	}
 	if managedStopPIDAlive(pid) {
 		t.Fatalf("dolt test pid %d still alive after SIGKILL", pid)
+	}
+}
+
+// registerRealBDServerStop stops any dolt sql-server rooted under cityPath
+// before the calling test returns. Callers must invoke this after their own
+// t.TempDir() call so t.Cleanup's LIFO ordering runs this cleanup — and so
+// the server's own writes under cityPath stop — before TempDir's automatic
+// RemoveAll walks that directory. Without this, a still-running server can
+// race that RemoveAll and intermittently fail with "directory not empty";
+// the package-level dolt leak guard only sweeps once, at the end of the
+// whole package run, too late to protect any one test's own TempDir cleanup.
+func registerRealBDServerStop(t *testing.T, cityPath string) {
+	t.Helper()
+	t.Cleanup(func() {
+		stopManagedDoltProcessesUnderTestCity(t, cityPath)
+	})
+}
+
+// fakeDoltSQLServerMarkerEnv, when set to "1" in a re-executed cmd/gc test
+// binary's environment, tells maybeRunFakeDoltSQLServer to block forever
+// instead of running the normal test suite. See startFakeDoltSQLServer.
+const fakeDoltSQLServerMarkerEnv = "GC_TEST_FAKE_DOLT_SQL_SERVER"
+
+// maybeRunFakeDoltSQLServer turns a re-executed cmd/gc test binary into a
+// process that signals startFakeDoltSQLServer it is ready and then blocks
+// forever, before the normal TestMain setup can parse os.Args or dispatch a
+// command. Called from TestMain, mirroring
+// maybeRunProductMetricsDirectChildEnvSpy.
+//
+// It never inspects os.Args: the whole point of re-executing this binary
+// (a real ELF, not a `#!`-script) is that startFakeDoltSQLServer can spoof
+// cmd.Args to whatever it needs /proc/<pid>/cmdline to show — a shebang
+// script can't do this because the kernel's own shebang handling discards a
+// caller's argv override and rebuilds it as [interpreter, script-path,
+// ...], and a standard binary like `sleep`/`cat`/`yes` can't do this either
+// because coreutils' getopt_long parsing rejects an unrecognized "--config"
+// token wherever it appears in argv and exits immediately. Reading os.Args
+// here would reintroduce exactly that problem one level up in Go instead of
+// C, so this ignores argv entirely and keys off the environment instead.
+func maybeRunFakeDoltSQLServer() {
+	if os.Getenv(fakeDoltSQLServerMarkerEnv) != "1" {
+		return
+	}
+	// Exit on SIGTERM like a real dolt sql-server. Under `bazel test` this
+	// binary inherits TEST_TIMEOUT, so rules_go's generated main has already
+	// registered a handler that swallows SIGTERM.
+	signal.Reset(syscall.SIGTERM)
+	// This code runs only after the kernel has finished the exec, so
+	// /proc/<pid>/cmdline already shows the spoofed argv. The byte on fd 3
+	// (startFakeDoltSQLServer's readiness pipe) tells the parent so.
+	ready := os.NewFile(3, "fake-dolt-sql-server-ready")
+	if _, err := ready.Write([]byte{1}); err != nil {
+		fmt.Fprintf(os.Stderr, "fake dolt sql-server: signal readiness: %v\n", err)
+		os.Exit(1)
+	}
+	_ = ready.Close()
+	// time.Sleep, not select{}: this early in TestMain there may be no other
+	// goroutine running yet, and an empty select blocking with nothing else
+	// runnable is exactly what the runtime's deadlock detector treats as
+	// "fatal error: all goroutines are asleep — deadlock!", crashing the
+	// process almost instantly. A pending timer is never mistaken for a
+	// deadlock. The test's own Cleanup kills this long before the sleep
+	// would elapse.
+	time.Sleep(24 * time.Hour)
+}
+
+// startFakeDoltSQLServer spawns a long-lived process whose argv looks exactly
+// like a real `dolt sql-server --config <path>` to looksLikeDoltSQLServer (it
+// only checks argv[0]'s basename and argv[1], per dolt_cleanup_discovery.go),
+// without depending on a real dolt/bd install or on real bd internals
+// actually leaving a background server running — empirically, under this
+// package's test isolation, a bare `bd init`/`bd config set`/BdStore.Create
+// sequence does NOT leave any dolt sql-server process alive by the time the
+// command returns (verified directly: discoverDoltProcesses found zero
+// matches under a fresh cityPath after that exact sequence), so a test built
+// on that premise would pass vacuously regardless of whether
+// registerRealBDServerStop does anything. This fake gives the test a
+// deterministic precondition instead: a process that will keep running
+// (and keep cityPath busy) until something explicitly stops it, and that
+// discoverDoltProcesses already sees by the time this returns.
+//
+// The spoofed argv is applied to this cmd/gc test binary re-executed as a
+// subprocess (via os.Executable), not to a standard tool. See
+// maybeRunFakeDoltSQLServer for why: a `#!`-script loses a cmd.Args override
+// to the kernel's shebang handling, and a real binary like `sleep`/`yes`
+// parses its own argv and rejects the spoofed "--config" token. The
+// re-executed test binary is a real ELF (no shebang indirection) and, via
+// the marker env var, never looks at its argv at all — so the spoof is
+// inert to it and /proc/<pid>/cmdline shows exactly what cmd.Args says.
+func startFakeDoltSQLServer(t *testing.T, cityPath string) *exec.Cmd {
+	t.Helper()
+	configPath := filepath.Join(cityPath, ".beads", "fake-dolt-config.yaml")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", filepath.Dir(configPath), err)
+	}
+	if err := os.WriteFile(configPath, []byte("fake dolt config\n"), 0o644); err != nil {
+		t.Fatalf("write %s: %v", configPath, err)
+	}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatalf("resolve test binary path: %v", err)
+	}
+	cmd := exec.Command(self)
+	// Override argv so /proc/<pid>/cmdline reads as "dolt sql-server --config
+	// <configPath>" — maybeRunFakeDoltSQLServer never looks at os.Args, so
+	// the spoofed content is never parsed or validated by anything.
+	cmd.Args = []string{"dolt", "sql-server", "--config", configPath}
+	cmd.Env = append(os.Environ(), fakeDoltSQLServerMarkerEnv+"=1")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	readyR, readyW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("create fake dolt sql-server readiness pipe: %v", err)
+	}
+	cmd.ExtraFiles = []*os.File{readyW}
+	if err := cmd.Start(); err != nil {
+		_ = readyR.Close()
+		_ = readyW.Close()
+		t.Fatalf("start fake dolt sql-server: %v", err)
+	}
+	_ = readyW.Close()
+	// Start returns as soon as the child's close-on-exec pipe closes, which
+	// the kernel does before it lays out the new image's argv: until then
+	// /proc/<pid>/cmdline reads empty and discoverDoltProcesses skips the
+	// fake. maybeRunFakeDoltSQLServer can signal only after the exec has
+	// finished, so wait for that byte before handing the fake to the caller.
+	_, err = io.ReadFull(readyR, make([]byte, 1))
+	_ = readyR.Close()
+	if err != nil {
+		_ = cmd.Process.Kill()
+		waitErr := cmd.Wait()
+		t.Fatalf("wait for fake dolt sql-server readiness: %v (fake exited: %v; stderr: %q)", err, waitErr, stderr.String())
+	}
+	return cmd
+}
+
+// TestRegisterRealBDServerStopStopsServerBeforeTempDirCleanup expresses the
+// ga-hk84x0 acceptance criterion directly: once a test that uses
+// registerRealBDServerStop has fully returned (including its own Cleanup
+// chain), no dolt sql-server rooted under its city path survives. Left
+// running, that server can still be writing under cityPath when t.TempDir()'s
+// own RemoveAll walks it, intermittently failing with "directory not empty"
+// under load — the package-level dolt leak guard (doltLeakGuardedTestingM)
+// only sweeps once, at the very end of the whole package run, too late to
+// protect this test's own TempDir cleanup.
+//
+// The t.Run subtest boundary is what makes this checkable in one test
+// function: a subtest's own Cleanup funcs finish before t.Run returns
+// control to the parent, so the parent can assert on the post-cleanup state.
+//
+// The check is only as good as the fake that stands in for the server, so the
+// first two subtests pin that it looks and behaves like a real dolt
+// sql-server.
+func TestRegisterRealBDServerStopStopsServerBeforeTempDirCleanup(t *testing.T) {
+	skipSlowCmdGCTest(t, "spawns subprocesses to simulate still-running dolt sql-servers; run make test-cmd-gc-process for full coverage")
+
+	t.Run("fake is discoverable on return", testFakeDoltSQLServerIsDiscoverableOnReturn)
+	t.Run("fake exits on SIGTERM", testFakeDoltSQLServerExitsOnSIGTERM)
+
+	var cityPath string
+	var fake *exec.Cmd
+	t.Run("subtest", func(t *testing.T) {
+		cityPath = t.TempDir()
+		registerRealBDServerStop(t, cityPath)
+		fake = startFakeDoltSQLServer(t, cityPath)
+	})
+
+	// Safety net independent of the behavior under test: never let the fake
+	// process outlive this test, whether or not registerRealBDServerStop
+	// stopped it first.
+	t.Cleanup(func() {
+		if fake != nil && fake.Process != nil {
+			_ = fake.Process.Kill()
+			_ = fake.Wait()
+		}
+	})
+
+	procs, err := discoverDoltProcesses()
+	if err != nil {
+		t.Fatalf("discoverDoltProcesses: %v", err)
+	}
+	for _, p := range procs {
+		if pathutil.PathWithin(cityPath, extractConfigPath(p.Argv)) {
+			t.Fatalf("dolt sql-server pid=%d still alive under %s after the subtest's cleanup chain ran; registerRealBDServerStop did not stop it before t.Run returned", p.PID, cityPath)
+		}
+	}
+}
+
+// testFakeDoltSQLServerIsDiscoverableOnReturn pins that once
+// startFakeDoltSQLServer returns, /proc/<pid>/cmdline already shows the
+// spoofed `dolt sql-server --config <path>` argv that discoverDoltProcesses
+// matches. exec.Cmd.Start returns as soon as the child's close-on-exec pipe
+// closes, which the kernel does before it lays out the new image's argv, so a
+// read straight after Start can come back empty and a discovery scan in that
+// window skips the fake. Several starts run because a single one can win that
+// race by luck.
+func testFakeDoltSQLServerIsDiscoverableOnReturn(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("reads /proc/<pid>/cmdline")
+	}
+
+	for start := 1; start <= 10; start++ {
+		cityPath := t.TempDir()
+		fake := startFakeDoltSQLServer(t, cityPath)
+		argv, ok := readDoltSQLServerArgv(fake.Process.Pid)
+		_ = fake.Process.Kill()
+		_ = fake.Wait()
+		if !ok || !pathutil.PathWithin(cityPath, extractConfigPath(argv)) {
+			t.Fatalf("start %d: /proc/%d/cmdline read %q when startFakeDoltSQLServer returned, want a dolt sql-server argv whose --config is under %s", start, fake.Process.Pid, argv, cityPath)
+		}
+	}
+}
+
+// testFakeDoltSQLServerExitsOnSIGTERM pins that, like a real dolt sql-server,
+// the fake exits on SIGTERM, so stopManagedDoltTestPID stops it without
+// waiting out its SIGKILL grace. Under `bazel test` the fake inherits
+// TEST_TIMEOUT, and rules_go's generated main then registers a handler that
+// swallows SIGTERM before TestMain runs.
+func testFakeDoltSQLServerExitsOnSIGTERM(t *testing.T) {
+	fake := startFakeDoltSQLServer(t, t.TempDir())
+	if err := fake.Process.Signal(syscall.SIGTERM); err != nil {
+		_ = fake.Process.Kill()
+		_ = fake.Wait()
+		t.Fatalf("send SIGTERM to fake dolt sql-server pid=%d: %v", fake.Process.Pid, err)
+	}
+	exited := make(chan struct{})
+	go func() {
+		_ = fake.Wait()
+		close(exited)
+	}()
+	select {
+	case <-exited:
+	case <-time.After(managedDoltTestSIGTERMGrace):
+		_ = fake.Process.Kill()
+		<-exited
+		t.Fatalf("fake dolt sql-server pid=%d still running %s after SIGTERM; stopManagedDoltTestPID would have had to SIGKILL it", fake.Process.Pid, managedDoltTestSIGTERMGrace)
+	}
+	status, ok := fake.ProcessState.Sys().(syscall.WaitStatus)
+	if !ok || !status.Signaled() || status.Signal() != syscall.SIGTERM {
+		t.Fatalf("fake dolt sql-server ended with %v, want termination by SIGTERM", fake.ProcessState)
 	}
 }

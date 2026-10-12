@@ -56,7 +56,7 @@ func infraCreateBodies() map[coordclass.Class]createBody {
 	return map[coordclass.Class]createBody{
 		coordclass.ClassGraph:     {Title: "a wisp", Type: "task", Labels: []string{"gc:wisp"}},
 		coordclass.ClassMessaging: {Title: "mail", Type: "message"},
-		coordclass.ClassSessions:  {Title: "a session", Type: "session"},
+		coordclass.ClassSessions:  {Title: "a wait", Type: "task", Labels: []string{"gc:wait"}}, // a session row itself is never created over HTTP (CONTRACT v5.9p)
 		coordclass.ClassOrders:    {Title: "an order run", Type: "task", Labels: []string{"order-tracking"}},
 		coordclass.ClassNudges:    {Title: "a nudge", Type: "task", Labels: []string{"gc:nudge"}},
 	}

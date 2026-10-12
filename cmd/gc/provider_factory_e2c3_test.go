@@ -146,7 +146,7 @@ func runE2c3ProviderFailureHelper(t *testing.T, cityPath, markerPath string) {
 
 	assertE2c3SessionMaterializationFailures(t, cityPath)
 	assertE2c3ProviderBuilds(t, providerBuilds, 2, "session materialization")
-	assertE2c3ControlDispatchFailures(t, cityPath)
+	assertE2c3ControlDispatchFailures(t)
 	assertE2c3ProviderBuilds(t, providerBuilds, 4, "control dispatch")
 	assertE2c3RigListFailure(t, cityPath)
 	assertE2c3ProviderBuilds(t, providerBuilds, 5, "JSON rig list")
@@ -194,32 +194,35 @@ func assertE2c3NoSessionBeads(t *testing.T, store beads.Store, operation string)
 	}
 }
 
-func assertE2c3ControlDispatchFailures(t *testing.T, cityPath string) {
+// assertE2c3ControlDispatchFailures pins that a session provider that cannot
+// be built fails the control-dispatch recycle that needs it, through the
+// hook's error return, and that a retry lane control that does not recycle
+// never builds one (ga-vnycm2.18). The hook is the RecycleSession every
+// retry-eval, retry and ralph dispatch installs.
+func assertE2c3ControlDispatchFailures(t *testing.T) {
 	t.Helper()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 	for _, kind := range []string{"retry-eval", "retry"} {
 		store := beads.NewMemStore()
-		control, err := store.Create(beads.Bead{
-			Title: "provider failure " + kind,
-			Type:  "task",
-			Metadata: map[string]string{
-				"gc.kind": kind,
-			},
+		subject, err := store.Create(beads.Bead{
+			Title:    "pooled " + kind + " subject",
+			Type:     "task",
+			Assignee: "polecat-1",
 		})
 		if err != nil {
-			t.Fatalf("create %s control bead: %v", kind, err)
+			t.Fatalf("create %s subject bead: %v", kind, err)
 		}
-		before := control
-		err = runControlDispatcherWithStoreAndConfig(cityPath, cityPath, store, control.ID, cfg, io.Discard, io.Discard)
-		if err == nil || err.Error() != e2c3ProviderConstructionFailure {
-			t.Fatalf("%s control dispatch error = %v, want %q", kind, err, e2c3ProviderConstructionFailure)
+		before := subject
+		recycle := recycleDispatchSubjectSession(t.TempDir(), store, cfg)
+		if err := recycle(subject); err == nil || err.Error() != e2c3ProviderConstructionFailure {
+			t.Fatalf("%s recycle error = %v, want %q", kind, err, e2c3ProviderConstructionFailure)
 		}
-		after, getErr := store.Get(control.ID)
+		after, getErr := store.Get(subject.ID)
 		if getErr != nil {
-			t.Fatalf("get %s control bead after provider failure: %v", kind, getErr)
+			t.Fatalf("get %s subject bead after provider failure: %v", kind, getErr)
 		}
 		if !reflect.DeepEqual(after, before) {
-			t.Fatalf("%s control bead changed after provider failure\n got: %#v\nwant: %#v", kind, after, before)
+			t.Fatalf("%s subject bead changed after provider failure\n got: %#v\nwant: %#v", kind, after, before)
 		}
 	}
 }

@@ -1,9 +1,324 @@
 load("@rules_go//go:def.bzl", "go_test")
+load("//tools/bazel/rules:go_variant_test.bzl", "go_variant_test")
+
+# acceptance_bd_contract: the bd CLI contract files are listed in srcs too;
+# the bd_cli_contract_* targets build acceptance_test with that tag alone,
+# and rules_go drops them from every other configuration.
+# gazelle:build_tags acceptance_a,acceptance_bd_contract
+
+# :acceptance_test's environment, which every go_variant_test of it inherits
+# (the SOLO_TESTS targets below as is; the bd_cli_contract cells override the
+# bd):
+#
+#   GC_TEST_TOOL_PATHS             the pinned bd and dolt go first on PATH
+#                                  (internal/testenv), so every bd and dolt
+#                                  the suite and gc run, dolt sql-server
+#                                  included, is a declared input rather than
+#                                  whatever the worker has installed.
+#   GC_ACCEPTANCE_BD_BIN           the pinned bd, and nothing else
+#                                  (helpers.FindBD).
+#   GC_REQUIRE_ACCEPTANCE_TOOLING  a missing bd or dolt, or a row precondition
+#                                  the pinned bd cannot produce, fails the
+#                                  test instead of skipping it into a cached
+#                                  pass.
+#   GC_ACCEPTANCE_TOPOLOGY_MATRIX  the beads topology rows that stand up real
+#                                  Dolt servers and a real bd proxy per row
+#                                  (blocked repair, the proxied idle timeout,
+#                                  suspension quiescence, the topology
+#                                  matrix). Every dolt sql-server is a child
+#                                  of the test process on loopback, so they
+#                                  run on remote workers without docker.
+ACCEPTANCE_ENV = {
+    "GC_ACCEPTANCE_BD_BIN": "$(rootpath @bd_bin_v1_3_1//:bd)",
+    "GC_ACCEPTANCE_TOPOLOGY_MATRIX": "1",
+    "GC_REQUIRE_ACCEPTANCE_TOOLING": "1",
+    "GC_TEST_TOOL_PATHS": "$(rootpath @bd_bin_v1_3_1//:bd) $(rootpath @dolt_bin_v2_2_0//:dolt-linux-amd64/bin/dolt)",
+}
+
+# Tests that each run past the lane's ~120 s shard budget on rbe-west, by
+# design: each waits out real Dolt lifecycle timers (proxy idle retirement,
+# a suspension quiescence window) or walks one long sequential shape. Each
+# runs alone in a target of its own (target name: top-level test), in
+# :acceptance_test's binary and environment, so the lane runs them side by
+# side instead of stacking one behind another in a shard. :acceptance_test
+# skips them. Manual, because only --config=acceptance compiles the
+# acceptance_a files they run: bazel.yml's acceptance lane names
+# :acceptance_solo_tests. scripts/acceptance_run_selection_test.go reads this
+# table. A test may appear under several targets, each running a disjoint
+# share of its subtests (SOLO_SUBTESTS).
+SOLO_TESTS = {
+    "beads_topology_matrix_doctor_test": "TestBeadsInitTopologyMatrix",
+    "beads_topology_matrix_native_lane_test": "TestBeadsInitTopologyMatrix",
+    "beads_topology_matrix_test": "TestBeadsInitTopologyMatrix",
+    "proxied_idle_timeout_test": "TestProxiedIdleTimeoutReapAndTransparentRestart",
+    "proxied_suspended_city_quiescence_test": "TestProxiedSuspensionIsQuiescenceSuspendedCity",
+    "proxied_suspended_rig_quiescence_test": "TestProxiedSuspensionIsQuiescenceSuspendedRig",
+}
+
+# The topology matrix walks one sequential shape per row (init, doctor, bd,
+# rig add, start, doctor, stop, start, stop), about 230 s for
+# M1-proxied-local, two thirds of it in gc start/stop/doctor round trips.
+# It runs as three targets side by side, each walking the shape up to the
+# phases it asserts: every subtest of TestBeadsInitTopologyMatrix is in
+# exactly one target's TOPOLOGY_PHASES, and TOPOLOGY_SETUP_PHASES (the steps
+# that build the state the later phases need) run in all three.
+# scripts/acceptance_run_selection_test.go keeps this equal to the test's
+# t.Run names. Each target sees the side effects of the setup phases and its
+# own phases only: doctor-after-start and native-lane run without the
+# pre-start doctor and bd-front-door's write before them, and stop-quiescent
+# and restart without doctor-after-start and native-lane, so no target
+# exercises those orders. A phase that needs another phase's state goes in
+# that phase's target: restart reads the bead bd-front-door creates.
+TOPOLOGY_SETUP_PHASES = [
+    "init-defers-the-store",
+    "rig-inherits",
+    "start-default-pack",
+]
+
+TOPOLOGY_PHASES = {
+    "beads_topology_matrix_doctor_test": ["doctor-after-start"],
+    "beads_topology_matrix_native_lane_test": ["native-lane"],
+    "beads_topology_matrix_test": [
+        "init-shape",
+        "doctor",
+        "bd-front-door",
+        "stop-quiescent",
+        "restart",
+    ],
+}
+
+# Subtests a solo target narrows its test to. The topology matrix runs its
+# qualified shapes only: M1-proxied-local, and M5-legacy-gc-managed, which
+# skips until a pre-journal gc is built (GC_ACCEPTANCE_LEGACY_GC_BIN;
+# GC_REQUIRE_ACCEPTANCE_LEGACY_GC stays off). The other shapes are not
+# qualified on a worker yet.
+SOLO_SUBTESTS = {
+    name: "/^(M1-proxied-local|M5-legacy-gc-managed)$$/^(%s)$$" % "|".join(TOPOLOGY_SETUP_PHASES + phases)
+    for name, phases in TOPOLOGY_PHASES.items()
+}
+
+# The timer-bound solo targets run their timers shortened on PRs and pushes:
+#
+#   GC_TEST_BACKSTOP_SPEEDUP            divides the controller backstop
+#                                       cadences that go through
+#                                       internal/clock.Backstop (listed in
+#                                       internal/clock/backstop.go) and the
+#                                       quiescence window by the same factor,
+#                                       so each of those backstops still
+#                                       comes round as many times inside the
+#                                       window (3 min -> 30 s at 6). A
+#                                       cadence outside that list comes round
+#                                       fewer times; the nightly
+#                                       REALTIME_TESTS cover it. Only a gc
+#                                       linked with test hooks honors it, so
+#                                       these rows run //cmd/gc:gc_testhooks
+#                                       (GC_ACCEPTANCE_GC_BIN), and fail if
+#                                       gc does not report the hook active.
+#   GC_ACCEPTANCE_PROXIED_IDLE_TIMEOUT  the idle timeout the test gives bd's
+#                                       proxy (20 s when unset; a value that
+#                                       is not a duration of at least 5 s
+#                                       fails the test).
+#
+# REALTIME_TESTS run the same tests with neither set, at their real timers,
+# in the nightly fresh run only (bazel.yml appends :acceptance_realtime_tests
+# to the acceptance lane under --config=fresh), so a bug that only a real
+# window shows still surfaces within a day.
+TESTHOOKS_GC_ENV = {
+    "GC_ACCEPTANCE_GC_BIN": "$(rootpath //cmd/gc:gc_testhooks)",
+    "GC_TEST_BACKSTOP_SPEEDUP": "6",
+}
+
+SOLO_ENV = {
+    "proxied_idle_timeout_test": {"GC_ACCEPTANCE_PROXIED_IDLE_TIMEOUT": "8s"},
+    "proxied_suspended_city_quiescence_test": TESTHOOKS_GC_ENV,
+    "proxied_suspended_rig_quiescence_test": TESTHOOKS_GC_ENV,
+}
+
+SOLO_DATA = {
+    "proxied_suspended_city_quiescence_test": ["//cmd/gc:gc_testhooks"],
+    "proxied_suspended_rig_quiescence_test": ["//cmd/gc:gc_testhooks"],
+}
+
+REALTIME_TESTS = {
+    "proxied_idle_timeout_realtime_test": "TestProxiedIdleTimeoutReapAndTransparentRestart",
+    "proxied_suspended_city_quiescence_realtime_test": "TestProxiedSuspensionIsQuiescenceSuspendedCity",
+    "proxied_suspended_rig_quiescence_realtime_test": "TestProxiedSuspensionIsQuiescenceSuspendedRig",
+}
 
 go_test(
     name = "acceptance_test",
-    srcs = ["testenv_import_test.go"],
-    deps = ["//internal/testenv"],
+    srcs = [
+        "agent_env_test.go",
+        "agent_suspend_test.go",
+        "beads_blocked_repair_test.go",
+        "beads_cli_contract_home_isolation_test.go",
+        "beads_cli_contract_test.go",
+        "beads_health_test.go",
+        "beads_migrate_proxied_test.go",
+        "beads_proxied_default_test.go",
+        "beads_proxied_idle_timeout_test.go",
+        "beads_proxied_native_safety_test.go",
+        "beads_proxied_native_test.go",
+        "beads_proxied_shared_server_test.go",
+        "beads_proxied_suspension_quiescence_test.go",
+        "beads_topology_matrix_test.go",
+        "cli_basics_test.go",
+        "config_pack_test.go",
+        "converge_test.go",
+        "convoy_test.go",
+        "dashboard_serve_test.go",
+        "doctor_mail_test.go",
+        "doctor_proxied_backup_coverage_test.go",
+        "doctor_stopped_store_test.go",
+        "drain_ack_test.go",
+        "env_invariant_test.go",
+        "example_cities_test.go",
+        "formula_events_test.go",
+        "gastown_pack_cache_test.go",
+        "gastown_smoke_test.go",
+        "handoff_test.go",
+        "import_named_sessions_regression_test.go",
+        "init_lifecycle_test.go",
+        "integration_selfhost_ux_test.go",
+        "migration_regression_test.go",
+        "nudge_service_test.go",
+        "order_commands_test.go",
+        "order_env_test.go",
+        "pack_registry_live_test.go",
+        "pack_test.go",
+        "prime_test.go",
+        "rig_test.go",
+        "session_test.go",
+        "skill_test.go",
+        "sling_test.go",
+        "status_test.go",
+        "supervisor_registry_test.go",
+        "testenv_import_test.go",
+        "wait_test.go",
+        "worktree_lifecycle_test.go",
+        "worktree_test.go",
+    ],
+    # The SOLO_TESTS run in targets of their own (below), never here.
+    args = ["-test.skip=^(%s)$$" % "|".join(SOLO_TESTS.values())],
+    data = [
+        "//cmd/gc",
+        "//examples/bd",
+        "//:go.mod",
+        "//examples:all_examples",
+        # Pinned prebuilt release binaries (see MODULE.bazel): hermetic bd and
+        # dolt, same versions the go-test CI installs.
+        "@bd_bin_v1_3_1//:bd",
+        "@dolt_bin_v2_2_0//:dolt-linux-amd64/bin/dolt",
+    ],
+    env = ACCEPTANCE_ENV,
+    # rules_go assigns tests round-robin in source order; the lane is as slow
+    # as its slowest shard. scripts/acceptance_shards_test.go keeps the tests
+    # in heavy_tests.txt in separate shards.
+    shard_count = 18,
+    deps = [
+        "//internal/beads",
+        "//internal/beads/beadstest",
+        "//internal/beads/contract",
+        "//internal/beads/proxyendpoint",
+        "//internal/builtinpacks",
+        "//internal/citylayout",
+        "//internal/clock",
+        "//internal/config",
+        "//internal/deps",
+        "//internal/doctor",
+        "//internal/formula",
+        "//internal/fsys",
+        "//internal/logutil",
+        "//internal/packman",
+        "//internal/packregistry",
+        "//internal/remotesource",
+        "//internal/session",
+        "//internal/testenv",
+        "//internal/testutil",
+        "//test/acceptance/helpers",
+        "@com_github_burntsushi_toml//:toml",
+        "@com_github_gastownhall_gascity_packs//:gascity-packs",
+        "@com_github_go_sql_driver_mysql//:mysql",
+        "@net_pgregory_rapid//:rapid",
+    ],
+)
+
+# The shard placement guard (scripts/acceptance_shards_test.go) reads this
+# file's srcs and shard_count.
+exports_files(
+    ["BUILD.bazel"],
+    visibility = ["//scripts:__pkg__"],
+)
+
+# The external bd CLI contract (`make test-bd-cli-contract` and
+# `make test-bd-cli-contract-home-isolation`, one run): acceptance_test built
+# with -tags acceptance_bd_contract alone, against a pinned bd per cell.
+# GC_ACCEPTANCE_BD_BIN names the cell's bd and nothing else is used: a set
+# override that does not resolve fails the test (helpers.RequireBD).
+#
+#   prev     deps.env BD_PREV_VERSION, the minimum-supported release
+#   current  deps.env BD_CURRENT_REF; that commit is the v1.3.1 tag, whose
+#            release binary is @bd_bin_v1_3_1 (scripts/bd_contract_pins_test.go
+#            pins the correspondence)
+BD_CLI_CONTRACT_RUN = "-test.run=^(TestBdBasicCRUD|TestBdDependencies|TestBdDestructive|TestBdWorkflow|TestRunBDIsolatesHOMEFromSharedServerConfig)$$"
+
+go_variant_test(
+    name = "bd_cli_contract_prev_test",
+    size = "large",
+    args = [BD_CLI_CONTRACT_RUN],
+    data = ["@bd_bin_v1_0_4//:bd"],
+    env = {
+        "GC_ACCEPTANCE_BD_BIN": "$(rootpath @bd_bin_v1_0_4//:bd)",
+        "GC_TEST_TOOL_PATHS": "$(rootpath @bd_bin_v1_0_4//:bd)",
+    },
+    gotags = ["acceptance_bd_contract"],
+    test = ":acceptance_test",
+)
+
+go_variant_test(
+    name = "bd_cli_contract_current_test",
+    size = "large",
+    args = [BD_CLI_CONTRACT_RUN],
+    data = ["@bd_bin_v1_3_1//:bd"],
+    env = {
+        "GC_ACCEPTANCE_BD_BIN": "$(rootpath @bd_bin_v1_3_1//:bd)",
+        "GC_TEST_TOOL_PATHS": "$(rootpath @bd_bin_v1_3_1//:bd)",
+    },
+    gotags = ["acceptance_bd_contract"],
+    test = ":acceptance_test",
+)
+
+[go_variant_test(
+    name = name,
+    size = "large",
+    args = ["-test.run=^%s$$%s" % (
+        test,
+        SOLO_SUBTESTS.get(name, ""),
+    )],
+    data = SOLO_DATA.get(name, []),
+    env = SOLO_ENV.get(name, {}),
+    tags = ["manual"],
+    test = ":acceptance_test",
+) for name, test in SOLO_TESTS.items()]
+
+test_suite(
+    name = "acceptance_solo_tests",
+    tags = ["manual"],
+    tests = [":" + name for name in SOLO_TESTS],
+)
+
+[go_variant_test(
+    name = name,
+    size = "large",
+    args = ["-test.run=^%s$$" % test],
+    tags = ["manual"],
+    test = ":acceptance_test",
+) for name, test in REALTIME_TESTS.items()]
+
+test_suite(
+    name = "acceptance_realtime_tests",
+    tags = ["manual"],
+    tests = [":" + name for name in REALTIME_TESTS],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
@@ -14,6 +329,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

@@ -9984,6 +9984,31 @@ func TestOrderDispatchConditionFalseStaysQuiet(t *testing.T) {
 	}
 }
 
+func TestOrderDispatchConditionFailureMentioningTimedOutStaysQuiet(t *testing.T) {
+	cityDir := t.TempDir()
+	store := beads.NewMemStore()
+	stderr := &bytes.Buffer{}
+	m := &memoryOrderDispatcher{
+		aa: []orders.Order{{
+			Name:    "failed-check",
+			Trigger: "condition",
+			Check:   "echo 'connection timed out' >&2; exit 1",
+			Exec:    "true",
+		}},
+		storeFn: func(execStoreTarget) (beads.Store, error) { return store, nil },
+		execRun: successfulExec,
+		rec:     events.Discard,
+		stderr:  stderr,
+		cfg:     &config.City{},
+	}
+
+	m.dispatch(context.Background(), cityDir, time.Now())
+
+	if out := stderr.String(); strings.Contains(out, "raise check_timeout") {
+		t.Fatalf("ordinary stderr mentioning timed out must not log the timeout diagnostic:\n%s", out)
+	}
+}
+
 func assertNoDoltOrderEnv(t *testing.T, env map[string]string) {
 	t.Helper()
 	for _, key := range projectedDoltEnvKeys {

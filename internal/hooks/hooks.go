@@ -471,6 +471,14 @@ func installClaude(fs fsys.FS, cityDir string) error {
 	return writeManagedFile(fs, runtimeDst, data, forceOverwrite)
 }
 
+// ValidateClaudeSettings computes the Claude settings Install would project
+// to <cityDir>/.gc/settings.json and reports why it cannot, writing nothing:
+// a malformed or empty override fails exactly as Install would.
+func ValidateClaudeSettings(fs fsys.FS, cityDir string) error {
+	_, _, err := desiredClaudeSettings(fs, cityDir)
+	return err
+}
+
 type writeManagedFilePolicy int
 
 const (
@@ -1408,21 +1416,20 @@ func writeManagedFile(fs fsys.FS, dst string, data []byte, policy writeManagedFi
 	if err := fs.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("creating %s: %w", dir, err)
 	}
-	if err := fs.WriteFile(dst, data, 0o644); err != nil {
-		return fmt.Errorf("writing %s: %w", dst, err)
+	// Keep the existing mode (a user may have tightened it), adding only
+	// owner-read when force-overwriting an unreadable file so Claude can
+	// open it.
+	perm := os.FileMode(0o644)
+	if info, err := fs.Stat(dst); err == nil {
+		perm = info.Mode().Perm()
 	}
-
 	if policy == forceOverwrite && readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
-		info, err := fs.Stat(dst)
-		if err != nil {
-			return fmt.Errorf("stat %s: %w", dst, err)
-		}
-		currentMode := info.Mode().Perm()
-		if currentMode&0o400 == 0 {
-			if err := fs.Chmod(dst, currentMode|0o400); err != nil {
-				return fmt.Errorf("chmod %s: %w", dst, err)
-			}
-		}
+		perm |= 0o400
+	}
+	// Replace via rename: these files are read as settings sources, and a
+	// truncate-then-write lets a concurrent reader see an empty file.
+	if err := fsys.WriteFileAtomic(fs, dst, data, perm); err != nil {
+		return fmt.Errorf("writing %s: %w", dst, err)
 	}
 	return nil
 }

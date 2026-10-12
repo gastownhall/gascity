@@ -1304,6 +1304,73 @@ func TestInstallClaudeIdempotent(t *testing.T) {
 	}
 }
 
+// tornWriteFS models os.WriteFile on an existing file: O_TRUNC exposes an
+// empty file before the new bytes land. It records every content of watch a
+// concurrent reader could observe between filesystem operations.
+type tornWriteFS struct {
+	*fsys.Fake
+	watch string
+	seen  []string
+}
+
+func (f *tornWriteFS) observe() {
+	if data, ok := f.Files[f.watch]; ok {
+		f.seen = append(f.seen, string(data))
+	}
+}
+
+func (f *tornWriteFS) WriteFile(name string, data []byte, perm os.FileMode) error {
+	if _, ok := f.Files[name]; ok && name == f.watch {
+		f.Files[name] = []byte{}
+		f.observe()
+	}
+	err := f.Fake.WriteFile(name, data, perm)
+	f.observe()
+	return err
+}
+
+func (f *tornWriteFS) Rename(oldpath, newpath string) error {
+	err := f.Fake.Rename(oldpath, newpath)
+	f.observe()
+	return err
+}
+
+// TestInstallClaudeReplacesRuntimeSettingsAtomically verifies that rewriting
+// .gc/settings.json never exposes an empty or partial file. The runtime file
+// is also a settings source, and a concurrent projection that reads it empty
+// falls back to the embedded base and discards the customizations it holds.
+func TestInstallClaudeReplacesRuntimeSettingsAtomically(t *testing.T) {
+	const runtimePath = "/city/.gc/settings.json"
+	fs := &tornWriteFS{Fake: fsys.NewFake(), watch: runtimePath}
+	old := `{"previous_projection": true}`
+	fs.Files["/city/.claude/settings.json"] = []byte(`{"custom": true}`)
+	fs.Files[runtimePath] = []byte(old)
+
+	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	want := string(fs.Files[runtimePath])
+	if !strings.Contains(want, `"custom": true`) {
+		t.Fatalf("runtime settings missing .claude override:\n%s", want)
+	}
+	for i, got := range fs.seen {
+		if got != old && got != want {
+			t.Fatalf("observation %d of %s was neither the old nor the new settings (torn write):\n%q", i, runtimePath, got)
+		}
+	}
+
+	// Identical bytes must still skip the write entirely.
+	fs.Calls = nil
+	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {
+		t.Fatalf("second Install: %v", err)
+	}
+	for _, call := range fs.Calls {
+		if (call.Method == "WriteFile" || call.Method == "Rename") && strings.HasPrefix(call.Path, runtimePath) {
+			t.Fatalf("second Install rewrote unchanged %s: %+v", runtimePath, call)
+		}
+	}
+}
+
 func TestInstallClaudeMergesCityDotClaudeSettings(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/.claude/settings.json"] = []byte(`{

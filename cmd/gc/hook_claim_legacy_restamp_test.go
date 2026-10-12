@@ -31,6 +31,16 @@ func legacyHeldBeadHookCity(t *testing.T, beadID, legacyAssignee string) (cityDi
 // stored assignee untouched, while show keeps reading back the legacy owner.
 func legacyHeldBeadHookCityWithRestamp(t *testing.T, beadID, legacyAssignee string, restampWorks bool) (cityDir, ownerPath string) {
 	t.Helper()
+	return legacyAssignedBeadHookCity(t, beadID, legacyAssignee, "in_progress", restampWorks)
+}
+
+// legacyAssignedBeadHookCity is the shared fixture. status is the bead's
+// initial status: "in_progress" exercises adoption, "open" the ready-assignment
+// tier, whose `update --claim` the fake bd honors like bd's idempotent claim
+// (it lands only while the stored assignee is empty or equals BEADS_ACTOR, and
+// moves the bead to in_progress).
+func legacyAssignedBeadHookCity(t *testing.T, beadID, legacyAssignee, status string, restampWorks bool) (cityDir, ownerPath string) {
+	t.Helper()
 	cityDir = t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
@@ -41,8 +51,8 @@ name = "test-city"
 [[agent]]
 name = "builder"
 max_active_sessions = 3
-work_query = "printf '[{\"id\":\"%s\",\"status\":\"in_progress\",\"assignee\":\"%s\",\"metadata\":{\"gc.routed_to\":\"builder\"}}]'"
-`, beadID, legacyAssignee)
+work_query = "printf '[{\"id\":\"%s\",\"status\":\"%s\",\"assignee\":\"%s\",\"metadata\":{\"gc.routed_to\":\"builder\"}}]'"
+`, beadID, status, legacyAssignee)
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +64,7 @@ work_query = "printf '[{\"id\":\"%s\",\"status\":\"in_progress\",\"assignee\":\"
 	if err := os.WriteFile(ownerPath, []byte(legacyAssignee), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(statusPath, []byte("in_progress"), 0o644); err != nil {
+	if err := os.WriteFile(statusPath, []byte(status), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	restampFails := "0"
@@ -77,14 +87,25 @@ close)
   printf '[{"id":"%[3]s","status":"closed"}]'
   exit 0 ;;
 update)
-  ifassignee=""; to=""; prev=""
+  ifassignee=""; to=""; prev=""; claim=""
   for arg in "$@"; do
     case "$prev" in
       --if-assignee) ifassignee="$arg" ;;
       --assignee) to="$arg" ;;
     esac
+    [ "$arg" = "--claim" ] && claim=1
     prev="$arg"
   done
+  if [ -n "$claim" ]; then
+    if [ -n "$owner" ] && [ "$owner" != "$BEADS_ACTOR" ]; then
+      echo "Error claiming %[3]s: already claimed by $owner" >&2
+      exit 1
+    fi
+    printf '%%s' "$BEADS_ACTOR" > %[1]q
+    printf 'in_progress' > %[2]q
+    printf '[{"id":"%[3]s","status":"in_progress","assignee":"%%s"}]' "$BEADS_ACTOR"
+    exit 0
+  fi
   if [ -n "$ifassignee" ]; then
     if [ "%[4]s" = "1" ]; then
       echo "Error updating %[3]s: database is locked" >&2
@@ -206,6 +227,95 @@ func TestCmdHookClaimRefusesAdoptionWhenWorkStoreRestampFails(t *testing.T) {
 	}
 }
 
+// ga-uk5jj: the ready-assignment tier claims an OPEN bead assigned to a legacy
+// spelling of this session (e.g. pinned to the pool session_name before the
+// upgrade) as that spelling, because bd's idempotent --claim requires the
+// actor to match. Without a re-stamp the bead is handed out in_progress under
+// the legacy spelling and the worker's close, actored as BEADS_ACTOR (the
+// session bead id), is rejected. The claim must move it to the claim identity.
+func TestCmdHookClaimRestampsLegacySpellingOnReadyAssignment(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	const (
+		beadID    = "ga-open1"
+		sessionID = "gcg-session-557fc1017792caa9a01355325b212416"
+	)
+	legacy := "claude-" + sessionID
+	cityDir, ownerPath := legacyAssignedBeadHookCity(t, beadID, legacy, "open", true)
+
+	t.Setenv("GC_TEMPLATE", "builder")
+	t.Setenv("GC_ALIAS", "")
+	t.Setenv("GC_AGENT", sessionID)
+	t.Setenv("BEADS_ACTOR", sessionID)
+	t.Setenv("GC_SESSION_NAME", legacy)
+	t.Setenv("GC_SESSION_ID", sessionID)
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHookWithOptions(nil, hookCommandOptions{Claim: true, JSON: true}, &stdout, &stderr)
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON (code %d): %v\nraw: %s\nstderr: %s", code, err, stdout.String(), stderr.String())
+	}
+	if result.Action != "work" || result.BeadID != beadID || result.Reason != "ready_assignment" {
+		t.Fatalf("result = %+v (code %d), want ready_assignment claim of %q; stderr: %s", result, code, beadID, stderr.String())
+	}
+	if result.Assignee != sessionID {
+		t.Fatalf("claimed assignee = %q, want the session bead id %q", result.Assignee, sessionID)
+	}
+	owner, err := os.ReadFile(ownerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(owner)); got != sessionID {
+		t.Fatalf("stored assignee after claim = %q, want %q (legacy spelling %q must be re-stamped)", got, sessionID, legacy)
+	}
+	if err := hookClaimBdStoreContext(context.Background(), cityDir, nil, sessionID).Close(beadID); err != nil {
+		t.Fatalf("bd close as the claiming worker: %v", err)
+	}
+}
+
+// A failed re-stamp after a ready-assignment claim still hands the bead out —
+// this invocation minted the claim, so refusing would strand it — but names the
+// manual recovery.
+func TestCmdHookClaimReadyAssignmentFailedRestampWarns(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	const (
+		beadID    = "ga-open1"
+		sessionID = "gcg-session-557fc1017792caa9a01355325b212416"
+	)
+	legacy := "claude-" + sessionID
+	_, ownerPath := legacyAssignedBeadHookCity(t, beadID, legacy, "open", false)
+
+	t.Setenv("GC_TEMPLATE", "builder")
+	t.Setenv("GC_ALIAS", "")
+	t.Setenv("GC_AGENT", sessionID)
+	t.Setenv("BEADS_ACTOR", sessionID)
+	t.Setenv("GC_SESSION_NAME", legacy)
+	t.Setenv("GC_SESSION_ID", sessionID)
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHookWithOptions(nil, hookCommandOptions{Claim: true, JSON: true}, &stdout, &stderr)
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON (code %d): %v\nraw: %s\nstderr: %s", code, err, stdout.String(), stderr.String())
+	}
+	if result.Action != "work" || result.BeadID != beadID {
+		t.Fatalf("result = %+v (code %d), want %q handed out despite the failed re-stamp; stderr: %s", result, code, beadID, stderr.String())
+	}
+	owner, err := os.ReadFile(ownerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(owner)); got != legacy {
+		t.Fatalf("stored assignee = %q, want the legacy spelling %q left in place", got, legacy)
+	}
+	recovery := fmt.Sprintf("bd update %s --if-assignee %q --if-status in_progress --assignee %q", beadID, legacy, sessionID)
+	if !strings.Contains(stderr.String(), recovery) {
+		t.Fatalf("stderr does not name the manual recovery %q; stderr: %s", recovery, stderr.String())
+	}
+}
+
 // restampHookAdoption's decision table, driven through the ops seam.
 func TestRestampHookAdoption(t *testing.T) {
 	const (
@@ -280,5 +390,61 @@ func TestRestampHookAdoption(t *testing.T) {
 				t.Fatalf("stderr prescribes %q for a bead that needs no recovery; stderr: %s", tc.wantStderrLacks, stderr.String())
 			}
 		})
+	}
+}
+
+// A ready-tier claim of a bead held under a legacy spelling whose re-stamp CAS
+// is LOST (the bead changed hands between our claim and the re-stamp) is not
+// handed out: the claim moves on to the next candidate.
+func TestDoHookClaimReadyAssignmentLostRestampMovesToNextCandidate(t *testing.T) {
+	const sessionID = "gc-sess1"
+	legacy := "claude-" + sessionID
+	runner := func(string, string) (string, error) {
+		return `[
+			{"id":"hw-legacy","status":"open","assignee":"` + legacy + `","metadata":{"gc.routed_to":"worker"}},
+			{"id":"hw-fresh","status":"open","metadata":{"gc.routed_to":"worker"}}
+		]`, nil
+	}
+	var attempts, restamps []string
+	ops := hookClaimOps{
+		Runner: runner,
+		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+			attempts = append(attempts, beadID)
+			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "worker"}}, true, nil
+		},
+		RestampAdopted: func(_ context.Context, _ string, _ []string, beadID, from, to string) (bool, error) {
+			restamps = append(restamps, beadID+":"+from+">"+to)
+			return false, nil // lost CAS
+		},
+		ListContinuation: func(context.Context, string, []string, string, string) ([]beads.Bead, error) {
+			return nil, nil
+		},
+	}
+	opts := hookClaimOptions{
+		Assignee:           sessionID,
+		SessionID:          sessionID,
+		RuntimeActor:       sessionID,
+		IdentityCandidates: []string{sessionID, legacy},
+		RouteTargets:       []string{"worker"},
+		JSON:               true,
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doHookClaim = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if got, want := strings.Join(restamps, ","), "hw-legacy:"+legacy+">"+sessionID; got != want {
+		t.Fatalf("restamps = %q, want %q", got, want)
+	}
+	if got := strings.Join(attempts, ","); got != "hw-legacy,hw-fresh" {
+		t.Fatalf("claim attempts = %q, want hw-legacy then hw-fresh", got)
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.Action != "work" || result.BeadID != "hw-fresh" || result.Assignee != sessionID {
+		t.Fatalf("result = %+v, want the next candidate hw-fresh claimed as %q; stderr=%s", result, sessionID, stderr.String())
 	}
 }

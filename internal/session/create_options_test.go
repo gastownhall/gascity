@@ -20,7 +20,7 @@ func TestCreateOptionsDefaultSessionOrigin(t *testing.T) {
 func TestCreateSessionStartedDefaultsToManualOrigin(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := newTestManager(t, store, sp)
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{
 		Template: "helper",
@@ -50,7 +50,7 @@ func TestCreateSessionStartedDefaultsToManualOrigin(t *testing.T) {
 func TestCreateSessionBeadOnlyDefaultsToEphemeralOrigin(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := newTestManager(t, store, sp)
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{
 		BeadOnly: true,
@@ -81,7 +81,7 @@ func TestCreateSessionBeadOnlyDefaultsToEphemeralOrigin(t *testing.T) {
 func TestCreateSessionExtraMetaOverridesOriginDefault(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := newTestManager(t, store, sp)
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{
 		Template:  "helper",
@@ -107,7 +107,7 @@ func TestCreateSessionExtraMetaOverridesOriginDefault(t *testing.T) {
 func TestCreateSessionFieldNamedSpecMapsCorrectly(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := newTestManager(t, store, sp)
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{
 		Alias:        "sky",
@@ -172,7 +172,7 @@ func TestCreateSessionMatchesLegacyWrapper(t *testing.T) {
 func createOriginMetadata(t *testing.T, create func(*Manager) (Info, error)) string {
 	t.Helper()
 	store := beads.NewMemStore()
-	mgr := NewManagerWithOptions(store, runtime.NewFake())
+	mgr := newTestManager(t, store, runtime.NewFake())
 	info, err := create(mgr)
 	if err != nil {
 		t.Fatalf("create: %v", err)

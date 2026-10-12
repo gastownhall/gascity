@@ -5,6 +5,7 @@ import (
 	"io"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/spf13/cobra"
 )
@@ -117,6 +118,20 @@ func cmdSessionSetPin(args []string, pinned bool, stdout, stderr io.Writer, json
 		fmt.Fprintf(stderr, "gc session %s: session %s is closed\n", action, id) //nolint:errcheck
 		return 1
 	}
+	if pinned && !materializedForPin && cfg != nil {
+		// Pool demand alone starts and keeps a demand-only singleton's session;
+		// the reconciler never reads pin_awake for it, so refuse instead of
+		// reporting a pin that does nothing (#6858).
+		info, err := sessionFrontDoor(sessStore).Get(id)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc session %s: %v\n", action, err) //nolint:errcheck
+			return 1
+		}
+		if agent := sessionWakeResolveAgentInfo(info, cfg); demandOnlySingletonSessionInfo(info, agent, cfg) {
+			fmt.Fprintf(stderr, "gc session %s: cannot pin session %s: %s\n", action, id, session.DemandOnlySingletonExplanation(agent.QualifiedName())) //nolint:errcheck
+			return 1
+		}
+	}
 
 	value := ""
 	if pinned {
@@ -128,7 +143,7 @@ func cmdSessionSetPin(args []string, pinned bool, stdout, stderr io.Writer, json
 			return 1
 		}
 	}
-	pokeSessionPinController(cityErr, cityPath)
+	pokeSessionPinController(cityErr, cityPath, id)
 
 	if asJSON {
 		if err := writeSessionActionJSON(stdout, sessionActionResult{
@@ -150,9 +165,9 @@ func cmdSessionSetPin(args []string, pinned bool, stdout, stderr io.Writer, json
 	return 0
 }
 
-func pokeSessionPinController(cityErr error, cityPath string) {
+func pokeSessionPinController(cityErr error, cityPath, sessionID string) {
 	if cityErr != nil || !cityUsesManagedReconciler(cityPath) {
 		return
 	}
-	_ = pokeController(cityPath)
+	_ = enqueueController(cityPath, reconcilekey.Session(sessionID))
 }

@@ -190,7 +190,10 @@ Notes per trigger:
   would otherwise silently never fire).
 - **`event`** — fires whenever the named event appears on the bus. Cursor-based
   tracking advances a sequence marker per firing, so the same event isn't
-  processed twice.
+  processed twice. Delivery is at least once, though: one bead close can reach
+  the bus as two `bead.closed` events, one from the process that closed it and
+  one from the orchestrator when it notices the close first. Make an event
+  order's action safe to repeat for the same bead.
 - **`manual`** — shows up in `gc order list` and `gc order check` (always DUE
   `no`, reason `manual trigger — use gc order run`), but auto-fires never.
 

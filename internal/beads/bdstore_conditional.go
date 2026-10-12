@@ -388,11 +388,15 @@ func conditionalWriteBackoff(attempt int) time.Duration {
 // ErrConditionalWriteUnsupported rather than falling through to an
 // unconditional write.
 func (s *BdStore) UpdateIfMatch(id string, expectedRevision int64, opts UpdateOpts) error {
-	if err := validateConditionalUpdateOpts(opts); err != nil {
+	noteSessionKeysByID(s.Get, id, opts.Metadata)
+	if err := validateConditionalUpdateOpts(opts, false); err != nil {
 		return fmt.Errorf("conditional update %s: %w", id, err)
 	}
 	if capable, _ := s.conditionalWritesCapable(); !capable {
 		return ErrConditionalWriteUnsupported
+	}
+	if err := bdSplitSafeUpdate(opts); err != nil {
+		return err
 	}
 	args := bdUpdateArgs(id, opts)
 	if len(args) == 3 {
@@ -527,6 +531,10 @@ func (s *BdStore) finalizeConditionalWrite(id, verb string, expectedRevision int
 // genuine value loss ((false,nil)) or a precondition — so consumers re-enter
 // level-triggered instead of stranding a reservation (DESIGN §8.4).
 func (s *BdStore) CompareAndSetMetadataKey(id, key, expected, next string) (bool, error) {
+	if err := bdSplitSafeKeys(map[string]string{key: next}); err != nil {
+		return false, err
+	}
+	noteSessionKeysByID(s.Get, id, map[string]string{key: next})
 	if capable, _ := s.conditionalWritesCapable(); !capable {
 		return false, ErrConditionalWriteUnsupported
 	}

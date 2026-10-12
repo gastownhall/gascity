@@ -109,11 +109,12 @@ const (
 
 // Hold reasons recorded in drainReminderHoldKey.
 const (
-	drainReminderHoldBusy       = "busy"
-	drainReminderHoldAttached   = "attached"
-	drainReminderHoldUnreadable = "activity_unreadable"
-	drainReminderHoldExhausted  = "attempts_exhausted"
-	drainReminderHoldAckUnknown = "ack_unreadable"
+	drainReminderHoldBusy          = "busy"
+	drainReminderHoldAttached      = "attached"
+	drainReminderHoldAttachUnknown = "attach_unknown"
+	drainReminderHoldUnreadable    = "activity_unreadable"
+	drainReminderHoldExhausted     = "attempts_exhausted"
+	drainReminderHoldAckUnknown    = "ack_unreadable"
 )
 
 // drainReminderLabel prefixes this pass's journal lines so they are greppable
@@ -373,11 +374,15 @@ func announceDrainReminderExhausted(store beads.Store, info sessions.Info, name 
 // or the activity signal is unreadable or too recent (an agent in the middle of
 // a turn is answering its own drain; an unreadable signal is not evidence it is
 // not). proceed is false when one of those holds, carrying the outcome to return.
+// An attachment probe that cannot tell holds under its own reason.
 func drainReminderQuietHold(sp runtime.Provider, store beads.Store, info sessions.Info, name string, now time.Time) (drainReminderOutcome, bool) {
 	if !sp.IsRunning(name) {
 		return drainReminderSkipped, false // the stop took after all; the finalizer owns it
 	}
-	if sp.IsAttached(name) {
+	if attached, err := attachmentHolds(sp, name); err != nil {
+		noteDrainReminderHold(store, info, drainReminderHoldAttachUnknown)
+		return drainReminderHeld, false
+	} else if attached {
 		noteDrainReminderHold(store, info, drainReminderHoldAttached)
 		return drainReminderHeld, false
 	}

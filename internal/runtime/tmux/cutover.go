@@ -29,10 +29,27 @@ type seamBackedProvider struct {
 }
 
 var (
-	_ runtime.Provider = (*seamBackedProvider)(nil)
+	_ runtime.Provider                 = (*seamBackedProvider)(nil)
+	_ runtime.UnattendedSessionStopper = (*seamBackedProvider)(nil)
 	// Relaunch (B2) rides the embedded raw *Provider — it is NOT one of the 18
 	// seam-routed methods, so the warm-box relaunch stays on the real provider.
 	_ runtime.RelaunchProvider = (*seamBackedProvider)(nil)
+	// The listing attestation and the batched inventory also ride the
+	// embedded raw provider; ListRunning routes through the seams to the same
+	// raw listing.
+	_ runtime.ListingAttestation = (*seamBackedProvider)(nil)
+	_ runtime.InventoryProvider  = (*seamBackedProvider)(nil)
+	// The error-bearing attachment probe is promoted from the embedded raw
+	// provider; IsAttached (bool) routes through the seams to the same probe.
+	_ runtime.AttachmentObserverWithError = (*seamBackedProvider)(nil)
+	// The error-bearing liveness observation is promoted from the embedded raw
+	// provider; IsRunning and ProcessAlive (bool) route through the seams.
+	_ runtime.LivenessObserverWithError = (*seamBackedProvider)(nil)
+	// The confirmed-dead server check, the fresh read and the exact-object
+	// kills are promoted from the embedded raw provider.
+	_ runtime.ServerDeathConfirmer  = (*seamBackedProvider)(nil)
+	_ runtime.FreshLivenessObserver = (*seamBackedProvider)(nil)
+	_ runtime.SessionObjectKiller   = (*seamBackedProvider)(nil)
 )
 
 // NewSeamBackedWithConfig constructs a tmux provider served through the seams.
