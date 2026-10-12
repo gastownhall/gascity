@@ -1125,6 +1125,7 @@ func (s *sim) checkInflight() {
 // there, two passes in a row must admit nothing and change nothing (I10),
 // and the in-flight map must then be empty (I8).
 func (s *sim) quiesce() {
+	s.beginStep() // quiescence is a step of its own: an earlier close excuses no kill in it
 	s.logf("quiesce")
 	for _, l := range s.legs {
 		for _, ev := range l.events {
@@ -1145,8 +1146,8 @@ func (s *sim) quiesce() {
 	s.audit("v2")
 	slack := 2*simPatrol + s.cfg.Session.StartupTimeoutDuration()
 	bound := s.lastTimer().Add(slack)
-	neutral := 0
-	for quiet := 0; quiet < 2 && len(s.failures) == 0; {
+	rounds := quiesceRounds{}
+	for done := false; !done && len(s.failures) == 0; {
 		before, backoff, at := s.snapshot(), s.p.backoff.Snapshot(), s.clk.Now()
 		s.round = nil
 		s.inventory()
@@ -1161,17 +1162,17 @@ func (s *sim) quiesce() {
 		switch {
 		case s.clk.Now().Before(bound):
 		case (len(admitted) > 0 || changed) && s.pacedRetries(backoff, at, before, after):
-			// A paced re-issue is not a failure, but not quiet either: two
-			// quiet rounds must follow the last one, and more than
-			// simMaxPacedRounds is a loop (a backoff that never grows).
-			quiet = 0
-			if neutral++; neutral > simMaxPacedRounds {
-				s.failf("I10 I-bounded", "%d paced re-issues past the bound: admitted %v, a retry loop", neutral, admitted)
+			var keys []rowKey
+			for _, r := range s.round {
+				keys = append(keys, r.it.Key)
+			}
+			if k, loop := rounds.paced(keys); loop {
+				s.failf("I10 I-bounded", "%d paced re-issues past the bound for %v: admitted %v, a retry loop", rounds.count[k], k, admitted)
 			}
 		case len(admitted) > 0 || changed:
 			s.failf("I10 I-bounded", "no fixed point %s after the last timer: admitted %v, store changed %t", s.clk.Now().Sub(bound)+slack, admitted, changed)
 		default:
-			quiet++
+			done = rounds.quiet()
 		}
 		s.advance(simPatrol)
 		for _, l := range s.legs {
@@ -1221,6 +1222,37 @@ func (s *sim) checkConverged() {
 	}
 }
 
+// quiesceRounds counts I10's rounds past the bound (v5.9n, amended): two
+// quiet rounds in a row end quiescence; a paced re-issue round is neither
+// quiet nor a failure, and resets the quiet run; more than
+// simMaxPacedRounds paced re-issues of one row is a retry loop (a backoff
+// that never grows), counted per row, so correctly paced rows never add up.
+type quiesceRounds struct {
+	quiets int
+	count  map[rowKey]int
+}
+
+// quiet records a quiet round and reports whether quiescence is reached.
+func (q *quiesceRounds) quiet() bool {
+	q.quiets++
+	return q.quiets >= 2
+}
+
+// paced records a round of paced re-issues of keys, and returns a row whose
+// count passed the cap.
+func (q *quiesceRounds) paced(keys []rowKey) (rowKey, bool) {
+	q.quiets = 0
+	if q.count == nil {
+		q.count = map[rowKey]int{}
+	}
+	for _, k := range keys {
+		if q.count[k]++; q.count[k] > simMaxPacedRounds {
+			return k, true
+		}
+	}
+	return rowKey{}, false
+}
+
 // simResult is a released effect and its settlement.
 type simResult struct {
 	it  intent
@@ -1231,9 +1263,8 @@ type simResult struct {
 // effects all refused a re-issue the contract holds, each no earlier than
 // its row's backoff expiry (a paced retry, not a loop), and whose only store
 // change is the runtime lease record each attempt writes. The holds: a stop
-// a human's attach holds (§12.2 #10), a stop refused liveness-unknown while
-// its runtime's probe keeps erroring (I17), and a start refused dead on a
-// zombie.
+// a human's attach holds (§12.2 #10), and a stop refused liveness-unknown
+// while its runtime's probe keeps erroring (I17).
 func (s *sim) pacedRetries(backoff map[string]backoffRecord, at time.Time, before, after map[string]beads.Bead) bool {
 	for k, b := range after {
 		a, ok := before[k]
@@ -1254,25 +1285,13 @@ func (s *sim) pacedRetries(backoff map[string]backoffRecord, at time.Time, befor
 		held := r.it.Kind == intentStop && r.res.Cause == fenceAttached ||
 			// A probe that keeps erroring holds the stop, as I17 rules it
 			// not stoppable (v5.9n).
-			r.it.Kind == intentStop && r.res.Cause == fenceLivenessUnknown && s.probeErring(row) ||
-			// TODO(#7626, C5c2): delete the zombie clause once A12's
-			// zombie recycle is registered (TestSimZombieRetryClauseUntilA12).
-			r.it.Kind == intentStart && r.res.Cause == causeDead && s.zombieUnder(row.Metadata["session_name"])
+			r.it.Kind == intentStop && r.res.Cause == fenceLivenessUnknown && s.probeErring(row)
 		rec, backedOff := backoff[rowBackoffKey(r.it.Key)]
 		if r.res.Outcome != settledRefused || !held || !backedOff || rec.Until.After(at) {
 			return false
 		}
 	}
 	return true
-}
-
-// zombieUnder reports a zombie (its pane alive, its agent dead), not a
-// corpse, under name: the start a zombie holds until A12.
-func (s *sim) zombieUnder(name string) bool {
-	s.sp.mu.Lock()
-	defer s.sp.mu.Unlock()
-	rt := s.sp.rts[name]
-	return rt != nil && rt.zombie && !rt.corpse
 }
 
 // withoutLeaseKeys is meta without the runtime lease record's keys.
@@ -1394,7 +1413,7 @@ func TestSimCorpusFloored(t *testing.T) {
 // invariant models v5.9n fixed: the 1024-seed corpus's seeds that failed on
 // main at e11c512e1c (I4: a just-closed row's own runtime; I16: an outside
 // drain-basis write mid-finalize; I17: a probe-erroring runtime; I10: paced
-// re-issues held by an attach, or by a zombie until A12) each run as a
+// re-issues held by an attach) each run as a
 // regression.
 func TestSimCorpusPinnedSeeds(t *testing.T) {
 	for _, seed := range []uint64{107, 337, 338, 427, 452, 465, 553, 657} {
@@ -1403,17 +1422,6 @@ func TestSimCorpusPinnedSeeds(t *testing.T) {
 			s.run(simSteps)
 			s.report(t)
 		})
-	}
-}
-
-// TestSimZombieRetryClauseUntilA12 (v5.9n). Fails once A12's zombie recycle
-// is registered, so pacedRetries' temporary zombie clause is deleted with it
-// (TODO #7626, C5c2).
-func TestSimZombieRetryClauseUntilA12(t *testing.T) {
-	for _, arm := range rowArms {
-		if arm.name == "A12" {
-			t.Fatal("A12 is registered: delete pacedRetries' zombie clause and this test (v5.9n)")
-		}
 	}
 }
 

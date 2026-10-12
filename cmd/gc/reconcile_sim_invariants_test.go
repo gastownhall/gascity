@@ -662,6 +662,11 @@ func TestSimChecksBite(t *testing.T) {
 			s.closedInStep = map[string]beads.Bead{"s-x": row("x")}
 			s.sp.kills = append(s.sp.kills, simKill{Method: "Stop", Name: "s-x", Hit: &simRuntime{id: "x", epoch: "2", token: "tok-1"}})
 		}},
+		{"I4 ", func(s *sim) { // a just-closed pending create's name, another row's runtime (v5.9n)
+			s.prev = map[string]beads.Bead{}
+			s.closedInStep = map[string]beads.Bead{"s-x": row("x", "pending_create_claim", "true")}
+			s.sp.kills = append(s.sp.kills, simKill{Method: "Stop", Name: "s-x", Hit: &simRuntime{id: "y", epoch: "2", token: "tok-9"}})
+		}},
 		{"I4 ", func(s *sim) { // a row closed in an earlier step excuses nothing (v5.9n)
 			s.prev = map[string]beads.Bead{}
 			s.closedInStep = map[string]beads.Bead{"s-x": row("x")}
@@ -936,5 +941,85 @@ func TestSimExcusedRefusalIsFinalized(t *testing.T) {
 	s.quiesce()
 	if b, _ := l.backing.Get("gc-1"); len(s.failures) > 0 || signaledRow(b) {
 		t.Fatalf("violated %q; gc-1 %v: want it finalized by quiescence", s.failures, b.Metadata)
+	}
+}
+
+// TestSimCloseBeforeQuiescenceExcusesNoKill (v5.9n; #7648 review round 2).
+// Kills a quiescence that inherits the last step's outside closes: a stop
+// parked before a close in the step before quiescence is released by
+// quiescence, a step of its own, where the close excuses no kill; the stop,
+// re-reading the closed row, kills nothing, and nothing is violated.
+func TestSimCloseBeforeQuiescenceExcusesNoKill(t *testing.T) {
+	s := signaledSim(t)
+	s.inventory()
+	s.pass()
+	s.audit("v2")
+	if len(s.parked) != 1 || s.parked[0].it.Kind != intentStop {
+		t.Fatalf("parked %v, want one stop", s.parked)
+	}
+	l := s.legs[0]
+	s.beginStep()
+	b, _ := l.backing.Get("gc-1")
+	s.outside("close", l, b, func(l *simLeg, b beads.Bead) { _ = l.backing.Close(b.ID) })
+	s.quiesce()
+	if len(s.closedInStep) != 0 || len(s.failures) > 0 {
+		t.Fatalf("closedInStep %v, violated %q: want quiescence its own step, clean", s.closedInStep, s.failures)
+	}
+	for _, k := range s.sp.kills {
+		if !k.External && k.Hit != nil {
+			t.Fatalf("v2 %s on %s: a stop of a closed row", k.Method, k.Name)
+		}
+	}
+}
+
+// TestSimStepClearsItsCloses (v5.9n, I4). Kills a step that keeps an
+// earlier step's outside closes: whatever the step does, a close recorded
+// before it is gone.
+func TestSimStepClearsItsCloses(t *testing.T) {
+	s := signaledSim(t)
+	s.closedInStep = map[string]beads.Bead{"s-unknown": {ID: "unknown"}}
+	s.step()
+	if _, ok := s.closedInStep["s-unknown"]; ok {
+		t.Fatal("a step kept an earlier step's close")
+	}
+}
+
+// TestSimQuiesceRoundsCountPerRow (v5.9n amended, I10). Kills a round
+// counter that misses a loop or adds correct rows up: nine paced rounds of
+// one row fail, quiet rounds between them or not; a paced round then two
+// quiet ones ends quiescence; two rows paced eight times each never fail.
+func TestSimQuiesceRoundsCountPerRow(t *testing.T) {
+	a, b := rowKey{Leg: rowLeg, ID: "gc-1"}, rowKey{Leg: rowLeg, ID: "gc-2"}
+	run := func(steps string) (done, loop bool, at int) {
+		var q quiesceRounds
+		for i, c := range steps {
+			switch c {
+			case 'a', 'b':
+				k := map[rune]rowKey{'a': a, 'b': b}[c]
+				if _, l := q.paced([]rowKey{k}); l {
+					return false, true, i
+				}
+			case 'q':
+				if q.quiet() {
+					return true, false, i
+				}
+			}
+		}
+		return false, false, len(steps)
+	}
+	for _, c := range []struct {
+		name, steps string
+		done, loop  bool
+		at          int
+	}{
+		{"nine paced rounds", "aaaaaaaaa", false, true, 8},
+		{"paced and quiet alternating", "aqaqaqaqaqaqaqaqa", false, true, 16},
+		{"paced, then two quiet", "aqq", true, false, 2},
+		{"two rows, eight each", "abqabqabqabqabqabqabqab", false, false, 23},
+	} {
+		done, loop, at := run(c.steps)
+		if done != c.done || loop != c.loop || at != c.at {
+			t.Errorf("%s: done %t loop %t at %d, want done %t loop %t at %d", c.name, done, loop, at, c.done, c.loop, c.at)
+		}
 	}
 }
