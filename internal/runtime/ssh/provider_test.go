@@ -1,9 +1,11 @@
 package ssh
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"slices"
@@ -557,10 +559,16 @@ func TestProvider_ProcessAliveScopedToSessionPaneTree(t *testing.T) {
 		{"agent deep in the tree", processTable("100", "100 1 zsh", "101 100 sh", "102 101 caffeinate", "103 102 claude"), 0, []string{"claude"}, true},
 		{"another session's agent only", processTable("100", "100 1 zsh", "300 1 zsh", "301 300 claude"), 0, []string{"claude"}, false},
 		{"node script by name", processTable("100", "100 1 zsh", "101 100 node node /usr/lib/gemini/bin/gemini --yolo"), 0, []string{"gemini"}, true},
+		// Claude sets argv[0] to its version: only comm names it.
+		{"comm only", processTable("100", "100 1 zsh", "101 100 claude 2.1.30 --resume"), 0, []string{"claude"}, true},
 		{"any of several panes", processTable("100,400", "100 1 zsh", "400 1 zsh", "401 400 codex"), 0, []string{"codex"}, true},
 		{"session missing", "", 3, []string{"claude"}, false},
 		{"no panes listed", processTable("", "300 1 zsh", "301 300 claude"), 0, []string{"claude"}, false},
 		{"process table unreadable", "100\n" + processSectionComm + "\n" + processSectionArgs + "\n", 0, []string{"claude"}, true},
+		// ps failed (exit 1, "unknown option"): the script's status is ps's,
+		// but the session's panes exist, so it must not read dead (a dead
+		// read makes every session on the box a zombie, killed every pass).
+		{"ps fails", "100\n" + processSectionComm + "\n" + processSectionArgs + "\n", 1, []string{"claude"}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := &fakeRunner{respond: func(argv []string) ([]byte, int, error) {
@@ -584,9 +592,9 @@ func TestProvider_ProcessAliveScopedToSessionPaneTree(t *testing.T) {
 func TestProvider_ProcessAliveScriptTargetsSessionExactly(t *testing.T) {
 	script := processAliveScript("worker-1")
 	for _, want := range []string{
-		"tmux list-panes -s -t '=worker-1:' -F '#{pane_pid}' || exit 3",
-		"ps -A -o pid= -o ppid= -o comm=",
-		"ps -A -o pid= -o ppid= -o args=",
+		"tmux list-panes -s -t '=worker-1:' -F '#{pane_pid}') || exit 3",
+		"ps -A -o pid= -o ppid= -o comm= | awk -v roots=",
+		"ps -A -o pid= -o ppid= -o args= | awk -v roots=",
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("script lacks %q:\n%s", want, script)
@@ -1107,5 +1115,34 @@ func TestProvider_InvalidNamesNeverReachTmux(t *testing.T) {
 				t.Errorf("remote calls for %q = %q, want none", name, f.calls)
 			}
 		})
+	}
+}
+
+// A degraded process read (ps failing on the box) is logged once per episode,
+// not on every tick, and a good read ends the episode.
+func TestProvider_ProcessAliveLogsDegradedOncePerEpisode(t *testing.T) {
+	var logged bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&logged)
+	t.Cleanup(func() { log.SetOutput(prev) })
+	degraded := "100\n" + processSectionComm + "\n" + processSectionArgs + "\n"
+	healthy := processTable("100", "100 1 zsh", "101 100 claude")
+	out := degraded
+	f := &fakeRunner{respond: func([]string) ([]byte, int, error) { return []byte(out), 1, nil }}
+	p := providerWith(f)
+	for i := 0; i < 3; i++ {
+		if !p.ProcessAlive("s", []string{"claude"}) {
+			t.Fatal("degraded ProcessAlive = false, want true")
+		}
+	}
+	if n := strings.Count(logged.String(), "process snapshot degraded"); n != 1 {
+		t.Fatalf("degraded logs = %d, want 1:\n%s", n, logged.String())
+	}
+	out = healthy
+	_ = p.ProcessAlive("s", []string{"claude"})
+	out = degraded
+	_ = p.ProcessAlive("s", []string{"claude"})
+	if n := strings.Count(logged.String(), "process snapshot degraded"); n != 2 {
+		t.Fatalf("degraded logs after a new episode = %d, want 2", n)
 	}
 }

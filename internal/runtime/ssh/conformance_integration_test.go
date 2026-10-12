@@ -215,6 +215,30 @@ func TestSSHProviderProcessAliveAndNamesOnRealTmux(t *testing.T) {
 		t.Error("ProcessAlive(worker-1, sleep) = true: matched worker-10's sleep box-wide")
 	}
 
+	// The box's whole process table never crosses the connection: only the
+	// session's pane trees do.
+	if out, _, err := p.conn.Exec(ctx, "worker-10", []string{"sh", "-c", processAliveScript("worker-10")}); err != nil {
+		t.Fatalf("process script: %v", err)
+	} else if rows := strings.Count(string(out), "\n"); rows > 20 {
+		t.Errorf("process script returned %d lines, want only worker-10's pane tree:\n%s", rows, out)
+	}
+
+	// A ps that fails on the box degrades to alive rather than reading every
+	// session dead; a missing session still reads dead.
+	shadow := t.TempDir()
+	if err := os.WriteFile(filepath.Join(shadow, "ps"), []byte("#!/bin/sh\necho 'ps: unknown option' >&2\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := os.Getenv("PATH")
+	t.Setenv("PATH", shadow+string(os.PathListSeparator)+path)
+	if !p.ProcessAlive("worker-1", []string{"sleep"}) {
+		t.Error("ProcessAlive with a failing ps = false, want degraded true")
+	}
+	if p.ProcessAlive("worker-404", []string{"sleep"}) {
+		t.Error("ProcessAlive of a missing session with a failing ps = true, want false")
+	}
+	t.Setenv("PATH", path)
+
 	if err := p.Stop("worker-1*"); !errors.Is(err, ErrInvalidSessionName) {
 		t.Errorf("Stop(worker-1*) = %v, want ErrInvalidSessionName", err)
 	}

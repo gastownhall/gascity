@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -68,6 +70,7 @@ func paneTarget(name string) string {
 type Provider struct {
 	conn            *Conn
 	postStartSettle time.Duration // settle before the post-start liveness recheck
+	psDegraded      atomic.Bool   // ProcessAlive's degraded episode is logged once
 }
 
 var (
@@ -426,23 +429,54 @@ func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 	if checkName(name) != nil {
 		return false
 	}
-	out, code, err := p.conn.Exec(context.Background(), name, []string{"sh", "-c", processAliveScript(name)})
-	if err != nil || code != 0 {
+	// The exit code is not the verdict: a missing session prints no pane pids
+	// (|| exit 3) and reads dead below, while a failed ps must not read every
+	// session on the box dead.
+	out, _, err := p.conn.Exec(context.Background(), name, []string{"sh", "-c", processAliveScript(name)})
+	if err != nil {
 		return false
 	}
-	return paneTreeRunsNames(string(out), names)
+	alive, degraded := paneTreeRunsNames(string(out), names)
+	if degraded {
+		if !p.psDegraded.Swap(true) {
+			log.Printf("ssh provider %s: process snapshot degraded, retaining tmux pane liveness for ProcessAlive", p.conn.ep.target())
+		}
+	} else {
+		p.psDegraded.Store(false)
+	}
+	return alive
 }
 
 // processAliveScript lists the session's pane pids, then the box's process
 // table twice: comm (the process identity) and args (its command line), each
 // in its own pass so the variable-width column is last and parses safely.
+// Each pass is filtered on the box to the pane pids' process trees
+// (processTreeAwk), so only those rows cross the connection, not the whole
+// table of a busy box.
 func processAliveScript(name string) string {
-	return "tmux list-panes -s -t " + shellQuote([]string{paneTarget(name)}) + " -F '#{pane_pid}' || exit 3\n" +
+	return "panes=$(tmux list-panes -s -t " + shellQuote([]string{paneTarget(name)}) + " -F '#{pane_pid}') || exit 3\n" +
+		"echo \"$panes\"\n" +
+		"roots=$(echo $panes)\n" +
 		"echo " + processSectionComm + "\n" +
-		"ps -A -o pid= -o ppid= -o comm=\n" +
+		"ps -A -o pid= -o ppid= -o comm= | awk -v roots=\"$roots\" " + shellQuote([]string{processTreeAwk}) + "\n" +
 		"echo " + processSectionArgs + "\n" +
-		"ps -A -o pid= -o ppid= -o args=\n"
+		"ps -A -o pid= -o ppid= -o args= | awk -v roots=\"$roots\" " + shellQuote([]string{processTreeAwk}) + "\n"
 }
+
+// processTreeAwk prints the "pid ppid ..." rows of the processes in the trees
+// rooted at the space-separated roots, down to maxProcessDepth (POSIX awk).
+const processTreeAwk = `{ row[$1] = $0; kids[$2] = kids[$2] " " $1 }
+END {
+	n = split(roots, r, " ")
+	for (i = 1; i <= n; i++) { want[r[i]] = 0; stack[++top] = r[i] }
+	while (top > 0) {
+		p = stack[top--]
+		if (want[p] >= 10) continue
+		m = split(kids[p], c, " ")
+		for (j = 1; j <= m; j++) if (!(c[j] in want)) { want[c[j]] = want[p] + 1; stack[++top] = c[j] }
+	}
+	for (p in want) if (p in row) print row[p]
+}`
 
 const (
 	processSectionComm = "--gc-comm--"
@@ -451,8 +485,10 @@ const (
 )
 
 // paneTreeRunsNames evaluates processAliveScript's output: whether a pane pid,
-// or a descendant within maxProcessDepth, matches names.
-func paneTreeRunsNames(out string, names map[string]struct{}) bool {
+// or a descendant within maxProcessDepth, matches names. degraded reports a
+// session whose panes exist but whose process rows could not be read (ps
+// failed or printed nothing), which reads alive.
+func paneTreeRunsNames(out string, names map[string]struct{}) (alive, degraded bool) {
 	type proc struct{ ppid, comm, args string }
 	var roots []string
 	procs := map[string]*proc{}
@@ -489,10 +525,10 @@ func paneTreeRunsNames(out string, names map[string]struct{}) bool {
 		}
 	}
 	if len(roots) == 0 {
-		return false // no panes: the session is gone
+		return false, false // no panes: the session is gone
 	}
 	if len(procs) == 0 {
-		return true // the panes exist but the process table is unreadable
+		return true, true // the panes exist but the process table is unreadable
 	}
 	visited := map[string]bool{}
 	var walk func(pid string, depth int) bool
@@ -513,10 +549,10 @@ func paneTreeRunsNames(out string, names map[string]struct{}) bool {
 	}
 	for _, root := range roots {
 		if walk(root, 0) {
-			return true
+			return true, false
 		}
 	}
-	return false
+	return false, false
 }
 
 // Nudge delivers content to the session (best-effort).
