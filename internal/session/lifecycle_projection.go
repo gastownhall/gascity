@@ -357,6 +357,24 @@ func LifecycleDisplayReasonWithLivenessInfo(info Info, now time.Time, isRunning 
 	return lifecycleDisplayReasonFromViewInfo(view, info)
 }
 
+// LiveDowngradeReason names the discriminator Manager.EnrichInfo drops: when
+// the persisted state still says active/awake but the live overlay reports the
+// session asleep, the only way that happens is the provider's is-running probe
+// answering false — the runtime died (OOM-kill, evicted box, tmux gone) and the
+// reconciler has not yet persisted sleep_reason=runtime-missing. Display callers
+// use this to render the same reason immediately, without a second probe, so a
+// dead session is never indistinguishable from an idle one (sys-erovf). Returns
+// "" whenever the two states agree or the persisted state is not active.
+func LiveDowngradeReason(persistedState string, live State) string {
+	switch State(strings.TrimSpace(persistedState)) {
+	case StateActive, StateAwake:
+		if live == StateAsleep {
+			return LifecycleReasonRuntimeMissing
+		}
+	}
+	return ""
+}
+
 // LifecycleResetPendingReasonVisible reports whether reset-pending should
 // replace other display reasons for an in-flight requested or continuation reset.
 func LifecycleResetPendingReasonVisible(status string, metadata map[string]string, now time.Time, sessionName string, isRunning func(string) bool) bool {
