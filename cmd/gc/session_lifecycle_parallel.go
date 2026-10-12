@@ -3566,6 +3566,13 @@ func (r pendingCreateIdentity) attribution() pendingCreateAttribution {
 	return pendingCreateRuntimeForeign
 }
 
+// unstamped reports that the runtime carries neither a session ID nor an
+// instance token (unset or unsupported), which attribution reads as foreign
+// for want of any attribution rather than on positive evidence.
+func (r pendingCreateIdentity) unstamped() bool {
+	return r.id == runtimeTokenAbsent && r.token == runtimeTokenAbsent
+}
+
 // attributePendingCreateRuntime is the attribution the start-execution decision
 // paths use (runPreparedStartCandidate, startPreparedStartCandidate,
 // commitAsyncStartResultWithContext, stopStaleAsyncStartRuntime) and the

@@ -2865,8 +2865,30 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// TestReconcileSessionBeads_ZombieTerminalErrorReflectedOnSnapshot.
 		infoPostZombie := infoByID[id]
 		if alive && shouldRollbackPendingCreateInfo(infoPostZombie) {
-			switch attributePendingCreateRuntime(infoPostZombie, name, sp) {
+			identity := readPendingCreateIdentity(infoPostZombie, name, sp)
+			switch identity.attribution() {
 			case pendingCreateRuntimeForeign:
+				if identity.unstamped() && pendingCreateStartInFlightInfo(infoPostZombie, clk, startupTimeout) {
+					// A runtime with no identity at all reads foreign, but
+					// while this row's own start is in flight it is most
+					// likely that start's box: a remote runtime lists the name
+					// before Start returns, and one without a metadata store
+					// never carries identity. Rolling back here frees the name
+					// without a stop, and the late start then finds its row
+					// closed and cannot attribute the box either, so the box
+					// runs with no row. The start's commit settles the row; a
+					// start that never returns ends the in-flight window and
+					// the rollback applies.
+					logStandingCondition(dt, stderr, id, "start_in_flight.pending_create_rollback", fmt.Sprintf(
+						"session reconciler: pending-create rollback of %s deferred: its start is in flight and the live runtime carries no identity yet", name), clk.Now())
+					if trace != nil {
+						trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonPendingCreateRollback, TraceOutcomeDeferred, tp.TemplateName, name, traceRecordPayload{
+							"session_bead_id": id,
+							"attribution":     "start_in_flight",
+						})
+					}
+					continue
+				}
 				// Fold the rollback's mirrored metadata onto the snapshot (Step 6d;
 				// no Closed change — store-only close). STEP6-PREPASS-AUDIT group 2.
 				tick.apply(id, attemptRollbackPendingCreate(infoByID[id], tp.TemplateName, name, "pending_create_rollback", "live runtime belongs to another session", false))

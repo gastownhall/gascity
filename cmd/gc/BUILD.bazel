@@ -1505,6 +1505,7 @@ go_test(
         "pack_import_formula_order_test.go",
         "path_helpers_test.go",
         "pending_create_attribution_test.go",
+        "pending_create_inflight_rollback_test.go",
         "pending_interaction_lane_test.go",
         "per_dispatch_model_test.go",
         "phase2_real_transport_deadline_test.go",
