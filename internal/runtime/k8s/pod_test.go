@@ -81,6 +81,118 @@ func TestBuildPod_PriorityClassName(t *testing.T) {
 	}
 }
 
+func TestBuildPodSecretProjectionDefaultsAndOverrides(t *testing.T) {
+	t.Run("defaults", func(t *testing.T) {
+		p := newProviderWithOps(newFakeK8sOps())
+		pod, err := buildPod("test-session", runtime.Config{Command: "/bin/bash"}, p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !hasSecretEnvRef(pod.Spec.Containers[0].Env, "GITHUB_TOKEN", "git-credentials", "token") {
+			t.Fatal("default GITHUB_TOKEN SecretKeyRef missing")
+		}
+		if !hasSecretVolume(pod, "claude-credentials", "/tmp/claude-secret") {
+			t.Fatal("default claude-credentials read-only mount missing")
+		}
+	})
+	t.Run("custom categories replace independently", func(t *testing.T) {
+		p := newProviderWithOps(newFakeK8sOps())
+		p.secretEnv = []runtime.K8sSecretEnv{
+			{Name: "GITHUB_TOKEN", Secret: "git-auth", Key: "token"},
+			{Name: "SERVICE_TOKEN", Secret: "service-auth", Key: "credential"},
+		}
+		p.secretMounts = []runtime.K8sSecretMount{{Secret: "app-auth", MountPath: "/var/run/app-auth"}}
+		pod, err := buildPod("test-session", runtime.Config{Command: "/bin/bash"}, p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range []struct{ name, secret, key string }{
+			{"GITHUB_TOKEN", "git-auth", "token"}, {"SERVICE_TOKEN", "service-auth", "credential"},
+		} {
+			if !hasSecretEnvRef(pod.Spec.Containers[0].Env, want.name, want.secret, want.key) {
+				t.Errorf("SecretKeyRef %s -> %s/%s missing", want.name, want.secret, want.key)
+			}
+		}
+		if hasSecretEnvRef(pod.Spec.Containers[0].Env, "GITHUB_TOKEN", "git-credentials", "token") {
+			t.Fatal("legacy env projection was retained with custom list")
+		}
+		if !hasSecretVolume(pod, "app-auth", "/var/run/app-auth") || hasSecretVolume(pod, "claude-credentials", "/tmp/claude-secret") {
+			t.Fatal("custom mount replacement incorrect")
+		}
+	})
+	t.Run("custom env retains default mount", func(t *testing.T) {
+		p := newProviderWithOps(newFakeK8sOps())
+		p.secretEnv = []runtime.K8sSecretEnv{{Name: "GITEA_TOKEN", Secret: "gitea-auth", Key: "token"}}
+		pod, err := buildPod("test-session", runtime.Config{Command: "/bin/bash"}, p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !hasSecretVolume(pod, "claude-credentials", "/tmp/claude-secret") {
+			t.Fatal("custom env projection removed the default mount")
+		}
+	})
+	t.Run("custom mount retains default env", func(t *testing.T) {
+		p := newProviderWithOps(newFakeK8sOps())
+		p.secretMounts = []runtime.K8sSecretMount{{Secret: "service-files", MountPath: "/run/service"}}
+		pod, err := buildPod("test-session", runtime.Config{Command: "/bin/bash"}, p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !hasSecretEnvRef(pod.Spec.Containers[0].Env, "GITHUB_TOKEN", "git-credentials", "token") {
+			t.Fatal("custom mount projection removed the default env")
+		}
+	})
+}
+
+func TestBuildPodRejectsMalformedSecretProjection(t *testing.T) {
+	tests := []struct {
+		name string
+		p    *Provider
+		want string
+	}{
+		{"blank env name", &Provider{secretEnv: []runtime.K8sSecretEnv{{Secret: "s", Key: "k"}}}, "name"},
+		{"invalid env name", &Provider{secretEnv: []runtime.K8sSecretEnv{{Name: "bad-name", Secret: "s", Key: "k"}}}, "environment variable"},
+		{"duplicate env name", &Provider{secretEnv: []runtime.K8sSecretEnv{{Name: "TOKEN", Secret: "s", Key: "k"}, {Name: "TOKEN", Secret: "s2", Key: "k"}}}, "duplicated"},
+		{"blank mount secret", &Provider{secretMounts: []runtime.K8sSecretMount{{MountPath: "/secret"}}}, "secret"},
+		{"relative mount path", &Provider{secretMounts: []runtime.K8sSecretMount{{Secret: "s", MountPath: "secret"}}}, "absolute"},
+		{"duplicate mount path", &Provider{secretMounts: []runtime.K8sSecretMount{{Secret: "s", MountPath: "/secret"}, {Secret: "s2", MountPath: "/secret"}}}, "duplicated"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := newProviderWithOps(newFakeK8sOps())
+			p.secretEnv, p.secretMounts = tt.p.secretEnv, tt.p.secretMounts
+			_, err := buildPod("test-session", runtime.Config{}, p)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("buildPod error = %v, want text %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func hasSecretEnvRef(env []corev1.EnvVar, name, secret, key string) bool {
+	for _, item := range env {
+		if item.Name == name && item.Value == "" && item.ValueFrom != nil && item.ValueFrom.SecretKeyRef != nil {
+			ref := item.ValueFrom.SecretKeyRef
+			return ref.Name == secret && ref.Key == key && ref.Optional != nil && *ref.Optional
+		}
+	}
+	return false
+}
+
+func hasSecretVolume(pod *corev1.Pod, secret, mountPath string) bool {
+	for _, volume := range pod.Spec.Volumes {
+		if volume.Secret == nil || volume.Secret.SecretName != secret || volume.Secret.Optional == nil || !*volume.Secret.Optional {
+			continue
+		}
+		for _, mount := range pod.Spec.Containers[0].VolumeMounts {
+			if mount.Name == volume.Name && mount.MountPath == mountPath && mount.ReadOnly {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func TestBuildPod_NoSchedulingFields_NoBehaviorChange(t *testing.T) {
 	// Zero-value scheduling fields must not alter default pod behavior.
 	p := newProviderWithOps(newFakeK8sOps())

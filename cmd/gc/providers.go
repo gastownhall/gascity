@@ -1326,7 +1326,7 @@ func newHybridProvider(sc config.SessionConfig, cityName, cityPath string) (runt
 	// Cut-over: hybrid routes to the seam-backed tmux/k8s providers, so
 	// hybrid-routed sessions flow through the seams like every other path.
 	local := sessiontmux.NewSeamBackedWithConfig(tmuxConfigFromSession(sc, cityName, cityPath))
-	remote, err := sessionk8s.NewSeamBacked()
+	remote, err := k8sProviderFromSession(sc.K8s)
 	if err != nil {
 		return nil, fmt.Errorf("hybrid: k8s backend: %w", err)
 	}
@@ -1337,4 +1337,26 @@ func newHybridProvider(sc config.SessionConfig, cityName, cityPath string) (runt
 	return sessionhybrid.New(local, remote, func(name string) bool {
 		return pattern != "" && strings.Contains(name, pattern)
 	}), nil
+}
+
+func k8sProviderFromSession(cfg config.K8sConfig) (runtime.Provider, error) {
+	secretEnv, secretMounts := k8sSecretProjectionFromConfig(cfg)
+	return newSeamBackedK8sProvider(secretEnv, secretMounts)
+}
+
+// newSeamBackedK8sProvider keeps provider construction behind the same narrow
+// seam for builtin and hybrid routing, and lets wiring tests verify the exact
+// projections passed to the K8s provider without creating a cluster client.
+var newSeamBackedK8sProvider = sessionk8s.NewSeamBackedWithSecretProjection
+
+func k8sSecretProjectionFromConfig(cfg config.K8sConfig) ([]runtime.K8sSecretEnv, []runtime.K8sSecretMount) {
+	secretEnv := make([]runtime.K8sSecretEnv, 0, len(cfg.SecretEnv))
+	for _, item := range cfg.SecretEnv {
+		secretEnv = append(secretEnv, runtime.K8sSecretEnv{Name: item.Name, Secret: item.Secret, Key: item.Key})
+	}
+	secretMounts := make([]runtime.K8sSecretMount, 0, len(cfg.SecretMounts))
+	for _, item := range cfg.SecretMounts {
+		secretMounts = append(secretMounts, runtime.K8sSecretMount{Secret: item.Secret, MountPath: item.MountPath})
+	}
+	return secretEnv, secretMounts
 }
