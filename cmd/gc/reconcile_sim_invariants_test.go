@@ -22,7 +22,7 @@ import (
 // TestSimChecksBite until its PR adds a mutant.
 
 func init() {
-	simStepChecks = append(simStepChecks, (*sim).checkCaps, (*sim).checkStarts, (*sim).checkDestructive, (*sim).checkTokens, (*sim).checkDead)
+	simStepChecks = append(simStepChecks, (*sim).checkCaps, (*sim).checkStarts, (*sim).checkDestructive, (*sim).checkTokens, (*sim).checkDead, (*sim).checkQuarantinedCommits)
 	simWriteChecks = append(simWriteChecks, (*sim).checkWrite)
 	simEffectChecks = append(simEffectChecks, (*sim).checkFinalized, (*sim).checkCensusOnly)
 	simQuietChecks = append(simQuietChecks, (*sim).checkDwell)
@@ -213,20 +213,97 @@ func (s *sim) checkWrite(w simWrite) {
 		return
 	}
 	if a["generation"] != b["generation"] {
+		if s.preWakeQuarantine == nil {
+			s.preWakeQuarantine = map[string]string{}
+		}
+		s.preWakeQuarantine[id] = a["quarantined_until"]
 		for _, k := range stopKeys {
 			if a[k] != "" {
 				s.failf("I15 I-STOP-3/4", "%s survived v2's PreWake of %s", k, id)
 			}
 		}
 	}
-	if k := dormantChange(w.Before, a, w.At, s.stable[w.After.ID]); k != "" && (!closes || !closeEndsSuspend(w.Before, k, w.At)) {
+	if k := dormantChange(w.Before, a, w.At, s.stable[w.After.ID]); k != "" && (!closes || !closeEndsSuspend(w.Before, k, w.At)) && !s.quarantinedCommit(id, w, k) {
 		s.failf("I15 I-STOP-3/4", "v2 rewrote %s %q -> %q on %s, which an operator holds dormant at %s", k, b[k], a[k], id, w.At.Format(time.RFC3339))
 	}
 	terminal := (w.After.Status == "closed" && w.Before.Status != "closed") ||
 		(a["state"] != b["state"] && slices.Contains([]string{"asleep", "drained", "stopped", "closed", "orphaned", string(session.StateFailedCreate)}, a["state"]))
-	if terminal && s.livePane(w.Before) {
+	// S5's screens park or quarantine a zombie in place (its agent is dead):
+	// a terminal provider error or a rate-limit screen, with no stop.
+	screened := w.After.Status != "closed" && s.zombiePane(w.Before) &&
+		slices.Contains([]string{string(session.SleepReasonProviderTerminalError), string(session.SleepReasonRateLimit)}, a["sleep_reason"])
+	if terminal && s.livePane(w.Before) && !screened {
 		s.failf("I4 I-fence", "v2 wrote %s terminal (state %q) while its runtime has a live pane", id, a["state"])
 	}
+}
+
+// quarantineDrainBound is how long a row whose commit kept a late
+// quarantine may stay up undrained: A6's stability clear ends the
+// quarantine of a row alive 30s past its wake, and an undesired row's A20
+// begin waits out INC-003's grace.
+const quarantineDrainBound = 6 * simPatrol
+
+// quarantinedCommit is I15's exception for §12.2 #57: S2's commit of a row
+// whose quarantine landed after its PreWake, its only hold, moves state
+// alone, and the row is then held to checkQuarantinedCommits.
+func (s *sim) quarantinedCommit(id string, w simWrite, k string) bool {
+	b, a := w.Before.Metadata, w.After.Metadata
+	if k != "state" || b["state"] != string(session.StateCreating) || !slices.Contains([]string{"awake", "active"}, a["state"]) ||
+		!quarantineAlone(b, w.At) || a["quarantined_until"] != b["quarantined_until"] || a["sleep_reason"] != b["sleep_reason"] {
+		return false
+	}
+	if at, ok := s.preWakeQuarantine[id]; ok && at == b["quarantined_until"] {
+		return false // the quarantine was there at the PreWake, which must have refused
+	}
+	if s.quarantinedCommits == nil {
+		s.quarantinedCommits = map[string]time.Time{}
+	}
+	s.quarantinedCommits[id] = w.At
+	return true
+}
+
+// quarantineAlone reports meta's quarantine in force at now as its only
+// hold: no operator suspend or hold, no wait hold, no held_until timer.
+func quarantineAlone(meta map[string]string, now time.Time) bool {
+	held, err := time.Parse(time.RFC3339, strings.TrimSpace(meta["held_until"]))
+	return session.DecodeDisposition(meta).Quarantine.After(now) &&
+		session.State(strings.TrimSpace(meta["state"])) != session.StateSuspended && strings.TrimSpace(meta["wait_hold"]) == "" &&
+		strings.TrimSpace(meta["sleep_intent"]) != string(session.SleepReasonUserHold) && (err != nil || !held.After(now))
+}
+
+// checkQuarantinedCommits is I15's bound on §12.2 #57: a row whose commit
+// kept a late quarantine is, within quarantineDrainBound, closed, stopped,
+// asked to stop (A20's begin; A4 stops it), out of its quarantine, or kept
+// by its assigned work, as legacy's assigned-work lens keeps it (DRAIN-046).
+func (s *sim) checkQuarantinedCommits() {
+	if len(s.quarantinedCommits) == 0 {
+		return
+	}
+	now := s.clk.Now()
+	rows := s.snapshot()
+	for id, at := range s.quarantinedCommits {
+		b := rows[id]
+		worked := slices.ContainsFunc(slices.Collect(maps.Values(rows)), func(w beads.Bead) bool {
+			return w.Assignee == b.ID && (w.Status == "open" || w.Status == "in_progress")
+		})
+		switch {
+		case b.Status == "closed", !s.livePane(b), b.Metadata[session.DrainIntentReasonKey] != "",
+			!session.DecodeDisposition(b.Metadata).Quarantine.After(now), worked:
+			delete(s.quarantinedCommits, id)
+		case now.Sub(at) > quarantineDrainBound:
+			s.failf("I15 I-STOP-3/4", "%s, committed under a quarantine that landed after its PreWake, is still up undrained %s later", id, now.Sub(at))
+			delete(s.quarantinedCommits, id)
+		}
+	}
+}
+
+// zombiePane reports whether b's own runtime is a zombie: its pane up, its
+// agent dead.
+func (s *sim) zombiePane(b beads.Bead) bool {
+	s.sp.mu.Lock()
+	defer s.sp.mu.Unlock()
+	rt := s.sp.rts[b.Metadata["session_name"]]
+	return rt != nil && rt.zombie && !rt.corpse && rt.id == b.ID
 }
 
 // suspendKey are a suspend's keys, which an A21 close may end: CONTRACT
@@ -499,6 +576,18 @@ func TestSimChecksBite(t *testing.T) {
 		}},
 		{"I15 ", func(s *sim) { // a request that survives a v2 PreWake
 			s.checkWrite(simWrite{Leg: "city", Before: row("x", "generation", "1"), After: row("x", session.DrainAckIncarnationKey, "1")})
+		}},
+		{"I15 ", func(s *sim) { // a commit over a quarantine its PreWake already saw (no #57 exception)
+			q := s.rel(time.Hour)
+			s.preWakeQuarantine = map[string]string{"city/x": q}
+			s.checkWrite(simWrite{
+				Leg: "city", At: s.clk.Now(), Before: row("x", "state", "creating", "quarantined_until", q, "sleep_reason", "quarantine"),
+				After: row("x", "state", "awake", "quarantined_until", q, "sleep_reason", "quarantine"),
+			})
+		}},
+		{"I15 ", func(s *sim) { // §12.2 #57: a late-quarantined commit left up undrained past the bound
+			s.setMeta(s.legs[0], "gc-1", "quarantined_until", s.rel(time.Hour), "sleep_reason", "quarantine", "instance_token", "tok-gc-1-1", "generation", "1")
+			s.quarantinedCommits = map[string]time.Time{"city/gc-1": s.clk.Now().Add(-quarantineDrainBound - time.Second)}
 		}},
 		{"I16 ", func(s *sim) {
 			s.setMeta(s.legs[0], "gc-1", signaled...)

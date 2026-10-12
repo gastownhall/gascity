@@ -92,7 +92,9 @@ type parityFixture struct {
 	Idle []string
 	// StartErr fails each copy's first provider Start (S3's abandon).
 	StartErr error
-	Explain  map[string]string
+	// Panes is each row's pane output, by row ID, as a peek reads it.
+	Panes   map[string]string
+	Explain map[string]string
 }
 
 // parityRow is a bead; a type alias keeps fixtures short.
@@ -134,6 +136,10 @@ var parityAccepted = map[string]parityEntry{
 	"§12.2#43 close-after-hold-heal": {
 		"CONTRACT v5 §12.2 #43 (A6, A21)", "v2 heals an unwanted workless pool row's expired hold one pass before A21 closes it; legacy's MAINT-051 sweep closes it first and leaves the expired held_until and sleep_reason on the closed row",
 		[]string{"held_until", "sleep_reason"},
+	},
+	"§12.2#19 screen-parks": {
+		"CONTRACT v5 §12.2 #19 (S5; C5a3)", "a wanted seat whose own dead runtime shows a terminal provider error is parked (no kill, no launch); legacy's start recycles and relaunches it in the same tick, recording a crash",
+		append([]string{"sleep_reason", "provider_terminal_error", "provider_terminal_error_at", "health_state", "health_reason", "drainable", "currently_processing_bead_id"}, parityStartKeys...),
 	},
 	"§12.2#41 close-removes-corpse": {"CONTRACT v5 §12.2 #41 (C3 step 1, M1; C5c1)", "A21's close removes the corpse it counts as stopped, by exact session object; legacy's sweep closes the row and leaves the dead pane listed", nil},
 	"§12.2#42 orphan-claim-release-unconfigured": {
@@ -199,6 +205,7 @@ var parityFindings = map[string]parityEntry{
 		[]string{"status", "state", "close_reason", "closed_at", "synced_at"},
 	},
 	"drift-deferral-skips": {"C7b1 (A14 runs after A6's heals and the allocation's writes, CONTRACT v5 §4)", "legacy's config-drift deferral (SESS-553/558/559) continues past the row, so that tick it skips the row's later writes, its current-bead stamp (SESS-613) and sleep-policy keys among them; v2's A6 and the allocation write them before A14 decides", []string{"currently_processing_bead_id"}},
+	"recycle-by-object":    {"CONTRACT v5 S5, F2 (C5a3)", "v2's start recycle removes the row's own dead runtime by exact session object (KillZombieObject, KillCorpseObject) after re-checking it; legacy's start recycle stops it by name, and a death that accrues legacy leaves listed until its next start. §12.2 does not list it", nil},
 	"mislabelled-close":    {"CONTRACT v5 AL1, A1", "legacy closes a row with no template and no session name as orphaned; v2's A1 leaves it open as None, which §12.2 does not list", []string{"status", "state", "close_reason", "closed_at"}},
 	"idle-respawn-drain":   {"C6d (D2's idle-respawn row: its begin and the claim-revalidating signal, signal-fresh), BEHAVIORS SESS-614", "legacy drains a pool row awake only for ready, unclaimed assigned work, idle past its sleep time, and retires its slot so a fresh seat takes the work; v2's A20 begins a plain idle drain there (its stop request), and registers no idle-respawn begin or signal yet", []string{"sleep_intent", "drain_at", "state", "state_reason", "status", "close_reason", "closed_at", "synced_at", session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey}},
 	"drain-stop-lag":       {"C6b1, C6b2 (A20, A4; D1-D4; owner to add a §12.2 row)", "legacy signals a drain through the runtime's drain env the tick after its begin, then stops and finalizes it; v2's begin (A20), its signal a patrol later (C6b1) and the stop verb (A4) each take a pass, so the stop, its events and the finalize land a pass or more after legacy's, with legacy's outcome", []string{session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey, "drain_at", "sleep_intent", "slept_at", "state_reason"}},
@@ -319,15 +326,6 @@ func (p twinProvider) GetMeta(name, key string) (string, error) {
 	return p.Fake.GetMeta(name, key)
 }
 
-func (p twinProvider) IsAttachedWithError(name string) (bool, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if rt := p.rts[name]; rt != nil && rt.probeErr {
-		return false, fmt.Errorf("sim: attach probe of %s: %w", name, runtime.ErrRuntimeUnavailable)
-	}
-	return p.rts[name] != nil && p.rts[name].attached, nil
-}
-
 // parityMutators are runtime.Fake's recorded calls that change a runtime;
 // Start and the destructive calls are the simulator's own records.
 var parityMutators = map[string]bool{
@@ -357,6 +355,11 @@ func (p twinProvider) actions() map[string]int {
 // place puts f's runtimes on p, each under its row's session name.
 func (f parityFixture) place(p *simProvider) {
 	p.nextStart = f.StartErr
+	for _, b := range f.Rows {
+		if pane, ok := f.Panes[b.ID]; ok {
+			p.SetPeekOutput(b.Metadata["session_name"], pane)
+		}
+	}
 	for _, rt := range f.Runtimes {
 		for _, b := range append(slices.Clone(f.Rows), f.Rig...) {
 			if b.ID == rt.id {
@@ -1600,6 +1603,59 @@ func parityFixtures() []parityFixture {
 		// failure retries the next legacy tick but backs off in v2 (P4), so
 		// its classes are pinned against legacy's writers instead
 		// (TestAbandonStepClasses, TestComposedUndoMatchesLegacyRestore).
+		// The dead row of S1 (C5a3): a wanted seat's own dead runtime is
+		// classified, removed by exact object, and the seat restarts.
+		{
+			Name: "a wanted seat's own crashed zombie is recycled once", Behaviors: []string{"SESS-089"},
+			Rows: []parityRow{awake("last_woke_at", at(-time.Hour))}, Work: assigned, Runtimes: []simRuntime{{id: "gc-1", epoch: "1", token: "tok-gc-1", zombie: true}},
+			Panes:   map[string]string{"gc-1": "panic: boom"},
+			Explain: explain(map[string]string{"provider:RemoveMeta s-gc-1": "§12.2#38 start-meta-clears", "provider:Stop s-gc-1": "recycle-by-object", "provider:KillZombieObject s-gc-1": "recycle-by-object"}),
+		},
+		// A rapid crash left as a corpse (tmux remain-on-exit) or a zombie:
+		// the death accrues its fifth wake failure, quarantining, as A6
+		// accrues a gone runtime's (the C5a3 review's twin).
+		{
+			Name: "a wanted seat's rapid crash left as a corpse accrues and quarantines", Behaviors: []string{"SESS-537"},
+			Rows: []parityRow{poolRow("gc-1", "worker", 1, "awake", "instance_token", "tok-gc-1", "last_woke_at", at(-10*time.Second), "started_config_hash", "h-1", "wake_attempts", "4")},
+			Work: assigned, Runtimes: []simRuntime{{id: "gc-1", epoch: "1", token: "tok-gc-1", corpse: true}}, Panes: map[string]string{"gc-1": "panic: boom"},
+			Explain: explain(map[string]string{"provider:KillCorpseObject s-gc-1": "recycle-by-object"}),
+		},
+		{
+			Name: "a wanted seat's rapid crash left as a zombie accrues and quarantines", Behaviors: []string{"SESS-537", "SESS-089"},
+			Rows: []parityRow{poolRow("gc-1", "worker", 1, "awake", "instance_token", "tok-gc-1", "last_woke_at", at(-10*time.Second), "started_config_hash", "h-1", "wake_attempts", "4")},
+			Work: assigned, Runtimes: []simRuntime{{id: "gc-1", epoch: "1", token: "tok-gc-1", zombie: true}}, Panes: map[string]string{"gc-1": "panic: boom"},
+			Explain: explain(map[string]string{"provider:KillZombieObject s-gc-1": "recycle-by-object"}),
+		},
+		{
+			Name: "a wanted seat whose zombie shows a terminal provider error is parked", Behaviors: []string{"SESS-088"},
+			Rows: []parityRow{awake("last_woke_at", at(-time.Hour))}, Work: assigned, Runtimes: []simRuntime{{id: "gc-1", epoch: "1", token: "tok-gc-1", zombie: true}},
+			Panes:   map[string]string{"gc-1": "Error: model_not_found"},
+			Explain: explain(map[string]string{"row:gc-1:*parked": "§12.2#19 screen-parks", "event:session.crashed worker-1 [reason session_id template]": "§12.2#19 screen-parks", "provider:Stop s-gc-1": "§12.2#19 screen-parks", "provider:RemoveMeta s-gc-1": "§12.2#19 screen-parks", "provider:Start s-gc-1": "§12.2#19 screen-parks", "event:session.woke worker-1 []": "§12.2#19 screen-parks"}),
+		},
+		// The park's exits (the C5a3 delta review): an operator's wake starts
+		// a parked row; a stale provider_terminal_error mark, which nothing
+		// clears and legacy restarts past, parks nothing.
+		{
+			Name: "an explicit wake starts a parked named row", Behaviors: []string{"SESS-088"}, City: chat(false),
+			Rows: []parityRow{chatRow("gc-c", "1", "session_name", "chat", "state", "asleep", "sleep_reason", "provider-terminal-error",
+				"provider_terminal_error", "model_not_found", "provider_terminal_error_at", at(-time.Hour), "session_health", "unhealthy", "session_health_reason", "model_not_found",
+				"session_drainable", "true", "wake_request", "explicit", "wake_requested_at", at(-time.Minute))},
+			Explain: map[string]string{"provider:RemoveMeta chat": "§12.2#38 start-meta-clears", "row:gc-c:*policy": "sleep-policy-keys"},
+		},
+		{
+			Name: "a stale terminal mark does not park a named row", Behaviors: []string{"SESS-088"}, City: chat(false),
+			Rows: []parityRow{chatRow("gc-c", "1", "session_name", "chat", "state", "asleep", "provider_terminal_error", "model_not_found", "provider_terminal_error_at", at(-7*24*time.Hour),
+				"session_health", "unhealthy", "session_health_reason", "model_not_found", "session_drainable", "true")},
+			Explain: map[string]string{"provider:RemoveMeta chat": "§12.2#38 start-meta-clears", "row:gc-c:*policy": "sleep-policy-keys"},
+		},
+		{
+			Name: "a stale terminal mark does not hold a named row's crashed zombie", Behaviors: []string{"SESS-089"}, City: chat(false),
+			Rows: []parityRow{chatRow("gc-c", "1", "session_name", "chat", "state", "awake", "instance_token", "tok-gc-c", "last_woke_at", at(-time.Hour),
+				"provider_terminal_error", "quota_exceeded", "provider_terminal_error_at", at(-7*24*time.Hour), "session_health", "unhealthy", "session_health_reason", "quota_exceeded", "session_drainable", "true")},
+			Runtimes: []simRuntime{{id: "gc-c", epoch: "1", token: "tok-gc-c", zombie: true}},
+			Panes:    map[string]string{"gc-c": "panic: boom"},
+			Explain:  map[string]string{"provider:RemoveMeta chat": "§12.2#38 start-meta-clears", "provider:Stop chat": "recycle-by-object", "provider:KillZombieObject chat": "recycle-by-object", "row:gc-c:*policy": "sleep-policy-keys"},
+		},
 		{
 			Name: "a pending create whose start fails rolls back", Behaviors: []string{"START-031", "START-033"},
 			City: floor, StartErr: errors.New("boom"),

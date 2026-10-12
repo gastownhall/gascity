@@ -93,10 +93,15 @@ func failStart(v txView, out startOutcome, cause string, err error) txStep {
 func readStartFailure(ctx context.Context, c txCaps, f startFailure) startFailureRead {
 	r := startFailureRead{startFailure: f}
 	if f.peek {
-		r.rateLimit = runtime.ContainsProviderRateLimitScreen(peekPane(ctx, c.start.sp, f.name))
+		// The dead pane's own screen (§12.2 #19, C5a3): a terminal provider
+		// error parks the row, as the zombie capture does; a rate-limit
+		// screen quarantines it (START-022/029).
+		pane := peekPane(ctx, c.start.sp, f.name)
+		r.terminal = runtime.ProviderTerminalErrorReason(pane)
+		r.rateLimit = r.terminal == "" && runtime.ContainsProviderRateLimitScreen(pane)
 	}
 	switch {
-	case r.rateLimit, f.terminal != "", f.cause == causeAttribution && errors.Is(f.err, runtime.ErrSessionExists):
+	case r.rateLimit, r.terminal != "", f.cause == causeAttribution && errors.Is(f.err, runtime.ErrSessionExists):
 	case f.pending, f.cause == causePrepare, f.cause == causeAttribution:
 		_ = c.episode.fail(f.episode, f.err, c.start.clock.Now())
 	default:
@@ -206,19 +211,25 @@ func restorePatch(u preWakeUndo, meta map[string]string) (session.MetadataPatch,
 // teardown is a rollback's own-runtime stop, when it has one, and what its
 // close settles with.
 type teardown struct {
-	stop  *fenceVerdict // L1 alone on the own runtime (the rollback exception, F2); nil: nothing to stop
-	names []string      // its template's process names, for C8.8
-	fail  string        // the start's failure the close settles with; "" for A10's rollback
-	err   error
-	more  session.MetadataPatch // folded under the failed-create close: a terminal mark (START-028)
+	stop   *fenceVerdict // L1 alone on the own runtime (the rollback exception, F2); nil: nothing to stop
+	corpse corpseKill    // a corpse under the name, removed by exact object (the corpse exception)
+	names  []string      // its template's process names, for C8.8
+	fail   string        // the start's failure the close settles with; "" for A10's rollback
+	err    error
+	more   session.MetadataPatch // folded under the failed-create close: a terminal mark (START-028)
 }
 
 // ownTeardown is the teardown of v's pending create on its fresh read, or
 // the cause that holds the rollback (rollbackRuntime).
 func ownTeardown(v txView) (teardown, string) {
 	stop, cause := rollbackRuntime(v.Row, v.RT)
-	if cause != "" || !stop {
+	switch {
+	case cause != "":
 		return teardown{}, cause
+	case v.RT.Class == rtCorpse && v.RT.Same: // counted stopped (C8.8), and removed
+		return teardown{corpse: corpseKill{leaf: v.RT.leaf, name: strings.TrimSpace(v.Row.SessionName), live: v.RT.Again, now: v.Now}}, ""
+	case !stop:
+		return teardown{}, ""
 	}
 	verdict := ownRuntimeFence(v.RT, v.Row)
 	return teardown{stop: &verdict, names: processNamesFor(v.World, v.Row)}, ""
@@ -229,10 +240,8 @@ func ownTeardown(v txView) (teardown, string) {
 // stopped whatever its identity, SESS-091); neither for nothing running, a
 // corpse (C8.8 counts it stopped) or another row's runtime (F3: rolled back
 // without a stop, a stale epoch included, S7); else the cause that holds.
-//
-// TODO(C5a3): the corpse a rollback counts stopped stays listed (legacy
-// stops the name); C5a3's corpse removal takes it, so a crash-looping pool
-// create's corpses do not pile up (§12.2 #45 does not cover them).
+// A corpse counts stopped; the teardown removes it (ownTeardown), so a
+// crash-looping pool create's corpses do not pile up.
 func rollbackRuntime(row session.Info, rt *txRuntime) (stop bool, cause string) {
 	switch rt.Class {
 	case rtUnsupported:
@@ -258,8 +267,11 @@ func rollbackRuntime(row session.Info, rt *txRuntime) (stop bool, cause string) 
 // confirmed (C8.8), when the teardown has one. The close reads the runtime
 // fresh again, and holds the row open while its own runtime stays (ga-vcjr9).
 func stopOwnRuntime(ctx context.Context, c txCaps, in teardown) (teardown, error) {
-	if in.stop != nil {
+	switch {
+	case in.stop != nil:
 		stopFenced(ctx, c.start.sp, *in.stop, in.names, c.start.clock.Now)
+	case in.corpse.found():
+		_, _ = killCorpse(ctx, c, in.corpse) // a refused kill leaves it, counted stopped all the same
 	}
 	return in, nil
 }

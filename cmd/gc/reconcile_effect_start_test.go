@@ -97,7 +97,7 @@ func TestStartResolutionTable(t *testing.T) {
 			v.Row = r
 			k.resolvesAs(row, r)
 			step := verbStep(c.adopt)(v, prepared, nil)
-			if step.Refuse != c.refuse || (len(step.Write) > 0) != c.write || step.Done != c.done {
+			if step.Refuse != c.refuse || (len(step.Write) > 0) != c.write || (step.Done || step.Last) != c.done {
 				t.Fatalf("step %+v, want refuse %q, write %v, done %v", step, c.refuse, c.write, c.done)
 			}
 			if c.done && (step.Facts.Noted == nil || step.Facts.Noted.Name != "s-gc-1") {

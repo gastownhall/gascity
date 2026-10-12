@@ -743,3 +743,28 @@ func TestTimedOutStartAbandonsBeforeItsDeadline(t *testing.T) {
 		t.Fatalf("events %+v, want session.cold_start_timeout", s.Facts.Events)
 	}
 }
+
+// Kills a stranded seat whose composed restart keeps the whole heal (F04):
+// built as A6 composes it (startHealed over the dead-runtime heal), a failed
+// launch leaves the seat committed, its death's accrual alone kept.
+func TestStrandedComposedStartStaysCommitted(t *testing.T) {
+	woke := gatherNow.Add(-time.Hour).Format(time.RFC3339)
+	k, _ := launchKit(t, "active", "session_key", "k-1", "started_config_hash", "h", "last_woke_at", woke)
+	row := k.p.World.Census.Rows[k.it.Key]
+	r := &rowFacts{w: k.p.World, k: k.it.Key, row: row, found: true, entry: &selectionEntry{Key: k.it.Key, Liveness: livenessGone, Desired: desireWake, Template: "worker"}}
+	if !r.asleepStranded() {
+		t.Fatal("the seat is not stranded: the case is vacuous")
+	}
+	heal, class, _ := deadRuntimePatch(r, true)
+	it := r.startHealed(intent{Kind: intentRowHealFresh, Reason: decideDeadRuntimeHeal, Key: k.it.Key, Patch: heal, Class: class})
+	if it.Kind != intentStart {
+		t.Fatalf("startHealed = %+v, want a start", it)
+	}
+	it.Deadline = k.it.Deadline
+	k.it = it
+	k.sp.nextStart = errors.New("boom")
+	k.runKind()
+	if got := k.meta("state"); got != "active" {
+		t.Fatalf("state %q, want the stranded seat still committed", got)
+	}
+}

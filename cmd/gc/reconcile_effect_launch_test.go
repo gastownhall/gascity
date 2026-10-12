@@ -658,7 +658,12 @@ func TestLaunchInstallsAgentSideEffectsBeforeStart(t *testing.T) {
 	}{
 		{"launch", intentStart, "asleep", nil, []string{"install@generation=4", "start"}},
 		{"no-op over a committed runtime", intentStart, "active", func(k *txKit) { k.runtimeAs("gc-1", "tok", nil) }, nil},
-		{"adopt", intentAdopt, "creating", func(k *txKit) { k.runtimeAs("gc-1", "tok", nil) }, nil},
+		{"adopt: once, on its commit", intentAdopt, "creating", func(k *txKit) { k.runtimeAs("gc-1", "tok", nil) }, []string{"install@generation=3"}},
+		{"adopt refused", intentAdopt, "creating", func(k *txKit) { k.runtimeAs("gc-9", "theirs", nil) }, nil},
+		{"adopt whose commit lost", intentAdopt, "creating", func(k *txKit) {
+			k.runtimeAs("gc-1", "tok", nil)
+			k.on(seamAfterRowRead, func() { k.outside("state", "asleep", "sleep_reason", "killed") })
+		}, nil},
 		{"PreWake refused", intentStart, "asleep", func(k *txKit) {
 			k.on(seamAfterReads, func() {})
 			k.on(seamAfterReads, func() { k.outside("held_until", gatherNow.Add(time.Hour).Format(time.RFC3339)) })

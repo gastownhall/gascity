@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -42,13 +43,13 @@ const (
 var errEndpointGate = errors.New("v2 start: the endpoint admits no start now")
 
 // startSections are bringUp's sections.
-var startSections = []section{
-	called(0, probed(prepareAdoption, verbStep(false)), admitTicket),
+var startSections = append(slices.Clone(recycleSections),
+	called(0, probed(prepareAdoption, verbStep(false)), verbCall),
 	called(callStart, probed(foldPreWake, preWakeStep), startLaunch),
 	called(0, section{Premise: premiseOwnToken, Decide: commitStep}, afterStart),
 	called(0, section{Premise: premiseOwnToken, Decide: abandonStep}, stopOwnRuntime),
-	{Premise: premiseClose, Decide: rollbackClose},
-}
+	section{Premise: premiseClose, Decide: rollbackClose},
+)
 
 // launchRow is the row, template and pass a Launch's Calls act on.
 type launchRow struct {

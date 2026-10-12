@@ -799,3 +799,51 @@ func TestSimJ27StaleAckAcrossSameGenerationRestart(t *testing.T) {
 		s.noViolations(t)
 	}
 }
+
+// Kills a commit that drops a quarantine landed after its PreWake, and a
+// row left up under it (§12.2 #57): S2 adopts the row's own live runtime and
+// keeps the quarantine's keys; A6's stability clear then ends the quarantine
+// of the row alive past its wake, inside I15's bound, which the run passes
+// with no violation.
+func TestSimLateQuarantineCommitsThenClears(t *testing.T) {
+	until := rowAt(time.Hour)
+	s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "creating", "instance_token", "tok-1", "last_woke_at", rowAt(time.Second),
+		"quarantined_until", until, "sleep_reason", "quarantine"))
+	s.settle()
+	if m := s.gc1(); m["state"] != "awake" || m["quarantined_until"] != until || m["sleep_reason"] != "quarantine" {
+		t.Fatalf("row %v: want adopted awake with its quarantine kept", m)
+	}
+	for range quarantineDrainBound/simPatrol + 1 { // past I15's bound
+		s.advance(simPatrol)
+		s.settle()
+	}
+	s.noViolations(t)
+	if m := s.gc1(); m["quarantined_until"] != "" {
+		t.Fatalf("row %v: want the quarantine ended", m)
+	}
+}
+
+// Kills I15's §12.2 #57 exception excusing a commit under more than its
+// late quarantine (E07 of the C5a3 delta review): the quarantine must hold
+// alone; a held_until timer, a wait hold, a user hold or an operator
+// suspend beside it, or a quarantine already ended, excuses nothing.
+func TestQuarantineAloneIsTheOnlyHold(t *testing.T) {
+	q := map[string]string{"state": "creating", "quarantined_until": rowAt(time.Hour)}
+	with := func(k, v string) map[string]string { m := maps.Clone(q); m[k] = v; return m }
+	for name, c := range map[string]struct {
+		meta map[string]string
+		want bool
+	}{
+		"alone":            {q, true},
+		"held_until":       {with("held_until", rowAt(time.Hour)), false},
+		"held_until ended": {with("held_until", rowAt(-time.Hour)), true},
+		"wait hold":        {with("wait_hold", "w-1"), false},
+		"user hold":        {with("sleep_intent", "user-hold"), false},
+		"suspended":        {with("state", "suspended"), false},
+		"ended":            {with("quarantined_until", rowAt(-time.Minute)), false},
+	} {
+		if got := quarantineAlone(c.meta, plannerT0); got != c.want {
+			t.Errorf("%s: quarantineAlone = %v, want %v", name, got, c.want)
+		}
+	}
+}

@@ -20,12 +20,13 @@ const (
 	decideAdopt             = "adopt"
 	decideRollback          = "rollback"
 	decideStart             = "start"
-	decideHeartbeatRespawn  = "heartbeat-respawn"         // A17, SESS-602
-	decideStartAccrued      = "start-held:death-accrual"  // SESS-537/538: legacy restarts the next tick
-	decideStartFailedCreate = "start-held:failed-create"  // SESS-605
-	decideStartQuarantine   = "start-held:quarantine"     // SESS-606
-	decideStartEpisode      = "start-held:startup-health" // SESS-607, #46
-	decideStartProviderRed  = "start-held:provider-red"   // SESS-610, GUAR-034
+	decideHeartbeatRespawn  = "heartbeat-respawn"                  // A17, SESS-602
+	decideStartAccrued      = "start-held:death-accrual"           // SESS-537/538: legacy restarts the next tick
+	decideStartFailedCreate = "start-held:failed-create"           // SESS-605
+	decideStartParked       = "start-held:provider-terminal-error" // §12.2 #19: parked until an operator wakes it
+	decideStartQuarantine   = "start-held:quarantine"              // SESS-606
+	decideStartEpisode      = "start-held:startup-health"          // SESS-607, #46
+	decideStartProviderRed  = "start-held:provider-red"            // SESS-610, GUAR-034
 )
 
 // armAdopt is A10's adopt: an uncommitted intent (a creating row) whose own
@@ -130,6 +131,9 @@ func (r *rowFacts) startIntent(reason string) (intent, bool) {
 	if isFailedCreateSessionInfo(info) {
 		return intent{Reason: decideStartFailedCreate}, true
 	}
+	if parkedTerminal(info) && strings.TrimSpace(info.WakeRequest) != string(session.WakeCauseExplicit) {
+		return intent{Reason: decideStartParked}, true // an operator's wake starts it
+	}
 	if until := session.DispositionOfInfo(info).Quarantine; until.After(now) {
 		r.after(requeueUntil(now, until))
 		return intent{Reason: decideStartQuarantine}, true
@@ -201,4 +205,12 @@ func (r *rowFacts) asleepStranded() bool {
 	}
 	agent := findAgentByTemplate(r.w.Env.Cfg, r.entry.Template)
 	return agent != nil && agent.Lifecycle != config.AgentLifecycleOneShot
+}
+
+// parkedTerminal reports the terminal park itself: the sleep reason S5's and
+// legacy's terminal patch write, which every start commit clears. Not the
+// provider_terminal_error mark, which nothing clears: legacy restarts a
+// named row past it, so a stale mark parks nothing.
+func parkedTerminal(info session.Info) bool {
+	return session.SleepReason(strings.TrimSpace(info.SleepReason)) == session.SleepReasonProviderTerminalError
 }

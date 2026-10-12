@@ -233,10 +233,16 @@ func (p *simProvider) IsAttached(name string) bool {
 	return p.rts[name] != nil && p.rts[name].attached
 }
 
-// IsAttachedWithError is IsAttached, error-free: the fence's L3 probe reads
-// it, never the embedded Fake's own attach map.
-func (p *simProvider) IsAttachedWithError(name string) (bool, error) { //nolint:unparam // runtime.AttachmentObserverWithError's signature
-	return p.IsAttached(name), nil
+// IsAttachedWithError is the attach fact a fence's L3 reads, the
+// simulator's own rather than runtime.Fake's; a runtime whose probes err
+// cannot answer it.
+func (p *simProvider) IsAttachedWithError(name string) (bool, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if rt := p.rts[name]; rt != nil && rt.probeErr {
+		return false, fmt.Errorf("sim: attach probe of %s: %w", name, runtime.ErrRuntimeUnavailable)
+	}
+	return p.rts[name] != nil && p.rts[name].attached, nil
 }
 
 // Start creates a runtime carrying cfg's identity env, unless a scripted
@@ -361,11 +367,16 @@ type sim struct {
 	// stable is, by row ID, whether the pass that last admitted an effect
 	// for the row read it committed, its own runtime alive, and 30s past its
 	// wake: I15's view of A6's stability clear.
-	stable   map[string]bool
-	failures []string
-	locks    *lockObserver // the sections holding each row's mutation lock
-	runMu    sync.Mutex
-	running  map[effectKey]*simEffect // released, by key, for their seams
+	stable map[string]bool
+	// preWakeQuarantine is each row's quarantined_until at v2's last PreWake
+	// of it; quarantinedCommits the rows whose commit kept a quarantine that
+	// landed after it (§12.2 #57), by the time the commit landed.
+	preWakeQuarantine  map[string]string
+	quarantinedCommits map[string]time.Time
+	failures           []string
+	locks              *lockObserver // the sections holding each row's mutation lock
+	runMu              sync.Mutex
+	running            map[effectKey]*simEffect // released, by key, for their seams
 }
 
 // simOpts scripts a run: rows replaces the seeded rows, and the other fields
@@ -1171,7 +1182,8 @@ func (s *sim) checkConverged() {
 }
 
 // lastTimer is the latest pending timer: a row's hold, quarantine or kill
-// fence, or a backoff's expiry.
+// fence, A6's churn clear past an open committed row's wake (SESS-540), or
+// a backoff's expiry.
 func (s *sim) lastTimer() time.Time {
 	last := s.clk.Now()
 	later := func(t time.Time) {
@@ -1186,6 +1198,14 @@ func (s *sim) lastTimer() time.Time {
 			}
 			if at, err := time.Parse(time.RFC3339, b.Metadata[k]); err == nil {
 				later(at.Add(grace))
+			}
+		}
+		// The churn clear is A6's at its threshold on an open committed row
+		// (SESS-540), which a patrol reaches.
+		up := b.Status != "closed" && slices.Contains([]string{"active", "awake"}, b.Metadata["state"])
+		if woke, err := time.Parse(time.RFC3339, b.Metadata["last_woke_at"]); err == nil && up {
+			if n := b.Metadata["churn_count"]; n != "" && n != "0" {
+				later(woke.Add(churnProductivityThreshold))
 			}
 		}
 	}
@@ -1269,7 +1289,8 @@ var simMutants = []struct {
 				return f, err
 			}
 			s := specs[intentStart]
-			s.sections = []section{startSections[0], called(callStart, probed(reuse, preWakeStep), startLaunch), startSections[2]}
+			s.sections = slices.Clone(startSections)
+			s.sections[slices.IndexFunc(s.sections, func(sec section) bool { return sec.callKind == callStart })] = called(callStart, probed(reuse, preWakeStep), startLaunch)
 			specs[intentStart] = s
 		},
 	}},

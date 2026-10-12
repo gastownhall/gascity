@@ -36,8 +36,31 @@ const (
 )
 
 // adoptSections are the adopt's one section: the verb, which never
-// launches.
-var adoptSections = []section{probed(prepareAdoption, verbStep(true))}
+// launches, and its Call, the adoption's side effects.
+var adoptSections = []section{called(0, probed(prepareAdoption, verbStep(true)), verbCall)}
+
+// verbPass is what the verb section hands its Call: the row a Launch acts
+// on, or the row an adoption committed.
+type verbPass struct {
+	launch, adopted *launchRow
+}
+
+// verbCall is the verb section's Call: a Launch's endpoint ticket
+// (admitTicket), or, once an adoption's commit landed, the side effects a
+// launch installs (plan C5a3): the agent's hooks and its ACP route
+// (installAgentSideEffects), as legacy's tick installs them for every
+// desired agent. Legacy's adoption (recoverRunningPendingCreate) runs no
+// launch tail (dialogs, session_setup, the startup nudge, session_live), and
+// neither does this one.
+func verbCall(ctx context.Context, c txCaps, in verbPass) (*startTicket, error) {
+	switch {
+	case in.launch != nil:
+		return admitTicket(ctx, c, *in.launch)
+	case in.adopted != nil:
+		in.adopted.w.Templates.installSideEffects(in.adopted.agent, in.adopted.tp)
+	}
+	return nil, nil
+}
 
 // prepareAdoption is the verb section's Probe: legacy's prepare of the
 // expected row, read-only, when the fresh read may commit it (a creating
@@ -125,7 +148,7 @@ func verbStep(adopt bool) func(txView, *preparedStart, error) txStep {
 		case !ok || res.Err != nil:
 			return healInstead(v, txStep{Refuse: causeTemplate, Err: res.Err})
 		case cause == causeNotPresent && !adopt:
-			return txStep{Pass: launchRow{w: v.World, row: v.Row, tp: res.TP, agent: res.Agent}}
+			return txStep{Pass: verbPass{launch: &launchRow{w: v.World, row: v.Row, tp: res.TP, agent: res.Agent}}}
 		case cause != "":
 			return txStep{Refuse: cause}
 		}
@@ -136,7 +159,9 @@ func verbStep(adopt bool) func(txView, *preparedStart, error) txStep {
 		case prepared == nil:
 			return txStep{Fail: causePrepare, Err: prepErr}
 		}
-		return txStep{Write: startCommit(prepared, v.Row, v.Now), Done: true, Facts: noted}
+		// The adoption's commit, and its side effects once it landed.
+		adopted := &launchRow{w: v.World, row: v.Row, tp: res.TP, agent: res.Agent}
+		return txStep{Write: startCommit(prepared, v.Row, v.Now), Last: true, Facts: noted, Pass: verbPass{adopted: adopted}}
 	}
 }
 
@@ -168,12 +193,18 @@ func runtimeCause(row session.Info, rt *txRuntime) string {
 	case rtAbsent:
 		return causeNotPresent
 	case rtCorpse, rtZombie:
-		return causeDead
+		return causeDead // the recycle section's (reconcile_effect_recycle.go); an adopt never recycles
 	}
 	if !rt.Alive() { // unknown, or the session object changed around the identity read
 		return causeLivenessUnknown
 	}
-	switch compareIdentity(row, rt.Identity) {
+	return identityCause(row, rt.Identity)
+}
+
+// identityCause is runtimeCause's refusal for an alive runtime whose
+// identity read is ident: "" when it is Current.
+func identityCause(row session.Info, ident runtimeIdentity) string {
+	switch compareIdentity(row, ident) {
 	case identityCurrent:
 		return ""
 	case identityStaleSelf: // arm A3 re-keys it (X1); a pending create's S7 exit is C5a3's
@@ -193,6 +224,12 @@ func startCommit(prepared *preparedStart, row session.Info, now time.Time) sessi
 	patch := startCommitPatch(prepared, row, now)
 	if patch["state"] == string(session.StateActive) {
 		patch["state"] = string(session.StateAwake)
+	}
+	// A quarantine that landed after the PreWake does not veto the commit
+	// (S2), which records a live runtime; the commit keeps its keys, and the
+	// row exits by A6's stability clear (§12.2 #57).
+	if session.DispositionOfInfo(row).Quarantine.After(now) {
+		delete(patch, "sleep_reason") // the Quarantine cell's deadline is no commit's to write
 	}
 	return patch
 }
