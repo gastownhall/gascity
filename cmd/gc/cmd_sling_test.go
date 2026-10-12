@@ -7505,6 +7505,45 @@ func TestDoSlingKeepsWorkflowParentIdempotent(t *testing.T) {
 	}
 }
 
+// TestSlingReroutesAssignedSingleSessionBead covers a bead assigned to a
+// single-session agent while gc.routed_to still names another target (here a
+// pool it was handed off from). Slinging it to the assignee must write
+// gc.routed_to = target rather than skip as idempotent, or the agent's routed
+// work query never finds the bead.
+func TestSlingReroutesAssignedSingleSessionBead(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	deps.Store = beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "WF-1", Title: "workflow", Type: "workflow", Status: "in_progress", Metadata: map[string]string{"gc.kind": "workflow"}},
+		{
+			ID:       "BL-42",
+			Title:    "handed-off work",
+			Type:     "task",
+			Status:   "open",
+			ParentID: "WF-1",
+			Assignee: "mayor",
+			Metadata: map[string]string{"gc.routed_to": "reviewers"},
+		},
+	}, nil)
+
+	opts := testOpts(a, "BL-42")
+	code := doSling(opts, deps, deps.Store, stdout, stderr)
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if strings.Contains(stdout.String(), "skipping (idempotent)") {
+		t.Fatalf("stdout = %q, want no idempotent skip", stdout.String())
+	}
+	assertStoreRoutedTo(t, deps.Store, "BL-42", "mayor")
+	if !strings.Contains(stderr.String(), "re-routing") {
+		t.Errorf("stderr = %q, want re-routing warning", stderr.String())
+	}
+}
+
 func TestDoSlingIdempotentForceOverrides(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
@@ -9443,5 +9482,94 @@ func TestCmdSlingMultiDefaultTargetsEmptyEntryRejected(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "empty entry") {
 		t.Errorf("stderr = %q, want to mention 'empty entry'", stderr.String())
+	}
+}
+
+// claimedRoutedElsewhereStore seeds id open, assigned to "mayor" and routed to
+// "reviewers": the target claims it but its route is stale, so a sling to mayor
+// re-routes it without attaching a formula.
+func claimedRoutedElsewhereStore(id string) beads.Store {
+	return beads.NewMemStoreFrom(0, []beads.Bead{{
+		ID:       id,
+		Title:    id,
+		Type:     "task",
+		Status:   "open",
+		Assignee: "mayor",
+		Metadata: map[string]string{"gc.routed_to": "reviewers"},
+	}}, nil)
+}
+
+func TestSlingDryRunClaimedBeadRoutedElsewhereShowsRerouteOnly(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1), DefaultSlingFormula: strPtr("code-review")}
+
+	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.Store = claimedRoutedElsewhereStore("BL-1")
+	opts := testOpts(a, "BL-1")
+	opts.DryRun = true
+	if code := doSling(opts, deps, deps.Store, stdout, stderr); code != 0 {
+		t.Fatalf("dry run returned %d; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Re-route only:") {
+		t.Errorf("dry run should say the claimed bead is only re-routed; got:\n%s", out)
+	}
+	if strings.Contains(out, "Default formula:") || strings.Contains(out, "gc formula cook") {
+		t.Errorf("dry run should not preview a formula attach onto claimed work; got:\n%s", out)
+	}
+	if !strings.Contains(out, "bd update 'BL-1' --set-metadata gc.routed_to=mayor") {
+		t.Errorf("dry run should still show the route command; got:\n%s", out)
+	}
+
+	// With --reassign the live run clears the claim and attaches the formula.
+	stdout.Reset()
+	opts.Reassign = true
+	if code := doSling(opts, deps, deps.Store, stdout, stderr); code != 0 {
+		t.Fatalf("dry run --reassign returned %d; stderr: %s", code, stderr.String())
+	}
+	if out := stdout.String(); strings.Contains(out, "Re-route only:") || !strings.Contains(out, "Default formula:") {
+		t.Errorf("dry run --reassign should preview the formula attach; got:\n%s", out)
+	}
+	if len(runner.calls) != 0 {
+		t.Errorf("dry run executed commands: %v", runner.calls)
+	}
+}
+
+func TestSlingDryRunBatchClaimedChildRoutedElsewhereShowsRerouteOnly(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	q := newFakeChildQuerier()
+	q.beadsByID["CVY-1"] = beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"}
+	children := []beads.Bead{
+		{ID: "BL-1", Status: "open", Assignee: "mayor", Metadata: map[string]string{"gc.routed_to": "reviewers"}},
+		{ID: "BL-2", Status: "open"},
+	}
+	q.childrenOf["CVY-1"] = children
+	for _, c := range children {
+		q.beadsByID[c.ID] = c
+	}
+
+	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
+	opts := testOpts(a, "CVY-1")
+	opts.OnFormula = "code-review"
+	opts.DryRun = true
+	if code := doSlingBatch(opts, deps, q, stdout, stderr); code != 0 {
+		t.Fatalf("dry run returned %d; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "BL-1 (open) → would re-route only") {
+		t.Errorf("claimed child BL-1 should preview a re-route only; got:\n%s", out)
+	}
+	if strings.Contains(out, "gc formula cook code-review --attach BL-1") {
+		t.Errorf("dry run should not cook a formula onto claimed BL-1; got:\n%s", out)
+	}
+	if !strings.Contains(out, "gc formula cook code-review --attach BL-2") {
+		t.Errorf("dry run should still cook for unclaimed BL-2; got:\n%s", out)
+	}
+	if len(runner.calls) != 0 {
+		t.Errorf("dry run executed commands: %v", runner.calls)
 	}
 }
