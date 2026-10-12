@@ -24,9 +24,14 @@ var signalSections = []section{{Premise: premiseDrainBasis, Decide: redecideSign
 // L4 (C8.9).
 var signalFreshNeeds = needs{Runtime: true, Legs: legAttach | legPending}
 
-// redecideSignal is redecideRow, then, for the fresh kind, L3 and L4.
+// redecideSignal is redecideRow, then, for the fresh kind, L3 and L4. A
+// floor member's canceled ack (DRAIN-010) carries legacy's "min-floor
+// cancel" drain transition, a fact only once its write lands.
 func redecideSignal(v txView) txStep {
-	step := redecideRow(v)
+	step, fresh := redecideRowIntent(v)
+	if len(step.Write) > 0 && fresh.Reason == decideFloorAckCancel {
+		step.Facts.Transition = &drainTransition{Name: v.Row.SessionNameMetadata, Reason: "min-floor", Transition: "cancel"}
+	}
 	if len(step.Write) == 0 || v.It.Kind != intentSignalFresh {
 		return step
 	}

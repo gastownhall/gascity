@@ -856,44 +856,171 @@ func TestSimFloorAckKeepsTheSeatWarm(t *testing.T) {
 	for _, floor := range []int{1, 0} {
 		s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-1", "last_woke_at", rowAt(-time.Hour)))
 		s.cfg.Agents[0].MinActiveSessions = intPtr(floor)
-		s.settle()
-		s.sp.mu.Lock()
-		object := s.sp.rts["s-gc-1"].object
-		s.sp.mu.Unlock()
-		pending := false
-		for range 3 {
-			commit, err := checkDrainAckRow(s.legs[0].backing, "gc-1", false, "tok-1", s.clk.Now())
-			if err == nil {
-				err = commit()
-			}
-			if err != nil {
-				if floor == 0 {
-					break // the seat is stopped: no ack to write
-				}
-				t.Fatalf("floor %d: the agent's ack: %v", floor, err)
-			}
-			s.audit("drain-ack")
-			s.legs[0].cache.ApplyEvent("bead.updated", s.legs[0].events[len(s.legs[0].events)-1])
-			for range 3 {
-				s.advance(simPatrol)
-				s.settle()
-				pending = pending || s.gc1()["state_reason"] == session.DrainAckStopPendingReason
-			}
-		}
-		var stopped bool
-		for _, k := range s.sp.kills {
-			stopped = stopped || k.Name == "s-gc-1"
-		}
-		s.sp.mu.Lock()
-		rt, live := s.sp.rts["s-gc-1"]
-		s.sp.mu.Unlock()
-		m := s.gc1()
-		switch {
-		case floor == 1 && (stopped || pending || !live || rt.object != object || m[session.DrainAckIncarnationKey] != ""):
-			t.Errorf("floor 1: stopped %v, ever stop-pending %v, live %v (object $%d, was $%d), row %v; want the seat warm and the ack canceled", stopped, pending, live, rt.object, object, m)
-		case floor == 0 && !stopped && !pending:
-			t.Errorf("floor 0: kills %v, row %v; want the ack to stop the seat", s.sp.kills, m)
-		}
-		s.noViolations(t)
+
+// simAck is the agent of row id (its pane's token tok) acking its own drain
+// through the CLI's row ack (E3), with the census told of the write. It
+// reports whether the ack landed.
+func (s *sim) simAck(id, tok string) bool {
+	commit, err := checkDrainAckRow(s.legs[0].backing, id, false, tok, s.clk.Now())
+	if err == nil {
+		err = commit()
 	}
+	if err != nil {
+		return false
+	}
+	s.audit("drain-ack")
+	s.legs[0].cache.ApplyEvent("bead.updated", s.legs[0].events[len(s.legs[0].events)-1])
+	return true
+}
+
+// simOperatorDrain is `gc runtime drain` (drain true) or `undrain` on row
+// id in a v2 city, with the census told of the write.
+func (s *sim) simOperatorDrain(id string, drain bool) {
+	var err error
+	if drain {
+		err = writeOperatorDrainRow(s.legs[0].backing, id, s.clk.Now())
+	} else {
+		err = clearOperatorDrainRow(s.legs[0].backing, id)
+	}
+	if err != nil {
+		s.t.Fatal(err)
+	}
+	s.audit("operator-drain")
+	s.legs[0].cache.ApplyEvent("bead.updated", s.legs[0].events[len(s.legs[0].events)-1])
+}
+
+// floorRun settles s for patrols patrols, reporting whether row id was ever
+// stop-pending.
+func (s *sim) floorRun(id string, patrols int) (pending bool) {
+	for range patrols {
+		s.advance(simPatrol)
+		s.settle()
+		b, _ := s.legs[0].backing.Get(id)
+		pending = pending || b.Metadata["state_reason"] == session.DrainAckStopPendingReason
+	}
+	return pending
+}
+
+// stoppedRow reports whether the sim ever stopped row id's runtime.
+func (s *sim) stoppedRow(name string) bool {
+	for _, k := range s.sp.kills {
+		if k.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// Scenario sc-j27j0d (DRAIN-010, PAR-FLOORACK): a floor member that acks its
+// own idle drain, again and again as an idle agent does, is never marked
+// stop-pending, never stopped and never recreated (its runtime object
+// stands), its ack voided each time, while an elastic seat above the floor
+// retires on its own ack; with the floor at 0 the ack stops the seat. An
+// operator's `gc runtime drain` (legacy's GC_DRAIN) explains the ack, which
+// then stops the floor seat; undrained, the ack is canceled again.
+func TestSimFloorAckKeepsTheSeatWarm(t *testing.T) {
+	seat := func(id string, slot int) beads.Bead {
+		return poolRow(id, "worker", slot, "active", "instance_token", "tok-"+id, "last_woke_at", rowAt(-time.Hour))
+	}
+	for _, c := range []struct {
+		name     string
+		floor    int
+		seats    []string
+		operator string // "drain", "undrain" (drain, then undrain) before the acks
+		warm     []string
+		stopped  []string
+	}{
+		{"one seat at floor 1", 1, []string{"gc-1"}, "", []string{"gc-1"}, nil},
+		{"one seat at floor 0", 0, []string{"gc-1"}, "", nil, []string{"gc-1"}},
+		{"three seats at floor 2", 2, []string{"gc-1", "gc-2", "gc-3"}, "", []string{"gc-1", "gc-2"}, []string{"gc-3"}},
+		{"an operator's drain on the floor seat", 1, []string{"gc-1"}, "drain", nil, []string{"gc-1"}},
+		{"an operator's drain, undrained", 1, []string{"gc-1"}, "undrain", []string{"gc-1"}, nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var rows []beads.Bead
+			for i, id := range c.seats {
+				rows = append(rows, seat(id, i+1))
+			}
+			s := scripted(t, c.seats, rows...)
+			s.cfg.Agents[0].MinActiveSessions = intPtr(c.floor)
+			s.settle()
+			objects := map[string]int64{}
+			s.sp.mu.Lock()
+			for _, id := range c.seats {
+				objects[id] = s.sp.rts["s-"+id].object
+			}
+			s.sp.mu.Unlock()
+			switch c.operator {
+			case "drain":
+				s.simOperatorDrain("gc-1", true)
+				s.floorRun("gc-1", 3) // the request stands un-acked: nothing voids it
+			case "undrain":
+				s.simOperatorDrain("gc-1", true)
+				s.floorRun("gc-1", 3)
+				s.simOperatorDrain("gc-1", false)
+			}
+			pending := map[string]bool{}
+			for range 3 {
+				for _, id := range c.seats {
+					s.simAck(id, "tok-"+id)
+				}
+				for _, id := range c.seats {
+					pending[id] = s.floorRun(id, 3) || pending[id]
+				}
+			}
+			for _, id := range c.warm {
+				s.sp.mu.Lock()
+				rt, live := s.sp.rts["s-"+id]
+				s.sp.mu.Unlock()
+				if b, _ := s.legs[0].backing.Get(id); s.stoppedRow("s-"+id) || pending[id] || !live || rt.object != objects[id] || b.Metadata[session.DrainAckIncarnationKey] != "" {
+					t.Errorf("%s: stopped %v, ever stop-pending %v, live %v, row %v; want it warm and its ack canceled", id, s.stoppedRow("s-"+id), pending[id], live, b.Metadata)
+				}
+			}
+			for _, id := range c.stopped {
+				if !s.stoppedRow("s-"+id) && !pending[id] {
+					t.Errorf("%s: kills %v; want its ack to stop it", id, s.sp.kills)
+				}
+			}
+			s.noViolations(t)
+		})
+	}
+}
+
+// Scenario M12 (PAR-FLOORACK review ruling): a floor member acks and its
+// pane then dies before the controller's pass. v2 cancels the ack as any
+// floor member's (legacy cancels only a live runtime's): the seat is never
+// signaled, stopped as a drain, or recreated as a new row, and its ack is
+// voided. The dead pane itself is A6/A12's (not asserted here).
+func TestSimFloorAckOnADeadPaneIsCanceled(t *testing.T) {
+	s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-gc-1", "last_woke_at", rowAt(-time.Hour)))
+	s.cfg.Agents[0].MinActiveSessions = intPtr(1)
+	s.settle()
+	if !s.simAck("gc-1", "tok-gc-1") {
+		t.Fatal("the agent's ack did not land")
+	}
+	s.sp.mu.Lock()
+	s.sp.rts["s-gc-1"].corpse = true
+	s.sp.touch("s-gc-1")
+	s.sp.mu.Unlock()
+	pending := s.floorRun("gc-1", 6)
+	b, _ := s.legs[0].backing.Get("gc-1")
+	all, err := s.legs[0].backing.List(beads.ListQuery{Type: sessionBeadType})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var open []string
+	for _, r := range all {
+		if r.Status != "closed" {
+			open = append(open, r.ID)
+		}
+	}
+	switch {
+	case b.Status == "closed" || pending || s.stoppedRow("s-gc-1"):
+		t.Errorf("row %s, ever stop-pending %v, stopped %v; want the ack canceled, not a drain stop", b.Status, pending, s.stoppedRow("s-gc-1"))
+	case b.Metadata[session.DrainAckIncarnationKey] != "":
+		t.Errorf("row %v, want the ack voided", b.Metadata)
+	case !slices.Equal(open, []string{"gc-1"}):
+		t.Errorf("open session rows %v, want gc-1 alone (no seat recreated)", open)
+	}
+	s.noViolations(t)
 }

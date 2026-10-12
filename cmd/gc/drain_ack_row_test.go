@@ -647,6 +647,48 @@ func TestRuntimeUndrainModeSwitch(t *testing.T) {
 	}
 }
 
+// TestRuntimeDrainModeSwitch drives runtimeDrain over temp cities: a legacy
+// city is doRuntimeDrain and writes no row key; a v2 city also writes the
+// operator's request on the row (PAR-FLOORACK review ruling 1), which a v2
+// undrain clears. Kills: a v2 drain that leaves the row bare (A11 would
+// cancel the agent's ack on a floor seat), a legacy drain that writes it,
+// and an undrain that leaves it.
+func TestRuntimeDrainModeSwitch(t *testing.T) {
+	for _, city := range []struct {
+		name       string
+		reconciler string
+		admitV2    bool
+		want       string
+	}{
+		{name: "legacy"},
+		{name: "v2", reconciler: "v2", admitV2: true, want: drainOperator},
+	} {
+		t.Run(city.name, func(t *testing.T) {
+			cityPath, store, id := drainAckCity(t, city.reconciler, city.admitV2)
+			sp := runtime.NewFake()
+			if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "echo"}); err != nil {
+				t.Fatal(err)
+			}
+			dops := newFakeDrainOps()
+			target := sessionRuntimeTarget{cityPath: cityPath, display: "worker", sessionName: "worker"}
+			var stdout, stderr bytes.Buffer
+			if code := runtimeDrain(dops, sp, events.NewFake(), target, false, &stdout, &stderr); code != 0 || !dops.draining["worker"] {
+				t.Fatalf("drain = %d (draining %v), want 0 with the env flag; stderr=%s", code, dops.draining["worker"], stderr.String())
+			}
+			b, _ := store.Get(id)
+			if got := b.Metadata[sessionpkg.DrainIntentReasonKey]; got != city.want {
+				t.Fatalf("row request = %q, want %q", got, city.want)
+			}
+			if code := runtimeUndrain(dops, sp, events.NewFake(), target, false, &stdout, &stderr); code != 0 {
+				t.Fatalf("undrain = %d; stderr=%s", code, stderr.String())
+			}
+			if b, _ := store.Get(id); b.Metadata[sessionpkg.DrainIntentReasonKey] != "" {
+				t.Fatalf("after undrain: row request %q, want none", b.Metadata[sessionpkg.DrainIntentReasonKey])
+			}
+		})
+	}
+}
+
 // TestUndrainRuntimeRowClearFailure pins a failed v2 row clear: the env clear
 // and its event stand, and undrain exits 1. Kills: ignoring the failure, and
 // a row clear that gates the legacy clear.

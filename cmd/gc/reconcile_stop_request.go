@@ -100,10 +100,16 @@ func activeStop(row censusRow) (stopRequest, bool) {
 // the row's generation. It never writes state (no BeginDrainPatch: legacy
 // skips state=draining without stop-pending as an unknown state).
 func stopBeginPatch(row censusRow, reason string, now time.Time) session.MetadataPatch {
+	return stopBeginPatchAt(row.Incarnation, reason, now)
+}
+
+// stopBeginPatchAt is stopBeginPatch for a row of generation incarnation:
+// `gc runtime drain`'s operator request (drainOperator) writes it too.
+func stopBeginPatchAt(incarnation int64, reason string, now time.Time) session.MetadataPatch {
 	return session.MetadataPatch{
 		session.DrainIntentReasonKey:      reason,
 		session.DrainIntentAtKey:          now.UTC().Format(time.RFC3339),
-		session.DrainIntentIncarnationKey: strconv.FormatInt(row.Incarnation, 10),
+		session.DrainIntentIncarnationKey: strconv.FormatInt(incarnation, 10),
 	}
 }
 
@@ -129,4 +135,33 @@ func stopAckVoidPatch() session.MetadataPatch {
 // stopVoidResiduePatch clears both halves of a request rule 2 ended.
 func stopVoidResiduePatch() session.MetadataPatch {
 	return session.ClearStopRequestPatch()
+}
+
+// operatorDrainPatch is `gc runtime drain`'s request on a v2 row: the
+// controller half, reason drainOperator, at the row's generation as read. A
+// row already carrying a request of its generation keeps it (a controller
+// drain stands; a repeated drain keeps its begin), so it returns nil.
+func operatorDrainPatch(meta map[string]string, now time.Time) session.MetadataPatch {
+	k, gen := readStopKeys(meta), rowGeneration(meta)
+	if k.rawIntentReason != "" && k.rawIntentIncarnation == strconv.FormatInt(gen, 10) {
+		return nil
+	}
+	return stopBeginPatchAt(gen, drainOperator, now)
+}
+
+// operatorUndrainPatch is `gc runtime undrain`'s clear of an operator's
+// request (stopCancelPatch); a controller's request it leaves, so it
+// returns nil.
+func operatorUndrainPatch(meta map[string]string) session.MetadataPatch {
+	if readStopKeys(meta).rawIntentReason != drainOperator {
+		return nil
+	}
+	return stopCancelPatch()
+}
+
+// rowGeneration is a row's generation as the drain tracker reads it: an
+// empty or unparseable one is 0.
+func rowGeneration(meta map[string]string) int64 {
+	gen, _ := strconv.ParseInt(strings.TrimSpace(meta["generation"]), 10, 64)
+	return gen
 }

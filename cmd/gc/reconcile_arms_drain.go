@@ -38,6 +38,10 @@ const (
 const (
 	drainIdle        = string(session.SleepReasonIdle)
 	drainConfigDrift = "config-drift"
+	// drainOperator is `gc runtime drain`'s request in a v2 city: an
+	// operator's, which only the agent's ack stops (A11) and only
+	// `gc runtime undrain` clears.
+	drainOperator    = "operator-drain"
 	reasonIdleSleep  = "idle-sleep"
 	sleepIntentIdle  = "idle-stop-pending"
 	timerBlockerHold = "user_hold"
@@ -73,6 +77,11 @@ func drainPolicyOf(reason string) drainPolicy {
 		return drainPolicy{authorized: func(*rowFacts, string) bool { return true }}
 	case idleRespawnDrainReason:
 		return drainPolicy{} // C6d: eligibility and its revalidation
+	case drainOperator:
+		// No controller authorization: A19 never voids or cancels it and
+		// A20 never signals it; the agent's ack does (A11), as legacy's
+		// GC_DRAIN waits for it, and `gc runtime undrain` clears it.
+		return drainPolicy{}
 	}
 	return drainPolicy{authorized: func(r *rowFacts, reason string) bool { return strings.TrimSpace(r.row.Info.SleepIntent) == reason }}
 }
@@ -217,12 +226,14 @@ func workKeepsNoWakeRow(r *rowFacts) bool {
 // can ack again.
 //
 // DRAIN-010 (PAR-FLOORACK, legacy's cancelSelfInitiatedDrainAckAtMinFloor):
-// a bare ack, one no drain the controller began explains, on a member of
+// a bare ack, one no request on the row explains, on a member of
 // its template's min_active_sessions floor (the allocator's floor set,
 // legacy's lowest-bead-id membership) is the agent's own idle ack, and
 // stopping the seat only recreates it (sc-j27j0d): the ack is canceled,
-// its half voided, and the seat stays warm. A drain the controller began
-// outranks the floor, as legacy's GC_DRAIN does.
+// its half voided, and the seat stays warm, whatever the allocation
+// wants of it (Keep, Sleep or Drain, as legacy cancels them). A request
+// the row carries outranks the floor: the controller's own drains, and an
+// operator's `gc runtime drain` (drainOperator, legacy's GC_DRAIN).
 func armAck(r *rowFacts) (intent, bool) {
 	req, ok := activeStop(r.row)
 	if !ok || req.Phase != stopAcked {
@@ -232,7 +243,10 @@ func armAck(r *rowFacts) (intent, bool) {
 	if stale := r.ackPredatesRuntime(req.AckAt); stale || req.AckAt.IsZero() {
 		return intent{Kind: intentSignalAck, Reason: decideAckVoid, Basis: basis, Patch: stopAckVoidPatch()}, true
 	}
-	if req.Reason == "" && r.entry != nil && r.entry.Floor != nil {
+	// The floor check stays after the stale-ack void: that check records
+	// the runtime rest the probing kind needs, so a cancel decided first
+	// would defer at admission (rests-missing).
+	if req.Reason == "" && r.entry.Floor != nil {
 		return intent{Kind: intentSignalAck, Reason: decideFloorAckCancel, Basis: basis, Patch: stopAckVoidPatch()}, true
 	}
 	return intent{Kind: intentSignalAck, Reason: decideDrainSignal + req.Reason, Basis: basis, Patch: session.DrainAckStopPendingPatch(r.w.Now)}, true

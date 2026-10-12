@@ -547,6 +547,11 @@ func TestOperatorStartClearsARequestBegunBeforeItsLease(t *testing.T) {
 // floor (the allocator's floor set) and a Wake entry.
 func onFloor(e *selectionEntry) { e.Desired, e.Floor = desireWake, &floorView{Rank: 0, MinActive: 1} }
 
+// floorWith is onFloor with the allocation wanting d of the row.
+func floorWith(d desire) func(*selectionEntry) {
+	return func(e *selectionEntry) { onFloor(e); e.Desired = d }
+}
+
 // TestFloorAckCancels (DRAIN-010, PAR-FLOORACK; sc-j27j0d). Kills a floor
 // member's own idle ack stopping it, only for the floor to recreate it: a
 // bare ack on a floor member cancels (its half voided, nothing signaled); an
@@ -563,6 +568,12 @@ func TestFloorAckCancels(t *testing.T) {
 		{"a bare ack off the floor", ackMeta("3"), awakeWanted, decideDrainSignal},
 		{"an ack a controller drain explains, on the floor", append(ackMeta("3"), intentBegunAt(drainConfigDrift, time.Minute)...), onFloor, decideDrainSignal + drainConfigDrift},
 		{"an ack without a time, on the floor", []string{session.DrainAckIncarnationKey, "3"}, onFloor, decideAckVoid},
+		// Legacy cancels whatever the allocation wants of a floor member (M8).
+		{"a bare ack on a Keep floor member", ackMeta("3"), floorWith(desireKeep), decideFloorAckCancel},
+		{"a bare ack on a Sleep floor member", ackMeta("3"), floorWith(desireSleep), decideFloorAckCancel},
+		{"a bare ack on a Drain floor member", ackMeta("3"), floorWith(desireDrain), decideFloorAckCancel},
+		// An operator's `gc runtime drain` explains the ack (legacy's GC_DRAIN).
+		{"an ack an operator's drain explains, on the floor", append(ackMeta("3"), intentBegunAt(drainOperator, time.Minute)...), onFloor, decideDrainSignal + drainOperator},
 	} {
 		it, _ := decideDrain(t, c.meta, c.entry)
 		switch {
@@ -599,6 +610,10 @@ func TestFloorAckCancelKeepsTheSeatWarm(t *testing.T) {
 			t.Errorf("floor: row %v (request active %v), running %v; want the ack canceled, the seat warm", got.Metadata, active, leaf.IsRunning("s-gc-1"))
 		case !floor && !isDrainAckStopPendingInfo(row.Info):
 			t.Errorf("off the floor: row %v, want the signal", got.Metadata)
+		case floor && (s.Facts.Transition == nil || s.Facts.Transition.Reason != "min-floor" || s.Facts.Transition.Transition != "cancel"):
+			t.Errorf("floor: transition %+v, want legacy's min-floor cancel", s.Facts.Transition)
+		case !floor && s.Facts.Transition != nil:
+			t.Errorf("off the floor: transition %+v, want none", s.Facts.Transition)
 		}
 	}
 }

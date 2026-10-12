@@ -19,7 +19,9 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // drainOpsWithCountdown wraps fakeDrainOps and returns false for isRestartRequested
@@ -1610,5 +1612,43 @@ func TestFindAgentByNameNoMatch(t *testing.T) {
 	_, ok := findAgentByName(cfg, "nobody")
 	if ok {
 		t.Error("expected no match for nonexistent agent")
+	}
+}
+
+// TestOperatorDrainRow (PAR-FLOORACK review ruling 1): in a v2 city `gc
+// runtime drain` writes an operator's request on the row (the controller
+// half, reason operator-drain, at the row's generation), which leaves a
+// request already there; `gc runtime undrain` clears an operator's request
+// and leaves a controller's.
+func TestOperatorDrainRow(t *testing.T) {
+	now := time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC)
+	for _, c := range []struct {
+		name           string
+		meta           map[string]string
+		drain, undrain string // the request's reason after each
+	}{
+		{"a bare row", map[string]string{"generation": "3"}, drainOperator, ""},
+		{"a controller's request stands", map[string]string{"generation": "3", session.DrainIntentReasonKey: drainConfigDrift, session.DrainIntentAtKey: now.Format(time.RFC3339), session.DrainIntentIncarnationKey: "3"}, drainConfigDrift, drainConfigDrift},
+		{"a request of an older generation is replaced", map[string]string{"generation": "3", session.DrainIntentReasonKey: drainConfigDrift, session.DrainIntentIncarnationKey: "2"}, drainOperator, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			store, id := stampedMem(t, gate.Require)
+			if err := store.SetMetadataBatch(id, c.meta); err != nil {
+				t.Fatal(err)
+			}
+			if err := writeOperatorDrainRow(store, id, now); err != nil {
+				t.Fatal(err)
+			}
+			b, _ := store.Get(id)
+			if got := b.Metadata[session.DrainIntentReasonKey]; got != c.drain || c.drain == drainOperator && b.Metadata[session.DrainIntentIncarnationKey] != "3" {
+				t.Fatalf("after drain: request %q at %q, want %q at 3", got, b.Metadata[session.DrainIntentIncarnationKey], c.drain)
+			}
+			if err := clearOperatorDrainRow(store, id); err != nil {
+				t.Fatal(err)
+			}
+			if b, _ := store.Get(id); b.Metadata[session.DrainIntentReasonKey] != c.undrain {
+				t.Fatalf("after undrain: request %q, want %q", b.Metadata[session.DrainIntentReasonKey], c.undrain)
+			}
+		})
 	}
 }
