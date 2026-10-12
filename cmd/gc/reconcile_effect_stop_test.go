@@ -489,3 +489,14 @@ func TestSameObjectGuardsForeignAndCorpse(t *testing.T) {
 		t.Fatalf("a corpse read across a replaced object was removed (%d kills)", n)
 	}
 }
+
+// TestDormantFinalizeClearsALeftoverRequest (v5.9n; the C7 builder's lead).
+// Kills a finalize that reads the stop request off a row rebuilt without its
+// stop keys: an operator-dormant stop of a row carrying a current ack clears
+// the request in its finalize, as a signaled one does.
+func TestDormantFinalizeClearsALeftoverRequest(t *testing.T) {
+	s, got, leaf := stopRun(t, []string{"sleep_intent", "user-hold", session.DrainAckIncarnationKey, "3", session.DrainAckAtKey, rowAt(-time.Minute)}, undesired(drainOrphaned), nil)
+	if s.Outcome != settledLanded || stops(leaf) != 1 || got.Metadata[session.DrainAckIncarnationKey] != "" || got.Metadata[session.DrainAckAtKey] != "" {
+		t.Fatalf("settlement %+v, %d stops, row %v; want the dormant stop finalized with its request cleared", s, stops(leaf), got.Metadata)
+	}
+}

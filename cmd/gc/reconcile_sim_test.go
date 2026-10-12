@@ -362,8 +362,17 @@ type sim struct {
 	prev     map[string]beads.Bead // "leg/id" → row, after the last step
 	// killsChecked is how many of the provider's kills I4 and I5 judged.
 	killsChecked int
-	writes       []simWrite
-	admitted     []time.Time // admitted starts (I9)
+	// closedInStep is, by session name, each row an outside writer closed
+	// since the last v2 audit, as it stood before the close (I4, v5.9n).
+	closedInStep map[string]beads.Bead
+	// basisMoves are the outside writes that moved a row's drain basis, as
+	// "leg/id", in order (I16, v5.9n); writes is cleared every step.
+	basisMoves []string
+	// round is the effects quiescence's current round released, with
+	// their settlements (I10's paced retries, v5.9n).
+	round    []simResult
+	writes   []simWrite
+	admitted []time.Time // admitted starts (I9)
 	// stable is, by row ID, whether the pass that last admitted an effect
 	// for the row read it committed, its own runtime alive, and 30s past its
 	// wake: I15's view of A6's stability clear.
@@ -668,6 +677,7 @@ func (s *sim) release(i int) {
 		s.t.Fatalf("seed %d: effect %s %v never returned", s.seed, e.it.Kind, e.it.Key)
 	}
 	s.logf("effect %s %s: outcome %d %s (late %t)", e.it.Kind, e.it.Key.ID, res.Outcome, res.Cause, e.settled)
+	s.round = append(s.round, simResult{it: e.it, res: res})
 	if res.Outcome == settledNoop && res.Cause == causeNotIdle {
 		s.notIdle = append(s.notIdle, intentKeys([]intent{e.it})...)
 	}
@@ -959,6 +969,15 @@ func (s *sim) audit(actor string) {
 		if actor == "v2" {
 			continue
 		}
+		if before.ID != "" && len(session.FactsDrainBasis.Moved(session.FactsOf(after.Metadata), session.FactsOf(before.Metadata))) > 0 {
+			s.basisMoves = append(s.basisMoves, k)
+		}
+		if before.ID != "" && before.Status != "closed" && after.Status == "closed" {
+			if s.closedInStep == nil {
+				s.closedInStep = map[string]beads.Bead{}
+			}
+			s.closedInStep[before.Metadata["session_name"]] = before
+		}
 		payload, err := json.Marshal(after)
 		if err != nil {
 			s.t.Fatal(err)
@@ -971,6 +990,9 @@ func (s *sim) audit(actor string) {
 	}
 	s.check()
 	s.prev = next
+	if actor == "v2" {
+		clear(s.closedInStep) // a v2 step's kills are judged by now
+	}
 }
 
 func sameBead(a, b beads.Bead) bool {
@@ -1120,7 +1142,8 @@ func (s *sim) quiesce() {
 	slack := 2*simPatrol + s.cfg.Session.StartupTimeoutDuration()
 	bound := s.lastTimer().Add(slack)
 	for quiet := 0; quiet < 2 && len(s.failures) == 0; {
-		before := s.snapshot()
+		before, backoff, at := s.snapshot(), s.p.backoff.Snapshot(), s.clk.Now()
+		s.round = nil
 		s.inventory()
 		s.pass()
 		admitted := intentKeys(s.p.out.record.Load().Admitted)
@@ -1128,9 +1151,13 @@ func (s *sim) quiesce() {
 			s.release(0)
 		}
 		s.audit("v2")
-		changed := !maps.EqualFunc(before, s.snapshot(), sameBead)
+		after := s.snapshot()
+		changed := !maps.EqualFunc(before, after, sameBead)
 		switch {
 		case s.clk.Now().Before(bound):
+		case (len(admitted) > 0 || changed) && s.pacedRetries(backoff, at, before, after):
+			// Neither quiet nor a failure: the next pass drains its settlement,
+			// and two quiet rounds still follow it.
 		case len(admitted) > 0 || changed:
 			s.failf("I10 I-bounded", "no fixed point %s after the last timer: admitted %v, store changed %t", s.clk.Now().Sub(bound)+slack, admitted, changed)
 		default:
@@ -1184,6 +1211,51 @@ func (s *sim) checkConverged() {
 	}
 }
 
+// simResult is a released effect and its settlement.
+type simResult struct {
+	it  intent
+	res settlement
+}
+
+// pacedRetries is I10's paced retry (v5.9n): a quiescence round whose
+// effects all refused a re-issue the contract holds, each no earlier than
+// its row's backoff expiry (a paced retry, not a loop), and whose only store
+// change is the runtime lease record each attempt writes. The holds: a stop
+// a human's attach holds (§12.2 #10), and a start refused dead on a zombie.
+func (s *sim) pacedRetries(backoff map[string]backoffRecord, at time.Time, before, after map[string]beads.Bead) bool {
+	for k, b := range after {
+		a, ok := before[k]
+		if !ok || a.Status != b.Status || !maps.EqualFunc(withoutLeaseKeys(a.Metadata), withoutLeaseKeys(b.Metadata), func(x, y string) bool { return x == y }) {
+			return false
+		}
+	}
+	if len(before) != len(after) || len(s.round) == 0 {
+		return false
+	}
+	for _, r := range s.round {
+		held := r.it.Kind == intentStop && r.res.Cause == fenceAttached ||
+			// TODO(#7626, C5c2): delete the zombie clause once A12's
+			// zombie recycle is registered (TestSimZombieRetryClauseUntilA12).
+			r.it.Kind == intentStart && r.res.Cause == causeDead
+		rec, backedOff := backoff[rowBackoffKey(r.it.Key)]
+		if r.res.Outcome != settledRefused || !held || !backedOff || rec.Until.After(at) {
+			return false
+		}
+	}
+	return true
+}
+
+// withoutLeaseKeys is meta without the runtime lease record's keys.
+func withoutLeaseKeys(meta map[string]string) map[string]string {
+	out := maps.Clone(meta)
+	for k := range out {
+		if strings.HasPrefix(k, "runtime_lease_") {
+			delete(out, k)
+		}
+	}
+	return out
+}
+
 // lastTimer is the latest pending timer: a row's hold, quarantine or kill
 // fence, A6's churn clear past an open committed row's wake (SESS-540), or
 // a backoff's expiry.
@@ -1219,14 +1291,15 @@ func (s *sim) lastTimer() time.Time {
 }
 
 // simSeeds is the corpus: GC_V2_SIM_SEED replays one seed, GC_V2_SIM_SEEDS
-// runs seeds 1..N (nightly), and CI runs simCISeeds.
+// runs N seeds from GC_V2_SIM_SEED_FIRST (1 by default; the CI corpus
+// targets run the 1024 in ranges, v5.9n), and CI's gc_test runs simCISeeds.
 func simSeeds(t *testing.T) []uint64 {
 	first, n := uint64(1), uint64(simCISeeds)
-	for env, v := range map[string]*uint64{"GC_V2_SIM_SEED": &first, "GC_V2_SIM_SEEDS": &n} {
+	for env, v := range map[string]*uint64{"GC_V2_SIM_SEED": &first, "GC_V2_SIM_SEED_FIRST": &first, "GC_V2_SIM_SEEDS": &n} {
 		var err error
 		if raw := os.Getenv(env); raw != "" {
-			if *v, err = strconv.ParseUint(raw, 10, 64); err != nil || env == "GC_V2_SIM_SEED" && os.Getenv("GC_V2_SIM_SEEDS") != "" {
-				t.Fatalf("%s=%q: want a number, and only one of GC_V2_SIM_SEED and GC_V2_SIM_SEEDS (%v)", env, raw, err)
+			if *v, err = strconv.ParseUint(raw, 10, 64); err != nil || env == "GC_V2_SIM_SEED" && (os.Getenv("GC_V2_SIM_SEEDS") != "" || os.Getenv("GC_V2_SIM_SEED_FIRST") != "") {
+				t.Fatalf("%s=%q: want a number, and GC_V2_SIM_SEED alone, without GC_V2_SIM_SEEDS or GC_V2_SIM_SEED_FIRST (%v)", env, raw, err)
 			}
 		}
 	}
@@ -1284,6 +1357,33 @@ func TestSimCorpusFloored(t *testing.T) {
 			s.run(simSteps)
 			s.report(t)
 		})
+	}
+}
+
+// TestSimCorpusPinnedSeeds (CONTRACT v5.9n). Kills a regression of the
+// invariant models v5.9n fixed: the 1024-seed corpus's seeds that failed on
+// main at e11c512e1c (I4: a just-closed row's own runtime; I16: an outside
+// drain-basis write mid-finalize; I17: a probe-erroring runtime; I10: paced
+// re-issues held by an attach, or by a zombie until A12) each run as a
+// regression.
+func TestSimCorpusPinnedSeeds(t *testing.T) {
+	for _, seed := range []uint64{107, 337, 338, 427, 452, 465, 553, 657} {
+		t.Run(fmt.Sprint(seed), func(t *testing.T) {
+			s := newSim(t, seed, simOpts{})
+			s.run(simSteps)
+			s.report(t)
+		})
+	}
+}
+
+// TestSimZombieRetryClauseUntilA12 (v5.9n). Fails once A12's zombie recycle
+// is registered, so pacedRetries' temporary zombie clause is deleted with it
+// (TODO #7626, C5c2).
+func TestSimZombieRetryClauseUntilA12(t *testing.T) {
+	for _, arm := range rowArms {
+		if arm.name == "A12" {
+			t.Fatal("A12 is registered: delete pacedRetries' zombie clause and this test (v5.9n)")
+		}
 	}
 }
 

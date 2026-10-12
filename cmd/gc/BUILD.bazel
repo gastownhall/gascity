@@ -2176,6 +2176,22 @@ go_variant_test(
     test = ":gc_test",
 )
 
+# The full 1024-seed v2 simulator corpus, a CI gate (CONTRACT v5.9n): gc_test
+# runs the first simCISeeds; these run all 1024 in eight ranges of 128, each
+# a target of its own (the same binary, no extra compile), so they run in
+# parallel beside gc_test's shards. A range took ~40 s of test time on the
+# shared builder (2026-10-12).
+[go_variant_test(
+    name = "gc_sim_corpus_%d_test" % i,
+    size = "large",
+    args = ["-test.run=^TestSimCorpus$$"],
+    env = {
+        "GC_V2_SIM_SEEDS": "128",
+        "GC_V2_SIM_SEED_FIRST": str(1 + 128 * i),
+    },
+    test = ":gc_test",
+) for i in range(8)]
+
 # INTEGRATION_SOLO_TESTS, each alone, and INTEGRATION_SOLO_SPLIT_TESTS, by
 # subtest, in gc_test's integration build.
 # Manual: the unit lane's //... does not run them (gc_test runs them there);

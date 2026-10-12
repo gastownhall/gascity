@@ -174,14 +174,17 @@ func (s *sim) rowNamedEver(name string) beads.Bead {
 	return beads.Bead{}
 }
 
-// rowNamed is the open row that carried name before this step.
+// rowNamed is the open row that carried name before this step, or the row
+// an outside writer closed within the step, as it stood before its close
+// (v5.9n): stopping a just-closed row's own runtime is no fence breach, and
+// unleased closes are real (bd close on a session row).
 func (s *sim) rowNamed(name string) beads.Bead {
 	for _, k := range slices.Sorted(maps.Keys(s.prev)) {
 		if b := s.prev[k]; b.Status != "closed" && b.Metadata["session_name"] == name {
 			return b
 		}
 	}
-	return beads.Bead{}
+	return s.closedInStep[name]
 }
 
 // checkTokens is I9 (I-tokens): in any window, admitted starts ≤ capacity
@@ -414,6 +417,15 @@ func dormantChange(b beads.Bead, a map[string]string, t time.Time, stable bool) 
 	return ""
 }
 
+// probeErring reports whether b's name holds a runtime whose process probe
+// errors.
+func (s *sim) probeErring(b beads.Bead) bool {
+	s.sp.mu.Lock()
+	defer s.sp.mu.Unlock()
+	rt := s.sp.rts[b.Metadata["session_name"]]
+	return rt != nil && rt.probeErr
+}
+
 // livePane reports whether b's own runtime (its ID and token) has a live
 // pane: what a C8.8 confirmation reads as not stopped.
 func (s *sim) livePane(b beads.Bead) bool {
@@ -437,6 +449,12 @@ func (s *sim) namedPane(b beads.Bead) bool {
 	return rt != nil && !rt.corpse && (rt.id == b.ID || beadScoped)
 }
 
+// basisMovedOutside reports an outside write since basisMoves[from] that
+// moved row id's drain basis on leg (session.FactsDrainBasis).
+func (s *sim) basisMovedOutside(leg, id string, from int) bool {
+	return slices.Contains(s.basisMoves[min(from, len(s.basisMoves)):], leg+"/"+id)
+}
+
 func signaledRow(b beads.Bead) bool {
 	return b.Status != "closed" && b.Metadata["state"] == string(session.StateDraining) && b.Metadata["state_reason"] == session.DrainAckStopPendingReason
 }
@@ -444,7 +462,11 @@ func signaledRow(b beads.Bead) bool {
 // checkFinalized is I16 (I-STOP-5): a stop effect that ran while its row's
 // name held no live pane, the absence C8.8 confirms, leaves the row's
 // request finalized. A live pane of another token under the name is no
-// absence: the verb refuses it (L2), and finalizes nothing.
+// absence: the verb refuses it (L2), and finalizes nothing. A premise
+// refusal is excused when, and only when, an outside writer moved a
+// drain-basis key of the row inside the effect's window (v5.9n): the
+// after-stop premise refuses it by design, and the next pass finalizes,
+// which I17's bound holds it to.
 func (s *sim) checkFinalized(e *simEffect) func(settlement) {
 	l := s.legOf(e.it.Key.Leg)
 	if e.it.Kind != intentStop || l == nil {
@@ -452,8 +474,12 @@ func (s *sim) checkFinalized(e *simEffect) func(settlement) {
 	}
 	before, _ := l.backing.Get(e.it.Key.ID)
 	paneBefore := s.namedPane(before)
+	window := len(s.basisMoves)
 	return func(res settlement) {
 		b, err := l.backing.Get(e.it.Key.ID)
+		if res.Cause == causePremise && s.basisMovedOutside(l.name, e.it.Key.ID, window) {
+			return
+		}
 		if !paneBefore && res.Cause != "name-busy" && err == nil && signaledRow(b) && !s.namedPane(b) {
 			s.failf("I16 I-STOP-5", "the stop effect on %v confirmed no live pane and left the request signaled", e.it.Key)
 		}
@@ -489,9 +515,13 @@ func (s *sim) legOf(ref string) *simLeg {
 // checkDwell is I17 (I-STOP-7), at quiescence: past the bound, no row is
 // still signaled whose runtime would pass the fence (its own, live,
 // unattached).
+// A runtime whose process probe errors is not stoppable (v5.9n: D3 waives
+// liveness only on identity Current, as legacy's SESS-056 defers). No
+// runtime fault changes during quiescence, so the bound, from quiescence's
+// start, runs from the first pass whose probe succeeds.
 func (s *sim) checkDwell() {
 	for _, k := range slices.Sorted(maps.Keys(s.prev)) {
-		if b := s.prev[k]; signaledRow(b) && s.livePane(b) && !s.sp.IsAttached(b.Metadata["session_name"]) {
+		if b := s.prev[k]; signaledRow(b) && s.livePane(b) && !s.sp.IsAttached(b.Metadata["session_name"]) && !s.probeErring(b) {
 			s.failf("I17 I-STOP-7", "%s is still signaled past the bound with a stoppable runtime", k)
 		}
 	}
@@ -610,6 +640,11 @@ func TestSimChecksBite(t *testing.T) {
 			s.sp.put("s-x", "x", "2", "tok-2")
 			s.checkWrite(simWrite{Leg: "city", Before: row("x", "state", "active"), After: row("x", "state", "asleep")})
 		}},
+		{"I4 ", func(s *sim) { // a just-closed row's runtime of another incarnation (v5.9n)
+			s.prev = map[string]beads.Bead{}
+			s.closedInStep = map[string]beads.Bead{"s-x": row("x")}
+			s.sp.kills = append(s.sp.kills, simKill{Method: "Stop", Name: "s-x", Hit: &simRuntime{id: "x", epoch: "1", token: "tok-1"}})
+		}},
 		{"I5 ", func(s *sim) {
 			s.sp.kills = append(s.sp.kills, simKill{Method: "KillCorpseObject", Name: "s-x", Hit: &simRuntime{corpse: true, attached: true}})
 		}},
@@ -640,6 +675,11 @@ func TestSimChecksBite(t *testing.T) {
 			s.setMeta(s.legs[0], "gc-1", signaled...)
 			s.sp.drop("s-gc-1")
 			s.checkFinalized(&simEffect{it: intent{Kind: intentStop, Key: rowKey{Leg: rowLeg, ID: "gc-1"}}})(settlement{Outcome: settledLanded})
+		}},
+		{"I16 ", func(s *sim) { // a premise refusal no outside basis write excuses (v5.9n)
+			s.setMeta(s.legs[0], "gc-1", signaled...)
+			s.sp.drop("s-gc-1")
+			s.checkFinalized(&simEffect{it: intent{Kind: intentStop, Key: rowKey{Leg: rowLeg, ID: "gc-1"}}})(settlement{Outcome: settledRefused, Cause: causePremise})
 		}},
 		{"I17 ", func(s *sim) {
 			s.prev = map[string]beads.Bead{"city/x": row("x", signaled...)}
@@ -729,5 +769,36 @@ func TestCloseEndsSuspend(t *testing.T) {
 				t.Fatalf("change %q exempted = %t, want %t", k, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestSimPacedRetries (v5.9n, I10). Kills a pacing rule that excuses a retry
+// loop: a refused re-issue held by an attach is quiescent only at or past
+// its row's backoff expiry and with no change but the runtime lease record;
+// one before the expiry, one with any other change, or one refused for
+// another cause is not.
+func TestSimPacedRetries(t *testing.T) {
+	k := rowKey{Leg: rowLeg, ID: "gc-1"}
+	at := plannerT0.Add(time.Hour)
+	row := func(kv ...string) map[string]beads.Bead {
+		return map[string]beads.Bead{"city/gc-1": sessionRow("gc-1", kv...)}
+	}
+	for _, c := range []struct {
+		name          string
+		until         time.Duration
+		cause         string
+		before, after map[string]beads.Bead
+		paced         bool
+	}{
+		{"at the expiry, the lease alone", -time.Second, fenceAttached, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4"), true},
+		{"before the expiry", time.Second, fenceAttached, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4"), false},
+		{"another key moved", -time.Second, fenceAttached, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4", "state", "asleep"), false},
+		{"another cause", -time.Second, fencePending, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4"), false},
+	} {
+		s := &sim{round: []simResult{{it: intent{Kind: intentStop, Key: k}, res: settlement{Outcome: settledRefused, Cause: c.cause}}}}
+		backoff := map[string]backoffRecord{rowBackoffKey(k): {Consecutive: 2, Until: at.Add(c.until), Cause: c.cause}}
+		if got := s.pacedRetries(backoff, at, c.before, c.after); got != c.paced {
+			t.Errorf("%s: paced %t, want %t", c.name, got, c.paced)
+		}
 	}
 }

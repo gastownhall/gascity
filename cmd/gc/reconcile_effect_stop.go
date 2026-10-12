@@ -297,8 +297,8 @@ func stopFinalizeStep(v txView, work finalizeWork, _ error) txStep {
 	// the fresh row in the same CAS, as legacy's ApplySleep splits it: the
 	// cell keeps an operator's hold, a wait's intent and an intent it cannot
 	// read, and clears the idle stop's transient.
-	patch := maps.Clone(choice.Patch) // a builder may hand back a shared map
-	if _, ok := activeStop(newCensusRow(v.It.Key, v.Row)); ok {
+	patch := maps.Clone(choice.Patch)                                            // a builder may hand back a shared map
+	if _, ok := activeStop(v.World.Census.reread(v.It.Key, v.Row, v.Meta)); ok { // the fresh row's stop keys
 		maps.Copy(patch, stopEndPatch())
 	}
 	var kept *beads.Bead
