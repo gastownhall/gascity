@@ -131,6 +131,8 @@ func TestAllocator_UndesiredPendingCreateKeep(t *testing.T) {
 		{name: "removed agent's started create past its windows: the keep's lease ends it", cfg: removed, row: started, want: desireDrain, wantRollback: true},
 		{name: "manual create stamped two hours ahead (a clock stepped back)", cfg: city, row: manualCreate(-2 * time.Hour), want: desireDrain, wantRollback: true},
 		{name: "manual create stamped one minute ahead", cfg: city, row: manualCreate(-time.Minute), want: desireKeep},
+		{name: "manual create stamped four minutes ahead (inside the skew bound)", cfg: city, row: manualCreate(-4 * time.Minute), want: desireKeep},
+		{name: "manual create stamped six minutes ahead (past the skew bound)", cfg: city, row: manualCreate(-6 * time.Minute), want: desireDrain, wantRollback: true},
 		{
 			name: "started create woken two hours ahead (a clock stepped back)", cfg: removed,
 			row:  manualCreate(time.Minute, "session_name", "s-gc-m", "state", "creating", "last_woke_at", allocNow.Add(2*time.Hour).Format(time.RFC3339)),
@@ -154,5 +156,31 @@ func TestAllocator_UndesiredPendingCreateKeep(t *testing.T) {
 		},
 	} {
 		t.Run(c.name, c.run)
+	}
+}
+
+// Kills the suspended city's keep honoring a lease anchor far in the future
+// (v5.9r: the skew bound applies in every mode): a pending create whose
+// anchor is inside the bound keeps, one past it drains.
+func TestAllocator_SuspendedCityKeepRefusesAnAnchorAhead(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		ahead time.Duration
+		want  desire
+	}{
+		{"four minutes ahead", 4 * time.Minute, desireKeep},
+		{"six minutes ahead", 6 * time.Minute, desireDrain},
+		{"two hours ahead", 2 * time.Hour, desireDrain},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 3)}}
+			f := newAllocFixture(t, cfg).sessions(poolRow("gc-1", "worker", 1, "start-pending", "pending_create_claim", "true",
+				"pending_create_started_at", allocNow.Add(tc.ahead).Format(time.RFC3339)))
+			f.in.CitySuspended = true
+			d := f.decide()
+			if e := entryOf(t, d, "gc-1"); e.Desired != tc.want {
+				t.Fatalf("entry %s(%s), want %s", e.Desired, e.Reason, tc.want)
+			}
+		})
 	}
 }
