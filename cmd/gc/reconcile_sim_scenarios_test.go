@@ -1169,12 +1169,7 @@ func TestSimLostCommit(t *testing.T) {
 				if up {
 					t.Fatalf("seed %d: %q left the start's runtime running", seed, outcome)
 				}
-				if name == "asleep" {
-					s.noViolations(t)
-				}
-				// A close's stop is judged by I4's closed-row model, which
-				// #7648 rewrites ("closed within the step"); its check joins
-				// this scenario with it.
+				s.noViolations(t) // a close's stop: I4's "closed within the step" (#7648)
 				return
 			}
 			t.Fatal("no seed reached the lost commit")

@@ -1023,3 +1023,42 @@ func TestSimQuiesceRoundsCountPerRow(t *testing.T) {
 		}
 	}
 }
+
+// Kills I4's closed-row model judging a lost commit's stop on the
+// step-start snapshot, or excusing a real wrong-token stop (v5.9n amended):
+// a start mints its PreWake token, an outside close lands in the same step,
+// and the stop of the runtime carrying the minted token passes I4, while a
+// stop of one carrying the row's step-start token still fails it.
+func TestSimI4ClosedRowAsTheCloseFoundIt(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		token string
+		fails bool
+	}{
+		{"the runtime carrying the minted token", "tok-new", false},
+		{"a runtime carrying the step-start token", "tok-gc-1-1", true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s := newSim(t, 3, simOpts{rows: func(*sim) ([]beads.Bead, []beads.Bead) {
+				return []beads.Bead{poolRow("gc-1", "worker", 1, "creating", "instance_token", "tok-gc-1-1")}, nil
+			}})
+			s.advance(time.Second)
+			s.beginStep()
+			l := s.legs[0]
+			if err := l.backing.SetMetadataBatch("gc-1", map[string]string{"instance_token": "tok-new", "generation": "2"}); err != nil { // the PreWake, not yet audited
+				t.Fatal(err)
+			}
+			b, err := l.backing.Get("gc-1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.outside("close", l, b, func(l *simLeg, b beads.Bead) { _ = l.backing.Close(b.ID) })
+			s.failures = nil
+			s.sp.kills = append(s.sp.kills, simKill{Method: "Stop", Name: b.Metadata["session_name"], Hit: &simRuntime{id: "gc-1", epoch: "2", token: c.token}})
+			s.check()
+			if got := slices.ContainsFunc(s.failures, func(f string) bool { return strings.HasPrefix(f, "I4 ") }); got != c.fails {
+				t.Fatalf("failures %q, want an I4 violation %v", s.failures, c.fails)
+			}
+		})
+	}
+}

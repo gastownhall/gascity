@@ -367,6 +367,9 @@ type sim struct {
 	// closedInStep is, by session name, each row an outside writer closed
 	// since the last v2 audit, as it stood before the close (I4, v5.9n).
 	closedInStep map[string]beads.Bead
+	// preOutside is the store an outside write found, while it runs, by
+	// which closedInStep holds a row as its close found it.
+	preOutside map[string]beads.Bead
 	// basisMoves are the outside writes that moved a row's drain basis, as
 	// "leg/id", in order (I16, v5.9n); writes is cleared every step.
 	basisMoves []string
@@ -694,16 +697,26 @@ func (s *sim) release(i int) {
 }
 
 // releaseInside releases parked effect i with an outside writer, picked at
-// random, run on its row at a random seam inside its section.
+// random, run on its row at a random seam inside its section; for a start,
+// also after its launch Call, between the Start and the commit (S2's lost
+// commit).
 func (s *sim) releaseInside(i int) {
 	e := s.parked[i]
-	e.seam = []txSeam{seamAfterRowRead, seamBeforeCAS}[s.rng.IntN(2)]
+	seams := []txSeam{seamAfterRowRead, seamBeforeCAS}
+	if e.it.Kind == intentStart {
+		seams = append(seams, seamAfterCall)
+	}
+	e.seam = seams[s.rng.IntN(len(seams))]
 	op := externalOps[s.rng.IntN(len(externalOps))]
-	e.outside = func() {
+	fire := func() {
 		l := s.legOf(e.it.Key.Leg)
 		if b, err := l.backing.Get(e.it.Key.ID); err == nil {
 			s.outside(op.name+" inside "+e.it.Kind, l, b, func(l *simLeg, b beads.Bead) { op.fn(s, l, b) })
 		}
+	}
+	e.outside = fire
+	if e.seam == seamAfterCall { // the admit-ticket Call's seam comes first: re-arm for the launch Call's
+		e.outside = func() { e.seam, e.outside = seamAfterCall, fire }
 	}
 	s.release(i)
 }
@@ -781,6 +794,8 @@ func (s *sim) external(name string, fn func(l *simLeg, b beads.Bead)) {
 
 // outside runs fn on row b of leg l as an outside writer, and audits it.
 func (s *sim) outside(name string, l *simLeg, b beads.Bead, fn func(l *simLeg, b beads.Bead)) {
+	s.preOutside = s.snapshot() // the store as the outside write found it (v5.9n amended)
+	defer func() { s.preOutside = nil }()
 	s.sp.external = true // no effect calls the provider while it runs
 	fn(l, b)
 	s.sp.external = false
@@ -983,7 +998,15 @@ func (s *sim) audit(actor string) {
 			if s.closedInStep == nil {
 				s.closedInStep = map[string]beads.Bead{}
 			}
-			s.closedInStep[before.Metadata["session_name"]] = before
+			// The closed row as the store held it immediately before its
+			// closing write, the step's own earlier writes (a PreWake's
+			// token mint) included, not the step-start snapshot (v5.9n
+			// amended).
+			held := before
+			if p, ok := s.preOutside[k]; ok && p.Status != "closed" {
+				held = p
+			}
+			s.closedInStep[held.Metadata["session_name"]] = held
 		}
 		payload, err := json.Marshal(after)
 		if err != nil {
