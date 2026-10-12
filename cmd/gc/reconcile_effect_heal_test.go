@@ -204,20 +204,25 @@ func TestFreshHealSeesTheOtherBackend(t *testing.T) {
 }
 
 // Kills repeated heal refusals kept silent: an A6 heal refused until its
-// backoff reaches the cap alerts once, not before and not again.
+// backoff reaches the cap alerts once, not before and not again; so does
+// the drift repair, a fresh heal of its own kind (the C7b2-1 review's N4).
 func TestHealRefusalsAlertAtTheCap(t *testing.T) {
-	f := newObserveFixture(t)
-	for i := 1; i <= healRefusalsBeforeAlert+2; i++ {
-		f.clk.Advance(10 * time.Minute) // past the last backoff
-		f.p.settlements.post(settlement{Key: rowKeyOf("gc-1"), Kind: intentRowHealFresh, Outcome: settledRefused, Cause: causeRuntimePresent})
-		f.p.drainSettlements(f.clk.Now())
-		want := 0
-		if i >= healRefusalsBeforeAlert {
-			want = 1
-		}
-		if got := len(f.alerts(t)); got != want {
-			t.Fatalf("after %d refusals: %d alerts, want %d", i, got, want)
-		}
+	for _, kind := range []string{intentRowHealFresh, intentDriftRepair} { // the drift repair is a fresh heal of its own kind (N4)
+		t.Run(kind, func(t *testing.T) {
+			f := newObserveFixture(t)
+			for i := 1; i <= healRefusalsBeforeAlert+2; i++ {
+				f.clk.Advance(10 * time.Minute) // past the last backoff
+				f.p.settlements.post(settlement{Key: rowKeyOf("gc-1"), Kind: kind, Outcome: settledRefused, Cause: causeRuntimePresent})
+				f.p.drainSettlements(f.clk.Now())
+				want := 0
+				if i >= healRefusalsBeforeAlert {
+					want = 1
+				}
+				if got := len(f.alerts(t)); got != want {
+					t.Fatalf("after %d refusals: %d alerts, want %d", i, got, want)
+				}
+			}
+		})
 	}
 }
 
