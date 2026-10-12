@@ -217,7 +217,8 @@ func (p *planner) postExecutionStalled(r executionStalledRequest) {
 // closed; when the pass reads its row, at the request's generation, with the
 // execution-stalled stop request on it (its begin landed, whatever its
 // settlement said), dormant, or with its runtime gone or a corpse (obs at
-// now within maxAge), which is where legacy's tracked drain completes; or 30
+// now within maxAge, on a pass started after the post), which is where
+// legacy's tracked drain completes; or 30
 // minutes after it was posted, the backstop latch's re-post cadence
 // (executionStalledLatchRetryAfter). A stall that persists is posted again.
 func (p *planner) executionStalled(c *sessionCensus, obs *ObservationSnapshot, now time.Time, maxAge time.Duration) map[string]executionStalledRequest {
@@ -269,6 +270,11 @@ func stallRequestSpentOn(r executionStalledRequest, row censusRow, obs *Observat
 	}
 	if !sessionBeadClaimsLiveRuntime(row.Info) {
 		return true
+	}
+	// Absence or a corpse spends it only on a pass that started after the
+	// post: an older listing may predate the runtime the backstop judged.
+	if obs == nil || !obs.Inventory.StartedAt.After(r.At) {
+		return false
 	}
 	switch readRuntimeName(obs, row.Info.SessionName, now, maxAge).state {
 	case nameAbsent, nameCorpse:

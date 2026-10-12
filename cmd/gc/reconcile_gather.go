@@ -175,7 +175,9 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 	if w.Census, err = readSessionCensus(now, legs); err != nil {
 		return World{}, fmt.Errorf("gather: %w", err)
 	}
-	w.ExecutionStalled = p.executionStalled(w.Census, w.Obs, now, 2*env.patrol()) // w.ObsMaxAge, set below
+	w.Patrol = env.patrol()
+	w.ObsMaxAge = 2 * w.Patrol
+	w.ExecutionStalled = p.executionStalled(w.Census, w.Obs, now, w.ObsMaxAge)
 	w.AliasOwed = p.aliasOwedFor(w.Census)
 	w.Phantoms = censusPhantoms(w.Census, cfg, e.CityName)
 	if e.ReadyWaits != nil {
@@ -209,8 +211,6 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 	}
 	w.ScaleCheck = rec.scaleCheck(now)
 
-	w.Patrol = env.patrol()
-	w.ObsMaxAge = 2 * w.Patrol
 	w.Observed = observeCensus(w.Obs, w.Census, now, w.ObsMaxAge)
 	var guard *endpointCapacityGuard
 	if e.Capacity != nil {

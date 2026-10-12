@@ -131,7 +131,7 @@ func TestExecutionStalledRequestSpentAtThePassRead(t *testing.T) {
 			if tc.listed {
 				listed = []string{"s-gc-1"}
 			}
-			_, read := stalledFixture(t, tc.row, allocNow.Add(-tc.posted), listed...)
+			_, read := stalledFixture(t, tc.row, allocNow.Add(-tc.posted-time.Second), listed...) // posted before the pass started
 			if spent := len(read()) == 0; spent != tc.wantSpent {
 				t.Fatalf("spent = %v, want %v", spent, tc.wantSpent)
 			}
@@ -160,7 +160,7 @@ func TestExecutionStalledRequestSpentOnlyByItsLandedBegin(t *testing.T) {
 		{"another reason's landed begin", decideDrainBegin + "idle", settledLanded, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			p, read := stalledFixture(t, poolRow("gc-1", "worker", 1, "active"), allocNow, "s-gc-1")
+			p, read := stalledFixture(t, poolRow("gc-1", "worker", 1, "active"), allocNow.Add(-time.Second), "s-gc-1")
 			if got := read(); len(got) != 1 {
 				t.Fatalf("before the begin: %v, want gc-1's request", got)
 			}
@@ -178,7 +178,7 @@ func TestExecutionStalledRequestSpentOnlyByItsLandedBegin(t *testing.T) {
 // execution-stalled stop request at its generation, spends it.
 func TestExecutionStalledAmbiguousBeginSpentByTheCensus(t *testing.T) {
 	stalled := []string{session.DrainIntentReasonKey, executionStalledDrainReason, session.DrainIntentAtKey, ago(time.Second), session.DrainIntentIncarnationKey, "1"}
-	p, before := stalledFixture(t, poolRow("gc-1", "worker", 1, "active"), allocNow, "s-gc-1")
+	p, before := stalledFixture(t, poolRow("gc-1", "worker", 1, "active"), allocNow.Add(-time.Second), "s-gc-1")
 	if got := before(); len(got) != 1 {
 		t.Fatalf("before the begin: %v", got)
 	}
@@ -192,5 +192,169 @@ func TestExecutionStalledAmbiguousBeginSpentByTheCensus(t *testing.T) {
 	in := f.inputs()
 	if got := p.executionStalled(in.Census, in.Obs, allocNow, observeMaxAge); len(got) != 0 {
 		t.Fatalf("after the landed write's census: %v, want the request spent", got)
+	}
+}
+
+// stalledReadOn reports whether a pass over a live gc-1 at generation 1,
+// observed through snap (the fixture's own when nil), spends a request
+// posted at posted.
+func stalledReadOn(t *testing.T, posted time.Time, snap func(*allocFixture) *ObservationSnapshot) bool {
+	t.Helper()
+	f := newAllocFixture(t, &config.City{Agents: []config.Agent{allocPoolAgent("worker", 3)}}).sessions(poolRow("gc-1", "worker", 1, "active"))
+	in := f.inputs()
+	obs := in.Obs
+	if snap != nil {
+		obs = snap(f)
+	}
+	p := newPlanner(newFakePlannerClock(plannerT0), func() time.Duration { return time.Minute }, nil, newInflightMap(), nil, nil)
+	p.postExecutionStalled(executionStalledRequest{ID: "gc-1", Generation: "1", At: posted})
+	return len(p.executionStalled(in.Census, obs, allocNow, observeMaxAge)) == 0
+}
+
+func ownStalledAttrs() map[string]InventoryAttrs {
+	return map[string]InventoryAttrs{"s-gc-1": {DeadKnown: true, AttachedKnown: true, Identity: readIdentity("gc-1")}}
+}
+
+// Kills a request spent by a runtime read that does not prove the runtime
+// gone (the #7658 r4 review's table): only a fresh complete pass without the
+// name, or a corpse, spends it. A partial, failed or unattested listing, a
+// stale or missing pass, presence carried from an earlier pass or a probe, a
+// zombie, and a live runtime keep it.
+func TestExecutionStalledRuntimeSpendNeedsAConfirmedRead(t *testing.T) {
+	posted := allocNow.Add(-time.Second) // before the pass at allocNow started
+	for _, tc := range []struct {
+		name      string
+		snap      func(*allocFixture) *ObservationSnapshot
+		wantSpent bool
+	}{
+		{"complete pass without the name (gone)", func(*allocFixture) *ObservationSnapshot {
+			return newObserveCache().publish(allocNow, nil, completeBackend("tmux"))
+		}, true},
+		{"partial pass without the name", func(*allocFixture) *ObservationSnapshot {
+			return newObserveCache().publish(allocNow, nil, partialSingle())
+		}, false},
+		{"failed pass", func(*allocFixture) *ObservationSnapshot {
+			return newObserveCache().publish(allocNow, nil, failedSingle())
+		}, false},
+		{"unattested backend without the name", func(*allocFixture) *ObservationSnapshot {
+			return newObserveCache().publish(allocNow, nil, unattestedBackend("exec"))
+		}, false},
+		{"complete tmux, partial acp", func(*allocFixture) *ObservationSnapshot {
+			b := partialSingle()
+			b.Label = "acp"
+			return newObserveCache().publish(allocNow, nil, completeBackend("tmux"), b)
+		}, false},
+		{"stale complete pass without the name", func(*allocFixture) *ObservationSnapshot {
+			return newObserveCache().publish(allocNow.Add(-3*observeMaxAge), nil, completeBackend("tmux"))
+		}, false},
+		{"no pass at all", func(*allocFixture) *ObservationSnapshot {
+			return newObserveCache().Snapshot()
+		}, false},
+		{"listed by an earlier pass, the latest partial without it", func(*allocFixture) *ObservationSnapshot {
+			c := newObserveCache()
+			c.publish(allocNow.Add(-20*time.Second), ownStalledAttrs(), completeBackend("tmux", "s-gc-1"))
+			return c.publish(allocNow, nil, partialSingle())
+		}, false},
+		{"a probe listed it after a complete pass without it", func(*allocFixture) *ObservationSnapshot {
+			c := newObserveCache()
+			c.publish(allocNow, nil, completeBackend("tmux"))
+			c.Note("s-gc-1", FactListed, ObsYes, allocNow.Add(time.Second), SourceProbe, "")
+			return c.Snapshot()
+		}, false},
+		{"a corpse (pane dead)", func(f *allocFixture) *ObservationSnapshot {
+			f.corpse("s-gc-1")
+			return f.observation()
+		}, true},
+		{"a zombie (pane alive, agent dead)", func(f *allocFixture) *ObservationSnapshot {
+			f.alive("s-gc-1", InventoryAttrs{AttachedKnown: true}).fact("s-gc-1", FactProcessAlive, ObsNo)
+			return f.observation()
+		}, false},
+		{"alive", func(f *allocFixture) *ObservationSnapshot {
+			f.alive("s-gc-1", InventoryAttrs{AttachedKnown: true})
+			return f.observation()
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if spent := stalledReadOn(t, posted, tc.snap); spent != tc.wantSpent {
+				t.Fatalf("spent = %v, want %v", spent, tc.wantSpent)
+			}
+		})
+	}
+}
+
+// Kills absence or a corpse read on a pass that started before the post
+// spending the request (the r4 hardening ruling): that listing may predate
+// the runtime the backstop judged stalled. A pass started after the post
+// spends it.
+func TestExecutionStalledRuntimeSpendNeedsAPassAfterThePost(t *testing.T) {
+	gone := func(*allocFixture) *ObservationSnapshot {
+		return newObserveCache().publish(allocNow.Add(-10*time.Second), nil, completeBackend("tmux"))
+	}
+	corpse := func(*allocFixture) *ObservationSnapshot {
+		attrs := ownStalledAttrs()
+		a := attrs["s-gc-1"]
+		a.AllPanesDead = true
+		attrs["s-gc-1"] = a
+		return newObserveCache().publish(allocNow.Add(-10*time.Second), attrs, completeBackend("tmux", "s-gc-1"))
+	}
+	for _, tc := range []struct {
+		name      string
+		snap      func(*allocFixture) *ObservationSnapshot
+		posted    time.Duration // before allocNow; the pass started 10s before it
+		wantSpent bool
+	}{
+		{"gone, on a pass started before the post", gone, 5 * time.Second, false},
+		{"gone, on a pass started at the post", gone, 10 * time.Second, false},
+		{"gone, on a pass started after the post", gone, 15 * time.Second, true},
+		{"a corpse, on a pass started before the post", corpse, 5 * time.Second, false},
+		{"a corpse, on a pass started after the post", corpse, 15 * time.Second, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if spent := stalledReadOn(t, allocNow.Add(-tc.posted), tc.snap); spent != tc.wantSpent {
+				t.Fatalf("spent = %v, want %v", spent, tc.wantSpent)
+			}
+		})
+	}
+}
+
+// Kills a request spent end to end by bad listings: a partial or failed
+// listing, or a tmux server that is unreachable but not confirmed dead, for
+// several passes spends no request, and A16 begins once listings recover,
+// with no new post (the r4 review's sim probe).
+func TestSimExecutionStalledBadListingsKeepTheRequest(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		bad  func(p *simProvider)
+	}{
+		{"partial listing", func(p *simProvider) { p.listing = 1 }},
+		{"failed listing", func(p *simProvider) { p.listing = 2 }},
+		{"server unreachable, not confirmed dead", func(p *simProvider) { p.serverDown, p.confirmable = true, false }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-1"), gc1Work())
+			s.settle()
+			s.sp.mu.Lock()
+			tc.bad(s.sp)
+			s.sp.mu.Unlock()
+			s.p.postExecutionStalled(executionStalledRequest{ID: "gc-1", Generation: "1", At: s.clk.Now()})
+			for range 5 {
+				s.advance(simPatrol)
+				s.settle()
+				if s.gc1()[session.DrainIntentReasonKey] == executionStalledDrainReason {
+					break // A16 may act on presence carried from the last fresh pass
+				}
+			}
+			s.sp.mu.Lock()
+			s.sp.listing, s.sp.serverDown = 0, false
+			s.sp.mu.Unlock()
+			for range 4 {
+				if s.gc1()[session.DrainIntentReasonKey] == executionStalledDrainReason {
+					return
+				}
+				s.advance(simPatrol)
+				s.settle()
+			}
+			t.Errorf("row %v: the stall request was spent by the bad listings, want A16's begin once they recover", s.gc1())
+		})
 	}
 }
