@@ -4657,6 +4657,78 @@ func matchesPromptPrefix(line, readyPromptPrefix string) bool {
 	return false
 }
 
+// isMenuCursorRow reports whether lines[i] is the selected row of a numbered
+// option menu rather than the runtime's composer. Codex marks the selected
+// option of its startup dialogs with its prompt glyph ("› 1. Trust and
+// continue" over "  2. Quit"), so the row matches the ready-prompt prefix
+// while the pane is still waiting for an answer. Reading it as ready delivers
+// the startup nudge into the dialog, and Codex's submit sequence starts with
+// Escape, which quits Codex from its folder-trust dialog.
+//
+// A row counts only when the nearest non-blank line above or below it is the
+// neighboring numbered option, so a composer draft that merely starts with
+// "1. " still reads as a prompt.
+func isMenuCursorRow(lines []string, i int, readyPromptPrefix string) bool {
+	if readyPromptPrefix == "" || i < 0 || i >= len(lines) {
+		return false
+	}
+	normalize := func(line string) string {
+		return strings.ReplaceAll(strings.TrimSpace(line), "\u00a0", " ")
+	}
+	normalizedPrefix := strings.ReplaceAll(readyPromptPrefix, "\u00a0", " ")
+	trimmed := normalize(lines[i])
+	number := 0
+	for _, cand := range []string{trimmed, stripLeadingBoxBorder(trimmed)} {
+		rest, ok := strings.CutPrefix(cand, normalizedPrefix)
+		if !ok {
+			continue
+		}
+		if n, ok := menuRowNumber(rest); ok {
+			number = n
+			break
+		}
+	}
+	if number == 0 {
+		return false
+	}
+	neighbor := func(step int) (int, bool) {
+		for j := i + step; j >= 0 && j < len(lines); j += step {
+			cand := normalize(lines[j])
+			if cand == "" {
+				continue
+			}
+			return menuRowNumber(stripLeadingBoxBorder(cand))
+		}
+		return 0, false
+	}
+	if n, ok := neighbor(-1); ok && n == number-1 {
+		return true
+	}
+	if n, ok := neighbor(1); ok && n == number+1 {
+		return true
+	}
+	return false
+}
+
+// menuRowNumber parses the option number off a menu row label such as
+// "2. Quit". It reports false for anything that does not start with a
+// positive number followed by ". ".
+func menuRowNumber(label string) (int, bool) {
+	label = strings.TrimLeft(label, " \t")
+	digits := 0
+	for digits < len(label) && label[digits] >= '0' && label[digits] <= '9' {
+		digits++
+	}
+	if digits == 0 || digits > 3 || !strings.HasPrefix(label[digits:], ". ") {
+		return 0, false
+	}
+	n, err := strconv.Atoi(label[:digits])
+	if err != nil || n == 0 {
+		return 0, false
+	}
+	return n, true
+}
+
 // stripLeadingBoxBorder removes a leading vertical box-drawing character
 // (│ U+2502 / ┃ U+2503) plus surrounding spaces from a line, so prompt detection
 // can see a prompt glyph that a TUI renders inside a bordered input box (grok).
@@ -4712,9 +4784,10 @@ func (t *Tmux) WaitForRuntimeReady(ctx context.Context, session string, rc *Runt
 			}
 			continue
 		}
-		// Look for runtime prompt indicator at start of line
-		for _, line := range lines {
-			if matchesPromptPrefix(line, rc.Tmux.ReadyPromptPrefix) {
+		// Look for runtime prompt indicator at start of line. The cursor row
+		// of a numbered menu carries the same glyph and is not a prompt.
+		for i, line := range lines {
+			if matchesPromptPrefix(line, rc.Tmux.ReadyPromptPrefix) && !isMenuCursorRow(lines, i, rc.Tmux.ReadyPromptPrefix) {
 				return nil
 			}
 		}
@@ -4847,9 +4920,14 @@ func PaneShowsIdlePrompt(lines []string, promptPrefix string) bool {
 	// Scan captured lines for the prompt prefix.
 	// Claude Code renders a status bar below the prompt line,
 	// so the prompt may not be the last non-empty line.
-	for _, line := range lines {
+	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" {
+			continue
+		}
+		// A startup dialog's selected option ("› 1. Trust and continue") is
+		// not an idle boundary either: text delivered now answers the dialog.
+		if isMenuCursorRow(lines, i, promptPrefix) {
 			continue
 		}
 		if matchesPromptPrefix(trimmed, promptPrefix) || (prefix != "" && trimmed == prefix) {
