@@ -270,10 +270,12 @@ func TestCreatingHealSkipsPendingCreateAndWakeRows(t *testing.T) {
 // close), a census-only rig-leg row (another city's, on a shared rig store), a
 // dead runtime A12 has not classified, a creating row (the creating heal's)
 // and an asleep row are not healed by it. A Wake row is restarted in the same
-// pass instead: A18's start carries legacy's heal patch into its PreWake.
+// pass instead: A18's start carries legacy's heal patch into its PreWake. A
+// committed manual conversation (key and hash) heals as legacy heals it.
 func TestDeadRuntimeHealCoversEveryCommittedRowAL1DoesNotDrain(t *testing.T) {
 	named := []string{"configured_named_session", "true", "configured_named_identity", "chat", "configured_named_mode", "always"}
 	held := []string{"held_until", rowAt(time.Hour)}
+	manual := []string{"session_origin", "manual"}
 	for _, tc := range []struct {
 		name     string
 		liveness rowLiveness
@@ -284,6 +286,9 @@ func TestDeadRuntimeHealCoversEveryCommittedRowAL1DoesNotDrain(t *testing.T) {
 	}{
 		{"named active", livenessGone, desireNone, append([]string{"state", "active"}, named...), "", true},
 		{"named awake", livenessGone, desireSleep, append([]string{"state", "awake"}, named...), "", true},
+		{"manual active", livenessGone, desireNone, append([]string{"state", "active"}, manual...), "", true},
+		{"manual awake, legacy marker", livenessGone, desireSleep, []string{"state", "awake", "manual_session", "true"}, "", true},
+		{"manual wake: restarted, the heal in its start", livenessGone, desireWake, append([]string{"state", "active"}, manual...), "", false},
 		{"wake: restarted, the heal in its start", livenessGone, desireWake, []string{"state", "active"}, "", false},
 		{"pool sleep", livenessGone, desireSleep, []string{"state", "active"}, "", true},
 		{"pool keep", livenessGone, desireKeep, []string{"state", "awake"}, "", true},
@@ -333,7 +338,7 @@ func TestDeadRuntimeHealCoversEveryCommittedRowAL1DoesNotDrain(t *testing.T) {
 // Kills asleepHealPatch drifting from legacy's healStatePatchWithRollbackInfo
 // for every row it heals: a claimless creating row past the stale window and
 // a committed row, each sleep reason, with and without a continuation, named
-// mode always or not.
+// mode always or not, manual (by origin or the legacy marker) or not.
 func TestAsleepHealPatchMatchesLegacy(t *testing.T) {
 	reasons := []session.SleepReason{
 		"", "crashed", session.SleepReasonKilled, session.SleepReasonIdle, session.SleepReasonIdleTimeout, session.SleepReasonNoWakeReason,
@@ -344,14 +349,18 @@ func TestAsleepHealPatchMatchesLegacy(t *testing.T) {
 	}
 	for _, state := range []string{"creating", "active", "awake"} {
 		for _, reason := range reasons {
-			for _, cont := range []session.Info{{}, {SessionKey: "k"}, {StartedConfigHash: " h "}} {
+			for _, cont := range []session.Info{{}, {SessionKey: "k"}, {StartedConfigHash: " h "}, {SessionKey: "k", StartedConfigHash: "h"}} {
 				for _, mode := range []string{"", "on_demand", "always"} {
-					info := cont
-					info.ID, info.MetadataState, info.SleepReason = "gc-1", state, string(reason)
-					info.CreatedAt = gatherNow.Add(-time.Hour)
-					info.ConfiguredNamedSession, info.ConfiguredNamedMode = mode != "", mode
-					if got, want := asleepHealPatch(info), legacyHeal(info); !maps.Equal(got, want) {
-						t.Errorf("%s/%q/%+v/%q: patch %v, legacy %v", state, reason, cont, mode, got, want)
+					// A manual row by origin or by the legacy marker (#7470).
+					for _, manual := range []session.Info{{}, {SessionOrigin: "manual"}, {ManualSessionMetadata: "true"}} {
+						info := cont
+						info.ID, info.MetadataState, info.SleepReason = "gc-1", state, string(reason)
+						info.CreatedAt = gatherNow.Add(-time.Hour)
+						info.ConfiguredNamedSession, info.ConfiguredNamedMode = mode != "", mode
+						info.SessionOrigin, info.ManualSessionMetadata = manual.SessionOrigin, manual.ManualSessionMetadata
+						if got, want := asleepHealPatch(info), legacyHeal(info); !maps.Equal(got, want) {
+							t.Errorf("%s/%q/%+v/%q/%+v: patch %v, legacy %v", state, reason, cont, mode, manual, got, want)
+						}
 					}
 				}
 			}

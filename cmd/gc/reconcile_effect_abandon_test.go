@@ -42,6 +42,15 @@ func legacyWakeFailure(t *testing.T, row beads.Bead) map[string]string {
 	return b.Metadata
 }
 
+// withMeta is row with meta's key-value pairs set on a copy of its metadata.
+func withMeta(row beads.Bead, meta ...string) beads.Bead {
+	row.Metadata = maps.Clone(row.Metadata)
+	for i := 0; i+1 < len(meta); i += 2 {
+		row.Metadata[meta[i]] = meta[i+1]
+	}
+	return row
+}
+
 // hasAny reports whether patch writes any of keys.
 func hasAny(patch session.MetadataPatch, keys ...string) bool {
 	for _, k := range keys {
@@ -68,14 +77,25 @@ func TestAbandonStepClasses(t *testing.T) {
 	}
 	other := startFailureRead{startFailure: startFailure{cause: causeStartError, err: boom, undo: undo, display: "worker"}}
 
-	wake := legacyWakeFailure(t, creating)
 	step := abandonStep(abandonView(k, creating, txRuntime{Class: rtAbsent}, other))
 	if step.Fail != causeStartError || step.Write["state"] != "asleep" || step.Write["wake_request"] != "explicit" || step.Write["last_woke_at"] != "" {
 		t.Fatalf("any other failure: %+v, want the PreWake restored and the start's failure", step)
 	}
-	for key, v := range wake {
-		if v != creating.Metadata[key] && step.Write[key] != v {
-			t.Errorf("any other failure: %s = %q, legacy's recordWakeFailure writes %q", key, step.Write[key], v)
+	// A committed manual conversation (key and hash), by origin or by the
+	// legacy marker, fails as legacy's recordWakeFailure fails it (#7470):
+	// every key legacy changes, and no conversation key legacy keeps.
+	for _, row := range []beads.Bead{creating, withMeta(creating, "session_origin", "manual"), withMeta(creating, "manual_session", "true")} {
+		wake := legacyWakeFailure(t, row)
+		step := abandonStep(abandonView(k, row, txRuntime{Class: rtAbsent}, other))
+		for key, v := range wake {
+			if v != row.Metadata[key] && step.Write[key] != v {
+				t.Errorf("any other failure of %v: %s = %q, legacy's recordWakeFailure writes %q", row.Metadata, key, step.Write[key], v)
+			}
+		}
+		for _, key := range []string{"session_key", "started_config_hash", "continuation_reset_pending"} {
+			if v, ok := step.Write[key]; ok && v != wake[key] {
+				t.Errorf("any other failure of %v: %s = %q, legacy's recordWakeFailure leaves %q", row.Metadata, key, v, wake[key])
+			}
 		}
 	}
 

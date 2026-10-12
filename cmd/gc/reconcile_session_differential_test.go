@@ -1182,6 +1182,13 @@ func parityFixtures() []parityFixture {
 			Explain: map[string]string{"row:gc-1:*policy": "sleep-policy-keys"},
 		},
 		{
+			// A committed manual conversation (key and hash, #7470): both
+			// copies heal it asleep and keep its conversation.
+			Name: "an awake manual conversation whose runtime is gone", Behaviors: []string{"SESS-531", "SESS-725"},
+			Rows: []parityRow{awake("last_woke_at", at(-2*time.Hour), "quarantined_until", at(time.Hour), "session_key", "conversation-1", "started_config_hash", "v6:abc", "session_origin", "manual")}, Work: assigned,
+			Explain: map[string]string{"row:gc-1:*policy": "sleep-policy-keys"},
+		},
+		{
 			Name: "a stranded row past its confirmation window is repaired", Behaviors: []string{"SESS-625"},
 			Rows: []parityRow{awake("last_woke_at", at(-2*time.Hour), "quarantined_until", at(time.Hour), "stranded_event_emitted_at", at(-time.Hour))}, Work: assigned,
 			Explain: map[string]string{"row:gc-1:*policy": "sleep-policy-keys"},
