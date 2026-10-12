@@ -289,6 +289,71 @@ func TestApplySleepKeepsTheHolds(t *testing.T) {
 	}
 }
 
+// TestApplySleepKeepsALateQuarantinesReason (mc-slkxd): legacy's finalize
+// through the Sleep cell keeps the reason of a quarantine in force at its
+// slept_at (quarantine, rate_limit, context-churn); an expired quarantine's
+// reason, or any other, is the finalize's.
+func TestApplySleepKeepsALateQuarantinesReason(t *testing.T) {
+	now := time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
+	for _, c := range []struct {
+		reason string
+		until  time.Duration
+		want   string
+	}{
+		{"quarantine", time.Hour, "quarantine"},
+		{"rate_limit", time.Hour, "rate_limit"},
+		{"context-churn", time.Hour, "context-churn"},
+		{"quarantine", -time.Minute, "idle"},
+		{"idle", time.Hour, "drained"},
+	} {
+		store := beads.NewMemStore()
+		b := wakeRow(t, store)
+		until := now.Add(c.until).Format(time.RFC3339)
+		if err := store.SetMetadataBatch(b.ID, map[string]string{"sleep_reason": c.reason, "quarantined_until": until}); err != nil {
+			t.Fatal(err)
+		}
+		reason := "idle"
+		if c.reason == "idle" {
+			reason = "drained"
+		}
+		patch := SleepPatch(now, reason)
+		if _, err := NewStore(beads.SessionStore{Store: store}).ApplySleep(b.ID, patch); err != nil {
+			t.Fatal(err)
+		}
+		got, _ := store.Get(b.ID)
+		if got.Metadata["sleep_reason"] != c.want || got.Metadata["quarantined_until"] != until || got.Metadata["state"] != string(StateAsleep) {
+			t.Errorf("%s until %s: state=%q sleep_reason=%q quarantined_until=%q, want asleep with %q and the quarantine kept",
+				c.reason, c.until, got.Metadata["state"], got.Metadata["sleep_reason"], got.Metadata["quarantined_until"], c.want)
+		}
+		if !maps.Equal(patch, SleepPatch(now, reason)) {
+			t.Errorf("%s: ApplySleep mutated its input", c.reason)
+		}
+	}
+}
+
+// TestKeepQuarantineReason pins the helper's cases.
+func TestKeepQuarantineReason(t *testing.T) {
+	now := time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
+	live := Disposition{Quarantine: now.Add(time.Hour)}
+	for _, c := range []struct {
+		d      Disposition
+		reason string
+		kept   bool
+	}{
+		{live, "quarantine", true},
+		{live, "rate_limit", true},
+		{live, "context-churn", true},
+		{live, "idle", false},
+		{Disposition{Quarantine: now.Add(-time.Minute)}, "quarantine", false},
+		{Disposition{}, "quarantine", false},
+	} {
+		patch := KeepQuarantineReason(MetadataPatch{"sleep_reason": "idle"}, c.d, c.reason, now)
+		if _, set := patch["sleep_reason"]; set == c.kept {
+			t.Errorf("%+v %q: patch %v, want the row's reason kept %v", c.d, c.reason, patch, c.kept)
+		}
+	}
+}
+
 // TestApplySleepReadsTheRowFresh: the decision comes from the
 // store's row, not the caller's snapshot: a suspend that landed after the
 // snapshot keeps its intent through a drain completion.

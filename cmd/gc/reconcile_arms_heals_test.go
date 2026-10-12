@@ -961,3 +961,21 @@ func TestStabilityClearEndsTheQuarantinesReason(t *testing.T) {
 		}
 	}
 }
+
+// Kills A6's idle-sleep heal overwriting a quarantine's reason (mc-slkxd):
+// a committed row with an idle stop pending whose runtime is gone heals to
+// SleepPatch(idle), but keeps quarantine while quarantined_until is ahead
+// (an expired one is the timer heal's first).
+func TestIdleStopHealKeepsAQuarantinesReason(t *testing.T) {
+	for _, c := range []struct {
+		until time.Duration
+		want  string
+	}{{time.Hour, "quarantine"}} {
+		h := newHealCase(t, livenessGone, desireSleep, "state", "active", "sleep_intent", "idle-stop-pending", "sleep_reason", "quarantine", "quarantined_until", rowAt(c.until))
+		it := h.decide()
+		got, set := it.folded()["sleep_reason"]
+		if it.Reason != decideDeadRuntimeHeal || c.want == "quarantine" && set || c.want == "idle" && got != "idle" {
+			t.Fatalf("until %s: decideRow = (%q, %v), want the heal with sleep_reason %q", c.until, it.Reason, it.folded(), c.want)
+		}
+	}
+}

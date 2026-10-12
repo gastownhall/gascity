@@ -213,6 +213,7 @@ func deadRuntimePatch(r *rowFacts, heal bool) (patch session.MetadataPatch, clas
 		// it, which keeps the pre-drain sleep_policy_fingerprint, with the
 		// disposition's Sleep cell.
 		maps.Copy(patch, session.SleepPatch(r.w.Now, drainIdle))
+		session.KeepQuarantineReason(patch, session.DispositionOfInfo(info), info.SleepReason, r.w.Now) // a quarantine's reason dominates (mc-slkxd)
 		return patch, session.CellInfo(info, session.ActorController, session.DispEvent{Kind: session.EvSleep}, r.w.Now), false
 	}
 	_, draining := activeStop(r.row)

@@ -328,8 +328,10 @@ func stopFinalizeStep(v txView, work finalizeWork, _ error) txStep {
 	}
 	var kept *beads.Bead
 	var class session.DispositionPatch
+	from := session.DecodeDisposition(v.Meta)
+	session.KeepQuarantineReason(patch, from, v.Row.SleepReason, v.Now) // a late quarantine's reason dominates (mc-slkxd)
 	if choice.AsSleep {
-		to, err := session.DecodeDisposition(v.Meta).Apply(session.ActorController, session.DispEvent{Kind: session.EvSleep}, session.State(v.Row.MetadataState), v.Now)
+		to, err := from.Apply(session.ActorController, session.DispEvent{Kind: session.EvSleep}, session.State(v.Row.MetadataState), v.Now)
 		if err != nil {
 			return txStep{Refuse: causeDispositionRefused, Err: err}
 		}
