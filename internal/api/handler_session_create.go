@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -412,7 +413,7 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 
 	// Deliver initial message if provided.
 	if msg := strings.TrimSpace(body.Message); msg != "" {
-		if _, sendErr := s.submitMessageToSession(r.Context(), store.Store, info.ID, msg, session.SubmitIntentDefault); sendErr != nil {
+		if _, sendErr := s.submitMessageToSession(r.Context(), store.Store, info.ID, msg, session.SubmitIntentDefault, false); sendErr != nil {
 			log.Printf("session %s: initial message delivery failed: %v", info.ID, sendErr)
 			rollbackErr := s.rollbackCreatedSession(store, info.ID)
 			s.idem.unreserve(idemKey)
@@ -464,7 +465,7 @@ func (s *Server) rollbackCreatedSession(store beads.SessionStore, sessionID stri
 	if store.Store == nil || strings.TrimSpace(sessionID) == "" {
 		return nil
 	}
-	if err := s.sessionManager(store.Store).Close(sessionID); err != nil {
+	if err := s.sessionManager(store.Store).Close(context.Background(), s.actor(session.ActorOperator), sessionID); err != nil {
 		return fmt.Errorf("close created session: %w", err)
 	}
 	if err := store.Delete(sessionID); err != nil {

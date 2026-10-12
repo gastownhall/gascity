@@ -24,6 +24,11 @@
           "type": "string",
           "description": "StopGrace is how long stopping an ACP session waits after SIGTERM\nbefore escalating to SIGKILL. Raise it for agents that need longer to\ndrain in-flight tool calls on shutdown. Duration string (e.g., \"5s\",\n\"20s\"). Defaults to \"5s\"; non-positive or unparseable values fall back\nto the default. gc stop bounds each session at 30s, so keep stop_grace\ncomfortably below that.",
           "default": "5s"
+        },
+        "cancel_timeout": {
+          "type": "string",
+          "description": "CancelTimeout is how long interrupting an ACP session waits for the\nagent to end its turn after session/cancel before falling back to\nSIGINT. The interrupt never kills the agent. Duration string (e.g.,\n\"10s\", \"30s\"). Defaults to \"10s\"; non-positive or unparseable values\nfall back to the default.",
+          "default": "10s"
         }
       },
       "additionalProperties": false,
@@ -112,7 +117,7 @@
         },
         "prompt_template": {
           "type": "string",
-          "description": "PromptTemplate is the path to this agent's prompt template file.\nRelative paths resolve against the city directory."
+          "description": "PromptTemplate is the path to this agent's prompt template file.\nRelative paths resolve against the directory of the file that declares\nthe agent: the city directory for city.toml, the fragment's directory\nfor an included fragment, and the pack directory for an agent a pack\ndeclares — in pack.toml or in agents/\u003cname\u003e/agent.toml alike. Paths\nprefixed with \"//\" resolve against the city root."
         },
         "nudge": {
           "type": "string",
@@ -234,7 +239,7 @@
         },
         "work_query": {
           "type": "string",
-          "description": "WorkQuery is the shell command template to find available work for this\nagent. If it contains Go template placeholders, gc expands them using\nthe same PathContext fields as work_dir and session_setup (Agent,\nAgentBase, Rig, RigRoot, CityRoot, CityName, DefaultBranch) before\nprobe, hook, and prompt-context execution. Used by gc hook and available in prompt\ntemplates as {{.WorkQuery}}.\nIf unset, Gas City uses a three-tier default query:\n  1. in_progress work assigned to this session/alias (crash recovery)\n  2. ready work assigned to this session/alias (pre-assigned work)\n  3. ready unassigned work with gc.routed_to=\u003cqualified-name\u003e\nWhen the controller probes for demand without session context, only the\nrouted_to tier applies. Override to integrate with external task systems."
+          "description": "WorkQuery is the shell command template to find available work for this\nagent. If it contains Go template placeholders, gc expands them using\nthe same PathContext fields as work_dir and session_setup (Agent,\nAgentBase, Rig, RigRoot, CityRoot, CityName, DefaultBranch) before\nprobe, hook, and prompt-context execution. Used by gc hook and available in prompt\ntemplates as {{.WorkQuery}}.\nIf unset, Gas City uses a three-tier default query:\n  1. in_progress work assigned to this session/alias (crash recovery)\n  2. ready work assigned to this session/alias (pre-assigned work)\n  3. ready unassigned work with gc.routed_to=\u003cqualified-name\u003e\nWhen the controller probes for demand without session context, only the\nrouted_to tier applies. Override to integrate with external task systems.\nA custom query that looks up assigned work should read $GC_ALIAS: under\ngc hook --claim, a single-slot pool session the supervisor collapsed onto\nthe agent's canonical [[named_session]] identity runs the query with\n$GC_ALIAS set to that identity, while $GC_AGENT keeps the session's\nruntime value."
         },
         "sling_query": {
           "type": "string",
@@ -1970,6 +1975,10 @@
         "retention_ttl": {
           "type": "string",
           "description": "RetentionTTL has two consumers: it is how long read messages are\nretained before purge, and how long a read mail bead stays open before\nthe nudge-mail sweep closes it. Empty or \"0\" disables read-message\npurge. The sweep distinguishes the two: empty leaves it at its own\n60-minute default, while \"0\" disables its mail-close phase."
+        },
+        "unread_retention_ttl": {
+          "type": "string",
+          "description": "UnreadRetentionTTL is how long a never-read mail bead stays open before\nthe nudge-mail sweep closes it. Empty or \"0\" disables the unread-mail\nphase; it is opt-in so unread mail is never closed by default."
         }
       },
       "additionalProperties": false,

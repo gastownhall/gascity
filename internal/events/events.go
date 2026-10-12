@@ -183,6 +183,14 @@ const (
 	// drain-ack defect is spreading while this bound quietly absorbs it.
 	// See ga-rxhu2.
 	SessionPoolSlotRetiredAtDrainDeadline = "session.pool_slot_retired_at_drain_deadline"
+	// SessionStrandedClaims fires when claims no lane serves (an unserved
+	// route, or an expanded workflow root with no route of its own) stay
+	// assigned to a closed or retired session: stranded work, which no sweep
+	// releases (owner ruling O5, revised). The close completed; the claims were
+	// kept rather than released into no lane. It fires when the operation
+	// completes and again every 15 minutes (D6's cadence) while they stay, at
+	// once when the set of claims changes.
+	SessionStrandedClaims = "session.stranded_claims"
 	// SessionUnknownState fires when the reconciler observes a session bead
 	// whose metadata state it does not recognize. The reconciler skips such
 	// beads (forward-compatible rollback: an older reconciler ignores a newer
@@ -246,12 +254,13 @@ const (
 	// SessionPendingCleared fires when that interaction goes away — answered,
 	// withdrawn, replaced by a different interaction, or the session left the
 	// set GET /v0/city/{cityName}/pending probes. Both carry the same
-	// session_id and request_id, and each fires on a transition, never once per
-	// detection poll. The API server's pending monitor emits them while at
-	// least one event stream is open for the city; see
-	// internal/api/pending_monitor.go for the detection cadence, the
-	// restart/resume contract, and why delivery is not exactly once across a
-	// restart.
+	// session_id and request_id, and each fires once per transition, never once
+	// per detection pass. The city's controller emits them whether or not any
+	// client watches the stream; see internal/pendingwatch for the detection
+	// cadence and cmd/gc/pending_interaction_lane.go for the restart
+	// contract (the announced set is rebuilt from this event log). That
+	// contract can miss the clear of an interaction outstanding when a clean
+	// stop parked its session; pendingwatch.RebuildSince says when.
 	SessionPending        = "session.pending"
 	SessionPendingCleared = "session.pending_cleared"
 	ConvoyCreated         = "convoy.created"
@@ -432,6 +441,11 @@ const (
 	// the next episode fires independently. (ADR-0013 A1 M3a)
 	ProviderHealthGateAlert = "provider.health_gate_alert"
 
+	// ReconcilerAlert is the v2 session reconciler's operator alert: a
+	// condition that should never happen, or that needs an operator. The
+	// payload's "alert" names it (cmd/gc reconcile_observe_v2.go).
+	ReconcilerAlert = "reconciler.alert"
+
 	// Emergency events are dolt-independent escalation records written to
 	// .gc/emergency and mirrored into the city event log.
 	EmergencySignaled = "emergency.signaled"
@@ -496,6 +510,7 @@ var KnownEventTypes = []string{
 	SessionDrainStopEscalated,
 	SessionStranded,
 	SessionPoolSlotRetiredAtDrainDeadline,
+	SessionStrandedClaims,
 	SessionUnknownState,
 	SessionWakeRefused,
 	SessionResetStalled,
@@ -543,9 +558,9 @@ var KnownEventTypes = []string{
 	StorageBindingConverged, StorageBindingGenesis,
 	StorageBindingUnconverged, StorageBindingUncheckable,
 	StorageBindingNotConfigured,
-	// ProviderHealthGateAlert is intentionally omitted from KnownEventTypes.
-	// The event is emitted by the reconciler but its typed SSE payload is not
-	// yet registered in internal/api (the payload registration lives in a
+	// ProviderHealthGateAlert and ReconcilerAlert are intentionally omitted
+	// from KnownEventTypes. Each is emitted by the reconciler but its typed
+	// SSE payload is not yet registered in internal/api (the payload registration lives in a
 	// follow-up that adds the full SSE projection). Until then, subscribers
 	// receive it via the custom-event envelope.
 }

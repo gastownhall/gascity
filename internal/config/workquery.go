@@ -333,16 +333,23 @@ func ephemeralReadyDependencyCandidateFilterJQ(selector string, limit int, exclu
 	return filter
 }
 
-func legacyEphemeralPoolDemandShell(limit int, topo QueryTopology, quiet bool) string {
-	if topo.includeEphemeralReady() {
-		return `printf "[]"`
-	}
-	filter := legacyEphemeralReadyFilterJQ(
+// legacyEphemeralPoolDemandFilterJQ selects, from the open ephemeral tier,
+// the unassigned rows routed to $target or carrying its unexpanded legacy
+// workflow run target.
+func legacyEphemeralPoolDemandFilterJQ(limit int) string {
+	return legacyEphemeralReadyFilterJQ(
 		`select((.assignee // "") == "")`+
 			` | select((`+jqMeta(beadmeta.RoutedToMetadataKey)+` == $target) or ((`+jqMeta(beadmeta.RoutedToMetadataKey)+` == "") and (`+jqMeta(beadmeta.RunTargetMetadataKey)+` == $target) and (`+jqMeta(beadmeta.KindMetadataKey)+` == "`+beadmeta.KindWorkflow+`") and (`+jqMeta(beadmeta.WorkflowExpandedMetadataKey)+` != "true")))`,
 		limit,
 		true,
 	)
+}
+
+func legacyEphemeralPoolDemandShell(limit int, topo QueryTopology, quiet bool) string {
+	if topo.includeEphemeralReady() {
+		return `printf "[]"`
+	}
+	filter := legacyEphemeralPoolDemandFilterJQ(limit)
 	query := bdQueryEphemeralStatusShell("open")
 	if quiet {
 		query = bdQueryEphemeralStatusQuietShell("open")
@@ -352,6 +359,32 @@ func legacyEphemeralPoolDemandShell(limit int, topo QueryTopology, quiet bool) s
 		jqStderr = ` 2>/dev/null`
 	}
 	return `{ ` + query + ` | jq --arg target "$target" ` + shellquote.Quote(filter) + jqStderr + `; } || printf "[]"`
+}
+
+// legacyEphemeralPoolDemandFromSnapshotShell is the worker-side form of
+// legacyEphemeralPoolDemandShell: it assigns shellVar the legacy ephemeral
+// pool-demand candidates, filtered from the memoized open-ephemeral snapshot
+// (ephemeralStatusSnapshotShell) rather than a scan of its own. The assigned
+// ready tier before it takes that snapshot with the same read — `bd query`
+// of the open ephemeral tier, quiet — so a combined work query scans the
+// wisp tier for open rows once, not once per tier and target; a probe run
+// with no snapshot taken scans once and keeps it for the next target. The
+// same filter applies to the same rows, so the selection is unchanged.
+//
+// The snapshot can be stale by the time this tier reads it: it was taken
+// before the assigned and routed tiers ran, so a wisp routed to the target
+// since is not offered until the next probe, and one another worker claimed
+// since is still offered. That is the trade ephemeralStatusSnapshotShell
+// already makes between identities, and both are safe: a work query is a
+// point-in-time probe the caller re-runs, and a stale candidate is settled by
+// the claim that follows it, not by this read.
+func legacyEphemeralPoolDemandFromSnapshotShell(shellVar string, limit int, topo QueryTopology) string {
+	if topo.includeEphemeralReady() {
+		return shellVar + `=$(printf "[]"); `
+	}
+	filter := legacyEphemeralPoolDemandFilterJQ(limit)
+	return ephemeralStatusSnapshotShell("open_ephemeral", "open") +
+		shellVar + `=$({ printf "%s" "$open_ephemeral" | jq --arg target "$target" ` + shellquote.Quote(filter) + ` 2>/dev/null; } || printf "[]"); `
 }
 
 // poolDemandFirstRowFunctionScript emits the work_query Tier 3 function: it
@@ -369,7 +402,7 @@ func poolDemandFirstRowFunctionScript(topo QueryTopology) string {
 		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit=20", topo) + readyReaderStderrSink(fed) + `)` + readyReaderFailurePropagation(fed) + `; ` +
 		`r=$(printf "%s" "$legacy_candidates" | ` + poolDemandMigrationFilterJQ(1) + ` 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
-		`legacy_ephemeral_candidates=$(` + legacyEphemeralPoolDemandShell(20, topo, true) + `); ` +
+		legacyEphemeralPoolDemandFromSnapshotShell("legacy_ephemeral_candidates", 20, topo) +
 		`r=$(printf "%s" "$legacy_ephemeral_candidates" | jq '.[0:1]' 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`return 1; ` +
@@ -440,6 +473,22 @@ func (a *Agent) poolDemandTarget() string {
 	return target
 }
 
+// identityLoopHead opens the loop over the hook's identities — GC_SESSION_ID,
+// GC_SESSION_NAME, GC_ALIAS, in that order — that every assigned tier runs,
+// binding each to $id. An unset identity, and one equal to an identity the loop
+// already visited, is skipped: for a configured named session the session name
+// and the alias are the same string, and the tiers would ask bd the identical
+// question twice for the identical answer. Only test builtins compare, so the
+// skip costs no process, and the comparison is exact for any identity string.
+func identityLoopHead() string {
+	return `gc_id_seen1=""; gc_id_seen2=""; ` +
+		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
+		`[ -z "$id" ] && continue; ` +
+		`[ "$id" = "$gc_id_seen1" ] && continue; ` +
+		`[ "$id" = "$gc_id_seen2" ] && continue; ` +
+		`if [ -z "$gc_id_seen1" ]; then gc_id_seen1="$id"; else gc_id_seen2="$id"; fi; `
+}
+
 func standardAssignedWorkQueryScript(topo QueryTopology) string {
 	return standardAssignedInProgressWorkQueryScriptDeferringGraphAnchor(topo) +
 		standardAssignedReadyWorkQueryScript(topo)
@@ -456,8 +505,7 @@ func standardAssignedWorkQueryScript(topo QueryTopology) string {
 // tier alone still receive the anchor.
 func standardAssignedInProgressWorkQueryScriptDeferringGraphAnchor(topo QueryTopology) string {
 	return `gc_assigned_workflow_anchor_json=""; ` +
-		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
-		`[ -z "$id" ] && continue; ` +
+		identityLoopHead() +
 		assignedInProgressTierCommand("id", topo) +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
 		inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(topo.FederatedReady, true) +
@@ -520,8 +568,7 @@ func assignedInProgressTierCommandWithLimit(shellVar string, topo QueryTopology,
 
 // standardAssignedInProgressWorkQueryScript is the crash-recovery tier.
 func standardAssignedInProgressWorkQueryScript(topo QueryTopology) string {
-	return `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
-		`[ -z "$id" ] && continue; ` +
+	return identityLoopHead() +
 		assignedInProgressTierCommand("id", topo) +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
 		inProgressBlockedByEnrichmentScript(topo.FederatedReady, true) +
@@ -692,8 +739,7 @@ func assignedReadyTierCommand(shellVar string, topo QueryTopology) string {
 }
 
 func standardAssignedReadyWorkQueryScript(topo QueryTopology) string {
-	return `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
-		`[ -z "$id" ] && continue; ` +
+	return identityLoopHead() +
 		assignedReadyTierCommand("id", topo) +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		ephemeralAssignedReadyProbeScript("id", topo) +
@@ -707,8 +753,7 @@ func legacyControlAssignedWorkQueryScript(topo QueryTopology) string {
 
 func legacyControlAssignedInProgressWorkQueryScriptDeferringGraphAnchor(topo QueryTopology) string {
 	return `gc_assigned_workflow_anchor_json=""; ` +
-		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
-		`[ -z "$id" ] && continue; ` +
+		identityLoopHead() +
 		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
 		`for cand in "$id" "$legacy"; do ` +
 		`[ -z "$cand" ] && continue; ` +
@@ -728,8 +773,7 @@ func legacyControlAssignedInProgressWorkQueryScriptDeferringGraphAnchor(topo Que
 }
 
 func legacyControlAssignedInProgressWorkQueryScript(topo QueryTopology) string {
-	return `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
-		`[ -z "$id" ] && continue; ` +
+	return identityLoopHead() +
 		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
 		`for cand in "$id" "$legacy"; do ` +
 		`[ -z "$cand" ] && continue; ` +
@@ -743,8 +787,7 @@ func legacyControlAssignedInProgressWorkQueryScript(topo QueryTopology) string {
 }
 
 func legacyControlAssignedReadyWorkQueryScript(topo QueryTopology) string {
-	return `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
-		`[ -z "$id" ] && continue; ` +
+	return identityLoopHead() +
 		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
 		`for cand in "$id" "$legacy"; do ` +
 		`[ -z "$cand" ] && continue; ` +

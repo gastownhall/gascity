@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 )
 
 // lifecycleOrderProvider wraps runtime.Fake and additionally implements
@@ -232,6 +233,48 @@ func TestCmdStopBodyReportsTeardownErrorWithoutFailing(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "gc stop: teardown server: provider-stop-failed") {
 		t.Fatalf("stderr = %q, want teardown server warning", stderr.String())
+	}
+}
+
+// TestCmdStopBodyTearsDownServerThroughAutoProvider covers a city whose
+// provider is auto-wrapped (any ACP-capable provider): gc stop must still reach
+// the tmux leg's TeardownServer, or the city's tmux server survives every full
+// stop (#5175, mc-zndi7.92).
+func TestCmdStopBodyTearsDownServerThroughAutoProvider(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "auto-lifecycle-city"},
+		Beads:     config.BeadsConfig{Provider: "file"},
+		Daemon:    config.DaemonConfig{ShutdownTimeout: "0s"},
+	}
+	writeStopLifecycleCityConfig(t, cityDir, cfg)
+
+	tmuxLeg := &lifecycleOrderProvider{Fake: runtime.NewFake()}
+	overrideShutdownBeadsProviderForStop(t, func(string) error { return nil })
+	oldFactory := sessionProviderForStopCity
+	t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
+	sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) {
+		return sessionauto.New(tmuxLeg, runtime.NewFake()), nil
+	}
+
+	var stdout, stderr lockedBuffer
+	if code := cmdStopBody(cityDir, cfg, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdStopBody() = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	tmuxLeg.mu.Lock()
+	events := append([]string(nil), tmuxLeg.events...)
+	tmuxLeg.mu.Unlock()
+	teardowns := 0
+	for _, e := range events {
+		if e == "TeardownServer" {
+			teardowns++
+		}
+	}
+	if teardowns != 1 {
+		t.Fatalf("tmux leg TeardownServer called %d time(s) through auto, want 1; events = %v", teardowns, events)
 	}
 }
 

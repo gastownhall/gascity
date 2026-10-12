@@ -167,8 +167,7 @@ func assertSessionEnqueued(t *testing.T, fs *fakeState, id string) {
 
 // #6858: `gc session wake` records the wake (clearing holds) and then reports
 // that a demand-only singleton's pool session will not start; the API wake
-// does the same, refusing with a dedicated code clients can tell apart from a
-// malformed request.
+// does the same, with the wake's one will-not-start code.
 func TestHumaHandleSessionWakeRefusesDemandOnlySingletonSession(t *testing.T) {
 	fs := newSessionFakeState(t)
 	id := createDemandOnlyPoolSession(t, fs)
@@ -182,8 +181,10 @@ func TestHumaHandleSessionWakeRefusesDemandOnlySingletonSession(t *testing.T) {
 	if !errors.As(err, &problem) {
 		t.Fatalf("humaHandleSessionWake() error = %T %v, want *apierr.ErrorModel", err, err)
 	}
-	if problem.Status != http.StatusBadRequest || problem.Code != apierr.DemandOnlySingleton.Code {
-		t.Fatalf("problem = status %d code %q, want status %d code %q", problem.Status, problem.Code, http.StatusBadRequest, apierr.DemandOnlySingleton.Code)
+	// The wake's one "recorded but will not start" answer (CONTRACT v5.9 D8
+	// 7(a)): 409 wake-will-not-start for every refusal, this one included.
+	if problem.Status != http.StatusConflict || problem.Code != apierr.WakeWillNotStart.Code {
+		t.Fatalf("problem = status %d code %q, want status %d code %q", problem.Status, problem.Code, http.StatusConflict, apierr.WakeWillNotStart.Code)
 	}
 	assertDemandOnlyRefusalMessage(t, problem.Detail)
 	if !strings.Contains(problem.Detail, "wake recorded") {

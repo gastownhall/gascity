@@ -240,8 +240,8 @@ func createTestSession(t *testing.T, store beads.Store, sp *runtime.Fake, title 
 
 func suspendSessionForPermissionModeTest(t *testing.T, fs *fakeState, id string) {
 	t.Helper()
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
-	if err := mgr.Suspend(id); err != nil {
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
+	if err := mgr.Suspend(context.Background(), testOperatorIn(t, fs.cityPath), id, false); err != nil {
 		t.Fatalf("suspend session: %v", err)
 	}
 }
@@ -764,8 +764,8 @@ func TestHandleSessionListFilterByState(t *testing.T) {
 	createTestSession(t, fs.cityBeadStore, fs.sp, "Stay Active")
 
 	// Suspend one.
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
-	if err := mgr.Suspend(info.ID); err != nil {
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
+	if err := mgr.Suspend(context.Background(), testOperatorIn(t, fs.cityPath), info.ID, false); err != nil {
 		t.Fatalf("suspend: %v", err)
 	}
 
@@ -1338,11 +1338,11 @@ func TestHandleSessionSuspend_IllegalTransition(t *testing.T) {
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "To Drain")
 
-	// Drain the session directly via the manager (the API surface for drain
-	// lives elsewhere; this test isolates the transition check).
+	// Drain the session the way the controller's drain-ack path does, the
+	// only writer of state=draining (this test isolates the transition check).
 	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
-	if err := mgr.BeginDrain(info.ID, "shutdown"); err != nil {
-		t.Fatalf("BeginDrain: %v", err)
+	if err := mgr.PersistedStore().ApplyPatch(info.ID, session.DrainAckStopPendingPatch(time.Now())); err != nil {
+		t.Fatalf("seeding drain-ack stop-pending: %v", err)
 	}
 
 	w := httptest.NewRecorder()
@@ -1840,83 +1840,64 @@ func TestHandleSessionWake(t *testing.T) {
 	}
 }
 
-func TestHandleSessionWakeStartsSuspendedRuntime(t *testing.T) {
-	fs := newSessionFakeState(t)
-	srv := New(fs)
-	h := newTestCityHandlerWith(t, fs, srv)
+// TestHandleSessionWakeRecordsWakeOnly is D8 rule 6 (CONTRACT v5.9): POST
+// /wake records the wake and hands the session to the controller; it never
+// starts a runtime in the controller process. A controller that will not
+// start the session says why, with the wake still recorded; it judges the
+// row after the wake. Kills the API wake's own start, a refusal that drops
+// the wake, and a refusal read from the pre-wake row.
+func TestHandleSessionWakeRecordsWakeOnly(t *testing.T) {
+	for name, refusal := range map[string]string{"starts": "", "will not start": "rig \"r\" is suspended"} {
+		t.Run(name, func(t *testing.T) {
+			fs := newSessionFakeState(t)
+			info := createTestSession(t, fs.cityBeadStore, fs.sp, "Suspended Session")
+			mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
+			if err := mgr.Suspend(context.Background(), testOperatorIn(t, fs.cityPath), info.ID, false); err != nil {
+				t.Fatalf("Suspend: %v", err)
+			}
+			state := &wakeRefusingState{fakeState: fs, refusal: refusal}
+			h := newTestCityHandlerWith(t, state, New(state))
+			startsBefore := fs.sp.CountCalls("Start", info.SessionName)
 
-	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Suspended Session")
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
-	if err := mgr.Suspend(info.ID); err != nil {
-		t.Fatalf("Suspend: %v", err)
-	}
-	if fs.sp.IsRunning(info.SessionName) {
-		t.Fatalf("session %q running after suspend", info.SessionName)
-	}
+			w := httptest.NewRecorder()
+			synctest.Test(t, func(*testing.T) {
+				h.ServeHTTP(w, newPostRequest(cityURL(fs, "/session/")+info.ID+"/wake", nil))
+				synctest.Wait()
+			})
 
-	w := httptest.NewRecorder()
-	r := newPostRequest(cityURL(fs, "/session/")+info.ID+"/wake", nil)
-	h.ServeHTTP(w, r)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
-	}
-	deadline := time.Now().Add(testEventTimeout)
-	for !fs.sp.IsRunning(info.SessionName) && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
-	if !fs.sp.IsRunning(info.SessionName) {
-		t.Fatalf("session %q should be running after async POST /wake start", info.SessionName)
+			if refusal == "" && w.Code != http.StatusOK || refusal != "" && (w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "will not start")) {
+				t.Fatalf("status %d, body %s; want refusal %q", w.Code, w.Body.String(), refusal)
+			}
+			if n := fs.sp.CountCalls("Start", info.SessionName); n != startsBefore {
+				t.Fatalf("Start calls = %d, want the controller to start the session", n-startsBefore)
+			}
+			if got := fs.enqueuedKeys(); !slices.Contains(got, reconcilekey.Session(info.ID)) {
+				t.Fatalf("enqueued keys = %v, want the session handed to the controller", got)
+			}
+			b, err := fs.cityBeadStore.Get(info.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if b.Metadata["wake_request"] == "" {
+				t.Fatalf("metadata = %v, want the wake recorded", b.Metadata)
+			}
+			if state.seen.WakeRequest == "" || state.seen.MetadataState == "suspended" {
+				t.Fatalf("refuser read %+v, want the row after the wake", state.seen)
+			}
+		})
 	}
 }
 
-// onDeathGatedState holds one session name in the on_death start interlock.
-type onDeathGatedState struct {
+// wakeRefusingState is a controller that names why it will not start.
+type wakeRefusingState struct {
 	*fakeState
-	pending string
+	refusal string
+	seen    session.Info
 }
 
-func (s *onDeathGatedState) OnDeathHookPending(name string) bool { return name == s.pending }
-
-// Kills: an API wake starting a runtime while the name's on_death hook is
-// queued or running. The wake is recorded and handed to the reconciler,
-// whose start path waits for the hook.
-func TestHandleSessionWakeDefersStartWhileOnDeathHookPending(t *testing.T) {
-	fs := newSessionFakeState(t)
-	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Gated Session")
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
-	if err := mgr.Suspend(info.ID); err != nil {
-		t.Fatalf("Suspend: %v", err)
-	}
-	gated := &onDeathGatedState{fakeState: fs, pending: info.SessionName}
-	h := newTestCityHandlerWith(t, gated, New(gated))
-	startsBefore := fs.sp.CountCalls("Start", info.SessionName)
-
-	// The bubble makes the "no Start" check exact: synctest.Wait returns only
-	// once every goroutine the request started (an async start included) has
-	// finished or blocked.
-	w := httptest.NewRecorder()
-	synctest.Test(t, func(*testing.T) {
-		h.ServeHTTP(w, newPostRequest(cityURL(fs, "/session/")+info.ID+"/wake", nil))
-		synctest.Wait()
-	})
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
-	}
-	if n := fs.sp.CountCalls("Start", info.SessionName); n != startsBefore {
-		t.Fatalf("Start calls = %d, want none while the on_death hook is pending", n-startsBefore)
-	}
-	if got := fs.enqueuedKeys(); !slices.Contains(got, reconcilekey.Session(info.ID)) {
-		t.Fatalf("enqueued keys = %v, want the session handed to the reconciler", got)
-	}
-	b, err := fs.cityBeadStore.Get(info.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if b.Metadata["wake_request"] == "" {
-		t.Fatalf("metadata = %v, want the wake recorded for the reconciler", b.Metadata)
-	}
+func (s *wakeRefusingState) WakeStartRefusal(info session.Info) (string, bool) {
+	s.seen = info
+	return s.refusal, true
 }
 
 func TestHandleSessionWakeClosed(t *testing.T) {
@@ -1926,8 +1907,8 @@ func TestHandleSessionWakeClosed(t *testing.T) {
 	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Closed Session")
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
-	_ = mgr.Close(info.ID)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
+	_ = mgr.Close(context.Background(), testOperatorIn(t, fs.cityPath), info.ID)
 
 	w := httptest.NewRecorder()
 	r := newPostRequest(cityURL(fs, "/session/")+info.ID+"/wake", nil)
@@ -4365,7 +4346,7 @@ func TestHandleSessionPermissionModePreservesProviderCreateOptions(t *testing.T)
 		t.Fatalf("response options.effort = %q, want high from create-time provider option", got)
 	}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	info, err := mgr.Get(success.Session.ID)
 	if err != nil {
 		t.Fatalf("Get session: %v", err)
@@ -4526,7 +4507,7 @@ func TestHandleSessionGetUsesAgentDefaultsForConfiguredNamedSession(t *testing.T
 	srv := New(fs)
 	h := newTestCityHandlerWith(t, fs, srv)
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "worker", Command: "echo test", WorkDir: "/tmp", Provider: "test-agent", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("create session: %v", err)
@@ -4576,7 +4557,7 @@ func TestHandleSessionGetUsesLegacyProviderKindForNameCollision(t *testing.T) {
 	srv := New(fs)
 	h := newTestCityHandlerWith(t, fs, srv)
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "codex", Title: "codex", Command: "echo", WorkDir: "/tmp/provider", Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("create session: %v", err)
@@ -4848,8 +4829,8 @@ func TestHandleSessionMessageQueuesSuspendedSessionMessage(t *testing.T) {
 	fs := newSessionFakeState(t)
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Resume Me")
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
-	if err := mgr.Suspend(info.ID); err != nil {
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
+	if err := mgr.Suspend(context.Background(), testOperatorIn(t, fs.cityPath), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
@@ -4869,7 +4850,7 @@ func TestHandleSessionMessageQueuesSuspendedSessionMessage(t *testing.T) {
 	srv := New(&stateWithSessionProvider{fakeState: fs, provider: blocker})
 	h := newTestCityHandlerWith(t, fs, srv)
 
-	req := newPostRequest(cityURL(fs, "/session/")+info.ID+"/messages", strings.NewReader(`{"message":"hello"}`))
+	req := newPostRequest(cityURL(fs, "/session/")+info.ID+"/messages", strings.NewReader(`{"message":"hello","resume":true}`))
 	req.Header.Set("Idempotency-Key", "sess-msg-1")
 	w := httptest.NewRecorder()
 	done := make(chan struct{})
@@ -5177,13 +5158,13 @@ func TestHandleSessionGetReservedNamedTargetIgnoresClosedHistoricalBead(t *testi
 	h := newTestCityHandlerWith(t, fs, srv)
 	_ = h
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	info, err := mgr.CreateSession(
 		context.Background(), session.CreateOptions{Alias: "myrig/worker", ExplicitName: "", Template: "myrig/worker", Title: "Historic Worker", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Transport: "", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("CreateSessionNamedWithTransport: %v", err)
 	}
-	if err := mgr.Close(info.ID); err != nil {
+	if err := mgr.Close(context.Background(), testOperatorIn(t, fs.cityPath), info.ID); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 
@@ -5645,7 +5626,7 @@ func TestHandleSessionTranscriptClosedSession(t *testing.T) {
 	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -5660,7 +5641,7 @@ func TestHandleSessionTranscriptClosedSession(t *testing.T) {
 		`{"uuid":"1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"hello\"}","timestamp":"2025-01-01T00:00:00Z"}`,
 		`{"uuid":"2","parentUuid":"1","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"world\"}","timestamp":"2025-01-01T00:00:01Z"}`,
 	)
-	if err := mgr.Close(info.ID); err != nil {
+	if err := mgr.Close(context.Background(), testOperatorIn(t, fs.cityPath), info.ID); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 
@@ -6578,14 +6559,13 @@ func TestHandleSessionMessageRejectsPendingInteraction(t *testing.T) {
 	req := newPostRequest(cityURL(fs, "/session/")+info.ID+"/messages", strings.NewReader(`{"message":"hello"}`))
 	h.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusAccepted {
-		t.Fatalf("message status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
+	// A pending interaction is rejected synchronously with 409 rather than
+	// accepted (202) and failed later on the event stream (#2892).
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("message status = %d, want %d; body: %s", rec.Code, http.StatusConflict, rec.Body.String())
 	}
-
-	accepted := decodeAsyncAccepted(t, rec.Body)
-	_, failure := waitForSessionMessageResult(t, fs.eventProv, accepted.RequestID)
-	if failure == nil {
-		t.Fatalf("expected session message to fail (pending interaction should reject), got success")
+	if !strings.Contains(rec.Body.String(), "pending_interaction: ") {
+		t.Fatalf("message body = %s, want a pending_interaction detail", rec.Body.String())
 	}
 }
 
@@ -6595,12 +6575,12 @@ func TestHandleSessionMessageRejectsClosedNamedSession(t *testing.T) {
 	h := newTestCityHandlerWith(t, fs, srv)
 	_ = h
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{ExplicitName: "sky", Template: "myrig/worker", Title: "Sky", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Transport: "", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("CreateSessionNamedWithTransport: %v", err)
 	}
-	if err := mgr.Close(info.ID); err != nil {
+	if err := mgr.Close(context.Background(), testOperatorIn(t, fs.cityPath), info.ID); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 
@@ -6691,12 +6671,12 @@ func TestHandleSessionStreamStoppedWithoutOutputReturnsNotFound(t *testing.T) {
 	_ = h
 	srv.sessionLogSearchPaths = []string{t.TempDir()}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "default", Title: "No Output", Command: "echo test", WorkDir: t.TempDir(), Provider: "test", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testOperatorIn(t, fs.cityPath), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
@@ -6715,12 +6695,12 @@ func TestHandleSessionStreamRawStoppedWithoutOutputReturnsNotFound(t *testing.T)
 	h := newTestCityHandlerWith(t, fs, srv)
 	srv.sessionLogSearchPaths = []string{t.TempDir()}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "default", Title: "No Output", Command: "echo test", WorkDir: t.TempDir(), Provider: "test", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testOperatorIn(t, fs.cityPath), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
@@ -6738,12 +6718,12 @@ func TestLegacySessionStreamRawStoppedWithoutOutputReturnsNotFound(t *testing.T)
 	srv := New(fs)
 	srv.sessionLogSearchPaths = []string{t.TempDir()}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "default", Title: "No Output", Command: "echo test", WorkDir: t.TempDir(), Provider: "test", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testOperatorIn(t, fs.cityPath), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
@@ -6764,7 +6744,7 @@ func TestHandleSessionStreamClosedSessionReturnsSnapshot(t *testing.T) {
 	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -6779,7 +6759,7 @@ func TestHandleSessionStreamClosedSessionReturnsSnapshot(t *testing.T) {
 		`{"uuid":"1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"hello\"}","timestamp":"2025-01-01T00:00:00Z"}`,
 		`{"uuid":"2","parentUuid":"1","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"world\"}","timestamp":"2025-01-01T00:00:01Z"}`,
 	)
-	if err := mgr.Close(info.ID); err != nil {
+	if err := mgr.Close(context.Background(), testOperatorIn(t, fs.cityPath), info.ID); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 
@@ -6816,7 +6796,7 @@ func TestHandleSessionStreamStoppedSessionCommitsStatusHeaders(t *testing.T) {
 	srv.sessionLogSearchPaths = []string{searchBase}
 	h := newTestCityHandlerWith(t, fs, srv)
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -6830,7 +6810,7 @@ func TestHandleSessionStreamStoppedSessionCommitsStatusHeaders(t *testing.T) {
 	writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
 		`{"uuid":"1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"hello\"}","timestamp":"2025-01-01T00:00:00Z"}`,
 	)
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testOperatorIn(t, fs.cityPath), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
@@ -6869,7 +6849,7 @@ func TestHandleSessionStreamClosedNamedSessionReturnsSnapshot(t *testing.T) {
 	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -6884,7 +6864,7 @@ func TestHandleSessionStreamClosedNamedSessionReturnsSnapshot(t *testing.T) {
 		`{"uuid":"1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"hello\"}","timestamp":"2025-01-01T00:00:00Z"}`,
 		`{"uuid":"2","parentUuid":"1","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"world\"}","timestamp":"2025-01-01T00:00:01Z"}`,
 	)
-	if err := mgr.Close(info.ID); err != nil {
+	if err := mgr.Close(context.Background(), testOperatorIn(t, fs.cityPath), info.ID); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 
@@ -8432,8 +8412,8 @@ func TestHandleSessionKillClosedSessionIsOK(t *testing.T) {
 	h := newTestCityHandler(t, fs)
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "kill-closed-test")
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
-	if err := mgr.Close(info.ID); err != nil {
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
+	if err := mgr.Close(context.Background(), testOperatorIn(t, fs.cityPath), info.ID); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 
@@ -8476,8 +8456,8 @@ func TestHandleSessionMessageQueuesWhenSuspended(t *testing.T) {
 	h := newTestCityHandlerWith(t, fs, srv)
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "queue-test")
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
-	if err := mgr.Suspend(info.ID); err != nil {
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
+	if err := mgr.Suspend(context.Background(), testOperatorIn(t, fs.cityPath), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 

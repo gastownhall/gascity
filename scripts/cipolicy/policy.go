@@ -16,7 +16,13 @@ const (
 	// approximating shell semantics: any execution change requires explicit
 	// policy review, while workflow, job, step, and input descriptions remain
 	// free to change. A failure prints the projection and candidate digest.
-	expectedCITriggersHash = "d1a8bcd089019589658d8f154af9c26a70877285d84a384c2dcea299efc9554a"
+	//
+	// Triggers bumped for merge-queue readiness (TESTING.md "Merge queue"):
+	// merge_group [checks_requested], so Check and CI / required report on a
+	// queue entry's merge-group commit. Reviewed delta: one trigger, no new
+	// job, step command or permission; scripts/ci_merge_queue_test.go pins
+	// what each event expression yields on it.
+	expectedCITriggersHash = "869922e05434e56d0b7fe8245e29529edc9616efac89ce4ba068edf7faa3f69b"
 	// Bumped for the beads-topology-acceptance job: the bd/dolt-backed topology
 	// shapes had never executed in CI — every job lacked a bd with
 	// --proxied-server, so each test skipped and a suite that ran nothing
@@ -280,7 +286,32 @@ const (
 	// against the PR base commit's spec, which the lane writes with git show
 	// and hands to @openapi_base_spec. Reviewed delta: one job removed; no
 	// new job, trigger, step command or permission.
-	expectedCIExecutionHash     = "0b81b0eead4e815e218330ee63ccec936e8a14b7867b5e784ef0aadbd3cb006b"
+	//
+	// Bumped again (ga-96smfk.12, final cutover: every suite of this tree
+	// under Bazel): preflight-static (no steps left but setup),
+	// preflight-acceptance (Tier A: bazel.yml's acceptance lane plus the
+	// untagged helpers in the unit lane), the push-only unit cover jobs
+	// (bazel-nightly.yml's `bazel coverage //...` -> Codecov flag
+	// bazel-unit), the push-only integration-rest-full shards
+	// (bazel-nightly.yml's //test/integration lane), release-config
+	// (//:goreleaser_check_test) and the ci-preflight / ci-integration
+	// rollups are removed, with the changes job's cmd_gc_process and
+	// integration filters and outputs that only they read. Check and
+	// ci-required fan in the remaining gating jobs; credential-provider-
+	// windows moves to runner_policy.py's Blacksmith Windows runner.
+	// Reviewed delta: jobs, filters and needs removed, one runs-on and one
+	// runner-policy output; no new trigger, step command or permission.
+	//
+	// Bumped again (merge-queue readiness): the changes job's paths-filter
+	// takes base/ref from merge_group.base_sha/head_sha, empty on every other
+	// event (the action's defaults). Reviewed delta: two `with` inputs; no
+	// new job, step command or permission.
+	//
+	// Bumped again (installation rate limit): the changes job's paths-filter
+	// gets `token: ''`, so pull requests diff with git instead of calling the
+	// pulls/files API on the shared github.token budget. Reviewed delta: one
+	// `with` input; no new job, step command or permission.
+	expectedCIExecutionHash     = "094fa149515765ad86669145929368481d2c8112e58396b4083a6947b6ec2564"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
@@ -310,7 +341,12 @@ const (
 	// beads-proxied-perf's -run selects TestBeadsProxiedDefaultNativeLane, the
 	// one test split out of TestBeadsProxiedDefault that reads
 	// GC_ACCEPTANCE_PERF; no new job, trigger, permission or secret.
-	expectedNightlyExecutionHash = "81df6767fb4a45226bfdf50a367a369c86f525510772a313d0ce3fa744295153"
+	// Bumped again (ga-96smfk.59): integration-sqlite-coordstore is removed.
+	// It selected GC_BEADS=sqlite, a provider #3151 removed (gc now
+	// hard-errors on it), so it failed every night; no job may select a
+	// provider now. Reviewed delta: one job removed; no new job, trigger or
+	// permission.
+	expectedNightlyExecutionHash = "cb54a44e7bfc392a047849ab6cfe695dcbffec56e127b5a84d427e3c1d4bef8c"
 	// Setup action: reviewed delta (Go module fetch resilience) is setup-go
 	// `cache: false` and one step right after it,
 	// `uses: ./.github/actions/go-mod-download`.
@@ -334,33 +370,12 @@ var requiredFilterPaths = map[string][]string{
 		"cmd/gc/embed_builtin_packs.go",
 		"scripts/update-bundled-gastown-pack",
 	},
-	"cmd_gc_process": {
-		"go.mod",
-		"go.sum",
-		".github/workflows/**",
-		"Makefile",
-		"cmd/gc/**",
-		"internal/**",
-		"examples/gastown/**",
-	},
 	"credential_provider": {
 		"go.mod",
 		"go.sum",
 		"internal/credentialprovider/**",
 		"internal/testenv/**",
 		"internal/testutil/**",
-	},
-	"integration": {
-		"go.mod",
-		"go.sum",
-		".github/workflows/**",
-		"Makefile",
-		"**/*.go",
-		"scripts/test-integration-shard",
-		"scripts/test-go-test-shard",
-		"scripts/runtime-tmux-tests.manifest",
-		"scripts/go-test-observable",
-		"examples/gastown/**",
 	},
 	"shared": {
 		"go.mod",
@@ -528,7 +543,7 @@ func validatePRProviderOwnership(workflow map[string]any) error {
 func validateNightlyProviderOwnership(workflow map[string]any) error {
 	if match, ok := findEnvField(workflow, "nightly"); ok {
 		return fmt.Errorf(
-			"nightly provider selection must be owned only by integration-sqlite-coordstore: %s assigns %s",
+			"nightly jobs must not select a beads test provider (the sqlite coordination store it selected was removed in #3151): %s assigns %s",
 			match.path,
 			match.name,
 		)
@@ -549,13 +564,10 @@ func validateNightlyProviderOwnership(workflow map[string]any) error {
 		if !ok {
 			return fmt.Errorf("nightly job %q must be a mapping", name)
 		}
-		if name == "integration-sqlite-coordstore" {
-			continue
-		}
 		path := "nightly.jobs." + name
 		if match, found := findJobProviderSelector(projectJob(job), path); found {
 			return fmt.Errorf(
-				"nightly provider selection must be owned only by integration-sqlite-coordstore: %s assigns %s",
+				"nightly jobs must not select a beads test provider (the sqlite coordination store it selected was removed in #3151): %s assigns %s",
 				match.path,
 				match.name,
 			)

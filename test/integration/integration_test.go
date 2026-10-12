@@ -39,6 +39,7 @@ import (
 	"github.com/cenkalti/backoff/v4"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -78,6 +79,11 @@ const (
 	integrationBDCommandTimeout      = 15 * time.Second
 	integrationSupervisorStopTimeout = 10 * time.Second
 	integrationSupervisorWaitDelay   = 10 * time.Second
+	// integrationSupervisorReadyTimeout bounds startIsolatedSupervisor's wait
+	// for the control socket. It matches gc's own supervisorReadyTimeout
+	// (cmd/gc/cmd_supervisor_lifecycle.go), the budget `gc supervisor start`
+	// gives the same readiness condition.
+	integrationSupervisorReadyTimeout = 15 * time.Second
 )
 
 const (
@@ -436,6 +442,37 @@ func TestIntegrationSupervisorStopHelperProcess(t *testing.T) {
 		return
 	}
 	select {}
+}
+
+// TestSupervisorStatusConfirmsPID pins the readiness predicate
+// startIsolatedSupervisor waits on: only the control socket answering with the
+// PID of the supervisor the test started counts. The service-manager and API
+// fallbacks of `gc supervisor status` report "running" before that supervisor
+// has bound its control socket (and the isolated env's systemctl shim makes the
+// service-manager fallback report it before the process has done anything),
+// while `gc init` probes only the socket, so trusting them let init race a
+// half-started supervisor and fail on its held lock (ga-96smfk.51-.57).
+func TestSupervisorStatusConfirmsPID(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		out  string
+		pid  int
+		want bool
+	}{
+		{name: "socket answered with our pid", out: "Supervisor is running (PID 4242)\n", pid: 4242, want: true},
+		{name: "socket answered with our pid plus ownership note", out: "Supervisor is running (PID 4242)\nWarning: running outside systemd unit x (unit is installed but inactive)\n", pid: 4242, want: true},
+		{name: "socket answered with another pid", out: "Supervisor is running (PID 42420)\n", pid: 4242, want: false},
+		{name: "service manager fallback", out: "Supervisor is running (pid unavailable: control socket unreachable; liveness confirmed via service_manager)\n", pid: 4242, want: false},
+		{name: "api fallback", out: "Supervisor is running (pid unavailable: control socket unreachable; liveness confirmed via api)\n", pid: 4242, want: false},
+		{name: "not running", out: "Supervisor is not running\n", pid: 4242, want: false},
+		{name: "no pid", out: "Supervisor is running (PID 4242)\n", pid: 0, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := supervisorStatusConfirmsPID(tc.out, tc.pid); got != tc.want {
+				t.Fatalf("supervisorStatusConfirmsPID(%q, %d) = %v, want %v", tc.out, tc.pid, got, tc.want)
+			}
+		})
+	}
 }
 
 func TestStopIntegrationSupervisorWithTimeoutReturnsAfterDeadline(t *testing.T) {
@@ -1800,6 +1837,13 @@ func ensureManagedDoltPortForTest(cityDir string) (string, bool) {
 	if cityDir == "" {
 		return "", false
 	}
+	// A proxied-server scope (the fresh-city default) never publishes a
+	// managed Dolt port: bd reaches the store through its own proxy, so there
+	// is nothing to wait for. Polling for one here cost every bdDolt call on
+	// such a city 30 s and returned no port anyway.
+	if scopeUsesProxiedServerForTest(cityDir) {
+		return "", false
+	}
 	startOut, startErr := runGCDoltWithEnv(commandEnvForDir(cityDir, true), "", "start", cityDir)
 	if startErr != nil && !isGCStartAlreadyRunning(startOut) {
 		return "", false
@@ -1812,6 +1856,22 @@ func ensureManagedDoltPortForTest(cityDir string) (string, bool) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	return "", false
+}
+
+// scopeUsesProxiedServerForTest reports whether scopeRoot's bd metadata binds
+// it to beads' proxied-server path, the mode in which no managed Dolt port
+// file or runtime state is ever written.
+func scopeUsesProxiedServerForTest(scopeRoot string) bool {
+	metadata := filepath.Join(scopeRoot, ".beads", "metadata.json")
+	mode, ok, err := contract.ReadDoltMode(fsys.OSFS{}, metadata)
+	if err != nil || !ok {
+		return false
+	}
+	backend, _, err := contract.ReadMetadataBackend(fsys.OSFS{}, metadata)
+	if err != nil {
+		return false
+	}
+	return contract.IsProxiedDoltMode(backend, mode)
 }
 
 func managedDoltTransportRetryable(out string) bool {
@@ -2013,10 +2073,13 @@ func startIsolatedSupervisor(t *testing.T, env []string, gcHome string) {
 		done <- cmd.Wait()
 	}()
 
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(integrationSupervisorReadyTimeout)
 	for time.Now().Before(deadline) {
+		// Ready means the control socket answers with this supervisor's PID:
+		// that is the only liveness signal `gc init`/`gc start` trust, and
+		// it is bound last in startup, after the lock and the API.
 		out, err := runCommand("", env, 2*time.Second, gcBinary, "supervisor", "status")
-		if err == nil && strings.Contains(out, "Supervisor is running") {
+		if err == nil && supervisorStatusConfirmsPID(out, cmd.Process.Pid) {
 			t.Cleanup(func() {
 				// --wait so runCommand blocks until the supervisor fully
 				// shut down, aligning with the cmd.Wait() synchronization below.
@@ -2047,6 +2110,24 @@ func startIsolatedSupervisor(t *testing.T, env []string, gcHome string) {
 	t.Fatalf("isolated supervisor did not become ready:\n%s", string(logData))
 }
 
+// supervisorStatusConfirmsPID reports whether `gc supervisor status` output
+// shows the supervisor control socket answering with pid. The status command's
+// service-manager and API fallbacks ("pid unavailable: ...") do not count: they
+// can report a supervisor that holds the single-instance lock but has not yet
+// bound the socket, which `gc init` would then try, and fail, to start again.
+func supervisorStatusConfirmsPID(out string, pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	want := fmt.Sprintf("Supervisor is running (PID %d)", pid)
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) == want {
+			return true
+		}
+	}
+	return false
+}
+
 func waitForIntegrationSupervisorDone(cmd *exec.Cmd, done <-chan error, timeout time.Duration) {
 	select {
 	case <-done:
@@ -2070,17 +2151,11 @@ func restartIsolatedSupervisor(t *testing.T, env []string) {
 	startIsolatedSupervisor(t, env, gcHome)
 }
 
+// reserveLoopbackPort returns a loopback port that, on Linux, no other
+// ReserveLoopbackPort caller in the network namespace is handed while this
+// test binary lives (testutil.ReserveLoopbackPort).
 func reserveLoopbackPort() (int, error) {
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return 0, err
-	}
-	defer lis.Close() //nolint:errcheck
-	addr, ok := lis.Addr().(*net.TCPAddr)
-	if !ok {
-		return 0, fmt.Errorf("unexpected addr type %T", lis.Addr())
-	}
-	return addr.Port, nil
+	return testutil.ReserveLoopbackPort()
 }
 
 func TestIntegrationEnvForIsolatesHome(t *testing.T) {

@@ -4,8 +4,10 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/pricing"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -32,6 +34,10 @@ type FactoryConfig struct {
 	// a keyed start is probed for stale resume-key failure. Nil preserves the
 	// session package production timer.
 	StaleKeyDetectionWaiter sessionpkg.StaleKeyDetectionWaiter
+	// RuntimeLeaseTTL is the lifetime of the manager's runtime lease records,
+	// session.RuntimeLeaseTTL of the city's startup timeout. Zero uses the
+	// default startup timeout's.
+	RuntimeLeaseTTL time.Duration
 	// Pricing estimates per-invocation cost for telemetry. Nil falls back
 	// to the registry built from shipped defaults.
 	Pricing *pricing.Registry
@@ -64,12 +70,15 @@ type Factory struct {
 // NewFactory constructs a Factory backed by a session.Manager configured for
 // the caller's city/runtime context.
 func NewFactory(cfg FactoryConfig) (*Factory, error) {
-	opts := make([]sessionpkg.ManagerOption, 0, 3)
+	opts := make([]sessionpkg.ManagerOption, 0, 4)
 	if cfg.CityPath != "" || cfg.ResolveTransport != nil {
 		opts = append(opts, sessionpkg.WithCityPath(cfg.CityPath))
 	}
 	if cfg.ResolveTransport != nil {
 		opts = append(opts, sessionpkg.WithTransportResolver(cfg.ResolveTransport))
+	}
+	if cfg.RuntimeLeaseTTL > 0 {
+		opts = append(opts, sessionpkg.WithRuntimeLeaseTTL(cfg.RuntimeLeaseTTL))
 	}
 	if cfg.StaleKeyDetectionWaiter != nil {
 		opts = append(opts, sessionpkg.WithStaleKeyDetectionWaiter(cfg.StaleKeyDetectionWaiter))
@@ -100,13 +109,35 @@ func newFactory(manager *sessionpkg.Manager, cfg FactoryConfig) (*Factory, error
 		manager:               manager,
 		store:                 cfg.Store,
 		provider:              cfg.Provider,
-		searchPaths:           append([]string(nil), cfg.SearchPaths...),
+		searchPaths:           factorySearchPaths(cfg),
 		recorder:              cfg.Recorder,
 		usageSink:             usageSink,
 		resolveSessionRuntime: cfg.ResolveSessionRuntime,
 		pricing:               cfg.Pricing,
 		activityMemo:          memo,
 	}, nil
+}
+
+// factorySearchPaths returns the transcript search roots for a factory: the
+// configured roots plus, for a city, its ACP capture directory. Transcript
+// reads are fenced to these roots, and gc writes ACP transcripts there. With
+// no configured roots the defaults stand in, which is what an empty list
+// means to transcript discovery; the capture directory must not replace them.
+func factorySearchPaths(cfg FactoryConfig) []string {
+	paths := append([]string(nil), cfg.SearchPaths...)
+	if strings.TrimSpace(cfg.CityPath) == "" {
+		return paths
+	}
+	if len(paths) == 0 {
+		paths = DefaultSearchPaths()
+	}
+	acpDir := citylayout.ACPTranscriptsDir(cfg.CityPath)
+	for _, path := range paths {
+		if path == acpDir {
+			return paths
+		}
+	}
+	return append(paths, acpDir)
 }
 
 // Catalog returns a worker-owned session catalog backed by the factory's

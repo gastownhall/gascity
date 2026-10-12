@@ -651,16 +651,27 @@ func classifyMigrateProxiedScope(cityPath string, scope migrateProxiedScope) (mi
 		return migrateProxiedClassification{}, fmt.Errorf("%s has no %s; there is no initialized beads store to migrate", scope.Label, metadataPath)
 	}
 	backend := strings.TrimSpace(metadata.Backend)
+	// The metadata loader above refuses, by name, every backend except dolt
+	// (which metadata naming no backend defaults to), doltlite, and a library
+	// extension backend (contract.IsLibraryExtensionBackend). Only dolt can sit
+	// behind a legacy gc-managed server, so the other two stop here.
+	//
+	// A library extension backend is opened by the library that registered it
+	// and is never served by gc. The metadata `bd connect --convert-workspace`
+	// writes for one records no dolt_mode, which the switch below reads as the
+	// pre-dolt_mode legacy direct server, and nothing after that tells it
+	// apart: the command would initialize a Dolt root beside the workspace,
+	// stamp a shared-root rig's dolt_data_dir, and hand either to bd's server
+	// migration.
+	if contract.IsLibraryExtensionBackend(backend) {
+		return migrateProxiedClassification{}, fmt.Errorf("%s uses library backend %q; it has no gc-managed Dolt server to migrate", scope.Label, backend)
+	}
 	// doltlite is the embedded engine: no server, and so nothing to migrate to
 	// a proxy. gc recognizes one by either metadata field, because a doltlite
 	// scope can leave `backend` at the dolt default and name the engine in
 	// `database` instead (cmd/gc/cmd_bd_store_bridge.go). Asking only about
 	// `backend` let that shape reach the migratable arm, where an empty
 	// dolt_mode reads as the pre-dolt_mode legacy direct server.
-	//
-	// Anything that is neither is refused one frame earlier, by the metadata
-	// loader above: it admits dolt and doltlite and names the backend it
-	// rejected, so there is nothing left here for a third arm to catch.
 	if strings.EqualFold(backend, "doltlite") || strings.EqualFold(strings.TrimSpace(metadata.Database), "doltlite") {
 		return migrateProxiedClassification{}, fmt.Errorf("%s is a doltlite scope; the embedded engine has no server topology to migrate", scope.Label)
 	}

@@ -33,9 +33,10 @@ var v2SessionRuntimesAdmitted = map[string]bool{
 }
 
 // v2LatchRefusals lists every refusal the composed config hits, in a fixed
-// order. It reads only cfg and the immutable builtin runtime registry, never a
-// store or the environment, so the latch and the doctor dry run agree.
-func v2LatchRefusals(cfg *config.City) []latchRefusal {
+// order. It reads only cfg, lookupEnv's GC_SESSION (the provider the city
+// runs, v2SessionRuntimeName) and the immutable builtin runtime registry,
+// never a store, so the latch and the doctor dry run agree.
+func v2LatchRefusals(cfg *config.City, lookupEnv func(string) (string, bool)) []latchRefusal {
 	var out []latchRefusal
 	if cfg.Daemon.SessionCircuitBreaker {
 		out = append(out, latchRefusal{"the identity circuit breaker", "[daemon] session_circuit_breaker = true", "PAR-BRK"})
@@ -74,21 +75,29 @@ func v2LatchRefusals(cfg *config.City) []latchRefusal {
 	if cfg.ChatSessions.IdleTimeoutDuration() > 0 {
 		out = append(out, latchRefusal{"chat auto-suspend", "[chat_sessions] idle_timeout", "PAR-CHAT"})
 	}
-	reg, err := runtimeRegistryForCity(cfg)
-	if err != nil { // a pack runtime collision; config load already rejects it
-		reg = runtimeRegistry
-	}
-	if r, ok := v2SessionRuntimeRefusal(cfg, reg); ok {
+	if r, ok := v2ProviderSwapRefusal(cfg, lookupEnv); ok {
 		out = append(out, r)
 	}
 	return out
 }
 
-// v2SessionRuntimeRefusal refuses a [session] provider outside the allowlist
-// that reg resolves. A name reg does not resolve reaches the tmux fallback and
-// is admitted as tmux. exec:…/gc-session-t3 is the legacy t3bridge spelling.
-func v2SessionRuntimeRefusal(cfg *config.City, reg *registry.Registry) (latchRefusal, bool) {
-	name := strings.TrimSpace(cfg.Session.Provider)
+// v2SessionRuntimeName is the session provider the city runs: GC_SESSION,
+// when lookupEnv sets it, over the config's [session] provider, as
+// effectiveProviderName reads it (a nil lookupEnv has none).
+func v2SessionRuntimeName(cfg *config.City, lookupEnv func(string) (string, bool)) string {
+	if lookupEnv != nil {
+		if v, ok := lookupEnv("GC_SESSION"); ok && v != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return strings.TrimSpace(cfg.Session.Provider)
+}
+
+// v2SessionRuntimeRefusal refuses a session provider name outside the
+// allowlist that reg resolves. A name reg does not resolve reaches the tmux
+// fallback and is admitted as tmux. exec:…/gc-session-t3 is the legacy
+// t3bridge spelling.
+func v2SessionRuntimeRefusal(cfg *config.City, reg *registry.Registry, name string) (latchRefusal, bool) {
 	if v2SessionRuntimesAdmitted[name] || !reg.Resolves(name) {
 		return latchRefusal{}, false
 	}
@@ -113,4 +122,20 @@ func v2SessionRuntimeRefusal(cfg *config.City, reg *registry.Registry) (latchRef
 		feature = "unsupported session runtime"
 	}
 	return latchRefusal{feature, fmt.Sprintf("[session] provider = %q", name), parityPR}, true
+}
+
+// v2FloorWarnings lists, in config order, the agents with a min_active_sessions
+// floor whose template is not the control dispatcher, matched by suffix as
+// dispatch_control_ready does so core.control-dispatcher counts. Under v2 a
+// floor member that drains itself is stopped and restarted, not kept warm
+// (PAR-FLOORACK; CONTRACT v5 §12.2). It never refuses the latch.
+func v2FloorWarnings(cfg *config.City) []string {
+	var out []string
+	for i := range cfg.Agents {
+		a := &cfg.Agents[i]
+		if n := a.EffectiveMinActiveSessions(); n > 0 && !strings.HasSuffix(a.QualifiedName(), config.ControlDispatcherAgentName) {
+			out = append(out, fmt.Sprintf("agent %s sets min_active_sessions = %d: under v2 a floor member that drains itself is stopped and restarted, not kept warm, until PAR-FLOORACK", a.QualifiedName(), n))
+		}
+	}
+	return out
 }

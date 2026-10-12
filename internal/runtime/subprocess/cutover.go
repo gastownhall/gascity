@@ -48,6 +48,9 @@ func seamBack(raw *Provider) *seamBackedProvider {
 // through; the seams route GetMeta to the same sidecar.
 func (s *seamBackedProvider) LocalIdentitySidecar() bool { return s.raw.LocalIdentitySidecar() }
 
+// LivenessReadsFresh forwards [runtime.FreshByConstruction].
+func (s *seamBackedProvider) LivenessReadsFresh() bool { return s.raw.LivenessReadsFresh() }
+
 // FindRuntimesBySessionID implements [runtime.ProcessTableScanner] (non-seam).
 func (s *seamBackedProvider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, error) {
 	return s.raw.FindRuntimesBySessionID(id)

@@ -113,12 +113,16 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		"eventPrefixes": true, // event-ownership config, fixed at construction
 		"epoch":         true, // instance identity, fixed at construction
 		"reconcileGate": true, // reconcile-loop gate, fixed at construction
+		"now":           true, // the clock (WithClock), fixed at construction
 		"onChange":      true, "problemf": true, "problemLog": true,
 		"lastReconcileLogAt": true, "primeMu": true, "primeRunning": true,
 		"primeCycle": true, "lastFullPrimeStartedAt": true, "primeRetryDelay": true,
 		"lifecycleMu": true, "lifecycleWG": true, "cancelFn": true, "stopCh": true,
 		"stopped": true, "latencyWindow": true, "latencyDriverActive": true,
 		"applyEventBeforeCommitForTest": true,
+		"eventCheckAfter":               true, // a test-only deadline timer, fixed per instance
+		"eventCheckDeadline":            true, // event-check config, fixed at construction
+		"eventCheckBusy":                true, // the in-flight event check slot, not cache state
 		// readyProjectionDegraded is a one-way capability latch about the
 		// BACKING STORE, set by applyReadyProjection before the seam runs and
 		// never touched by mergeSnapshotLocked. It routes readiness reads to the
@@ -133,6 +137,14 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		// cached one, which the IncludeClosed=false scan does not do. Its
 		// exactly-once behavior is pinned by caching_store_close_event_test.go.
 		"unannouncedCloses": true, "hasUnannouncedCloses": true,
+		// closeIntents counts closing writes in flight between their backing
+		// write and their announcement claim; only those writers touch it, and
+		// the seam reads it only through trackCloseTransitionLocked's queueing
+		// (excluded above with the queue it feeds).
+		"closeIntents": true,
+		// ownEmits records what onChange emitted, to recognize its echoes in
+		// applyEvent; the merge neither reads nor writes it.
+		"ownEmitMu": true, "ownEmits": true, "ownEmitsSweptAt": true,
 	}
 	assertFieldsClassified(t, reflect.TypeOf(CachingStore{}), comparedStore, excludedStore)
 

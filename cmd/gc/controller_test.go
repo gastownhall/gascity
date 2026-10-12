@@ -1118,7 +1118,7 @@ func TestControllerReloadsNamedSessionModeAndAppliesIdleTimeout(t *testing.T) {
 			namedSessionMetadataKey:      "true",
 			namedSessionIdentityMetadata: "mayor",
 			namedSessionModeMetadata:     "always",
-			"config_hash":                runtime.CoreFingerprint(seedCfg),
+			"test_config_hash":           runtime.CoreFingerprint(seedCfg),
 			"live_hash":                  runtime.LiveFingerprint(seedCfg),
 			"generation":                 "1",
 			"continuation_epoch":         "1",
@@ -2144,7 +2144,9 @@ func (osFS) Chmod(name string, mode os.FileMode) error { return os.Chmod(name, m
 // startControllerSocket removes whatever sits at that path, so a sentinel
 // there survives only if no socket opened. With the override (mctl), the
 // controller runs v2 and its runtime and API state share the wiring's routed
-// wake. Both cases go through the one runController call below.
+// wake; over a store that fences, v2 boots its planner, and over the file
+// store, C0.7 refuses the boot after the wiring. All cases go through the one
+// runController call below.
 func TestRunControllerLatchesSessionReconciler(t *testing.T) {
 	type started struct {
 		dir            string
@@ -2209,14 +2211,12 @@ func TestRunControllerLatchesSessionReconciler(t *testing.T) {
 		}
 	})
 
-	t.Run("admitted", func(t *testing.T) {
-		admitV2(t)
-		wired := captureWiredControllerStates(t)
-		s := start(t, "gc-latch-v2-", nil)
-		t.Cleanup(func() {
-			tryStopController(s.dir, &bytes.Buffer{})
-			awaitClose(t, s.done, "controller to exit after stop")
-		})
+	// awaitWired waits for the controller state's wiring, or for
+	// runController's exit. setControllerState runs before cr.run, the only
+	// path to the boot, so a wired runtime is wired whether or not it exited
+	// since.
+	awaitWired := func(t *testing.T, s started, wired func() []*CityRuntime) {
+		t.Helper()
 		awaitCond(t, func() bool {
 			select {
 			case <-s.done:
@@ -2225,11 +2225,51 @@ func TestRunControllerLatchesSessionReconciler(t *testing.T) {
 				return len(wired()) > 0
 			}
 		}, "controller state wiring")
-		select {
-		case <-s.done:
+		if len(wired()) == 0 {
 			t.Fatalf("runController exited %d before wiring its controller state:\n%s", *s.code, s.stderr.String())
-		default:
 		}
 		assertV2WakeWired(t, wired())
+	}
+
+	t.Run("admitted", func(t *testing.T) {
+		admitV2(t)
+		// A store that fences (C0.7), opened for every scope.
+		store := fencingAtomicCloseStore(t)
+		restore := openStoreFactoryForCity
+		openStoreFactoryForCity = func(context.Context, beads.StoreOpenOptions) (beads.StoreOpenResult, error) {
+			return beads.StoreOpenResult{Store: store}, nil
+		}
+		t.Cleanup(func() { openStoreFactoryForCity = restore })
+		wired := captureWiredControllerStates(t)
+		s := start(t, "gc-latch-v2-", nil)
+		t.Cleanup(func() {
+			tryStopController(s.dir, &bytes.Buffer{})
+			awaitClose(t, s.done, "controller to exit after stop")
+		})
+		awaitWired(t, s, wired)
+		select {
+		case <-wired()[0].v2.ready:
+		case <-s.done:
+			t.Fatalf("runController exited %d before its v2 planner booted:\n%s", *s.code, s.stderr.String())
+		case <-time.After(hangBudget):
+			t.Fatalf("v2 planner did not boot within the hang budget (%s):\n%s", hangBudget, s.stderr.String())
+		}
+	})
+
+	t.Run("capability refused", func(t *testing.T) {
+		admitV2(t)
+		wired := captureWiredControllerStates(t)
+		s := start(t, "gc-latch-c07-", nil)
+		awaitWired(t, s, wired)
+		select {
+		case <-s.done:
+		case <-time.After(hangBudget):
+			tryStopController(s.dir, &bytes.Buffer{})
+			awaitClose(t, s.done, "runController exit after stop")
+			t.Fatalf("v2 over the file store ran a controller; want the C0.7 boot refusal\nstderr: %s", s.stderr.String())
+		}
+		if !strings.Contains(s.stderr.String(), "v2 refuses to boot without conditional writes (C0.7)") {
+			t.Errorf("stderr = %q, want the C0.7 boot refusal", s.stderr.String())
+		}
 	})
 }

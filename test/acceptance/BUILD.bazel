@@ -37,19 +37,54 @@ ACCEPTANCE_ENV = {
 
 # Tests that each run past the lane's ~120 s shard budget on rbe-west, by
 # design: each waits out real Dolt lifecycle timers (proxy idle retirement,
-# a 3-minute suspension quiescence window) or walks one long sequential
-# shape. Each runs alone in a target of its own (target name: top-level
-# test), in :acceptance_test's binary and environment, so the lane runs them
-# side by side instead of stacking one behind another in a shard.
-# :acceptance_test skips them. Manual, because only --config=acceptance
-# compiles the acceptance_a files they run: bazel.yml's acceptance lane
-# names :acceptance_solo_tests. scripts/acceptance_run_selection_test.go
-# reads this table.
+# a suspension quiescence window) or walks one long sequential shape. Each
+# runs alone in a target of its own (target name: top-level test), in
+# :acceptance_test's binary and environment, so the lane runs them side by
+# side instead of stacking one behind another in a shard. :acceptance_test
+# skips them. Manual, because only --config=acceptance compiles the
+# acceptance_a files they run: bazel.yml's acceptance lane names
+# :acceptance_solo_tests. scripts/acceptance_run_selection_test.go reads this
+# table. A test may appear under several targets, each running a disjoint
+# share of its subtests (SOLO_SUBTESTS).
 SOLO_TESTS = {
+    "beads_topology_matrix_doctor_test": "TestBeadsInitTopologyMatrix",
+    "beads_topology_matrix_native_lane_test": "TestBeadsInitTopologyMatrix",
     "beads_topology_matrix_test": "TestBeadsInitTopologyMatrix",
     "proxied_idle_timeout_test": "TestProxiedIdleTimeoutReapAndTransparentRestart",
     "proxied_suspended_city_quiescence_test": "TestProxiedSuspensionIsQuiescenceSuspendedCity",
     "proxied_suspended_rig_quiescence_test": "TestProxiedSuspensionIsQuiescenceSuspendedRig",
+}
+
+# The topology matrix walks one sequential shape per row (init, doctor, bd,
+# rig add, start, doctor, stop, start, stop), about 230 s for
+# M1-proxied-local, two thirds of it in gc start/stop/doctor round trips.
+# It runs as three targets side by side, each walking the shape up to the
+# phases it asserts: every subtest of TestBeadsInitTopologyMatrix is in
+# exactly one target's TOPOLOGY_PHASES, and TOPOLOGY_SETUP_PHASES (the steps
+# that build the state the later phases need) run in all three.
+# scripts/acceptance_run_selection_test.go keeps this equal to the test's
+# t.Run names. Each target sees the side effects of the setup phases and its
+# own phases only: doctor-after-start and native-lane run without the
+# pre-start doctor and bd-front-door's write before them, and stop-quiescent
+# and restart without doctor-after-start and native-lane, so no target
+# exercises those orders. A phase that needs another phase's state goes in
+# that phase's target: restart reads the bead bd-front-door creates.
+TOPOLOGY_SETUP_PHASES = [
+    "init-defers-the-store",
+    "rig-inherits",
+    "start-default-pack",
+]
+
+TOPOLOGY_PHASES = {
+    "beads_topology_matrix_doctor_test": ["doctor-after-start"],
+    "beads_topology_matrix_native_lane_test": ["native-lane"],
+    "beads_topology_matrix_test": [
+        "init-shape",
+        "doctor",
+        "bd-front-door",
+        "stop-quiescent",
+        "restart",
+    ],
 }
 
 # Subtests a solo target narrows its test to. The topology matrix runs its
@@ -58,7 +93,56 @@ SOLO_TESTS = {
 # GC_REQUIRE_ACCEPTANCE_LEGACY_GC stays off). The other shapes are not
 # qualified on a worker yet.
 SOLO_SUBTESTS = {
-    "beads_topology_matrix_test": "/^(M1-proxied-local|M5-legacy-gc-managed)$$",
+    name: "/^(M1-proxied-local|M5-legacy-gc-managed)$$/^(%s)$$" % "|".join(TOPOLOGY_SETUP_PHASES + phases)
+    for name, phases in TOPOLOGY_PHASES.items()
+}
+
+# The timer-bound solo targets run their timers shortened on PRs and pushes:
+#
+#   GC_TEST_BACKSTOP_SPEEDUP            divides the controller backstop
+#                                       cadences that go through
+#                                       internal/clock.Backstop (listed in
+#                                       internal/clock/backstop.go) and the
+#                                       quiescence window by the same factor,
+#                                       so each of those backstops still
+#                                       comes round as many times inside the
+#                                       window (3 min -> 30 s at 6). A
+#                                       cadence outside that list comes round
+#                                       fewer times; the nightly
+#                                       REALTIME_TESTS cover it. Only a gc
+#                                       linked with test hooks honors it, so
+#                                       these rows run //cmd/gc:gc_testhooks
+#                                       (GC_ACCEPTANCE_GC_BIN), and fail if
+#                                       gc does not report the hook active.
+#   GC_ACCEPTANCE_PROXIED_IDLE_TIMEOUT  the idle timeout the test gives bd's
+#                                       proxy (20 s when unset; a value that
+#                                       is not a duration of at least 5 s
+#                                       fails the test).
+#
+# REALTIME_TESTS run the same tests with neither set, at their real timers,
+# in the nightly fresh run only (bazel.yml appends :acceptance_realtime_tests
+# to the acceptance lane under --config=fresh), so a bug that only a real
+# window shows still surfaces within a day.
+TESTHOOKS_GC_ENV = {
+    "GC_ACCEPTANCE_GC_BIN": "$(rootpath //cmd/gc:gc_testhooks)",
+    "GC_TEST_BACKSTOP_SPEEDUP": "6",
+}
+
+SOLO_ENV = {
+    "proxied_idle_timeout_test": {"GC_ACCEPTANCE_PROXIED_IDLE_TIMEOUT": "8s"},
+    "proxied_suspended_city_quiescence_test": TESTHOOKS_GC_ENV,
+    "proxied_suspended_rig_quiescence_test": TESTHOOKS_GC_ENV,
+}
+
+SOLO_DATA = {
+    "proxied_suspended_city_quiescence_test": ["//cmd/gc:gc_testhooks"],
+    "proxied_suspended_rig_quiescence_test": ["//cmd/gc:gc_testhooks"],
+}
+
+REALTIME_TESTS = {
+    "proxied_idle_timeout_realtime_test": "TestProxiedIdleTimeoutReapAndTransparentRestart",
+    "proxied_suspended_city_quiescence_realtime_test": "TestProxiedSuspensionIsQuiescenceSuspendedCity",
+    "proxied_suspended_rig_quiescence_realtime_test": "TestProxiedSuspensionIsQuiescenceSuspendedRig",
 }
 
 go_test(
@@ -138,6 +222,7 @@ go_test(
         "//internal/beads/proxyendpoint",
         "//internal/builtinpacks",
         "//internal/citylayout",
+        "//internal/clock",
         "//internal/config",
         "//internal/deps",
         "//internal/doctor",
@@ -210,6 +295,8 @@ go_variant_test(
         test,
         SOLO_SUBTESTS.get(name, ""),
     )],
+    data = SOLO_DATA.get(name, []),
+    env = SOLO_ENV.get(name, {}),
     tags = ["manual"],
     test = ":acceptance_test",
 ) for name, test in SOLO_TESTS.items()]
@@ -218,6 +305,20 @@ test_suite(
     name = "acceptance_solo_tests",
     tags = ["manual"],
     tests = [":" + name for name in SOLO_TESTS],
+)
+
+[go_variant_test(
+    name = name,
+    size = "large",
+    args = ["-test.run=^%s$$" % test],
+    tags = ["manual"],
+    test = ":acceptance_test",
+) for name, test in REALTIME_TESTS.items()]
+
+test_suite(
+    name = "acceptance_realtime_tests",
+    tags = ["manual"],
+    tests = [":" + name for name in REALTIME_TESTS],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

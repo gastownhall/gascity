@@ -20,7 +20,7 @@ import (
 // gone; suspend-class drains are revertible, so a 1-tick confirmation buffer is
 // safe and cheap.
 func TestReconcileSessionBeads_NamedSessionTransientSpecCollapseDeferred(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	// cfg has the agent template but NO [[named_session]] entry this tick —
 	// modeling the transient collapse where the named spec briefly vanishes.
 	env.cfg = &config.City{
@@ -62,7 +62,7 @@ func TestReconcileSessionBeads_NamedSessionTransientSpecCollapseDeferred(t *test
 // the confirmation counter resets so a LATER genuine removal still gets a full
 // confirmation window rather than draining on its first tick.
 func TestReconcileSessionBeads_NamedSessionSpecReappearsClearsDeferral(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	sessionName := config.NamedSessionRuntimeName("test-city", config.Workspace{Name: "test-city"}, "warlord")
 	withSpec := &config.City{
 		Workspace:     config.Workspace{Name: "test-city"},

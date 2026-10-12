@@ -16,6 +16,13 @@ on:
       - reopened
       - synchronize
       - ready_for_review
+  # Merge queue (dormant until a ruleset enables one; TESTING.md "Merge
+  # queue"): Check and CI / required must report on every queue entry's
+  # merge-group commit. The concurrency group below keys a merge group on
+  # its own queue ref and never cancels it; `changes` diffs the entry
+  # against merge_group.base_sha.
+  merge_group:
+    types: [checks_requested]
 
 permissions:
   contents: read
@@ -35,6 +42,7 @@ jobs:
       runner_8vcpu: ${{ steps.policy.outputs.runner_8vcpu }}
       runner_16vcpu: ${{ steps.policy.outputs.runner_16vcpu }}
       runner_32vcpu: ${{ steps.policy.outputs.runner_32vcpu }}
+      runner_windows: ${{ steps.policy.outputs.runner_windows }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - name: Select runner backend
@@ -46,7 +54,7 @@ jobs:
         run: |
           python3 .github/workflows/scripts/runner_policy.py
 
-  # Detect which paths changed to gate conditional jobs.
+  # Detect which paths changed to gate the path-scoped jobs below.
   changes:
     name: Detect changes
     needs: runner-policy
@@ -60,17 +68,28 @@ jobs:
       mail: ${{ steps.filter.outputs.mail == 'true' || steps.filter.outputs.shared == 'true' }}
       beads: ${{ steps.filter.outputs.beads == 'true' || steps.filter.outputs.shared == 'true' }}
       packs: ${{ steps.filter.outputs.packs == 'true' || steps.filter.outputs.shared == 'true' }}
-      cmd_gc_process: ${{ steps.filter.outputs.cmd_gc_process == 'true' || steps.filter.outputs.shared == 'true' }}
       credential_provider: ${{ steps.filter.outputs.credential_provider == 'true' || steps.filter.outputs.shared == 'true' }}
-      integration: ${{ steps.filter.outputs.integration == 'true' || steps.filter.outputs.shared == 'true' }}
       # Raw cross-cutting signal and per-run coverage classification (metric).
       shared: ${{ steps.filter.outputs.shared }}
       suite_mode: ${{ steps.coverage.outputs.suite_mode }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      # merge_group: the entry's own changes, merge_group.base_sha (main or
+      # the entry ahead) to head_sha, as a PR's are its diff from its base.
+      # Empty on every other event, which keeps the action's defaults.
+      #
+      # token: '' detects a pull request's changes with git (merge base with
+      # the PR base branch) instead of the REST pulls/files API. The default
+      # github.token shares the repository's hourly installation rate limit
+      # with every other workflow run; when that is spent the API call 403s
+      # and this job, and with it Check and CI / required, fails on a PR that
+      # changed nothing wrong. Other events never used the token.
       - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
         id: filter
         with:
+          token: ''
+          base: ${{ github.event.merge_group.base_sha }}
+          ref: ${{ github.event.merge_group.head_sha }}
           filters: |
             mail:
               - 'internal/mail/**'
@@ -88,32 +107,12 @@ jobs:
               - 'internal/config/compose.go'
               - 'cmd/gc/embed_builtin_packs.go'
               - 'scripts/update-bundled-gastown-pack'
-            cmd_gc_process:
-              - 'go.mod'
-              - 'go.sum'
-              - '.github/workflows/**'
-              - 'Makefile'
-              - 'cmd/gc/**'
-              - 'internal/**'
-              - 'examples/gastown/**'
             credential_provider:
               - 'go.mod'
               - 'go.sum'
               - 'internal/credentialprovider/**'
               - 'internal/testenv/**'
               - 'internal/testutil/**'
-            integration:
-              - 'go.mod'
-              - 'go.sum'
-              - '.github/workflows/**'
-              - 'Makefile'
-              - '**/*.go'
-              - 'scripts/test-integration-shard'
-              - 'scripts/test-go-test-shard'
-              - 'scripts/runtime-tmux-tests.manifest'
-              - 'scripts/go-test-observable'
-              - 'internal/bootstrap/packs/core/assets/scripts/**'
-              - 'examples/gastown/**'
             # Cross-cutting core paths. A change here is folded into every
             # gated output above, forcing a full union run. Beads is the
             # universal persistence substrate, events the universal observation
@@ -143,138 +142,22 @@ jobs:
           SHARED_FILTER_RESULT: ${{ steps.filter.outputs.shared }}
         run: python3 .github/workflows/scripts/ci_suite_coverage.py classify "$SHARED_FILTER_RESULT"
 
-  preflight-static:
-    name: Preflight / static checks
-    needs: runner-policy
-    runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
-        with:
-          go-version-file: go.mod
-          cache: false
-      - uses: ./.github/actions/go-mod-download
-      # The CI-policy unit tests, the shell guards (go.mod replace, native
-      # dependency surface, event-export isolation, open-core boundary),
-      # formatting and docsync run as Bazel tests in bazel.yml's unit lane:
-      # //:ci_runner_policy_test, //:ci_suite_coverage_test,
-      # //scripts/cipolicy:cipolicy_test, //scripts/prwatchdog:prwatchdog_test,
-      # //scripts:scripts_test, //scripts:check_*_test, //:go_format_test and
-      # //test/docsync:docsync_test; the native DoltLite read-store suite
-      # (-tags gascity_native_beads) as //internal/beads:beads_native_doltlite_test.
-      # Lint and vet (go vet's suite plus the linters .golangci.yml enables)
-      # run there too, as nogo (//tools/nogo): a finding fails the Go compile
-      # it belongs to.
+  # Every build and test of this tree runs under Bazel on rbe-west, gated by
+  # bazel.yml's required checks "bazel test (side-by-side)" and "BUILD files
+  # in sync" (unit lane: //..., nogo lint/vet, gofmt, generated-artifact
+  # drift incl. the OpenAPI breaking-change gate, policy guards, dashboard,
+  # //:goreleaser_check_test; acceptance lane: Tier A incl. the beads
+  # topology rows; integration-packages and integration-smoke lanes;
+  # bazel-nightly.yml: the full //test/integration suite and `bazel
+  # coverage` to Codecov). This workflow keeps only what Bazel cannot run:
+  #   - credential-provider-windows: rbe-west has no Windows workers, so the
+  #     Windows process-tree tests run on a Blacksmith Windows runner;
+  #   - pack-gate, mcp-mail, contract-radar-bd-head: live probes of upstream
+  #     services (the gascity-packs registry, mcp_agent_mail, beads main
+  #     HEAD), not tests of this tree.
+  # Check and CI / required keep their names for branch protection and the
+  # main ruleset; both fan in exactly those gating jobs.
 
-  # Coverage reporting only matters on the main branch — codecov regression
-  # info doesn't need to gate every PR, and the full ./... unit suite is
-  # already covered by bazel.yml's lanes (cmd/gc's process suite runs in
-  # integration-packages) and acceptance A.
-  # Split into two parallel push-only jobs to take the serial cmd/gc loop off
-  # the critical path (ga-29jlpr); Codecov merges uploads server-side.
-  preflight-unit-cover-noncmdgc:
-    name: Preflight / unit cover (noncmdgc)
-    needs:
-      - runner-policy
-    if: github.event_name == 'push'
-    runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
-    env:
-      DOLT_VERSION: "2.2.0"
-      BD_VERSION: "v1.3.1"
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: ./.github/actions/setup-gascity-ubuntu
-        with:
-          dolt-version: ${{ env.DOLT_VERSION }}
-          bd-version: ${{ env.BD_VERSION }}
-          install-claude-cli: "false"
-      - name: Install tools
-        run: make install-tools
-      - name: Unit cover (non-cmd/gc)
-        run: make test-cover-noncmdgc
-      - name: Upload coverage to Codecov
-        if: hashFiles('coverage.noncmdgc.txt') != ''
-        uses: codecov/codecov-action@75cd11691c0faa626561e295848008c8a7dddffe # v5
-        with:
-          files: coverage.noncmdgc.txt
-          flags: unit-cover-noncmdgc
-          token: ${{ secrets.CODECOV_TOKEN }}
-          verbose: true
-
-  preflight-unit-cover-cmdgc:
-    name: Preflight / unit cover (cmd/gc ${{ matrix.shard }} of 6)
-    needs:
-      - runner-policy
-    if: github.event_name == 'push'
-    runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
-    env:
-      DOLT_VERSION: "2.2.0"
-      BD_VERSION: "v1.3.1"
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4, 5, 6]
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: ./.github/actions/setup-gascity-ubuntu
-        with:
-          dolt-version: ${{ env.DOLT_VERSION }}
-          bd-version: ${{ env.BD_VERSION }}
-          install-claude-cli: "false"
-      - name: Install tools
-        run: make install-tools
-      - name: Unit cover (cmd/gc shard ${{ matrix.shard }} of 6)
-        run: make test-cover-cmdgc-shard CMD_GC_COVER_SHARD=${{ matrix.shard }} CMD_GC_COVER_TOTAL=6
-      - name: Upload coverage to Codecov
-        if: hashFiles(format('coverage.cmdgc.{0}.txt', matrix.shard)) != ''
-        uses: codecov/codecov-action@75cd11691c0faa626561e295848008c8a7dddffe # v5
-        with:
-          files: coverage.cmdgc.${{ matrix.shard }}.txt
-          flags: unit-cover-cmdgc
-          token: ${{ secrets.CODECOV_TOKEN }}
-          verbose: true
-
-  preflight-acceptance:
-    name: Preflight / acceptance A
-    needs:
-      - runner-policy
-    runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      # Tier A deliberately selects subprocess sessions, file beads, and
-      # skipped Dolt. Installing the live provider stack here adds startup
-      # latency without exercising it.
-      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
-        with:
-          go-version-file: go.mod
-          cache: false
-      - uses: ./.github/actions/go-mod-download
-      - name: Acceptance tests (Tier A)
-        run: make test-acceptance-go
-
-  # The cross-version bd CLI contract cells run under Bazel in bazel.yml's
-  # unit lane, against pinned bd release archives (MODULE.bazel):
-  # //test/acceptance:bd_cli_contract_prev_test (BD_PREV_VERSION),
-  # //test/acceptance:bd_cli_contract_current_test (BD_CURRENT_REF, the
-  # v1.3.1 tag) and //internal/beads:bd_conditional_release_contract_test
-  # (the ReleaseIfCurrent CAS contract, BD_CURRENT_REF's bd).
-  # scripts/bd_contract_pins_test.go keeps them on the deps.env pins.
-
-  # The beads topology and proxied-native acceptance rows (the proxied-default,
-  # shared-server, blocked-repair, migration, proxied-native lifecycle/safety,
-  # idle-timeout and suspension-quiescence tests, and the topology matrix's
-  # M1/M5 shapes) run in bazel.yml's required acceptance lane:
-  # //test/acceptance:acceptance_test and :acceptance_solo_tests, under
-  # GC_REQUIRE_ACCEPTANCE_TOOLING and GC_ACCEPTANCE_TOPOLOGY_MATRIX with the
-  # pinned bd and dolt (test/acceptance/BUILD.bazel).
-
-  # NON-REQUIRED HEADxHEAD radar: builds bd from beads MAIN HEAD (live, not the
-  # pinned BD_CURRENT_REF) and runs gc-HEAD's real bd CLI contract against it —
-  # early warning when bd's bleeding edge diverges from what
-  # gc expects, before the next deliberate pin bump. Deliberately NOT wired into
-  # ci-required: a bd-main break must never block a gascity merge (that is the
-  # cross-HEAD deadlock the pinned cells avoid). A red here is an advisory signal
-  # to stage a coordinated change, not a gate. Path-gated on the beads filter.
   contract-radar-bd-head:
     name: Contract radar (gc HEAD x bd main HEAD)
     needs:
@@ -304,87 +187,13 @@ jobs:
       - name: bd CLI contract HOME isolation (main HEAD)
         run: make test-bd-cli-contract-home-isolation
 
-  # The generated-artifact drift checks run under Bazel in bazel.yml's unit
-  # lane: //cmd/genspec:genspec_in_sync_test, //internal/api/genclient:
-  # genclient_test (hermetic oapi-codegen), //cmd/genschema:
-  # genschema_in_sync_test (its regeneration patch feeds docs-autofix.yml),
-  # //internal/api/dashboardspa/web/shared:generated_client_in_sync_test and
-  # //internal/api/dashboardspa:dist_in_sync_test. So does the OpenAPI
-  # breaking-change gate: //cmd/openapi-breaking:openapi-breaking_test runs
-  # the pinned oasdiff against the PR base commit's spec, which the lane
-  # writes with git show (tools/bazel/rules/openapi_base_spec.bzl).
-
-  # Historical fan-in name and the branch-protection-enforced required status.
-  # The cross-version bd contract cells gate through the required Bazel check
-  # instead (see the note where their jobs used to be). During the Blacksmith
-  # proof, branch protection can move to `CI / required`; this job keeps the
-  # old name meaningful either way.
-  check:
-    name: Check
-    needs:
-      - runner-policy
-      # `changes` is a hard dependency so a filter-job flake fails Check
-      # directly. Mirrors ci-required.
-      - changes
-      - preflight-static
-      - preflight-acceptance
-    if: ${{ always() }}
-    runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
-    env:
-      NEEDS_JSON: ${{ toJSON(needs) }}
-    steps:
-      - name: Summarize preflight result
-        run: |
-          python3 - <<'PY'
-          import json
-          import os
-          import sys
-
-          # Every dependency runs unconditionally: none may skip.
-          needs = json.loads(os.environ["NEEDS_JSON"])
-          failures = {}
-          for job, meta in sorted(needs.items()):
-              result = meta.get("result", "unknown")
-              if result == "success":
-                  continue
-              failures[job] = result
-          summary_path = os.environ["GITHUB_STEP_SUMMARY"]
-          with open(summary_path, "a", encoding="utf-8") as handle:
-              handle.write("## CI Preflight\n\n")
-              handle.write("| Job | Result |\n| --- | --- |\n")
-              for job, meta in sorted(needs.items()):
-                  handle.write(f"| {job} | {meta.get('result', 'unknown')} |\n")
-          if failures:
-              for job, result in failures.items():
-                  print(f"{job}: {result}", file=sys.stderr)
-              sys.exit(1)
-          PY
-
-  release-config:
-    name: Release config
-    needs: runner-policy
-    runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-
-      - name: Check GoReleaser configuration
-        uses: goreleaser/goreleaser-action@1a80836c5c9d9e5755a25cb59ec6f45a3b5f41a8 # v7
-        with:
-          version: "~> v2"
-          args: check
-
-  # The tagged product-metrics contracts (-tags productmetrics_testhook) run
-  # as the Bazel target //cmd/gc:gc_productmetrics_testhook_test in
-  # bazel.yml's unit lane, gated by the required "bazel test (side-by-side)"
-  # check.
-
   credential-provider-windows:
     name: Credential provider / Windows process tree
     needs:
       - runner-policy
       - changes
     if: needs.changes.outputs.credential_provider == 'true'
-    runs-on: windows-latest
+    runs-on: ${{ needs.runner-policy.outputs.runner_windows }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
@@ -397,46 +206,7 @@ jobs:
       - name: Test Windows Job Object descendant cleanup
         run: go test -tags=integration -count=1 ./internal/credentialprovider -run '^TestCredentialProviderWindowsJob' -timeout=45s
 
-  # The full REST suite is broad release/post-merge coverage. PRs run the
-  # focused REST smoke contract (bazel.yml's integration-smoke lane); pushes
-  # retain all full-suite shards.
-  integration-rest-full:
-    name: Integration / rest-full-${{ matrix.shard }}-of-16
-    needs:
-      - runner-policy
-      - changes
-    if: github.event_name == 'push' && needs.changes.outputs.integration == 'true'
-    runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
-    env:
-      DOLT_VERSION: "2.2.0"
-      BD_VERSION: "v1.3.1"
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: ./.github/actions/setup-gascity-ubuntu
-        with:
-          dolt-version: ${{ env.DOLT_VERSION }}
-          bd-version: ${{ env.BD_VERSION }}
-          install-claude-cli: "false"
-      - name: Run full REST shard
-        run: ./scripts/test-integration-shard rest-full-${{ matrix.shard }}-of-16
-
-  # Worker-core phase-1/phase-2 conformance runs under Bazel with PROFILE
-  # unset, which selects every profile, so one run covers the claude, codex,
-  # cursor and gemini legs: //internal/worker/workertest:workertest_test,
-  # //internal/runtime/tmux:tmux_test and //cmd/gc:gc_test in bazel.yml's
-  # unit lane, and cmd/gc's integration-tagged real-transport proof in the
-  # integration-packages lane.
-
   # Runs distinct live/provenance checks when pack-related files change.
-  # The unconditional preflight-acceptance job already runs the complete Tier
-  # A suite, including gastown materialization and smoke coverage. Keep this
-  # job parallel and focused so pack changes add confidence, not a serialized
-  # duplicate of the same suite.
   pack-gate:
     name: Pack compatibility gate
     needs:
@@ -484,7 +254,6 @@ jobs:
         env:
           GC_TEST_GASCITY_PACKS_REGISTRY: main
 
-
   # Runs when mail-related source paths change.
   mcp-mail:
     name: MCP mail conformance
@@ -516,61 +285,33 @@ jobs:
       - name: MCP mail conformance test
         run: make test-mcp-mail
 
-  ci-preflight:
-    name: CI / preflight
+  # The main ruleset's required "Check". It fans in the same gating jobs as
+  # CI / required (the Bazel lanes gate through bazel.yml's own required
+  # checks).
+  check:
+    name: Check
     needs:
       - runner-policy
+      # `changes` is a hard dependency so a filter-job flake fails Check
+      # directly.
       - changes
-      - preflight-static
-      - preflight-acceptance
-      - release-config
+      - credential-provider-windows
+      - pack-gate
     if: ${{ always() }}
     runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
     env:
       NEEDS_JSON: ${{ toJSON(needs) }}
     steps:
-      - name: Summarize preflight gates
+      - name: Summarize check gates
         run: |
           python3 - <<'PY'
           import json
           import os
           import sys
 
-          needs = json.loads(os.environ["NEEDS_JSON"])
-          failed = {}
-          for job, meta in sorted(needs.items()):
-              result = meta.get("result", "unknown")
-              if result == "success":
-                  continue
-              failed[job] = result
-          if failed:
-              for job, result in failed.items():
-                  print(f"{job}: {result}", file=sys.stderr)
-              sys.exit(1)
-          PY
-
-  ci-integration:
-    name: CI / integration
-    needs:
-      - runner-policy
-      - integration-rest-full
-    if: ${{ always() }}
-    runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
-    env:
-      NEEDS_JSON: ${{ toJSON(needs) }}
-    steps:
-      - name: Summarize integration gates
-        run: |
-          python3 - <<'PY'
-          import json
-          import os
-          import sys
-
-          # integration-rest-full is path-gated and push-only: its skipped
-          # result is expected for docs-only changes and pull requests.
-          # bazel.yml's integration-packages and integration-smoke lanes run
-          # the per-PR integration tests.
-          allow_skipped = {"integration-rest-full"}
+          # credential-provider-windows and pack-gate are path-gated: a
+          # skipped result means the change does not touch their paths.
+          allow_skipped = {"credential-provider-windows", "pack-gate"}
           needs = json.loads(os.environ["NEEDS_JSON"])
           failed = {}
           for job, meta in sorted(needs.items()):
@@ -580,22 +321,29 @@ jobs:
               if result == "skipped" and job in allow_skipped:
                   continue
               failed[job] = result
+
+          summary_path = os.environ["GITHUB_STEP_SUMMARY"]
+          with open(summary_path, "a", encoding="utf-8") as handle:
+              handle.write("## Check\n\n")
+              handle.write("| Job | Result |\n| --- | --- |\n")
+              for job, meta in sorted(needs.items()):
+                  handle.write(f"| {job} | {meta.get('result', 'unknown')} |\n")
+
           if failed:
               for job, result in failed.items():
                   print(f"{job}: {result}", file=sys.stderr)
               sys.exit(1)
           PY
 
+  # Branch protection's (and the hotfix/release ruleset's) required
+  # "CI / required".
   ci-required:
     name: CI / required
     needs:
       - runner-policy
       - changes
-      - ci-preflight
-      - ci-integration
+      - check
       - credential-provider-windows
-      - preflight-unit-cover-noncmdgc
-      - preflight-unit-cover-cmdgc
       - pack-gate
     if: ${{ always() }}
     runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
@@ -609,13 +357,10 @@ jobs:
           import os
           import sys
 
+          # credential-provider-windows and pack-gate are path-gated: a
+          # skipped result means the change does not touch their paths.
+          allow_skipped = {"credential-provider-windows", "pack-gate"}
           needs = json.loads(os.environ["NEEDS_JSON"])
-          allow_skipped = {
-              "credential-provider-windows",
-              "preflight-unit-cover-noncmdgc",
-              "preflight-unit-cover-cmdgc",
-              "pack-gate",
-          }
           failed = {}
           for job, meta in sorted(needs.items()):
               result = meta.get("result", "unknown")

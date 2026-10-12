@@ -66,7 +66,7 @@ func NewRuntimeHandle(cfg RuntimeHandleConfig) (*RuntimeHandle, error) {
 }
 
 // Start reports unsupported for runtime-only handles that lack bead-backed state.
-func (h *RuntimeHandle) Start(ctx context.Context) (err error) {
+func (h *RuntimeHandle) Start(ctx context.Context, _ sessionpkg.Actor) (err error) {
 	event := h.beginOperationEvent(ctx, workerOperationStart)
 	defer func() { event.finish(err) }()
 
@@ -78,7 +78,7 @@ func (h *RuntimeHandle) Start(ctx context.Context) (err error) {
 }
 
 // StartResolved starts a runtime-only handle using the provided resolved command.
-func (h *RuntimeHandle) StartResolved(ctx context.Context, startCommand string, cfg runtime.Config) (err error) {
+func (h *RuntimeHandle) StartResolved(ctx context.Context, by sessionpkg.Actor, startCommand string, cfg runtime.Config) (err error) {
 	event := h.beginOperationEvent(ctx, workerOperationStartResolved)
 	defer func() { event.finish(err) }()
 
@@ -93,12 +93,30 @@ func (h *RuntimeHandle) StartResolved(ctx context.Context, startCommand string, 
 		err = fmt.Errorf("%w: start requires a runtime command", ErrOperationUnsupported)
 		return err
 	}
+	if err = by.CheckStarts(); err != nil {
+		return err
+	}
+	release, err := sessionpkg.LeaseRuntimeName(ctx, by, h.sessionName)
+	if err != nil {
+		return err
+	}
+	defer release()
 	err = h.provider.Start(ctx, h.sessionName, startCfg)
 	return err
 }
 
+// stopUnderLease stops the runtime under the name's flock (by's lease mode).
+func (h *RuntimeHandle) stopUnderLease(ctx context.Context, by sessionpkg.Actor) error {
+	release, err := sessionpkg.LeaseRuntimeName(ctx, by, h.sessionName)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return runtime.StopForCleanup(h.provider, h.sessionName)
+}
+
 // Attach attaches to the live runtime session if it is currently running.
-func (h *RuntimeHandle) Attach(ctx context.Context) (err error) {
+func (h *RuntimeHandle) Attach(ctx context.Context, _ sessionpkg.Actor) (err error) {
 	event := h.beginOperationEvent(ctx, workerOperationAttach)
 	defer func() { event.finish(err) }()
 
@@ -131,11 +149,11 @@ func (h *RuntimeHandle) Reset(ctx context.Context) (err error) {
 // Stop asks the provider to stop the live runtime session. A session that is
 // already gone satisfies the request, so it reports success — see
 // [runtime.StopForCleanup].
-func (h *RuntimeHandle) Stop(ctx context.Context) (err error) {
+func (h *RuntimeHandle) Stop(ctx context.Context, by sessionpkg.Actor) (err error) {
 	event := h.beginOperationEvent(ctx, workerOperationStop)
 	defer func() { event.finish(err) }()
 
-	err = runtime.StopForCleanup(h.provider, h.sessionName)
+	err = h.stopUnderLease(ctx, by)
 	return err
 }
 
@@ -145,35 +163,41 @@ func (h *RuntimeHandle) Stop(ctx context.Context) (err error) {
 // so the sweep can express its intent through one interface regardless of which
 // handle kind it holds.
 func (h *RuntimeHandle) StopForShutdown(ctx context.Context) error {
-	return h.Stop(ctx)
+	return h.Stop(ctx, sessionpkg.Actor{Kind: sessionpkg.ActorSweep})
+}
+
+// StopIdle is Stop for the chat idle auto-suspend; like StopForShutdown it
+// adds nothing to a handle with no session bead.
+func (h *RuntimeHandle) StopIdle(ctx context.Context, by sessionpkg.Actor) error {
+	return h.Stop(ctx, by)
 }
 
 // Kill asks the provider to stop the live runtime session immediately. A
 // session that is already gone satisfies the request, so it reports success —
 // see [runtime.StopForCleanup].
-func (h *RuntimeHandle) Kill(ctx context.Context) (err error) {
+func (h *RuntimeHandle) Kill(ctx context.Context, by sessionpkg.Actor) (err error) {
 	event := h.beginOperationEvent(ctx, workerOperationKill)
 	defer func() { event.finish(err) }()
 
-	err = runtime.StopForCleanup(h.provider, h.sessionName)
+	err = h.stopUnderLease(ctx, by)
 	return err
 }
 
 // Close asks the provider to close the live runtime session. A session that is
 // already gone satisfies the request, so it reports success — see
 // [runtime.StopForCleanup].
-func (h *RuntimeHandle) Close(ctx context.Context) (err error) {
+func (h *RuntimeHandle) Close(ctx context.Context, by sessionpkg.Actor) (err error) {
 	event := h.beginOperationEvent(ctx, workerOperationClose)
 	defer func() { event.finish(err) }()
 
-	err = runtime.StopForCleanup(h.provider, h.sessionName)
+	err = h.stopUnderLease(ctx, by)
 	return err
 }
 
 // CloseDetailed asks the provider to close the live runtime session and
 // returns no bead cleanup artifacts for runtime-only handles.
-func (h *RuntimeHandle) CloseDetailed(ctx context.Context) (sessionpkg.CloseResult, error) {
-	if err := h.Close(ctx); err != nil {
+func (h *RuntimeHandle) CloseDetailed(ctx context.Context, by sessionpkg.Actor) (sessionpkg.CloseResult, error) {
+	if err := h.Close(ctx, by); err != nil {
 		return sessionpkg.CloseResult{}, err
 	}
 	return sessionpkg.CloseResult{}, nil
@@ -223,7 +247,7 @@ func (h *RuntimeHandle) State(context.Context) (State, error) {
 // Runtime-only sessions are permanently excluded from invocation
 // telemetry (gc.agent.tokens.*, gc.agent.invocation.cost_usd); see
 // SessionHandle.recordInvocationTelemetry. Do not add a telemetry hook here.
-func (h *RuntimeHandle) Message(ctx context.Context, req MessageRequest) (result MessageResult, err error) {
+func (h *RuntimeHandle) Message(ctx context.Context, _ sessionpkg.Actor, req MessageRequest) (result MessageResult, err error) {
 	event := h.beginOperationEvent(ctx, workerOperationMessage)
 	defer func() {
 		event.payload.Queued = boolPointer(result.Queued)
@@ -239,7 +263,7 @@ func (h *RuntimeHandle) Message(ctx context.Context, req MessageRequest) (result
 		return MessageResult{}, err
 	}
 	if err := h.provider.Nudge(h.sessionName, runtime.TextContent(req.Text)); err != nil {
-		return MessageResult{}, err
+		return MessageResult{}, runtimeInteractionError(err)
 	}
 	result = MessageResult{Queued: false}
 	return result, nil
@@ -257,7 +281,7 @@ func (h *RuntimeHandle) Interrupt(ctx context.Context, _ InterruptRequest) (err 
 // Nudge submits a best-effort reminder to the live runtime session.
 // Like Message, it is permanently excluded from invocation telemetry;
 // see SessionHandle.recordInvocationTelemetry.
-func (h *RuntimeHandle) Nudge(ctx context.Context, req NudgeRequest) (result NudgeResult, err error) {
+func (h *RuntimeHandle) Nudge(ctx context.Context, _ sessionpkg.Actor, req NudgeRequest) (result NudgeResult, err error) {
 	event := h.beginOperationEvent(ctx, workerOperationNudge)
 	defer func() {
 		event.payload.Delivered = boolPointer(result.Delivered)
@@ -280,13 +304,13 @@ func (h *RuntimeHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 	switch req.Delivery {
 	case "", NudgeDeliveryDefault:
 		if err := h.provider.Nudge(h.sessionName, runtime.TextContent(req.Text)); err != nil {
-			return NudgeResult{}, err
+			return NudgeResult{}, runtimeInteractionError(err)
 		}
 		result = NudgeResult{Delivered: true}
 		return result, nil
 	case NudgeDeliveryImmediate:
 		if err := h.nudgeNow(req.Text); err != nil {
-			return NudgeResult{}, err
+			return NudgeResult{}, runtimeInteractionError(err)
 		}
 		result = NudgeResult{Delivered: true}
 		return result, nil
@@ -341,9 +365,12 @@ func (h *RuntimeHandle) Pending(ctx context.Context) (*PendingInteraction, error
 // PendingStatus returns the pending interaction plus whether the provider
 // supports it. Support is keyed on the provider's answer, not on the interface:
 // a provider that implements InteractionProvider but answers
-// runtime.ErrInteractionUnsupported (acp) is unsupported. A vanished session
-// has no prompt. Any other probe error is returned, so callers can tell "could
-// not tell" from "nothing pending". The mapping mirrors session.Manager.PendingByName.
+// runtime.ErrInteractionUnsupported (a router whose backend has no
+// interactions) is unsupported. A vanished session reports no prompt, and so
+// does a session this provider instance does not own (ACP answers that with
+// runtime.ErrSessionNotFound). Any other probe error is returned, so callers
+// can tell "could not tell" from "nothing pending". The mapping mirrors
+// session.Manager.PendingByName.
 func (h *RuntimeHandle) PendingStatus(context.Context) (*PendingInteraction, bool, error) {
 	ip, ok := h.provider.(runtime.InteractionProvider)
 	if !ok {
@@ -411,12 +438,29 @@ func (h *RuntimeHandle) Respond(_ context.Context, req InteractionResponse) erro
 	if !ok {
 		return runtime.ErrInteractionUnsupported
 	}
-	return ip.Respond(h.sessionName, runtime.InteractionResponse{
+	return runtimeInteractionError(ip.Respond(h.sessionName, runtime.InteractionResponse{
 		RequestID: req.RequestID,
 		Action:    req.Action,
 		Text:      req.Text,
 		Metadata:  cloneStringMap(req.Metadata),
-	})
+	}))
+}
+
+// runtimeInteractionError reports the runtime's interaction refusals in the
+// session vocabulary, as session.Manager does, so a caller maps them the same
+// way for a runtime-only handle: a nudge refused while an interaction is
+// pending is session.ErrPendingInteraction, and a response the provider
+// rejects, or one naming an action the pending prompt does not offer, is
+// session.ErrInteractionMismatch. The runtime error stays wrapped.
+func runtimeInteractionError(err error) error {
+	switch {
+	case errors.Is(err, runtime.ErrNudgeRefusedPendingInteraction):
+		return fmt.Errorf("%w: %w", sessionpkg.ErrPendingInteraction, err)
+	case errors.Is(err, runtime.ErrInteractionResponseInvalid),
+		errors.Is(err, runtime.ErrInteractionActionUnavailable):
+		return fmt.Errorf("%w: %w", sessionpkg.ErrInteractionMismatch, err)
+	}
+	return err
 }
 
 const runtimeHandleWaitIdleTimeout = 30 * time.Second
@@ -435,7 +479,7 @@ func (h *RuntimeHandle) nudgeWaitIdle(ctx context.Context, req NudgeRequest) (Nu
 	}
 	if h.transport == "acp" {
 		if err := h.provider.Nudge(h.sessionName, runtime.TextContent(req.Text)); err != nil {
-			return NudgeResult{}, err
+			return NudgeResult{}, runtimeInteractionError(err)
 		}
 		return NudgeResult{Delivered: true}, nil
 	}
@@ -452,6 +496,13 @@ func (h *RuntimeHandle) nudgeWaitIdle(ctx context.Context, req NudgeRequest) (Nu
 		return NudgeResult{Delivered: false, Undelivered: NudgeUndeliveredProviderUnsupported}, nil
 	}
 	if err := waiter.WaitForIdle(ctx, h.sessionName, runtimeHandleWaitIdleTimeout); err != nil {
+		// A provider type can implement the idle wait while the runtime behind
+		// it cannot (an exec pack that does not declare an idle boundary, or a
+		// composite routing to a backend without one): that is the same
+		// permanent "no live delivery" as having no waiter at all.
+		if errors.Is(err, runtime.ErrInteractionUnsupported) {
+			return NudgeResult{Delivered: false, Undelivered: NudgeUndeliveredProviderUnsupported}, nil
+		}
 		if errors.Is(err, context.Canceled) {
 			return NudgeResult{Delivered: false}, err
 		}
@@ -464,7 +515,7 @@ func (h *RuntimeHandle) nudgeWaitIdle(ctx context.Context, req NudgeRequest) (Nu
 		return NudgeResult{Delivered: false, Undelivered: NudgeUndeliveredNoIdleBoundary}, nil
 	}
 	if err := h.nudgeNow(formatRuntimeWaitIdleReminder(req.Source, req.Text)); err != nil {
-		return NudgeResult{}, err
+		return NudgeResult{}, runtimeInteractionError(err)
 	}
 	return NudgeResult{Delivered: true}, nil
 }

@@ -24,24 +24,33 @@ import (
 // and the per-runtime-name lock (P4 F14). Timing runs in synctest bubbles.
 
 // blockingEffect is an effect whose Run waits for release, or for its
-// context when honorCtx is set, and whose Settle reports on settled.
-func blockingEffect(kind sessionEffectKind, deadline time.Time, release <-chan struct{}, honorCtx bool, settled chan<- error) sessionEffect {
+// context when honorCtx is set, and then settles with the context's error.
+func blockingEffect(kind string, deadline time.Time, release <-chan struct{}, honorCtx bool) sessionEffect {
 	return sessionEffect{
 		Kind:     kind,
 		Deadline: deadline,
-		Run: func(ctx context.Context) error {
+		Run: func(ctx context.Context) settlement {
 			if honorCtx {
 				select {
 				case <-release:
 				case <-ctx.Done():
-					return ctx.Err()
+					return settlement{Outcome: settledFailed, Err: ctx.Err()}
 				}
-				return nil
+				return settlement{Outcome: settledLanded}
 			}
 			<-release
-			return nil
+			return settlement{Outcome: settledLanded}
 		},
-		Settle: func(err error) { settled <- err },
+	}
+}
+
+// tapSettlements sends each settlement's error to settled before x's post.
+// Call it before any submit.
+func tapSettlements(x *effectExecutor, settled chan<- error) {
+	post := x.post
+	x.post = func(s settlement) {
+		settled <- s.Err
+		post(s)
 	}
 }
 
@@ -51,14 +60,13 @@ func TestEffectExecutorDeadlineSettlesHungEffect(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		settled := make(chan error, 2)
 		k := rowKey{Leg: routerTestLeg, ID: "a"}
-		x := newEffectExecutor(func(rowKey, error) {}, io.Discard)
+		x := newEffectExecutor(func(s settlement) { settled <- s.Err }, io.Discard)
 		hang := make(chan struct{})
 		defer close(hang)
 		e := sessionEffect{
-			Kind:     effectStart,
+			Kind:     intentStart,
 			Deadline: time.Now().Add(time.Minute),
-			Run:      func(context.Context) error { <-hang; return nil }, // ignores its context
-			Settle:   func(err error) { settled <- err },
+			Run:      func(context.Context) settlement { <-hang; return settlement{} }, // ignores its context
 		}
 		if err := x.submit(k, e); err != nil {
 			t.Fatal(err)
@@ -85,7 +93,7 @@ func TestCityShutdownKeepsGracefulStopAfterV2StopWithStartInFlight(t *testing.T)
 		rt := newDefaultPlanner(io.Discard)
 		stuck := make(chan struct{})
 		defer close(stuck)
-		if err := rt.exec.submit(rowKey{Leg: routerTestLeg, ID: "a"}, blockingEffect(effectStart, time.Now().Add(time.Hour), stuck, true, make(chan error, 1))); err != nil {
+		if err := rt.exec.submit(rowKey{Leg: routerTestLeg, ID: "a"}, blockingEffect(intentStart, time.Now().Add(time.Hour), stuck, true)); err != nil {
 			t.Fatal(err)
 		}
 		cfg := &config.City{}
@@ -104,46 +112,36 @@ func TestCityShutdownKeepsGracefulStopAfterV2StopWithStartInFlight(t *testing.T)
 	})
 }
 
-// Kills: a panic in Run or Settle crashing the process (one bad effect must
-// not), a Run panic logged with no stack, a panicked effect settled as a
-// success or never freeing its key, and done called before the in-flight
+// Kills: a panic in Run crashing the process (one bad effect must not), a
+// Run panic logged with no stack, a panicked effect settled as a success or
+// never freeing its key, and the settlement posted before the in-flight
 // entry is cleared.
-func TestEffectExecutorRecoversRunAndSettlePanics(t *testing.T) {
+func TestEffectExecutorRecoversRunPanic(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var stderr bytes.Buffer
-		done := make(chan error, 2)
-		x := newEffectExecutor(func(_ rowKey, err error) { done <- err }, &stderr)
 		k := rowKey{Leg: routerTestLeg, ID: "a"}
-		var settledWith error
+		posted := make(chan settlement, 1)
+		var x *effectExecutor
+		x = newEffectExecutor(func(s settlement) {
+			if x.inFlight(k) {
+				t.Error("the settlement was posted while the key was still in flight")
+			}
+			posted <- s
+		}, &stderr)
 		if err := x.submit(k, sessionEffect{
-			Kind: effectStart, Deadline: time.Now().Add(time.Minute),
-			Run:    func(context.Context) error { panic("provider exploded") },
-			Settle: func(err error) { settledWith = err },
+			Kind: intentStart, Deadline: time.Now().Add(time.Minute),
+			Run: func(context.Context) settlement { panic("provider exploded") },
 		}); err != nil {
 			t.Fatal(err)
 		}
-		if err := <-done; err == nil || settledWith == nil || err.Error() != settledWith.Error() {
-			t.Fatalf("done(%v) after Settle(%v), want the panic as the error to both", err, settledWith)
+		if s := <-posted; s.Outcome != settledFailed || s.Cause != causePanic || s.Err == nil || s.Key != k {
+			t.Fatalf("settlement %+v, want a failed one for %v with the panic", s, k)
 		}
 		if out := stderr.String(); !strings.Contains(out, "provider exploded") || !strings.Contains(out, "goroutine ") {
 			t.Fatalf("stderr %q, want the panic logged with its stack", out)
 		}
 		if x.inFlight(k) {
 			t.Fatal("a panicked effect still holds its key")
-		}
-
-		if err := x.submit(k, sessionEffect{
-			Kind: effectOther, Deadline: time.Now().Add(time.Minute),
-			Run:    func(context.Context) error { return nil },
-			Settle: func(error) { panic("ledger exploded") },
-		}); err != nil {
-			t.Fatal(err)
-		}
-		if err := <-done; err != nil {
-			t.Fatalf("done(%v), want Run's nil after a Settle panic", err)
-		}
-		if !strings.Contains(stderr.String(), "ledger exploded") {
-			t.Fatalf("stderr %q, want the Settle panic logged", stderr.String())
 		}
 	})
 }
@@ -153,8 +151,8 @@ func TestEffectExecutorRecoversRunAndSettlePanics(t *testing.T) {
 // and waiting for effects that are not starts.
 func TestBeforeProviderSwapWaitsInFlightStartsBounded(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		x := newEffectExecutor(func(rowKey, error) {}, io.Discard)
 		release, settled, hung := make(chan struct{}), make(chan error, 3), make(chan struct{})
+		x := newEffectExecutor(func(s settlement) { settled <- s.Err }, io.Discard)
 		defer close(hung)
 		far := time.Now().Add(time.Hour)
 		must := func(err error) {
@@ -162,8 +160,8 @@ func TestBeforeProviderSwapWaitsInFlightStartsBounded(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		must(x.submit(rowKey{ID: "start"}, blockingEffect(effectStart, far, release, false, settled)))
-		must(x.submit(rowKey{ID: "stop"}, blockingEffect(effectStop, far, hung, false, settled)))
+		must(x.submit(rowKey{ID: "start"}, blockingEffect(intentStart, far, release, false)))
+		must(x.submit(rowKey{ID: "stop"}, blockingEffect(intentStop, far, hung, false)))
 		go func() {
 			<-time.After(20 * time.Second)
 			close(release)
@@ -174,14 +172,14 @@ func TestBeforeProviderSwapWaitsInFlightStartsBounded(t *testing.T) {
 		}
 		<-settled
 
-		must(x.submit(rowKey{ID: "hung"}, blockingEffect(effectStart, far, hung, false, settled)))
+		must(x.submit(rowKey{ID: "hung"}, blockingEffect(intentStart, far, hung, false)))
 		start = time.Now()
 		if err := x.waitStarts(time.Minute); err == nil || time.Since(start) != 70*time.Second {
 			t.Fatalf("hung start: %v after %s, want an error at the bound plus the cancel bound", err, time.Since(start))
 		}
 
-		x = newEffectExecutor(func(rowKey, error) {}, io.Discard) // the hung start above still runs
-		must(x.submit(rowKey{ID: "cancelable"}, blockingEffect(effectStart, far, hung, true, settled)))
+		x = newEffectExecutor(func(s settlement) { settled <- s.Err }, io.Discard) // the hung start above still runs
+		must(x.submit(rowKey{ID: "cancelable"}, blockingEffect(intentStart, far, hung, true)))
 		start = time.Now()
 		if err := x.waitStarts(time.Minute); err != nil || time.Since(start) != time.Minute {
 			t.Fatalf("cancelable start: %v after %s, want it canceled and settled at the bound", err, time.Since(start))
@@ -212,12 +210,13 @@ func TestRuntimeNameLockSerializesReaperAndStart(t *testing.T) {
 	}
 	open := newSessionBeadSnapshotFromInfos([]session.Info{freshInfo})
 
+	cityA, cityB := t.TempDir(), t.TempDir()
 	sp, store := setup(t)
-	unlock := runtimeNames.tryLock("city-a", "named-1") // a start is mid provider Start
-	if n := reapRuntimesBoundToClosedBeads(store, open, nil, sp, nil, "city-a", io.Discard); n != 0 || sp.CountCalls("Stop", "named-1") != 0 {
+	unlock := holdName(t, cityA, "named-1") // a start is mid provider Start
+	if n := reapRuntimesBoundToClosedBeads(store, open, nil, sp, nil, cityA, io.Discard); n != 0 || sp.CountCalls("Stop", "named-1") != 0 {
 		t.Fatal("the reaper stopped a name a start holds")
 	}
-	if n := reapRuntimesBoundToClosedBeads(store, open, nil, sp, nil, "city-b", io.Discard); n != 1 {
+	if n := reapRuntimesBoundToClosedBeads(store, open, nil, sp, nil, cityB, io.Discard); n != 1 {
 		t.Fatal("another city's start on the same runtime name blocked the reap")
 	}
 	unlock()
@@ -227,12 +226,12 @@ func TestRuntimeNameLockSerializesReaperAndStart(t *testing.T) {
 		_ = sp.SetMeta("named-1", "GC_SESSION_ID", "new") //nolint:errcheck // fake
 	}
 	var stderr bytes.Buffer
-	if n := reapRuntimesBoundToClosedBeads(store, open, nil, sp, nil, "city-a", &stderr); n != 0 || sp.CountCalls("Stop", "named-1") != 0 {
+	if n := reapRuntimesBoundToClosedBeads(store, open, nil, sp, nil, cityA, &stderr); n != 0 || sp.CountCalls("Stop", "named-1") != 0 {
 		t.Fatalf("the reaper stopped the fresh runtime: %s", stderr.String())
 	}
 
 	sp, store = setup(t)
-	if n := reapRuntimesBoundToClosedBeads(store, open, nil, sp, nil, "city-a", io.Discard); n != 1 {
+	if n := reapRuntimesBoundToClosedBeads(store, open, nil, sp, nil, cityA, io.Discard); n != 1 {
 		t.Fatal("the reaper must still reap a runtime bound to a closed bead")
 	}
 }
@@ -241,6 +240,7 @@ func TestRuntimeNameLockSerializesReaperAndStart(t *testing.T) {
 // lane-gone path's unlock, MAINT-032), so every later start and reap of the
 // name is skipped forever, and a provider panic that leaks it.
 func TestReaperFreesRuntimeNameLockOnEveryPath(t *testing.T) {
+	city := t.TempDir()
 	for _, c := range []struct {
 		name    string
 		sp      func() runtime.Provider
@@ -253,15 +253,13 @@ func TestReaperFreesRuntimeNameLockOnEveryPath(t *testing.T) {
 	} {
 		func() {
 			defer func() { _ = recover() }()
-			if stopped, _ := stopStillBoundClosedRuntime("city-a", "named-1", "old", c.sp(), true); stopped != c.stopped {
+			if stopped, _ := stopStillBoundClosedRuntimeLeased(nil, city, "named-1", "", "old", c.sp(), true, nil); stopped != c.stopped {
 				t.Errorf("%s: stopped=%v, want %v", c.name, stopped, c.stopped)
 			}
 		}()
-		unlock := runtimeNames.tryLock("city-a", "named-1")
-		if unlock == nil {
+		if nameHeld(t, city, "named-1") {
 			t.Fatalf("%s: the name lock is still held", c.name)
 		}
-		unlock()
 	}
 }
 
@@ -332,14 +330,13 @@ func TestReloadProviderSwapWaitsForV2StartsBeforeListing(t *testing.T) {
 		defer close(hung)
 		var pausedAtCancel atomic.Bool
 		if err := cr.v2.exec.submit(rowKey{ID: "s"}, sessionEffect{
-			Kind: effectStart, Deadline: time.Now().Add(time.Hour),
-			Run: func(ctx context.Context) error {
+			Kind: intentStart, Deadline: time.Now().Add(time.Hour),
+			Run: func(ctx context.Context) settlement {
 				<-ctx.Done() // waitStarts cancels it; it hangs on regardless
 				pausedAtCancel.Store(cr.v2.planner.startsPaused())
 				<-hung
-				return ctx.Err()
+				return settlement{Outcome: settledFailed, Err: ctx.Err()}
 			},
-			Settle: func(error) {},
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -353,7 +350,7 @@ func TestReloadProviderSwapWaitsForV2StartsBeforeListing(t *testing.T) {
 		if !pausedAtCancel.Load() || cr.v2.planner.startsPaused() {
 			t.Fatalf("starts paused at the cancel = %v, after the abort = %v; want paused, then resumed", pausedAtCancel.Load(), cr.v2.planner.startsPaused())
 		}
-		if _, err := (&CityRuntime{}).beforeProviderSwap(cfg); err != nil {
+		if _, err := (&CityRuntime{}).beforeProviderSwap(context.Background(), cfg); err != nil {
 			t.Fatalf("a legacy controller waits on nothing: %v", err)
 		}
 	})
@@ -367,11 +364,12 @@ func TestBeforeProviderSwapWaitsTheDefaultStartupForZero(t *testing.T) {
 		cr := &CityRuntime{v2: newDefaultPlanner(io.Discard)}
 		release, settled := make(chan struct{}), make(chan error, 1)
 		time.AfterFunc(time.Minute, func() { close(release) })
-		if err := cr.v2.exec.submit(rowKey{ID: "s"}, blockingEffect(effectStart, time.Now().Add(time.Hour), release, true, settled)); err != nil {
+		tapSettlements(cr.v2.exec, settled)
+		if err := cr.v2.exec.submit(rowKey{ID: "s"}, blockingEffect(intentStart, time.Now().Add(time.Hour), release, true)); err != nil {
 			t.Fatal(err)
 		}
 		cfg := &config.City{Session: config.SessionConfig{StartupTimeout: "0s"}}
-		resume, err := cr.beforeProviderSwap(cfg)
+		resume, err := cr.beforeProviderSwap(context.Background(), cfg)
 		resume()
 		if err != nil {
 			t.Fatalf("beforeProviderSwap = %v, want the minute-long start waited for", err)

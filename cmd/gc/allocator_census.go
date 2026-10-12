@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -61,6 +62,14 @@ type censusRow struct {
 	// UnknownState is a state main does not know, other than drain-ack
 	// stop-pending (F9, SESS-044). The row still occupies its slot.
 	UnknownState bool
+	// StopKeys are the row's raw stop-request keys, which only activeStop
+	// reads (v5 D1).
+	StopKeys rawStopKeys
+	// Refresh are the row's raw refresh keys, which A7 reads (C7d-2).
+	Refresh rowRefreshKeys
+	// Facts are the row's premise facts, read off its persisted metadata: an
+	// effect's premise compares the fresh row's against them (tx.premise).
+	Facts session.Facts
 }
 
 // sessionCensus is one pass's census. It is immutable once read.
@@ -75,6 +84,16 @@ type sessionCensus struct {
 	byName    map[string][]rowKey // canonical rows by runtime session name
 }
 
+// sessionsLeg is the sessions leg's ref, the census's first leg, or "" when
+// there is none: the one leg v2 reconciles, every other leg's rows being
+// AL1's None(census-only).
+func (c *sessionCensus) sessionsLeg() string {
+	if c == nil || len(c.Legs) == 0 {
+		return ""
+	}
+	return c.Legs[0].Ref
+}
+
 // readSessionCensus takes one census over legs, which
 // sessionCensusStoreCandidates resolved with the sessions leg first. It
 // errors when there are no legs, or when the sessions leg failed hard.
@@ -85,31 +104,25 @@ func readSessionCensus(now time.Time, legs []classStoreCandidate) (*sessionCensu
 	c := &sessionCensus{At: now, Rows: make(map[rowKey]censusRow)}
 	canonicalLeg := make(map[string]string)
 	for i, source := range legs {
-		infos, err := sessionFrontDoor(source.store).ListAll(session.ListAllOptions{TierMode: beads.FederatedReadTier})
+		listed, err := sessionFrontDoor(source.store).ListAllWithResponses(session.ListAllOptions{TierMode: beads.FederatedReadTier})
 		if i == 0 && err != nil && !beads.IsPartialResult(err) {
 			return nil, fmt.Errorf("session census sessions leg %q: %w", source.ref, err)
 		}
 		c.Legs = append(c.Legs, censusLeg{Ref: source.ref, Err: err})
-		for _, info := range infos {
-			id := strings.TrimSpace(info.ID)
+		for _, l := range listed {
+			id := strings.TrimSpace(l.Info.ID)
 			if id == "" {
 				continue
 			}
 			k := rowKey{Leg: source.ref, ID: id}
-			row := censusRow{
-				Key:           k,
-				Info:          info,
-				InstanceToken: info.InstanceToken,
-				UnknownState:  !isKnownStateInfo(info) && !isDrainAckStopPendingInfo(info),
-			}
-			row.Incarnation, _ = strconv.ParseInt(strings.TrimSpace(info.Generation), 10, 64)
+			row := newCensusRow(k, l.Info)
+			row.StopKeys, row.Refresh = readStopKeys(l.Response.Metadata), readRefreshKeys(l.Response.Metadata)
+			row.Facts = session.FactsOf(l.Response.Metadata)
 			if first, dup := canonicalLeg[id]; dup {
-				row.DuplicateOf = first
-			} else {
 				// One effect, one row: only the canonical copy counts in flight.
+				row.DuplicateOf, row.PendingCreate = first, false
+			} else {
 				canonicalLeg[id] = source.ref
-				state := session.State(strings.TrimSpace(info.MetadataState))
-				row.PendingCreate = info.PendingCreateClaim && state != session.StateActive && state != session.StateAwake
 				c.canonical = append(c.canonical, k)
 			}
 			c.Rows[k] = row
@@ -117,6 +130,35 @@ func readSessionCensus(now time.Time, legs []classStoreCandidate) (*sessionCensu
 	}
 	c.index()
 	return c, nil
+}
+
+// newCensusRow is info's census row at k, as its canonical copy.
+func newCensusRow(k rowKey, info session.Info) censusRow {
+	row := censusRow{
+		Key:           k,
+		Info:          info,
+		InstanceToken: info.InstanceToken,
+		UnknownState:  !isKnownStateInfo(info) && !isDrainAckStopPendingInfo(info),
+	}
+	row.Incarnation, _ = strconv.ParseInt(strings.TrimSpace(info.Generation), 10, 64)
+	state := session.State(strings.TrimSpace(info.MetadataState))
+	row.PendingCreate = info.PendingCreateClaim && state != session.StateActive && state != session.StateAwake
+	return row
+}
+
+// reread is k's census row read again as info, with its persisted metadata
+// meta. A nil meta keeps the census's stop keys and facts: a re-decide never
+// drops a request it was not shown.
+func (c *sessionCensus) reread(k rowKey, info session.Info, meta map[string]string) censusRow {
+	r, prev := newCensusRow(k, info), c.Rows[k]
+	r.StopKeys, r.Refresh, r.Facts = prev.StopKeys, prev.Refresh, prev.Facts
+	if meta != nil {
+		r.StopKeys, r.Refresh, r.Facts = readStopKeys(meta), readRefreshKeys(meta), session.FactsOf(meta)
+	}
+	if r.DuplicateOf = prev.DuplicateOf; r.DuplicateOf != "" {
+		r.PendingCreate = false
+	}
+	return r
 }
 
 // index orders the canonical rows and builds the per-pass lookups.
@@ -151,7 +193,11 @@ func (c *sessionCensus) Canonical() []censusRow {
 }
 
 // Partial reports whether some leg's read was partial: its rows are what the
-// read returned, so the pass retains (causeStoreQueryPartial).
+// read returned, so the pass retains (causeStoreQueryPartial). This is the
+// decide's retention trigger, not an absence test: a hard error on a
+// non-sessions leg leaves a census that is not complete (complete), so
+// nothing reads its rows closed, but it does not retain the whole pass
+// (S1-2, S1-9: its rows are census-only relics).
 func (c *sessionCensus) Partial() bool {
 	for _, l := range c.Legs {
 		if beads.IsPartialResult(l.Err) {
@@ -159,6 +205,51 @@ func (c *sessionCensus) Partial() bool {
 		}
 	}
 	return false
+}
+
+// completeCensus is a census every leg of which read cleanly: the only one
+// that may read a row it does not hold as closed (EFFECT-STRUCTURE §2.2). On
+// a partial or failed leg read an absent row is unknown, so nothing forgets
+// it on that read's strength. Only complete makes one; its zero value
+// closes nothing.
+type completeCensus struct{ c *sessionCensus }
+
+// complete returns c as a completeCensus, false when c is nil or any leg
+// read erred, partially or hard.
+func (c *sessionCensus) complete() (completeCensus, bool) {
+	if c == nil {
+		return completeCensus{}, false
+	}
+	for _, l := range c.Legs {
+		if l.Err != nil {
+			return completeCensus{}, false
+		}
+	}
+	return completeCensus{c: c}, true
+}
+
+// Closed reports that the census holds no open row k on a leg it read: a
+// row on a leg the census did not plan (a suspended or unbound rig) is not
+// closed.
+func (c completeCensus) Closed(k rowKey) bool {
+	if c.c == nil || !slices.ContainsFunc(c.c.Legs, func(l censusLeg) bool { return l.Ref == k.Leg }) {
+		return false
+	}
+	_, open := c.c.Rows[k]
+	return !open
+}
+
+// ClosedID reports that the census holds no open row with bead id on any leg.
+func (c completeCensus) ClosedID(id string) bool {
+	if c.c == nil {
+		return false
+	}
+	for k := range c.c.Rows {
+		if k.ID == id {
+			return false
+		}
+	}
+	return true
 }
 
 // RowsNamed returns the canonical rows whose runtime session name is name.

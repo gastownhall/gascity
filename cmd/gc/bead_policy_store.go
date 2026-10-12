@@ -28,6 +28,10 @@ const (
 type beadPolicyStore struct {
 	beads.Store
 	cfg *config.City
+	// borrowed marks a handle over a store the invocation memo owns
+	// (invocation_store_memo.go). closeBeadStoreHandle leaves its store open;
+	// the memo closes it when the invocation ends.
+	borrowed bool
 }
 
 type beadPolicyGraphStore struct {
@@ -58,12 +62,23 @@ var (
 )
 
 func wrapStoreWithBeadPolicies(store beads.Store, cfg *config.City) beads.Store {
+	return wrapStoreWithBeadPoliciesOwnership(store, cfg, false)
+}
+
+// borrowedStoreWithBeadPolicies is wrapStoreWithBeadPolicies for a store the
+// invocation memo owns: the handle's close leaves the store open.
+func borrowedStoreWithBeadPolicies(store beads.Store, cfg *config.City) beads.Store {
+	return wrapStoreWithBeadPoliciesOwnership(store, cfg, true)
+}
+
+func wrapStoreWithBeadPoliciesOwnership(store beads.Store, cfg *config.City, borrowed bool) beads.Store {
 	if store == nil {
 		return nil
 	}
 	policyStore := &beadPolicyStore{
-		Store: store,
-		cfg:   cfg,
+		Store:    store,
+		cfg:      cfg,
+		borrowed: borrowed,
 	}
 	if applier, ok := beads.GraphApplyFor(store); ok {
 		return &beadPolicyGraphStore{
@@ -212,6 +227,31 @@ func (s *beadPolicyStore) SawRows() bool {
 	return ok && witness.SawRows()
 }
 
+// DepListBatch forwards the batched dep-edge read to the wrapped store.
+//
+// The policy layer shapes which BEADS are visible — Create, List, Ready,
+// Children, ListByLabel and the rest are filtered here. It does not shape DEP
+// EDGES: DepList is already answered by the embedded store with no policy
+// applied, and this is DepList's batch shape, so forwarding it keeps the two
+// answers identical rather than giving the batch a reach the single read
+// does not have.
+//
+// It is explicit for the reason DeleteBatch above is: the embedded Store
+// interface does not promote optional capabilities, so a silent wrapper makes
+// the batch unreachable and the caller takes the per-anchor path with no
+// diagnostic. That is exactly what happened on a live hosted city, where the
+// recovery walk asked this wrapper for the batch, was told no by a failed type
+// assertion, and read a few hundred beads one round trip at a time over a link
+// that drops handshakes (ga-50tsx). beadPolicyGraphStore embeds
+// *beadPolicyStore, so it forwards through this too.
+func (s *beadPolicyStore) DepListBatch(ids []string) (map[string][]beads.Dep, error) {
+	batch, ok := beads.DepListBatchFor(s.Store)
+	if !ok {
+		return nil, beads.ErrDepListBatchUnsupported
+	}
+	return batch.DepListBatch(ids)
+}
+
 func (s *beadPolicyStore) Handles() beads.StoreHandles {
 	handles := beads.HandlesFor(s.Store)
 	handles.Cached = beadPolicyCachedReader{CachedReader: handles.Cached}
@@ -298,6 +338,23 @@ func (s *beadPolicyStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, e
 		return false, beads.ErrConditionalReleaseUnsupported
 	}
 	return releaser.ReleaseIfCurrent(id, expectedAssignee)
+}
+
+// Claim forwards the two-argument compare-and-swap claim to the wrapped
+// store, the same plain pass-through ReleaseIfCurrent just above uses: the
+// policy layer shapes creation and reads, and has no claim policy of its own
+// to apply, so the inner store's ok/error idiom (a conflict is ok=false with a
+// nil error; a missing bead is ErrNotFound) travels unmodified.
+// beadPolicyGraphStore inherits this via its embedded *beadPolicyStore,
+// matching ConditionalWritesResolveTarget's comment above.
+func (s *beadPolicyStore) Claim(id, assignee string) (beads.Bead, bool, error) {
+	claimer, ok := s.Store.(interface {
+		Claim(id, assignee string) (beads.Bead, bool, error)
+	})
+	if !ok {
+		return beads.Bead{}, false, beads.ErrClaimUnsupported
+	}
+	return claimer.Claim(id, assignee)
 }
 
 func (s *beadPolicyStore) policyForCreate(b beads.Bead) (string, string) {
@@ -496,7 +553,13 @@ func beadStorageClass(storage string) beads.StorageClass {
 }
 
 func applyBeadStorage(b beads.Bead, storage string) beads.Bead {
-	switch beadStorageClass(storage) {
+	return applyStorageClass(b, beadStorageClass(storage))
+}
+
+// applyStorageClass sets the bead's own storage flags to storage, for a store
+// that has no storage-class create. StorageDefault leaves them as they are.
+func applyStorageClass(b beads.Bead, storage beads.StorageClass) beads.Bead {
+	switch storage {
 	case beads.StorageEphemeral:
 		b.Ephemeral = true
 		b.NoHistory = false

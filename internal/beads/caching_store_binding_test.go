@@ -56,6 +56,9 @@ func TestWithEventIDPrefixesAppliesEveryServedNamespace(t *testing.T) {
 				t.Fatalf("re-Prime: %v", err)
 			}
 			row.Title = "delivered"
+			if err := engine.Update(row.ID, beads.UpdateOpts{Title: &row.Title}); err != nil {
+				t.Fatalf("Update: %v", err)
+			}
 			payload, err := beads.EncodeBeadEventPayload(row)
 			if err != nil {
 				t.Fatalf("encoding: %v", err)

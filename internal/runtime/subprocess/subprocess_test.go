@@ -1371,3 +1371,178 @@ func TestAcpSubprocessAlreadyFreshOnly(t *testing.T) {
 		t.Fatal("Start replaced or stopped the runtime holding the name")
 	}
 }
+
+// exitingConn is a tracked session whose process has already exited: its cmd
+// was never started, so reap's Wait returns at once and no process is spawned.
+func exitingConn(token string) *sessionConn {
+	return &sessionConn{cmd: &exec.Cmd{}, done: make(chan struct{}), reaped: make(chan struct{}), token: token, listener: newFakeListener()}
+}
+
+// v5 O2 (X3): Ownerless needs identity to be atomic with liveness on the way
+// out as well as in. Held off p.mu, reap can close done but cannot clear the
+// sidecar, so the runtime reads not alive with its identity still there. This
+// is the only clear of a started session's sidecar, whether the process exits
+// on its own or because Stop signaled it.
+// Kills: the sidecar cleared before done closes (the old exit order).
+func TestSubprocessExitReadsNotAliveBeforeIdentityClears(t *testing.T) {
+	p := newTestProvider(t)
+	if err := p.persistStartMetadata("exiting", identityEnv); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	sc := exitingConn(identityEnv["GC_INSTANCE_TOKEN"])
+	p.procs["exiting"] = sc
+
+	p.mu.Lock()
+	go p.reap("exiting", sc, p.socketDir(), os.Geteuid())
+	<-sc.done
+	for key, want := range identityEnv {
+		if got, _ := p.GetMeta("exiting", key); got != want {
+			t.Errorf("sidecar %s when done closed = %q, want %q", key, got, want)
+		}
+	}
+	p.mu.Unlock()
+	<-sc.reaped
+
+	if obs, err := p.ObserveLivenessWithError("exiting", nil); err != nil || obs.Alive {
+		t.Errorf("ObserveLivenessWithError after reap = %+v, %v; want not alive", obs, err)
+	}
+	for key := range identityEnv {
+		if got, _ := p.GetMeta("exiting", key); got != "" {
+			t.Errorf("sidecar %s after reap = %q, want cleared", key, got)
+		}
+	}
+}
+
+// A late reap clears the sidecar only while it is still its incarnation's.
+// Kills: an unconditional clear (rows 3 and 4), the tracked-incarnation check
+// dropped (row 3: a tokenless newer Start in this provider), the token check
+// dropped (row 4: a newer Start in another provider), and a reap that never
+// clears (rows 1 and 2).
+func TestSubprocessReapClearsOnlyItsOwnIncarnation(t *testing.T) {
+	newer := map[string]string{"GC_SESSION_ID": "bead-123"}
+	tests := []struct {
+		name      string
+		ownToken  string
+		tracked   func(own *sessionConn) *sessionConn
+		sidecar   map[string]string
+		wantClear bool
+	}{
+		{"tracked own incarnation", "token-456", func(own *sessionConn) *sessionConn { return own }, identityEnv, true},
+		{"own incarnation evicted by Stop", "token-456", func(*sessionConn) *sessionConn { return nil }, identityEnv, true},
+		{"newer tokenless Start in this provider", "", func(*sessionConn) *sessionConn { return exitingConn("") }, newer, false},
+		{"newer Start in another provider", "token-456", func(*sessionConn) *sessionConn { return nil }, map[string]string{"GC_SESSION_ID": "bead-123", "GC_INSTANCE_TOKEN": "token-789"}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := newTestProvider(t)
+			if err := p.persistStartMetadata("reused", tt.sidecar); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			sc := exitingConn(tt.ownToken)
+			if cur := tt.tracked(sc); cur != nil {
+				p.procs["reused"] = cur
+			}
+
+			p.reap("reused", sc, p.socketDir(), os.Geteuid())
+
+			for key, want := range tt.sidecar {
+				if tt.wantClear {
+					want = ""
+				}
+				if got, _ := p.GetMeta("reused", key); got != want {
+					t.Errorf("sidecar %s after reap = %q, want %q", key, got, want)
+				}
+			}
+		})
+	}
+}
+
+// Stop returns only once reap has cleared the sidecar, as it did when reap
+// cleared it before closing done: from a live conn (reap held in Close until
+// Stop is under way) and from one whose done closes while Stop and reap both
+// wait on p.mu. Each setup races Stop against reap, so it runs repeatedly; a pass
+// is never spurious.
+// Kills: Stop not waiting for reap on the live path (terminateSessionConn) or
+// the exited path.
+func TestSubprocessStopReturnsAfterReap(t *testing.T) {
+	setups := map[string]func(p *Provider, sc *sessionConn, stop func()){
+		"live": func(p *Provider, sc *sessionConn, stop func()) {
+			gate := &gatedListener{fakeListener: newFakeListener(), release: make(chan struct{})}
+			sc.listener = gate
+			go p.reap("stopping", sc, p.socketDir(), os.Geteuid())
+			stop()
+			close(gate.release)
+		},
+		"exited": func(p *Provider, sc *sessionConn, stop func()) {
+			p.mu.Lock()
+			stop()
+			go p.reap("stopping", sc, p.socketDir(), os.Geteuid())
+			<-sc.done
+			p.mu.Unlock()
+		},
+	}
+	for name, setup := range setups {
+		t.Run(name, func(t *testing.T) {
+			for range 32 {
+				p := newTestProvider(t)
+				if err := p.persistStartMetadata("stopping", identityEnv); err != nil {
+					t.Fatalf("seed: %v", err)
+				}
+				sc := exitingConn(identityEnv["GC_INSTANCE_TOKEN"])
+				p.procs["stopping"] = sc
+				stopped := make(chan error, 1)
+				setup(p, sc, func() { go func() { stopped <- p.Stop("stopping") }() })
+				if err := <-stopped; err != nil {
+					t.Fatalf("Stop: %v", err)
+				}
+				select {
+				case <-sc.reaped:
+				default:
+					t.Fatal("Stop returned before reap finished")
+				}
+				for key := range identityEnv {
+					if got, _ := p.GetMeta("stopping", key); got != "" {
+						t.Fatalf("sidecar %s after Stop = %q, want cleared", key, got)
+					}
+				}
+			}
+		})
+	}
+}
+
+// gatedListener holds reap in Close, so the runtime stays alive, until release.
+type gatedListener struct {
+	*fakeListener
+	release chan struct{}
+}
+
+func (l *gatedListener) Close() error {
+	<-l.release
+	return l.fakeListener.Close()
+}
+
+// The seed writes the token, then the epoch, then the session ID, so a read
+// that straddles it never sees an ID without its token. Squatting a key's
+// path makes its write the one that fails; the first squatted key attempted
+// names the order.
+// Kills: the seed written in map order.
+func TestSubprocessSeedsIdentityTokenEpochID(t *testing.T) {
+	env := map[string]string{"GC_SESSION_ID": "bead-123", "GC_RUNTIME_EPOCH": "4", "GC_INSTANCE_TOKEN": "token-456"}
+	for _, squat := range [][]string{
+		{"GC_INSTANCE_TOKEN", "GC_RUNTIME_EPOCH", "GC_SESSION_ID"},
+		{"GC_RUNTIME_EPOCH", "GC_SESSION_ID"},
+	} {
+		for range 16 {
+			p := newTestProvider(t)
+			for _, key := range squat {
+				if err := os.MkdirAll(filepath.Join(p.metaPath("seeded", key), "squat"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := p.persistStartMetadata("seeded", env)
+			if err == nil || !strings.Contains(err.Error(), p.metaPath("seeded", squat[0])) {
+				t.Fatalf("squatting %v: seed error = %v, want the %s write to fail first", squat, err, squat[0])
+			}
+		}
+	}
+}

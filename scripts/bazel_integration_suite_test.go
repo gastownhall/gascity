@@ -49,7 +49,9 @@ func goTestBuild(names ...string) string {
 // --check) is a fixed point.
 func TestIntegrationSuiteListsEveryPackageTheIntegrationBuildChanges(t *testing.T) {
 	root := newIntegrationSuiteTree(t, map[string]string{
-		"tagged/BUILD.bazel":                 goTestBuild("tagged_test", "tagged_more_test"),
+		"tagged/BUILD.bazel": goTestBuild("tagged_test", "tagged_more_test") +
+			"test_suite(\n    name = \"tagged_integration_solo_tests\",\n    tests = [\":tagged_test\"],\n)\n\n" +
+			"test_suite(\n    name = \"tagged_other_tests\",\n    tests = [\":tagged_test\"],\n)\n\n",
 		"tagged/a_test.go":                   "//go:build integration\n\npackage tagged\n",
 		"either/BUILD.bazel":                 goTestBuild("either_test"),
 		"either/a_test.go":                   "//go:build integration || dolt_integration\n\npackage either\n",
@@ -86,12 +88,16 @@ func TestIntegrationSuiteListsEveryPackageTheIntegrationBuildChanges(t *testing.
 		"//gated:gated_test",
 		"//herdr:herdr_test",
 		"//library:library_test",
+		"//tagged:tagged_integration_solo_tests",
 		"//tagged:tagged_more_test",
 		"//tagged:tagged_test",
 	} {
 		if !strings.Contains(got, "        \""+label+"\",\n") {
 			t.Errorf("suite lacks %s:\n%s", label, got)
 		}
+	}
+	if strings.Contains(got, "//tagged:tagged_other_tests") {
+		t.Errorf("suite lists a test_suite not named *_integration_solo_tests:\n%s", got)
 	}
 	for _, pkg := range []string{"plain", "othertag", "fixture", "own", "nobuild", "test/integration", "test/acceptance"} {
 		if strings.Contains(got, "\"//"+pkg) {

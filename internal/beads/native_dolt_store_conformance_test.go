@@ -10,6 +10,7 @@ import (
 func TestNativeDoltStoreConformance(t *testing.T) {
 	beadstest.RunStoreTests(t, beads.NewNativeDoltStoreForConformance)
 	beadstest.RunCloseReasonTests(t, beads.NewNativeDoltStoreForConformance)
+	beadstest.RunCloseNotificationTests(t, func(*testing.T) beads.Store { return beads.NewNativeDoltStoreForConformance() })
 }
 
 // TestNativeDoltStorePinnedIDFenceConformance runs the shared fenced-Create

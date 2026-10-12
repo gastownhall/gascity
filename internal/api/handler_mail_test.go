@@ -183,12 +183,12 @@ func (f *multiProviderFakeState) MailProviders() map[string]mail.Provider {
 	return f.providers
 }
 
-func TestMailInboxForRecipientsUsesMultiRecipientProvider(t *testing.T) {
+func TestMailInboxForQueryUsesMultiRecipientProvider(t *testing.T) {
 	mp := &multiRecipientInboxMailProvider{}
 
-	msgs, err := mailInboxForRecipients(mp, []string{"sky", "mayor", "sky"})
+	msgs, err := mailInboxForQuery(mp, apiMailQuery{recipients: []string{"sky", "mayor", "sky"}})
 	if err != nil {
-		t.Fatalf("mailInboxForRecipients: %v", err)
+		t.Fatalf("mailInboxForQuery: %v", err)
 	}
 	if len(msgs) != 1 || msgs[0].ID != "multi-1" {
 		t.Fatalf("messages = %#v, want multi-recipient result", msgs)
@@ -202,15 +202,15 @@ func TestMailInboxForRecipientsUsesMultiRecipientProvider(t *testing.T) {
 	}
 }
 
-func TestMailInboxForRecipientsFallbackDedupesMessages(t *testing.T) {
+func TestMailInboxForQueryFallbackDedupesMessages(t *testing.T) {
 	mp := &exactRecipientMailProvider{messages: map[string][]mail.Message{
 		"sky":   {{ID: "msg-1", To: "sky"}, {ID: "shared", To: "sky"}},
 		"mayor": {{ID: "shared", To: "mayor"}, {ID: "msg-2", To: "mayor"}},
 	}}
 
-	msgs, err := mailInboxForRecipients(mp, []string{"sky", "mayor", "sky"})
+	msgs, err := mailInboxForQuery(mp, apiMailQuery{recipients: []string{"sky", "mayor", "sky"}})
 	if err != nil {
-		t.Fatalf("mailInboxForRecipients: %v", err)
+		t.Fatalf("mailInboxForQuery: %v", err)
 	}
 	if len(msgs) != 3 {
 		t.Fatalf("messages = %#v, want 3 deduped fallback messages", msgs)

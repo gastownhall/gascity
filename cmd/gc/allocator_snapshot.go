@@ -3,6 +3,7 @@ package main
 import (
 	"time"
 
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worktree"
 )
 
@@ -153,6 +154,9 @@ type selectionEntry struct {
 	Endpoint             endpointKey
 	ObservationUncertain bool
 	Identity             *identityView
+	// OpenWork is a Drain entry's first open or in-progress assigned work,
+	// ready or not: legacy's undesired-drain keep (SESS-074).
+	OpenWork *assignedWorkView
 }
 
 // rowBasis is the row incarnation the pass saw.
@@ -214,6 +218,9 @@ type bindingTarget struct {
 	// when set, must be verified by the session key before it applies.
 	WorkDir      string
 	WorktreeSpec *worktree.Spec
+	// Patch is computePoolTriggerBindingPatch against the pass's row: what
+	// the start effect's PreWake folds (v5 S1).
+	Patch session.MetadataPatch
 }
 
 // identityView is a row's place among its named identity's rows (C2.13) or

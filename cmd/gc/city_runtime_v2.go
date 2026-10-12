@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
@@ -63,10 +65,14 @@ func (cr *CityRuntime) installPlanner(rt *plannerRuntime) {
 // newPlannerHost is the one place the planner's view of the city is built
 // (F2). Every closure reads state a lock publishes or state fixed before run
 // starts; run sets inventoryLane before the startup step boots the planner.
-// The capacity guard and template resolutions are left out: no trace-only
-// arm reads them.
+// The endpoint capacity guard is built here, before run, so the planner and
+// its effects share the controller's guard without racing its lazy build.
+// A generation's template resolver builds its params once, as legacy's
+// buildDesiredState does each tick, over the sessions store gather reads.
 func (cr *CityRuntime) newPlannerHost() plannerHost {
+	guard := cr.ensureEndpointCapacityGuard()
 	return plannerHost{
+		preserveSessions: cr.preserveSessionsShutdown.Load,
 		gather: gatherEnv{
 			CityPath: cr.cityPath, CityName: cr.cityName,
 			Sessions:  cr.v2SessionsStore,
@@ -82,7 +88,15 @@ func (cr *CityRuntime) newPlannerHost() plannerHost {
 				return readStartupHealthEpisodes(cr.v2SessionsStore())
 			},
 			Suspension: func() suspensionstate.State { return loadSuspensionStateBestEffort(cr.cityPath) },
-			LookPath:   exec.LookPath,
+			Nudges: func() beads.NudgesStore {
+				return beads.NudgesStore{Store: resolveNudgesStore(cr.storageRoutes, cr.cityBeadStore(), cr.serviceConfigSnapshot(), cr.cityPath, cr.rec)}
+			},
+			WorkStore: cr.cityBeadStore,
+			Capacity:  func() *endpointCapacityGuard { return guard },
+			Templates: func(env *reconcileEnv, now time.Time) templateResolver {
+				return newTemplateResolver(newAgentBuildParams(cr.cityName, cr.cityPath, env.Cfg, env.SP, now.UTC(), cr.v2SessionsStore(), cr.stderr))
+			},
+			LookPath: exec.LookPath,
 		},
 		snapshotEnv: cr.serviceEnvSnapshot,
 		setInventoryHook: func(fn func(prev, next *ObservationSnapshot)) {
@@ -92,16 +106,117 @@ func (cr *CityRuntime) newPlannerHost() plannerHost {
 			rigs := cr.rigBeadStores() // residency:allow — the census frame; collectOpenSessionInfos plans the legs (storeref.Plan)
 			return readV2SessionMigration(cr.cityPath, cr.cityName, cr.serviceConfigSnapshot(), cr.v2SessionsStore(), rigs)
 		},
+		capabilities: func() error {
+			return v2CapabilityRefusal(v2ClassStoreCapabilities(cr.v2SessionsStore(), cr.v2GraphStore(), false))
+		},
 		beginTrace: cr.beginV2Trace,
-		safeTick:   cr.safeTick,
-		rec:        cr.rec,
-		stderr:     cr.stderr,
+		inventoryFields: func() map[string]any {
+			if cr.inventoryLane == nil {
+				return nil
+			}
+			return cr.inventoryLane.v2PassFields()
+		},
+		safeTick: cr.safeTick,
+		rec:      cr.rec,
+		stderr:   cr.stderr,
+		stranded: cr.strandedClaimAlerter(),
 	}
 }
 
 // v2SessionsStore is sessionsBeadStore with the config read under its lock.
 func (cr *CityRuntime) v2SessionsStore() beads.Store {
 	return resolveSessionStore(cr.storageRoutes, cr.cityBeadStore(), cr.serviceConfigSnapshot(), cr.cityPath, cr.rec)
+}
+
+// v2GraphStore is graphBeadStore with the config read under its lock.
+func (cr *CityRuntime) v2GraphStore() beads.Store {
+	return resolveGraphStore(cr.storageRoutes, cr.cityBeadStore(), cr.serviceConfigSnapshot(), cr.cityPath, cr.rec)
+}
+
+// v2StoreCapability is C0.7's reading of one class store: its stamped
+// conditional-writes mode and kind, whether it has a conditional writer and
+// an atomic conditional closer, and why it has no writer.
+type v2StoreCapability struct {
+	Class, Kind    string
+	Mode           gate.Mode
+	Writer, Closer bool
+	Reason         string
+}
+
+// v2ClassStoreCapabilities reads C0.7's two capabilities of the sessions
+// and graph class stores (CONTRACT v5 R2), writing nothing. Boot resolves
+// the writer as the write path does; doctor (inspect) only inspects the
+// stamp and the capability memo, so it fires no degraded event.
+func v2ClassStoreCapabilities(sessions, graph beads.Store, inspect bool) []v2StoreCapability {
+	out := make([]v2StoreCapability, 0, 2)
+	for _, c := range []struct {
+		class string
+		store beads.Store
+	}{{"sessions", sessions}, {"graph", graph}} {
+		insp := beads.InspectConditionalWrites(c.store)
+		got := v2StoreCapability{Class: c.class, Kind: insp.StoreKind, Mode: insp.Mode, Reason: insp.Reason}
+		_, got.Closer = beads.AtomicConditionalCloserFor(c.store)
+		if inspect {
+			_, has := beads.ConditionalWriterForTarget(c.store)
+			got.Writer = has && insp.Capable && (insp.Mode == gate.Auto || insp.Mode == gate.Require)
+		} else {
+			w, diag, err := beads.ResolveConditionalWriter(c.store)
+			got.Writer = w != nil && err == nil
+			switch {
+			case err != nil:
+				got.Reason = err.Error()
+			case diag != nil && diag.PreflightReason != "":
+				got.Reason = diag.PreflightReason
+			}
+		}
+		if !got.Writer && got.Reason == "" {
+			got.Reason = "conditional writes are off"
+			if got.Mode == gate.Auto || got.Mode == gate.Require {
+				got.Reason = "the store does not implement conditional writes"
+			}
+		}
+		out = append(out, got)
+	}
+	return out
+}
+
+// off reports whether c's conditional writes are off or never stamped.
+func (c v2StoreCapability) off() bool { return c.Mode == gate.ModeUnset || c.Mode == gate.Off }
+
+// String is c as the boot refusal and doctor name it.
+func (c v2StoreCapability) String() string {
+	mode := string(c.Mode)
+	if c.Mode == gate.ModeUnset {
+		mode = "unset"
+	}
+	writer := fmt.Sprintf("conditional writer %v", c.Writer)
+	if !c.Writer {
+		writer += " (" + c.Reason + ")"
+	}
+	return fmt.Sprintf("%s store (%s, conditional_writes=%s): %s, atomic conditional closer %v", c.Class, c.Kind, mode, writer, c.Closer)
+}
+
+// v2CapabilityRefusal is C0.7's boot refusal: no capability, no effect. It
+// names each store lacking one, with both its capabilities, and the fix:
+// conditional_writes = "auto" when a store has them off, else a store that
+// fences.
+func v2CapabilityRefusal(caps []v2StoreCapability) error {
+	var parts []string
+	off := false
+	for _, c := range caps {
+		if !c.Writer || !c.Closer {
+			parts = append(parts, c.String())
+			off = off || (!c.Writer && c.off())
+		}
+	}
+	if len(parts) == 0 {
+		return nil
+	}
+	fix := "put the class on a store that fences (SQLite or native Dolt)"
+	if off {
+		fix = `set [beads] conditional_writes = "auto"`
+	}
+	return fmt.Errorf("v2 refuses to boot without conditional writes (C0.7): %s; v2 never writes blind: %s, or remove session_reconciler to run legacy", strings.Join(parts, "; "), fix)
 }
 
 // recordV2Pass records the planner's reconcile_pass operation in a
@@ -151,7 +266,7 @@ func (cr *CityRuntime) reloadV2(p *tickPass, source reloadSource) {
 	r := cr.reloadConfigTraced(p.ctx, p.lastProviderName, p.cityRoot, p.trace, source)
 	cr.v2.publishEnv()
 	if r.Outcome != reloadOutcomeFailed {
-		cr.v2.softReload(reloadIntent{Source: source, Soft: p.manualReload != nil && p.manualReload.soft}, &r)
+		cr.v2.softReload(p.ctx, reloadIntent{Source: source, Soft: p.manualReload != nil && p.manualReload.soft}, &r)
 	}
 	cr.v2.planner.markDirty("reload")
 	p.manualReply = r
@@ -162,20 +277,45 @@ func (cr *CityRuntime) reloadV2(p *tickPass, source reloadSource) {
 }
 
 // beforeProviderSwap holds a provider swap (CONTRACT v5 P7): it pauses the
-// planner's starts and creates (swap-pause), then waits for every in-flight
+// planner's starts and creates (swap-pause) and closes the executor to starts
+// admitted before the pause, then waits for every in-flight
 // v2 start (effectExecutor.waitStarts), so the swap's listing cannot miss a
 // runtime a start is still creating; an error aborts the reload. The caller
-// resumes once the swap applied or aborted. Legacy waits on nothing.
-func (cr *CityRuntime) beforeProviderSwap(cfg *config.City) (resume func(), err error) {
-	if cr.v2 == nil {
-		return func() {}, nil
-	}
+// resumes once the swap applied or aborted. Legacy waits the same bound for
+// its launched async starts. A ctx done during the wait (a controller stop)
+// aborts the swap too.
+func (cr *CityRuntime) beforeProviderSwap(ctx context.Context, cfg *config.City) (resume func(), err error) {
 	startup := cfg.Session.StartupTimeoutDuration()
 	if startup <= 0 {
 		startup = 60 * time.Second // as admit's start deadline (CONTRACT v5.4 P3)
 	}
+	if cr.v2 == nil {
+		return func() {}, cr.asyncStarts.waitLaunchedStarts(ctx, startup+startDeadlineSlack)
+	}
+	if r, refused := v2ProviderSwapRefusal(cfg, reconcilerModeLookupEnv); refused {
+		return func() {}, fmt.Errorf("v2 refuses the provider swap: %s", r)
+	}
 	cr.v2.planner.pauseStarts()
-	return cr.v2.planner.resumeStarts, cr.v2.exec.waitStarts(startup + startDeadlineSlack)
+	cr.v2.exec.closeStarts()
+	resume = func() {
+		cr.v2.exec.openStarts()
+		cr.v2.planner.resumeStarts()
+	}
+	if err := cr.v2.exec.waitStarts(startup + startDeadlineSlack + startFailureSlack); err != nil {
+		return resume, err
+	}
+	return resume, ctx.Err()
+}
+
+// v2ProviderSwapRefusal is the latch's refusal of the session provider cfg
+// runs under lookupEnv: at boot (v2LatchRefusals), and on a reload's provider
+// swap, so a v2 city never swaps onto a runtime it would not start on.
+func v2ProviderSwapRefusal(cfg *config.City, lookupEnv func(string) (string, bool)) (latchRefusal, bool) {
+	reg, err := runtimeRegistryForCity(cfg)
+	if err != nil { // a pack runtime collision; config load already rejects it
+		reg = runtimeRegistry
+	}
+	return v2SessionRuntimeRefusal(cfg, reg, v2SessionRuntimeName(cfg, lookupEnv))
 }
 
 // checkReconcilerWiring refuses runtime params whose v2 runtime and wake

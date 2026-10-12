@@ -12,17 +12,21 @@ import (
 // percentiles: the most recent passes, not the whole process lifetime.
 const passMetricsWindow = 1024
 
-// passDutyWindow is how far back the planner's duty cycle looks.
-const passDutyWindow = 5 * time.Minute
+// passDutyWindow is how far back the planner's duty cycle looks: Gate S
+// reads its p99 over the records.
+const passDutyWindow = time.Minute
 
 // passCounts is what one pass reports for the metrics: intents admitted by
 // kind, intents deferred by kind and cause, the in-flight depth by kind once
-// the pass has submitted, and the age of each input it read.
+// the pass has submitted, the age of each input it read, the census rows,
+// and the signaled stops older than stopOutstandingAge.
 type passCounts struct {
-	Admitted  map[string]int
-	Deferred  map[deferral]int
-	InFlight  map[string]int
-	InputAges map[string]time.Duration
+	Admitted        map[string]int
+	Deferred        map[deferral]int
+	InFlight        map[string]int
+	InputAges       map[string]time.Duration
+	Rows            int
+	StopOutstanding int
 }
 
 // deferral is why admission held an intent back.
@@ -47,6 +51,10 @@ type passMetrics struct {
 	deferred  map[deferral]uint64
 	inFlight  map[string]int
 	inputAges map[string]time.Duration
+	// The pass record's counters (reconcile_observe_v2.go).
+	settled map[string]uint64 // by settledKey
+	alerts  map[string]uint64 // by alert kind
+	series  map[string]uint64 // soakSeries
 }
 
 // passSpan is one pass, for the windowed duty cycle.
@@ -67,10 +75,15 @@ type passMetricsSnapshot struct {
 	Deferred                 map[deferral]uint64
 	InFlight                 map[string]int           // after the last pass
 	InputAges                map[string]time.Duration // as the last pass read them
+	LastEnd                  time.Time
+	Settled, Alerts, Series  map[string]uint64
 }
 
 func newPassMetrics() *passMetrics {
-	return &passMetrics{wakes: make(map[string]uint64), admitted: make(map[string]uint64), deferred: make(map[deferral]uint64)}
+	return &passMetrics{
+		wakes: make(map[string]uint64), admitted: make(map[string]uint64), deferred: make(map[deferral]uint64),
+		settled: make(map[string]uint64), alerts: make(map[string]uint64), series: make(map[string]uint64),
+	}
 }
 
 func (m *passMetrics) recordWake(reason string) {
@@ -125,6 +138,10 @@ func (m *passMetrics) snapshot(now time.Time) passMetricsSnapshot {
 		Deferred:     maps.Clone(m.deferred),
 		InFlight:     maps.Clone(m.inFlight),
 		InputAges:    maps.Clone(m.inputAges),
+		LastEnd:      m.lastEnd,
+		Settled:      maps.Clone(m.settled),
+		Alerts:       maps.Clone(m.alerts),
+		Series:       maps.Clone(m.series),
 	}
 	if m.started.IsZero() {
 		return s

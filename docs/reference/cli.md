@@ -1141,6 +1141,15 @@ Scan open convoys and auto-close any where all child issues are resolved.
 Evaluates each open convoy's children. If all children have status
 "closed", the convoy is automatically closed and an event is recorded.
 
+The check skips a suspended rig's store, naming the rig on stderr, and
+checks its convoys once the rig resumes. A store it cannot open or list,
+or a convoy it cannot read or close, is named on stderr and the check
+goes on with the rest, then exits 1. The exception is a city whose
+convoys moved to a class binding: if the binding cannot be read, the
+check closes nothing and exits 1. A convoy that changed or disappeared
+after the check listed it is left for the next run and does not fail
+the check.
+
 ```
 gc convoy check [flags]
 ```
@@ -2114,7 +2123,10 @@ entry using source plus optional version. Supported sources are:
 - local paths inside git worktrees at HEAD: promoted to a file:// repo source
   with the pack subpath and locked to the current commit
 - remote git repositories: cloned and locked; --version accepts a semver
-  constraint or sha:&lt;commit&gt;
+  constraint or sha:&lt;commit&gt;. Without --version, a source the city already
+  imports or locks keeps the constraint the city holds for it, so its
+  packs.lock entry does not move (a local path inside a git worktree is
+  still locked to its current commit)
 - packs published in a configured pack registry: a semver --version (or no
   --version) resolves against the registry's release entries, not git tags;
   the constraint is kept, the lock records the release version and commit,
@@ -2975,7 +2987,10 @@ gc order show <name> [flags]
 Close stale delivered nudge beads and read mail beads.
 
 Nudge beads that are past --nudge-ttl and not in the live nudge queue are
-closed. Read mail beads past --mail-ttl are closed. A budget cap of 50 closes
+closed. Read mail beads past --mail-ttl are closed. Closing unread mail is
+opt-in: when --unread-mail-ttl (or [mail] unread_retention_ttl) is set, unread
+mail beads past it are also closed, so mail nobody ever reads ages out instead
+of accumulating forever. A budget cap of 50 closes
 per invocation prevents runaway sweeps under load.
 
 Use --dry-run to log what would be closed without making any changes.
@@ -2991,6 +3006,7 @@ gc order sweep-nudge-mail [flags]
 | `--mail-ttl` | duration | `1h0m0s` | min age before a read mail bead is GC'd; 0 disables the mail-close phase (default: cfg.Mail.RetentionTTL when set, else 1h0m0s) |
 | `--nudge-ttl` | duration | `10m0s` | min age before a delivered nudge bead is GC'd |
 | `--quiet` | bool |  | suppress success output |
+| `--unread-mail-ttl` | duration | `0s` | min age before an unread mail bead is GC'd; 0 disables (default: cfg.Mail.UnreadRetentionTTL when set, else disabled) |
 
 ## gc order sweep-tracking
 
@@ -3357,14 +3373,17 @@ When agent-name is omitted, `GC_ALIAS` is used (falling back to `GC_AGENT`).
 If agent-name matches a configured agent with a prompt_template,
 that template is output. Otherwise outputs a default worker prompt.
 
-Pass --strict to fail on debugging mistakes instead of silently falling
-back to the default prompt. Strict errors on:
+Pass --strict to fail on debugging mistakes instead of falling back to
+the default prompt. Strict errors on:
 
   - no city config found
   - city config fails to load
   - no agent name given (from args, GC_ALIAS, or GC_AGENT)
   - agent name not in city config (typo detection — the main use case)
   - agent's prompt_template points at a file that cannot be read
+
+Without --strict, a prompt_template that cannot be read is reported on
+stderr and the default prompt is output.
 
 Strict does NOT error on agents whose config intentionally lacks a
 prompt_template (a supported minimal config), on templates that render
@@ -3630,10 +3649,20 @@ Register an external project directory as a rig.
 
 Initializes beads database, installs agent hooks if configured,
 generates cross-rig routes, and appends the rig to city.toml.
-If the target directory doesn't exist, it is created. Use --include
-to apply a pack source that defines the rig's agent configuration;
-repeat the flag to compose multiple packs for one rig. The flag is
-compatibility sugar: gc rig add writes canonical rig imports.
+If the target directory doesn't exist, it is created.
+
+Use --include to import a pack into the rig; repeat the flag to compose
+multiple packs for one rig. Each --include becomes a [rigs.imports.&lt;binding&gt;]
+entry in city.toml, resolved the way "gc import add --rig &lt;rig&gt;" resolves an
+import: a bundled pack is pinned to the version shipped with gc; any other
+remote source gets the version constraint gc import add would write (the
+constraint the city already holds for that source, else the newest registry
+release, else the newest semver tag, else the remote HEAD commit) plus a
+packs.lock entry; a remote source with an embedded "#ref" and a local path
+are imported as given, with no packs.lock entry. If a version cannot be
+resolved, nothing is written. Imports do not honor a "#ref": the city fails
+to load until gc import install locks such a source, at a commit chosen
+without the ref; use gc import add --rig &lt;rig&gt; --version to pin a version.
 
 --include takes a pack source (local path or remote URL) or a pack name: a
 bundled pack ("gastown"), or a registry pack resolved from the cached
@@ -3642,6 +3671,12 @@ prefix or a "packs/&lt;name&gt;" token is never read as a registry name (a
 bundled pack still canonicalizes, so "./gastown" resolves to the bundled
 source), and an existing directory always wins over a registry pack of the
 same name.
+
+The binding defaults to the pack's name (its [packs] key or the source's last
+path segment). Write --include &lt;binding&gt;=&lt;source&gt; to choose it, for example
+--include gt=gastown. A binding is letters, digits, "-" and "_", starting with
+a letter or digit, and an explicit binding may not name a different pack than
+another --include. Prefix a path with "./" if its name itself contains "=".
 
 Use --name to set the rig name explicitly (default: directory basename).
 Use --prefix to set the bead ID prefix explicitly (default: derived from name).
@@ -3674,6 +3709,7 @@ gc rig add /path/to/master-repo --default-branch master
 gc rig add ./my-project --include gastown
 gc rig add ./my-project --include packs/planner --include packs/architect
 gc rig add ./my-project --include acme/planner
+gc rig add ./my-project --include gc=https://github.com/gastownhall/gascity-packs/tree/main/gascity
 gc rig add ./my-project --include gastown --start-suspended
 gc rig add /path/to/existing --adopt
 ```
@@ -3684,7 +3720,7 @@ gc rig add /path/to/existing --adopt
 | `--allow-ephemeral` | bool |  | register the rig even though its path is on a filesystem that does not survive a restart |
 | `--default-branch` | string |  | mainline branch (default: auto-detect from a remote HEAD — origin preferred — or the current branch) |
 | `--git-url` | string |  | git URL to clone into a new rig on a REMOTE city (server-side provisioning) |
-| `--include` | stringArray |  | pack source or pack name for rig agents (repeatable; writes canonical rig imports) |
+| `--include` | stringArray |  | pack to import into the rig: a source, a pack name, or &lt;binding&gt;=&lt;source&gt; (repeatable) |
 | `--json` | bool |  | Output in JSONL format |
 | `--name` | string |  | rig name (default: directory basename, or git URL basename for --git-url) |
 | `--prefix` | string |  | bead ID prefix (default: derived from name) |
@@ -3768,7 +3804,9 @@ will no longer track the managed city Dolt.
 
 This command owns the rig's canonical .beads/config.yaml topology state. It
 refuses a rig whose store the beads provider owns: that rig's endpoint lives in
-bd's own files and is bd's to change.
+bd's own files and is bd's to change. It also refuses a rig whose
+.beads/metadata.json records embedded Dolt storage: that rig serves its own
+store and has no server endpoint.
 
 ```
 gc rig set-endpoint <rig> [flags]
@@ -3837,8 +3875,10 @@ These commands read and write session metadata to coordinate lifecycle
 events (drain, restart) between agents and the controller. They are
 designed to be called from within running agent sessions, not by humans.
 
-The exception is "gc runtime check", which validates a Runtime Provider
-Protocol executable — run by humans and runtime-pack CIs.
+The exceptions are "gc runtime check" and "gc runtime conformance", which
+validate a Runtime Provider Protocol executable — run by humans and
+runtime-pack CIs — and "gc runtime workdir-export", which runtime packs call
+to list the work-dir entries they may copy off the orchestrator host.
 
 ```
 gc runtime
@@ -3854,6 +3894,7 @@ gc runtime
 | [gc runtime heartbeat](#gc-runtime-heartbeat) | Extend idle-timeout window during a long operation |
 | [gc runtime request-restart](#gc-runtime-request-restart) | Request controller restart this session (returns immediately) |
 | [gc runtime undrain](#gc-runtime-undrain) | Cancel drain on a session |
+| [gc runtime workdir-export](#gc-runtime-workdir-export) | List the work-dir entries a runtime may copy off the orchestrator host |
 
 ## gc runtime check
 
@@ -4038,6 +4079,57 @@ gc runtime undrain <name> [flags]
 |------|------|---------|-------------|
 | `--json` | bool |  | Output as JSON |
 
+## gc runtime workdir-export
+
+List the entries of a session work dir that a runtime may copy into another
+filesystem (a remote sandbox, a container image).
+
+Orchestrator-local state named by the work_dir_exclude start-config field
+(secrets, the event log, the nudge queue, ledger stores, sockets, other
+sessions' worktrees) is left out; an excluded directory is pruned with
+everything below it. Paths are relative to &lt;work_dir&gt; and slash-separated,
+in depth-first walk order with each directory's entries sorted by name.
+
+Every surviving file and symlink is listed, plus every surviving directory
+that is empty on disk. A non-empty directory is never listed, so a consumer
+that recurses into listed entries still copies nothing excluded. Symlinks
+are listed, never followed; copy them as links.
+
+Scripts must use --null, which terminates entries with NUL. The default
+newline-terminated output is for humans only: no byte filter makes it safe
+for a consumer that splits on blanks or quotes, such as xargs. As a backstop
+it fails, printing nothing, when an entry contains a newline, a carriage
+return, or a backslash (GNU tar -T reads "\057" as "/"), or starts with "-".
+Run the gc that produced the start config (its env.GC_BIN) and check its
+exit status, for example:
+
+  set -o pipefail
+  "$GC_BIN" runtime workdir-export --null "$WORK_DIR" |
+    tar -C "$WORK_DIR" --null --no-recursion -T - -czf -
+
+GNU tar reads a --null list verbatim only from 1.30; bsdtar always does.
+Older GNU tar unquotes backslash escapes even with --null, so a crafted
+file name can make it archive .gc/controller.token or a file above the
+work dir. Where GNU tar may predate 1.30, use the form below: 1.29 reads
+the list verbatim with it, and older releases reject its options, which
+fails the pipeline. bsdtar rejects those options, so keep the form above
+there.
+
+  set -o pipefail
+  "$GC_BIN" runtime workdir-export --null "$WORK_DIR" |
+    tar -C "$WORK_DIR" --null --verbatim-files-from --no-unquote \
+      --no-recursion -T - -czf -
+
+The protocol contract is docs/reference/exec-session-provider.md.
+
+```
+gc runtime workdir-export <work_dir> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `-0`, `--null` | bool |  | terminate entries with NUL instead of newline (required for scripts) |
+
 ## gc service
 
 Inspect workspace services
@@ -4107,7 +4199,7 @@ gc session
 |------------|-------------|
 | [gc session attach](#gc-session-attach) | Attach to (or resume) a chat session |
 | [gc session close](#gc-session-close) | Close a session permanently |
-| [gc session kill](#gc-session-kill) | Force-kill session runtime (reconciler restarts) |
+| [gc session kill](#gc-session-kill) | Force-kill session runtime |
 | [gc session list](#gc-session-list) | List chat sessions |
 | [gc session logs](#gc-session-logs) | Show session logs for a session |
 | [gc session new](#gc-session-new) | Create a new chat session from an agent template |
@@ -4163,6 +4255,13 @@ resume metadata, Gas City may attempt provider resume, but
 provider conversation continuity is not guaranteed; confirm it with the agent or
 provider after restart.
 
+An idle pool seat (no started work and no ready work) is replaced: the
+reconciler releases the routed work it had not started so another seat can
+pick it up, closes it, and the pool starts a fresh seat in its slot. A pool seat holding started or ready work
+restarts in place on its bead; while its started work is blocked, it holds its
+slot asleep. A task assigned directly to the seat with no route is kept, not
+released, and the seat holds its slot until that task is ready.
+
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).
 
 ```
@@ -4171,7 +4270,7 @@ gc session kill <session-id-or-alias> [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--force` | bool |  | destroy a session even when it has live background subagents |
+| `--force` | bool |  | destroy a session even when it has live background subagents, or past a hung holder of its runtime lease whose record expired |
 | `--json` | bool |  | emit JSONL |
 
 ## gc session list
@@ -5001,16 +5100,23 @@ Stop the running machine-wide supervisor and all its cities.
 
 By default, returns as soon as the supervisor acknowledges the stop
 request — shutdown continues asynchronously. Pass --wait to block
-until the supervisor socket is no longer answering, which is what
-most callers that need deterministic cleanup want (e.g., integration
-tests that then expect to remove temp directories without racing
-against lingering supervisor / controller subprocesses).
+until the supervisor process has exited and released its
+single-instance lock, which is what most callers that need
+deterministic cleanup want (e.g., integration tests that then expect
+to remove temp directories without racing against lingering
+supervisor / controller subprocesses, or a 'gc supervisor start'
+right after the stop). --wait waits for the control socket to stop
+answering and then for the process to exit, within --wait-timeout,
+except that the process always gets at least 10s after its socket
+closes to finish shutting down. A supervisor process this host
+cannot see (one in another PID namespace) is waited for only until
+its socket stops answering.
 
 Stopping the supervisor also stops the platform service that manages
 it, and stop exits non-zero when that fails; with --wait, gc further
 verifies on macOS that the launchd job is really gone before
-returning, sharing the same --wait-timeout deadline as the socket
-wait, and fails when it cannot confirm that. An operator stop also
+returning, sharing the same --wait-timeout deadline, and fails when
+it cannot confirm that. An operator stop also
 disables the launchd job, so it will not come back at the next login
 until 'gc supervisor install' — or 'gc start', which routes through
 install — re-enables it.
@@ -5029,8 +5135,8 @@ gc supervisor stop [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSONL summary |
-| `--wait` | bool |  | Wait for the supervisor to finish stopping all managed cities and release its socket before returning |
-| `--wait-timeout` | duration | `30s` | Maximum time to wait when --wait is set (in delegated mode, bounds the synchronous systemctl stop regardless of --wait) |
+| `--wait` | bool |  | Wait for the supervisor to finish stopping all managed cities and for its process to exit before returning |
+| `--wait-timeout` | duration | `30s` | Maximum time to wait when --wait is set, except that the supervisor process gets at least 10s to exit after its socket closes (in delegated mode, bounds the synchronous systemctl stop regardless of --wait) |
 
 ## gc supervisor uninstall
 

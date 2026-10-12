@@ -8,9 +8,9 @@ import (
 
 // The OpenAPI breaking-change gate runs under Bazel only
 // (//cmd/openapi-breaking:openapi-breaking_test, in the unit lane's //...):
-// on pull requests bazel.yml's unit lane writes the base commit's spec and
-// names it in GC_OPENAPI_BREAKING_BASE_SPEC, the client environment variable
-// @openapi_base_spec reads. Without that step the gate compares the spec
+// on pull requests and merge groups bazel.yml's unit lane writes the base
+// commit's spec and names it in GC_OPENAPI_BREAKING_BASE_SPEC, the client
+// environment variable @openapi_base_spec reads. Without that step the gate compares the spec
 // with itself and passes every PR; with a second, go-test copy in ci.yml
 // the gate would run twice.
 func TestOpenAPIBreakingGateRunsInTheBazelUnitLane(t *testing.T) {
@@ -41,13 +41,13 @@ func TestOpenAPIBreakingGateRunsInTheBazelUnitLane(t *testing.T) {
 	if testIndex < baseIndex {
 		t.Errorf("%s: the base spec step (#%d) must run before the bazel step (#%d)", bazelMultiLaneWorkflow, baseIndex, testIndex)
 	}
-	for _, want := range []string{"github.event_name == 'pull_request'", "matrix.lane == 'unit'"} {
-		if !strings.Contains(base.If, want) {
-			t.Errorf("%s base spec step if = %q, want it to contain %q", bazelMultiLaneWorkflow, base.If, want)
-		}
+	// Pull requests and merge groups (the merge queue) have a base; a merge
+	// group's is merge_group.base_sha, the commit the entry is queued onto.
+	if want := "(github.event_name == 'pull_request' || github.event_name == 'merge_group') && matrix.lane == 'unit'"; base.If != want {
+		t.Errorf("%s base spec step if = %q, want %q", bazelMultiLaneWorkflow, base.If, want)
 	}
-	if got := base.Env["BASE_SHA"]; got != "${{ needs.rbe.outputs.base-sha }}" {
-		t.Errorf("%s base spec step BASE_SHA = %q, want fresh-merge's base-sha (the commit the PR is merged onto)", bazelMultiLaneWorkflow, got)
+	if got, want := base.Env["BASE_SHA"], "${{ github.event_name == 'merge_group' && github.event.merge_group.base_sha || needs.rbe.outputs.base-sha }}"; got != want {
+		t.Errorf("%s base spec step BASE_SHA = %q, want %q (merge_group.base_sha on a merge group, else fresh-merge's base-sha, the commit the PR is merged onto)", bazelMultiLaneWorkflow, got, want)
 	}
 	if !strings.Contains(base.Run, `git show "$BASE_SHA:internal/api/openapi.json"`) || !strings.Contains(base.Run, `>> "$GITHUB_ENV"`) {
 		t.Errorf("%s base spec step must write git show $BASE_SHA:internal/api/openapi.json and export its path through $GITHUB_ENV:\n%s", bazelMultiLaneWorkflow, base.Run)

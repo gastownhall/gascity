@@ -1000,7 +1000,7 @@ type sessionChaosHarness struct {
 
 func newSessionChaosHarness(t *testing.T, seed int64) *sessionChaosHarness {
 	t.Helper()
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	template := "chaos-worker"
 	env.cfg = &config.City{
 		Agents: []config.Agent{{
@@ -1011,7 +1011,7 @@ func newSessionChaosHarness(t *testing.T, seed int64) *sessionChaosHarness {
 	return &sessionChaosHarness{
 		t:        t,
 		env:      env,
-		manager:  sessionpkg.NewManagerWithOptions(env.store, env.sp, sessionpkg.WithClock(env.clk)),
+		manager:  sessionpkg.NewManagerWithOptions(env.store, env.sp, sessionpkg.WithClock(env.clk), sessionpkg.WithCityPath(env.city)),
 		rng:      rand.New(rand.NewSource(seed)), //nolint:gosec // deterministic test chaos, not security-sensitive.
 		seed:     seed,
 		template: template,
@@ -1099,11 +1099,14 @@ func (h *sessionChaosHarness) reconcileTickWithoutPostInvariants(storeQueryParti
 			poolDesired[tp.TemplateName]++
 		}
 	}
-	woken := reconcileSessionBeads(
-		context.Background(), sessions, h.env.desiredState, configuredSessionNames(h.env.cfg, "", h.env.store),
-		h.env.cfg, h.env.sp, h.env.store, nil, nil, nil, h.env.dt, poolDesired, storeQueryPartial, nil, "",
+	stops := &asyncStartTracker{}
+	woken := reconcileSessionBeadsAtPath(
+		context.Background(), h.env.city, sessions, h.env.desiredState, configuredSessionNames(h.env.cfg, "", h.env.store),
+		h.env.cfg, h.env.sp, h.env.store, nil, nil, nil, nil, h.env.dt, poolDesired, storeQueryPartial, nil, "",
 		nil, h.env.clk, h.env.rec, 0, 0, &h.env.stdout, &h.env.stderr,
+		withAsyncDrainAckStopTracker(stops),
 	)
+	h.waitAsyncStops(stops)
 	h.record("reconcile open=%d woken=%d", len(sessions), woken)
 }
 
@@ -1118,11 +1121,14 @@ func (h *sessionChaosHarness) reconcileTickWithIdle(it idleTracker) {
 			poolDesired[tp.TemplateName]++
 		}
 	}
-	woken := reconcileSessionBeads(
-		context.Background(), sessions, h.env.desiredState, configuredSessionNames(h.env.cfg, "", h.env.store),
-		h.env.cfg, h.env.sp, h.env.store, nil, nil, nil, h.env.dt, poolDesired, false, nil, "",
+	stops := &asyncStartTracker{}
+	woken := reconcileSessionBeadsAtPath(
+		context.Background(), h.env.city, sessions, h.env.desiredState, configuredSessionNames(h.env.cfg, "", h.env.store),
+		h.env.cfg, h.env.sp, h.env.store, nil, nil, nil, nil, h.env.dt, poolDesired, false, nil, "",
 		it, h.env.clk, h.env.rec, 0, 0, &h.env.stdout, &h.env.stderr,
+		withAsyncDrainAckStopTracker(stops),
 	)
+	h.waitAsyncStops(stops)
 	h.record("reconcile-with-idle open=%d woken=%d", len(sessions), woken)
 	h.assertPostReconcileInvariants()
 }
@@ -1138,11 +1144,14 @@ func (h *sessionChaosHarness) reconcileTickWithDrainOps() {
 			poolDesired[tp.TemplateName]++
 		}
 	}
-	woken := reconcileSessionBeads(
-		context.Background(), sessions, h.env.desiredState, configuredSessionNames(h.env.cfg, "", h.env.store),
-		h.env.cfg, h.env.sp, h.env.store, newDrainOps(h.env.sp), nil, nil, h.env.dt, poolDesired, false, nil, "",
+	stops := &asyncStartTracker{}
+	woken := reconcileSessionBeadsAtPath(
+		context.Background(), h.env.city, sessions, h.env.desiredState, configuredSessionNames(h.env.cfg, "", h.env.store),
+		h.env.cfg, h.env.sp, h.env.store, newDrainOps(h.env.sp), nil, nil, nil, h.env.dt, poolDesired, false, nil, "",
 		nil, h.env.clk, h.env.rec, 0, 0, &h.env.stdout, &h.env.stderr,
+		withAsyncDrainAckStopTracker(stops),
 	)
+	h.waitAsyncStops(stops)
 	h.record("reconcile-with-drain-ops open=%d woken=%d", len(sessions), woken)
 	h.assertPostReconcileInvariants()
 }
@@ -1158,11 +1167,14 @@ func (h *sessionChaosHarness) reconcileTickWithReadyWait(readyWaitSet map[string
 			poolDesired[tp.TemplateName]++
 		}
 	}
-	woken := reconcileSessionBeads(
-		context.Background(), sessions, h.env.desiredState, configuredSessionNames(h.env.cfg, "", h.env.store),
-		h.env.cfg, h.env.sp, h.env.store, nil, nil, readyWaitSet, h.env.dt, poolDesired, false, nil, "",
+	stops := &asyncStartTracker{}
+	woken := reconcileSessionBeadsAtPath(
+		context.Background(), h.env.city, sessions, h.env.desiredState, configuredSessionNames(h.env.cfg, "", h.env.store),
+		h.env.cfg, h.env.sp, h.env.store, nil, nil, nil, readyWaitSet, h.env.dt, poolDesired, false, nil, "",
 		nil, h.env.clk, h.env.rec, 0, 0, &h.env.stdout, &h.env.stderr,
+		withAsyncDrainAckStopTracker(stops),
 	)
+	h.waitAsyncStops(stops)
 	h.record("reconcile-with-ready-wait open=%d woken=%d", len(sessions), woken)
 	h.assertPostReconcileInvariants()
 }
@@ -1217,8 +1229,6 @@ func (h *sessionChaosHarness) runRandomAction() {
 		{name: "toggle-pending-interaction", run: h.togglePendingInteraction},
 		{name: "suspend", run: h.suspendSession},
 		{name: "wake", run: h.wakeSession},
-		{name: "archive-continuity", run: h.archiveContinuity},
-		{name: "reactivate", run: h.reactivateSession},
 		{name: "start-failure", run: h.injectStartFailure},
 	}
 	action := actions[h.rng.Intn(len(actions))]
@@ -1352,7 +1362,7 @@ func (h *sessionChaosHarness) suspendSession() {
 		h.record("suspend skipped: pending create")
 		return
 	}
-	if err := h.manager.Suspend(b.ID); err != nil {
+	if err := h.manager.Suspend(context.Background(), testActorIn(h.t, sessionpkg.ActorOperator, h.env.city), b.ID, false); err != nil {
 		h.record("suspend skipped: %v", err)
 		return
 	}
@@ -1369,51 +1379,6 @@ func (h *sessionChaosHarness) wakeSession() {
 		return
 	}
 	h.record("wake id=%s", b.ID)
-}
-
-func (h *sessionChaosHarness) archiveContinuity() {
-	b, ok := h.currentBead()
-	if !ok || b.Status == "closed" {
-		return
-	}
-	if h.env.sp.IsRunning(h.sessionName) {
-		if err := h.manager.Kill(b.ID); err != nil {
-			h.record("archive kill skipped: %v", err)
-		}
-	}
-	if err := h.manager.Archive(b.ID, "chaos-archive"); err != nil {
-		h.record("archive skipped: %v", err)
-		return
-	}
-	if h.rng.Intn(2) == 0 {
-		if err := h.env.store.SetMetadata(b.ID, "continuity_eligible", "true"); err != nil {
-			h.failf("mark continuity eligible: %v", err)
-		}
-		h.record("archive continuity=true")
-		return
-	}
-	h.record("archive continuity=false")
-}
-
-func (h *sessionChaosHarness) reactivateSession() {
-	b, ok := h.currentBead()
-	if !ok || b.Status == "closed" {
-		return
-	}
-	lcInput := sessionpkg.LifecycleInputFromMetadata(b.Status, b.Metadata)
-	lcInput.Now = h.env.clk.Now()
-	view := sessionpkg.ProjectLifecycle(lcInput)
-	switch view.BaseState {
-	case sessionpkg.BaseStateArchived, sessionpkg.BaseStateQuarantined:
-	default:
-		h.record("reactivate skipped: state=%s", view.BaseState)
-		return
-	}
-	if err := h.manager.Reactivate(b.ID); err != nil {
-		h.record("reactivate skipped: %v", err)
-		return
-	}
-	h.record("reactivate id=%s", b.ID)
 }
 
 func (h *sessionChaosHarness) injectStartFailure() {
@@ -1524,9 +1489,6 @@ func (h *sessionChaosHarness) assertInvariants() {
 			h.failf("running session retained pending_create_claim=%q", b.Metadata["pending_create_claim"])
 		}
 		h.assertLastStartConfigMatches(b)
-	}
-	if state == string(sessionpkg.StateArchived) && b.Metadata["continuity_eligible"] != "true" && running {
-		h.failf("continuity-ineligible archive still running runtime %q", runtimeName)
 	}
 	if b.Status != "closed" &&
 		strings.TrimSpace(b.Metadata["pending_create_claim"]) == "true" &&
@@ -1662,6 +1624,16 @@ func (h *sessionChaosHarness) assertDrainAckStopPending() {
 	}
 	if got := b.Metadata["state_reason"]; got != sessionpkg.DrainAckStopPendingReason {
 		h.failf("state_reason = %q, want %q", got, sessionpkg.DrainAckStopPendingReason)
+	}
+}
+
+// waitAsyncStops waits for a tick's async drain-ack stops. They take the
+// city's runtime lease, so one still running would make the next tick's stop
+// defer as busy.
+func (h *sessionChaosHarness) waitAsyncStops(stops *asyncStartTracker) {
+	h.t.Helper()
+	if !stops.wait(10 * time.Second) {
+		h.failf("async drain-ack stops did not finish")
 	}
 }
 

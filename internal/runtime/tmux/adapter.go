@@ -56,6 +56,7 @@ var (
 	_ runtime.ImmediateNudgeProvider        = (*Provider)(nil)
 	_ runtime.InterruptBoundaryWaitProvider = (*Provider)(nil)
 	_ runtime.InterruptedTurnResetProvider  = (*Provider)(nil)
+	_ runtime.InputClearProvider            = (*Provider)(nil)
 	_ runtime.ProcessTableScanner           = (*Provider)(nil)
 	_ runtime.ServerLifecycleProvider       = (*Provider)(nil)
 	_ runtime.UnattendedSessionStopper      = (*Provider)(nil)
@@ -123,6 +124,13 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		return nil
 	}
 	if errors.Is(err, ErrServerDegraded) {
+		return err
+	}
+	if errors.Is(err, runtime.ErrSessionExists) {
+		// The name was already held, so this attempt created nothing of its
+		// own to tear down. The held session may postdate the cache's last
+		// list, so drop that snapshot.
+		p.cache.Invalidate()
 		return err
 	}
 	p.cleanupFailedStart(name, cfg)
@@ -230,6 +238,11 @@ func newInstanceToken() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
+// cleanupFailedStart tears down the session of a Start that failed after this
+// attempt created it. Call it only then, never for a refusal of a name that was
+// already held: the GC_INSTANCE_TOKEN fence it relies on is per bead, so a
+// session another attempt at the same bead started under that name carries the
+// same token and would read as this attempt's own.
 func (p *Provider) cleanupFailedStart(name string, cfg runtime.Config) {
 	instanceToken := strings.TrimSpace(cfg.Env["GC_INSTANCE_TOKEN"])
 	if instanceToken == "" {
@@ -423,11 +436,19 @@ func (p *Provider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, er
 		return found, errors.Join(scanErr, fmt.Errorf("tmux list running: %w", listErr))
 	}
 
+	// A session whose GC_SESSION_ID cannot be read may track any root, so the
+	// failure is returned with the results: a caller that reaps on IsTracked
+	// false must treat this scan's tracking as unknown. A session that ended
+	// after the listing tracks nothing.
 	tracked := make(map[string]string)
+	var metaErrs []error
 	for _, name := range running {
 		sessionID, err := p.GetMeta(name, "GC_SESSION_ID")
-		if err == nil && strings.TrimSpace(sessionID) != "" {
+		switch {
+		case err == nil && strings.TrimSpace(sessionID) != "":
 			tracked[sessionID] = name
+		case err != nil && !errors.Is(err, runtime.ErrSessionNotFound):
+			metaErrs = append(metaErrs, fmt.Errorf("tmux tracking: %w", err))
 		}
 	}
 	for i := range found {
@@ -436,7 +457,7 @@ func (p *Provider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, er
 			found[i].ProviderName = name
 		}
 	}
-	return found, scanErr
+	return found, errors.Join(append([]error{scanErr}, metaErrs...)...)
 }
 
 // TerminateRuntime implements [runtime.ProcessTableScanner].
@@ -444,7 +465,7 @@ func (p *Provider) TerminateRuntime(r runtime.LiveRuntime) error {
 	if r.PID <= 1 {
 		return fmt.Errorf("tmux: invalid PID %d for session %s", r.PID, r.SessionID)
 	}
-	if err := proctable.KillByPID(r.PID); err != nil {
+	if err := proctable.KillByPIDIdentity(r.PID, r.StartIdentity); err != nil {
 		return fmt.Errorf("tmux: terminate runtime PID %d for session %s: %w", r.PID, r.SessionID, err)
 	}
 	return nil
@@ -617,9 +638,23 @@ func (p *Provider) WaitForIdle(ctx context.Context, name string, timeout time.Du
 
 // SnapshotIdle reports, in a single non-blocking observation, whether the named
 // session is at an idle interactive boundary right now. It implements
-// [runtime.IdleSnapshotProvider].
+// [runtime.IdleSnapshotProvider] by forwarding to [Tmux.SnapshotIdle], so the
+// tri-state contract is the leaf's: (false, nil) means the capture contains a
+// busy-indicator string, and a pane showing neither that nor the ready prompt
+// returns [runtime.ErrIdleIndeterminate].
 func (p *Provider) SnapshotIdle(name string) (bool, error) {
 	return p.tm.SnapshotIdle(name)
+}
+
+// ClearInput empties a Claude Code session's input box, waiting up to
+// restoreWindow for Claude to restore an interrupted prompt into it. It
+// implements [runtime.InputClearProvider].
+func (p *Provider) ClearInput(ctx context.Context, name string, restoreWindow time.Duration) error {
+	err := p.tm.ClearInput(ctx, name, restoreWindow)
+	if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
+		return nil
+	}
+	return err
 }
 
 // WaitForInterruptBoundary waits for a provider-native interrupt acknowledgement
@@ -697,6 +732,11 @@ func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 	// in scrollback during inter-tool-call gaps, so immediate send-keys
 	// would inject text mid-execution. See upstream dfd945e9/6bc898ce.
 	if idleTimeout := p.tm.cfg.NudgeIdleTimeout; idleTimeout > 0 {
+		// A pending permission prompt does not turn idle on its own, and
+		// NudgeNow refuses it anyway: refuse it now, not after the whole wait.
+		if err := p.tm.checkNoApprovalPrompt(name); errors.Is(err, runtime.ErrPendingInteraction) {
+			return err
+		}
 		// Best-effort wait — if it fails (session gone, timeout), proceed
 		// with the nudge anyway. The message may arrive during active work,
 		// but Claude's cooperative queue will handle it at the next turn.
@@ -737,6 +777,18 @@ func (p *Provider) NudgeNow(name string, content []runtime.ContentBlock) error {
 	message := strings.Join(parts, "\n")
 	if message == "" {
 		return nil
+	}
+
+	// Never type into a pending permission prompt: Enter would pick the
+	// highlighted option ("Yes") and digits would pick others (#2892).
+	if err := p.tm.checkNoApprovalPrompt(name); err != nil {
+		if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
+			return nil
+		}
+		if errors.Is(err, runtime.ErrPendingInteraction) {
+			return err
+		}
+		return fmt.Errorf("checking %q for a pending permission prompt before sending text: %w", name, err)
 	}
 
 	if used, err := p.tm.sendHiddenAttachedText(name, message); used {

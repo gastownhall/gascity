@@ -312,6 +312,11 @@ type InventoryAttrs struct {
 	ProcessProbed           bool
 	ProcessKnown            bool
 	ProcessAlive            bool
+	// ActivityKnown says the pass read the runtime's last activity
+	// (GetLastActivity, legacy's idle reference) error-free and non-zero;
+	// LastActivity is then that time. Anything else leaves it unknown.
+	ActivityKnown bool
+	LastActivity  time.Time
 }
 
 // runtimeIdentity is one read of a runtime's identity env (v5 O2, O3):
@@ -497,8 +502,12 @@ func (c *ObservationCache) PublishInventory(pass InventoryPass, attrs map[string
 	at := pass.StartedAt
 	swapped := pass.ProviderGen != prev.Inventory.ProviderGen
 
+	// Activity is this pass's read or unknown: a stale reading never
+	// carries over, enriched or not, so a missed read cannot make a row
+	// look idle.
 	byName := make(map[string]RuntimeObservation, len(prev.ByName))
 	for name, obs := range prev.ByName {
+		obs.LastActivity, obs.LastActivityKnown = time.Time{}, false
 		byName[name] = obs
 	}
 
@@ -537,6 +546,7 @@ func (c *ObservationCache) PublishInventory(pass InventoryPass, attrs map[string
 		if enriched {
 			applyInventoryAttrs(&obs, a, at)
 		}
+		keepNewerFacts(&obs, old, at)
 		if observationChanged(old, obs, had) {
 			flips++
 		}
@@ -556,6 +566,7 @@ func (c *ObservationCache) PublishInventory(pass InventoryPass, attrs map[string
 		case unrefreshed[obs.Backend] != "":
 			obs.Listed.Reason = unrefreshed[obs.Backend]
 		}
+		keepNewerFacts(&obs, old, at)
 		if observationChanged(old, obs, true) {
 			flips++
 		}
@@ -590,6 +601,17 @@ func (c *ObservationCache) PublishInventory(pass InventoryPass, attrs map[string
 	}
 	c.store(next, flips > 0 || primedChanged(prev.Primed, primed), at)
 	return flips
+}
+
+// keepNewerFacts restores onto obs each of old's facts observed after at, a
+// pass's start: a fresh read Note wrote after the pass began wins over the
+// pass, and a pass that started later overrides it (v5 O4).
+func keepNewerFacts(obs *RuntimeObservation, old RuntimeObservation, at time.Time) {
+	for _, kind := range allFactKinds {
+		if f := old.fact(kind); f.ObservedAt.After(at) {
+			*obs.fact(kind) = *f
+		}
+	}
 }
 
 // primedChanged reports whether any backend's primed state differs, which
@@ -630,6 +652,9 @@ func applyInventoryAttrs(obs *RuntimeObservation, a InventoryAttrs, at time.Time
 	obs.Attached = unsupported
 	if a.AttachedKnown {
 		obs.Attached = poller(obsFactOf(a.Attached))
+	}
+	if a.ActivityKnown {
+		obs.LastActivity, obs.LastActivityKnown = a.LastActivity, true
 	}
 	obs.OwnerState, obs.Owner, obs.InstanceToken, obs.Identity = a.OwnerState, reconcilekey.Key{}, a.InstanceToken, a.Identity
 	if a.OwnerState == OwnerSession {
@@ -715,10 +740,22 @@ func (s *ObservationSnapshot) Observation(name string, now time.Time, maxAge tim
 		f := obs.fact(kind)
 		*f = s.readFact(obs.Backend, *f, now, maxAge)
 	}
-	if obs.Listed.Value != ObsYes || obs.EnrichedAt.IsZero() || !obs.EnrichedAt.Equal(obs.Listed.ObservedAt) {
-		obs.Incarnation, obs.Owner, obs.OwnerState, obs.InstanceToken, obs.Identity = "", reconcilekey.Key{}, OwnerUnknown, "", runtimeIdentity{}
+	if !obs.enrichedWithListing() {
+		obs.Incarnation, obs.InstanceToken = "", ""
+		obs.forgetOwner()
 	}
 	return obs, true
+}
+
+// enrichedWithListing reports whether the pass that listed the name also
+// enriched it, so its owner and identity facts are that pass's.
+func (o *RuntimeObservation) enrichedWithListing() bool {
+	return o.Listed.Value == ObsYes && !o.EnrichedAt.IsZero() && o.EnrichedAt.Equal(o.Listed.ObservedAt)
+}
+
+// forgetOwner clears the owner fact and the identity read: unknown.
+func (o *RuntimeObservation) forgetOwner() {
+	o.Owner, o.OwnerState, o.Identity = reconcilekey.Key{}, OwnerUnknown, runtimeIdentity{}
 }
 
 // Get returns name's observation read at the cache's clock (Observation).

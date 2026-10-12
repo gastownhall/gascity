@@ -674,7 +674,7 @@ func (p *probingInventoryProvider) ObserveLivenessWithError(name string, process
 func newProbingProvider(probe func(string, []string) (runtime.Liveness, error), names ...string) *probingInventoryProvider {
 	p := &probingInventoryProvider{scriptedInventoryProvider: newScriptedInventoryProvider(names...), probe: probe}
 	for _, n := range names {
-		p.env[n] = map[string]string{"GC_SESSION_ID": "id-" + n, "GC_INSTANCE_TOKEN": "tok", "GT_PROCESS_NAMES": "claude"}
+		p.env[n] = map[string]string{"GC_SESSION_ID": "id-" + n, "GC_INSTANCE_TOKEN": rowToken("id-" + n), "GT_PROCESS_NAMES": "claude"}
 	}
 	return p
 }
@@ -1692,8 +1692,9 @@ func TestInventoryEnvReadSkipsLeavesWithoutLocalIdentity(t *testing.T) {
 	if id := cr.inventoryLane.cache.Snapshot().ByName["gc-x"].Identity; id.Known {
 		t.Fatalf("exec runtime identity = %+v, want unknown", id)
 	}
-	if got := readRuntimeIdentity(context.Background(), execLike, "gc-x"); got.Known || len(execLike.SnapshotCalls()) != 0 {
-		t.Fatalf("fresh read on an exec-shaped leaf = %+v with %d calls, want unknown and none", got, len(execLike.SnapshotCalls()))
+	before := len(execLike.SnapshotCalls())
+	if got := readRuntimeIdentity(context.Background(), execLike, "gc-x"); got.Known || len(execLike.SnapshotCalls()) != before {
+		t.Fatalf("fresh read on an exec-shaped leaf = %+v with %d calls, want unknown and none", got, len(execLike.SnapshotCalls())-before)
 	}
 }
 
@@ -1756,7 +1757,7 @@ func TestConfirmedDeadServerMakesPreviouslyListedNameGone(t *testing.T) {
 	sp.listErr = nil
 	sp.names = []string{"s1"}
 	sp.inventory["s1"] = runtime.InventoryEntry{Incarnation: "s1:1", DeadKnown: true}
-	sp.env["s1"] = map[string]string{"GC_SESSION_ID": "gc-1", "GC_INSTANCE_TOKEN": "tok"}
+	sp.env["s1"] = map[string]string{"GC_SESSION_ID": "gc-1", "GC_INSTANCE_TOKEN": rowToken("gc-1")}
 	cr := inventoryLaneTestRuntime(t, sp, nil)
 	clk := &clock.Fake{Time: obsTestEpoch}
 	useInventoryClock(cr, clk)

@@ -197,6 +197,7 @@ func (s *SQLiteStore) CompareAndSetMetadataKey(id, key, expected, next string) (
 			}
 			return err
 		}
+		noteSessionKeys(b, map[string]string{key: next})
 		if b.Metadata[key] != expected {
 			return tx.Commit() // genuine mismatch: caller lost, not an error
 		}
