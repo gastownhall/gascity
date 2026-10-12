@@ -16,7 +16,7 @@ type Facts struct{ v [numFactKeys]string }
 
 // numFactKeys is the number of keys Facts holds; TestFactsKeys pins it to
 // the registry.
-const numFactKeys = 72
+const numFactKeys = 73
 
 // factKeys are Facts' keys, and identityFrom the index of the first
 // assignment identity key outside the premise.

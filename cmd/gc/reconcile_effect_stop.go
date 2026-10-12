@@ -271,7 +271,7 @@ func stopCloseStep(v txView, work finalizeWork, _ error) txStep {
 		return txStep{Refuse: causeRedecided}
 	}
 	terminal := session.ClosePatch(v.Now, "drained")
-	maps.Copy(terminal, stopVoidResiduePatch()) // a closed row keeps no stop request
+	maps.Copy(terminal, stopEndPatch()) // a closed row keeps no stop request
 	return txStep{Terminal: terminal, Facts: stopFacts(v, out, nil), Done: true}
 }
 
@@ -299,7 +299,7 @@ func stopFinalizeStep(v txView, work finalizeWork, _ error) txStep {
 	// read, and clears the idle stop's transient.
 	patch := maps.Clone(choice.Patch) // a builder may hand back a shared map
 	if _, ok := activeStop(newCensusRow(v.It.Key, v.Row)); ok {
-		maps.Copy(patch, stopVoidResiduePatch())
+		maps.Copy(patch, stopEndPatch())
 	}
 	var kept *beads.Bead
 	var class session.DispositionPatch

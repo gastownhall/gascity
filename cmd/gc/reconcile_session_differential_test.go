@@ -90,6 +90,11 @@ type parityFixture struct {
 	// fixture and answers WaitForIdle idle: legacy's idle probe and v2's
 	// activity fact (I3) and fresh idle proof read the same provider.
 	Idle []string
+	// Acks names the rows whose agent acked its own drain at generation
+	// 1: legacy's runtime env ack (GC_DRAIN_ACK, source agent, the
+	// incarnation stamp) and v2's row ack (drain_ack_*, E3), each copy
+	// reading its own.
+	Acks []string
 	// StartErr fails each copy's first provider Start (S3's abandon).
 	StartErr error
 	// Panes is each row's pane output, by row ID, as a peek reads it.
@@ -215,6 +220,10 @@ var parityFindings = map[string]parityEntry{
 	"drain-stop-lag":       {"C6b1, C6b2 (A20, A4; D1-D4; owner to add a §12.2 row)", "legacy signals a drain through the runtime's drain env the tick after its begin, then stops and finalizes it; v2's begin (A20), its signal a patrol later (C6b1) and the stop verb (A4) each take a pass, so the stop, its events and the finalize land a pass or more after legacy's, with legacy's outcome", []string{session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey, "drain_at", "sleep_intent", "slept_at", "state_reason"}},
 	"idle-sleep-lag":       {"C6b1, C6b2 (A20, A4 with D4's idle builder; owner to add a §12.2 row)", "legacy idle-sleeps a row in the tick its probe answers idle (begin, signal, stop and SleepPatch(idle) with the latch); v2's begin (A20), signal (C6b1) and stop verb (A4, finalizing with SleepPatch(idle)) reach the same sleep a pass or more later. An always-named session's idle sleep waits for C6a2b's activity fact (#7586), so v2 leaves its runtime up", append([]string{"sleep_intent", "sleep_reason", "slept_at", "drain_at", "detached_at", session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey}, parityStartKeys...)},
 
+	"floor-ack-row-void": {
+		"PAR-FLOORACK (A11, DRAIN-010; E3's row ack is v2's alone, CONTRACT v5 D5)", "both cancel a floor member's own ack and keep the seat warm; legacy clears its runtime env ack and never reads or clears the row ack E3 writes in a v2 city, while v2 voids that row ack (stopAckVoidPatch)",
+		[]string{session.DrainAckIncarnationKey, session.DrainAckAtKey},
+	},
 	"drain-env-clears": {
 		"C6b2 (A4, v5 D5; owner to add a §12.2 row)", "legacy signals and finalizes a drain through the runtime's drain env (SetMeta GC_DRAIN_ACK, then RemoveMeta GC_DRAIN and GC_DRAIN_ACK, also on a runtime already gone); v2's acks and signal are row-bound (D1, D5), so its stop verb writes and removes no drain env",
 		nil,
@@ -373,6 +382,12 @@ func (f parityFixture) place(p *simProvider) {
 				*p.rts[b.Metadata["session_name"]] = placed
 				if slices.Contains(f.Pending, rt.id) {
 					p.SetPendingInteraction(b.Metadata["session_name"], &runtime.PendingInteraction{RequestID: "req-1", Kind: "approval"})
+				}
+				if slices.Contains(f.Acks, rt.id) {
+					name := b.Metadata["session_name"]
+					_ = p.SetMeta(name, drainAckRequesterInstanceTokenKey, drainAckInstanceTokenDigest(rt.token))
+					_ = p.SetMeta(name, reconcilerDrainAckSourceKey, drainAckSourceAgentValue)
+					_ = p.SetMeta(name, "GC_DRAIN_ACK", "1")
 				}
 				if slices.Contains(f.Idle, rt.id) {
 					p.SetActivity(b.Metadata["session_name"], parityNow.Add(-time.Hour))
@@ -1220,6 +1235,18 @@ func parityFixtures() []parityFixture {
 			Rows:    []parityRow{sessionRow("gc-p", "template", "keeper", "session_name", "chat", "configured_named_session", "true", "state", "asleep", "generation", "1")},
 			Work:    []parityRow{{ID: "gw-1", Title: "gw-1", Type: "task", Status: "open", Assignee: "chat", Metadata: map[string]string{}}},
 			Explain: started("gc-1", "chat", "chat", map[string]string{"row:gc-p:*reason": "§12.2#17 orphan-close-reason"}),
+		},
+		{
+			// DRAIN-010 / SESS-069 (PAR-FLOORACK): the sole member of a
+			// min_active_sessions = 1 pool acks its own idle drain; both
+			// modes cancel the ack and keep the seat warm. Legacy clears its
+			// runtime env ack; v2 voids its row ack.
+			Name: "a floor member's own ack is canceled and the seat stays warm", Behaviors: []string{"DRAIN-010", "SESS-069"},
+			City: func() *config.City { cfg := workerCity(3); cfg.Agents[0].MinActiveSessions = intPtr(1); return cfg },
+			Rows: []parityRow{poolRow("gc-1", "worker", 1, "awake", "instance_token", "tok-gc-1", "last_woke_at", at(-time.Hour),
+				session.DrainAckIncarnationKey, "1", session.DrainAckAtKey, at(-time.Minute))},
+			Runtimes: []simRuntime{{id: "gc-1", epoch: "1", token: "tok-gc-1"}}, Acks: []string{"gc-1"},
+			Explain: map[string]string{"provider:RemoveMeta s-gc-1": "drain-env-clears", "row:gc-1:*policy": "sleep-policy-keys", "row:gc-1:*ack": "floor-ack-row-void"},
 		},
 		{
 			Name: "an idle killed pool seat closes", Behaviors: []string{"SESS-623"},

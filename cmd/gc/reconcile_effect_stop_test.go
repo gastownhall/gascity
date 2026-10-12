@@ -66,13 +66,13 @@ func eventTypes(s settlement) []string {
 // row ends drained in one CAS that clears the request, with session.stopped
 // and the stop metric.
 func TestStopVerbStopsConfirmsAndFinalizes(t *testing.T) {
-	s, got, leaf := stopRun(t, signaled(drainOrphaned), wanted, nil)
+	s, got, leaf := stopRun(t, signaled(drainOrphaned, session.OperatorDrainKey, "3"), wanted, nil)
 	m := got.Metadata
 	switch {
 	case s.Outcome != settledLanded || stops(leaf) != 1:
 		t.Fatalf("settlement %+v with %d stops, want landed after one", s, stops(leaf))
-	case m["state"] != string(session.StateDrained) || m[session.DrainIntentReasonKey] != "" || m["state_reason"] != "":
-		t.Fatalf("row %v, want drained with the request cleared", m)
+	case m["state"] != string(session.StateDrained) || m[session.DrainIntentReasonKey] != "" || m["state_reason"] != "" || m[session.OperatorDrainKey] != "":
+		t.Fatalf("row %v, want drained with the request and the operator's mark cleared", m)
 	case s.Facts.Stopped == nil || len(s.Facts.Events) != 1 || s.Facts.Events[0].Type != events.SessionStopped:
 		t.Fatalf("facts %+v, want session.stopped and the stop metric", s.Facts)
 	}
@@ -363,11 +363,11 @@ func TestUndesiredNonPoolRowClosesAsLegacy(t *testing.T) {
 // drained, as legacy's does.
 func TestWantedPoolSeatWithoutWorkClosesAsLegacy(t *testing.T) {
 	for _, reason := range []string{drainConfigDrift, executionStalledDrainReason} {
-		s, got, _ := stopRun(t, signaled(reason, "pool_managed", "true"), wanted, nil)
+		s, got, _ := stopRun(t, signaled(reason, "pool_managed", "true", session.OperatorDrainKey, "3"), wanted, nil)
 		if s.Outcome != settledLanded || got.Status != "closed" || got.Metadata["state"] != "drained" || got.Metadata["close_reason"] != session.CanonicalCloseReason("drained") {
 			t.Errorf("%s: settlement %+v, status %s, row %v; want legacy's drained close", reason, s, got.Status, got.Metadata)
 		}
-		for _, k := range []string{session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey} {
+		for _, k := range []string{session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey, session.OperatorDrainKey} {
 			if got.Metadata[k] != "" {
 				t.Errorf("%s: the closed row keeps %s=%q, want the stop request cleared", reason, k, got.Metadata[k])
 			}

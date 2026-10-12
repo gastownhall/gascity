@@ -333,7 +333,12 @@ func (p *Provider) Interrupt(name string) error {
 		}
 		return nil
 	}
-	err := p.tm.SendKeysRaw(name, "C-c")
+	// Ctrl-C the agent pane: sent to the active pane it would interrupt
+	// whatever a human is running in another window or split.
+	target, err := p.tm.agentPaneTarget(name)
+	if err == nil {
+		err = p.tm.SendKeysRaw(target, "C-c")
+	}
 	if err != nil && (errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer)) {
 		return nil
 	}
@@ -1155,8 +1160,16 @@ func (p *Provider) SendKeys(name string, keys ...string) error {
 		}
 		return nil
 	}
+	// Resolve the agent pane once, so every key lands in the same pane.
+	target, err := p.tm.agentPaneTarget(name)
+	if err != nil && (errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer)) {
+		return nil // best-effort
+	}
+	if err != nil {
+		return err
+	}
 	for _, k := range keys {
-		err := p.tm.SendKeysRaw(name, k)
+		err := p.tm.SendKeysRaw(target, k)
 		if err != nil && (errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer)) {
 			return nil // best-effort
 		}
@@ -1347,9 +1360,9 @@ func (o *tmuxStartOps) createSession(name, workDir, command string, env map[stri
 }
 
 // respawnAgent relaunches the agent command in the session's existing agent
-// pane (respawn-pane -k on the GetPaneID pane, never the active one), reusing
-// the warm box and its session environment. The launch-half of the un-weld
-// relaunch path.
+// pane (respawn-pane -k on the agentPaneTarget pane, never the active one),
+// reusing the warm box and its session environment. The launch-half of the
+// un-weld relaunch path.
 //
 // respawn-pane takes no env argument: the new process inherits the tmux server's
 // global environment as filtered by the SESSION environment, so a withheld
@@ -1364,6 +1377,9 @@ func (o *tmuxStartOps) respawnAgent(name, workDir, command string, env map[strin
 	if err := o.tm.markSessionEnvRemoved(name, durableWithholdKeys(env)); err != nil {
 		return err
 	}
+	// A warm box created before the agent-pane marker (or whose mark failed)
+	// is marked here while it still has only the agent's pane.
+	o.tm.adoptAgentPane(name)
 	return o.tm.RespawnPaneWithWorkDir(name, workDir, command)
 }
 
@@ -1387,8 +1403,14 @@ func (o *tmuxStartOps) acceptStartupDialogs(ctx context.Context, name string) er
 	return o.tm.AcceptStartupDialogs(ctx, name)
 }
 
+// waitForReady polls the agent pane, not the active one: a human's split or
+// window showing a prompt must not pass for the agent being ready.
 func (o *tmuxStartOps) waitForReady(ctx context.Context, name string, rc *RuntimeConfig, timeout time.Duration) error {
-	return o.tm.WaitForRuntimeReady(ctx, name, rc, timeout)
+	target, err := o.tm.agentPaneTarget(name)
+	if err != nil {
+		return err
+	}
+	return o.tm.WaitForRuntimeReady(ctx, target, rc, timeout)
 }
 
 func (o *tmuxStartOps) hasSession(name string) (bool, error) {
@@ -1404,7 +1426,12 @@ func (o *tmuxStartOps) hasSession(name string) (bool, error) {
 // width, and a credential split across two lines by a newline tmux inserted is
 // a credential substring matching cannot find.
 func (o *tmuxStartOps) capturePane(name string, lines int) (string, error) {
-	content, err := o.tm.CapturePaneJoined(name, lines)
+	// The agent pane's output, never a human split's (agentPaneTarget).
+	target, err := o.tm.agentPaneTarget(name)
+	if err != nil {
+		return "", err
+	}
+	content, err := o.tm.CapturePaneJoined(target, lines)
 	return runtime.RedactSecrets(content, o.secrets), err
 }
 

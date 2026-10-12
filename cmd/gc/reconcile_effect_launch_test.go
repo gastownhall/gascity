@@ -125,17 +125,18 @@ func TestLaunchOverATakenNameRefuses(t *testing.T) {
 	}
 }
 
-// Kills a stop request that survives a v2 PreWake (I15; v5 D1).
+// Kills a stop request, or an operator's drain mark, that survives a v2
+// PreWake (I15; v5 D1, v5.9p).
 func TestPreWakeClearsStopRequest(t *testing.T) {
 	var meta []string
-	for k := range stopVoidResiduePatch() {
+	for k := range stopEndPatch() {
 		meta = append(meta, k, "set")
 	}
 	k, _ := launchKit(t, "asleep", meta...)
 	if s := k.runKind(); s.Outcome != settledLanded {
 		t.Fatalf("settlement %+v, want landed", s)
 	}
-	for key := range stopVoidResiduePatch() {
+	for key := range stopEndPatch() {
 		if v := k.meta(key); v != "" {
 			t.Errorf("%s = %q after PreWake, want cleared", key, v)
 		}
