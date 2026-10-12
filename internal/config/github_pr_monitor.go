@@ -8,11 +8,6 @@ import (
 
 const defaultGitHubMergeQueuePolicy = "observe"
 
-// defaultGitHubRepairWorkflow is the formula attached to repair beads when a
-// monitor does not configure an explicit repair_workflow. It carries the
-// standard polecat branch/test/push/refinery steps.
-const defaultGitHubRepairWorkflow = "mol-polecat-work"
-
 // GitHubConfig groups GitHub-facing repository monitor declarations.
 type GitHubConfig struct {
 	// PRMonitors declares GitHub pull-request readiness monitors.
@@ -37,9 +32,11 @@ type GitHubPRMonitor struct {
 	// RepairRoute is the operator-supplied route target for repair work.
 	RepairRoute string `toml:"repair_route" jsonschema:"required"`
 	// RepairWorkflow is the formula attached to repair beads created for this
-	// monitor. Empty defaults to the standard polecat repair workflow so routed
-	// repair work carries the branch/test/push/refinery steps instead of
-	// sitting as a raw routed task.
+	// monitor, so routed repair work carries the pack's repair steps instead of
+	// sitting as a raw routed task. Empty attaches no workflow: the repair bead
+	// is still created and routed to repair_route. The formula must resolve
+	// from the rig's formula layers (for example, one shipped by an imported
+	// pack).
 	RepairWorkflow string `toml:"repair_workflow,omitempty"`
 	// WebhookSecretEnv is the environment variable containing the webhook
 	// HMAC secret. The secret value itself must not be stored in city.toml.
@@ -63,13 +60,10 @@ func (m GitHubPRMonitor) MergeQueuePolicyOrDefault() string {
 	return policy
 }
 
-// RepairWorkflowOrDefault returns the configured repair workflow formula name,
-// or the default polecat repair workflow when unset.
-func (m GitHubPRMonitor) RepairWorkflowOrDefault() string {
-	if wf := strings.TrimSpace(m.RepairWorkflow); wf != "" {
-		return wf
-	}
-	return defaultGitHubRepairWorkflow
+// RepairWorkflowFormula returns the configured repair workflow formula name,
+// or "" when the monitor attaches no workflow to its repair beads.
+func (m GitHubPRMonitor) RepairWorkflowFormula() string {
+	return strings.TrimSpace(m.RepairWorkflow)
 }
 
 // WebhookSecretKeyOrDefault returns the configured secret key or the env var

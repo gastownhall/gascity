@@ -42,7 +42,7 @@ func stubGitHubRepairWorkflowAttach(t *testing.T) *[]string {
 	old := attachGitHubPRRepairWorkflow
 	calls := []string{}
 	attachGitHubPRRepairWorkflow = func(_ beads.Store, _ beads.GraphStore, _ *config.City, _ config.Rig, monitor config.GitHubPRMonitor, _ beads.Bead, _ githubmonitor.Result) error {
-		calls = append(calls, monitor.RepairWorkflowOrDefault())
+		calls = append(calls, monitor.RepairWorkflowFormula())
 		return nil
 	}
 	t.Cleanup(func() { attachGitHubPRRepairWorkflow = old })
@@ -165,8 +165,8 @@ func TestGitHubPRBackfillCommandCreatesDedupedRepairBeads(t *testing.T) {
 	if len(*attachCalls) != 1 {
 		t.Fatalf("workflow attach calls = %v, want exactly one (create only)", *attachCalls)
 	}
-	if (*attachCalls)[0] != "mol-polecat-work" {
-		t.Fatalf("attached workflow = %q, want mol-polecat-work default", (*attachCalls)[0])
+	if (*attachCalls)[0] != testGitHubRepairWorkflow {
+		t.Fatalf("attached workflow = %q, want configured %q", (*attachCalls)[0], testGitHubRepairWorkflow)
 	}
 }
 
@@ -304,8 +304,8 @@ func TestGitHubPRBackfillDispatchesWorkflowOnCreateOnly(t *testing.T) {
 	if payload.CreatedRepairs != 1 || payload.DispatchedRepairs != 1 {
 		t.Fatalf("created=%d dispatched=%d, want 1/1", payload.CreatedRepairs, payload.DispatchedRepairs)
 	}
-	if len(payload.RepairBeads) != 1 || !payload.RepairBeads[0].Dispatched || payload.RepairBeads[0].Workflow != "mol-polecat-work" {
-		t.Fatalf("repair bead = %#v, want dispatched mol-polecat-work", payload.RepairBeads)
+	if len(payload.RepairBeads) != 1 || !payload.RepairBeads[0].Dispatched || payload.RepairBeads[0].Workflow != testGitHubRepairWorkflow {
+		t.Fatalf("repair bead = %#v, want dispatched %q", payload.RepairBeads, testGitHubRepairWorkflow)
 	}
 
 	// Second pass over the same PR/head updates, does not re-dispatch.
@@ -330,6 +330,59 @@ func runGitHubBackfillOrFatal(t *testing.T, cityPath string) {
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"--city", cityPath, "github", "pr", "backfill", "partcl-main", "--create-repair-beads", "--json"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("run code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+	}
+}
+
+// TestGitHubPRBackfillWithoutRepairWorkflowCreatesRoutedBeadOnly pins that the
+// SDK names no default repair formula: a monitor with no repair_workflow still
+// creates and routes the repair bead, but attaches nothing and reports nothing
+// dispatched.
+func TestGitHubPRBackfillWithoutRepairWorkflowCreatesRoutedBeadOnly(t *testing.T) {
+	cityPath := writeGitHubMonitorTestCityWithRepairWorkflow(t, "")
+	store := beads.NewMemStore()
+	lister := &stubGitHubPRLister{prs: []githubmonitor.PullRequest{{
+		Number: 2601, Title: "Fix", URL: "https://github.com/partcleda/partcl/pull/2601",
+		BaseRefName: "main", HeadRefName: "fix", HeadSHA: "abc123", MergeStateStatus: "DIRTY",
+	}}}
+	oldToken := resolveGitHubTokenForBackfill
+	oldClient := newGitHubPRBackfillClient
+	oldStore := openGitHubPRRepairStore
+	resolveGitHubTokenForBackfill = func(context.Context) (string, error) { return "token", nil }
+	newGitHubPRBackfillClient = func(string) githubPRLister { return lister }
+	openGitHubPRRepairStore = func(string, string) (beads.Store, error) { return store, nil }
+	attachCalls := stubGitHubRepairWorkflowAttach(t)
+	t.Cleanup(func() {
+		resolveGitHubTokenForBackfill = oldToken
+		newGitHubPRBackfillClient = oldClient
+		openGitHubPRRepairStore = oldStore
+	})
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"--city", cityPath, "github", "pr", "backfill", "partcl-main", "--create-repair-beads", "--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("run code = %d, stderr = %q", code, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "not attached") {
+		t.Fatalf("stderr = %q, want no attach warning when no workflow is configured", stderr.String())
+	}
+	var payload githubPRBackfillResult
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode %q: %v", stdout.String(), err)
+	}
+	if len(*attachCalls) != 0 {
+		t.Fatalf("workflow attach calls = %v, want none without repair_workflow", *attachCalls)
+	}
+	if payload.CreatedRepairs != 1 || payload.DispatchedRepairs != 0 {
+		t.Fatalf("created=%d dispatched=%d, want 1/0", payload.CreatedRepairs, payload.DispatchedRepairs)
+	}
+	if len(payload.RepairBeads) != 1 || payload.RepairBeads[0].Dispatched || payload.RepairBeads[0].Workflow != "" {
+		t.Fatalf("repair bead = %#v, want undispatched with no workflow", payload.RepairBeads)
+	}
+	got, err := store.Get(payload.RepairBeads[0].ID)
+	if err != nil {
+		t.Fatalf("Get repair bead: %v", err)
+	}
+	if route := got.Metadata["gc.routed_to"]; route != "partcl/polecat" {
+		t.Fatalf("gc.routed_to = %q, want partcl/polecat", route)
 	}
 }
 
@@ -358,7 +411,18 @@ func TestGitHubPRBackfillCommandFiltersCleanResultsByDefault(t *testing.T) {
 	}
 }
 
+// testGitHubRepairWorkflow is an arbitrary repair_workflow name: the monitor
+// attaches whatever formula the city configures and ships no default of its own.
+const testGitHubRepairWorkflow = "pr-repair-work"
+
 func writeGitHubMonitorTestCity(t *testing.T) string {
+	t.Helper()
+	return writeGitHubMonitorTestCityWithRepairWorkflow(t, testGitHubRepairWorkflow)
+}
+
+// writeGitHubMonitorTestCityWithRepairWorkflow writes the monitor test city;
+// an empty workflow omits the repair_workflow key entirely.
+func writeGitHubMonitorTestCityWithRepairWorkflow(t *testing.T, workflow string) string {
 	t.Helper()
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
@@ -383,6 +447,9 @@ notify = ["gastown.mayor"]
 poll_interval = "2m"
 merge_queue = "repair"
 `
+	if workflow != "" {
+		body += fmt.Sprintf("repair_workflow = %q\n", workflow)
+	}
 	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(body), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
