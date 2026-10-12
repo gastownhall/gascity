@@ -206,15 +206,12 @@ func TestSQLiteStoreReadOnlyConnectionsApplyTuningPragmas(t *testing.T) {
 // invariant behind the synchronous entry in sqliteMeasuredOutPragmas rather
 // than restating the pragma value.
 //
-// recoverSequence rebuilds the allocator at open from MAX(numeric suffix) over
-// durable rows. Under synchronous=FULL a commit is fsynced before Create
-// returns, so an ID the caller has already seen is durable and the allocator
-// cannot regress below it. Under NORMAL the whole WAL tail since the last
-// checkpoint can be discarded by a host crash, the allocator regresses, and the
-// next mints reissue IDs that already escaped. The test asserts the premise
-// (the persisted floor trails the ids handed out) and the consequence (the
-// write connection is at FULL) together, so it stops guarding as soon as the
-// premise stops being true instead of silently pinning a stale conclusion.
+// The allocator used to be rebuilt at open from durable rows alone, so NORMAL
+// (which can drop the WAL tail on a host crash) would regress it and reissue
+// ids that had already escaped. The persisted floor now leads the allocator: a
+// block is fsynced before any id in it is handed out. The test pins that
+// premise (floor >= every id handed out) and keeps FULL pinned too — rows the
+// caller was told exist are a separate durability decision, not this one.
 func TestSQLiteStoreKeepsFullSynchronousUntilTheSequenceFloorLeads(t *testing.T) {
 	dir := t.TempDir()
 	opened, err := OpenSQLiteStore(dir, WithSQLiteStoreIDPrefix(sqliteGraphPrefix))
@@ -236,16 +233,18 @@ func TestSQLiteStoreKeepsFullSynchronousUntilTheSequenceFloorLeads(t *testing.T)
 	if err != nil {
 		t.Fatalf("SequenceFloor: %v", err)
 	}
-	minted := store.seq.Load()
+	store.sequenceFloorMu.Lock()
+	minted := store.seq
+	store.sequenceFloorMu.Unlock()
 	if minted == 0 {
 		t.Fatal("no ids were minted, so the guard below would be vacuous")
 	}
-	if floor >= minted {
-		t.Skipf("sequence floor %d now leads the allocator at %d after minting %v; re-evaluate synchronous=NORMAL", floor, minted, escaped)
+	if floor < minted {
+		t.Fatalf("sequence floor %d trails the allocator at %d after minting %v; a crash could reissue them", floor, minted, escaped)
 	}
 
 	conn := checkoutAllConns(t, store.db, 1)[0]
 	if got := sqlitePragmaValue(t, conn, "synchronous"); got != "2" {
-		t.Errorf("write connection PRAGMA synchronous = %s, want 2 (FULL): the allocator recovers from durable rows but the persisted floor (%d) trails the %d ids already handed out (%v)", got, floor, minted, escaped)
+		t.Errorf("write connection PRAGMA synchronous = %s, want 2 (FULL): committed rows must survive a host crash (floor %d, minted %d, ids %v)", got, floor, minted, escaped)
 	}
 }

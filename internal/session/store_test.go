@@ -245,7 +245,7 @@ func TestCloseEmitsClosePatchThenClose(t *testing.T) {
 	is, rec := recordingStore(t, b)
 
 	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
-	closed, err := is.Close("s-1", "gc_swept", now)
+	closed, err := is.Close(infoFromPersistedBead(b), "gc_swept", now)
 	if err != nil {
 		t.Fatalf("Close: %v", err)
 	}
@@ -269,7 +269,7 @@ func TestCloseAlreadyClosedIsNoOp(t *testing.T) {
 	b := sessionBeadFixture("s-1", "closed", nil)
 	is, rec := recordingStore(t, b)
 
-	closed, err := is.Close("s-1", "gc_swept", time.Now())
+	closed, err := is.Close(infoFromPersistedBead(b), "gc_swept", time.Now())
 	if err != nil {
 		t.Fatalf("Close: %v", err)
 	}

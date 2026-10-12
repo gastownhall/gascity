@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -303,5 +304,57 @@ func TestPackRuntimeDeclarationChanged(t *testing.T) {
 				t.Errorf("packRuntimeDeclarationChanged = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// Kills: dropping either half of the config composition decision (explicit
+// session = "acp" agents, or ACP provider targets), and dropping the acp-base
+// guard, which would stop every session for a composition an acp base never
+// builds.
+func TestSessionTransportCompositionChanged(t *testing.T) {
+	plain := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	acpAgent := &config.City{Agents: []config.Agent{{Name: "worker"}, {Name: "reviewer", Session: "acp"}}}
+	otherACPAgent := &config.City{Agents: []config.Agent{{Name: "auditor", Session: "acp"}}}
+	acpProvider := &config.City{Providers: map[string]config.ProviderSpec{
+		"opencode": {Command: "/bin/echo", PathCheck: "true", SupportsACP: boolPtr(true), ACPCommand: "/bin/echo", ACPArgs: []string{"acp"}},
+	}}
+	if !hasACPProviderTargets(acpProvider) {
+		t.Fatal("fixture: acpProvider has no ACP provider target")
+	}
+	cases := []struct {
+		name           string
+		oldCfg, newCfg *config.City
+		base           string
+		want           bool
+	}{
+		{"nil configs", nil, nil, "tmux", false},
+		{"no ACP either side", plain, plain, "tmux", false},
+		{"first ACP agent added", plain, acpAgent, "tmux", true},
+		{"last ACP agent removed", acpAgent, plain, "tmux", true},
+		{"ACP provider target added", plain, acpProvider, "tmux", true},
+		{"ACP agents swapped for others", acpAgent, otherACPAgent, "tmux", false},
+		{"ACP agent swapped for an ACP provider target", acpAgent, acpProvider, "tmux", false},
+		{"acp base never composes", plain, acpAgent, "acp", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sessionTransportCompositionChanged(tc.oldCfg, tc.newCfg, tc.base); got != tc.want {
+				t.Errorf("sessionTransportCompositionChanged = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRuntimeRegistryACPConfigCarriesStopGrace(t *testing.T) {
+	got := acpProviderConfig(config.ACPSessionConfig{StopGrace: "45s"})
+	if got.StopGrace != 45*time.Second {
+		t.Errorf("acp StopGrace = %v, want 45s from [session.acp] stop_grace", got.StopGrace)
+	}
+	def := acpProviderConfig(config.ACPSessionConfig{})
+	if def.StopGrace != runtime.ManagedProcessStopGrace {
+		t.Errorf("default acp StopGrace = %v, want runtime.ManagedProcessStopGrace (%v)", def.StopGrace, runtime.ManagedProcessStopGrace)
+	}
+	if def.HandshakeTimeout != 30*time.Second || def.NudgeBusyTimeout != 60*time.Second || def.OutputBufferLines != 1000 {
+		t.Errorf("default acp config = %+v, want 30s handshake, 60s nudge busy, 1000 buffer lines", def)
 	}
 }

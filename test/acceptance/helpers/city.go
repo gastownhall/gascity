@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // City is the acceptance test DSL. It wraps a city directory and the
@@ -400,6 +402,9 @@ func acceptanceTempDir(t *testing.T) string {
 		t.Fatalf("acceptance: creating temp dir: %v", err)
 	}
 	t.Cleanup(func() {
+		// A failed test's Dolt, bd-proxy and supervisor logs exist only under
+		// this dir; keep them in $GC_TEST_FAILURE_ARTIFACT_DIR for CI upload.
+		testutil.SaveFailureDiagnostics(t, dir)
 		removeAllWithRetry(t, dir, 5*time.Second, 50*time.Millisecond)
 	})
 	return dir

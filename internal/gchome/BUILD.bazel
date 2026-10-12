@@ -1,0 +1,39 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "gchome",
+    srcs = [
+        "gchome.go",
+        "trust_unix.go",
+        "trust_unsupported.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/gchome",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "gchome_test",
+    srcs = [
+        "gchome_test.go",
+        "testenv_import_test.go",
+        "trust_unix_test.go",
+    ],
+    data = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ),
+    embed = [":gchome"],
+    deps = ["//internal/testenv"],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

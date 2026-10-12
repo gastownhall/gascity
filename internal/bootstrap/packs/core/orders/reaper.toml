@@ -1,9 +1,12 @@
 # Converted from formula+pool to exec. All reaper operations are
-# deterministic: SQL age comparisons, gc bd close, count thresholds.
-# No LLM judgment needed — runs inline in the controller.
+# deterministic gc bd verbs per bead scope (read-only gc bd sql selections, then
+# gc bd close/update/purge/prune/delete) plus count thresholds. No LLM judgment
+# needed — runs inline in the controller. The timeout covers one bd fork per
+# selection and per verb batch across the city and every rig scope.
 [order]
 description = "Reap stale wisps and purge closed molecules"
 exec = "$PACK_DIR/assets/scripts/reaper.sh"
 trigger = "cooldown"
 interval = "30m"
+timeout = "900s"
 skip_aliases = ["mol-dog-reaper"]

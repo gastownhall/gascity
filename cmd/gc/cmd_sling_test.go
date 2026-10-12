@@ -4460,7 +4460,7 @@ func TestOnFormulaCopiesSourcePriorityToCreatedBeads(t *testing.T) {
 	}
 }
 
-func TestOnFormulaGraphWorkflowPreassignsNonLatchBeadsForFixedAgent(t *testing.T) {
+func TestOnFormulaGraphWorkflowRoutesUnclaimedNonLatchBeadsForFixedAgent(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
@@ -4573,7 +4573,7 @@ title = "Do work"
 	if err != nil {
 		t.Fatalf("list workflow beads: %v", err)
 	}
-	assigned := 0
+	routed := 0
 	for _, bead := range all {
 		if bead.Metadata["gc.root_bead_id"] != rootID {
 			continue
@@ -4593,19 +4593,19 @@ title = "Do work"
 			if bead.Metadata[graphroute.GraphExecutionRouteMetaKey] != "mayor" {
 				t.Fatalf("workflow-finalize execution route = %q, want mayor", bead.Metadata[graphroute.GraphExecutionRouteMetaKey])
 			}
-			assigned++
+			routed++
 		default:
-			if bead.Assignee != "mayor" {
-				t.Fatalf("workflow bead %s assignee = %q, want mayor", bead.ID, bead.Assignee)
+			if bead.Assignee != "" {
+				t.Fatalf("workflow bead %s assignee = %q, want unclaimed routed work", bead.ID, bead.Assignee)
 			}
 			if bead.Metadata["gc.routed_to"] != "mayor" {
 				t.Fatalf("workflow bead %s gc.routed_to = %q, want mayor", bead.ID, bead.Metadata["gc.routed_to"])
 			}
-			assigned++
+			routed++
 		}
 	}
-	if assigned == 0 {
-		t.Fatalf("expected at least one assigned workflow bead; rows=%#v", all)
+	if routed == 0 {
+		t.Fatalf("expected at least one routed workflow bead; rows=%#v", all)
 	}
 	if !strings.Contains(stdout.String(), "Attached workflow") {
 		t.Fatalf("stdout = %q, want attached workflow message", stdout.String())

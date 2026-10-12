@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -85,6 +86,10 @@ func requirePrivateFallbackRejected(t *testing.T, p *Provider, name string) {
 		if err == nil || !strings.Contains(err.Error(), "private socket directory") {
 			t.Errorf("%s error = %v, want private socket directory validation", check.name, err)
 		}
+	}
+	// A directory that fails validation cannot tell, so liveness is unknown.
+	if _, err := p.ObserveLivenessWithError(name, nil); !errors.Is(err, runtime.ErrRuntimeUnavailable) || !errors.Is(err, errPrivateSocketDirValidation) {
+		t.Errorf("ObserveLivenessWithError error = %v, want ErrRuntimeUnavailable wrapping private socket directory validation", err)
 	}
 }
 
@@ -335,7 +340,8 @@ func TestLegacySocketRemainsVisibleWhenPrivateFallbackIsMissing(t *testing.T) {
 	if startCalls != 0 {
 		t.Fatalf("process start calls = %d, want 0", startCalls)
 	}
-	for _, want := range []string{"ping", "ping", "interrupt", "stop", "ping"} {
+	// Liveness probes only connect, so the owner sees just the two commands.
+	for _, want := range []string{"interrupt", "stop"} {
 		select {
 		case got := <-gotCommand:
 			if got != want {
@@ -1251,5 +1257,117 @@ func TestListRunningViaSocket(t *testing.T) {
 	}
 	if len(all) != 3 {
 		t.Errorf("ListRunning('') = %v, want 3 results", all)
+	}
+}
+
+// noProcessStart stands in for (*exec.Cmd).Start without spawning: it binds a
+// pid above every OS pid_max (Linux 2^22, macOS 99999), so the failure paths'
+// Kill and Wait reach no process.
+func noProcessStart(cmd *exec.Cmd) error {
+	proc, err := os.FindProcess(1 << 30)
+	if err != nil {
+		return err
+	}
+	cmd.Process = proc
+	return nil
+}
+
+// fakeListener is a control socket that accepts nothing until closed.
+type fakeListener struct {
+	closed chan struct{}
+	once   sync.Once
+}
+
+func newFakeListener() *fakeListener { return &fakeListener{closed: make(chan struct{})} }
+
+func (l *fakeListener) Accept() (net.Conn, error) {
+	<-l.closed
+	return nil, net.ErrClosed
+}
+
+func (l *fakeListener) Close() error {
+	l.once.Do(func() { close(l.closed) })
+	return nil
+}
+
+func (l *fakeListener) Addr() net.Addr { return &net.UnixAddr{Net: "unix"} }
+
+var identityEnv = map[string]string{
+	"GC_SESSION_ID":     "bead-123",
+	"GC_INSTANCE_TOKEN": "token-456",
+}
+
+// v5 O2 (X3): Ownerless on subprocess requires the identity write to precede
+// liveness. A reader in another process looks at the sidecar the instant the
+// socket is bound; it must already carry both identity keys.
+func TestSubprocessSidecarSeededBeforeSocket(t *testing.T) {
+	p := newTestProvider(t)
+	reader := NewProviderWithDir(p.dir)
+	seen := map[string]string{}
+	p.ops.start = noProcessStart
+	p.ops.listen = func(_, _ string) (net.Listener, error) {
+		for key := range identityEnv {
+			seen[key], _ = reader.GetMeta("seeded", key)
+		}
+		return newFakeListener(), nil
+	}
+
+	if err := p.Start(context.Background(), "seeded", runtime.Config{Command: "sleep 300", Env: identityEnv}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	for key, want := range identityEnv {
+		if seen[key] != want {
+			t.Errorf("sidecar %s at socket bind = %q, want %q", key, seen[key], want)
+		}
+	}
+}
+
+func TestSubprocessStartFailureCleansSidecar(t *testing.T) {
+	p := newTestProvider(t)
+	workDir := t.TempDir()
+	p.ops.start = noProcessStart
+	p.ops.listen = func(_, _ string) (net.Listener, error) {
+		return nil, errors.New("bind refused")
+	}
+
+	err := p.Start(context.Background(), "unbound", runtime.Config{Command: "sleep 300", WorkDir: workDir, Env: identityEnv})
+	if err == nil || !strings.Contains(err.Error(), "creating control socket") {
+		t.Fatalf("Start error = %v, want control socket failure", err)
+	}
+	for key := range identityEnv {
+		if got, _ := p.GetMeta("unbound", key); got != "" {
+			t.Errorf("sidecar %s after failed Start = %q, want removed", key, got)
+		}
+	}
+	if _, ok := p.workDirs["unbound"]; ok {
+		t.Error("workDir still tracked after failed Start")
+	}
+	if _, ok := p.procs["unbound"]; ok {
+		t.Error("session still tracked after failed Start")
+	}
+	namePath := filepath.Join(p.socketDir(), p.sockKey("unbound")+".name")
+	if _, err := os.Lstat(namePath); !os.IsNotExist(err) {
+		t.Errorf("socket name artifact after failed Start: %v, want not exist", err)
+	}
+}
+
+// LL6, I24: subprocess is already fresh-only. A held name returns
+// ErrSessionExists with FreshOnly set, and the holder is neither replaced nor
+// stopped. Kills a recycle of a held name inside Start.
+func TestAcpSubprocessAlreadyFreshOnly(t *testing.T) {
+	p := NewProviderWithDir(shortTempDir(t))
+	p.ops.start = func(*exec.Cmd) error {
+		t.Fatal("Start spawned a process for a held name")
+		return nil
+	}
+	holder := &sessionConn{done: make(chan struct{})}
+	p.procs["held"] = holder
+
+	err := p.Start(context.Background(), "held", runtime.Config{Command: "true", FreshOnly: true})
+	if !errors.Is(err, runtime.ErrSessionExists) {
+		t.Fatalf("Start = %v, want runtime.ErrSessionExists", err)
+	}
+	if p.procs["held"] != holder || !holder.alive() {
+		t.Fatal("Start replaced or stopped the runtime holding the name")
 	}
 }

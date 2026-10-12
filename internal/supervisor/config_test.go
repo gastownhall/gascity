@@ -103,6 +103,9 @@ func TestShouldSeedIsolatedSupervisorConfigTrueForNonTestBinaryWithGCIsolated(t 
 
 func setProgramName(t *testing.T, name string) {
 	t.Helper()
+	// Bazel test binaries are detected via TEST_SRCDIR rather than the
+	// program name; clear it so non-test-binary simulations hold there too.
+	t.Setenv("TEST_SRCDIR", "")
 	oldArgs := os.Args
 	os.Args = append([]string{name}, oldArgs[1:]...)
 	t.Cleanup(func() {

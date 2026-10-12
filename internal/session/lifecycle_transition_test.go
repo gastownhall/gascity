@@ -496,6 +496,42 @@ func TestPreWakePatchPreservesResetCommittedAt(t *testing.T) {
 	}
 }
 
+// TestPreWakePatchKeepsEpisodePendingCreateStartedAt: the pre-wake commit runs
+// before every start attempt, so re-stamping pending_create_started_at there
+// reset the stale-create clock on each retry and the bound never expired. A
+// wake that continues an episode keeps the episode's marker; a new episode, or
+// an unreadable marker, gets a fresh stamp.
+func TestPreWakePatchKeepsEpisodePendingCreateStartedAt(t *testing.T) {
+	now := time.Date(2026, 9, 3, 1, 54, 51, 0, time.UTC)
+	fresh := now.UTC().Format(time.RFC3339)
+	episode := "2026-09-02T23:17:00Z"
+	for _, tc := range []struct {
+		name    string
+		episode string
+		want    string
+	}{
+		{name: "continuing episode keeps its start", episode: episode, want: episode},
+		{name: "new episode stamps now", episode: "", want: fresh},
+		{name: "unreadable marker stamps now", episode: "not-a-time", want: fresh},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := PreWakePatch(PreWakePatchInput{
+				Generation:                    2,
+				InstanceToken:                 "token-2",
+				ContinuationEpoch:             1,
+				Now:                           now,
+				EpisodePendingCreateStartedAt: tc.episode,
+			})
+			if got["pending_create_started_at"] != tc.want {
+				t.Fatalf("pending_create_started_at = %q, want %q", got["pending_create_started_at"], tc.want)
+			}
+			if got["last_woke_at"] != fresh {
+				t.Fatalf("last_woke_at = %q, want %q: the per-attempt lease still renews", got["last_woke_at"], fresh)
+			}
+		})
+	}
+}
+
 func TestMetadataPatchApplyReturnsMergedCopy(t *testing.T) {
 	original := map[string]string{
 		"state":        string(StateAsleep),

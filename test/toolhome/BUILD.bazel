@@ -1,0 +1,30 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "toolhome",
+    srcs = ["toolhome.go"],
+    importpath = "github.com/gastownhall/gascity/test/toolhome",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "toolhome_test",
+    srcs = [
+        "testenv_import_test.go",
+        "toolhome_test.go",
+    ],
+    embed = [":toolhome"],
+    deps = ["//internal/testenv"],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

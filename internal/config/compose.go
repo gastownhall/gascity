@@ -782,6 +782,7 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	if err := ValidateNonNegativeDurations(root, path); err != nil {
 		return nil, nil, err
 	}
+	prov.Warnings = append(prov.Warnings, ValidateProxiedIdleTimeouts(root, path)...)
 	if err := ValidateDoltConfig(root, path); err != nil {
 		return nil, nil, err
 	}
@@ -1128,12 +1129,16 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 		// field still wins.
 		conditionalWrites := base.Beads.ConditionalWrites
 		guardedRelease := base.Beads.GuardedRelease
+		proxiedIdleTimeout := base.Beads.ProxiedIdleTimeout
 		base.Beads = fragment.Beads
 		if !fragMeta.IsDefined("beads", "conditional_writes") {
 			base.Beads.ConditionalWrites = conditionalWrites
 		}
 		if !fragMeta.IsDefined("beads", "guarded_release") {
 			base.Beads.GuardedRelease = guardedRelease
+		}
+		if !fragMeta.IsDefined("beads", "proxied_idle_timeout") {
+			base.Beads.ProxiedIdleTimeout = proxiedIdleTimeout
 		}
 	}
 	if fragMeta.IsDefined("dolt") {
@@ -1144,9 +1149,13 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 	}
 	if fragMeta.IsDefined("daemon") {
 		formulaV2 := base.Daemon.FormulaV2
+		sessionReconciler := base.Daemon.SessionReconciler
 		base.Daemon = fragment.Daemon
 		if !fragMeta.IsDefined("daemon", "formula_v2") && !fragMeta.IsDefined("daemon", "graph_workflows") {
 			base.Daemon.FormulaV2 = formulaV2
+		}
+		if !fragMeta.IsDefined("daemon", "session_reconciler") {
+			base.Daemon.SessionReconciler = sessionReconciler
 		}
 	}
 	if fragMeta.IsDefined("session") {
@@ -1624,6 +1633,7 @@ func parseWithMeta(data []byte, source string) (*City, toml.MetaData, []string, 
 	warnings := agentDefaultsCompatibilityWarnings(md, source)
 	normalizeLegacyOrderOverrideAliases(&cfg)
 	warnings = append(warnings, CheckUndecodedKeys(md, source)...)
+	warnings = append(warnings, sessionReconcilerWarnings(&cfg, source)...)
 	// Stamp source=sourceInline on inline [[agent]] tables. For fragments,
 	// adjustAgentPaths later sets SourceDir, which takes precedence in
 	// describeSource (FR-1). For the root city.toml, SourceDir is empty

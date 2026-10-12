@@ -1,0 +1,39 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "workqueue",
+    srcs = [
+        "coverage.go",
+        "doc.go",
+        "queue.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/workqueue",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "workqueue_test",
+    srcs = [
+        "coverage_test.go",
+        "queue_test.go",
+        "testenv_import_test.go",
+    ],
+    data = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ),
+    embed = [":workqueue"],
+    deps = ["//internal/testenv"],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

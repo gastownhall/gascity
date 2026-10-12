@@ -1,0 +1,43 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "ssh",
+    srcs = [
+        "cutover.go",
+        "provider.go",
+        "seams.go",
+        "session_env_file.go",
+        "ssh.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/runtime/ssh",
+    visibility = ["//:__subpackages__"],
+    deps = ["//internal/runtime"],
+)
+
+go_test(
+    name = "ssh_test",
+    srcs = [
+        "provider_test.go",
+        "seams_test.go",
+        "session_env_file_test.go",
+        "ssh_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":ssh"],
+    deps = [
+        "//internal/runtime",
+        "//internal/testenv",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

@@ -1,0 +1,38 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "mail",
+    srcs = [
+        "fake.go",
+        "mail.go",
+        "resolve.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/mail",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "mail_test",
+    srcs = [
+        "fake_conformance_test.go",
+        "resolve_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":mail"],
+    deps = [
+        "//internal/mail/mailtest",
+        "//internal/testenv",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

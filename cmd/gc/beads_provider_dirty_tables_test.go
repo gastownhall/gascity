@@ -202,6 +202,15 @@ provider = "bd"
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityConfig), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// This recovery belongs to an existing direct-server city. Without the
+	// persisted city marker, a fresh scope correctly takes the new
+	// provider-owned proxied-local path and never reaches legacy recovery.
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "metadata.json"), []byte(`{"backend":"dolt","dolt_mode":"server"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	rigDir := filepath.Join(cityDir, "rigs", "gascity-packs")
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatal(err)

@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"testing"
 
@@ -20,6 +21,7 @@ func TestDrainWorkflowServeWorkQuietRetryDoesNotReportPending(t *testing.T) {
 	clearGCEnv(t)
 
 	blocked := errors.New(`pl-pujtf: completing workflow head: updating bead "pl-pujtf": exit status 1: cannot close blocked issue: pl-pujtf is blocked by [pl-mmneh]`)
+	pending := fmt.Errorf("%w: rig %q not found in city config", dispatch.ErrControlPending, "ghostrig")
 
 	tests := []struct {
 		name            string
@@ -45,6 +47,23 @@ func TestDrainWorkflowServeWorkQuietRetryDoesNotReportPending(t *testing.T) {
 		{
 			name:            "availability failure still wakes the loop",
 			serveErr:        errors.New("updating bead: dial tcp 127.0.0.1:3306: connect: connection refused"),
+			wantPendingAny:  true,
+			wantSweepGrowth: false,
+		},
+		{
+			// Pending took the same arm the semantic tier took before the quiet
+			// mark existed, and it can last far longer: it waits on config drift
+			// a human heals, so a removed rig holds the loop at its 1s floor for
+			// days while it re-runs a full dispatch — config load, store open,
+			// outcome read, source-chain preflight — to re-learn the same answer.
+			name:            "quiet pending repeat does not pin the backoff",
+			serveErr:        dispatch.MarkQuietControllerRetry(pending),
+			wantPendingAny:  false,
+			wantSweepGrowth: true,
+		},
+		{
+			name:            "first pending refusal still wakes the loop",
+			serveErr:        pending,
 			wantPendingAny:  true,
 			wantSweepGrowth: false,
 		},

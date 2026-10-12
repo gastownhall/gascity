@@ -19,6 +19,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
@@ -134,6 +135,20 @@ func (s *readyQueryRecordingStore) Ready(query ...beads.ReadyQuery) ([]beads.Bea
 		s.readyQueries = append(s.readyQueries, query[0])
 	}
 	return s.MemStore.Ready(query...)
+}
+
+// listCallCountingStore counts calls made through List so a test can assert
+// a lookup's store-read cost stays flat against an unrelated input's size
+// (e.g. the number of configured named sessions), rather than growing one
+// read per item (ga-0t7qjl).
+type listCallCountingStore struct {
+	*beads.MemStore
+	listCalls int
+}
+
+func (s *listCallCountingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.listCalls++
+	return s.MemStore.List(query)
 }
 
 type blockingPoolCreateStore struct {
@@ -343,7 +358,7 @@ func TestCollectAllOpenSessionInfos(t *testing.T) {
 			t.Fatalf("close session bead: %v", err)
 		}
 
-		infos, err := collectAllOpenSessionInfos("", &config.City{}, cityStore, nil, nil)
+		infos, err := collectAllOpenSessionInfos("", &config.City{}, cityStore, nil, nil, nil)
 		if err != nil {
 			t.Fatalf("collectAllOpenSessionInfos: %v", err)
 		}
@@ -376,7 +391,7 @@ func TestCollectAllOpenSessionInfos(t *testing.T) {
 		}
 		store := &partialSessionListStore{MemStore: backing}
 
-		infos, err := collectAllOpenSessionInfos("", &config.City{}, store, nil, nil)
+		infos, err := collectAllOpenSessionInfos("", &config.City{}, store, nil, nil, nil)
 		if err == nil {
 			t.Fatal("collectAllOpenSessionInfos returned nil error on a partial-result store")
 		}
@@ -419,7 +434,7 @@ func TestCollectAllOpenSessionInfos(t *testing.T) {
 		rigStores := map[string]beads.Store{"rig-A": rigStore}
 
 		// Control: with the rig live, both sessions are collected.
-		liveInfos, err := collectAllOpenSessionInfos("", cfg, cityStore, rigStores, nil)
+		liveInfos, err := collectAllOpenSessionInfos("", cfg, cityStore, rigStores, nil, nil)
 		if err != nil {
 			t.Fatalf("collectAllOpenSessionInfos (live rig): %v", err)
 		}
@@ -429,7 +444,7 @@ func TestCollectAllOpenSessionInfos(t *testing.T) {
 
 		// Suspending the rig drops its store from the fan-out.
 		suspended := map[string]bool{rigPath: true}
-		infos, err := collectAllOpenSessionInfos("", cfg, cityStore, rigStores, suspended)
+		infos, err := collectAllOpenSessionInfos("", cfg, cityStore, rigStores, suspended, nil)
 		if err != nil {
 			t.Fatalf("collectAllOpenSessionInfos (suspended rig): %v", err)
 		}
@@ -2433,7 +2448,7 @@ func TestReadyAssignedWorkAssigneesExcludeBroadIdentities(t *testing.T) {
 			{Template: "mayor", Mode: "always"},
 			{Dir: "repo", Template: "named-worker", Mode: "on_demand"},
 		},
-	}, nil, nil)
+	}, nil, nil, nil, nil, "", nil)
 
 	for _, disallowed := range []string{"repo/worker", "mayor"} {
 		for _, value := range got {
@@ -2451,6 +2466,77 @@ func TestReadyAssignedWorkAssigneesExcludeBroadIdentities(t *testing.T) {
 	if !foundNamed {
 		t.Fatalf("ready assignees = %#v, want on-demand named-session identity", got)
 	}
+}
+
+// TestReadyAssignedWorkAssigneesStoreReadsAreIndependentOfNamedSessionCount
+// pins ga-0t7qjl: readyAssignedWorkAssignees looked up each on_demand named
+// session's closed-bead phantom one identity at a time
+// (findClosedNamedSessionBead -> one store.List per identity), so its store
+// cost scaled linearly with the number of configured named sessions — 109
+// serial calls, +155s, on this city. A batched lookup must cost the same
+// small constant number of store reads regardless of how many named
+// sessions are configured.
+func TestReadyAssignedWorkAssigneesStoreReadsAreIndependentOfNamedSessionCount(t *testing.T) {
+	newCityWithNamedSessions := func(n int) *config.City {
+		cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+		for i := 0; i < n; i++ {
+			cfg.NamedSessions = append(cfg.NamedSessions, config.NamedSession{
+				Dir:      fmt.Sprintf("repo-%d", i),
+				Template: "named-worker",
+				Mode:     "on_demand",
+			})
+		}
+		return cfg
+	}
+
+	countListCalls := func(n int) int {
+		store := &listCallCountingStore{MemStore: beads.NewMemStore()}
+		readyAssignedWorkAssignees(newCityWithNamedSessions(n), store, nil, nil, nil, "", nil)
+		return store.listCalls
+	}
+
+	small := countListCalls(2)
+	large := countListCalls(200)
+
+	if small != large {
+		t.Fatalf("store.List call count scales with named-session count: 2 sessions -> %d calls, 200 sessions -> %d calls; want equal (one batched lookup regardless of session count)", small, large)
+	}
+	if large > 2 {
+		t.Fatalf("store.List called %d times for 200 named sessions; want a small constant via one batched lookup, not one call per named session", large)
+	}
+}
+
+// TestReadyAssignedWorkAssigneesSkipsClosedIndexWithoutOnDemandNamedSession
+// pins ga-bequ8d: the closed-session index is built only when at least one
+// on_demand named session exists, so a city with none pays zero store reads.
+// readyAssignedWorkAssignees must not build the index (or issue any
+// store.List) when no configured named session is on_demand.
+func TestReadyAssignedWorkAssigneesSkipsClosedIndexWithoutOnDemandNamedSession(t *testing.T) {
+	countListCalls := func(cfg *config.City) int {
+		store := &listCallCountingStore{MemStore: beads.NewMemStore()}
+		readyAssignedWorkAssignees(cfg, store, nil, nil, nil, "", nil)
+		return store.listCalls
+	}
+
+	t.Run("no named sessions configured", func(t *testing.T) {
+		cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+		if got := countListCalls(cfg); got != 0 {
+			t.Fatalf("store.List called %d times with zero named sessions configured; want 0 (closed-session index must not be built)", got)
+		}
+	})
+
+	t.Run("only always-mode named sessions configured", func(t *testing.T) {
+		cfg := &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+			NamedSessions: []config.NamedSession{
+				{Template: "mayor", Mode: "always"},
+				{Dir: "repo", Template: "deputy", Mode: "always"},
+			},
+		}
+		if got := countListCalls(cfg); got != 0 {
+			t.Fatalf("store.List called %d times with only always-mode named sessions; want 0 (closed-session index must not be built when no on_demand session needs it)", got)
+		}
+	})
 }
 
 func TestCollectAssignedWorkBeads_ReadyProbeExcludesFutureNamedSessionRuntimeAssignee(t *testing.T) {
@@ -3325,16 +3411,14 @@ func TestBuildDesiredState_NewPoolSessionBeadCreatedWithConcreteIdentity(t *test
 	if !containsString(got.Labels, "agent:rig/claude-1") {
 		t.Fatalf("labels = %#v, want concrete slot agent label", got.Labels)
 	}
-	// The runtime name is derived from the slot identity, never from the bead
-	// ID — that derivation is the ga-vcjr9 leak. A transient slot then steps
-	// aside onto "<identity>-pool" so the rebinding slot never becomes the
-	// runtime name (and therefore GC_AGENT), guarded by
-	// TestE2E_MultiAgent_PoolAndFixed (#5241).
-	if want := poolRuntimeSessionName(nil, "rig/claude-1", "rig/claude", true); got.Metadata["session_name"] != want {
-		t.Fatalf("session_name = %q, want the transient slot's identity-derived runtime name %q", got.Metadata["session_name"], want)
+	// An unaliased pool's runtime name is <template>-<beadID>, so the runtime
+	// resolves back to its bead; it is never the bare slot (and therefore never
+	// GC_AGENT = slot, #5241).
+	if want := PoolSessionName("rig/claude", got.ID); got.Metadata["session_name"] != want {
+		t.Fatalf("session_name = %q, want bead-scoped runtime name %q", got.Metadata["session_name"], want)
 	}
-	if beadOwnsPoolSessionName(got) {
-		t.Fatalf("session_name = %q is still bead-ID derived", got.Metadata["session_name"])
+	if !beadOwnsPoolSessionName(got) {
+		t.Fatalf("session_name = %q is not bead-ID scoped", got.Metadata["session_name"])
 	}
 }
 
@@ -5857,6 +5941,211 @@ func (s *failingPoolCreateStore) claimFailure() bool {
 	return true
 }
 
+// panickingLegStore panics on one read, standing in for a bug inside a demand
+// leg's store read (a bd JSON decode edge, a nil wrapper deref). safeTick
+// recovers only the tick goroutine, so before mc-zndi7.40 a panic in a fan-out
+// leg killed the whole test binary, and the controller with it.
+type panickingLegStore struct {
+	beads.Store
+	panicOnList  bool
+	panicOnReady bool
+}
+
+func (s panickingLegStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if s.panicOnList {
+		panic("injected leg panic: List")
+	}
+	return s.Store.List(query)
+}
+
+func (s panickingLegStore) Ready(query ...beads.ReadyQuery) ([]beads.Bead, error) {
+	if s.panicOnReady {
+		panic("injected leg panic: Ready")
+	}
+	return s.Store.Ready(query...)
+}
+
+// panickingPoolCreateStore panics on the next panicsRemaining session-bead
+// creates, inside a realize worker.
+type panickingPoolCreateStore struct {
+	*beads.MemStore
+	mu              sync.Mutex
+	panicsRemaining int
+}
+
+func (s *panickingPoolCreateStore) Create(bead beads.Bead) (beads.Bead, error) {
+	if bead.Type == sessionBeadType {
+		s.mu.Lock()
+		panics := s.panicsRemaining > 0
+		s.panicsRemaining--
+		s.mu.Unlock()
+		if panics {
+			panic("injected pool create panic")
+		}
+	}
+	return s.MemStore.Create(bead)
+}
+
+func TestEvaluatePendingPoolsRecoversPanickingProbe(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{{Name: "alpha"}, {Name: "zulu"}}}
+	pools := []poolEvalWork{
+		{agentIdx: 0, sp: scaleParams{Max: 5, Check: "probe-alpha"}, newDemand: true},
+		{agentIdx: 1, sp: scaleParams{Max: 5, Check: "probe-zulu"}, newDemand: true},
+	}
+	runner := func(command, _ string, _ map[string]string) (string, error) {
+		if strings.Contains(command, "probe-alpha") {
+			panic("injected scale_check panic")
+		}
+		return "3", nil
+	}
+	var stderr bytes.Buffer
+
+	counts, partials := evaluatePendingPools(cfg, pools, runner, &stderr, nil)
+
+	if !partials[0] || counts[0] != 0 {
+		t.Fatalf("panicking probe: count=%d partial=%v, want 0 and partial", counts[0], partials[0])
+	}
+	if partials[1] || counts[1] != 3 {
+		t.Fatalf("healthy probe: count=%d partial=%v, want 3 and not partial", counts[1], partials[1])
+	}
+	if !strings.Contains(stderr.String(), "injected scale_check panic") || !strings.Contains(stderr.String(), "goroutine") {
+		t.Fatalf("stderr = %q, want the panic value and its stack", stderr.String())
+	}
+}
+
+func TestCollectOpenSessionInfosRecoversPanickingLeg(t *testing.T) {
+	cfg := &config.City{Rigs: []config.Rig{{Name: "rig-A", Path: "/c/rigs/rig-A"}}}
+	cityStore := beads.NewMemStore()
+	cityBead, err := cityStore.Create(beads.Bead{
+		Status: "open", Type: sessionBeadType,
+		Metadata: map[string]string{"template": "worker", "state": "active"},
+	})
+	if err != nil {
+		t.Fatalf("create city session bead: %v", err)
+	}
+	rigStores := map[string]beads.Store{"rig-A": panickingLegStore{Store: beads.NewMemStoreFrom(100, nil, nil), panicOnList: true}}
+
+	infos, err := collectAllOpenSessionInfos("", cfg, cityStore, rigStores, nil, nil)
+
+	if err == nil || !strings.Contains(err.Error(), "panicked") {
+		t.Fatalf("err = %v, want the panicking rig leg reported as an error", err)
+	}
+	if len(infos) != 1 || infos[0].ID != cityBead.ID {
+		t.Fatalf("infos = %#v, want the city leg's session intact", infos)
+	}
+}
+
+func TestCollectAssignedWorkBeadsRecoversPanickingLeg(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		rig  panickingLegStore
+	}{
+		{name: "in-progress pass", rig: panickingLegStore{panicOnList: true}},
+		{name: "ready pass", rig: panickingLegStore{panicOnReady: true}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cityStore := beads.NewMemStore()
+			// Open, assigned and ready: no first-pass leg captures it, so the
+			// Ready pass runs over every leg and finds it in the city store.
+			work, err := cityStore.Create(beads.Bead{Title: "city work", Type: "task", Status: "open", Assignee: "worker-1"})
+			if err != nil {
+				t.Fatalf("create city work: %v", err)
+			}
+			tt.rig.Store = beads.NewMemStoreFrom(100, nil, nil)
+
+			got, _, _, _, partial := collectAssignedWorkBeadsWithStores(
+				"",
+				&config.City{Rigs: []config.Rig{{Name: "repo", Path: "/repo"}}},
+				cityStore,
+				map[string]beads.Store{"repo": tt.rig},
+				nil,
+				nil,
+			)
+
+			if !partial {
+				t.Fatal("partial = false, want the panicking rig leg reported partial")
+			}
+			if len(got) != 1 || got[0].ID != work.ID {
+				t.Fatalf("got = %#v, want the city leg's work %s intact", got, work.ID)
+			}
+		})
+	}
+}
+
+func TestCollectOpenUnassignedRoutedWorkRecoversPanickingLeg(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "repo", Path: "/repo"}},
+	}
+	cityStore := beads.NewMemStore()
+	routed, err := cityStore.Create(beads.Bead{
+		Title: "routed", Type: "task", Status: "open",
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"},
+	})
+	if err != nil {
+		t.Fatalf("create routed work: %v", err)
+	}
+	rigStores := map[string]beads.Store{"repo": panickingLegStore{Store: beads.NewMemStoreFrom(100, nil, nil), panicOnList: true}}
+	var stderr bytes.Buffer
+
+	got, _, _, partial := collectOpenUnassignedRoutedWork("", cfg, cityStore, rigStores, nil, &stderr, nil, nil)
+
+	if !partial {
+		t.Fatal("partial = false, want the panicking rig leg reported partial")
+	}
+	if len(got) != 1 || got[0].ID != routed.ID {
+		t.Fatalf("got = %#v, want the city leg's routed row %s intact", got, routed.ID)
+	}
+	if !strings.Contains(stderr.String(), "injected leg panic") {
+		t.Fatalf("stderr = %q, want the recovered panic reported", stderr.String())
+	}
+}
+
+// The second case panics on every create with one more request than there are
+// workers. A recover around the whole worker instead of each job would let every
+// worker die and leave the sender blocked on the last job.
+func TestRealizePoolDesiredSessionsRecoversPanickingCreate(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		requests    int
+		panics      int
+		wantDesired int
+	}{
+		{name: "one create panics", requests: 2, panics: 1, wantDesired: 1},
+		{name: "every create panics", requests: poolRealizeParallelism + 1, panics: poolRealizeParallelism + 1, wantDesired: 0},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &panickingPoolCreateStore{MemStore: beads.NewMemStore(), panicsRemaining: tt.panics}
+			cfg := &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Agents: []config.Agent{{
+					Name:              "worker",
+					StartCommand:      "true",
+					MinActiveSessions: intPtr(0),
+					MaxActiveSessions: intPtr(tt.requests),
+				}},
+			}
+			var stderr bytes.Buffer
+			bp := newAgentBuildParams("test-city", t.TempDir(), cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
+			bp.sessionBeads = &sessionBeadSnapshot{}
+			requests := make([]SessionRequest, tt.requests)
+			for i := range requests {
+				requests[i] = SessionRequest{Template: "worker", Tier: "new"}
+			}
+			desired := map[string]TemplateParams{}
+
+			realizePoolDesiredSessions(bp, &cfg.Agents[0], PoolDesiredState{Template: "worker", Requests: requests}, desired, &stderr)
+
+			if got := len(desired); got != tt.wantDesired {
+				t.Fatalf("desired sessions = %d, want %d; stderr=%q", got, tt.wantDesired, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "injected pool create panic") {
+				t.Fatalf("stderr = %q, want the recovered create panic reported", stderr.String())
+			}
+		})
+	}
+}
+
 func (s *delayingPoolCreateStore) Create(bead beads.Bead) (beads.Bead, error) {
 	if bead.Type == sessionBeadType {
 		s.beginSessionCreate()
@@ -6047,8 +6336,10 @@ func TestBuildDesiredState_MinZeroDefaultScaleCheckRoutedWorkCreatesPoolSession(
 	if err != nil {
 		t.Skip("jq not installed")
 	}
+	pinTestOwnedBDHome(t)
 
-	cityPath := t.TempDir()
+	cityPath := beadstest.GuardedTempDir(t)
+	registerRealBDServerStop(t, cityPath)
 	beadsDir := filepath.Join(cityPath, ".beads")
 	t.Setenv("PATH", strings.Join([]string{filepath.Dir(bdPath), filepath.Dir(jqPath), os.Getenv("PATH")}, string(os.PathListSeparator)))
 	t.Setenv("BEADS_DIR", beadsDir)
@@ -6058,9 +6349,9 @@ func TestBuildDesiredState_MinZeroDefaultScaleCheckRoutedWorkCreatesPoolSession(
 	runExternal(t, cityPath, bdPath, "init", "-p", "ct", "--skip-hooks", "-q")
 	runExternal(t, cityPath, bdPath, "config", "set", "types.custom", "session")
 
-	store := beads.NewBdStore(cityPath, beads.ExecCommandRunnerWithEnv(map[string]string{
+	store := beads.NewBdStore(cityPath, beads.ExecCommandRunnerWithEnv(beadstest.BdSubprocessEnv(map[string]string{
 		"BEADS_DIR": beadsDir,
-	}))
+	})))
 	if _, err := store.Create(beads.Bead{
 		Title:  "queued polecat work",
 		Type:   "task",
@@ -8651,8 +8942,8 @@ func TestBuildDesiredState_UsesBeadNamedPoolSessionsForScaleCheckDemand(t *testi
 	if tp.TemplateName != "worker" {
 		t.Fatalf("TemplateName = %q, want worker", tp.TemplateName)
 	}
-	if got := poolRuntimeSessionName(nil, "worker-1", "worker", true); sessionName != got {
-		t.Fatalf("session name = %q, want the transient slot's identity-derived runtime name %q", sessionName, got)
+	if !strings.HasPrefix(sessionName, "worker-") || sessionName == poolRuntimeSessionName(nil, "worker-1", "worker", true) {
+		t.Fatalf("session name = %q, want a bead-scoped worker-<beadID> runtime name", sessionName)
 	}
 
 	sessionBeads, err := store.ListByLabel(sessionBeadLabel, 0)
@@ -10931,10 +11222,9 @@ func TestSelectOrCreatePoolSessionBeadPicksEarliestReusableSingletonCandidate(t 
 
 // TestSelectOrCreateDependencyPoolSessionBead_BlocksWhenConcreteAliasTaken:
 // a manual session holding "claude-1" as its alias owns that handle, so the
-// pool slot whose identity derives the same runtime name cannot have it. The
-// create fails closed and retries next tick against the same name rather than
-// minting a bead-ID-scoped sibling box (ga-vcjr9). The operator sees the
-// holder named in the error.
+// pool slot whose identity derives the same name cannot have it. The create
+// fails closed and retries next tick rather than minting a sibling box beside
+// the holder (ga-vcjr9). The operator sees the holder named in the error.
 func TestSelectOrCreateDependencyPoolSessionBead_BlocksWhenConcreteAliasTaken(t *testing.T) {
 	store := beads.NewMemStore()
 	if _, err := store.Create(beads.Bead{
@@ -12524,17 +12814,7 @@ func TestBuildDesiredState_ClassBoundRigRootedControlWorkWithoutRigDispatcherIsN
 		t.Fatalf("create control: %v", err)
 	}
 
-	maxActive := 1
-	cfg := &config.City{
-		Workspace: config.Workspace{Name: "test-city"},
-		Rigs:      []config.Rig{{Name: "fixture", Path: t.TempDir()}},
-		Agents: []config.Agent{{
-			Name:              config.ControlDispatcherAgentName,
-			BindingName:       "core",
-			StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
-			MaxActiveSessions: &maxActive,
-		}},
-	}
+	cfg := cityOnlyDispatcherFixtureConfig(t)
 	var stderr bytes.Buffer
 	result := buildDesiredStateWithSessionBeads(
 		"test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), binding,
@@ -12563,6 +12843,252 @@ func TestBuildDesiredState_ClassBoundRigRootedControlWorkWithoutRigDispatcherIsN
 	bindingRef := string(storeref.ClassRef(wholeSplitClasses()))
 	if !strings.Contains(diag, bindingRef) || !strings.Contains(diag, `rig "fixture"`) {
 		t.Fatalf("stderr = %q, want the diagnostic to name the class binding %s and the owning rig", diag, bindingRef)
+	}
+}
+
+// TestBuildDesiredState_ReportsControlDispatcherScopeGapForRigRootedWork is the
+// counted-signal half of the missing-dispatcher arm above: the same rig-rooted
+// row the binding serves, in a city that configures only a city dispatcher,
+// must also leave a machine-readable summary on the result so the reconciler
+// can turn it into ONE event per scope instead of one stderr line per scope per
+// tick that nobody reads (ga-oytw9 took 26h and 600+ identical lines to find by
+// hand). SuppressedCount is what the stderr line cannot say: it names one bead,
+// so a single stuck row and a hundred read identically.
+func TestBuildDesiredState_ReportsControlDispatcherScopeGapForRigRootedWork(t *testing.T) {
+	cityPath := t.TempDir()
+	work := beads.NewMemStore()
+	binding := beads.NewMemStore()
+	routes := splitRoutes(binding)
+	registerResidencyRoutes(cityPath, routes, func() beads.Store { return work })
+	t.Cleanup(func() { unregisterResidencyRoutes(cityPath, routes) })
+
+	control, err := binding.Create(beads.Bead{
+		Title:  "Finalize rig workflow",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:         beadmeta.KindWorkflowFinalize,
+			beadmeta.RoutedToMetadataKey:     "fixture/core.control-dispatcher",
+			beadmeta.RootStoreRefMetadataKey: "rig:fixture",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create control: %v", err)
+	}
+
+	result := buildDesiredStateWithSessionBeads(
+		"test-city", cityPath, time.Now().UTC(), cityOnlyDispatcherFixtureConfig(t), runtime.NewFake(), binding,
+		map[string]beads.Store{"fixture": beads.NewMemStore()}, newSessionBeadSnapshot(nil), nil, io.Discard,
+	)
+
+	if len(result.ControlDispatcherScopeGaps) != 1 {
+		t.Fatalf("scope gaps = %+v, want exactly one for the rig with no dispatcher", result.ControlDispatcherScopeGaps)
+	}
+	gap := result.ControlDispatcherScopeGaps[0]
+	if gap.RigContext != "fixture" {
+		t.Fatalf("gap rig context = %q, want fixture (the scope that owns the row, not the leg it was read through)", gap.RigContext)
+	}
+	if gap.SuppressedCount != 1 {
+		t.Fatalf("gap suppressed count = %d, want 1", gap.SuppressedCount)
+	}
+	if gap.SampleBeadID != control.ID {
+		t.Fatalf("gap sample bead = %q, want %q", gap.SampleBeadID, control.ID)
+	}
+	bindingRef := string(storeref.ClassRef(wholeSplitClasses()))
+	if gap.StoreRef != bindingRef {
+		t.Fatalf("gap store ref = %q, want the binding leg %q", gap.StoreRef, bindingRef)
+	}
+	if !strings.Contains(gap.ScopeLabel, bindingRef) || !strings.Contains(gap.ScopeLabel, `rig "fixture"`) {
+		t.Fatalf("gap scope label = %q, want it to name the class binding %s and the owning rig", gap.ScopeLabel, bindingRef)
+	}
+}
+
+// TestBuildDesiredState_ClassBoundScopeGapRowDoesNotWakeCityDispatcher is the
+// demand half of the scope-gap arm on the binding topology (mc-zndi7.41). The
+// row is rig-rooted, the rig has no dispatcher, and its durable route names the
+// CITY dispatcher (the #3765 shape). The repair suppresses it from the
+// collected snapshot and reports the gap, but the default scale_check probe
+// re-reads Ready from the binding, which is also the city dispatcher's probe
+// target, and so it saw the stale route. The city dispatcher was then desired
+// for a row the gap event called suppressed, and its serve query (by route, no
+// scope filter) would run the finalize cross-scope.
+func TestBuildDesiredState_ClassBoundScopeGapRowDoesNotWakeCityDispatcher(t *testing.T) {
+	cityPath := t.TempDir()
+	work := beads.NewMemStore()
+	binding := beads.NewMemStore()
+	routes := splitRoutes(binding)
+	registerResidencyRoutes(cityPath, routes, func() beads.Store { return work })
+	t.Cleanup(func() { unregisterResidencyRoutes(cityPath, routes) })
+
+	control, err := binding.Create(beads.Bead{
+		Title:  "Finalize rig workflow",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:         beadmeta.KindWorkflowFinalize,
+			beadmeta.RoutedToMetadataKey:     "core.control-dispatcher",
+			beadmeta.RootStoreRefMetadataKey: "rig:fixture",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create control: %v", err)
+	}
+
+	result := buildDesiredStateWithSessionBeads(
+		"test-city", cityPath, time.Now().UTC(), cityOnlyDispatcherFixtureConfig(t), runtime.NewFake(), binding,
+		map[string]beads.Store{"fixture": beads.NewMemStore()}, newSessionBeadSnapshot(nil), nil, io.Discard,
+	)
+
+	if len(result.ControlDispatcherScopeGaps) != 1 || result.ControlDispatcherScopeGaps[0].SampleBeadID != control.ID {
+		t.Fatalf("scope gaps = %+v, want exactly one naming %s", result.ControlDispatcherScopeGaps, control.ID)
+	}
+	if got := result.ScaleCheckCounts["core.control-dispatcher"]; got != 0 {
+		t.Fatalf("city dispatcher demand = %d, want 0 for a row the repair suppressed", got)
+	}
+	for _, desired := range result.State {
+		if desired.TemplateName == "core.control-dispatcher" {
+			t.Fatalf("desired state woke the city dispatcher for a suppressed scope-gap row: %+v", desired)
+		}
+	}
+}
+
+// TestBuildDesiredState_ClassBoundDeferredRouteRepairDoesNotWakeStaleDispatcher
+// is the deferred-repair arm of the same rule: the rig HAS a dispatcher, but
+// the repair write fails, so the row keeps its stale city route this tick. The
+// repair suppresses it from the collected snapshot until the write lands; the
+// probe must not count it for the city dispatcher the stale route names.
+func TestBuildDesiredState_ClassBoundDeferredRouteRepairDoesNotWakeStaleDispatcher(t *testing.T) {
+	cityPath := t.TempDir()
+	work := beads.NewMemStore()
+	binding := routeRepairUpdateFailStore{Store: beads.NewMemStore(), err: errors.New("route repair write failed")}
+	routes := splitRoutes(binding)
+	registerResidencyRoutes(cityPath, routes, func() beads.Store { return work })
+	t.Cleanup(func() { unregisterResidencyRoutes(cityPath, routes) })
+
+	if _, err := binding.Create(beads.Bead{
+		Title:  "Finalize rig workflow",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:         beadmeta.KindWorkflowFinalize,
+			beadmeta.RoutedToMetadataKey:     "core.control-dispatcher",
+			beadmeta.RootStoreRefMetadataKey: "rig:fixture",
+		},
+	}); err != nil {
+		t.Fatalf("create control: %v", err)
+	}
+
+	result := buildDesiredStateWithSessionBeads(
+		"test-city", cityPath, time.Now().UTC(), classBindingDispatcherFixtureConfig(t), runtime.NewFake(), binding,
+		map[string]beads.Store{"fixture": beads.NewMemStore()}, newSessionBeadSnapshot(nil), nil, io.Discard,
+	)
+
+	if len(result.ControlDispatcherScopeGaps) != 0 {
+		t.Fatalf("scope gaps = %+v, want none: the rig has a dispatcher", result.ControlDispatcherScopeGaps)
+	}
+	if got := result.ScaleCheckCounts["core.control-dispatcher"]; got != 0 {
+		t.Fatalf("city dispatcher demand = %d, want 0 for a rig-rooted row whose route repair was deferred", got)
+	}
+	for _, desired := range result.State {
+		if desired.TemplateName == "core.control-dispatcher" {
+			t.Fatalf("desired state woke the city dispatcher for a deferred rig-rooted row: %+v", desired)
+		}
+	}
+}
+
+// One scope with many suppressed rows is ONE gap carrying the count — the
+// per-row emission this replaces is exactly what made the condition invisible.
+func TestRepairControlDispatcherRoutesCountsSuppressedRowsPerScope(t *testing.T) {
+	maxActive := 1
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "fixture", Path: t.TempDir()}},
+		Agents: []config.Agent{{
+			Name:              config.ControlDispatcherAgentName,
+			BindingName:       "core",
+			StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+			MaxActiveSessions: &maxActive,
+		}},
+	}
+	newControl := func(id string) beads.Bead {
+		return beads.Bead{
+			ID: id, Type: "task", Status: "open", Metadata: map[string]string{
+				beadmeta.KindMetadataKey:         beadmeta.KindWorkflowFinalize,
+				beadmeta.RoutedToMetadataKey:     "fixture/core.control-dispatcher",
+				beadmeta.RootStoreRefMetadataKey: "rig:fixture",
+			},
+		}
+	}
+	work := []beads.Bead{newControl("control-1"), newControl("control-2")}
+	store := beads.NewMemStore()
+
+	gaps := repairControlDispatcherRoutesForStoreScope(
+		t.Name(),
+		cfg,
+		work,
+		[]beads.Store{store, store},
+		[]string{"rig:fixture", "rig:fixture"},
+		io.Discard,
+	)
+
+	if len(gaps) != 1 {
+		t.Fatalf("scope gaps = %+v, want one entry for the one scope with no dispatcher", gaps)
+	}
+	if gaps[0].SuppressedCount != 2 {
+		t.Fatalf("suppressed count = %d, want 2 (both rows of the same scope)", gaps[0].SuppressedCount)
+	}
+	if gaps[0].ScopeLabel != `rig store "fixture"` {
+		t.Fatalf("scope label = %q, want the same text the stderr diagnostic prints", gaps[0].ScopeLabel)
+	}
+}
+
+// A scope whose dispatcher IS configured is not a gap: nothing was suppressed,
+// so an alert on this event stays quiet on a healthy city.
+func TestRepairControlDispatcherRoutesReportsNoScopeGapWhenDispatcherIsConfigured(t *testing.T) {
+	maxActive := 1
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "fixture", Path: t.TempDir()}},
+		Agents: []config.Agent{{
+			Name:              config.ControlDispatcherAgentName,
+			BindingName:       "core",
+			Dir:               "fixture",
+			StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+			MaxActiveSessions: &maxActive,
+		}},
+	}
+	work := []beads.Bead{{
+		ID: "control-1", Type: "task", Status: "open", Metadata: map[string]string{
+			beadmeta.KindMetadataKey:         beadmeta.KindWorkflowFinalize,
+			beadmeta.RoutedToMetadataKey:     "core.control-dispatcher",
+			beadmeta.RootStoreRefMetadataKey: "rig:fixture",
+		},
+	}}
+
+	gaps := repairControlDispatcherRoutesForStoreScope(
+		t.Name(), cfg, work, []beads.Store{beads.NewMemStore()}, []string{"rig:fixture"}, io.Discard,
+	)
+
+	if len(gaps) != 0 {
+		t.Fatalf("scope gaps = %+v, want none when the owning scope has a dispatcher", gaps)
+	}
+}
+
+// cityOnlyDispatcherFixtureConfig is the one-dispatcher city the
+// missing-dispatcher class-binding tests share: a city dispatcher and a rig
+// "fixture" that configures none.
+func cityOnlyDispatcherFixtureConfig(t *testing.T) *config.City {
+	t.Helper()
+	maxActive := 1
+	return &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "fixture", Path: t.TempDir()}},
+		Agents: []config.Agent{{
+			Name:              config.ControlDispatcherAgentName,
+			BindingName:       "core",
+			StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+			MaxActiveSessions: &maxActive,
+		}},
 	}
 }
 
@@ -12877,6 +13403,8 @@ func TestCollectOpenUnassignedRoutedWorkKeepsSameIDAcrossStoreScopes(t *testing.
 		map[string]beads.Store{"city": rigStore},
 		nil,
 		io.Discard,
+		nil,
+		nil,
 	)
 	if len(work) != 2 {
 		t.Fatalf("collected work count = %d, want both same-ID rows from independent stores", len(work))
@@ -12945,6 +13473,8 @@ func TestCollectOpenUnassignedRoutedWorkReportsCanonicalStoreRefs(t *testing.T) 
 		map[string]beads.Store{"fixture": listFailStore{Store: beads.NewMemStore()}},
 		nil,
 		&stderr,
+		nil,
+		nil,
 	)
 	for _, want := range []string{"city:test-city: List(open)", "rig:fixture: List(open)"} {
 		if !strings.Contains(stderr.String(), want) {
@@ -13876,74 +14406,6 @@ func TestBuildDesiredState_AsleepNamedAliasHolderStaysSingle(t *testing.T) {
 	// pool standby (alias empty because it lost the alias-acquisition race).
 	if mayorEntries[0].ConfiguredNamedIdentity != "gastown.mayor" {
 		t.Fatalf("retained entry is not the named alias-holder: %+v", mayorEntries[0])
-	}
-}
-
-// TestBuildDesiredStateRecordsDemandSubPhases verifies the sub-phase operation
-// records emitted inside buildDesiredStateWithSessionBeads (sr-5rz /
-// gastownhall/gascity#2463): the aggregate load_demand_snapshot tick phase
-// regularly dominates the controller cycle, and these records are what make
-// its internal split (collection reads vs demand probes vs scale_check execs)
-// attributable from a trace instead of requiring an instrumented rebuild.
-func TestBuildDesiredStateRecordsDemandSubPhases(t *testing.T) {
-	// The non-tick path passes no trace; the recorder must be nil-safe.
-	recordDemandSubPhase(nil, "demand_snapshot.collect_open_session_beads", time.Now(), nil)
-
-	cityDir := t.TempDir()
-	tracer := newSessionReconcilerTracer(cityDir, "trace-town", io.Discard)
-	if !tracer.Enabled() {
-		t.Fatal("tracer should be enabled")
-	}
-	cycle := tracer.BeginCycle(TraceTickTriggerPatrol, "", time.Now().UTC(), &config.City{})
-	if cycle == nil {
-		t.Fatal("BeginCycle returned nil")
-	}
-
-	store := beads.NewMemStore()
-	sessionSnapshot, err := loadSessionBeadSnapshot(store)
-	if err != nil {
-		t.Fatalf("load session snapshot: %v", err)
-	}
-	var stderr strings.Builder
-	buildDesiredStateWithSessionBeads(
-		"trace-town", cityDir, time.Now().UTC(), &config.City{}, runtime.NewFake(),
-		store, nil, sessionSnapshot, cycle, &stderr,
-	)
-
-	if err := cycle.End(TraceCompletionCompleted, map[string]any{}); err != nil {
-		t.Fatalf("End: %v", err)
-	}
-	if err := tracer.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-
-	records, err := ReadTraceRecords(traceCityRuntimeDir(cityDir), TraceFilter{})
-	if err != nil {
-		t.Fatalf("ReadTraceRecords: %v", err)
-	}
-	// Sub-phases that must fire on every store-backed build, even with an
-	// empty config (the scale/named demand probes only fire with matching
-	// agents, so they are intentionally not asserted here).
-	want := map[string]bool{
-		"demand_snapshot.collect_open_session_beads": false,
-		"demand_snapshot.collect_assigned_work":      false,
-		"demand_snapshot.collect_unassigned_routed":  false,
-		"demand_snapshot.evaluate_pending_pools":     false,
-	}
-	for i := range records {
-		r := &records[i]
-		if r.RecordType != TraceRecordOperation || r.SiteCode != TraceSiteDemandSnapshot {
-			continue
-		}
-		name, _ := r.Fields["operation_name"].(string)
-		if _, tracked := want[name]; tracked {
-			want[name] = true
-		}
-	}
-	for name, seen := range want {
-		if !seen {
-			t.Errorf("missing demand sub-phase operation record %q", name)
-		}
 	}
 }
 

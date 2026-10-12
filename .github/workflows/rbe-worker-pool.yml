@@ -1,0 +1,144 @@
+# OSS remote-execution worker pool on Blacksmith (farm v2, infra
+# docs/architecture/rbe-farm-west-v0.md). Dispatched by the rbe-west pool
+# scaler: each run is one NativeLink worker for rbe-west's OSS scheduler that
+# retires itself after idle_minutes with nothing in flight (or at max_minutes),
+# draining first.
+#
+# Blacksmith donates this compute for workflows of our OSS repos only. These
+# workers register with the OSS scheduler (dedicated rbe-oss-worker cert);
+# developer and agent builds use the default instance and never run here.
+name: rbe-worker-pool
+
+on:
+  workflow_dispatch:
+    inputs:
+      idle_minutes:
+        description: Retire after this many minutes with no action in flight
+        default: "15"
+        type: string
+      max_minutes:
+        description: Retire after this many minutes regardless (recycles the VM)
+        default: "300"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  worker:
+    name: rbe pool worker (Blacksmith, OSS scheduler)
+    # Default branch only. (A Blacksmith sticky disk for a warm worker cache
+    # needs useblacksmith/stickydisk in this repo's allowed-actions list;
+    # blacksmith-worker.sh takes it via CACHE_DIR.)
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: blacksmith-32vcpu-ubuntu-2404
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          # No GITHUB_TOKEN in .git/config: remote actions run on this runner (S11.3).
+          persist-credentials: false
+      # worker-env (tools/rbe/worker-env-drift): provision and measure this
+      # host against the pin before serving. Drift fails this step, never the
+      # worker: a drifted worker still registers (advertising what it
+      # measured) and serves the pool's actions that send no worker-env
+      # (beads). The upload is what await-drift reports from.
+      - name: Measure this host against the worker-env pin
+        id: worker-env
+        continue-on-error: true
+        env:
+          WORKER_MODE: measure
+        run: tools/rbe/blacksmith-worker.sh
+      - name: Upload the worker-env drift
+        if: steps.worker-env.outcome == 'failure'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: worker-env-drift
+          path: ${{ runner.temp }}/worker-env-drift
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: NativeLink worker until idle or max age
+        env:
+          RBE_WORKER_TLS_CERT: ${{ secrets.RBE_WORKER_TLS_CERT }}
+          RBE_WORKER_TLS_KEY: ${{ secrets.RBE_WORKER_TLS_KEY }}
+          RBE_WEST_HOST: ${{ secrets.RBE_WEST_HOST }}
+          WORKER_MODE: pool
+          POOL_IDLE_MINUTES: ${{ inputs.idle_minutes }}
+          POOL_MAX_MINUTES: ${{ inputs.max_minutes }}
+          WORKER_NAME: gha-pool-${{ github.event.repository.name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          # Actions run as per-action slot users, away from the worker key and
+          # this step's environment (S11.3). Rollback: set the repository
+          # variable RBE_ACTION_ISOLATION to 0; the next dispatch runs actions
+          # as the runner user again. canary: the workers of one run in
+          # RBE_ACTION_CANARY_EVERY (by GITHUB_RUN_ID) try isolation and, if it
+          # fails, warn and run as 0 instead of exiting; the others run as 0.
+          RBE_ACTION_ISOLATION: ${{ vars.RBE_ACTION_ISOLATION || '1' }}
+          RBE_ACTION_CANARY_EVERY: ${{ vars.RBE_ACTION_CANARY_EVERY || '4' }}
+          # REAPI compressed-blobs (zstd) fetches for blobs of 64 KiB or more:
+          # about a quarter of the bytes on the wire for test binaries and
+          # archives. Uploads stay identity. Set RBE_WIRE_ZSTD=1 together with
+          # RBE_WIRE_ZSTD_READ_URL=grpcs://rbe-zread.ops.gascity.com:443 (the
+          # dedicated read-only zstd host; the worker refuses to start with the
+          # switch on and no zread URL). Rollback: RBE_WIRE_ZSTD=0, and the
+          # next dispatch fetches identity again; for an emergency also cancel
+          # the running pool runs, which keep their store until they retire.
+          RBE_WIRE_ZSTD: ${{ vars.RBE_WIRE_ZSTD || '0' }}
+          RBE_WIRE_ZSTD_READ_URL: ${{ vars.RBE_WIRE_ZSTD_READ_URL || '' }}
+        run: tools/rbe/blacksmith-worker.sh
+
+  # Beside the worker, which serves for hours: wait for its drift upload to
+  # complete, so drift is reported while the worker still runs. GitHub-hosted,
+  # no token beyond reading this run's jobs.
+  await-drift:
+    name: worker-env drift watch
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      drift: ${{ steps.await.outputs.drift }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - name: Wait for the worker's measurement
+        id: await
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: tools/rbe/worker-env-drift await "rbe pool worker (Blacksmith, OSS scheduler)" "Upload the worker-env drift"
+
+  # The pinned host's drift issue: opened with the manifest and pin to commit,
+  # or updated with a new measurement. The farm caps the pools while it is
+  # open. The only job with issues: write, off the worker VM; one at a time
+  # across workflows, so no duplicate issues.
+  report-drift:
+    name: worker-env drift report
+    needs: await-drift
+    if: needs.await-drift.outputs.drift == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    concurrency:
+      group: rbe-worker-env-drift-report
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - name: Download the worker-env drift
+        id: drift
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: worker-env-drift
+          path: ${{ runner.temp }}/worker-env-drift
+      - name: Open or update the drift issue
+        if: steps.drift.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: tools/rbe/worker-env-drift report "$RUNNER_TEMP/worker-env-drift"

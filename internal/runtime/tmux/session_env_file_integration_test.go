@@ -111,6 +111,31 @@ func TestSecretEnvIsAbsentFromProcCmdline(t *testing.T) {
 		t.Errorf("process in the session did not inherit the value (len %d, want %d)", len(body), len(secret))
 	}
 
+	// SetEnvironment (the SetMeta backend) stages secret values the same way.
+	// The staged path must leave tmux holding exactly what the argv path would
+	// for the same hostile value, so set it once through each (GC_RIG is
+	// argv-safe, GC_INSTANCE_TOKEN is not) and compare tmux's own readback —
+	// show-environment re-escapes some characters, so raw equality with the
+	// input is not the contract; equivalence with the argv path is.
+	metaValue := fmt.Sprintf("gc-argv-meta-canary-%d 'q' \"d\" $HOME #{session_name} ; \\ \nline2", stamp)
+	if err := secretTm.SetEnvironment("gcargvsec", "GC_RIG", metaValue); err != nil {
+		t.Fatalf("SetEnvironment(argv path): %v", err)
+	}
+	if err := secretTm.SetEnvironment("gcargvsec", "GC_INSTANCE_TOKEN", metaValue); err != nil {
+		t.Fatalf("SetEnvironment(staged path): %v", err)
+	}
+	viaArgv, err := secretTm.GetEnvironment("gcargvsec", "GC_RIG")
+	if err != nil {
+		t.Fatalf("GetEnvironment(GC_RIG): %v", err)
+	}
+	viaFile, err := secretTm.GetEnvironment("gcargvsec", "GC_INSTANCE_TOKEN")
+	if err != nil {
+		t.Fatalf("GetEnvironment(GC_INSTANCE_TOKEN): %v", err)
+	}
+	if viaFile != viaArgv || !strings.Contains(viaFile, "gc-argv-meta-canary-") {
+		t.Errorf("staged SetEnvironment diverged from the argv path (len %d vs %d)", len(viaFile), len(viaArgv))
+	}
+
 	// No staged directory may outlive the call that needed it.
 	if leftovers := stagedDirs(t); len(leftovers) != 0 {
 		t.Errorf("staged directories survived session creation: %v", leftovers)

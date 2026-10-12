@@ -199,10 +199,20 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 	sp := s.state.SessionProvider()
 	cityName := s.state.CityName()
 	sessTmpl := cfg.Workspace.SessionTemplate
-	sessionSnapshot := s.statusSessionSnapshot(ctx)
-	partialErrors := append([]string(nil), sessionSnapshot.partialErrors...)
-
 	citySt, _ := suspensionstate.Load(fsys.OSFS{}, s.state.CityPath())
+	// A suspended city's bead stores are not read: a read restarts the
+	// retired bd proxy the controller just stopped, and an open dashboard
+	// polling this would cycle it. The body says so (StoresNotRead) and
+	// carries no work, mail, session-count or store-health figures.
+	citySuspended := suspensionstate.EffectiveCitySuspended(citySt, cfg.Workspace.EffectiveSuspendedOnStart())
+	sessionSnapshot := statusSessionSnapshot{
+		bySessionName: make(map[string]statusSessionInfo),
+		byTemplate:    make(map[string][]statusSessionInfo),
+	}
+	if !citySuspended {
+		sessionSnapshot = s.statusSessionSnapshot(ctx)
+	}
+	partialErrors := append([]string(nil), sessionSnapshot.partialErrors...)
 
 	// Count agents by state and collect per-agent detail rows in a single
 	// pass. Pool expansion emits one detail row per instance with a
@@ -214,8 +224,7 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 	suspendedRigs := make(map[string]bool, len(cfg.Rigs))
 	// cacheColdRigs mirrors the controller's per-rig cache refresh gate
 	// (rigStoreBackgroundRefresh): a rig suspended by EFFECTIVE state gets no
-	// async full prime and no reconciler, so its cache never reaches live and
-	// the cache-only Ready projection can never answer. It is deliberately not
+	// cache at all, and status does not read its store (statusWorkCounts). It is deliberately not
 	// the same set as suspendedRigs, which grows below to include rigs merely
 	// inferred suspended because every one of their agents is — those keep a
 	// refreshing cache and must still be asked for ready work.
@@ -231,7 +240,10 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 	// Active graph-resident work, indexed once per request by agent session
 	// name. On a single-store city this is nil, so every lookup below misses
 	// and the counts stay byte-identical to the provider-only behavior.
-	graphWork := s.graphActiveWorkBySession()
+	var graphWork map[string]graphAgentWork
+	if !citySuspended {
+		graphWork = s.graphActiveWorkBySession()
+	}
 	for _, a := range cfg.Agents {
 		rigName := workdirutil.ConfiguredRigName(s.state.CityPath(), a, cfg.Rigs)
 		scope := "city"
@@ -248,7 +260,7 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 			if rigName != "" {
 				perRigAgentTotals[rigName]++
 			}
-			sessName := agentSessionName(cityName, ea.qualifiedName, sessTmpl)
+			sessName := statusRuntimeSessionName(cityName, sessTmpl, ea.qualifiedName, groupName, sessionSnapshot)
 			info, hasInfo := sessionSnapshot.bySessionName[sessName]
 			running := statusProviderRunning(sp, sessName)
 			// An agent whose work runs under a relocated-graph wisp session is
@@ -329,7 +341,7 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 	// Count work items (best-effort). Skipped in lite mode: querying every
 	// rig store is one of the per-request costs the lite poll avoids.
 	var wc workCounts
-	if !lite {
+	if !lite && !citySuspended {
 		var workErrs []string
 		wc, workErrs = s.statusWorkCounts(ctx, cacheColdRigs)
 		partialErrors = append(partialErrors, workErrs...)
@@ -338,7 +350,11 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 	// Count mail (best-effort).
 	var mc mailCounts
 	seenProvs := make(map[string]bool)
-	for _, mp := range s.state.MailProviders() {
+	mailProviders := s.state.MailProviders()
+	if citySuspended {
+		mailProviders = nil
+	}
+	for _, mp := range mailProviders {
 		key := fmt.Sprintf("%p", mp)
 		if seenProvs[key] {
 			continue
@@ -381,7 +397,7 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 	// StoreHealth carries a full closed-history Dolt row scan (behind its
 	// sub-cache). Omitted in lite mode so a cold lite poll never triggers it.
 	var storeHealth *StatusStoreHealth
-	if !lite {
+	if !lite && !citySuspended {
 		var err error
 		storeHealth, err = s.cachedStoreHealth(ctx, time.Now())
 		if err != nil {
@@ -396,7 +412,8 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 		DoltVersion:         versions.Dolt,
 		BeadsVersion:        versions.Beads,
 		UptimeSec:           uptime,
-		Suspended:           suspensionstate.EffectiveCitySuspended(citySt, cfg.Workspace.EffectiveSuspendedOnStart()),
+		Suspended:           citySuspended,
+		StoresNotRead:       citySuspended,
 		AgentCount:          ac.Total,
 		RigCount:            rc.Total,
 		Running:             rawRunning,
@@ -693,12 +710,13 @@ type statusWorkResult struct {
 // by design (see cacheColdRigs below), which is the opposite of the graph leg's
 // fail-loud contract, so wiring one in is its own slice, not a rider.
 //
-// Rigs in cacheColdRigs are asked for persisted counts but not for ready work.
-// Their store runs no background cache refresh, so the cache-only Ready
-// projection is guaranteed to decline with ErrCacheUnavailable — reporting that
-// as a partial error made every city with a suspended rig permanently partial,
-// which greys out unrelated status tiles in the dashboard. Skipping the read
-// changes no count: the failing read already contributed zero ready work.
+// Rigs in cacheColdRigs (suspended rigs) are not asked at all. Their store
+// runs no cache, so every read would go to bd, and a bd read restarts a
+// suspended rig's retired proxy and Dolt; gc leaves a suspended scope
+// untouched. Their open and in-progress work is therefore not in the counts.
+// The cache-only Ready projection would decline for them anyway — reporting
+// that as a partial error made every city with a suspended rig permanently
+// partial, which greys out unrelated status tiles in the dashboard.
 func (s *Server) statusWorkCounts(ctx context.Context, cacheColdRigs map[string]bool) (workCounts, []string) {
 	stores := s.state.BeadStores()
 	// sortedRigNames deduplicates rigs sharing one store instance, so each
@@ -719,12 +737,17 @@ func (s *Server) statusWorkCounts(ctx context.Context, cacheColdRigs map[string]
 		})
 	}
 	cityName := s.state.CityName()
+	excluded := 0
 	for _, rigName := range rigNames {
+		if cacheColdRigs[rigName] {
+			excluded++
+			continue
+		}
 		queries = append(queries, workQuery{
 			label:         "rig " + rigName,
 			store:         stores[rigName],
 			includeStored: true,
-			includeReady:  rigName != cityName && !cacheColdRigs[rigName],
+			includeReady:  rigName != cityName,
 		})
 	}
 
@@ -761,6 +784,7 @@ func (s *Server) statusWorkCounts(ctx context.Context, cacheColdRigs map[string]
 		}
 		errs = append(errs, r.errs...)
 	}
+	wc.SuspendedRigsExcluded = excluded
 	return wc, errs
 }
 
@@ -1086,6 +1110,63 @@ func statusSessionStateInfo(info session.Info) session.State {
 	default:
 		return state
 	}
+}
+
+// statusRuntimeSessionName resolves the runtime session name an expanded agent
+// actually runs under.
+//
+// The canonical derivation (agent.SessionNameFor) is not the only name a
+// session may legitimately hold. An unaliased pool instance runs under a
+// bead-scoped name (<template>-<beadID>, PoolSessionName), and rows minted by
+// pre-release builds may carry a "-pool" step-aside name (poolRuntimeSessionName
+// in cmd/gc/session_name_lookup.go). Both are recorded on the session bead and
+// cannot be re-derived from the agent identity, so a status path that only
+// derives the canonical name reports a live seat as not running.
+//
+// Resolution order, strongest evidence first:
+//  1. a session bead sitting on the canonical name — today's behavior, kept
+//     exactly so canonically named sessions are unaffected;
+//  2. a session bead whose recorded agent identity IS this instance;
+//  3. for a single-instance identity, the one session bead recorded against
+//     it as template.
+//
+// Anything ambiguous falls back to the canonical name rather than guessing.
+func statusRuntimeSessionName(cityName, sessTmpl, qualifiedName, groupName string, snapshot statusSessionSnapshot) string {
+	canonical := agentSessionName(cityName, qualifiedName, sessTmpl)
+	if _, ok := snapshot.bySessionName[canonical]; ok {
+		return canonical
+	}
+
+	candidates := snapshot.byTemplate[qualifiedName]
+	if groupName != "" && groupName != qualifiedName {
+		candidates = append(append([]statusSessionInfo(nil), candidates...), snapshot.byTemplate[groupName]...)
+	}
+
+	// (2) an explicit per-instance identity match is unambiguous.
+	for _, info := range candidates {
+		if info.agentName != "" && info.agentName == qualifiedName && info.sessionName != "" {
+			return info.sessionName
+		}
+	}
+
+	// (3) a session recorded against this identity as its template, with no
+	// competing sibling. Deterministic by construction: more than one
+	// candidate means the pool has instances we cannot tell apart here, so
+	// the canonical name is the honest answer.
+	var only string
+	for _, info := range snapshot.byTemplate[qualifiedName] {
+		if info.sessionName == "" {
+			continue
+		}
+		if only != "" && only != info.sessionName {
+			return canonical
+		}
+		only = info.sessionName
+	}
+	if only != "" {
+		return only
+	}
+	return canonical
 }
 
 func statusProviderRunning(sp interface{ IsRunning(string) bool }, sessionName string) bool {

@@ -216,7 +216,7 @@ func HandleInbound(ctx context.Context, deps InboundDeps, key AdapterKey, payloa
 	}
 
 	// Step 6: Emit event.
-	// Wake is handled by the caller (HTTP handler calls state.Poke()).
+	// Wake is handled by the caller (HTTP handler calls state.Enqueue()).
 	// Sessions discover unread entries via gc transcript check --inject.
 	if deps.EmitEvent != nil {
 		deps.EmitEvent(events.ExtMsgInbound, result.targetSubject(), InboundEventPayload{

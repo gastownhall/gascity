@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"strconv"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	beadslib "github.com/steveyegge/beads"
 )
 
@@ -14,12 +17,16 @@ var (
 	_ AtomicConditionalCloser          = (*NativeDoltStore)(nil)
 	_ MetadataCASWriter                = (*NativeDoltStore)(nil)
 	_ conditionalWriteCapabilityProber = (*NativeDoltStore)(nil)
+	_ conditionalLabelsGuard           = (*NativeDoltStore)(nil)
 )
 
 // CloseWithMetadataIfMatch merges metadata and closes id inside one native
 // transaction, but only while the exact opaque row version still matches.
 // It returns the final in-transaction row only after the transaction commits.
 func (s *NativeDoltStore) CloseWithMetadataIfMatch(id string, expectedRevision int64, metadata map[string]string) (Bead, error) {
+	if err := s.readOnlyGuard(); err != nil {
+		return Bead{}, err
+	}
 	storage, release, err := s.acquireStorage()
 	if err != nil {
 		return Bead{}, err
@@ -98,10 +105,18 @@ func (s *NativeDoltStore) probeConditionalWriteCapability() (bool, string) {
 	return true, "native beads backend exposes row-version checked writes and transactions"
 }
 
+// conditionalLabelsGuarded reports that UpdateIfMatch applies labels in the
+// transaction that checks the row version, and moves the version with them
+// (updateLabelsIfMatch).
+func (s *NativeDoltStore) conditionalLabelsGuarded() bool { return true }
+
 // UpdateIfMatch applies row-backed opts only while id still has
 // expectedRevision.
 func (s *NativeDoltStore) UpdateIfMatch(id string, expectedRevision int64, opts UpdateOpts) error {
-	if err := validateConditionalUpdateOpts(opts); err != nil {
+	if err := s.readOnlyGuard(); err != nil {
+		return err
+	}
+	if err := validateConditionalUpdateOpts(opts, s.conditionalLabelsGuarded()); err != nil {
 		return fmt.Errorf("conditional update %s: %w", id, err)
 	}
 	storage, release, err := s.acquireStorage()
@@ -109,6 +124,9 @@ func (s *NativeDoltStore) UpdateIfMatch(id string, expectedRevision int64, opts 
 		return err
 	}
 	defer release()
+	if len(opts.Labels) > 0 || len(opts.RemoveLabels) > 0 {
+		return s.updateLabelsIfMatch(storage, id, expectedRevision, opts)
+	}
 	ctx, cancel := nativeDoltOperationContext(context.TODO())
 	defer cancel()
 
@@ -132,8 +150,65 @@ func (s *NativeDoltStore) UpdateIfMatch(id string, expectedRevision int64, opts 
 	return s.conditionalWriteError(ctx, storage, id, expectedRevision, err)
 }
 
+// updateLabelsIfMatch is UpdateIfMatch for opts that carry labels: one
+// transaction checks the row version, then applies the row fields and the
+// label writes. Upstream label writes touch only the label and event tables
+// (wisp_labels and wisp_events for a wisp), which leave the row version where
+// it was, so the transaction also advances beadmeta.LabelRevisionMetadataKey
+// in the row's metadata. That issues-row (or wisps-row) change mints a fresh
+// row version, so a CAS read before this write fails afterwards.
+//
+// The key is bookkeeping, not desired state: a caller comparing metadata for
+// convergence must ignore it, and nothing else reads it.
+func (s *NativeDoltStore) updateLabelsIfMatch(storage beadslib.Storage, id string, expectedRevision int64, opts UpdateOpts) error {
+	return retryOnNativeDoltSerializationConflict(func() error {
+		ctx, cancel := nativeDoltOperationContext(context.TODO())
+		defer cancel()
+		return storage.RunInTransaction(ctx, fmt.Sprintf("gc: fenced label update bead %s", id), func(tx beadslib.Transaction) error {
+			issue, err := tx.GetIssue(ctx, id)
+			if err != nil {
+				return nativeStoreError(id, err)
+			}
+			if issue == nil {
+				return fmt.Errorf("bead %q: %w", id, ErrNotFound)
+			}
+			if issue.RowVersion != expectedRevision {
+				return &PreconditionFailedError{
+					ID:       id,
+					Expected: expectedRevision,
+					Current:  issue.RowVersion,
+					Raw:      "native row-version mismatch",
+				}
+			}
+			stamped := opts
+			stamped.Metadata = maps.Clone(opts.Metadata)
+			if stamped.Metadata == nil {
+				stamped.Metadata = make(map[string]string, 1)
+			}
+			stamped.Metadata[beadmeta.LabelRevisionMetadataKey] = nextConditionalLabelRevision(issue.Metadata)
+			return s.applyUpdateInTx(ctx, tx, id, stamped)
+		})
+	})
+}
+
+// nextConditionalLabelRevision returns a beadmeta.LabelRevisionMetadataKey
+// value that differs from the one raw holds, so writing it always changes the
+// row.
+func nextConditionalLabelRevision(raw json.RawMessage) string {
+	var fields map[string]json.RawMessage
+	var prev string
+	if json.Unmarshal(raw, &fields) == nil {
+		_ = json.Unmarshal(fields[beadmeta.LabelRevisionMetadataKey], &prev)
+	}
+	n, _ := strconv.ParseInt(prev, 10, 64)
+	return strconv.FormatInt(n+1, 10)
+}
+
 // CloseIfMatch closes id only while it still has expectedRevision.
 func (s *NativeDoltStore) CloseIfMatch(id string, expectedRevision int64) error {
+	if err := s.readOnlyGuard(); err != nil {
+		return err
+	}
 	storage, release, err := s.acquireStorage()
 	if err != nil {
 		return err
@@ -165,6 +240,9 @@ func (s *NativeDoltStore) CloseIfMatch(id string, expectedRevision int64) error 
 
 // DeleteIfMatch deletes id only while it still has expectedRevision.
 func (s *NativeDoltStore) DeleteIfMatch(id string, expectedRevision int64) error {
+	if err := s.readOnlyGuard(); err != nil {
+		return err
+	}
 	storage, release, err := s.acquireStorage()
 	if err != nil {
 		return err
@@ -252,6 +330,9 @@ func (s *NativeDoltStore) conditionalWriteError(
 // objects, and arrays. The transaction compares through that public string
 // view, then replaces only the selected raw JSON member with a JSON string.
 func (s *NativeDoltStore) CompareAndSetMetadataKey(id, key, expected, next string) (bool, error) {
+	if err := s.readOnlyGuard(); err != nil {
+		return false, err
+	}
 	storage, release, err := s.acquireStorage()
 	if err != nil {
 		return false, err

@@ -1200,6 +1200,14 @@ func TestCompileReviewQuorumCoreFormula(t *testing.T) {
 					t.Fatalf("%s description missing structured output key %q", step.ID, required)
 				}
 			}
+			for _, required := range []string{
+				"Do not set `gc.failure_class`",
+				"retry-control metadata",
+			} {
+				if !strings.Contains(step.Description, required) {
+					t.Fatalf("%s description missing success metadata-boundary instruction %q", step.ID, required)
+				}
+			}
 			if !strings.Contains(step.Description, "{{base_ref}}") {
 				t.Fatalf("%s description missing base_ref prompt placeholder", step.ID)
 			}
@@ -1232,6 +1240,14 @@ func TestCompileReviewQuorumCoreFormula(t *testing.T) {
 		} {
 			if !strings.Contains(step.Description, required) {
 				t.Fatalf("%s description missing synthesis contract key %q", step.ID, required)
+			}
+		}
+		for _, required := range []string{
+			"Do not set `gc.failure_class`",
+			"retry-control metadata",
+		} {
+			if !strings.Contains(step.Description, required) {
+				t.Fatalf("%s description missing success metadata-boundary instruction %q", step.ID, required)
 			}
 		}
 	}

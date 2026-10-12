@@ -35,7 +35,10 @@ func TestReconcileSessionBeads_NamedSessionTransientSpecCollapseDeferred(t *test
 		namedSessionIdentityMetadata: "warlord",
 		namedSessionModeMetadata:     "always",
 		"state":                      "active",
-		"last_woke_at":               env.clk.Now().UTC().Format(time.RFC3339),
+		// Past the wake grace: the undesired arm spares a runtime the wake family
+		// started moments ago (ga-qgtb3). The subject here is the #3630
+		// spec-collapse confirmation window, which sits behind that grace.
+		"last_woke_at": env.clk.Now().Add(-wakeUndesiredGrace - time.Minute).UTC().Format(time.RFC3339),
 	})
 
 	// Tick 1 (collapse tick): spec absent for the first time → defer, do not drain.
@@ -78,7 +81,8 @@ func TestReconcileSessionBeads_NamedSessionSpecReappearsClearsDeferral(t *testin
 		namedSessionIdentityMetadata: "warlord",
 		namedSessionModeMetadata:     "always",
 		"state":                      "active",
-		"last_woke_at":               env.clk.Now().UTC().Format(time.RFC3339),
+		// Past the INC-003 wake grace, so the #3630 window is what defers.
+		"last_woke_at": env.clk.Now().Add(-wakeUndesiredGrace - time.Minute).UTC().Format(time.RFC3339),
 	})
 
 	// Tick 1: collapse — spec absent → defer (counter = 1).

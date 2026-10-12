@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/api/genclient"
+	"github.com/gastownhall/gascity/internal/bazeltest"
 )
 
 // TestGeneratedClientInSync regenerates client_gen.go from the live spec
@@ -36,7 +37,23 @@ func TestGeneratedClientInSync(t *testing.T) {
 		t.Fatalf("find repo root: %v", err)
 	}
 
-	cmd := exec.Command("go", "run", "./cmd/gen-client")
+	// Under bazel the prebuilt gen-client binary ships in runfiles; the
+	// `go run` fallback covers plain `go test` (and needs a module cache).
+	// Kept to a single call site: the source-resource census counts these.
+	genClient := "go"
+	args := []string{"run", "./cmd/gen-client"}
+	for _, rf := range []string{os.Getenv("RUNFILES_DIR"), os.Getenv("TEST_SRCDIR")} {
+		if rf == "" {
+			continue
+		}
+		bin := filepath.Join(rf, "_main", "cmd", "gen-client", "gen-client_", "gen-client")
+		if _, statErr := os.Stat(bin); statErr == nil {
+			genClient = bin
+			args = nil
+			break
+		}
+	}
+	cmd := exec.Command(genClient, args...)
 	cmd.Dir = repoRoot
 	var out, errBuf bytes.Buffer
 	cmd.Stdout = &out
@@ -104,6 +121,9 @@ func sameStepDependencies(got, want *[]string) bool {
 // findRepoRoot walks up from the current working directory until it
 // finds a go.mod file.
 func findRepoRoot() (string, error) {
+	if root := bazeltest.OverrideRoot(); root != "" {
+		return root, nil
+	}
 	wd, err := os.Getwd()
 	if err != nil {
 		return "", err

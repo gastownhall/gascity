@@ -441,7 +441,7 @@ func copyCanonicalJSONFile(src, dst string) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return fmt.Errorf("creating parent for %q: %w", dst, err)
 	}
-	return os.WriteFile(dst, canonical, info.Mode().Perm())
+	return os.WriteFile(dst, canonical, info.Mode().Perm()|0o200)
 }
 
 // copyFile copies a single file preserving permissions.
@@ -462,7 +462,10 @@ func copyFile(src, dst string) error {
 		return fmt.Errorf("stat %q: %w", src, err)
 	}
 
-	dstFile, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode())
+	// Remote build workers materialize action inputs read-only; copies made
+	// for later in-place editing (gc init over an example template) must be
+	// owner-writable regardless of the source mode.
+	dstFile, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode().Perm()|0o200)
 	if err != nil {
 		return fmt.Errorf("creating %q: %w", dst, err)
 	}

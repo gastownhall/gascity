@@ -1,0 +1,86 @@
+#!/bin/bash
+# rbe-action-sweep: clean up after actions whose launcher was killed (README
+# "Action isolation"). Installed root:root 0755 at
+# /usr/local/libexec/rbe-action/sweep.
+#
+#   sweep --boot   ExecStartPre=+ of nativelink-worker: no action is running.
+#                  Kill every slot process, make WORK_ROOT removable (NativeLink
+#                  purges it at start and fails to start if it cannot), reset
+#                  the launcher's state in /run/rbe-action.
+#   sweep          rbe-action-sweep.timer: for each slot whose lock is free but
+#                  still marked busy (its launcher was SIGKILLed: NativeLink
+#                  cancel or backstop timeout), kill the slot's processes,
+#                  remove that action directory (NativeLink already failed to)
+#                  and clear the marker. Remove the directories of orphans/<op>:
+#                  killed launchers whose slot the next action took first (the
+#                  launcher killed their processes and moved the marker there).
+#                  Drop claims of directories that are gone.
+set -euo pipefail
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+CONF=/etc/rbe-west/rbe-action.env
+RUN=/run/rbe-action
+[[ $(id -u) == 0 ]] || { echo "rbe-action-sweep: must run as root" >&2; exit 1; }
+[[ -f $CONF && ! -L $CONF && $(stat -c '%u %a' "$CONF") =~ ^0\ [0-7][0145][0145]$ ]] || {
+	echo "rbe-action-sweep: $CONF must be a root-owned file, not group/world-writable" >&2
+	exit 1
+}
+# shellcheck source=/dev/null
+. "$CONF"
+: "${WORK_ROOT:?}" "${SLOT_UID0:?}" "${SLOT_COUNT:?}"
+log() { logger -t rbe-action-sweep -- "$*"; echo "rbe-action-sweep: $*"; }
+
+kill_slot() { # UID: no process of this slot user survives
+	local i
+	pkill -KILL -U "$1" 2>/dev/null || true
+	for i in $(seq 50); do
+		pgrep -U "$1" >/dev/null || return 0
+		sleep 0.1
+	done
+	log "uid $1 still has processes after SIGKILL"
+	return 1
+}
+
+if [[ ${1:-} == --boot ]]; then
+	for ((i = 0; i < SLOT_COUNT; i++)); do kill_slot $((SLOT_UID0 + i)); done
+	# Only directories directly under WORK_ROOT, never across a mount point.
+	if [[ -d $WORK_ROOT && ! -L $WORK_ROOT ]]; then
+		find "$WORK_ROOT" -mindepth 1 -maxdepth 1 -exec rm -rf --one-file-system -- {} +
+	fi
+	rm -rf --one-file-system -- "$RUN"
+	install -d -m 0700 "$RUN" "$RUN/slots" "$RUN/claims" "$RUN/stash" "$RUN/orphans"
+	exit 0
+fi
+
+[[ -d $RUN/slots ]] || exit 0
+for ((i = 0; i < SLOT_COUNT; i++)); do
+	busy=$RUN/slots/$i.busy
+	[[ -e $busy ]] || continue
+	exec {lk}>"$RUN/slots/$i"
+	if ! flock -n "$lk"; then # a launcher holds it: the action is running
+		exec {lk}>&-
+		continue
+	fi
+	op=$(head -c 200 "$busy" 2>/dev/null || true)
+	if kill_slot $((SLOT_UID0 + i)); then
+		if [[ $op =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$ && -d $WORK_ROOT/$op && ! -L $WORK_ROOT/$op ]]; then
+			rm -rf --one-file-system -- "${WORK_ROOT:?}/$op"
+			log "slot $i: removed the action directory $op left by a killed launcher"
+		fi
+		rm -f "$busy"
+	fi
+	exec {lk}>&-
+done
+for o in "$RUN"/orphans/*; do
+	[[ -e $o ]] || continue
+	op=${o##*/}
+	if [[ $op =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$ && -d $WORK_ROOT/$op && ! -L $WORK_ROOT/$op ]]; then
+		rm -rf --one-file-system -- "${WORK_ROOT:?}/$op"
+		log "removed the action directory $op left by a killed launcher (slot reused)"
+	fi
+	rm -f "$o"
+done
+for c in "$RUN"/claims/*; do
+	[[ -e $c ]] || continue
+	n=${c##*/}
+	[[ -d $WORK_ROOT/${n%.*} ]] || rmdir "$c" 2>/dev/null || true
+done

@@ -81,6 +81,9 @@ type AgentPatch struct {
 	// SleepAfterIdle overrides idle sleep policy for this agent. Accepts a
 	// duration string or "off".
 	SleepAfterIdle *string `toml:"sleep_after_idle,omitempty"`
+	// AutoReclaimStaleClaims overrides Agent.AutoReclaimStaleClaims (see that
+	// field for semantics).
+	AutoReclaimStaleClaims *bool `toml:"auto_reclaim_stale_claims,omitempty"`
 	// InstallAgentHooks overrides the agent's install_agent_hooks list.
 	InstallAgentHooks []string `toml:"install_agent_hooks,omitempty"`
 	// Skills is a tombstone field retained for v0.15.1 backwards compatibility.
@@ -211,6 +214,10 @@ type RigPatch struct {
 	Prefix *string `toml:"prefix,omitempty"`
 	// DefaultBranch overrides the rig's recorded mainline branch.
 	DefaultBranch *string `toml:"default_branch,omitempty"`
+	// DefaultMergeStrategy overrides the merge strategy `gc sling` stamps on
+	// beads routed into this rig. Set to "" to clear the rig's default and go
+	// back to leaving merge_strategy unstamped.
+	DefaultMergeStrategy *string `toml:"default_merge_strategy,omitempty"`
 	// Suspended is the deprecated, pre-runtime-state suspension override.
 	// Parsed for backwards compatibility; `gc doctor` surfaces it as a
 	// warning and recommends the rename to SuspendedOnStart. No behavioral
@@ -223,6 +230,8 @@ type RigPatch struct {
 	// Additive merge: patch keys win over existing rig keys, unspecified
 	// keys are preserved.
 	FormulaVars map[string]string `toml:"formula_vars,omitempty"`
+	// BeadsProxiedIdleTimeout overrides the rig's beads_proxied_idle_timeout.
+	BeadsProxiedIdleTimeout *string `toml:"beads_proxied_idle_timeout,omitempty"`
 }
 
 // ProviderPatch modifies an existing provider identified by Name.
@@ -579,6 +588,9 @@ func applyAgentMutation(a *Agent, p *AgentPatch, sleepSource string) {
 		a.SleepAfterIdle = NormalizeSleepAfterIdle(*p.SleepAfterIdle)
 		a.SleepAfterIdleSource = sleepSource
 	}
+	if p.AutoReclaimStaleClaims != nil {
+		a.AutoReclaimStaleClaims = *p.AutoReclaimStaleClaims
+	}
 	if len(p.InstallAgentHooks) > 0 {
 		a.InstallAgentHooks = append([]string(nil), p.InstallAgentHooks...)
 	}
@@ -729,11 +741,18 @@ func applyRigPatch(cfg *City, patch *RigPatch) error {
 			if patch.DefaultBranch != nil {
 				r.DefaultBranch = *patch.DefaultBranch
 			}
+			if patch.DefaultMergeStrategy != nil {
+				r.DefaultMergeStrategy = *patch.DefaultMergeStrategy
+			}
 			if patch.Suspended != nil {
 				r.Suspended = *patch.Suspended
 			}
 			if patch.SuspendedOnStart != nil {
 				r.SuspendedOnStart = *patch.SuspendedOnStart
+			}
+			if patch.BeadsProxiedIdleTimeout != nil {
+				v := *patch.BeadsProxiedIdleTimeout
+				r.BeadsProxiedIdleTimeout = &v
 			}
 			if len(patch.FormulaVars) > 0 {
 				if r.FormulaVars == nil {

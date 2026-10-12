@@ -5152,7 +5152,10 @@ func TestCheckBeadStateRoutedPoolSiblingPrefixIsCurrentlyOverMatched(t *testing.
 // target+"-" never matches it. The target+"-" anchor therefore only
 // fires for Dir-less pools. This is a lost fix, not a regression: the
 // pre-fix behavior for this shape is unchanged. Asserted so the gap is
-// visible until a session->pool ownership lookup replaces the prefix.
+// visible. Current claims are recorded under the session bead ID, which
+// assigneeIsOwnPoolSession resolves to the pool for rig-qualified pools too
+// (TestCheckBeadStateRoutedPoolClaimedBySessionBeadIDIsIdempotent); only this
+// legacy sanitized session_name spelling stays unmatched.
 func TestCheckBeadStateRoutedRigQualifiedPoolSessionIsNotMatched(t *testing.T) {
 	store := beads.NewMemStore()
 	a := config.Agent{
@@ -5180,5 +5183,113 @@ func TestCheckBeadStateRoutedRigQualifiedPoolSessionIsNotMatched(t *testing.T) {
 	}
 	if len(result.Warnings) == 0 {
 		t.Fatalf("expected the conflict warning for an unmatched pool-session claim, got none")
+	}
+}
+
+// createPoolSessionBead creates a session bead as the reconciler stamps it for
+// an unaliased pool worker (template = the pool's qualified name).
+func createPoolSessionBead(t *testing.T, store beads.Store, template, status string) beads.Bead {
+	t.Helper()
+	sb, err := store.Create(beads.Bead{
+		Title:    "pool session",
+		Type:     "session",
+		Status:   "open",
+		Labels:   []string{"gc:session"},
+		Metadata: map[string]string{"template": template, "pool_managed": "true"},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(session): %v", err)
+	}
+	if status == "closed" {
+		if err := store.Close(sb.ID); err != nil {
+			t.Fatalf("store.Close(session): %v", err)
+		}
+	}
+	return sb
+}
+
+// Since #6324 an unaliased pool worker claims under its session bead ID, which
+// carries no "<pool>-" prefix. A re-sling of a bead that such a worker already
+// claimed must still read as idempotent (the #4785 double-mint), for Dir-less
+// and rig-qualified pools alike; a claim by another pool's session, or by a
+// closed session, must still warn.
+func TestCheckBeadStateRoutedPoolClaimedBySessionBeadIDIsIdempotent(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		dir             string
+		sessionTemplate func(target string) string
+		sessionStatus   string
+		wantIdempotent  bool
+	}{
+		{name: "own pool session", sessionTemplate: func(target string) string { return target }, sessionStatus: "open", wantIdempotent: true},
+		{name: "own rig-qualified pool session", dir: "myrig", sessionTemplate: func(target string) string { return target }, sessionStatus: "open", wantIdempotent: true},
+		{name: "other pool session", sessionTemplate: func(string) string { return "novices" }, sessionStatus: "open", wantIdempotent: false},
+		{name: "closed own pool session", sessionTemplate: func(target string) string { return target }, sessionStatus: "closed", wantIdempotent: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			a := config.Agent{
+				Name:              "smiths",
+				Dir:               tc.dir,
+				MinActiveSessions: intPtr(1),
+				MaxActiveSessions: intPtr(4),
+			}
+			target := agentutil.RoutedToIdentity(&a)
+			sb := createPoolSessionBead(t, store, tc.sessionTemplate(target), tc.sessionStatus)
+			convoy, err := store.Create(beads.Bead{Title: "auto convoy", Type: "convoy", Status: "open"})
+			if err != nil {
+				t.Fatalf("store.Create(convoy): %v", err)
+			}
+			bead, err := store.Create(beads.Bead{
+				Title:    "pool work",
+				Type:     "task",
+				Status:   "in_progress",
+				Assignee: sb.ID,
+				Metadata: map[string]string{"gc.routed_to": target},
+			})
+			if err != nil {
+				t.Fatalf("store.Create(bead): %v", err)
+			}
+			if err := store.DepAdd(convoy.ID, bead.ID, "tracks"); err != nil {
+				t.Fatalf("store.DepAdd(tracks): %v", err)
+			}
+
+			result := CheckBeadState(store, bead.ID, a, SlingDeps{Store: store})
+
+			if result.Idempotent != tc.wantIdempotent {
+				t.Fatalf("Idempotent = %v, want %v (assignee %q, target %q); result %+v", result.Idempotent, tc.wantIdempotent, sb.ID, target, result)
+			}
+			if !tc.wantIdempotent && len(result.Warnings) == 0 {
+				t.Fatalf("expected a warning naming the conflicting assignee, got none")
+			}
+		})
+	}
+}
+
+// The undeliverable-hand-off warning shares the ownership predicate: a bead held
+// by one of the target pool's own sessions under its session bead ID is not
+// stranded, while one held by another pool's session is.
+func TestUndeliverableHandoffWarningRecognizesPoolSessionBeadID(t *testing.T) {
+	store := beads.NewMemStore()
+	a := config.Agent{Name: "smiths", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(4)}
+	target := agentutil.RoutedToIdentity(&a)
+	molErr := &MoleculeAttachedError{Label: "molecule", AttachmentID: "mol-1"}
+
+	own := createPoolSessionBead(t, store, target, "open")
+	held, err := store.Create(beads.Bead{Title: "held", Type: "task", Status: "in_progress", Assignee: own.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg, warn := undeliverableHandoffWarning(store, SlingDeps{Store: store}, held.ID, a, molErr); warn {
+		t.Fatalf("own pool session claim reported undeliverable: %s", msg)
+	}
+
+	other := createPoolSessionBead(t, store, "novices", "open")
+	foreign, err := store.Create(beads.Bead{Title: "foreign", Type: "task", Status: "in_progress", Assignee: other.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, warn := undeliverableHandoffWarning(store, SlingDeps{Store: store}, foreign.ID, a, molErr); !warn {
+		t.Fatalf("another pool's session claim was not reported undeliverable")
 	}
 }

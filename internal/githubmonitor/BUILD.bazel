@@ -1,0 +1,38 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "githubmonitor",
+    srcs = [
+        "client.go",
+        "monitor.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/githubmonitor",
+    visibility = ["//:__subpackages__"],
+    deps = ["//internal/config"],
+)
+
+go_test(
+    name = "githubmonitor_test",
+    srcs = [
+        "client_test.go",
+        "monitor_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":githubmonitor"],
+    deps = [
+        "//internal/config",
+        "//internal/testenv",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

@@ -1,0 +1,32 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "builtin",
+    srcs = ["profiles.go"],
+    importpath = "github.com/gastownhall/gascity/internal/worker/builtin",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "builtin_test",
+    srcs = [
+        "context_opus5_ra_jbbv0_test.go",
+        "gasburger_pins_ga_fyh_test.go",
+        "profiles_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":builtin"],
+    deps = ["//internal/testenv"],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

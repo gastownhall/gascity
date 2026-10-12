@@ -9,6 +9,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/pathutil"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // gcEnvVars lists the GC_* identity and session-routing variables that
@@ -341,12 +342,7 @@ func gcBeadsBdTestHomeEnv(t *testing.T) []string {
 }
 
 func writeTestDoltIdentity(homeDir string) error {
-	doltDir := filepath.Join(homeDir, ".dolt")
-	if err := os.MkdirAll(doltDir, 0o755); err != nil {
-		return err
-	}
-	data := []byte(`{"user.name":"gc-test","user.email":"gc-test@test.local"}`)
-	return os.WriteFile(filepath.Join(doltDir, "config_global.json"), data, 0o644)
+	return testutil.SeedDoltGlobalConfig(homeDir)
 }
 
 // doltIdentityHomeDir returns a fresh directory for dolt/git identity files,

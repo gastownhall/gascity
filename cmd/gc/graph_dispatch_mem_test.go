@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
@@ -22,13 +23,9 @@ import (
 
 func builtinFormulaDir(t *testing.T) string {
 	t.Helper()
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	// Built-in formulas now live in the core bootstrap pack. cwd is cmd/gc,
-	// so walk up to the repo root and into the core pack's formulas dir.
-	return filepath.Join(cwd, "..", "..", "internal", "bootstrap", "packs", "core", "formulas")
+	// Built-in formulas now live in the core bootstrap pack; resolve the
+	// repo root from the caller (bazel runfiles cwd is not the package dir).
+	return filepath.Join(gcRepoRootFromEnv(), "internal", "bootstrap", "packs", "core", "formulas")
 }
 
 func buildMemGraphWorkflowConfig(t *testing.T) *config.City {
@@ -112,6 +109,25 @@ func beadRef(bead beads.Bead) string {
 	return bead.Metadata["gc.step_ref"]
 }
 
+// memGraphLatchKind is the one latch kind set this harness recognizes: workflow
+// topology (workflow/scope/spec) plus the ralph/retry latches. The claim loop
+// and the selector below both derive from it, so the loop can never filter out a
+// kind the selector is supposed to fail on. Inline copies drifted apart before:
+// the claim loop skipped `spec` while the selector's latch case omitted it, so a
+// `spec` step on a worker queue was skipped before the selector saw it — and if
+// one ever did arrive pre-assigned, accepted as ordinary executable work rather
+// than raising the assertion that exists to catch exactly that.
+func memGraphLatchKind(kind string) bool {
+	return graphroute.IsWorkflowTopologyKind(kind) || kind == "ralph" || kind == "retry"
+}
+
+// memGraphNonClaimableKind reports the kinds a worker must never claim: the
+// latch set plus control-dispatcher work. The selector keeps the two apart only
+// to report which contract a leaked bead broke.
+func memGraphNonClaimableKind(kind string) bool {
+	return graphroute.IsControlDispatcherKind(kind) || memGraphLatchKind(kind)
+}
+
 func selectExecutableGraphWorkerBead(ready []beads.Bead, assignee string) (beads.Bead, bool, error) {
 	for _, bead := range ready {
 		if bead.Assignee != assignee {
@@ -121,7 +137,7 @@ func selectExecutableGraphWorkerBead(ready []beads.Bead, assignee string) (beads
 		switch {
 		case graphroute.IsControlDispatcherKind(kind):
 			return beads.Bead{}, false, fmt.Errorf("worker queue exposed control bead %s kind=%s ref=%s", bead.ID, kind, beadRef(bead))
-		case kind == "workflow" || kind == "scope" || kind == "ralph" || kind == "retry":
+		case memGraphLatchKind(kind):
 			return beads.Bead{}, false, fmt.Errorf("worker queue exposed latch bead %s kind=%s ref=%s", bead.ID, kind, beadRef(bead))
 		case bead.Status != "open":
 			continue
@@ -132,6 +148,28 @@ func selectExecutableGraphWorkerBead(ready []beads.Bead, assignee string) (beads
 		}
 	}
 	return beads.Bead{}, false, nil
+}
+
+// firstClaimableGraphWorkerBead returns the index of the first bead a real
+// worker would claim for this seat: unassigned work routed to it that the
+// selector would then accept as executable. Matching the selector's acceptance
+// (not merely its route) is what keeps the harness claiming one bead at a time,
+// like `gc hook --claim`, instead of stamping its identity on steps it will
+// never execute.
+func firstClaimableGraphWorkerBead(ready []beads.Bead, workerSession string) (int, bool) {
+	for i, candidate := range ready {
+		if candidate.Assignee != "" || candidate.Metadata["gc.routed_to"] != workerSession {
+			continue
+		}
+		if memGraphNonClaimableKind(candidate.Metadata["gc.kind"]) {
+			continue
+		}
+		if candidate.Status != "open" || candidate.Metadata["gc.outcome"] == "skipped" {
+			continue
+		}
+		return i, true
+	}
+	return 0, false
 }
 
 func executeMemGraphWorkerBead(t *testing.T, store beads.Store, bead beads.Bead, targetID, cityPath, mode string) {
@@ -258,6 +296,21 @@ func runMemGraphWorkflowToCompletion(t *testing.T, store beads.Store, workflowID
 
 		ready = memGraphReady(t, store)
 		for {
+			// Fixed agents now claim routed work just like pools. Mirror that
+			// transition before selecting the worker's assigned queue — one
+			// bead at a time, as a real worker does through `gc hook --claim`,
+			// so steps the worker will not execute stay unassigned.
+			if i, ok := firstClaimableGraphWorkerBead(ready, workerSession); ok {
+				candidate := ready[i]
+				writer, ok := beads.ConditionalWriterFor(store)
+				if !ok {
+					t.Fatal("memory workflow store does not support conditional claims")
+				}
+				if err := writer.UpdateIfMatch(candidate.ID, candidate.Revision, beads.UpdateOpts{Assignee: &workerSession}); err != nil {
+					t.Fatalf("claim routed worker bead %s: %v", candidate.ID, err)
+				}
+				ready[i] = mustGetMemBead(t, store, candidate.ID)
+			}
 			bead, ok, err := selectExecutableGraphWorkerBead(ready, workerSession)
 			if err != nil {
 				t.Fatal(err)
@@ -356,20 +409,40 @@ func TestSelectExecutableGraphWorkerBeadRejectsControlKinds(t *testing.T) {
 	}
 }
 
+// TestSelectExecutableGraphWorkerBeadRejectsLatchKinds asserts the selector's
+// latch arm directly for every kind that reaches it, not just `scope`. The claim
+// loop never assigns any of them, so each case is the leak the assertion exists
+// to catch: a latch that arrived pre-assigned must raise rather than be accepted
+// as ordinary executable work. `spec` is the kind the shared predicate added to
+// this arm; before that it fell through to the default and was executed.
+//
+// The table derives from beadmeta.WorkflowTopologyKinds, the same canonical set
+// memGraphLatchKind reaches through graphroute.IsWorkflowTopologyKind, so a
+// harness that drifts back to an inline kind list reddens here. The other two
+// kinds memGraphLatchKind recognizes, `ralph` and `retry`, are also control
+// kinds, and the switch tests IsControlDispatcherKind first — their observable
+// contract is the control-bead error, covered above, not this one.
 func TestSelectExecutableGraphWorkerBeadRejectsLatchKinds(t *testing.T) {
-	ready := []beads.Bead{{
-		ID:       "gc-3",
-		Status:   "open",
-		Assignee: "worker",
-		Metadata: map[string]string{
-			"gc.kind":     "scope",
-			"gc.step_ref": "mol-scoped-work.body",
-		},
-	}}
+	if len(beadmeta.WorkflowTopologyKinds) == 0 {
+		t.Fatal("beadmeta.WorkflowTopologyKinds is empty; this table would assert nothing")
+	}
+	for _, kind := range beadmeta.WorkflowTopologyKinds {
+		t.Run(kind, func(t *testing.T) {
+			ready := []beads.Bead{{
+				ID:       "gc-3",
+				Status:   "open",
+				Assignee: "worker",
+				Metadata: map[string]string{
+					"gc.kind":     kind,
+					"gc.step_ref": "mol-scoped-work.body",
+				},
+			}}
 
-	_, _, err := selectExecutableGraphWorkerBead(ready, "worker")
-	if err == nil || !strings.Contains(err.Error(), "latch bead") {
-		t.Fatalf("err = %v, want latch bead error", err)
+			_, _, err := selectExecutableGraphWorkerBead(ready, "worker")
+			if err == nil || !strings.Contains(err.Error(), "latch bead") {
+				t.Fatalf("kind=%s: err = %v, want latch bead error", kind, err)
+			}
+		})
 	}
 }
 

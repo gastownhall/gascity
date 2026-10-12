@@ -3,6 +3,7 @@ package materialize
 import (
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/config"
@@ -38,7 +39,15 @@ func EffectiveMCPForSession(
 			cfgForMCP = &clone
 		}
 	}
-	return EffectiveMCPForAgent(cfgForMCP, agent, MCPTemplateData(cfgForMCP, cityPath, agent, identity, workDir, topo))
+	// MCPTemplateData probes the workdir's default branch with up to three git
+	// subprocesses, and only .template.toml definitions consume it. Build it on
+	// first use so a catalog with no template servers never forks git for it.
+	// resolveTemplate lands here on every session start and on every reconcile
+	// pass that builds an agent's template.
+	templateData := sync.OnceValue(func() map[string]string {
+		return MCPTemplateData(cfgForMCP, cityPath, agent, identity, workDir, topo)
+	})
+	return mergeMCPDirs(MCPPackSourcesForAgent(cfgForMCP, agent), templateData)
 }
 
 // MCPTemplateData builds the template expansion surface used by MCP catalogs.

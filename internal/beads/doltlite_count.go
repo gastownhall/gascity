@@ -28,12 +28,14 @@ import (
 // because List applies them with Go-side semantics a single COUNT cannot
 // reproduce. Limited queries are excluded because the Counter contract is
 // List cardinality parity, not full-result total cardinality. UpdatedBefore
-// is also excluded, but as an over-conservative exclusion pending cleanup of
-// the duplicate SQL/Go filter: queryIssueTable already emits an exact
-// COALESCE(updated_at, created_at) predicate for it, so a COUNT could
-// reproduce it — the redundant Go-side re-filter is what currently keeps it
-// out. Callers fall back to List for those shapes, exactly as the Counter
-// contract specifies.
+// is excluded for the same reason as CreatedBefore: buildDoltliteTableQuery
+// deliberately emits an OVER-ADMITTING predicate for both
+// (julianday(...) < julianday(?) OR julianday(...) IS NULL), so that rows
+// whose stored timestamp julianday() cannot parse still reach the tolerant
+// Go-side filterDoltliteBeforeTimes, which is authoritative. A SQL COUNT of
+// that predicate would therefore over-count, and "cleaning up" the Go-side
+// re-filter would make Count disagree with List. Callers fall back to List
+// for those shapes, exactly as the Counter contract specifies.
 func (s *DoltliteReadStore) Count(ctx context.Context, query ListQuery, excludeTypes ...string) (int, error) {
 	if err := query.Validate(); err != nil {
 		return 0, err

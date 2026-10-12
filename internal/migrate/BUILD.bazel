@@ -1,0 +1,39 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "migrate",
+    srcs = ["migrate.go"],
+    importpath = "github.com/gastownhall/gascity/internal/migrate",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/config",
+        "//internal/fsys",
+        "@com_github_burntsushi_toml//:toml",
+    ],
+)
+
+go_test(
+    name = "migrate_test",
+    srcs = [
+        "migrate_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":migrate"],
+    deps = [
+        "//internal/config",
+        "//internal/fsys",
+        "//internal/testenv",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

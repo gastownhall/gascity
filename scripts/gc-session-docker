@@ -263,7 +263,7 @@ cleanup_failed_start() {
     # Roll back with a single force-remove instead of a graceful "stop -t 10"
     # followed by "rm -f". A failed start has no live session worth draining,
     # and cooperative cancellation gives this cleanup only a short grace window:
-    # the exec provider force-kills the adapter ~2s after signaling interrupt.
+    # the exec provider force-kills the adapter ~2s after sending SIGTERM.
     # A graceful stop that waited out its timeout would be killed before "rm -f"
     # ran, leaking the container. "docker rm -f" sends SIGKILL and removes in one
     # bounded step, so rollback completes inside the grace window.
@@ -389,6 +389,9 @@ do_start() {
     # A successful docker run transfers ownership of the new container to
     # this script. Until startup completes, roll it back on every failure
     # by immutable ID while preserving the original status and diagnostic.
+    # The exec provider cancels by sending SIGTERM to the adapter's process
+    # group, so the TERM trap is the cancellation path; INT and HUP cover a
+    # human running the adapter by hand.
     FAILED_START_CONTAINER_ID="$created_id"
     FAILED_START_CONTAINER_NAME="$cname"
     trap cleanup_failed_start EXIT

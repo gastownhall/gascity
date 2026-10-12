@@ -1,0 +1,40 @@
+load("@rules_go//go:def.bzl", "go_test")
+
+go_test(
+    name = "no_extra_env_test",
+    srcs = [
+        "no_extra_env_test.go",
+        "testenv_import_test.go",
+    ],
+    deps = ["//internal/testenv"],
+)
+
+exports_files(
+    glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "pkg_files",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

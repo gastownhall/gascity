@@ -92,11 +92,26 @@ type BeadClaimReleasedPayload struct {
 // IsEventPayload marks BeadClaimReleasedPayload as an events.Payload variant.
 func (BeadClaimReleasedPayload) IsEventPayload() {}
 
+// HookClaimReclaimedStalePayload is the typed payload for hook.claim.reclaimed_stale
+// events (ga-7rj87d). Emitted when a scoped `bd reclaim --id BeadID` recovers a
+// candidate from PreviousOwner's stale lease and the retried claim in the same
+// hook cycle wins it for NewAssignee.
+type HookClaimReclaimedStalePayload struct {
+	BeadID        string `json:"bead_id"`
+	PreviousOwner string `json:"previous_owner"`
+	NewAssignee   string `json:"new_assignee"`
+}
+
+// IsEventPayload marks HookClaimReclaimedStalePayload as an events.Payload variant.
+func (HookClaimReclaimedStalePayload) IsEventPayload() {}
+
 func init() {
 	RegisterPayload(BeadWorktreeReaped, BeadWorktreeReapedPayload{})
 	RegisterPayload(BeadWorktreeReapSkipped, BeadWorktreeReapSkippedPayload{})
 	RegisterPayload(BeadClaimRejected, BeadClaimRejectedPayload{})
 	RegisterPayload(BeadClaimReleased, BeadClaimReleasedPayload{})
+	RegisterPayload(HookClaimReclaimedStale, HookClaimReclaimedStalePayload{})
+	RegisterPayload(BeadsBlockedRecomputed, BlockedRecomputedPayload{})
 }
 
 // StoreDiskWarnPayload is the typed payload for gc.store.disk_warn events.
@@ -211,3 +226,20 @@ func (SessionDemandClaimDivergencePayload) IsEventPayload() {}
 func init() {
 	RegisterPayload(SessionDemandClaimDivergence, SessionDemandClaimDivergencePayload{})
 }
+
+// BlockedRecomputedPayload is the typed payload for beads.blocked.recomputed
+// events: gc start ran `bd recompute-blocked` over one scope because the scope
+// had not yet been repaired under the running bd version.
+type BlockedRecomputedPayload struct {
+	// Scope names the repaired scope: "city" or "rig/<name>".
+	Scope string `json:"scope"`
+	// RowsCorrected is bd's count of is_blocked values the recompute changed.
+	// Zero means the scope was already consistent.
+	RowsCorrected int `json:"rows_corrected"`
+	// BDVersion is the bd version that ran the recompute and is now recorded
+	// as the scope's repair marker.
+	BDVersion string `json:"bd_version"`
+}
+
+// IsEventPayload marks BlockedRecomputedPayload as an events.Payload variant.
+func (BlockedRecomputedPayload) IsEventPayload() {}

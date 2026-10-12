@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -43,14 +44,16 @@ func TestWorkspaceTrustDialogDoesNotConfirmNoExit(t *testing.T) {
 		func(int) (string, error) { return realTrustDialogNoExitSelected, nil },
 		func(keys ...string) error { sent = append(sent, keys...); return nil },
 	)
-	if err != nil {
-		t.Fatalf("acceptWorkspaceTrustDialog() error = %v", err)
+	// The pane never re-renders with the cursor on the trust row, so the
+	// handler must give up visibly instead of confirming "No, exit".
+	if !errors.Is(err, ErrWorkspaceTrustUnconfirmed) {
+		t.Fatalf("acceptWorkspaceTrustDialog() error = %v, want ErrWorkspaceTrustUnconfirmed", err)
 	}
 
-	if len(sent) > 0 && strings.EqualFold(sent[0], "Enter") {
-		t.Errorf("handler confirmed while %q was the selected row: sent=%v\n"+
-			"want the selection moved onto the trust option first (e.g. [Down Enter]), "+
-			"as acceptMCPTrustDialog already does", "No, exit", sent)
+	for _, k := range sent {
+		if strings.EqualFold(k, "Enter") {
+			t.Fatalf("handler confirmed while %q was the selected row: sent=%v", "No, exit", sent)
+		}
 	}
 }
 

@@ -41,6 +41,12 @@ var ErrMetadataParse = errors.New("bead metadata parse")
 // cannot answer without consulting the backing store.
 var ErrCacheUnavailable = errors.New("bead cache unavailable")
 
+// ErrRowRefreshFenced is returned by CachingStore.RefreshRow when a local
+// write, deletion or applied event newer than its backing read owns the row,
+// or a reconcile or full Prime merged since the read began, so the read
+// installed nothing. The caller may retry.
+var ErrRowRefreshFenced = errors.New("bead cache row refresh fenced by newer state")
+
 // ErrReadyContextUnsupported reports that a store cannot guarantee a Ready
 // projection stops when the caller's context is canceled.
 var ErrReadyContextUnsupported = errors.New("context-aware ready unsupported")
@@ -48,6 +54,12 @@ var ErrReadyContextUnsupported = errors.New("context-aware ready unsupported")
 // ErrStoreClosed is returned when a caller uses a bead store after its backing
 // handle has been closed.
 var ErrStoreClosed = errors.New("bead store closed")
+
+// ErrSQLiteBusyExhausted marks a SQLiteStore write whose every attempt failed
+// with SQLITE_BUSY, so it committed nothing: each attempt is one transaction,
+// and SQLite applies no statement, and commits no transaction, that reports
+// BUSY. The error's message stays the driver's.
+var ErrSQLiteBusyExhausted = errors.New("sqlite busy retries exhausted")
 
 // ErrParentProjectionSuperseded reports that a parent update was overtaken by a
 // concurrent reparent before the caller's projection wait could converge.
@@ -231,6 +243,34 @@ type ConditionalAssignmentReleaser interface {
 	ReleaseIfCurrent(id, expectedAssignee string) (bool, error)
 }
 
+// AssignmentGuardedUpdater is implemented by stores whose backend can apply an
+// update only while the bead still has an expected status and assignee,
+// checked inside the same write. It fences an assignment change on the facts
+// it was decided from where the store has no revision fence: BdStore without
+// --if-revision answers it with `bd update --if-status --if-assignee`.
+//
+// An empty expectedAssignee means the bead must be unassigned. UpdateIfAssignment
+// reports true when the update landed, and false with nothing written when the
+// status or assignee no longer match or the id resolves to no bead. A store
+// whose backend lacks the guard returns ErrConditionalWriteUnsupported, also
+// with nothing written. opts follows the UpdateIfMatch shape: no labels and no
+// parent, because the guard does not cover them.
+type AssignmentGuardedUpdater interface {
+	UpdateIfAssignment(id, expectedStatus, expectedAssignee string, opts UpdateOpts) (bool, error)
+}
+
+// AssignmentGuardedUpdaterFor returns the guarded-update capability of store,
+// following declared conditional-writes resolution targets exactly as
+// MetadataCASWriterFor does. Like ConditionalWriterForTarget it applies no
+// rollout mode.
+func AssignmentGuardedUpdaterFor(store Store) (AssignmentGuardedUpdater, bool) {
+	if store == nil {
+		return nil, false
+	}
+	updater, ok := followConditionalWritesResolveTarget(store).(AssignmentGuardedUpdater)
+	return updater, ok
+}
+
 // ConditionalWriter is implemented by stores that can apply a write only when
 // the caller's snapshot of the bead is still current. It is an optional store
 // capability, discovered like ConditionalAssignmentReleaser: type-assert on the
@@ -249,7 +289,8 @@ type ConditionalAssignmentReleaser interface {
 //   - Every successful mutation of revision-guarded whole-row content —
 //     conditional or unconditional — mints a fresh nonzero revision. This
 //     covers row-backed Update fields, metadata writes, Close, and Reopen;
-//     reads never change it.
+//     reads never change it. A same-value update (setting a field to what it
+//     already holds) succeeds but may leave the revision unchanged.
 //     Separate label/parent persistence and derived or heartbeat fields are
 //     outside this guarantee.
 //   - Denormalized/derived projection columns are OUTSIDE this guarantee. bd
@@ -273,11 +314,20 @@ type ConditionalAssignmentReleaser interface {
 type ConditionalWriter interface {
 	// UpdateIfMatch applies row-backed opts only if the bead's revision equals
 	// expectedRevision; otherwise it returns *PreconditionFailedError. A store
-	// that persists ParentID, Labels, or RemoveLabels through separate writes
-	// cannot fold them into the guarded update and rejects them with
-	// *ConditionalUpdateFieldUnsupportedError; bd-backed and Dolt-backed stores
-	// do. Callers must therefore handle that error rather than assume the
-	// fields applied.
+	// that persists ParentID through separate writes rejects it with
+	// *ConditionalUpdateFieldUnsupportedError. Labels and RemoveLabels are
+	// applied under the same revision check only by a store that guards them
+	// (conditionalLabelsGuard: MemStore, SQLiteStore, NativeDoltStore, and a
+	// CachingStore over one of those); bd-backed stores and FileStore reject
+	// them the same way. Callers must therefore handle that error rather than
+	// assume the fields applied.
+	//
+	// On NativeDoltStore the label guarantee runs one way. A label CAS mints a
+	// revision (it advances beadmeta.LabelRevisionMetadataKey on the row), but
+	// an unconditional label-only Update does not: upstream label writes touch
+	// only the label and event tables. A CAS read before such an Update
+	// therefore still succeeds after it. Label deltas commute, so both changes
+	// survive, but a CAS cannot tell that the label set moved.
 	UpdateIfMatch(id string, expectedRevision int64, opts UpdateOpts) error
 	// CloseIfMatch closes the bead only if its revision equals expectedRevision;
 	// otherwise it returns *PreconditionFailedError.
@@ -350,15 +400,30 @@ func (e *ConditionalUpdateFieldUnsupportedError) Error() string {
 	return fmt.Sprintf("conditional update: %s is not supported with revision matching", e.Field)
 }
 
-// validateConditionalUpdateOpts rejects the fields bd must persist separately
-// before any store evaluates a revision fence or mutates state.
-func validateConditionalUpdateOpts(o UpdateOpts) error {
+// conditionalLabelsGuard is implemented by stores whose UpdateIfMatch applies
+// Labels and RemoveLabels inside its revision check and moves the revision
+// with them, so the next revision read sees the label change.
+type conditionalLabelsGuard interface {
+	conditionalLabelsGuarded() bool
+}
+
+// conditionalLabelsGuarded reports whether store guards labels in
+// UpdateIfMatch. A store that does not say so refuses them.
+func conditionalLabelsGuarded(store any) bool {
+	guard, ok := store.(conditionalLabelsGuard)
+	return ok && guard.conditionalLabelsGuarded()
+}
+
+// validateConditionalUpdateOpts rejects, before any store evaluates a revision
+// fence or mutates state, the fields the store cannot fold into the guarded
+// update: the parent always, and the labels unless labelsGuarded.
+func validateConditionalUpdateOpts(o UpdateOpts, labelsGuarded bool) error {
 	switch {
 	case o.ParentID != nil:
 		return &ConditionalUpdateFieldUnsupportedError{Field: "parent_id"}
-	case len(o.Labels) > 0:
+	case !labelsGuarded && len(o.Labels) > 0:
 		return &ConditionalUpdateFieldUnsupportedError{Field: "labels"}
-	case len(o.RemoveLabels) > 0:
+	case !labelsGuarded && len(o.RemoveLabels) > 0:
 		return &ConditionalUpdateFieldUnsupportedError{Field: "remove_labels"}
 	case isEmptyUpdateOpts(o):
 		return ErrEmptyConditionalUpdate
@@ -399,6 +464,23 @@ func ConditionalWriterFor(store Store) (ConditionalWriter, bool) {
 		return provider.ConditionalWriterHandle()
 	}
 	return nil, false
+}
+
+// ConditionalWriterForTarget is ConditionalWriterFor on the store a wrapper
+// declares as its conditional-writes resolution target
+// (ConditionalWritesResolveTargeter), which is how MetadataCASWriterFor and
+// AtomicConditionalCloserFor find their capabilities through the cmd/gc
+// policy store and the typed class wrappers. Like them it applies no rollout
+// mode: it serves effects that must fence whenever the store can, such as a
+// destructive delete or an ownership release. A writer it returns can still
+// answer ErrConditionalWriteUnsupported at call time (BdStore without
+// --if-revision, a legacy SQLite layout), and the caller decides what that
+// means.
+func ConditionalWriterForTarget(store Store) (ConditionalWriter, bool) {
+	if store == nil {
+		return nil, false
+	}
+	return ConditionalWriterFor(followConditionalWritesResolveTarget(store))
 }
 
 // PreconditionFailedError reports that a conditional write was rejected because

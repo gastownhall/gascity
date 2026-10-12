@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log"
 	"os/exec"
 	"strings"
 	"time"
@@ -81,6 +83,7 @@ func workerFactoryWithStaleKeyDetectionWaiter(
 		Provider:                sp,
 		CityPath:                cityPath,
 		SearchPaths:             searchPaths,
+		Recorder:                cliFactoryEventsRecorder(cityPath, cfg),
 		UsageSink:               usageSinkForCity(cfg, cityPath),
 		ResolveTransport:        resolveTransport,
 		ResolveSessionRuntime:   workerSessionRuntimeResolverWithConfig(cityPath, cfg),
@@ -499,12 +502,15 @@ func workerKillSessionTargetWithConfig(cityPath string, store beads.Store, sp ru
 	return handle.Kill(context.Background())
 }
 
-func workerStopSessionTargetWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string) error {
+// workerStopSessionTargetForShutdownWithConfig is the city stop/restart sweep's
+// stop. It is separate from workerStopSessionTargetWithConfig so the draining
+// latitude reaches only the sweep and never a targeted operator command.
+func workerStopSessionTargetForShutdownWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string) error {
 	handle, err := workerHandleForSessionTargetWithConfig(cityPath, store, sp, cfg, target)
 	if err != nil {
 		return err
 	}
-	return handle.Stop(context.Background())
+	return handle.StopForShutdown(context.Background())
 }
 
 func workerInterruptSessionTargetWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string) error {
@@ -543,12 +549,43 @@ func workerSessionTargetAliveWithConfig(store beads.Store, sp runtime.Provider, 
 	return obs.Alive, nil
 }
 
+// workerSessionTargetAttachedWithConfig reports whether target has an attached
+// terminal. An attachment probe that could not tell answers (true, err) with
+// err wrapping runtime.ErrRuntimeUnavailable, so a destructive caller holds.
 func workerSessionTargetAttachedWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string) (bool, error) {
 	obs, err := workerObserveSessionTargetWithConfig(cityPath, store, sp, cfg, target)
 	if err != nil {
 		return false, err
 	}
+	if obs.AttachedErr != nil {
+		return true, attachProbeUnavailable(target, obs.AttachedErr)
+	}
 	return obs.Attached, nil
+}
+
+// attachmentHolds reports whether a destructive action against name must hold
+// because a human may be attached: the probe answered attached, or it could
+// not tell. In the second case err is the probe error, wrapping
+// runtime.ErrRuntimeUnavailable. A vanished session (runtime.ErrSessionNotFound)
+// is not attached and answers (false, nil).
+func attachmentHolds(sp runtime.Provider, name string) (bool, error) {
+	attached, err := runtime.IsAttachedWithError(sp, name)
+	if !runtime.AttachProbeHolds(attached, err) {
+		return false, nil
+	}
+	if err != nil {
+		return true, attachProbeUnavailable(name, err)
+	}
+	return true, nil
+}
+
+// attachProbeUnavailable names an attachment probe failure as "unknown" for
+// callers that defer on runtime.ErrRuntimeUnavailable.
+func attachProbeUnavailable(name string, err error) error {
+	if errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		return fmt.Errorf("observe attachment for %q: %w", name, err)
+	}
+	return fmt.Errorf("observe attachment for %q: %w: %w", name, runtime.ErrRuntimeUnavailable, err)
 }
 
 func workerSessionTargetLastActivityWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string) (time.Time, error) {
@@ -708,6 +745,8 @@ func resolvedWorkerRuntimeCommandForTransport(cityPath string, resolved *config.
 			if shouldPreserveStoredRuntimeCommandForTransport(command, desiredCommand, transport, optionOverrides) {
 				desiredCommand = command
 			}
+		} else {
+			log.Printf("WARNING: unhonored option pin (%v); launching without schema flags", err)
 		}
 	}
 	if !shouldPreserveStoredRuntimeCommand(command, desiredCommand) {

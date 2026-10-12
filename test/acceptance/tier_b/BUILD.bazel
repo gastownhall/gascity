@@ -1,0 +1,45 @@
+load("@rules_go//go:def.bzl", "go_test")
+
+# gazelle:build_tags acceptance_b
+
+go_test(
+    name = "tier_b_test",
+    srcs = [
+        "idle_bead_stability_test.go",
+        "lifecycle_b_test.go",
+        "pool_workquery_test.go",
+        "split_storage_migrated_formula_test.go",
+        "testenv_import_test.go",
+    ],
+    data = [
+        "//cmd/gc",
+        "//examples/bd",
+        "//:go.mod",
+        "//:repo_source_tree",
+        # Pinned prebuilt release binaries (see MODULE.bazel): hermetic bd and
+        # dolt for the dolt-backed acceptance shapes, same versions the go-test
+        # CI installs via install-bd-archive.sh / install-dolt-archive.sh.
+        "@bd_bin_v1_3_1//:bd",
+        "@dolt_bin_v2_2_0//:dolt-linux-amd64/bin/dolt",
+    ],
+    deps = [
+        "//internal/beads",
+        "//internal/beads/beadstest",
+        "//internal/fsys",
+        "//internal/testenv",
+        "//test/acceptance/helpers",
+        "@com_github_gastownhall_gascity_packs//:gascity-packs",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

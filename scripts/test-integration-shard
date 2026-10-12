@@ -82,6 +82,7 @@ formula_tests=(
   TestPersonalWorkFormulaCompileAndRun
   TestAdoptPRFormulaRetriesTransientReviewerStep
   TestAdoptPRFormulaSoftFailsGeminiAfterTransientRetries
+  TestReviewLoopApprovesInIterationTwoWithBodyRetry
   TestRetryManagedPooledWorkerRecoversClaimedAttemptAfterCrash
 )
 
@@ -93,10 +94,19 @@ review_formulas_basic_tests=(
 review_formulas_retry_tests=(
   TestAdoptPRFormulaRetriesTransientReviewerStep
   TestAdoptPRFormulaSoftFailsGeminiAfterTransientRetries
+  TestReviewLoopApprovesInIterationTwoWithBodyRetry
 )
 
 review_formulas_recovery_tests=(
   TestRetryManagedPooledWorkerRecoversClaimedAttemptAfterCrash
+)
+
+bdstore_tests=(
+  TestBdStoreConformance
+  TestBdStoreDeleteBatchOrphansExternalDependents
+  TestBdStoreMailWispInsert
+  TestPinnedBdStoreCommandRunnerReportsSilentFallback
+  TestPinnedBdStoreCommandRunnerUsesExactEnvironmentAndKeepsStdoutJSON
 )
 
 # Keep this list to top-level test names. Matching a parent test runs all of
@@ -108,7 +118,8 @@ rest_smoke_tests=(
   TestGastown_ControllerStartStop
   TestGastown_PipelineHumanToWorker
   TestGraphWorkflowSuccessPath
-  TestIntegrationEnvForPinsRealHome
+  TestIntegrationEnvForIsolatesHome
+  TestIsolatedEnvRootsKeepGCOffTheRealHome
   TestStandaloneBDEnvForDirIsolatesHome
 )
 
@@ -116,9 +127,15 @@ rest_smoke_tests=(
 # integration tag. Keep this manifest exact; scripts tests compare it with the
 # canonical linux/amd64 shard's tagged source declarations.
 cmd_gc_integration_tests=(
+  TestBlockedRepairOnRealBdIsHarmlessOnACleanStore
+  TestBlockedRepairOnRealBdRestoresOverBlockedWork
   TestCapstoneIntegrationRealMinter
   TestControllerDiscoversAddedCronOrderWithoutRestart
   TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind
+  TestManagedBeadsNativeCLICompatibility
+  TestPhase2RealTransportBoundsStayAHangDetector
+  TestPhase2RealTransportResultStillFailsWhenGenuinelyBroken
+  TestPhase2RealTransportResultToleratesASlowButCorrectStart
   TestPhase2WorkerCoreRealTransportProof
   TestRigAddIncludeResolvesScopedRegistryPackName
   TestStorageGateServesACityFromItsBeadsWorkspace
@@ -328,7 +345,7 @@ run_rest_full_shard_modulo() {
   local excluded excluded_name test_name
 
   excluded=""
-  for excluded_name in "${formula_tests[@]}" "${rest_smoke_tests[@]}" TestBdStoreConformance TestBdStoreMailWispInsert; do
+  for excluded_name in "${formula_tests[@]}" "${rest_smoke_tests[@]}" "${bdstore_tests[@]}"; do
     excluded+="${excluded_name}"$'\n'
   done
 
@@ -413,7 +430,7 @@ case "$shard" in
     run_pkg_tests "$pkg" "${review_formulas_recovery_tests[@]}"
     ;;
   bdstore)
-    run_pkg_tests "$pkg" TestBdStoreConformance TestBdStoreMailWispInsert
+    run_pkg_tests "$pkg" "${bdstore_tests[@]}"
     ;;
   rest-smoke)
     run_rest_smoke_shard

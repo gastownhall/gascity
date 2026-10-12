@@ -159,14 +159,25 @@ func seqLineAt(f *os.File, off int64) (seq uint64, start int64, ok bool) {
 // it only after each line has been unmarshalled -- the dominant cost of the
 // supervisor's per-tick order-trigger check (gcy-ocb5).
 //
-// Returns 0 (full scan) whenever the boundary cannot be established, so a log
-// that violates the ordering invariant degrades in speed, never in correctness.
+// Returns 0 (full scan) whenever the boundary cannot be established, or
+// whenever the file's own head and tail contradict the non-decreasing-seq
+// assumption sort.Search depends on, so a log that violates the ordering
+// invariant this way degrades in speed rather than silently dropping events.
+// That check is necessarily partial: it catches a reversed tail (e.g. a stale
+// post-rotation writer appending seq below the file's head) but, like any
+// sub-linear check, cannot see an out-of-order run that both starts and ends
+// within the seq range the head and tail already imply.
 func activeScanStart(f *os.File, size int64, afterSeq uint64) int64 {
 	if afterSeq == 0 || size <= 0 {
 		return 0
 	}
 	// Nothing to skip when the log's first line is already above the cursor.
-	if first, _, ok := seqLineAt(f, 0); !ok || first > afterSeq {
+	first, _, ok := seqLineAt(f, 0)
+	if !ok || first > afterSeq {
+		return 0
+	}
+	tailSeq, err := readLatestSeqFromTail(f, size)
+	if err != nil || tailSeq < first {
 		return 0
 	}
 	i := sort.Search(int(size), func(i int) bool {
@@ -175,6 +186,11 @@ func activeScanStart(f *os.File, size int64, afterSeq uint64) int64 {
 	})
 	seq, start, ok := seqLineAt(f, int64(i))
 	if !ok || seq <= afterSeq {
+		if tailSeq > afterSeq {
+			// The file's actual last record contradicts "nothing left to
+			// see"; the search converged on a stale or corrupted region.
+			return 0
+		}
 		// Cursor is at or beyond the newest event: skip the file entirely.
 		return size
 	}
@@ -653,6 +669,32 @@ func ReadLatestSeq(path string) (uint64, error) {
 			if info.LastSeq > seq {
 				seq = info.LastSeq
 			}
+		}
+	}
+	return seq, nil
+}
+
+// latestLiveSeq returns the seq the next append continues past: the active
+// log's last seq or, when the active log holds none, the highest window an
+// archive or in-flight rotating file covers. The fallback matters when a
+// rotation renamed the log and crashed, or failed to reopen it, before writing
+// its anchor: the fresh active log is empty, and every writer must still
+// continue past the rotated window instead of reissuing its seqs.
+func latestLiveSeq(path string) (uint64, error) {
+	seq, err := readLatestActiveSeq(path)
+	if err != nil || seq > 0 {
+		return seq, err
+	}
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		return 0, fmt.Errorf("reading event log directory: %w", err)
+	}
+	for _, entry := range entries {
+		if info, err := parseArchiveBasename(entry.Name()); err == nil && info.LastSeq > seq {
+			seq = info.LastSeq
+		}
+		if _, _, last, ok := parseRotatingBasename(entry.Name()); ok && last > seq {
+			seq = last
 		}
 	}
 	return seq, nil

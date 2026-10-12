@@ -20,6 +20,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/bazeltest"
 )
 
 // healthScript is the on-disk path to the health command script. The
@@ -30,6 +32,9 @@ const healthScript = "commands/health/run.sh"
 
 func repoRoot(t *testing.T) string {
 	t.Helper()
+	if root := bazeltest.OverrideRoot(); root != "" {
+		return filepath.Join(root, "examples", "bd", "dolt")
+	}
 	_, filename, _, _ := runtime.Caller(0)
 	return filepath.Dir(filename)
 }
@@ -1502,6 +1507,15 @@ func TestHealthScriptZombieScanExcludesRigLocalServers(t *testing.T) {
 		{
 			name:      "quoted port",
 			rigConfig: "dolt.port: \"19902\"\n",
+		},
+		{
+			// bd >= 1.3.1 writes `bd config set dolt.port` nested.
+			name:      "nested port",
+			rigConfig: "dolt:\n    disable-event-flush: true\n    port: 19902\n",
+		},
+		{
+			name:      "nested quoted port with comment",
+			rigConfig: "dolt:\n  port: '19902' # rig server\n",
 		},
 	}
 

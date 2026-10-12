@@ -29,6 +29,8 @@ var (
 	ErrInvalidSessionAlias = errors.New("invalid session alias")
 	// ErrSessionAliasExists reports that a live session already owns the alias.
 	ErrSessionAliasExists = errors.New("session alias already exists")
+	// ErrInvalidSessionTitle reports a blank or whitespace-only session title.
+	ErrInvalidSessionTitle = errors.New("invalid session title")
 )
 
 var (
@@ -128,6 +130,17 @@ func GenerateAdhocIdentity(base string) (string, error) {
 		base = "session"
 	}
 	return base + "-adhoc-" + compact, nil
+}
+
+// ValidateTitle refuses a blank or whitespace-only session title. Callers that
+// take a title from user input check it here so the user gets a usage error
+// rather than a storage validation error from deep inside the bead write (the
+// bead store requires a non-empty title).
+func ValidateTitle(title string) error {
+	if strings.TrimSpace(title) == "" {
+		return fmt.Errorf("%w: title cannot be empty", ErrInvalidSessionTitle)
+	}
+	return nil
 }
 
 // ValidateAlias validates a human-chosen session alias. Empty means

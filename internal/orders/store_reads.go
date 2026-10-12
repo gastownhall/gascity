@@ -397,7 +397,10 @@ func (s *Store) LastRun(name string) (time.Time, error) {
 	label := labelOrderRunPrefix + name
 	var latest time.Time
 	for _, store := range s.mixedLegStores() {
-		results, err := store.List(beads.ListQuery{
+		// Live: over a CachingStore a hard backing failure of this closed-history
+		// read comes back as a partial result holding only the cached open rows,
+		// which would read as surviving rows and shorten the cooldown.
+		results, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
 			Label:         label,
 			Limit:         1,
 			IncludeClosed: true,
@@ -432,7 +435,9 @@ func (s *Store) Cursor(name string) EventCursor {
 	label := labelOrderRunPrefix + name
 	var latest uint64
 	for _, store := range s.mixedLegStores() {
-		results, err := store.List(beads.ListQuery{
+		// Live, for LastRun's reason: a cached partial answer would regress the
+		// cursor to the open rows' seqs and replay consumed events.
+		results, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
 			Label:         label,
 			Limit:         10,
 			IncludeClosed: true,

@@ -1,0 +1,46 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "tmuxtest",
+    srcs = [
+        "guard.go",
+        "orphan_sweep.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/test/tmuxtest",
+    visibility = ["//visibility:public"],
+    deps = ["//internal/pidutil"],
+)
+
+go_test(
+    name = "tmuxtest_test",
+    srcs = [
+        "guard_test.go",
+        "orphan_sweep_reaper_test.go",
+        "orphan_sweep_sigkill_test.go",
+        "orphan_sweep_test.go",
+        "orphan_sweep_tmux_test.go",
+        "testenv_import_test.go",
+        "tmux_call_bounds_test.go",
+    ],
+    data = glob(
+        ["*.go"],
+        exclude = ["*_test.go"],
+    ),
+    embed = [":tmuxtest"],
+    deps = [
+        "//internal/pidutil",
+        "//internal/testenv",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

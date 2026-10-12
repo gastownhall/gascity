@@ -34,6 +34,9 @@ var (
 	resolveImportVersion    = packman.ResolveVersion
 	defaultImportConstraint = packman.DefaultConstraint
 	resolveImportHeadCommit = defaultImportHeadCommit
+	// resolveImportRegistryRelease answers the default constraint of a
+	// `gc import add` without --version for a registry-published source.
+	resolveImportRegistryRelease = packman.ResolveRegistryRelease
 
 	// validateComposedConfigAfterInstall loads the composed city config after
 	// install, so `gc import install` fails on the same load errors gc
@@ -156,6 +159,10 @@ entry using source plus optional version. Supported sources are:
   with the pack subpath and locked to the current commit
 - remote git repositories: cloned and locked; --version accepts a semver
   constraint or sha:<commit>
+- packs published in a configured pack registry: a semver --version (or no
+  --version) resolves against the registry's release entries, not git tags;
+  the constraint is kept, the lock records the release version and commit,
+  and the fetched content must match the release's content hash
 - remote GitHub repository subpaths: use dereferenceable tree URLs such as
   https://github.com/org/repo/tree/main/packs/foo
 
@@ -644,6 +651,8 @@ func importSvcDeps() importsvc.Deps {
 		ResolveVersion:    resolveImportVersion,
 		DefaultConstraint: defaultImportConstraint,
 		ResolveHeadCommit: resolveImportHeadCommit,
+
+		ResolveRegistryRelease: resolveImportRegistryRelease,
 	}
 }
 
@@ -654,6 +663,9 @@ func doImportAdd(fs fsys.FS, cityPath, source, nameOverride, versionFlag string,
 		fmt.Fprintln(stderr, importAddErrorLine(source, nameOverride, err)) //nolint:errcheck
 		printCredentialHint(stderr, err)
 		return 1
+	}
+	if res.RegistryRelease != "" {
+		fmt.Fprintf(stdout, "Locked to registry release %s\n", res.RegistryRelease) //nolint:errcheck
 	}
 	fmt.Fprintf(stdout, "Added import %q from %s\n", res.Name, res.Source) //nolint:errcheck
 	return 0

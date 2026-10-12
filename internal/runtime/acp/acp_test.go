@@ -151,6 +151,51 @@ func TestStart_EmptyEnvOverrideIsAbsentFromAgent(t *testing.T) {
 	}
 }
 
+// The control-socket marker is provider-authoritative: FindRuntimesBySessionID
+// decides tracking from it, so a caller must not be able to set it (pointing
+// at a live listener to look tracked) or withhold it with the empty spelling
+// that withholds inherited variables.
+func TestStart_ControlSocketMarkerOutranksEnvOverride(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		override string
+	}{
+		{name: "forged value", override: "/tmp/gc-forged-marker.sock"},
+		{name: "withheld", override: ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			marker := filepath.Join(t.TempDir(), "env.txt")
+			command := `env | sort > "$GC_ENV_MARKER"; ` + fakeACPShellCommand()
+			p := newTestProvider(t)
+			name := testName()
+			if err := p.Start(context.Background(), name, runtime.Config{
+				Command: command,
+				WorkDir: t.TempDir(),
+				Env: map[string]string{
+					controlSocketEnv: tt.override,
+					"GC_ENV_MARKER":  marker,
+				},
+			}); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			t.Cleanup(func() { _ = p.Stop(name) })
+
+			data, err := os.ReadFile(marker)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := string(data)
+			want := controlSocketEnv + "=" + p.controlSocketMarker(name) + "\n"
+			if !strings.Contains(got, want) {
+				t.Fatalf("agent environment lacks the provider marker %q: %q", want, got)
+			}
+			if tt.override != "" && strings.Contains(got, tt.override) {
+				t.Fatalf("caller override %q reached agent: %q", tt.override, got)
+			}
+		})
+	}
+}
+
 func TestStart_StagesKiroPackOverlayBeforeLaunch(t *testing.T) {
 	p := newTestProvider(t)
 	name := testName()
@@ -1309,7 +1354,7 @@ func TestNudge_NonPipeErrorSurfacesImmediately(t *testing.T) {
 
 	// sc.done is intentionally left open: if the new branch mis-routes
 	// non-pipe errors through the select, the call will hang until
-	// nudgePostWriteDrainTimeout and the test will fail.
+	// the configured stop grace and the test will fail.
 	done := make(chan error, 1)
 	go func() {
 		done <- p.Nudge(name, []runtime.ContentBlock{{Type: "text", Text: "hi"}})
@@ -1325,5 +1370,22 @@ func TestNudge_NonPipeErrorSurfacesImmediately(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Nudge stalled on non-pipe error — origin gate should have bypassed sc.done wait")
+	}
+}
+
+// LL6, I24: acp is already fresh-only. A held name returns ErrSessionExists
+// with FreshOnly set, and the holder is neither replaced nor stopped. Kills a
+// recycle of a held name inside Start.
+func TestAcpSubprocessAlreadyFreshOnly(t *testing.T) {
+	p := NewProviderWithDir(shortTempDir(t), Config{})
+	holder := &sessionConn{done: make(chan struct{})}
+	p.conns["held"] = holder
+
+	err := p.Start(context.Background(), "held", runtime.Config{Command: "true", FreshOnly: true})
+	if !errors.Is(err, runtime.ErrSessionExists) {
+		t.Fatalf("Start = %v, want runtime.ErrSessionExists", err)
+	}
+	if p.conns["held"] != holder || !holder.alive() {
+		t.Fatal("Start replaced or stopped the runtime holding the name")
 	}
 }

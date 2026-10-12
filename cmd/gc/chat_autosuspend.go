@@ -50,6 +50,14 @@ func autoSuspendChatSessions(store beads.Store, sp runtime.Provider, idleTimeout
 		if now.Sub(s.LastActive) < idleTimeout {
 			continue // not idle long enough
 		}
+		// s.Attached is a bool that reads "detached" when the probe fails;
+		// re-probe so an attachment probe that cannot tell holds the stop.
+		if attached, err := attachmentHolds(sp, s.SessionName); err != nil {
+			fmt.Fprintf(stderr, "gc start: auto-suspend session %s: %v; not suspending\n", s.ID, err) //nolint:errcheck // best-effort stderr
+			continue
+		} else if attached {
+			continue
+		}
 
 		handle, err := workerHandleForSessionWithConfig(cityPath, store, sp, cfg, s.ID)
 		if err != nil {

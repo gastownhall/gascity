@@ -1,0 +1,40 @@
+load("@rules_go//go:def.bzl", "go_test")
+
+go_test(
+    name = "examples_test",
+    srcs = [
+        "routing_namespace_test.go",
+        "testenv_import_test.go",
+    ],
+    data = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ) + [
+        "//:go.mod",
+        "//:repo_source_tree",
+        "//examples/bd/dolt:pack_files",
+        "//examples/gastown:pack_files",
+        "//examples/hyperscale:pack_files",
+        "//examples/lifecycle:pack_files",
+        "//examples/t3bridge-gastown:pack_files",
+        "//internal/bootstrap/packs/core:pack_files",
+    ],
+    deps = [
+        "//internal/bazeltest",
+        "//internal/testenv",
+        "@com_github_burntsushi_toml//:toml",
+        "@in_gopkg_yaml_v3//:yaml_v3",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

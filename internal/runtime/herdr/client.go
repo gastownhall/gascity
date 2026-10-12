@@ -66,6 +66,53 @@ func herdrErrorCode(err error) string {
 	return ""
 }
 
+// herdrCodeAnyShape returns the herdr-reported error code from err
+// regardless of which shape runWithSecrets wrapped it in: the typed
+// envelope herdrErrorCode already recovers (a zero-exit CLI invocation), or
+// the *herdrStderr shape a non-zero exit wraps instead. herdrErrorCode alone
+// cannot see through the second shape, which is what left the pane-busy
+// retry guard at provider.go unable to recognize agent_pane_busy
+// (ga-iwanrj): herdr reports that rejection via a non-zero exit.
+func herdrCodeAnyShape(err error) string {
+	if code := herdrErrorCode(err); code != "" {
+		return code
+	}
+	var hs *herdrStderr
+	if !errors.As(err, &hs) {
+		return ""
+	}
+	codes := herdrErrorCodeFromStderr(hs.Text)
+	if len(codes) == 0 {
+		return ""
+	}
+	return codes[0]
+}
+
+// herdrErrorCodeFromStderr scans stderr text from a non-zero-exit herdr
+// invocation for every JSON error envelope it contains and returns their
+// codes in the order found. Applies no filtering of its own -- callers
+// decide which code, if any, matters; disqualifyingCode's agentlessCapableCode
+// filter in particular stays there, not here.
+func herdrErrorCodeFromStderr(text string) []string {
+	var codes []string
+	for i := strings.Index(text, "{"); i >= 0; {
+		var env envelope
+		// A decoder rather than Unmarshal: it stops at the end of the first
+		// complete value, so an envelope with text after it still parses.
+		if derr := json.NewDecoder(strings.NewReader(text[i:])).Decode(&env); derr == nil && env.Error != nil {
+			if code := env.Error.Code; code != "" {
+				codes = append(codes, code)
+			}
+		}
+		next := strings.Index(text[i+1:], "{")
+		if next < 0 {
+			break
+		}
+		i += 1 + next
+	}
+	return codes
+}
+
 // disqualifyingCode returns a herdr error code that rules the paste fallback out,
 // or "" if none does. It is the only use this change makes of a failure's text, and
 // the direction is the whole point: see targetHasNoNamedAgent for why text cannot
@@ -96,20 +143,10 @@ func disqualifyingCode(err error) string {
 	if !errors.As(err, &hs) {
 		return ""
 	}
-	for i := strings.Index(hs.Text, "{"); i >= 0; {
-		var env envelope
-		// A decoder rather than Unmarshal: it stops at the end of the first
-		// complete value, so an envelope with text after it still parses.
-		if derr := json.NewDecoder(strings.NewReader(hs.Text[i:])).Decode(&env); derr == nil && env.Error != nil {
-			if code := env.Error.Code; code != "" && !agentlessCapableCode(code) {
-				return code
-			}
+	for _, code := range herdrErrorCodeFromStderr(hs.Text) {
+		if !agentlessCapableCode(code) {
+			return code
 		}
-		next := strings.Index(hs.Text[i+1:], "{")
-		if next < 0 {
-			break
-		}
-		i += 1 + next
 	}
 	return ""
 }

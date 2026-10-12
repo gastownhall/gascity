@@ -124,10 +124,11 @@ func TestFindBareBDCommands(t *testing.T) {
 func TestCoreMaintenanceExecAssets(t *testing.T) {
 	required := []string{
 		"assets/scripts/_bd_trace.sh",
-		"assets/scripts/dolt-target.sh",
 		"assets/scripts/escalate.sh",
 		"assets/scripts/jsonl-export.sh",
+		"assets/scripts/order_outcome.sh",
 		"assets/scripts/reaper.sh",
+		"assets/scripts/scope_bd.sh",
 		"orders/jsonl-export.toml",
 		"orders/reaper.toml",
 	}
@@ -142,10 +143,30 @@ func TestCoreMaintenanceExecAssets(t *testing.T) {
 		"formulas/mol-dog-reaper.toml",
 		"orders/mol-dog-jsonl.toml",
 		"orders/mol-dog-reaper.toml",
+		// Retired with the move to bd verbs: the maintenance orders no
+		// longer resolve a Dolt port of their own.
+		"assets/scripts/dolt-target.sh",
 	}
 	for _, path := range retired {
 		if _, err := fs.Stat(PackFS, path); err == nil {
 			t.Fatalf("core pack must not carry retired Dog maintenance asset %s", path)
+		}
+	}
+}
+
+func TestReaperScriptUsesUTCTimestampForAgeGates(t *testing.T) {
+	data, err := fs.ReadFile(PackFS, "assets/scripts/reaper.sh")
+	if err != nil {
+		t.Fatalf("core pack missing reaper.sh: %v", err)
+	}
+	commentLine := regexp.MustCompile(`^[ \t]*#`)
+	localNow := regexp.MustCompile(`\bNOW[ \t]*\(`)
+	for i, line := range strings.Split(string(data), "\n") {
+		if commentLine.MatchString(line) {
+			continue
+		}
+		if localNow.MatchString(line) {
+			t.Errorf("reaper.sh:%d compares against server-local NOW() but bead timestamps are UTC; use UTC_TIMESTAMP(): %s", i+1, strings.TrimSpace(line))
 		}
 	}
 }

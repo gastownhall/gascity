@@ -38,7 +38,9 @@ func TestPreflightBlocksNativeOnABackendGCDoesNotImplement(t *testing.T) {
 	assertPreflightVerdict(t, result, PreflightVerdictBlocked, false)
 	assertCheckOrder(t, result)
 	assertCheckState(t, result, PreflightCheckMetadataBackend, PreflightCheckFail)
-	assertCheckState(t, result, PreflightCheckBDContextAgreement, PreflightCheckPass)
+	// bd context is not consulted once metadata_backend has blocked: the
+	// bd-context checks report that, as a WARN, instead of a cross-check.
+	assertCheckState(t, result, PreflightCheckBDContextAgreement, PreflightCheckWarn)
 	assertCheckState(t, result, PreflightCheckContractShape, PreflightCheckFail)
 	for _, id := range []PreflightCheckID{PreflightCheckMetadataBackend, PreflightCheckContractShape} {
 		if summary := findPreflightCheck(t, result, id).Summary; !strings.Contains(summary, `"postgres"`) {

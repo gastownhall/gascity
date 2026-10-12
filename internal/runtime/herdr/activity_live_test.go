@@ -73,15 +73,7 @@ func TestActivityLive(t *testing.T) {
 
 	// working → continuously active: successive reads advance and stay ~now.
 	report("working")
-	waitActivity(t, p, "act-a", 5*time.Second, func(got time.Time) bool {
-		return !got.IsZero() && time.Since(got) < 100*time.Millisecond
-	})
-	w1 := lastActivity(t, p, "act-a")
-	time.Sleep(30 * time.Millisecond)
-	w2 := lastActivity(t, p, "act-a")
-	if !w2.After(w1) {
-		t.Fatalf("working must read continuously active: %v then %v", w1, w2)
-	}
+	assertWorkingContinuouslyActive(t, p, "act-a", first)
 
 	// working → idle: the stamp freezes at the observed transition and ages.
 	report("idle")

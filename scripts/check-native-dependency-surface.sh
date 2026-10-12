@@ -21,7 +21,13 @@ max_modules="${GC_NATIVE_DEP_MAX_MODULES:-737}"
 # grows the binary ~90KB/day, so 180,000,000 gives ~88 days of headroom.
 # Re-baseline with fresh measurement + growth-rate evidence, not an
 # arbitrary bump, when this next fails.
-max_binary_bytes="${GC_NATIVE_DEP_MAX_BINARY_BYTES:-180000000}"
+#
+# Re-baselined 2026-10-05 (lane split151, #7074). Same build command:
+# origin/main bf395c1fe4 measured 179,875,091 bytes and the split-storage
+# clear adds ~156KB (180,031,776). Growth since the 2026-08-29 measurement
+# is 7.78MB over 37 days, ~210KB/day, so 190,000,000 gives ~48 days of
+# headroom from main's measurement.
+max_binary_bytes="${GC_NATIVE_DEP_MAX_BINARY_BYTES:-190000000}"
 max_aws_modules="${GC_NATIVE_DEP_MAX_AWS_MODULES:-25}"
 max_azure_modules="${GC_NATIVE_DEP_MAX_AZURE_MODULES:-9}"
 max_dolthub_modules="${GC_NATIVE_DEP_MAX_DOLTHUB_MODULES:-15}"

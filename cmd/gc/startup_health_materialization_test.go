@@ -54,7 +54,10 @@ func runMaterializedStartupFailureCycles(t *testing.T, env *reconcilerTestEnv) s
 			sn, beadID = k, v
 		}
 		switch {
-		case attempt == 1:
+		case attempt == 1 || (sn != name && beadOwnsPoolSessionNameForID(sn, beadID)):
+			// A bead-scoped pool name (<template>-<beadID>) is new per
+			// generation; the startup-health episode stays stable because it
+			// keys on the pool identity (startupHealthEpisodeKey), not on sn.
 			name = sn
 			env.sp.StartErrors[name] = errors.New("provider start failure")
 			// reconcileSessionBeads (unlike syncSessionBeads's CREATE path)
@@ -118,6 +121,23 @@ func assertQuarantineBlocksFurtherMaterializedStarts(t *testing.T, env *reconcil
 		t.Fatalf("post-quarantine syncSessionBeads: unexpected stderr: %s", stderr.String())
 	}
 	beadID, ok := openIndex[name]
+	if !ok && len(openIndex) == 1 {
+		// Bead-scoped pool shape: the post-quarantine bead is a new generation
+		// with its own name. Re-key the desired entry onto it, as production's
+		// per-tick rebuild does.
+		for sn, id := range openIndex {
+			if beadOwnsPoolSessionNameForID(sn, id) {
+				for k, tp := range env.desiredState {
+					delete(env.desiredState, k)
+					tp.SessionName = sn
+					env.desiredState[sn] = tp
+					break
+				}
+				env.sp.StartErrors[sn] = errors.New("provider start failure")
+				name, beadID, ok = sn, id, true
+			}
+		}
+	}
 	if !ok {
 		t.Fatalf("post-quarantine syncSessionBeads did not preserve an open bead for %q (openIndex=%v)", name, openIndex)
 	}
@@ -255,7 +275,8 @@ func TestPoolSessionStartupHealthEpisodeAccruesViaRealMaterialization(t *testing
 	}
 
 	is := sessionpkg.NewStore(beads.SessionStore{Store: env.store})
-	episode, err := is.LoadStartupHealthEpisode(name)
+	episodeKey := boundSessionNameLength(poolIdentitySessionName(instanceName, "polecat") + poolRuntimeNameSuffix)
+	episode, err := is.LoadStartupHealthEpisode(episodeKey)
 	if err != nil {
 		t.Fatalf("LoadStartupHealthEpisode: %v", err)
 	}
@@ -273,6 +294,7 @@ func TestPoolSessionStartupHealthEpisodeAccruesViaRealMaterialization(t *testing
 	// startup_health_reconcile_test.go tests do via a synthesized replacement
 	// bead after their own identical loop.
 	bead := assertQuarantineBlocksFurtherMaterializedStarts(t, env, name)
+	name = strings.TrimSpace(bead.Metadata["session_name"])
 
 	open, err := env.store.ListByLabel(sessionBeadLabel, 0)
 	if err != nil {
@@ -295,4 +317,10 @@ func TestPoolSessionStartupHealthEpisodeAccruesViaRealMaterialization(t *testing
 	if got := bead.Metadata[startupHealthActiveKindMetadataKey]; got != string(episode.Kind) {
 		t.Errorf("%s = %q, want %q (mirrored episode Kind)", startupHealthActiveKindMetadataKey, got, string(episode.Kind))
 	}
+}
+
+// beadOwnsPoolSessionNameForID reports whether sn is the bead-scoped pool
+// runtime name of bead id (<template>-<id>).
+func beadOwnsPoolSessionNameForID(sn, id string) bool {
+	return id != "" && strings.HasSuffix(sn, "-"+id)
 }

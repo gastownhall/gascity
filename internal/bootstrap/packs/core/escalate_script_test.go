@@ -60,30 +60,16 @@ func runEscalate(t *testing.T, binDir string, extraEnv ...string) (string, error
 
 func runIncidentEscalate(t *testing.T, binDir, incidentDir, now, fingerprint, message string, extraEnv ...string) (string, error) {
 	t.Helper()
-	cmd := exec.Command("bash", escalateScriptPath,
+	env := append([]string{
+		"GC_ESCALATE_INCIDENT_DIR=" + incidentDir,
+		"GC_ESCALATE_NOW_EPOCH=" + now,
+		"GC_ESCALATE_REMINDER_SECONDS=86400",
+	}, extraEnv...)
+	return runPackScript(t, escalateScriptPath, binDir, escalationEnvKeys, env,
 		"--subject", "Dolt backup failed [MEDIUM]",
 		"--message", message,
 		"--incident-key", "dolt-backup:hq",
 		"--fingerprint", fingerprint)
-	inherited := os.Environ()
-	env := make([]string, 0, len(inherited)+4+len(extraEnv))
-	for _, entry := range inherited {
-		if key, _, ok := strings.Cut(entry, "="); ok {
-			if _, skip := escalationEnvKeys[key]; skip {
-				continue
-			}
-		}
-		env = append(env, entry)
-	}
-	env = append(env,
-		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
-		"GC_ESCALATE_INCIDENT_DIR="+incidentDir,
-		"GC_ESCALATE_NOW_EPOCH="+now,
-		"GC_ESCALATE_REMINDER_SECONDS=86400")
-	env = append(env, extraEnv...)
-	cmd.Env = env
-	out, err := cmd.CombinedOutput()
-	return string(out), err
 }
 
 // TestEscalateWakesAnAgentRecipient pins that an escalation addressed to an

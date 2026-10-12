@@ -388,11 +388,10 @@ func TestBeadListLegacyCityDoesNotSmuggleCityStore(t *testing.T) {
 //	                 global sort would change the bytes a single-store city
 //	                 already serves
 //
-// Per-leg order is deterministic but NOT canonical across leg kinds: a
-// caching-wrapped work store emits (priority, created_at, id) via
-// sortBeadsReadyOrder, while the canonical relocated graph binding
-// (beads.SQLiteStore) emits (created_at, id) with no priority term at all
-// (sqliteReadySQL). Both sides therefore normalize with
+// Each leg emits canonical (priority, created_at, id) order — a caching-wrapped
+// work store via sortBeadsReadyOrder, the canonical relocated graph binding
+// (beads.SQLiteStore) in its own readyRows — but the concatenation of sorted
+// legs is not sorted. Both sides therefore normalize with
 // beads.SortBeadsReadyOrder before comparing — a load-bearing step, not a
 // formality. The graph leg goes LAST, which matches the CLI composite's
 // work-then-infra leg order.

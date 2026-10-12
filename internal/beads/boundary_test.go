@@ -8,10 +8,18 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/bazeltest"
 )
 
 // repoRoot returns the repository root by navigating from this file's location.
 func repoRoot() string {
+	// Bazel runfiles builds compile with runfiles-relative paths, so
+	// runtime.Caller arithmetic lands inside the package instead of the repo
+	// root; an explicit root keeps the boundary walk meaningful there.
+	if root := bazeltest.OverrideRoot(); root != "" {
+		return root
+	}
 	_, filename, _, _ := runtime.Caller(0)
 	return filepath.Join(filepath.Dir(filename), "..", "..")
 }

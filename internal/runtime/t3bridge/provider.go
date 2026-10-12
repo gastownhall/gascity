@@ -1778,9 +1778,25 @@ func (p *Provider) removeWorktreeForThread(thread map[string]interface{}) {
 	_ = p.rpcRemoveWorktree(base, worktreePath)
 }
 
+// clearBridgeMeta erases the drain markers this provider left on a session.
+//
+// The acknowledgement's provenance goes with the acknowledgement. Both keys have
+// exactly its lifetime, and Stop reaches here on the isPersistentAgent branch
+// too — where the session is deliberately LEFT RUNNING: same pane, same
+// instance_token. Left behind, a later drain of that still-live incarnation
+// finds an agent source beside a stamp that still matches the row, reads a dead
+// drain's acknowledgement as current, and declines to remind in total silence —
+// the ga-o6uw0 wedge. Removed, the same re-drain finds an unbound source,
+// classifies it unprovable, and asks again.
+//
+// The key names are spelled out rather than shared with cmd/gc's constants
+// because that package is main and cannot be imported; the eraser census in
+// cmd/gc/drain_reminder_ack_binding_test.go is what holds the two in step.
 func (p *Provider) clearBridgeMeta(name string) {
 	_ = removeMetaValue(name, "GC_DRAIN")
 	_ = removeMetaValue(name, "GC_DRAIN_ACK")
+	_ = removeMetaValue(name, "GC_DRAIN_ACK_SOURCE")
+	_ = removeMetaValue(name, "GC_DRAIN_ACK_REQUESTER_INSTANCE_TOKEN")
 	_ = removeMetaValue(name, "drained")
 }
 
@@ -1949,6 +1965,23 @@ func beadStoreForWatcher(workDir string, env map[string]string) *beads.CachingSt
 	return beads.NewCachingStore(bd, nil)
 }
 
+// watchedBeadEvent filters the journal to the bead events the watcher
+// projects and canonicalizes their identity. The cache applies the payload
+// under the snapshot's own ID, so the subject the watcher then reads back must
+// be that same ID; an event whose subject names a different bead is dropped
+// rather than reported as activity on the wrong bead.
+func watchedBeadEvent(ev events.Event) (events.Event, bool) {
+	if ev.Type != events.BeadUpdated && ev.Type != events.BeadClosed && ev.Type != events.BeadCreated {
+		return events.Event{}, false
+	}
+	id, err := beads.BeadEventID(ev.Subject, ev.Payload)
+	if err != nil || id == "" {
+		return events.Event{}, false
+	}
+	ev.Subject = id
+	return ev, true
+}
+
 func beadEventRelevant(ev events.Event, bead beads.Bead, agentName, currentBead string) bool {
 	if ev.Actor == agentName {
 		return true
@@ -2084,6 +2117,13 @@ func latestSeqWithBackoff(ctx context.Context, latest func() (uint64, error)) (u
 	return 0, lastErr
 }
 
+// openWatcherEvents opens the city's event log for the event watcher. It is
+// read-only: the watcher never records, so it holds no write handle that would
+// pin a rotated-away log on disk.
+func openWatcherEvents(cityPath string) *events.FileRecorder {
+	return events.NewReadOnlyFileProvider(filepath.Join(cityPath, ".gc", "events.jsonl"), io.Discard)
+}
+
 func (p *Provider) runEventWatcher(ctx context.Context, _ string, cfg runtime.Config, binding threadBinding, envelope StartupEnvelope, providerName string) {
 	cityPath := cfg.Env["GC_CITY_PATH"]
 	if cityPath == "" {
@@ -2093,11 +2133,7 @@ func (p *Provider) runEventWatcher(ctx context.Context, _ string, cfg runtime.Co
 		return
 	}
 
-	eventPath := filepath.Join(cityPath, ".gc", "events.jsonl")
-	recorder, err := events.NewFileRecorder(eventPath, io.Discard)
-	if err != nil {
-		return
-	}
+	recorder := openWatcherEvents(cityPath)
 	defer func() { _ = recorder.Close() }()
 
 	cache := beadStoreForWatcher(cfg.WorkDir, cfg.Env)
@@ -2129,7 +2165,8 @@ func (p *Provider) runEventWatcher(ctx context.Context, _ string, cfg runtime.Co
 		if err != nil {
 			return
 		}
-		if ev.Type != events.BeadUpdated && ev.Type != events.BeadClosed && ev.Type != events.BeadCreated {
+		ev, ok := watchedBeadEvent(ev)
+		if !ok {
 			continue
 		}
 		cache.ApplyEvent(ev.Type, ev.Payload)

@@ -1,0 +1,40 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "usage",
+    srcs = [
+        "exec_sink.go",
+        "local_sink.go",
+        "recent_reader.go",
+        "totals.go",
+        "usage.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/usage",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "usage_test",
+    srcs = [
+        "exec_sink_test.go",
+        "local_sink_test.go",
+        "recent_reader_test.go",
+        "testenv_import_test.go",
+        "totals_test.go",
+        "usage_test.go",
+    ],
+    embed = [":usage"],
+    deps = ["//internal/testenv"],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

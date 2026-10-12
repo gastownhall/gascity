@@ -20,6 +20,36 @@ func namedSocketPath(socketName string) string {
 	return filepath.Join(tmpDir, fmt.Sprintf("tmux-%d", os.Getuid()), socketName)
 }
 
+// serverSocketPath returns the socket path of the server t talks to: its
+// named -L socket, or tmux's "default" socket when SocketName is empty.
+func (t *Tmux) serverSocketPath() string {
+	name := t.cfg.SocketName
+	if name == "" {
+		name = "default"
+	}
+	return namedSocketPath(name)
+}
+
+// observeServerSocket observes path with the injected observer, or with
+// observeNamedSocket when none is set. Nil means the socket is safely absent
+// or stale.
+func (t *Tmux) observeServerSocket(ctx context.Context, path string) error {
+	observer := t.serverSocketObserver
+	if observer == nil {
+		observer = observeNamedSocket
+	}
+	return observer(ctx, path)
+}
+
+// serverConfirmedDead reports whether the server's socket is missing, or
+// refuses connections on a stable inode, so that no server can be listening.
+// Any other observation, including a live or unreadable socket, is false.
+func (t *Tmux) serverConfirmedDead() bool {
+	ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
+	defer cancel()
+	return t.observeServerSocket(ctx, t.serverSocketPath()) == nil
+}
+
 // observeNamedSocket distinguishes a safely absent or stale named socket from
 // a socket that might still belong to a live server. It fails closed whenever
 // its filesystem and dial observations cannot prove it is safe to create.

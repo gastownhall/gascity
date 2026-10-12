@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/usage"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
@@ -276,9 +277,9 @@ func (s *seededState) OrdersBeadStore() beads.OrdersStore {
 // and a state that censused nothing has cleared nothing.
 func (s *seededState) ClassBindingHasLegacyResidents(beads.Store) bool { return true }
 
-func (s *seededState) Orders() []orders.Order    { return nil }
-func (s *seededState) OrdersAll() []orders.Order { return nil }
-func (s *seededState) Poke()                     {}
+func (s *seededState) Orders() []orders.Order      { return nil }
+func (s *seededState) OrdersAll() []orders.Order   { return nil }
+func (s *seededState) Enqueue(...reconcilekey.Key) {}
 
 func (s *seededState) ServiceRegistry() workspacesvc.Registry   { return nil }
 func (s *seededState) ExtMsgServices() *extmsg.Services         { return s.extmsgSvc }

@@ -208,6 +208,40 @@ func TestProviderPendingMapsTmuxSessionNotFoundToRuntimeSentinel(t *testing.T) {
 	}
 }
 
+// A tmux server that cannot be reached is a failed observation, not an empty
+// pane: Pending must not answer "nothing pending", and its message must not
+// read as gone to runtime.IsSessionGone. A server that answered with no
+// sessions does prove the pane is gone.
+func TestProviderPendingNoServerMapping(t *testing.T) {
+	cases := []struct {
+		name            string
+		err             error
+		wantUnavailable bool
+		wantNotFound    bool
+	}{
+		{name: "no_server", err: ErrNoServer, wantUnavailable: true},
+		{name: "no_current_target", err: ErrNoCurrentTarget, wantNotFound: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := &Provider{tm: &Tmux{exec: &fakeExecutor{err: tc.err}}}
+			pending, err := provider.Pending("worker")
+			if pending != nil || err == nil {
+				t.Fatalf("Pending = (%#v, %v), want (nil, error)", pending, err)
+			}
+			if got := errors.Is(err, runtime.ErrRuntimeUnavailable); got != tc.wantUnavailable {
+				t.Fatalf("errors.Is(%v, ErrRuntimeUnavailable) = %v, want %v", err, got, tc.wantUnavailable)
+			}
+			if got := errors.Is(err, runtime.ErrSessionNotFound); got != tc.wantNotFound {
+				t.Fatalf("errors.Is(%v, ErrSessionNotFound) = %v, want %v", err, got, tc.wantNotFound)
+			}
+			if got := runtime.IsSessionGone(err); got != tc.wantNotFound {
+				t.Fatalf("IsSessionGone(%v) = %v, want %v", err, got, tc.wantNotFound)
+			}
+		})
+	}
+}
+
 func TestProviderRespondMapsTmuxSessionNotFoundToRuntimeSentinel(t *testing.T) {
 	provider := &Provider{
 		tm: &Tmux{
@@ -372,7 +406,7 @@ func pendingInteractionSeamResult(session string, pending *runtime.PendingIntera
 		return workertest.Fail(profile, workertest.RequirementInteractionPending,
 			fmt.Sprintf("tmux calls = %d, want 1", len(calls))).WithEvidence(evidence)
 	}
-	want := []string{"-u", "-L", "phase2-sock", "capture-pane", "-p", "-t", session, "-S", "-40"}
+	want := []string{"-u", "-L", "phase2-sock", "capture-pane", "-p", "-t", "=" + session + ":", "-S", "-40"}
 	if err := matchTMuxCall(calls[0], want); err != nil {
 		evidence["tmux_call"] = strings.Join(calls[0], " ")
 		return workertest.Fail(profile, workertest.RequirementInteractionPending, err.Error()).WithEvidence(evidence)
@@ -427,10 +461,10 @@ func respondInteractionSeamResult(session string, err error, calls [][]string) w
 	// keystroke. Here the probe reports not-parked ("0"), so no -X cancel is
 	// issued and delivery is otherwise unchanged.
 	wantCalls := [][]string{
-		{"-u", "-L", "phase2-sock", "capture-pane", "-p", "-t", session, "-S", "-40"},
-		{"-u", "-L", "phase2-sock", "display-message", "-t", session, "-p", "#{pane_in_mode}"},
-		{"-u", "-L", "phase2-sock", "send-keys", "-t", session, "-l", "1"},
-		{"-u", "-L", "phase2-sock", "capture-pane", "-p", "-t", session, "-S", "-40"},
+		{"-u", "-L", "phase2-sock", "capture-pane", "-p", "-t", "=" + session + ":", "-S", "-40"},
+		{"-u", "-L", "phase2-sock", "display-message", "-t", "=" + session + ":", "-p", "#{pane_in_mode}"},
+		{"-u", "-L", "phase2-sock", "send-keys", "-t", "=" + session + ":", "-l", "1"},
+		{"-u", "-L", "phase2-sock", "capture-pane", "-p", "-t", "=" + session + ":", "-S", "-40"},
 	}
 	for i, want := range wantCalls {
 		if callErr := matchTMuxCall(calls[i], want); callErr != nil {

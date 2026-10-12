@@ -419,6 +419,81 @@ func TestBdStoreGetEphemeralFallbackReturnsErrNotFoundWhenMissing(t *testing.T) 
 	}
 }
 
+// A failed wisp fallback leaves absence unproven: Get must return the query's
+// real error, not ErrNotFound, so callers that act on "confirmed absent" (the
+// process-table orphan sweep kills live runtimes on it) do not act on a
+// transient read failure.
+func TestBdStoreGetEphemeralFallbackErrorIsNotErrNotFound(t *testing.T) {
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd show --json gc-wisp-live`: {
+			err: fmt.Errorf("issue gc-wisp-live not found"),
+		},
+		`bd query --json ephemeral=true AND id=gc-wisp-live --all --limit 1`: {
+			err: fmt.Errorf("exit status 1: dolt: connection refused"),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+	_, err := s.Get("gc-wisp-live")
+	if err == nil {
+		t.Fatal("Get succeeded, want the wisp query error")
+	}
+	if errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("err = %v; a failed wisp fallback must not read as ErrNotFound", err)
+	}
+	if !strings.Contains(err.Error(), "connection refused") {
+		t.Fatalf("err = %v, want the underlying wisp query error", err)
+	}
+}
+
+// A wisp fallback that itself reports a bead-level miss is still a miss.
+func TestBdStoreGetEphemeralFallbackNotFoundErrorIsErrNotFound(t *testing.T) {
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd show --json gc-wisp-gone`: {
+			err: fmt.Errorf("issue gc-wisp-gone not found"),
+		},
+		`bd query --json ephemeral=true AND id=gc-wisp-gone --all --limit 1`: {
+			err: fmt.Errorf("exit status 1: no issues found"),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+	if _, err := s.Get("gc-wisp-gone"); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
+// Infrastructure failures whose text happens to say "not found" (a missing bd
+// binary, Dolt's "database not found" mid-restart) say nothing about the bead
+// and must not map to ErrNotFound.
+func TestBdStoreGetInfraNotFoundIsNotErrNotFound(t *testing.T) {
+	for _, msg := range []string{
+		`exec: "bd": executable file not found in $PATH`,
+		"exit status 1: Error: database not found: beads",
+		"exit status 1: Error 1146: table not found: wisps",
+		"exit status 1: beads workspace not found: /city/.beads",
+		"sh: 1: bd: command not found",
+	} {
+		t.Run(msg, func(t *testing.T) {
+			runner := func(_, _ string, _ ...string) ([]byte, error) {
+				return nil, errors.New(msg)
+			}
+			s := beads.NewBdStore("/city", runner)
+			_, err := s.Get("gc-wisp-abc")
+			if err == nil {
+				t.Fatal("Get succeeded, want an error")
+			}
+			if errors.Is(err, beads.ErrNotFound) {
+				t.Fatalf("err = %v; an infrastructure failure must not read as ErrNotFound", err)
+			}
+		})
+	}
+}
+
 func TestBdStoreListUsesDecodedUpdatedAtForUpdatedBefore(t *testing.T) {
 	cutoff := time.Date(2026, 1, 3, 0, 0, 0, 0, time.UTC)
 	runner := func(_, name string, args ...string) ([]byte, error) {
@@ -5364,5 +5439,51 @@ func TestIsTimeoutError(t *testing.T) {
 				t.Errorf("IsTimeoutError(%v) = %v, want %v", tc.err, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestBdStoreReclaimStaleReturnsPreviousOwner covers ga-7rj87d FR2: the
+// reclaim call must be scoped to exactly the one candidate ID (bd reclaim
+// --id <id>), not a bare sweep, and must surface the previous owner so the
+// caller can report it on the hook.claim.reclaimed_stale event (FR5).
+func TestBdStoreReclaimStaleReturnsPreviousOwner(t *testing.T) {
+	var gotArgs []string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if name != "bd" {
+			t.Fatalf("name = %q, want bd", name)
+		}
+		gotArgs = append([]string(nil), args...)
+		return []byte(`{"reclaimed":[{"id":"bd-42","previous_owner":"worker-1"}],"count":1,"scoped":true}`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	reclaimed, previousOwner, err := s.ReclaimStale("bd-42")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reclaimed {
+		t.Fatal("ReclaimStale reclaimed = false, want true")
+	}
+	if previousOwner != "worker-1" {
+		t.Fatalf("previousOwner = %q, want worker-1", previousOwner)
+	}
+	if got := strings.Join(gotArgs, " "); got != "reclaim --id bd-42 --json" {
+		t.Fatalf("args = %q, want scoped single-id reclaim args", got)
+	}
+}
+
+// TestBdStoreReclaimStaleReportsNothingReclaimed covers ga-7rj87d FR4: when
+// bd reclaim reports nothing reclaimed for the scoped id, ReclaimStale must
+// report false without error so the caller leaves the candidate untouched.
+func TestBdStoreReclaimStaleReportsNothingReclaimed(t *testing.T) {
+	runner := func(_, _ string, _ ...string) ([]byte, error) {
+		return []byte(`{"reclaimed":[],"count":0,"scoped":true}`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	reclaimed, previousOwner, err := s.ReclaimStale("bd-42")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reclaimed {
+		t.Fatalf("ReclaimStale reclaimed = true, want false; previousOwner=%q", previousOwner)
 	}
 }

@@ -2230,42 +2230,54 @@ func autocloseCityPathForStoreRoot(storeRoot string) string {
 
 // doConvoyAutocloseWith checks whether the closed bead's legacy parent or
 // tracks dependents are convoys with all children closed, and if so closes
-// them. All errors are silently swallowed — this is best-effort
-// infrastructure called from a bd hook script.
-func doConvoyAutocloseWith(store beads.Store, rec events.Recorder, beadID string, stdout, _ io.Writer) {
+// them. All errors are swallowed — this is best-effort infrastructure called
+// from a bd hook script — but reported in the returned run, so the controller
+// can retry a run a read failure or a refused close left undecided.
+func doConvoyAutocloseWith(store beads.Store, rec events.Recorder, beadID string, stdout, _ io.Writer) autocloseRun {
+	var run autocloseRun
 	bead, err := store.Get(beadID)
 	if err != nil {
-		return
+		run.note(err)
+		return run
 	}
 
 	seen := make(map[string]bool)
 	if bead.ParentID != "" {
 		parent, err := store.Get(bead.ParentID)
+		run.note(err)
 		if err == nil {
 			seen[parent.ID] = true
-			autocloseConvoyIfComplete(store, rec, parent, stdout)
+			autocloseConvoyIfComplete(store, rec, parent, stdout, &run)
 		}
 	}
 
 	trackingConvoys, err := convoycore.TrackingConvoysForItem(store, beadID)
 	if err != nil {
-		return
+		run.note(err)
+		return run
 	}
 	for _, convoy := range trackingConvoys {
 		if seen[convoy.ID] {
 			continue
 		}
 		seen[convoy.ID] = true
-		autocloseConvoyIfComplete(store, rec, convoy, stdout)
+		autocloseConvoyIfComplete(store, rec, convoy, stdout, &run)
 	}
+	return run
 }
 
-func autocloseConvoyIfComplete(store beads.Store, rec events.Recorder, convoy beads.Bead, stdout io.Writer) {
-	if convoy.Type != "convoy" || convoycore.IsTerminalStatus(convoy.Status) || hasLabel(convoy.Labels, "owned") {
+// convoyStillAutocloses is autoclose's premise about the convoy row itself.
+func convoyStillAutocloses(convoy beads.Bead) bool {
+	return convoy.Type == "convoy" && !convoycore.IsTerminalStatus(convoy.Status) && !hasLabel(convoy.Labels, "owned")
+}
+
+func autocloseConvoyIfComplete(store beads.Store, rec events.Recorder, convoy beads.Bead, stdout io.Writer, run *autocloseRun) {
+	if !convoyStillAutocloses(convoy) {
 		return
 	}
 
 	children, err := listConvoyChildren(store, convoy.ID, true)
+	run.note(err)
 	if err != nil || len(children) == 0 {
 		return
 	}
@@ -2275,7 +2287,11 @@ func autocloseConvoyIfComplete(store beads.Store, rec events.Recorder, convoy be
 		}
 	}
 
-	if err := closeConvoyWithReason(store, convoy.ID, convoyAutocloseReason); err != nil {
+	closed, err := autocloseCloseIfStill(store, convoy.ID, convoyAutocloseReason, convoyStillAutocloses, func() error {
+		return closeConvoyWithReason(store, convoy.ID, convoyAutocloseReason)
+	})
+	run.note(err)
+	if err != nil || !closed {
 		return
 	}
 

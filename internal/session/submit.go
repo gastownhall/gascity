@@ -674,6 +674,12 @@ func ensureSessionSubmitPoller(cityPath, agentName, sessionName string) error {
 }
 
 func isGoTestExecutable(path string) bool {
+	// The running bazel test binary drops the .test suffix but keeps the
+	// <target>_test name and exports TEST_SRCDIR; probes that exec a renamed
+	// spy binary must not match.
+	if os.Getenv("TEST_SRCDIR") != "" && path == os.Args[0] && strings.HasSuffix(filepath.Base(path), "_test") {
+		return true
+	}
 	return strings.HasSuffix(filepath.Base(path), ".test")
 }
 
