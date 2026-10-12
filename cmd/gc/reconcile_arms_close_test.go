@@ -874,18 +874,32 @@ func TestFreshClosableOwnZombieOnly(t *testing.T) {
 
 // Kills a failed create closed under its still-leased claim (SESS-058,
 // mc-mcud0): legacy keeps it open while the pending-create lease holds, a
-// start possibly holding it; once the lease expires, A21 closes it.
+// start possibly holding it; once the lease expires, or its agent is
+// suspended, A21 closes it, and a lease anchor skewed ahead of the clock
+// (v5.9r) holds nothing.
 func TestFailedCreateHeldWhileLeased(t *testing.T) {
+	ago := func(d time.Duration) string { return gatherNow.Add(d).Format(time.RFC3339) }
 	for _, c := range []struct {
-		name    string
-		started time.Duration
-		want    string
+		name      string
+		meta      []string
+		suspended bool
+		want      string
 	}{
-		{"leased (never started, inside the deadline)", -time.Minute, decideFailedCreateLeased},
-		{"the lease expired", -11 * time.Minute, decideCloseFailedCreate},
+		{"leased (never started, inside the deadline)", []string{"pending_create_started_at", ago(-time.Minute)}, false, decideFailedCreateLeased},
+		{"leased (a start in flight)", []string{"pending_create_started_at", ago(-11 * time.Minute), "last_woke_at", ago(-10 * time.Second)}, false, decideFailedCreateLeased},
+		{"the lease expired", []string{"pending_create_started_at", ago(-11 * time.Minute)}, false, decideCloseFailedCreate},
+		{"its agent suspended", []string{"pending_create_started_at", ago(-time.Minute)}, true, decideCloseFailedCreate},
+		{"an anchor 6 minutes ahead", []string{"pending_create_started_at", ago(6 * time.Minute)}, false, decideCloseFailedCreate},
+		{"an anchor a year ahead", []string{"pending_create_started_at", ago(365 * 24 * time.Hour)}, false, decideCloseFailedCreate},
 	} {
-		cc := newCloseCase(t, livenessGone, desireNone, "state", "failed-create", "pending_create_claim", "true", "pending_create_started_at", gatherNow.Add(c.started).Format(time.RFC3339))
+		cc := newCloseCase(t, livenessGone, desireNone, append([]string{"state", "failed-create", "pending_create_claim", "true"}, c.meta...)...)
 		cc.entry().Reason = reasonFailedCreate
+		for i := range cc.cfg.Agents {
+			if cc.cfg.Agents[i].Name == "worker" {
+				cc.cfg.Agents[i].Suspended = c.suspended
+			}
+		}
+		cc.w.Env = &reconcileEnv{Cfg: cc.cfg}
 		if it := cc.decide(); it.Reason != c.want || (c.want == decideFailedCreateLeased) != (it.Kind == "") {
 			t.Fatalf("%s: decideRow = (%q, %q), want %q", c.name, it.Kind, it.Reason, c.want)
 		}

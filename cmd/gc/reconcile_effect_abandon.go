@@ -384,7 +384,13 @@ func staleSelfOwn(v txView) bool {
 func rollbackStep(v txView, screen screenWrite, _ error) txStep {
 	td, cause := ownTeardown(v)
 	switch {
-	case !rollbackable(v.Row), v.It.Relaunch && !staleSelfOwn(v):
+	case !rollbackable(v.Row):
+		return txStep{Refuse: causeRedecided}
+	case v.It.Reason == decideStaleCreate && v.RT.Alive() && compareIdentity(v.Row, v.RT.Identity) == identityCurrent:
+		return txStep{Refuse: causeRedecided} // S7: a runtime Current since the pass is A10's adopt's, next pass
+	case v.It.Relaunch && v.RT.Class == rtAbsent:
+		return txStep{Done: true, Cause: decideStaleCreate} // gone already: A18 relaunches it, no backoff between
+	case v.It.Relaunch && !staleSelfOwn(v):
 		return txStep{Refuse: causeRedecided} // S7's relaunch stops only a runtime its own read still finds StaleSelf, its own
 	case len(screen.patch) > 0 || screen.class.Len() > 0:
 		return txStep{Write: screen.patch, Class: screen.class, Done: true}

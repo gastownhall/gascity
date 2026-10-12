@@ -168,13 +168,15 @@ func (r *rowFacts) inWakeGrace() bool {
 
 // failedCreateLeased is legacy's pendingCreateSessionStillLeased on the row
 // at the pass time (SESS-058): its claim's lease, or its start request, still
-// active for an agent that is not suspended.
+// active for an agent that is not suspended; never on a lease anchor skewed
+// ahead of the clock (pendingCreateAnchorAhead, v5.9r), which would hold the
+// row open for as long as the skew lasts.
 func (r *rowFacts) failedCreateLeased() bool {
 	var cfg *config.City
 	if r.w.Env != nil {
 		cfg = r.w.Env.Cfg
 	}
-	return pendingCreateSessionStillLeasedAt(r.row.Info, cfg, r.w.Now)
+	return pendingCreateSessionStillLeasedAt(r.row.Info, cfg, r.w.Now) && !pendingCreateAnchorAhead(r.row.Info, r.w.Now)
 }
 
 // deliberatelyHeldPoolRow is an undesired pool row a deliberate hold parks:

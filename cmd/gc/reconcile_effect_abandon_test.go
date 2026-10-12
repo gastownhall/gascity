@@ -417,6 +417,31 @@ func TestRollbackEffect(t *testing.T) {
 	if s := k.runKind(); s.Cause != causeRedecided || len(k.sp.kills) != 0 {
 		t.Fatalf("re-attached on the row's token: settlement %+v kills %+v, want refused redecided, nothing stopped", s, k.sp.kills)
 	}
+	// Any stale-create exit, not only the relaunch, leaves a runtime that
+	// reads Current by the effect to A10's adopt (the #7650 review's ruling).
+	k = rollback(t, "generation", "3")
+	k.it.Reason = decideStaleCreate
+	k.sp.put("s-gc-1", "gc-1", "3", "tok")
+	k.p.World.Census = readCensus(t, gatherNow, censusLegs(rowLeg, k.cache))
+	if s := k.runKind(); s.Cause != causeRedecided || len(k.sp.kills) != 0 || closed(k) {
+		t.Fatalf("a rollback exit over a Current runtime: settlement %+v kills %+v, want refused redecided, nothing stopped or closed", s, k.sp.kills)
+	}
+	// A relaunch whose runtime is no longer its own StaleSelf by the effect
+	// (an older incarnation's now) stops nothing.
+	k = rollback(t, "generation", "3")
+	k.it.Reason, k.it.Relaunch = decideStaleCreate, true
+	k.sp.put("s-gc-1", "gc-1", "2", "older")
+	k.p.World.Census = readCensus(t, gatherNow, censusLegs(rowLeg, k.cache))
+	if s := k.runKind(); s.Cause != causeRedecided || len(k.sp.kills) != 0 {
+		t.Fatalf("a relaunch over another incarnation: settlement %+v kills %+v, want refused redecided, nothing stopped", s, k.sp.kills)
+	}
+	// A relaunch whose runtime is gone by the effect is a no-op, so no
+	// backoff delays A18's relaunch.
+	k = rollback(t, "generation", "3")
+	k.it.Reason, k.it.Relaunch = decideStaleCreate, true
+	if s := k.runKind(); s.Outcome != settledNoop || s.Cause != decideStaleCreate || closed(k) {
+		t.Fatalf("a relaunch over a gone runtime: settlement %+v, want a no-op keeping the row", s)
+	}
 	k = rollback(t, "generation", "3")
 	k.it.Reason, k.it.Relaunch = decideStaleCreate, true
 	k.sp.put("s-gc-1", "gc-1", "3", "old")
