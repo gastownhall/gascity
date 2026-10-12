@@ -60,7 +60,7 @@ outside your session. See [Formulas](/tutorials/05-formulas) and
 ## 4. Watch an Agent Work
 
 ```bash
-bd show <bead-id> --watch
+gc bd show <bead-id> --watch
 ```
 
 For a fuller walkthrough of cities and rigs, continue to

@@ -290,11 +290,15 @@ func doRigStatusWithStoreAndSnapshot(
 	stdout, stderr io.Writer,
 ) int {
 	registerStatusProviderACPRoutes(sp, statusSnapshot, cityName, cfg)
+	suspState, err := loadSuspensionState(fsys.OSFS{}, cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc rig status: loading suspension state: %v\n", err) //nolint:errcheck
+		return 1
+	}
 	if jsonOutput {
-		return renderRigStatusJSON(sp, dops, rig, agents, cityPath, cityName, sessionTemplate, cfg, store, statusSnapshot, stdout, stderr)
+		return renderRigStatusJSON(sp, dops, rig, agents, cityPath, cityName, sessionTemplate, cfg, store, statusSnapshot, suspState, stdout, stderr)
 	}
 
-	suspState, _ := loadSuspensionState(fsys.OSFS{}, cityPath)
 	suspStr := "no"
 	if suspensionstate.EffectiveRigSuspended(suspState, rig.Name, rig.EffectiveSuspendedOnStart()) {
 		suspStr = "yes"
@@ -333,6 +337,7 @@ func renderRigStatusJSON(
 	cfg *config.City,
 	store beads.Store,
 	statusSnapshot *sessionBeadSnapshot,
+	suspState suspensionstate.State,
 	stdout, stderr io.Writer,
 ) int {
 	result := RigStatusJSON{
@@ -344,7 +349,7 @@ func renderRigStatusJSON(
 			Path:          rig.Path,
 			Prefix:        rig.EffectivePrefix(),
 			DefaultBranch: rig.EffectiveDefaultBranch(),
-			Suspended:     rig.Suspended,
+			Suspended:     suspensionstate.EffectiveRigSuspended(suspState, rig.Name, rig.EffectiveSuspendedOnStart()),
 			Beads:         rigBeadsStatus(fsys.OSFS{}, rig.Path),
 		},
 	}

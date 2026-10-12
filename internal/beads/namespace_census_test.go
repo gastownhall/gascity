@@ -10,6 +10,7 @@ package beads
 // approximately.
 
 import (
+	"slices"
 	"testing"
 )
 
@@ -294,5 +295,49 @@ func TestNamespaceCensusForReportsNoCensus(t *testing.T) {
 	}
 	if _, ok := NamespaceCensusFor(NewMemStore()); ok {
 		t.Error("the mem store was reported as answering the census; it has no such query and the caller must scan it")
+	}
+}
+
+// TestSQLiteResidentIDsIsTheClosedInclusiveBothTierIDSet pins ResidentIDs to the
+// id set of the List it stands in for. The storage boot gate classifies every
+// source infra bead the binding does not hold as stranded, so an id this
+// misses (a wisp-tier row, a closed one) is a false strand that refuses the
+// city, and an id it invents hides a real one.
+func TestSQLiteResidentIDsIsTheClosedInclusiveBothTierIDSet(t *testing.T) {
+	store := openCensusStore(t)
+	seedCensusRow(t, store, Bead{ID: "gcg-1"})
+	seedCensusRow(t, store, Bead{ID: "ga-relic"})
+	seedCensusRow(t, store, Bead{ID: "ga-wisp", Ephemeral: true})
+	seedCensusRow(t, store, Bead{ID: "ga-done"})
+	if err := store.Close("ga-done"); err != nil {
+		t.Fatalf("closing ga-done: %v", err)
+	}
+
+	got, ok, err := ResidentIDs(store)
+	if err != nil || !ok {
+		t.Fatalf("ResidentIDs over a bare sqlite engine = ok %v, err %v", ok, err)
+	}
+	rows, err := store.List(ListQuery{TierMode: TierBoth, IncludeClosed: true, AllowScan: true})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	want := make([]string, 0, len(rows))
+	for _, b := range rows {
+		want = append(want, b.ID)
+	}
+	slices.Sort(got)
+	slices.Sort(want)
+	if !slices.Equal(got, want) || len(got) != 4 {
+		t.Fatalf("ResidentIDs = %v, want the closed-inclusive both-tier List ids %v (4 rows)", got, want)
+	}
+}
+
+// TestResidentIDsDeclinesAStoreThatIsNotTheBareEngine pins the fallback: a
+// store that is not the bare sqlite engine answers ok=false so the caller lists
+// it, rather than an empty (and therefore "nothing is in the binding") id set.
+func TestResidentIDsDeclinesAStoreThatIsNotTheBareEngine(t *testing.T) {
+	ids, ok, err := ResidentIDs(NewMemStore())
+	if ok || err != nil || ids != nil {
+		t.Fatalf("ResidentIDs(mem store) = %v, ok %v, err %v; want a decline", ids, ok, err)
 	}
 }

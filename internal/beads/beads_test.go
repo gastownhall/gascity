@@ -157,6 +157,36 @@ func TestIsReadyCandidate(t *testing.T) {
 // satisfies unless it was explicitly closed as gc.work_outcome=blocked. A
 // closed dependency carrying no work_outcome at all (the legacy/pre-ADR-0009
 // case) must still satisfy — that's the backward-compat guarantee.
+func TestReadinessWorkOutcomeDefersToAPassedStep(t *testing.T) {
+	tests := []struct {
+		name     string
+		metadata map[string]string
+		want     string
+	}{
+		{"no metadata", nil, ""},
+		{"work outcome alone", map[string]string{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, beadmeta.WorkOutcomeBlocked},
+		{"passed step ignores blocked work outcome", map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, ""},
+		{"failed step keeps blocked work outcome", map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: beadmeta.OutcomeFail, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, beadmeta.WorkOutcomeBlocked},
+		{"skipped step keeps blocked work outcome", map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, beadmeta.WorkOutcomeBlocked},
+		{"passed step with shipped outcome", map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeShipped}, ""},
+		// A plain work bead (no gc.step_ref) is not a control-plane step: the
+		// core mol-do-work formula stamps gc.outcome=pass on the work bead
+		// itself, including blocked/abandoned closes, so gc.outcome must not
+		// mask its blocked work outcome.
+		{"work bead with pass keeps blocked work outcome", map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, beadmeta.WorkOutcomeBlocked},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ReadinessWorkOutcome(tt.metadata); got != tt.want {
+				t.Fatalf("ReadinessWorkOutcome(%v) = %q, want %q", tt.metadata, got, tt.want)
+			}
+			if tt.want == "" && !DependencySatisfied("closed", ReadinessWorkOutcome(tt.metadata)) {
+				t.Fatalf("a closed dependency whose step passed must satisfy its dependents (%v)", tt.metadata)
+			}
+		})
+	}
+}
+
 func TestDependencySatisfied(t *testing.T) {
 	tests := []struct {
 		name           string

@@ -47,7 +47,9 @@ type Provider struct {
 }
 
 type providerOps struct {
-	start func(*exec.Cmd) error
+	start  func(*exec.Cmd) error
+	listen func(network, addr string) (net.Listener, error)
+	dial   func(network, addr string, timeout time.Duration) (net.Conn, error)
 }
 
 const (
@@ -61,14 +63,18 @@ const (
 type sessionConn struct {
 	cmd      *exec.Cmd
 	done     chan struct{} // closed when process exits
+	reaped   chan struct{} // closed once reap has finished, after done
+	token    string        // the GC_INSTANCE_TOKEN this incarnation seeded
 	listener net.Listener  // unix socket listener
 }
 
 // Compile-time check.
 var (
-	errPrivateSocketDirValidation                             = errors.New("private socket directory validation failed")
-	_                             runtime.Provider            = (*Provider)(nil)
-	_                             runtime.ProcessTableScanner = (*Provider)(nil)
+	errPrivateSocketDirValidation                                   = errors.New("private socket directory validation failed")
+	_                             runtime.Provider                  = (*Provider)(nil)
+	_                             runtime.ProcessTableScanner       = (*Provider)(nil)
+	_                             runtime.LivenessObserverWithError = (*Provider)(nil)
+	_                             runtime.ListingAttestation        = (*Provider)(nil)
 )
 
 // NewProvider returns a subprocess [Provider] that stores socket files in
@@ -105,7 +111,9 @@ func newProvider(dir string) *Provider {
 		procs:    make(map[string]*sessionConn),
 		workDirs: make(map[string]string),
 		ops: providerOps{
-			start: (*exec.Cmd).Start,
+			start:  (*exec.Cmd).Start,
+			listen: net.Listen,
+			dial:   net.DialTimeout,
 		},
 	}
 }
@@ -203,37 +211,59 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 	}
 	_ = nullFile.Close()
 
-	// Create control socket for cross-process discovery.
-	done := make(chan struct{})
-	lis, err := p.startControlSocket(name, cmd, done, socketDir, euid)
-	if err != nil {
-		// Socket creation failed — kill the process and bail.
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		clearWorkDir()
-		return fmt.Errorf("creating control socket for %q: %w", name, err)
-	}
+	// Seed the identity sidecar before the control socket exists, so no
+	// reader can see a live socket that carries no identity.
 	if err := p.persistStartMetadata(name, cfg.Env); err != nil {
-		lis.Close() //nolint:errcheck
-		_ = p.removeSocketArtifactsAt(name, socketDir, euid)
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 		clearWorkDir()
 		return fmt.Errorf("storing metadata for %q: %w", name, err)
 	}
 
-	go func() {
+	// Create control socket for cross-process discovery.
+	sc := &sessionConn{cmd: cmd, done: make(chan struct{}), reaped: make(chan struct{}), token: cfg.Env["GC_INSTANCE_TOKEN"]}
+	lis, err := p.startControlSocket(name, sc, socketDir, euid)
+	if err != nil {
+		// Socket creation failed — kill the process and bail.
+		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
-		// Clean up socket before signaling done so ListRunning
-		// never sees a stale socket after Stop returns.
-		lis.Close() //nolint:errcheck
-		_ = p.removeSocketArtifactsAt(name, socketDir, euid)
 		p.clearSessionMeta(name)
-		close(done)
-	}()
+		clearWorkDir()
+		return fmt.Errorf("creating control socket for %q: %w", name, err)
+	}
 
-	p.procs[name] = &sessionConn{cmd: cmd, done: done, listener: lis}
+	sc.listener = lis
+	go p.reap(name, sc, socketDir, euid)
+
+	p.procs[name] = sc
 	return nil
+}
+
+// reap cleans up after sc's process exits. The socket goes first, so
+// ListRunning never sees a stale socket after Stop returns. done closes next,
+// so the runtime reads not alive before its identity sidecar is cleared.
+//
+// The sidecar is cleared only while it is still this incarnation's. Under p.mu
+// no newer Start in this provider can be mid-seed, so a name this provider now
+// tracks for a newer incarnation is left alone; a sidecar another provider has
+// reseeded carries a different token. The token check is a read before the
+// remove, so it narrows the cross-process race rather than closing it.
+func (p *Provider) reap(name string, sc *sessionConn, socketDir string, euid int) {
+	defer close(sc.reaped)
+	_ = sc.cmd.Wait()
+	sc.listener.Close() //nolint:errcheck
+	_ = p.removeSocketArtifactsAt(name, socketDir, euid)
+	close(sc.done)
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if cur, ok := p.procs[name]; ok && cur != sc {
+		return
+	}
+	if token, err := p.GetMeta(name, "GC_INSTANCE_TOKEN"); err != nil || token != sc.token {
+		return
+	}
+	p.clearSessionMeta(name)
 }
 
 func envWithoutKey(env []string, key string) []string {
@@ -261,6 +291,7 @@ func (p *Provider) Stop(name string) error {
 	// Try in-memory process first.
 	if ok {
 		if !sc.alive() {
+			<-sc.reaped
 			return nil
 		}
 		return terminateSessionConn(sc)
@@ -292,17 +323,27 @@ func (p *Provider) Interrupt(name string) error {
 
 // IsRunning reports whether the named session has a live process.
 func (p *Provider) IsRunning(name string) bool {
+	obs, _ := p.ObserveLivenessWithError(name, nil)
+	return obs.Running
+}
+
+// ObserveLivenessWithError implements [runtime.LivenessObserverWithError]. An
+// in-process session answers from its process; any other answers from its
+// control socket (see probeSessionSocket), so a probe that cannot tell returns
+// an error wrapping [runtime.ErrRuntimeUnavailable] instead of absence.
+// Process names are ignored, as in ProcessAlive.
+func (p *Provider) ObserveLivenessWithError(name string, _ []string) (runtime.Liveness, error) {
 	euid := os.Geteuid()
 	p.mu.Lock()
 	sc, ok := p.procs[name]
 	p.mu.Unlock()
 
 	if ok {
-		return sc.alive()
+		alive := sc.alive()
+		return runtime.Liveness{Running: alive, Alive: alive}, nil
 	}
-
-	// Fall back to socket liveness check.
-	return p.socketAliveAt(name, euid)
+	present, err := p.probeSessionSocket(name, euid)
+	return runtime.Liveness{Running: present, Alive: present}, err
 }
 
 // IsAttached always returns false — subprocess has no terminal concept.
@@ -355,7 +396,7 @@ func (p *Provider) TerminateRuntime(r runtime.LiveRuntime) error {
 	if r.PID <= 1 {
 		return fmt.Errorf("subprocess: invalid PID %d for session %s", r.PID, r.SessionID)
 	}
-	if err := proctable.KillByPID(r.PID); err != nil {
+	if err := proctable.KillByPIDIdentity(r.PID, r.StartIdentity); err != nil {
 		return fmt.Errorf("subprocess: terminate runtime PID %d for session %s: %w", r.PID, r.SessionID, err)
 	}
 	return nil
@@ -412,6 +453,13 @@ func (p *Provider) SetMeta(name, key, value string) error {
 	return runtime.WritePrivateFile(p.metaPath(name, key), []byte(value))
 }
 
+// LocalIdentitySidecar implements [runtime.IdentitySidecarProvider]: GetMeta
+// reads the session's local sidecar file.
+func (p *Provider) LocalIdentitySidecar() bool { return true }
+
+// LivenessReadsFresh implements [runtime.FreshByConstruction].
+func (p *Provider) LivenessReadsFresh() bool { return true }
+
 // GetMeta retrieves a metadata value from a sidecar file.
 // Returns ("", nil) if the key is not set.
 func (p *Provider) GetMeta(name, key string) (string, error) {
@@ -445,8 +493,8 @@ func (p *Provider) RemoveMeta(name, key string) error {
 func (p *Provider) persistStartMetadata(name string, env map[string]string) error {
 	seed, _ := runtime.SplitEnvForMetaSeed(env)
 	p.clearSessionMeta(name)
-	for key, value := range seed {
-		if err := p.SetMeta(name, key, value); err != nil {
+	for _, key := range runtime.MetaSeedKeys(seed) {
+		if err := p.SetMeta(name, key, seed[key]); err != nil {
 			p.clearSessionMeta(name)
 			return err
 		}
@@ -485,7 +533,9 @@ func (p *Provider) CopyTo(name, src, relDst string) error {
 }
 
 // ListRunning returns the names of all running sessions whose names
-// match the given prefix, discovered via socket files.
+// match the given prefix, discovered via socket files. A socket that cannot be
+// classified (see probeSessionSocket) leaves its name out, so the names come
+// back with a [runtime.PartialListError] rather than as a complete list.
 func (p *Provider) ListRunning(prefix string) ([]string, error) {
 	euid := os.Geteuid()
 	dirs := []string{p.dir}
@@ -493,7 +543,10 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 		dirs = append(dirs, fallback)
 	}
 	seen := make(map[string]bool)
-	var names []string
+	var (
+		names    []string
+		failures []error
+	)
 	for _, dir := range dirs {
 		if err := p.validateSocketDir(dir, euid); err != nil {
 			if os.IsNotExist(err) {
@@ -517,14 +570,30 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 			if !strings.HasPrefix(sn, prefix) || seen[sn] {
 				continue
 			}
-			if p.socketAliveAt(sn, euid) {
+			present, err := p.probeSessionSocket(sn, euid)
+			if errors.Is(err, errPrivateSocketDirValidation) {
+				return nil, err
+			}
+			if err != nil {
+				failures = append(failures, err)
+				continue
+			}
+			if present {
 				seen[sn] = true
 				names = append(names, sn)
 			}
 		}
 	}
+	if len(failures) > 0 {
+		return names, &runtime.PartialListError{Err: errors.Join(failures...)}
+	}
 	return names, nil
 }
+
+// ListRunningComplete implements [runtime.ListingAttestation]: a socket that
+// cannot be classified makes ListRunning partial, so an error-free result
+// lists every running session.
+func (p *Provider) ListRunningComplete() bool { return true }
 
 func (p *Provider) metaPath(name, key string) string {
 	return filepath.Join(p.dir, metaFilePrefix(name)+".meta."+metaFileKey(key))
@@ -692,7 +761,7 @@ func (p *Provider) socketNameForEntry(dir, key string) string {
 //   - "interrupt" — SIGINT to the whole session process group; replies "ok"
 //   - "ping" — replies "ok"
 //   - "pid" — replies with the PID (diagnostics)
-func (p *Provider) startControlSocket(name string, cmd *exec.Cmd, done <-chan struct{}, dir string, euid int) (net.Listener, error) {
+func (p *Provider) startControlSocket(name string, sc *sessionConn, dir string, euid int) (net.Listener, error) {
 	if err := p.ensureSocketDir(dir, euid); err != nil {
 		return nil, err
 	}
@@ -705,7 +774,7 @@ func (p *Provider) startControlSocket(name string, cmd *exec.Cmd, done <-chan st
 	if err := os.WriteFile(namePath, []byte(name), 0o644); err != nil {
 		return nil, err
 	}
-	lis, err := net.Listen("unix", sp)
+	lis, err := p.ops.listen("unix", sp)
 	if err != nil {
 		_ = os.Remove(namePath)
 		return nil, err
@@ -716,14 +785,14 @@ func (p *Provider) startControlSocket(name string, cmd *exec.Cmd, done <-chan st
 			if err != nil {
 				return // listener closed
 			}
-			go handleSessionConn(conn, cmd, done)
+			go handleSessionConn(conn, sc)
 		}
 	}()
 	return lis, nil
 }
 
 // handleSessionConn reads a command from the connection and acts on the process.
-func handleSessionConn(conn net.Conn, cmd *exec.Cmd, done <-chan struct{}) {
+func handleSessionConn(conn net.Conn, sc *sessionConn) {
 	defer conn.Close()                                     //nolint:errcheck
 	conn.SetReadDeadline(time.Now().Add(10 * time.Second)) //nolint:errcheck
 	scanner := bufio.NewScanner(conn)
@@ -732,25 +801,74 @@ func handleSessionConn(conn net.Conn, cmd *exec.Cmd, done <-chan struct{}) {
 	}
 	switch scanner.Text() {
 	case "stop":
-		_ = runtime.TerminateManagedProcess(cmd, done, runtime.ManagedProcessStopGrace)
+		_ = terminateSessionConn(sc)
 		conn.Write([]byte("ok\n")) //nolint:errcheck
 	case "interrupt":
-		_ = runtime.SignalProcessGroup(cmd, syscall.SIGINT)
+		_ = runtime.SignalProcessGroup(sc.cmd, syscall.SIGINT)
 		conn.Write([]byte("ok\n")) //nolint:errcheck
 	case "ping":
 		conn.Write([]byte("ok\n")) //nolint:errcheck
 	case "pid":
-		fmt.Fprintf(conn, "%d\n", cmd.Process.Pid) //nolint:errcheck
+		fmt.Fprintf(conn, "%d\n", sc.cmd.Process.Pid) //nolint:errcheck
 	}
 }
 
-// socketAlive checks if a session is alive by pinging its control socket.
+// socketAlive reports whether the session's control socket accepts a
+// connection. A socket that cannot be classified reads as not alive.
 func (p *Provider) socketAlive(name string) bool {
 	return p.socketAliveAt(name, os.Geteuid())
 }
 
 func (p *Provider) socketAliveAt(name string, euid int) bool {
-	return p.sendSocketCommandAt(name, "ping", 500*time.Millisecond, euid) == nil
+	present, _ := p.probeSessionSocket(name, euid)
+	return present
+}
+
+// socketProbeTimeout bounds one control-socket dial in probeSessionSocket.
+const socketProbeTimeout = 500 * time.Millisecond
+
+// probeSessionSocket classifies the named session's control socket, trying the
+// hashed path and then the legacy name-based one. It is the one answer behind
+// IsRunning, ObserveLivenessWithError and ListRunning:
+//   - (true, nil): a path accepted the connection. The owner closes its
+//     listener when the process exits, so the session is running even when it
+//     is too busy to answer a ping.
+//   - (false, nil): every path is missing, refuses connections, or is too long
+//     to bind (see [runtime.ClassifyControlSocketDial] for what refused means
+//     off Linux).
+//   - (false, err): the private socket directory failed validation, or no
+//     path connected and one failed another way (a dial timeout, EACCES); err
+//     wraps [runtime.ErrRuntimeUnavailable].
+func (p *Provider) probeSessionSocket(name string, euid int) (bool, error) {
+	socketDir := p.socketDirForEUID(euid)
+	paths := make([]string, 0, 2)
+	switch err := p.validateSocketDir(socketDir, euid); {
+	case err == nil:
+		paths = append(paths, filepath.Join(socketDir, p.sockKey(name)+".sock"))
+	case !os.IsNotExist(err):
+		return false, fmt.Errorf("%w: %w: %w", runtime.ErrRuntimeUnavailable, errPrivateSocketDirValidation, err)
+	}
+	paths = append(paths, p.legacySockPath(name))
+	var unknown error
+	for _, sp := range paths {
+		if runtime.UnixSocketPathTooLong(sp) {
+			continue
+		}
+		conn, err := p.ops.dial("unix", sp, socketProbeTimeout)
+		switch runtime.ClassifyControlSocketDial(err) {
+		case runtime.ControlSocketPresent:
+			_ = conn.Close()
+			return true, nil
+		case runtime.ControlSocketUnknown:
+			if unknown == nil {
+				unknown = err
+			}
+		}
+	}
+	if unknown != nil {
+		return false, fmt.Errorf("%w: subprocess control socket for %q: %w", runtime.ErrRuntimeUnavailable, name, unknown)
+	}
+	return false, nil
 }
 
 // sendSocketCommand connects to the session's control socket, sends a
@@ -782,7 +900,7 @@ func (p *Provider) sendSocketCommandAt(name, command string, timeout time.Durati
 	paths = append(paths, legacyPath)
 	for _, sp := range paths {
 		err := func(sockPath string) error {
-			conn, err := net.DialTimeout("unix", sockPath, timeout)
+			conn, err := p.ops.dial("unix", sockPath, timeout)
 			if err != nil {
 				return err
 			}
@@ -839,16 +957,18 @@ func (p *Provider) stopBySocketAt(name string, euid int) error {
 }
 
 func isUnavailableSocketError(err error) bool {
-	return errors.Is(err, os.ErrNotExist) ||
-		errors.Is(err, syscall.ENOENT) ||
-		errors.Is(err, syscall.ECONNREFUSED)
+	return err != nil && runtime.ClassifyControlSocketDial(err) == runtime.ControlSocketAbsent
 }
 
 // --- In-memory process helpers ---
 
-// terminateSessionConn sends SIGTERM then SIGKILL to an in-memory tracked process.
+// terminateSessionConn sends SIGTERM then SIGKILL to an in-memory tracked
+// process and returns once reap has finished, so a stopped session's sidecar
+// is gone when Stop (or a socket "stop") returns.
 func terminateSessionConn(sc *sessionConn) error {
-	return runtime.TerminateManagedProcess(sc.cmd, sc.done, runtime.ManagedProcessStopGrace)
+	err := runtime.TerminateManagedProcess(sc.cmd, sc.done, runtime.ManagedProcessStopGrace)
+	<-sc.reaped
+	return err
 }
 
 // Capabilities reports subprocess provider capabilities. The subprocess

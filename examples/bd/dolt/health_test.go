@@ -1508,6 +1508,15 @@ func TestHealthScriptZombieScanExcludesRigLocalServers(t *testing.T) {
 			name:      "quoted port",
 			rigConfig: "dolt.port: \"19902\"\n",
 		},
+		{
+			// bd >= 1.3.1 writes `bd config set dolt.port` nested.
+			name:      "nested port",
+			rigConfig: "dolt:\n    disable-event-flush: true\n    port: 19902\n",
+		},
+		{
+			name:      "nested quoted port with comment",
+			rigConfig: "dolt:\n  port: '19902' # rig server\n",
+		},
 	}
 
 	for _, tc := range tests {

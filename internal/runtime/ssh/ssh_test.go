@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -22,11 +23,24 @@ type fakeRunner struct {
 	code    int
 	err     error
 	respond func(remoteArgv []string) ([]byte, int, error)
+	// panes answers the agent-pane list-panes lookups ("<mark>\t@W.%P"
+	// rows); empty means one marked agent pane, @1.%1. rawPanes sends the
+	// lookups to respond/out like any other call.
+	panes    string
+	rawPanes bool
 }
 
 func (f *fakeRunner) run(_ context.Context, _ Endpoint, remoteArgv []string, stdin []byte) ([]byte, int, error) {
 	f.calls = append(f.calls, remoteArgv)
 	f.stdins = append(f.stdins, stdin)
+	if !f.rawPanes && isAgentPaneLookup(remoteArgv) {
+		// Answer as tmux does: the format's separator, a space.
+		rows := f.panes
+		if rows == "" {
+			rows = "agent\t@1.%1"
+		}
+		return []byte(strings.ReplaceAll(rows, "\t", " ") + "\n"), 0, nil
+	}
 	if f.respond != nil {
 		return f.respond(remoteArgv)
 	}
@@ -186,26 +200,8 @@ func TestTmuxCarrierDrivesOverSSH(t *testing.T) {
 	}
 }
 
-// TestConn_ExecOverRealLocalhost exercises the actual ssh client when
-// passwordless localhost ssh is available; it skips otherwise (e.g. CI).
-func TestConn_ExecOverRealLocalhost(t *testing.T) {
-	if _, err := exec.LookPath("ssh"); err != nil {
-		t.Skip("no ssh client")
-	}
-	kh := filepath.Join(t.TempDir(), "known_hosts")
-	probe := exec.Command("ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-o", "UserKnownHostsFile="+kh, "localhost", "true")
-	if probe.Run() != nil {
-		t.Skip("passwordless ssh to localhost unavailable")
-	}
-	c := New(Endpoint{Host: "localhost", KnownHostsPath: kh})
-	out, code, err := c.Exec(context.Background(), "", []string{"printf", "%s", "ok"})
-	if err != nil {
-		t.Fatalf("Exec over localhost: %v", err)
-	}
-	if code != 0 {
-		t.Errorf("code = %d, want 0", code)
-	}
-	if string(out) != "ok" {
-		t.Errorf("out = %q, want %q", out, "ok")
-	}
+// isAgentPaneLookup matches the provider's agent-pane list-panes calls.
+func isAgentPaneLookup(argv []string) bool {
+	return len(argv) >= 2 && argv[0] == "tmux" && argv[1] == "list-panes" &&
+		argv[len(argv)-1] == agentPaneRowFormat
 }

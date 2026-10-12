@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -541,31 +540,9 @@ func filterEnvMany(env []string, prefixes ...string) []string {
 func extractBeadID(t *testing.T, output string) string {
 	t.Helper()
 
-	re := regexp.MustCompile(`\b(?:bd|gc|mc)-[A-Za-z0-9]+\b`)
-	if match := re.FindString(output); match != "" {
-		return match
+	id, ok := parseBeadID(output)
+	if !ok {
+		t.Fatalf("could not parse bead ID from output: %s", output)
 	}
-
-	for _, prefix := range []string{"Created bead: ", "Created issue: "} {
-		if idx := strings.Index(output, prefix); idx >= 0 {
-			rest := output[idx+len(prefix):]
-			fields := strings.Fields(rest)
-			if len(fields) > 0 {
-				return fields[0]
-			}
-		}
-	}
-
-	for _, line := range strings.Split(output, "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "bd-") || strings.HasPrefix(line, "gc-") || strings.HasPrefix(line, "mc-") {
-			fields := strings.Fields(line)
-			if len(fields) > 0 {
-				return fields[0]
-			}
-		}
-	}
-
-	t.Fatalf("could not parse bead ID from output: %s", output)
-	return ""
+	return id
 }

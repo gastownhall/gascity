@@ -25,6 +25,7 @@ go_library(
         "checks_provider_parity.go",
         "checks_proxied_backup_coverage.go",
         "checks_proxied_endpoint.go",
+        "checks_proxied_shared_server.go",
         "checks_rig_coverage.go",
         "checks_rig_root_branch.go",
         "checks_rig_worktrees.go",
@@ -43,6 +44,7 @@ go_library(
         "skill_checks.go",
         "skill_dangling_sink_check.go",
         "stale_local_pack_dir_check.go",
+        "store_liveness.go",
         "types.go",
         "warmup_eligible.go",
     ],
@@ -108,9 +110,11 @@ go_test(
         "checks_order_outcome_test.go",
         "checks_pack_credentials_test.go",
         "checks_provider_parity_test.go",
+        "checks_proxied_backup_coverage_test.go",
         "checks_proxied_endpoint_test.go",
         "checks_proxied_external_backup_test.go",
         "checks_proxied_provider_test.go",
+        "checks_proxied_shared_server_test.go",
         "checks_rig_coverage_test.go",
         "checks_rig_root_branch_test.go",
         "checks_rig_worktrees_test.go",
@@ -131,13 +135,16 @@ go_test(
         "skill_checks_test.go",
         "skill_dangling_sink_check_test.go",
         "stale_local_pack_dir_check_test.go",
+        "store_liveness_test.go",
         "tempdir_guard_test.go",
         "testenv_import_test.go",
         "zz_boolptr_test.go",
     ],
+    data = glob(["testdata/**"]),
     embed = [":doctor"],
     deps = [
         "//internal/beads",
+        "//internal/beads/beadstest",
         "//internal/beads/contract",
         "//internal/beads/proxyendpoint",
         "//internal/citylayout",
@@ -148,6 +155,7 @@ go_test(
         "//internal/orders",
         "//internal/pathutil",
         "//internal/runtime",
+        "//internal/runtime/tmux",
         "//internal/shellquote",
         "//internal/supervisor",
         "//internal/suspensionstate",
@@ -164,6 +172,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

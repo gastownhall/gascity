@@ -548,7 +548,10 @@ func (c *ZombieSessionsCheck) CanFix() bool { return true }
 
 // Fix kills all zombie sessions. It refuses while a controller is running
 // (GH#5742): the controller's own health patrol already reconciles zombie
-// sessions, and an uncoordinated Stop here would race it.
+// sessions, and an uncoordinated Stop here would race it. A zombie that is
+// already gone when Fix stops it — its tmux server died after the observation —
+// is fixed, so Fix stops through runtime.StopForCleanup and reports only a
+// stop that failed to remove a session.
 func (c *ZombieSessionsCheck) Fix(ctx *CheckContext) error {
 	if IsControllerRunning(ctx.CityPath) {
 		return errControllerRunningFixSkipped
@@ -559,7 +562,7 @@ func (c *ZombieSessionsCheck) Fix(ctx *CheckContext) error {
 		}
 		sn := agent.SessionNameFor(c.cityName, a.QualifiedName(), c.sessionTemplate)
 		if c.sp.IsRunning(sn) && !c.sp.ProcessAlive(sn, a.ProcessNames) {
-			if err := c.sp.Stop(sn); err != nil {
+			if err := runtime.StopForCleanup(c.sp, sn); err != nil {
 				return fmt.Errorf("killing zombie session %q: %w", sn, err)
 			}
 		}
@@ -634,7 +637,9 @@ func (c *OrphanSessionsCheck) CanFix() bool { return true }
 
 // Fix kills all orphaned sessions. It refuses while a controller is running
 // (GH#5742): the controller's own health patrol already reconciles orphan
-// sessions, and an uncoordinated Stop here would race it.
+// sessions, and an uncoordinated Stop here would race it. Like
+// ZombieSessionsCheck.Fix, it stops through runtime.StopForCleanup, so an
+// orphan whose tmux server died after the listing counts as removed.
 func (c *OrphanSessionsCheck) Fix(ctx *CheckContext) error {
 	if IsControllerRunning(ctx.CityPath) {
 		return errControllerRunningFixSkipped
@@ -654,7 +659,7 @@ func (c *OrphanSessionsCheck) Fix(ctx *CheckContext) error {
 	}
 	for _, s := range running {
 		if !expected[s] {
-			if err := c.sp.Stop(s); err != nil {
+			if err := runtime.StopForCleanup(c.sp, s); err != nil {
 				return fmt.Errorf("killing orphan session %q: %w", s, err)
 			}
 		}
@@ -1947,7 +1952,7 @@ func validPublishedManagedDoltDoctorState(cityPath string, state managedDoltDoct
 		return false
 	}
 	_ = conn.Close()
-	holderPID := managedDoltDoctorPortHolderPID(state.Port)
+	holderPID := managedDoltDoctorPortHolderPID(state.Port, state.PID)
 	if holderPID > 0 {
 		return holderPID == state.PID
 	}
@@ -1982,76 +1987,17 @@ func managedDoltDoctorProcCmdline(pid int) string {
 	return strings.TrimSpace(string(out))
 }
 
-func managedDoltDoctorPortHolderPID(port int) int {
+// managedDoltDoctorPortHolderPID returns the PID listening on port, checking
+// candidate first. Linux reads /proc (see pidutil.ListenerPID); hosts without
+// /proc/net fall back to lsof.
+func managedDoltDoctorPortHolderPID(port, candidate int) int {
 	if port <= 0 {
 		return 0
 	}
-	if pid, checked := managedDoltDoctorPortHolderFromProc(uint16(port)); checked {
+	if pid, checked := pidutil.ListenerPID(port, candidate); checked {
 		return pid
 	}
 	return managedDoltDoctorPortHolderFromLsof(port)
-}
-
-func managedDoltDoctorPortHolderFromProc(port uint16) (int, bool) {
-	inodes := map[string]struct{}{}
-	checked := false
-	for _, path := range []string{"/proc/net/tcp", "/proc/net/tcp6"} {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		checked = true
-		for _, line := range strings.Split(string(data), "\n") {
-			fields := strings.Fields(line)
-			if len(fields) < 10 || fields[3] != "0A" {
-				continue
-			}
-			_, portHex, ok := strings.Cut(fields[1], ":")
-			if !ok {
-				continue
-			}
-			gotPort, err := strconv.ParseUint(portHex, 16, 16)
-			if err != nil || uint16(gotPort) != port {
-				continue
-			}
-			inodes[fields[9]] = struct{}{}
-		}
-	}
-	if !checked {
-		return 0, false
-	}
-	if len(inodes) == 0 {
-		return 0, true
-	}
-	entries, err := os.ReadDir("/proc")
-	if err != nil {
-		return 0, true
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		pid, err := strconv.Atoi(entry.Name())
-		if err != nil || !pidutil.Alive(pid) {
-			continue
-		}
-		fdDir := filepath.Join("/proc", entry.Name(), "fd")
-		fds, err := os.ReadDir(fdDir)
-		if err != nil {
-			continue
-		}
-		for _, fd := range fds {
-			target, err := os.Readlink(filepath.Join(fdDir, fd.Name()))
-			if err != nil || !strings.HasPrefix(target, "socket:[") || !strings.HasSuffix(target, "]") {
-				continue
-			}
-			inode := strings.TrimSuffix(strings.TrimPrefix(target, "socket:["), "]")
-			if _, ok := inodes[inode]; ok {
-				return pid, true
-			}
-		}
-	}
-	return 0, true
 }
 
 func managedDoltDoctorPortHolderFromLsof(port int) int {

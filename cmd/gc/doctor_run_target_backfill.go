@@ -78,6 +78,11 @@ func (c *runTargetRoutedToBackfillCheck) collect() (targets []backfillTarget, sk
 			if runTarget == "" || strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]) != "" {
 				continue
 			}
+			// An expanded root is neither demanded nor claimable: routing it
+			// again resurrects it (#5900, NEW-5).
+			if !workflowRunTargetFallbackEligible(b) {
+				continue
+			}
 			targets = append(targets, backfillTarget{label: sc.label, store: store, beadID: b.ID, runTarget: runTarget})
 		}
 	}

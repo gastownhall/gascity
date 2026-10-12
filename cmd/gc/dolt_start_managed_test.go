@@ -112,6 +112,19 @@ func TestDoltServerEnv_ScrubsSessionIdentity(t *testing.T) {
 	}
 }
 
+// TestDoltServerEnv_ScrubsHookDeadline pins that a managed server started from
+// inside a hook does not keep that hook's deadline: the server and its
+// watchdog outlive the hook, so the deadline would be stale for anything they
+// spawn.
+func TestDoltServerEnv_ScrubsHookDeadline(t *testing.T) {
+	out := doltServerEnv("", []string{"PATH=/usr/bin", hookDeadlineEnv + "=2026-10-11T12:00:00Z"})
+	for _, kv := range out {
+		if strings.HasPrefix(kv, hookDeadlineEnv+"=") {
+			t.Fatalf("managed Dolt env carries the hook deadline: %v", out)
+		}
+	}
+}
+
 // TestDoltServerEnvScrubCoversSessionRuntimeEnv keeps the scrub list from
 // drifting behind the session lifecycle: a key added to
 // session.RuntimeEnvWithSessionContext reaches every managed server started
@@ -241,8 +254,8 @@ func TestGCBeadsBDScript_UsesPortableSleepMS(t *testing.T) {
 	if got := strings.Count(script, `sleep_ms "$backoff_ms" 2>/dev/null || sleep 1`); got < 3 {
 		t.Fatalf("gc-beads-bd.sh must use sleep_ms for retry backoff sleeps; found %d call sites", got)
 	}
-	if !strings.Contains(script, "for attempt in 1 2 3 4 5 6 7 8; do") {
-		t.Fatalf("gc-beads-bd.sh must allow slow bd runtime schema visibility after init")
+	if !strings.Contains(script, `cap_ms="${GC_DOLT_SCHEMA_SETTLE_TIMEOUT_MS:-120000}"`) {
+		t.Fatalf("gc-beads-bd.sh must allow slow bd runtime schema visibility after init via an env-overridable hard cap")
 	}
 }
 

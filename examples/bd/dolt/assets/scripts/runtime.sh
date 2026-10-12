@@ -48,6 +48,55 @@ is_local_dolt_host() {
   esac
 }
 
+# beads_config_value <config.yaml> <section.field> prints a two-part dotted
+# bd config key's value in either spelling bd reads: the flat top-level
+# `section.field: v` gc writes, or the nested `section:` / `  field: v` that
+# bd >= 1.3.1 writes on `bd config set`. The flat spelling wins when both are
+# present, as it does in viper. Trailing comments and surrounding quotes are
+# stripped; an absent file or key prints nothing. Mirrors findConfigValue in
+# internal/beads/contract/files.go and beads_config_value in the bd pack's
+# gc-beads-bd.sh.
+beads_config_value() {
+  [ -f "$1" ] || return 0
+  awk -v key="$2" '
+    function clean(v) {
+      sub(/^[[:space:]]+/, "", v)
+      if (v ~ /^#/) v = ""
+      sub(/[[:space:]]+#.*$/, "", v)
+      sub(/[[:space:]]+$/, "", v)
+      if (v ~ /^".*"$/ || v ~ /^\047.*\047$/) v = substr(v, 2, length(v) - 2)
+      return v
+    }
+    BEGIN {
+      dot = index(key, ".")
+      section = substr(key, 1, dot - 1)
+      field = substr(key, dot + 1)
+    }
+    { sub(/\r$/, "") }
+    /^[[:space:]]*(#.*)?$/ { next }
+    /^[^[:space:]]/ {
+      in_section = 0
+      child_indent = -1
+      if (!flat_seen && index($0, key ":") == 1) {
+        flat_seen = 1
+        flat = clean(substr($0, length(key) + 2))
+      }
+      if (index($0, section ":") == 1 && clean(substr($0, length(section) + 2)) == "") in_section = 1
+      next
+    }
+    in_section {
+      match($0, /^[[:space:]]+/)
+      if (child_indent < 0) child_indent = RLENGTH
+      if (RLENGTH == child_indent && nested == "" && index(substr($0, RLENGTH + 1), field ":") == 1)
+        nested = clean(substr($0, RLENGTH + length(field) + 2))
+    }
+    END {
+      if (flat_seen) print flat
+      else if (nested != "") print nested
+    }
+  ' "$1"
+}
+
 read_runtime_state_flag() (
   state_file="$1"
   key="$2"
@@ -245,20 +294,7 @@ else
   GC_DOLT_PORT=$(resolve_dolt_port_or_die "$DOLT_STATE_FILE" "$DOLT_PROVIDER_STATE_FILE" "$DOLT_DATA_DIR" "$GC_CITY_PATH") || exit $?
 fi
 
-# Resolve a bounded-execution helper. Prefer gtimeout (coreutils on
-# macOS), fall back to timeout (coreutils on Linux), then to running
-# the command directly if neither is installed. Running unbounded is
-# still better than letting a wedged dolt client hang the caller, but
-# patrol callers need a hard upper bound wherever possible.
-if command -v gtimeout >/dev/null 2>&1; then
-  TIMEOUT_BIN="gtimeout"
-elif command -v timeout >/dev/null 2>&1; then
-  TIMEOUT_BIN="timeout"
-else
-  TIMEOUT_BIN=""
-fi
-
-_run_bounded_warned_no_timeout=""
+. "${GC_PACK_DIR:-${PACK_DIR:-${GC_SYSTEM_PACKS_DIR:-$GC_CITY_PATH/.gc/system/packs}/dolt}}/assets/scripts/_bounded.sh"
 
 # Wall-clock bound (seconds) for `gc rig list --json` rig discovery, shared
 # by the compact and health commands and tunable via
@@ -268,40 +304,3 @@ _run_bounded_warned_no_timeout=""
 # (gascity#2740).
 GC_DOLT_RIG_LIST_TIMEOUT_SECS="${GC_DOLT_RIG_LIST_TIMEOUT_SECS:-30}"
 
-# run_bounded SECS CMD...  — Run CMD with a wall-clock timeout. Exits
-# 124 on timeout (coreutils convention). Uses --kill-after=2 so an
-# uncooperative child that ignores SIGTERM (e.g. a dolt client stuck
-# in kernel socket wait) is escalated to SIGKILL rather than leaking
-# zombies — which is the failure mode the bounded helper exists to
-# prevent. If no bounded execution mechanism is available, fail closed rather
-# than running a potentially wedged Dolt client unbounded.
-run_bounded() {
-  _t="$1"; shift
-  if [ -n "$TIMEOUT_BIN" ]; then
-    "$TIMEOUT_BIN" --kill-after=2 "$_t" "$@"
-  elif command -v python3 >/dev/null 2>&1; then
-    python3 - "$_t" "$@" <<'PY'
-import subprocess
-import sys
-
-limit = float(sys.argv[1])
-cmd = sys.argv[2:]
-
-proc = subprocess.Popen(cmd)
-try:
-    proc.wait(timeout=limit)
-except subprocess.TimeoutExpired:
-    proc.terminate()
-    try:
-        proc.wait(timeout=2)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
-    sys.exit(124)
-sys.exit(proc.returncode)
-PY
-  else
-    printf 'dolt runtime: timeout/gtimeout/python3 not found; cannot run bounded command\n' >&2
-    return 124
-  fi
-}

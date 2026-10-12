@@ -5,6 +5,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"reflect"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -117,8 +118,23 @@ func resolveActiveWispStep(workStore, graphStore beads.Store, assignees []string
 		graphStore = workStore
 	}
 
-	molecule, err := resolveActiveMolecule(graphStore, assignees)
-	if err != nil {
+	// One store holding both classes answers every "what is in progress for
+	// these identities" question below from one listing; split classes ask
+	// each store their own.
+	var claimed *claimedWork
+	if sameStoreHandle(workStore, graphStore) {
+		rows, err := listClaimedWork(workStore, assignees)
+		if err != nil {
+			return nil, fmt.Errorf("listing in-progress work: %w", err)
+		}
+		claimed = &claimedWork{rows: rows}
+	}
+
+	var molecule *beads.Bead
+	var err error
+	if claimed != nil {
+		molecule = claimed.activeMolecule()
+	} else if molecule, err = resolveActiveMolecule(graphStore, assignees); err != nil {
 		return nil, err
 	}
 	if molecule == nil {
@@ -127,7 +143,16 @@ func resolveActiveWispStep(workStore, graphStore beads.Store, assignees []string
 		// bead, so follow that bridge to the root's active step before the
 		// legacy description fallback. Best-effort: a resolution error or no
 		// bridge drops to legacy.
-		if root := resolveMoleculeRootViaBridge(workStore, graphStore, assignees); root != nil {
+		var root *beads.Bead
+		if claimed != nil {
+			root = firstMoleculeRootFrom(graphStore, claimed.newest(claimedBridgeSample))
+			if root == nil {
+				root = resolveMoleculeRootViaRoutedBridge(workStore, graphStore, assignees)
+			}
+		} else {
+			root = resolveMoleculeRootViaBridge(workStore, graphStore, assignees)
+		}
+		if root != nil {
 			step, stepErr := resolveInProgressStepChild(graphStore, root.ID)
 			if stepErr != nil {
 				log.Printf("wisp step inject: error resolving in-progress step for bridged molecule %s: %v", root.ID, stepErr)
@@ -139,6 +164,9 @@ func resolveActiveWispStep(workStore, graphStore beads.Store, assignees []string
 			return resolveEntryStepChild(graphStore, root.ID)
 		}
 		// No molecule bridge; fall back to legacy: any in-progress bead with a description.
+		if claimed != nil {
+			return firstWithDescription(claimed.newest(claimedDescriptionSample)), nil
+		}
 		return resolveBeadWithDescription(workStore, assignees)
 	}
 
@@ -157,40 +185,127 @@ func resolveActiveWispStep(workStore, graphStore beads.Store, assignees []string
 	return resolveEntryStepChild(graphStore, molecule.ID)
 }
 
+// Sample sizes of the step-reminder resolution: each question looks at the
+// newest claimed beads only, cut in created order, newest first.
+const (
+	// activeMoleculeSample is how many of the newest in-progress roots of one
+	// type are compared for the most recently updated.
+	activeMoleculeSample = 5
+	// claimedBridgeSample is how many of the newest claimed beads are searched
+	// for a molecule_id bridge.
+	claimedBridgeSample = 10
+	// claimedDescriptionSample is how many of the newest claimed beads are
+	// searched for one with a description.
+	claimedDescriptionSample = 10
+)
+
+// activeMoleculeTypes are the root types searched for an active molecule, in
+// preference order.
+var activeMoleculeTypes = []string{"molecule", "wisp"}
+
+// claimedWork is every in-progress bead assigned to the hook's identities,
+// newest created first: the one listing the step reminder's in-progress
+// questions are projections of when one store holds work and graph beads.
+type claimedWork struct {
+	rows []beads.Bead
+}
+
+// listClaimedWork lists every in-progress bead assigned to any of assignees,
+// both tiers, newest created first.
+func listClaimedWork(store beads.Store, assignees []string) ([]beads.Bead, error) {
+	return store.List(beads.ListQuery{
+		Status:    "in_progress",
+		Assignees: assignees,
+		TierMode:  beads.TierBoth,
+		Sort:      beads.SortCreatedDesc,
+	})
+}
+
+// newest returns the n newest claimed beads.
+func (c *claimedWork) newest(n int) []beads.Bead {
+	if len(c.rows) <= n {
+		return c.rows
+	}
+	return c.rows[:n]
+}
+
+// activeMolecule is resolveActiveMolecule answered from the claimed work: of
+// each root type in turn, the newest activeMoleculeSample roots, the most
+// recently updated of them.
+func (c *claimedWork) activeMolecule() *beads.Bead {
+	for _, molType := range activeMoleculeTypes {
+		var sample []beads.Bead
+		for _, b := range c.rows {
+			if b.Type != molType {
+				continue
+			}
+			sample = append(sample, b)
+			if len(sample) == activeMoleculeSample {
+				break
+			}
+		}
+		if best := mostRecentlyUpdatedMolecule(sample, molType); best != nil {
+			return best
+		}
+	}
+	return nil
+}
+
+// sameStoreHandle reports whether a and b are the same store handle.
+func sameStoreHandle(a, b beads.Store) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	ta := reflect.TypeOf(a)
+	return ta == reflect.TypeOf(b) && ta.Kind() == reflect.Pointer && a == b
+}
+
 // resolveActiveMolecule returns the agent's in-progress molecule bead.
-// When multiple molecules are found, the most recently updated one is returned
-// and the ambiguity is logged. Returns nil, nil when none is found.
+// When multiple molecules are found, the most recently updated of the five
+// newest is returned and the ambiguity is logged. The sample is cut in created
+// order, newest first, so which five are compared does not depend on the
+// store's default listing order. Returns nil, nil when none is found.
 func resolveActiveMolecule(store beads.Store, assignees []string) (*beads.Bead, error) {
-	for _, molType := range []string{"molecule", "wisp"} {
+	for _, molType := range activeMoleculeTypes {
 		results, err := store.List(beads.ListQuery{
 			Status:    "in_progress",
 			Type:      molType,
 			Assignees: assignees,
 			TierMode:  beads.TierBoth,
-			Limit:     5,
+			Limit:     activeMoleculeSample,
+			Sort:      beads.SortCreatedDesc,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("listing in-progress %s beads: %w", molType, err)
 		}
-		if len(results) == 0 {
-			continue
+		if best := mostRecentlyUpdatedMolecule(results, molType); best != nil {
+			return best, nil
 		}
-		if len(results) > 1 {
-			ids := make([]string, len(results))
-			for i, r := range results {
-				ids[i] = r.ID
-			}
-			log.Printf("wisp step inject: %d in-progress %s beads found (%s); using most recent", len(results), molType, strings.Join(ids, ", "))
-		}
-		best := results[0]
-		for _, r := range results[1:] {
-			if r.UpdatedAt.After(best.UpdatedAt) {
-				best = r
-			}
-		}
-		return &best, nil
 	}
 	return nil, nil
+}
+
+// mostRecentlyUpdatedMolecule returns the most recently updated of the sampled
+// roots of one type (the first on a tie), logging the ambiguity when there is
+// more than one; nil for an empty sample.
+func mostRecentlyUpdatedMolecule(results []beads.Bead, molType string) *beads.Bead {
+	if len(results) == 0 {
+		return nil
+	}
+	if len(results) > 1 {
+		ids := make([]string, len(results))
+		for i, r := range results {
+			ids[i] = r.ID
+		}
+		log.Printf("wisp step inject: %d in-progress %s beads found (%s); using most recent", len(results), molType, strings.Join(ids, ", "))
+	}
+	best := results[0]
+	for _, r := range results[1:] {
+		if r.UpdatedAt.After(best.UpdatedAt) {
+			best = r
+		}
+	}
+	return &best
 }
 
 // resolveMoleculeRootViaBridge finds the molecule root reachable from an
@@ -207,12 +322,16 @@ func resolveActiveMolecule(store beads.Store, assignees []string) (*beads.Bead, 
 //
 // The bridge crosses a class boundary: the bead carrying the stamp is work
 // class, the root it names is ClassGraph.
+//
+// The ten candidates are the newest claimed work, cut in created order so the
+// sample does not depend on the store's default listing order.
 func resolveMoleculeRootViaBridge(workStore, graphStore beads.Store, assignees []string) *beads.Bead {
 	results, err := workStore.List(beads.ListQuery{
 		Status:    "in_progress",
 		Assignees: assignees,
 		TierMode:  beads.TierBoth,
-		Limit:     10,
+		Limit:     claimedBridgeSample,
+		Sort:      beads.SortCreatedDesc,
 	})
 	if err == nil {
 		if root := firstMoleculeRootFrom(graphStore, results); root != nil {
@@ -329,24 +448,32 @@ func resolveEntryStepChild(store beads.Store, moleculeID string) (*beads.Bead, e
 
 // resolveBeadWithDescription returns the first in-progress bead assigned to any
 // of the given identities that has a non-empty Description. This is the legacy
-// resolution path used when no molecule bead is assigned to the agent.
+// resolution path used when no molecule bead is assigned to the agent. The
+// ten candidates are the newest claimed work, first in created order newest
+// first, so the answer does not depend on the store's default listing order.
 func resolveBeadWithDescription(store beads.Store, assignees []string) (*beads.Bead, error) {
 	results, err := store.List(beads.ListQuery{
 		Status:    "in_progress",
 		Assignees: assignees,
 		TierMode:  beads.TierBoth,
-		Limit:     10,
+		Limit:     claimedDescriptionSample,
+		Sort:      beads.SortCreatedDesc,
 	})
 	if err != nil {
 		return nil, err
 	}
+	return firstWithDescription(results), nil
+}
+
+// firstWithDescription returns the first bead with a non-empty description.
+func firstWithDescription(results []beads.Bead) *beads.Bead {
 	for i := range results {
 		if strings.TrimSpace(results[i].Description) != "" {
 			b := results[i]
-			return &b, nil
+			return &b
 		}
 	}
-	return nil, nil
+	return nil
 }
 
 // formatWispStepReminder formats a formula step bead as a <system-reminder>

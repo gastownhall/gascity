@@ -6,7 +6,9 @@ import "strings"
 // reach the infrastructure I need" rather than "the thing I check is not true".
 // It is EX_TEMPFAIL from sysexits.h, the same convention the repo's own scripts
 // already use to separate a temporary-unavailable outcome from a real failure
-// (see scripts/push-gate-lock-lib.sh and TESTING.md).
+// (see scripts/push-gate-lock-lib.sh and TESTING.md), and the one a launched
+// agent command uses to report a provider capacity refusal
+// (runtime.ExitCodeTempFail).
 //
 // Gates are shell commands, so this is the protocol a gate author opts into:
 // exit 75 and the dispatcher treats the run as an infra outcome instead of a

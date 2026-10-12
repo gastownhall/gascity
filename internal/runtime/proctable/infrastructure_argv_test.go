@@ -64,7 +64,7 @@ func TestIsCityInfrastructureRootReadsInjectedProcfs(t *testing.T) {
 	if IsCityInfrastructureRoot(100) {
 		t.Fatal("IsCityInfrastructureRoot read the live /proc under go test")
 	}
-	t.Cleanup(SetScanRootForTesting(root))
+	SetScanRootForTesting(t, root)
 	for pid, want := range map[int]bool{100: true, 101: true, 102: false, 103: false, 0: false} {
 		if got := IsCityInfrastructureRoot(pid); got != want {
 			t.Errorf("IsCityInfrastructureRoot(%d) = %v, want %v", pid, got, want)

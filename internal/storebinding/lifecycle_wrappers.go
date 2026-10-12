@@ -365,8 +365,8 @@ func (s *wrappedSessionsStore) SetState(id string, state session.State, reason s
 
 // Close is the session close race: exactly one caller wins, and losing is not
 // an error. It is reported as a claim so a lost race never reads as a failure.
-func (s *wrappedSessionsStore) Close(id, reason string, at time.Time) (bool, error) {
-	won, err := s.SessionsStore.Close(id, reason, at)
+func (s *wrappedSessionsStore) Close(expected session.Info, reason string, at time.Time) (bool, error) {
+	won, err := s.SessionsStore.Close(expected, reason, at)
 	s.emitter.observeClaim("Close", won, err)
 	return won, err
 }

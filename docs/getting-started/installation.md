@@ -27,7 +27,7 @@ for you; the other methods require manual installation.
 | jq | Yes | — | `brew install jq` | `apt install jq` | JSON processing |
 | git | Yes | — | (built-in) | (built-in) | Version control |
 | dolt | Yes | 2.1.0 or newer | `brew install dolt` | [releases](https://github.com/dolthub/dolt/releases) | Beads data plane |
-| bd (Beads CLI) | Yes | 1.0.4 minimum; 1.3.0 tested | `brew install beads` | [releases](https://github.com/gastownhall/beads/releases) | Issue tracking |
+| bd (Beads CLI) | Yes | 1.0.4 minimum; 1.3.1 tested | `brew install beads` | [releases](https://github.com/gastownhall/beads/releases) | Issue tracking |
 | flock | Yes | — | `brew install flock` | (built-in via util-linux) | File locking |
 | gh | Optional | — | `brew install gh` | [cli.github.com](https://cli.github.com/) | GitHub gate checks |
 | Go 1.26+ | Source only | 1.26 | `brew install go` | [golang.org](https://go.dev/dl/) | Compiler |
@@ -41,9 +41,17 @@ under heavy write load.
 
 The exact versions CI pins are in [`deps.env`](https://github.com/gastownhall/gascity/blob/main/deps.env).
 
-Gas City 1.4.2 and main pair the native store with Beads 1.3.0. When upgrading
+The tested bd is v1.3.1: `brew install beads` (or `brew upgrade beads`)
+installs it, or download `bd` for your platform from the
+[v1.3.1 release assets](https://github.com/gastownhall/beads/releases/tag/v1.3.1).
+With bd v1.3.0 Gas City falls back from its native store to the bd CLI, and
+proxied `bd backup` and closed-wisp purge are skipped.
+
+Gas City 1.4.2 pairs the native store with Beads 1.3.0, and main pairs it with
+Beads 1.3.1, which keeps the same schema. When upgrading
 an existing shared database from Beads 1.2.2, coordinate the upgrade of all
-clients using that database, then run `bd migrate schema` from the workspace.
+clients using that database, then run `bd migrate schema` from the workspace
+(for a city, see [Migrate the Beads schema](/getting-started/upgrading#migrate-the-beads-schema)).
 The tested upgrade moves schema 53 to 66 and preserves existing beads. Older
 clients cannot use the migrated schema. Fresh workspaces initialize directly
 at the new schema.
@@ -90,16 +98,16 @@ brew update
 brew upgrade gascity
 ```
 
-After upgrading, restart any running city so the supervisor picks up the new
-binary:
+The `gascity` formula depends on `beads`, so this upgrades `bd` too.
 
-```bash
-gc service restart     # restarts the launchd/systemd service
-```
+After upgrading, run `gc start` for each city. When the supervisor is still
+running the old binary, `gc start` restarts it on the new one, and it
+regenerates the supervisor's service file on each invocation, so a
+`brew upgrade` followed by `gc start` always picks up template changes.
 
-`gc start` auto-regenerates the service file on each invocation, so a
-`brew upgrade` followed by `gc start` always picks up template changes
-(see [v0.13.3 release notes](https://github.com/gastownhall/gascity/releases/tag/v0.13.3)).
+An upgrade that changes the Beads version can also need a backup and a
+one-time database migration. Before upgrading a city you rely on, follow
+[Upgrading an existing city](/getting-started/upgrading).
 
 ### Uninstalling via Homebrew
 
@@ -181,7 +189,9 @@ curl -fsSLO "https://github.com/gastownhall/gascity/releases/download/v${VERSION
 ### Upgrading a direct-download install
 
 Repeat the download steps above with the new version number. The `gc` binary is
-a single static file — overwriting it is safe.
+a single static file — overwriting it is safe. Install the matching `bd` as
+well, and see [Upgrading an existing city](/getting-started/upgrading) for the
+backup and Beads migration steps.
 
 <Tip>
 You still need to install the [prerequisites](#prerequisites) separately when
@@ -217,15 +227,38 @@ for a local experiment. Successful local signing also removes stale
 
 ### Contributor setup
 
-After building, install the dev toolchain and pre-commit hooks:
+`make install` and `make build` produce the binary you run. To change Gas
+City itself, you test with [Bazel](https://bazel.build): CI checks every
+pull request with `bazel test`, and the `make` targets below run the same
+commands. Install [Bazelisk](https://github.com/bazelbuild/bazelisk), which
+reads the Bazel version the repo pins, then set up the dev toolchain and git
+hooks:
 
 ```bash
 make setup
-make check          # runs fmt, lint, vet, and unit tests
+echo 'build --config=fork-cache' >> .bazelrc.local   # read CI's build cache
+make check          # bazel test //...: unit tests, lint, vet, formatting, generated files
 ```
 
-See [CONTRIBUTING.md](https://github.com/gastownhall/gascity/blob/main/CONTRIBUTING.md)
-for the full contributor workflow.
+The `fork-cache` line points Bazel at the project's anonymous, read-only
+cache, so anything CI already built or tested is reused instead of rerun on
+your machine. Nothing you build is uploaded.
+
+| Change | Run |
+|---|---|
+| Any change | `make check` |
+| `gc` command behavior | `make test-acceptance` |
+| Runtime, orchestrator, or formula behavior | `make test-integration` |
+| Docs | `make check-docs` |
+| Added packages, files, or imports | `make bazel-sync`, then commit the result |
+
+Plain `go test ./...` still works for a quick check of one package, but it
+is not what CI runs and skips the lint, formatting, and generated-file
+checks. See
+[CONTRIBUTING.md](https://github.com/gastownhall/gascity/blob/main/CONTRIBUTING.md)
+for the full contributor workflow and the
+[Bazel quickstart](https://github.com/gastownhall/gascity/blob/main/engdocs/bazel-quickstart.md)
+for remote execution and troubleshooting.
 
 ## Verify your installation
 

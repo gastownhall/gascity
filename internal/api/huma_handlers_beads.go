@@ -3,10 +3,17 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
+	"maps"
+	"slices"
+	"strings"
 	"time"
 
+	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/api/apierr"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // humaHandleBeadList is the Huma-typed handler for GET /v0/beads.
@@ -492,12 +499,10 @@ func readyFederationQuery() beads.ReadyQuery {
 //     relocated graph store. The CLI composite's legs are work-then-infra, the
 //     same relative order, so on a rig-less city the two sequences agree.
 //     GET /v0/beads federates the same legs in the same order.
-//   - Within a leg: whatever order that leg's own Ready reader emits. That is
-//     the canonical (priority ASC, created_at ASC, id ASC) for a work store —
-//     CachingStore.Ready sorts with sortBeadsReadyOrder — but NOT for the graph
-//     leg: the canonical relocated binding is beads.SQLiteStore, whose
-//     sqliteReadySQL orders by (created_at ASC, id ASC) with no priority term at
-//     all. Per-leg order is therefore deterministic, not canonical.
+//   - Within a leg: whatever order that leg's own Ready reader emits. For a
+//     work store (CachingStore.Ready) and for the canonical relocated binding
+//     (beads.SQLiteStore.Ready) alike that is the canonical (priority ASC,
+//     created_at ASC, id ASC) order, so each leg is sorted on its own.
 //   - Dedupe: first leg to return an id wins. The graph leg runs last, so a bead
 //     co-resident in the work store and the binding — the documented steady
 //     state of a migrated city, where the migration preserves ids and never
@@ -506,9 +511,9 @@ func readyFederationQuery() beads.ReadyQuery {
 //     re-sort would change the bytes a multi-rig single-store city already
 //     serves, and the graph leg must be free for such a city. Both sides are
 //     therefore compared after normalizing with beads.SortBeadsReadyOrder. That
-//     normalization is load-bearing rather than cosmetic, precisely because the
-//     graph leg is not priority-ordered; it is well-defined because
-//     SortBeadsReadyOrder is a total order over the merged set.
+//     normalization is load-bearing rather than cosmetic, because a
+//     concatenation of sorted legs is not itself sorted; it is well-defined
+//     because SortBeadsReadyOrder is a total order over the merged set.
 //   - Failure: a rig degrades (Partial 200 + partial_errors); the graph leg
 //     does not (503, carrying any work-leg errors recorded before it). See
 //     graphPlaneUnavailable.
@@ -726,6 +731,11 @@ func (s *Server) humaHandleBeadCreate(ctx context.Context, input *BeadCreateInpu
 			if err != nil {
 				return beads.Bead{}, err
 			}
+			// Before anything is written, the assignee's materialized session
+			// included.
+			if err := refuseGenericSessionWrite("(new)", nil, candidate, genericWrite{meta: candidate.Metadata, labels: candidate.Labels}); err != nil {
+				return beads.Bead{}, err
+			}
 			candidate.Assignee, err = s.normalizeRawBeadAssignee(ctx, input.Body.Assignee)
 			if err != nil {
 				return beads.Bead{}, apierr.InvalidRequest.Msg(err.Error())
@@ -752,16 +762,53 @@ func (s *Server) humaHandleBeadCreate(ctx context.Context, input *BeadCreateInpu
 }
 
 // humaHandleBeadClose is the Huma-typed handler for POST /v0/bead/{id}/close.
+//
+// An optional {"reason": "..."} body records why the bead was closed. The
+// reason is stamped as metadata.close_reason before the close, the convention
+// every store's close honors: BdStore and NativeDoltStore forward it as the
+// close reason (bd close --reason), and the whole-row stores record it, so it
+// comes back as the bead's close_reason on GET and on bead.closed.
 func (s *Server) humaHandleBeadClose(ctx context.Context, input *BeadCloseInput) (*OKResponse, error) {
 	id := input.ID
 	store, current, err := s.resolveBeadOwner(id)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.gateWorkRecordClose(ctx, id, store, current, nil); err != nil {
+	var submitted map[string]string
+	reason := ""
+	if input.Body != nil {
+		reason = strings.TrimSpace(input.Body.Reason)
+	}
+	if reason != "" {
+		submitted = map[string]string{"close_reason": reason}
+	}
+	if err := s.gateWorkRecordClose(ctx, id, store, current, submitted); err != nil {
 		return nil, err
 	}
+	// Only a close that happens stamps a reason. On a bead that is not closed,
+	// a recorded close_reason is left over from an earlier close (bd's reopen
+	// clears its close_reason column but not the metadata), so this close
+	// replaces it with its own reason, or with none. On a bead already closed,
+	// Close is a no-op that keeps the reason its close recorded, so no other
+	// reason is stamped beside it.
+	priorReason := current.Metadata["close_reason"]
+	stampReason := current.Status != "closed" && (reason != "" || strings.TrimSpace(priorReason) != "")
+	if stampReason {
+		if err := store.SetMetadata(id, "close_reason", reason); err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				return nil, apierr.ConflictConcurrentDelete.Msg("conflict: bead " + id + " was deleted concurrently")
+			}
+			return nil, apierr.Internal.Msg(err.Error())
+		}
+	}
 	if err := store.Close(id); err != nil {
+		if stampReason && !errors.Is(err, beads.ErrNotFound) {
+			// The bead stays open, so it must not keep the reason stamped
+			// for a close that did not happen.
+			if restoreErr := store.SetMetadata(id, "close_reason", priorReason); restoreErr != nil {
+				err = errors.Join(err, fmt.Errorf("restoring close_reason after failed close: %w", restoreErr))
+			}
+		}
 		if errors.Is(err, beads.ErrNotFound) {
 			return nil, apierr.ConflictConcurrentDelete.Msg("conflict: bead " + id + " was deleted concurrently")
 		}
@@ -782,6 +829,9 @@ func (s *Server) humaHandleBeadReopen(_ context.Context, input *BeadReopenInput)
 	}
 	if b.Status != "closed" {
 		return nil, apierr.ConflictWrongState.Msg("conflict: bead " + id + " is not closed (status: " + b.Status + ")")
+	}
+	if err := session.ClearRuntimeLeaseForReopen(store, id); err != nil {
+		return nil, apierr.Internal.Msg(err.Error())
 	}
 	if err := store.Reopen(id); err != nil {
 		return nil, apierr.Internal.Msg(err.Error())
@@ -855,6 +905,9 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 	if err != nil {
 		return nil, err
 	}
+	if err := refuseGenericSessionWrite(id, &current, afterUpdate(current, body), genericWrite{meta: body.Metadata, labels: body.Labels, removeLabels: body.RemoveLabels}); err != nil {
+		return nil, err
+	}
 	if body.Assignee != nil {
 		assignee, err := s.normalizeRawBeadAssignee(ctx, *body.Assignee)
 		if err != nil {
@@ -897,6 +950,109 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 	resp := &OKResponse{}
 	resp.Body.Status = "updated"
 	return resp, nil
+}
+
+// refuseGenericSessionWrite refuses, before anything is written (an
+// assignee's materialized session included), a generic bead create or update
+// (ARCH-RESTRUCTURE-2 R7, mc-ojhnu; CONTRACT v5.9p):
+//   - a metadata key that fails beadmeta.ValidKey: a bd-backed store would
+//     split "wait_hold=true" into a disposition key; and a label that fails
+//     beadmeta.ValidLabel, which bd reads as a CSV record ("x,gc:session" or
+//     "gc:session\n" would add the session label);
+//   - a change of whether the row is a session row
+//     (session.IsSessionBeadOrRepairable), or of either session marker (the
+//     session type, the gc:session label): the session verbs own session
+//     rows, and gc never retypes one over HTTP;
+//   - on a session row, a key the row's disposition decodes
+//     (session.DispositionInputKeysIn): only the session verbs move it.
+//
+// before is the row as read, nil for a create; after is the row with the
+// request's type and labels applied. Each refusal is 422 with an errors[]
+// entry per offending field.
+func refuseGenericSessionWrite(id string, before *beads.Bead, after beads.Bead, w genericWrite) error {
+	const verbs = "POST /v0/city/{cityName}/session/{id}/suspend, /wake or /kill, gc session suspend|wake|kill, gc runtime heartbeat, gc session wait"
+	var invalid []*huma.ErrorDetail
+	for _, k := range slices.Sorted(maps.Keys(w.meta)) {
+		if !beadmeta.ValidKey(k) {
+			invalid = append(invalid, &huma.ErrorDetail{Location: "body.metadata." + k, Message: "invalid metadata key: must match " + beadmeta.ValidKeyPattern, Value: k})
+		}
+	}
+	for field, labels := range map[string][]string{"labels": w.labels, "remove_labels": w.removeLabels} {
+		for i, l := range labels {
+			if !beadmeta.ValidLabel(l) {
+				invalid = append(invalid, &huma.ErrorDetail{Location: fmt.Sprintf("body.%s[%d]", field, i), Message: "a label must read back as itself from one CSV record: no comma, quote, newline or carriage return (bd reads labels as a CSV list)", Value: l})
+			}
+		}
+	}
+	if len(invalid) > 0 {
+		slices.SortFunc(invalid, func(a, b *huma.ErrorDetail) int { return strings.Compare(a.Location, b.Location) })
+		return apierr.ValidationFailed.With("bead "+id+": invalid metadata key or label; nothing was written", invalid...)
+	}
+	wasSession := before != nil && session.IsSessionBeadOrRepairable(*before)
+	if isSession := session.IsSessionBeadOrRepairable(after); isSession != wasSession || sessionMarkChanged(before, after) {
+		return apierr.ValidationFailed.With(fmt.Sprintf(
+			"bead %s: the generic bead API never makes a row a session or stops it being one (its type or the %s label); the session verbs own session rows (POST /v0/city/{cityName}/sessions; %s); nothing was written",
+			id, session.LabelSession, verbs), sessionMarkDetail(before, after, w))
+	}
+	if !wasSession {
+		return nil
+	}
+	keys := session.DispositionInputKeysIn(w.meta)
+	if len(keys) == 0 {
+		return nil
+	}
+	details := make([]*huma.ErrorDetail, 0, len(keys))
+	for _, k := range keys {
+		details = append(details, &huma.ErrorDetail{Location: "body.metadata." + k, Message: "a session's disposition key; only the session verbs set it", Value: k})
+	}
+	return apierr.ValidationFailed.With(fmt.Sprintf(
+		"bead %s is a session: metadata %s is its disposition, which only the session verbs set (%s); nothing was written",
+		id, strings.Join(keys, ", "), verbs), details...)
+}
+
+// genericWrite is what a generic create or update asks to write: its
+// metadata, and the labels it adds and removes.
+type genericWrite struct {
+	meta                 map[string]string
+	labels, removeLabels []string
+}
+
+// sessionMarkDetail points the session-ness refusal at the field that made
+// it: the session label added or removed, else the type.
+func sessionMarkDetail(before *beads.Bead, after beads.Bead, w genericWrite) *huma.ErrorDetail {
+	hadLabel := before != nil && slices.Contains(before.Labels, session.LabelSession)
+	switch hasLabel := slices.Contains(after.Labels, session.LabelSession); {
+	case hasLabel && !hadLabel:
+		return &huma.ErrorDetail{Location: fmt.Sprintf("body.labels[%d]", slices.Index(w.labels, session.LabelSession)), Message: "makes the row a session", Value: session.LabelSession}
+	case hadLabel && !hasLabel:
+		return &huma.ErrorDetail{Location: fmt.Sprintf("body.remove_labels[%d]", slices.Index(w.removeLabels, session.LabelSession)), Message: "stops the row being a session", Value: session.LabelSession}
+	}
+	return &huma.ErrorDetail{Location: "body.type", Message: "changes whether the row is a session", Value: after.Type}
+}
+
+// sessionMarkChanged reports a change of either session marker, the
+// session type or the session label, between before (nil for a create)
+// and after, whatever the predicate makes of the row.
+func sessionMarkChanged(before *beads.Bead, after beads.Bead) bool {
+	var was beads.Bead
+	if before != nil {
+		was = *before
+	}
+	return (was.Type == session.BeadType) != (after.Type == session.BeadType) ||
+		slices.Contains(was.Labels, session.LabelSession) != slices.Contains(after.Labels, session.LabelSession)
+}
+
+// afterUpdate is current with the update's type and label changes applied:
+// the row the update would leave, as far as whether it is a session row.
+func afterUpdate(current beads.Bead, body beadUpdateBody) beads.Bead {
+	after := current
+	if body.Type != nil {
+		after.Type = *body.Type
+	}
+	labels := slices.Clone(current.Labels)
+	labels = append(labels, body.Labels...)
+	after.Labels = slices.DeleteFunc(labels, func(l string) bool { return slices.Contains(body.RemoveLabels, l) })
+	return after
 }
 
 // humaHandleBeadDelete is the Huma-typed handler for DELETE /v0/bead/{id}.

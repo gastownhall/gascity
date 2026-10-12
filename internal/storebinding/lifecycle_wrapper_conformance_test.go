@@ -269,10 +269,14 @@ func sessionsScript(tb storebindingtest.TB, sessions storebinding.SessionsStore)
 	// healthy. A provider that reported the loss as an error would separate
 	// the streams here.
 	at := time.Unix(1750000000, 0).UTC()
-	if won, err := sessions.Close(id, "parity", at); err != nil || !won {
+	decided, err := sessions.Get(id)
+	if err != nil {
+		tb.Fatalf("Get before Close: %v", err)
+	}
+	if won, err := sessions.Close(decided, "parity", at); err != nil || !won {
 		tb.Fatalf("Close = (%v, %v), want the race won with no error", won, err)
 	}
-	if won, err := sessions.Close(id, "parity", at); err != nil || won {
+	if won, err := sessions.Close(decided, "parity", at); err != nil || won {
 		tb.Fatalf("second Close = (%v, %v), want the race lost with no error", won, err)
 	}
 }
@@ -860,15 +864,15 @@ func TestWrappedSessionsReportsALostCloseAsAConflict(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wrapping the Sessions front door: %v", err)
 	}
-	id, err := wrapped.CreateSession(session.CreateSpec{Title: "polly", AgentName: "polly"})
+	created, err := wrapped.CreateSessionInfo(session.CreateSpec{Title: "polly", AgentName: "polly"})
 	if err != nil {
-		t.Fatalf("CreateSession: %v", err)
+		t.Fatalf("CreateSessionInfo: %v", err)
 	}
 	now := time.Now().UTC()
-	if won, err := wrapped.Close(id, "done", now); err != nil || !won {
+	if won, err := wrapped.Close(created, "done", now); err != nil || !won {
 		t.Fatalf("first Close = (%v, %v), want the race won with no error", won, err)
 	}
-	if won, err := wrapped.Close(id, "done", now); err != nil || won {
+	if won, err := wrapped.Close(created, "done", now); err != nil || won {
 		t.Fatalf("second Close = (%v, %v), want the race lost with no error", won, err)
 	}
 	stream := observer.stream()

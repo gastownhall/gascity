@@ -42,8 +42,14 @@ func carriedPoolRoute(b beads.Bead) string {
 		return ""
 	}
 	// Legacy pre-ga-eld2x workflow root: gc.run_target is the root's pool route
-	// only while gc.routed_to is empty — exactly legacyWorkflowRunTarget's rule.
+	// only while gc.routed_to is empty — exactly legacyWorkflowRunTarget's rule
+	// — and only while the root is unexpanded. An expanded root is neither
+	// demanded nor claimable (#5900); restoring its run_target into
+	// gc.routed_to would make it both (NEW-5).
 	if route := legacyWorkflowRunTarget(b); route != "" {
+		if !workflowRunTargetFallbackEligible(b) {
+			return ""
+		}
 		return route
 	}
 	// Broaden beyond workflow roots to plain standalone work beads. Any non-empty
@@ -144,6 +150,10 @@ func (cr *CityRuntime) recoverUnroutedWorkRoutes() {
 
 // runRouteRecoveryBackstop executes one authoritative pass and reports it.
 func (cr *CityRuntime) runRouteRecoveryBackstop(reason string) routeRecoveryReport {
+	if cr.beadsQuiescent.Load() {
+		// Suspended with nothing running: no store is read until resume.
+		return routeRecoveryReport{lane: "backstop", reason: reason}
+	}
 	lane := cr.routeRecoveryLaneOf()
 	if !lane.beginBackstop() {
 		// Another pass is already reading the same state. On a large city the
