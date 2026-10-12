@@ -100,10 +100,28 @@ type CachingStore struct {
 	// close another process made (bd close, gc bd close). The next notification
 	// drains them as bead.closed. Without it the reconcile pass later found an
 	// already-closed row and evicted it silently, so the close was never
-	// announced at all (gastownhall/gascity#6860, #2546). hasUnannouncedCloses
-	// mirrors len(unannouncedCloses) > 0 so the drain costs no lock when idle.
-	unannouncedCloses    map[string]Bead
+	// announced at all (gastownhall/gascity#6860, #2546). Each entry carries
+	// the close generation it was queued under (queuedClose), and draining it
+	// credits that generation only, so a stale close drained during a later
+	// close's write does not cancel that close's announcement.
+	// hasUnannouncedCloses mirrors len(unannouncedCloses) > 0 so the drain
+	// costs no lock when idle.
+	unannouncedCloses    map[string]queuedClose
 	hasUnannouncedCloses atomic.Bool
+	// closeIntents tracks, per bead, the closing writes (Close, a closing
+	// Update, the conditional closers) between their backing write and their
+	// claim of the bead.closed announcement (claimCloseLocked), and the close
+	// generation they are making (closeIntent). While one is in flight, a read
+	// that caches the bead as closed with no cached row before it queues the
+	// close too, so a close of a bead the cache never held is not swallowed as
+	// an already-closed row (see trackCloseTransitionLocked). A write does not
+	// claim a close announced elsewhere in its generation; a reopen starts a
+	// new generation, so a close after it is announced again. CloseAll
+	// registers no intent: its backing reports a count, not which ids it
+	// closed, so it announces only the closes of rows the cache held, and the
+	// close of a bead the cache never held goes unannounced, even when a read
+	// caches the closed row while the write is in flight.
+	closeIntents map[string]*closeIntent
 
 	reconciling    atomic.Bool
 	syncFailures   int
@@ -149,6 +167,14 @@ type CachingStore struct {
 	eventCheckBusy                atomic.Bool
 	eventCheckAfter               func(time.Duration) <-chan time.Time
 	applyEventBeforeCommitForTest func()
+
+	// ownEmits holds, per row, the snapshots this cache emitted within the
+	// recency window, so applyEvent tells its own echoes from other writers'
+	// events (ownEmission). ownEmitMu guards both and is never held while
+	// taking c.mu.
+	ownEmitMu       sync.Mutex
+	ownEmits        map[string][]ownEmit
+	ownEmitsSweptAt time.Time
 }
 
 // CacheObservation is an opaque, process-local stamp returned with a cached
@@ -203,9 +229,11 @@ func (o CacheObservation) CacheRev() CacheRevision {
 //   - an ApplyEvent whose verification against the backing fails or times
 //     out, or whose field conflict the backing does not confirm while its
 //     read equals the cached row (gastownhall/gascity#2927), a clean row's
-//     unconfirmed field update included (mc-03lk4). A read that differs
-//     from the cached row installs instead, stamped. An event merged onto a
-//     cached row never clears a mark: it is not a backing read;
+//     unconfirmed field update included (mc-03lk4), and one within five
+//     seconds of a local write to the row (mc-xlphf; only the cache's own
+//     emission coming back drops there unchecked). A read that differs from
+//     the cached row installs instead, stamped. An event merged onto a cached
+//     row never clears a mark: it is not a backing read;
 //   - an ApplyEvent for a row the cache does not hold that a local write or
 //     deletion of the row overlapped;
 //   - a refetch (Get, the overlay, a Live or Parent list, a conditional
@@ -274,6 +302,14 @@ func (o CacheObservation) CacheRev() CacheRevision {
 //     that lags the event looks the same. The mark refuses the census for
 //     the whole store until a backing read of the row clears it, so a row
 //     RefreshRow installed is not thereby visible in the next census.
+//   - Within five seconds of a local write to a row, an event identical,
+//     updated_at included, to a snapshot this cache emitted for the row in
+//     that window is taken for its own echo and dropped unchecked
+//     (mc-xlphf). Another writer that leaves the row exactly so, stamp
+//     included (on a backing that stamps whole seconds, a revert within the
+//     same second), is dropped with it: Get, List and a live list inside the
+//     window serve the older row until the first live read, RefreshRow or
+//     reconcile after the window.
 //   - A verified bead.closed snapshot older than the backing row takes the
 //     backing row, but the order is read from updated_at. A backing whose
 //     updated_at is coarser than a close/reopen cycle can tie a delayed

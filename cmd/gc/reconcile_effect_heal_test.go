@@ -20,11 +20,9 @@ import (
 // nameFree fails the test unless city's lock on name is free.
 func nameFree(t *testing.T, city, name string) {
 	t.Helper()
-	unlock := runtimeNames.tryLock(city, name)
-	if unlock == nil {
+	if nameHeld(t, city, name) {
 		t.Fatalf("the runtime name lock on %q is still held", name)
 	}
-	unlock()
 }
 
 // Kills the heal orphaning a live runtime: the inventory reads the name
@@ -42,21 +40,21 @@ func TestFreshHealNeverOrphansALiveRuntime(t *testing.T) {
 		locked bool
 		cause  string
 	}{
-		{"name held by a start", gone(), true, causeNameBusy},
-		{"alive", &freshObserver{Fake: runtime.NewFake(), l: runtime.Liveness{Running: true, Alive: true}}, false, causeRuntimePresent},
-		{"live pane, agent dead", &freshObserver{Fake: runtime.NewFake(), l: runtime.Liveness{Running: true}}, false, causeRuntimePresent},
-		{"corpse", &freshObserver{Fake: runtime.NewFake(), l: runtime.Liveness{Corpse: true}}, false, causeRuntimePresent},
-		{"incomplete", &freshObserver{Fake: runtime.NewFake(), err: unavailable}, false, causeLivenessUnknown},
+		{"name held by a start", gone().tmux(), true, causeNameBusy},
+		{"alive", (&freshObserver{Fake: runtime.NewFake(), l: runtime.Liveness{Running: true, Alive: true}}).tmux(), false, causeRuntimePresent},
+		{"live pane, agent dead", (&freshObserver{Fake: runtime.NewFake(), l: runtime.Liveness{Running: true}}).tmux(), false, causeRuntimePresent},
+		{"corpse", (&freshObserver{Fake: runtime.NewFake(), l: runtime.Liveness{Corpse: true}}).tmux(), false, causeRuntimePresent},
+		{"incomplete", (&freshObserver{Fake: runtime.NewFake(), err: unavailable}).tmux(), false, causeLivenessUnknown},
 		{"no error-bearing read", runtime.NewFake(), false, causeLivenessUnsupported},
 		{"no provider", nil, false, causeRouteUnknown},
-		{"gone", gone(), false, ""},
+		{"gone", gone().tmux(), false, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := newHealCase(t, livenessGone, desireNone, "state", "creating")
 			if tc.locked {
-				unlock := runtimeNames.tryLock(c.w.CityPath, "s-heal")
+				unlock := holdName(t, c.w.CityPath, "s-heal")
 				defer func() {
-					if runtimeNames.tryLock(c.w.CityPath, "s-heal") != nil {
+					if !nameHeld(t, c.w.CityPath, "s-heal") {
 						t.Error("the refused heal released a lock it does not hold")
 					}
 					unlock()
@@ -66,11 +64,7 @@ func TestFreshHealNeverOrphansALiveRuntime(t *testing.T) {
 			}
 			lockedAtCAS := false
 			adversary := &interleavedStore{Store: c.store, id: c.k.ID, between: func() {
-				if unlock := runtimeNames.tryLock(c.w.CityPath, "s-heal"); unlock != nil {
-					unlock()
-				} else {
-					lockedAtCAS = true
-				}
+				lockedAtCAS = nameHeld(t, c.w.CityPath, "s-heal")
 			}}
 			_, s := c.run(t, tc.sp, adversary)
 			if tc.cause != "" {
@@ -106,7 +100,7 @@ func TestFreshHealRefusesAWakeThatLandsDuringTheRead(t *testing.T) {
 			t.Error(err)
 		}
 	}
-	it, s := c.run(t, sp, nil)
+	it, s := c.run(t, sp.tmux(), nil)
 	if it.Reason != decideDeadRuntimeHeal || s.Outcome != settledRefused || s.Cause != causePremise {
 		t.Fatalf("intent %q, settlement %+v, want the dead-runtime heal refused with cause %q", it.Reason, s, causePremise)
 	}
@@ -123,7 +117,7 @@ func TestFreshHealDeadlineDuringTheReadSettlesFailed(t *testing.T) {
 	ctx, cancel := context.WithCancelCause(context.Background())
 	sp := gone()
 	sp.read = func() { cancel(context.DeadlineExceeded) }
-	p, it := c.pass(t, sp, nil)
+	p, it := c.pass(t, sp.tmux(), nil)
 	if s := runTx(ctx, p, it, effectSpecs[it.Kind], nil); s.Outcome != settledFailed || s.Cause != causeDeadline {
 		t.Fatalf("settlement %+v, want failed with cause %q", s, causeDeadline)
 	}
@@ -178,8 +172,7 @@ func TestFreshHealReadIsFreshForTheEffect(t *testing.T) {
 			c := newHealCase(t, livenessGone, desireNone, "state", "creating")
 			p, it := c.pass(t, &sinceObserver{Fake: runtime.NewFake(), notBefore: tc.notBefore}, nil)
 			p.Clock = checkedClock{newFakePlannerClock(t0), func() {
-				if unlock := runtimeNames.tryLock(c.w.CityPath, "s-heal"); unlock != nil {
-					unlock()
+				if !nameHeld(t, c.w.CityPath, "s-heal") {
 					t.Error("the fresh read's time was taken before the name lock")
 				}
 			}}
@@ -198,7 +191,7 @@ func TestFreshHealReadIsFreshForTheEffect(t *testing.T) {
 func TestFreshHealSeesTheOtherBackend(t *testing.T) {
 	for _, seeded := range []bool{true, false} {
 		c := newHealCase(t, livenessGone, desireNone, "state", "creating")
-		sp := auto.New(gone(), &freshObserver{Fake: runtime.NewFake(), l: runtime.Liveness{Running: true, Alive: true}})
+		sp := auto.New(gone().tmux(), (&freshObserver{Fake: runtime.NewFake(), l: runtime.Liveness{Running: true, Alive: true}}).acp())
 		want := causeRouteUnknown
 		if seeded {
 			sp.SeedRoutes(nil)
@@ -211,20 +204,25 @@ func TestFreshHealSeesTheOtherBackend(t *testing.T) {
 }
 
 // Kills repeated heal refusals kept silent: an A6 heal refused until its
-// backoff reaches the cap alerts once, not before and not again.
+// backoff reaches the cap alerts once, not before and not again; so does
+// the drift repair, a fresh heal of its own kind (the C7b2-1 review's N4).
 func TestHealRefusalsAlertAtTheCap(t *testing.T) {
-	f := newObserveFixture(t)
-	for i := 1; i <= healRefusalsBeforeAlert+2; i++ {
-		f.clk.Advance(10 * time.Minute) // past the last backoff
-		f.p.settlements.post(settlement{Key: rowKeyOf("gc-1"), Kind: intentRowHealFresh, Outcome: settledRefused, Cause: causeRuntimePresent})
-		f.p.drainSettlements(f.clk.Now())
-		want := 0
-		if i >= healRefusalsBeforeAlert {
-			want = 1
-		}
-		if got := len(f.alerts(t)); got != want {
-			t.Fatalf("after %d refusals: %d alerts, want %d", i, got, want)
-		}
+	for _, kind := range []string{intentRowHealFresh, intentDriftRepair} { // the drift repair is a fresh heal of its own kind (N4)
+		t.Run(kind, func(t *testing.T) {
+			f := newObserveFixture(t)
+			for i := 1; i <= healRefusalsBeforeAlert+2; i++ {
+				f.clk.Advance(10 * time.Minute) // past the last backoff
+				f.p.settlements.post(settlement{Key: rowKeyOf("gc-1"), Kind: kind, Outcome: settledRefused, Cause: causeRuntimePresent})
+				f.p.drainSettlements(f.clk.Now())
+				want := 0
+				if i >= healRefusalsBeforeAlert {
+					want = 1
+				}
+				if got := len(f.alerts(t)); got != want {
+					t.Fatalf("after %d refusals: %d alerts, want %d", i, got, want)
+				}
+			}
+		})
 	}
 }
 
@@ -239,7 +237,7 @@ func TestAwakeHealReadsTheRoutedLeafOnly(t *testing.T) {
 			Fake: runtime.NewFake(), l: runtime.Liveness{Running: true, Alive: true},
 			env: map[string]string{"GC_SESSION_ID": c.k.ID, "GC_INSTANCE_TOKEN": "tok-3"},
 		}
-		sp := auto.New(gone(), own)
+		sp := auto.New(gone().tmux(), own.acp())
 		if routed {
 			sp.SeedRoutes([]string{"s-heal"})
 		} else {
@@ -330,7 +328,7 @@ func TestAwakeHealRechecksPresenceAfterTheIdentityRead(t *testing.T) {
 				sp.l = after
 			}
 		}
-		_, s := c.run(t, sp, nil)
+		_, s := c.run(t, sp.tmux(), nil)
 		if s.Outcome != settledRefused || s.Cause != causeRuntimeNotOwn || c.meta(t)["state"] != "asleep" {
 			t.Fatalf("%s: settlement %+v, state %q, want refused %q and the row asleep", name, s, c.meta(t)["state"], causeRuntimeNotOwn)
 		}
@@ -354,15 +352,15 @@ func TestFreshHealDecidesOnTheBackingRow(t *testing.T) {
 			t.Error(err)
 		}
 	}
-	if _, s := c.run(t, sp, cache); s.Outcome != settledRefused || s.Cause != causePremise || reads != 1 || c.meta(t)["state"] != "creating" {
+	if _, s := c.run(t, sp.tmux(), cache); s.Outcome != settledRefused || s.Cause != causePremise || reads != 1 || c.meta(t)["state"] != "creating" {
 		t.Fatalf("settlement %+v after %d attempts, state %q, want refused %q on the first", s, reads, c.meta(t)["state"], causePremise)
 	}
 }
 
-// Kills the heal writing the pass's patch without deciding again on the
-// fresh row: a suspend (sleep_intent, which no lifecycle fact carries) or a
-// wait hold landing after the pass makes the row operator-dormant, so the
-// awake heal refuses redecided and the row stays asleep.
+// Kills the heal writing the pass's patch over a row an operator changed
+// since the pass: a suspend (sleep_intent) or a wait hold makes the row
+// operator-dormant. Both are operator intent keys, so since F2 the premise
+// refuses before the heal decides again, and the row stays asleep.
 func TestAwakeHealDecidesAgainOnTheFreshRow(t *testing.T) {
 	for _, kv := range [][]string{{"sleep_intent", "user-hold"}, {"wait_hold", "op"}} {
 		c := ownRuntimeCase(t, "tok-3", "state", "asleep", "sleep_reason", "idle")
@@ -375,8 +373,8 @@ func TestAwakeHealDecidesAgainOnTheFreshRow(t *testing.T) {
 			Fake: runtime.NewFake(), l: runtime.Liveness{Running: true, Alive: true},
 			env: map[string]string{"GC_SESSION_ID": c.k.ID, "GC_INSTANCE_TOKEN": "tok-3"},
 		}
-		if _, s := c.run(t, own, nil); s.Outcome != settledRefused || s.Cause != causeRedecided || c.meta(t)["state"] != "asleep" {
-			t.Fatalf("%s since the pass: settlement %+v, state %q, want refused %q", kv[0], s, c.meta(t)["state"], causeRedecided)
+		if _, s := c.run(t, own.tmux(), nil); s.Outcome != settledRefused || s.Cause != causePremise || c.meta(t)["state"] != "asleep" {
+			t.Fatalf("%s since the pass: settlement %+v, state %q, want refused %q", kv[0], s, c.meta(t)["state"], causePremise)
 		}
 	}
 }
@@ -386,8 +384,8 @@ func TestAwakeHealDecidesAgainOnTheFreshRow(t *testing.T) {
 // marker is set lands the heal and the marker's clear in its one CAS, the
 // merged patch decided again on the fresh row.
 func TestFreshHealLandsItsFoldedItemsInOneCAS(t *testing.T) {
-	c := newHealCase(t, livenessGone, desireWake, "state", "active", "session_key", "k-1", "detached_at", rowAt(-time.Hour))
-	it, s := c.run(t, gone(), nil)
+	c := newHealCase(t, livenessGone, desireSleep, "state", "active", "session_key", "k-1", "detached_at", rowAt(-time.Hour))
+	it, s := c.run(t, gone().tmux(), nil)
 	if it.Kind != intentRowHealFresh || s.Outcome != settledLanded {
 		t.Fatalf("intent (%q, %q), settlement %+v, want the fresh heal landed", it.Kind, it.Reason, s)
 	}
@@ -396,10 +394,10 @@ func TestFreshHealLandsItsFoldedItemsInOneCAS(t *testing.T) {
 	}
 }
 
-// Kills a fold written from the pass's decision rather than decided again on
-// the fresh row (review pins): a detached_at marker cleared by another
-// writer before the effect is not written back stale, and one stamped since
-// the pass is cleared in the heal's one CAS.
+// Kills a fold written from the pass's decision (review pins), now on the
+// premise (F2): detached_at is a premise key, so a marker cleared or stamped
+// by another writer since the pass refuses the heal, writing nothing; the
+// next pass decides on the row as it is.
 func TestFreshHealDecidesItsFoldOnTheFreshRow(t *testing.T) {
 	for _, c := range []struct {
 		name          string
@@ -412,18 +410,18 @@ func TestFreshHealDecidesItsFoldOnTheFreshRow(t *testing.T) {
 		if c.marker != "" {
 			meta = append(meta, "detached_at", c.marker)
 		}
-		hc := newHealCase(t, livenessGone, desireWake, meta...)
+		hc := newHealCase(t, livenessGone, desireSleep, meta...)
 		hc.before = func() {
 			if err := hc.store.SetMetadataBatch(hc.k.ID, map[string]string{"detached_at": c.write}); err != nil {
 				t.Error(err)
 			}
 		}
-		it, s := hc.run(t, gone(), nil)
-		if it.Kind != intentRowHealFresh || s.Outcome != settledLanded {
-			t.Fatalf("%s: intent (%q, %q), settlement %+v, want the fresh heal landed", c.name, it.Kind, it.Reason, s)
+		it, s := hc.run(t, gone().tmux(), nil)
+		if it.Kind != intentRowHealFresh || s.Outcome != settledRefused || s.Cause != causePremise {
+			t.Fatalf("%s: intent (%q, %q), settlement %+v, want the fresh heal refused %q", c.name, it.Kind, it.Reason, s, causePremise)
 		}
-		if m := hc.meta(t); m["state"] != "asleep" || m["detached_at"] != "" || m["session_key"] != "" {
-			t.Fatalf("%s: row %v, want asleep, its continuation reset and no marker, in the one CAS", c.name, m)
+		if m := hc.meta(t); m["state"] != "active" || m["detached_at"] != c.write || m["session_key"] != "k-1" {
+			t.Fatalf("%s: row %v, want it as the other writer left it", c.name, m)
 		}
 	}
 }
@@ -442,7 +440,7 @@ func TestOnlyFreshKindsRestOnTheRuntime(t *testing.T) {
 		rests rests
 	}{
 		{"creating heal", newHealCase(t, livenessGone, desireNone, "state", "creating"), intentRowHealFresh, restRuntime},
-		{"dead-runtime heal", newHealCase(t, livenessGone, desireWake, "state", "active"), intentRowHealFresh, restRuntime},
+		{"dead-runtime heal", newHealCase(t, livenessGone, desireSleep, "state", "active"), intentRowHealFresh, restRuntime},
 		{"awake heal", ownRuntimeCase(t, "tok-3", "state", "asleep", "sleep_reason", "idle"), intentRowHealFresh, restRuntime},
 		{"stranded clear", newHealCase(t, livenessAlive, desireKeep, "state", "active", strandedEventEmittedKey, rowAt(-time.Hour)), intentRowHeal, 0},
 		{"claim clear", newHealCase(t, livenessAlive, desireKeep, "state", "active", "pending_create_claim", "true"), intentRowHeal, 0},
@@ -511,7 +509,7 @@ func TestFreshHealDecideMatchesItsArmOnTheFreshRead(t *testing.T) {
 	}
 	rows := map[string]func() *healCase{
 		"creating":     func() *healCase { return newHealCase(t, livenessGone, desireNone, "state", "creating") },
-		"dead runtime": func() *healCase { return newHealCase(t, livenessGone, desireWake, "state", "active") },
+		"dead runtime": func() *healCase { return newHealCase(t, livenessGone, desireSleep, "state", "active") },
 		"asleep, own":  func() *healCase { return ownRuntimeCase(t, "tok-3", "state", "asleep", "sleep_reason", "idle") },
 	}
 	for rowName, row := range rows {
@@ -521,10 +519,10 @@ func TestFreshHealDecideMatchesItsArmOnTheFreshRead(t *testing.T) {
 			if it.Kind != intentRowHealFresh {
 				t.Fatalf("%s: the pass proposes %q, want a fresh heal", rowName, it.Kind)
 			}
-			rt, _ := readRuntime(context.Background(), sp(), nil, "s-heal", gatherNow, func() time.Time { return gatherNow })
+			rt, _ := readRuntime(context.Background(), sp().tmux(), nil, "s-heal", gatherNow, func() time.Time { return gatherNow })
 			w := c.w.withRuntime(c.k, rt)
 			again, _ := decideRow(&w, c.a, c.k)
-			_, s := c.run(t, sp(), nil)
+			_, s := c.run(t, sp().tmux(), nil)
 			if landed, arm := s.Outcome == settledLanded, again.Kind == it.Kind && again.Reason == it.Reason; landed != arm {
 				t.Errorf("%s over %s: landed %t (settlement %+v), the arm on the fresh read proposes %t", rowName, rtName, landed, s, arm)
 			}
@@ -558,5 +556,18 @@ func TestRedecideRowDecidesOnTheFreshRead(t *testing.T) {
 	noRead.RT = nil
 	if step := redecideRow(noRead); len(step.Write) == 0 {
 		t.Fatalf("no fresh read: step %+v, want the pass's facts decided (the heal written)", step)
+	}
+}
+
+// Kills a quarantining death accrual that records no quarantine telemetry:
+// the landed heal's facts carry the agent (legacy's RecordAgentQuarantine
+// after its accrual write), and an accrual below the limit carries none.
+func TestDeadRuntimeQuarantineRecordsTheAgent(t *testing.T) {
+	for attempts, want := range map[string]string{"4": "worker", "1": ""} {
+		c := newHealCase(t, livenessGone, desireWake, "state", "active", "last_woke_at", gatherNow.Add(-10*time.Second).Format(time.RFC3339), "wake_attempts", attempts)
+		it, s := c.run(t, gone().tmux(), nil)
+		if it.Reason != decideDeadRuntimeHeal || s.Outcome != settledLanded || s.Facts.Quarantined != want {
+			t.Fatalf("wake_attempts %s: intent %q, settlement %+v, want the heal landed recording quarantine %q", attempts, it.Reason, s, want)
+		}
 	}
 }

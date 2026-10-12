@@ -429,7 +429,7 @@ func createPoolSessionBeadWithIdentifiers(
 			if err := sessionFrontDoor(store).SetMarker(info.ID, "session_name", want); err != nil {
 				// Nothing was started under the placeholder; closing as
 				// failed_create releases the identity lease for the next tick.
-				closeFailedCreateBead(sessionFrontDoor(store), info, now, io.Discard)
+				closeSeat(store, nil, info, closeWhy{reason: string(sessionpkg.StateFailedCreate), gate: closeRollback}, now, io.Discard)
 				return sessionpkg.Info{}, poolCreateWriteError{err: err, rowID: info.ID, landed: true}
 			}
 			info = info.ApplyPatch(sessionpkg.MetadataPatch{"session_name": want})

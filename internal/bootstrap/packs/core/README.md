@@ -16,6 +16,7 @@ none requires per-city configuration.
 | `gate-sweep` | cooldown 30s | Evaluate and close pending gates (timer, GitHub) |
 | `orphan-sweep` | cooldown 5m | Reset beads assigned to dead agents back to the work pool |
 | `cross-rig-deps` | cooldown 5m | Convert satisfied cross-rig `blocks` deps to `related` |
+| `convoy-autoclose-backstop` | cooldown 1h | Close open, un-owned convoys whose members are all terminal (reconciles a missed autoclose) |
 | `order-tracking-sweep` | cooldown | Close stale order-tracking beads and prune expired tracking history |
 | `spawn-storm-detect` | cooldown | Detect beads repeatedly bouncing back to pool |
 | `prune-branches` | cooldown | Clean stale `gc/*` branches from all rigs |

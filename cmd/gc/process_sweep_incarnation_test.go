@@ -260,7 +260,7 @@ func newProcSweep(t *testing.T) *procSweep {
 	if err := os.WriteFile(filepath.Join(s.root, "stat"), []byte("btime "+strconv.FormatInt(sweepBoot.Unix(), 10)+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(proctable.SetScanRootForTesting(s.root))
+	proctable.SetScanRootForTesting(t, s.root)
 	return s
 }
 

@@ -65,10 +65,14 @@ func (cr *CityRuntime) installPlanner(rt *plannerRuntime) {
 // newPlannerHost is the one place the planner's view of the city is built
 // (F2). Every closure reads state a lock publishes or state fixed before run
 // starts; run sets inventoryLane before the startup step boots the planner.
-// The capacity guard and template resolutions are left out: no trace-only
-// arm reads them.
+// The endpoint capacity guard is built here, before run, so the planner and
+// its effects share the controller's guard without racing its lazy build.
+// A generation's template resolver builds its params once, as legacy's
+// buildDesiredState does each tick, over the sessions store gather reads.
 func (cr *CityRuntime) newPlannerHost() plannerHost {
+	guard := cr.ensureEndpointCapacityGuard()
 	return plannerHost{
+		preserveSessions: cr.preserveSessionsShutdown.Load,
 		gather: gatherEnv{
 			CityPath: cr.cityPath, CityName: cr.cityName,
 			Sessions:  cr.v2SessionsStore,
@@ -88,7 +92,11 @@ func (cr *CityRuntime) newPlannerHost() plannerHost {
 				return beads.NudgesStore{Store: resolveNudgesStore(cr.storageRoutes, cr.cityBeadStore(), cr.serviceConfigSnapshot(), cr.cityPath, cr.rec)}
 			},
 			WorkStore: cr.cityBeadStore,
-			LookPath:  exec.LookPath,
+			Capacity:  func() *endpointCapacityGuard { return guard },
+			Templates: func(env *reconcileEnv, now time.Time) templateResolver {
+				return newTemplateResolver(newAgentBuildParams(cr.cityName, cr.cityPath, env.Cfg, env.SP, now.UTC(), cr.v2SessionsStore(), cr.stderr))
+			},
+			LookPath: exec.LookPath,
 		},
 		snapshotEnv: cr.serviceEnvSnapshot,
 		setInventoryHook: func(fn func(prev, next *ObservationSnapshot)) {
@@ -111,6 +119,7 @@ func (cr *CityRuntime) newPlannerHost() plannerHost {
 		safeTick: cr.safeTick,
 		rec:      cr.rec,
 		stderr:   cr.stderr,
+		stranded: cr.strandedClaimAlerter(),
 	}
 }
 
@@ -257,7 +266,7 @@ func (cr *CityRuntime) reloadV2(p *tickPass, source reloadSource) {
 	r := cr.reloadConfigTraced(p.ctx, p.lastProviderName, p.cityRoot, p.trace, source)
 	cr.v2.publishEnv()
 	if r.Outcome != reloadOutcomeFailed {
-		cr.v2.softReload(reloadIntent{Source: source, Soft: p.manualReload != nil && p.manualReload.soft}, &r)
+		cr.v2.softReload(p.ctx, reloadIntent{Source: source, Soft: p.manualReload != nil && p.manualReload.soft}, &r)
 	}
 	cr.v2.planner.markDirty("reload")
 	p.manualReply = r
@@ -292,7 +301,7 @@ func (cr *CityRuntime) beforeProviderSwap(ctx context.Context, cfg *config.City)
 		cr.v2.exec.openStarts()
 		cr.v2.planner.resumeStarts()
 	}
-	if err := cr.v2.exec.waitStarts(startup + startDeadlineSlack); err != nil {
+	if err := cr.v2.exec.waitStarts(startup + startDeadlineSlack + startFailureSlack); err != nil {
 		return resume, err
 	}
 	return resume, ctx.Err()

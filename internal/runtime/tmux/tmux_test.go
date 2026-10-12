@@ -3184,7 +3184,11 @@ func TestPaneShowsDrainedComposer(t *testing.T) {
 		{"bare drained composer", []string{"❯ "}, "hello", true},
 		{"composer still holds exact sent draft", []string{"❯ hello"}, "hello", false},
 		{"composer holds sent draft with trailing padding", []string{"❯ hello  "}, "hello", false},
-		{"composer holds unrelated newer text", []string{"❯ something else entirely"}, "hello", true},
+		// Any text left in the composer puts the submit in doubt: a draft
+		// Claude restored after an interrupt, with the sent message pasted
+		// behind it, starts with the old prompt (see
+		// TestPaneShowsDrainedComposerRejectsMergedClaudeDraft).
+		{"composer holds other text", []string{"❯ something else entirely"}, "hello", false},
 		{
 			"long draft truncated to pane width still detected via 40-rune compare",
 			[]string{"❯ " + longSentFirst40},
@@ -3227,10 +3231,46 @@ func TestPaneShowsDrainedComposer(t *testing.T) {
 			"\nfirst line of reminder\nsecond line",
 			true,
 		},
+		{
+			"composer still holds the paste collapsed into a staged placeholder",
+			[]string{"● Done.", "────", "❯\u00a0[Pasted text #1 +42 lines]", "────", "  ⏵⏵ bypass permissions on"},
+			"reminder: please respond to the review",
+			false,
+		},
+		{
+			"placeholder only echoed in the transcript above a bare composer",
+			[]string{"❯\u00a0[Pasted text #1 +44 lines]", "● Done.", "────", "❯\u00a0", "────", "  ⏵⏵ bypass permissions on"},
+			"reminder: please respond to the review",
+			true,
+		},
+		{
+			"codex placeholder echoed in the transcript above a bare composer",
+			[]string{"› [Pasted Content 100 chars]", "● Done.", "────", "❯\u00a0", "────", "  ⏵⏵ bypass permissions on"},
+			"reminder: please respond to the review",
+			true,
+		},
+		{
+			"codex composer still staged below a transcript line starting with the ready prompt",
+			[]string{"  ❯ make test", "  ok  ./...", "› [Pasted Content 1234 chars]", "", "  gpt-5.5 low · /tmp/probe"},
+			"reminder: please respond to the review",
+			false,
+		},
+		{
+			"bare codex composer below a ready-prompt transcript line and an echoed placeholder",
+			[]string{"  ❯ make test", "› [Pasted Content 999 chars]", "• Done.", "› ", "  gpt-5.5 low · /tmp/probe"},
+			"reminder: please respond to the review",
+			true,
+		},
+		{
+			"staged composer below a codex placeholder echoed in the transcript",
+			[]string{"› [Pasted Content 100 chars]", "● Done.", "────", "❯\u00a0[Pasted text #2 +7 lines]", "────", "  ⏵⏵ bypass permissions on"},
+			"reminder: please respond to the review",
+			false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := paneShowsDrainedComposer(tt.lines, tt.sent)
+			got := paneShowsDrainedComposer(tt.lines)
 			if got != tt.want {
 				t.Errorf("paneShowsDrainedComposer(%v, %q) = %v, want %v", tt.lines, tt.sent, got, tt.want)
 			}

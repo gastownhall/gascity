@@ -156,6 +156,12 @@ type AwakeDecision struct {
 	ShouldWake      bool
 	Reason          string // human-readable reason for debugging
 	HasAssignedWork bool   // underlying assigned-work demand before wake reason overrides
+	// Attached is true when the input reports the session attached and no
+	// wait hold blocks that, whatever reason the decision ends with. A ready
+	// wait relabels an attached wake to "wait-ready", and the attachment must
+	// still keep the session out of its idle latch
+	// (wakeDemandOverridesSleepSuppression).
+	Attached bool
 	// AssignedWorkBeadID identifies the work bead that anchored the
 	// assigned-work decision for this session, when one applies. Callers
 	// use it to persist currently_processing_bead_id and to detect when an
@@ -340,11 +346,15 @@ func computeAwakeSetKeyed(input AwakeInput, keyBy awakeKey) map[string]AwakeDeci
 				// work-query stays gated: it lacks NamedSessionRoutedDemand's
 				// deliberate UsesCanonicalSingletonPoolIdentity() scoping, so
 				// exempting it would risk a herd-wake on multi-instance pools.
-				// Finally, when a drained holder has both signals, named-demand
-				// from blocked work wins the reason switch above; promote it to
-				// routed-demand so the live routed signal is not masked and the
-				// ga-j4lqwa.1 strand cannot survive in the combined case.
-				if bead.Drained && reason == "named-demand" && input.NamedSessionRoutedDemand[ns.Identity] {
+				// Finally, when a holder has both signals, named-demand from
+				// blocked work wins the reason switch above; promote it to
+				// routed-demand so the live routed signal is not masked. A
+				// drained holder needs the label for the exemption below (or the
+				// ga-j4lqwa.1 strand survives), and an idle-latched one needs it
+				// for wakeDemandOverridesSleepSuppression (or the template
+				// wedges with its standby alias-suppressed). Every other reason
+				// consumer treats the two labels alike.
+				if reason == "named-demand" && input.NamedSessionRoutedDemand[ns.Identity] {
 					reason = "routed-demand"
 				}
 				drainedExempt := reason == "routed-demand"
@@ -581,6 +591,7 @@ func computeAwakeSetKeyed(input AwakeInput, keyBy awakeKey) map[string]AwakeDeci
 		if input.AttachedSessions[name] && !bead.WaitHold {
 			decision.ShouldWake = true
 			decision.Reason = "attached"
+			decision.Attached = true
 		}
 
 		// Pending interaction override — even drained beads wake

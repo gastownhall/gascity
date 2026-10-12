@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -56,35 +57,62 @@ func TestV2RoutedToNamespaceCheckWarnsOnShortBoundRoutes(t *testing.T) {
 	}
 }
 
-func TestV2RoutedToNamespaceCheckUsesTargetedRouteQueries(t *testing.T) {
-	cityDir := t.TempDir()
-	cfg := &config.City{
-		Agents: []config.Agent{{Name: "dog", BindingName: "gastown"}},
-	}
-	store := &routeQuerySpyStore{Store: beads.NewMemStoreFrom(0, []beads.Bead{
-		{ID: "CITY-1", Title: "warrant", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "dog"}},
-	}, nil)}
+// TestV2RoutedToNamespaceCheckReadsEachStoreOnceWhateverTheRouteCount: the
+// check lists each store once and matches routes in memory, so its reads do
+// not grow with the city's bound routes (a 215-route city with four stores
+// paid 1,720 bd forks for one read per route per store). A store path shared
+// by two scopes is listed once and still reported for both.
+func TestV2RoutedToNamespaceCheckReadsEachStoreOnceWhateverTheRouteCount(t *testing.T) {
+	for _, routes := range []int{1, 250} {
+		t.Run(fmt.Sprintf("%d-routes", routes), func(t *testing.T) {
+			cityDir := t.TempDir()
+			rigDir := t.TempDir()
+			cfg := &config.City{
+				Rigs: []config.Rig{
+					{Name: "repo", Path: rigDir},
+					{Name: "alias", Path: rigDir},
+				},
+			}
+			for i := range routes {
+				cfg.Agents = append(cfg.Agents, config.Agent{Name: fmt.Sprintf("agent%03d", i), BindingName: "pack"})
+			}
+			stores := map[string]*routeQuerySpyStore{
+				cityDir: {Store: beads.NewMemStoreFrom(0, []beads.Bead{
+					{ID: "CITY-1", Title: "short", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "agent000"}},
+					{ID: "CITY-2", Title: "canonical", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "pack.agent000"}},
+					{ID: "CITY-3", Title: "closed", Type: "task", Status: "closed", Metadata: map[string]string{"gc.routed_to": "agent000"}},
+					{ID: "CITY-4", Title: "padded", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": " agent000"}},
+				}, nil)},
+				rigDir: {Store: beads.NewMemStoreFrom(0, []beads.Bead{
+					{ID: "RIG-1", Title: "short", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": fmt.Sprintf("agent%03d", routes-1)}},
+				}, nil)},
+			}
+			result := newV2RoutedToNamespaceCheck(cfg, cityDir, func(path string) (beads.Store, error) {
+				store, ok := stores[path]
+				if !ok {
+					return nil, fmt.Errorf("unexpected store path %q", path)
+				}
+				return store, nil
+			}).Run(&doctor.CheckContext{})
 
-	result := newV2RoutedToNamespaceCheck(cfg, cityDir, func(path string) (beads.Store, error) {
-		if path != cityDir {
-			return nil, fmt.Errorf("unexpected store path %q", path)
-		}
-		return store, nil
-	}).Run(&doctor.CheckContext{})
-
-	if result.Status != doctor.StatusWarning {
-		t.Fatalf("status = %v, want warning: %#v", result.Status, result)
-	}
-	if len(store.queries) == 0 {
-		t.Fatal("expected at least one route query")
-	}
-	for _, query := range store.queries {
-		if query.AllowScan {
-			t.Fatalf("query %+v used AllowScan; route namespace check should use targeted metadata lookups", query)
-		}
-		if got := query.Metadata["gc.routed_to"]; got == "" {
-			t.Fatalf("query %+v missing gc.routed_to metadata filter", query)
-		}
+			if result.Status != doctor.StatusWarning {
+				t.Fatalf("status = %v, want warning: %#v", result.Status, result)
+			}
+			last := fmt.Sprintf("agent%03d", routes-1)
+			want := []string{
+				`city bead CITY-1 has gc.routed_to="agent000"; use "pack.agent000"`,
+				fmt.Sprintf(`rig alias bead RIG-1 has gc.routed_to=%q; use "pack.%s"`, last, last),
+				fmt.Sprintf(`rig repo bead RIG-1 has gc.routed_to=%q; use "pack.%s"`, last, last),
+			}
+			if got := strings.Join(result.Details, "\n"); got != strings.Join(want, "\n") {
+				t.Fatalf("details:\n%s\nwant:\n%s", got, strings.Join(want, "\n"))
+			}
+			for path, store := range stores {
+				if len(store.queries) != 1 {
+					t.Fatalf("store %s listed %d times for %d routes, want 1: %+v", path, len(store.queries), routes, store.queries)
+				}
+			}
+		})
 	}
 }
 
@@ -358,10 +386,13 @@ func (s routeSetMetadataErrorStore) SetMetadata(string, string, string) error {
 
 type routeQuerySpyStore struct {
 	beads.Store
+	mu      sync.Mutex
 	queries []beads.ListQuery
 }
 
 func (s *routeQuerySpyStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.mu.Lock()
 	s.queries = append(s.queries, query)
+	s.mu.Unlock()
 	return s.Store.List(query)
 }

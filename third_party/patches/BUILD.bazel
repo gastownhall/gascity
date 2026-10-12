@@ -7,6 +7,7 @@ exports_files([
     "flatbuffers_v23_importpath.patch",
     "protoc_gen_validate_build.patch",
     "go_ruleguard_bazel_gcimporter.patch",
+    "honnef_unused_objectpath_encoder.patch",
     "revive_bazel_gcimporter.patch",
     "rules_go_nogo_golangci_nolint.patch",
     "x_tools_ctrlflow_stdlib_noreturn.patch",

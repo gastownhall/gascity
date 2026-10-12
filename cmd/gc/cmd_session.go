@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -29,12 +28,6 @@ import (
 	"github.com/gastownhall/gascity/internal/worker"
 	"github.com/spf13/cobra"
 )
-
-// indefiniteHoldDuration is the canonical "suspended indefinitely" sentinel
-// used when setting held_until on a session bead. The reconciler treats any
-// held_until in the future as "do not wake." 100 years is effectively forever
-// without risking time arithmetic overflow.
-const indefiniteHoldDuration = 100 * 365 * 24 * time.Hour
 
 func newSessionCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
@@ -398,7 +391,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 				return 1
 			}
 			fmt.Fprintln(stdout, "Attaching...") //nolint:errcheck // best-effort stdout
-			if err := handle.Attach(context.Background()); err != nil {
+			if err := handle.Attach(context.Background(), sessionActor(session.ActorOperator, cityPath)); err != nil {
 				fmt.Fprintf(stderr, "gc session new: attaching: %v\n", err) //nolint:errcheck // best-effort stderr
 				return 1
 			}
@@ -507,7 +500,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 	}
 
 	fmt.Fprintln(stdout, "Attaching...") //nolint:errcheck // best-effort stdout
-	if err := handle.Attach(context.Background()); err != nil {
+	if err := handle.Attach(context.Background(), sessionActor(session.ActorOperator, cityPath)); err != nil {
 		fmt.Fprintf(stderr, "gc session new: attaching: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -1563,7 +1556,7 @@ func cmdSessionAttach(args []string, stdout, stderr io.Writer) int {
 	}
 
 	fmt.Fprintf(stdout, "Attaching to session %s (%s)...\n", sessionID, info.Template) //nolint:errcheck // best-effort stdout
-	if err := handle.Attach(context.Background()); err != nil {
+	if err := handle.Attach(context.Background(), sessionActor(session.ActorOperator, cityPath)); err != nil {
 		fmt.Fprintf(stderr, "gc session attach: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -1709,17 +1702,6 @@ Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 	return cmd
 }
 
-// managedSuspendPatch is the metadata-only suspend `gc session suspend` writes
-// when a controller owns the stop: a hold far in the future, which also
-// supersedes any pending wake request (CONTRACT v5.7 D7).
-func managedSuspendPatch(now time.Time) session.MetadataPatch {
-	patch := session.ClearWakeRequestPatch()
-	patch["held_until"] = now.Add(indefiniteHoldDuration).UTC().Format(time.RFC3339)
-	patch["sleep_intent"] = "user-hold"
-	patch["state"] = "suspended"
-	return patch
-}
-
 // The managed `gc session suspend` path's controller calls, as mutable
 // global test seams.
 var (
@@ -1760,9 +1742,9 @@ func cmdSessionSuspend(args []string, stdout, stderr io.Writer, jsonOutput ...bo
 	// or the machine-wide supervisor — not for unmanaged ad-hoc cities.
 	if cityErr == nil && sessionSuspendManagedReconciler(cityPath) {
 		if pokeErr := sessionSuspendPokeController(cityPath); pokeErr == nil {
-			// Controller is running — metadata-only suspend.
-			// Set held_until far in the future so the reconciler drains/stops the session.
-			if err := sessionFrontDoor(sessStore).ApplyPatch(sessionID, managedSuspendPatch(time.Now())); err != nil {
+			// Controller is running — metadata-only suspend: the operator
+			// hold (the disposition's Suspend cell), which the reconciler drains.
+			if _, err := sessionFrontDoor(sessStore).OperatorSuspend(sessionID, time.Now()); err != nil {
 				fmt.Fprintf(stderr, "gc session suspend: %v\n", err) //nolint:errcheck // best-effort stderr
 				return 1
 			}
@@ -1797,7 +1779,7 @@ func cmdSessionSuspend(args []string, stdout, stderr io.Writer, jsonOutput ...bo
 		return 1
 	}
 
-	if err := handle.Stop(context.Background()); err != nil {
+	if err := handle.Stop(context.Background(), sessionActor(session.ActorOperator, cityPath)); err != nil {
 		fmt.Fprintf(stderr, "gc session suspend: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -1814,7 +1796,7 @@ func cmdSessionSuspend(args []string, stdout, stderr io.Writer, jsonOutput ...bo
 		}
 		return 0
 	}
-	fmt.Fprintf(stdout, "Session %s suspended. Resume with: gc session attach %s\n", sessionID, sessionID) //nolint:errcheck // best-effort stdout
+	fmt.Fprintf(stdout, "Session %s suspended. Resume with: gc session wake %s\n", sessionID, sessionID) //nolint:errcheck // best-effort stdout
 	return 0
 }
 
@@ -1850,8 +1832,9 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 
 	cityPath, cityErr := resolveCity()
 	var cfg *config.City
+	var cfgErr error
 	if cityErr == nil {
-		cfg, _ = loadCityConfig(cityPath, configWarnWriter(sessionJSONRequested(jsonOutput), stderr))
+		cfg, cfgErr = loadCityConfig(cityPath, configWarnWriter(sessionJSONRequested(jsonOutput), stderr))
 	}
 	// SURGICAL route: the session-class consumers (session-ID resolution, session
 	// worker handle, session bead read) go through the session coordination-class
@@ -1884,8 +1867,19 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 	if sessionBeadErr != nil {
 		closedSessionBead = beads.Bead{ID: sessionID}
 	}
+	// Without the config no claim's route can be judged, so the close could
+	// release none of the session's claims: refuse while it holds any, rather
+	// than strand them all. A session holding none closes.
+	if cityErr == nil && cfg == nil {
+		scope := releaseScopeOwn(closedSessionBead)
+		legs := workLegsFromCensus(cityPath, nil, cityWorkLegOf(beads.WorkStore{Store: store}), nil)
+		if holds, err := seatWorkFor(legs, scope).has(seatWorkQuery{scope: scope, statuses: seatWorkStatuses}); holds || err != nil {
+			fmt.Fprintf(stderr, "gc session close: city config did not load (%v); refusing to close %s while it holds claims: they could not be released\n", cfgErr, sessionID) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	}
 
-	closeResult, err := handle.CloseDetailed(context.Background())
+	closeResult, err := handle.CloseDetailed(context.Background(), sessionActor(session.ActorOperator, cityPath))
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session close: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1902,13 +1896,10 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 	// event the supervisor's CachingStore absorbs — the cache-update event
 	// the close path was previously missing (gastownhall/gascity#2625).
 	//
-	// The scan leads with the WORK store here, unlike the reconciler's, which
-	// leads with the sessions-class store. On a split city that difference used
-	// to be the whole release tier for relocated work: claim-time class routing
-	// (claim_class_route.go) can leave an in_progress assignee in the graph
-	// binding, and a work-led scan cannot see it. The binding is now a leg of
-	// the sweep's own plan (assignedWorkSweepPlan), so this site hands in
-	// nothing and a city that relocates nothing still reads one store.
+	// The legs are the city's work legs over the work store this command
+	// opened: claim-time class routing (claim_class_route.go) can leave an
+	// in_progress assignee in the graph binding, which is a leg of the plan,
+	// and a city that relocates nothing still reads one store.
 	var rigStores map[string]beads.Store
 	if cityErr == nil && cfg != nil {
 		rigStores = buildStandaloneRigStoresWithConfig(cfg, cityPath, stderr)
@@ -1916,7 +1907,14 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 	// The session bead lives in the sessions-class store (sessStore), which on a
 	// split city is not the work store the sweep leads with; the claim
 	// back-channel must be cleared where the session bead actually is.
-	unclaimWorkAssignedToRetiredSessionBeadVia(cityPath, cfg, store, sessStore, rigStores, closedSessionBead, "", stderr)
+	// A routeless claim takes the seat's own route, as every controller-side
+	// retirement gives it; a claim no lane serves stays on the closed row and
+	// raises session.stranded_claims, which the controller's detector repeats.
+	legs := workLegsFromCensus(cityPath, cfg, cityWorkLegOf(beads.WorkStore{Store: store}), rigStores)
+	out := unclaimWorkAssignedToRetiredSessionBeadVia(legs, sessStore, closedSessionBead, retiredSessionFallbackRoute(closedSessionBead), stderr)
+	if cityErr == nil {
+		strand(&strandedClaimAlerts{rec: openCityRecorderAt(cityPath, stderr)}, releaseSeatOfBead(closedSessionBead), "manual", out, time.Now(), stderr)
+	}
 
 	if asJSON {
 		if err := writeSessionActionJSON(stdout, sessionActionResult{
@@ -2483,9 +2481,9 @@ func cmdSessionKillWithForce(args []string, stdout, stderr io.Writer, asJSON, fo
 	// --force also overrides a hung holder of the flock whose record expired.
 	// A lease failure other than busy never holds the kill hostage: it stops
 	// under the name's flock alone. The lease ends before the controller poke.
-	killCtx := context.Background()
+	killCtx, killBy := context.Background(), sessionActor(session.ActorOperator, cityPath)
 	releaseLease, leaseOverridden := func() {}, false
-	if infoErr == nil && !info.Closed && filepath.IsAbs(cityPath) {
+	if infoErr == nil && !info.Closed {
 		req := session.RuntimeLeaseRequest{City: cityPath, Name: info.SessionName, ID: sessionID, TTL: session.RuntimeLeaseTTLFor(cfg)}
 		lease, overridden, err := killRuntimeLease(killCtx, sessionFrontDoor(sessStore), req, force, stderr)
 		if err != nil {
@@ -2494,7 +2492,7 @@ func cmdSessionKillWithForce(args []string, stdout, stderr io.Writer, asJSON, fo
 		}
 		releaseLease, leaseOverridden = lease.Release, overridden
 		defer releaseLease()
-		killCtx = session.ContextWithRuntimeLease(killCtx, lease)
+		killBy.Lease = lease
 	}
 	var fence *sessionKillFence
 	if infoErr == nil && !info.Closed && !runtimeAlreadyInactive {
@@ -2508,7 +2506,7 @@ func cmdSessionKillWithForce(args []string, stdout, stderr io.Writer, asJSON, fo
 		}
 	}
 
-	killErr := handle.Kill(killCtx)
+	killErr := handle.Kill(killCtx, killBy)
 	if killErr != nil && fence != nil && sessionKillRuntimeGone(info, sp) {
 		// With the fence in place Manager.Kill sees an asleep row and falls
 		// through to the provider liveness check, which reports "not active"
@@ -2557,12 +2555,9 @@ func cmdSessionKillWithForce(args []string, stdout, stderr io.Writer, asJSON, fo
 		}
 	case infoErr == nil:
 		now := time.Now().UTC()
-		patch := session.SleepPatch(now, string(session.SleepReasonKilled))
-		patch["synced_at"] = now.Format(time.RFC3339)
-		for k, v := range session.ClearWakeRequestPatch() {
-			patch[k] = v
-		}
-		if err := sessStore.SetMetadataBatch(sessionID, patch); err != nil {
+		if err := applySessionKillFencePatch(sessStore, sessionID, func(b beads.Bead) (map[string]string, bool) {
+			return killSleepPatch(b.ID, b.Metadata, now), true
+		}); err != nil {
 			fmt.Fprintf(stderr, "gc session kill: warning: syncing session %s to asleep: %v\n", sessionID, err) //nolint:errcheck // best-effort stderr
 		}
 	}
@@ -2767,10 +2762,9 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, jsonOutput boo
 		fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	outcome, err := handle.Message(context.Background(), worker.MessageRequest{
+	outcome, err := handle.Message(context.Background(), sessionActor(session.ActorOperator, cityPath), worker.MessageRequest{
 		Text:     message,
 		Delivery: workerDeliveryIntentForSubmitIntent(intent),
-		Resume:   session.ResumeOperator,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr

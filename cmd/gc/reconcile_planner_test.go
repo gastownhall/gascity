@@ -676,3 +676,167 @@ func TestPlannerStampsZeroSettlementAt(t *testing.T) {
 		t.Fatalf("settled = %+v, want the zero At stamped %v and the effect's own At kept", got, plannerT0)
 	}
 }
+
+// TestPlannerPacingIsCappedAtThePatrolsDueTime (CONTRACT v5.9j P1): a pass
+// stretched by a process pause or a stalled read (staging J40 C: a 101s
+// freeze bought a 404s stall, the patrol included) delays the owed pass by
+// at most a patrol after it ended; otherwise the owed pass waits four times
+// the last pass.
+//
+// Kills: an uncapped pacing wait, a cap from the pass's start, a cap of
+// another size, and pacing on anything but the last pass.
+func TestPlannerPacingIsCappedAtThePatrolsDueTime(t *testing.T) {
+	t.Run("four times the last pass, then the cap", func(t *testing.T) {
+		passes := 0
+		h := newPlannerHarness(t, func(h *plannerHarness, _ time.Time) passResult {
+			switch passes++; passes {
+			case 1:
+				h.clk.Advance(time.Second)
+				h.p.markDirty("test")
+			case 2:
+				h.clk.Advance(101 * time.Second) // frozen mid-pass
+				h.p.markDirty("test")
+			case 3:
+				h.clk.Advance(2 * time.Second)
+				h.p.markDirty("test")
+			}
+			return passResult{}
+		})
+		h.start(t) // the harness's 15s patrol
+		h.p.markDirty("test")
+		h.expectPass(t, plannerT0)
+		second := plannerT0.Add(4 * time.Second) // 4 × the 1s pass
+		h.clk.waitArmed(t, second)
+		h.clk.Advance(3 * time.Second)
+		h.expectPass(t, second)
+		third := second.Add(116 * time.Second) // min(4 × 101s, 101s + the 15s patrol)
+		h.clk.waitArmed(t, third)
+		h.clk.Advance(15 * time.Second)
+		h.expectPass(t, third)
+		fourth := third.Add(8 * time.Second) // 4 × the 2s pass, the freeze forgotten
+		h.clk.waitArmed(t, fourth)
+		h.clk.Advance(6 * time.Second)
+		h.expectPass(t, fourth)
+	})
+	for _, c := range []struct {
+		name string
+		pass time.Duration
+	}{
+		{"capped at the patrol after a stretched pass", 101 * time.Second},
+		{"capped at the patrol after a slow pass", 10 * time.Second},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			first := true
+			h := newPlannerHarness(t, func(h *plannerHarness, _ time.Time) passResult {
+				if first {
+					first = false
+					h.clk.Advance(c.pass)
+					h.p.markDirty("test")
+				}
+				return passResult{}
+			})
+			h.start(t)
+			h.p.markDirty("test")
+			h.expectPass(t, plannerT0)
+			// The 15s patrol's due time, one patrol after the pass ended,
+			// is sooner than 4 × the pass.
+			next := plannerT0.Add(c.pass + 15*time.Second)
+			h.clk.waitArmed(t, next)
+			h.clk.Advance(15 * time.Second)
+			h.expectPass(t, next)
+		})
+	}
+}
+
+// TestPlannerDutyBoundAlternatingPasses (CONTRACT v5.9j P1, Gate R's duty
+// p99 ≤ 25%; #7589 review). Kills a pace that lets passes run back to back:
+// every pass owes the next (a constant stream of dirty marks), and durations
+// alternate fast and slow, every pass under patrol/3, so duty stays at a
+// quarter. A manual driver advances the fake clock only once the loop has
+// re-armed its timer for the owed pass (two arms after a pass ends: the
+// patrol, then the pacing wait), so the real loop decides each start.
+func TestPlannerDutyBoundAlternatingPasses(t *testing.T) {
+	for _, c := range []struct {
+		name       string
+		fast, slow time.Duration
+	}{
+		{"100ms-5s P30s", 100 * time.Millisecond, 5 * time.Second},
+		{"100ms-1s P30s", 100 * time.Millisecond, time.Second},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			const n = 40
+			dur := func(i int) time.Duration {
+				if i%2 == 1 {
+					return c.slow
+				}
+				return c.fast
+			}
+			i := 0
+			h := newPlannerHarness(t, func(h *plannerHarness, _ time.Time) passResult {
+				d := dur(i)
+				i++
+				h.clk.Advance(d)
+				if i < n {
+					h.p.markDirty("test")
+				}
+				return passResult{}
+			})
+			h.patrol.Store(int64(30 * time.Second))
+			h.start(t)
+			h.p.markDirty("test")
+			guard := time.After(30 * time.Second)
+			var starts []time.Time
+			select {
+			case s := <-h.passes:
+				starts = append(starts, s)
+			case <-guard:
+				t.Fatal("no first pass")
+			}
+			for len(starts) < n {
+				select {
+				case s := <-h.passes:
+					starts = append(starts, s)
+					continue
+				case <-guard:
+					t.Fatalf("stuck after %d passes", len(starts))
+				default:
+				}
+				h.clk.mu.Lock()
+				var at time.Time
+				idle := !h.clk.inPass && h.clk.arms >= h.clk.passArm+2
+				if idle {
+					for _, tm := range h.clk.timers {
+						if tm.active && tm.arm == h.clk.arms {
+							at = tm.at
+						}
+					}
+				}
+				changed := h.clk.changed
+				h.clk.mu.Unlock()
+				if !at.IsZero() {
+					h.clk.Advance(at.Sub(h.clk.Now()))
+					continue
+				}
+				select {
+				case <-changed:
+				case <-time.After(time.Millisecond):
+				}
+			}
+			var busy time.Duration
+			for k := range n {
+				busy += dur(k)
+			}
+			span := starts[n-1].Add(dur(n - 1)).Sub(starts[0])
+			duty := float64(busy) / float64(span)
+			t.Logf("%d passes, busy %v over %v: duty %.1f%%; first starts %v", n, busy, span, 100*duty, func() (o []time.Duration) {
+				for _, s := range starts[:6] {
+					o = append(o, s.Sub(starts[0]))
+				}
+				return
+			}())
+			if duty > 0.26 {
+				t.Errorf("duty %.1f%% with every pass under patrol/3, want at most 25%% (v5.9j P1)", 100*duty)
+			}
+		})
+	}
+}

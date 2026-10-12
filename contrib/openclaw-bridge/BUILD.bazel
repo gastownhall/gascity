@@ -37,6 +37,7 @@ _TESTS = [
         name = "%s_test" % t.replace("-", "_"),
         data = glob([
             "*.mjs",
+            "fake-imsg/**",
             "lib/**",
         ]) + [
             "package.json",
