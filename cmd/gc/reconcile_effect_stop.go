@@ -51,9 +51,15 @@ var stopSections = []section{
 }
 
 // stopNeeds are the stop verb's fresh reads: the runtime under its lease,
-// and L3 and L4 for an operator-dormant stop's full fence.
-func stopNeeds(_ *World, it intent) needs {
-	return needs{Runtime: true, Lease: true, Legs: stopLegs(it) &^ (legLiveness | legToken)}
+// L3 and L4 for an operator-dormant stop's full fence, and an idle stop's
+// proof, its fresh activity or, for a content-clock fire, its pane.
+func stopNeeds(w *World, it intent) needs {
+	n := needs{Runtime: true, Lease: true, Legs: stopLegs(it) &^ (legLiveness | legToken)}
+	if isIdleReason(it.Reason) {
+		n.Content = w.idleView().fired[it.Key]
+		n.Activity = !n.Content
+	}
+	return n
 }
 
 // stopLegs are the fence legs the stop's origin keeps (v5 F1, F2).
@@ -105,11 +111,14 @@ type stopped struct {
 // fence. It refuses a stop A4 no longer decides, or one the fence holds.
 func stopDecide(v txView) txStep {
 	w := v.World.withRow(v.It.Key, v.Row, v.Meta).withRuntime(v.It.Key, v.RT)
-	if fresh, _ := decideRow(&w, v.Alloc, v.It.Key); fresh.Kind != v.It.Kind { // the stop's, or A14's restart that runs it
+	// The stop's, or A14's restart that runs it; an idle stop's reason, and
+	// only an idle stop's, must hold too, so the idle finalize never applies
+	// to another stop (a stop request's verb turns finalize on its own).
+	if fresh, _ := decideRow(&w, v.Alloc, v.It.Key); fresh.Kind != v.It.Kind || (isIdleReason(fresh.Reason) || isIdleReason(v.It.Reason)) && fresh.Reason != v.It.Reason {
 		return txStep{Refuse: causeRedecided}
 	}
 	name := strings.TrimSpace(v.Row.SessionName)
-	plan := stopPlan{name: name, names: processNamesFor(v.World, v.Row), now: v.Now, idle: v.It.Reason == decideIdleTimeout || v.It.Reason == decideIdleExhausted}
+	plan := stopPlan{name: name, names: processNamesFor(v.World, v.Row), now: v.Now, idle: isIdleReason(v.It.Reason)}
 	switch rt := v.RT; rt.Class {
 	case rtAbsent:
 		return txStep{Pass: plan}
@@ -131,6 +140,9 @@ func stopDecide(v txView) txStep {
 	fv := fenceDestructive(v.RT, v.Fence, fenceRequest{Row: v.Row, Legs: stopLegs(v.It)})
 	if !fv.Proceed {
 		return txStep{Refuse: fv.Reason}
+	}
+	if plan.idle && !idleReproved(v) {
+		return txStep{Refuse: causeIdleUnproven}
 	}
 	plan.verdict = fv
 	return txStep{Pass: plan}
@@ -325,7 +337,7 @@ func stopFinalizeStep(v txView, work finalizeWork, _ error) txStep {
 // stopFacts are legacy's events for a finalized stop (SESS-033/034,
 // DRAIN-051/054).
 func stopFacts(v txView, out stopped, kept *beads.Bead) effectFacts {
-	if v.It.Reason == decideIdleTimeout || v.It.Reason == decideIdleExhausted { // legacy's idle kill: session.idle_killed and its metric (SESS-576)
+	if isIdleReason(v.It.Reason) { // legacy's idle kill: session.idle_killed and its metric (SESS-576)
 		res, _ := v.World.Templates.lookup(v.Row)
 		name := res.TP.DisplayName()
 		return effectFacts{IdleKilled: name, Events: []events.Event{{Type: events.SessionIdleKilled, Actor: "gc", Subject: name}}}

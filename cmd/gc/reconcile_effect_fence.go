@@ -32,13 +32,13 @@ func (t *tx) readFence(ctx context.Context) string {
 	if t.view.RT != nil {
 		leaf = t.view.RT.leaf // the leaf the runtime read used
 	}
-	if leaf == nil && (t.needs.Legs&(legAttach|legPending) != 0 || t.needs.Idle || t.needs.Activity) { // L5 alone needs no route
+	if leaf == nil && (t.needs.Legs&(legAttach|legPending) != 0 || t.needs.Idle || t.needs.Activity || t.needs.Content) { // L5 alone needs no route
 		var known bool
 		if leaf, _, known = runtime.ResolveBackend(t.p.Runtime, t.name); t.p.Runtime == nil || !known || leaf == nil {
 			return causeRouteUnknown
 		}
 	}
-	t.view.Fence = readLegs(ctx, leaf, t.name, t.needs, t.view.Now, t.view.World.Now, func() *txWork { return t.p.readWork(t.expect, t.view.It.Kind) })
+	t.view.Fence = readLegs(ctx, leaf, t.name, t.needs, t.view.Now, t.view.World.Now, func() *txWork { return t.p.readWork(t.expect, t.view.It) })
 	return ""
 }
 
@@ -82,10 +82,25 @@ func readLegs(ctx context.Context, leaf runtime.Provider, name string, n needs, 
 		}
 		f.Activity = &a
 	}
+	if n.Content {
+		if snap, ok := leaf.(runtime.IdleSnapshotProvider); ok {
+			f.Content = boundedContent(ctx, snap, name)
+		}
+	}
 	return f
 }
 
-func (p *effectPass) readWork(row session.Info, kind string) *txWork {
+// boundedContent is a pane snapshot read within ctx: idle, busy,
+// indeterminate, an error, or unread past the bound.
+func boundedContent(ctx context.Context, snap runtime.IdleSnapshotProvider, name string) contentState {
+	got, ok := boundedProbe(ctx, func() contentState { return snapshotContent(snap, name) })
+	if !ok {
+		return contentUnread
+	}
+	return got
+}
+
+func (p *effectPass) readWork(row session.Info, it intent) *txWork {
 	if p.reads.legs.unusable() != nil || p.World.Env == nil {
 		return &txWork{Err: errNoReadStore}
 	}
@@ -95,7 +110,11 @@ func (p *effectPass) readWork(row session.Info, kind string) *txWork {
 	// does; every other effect that reads L5 ends a live runtime (a drain
 	// begin), which the seat's RefuseScope gates (O4).
 	var scope workScope = releaseScope(row, p.World.Env.Cfg)
-	if kind != intentClose {
+	if it.Reason == decideIdleTimeout { // legacy's late claim: in-progress work under the narrow scope (SESS-574)
+		late, err := lateSeatWork(p.reads.legs, scope, []string{"in_progress"}, nil)
+		return &txWork{Free: len(late) == 0 && err == nil, Err: err}
+	}
+	if it.Kind != intentClose {
 		scope = refuseScope(row, p.World.Env.Cfg)
 	}
 	has, err := sessionHasOpenAssignedWorkInStores(seatWorkFor(p.reads.legs, scope), scope)

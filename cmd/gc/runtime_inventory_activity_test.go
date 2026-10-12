@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -228,7 +229,9 @@ func TestReadContents(t *testing.T) {
 	}
 	hosts["plain"] = runtime.NewFake() // no snapshot
 	want := map[string]bool{"idle": true, "busy": true, "unsure": true, "gone": true, "boom": true, "plain": true, "unlisted": true}
-	readContents(context.Background(), attrs, hosts, want, 2)
+	if n := readContents(context.Background(), attrs, hosts, want, 2); n != 5 {
+		t.Errorf("reads %d, want the five wanted, enriched snapshot names", n)
+	}
 	for n, st := range map[string]contentState{"idle": contentIdle, "busy": contentBusy, "unsure": contentIndeterminate, "gone": contentError, "boom": contentError, "unwanted": contentUnread, "plain": contentUnread} {
 		if attrs[n].Content != st {
 			t.Errorf("%s: content %d, want %d", n, attrs[n].Content, st)
@@ -241,10 +244,57 @@ func TestReadContents(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 	slow := map[string]InventoryAttrs{"slow": {Content: contentIdle}}
-	readContents(ctx, slow, map[string]runtime.Provider{"slow": leaf}, map[string]bool{"slow": true}, 1)
+	returned := make(chan struct{})
+	go func() {
+		defer close(returned)
+		readContents(ctx, slow, map[string]runtime.Provider{"slow": leaf}, map[string]bool{"slow": true}, 1)
+	}()
+	select { // the read respects its context: it returns at the bound, the hung snapshot abandoned
+	case <-returned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("readContents outlived its context on a hung snapshot")
+	}
 	if slow["slow"].Content != contentUnread {
 		t.Fatalf("a read past the bound: %d, want unread", slow["slow"].Content)
 	}
+}
+
+// snapshotProvider is a probing inventory leaf whose panes a snapshot reads
+// after delay: idle, or err.
+type snapshotProvider struct {
+	*probingInventoryProvider
+	delay time.Duration
+	err   error
+}
+
+func (p snapshotProvider) SnapshotIdle(string) (bool, error) {
+	<-time.After(p.delay)
+	return p.err == nil, p.err
+}
+
+// Kills content reads with no share of the enrichment bound, or none at
+// all (v5.9s): with the batched reads taking the bound less its reserve, a
+// wanted pane's snapshot still reads within the reserve, and the lane
+// meters it; a snapshot that never returns ends at the bound.
+func TestLaneContentReadsHaveTheirReserve(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		probe := func(string, []string) (runtime.Liveness, error) { return runtime.Liveness{Running: true}, nil }
+		sp := snapshotProvider{probingInventoryProvider: newProbingProvider(probe, "gc-a"), delay: inventoryEnrichBound / 8}
+		cr := inventoryLaneTestRuntime(t, sp, nil)
+		cr.inventoryLane.cache.WantContent(map[string]bool{"gc-a": true})
+		runTestInventoryPass(cr)                                                                                       // reads the identity
+		sp.inventoryHook = func(context.Context, int) { <-time.After(inventoryEnrichBound - inventoryEnrichBound/16) } // all but a sliver of the bound
+		runTestInventoryPass(cr)
+		if got := cr.inventoryLane.cache.Snapshot().ByName["gc-a"].Content; got != contentIdle {
+			t.Fatalf("content %d after a slow inventory, want the reserved read's idle", got)
+		}
+		cr.inventoryLane.statusMu.Lock()
+		fields := cr.inventoryLane.status.v2Fields
+		cr.inventoryLane.statusMu.Unlock()
+		if fields["content_reads"] != 1 || fields["content_read_ms"] == nil {
+			t.Fatalf("lane fields %v, want the content read metered", fields)
+		}
+	})
 }
 
 // Kills a content read that outlives its pass (C7a-1): the cache carries a

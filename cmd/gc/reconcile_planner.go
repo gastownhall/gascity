@@ -511,7 +511,7 @@ func (p *planner) record(ev events.Event) {
 func (p *planner) backoffSettled(s settlement) {
 	key := s.BackoffKey
 	if key == "" && s.Key.ID != "" {
-		key = settledBackoffKey(s.Kind, s.Key)
+		key = settledBackoffKey(s.Kind, s.Reason, s.Key)
 	}
 	drift := s.Key.ID != "" && key == driftBackoffKey(s.Key)
 	if s.Kind == intentStart && s.Outcome == settledLanded && s.Cause == "" && s.Key.ID != "" {

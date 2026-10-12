@@ -94,12 +94,10 @@ type World struct {
 	Paused     bool            // starts paused for a provider swap (P7)
 	SoftReload *softReloadView // the open soft reload this pass read, for A8 (M2)
 	AliasOwed  map[rowKey]bool // rows whose runtime is owed their written alias, for A7 (M1)
-	// IdleDefers are the rows' consecutive assigned-work idle-timeout
-	// defers on one anchor bead, this pass's counted (SESS-575), and
-	// ContentIdle the rows whose content clock passed their idle_timeout
-	// this pass (ga-07mi8): A15's, from planner memory (idleState).
-	IdleDefers  map[rowKey]int
-	ContentIdle map[rowKey]bool
+	// Idle is A15's view of the pass, from planner memory (idleMemory):
+	// the defer streaks (SESS-575), the content clock's fires (ga-07mi8),
+	// and the rows' lifecycle settings.
+	Idle *idlePass
 
 	CitySuspended     bool
 	SuspendedRigPaths map[string]bool

@@ -362,16 +362,16 @@ func (a *admission) admitOne(it *intent) string {
 		a.seen[it.Key] = true
 	}
 	spec, ok := effectSpecs[it.Kind]
-	backoff, drift := a.in.Backoff[rowBackoffKey(it.Key)], backoffRecord{}
-	if k := settledBackoffKey(it.Kind, it.Key); k != rowBackoffKey(it.Key) {
-		drift = a.in.Backoff[k] // a drift kind's own key holds the drift alone
+	backoff, own := a.in.Backoff[rowBackoffKey(it.Key)], backoffRecord{}
+	if k := settledBackoffKey(it.Kind, it.Reason, it.Key); k != rowBackoffKey(it.Key) {
+		own = a.in.Backoff[k] // a drift kind's or an idle stop's own key holds it alone
 	}
 	switch {
 	case !ok:
 		return causeUnknownKind
 	case spec.bootGated && !a.in.BootOpen:
 		return causeBootGate
-	case it.Key.ID != "" && (!it.finalizesOnly(backoff) && backoff.live(a.in.Now) || drift.live(a.in.Now)):
+	case it.Key.ID != "" && (!it.finalizesOnly(backoff) && backoff.live(a.in.Now) || own.live(a.in.Now)):
 		return causeRowBackoff
 	case a.in.Paused && (spec.class == capStarts || spec.class == capCreates):
 		return causeSwapPause

@@ -161,9 +161,9 @@ func TestBackoffPruneBoundsTheTable(t *testing.T) {
 	closed := rowKey{Leg: "sessions", ID: "gc-closed"}
 	unread := rowKey{Leg: "rig", ID: "gc-r"}
 	slashed := rowKey{Leg: "rigs/a", ID: "gc-s"}
-	keep := []string{rowBackoffKey(open), driftBackoffKey(open), rowBackoffKey(unread), workBackoffKey("w-demand"), createBackoffKey("worker/worker-1")}
-	drop := []string{rowBackoffKey(closed), driftBackoffKey(closed), rowBackoffKey(slashed), workBackoffKey("w-gone"), createBackoffKey("worker/worker-2")}
-	for _, k := range []string{rowBackoffKey(open), driftBackoffKey(open), rowBackoffKey(closed), driftBackoffKey(closed), rowBackoffKey(unread), rowBackoffKey(slashed), workBackoffKey("w-demand"), workBackoffKey("w-gone")} {
+	keep := []string{rowBackoffKey(open), driftBackoffKey(open), idleBackoffKey(open), rowBackoffKey(unread), workBackoffKey("w-demand"), createBackoffKey("worker/worker-1")}
+	drop := []string{rowBackoffKey(closed), driftBackoffKey(closed), idleBackoffKey(closed), rowBackoffKey(slashed), workBackoffKey("w-gone"), createBackoffKey("worker/worker-2")}
+	for _, k := range []string{rowBackoffKey(open), driftBackoffKey(open), idleBackoffKey(open), rowBackoffKey(closed), driftBackoffKey(closed), idleBackoffKey(closed), rowBackoffKey(unread), rowBackoffKey(slashed), workBackoffKey("w-demand"), workBackoffKey("w-gone")} {
 		b.Refuse(k, now, time.Time{}, "c", "")
 	}
 	b.Refuse(createBackoffKey("worker/worker-1"), now, time.Time{}, createStageFence, "rev-2")
