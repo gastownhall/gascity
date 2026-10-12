@@ -106,47 +106,63 @@ func closeAllowed(sw *SeatWork, info sessionpkg.Info, why closeWhy) (string, err
 // or a rollback closes, the failed-create close. It reports whether it
 // closed.
 func closeSeat(store beads.Store, sw *SeatWork, info sessionpkg.Info, why closeWhy, now time.Time, stderr io.Writer) bool {
+	closed, _ := closeSeatFor(store, sw, info, why, now, stderr)
+	return closed
+}
+
+// closeSeatFor is closeSeat with the refusal's cause, "" when the
+// precondition allowed the close.
+func closeSeatFor(store beads.Store, sw *SeatWork, info sessionpkg.Info, why closeWhy, now time.Time, stderr io.Writer) (bool, string) {
 	if stderr == nil {
 		stderr = io.Discard
 	}
 	cause, err := closeAllowed(sw, info, why)
-	switch {
-	case !closeRefusals.note(info.ID, cause):
-	case err != nil:
-		fmt.Fprintf(stderr, "session beads: close of %s refused (%s): %v\n", info.ID, cause, err) //nolint:errcheck
-	default:
-		fmt.Fprintf(stderr, "session beads: close of %s refused (%s)\n", info.ID, cause) //nolint:errcheck
-	}
+	sw.closeRefusals().log(stderr, info.ID, cause, err)
 	switch {
 	case cause != "":
-		return false
+		return false, cause
 	case why.gate == closeRollback, why.gate != closeReleasing && isFailedCreateSessionInfo(info):
-		return closeFailedCreateBead(sessionFrontDoor(store), info, now, stderr)
+		return closeFailedCreateBead(sessionFrontDoor(store), info, now, stderr), ""
 	}
-	return closeBeadPreservingAssignees(store, sw, info, why.reason, why.preserve, now, stderr)
+	return closeBeadPreservingAssignees(store, sw, info, why.reason, why.preserve, now, stderr), ""
 }
 
-// closeRefusals remembers each row's last close refusal, so closeSeat logs a
-// refusal once per episode: when its cause first appears or changes.
-var closeRefusals = closeRefusalLog{last: map[string]string{}}
-
+// closeRefusalLog is each row's last logged close refusal, so a refusal is
+// logged once per episode: when its cause first appears or changes, and again
+// after a close was allowed. Its owner (the controller) keeps it across
+// ticks; a nil log logs every refusal. A refusal written to no one (a nil or
+// discarded writer) records nothing, so a caller that can print still does.
 type closeRefusalLog struct {
 	mu   sync.Mutex
 	last map[string]string
 }
 
-// note records id's refusal cause ("" for an allowed close, which ends the
-// episode) and reports whether it starts or changes one.
-func (l *closeRefusalLog) note(id, cause string) bool {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if cause == "" {
-		delete(l.last, id)
-		return false
+// log logs id's refusal cause to w unless the episode already said it; an
+// allowed close ("") ends the episode.
+func (l *closeRefusalLog) log(w io.Writer, id, cause string, err error) {
+	if l != nil {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		switch {
+		case cause == "":
+			delete(l.last, id)
+			return
+		case l.last[id] == cause:
+			return
+		}
 	}
-	if l.last[id] == cause {
-		return false
+	if cause == "" || w == io.Discard {
+		return
 	}
-	l.last[id] = cause
-	return true
+	if err != nil {
+		fmt.Fprintf(w, "session beads: close of %s refused (%s): %v\n", id, cause, err) //nolint:errcheck
+	} else {
+		fmt.Fprintf(w, "session beads: close of %s refused (%s)\n", id, cause) //nolint:errcheck
+	}
+	if l != nil {
+		if l.last == nil {
+			l.last = map[string]string{}
+		}
+		l.last[id] = cause
+	}
 }

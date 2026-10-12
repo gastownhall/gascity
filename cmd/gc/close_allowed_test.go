@@ -92,8 +92,10 @@ func TestCloseSeatAppliesThePrecondition(t *testing.T) {
 	}
 }
 
-// TestCloseSeatLogsARefusalOncePerEpisode: a refused close says why once,
-// again when its cause changes, and again after a close was allowed.
+// TestCloseSeatLogsARefusalOncePerEpisode: with its owner's refusal log, a
+// refused close says why once, again when its cause changes; a refusal no
+// one could read (the sweep's nil writer) records nothing, so the next
+// caller that can print does.
 func TestCloseSeatLogsARefusalOncePerEpisode(t *testing.T) {
 	now := time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
 	store := beads.NewMemStore()
@@ -102,15 +104,22 @@ func TestCloseSeatLogsARefusalOncePerEpisode(t *testing.T) {
 		t.Fatal(err)
 	}
 	info := sessionInfoFromBead(b)
+	var log closeRefusalLog
+	sw := func() *SeatWork {
+		sw := testSeatWork("", nil, store, nil)
+		sw.refusals = &log
+		return sw
+	}
+	closeSeat(store, sw(), info, closeWhy{reason: "gc_swept", gate: closeFreeSlot}, now, nil)
 	var stderr bytes.Buffer
 	for i := 0; i < 3; i++ {
-		closeSeat(store, testSeatWork("", nil, store, nil), info, closeWhy{reason: "idle", gate: closeFreeSlot}, now, &stderr)
+		closeSeat(store, sw(), info, closeWhy{reason: "idle", gate: closeFreeSlot}, now, &stderr)
 	}
 	if n := strings.Count(stderr.String(), "refused ("+causeKeepsSlot+")"); n != 1 {
 		t.Fatalf("logged the refusal %d times, want once: %q", n, stderr.String())
 	}
 	createWork(t, store, "open", info.ID, nil)
-	closeSeat(store, testSeatWork("", nil, store, nil), sessionpkg.Info{ID: info.ID, MetadataState: "asleep"}, closeWhy{reason: "idle", gate: closeFreeSlot}, now, &stderr)
+	closeSeat(store, sw(), sessionpkg.Info{ID: info.ID, MetadataState: "asleep"}, closeWhy{reason: "idle", gate: closeFreeSlot}, now, &stderr)
 	if !strings.Contains(stderr.String(), "refused ("+causeHasWork+")") {
 		t.Fatalf("a changed cause was not logged: %q", stderr.String())
 	}

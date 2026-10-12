@@ -179,3 +179,46 @@ func TestReconcileSessionBeads_NonPoolUndesiredCloseIgnoresTheHold(t *testing.T)
 		t.Fatalf("status %s, want the non-pool orphan closed whatever holds it", b.Status)
 	}
 }
+
+// An undesired pool row under an operator's suspend that holds a claim,
+// served or not: its free-slot close refuses keeps-slot, and the orphan
+// follow-up neither releases the claim nor closes the row, in both modes.
+func TestCloseAllowed_AHeldUndesiredRowKeepsItsClaims(t *testing.T) {
+	at := func(d time.Duration) string { return parityNow.Add(d).UTC().Format(time.RFC3339) }
+	for _, tc := range []struct{ name, route string }{{"a served claim", "worker"}, {"an unserved claim", "nowhere/lane"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := parityFixture{
+				Name: tc.name,
+				Rows: []parityRow{poolRow("gc-1", "worker", 1, "asleep", "sleep_intent", "user-hold", "sleep_reason", "user-hold", "held_until", at(100*24*time.Hour), "slept_at", at(-time.Hour))},
+				Work: []parityRow{{ID: "gw-1", Title: "gw-1", Type: "task", Status: "in_progress", Assignee: "gc-1", Metadata: map[string]string{"gc.routed_to": tc.route}}},
+			}
+			cityPath := t.TempDir()
+			rows := f.converged(t, cityPath)
+			for mode, out := range map[string]parityOutcome{"legacy": legacyParity(t, f, cityPath, rows), "v2": v2Parity(t, f, cityPath, rows)} {
+				if r, w := out.rows["gc-1"], out.work["gw-1"]; r.Status == "closed" || w.Assignee != "gc-1" {
+					t.Errorf("%s: row %s, claim assigned to %q; want the held row open with its claim", mode, r.Status, w.Assignee)
+				}
+			}
+		})
+	}
+}
+
+// The same through the legacy tick: a held undesired seat keeps its served
+// claim on another lane and its unserved one, and stays open.
+func TestCloseAllowed_AHeldSeatKeepsItsClaimsInTheLegacyTick(t *testing.T) {
+	for _, tc := range []struct{ name, route string }{{"a served claim", "repo/other"}, {"an unserved claim", "nowhere/lane"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			agent := persistentWorker()
+			agent.MinActiveSessions = intPtr(0)
+			e := r9cSeat(t, agent, map[string]string{"state": "suspended", "sleep_reason": "user-hold", "sleep_intent": "user-hold", "held_until": time.Date(2126, 1, 1, 0, 0, 0, 0, time.UTC).Format(time.RFC3339), "suspended_at": time.Date(2026, 10, 8, 11, 0, 0, 0, time.UTC).Format(time.RFC3339)})
+			claimID := e.addWork(t, "in_progress", e.seat.ID, map[string]string{"gc.routed_to": tc.route}).ID
+			for i := 0; i < 3; i++ {
+				e.tick(t, claims(e.reload(t, claimID)))
+				e.clk.Time = e.clk.Time.Add(time.Minute)
+			}
+			if b, c := e.reload(t, e.seat.ID), e.reload(t, claimID); b.Status == "closed" || c.Assignee != e.seat.ID {
+				t.Fatalf("seat %s, claim assigned to %q; want the held seat open with its claim", b.Status, c.Assignee)
+			}
+		})
+	}
+}

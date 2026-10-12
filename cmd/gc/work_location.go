@@ -88,10 +88,12 @@ func (l WorkLegs) unusable() error {
 }
 
 // newSeatWork is the controller's read for one tick (or one dispatcher pass),
-// raising session.stranded_claims through the controller's one alerter.
+// raising session.stranded_claims through the controller's one alerter and
+// logging close refusals through its one refusal log.
 func (cr *CityRuntime) newSeatWork() *SeatWork {
 	sw := newSeatWork(cr.workLegs())
 	sw.alerts = cr.strandedClaimAlerter()
+	sw.refusals = &cr.closeRefusals
 	return sw
 }
 

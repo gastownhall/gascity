@@ -259,6 +259,9 @@ type CityRuntime struct {
 	// (work_release.go); built on first use (strandedClaimAlerter).
 	strandedAlerts     *strandedClaimAlerts
 	strandedAlertsOnce sync.Once
+	// closeRefusals logs each row's close refusal once per episode across
+	// ticks (closeSeat).
+	closeRefusals closeRefusalLog
 	// deadAssigneeKeeps dedupes the dead-assignee sweep's keep log across
 	// ticks.
 	deadAssigneeKeeps deadAssigneeKeepLog

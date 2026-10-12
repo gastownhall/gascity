@@ -2719,8 +2719,10 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					if isPoolManagedSessionInfo(infoByID[id]) {
 						gate = closeFreeSlot
 					}
-					closed := closeSeat(store, sw, infoByID[id], closeWhy{reason: reason, gate: gate}, clk.Now().UTC(), stderr)
-					if !closed && reason == "orphaned" {
+					closed, cause := closeSeatFor(store, sw, infoByID[id], closeWhy{reason: reason, gate: gate}, clk.Now().UTC(), stderr)
+					// An operator's suspend keeps the seat whole: its claims are
+					// not released, nor is it closed through the releasing gate.
+					if !closed && reason == "orphaned" && cause != causeKeepsSlot {
 						// The guard refused because the seat still holds work. Nothing
 						// else can resolve that: the wake path is blocked on the orphaned
 						// base state and releaseOrphanedPoolAssignments skips work whose
