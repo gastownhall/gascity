@@ -316,6 +316,27 @@ func TestEffectSpecsThatChangeARuntimeTakeTheLease(t *testing.T) {
 	}
 }
 
+// TestDrainEffectsTakeTheFlockOnly (v5.9h; #7638 review M8). Kills a drain
+// effect that takes the row's lease record: a drain begin, signal, cancel or
+// void writes request keys and the legacy projection, never a runtime, the
+// incarnation or a commit, so it takes the runtime name's flock alone (the
+// fresh kinds through their runtime read, the plain signal by NameLock), for
+// every drain reason.
+func TestDrainEffectsTakeTheFlockOnly(t *testing.T) {
+	w := &World{}
+	for _, kind := range []string{intentDrainBegin, intentDrainBeginFresh, intentSignal, intentSignalFresh, intentSignalAck, intentDrainCancel, intentDrainVoid} {
+		spec := effectSpecs[kind]
+		for _, reason := range []string{drainIdle, reasonNoWake, drainOrphaned, drainSuspended, drainConfigDrift, executionStalledDrainReason, idleRespawnDrainReason, "rate-limit"} {
+			if n := spec.needsOf(w, intent{Kind: kind, Reason: decideDrainBegin + reason}); n.Lease || spec.needs.Lease {
+				t.Errorf("%s for %s: takes the row's lease record, want the name's flock only", kind, reason)
+			}
+		}
+	}
+	if !effectSpecs[intentSignal].needs.locksName(effectSpecs[intentSignal]) {
+		t.Error("the plain signal does not hold the runtime name's flock")
+	}
+}
+
 // Kills a per-intent needsFor dropping the record: a spec whose needs take
 // the lease keeps it whatever needsFor returns.
 func TestTxNeedsForCannotDropTheLease(t *testing.T) {

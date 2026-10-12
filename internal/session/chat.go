@@ -611,6 +611,28 @@ func (m *Manager) ensureRunning(ctx context.Context, by Actor, id string, b bead
 		}
 		defer cancel()
 	}
+	// The start decides on the row as of the lease, not the read before it
+	// (#7638 review): every writer of the kill fence or of drain-ack
+	// stop-pending holds the runtime name's flock, which the lease holds
+	// now, so a stop the controller signaled in between is seen here, before
+	// anything starts, and the restart clear and the hold consume below read
+	// this row.
+	fresh, err := m.PersistedStore().freshBead(id)
+	switch {
+	case err != nil:
+		err = fmt.Errorf("%w: reading session %s under its lease: %w", ErrStateSync, id, err)
+	case KillPendingMetadata(fresh.Metadata["state"], fresh.Metadata["state_reason"], fresh.Metadata["sleep_reason"], fresh.Metadata["slept_at"], m.now()):
+		err = fmt.Errorf("%w: %s", ErrSessionKillPending, id)
+	case drainAckStopPendingMetadata(fresh.Metadata):
+		err = fmt.Errorf("%w: %s", ErrSessionStopping, id)
+	}
+	if err != nil {
+		if unroute != nil {
+			unroute()
+		}
+		return err
+	}
+	b = fresh
 
 	cfg := hints
 	cfg.Command = resumeCommand
