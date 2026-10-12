@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"maps"
 	"math/rand/v2"
 	"reflect"
@@ -584,5 +585,41 @@ func TestAdmitDefersAttributionReprobeUnderBackoff(t *testing.T) {
 	in.Now, in.Backoff = admitT0, table.Snapshot()
 	if n := admitted(in); n != 3 {
 		t.Fatalf("%d of 3 admitted after a readable verdict reset it", n)
+	}
+}
+
+// Kills a drift deferral that holds the row (the D3 amendment; the C7b2-2
+// review's R4): a drift kind's refusal backs off its own key, which defers
+// the drift kinds alone, so a row whose drift defers at a prompt for hours
+// still starts, heals and stops at once; a live row backoff still defers
+// the drift kinds too; the drift key prunes with its row.
+func TestDriftBackoffPacesOnlyTheDrift(t *testing.T) {
+	p := newPlanner(realPlannerClock{}, func() time.Duration { return time.Minute }, nil, newInflightMap(), nil, io.Discard)
+	k := admitRow(1)
+	p.backoffSettled(settlement{Key: k, Kind: intentDriftRestart, Outcome: settledRefused, Cause: causeDriftDeferred + fencePending, At: admitT0})
+	if p.backoff.Record(rowBackoffKey(k)).Consecutive != 0 || !p.backoff.Record(driftBackoffKey(k)).live(admitT0) {
+		t.Fatalf("a drift refusal backed off %v, want its drift key alone", p.backoff.Snapshot())
+	}
+	in := admitIn(50, 50)
+	in.Backoff = p.backoff.Snapshot()
+	for kind := range effectSpecs {
+		if kind == intentCreate {
+			continue
+		}
+		drift := kind == intentDriftRestart || kind == intentDriftRelaunch
+		res := admit(in, []intent{rowIntent(kind, 1)})
+		if held := len(res.Deferred) == 1 && res.Deferred[0].Cause == causeRowBackoff; held != drift {
+			t.Errorf("%s: deferred on the drift backoff %v, want %v", kind, held, drift)
+		}
+	}
+	in.Backoff = map[string]backoffRecord{rowBackoffKey(k): {Until: admitT0.Add(time.Second), Cause: "fence-l3"}}
+	for _, kind := range []string{intentDriftRestart, intentDriftRelaunch} {
+		if res := admit(in, []intent{rowIntent(kind, 1)}); len(res.Deferred) != 1 || res.Deferred[0].Cause != causeRowBackoff {
+			t.Errorf("%s: admitted under a live row backoff", kind)
+		}
+	}
+	p.backoffSettled(settlement{Key: k, Kind: intentDriftRelaunch, Outcome: settledLanded, At: admitT0})
+	if p.backoff.Record(driftBackoffKey(k)).Consecutive != 0 {
+		t.Fatal("a landed drift kept its backoff")
 	}
 }

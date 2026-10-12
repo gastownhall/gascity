@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -307,6 +308,9 @@ func TestEffectSpecsThatChangeARuntimeTakeTheLease(t *testing.T) {
 			if (sec.call != nil || sec.Premise == premiseOwnToken || sec.Premise == premiseClose) && !spec.needs.Lease {
 				t.Errorf("%s: a section with a Call, the commit or a close, without needs.Lease", kind)
 			}
+		}
+		if i := slices.IndexFunc(spec.sections, func(s section) bool { return s.call != nil }); i >= 0 && spec.needs.LeaseAt > i {
+			t.Errorf("%s: its lease record taken at section %d, after its first Call's (%d)", kind, spec.needs.LeaseAt, i)
 		}
 	}
 	for _, kind := range []string{intentStart, intentAdopt, intentStop, intentClose, intentRollback, intentZombie, intentRekey} {

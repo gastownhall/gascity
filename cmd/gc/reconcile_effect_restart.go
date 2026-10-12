@@ -16,8 +16,10 @@ import (
 // deferral (LeaseAt), so a deferral writes nothing. A row first defers on
 // its use, read fresh: a pending interaction (but under a wait hold, a hold
 // or a quarantine, legacy's pendingInteractionHoldInfo) or an attach refuses
-// (SESS-553/558), so backoff paces it; a named row also on its activity
-// (SESS-555, legacy's shouldDeferNamedSessionConfigDrift): one it cannot
+// (SESS-553/558), and so does work on an ordinary seat (SESS-559), read
+// live; the refusal backs off the drift's own key (driftBackoffKey, the
+// D3 amendment), pacing the drift, not the row. A named row also defers on
+// its activity (SESS-555, legacy's shouldDeferNamedSessionConfigDrift): one it cannot
 // read for 2m, recent activity for 30s, each bound stamped
 // config_drift_deferred_{at,key} on first sight of its drift key. Then a
 // relaunch (SESS-556/560) prepares the row's start config, re-reads L3, and
@@ -49,12 +51,29 @@ var (
 )
 
 // driftRestartNeeds are the restart's and the relaunch's fresh reads: the
-// runtime, L3, L4 and L5 (the fallback drain's), and the agent's activity;
-// the lease record past the deferral section.
-var driftRestartNeeds = needs{Runtime: true, Lease: true, LeaseAt: 1, Legs: legAttach | legPending | legWork, Activity: true}
+// runtime, L3, L4 and the agent's activity; the lease record past the
+// deferral section, before any Call (driftLeaseAt).
+var driftRestartNeeds = needs{Runtime: true, Lease: true, LeaseAt: driftLeaseAt, Legs: legAttach | legPending, Activity: true}
+
+// driftLeaseAt is the first section past the deferral.
+const driftLeaseAt = 1
+
+// driftNeeds adds L5 for an ordinary row's relaunch, whose seat holds no
+// relaunch or fallback drain over work (SESS-559); a named restart reads
+// no work.
+func driftNeeds(w *World, it intent) needs {
+	n := driftRestartNeeds
+	if it.Kind == intentDriftRelaunch && w.Census != nil {
+		if row, ok := w.Census.Rows[it.Key]; ok && !isNamedSessionInfo(row.Info) {
+			n.Legs |= legWork
+		}
+	}
+	return n
+}
 
 // driftDeferStep is the use deferral: a pending interaction or an attach,
-// read fresh, refuses; a named row's activity defers it, bounded.
+// read fresh, refuses, and so does work on an ordinary row's seat, read
+// live (SESS-559); a named row's activity defers it, bounded.
 func driftDeferStep(v txView) txStep {
 	a := v.Fence.Activity
 	switch {
@@ -62,6 +81,8 @@ func driftDeferStep(v txView) txStep {
 		return txStep{Refuse: causeDriftDeferred + v.Fence.Pending}
 	case v.Fence.Attach != "":
 		return txStep{Refuse: causeDriftDeferred + v.Fence.Attach}
+	case !isNamedSessionInfo(v.Row) && v.Fence.workHeld():
+		return txStep{Refuse: causeHasWork}
 	case !isNamedSessionInfo(v.Row): // an ordinary row's relaunch: its other guards are the arm's
 	case a == nil || !a.Reportable:
 		return driftBoundedDefer(v, "activity_unknown", namedSessionActivityThreshold)

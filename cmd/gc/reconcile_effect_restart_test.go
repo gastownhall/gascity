@@ -60,6 +60,8 @@ func TestDriftDeferStep(t *testing.T) {
 		{name: "a pending interaction", named: true, fence: txFence{Pending: fencePending, Activity: reportable(time.Hour)}, refuse: causeDriftDeferred + fencePending},
 		{name: "an unknown pending", named: true, fence: txFence{Pending: fencePendingUnknown, Activity: reportable(time.Hour)}, refuse: causeDriftDeferred + fencePendingUnknown},
 		{name: "a pending interaction under a wait hold", named: true, fence: txFence{Pending: fencePending, Activity: reportable(time.Hour)}, meta: []string{"wait_hold", "true"}},
+		{name: "a pending interaction under a hold", named: true, fence: txFence{Pending: fencePending, Activity: reportable(time.Hour)}, meta: []string{"held_until", rowAt(time.Hour)}},
+		{name: "a pending interaction under a quarantine", named: true, fence: txFence{Pending: fencePending, Activity: reportable(time.Hour)}, meta: []string{"quarantined_until", rowAt(time.Hour)}},
 		{name: "attached", named: true, fence: txFence{Attach: fenceAttached, Activity: reportable(time.Hour)}, refuse: causeDriftDeferred + fenceAttached},
 		{name: "activity unknown, first sight", named: true, fence: txFence{Activity: unreported}, stamps: true},
 		{name: "activity unknown, inside 2m", named: true, fence: txFence{Activity: unreported}, meta: stamped(time.Minute), defers: true},
@@ -73,7 +75,10 @@ func TestDriftDeferStep(t *testing.T) {
 		{name: "an activity read that failed", named: true, fence: txFence{Activity: &activityRead{Reportable: true, Err: runtime.ErrRuntimeUnavailable}}, refuse: fenceLivenessUnknown},
 		{name: "an activity read past its bound", named: true, fence: txFence{Activity: &activityRead{Reportable: true, Err: errProbeExpired}}, refuse: fenceLivenessUnknown},
 		{name: "an ordinary row's relaunch, pending", fence: txFence{Pending: fencePending}, refuse: causeDriftDeferred + fencePending},
-		{name: "an ordinary row's relaunch, its activity unread", fence: txFence{Activity: unreported}},
+		{name: "an ordinary row's relaunch, its activity unread", fence: txFence{Activity: unreported, Work: &txWork{Free: true}}},
+		{name: "an ordinary row's relaunch over work", fence: txFence{Work: &txWork{}}, refuse: causeHasWork},
+		{name: "an ordinary row's relaunch, its work read failed", fence: txFence{Work: &txWork{Free: true, Err: errNoReadStore}}, refuse: causeHasWork},
+		{name: "an ordinary row's relaunch, its work unread", refuse: causeHasWork},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			step := driftDeferStep(driftView(t, tc.named, tc.fence, tc.meta...))

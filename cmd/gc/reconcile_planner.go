@@ -437,7 +437,7 @@ func (p *planner) record(ev events.Event) {
 func (p *planner) backoffSettled(s settlement) {
 	key := s.BackoffKey
 	if key == "" && s.Key.ID != "" {
-		key = rowBackoffKey(s.Key)
+		key = settledBackoffKey(s.Kind, s.Key)
 	}
 	switch {
 	case key == "":

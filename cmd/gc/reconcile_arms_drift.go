@@ -74,7 +74,7 @@ func armConfigDrift(r *rowFacts) (intent, bool) {
 	}
 	key, now, obs := stored+":"+core, r.w.Now, r.w.Observed[r.k]
 	_, active := activeStop(r.row)
-	launchOnly := r.w.Env.relaunches() && // a conjoined runtime takes the full path info.StartedProvisionHash != "" && info.StartedLaunchHash != "" &&
+	launchOnly := r.w.Env.relaunches() && info.StartedProvisionHash != "" && info.StartedLaunchHash != "" && // a conjoined runtime takes the full path
 		info.StartedProvisionHash == runtime.ProvisionFingerprint(cfg) && info.StartedLaunchHash != runtime.LaunchFingerprint(cfg)
 	switch {
 	case obs.Attached || obs.Uncertain:

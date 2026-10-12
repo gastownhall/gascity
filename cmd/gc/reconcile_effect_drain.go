@@ -84,7 +84,7 @@ func drainBeginChecks(v txView, reason string, step txStep) txStep {
 			return txStep{Refuse: fv.Reason}
 		}
 	}
-	if w := v.Fence.Work; (reason == drainOrphaned || reason == drainSuspended || reason == drainConfigDrift) && (w == nil || w.Err != nil || !w.Free) {
+	if (reason == drainOrphaned || reason == drainSuspended || reason == drainConfigDrift) && v.Fence.workHeld() {
 		return txStep{Refuse: causeHasWork}
 	}
 	step.Facts.Transition = &drainTransition{Name: v.Row.SessionNameMetadata, Reason: reason, Transition: "begin"}

@@ -144,7 +144,6 @@ func (rt *plannerRuntime) publishEnv() *reconcileEnv {
 		return old
 	}
 	e := &reconcileEnv{Gen: 1, Cfg: cfg, SP: sp, ConfigRev: rev}
-	e.Relaunch = e.relaunches()
 	if old != nil {
 		e.Gen = old.Gen + 1
 	}

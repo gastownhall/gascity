@@ -8,6 +8,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // The restart and relaunch through the production effect pass
@@ -188,16 +189,95 @@ func TestRelaunchBaselineSurvivesAHeartbeat(t *testing.T) {
 	}
 }
 
-// Kills a fallback drain over live work (should-fix 6): an ordinary row
-// whose relaunch fails while it holds work refuses the drain, as the
-// config-drift begin does.
-func TestRelaunchFallbackDrainHoldsOnWork(t *testing.T) {
+// Kills a relaunch over work (the round-two review's R1; SESS-559): an
+// ordinary seat whose live L5 read holds work, claimed since the pass,
+// refuses the relaunch; work claimed during a failed relaunch refuses the
+// fallback drain (should-fix 6).
+func TestRelaunchHoldsOnLiveWork(t *testing.T) {
 	p, it, store, leaf := driftOn(t, false, true)
-	leaf.RelaunchErrors = map[string]error{"s-gc-1": errors.New("box gone")}
 	assignWork(t, store, it.Key.ID)
+	if s := runTx(context.Background(), p, it, effectSpecs[it.Kind], nil); s.Outcome != settledRefused || s.Cause != causeHasWork || leaf.CountCalls("Relaunch", "s-gc-1") != 0 {
+		t.Fatalf("work since the pass: settled %+v, relaunches %d; want refused %q, none", s, leaf.CountCalls("Relaunch", "s-gc-1"), causeHasWork)
+	}
+	p, it, store, leaf = driftOn(t, false, true)
+	leaf.RelaunchErrors = map[string]error{"s-gc-1": errors.New("box gone")}
+	p.seam = func(_ context.Context, s txSeam, _ intent, section, _ int) error {
+		if s == seamAfterCall && section == 1 {
+			assignWork(t, store, it.Key.ID)
+		}
+		return nil
+	}
 	s := runTx(context.Background(), p, it, effectSpecs[it.Kind], nil)
-	if got, _ := store.Get(it.Key.ID); s.Outcome != settledRefused || s.Cause != causeHasWork || got.Metadata["drain_intent_reason"] != "" {
+	if got, _ := store.Get(it.Key.ID); s.Outcome != settledRefused || s.Cause != causeHasWork || got.Metadata["drain_intent_reason"] != "" || leaf.CountCalls("Relaunch", "s-gc-1") != 1 {
 		t.Fatalf("settled %+v, stop request %q: want refused %q and no drain", s, got.Metadata["drain_intent_reason"], causeHasWork)
+	}
+}
+
+// Kills a drift Call made without the runtime lease record (the
+// round-two review's R5; D02, D04): the record is not held in the deferral
+// section, is held through the restart's stop Call and the relaunch's
+// Relaunch, and is cleared after.
+func TestDriftLeaseRecordSpansTheCalls(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		named      bool
+		launchOnly bool
+	}{{"the restart's stop", true, false}, {"the relaunch", false, true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, it, store, _ := driftOn(t, tc.named, tc.launchOnly)
+			holder := func() string { b, _ := store.Get(it.Key.ID); return b.Metadata[session.RuntimeLeaseHolderKey] }
+			var deferring, calling string
+			p.seam = func(_ context.Context, s txSeam, _ intent, section, _ int) error {
+				switch {
+				case s == seamAfterReads && section == 0:
+					deferring = holder()
+				case s == seamBeforeCall && calling == "":
+					calling = holder()
+				}
+				return nil
+			}
+			s := runTx(context.Background(), p, it, effectSpecs[it.Kind], nil)
+			if s.Outcome != settledLanded || deferring != "" || calling == "" || holder() != "" {
+				t.Fatalf("settled %+v; holder deferring %q, at the Call %q, after %q: want none, held, cleared", s, deferring, calling, holder())
+			}
+		})
+	}
+}
+
+// Kills a lease record taken past the effect's deadline (the round-two
+// review's R2): a deadline that passes in the deferral section writes no
+// record and no row.
+func TestDriftRecordNotTakenPastTheDeadline(t *testing.T) {
+	p, it, store, leaf := driftOn(t, true, false)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p.seam = func(_ context.Context, s txSeam, _ intent, section, _ int) error {
+		if s == seamAfterRowRead && section == 0 {
+			cancel()
+		}
+		return nil
+	}
+	before, _ := store.Get(it.Key.ID)
+	s := runTx(ctx, p, it, effectSpecs[it.Kind], nil)
+	if after, _ := store.Get(it.Key.ID); after.Revision != before.Revision || s.Outcome == settledLanded || stops(leaf) != 0 {
+		t.Fatalf("settled %+v, revision %d -> %d, stops %d: want nothing written or stopped", s, before.Revision, after.Revision, stops(leaf))
+	}
+}
+
+// Kills a relaunch fallback's stop without the full fence (D16): a named
+// row whose relaunch fails and whose prompt comes up during it refuses the
+// restart's stop.
+func TestRelaunchFallbackStopIsFenced(t *testing.T) {
+	p, it, _, leaf := driftOn(t, true, true)
+	leaf.RelaunchErrors = map[string]error{"s-gc-1": errors.New("box gone")}
+	p.seam = func(_ context.Context, s txSeam, _ intent, section, _ int) error {
+		if s == seamAfterCall && section == 1 {
+			approval(leaf)
+		}
+		return nil
+	}
+	if s := runTx(context.Background(), p, it, effectSpecs[it.Kind], nil); s.Outcome != settledRefused || stops(leaf) != 0 {
+		t.Fatalf("settled %+v, stops %d; want refused, nothing stopped", s, stops(leaf))
 	}
 }
 

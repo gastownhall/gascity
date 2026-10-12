@@ -64,6 +64,8 @@ func TestDecideRowConfigDrift(t *testing.T) {
 		{name: "open work waits", meta: []string{"started_config_hash", stale}, alive: true, work: true},
 		{name: "a launch-only drift relaunches", meta: append([]string{"started_config_hash", stale}, launchOnly...), alive: true, relaunch: true, wantKind: intentDriftRelaunch, wantReason: decideDriftRelaunch},
 		{name: "a launch-only drift with open work waits", meta: append([]string{"started_config_hash", stale}, launchOnly...), alive: true, relaunch: true, work: true},
+		{name: "a provision hash without a launch hash drains", meta: []string{"started_config_hash", stale, "started_provision_hash", runtime.ProvisionFingerprint(cfg), "started_launch_hash", ""}, alive: true, relaunch: true, wantKind: intentDrainBegin, wantReason: decideDrainBegin + drainConfigDrift},
+		{name: "an active stop request holds a launch-only drift", meta: slices.Concat([]string{"started_config_hash", stale}, launchOnly, intentAt(drainIdle, "3")), alive: true, relaunch: true},
 		{name: "a launch-only drift no provider can relaunch drains", meta: append([]string{"started_config_hash", stale}, launchOnly...), alive: true, wantKind: intentDrainBegin, wantReason: decideDrainBegin + drainConfigDrift},
 		{name: "an active stop request holds the drain", meta: append([]string{"started_config_hash", stale}, intentAt(drainIdle, "3")...), alive: true},
 		// A11 sits above A14 (v5 §4): an ack is signaled first, attached or

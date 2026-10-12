@@ -457,6 +457,10 @@ type txFence struct {
 	Activity        *activityRead
 }
 
+// workHeld reports L5 holding: work read on the seat, or a read that failed
+// or was not made (fails closed).
+func (f txFence) workHeld() bool { return f.Work == nil || f.Work.Err != nil || !f.Work.Free }
+
 // activityRead is the routed leaf's activity read: whether it reports
 // activity for the name, and its last.
 type activityRead struct {
@@ -641,6 +645,10 @@ func leaseBound(ctx context.Context, lease *session.RuntimeLease) (context.Conte
 // takeRecord takes the lease record a LeaseAt effect deferred, bounding ctx
 // by it; a refusal is lockRuntimeName's.
 func (t *tx) takeRecord(ctx context.Context) (context.Context, context.CancelFunc, *settlement) {
+	if ctx.Err() != nil { // past its deadline: write no record, as the eager take
+		s := ended(ctx)
+		return ctx, func() {}, &s
+	}
 	req := session.RuntimeLeaseRequest{City: t.p.World.CityPath, Name: t.name, ID: t.view.It.Key.ID, TTL: t.recordTTL}
 	if err := t.lease.TakeRecord(t.recordFront, req); err != nil {
 		return ctx, func() {}, &settlement{Outcome: settledRefused, Cause: leaseRefusal(err), Err: err}
