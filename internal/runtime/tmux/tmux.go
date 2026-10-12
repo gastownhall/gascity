@@ -4378,7 +4378,7 @@ func (t *Tmux) CheckSessionHealth(session string, maxInactivity time.Duration) Z
 // Uses ps to get the actual command name from the process's executable path.
 // This handles cases where argv[0] is modified (e.g., Claude showing version "2.1.30").
 func processMatchesNames(pid string, names []string) bool {
-	nameSet := processNameSet(names)
+	nameSet := proctable.ProcessNameSet(names)
 	if len(nameSet) == 0 {
 		return false
 	}
@@ -4399,7 +4399,7 @@ func processMatchesNames(pid string, names []string) bool {
 	if err != nil {
 		return false
 	}
-	return processMatchesNameSet(commPath, string(out), nameSet)
+	return proctable.ProcessMatchesNameSet(commPath, string(out), nameSet)
 }
 
 // hasDescendantWithNames checks if a process has any descendant (child, grandchild, etc.)

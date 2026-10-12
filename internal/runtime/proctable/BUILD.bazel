@@ -22,6 +22,7 @@ go_library(
         "infrastructure_argv_stub.go",
         "kill_stub.go",
         "kill_unix.go",
+        "names.go",
         "proctable.go",
         "scan_darwin.go",
         "scan_darwin_command.go",

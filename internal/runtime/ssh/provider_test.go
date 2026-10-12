@@ -519,30 +519,81 @@ func TestProvider_StartTransportFailureIsNotDuplicate(t *testing.T) {
 	}
 }
 
-func TestProvider_ProcessAliveBracketsPattern(t *testing.T) {
-	// The pgrep pattern brackets its first character so it cannot self-match
-	// the wrapping shell's own argv over ssh (the dash false-positive).
-	f := &fakeRunner{respond: func(argv []string) ([]byte, int, error) {
-		if len(argv) >= 1 && argv[0] == "pgrep" {
-			return nil, 0, nil // found
+// isProcessAliveScript matches ProcessAlive's one remote call.
+func isProcessAliveScript(argv []string) bool {
+	return len(argv) == 3 && argv[0] == "sh" && argv[1] == "-c" && strings.Contains(argv[2], processSectionComm)
+}
+
+// processTable renders a processAliveScript answer: the session's pane pids,
+// then "pid ppid comm args..." rows split into the comm and args passes (comm
+// is the third field, args the rest, or the comm when there are no more).
+func processTable(panes string, rows ...string) string {
+	var comm, args strings.Builder
+	for _, row := range rows {
+		f := strings.Fields(row)
+		fmt.Fprintf(&comm, "%s %s %s\n", f[0], f[1], f[2])
+		a := strings.Join(f[3:], " ")
+		if a == "" {
+			a = f[2]
 		}
-		return nil, 1, nil
-	}}
-	p := providerWith(f)
-	if !p.ProcessAlive("s", []string{"claude"}) {
-		t.Error("ProcessAlive should be true when pgrep matches")
+		fmt.Fprintf(&args, "%s %s %s\n", f[0], f[1], a)
 	}
-	got := firstCall(f, func(a []string) bool { return len(a) >= 1 && a[0] == "pgrep" })
-	want := []string{"pgrep", "-f", "[c]laude"}
-	if !slices.Equal(got, want) {
-		t.Errorf("pgrep argv = %v, want %v (first char must be bracketed)", got, want)
+	return strings.ReplaceAll(panes, ",", "\n") + "\n" + processSectionComm + "\n" + comm.String() + processSectionArgs + "\n" + args.String()
+}
+
+// ProcessAlive is scoped to the session's pane process trees. A box-wide
+// match read a dead session alive whenever another session on the box ran the
+// same CLI (mc-pnu61). Matching follows the local provider: command, argv[0],
+// or an interpreter's script, in a pane process or its descendants.
+func TestProvider_ProcessAliveScopedToSessionPaneTree(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		out   string
+		code  int
+		names []string
+		want  bool
+	}{
+		{"agent under the pane shell", processTable("100", "100 1 zsh", "101 100 claude", "200 1 tmux"), 0, []string{"claude"}, true},
+		{"agent deep in the tree", processTable("100", "100 1 zsh", "101 100 sh", "102 101 caffeinate", "103 102 claude"), 0, []string{"claude"}, true},
+		{"another session's agent only", processTable("100", "100 1 zsh", "300 1 zsh", "301 300 claude"), 0, []string{"claude"}, false},
+		{"node script by name", processTable("100", "100 1 zsh", "101 100 node node /usr/lib/gemini/bin/gemini --yolo"), 0, []string{"gemini"}, true},
+		{"any of several panes", processTable("100,400", "100 1 zsh", "400 1 zsh", "401 400 codex"), 0, []string{"codex"}, true},
+		{"session missing", "", 3, []string{"claude"}, false},
+		{"no panes listed", processTable("", "300 1 zsh", "301 300 claude"), 0, []string{"claude"}, false},
+		{"process table unreadable", "100\n" + processSectionComm + "\n" + processSectionArgs + "\n", 0, []string{"claude"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeRunner{respond: func(argv []string) ([]byte, int, error) {
+				if isProcessAliveScript(argv) {
+					return []byte(tc.out), tc.code, nil
+				}
+				return nil, 1, nil
+			}}
+			if got := providerWith(f).ProcessAlive("s", tc.names); got != tc.want {
+				t.Errorf("ProcessAlive = %v, want %v", got, tc.want)
+			}
+			if len(f.calls) != 1 {
+				t.Errorf("calls = %q, want one remote call", f.calls)
+			}
+		})
 	}
 }
 
-func TestProvider_ProcessAliveAbsentIsFalse(t *testing.T) {
-	f := &fakeRunner{code: 1} // pgrep finds nothing
-	if providerWith(f).ProcessAlive("s", []string{"ghost"}) {
-		t.Error("ProcessAlive should be false when pgrep matches nothing")
+// The remote call lists only this session's panes, exactly, and reads the
+// process table with POSIX ps (any remote OS).
+func TestProvider_ProcessAliveScriptTargetsSessionExactly(t *testing.T) {
+	script := processAliveScript("worker-1")
+	for _, want := range []string{
+		"tmux list-panes -s -t '=worker-1:' -F '#{pane_pid}' || exit 3",
+		"ps -A -o pid= -o ppid= -o comm=",
+		"ps -A -o pid= -o ppid= -o args=",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("script lacks %q:\n%s", want, script)
+		}
+	}
+	if strings.Contains(script, "pgrep") {
+		t.Errorf("script still runs a box-wide pgrep:\n%s", script)
 	}
 }
 
@@ -875,7 +926,8 @@ func TestProvider_AttachArgsQuotesRemoteCommand(t *testing.T) {
 	// A session name with shell metacharacters must be confined to a single
 	// shell-quoted remote-command argument — no remote command injection.
 	args := attachArgs(Endpoint{User: "u", Host: "box"}, "x; rm -rf ~")
-	if last := args[len(args)-1]; last != `'tmux' 'attach' '-t' 'x; rm -rf ~'` {
+	// Attach rejects such a name (checkName); the quoting holds regardless.
+	if last := args[len(args)-1]; last != `'tmux' 'attach' '-t' '=x; rm -rf ~'` {
 		t.Errorf("remote command arg = %q, want it shell-quoted as one token", last)
 	}
 	if dest := args[len(args)-2]; dest != "u@box" {
@@ -1016,5 +1068,44 @@ func TestProvider_AttachArgsTargetSessionExactly(t *testing.T) {
 	args := attachArgs(Endpoint{User: "u", Host: "box"}, "worker-1")
 	if last := args[len(args)-1]; last != `'tmux' 'attach' '-t' '=worker-1'` {
 		t.Errorf("remote command arg = %q, want an exact, quoted target", last)
+	}
+}
+
+// A name that is not a safe tmux target never reaches tmux. A bare target is a
+// prefix match and a glob ("worker-1*" names worker-10), and "." and ":" split
+// it into window and pane parts (mc-xm7mg). Verbs that return errors report
+// ErrInvalidSessionName; best-effort verbs do nothing.
+func TestProvider_InvalidNamesNeverReachTmux(t *testing.T) {
+	for _, name := range []string{"worker-1*", "worker-?", "worker-1:0", "worker.1", "", "x; rm -rf ~"} {
+		t.Run(name, func(t *testing.T) {
+			f := &fakeRunner{}
+			p := providerWith(f)
+			ctx := context.Background()
+			for verb, err := range map[string]error{
+				"Start":    p.Start(ctx, name, runtime.Config{Command: "agent"}),
+				"Relaunch": p.Relaunch(ctx, name, runtime.Config{Command: "agent"}),
+				"Stop":     p.Stop(name),
+				"Attach":   p.Attach(name),
+			} {
+				if !errors.Is(err, ErrInvalidSessionName) {
+					t.Errorf("%s(%q) = %v, want ErrInvalidSessionName", verb, name, err)
+				}
+			}
+			if p.IsRunning(name) || p.IsAttached(name) || p.ProcessAlive(name, []string{"claude"}) {
+				t.Errorf("IsRunning/IsAttached/ProcessAlive(%q) reported true", name)
+			}
+			_ = p.Nudge(name, runtime.TextContent("hi"))
+			_ = p.SendKeys(name, "Enter")
+			_ = p.Interrupt(name)
+			_ = p.ClearScrollback(name)
+			_, _ = p.Peek(name, 5)
+			_ = p.SetMeta(name, "GC_SESSION_ID", "gc-1")
+			_, _ = p.GetMeta(name, "GC_SESSION_ID")
+			_ = p.RemoveMeta(name, "GC_SESSION_ID")
+			_, _ = p.GetLastActivity(name)
+			if len(f.calls) != 0 {
+				t.Errorf("remote calls for %q = %q, want none", name, f.calls)
+			}
+		})
 	}
 }

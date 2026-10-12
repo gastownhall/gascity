@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/proctable"
 )
 
 // validTmuxName mirrors the local tmux provider's guard: a session name must be
@@ -24,16 +25,23 @@ var validTmuxName = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 // ErrInvalidSessionName reports a session name that is not a safe tmux target.
 var ErrInvalidSessionName = errors.New("invalid session name")
 
-// sessionTarget returns the exact target-session form of a session name, as
-// the local tmux provider does. tmux resolves a bare -t name by unique prefix,
-// so once "worker-1" has exited "-t worker-1" names a live "worker-10" on the
-// same box: has-session reports a dead session alive and kill-session kills
-// the wrong one. The "=" prefix disables that. A name that is not a safe tmux
-// target passes through unchanged (it cannot have been created by Start).
-func sessionTarget(name string) string {
+// checkName rejects a session name that is not a safe tmux target. Start never
+// creates such a session, and the name must never reach tmux: a bare target is
+// matched by prefix and as a glob ("worker-1*" names worker-10), and "." and
+// ":" split it into window and pane parts, so every verb checks it first.
+func checkName(name string) error {
 	if !validTmuxName.MatchString(name) {
-		return name
+		return fmt.Errorf("%w %q: must match %s", ErrInvalidSessionName, name, validTmuxName.String())
 	}
+	return nil
+}
+
+// sessionTarget returns the exact target-session form of a (checked) session
+// name, as the local tmux provider does. tmux resolves a bare -t name by
+// unique prefix, so once "worker-1" has exited "-t worker-1" names a live
+// "worker-10" on the same box: has-session reports a dead session alive and
+// kill-session kills the wrong one. The "=" prefix disables that.
+func sessionTarget(name string) string {
 	return "=" + name
 }
 
@@ -41,9 +49,6 @@ func sessionTarget(name string) string {
 // target-pane. The trailing ":" is required: tmux still prefix-matches
 // "=name" in that position, and only "=name:" is exact.
 func paneTarget(name string) string {
-	if !validTmuxName.MatchString(name) {
-		return name
-	}
 	return "=" + name + ":"
 }
 
@@ -130,8 +135,8 @@ const defaultRemoteShell = "/bin/sh"
 // AcceptStartupDialogs), CopyTo, and live SessionLive re-apply on drift (RunLive
 // is a no-op, matching k8s; SessionLive is applied once at startup).
 func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
-	if !validTmuxName.MatchString(name) {
-		return fmt.Errorf("%w %q: must match %s", ErrInvalidSessionName, name, validTmuxName.String())
+	if err := checkName(name); err != nil {
+		return err
 	}
 	if p.hasSession(ctx, name) {
 		return fmt.Errorf("%w: ssh session %q", runtime.ErrSessionExists, name)
@@ -291,8 +296,8 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if !validTmuxName.MatchString(name) {
-		return fmt.Errorf("%w %q: must match %s", ErrInvalidSessionName, name, validTmuxName.String())
+	if err := checkName(name); err != nil {
+		return err
 	}
 	if !p.hasSession(ctx, name) {
 		return fmt.Errorf("%w: ssh session %q (box must be provisioned first)", runtime.ErrSessionNotFound, name)
@@ -355,6 +360,9 @@ func (p *Provider) requiresPostStartLiveness(cfg runtime.Config) bool {
 // error would let the seam adapter drop tracking while the remote tmux session
 // and the agent inside it keep running untracked, leaking the remote box.
 func (p *Provider) Stop(name string) error {
+	if err := checkName(name); err != nil {
+		return fmt.Errorf("ssh stop: %w", err)
+	}
 	if _, _, err := p.tmux(context.Background(), name, "kill-session", "-t", sessionTarget(name)); err != nil {
 		return fmt.Errorf("ssh stop %q: %w", name, err)
 	}
@@ -363,6 +371,9 @@ func (p *Provider) Stop(name string) error {
 
 // hasSession reports whether the tmux session exists, using the given context.
 func (p *Provider) hasSession(ctx context.Context, name string) bool {
+	if checkName(name) != nil {
+		return false
+	}
 	_, code, err := p.tmux(ctx, name, "has-session", "-t", sessionTarget(name))
 	return err == nil && code == 0
 }
@@ -374,6 +385,9 @@ func (p *Provider) IsRunning(name string) bool {
 
 // IsAttached reports whether a terminal is attached to the tmux session.
 func (p *Provider) IsAttached(name string) bool {
+	if checkName(name) != nil {
+		return false
+	}
 	out, code, err := p.tmux(context.Background(), name, "display-message", "-t", paneTarget(name), "-p", "#{session_attached}")
 	if err != nil || code != 0 {
 		return false
@@ -383,6 +397,9 @@ func (p *Provider) IsAttached(name string) bool {
 
 // Attach connects the local terminal to the remote tmux session over ssh -t.
 func (p *Provider) Attach(name string) error {
+	if err := checkName(name); err != nil {
+		return fmt.Errorf("ssh attach: %w", err)
+	}
 	cmd := exec.Command("ssh", attachArgs(p.conn.ep, name)...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -390,25 +407,112 @@ func (p *Provider) Attach(name string) error {
 	return cmd.Run()
 }
 
-// ProcessAlive reports whether any of processNames is running on the box.
-// Returns true when processNames is empty (per the interface contract).
+// ProcessAlive reports whether one of processNames runs in the session: in a
+// pane's process or anything beneath it, judged as the local tmux provider
+// judges its panes (by command, argv[0], or an interpreter's script; see
+// [proctable.ProcessMatchesNameSet]). It is scoped to this session's panes: a
+// box-wide match would read a dead session alive whenever another session on
+// the box runs the same CLI. One remote call lists the session's pane pids
+// and the box's process table (POSIX ps, so any remote OS). A missing session
+// is not alive; a process table that cannot be read while the session's panes
+// exist degrades to alive, as the local provider does, so a failed secondary
+// probe never triggers a reap. Returns true when processNames is empty (per
+// the interface contract).
 func (p *Provider) ProcessAlive(name string, processNames []string) bool {
-	if len(processNames) == 0 {
+	names := proctable.ProcessNameSet(processNames)
+	if len(names) == 0 {
 		return true
 	}
-	for _, pname := range processNames {
-		if pname == "" {
+	if checkName(name) != nil {
+		return false
+	}
+	out, code, err := p.conn.Exec(context.Background(), name, []string{"sh", "-c", processAliveScript(name)})
+	if err != nil || code != 0 {
+		return false
+	}
+	return paneTreeRunsNames(string(out), names)
+}
+
+// processAliveScript lists the session's pane pids, then the box's process
+// table twice: comm (the process identity) and args (its command line), each
+// in its own pass so the variable-width column is last and parses safely.
+func processAliveScript(name string) string {
+	return "tmux list-panes -s -t " + shellQuote([]string{paneTarget(name)}) + " -F '#{pane_pid}' || exit 3\n" +
+		"echo " + processSectionComm + "\n" +
+		"ps -A -o pid= -o ppid= -o comm=\n" +
+		"echo " + processSectionArgs + "\n" +
+		"ps -A -o pid= -o ppid= -o args=\n"
+}
+
+const (
+	processSectionComm = "--gc-comm--"
+	processSectionArgs = "--gc-args--"
+	maxProcessDepth    = 10 // matches the local provider's descendant bound
+)
+
+// paneTreeRunsNames evaluates processAliveScript's output: whether a pane pid,
+// or a descendant within maxProcessDepth, matches names.
+func paneTreeRunsNames(out string, names map[string]struct{}) bool {
+	type proc struct{ ppid, comm, args string }
+	var roots []string
+	procs := map[string]*proc{}
+	children := map[string][]string{}
+	section := ""
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case line == "":
+			continue
+		case line == processSectionComm || line == processSectionArgs:
+			section = line
+			continue
+		case section == "":
+			roots = append(roots, line)
 			continue
 		}
-		// Bracket the first character so the regex cannot match the literal
-		// text in the invoking shell's own command line: over ssh the op runs
-		// as `sh -c "'pgrep' '-f' '<pat>'"`, and on dash the wrapper shell
-		// survives carrying <pname> in its argv, which a bare `pgrep -f <pname>`
-		// would self-match (a false positive for any name). "[c]laude" cannot
-		// match the literal "[c]laude" text yet still matches a running "claude".
-		pat := "[" + pname[:1] + "]" + pname[1:]
-		_, code, err := p.conn.Exec(context.Background(), name, []string{"pgrep", "-f", pat})
-		if err == nil && code == 0 {
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
+			continue
+		}
+		pid, ppid := fields[0], fields[1]
+		rest := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(strings.TrimPrefix(line, pid)), ppid))
+		pr := procs[pid]
+		if pr == nil {
+			pr = &proc{ppid: ppid}
+			procs[pid] = pr
+			children[ppid] = append(children[ppid], pid)
+		}
+		if section == processSectionComm {
+			pr.comm = rest
+		} else {
+			pr.args = rest
+		}
+	}
+	if len(roots) == 0 {
+		return false // no panes: the session is gone
+	}
+	if len(procs) == 0 {
+		return true // the panes exist but the process table is unreadable
+	}
+	visited := map[string]bool{}
+	var walk func(pid string, depth int) bool
+	walk = func(pid string, depth int) bool {
+		if depth > maxProcessDepth || visited[pid] {
+			return false
+		}
+		visited[pid] = true
+		if pr := procs[pid]; pr != nil && proctable.ProcessMatchesNameSet(pr.comm, pr.args, names) {
+			return true
+		}
+		for _, child := range children[pid] {
+			if walk(child, depth+1) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, root := range roots {
+		if walk(root, 0) {
 			return true
 		}
 	}
@@ -417,30 +521,45 @@ func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 
 // Nudge delivers content to the session (best-effort).
 func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
+	if checkName(name) != nil {
+		return nil // best-effort; never reaches tmux
+	}
 	_ = p.carrier(name).Nudge(context.Background(), name, content)
 	return nil
 }
 
 // SendKeys sends bare keystrokes to the session (best-effort).
 func (p *Provider) SendKeys(name string, keys ...string) error {
+	if checkName(name) != nil {
+		return nil // best-effort; never reaches tmux
+	}
 	_ = p.carrier(name).SendKeys(context.Background(), name, keys...)
 	return nil
 }
 
 // Peek captures the last N lines of the session pane (best-effort: empty on failure).
 func (p *Provider) Peek(name string, lines int) (string, error) {
+	if checkName(name) != nil {
+		return "", nil
+	}
 	out, _ := p.carrier(name).Peek(context.Background(), name, lines)
 	return out, nil
 }
 
 // Interrupt sends Ctrl-C to the session (best-effort).
 func (p *Provider) Interrupt(name string) error {
+	if checkName(name) != nil {
+		return nil // best-effort; never reaches tmux
+	}
 	_ = p.carrier(name).Interrupt(context.Background(), name)
 	return nil
 }
 
 // ClearScrollback clears the session's scrollback (best-effort).
 func (p *Provider) ClearScrollback(name string) error {
+	if checkName(name) != nil {
+		return nil // best-effort; never reaches tmux
+	}
 	_ = p.carrier(name).ClearScrollback(context.Background(), name)
 	return nil
 }
@@ -453,6 +572,9 @@ func (p *Provider) ClearScrollback(name string) error {
 // best-effort, but a staging failure skips the write rather than falling back to
 // argv — that fallback is the leak.
 func (p *Provider) SetMeta(name, key, value string) error {
+	if checkName(name) != nil {
+		return nil // best-effort; never reaches tmux
+	}
 	ctx := context.Background()
 	args := []string{"set-environment", "-t", sessionTarget(name), key, value}
 	if !runtime.ArgvSecretEnvValue(key, value) {
@@ -470,6 +592,9 @@ func (p *Provider) SetMeta(name, key, value string) error {
 
 // GetMeta retrieves a value from the tmux session environment ("" if unset).
 func (p *Provider) GetMeta(name, key string) (string, error) {
+	if checkName(name) != nil {
+		return "", nil
+	}
 	out, code, err := p.tmux(context.Background(), name, "show-environment", "-t", sessionTarget(name), key)
 	if err != nil || code != 0 {
 		return "", nil
@@ -486,6 +611,9 @@ func (p *Provider) GetMeta(name, key string) (string, error) {
 
 // RemoveMeta removes a key from the tmux session environment.
 func (p *Provider) RemoveMeta(name, key string) error {
+	if checkName(name) != nil {
+		return nil
+	}
 	_, _, _ = p.tmux(context.Background(), name, "set-environment", "-t", sessionTarget(name), "-u", key)
 	return nil
 }
@@ -511,6 +639,9 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 
 // GetLastActivity returns the session's last-activity time (zero if unknown).
 func (p *Provider) GetLastActivity(name string) (time.Time, error) {
+	if checkName(name) != nil {
+		return time.Time{}, nil
+	}
 	out, code, err := p.tmux(context.Background(), name, "display-message", "-t", paneTarget(name), "-p", "#{session_activity}")
 	if err != nil || code != 0 {
 		return time.Time{}, nil

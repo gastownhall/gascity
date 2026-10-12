@@ -13,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/runtimetest"
@@ -177,5 +178,50 @@ func TestSSHProviderTargetsSessionsExactlyOnRealTmux(t *testing.T) {
 	}
 	if peek, _ := p.Peek("worker-10", 20); strings.Contains(peek, "STRAY-NUDGE") {
 		t.Errorf("worker-10 received worker-1's nudge: %q", peek)
+	}
+}
+
+// ProcessAlive is scoped to the session's own panes: a session whose agent is
+// gone reads dead even while another session on the box runs the same
+// program (mc-pnu61). A name that is not a safe tmux target is refused before
+// it reaches tmux, where "worker-1*" glob-matches worker-10 (mc-xm7mg).
+func TestSSHProviderProcessAliveAndNamesOnRealTmux(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	p := NewProvider(sshConformanceEndpoint(t))
+	p.postStartSettle = 0
+	ctx := context.Background()
+	// worker-10 starts sleep, then signals; the signal proves sleep is running.
+	ready := fmt.Sprintf("gc-ssh-pa-ready-%d", time.Now().UnixNano())
+	for name, cmd := range map[string]string{
+		"worker-1":  "cat",
+		"worker-10": "sh -c 'sleep 300 & tmux wait-for -S " + ready + "; wait'",
+	} {
+		if err := p.Start(ctx, name, runtime.Config{Command: cmd, WorkDir: t.TempDir()}); err != nil {
+			t.Fatalf("Start %s: %v", name, err)
+		}
+		t.Cleanup(func() { _ = p.Stop(name) })
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if _, code, err := p.tmux(waitCtx, "worker-10", "wait-for", ready); err != nil || code != 0 {
+		t.Fatalf("waiting for worker-10's sleep: code %d, %v", code, err)
+	}
+	if !p.ProcessAlive("worker-10", []string{"sleep"}) {
+		t.Fatal("ProcessAlive(worker-10, sleep) = false, want true")
+	}
+	if p.ProcessAlive("worker-1", []string{"sleep"}) {
+		t.Error("ProcessAlive(worker-1, sleep) = true: matched worker-10's sleep box-wide")
+	}
+
+	if err := p.Stop("worker-1*"); !errors.Is(err, ErrInvalidSessionName) {
+		t.Errorf("Stop(worker-1*) = %v, want ErrInvalidSessionName", err)
+	}
+	if p.IsRunning("worker-1*") {
+		t.Error("IsRunning(worker-1*) = true: the glob reached tmux")
+	}
+	if !p.IsRunning("worker-10") {
+		t.Error("worker-10 is gone: kill-session -t 'worker-1*' glob-matched it")
 	}
 }
