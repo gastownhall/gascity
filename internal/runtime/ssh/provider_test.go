@@ -281,7 +281,7 @@ func TestProvider_RelaunchRespawnsAgentInWarmSession(t *testing.T) {
 	}
 	got := firstCall(f, isTmux("respawn-pane"))
 	// respawn-pane has no -e, so env is NOT re-applied (provision-half).
-	want := []string{"tmux", "respawn-pane", "-k", "-t", "s", "-c", "/w", "agent --resumed"}
+	want := []string{"tmux", "respawn-pane", "-k", "-t", "=s:", "-c", "/w", "agent --resumed"}
 	if !slices.Equal(got, want) {
 		t.Errorf("respawn-pane argv =\n  %v\nwant\n  %v", got, want)
 	}
@@ -364,15 +364,15 @@ func TestProvider_IsRunning(t *testing.T) {
 }
 
 func TestProvider_NudgeDrivesNamedTmuxTarget(t *testing.T) {
-	// The carrier target is the session name (one host, many sessions).
+	// The carrier target is the session, exactly (one host, many sessions).
 	f := &fakeRunner{}
 	p := providerWith(f)
 	if err := p.Nudge("sess-7", runtime.TextContent("hi")); err != nil {
 		t.Fatalf("Nudge: %v", err)
 	}
 	want := [][]string{
-		{"tmux", "send-keys", "-t", "sess-7", "-l", "hi"},
-		{"tmux", "send-keys", "-t", "sess-7", "Enter"},
+		{"tmux", "send-keys", "-t", "=sess-7:", "-l", "hi"},
+		{"tmux", "send-keys", "-t", "=sess-7:", "Enter"},
 	}
 	if len(f.calls) != 2 {
 		t.Fatalf("calls = %v, want 2", f.calls)
@@ -866,7 +866,7 @@ func TestProvider_StartSendsInitialNudgeWhenAlive(t *testing.T) {
 	if len(nudges) != 2 {
 		t.Fatalf("expected 2 send-keys (type + Enter) for the initial nudge, got %v", nudges)
 	}
-	if !slices.Equal(nudges[0], []string{"tmux", "send-keys", "-t", "s", "-l", "hello"}) {
+	if !slices.Equal(nudges[0], []string{"tmux", "send-keys", "-t", "=s:", "-l", "hello"}) {
 		t.Errorf("initial nudge type = %v", nudges[0])
 	}
 }
@@ -916,6 +916,10 @@ func TestProvider_SetMetaKeepsSecretValueOutOfArgv(t *testing.T) {
 	if !strings.Contains(stdinFor(f, isStagingScript), secret) {
 		t.Error("secret value was not delivered on the staging script's stdin")
 	}
+	// The staged command names the session exactly, like the argv path.
+	if staged := stdinFor(f, isStagingScript); !strings.Contains(staged, "'set-environment' '-t' '=s'") {
+		t.Errorf("staged command does not target =s exactly: %q", staged)
+	}
 	if firstCall(f, func(argv []string) bool { return len(argv) == 3 && argv[0] == "rm" && argv[2] == stagedDir }) == nil {
 		t.Error("staged directory was not removed after SetMeta")
 	}
@@ -947,11 +951,70 @@ func TestProvider_SetMetaInertValueStaysOnArgv(t *testing.T) {
 	if err := providerWith(f).SetMeta("s", "GC_SESSION_ID", "gc-1"); err != nil {
 		t.Fatalf("SetMeta: %v", err)
 	}
-	want := []string{"tmux", "set-environment", "-t", "s", "GC_SESSION_ID", "gc-1"}
+	want := []string{"tmux", "set-environment", "-t", "=s", "GC_SESSION_ID", "gc-1"}
 	if got := firstCall(f, isTmux("set-environment")); !slices.Equal(got, want) {
 		t.Errorf("set-environment argv = %v, want %v", got, want)
 	}
 	if firstCall(f, isStagingScript) != nil {
 		t.Error("an inert meta value must not stage a file on the box")
+	}
+}
+
+// tmux resolves a bare -t name by unique prefix: once "worker-1" has exited,
+// "-t worker-1" names a live "worker-10" on the same box. Every session-keyed
+// command must name its session exactly: "=name" for target-session commands,
+// "=name:" for target-window and target-pane ones (tmux still prefix-matches
+// "=name" there).
+func TestProvider_TargetsSessionsExactly(t *testing.T) {
+	const session, pane = "=worker-1", "=worker-1:"
+	cases := []struct {
+		name string
+		run  func(*Provider)
+		sub  string
+		want string
+	}{
+		{"IsRunning", func(p *Provider) { _ = p.IsRunning("worker-1") }, "has-session", session},
+		{"Stop", func(p *Provider) { _ = p.Stop("worker-1") }, "kill-session", session},
+		{"IsAttached", func(p *Provider) { _ = p.IsAttached("worker-1") }, "display-message", pane},
+		{"GetLastActivity", func(p *Provider) { _, _ = p.GetLastActivity("worker-1") }, "display-message", pane},
+		{"SetMeta", func(p *Provider) { _ = p.SetMeta("worker-1", "GC_SESSION_ID", "gc-1") }, "set-environment", session},
+		{"GetMeta", func(p *Provider) { _, _ = p.GetMeta("worker-1", "GC_K") }, "show-environment", session},
+		{"RemoveMeta", func(p *Provider) { _ = p.RemoveMeta("worker-1", "GC_K") }, "set-environment", session},
+		{"Relaunch", func(p *Provider) { _ = p.Relaunch(context.Background(), "worker-1", runtime.Config{Command: "agent"}) }, "respawn-pane", pane},
+		{"Nudge", func(p *Provider) { _ = p.Nudge("worker-1", runtime.TextContent("hi")) }, "send-keys", pane},
+		{"SendKeys", func(p *Provider) { _ = p.SendKeys("worker-1", "Enter") }, "send-keys", pane},
+		{"Interrupt", func(p *Provider) { _ = p.Interrupt("worker-1") }, "send-keys", pane},
+		{"Peek", func(p *Provider) { _, _ = p.Peek("worker-1", 5) }, "capture-pane", pane},
+		{"ClearScrollback", func(p *Provider) { _ = p.ClearScrollback("worker-1") }, "clear-history", pane},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeRunner{}
+			tc.run(providerWith(f))
+			var targets []string
+			for _, c := range f.calls {
+				if len(c) < 2 || c[0] != "tmux" {
+					continue
+				}
+				if i := slices.Index(c, "-t"); i > 0 && i+1 < len(c) {
+					targets = append(targets, c[1]+" "+c[i+1])
+					if c[1] == tc.sub && c[i+1] != tc.want {
+						t.Errorf("%s -t %q, want %q; argv=%q", c[1], c[i+1], tc.want, c)
+					}
+				}
+			}
+			if !slices.Contains(targets, tc.sub+" "+tc.want) {
+				t.Errorf("no %s -t %s; targeted calls=%q", tc.sub, tc.want, targets)
+			}
+		})
+	}
+}
+
+// Attach names the session exactly too, shell-quoted so a remote login shell
+// (zsh expands a leading "=" as a command lookup) passes it to tmux intact.
+func TestProvider_AttachArgsTargetSessionExactly(t *testing.T) {
+	args := attachArgs(Endpoint{User: "u", Host: "box"}, "worker-1")
+	if last := args[len(args)-1]; last != `'tmux' 'attach' '-t' '=worker-1'` {
+		t.Errorf("remote command arg = %q, want an exact, quoted target", last)
 	}
 }
