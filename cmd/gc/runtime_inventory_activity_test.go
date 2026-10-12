@@ -249,7 +249,7 @@ func TestReadContents(t *testing.T) {
 
 // Kills a content read that outlives its pass (C7a-1): the cache carries a
 // pass's content read onto the observation and forgets it on the next
-// pass that does not read it.
+// pass that lists it without reading it.
 func TestObservationCarriesContent(t *testing.T) {
 	c := newObserveCache()
 	c.WantContent(map[string]bool{"s": true})
@@ -260,7 +260,7 @@ func TestObservationCarriesContent(t *testing.T) {
 	if obs, _ := snap.Observation("s", censusNow, observeMaxAge); obs.Content != contentIdle {
 		t.Fatalf("content %d, want idle", obs.Content)
 	}
-	snap = c.publish(censusNow.Add(time.Second), map[string]InventoryAttrs{"s": {}}, completeBackend("tmux", "s"))
+	snap = c.publish(censusNow.Add(time.Second), nil, completeBackend("tmux", "s")) // listed, not enriched
 	if obs, _ := snap.Observation("s", censusNow.Add(time.Second), observeMaxAge); obs.Content != contentUnread {
 		t.Fatalf("next pass: content %d, want unread", obs.Content)
 	}
