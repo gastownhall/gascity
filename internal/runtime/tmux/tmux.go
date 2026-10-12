@@ -3819,38 +3819,19 @@ func (t *Tmux) agentInputTarget(session string) (string, error) {
 	return first.target, nil
 }
 
-// agentPaneOption is the pane user option that marks a session's agent pane;
-// its value is the owning session's id ("$3"), so a gc agent pane joined into
-// another session, or an option set at window, session or global scope (which
-// format lookup would inherit onto every pane), never reads as that session's
-// agent. Every create path sets it on the session's only pane (markAgentPane),
-// then sets agentSessionOption on the session. A pane option belongs to the
-// pane, not its position: it survives respawn-pane, split-window -b,
-// swap-pane, rotate-window, break-pane and new-window -b, and a pane a human
-// adds does not inherit it.
-//
-// list-panes rows lead with agentPaneMarkerFormat, which expands to a word
-// rather than the raw option (the executor trims output, so an empty leading
-// field would vanish from the first row):
-//   - "agent": the session's marked agent pane;
-//   - "orphan": any other pane of a marked session;
-//   - "pane": a pane of a session created before the marker.
+// The agent-pane marker and its classifier are shared with the ssh provider
+// (see [runtime.TmuxAgentPaneOption]); these names keep this file readable.
 const (
-	agentPaneOption       = "@gc_agent"
-	agentSessionOption    = "@gc_agent_session"
-	agentPaneMarkerFormat = "#{?#{==:#{" + agentPaneOption + "},#{session_id}},agent,#{?#{" + agentSessionOption + "},orphan,pane}}"
-	agentPaneMarked       = "agent"
-	agentPaneOrphan       = "orphan"
+	agentPaneOption       = runtime.TmuxAgentPaneOption
+	agentSessionOption    = runtime.TmuxAgentSessionOption
+	agentPaneMarkerFormat = runtime.TmuxAgentPaneMarkerFormat
+	agentPaneMarked       = runtime.TmuxAgentPaneMarked
 )
 
-// errAgentPaneGone reports a marked session whose agent pane no longer exists
-// (a human killed it and the session lives on in their panes). Callers fail
-// closed: writes refuse, IsPaneDead reports dead, the kill plan is empty.
-var errAgentPaneGone = errors.New("agent pane is gone")
-
-// errAgentPaneAmbiguous reports more than one pane marked as a session's
-// agent pane. Callers fail closed rather than guess.
-var errAgentPaneAmbiguous = errors.New("agent pane is ambiguous")
+var (
+	errAgentPaneGone      = runtime.ErrTmuxAgentPaneGone
+	errAgentPaneAmbiguous = runtime.ErrTmuxAgentPaneAmbiguous
+)
 
 // agentPaneWarningOut receives agent-pane marking warnings (a var so tests
 // can capture it).
@@ -3920,36 +3901,8 @@ func (t *Tmux) readAgentPane(run func(...string) (string, error), target, format
 	return fields, nil
 }
 
-// pickAgentPaneRow returns the fields of the one "agent" row of list-panes
-// output whose rows are "<agent|orphan|pane>\t<fields>". With no agent row,
-// a marked session (any "orphan" row) has lost its agent pane
-// (errAgentPaneGone), and an unmarked one falls back to its first row. Two
-// agent rows are errAgentPaneAmbiguous. Empty output yields "", which each
-// reader reports as its own empty-answer error.
-func pickAgentPaneRow(out string) (string, error) {
-	rows := strings.Split(strings.TrimRight(out, "\n"), "\n")
-	agent, marked := -1, false
-	for i, row := range rows {
-		switch mark, _, _ := strings.Cut(row, "\t"); mark {
-		case agentPaneMarked:
-			if agent >= 0 {
-				return "", errAgentPaneAmbiguous
-			}
-			agent = i
-		case agentPaneOrphan:
-			marked = true
-		}
-	}
-	switch {
-	case agent >= 0:
-		_, fields, _ := strings.Cut(rows[agent], "\t")
-		return fields, nil
-	case marked:
-		return "", errAgentPaneGone
-	}
-	_, fields, _ := strings.Cut(rows[0], "\t")
-	return fields, nil
-}
+// pickAgentPaneRow is [runtime.PickTmuxAgentPaneRow].
+func pickAgentPaneRow(out string) (string, error) { return runtime.PickTmuxAgentPaneRow(out) }
 
 // agentPaneTarget returns a tmux target for a session's agent pane, fenced to
 // the session and window it was found in ("=name:@W.%P"): pane ids are

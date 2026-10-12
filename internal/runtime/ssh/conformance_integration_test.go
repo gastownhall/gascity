@@ -249,3 +249,96 @@ func TestSSHProviderProcessAliveAndNamesOnRealTmux(t *testing.T) {
 		t.Error("worker-10 is gone: kill-session -t 'worker-1*' glob-matched it")
 	}
 }
+
+// Through the production connection (fake ssh, real tmux): Relaunch and the
+// driving verbs reach the session's agent pane, not a human's split or window
+// that is active, and fail closed when a human killed the agent pane. Another
+// gc session's agent pane joined in front reads as foreign (mc-zndi7.103).
+func TestSSHProviderAgentPaneOnRealTmux(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	p := NewProvider(sshConformanceEndpoint(t))
+	p.postStartSettle = 0
+	ctx := context.Background()
+	dir := t.TempDir()
+	run := func(args ...string) string {
+		t.Helper()
+		out, code, err := p.tmux(ctx, "", args...)
+		if err != nil || code != 0 {
+			t.Fatalf("tmux %q: exit %d, %v", args, code, err)
+		}
+		return strings.TrimSpace(out)
+	}
+	record := func(path string) string {
+		b, _ := os.ReadFile(path)
+		return string(b)
+	}
+	waitFile := func(path, want string) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		ready := fmt.Sprintf("gc-ssh-ap-%d", time.Now().UnixNano())
+		// Ask the box to signal once the record holds want, instead of polling.
+		go func() {
+			_, _, _ = p.conn.Exec(ctx, "", []string{"sh", "-c", "until grep -qx " + shellQuote([]string{want}) + " " + shellQuote([]string{path}) + " 2>/dev/null; do sleep 0.05; done; tmux wait-for -S " + ready})
+		}()
+		if _, code, err := p.tmux(ctx, "", "wait-for", ready); err != nil || code != 0 {
+			t.Fatalf("waiting for %s to hold %q: exit %d, %v (have %q)", path, want, code, err, record(path))
+		}
+	}
+
+	const name = "ssh-agent-pane"
+	agentIn, humanIn := filepath.Join(dir, "agent-in"), filepath.Join(dir, "human-in")
+	if err := p.Start(ctx, name, runtime.Config{Command: "cat > " + agentIn, WorkDir: dir}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = p.Stop(name) })
+	agent := run("list-panes", "-t", "="+name+":", "-F", "#{pane_id}")
+	human := run("split-window", "-b", "-P", "-F", "#{pane_id}", "-t", agent, "cat > "+humanIn)
+	run("new-window", "-t", "="+name+":", "sleep 300")
+
+	_ = p.SendKeys(name, "Enter")
+	_ = p.Nudge(name, runtime.TextContent("to-the-agent"))
+	waitFile(agentIn, "to-the-agent")
+	if got := record(humanIn); got != "" {
+		t.Errorf("human pane received %q, want nothing", got)
+	}
+	pidBefore := run("display-message", "-p", "-t", agent, "#{pane_pid}")
+	if err := p.Relaunch(ctx, name, runtime.Config{Command: "cat > " + agentIn + "-2", WorkDir: dir}); err != nil {
+		t.Fatalf("Relaunch: %v", err)
+	}
+	if pid := run("display-message", "-p", "-t", agent, "#{pane_pid}"); pid == pidBefore {
+		t.Errorf("agent pane %s still runs pid %s, want a respawned agent", agent, pid)
+	}
+	if dead := run("display-message", "-p", "-t", human, "#{pane_dead}"); dead != "0" {
+		t.Errorf("human pane %s dead=%s after Relaunch, want untouched", human, dead)
+	}
+
+	// Another gc session's agent pane joined in front reads as foreign.
+	if err := p.Start(ctx, "ssh-agent-other", runtime.Config{Command: "sleep 300", WorkDir: dir}); err != nil {
+		t.Fatalf("Start other: %v", err)
+	}
+	t.Cleanup(func() { _ = p.Stop("ssh-agent-other") })
+	foreign := run("list-panes", "-t", "=ssh-agent-other:", "-F", "#{pane_id}")
+	run("new-session", "-d", "-s", "ssh-agent-keepalive", "sleep 300")
+	t.Cleanup(func() { _ = p.Stop("ssh-agent-keepalive") })
+	run("join-pane", "-b", "-s", foreign, "-t", agent)
+	if got, err := p.agentPane(ctx, name); err != nil || !strings.HasSuffix(got, "."+agent) {
+		t.Errorf("agentPane with a foreign agent pane joined = (%q, %v), want the session's own %s", got, err, agent)
+	}
+
+	// A human kills the agent pane: nothing reaches the panes left behind.
+	run("kill-pane", "-t", agent)
+	if err := p.Relaunch(ctx, name, runtime.Config{Command: "sleep 300", WorkDir: dir}); !errors.Is(err, runtime.ErrTmuxAgentPaneGone) {
+		t.Errorf("Relaunch with the agent pane killed = %v, want ErrTmuxAgentPaneGone", err)
+	}
+	_ = p.Nudge(name, runtime.TextContent("stray"))
+	_ = p.SendKeys(name, "Enter")
+	run("send-keys", "-t", human, "-l", "SENTINEL")
+	run("send-keys", "-t", human, "Enter")
+	waitFile(humanIn, "SENTINEL")
+	if got := strings.TrimSpace(record(humanIn)); got != "SENTINEL" {
+		t.Errorf("human pane received %q, want only the sentinel", got)
+	}
+}

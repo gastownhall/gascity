@@ -94,11 +94,77 @@ func (p *Provider) Exec(ctx context.Context, name string, argv []string) ([]byte
 	return p.conn.Exec(ctx, name, argv)
 }
 
-// carrier drives the named session's tmux over the connection. The in-box tmux
-// target is the session, exactly (one host, many named sessions; see
-// [paneTarget]).
-func (p *Provider) carrier(name string) runtime.Carrier {
-	return runtime.NewTmuxCarrier(p.conn, paneTarget(name))
+// carrier drives the session's agent pane over the connection, resolved once
+// for the operation (see [Provider.agentPane]): one host runs many named
+// sessions, and a session's active pane may be a human's split or window.
+func (p *Provider) carrier(ctx context.Context, name string) (runtime.Carrier, error) {
+	target, err := p.agentPane(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	return runtime.NewTmuxCarrier(p.conn, target), nil
+}
+
+// agentPane resolves a (checked) session's agent pane in one remote list-panes
+// call over all its windows, classified as the local tmux provider does
+// ([runtime.PickTmuxAgentPaneRow]): the pane carrying the session-scoped
+// marker Start sets, else (a session created before the marker) the first
+// pane of the first window. A marked session whose agent pane is gone, or
+// with two, fails closed. The pane is returned fenced to its session and
+// window ("=name:@W.%P"), so a stale id cannot name another pane.
+func (p *Provider) agentPane(ctx context.Context, name string) (string, error) {
+	out, code, err := p.tmux(ctx, name, "list-panes", "-s", "-t", paneTarget(name), "-F", runtime.TmuxAgentPaneMarkerFormat+"\t#{window_id}.#{pane_id}")
+	if err != nil {
+		return "", err
+	}
+	if code != 0 {
+		return "", fmt.Errorf("%w: ssh session %q", runtime.ErrSessionNotFound, name)
+	}
+	pane, err := runtime.PickTmuxAgentPaneRow(strings.TrimSpace(out))
+	if err != nil {
+		return "", fmt.Errorf("ssh session %q: %w", name, err)
+	}
+	pane = strings.TrimSpace(pane)
+	if !strings.HasPrefix(pane, "@") || !strings.Contains(pane, ".%") {
+		return "", fmt.Errorf("ssh session %q: no panes found (got %q)", name, out)
+	}
+	return paneTarget(name) + pane, nil
+}
+
+// markAgentPane marks pane (the id new-session printed) as the session's agent
+// pane, valued with the session's id, then flags the session as marked; the
+// flag follows a successful mark only, since a flagged session with no marked
+// pane fails closed. Best-effort and logged: an unmarked session falls back to
+// its first pane, and Relaunch adopts a lone unmarked pane.
+func (p *Provider) markAgentPane(ctx context.Context, name, pane string) {
+	pane = strings.TrimSpace(pane)
+	if !strings.HasPrefix(pane, "%") {
+		pane = paneTarget(name)
+	}
+	if _, code, err := p.tmux(ctx, name, "set-option", "-p", "-F", "-t", pane, runtime.TmuxAgentPaneOption, "#{session_id}"); err != nil || code != 0 {
+		log.Printf("ssh session %q: marking agent pane %s failed (exit %d): %v", name, pane, code, err)
+		return
+	}
+	if _, code, err := p.tmux(ctx, name, "set-option", "-t", paneTarget(name), runtime.TmuxAgentSessionOption, "1"); err != nil || code != 0 {
+		log.Printf("ssh session %q: flagging marked session failed (exit %d): %v", name, code, err)
+	}
+}
+
+// adoptAgentPane marks an unmarked session (one created before the marker, or
+// whose mark failed) when it has exactly one pane, which can only be the
+// agent's. Best-effort.
+func (p *Provider) adoptAgentPane(ctx context.Context, name string) {
+	out, code, err := p.tmux(ctx, name, "list-panes", "-s", "-t", paneTarget(name), "-F", runtime.TmuxAgentPaneMarkerFormat+"\t#{pane_id}")
+	if err != nil || code != 0 {
+		return
+	}
+	rows := strings.Split(strings.TrimSpace(out), "\n")
+	if len(rows) != 1 {
+		return
+	}
+	if mark, pane, _ := strings.Cut(rows[0], "\t"); mark == "pane" {
+		p.markAgentPane(ctx, name, pane)
+	}
 }
 
 // tmux runs a tmux subcommand over the connection and returns trimmed stdout,
@@ -145,7 +211,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		return fmt.Errorf("%w: ssh session %q", runtime.ErrSessionExists, name)
 	}
 
-	args := []string{"new-session", "-d", "-s", name}
+	args := []string{"new-session", "-d", "-P", "-F", "#{pane_id}", "-s", name}
 	if cfg.WorkDir != "" {
 		args = append(args, "-c", cfg.WorkDir)
 	}
@@ -211,7 +277,8 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		}
 	}
 
-	if _, code, err := p.launchSession(ctx, name, args, staged); err != nil {
+	pane, code, err := p.launchSession(ctx, name, args, staged)
+	if err != nil {
 		return fmt.Errorf("ssh start %q: %w", name, err)
 	} else if code != 0 {
 		// Tighten the sentinel under the precheck TOCTOU: if the session now
@@ -221,6 +288,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		}
 		return fmt.Errorf("ssh start %q: tmux new-session exited %d", name, code)
 	}
+	p.markAgentPane(ctx, name, pane)
 
 	// SessionSetup, SessionSetupScript, and SessionLive run on the box,
 	// best-effort, with the same cwd + env prelude.
@@ -282,7 +350,8 @@ func (p *Provider) runPostLaunchSetup(ctx context.Context, name string, cfg runt
 }
 
 // Relaunch re-launches the agent inside the existing remote tmux session without
-// re-provisioning: it respawns the session's pane (respawn-pane -k) with the
+// re-provisioning: it respawns the session's agent pane (respawn-pane -k on
+// [Provider.agentPane], never the active pane) with the
 // (possibly changed) command, then re-runs the post-launch setup tail and the
 // liveness recheck. The box (remote host) and its tmux session must already
 // exist — a missing session is a [runtime.ErrSessionNotFound], NOT a silent
@@ -318,7 +387,16 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 
 	prelude := setupPrelude(cfg, name, staged.envPath)
 
-	args := []string{"respawn-pane", "-k", "-t", paneTarget(name)}
+	// Respawn the agent pane, never the active one: a human who split the
+	// session or opened a window would otherwise have that pane killed and the
+	// old agent left running. A warm box from before the marker is marked first
+	// while it still has only the agent's pane.
+	p.adoptAgentPane(ctx, name)
+	target, err := p.agentPane(ctx, name)
+	if err != nil {
+		return fmt.Errorf("ssh relaunch %q: %w", name, err)
+	}
+	args := []string{"respawn-pane", "-k", "-t", target}
 	if cfg.WorkDir != "" {
 		args = append(args, "-c", cfg.WorkDir)
 	}
@@ -560,7 +638,10 @@ func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 	if checkName(name) != nil {
 		return nil // best-effort; never reaches tmux
 	}
-	_ = p.carrier(name).Nudge(context.Background(), name, content)
+	ctx := context.Background()
+	if c, err := p.carrier(ctx, name); err == nil {
+		_ = c.Nudge(ctx, name, content)
+	}
 	return nil
 }
 
@@ -569,7 +650,10 @@ func (p *Provider) SendKeys(name string, keys ...string) error {
 	if checkName(name) != nil {
 		return nil // best-effort; never reaches tmux
 	}
-	_ = p.carrier(name).SendKeys(context.Background(), name, keys...)
+	ctx := context.Background()
+	if c, err := p.carrier(ctx, name); err == nil {
+		_ = c.SendKeys(ctx, name, keys...)
+	}
 	return nil
 }
 
@@ -578,7 +662,12 @@ func (p *Provider) Peek(name string, lines int) (string, error) {
 	if checkName(name) != nil {
 		return "", nil
 	}
-	out, _ := p.carrier(name).Peek(context.Background(), name, lines)
+	ctx := context.Background()
+	c, err := p.carrier(ctx, name)
+	if err != nil {
+		return "", nil
+	}
+	out, _ := c.Peek(ctx, name, lines)
 	return out, nil
 }
 
@@ -587,7 +676,10 @@ func (p *Provider) Interrupt(name string) error {
 	if checkName(name) != nil {
 		return nil // best-effort; never reaches tmux
 	}
-	_ = p.carrier(name).Interrupt(context.Background(), name)
+	ctx := context.Background()
+	if c, err := p.carrier(ctx, name); err == nil {
+		_ = c.Interrupt(ctx, name)
+	}
 	return nil
 }
 
@@ -596,7 +688,10 @@ func (p *Provider) ClearScrollback(name string) error {
 	if checkName(name) != nil {
 		return nil // best-effort; never reaches tmux
 	}
-	_ = p.carrier(name).ClearScrollback(context.Background(), name)
+	ctx := context.Background()
+	if c, err := p.carrier(ctx, name); err == nil {
+		_ = c.ClearScrollback(ctx, name)
+	}
 	return nil
 }
 

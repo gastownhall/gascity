@@ -82,7 +82,7 @@ func TestProvider_StartLaunchesTmuxSession(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 	got := firstCall(f, isTmux("new-session"))
-	want := []string{"tmux", "new-session", "-d", "-s", "s", "-c", "/w", "-e", "GC_AGENT=1", "-e", "GC_RIG=2", "agent --serve"}
+	want := []string{"tmux", "new-session", "-d", "-P", "-F", "#{pane_id}", "-s", "s", "-c", "/w", "-e", "GC_AGENT=1", "-e", "GC_RIG=2", "agent --serve"}
 	if !slices.Equal(got, want) {
 		t.Errorf("new-session argv =\n  %v\nwant\n  %v", got, want)
 	}
@@ -283,7 +283,7 @@ func TestProvider_RelaunchRespawnsAgentInWarmSession(t *testing.T) {
 	}
 	got := firstCall(f, isTmux("respawn-pane"))
 	// respawn-pane has no -e, so env is NOT re-applied (provision-half).
-	want := []string{"tmux", "respawn-pane", "-k", "-t", "=s:", "-c", "/w", "agent --resumed"}
+	want := []string{"tmux", "respawn-pane", "-k", "-t", "=s:@1.%1", "-c", "/w", "agent --resumed"}
 	if !slices.Equal(got, want) {
 		t.Errorf("respawn-pane argv =\n  %v\nwant\n  %v", got, want)
 	}
@@ -366,18 +366,20 @@ func TestProvider_IsRunning(t *testing.T) {
 }
 
 func TestProvider_NudgeDrivesNamedTmuxTarget(t *testing.T) {
-	// The carrier target is the session, exactly (one host, many sessions).
+	// The carrier targets the session's agent pane, resolved once for the
+	// operation and fenced to the session (one host, many sessions).
 	f := &fakeRunner{}
 	p := providerWith(f)
 	if err := p.Nudge("sess-7", runtime.TextContent("hi")); err != nil {
 		t.Fatalf("Nudge: %v", err)
 	}
 	want := [][]string{
-		{"tmux", "send-keys", "-t", "=sess-7:", "-l", "hi"},
-		{"tmux", "send-keys", "-t", "=sess-7:", "Enter"},
+		{"tmux", "list-panes", "-s", "-t", "=sess-7:", "-F", runtime.TmuxAgentPaneMarkerFormat + "\t#{window_id}.#{pane_id}"},
+		{"tmux", "send-keys", "-t", "=sess-7:@1.%1", "-l", "hi"},
+		{"tmux", "send-keys", "-t", "=sess-7:@1.%1", "Enter"},
 	}
-	if len(f.calls) != 2 {
-		t.Fatalf("calls = %v, want 2", f.calls)
+	if len(f.calls) != 3 {
+		t.Fatalf("calls = %v, want 3", f.calls)
 	}
 	for i := range want {
 		if !slices.Equal(f.calls[i], want[i]) {
@@ -461,7 +463,7 @@ func TestProvider_StartQuotesNameWorkdirEnvCommand(t *testing.T) {
 	}
 	got := firstCall(f, isTmux("new-session"))
 	want := []string{
-		"tmux", "new-session", "-d", "-s", "sess-one",
+		"tmux", "new-session", "-d", "-P", "-F", "#{pane_id}", "-s", "sess-one",
 		"-c", "/path with space",
 		"-e", "GC_ALIAS=hello world",
 		"-e", `GC_TEMPLATE=a'b"c`,
@@ -492,7 +494,7 @@ func TestProvider_StartQuotesStagedSecretEnv(t *testing.T) {
 	}
 	script := stdinFor(f, isStagingScript)
 	wantLine := tmuxCommandLine([]string{
-		"new-session", "-d", "-s", "sess-one",
+		"new-session", "-d", "-P", "-F", "#{pane_id}", "-s", "sess-one",
 		"-c", "/path with space",
 		"-e", "MSG=hello world",
 		"-e", "Q=a'b\"c$d#e;f\\g\nh",
@@ -925,7 +927,7 @@ func TestProvider_StartSendsInitialNudgeWhenAlive(t *testing.T) {
 	if len(nudges) != 2 {
 		t.Fatalf("expected 2 send-keys (type + Enter) for the initial nudge, got %v", nudges)
 	}
-	if !slices.Equal(nudges[0], []string{"tmux", "send-keys", "-t", "=s:", "-l", "hello"}) {
+	if !slices.Equal(nudges[0], []string{"tmux", "send-keys", "-t", "=s:@1.%1", "-l", "hello"}) {
 		t.Errorf("initial nudge type = %v", nudges[0])
 	}
 }
@@ -1026,7 +1028,7 @@ func TestProvider_SetMetaInertValueStaysOnArgv(t *testing.T) {
 // "=name:" for target-window and target-pane ones (tmux still prefix-matches
 // "=name" there).
 func TestProvider_TargetsSessionsExactly(t *testing.T) {
-	const session, pane = "=worker-1", "=worker-1:"
+	const session, pane, agent = "=worker-1", "=worker-1:", "=worker-1:@1.%1"
 	cases := []struct {
 		name string
 		run  func(*Provider)
@@ -1040,12 +1042,12 @@ func TestProvider_TargetsSessionsExactly(t *testing.T) {
 		{"SetMeta", func(p *Provider) { _ = p.SetMeta("worker-1", "GC_SESSION_ID", "gc-1") }, "set-environment", session},
 		{"GetMeta", func(p *Provider) { _, _ = p.GetMeta("worker-1", "GC_K") }, "show-environment", session},
 		{"RemoveMeta", func(p *Provider) { _ = p.RemoveMeta("worker-1", "GC_K") }, "set-environment", session},
-		{"Relaunch", func(p *Provider) { _ = p.Relaunch(context.Background(), "worker-1", runtime.Config{Command: "agent"}) }, "respawn-pane", pane},
-		{"Nudge", func(p *Provider) { _ = p.Nudge("worker-1", runtime.TextContent("hi")) }, "send-keys", pane},
-		{"SendKeys", func(p *Provider) { _ = p.SendKeys("worker-1", "Enter") }, "send-keys", pane},
-		{"Interrupt", func(p *Provider) { _ = p.Interrupt("worker-1") }, "send-keys", pane},
-		{"Peek", func(p *Provider) { _, _ = p.Peek("worker-1", 5) }, "capture-pane", pane},
-		{"ClearScrollback", func(p *Provider) { _ = p.ClearScrollback("worker-1") }, "clear-history", pane},
+		{"Relaunch", func(p *Provider) { _ = p.Relaunch(context.Background(), "worker-1", runtime.Config{Command: "agent"}) }, "respawn-pane", agent},
+		{"Nudge", func(p *Provider) { _ = p.Nudge("worker-1", runtime.TextContent("hi")) }, "send-keys", agent},
+		{"SendKeys", func(p *Provider) { _ = p.SendKeys("worker-1", "Enter") }, "send-keys", agent},
+		{"Interrupt", func(p *Provider) { _ = p.Interrupt("worker-1") }, "send-keys", agent},
+		{"Peek", func(p *Provider) { _, _ = p.Peek("worker-1", 5) }, "capture-pane", agent},
+		{"ClearScrollback", func(p *Provider) { _ = p.ClearScrollback("worker-1") }, "clear-history", agent},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1144,5 +1146,129 @@ func TestProvider_ProcessAliveLogsDegradedOncePerEpisode(t *testing.T) {
 	_ = p.ProcessAlive("s", []string{"claude"})
 	if n := strings.Count(logged.String(), "process snapshot degraded"); n != 2 {
 		t.Fatalf("degraded logs after a new episode = %d, want 2", n)
+	}
+}
+
+// Start marks the pane new-session printed as the session's agent pane,
+// valued with the session's id, and only then flags the session as marked.
+func TestProvider_StartMarksAgentPane(t *testing.T) {
+	f := &fakeRunner{respond: func(argv []string) ([]byte, int, error) {
+		switch {
+		case isTmux("has-session")(argv):
+			return nil, 1, nil
+		case isTmux("new-session")(argv):
+			return []byte("%7\n"), 0, nil
+		}
+		return nil, 0, nil
+	}}
+	if err := providerWith(f).Start(context.Background(), "s", runtime.Config{Command: "agent"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	mark := []string{"tmux", "set-option", "-p", "-F", "-t", "%7", runtime.TmuxAgentPaneOption, "#{session_id}"}
+	flag := []string{"tmux", "set-option", "-t", "=s:", runtime.TmuxAgentSessionOption, "1"}
+	created := slices.IndexFunc(f.calls, isTmux("new-session"))
+	marked := slices.IndexFunc(f.calls, func(c []string) bool { return slices.Equal(c, mark) })
+	flagged := slices.IndexFunc(f.calls, func(c []string) bool { return slices.Equal(c, flag) })
+	if created < 0 || marked <= created || flagged <= marked {
+		t.Fatalf("calls = %q, want new-session, then %q, then %q", f.calls, mark, flag)
+	}
+}
+
+// Relaunch and the driving verbs reach the session's agent pane, never its
+// active pane, and fail closed when the agent pane cannot be named: a human
+// killed it (the session lives on in their panes), or two panes claim it.
+func TestProvider_AgentPaneResolution(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		panes   string
+		want    string // respawn-pane / send-keys target; "" when nothing may be sent
+		wantErr error
+	}{
+		{"marked pane behind a human split", "orphan\t@1.%3\nagent\t@2.%5\norphan\t@2.%6", "=s:@2.%5", nil},
+		{"unmarked session takes the first pane", "pane\t@1.%3\npane\t@1.%4", "=s:@1.%3", nil},
+		{"agent pane killed", "orphan\t@1.%3\norphan\t@1.%4", "", runtime.ErrTmuxAgentPaneGone},
+		{"two agent panes", "agent\t@1.%3\nagent\t@2.%4", "", runtime.ErrTmuxAgentPaneAmbiguous},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeRunner{panes: tc.panes}
+			p := providerWith(f)
+			err := p.Relaunch(context.Background(), "s", runtime.Config{Command: "agent"})
+			_ = p.Nudge("s", runtime.TextContent("hi"))
+			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+				t.Errorf("Relaunch = %v, want %v", err, tc.wantErr)
+			}
+			if tc.wantErr == nil && err != nil {
+				t.Errorf("Relaunch = %v, want nil", err)
+			}
+			for _, c := range f.calls {
+				if len(c) < 2 || c[0] != "tmux" || (c[1] != "respawn-pane" && c[1] != "send-keys") {
+					continue
+				}
+				if i := slices.Index(c, "-t"); tc.want == "" || c[i+1] != tc.want {
+					t.Errorf("%s -t %q, want %q; argv=%q", c[1], c[i+1], tc.want, c)
+				}
+			}
+		})
+	}
+}
+
+// Relaunch marks a warm box from before the marker while it has only the
+// agent's pane, and leaves any other session alone.
+func TestProvider_RelaunchAdoptsLoneUnmarkedPane(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		panes    string
+		wantMark bool
+	}{
+		{"lone unmarked pane", "pane\t@1.%3", true},
+		{"two unmarked panes", "pane\t@1.%3\npane\t@1.%4", false},
+		{"already marked", "agent\t@1.%3", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeRunner{panes: tc.panes}
+			if err := providerWith(f).Relaunch(context.Background(), "s", runtime.Config{Command: "agent"}); err != nil {
+				t.Fatalf("Relaunch: %v", err)
+			}
+			marked := slices.ContainsFunc(f.calls, func(c []string) bool {
+				return slices.Equal(c, []string{"tmux", "set-option", "-p", "-F", "-t", "%3", runtime.TmuxAgentPaneOption, "#{session_id}"})
+			})
+			if marked != tc.wantMark {
+				t.Errorf("marked = %v, want %v; calls=%q", marked, tc.wantMark, f.calls)
+			}
+		})
+	}
+}
+
+// An agent-pane lookup that names no pane fails closed: a missing session is
+// ErrSessionNotFound, and output with no pane row never falls back to the
+// session's active pane ("=s:").
+func TestProvider_AgentPaneLookupFailsClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		out     string
+		code    int
+		wantErr error
+	}{
+		{"session missing", "", 1, runtime.ErrSessionNotFound},
+		{"no pane rows", "", 0, nil},
+		{"malformed row", "agent\tgarbage", 0, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeRunner{rawPanes: true, respond: func(argv []string) ([]byte, int, error) {
+				if isAgentPaneLookup(argv) {
+					return []byte(tc.out), tc.code, nil
+				}
+				return nil, 0, nil
+			}}
+			p := providerWith(f)
+			_, err := p.agentPane(context.Background(), "s")
+			if err == nil || (tc.wantErr != nil && !errors.Is(err, tc.wantErr)) {
+				t.Errorf("agentPane = %v, want an error (%v)", err, tc.wantErr)
+			}
+			_ = p.Nudge("s", runtime.TextContent("hi"))
+			if c := firstCall(f, isTmux("send-keys")); c != nil {
+				t.Errorf("Nudge sent %q after a failed lookup", c)
+			}
+		})
 	}
 }
