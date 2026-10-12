@@ -58,8 +58,13 @@ func stopNeeds(_ *World, it intent) needs {
 
 // stopLegs are the fence legs the stop's origin keeps (v5 F1, F2).
 func stopLegs(it intent) fenceLegs {
-	if it.Reason == decideDormantStop || it.Kind == intentDriftRestart || it.Kind == intentDriftRelaunch { // A14's restart: the Full fence (D3)
+	switch {
+	case it.Reason == decideDormantStop || it.Kind == intentDriftRestart || it.Kind == intentDriftRelaunch: // A14's restart: the Full fence (D3)
 		return legsFull
+	case it.Reason == decideIdleTimeout: // a pending interaction or a claim since the pass defers it (SESS-574/576)
+		return legToken | legAttach | legPending | legWork
+	case it.Reason == decideIdleExhausted: // stopped over its work (SESS-575)
+		return legToken | legAttach | legPending
 	}
 	return legToken | legAttach
 }
@@ -78,6 +83,7 @@ type stopPlan struct {
 	foreign bool // a fresh Foreign verdict: finalize without a stop
 	corpse  *corpseObject
 	now     time.Time
+	idle    bool // an idle-timeout stop clears the pane's scrollback after it (SESS-576)
 }
 
 // corpseObject is the corpse a confirmed stop removes: its leaf and the
@@ -103,7 +109,7 @@ func stopDecide(v txView) txStep {
 		return txStep{Refuse: causeRedecided}
 	}
 	name := strings.TrimSpace(v.Row.SessionName)
-	plan := stopPlan{name: name, names: processNamesFor(v.World, v.Row), now: v.Now}
+	plan := stopPlan{name: name, names: processNamesFor(v.World, v.Row), now: v.Now, idle: v.It.Reason == decideIdleTimeout || v.It.Reason == decideIdleExhausted}
 	switch rt := v.RT; rt.Class {
 	case rtAbsent:
 		return txStep{Pass: plan}
@@ -139,6 +145,9 @@ func stopCall(ctx context.Context, c txCaps, p stopPlan) (stopped, error) {
 		return stopped{Confirmed: true}, nil
 	case p.verdict.Proceed:
 		v, ok := stopFenced(ctx, sp, p.verdict, p.names, now)
+		if ok && v.Proceed && p.idle {
+			_ = sp.ClearScrollback(p.name) // legacy's, best effort
+		}
 		return stopped{Confirmed: ok, Performed: v.Proceed, Reason: v.Reason}, nil
 	}
 	if p.name == "" || !confirmStopped(ctx, sp, p.names, p.name, p.now) {
@@ -316,6 +325,11 @@ func stopFinalizeStep(v txView, work finalizeWork, _ error) txStep {
 // stopFacts are legacy's events for a finalized stop (SESS-033/034,
 // DRAIN-051/054).
 func stopFacts(v txView, out stopped, kept *beads.Bead) effectFacts {
+	if v.It.Reason == decideIdleTimeout || v.It.Reason == decideIdleExhausted { // legacy's idle kill: session.idle_killed and its metric (SESS-576)
+		res, _ := v.World.Templates.lookup(v.Row)
+		name := res.TP.DisplayName()
+		return effectFacts{IdleKilled: name, Events: []events.Event{{Type: events.SessionIdleKilled, Actor: "gc", Subject: name}}}
+	}
 	template := cmp.Or(normalizedSessionTemplateInfo(v.Row, v.World.Env.Cfg), v.Row.Template)
 	f := effectFacts{}
 	if out.Performed {

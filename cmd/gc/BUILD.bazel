@@ -433,6 +433,7 @@ go_library(
         "reconcile_arms_drift.go",
         "reconcile_arms_heals.go",
         "reconcile_arms_identity.go",
+        "reconcile_arms_idle.go",
         "reconcile_arms_metadata.go",
         "reconcile_arms_start.go",
         "reconcile_arms_stop.go",

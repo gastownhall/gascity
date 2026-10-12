@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"reflect"
@@ -405,6 +406,7 @@ func (l *runtimeInventoryLane) publish(ctx context.Context, listing inventoryLis
 	phase = l.clock.Now()
 	report.activityReads = readActivities(enrichCtx, attrs, hosts, concurrency)
 	report.activityRead = l.clock.Now().Sub(phase)
+	readContents(enrichCtx, attrs, hosts, l.cache.contentWanted(), concurrency)
 
 	pass := InventoryPass{
 		Epoch:       l.cache.epoch,
@@ -989,6 +991,71 @@ func readActivities(ctx context.Context, attrs map[string]InventoryAttrs, hosts 
 		attrs[got.name] = a
 	}
 	return reads
+}
+
+// readContents reads, within ctx (the pass's enrichment bound), the pane
+// content of each enriched name the planner wants (WantContent: the rows
+// on A15's content clock) on a leaf that can snapshot it, at most
+// concurrency at a time; a read past ctx stays unread.
+func readContents(ctx context.Context, attrs map[string]InventoryAttrs, hosts map[string]runtime.Provider, want map[string]bool, concurrency int) {
+	type answer struct {
+		name string
+		got  contentState
+	}
+	var names []string
+	for name := range want {
+		_, enriched := attrs[name]
+		if _, ok := hosts[name].(runtime.IdleSnapshotProvider); ok && enriched {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	answers := make(chan answer, len(names))
+	sem := make(chan struct{}, max(concurrency, 1))
+	reads := 0
+	for _, name := range names {
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+		}
+		if ctx.Err() != nil {
+			break
+		}
+		reads++
+		go func(snap runtime.IdleSnapshotProvider) {
+			defer func() { <-sem }()
+			done := make(chan contentState, 1)
+			go func() {
+				got := contentError
+				defer func() {
+					_ = recover() // a panicking read is an erring one
+					done <- got
+				}()
+				idle, err := snap.SnapshotIdle(name)
+				switch {
+				case errors.Is(err, runtime.ErrIdleIndeterminate):
+					got = contentIndeterminate
+				case err != nil:
+				case idle:
+					got = contentIdle
+				default:
+					got = contentBusy
+				}
+			}()
+			select {
+			case got := <-done:
+				answers <- answer{name, got}
+			case <-ctx.Done():
+				answers <- answer{name, contentUnread}
+			}
+		}(hosts[name].(runtime.IdleSnapshotProvider))
+	}
+	for range reads {
+		got := <-answers
+		a := attrs[got.name]
+		a.Content = got.got
+		attrs[got.name] = a
+	}
 }
 
 // probedIncarnation reports whether a probe answered for incarnation: the

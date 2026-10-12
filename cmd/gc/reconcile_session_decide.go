@@ -217,6 +217,7 @@ var rowArms = []rowArm{
 	{"A11", armAck},
 	{"A12", armZombie},
 	{"A14", armConfigDrift},
+	{"A15", armIdleTimeout},
 	{"A16", armExecutionStalled},
 	{"A17", armHeartbeatRespawn},
 	{"A18", armStart},

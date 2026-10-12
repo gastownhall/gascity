@@ -98,6 +98,11 @@ func (p *planner) tracePass(e gatherEnv, now time.Time) passResult {
 		return passResult{}
 	}
 	rec.Alerts = a.Alerts
+	var wantContent map[string]bool
+	w.IdleDefers, w.ContentIdle, wantContent = p.idle.update(&w, &a)
+	if p.observations != nil {
+		p.observations().WantContent(wantContent)
+	}
 
 	running := make(map[rowKey]bool)
 	for _, f := range w.InFlight.Entries {

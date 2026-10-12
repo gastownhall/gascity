@@ -938,6 +938,10 @@ func TestApplyFactsConsumesEveryField(t *testing.T) {
 		stops = append(stops, name+"/"+identity+"/"+reason)
 	}
 	t.Cleanup(func() { recordAgentStop = savedS })
+	var idleKills []string
+	savedI := recordAgentIdleKill
+	recordAgentIdleKill = func(_ context.Context, agent string) { idleKills = append(idleKills, agent) }
+	t.Cleanup(func() { recordAgentIdleKill = savedI })
 	f := effectFacts{
 		Events:      []events.Event{{Type: "session.test"}},
 		Transition:  &drainTransition{Name: "s", Reason: "idle", Transition: "cancel"},
@@ -947,6 +951,7 @@ func TestApplyFactsConsumesEveryField(t *testing.T) {
 		AliasOwed:   &rowKey{Leg: rowLeg, ID: "gc-a"},
 		Stopped:     &agentStop{Name: "s1", Identity: "worker"},
 		Classified:  &classifiedRuntime{Key: rowKey{ID: "gc-1"}, Token: "tok", Crash: &events.Event{Type: events.SessionCrashed}, Recycle: true},
+		IdleKilled:  "worker",
 	}
 	p.applyFacts(f, plannerT0)
 	consumed := map[string]bool{
@@ -958,6 +963,7 @@ func TestApplyFactsConsumesEveryField(t *testing.T) {
 		"AliasOwed":   p.aliasOwed[rowKey{Leg: rowLeg, ID: "gc-a"}],
 		"Stopped":     slices.Equal(stops, []string{"s1/worker/drain-ack"}),
 		"Classified":  p.classified[rowKey{ID: "gc-1"}].Token == "tok" && p.classified[rowKey{ID: "gc-1"}].Crash != nil && p.classified[rowKey{ID: "gc-1"}].Recycle,
+		"IdleKilled":  slices.Equal(idleKills, []string{"worker"}),
 	}
 	ft := reflect.TypeOf(f)
 	for i := range ft.NumField() {

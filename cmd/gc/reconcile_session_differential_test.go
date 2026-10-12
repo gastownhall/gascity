@@ -214,11 +214,15 @@ var parityFindings = map[string]parityEntry{
 	},
 
 	"drift-deferral-skips": {"C7b1 (A14 runs after A6's heals and the allocation's writes, CONTRACT v5 §4)", "legacy's config-drift deferral (SESS-553/558/559) continues past the row, so that tick it skips the row's later writes, its current-bead stamp (SESS-613) and sleep-policy keys among them; v2's A6 and the allocation write them before A14 decides", []string{"currently_processing_bead_id"}},
-	"recycle-by-object":    {"CONTRACT v5 S5, F2 (C5a3)", "v2's start recycle removes the row's own dead runtime by exact session object (KillZombieObject, KillCorpseObject) after re-checking it; legacy's start recycle stops it by name, and a death that accrues legacy leaves listed until its next start. §12.2 does not list it", nil},
-	"mislabelled-close":    {"CONTRACT v5 AL1, A1", "legacy closes a row with no template and no session name as orphaned; v2's A1 leaves it open as None, which §12.2 does not list", []string{"status", "state", "close_reason", "closed_at"}},
-	"idle-respawn-drain":   {"C6d (D2's idle-respawn row: its begin and the claim-revalidating signal, signal-fresh), BEHAVIORS SESS-614", "legacy drains a pool row awake only for ready, unclaimed assigned work, idle past its sleep time, and retires its slot so a fresh seat takes the work; v2's A20 begins a plain idle drain there (its stop request), and registers no idle-respawn begin or signal yet", []string{"sleep_intent", "drain_at", "state", "state_reason", "status", "close_reason", "closed_at", "synced_at", session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey}},
-	"drain-stop-lag":       {"C6b1, C6b2 (A20, A4; D1-D4; owner to add a §12.2 row)", "legacy signals a drain through the runtime's drain env the tick after its begin, then stops and finalizes it; v2's begin (A20), its signal a patrol later (C6b1) and the stop verb (A4) each take a pass, so the stop, its events and the finalize land a pass or more after legacy's, with legacy's outcome", []string{session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey, "drain_at", "sleep_intent", "slept_at", "state_reason"}},
-	"idle-sleep-lag":       {"C6b1, C6b2 (A20, A4 with D4's idle builder; owner to add a §12.2 row)", "legacy idle-sleeps a row in the tick its probe answers idle (begin, signal, stop and SleepPatch(idle) with the latch); v2's begin (A20), signal (C6b1) and stop verb (A4, finalizing with SleepPatch(idle)) reach the same sleep a pass or more later. An always-named session's idle sleep waits for C6a2b's activity fact (#7586), so v2 leaves its runtime up", append([]string{"sleep_intent", "sleep_reason", "slept_at", "drain_at", "detached_at", session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey}, parityStartKeys...)},
+	"idle-rewake-lag": {
+		"BEHAVIORS SESS-576/577 (A15 idle-timeout; C7a-1, §12.2 #60, v5.9s)", "legacy re-wakes an idle-killed row its demand still wants in the same tick (the kill falls through to the wake pass); v2's stop verb finalizes it asleep (SleepPatch(idle-timeout)) and A18 starts it the next pass, so the restart lands a pass later",
+		append([]string{"sleep_reason", "slept_at"}, parityStartKeys...),
+	},
+	"recycle-by-object":  {"CONTRACT v5 S5, F2 (C5a3)", "v2's start recycle removes the row's own dead runtime by exact session object (KillZombieObject, KillCorpseObject) after re-checking it; legacy's start recycle stops it by name, and a death that accrues legacy leaves listed until its next start. §12.2 does not list it", nil},
+	"mislabelled-close":  {"CONTRACT v5 AL1, A1", "legacy closes a row with no template and no session name as orphaned; v2's A1 leaves it open as None, which §12.2 does not list", []string{"status", "state", "close_reason", "closed_at"}},
+	"idle-respawn-drain": {"C6d (D2's idle-respawn row: its begin and the claim-revalidating signal, signal-fresh), BEHAVIORS SESS-614", "legacy drains a pool row awake only for ready, unclaimed assigned work, idle past its sleep time, and retires its slot so a fresh seat takes the work; v2's A20 begins a plain idle drain there (its stop request), and registers no idle-respawn begin or signal yet", []string{"sleep_intent", "drain_at", "state", "state_reason", "status", "close_reason", "closed_at", "synced_at", session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey}},
+	"drain-stop-lag":     {"C6b1, C6b2 (A20, A4; D1-D4; owner to add a §12.2 row)", "legacy signals a drain through the runtime's drain env the tick after its begin, then stops and finalizes it; v2's begin (A20), its signal a patrol later (C6b1) and the stop verb (A4) each take a pass, so the stop, its events and the finalize land a pass or more after legacy's, with legacy's outcome", []string{session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey, "drain_at", "sleep_intent", "slept_at", "state_reason"}},
+	"idle-sleep-lag":     {"C6b1, C6b2 (A20, A4 with D4's idle builder; owner to add a §12.2 row)", "legacy idle-sleeps a row in the tick its probe answers idle (begin, signal, stop and SleepPatch(idle) with the latch); v2's begin (A20), signal (C6b1) and stop verb (A4, finalizing with SleepPatch(idle)) reach the same sleep a pass or more later. An always-named session's idle sleep waits for C6a2b's activity fact (#7586), so v2 leaves its runtime up", append([]string{"sleep_intent", "sleep_reason", "slept_at", "drain_at", "detached_at", session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey}, parityStartKeys...)},
 
 	"floor-ack-row-void": {
 		"PAR-FLOORACK (A11, DRAIN-010; E3's row ack is v2's alone, CONTRACT v5 D5)", "both cancel a floor member's own ack and keep the seat warm; legacy clears its runtime env ack and never reads or clears the row ack E3 writes in a v2 city, while v2 voids that row ack (stopAckVoidPatch)",
@@ -514,6 +518,17 @@ type legacyWorld struct {
 	dops     drainOps
 	stops    asyncStartTracker // the drain-ack's async stops, as the controller's asyncStops
 	pokes    *atomic.Int64     // the async stops' completion pokes, when the timeline counts them
+	// it and adt are the controller's idle and assigned-work defer
+	// trackers (buildIdleTracker, buildAssignedWorkDeferTracker), kept across
+	// ticks and rebuilt on a reload, as city_runtime does.
+	it  idleTracker
+	adt assignedWorkDeferTracker
+}
+
+// trackers builds the controller's lifecycle trackers for cfg.
+func (w *legacyWorld) trackers(cfg *config.City) {
+	w.it = buildIdleTracker(cfg, cfg.Workspace.Name, w.cityPath, w.sp)
+	w.adt = buildAssignedWorkDeferTracker(cfg, cfg.Workspace.Name, w.sp)
 }
 
 func newLegacyWorld(t testing.TB, f parityFixture, cityPath string, rows []beads.Bead) *legacyWorld {
@@ -526,6 +541,7 @@ func newLegacyWorld(t testing.TB, f parityFixture, cityPath string, rows []beads
 		clk: clk, rec: &memRecorder{}, dt: newDrainTracker(),
 	}
 	w.dops = newDrainOps(w.sp)
+	w.trackers(w.cfg)
 	for id, reason := range f.Drains {
 		// The drain's basis is the seeded row, as beginSessionDrainInfo records it.
 		var basis session.Decided
@@ -638,10 +654,10 @@ func (w *legacyWorld) tick(t *testing.T, reconcile bool) {
 	awake, awakeRefs, awakeStores := filterAssignedWorkBeadsForSessionWakeWithStores(cfg, w.cityPath, w.store, open, assigned, refs, stores)
 	reconcileSessionBeadsAtPathWithNamedDemand(context.Background(), w.cityPath, updated.OpenForReconcile(), updated, result.State, cfgNames, cfg, w.sp, w.store, sw,
 		w.dops, awake, w.rigs, readyWaits, w.dt, nil, poolDesired, result.NamedSessionDemand, result.NamedSessionRoutedDemand,
-		result.snapshotQueryPartial(), map[string]bool{}, cfg.Workspace.Name, nil, w.clk, w.rec, cfg.Session.StartupTimeoutDuration(), cfg.Daemon.DriftDrainTimeoutDuration(),
+		result.snapshotQueryPartial(), map[string]bool{}, cfg.Workspace.Name, w.it, w.clk, w.rec, cfg.Session.StartupTimeoutDuration(), cfg.Daemon.DriftDrainTimeoutDuration(),
 		io.Discard, io.Discard,
 		withReadyAssignedFlags(readyAssignedFlagsForBeads(result.ReadyAssigned, awake, awakeRefs)), withAssignedWorkStores(awakeStores),
-		withAsyncDrainAckStopTracker(&w.stops),
+		withAsyncDrainAckStopTracker(&w.stops), withAssignedWorkDeferTracker(w.adt),
 		withStartStabilityWaiter(immediateStartStabilityWaiter), withSessionStaleKeyDetectionWaiter(immediateSessionStaleKeyDetectionWaiter))
 	for _, gate := range gates {
 		close(gate)

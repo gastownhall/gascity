@@ -260,6 +260,9 @@ func (p *simProvider) Start(_ context.Context, name string, cfg runtime.Config) 
 	}
 	if s.Created = err == nil; s.Created {
 		p.put(name, s.ID, cfg.Env["GC_RUNTIME_EPOCH"], s.Token)
+		if _, tracked := p.Activity[name]; tracked {
+			p.SetActivity(name, p.now()) // a new session's activity is its creation, as tmux's window_activity
+		}
 	}
 	p.starts = append(p.starts, s)
 	return err

@@ -153,6 +153,9 @@ type planner struct {
 	// not yet synced (A7's runtime-alias sync): set by the write's fact,
 	// cleared when the sync settles.
 	aliasOwed map[rowKey]bool
+	// idle is A15's memory (idleState), lost on restart as legacy's
+	// trackers are.
+	idle idleMemory
 	// idleProbes are the idle begins submitted to prove an agent idle, by
 	// row, which paceIdleProbes holds a patrol apart.
 	idleProbes map[rowKey]idleProbe
@@ -440,6 +443,9 @@ func (p *planner) applyFacts(f effectFacts, at time.Time) {
 	if f.Quarantined != "" {
 		recordAgentQuarantine(context.Background(), f.Quarantined)
 	}
+	if f.IdleKilled != "" {
+		recordAgentIdleKill(context.Background(), f.IdleKilled)
+	}
 	if f.AliasOwed != nil {
 		p.aliasOwed[*f.AliasOwed] = true
 	}
@@ -470,11 +476,13 @@ func (p *planner) applyFacts(f effectFacts, at time.Time) {
 	}
 }
 
-// recordDrainTransition, recordAgentQuarantine and recordAgentStop are
-// legacy's drain, quarantine and stop telemetry; a test reads them.
+// recordDrainTransition, recordAgentQuarantine, recordAgentIdleKill and
+// recordAgentStop are legacy's drain, quarantine, idle-kill and stop
+// telemetry; a test reads them.
 var (
 	recordDrainTransition = telemetry.RecordDrainTransition
 	recordAgentQuarantine = telemetry.RecordAgentQuarantine
+	recordAgentIdleKill   = telemetry.RecordAgentIdleKill
 	recordAgentStop       = telemetry.RecordAgentStop
 	recordAgentCrash      = telemetry.RecordAgentCrash // the recycle's and A12's crash metric
 )

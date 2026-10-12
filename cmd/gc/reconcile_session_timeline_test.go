@@ -197,7 +197,7 @@ func (w *legacyWorld) twin(t *testing.T) twin {
 	for _, rig := range slices.Sorted(maps.Keys(w.rigs)) {
 		stores = append(stores, w.rigs[rig])
 	}
-	return twin{t: t, cfg: w.cfg, reload: func(c *config.City) { w.cfg = c }, sp: w.sp.simProvider, stores: stores, rec: w.rec, now: w.clk.Now(), city: w.cityPath}
+	return twin{t: t, cfg: w.cfg, reload: func(c *config.City) { w.cfg = c; w.trackers(c) }, sp: w.sp.simProvider, stores: stores, rec: w.rec, now: w.clk.Now(), city: w.cityPath}
 }
 
 // twin is copy B's view; it writes the backings, and a reload publishes a
@@ -580,6 +580,8 @@ var (
 var timelineGoldenRulings = []goldenRuling{
 	{"a cutover finds v5 hashes on a live seat", timelineGoldenBaseline, "42010976a333"},
 	{"a live drift on a seat", timelineGoldenBaseline, "e4f04b540c00"},
+	{"an idle named session past its idle_timeout is stopped", timelineGoldenBaseline, "67930e13ed18"},
+	{"an idle named session holding assigned work defers until its streak is exhausted", timelineGoldenBaseline, "adade3317639"},
 	{"a crash 29s after wake", timelineGoldenBaseline, "55c4df6af9c5"},
 	{"a crash 31s after wake", timelineGoldenBaseline, "b799cd2aa091"},
 	{"a crash 5m0s after wake", timelineGoldenBaseline, "21983abfeb7d"},
@@ -792,7 +794,7 @@ func TestTimelineGoldenNeedsARuling(t *testing.T) {
 // §3.6, each group's own: the stability clears and accrual, then the idle
 // and drain timers, then the operator verbs.
 func timelineFixtures() []timelineFixture {
-	return slices.Concat(stabilityTimeline(), idleTimeline(), operatorTimeline(), baselineTimeline(), driftTimeline(), manualCreateTimeline())
+	return slices.Concat(stabilityTimeline(), idleTimeline(), operatorTimeline(), baselineTimeline(), driftTimeline(), manualCreateTimeline(), idleTimeoutTimeline())
 }
 
 // manualCreateTimeline is staging J45 through time (v5.9r; SESS-065): a
@@ -1400,4 +1402,49 @@ func operatorTimeline() []timelineFixture {
 			}, nudgeQueued),
 		})
 	return []timelineFixture{suspend, managed, kill(false), kill(true), swap, fence, waiter}
+}
+
+// idleTimeoutTimeline is A15's idle timeout (C7a-1): a live named
+// on-demand session idle past its idle_timeout by the activity clock is
+// stopped through the stop verb with the idle finalize; one holding
+// assigned work defers until its streak is exhausted.
+func idleTimeoutTimeline() []timelineFixture {
+	chatIdling := func() *config.City {
+		cfg := tlCity()
+		cfg.Agents = append(cfg.Agents, config.Agent{Name: "chat", StartCommand: "true", IdleTimeout: "5m"})
+		cfg.NamedSessions = []config.NamedSession{{Template: "chat", Mode: "on_demand"}}
+		return cfg
+	}
+	chatName := agent.SessionNameFor("test-city", "chat", tlCity().Workspace.SessionTemplate)
+	named := chatRow("gc-c", "1", "state", "awake", "session_name", chatName, "instance_token", "tok-gc-c", "last_woke_at", tlAt(-time.Minute), "alias", "chat", "configured_named_mode", "on_demand")
+	named.Title = "Display gc-c"
+	active := func(tw twin) { tw.sp.SetActivity(chatName, tw.now) }
+	stopped := tlFixture("an idle named session past its idle_timeout is stopped", chatIdling,
+		[]parityRow{named}, nil, []simRuntime{tlLive("gc-c")},
+		[]parityStep{
+			{Name: "active", Op: active},
+			{Name: "idle past idle_timeout", Advance: 6 * time.Minute},
+		}, tlPol("gc-c"), nil)
+	stopped.Behaviors = []string{"GUAR-036", "SESS-574", "SESS-576"}
+	// rewoken is legacy's same-tick re-wake of the exhausted row, which v2
+	// starts a pass later.
+	rewoken := map[string]string{
+		"row:gc-c:*rewake": "idle-rewake-lag", "provider:Start " + chatName: "idle-rewake-lag", "event:session.woke chat null": "idle-rewake-lag",
+		"runtime:" + chatName:             "idle-rewake-lag",
+		"provider:RemoveMeta " + chatName: "§12.2#38 start-meta-clears",
+	}
+	busy := tlFixture("an idle named session holding assigned work defers until its streak is exhausted", chatIdling,
+		[]parityRow{named}, tlClaim("in_progress", chatName), []simRuntime{tlLive("gc-c")},
+		[]parityStep{
+			{Name: "active", Op: active},
+			{Name: "idle past idle_timeout", Advance: 6 * time.Minute, Ticks: 6},
+		}, tlMerged(tlPol("gc-c"), map[string]string{"row:gc-c:*a7": "§12.2#51 a7-lag"}), map[string]map[string]string{"idle past idle_timeout": rewoken})
+	busy.Setup = func(tw twin) { // the claim's work dir, which legacy's tick stamps on a named session's work
+		st, _ := tw.row("gw-1")
+		if err := st.SetMetadata("gw-1", "gc.work_dir", tw.city); err != nil {
+			tw.t.Fatal(err)
+		}
+	}
+	busy.Behaviors = []string{"SESS-574", "SESS-575", "SESS-577"}
+	return []timelineFixture{stopped, busy}
 }

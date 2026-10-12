@@ -530,6 +530,9 @@ type effectFacts struct {
 	// Quarantined is the agent a landed death accrual quarantined, for
 	// legacy's RecordAgentQuarantine.
 	Quarantined string
+	// IdleKilled is the agent an idle-timeout stop stopped, for legacy's
+	// RecordAgentIdleKill.
+	IdleKilled string
 	// AliasOwed is the row whose landed alias write owes its runtime the
 	// alias (A7's runtime-alias sync, M1).
 	AliasOwed *rowKey
@@ -560,7 +563,7 @@ type notedRuntime struct {
 }
 
 func (f effectFacts) empty() bool {
-	return len(f.Events) == 0 && f.Transition == nil && f.Work == nil && f.Noted == nil && f.Quarantined == "" && f.AliasOwed == nil && f.Stopped == nil && f.Classified == nil
+	return len(f.Events) == 0 && f.Transition == nil && f.Work == nil && f.Noted == nil && f.Quarantined == "" && f.AliasOwed == nil && f.Stopped == nil && f.Classified == nil && f.IdleKilled == ""
 }
 
 func (f *effectFacts) merge(g effectFacts) {
@@ -572,6 +575,7 @@ func (f *effectFacts) merge(g effectFacts) {
 	f.AliasOwed = cmp.Or(g.AliasOwed, f.AliasOwed)
 	f.Stopped = cmp.Or(g.Stopped, f.Stopped)
 	f.Classified = cmp.Or(g.Classified, f.Classified)
+	f.IdleKilled = cmp.Or(g.IdleKilled, f.IdleKilled)
 }
 
 // Transaction causes. A refusal backs the row off (P4).
