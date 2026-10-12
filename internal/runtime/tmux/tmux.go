@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	goruntime "runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -3734,89 +3735,75 @@ func (t *Tmux) GetPaneCommand(session string) (string, error) {
 	return result, nil
 }
 
-// FindAgentPane finds the agent's pane within a session and returns its pane
-// ID (e.g., "%5"). In multi-pane sessions, send-keys -t <session> targets the
-// active/focused pane, which may be a human's.
-//
-// The pane carrying the agent-pane marker (agentPaneOption) is the agent's,
-// whatever runs in it and wherever it has moved: a human pane running the same
-// CLI is never picked over it. Only a session created before the marker falls
-// back to process detection: pane_current_command, then process tree
-// inspection (same logic as IsRuntimeRunning) for agents started via shell
-// wrappers.
-//
-// Returns ("", nil) for an unmarked session with only one pane (no
-// disambiguation needed) or no identifiable agent pane.
-func (t *Tmux) FindAgentPane(session string) (string, error) {
-	target, identified, err := t.locateAgentPane(session)
-	if err != nil || !identified {
-		return "", err
-	}
-	_, id, _ := strings.Cut(strings.TrimPrefix(target, paneTarget(session)), ".")
-	return id, nil
-}
-
-// agentInputTarget is agentPaneTarget for the input paths that historically
-// went through FindAgentPane (nudge, input clear, modal dismissal, busy
-// probes): the marked pane, else (an unmarked session) the process-detected
-// agent pane, else the first pane. Fenced to its session and window.
+// agentInputTarget is agentPaneTarget for the input paths that used to go
+// through process detection (nudge, input clear, modal dismissal, busy
+// probes), fenced to the pane's session and window. A marked session resolves
+// exactly as every agent-pane read does (pickAgentPaneRow): its agent pane,
+// else errAgentPaneGone, and two agent panes are errAgentPaneAmbiguous, so a
+// nudge never lands in a human pane, even one running the same CLI. Only an
+// unmarked (pre-upgrade) session falls back to process detection:
+// pane_current_command, then process tree inspection (same logic as
+// IsRuntimeRunning) for agents started via shell wrappers, then the first
+// pane. One list-panes call, plus a show-environment for process names in
+// unmarked multi-pane sessions only. Pane ids and explicit targets pass
+// through.
 func (t *Tmux) agentInputTarget(session string) (string, error) {
-	target, _, err := t.locateAgentPane(session)
-	return target, err
-}
-
-// locateAgentPane resolves session's agent pane in one list-panes call (plus
-// a show-environment for process names, unmarked multi-pane sessions only).
-// It returns the pane as an agentPaneTarget-style fenced target and whether
-// it was identified (marked, or process-detected) rather than defaulted to
-// the first pane. Pane ids and explicit targets pass through, identified.
-func (t *Tmux) locateAgentPane(session string) (string, bool, error) {
 	if !validSessionNameRe.MatchString(session) {
-		return session, true, nil
+		return session, nil
 	}
 	// List all panes across all windows (-s). Without -s, list-panes only
 	// shows the active window's panes, missing agent panes in other windows.
 	out, err := t.run("list-panes", "-s", "-t", paneTarget(session), "-F",
 		agentPaneMarkerFormat+"\t#{window_id}.#{pane_id}\t#{pane_current_command}\t#{pane_pid}")
 	if err != nil {
-		return "", false, err
+		return "", err
+	}
+	fields, err := pickAgentPaneRow(out)
+	if err != nil {
+		return "", fmt.Errorf("session %s: %w", session, err)
 	}
 	type row struct{ target, cmd, pid string }
-	var rows []row
-	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-		parts := strings.SplitN(line, "\t", 4)
-		if len(parts) < 4 || !strings.HasPrefix(parts[1], "@") || !strings.Contains(parts[1], ".%") {
-			continue
+	parse := func(fields string) (row, bool) {
+		parts := strings.SplitN(fields, "\t", 3)
+		if len(parts) < 3 || !strings.HasPrefix(parts[0], "@") || !strings.Contains(parts[0], ".%") {
+			return row{}, false
 		}
-		r := row{target: paneTarget(session) + parts[1], cmd: parts[2], pid: parts[3]}
-		if parts[0] == agentPaneMarked {
-			return r.target, true, nil
-		}
-		rows = append(rows, r)
+		return row{target: paneTarget(session) + parts[0], cmd: parts[1], pid: parts[2]}, true
 	}
-	if len(rows) == 0 {
-		return "", false, fmt.Errorf("no panes found in session %s (got %q)", session, out)
+	first, ok := parse(fields)
+	if !ok {
+		return "", fmt.Errorf("no panes found in session %s (got %q)", session, out)
 	}
-	if len(rows) == 1 {
-		// Single pane - no disambiguation needed
-		return rows[0].target, false, nil
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	unmarked := !slices.ContainsFunc(lines, func(line string) bool {
+		mark, _, _ := strings.Cut(line, "\t")
+		return mark != "pane"
+	})
+	if !unmarked || len(lines) == 1 {
+		// The marked agent pane, or an unmarked session's only pane.
+		return first.target, nil
 	}
 
 	// Get agent process names from session environment
 	processNames := t.resolveSessionProcessNames(session)
 
 	// Check each pane for agent process
-	for _, r := range rows {
+	for _, line := range lines {
+		_, fields, _ := strings.Cut(line, "\t")
+		r, ok := parse(fields)
+		if !ok {
+			continue
+		}
 		// Direct command match
 		for _, name := range processNames {
 			if r.cmd == name {
-				return r.target, true, nil
+				return r.target, nil
 			}
 		}
 
 		// Version-as-argv[0] (e.g., "2.1.30") — check real binary name
 		if processMatchesNames(r.pid, processNames) {
-			return r.target, true, nil
+			return r.target, nil
 		}
 
 		// Descendant walk: agents under shells ("bash -c 'exec claude'")
@@ -3824,12 +3811,12 @@ func (t *Tmux) locateAgentPane(session string) (string, bool, error) {
 		// the shell/wrapper as pane_current_command — same unconditional
 		// descendant fallback as IsRuntimeRunning.
 		if hasDescendantWithNames(r.pid, processNames, 0) {
-			return r.target, true, nil
+			return r.target, nil
 		}
 	}
 
 	// No agent pane found: the first pane, as for every other agent-pane read.
-	return rows[0].target, false, nil
+	return first.target, nil
 }
 
 // agentPaneOption is the pane user option that marks a session's agent pane;

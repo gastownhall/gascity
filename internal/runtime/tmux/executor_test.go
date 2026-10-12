@@ -728,6 +728,7 @@ type markedAgentPaneExecutor struct {
 	calls   [][]string
 	capture string
 	lookErr error
+	inMode  string // answers the #{pane_in_mode} copy-mode probe
 }
 
 func (e *markedAgentPaneExecutor) execute(args []string) (string, error) {
@@ -746,6 +747,10 @@ func (e *markedAgentPaneExecutor) execute(args []string) (string, error) {
 		return "orphan\t" + human + "\nagent\t" + agent, nil
 	case "capture-pane":
 		return e.capture, nil
+	case "display-message":
+		if slices.Contains(args, "#{pane_in_mode}") {
+			return e.inMode, nil
+		}
 	}
 	return "", nil
 }
@@ -966,28 +971,34 @@ func TestAgentPaneInputOpsTargetMarkedPane(t *testing.T) {
 	}
 }
 
-// FindAgentPane takes the marked pane even when a human pane listed before it
-// runs the agent's CLI: a nudge must never land in that human pane. Only an
-// unmarked (pre-upgrade) session falls back to process detection.
-func TestFindAgentPanePrefersMarkerOverMatchingHumanPane(t *testing.T) {
+// agentInputTarget, the nudge's resolver, classifies rows exactly as every
+// agent-pane read does. It takes the marked pane even when a human pane listed
+// before it runs the agent's CLI, and fails closed when the marked agent pane
+// is gone or more than one pane claims it: a nudge must never land in a human
+// pane. Only an unmarked (pre-upgrade) session falls back to process
+// detection, then to its first pane.
+func TestAgentInputTargetPrefersMarkerAndFailsClosed(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		outs      []string
 		want      string
+		wantErr   error
 		wantCalls int
 	}{
-		{"marked pane behind a human claude", []string{"pane\t@1.%1\tclaude\t111\nagent\t@2.%5\tsh\t222"}, "%5", 1},
-		{"unmarked falls back to process names", []string{"pane\t@1.%1\tvim\t111\npane\t@1.%2\tclaude\t222", "GT_PROCESS_NAMES=claude"}, "%2", 2},
-		{"unmarked single pane", []string{"pane\t@1.%1\tclaude\t111"}, "", 1},
-		{"unmarked with no match", []string{"pane\t@1.%1\tvim\t111\npane\t@1.%2\tvim\t222", "GT_PROCESS_NAMES=claude"}, "", 2},
+		{"marked pane behind a human claude", []string{"orphan\t@1.%1\tclaude\t111\nagent\t@2.%5\tsh\t222"}, "=w:@2.%5", nil, 1},
+		{"marked agent pane gone", []string{"orphan\t@1.%1\tclaude\t111\norphan\t@1.%2\tsh\t222"}, "", errAgentPaneGone, 1},
+		{"two marked agent panes", []string{"agent\t@1.%1\tclaude\t111\nagent\t@2.%5\tsh\t222"}, "", errAgentPaneAmbiguous, 1},
+		{"unmarked falls back to process names", []string{"pane\t@1.%1\tvim\t111\npane\t@1.%2\tclaude\t222", "GT_PROCESS_NAMES=claude"}, "=w:@1.%2", nil, 2},
+		{"unmarked single pane", []string{"pane\t@1.%1\tclaude\t111"}, "=w:@1.%1", nil, 1},
+		{"unmarked with no match takes the first pane", []string{"pane\t@1.%1\tvim\t111\npane\t@1.%2\tvim\t222", "GT_PROCESS_NAMES=claude"}, "=w:@1.%1", nil, 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			exec := &fakeExecutor{outs: tc.outs}
 			tm := NewTmux()
 			tm.exec = exec
-			got, err := tm.FindAgentPane("w")
-			if err != nil || got != tc.want {
-				t.Fatalf("FindAgentPane = (%q, %v), want (%q, nil)", got, err, tc.want)
+			got, err := tm.agentInputTarget("w")
+			if got != tc.want || !errors.Is(err, tc.wantErr) || (tc.wantErr == nil && err != nil) {
+				t.Fatalf("agentInputTarget = (%q, %v), want (%q, %v)", got, err, tc.want, tc.wantErr)
 			}
 			if len(exec.calls) != tc.wantCalls {
 				t.Errorf("tmux calls = %q, want %d", exec.calls, tc.wantCalls)
@@ -1046,6 +1057,54 @@ func TestAgentPaneResolvedOncePerOperation(t *testing.T) {
 	}
 }
 
+// A pane a human scrolled into copy-mode is probed and released on the agent's
+// pane: probing the active pane would miss a parked agent pane, and a cancel
+// sent there would knock a human's pane out of the mode they chose.
+func TestCopyModeProbeAndCancelTargetResolvedAgentPane(t *testing.T) {
+	const fenced = "=w:@2.%5"
+	approval := readApprovalFixture(t, "bash-manual-80x24.txt")
+	prevTimeout := respondVerifyTimeout
+	respondVerifyTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { respondVerifyTimeout = prevTimeout })
+	for _, tc := range []struct {
+		name    string
+		capture string
+		run     func(*Tmux) error
+	}{
+		{"SendKeysDebounced", "", func(tm *Tmux) error { return tm.SendKeysDebounced("w", "hi", 0) }},
+		{"NudgeSession", "❯ ", func(tm *Tmux) error { return tm.NudgeSession("w", "hi") }},
+		{"Respond", approval, func(tm *Tmux) error {
+			err := tm.Respond("w", runtime.InteractionResponse{Action: "approve"})
+			if err != nil && strings.Contains(err.Error(), "did not clear") {
+				return nil
+			}
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			exec := &markedAgentPaneExecutor{capture: tc.capture, inMode: "1"}
+			tm := NewTmux()
+			tm.exec = exec
+			if err := tc.run(tm); err != nil {
+				t.Fatalf("%s: %v", tc.name, err)
+			}
+			probe, cancel := "", ""
+			for _, c := range exec.calls {
+				target, _ := tmuxTargetArg(c)
+				switch {
+				case slices.Contains(c, "#{pane_in_mode}") && probe == "":
+					probe = target
+				case slices.Contains(c, "-X") && slices.Contains(c, "cancel") && cancel == "":
+					cancel = target
+				}
+			}
+			if probe != fenced || cancel != fenced {
+				t.Errorf("copy-mode probe -t %q, cancel -t %q, want both %q; calls=%q", probe, cancel, fenced, exec.calls)
+			}
+		})
+	}
+}
+
 // A failed agent-pane lookup sends nothing anywhere: no key reaches the
 // active pane in its place.
 func TestAgentPaneInputOpsFailClosed(t *testing.T) {
@@ -1068,6 +1127,11 @@ func TestAgentPaneInputOpsFailClosed(t *testing.T) {
 		{"SendKeysReplace", func(tm *Tmux) error { return tm.SendKeysReplace("w", "hi", 0) }},
 		{"Respond", func(tm *Tmux) error { return tm.Respond("w", runtime.InteractionResponse{Action: "approve"}) }},
 		{"WaitForIdle", func(tm *Tmux) error { return tm.WaitForIdle(context.Background(), "w", time.Second) }},
+		{"ClearInput", func(tm *Tmux) error { return tm.ClearInput(context.Background(), "w", 0) }},
+		{"startup paneBusy", func(tm *Tmux) error {
+			_, err := newTmuxStartOps(tm, "", 0, runtime.Config{}, true).paneBusy("w")
+			return err
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			exec := &markedAgentPaneExecutor{lookErr: boom}

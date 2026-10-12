@@ -823,8 +823,8 @@ func TestProvider_InputPathsReachMarkedAgentPaneOverSameCLIHumanPane(t *testing.
 		return strconv.FormatBool(strings.Contains(out, "HUMAN-SCREEN"))
 	})
 
-	if got, err := tm.FindAgentPane(name); err != nil || got != agent {
-		t.Errorf("FindAgentPane = (%q, %v), want the marked %q", got, err, agent)
+	if got, err := inputPaneID(tm, name); err != nil || got != agent {
+		t.Errorf("nudge input pane = (%q, %v), want the marked %q", got, err, agent)
 	}
 	peek, err := p.Peek(name, 20)
 	if err != nil || !strings.Contains(peek, "AGENT-SCREEN") || strings.Contains(peek, "HUMAN-SCREEN") {
@@ -883,6 +883,48 @@ func TestProvider_IdleAndPendingReadAgentPaneNotFocusedHumanPrompt(t *testing.T)
 	captured(f.agent, "Do you want to proceed?")
 	if pending, err := tm.Pending(f.name); err != nil || pending == nil {
 		t.Errorf("Pending = (%v, %v), want the agent pane's approval prompt", pending, err)
+	}
+}
+
+// A nudge never lands in a human pane when the agent pane cannot be named: a
+// human killed the agent pane (the session lives on in theirs), or two panes
+// claim to be the agent's. The nudge errors and the human pane receives
+// nothing (#7677 review MF1).
+func TestProvider_NudgeFailsClosedWithoutOneAgentPane(t *testing.T) {
+	cases := []struct {
+		name    string
+		wantErr error
+		setup   func(t *testing.T, f *agentPaneFixture, human string)
+	}{
+		{"agent pane killed", errAgentPaneGone, func(t *testing.T, f *agentPaneFixture, _ string) {
+			f.mustRun(t, "kill-pane", "-t", f.agent)
+		}},
+		{"two marked panes", errAgentPaneAmbiguous, func(t *testing.T, f *agentPaneFixture, human string) {
+			f.mustRun(t, "set-option", "-p", "-F", "-t", human, agentPaneOption, "#{session_id}")
+		}},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newAgentPaneFixture(t, fmt.Sprintf("anf%d", i), "1")
+			rec := filepath.Join(f.workDir, "human-input")
+			human := f.mustRun(t, "split-window", "-b", "-P", "-F", "#{pane_id}", "-t", f.agent, "cat > "+rec)
+			tc.setup(t, f, human)
+
+			if err := f.p.tm.NudgeSession(f.name, "NUDGE-TEXT"); !errors.Is(err, tc.wantErr) {
+				t.Errorf("NudgeSession = %v, want %v", err, tc.wantErr)
+			}
+			if err := f.p.tm.ClearInput(context.Background(), f.name, 0); !errors.Is(err, tc.wantErr) {
+				t.Errorf("ClearInput = %v, want %v", err, tc.wantErr)
+			}
+			// A sentinel typed after the attempts arrives after any stray
+			// keys, so once it lands the record is complete.
+			f.mustRun(t, "send-keys", "-t", human, "-l", "SENTINEL")
+			f.mustRun(t, "send-keys", "-t", human, "Enter")
+			waitForValue(t, "human pane record", "SENTINEL", func() string {
+				b, _ := os.ReadFile(rec)
+				return strings.TrimSpace(string(b))
+			})
+		})
 	}
 }
 
