@@ -542,5 +542,63 @@ func TestOperatorStartClearsARequestBegunBeforeItsLease(t *testing.T) {
 	}
 	if _, active := activeStop(censusRowOf(t, got)); active || !sp.Fake.IsRunning("s-gc-1") {
 		t.Fatalf("row %v: want the runtime started and the request begun before the lease cleared", got.Metadata)
+
+// onFloor makes the entry a member of its template's min_active_sessions
+// floor (the allocator's floor set) and a Wake entry.
+func onFloor(e *selectionEntry) { e.Desired, e.Floor = desireWake, &floorView{Rank: 0, MinActive: 1} }
+
+// TestFloorAckCancels (DRAIN-010, PAR-FLOORACK; sc-j27j0d). Kills a floor
+// member's own idle ack stopping it, only for the floor to recreate it: a
+// bare ack on a floor member cancels (its half voided, nothing signaled); an
+// ack off the floor, or one a drain the controller began explains, signals;
+// an ack older than its runtime is void first.
+func TestFloorAckCancels(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		meta   []string
+		entry  func(*selectionEntry)
+		reason string
+	}{
+		{"a bare ack on a floor member", ackMeta("3"), onFloor, decideFloorAckCancel},
+		{"a bare ack off the floor", ackMeta("3"), awakeWanted, decideDrainSignal},
+		{"an ack a controller drain explains, on the floor", append(ackMeta("3"), intentBegunAt(drainConfigDrift, time.Minute)...), onFloor, decideDrainSignal + drainConfigDrift},
+		{"an ack without a time, on the floor", []string{session.DrainAckIncarnationKey, "3"}, onFloor, decideAckVoid},
+	} {
+		it, _ := decideDrain(t, c.meta, c.entry)
+		switch {
+		case it.Kind != intentSignalAck || it.Reason != c.reason:
+			t.Errorf("%s: %s %q, want the ack's %q", c.name, it.Kind, it.Reason, c.reason)
+		case c.reason == decideFloorAckCancel && (it.Patch["state"] != "" || it.Patch[session.DrainAckIncarnationKey] != "" || it.Patch[session.DrainAckAtKey] != "" || len(it.Patch) != 2):
+			t.Errorf("%s: patch %v, want the ack half voided alone", c.name, it.Patch)
+		}
+	}
+}
+
+// TestFloorAckCancelKeepsTheSeatWarm (DRAIN-010, through runTx). Kills a
+// cancel that stops or marks the seat: the effect lands the ack half's
+// void on the fresh row, which is not stop-pending, and leaves the runtime
+// running; off the floor the same ack signals.
+func TestFloorAckCancelKeepsTheSeatWarm(t *testing.T) {
+	for _, floor := range []bool{true, false} {
+		entry := awakeWanted
+		if floor {
+			entry = onFloor
+		}
+		p, it, store, leaf := admittedBeginOn(t, ackMeta("3"), entry)
+		s := runTx(context.Background(), p, it, effectSpecs[it.Kind], nil)
+		got, err := store.Get(it.Key.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		row := censusRowOf(t, got)
+		_, active := activeStop(row)
+		switch {
+		case s.Outcome != settledLanded:
+			t.Errorf("floor %t: settlement %+v, want landed", floor, s)
+		case floor && (active || isDrainAckStopPendingInfo(row.Info) || got.Metadata[session.DrainAckIncarnationKey] != "" || !leaf.IsRunning("s-gc-1")):
+			t.Errorf("floor: row %v (request active %v), running %v; want the ack canceled, the seat warm", got.Metadata, active, leaf.IsRunning("s-gc-1"))
+		case !floor && !isDrainAckStopPendingInfo(row.Info):
+			t.Errorf("off the floor: row %v, want the signal", got.Metadata)
+		}
 	}
 }

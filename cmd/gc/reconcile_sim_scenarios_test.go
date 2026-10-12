@@ -845,5 +845,55 @@ func TestQuarantineAloneIsTheOnlyHold(t *testing.T) {
 		if got := quarantineAlone(c.meta, plannerT0); got != c.want {
 			t.Errorf("%s: quarantineAlone = %v, want %v", name, got, c.want)
 		}
+
+// Scenario sc-j27j0d (DRAIN-010, PAR-FLOORACK): the sole member of a
+// min_active_sessions = 1 pool acks its own idle drain, again and again, as
+// an idle agent does. Each ack is canceled: the seat is never marked
+// stop-pending, never stopped, never recreated (its runtime object
+// stands), and its ack half is voided. With the floor at 0 the same ack
+// stops the seat, the loop's first half.
+func TestSimFloorAckKeepsTheSeatWarm(t *testing.T) {
+	for _, floor := range []int{1, 0} {
+		s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-1", "last_woke_at", rowAt(-time.Hour)))
+		s.cfg.Agents[0].MinActiveSessions = intPtr(floor)
+		s.settle()
+		s.sp.mu.Lock()
+		object := s.sp.rts["s-gc-1"].object
+		s.sp.mu.Unlock()
+		pending := false
+		for range 3 {
+			commit, err := checkDrainAckRow(s.legs[0].backing, "gc-1", false, "tok-1", s.clk.Now())
+			if err == nil {
+				err = commit()
+			}
+			if err != nil {
+				if floor == 0 {
+					break // the seat is stopped: no ack to write
+				}
+				t.Fatalf("floor %d: the agent's ack: %v", floor, err)
+			}
+			s.audit("drain-ack")
+			s.legs[0].cache.ApplyEvent("bead.updated", s.legs[0].events[len(s.legs[0].events)-1])
+			for range 3 {
+				s.advance(simPatrol)
+				s.settle()
+				pending = pending || s.gc1()["state_reason"] == session.DrainAckStopPendingReason
+			}
+		}
+		var stopped bool
+		for _, k := range s.sp.kills {
+			stopped = stopped || k.Name == "s-gc-1"
+		}
+		s.sp.mu.Lock()
+		rt, live := s.sp.rts["s-gc-1"]
+		s.sp.mu.Unlock()
+		m := s.gc1()
+		switch {
+		case floor == 1 && (stopped || pending || !live || rt.object != object || m[session.DrainAckIncarnationKey] != ""):
+			t.Errorf("floor 1: stopped %v, ever stop-pending %v, live %v (object $%d, was $%d), row %v; want the seat warm and the ack canceled", stopped, pending, live, rt.object, object, m)
+		case floor == 0 && !stopped && !pending:
+			t.Errorf("floor 0: kills %v, row %v; want the ack to stop the seat", s.sp.kills, m)
+		}
+		s.noViolations(t)
 	}
 }

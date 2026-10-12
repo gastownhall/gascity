@@ -26,8 +26,9 @@ const (
 	decideStopResidue    = "drain-void:residue"
 	decideStopActive     = "stop-requested"
 	decideDrainSignal    = "drain-signal:"
-	decideAckVoid        = "drain-ack-void"       // C6a ruling 3
-	decideWakeGrace      = "undesired-wake-grace" // INC-003
+	decideAckVoid        = "drain-ack-void"             // C6a ruling 3
+	decideFloorAckCancel = "drain-ack-cancel:min-floor" // DRAIN-010, PAR-FLOORACK
+	decideWakeGrace      = "undesired-wake-grace"       // INC-003
 	decideDrainWorkKept  = "drain-kept:assigned-work"
 	decideIdleUnprovable = "drain-kept:idle-unprovable" // SESS-621
 	decideIdleStopClear  = "idle-stop-pending-clear"    // SESS-616
@@ -214,6 +215,14 @@ func workKeepsNoWakeRow(r *rowFacts) bool {
 // whose time is missing or unreadable is void at once (#7635 review
 // ruling): never stop a runtime that may have been replaced; the agent
 // can ack again.
+//
+// DRAIN-010 (PAR-FLOORACK, legacy's cancelSelfInitiatedDrainAckAtMinFloor):
+// a bare ack, one no drain the controller began explains, on a member of
+// its template's min_active_sessions floor (the allocator's floor set,
+// legacy's lowest-bead-id membership) is the agent's own idle ack, and
+// stopping the seat only recreates it (sc-j27j0d): the ack is canceled,
+// its half voided, and the seat stays warm. A drain the controller began
+// outranks the floor, as legacy's GC_DRAIN does.
 func armAck(r *rowFacts) (intent, bool) {
 	req, ok := activeStop(r.row)
 	if !ok || req.Phase != stopAcked {
@@ -222,6 +231,9 @@ func armAck(r *rowFacts) (intent, bool) {
 	basis := rowBasis{Incarnation: r.row.Incarnation, InstanceToken: r.row.InstanceToken}
 	if stale := r.ackPredatesRuntime(req.AckAt); stale || req.AckAt.IsZero() {
 		return intent{Kind: intentSignalAck, Reason: decideAckVoid, Basis: basis, Patch: stopAckVoidPatch()}, true
+	}
+	if req.Reason == "" && r.entry != nil && r.entry.Floor != nil {
+		return intent{Kind: intentSignalAck, Reason: decideFloorAckCancel, Basis: basis, Patch: stopAckVoidPatch()}, true
 	}
 	return intent{Kind: intentSignalAck, Reason: decideDrainSignal + req.Reason, Basis: basis, Patch: session.DrainAckStopPendingPatch(r.w.Now)}, true
 }
