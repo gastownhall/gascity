@@ -1231,7 +1231,9 @@ type simResult struct {
 // effects all refused a re-issue the contract holds, each no earlier than
 // its row's backoff expiry (a paced retry, not a loop), and whose only store
 // change is the runtime lease record each attempt writes. The holds: a stop
-// a human's attach holds (§12.2 #10), and a start refused dead on a zombie.
+// a human's attach holds (§12.2 #10), a stop refused liveness-unknown while
+// its runtime's probe keeps erroring (I17), and a start refused dead on a
+// zombie.
 func (s *sim) pacedRetries(backoff map[string]backoffRecord, at time.Time, before, after map[string]beads.Bead) bool {
 	for k, b := range after {
 		a, ok := before[k]
@@ -1243,10 +1245,19 @@ func (s *sim) pacedRetries(backoff map[string]backoffRecord, at time.Time, befor
 		return false
 	}
 	for _, r := range s.round {
+		var row beads.Bead // the sim's row IDs are unique across its legs
+		for _, b := range after {
+			if b.ID == r.it.Key.ID {
+				row = b
+			}
+		}
 		held := r.it.Kind == intentStop && r.res.Cause == fenceAttached ||
+			// A probe that keeps erroring holds the stop, as I17 rules it
+			// not stoppable (v5.9n).
+			r.it.Kind == intentStop && r.res.Cause == fenceLivenessUnknown && s.probeErring(row) ||
 			// TODO(#7626, C5c2): delete the zombie clause once A12's
 			// zombie recycle is registered (TestSimZombieRetryClauseUntilA12).
-			r.it.Kind == intentStart && r.res.Cause == causeDead && s.zombieUnder(after[s.legOf(r.it.Key.Leg).name+"/"+r.it.Key.ID].Metadata["session_name"])
+			r.it.Kind == intentStart && r.res.Cause == causeDead && s.zombieUnder(row.Metadata["session_name"])
 		rec, backedOff := backoff[rowBackoffKey(r.it.Key)]
 		if r.res.Outcome != settledRefused || !held || !backedOff || rec.Until.After(at) {
 			return false

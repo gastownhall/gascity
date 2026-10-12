@@ -837,8 +837,12 @@ func TestSimPacedRetries(t *testing.T) {
 		{"another key moved", -time.Second, fenceAttached, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4", "state", "asleep"), false},
 		{"another cause", -time.Second, fencePending, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4"), false},
 		{"no backoff record", 0, fenceAttached, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4"), false},
+		{"liveness unknown, the probe erroring, at the expiry", -time.Second, fenceLivenessUnknown, row("session_name", "s-gc-1", "runtime_lease_epoch", "3"), row("session_name", "s-gc-1", "runtime_lease_epoch", "4"), true},
+		{"liveness unknown, the probe erroring, before the expiry", time.Second, fenceLivenessUnknown, row("session_name", "s-gc-1", "runtime_lease_epoch", "3"), row("session_name", "s-gc-1", "runtime_lease_epoch", "4"), false},
+		{"liveness unknown, the probe reading", -time.Second, fenceLivenessUnknown, row("session_name", "s-gc-2", "runtime_lease_epoch", "3"), row("session_name", "s-gc-2", "runtime_lease_epoch", "4"), false},
 	} {
 		s := &sim{round: []simResult{{it: intent{Kind: intentStop, Key: k}, res: settlement{Outcome: settledRefused, Cause: c.cause}}}}
+		s.sp = &simProvider{rts: map[string]*simRuntime{"s-gc-1": {id: "gc-1", probeErr: true}, "s-gc-2": {id: "gc-1"}}}
 		backoff := map[string]backoffRecord{rowBackoffKey(k): {Consecutive: 2, Until: at.Add(c.until), Cause: c.cause}}
 		if c.until == 0 {
 			backoff = nil
@@ -865,34 +869,45 @@ func (s *sim) setProbeErr(name string, v bool) {
 	s.sp.touch(name)
 }
 
-// TestSimProbeErrorHoldsTheStopUntilItRecovers (v5.9n, I17). Kills a stop
-// verb that never stops a runtime whose probe once errored: the probe
-// errors through a stop attempt, then recovers, and by quiescence the row
-// is stopped and finalized; a probe still erroring through quiescence holds
-// the stop, and I17 excuses it.
+// TestSimProbeErrorHoldsTheStopUntilItRecovers (v5.9n, I17 and I10).
+// Kills a stop verb that never stops a runtime whose probe once errored: the
+// probe errors through a stop attempt, then recovers, and by quiescence the
+// row is stopped and finalized. A probe still erroring through quiescence
+// holds the stop, and I17 excuses it; so does I10 its paced liveness-unknown
+// re-issues, whether quiescence starts at once or after a stop attempt and a
+// patrol (the shape whose late re-issue v5.9n's amendment rules paced).
 func TestSimProbeErrorHoldsTheStopUntilItRecovers(t *testing.T) {
-	for _, recovers := range []bool{true, false} {
+	for _, c := range []struct {
+		name              string
+		attempt, recovers bool
+	}{
+		{"recovers after a stop attempt", true, true},
+		{"still erroring", false, false},
+		{"still erroring after a stop attempt", true, false},
+	} {
 		s := signaledSim(t)
 		s.setProbeErr("s-gc-1", true)
 		s.inventory()
-		if recovers {
+		if c.attempt {
 			s.pass()
 			for len(s.parked) > 0 {
 				s.release(0)
 			}
 			s.audit("v2")
 			s.advance(simPatrol)
+		}
+		if c.recovers {
 			s.setProbeErr("s-gc-1", false)
 		}
 		s.quiesce()
 		b, _ := s.legs[0].backing.Get("gc-1")
 		switch {
 		case len(s.failures) > 0:
-			t.Errorf("recovers %t: violated %q", recovers, s.failures)
-		case recovers && signaledRow(b):
-			t.Errorf("recovered probe: gc-1 still signaled at quiescence: %v", b.Metadata)
-		case !recovers && !signaledRow(b):
-			t.Errorf("erroring probe: gc-1 finalized over a runtime no read proved stopped: %v", b.Metadata)
+			t.Errorf("%s: violated %q", c.name, s.failures)
+		case c.recovers && signaledRow(b):
+			t.Errorf("%s: gc-1 still signaled at quiescence: %v", c.name, b.Metadata)
+		case !c.recovers && !signaledRow(b):
+			t.Errorf("%s: gc-1 finalized over a runtime no read proved stopped: %v", c.name, b.Metadata)
 		}
 	}
 }
