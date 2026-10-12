@@ -490,13 +490,23 @@ func TestSameObjectGuardsForeignAndCorpse(t *testing.T) {
 	}
 }
 
-// TestDormantFinalizeClearsALeftoverRequest (v5.9n; the C7 builder's lead).
-// Kills a finalize that reads the stop request off a row rebuilt without its
-// stop keys: an operator-dormant stop of a row carrying a current ack clears
-// the request in its finalize, as a signaled one does.
+// TestDormantFinalizeClearsALeftoverRequest (v5.9n; the C7 builder's lead;
+// #7648 review 7). Kills a finalize that reads the stop request off a row
+// rebuilt without its stop keys, or that clears only an active request: an
+// operator-dormant stop of a row carrying a current ack clears it in its
+// finalize, as D4 does always; on a suspended row the ack is residue
+// (activeStop's rule 2), cleared just the same.
 func TestDormantFinalizeClearsALeftoverRequest(t *testing.T) {
-	s, got, leaf := stopRun(t, []string{"sleep_intent", "user-hold", session.DrainAckIncarnationKey, "3", session.DrainAckAtKey, rowAt(-time.Minute)}, undesired(drainOrphaned), nil)
-	if s.Outcome != settledLanded || stops(leaf) != 1 || got.Metadata[session.DrainAckIncarnationKey] != "" || got.Metadata[session.DrainAckAtKey] != "" {
-		t.Fatalf("settlement %+v, %d stops, row %v; want the dormant stop finalized with its request cleared", s, stops(leaf), got.Metadata)
+	for _, c := range []struct {
+		name string
+		meta []string
+	}{
+		{"user-hold", []string{"sleep_intent", "user-hold"}},
+		{"suspended", []string{"state", string(session.StateSuspended), "suspended_at", rowAt(-time.Minute)}},
+	} {
+		s, got, leaf := stopRun(t, append(c.meta, session.DrainAckIncarnationKey, "3", session.DrainAckAtKey, rowAt(-time.Minute)), undesired(drainOrphaned), nil)
+		if s.Outcome != settledLanded || stops(leaf) != 1 || got.Metadata[session.DrainAckIncarnationKey] != "" || got.Metadata[session.DrainAckAtKey] != "" {
+			t.Errorf("%s: settlement %+v, %d stops, row %v; want the dormant stop finalized with its request cleared", c.name, s, stops(leaf), got.Metadata)
+		}
 	}
 }

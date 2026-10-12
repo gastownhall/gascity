@@ -25,7 +25,7 @@ func init() {
 	simStepChecks = append(simStepChecks, (*sim).checkCaps, (*sim).checkStarts, (*sim).checkDestructive, (*sim).checkTokens, (*sim).checkDead, (*sim).checkQuarantinedCommits)
 	simWriteChecks = append(simWriteChecks, (*sim).checkWrite)
 	simEffectChecks = append(simEffectChecks, (*sim).checkFinalized, (*sim).checkCensusOnly)
-	simQuietChecks = append(simQuietChecks, (*sim).checkDwell)
+	simQuietChecks = append(simQuietChecks, (*sim).checkDwell, (*sim).checkStranded)
 	simMutants = append(simMutants, []struct {
 		name, inv string
 		opts      simOpts
@@ -143,17 +143,20 @@ func (s *sim) checkDestructive() {
 		if k.Hit.attached {
 			s.failf("I5 I-attached", "v2 %s on %s while attached", k.Method, k.Name)
 		}
-		row := s.rowNamed(k.Name)
+		row, closed := s.rowNamed(k.Name)
+		own := k.Hit.id == row.ID && k.Hit.token == row.Metadata["instance_token"]
 		switch {
 		case k.Method == "KillCorpseObject" && k.Hit.corpse: // the corpse exception, whoever it was
 		case k.Method == "KillZombieObject" && k.Hit.zombie && k.Hit.id != "" && k.Hit.id == s.rowNamedEver(k.Name).ID:
 			// The row's own zombie: the start recycle's and the close's, the
 			// row closed meanwhile included (its zombie stays its own).
-		case k.Method == "Stop" && row.Metadata["pending_create_claim"] == "true" && ownsName(sessionInfoFromBead(row), k.Name):
+		case k.Method == "Stop" && row.Metadata["pending_create_claim"] == "true" && ownsName(sessionInfoFromBead(row), k.Name) && (!closed || own):
 			// C8.2(a): a pending create's rollback stops its bead-scoped name
 			// whoever runs under it (C3, S1's Foreign row), as legacy does.
 		case row.ID == "" || k.Hit.id != row.ID:
 			s.failf("I4 I-fence", "v2 %s on %s hit row %q's runtime, not its own", k.Method, k.Name, k.Hit.id)
+		case closed && !own:
+			s.failf("I4 I-fence", "v2 %s on %s hit token %s, not the just-closed row %s's", k.Method, k.Name, k.Hit.token, row.ID)
 		case k.Hit.token != row.Metadata["instance_token"] && k.Hit.epoch != row.Metadata["generation"]:
 			s.failf("I4 I-fence", "v2 %s on %s hit token %s, not row %s's", k.Method, k.Name, k.Hit.token, row.ID)
 		}
@@ -163,7 +166,7 @@ func (s *sim) checkDestructive() {
 // rowNamedEver is the row that carried name before this step, open or
 // closed, preferring an open one.
 func (s *sim) rowNamedEver(name string) beads.Bead {
-	if b := s.rowNamed(name); b.ID != "" {
+	if b, _ := s.rowNamed(name); b.ID != "" {
 		return b
 	}
 	for _, k := range slices.Sorted(maps.Keys(s.prev)) {
@@ -174,17 +177,19 @@ func (s *sim) rowNamedEver(name string) beads.Bead {
 	return beads.Bead{}
 }
 
-// rowNamed is the open row that carried name before this step, or the row
-// an outside writer closed within the step, as it stood before its close
-// (v5.9n): stopping a just-closed row's own runtime is no fence breach, and
-// unleased closes are real (bd close on a session row).
-func (s *sim) rowNamed(name string) beads.Bead {
+// rowNamed is the open row that carried name before this step, or (closed)
+// the row an outside writer closed within this step, as it stood before its
+// close (v5.9n): stopping a just-closed row's own runtime is no fence breach,
+// and unleased closes are real (bd close on a session row). A close in an
+// earlier step excuses nothing (beginStep).
+func (s *sim) rowNamed(name string) (row beads.Bead, closed bool) {
 	for _, k := range slices.Sorted(maps.Keys(s.prev)) {
 		if b := s.prev[k]; b.Status != "closed" && b.Metadata["session_name"] == name {
-			return b
+			return b, false
 		}
 	}
-	return s.closedInStep[name]
+	b, ok := s.closedInStep[name]
+	return b, ok
 }
 
 // checkTokens is I9 (I-tokens): in any window, admitted starts ≤ capacity
@@ -417,6 +422,18 @@ func dormantChange(b beads.Bead, a map[string]string, t time.Time, stable bool) 
 	return ""
 }
 
+// checkStranded is I16 (I-STOP-5) at quiescence: no row is still signaled
+// with no live pane under its name, which the next pass's A4 confirms and
+// finalizes; so a premise refusal I16 excused (an outside drain-basis write
+// inside the stop) is finalized by then (v5.9n). I17 sees only live panes.
+func (s *sim) checkStranded() {
+	for _, k := range slices.Sorted(maps.Keys(s.prev)) {
+		if b := s.prev[k]; signaledRow(b) && !s.namedPane(b) {
+			s.failf("I16 I-STOP-5", "%s is still signaled at quiescence with no live pane: the next pass never finalized it", k)
+		}
+	}
+}
+
 // probeErring reports whether b's name holds a runtime whose process probe
 // errors.
 func (s *sim) probeErring(b beads.Bead) bool {
@@ -643,7 +660,13 @@ func TestSimChecksBite(t *testing.T) {
 		{"I4 ", func(s *sim) { // a just-closed row's runtime of another incarnation (v5.9n)
 			s.prev = map[string]beads.Bead{}
 			s.closedInStep = map[string]beads.Bead{"s-x": row("x")}
-			s.sp.kills = append(s.sp.kills, simKill{Method: "Stop", Name: "s-x", Hit: &simRuntime{id: "x", epoch: "1", token: "tok-1"}})
+			s.sp.kills = append(s.sp.kills, simKill{Method: "Stop", Name: "s-x", Hit: &simRuntime{id: "x", epoch: "2", token: "tok-1"}})
+		}},
+		{"I4 ", func(s *sim) { // a row closed in an earlier step excuses nothing (v5.9n)
+			s.prev = map[string]beads.Bead{}
+			s.closedInStep = map[string]beads.Bead{"s-x": row("x")}
+			s.beginStep()
+			s.sp.kills = append(s.sp.kills, simKill{Method: "Stop", Name: "s-x", Hit: &simRuntime{id: "x", epoch: "2", token: "tok-2"}})
 		}},
 		{"I5 ", func(s *sim) {
 			s.sp.kills = append(s.sp.kills, simKill{Method: "KillCorpseObject", Name: "s-x", Hit: &simRuntime{corpse: true, attached: true}})
@@ -680,6 +703,25 @@ func TestSimChecksBite(t *testing.T) {
 			s.setMeta(s.legs[0], "gc-1", signaled...)
 			s.sp.drop("s-gc-1")
 			s.checkFinalized(&simEffect{it: intent{Kind: intentStop, Key: rowKey{Leg: rowLeg, ID: "gc-1"}}})(settlement{Outcome: settledRefused, Cause: causePremise})
+		}},
+		{"I16 ", func(s *sim) { // a basis write before the effect's window excuses nothing (v5.9n)
+			s.setMeta(s.legs[0], "gc-1", signaled...)
+			s.sp.drop("s-gc-1")
+			s.basisMoves = append(s.basisMoves, s.legs[0].name+"/gc-1")
+			s.checkFinalized(&simEffect{it: intent{Kind: intentStop, Key: rowKey{Leg: rowLeg, ID: "gc-1"}}})(settlement{Outcome: settledRefused, Cause: causePremise})
+		}},
+		{"I16 ", func(s *sim) { // another row's basis write excuses nothing (v5.9n)
+			s.setMeta(s.legs[0], "gc-1", signaled...)
+			s.sp.drop("s-gc-1")
+			settle := s.checkFinalized(&simEffect{it: intent{Kind: intentStop, Key: rowKey{Leg: rowLeg, ID: "gc-1"}}})
+			s.basisMoves = append(s.basisMoves, s.legs[0].name+"/gc-2")
+			settle(settlement{Outcome: settledRefused, Cause: causePremise})
+		}},
+		{"I16 ", func(s *sim) { // signaled at quiescence with no pane: never finalized (v5.9n)
+			s.setMeta(s.legs[0], "gc-1", signaled...)
+			s.sp.drop("s-gc-1")
+			s.prev = s.snapshot()
+			s.checkStranded()
 		}},
 		{"I17 ", func(s *sim) {
 			s.prev = map[string]beads.Bead{"city/x": row("x", signaled...)}
@@ -794,11 +836,90 @@ func TestSimPacedRetries(t *testing.T) {
 		{"before the expiry", time.Second, fenceAttached, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4"), false},
 		{"another key moved", -time.Second, fenceAttached, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4", "state", "asleep"), false},
 		{"another cause", -time.Second, fencePending, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4"), false},
+		{"no backoff record", 0, fenceAttached, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4"), false},
 	} {
 		s := &sim{round: []simResult{{it: intent{Kind: intentStop, Key: k}, res: settlement{Outcome: settledRefused, Cause: c.cause}}}}
 		backoff := map[string]backoffRecord{rowBackoffKey(k): {Consecutive: 2, Until: at.Add(c.until), Cause: c.cause}}
+		if c.until == 0 {
+			backoff = nil
+		}
 		if got := s.pacedRetries(backoff, at, c.before, c.after); got != c.paced {
 			t.Errorf("%s: paced %t, want %t", c.name, got, c.paced)
 		}
+	}
+}
+
+// signaledSim is a sim with one signaled row, gc-1, whose own runtime is
+// live (the #7648 review's directed scenarios).
+func signaledSim(t *testing.T) *sim {
+	return newSim(t, 3, simOpts{rows: func(s *sim) ([]beads.Bead, []beads.Bead) {
+		s.sp.put("s-gc-1", "gc-1", "1", "tok-gc-1-1")
+		return []beads.Bead{poolRow("gc-1", "worker", 1, string(session.StateDraining), "instance_token", "tok-gc-1-1", "state_reason", session.DrainAckStopPendingReason)}, nil
+	}})
+}
+
+func (s *sim) setProbeErr(name string, v bool) {
+	s.sp.mu.Lock()
+	defer s.sp.mu.Unlock()
+	s.sp.rts[name].probeErr = v
+	s.sp.touch(name)
+}
+
+// TestSimProbeErrorHoldsTheStopUntilItRecovers (v5.9n, I17). Kills a stop
+// verb that never stops a runtime whose probe once errored: the probe
+// errors through a stop attempt, then recovers, and by quiescence the row
+// is stopped and finalized; a probe still erroring through quiescence holds
+// the stop, and I17 excuses it.
+func TestSimProbeErrorHoldsTheStopUntilItRecovers(t *testing.T) {
+	for _, recovers := range []bool{true, false} {
+		s := signaledSim(t)
+		s.setProbeErr("s-gc-1", true)
+		s.inventory()
+		if recovers {
+			s.pass()
+			for len(s.parked) > 0 {
+				s.release(0)
+			}
+			s.audit("v2")
+			s.advance(simPatrol)
+			s.setProbeErr("s-gc-1", false)
+		}
+		s.quiesce()
+		b, _ := s.legs[0].backing.Get("gc-1")
+		switch {
+		case len(s.failures) > 0:
+			t.Errorf("recovers %t: violated %q", recovers, s.failures)
+		case recovers && signaledRow(b):
+			t.Errorf("recovered probe: gc-1 still signaled at quiescence: %v", b.Metadata)
+		case !recovers && !signaledRow(b):
+			t.Errorf("erroring probe: gc-1 finalized over a runtime no read proved stopped: %v", b.Metadata)
+		}
+	}
+}
+
+// TestSimExcusedRefusalIsFinalized (v5.9n, I16). Kills an excused premise
+// refusal left signaled: an outside quarantine after the stop's row read
+// refuses its after-stop finalize (excused), and by quiescence the next pass
+// has finalized the row, which checkStranded holds it to.
+func TestSimExcusedRefusalIsFinalized(t *testing.T) {
+	s := signaledSim(t)
+	s.inventory()
+	s.pass()
+	if len(s.parked) != 1 || s.parked[0].it.Kind != intentStop {
+		t.Fatalf("parked %v, want one stop", s.parked)
+	}
+	l, e := s.legs[0], s.parked[0]
+	e.seam = seamAfterRowRead
+	e.outside = func() {
+		b, _ := l.backing.Get("gc-1")
+		s.outside("quarantine inside stop", l, b, func(l *simLeg, b beads.Bead) {
+			s.setMeta(l, b.ID, "quarantined_until", s.rel(30*time.Second), "sleep_reason", "quarantine")
+		})
+	}
+	s.release(0)
+	s.audit("v2")
+	s.quiesce()
+	if b, _ := l.backing.Get("gc-1"); len(s.failures) > 0 || signaledRow(b) {
+		t.Fatalf("violated %q; gc-1 %v: want it finalized by quiescence", s.failures, b.Metadata)
 	}
 }

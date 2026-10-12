@@ -39,12 +39,14 @@ import (
 // every seam checks the transaction's lock scope.
 
 const (
-	simPatrol  = 10 * time.Second
-	simSteps   = 500
-	simCISeeds = 64
-	simGuard   = 10 * time.Second // real time: turns a hang into a failure
-	simCityLeg = "city"
-	simRigLeg  = "rig-a"
+	simPatrol = 10 * time.Second
+	simSteps  = 500
+	// simMaxPacedRounds bounds I10's paced re-issues at quiescence (v5.9n).
+	simMaxPacedRounds = 8
+	simCISeeds        = 64
+	simGuard          = 10 * time.Second // real time: turns a hang into a failure
+	simCityLeg        = "city"
+	simRigLeg         = "rig-a"
 )
 
 // simStaleEvents lets a step deliver an event older than its row's backing:
@@ -922,6 +924,7 @@ func (s *sim) stale(l *simLeg, ev json.RawMessage) bool {
 
 // step runs one step the RNG picks, then audits it.
 func (s *sim) step() {
+	s.beginStep()
 	switch r := s.rng.IntN(100); {
 	case r < 22:
 		s.pass()
@@ -954,6 +957,10 @@ func (s *sim) step() {
 	}
 	s.audit("v2")
 }
+
+// beginStep starts a step: an outside close of an earlier step excuses no
+// kill in this one (I4's rowNamed, v5.9n).
+func (s *sim) beginStep() { clear(s.closedInStep) }
 
 // audit attributes every row change since the last step to actor, queues an
 // outside writer's events, and checks the invariants.
@@ -990,9 +997,6 @@ func (s *sim) audit(actor string) {
 	}
 	s.check()
 	s.prev = next
-	if actor == "v2" {
-		clear(s.closedInStep) // a v2 step's kills are judged by now
-	}
 }
 
 func sameBead(a, b beads.Bead) bool {
@@ -1141,6 +1145,7 @@ func (s *sim) quiesce() {
 	s.audit("v2")
 	slack := 2*simPatrol + s.cfg.Session.StartupTimeoutDuration()
 	bound := s.lastTimer().Add(slack)
+	neutral := 0
 	for quiet := 0; quiet < 2 && len(s.failures) == 0; {
 		before, backoff, at := s.snapshot(), s.p.backoff.Snapshot(), s.clk.Now()
 		s.round = nil
@@ -1156,8 +1161,13 @@ func (s *sim) quiesce() {
 		switch {
 		case s.clk.Now().Before(bound):
 		case (len(admitted) > 0 || changed) && s.pacedRetries(backoff, at, before, after):
-			// Neither quiet nor a failure: the next pass drains its settlement,
-			// and two quiet rounds still follow it.
+			// A paced re-issue is not a failure, but not quiet either: two
+			// quiet rounds must follow the last one, and more than
+			// simMaxPacedRounds is a loop (a backoff that never grows).
+			quiet = 0
+			if neutral++; neutral > simMaxPacedRounds {
+				s.failf("I10 I-bounded", "%d paced re-issues past the bound: admitted %v, a retry loop", neutral, admitted)
+			}
 		case len(admitted) > 0 || changed:
 			s.failf("I10 I-bounded", "no fixed point %s after the last timer: admitted %v, store changed %t", s.clk.Now().Sub(bound)+slack, admitted, changed)
 		default:
@@ -1236,13 +1246,22 @@ func (s *sim) pacedRetries(backoff map[string]backoffRecord, at time.Time, befor
 		held := r.it.Kind == intentStop && r.res.Cause == fenceAttached ||
 			// TODO(#7626, C5c2): delete the zombie clause once A12's
 			// zombie recycle is registered (TestSimZombieRetryClauseUntilA12).
-			r.it.Kind == intentStart && r.res.Cause == causeDead
+			r.it.Kind == intentStart && r.res.Cause == causeDead && s.zombieUnder(after[s.legOf(r.it.Key.Leg).name+"/"+r.it.Key.ID].Metadata["session_name"])
 		rec, backedOff := backoff[rowBackoffKey(r.it.Key)]
 		if r.res.Outcome != settledRefused || !held || !backedOff || rec.Until.After(at) {
 			return false
 		}
 	}
 	return true
+}
+
+// zombieUnder reports a zombie (its pane alive, its agent dead), not a
+// corpse, under name: the start a zombie holds until A12.
+func (s *sim) zombieUnder(name string) bool {
+	s.sp.mu.Lock()
+	defer s.sp.mu.Unlock()
+	rt := s.sp.rts[name]
+	return rt != nil && rt.zombie && !rt.corpse
 }
 
 // withoutLeaseKeys is meta without the runtime lease record's keys.
