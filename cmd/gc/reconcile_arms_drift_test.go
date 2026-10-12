@@ -275,3 +275,31 @@ func TestLiveAppliedStepFailsOnARunLiveError(t *testing.T) {
 		t.Fatalf("step %+v, want the live hashes and session.updated", ok)
 	}
 }
+
+// Kills A14 repairing drift on a classified dead runtime (E02, the C5c2
+// delta review): a named row's classified zombie is no gone runtime, so its
+// drift gets no repair; gone, it is repaired.
+func TestDriftRepairSkipsAClassifiedDeadRuntime(t *testing.T) {
+	withoutA7(t)
+	tp := TemplateParams{TemplateName: "worker", Command: "run"}
+	stale := runtime.FingerprintVersion + ":stale"
+	named := []string{"configured_named_session", "true", "configured_named_identity", "worker", "configured_named_mode", "always"}
+	for _, gone := range []bool{false, true} {
+		it, _ := decideDrain(t, append([]string{"state", "asleep", "started_config_hash", stale}, named...), func(e *selectionEntry) {
+			e.InDesired, e.Desired, e.Liveness = true, desireKeep, livenessDead
+			if gone {
+				e.Liveness = livenessGone
+			}
+		}, func(w *World) {
+			info := w.Census.Rows[rowKeyOf("gc-1")].Info
+			id := runtimeIdentity{Known: true, SessionID: info.ID, Epoch: info.Generation, Token: info.InstanceToken}
+			w.Env = &reconcileEnv{Cfg: &config.City{Agents: []config.Agent{{Name: "worker"}}}, SP: struct{ runtime.Provider }{runtime.NewFake()}}
+			w.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(info): {TP: tp}}}
+			w.Observed = map[rowKey]rowObservation{rowKeyOf("gc-1"): {Liveness: livenessDead, Identity: id}}
+			w.Classified = map[rowKey]string{rowKeyOf("gc-1"): deadToken(id)}
+		})
+		if repaired := it.Reason == decideDriftRepair || it.Heal != nil && it.Heal.Reason == decideDriftRepair; repaired != gone {
+			t.Fatalf("gone %v: decideRow = (%q, %q), want the drift repair %v", gone, it.Kind, it.Reason, gone)
+		}
+	}
+}

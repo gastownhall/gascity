@@ -595,6 +595,12 @@ func TestSimChecksBite(t *testing.T) {
 			s.prev = map[string]beads.Bead{"city/x": row("x")}
 			s.sp.kills = append(s.sp.kills, simKill{Method: "KillZombieObject", Name: "s-x", Hit: &simRuntime{id: "other", epoch: "2", token: "tok-9", zombie: true}})
 		}},
+		{"I4 ", func(s *sim) { // an asleep write over a zombie classified under another token (E08)
+			s.sp.put("s-x", "x", "2", "tok-2")
+			s.sp.rts["s-x"].zombie = true
+			s.p.classified = map[rowKey]string{{Leg: rowLeg, ID: "x"}: "x/tok-old"}
+			s.checkWrite(simWrite{Leg: "city", Before: row("x", "state", "active"), After: row("x", "state", "asleep")})
+		}},
 		{"I4 ", func(s *sim) { // an asleep write over an unclassified zombie (T1)
 			s.sp.put("s-x", "x", "2", "tok-2")
 			s.sp.rts["s-x"].zombie = true

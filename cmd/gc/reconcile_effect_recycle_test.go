@@ -389,6 +389,19 @@ func TestStartRecycleDrainedDeathCountsNothing(t *testing.T) {
 			t.Fatalf("%s: churn %q attempts %q, want nothing counted for a drained death", name, k.meta("churn_count"), k.meta("wake_attempts"))
 		}
 	}
+	// D1: a drain requested since the pass, on the fresh row alone, as
+	// deathStep's Decide reads it (E05's shape).
+	k, _, _ := deadKit(t, false, "gc-1", "tok", "", "state", "awake", "last_woke_at", gatherNow.Add(-10*time.Second).Format(time.RFC3339), "wake_attempts", "1")
+	b, err := k.backing.Get(k.it.Key.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta := maps.Clone(b.Metadata)
+	meta[session.DrainIntentReasonKey], meta[session.DrainIntentAtKey], meta[session.DrainIntentIncarnationKey] = "idle", gatherNow.Format(time.RFC3339), "3"
+	v := txView{It: k.it, World: k.p.World, Row: k.p.World.Census.Rows[k.it.Key].Info, Meta: meta, Now: gatherNow, prev: deadKilled{killed: true, account: true}}
+	if step := deathStep(v); step.Write["wake_attempts"] != "" || step.Done {
+		t.Fatalf("a drain on the fresh row alone: step %+v, want nothing counted", step)
+	}
 }
 
 // Kills a death's crash recorded twice (SESS-089; the C5c2 review): a

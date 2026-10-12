@@ -922,3 +922,20 @@ func TestDeadRuntimeHealTakesAClassifiedDeadRuntime(t *testing.T) {
 		})
 	}
 }
+
+// Kills the creating heal's classified path lost (E03, the C5c2 delta
+// review): a claimless creating row AL1 wants asleep whose corpse A12
+// classified is healed by the creating heal; unclassified, it is A12's.
+func TestCreatingHealTakesAClassifiedCorpse(t *testing.T) {
+	for _, classified := range []bool{true, false} {
+		c := newHealCase(t, livenessDead, desireSleep, "state", "creating")
+		id := runtimeIdentity{Known: true, SessionID: c.k.ID, Epoch: "3", Token: "tok-3"}
+		c.w.Observed = map[rowKey]rowObservation{c.k: {Liveness: livenessDead, Identity: id}}
+		if classified {
+			c.w.Classified = map[rowKey]string{c.k: deadToken(id)}
+		}
+		if it := c.decide(); (it.Reason == decideCreatingHeal) != classified {
+			t.Fatalf("classified %v: decideRow = (%q, %q), want the creating heal %v", classified, it.Kind, it.Reason, classified)
+		}
+	}
+}

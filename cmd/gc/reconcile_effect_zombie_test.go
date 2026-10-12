@@ -295,3 +295,16 @@ func TestClassifiedDeadIsNotGone(t *testing.T) {
 		t.Fatalf("fresh read: freshGone %v freshGoneOrClassified %v, want false and true", r.freshGone(), r.freshGoneOrClassified())
 	}
 }
+
+// Kills A4 finalizing a signaled stop over a classified zombie (E01, the
+// C5c2 delta review): it decides the stop verb's stop, never its finalize,
+// which only a runtime that reads gone takes.
+func TestStopOnAClassifiedZombieIsNoFinalize(t *testing.T) {
+	c := newHealCase(t, livenessDead, desireSleep, "state", string(session.StateDraining), "state_reason", session.DrainAckStopPendingReason)
+	id := runtimeIdentity{Known: true, SessionID: c.k.ID, Epoch: "3", Token: "tok-3"}
+	c.w.Observed = map[rowKey]rowObservation{c.k: {Liveness: livenessDead, Identity: id}}
+	c.w.Classified = map[rowKey]string{c.k: deadToken(id)}
+	if it := c.decide(); it.Kind != intentStop || it.Finalize {
+		t.Fatalf("decideRow = (%q, %q, finalize %v), want the stop with no finalize", it.Kind, it.Reason, it.Finalize)
+	}
+}
