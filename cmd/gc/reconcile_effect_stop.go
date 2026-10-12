@@ -196,7 +196,7 @@ func finalizeWorkProbe(_ context.Context, r effectReads, v txView) (finalizeWork
 func stopChoice(v txView, work finalizeWork) finalizeChoice {
 	f := finalizeFacts{
 		Now: v.Now, CloseIfUnassigned: closeIfUnassigned(v), HasWork: work.has || work.err != nil,
-		OperatorHeld: session.HoldsInfo(v.Row, v.Now).In&session.HoldUser != 0,
+		OperatorHeld: session.DispositionOfInfo(v.Row).KeepsSlot(),
 		HonoredWake:  honoredWake(v),
 		FreshWake:    v.Row.WakeMode == "fresh", RestartRequested: v.Row.RestartRequested == "true",
 	}
