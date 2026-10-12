@@ -1,6 +1,7 @@
 package session
 
 import (
+	"errors"
 	"reflect"
 	"testing"
 	"time"
@@ -263,6 +264,20 @@ func TestCommitCloseFallsBackToTheTxWhenRefusedAtCallTime(t *testing.T) {
 	}
 	if got.Status != "closed" || got.Metadata["state"] != string(StateFailedCreate) {
 		t.Fatalf("row = status %q state %q, want closed/%s", got.Status, got.Metadata["state"], StateFailedCreate)
+	}
+}
+
+// TestCloseReportsAKillFence: Store.Close, CommitClose's bool form, refuses a
+// row a fresh kill fence holds with ErrSessionKillPending.
+func TestCloseReportsAKillFence(t *testing.T) {
+	backing := beads.NewAtomicCloseMemStore()
+	created := seedOpenSession(t, backing, "s-killed")
+	if err := backing.SetMetadataBatch(created.ID, map[string]string(KillPendingPatch(closeTestNow))); err != nil {
+		t.Fatal(err)
+	}
+	closed, err := NewStore(beads.SessionStore{Store: backing}).Close(decidedOn(t, backing, created.ID), "dead-runtime", closeTestNow.Add(time.Second))
+	if closed || !errors.Is(err, ErrSessionKillPending) {
+		t.Fatalf("Close = (%v, %v), want (false, ErrSessionKillPending)", closed, err)
 	}
 }
 

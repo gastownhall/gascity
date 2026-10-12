@@ -1611,6 +1611,8 @@ func (m *Manager) CloseDetailed(ctx context.Context, by Actor, id string) (Close
 			return fmt.Errorf("closing session %s: %w", id, ErrSessionCloseSuperseded)
 		case res == CommitContended:
 			return fmt.Errorf("closing session %s: lost the revision fence %d times", id, terminalCloseMaxAttempts)
+		case res != CommitLanded && res != CommitClosed:
+			return fmt.Errorf("closing session %s: refused (%s)", id, res)
 		}
 		_ = clearRuntimeMCPServersSnapshot(m.cityPath, id)
 		return nil
