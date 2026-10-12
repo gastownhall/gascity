@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"io"
@@ -47,7 +48,8 @@ type gatherEnv struct {
 	Recording  func() *externalReadsRecording // K1's latest; nil before the first
 	ReadyWaits func() map[string]bool         // K1's waits step's latest (I10)
 	// Nudges and WorkStore are the nudges-class and city work stores C8's
-	// steps write through.
+	// steps write through. WorkStore is also the work leg of the pass's
+	// WorkLegs, which the live work read (L5) plans over.
 	Nudges       func() beads.NudgesStore
 	WorkStore    func() beads.Store
 	Observations func() *ObservationCache
@@ -80,13 +82,18 @@ type World struct {
 	ScaleCheck  *scaleCheckResult
 	Obs         *ObservationSnapshot
 	ObsMaxAge   time.Duration
-	Observed    map[rowKey]rowObservation // observeCensus's per-row facts
-	Gates       map[endpointKey]endpointView
-	Backoff     map[string]backoffRecord
-	InFlight    inflightView
-	Bucket      bucketState
-	Boot        bootState
-	Paused      bool // starts paused for a provider swap (P7)
+	// Patrol is the patrol interval, read once by gather, so the decide
+	// never reaches the config's environment-backed reader.
+	Patrol     time.Duration
+	Observed   map[rowKey]rowObservation // observeCensus's per-row facts
+	Gates      map[endpointKey]endpointView
+	Backoff    map[string]backoffRecord
+	InFlight   inflightView
+	Bucket     bucketState
+	Boot       bootState
+	Paused     bool            // starts paused for a provider swap (P7)
+	SoftReload *softReloadView // the open soft reload this pass read, for A8 (M2)
+	AliasOwed  map[rowKey]bool // rows whose runtime is owed their written alias, for A7 (M1)
 
 	CitySuspended     bool
 	SuspendedRigPaths map[string]bool
@@ -99,6 +106,9 @@ type World struct {
 	// ExecutionStalled are the execution backstop's drain requests by row
 	// ID, for arm A16 (C7b1).
 	ExecutionStalled map[string]executionStalledRequest
+	// Classified are the rows whose dead runtime a zombie classification
+	// completed, by its runtime token (A12): the planner's memory.
+	Classified map[rowKey]string
 	// LegStores holds the sessions leg's store by its ref, which effects
 	// reach only as a fenced writer (newEffectPass). No other leg's store is
 	// here: a census-only row has no writer (AL1, armCensusOnly).
@@ -110,6 +120,20 @@ type World struct {
 	// ref is Census.sessionsLeg().
 	SessionsStore beads.Store
 	RigStores     map[string]beads.Store
+	// OperatorSuspend is the explicit operator suspend cause (city, rig,
+	// agent or session) of each canonical row inside INC-003's grace, the
+	// only rows that read it: such a row gets no grace (v5.4 D2). Gather
+	// reads it, since operatorSuspendCause reads the environment.
+	OperatorSuspend map[rowKey]string
+	// WorkLegs are the city work legs the effects' live work read (L5) plans
+	// over: minted from the city work store, never the sessions store
+	// (NEW2-1). Effects reach them only as effectReads.
+	WorkLegs WorkLegs
+	// Phantoms are the rows that squat a configured name without being its
+	// canonical owner (SESS-080), each with the assignees its close keeps (the
+	// identity and its runtime name), which A21 reads. Resolving them writes
+	// diagnostics, which the pure decide may not (censusPhantoms).
+	Phantoms map[rowKey][]string
 	// fresh is one row's fresh runtime read, which the fresh accessors read
 	// in its pass's stead (withRuntime): set only inside an effect.
 	fresh *freshRow
@@ -129,7 +153,7 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	w := World{Now: now, CityPath: e.CityPath, Env: env, InFlight: p.inflight.view(), Backoff: p.backoff.Snapshot(), Bucket: p.bucket, Paused: p.startsPaused()}
+	w := World{Now: now, CityPath: e.CityPath, Env: env, InFlight: p.inflight.view(), Backoff: p.backoff.Snapshot(), Bucket: p.bucket, Paused: p.startsPaused(), SoftReload: p.softReload.Load().view()}
 	var st suspensionstate.State
 	if e.Suspension != nil {
 		st = e.Suspension()
@@ -155,10 +179,15 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 		return World{}, fmt.Errorf("gather: %w", err)
 	}
 	w.ExecutionStalled = p.executionStalled(w.Census)
+	w.AliasOwed = p.aliasOwedFor(w.Census)
+	w.Phantoms = censusPhantoms(w.Census, cfg, e.CityName)
 	if e.ReadyWaits != nil {
 		w.ReadyWaits = e.ReadyWaits()
 	}
 	w.SessionsStore, w.RigStores = store, rigs
+	if e.WorkStore != nil { // without one, the zero WorkLegs answers every work read unknown
+		w.WorkLegs = workLegsFromCensus(e.CityPath, cfg, cityWorkLegOf(beads.WorkStore{Store: e.WorkStore()}), rigs)
+	}
 	w.LegStores = map[string]beads.Store{legs[0].ref: legs[0].store}
 	all := make(map[string]beads.Store, len(legs))
 	for _, l := range legs {
@@ -166,6 +195,7 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 	}
 	w.InputAges = inputAges(now, all, w.Obs, rec)
 	rows := w.Census.Canonical()
+	w.OperatorSuspend = operatorSuspendCauses(cfg, e.CityPath, rows, st, now)
 	for _, row := range rows {
 		if strings.TrimSpace(row.Info.Template) == "" && strings.TrimSpace(row.Info.SessionNameMetadata) == "" {
 			if w.Mislabelled == nil {
@@ -182,8 +212,10 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 	}
 	w.ScaleCheck = rec.scaleCheck(now)
 
-	w.ObsMaxAge = 2 * env.patrol()
+	w.Patrol = env.patrol()
+	w.ObsMaxAge = 2 * w.Patrol
 	w.Observed = observeCensus(w.Obs, w.Census, now, w.ObsMaxAge)
+	w.Classified = p.classifiedOf(w.Census, w.Observed)
 	var guard *endpointCapacityGuard
 	if e.Capacity != nil {
 		guard = e.Capacity()
@@ -203,6 +235,22 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 	w.Boot.RecordingSeen = rec != nil || !laneFed
 	p.boot = w.Boot
 	return w, nil
+}
+
+// operatorSuspendCauses is operatorSuspendCause for each of rows woken
+// within INC-003's grace of now, keeping the causes only. The rig resolver
+// is costly on path-style dirs, so no other row pays for it.
+func operatorSuspendCauses(cfg *config.City, cityPath string, rows []censusRow, st suspensionstate.State, now time.Time) map[rowKey]string {
+	causes := make(map[rowKey]string)
+	for _, row := range rows {
+		if !wakeGracePreservesUndesiredRow(row.Info, now) {
+			continue
+		}
+		if cause := operatorSuspendCause(cfg, cityPath, row.Info, st); cause != "" {
+			causes[row.Key] = cause
+		}
+	}
+	return causes
 }
 
 // gatherGates reads each endpoint's breaker the pass may act on: every
@@ -283,6 +331,7 @@ func (e gatherEnv) externalReadsEnv() (externalReadsEnv, error) {
 	}
 	if e.WorkStore != nil {
 		k1.WorkStore = e.WorkStore()
+		k1.WorkLegs = workLegsFromCensus(e.CityPath, env.Cfg, cityWorkLegOf(beads.WorkStore{Store: k1.WorkStore}), rigs)
 	}
 	return k1, nil
 }
@@ -516,6 +565,38 @@ func (m *gatherMemo) sleepPolicies(cfg *config.City, env *reconcileEnv, rows []c
 			m.sleep[k] = policy
 		}
 		out[row.Key.ID] = policy
+	}
+	return out
+}
+
+// censusPhantoms is c's SESS-080 phantoms under cfg (World.Phantoms).
+func censusPhantoms(c *sessionCensus, cfg *config.City, cityName string) map[rowKey][]string {
+	out := map[rowKey][]string{}
+	if cfg == nil || len(cfg.NamedSessions) == 0 {
+		return out
+	}
+	// names are the configured names' runtime names, built once: only a row
+	// under one can be a phantom, so the predicate runs on those alone.
+	names := map[string]bool{}
+	city := cmp.Or(strings.TrimSpace(cityName), config.EffectiveCityName(cfg, ""))
+	for i := range cfg.NamedSessions {
+		if identity := cfg.NamedSessions[i].QualifiedName(); identity != "" {
+			names[config.NamedSessionRuntimeName(city, cfg.Workspace, identity)] = true
+		}
+	}
+	for k, row := range c.Rows {
+		if !names[strings.TrimSpace(row.Info.SessionNameMetadata)] {
+			continue
+		}
+		identity, ok := recyclableDeadConfiguredNamePhantomInfo(row.Info, cfg, cityName)
+		if !ok {
+			continue
+		}
+		keep := []string{identity}
+		if rn := config.NamedSessionRuntimeName(cityName, cfg.Workspace, identity); rn != "" && rn != identity {
+			keep = append(keep, rn)
+		}
+		out[k] = keep
 	}
 	return out
 }

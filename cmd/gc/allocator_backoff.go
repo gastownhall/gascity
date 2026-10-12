@@ -34,12 +34,25 @@ func vetoBackoff(n int) time.Duration {
 }
 
 // Backoff keys (C5.11): "row:<leg>/<id>" for a session key's refusal;
+// "drift:<leg>/<id>" for its drift kinds' (D3 amendment: a drift deferral
+// paces only the drift, not the row's other intents);
 // "create:<template>/<instance>" or "named:<identity>" for a create that
 // failed without writing (AM-N8), fingerprinted by its ConfigRev; and
 // "work:<bead>" for worktree evidence that failed verification (C6.5(a)),
 // fingerprinted by the evidence.
 
 func rowBackoffKey(k rowKey) string { return "row:" + k.Leg + "/" + k.ID }
+
+// driftBackoffKey is the key A14's drift kinds settle on.
+func driftBackoffKey(k rowKey) string { return "drift:" + k.Leg + "/" + k.ID }
+
+// settledBackoffKey is the key a row's settlement of kind backs off.
+func settledBackoffKey(kind string, k rowKey) string {
+	if kind == intentDriftRestart || kind == intentDriftRelaunch {
+		return driftBackoffKey(k)
+	}
+	return rowBackoffKey(k)
+}
 
 // createBackoffKey is a create identity's backoff key, from
 // createIdentity.key or allocPlan.identity.
@@ -124,7 +137,7 @@ func (t *backoffTable) Prune(configRev string, census *sessionCensus, demand map
 	for k, r := range t.recs {
 		var drop bool
 		switch kind, rest, _ := strings.Cut(k, ":"); kind {
-		case "row":
+		case "row", "drift":
 			i := strings.LastIndex(rest, "/")
 			drop = complete.Closed(rowKey{Leg: rest[:max(i, 0)], ID: rest[i+1:]})
 		case "work":

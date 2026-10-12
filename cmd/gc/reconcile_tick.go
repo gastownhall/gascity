@@ -134,7 +134,7 @@ func (t *reconcileTick) clearIdleStopPending(id string, front *sessionpkg.Store)
 	// whose intent the fold then follows.
 	w, err := front.ApplyDispositionFresh(id, sessionpkg.ActorController, sessionpkg.DispEvent{Kind: sessionpkg.EvIdleStopEnd}, nil, time.Time{})
 	var refused *sessionpkg.ErrDispositionRefused
-	intent := w.To.Encode()["sleep_intent"]
+	intent := w.To.Encode().Get("sleep_intent")
 	if err != nil && !errors.As(err, &refused) {
 		intent = ""
 	}

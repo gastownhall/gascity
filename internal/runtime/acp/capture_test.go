@@ -813,7 +813,21 @@ func TestStart_CapturesEveryJSONObjectLine(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading capture: %v", err)
 	}
-	got := strings.Join(captureShape(t, parseCaptureLines(t, data)), " | ")
+	// gc answers the permission request (it offers no options) from a
+	// goroutine, so that reply's out record has no fixed position, and Stop
+	// can close the capture before it is written. Compare the shape without
+	// it, and allow at most one.
+	shape := captureShape(t, parseCaptureLines(t, data))
+	var printed []string
+	for _, s := range shape {
+		if s != "out response" {
+			printed = append(printed, s)
+		}
+	}
+	if replies := len(shape) - len(printed); replies > 1 {
+		t.Fatalf("captured %d out responses, want at most 1 (the reply to perm-1): %s", replies, strings.Join(shape, " | "))
+	}
+	got := strings.Join(printed, " | ")
 	want := strings.Join([]string{
 		"header",
 		"out initialize",

@@ -1485,7 +1485,7 @@ func (s *NativeDoltStore) SupportsEphemeralGraphApply() bool {
 // facade commits the issue and every edge in one transaction, so a partial
 // create can no longer be observed and needs no compensation.
 func (s *NativeDoltStore) Create(b Bead) (Bead, error) {
-	noteSessionKeys(b, b.Metadata)
+	noteSessionCreate(b)
 	return s.create(b, false)
 }
 
@@ -2778,7 +2778,7 @@ type nativeDoltTx struct {
 }
 
 func (t *nativeDoltTx) Create(b Bead) (Bead, error) {
-	noteSessionKeys(b, b.Metadata)
+	noteSessionCreate(b)
 	return t.store.applyCreateInTx(t.ctx, t.tx, b)
 }
 
@@ -2790,7 +2790,7 @@ func (t *nativeDoltTx) Update(id string, opts UpdateOpts) error {
 }
 
 func (t *nativeDoltTx) SetMetadataBatch(id string, kvs map[string]string) error {
-	if len(kvs) > 0 && sessionKeyHook.Load() != nil {
+	if len(kvs) > 0 && sessionHooked() {
 		issue, _ := t.tx.GetIssue(t.ctx, id) // read inside the transaction it writes in
 		noteNativeSessionKeys(issue, kvs)
 	}
@@ -2804,7 +2804,7 @@ func (t *nativeDoltTx) Close(id string) error {
 // noteNativeSessionKeys reports kvs when issue is a session row's, read where
 // the write already holds the row.
 func noteNativeSessionKeys(issue *beadslib.Issue, kvs map[string]string) {
-	if issue == nil || sessionKeyHook.Load() == nil {
+	if issue == nil || !sessionHooked() {
 		return
 	}
 	if b, err := beadFromNativeIssue(issue); err == nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"testing"
 	"time"
 
@@ -145,6 +146,9 @@ func TestChatIdleSuspendHoldsNothing(t *testing.T) {
 		t.Fatalf("state=%q held_until=%q sleep_intent=%q wake_request=%q, want suspended, unheld, wake cleared",
 			got.Metadata["state"], got.Metadata["held_until"], got.Metadata["sleep_intent"], got.Metadata["wake_request"])
 	}
+	if _, err := time.Parse(time.RFC3339, got.Metadata["suspended_at"]); err != nil {
+		t.Fatalf("suspended_at = %q, want the SuspendSoft cell's stamp", got.Metadata["suspended_at"])
+	}
 	draining := wakeRow(t, store)
 	if err := store.SetMetadata(draining.ID, "state", string(StateDraining)); err != nil {
 		t.Fatal(err)
@@ -279,7 +283,7 @@ func TestApplySleepKeepsTheHolds(t *testing.T) {
 		if got.Metadata["sleep_intent"] != want || got.Metadata["state"] != string(StateAsleep) {
 			t.Errorf("intent %q: after the sleep state=%q sleep_intent=%q, want asleep with %q", intent, got.Metadata["state"], got.Metadata["sleep_intent"], want)
 		}
-		if _, ok := patch["sleep_intent"]; !ok {
+		if !maps.Equal(patch, SleepPatch(now, "idle")) {
 			t.Errorf("intent %q: ApplySleep mutated its input", intent)
 		}
 	}
@@ -419,5 +423,25 @@ func TestSetWaitHoldOnAClosedRow(t *testing.T) {
 	}
 	if after := mustGet(t, mem, b.ID).Metadata; after["wait_hold"] != before["wait_hold"] || after["sleep_intent"] != before["sleep_intent"] {
 		t.Errorf("closed row wait_hold %q -> %q, intent %q -> %q; want no write", before["wait_hold"], after["wait_hold"], before["sleep_intent"], after["sleep_intent"])
+	}
+}
+
+// TestCloseClearsTheHolds: a closed row keeps no hold, intent or stamp: the
+// close's clear is the Retire cell.
+func TestCloseClearsTheHolds(t *testing.T) {
+	store := beads.NewMemStore()
+	mgr := newTestManager(t, store, runtime.NewFake())
+	b := wakeRow(t, store)
+	if err := store.SetMetadataBatch(b.ID, map[string]string{"sleep_intent": "user-hold", "held_until": dispT0.Format(time.RFC3339), "wait_hold": "true", "suspended_at": dispT0.Format(time.RFC3339)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mgr.CloseDetailed(context.Background(), testActor(mgr, ActorOperator), b.ID); err != nil {
+		t.Fatalf("CloseDetailed: %v", err)
+	}
+	m := mustGet(t, store, b.ID).Metadata
+	for _, k := range dispositionKeys {
+		if m[k] != "" {
+			t.Errorf("%s = %q after the close, want cleared", k, m[k])
+		}
 	}
 }

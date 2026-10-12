@@ -324,15 +324,132 @@ hints or ignore them:
 Fields that are **not** included in the JSON (gc-internal, not part of
 the exec protocol):
 
-- `ready_prompt_prefix` — prompt prefix for readiness detection (gc polls
-  via `peek` after `start` returns)
-- `ready_delay_ms` — fixed delay fallback (gc sleeps after `start` returns)
 - `emits_permission_warning` — bypass-permissions dialog handling
 - `fingerprint_extra` — config change detection metadata
 
-The distinction: readiness polling and delay are the *caller's*
-responsibility. Session setup commands are the *script's* responsibility
-— they run on the target filesystem, not the orchestrator.
+`ready_prompt_prefix` and `ready_delay_ms` are sent, but readiness polling
+(via `peek` after `start` returns) and the fixed delay remain the
+*caller's* responsibility; a script may ignore them. Session setup
+commands are the *script's* responsibility — they run on the target
+filesystem, not the orchestrator.
+
+### Work-dir export exclusions
+
+- **`work_dir_exclude`** — array of patterns, relative to `work_dir`,
+  naming orchestrator-local state that must not leave the orchestrator
+  host. gc sends it with every start config that has a `work_dir`, whatever
+  the directory holds: a work dir with no top-level `.gc/` or `.beads/` can
+  still hold rig scopes below it. A script that copies, archives, or syncs
+  `work_dir` into another filesystem (a remote sandbox, a container image)
+  must skip every matching path. A script that runs the agent in place on
+  the orchestrator's filesystem ignores it.
+
+The list is a floor, not the complete set. A script must skip every
+matching path and may skip more. A script that carries its own built-in
+denylist applies the union of that list and `work_dir_exclude`; it never
+replaces its list with gc's, so a gap on either side cannot widen what
+leaves the host.
+
+Rather than implement the grammar below, a script can ask gc for the
+entries that survive it:
+
+```sh
+set -o pipefail
+"$GC_BIN" runtime workdir-export --null "$WORK_DIR" |
+  tar -C "$WORK_DIR" --null --no-recursion -T - -czf -
+```
+
+- Call the gc named by the start config's `env.GC_BIN`, the binary that
+  produced the list. An older `gc` on `PATH` may lack the subcommand.
+- Check its exit status (`set -o pipefail` in a pipeline). On failure it
+  prints nothing to stdout, and an unchecked pipeline archives an empty work
+  dir.
+- Use `--null`. The default newline-terminated output is for humans only:
+  no byte filter makes it safe for a consumer that splits on blanks or
+  quotes, such as `xargs`. As a backstop it refuses, printing nothing, any
+  entry that contains a newline, a carriage return, or a backslash (GNU
+  `tar -T` reads `\057` as `/`), or that starts with `-`.
+- GNU tar reads a `--null` list verbatim only from 1.30; bsdtar always
+  does. Older GNU tar unquotes backslash escapes even with `--null`, so a
+  crafted file name can make it archive `.gc/controller.token` or a file
+  above the work dir. Where GNU tar may predate 1.30, use the form below:
+  1.29 reads the list verbatim with it, and older releases reject its
+  options, which fails the pipeline. bsdtar rejects those options, so keep
+  the form above there.
+
+  ```sh
+  set -o pipefail
+  "$GC_BIN" runtime workdir-export --null "$WORK_DIR" |
+    tar -C "$WORK_DIR" --null --verbatim-files-from --no-unquote \
+      --no-recursion -T - -czf -
+  ```
+- The output lists every surviving file and symlink, plus every surviving
+  directory that is empty on disk. A non-empty directory is never listed, so
+  a consumer that recurses into listed entries still copies nothing
+  excluded; a consumer that does not recurse recreates parent directories
+  from the paths below them. A directory whose every entry is excluded is
+  absent.
+- Entries come in depth-first walk order, each directory's entries sorted by
+  name. This is not `sort` order: `a/b` comes before `a-c`.
+
+A script that applies `work_dir_exclude` itself copies symlinks as links and
+never dereferences them: an in-tree link such as `x -> .gc/controller.token`
+would otherwise ship its target.
+
+Pattern grammar:
+
+- Patterns and paths are `/`-separated and relative to `work_dir`.
+- A segment of exactly `**` matches zero or more whole path segments.
+- Every other segment is a single-segment glob (Go `path.Match` syntax):
+  `*` matches any run of characters except `/`, leading dots included.
+- A path is excluded when it, or any directory above it, matches. A
+  trailing `/**` spells out that a whole subtree stays behind.
+- This is not gitignore, rsync, or tar `--exclude` syntax. A pattern with
+  no `/` matches only at the work-dir root, and `.gc/**/*.sock` matches
+  `.gc/controller.sock` because `**` may match zero segments. Translating
+  patterns into another tool's syntax is error-prone; prefer
+  `gc runtime workdir-export`.
+
+The list covers secrets and credentials (`.gc/services/**`,
+`.gc/secrets/**`, `.gc/controller.token`, `.gc/credentials.toml`,
+`.gc/credentials.json`, `.gc/mcp-adopted/**`, `.beads/.env`, `.beads/.beads-credential-key`,
+`.beads/proxy.secret`), the event and usage logs, the nudge queue,
+per-session diagnostics under `.gc/sessions/` and ACP transcripts under
+`.gc/transcripts/`, sockets, locks and pid files, the stores under
+`.gc/store/` (the default SQLite binding root), `.gc/storage/`,
+`.gc/infra/` and `.gc/dolt-data/`, bd's stores and their backups in any
+scope (`.beads/dolt/`, `.beads/doltlite/`, `.beads/embeddeddolt/`, its
+SQLite files, bd backups and corrupt-store backups), the file provider's
+`.gc/beads.json` and its `.bak` in any scope, the legacy JSONL archive,
+every file named `beads.sqlite*` wherever it sits, bd server, proxy and
+sync state, the provider-lifecycle journal `.gc/scope-ownership.json`,
+orchestrator runtime state, and other agents' work dirs under
+`.gc/worktrees/` and `.gc/agents/`. Copying any of it gives the session a
+stale, private fork of state the orchestrator owns, or hands it secrets it
+must not hold. Files the session needs are never listed:
+`.gc/settings.json`, `.gc/site.toml`, `.gc/cache/` and `.gc/system/` (pid
+and socket files aside), `.gc/scripts/`, the prompt and skill snapshots
+under `.gc/tmp/`, the staged prompts under `.gc/synth/`, the MCP
+projections under `.gc/mcp-managed/`, the step and iteration artifacts
+agents read and write under `.gc/molecules/` and `.gc/artifacts/`, the
+`.gc/file-beads-layout` marker, `.beads/metadata.json`,
+`.beads/config.yaml`, `.beads/http_target.json`, and `.beads/redirect`.
+
+The list is fixed and matches paths by name. It does not read the city's
+configuration: when a SQLite storage binding's `path` moves its root to a
+path inside the work dir that the list does not name, only that root's
+`beads.sqlite*` files match, and a script for such a city adds the root to
+its own denylist. Matching names also cannot stop a process on the
+orchestrator host from copying or hard-linking excluded content to a path
+the list keeps.
+
+`.gc/site.toml` ships because session-side `gc` commands load it with
+`city.toml`: it carries the workspace name and bead prefix as well as rig
+path bindings. Its rig paths are orchestrator-host paths, so a script that
+relocates the work dir remaps them as it remaps the `GC_*` path variables.
+
+The field is additive. A script that predates it ignores the unknown key
+and keeps copying the whole work dir.
 
 ### Conventions
 

@@ -301,7 +301,7 @@ func TestLiveResumeConsumeDefersOnABusyLease(t *testing.T) {
 // with no other hold: the class unheld, and the resumed runtime's lifecycle.
 func consumeUserHoldPatch() MetadataPatch {
 	patch := consumeUserHoldLife(Disposition{}, Disposition{}, Info{})
-	for k, v := range (Disposition{}).Encode() {
+	for k, v := range (Disposition{}).Encode().Fold() {
 		patch[k] = v
 	}
 	return patch

@@ -14,6 +14,7 @@ go_library(
         "create_options.go",
         "decided.go",
         "disposition.go",
+        "disposition_patch.go",
         "disposition_store.go",
         "facts.go",
         "fields.go",
@@ -96,6 +97,7 @@ go_library(
 go_test(
     name = "session_test",
     srcs = [
+        "acp_permission_test.go",
         "actor_fence_test.go",
         "actor_test.go",
         "address_directory_test.go",
@@ -147,6 +149,7 @@ go_test(
         "named_config_info_equiv_test.go",
         "named_config_test.go",
         "named_session_ineligible_conflict_test.go",
+        "names_alias_conflict_test.go",
         "names_test.go",
         "nocity_guard_test.go",
         "orphan_auto_test.go",
@@ -167,6 +170,7 @@ go_test(
         "startup_health_test.go",
         "state_machine_test.go",
         "stop_fallback_shape_test.go",
+        "stop_input_clear_test.go",
         "store_close_backends_test.go",
         "store_close_terminal_test.go",
         "store_close_test.go",

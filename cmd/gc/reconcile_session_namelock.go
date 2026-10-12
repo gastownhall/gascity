@@ -132,22 +132,27 @@ func lockRuntimeName(w *World, row session.Info, front *session.Store, ttl time.
 	if front != nil {
 		req.ID, req.TTL = row.ID, ttl
 	}
-	lease, err = session.TryRuntimeLease(front, req)
-	switch {
-	case err == nil:
-		return name, lease, "", nil
-	case errors.Is(err, session.ErrRuntimeLeaseBusy):
-		return name, nil, causeNameBusy, err
-	case errors.Is(err, session.ErrRuntimeLeaseNoCAS):
-		return name, nil, causeLeaseNoCAS, err
-	case errors.Is(err, session.ErrRuntimeLeaseRowClosed):
-		return name, nil, causeLeaseRowClosed, err
-	case errors.Is(err, session.ErrRuntimeLeaseContention):
-		return name, nil, causeLeaseContended, err
-	case errors.Is(err, session.ErrRuntimeLeaseRenamed):
-		return name, nil, causeLeaseRenamed, err
-	case errors.Is(err, session.ErrRuntimeLeaseLocalFS):
-		return name, nil, causeLeaseLocalFS, err
+	if lease, err = session.TryRuntimeLease(front, req); err != nil {
+		return name, nil, leaseRefusal(err), err
 	}
-	return name, nil, causeLeaseStore, err
+	return name, lease, "", nil
+}
+
+// leaseRefusal is a lease error's refusal cause.
+func leaseRefusal(err error) string {
+	switch {
+	case errors.Is(err, session.ErrRuntimeLeaseBusy):
+		return causeNameBusy
+	case errors.Is(err, session.ErrRuntimeLeaseNoCAS):
+		return causeLeaseNoCAS
+	case errors.Is(err, session.ErrRuntimeLeaseRowClosed):
+		return causeLeaseRowClosed
+	case errors.Is(err, session.ErrRuntimeLeaseContention):
+		return causeLeaseContended
+	case errors.Is(err, session.ErrRuntimeLeaseRenamed):
+		return causeLeaseRenamed
+	case errors.Is(err, session.ErrRuntimeLeaseLocalFS):
+		return causeLeaseLocalFS
+	}
+	return causeLeaseStore
 }

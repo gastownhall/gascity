@@ -137,6 +137,7 @@ func newTxKitOn(t *testing.T, m, backing beads.Store) *txKit {
 		Census: readCensus(t, gatherNow, censusLegs(rowLeg, cache)), Mislabelled: map[rowKey]bool{},
 		LegStores: map[string]beads.Store{rowLeg: cache}, SessionsStore: cache,
 	}
+	w.WorkLegs = workLegsFromCensus(w.CityPath, w.Env.Cfg, cityWorkLeg{store: cache}, nil)
 	k.p = newEffectPass(w, &allocDecision{Snapshot: &selectionSnapshot{Entries: map[rowKey]*selectionEntry{}}})
 	k.p.Clock, k.p.Runtime = newFakePlannerClock(gatherNow), k.leaf
 	k.p.seam = func(_ context.Context, at txSeam, _ intent, section, attempt int) error {
@@ -451,11 +452,11 @@ func TestTxReadsTheFenceLegs(t *testing.T) {
 	if f.Attach != "" || f.Pending != "" || f.Idle || f.Work.Free {
 		t.Fatalf("fence %+v (work %+v), want detached, nothing pending, active since the pass, work found", f, f.Work)
 	}
-	k.p.reads.city = blindWriteRefusingStore{inner: failingList{k.cache}}
+	k.p.reads.legs = workLegsFromCensus("", nil, cityWorkLeg{store: blindWriteRefusingStore{inner: failingList{k.cache}}}, nil)
 	if k.run(context.Background(), spec); f.Work.Free || f.Work.Err == nil {
 		t.Fatalf("failed work read: %+v, want work assumed, with its error", f.Work)
 	}
-	k.p.reads.city = nil
+	k.p.reads.legs = WorkLegs{}
 	if k.run(context.Background(), spec); f.Work.Free || !errors.Is(f.Work.Err, errNoReadStore) {
 		t.Fatalf("no store: %+v, want work assumed", f.Work)
 	}
@@ -570,6 +571,28 @@ func TestTxReadsTheRuntimeEachAttempt(t *testing.T) {
 	}
 }
 
+// factsCall is a Call result carrying facts (callFacts).
+type factsCall struct{}
+
+func (factsCall) facts() effectFacts {
+	return effectFacts{Events: []events.Event{{Type: events.SessionStopped, Subject: "kept"}}}
+}
+
+// Kills a Call's facts dropped by a later refusal (the C5c2 delta review):
+// facts a Call result carries are merged as it returns, so the next
+// section's refusal keeps them.
+func TestTxCallFactsSurviveALaterRefusal(t *testing.T) {
+	k := newTxKit(t)
+	spec := effectSpec{sections: []section{
+		called(0, section{Decide: func(txView) txStep { return txStep{Pass: struct{}{}} }}, func(context.Context, txCaps, struct{}) (factsCall, error) { return factsCall{}, nil }),
+		{Decide: func(txView) txStep { return txStep{Refuse: "later"} }},
+	}}
+	s := k.run(context.Background(), spec)
+	if s.Cause != "later" || len(s.Facts.Events) != 1 || s.Facts.Events[0].Subject != "kept" {
+		t.Fatalf("settlement %+v, want refused later with the Call's facts kept", s)
+	}
+}
+
 // Kills a premise that checks too little: a fresh row that moved its
 // incarnation, any lifecycle fact (a wake_request at the same generation),
 // its runtime name, or closed, refuses without Decide; after a section
@@ -632,9 +655,13 @@ func TestTxPremiseComparesTheRegistryFacts(t *testing.T) {
 		{"after a start: the current bead", []string{session.CurrentBeadIDKey, "b-1"}, false, []callKind{callStart}, true},
 		{"after a start: the current claim", []string{beadmeta.CurrentClaimBeadIDMetadataKey, "b-1"}, false, []callKind{callStart}, false},
 		{"after a start: lifecycle", []string{"state_reason", "x"}, false, []callKind{callStart}, true},
-		{"after a stop: a session key", []string{"session_key", "k2"}, false, []callKind{callStop}, true},
-		{"after a stop: detached_at", []string{"detached_at", rowAt(0)}, false, []callKind{callStop}, true},
-		{"after a start, then a stop: a session key", []string{"session_key", "k2"}, false, []callKind{callStart, callStop}, true},
+		{"after a stop: an agent's heartbeat", []string{"held_until", rowAt(time.Hour)}, false, []callKind{callStop}, false},
+		{"after a stop: its ack", []string{"drain_ack_at", rowAt(0)}, false, []callKind{callStop}, false},
+		{"after a stop: a session key", []string{"session_key", "k2"}, false, []callKind{callStop}, false},
+		{"after a stop: the operator's intent", []string{"sleep_intent", "user-hold"}, false, []callKind{callStop}, true},
+		{"after a stop: a wake request", []string{"wake_request", "explicit"}, false, []callKind{callStop}, true},
+		{"after a stop: the state", []string{"state_reason", "x"}, false, []callKind{callStop}, true},
+		{"after a start, then a stop: a session key", []string{"session_key", "k2"}, false, []callKind{callStart, callStop}, false},
 	} {
 		k := newTxKit(t)
 		spec := effectSpec{sections: []section{{Decide: mark(txKeyA)}}}
@@ -795,7 +822,7 @@ func TestExecutorSettlesAnAbandonedEffectByItsLatch(t *testing.T) {
 	if err := x.submit(rowKey{Leg: rowLeg, ID: "shutdown"}, hungEffect(intentRowHeal, 2, plannerT0.Add(time.Hour), release)); err != nil {
 		t.Fatal(err)
 	}
-	x.cancel()
+	x.cancel(errEffectShutdown)
 	if s := receive(t, posted); s.Cause != causeShutdown {
 		t.Fatalf("abandoned at shutdown: settlement %+v, want cause %q", s, causeShutdown)
 	}
@@ -826,12 +853,16 @@ func TestEffectSpecsCoverEveryKind(t *testing.T) {
 			t.Errorf("%s: only the create has a body, and a body declares no needs or sections", kind)
 		}
 	}
-	if want := []string{intentAdopt, intentCreate, intentDrainCancel, intentDrainVoid, intentRekey, intentRowHeal, intentRowHealFresh, intentStart}; !slices.Equal(running, want) {
+	if want := []string{intentAdopt, intentBaseline, intentClose, intentCreate, intentDrainBegin, intentDrainBeginFresh, intentDrainCancel, intentDrainVoid, intentDriftRelaunch, intentDriftRepair, intentDriftRestart, intentLiveApply, intentRekey, intentRollback, intentRowHeal, intentRowHealFresh, intentRowMetadata, intentRuntimeAlias, intentSignal, intentSignalAck, intentSignalFresh, intentStart, intentStop, intentZombie}; !slices.Equal(running, want) {
 		t.Fatalf("running kinds %v, want %v", running, want)
 	}
 	p := &effectPass{held: heldCaps{create: &createPass{}, creates: &createEffects{}}}
 	if c := p.capsFor(intent{}, 0, nil); c.create != nil || c.creates != nil {
 		t.Fatal("caps without capCreate hold the create runner")
+	}
+	p.held.release = &closeReleases{}
+	if c := p.capsFor(intent{}, capReadStores, nil); c.release != nil {
+		t.Fatal("caps without capRelease hold the close's release handles")
 	}
 	if c := p.capsFor(intent{}, capCreate, nil); c.create == nil || c.creates == nil {
 		t.Fatal("capCreate does not reach the create runner")
@@ -841,7 +872,12 @@ func TestEffectSpecsCoverEveryKind(t *testing.T) {
 // effectCapGrants are the capabilities each kind holds: the create its
 // runner, the adopt the read-only stores its prepare reads.
 var effectCapGrants = map[string]caps{
-	intentCreate: capCreate, intentAdopt: capReadStores, intentStart: capReadStores | capProviderStart | capEpisode,
+	intentCreate: capCreate, intentAdopt: capReadStores, intentStart: capReadStores | capProviderStart | capEpisode | capRetire,
+	intentRollback:    capProviderStart | capRetire,
+	intentClose:       capReadStores | capRelease,
+	intentRowMetadata: capReadStores, intentRuntimeAlias: capProviderStart, // the alias probe's store; the runtime alias sync
+	intentStop:         capReadStores | capProviderStop,
+	intentDriftRestart: capReadStores | capProviderStop, intentDriftRelaunch: capReadStores | capProviderStart | capProviderStop, // the prepare's stores; the relaunch; the stop
 }
 
 // Kills a fact the planner drops: every effectFacts field, set, is consumed
@@ -863,12 +899,21 @@ func TestApplyFactsConsumesEveryField(t *testing.T) {
 	savedQ := recordAgentQuarantine
 	recordAgentQuarantine = func(_ context.Context, agent string) { quarantined = append(quarantined, agent) }
 	t.Cleanup(func() { recordAgentQuarantine = savedQ })
+	var stops []string
+	savedS := recordAgentStop
+	recordAgentStop = func(_ context.Context, name, identity, reason string, _ error) {
+		stops = append(stops, name+"/"+identity+"/"+reason)
+	}
+	t.Cleanup(func() { recordAgentStop = savedS })
 	f := effectFacts{
 		Events:      []events.Event{{Type: "session.test"}},
 		Transition:  &drainTransition{Name: "s", Reason: "idle", Transition: "cancel"},
 		Work:        &workVerdict{BeadID: "gc-w1", Refused: true},
 		Noted:       &notedRuntime{Name: "s1", At: plannerT0},
 		Quarantined: "worker-1",
+		AliasOwed:   &rowKey{Leg: rowLeg, ID: "gc-a"},
+		Stopped:     &agentStop{Name: "s1", Identity: "worker"},
+		Classified:  &classifiedRuntime{Key: rowKey{ID: "gc-1"}, Token: "tok"},
 	}
 	p.applyFacts(f, plannerT0)
 	consumed := map[string]bool{
@@ -877,6 +922,9 @@ func TestApplyFactsConsumesEveryField(t *testing.T) {
 		"Work":        p.backoff.Snapshot()[workBackoffKey("gc-w1")].Cause == createStageWorktree,
 		"Noted":       cache.Snapshot().ByName["s1"].Listed.Value == ObsYes,
 		"Quarantined": slices.Equal(quarantined, []string{"worker-1"}),
+		"AliasOwed":   p.aliasOwed[rowKey{Leg: rowLeg, ID: "gc-a"}],
+		"Stopped":     slices.Equal(stops, []string{"s1/worker/drain-ack"}),
+		"Classified":  p.classified[rowKey{ID: "gc-1"}] == "tok",
 	}
 	ft := reflect.TypeOf(f)
 	for i := range ft.NumField() {
@@ -1040,13 +1088,22 @@ func TestOnlyStagingCodeAssignsTheStagingSeam(t *testing.T) {
 
 // Kills a hook reaching handles its place forbids: around, outside every
 // lock, holds only these fields, and a Probe only the read-only stores; a
-// Call's handles (provider start, routing, release, kill) go on txCaps
-// alone.
+// Call's handles (provider start, routing, kill) go on txCaps alone. The one
+// write handle an around holds is the close's release (capRelease), for the
+// post-close cascade it runs only once its close landed (settlement.Closed),
+// as runTx's design names; only the close's spec grants it.
 func TestAroundCapsAreScoped(t *testing.T) {
 	if got := reflect.TypeOf(section{}.probe).In(1); got != reflect.TypeFor[effectReads]() {
 		t.Errorf("a Probe holds %v, want effectReads alone", got)
 	}
-	allowed := map[string]bool{"it": true, "reads": true}
+	for kind, spec := range effectSpecs {
+		if spec.caps&capRelease != 0 && kind != intentClose {
+			t.Errorf("%s holds the close's release handles", kind)
+		}
+	}
+	// retire is a closed row's cleanup after its close (C3 step 5): its
+	// waits and bindings, never a session row.
+	allowed := map[string]bool{"it": true, "reads": true, "release": true, "retire": true}
 	for i, ty := 0, reflect.TypeFor[aroundCaps](); i < ty.NumField(); i++ {
 		if f := ty.Field(i).Name; !allowed[f] {
 			t.Errorf("aroundCaps.%s: around runs outside every lock; a write or provider handle belongs to a Call", f)
@@ -1101,16 +1158,16 @@ func TestTxReadStoresNeedsForProbeResetAndCallSeam(t *testing.T) {
 	var reads effectReads
 	probe := probed(func(_ context.Context, r effectReads, _ txView) (int, error) { reads = r; return 7, nil }, func(txView, int, error) txStep { return txStep{} })
 	k.run(context.Background(), effectSpec{sections: []section{probe}})
-	if reads.city != nil {
+	if reads.legs.work != nil {
 		t.Fatal("a Probe reached the stores without capReadStores")
 	}
 	var leaked any
 	next := section{Decide: func(v txView) txStep { leaked = v.probe; return txStep{} }}
 	k.run(context.Background(), effectSpec{caps: capReadStores, sections: []section{probe, next}})
-	if reads.city == nil || leaked != nil {
+	if reads.legs.work == nil || leaked != nil {
 		t.Fatalf("stores %+v, next section's probe %v; want the stores granted and the result not carried", reads, leaked)
 	}
-	if _, err := reads.city.Create(beads.Bead{}); !errors.Is(err, errBlindWriteRefused) {
+	if _, err := reads.legs.work.Create(beads.Bead{}); !errors.Is(err, errBlindWriteRefused) {
 		t.Fatalf("the granted city store wrote: %v", err)
 	}
 	var sawWorld *World
@@ -1157,7 +1214,7 @@ func TestTxBoundedReadsFailClosed(t *testing.T) {
 	if s := k.run(context.Background(), effectSpec{sections: []section{sec}}); s.Outcome != settledNoop || probeErr == nil || !bounded {
 		t.Fatalf("settlement %+v, probe error %v, bounded %t; want the panic read as a failed, bounded Probe", s, probeErr, bounded)
 	}
-	k.p.reads.city = blindWriteRefusingStore{inner: panickingList{k.cache}}
+	k.p.reads.legs = workLegsFromCensus("", nil, cityWorkLeg{store: blindWriteRefusingStore{inner: panickingList{k.cache}}}, nil)
 	var w *txWork
 	k.run(context.Background(), effectSpec{needs: needs{Legs: legWork}, sections: []section{{Decide: func(v txView) txStep { w = v.Fence.Work; return txStep{} }}}})
 	if w == nil || w.Free || w.Err == nil {
@@ -1230,7 +1287,7 @@ func TestTxReadStoresAreReadOnly(t *testing.T) {
 	var w beads.ConditionalWriter
 	var err error
 	sec := probed(func(_ context.Context, r effectReads, _ txView) (int, error) {
-		w, _, err = beads.ResolveConditionalWriter(r.city)
+		w, _, err = beads.ResolveConditionalWriter(r.legs.work)
 		return 0, nil
 	}, func(txView, int, error) txStep { return txStep{} })
 	var around effectReads
@@ -1238,8 +1295,8 @@ func TestTxReadStoresAreReadOnly(t *testing.T) {
 		around = a.reads
 		return run()
 	}})
-	if w != nil || around.city == nil {
-		t.Fatalf("the read-only city store resolved a conditional writer (%v); around got stores %t", err, around.city != nil)
+	if w != nil || around.legs.work == nil {
+		t.Fatalf("the read-only city store resolved a conditional writer (%v); around got stores %t", err, around.legs.work != nil)
 	}
 }
 
@@ -1473,5 +1530,106 @@ func TestLandedCauseOnlyFromTheWritingStep(t *testing.T) {
 	}}
 	if s := newTxKit(t).run(context.Background(), effectSpec{sections: []section{writes}}); s.Outcome != settledLanded || s.Cause != causeHeld {
 		t.Fatalf("settlement %+v, want landed with cause %q", s, causeHeld)
+	}
+}
+
+// Kills a step's title or label deltas dropped, or written apart from its
+// metadata (v5 M1; C7d): a step's Title, AddLabels and RemoveLabels land
+// with its Write, in its one CAS.
+func TestTxWritesTitleAndLabelsWithTheMetadata(t *testing.T) {
+	k := newTxKit(t)
+	if err := k.backing.Update(k.it.Key.ID, beads.UpdateOpts{Labels: []string{"agent:old"}}); err != nil {
+		t.Fatal(err)
+	}
+	title := "worker-1"
+	spec := effectSpec{sections: []section{{Decide: func(txView) txStep {
+		return txStep{Write: session.MetadataPatch{txKeyA: "1"}, Title: &title, AddLabels: []string{"agent:new"}, RemoveLabels: []string{"agent:old"}}
+	}}}}
+	if s := k.run(context.Background(), spec); s.Outcome != settledLanded {
+		t.Fatalf("settlement %+v, want landed", s)
+	}
+	b, err := k.backing.Get(k.it.Key.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Metadata[txKeyA] != "1" || b.Title != title || !slices.Contains(b.Labels, "agent:new") || slices.Contains(b.Labels, "agent:old") {
+		t.Fatalf("row title %q labels %v meta %v, want the title and label deltas with the write", b.Title, b.Labels, b.Metadata)
+	}
+}
+
+// labelRefusingBacking is a backing whose conditional write cannot guard
+// labels, as a FileStore's (LL1).
+type labelRefusingBacking struct{ simBacking }
+
+func (b labelRefusingBacking) UpdateIfMatch(id string, rev int64, opts beads.UpdateOpts) error {
+	if len(opts.Labels)+len(opts.RemoveLabels) > 0 {
+		return &beads.ConditionalUpdateFieldUnsupportedError{Field: "labels"}
+	}
+	return b.MemStore.UpdateIfMatch(id, rev, opts)
+}
+
+// Kills a label write the store cannot guard settled as a plain failure
+// (C7d-1 review should-fix 4): it refuses with its own cause, which A7's
+// deferral reads, and writes nothing.
+func TestTxRefusesUnguardedLabels(t *testing.T) {
+	m := beads.NewMemStoreFrom(0, []beads.Bead{poolRow("gc-1", "worker", 1, "asleep")}, nil)
+	k := newTxKitOn(t, m, labelRefusingBacking{simBacking{m}})
+	spec := effectSpec{sections: []section{{Decide: func(txView) txStep {
+		return txStep{Write: session.MetadataPatch{txKeyA: "1"}, AddLabels: []string{"agent:new"}}
+	}}}}
+	if s := k.run(context.Background(), spec); s.Outcome != settledRefused || s.Cause != causeLabelsUnguarded || k.meta(txKeyA) != "" {
+		t.Fatalf("settlement %+v, a=%q; want refused with cause %q and nothing written", s, k.meta(txKeyA), causeLabelsUnguarded)
+	}
+}
+
+// Kills an abandon (S3) that writes nothing or settles landed, and a Last
+// step whose effect runs on past its Call: a Fail with a Write lands the
+// write and settles failed with the cause; a Last step's Call runs, the
+// effect stays landed, and the section after it never runs.
+func TestTxAbandonAndLast(t *testing.T) {
+	k := newTxKit(t)
+	abandon := effectSpec{needs: needs{NameLock: true}, sections: []section{{Decide: func(txView) txStep {
+		return txStep{Write: session.MetadataPatch{"sleep_reason": "idle"}, Fail: "gave-up"}
+	}}, {Decide: mark("detached_at")}}}
+	if s := k.run(context.Background(), abandon); s.Outcome != settledFailed || s.Cause != "gave-up" || k.meta("sleep_reason") != "idle" || k.meta("detached_at") != "" {
+		t.Fatalf("abandon: settlement %+v, reason %q detached %q; want failed gave-up with a written, b not", s, k.meta("sleep_reason"), k.meta("detached_at"))
+	}
+	k = newTxKit(t)
+	ran := false
+	last := effectSpec{needs: needs{NameLock: true}, sections: []section{
+		called(0, section{Decide: func(txView) txStep { return txStep{Write: session.MetadataPatch{"sleep_reason": "idle"}, Last: true} }},
+			func(context.Context, txCaps, struct{}) (struct{}, error) { ran = true; return struct{}{}, nil }),
+		{Decide: mark("detached_at")},
+	}}
+	if s := k.run(context.Background(), last); s.Outcome != settledLanded || !ran || k.meta("detached_at") != "" {
+		t.Fatalf("last: settlement %+v, call ran %v, detached %q; want landed, the Call run, b not", s, ran, k.meta("detached_at"))
+	}
+}
+
+// Kills a skipped Call that still runs, or still opens the latch: a
+// calledWhen section whose Pass it declines runs no Call and no seam, so an
+// abandonment after it settles failed, never ambiguous; a Pass it accepts
+// calls, gated like a write.
+func TestTxCalledWhenSkipsWithoutOpeningTheLatch(t *testing.T) {
+	k := newTxKit(t)
+	ran := 0
+	call := calledWhen(callStop, section{Decide: func(v txView) txStep {
+		return txStep{Pass: v.It.Reason == "go"}
+	}}, func(run bool) bool { return run }, func(context.Context, txCaps, bool) (struct{}, error) { ran++; return struct{}{}, nil })
+	var seams []txSeam
+	k.on(seamBeforeCall, func() { seams = append(seams, seamBeforeCall) })
+	latch := new(writeLatch)
+	after := section{Decide: func(txView) txStep {
+		latch.abandon() // the executor gives up after the skipped step
+		return txStep{Done: true}
+	}}
+	if s := runTx(context.Background(), k.p, k.it, effectSpec{sections: []section{call, after}}, latch); ran != 0 || len(seams) != 0 || s.Outcome == settledAmbiguous || latch.begun() {
+		t.Fatalf("settlement %+v (called %d, seams %v, begun %t), want the Call skipped and the latch unopened", s, ran, seams, latch.begun())
+	}
+	it := k.it
+	it.Reason = "go"
+	latch = new(writeLatch)
+	if s := runTx(context.Background(), k.p, it, effectSpec{sections: []section{call}}, latch); ran != 1 || len(seams) != 1 || !latch.begun() || s.Outcome == settledFailed {
+		t.Fatalf("settlement %+v (called %d, seams %v, begun %t), want the Call run behind the latch", s, ran, seams, latch.begun())
 	}
 }

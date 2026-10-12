@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -591,7 +592,7 @@ func TestNewControllerStateOpenCityStoreThreadsTheLatchedNativeTransport(t *test
 // TestOpenControlBdStoreThroughFactoryStamps pins the control-dispatcher
 // routing: the raw control-plane bd store must come back factory-stamped
 // (and raw — control paths are deliberately unwrapped), with native
-// selection impossible (no preflight checker is supplied).
+// selection impossible (the control path passes NativeTransportOff).
 func TestOpenControlBdStoreThroughFactoryStamps(t *testing.T) {
 	cfg, err := config.Parse([]byte("[workspace]\nname = \"t\"\n\n[beads]\nconditional_writes = \"require\"\n"))
 	if err != nil {
@@ -615,6 +616,70 @@ func TestOpenControlBdStoreThroughFactoryStamps(t *testing.T) {
 	}
 	if writer == nil {
 		t.Fatal("require was not stamped onto the control-plane bd store")
+	}
+}
+
+// TestOpenControlStoreAtForCityLogsTheBdStorePinAtDebug pins the control
+// path's logging. Every control-plane open pins the bd store, and the control
+// dispatcher opens a store on every readiness poll and dispatched control
+// bead, so that chosen fallback must not reach the default handler as a WARN
+// native_store_unavailable naming a beads.native_transport the city never
+// set. It still logs at Debug under gate native_transport_off: downgraded,
+// not deleted. The control path passes no Logger, so the record lands on
+// slog.Default, which the test swaps for a recorder (so it cannot run in
+// parallel).
+func TestOpenControlStoreAtForCityLogsTheBdStorePinAtDebug(t *testing.T) {
+	const serverMetadata = `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"demo"}`
+	for _, scope := range []string{"city", "rig"} {
+		t.Run(scope, func(t *testing.T) {
+			clearGCEnv(t)
+			disableManagedDoltRecoveryForTest(t)
+			t.Setenv("GC_BEADS", "bd")
+			cityDir := t.TempDir()
+			cfg := &config.City{
+				Workspace: config.Workspace{Name: "demo"},
+				Rigs:      []config.Rig{{Name: "frontend", Path: "rigs/frontend"}},
+			}
+			scopeDir := cityDir
+			if scope == "rig" {
+				scopeDir = filepath.Join(cityDir, "rigs", "frontend")
+			}
+			if err := os.MkdirAll(filepath.Join(scopeDir, ".beads"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(scopeDir, ".beads", "metadata.json"), []byte(serverMetadata), 0o644); err != nil {
+				t.Fatalf("write %s metadata: %v", scope, err)
+			}
+
+			logs := &captureHandler{}
+			prev := slog.Default()
+			slog.SetDefault(slog.New(logs))
+			t.Cleanup(func() { slog.SetDefault(prev) })
+
+			store, err := openControlStoreAtForCity(scopeDir, cityDir, cfg)
+			if err != nil {
+				t.Fatalf("openControlStoreAtForCity: %v", err)
+			}
+			if _, ok := store.(*beads.BdStore); !ok {
+				t.Fatalf("store = %T, want the raw control bd store", store)
+			}
+			pinned := 0
+			for _, r := range logs.records {
+				if r.Message != "native_store_unavailable" {
+					continue
+				}
+				gateName := recordFields(r)["gate"].String()
+				if r.Level >= slog.LevelWarn {
+					t.Errorf("control open logged %s native_store_unavailable gate=%s; the control path pins the bd store on every open, so the pin must not warn", r.Level, gateName)
+				}
+				if r.Level == slog.LevelDebug && gateName == "native_transport_off" {
+					pinned++
+				}
+			}
+			if pinned != 1 {
+				t.Fatalf("control open logged %d DEBUG native_store_unavailable gate=native_transport_off records, want 1 (downgraded, not deleted)", pinned)
+			}
+		})
 	}
 }
 
@@ -659,14 +724,15 @@ func TestConditionalWritesDegradedRecorder(t *testing.T) {
 // therefore reaches this layer as its %T spelling.
 func TestConditionalWritesEventStoreKind(t *testing.T) {
 	for in, want := range map[string]string{
-		beads.BeadsStoreNameBdStore:         "bd",
-		beads.BeadsStoreNameNativeDoltStore: "native",
-		beads.BeadsStoreNameFileStore:       "file",
-		"MemStore":                          "mem",
-		"CachingStore":                      "caching",
-		"SQLiteStore":                       "sqlite-graph",
-		"*beads.DoltliteReadStore":          "bd",
-		"someFutureStore":                   "someFutureStore",
+		beads.BeadsStoreNameBdStore:             "bd",
+		beads.BeadsStoreNameNativeDoltStore:     "native",
+		beads.BeadsStoreNameLibraryBackendStore: "native",
+		beads.BeadsStoreNameFileStore:           "file",
+		"MemStore":                              "mem",
+		"CachingStore":                          "caching",
+		"SQLiteStore":                           "sqlite-graph",
+		"*beads.DoltliteReadStore":              "bd",
+		"someFutureStore":                       "someFutureStore",
 	} {
 		if got := conditionalWritesEventStoreKind(in); got != want {
 			t.Errorf("conditionalWritesEventStoreKind(%q) = %q, want %q", in, got, want)

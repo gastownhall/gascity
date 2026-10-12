@@ -651,7 +651,7 @@ func (s *SQLiteStore) CreateWithForeignID(b Bead) (Bead, error) {
 // duplicate-id error, provided it carries one of the store's reserved
 // namespaces when the store is fenced (WithSQLiteStoreReservedIDPrefixes).
 func (s *SQLiteStore) Create(b Bead) (Bead, error) {
-	noteSessionKeys(b, b.Metadata)
+	noteSessionCreate(b)
 	return s.create(b, false)
 }
 
@@ -1851,7 +1851,7 @@ type sqliteStoreTx struct {
 // the exemption runs through CreateWithForeignID on the store, not inside a
 // caller's transaction, so adding one would open a bypass nothing asks for.
 func (t *sqliteStoreTx) Create(b Bead) (Bead, error) {
-	noteSessionKeys(b, b.Metadata)
+	noteSessionCreate(b)
 	if err := t.store.checkPinnedIDNamespace(b.ID); err != nil {
 		return Bead{}, err
 	}

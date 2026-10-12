@@ -130,7 +130,7 @@ func TestUpdateRowFencedOneCAS(t *testing.T) {
 			rec := &rowWriteRecorder{Store: store}
 			front := NewStore(beads.SessionStore{Store: rec})
 
-			written, err := front.UpdateRowFenced(created.ID, 3, func(Info) (RowPatch, bool) {
+			written, err := front.UpdateRowFenced(created.ID, 3, func(Info, PersistedResponse) (RowPatch, bool) {
 				return singletonRowPatch(), true
 			})
 			if err != nil || !written {
@@ -168,7 +168,7 @@ func TestUpdateRowFencedRedecidesOnLostCAS(t *testing.T) {
 			front := NewStore(beads.SessionStore{Store: store})
 			var seen []string
 
-			written, err := front.UpdateRowFenced(created.ID, 3, func(current Info) (RowPatch, bool) {
+			written, err := front.UpdateRowFenced(created.ID, 3, func(current Info, _ PersistedResponse) (RowPatch, bool) {
 				seen = append(seen, current.Alias)
 				if len(seen) == 1 {
 					if err := backing.SetMetadataBatch(created.ID, map[string]string{"alias": "operator-pick"}); err != nil {
@@ -228,7 +228,7 @@ func TestUpdateRowFencedRefusesWithoutWriter(t *testing.T) {
 			created := seedRowFenceSession(t, store, "s-blind")
 			front := NewStore(beads.SessionStore{Store: store})
 			for call := 0; call < 2; call++ {
-				written, err := front.UpdateRowFenced(created.ID, 3, func(Info) (RowPatch, bool) {
+				written, err := front.UpdateRowFenced(created.ID, 3, func(Info, PersistedResponse) (RowPatch, bool) {
 					t.Fatal("decide ran without a conditional writer")
 					return RowPatch{}, false
 				})
@@ -255,7 +255,7 @@ func TestUpdateRowFencedLabelsRefusedWritesNothing(t *testing.T) {
 			created := seedRowFenceSession(t, store, "s-labels")
 			front := NewStore(beads.SessionStore{Store: store})
 
-			written, err := front.UpdateRowFenced(created.ID, 3, func(Info) (RowPatch, bool) {
+			written, err := front.UpdateRowFenced(created.ID, 3, func(Info, PersistedResponse) (RowPatch, bool) {
 				return singletonRowPatch(), true
 			})
 			var unsupported *beads.ConditionalUpdateFieldUnsupportedError
@@ -282,13 +282,50 @@ func TestUpdateRowFencedDecideRefusalWritesNothing(t *testing.T) {
 			rec := &rowWriteRecorder{Store: store}
 			front := NewStore(beads.SessionStore{Store: rec})
 
-			written, err := front.UpdateRowFenced(created.ID, 3, func(Info) (RowPatch, bool) {
+			written, err := front.UpdateRowFenced(created.ID, 3, func(Info, PersistedResponse) (RowPatch, bool) {
 				return decided.patch, decided.ok
 			})
 			if written || err != nil || len(rec.writes) != 0 {
 				t.Fatalf("UpdateRowFenced = (%v, %v) with writes %v, want nothing written", written, err, rec.writes)
 			}
 			assertRowUntouched(t, store, created.ID)
+		})
+	}
+}
+
+// TestUpdateRowFencedRepairsTypeInTheCAS proves an empty session type is
+// repaired in the same UpdateIfMatch as the metadata (CONTRACT v5 M1,
+// SESS-701). Kills a dropped Type, a type-only patch read as empty, and a
+// separate RepairType write.
+func TestUpdateRowFencedRepairsTypeInTheCAS(t *testing.T) {
+	for _, backend := range rowFenceBackends() {
+		t.Run(backend.name, func(t *testing.T) {
+			store, backing := backend.open(t)
+			b := sessionBeadFixture("s-typeless", "open", map[string]string{"state": string(StateAsleep)})
+			b.Labels = append(b.Labels, LabelSession) // what admits a typeless row (IsSessionBeadOrRepairable)
+			created, err := store.Create(b)
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			empty := ""
+			if err := store.Update(created.ID, beads.UpdateOpts{Type: &empty}); err != nil {
+				t.Fatalf("clearing the type: %v", err)
+			}
+			if got, _ := backing.Get(created.ID); got.Type != "" {
+				t.Skipf("%s stamps a type on create (%q)", backend.name, got.Type)
+			}
+			rec := &rowWriteRecorder{Store: store}
+			front := NewStore(beads.SessionStore{Store: rec})
+			typ := BeadType
+			written, err := front.UpdateRowFenced(created.ID, 3, func(Info, PersistedResponse) (RowPatch, bool) {
+				return RowPatch{Type: &typ}, true
+			})
+			if err != nil || !written || !slices.Equal(rec.writes, []string{"UpdateIfMatch"}) {
+				t.Fatalf("UpdateRowFenced = (%v, %v), writes %v; want one UpdateIfMatch", written, err, rec.writes)
+			}
+			if got, err := backing.Get(created.ID); err != nil || got.Type != BeadType {
+				t.Fatalf("type %q (%v), want %q", got.Type, err, BeadType)
+			}
 		})
 	}
 }

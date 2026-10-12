@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // fakeExecutor captures tmux command arguments for unit testing.
@@ -712,5 +714,63 @@ func TestNewTmuxCommandBoundsPipeWait(t *testing.T) {
 	}
 	if !slices.Equal(cmd.Args[1:], []string{"-u", "list-panes", "-a"}) {
 		t.Fatalf("args = %q, want the tmux argv unchanged", cmd.Args)
+	}
+}
+
+// TestSnapshotIdleSeparatesBusyFromIndeterminate pins the readings of the pane
+// scan behind SnapshotIdle. Only a visible busy indicator is (false, nil). A
+// capture showing neither it nor a ready prompt is
+// runtime.ErrIdleIndeterminate: an idle TUI does not repaint a prompt that a
+// broadcast message or an alternate screen displaced, so callers that hold on
+// busy must not read that pane as busy.
+func TestSnapshotIdleSeparatesBusyFromIndeterminate(t *testing.T) {
+	errCapture := errors.New("capture-pane failed")
+	for _, tc := range []struct {
+		name              string
+		pane              string
+		captureErr        error
+		wantIdle          bool
+		wantIndeterminate bool
+	}{
+		{name: "ready prompt", pane: "● Done.\n\n❯ \n  ? for shortcuts", wantIdle: true},
+		{name: "busy indicator over a visible prompt", pane: "❯ \n  esc to interrupt"},
+		{name: "busy spinner", pane: "✻ Thinking… (12s · ↓ 1.2k tokens)"},
+		{
+			name:              "prompt displaced by a broadcast",
+			pane:              "Broadcast message from root@host (somewhere) (Wed Oct  8 18:00:01 2026):\n\nDISK ALERT: /data at 91% used",
+			wantIndeterminate: true,
+		},
+		{name: "empty capture", wantIndeterminate: true},
+		{name: "capture failure", captureErr: errCapture},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fe := &fakeExecutor{
+				// show-environment finds no configured prefix, so the scan
+				// looks for DefaultReadyPromptPrefix.
+				outs: []string{"", tc.pane},
+				errs: []error{errors.New("unknown variable: GC_READY_PROMPT_PREFIX"), tc.captureErr},
+			}
+			tm := &Tmux{cfg: Config{SocketName: "x"}, exec: fe}
+
+			idle, err := tm.SnapshotIdle("sess")
+
+			if len(fe.calls) != 2 || !slices.Contains(fe.calls[1], "capture-pane") {
+				t.Fatalf("tmux calls = %q, want show-environment then one capture-pane", fe.calls)
+			}
+			if idle != tc.wantIdle {
+				t.Errorf("idle = %t, want %t", idle, tc.wantIdle)
+			}
+			if got := errors.Is(err, runtime.ErrIdleIndeterminate); got != tc.wantIndeterminate {
+				t.Errorf("errors.Is(err, ErrIdleIndeterminate) = %t, want %t (err = %v)", got, tc.wantIndeterminate, err)
+			}
+			switch {
+			case tc.captureErr != nil:
+				if !errors.Is(err, tc.captureErr) {
+					t.Errorf("err = %v, want the capture error %v", err, tc.captureErr)
+				}
+			case !tc.wantIndeterminate && err != nil:
+				t.Errorf("err = %v, want nil", err)
+			}
+		})
 	}
 }

@@ -726,7 +726,7 @@ func TestReleaseOrphanedPoolAssignmentsWhenSnapshotsComplete_PartialSkipsComplet
 		},
 		nil,
 		nil,
-		nil,
+		nil, nil,
 	)
 	if len(released) != 0 {
 		t.Fatalf("released %d work bead(s) from a partial snapshot, want none", len(released))
@@ -752,7 +752,7 @@ func TestReleaseOrphanedPoolAssignmentsWhenSnapshotsComplete_PartialSkipsComplet
 		},
 		nil,
 		nil,
-		nil,
+		nil, nil,
 	)
 	if len(released) != 0 {
 		t.Fatalf("released %d work bead(s) from a partial session snapshot, want none", len(released))
@@ -777,7 +777,7 @@ func TestReleaseOrphanedPoolAssignmentsWhenSnapshotsComplete_PartialSkipsComplet
 		},
 		nil,
 		nil,
-		nil,
+		nil, nil,
 	)
 	if len(released) != 1 {
 		t.Fatalf("complete one-shot snapshot released %d work bead(s), want 1", len(released))

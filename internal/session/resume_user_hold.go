@@ -3,6 +3,7 @@ package session
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"time"
 
@@ -60,9 +61,17 @@ func consumeUserHoldLife(Disposition, Disposition, Info) MetadataPatch {
 // blocks a consume (BlocksConsume), at the same generation and token is
 // converged; otherwise it returns an ErrStateSync error, so the caller never
 // stops the runtime it launched.
-func (m *Manager) consumeUserHold(d Decided, now time.Time) error {
+func (m *Manager) consumeUserHold(d Decided, now time.Time, clears MetadataPatch) error {
 	store := m.PersistedStore()
-	w, err := store.ApplyDisposition(d, ActorOperator, DispEvent{Kind: EvResume}, consumeUserHoldLife, now)
+	life := consumeUserHoldLife
+	if len(clears) > 0 { // a runtime this resume started: as PreWake, it clears the stop request
+		life = func(from, to Disposition, info Info) MetadataPatch {
+			patch := consumeUserHoldLife(from, to, info)
+			maps.Copy(patch, clears)
+			return patch
+		}
+	}
+	w, err := store.ApplyDisposition(d, ActorOperator, DispEvent{Kind: EvResume}, life, now)
 	var refused *ErrDispositionRefused
 	switch {
 	case err != nil && !errors.As(err, &refused):

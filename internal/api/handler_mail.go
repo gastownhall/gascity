@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
+	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -108,48 +109,105 @@ func (s *Server) resolveMailSendRecipientWithContext(ctx context.Context, recipi
 	return "", apiSessionTargetNotFound(recipient)
 }
 
-func (s *Server) resolveMailQueryRecipientsWithContext(ctx context.Context, recipient string) []string {
+// apiMailQuery is the mailbox a mail list or count query reads: the recipient
+// addresses, and — when the query named one session or one configured named
+// session — the inbox that mailbox is, read in one listing
+// (sessionInboxForQuery) instead of expanding each address again.
+type apiMailQuery struct {
+	recipients []string
+	// session is the session whose own inbox the mailbox is
+	// (beadmail.Provider.InboxForSession); nil when there is none.
+	session *session.Info
+	// routes are further mailbox routes read as they are, unexpanded, with
+	// session's inbox — or alone when session is nil.
+	routes []string
+}
+
+// readsInbox reports whether q names a mailbox read as one inbox.
+func (q apiMailQuery) readsInbox() bool {
+	return q.session != nil || len(q.routes) > 0
+}
+
+// resolveMailQueryWithContext resolves the agent a mail list or count query
+// names onto the mailbox it reads.
+func (s *Server) resolveMailQueryWithContext(ctx context.Context, recipient string) apiMailQuery {
 	recipient = strings.TrimSpace(recipient)
 	if recipient == "" {
-		return []string{""}
+		return apiMailQuery{recipients: []string{""}}
 	}
 	if recipient == "human" {
-		return []string{"human"}
+		return apiMailQuery{recipients: []string{"human"}}
 	}
 	store := s.state.SessionsBeadStore().Store
 	if store == nil {
 		if resolved, err := mail.ResolveRecipient(recipient, agentEntries(s.state.Config())); err == nil {
 			if resolved == recipient {
-				return []string{resolved}
+				return apiMailQuery{recipients: []string{resolved}}
 			}
 			// Compatibility: older tests and direct provider callers may have
 			// persisted mail under the raw bare name while API sends now
 			// canonicalize to the qualified recipient.
-			return []string{resolved, recipient}
+			return apiMailQuery{recipients: []string{resolved, recipient}}
 		}
-		return []string{recipient}
+		return apiMailQuery{recipients: []string{recipient}}
 	}
 	if spec, ok, err := s.findNamedSessionSpecForTarget(store, recipient); err == nil && ok {
-		if recipients, listErr := s.mailRecipientsForNamedSession(store, spec); listErr == nil {
-			recipients = uniqueNonEmptyMailRecipients(append(recipients, recipient))
-			if len(recipients) > 0 {
-				return recipients
-			}
+		if q, listErr := s.mailQueryForNamedSession(store, spec, recipient); listErr == nil && len(q.recipients) > 0 {
+			return q
 		}
 	}
 	resolved, err := s.resolveSessionTargetIDWithContext(ctx, store, recipient, apiSessionResolveOptions{})
 	if err != nil {
-		return []string{recipient}
+		return apiMailQuery{recipients: []string{recipient}}
 	}
-	if bead, getErr := store.Get(resolved); getErr == nil {
-		if recipients := session.MailboxAddressesIncludingRuntimeName(bead); len(recipients) > 0 {
-			return recipients
+	if info, _, getErr := session.ResolveSessionRecordByExactID(store, resolved); getErr == nil {
+		if recipients := session.MailboxAddressesIncludingRuntimeNameFromInfo(info); len(recipients) > 0 {
+			return apiMailQuery{recipients: recipients, session: &info}
 		}
 	}
-	return []string{resolved}
+	return apiMailQuery{recipients: []string{resolved}}
 }
 
-func (s *Server) mailRecipientsForNamedSession(store beads.Store, spec apiNamedSessionSpec) ([]string, error) {
+// mailQueryForNamedSession is the mailbox of a configured named session that
+// recipient names: the live incarnation's session inbox, plus — as routes read
+// unexpanded — the configured identity, recipient itself, and every other
+// incarnation's own addresses. An alias-history address is never expanded
+// through the session that holds it now, so another live session's mail stays
+// out, as it does for a query naming the incarnation by id. With no live
+// incarnation the routes alone are the mailbox.
+func (s *Server) mailQueryForNamedSession(store beads.Store, spec apiNamedSessionSpec, recipient string) (apiMailQuery, error) {
+	candidates, err := s.namedSessionIncarnations(store, spec)
+	if err != nil {
+		return apiMailQuery{}, err
+	}
+	identity := apiNormalizeSessionTarget(spec.Identity)
+	if identity == "" {
+		return apiMailQuery{}, nil
+	}
+	q := apiMailQuery{recipients: []string{identity}}
+	routes := []string{identity, recipient}
+	for _, b := range candidates {
+		addresses := session.MailboxAddressesIncludingRuntimeName(b)
+		q.recipients = append(q.recipients, addresses...)
+		if q.session == nil && b.Status != "closed" {
+			info, _, getErr := session.ResolveSessionRecordByExactID(store, b.ID)
+			if getErr != nil {
+				return apiMailQuery{}, getErr
+			}
+			q.session = &info
+			continue
+		}
+		routes = append(routes, addresses...)
+	}
+	q.recipients = uniqueNonEmptyMailRecipients(append(q.recipients, recipient))
+	sort.Strings(q.recipients)
+	q.routes = uniqueNonEmptyMailRecipients(routes)
+	return q, nil
+}
+
+// namedSessionIncarnations returns the session beads, open and closed, of the
+// configured named session spec, once each.
+func (s *Server) namedSessionIncarnations(store beads.Store, spec apiNamedSessionSpec) ([]beads.Bead, error) {
 	identity := apiNormalizeSessionTarget(spec.Identity)
 	if identity == "" {
 		return nil, nil
@@ -163,10 +221,8 @@ func (s *Server) mailRecipientsForNamedSession(store beads.Store, spec apiNamedS
 	if err != nil {
 		return nil, fmt.Errorf("listing named session mail recipients: %w", err)
 	}
-	// The configured identity is a durable mailbox address even after a
-	// materialized session bead adds aliases, IDs, or runtime session names.
-	recipients := []string{identity}
 	seen := make(map[string]bool)
+	out := make([]beads.Bead, 0, len(candidates))
 	for _, b := range candidates {
 		if !session.IsSessionBeadOrRepairable(b) ||
 			!session.IsNamedSessionBead(b) ||
@@ -177,11 +233,9 @@ func (s *Server) mailRecipientsForNamedSession(store beads.Store, spec apiNamedS
 			continue
 		}
 		seen[b.ID] = true
-		recipients = append(recipients, session.MailboxAddressesIncludingRuntimeName(b)...)
+		out = append(out, b)
 	}
-	recipients = uniqueNonEmptyMailRecipients(recipients)
-	sort.Strings(recipients)
-	return recipients, nil
+	return out, nil
 }
 
 func (s *Server) configuredNamedMailIdentities(identifier string) []string {
@@ -300,16 +354,49 @@ func (s *Server) configuredMailRecipientAddress(store beads.Store, identifier st
 	return spec.Identity, true, nil
 }
 
-func mailInboxForRecipients(mp mail.Provider, recipients []string) ([]mail.Message, error) {
-	recipients = uniqueMailRecipients(recipients)
+// sessionInboxForQuery reads the mailbox of a query that named one session or
+// one configured named session as one inbox, when mp can
+// (beadmail.SessionInboxReader) — the mailbox the CLI's self-reads, hook
+// injection and SessionStart mail read, so the API's answer agrees with
+// theirs. ok is false for any other query or provider.
+func sessionInboxForQuery(mp mail.Provider, q apiMailQuery) (inbox *beadmail.Inbox, ok bool, err error) {
+	reader, reads := mp.(beadmail.SessionInboxReader)
+	if !reads || !q.readsInbox() {
+		return nil, false, nil
+	}
+	if q.session != nil {
+		inbox, err = reader.InboxForSession(*q.session, q.routes...)
+	} else {
+		inbox, err = reader.InboxForRoutes(q.routes)
+	}
+	return inbox, true, err
+}
+
+// mailInboxForQuery returns the unread mail of the mailbox q names.
+func mailInboxForQuery(mp mail.Provider, q apiMailQuery) ([]mail.Message, error) {
+	if inbox, ok, err := sessionInboxForQuery(mp, q); ok {
+		if err != nil {
+			return nil, err
+		}
+		return inbox.Unread(), nil
+	}
+	recipients := uniqueMailRecipients(q.recipients)
 	if inboxer, ok := mp.(mail.MultiRecipientInboxer); ok {
 		return inboxer.InboxRecipients(recipients)
 	}
 	return mailMessagesForRecipients(mp.Inbox, recipients)
 }
 
-func mailAllForRecipients(mp mail.Provider, recipients []string) ([]mail.Message, error) {
-	return mailMessagesForRecipients(mp.All, recipients)
+// mailAllForQuery returns all open mail, read or unread, of the mailbox q
+// names.
+func mailAllForQuery(mp mail.Provider, q apiMailQuery) ([]mail.Message, error) {
+	if inbox, ok, err := sessionInboxForQuery(mp, q); ok {
+		if err != nil {
+			return nil, err
+		}
+		return inbox.All(), nil
+	}
+	return mailMessagesForRecipients(mp.All, q.recipients)
 }
 
 func mailMessagesForRecipients(fetch func(string) ([]mail.Message, error), recipients []string) ([]mail.Message, error) {
@@ -334,8 +421,17 @@ func mailMessagesForRecipients(fetch func(string) ([]mail.Message, error), recip
 	return all, nil
 }
 
-func mailCountForRecipients(mp mail.Provider, recipients []string) (int, int, error) {
-	recipients = uniqueMailRecipients(recipients)
+// mailCountForQuery returns the total and unread counts of the mailbox q
+// names.
+func mailCountForQuery(mp mail.Provider, q apiMailQuery) (int, int, error) {
+	if inbox, ok, err := sessionInboxForQuery(mp, q); ok {
+		if err != nil {
+			return 0, 0, err
+		}
+		total, unread := inbox.Counts()
+		return total, unread, nil
+	}
+	recipients := uniqueMailRecipients(q.recipients)
 	if counter, ok := mp.(interface {
 		CountRecipients([]string) (int, int, error)
 	}); ok {

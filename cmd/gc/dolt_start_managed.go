@@ -1265,8 +1265,11 @@ func managedDoltTestParentDone(rawFD string) (<-chan struct{}, func(), error) {
 // reconciler's orphan sweep (sweepProcessTableOrphans) would reap the watchdog
 // as that session's process-table root once the session bead closes, taking
 // the server down with it. A managed server is city infrastructure, not part
-// of any session.
+// of any session. A hook's deadline (hookDeadlineEnv) is scrubbed too: the
+// server outlives the hook that may have started it, so the deadline would be
+// stale for anything the server or its watchdog spawns.
 var managedDoltSessionScopedEnvKeys = []string{
+	hookDeadlineEnv,
 	"GC_SESSION_ID",
 	"GC_SESSION_NAME",
 	"GC_ALIAS",

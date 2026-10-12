@@ -146,7 +146,7 @@ func (t *nativeBatchTx) Create(Bead) (Bead, error) {
 // updateThroughBatch, which waives both guards because the storage-layer write
 // the standalone Store.Update replaced applied neither.
 func (t *nativeBatchTx) Update(id string, opts UpdateOpts) error {
-	if len(opts.Metadata) > 0 && sessionKeyHook.Load() != nil {
+	if len(opts.Metadata) > 0 && sessionHooked() {
 		issue, _ := t.storage.GetIssue(t.ctx, id) // the batch holds the storage; read through it
 		noteNativeSessionKeys(issue, opts.Metadata)
 	}
