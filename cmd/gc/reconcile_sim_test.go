@@ -718,7 +718,7 @@ func (s *sim) releaseInside(i int) {
 		}
 	}
 	e.outside = fire
-	if e.seam == seamAfterCall { // the admit-ticket Call's seam comes first: re-arm for the launch Call's
+	if e.seam == seamAfterCall { // the next Call's seam (the admit ticket's, or a recycle's kill) comes first: re-arm for the one after it
 		e.outside = func() { e.seam, e.outside = seamAfterCall, fire }
 	}
 	s.release(i)

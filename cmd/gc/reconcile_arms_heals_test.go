@@ -952,7 +952,7 @@ func TestStabilityClearEndsTheQuarantinesReason(t *testing.T) {
 	for _, c := range []struct {
 		reason string
 		clear  bool
-	}{{"quarantine", true}, {"rate_limit", true}, {"idle", false}} {
+	}{{"quarantine", true}, {"rate_limit", true}, {"idle", false}, {"context-churn", false}} {
 		h := newHealCase(t, livenessAlive, desireKeep, "state", "awake", "last_woke_at", rowAt(-time.Minute), "quarantined_until", rowAt(time.Hour), "sleep_reason", c.reason)
 		it := h.decide()
 		got, ok := it.Patch["sleep_reason"]
