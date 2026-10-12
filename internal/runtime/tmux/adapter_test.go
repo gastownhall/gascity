@@ -806,6 +806,13 @@ func TestProvider_InputPathsReachMarkedAgentPaneOverSameCLIHumanPane(t *testing.
 	}
 	tm := p.tm
 	agent := markedAgentPane(t, tm, name)
+	// Wait for the agent pane's program before splitting: on a slow default
+	// shell (zsh, tmux 3.2a) it may not have run yet, and its screen and
+	// input are what this test reads.
+	waitForValue(t, "agent pane screen", "true", func() string {
+		out, _ := tm.run("capture-pane", "-p", "-t", agent)
+		return strconv.FormatBool(strings.Contains(out, "AGENT-SCREEN"))
+	})
 	// The human's split goes first in the window (-b) and is focused.
 	human, err := tm.run("split-window", "-b", "-P", "-F", "#{pane_id}", "-t", agent, pane("HUMAN", humanIn))
 	if err != nil {
