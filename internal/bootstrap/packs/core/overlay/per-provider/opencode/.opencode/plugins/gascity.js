@@ -120,11 +120,16 @@ function providerSessionEnv(sessionID) {
     return env;
   }
   env.GC_PROVIDER_SESSION_ID = sessionID;
+  if (process.env.GC_SESSION_ID) {
+    env.GC_SESSION_ID = process.env.GC_SESSION_ID;
+  }
   return env;
 }
 
 async function mirrorTranscript(directory, client, sessionID) {
-  const exportDir = process.env.GC_OPENCODE_TRANSCRIPT_DIR || "";
+  const exportDir =
+    process.env.GC_OPENCODE_TRANSCRIPT_DIR ||
+    path.join(process.env.HOME || "", ".local/share/opencode", "transcripts");
   const safeID = safeSessionID(sessionID);
   if (!exportDir || !safeID || !client?.session) {
     return;
@@ -183,6 +188,9 @@ export default async function gascityPlugin({ directory, client }) {
           }
           return;
         case "session.idle":
+          await mirrorTranscript(directory, client, sessionIDFromEvent(event));
+          await run(directory, "runtime", "drain-ack");
+          return;
         case "message.updated":
           await mirrorTranscript(directory, client, sessionIDFromEvent(event));
           return;
