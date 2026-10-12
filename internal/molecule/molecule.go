@@ -60,6 +60,7 @@ type Options struct {
 	DeferAssignees bool
 
 	nativeStepTopologyPrepared bool
+	stampAttachRootID          bool
 }
 
 const (
@@ -406,6 +407,7 @@ func Attach(ctx context.Context, store beads.Store, recipe *formula.Recipe, atta
 		PreserveRootType:           true,
 		DeferAssignees:             fencedDeferred,
 		nativeStepTopologyPrepared: true,
+		stampAttachRootID:          true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("instantiate: %w", err)
@@ -779,8 +781,23 @@ func existingAttachIDMapping(store beads.Store, recipe *formula.Recipe, rootBead
 	if err != nil {
 		return nil, err
 	}
+	scoped := false
+	for _, bead := range all {
+		if strings.TrimSpace(bead.Metadata[beadmeta.AttachRootIDMetadataKey]) == root.ID {
+			scoped = true
+			break
+		}
+	}
+	matched := map[string]string{}
 	for _, bead := range all {
 		if bead.Metadata[beadmeta.MoleculeFailedMetadataKey] == "true" {
+			continue
+		}
+		owner := strings.TrimSpace(bead.Metadata[beadmeta.AttachRootIDMetadataKey])
+		if scoped && owner != root.ID {
+			continue
+		}
+		if !scoped && (owner != "" || bead.Status == "closed") {
 			continue
 		}
 		ref := strings.TrimSpace(bead.Metadata[beadmeta.StepRefMetadataKey])
@@ -791,10 +808,18 @@ func existingAttachIDMapping(store beads.Store, recipe *formula.Recipe, rootBead
 			continue
 		}
 		for _, stepID := range wantedRefs[ref] {
-			if idMapping[stepID] == "" {
-				idMapping[stepID] = bead.ID
+			prior := matched[stepID]
+			if prior == "" {
+				matched[stepID] = bead.ID
+				continue
+			}
+			if scoped && prior != bead.ID {
+				return nil, fmt.Errorf("attach root %s: step %q matches beads %s and %s", root.ID, stepID, prior, bead.ID)
 			}
 		}
+	}
+	for stepID, beadID := range matched {
+		idMapping[stepID] = beadID
 	}
 	return idMapping, nil
 }
@@ -980,6 +1005,9 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 			}
 			if b.Metadata[beadmeta.StepRefMetadataKey] == "" {
 				b.Metadata[beadmeta.StepRefMetadataKey] = step.ID
+			}
+			if opts.stampAttachRootID {
+				b.Metadata[beadmeta.AttachRootIDMetadataKey] = idMapping[recipe.Steps[0].ID]
 			}
 
 			if graphWorkflow || step.Metadata[beadmeta.KindMetadataKey] != "" {
