@@ -413,6 +413,12 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 				return session.ConfigDriftAsleepResetPatch("key")
 			}),
 		},
+		"internal/session/lifecycle_transition.go:ConfigDriftRestartPatch": {
+			[]string{"restart_requested", "true"},
+			patchSite(func(session.Info) session.MetadataPatch {
+				return session.ConfigDriftRestartPatch("key", now)
+			}),
+		},
 		"internal/session/kill_fence.go:KillPendingPatch": {
 			[]string{"wake_request", "explicit", "wake_requested_at", ago(time.Minute)},
 			patchSite(func(session.Info) session.MetadataPatch { return session.KillPendingPatch(now) }),

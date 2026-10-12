@@ -57,11 +57,13 @@ func TestDecideRowConfigDrift(t *testing.T) {
 		{name: "a stale attached deferral drains", meta: []string{"started_config_hash", stale, "attached_config_drift_deferred_key", key, "attached_config_drift_deferred_at", rowAt(-6 * time.Minute)}, alive: true, wantKind: intentDrainBegin, wantReason: decideDrainBegin + drainConfigDrift},
 		{name: "a pinned named row stamps", meta: append([]string{"started_config_hash", stale, "pin_awake", "true"}, named...), alive: true, wantKind: intentRowHeal, wantReason: decideDriftPinned},
 		{name: "a stamped pinned named row waits", meta: append([]string{"started_config_hash", stale, "pin_awake", "true", "config_drift_deferred_key", key, "config_drift_deferred_at", rowAt(-time.Hour)}, named...), alive: true},
-		{name: "a named row's restart is C7b2's", meta: append([]string{"started_config_hash", stale}, named...), alive: true},
-		{name: "a named launch-only drift's relaunch is C7b2's", meta: slices.Concat([]string{"started_config_hash", stale}, launchOnly, named), alive: true, relaunch: true},
+		{name: "a named row restarts in place", meta: append([]string{"started_config_hash", stale}, named...), alive: true, wantKind: intentDriftRestart, wantReason: decideDriftRestart},
+		{name: "a named row in use restarts, its effect deferring", meta: append([]string{"started_config_hash", stale}, named...), alive: true, pending: true, wantKind: intentDriftRestart, wantReason: decideDriftRestart},
+		{name: "a named launch-only drift relaunches", meta: slices.Concat([]string{"started_config_hash", stale}, launchOnly, named), alive: true, relaunch: true, wantKind: intentDriftRelaunch, wantReason: decideDriftRelaunch},
 		{name: "a pending interaction waits", meta: []string{"started_config_hash", stale}, alive: true, pending: true},
 		{name: "open work waits", meta: []string{"started_config_hash", stale}, alive: true, work: true},
-		{name: "a launch-only drift's relaunch is C7b2's", meta: append([]string{"started_config_hash", stale}, launchOnly...), alive: true, relaunch: true},
+		{name: "a launch-only drift relaunches", meta: append([]string{"started_config_hash", stale}, launchOnly...), alive: true, relaunch: true, wantKind: intentDriftRelaunch, wantReason: decideDriftRelaunch},
+		{name: "a launch-only drift with open work waits", meta: append([]string{"started_config_hash", stale}, launchOnly...), alive: true, relaunch: true, work: true},
 		{name: "a launch-only drift no provider can relaunch drains", meta: append([]string{"started_config_hash", stale}, launchOnly...), alive: true, wantKind: intentDrainBegin, wantReason: decideDrainBegin + drainConfigDrift},
 		{name: "an active stop request holds the drain", meta: append([]string{"started_config_hash", stale}, intentAt(drainIdle, "3")...), alive: true},
 		// A11 sits above A14 (v5 §4): an ack is signaled first, attached or
@@ -101,7 +103,7 @@ func TestDecideRowConfigDrift(t *testing.T) {
 				w.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(info): {TP: tp}}}
 				w.Observed = map[rowKey]rowObservation{rowKeyOf("gc-1"): {Liveness: livenessAlive, Attached: tc.attached, Uncertain: tc.unsure}}
 			})
-			drift := slices.Contains([]string{decideDriftAttached, decideDriftPinned, decideDriftResolved, decideDrainBegin + drainConfigDrift, decideDriftRepair, decideLiveApply}, it.Reason)
+			drift := slices.Contains([]string{decideDriftAttached, decideDriftPinned, decideDriftResolved, decideDrainBegin + drainConfigDrift, decideDriftRepair, decideLiveApply, decideDriftRestart, decideDriftRelaunch}, it.Reason)
 			if tc.wantKind == "" && drift || tc.wantKind != "" && (it.Kind != tc.wantKind || it.Reason != tc.wantReason) { // another arm may take a row A14 leaves
 				t.Fatalf("decideRow = (%q, %q) %v, want (%q, %q)", it.Kind, it.Reason, it.Patch, tc.wantKind, tc.wantReason)
 			}

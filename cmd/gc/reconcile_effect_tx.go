@@ -269,6 +269,7 @@ type needs struct {
 	Runtime   bool      // the runtime read fresh each attempt
 	Legs      fenceLegs // legAttach (L3), legPending (L4) on the routed leaf; legWork (L5) live
 	Idle      bool      // the agent proved idle on the routed leaf
+	Activity  bool      // the agent's activity read on the routed leaf (a named drift restart's deferral)
 	Escalates bool      // a C8.5 escalation class: L3 escalates on a terminal-no-report leaf
 	Attempts  int       // CAS rounds per section, each deciding again; 0 is 3
 	// Lease takes the row's runtime lease record, not the name's flock
@@ -448,6 +449,15 @@ type txFence struct {
 	Read            fenceLegs // the legs read: one not read holds (fenceDestructive)
 	Work            *txWork
 	Idle            bool // proved idle: WaitForIdle, then no activity since the pass
+	Activity        *activityRead
+}
+
+// activityRead is the routed leaf's activity read: whether it reports
+// activity for the name, and its last.
+type activityRead struct {
+	Reportable bool
+	Last       time.Time
+	Err        error
 }
 
 // txStep is Decide's verdict: refuse or fail (writing nothing), write, or

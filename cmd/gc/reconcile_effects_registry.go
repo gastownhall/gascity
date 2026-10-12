@@ -98,10 +98,12 @@ func newEffectPass(w *World, a *allocDecision) *effectPass {
 var effectSpecs = map[string]effectSpec{
 	intentStart:           {class: capStarts, tokens: 1, needs: needs{Runtime: true, Lease: true}, caps: capReadStores | capProviderStart | capEpisode | capRetire, sections: startSections, around: retireAround},
 	intentAdopt:           {class: capProbing, needs: needs{Runtime: true, Lease: true}, caps: capReadStores, sections: adoptSections},
-	intentCreate:          {class: capCreates, caps: capCreate, body: createBody},                                     // C1, C2
-	intentDriftRepair:     {class: capProbing, needs: needs{Runtime: true}, sections: healSections},                   // A14 (C7b2): the fresh heal's, under its own kind
-	intentLiveApply:       {class: capProbing, needs: needs{Runtime: true, Lease: true}, sections: liveApplySections}, // A14 (C7b2)
-	intentRekey:           {class: capProbing, needs: needs{Runtime: true, Lease: true}, sections: rekeySections},     // A3: writes the incarnation under the row's lease record
+	intentCreate:          {class: capCreates, caps: capCreate, body: createBody},                                                                                                    // C1, C2
+	intentDriftRepair:     {class: capProbing, needs: needs{Runtime: true}, sections: healSections},                                                                                  // A14 (C7b2): the fresh heal's, under its own kind
+	intentDriftRestart:    {class: capProbing, bootGated: true, needs: driftRestartNeeds, caps: capReadStores | capProviderStop, sections: driftRestartSections},                     // A14 (C7b2)
+	intentDriftRelaunch:   {class: capProbing, bootGated: true, needs: driftRestartNeeds, caps: capReadStores | capProviderStart | capProviderStop, sections: driftRelaunchSections}, // A14 (C7b2)
+	intentLiveApply:       {class: capProbing, needs: needs{Runtime: true, Lease: true}, sections: liveApplySections},                                                                // A14 (C7b2)
+	intentRekey:           {class: capProbing, needs: needs{Runtime: true, Lease: true}, sections: rekeySections},                                                                    // A3: writes the incarnation under the row's lease record
 	intentZombie:          {class: capProbing, bootGated: true, needs: needs{Lease: true}},
 	intentDrainBegin:      {class: capRowWrites, bootGated: true, needsFor: drainBeginNeeds, sections: drainBeginSections},                                                                               // A20 (C6a2)
 	intentDrainBeginFresh: {class: capProbing, bootGated: true, needsFor: drainBeginNeeds, sections: drainBeginSections},                                                                                 // A20 (C6a2)

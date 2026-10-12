@@ -28,6 +28,8 @@ const (
 	intentRekey           = "rekey"             // S4
 	intentLiveApply       = "live-apply"        // A14's RunLive (SESS-565)
 	intentDriftRepair     = "drift-repair"      // A14's asleep named repair (SESS-566/568): a fresh heal of its own kind
+	intentDriftRestart    = "drift-restart"     // A14's named restart in place (SESS-557), on the stop verb
+	intentDriftRelaunch   = "drift-relaunch"    // A14's launch-only relaunch (SESS-556/560), falling back to the restart or the drain
 	intentZombie          = "zombie"            // A12's classification (S5)
 	intentDrainBegin      = "drain-begin"       // D1, D2
 	intentDrainBeginFresh = "drain-begin-fresh" // a begin that reads fresh legs (F4) or re-proves idleness

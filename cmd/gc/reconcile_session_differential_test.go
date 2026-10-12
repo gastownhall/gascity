@@ -218,10 +218,6 @@ var parityFindings = map[string]parityEntry{
 // parityUnported is legacy behavior that belongs to an arm or effect kind
 // not yet registered. The key's arm ("A18") or kind must stay unregistered.
 var parityUnported = map[string]parityEntry{
-	"C7b2 drift-restart": {
-		"C7b2 (A14's named restart in place, SESS-557)", "legacy kills a drifted named row's runtime and restarts it in place in the tick (ConfigDriftResetPatch, the start and its commit); v2's A14 leaves the row alone until C7b2 brings the restart with its effect",
-		append([]string{"continuation_epoch", "generation", "state_reason", "creation_complete_at", "awake_started_at", "last_woke_at", "primed_at", "prompt_hash", "started_config_hash"}, parityStartKeys...),
-	},
 	// Unported with no fixture, since neither twin reads a provider-health
 	// registry (legacy's gate is nil there): legacy's ADR-0013 episode
 	// bookkeeping around A18's red skip, recordRedSkip, recordGreenTick and
@@ -263,9 +259,11 @@ var parityKindOwners = map[string]*regexp.Regexp{
 	intentSignalAck: regexp.MustCompile(`\bA11\b`),
 	// S4 rekeys a StaleSelf row; A3, the arm proposing it, is gated
 	// through parityArmRef.
-	intentRekey:       regexp.MustCompile(`\bS4\b`),
-	intentLiveApply:   regexp.MustCompile(`\bA14 config drift\b`), // SESS-565's RunLive
-	intentDriftRepair: regexp.MustCompile(`\bA14 config drift\b`), // SESS-566/568's repair
+	intentRekey:         regexp.MustCompile(`\bS4\b`),
+	intentLiveApply:     regexp.MustCompile(`\bA14 config drift\b`), // SESS-565's RunLive
+	intentDriftRepair:   regexp.MustCompile(`\bA14 config drift\b`), // SESS-566/568's repair
+	intentDriftRestart:  regexp.MustCompile(`\bA14 config drift\b`), // SESS-557's restart in place
+	intentDriftRelaunch: regexp.MustCompile(`\bA14 config drift\b`), // SESS-556/560's relaunch
 	// S1's start (C5a1's effect, A17/A18's kind) owns its Launch and
 	// PreWake rows; S1's adopt owns no row yet.
 	intentStart: regexp.MustCompile(`\bS1 start\b|\bS1 PreWake\b`),
@@ -1561,10 +1559,7 @@ func parityFixtures() []parityFixture {
 		{
 			Name: "a named row's drift restarts it in place", Behaviors: []string{"SESS-557"}, City: chat(false),
 			Rows: []parityRow{onDemand("configured_named_mode", "always", "started_config_hash", drifted)}, Runtimes: []simRuntime{chatLive},
-			Explain: tlMerged(chatStanding, map[string]string{
-				"row:gc-c:*restart": "C7b2 drift-restart", "provider:Stop chat": "C7b2 drift-restart", "provider:Start chat": "C7b2 drift-restart", "provider:RemoveMeta chat": "C7b2 drift-restart",
-				"event:session.draining chat []": "C7b2 drift-restart", "event:session.woke chat []": "C7b2 drift-restart",
-			}),
+			Explain: tlMerged(chatStanding, map[string]string{"provider:RemoveMeta chat": "§12.2#38 start-meta-clears"}),
 		},
 		{
 			Name: "an asleep named row's drift is repaired", Behaviors: []string{"SESS-566", "SESS-568"}, City: chatOnDemand,

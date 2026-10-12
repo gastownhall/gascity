@@ -254,6 +254,8 @@ var observed = []struct {
 	{legacy(srcTransition, "ConfigDriftResetPatch"), true, []string{"restart_requested"}},
 	{v2(srcTransition, "ConfigDriftAsleepResetPatch"), false, []string{"continuation_reset_pending", "last_woke_at", "live_hash", "pending_create_claim", "pending_create_started_at", "primed_at", "priming_attempted_at", "prompt_hash", "started_config_hash", "started_live_hash", "startup_dialog_verified", "state"}},
 	{v2(srcTransition, "ConfigDriftAsleepResetPatch"), true, []string{"restart_requested"}},
+	{v2(srcTransition, "ConfigDriftRestartPatch"), false, []string{"continuation_reset_pending", "last_woke_at", "live_hash", "pending_create_claim", "pending_create_started_at", "primed_at", "priming_attempted_at", "prompt_hash", "session_key", "started_config_hash", "started_live_hash", "startup_dialog_verified", "state"}},
+	{v2(srcTransition, "ConfigDriftRestartPatch"), true, []string{"restart_requested"}},
 	{legacy(srcTransition, "PreWakePatch"), false, []string{"sleep_reason"}},
 	// A fresh wake's conversation reset (applyFreshWakeConversationReset),
 	// which v2's PreWake reuses: the baseline cleared for its commit.

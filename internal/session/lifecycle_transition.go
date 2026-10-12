@@ -540,6 +540,16 @@ func ConfigDriftAsleepResetPatch(sessionKey string) MetadataPatch {
 	return configDriftReset(StateAsleep, sessionKey)
 }
 
+// ConfigDriftRestartPatch is ConfigDriftResetPatch(StateStartPending, ...)
+// at now, which it reads from its caller: the v2 named restart in place's
+// (SESS-557), written after its stop.
+func ConfigDriftRestartPatch(sessionKey string, now time.Time) MetadataPatch {
+	patch := configDriftReset(StateStartPending, sessionKey)
+	patch["pending_create_claim"] = "true"
+	patch["pending_create_started_at"] = now.UTC().Format(time.RFC3339)
+	return patch
+}
+
 // configDriftReset is a config-drift reset into nextState, its pending
 // create claim (a start's) aside.
 func configDriftReset(nextState State, sessionKey string) MetadataPatch {

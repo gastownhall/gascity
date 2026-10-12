@@ -99,7 +99,8 @@ type stopped struct {
 // fence. It refuses a stop A4 no longer decides, or one the fence holds.
 func stopDecide(v txView) txStep {
 	w := v.World.withRow(v.It.Key, v.Row, v.Meta).withRuntime(v.It.Key, v.RT)
-	if fresh, _ := decideRow(&w, v.Alloc, v.It.Key); fresh.Kind != intentStop {
+	if fresh, _ := decideRow(&w, v.Alloc, v.It.Key); fresh.Kind != v.It.Kind { // the stop's, or A14's restart that runs it
+
 		return txStep{Refuse: causeRedecided}
 	}
 	name := strings.TrimSpace(v.Row.SessionName)

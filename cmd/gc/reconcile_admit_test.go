@@ -432,10 +432,11 @@ func TestAdmitPausedDefersStartsAndCreates(t *testing.T) {
 }
 
 // Kills a destructive effect before the inputs are primed, and gating a
-// start, adopt or rekey on the boot gate (P2): exactly the six destructive
-// families defer, with cause boot-gate.
+// start, adopt or rekey on the boot gate (P2): exactly the destructive
+// families defer, A14's restart and relaunch among them, with cause
+// boot-gate.
 func TestAdmitBootGateClosedDefersExactlyTheSixKinds(t *testing.T) {
-	gated := []string{intentClose, intentDrainBegin, intentDrainBeginFresh, intentRollback, intentSignal, intentSignalAck, intentSignalFresh, intentStop, intentZombie}
+	gated := []string{intentClose, intentDrainBegin, intentDrainBeginFresh, intentDriftRelaunch, intentDriftRestart, intentRollback, intentSignal, intentSignalAck, intentSignalFresh, intentStop, intentZombie} // A14's restart and relaunch, ruled
 	in := admitIn(50, 50)
 	in.BootOpen = false
 	var intents []intent
