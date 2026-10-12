@@ -98,7 +98,7 @@ func driftDeferStep(v txView) txStep {
 // (pendingInteractionHoldInfo): a wait hold, or a hold or quarantine
 // blocking the row.
 func pendingExempt(row session.Info, now time.Time) bool {
-	if strings.TrimSpace(row.WaitHold) != "" {
+	if session.DispositionOfInfo(row).Wait {
 		return true
 	}
 	in := session.LifecycleInputFromInfo(row)
