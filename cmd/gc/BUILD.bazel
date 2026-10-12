@@ -872,6 +872,7 @@ go_test(
         "allocator_health_test.go",
         "allocator_index_test.go",
         "allocator_observe_test.go",
+        "allocator_pending_create_keep_test.go",
         "allocator_plan_test.go",
         "allocator_scalecheck_lane_test.go",
         "allocator_seams_prerefactor_test.go",

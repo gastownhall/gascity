@@ -465,6 +465,18 @@ func (p *decidePass) openAssignedWork(info session.Info) *assignedWorkView {
 // or its template retained), then an uncertain observation. In a suspended
 // city a pending create legacy still leases and a row with open assigned
 // work keep too.
+//
+// In a running city an undesired pending create that is not pool-managed
+// keeps while legacy still leases it (v5.9r; SESS-065, SESS-596): legacy
+// preserves such a row before any drain or close (session_reconciler.go:2368),
+// and a fresh manual create read between its two writes (the row, then its
+// session_name) is undesired for want of a name (staging J45). Only a row
+// holding pending_create_claim keeps, so the claim's lease bounds the keep:
+// the never-started deadline (S6) or the start's in-flight window, and a
+// suspended agent ends it at once. Legacy's other leased shape, a claimless
+// start-pending row, has no deadline, so it is not kept. An undesired pool
+// pending create is not kept: legacy's MAINT-051 sweep closes it, and A10
+// rolls it back (§12.2 row 44).
 func (p *decidePass) keepReason(e *selectionEntry, info session.Info) string {
 	if e.Desired != desireSleep && e.Desired != desireDrain {
 		return ""
@@ -475,6 +487,9 @@ func (p *decidePass) keepReason(e *selectionEntry, info session.Info) string {
 	case e.ObservationUncertain:
 		return reasonObservationUncertain
 	case !p.in.CitySuspended:
+		if e.Desired == desireDrain && info.PendingCreateClaim && !isPoolManagedSessionInfo(info) && pendingCreateSessionStillLeasedAt(info, p.cfg, p.in.Now) {
+			return reasonPendingCreate
+		}
 		return ""
 	case pendingCreateSessionStillLeasedAt(info, p.cfg, p.in.Now):
 		return reasonPendingCreate

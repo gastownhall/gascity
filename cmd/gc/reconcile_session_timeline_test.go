@@ -588,6 +588,7 @@ var timelineGoldenRulings = []goldenRuling{
 	{"a managed suspend drains, then wake", timelineGoldenBaseline, "48df08bf8396"},
 	{"a managed suspend drains, then wake", "fix #7417 (mc-esqo7)", "61f2ce80feb0"},
 	{"a managed suspend drains, then wake", "fix #7590 (mc-esqo7): the drain's sleep keeps suspended_at (the Sleep cell, NEW2-5)", "e6e0e6743019"},
+	{"a manual create read between its two writes", timelineGoldenBaseline, "8c2d0f4552c4"},
 	{"a provider swap stops the runtime", timelineGoldenBaseline, "68a5d9d9b0ef"},
 	{"a quarantine, then a kill fence, expires", timelineGoldenBaseline, "e6f3872c765e"},
 	{"a reload turns idle sleep on for a detached row", timelineGoldenBaseline, "787037012e13"},
@@ -791,7 +792,29 @@ func TestTimelineGoldenNeedsARuling(t *testing.T) {
 // §3.6, each group's own: the stability clears and accrual, then the idle
 // and drain timers, then the operator verbs.
 func timelineFixtures() []timelineFixture {
-	return slices.Concat(stabilityTimeline(), idleTimeline(), operatorTimeline(), baselineTimeline(), driftTimeline())
+	return slices.Concat(stabilityTimeline(), idleTimeline(), operatorTimeline(), baselineTimeline(), driftTimeline(), manualCreateTimeline())
+}
+
+// manualCreateTimeline is staging J45 through time (v5.9r; SESS-065): a
+// manual create the passes read between its two writes, the row (with the
+// keys Manager.CreateSession writes first) and then its session_name.
+// Undesired for want of a name, it is kept, not rolled back, and once its
+// name lands both copies wake it.
+func manualCreateTimeline() []timelineFixture {
+	one := func() *config.City {
+		cfg := tlCity()
+		cfg.Agents[0].MaxActiveSessions, cfg.Agents[0].MinActiveSessions = intPtr(1), intPtr(0)
+		return cfg
+	}
+	row := sessionRow("gc-1", "template", "worker", "agent_name", "worker", "alias", "worker", "state", "start-pending",
+		"session_origin", "manual", "command", "true", "generation", "1", "continuation_epoch", "1", "instance_token", "tok-gc-1",
+		"pending_create_claim", "true", "pending_create_started_at", tlAt(0))
+	f := tlFixture("a manual create read between its two writes", one,
+		[]parityRow{row}, nil, nil,
+		[]parityStep{{Name: "its session_name lands", Advance: 2 * time.Second, Op: func(tw twin) { tw.set("gc-1", "session_name", "s-gc-1") }}},
+		nil, map[string]map[string]string{"its session_name lands": tlMerged(tlPol("gc-1"), tlRestarted())})
+	f.Setup = func(tw twin) { tw.set("gc-1", "work_dir", tw.city) }
+	return []timelineFixture{f}
 }
 
 func tlAt(d time.Duration) string { return parityNow.Add(d).UTC().Format(time.RFC3339) }

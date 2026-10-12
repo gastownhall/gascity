@@ -166,6 +166,20 @@ row:gc-1:state legacy="active" v2="awake" [§12.2#39 commit-writes-awake]
 provider:RemoveMeta s-gc-1 resolved
 row:gc-1:state resolved
 ## 4 the next pass (+10m0s)
+=== a manual create read between its two writes
+## 0 seed (+20s)
+## 1 its session_name lands (+42s)
+@ +22s
+provider:RemoveMeta s-gc-1 legacy="5" v2="" [§12.2#38 start-meta-clears]
+row:gc-1:effective_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
+row:gc-1:requested_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
+row:gc-1:sleep_capability legacy="full" v2="" [sleep-policy-keys]
+row:gc-1:sleep_policy_fingerprint legacy="value=off|class=interactive_resume|source=legacy_off|wake=resume|cap=full|deps=|template=worker" v2="" [sleep-policy-keys]
+row:gc-1:sleep_policy_source legacy="legacy_off" v2="" [sleep-policy-keys]
+row:gc-1:state legacy="active" v2="awake" [§12.2#39 commit-writes-awake]
+@ +32s
+provider:RemoveMeta s-gc-1 resolved
+row:gc-1:state resolved
 === a provider swap stops the runtime
 ## 0 seed (+20s)
 @ +0s
