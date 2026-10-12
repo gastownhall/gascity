@@ -80,6 +80,7 @@ go_test(
         "lifecycle_test.go",
         "liveness_present_test.go",
         "main_test.go",
+        "menu_cursor_row_test.go",
         "nudge_clear_before_paste_integration_test.go",
         "nudge_confirm_lag_integration_test.go",
         "nudge_dismiss_besteffort_test.go",
