@@ -41,8 +41,13 @@ const (
 
 // heal is the row write of patch as kind, at the incarnation the pass saw.
 func (r *rowFacts) heal(kind, reason string, patch session.MetadataPatch) (intent, bool) {
+	return r.healClass(kind, reason, patch, session.DispositionPatch{})
+}
+
+// healClass is heal with the disposition cells' keys class beside patch.
+func (r *rowFacts) healClass(kind, reason string, patch session.MetadataPatch, class session.DispositionPatch) (intent, bool) {
 	basis := rowBasis{Incarnation: r.row.Incarnation, InstanceToken: r.row.InstanceToken}
-	return intent{Kind: kind, Reason: reason, Basis: basis, Patch: patch}, true
+	return intent{Kind: kind, Reason: reason, Basis: basis, Patch: patch, Class: class}, true
 }
 
 // freshGone is gone for a fresh kind's arm: it rests the decision on the
@@ -151,8 +156,8 @@ func armDeadRuntimeHeal(r *rowFacts) (intent, bool) {
 	if r.entry == nil || !committed(info) || r.entry.Desired == desireDrain || !r.freshGone() {
 		return intent{}, false
 	}
-	patch, _ := deadRuntimePatch(r, true)
-	return r.heal(intentRowHealFresh, decideDeadRuntimeHeal, patch)
+	patch, class, _ := deadRuntimePatch(r, true)
+	return r.healClass(intentRowHealFresh, decideDeadRuntimeHeal, patch, class)
 }
 
 // deadRuntimePatch is legacy's write for a committed row whose runtime is
@@ -171,17 +176,20 @@ func armDeadRuntimeHeal(r *rowFacts) (intent, bool) {
 // With heal false the patch is the death's accrual alone, the row left
 // committed: a stranded seat's record of its death while its restart
 // cannot run (startHealed).
-func deadRuntimePatch(r *rowFacts, heal bool) (patch session.MetadataPatch, accrued bool) {
+func deadRuntimePatch(r *rowFacts, heal bool) (patch session.MetadataPatch, class session.DispositionPatch, accrued bool) {
 	info := r.row.Info
-	if strings.TrimSpace(info.SleepIntent) == sleepIntentIdle {
-		// SESS-532: an idle stop was pending, so the death is the idle
-		// sleep it asked for, which accrues nothing: legacy's
-		// SleepPatch(idle), which keeps the pre-drain sleep_policy_fingerprint.
-		return session.SleepPatch(r.w.Now, drainIdle), false
-	}
 	patch = session.MetadataPatch{}
 	if heal {
 		patch = asleepHealPatch(info)
+	}
+	if session.DispositionOfInfo(info).IdleStop {
+		// SESS-532: an idle stop was pending, so the death is the idle
+		// sleep it asked for, which accrues nothing. Legacy heals the state
+		// first (its continuation reset), then writes SleepPatch(idle) over
+		// it, which keeps the pre-drain sleep_policy_fingerprint, with the
+		// disposition's Sleep cell.
+		maps.Copy(patch, session.SleepPatch(r.w.Now, drainIdle))
+		return patch, session.CellInfo(info, session.ActorController, session.DispEvent{Kind: session.EvSleep}, r.w.Now), false
 	}
 	_, draining := activeStop(r.row)
 	until := r.w.Now.Add(defaultQuarantineDuration)
@@ -212,13 +220,14 @@ func deadRuntimePatch(r *rowFacts, heal bool) (patch session.MetadataPatch, accr
 		if info.ChurnCount != "" && info.ChurnCount != "0" {
 			patch["churn_count"] = "0"
 		}
-		return patch, false
+		return patch, class, false
 	default:
-		return patch, false
+		return patch, class, false
 	}
 	maps.Copy(patch, accrual.Patch)
+	class = accrual.Class(info, r.w.Now)
 	patch["last_woke_at"] = ""
-	return patch, true
+	return patch, class, true
 }
 
 // heartbeatHeld reports SESS-602's heartbeat hold (Disposition.HeartbeatHeld).
@@ -232,31 +241,16 @@ func heartbeatHeld(info session.Info, now time.Time) bool {
 // effect proves it again fresh. Without it a runtime started outside the
 // controller on an asleep row (`gc session attach`) stays orphaned, as S1
 // reads the shape as Noop. Unlike legacy, a row an operator holds dormant is
-// never woken (I15, I-STOP-3/4; operatorDormant): its runtime is the
+// never woken (I15, I-STOP-3/4; Disposition.OperatorDormant): its runtime is the
 // operator-dormant stop path's (C5a3's lost-commit stop, C6b2). That covers a
 // `gc session kill` that lands between a PreWake and its provider Start,
 // before any runtime exists to fence.
 func armAwakeHeal(r *rowFacts) (intent, bool) {
 	info := r.row.Info
-	if strings.TrimSpace(info.MetadataState) != string(session.StateAsleep) || operatorDormant(info, r.w.Now) || !r.freshOwnAlive() {
+	if strings.TrimSpace(info.MetadataState) != string(session.StateAsleep) || session.DispositionOfInfo(info).OperatorDormant(r.w.Now) || !r.freshOwnAlive() {
 		return intent{}, false
 	}
 	return r.heal(intentRowHealFresh, decideAwakeHeal, session.MetadataPatch{"state": string(session.StateAwake)})
-}
-
-// operatorDormant reports an asleep row an operator holds dormant: a kill
-// fence, a sleep an operator owns (killed, user-hold, city-stop), a user-hold
-// sleep intent (a suspend), a wait hold, or a live hold or quarantine. The
-// timers are trimmed here: metadataTimeInFuture, which legacy shares, does
-// not trim, and a padded timer must not read as no hold.
-func operatorDormant(info session.Info, now time.Time) bool {
-	switch session.SleepReason(strings.TrimSpace(info.SleepReason)) {
-	case session.SleepReasonKilled, session.SleepReasonUserHold, session.SleepReasonCityStop:
-		return true
-	}
-	return session.IsKillPendingInfo(info, now) || strings.TrimSpace(info.SleepIntent) == string(session.SleepReasonUserHold) ||
-		strings.TrimSpace(info.WaitHold) != "" || metadataTimeInFuture(strings.TrimSpace(info.HeldUntil), now) ||
-		metadataTimeInFuture(strings.TrimSpace(info.QuarantinedUntil), now)
 }
 
 // armStabilityClear is SESS-539/540 (clearWakeFailures, clearChurn; v5.8
@@ -274,16 +268,18 @@ func armStabilityClear(r *rowFacts) (intent, bool) {
 	if info.WakeAttemptsMetadata != "" && info.WakeAttemptsMetadata != "0" {
 		patch["wake_attempts"] = "0"
 	}
+	var class session.DispositionPatch
 	if info.QuarantinedUntil != "" {
-		patch["quarantined_until"] = ""
+		// The Quarantine cell with no deadline: the quarantine ends.
+		class = session.CellInfo(info, session.ActorController, session.DispEvent{Kind: session.EvQuarantine}, r.w.Now)
 	}
 	if info.ChurnCount != "" && info.ChurnCount != "0" && r.w.Now.Sub(woke) >= churnProductivityThreshold {
 		patch["churn_count"] = "0"
 	}
-	if len(patch) == 0 {
+	if len(patch) == 0 && class.Len() == 0 {
 		return intent{}, false
 	}
-	return r.heal(intentRowHeal, decideStabilityClear, patch)
+	return r.healClass(intentRowHeal, decideStabilityClear, patch, class)
 }
 
 // armDetachedAt is SESS-533/535/536 (reconcileDetachedAtInfo; v5.8 A6 item

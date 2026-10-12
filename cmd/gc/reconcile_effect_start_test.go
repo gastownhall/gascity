@@ -31,7 +31,7 @@ func startKit(t *testing.T, kind, state string, meta ...string) *txKit {
 	t.Helper()
 	row := poolRow("gc-1", "worker", 1, state, append([]string{"generation", "3", "instance_token", "tok"}, meta...)...)
 	m := beads.NewMemStoreFrom(0, []beads.Bead{row}, nil)
-	k := newTxKitOn(t, m, simBacking{m})
+	k := newTxKitOn(t, m, simLegBacking{simBacking{m}}) // a rollback closes atomically
 	k.it.Kind = kind
 	return k
 }
@@ -367,8 +367,7 @@ var stateWriters = map[string]string{
 	"cmd/gc/session_reconcile.go:providerTerminalErrorPatch":                  "patch builder (C5a2's abandon)",
 	"cmd/gc/session_reconciler.go:reconcileSessionBeadsTracedWithNamedDemand": "legacy reconciler",
 	"internal/session/chat.go:Manager.confirmLiveSessionState":                "Manager: CLI/API start confirms active",
-	"internal/session/holds.go:holdMeta":                                      "read model, not a write",
-	"internal/session/disposition.go:DispositionOfInfo":                       "read model, not a write",
+	"internal/session/disposition.go:dispositionMeta":                         "read model, not a write",
 	"internal/session/resume_user_hold.go:consumeUserHoldLife":                "patch builder (operator resume consumes a user hold)",
 	"internal/session/lifecycle_exits.go:RateLimitQuarantinePatch":            "patch builder",
 	"internal/session/lifecycle_transition.go:AcknowledgeDrainPatch":          "patch builder",
@@ -377,7 +376,7 @@ var stateWriters = map[string]string{
 	"internal/session/lifecycle_transition.go:ClearWakeBlockersPatch":         "patch builder",
 	"internal/session/lifecycle_transition.go:ClosePatch":                     "patch builder",
 	"internal/session/lifecycle_transition.go:CommitStartedPatch":             "patch builder (S2's commit)",
-	"internal/session/lifecycle_transition.go:ConfigDriftResetPatch":          "patch builder",
+	"internal/session/lifecycle_transition.go:configDriftReset":               "patch builder", // ConfigDriftResetPatch's and ConfigDriftAsleepResetPatch's
 	"internal/session/lifecycle_transition.go:ConfirmStartedPatch":            "patch builder",
 	"internal/session/lifecycle_transition.go:PreWakePatch":                   "patch builder (S1's PreWake)",
 	"internal/session/store.go:operatorSuspendLife":                           "patch builder (operator suspend)",

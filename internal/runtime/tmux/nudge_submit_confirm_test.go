@@ -3,6 +3,7 @@ package tmux
 import (
 	"context"
 	"errors"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -639,13 +640,22 @@ func (e *agentPaneExecutor) execute(args []string) (string, error) {
 	case slices.Contains(args, "show-environment") && slices.Contains(args, "GC_PROVIDER"):
 		return "GC_PROVIDER=" + e.provider, nil
 	case slices.Contains(args, "capture-pane"):
+		lines := e.pane
 		if e.after != nil && e.submitEnters() == submitEnterMaxSends && e.capturesSinceLastEnter() > submitConfirmPollsPerSend {
-			return strings.Join(e.after, "\n"), nil
+			lines = e.after
 		}
-		return strings.Join(e.pane, "\n"), nil
+		out := strings.Join(lines, "\n")
+		if !slices.Contains(args, "-e") {
+			out = sgrSequence.ReplaceAllString(out, "")
+		}
+		return out, nil
 	}
 	return "", nil
 }
+
+// sgrSequence matches an SGR escape sequence, which capture-pane includes in
+// its output only with -e.
+var sgrSequence = regexp.MustCompile("\x1b\\[[0-9;]*m")
 
 func (e *agentPaneExecutor) executeCtx(_ context.Context, args []string) (string, error) {
 	return e.execute(args)
@@ -744,7 +754,7 @@ func TestNudgeSessionClaudeStagedDraftStaysUnconfirmed(t *testing.T) {
 // credit it either. The composer decides: while it still holds the nudge
 // (typed or as a staged paste) the submit is unconfirmed and the nudge
 // requeues; once Claude has queued the nudge (a plain-space "❯ " row above a
-// composer showing its queued-message hint) the Enter reached the pane.
+// composer showing its dim queued-message hint) the Enter reached the pane.
 func TestNudgeSessionClaudeBusyThroughoutIsNotCredited(t *testing.T) {
 	const message = "reminder: please respond to the review"
 	turn := []string{"* Incubating… (48s · ↓ 707 tokens)", "  ⎿ \u00a0Tip: Use /btw to ask a quick side question", ""}
@@ -759,7 +769,7 @@ func TestNudgeSessionClaudeBusyThroughoutIsNotCredited(t *testing.T) {
 		{"detached, nudge typed in the composer", "busy-claude-typed-detached", "0", []string{"────", "❯\u00a0" + message}, ErrNudgeSubmitUnconfirmed},
 		{"attached, nudge typed in the composer", "busy-claude-typed-attached", "1", []string{"────", "❯\u00a0" + message}, ErrNudgeSubmitUnconfirmed},
 		{"detached, nudge staged as a paste", "busy-claude-staged-detached", "0", []string{"────", "❯\u00a0[Pasted text #1 +42 lines]"}, ErrNudgeSubmitUnconfirmed},
-		{"detached, nudge queued by Claude", "busy-claude-queued-detached", "0", []string{"❯ " + message, "────", "❯\u00a0Press up to edit queued messages"}, ErrNudgeSubmitDeliveredUnobserved},
+		{"detached, nudge queued by Claude", "busy-claude-queued-detached", "0", []string{"❯ " + message, "────", "❯\u00a0\x1b[2mPress up to edit queued messages\x1b[0m"}, ErrNudgeSubmitDeliveredUnobserved},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -836,37 +846,30 @@ func TestNudgeSessionCodexBusyThroughoutIsNotCredited(t *testing.T) {
 	}
 }
 
-// TestPaneShowsDrainedComposerReadsTheFamilyPrompt pins which prompt finds the
-// live composer. A codex composer starts with "› " and only that prompt
-// observes it: read through Claude's "❯ " the same drained pane shows no
-// composer, so delivery is never proven. A family without a staged-draft entry
-// keeps reading DefaultReadyPromptPrefix.
+// TestPaneShowsDrainedComposerReadsTheFamilyPrompt pins that a codex composer,
+// which starts with "› " rather than Claude's "❯ ", is found by its own
+// family's prompt: drained while the turn runs, back to its dim hint (which
+// captureInputLines strips), still holding the draft, or still staged.
 func TestPaneShowsDrainedComposerReadsTheFamilyPrompt(t *testing.T) {
 	const sent = "reminder: please respond to the review"
-	codex := stagedDraftMarkers["codex"].composerPromptPrefix()
 	busy := []string{"◦ Working (48s • esc to interrupt)", ""}
 	footer := []string{"", "  gpt-5.5 low · /tmp/probe"}
 	tests := []struct {
-		name   string
-		prefix string
-		lines  []string
-		want   bool
+		name  string
+		lines []string
+		want  bool
 	}{
-		{"drained codex composer", codex, slices.Concat(busy, []string{"› "}, footer), true},
-		{"codex composer back to its hint", codex, []string{"• PONG", "› Explain this codebase", "  gpt-5.5 low · /tmp/probe"}, true},
-		{"codex composer still holds the draft", codex, slices.Concat(busy, []string{"› " + sent}, footer), false},
-		{"codex composer still staged", codex, slices.Concat(busy, []string{"› [Pasted Content 1234 chars]"}, footer), false},
-		{"drained codex composer read through Claude's prompt", DefaultReadyPromptPrefix, slices.Concat(busy, []string{"› "}, footer), false},
+		{"drained codex composer", slices.Concat(busy, []string{"› "}, footer), true},
+		{"codex composer back to its dim hint", []string{"• PONG", stripDimText("› \x1b[2mExplain this codebase\x1b[22m"), "  gpt-5.5 low · /tmp/probe"}, true},
+		{"codex composer still holds the draft", slices.Concat(busy, []string{"› " + sent}, footer), false},
+		{"codex composer still staged", slices.Concat(busy, []string{"› [Pasted Content 1234 chars]"}, footer), false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := paneShowsDrainedComposer(tt.lines, sent, tt.prefix); got != tt.want {
-				t.Fatalf("paneShowsDrainedComposer(%q, %q, %q) = %v, want %v", tt.lines, sent, tt.prefix, got, tt.want)
+			if got := paneShowsDrainedComposer(tt.lines); got != tt.want {
+				t.Fatalf("paneShowsDrainedComposer(%q) = %v, want %v", tt.lines, got, tt.want)
 			}
 		})
-	}
-	if got := (stagedDraftMarker{}).composerPromptPrefix(); got != DefaultReadyPromptPrefix {
-		t.Errorf("composerPromptPrefix() without a staged-draft entry = %q, want %q", got, DefaultReadyPromptPrefix)
 	}
 }
 

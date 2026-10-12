@@ -940,7 +940,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BackendCredentialResolvedPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BlockedRecomputedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OrderSkippedPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPendingClearedPayload | SessionPendingPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BackendCredentialResolvedPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BlockedRecomputedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OrderSkippedPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPendingClearedPayload | SessionPendingPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionResetStalledPayload | SessionStrandedClaimsPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -3531,6 +3531,29 @@ export type SessionResponse = {
     work_dir?: string;
 };
 
+export type SessionStrandedClaimsPayload = {
+    /**
+     * The stranded claims, sorted by bead ID.
+     */
+    claims: Array<StrandedClaim> | null;
+    /**
+     * What left the claims on the seat: its close reason (drained, orphaned, ...), killed, retired, or manual (gc session close).
+     */
+    kind: string;
+    /**
+     * Canonical session bead ID of the closed or retired seat holding the claims.
+     */
+    session_id: string;
+    /**
+     * Runtime session name from the session bead metadata, when set.
+     */
+    session_name?: string;
+    /**
+     * Template of the seat, when set.
+     */
+    template?: string;
+};
+
 export type SessionStrandedPayload = {
     /**
      * Canonical session bead ID for the stranded pool session (also the envelope Subject).
@@ -5334,6 +5357,21 @@ export type StoreMaintenanceFailedPayload = {
     stage: string;
 };
 
+export type StrandedClaim = {
+    /**
+     * The claim's work bead ID.
+     */
+    bead_id: string;
+    /**
+     * Why it was kept: unserved-route.
+     */
+    reason: string;
+    /**
+     * The route the claim would be released into, when it has one: no configured agent serves it.
+     */
+    route?: string;
+};
+
 export type SubmissionCapabilities = {
     supports_follow_up: boolean;
     supports_interrupt_now: boolean;
@@ -5708,6 +5746,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeSessionStopped) | ({
     type: 'session.stranded';
 } & TypedEventStreamEnvelopeSessionStranded) | ({
+    type: 'session.stranded_claims';
+} & TypedEventStreamEnvelopeSessionStrandedClaims) | ({
     type: 'session.suspended';
 } & TypedEventStreamEnvelopeSessionSuspended) | ({
     type: 'session.undrained';
@@ -7298,6 +7338,24 @@ export type TypedEventStreamEnvelopeSessionStranded = {
 };
 
 /**
+ * TypedEventStreamEnvelope session.stranded_claims
+ */
+export type TypedEventStreamEnvelopeSessionStrandedClaims = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionStrandedClaimsPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.stranded_claims';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope session.suspended
  */
 export type TypedEventStreamEnvelopeSessionSuspended = {
@@ -7815,6 +7873,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeSessionStopped) | ({
     type: 'session.stranded';
 } & TypedTaggedEventStreamEnvelopeSessionStranded) | ({
+    type: 'session.stranded_claims';
+} & TypedTaggedEventStreamEnvelopeSessionStrandedClaims) | ({
     type: 'session.suspended';
 } & TypedTaggedEventStreamEnvelopeSessionSuspended) | ({
     type: 'session.undrained';
@@ -9487,6 +9547,25 @@ export type TypedTaggedEventStreamEnvelopeSessionStranded = {
     subject?: string;
     ts: string;
     type: 'session.stranded';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope session.stranded_claims
+ */
+export type TypedTaggedEventStreamEnvelopeSessionStrandedClaims = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionStrandedClaimsPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.stranded_claims';
     workflow?: WorkflowEventProjection;
 };
 

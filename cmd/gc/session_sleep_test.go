@@ -1399,10 +1399,11 @@ func waitForIdleProbeReady(t *testing.T, dt *drainTracker, beadID string) {
 	t.Fatalf("idle probe for %s not ready within 10s", beadID)
 }
 
-// A runtime with no interactions (acp answers ErrInteractionUnsupported) is
-// "not pending", never "unknown": unknown would keep every ACP session awake.
+// A runtime with no interactions (a router whose backend has none answers
+// ErrInteractionUnsupported) is "not pending", never "unknown": unknown would
+// keep every such session awake.
 func TestPendingProbeUnsupportedIsNo(t *testing.T) {
-	err := fmt.Errorf("acp: %w", runtime.ErrInteractionUnsupported)
+	err := fmt.Errorf("routed backend: %w", runtime.ErrInteractionUnsupported)
 	if got := classifyPendingInteraction(false, err); got != pendingInteractionNo {
 		t.Fatalf("classifyPendingInteraction(unsupported) = %v, want pendingInteractionNo", got)
 	}

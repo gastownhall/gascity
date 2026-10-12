@@ -214,7 +214,7 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 		return nil, err
 	}
 
-	agents := s.resolveMailQueryRecipientsWithContext(ctx, input.Agent)
+	query := s.resolveMailQueryWithContext(ctx, input.Agent)
 	status := input.Status
 	rig := input.Rig
 	index := s.latestIndex()
@@ -232,7 +232,7 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 				}, nil
 			}
 			msgs, err := withMailReadDeadline(ctx, func() ([]mail.Message, error) {
-				return mailInboxForRecipients(mp, agents)
+				return mailInboxForQuery(mp, query)
 			})
 			if err != nil {
 				return nil, mailReadAPIError(err)
@@ -253,7 +253,7 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 		var partialErrs []string
 		partialStoreSlow := false
 		for _, res := range withMailProviderReadDeadline(ctx, providers, func(provider mail.Provider) ([]mail.Message, error) {
-			return mailInboxForRecipients(provider, agents)
+			return mailInboxForQuery(provider, query)
 		}) {
 			if res.err != nil {
 				var timeoutErr *mailReadTimeoutError
@@ -286,7 +286,7 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 				}, nil
 			}
 			msgs, err := withMailReadDeadline(ctx, func() ([]mail.Message, error) {
-				return mailAllForRecipients(mp, agents)
+				return mailAllForQuery(mp, query)
 			})
 			if err != nil {
 				return nil, mailReadAPIError(err)
@@ -307,7 +307,7 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 		var partialErrs []string
 		partialStoreSlow := false
 		for _, res := range withMailProviderReadDeadline(ctx, providers, func(provider mail.Provider) ([]mail.Message, error) {
-			return mailAllForRecipients(provider, agents)
+			return mailAllForQuery(provider, query)
 		}) {
 			if res.err != nil {
 				var timeoutErr *mailReadTimeoutError
@@ -420,7 +420,7 @@ func (s *Server) humaHandleMailCount(ctx context.Context, input *MailCountInput)
 	if err := cacheLiveOr503(cityStore); err != nil {
 		return nil, err
 	}
-	agents := s.resolveMailQueryRecipientsWithContext(ctx, input.Agent)
+	query := s.resolveMailQueryWithContext(ctx, input.Agent)
 	rig := input.Rig
 	cacheAge := cacheAgeSeconds(cityStore)
 
@@ -433,7 +433,7 @@ func (s *Server) humaHandleMailCount(ctx context.Context, input *MailCountInput)
 			return resp, nil
 		}
 		counts, err := withMailReadDeadline(ctx, func() (mailReadCounts, error) {
-			total, unread, err := mailCountForRecipients(mp, agents)
+			total, unread, err := mailCountForQuery(mp, query)
 			return mailReadCounts{Total: total, Unread: unread}, err
 		})
 		if err != nil {
@@ -453,7 +453,7 @@ func (s *Server) humaHandleMailCount(ctx context.Context, input *MailCountInput)
 	var partialErrs []string
 	partialStoreSlow := false
 	for _, res := range withMailProviderReadDeadline(ctx, providers, func(provider mail.Provider) (mailReadCounts, error) {
-		total, unread, err := mailCountForRecipients(provider, agents)
+		total, unread, err := mailCountForQuery(provider, query)
 		return mailReadCounts{Total: total, Unread: unread}, err
 	}) {
 		if res.err != nil {

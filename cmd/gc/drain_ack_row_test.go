@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -257,7 +258,8 @@ func preE3DoRuntimeDrainAck(dops drainOps, cityPath, targetName, sn, sessionID s
 func drainAckCity(t *testing.T, reconciler string, admitV2 bool) (string, beads.Store, string) {
 	t.Helper()
 	city := t.TempDir()
-	toml := "[workspace]\nname = \"test-city\"\n\n[beads]\nprovider = \"file\"\nconditional_writes = \"require\"\n"
+	// One configured agent, "worker": the lane a released claim routes to.
+	toml := "[workspace]\nname = \"test-city\"\n\n[beads]\nprovider = \"file\"\nconditional_writes = \"require\"\n\n[[agent]]\nname = \"worker\"\nstart_command = \"true\"\n"
 	if reconciler != "" {
 		toml += "\n[daemon]\nsession_reconciler = \"" + reconciler + "\"\n"
 	}
@@ -568,7 +570,7 @@ func (s *casReadSpyStore) ConditionalWritesResolveTarget() beads.Store { return 
 // release given the wrong city path or the display alias.
 func TestRuntimeDrainAckV2RealReleaseBeforeRowCAS(t *testing.T) {
 	cityPath, store, id := drainAckCity(t, "v2", true)
-	held := mustCreateDrainAckBead(t, store, beads.Bead{Title: "claimed, never executed", Type: "task"}, "in_progress", id)
+	held := mustCreateDrainAckBead(t, store, beads.Bead{Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"}, Title: "claimed, never executed", Type: "task"}, "in_progress", id)
 
 	var atCAS []string
 	original, originalPoke := drainAckOpenSessionRow, drainAckPokeController

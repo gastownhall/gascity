@@ -1340,7 +1340,11 @@ func closeBeadStoreHandle(store beads.Store) error {
 	if store == nil {
 		return nil
 	}
-	if base, _, ok := unwrapBeadPolicyStore(store); ok {
+	if base, policy, ok := unwrapBeadPolicyStore(store); ok {
+		if policy.borrowed {
+			// The invocation memo owns the store and closes it at exit.
+			return nil
+		}
 		return closeBeadStoreHandle(base)
 	}
 	if cached, ok := store.(*beads.CachingStore); ok {

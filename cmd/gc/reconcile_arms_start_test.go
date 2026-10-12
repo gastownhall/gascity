@@ -135,8 +135,8 @@ func TestDecideRowHeartbeatRespawn(t *testing.T) {
 			if got := it.Kind == intentStart && it.Reason == decideHeartbeatRespawn; got != tc.respawn {
 				t.Fatalf("decideRow = (%q, %q), want a heartbeat respawn %v", it.Kind, it.Reason, tc.respawn)
 			}
-			if tc.respawn && it.Patch["state"] != string(session.StateAsleep) {
-				t.Fatalf("respawn patch %v, want the dead-runtime heal folded in", it.Patch)
+			if tc.respawn && it.folded()["state"] != string(session.StateAsleep) {
+				t.Fatalf("respawn patch %v, want the dead-runtime heal folded in", it.folded())
 			}
 			if !tc.respawn && it.Reason != decideDeadRuntimeHeal {
 				t.Fatalf("decideRow = (%q, %q), want A6's dead-runtime heal", it.Kind, it.Reason)
@@ -182,12 +182,12 @@ func TestDeadRuntimeAccrualMatchesLegacy(t *testing.T) {
 			if started := it.Kind == intentStart; started != tc.sameTick {
 				t.Fatalf("decideRow = (%q, %q), want a same-pass start %v", it.Kind, it.Reason, tc.sameTick)
 			}
-			if _, wrote := it.Patch[tc.kept]; tc.kept != "" && wrote {
-				t.Fatalf("patch %v writes %s, which the PreWake's transcript probe owns", it.Patch, tc.kept)
+			if _, wrote := it.folded()[tc.kept]; tc.kept != "" && wrote {
+				t.Fatalf("patch %v writes %s, which the PreWake's transcript probe owns", it.folded(), tc.kept)
 			}
 			for k, v := range tc.want {
-				if got, ok := it.Patch[k]; !ok || got != v {
-					t.Errorf("patch %s = %q (set %v), want %q; patch %v", k, got, ok, v, it.Patch)
+				if got, ok := it.folded()[k]; !ok || got != v {
+					t.Errorf("patch %s = %q (set %v), want %q; patch %v", k, got, ok, v, it.folded())
 				}
 			}
 		})
@@ -195,8 +195,8 @@ func TestDeadRuntimeAccrualMatchesLegacy(t *testing.T) {
 	// A subprocess worker exits after its unit of work: no crash, no churn.
 	c := newHealCase(t, livenessGone, desireWake, "state", "active", "session_key", "k-1", "last_woke_at", woke(10*time.Second))
 	c.w.Env = &reconcileEnv{Cfg: &config.City{Session: config.SessionConfig{Provider: "subprocess"}}}
-	if it := c.decide(); it.Kind != intentStart || it.Patch["wake_attempts"] != "" {
-		t.Fatalf("subprocess exit: decideRow = (%q, %q, %v), want a same-pass start with no accrual", it.Kind, it.Reason, it.Patch)
+	if it := c.decide(); it.Kind != intentStart || it.folded()["wake_attempts"] != "" {
+		t.Fatalf("subprocess exit: decideRow = (%q, %q, %v), want a same-pass start with no accrual", it.Kind, it.Reason, it.folded())
 	}
 }
 
@@ -206,11 +206,11 @@ func TestDeadRuntimeAccrualMatchesLegacy(t *testing.T) {
 func TestTimerHealStartsAWantedRowInTheSamePass(t *testing.T) {
 	c := newHealCase(t, livenessGone, desireWake, "state", "asleep", "held_until", gatherNow.Add(-time.Minute).Format(time.RFC3339), "sleep_reason", "user-hold")
 	it := c.decide()
-	if it.Kind != intentStart || it.Reason != decideStart || it.Patch["held_until"] != "" {
-		t.Fatalf("decideRow = (%q, %q, %v), want a start carrying the timer heal", it.Kind, it.Reason, it.Patch)
+	if it.Kind != intentStart || it.Reason != decideStart || it.folded()["held_until"] != "" {
+		t.Fatalf("decideRow = (%q, %q, %v), want a start carrying the timer heal", it.Kind, it.Reason, it.folded())
 	}
-	if _, ok := it.Patch["held_until"]; !ok {
-		t.Fatalf("patch %v, want the expired hold cleared in the start's CAS", it.Patch)
+	if _, ok := it.folded()["held_until"]; !ok {
+		t.Fatalf("patch %v, want the expired hold cleared in the start's CAS", it.folded())
 	}
 	// The heal the start carries for when it cannot run lands as its own
 	// row write, though the fresh decision composes the start again.
@@ -257,8 +257,8 @@ func TestDeadRuntimeAccrualRestartsAStrandedSeatInPlace(t *testing.T) {
 			if got := it.Kind == intentStart; got != tc.inPlace {
 				t.Fatalf("decideRow = (%q, %q), want a same-pass restart %v", it.Kind, it.Reason, tc.inPlace)
 			}
-			if tc.inPlace && (it.Patch["churn_count"] != "1" || it.Heal == nil || it.Heal.Patch["churn_count"] != "1" || it.Heal.Patch["state"] != "") {
-				t.Fatalf("restart patch %v heal %+v, want the churn accrued and a fallback recording it alone", it.Patch, it.Heal)
+			if tc.inPlace && (it.folded()["churn_count"] != "1" || it.Heal == nil || it.Heal.Patch["churn_count"] != "1" || it.Heal.Patch["state"] != "") {
+				t.Fatalf("restart patch %v heal %+v, want the churn accrued and a fallback recording it alone", it.folded(), it.Heal)
 			}
 		})
 	}
@@ -301,8 +301,8 @@ func TestStrandedDeathIsRecordedOnce(t *testing.T) {
 		c2.w.Census = readCensus(t, gatherNow, censusLegs(rowLeg, c2.store))
 		c2.w.Now = gatherNow.Add(at)
 		it := c2.decide()
-		if it.Kind != intentStart || it.Heal != nil || it.Patch["churn_count"] != "" || it.Patch["wake_attempts"] != "" {
-			t.Fatalf("+%v: decideRow = (%q, %q) patch %v heal %+v, want a plain restart recording nothing more", at, it.Kind, it.Reason, it.Patch, it.Heal)
+		if it.Kind != intentStart || it.Heal != nil || it.folded()["churn_count"] != "" || it.folded()["wake_attempts"] != "" {
+			t.Fatalf("+%v: decideRow = (%q, %q) patch %v heal %+v, want a plain restart recording nothing more", at, it.Kind, it.Reason, it.folded(), it.Heal)
 		}
 	}
 }
@@ -311,8 +311,8 @@ func TestStrandedDeathIsRecordedOnce(t *testing.T) {
 // the accrual that quarantines holds the start, and the heal lands with it.
 func TestStrandedQuarantineHoldsTheStart(t *testing.T) {
 	it := strandedCase(t, 10*time.Second, "wake_attempts", "4").decide()
-	if it.Kind == intentStart || it.Patch["quarantined_until"] == "" || it.Patch["state"] != "asleep" {
-		t.Fatalf("decideRow = (%q, %q) patch %v, want the heal with its quarantine and no start", it.Kind, it.Reason, it.Patch)
+	if it.Kind == intentStart || it.folded()["quarantined_until"] == "" || it.folded()["state"] != "asleep" {
+		t.Fatalf("decideRow = (%q, %q) patch %v, want the heal with its quarantine and no start", it.Kind, it.Reason, it.folded())
 	}
 }
 
@@ -323,7 +323,7 @@ func TestStrandedSeatUnderARedProviderHealsAsleep(t *testing.T) {
 	c.w.ProviderHealth = &providerHealthSnapshot{present: true, entries: map[string]bool{"claude": false}}
 	tp := TemplateParams{TemplateName: "worker", ResolvedProvider: &config.ResolvedProvider{Name: "claude"}}
 	c.w.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(c.w.Census.Rows[c.k].Info): {TP: tp}}}
-	if it := c.decide(); it.Kind != intentRowHealFresh || it.Patch["state"] != string(session.StateAsleep) {
-		t.Fatalf("decideRow = (%q, %q) patch %v, want A6's heal asleep", it.Kind, it.Reason, it.Patch)
+	if it := c.decide(); it.Kind != intentRowHealFresh || it.folded()["state"] != string(session.StateAsleep) {
+		t.Fatalf("decideRow = (%q, %q) patch %v, want A6's heal asleep", it.Kind, it.Reason, it.folded())
 	}
 }

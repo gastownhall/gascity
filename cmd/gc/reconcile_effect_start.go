@@ -97,7 +97,9 @@ var errTemplateUnresolved = errors.New("v2 start: the row's template is unresolv
 // transcript state (S-1) through the read-only stores, with legacy's task
 // work dir resolver over the pass's assigned work: it writes nothing.
 func prepareRow(r effectReads, w *World, row session.Info, tp TemplateParams, transcript sessTranscriptState) (*preparedStart, error) {
-	sources := dispatchOptionSources{claimedWork: reachableClaimedWorkProbe(w.CityPath, w.Env.Cfg, r.city, servingRigStores(w.Env.Cfg, r.rigs, w.SuspendedRigPaths))}
+	// The claimed-work probe reads the seat's work through the city work
+	// legs (NEW2-1), never the sessions store.
+	sources := dispatchOptionSources{claimedWork: reachableClaimedWorkProbe(seatWorkFor(r.legs, releaseScope(row, w.Env.Cfg)))}
 	prepared, _, err := buildPreparedStartWithTranscript(startCandidate{info: row, tp: tp}, w.CityPath, w.Env.Cfg, r.city, taskWorkDirs(w), sources, &transcript)
 	return prepared, err
 }
@@ -146,7 +148,11 @@ func healInstead(v txView, refuse txStep) txStep {
 	if heal == nil || v.RT == nil || v.RT.Class != rtAbsent {
 		return refuse
 	}
-	step := txStep{Write: heal.Patch, Done: true, Cause: refuse.Refuse, Facts: refuse.Facts}
+	patch := heal.Patch
+	if heal.Kind == intentDriftRepair { // the composed repair's cleared key, rotated as its own effect does
+		patch = withRepairKey(patch, v.World, v.Row)
+	}
+	step := txStep{Write: patch, Class: heal.Class, Done: true, Cause: refuse.Refuse, Facts: refuse.Facts}
 	if heal.Event != nil {
 		step.Facts.Events = append(step.Facts.Events, *heal.Event)
 	}

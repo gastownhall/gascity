@@ -1405,8 +1405,8 @@ func TestV2MaintenanceTraceRecordsReconcilePass(t *testing.T) {
 func TestV2LegacySessionEntriesReportedInTrace(t *testing.T) {
 	cr, _ := newPhaseFixtureRuntime(t, false, true)
 	attachTestV2(t, cr)
-	cr.beadReconcileTick(context.Background(), DesiredStateResult{}, nil, nil, false) // refused and counted
-	cr.controlDispatcherTick(context.Background())                                    // refused and counted
+	cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), DesiredStateResult{}, nil, nil, false) // refused and counted
+	cr.controlDispatcherTick(context.Background())                                                                // refused and counted
 	runFixtureTick(cr, "patrol")
 	recs := passRecords(closeTrace(t, cr))
 	if len(recs) != 1 {
@@ -1613,5 +1613,25 @@ func TestV2ExecutorSeesThePreserveSessionsShutdown(t *testing.T) {
 	cr.preserveSessionsOnShutdown()
 	if !rt.exec.preserve() {
 		t.Fatal("the executor does not see the city's preserve-sessions shutdown")
+	}
+}
+
+// Kills the v2 stranded-work detector never running: the controller's one
+// alerter reaches the planner host and the planner (A21's close cascade
+// strands through it), and the started lane's orphan-release step holds it
+// (D25, D26).
+func TestV2LaneHoldsTheControllersStrandedAlerter(t *testing.T) {
+	cr, _ := newPhaseFixtureRuntime(t, false, false)
+	rt := attachTestV2(t, cr)
+	if rt.host.stranded == nil || rt.host.stranded != cr.strandedClaimAlerter() {
+		t.Fatalf("host alerter = %p, want the controller's %p", rt.host.stranded, cr.strandedClaimAlerter())
+	}
+	if rt.planner.stranded != cr.strandedClaimAlerter() {
+		t.Fatal("the planner does not hold the controller's alerter")
+	}
+	rt.publishEnv()
+	rt.start(context.Background())
+	if lane := rt.lane.Load(); lane == nil || lane.stranded != cr.strandedClaimAlerter() {
+		t.Fatal("the started lane does not hold the controller's alerter")
 	}
 }

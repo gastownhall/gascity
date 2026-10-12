@@ -240,9 +240,9 @@ func TestSetWaitHoldClearWritesEmptyStrings(t *testing.T) {
 }
 
 // TestCloseEmitsClosePatchThenClose proves Close stamps ClosePatch metadata and
-// then closes the bead — the byte-identical replacement for closeBead's
-// SetMetadataBatch(ClosePatch)+Close, WITHOUT any work-reassignment side effect
-// (that is Phase 6).
+// then closes the bead, in one transaction on a store without the atomic
+// close (CommitClose), WITHOUT any work-reassignment side effect (that is
+// Phase 6).
 func TestCloseEmitsClosePatchThenClose(t *testing.T) {
 	b := sessionBeadFixture("s-1", "open", map[string]string{"state": "active"})
 	is, rec := recordingStore(t, b)
@@ -255,15 +255,17 @@ func TestCloseEmitsClosePatchThenClose(t *testing.T) {
 	if !closed {
 		t.Fatalf("Close reported not-closed for an open bead")
 	}
-
-	gotOps := opsOf(rec.Calls())
-	wantOps := []string{"SetMetadataBatch", "Close"}
-	if !reflect.DeepEqual(gotOps, wantOps) {
-		t.Fatalf("Close ops = %v, want %v", gotOps, wantOps)
+	got, err := rec.Get("s-1")
+	if err != nil {
+		t.Fatal(err)
 	}
-	want := map[string]string(ClosePatch(now, "gc_swept"))
-	if !reflect.DeepEqual(rec.CallsForOp("SetMetadataBatch")[0].Metadata, want) {
-		t.Errorf("close patch = %#v, want %#v", rec.CallsForOp("SetMetadataBatch")[0].Metadata, want)
+	if got.Status != "closed" {
+		t.Fatalf("status = %q, want closed", got.Status)
+	}
+	for k, v := range ClosePatch(now, "gc_swept") {
+		if got.Metadata[k] != v {
+			t.Errorf("metadata[%q] = %q, want %q", k, got.Metadata[k], v)
+		}
 	}
 }
 

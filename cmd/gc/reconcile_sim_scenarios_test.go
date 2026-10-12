@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -141,12 +142,19 @@ func TestSimR14PartialListingConcludesNoAbsence(t *testing.T) {
 }
 
 // Scenario R17 (INC-006; I10): an event replayed many times, and rescans,
-// mark the planner dirty and write nothing: no write loop.
+// mark the planner dirty and write nothing: no write loop. The city first
+// settles: the heal lands, then the freed slot's close (A21).
 func TestSimR17ReplayedEventsWriteNothing(t *testing.T) {
 	s := scripted(t, nil, heldRow())
 	s.inventory()
 	s.pass()
 	s.release(0)
+	for range 3 {
+		s.pass()
+		for len(s.parked) > 0 {
+			s.release(0)
+		}
+	}
 	s.audit("v2")
 	ev := s.operator("gc-1", "held_until", s.rel(time.Hour))
 	for range 5 {
@@ -185,6 +193,9 @@ func TestSimR34R35ServerGone(t *testing.T) {
 			gone := s.liveness("gc-1") == livenessGone
 			if gone != confirmed || coldBoot && s.p.boot.InventoryComplete != confirmed {
 				t.Errorf("cold boot %t, confirmed dead %t: gc-1 gone %t, boot inventory complete %t", coldBoot, confirmed, gone, s.p.boot.InventoryComplete)
+			}
+			for len(s.parked) > 0 { // a confirmed-gone row's close (A21) runs out
+				s.release(0)
 			}
 			s.audit("v2")
 			s.noViolations(t)
@@ -384,9 +395,23 @@ func TestSimI15StabilityCarveOut(t *testing.T) {
 				if r.row.Info.QuarantinedUntil == tc.patch["quarantined_until"] {
 					return intent{}, false
 				}
-				return r.heal(intentRowHeal, decideStabilityClear, tc.patch)
+				// The quarantine's write is the Quarantine cell's, to the
+				// scenario's deadline (none: cleared); the rest is the patch.
+				until, _ := time.Parse(time.RFC3339, tc.patch["quarantined_until"])
+				class := session.CellInfo(r.row.Info, session.ActorController, session.DispEvent{Kind: session.EvQuarantine, Until: until}, r.w.Now)
+				patch := maps.Clone(tc.patch)
+				delete(patch, "quarantined_until")
+				return r.healClass(intentRowHeal, decideStabilityClear, patch, class)
 			}
-			s := scriptedWith(t, simOpts{arms: mutateHeal(write)}, []string{"gc-1"}, tc.row)
+			arms := mutateHeal(write)
+			if tc.row.Metadata["sleep_intent"] == "user-hold" {
+				// A4's direct stop of the live user-hold row would preempt the
+				// seeded write; the oracle under test is I15's, not A4's.
+				arms = func(in []rowArm) []rowArm {
+					return slices.DeleteFunc(mutateHeal(write)(in), func(a rowArm) bool { return a.name == "A4" })
+				}
+			}
+			s := scriptedWith(t, simOpts{arms: arms}, []string{"gc-1"}, tc.row)
 			if tc.zombie {
 				s.sp.mu.Lock()
 				s.sp.rts["s-gc-1"].zombie = true
@@ -579,8 +604,9 @@ func TestSimDeferredStrandedDeathsRecordOnce(t *testing.T) {
 func TestSimCutoverV5HashesRebaselineNotDrain(t *testing.T) {
 	v5 := []string{"started_config_hash", "v5:core", "started_provision_hash", "v5:prov", "started_launch_hash", "v5:launch", "started_live_hash", "v5:live", "live_hash", "v5:live", "core_hash_breakdown", "{}"}
 	s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", append([]string{"instance_token", "tok-1", "last_woke_at", rowAt(-time.Hour)}, v5...)...), gc1Work())
-	s.settle()
-	s.settle()
+	for range 4 { // A7 converges the row's identity first, then A8 hashes it (v5 B4)
+		s.settle()
+	}
 	m := s.gc1()
 	for i := 0; i < len(v5); i += 2 {
 		if k := v5[i]; k != "core_hash_breakdown" && !strings.HasPrefix(m[k], runtime.FingerprintVersion+":") || m[k] == v5[i+1] {
@@ -603,7 +629,7 @@ func TestSimSoftReloadAcceptsDriftOnce(t *testing.T) {
 	s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-1", "last_woke_at", rowAt(-time.Hour), "started_config_hash", stale), gc1Work())
 	q := newSoftReloadRequest(1)
 	s.p.openSoftReload(q)
-	for range 3 {
+	for range 5 { // A7 converges the row's identity first (v5 B4)
 		s.settle()
 	}
 	select {
@@ -628,4 +654,148 @@ func TestSimSoftReloadAcceptsDriftOnce(t *testing.T) {
 		t.Fatal("a newer request left the older open")
 	}
 	s.noViolations(t)
+}
+
+// Kills A8 hashing a row before A7 rewrites its identity (v5 B4; R43): a
+// live seat with the previous fingerprint's hashes and no origin is given
+// its identity first, by A7 alone, then rebaselined by A8, with no stop and
+// no start. (An alias A7 writes rebaselines in A7's own CAS, as legacy's
+// does: the hashes are taken on the rewritten row either way.)
+func TestSimR43IdentityBeforeRebaseline(t *testing.T) {
+	v5 := []string{"started_config_hash", "v5:core", "started_provision_hash", "v5:prov", "started_launch_hash", "v5:launch", "started_live_hash", "v5:live", "live_hash", "v5:live", "core_hash_breakdown", "{}"}
+	s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", append([]string{"instance_token", "tok-1", "last_woke_at", rowAt(-time.Hour)}, v5...)...), gc1Work())
+	identityFirst := false
+	for range 4 {
+		s.settle()
+		m := s.gc1()
+		rebaselined := m["started_config_hash"] != "v5:core"
+		if rebaselined && m["session_origin"] == "" {
+			t.Fatalf("row %v: rebaselined before its identity was written", m)
+		}
+		identityFirst = identityFirst || !rebaselined && m["session_origin"] == "ephemeral"
+	}
+	m := s.gc1()
+	if !identityFirst || !strings.HasPrefix(m["started_config_hash"], runtime.FingerprintVersion+":") {
+		t.Fatalf("row %v: want the identity written alone, then the rebaseline", m)
+	}
+	if len(s.sp.kills) != 0 || len(s.sp.starts) != 0 || m["state"] != "active" {
+		t.Errorf("kills %v starts %v state %q, want the seat left running", s.sp.kills, s.sp.starts, m["state"])
+	}
+	s.noViolations(t)
+}
+
+// Kills a rollback that stops a foreign occupant outside C8.2(a), and an I4
+// that flags the stop C8.2(a) admits (the C5a2 review): a pending create
+// whose bead-scoped name another row's runtime holds is rolled back, the
+// occupant stopped by name, with no violation. (A Foreign runtime under any
+// other name is rolled back without a stop: TestRollbackRuntime.)
+func TestSimRollbackStopsABeadScopedNameOnly(t *testing.T) {
+	run := func(t *testing.T, row beads.Bead) *sim {
+		t.Helper()
+		s := newSim(t, 1, simOpts{rows: func(s *sim) ([]beads.Bead, []beads.Bead) {
+			s.sp.put(row.Metadata["session_name"], "gc-other", "1", "tok-other")
+			return []beads.Bead{row}, nil
+		}})
+		s.lag = false
+		for range 3 {
+			s.advance(simPatrol)
+			s.settle()
+		}
+		s.noViolations(t)
+		return s
+	}
+	started := plannerT0.Add(-time.Minute).Format(time.RFC3339)
+	s := run(t, poolRow("gc-1", "worker", 1, "creating", "instance_token", "tok-gc-1", "pending_create_claim", "true", "pending_create_started_at", started))
+	if b, _ := s.legs[0].backing.Get("gc-1"); b.Status != "closed" || len(s.sp.kills) != 1 {
+		t.Fatalf("bead-scoped: row %s kills %+v, want rolled back with the occupant stopped", b.Status, s.sp.kills)
+	}
+}
+
+// Kills a drift drain over an attached human (GUAR-006, SESS-553/554/561):
+// a drifted seat that is attached stamps its deferral and is never drained
+// or stopped; detached, it waits out the recent-deferral window, then its
+// config-drift request is written, and nothing kills its runtime (the stop
+// is C6b2's).
+func TestSimConfigDriftWaitsForTheHumanThenDrains(t *testing.T) {
+	stale := runtime.FingerprintVersion + ":stale"
+	s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-1", "last_woke_at", rowAt(-time.Hour), "started_config_hash", stale))
+	s.cfg.Agents[0].MinActiveSessions = intPtr(1)
+	attach := func(on bool) {
+		s.sp.mu.Lock()
+		s.sp.rts["s-gc-1"].attached = on
+		s.sp.touch("s-gc-1")
+		s.sp.mu.Unlock()
+	}
+	attach(true)
+	for range 3 {
+		s.advance(simPatrol)
+		s.settle()
+	}
+	if m := s.gc1(); m["attached_config_drift_deferred_key"] == "" || m[session.DrainIntentReasonKey] != "" {
+		t.Fatalf("attached: row %v, want the deferral stamped and no request", m)
+	}
+	attach(false)
+	s.advance(time.Minute)
+	s.settle()
+	if m := s.gc1(); m[session.DrainIntentReasonKey] != "" {
+		t.Fatalf("detached inside the window: request %q, want none", m[session.DrainIntentReasonKey])
+	}
+	s.advance(6 * time.Minute)
+	s.settle()
+	s.settle()
+	if m := s.gc1(); m[session.DrainIntentReasonKey] != drainConfigDrift {
+		t.Fatalf("past the window: row %v, want the config-drift request", m)
+	}
+	if len(s.sp.kills) != 0 {
+		t.Fatalf("kills %v, want none", s.sp.kills)
+	}
+	s.noViolations(t)
+}
+
+// Scenario J27 B (C6a ruling 3, v5.9g; D1, D5): an agent acks its drain,
+// its runtime dies, and Manager.ensureRunning restarts it at the same
+// generation and token before the controller's next pass. The restarted
+// runtime is never stopped for its predecessor's ack: the ack signal's
+// fresh read finds a runtime created after the ack, and voids the ack half.
+// With no restart the ack stops the acked runtime.
+func TestSimJ27StaleAckAcrossSameGenerationRestart(t *testing.T) {
+	for _, restarted := range []bool{false, true} {
+		s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-1"), gc1Work())
+		s.settle()
+		commit, err := checkDrainAckRow(s.legs[0].backing, "gc-1", false, "tok-1", s.clk.Now())
+		if err == nil {
+			err = commit()
+		}
+		if err != nil {
+			t.Fatalf("restarted %t: the agent's ack: %v", restarted, err)
+		}
+		s.audit("drain-ack")
+		s.legs[0].cache.ApplyEvent("bead.updated", s.legs[0].events[len(s.legs[0].events)-1]) // the census sees the CLI's write
+		s.advance(5 * time.Second)
+		s.sp.mu.Lock()
+		acked := s.sp.rts["s-gc-1"].object
+		if restarted {
+			s.sp.drop("s-gc-1")
+			s.sp.put("s-gc-1", "gc-1", s.gc1()["generation"], "tok-1")
+		}
+		s.sp.mu.Unlock()
+		for range 3 {
+			s.settle()
+			s.advance(time.Minute)
+		}
+		var stopped []int64
+		for _, k := range s.sp.kills {
+			if k.Name == "s-gc-1" && k.Hit != nil {
+				stopped = append(stopped, k.Hit.object)
+			}
+		}
+		m := s.gc1()
+		switch {
+		case restarted && (len(stopped) != 0 || m[session.DrainAckIncarnationKey] != "" || m["state_reason"] == session.DrainAckStopPendingReason):
+			t.Errorf("restarted: stopped objects %v, row %v; want none stopped and the ack voided", stopped, m)
+		case !restarted && !slices.Contains(stopped, acked):
+			t.Errorf("not restarted: stopped objects %v, want the acked runtime $%d stopped", stopped, acked)
+		}
+		s.noViolations(t)
+	}
 }

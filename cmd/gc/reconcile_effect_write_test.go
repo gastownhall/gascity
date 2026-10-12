@@ -34,7 +34,7 @@ func admittedHeal(t *testing.T, census, writer beads.Store) (*effectPass, intent
 	w := &World{Now: gatherNow, Census: readCensus(t, gatherNow, censusLegs(rowLeg, census)), Mislabelled: map[rowKey]bool{}}
 	a := &allocDecision{Snapshot: &selectionSnapshot{Entries: map[rowKey]*selectionEntry{}}}
 	it, _ := decideRow(w, a, rowKey{Leg: rowLeg, ID: b.ID})
-	if it.Kind != intentRowHeal || len(it.Patch) == 0 {
+	if it.Kind != intentRowHeal || len(it.folded()) == 0 {
 		t.Fatalf("the fixture admits %+v, want a timer heal with its patch", it)
 	}
 	w.LegStores = map[string]beads.Store{rowLeg: writer}
@@ -224,6 +224,7 @@ func TestEffectPassStripsRawHandles(t *testing.T) {
 		Demand:        demandView{AssignedStores: []beads.Store{store}},
 		LegStores:     map[string]beads.Store{rowLeg: store},
 		SessionsStore: store, RigStores: map[string]beads.Store{"rig": store},
+		WorkLegs: workLegsFromCensus("", nil, cityWorkLeg{store: store}, nil),
 	}
 	p := newEffectPass(w, &allocDecision{})
 	if p.World.LegStores != nil || p.World.Demand.AssignedStores != nil || p.World.Env.SP != nil {
@@ -237,6 +238,9 @@ func TestEffectPassStripsRawHandles(t *testing.T) {
 	}
 	if p.World.SessionsStore != nil || p.World.RigStores != nil {
 		t.Fatal("the effects' World holds the census stores")
+	}
+	if p.World.WorkLegs.unusable() == nil {
+		t.Fatal("the effects' World holds the work legs; effects reach them only as effectReads")
 	}
 }
 

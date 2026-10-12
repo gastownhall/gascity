@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"strconv"
 	"strings"
 	"sync"
@@ -399,8 +400,11 @@ var (
 	// currently pending interaction request.
 	ErrInteractionMismatch = errors.New("pending interaction does not match request")
 	// ErrPendingInteraction reports that the session is blocked on a pending
-	// approval or question and cannot accept a new user turn.
-	ErrPendingInteraction = errors.New("session has a pending interaction")
+	// approval or question and cannot accept a new user turn. It is the
+	// runtime sentinel, so a refusal raised by the provider itself (for
+	// example the tmux guard against typing into a permission prompt) matches
+	// it too.
+	ErrPendingInteraction = runtime.ErrPendingInteraction
 	// ErrSessionKillPending reports that a `gc session kill` is tearing the
 	// session's runtime down (see KillPendingReason). The caller should retry
 	// once the kill completes and the lifecycle rules have taken over again.
@@ -579,9 +583,9 @@ func (m *Manager) ensureRunning(ctx context.Context, by Actor, id string, b bead
 				return err
 			}
 			defer release()
-			return m.consumeUserHold(consume, m.now())
+			return m.consumeUserHold(consume, m.now(), nil)
 		}
-		if err := m.confirmLiveSessionState(id, &b); err != nil {
+		if err := m.confirmLiveSessionState(id, &b, false); err != nil {
 			return err
 		}
 		return nil
@@ -726,9 +730,13 @@ func (m *Manager) ensureRunning(ctx context.Context, by Actor, id string, b bead
 		return fmt.Errorf("%w: %w", ErrStateSync, err)
 	}
 	if consumes {
-		return m.consumeUserHold(consume, m.now())
+		var clears MetadataPatch
+		if started {
+			clears = restartStopRequestClears(b.Metadata)
+		}
+		return m.consumeUserHold(consume, m.now(), clears)
 	}
-	if err := m.confirmLiveSessionState(id, &b); err != nil {
+	if err := m.confirmLiveSessionState(id, &b, started); err != nil {
 		if started && !errors.Is(err, ErrStateSync) {
 			_ = m.sp.Stop(sessName)
 		}
@@ -848,11 +856,14 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 	return nil
 }
 
-func (m *Manager) confirmLiveSessionState(id string, b *beads.Bead) error {
+func (m *Manager) confirmLiveSessionState(id string, b *beads.Bead, started bool) error {
 	if b == nil {
 		return nil
 	}
 	batch := make(map[string]string)
+	if started {
+		maps.Copy(batch, restartStopRequestClears(b.Metadata))
+	}
 	switch State(b.Metadata["state"]) {
 	case "", StateStartPending, StateCreating, StateAsleep, StateSuspended:
 		batch["state"] = string(StateActive)
@@ -927,6 +938,9 @@ func (m *Manager) nudgeSession(ctx context.Context, sessName, message string, im
 		recordCtx = context.Background()
 	}
 	telemetry.RecordNudge(recordCtx, sessName, err)
+	if errors.Is(err, runtime.ErrNudgeRefusedPendingInteraction) {
+		return fmt.Errorf("%w: %w", ErrPendingInteraction, err)
+	}
 	if err != nil {
 		return fmt.Errorf("sending message to session: %w", err)
 	}
@@ -1012,10 +1026,27 @@ func (m *Manager) pendingInteractionLocked(sessName string) error {
 			return fmt.Errorf("getting pending interaction: %w", err)
 		}
 		if pending != nil {
-			return ErrPendingInteraction
+			return PendingInteractionError(pending)
 		}
 	}
 	return nil
+}
+
+// PendingInteractionError returns an error wrapping ErrPendingInteraction that
+// names the pending request, so callers can tell the operator what must be
+// answered (with Respond) before text can be delivered.
+func PendingInteractionError(pending *runtime.PendingInteraction) error {
+	what := strings.TrimSpace(pending.Kind)
+	if what == "" {
+		what = "interaction"
+	}
+	if prompt := strings.TrimSpace(pending.Prompt); prompt != "" {
+		what += " " + strconv.Quote(prompt)
+	}
+	if pending.RequestID != "" {
+		what += " (request " + pending.RequestID + ")"
+	}
+	return fmt.Errorf("%w: %s is waiting for an answer; respond to it (approve or deny) before sending text", ErrPendingInteraction, what)
 }
 
 func (m *Manager) dismissKnownDialogsLocked(ctx context.Context, sessName string, timeout time.Duration) bool {
@@ -1205,12 +1236,16 @@ func (m *Manager) TryWaitIdleNudgeLiveOnly(ctx context.Context, id, source, mess
 // StopTurn issues a provider-appropriate interrupt for the currently running
 // turn. For providers that need post-interrupt idle settlement (e.g. Claude),
 // it waits for the session to return to an idle prompt before returning.
+// Claude Code puts a prompt interrupted before its first response chunk back
+// into its input box, so for Claude StopTurn also clears the input box when
+// the runtime can do a verified clear (see clearRestoredInputLocked).
 func (m *Manager) StopTurn(id string) error {
 	return withSessionMutationLock(id, func() error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
 		}
+		running := State(b.Metadata["state"]) != StateSuspended && m.sp.IsRunning(sessName)
 		interruptStartedAt := time.Now()
 		if err := m.stopTurnLocked(b, sessName); err != nil {
 			return err
@@ -1220,6 +1255,14 @@ func (m *Manager) StopTurn(id string) error {
 		}
 		if err := m.waitForInterruptBoundaryLocked(context.Background(), b, sessName, interruptStartedAt); err != nil {
 			return fmt.Errorf("waiting for stopped session interrupt boundary: %w", err)
+		}
+		if running && restoresInterruptedInput(b) {
+			// The stop already succeeded. A draft that will not clear is
+			// logged, not returned: the next submit clears the input box
+			// again before it pastes.
+			if _, err := m.clearRestoredInputLocked(context.Background(), sessName); err != nil {
+				log.Printf("session: stopped the turn of %q but %v", sessName, err)
+			}
 		}
 		return nil
 	})
@@ -1295,13 +1338,23 @@ func (m *Manager) Respond(id string, response runtime.InteractionResponse) error
 		if pending.RequestID != "" && response.RequestID != pending.RequestID {
 			return fmt.Errorf("%w: pending interaction %q does not match request %q", ErrInteractionMismatch, pending.RequestID, response.RequestID)
 		}
+		// The provider may not return until it sees the prompt clear (tmux
+		// waits up to 10 s for Claude Code to redraw), and this session's
+		// mutation lock is held all that time, so sends, stops and other
+		// mutations of the session wait behind it.
 		if err := ip.Respond(sessName, response); err != nil {
 			if errors.Is(err, runtime.ErrInteractionUnsupported) {
 				return ErrInteractionUnsupported
 			}
+			if errors.Is(err, runtime.ErrInteractionActionUnavailable) {
+				return fmt.Errorf("%w: %w", ErrInteractionMismatch, err)
+			}
 			if errors.Is(err, runtime.ErrSessionNotFound) {
 				log.Printf("session: respond runtime session gone for %q: %v", sessName, err)
 				return ErrNoPendingInteraction
+			}
+			if errors.Is(err, runtime.ErrInteractionResponseInvalid) {
+				return fmt.Errorf("%w: %w", ErrInteractionMismatch, err)
 			}
 			return fmt.Errorf("responding to pending interaction: %w", err)
 		}

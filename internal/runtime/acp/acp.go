@@ -670,8 +670,11 @@ func (p *Provider) Stop(name string) error {
 	return err
 }
 
-// Interrupt sends SIGINT to the named session's process.
-// Best-effort: returns nil if the session doesn't exist.
+// Interrupt sends SIGINT to the named session's process. When this provider
+// instance owns the connection, it first cancels the outstanding permission
+// requests. Another process interrupts through the control socket, which only
+// signals; held requests are then canceled when the turn ends or the agent
+// exits. Best-effort: returns nil if the session doesn't exist.
 func (p *Provider) Interrupt(name string) error {
 	p.mu.Lock()
 	sc, ok := p.conns[name]
@@ -681,6 +684,7 @@ func (p *Provider) Interrupt(name string) error {
 		if sc.cmd == nil {
 			return nil
 		}
+		sc.cancelOutstandingPermissions()
 		return syscall.Kill(-sc.cmd.Process.Pid, syscall.SIGINT)
 	}
 
@@ -761,9 +765,13 @@ func (p *Provider) nudgeConn(name string, sc *sessionConn, content []runtime.Con
 		return nil
 	}
 
-	// Wait for agent to become idle.
-	if !sc.waitIdle(p.cfg.nudgeBusyTimeout()) {
-		return fmt.Errorf("agent %q busy, timed out waiting for idle", name)
+	// Wait for agent to become idle. A turn held open by a permission
+	// request refuses instead, so the answer is not stuck behind this wait.
+	if err := sc.waitNudgeable(p.cfg.nudgeBusyTimeout()); err != nil {
+		if errors.Is(err, runtime.ErrNudgeRefusedPendingInteraction) {
+			return fmt.Errorf("%w: %s", err, name)
+		}
+		return fmt.Errorf("agent %q busy, %w", name, err)
 	}
 
 	sc.mu.Lock()
@@ -839,20 +847,6 @@ func (p *Provider) nudgeConn(name string, sc *sessionConn, content []runtime.Con
 	}()
 
 	return nil
-}
-
-// Pending reports structured pending interactions. ACP only tracks whether an
-// outbound prompt is in flight; that busy state is not a user-facing blocking
-// interaction, so the provider intentionally reports this capability as
-// unsupported.
-func (p *Provider) Pending(_ string) (*runtime.PendingInteraction, error) {
-	return nil, runtime.ErrInteractionUnsupported
-}
-
-// Respond resolves a pending structured interaction. ACP does not currently
-// expose those interactions over the protocol, so responses are unsupported.
-func (p *Provider) Respond(_ string, _ runtime.InteractionResponse) error {
-	return runtime.ErrInteractionUnsupported
 }
 
 // SendKeys is a no-op for ACP sessions (no terminal).

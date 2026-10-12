@@ -125,8 +125,8 @@ func TestOperatorSuspendSkipsINC003Grace(t *testing.T) {
 // still suspended; the void clears the controller half alone.
 func TestResumeVoidsSuspendedDrain(t *testing.T) {
 	meta := intentAt(drainSuspended, "3")
-	if it, _ := decideDrain(t, meta, undesired(drainSuspended)); it.Kind != "" || it.Reason != decideStopActive {
-		t.Fatalf("still suspended: %+v, want the request held", it)
+	if it, _ := decideDrain(t, meta, undesired(drainSuspended)); it.Kind != intentSignal {
+		t.Fatalf("still suspended: %+v, want the request kept and signaled", it)
 	}
 	store, _ := stampedMem(t, gate.Require)
 	b, err := store.Create(drainRow(meta...))
@@ -192,7 +192,7 @@ func TestConfigDriftResolvedCancels(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			meta := slices.Concat(intentAt(drainConfigDrift, "3"), []string{"started_config_hash", c.hash, "started_live_hash", live}, c.extra)
 			it, _ := decideDrain(t, meta, c.entry, c.world...)
-			if got := it.Kind == intentDrainCancel; got != c.cancel || (!c.cancel && it.Reason != decideStopActive) {
+			if got := it.Kind == intentDrainCancel; got != c.cancel || (!c.cancel && it.Kind != intentSignal) {
 				t.Fatalf("%+v, want cancel=%v", it, c.cancel)
 			}
 		})
@@ -224,7 +224,7 @@ func TestDrainCancelLensesMatchLegacy(t *testing.T) {
 				case lens:
 					want = intentDrainCancel
 				case reason == drainConfigDrift || reason == executionStalledDrainReason:
-					want = "" // still authorized
+					want = intentSignal // still authorized, past its grace
 				}
 				if it, _ := decideDrain(t, intentAt(reason, "3"), entry); it.Kind != want {
 					t.Errorf("%s, %s lens, keep=%v: %+v, want kind %q", reason, name, keep, it, want)
@@ -302,7 +302,6 @@ func TestNoDrainOnKeepOrUnknownLiveness(t *testing.T) {
 		// own runtime the inventory reads alive.
 		{name: "asleep", meta: []string{"state", "asleep"}, entry: undesired(drainOrphaned), want: decideNoAction, world: func(w *World) { w.Obs = nil }},
 		{name: "heartbeat hold (SESS-617)", meta: []string{"held_until", rowAt(time.Minute)}, entry: func(e *selectionEntry) { e.Desired = desireSleep }, want: decideNoAction},
-		{name: "user-hold intent (C6b2's)", meta: []string{"sleep_intent", "user-hold"}, entry: undesired(drainOrphaned), want: decideNoAction},
 	} {
 		var world []func(*World)
 		if c.world != nil {
@@ -312,6 +311,11 @@ func TestNoDrainOnKeepOrUnknownLiveness(t *testing.T) {
 		if it.Kind != "" || it.Reason != c.want {
 			t.Errorf("%s: %+v, want hold %q", c.name, it, c.want)
 		}
+	}
+	// A user-hold intent on a live own runtime is A4's direct stop (C6b2),
+	// never a drain begin.
+	if it, _ := decideDrain(t, []string{"sleep_intent", "user-hold"}, undesired(drainOrphaned)); it.Kind != intentStop || it.Reason != decideDormantStop {
+		t.Errorf("user-hold intent: %+v, want A4's direct stop", it)
 	}
 }
 
@@ -330,7 +334,7 @@ func TestINC003IsDrainOnly(t *testing.T) {
 func TestWokenRowClearsIdleStopPending(t *testing.T) {
 	wake := func(e *selectionEntry) { e.Desired = desireWake }
 	it, _ := decideDrain(t, []string{"sleep_intent", sleepIntentIdle}, wake)
-	if it.Kind != intentRowHeal || it.Reason != decideIdleStopClear || len(it.Patch) != 1 || it.Patch["sleep_intent"] != "" {
+	if w := it.folded(); it.Kind != intentRowHeal || it.Reason != decideIdleStopClear || len(w) != 1 || w["sleep_intent"] != "" || !it.Class.Has("sleep_intent") {
 		t.Fatalf("%+v, want the sleep_intent clear alone", it)
 	}
 }
@@ -500,7 +504,8 @@ func TestNoWakeRequestCancelsOnAssignedWork(t *testing.T) {
 		{"blocked in-progress work", sleep, []func(*World){blockedClaim}, true},
 	} {
 		it, _ := decideDrain(t, quarantined, c.entry, c.world...)
-		if got := it.Kind == intentDrainCancel; got != c.cancel || (!c.cancel && it.Kind != "") {
+		// A request no work cancels stands, and is signaled past its grace.
+		if got := it.Kind == intentDrainCancel; got != c.cancel || (!c.cancel && it.Kind != intentSignalFresh) {
 			t.Errorf("%s: %+v, want cancel=%v", c.name, it, c.cancel)
 		}
 	}
@@ -527,15 +532,15 @@ func TestIdleBeginWritesTheIdleLatch(t *testing.T) {
 }
 
 // TestSignaledStopIsNotA20s. Kills A20 holding a signaled stop: a requested
-// or acked drain holds for its signal there, but a signaled one (legacy's
+// or acked drain is signaled there, but a signaled one (legacy's
 // stop-pending projection) falls through to A4's stop verb (C6b2).
 func TestSignaledStopIsNotA20s(t *testing.T) {
 	stopPending := []string{"state", "draining", "state_reason", session.DrainAckStopPendingReason, "drain_at", rowAt(-time.Minute)}
 	if it, _ := decideDrain(t, stopPending, undesired(drainOrphaned)); it.Reason == decideStopActive {
 		t.Fatalf("signaled stop: %+v, want A20 to yield to A4", it)
 	}
-	if it, _ := decideDrain(t, intentAt(drainOrphaned, "3"), undesired(drainOrphaned)); it.Kind != "" || it.Reason != decideStopActive {
-		t.Fatalf("requested stop: %+v, want A20 holding it for the signal", it)
+	if it, _ := decideDrain(t, intentAt(drainOrphaned, "3"), undesired(drainOrphaned)); it.Kind != intentSignal {
+		t.Fatalf("requested stop: %+v, want A20 signaling it", it)
 	}
 }
 

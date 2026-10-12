@@ -4,9 +4,9 @@ import (
 	"os"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 )
 
 // The census is the guard: this package's tests, like cmd/gc's, internal/api's
@@ -63,16 +63,18 @@ func TestGuardSessionKeys(t *testing.T) {
 
 // TestGuardDispositionWrites pins the disposition write guard's verdicts: a
 // write carrying class keys passes only as exactly a minted DispositionPatch
-// for its row (spent once), a fixture's, or a listed bypass writer's within
-// its bound; a hand-built one fails, as does a key beside a mint, a mint for
-// another row, and a bypass writer's write outside its bound.
+// for its row (spent once) or a fixture's; a hand-built one fails, as does a
+// key beside a mint, a mint for another row, and a Fold. No writer is exempt
+// by name.
 func TestGuardDispositionWrites(t *testing.T) {
-	prod := func() (string, []string, bool) { return "cmd/gc.someWriter", nil, false }
+	prod := func() (string, bool) { return "cmd/gc.someWriter", false }
 	if msg := checkDispositionWrite("r1", map[string]string{"state": "asleep"}, prod); msg != "" {
 		t.Errorf("a write with no class key failed: %s", msg)
 	}
-	if msg := checkDispositionWrite("r1", map[string]string{"held_until": "x"}, prod); !strings.Contains(msg, "written by hand at cmd/gc.someWriter") {
-		t.Errorf("a hand-built class write = %q, want a violation naming its writer", msg)
+	for _, class := range []map[string]string{{"held_until": ""}, {"quarantined_until": "2026-01-01T00:00:00Z"}, {"sleep_intent": "user-hold"}} {
+		if msg := checkDispositionWrite("r1", class, prod); !strings.Contains(msg, "written by hand at cmd/gc.someWriter") {
+			t.Errorf("a hand-built %v = %q, want a violation naming its writer", class, msg)
+		}
 	}
 	minted := DecodeDisposition(nil)
 	minted.Wait = true
@@ -93,43 +95,11 @@ func TestGuardDispositionWrites(t *testing.T) {
 	if msg := checkDispositionWrite("r1", map[string]string{"wait_hold": "true"}, prod); msg != "" {
 		t.Errorf("the unspent mint failed its exact write: %s", msg)
 	}
-	if msg := checkDispositionWrite("r1", map[string]string{"held_until": "x"}, func() (string, []string, bool) { return "cmd/gc.TestX", nil, true }); msg != "" {
+	if msg := checkDispositionWrite("r1", map[string]string{"held_until": "x"}, func() (string, bool) { return "cmd/gc.TestX", true }); msg != "" {
 		t.Errorf("a fixture write failed: %s", msg)
 	}
 	if msg := checkDispositionWrite("r1", minted.Encode().Fold(), prod); msg == "" {
 		t.Error("a Fold, which mints nothing, passed as a write")
-	}
-	stamp := dispT0.Format(time.RFC3339)
-	for _, tc := range []struct {
-		writer string
-		class  map[string]string
-		admit  bool
-	}{
-		{"cmd/gc.healExpiredTimersInfo", map[string]string{"held_until": "", "quarantined_until": ""}, true},
-		{"cmd/gc.healExpiredTimersInfo", map[string]string{"held_until": stamp}, false},
-		{"cmd/gc.fencedWriter.casRow", map[string]string{"quarantined_until": stamp, "sleep_intent": ""}, true},
-		{"cmd/gc.fencedWriter.casRow", map[string]string{"sleep_intent": "user-hold"}, false},
-		{"cmd/gc.fencedWriter.casRow", map[string]string{"held_until": stamp}, false},
-		{"cmd/gc.fencedWriter.casRow", map[string]string{"suspended_at": stamp}, false},
-		{"cmd/gc.recordChurn", map[string]string{"quarantined_until": stamp}, true},
-		{"cmd/gc.recordChurn", map[string]string{"quarantined_until": "soon"}, false},
-		{"cmd/gc.recordChurn", map[string]string{"quarantined_until": stamp, "wait_hold": ""}, false},
-		{"cmd/gc.(*sessionKillFence).rollback", map[string]string{"held_until": stamp, "sleep_intent": "user-hold", "suspended_at": stamp}, true},
-		{"cmd/gc.(*sessionKillFence).rollback", map[string]string{"sleep_intent": "someday", "held_until": "soon"}, true},
-		{"cmd/gc.(*sessionKillFence).rollback", map[string]string{"wait_hold": "true"}, false},
-		{"cmd/gc.preWakeCommitWith", map[string]string{"sleep_intent": ""}, true},
-		{"cmd/gc.preWakeCommitWith", map[string]string{"held_until": ""}, false},
-	} {
-		on := func() (string, []string, bool) { return "cmd/gc.inner", []string{tc.writer}, false }
-		if msg := checkDispositionWrite("r3", tc.class, on); (msg == "") != tc.admit {
-			t.Errorf("%s writing %v: admitted %v, want %v", tc.writer, tc.class, msg == "", tc.admit)
-		}
-	}
-	both := func() (string, []string, bool) {
-		return "x", []string{"cmd/gc.preWakeCommitWith", "cmd/gc.recordChurn"}, false
-	}
-	if msg := checkDispositionWrite("r3", map[string]string{"quarantined_until": stamp}, both); msg != "" {
-		t.Errorf("a write one of two bypass writers on the stack admits failed: %s", msg)
 	}
 }
 
@@ -160,13 +130,165 @@ func TestDispositionGuardReadsTheStack(t *testing.T) {
 	if !dispositionVerbs["internal/session.(*Store).ApplyPatch"] || dispositionVerbs["internal/session.(*Store).OperatorSuspend"] {
 		t.Error("the session store's generic verbs, and only they, are plumbing")
 	}
-	if at, bypass, fixture := dispositionWriterFromHere(); !fixture || bypass != nil {
-		t.Errorf("a test's write: at %q bypass %v fixture %v, want a fixture", at, bypass, fixture)
+	if at, fixture := dispositionWriterFromHere(); !fixture {
+		t.Errorf("a test's write: at %q fixture %v, want a fixture", at, fixture)
 	}
 }
 
 // dispositionWriterFromHere reads the stack as the hook does, from a frame
 // standing for the hook (hookFrame).
-func dispositionWriterFromHere() (string, []string, bool) { return hookFrame() }
+func dispositionWriterFromHere() (string, bool) { return hookFrame() }
 
-func hookFrame() (string, []string, bool) { return dispositionWriter() }
+func hookFrame() (string, bool) { return dispositionWriter() }
+
+// TestLostDispositionWritesLeaveNoMint (L1, L1b): a move whose every CAS
+// attempt loses leaves no open mint, so a hand-built write of the same
+// content fails the guard, on its row and on the same ID in another store
+// (every MemStore's first row is gc-1).
+func TestLostDispositionWritesLeaveNoMint(t *testing.T) {
+	stamped := stampedMemStore(t, gate.Auto, beads.NewMemStore())
+	b, err := stamped.Create(beads.Bead{Title: "w", Type: BeadType, Labels: []string{LabelSession}, Metadata: map[string]string{"state": string(StateActive), "sleep_intent": "idle-stop-pending"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := OpenDispositionMints(b.ID)
+	loser := &wakeCASLoser{rowWriteRecorder: &rowWriteRecorder{Store: stamped}, backing: stamped}
+	if w, err := NewStore(beads.SessionStore{Store: loser}).ApplyDispositionFresh(b.ID, ActorController, DispEvent{Kind: EvIdleStopEnd}, nil, dispT0); err != nil || w.Result != CommitContended {
+		t.Fatalf("IdleStopEnd under a CAS that always loses = %+v, %v; want contended", w, err)
+	}
+	if n := OpenDispositionMints(b.ID) - before; n != 0 {
+		t.Errorf("the lost move left %d open mints for %s", n, b.ID)
+	}
+	other := beads.NewMemStore()
+	b2, err := other.Create(beads.Bead{Title: "x", Type: BeadType, Labels: []string{LabelSession}, Metadata: map[string]string{"state": string(StateActive)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prod := func() (string, bool) { return "cmd/gc.someHandWriter", false }
+	if b2.ID == b.ID && checkDispositionWrite(b2.ID, map[string]string{"sleep_intent": ""}, prod) == "" {
+		t.Errorf("a hand-built {sleep_intent: \"\"} to %s in another store passed the guard", b2.ID)
+	}
+}
+
+// TestUpdateMetadataFencedUnmintsLostAttempts: a fenced decider that mints
+// (the wait clear, the undos) and loses every CAS attempt leaves no open mint.
+func TestUpdateMetadataFencedUnmintsLostAttempts(t *testing.T) {
+	stamped := stampedMemStore(t, gate.Auto, beads.NewMemStore())
+	b, err := stamped.Create(beads.Bead{Title: "w", Type: BeadType, Labels: []string{LabelSession}, Metadata: map[string]string{"state": string(StateActive), "wait_hold": "true"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := OpenDispositionMints(b.ID)
+	loser := &wakeCASLoser{rowWriteRecorder: &rowWriteRecorder{Store: stamped}, backing: stamped}
+	ok, err := NewStore(beads.SessionStore{Store: loser}).UpdateMetadataFenced(b.ID, 3, func(info Info, _ PersistedResponse) MetadataPatch {
+		to, err := DispositionOfInfo(info).Apply(ActorController, DispEvent{Kind: EvWaitEnd}, State(info.MetadataState), dispT0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return to.Changed().Into(info.ID, nil)
+	})
+	if ok || err != nil {
+		t.Fatalf("UpdateMetadataFenced under a CAS that always loses = %v, %v; want not written", ok, err)
+	}
+	if n := OpenDispositionMints(b.ID) - before; n != 0 {
+		t.Errorf("the lost attempts left %d open mints", n)
+	}
+}
+
+// TestCloseWithMetadataIfMatchUnmintsALostClose: a decided close carrying a
+// cell's keys that loses its fence leaves no open mint.
+func TestCloseWithMetadataIfMatchUnmintsALostClose(t *testing.T) {
+	stamped := beads.NewAtomicCloseMemStore()
+	b, err := stamped.Create(beads.Bead{Title: "w", Type: BeadType, Labels: []string{LabelSession}, Metadata: map[string]string{"state": string(StateCreating), "wait_hold": "true"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	front := NewStore(beads.SessionStore{Store: stamped})
+	before := OpenDispositionMints(b.ID)
+	closed, err := front.CloseWithMetadataIfMatch(b.ID, func(info Info, _ PersistedResponse) (MetadataPatch, bool) {
+		patch := CellInfo(info, ActorController, DispEvent{Kind: EvRetire}, dispT0).Into(info.ID, MetadataPatch{"state": "failed-create"})
+		if err := stamped.SetMetadata(info.ID, "detached_at", "x"); err != nil { // a writer lands after the read
+			t.Fatal(err)
+		}
+		return patch, true
+	})
+	if closed || err != nil {
+		t.Fatalf("close over a moved row = %v, %v; want lost", closed, err)
+	}
+	if n := OpenDispositionMints(b.ID) - before; n != 0 {
+		t.Errorf("the lost close left %d open mints", n)
+	}
+}
+
+// TestUpdateRowFencedUnmintsALostWrite: a row CAS that loses its fence
+// leaves no mint of its cell open (v2's casRow writes through it).
+func TestUpdateRowFencedUnmintsALostWrite(t *testing.T) {
+	stamped := stampedMemStore(t, gate.Auto, beads.NewMemStore())
+	b, err := stamped.Create(beads.Bead{Title: "w", Type: BeadType, Labels: []string{LabelSession}, Metadata: map[string]string{"state": string(StateAsleep), "wait_hold": "true"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	front := NewStore(beads.SessionStore{Store: stamped})
+	before := OpenDispositionMints(b.ID)
+	wrote, err := front.UpdateRowFenced(b.ID, 1, func(info Info, _ PersistedResponse) (RowPatch, bool) {
+		patch := CellInfo(info, ActorController, DispEvent{Kind: EvRetire}, dispT0).Into(info.ID, MetadataPatch{"state": "asleep"})
+		if err := stamped.SetMetadata(info.ID, "detached_at", "x"); err != nil { // a writer lands after the read
+			t.Fatal(err)
+		}
+		return RowPatch{Metadata: patch}, true
+	})
+	if wrote || err != nil {
+		t.Fatalf("CAS over a moved row = %v, %v; want lost", wrote, err)
+	}
+	if n := OpenDispositionMints(b.ID) - before; n != 0 {
+		t.Errorf("the lost write left %d open mints", n)
+	}
+}
+
+// TestCommitCloseUnmintsARefusedClose: a close its premise refuses leaves no
+// mint of its terminal patch's cell open.
+func TestCommitCloseUnmintsARefusedClose(t *testing.T) {
+	stamped := beads.NewAtomicCloseMemStore()
+	b, err := stamped.Create(beads.Bead{Title: "w", Type: BeadType, Labels: []string{LabelSession}, Metadata: map[string]string{"state": string(StateAsleep), "wait_hold": "true"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	front := NewStore(beads.SessionStore{Store: stamped})
+	info := infoFromPersistedBead(b)
+	if err := stamped.SetMetadata(b.ID, "state", string(StateAwake)); err != nil { // a wake after the decision
+		t.Fatal(err)
+	}
+	before := OpenDispositionMints(b.ID)
+	terminal := CellInfo(info, ActorController, DispEvent{Kind: EvRetire}, dispT0).Into(b.ID, ClosePatch(dispT0, "orphaned"))
+	if res, err := front.CommitClose(Decide(info, FactsLegacyClose), terminal, dispT0); res != CommitMoved || err != nil {
+		t.Fatalf("close over a woken row = %v, %v; want moved", res, err)
+	}
+	if n := OpenDispositionMints(b.ID) - before; n != 0 {
+		t.Errorf("the refused close left %d open mints", n)
+	}
+}
+
+// TestStoreWriteMethodIsPlumbing: a test's store adapter (a _test.go method
+// named for a store write verb) is plumbing, so a production writer behind
+// it is judged; a test function, a non-verb method and a production method
+// are not.
+func TestStoreWriteMethodIsPlumbing(t *testing.T) {
+	for _, tc := range []struct {
+		file, name string
+		want       bool
+	}{
+		{"cmd/gc/reconcile_sim_test.go", "cmd/gc.(*simLegBacking).CloseWithMetadataIfMatch", true},
+		{"cmd/gc/x_test.go", "cmd/gc.recordingStore.SetMetadataBatch", true},
+		{"cmd/gc/x_test.go", "cmd/gc.(*wrapped).UpdateIfMatch", true},
+		{"cmd/gc/x_test.go", "cmd/gc.(*wrapped).CompareAndSetMetadataKey", true},
+		{"cmd/gc/x_test.go", "cmd/gc.(*wrapped).CreateWithStorage", true},
+		{"cmd/gc/x_test.go", "cmd/gc.racer.UpdateIfAssignment", true},
+		{"cmd/gc/x_test.go", "cmd/gc.TestUpdate", false},
+		{"cmd/gc/x_test.go", "cmd/gc.(*kit).run", false},
+		{"cmd/gc/class_store_emit.go", "cmd/gc.(*emittingClassStore).SetMetadataBatch", false},
+	} {
+		if got := storeWriteMethod(tc.file, tc.name); got != tc.want {
+			t.Errorf("storeWriteMethod(%q, %q) = %v, want %v", tc.file, tc.name, got, tc.want)
+		}
+	}
+}

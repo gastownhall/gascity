@@ -226,6 +226,9 @@ func (p *planner) submit(w *World, a *allocDecision, admitted []intent) {
 	}
 	for _, it := range admitted {
 		e := inflightEntry{Kind: it.Kind, Key: it.Key, Endpoint: it.Endpoint}
+		if it.Kind == intentClose && pass.held.release == nil {
+			pass.held.release = newCloseReleases(w, p.stranded, p.stderr)
+		}
 		if it.Kind == intentCreate {
 			if pass.held.create == nil {
 				pass.held.create = newCreatePass(w)

@@ -9,13 +9,16 @@ import (
 	"path/filepath"
 )
 
-// ReadFilteredEach calls fn, in order, for each event ReadFiltered would
-// return (the sibling archives oldest-first, then the active log), without
-// collecting them, so memory does not grow with the number of matches. It
-// stops at fn's first error and returns it. It returns ctx's error when ctx is
-// done, checked before each archive and every historyTailCtxCheckLines events
-// or lines. A positive Filter.Limit stops it after that many events, as in
-// ReadFiltered.
+// ReadFilteredEach calls fn, in order, for each event ReadFiltered's full read
+// would return (the sibling archives oldest-first, then the active log),
+// without collecting them, so memory does not grow with the number of matches.
+// It always runs that forward read, even for a Since filter that ReadFiltered
+// answers from its backward walk, so on a log that breaks the invariant
+// sinceScanSkew describes it can return events ReadFiltered omits, until
+// ga-npyxc0 routes it through the walk. It stops at fn's first error and
+// returns it. It returns ctx's error when ctx is done, checked before each
+// archive and every historyTailCtxCheckLines events or lines. A positive
+// Filter.Limit stops it after that many events, as in ReadFiltered.
 func ReadFilteredEach(ctx context.Context, path string, filter Filter, fn func(Event) error) error {
 	dir := filepath.Dir(path)
 	archives, err := archiveFilesIn(dir)

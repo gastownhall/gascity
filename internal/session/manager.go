@@ -1258,17 +1258,35 @@ func (m *Manager) Attach(ctx context.Context, by Actor, id string, resumeCommand
 // suspendRollback is the restore of a failed stop's suspend w over the row
 // meta reads now: nothing unless meta still carries the suspend's stamp, and
 // then Was for each key w changed that meta still reads as w wrote it.
-func suspendRollback(w DispositionWrite, meta map[string]string) MetadataPatch {
+// rollbackSuspend writes suspendRollback on a fresh read, fenced.
+func (m *Manager) rollbackSuspend(id string, suspended DispositionWrite) error {
+	_, err := m.PersistedStore().UpdateMetadataFenced(id, operatorSuspendAttempts, func(_ Info, p PersistedResponse) MetadataPatch {
+		return suspendRollback(id, suspended, p.Metadata)
+	})
+	return err
+}
+
+// stampSoftSuspend writes a suspend that holds nothing (the chat idle
+// auto-suspend, the city stop sweep): patch's state and stamp.
+func (m *Manager) stampSoftSuspend(id string, patch MetadataPatch) error {
+	if err := m.store.Update(id, beads.UpdateOpts{Metadata: map[string]string(patch)}); err != nil {
+		return fmt.Errorf("updating suspension state: %w", err)
+	}
+	return nil
+}
+
+func suspendRollback(id string, w DispositionWrite, meta map[string]string) MetadataPatch {
 	if w.Wrote == nil || meta["suspended_at"] != w.Wrote["suspended_at"] {
 		return nil
 	}
 	restore := MetadataPatch{}
-	for k, v := range w.Wrote {
+	for k, v := range LifecycleOnly(w.Wrote) {
 		if meta[k] == v && w.Was[k] != v {
 			restore[k] = w.Was[k]
 		}
 	}
-	return restore
+	// The class keys' undo is the Suspend cell's.
+	return UndoDisposition(w.Was, w.Wrote, meta).Into(id, restore)
 }
 
 // suspendIntent distinguishes an operator's explicit, targeted suspend from the
@@ -1428,9 +1446,7 @@ func (m *Manager) Suspend(ctx context.Context, by Actor, id string, soft bool) e
 				// stamp, and only the keys the suspend changed that still read
 				// as it wrote them, so a write since (a wait, a quarantine)
 				// stands.
-				if _, rbErr := m.PersistedStore().UpdateMetadataFenced(id, operatorSuspendAttempts, func(_ Info, p PersistedResponse) MetadataPatch {
-					return suspendRollback(suspended, p.Metadata)
-				}); rbErr != nil {
+				if rbErr := m.rollbackSuspend(id, suspended); rbErr != nil {
 					return fmt.Errorf("%w (restoring the row: %w)", err, rbErr)
 				}
 				return err
@@ -1448,7 +1464,6 @@ func (m *Manager) Suspend(ctx context.Context, by Actor, id string, soft bool) e
 		// the shutdown sweep leaves the wake for the next start.
 		patch := MetadataPatch{
 			"state":        string(StateSuspended),
-			"suspended_at": m.now().UTC().Format(time.RFC3339),
 			"slept_at":     "",
 			"sleep_reason": "",
 		}
@@ -1457,11 +1472,9 @@ func (m *Manager) Suspend(ctx context.Context, by Actor, id string, soft bool) e
 				patch[k] = v
 			}
 		}
-		if err := m.store.Update(id, beads.UpdateOpts{Metadata: map[string]string(patch)}); err != nil {
-			return fmt.Errorf("updating suspension state: %w", err)
-		}
-
-		return nil
+		// The stamp is the disposition's SuspendSoft cell (no hold).
+		patch = CellInto(id, b.Metadata, by.Kind, DispEvent{Kind: EvSuspendSoft}, m.now(), patch)
+		return m.stampSoftSuspend(id, patch)
 	})
 }
 
@@ -1582,15 +1595,24 @@ func (m *Manager) CloseDetailed(ctx context.Context, by Actor, id string) (Close
 			log.Printf("session %s: closing after capped wait cancellation lookup", id)
 		}
 		result.WaitNudgeIDs = append(result.WaitNudgeIDs, nudgeIDs...)
-		if err := m.clearWakeAndHoldOverrides(id); err != nil {
-			return err
-		}
-		if err := m.retireConfiguredNamedSessionIdentifiers(id, b); err != nil {
-			return err
-		}
-
-		if err := m.store.Close(id); err != nil {
-			return err
+		// One terminal close (op.close): the holds go as a retired row's (the
+		// disposition's Retire cell), with the wake pin and a configured
+		// named session's identifiers, on the incarnation this close stopped.
+		terminal := retiredIdentifiersPatch(b)
+		terminal["pin_awake"] = ""
+		terminal = CellInto(id, b.Metadata, ActorController, DispEvent{Kind: EvRetire}, m.now(), terminal)
+		// Past a kill fence: the operator's close ends the session a kill was
+		// tearing down, as it did before CommitClose.
+		res, err := NewStore(beads.SessionStore{Store: m.store}).CommitClose(Decide(infoFromPersistedBead(b), FactsOpClose), terminal, m.now(), CommitPastKillFence())
+		switch {
+		case err != nil:
+			return fmt.Errorf("closing session %s: %w", id, err)
+		case res == CommitMoved:
+			return fmt.Errorf("closing session %s: %w", id, ErrSessionCloseSuperseded)
+		case res == CommitContended:
+			return fmt.Errorf("closing session %s: lost the revision fence %d times", id, terminalCloseMaxAttempts)
+		case res != CommitLanded && res != CommitClosed:
+			return fmt.Errorf("closing session %s: refused (%s)", id, res)
 		}
 		_ = clearRuntimeMCPServersSnapshot(m.cityPath, id)
 		return nil
@@ -1598,43 +1620,23 @@ func (m *Manager) CloseDetailed(ctx context.Context, by Actor, id string) (Close
 	return result, err
 }
 
-func (m *Manager) clearWakeAndHoldOverrides(id string) error {
-	update := map[string]string{
-		"pin_awake":    "",
-		"held_until":   "",
-		"sleep_intent": "",
-	}
-	if err := m.store.SetMetadataBatch(id, update); err != nil {
-		return fmt.Errorf("clearing wake and hold overrides: %w", err)
-	}
-	return nil
-}
-
-func (m *Manager) retireConfiguredNamedSessionIdentifiers(id string, b beads.Bead) error {
-	// Recognize configured named sessions by flag OR identity so a
-	// partially-tagged bead (identity recorded, boolean flag absent) still
-	// releases its reserved runtime name on close instead of stranding the
-	// name and blocking respawn (ga-841).
+// retiredIdentifiersPatch frees a configured named session's identifiers on
+// its close: its aliases, runtime name and canonical identity record, as
+// RetireNamedSessionPatch does. Recognized by flag OR identity, so a
+// partially-tagged bead (identity recorded, boolean flag absent) still
+// releases its reserved runtime name instead of stranding it and blocking
+// respawn (ga-841). Any other row's is empty.
+func retiredIdentifiersPatch(b beads.Bead) MetadataPatch {
 	if !wasConfiguredNamedSession(b) {
-		return nil
+		return MetadataPatch{}
 	}
-	update := beads.UpdateOpts{
-		Metadata: UpdatedAliasMetadata(b.Metadata, ""),
-	}
-	update.Metadata["session_name"] = ""
-	update.Metadata["session_name_explicit"] = ""
-	update.Metadata["pending_create_claim"] = ""
-	update.Metadata["pending_create_started_at"] = ""
-	// Free the durable canonical-identity record on this close path too, matching
-	// RetireNamedSessionPatch. Without it a configured named session closed via
-	// Manager.Close keeps a stale canonical instance name / pool slot — the same
-	// strand class the S19 retirement fix removed for the duplicate/removed/API
-	// paths, which this hand-rolled path is not one of.
-	freeCanonicalIdentityMetadata(update.Metadata)
-	if err := m.store.Update(id, update); err != nil {
-		return fmt.Errorf("retiring configured named session identifiers: %w", err)
-	}
-	return nil
+	patch := MetadataPatch(UpdatedAliasMetadata(b.Metadata, ""))
+	patch["session_name"] = ""
+	patch["session_name_explicit"] = ""
+	patch["pending_create_claim"] = ""
+	patch["pending_create_started_at"] = ""
+	freeCanonicalIdentityMetadata(patch)
+	return patch
 }
 
 // Kill force-kills the runtime process for a session without changing bead

@@ -19,7 +19,7 @@ A12 / S5 classification and recycle	SESS-056,SESS-057
 A21 + C3 failed-create close	SESS-060,SESS-061,SESS-702
 A6 heal of a `creating` row without a claim to asleep, fenced on `instance_token` (lease branch removed)	SESS-062
 AL1 Drain + A20 + D2	SESS-074
-A21 + C3 close	SESS-080,SESS-081,SESS-082,SESS-083,SESS-624,SESS-626,SESS-722,GUAR-022,GUAR-038
+A21 + C3 close	SESS-080,SESS-081,SESS-082,SESS-083,SESS-624,SESS-626,SESS-722,GUAR-022
 A12 / S5 classification and recycle (reset-stall via the recycle)	SESS-085,SESS-086,SESS-087,SESS-088,SESS-089,SESS-090,SESS-530
 A6 dead-runtime heal (C5d replay): a committed row whose runtime is gone and that AL1 does not Drain, fresh-read fenced; heartbeat-held rows wait for A17	SESS-531
 A19/A20 + D2 policy table	SESS-532,SESS-616,SESS-617,SESS-618,SESS-619,SESS-621,DRAIN-022,DRAIN-501
@@ -27,7 +27,7 @@ A6 detached-at marker (C5d replay): cleared when the policy is not interactive, 
 AL1 Keep on an uncertain attach (C2.9); A6's detached-at marker writes nothing	SESS-534
 A6 detached-at marker (C5d replay): cleared while attached	SESS-535
 A6 detached-at marker (C5d replay): stamped at the pass time when detached and empty	SESS-536
-S3 abandon table + S6 #46	SESS-537,SESS-538,START-031,START-032,START-033,START-034,START-035,GUAR-025,GUAR-027,GUAR-039
+S3 abandon table + S6 #46	SESS-537,SESS-538,START-031,START-032,START-033,START-034,START-035,GUAR-025,GUAR-027,GUAR-038,GUAR-039
 A6 stability clear (C5d replay): `wake_attempts` and an unexpired `quarantined_until` on a committed row alive 30s past `last_woke_at`, before A20	SESS-539
 A6 stability clear (C5d replay): `churn_count` on a committed row alive 5 min past `last_woke_at`	SESS-540
 A14 config drift + D2/D3 (C7b)	SESS-550,SESS-552,SESS-553,SESS-554,SESS-555,SESS-556,SESS-557,SESS-558,SESS-559,SESS-560,SESS-561,SESS-562,SESS-565,SESS-566,SESS-568,GUAR-006

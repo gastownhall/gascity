@@ -20,8 +20,11 @@ import (
 // exact or a superset of the query's.
 //
 // A plural Assignees set fans out into one request per distinct assignee, each
-// with that assignee pushed, up to nativeListAssigneeFanOutMax. The status and
-// type pushdowns are nativeListRequestFromListQuery's.
+// with that assignee pushed, however many there are: a keyed request reads one
+// assignee's rows, while the one request a plural set would otherwise collapse
+// into carries no assignee and, for a type and status that cannot be pushed
+// (open mail), walks the whole ledger. The status and type pushdowns are
+// nativeListRequestFromListQuery's.
 //
 // A FANNED-OUT PLAN IS SEVERAL SNAPSHOTS. The reader role publishes no read
 // transaction, so each request reads the ledger as of its own arrival: a bead
@@ -38,11 +41,6 @@ import (
 func NativeListPlan(query ListQuery) []issueops.ListRequest {
 	return nativeListPlan(query, nativeListDefaultPushableTypes)
 }
-
-// nativeListAssigneeFanOutMax bounds the plural-assignee fan-out. No hook asks
-// for more than an identity's routes (id, alias, session name and alias
-// history); a larger set stays one request with the assignees applied Go-side.
-const nativeListAssigneeFanOutMax = 8
 
 // nativeListPlan is NativeListPlan over a store's own pushable type set. A nil
 // set pushes no type at all.
@@ -79,9 +77,6 @@ func nativeListFanOutAssignees(query ListQuery) []string {
 		}
 		seen[assignee] = true
 		out = append(out, assignee)
-	}
-	if len(out) > nativeListAssigneeFanOutMax {
-		return nil
 	}
 	return out
 }

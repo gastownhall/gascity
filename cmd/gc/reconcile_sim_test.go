@@ -170,7 +170,8 @@ func (p *simProvider) RuntimeInventory(context.Context) (map[string]runtime.Inve
 	out := make(map[string]runtime.InventoryEntry, len(p.rts))
 	for name, rt := range p.rts {
 		inc := fmt.Sprintf("$%d:%d:%d", rt.object, rt.created, rt.object+1000)
-		out[name] = runtime.InventoryEntry{Incarnation: inc, DeadKnown: true, AllPanesDead: rt.corpse, AttachedKnown: true, Attached: rt.attached}
+		at := p.Activity[name] // the embedded fake's, as tmux's batched read carries it
+		out[name] = runtime.InventoryEntry{Incarnation: inc, DeadKnown: true, AllPanesDead: rt.corpse, AttachedKnown: true, Attached: rt.attached, ActivityKnown: !at.IsZero(), LastActivity: at}
 	}
 	return out, nil
 }
@@ -232,6 +233,12 @@ func (p *simProvider) IsAttached(name string) bool {
 	return p.rts[name] != nil && p.rts[name].attached
 }
 
+// IsAttachedWithError is IsAttached, error-free: the fence's L3 probe reads
+// it, never the embedded Fake's own attach map.
+func (p *simProvider) IsAttachedWithError(name string) (bool, error) { //nolint:unparam // runtime.AttachmentObserverWithError's signature
+	return p.IsAttached(name), nil
+}
+
 // Start creates a runtime carrying cfg's identity env, unless a scripted
 // outcome fails it or the name is held (FreshOnly's ErrSessionExists).
 func (p *simProvider) Start(_ context.Context, name string, cfg runtime.Config) error {
@@ -272,6 +279,15 @@ func (p *simProvider) killLocked(method, name string) {
 type simBacking struct{ *beads.MemStore }
 
 func (simBacking) CachedReadExact() bool { return true }
+
+// simLegBacking is the simulator's leg backing: simBacking with the atomic
+// terminal close the v2 close verbs require (closeRow), as the city's
+// SQLite sessions store has.
+type simLegBacking struct{ simBacking }
+
+func (b simLegBacking) CloseWithMetadataIfMatch(id string, expectedRevision int64, metadata map[string]string) (beads.Bead, error) {
+	return beads.AtomicCloserOver(b.MemStore).CloseWithMetadataIfMatch(id, expectedRevision, metadata)
+}
 
 // simLeg is one census leg: its backing, the cache the controller reads and
 // writes through, and the outside writers' events, which a step delivers.
@@ -338,8 +354,10 @@ type sim struct {
 	parked   []*simEffect
 	lastSeq  uint64
 	prev     map[string]beads.Bead // "leg/id" → row, after the last step
-	writes   []simWrite
-	admitted []time.Time // admitted starts (I9)
+	// killsChecked is how many of the provider's kills I4 and I5 judged.
+	killsChecked int
+	writes       []simWrite
+	admitted     []time.Time // admitted starts (I9)
 	// stable is, by row ID, whether the pass that last admitted an effect
 	// for the row read it committed, its own runtime alive, and 30s past its
 	// wake: I15's view of A6's stability clear.
@@ -382,7 +400,7 @@ func newSim(t *testing.T, seed uint64, o simOpts) *sim {
 		if err := beads.StampOpenedStore(m, "MemStore", gate.Require, nil, nil); err != nil {
 			t.Fatalf("stamp: %v", err)
 		}
-		cache := beads.NewCachingStoreForTest(simBacking{m}, nil, beads.WithClock(s.clk.Now)) // its windows run on sim time
+		cache := beads.NewCachingStoreForTest(simLegBacking{simBacking{m}}, nil, beads.WithClock(s.clk.Now)) // its windows run on sim time
 		if err := cache.Prime(context.Background()); err != nil {
 			t.Fatalf("prime %s: %v", name, err)
 		}
@@ -400,6 +418,7 @@ func newSim(t *testing.T, seed uint64, o simOpts) *sim {
 		CityPath: t.TempDir(), CityName: "test-city",
 		Env:          func() *reconcileEnv { return env },
 		Sessions:     func() beads.Store { return s.legs[0].cache },
+		WorkStore:    func() beads.Store { return s.legs[0].cache }, // the city's work and sessions share a store
 		RigStores:    func() map[string]beads.Store { return map[string]beads.Store{simRigLeg: s.legs[1].cache} },
 		Recording:    func() *externalReadsRecording { return nil },
 		Observations: func() *ObservationCache { return s.lane.cache },

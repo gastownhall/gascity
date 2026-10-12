@@ -274,7 +274,7 @@ func TestLaunchDeadlines(t *testing.T) {
 	k, leaf := launchKit(t, "asleep")
 	clk := k.p.Clock.(*fakePlannerClock)
 	leaf.onStart = func(ctx context.Context) {
-		clk.Advance(70*time.Second - startDeadlineSlack)
+		clk.Advance(70*time.Second - startDeadlineSlack - startFailureSlack)
 		select {
 		case <-ctx.Done():
 			if !errors.Is(context.Cause(ctx), context.DeadlineExceeded) {
@@ -740,6 +740,10 @@ func TestPreWakeLaunchesWaitHeldAndUnparseableTimerRows(t *testing.T) {
 		if s := k.runKind(); s.Outcome != settledLanded || len(k.starts()) != 1 {
 			t.Errorf("%v: settlement %+v, starts %d; want one launch", meta, s, len(k.starts()))
 		}
+		// The PreWake cell clears the wait's intent and keeps its hold.
+		if meta[0] == "wait_hold" && (k.meta("sleep_intent") != "" || k.meta("wait_hold") != "true") {
+			t.Errorf("%v: after the PreWake sleep_intent=%q wait_hold=%q, want the intent cleared and the wait kept", meta, k.meta("sleep_intent"), k.meta("wait_hold"))
+		}
 	}
 }
 
@@ -917,13 +921,14 @@ func TestStaleKeyResetRotatesTheContinuation(t *testing.T) {
 	if env := leaf.cfgs[0].Env["GC_CONTINUATION_EPOCH"]; env != "6" || k.meta("continuation_epoch") != "6" || k.meta("continuation_reset_pending") != "" {
 		t.Fatalf("runtime epoch %q, row epoch %q, reset pending %q; want 6, 6 and cleared", env, k.meta("continuation_epoch"), k.meta("continuation_reset_pending"))
 	}
-	// A failed launch leaves the PreWake's write alone: rotated and cleared,
-	// with no commit to clear the mark for it.
+	// A failed launch is S3's any-other class (#7570): the PreWake's
+	// rotation is restored, and the wake failure resets the conversation
+	// again (legacy's restorePreWakeState, then recordWakeFailure).
 	failed, _ := launchKit(t, "asleep", "session_key", "stale", "continuation_epoch", "5", "started_config_hash", "h0")
 	failed.p.World.Templates = k.p.World.Templates
 	failed.sp.nextStart = errors.New("boom")
-	if s := failed.runKind(); s.Cause != causeStartError || failed.meta("continuation_epoch") != "6" || failed.meta("continuation_reset_pending") != "" {
-		t.Fatalf("a failed launch: settlement %+v, row epoch %q, reset pending %q; want start-error, 6 and cleared", s, failed.meta("continuation_epoch"), failed.meta("continuation_reset_pending"))
+	if s := failed.runKind(); s.Cause != causeStartError || failed.meta("continuation_epoch") != "5" || failed.meta("continuation_reset_pending") != "true" || failed.meta("wake_attempts") != "1" {
+		t.Fatalf("a failed launch: settlement %+v, row epoch %q, reset pending %q, attempts %q; want start-error, 5, reset again, 1", s, failed.meta("continuation_epoch"), failed.meta("continuation_reset_pending"), failed.meta("wake_attempts"))
 	}
 }
 
@@ -1032,6 +1037,8 @@ func TestPreWakeExemptsTheHeartbeatHoldForA17Only(t *testing.T) {
 		{"A17 through a heartbeat hold", decideHeartbeatRespawn, []string{"held_until", soon}, true},
 		{"A18 over a heartbeat hold", decideStart, []string{"held_until", soon}, false},
 		{"A17 over an operator's hold", decideHeartbeatRespawn, []string{"held_until", soon, "sleep_intent", "user-hold"}, false},
+		{"A17 over a live quarantine", decideHeartbeatRespawn, []string{"held_until", soon, "quarantined_until", soon}, false},
+		{"A17 over a soft suspend", decideHeartbeatRespawn, []string{"held_until", soon, "state", "suspended"}, false},
 	} {
 		k, _ := launchKit(t, "asleep", c.meta...)
 		k.it.Reason = c.reason
@@ -1092,15 +1099,20 @@ func TestRefusedStartStillHeals(t *testing.T) {
 				tc.arrange(k)
 			}
 			k.it.Reason = decideStart
-			heal, _ := deadRuntimePatch(&rowFacts{w: k.p.World, row: row, entry: &selectionEntry{Liveness: livenessGone, Desired: desireWake}}, true)
-			maps.Copy(heal, tc.patch)
-			k.it.Patch, k.it.Heal = heal, &intent{Kind: intentRowHealFresh, Key: k.it.Key, Reason: decideDeadRuntimeHeal, Patch: heal}
+			heal, class, _ := deadRuntimePatch(&rowFacts{w: k.p.World, row: row, entry: &selectionEntry{Liveness: livenessGone, Desired: desireWake}}, true)
+			if until, err := time.Parse(time.RFC3339, tc.patch["quarantined_until"]); err == nil { // a quarantine is the Quarantine cell's
+				class = class.With(session.CellInfo(row.Info, session.ActorController, session.DispEvent{Kind: session.EvQuarantine, Until: until}, gatherNow))
+			}
+			k.it.Patch, k.it.Class, k.it.Heal = heal, class, &intent{Kind: intentRowHealFresh, Key: k.it.Key, Reason: decideDeadRuntimeHeal, Patch: heal, Class: class}
 			s := k.runKind()
 			if got := k.meta("state"); got != tc.wantState || len(k.starts()) != 0 {
 				t.Fatalf("settlement %+v: state %q, %d starts; want %q and no start", s, got, len(k.starts()), tc.wantState)
 			}
 			if healed := tc.wantState == "asleep"; healed != (s.Outcome == settledLanded) || s.Cause != tc.cause {
 				t.Fatalf("settlement %+v, want landed %v with cause %q", s, healed, tc.cause)
+			}
+			if q := tc.patch["quarantined_until"]; q != "" && k.meta("quarantined_until") != q {
+				t.Fatalf("quarantined_until %q after the heal written alone, want its cell's %q", k.meta("quarantined_until"), q)
 			}
 		})
 	}
@@ -1377,4 +1389,54 @@ func TestExecutorStopCancelsWithTheShutdownCause(t *testing.T) {
 			t.Fatalf("preserve=%v: an effect's context ended at shutdown with %v, want %v", c.preserve, cause, c.want)
 		}
 	}
+}
+
+// TestLaunchRefusesAStartTheShutdownOvertook (#7592 delta review). Kills a
+// launch that ignores beginStart: a preserve-sessions shutdown that lands in
+// the launch's pre-start steps (here its template resolution) leaves the
+// provider's Start uncalled.
+func TestLaunchRefusesAStartTheShutdownOvertook(t *testing.T) {
+	k, leaf := launchKit(t, "asleep")
+	ctx, shutdown := context.WithCancelCause(context.Background())
+	defer shutdown(nil)
+	row := k.p.World.Census.Rows[k.it.Key]
+	k.p.World.Templates = &templateMemo{
+		entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(row.Info): {TP: TemplateParams{TemplateName: "worker"}}},
+		resolveAt: func(session.Info, time.Time) templateResolution {
+			shutdown(errEffectShutdown) // past the tx's pre-Call check
+			return templateResolution{TP: TemplateParams{TemplateName: "worker"}}
+		},
+	}
+	s := k.run(ctx, effectSpecs[intentStart])
+	if len(leaf.cfgs) != 0 || s.Outcome == settledLanded {
+		t.Fatalf("settlement %+v, %d provider Starts; want none after the shutdown", s, len(leaf.cfgs))
+	}
+}
+
+// TestOutlivingStartStillEndsAtTheEffectsDeadline (#7592 delta review).
+// Kills a deadline the detached context only reports: after a
+// preserve-sessions shutdown spent the relay on a begun start, the effect's
+// deadline still ends it, and a later child deadline (the lease watch's
+// SafeUntil) ends with it.
+func TestOutlivingStartStillEndsAtTheEffectsDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		effect, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		ctx, shutdown := context.WithCancelCause(effect)
+		defer shutdown(nil)
+		detached, release := outlivesShutdown(ctx)
+		defer release()
+		if !beginStart(detached) {
+			t.Fatal("the start did not begin")
+		}
+		shutdown(errEffectShutdown)
+		synctest.Wait()
+		safeUntil, stop := context.WithDeadline(detached, time.Now().Add(110*time.Second))
+		defer stop()
+		start := time.Now()
+		<-safeUntil.Done()
+		if waited := time.Since(start); waited != time.Minute || !errors.Is(detached.Err(), context.DeadlineExceeded) {
+			t.Fatalf("ended after %v with %v, want the effect's deadline at 1m", waited, detached.Err())
+		}
+	})
 }

@@ -1,0 +1,26 @@
+# TestDispositionReadRatchet baseline (R7): raw reads of the five disposition keys per production file.
+# The counts may only fall; lower a file's count when it falls.
+cmd/gc/allocator_plan.go 1
+cmd/gc/api_state_wake_refusal.go 2
+cmd/gc/build_desired_state_pool_info.go 6
+cmd/gc/cmd_session.go 3
+cmd/gc/compute_awake_bridge.go 3
+cmd/gc/compute_awake_set.go 15
+cmd/gc/doctor_startup_health.go 3
+cmd/gc/pool_desired_state.go 3
+cmd/gc/reconcile_arms_drain.go 3
+cmd/gc/reconcile_arms_heals.go 1
+cmd/gc/reconcile_arms_start.go 1
+cmd/gc/reconcile_effect_heal.go 1
+cmd/gc/reconcile_session_decide.go 2
+cmd/gc/reconcile_startup_health.go 1
+cmd/gc/reconcile_tick.go 1
+cmd/gc/session_beads.go 1
+cmd/gc/session_lifecycle_parallel.go 2
+cmd/gc/session_pool_drain_deadline.go 1
+cmd/gc/session_reconcile.go 7
+cmd/gc/session_reconciler.go 12
+cmd/gc/session_sleep.go 4
+internal/session/lifecycle_projection.go 12
+internal/session/manager.go 4
+internal/session/startup_health.go 2

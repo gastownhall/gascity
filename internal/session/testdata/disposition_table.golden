@@ -617,7 +617,7 @@ TimerTick by controller
   none+unreadable-stamp         life=asleep   -> suspended_at=garbage
   suspended                     life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=t00s
   suspended+wait                life=asleep   -> held_until=∞ sleep_intent=user-hold wait_hold=true
-  suspended-finite-expired      life=asleep   -> (none)
+  suspended-finite-expired      life=asleep   -> sleep_intent=user-hold suspended_at=t0-1h0m0s
   suspended-no-until            life=asleep   -> sleep_intent=user-hold
   suspended-unknown-until       life=asleep   -> held_until=soon sleep_intent=user-hold
   suspended-soft                life=asleep   -> state=suspended suspended_at=t00s

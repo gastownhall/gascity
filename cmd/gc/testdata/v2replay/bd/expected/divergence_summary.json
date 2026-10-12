@@ -2,10 +2,11 @@
   "city": "bd-city",
   "ticks": 2,
   "legacy_actions": 1,
-  "v2_intents": 2,
+  "v2_intents": 3,
   "legacy_no_action_records": {},
   "divergences_by_family": {
     "harness gap": 1,
+    "replay approximation": 1,
     "unexplained": 2
   }
 }
