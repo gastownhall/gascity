@@ -303,8 +303,8 @@ func TestCommitCloseYieldsToAKillFence(t *testing.T) {
 			}
 
 			closed, err := NewStore(beads.SessionStore{Store: tracing}).CommitClose(Decide(decidedOn(t, backing, created.ID), FactsLegacyClose), ClosePatch(closeTestNow, "dead-runtime"), closeTestNow.Add(time.Second))
-			if err != nil || closed != CommitMoved {
-				t.Fatalf("CommitClose = (%v, %v), want moved (the kill's row)", closed, err)
+			if err != nil || closed != CommitKillFenced {
+				t.Fatalf("CommitClose = (%v, %v), want kill-fenced", closed, err)
 			}
 			if tracing.atomicCalls != tc.wantAtomics || len(tracing.txMsgs) != 0 {
 				t.Fatalf("atomic/tx calls = %d/%d, want %d/0", tracing.atomicCalls, len(tracing.txMsgs), tc.wantAtomics)
@@ -381,7 +381,7 @@ func TestCommitCloseFallbackChecksTheRowFirst(t *testing.T) {
 		}, want: CommitMoved},
 		{name: "kill fence", change: func(store beads.Store, id string) error {
 			return store.SetMetadataBatch(id, map[string]string(KillPendingPatch(closeTestNow)))
-		}, want: CommitMoved},
+		}, want: CommitKillFenced},
 		{name: "already closed", change: func(store beads.Store, id string) error {
 			if err := store.SetMetadataBatch(id, ClosePatch(closeTestNow, "orphaned")); err != nil {
 				return err

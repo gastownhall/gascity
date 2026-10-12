@@ -6028,3 +6028,48 @@ func TestCloseRefusesANewIncarnation(t *testing.T) {
 		t.Fatalf("status = %s, want the new incarnation's row open", b.Status)
 	}
 }
+
+// TestCloseLandsPastAKillFence: an operator's close of a row a fresh `gc
+// session kill` fence holds (a kill CLI that died mid-kill, or one racing the
+// close) closes it, on both store kinds, as it did before CommitClose.
+func TestCloseLandsPastAKillFence(t *testing.T) {
+	for name, store := range map[string]beads.Store{"memstore": beads.NewMemStore(), "atomic": beads.NewAtomicCloseMemStore()} {
+		mgr := newTestManager(t, store, runtime.NewFake())
+		info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: "/tmp", Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.SetMetadataBatch(info.ID, map[string]string{"state": "asleep", "state_reason": KillPendingReason, "sleep_reason": "killed", "slept_at": time.Now().UTC().Format(time.RFC3339)}); err != nil {
+			t.Fatal(err)
+		}
+		if err := mgr.Close(context.Background(), testActor(mgr, ActorOperator), info.ID); err != nil {
+			t.Fatalf("%s: Close under a kill fence = %v", name, err)
+		}
+		if b, _ := store.Get(info.ID); b.Status != "closed" {
+			t.Fatalf("%s: status %s, want closed", name, b.Status)
+		}
+	}
+}
+
+// TestCloseRidesALifecycleWrite: an operator's close rests on the incarnation
+// alone (op.close), so a heartbeat's held_until or a wake request written
+// while it stops the runtime does not refuse it.
+func TestCloseRidesALifecycleWrite(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := stopHookFake{Fake: runtime.NewFake()}
+	mgr := newTestManager(t, store, sp)
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: "/tmp", Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sp.onStop = func() {
+		_ = store.SetMetadataBatch(info.ID, map[string]string{"held_until": time.Now().Add(time.Hour).UTC().Format(time.RFC3339), "wake_request": "explicit"})
+	}
+	mgr = newTestManager(t, store, sp)
+	if err := mgr.Close(context.Background(), testActor(mgr, ActorOperator), info.ID); err != nil {
+		t.Fatalf("Close over a lifecycle write = %v, want it to land", err)
+	}
+	if b, _ := store.Get(info.ID); b.Status != "closed" {
+		t.Fatalf("status %s, want closed", b.Status)
+	}
+}

@@ -2891,7 +2891,9 @@ func commitLegacyClose(front *session.Store, expected session.Info, terminal ses
 	case err != nil:
 		fmt.Fprintf(stderr, "session beads: closing %s %s: %v\n", what, expected.ID, err) //nolint:errcheck
 		return 0
-	case res == session.CommitMoved, res == session.CommitContended:
+	case res == session.CommitKillFenced:
+		fmt.Fprintf(stderr, "session beads: closing %s %s: refused (%s): %v\n", what, expected.ID, res, session.ErrSessionKillPending) //nolint:errcheck
+	case res != session.CommitLanded && res != session.CommitClosed:
 		fmt.Fprintf(stderr, "session beads: closing %s %s: refused (%s): %v\n", what, expected.ID, res, session.ErrSessionCloseSuperseded) //nolint:errcheck
 	}
 	return res

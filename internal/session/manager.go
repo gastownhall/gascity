@@ -1601,7 +1601,9 @@ func (m *Manager) CloseDetailed(ctx context.Context, by Actor, id string) (Close
 		terminal := retiredIdentifiersPatch(b)
 		terminal["pin_awake"] = ""
 		terminal = CellInto(id, b.Metadata, ActorController, DispEvent{Kind: EvRetire}, m.now(), terminal)
-		res, err := NewStore(beads.SessionStore{Store: m.store}).CommitClose(Decide(infoFromPersistedBead(b), FactsOpClose), terminal, m.now())
+		// Past a kill fence: the operator's close ends the session a kill was
+		// tearing down, as it did before CommitClose.
+		res, err := NewStore(beads.SessionStore{Store: m.store}).CommitClose(Decide(infoFromPersistedBead(b), FactsOpClose), terminal, m.now(), CommitPastKillFence())
 		switch {
 		case err != nil:
 			return fmt.Errorf("closing session %s: %w", id, err)
