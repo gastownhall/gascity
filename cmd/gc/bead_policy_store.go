@@ -252,6 +252,16 @@ func (s *beadPolicyStore) DepListBatch(ids []string) (map[string][]beads.Dep, er
 	return batch.DepListBatch(ids)
 }
 
+// DependentIDsBatch forwards the batched dependent read for the same reason
+// DepListBatch does: the embedded Store interface does not promote it.
+func (s *beadPolicyStore) DependentIDsBatch(ids []string, depType string) ([]string, error) {
+	batch, ok := beads.DependentBatchFor(s.Store)
+	if !ok {
+		return nil, beads.ErrDepListBatchUnsupported
+	}
+	return batch.DependentIDsBatch(ids, depType)
+}
+
 func (s *beadPolicyStore) Handles() beads.StoreHandles {
 	handles := beads.HandlesFor(s.Store)
 	handles.Cached = beadPolicyCachedReader{CachedReader: handles.Cached}

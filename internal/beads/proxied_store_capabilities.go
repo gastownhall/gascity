@@ -150,6 +150,20 @@ func (s *ProxiedStore) DepListBatch(ids []string) (map[string][]Dep, error) {
 	return result, nil
 }
 
+// DependentIDsBatch forwards the batched dependent read to the bd leaf. The
+// native leaf has no such read, so on the native lane this reports
+// ErrDepListBatchUnsupported and the caller keeps its per-anchor reads, which
+// route through this store's own guards.
+func (s *ProxiedStore) DependentIDsBatch(ids []string, depType string) ([]string, error) {
+	if s.nativeLeaf() != nil {
+		return nil, ErrDepListBatchUnsupported
+	}
+	if batch, ok := DependentBatchFor(s.bd); ok {
+		return batch.DependentIDsBatch(ids, depType)
+	}
+	return nil, ErrDepListBatchUnsupported
+}
+
 // SawRows implements RowWitness, and it ORs the two leaves.
 //
 // The capability is one-directional by contract: true proves the ledger holds

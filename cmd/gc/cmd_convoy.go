@@ -923,6 +923,9 @@ func openAllConvoyStoresAt(cityPath string, stderr io.Writer, cmdName string) ([
 type convoyWithStore struct {
 	store beads.Store
 	bead  beads.Bead
+	// view is the index of the store view the convoy was read from, so the
+	// children of every convoy in one store can be read in one batch.
+	view int
 }
 
 type convoyProgressJSON struct {
@@ -991,7 +994,7 @@ func collectOpenConvoys(stores []convoyStoreView) ([]convoyWithStore, error) {
 			return nil, err
 		}
 		for _, b := range all {
-			rows[i] = append(rows[i], convoyWithStore{store: candidate.store, bead: b})
+			rows[i] = append(rows[i], convoyWithStore{store: candidate.store, bead: b, view: i})
 		}
 	}
 	convoys, err := mergeConvoyViewRows(stores, rows, func(c convoyWithStore) string { return c.bead.ID })
@@ -1071,6 +1074,42 @@ func listConvoyChildren(store beads.Store, convoyID string, includeClosed bool) 
 	return convoycore.Members(store, convoyID, includeClosed)
 }
 
+// listConvoyChildrenBatch returns the children of each convoy, in the order of
+// convoys, with one convoycore.MembersBatch read per store view instead of one
+// listConvoyChildren per convoy. Each answer is the one listConvoyChildren
+// gives; a store with about a thousand open convoys took hours one by one.
+func listConvoyChildrenBatch(convoys []convoyWithStore, includeClosed bool) ([][]beads.Bead, error) {
+	type viewBatch struct {
+		store beads.Store
+		ids   []string
+	}
+	batches := make(map[int]*viewBatch)
+	var order []int
+	for _, c := range convoys {
+		batch, ok := batches[c.view]
+		if !ok {
+			batch = &viewBatch{store: c.store}
+			batches[c.view] = batch
+			order = append(order, c.view)
+		}
+		batch.ids = append(batch.ids, c.bead.ID)
+	}
+	byView := make(map[int]map[string][]beads.Bead, len(batches))
+	for _, view := range order {
+		batch := batches[view]
+		children, err := convoycore.MembersBatch(batch.store, batch.ids, includeClosed)
+		if err != nil {
+			return nil, err
+		}
+		byView[view] = children
+	}
+	out := make([][]beads.Bead, len(convoys))
+	for i, c := range convoys {
+		out[i] = byView[c.view][c.bead.ID]
+	}
+	return out, nil
+}
+
 func doConvoyListAcrossStores(stores []convoyStoreView, jsonOut bool, stdout, stderr io.Writer) int {
 	convoys, err := collectOpenConvoys(stores)
 	if err != nil {
@@ -1087,15 +1126,15 @@ func doConvoyListAcrossStores(stores []convoyStoreView, jsonOut bool, stdout, st
 		return 0
 	}
 
+	allChildren, err := listConvoyChildrenBatch(convoys, true)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc convoy list: children: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "ID\tTITLE\tPROGRESS") //nolint:errcheck // best-effort stdout
-	for _, c := range convoys {
-		children, err := listConvoyChildren(c.store, c.bead.ID, true)
-		if err != nil {
-			fmt.Fprintf(stderr, "gc convoy list: children of %s: %v\n", c.bead.ID, err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		progress := convoyProgressFromChildren(children)
+	for i, c := range convoys {
+		progress := convoyProgressFromChildren(allChildren[i])
 		fmt.Fprintf(tw, "%s\t%s\t%s\n", c.bead.ID, c.bead.Title, formatConvoyProgress(progress)) //nolint:errcheck // best-effort stdout
 	}
 	tw.Flush() //nolint:errcheck // best-effort stdout
@@ -1103,14 +1142,14 @@ func doConvoyListAcrossStores(stores []convoyStoreView, jsonOut bool, stdout, st
 }
 
 func writeConvoyListJSON(convoys []convoyWithStore, stdout, stderr io.Writer) int {
+	allChildren, err := listConvoyChildrenBatch(convoys, true)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc convoy list: children: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	items := make([]convoySummaryJSON, 0, len(convoys))
-	for _, c := range convoys {
-		children, err := listConvoyChildren(c.store, c.bead.ID, true)
-		if err != nil {
-			fmt.Fprintf(stderr, "gc convoy list: children of %s: %v\n", c.bead.ID, err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		item := convoySummaryFromBead(c.bead, children)
+	for i, c := range convoys {
+		item := convoySummaryFromBead(c.bead, allChildren[i])
 		items = append(items, item)
 	}
 	if err := writeCLIJSONLine(stdout, convoyListResultJSON{
@@ -1767,22 +1806,32 @@ func doConvoyCheckAcrossStoresJSON(stores []convoyStoreView, rec events.Recorder
 		return 1
 	}
 
-	closed := 0
+	// Owned convoys are never auto-closed, so their children are not read.
+	unowned := make([]convoyWithStore, 0, len(convoys))
 	for _, item := range convoys {
-		if hasLabel(item.bead.Labels, "owned") {
-			continue
+		if !hasLabel(item.bead.Labels, "owned") {
+			unowned = append(unowned, item)
 		}
-		children, err := listConvoyChildren(item.store, item.bead.ID, true)
-		if err != nil {
-			fmt.Fprintf(stderr, "gc convoy check: children of %s: %v\n", item.bead.ID, err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
+	}
+	allChildren, err := listConvoyChildrenBatch(unowned, true)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc convoy check: children: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
+	// The children were read before any close, so a convoy closed earlier in
+	// this pass still reads open as another convoy's child. closedThisPass
+	// counts it closed, as a read after the close would.
+	closedThisPass := make(map[int]map[string]bool)
+	closed := 0
+	for i, item := range unowned {
+		children := allChildren[i]
 		if len(children) == 0 {
 			continue
 		}
 		allClosed := true
 		for _, ch := range children {
-			if !convoycore.IsTerminalStatus(ch.Status) {
+			if !convoycore.IsTerminalStatus(ch.Status) && !closedThisPass[item.view][ch.ID] {
 				allClosed = false
 				break
 			}
@@ -1792,6 +1841,10 @@ func doConvoyCheckAcrossStoresJSON(stores []convoyStoreView, rec events.Recorder
 				fmt.Fprintf(stderr, "gc convoy check: closing %s: %v\n", item.bead.ID, err) //nolint:errcheck // best-effort stderr
 				return 1
 			}
+			if closedThisPass[item.view] == nil {
+				closedThisPass[item.view] = make(map[string]bool)
+			}
+			closedThisPass[item.view][item.bead.ID] = true
 			rec.Record(events.Event{
 				Type:    events.ConvoyClosed,
 				Actor:   eventActor(),
@@ -1895,13 +1948,13 @@ func doConvoyStrandedAcrossStoresJSON(stores []convoyStoreView, jsonOut bool, st
 	}
 	var items []strandedItem
 
-	for _, item := range convoys {
-		children, err := listConvoyChildren(item.store, item.bead.ID, false)
-		if err != nil {
-			fmt.Fprintf(stderr, "gc convoy stranded: children of %s: %v\n", item.bead.ID, err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		for _, ch := range children {
+	allChildren, err := listConvoyChildrenBatch(convoys, false)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc convoy stranded: children: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	for i, item := range convoys {
+		for _, ch := range allChildren[i] {
 			if convoycore.IsUnresolvedTrackedItem(ch) {
 				continue
 			}

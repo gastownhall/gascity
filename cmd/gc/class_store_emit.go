@@ -783,6 +783,15 @@ func (s *emittingClassStore) DepListBatch(ids []string) (map[string][]beads.Dep,
 	return batch.DepListBatch(ids)
 }
 
+// DependentIDsBatch forwards the batched dependent read; it writes nothing.
+func (s *emittingClassStore) DependentIDsBatch(ids []string, depType string) ([]string, error) {
+	batch, ok := beads.DependentBatchFor(s.Store)
+	if !ok {
+		return nil, beads.ErrDepListBatchUnsupported
+	}
+	return batch.DependentIDsBatch(ids, depType)
+}
+
 func (s *emittingClassStore) ApplyGraphPlan(ctx context.Context, plan *beads.GraphApplyPlan) (*beads.GraphApplyResult, error) {
 	applier, ok := beads.GraphApplyFor(s.Store)
 	if !ok {

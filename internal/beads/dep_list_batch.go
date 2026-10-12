@@ -54,3 +54,26 @@ func DepListBatchFor(store Store) (DependencyBatchLister, bool) {
 	batch, ok := store.(DependencyBatchLister)
 	return batch, ok
 }
+
+// DependentBatchLister reads which beads hold an edge of one type onto any of
+// many anchors, in one round trip per chunk of anchors.
+//
+// It is the batch shape of Store.DepList's UP direction narrowed to one edge
+// type, and it answers with the dependents' ids only. A caller that needs the
+// anchor each dependent points at reads it off the dependents' own rows, the
+// way the per-anchor read it replaces is filtered.
+//
+// A backend that cannot answer it reports ErrDepListBatchUnsupported, which
+// callers treat as the cue to fall back to per-anchor reads, never as "no
+// dependents".
+type DependentBatchLister interface {
+	DependentIDsBatch(ids []string, depType string) ([]string, error)
+}
+
+// DependentBatchFor returns the batched dependent reader behind store, if any.
+// Wrappers forward it and report ErrDepListBatchUnsupported when their backing
+// store lacks it, exactly as they do for DepListBatchFor.
+func DependentBatchFor(store Store) (DependentBatchLister, bool) {
+	batch, ok := store.(DependentBatchLister)
+	return batch, ok
+}

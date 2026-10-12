@@ -132,26 +132,11 @@ func MembersIn(classes MemberClasses, convoyID string, includeClosed bool) ([]be
 		return nil, fmt.Errorf("listing legacy convoy children of %s: %w", convoyID, err)
 	}
 
-	seen := make(map[string]bool, len(legacyChildren))
-	members := make([]beads.Bead, 0, len(legacyChildren))
-	add := func(b beads.Bead) {
-		if seen[b.ID] {
-			return
-		}
-		if !includeClosed && IsTerminalStatus(b.Status) {
-			return
-		}
-		seen[b.ID] = true
-		members = append(members, b)
-	}
-	for _, child := range legacyChildren {
-		add(child)
-	}
-
 	deps, err := store.DepList(convoyID, "down")
 	if err != nil {
 		return nil, fmt.Errorf("listing convoy %s dependencies: %w", convoyID, err)
 	}
+	var tracked []beads.Bead
 	for _, dep := range deps {
 		if dep.Type != TrackingDepType {
 			continue
@@ -161,16 +146,168 @@ func MembersIn(classes MemberClasses, convoyID string, includeClosed bool) ([]be
 			if errors.Is(err, beads.ErrNotFound) || errors.Is(err, beads.ErrMetadataParse) {
 				// Convoy membership is an edge inventory. Keep the edge visible
 				// even when the target bead cannot be projected into a Bead.
-				add(unresolvedTrackedItem(dep.DependsOnID))
+				tracked = append(tracked, unresolvedTrackedItem(dep.DependsOnID))
 				continue
 			}
 			return nil, fmt.Errorf("getting tracked item %s: %w", dep.DependsOnID, err)
 		}
-		add(item)
+		tracked = append(tracked, item)
+	}
+	return assembleMembers(legacyChildren, tracked, includeClosed), nil
+}
+
+// MembersBatch returns the members of each convoy in convoyIDs, keyed by convoy
+// id, spanning only the one class handle store. It is the batch form of
+// Members(store, id, includeClosed) with no member stores, which is how the gc
+// convoy commands read children, and it answers every convoy exactly as that
+// call would.
+//
+// On the bd store, Members costs a bd process per read: a legacy parent-child
+// list (and its wisp-tier twin), a dep list and a show per tracked member, per
+// convoy. On a store holding about a thousand open convoys that is hours. MembersBatch reads the same answer for
+// every convoy in a fixed number of reads:
+//
+//   - Legacy children: one batched up read of the parent-child dependents of
+//     all the convoys, then those rows by id. A row belongs to the convoy its
+//     own parent field names, because that is the only row Members keeps
+//     (ListQuery.Matches compares the parent field, which bd fills from the
+//     parent-child edge, so a dotted child with no edge is in neither answer).
+//   - Tracked members: one batched down read of every convoy's edges, then the
+//     tracks targets by id.
+//
+// A convoy whose tracks edge names a target the by-id read did not return (a
+// dangling edge, a row in another database, a row outside the tiers the store
+// lists) is read again by Members alone, because those are exactly the cases where Members' own
+// reads decide what the member is. A store without both batched reads, or a
+// single convoy, takes Members per convoy.
+func MembersBatch(store beads.Store, convoyIDs []string, includeClosed bool) (map[string][]beads.Bead, error) {
+	out := make(map[string][]beads.Bead, len(convoyIDs))
+	if len(convoyIDs) == 0 {
+		return out, nil
+	}
+	edgeReader, haveEdges := beads.DepListBatchFor(store)
+	dependentReader, haveDependents := beads.DependentBatchFor(store)
+	// One id is not a batch: bd's dep list answers a single anchor in the
+	// neighbor shape rather than as edge records.
+	if isNilStore(store) || !haveEdges || !haveDependents || len(convoyIDs) < 2 {
+		return membersOneByOne(store, convoyIDs, includeClosed, out)
 	}
 
+	wanted := make(map[string]bool, len(convoyIDs))
+	for _, id := range convoyIDs {
+		wanted[id] = true
+	}
+
+	childIDs, err := dependentReader.DependentIDsBatch(convoyIDs, "parent-child")
+	if errors.Is(err, beads.ErrDepListBatchUnsupported) {
+		return membersOneByOne(store, convoyIDs, includeClosed, out)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("listing legacy convoy children: %w", err)
+	}
+	legacy := make(map[string][]beads.Bead)
+	if len(childIDs) > 0 {
+		rows, err := store.List(beads.ListQuery{
+			IDs:           childIDs,
+			IncludeClosed: includeClosed,
+			Sort:          beads.SortCreatedAsc,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("reading legacy convoy children: %w", err)
+		}
+		for _, b := range rows {
+			if wanted[b.ParentID] {
+				legacy[b.ParentID] = append(legacy[b.ParentID], b)
+			}
+		}
+	}
+
+	edges, err := edgeReader.DepListBatch(convoyIDs)
+	if errors.Is(err, beads.ErrDepListBatchUnsupported) {
+		return membersOneByOne(store, convoyIDs, includeClosed, out)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("listing convoy dependencies: %w", err)
+	}
+	var trackedIDs []string
+	queued := make(map[string]bool)
+	for _, id := range convoyIDs {
+		for _, dep := range edges[id] {
+			if dep.Type == TrackingDepType && !queued[dep.DependsOnID] {
+				queued[dep.DependsOnID] = true
+				trackedIDs = append(trackedIDs, dep.DependsOnID)
+			}
+		}
+	}
+	held := make(map[string]beads.Bead, len(trackedIDs))
+	if len(trackedIDs) > 0 {
+		rows, err := store.List(beads.ListQuery{IDs: trackedIDs, IncludeClosed: true})
+		if err != nil {
+			return nil, fmt.Errorf("reading tracked convoy members: %w", err)
+		}
+		for _, b := range rows {
+			held[b.ID] = b
+		}
+	}
+
+	for _, id := range convoyIDs {
+		var tracked []beads.Bead
+		readAlone := false
+		for _, dep := range edges[id] {
+			if dep.Type != TrackingDepType {
+				continue
+			}
+			b, ok := held[dep.DependsOnID]
+			if !ok {
+				readAlone = true
+				break
+			}
+			tracked = append(tracked, b)
+		}
+		if readAlone {
+			members, err := Members(store, id, includeClosed)
+			if err != nil {
+				return nil, err
+			}
+			out[id] = members
+			continue
+		}
+		out[id] = assembleMembers(legacy[id], tracked, includeClosed)
+	}
+	return out, nil
+}
+
+func membersOneByOne(store beads.Store, convoyIDs []string, includeClosed bool, out map[string][]beads.Bead) (map[string][]beads.Bead, error) {
+	for _, id := range convoyIDs {
+		members, err := Members(store, id, includeClosed)
+		if err != nil {
+			return nil, err
+		}
+		out[id] = members
+	}
+	return out, nil
+}
+
+// assembleMembers applies MembersIn's rules to rows already read: legacy
+// children first, each id once, terminal members dropped unless includeClosed,
+// then the canonical order.
+func assembleMembers(legacy, tracked []beads.Bead, includeClosed bool) []beads.Bead {
+	seen := make(map[string]bool, len(legacy)+len(tracked))
+	members := make([]beads.Bead, 0, len(legacy)+len(tracked))
+	for _, group := range [][]beads.Bead{legacy, tracked} {
+		for _, b := range group {
+			if seen[b.ID] {
+				continue
+			}
+			if !includeClosed && IsTerminalStatus(b.Status) {
+				continue
+			}
+			seen[b.ID] = true
+			members = append(members, b)
+		}
+	}
 	sortMembers(members)
-	return members, nil
+	return members
 }
 
 func unresolvedTrackedItem(id string) beads.Bead {

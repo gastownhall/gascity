@@ -3603,6 +3603,87 @@ func (s *BdStore) DepList(id, direction string) ([]Dep, error) {
 	return result, nil
 }
 
+// bdDependentBatchChunk bounds how many anchors one DependentIDsBatch statement
+// names, so the SQL text stays one modest argv string however many anchors a
+// caller passes.
+const bdDependentBatchChunk = 1000
+
+// DependentIDsBatch returns the ids of the beads holding a depType edge onto
+// any of ids, deduplicated, with one bd sql read per bdDependentBatchChunk
+// anchors.
+// bd's own up-direction dep list runs one query per anchor, about 0.1 s each,
+// so a thousand anchors cost minutes; this is one statement over both edge
+// tables, matching the edge target the way bd's parent filter does.
+//
+// A bd that will not answer it (bd sql refused in embedded mode, an edge
+// schema without these columns, an unsupported backend) reports
+// ErrDepListBatchUnsupported, so the caller falls back to per-anchor reads
+// instead of reading "no dependents".
+func (s *BdStore) DependentIDsBatch(ids []string, depType string) ([]string, error) {
+	if err := s.guardRelocatedClassIDs("dependent batch", ids...); err != nil {
+		return nil, err
+	}
+	var dependents []string
+	seen := make(map[string]bool)
+	for start := 0; start < len(ids); start += bdDependentBatchChunk {
+		chunk := ids[start:min(start+bdDependentBatchChunk, len(ids))]
+		out, err := s.runBDTransientRead("sql", "--json", dependentIDsSQL(chunk, depType))
+		if err != nil {
+			if isBdSQLUnsupportedInEmbeddedMode(err) || isBdOperationUnsupported(err) || isBdEdgeSchemaMismatch(err) {
+				return nil, fmt.Errorf("batch dependent list: %w: %w", ErrDepListBatchUnsupported, err)
+			}
+			return nil, fmt.Errorf("batch dependent list: %w", err)
+		}
+		var rows []struct {
+			IssueID string `json:"issue_id"`
+		}
+		if err := json.Unmarshal(extractJSON(out), &rows); err != nil {
+			return nil, fmt.Errorf("batch dependent list: parsing JSON: %w", err)
+		}
+		for _, r := range rows {
+			if r.IssueID == "" || seen[r.IssueID] {
+				continue
+			}
+			seen[r.IssueID] = true
+			dependents = append(dependents, r.IssueID)
+		}
+	}
+	return dependents, nil
+}
+
+// dependentIDsSQL selects the sources of depType edges onto any of ids from
+// both edge tables. The target is the one bd's parent filter matches:
+// COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external).
+func dependentIDsSQL(ids []string, depType string) string {
+	literals := make([]string, len(ids))
+	for i, id := range ids {
+		literals[i] = bdSQLStringLiteral(id)
+	}
+	in := strings.Join(literals, ",")
+	where := " WHERE type = " + bdSQLStringLiteral(depType) +
+		" AND COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) IN (" + in + ")"
+	return "SELECT issue_id FROM dependencies" + where + " UNION SELECT issue_id FROM wisp_dependencies" + where
+}
+
+// isBdEdgeSchemaMismatch reports bd answering that an edge table or column the
+// batched dependent read names does not exist, as an older edge schema does.
+func isBdEdgeSchemaMismatch(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, name := range []string{"wisp_dependencies", "depends_on_issue_id", "depends_on_wisp_id", "depends_on_external"} {
+		if strings.Contains(msg, name) && (strings.Contains(msg, "not found") ||
+			strings.Contains(msg, "does not have column") ||
+			strings.Contains(msg, "unknown column") ||
+			strings.Contains(msg, "no such") ||
+			strings.Contains(msg, "doesn't exist")) {
+			return true
+		}
+	}
+	return false
+}
+
 // DepListBatch fetches "down" deps for multiple issue IDs in a single bd
 // subprocess call. Returns a map from issue ID to its deps.
 func (s *BdStore) DepListBatch(ids []string) (map[string][]Dep, error) {
