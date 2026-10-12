@@ -466,17 +466,21 @@ func (p *decidePass) openAssignedWork(info session.Info) *assignedWorkView {
 // city a pending create legacy still leases and a row with open assigned
 // work keep too.
 //
-// In a running city an undesired pending create that is not pool-managed
-// keeps while legacy still leases it (v5.9r; SESS-065, SESS-596): legacy
-// preserves such a row before any drain or close (session_reconciler.go:2368),
-// and a fresh manual create read between its two writes (the row, then its
-// session_name) is undesired for want of a name (staging J45). Only a row
+// In a running city an undesired pending create keeps while legacy still
+// leases it (v5.9r as amended; SESS-065, SESS-596): legacy preserves such a
+// row before any drain or close (session_reconciler.go:2368), and its
+// MAINT-051 sweep skips a leased claim (city_runtime.go:3880), pool rows
+// included. A fresh create read between its two writes (the row, then its
+// session_name) is undesired for want of a name (staging J45), whether made
+// by `gc session new` or by the API (session_origin ephemeral). Only a row
 // holding pending_create_claim keeps, so the claim's lease bounds the keep:
-// the never-started deadline (S6) or the start's in-flight window, and a
-// suspended agent ends it at once. Legacy's other leased shape, a claimless
-// start-pending row, has no deadline, so it is not kept. An undesired pool
-// pending create is not kept: legacy's MAINT-051 sweep closes it, and A10
-// rolls it back (§12.2 row 44).
+// the never-started deadline (S6), or a started create's in-flight and
+// attempt windows. A suspended agent ends it at once; a suspended rig does
+// not, as in legacy, whose lease reads only the agent. A lease anchor
+// (last_woke_at, pending_create_started_at) pendingCreateFutureSkew or more
+// in the future holds nothing, so a clock stepped back cannot pin the row.
+// Legacy's other leased shape, a claimless start-pending row, has no
+// deadline, so it is not kept. Past its lease, A10 rolls the row back.
 func (p *decidePass) keepReason(e *selectionEntry, info session.Info) string {
 	if e.Desired != desireSleep && e.Desired != desireDrain {
 		return ""
@@ -487,7 +491,7 @@ func (p *decidePass) keepReason(e *selectionEntry, info session.Info) string {
 	case e.ObservationUncertain:
 		return reasonObservationUncertain
 	case !p.in.CitySuspended:
-		if e.Desired == desireDrain && info.PendingCreateClaim && !isPoolManagedSessionInfo(info) && pendingCreateSessionStillLeasedAt(info, p.cfg, p.in.Now) {
+		if e.Desired == desireDrain && info.PendingCreateClaim && !pendingCreateAnchorAhead(info, p.in.Now) && pendingCreateSessionStillLeasedAt(info, p.cfg, p.in.Now) {
 			return reasonPendingCreate
 		}
 		return ""
@@ -497,6 +501,18 @@ func (p *decidePass) keepReason(e *selectionEntry, info session.Info) string {
 		return reasonAssignedWork
 	}
 	return ""
+}
+
+// pendingCreateAnchorAhead reports a pending create's lease anchor
+// (last_woke_at or pending_create_started_at) pendingCreateFutureSkew or more
+// past now: a clock stepped back, which must not extend the keep.
+func pendingCreateAnchorAhead(info session.Info, now time.Time) bool {
+	for _, raw := range []string{info.LastWokeAt, info.PendingCreateStartedAt} {
+		if at, ok := parseRFC3339Metadata(raw); ok && at.Sub(now) >= pendingCreateFutureSkew {
+			return true
+		}
+	}
+	return false
 }
 
 // awake is steps 10 and 11: the awake set keyed by bead ID over the

@@ -92,7 +92,7 @@ const (
 	// city that legacy's suspend drain leaves alone: a pending create within
 	// its lease, and a row with open assigned work
 	// (session_reconciler.go:2414-2436). reasonPendingCreate also keeps an
-	// undesired pending create that is not pool-managed in a running city
+	// undesired pending create in a running city while its lease holds
 	// (v5.9r, SESS-065).
 	reasonPendingCreate = "pending-create"
 	reasonAssignedWork  = "assigned-work"

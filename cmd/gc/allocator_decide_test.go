@@ -377,9 +377,10 @@ func TestAllocator_CitySuspended_KeepsWhatLegacySuspendSpares(t *testing.T) {
 	}
 }
 
-// Kills: the suspended city's keeps leaking into a normal pass: there an
-// undesired row with assigned work, or a pending create within its lease,
-// drains; the session key's drain gates hold it (CONTRACT §2.2).
+// Kills: the suspended city's assigned-work keep leaking into a normal
+// pass: there an undesired row with assigned work drains; the session key's
+// drain gates hold it (CONTRACT §2.2). An undesired pending create within its
+// lease keeps in a normal pass too (v5.9r, SESS-065), pool rows included.
 func TestAllocator_NormalPassDrainsUndesiredRowsWithWork(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 3)}}
 	f := newAllocFixture(t, cfg).sessions(
@@ -389,10 +390,11 @@ func TestAllocator_NormalPassDrainsUndesiredRowsWithWork(t *testing.T) {
 	f.in.Demand.AssignedWork = []beads.Bead{{ID: "w-1", Status: "in_progress", Assignee: "gc-1"}}
 	f.in.Demand.AssignedStoreRefs = []string{""}
 	d := f.decideSelecting()
-	for _, id := range []string{"gc-1", "gc-2"} {
-		if e := entryOf(t, d, id); e.Desired != desireDrain {
-			t.Errorf("%s = %s/%s, want drain", id, e.Desired, e.Reason)
-		}
+	if e := entryOf(t, d, "gc-1"); e.Desired != desireDrain {
+		t.Errorf("gc-1 = %s/%s, want drain", e.Desired, e.Reason)
+	}
+	if e := entryOf(t, d, "gc-2"); e.Desired != desireKeep || e.Reason != reasonPendingCreate {
+		t.Errorf("gc-2 = %s/%s, want keep/%s", e.Desired, e.Reason, reasonPendingCreate)
 	}
 	if e := entryOf(t, d, "gc-1"); e.AssignedWork == nil || e.AssignedWork.BeadID != "w-1" {
 		t.Errorf("undesired row's assigned work = %+v, want w-1 carried for the session key's gate", e.AssignedWork)
