@@ -85,6 +85,7 @@ type simKill struct {
 	Method, Name string
 	Hit          *simRuntime
 	External     bool
+	Effect       string // the intent kind of the v2 effect that made it, when one ran
 }
 
 var errSimListing = errors.New("sim: list-sessions failed")
@@ -106,9 +107,10 @@ type simProvider struct {
 	now         func() time.Time
 	listing     int // 0 complete; 1 partial, the first name missing; 2 failed (v5 O1)
 	serverDown  bool
-	confirmable bool  // a down server confirms dead (LL2)
-	external    bool  // the calls now are an operator's or a second controller's
-	nextStart   error // the next Start's scripted outcome
+	confirmable bool   // a down server confirms dead (LL2)
+	external    bool   // the calls now are an operator's or a second controller's
+	effect      string // the intent kind of the v2 effect now running (reconcile_sim_pending_test.go)
+	nextStart   error  // the next Start's scripted outcome
 	starts      []simStart
 	kills       []simKill
 	cached      map[string]simRuntime // the runtimes at the last listing
@@ -282,7 +284,7 @@ func (p *simProvider) killLocked(method, name string) {
 		hit = &c
 		p.drop(name)
 	}
-	p.kills = append(p.kills, simKill{Method: method, Name: name, Hit: hit, External: p.external})
+	p.kills = append(p.kills, simKill{Method: method, Name: name, Hit: hit, External: p.external, Effect: p.effect})
 }
 
 // simBacking is one leg's revisioned store: a MemStore stamped require, whose
@@ -368,6 +370,11 @@ type sim struct {
 	// respawnBegun are the (row, bead) pairs with an idle-respawn begin
 	// (I25).
 	respawnBegun map[string]bool
+	// noPendingCreates is simOpts.noPendingCreates (reconcile_sim_pending_test.go).
+	noPendingCreates bool
+	// stopAdmissions are the stops each pass admitted, by row
+	// (reconcile_sim_pending_test.go), for I16's moved-basis excuse.
+	stopAdmissions map[rowKey]stopAdmission
 	// killsChecked is how many of the provider's kills I4 and I5 judged.
 	killsChecked int
 	// closedInStep is, by session name, each row an outside writer closed
@@ -408,6 +415,9 @@ type simOpts struct {
 	// rowLock replaces runTx's session mutation lock, unobserved.
 	rowLock func(id string, fn func() error) error
 	arms    func([]rowArm) []rowArm
+	// noPendingCreates seeds no pending creates (reconcile_sim_pending_test.go):
+	// the floored corpus keeps its floor members' acks in reach.
+	noPendingCreates bool
 }
 
 func newSim(t *testing.T, seed uint64, o simOpts) *sim {
@@ -425,6 +435,7 @@ func newSim(t *testing.T, seed uint64, o simOpts) *sim {
 	if o.rows == nil {
 		o.rows = (*sim).seedRows
 	}
+	s.noPendingCreates = o.noPendingCreates
 	city, rig := o.rows(s)
 	for name, rows := range map[string][]beads.Bead{simCityLeg: city, simRigLeg: rig} {
 		m := beads.NewMemStoreFrom(0, rows, nil)
@@ -538,6 +549,9 @@ func (s *sim) seedRows() (city, rig []beads.Bead) {
 		city = append(city, row(fmt.Sprintf("gc-%d", i), i))
 	}
 	city = append(city, routedDemandBead("gc-w1"), routedDemandBead("gc-w2"))
+	if !s.noPendingCreates {
+		city = append(city, s.pendingCreateRows()...) // reconcile_sim_pending_test.go
+	}
 	for i := 1; i <= 1+s.rng.IntN(2); i++ {
 		rig = append(rig, row(fmt.Sprintf("rg-%d", i), 10+i))
 	}
@@ -713,7 +727,7 @@ func (s *sim) releaseInside(i int) {
 		seams = append(seams, seamAfterCall)
 	}
 	e.seam = seams[s.rng.IntN(len(seams))]
-	op := externalOps[s.rng.IntN(len(externalOps))]
+	op := s.pickExternalOp()
 	fire := func() {
 		l := s.legOf(e.it.Key.Leg)
 		if b, err := l.backing.Get(e.it.Key.ID); err == nil {
@@ -964,11 +978,11 @@ func (s *sim) step() {
 	case r < 70:
 		s.deliver()
 	case r < 84:
-		op := externalOps[s.rng.IntN(len(externalOps))]
+		op := s.pickExternalOp()
 		s.external(op.name, func(l *simLeg, b beads.Bead) { op.fn(s, l, b) })
 		return
 	default:
-		op := runtimeOps[s.rng.IntN(len(runtimeOps))]
+		op := s.pickRuntimeOp()
 		s.external("runtime "+op.name, func(_ *simLeg, b beads.Bead) {
 			s.sp.mu.Lock()
 			defer s.sp.mu.Unlock()
@@ -1322,7 +1336,15 @@ func (s *sim) pacedRetries(backoff map[string]backoffRecord, at time.Time, befor
 		held := r.it.Kind == intentStop && r.res.Cause == fenceAttached ||
 			// A probe that keeps erroring holds the stop, as I17 rules it
 			// not stoppable (v5.9n).
-			r.it.Kind == intentStop && r.res.Cause == fenceLivenessUnknown && s.probeErring(row)
+			r.it.Kind == intentStop && r.res.Cause == fenceLivenessUnknown && s.probeErring(row) ||
+			// An unstamped runtime under the name holds the stop: L2 finds
+			// no token to fence on, and no verdict proves the row's gone.
+			r.it.Kind == intentStop && r.res.Cause == fenceTokenAbsent && s.unstampedPane(row) ||
+			// A start AL1 proposes for a row an operator holds (a pending
+			// create's claim, a manual session) that its PreWake refuses
+			// (RefusesPreWake), or whose recycle an attached pane refuses,
+			// paced by its backoff (mc-cjtkj).
+			r.it.Kind == intentStart && (r.res.Cause == causeHeld || r.res.Cause == causeAttached)
 		rec, backedOff := backoff[rowBackoffKey(r.it.Key)]
 		if r.res.Outcome != settledRefused || !held || !backedOff || rec.Until.After(at) {
 			return false
@@ -1346,6 +1368,18 @@ func withoutLeaseKeys(meta map[string]string) map[string]string {
 // fence, A6's churn clear past an open committed row's wake (SESS-540), or
 // a backoff's expiry.
 func (s *sim) lastTimer() time.Time {
+	last := s.rowTimers()
+	for _, r := range s.p.backoff.Snapshot() {
+		if r.Until.After(last) {
+			last = r.Until
+		}
+	}
+	return last
+}
+
+// rowTimers is the latest timer the rows hold: lastTimer without the
+// backoff table, whose paced retries re-arm it.
+func (s *sim) rowTimers() time.Time {
 	last := s.clk.Now()
 	later := func(t time.Time) {
 		if t.After(last) {
@@ -1370,8 +1404,8 @@ func (s *sim) lastTimer() time.Time {
 			}
 		}
 	}
-	for _, r := range s.p.backoff.Snapshot() {
-		later(r.Until)
+	for _, t := range s.pendingCreateTimers() { // reconcile_sim_pending_test.go
+		later(t)
 	}
 	return last
 }
@@ -1438,7 +1472,7 @@ func TestSimCorpusFloored(t *testing.T) {
 	})
 	for _, seed := range simSeeds(t) {
 		t.Run(fmt.Sprint(seed), func(t *testing.T) {
-			s := newSim(t, seed, simOpts{})
+			s := newSim(t, seed, simOpts{noPendingCreates: true})
 			s.cfg.Agents[0].MinActiveSessions = intPtr(1 + int(seed%2))
 			s.run()
 			s.report(t)

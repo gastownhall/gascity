@@ -140,19 +140,25 @@ func (s *sim) checkDestructive() {
 		if k.External || k.Hit == nil {
 			continue
 		}
-		if k.Hit.attached {
+		row, closed := s.rowNamed(k.Name)
+		// The own-runtime exception's effects (a rollback's teardown and
+		// S7's exit, the lost commit) take O2's own-runtime test: Current,
+		// or StaleSelf at the row's generation.
+		own := k.Hit.id == row.ID && (k.Hit.token == row.Metadata["instance_token"] ||
+			ownRuntimeEffect(k) && k.Hit.epoch == row.Metadata["generation"])
+		if k.Hit.attached && !s.ownRuntimeException(k, row, own) {
 			s.failf("I5 I-attached", "v2 %s on %s while attached", k.Method, k.Name)
 		}
-		row, closed := s.rowNamed(k.Name)
-		own := k.Hit.id == row.ID && k.Hit.token == row.Metadata["instance_token"]
 		switch {
 		case k.Method == "KillCorpseObject" && k.Hit.corpse: // the corpse exception, whoever it was
 		case k.Method == "KillZombieObject" && k.Hit.zombie && k.Hit.id != "" && k.Hit.id == s.rowNamedEver(k.Name).ID:
 			// The row's own zombie: the start recycle's and the close's, the
 			// row closed meanwhile included (its zombie stays its own).
-		case k.Method == "Stop" && row.Metadata["pending_create_claim"] == "true" && ownsName(sessionInfoFromBead(row), k.Name) && (!closed || own):
+		case k.Method == "Stop" && row.Metadata["pending_create_claim"] == "true" && ownsName(sessionInfoFromBead(row), k.Name) && (!closed || own || k.Effect == intentRollback):
 			// C8.2(a): a pending create's rollback stops its bead-scoped name
-			// whoever runs under it (C3, S1's Foreign row), as legacy does.
+			// whoever runs under it (C3, S1's Foreign row), as legacy does;
+			// the name embeds the row's bead ID, so it stays the row's when
+			// an outside writer closes the row inside the rollback (v5.9q).
 		case row.ID == "" || k.Hit.id != row.ID:
 			s.failf("I4 I-fence", "v2 %s on %s hit row %q's runtime, not its own", k.Method, k.Name, k.Hit.id)
 		case closed && !own:
@@ -249,7 +255,7 @@ func (s *sim) checkWrite(w simWrite) {
 			}
 		}
 	}
-	if k := dormantChange(w.Before, a, w.At, s.stable[w.After.ID]); k != "" && (!closes || !closeEndsSuspend(w.Before, k, w.At)) && !s.quarantinedCommit(id, w, k) {
+	if k := dormantChange(w.Before, a, w.At, s.stable[w.After.ID]); k != "" && (!closes || !closeEndsSuspend(w.Before, k, w.At)) && (!closes || !pendingCreateRollback(w)) && !s.quarantinedCommit(id, w, k) {
 		s.failf("I15 I-STOP-3/4", "v2 rewrote %s %q -> %q on %s, which an operator holds dormant at %s", k, b[k], a[k], id, w.At.Format(time.RFC3339))
 	}
 	terminal := (w.After.Status == "closed" && w.Before.Status != "closed") ||
@@ -315,7 +321,8 @@ func (s *sim) checkQuarantinedCommits() {
 		})
 		switch {
 		case b.Status == "closed", !s.livePane(b), b.Metadata[session.DrainIntentReasonKey] != "",
-			!session.DecodeDisposition(b.Metadata).Quarantine.After(now), worked:
+			!session.DecodeDisposition(b.Metadata).Quarantine.After(now), worked,
+			s.sp.IsAttached(b.Metadata["session_name"]): // an attach keeps it up, as legacy's attached override wakes it (mc-cjtkj)
 			delete(s.quarantinedCommits, id)
 		case now.Sub(at) > quarantineDrainBound:
 			s.failf("I15 I-STOP-3/4", "%s, committed under a quarantine that landed after its PreWake, is still up undrained %s later", id, now.Sub(at))
@@ -439,7 +446,7 @@ func dormantChange(b beads.Bead, a map[string]string, t time.Time, stable bool) 
 // inside the stop) is finalized by then (v5.9n). I17 sees only live panes.
 func (s *sim) checkStranded() {
 	for _, k := range slices.Sorted(maps.Keys(s.prev)) {
-		if b := s.prev[k]; signaledRow(b) && !s.namedPane(b) {
+		if b := s.prev[k]; signaledRow(b) && !s.namedPane(b) && !s.probeErring(b) { // an erroring probe proves no absence (O3)
 			s.failf("I16 I-STOP-5", "%s is still signaled at quiescence with no live pane: the next pass never finalized it", k)
 		}
 	}
@@ -464,7 +471,8 @@ func (s *sim) livePane(b beads.Bead) bool {
 }
 
 // namedPane reports whether b's name holds a live pane the stop verb must
-// not finalize over: b's own runtime, whatever its token, or, under b's
+// not finalize over: b's own runtime, whatever its token, an unstamped one
+// (Ownerless or Unknown: no verdict, L2 refuses it), or, under b's
 // bead-scoped pool name, any runtime (never Foreign there, v5.2 D3; L2
 // refuses it). Another row's runtime under any other name is the Foreign
 // verdict, which proves b's gone.
@@ -474,7 +482,7 @@ func (s *sim) namedPane(b beads.Bead) bool {
 	name := b.Metadata["session_name"]
 	rt := s.sp.rts[name]
 	beadScoped := b.Metadata["pool_managed"] == "true" && strings.HasSuffix(name, "-"+b.ID)
-	return rt != nil && !rt.corpse && (rt.id == b.ID || beadScoped)
+	return rt != nil && !rt.corpse && (rt.id == b.ID || rt.id == "" || beadScoped)
 }
 
 // basisMovedOutside reports an outside write since basisMoves[from] that
@@ -505,8 +513,11 @@ func (s *sim) checkFinalized(e *simEffect) func(settlement) {
 	window := len(s.basisMoves)
 	return func(res settlement) {
 		b, err := l.backing.Get(e.it.Key.ID)
-		if res.Cause == causePremise && s.basisMovedOutside(l.name, e.it.Key.ID, window) {
+		if res.Cause == causePremise && (s.basisMovedOutside(l.name, e.it.Key.ID, window) || s.stopBasisMovedSinceRead(l.name, e.it.Key)) {
 			return
+		}
+		if res.Cause == fenceLivenessUnknown && s.probeErring(b) {
+			return // an erroring probe proves no absence (O3), as I17 rules it not stoppable (v5.9n)
 		}
 		if !paneBefore && res.Cause != "name-busy" && err == nil && signaledRow(b) && !s.namedPane(b) {
 			s.failf("I16 I-STOP-5", "the stop effect on %v confirmed no live pane and left the request signaled", e.it.Key)
