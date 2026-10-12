@@ -236,6 +236,7 @@ func (m *idleMemory) update(w *World, a *allocDecision) (map[rowKey]int, map[row
 	}
 	defers := make(map[rowKey]int)
 	fired := make(map[rowKey]bool)
+	w.ContentIdle = fired // the trigger reads this pass's fire as it lands
 	live := make(map[idleIncarnation]bool)
 	want := make(map[string]bool) // the panes the lane reads for the content clock
 	for _, row := range w.Census.Canonical() {
@@ -262,7 +263,6 @@ func (m *idleMemory) update(w *World, a *allocDecision) (map[rowKey]int, map[row
 		case contentBusy, contentIndeterminate:
 			delete(m.since, ki)
 		}
-		w.ContentIdle = fired // the trigger reads this pass's fire
 		if anchor, deferred := r.idleWorkDefer(timeout); deferred {
 			st := m.defers[row.Key]
 			if st.anchor != anchor {

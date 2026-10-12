@@ -192,3 +192,76 @@ func TestInventoryActivityIsTheBatchedRead(t *testing.T) {
 		t.Fatalf("readActivities read %d names on a batched leaf, want none", n)
 	}
 }
+
+// contentLeaf scripts SnapshotIdle per name: idle, an error, or a read
+// that blocks until its test ends; it panics on a name it was not given.
+type contentLeaf struct {
+	*runtime.Fake
+	idle  map[string]bool
+	err   map[string]error
+	block map[string]bool
+	done  chan struct{}
+}
+
+func (l *contentLeaf) SnapshotIdle(name string) (bool, error) {
+	if l.block[name] {
+		<-l.done
+	}
+	idle, ok := l.idle[name]
+	if !ok && l.err[name] == nil {
+		panic("unscripted " + name)
+	}
+	return idle, l.err[name]
+}
+
+// Kills a content read that lies or overreaches (C7a-1, ga-07mi8): the lane
+// reads only the wanted, enriched names on a leaf that can snapshot them;
+// idle, busy, indeterminate and an error read as such, a panicking read is
+// an error, and a read past the bound stays unread.
+func TestReadContents(t *testing.T) {
+	leaf := &contentLeaf{Fake: runtime.NewFake(), idle: map[string]bool{"idle": true, "busy": false}, err: map[string]error{"unsure": runtime.ErrIdleIndeterminate, "gone": errors.New("no pane")}, block: map[string]bool{"slow": true}, done: make(chan struct{})}
+	t.Cleanup(func() { close(leaf.done) })
+	names := []string{"idle", "busy", "unsure", "gone", "boom", "unwanted", "plain"}
+	attrs, hosts := map[string]InventoryAttrs{}, map[string]runtime.Provider{}
+	for _, n := range names {
+		attrs[n], hosts[n] = InventoryAttrs{}, leaf
+	}
+	hosts["plain"] = runtime.NewFake() // no snapshot
+	want := map[string]bool{"idle": true, "busy": true, "unsure": true, "gone": true, "boom": true, "plain": true, "unlisted": true}
+	readContents(context.Background(), attrs, hosts, want, 2)
+	for n, st := range map[string]contentState{"idle": contentIdle, "busy": contentBusy, "unsure": contentIndeterminate, "gone": contentError, "boom": contentError, "unwanted": contentUnread, "plain": contentUnread} {
+		if attrs[n].Content != st {
+			t.Errorf("%s: content %d, want %d", n, attrs[n].Content, st)
+		}
+	}
+	if _, ok := attrs["unlisted"]; ok {
+		t.Fatal("an unlisted name was read into the attrs")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	slow := map[string]InventoryAttrs{"slow": {Content: contentIdle}}
+	readContents(ctx, slow, map[string]runtime.Provider{"slow": leaf}, map[string]bool{"slow": true}, 1)
+	if slow["slow"].Content != contentUnread {
+		t.Fatalf("a read past the bound: %d, want unread", slow["slow"].Content)
+	}
+}
+
+// Kills a content read that outlives its pass (C7a-1): the cache carries a
+// pass's content read onto the observation and forgets it on the next
+// pass that does not read it.
+func TestObservationCarriesContent(t *testing.T) {
+	c := newObserveCache()
+	c.WantContent(map[string]bool{"s": true})
+	if !c.contentWanted()["s"] {
+		t.Fatal("WantContent not kept")
+	}
+	snap := c.publish(censusNow, map[string]InventoryAttrs{"s": {Content: contentIdle}}, completeBackend("tmux", "s"))
+	if obs, _ := snap.Observation("s", censusNow, observeMaxAge); obs.Content != contentIdle {
+		t.Fatalf("content %d, want idle", obs.Content)
+	}
+	snap = c.publish(censusNow.Add(time.Second), map[string]InventoryAttrs{"s": {}}, completeBackend("tmux", "s"))
+	if obs, _ := snap.Observation("s", censusNow.Add(time.Second), observeMaxAge); obs.Content != contentUnread {
+		t.Fatalf("next pass: content %d, want unread", obs.Content)
+	}
+}

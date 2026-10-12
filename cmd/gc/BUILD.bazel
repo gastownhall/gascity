@@ -1598,6 +1598,7 @@ go_test(
         "reconcile_arms_drain_test.go",
         "reconcile_arms_drift_test.go",
         "reconcile_arms_heals_test.go",
+        "reconcile_arms_idle_test.go",
         "reconcile_arms_metadata_test.go",
         "reconcile_arms_start_test.go",
         "reconcile_dirty_test.go",
