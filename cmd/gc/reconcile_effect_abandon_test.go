@@ -372,21 +372,26 @@ func TestRollbackEffect(t *testing.T) {
 
 	// S7: a StaleSelf runtime at the row's generation is its own, stopped;
 	// the relaunch keeps the row, the rollback closes it. An older epoch is
-	// Foreign: rolled back without a stop.
+	// Foreign (CONTRACT v5.9q): a named row is rolled back without a stop,
+	// A18 and A21 owning its name; a pool row's bead-scoped name is its
+	// alone (C8.2(a)), so whatever runs under it is stopped and confirmed
+	// before the rollback lands, leaving no orphan runtime.
 	for _, c := range []struct {
 		name          string
 		epoch         string
+		named         bool
 		relaunch      bool
 		kills         int
 		closed, claim bool
 	}{
-		{"own, relaunched", "3", true, 1, false, true},
-		{"own, rolled back", "3", false, 1, true, false},
-		{"older epoch, under a name not bead-scoped (C8.2(a) stops one whoever runs it)", "2", false, 0, true, false},
+		{"own, relaunched", "3", false, true, 1, false, true},
+		{"own, rolled back", "3", false, false, 1, true, false},
+		{"older epoch, a named row: no stop", "2", true, false, 0, true, false},
+		{"older epoch, a pool row's bead-scoped name: stopped first (v5.9q)", "2", false, false, 1, true, false},
 	} {
 		name := "s-gc-1"
 		k = rollback(t, "generation", "3")
-		if c.epoch == "2" {
+		if c.named {
 			name = "chat"
 			k = rollback(t, "generation", "3", "session_name", "chat", "configured_named_session", "true", "configured_named_identity", "chat", "pool_managed", "")
 		}
