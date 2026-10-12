@@ -98,6 +98,8 @@ const (
 	// transient per-parse garbage is returned to the OS without paying a full
 	// GC + scavenge on every short idle tick.
 	nudgePollFreeOSInterval = 30 * time.Second
+
+	nudgePollDeliveredBackoffCap = 30 * time.Second
 )
 
 var errNudgeSessionFenceMismatch = errors.New("queued nudge session fence mismatch")
@@ -124,6 +126,7 @@ var (
 	nudgePokeController                      = enqueueController
 	nudgeObserveTarget                       = workerObserveNudgeTarget
 	nudgePollDeliverQueued                   = tryDeliverQueuedNudgesByPoller
+	nudgePollSleep                           = time.Sleep
 	nudgeWarningWriter             io.Writer = os.Stderr
 )
 
@@ -1007,6 +1010,7 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 	var missingSince time.Time
 	var lastFreeOS time.Time
 	var idleTicksSinceObserve int
+	var consecutiveDelivered int
 	for {
 		// Each tick that observes a changed beads.json re-parses the whole-file
 		// store, leaving several hundred MB of transient garbage. The soft
@@ -1034,7 +1038,7 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 			}
 		}
 		if !observeThisTick {
-			time.Sleep(interval)
+			nudgePollSleep(interval)
 			continue
 		}
 		idleTicksSinceObserve = 0
@@ -1059,7 +1063,7 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 				if missingSince.IsZero() {
 					missingSince = now
 				}
-				time.Sleep(interval)
+				nudgePollSleep(interval)
 				continue
 			}
 			return 1
@@ -1070,7 +1074,7 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 				if missingSince.IsZero() {
 					missingSince = now
 				}
-				time.Sleep(interval)
+				nudgePollSleep(interval)
 				continue
 			}
 			return 0
@@ -1079,7 +1083,7 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 		if !hasDue {
 			// Observed only to satisfy the idle-cadence liveness check above;
 			// the cheap gate already established there is nothing to deliver.
-			time.Sleep(interval)
+			nudgePollSleep(interval)
 			continue
 		}
 		delivered, pollErr := nudgePollDeliverQueued(target, store.Store, cliSessionStore(store.Store, target.cfg, target.cityPath), sp, quiescence, obs)
@@ -1087,8 +1091,11 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 			fmt.Fprintf(stderr, "gc nudge poll: %v\n", pollErr) //nolint:errcheck
 		}
 		if delivered {
+			consecutiveDelivered++
+			nudgePollSleep(nudgePollDeliveredBackoff(interval, consecutiveDelivered))
 			continue
 		}
+		consecutiveDelivered = 0
 		// Mirror dispatchAllQueuedNudges' skip accounting (nudge_dispatcher.go),
 		// gate included: "not-delivered" means this target HAD due queued work
 		// and still got nothing this tick -- most commonly
@@ -1109,8 +1116,23 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 				fmt.Fprintf(stderr, "gc nudge poll: recording dispatch skip counter: %v\n", recErr) //nolint:errcheck
 			}
 		}
-		time.Sleep(interval)
+		nudgePollSleep(interval)
 	}
+}
+
+func nudgePollDeliveredBackoff(interval time.Duration, consecutive int) time.Duration {
+	if consecutive <= 1 {
+		return interval
+	}
+	shift := consecutive - 1
+	if shift > 5 {
+		shift = 5
+	}
+	backoff := interval * time.Duration(1<<uint(shift))
+	if backoff > nudgePollDeliveredBackoffCap {
+		return nudgePollDeliveredBackoffCap
+	}
+	return backoff
 }
 
 // nudgePollTargetHasDueWork reports whether the queue currently holds work
