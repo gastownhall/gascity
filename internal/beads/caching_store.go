@@ -100,10 +100,28 @@ type CachingStore struct {
 	// close another process made (bd close, gc bd close). The next notification
 	// drains them as bead.closed. Without it the reconcile pass later found an
 	// already-closed row and evicted it silently, so the close was never
-	// announced at all (gastownhall/gascity#6860, #2546). hasUnannouncedCloses
-	// mirrors len(unannouncedCloses) > 0 so the drain costs no lock when idle.
-	unannouncedCloses    map[string]Bead
+	// announced at all (gastownhall/gascity#6860, #2546). Each entry carries
+	// the close generation it was queued under (queuedClose), and draining it
+	// credits that generation only, so a stale close drained during a later
+	// close's write does not cancel that close's announcement.
+	// hasUnannouncedCloses mirrors len(unannouncedCloses) > 0 so the drain
+	// costs no lock when idle.
+	unannouncedCloses    map[string]queuedClose
 	hasUnannouncedCloses atomic.Bool
+	// closeIntents tracks, per bead, the closing writes (Close, a closing
+	// Update, the conditional closers) between their backing write and their
+	// claim of the bead.closed announcement (claimCloseLocked), and the close
+	// generation they are making (closeIntent). While one is in flight, a read
+	// that caches the bead as closed with no cached row before it queues the
+	// close too, so a close of a bead the cache never held is not swallowed as
+	// an already-closed row (see trackCloseTransitionLocked). A write does not
+	// claim a close announced elsewhere in its generation; a reopen starts a
+	// new generation, so a close after it is announced again. CloseAll
+	// registers no intent: its backing reports a count, not which ids it
+	// closed, so it announces only the closes of rows the cache held, and the
+	// close of a bead the cache never held goes unannounced, even when a read
+	// caches the closed row while the write is in flight.
+	closeIntents map[string]*closeIntent
 
 	reconciling    atomic.Bool
 	syncFailures   int

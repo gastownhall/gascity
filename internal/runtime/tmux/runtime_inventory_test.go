@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -27,25 +28,26 @@ func runtimeInventoryFrom(t *testing.T, fe *fakeExecutor) (map[string]runtime.In
 // (one entry per pane, or the last pane winning).
 func TestTmuxRuntimeInventory_ParsesPanesCorpsesAndAttach(t *testing.T) {
 	fe := &fakeExecutor{out: inventoryLines(
-		"live\t$1\t1700000001\t0\t0.0\t0\t101",
-		"corpse\t$2\t1700000002\t0\t0.0\t1\t201",
-		"corpse\t$2\t1700000002\t0\t0.1\t1\t202",
-		"mixed\t$3\t1700000003\t1\t0.0\t0\t301",
-		"mixed\t$3\t1700000003\t1\t0.1\t1\t302",
-		"watched\t$4\t1700000004\t2\t0.0\t0\t401",
-		"odd\t$5\t1700000005\tx\t0.0\t?\t501",
+		"live\t$1\t1700000001\t0\t0.0\t0\t101\t1700000100",
+		"corpse\t$2\t1700000002\t0\t0.0\t1\t201\t1700000100",
+		"corpse\t$2\t1700000002\t0\t0.1\t1\t202\t1700000100",
+		"mixed\t$3\t1700000003\t1\t0.0\t0\t301\t1700000100",
+		"mixed\t$3\t1700000003\t1\t0.1\t1\t302\t1700000100",
+		"watched\t$4\t1700000004\t2\t0.0\t0\t401\t1700000100",
+		"odd\t$5\t1700000005\tx\t0.0\t?\t501\t1700000100",
 	)}
 
 	got, err := runtimeInventoryFrom(t, fe)
 	if err != nil {
 		t.Fatalf("RuntimeInventory: %v", err)
 	}
+	act := time.Unix(1700000100, 0)
 	want := map[string]runtime.InventoryEntry{
-		"live":    {Incarnation: "$1:1700000001:101", DeadKnown: true, AllPanesDead: false, AttachedKnown: true, Attached: false},
-		"corpse":  {Incarnation: "$2:1700000002:201", DeadKnown: true, AllPanesDead: true, AttachedKnown: true, Attached: false},
-		"mixed":   {Incarnation: "$3:1700000003:301", DeadKnown: true, AllPanesDead: false, AttachedKnown: true, Attached: true},
-		"watched": {Incarnation: "$4:1700000004:401", DeadKnown: true, AllPanesDead: false, AttachedKnown: true, Attached: true},
-		"odd":     {Incarnation: "$5:1700000005:501", DeadKnown: false, AllPanesDead: false, AttachedKnown: false, Attached: false},
+		"live":    {Incarnation: "$1:1700000001:101", DeadKnown: true, AllPanesDead: false, AttachedKnown: true, Attached: false, ActivityKnown: true, LastActivity: act},
+		"corpse":  {Incarnation: "$2:1700000002:201", DeadKnown: true, AllPanesDead: true, AttachedKnown: true, Attached: false, ActivityKnown: true, LastActivity: act},
+		"mixed":   {Incarnation: "$3:1700000003:301", DeadKnown: true, AllPanesDead: false, AttachedKnown: true, Attached: true, ActivityKnown: true, LastActivity: act},
+		"watched": {Incarnation: "$4:1700000004:401", DeadKnown: true, AllPanesDead: false, AttachedKnown: true, Attached: true, ActivityKnown: true, LastActivity: act},
+		"odd":     {Incarnation: "$5:1700000005:501", DeadKnown: false, AllPanesDead: false, AttachedKnown: false, Attached: false, ActivityKnown: true, LastActivity: act},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("RuntimeInventory =\n%#v\nwant\n%#v", got, want)
@@ -63,9 +65,9 @@ func TestTmuxRuntimeInventory_ParsesPanesCorpsesAndAttach(t *testing.T) {
 // incarnation taken from a pane other than the lowest window.pane index.
 func TestTmuxRuntimeInventory_IncarnationIncludesFirstPanePID(t *testing.T) {
 	before, err := runtimeInventoryFrom(t, &fakeExecutor{out: inventoryLines(
-		"s\t$7\t1700000007\t0\t10.0\t0\t900",
-		"s\t$7\t1700000007\t0\t2.1\t0\t210",
-		"s\t$7\t1700000007\t0\t2.0\t0\t200",
+		"s\t$7\t1700000007\t0\t10.0\t0\t900\t1700000100",
+		"s\t$7\t1700000007\t0\t2.1\t0\t210\t1700000100",
+		"s\t$7\t1700000007\t0\t2.0\t0\t200\t1700000100",
 	)})
 	if err != nil {
 		t.Fatalf("RuntimeInventory before respawn: %v", err)
@@ -77,15 +79,36 @@ func TestTmuxRuntimeInventory_IncarnationIncludesFirstPanePID(t *testing.T) {
 	// respawn-pane keeps the session id and creation time but starts a new
 	// process in the same pane.
 	after, err := runtimeInventoryFrom(t, &fakeExecutor{out: inventoryLines(
-		"s\t$7\t1700000007\t0\t10.0\t0\t900",
-		"s\t$7\t1700000007\t0\t2.1\t0\t210",
-		"s\t$7\t1700000007\t0\t2.0\t0\t555",
+		"s\t$7\t1700000007\t0\t10.0\t0\t900\t1700000100",
+		"s\t$7\t1700000007\t0\t2.1\t0\t210\t1700000100",
+		"s\t$7\t1700000007\t0\t2.0\t0\t555\t1700000100",
 	)})
 	if err != nil {
 		t.Fatalf("RuntimeInventory after respawn: %v", err)
 	}
 	if before["s"].Incarnation == after["s"].Incarnation {
 		t.Fatalf("incarnation %q unchanged across a respawn of the first pane", after["s"].Incarnation)
+	}
+}
+
+// Kills: an activity that is not the session's latest window's, or one read
+// from a field tmux left blank (C6a2b: the observation lane's idle
+// reference, in the same batched read).
+func TestTmuxRuntimeInventory_ActivityIsTheLatestWindowsOrUnknown(t *testing.T) {
+	got, err := runtimeInventoryFrom(t, &fakeExecutor{out: inventoryLines(
+		"s\t$1\t1700000001\t0\t0.0\t0\t101\t1700000200",
+		"s\t$1\t1700000001\t0\t1.0\t1\t102\t1700000300",
+		"s\t$1\t1700000001\t0\t2.0\t0\t103\t1700000250",
+		"quiet\t$2\t1700000002\t0\t0.0\t0\t201\t",
+	)})
+	if err != nil {
+		t.Fatalf("RuntimeInventory: %v", err)
+	}
+	if e := got["s"]; !e.ActivityKnown || !e.LastActivity.Equal(time.Unix(1700000300, 0)) {
+		t.Fatalf("s: activity %v known %v, want the latest window's, a dead pane's included", e.LastActivity, e.ActivityKnown)
+	}
+	if e := got["quiet"]; e.ActivityKnown {
+		t.Fatalf("quiet: activity known from a blank field: %v", e.LastActivity)
 	}
 }
 
@@ -116,11 +139,11 @@ func TestTmuxRuntimeInventory_NoServerIsError(t *testing.T) {
 func TestTmuxRuntimeInventory_MalformedLineIsError(t *testing.T) {
 	for _, bad := range []string{
 		"s\t$1\t1700000001\t0\t0.1",
-		"s\t$1\t1700000001\t0\tx.0\t0\t101",
+		"s\t$1\t1700000001\t0\tx.0\t0\t101\t1700000100",
 		"\t$1\t1700000001\t0\t0.1\t0\t101",
 	} {
 		got, err := runtimeInventoryFrom(t, &fakeExecutor{out: inventoryLines(
-			"s\t$1\t1700000001\t0\t0.0\t1\t100",
+			"s\t$1\t1700000001\t0\t0.0\t1\t100\t1700000100",
 			bad,
 		)})
 		if err == nil {
@@ -219,6 +242,7 @@ type inventoryFixturePane struct {
 type inventoryFixtureSession struct {
 	name, id, created, attached string
 	panes                       []inventoryFixturePane
+	activity                    map[int]string // #{window_activity} by window index
 	env                         map[string]string
 	envErr                      error
 }
@@ -264,6 +288,18 @@ func (f *inventoryFixtureExecutor) execute(args []string) (string, error) {
 		}
 		if lines == nil {
 			return "", ErrSessionNotFound
+		}
+		return strings.Join(lines, "\n"), nil
+	case "list-windows":
+		s, ok := f.session(flag("-t"))
+		if !ok {
+			return "", ErrSessionNotFound
+		}
+		var lines []string
+		for i, p := range s.panes {
+			if i == 0 || p.window != s.panes[i-1].window {
+				lines = append(lines, f.render(flag("-F"), s, p))
+			}
 		}
 		return strings.Join(lines, "\n"), nil
 	case "display-message":
@@ -317,6 +353,7 @@ func (f *inventoryFixtureExecutor) render(format string, s inventoryFixtureSessi
 		"#{pane_index}", strconv.Itoa(p.pane),
 		"#{pane_dead}", p.dead,
 		"#{pane_pid}", p.pid,
+		"#{window_activity}", s.activity[p.window],
 	).Replace(format)
 }
 
@@ -329,36 +366,42 @@ func inventoryFixtureFleet() *inventoryFixtureExecutor {
 	return &inventoryFixtureExecutor{sessions: []inventoryFixtureSession{
 		{
 			name: "gc-live", id: "$1", created: "1700000001", attached: "0",
-			panes: []inventoryFixturePane{{0, 0, "0", "101"}},
-			env:   map[string]string{"GC_SESSION_ID": "gc-101", "GC_INSTANCE_TOKEN": "tok-101"},
+			panes:    []inventoryFixturePane{{0, 0, "0", "101"}},
+			activity: map[int]string{0: "1700000101"},
+			env:      map[string]string{"GC_SESSION_ID": "gc-101", "GC_INSTANCE_TOKEN": "tok-101"},
 		},
 		{
 			name: "gc-corpse", id: "$2", created: "1700000002", attached: "0",
-			panes: []inventoryFixturePane{{0, 0, "1", "201"}, {0, 1, "1", "202"}},
-			env:   map[string]string{"GC_SESSION_ID": "gc-201"},
+			panes:    []inventoryFixturePane{{0, 0, "1", "201"}, {0, 1, "1", "202"}},
+			activity: map[int]string{0: "1700000201"},
+			env:      map[string]string{"GC_SESSION_ID": "gc-201"},
 		},
 		{
 			name: "gc-mixed", id: "$3", created: "1700000003", attached: "1",
-			panes: []inventoryFixturePane{{0, 0, "1", "301"}, {1, 0, "0", "302"}},
-			env:   map[string]string{"GC_SESSION_ID": "gc-301", "GC_INSTANCE_TOKEN": "tok-301"},
+			panes:    []inventoryFixturePane{{0, 0, "1", "301"}, {1, 0, "0", "302"}},
+			activity: map[int]string{0: "1700000399", 1: "1700000301"},
+			env:      map[string]string{"GC_SESSION_ID": "gc-301", "GC_INSTANCE_TOKEN": "tok-301"},
 		},
 		{
 			name: "gc-ownerless", id: "$4", created: "1700000004", attached: "0",
-			panes: []inventoryFixturePane{{0, 0, "0", "401"}},
-			env:   map[string]string{"PATH": "/usr/bin"},
+			panes:    []inventoryFixturePane{{0, 0, "0", "401"}},
+			activity: map[int]string{0: "1700000401"},
+			env:      map[string]string{"PATH": "/usr/bin"},
 		},
 		{
 			name: "gc-unreadable", id: "$5", created: "1700000005", attached: "0",
-			panes:  []inventoryFixturePane{{0, 0, "0", "501"}},
-			envErr: errors.New("tmux show-environment: server busy"),
+			panes:    []inventoryFixturePane{{0, 0, "0", "501"}},
+			activity: map[int]string{0: "1700000501"},
+			envErr:   errors.New("tmux show-environment: server busy"),
 		},
 	}}
 }
 
 // Differential: on one fleet fixture, the batched inventory answers exactly
 // what the legacy per-session reads answer — the entry set is the listing,
-// AllPanesDead is IsDeadRuntimeSession, and Attached is IsAttached (whose
-// "exactly one client" reading agrees with a client count for 0 and 1).
+// AllPanesDead is IsDeadRuntimeSession, Attached is IsAttached (whose
+// "exactly one client" reading agrees with a client count for 0 and 1), and
+// LastActivity is GetLastActivity (legacy's idle reference).
 // Kills: an inventory that diverges from the per-runtime probes it replaces.
 func TestTmuxRuntimeInventory_MatchesPerSessionProbes(t *testing.T) {
 	raw := NewProviderWithConfig(Config{})
@@ -396,6 +439,13 @@ func TestTmuxRuntimeInventory_MatchesPerSessionProbes(t *testing.T) {
 		}
 		if entry.Incarnation == "" {
 			t.Errorf("%s: inventory incarnation is empty", name)
+		}
+		activity, err := raw.GetLastActivity(name)
+		if err != nil {
+			t.Fatalf("GetLastActivity(%s): %v", name, err)
+		}
+		if !entry.ActivityKnown || !entry.LastActivity.Equal(activity) {
+			t.Errorf("%s: inventory activity = %v (known %v), GetLastActivity = %v", name, entry.LastActivity, entry.ActivityKnown, activity)
 		}
 	}
 }
@@ -436,5 +486,28 @@ func TestTmuxAttributionEnvironment_MatchesGetMeta(t *testing.T) {
 				t.Errorf("%s: GetAllEnvironment[%s] = %q, GetMeta = %q", s.name, key, env[key], meta)
 			}
 		}
+	}
+}
+
+// Kills: an inventory activity that counts gc's own poke as the agent's
+// activity (C6a2b): the batched read applies the poke discount
+// GetLastActivity applies, so a session whose only activity since its prior
+// is a poke's echo reads its prior.
+func TestTmuxRuntimeInventory_ActivityDiscountsAPoke(t *testing.T) {
+	prior, poke := time.Unix(1700000000, 0), time.Now().Add(-time.Hour).Truncate(time.Second)
+	p := NewProviderWithConfig(Config{})
+	p.tm.exec = &fakeExecutor{out: fmt.Sprintf("s\t$1\t1700000001\t0\t0.0\t0\t101\t%d", poke.Unix())}
+	p.tm.pokeMu.Lock()
+	if p.tm.pokes == nil {
+		p.tm.pokes = map[string]pokeInfo{}
+	}
+	p.tm.pokes["s"] = pokeInfo{at: poke, prior: prior}
+	p.tm.pokeMu.Unlock()
+	got, err := p.RuntimeInventory(context.Background())
+	if err != nil {
+		t.Fatalf("RuntimeInventory: %v", err)
+	}
+	if e := got["s"]; !e.ActivityKnown || !e.LastActivity.Equal(prior) {
+		t.Fatalf("activity %v, want the prior %v: a poke's echo is not the agent's activity", e.LastActivity, prior)
 	}
 }

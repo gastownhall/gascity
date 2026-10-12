@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +14,8 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
+	sessionhybrid "github.com/gastownhall/gascity/internal/runtime/hybrid"
 	"github.com/gastownhall/gascity/pkg/eventexport"
 )
 
@@ -27,6 +30,7 @@ type executionBackstopFixture struct {
 	cfg      *config.City
 	store    beads.Store
 	sp       *runtime.Fake
+	provider runtime.Provider
 	session  beads.Bead
 	work     beads.Bead
 	rec      *events.Fake
@@ -115,11 +119,30 @@ func (f *executionBackstopFixture) tick(t *testing.T) {
 			stores[i] = f.workStore
 		}
 	}
-	nudgeStalledPoolExecution(f.sp, f.cfg, f.store, sessions, work, stores, refs, false, f.now, f.rec,
+	sp := runtime.Provider(f.sp)
+	if f.provider != nil {
+		sp = f.provider
+	}
+	nudgeStalledPoolExecution(sp, f.cfg, f.store, sessions, work, stores, refs, false, f.now, f.rec,
 		func(sessionBead beads.Bead) error {
 			f.drained = append(f.drained, strings.TrimSpace(sessionBead.Metadata["session_name"]))
 			return nil
 		}, &f.stdout)
+}
+
+// executionBackstopIdleSnapshotProvider is the fixture runtime with a scripted
+// point-in-time idle snapshot. calls counts snapshots taken, each of which is
+// a pane capture on the real tmux provider.
+type executionBackstopIdleSnapshotProvider struct {
+	*runtime.Fake
+	idle  bool
+	err   error
+	calls int
+}
+
+func (p *executionBackstopIdleSnapshotProvider) SnapshotIdle(string) (bool, error) {
+	p.calls++
+	return p.idle, p.err
 }
 
 // idleFor backdates the runtime's last-activity so the predicate observes an
@@ -127,6 +150,27 @@ func (f *executionBackstopFixture) tick(t *testing.T) {
 func (f *executionBackstopFixture) idleFor(t *testing.T, d time.Duration) {
 	t.Helper()
 	f.sp.SetActivity(f.sessName, f.now.Add(-d))
+}
+
+// tickStale runs idleClaimNudgeMaxAttempts+3 ticks a full grace-plus-backoff
+// apart, each with no runtime activity for ten minutes: enough, when nothing
+// holds the backstop, to observe, spend every attempt and escalate.
+func (f *executionBackstopFixture) tickStale(t *testing.T) {
+	t.Helper()
+	for i := 0; i < idleClaimNudgeMaxAttempts+3; i++ {
+		f.idleFor(t, 10*time.Minute)
+		f.tick(t)
+		f.now = f.now.Add(idleClaimNudgeGrace + idleClaimNudgeBackoff)
+	}
+}
+
+// setSessionMeta stamps metadata on the session bead, e.g. the provider and
+// transport the idle-snapshot gate reads.
+func (f *executionBackstopFixture) setSessionMeta(t *testing.T, meta map[string]string) {
+	t.Helper()
+	if err := f.store.SetMetadataBatch(f.session.ID, meta); err != nil {
+		t.Fatalf("stamping session metadata: %v", err)
+	}
 }
 
 func (f *executionBackstopFixture) sessionMeta(t *testing.T, key string) string {
@@ -198,6 +242,249 @@ func TestExecutionBackstopIsSilentForAWorkingAgent(t *testing.T) {
 	}
 	if got := f.sessionMeta(t, executionClaimNudgeAtKey); got != "" {
 		t.Fatalf("persisted timestamp = %q, want no write at all for a working agent", got)
+	}
+}
+
+// A quiet pane clock is not proof that an interactive agent ended its turn:
+// long model turns and quiet tool calls can leave tmux activity stale while
+// the provider's busy indicator still says the turn is active. For a provider
+// family whose busy indicator the scan reads, that stronger observation (a
+// (false, nil) snapshot) must hold the backstop before it writes or nudges, as
+// must a snapshot that fails, and the hold names the snapshot rather than the
+// activity clock.
+func TestExecutionBackstopIsSilentWhenIdleSnapshotReportsBusy(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		meta map[string]string
+		err  error
+		hold string
+	}{
+		{name: "claude busy indicator present", meta: map[string]string{"provider": "claude"}, hold: executionHoldSnapshotNotIdle},
+		{name: "codex busy indicator present", meta: map[string]string{"provider": "codex"}, hold: executionHoldSnapshotNotIdle},
+		// A custom alias resolves its family through builtin_ancestor, the
+		// same ladder that sets the pane's GC_PROVIDER.
+		{name: "claude-based alias busy indicator present", meta: map[string]string{"provider": "team-claude", "builtin_ancestor": "claude"}, hold: executionHoldSnapshotNotIdle},
+		{name: "snapshot failed", meta: map[string]string{"provider": "claude"}, err: errors.New("snapshot unavailable"), hold: executionHoldSnapshotError},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newExecutionBackstopFixture(t)
+			f.setSessionMeta(t, tc.meta)
+			f.provider = &executionBackstopIdleSnapshotProvider{Fake: f.sp, idle: false, err: tc.err}
+
+			f.tickStale(t)
+
+			if got := f.nudgeCount(); got != 0 {
+				t.Fatalf("nudges without affirmative idle snapshot = %d, want 0; stdout=%s", got, f.stdout.String())
+			}
+			if got := f.sessionMeta(t, executionClaimNudgeWorkKey); got != "" {
+				t.Fatalf("persisted work marker = %q, want no pacing state without affirmative idle snapshot", got)
+			}
+			if len(f.drained) != 0 {
+				t.Fatalf("drain requests = %v, want none while the snapshot shows the busy indicator or fails", f.drained)
+			}
+			if got := f.sessionMeta(t, executionClaimHoldKey); !strings.HasPrefix(got, tc.hold+" ") {
+				t.Fatalf("hold breadcrumb = %q, want %s", got, tc.hold)
+			}
+		})
+	}
+}
+
+func TestExecutionBackstopAdvancesWhenIdleSnapshotReportsIdle(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	f.setSessionMeta(t, map[string]string{"provider": "claude"})
+	snap := &executionBackstopIdleSnapshotProvider{Fake: f.sp, idle: true}
+	f.provider = snap
+	f.idleFor(t, 10*time.Minute)
+
+	f.tick(t)
+	f.now = f.now.Add(idleClaimNudgeGrace + time.Second)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+
+	if got := f.nudgeCount(); got != 1 {
+		t.Fatalf("nudges after affirmative idle snapshot = %d, want 1; stdout=%s", got, f.stdout.String())
+	}
+	if snap.calls == 0 {
+		t.Fatal("the snapshot was never consulted, so this row did not exercise the gate it names")
+	}
+}
+
+// A pane showing neither the busy indicator nor a ready prompt is not a running
+// turn. An idle TUI does not repaint, so once a broadcast message or an
+// alternate screen displaces its prompt, every later snapshot is indeterminate
+// for as long as the claim sits abandoned, and a hold there would never
+// release. Even for a family whose busy indicator the scan reads, the backstop
+// keeps the activity clock: it nudges to the attempt cap and escalates once.
+// The composites cmd/gc installs pass the leaf's sentinel through unchanged.
+func TestExecutionBackstopKeepsTheActivityClockWhenTheSnapshotIsIndeterminate(t *testing.T) {
+	indeterminate := fmt.Errorf("scanning pane: %w", runtime.ErrIdleIndeterminate)
+	for _, tc := range []struct {
+		name string
+		meta map[string]string
+		wrap func(leaf runtime.Provider) runtime.Provider
+	}{
+		{name: "claude", meta: map[string]string{"provider": "claude"}},
+		{name: "codex", meta: map[string]string{"provider": "codex"}},
+		{name: "claude-based alias", meta: map[string]string{"provider": "team-claude", "builtin_ancestor": "claude"}},
+		{name: "claude through auto", meta: map[string]string{"provider": "claude"}, wrap: func(leaf runtime.Provider) runtime.Provider {
+			return sessionauto.New(leaf, runtime.NewFake())
+		}},
+		{name: "claude through hybrid", meta: map[string]string{"provider": "claude"}, wrap: func(leaf runtime.Provider) runtime.Provider {
+			return sessionhybrid.New(leaf, runtime.NewFake(), func(string) bool { return false })
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newExecutionBackstopFixture(t)
+			f.setSessionMeta(t, tc.meta)
+			snap := &executionBackstopIdleSnapshotProvider{Fake: f.sp, err: indeterminate}
+			f.provider = snap
+			if tc.wrap != nil {
+				f.provider = tc.wrap(snap)
+			}
+
+			f.tickStale(t)
+
+			if got := f.nudgeCount(); got != idleClaimNudgeMaxAttempts {
+				t.Fatalf("delivered nudges = %d, want the attempt cap %d; stdout=%s", got, idleClaimNudgeMaxAttempts, f.stdout.String())
+			}
+			if len(f.drained) != 1 || f.drained[0] != f.sessName {
+				t.Fatalf("drain requests = %v, want exactly one for %s", f.drained, f.sessName)
+			}
+			if snap.calls == 0 {
+				t.Fatal("the snapshot was never consulted, so this row did not exercise the gate it names")
+			}
+		})
+	}
+}
+
+// The scan is known to read only some families' busy indicators. For any other
+// session, and for any session over ACP, a snapshot is evidence of nothing, so
+// those sessions keep the activity clock: the backstop nudges, exhausts its
+// attempts and escalates, without paying for a snapshot.
+func TestExecutionBackstopKeepsTheActivityClockWhereTheSnapshotCannotReadBusy(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		meta map[string]string
+	}{
+		{name: "no recorded provider"},
+		{name: "grok", meta: map[string]string{"provider": "grok"}},
+		{name: "kimi", meta: map[string]string{"provider": "kimi"}},
+		{name: "claude over ACP", meta: map[string]string{"provider": "claude", "transport": "acp"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newExecutionBackstopFixture(t)
+			if tc.meta != nil {
+				f.setSessionMeta(t, tc.meta)
+			}
+			snap := &executionBackstopIdleSnapshotProvider{Fake: f.sp, idle: false}
+			f.provider = snap
+
+			f.tickStale(t)
+
+			if got := f.nudgeCount(); got != idleClaimNudgeMaxAttempts {
+				t.Fatalf("delivered nudges = %d, want the attempt cap %d; stdout=%s", got, idleClaimNudgeMaxAttempts, f.stdout.String())
+			}
+			if len(f.drained) != 1 || f.drained[0] != f.sessName {
+				t.Fatalf("drain requests = %v, want exactly one for %s", f.drained, f.sessName)
+			}
+			if snap.calls != 0 {
+				t.Fatalf("idle snapshots taken = %d, want 0 for a session the snapshot cannot read as busy", snap.calls)
+			}
+		})
+	}
+}
+
+// The composites cmd/gc installs (auto once any agent selects ACP, hybrid for
+// tmux plus k8s) always implement IdleSnapshotProvider and report a routed
+// backend that cannot take a snapshot as ErrInteractionUnsupported. That is a
+// missing capability, not a running turn: the backstop keeps the activity
+// clock and still nudges and escalates the abandoned claim, even for a claude
+// session the snapshot would otherwise gate.
+func TestExecutionBackstopTreatsAnUnsupportedSnapshotAsCapabilityAbsent(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		provider func(f *executionBackstopFixture) runtime.Provider
+	}{
+		{name: "auto default route", provider: func(f *executionBackstopFixture) runtime.Provider {
+			return sessionauto.New(f.sp, runtime.NewFake())
+		}},
+		{name: "auto ACP route", provider: func(f *executionBackstopFixture) runtime.Provider {
+			p := sessionauto.New(runtime.NewFake(), f.sp)
+			p.RouteACP(f.sessName)
+			return p
+		}},
+		{name: "hybrid remote route", provider: func(f *executionBackstopFixture) runtime.Provider {
+			return sessionhybrid.New(runtime.NewFake(), f.sp, func(string) bool { return true })
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newExecutionBackstopFixture(t)
+			f.setSessionMeta(t, map[string]string{"provider": "claude"})
+			f.provider = tc.provider(f)
+
+			f.tickStale(t)
+
+			if got := f.nudgeCount(); got != idleClaimNudgeMaxAttempts {
+				t.Fatalf("delivered nudges = %d, want the attempt cap %d; stdout=%s", got, idleClaimNudgeMaxAttempts, f.stdout.String())
+			}
+			if len(f.drained) != 1 || f.drained[0] != f.sessName {
+				t.Fatalf("drain requests = %v, want exactly one for %s", f.drained, f.sessName)
+			}
+		})
+	}
+}
+
+// TestExecutionBackstopNamesTheSnapshotGate: the snapshot gate leaves its own
+// breadcrumb, so an operator can tell "the pane still shows the busy indicator"
+// from "the agent printed output moments ago". The snapshot is a pane capture,
+// so it is taken only once activity is stale, and the breadcrumb clears once
+// it reads idle and the backstop acts.
+func TestExecutionBackstopNamesTheSnapshotGate(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	f.setSessionMeta(t, map[string]string{"provider": "claude"})
+	snap := &executionBackstopIdleSnapshotProvider{Fake: f.sp}
+	f.provider = snap
+
+	// Fresh activity: the activity clock holds, and no snapshot is taken.
+	for i := 0; i < 3; i++ {
+		f.idleFor(t, time.Second)
+		f.tick(t)
+		f.now = f.now.Add(time.Minute)
+	}
+	if snap.calls != 0 {
+		t.Fatalf("idle snapshots taken while activity was fresh = %d, want 0", snap.calls)
+	}
+	if got := f.sessionMeta(t, executionClaimHoldKey); !strings.HasPrefix(got, executionHoldNotQuiet+" ") {
+		t.Fatalf("hold breadcrumb with fresh activity = %q, want %s", got, executionHoldNotQuiet)
+	}
+
+	// Stale activity, but the pane still shows the busy indicator.
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if got := f.sessionMeta(t, executionClaimHoldKey); !strings.HasPrefix(got, executionHoldSnapshotNotIdle+" ") {
+		t.Fatalf("hold breadcrumb for a busy snapshot = %q, want %s", got, executionHoldSnapshotNotIdle)
+	}
+
+	// The snapshot cannot be taken.
+	snap.err = errors.New("capture failed")
+	f.now = f.now.Add(time.Minute)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if got := f.sessionMeta(t, executionClaimHoldKey); !strings.HasPrefix(got, executionHoldSnapshotError+" ") {
+		t.Fatalf("hold breadcrumb for a failed snapshot = %q, want %s", got, executionHoldSnapshotError)
+	}
+
+	// The snapshot reads idle: the backstop acts and the breadcrumb clears.
+	snap.err = nil
+	snap.idle = true
+	f.now = f.now.Add(time.Minute)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if got := f.sessionMeta(t, executionClaimHoldKey); got != "" {
+		t.Fatalf("hold breadcrumb after an idle snapshot = %q, want cleared", got)
+	}
+	if got := f.sessionMeta(t, executionClaimNudgeWorkKey); got != f.work.ID {
+		t.Fatalf("observed work marker = %q, want %q once the snapshot affirms idle", got, f.work.ID)
 	}
 }
 

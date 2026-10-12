@@ -431,6 +431,57 @@ func TestSubmitDefaultToRunningGeminiSessionWaitsForIdleNudge(t *testing.T) {
 	}
 }
 
+// TestSubmitDefaultTreatsDeliveredUnobservedNudgeAsDelivered: a provider that
+// proved delivery but never observed the turn start reports
+// runtime.ErrNudgeDeliveredUnobserved. tmux does so when a Claude turn outlasts
+// its idle wait and Claude queues the message. Submit must succeed: an error
+// fails the CLI and the API, rolls back create-with-message, and a retry
+// delivers the message twice. An unconfirmed submit stays a failure.
+func TestSubmitDefaultTreatsDeliveredUnobservedNudgeAsDelivered(t *testing.T) {
+	tests := []struct {
+		name     string
+		nudgeErr error
+		wantErr  error
+	}{
+		{"runtime sentinel", runtime.ErrNudgeDeliveredUnobserved, nil},
+		{"tmux delivered-unobserved", fmt.Errorf("%w: session %q", tmux.ErrNudgeSubmitDeliveredUnobserved, "helper"), nil},
+		{"tmux unconfirmed stays a failure", fmt.Errorf("%w: session %q", tmux.ErrNudgeSubmitUnconfirmed, "helper"), tmux.ErrNudgeSubmitUnconfirmed},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			sp := runtime.NewFake()
+			mgr := newTestManager(t, store, sp)
+
+			info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			sp.NudgeErrors = map[string]error{info.SessionName: tt.nudgeErr}
+
+			outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault)
+			switch {
+			case tt.wantErr == nil && err != nil:
+				t.Fatalf("Submit(default) = %v, want nil (delivery was proven)", err)
+			case tt.wantErr != nil && !errors.Is(err, tt.wantErr):
+				t.Fatalf("Submit(default) = %v, want %v", err, tt.wantErr)
+			}
+			if outcome.Queued {
+				t.Fatal("Submit(default) unexpectedly queued")
+			}
+			nudges := 0
+			for _, call := range sp.Calls {
+				if (call.Method == "Nudge" || call.Method == "NudgeNow") && call.Name == info.SessionName {
+					nudges++
+				}
+			}
+			if nudges != 1 {
+				t.Fatalf("nudges = %d, want 1; calls = %#v", nudges, sp.Calls)
+			}
+		})
+	}
+}
+
 func TestSubmitDefaultConfirmsLiveCreatingSession(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
@@ -1313,7 +1364,7 @@ func TestSubmitInterruptNowUsesInterruptAndIdleWaitForClaude(t *testing.T) {
 		if call.Method == "WaitForIdle" && call.Name == info.SessionName {
 			sawWaitForIdle = true
 		}
-		if call.Method == "SendKeys" && call.Name == info.SessionName && call.Message == "C-u" {
+		if call.Method == "ClearInput" && call.Name == info.SessionName {
 			sawClear = true
 			clearIdx = i
 		}
@@ -1326,10 +1377,10 @@ func TestSubmitInterruptNowUsesInterruptAndIdleWaitForClaude(t *testing.T) {
 		}
 	}
 	if !sawInterrupt || !sawWaitForIdle || !sawClear || !sawNudge {
-		t.Fatalf("calls = %#v, want interrupt + WaitForIdle + SendKeys(C-u) + nudge", sp.Calls)
+		t.Fatalf("calls = %#v, want interrupt + WaitForIdle + ClearInput + nudge", sp.Calls)
 	}
 	if clearIdx < 0 || nudgeIdx < 0 || clearIdx > nudgeIdx {
-		t.Fatalf("calls = %#v, want SendKeys(C-u) before nudge", sp.Calls)
+		t.Fatalf("calls = %#v, want ClearInput before nudge", sp.Calls)
 	}
 	if sawStop {
 		t.Fatalf("calls = %#v, did not want Stop for claude interrupt_now", sp.Calls)
@@ -2151,5 +2202,97 @@ func TestSubmitDefaultDeferredRestartRequestedKeepsCurrentEpoch(t *testing.T) {
 	}
 	if got := state.Pending[0].ContinuationEpoch; got != "4" {
 		t.Fatalf("ContinuationEpoch = %q, want 4 (plain restart keeps the current epoch)", got)
+	}
+}
+
+// TestSubmitInterruptNowRejectsPendingInteraction pins that interrupt_now does
+// not barrel through a pending permission prompt: its interrupt keystroke
+// would dismiss (reject) the prompt as a side effect and the text would
+// follow. The caller must answer the prompt through Respond first (#2892).
+func TestSubmitInterruptNowRejectsPendingInteraction(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := newTestManager(t, store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "gemini", WorkDir: t.TempDir(), Provider: "gemini", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{
+		RequestID: "tmux-abc",
+		Kind:      "approval",
+		Prompt:    "Bash: rm -rf build",
+	})
+
+	outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "take this now", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow)
+	if !errors.Is(err, ErrPendingInteraction) {
+		t.Fatalf("Submit(interrupt_now) error = %v, want ErrPendingInteraction", err)
+	}
+	if outcome.Queued {
+		t.Fatal("Submit(interrupt_now) unexpectedly queued")
+	}
+	for _, call := range sp.Calls {
+		if call.Name != info.SessionName {
+			continue
+		}
+		switch call.Method {
+		case "SendKeys", "Interrupt", "Nudge", "NudgeNow", "Stop":
+			t.Fatalf("unexpected %s while a permission prompt is pending", call.Method)
+		}
+	}
+}
+
+// TestPendingInteractionErrorNamesThePrompt pins that the refusal says what
+// is pending, so an API or CLI caller can tell the operator what to answer.
+func TestPendingInteractionErrorNamesThePrompt(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := newTestManager(t, store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{
+		RequestID: "tmux-abc",
+		Kind:      "approval",
+		Prompt:    "Bash: rm -rf build",
+	})
+
+	_, err = mgr.Send(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello?", "", runtime.Config{})
+	if !errors.Is(err, ErrPendingInteraction) || !errors.Is(err, runtime.ErrPendingInteraction) {
+		t.Fatalf("Send error = %v, want session and runtime ErrPendingInteraction", err)
+	}
+	for _, want := range []string{"tmux-abc", "Bash: rm -rf build"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("Send error = %q, want it to mention %q", err, want)
+		}
+	}
+}
+
+type respondErrorProvider struct {
+	*runtime.Fake
+	err error
+}
+
+func (p *respondErrorProvider) Respond(string, runtime.InteractionResponse) error { return p.err }
+
+// TestRespondReportsUnavailableActionAsMismatch pins that a provider refusing
+// to guess an option (no single menu entry matches the action) surfaces as
+// an interaction mismatch, not an internal error.
+func TestRespondReportsUnavailableActionAsMismatch(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := &respondErrorProvider{Fake: runtime.NewFake(), err: fmt.Errorf("%w: 0 menu options match action \"deny\"", runtime.ErrInteractionActionUnavailable)}
+	mgr := newTestManager(t, store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{RequestID: "tmux-abc", Kind: "approval"})
+
+	err = mgr.Respond(info.ID, runtime.InteractionResponse{Action: "deny"})
+	if !errors.Is(err, ErrInteractionMismatch) {
+		t.Fatalf("Respond error = %v, want ErrInteractionMismatch", err)
 	}
 }

@@ -206,6 +206,16 @@ func (m *Manager) checkActor(by Actor) error {
 	return nil
 }
 
+// checkStarter is checkActor for a verb that may start, resume or interrupt
+// a runtime: it also refuses a stop sweep (CheckStarts), before any provider
+// call.
+func (m *Manager) checkStarter(by Actor) error {
+	if err := m.checkActor(by); err != nil {
+		return err
+	}
+	return by.CheckStarts()
+}
+
 // leaseForStop is leaseRuntime for a stop, which a store is never allowed to
 // hold hostage: a lease failure other than busy (the store unreachable, the
 // row closed or renamed, no conditional writes in require mode) is logged and

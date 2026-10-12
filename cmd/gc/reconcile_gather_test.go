@@ -407,3 +407,22 @@ func TestMislabelledRowFlagged(t *testing.T) {
 		t.Error("a mislabelled row's template was resolved")
 	}
 }
+
+// Kills a v2 lane env whose detector has no work legs: with a city work
+// store the env mints its legs over it, as gather does; without one they
+// are the zero WorkLegs, which detects nothing.
+func TestGatherK1EnvMintsTheWorkLegs(t *testing.T) {
+	f := newGatherFixture(t, poolRow("gc-1", "worker", 1, "active"))
+	env, err := f.env.externalReadsEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if env.WorkLegs.unusable() == nil {
+		t.Fatal("no work store, yet the lane's work legs are usable")
+	}
+	work := beads.NewMemStore()
+	f.env.WorkStore = func() beads.Store { return work }
+	if env, err = f.env.externalReadsEnv(); err != nil || env.WorkLegs.unusable() != nil || !env.WorkLegs.isWork(work) {
+		t.Fatalf("work legs over the city work store: %v / %v", err, env.WorkLegs.unusable())
+	}
+}

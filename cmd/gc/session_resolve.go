@@ -28,14 +28,12 @@ type namedSessionResolveOptions struct {
 	allowClosed         bool
 	materialize         bool
 	materializeMetadata map[string]string
+	// skipExactID skips the bead-id lookup for a caller that has just made it
+	// (resolveExactSessionInfo), so a miss is not asked twice.
+	skipExactID bool
 }
 
 const templateTargetPrefix = "template:"
-
-type templateTarget struct {
-	template   string
-	forceFresh bool
-}
 
 var errNamedSessionConflict = errors.New("configured named session conflict")
 
@@ -104,19 +102,14 @@ func resolveSessionIDMaterializingNamedWithMetadata(cityPath string, cfg *config
 	})
 }
 
-func parseTemplateTarget(identifier string) (templateTarget, bool) {
+// isTemplateTarget reports whether identifier is a "template:<name>" target,
+// which names a template to start fresh rather than a session to resolve.
+func isTemplateTarget(identifier string) bool {
 	identifier = strings.TrimSpace(identifier)
 	if !strings.HasPrefix(identifier, templateTargetPrefix) {
-		return templateTarget{}, false
+		return false
 	}
-	name := normalizeNamedSessionTarget(strings.TrimSpace(strings.TrimPrefix(identifier, templateTargetPrefix)))
-	if name == "" {
-		return templateTarget{}, false
-	}
-	return templateTarget{
-		template:   name,
-		forceFresh: true,
-	}, true
+	return normalizeNamedSessionTarget(strings.TrimSpace(strings.TrimPrefix(identifier, templateTargetPrefix))) != ""
 }
 
 func resolveSessionIDWithOptions(
@@ -129,13 +122,15 @@ func resolveSessionIDWithOptions(
 	if store == nil {
 		return "", fmt.Errorf("session store unavailable")
 	}
-	if _, ok := parseTemplateTarget(identifier); ok {
+	if isTemplateTarget(identifier) {
 		return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 	}
-	if id, err := session.ResolveSessionIDByExactID(store, identifier); err == nil {
-		return id, nil
-	} else if !errors.Is(err, session.ErrSessionNotFound) {
-		return "", err
+	if !opts.skipExactID {
+		if id, err := session.ResolveSessionIDByExactID(store, identifier); err == nil {
+			return id, nil
+		} else if !errors.Is(err, session.ErrSessionNotFound) {
+			return "", err
+		}
 	}
 	if id, matched, err := resolveConfiguredNamedSessionID(cityPath, cfg, store, identifier, opts); err == nil {
 		return id, nil

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"strconv"
 	"strings"
 	"sync"
@@ -399,8 +400,11 @@ var (
 	// currently pending interaction request.
 	ErrInteractionMismatch = errors.New("pending interaction does not match request")
 	// ErrPendingInteraction reports that the session is blocked on a pending
-	// approval or question and cannot accept a new user turn.
-	ErrPendingInteraction = errors.New("session has a pending interaction")
+	// approval or question and cannot accept a new user turn. It is the
+	// runtime sentinel, so a refusal raised by the provider itself (for
+	// example the tmux guard against typing into a permission prompt) matches
+	// it too.
+	ErrPendingInteraction = runtime.ErrPendingInteraction
 	// ErrSessionKillPending reports that a `gc session kill` is tearing the
 	// session's runtime down (see KillPendingReason). The caller should retry
 	// once the kill completes and the lifecycle rules have taken over again.
@@ -573,15 +577,15 @@ func (m *Manager) ensureRunning(ctx context.Context, by Actor, id string, b bead
 		// whose drain has not stopped it yet) consumes the hold too, under the
 		// runtime lease (tried, not waited for: a busy lease is the
 		// controller's stop deciding, and ErrRuntimeLeaseBusy is retryable).
-		if premise := liveUserHoldPremise(b.Metadata, by, m.now()); premise != nil {
+		if consume, ok := liveUserHoldDecision(b, by); ok {
 			_, release, err := m.leaseRuntime(ctx, by, id, sessName, 0)
 			if err != nil {
 				return err
 			}
 			defer release()
-			return m.consumeUserHold(id, premise, m.now())
+			return m.consumeUserHold(consume, m.now(), nil)
 		}
-		if err := m.confirmLiveSessionState(id, &b); err != nil {
+		if err := m.confirmLiveSessionState(id, &b, false); err != nil {
 			return err
 		}
 		return nil
@@ -607,6 +611,28 @@ func (m *Manager) ensureRunning(ctx context.Context, by Actor, id string, b bead
 		}
 		defer cancel()
 	}
+	// The start decides on the row as of the lease, not the read before it
+	// (#7638 review): every writer of the kill fence or of drain-ack
+	// stop-pending holds the runtime name's flock, which the lease holds
+	// now, so a stop the controller signaled in between is seen here, before
+	// anything starts, and the restart clear and the hold consume below read
+	// this row.
+	fresh, err := m.PersistedStore().freshBead(id)
+	switch {
+	case err != nil:
+		err = fmt.Errorf("%w: reading session %s under its lease: %w", ErrStateSync, id, err)
+	case KillPendingMetadata(fresh.Metadata["state"], fresh.Metadata["state_reason"], fresh.Metadata["sleep_reason"], fresh.Metadata["slept_at"], m.now()):
+		err = fmt.Errorf("%w: %s", ErrSessionKillPending, id)
+	case drainAckStopPendingMetadata(fresh.Metadata):
+		err = fmt.Errorf("%w: %s", ErrSessionStopping, id)
+	}
+	if err != nil {
+		if unroute != nil {
+			unroute()
+		}
+		return err
+	}
+	b = fresh
 
 	cfg := hints
 	cfg.Command = resumeCommand
@@ -646,9 +672,10 @@ func (m *Manager) ensureRunning(ctx context.Context, by Actor, id string, b bead
 	started := false
 	// An operator's resume of a row the operator holds consumes the hold, but
 	// only once the runtime is up (resume_user_hold.go).
-	var holdPremise map[string]string
+	var consume Decided
+	consumes := false
 	if by.consumesHold() {
-		holdPremise = userHoldPremise(b.Metadata, m.now())
+		consume, consumes = userHoldDecision(b)
 	}
 	// Refuse to resume if a prior escaped process for this session could not be
 	// confirmed dead: a survivor would race this replacement for the same work
@@ -724,10 +751,14 @@ func (m *Manager) ensureRunning(ctx context.Context, by Actor, id string, b bead
 	if err := m.syncStoredMCPServers(id, &b, cfg.MCPServers); err != nil {
 		return fmt.Errorf("%w: %w", ErrStateSync, err)
 	}
-	if holdPremise != nil {
-		return m.consumeUserHold(id, holdPremise, m.now())
+	if consumes {
+		var clears MetadataPatch
+		if started {
+			clears = restartStopRequestClears(b.Metadata)
+		}
+		return m.consumeUserHold(consume, m.now(), clears)
 	}
-	if err := m.confirmLiveSessionState(id, &b); err != nil {
+	if err := m.confirmLiveSessionState(id, &b, started); err != nil {
 		if started && !errors.Is(err, ErrStateSync) {
 			_ = m.sp.Stop(sessName)
 		}
@@ -847,11 +878,14 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 	return nil
 }
 
-func (m *Manager) confirmLiveSessionState(id string, b *beads.Bead) error {
+func (m *Manager) confirmLiveSessionState(id string, b *beads.Bead, started bool) error {
 	if b == nil {
 		return nil
 	}
 	batch := make(map[string]string)
+	if started {
+		maps.Copy(batch, restartStopRequestClears(b.Metadata))
+	}
 	switch State(b.Metadata["state"]) {
 	case "", StateStartPending, StateCreating, StateAsleep, StateSuspended:
 		batch["state"] = string(StateActive)
@@ -914,11 +948,21 @@ func formatWaitIdleReminder(source, message string) string {
 func (m *Manager) nudgeSession(ctx context.Context, sessName, message string, immediate bool) error {
 	content := runtime.TextContent(message)
 	err := m.nudgeContent(sessName, content, immediate)
+	if errors.Is(err, runtime.ErrNudgeDeliveredUnobserved) {
+		// The provider proved delivery and only missed the turn start, so
+		// this nudge is delivered: a caller that retried it would deliver
+		// the message twice.
+		log.Printf("session: %q: %v", sessName, err)
+		err = nil
+	}
 	recordCtx := ctx
 	if recordCtx == nil || recordCtx.Err() != nil {
 		recordCtx = context.Background()
 	}
 	telemetry.RecordNudge(recordCtx, sessName, err)
+	if errors.Is(err, runtime.ErrNudgeRefusedPendingInteraction) {
+		return fmt.Errorf("%w: %w", ErrPendingInteraction, err)
+	}
 	if err != nil {
 		return fmt.Errorf("sending message to session: %w", err)
 	}
@@ -1004,10 +1048,27 @@ func (m *Manager) pendingInteractionLocked(sessName string) error {
 			return fmt.Errorf("getting pending interaction: %w", err)
 		}
 		if pending != nil {
-			return ErrPendingInteraction
+			return PendingInteractionError(pending)
 		}
 	}
 	return nil
+}
+
+// PendingInteractionError returns an error wrapping ErrPendingInteraction that
+// names the pending request, so callers can tell the operator what must be
+// answered (with Respond) before text can be delivered.
+func PendingInteractionError(pending *runtime.PendingInteraction) error {
+	what := strings.TrimSpace(pending.Kind)
+	if what == "" {
+		what = "interaction"
+	}
+	if prompt := strings.TrimSpace(pending.Prompt); prompt != "" {
+		what += " " + strconv.Quote(prompt)
+	}
+	if pending.RequestID != "" {
+		what += " (request " + pending.RequestID + ")"
+	}
+	return fmt.Errorf("%w: %s is waiting for an answer; respond to it (approve or deny) before sending text", ErrPendingInteraction, what)
 }
 
 func (m *Manager) dismissKnownDialogsLocked(ctx context.Context, sessName string, timeout time.Duration) bool {
@@ -1061,7 +1122,7 @@ func (m *Manager) sendLocked(ctx context.Context, by Actor, id string, b beads.B
 }
 
 func (m *Manager) send(ctx context.Context, by Actor, id, message, resumeCommand string, hints runtime.Config, immediate bool) (SubmitOutcome, error) {
-	if err := m.checkActor(by); err != nil {
+	if err := m.checkStarter(by); err != nil {
 		return SubmitOutcome{}, err
 	}
 	var outcome SubmitOutcome
@@ -1102,7 +1163,7 @@ func (m *Manager) sendLiveOnly(ctx context.Context, id, message string, immediat
 // other callers that need bounded startup without attaching a terminal. A
 // dormant row it may not resume as its actor returns ErrResumeHeld.
 func (m *Manager) Start(ctx context.Context, by Actor, id, resumeCommand string, hints runtime.Config) error {
-	if err := m.checkActor(by); err != nil {
+	if err := m.checkStarter(by); err != nil {
 		return err
 	}
 	return withSessionStartLock(ctx, id, func() error {
@@ -1119,10 +1180,7 @@ func (m *Manager) Start(ctx context.Context, by Actor, id, resumeCommand string,
 // bridge while they still own commit/rollback bookkeeping above the worker
 // boundary. It runs under by.Lease, the caller's.
 func (m *Manager) StartRuntimeOnly(ctx context.Context, by Actor, id, resumeCommand string, hints runtime.Config) error {
-	if err := m.checkActor(by); err != nil {
-		return err
-	}
-	if err := by.CheckStarts(); err != nil {
+	if err := m.checkStarter(by); err != nil {
 		return err
 	}
 	return withSessionMutationLock(id, func() error {
@@ -1166,7 +1224,7 @@ func (m *Manager) SendImmediateLiveOnly(ctx context.Context, id, message string)
 // an operational error. A held row the actor may not resume returns
 // ErrResumeHeld, queueing nothing, so the caller queues it and says why.
 func (m *Manager) TryWaitIdleNudge(ctx context.Context, by Actor, id, source, message, resumeCommand string, hints runtime.Config) (bool, error) {
-	if err := m.checkActor(by); err != nil {
+	if err := m.checkStarter(by); err != nil {
 		return false, err
 	}
 	var delivered bool
@@ -1200,12 +1258,16 @@ func (m *Manager) TryWaitIdleNudgeLiveOnly(ctx context.Context, id, source, mess
 // StopTurn issues a provider-appropriate interrupt for the currently running
 // turn. For providers that need post-interrupt idle settlement (e.g. Claude),
 // it waits for the session to return to an idle prompt before returning.
+// Claude Code puts a prompt interrupted before its first response chunk back
+// into its input box, so for Claude StopTurn also clears the input box when
+// the runtime can do a verified clear (see clearRestoredInputLocked).
 func (m *Manager) StopTurn(id string) error {
 	return withSessionMutationLock(id, func() error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
 		}
+		running := State(b.Metadata["state"]) != StateSuspended && m.sp.IsRunning(sessName)
 		interruptStartedAt := time.Now()
 		if err := m.stopTurnLocked(b, sessName); err != nil {
 			return err
@@ -1215,6 +1277,14 @@ func (m *Manager) StopTurn(id string) error {
 		}
 		if err := m.waitForInterruptBoundaryLocked(context.Background(), b, sessName, interruptStartedAt); err != nil {
 			return fmt.Errorf("waiting for stopped session interrupt boundary: %w", err)
+		}
+		if running && restoresInterruptedInput(b) {
+			// The stop already succeeded. A draft that will not clear is
+			// logged, not returned: the next submit clears the input box
+			// again before it pastes.
+			if _, err := m.clearRestoredInputLocked(context.Background(), sessName); err != nil {
+				log.Printf("session: stopped the turn of %q but %v", sessName, err)
+			}
 		}
 		return nil
 	})
@@ -1290,13 +1360,23 @@ func (m *Manager) Respond(id string, response runtime.InteractionResponse) error
 		if pending.RequestID != "" && response.RequestID != pending.RequestID {
 			return fmt.Errorf("%w: pending interaction %q does not match request %q", ErrInteractionMismatch, pending.RequestID, response.RequestID)
 		}
+		// The provider may not return until it sees the prompt clear (tmux
+		// waits up to 10 s for Claude Code to redraw), and this session's
+		// mutation lock is held all that time, so sends, stops and other
+		// mutations of the session wait behind it.
 		if err := ip.Respond(sessName, response); err != nil {
 			if errors.Is(err, runtime.ErrInteractionUnsupported) {
 				return ErrInteractionUnsupported
 			}
+			if errors.Is(err, runtime.ErrInteractionActionUnavailable) {
+				return fmt.Errorf("%w: %w", ErrInteractionMismatch, err)
+			}
 			if errors.Is(err, runtime.ErrSessionNotFound) {
 				log.Printf("session: respond runtime session gone for %q: %v", sessName, err)
 				return ErrNoPendingInteraction
+			}
+			if errors.Is(err, runtime.ErrInteractionResponseInvalid) {
+				return fmt.Errorf("%w: %w", ErrInteractionMismatch, err)
 			}
 			return fmt.Errorf("responding to pending interaction: %w", err)
 		}
@@ -1343,6 +1423,9 @@ func (m *Manager) TranscriptPathClassified(id string, searchPaths []string) (str
 	}
 	workDir := b.Metadata["work_dir"]
 	if workDir == "" {
+		if path := m.acpCaptureTranscriptPath(b); path != "" {
+			return path, TranscriptFound, nil
+		}
 		return "", TranscriptNoWorkDir, nil
 	}
 	provider := strings.TrimSpace(b.Metadata["provider_kind"])
@@ -1353,6 +1436,12 @@ func (m *Manager) TranscriptPathClassified(id string, searchPaths []string) (str
 		searchPaths = sessionlog.DefaultSearchPaths()
 	}
 	if path := workertranscript.DiscoverKeyedPath(searchPaths, provider, workDir, b.Metadata["session_key"]); path != "" {
+		return path, TranscriptFound, nil
+	}
+	// An ACP session's transcript is the capture gc wrote itself. A keyed
+	// native transcript (above) still wins; the workdir fallbacks below could
+	// return an unrelated provider's file.
+	if path := m.acpCaptureTranscriptPath(b); path != "" {
 		return path, TranscriptFound, nil
 	}
 	// zcode carries no session_key — no session-id flag, no hook plugin — so

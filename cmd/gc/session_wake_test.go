@@ -196,6 +196,31 @@ func TestPreWakeCommit(t *testing.T) {
 	}
 }
 
+// TestPreWakeCommitIsThePreWakeCell: a start clears the idle stop's and a
+// wait's intent and a soft suspend's stamp (the disposition's PreWake cell),
+// and keeps a wait's hold.
+func TestPreWakeCommitIsThePreWakeCell(t *testing.T) {
+	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
+	for intent, want := range map[string]string{"idle-stop-pending": "", "wait-hold": "", "someday": ""} {
+		store := beads.NewMemStore()
+		b, err := store.Create(beads.Bead{Title: "test-session", Metadata: map[string]string{
+			"session_name": "test-worker", "template": "worker", "generation": "2",
+			"sleep_intent": intent, "wait_hold": "true", "suspended_at": "2026-03-08T11:00:00Z",
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, _, err := preWakeCommit(wakeInfo(t, b), sessionFrontDoor(store), clk); err != nil {
+			t.Fatalf("preWakeCommit: %v", err)
+		}
+		got, _ := store.Get(b.ID)
+		if got.Metadata["sleep_intent"] != want || got.Metadata["suspended_at"] != "" || got.Metadata["wait_hold"] != "true" {
+			t.Errorf("intent %q: after PreWake sleep_intent=%q suspended_at=%q wait_hold=%q, want the intent and stamp cleared and the wait kept",
+				intent, got.Metadata["sleep_intent"], got.Metadata["suspended_at"], got.Metadata["wait_hold"])
+		}
+	}
+}
+
 func TestPreWakeCommitUsesSingleBatchMetadataWrite(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}

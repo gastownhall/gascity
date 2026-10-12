@@ -222,6 +222,110 @@ func TestHandleSessionStopUsesSoftEscapeForCodex(t *testing.T) {
 	}
 }
 
+// TestSessionSubmitAndMessageRejectPendingInteractionWith409 pins the #2892
+// guard at the API: while the session is showing a permission prompt, a
+// submit or message is refused synchronously with 409 pending_interaction
+// instead of being accepted (202) and then typed into the prompt, where its
+// Enter keystroke would approve the pending tool call.
+func TestSessionSubmitAndMessageRejectPendingInteractionWith409(t *testing.T) {
+	fs := newSessionFakeState(t)
+	h := newTestCityHandler(t, fs)
+
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Awaiting Approval")
+	fs.sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{
+		RequestID: "tmux-abc123",
+		Kind:      "approval",
+		Prompt:    "Bash: date > bash-ran.txt",
+		Options:   []string{"Yes", "No"},
+	})
+
+	for _, tc := range []struct{ path, body string }{
+		{"/submit", `{"message":"hello?"}`},
+		{"/submit", `{"message":"hello?","intent":"follow_up"}`},
+		{"/submit", `{"message":"hello?","intent":"interrupt_now"}`},
+		{"/messages", `{"message":"hello?"}`},
+	} {
+		req := newPostRequest(cityURL(fs, "/session/")+info.ID+tc.path, strings.NewReader(tc.body))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("%s %s status = %d, want 409; body: %s", tc.path, tc.body, rec.Code, rec.Body.String())
+		}
+		var problem struct {
+			Code   string `json:"code"`
+			Detail string `json:"detail"`
+		}
+		if err := json.NewDecoder(rec.Body).Decode(&problem); err != nil {
+			t.Fatalf("decode problem: %v", err)
+		}
+		if problem.Code != "session-conflict" || !strings.HasPrefix(problem.Detail, "pending_interaction: ") {
+			t.Fatalf("%s problem = %+v, want session-conflict with a pending_interaction: detail", tc.path, problem)
+		}
+		if !strings.Contains(problem.Detail, "tmux-abc123") {
+			t.Fatalf("%s detail = %q, want it to name the pending request", tc.path, problem.Detail)
+		}
+	}
+
+	for _, call := range fs.sp.Calls {
+		if (call.Method == "Nudge" || call.Method == "NudgeNow" || call.Method == "SendKeys") && call.Name == info.SessionName {
+			t.Fatalf("session received %s while a permission prompt was pending", call.Method)
+		}
+	}
+	if pending, _ := fs.sp.Pending(info.SessionName); pending == nil {
+		t.Fatal("pending interaction was cleared; it must stay pending")
+	}
+}
+
+// TestSessionSubmitAndMessageAcceptWhatCannotBeSeenPending: the #2892 guard
+// refuses only a prompt it sees. A session that is not running has no prompt
+// to answer, so a submit or message to it is accepted (202) without looking,
+// even when its runtime cannot be reached. A look that cannot reach a running
+// session's runtime refuses nothing either: the delivery looks again under the
+// session lock. Kills an undeclared 500 from the accept-path look.
+func TestSessionSubmitAndMessageAcceptWhatCannotBeSeenPending(t *testing.T) {
+	unreachable := fmt.Errorf("capturing pane: tmux server unreachable: %w", runtime.ErrRuntimeUnavailable)
+	for _, row := range []struct {
+		name      string
+		suspended bool
+		lookErr   error
+	}{
+		{name: "suspended, runtime unreachable", suspended: true, lookErr: unreachable},
+		{name: "suspended, look fails", suspended: true, lookErr: errors.New("capturing pane: exit status 1")},
+		{name: "running, runtime unreachable", lookErr: unreachable},
+	} {
+		for _, tc := range []struct{ path, body string }{
+			{"/submit", `{"message":"hello?"}`},
+			{"/submit", `{"message":"hello?","resume":true}`},
+			{"/messages", `{"message":"hello?"}`},
+		} {
+			t.Run(row.name+" "+tc.path+" "+tc.body, func(t *testing.T) {
+				fs := newSessionFakeState(t)
+				h := newTestCityHandler(t, fs)
+				info := createTestSession(t, fs.cityBeadStore, fs.sp, "Unseen")
+				if row.suspended {
+					suspendSessionForPermissionModeTest(t, fs, info.ID)
+				}
+				fs.sp.PendingErrors[info.SessionName] = row.lookErr
+
+				rec := httptest.NewRecorder()
+				h.ServeHTTP(rec, newPostRequest(cityURL(fs, "/session/")+info.ID+tc.path, strings.NewReader(tc.body)))
+				if rec.Code != http.StatusAccepted {
+					t.Fatalf("status = %d, want 202; body: %s", rec.Code, rec.Body.String())
+				}
+				// Let the delivery finish inside the test; its outcome is
+				// not what this test pins.
+				accepted := decodeAsyncAccepted(t, rec.Body)
+				if tc.path == "/messages" {
+					waitForSessionMessageResult(t, fs.eventProv, accepted.RequestID)
+				} else {
+					waitForSessionSubmitResult(t, fs.eventProv, accepted.RequestID)
+				}
+			})
+		}
+	}
+}
+
 // TestHandleSessionMessageReportsQueued: POST /messages without resume: true
 // to a held session queues the message, and its result says so (queued).
 // Kills a result that reports a queued message as delivered.

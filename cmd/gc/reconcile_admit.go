@@ -1,6 +1,7 @@
 package main
 
 import (
+	"maps"
 	"slices"
 	"sort"
 	"strings"
@@ -25,17 +26,23 @@ const (
 	intentAdopt           = "adopt"             // S1's adopt: commits a live runtime, never launches
 	intentCreate          = inflightCreate      // C1; a named create may reopen its closed row (C2)
 	intentRekey           = "rekey"             // S4
+	intentLiveApply       = "live-apply"        // A14's RunLive (SESS-565)
+	intentDriftRepair     = "drift-repair"      // A14's asleep named repair (SESS-566/568): a fresh heal of its own kind
+	intentDriftRestart    = "drift-restart"     // A14's named restart in place (SESS-557), on the stop verb
+	intentDriftRelaunch   = "drift-relaunch"    // A14's launch-only relaunch (SESS-556/560), falling back to the restart or the drain
 	intentZombie          = "zombie"            // A12's classification (S5)
 	intentDrainBegin      = "drain-begin"       // D1, D2
 	intentDrainBeginFresh = "drain-begin-fresh" // a begin that reads fresh legs (F4) or re-proves idleness
 	intentSignal          = "signal"            // D2
 	intentSignalFresh     = "signal-fresh"      // a signal that reads fresh legs or revalidates claims
+	intentSignalAck       = "signal-ack"        // A11's: reads the runtime, to void an ack older than it
 	intentDrainCancel     = "drain-cancel"      // A19
 	intentDrainVoid       = "drain-void"        // A19
 	intentStop            = "stop"              // the stop verb with its finalize (D3, D4)
 	intentClose           = "close"             // A21 (C3)
 	intentRollback        = "rollback"          // A10 (C3)
 	intentRowMetadata     = "row-metadata"      // A7 (M1)
+	intentRuntimeAlias    = "runtime-alias"     // A7's runtime alias sync, after its alias write (M1)
 	intentBaseline        = "baseline"          // A8 (M2)
 	intentRowHeal         = "row-heal"          // A6's heals and markers, and other row writes
 	intentRowHealFresh    = "row-heal-fresh"    // A6's not-alive heals: a fresh read under the name lock first
@@ -54,18 +61,24 @@ const (
 // createsInFlightCap bounds running creates (P4, C1); the rest are P3's
 // flat deadlines.
 const (
-	createsInFlightCap     = 8
-	startDeadlineSlack     = 10 * time.Second
+	createsInFlightCap = 8
+	startDeadlineSlack = 10 * time.Second
+	// startFailureSlack is the start's reserve past its commit slack for a
+	// start that did not commit: the failure Call (the screen peek, the #46
+	// accrual) and the abandon, its teardown and close (S3), which a Start
+	// timed out at startup_timeout must still reach.
+	startFailureSlack      = 20 * time.Second
 	providerEffectDeadline = 60 * time.Second
 	rowWriteDeadline       = 30 * time.Second
 )
 
 // deadline is the effect's deadline (P3), by class alone with no exception:
-// a start startup_timeout + 10s, a row write 30s, every other effect 60s.
+// a start startup_timeout + 30s (its commit's 10s and its abandon's 20s), a
+// row write 30s, every other effect 60s.
 func (k effectSpec) deadline(startupTimeout time.Duration) time.Duration {
 	switch k.class {
 	case capStarts:
-		return startupTimeout + startDeadlineSlack
+		return startupTimeout + startDeadlineSlack + startFailureSlack
 	case capRowWrites:
 		return rowWriteDeadline
 	}
@@ -92,6 +105,20 @@ const (
 )
 
 // intent is one effect the pass proposes for admission.
+// folded is it's write as a plain patch, for a read of what it writes (a fold
+// onto a row); the write itself carries Class typed.
+func (it intent) folded() session.MetadataPatch { return foldClass(it.Patch, it.Class) }
+
+// foldClass is patch with class's keys, as a plain patch for a read.
+func foldClass(patch session.MetadataPatch, class session.DispositionPatch) session.MetadataPatch {
+	out := maps.Clone(patch)
+	if out == nil {
+		out = session.MetadataPatch{}
+	}
+	maps.Copy(out, class.Fold())
+	return out
+}
+
 type intent struct {
 	Kind     string
 	Key      rowKey      // the row; zero for a create
@@ -106,11 +133,32 @@ type intent struct {
 	// Finalize marks the stop verb proposed for a row whose runtime reads
 	// gone: it confirms and finalizes, and stops nothing (A4, D3).
 	Finalize bool
+	// Finish is the stop verb's finalize builder (D4); nil is
+	// finalizePatch. C7a's restart and idle-timeout, and C6d's idle
+	// respawn, call the verb with their own.
+	Finish stopFinish
 	// Patch is a row write's patch and Event what it records once it lands.
 	// The row-write effect re-decides on the fresh row and writes the
 	// re-decided intent's (R2).
 	Patch session.MetadataPatch
+	// Class is the disposition cells' keys the write carries beside Patch,
+	// decided without a mint (session.Cell); the effect's write mints them
+	// (DispositionPatch.Into).
+	Class session.DispositionPatch
 	Event *events.Event
+	// AliasLock is the city alias lock A7's row-metadata verb takes around
+	// its effect (v5 M1), when its alias work needs one.
+	AliasLock string
+	// Heal is the A6 heal a start carries into its PreWake (startHealed),
+	// written alone when the start is not admitted or refuses before it.
+	Heal *intent
+	// Kept is the part of a start's Patch a start that does not commit
+	// keeps: what S3's restore returns the row to (the heal, as legacy's
+	// tick writes it before its start; a stranded seat's death accrual
+	// alone, which keeps it committed).
+	Kept session.MetadataPatch
+	// Closing is a close's kind and kept assignees (A21).
+	Closing closeSpec
 	// Rests are the fresh facts the decision rests on, which only a fresh
 	// kind's arm records: its effect reads them and decides again on them.
 	Rests rests
@@ -230,6 +278,9 @@ func admit(in admitInput, intents []intent) admitResult {
 	for _, it := range a.order(intents) {
 		if it.Cause = a.admitOne(&it); it.Cause != "" {
 			res.Deferred = append(res.Deferred, it)
+			if heal, ok := a.healInstead(it); ok {
+				res.Admitted = append(res.Admitted, heal)
+			}
 			continue
 		}
 		res.Admitted = append(res.Admitted, it)
@@ -307,13 +358,16 @@ func (a *admission) admitOne(it *intent) string {
 		a.seen[it.Key] = true
 	}
 	spec, ok := effectSpecs[it.Kind]
-	backoff := a.in.Backoff[rowBackoffKey(it.Key)]
+	backoff, drift := a.in.Backoff[rowBackoffKey(it.Key)], backoffRecord{}
+	if k := settledBackoffKey(it.Kind, it.Key); k != rowBackoffKey(it.Key) {
+		drift = a.in.Backoff[k] // a drift kind's own key holds the drift alone
+	}
 	switch {
 	case !ok:
 		return causeUnknownKind
 	case spec.bootGated && !a.in.BootOpen:
 		return causeBootGate
-	case it.Key.ID != "" && !it.finalizesOnly(backoff) && backoff.live(a.in.Now):
+	case it.Key.ID != "" && (!it.finalizesOnly(backoff) && backoff.live(a.in.Now) || drift.live(a.in.Now)):
 		return causeRowBackoff
 	case a.in.Paused && (spec.class == capStarts || spec.class == capCreates):
 		return causeSwapPause
@@ -344,6 +398,18 @@ func (a *admission) admitOne(it *intent) string {
 	a.running[spec.class]++
 	it.Deadline = a.in.Now.Add(spec.deadline(a.startup))
 	return ""
+}
+
+// healInstead is the heal a deferred start carries (intent.Heal), admitted
+// in its stead as the row write it is.
+func (a *admission) healInstead(start intent) (intent, bool) {
+	if start.Heal == nil || start.Cause == causeRowRepeated {
+		return intent{}, false
+	}
+	heal := *start.Heal
+	delete(a.seen, heal.Key)
+	heal.Cause = a.admitOne(&heal)
+	return heal, heal.Cause == ""
 }
 
 // createCause is why a create may not be admitted, or "": the create cap,

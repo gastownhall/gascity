@@ -729,6 +729,9 @@ func (s *Server) acceptSessionSubmit(ctx context.Context, input *SessionSubmitIn
 		// synchronous message twin) instead of a 500 from humaStoreError.
 		return asyncAcceptedBody{}, humaResolveError(err)
 	}
+	if err := s.rejectPendingInteraction(ctx, store.Store, input.ID); err != nil {
+		return asyncAcceptedBody{}, err
+	}
 
 	intent := input.Body.Intent
 	if intent == "" {
@@ -796,6 +799,9 @@ func (s *Server) acceptSessionMessage(ctx context.Context, input *SessionMessage
 		// helper so they surface as 409 (matching /stop, /respond, and the
 		// synchronous message twin) instead of a 500 from humaStoreError.
 		return asyncAcceptedBody{}, humaResolveError(err)
+	}
+	if err := s.rejectPendingInteraction(ctx, store.Store, input.ID); err != nil {
+		return asyncAcceptedBody{}, err
 	}
 
 	reqID, reqIDErr := newRequestID()
@@ -1011,8 +1017,8 @@ func (s *Server) humaHandleSessionRespond(_ context.Context, input *SessionRespo
 	if err != nil {
 		return nil, err
 	}
-	// Publish the session.pending_cleared now rather than on the next tick.
-	s.pokePendingMonitor()
+	// Publish the session.pending_cleared now rather than on the next pass.
+	s.pokePendingInteractions(id)
 
 	out := &SessionRespondOutput{}
 	out.Body.Status = "accepted"

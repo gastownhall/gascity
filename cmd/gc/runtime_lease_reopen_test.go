@@ -13,7 +13,7 @@ import (
 // old holder (SESSION-RUNTIME-012).
 func TestReopenNamedSessionBatchClearsTheRuntimeLease(t *testing.T) {
 	for _, state := range []string{"active", "stopped"} {
-		batch := reopenNamedSessionBatch(state, "", time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC))
+		batch := reopenNamedSessionBatch(beads.Bead{}, state, time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC))
 		for k, v := range session.RuntimeLeaseClearPatch() {
 			if got, ok := batch[k]; !ok || got != v {
 				t.Errorf("reopen to %s: %s = %q (set %v), want cleared", state, k, got, ok)

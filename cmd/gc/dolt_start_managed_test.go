@@ -112,6 +112,19 @@ func TestDoltServerEnv_ScrubsSessionIdentity(t *testing.T) {
 	}
 }
 
+// TestDoltServerEnv_ScrubsHookDeadline pins that a managed server started from
+// inside a hook does not keep that hook's deadline: the server and its
+// watchdog outlive the hook, so the deadline would be stale for anything they
+// spawn.
+func TestDoltServerEnv_ScrubsHookDeadline(t *testing.T) {
+	out := doltServerEnv("", []string{"PATH=/usr/bin", hookDeadlineEnv + "=2026-10-11T12:00:00Z"})
+	for _, kv := range out {
+		if strings.HasPrefix(kv, hookDeadlineEnv+"=") {
+			t.Fatalf("managed Dolt env carries the hook deadline: %v", out)
+		}
+	}
+}
+
 // TestDoltServerEnvScrubCoversSessionRuntimeEnv keeps the scrub list from
 // drifting behind the session lifecycle: a key added to
 // session.RuntimeEnvWithSessionContext reaches every managed server started

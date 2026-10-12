@@ -278,6 +278,9 @@ type externalReadsEnv struct {
 	SP        runtime.Provider
 	Nudges    beads.NudgesStore
 	WorkStore beads.Store
+	// WorkLegs are the city work legs over WorkStore, which the stranded-work
+	// detector reads; the zero WorkLegs detects nothing.
+	WorkLegs WorkLegs
 }
 
 // laneStep is work a pass starts after it publishes, at most once per every
@@ -336,6 +339,11 @@ type externalReadsLane struct {
 	// execution-stalled inbox; set with the pool steps.
 	summary func() *allocSummary
 	stalled func(executionStalledRequest)
+	// stranded is the controller's stranded-claim alerter, which the
+	// orphan-release step's detector feeds; nil detects nothing.
+	stranded *strandedClaimAlerts
+	// deadAssigneeKeeps dedupes the orphan-release step's keep log.
+	deadAssigneeKeeps deadAssigneeKeepLog
 }
 
 // sourceRead is one read in flight.

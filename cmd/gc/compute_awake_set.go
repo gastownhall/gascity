@@ -156,6 +156,12 @@ type AwakeDecision struct {
 	ShouldWake      bool
 	Reason          string // human-readable reason for debugging
 	HasAssignedWork bool   // underlying assigned-work demand before wake reason overrides
+	// Attached is true when the input reports the session attached and no
+	// wait hold blocks that, whatever reason the decision ends with. A ready
+	// wait relabels an attached wake to "wait-ready", and the attachment must
+	// still keep the session out of its idle latch
+	// (wakeDemandOverridesSleepSuppression).
+	Attached bool
 	// AssignedWorkBeadID identifies the work bead that anchored the
 	// assigned-work decision for this session, when one applies. Callers
 	// use it to persist currently_processing_bead_id and to detect when an
@@ -585,6 +591,7 @@ func computeAwakeSetKeyed(input AwakeInput, keyBy awakeKey) map[string]AwakeDeci
 		if input.AttachedSessions[name] && !bead.WaitHold {
 			decision.ShouldWake = true
 			decision.Reason = "attached"
+			decision.Attached = true
 		}
 
 		// Pending interaction override — even drained beads wake

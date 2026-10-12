@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -631,11 +633,14 @@ func closeScopeAsPassedWith(store beads.Store, snapshot scopeSnapshot, subject b
 // abortScope runs the shared convergence sequence for a scope whose subject
 // failed: skip any still-open members, propagate non-gc.* member metadata (e.g.
 // review.verdict) onto the scope body so diagnostics survive failure auto-close,
-// then close the body with outcome=fail. It returns the number of members
-// skipped. traceID identifies the bead driving the trace and is also the id
-// ignored when skipping open members. The caller owns closing its own control
-// bead. This is the single implementation shared by processScopeCheck and
-// reconcileTerminalScopedMember.
+// then close the body with outcome=fail. When a member failed hard, the body
+// keeps that member's hard-failure record (gc.failure_class/reason/subject), so
+// the hard class reaches whatever reads the body: a ralph control evaluating
+// the body as its iteration, and the enclosing scope. It returns the number of
+// members skipped. traceID identifies the bead driving the trace and is also
+// the id ignored when skipping open members. The caller owns closing its own
+// control bead. This is the single implementation shared by processScopeCheck
+// and reconcileTerminalScopedMember.
 func abortScope(store beads.Store, snapshot scopeSnapshot, opts ProcessOptions, traceID string) (int, error) {
 	return abortScopeWith(store, snapshot, opts, traceID, updateMetadataAndClose)
 }
@@ -653,12 +658,56 @@ func abortScopeWith(store beads.Store, snapshot scopeSnapshot, opts ProcessOptio
 	}); err != nil {
 		return 0, fmt.Errorf("%s: propagating scope metadata: %w", traceID, err)
 	}
+	closeMetadata := map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomeFail}
+	if culprit, ok := firstHardFailedMember(snapshot.members, bodyID); ok {
+		maps.Copy(closeMetadata, hardFailureStamp(culprit))
+	}
 	if err := tracePhaseErr(opts, traceID, "close-body-fail", func() error {
-		return closeBody(store, bodyID, map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomeFail})
+		return closeBody(store, bodyID, closeMetadata)
 	}); err != nil {
 		return 0, fmt.Errorf("%s: completing scope body: %w", bodyID, err)
 	}
 	return skipped, nil
+}
+
+// closedWithHardFailure reports whether a bead closed with gc.outcome=fail and
+// an explicit gc.failure_class=hard. An empty or transient class is not hard:
+// such a failure stays repairable by the next attempt or iteration.
+func closedWithHardFailure(bead beads.Bead) bool {
+	return bead.Status == "closed" &&
+		strings.TrimSpace(bead.Metadata[beadmeta.OutcomeMetadataKey]) == beadmeta.OutcomeFail &&
+		strings.TrimSpace(bead.Metadata[beadmeta.FailureClassMetadataKey]) == beadmeta.FailureClassHard
+}
+
+// firstHardFailedMember returns the scope work member, in bead-ID order, that
+// closed with a hard failure. A retry attempt linked to its control is skipped:
+// its verdict belongs to that logical retry control, which closes hard itself
+// when the attempt does, so a superseded attempt never speaks for the scope.
+// An unlinked attempt (no gc.logical_bead_id) aborts the scope through its own
+// scope-check while its retry control closes skipped, so it is the culprit.
+// excludeID is the scope body, which a member list may carry.
+func firstHardFailedMember(members []beads.Bead, excludeID string) (beads.Bead, bool) {
+	ordered := slices.Clone(members)
+	slices.SortFunc(ordered, func(a, b beads.Bead) int { return strings.Compare(a.ID, b.ID) })
+	for _, member := range ordered {
+		if member.ID == excludeID || isPartialInstantiationResidue(member) || isRetryAttemptSubject(member) {
+			continue
+		}
+		switch member.Metadata[beadmeta.ScopeRoleMetadataKey] {
+		case beadmeta.ScopeRoleBody, beadmeta.ScopeRoleTeardown:
+			continue
+		}
+		if closedWithHardFailure(member) {
+			return member, true
+		}
+	}
+	return beads.Bead{}, false
+}
+
+// hardFailureStamp is the record a scope body keeps of the member whose hard
+// failure aborted it, in the whole-value shape of failureStamp.
+func hardFailureStamp(culprit beads.Bead) map[string]string {
+	return failureStamp(retryFailureReason(culprit), beadmeta.FailureClassHard, culprit.ID)
 }
 
 type scopeSnapshot struct {

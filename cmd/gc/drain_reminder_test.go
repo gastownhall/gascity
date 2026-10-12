@@ -603,7 +603,7 @@ func TestFinalizeDrainAckStopPendingRemindsTheLiveWedgeOnly(t *testing.T) {
 			// lock dir: let it finish before the dir is removed.
 			tracker := &asyncStartTracker{}
 			finalizeDrainAckStopPendingSessions(
-				t.TempDir(), cfg, e.sp, beads.SessionStore{Store: e.store}, nil,
+				t.TempDir(), cfg, e.sp, beads.SessionStore{Store: e.store}, testSeatWork(t.TempDir(), cfg, beads.SessionStore{Store: e.store}, nil),
 				[]sessionpkg.Info{e.info()}, nil, newDrainTracker(), tracker,
 				e.clk, nil, e.out,
 			)
