@@ -334,6 +334,93 @@ func TestRetryLifecycleClosedWorkflowRootEvaluatesSecondAttemptOnce(t *testing.T
 	}
 }
 
+func TestNestedRalphUnderRetryAdvancesPastSecondIterationThroughProcessControl(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+	opts := testProcessOptionsWithControlDispatcher("")
+	const storeRef = "city:test-city"
+	spec := &formula.Step{
+		ID:    "outer",
+		Title: "Outer",
+		Type:  "task",
+		Retry: &formula.RetrySpec{MaxAttempts: 3},
+		Children: []*formula.Step{{
+			ID:    "inner",
+			Title: "Inner",
+			Type:  "task",
+			Ralph: &formula.RalphSpec{MaxAttempts: 4, Check: &formula.RalphCheckSpec{Mode: "exec", Path: "unused.sh"}},
+		}},
+	}
+	root, outer := makeRetryControl(t, store, "mol-test.outer", spec, 3)
+	for _, id := range []string{root.ID, outer.ID} {
+		if err := store.SetMetadata(id, beadmeta.RootStoreRefMetadataKey, storeRef); err != nil {
+			t.Fatalf("set root store ref on %s: %v", id, err)
+		}
+	}
+	outerAttempt1 := makeAttemptBead(t, store, root.ID, "mol-test.outer.attempt.1", 1, map[string]string{
+		beadmeta.OutcomeMetadataKey:       beadmeta.OutcomeFail,
+		beadmeta.FailureClassMetadataKey:  beadmeta.FailureClassTransient,
+		beadmeta.FailureReasonMetadataKey: "rate_limited",
+	})
+	mustDep(t, store, outer.ID, outerAttempt1.ID, "blocks")
+
+	result, err := ProcessControl(store, mustGet(t, store, outer.ID), opts)
+	if err != nil {
+		t.Fatalf("ProcessControl outer: %v", err)
+	}
+	if result.Action != "retry" || result.Created != 1 {
+		t.Fatalf("outer result = %+v, want one retry", result)
+	}
+	if got := mustGet(t, store, root.ID).Status; got != "open" {
+		t.Fatalf("workflow root status = %q, want open", got)
+	}
+
+	inner := findAttemptByRef(t, store, root.ID, "mol-test.outer.attempt.2.inner")
+	if inner.ID == "" {
+		t.Fatal("outer attempt 2 did not create the inner ralph control")
+	}
+	if inner.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindRalph {
+		t.Fatalf("inner control kind = %q, want ralph", inner.Metadata[beadmeta.KindMetadataKey])
+	}
+	if got := inner.Metadata[beadmeta.RootStoreRefMetadataKey]; got != storeRef {
+		t.Fatalf("inner control %s = %q, want %q", beadmeta.RootStoreRefMetadataKey, got, storeRef)
+	}
+	if got := beadmeta.ResolveRunID(inner.Metadata, inner.ID, ""); got != root.ID {
+		t.Fatalf("inner control run id = %q, want workflow root %s", got, root.ID)
+	}
+
+	for iteration := 1; iteration <= 2; iteration++ {
+		ref := fmt.Sprintf("mol-test.outer.attempt.2.inner.iteration.%d", iteration)
+		current := findAttemptByRef(t, store, root.ID, ref)
+		if current.ID == "" {
+			t.Fatalf("inner iteration %d (%s) was not created", iteration, ref)
+		}
+		if got := beadmeta.ResolveRunID(current.Metadata, current.ID, ""); got != root.ID {
+			t.Fatalf("inner iteration %d run id = %q, want workflow root %s", iteration, got, root.ID)
+		}
+		if err := store.SetMetadata(current.ID, beadmeta.OutcomeMetadataKey, beadmeta.OutcomeFail); err != nil {
+			t.Fatalf("fail inner iteration %d: %v", iteration, err)
+		}
+		mustClose(t, store, current.ID)
+
+		result, err := ProcessControl(store, mustGet(t, store, inner.ID), opts)
+		if err != nil {
+			t.Fatalf("ProcessControl inner after iteration %d: %v", iteration, err)
+		}
+		if result.Action != "retry" || result.Created != 1 {
+			t.Fatalf("inner after iteration %d = %+v, want a retry spawning iteration %d", iteration, result, iteration+1)
+		}
+	}
+
+	third := findAttemptByRef(t, store, root.ID, "mol-test.outer.attempt.2.inner.iteration.3")
+	if third.ID == "" {
+		t.Fatal("inner ralph did not advance past iteration 2")
+	}
+	if got := mustGet(t, store, inner.ID); got.Status != "open" || got.Metadata[beadmeta.ControlEpochMetadataKey] != "3" {
+		t.Fatalf("inner control after iteration 2 = status %q epoch %q, want open/3", got.Status, got.Metadata[beadmeta.ControlEpochMetadataKey])
+	}
+}
+
 // TestRetryLifecycleAttachedAttemptExemptFromFalseScopeAbort reproduces
 // gc-yydp6f end to end: an Attach-spawned retry attempt that bare-closes with
 // a typed deliverable disposition (no flat gc.outcome) must carry
