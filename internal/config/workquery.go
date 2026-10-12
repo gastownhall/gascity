@@ -510,7 +510,11 @@ func assignedInProgressCandidatesTierCommand(shellVar string, topo QueryTopology
 
 func assignedInProgressTierCommandWithLimit(shellVar string, topo QueryTopology, limit int) string {
 	fed := topo.FederatedReady
-	reader := bdListInProgressCommand
+	// Plain `bd list` hides the no-history rows a bd-1.0.5 city may store its
+	// workflow steps as, and they are not `ephemeral=true`, so the ephemeral
+	// probe below this tier misses them as well. Ask for them with the switch
+	// the ready tiers use, or a session cannot recover a step it already holds.
+	reader := bdListInProgressCommand + bdReadyIncludeEphemeralArg(topo.includeEphemeralReady())
 	if fed {
 		reader = gcReadyCommand + ` --status in_progress`
 	}
