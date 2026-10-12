@@ -276,6 +276,60 @@ func TestReaperVisitsEveryRigScopeAndClosesExpiredNudgesThere(t *testing.T) {
 	}
 }
 
+// TestReaperReadsWorkflowIssueRootsOnlyInTheCityScope: issue roots are city
+// issues, so a database serving only rigs never runs the issue-root census.
+// A rig store that times out on that query must not escalate the run, and
+// the wisp-root half of the step still runs there.
+func TestReaperReadsWorkflowIssueRootsOnlyInTheCityScope(t *testing.T) {
+	rootReads := filepath.Join(t.TempDir(), "root-reads.log")
+	f := newScopeFixture(t, `
+  *"WITH RECURSIVE workflow_wisp_root_candidates"*)
+    case "$*" in *"SELECT DISTINCT root.id"*) kind=rows ;; *) kind=count ;; esac
+    printf '%s wisp-%s\n' "$GC_FAKE_SCOPE" "$kind" >> "`+rootReads+`"
+    if [ "$kind" = rows ]; then printf 'id\n'; else printf 'COUNT(*)\n0\n'; fi
+    ;;
+  *"WITH RECURSIVE workflow_issue_root_candidates"*)
+    case "$*" in *"SELECT DISTINCT root.id"*) kind=rows ;; *) kind=count ;; esac
+    printf '%s issue-%s\n' "$GC_FAKE_SCOPE" "$kind" >> "`+rootReads+`"
+    if [ "$GC_FAKE_SCOPE" != city ]; then
+      printf 'Error 1105: read tcp 10.0.0.2:3307: i/o timeout\n' >&2
+      exit 1
+    fi
+    if [ "$kind" = rows ]; then printf 'id\nissue-close\n'; else printf 'COUNT(*)\n0\n'; fi
+    ;;`)
+	f.env["FAKE_RIG_LIST_JSON"] = `{"rigs":[{"name":"api","hq":false}]}`
+	f.env["FAKE_SCOPE_DBS"] = "rig:api=apidb"
+	f.runReaper(t)
+
+	reads := f.read(t, rootReads)
+	if got := strings.Count(reads, "rig:api issue-"); got != 0 {
+		t.Fatalf("rig scope ran %d workflow issue-root read(s), want none:\n%s", got, reads)
+	}
+	for _, read := range []string{"city issue-count", "city issue-rows"} {
+		if got := strings.Count(reads, read+"\n"); got != 1 {
+			t.Fatalf("city scope ran %q %d time(s), want once:\n%s", read, got, reads)
+		}
+	}
+	for _, read := range []string{"rig:api wisp-count", "rig:api wisp-rows"} {
+		if !strings.Contains(reads, read+"\n") {
+			t.Fatalf("rig scope skipped the workflow wisp-root read %q:\n%s", read, reads)
+		}
+	}
+	gcLog := f.read(t, f.gcLog)
+	if strings.Contains(gcLog, "ESCALATION") || strings.Contains(gcLog, "workflow issue root") {
+		t.Fatalf("a rig store's issue-root census must not escalate the run:\n%s", gcLog)
+	}
+	if !strings.Contains(gcLog, "workflow_roots:1") {
+		t.Fatalf("summary missing workflow_roots:1:\n%s", gcLog)
+	}
+	if strings.Contains(gcLog, "skipped_non_city_workflow_issue_roots") {
+		t.Fatalf("summary still reports rig issue roots that no scope reads:\n%s", gcLog)
+	}
+	if bdLog := f.read(t, f.bdLog); !strings.Contains(bdLog, "scope=city args=close issue-close --reason stale inactive workflow root auto-closed by reaper") {
+		t.Fatalf("city scope did not close the stale workflow issue root through bd:\n%s", bdLog)
+	}
+}
+
 func TestReaperReportsUnreachableRigAndStillReapsTheCity(t *testing.T) {
 	f := newScopeFixture(t, "")
 	f.env["FAKE_RIG_LIST_JSON"] = `{"rigs":[{"name":"api","hq":false}]}`
