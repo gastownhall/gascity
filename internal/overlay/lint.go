@@ -2,8 +2,10 @@ package overlay
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
+	"regexp/syntax"
 	"slices"
 	"sort"
 	"strings"
@@ -98,11 +100,18 @@ type HookMatcherFinding struct {
 // Tool(args), which is not a regular expression over tool names.
 var permissionSyntaxMatcher = regexp.MustCompile(`^[A-Za-z|]+\(`)
 
+// groupedNameRegex matches a Tool(Alt|Alt) regex whose group holds only
+// name characters: a valid alternation over tool names, not a permission
+// rule's arguments.
+var groupedNameRegex = regexp.MustCompile(`^[A-Za-z|]+\([A-Za-z0-9_|]*\)\$?$`)
+
 // jsOnlyRegexSyntax matches constructs JavaScript regexes support and Go
 // RE2 rejects: lookaround, numbered and named backreferences, \u escapes
 // and the [^] any-character class. Claude Code evaluates matchers as
 // JavaScript regexes, so a matcher using them may work there and lint
-// cannot call it broken.
+// cannot call it broken. Identity escapes such as \R, which JavaScript reads
+// as the literal letter, are recognized from RE2's invalid-escape error
+// instead (see hookMatcherProblem).
 var jsOnlyRegexSyntax = regexp.MustCompile(`\(\?<?[=!]|\\[1-9]|\\k<|\\u[0-9A-Fa-f{]|\[\^\]`)
 
 // exactNameMatcher matches a matcher Claude Code reads as a list of exact tool
@@ -177,18 +186,22 @@ func FindInvalidHookMatchers(data []byte) ([]HookMatcherFinding, error) {
 
 // hookMatcherProblem classifies matcher, found under the given hook event. It
 // returns an empty severity when the matcher is usable. A matcher that fails to
-// compile only warns when it uses JavaScript-only syntax, since Claude Code may
+// compile only warns when it uses JavaScript-only syntax, including an identity
+// escape such as \R that RE2 rejects as an invalid escape, since Claude Code may
 // accept it; this check runs first, so it also covers a permission-shaped
 // matcher such as Bash(?!Output). Otherwise a matcher shaped like a permission
 // rule, Tool(args), is flagged as such when it fails to compile or, on a tool
 // event, selects no known tool: the author needs that specific explanation, not
 // a parse error or a typo warning. A valid grouped regex such as
-// Notebook(Edit|Read) selects real tools and lints clean.
+// Notebook(Edit|Read) selects real tools and lints clean, and one whose group
+// holds only name characters, such as Browser(Open|Close), only warns when it
+// selects no known tool.
 func hookMatcherProblem(category, matcher string) (Severity, string) {
 	permissionSyntax := permissionSyntaxMatcher.MatchString(matcher)
 	re, err := regexp.Compile(matcher)
 	if err != nil {
-		if jsOnlyRegexSyntax.MatchString(matcher) {
+		var synErr *syntax.Error
+		if jsOnlyRegexSyntax.MatchString(matcher) || (errors.As(err, &synErr) && synErr.Code == syntax.ErrInvalidEscape) {
 			return SeverityWarning, fmt.Sprintf("uses JavaScript-only regex syntax Go cannot check (%v); Claude Code evaluates matchers as JavaScript regexes, so verify it by hand", err)
 		}
 		if permissionSyntax {
@@ -197,7 +210,7 @@ func hookMatcherProblem(category, matcher string) (Severity, string) {
 		return SeverityError, fmt.Sprintf("does not compile as a regular expression: %v", err)
 	}
 	if toolMatcherEvents[category] && !strings.Contains(matcher, mcpToolPrefix) && !selectsKnownTool(matcher, re) {
-		if permissionSyntax {
+		if permissionSyntax && !groupedNameRegex.MatchString(matcher) {
 			return SeverityError, permissionSyntaxProblem
 		}
 		return SeverityWarning, "compiles but matches no known Claude Code tool name; check for a typo"

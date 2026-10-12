@@ -819,6 +819,22 @@ func TestLintWarnsOnJavaScriptOnlyHookMatcherWithoutFailing(t *testing.T) {
 	}
 }
 
+// A JavaScript identity escape such as \R reads as the literal letter in Claude
+// Code but is an invalid escape under Go RE2; lint must warn, not fail the pack.
+func TestLintWarnsOnJavaScriptIdentityEscapeHookMatcherWithoutFailing(t *testing.T) {
+	packDir := writeLintHookSettings(t, `{"hooks":{"PreToolUse":[{"matcher":"^\\Read$","hooks":[{"type":"command","command":"true"}]}]}}`)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"lint", packDir}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc lint = %d, want 0 (a JavaScript identity escape only warns)\nstdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
+	}
+	wantLoc := filepath.Join(".claude", "settings.json") + ": warning: hooks.PreToolUse[0] matcher"
+	if !strings.Contains(stderr.String(), wantLoc) {
+		t.Errorf("stderr missing %q:\n%s", wantLoc, stderr.String())
+	}
+}
+
 // The matchers this city and its packs ship today must keep linting clean: the
 // anchored ^Bash$ guard, the empty all-tools matcher, and SessionStart's
 // "startup" source matcher.

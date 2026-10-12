@@ -113,6 +113,7 @@ func TestFindInvalidHookMatchers_Classification(t *testing.T) {
 		{"JS braced unicode escape only warns", "PreToolUse", `^\u{42}ash$`, SeverityWarning, "JavaScript"},
 		{"JS named backreference only warns", "PreToolUse", `^(?<t>Bash)\k<t>?$`, SeverityWarning, "JavaScript"},
 		{"JS any-char class only warns", "PreToolUse", `^Bas[^]$`, SeverityWarning, "JavaScript"},
+		{"JS identity escape only warns", "PreToolUse", `^\Read$`, SeverityWarning, "JavaScript"},
 
 		// Compiles, but names nothing Claude Code has.
 		{"unknown tool", "PreToolUse", "^Frobnicate$", SeverityWarning, "no known Claude Code tool"},
@@ -120,6 +121,8 @@ func TestFindInvalidHookMatchers_Classification(t *testing.T) {
 		{"truncated name is an exact name, not a prefix", "PreToolUse", "Bas", SeverityWarning, "no known Claude Code tool"},
 		{"unknown tool on PostToolUseFailure", "PostToolUseFailure", "Frobnicate", SeverityWarning, "no known Claude Code tool"},
 		{"unknown tools on PermissionRequest", "PermissionRequest", "Frobnicate|Quux", SeverityWarning, "no known Claude Code tool"},
+		{"grouped regex over unknown tools only warns", "PreToolUse", "Future(Tool)", SeverityWarning, "no known Claude Code tool"},
+		{"grouped alternation over unknown tools only warns", "PreToolUse", "Browser(Open|Close)", SeverityWarning, "no known Claude Code tool"},
 
 		// Clean: the all-tools forms.
 		{"empty matcher means all tools", "PreToolUse", "", "", ""},
