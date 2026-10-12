@@ -57,10 +57,22 @@ func (tmux) Start(Context, string, Config) error { return nil }
 func (tmux) Stop(string) error                            { return nil }
 func (tmux) TerminateRuntime(string) error                { return nil }
 
-func CitySweepContext(ctx Context) Context { return ctx }
+type ActorKind int
+
+const (
+	ActorOperator ActorKind = 1
+	ActorSweep    ActorKind = 5
+)
+
+type CityDir struct{ abs string }
+
+type Actor struct {
+	Kind ActorKind
+	City CityDir
+}
 
 func killTarget(city, name string) error { return nil }
-func killCtx(ctx Context, city, name string) error { return nil }
+func killCtx(ctx Context, by Actor, city, name string) error { return nil }
 
 func unleased(sp Provider) { _ = sp.Stop("a") } // L26
 func unleasedConcrete(t tmux) { _ = t.Start(background(), "a", Config{}) } // L27
@@ -88,17 +100,24 @@ func helpers(ctx Context, city string) {
 	empty := ""
 	_ = killTarget(empty, "a") // L42
 	_ = killTarget(city, "a")
-	_ = killCtx(CitySweepContext(ctx), "", "a")
-	_ = killCtx(ctx, "", "a") // L45
+	_ = killCtx(ctx, Actor{Kind: ActorOperator, City: CityDir{"/c"}}, "", "a") // L45
 }
+
+func sweeper(ctx Context) { _ = killCtx(ctx, Actor{Kind: ActorSweep}, "", "a") }
+
+func notASweeper(ctx Context) { _ = killCtx(ctx, Actor{Kind: ActorSweep}, "/c", "a") } // LS1
+
+func cityless(ctx Context) { _ = killCtx(ctx, Actor{Kind: ActorOperator}, "/c", "a") } // LS2
 `
 
 func analyzer(allowed map[string]runtimelease.Allowance) *runtimelease.Config {
 	return &runtimelease.Config{
 		Packages:    []string{pkg},
 		RuntimePkg:  pkg,
-		CityHelpers: map[string]int{"killTarget": 0, "killCtx": 1},
-		SweepCtx:    "CitySweepContext",
+		CityHelpers: map[string]int{"killTarget": 0, "killCtx": 2},
+		Sweep:       pkg + ".ActorSweep",
+		SweepSites:  []string{pkg + ":sweeper"},
+		Actor:       pkg + ".Actor",
 		Allowed:     allowed,
 	}
 }
@@ -137,6 +156,8 @@ func TestRuntimeLeaseLint(t *testing.T) {
 		"L40": "killTarget is handed no city path",
 		"L42": "killTarget is handed no city path",
 		"L45": "killCtx is handed no city path",
+		"LS1": "notASweeper names the stop sweep's actor kind",
+		"LS2": "cityless builds an actor with no City",
 		"":    "allowlisted gone calls no provider",
 	}
 	for marker, msg := range want {
@@ -173,6 +194,81 @@ func markerLine(marker string) int {
 		return 1
 	}
 	for i, line := range strings.Split(src, "\n") {
+		if strings.HasSuffix(line, "// "+marker) {
+			return i + 1
+		}
+	}
+	return -1
+}
+
+// skippedSrc is a file another lint covers (SkipFiles): its runtime verbs
+// are not this lint's, but the actor rules still hold in it.
+const skippedSrc = `package p
+
+func effectStop(sp Provider) { _ = sp.Stop("a") }
+
+func effectActor(ctx Context) { _ = killCtx(ctx, Actor{Kind: ActorOperator}, "/c", "a") } // LK1
+`
+
+// actorSrc holds the actor rules' other shapes: a package-level use of the
+// sweep's kind, and an actor built field by field.
+const actorSrc = `package p
+
+const sweepKind = ActorSweep // LA1
+
+func fieldBuilt(ctx Context) {
+	var by Actor // LA2
+	by.Kind = ActorOperator
+	_ = killCtx(ctx, by, "/c", "a")
+}
+
+func fieldBuiltWithCity(ctx Context) {
+	var by Actor
+	by.Kind = ActorOperator
+	by.City = CityDir{"/c"}
+	_ = killCtx(ctx, by, "/c", "a")
+}
+
+func assignedWhole(ctx Context, from Actor) {
+	var by Actor
+	by = from
+	_ = killCtx(ctx, by, "/c", "a")
+}
+`
+
+// TestRuntimeLeaseActorRulesEverywhere: the actor rules hold in a skipped
+// file and at package scope, and catch an actor built by field assignment
+// with no City; a skipped file's verbs stay unreported.
+func TestRuntimeLeaseActorRulesEverywhere(t *testing.T) {
+	cfg := analyzer(map[string]runtimelease.Allowance{pkg + ":StopForCleanup": {Reason: "the runtime package's own"}})
+	cfg.SkipFiles = []string{"reconcile_effect"}
+	diags := analyzertest.Run(t, runtimelease.New(*cfg), pkg, map[string]string{"p.go": src, "reconcile_effect_x.go": skippedSrc, "actors.go": actorSrc})
+	got := map[string][]string{}
+	for _, d := range diags {
+		got[d.File] = append(got[d.File], fmt.Sprintf("%d %s", d.Line, d.Message))
+	}
+	want := map[string]map[int]string{
+		"reconcile_effect_x.go": {lineOf(skippedSrc, "LK1"): "effectActor builds an actor with no City"},
+		"actors.go": {
+			lineOf(actorSrc, "LA1"): "package scope names the stop sweep's actor kind",
+			lineOf(actorSrc, "LA2"): "fieldBuilt declares an actor it never gives a City",
+		},
+	}
+	for file, lines := range want {
+		if len(got[file]) != len(lines) {
+			t.Errorf("%s: findings %v, want %d", file, got[file], len(lines))
+		}
+		for line, msg := range lines {
+			if !slicesContain(got[file], fmt.Sprintf("%d ", line), msg) {
+				t.Errorf("%s: no finding %q on line %d; got %v", file, msg, line, got[file])
+			}
+		}
+	}
+}
+
+// lineOf is the line of text carrying "// marker".
+func lineOf(text, marker string) int {
+	for i, line := range strings.Split(text, "\n") {
 		if strings.HasSuffix(line, "// "+marker) {
 			return i + 1
 		}

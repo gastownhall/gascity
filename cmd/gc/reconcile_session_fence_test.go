@@ -60,47 +60,54 @@ func fenceRun(t *testing.T, sp runtime.Provider, req fenceRequest, o fenceOpts) 
 	return stopFenced(ctx, sp, v, nil, clock)
 }
 
-// fenceLeaf is a hardened leaf: runtime.Fake (a reporter: it reports
-// attachment through an error probe) plus error-bearing liveness.
+// fenceLeaf is a hardened leaf: backend P's profile over a fake whose
+// error-bearing liveness read fails per LivenessErrors. The fence reads P.
 type fenceLeaf struct {
 	*runtime.Fake
 	LivenessErrors map[string]error
+	P              runtime.Provider
 }
 
-func newFenceLeaf() *fenceLeaf {
-	return &fenceLeaf{Fake: runtime.NewFake(), LivenessErrors: map[string]error{}}
+// newFenceLeaf is a hardened leaf as tmux (a reporter: its attachment probe
+// reports errors) or acp (no terminal; identity in a local sidecar).
+func newFenceLeaf(p runtime.Profile) *fenceLeaf {
+	l := &fenceLeaf{Fake: runtime.NewFake(), LivenessErrors: map[string]error{}}
+	l.P = runtime.NewFakeProfile(p, leafReads{runtime.FullFake{Fake: l.Fake}, l})
+	return l
 }
 
-// LocalIdentitySidecar makes the leaf's identity readable, as acp's and
-// subprocess's are (readRuntimeIdentity).
-func (*fenceLeaf) LocalIdentitySidecar() bool { return true }
+// leafReads is a fenceLeaf's backend: its liveness reads fail per the
+// leaf's LivenessErrors.
+type leafReads struct {
+	runtime.FullFake
+	l *fenceLeaf
+}
 
-// LivenessReadsFresh makes its liveness read fresh by construction, as
-// acp's and subprocess's are (freshReadable).
-func (*fenceLeaf) LivenessReadsFresh() bool { return true }
-
-func (l *fenceLeaf) ObserveLivenessWithError(name string, _ []string) (runtime.Liveness, error) {
-	if err := l.LivenessErrors[name]; err != nil {
+func (r leafReads) ObserveLivenessWithError(name string, pn []string) (runtime.Liveness, error) {
+	if err := r.l.LivenessErrors[name]; err != nil {
 		return runtime.Liveness{}, err
 	}
-	running := l.IsRunning(name)
-	return runtime.Liveness{Running: running, Alive: running}, nil
+	return r.FullFake.ObserveLivenessWithError(name, pn)
 }
 
-// terminalLeaf is a hardened leaf with a terminal it cannot report: the
-// embedded interface hides the Fake's attach error probe and interactions.
+func (r leafReads) ObserveLivenessSince(name string, pn []string, _ time.Time) (runtime.Liveness, error) {
+	return r.ObserveLivenessWithError(name, pn)
+}
+
+// terminalLeaf is a hardened leaf with a terminal it cannot report, a shape
+// no backend has yet: acp's profile with a terminal.
 type terminalLeaf struct {
 	runtime.Provider
 	leaf *fenceLeaf
 }
 
 func newTerminalLeaf() *terminalLeaf {
-	l := newFenceLeaf()
-	return &terminalLeaf{Provider: l, leaf: l}
+	l := newFenceLeaf(runtime.ProfileACP)
+	return &terminalLeaf{Provider: l.P, leaf: l}
 }
 
 func (l *terminalLeaf) ObserveLivenessWithError(name string, pn []string) (runtime.Liveness, error) {
-	return l.leaf.ObserveLivenessWithError(name, pn)
+	return l.leaf.P.(runtime.LivenessObserverWithError).ObserveLivenessWithError(name, pn)
 }
 
 func (*terminalLeaf) LocalIdentitySidecar() bool { return true }
@@ -111,12 +118,10 @@ func (l *terminalLeaf) Capabilities() runtime.ProviderCapabilities {
 	return runtime.ProviderCapabilities{CanAttachTTY: true, CanReportActivity: true}
 }
 
-// boolLeaf is an unhardened leaf (k8s, ssh, exec, herdr): bool liveness, no
-// attach probe, and the capabilities k8s and ssh report.
-type boolLeaf struct{ runtime.Provider }
-
-func (boolLeaf) Capabilities() runtime.ProviderCapabilities {
-	return runtime.ProviderCapabilities{CanReportActivity: true}
+// fakeProfile is backend p's profile over a fresh fake, and the fake.
+func fakeProfile(p runtime.Profile) (runtime.Provider, *runtime.Fake) {
+	f := runtime.NewFake()
+	return runtime.NewFakeProfile(p, runtime.FullFake{Fake: f}), f
 }
 
 // fenceRow is row id whose runtime rt_<id> carries token tok.
@@ -144,9 +149,9 @@ func ours(id string) map[string]string {
 // Kills: trusting the composite's capabilities or probing anything while
 // the route is unknown (R28): every leg is unknown and nothing is stopped.
 func TestFenceUnknownRouteAllLegsUnknown(t *testing.T) {
-	tmux, acp := newFenceLeaf(), newFenceLeaf()
+	tmux, acp := newFenceLeaf(runtime.ProfileTmux), newFenceLeaf(runtime.ProfileACP)
 	startRuntime(t, tmux.Fake, "rt_a", ours("a"))
-	sp := auto.New(tmux, acp) // never seeded: the default route is not known
+	sp := auto.New(tmux.P, acp.P) // never seeded: the default route is not known
 	v, confirmed := fenceRun(t, sp, fenceRequest{Row: fenceRow("a", "tok-a"), Legs: legsFull}, fenceOpts{stop: true})
 	if v.Proceed || v.Reason != fenceRouteUnknown || confirmed {
 		t.Fatalf("verdict %+v confirmed=%v, want route_unknown and nothing done", v, confirmed)
@@ -176,8 +181,8 @@ func TestFenceTerminalNoReportUsesQuietWindowNotBoolAttach(t *testing.T) {
 		t.Fatalf("escalation class: %+v, want escalate, never proceed", v)
 	}
 
-	k8s := boolLeaf{runtime.NewFake()}
-	startRuntime(t, k8s.Provider.(*runtime.Fake), "rt_b", ours("b"))
+	k8s, k8sFake := fakeProfile(runtime.ProfileK8s)
+	startRuntime(t, k8sFake, "rt_b", ours("b"))
 	if reason, _ := attachLeg(context.Background(), k8s, "rt_b", false, now); reason != fenceTerminalNotQuiet {
 		t.Fatalf("unhardened leaf with no activity: L3 %q, want terminal-no-report's defer", reason)
 	}
@@ -185,7 +190,7 @@ func TestFenceTerminalNoReportUsesQuietWindowNotBoolAttach(t *testing.T) {
 
 // Kills: an attach probe error read as detached on a reporter backend.
 func TestFenceReporterAttachErrorHolds(t *testing.T) {
-	leaf := newFenceLeaf()
+	leaf := newFenceLeaf(runtime.ProfileTmux)
 	startRuntime(t, leaf.Fake, "rt_a", ours("a"))
 	req := fenceRequest{Row: fenceRow("a", "tok-a"), Legs: legsFull}
 	for _, c := range []struct {
@@ -198,13 +203,13 @@ func TestFenceReporterAttachErrorHolds(t *testing.T) {
 		{nil, true},
 	} {
 		leaf.AttachedErrors = map[string]error{"rt_a": c.err}
-		if v, _ := fenceRun(t, leaf, req, fenceOpts{}); v.Proceed != c.want {
+		if v, _ := fenceRun(t, leaf.P, req, fenceOpts{}); v.Proceed != c.want {
 			t.Errorf("attach error %v: %+v, want proceed=%v", c.err, v, c.want)
 		}
 	}
 	leaf.AttachedErrors = nil
 	leaf.SetAttached("rt_a", true)
-	if v, _ := fenceRun(t, leaf, req, fenceOpts{}); v.Proceed || v.Reason != fenceAttached {
+	if v, _ := fenceRun(t, leaf.P, req, fenceOpts{}); v.Proceed || v.Reason != fenceAttached {
 		t.Fatalf("attached: %+v, want a defer", v)
 	}
 }
@@ -239,13 +244,13 @@ func TestFenceTokenLegPassesOnlyOnCurrent(t *testing.T) {
 		{"unreadable", row, nil, errors.New("tmux: server busy"), fenceTokenUnverifiable},
 	}
 	for _, c := range cases {
-		leaf := newFenceLeaf()
+		leaf := newFenceLeaf(runtime.ProfileACP)
 		name := c.row.SessionName
 		startRuntime(t, leaf.Fake, name, c.meta)
 		if c.metaErr != nil {
 			leaf.GetMetaErrors = map[string]map[string]error{name: {"GC_INSTANCE_TOKEN": c.metaErr, "GC_SESSION_ID": c.metaErr}}
 		}
-		v, _ := fenceRun(t, leaf, fenceRequest{Row: c.row, Legs: legsFull}, fenceOpts{})
+		v, _ := fenceRun(t, leaf.P, fenceRequest{Row: c.row, Legs: legsFull}, fenceOpts{})
 		if v.Proceed != (c.want == "") || v.Reason != c.want {
 			t.Errorf("%s: %+v, want reason %q", c.name, v, c.want)
 		}
@@ -255,8 +260,8 @@ func TestFenceTokenLegPassesOnlyOnCurrent(t *testing.T) {
 	}
 	// A leaf that cannot read fresh proves nothing: the fence holds on it
 	// whatever legs it keeps, and stops nothing (no nil leaf reaches Stop).
-	k8s := boolLeaf{runtime.NewFake()}
-	startRuntime(t, k8s.Provider.(*runtime.Fake), "rt_b", ours("b"))
+	k8s, k8sFake := fakeProfile(runtime.ProfileK8s)
+	startRuntime(t, k8sFake, "rt_b", ours("b"))
 	if v, _ := fenceRun(t, k8s, fenceRequest{Row: fenceRow("b", "tok-b"), Legs: legsFull}, fenceOpts{}); v.Proceed || v.Reason != fenceLivenessUnknown {
 		t.Fatalf("unhardened leaf: %+v, want liveness_unknown", v)
 	}
@@ -271,13 +276,13 @@ func TestFenceTokenLegPassesOnlyOnCurrent(t *testing.T) {
 // backend and stopping through the composite, whose Stop falls through to
 // the other backend.
 func TestFenceProbesAndStopsThroughSameLeaf(t *testing.T) {
-	tmux, acp := newFenceLeaf(), newFenceLeaf()
+	tmux, acp := newFenceLeaf(runtime.ProfileTmux), newFenceLeaf(runtime.ProfileACP)
 	startRuntime(t, acp.Fake, "rt_a", ours("a"))
 	startRuntime(t, tmux.Fake, "rt_a", map[string]string{"GC_SESSION_ID": "other"}) // a namesake on the default backend
-	sp := auto.New(tmux, acp)
+	sp := auto.New(tmux.P, acp.P)
 	sp.SeedRoutes([]string{"rt_a"})
 	v, confirmed := fenceRun(t, sp, fenceRequest{Row: fenceRow("a", "tok-a"), Legs: legsFull}, fenceOpts{stop: true})
-	if !v.Proceed || v.Leaf != runtime.Provider(acp) {
+	if !v.Proceed || v.Leaf != acp.P {
 		t.Fatalf("verdict %+v, want the ACP leaf fenced", v)
 	}
 	if acp.CountCalls("Stop", "rt_a") != 1 || tmux.CountCalls("Stop", "rt_a") != 0 || tmux.CountCalls("GetMeta", "rt_a") != 0 {
@@ -305,23 +310,23 @@ func TestFenceProbesAndStopsThroughSameLeaf(t *testing.T) {
 func TestConfirmedStopNeedsThreeOutcomeAbsentViaComposite(t *testing.T) {
 	ctx := context.Background()
 	t.Run("stop returned nil but the runtime stayed", func(t *testing.T) {
-		leaf := newFenceLeaf()
+		leaf := newFenceLeaf(runtime.ProfileTmux)
 		startRuntime(t, leaf.Fake, "rt_a", ours("a"))
 		leaf.StopLeavesRunning = map[string]bool{"rt_a": true}
-		if v, confirmed := fenceRun(t, leaf, fenceRequest{Row: fenceRow("a", "tok-a"), Legs: legsFull}, fenceOpts{stop: true}); confirmed || v.Reason != fenceStopUnconfirmed {
+		if v, confirmed := fenceRun(t, leaf.P, fenceRequest{Row: fenceRow("a", "tok-a"), Legs: legsFull}, fenceOpts{stop: true}); confirmed || v.Reason != fenceStopUnconfirmed {
 			t.Fatalf("%+v confirmed=%v, want stop_unconfirmed", v, confirmed)
 		}
 	})
 	t.Run("bool-only absence", func(t *testing.T) {
-		leaf := boolLeaf{runtime.NewFake()}
+		leaf, _ := fakeProfile(runtime.ProfileK8s)
 		if confirmStopped(ctx, leaf, nil, "rt_a", time.Now()) {
 			t.Fatal("a bool liveness answer confirmed a stop")
 		}
 	})
 	t.Run("stale route", func(t *testing.T) {
-		tmux, acp := newFenceLeaf(), newFenceLeaf()
+		tmux, acp := newFenceLeaf(runtime.ProfileTmux), newFenceLeaf(runtime.ProfileACP)
 		startRuntime(t, tmux.Fake, "rt_a", ours("a")) // really on the default backend
-		sp := auto.New(tmux, acp)
+		sp := auto.New(tmux.P, acp.P)
 		sp.SeedRoutes([]string{"rt_a"}) // but routed to ACP
 		if confirmStopped(ctx, sp, nil, "rt_a", time.Now()) {
 			t.Fatal("a stale route's absence on the ACP leaf confirmed the stop")
@@ -334,30 +339,31 @@ func TestConfirmedStopNeedsThreeOutcomeAbsentViaComposite(t *testing.T) {
 		}
 	})
 	t.Run("liveness unknown", func(t *testing.T) {
-		leaf := newFenceLeaf()
+		leaf := newFenceLeaf(runtime.ProfileTmux)
 		leaf.LivenessErrors["rt_a"] = runtime.ErrRuntimeUnavailable
-		if confirmStopped(ctx, leaf, nil, "rt_a", time.Now()) {
+		if confirmStopped(ctx, leaf.P, nil, "rt_a", time.Now()) {
 			t.Fatal("an unknown liveness confirmed a stop")
 		}
 	})
 	t.Run("plain liveness error", func(t *testing.T) {
-		leaf := newFenceLeaf()
+		leaf := newFenceLeaf(runtime.ProfileTmux)
 		leaf.LivenessErrors["rt_a"] = errors.New("tmux: server busy") // a complete observation that erred
-		if confirmStopped(ctx, leaf, nil, "rt_a", time.Now()) {
+		if confirmStopped(ctx, leaf.P, nil, "rt_a", time.Now()) {
 			t.Fatal("a liveness error confirmed a stop")
 		}
 	})
 	t.Run("a composite with a bool-only backend", func(t *testing.T) {
-		sp := auto.New(boolLeaf{runtime.NewFake()}, newFenceLeaf())
+		k8s, _ := fakeProfile(runtime.ProfileK8s)
+		sp := auto.New(k8s, newFenceLeaf(runtime.ProfileACP).P)
 		sp.SeedRoutes(nil)
 		if confirmStopped(ctx, sp, nil, "rt_a", time.Now()) {
 			t.Fatal("a composite whose default backend answers only bool liveness confirmed a stop")
 		}
 	})
 	t.Run("nothing to stop, but running on another backend", func(t *testing.T) {
-		tmux, acp := newFenceLeaf(), newFenceLeaf()
+		tmux, acp := newFenceLeaf(runtime.ProfileTmux), newFenceLeaf(runtime.ProfileACP)
 		startRuntime(t, tmux.Fake, "rt_a", ours("a")) // really on the default backend
-		sp := auto.New(tmux, acp)
+		sp := auto.New(tmux.P, acp.P)
 		sp.SeedRoutes([]string{"rt_a"}) // but routed to ACP, where it is absent
 		v, confirmed := fenceRun(t, sp, fenceRequest{Row: fenceRow("a", "tok-a"), Legs: legsFull}, fenceOpts{stop: true})
 		if v.Reason != fenceLivenessUnknown || confirmed || tmux.CountCalls("Stop", "rt_a") != 0 {
@@ -375,10 +381,10 @@ func TestConfirmedStopNeedsThreeOutcomeAbsentViaComposite(t *testing.T) {
 // Kills: unknown L1 read as nothing to stop (which a caller may confirm and
 // close on), rather than holding the action.
 func TestFenceUnknownLivenessIsNotNothingToStop(t *testing.T) {
-	leaf := newFenceLeaf()
+	leaf := newFenceLeaf(runtime.ProfileTmux)
 	startRuntime(t, leaf.Fake, "rt_a", ours("a"))
 	leaf.LivenessErrors["rt_a"] = runtime.ErrRuntimeUnavailable
-	v, confirmed := fenceRun(t, leaf, fenceRequest{Row: fenceRow("a", "tok-a"), Legs: legsFull}, fenceOpts{stop: true})
+	v, confirmed := fenceRun(t, leaf.P, fenceRequest{Row: fenceRow("a", "tok-a"), Legs: legsFull}, fenceOpts{stop: true})
 	if v.Proceed || v.Reason != fenceLivenessUnknown || confirmed || leaf.CountCalls("Stop", "rt_a") != 0 {
 		t.Fatalf("%+v confirmed=%v, want liveness_unknown and nothing stopped", v, confirmed)
 	}
@@ -388,9 +394,9 @@ func TestFenceUnknownLivenessIsNotNothingToStop(t *testing.T) {
 // entry behind (auto.Stop would have dropped it), so the name keeps routing
 // to ACP; and a stop that was not confirmed dropping the route.
 func TestFenceConfirmedStopUnroutesLeafRoute(t *testing.T) {
-	tmux, acp := newFenceLeaf(), newFenceLeaf()
+	tmux, acp := newFenceLeaf(runtime.ProfileTmux), newFenceLeaf(runtime.ProfileACP)
 	startRuntime(t, acp.Fake, "rt_a", ours("a"))
-	sp := auto.New(tmux, acp)
+	sp := auto.New(tmux.P, acp.P)
 	sp.SeedRoutes([]string{"rt_a"})
 	acp.StopLeavesRunning = map[string]bool{"rt_a": true}
 	if _, confirmed := fenceRun(t, sp, fenceRequest{Row: fenceRow("a", "tok-a"), Legs: legsFull}, fenceOpts{stop: true}); confirmed || sp.RouteFor("rt_a").Label != "acp" {
@@ -417,30 +423,30 @@ func TestPendingUnsupportedPassesUnknownHolds(t *testing.T) {
 		{runtime.ErrSessionNotFound, ""},
 		{errors.New("acp: socket refused"), fencePendingUnknown},
 	} {
-		leaf := newFenceLeaf()
+		leaf := newFenceLeaf(runtime.ProfileACP)
 		startRuntime(t, leaf.Fake, "rt_a", ours("a"))
 		leaf.PendingErrors = map[string]error{"rt_a": c.err}
-		if v, _ := fenceRun(t, leaf, fenceRequest{Row: fenceRow("a", "tok-a"), Legs: legsFull}, fenceOpts{}); v.Reason != c.want {
+		if v, _ := fenceRun(t, leaf.P, fenceRequest{Row: fenceRow("a", "tok-a"), Legs: legsFull}, fenceOpts{}); v.Reason != c.want {
 			t.Errorf("pending error %v: %+v, want reason %q", c.err, v, c.want)
 		}
 	}
-	leaf := newFenceLeaf()
+	leaf := newFenceLeaf(runtime.ProfileACP)
 	startRuntime(t, leaf.Fake, "rt_a", ours("a"))
 	leaf.PendingInteractions = map[string]*runtime.PendingInteraction{"rt_a": {RequestID: "r", Kind: "approval"}}
-	if v, _ := fenceRun(t, leaf, fenceRequest{Row: fenceRow("a", "tok-a"), Legs: legsFull}, fenceOpts{}); v.Reason != fencePending {
+	if v, _ := fenceRun(t, leaf.P, fenceRequest{Row: fenceRow("a", "tok-a"), Legs: legsFull}, fenceOpts{}); v.Reason != fencePending {
 		t.Fatalf("pending interaction: %+v, want a defer", v)
 	}
 	// L5, where an action requires it: a read error counts as has-work (P-2).
 	work := func() *txWork { return &txWork{Err: errors.New("store down")} }
 	leaf.PendingInteractions = nil
-	if v, _ := fenceRun(t, leaf, fenceRequest{Row: fenceRow("a", "tok-a"), Legs: legsFull | legWork}, fenceOpts{work: work}); v.Reason != fenceWorkUnknown {
+	if v, _ := fenceRun(t, leaf.P, fenceRequest{Row: fenceRow("a", "tok-a"), Legs: legsFull | legWork}, fenceOpts{work: work}); v.Reason != fenceWorkUnknown {
 		t.Fatalf("work read error: %+v, want work_unknown", v)
 	}
 	// A request that keeps L5 with no work read fails closed.
-	if v, _ := fenceRun(t, leaf, fenceRequest{Row: fenceRow("a", "tok-a"), Legs: legsFull | legWork}, fenceOpts{}); v.Proceed || v.Reason != fenceWorkUnknown {
+	if v, _ := fenceRun(t, leaf.P, fenceRequest{Row: fenceRow("a", "tok-a"), Legs: legsFull | legWork}, fenceOpts{}); v.Proceed || v.Reason != fenceWorkUnknown {
 		t.Fatalf("no work read: %+v, want work_unknown", v)
 	}
-	if v, _ := fenceRun(t, leaf, fenceRequest{Row: fenceRow("a", "tok-a"), Legs: legsFull | legWork}, fenceOpts{work: func() *txWork { return &txWork{} }}); v.Reason != fenceHasWork {
+	if v, _ := fenceRun(t, leaf.P, fenceRequest{Row: fenceRow("a", "tok-a"), Legs: legsFull | legWork}, fenceOpts{work: func() *txWork { return &txWork{} }}); v.Reason != fenceHasWork {
 		t.Fatalf("work found: %+v, want has_work", v)
 	}
 }
@@ -455,7 +461,7 @@ func TestFenceL1WaivedAbsentRuntimeNeverProceeds(t *testing.T) {
 		name     string
 		leftover bool
 	}{{"never started", false}, {"gone, sidecar left", true}} {
-		leaf := newFenceLeaf()
+		leaf := newFenceLeaf(runtime.ProfileACP)
 		if tc.leftover {
 			startRuntime(t, leaf.Fake, "rt_a", ours("a"))
 			if err := leaf.Stop("rt_a"); err != nil {
@@ -464,7 +470,7 @@ func TestFenceL1WaivedAbsentRuntimeNeverProceeds(t *testing.T) {
 		}
 		stops := leaf.CountCalls("Stop", "rt_a")
 		req := fenceRequest{Row: fenceRow("a", "tok-a"), Legs: legsFull &^ legLiveness}
-		v, confirmed := fenceRun(t, leaf, req, fenceOpts{stop: true})
+		v, confirmed := fenceRun(t, leaf.P, req, fenceOpts{stop: true})
 		if v.Proceed || v.Reason == fenceNothingToStop || v.Reason != fenceTokenUnverifiable || confirmed || leaf.CountCalls("Stop", "rt_a") != stops {
 			t.Errorf("%s: %+v confirmed=%v, want held as token_unverifiable, nothing stopped", tc.name, v, confirmed)
 		}
@@ -516,7 +522,7 @@ func TestFenceReadsTheRuntimeClass(t *testing.T) {
 // it did not read, attached, pending-unknown or work-unknown, over a
 // detached runtime with nothing pending.
 func TestFenceUnreadLegsHold(t *testing.T) {
-	leaf := newFenceLeaf()
+	leaf := newFenceLeaf(runtime.ProfileTmux)
 	startRuntime(t, leaf.Fake, "rt_a", ours("a"))
 	free := func() *txWork { return &txWork{Free: true} }
 	for _, c := range []struct {
@@ -529,7 +535,7 @@ func TestFenceUnreadLegsHold(t *testing.T) {
 		{legAttach | legPending | legWork, ""},
 	} {
 		read := c.read
-		v, _ := fenceRun(t, leaf, fenceRequest{Row: fenceRow("a", "tok-a"), Legs: legsFull | legWork}, fenceOpts{read: &read, work: free})
+		v, _ := fenceRun(t, leaf.P, fenceRequest{Row: fenceRow("a", "tok-a"), Legs: legsFull | legWork}, fenceOpts{read: &read, work: free})
 		if v.Proceed != (c.want == "") || v.Reason != c.want {
 			t.Errorf("legs read %b: %+v, want reason %q", c.read, v, c.want)
 		}
@@ -575,14 +581,14 @@ func TestFenceConfirmReadsFreshSinceTheStop(t *testing.T) {
 // Kills a stop that skips C8.7's re-check: a reporter leaf detached at the
 // fence and attached by the stop is not stopped.
 func TestFenceRechecksAttachBeforeTheStop(t *testing.T) {
-	leaf := newFenceLeaf()
+	leaf := newFenceLeaf(runtime.ProfileTmux)
 	startRuntime(t, leaf.Fake, "rt_a", ours("a"))
-	v, _ := fenceRun(t, leaf, fenceRequest{Row: fenceRow("a", "tok-a"), Legs: legsFull}, fenceOpts{})
+	v, _ := fenceRun(t, leaf.P, fenceRequest{Row: fenceRow("a", "tok-a"), Legs: legsFull}, fenceOpts{})
 	if !v.Proceed {
 		t.Fatalf("fence: %+v, want proceed", v)
 	}
 	leaf.SetAttached("rt_a", true) // an operator attached between the fence and the stop
-	if v, confirmed := stopFenced(context.Background(), leaf, v, nil, time.Now); v.Proceed || v.Reason != fenceAttached || confirmed || leaf.CountCalls("Stop", "rt_a") != 0 {
+	if v, confirmed := stopFenced(context.Background(), leaf.P, v, nil, time.Now); v.Proceed || v.Reason != fenceAttached || confirmed || leaf.CountCalls("Stop", "rt_a") != 0 {
 		t.Fatalf("%+v confirmed=%t, want held attached and nothing stopped", v, confirmed)
 	}
 }

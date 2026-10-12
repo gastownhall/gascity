@@ -422,7 +422,7 @@ func TestBuildPreparedStart_AssignedWorkBeadOptionsBeatTriggerBead(t *testing.T)
 // instead of reading as "holds nothing".
 func TestBuildPreparedStart_ClaimedWorkWithoutOptionsSuppressesTriggerBead(t *testing.T) {
 	reachable := func(sessionStore, rigStore beads.Store) claimedWorkProbe {
-		return reachableClaimedWorkProbe("", &config.City{}, sessionStore, map[string]beads.Store{"frontend": rigStore})
+		return reachableClaimedWorkProbe(testSeatWork("", declaredRigsConfig("frontend"), sessionStore, map[string]beads.Store{"frontend": rigStore}))
 	}
 	failing := func(beads.Store, beads.Store) claimedWorkProbe {
 		return func(sessionpkg.Info) (bool, error) { return false, errors.New("rig store unavailable") }
@@ -481,7 +481,7 @@ func TestBuildPreparedStart_TriggerClaimedBySessionKeepsItsPins(t *testing.T) {
 	if err := rigStore.Update(candidate.info.TriggerBeadID, beads.UpdateOpts{Status: &inProgress, Assignee: &assignee}); err != nil {
 		t.Fatalf("claim trigger: %v", err)
 	}
-	probe := reachableClaimedWorkProbe("", &config.City{}, sessionStore, map[string]beads.Store{"frontend": rigStore})
+	probe := reachableClaimedWorkProbe(testSeatWork("", declaredRigsConfig("frontend"), sessionStore, map[string]beads.Store{"frontend": rigStore}))
 	if claimed, err := probe(candidate.info); err != nil || !claimed {
 		t.Fatalf("claimed-work probe = (%v, %v), want the rig-resident claim visible", claimed, err)
 	}
@@ -676,7 +676,7 @@ func TestExecutePlannedStartsAppliesRigResidentTriggerOptionsViaResolver(t *test
 				options = append(options, withTriggerBeadResolver(rigStore.Get))
 			}
 
-			woken := executePlannedStarts(
+			woken := executePlannedStartsTraced(
 				context.Background(),
 				[]startCandidate{candidate},
 				cfg,
@@ -684,11 +684,13 @@ func TestExecutePlannedStartsAppliesRigResidentTriggerOptionsViaResolver(t *test
 				sp,
 				sessionStore,
 				"",
+				t.TempDir(),
 				clk,
 				events.Discard,
 				5*time.Second,
 				io.Discard,
 				io.Discard,
+				nil,
 				options...,
 			)
 			if woken != 1 {
@@ -800,7 +802,7 @@ func TestCityRuntimeBeadReconcileTick_AppliesTriggerPinsThroughResidencyReader(t
 				stderr:              io.Discard,
 			}
 
-			cr.beadReconcileTick(context.Background(), DesiredStateResult{
+			cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), DesiredStateResult{
 				State: map[string]TemplateParams{"worker-1": {
 					TemplateName:     "worker",
 					SessionName:      "worker-1",

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -22,7 +23,8 @@ var (
 )
 
 // scriptedTargetExecutor records argv and answers capture-pane from captures
-// (then capture), display-message with display, and everything else with "".
+// (then capture), display-message and list-panes with display, and everything
+// else with "".
 type scriptedTargetExecutor struct {
 	calls    [][]string
 	captures []string
@@ -40,7 +42,7 @@ func (s *scriptedTargetExecutor) execute(args []string) (string, error) {
 			return out, nil
 		}
 		return s.capture, nil
-	case slices.Contains(args, "display-message"):
+	case slices.Contains(args, "display-message"), slices.Contains(args, "list-panes"):
 		return s.display, nil
 	}
 	return "", nil
@@ -87,6 +89,17 @@ func requireExactTargets(t *testing.T, calls [][]string, name string, want ...st
 		case slices.Contains(exactSessionCommands, sub):
 			if target != "="+name {
 				t.Errorf("%s -t %q, want %q; argv=%q", sub, target, "="+name, call)
+			}
+		case sub == "list-panes":
+			// ":^" lists the first window's panes; the agent pane is found
+			// among them, so it is exact here and nowhere else.
+			if !slices.Contains([]string{"=" + name + ":", "=" + name + ":^"}, target) {
+				t.Errorf("%s -t %q, want %q or %q; argv=%q", sub, target, "="+name+":", "="+name+":^", call)
+			}
+		case sub == "respawn-pane":
+			// Respawn takes the looked-up pane id, fenced to the session.
+			if !strings.HasPrefix(target, "="+name+":^.%") {
+				t.Errorf("%s -t %q, want %q; argv=%q", sub, target, "="+name+":^.%<id>", call)
 			}
 		case slices.Contains(exactPaneCommands, sub):
 			if target != "="+name+":" && target != "="+name+":^.0" {
@@ -351,7 +364,7 @@ func TestPaneReadsAndPaneOpsTargetExactSession(t *testing.T) {
 		wantSub string
 	}{
 		{"GetPaneCommand", "claude", func(tm *Tmux) { _, _ = tm.GetPaneCommand("worker-1") }, "display-message"},
-		{"GetPaneID", "%1", func(tm *Tmux) { _, _ = tm.GetPaneID("worker-1") }, "display-message"},
+		{"GetPaneID", "%1", func(tm *Tmux) { _, _ = tm.GetPaneID("worker-1") }, "list-panes"},
 		{"GetPaneWorkDir", "/w", func(tm *Tmux) { _, _ = tm.GetPaneWorkDir("worker-1") }, "display-message"},
 		{"GetPanePID", "42", func(tm *Tmux) { _, _ = tm.GetPanePID("worker-1") }, "display-message"},
 		{"IsPaneDead", "0", func(tm *Tmux) { _, _ = tm.IsPaneDead("worker-1") }, "display-message"},
@@ -360,8 +373,7 @@ func TestPaneReadsAndPaneOpsTargetExactSession(t *testing.T) {
 		{"GetSessionCreatedUnix", "1", func(tm *Tmux) { _, _ = tm.GetSessionCreatedUnix("worker-1") }, "display-message"},
 		{"FindAgentPane", "", func(tm *Tmux) { _, _ = tm.FindAgentPane("worker-1") }, "list-panes"},
 		{"CapturePane", "", func(tm *Tmux) { _, _ = tm.CapturePane("worker-1", 5) }, "capture-pane"},
-		{"RespawnPane", "", func(tm *Tmux) { _ = tm.RespawnPane("worker-1", "true") }, "respawn-pane"},
-		{"RespawnPaneWithWorkDir", "", func(tm *Tmux) { _ = tm.RespawnPaneWithWorkDir("worker-1", "/w", "true") }, "respawn-pane"},
+		{"RespawnPaneWithWorkDir", "%1", func(tm *Tmux) { _ = tm.RespawnPaneWithWorkDir("worker-1", "/w", "true") }, "respawn-pane"},
 		{"ClearHistory", "", func(tm *Tmux) { _ = tm.ClearHistory("worker-1") }, "clear-history"},
 	}
 	for _, tc := range cases {

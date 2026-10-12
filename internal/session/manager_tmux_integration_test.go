@@ -64,7 +64,7 @@ func testSuspendDeletedSocketAndDeadServer(t *testing.T, newProvider func(tmux.C
 	socketPath := filepath.Join(socketRoot, fmt.Sprintf("tmux-%d", os.Getuid()), cfg.SocketName)
 	tm := tmux.NewTmuxWithConfig(cfg)
 
-	mgr := NewManagerWithOptions(beads.NewMemStore(), newProvider(cfg))
+	mgr := newTestManager(t, beads.NewMemStore(), newProvider(cfg))
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{ExplicitName: "sky", Template: "helper", Title: "test", Command: "sleep 600", WorkDir: t.TempDir(), Provider: "", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -92,7 +92,7 @@ func testSuspendDeletedSocketAndDeadServer(t *testing.T, newProvider func(tmux.C
 	if err := os.Remove(socketPath); err != nil {
 		t.Fatalf("delete live server socket: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err == nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err == nil {
 		t.Fatal("Suspend = nil over a live server whose socket was deleted; its session is still running")
 	}
 	if err := syscall.Kill(serverPID, 0); err != nil {
@@ -117,7 +117,7 @@ func testSuspendDeletedSocketAndDeadServer(t *testing.T, newProvider func(tmux.C
 		t.Fatalf("kill-server after SIGUSR1: %v", err)
 	}
 	waitFor(t, "the tmux server to exit", func() bool { return processGone(serverPID) })
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
 		t.Fatalf("Suspend against a dead server: %v", err)
 	}
 	if got, err := mgr.Get(info.ID); err != nil || got.State != StateSuspended {

@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -160,10 +161,10 @@ func (s *Server) retireContinuityIneligibleNamedSessionIdentifiers(store beads.S
 		}
 		if sessionName := strings.TrimSpace(info.SessionNameMetadata); sessionName != "" && s.state.SessionProvider() != nil {
 			if handle, err := s.workerHandleForSession(store, info.ID); err == nil {
-				_ = handle.Kill(context.Background())
+				_ = handle.Kill(context.Background(), s.actor(session.ActorOperator))
 			}
 		}
-		patch := session.RetireNamedSessionPatch(now, "continuity-ineligible-replacement", spec.Identity)
+		patch := session.CellIntoInfo(info, session.ActorController, session.DispEvent{Kind: session.EvRetire}, now, session.RetireNamedSessionPatch(now, "continuity-ineligible-replacement", spec.Identity))
 		patch["alias_history"] = ""
 		if err := store.SetMetadataBatch(info.ID, patch); err != nil {
 			return nil, fmt.Errorf("retiring continuity-ineligible named session identifiers on %s: %w", info.ID, err)
@@ -642,6 +643,43 @@ func (s *Server) sessionTargetDeliverable(ctx context.Context, store beads.Store
 	return apiSessionTargetNotFound(identifier)
 }
 
+// rejectPendingInteraction refuses a text delivery synchronously while the
+// target session is waiting on a pending interaction such as a tool
+// permission prompt (#2892). The delivery itself runs asynchronously after
+// the 202, so without this check the caller would be told "accepted" and the
+// refusal would surface only as a request.failed event -- or, where the
+// provider could not see the prompt, the text's Enter would answer it. A
+// configured named session that has not been materialized yet has nothing
+// pending, and neither has a session that is not running: the worker handle
+// does not look at its runtime. A look that cannot reach the runtime refuses
+// nothing; the delivery looks again under the session lock.
+func (s *Server) rejectPendingInteraction(ctx context.Context, store beads.Store, identifier string) error {
+	id, err := s.resolveSessionTargetIDWithContext(ctx, store, identifier, apiSessionResolveOptions{})
+	if err != nil {
+		if errors.Is(err, session.ErrSessionNotFound) {
+			return nil
+		}
+		return humaResolveError(err)
+	}
+	handle, err := s.workerHandleForSession(store, id)
+	if err != nil {
+		return humaSessionManagerError(err)
+	}
+	pending, _, err := handle.PendingStatus(ctx)
+	if errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		log.Printf("gc api: accepting text for %s without a look for a pending interaction: %v", id, err)
+		return nil
+	}
+	if err != nil {
+		return humaSessionManagerError(err)
+	}
+	if pending != nil {
+		interaction := runtimePendingInteraction(pending)
+		return humaSessionManagerError(session.PendingInteractionError(&interaction))
+	}
+	return nil
+}
+
 func (s *Server) resolveSessionIDMaterializingNamed(store beads.Store, identifier string) (string, error) {
 	return s.resolveSessionTargetID(store, identifier, apiSessionResolveOptions{materialize: true})
 }
@@ -668,14 +706,13 @@ func (s *Server) submitMessageToSession(ctx context.Context, store beads.Store, 
 	if err != nil {
 		return messageOutcome{}, err
 	}
-	policy := session.ResumeViaController
+	by := s.actor(session.ActorBackground)
 	if resume {
-		policy = session.ResumeOperator
+		by = s.actor(session.ActorOperator)
 	}
-	result, err := handle.Message(ctx, worker.MessageRequest{
+	result, err := handle.Message(ctx, by, worker.MessageRequest{
 		Text:     message,
 		Delivery: workerDeliveryIntent(intent),
-		Resume:   policy,
 	})
 	if err != nil {
 		return messageOutcome{}, err
@@ -762,7 +799,7 @@ func (s *Server) sendBackgroundMessageToSession(ctx context.Context, store beads
 	if err != nil {
 		return err
 	}
-	result, err := handle.Nudge(ctx, worker.NudgeRequest{Text: message, Resume: session.ResumeViaController})
+	result, err := handle.Nudge(ctx, s.actor(session.ActorBackground), worker.NudgeRequest{Text: message})
 	if err == nil && result.Undelivered == worker.NudgeQueuedHeld {
 		s.deferToController(store, id)
 	}

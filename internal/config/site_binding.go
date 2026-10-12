@@ -160,7 +160,10 @@ func SiteBindingPath(cityRoot string) string {
 	return filepath.Join(cityRoot, citylayout.RuntimeRoot, "site.toml")
 }
 
-// SiteBinding stores machine-local rig bindings for a city.
+// SiteBinding stores machine-local rig bindings for a city. It models only
+// the fields gc writes; each writer patches just the keys it owns, so other
+// tables and keys survive rewrites (see persistSiteBinding and
+// setSiteRigBindings for the per-rig entry policy).
 type SiteBinding struct {
 	WorkspaceName   string           `toml:"workspace_name,omitempty"`
 	WorkspacePrefix string           `toml:"workspace_prefix,omitempty"`
@@ -309,16 +312,17 @@ func PersistRigSiteBindings(fs fsys.FS, cityRoot string, rigs []Rig) error {
 }
 
 func persistRigSiteBindings(fs fsys.FS, cityRoot string, rigs []Rig, removedRigNames map[string]struct{}) error {
-	existing, err := LoadSiteBinding(fs, cityRoot)
-	if err != nil {
-		return err
-	}
+	return persistSiteBinding(fs, cityRoot, func(doc map[string]any, existing *SiteBinding) {
+		setSiteRigBindings(doc, desiredRigSiteBindings(rigs, existing.Rigs, removedRigNames), removedRigNames)
+	})
+}
+
+// desiredRigSiteBindings computes the rig bindings to write: every declared
+// rig with a path, plus existing bindings for undeclared rigs that were not
+// explicitly removed. The result is sorted by name, then path.
+func desiredRigSiteBindings(rigs []Rig, existing []RigSiteBinding, removedRigNames map[string]struct{}) []RigSiteBinding {
 	declaredNames := make(map[string]struct{}, len(rigs))
-	binding := SiteBinding{
-		WorkspaceName:   strings.TrimSpace(existing.WorkspaceName),
-		WorkspacePrefix: strings.TrimSpace(existing.WorkspacePrefix),
-		Rigs:            make([]RigSiteBinding, 0, len(rigs)+len(existing.Rigs)),
-	}
+	out := make([]RigSiteBinding, 0, len(rigs)+len(existing))
 	for _, rig := range rigs {
 		name := strings.TrimSpace(rig.Name)
 		path := strings.TrimSpace(rig.Path)
@@ -329,9 +333,9 @@ func persistRigSiteBindings(fs fsys.FS, cityRoot string, rigs []Rig, removedRigN
 		if path == "" {
 			continue
 		}
-		binding.Rigs = append(binding.Rigs, RigSiteBinding{Name: name, Path: path})
+		out = append(out, RigSiteBinding{Name: name, Path: path})
 	}
-	for _, rig := range existing.Rigs {
+	for _, rig := range existing {
 		name := strings.TrimSpace(rig.Name)
 		path := strings.TrimSpace(rig.Path)
 		if name == "" || path == "" {
@@ -343,16 +347,15 @@ func persistRigSiteBindings(fs fsys.FS, cityRoot string, rigs []Rig, removedRigN
 		if _, ok := declaredNames[name]; ok {
 			continue
 		}
-		binding.Rigs = append(binding.Rigs, RigSiteBinding{Name: name, Path: path})
+		out = append(out, RigSiteBinding{Name: name, Path: path})
 	}
-	sort.Slice(binding.Rigs, func(i, j int) bool {
-		if binding.Rigs[i].Name != binding.Rigs[j].Name {
-			return binding.Rigs[i].Name < binding.Rigs[j].Name
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Name != out[j].Name {
+			return out[i].Name < out[j].Name
 		}
-		return binding.Rigs[i].Path < binding.Rigs[j].Path
+		return out[i].Path < out[j].Path
 	})
-
-	return persistSiteBinding(fs, cityRoot, binding)
+	return out
 }
 
 // WriteCityAndRigSiteBindingsForEdit writes the checked-in city.toml form and
@@ -674,27 +677,72 @@ func (s *configFileRestoreSnapshot) restore(fs fsys.FS) error {
 }
 
 // PersistWorkspaceSiteBinding writes machine-local workspace identity to
-// .gc/site.toml while preserving any existing rig bindings.
+// .gc/site.toml. It touches only workspace_name and workspace_prefix; rig
+// bindings and every other table and key are left as they are.
 func PersistWorkspaceSiteBinding(fs fsys.FS, cityRoot, name, prefix string) error {
-	existing, err := LoadSiteBinding(fs, cityRoot)
-	if err != nil {
-		return err
-	}
-	binding := SiteBinding{
-		WorkspaceName:   strings.TrimSpace(name),
-		WorkspacePrefix: strings.TrimSpace(prefix),
-		Rigs:            append([]RigSiteBinding(nil), existing.Rigs...),
-	}
-	return persistSiteBinding(fs, cityRoot, binding)
+	return persistSiteBinding(fs, cityRoot, func(doc map[string]any, _ *SiteBinding) {
+		setSiteWorkspaceIdentity(doc, strings.TrimSpace(name), strings.TrimSpace(prefix))
+	})
 }
 
-func persistSiteBinding(fs fsys.FS, cityRoot string, binding SiteBinding) error {
+// TOML keys of the SiteBinding fields gc writes. Everything else in
+// .gc/site.toml is carried through rewrites untouched.
+const (
+	siteBindingKeyWorkspaceName   = "workspace_name"
+	siteBindingKeyWorkspacePrefix = "workspace_prefix"
+	siteBindingKeyRig             = "rig"
+	siteBindingKeyRigName         = "name"
+	siteBindingKeyRigPath         = "path"
+)
+
+// siteBindingKeyOwners and rigSiteBindingKeyOwners name the writer that owns
+// each modeled .gc/site.toml key. Every SiteBinding / RigSiteBinding toml tag
+// must appear here (TestSiteBindingFieldsHaveWriterOwner): writers patch only
+// the keys they own, so a field without an owner is never written.
+var (
+	siteBindingKeyOwners = map[string]string{
+		siteBindingKeyWorkspaceName:   "setSiteWorkspaceIdentity",
+		siteBindingKeyWorkspacePrefix: "setSiteWorkspaceIdentity",
+		siteBindingKeyRig:             "setSiteRigBindings",
+	}
+	rigSiteBindingKeyOwners = map[string]string{
+		siteBindingKeyRigName: "setSiteRigBindings",
+		siteBindingKeyRigPath: "setSiteRigBindings",
+	}
+)
+
+// persistSiteBinding rewrites .gc/site.toml by letting update patch the keys
+// its writer owns in the generically decoded document; update also receives
+// the typed view of the same bytes. Every table and key update does not touch
+// round-trips with the same meaning (comments and key order are not kept).
+// The file keeps its permission bits and is removed only when nothing at all
+// remains.
+func persistSiteBinding(fs fsys.FS, cityRoot string, update func(doc map[string]any, current *SiteBinding)) error {
 	path := SiteBindingPath(cityRoot)
 	writePath, err := fsys.ResolveSymlinks(fs, path)
 	if err != nil {
 		return fmt.Errorf("resolving site binding %q for rewrite: %w", path, err)
 	}
-	if len(binding.Rigs) == 0 && binding.WorkspaceName == "" && binding.WorkspacePrefix == "" {
+	doc := map[string]any{}
+	var current SiteBinding
+	mode := os.FileMode(0o644)
+	data, err := fs.ReadFile(writePath)
+	switch {
+	case err == nil:
+		if _, err := toml.Decode(string(data), &doc); err != nil {
+			return fmt.Errorf("parsing site binding %q: %w", writePath, err)
+		}
+		if _, err := toml.Decode(string(data), &current); err != nil {
+			return fmt.Errorf("parsing site binding %q: %w", writePath, err)
+		}
+		if info, statErr := fs.Stat(writePath); statErr == nil {
+			mode = info.Mode().Perm()
+		}
+	case !os.IsNotExist(err):
+		return fmt.Errorf("loading site binding %q: %w", writePath, err)
+	}
+	update(doc, &current)
+	if len(doc) == 0 {
 		if err := fs.Remove(writePath); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("removing site binding %q: %w", writePath, err)
 		}
@@ -704,7 +752,7 @@ func persistSiteBinding(fs fsys.FS, cityRoot string, binding SiteBinding) error 
 	var buf bytes.Buffer
 	enc := toml.NewEncoder(&buf)
 	enc.Indent = ""
-	if err := enc.Encode(binding); err != nil {
+	if err := enc.Encode(doc); err != nil {
 		return fmt.Errorf("marshaling site binding: %w", err)
 	}
 	if err := fs.MkdirAll(filepath.Dir(writePath), 0o755); err != nil {
@@ -713,8 +761,118 @@ func persistSiteBinding(fs fsys.FS, cityRoot string, binding SiteBinding) error 
 	// Skip the write when on-disk content already matches. Keeps repeated
 	// rig/suspend/resume/agent commands idempotent instead of churning
 	// .gc/site.toml mtime (and breaking watcher debounce logic).
-	if err := fsys.WriteFileIfChangedAtomic(fs, writePath, buf.Bytes(), 0o644); err != nil {
+	if err := fsys.WriteFileIfChangedAtomic(fs, writePath, buf.Bytes(), mode); err != nil {
 		return fmt.Errorf("writing site binding %q: %w", writePath, err)
 	}
 	return nil
+}
+
+// setSiteWorkspaceIdentity sets or clears the workspace identity keys.
+func setSiteWorkspaceIdentity(doc map[string]any, name, prefix string) {
+	setOrDeleteSiteKey(doc, siteBindingKeyWorkspaceName, name)
+	setOrDeleteSiteKey(doc, siteBindingKeyWorkspacePrefix, prefix)
+}
+
+// setSiteRigBindings replaces the rig entries in doc with rigs while keeping
+// the per-rig keys gc does not own:
+//   - each written rig reuses the existing entry with the same trimmed name
+//     and path, else the first unclaimed entry with the same name (so keys
+//     follow a rebind to a new path);
+//   - an unwritten entry that still carries unowned keys is kept with its
+//     path stripped, unless its rig is in removedRigNames;
+//   - an unwritten entry with nothing but name/path is dropped.
+func setSiteRigBindings(doc map[string]any, rigs []RigSiteBinding, removedRigNames map[string]struct{}) {
+	entries := normalizeSiteRigEntries(doc[siteBindingKeyRig])
+	claimed := make([]bool, len(entries))
+	claim := func(rig RigSiteBinding, matchPath bool) map[string]any {
+		for i, entry := range entries {
+			if claimed[i] || siteRigEntryString(entry, siteBindingKeyRigName) != rig.Name {
+				continue
+			}
+			if matchPath && siteRigEntryString(entry, siteBindingKeyRigPath) != rig.Path {
+				continue
+			}
+			claimed[i] = true
+			return entry
+		}
+		return nil
+	}
+
+	written := make([]map[string]any, len(rigs))
+	for i, rig := range rigs {
+		written[i] = claim(rig, true)
+	}
+	for i, rig := range rigs {
+		if written[i] == nil {
+			written[i] = claim(rig, false)
+		}
+	}
+	out := make([]map[string]any, 0, len(entries)+len(rigs))
+	for i, rig := range rigs {
+		entry := written[i]
+		if entry == nil {
+			entry = map[string]any{}
+		}
+		entry[siteBindingKeyRigName] = rig.Name
+		setOrDeleteSiteKey(entry, siteBindingKeyRigPath, rig.Path)
+		out = append(out, entry)
+	}
+	for i, entry := range entries {
+		if claimed[i] || !siteRigEntryHasUnownedKeys(entry) {
+			continue
+		}
+		if _, removed := removedRigNames[siteRigEntryString(entry, siteBindingKeyRigName)]; removed {
+			continue
+		}
+		delete(entry, siteBindingKeyRigPath)
+		out = append(out, entry)
+	}
+	if len(out) == 0 {
+		delete(doc, siteBindingKeyRig)
+		return
+	}
+	doc[siteBindingKeyRig] = out
+}
+
+// normalizeSiteRigEntries normalizes a decoded rig array. `[[rig]]` headers decode as
+// []map[string]any while the inline `rig = [{...}]` form decodes as []any.
+// Non-table elements cannot occur here: the typed decode of the same bytes
+// would already have rejected them.
+func normalizeSiteRigEntries(value any) []map[string]any {
+	switch rigs := value.(type) {
+	case []map[string]any:
+		return rigs
+	case []any:
+		out := make([]map[string]any, 0, len(rigs))
+		for _, rig := range rigs {
+			if entry, ok := rig.(map[string]any); ok {
+				out = append(out, entry)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func siteRigEntryString(entry map[string]any, key string) string {
+	value, _ := entry[key].(string)
+	return strings.TrimSpace(value)
+}
+
+func siteRigEntryHasUnownedKeys(entry map[string]any) bool {
+	for key := range entry {
+		if _, owned := rigSiteBindingKeyOwners[key]; !owned {
+			return true
+		}
+	}
+	return false
+}
+
+func setOrDeleteSiteKey(doc map[string]any, key, value string) {
+	if value == "" {
+		delete(doc, key)
+		return
+	}
+	doc[key] = value
 }

@@ -272,3 +272,55 @@ func TestBeadCloseAutocloseDefersWhileTheCityIsQuiescent(t *testing.T) {
 		t.Fatalf("convoy after resume = (%+v, %v), want closed", got, err)
 	}
 }
+
+// A committed close's autoclose run is store work from dispatch until it
+// returns, so the city's pairs are not retired while it is queued or reading;
+// a quiescent city's committed close leaves no work counted behind it.
+func TestCommittedCloseCountsItsAutocloseAsStoreWork(t *testing.T) {
+	var queued []func()
+	prev := beadCloseAutocloseDispatch
+	beadCloseAutocloseDispatch = func(fn func()) { queued = append(queued, fn) }
+	t.Cleanup(func() { beadCloseAutocloseDispatch = prev })
+
+	backing := beads.NewMemStore()
+	convoy, err := backing.Create(beads.Bead{Title: "batch", Type: "convoy"})
+	if err != nil {
+		t.Fatalf("Create convoy: %v", err)
+	}
+	child, err := backing.Create(beads.Bead{Title: "task", ParentID: convoy.ID})
+	if err != nil {
+		t.Fatalf("Create child: %v", err)
+	}
+	cached := beads.NewCachingStoreForTest(backing, nil)
+	if err := cached.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	payload := closedSnapshotInBacking(t, backing, child.ID)
+	quiescent := new(atomic.Bool)
+	cs := &controllerState{
+		beadStores:     map[string]beads.Store{"test": cached},
+		pokeCh:         make(chan struct{}, 1),
+		beadsQuiescent: quiescent,
+	}
+
+	cs.applyBeadEventToStores(events.Event{Type: events.BeadClosed, Subject: child.ID, Payload: payload})
+	if len(queued) != 1 {
+		t.Fatalf("dispatched %d autoclose run(s), want 1", len(queued))
+	}
+	if !cs.storeWorkInFlight() {
+		t.Fatal("a dispatched autoclose run is not counted as store work until it runs")
+	}
+	queued[0]()
+	if cs.storeWorkInFlight() {
+		t.Fatal("store work still counted after the autoclose run returned")
+	}
+
+	quiescent.Store(true)
+	cs.applyBeadEventToStores(events.Event{Type: events.BeadClosed, Subject: child.ID, Payload: payload})
+	if len(queued) != 1 {
+		t.Fatalf("a quiescent city dispatched an autoclose run (%d total)", len(queued))
+	}
+	if cs.storeWorkInFlight() {
+		t.Fatal("a quiescent city's deferred committed close left store work counted")
+	}
+}

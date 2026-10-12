@@ -170,7 +170,7 @@ func withSpecs(t *testing.T, edit func(map[string]effectSpec)) {
 
 // Kills a per-kind exception to P3's deadlines in the executor: every kind,
 // submitted as the pass submits it, runs under exactly the deadline
-// admission gives its intent (a start startup_timeout + 10s, a row write
+// admission gives its intent (a start startup_timeout + 30s, a row write
 // 30s, every other effect 60s), and settles there.
 func TestDeadlinesHaveNoException(t *testing.T) {
 	clk := newFakePlannerClock(plannerT0)
@@ -183,6 +183,7 @@ func TestDeadlinesHaveNoException(t *testing.T) {
 				<-release
 				return settlement{Outcome: settledLanded}
 			}
+			spec.around = nil // the close's precheck would end it before its body
 			specs[kind] = spec
 		}
 	})
@@ -193,7 +194,7 @@ func TestDeadlinesHaveNoException(t *testing.T) {
 		want := providerEffectDeadline
 		switch effectSpecs[kind].class {
 		case capStarts:
-			want = startup + 10*time.Second
+			want = startup + startDeadlineSlack + startFailureSlack
 		case capRowWrites:
 			want = 30 * time.Second
 		}
@@ -208,7 +209,7 @@ func TestDeadlinesHaveNoException(t *testing.T) {
 	for at, n := range armed {
 		waitTimersAt(t, clk, at, n)
 	}
-	clk.Advance(startup + 10*time.Second)
+	clk.Advance(startup + startDeadlineSlack + startFailureSlack)
 	for range kinds {
 		if s := receive(t, posted); s.Cause != causeDeadline {
 			t.Fatalf("settlement %+v, want every kind settled at its deadline", s)
@@ -265,6 +266,12 @@ func TestExecutorCausesCarryTheFinalizePrefix(t *testing.T) {
 			t.Fatalf("%s: cause %q, want %q", c.it.Key.ID, s.Cause, c.want)
 		}
 	}
+	// The effects above share the deadline's instant, and each stops its two
+	// timers only after it posts (its settlement timer) or after Run returns
+	// (its context's). Wait for that teardown, or the count below can match
+	// their stale timers before the next effect arms its own, and Advance
+	// then runs ahead of that effect's timers, which never fire.
+	waitTimersAt(t, clk, plannerT0.Add(time.Minute), 0)
 	if err := x.submitIntent(&effectPass{}, finalize(intentStop, "deadline"), 9); err != nil {
 		t.Fatal(err)
 	}
@@ -423,8 +430,10 @@ func TestEffectSpecFuncsAreLinted(t *testing.T) {
 			}
 		}
 		for _, sec := range spec.sections {
-			for _, fn := range append([]any{sec.Decide}, sec.defs...) {
-				check(kind, fn)
+			for _, fn := range []any{sec.Decide, sec.probeDef, sec.decideDef, sec.callDef} {
+				if fn != nil {
+					check(kind, fn)
+				}
 			}
 			n++
 		}

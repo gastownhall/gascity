@@ -32,6 +32,7 @@ go_library(
         "formulas/mol-scoped-work.toml",
         "orders/beads-health.toml",
         "orders/cascade-nudge-on-blocker-close.toml",
+        "orders/convoy-autoclose-backstop.toml",
         "orders/cross-rig-deps.toml",
         "orders/gate-sweep.toml",
         "orders/jsonl-export.toml",

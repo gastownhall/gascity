@@ -50,6 +50,10 @@ type plannerHost struct {
 	safeTick         func(fn func(), trigger string) (panicked bool)
 	rec              events.Recorder
 	stderr           io.Writer
+	// preserveSessions reports a shutdown that leaves the city's sessions
+	// running for the next boot to adopt (a supervisor's restart).
+	preserveSessions func() bool
+	stranded         *strandedClaimAlerts // the controller's (strandedClaimAlerter)
 }
 
 // plannerRuntime owns the planner and what runs beside it. mu orders
@@ -60,9 +64,8 @@ type plannerRuntime struct {
 	exec    *effectExecutor
 	lane    atomic.Pointer[externalReadsLane] // built at start
 	env     atomic.Pointer[reconcileEnv]
-	// softReload amends a reload's reply; v2SoftReloadUnavailable until C7c
-	// hands the planner a soft-reload request instead (v5 M2).
-	softReload func(intent reloadIntent, r *reloadControlReply)
+	// softReload amends a reload's reply (acceptSoftReload, v5 M2).
+	softReload func(ctx context.Context, intent reloadIntent, r *reloadControlReply)
 	census     atomic.Bool   // C11's boot census passed
 	ready      chan struct{} // closed by the first completed pass with the gate open
 	readyOnce  sync.Once
@@ -80,9 +83,11 @@ func newDefaultPlanner(stderr io.Writer) *plannerRuntime {
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	rt := &plannerRuntime{host: plannerHost{stderr: stderr}, softReload: v2SoftReloadUnavailable, ready: make(chan struct{})}
+	rt := &plannerRuntime{host: plannerHost{stderr: stderr}, ready: make(chan struct{})}
 	rt.exec = newEffectExecutor(func(s settlement) { rt.planner.settlements.post(s) }, stderr)
+	rt.exec.preserve = func() bool { return rt.host.preserveSessions != nil && rt.host.preserveSessions() }
 	rt.planner = newPlanner(realPlannerClock{}, func() time.Duration { return rt.env.Load().patrol() }, rt.pass, newInflightMap(), rt.exec.stop, stderr)
+	rt.softReload = rt.acceptSoftReload
 	if v2EffectsEnabled(reconcilerModeLookupEnv) {
 		rt.planner.effects = rt.exec
 	}
@@ -114,7 +119,8 @@ func (rt *plannerRuntime) bindHost(h plannerHost) {
 		return nil
 	}
 	rt.host = h
-	rt.planner.rec = h.rec
+	rt.planner.rec, rt.planner.observations, rt.planner.capacity = h.rec, h.gather.Observations, h.gather.Capacity
+	rt.planner.stranded = h.stranded
 	rt.planner.emitRecord = rt.emitPassRecord
 	creates, err := newCreateEffects(createEffectHost{cityPath: h.gather.CityPath, cityName: h.gather.CityName, lookPath: h.gather.LookPath, stderr: h.stderr})
 	if err != nil {
@@ -213,6 +219,7 @@ func (rt *plannerRuntime) start(parent context.Context) bool {
 	rt.cancel = cancel
 	h := rt.host
 	lane := newExternalReadsLane(rt.env.Load().patrol(), h.gather.externalReadsEnv, func() { rt.planner.markDirty("external-reads") }, h.safeTick, h.rec, h.stderr)
+	lane.stranded = h.stranded
 	lane.addWaitsStep()
 	lane.addPoolSteps(rt.planner.out.summary.Load, rt.planner.postExecutionStalled)
 	rt.lane.Store(lane)

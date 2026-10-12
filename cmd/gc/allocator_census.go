@@ -65,6 +65,11 @@ type censusRow struct {
 	// StopKeys are the row's raw stop-request keys, which only activeStop
 	// reads (v5 D1).
 	StopKeys rawStopKeys
+	// Refresh are the row's raw refresh keys, which A7 reads (C7d-2).
+	Refresh rowRefreshKeys
+	// Facts are the row's premise facts, read off its persisted metadata: an
+	// effect's premise compares the fresh row's against them (tx.premise).
+	Facts session.Facts
 }
 
 // sessionCensus is one pass's census. It is immutable once read.
@@ -111,7 +116,8 @@ func readSessionCensus(now time.Time, legs []classStoreCandidate) (*sessionCensu
 			}
 			k := rowKey{Leg: source.ref, ID: id}
 			row := newCensusRow(k, l.Info)
-			row.StopKeys = readStopKeys(l.Response.Metadata)
+			row.StopKeys, row.Refresh = readStopKeys(l.Response.Metadata), readRefreshKeys(l.Response.Metadata)
+			row.Facts = session.FactsOf(l.Response.Metadata)
 			if first, dup := canonicalLeg[id]; dup {
 				// One effect, one row: only the canonical copy counts in flight.
 				row.DuplicateOf, row.PendingCreate = first, false
@@ -141,13 +147,13 @@ func newCensusRow(k rowKey, info session.Info) censusRow {
 }
 
 // reread is k's census row read again as info, with its persisted metadata
-// meta. A nil meta keeps the census's stop keys: a re-decide never drops a
-// request it was not shown.
+// meta. A nil meta keeps the census's stop keys and facts: a re-decide never
+// drops a request it was not shown.
 func (c *sessionCensus) reread(k rowKey, info session.Info, meta map[string]string) censusRow {
 	r, prev := newCensusRow(k, info), c.Rows[k]
-	r.StopKeys = prev.StopKeys
+	r.StopKeys, r.Refresh, r.Facts = prev.StopKeys, prev.Refresh, prev.Facts
 	if meta != nil {
-		r.StopKeys = readStopKeys(meta)
+		r.StopKeys, r.Refresh, r.Facts = readStopKeys(meta), readRefreshKeys(meta), session.FactsOf(meta)
 	}
 	if r.DuplicateOf = prev.DuplicateOf; r.DuplicateOf != "" {
 		r.PendingCreate = false

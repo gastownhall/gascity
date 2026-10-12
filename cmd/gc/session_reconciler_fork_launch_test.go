@@ -23,6 +23,7 @@ import (
 // (#127-class drift). This FAILS against pendingCreateResidueFold(info) and PASSES
 // against pendingCreateResidueFold(partialInfo).
 func TestRecoverRunningPendingCreate_BuildFailResidueMatchesStore(t *testing.T) {
+	testCity := t.TempDir()
 	const parentSID = "brain-xyz"
 	candidate, cfg, store := newForkSessionCandidate(t, forkClaude(), parentSID, "fresh")
 	if candidate.info.StartedConfigHash != "deadbeef" {
@@ -36,7 +37,7 @@ func TestRecoverRunningPendingCreate_BuildFailResidueMatchesStore(t *testing.T) 
 	staleResumeKeyProbe = func(_, _, _ string) (present, probeable bool) { return false, true }
 	t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
 
-	ok, residue := recoverRunningPendingCreate("", candidate.info, candidate.tp, cfg, store, clock.Real{}, nil)
+	ok, residue := recoverRunningPendingCreate(testCity, candidate.info, candidate.tp, cfg, store, clock.Real{}, nil)
 	if ok {
 		t.Fatal("recoverRunningPendingCreate ok=true; want false (buildPreparedStart errors on fork + wake_mode=fresh)")
 	}

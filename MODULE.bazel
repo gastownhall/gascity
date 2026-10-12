@@ -384,6 +384,17 @@ go_deps.module_override(
     path = "github.com/mgechev/revive",
 )
 
+# staticcheck's unused analyzer calls objectpath.For per exported field and
+# method, re-walking the whole package each time: quadratic in package size.
+# On //cmd/gc:gc_test (~1500 files) that one analyzer took ~140 s and set the
+# unit lane's critical path. The patch shares one objectpath.Encoder per
+# analysis, which memoizes the walk; the reported objects are unchanged.
+go_deps.module_override(
+    patch_strip = 1,
+    patches = ["//third_party/patches:honnef_unused_objectpath_encoder.patch"],
+    path = "honnef.co/go/tools",
+)
+
 # nogo does not analyze the standard library, so ctrlflow has no noReturn
 # facts for t.Fatal, log.Fatal, os.Exit, ...; without them staticcheck's
 # SA5011 reports every nil check followed by t.Fatal. The patch makes
@@ -470,7 +481,7 @@ openapi_base_spec(
 # lockfiles fetched here.
 #
 # Node.js 22, sha256-checked by rules_nodejs; it satisfies every workspace's
-# engines (dashboard >=22.13.0, contrib/openclaw-bridge >=22.19.0).
+# engines (dashboard >=22.13.0, contrib/openclaw-bridge >=22.22.3).
 node = use_extension("@rules_nodejs//nodejs:extensions.bzl", "node")
 node.toolchain(node_version = "22.23.2")
 

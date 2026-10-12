@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -37,11 +38,11 @@ import (
 // unregistered one turns both the write and the scan into "invalid issue
 // type". A native-store city never noticed because its SQL path does not
 // validate.
-var RequiredCustomTypes = []string{
-	"molecule", "convoy", "message", "event", "gate",
-	"merge-request", "agent", "role", "rig", "session", "spec",
-	"convergence", "step", "startup-health-episode",
-}
+//
+// The list itself lives in internal/beads, beside the native store's typed
+// list pushdown that relies on every scope carrying it. This is a copy, so a
+// caller that appends to or edits it cannot change the pushdown's vocabulary.
+var RequiredCustomTypes = slices.Clone(beads.RequiredCustomTypes)
 
 // CustomTypesCheck verifies that all required Gas City custom bead
 // types are registered in a bd store's types.custom config.
@@ -220,6 +221,15 @@ func MergeRequiredCustomTypes(row, table []string) []string {
 // table whenever it is non-empty, so a complete row alone is not enough.
 func CustomTypesNeedRegistration(row, table []string) bool {
 	return len(typesNotIn(RequiredCustomTypes, row)) != 0 || len(typesNotIn(RequiredCustomTypes, table)) != 0
+}
+
+// CustomTypesStoreEnv returns the environment this check runs bd under for the
+// store at dir in the city at cityPath. Every inherited store selector is
+// replaced, so bd resolves dir's own .beads: a server target only when dir's
+// metadata records server mode, none otherwise. Code that registers the types
+// outside doctor uses it to reach the store `gc doctor --fix` would.
+func CustomTypesStoreEnv(cityPath, dir string) ([]string, error) {
+	return customTypesStoreEnv(&CheckContext{CityPath: cityPath}, dir)
 }
 
 func customTypesStoreEnv(ctx *CheckContext, dir string) ([]string, error) {

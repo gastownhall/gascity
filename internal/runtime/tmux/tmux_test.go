@@ -882,11 +882,9 @@ func TestEnsureSessionFresh_ZombieSession(t *testing.T) {
 	// Clean up any existing session
 	_ = tm.KillSession(sessionName)
 
-	// Create a zombie session (session exists but no Claude/node running)
-	// A normal tmux session with bash/zsh is a "zombie" for our purposes
-	if err := tm.NewSession(sessionName, ""); err != nil {
-		t.Fatalf("NewSession: %v", err)
-	}
+	// Create a zombie session (session exists but no Claude/node running):
+	// a pane that is just a settled shell.
+	newPlainShellSession(t, tm, sessionName)
 	defer func() { _ = tm.KillSession(sessionName) }()
 
 	// Verify it's a zombie (not running any agent)
@@ -895,16 +893,22 @@ func TestEnsureSessionFresh_ZombieSession(t *testing.T) {
 	}
 
 	// Verify generic agent check also treats it as not running (shell session).
-	// Allow a brief settle time — tmux pane command may not be stable immediately.
-	time.Sleep(200 * time.Millisecond)
 	if tm.IsAgentRunning(sessionName) {
-		t.Fatalf("expected IsAgentRunning(%q) to be false for a fresh shell session", sessionName)
+		cmd, err := tm.GetPaneCommand(sessionName)
+		t.Fatalf("expected IsAgentRunning(%q) to be false for a fresh shell session (pane command %q, err %v)", sessionName, cmd, err)
+	}
+	zombiePID, err := tm.GetPanePID(sessionName)
+	if err != nil {
+		t.Fatalf("GetPanePID(zombie): %v", err)
 	}
 
 	// EnsureSessionFresh should kill the zombie and create fresh session
 	// This should NOT error with "session already exists"
 	if err := tm.EnsureSessionFresh(sessionName, ""); err != nil {
 		t.Fatalf("EnsureSessionFresh on zombie: %v", err)
+	}
+	if freshPID, err := tm.GetPanePID(sessionName); err != nil || freshPID == zombiePID {
+		t.Fatalf("EnsureSessionFresh kept the zombie pane: pid %q -> %q (err %v)", zombiePID, freshPID, err)
 	}
 
 	// Session should still exist
@@ -3184,7 +3188,11 @@ func TestPaneShowsDrainedComposer(t *testing.T) {
 		{"bare drained composer", []string{"❯ "}, "hello", true},
 		{"composer still holds exact sent draft", []string{"❯ hello"}, "hello", false},
 		{"composer holds sent draft with trailing padding", []string{"❯ hello  "}, "hello", false},
-		{"composer holds unrelated newer text", []string{"❯ something else entirely"}, "hello", true},
+		// Any text left in the composer puts the submit in doubt: a draft
+		// Claude restored after an interrupt, with the sent message pasted
+		// behind it, starts with the old prompt (see
+		// TestPaneShowsDrainedComposerRejectsMergedClaudeDraft).
+		{"composer holds other text", []string{"❯ something else entirely"}, "hello", false},
 		{
 			"long draft truncated to pane width still detected via 40-rune compare",
 			[]string{"❯ " + longSentFirst40},
@@ -3227,10 +3235,46 @@ func TestPaneShowsDrainedComposer(t *testing.T) {
 			"\nfirst line of reminder\nsecond line",
 			true,
 		},
+		{
+			"composer still holds the paste collapsed into a staged placeholder",
+			[]string{"● Done.", "────", "❯\u00a0[Pasted text #1 +42 lines]", "────", "  ⏵⏵ bypass permissions on"},
+			"reminder: please respond to the review",
+			false,
+		},
+		{
+			"placeholder only echoed in the transcript above a bare composer",
+			[]string{"❯\u00a0[Pasted text #1 +44 lines]", "● Done.", "────", "❯\u00a0", "────", "  ⏵⏵ bypass permissions on"},
+			"reminder: please respond to the review",
+			true,
+		},
+		{
+			"codex placeholder echoed in the transcript above a bare composer",
+			[]string{"› [Pasted Content 100 chars]", "● Done.", "────", "❯\u00a0", "────", "  ⏵⏵ bypass permissions on"},
+			"reminder: please respond to the review",
+			true,
+		},
+		{
+			"codex composer still staged below a transcript line starting with the ready prompt",
+			[]string{"  ❯ make test", "  ok  ./...", "› [Pasted Content 1234 chars]", "", "  gpt-5.5 low · /tmp/probe"},
+			"reminder: please respond to the review",
+			false,
+		},
+		{
+			"bare codex composer below a ready-prompt transcript line and an echoed placeholder",
+			[]string{"  ❯ make test", "› [Pasted Content 999 chars]", "• Done.", "› ", "  gpt-5.5 low · /tmp/probe"},
+			"reminder: please respond to the review",
+			true,
+		},
+		{
+			"staged composer below a codex placeholder echoed in the transcript",
+			[]string{"› [Pasted Content 100 chars]", "● Done.", "────", "❯\u00a0[Pasted text #2 +7 lines]", "────", "  ⏵⏵ bypass permissions on"},
+			"reminder: please respond to the review",
+			false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := paneShowsDrainedComposer(tt.lines, tt.sent)
+			got := paneShowsDrainedComposer(tt.lines)
 			if got != tt.want {
 				t.Errorf("paneShowsDrainedComposer(%v, %q) = %v, want %v", tt.lines, tt.sent, got, tt.want)
 			}
@@ -3946,6 +3990,48 @@ func TestSelfCloseExcludedInPaneCallerSurvivesCleanup(t *testing.T) {
 	waitForProcessTargetsGone(t, []processTarget{leaderTarget}, 10*time.Second)
 	if provider.IsRunning(session) {
 		t.Fatalf("session %q still running after self-close teardown", session)
+	}
+}
+
+// newPlainShellSession creates a detached session whose pane runs a plain `sh`
+// with no startup files, and returns once the pane reports it.
+//
+// NewSession starts the server's default-shell as a LOGIN shell, and its pane
+// passes through transient foreground processes before it settles: tmux's own
+// forked child before it execs the shell ("tmux"), and — under zsh, which hands
+// the terminal to startup-file jobs — /etc/profile.d helpers ("sh" from
+// grepconf.sh) and zsh-newuser-install's clear probe ("clear") when HOME has no
+// zsh dotfiles. How long that lasts depends on host load, $SHELL and $HOME, so
+// an assertion about pane_current_command taken a fixed delay after NewSession
+// races it (ga-kmwwcx). A non-login `sh` with $ENV unset runs no startup
+// files, and once the pane reports "sh" it stays "sh".
+func newPlainShellSession(t *testing.T, tm *Tmux, name string) {
+	t.Helper()
+	if err := tm.NewSessionWithCommand(name, "", "exec env -u ENV sh"); err != nil {
+		t.Fatalf("NewSessionWithCommand(%q): %v", name, err)
+	}
+	waitForPaneCommand(t, tm, name, "sh", 10*time.Second)
+}
+
+// waitForPaneCommand waits until session's first pane reports want as its
+// pane_current_command, failing the test if that does not happen within
+// timeout.
+func waitForPaneCommand(t *testing.T, tm *Tmux, session, want string, timeout time.Duration) {
+	t.Helper()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		got, err := tm.GetPaneCommand(session)
+		if err == nil && got == want {
+			return
+		}
+		select {
+		case <-timer.C:
+			t.Fatalf("pane of %q did not report %q within %s (last %q, err %v)", session, want, timeout, got, err)
+		case <-ticker.C:
+		}
 	}
 }
 

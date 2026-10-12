@@ -19,10 +19,18 @@ const testHooksStamp = "internal/clock.testHooks"
 //
 //   - exactly one Bazel target stamps it, //cmd/gc:gc_testhooks, and that
 //     target is testonly, manual and visible to //test/acceptance only;
+//   - //cmd/gc:gc_lib, gc's main package, stays private, so no other
+//     package can link a gc of its own;
 //   - the release config (.goreleaser.yml) and the Makefile's LDFLAGS never
 //     mention it;
 //   - every acceptance target that sets GC_TEST_BACKSTOP_SPEEDUP runs that
 //     binary (GC_ACCEPTANCE_GC_BIN), since a gc without the stamp ignores it.
+//
+// Under go test the walk for stamping BUILD and .bzl files covers the whole
+// checkout; under bazel test it sees only the files in this test's runfiles
+// (scripts/BUILD.bazel's data). There the checks on cmd/gc/BUILD.bazel carry
+// the guarantee: gc_lib is private, so only that file can link gc, and in it
+// only gc_testhooks names the stamp.
 func TestOnlyTheTestonlyGCLinkCarriesTheTestHooksStamp(t *testing.T) {
 	root := repoRoot(t)
 	var stamped []string
@@ -74,6 +82,13 @@ func TestOnlyTheTestonlyGCLinkCarriesTheTestHooksStamp(t *testing.T) {
 	}
 	if n := strings.Count(starlarkCode(build), testHooksStamp); n != 1 {
 		t.Errorf("cmd/gc/BUILD.bazel mentions %s %d times; only gc_testhooks may stamp it", testHooksStamp, n)
+	}
+	lib := regexp.MustCompile(`(?ms)^go_library\(\n    name = "gc_lib",\n(.*?)^\)`).FindStringSubmatch(build)
+	if lib == nil {
+		t.Fatal("cmd/gc/BUILD.bazel has no go_library gc_lib")
+	}
+	if vis := regexp.MustCompile(`(?m)^    visibility = .*$`).FindString(lib[1]); vis != `    visibility = ["//visibility:private"],` {
+		t.Errorf("gc_lib has %q; it must stay //visibility:private, or another package could link a gc with a stamp of its own", strings.TrimSpace(vis))
 	}
 
 	for _, rel := range []string{".goreleaser.yml", "Makefile"} {

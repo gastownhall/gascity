@@ -31,3 +31,14 @@ When adding a field to `config.Rig`, also add the corresponding optional
 field to `RigPatch` and wire the merge into `applyRigPatch` so layered
 configs (fragments, patches) can override it. No field-sync test exists for
 Rig today; the patch path must be checked manually.
+
+## Adding `.gc/site.toml` fields
+
+`.gc/site.toml` holds machine-local bindings and may carry tables this binary
+does not model, so writers never re-encode `SiteBinding` wholesale. Each
+writer passes `persistSiteBinding` a patch that touches only the keys it owns
+(`setSiteWorkspaceIdentity`, `setSiteRigBindings`); everything else
+round-trips. When adding a field to `SiteBinding` or `RigSiteBinding`, register
+its TOML key in `siteBindingKeyOwners` / `rigSiteBindingKeyOwners` and patch it
+only in that owning writer. `TestSiteBindingFieldsHaveWriterOwner` fails on an
+unregistered field.
