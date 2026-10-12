@@ -55,6 +55,19 @@ const unreadableTimers = UnknownHeldUntil | UnknownQuarantine
 // keeps their text.
 var dispositionKeys = [...]string{"held_until", "sleep_intent", "wait_hold", "quarantined_until", "suspended_at"}
 
+// DispositionKeysIn is the disposition keys meta carries, in the class's
+// order: the keys a generic metadata write must not set on a session row,
+// whose disposition only its cells move (the session verbs).
+func DispositionKeysIn(meta map[string]string) []string {
+	var out []string
+	for _, k := range dispositionKeys {
+		if _, ok := meta[k]; ok {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
 // Disposition is a row's holds as one value.
 type Disposition struct {
 	Operator OperatorHold

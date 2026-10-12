@@ -34,7 +34,14 @@ The spec is the full reference. A brief summary of the surfaces:
   `GET/PATCH/DELETE` on `/v0/city/{cityName}/agent/{base}` and SSE
   `/v0/city/{cityName}/agent/{base}/output/stream`.
 - **Beads (work units).** CRUD under `/v0/city/{cityName}/beads`,
-  query + hook operations, dependencies, labels.
+  query + hook operations, dependencies, labels. A generic bead update
+  (`PATCH /v0/city/{cityName}/bead/{id}` or `POST .../bead/{id}/update`)
+  refuses, with 422 and nothing written, any of a session's disposition
+  keys (`held_until`, `sleep_intent`, `wait_hold`, `quarantined_until`,
+  `suspended_at`): only the session verbs set them (`suspend`, `wake`,
+  `kill`, `gc runtime heartbeat`, `gc session wait`). `gc bd update
+  --set-metadata` on a session bead is an operator escape hatch: it
+  bypasses the disposition and nothing checks it.
 - **Sessions.** CRUD under `/v0/city/{cityName}/sessions`, submit,
   prompt, resume, interaction response, transcript, SSE stream.
 - **External messaging.** `POST /v0/city/{cityName}/extmsg/adapters`

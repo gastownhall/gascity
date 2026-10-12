@@ -896,6 +896,9 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 	if err != nil {
 		return nil, err
 	}
+	if err := refuseSessionDispositionPatch(id, current, body); err != nil {
+		return nil, err
+	}
 	if body.Assignee != nil {
 		assignee, err := s.normalizeRawBeadAssignee(ctx, *body.Assignee)
 		if err != nil {
@@ -938,6 +941,24 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 	resp := &OKResponse{}
 	resp.Body.Status = "updated"
 	return resp, nil
+}
+
+// refuseSessionDispositionPatch refuses, with nothing written, a generic
+// update whose metadata sets any of a session row's disposition keys
+// (session.DispositionKeysIn): only the session verbs move them, through the
+// disposition's cells, so a hand edit can never leave a heartbeat-shaped
+// hold or an unknown intent behind (ARCH-RESTRUCTURE-2 R7, mc-ojhnu). A
+// work bead's same-named key, and a session row's other keys, pass.
+func refuseSessionDispositionPatch(id string, current beads.Bead, body beadUpdateBody) error {
+	keys := session.DispositionKeysIn(body.Metadata)
+	becomesSession := body.Type != nil && *body.Type == session.BeadType
+	if len(keys) == 0 || !session.IsSessionBeadOrRepairable(current) && !becomesSession {
+		return nil
+	}
+	return apierr.ValidationFailed.Msg(fmt.Sprintf(
+		"bead %s is a session: metadata %s is its disposition, which only the session verbs set "+
+			"(POST /v0/session/{id}/suspend, /wake or /kill, gc session suspend|wake|kill, gc runtime heartbeat, gc session wait); nothing was written",
+		id, strings.Join(keys, ", ")))
 }
 
 // humaHandleBeadDelete is the Huma-typed handler for DELETE /v0/bead/{id}.
