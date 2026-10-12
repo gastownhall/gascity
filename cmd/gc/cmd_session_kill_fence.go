@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"time"
 
@@ -18,7 +19,8 @@ import (
 type sessionKillFence struct {
 	sessionID string
 	sleptAt   string
-	restore   map[string]string
+	wrote     map[string]string // what the fence wrote
+	restore   map[string]string // the row's values for those keys before it
 }
 
 // sessionKillFenceAttempts bounds the re-read/re-decide loop around a
@@ -46,14 +48,25 @@ func writeSessionKillFence(store beads.Store, sessionID string, now time.Time) (
 		if b.Status == "closed" {
 			return nil, false
 		}
+		// The kill is the disposition's Kill cell: an operator suspend goes
+		// whole, its held_until with it, so no heartbeat-shaped hold is left
+		// behind; a wait or a heartbeat stays. The fence writes
+		// KillPendingPatch's lifecycle and only the class keys the kill
+		// changed, so a store without conditional writes reverts no
+		// concurrent write to the others.
+		killed, err := session.DecodeDisposition(b.Metadata).Apply(session.ActorOperator, session.DispEvent{Kind: session.EvKill}, session.State(b.Metadata["state"]), now)
+		if err != nil {
+			return nil, false
+		}
+		write := map[string]string(killed.Changed().Into(sessionID, maps.Clone(patch)))
 		// Capture the pre-image from the same observation the fenced write is
 		// conditioned on, so a rollback restores the row the kill replaced.
-		restore := make(map[string]string, len(patch))
-		for key := range patch {
+		restore := make(map[string]string, len(write))
+		for key := range write {
 			restore[key] = b.Metadata[key]
 		}
-		fence.restore = restore
-		return patch, true
+		fence.wrote, fence.restore = write, restore
+		return write, true
 	})
 	if err != nil {
 		return nil, err
@@ -90,7 +103,16 @@ func (f *sessionKillFence) rollback(store beads.Store) error {
 		if !f.owns(b) {
 			return nil, false
 		}
-		return f.restore, true
+		// Only the keys the fence changed that still read as it wrote them:
+		// a write since (a wait, a quarantine) stands. The class keys' undo
+		// is the Kill cell's (UndoDisposition).
+		undo := make(session.MetadataPatch, len(f.wrote))
+		for k, v := range session.LifecycleOnly(f.wrote) {
+			if b.Metadata[k] == v && f.restore[k] != v {
+				undo[k] = f.restore[k]
+			}
+		}
+		return session.UndoDisposition(f.restore, f.wrote, b.Metadata).Into(f.sessionID, undo), true
 	})
 }
 
@@ -118,12 +140,29 @@ func applySessionKillFencePatch(store beads.Store, sessionID string, decide func
 			return nil
 		}
 		if writer == nil {
-			return store.SetMetadataBatch(sessionID, patch)
+			err := store.SetMetadataBatch(sessionID, patch)
+			if err != nil {
+				session.UnmintDisposition(sessionID, patch)
+			}
+			return err
 		}
 		lastErr = writer.UpdateIfMatch(sessionID, b.Revision, beads.UpdateOpts{Metadata: patch})
+		if lastErr != nil {
+			session.UnmintDisposition(sessionID, patch) // decide mints again on the next attempt
+		}
 		if lastErr == nil || !beads.IsPreconditionFailed(lastErr) {
 			return lastErr
 		}
 	}
 	return fmt.Errorf("conditional write kept losing to concurrent updates: %w", lastErr)
+}
+
+// killSleepPatch is the kill's asleep sync with no fence, on the row's fresh
+// metadata: SleepPatch's lifecycle, the wake request cleared, and the Kill
+// cell's class keys, as the fence writes them (no heartbeat-shaped hold left).
+func killSleepPatch(id string, meta map[string]string, now time.Time) map[string]string {
+	patch := session.SleepPatch(now, string(session.SleepReasonKilled))
+	patch["synced_at"] = now.Format(time.RFC3339)
+	maps.Copy(patch, session.ClearWakeRequestPatch())
+	return session.CellInto(id, meta, session.ActorOperator, session.DispEvent{Kind: session.EvKill}, now, patch)
 }

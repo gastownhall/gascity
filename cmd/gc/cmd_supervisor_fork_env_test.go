@@ -29,6 +29,20 @@ func TestSupervisorForkEnv(t *testing.T) {
 			},
 		},
 		{
+			// A forked supervisor outlives the hook that may have launched it;
+			// a hook deadline it inherited would be stale for every gc hook
+			// run it later spawns.
+			name:   "drops the hook deadline",
+			parent: []string{"PATH=/bin", hookDeadlineEnv + "=2026-10-11T12:00:00Z", "HOME=/home/x"},
+			check: func(t *testing.T, got []string) {
+				for _, kv := range got {
+					if strings.HasPrefix(kv, hookDeadlineEnv+"=") {
+						t.Fatalf("supervisorForkEnv result %v still carries %s", got, hookDeadlineEnv)
+					}
+				}
+			},
+		},
+		{
 			name:   "adds preserve-var when absent",
 			parent: []string{"PATH=/bin"},
 			check: func(t *testing.T, got []string) {

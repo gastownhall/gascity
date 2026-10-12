@@ -247,6 +247,133 @@ func TestDoltDriftCheckCanFixGating(t *testing.T) {
 	}
 }
 
+// TestDoltDriftCheckSkipsEmbeddedRigPortFile pins the doctor half of the
+// ga-p9iuv contract: an embedded rig serves its own store, so its
+// .beads/dolt-server.port is bd's (or the operator's), not a mirror of the
+// managed city port. A port file there that disagrees with the managed port is
+// no drift — reporting it would fail `gc doctor` with a re-pin that `--fix`
+// never performs, because the port-file sync skips embedded rigs.
+func TestDoltDriftCheckSkipsEmbeddedRigPortFile(t *testing.T) {
+	cityPath, rigPath, cfg := legacyManagedCityWithEmbeddedRig(t, cleanEmbeddedRigConfig)
+	managedPort := publishManagedCityDoltPort(t, cityPath)
+	const rigPort = "3310\n"
+	if strings.TrimSpace(rigPort) == managedPort {
+		t.Fatalf("test fixture picked the rig port %s", managedPort)
+	}
+	portFile := filepath.Join(rigPath, ".beads", "dolt-server.port")
+	if err := os.WriteFile(portFile, []byte(rigPort), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	check := newDoltDriftCheck(cityPath, cfg)
+	r := check.Run(&doctor.CheckContext{CityPath: cityPath})
+	if r.Status != doctor.StatusOK {
+		t.Fatalf("Run() status = %v, want StatusOK for an embedded rig; message=%q details=%v", r.Status, r.Message, r.Details)
+	}
+	if check.CanFix() {
+		t.Error("CanFix() = true for an embedded rig's port file, want false (the re-pin sync skips embedded rigs)")
+	}
+	got, err := os.ReadFile(portFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != rigPort {
+		t.Errorf("embedded rig port file = %q, want it left byte-identical at %q", got, rigPort)
+	}
+}
+
+// TestDoltDriftCheckFixConvergesBesideEmbeddedRig drives `gc doctor --fix`
+// through the doctor framework on a city holding both kinds of rig. The server
+// rig's stale port file is still reported and re-pinned, while the embedded
+// rig, listed first, neither hides it nor fails the verifying re-run, and keeps
+// its own port file.
+func TestDoltDriftCheckFixConvergesBesideEmbeddedRig(t *testing.T) {
+	cityDir, serverRigDir, managedPort, cfg := managedCityDriftFixture(t, "drifted")
+	const stalePort = "29999\n"
+	const embeddedPort = "3310\n"
+	for _, port := range []string{stalePort, embeddedPort} {
+		if strings.TrimSpace(port) == managedPort {
+			t.Fatalf("test fixture picked the fixed port %s", managedPort)
+		}
+	}
+	serverPortFile := filepath.Join(serverRigDir, ".beads", "dolt-server.port")
+	if err := os.WriteFile(serverPortFile, []byte(stalePort), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	embeddedRigDir := embeddedScopeWithBeads(t, "fr")
+	if err := os.WriteFile(filepath.Join(embeddedRigDir, ".beads", "config.yaml"), []byte(cleanEmbeddedRigConfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	embeddedPortFile := filepath.Join(embeddedRigDir, ".beads", "dolt-server.port")
+	if err := os.WriteFile(embeddedPortFile, []byte(embeddedPort), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Rigs = append([]config.Rig{{Name: "frontend", Path: embeddedRigDir, Prefix: "fr"}}, cfg.Rigs...)
+
+	check := newDoltDriftCheck(cityDir, cfg)
+	first := check.Run(&doctor.CheckContext{CityPath: cityDir})
+	if first.Status != doctor.StatusError || len(first.Details) != 1 || !strings.Contains(first.Details[0], `rig "drifted"`) {
+		t.Fatalf("Run() = status %v details %v, want exactly the server rig's port-file drift", first.Status, first.Details)
+	}
+	if !check.CanFix() {
+		t.Fatal("CanFix() = false for the server rig's port-file drift, want true")
+	}
+
+	d := &doctor.Doctor{}
+	d.Register(check)
+	report := d.RunCollect(&doctor.CheckContext{CityPath: cityDir}, true)
+	if report.Fixed != 1 || report.Failed != 0 {
+		res := report.Results[0]
+		t.Fatalf("doctor --fix: fixed=%d failed=%d, want the drift fixed; status=%v details=%v fixErr=%q", report.Fixed, report.Failed, res.Status, res.Details, res.FixError)
+	}
+	got, err := os.ReadFile(serverPortFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(got)) != managedPort {
+		t.Errorf("server rig port file = %q, want it re-pinned to the managed port %s", got, managedPort)
+	}
+	got, err = os.ReadFile(embeddedPortFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != embeddedPort {
+		t.Errorf("embedded rig port file = %q, want it left byte-identical at %q", got, embeddedPort)
+	}
+}
+
+// TestDoltDriftCheckReportsUnclassifiableRigStorage pins the fail-closed arm of
+// the embedded skip: a rig whose metadata.json cannot be read is reported, not
+// guessed into either mode — skipping it as embedded would hide real drift, and
+// treating it as a server rig would offer a re-pin the sync refuses.
+func TestDoltDriftCheckReportsUnclassifiableRigStorage(t *testing.T) {
+	cityDir, rigDir, _, cfg := managedCityDriftFixture(t, "unreadable")
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "dolt-server.port"), []byte("29999\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A directory where metadata.json belongs still marks a bd scope (the
+	// contract stats it) but fails every read.
+	metadataPath := filepath.Join(rigDir, ".beads", "metadata.json")
+	if err := os.Remove(metadataPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(metadataPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	check := newDoltDriftCheck(cityDir, cfg)
+	r := check.Run(&doctor.CheckContext{CityPath: cityDir})
+	if r.Status != doctor.StatusError {
+		t.Fatalf("Run() status = %v, want StatusError; message=%q details=%v", r.Status, r.Message, r.Details)
+	}
+	if joined := strings.Join(r.Details, " "); !strings.Contains(joined, `rig "unreadable" classify storage mode`) {
+		t.Errorf("details = %q, want the rig's storage-mode classification failure", joined)
+	}
+	if check.CanFix() {
+		t.Error("CanFix() = true for a rig whose storage mode is unknown, want false")
+	}
+}
+
 func TestDoltDriftCheckNoRigsIsOK(t *testing.T) {
 	cityDir := t.TempDir()
 	cfg := &config.City{Workspace: config.Workspace{Name: "empty"}}

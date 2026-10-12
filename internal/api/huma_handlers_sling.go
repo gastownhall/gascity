@@ -143,11 +143,10 @@ func (s *Server) humaHandleSling(ctx context.Context, input *SlingInput) (*Sling
 	}
 
 	// Successful sling: surface a dashboard deep link when this process also
-	// hosts the dashboard. This endpoint never produces batch shapes (no
-	// DoSlingBatch call), so resp.WorkflowID alone discriminates the single
+	// hosts the dashboard. resp.WorkflowID alone discriminates the single
 	// graph-workflow launch (run detail) from every other successful shape
-	// (wisps, plain bead routes, idempotent skips → runs list), matching the
-	// CLI's link policy.
+	// (wisps, plain bead routes, per-child convoy batches, idempotent skips →
+	// runs list), matching the CLI's link policy.
 	resp.DashboardURL = s.slingDashboardURL(input.CityName, resp.WorkflowID)
 
 	// Point the caller at the canonical Run resource. A graph-workflow launch has

@@ -1,4 +1,5 @@
 load("@rules_go//go:def.bzl", "go_binary", "go_library")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 go_library(
     name = "genschema_lib",
@@ -15,6 +16,58 @@ go_binary(
     name = "genschema",
     embed = [":genschema_lib"],
     visibility = ["//visibility:public"],
+)
+
+# Fails when the committed reference docs differ from what genschema
+# generates. On drift the regeneration patch lands in this test's
+# test.outputs as generated-docs-freshness.patch, the artifact the Docs
+# Autofix workflow applies (scripts/docs-autofix-push.sh allowlists exactly
+# these paths).
+#
+# genschema takes field descriptions from the doc comments of the Go source
+# declaring the reflected config types, so that source is staged with
+# --source. Today every reflected type lives in internal/config or
+# internal/pricing; a field typed from another package shows up here as a
+# lost description until its package is added.
+sh_test(
+    name = "genschema_in_sync_test",
+    srcs = ["//scripts:check-generated-in-sync.sh"],
+    args = [
+        "'make generate'",
+        "generated-docs-freshness.patch",
+        "--source",
+        "internal/config",
+        "--source",
+        "internal/pricing",
+        "$(rootpath :genschema)",
+        "-gc",
+        "$(rootpath //cmd/gc)",
+        "--",
+        "docs/reference/cli.md",
+        "$(rootpath //docs:reference/cli.md)",
+        "docs/reference/config.md",
+        "$(rootpath //docs:reference/config.md)",
+        "docs/reference/schema/city-schema.json",
+        "$(rootpath //docs:reference/schema/city-schema.json)",
+        "docs/reference/schema/city-schema.txt",
+        "$(rootpath //docs:reference/schema/city-schema.txt)",
+        "docs/reference/schema/pack-schema.json",
+        "$(rootpath //docs:reference/schema/pack-schema.json)",
+        "docs/reference/schema/pack-schema.txt",
+        "$(rootpath //docs:reference/schema/pack-schema.txt)",
+    ],
+    data = [
+        ":genschema",
+        "//cmd/gc",
+        "//docs:reference/cli.md",
+        "//docs:reference/config.md",
+        "//docs:reference/schema/city-schema.json",
+        "//docs:reference/schema/city-schema.txt",
+        "//docs:reference/schema/pack-schema.json",
+        "//docs:reference/schema/pack-schema.txt",
+        "//internal/config:bazel_repo_srcs",
+        "//internal/pricing:bazel_repo_srcs",
+    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

@@ -1,17 +1,23 @@
-# Bazel quickstart: local cache + remote build farm
+# Bazel quickstart: building and testing Gas City
 
-The repo builds two ways: `go build`/`go test` (unchanged, the required
-CI) and Bazel (side-by-side, remote-cached, the fast iteration loop).
-This guide sets up the second for your dev machine.
+Bazel is how Gas City is built and tested. CI gates on `bazel test`
+(`.github/workflows/bazel.yml`), and `make test`, `make check`,
+`make test-acceptance` and `make test-integration` run the same commands.
+`go build`/`go test` still work for a quick inner loop on one package, but
+they are not what CI enforces: nogo (lint and vet), formatting,
+generated-artifact drift and the policy guards exist only as Bazel targets.
+This guide sets Bazel up on your machine; TESTING.md "Building and testing"
+lists the command for every test tier.
 
 ## Why
 
 | | `go test ./...` | `bazel test //...` |
 |---|---|---|
-| first run | ~15 min | ~15 min (same work) |
-| warm run | ~15 min (per-package cache only) | **~0.6s** (action-level, remote) |
+| what CI gates on | no | **yes** |
+| lint, vet, format, generated artifacts | no | **yes** (nogo and test targets) |
+| first run | ~15 min | ~15 min (same work), or seconds on remote execution |
+| warm run | ~15 min (per-package cache only) | **seconds** (action-level, remote) |
 | cross-worktree | no | **yes** (shared CAS) |
-| CI-parity | yes | yes (same test binaries) |
 
 Bazel's remote cache stores every compiled object, test result, and
 file digest in a shared remote cache. Any machine — your laptop,
@@ -47,14 +53,19 @@ release of the same LLVM version, also pinned by sha256, but without a
 sysroot: cgo uses the host's C headers and libraries (ICU included), and
 their action keys do not match CI's.
 
-### 2. Use the shared cache (the free win)
+### 2. Choose where actions run
 
-No setup: the committed `.bazelrc` has a `fork-cache` config for rbe-west's
-anonymous, read-only cache. Pass it to read every result CI already
-computed; misses build and run locally, and nothing you run is uploaded:
+Bazel decides where to run from the rc files; the committed `.bazelrc` has
+no executor, so pick one of these per machine.
+
+**Contributors: the read-only shared cache.** The committed `.bazelrc` has a
+`fork-cache` config for rbe-west's anonymous, read-only cache. It reads every
+result CI already computed; misses build and run locally, and nothing you
+run is uploaded. No credential is needed:
 
 ```bash
 bazel test //... --config=fork-cache
+echo 'build --config=fork-cache' >> .bazelrc.local   # or make it the default
 ```
 
 This only hits if your actions hash like CI's, so do not add key-affecting
@@ -64,12 +75,20 @@ flags (`--test_env`, `--action_env`, `--define`, platforms, ...) to
 `PATH`, so Go must be at `/usr/local/go`
 (`sudo ln -s "$(go env GOROOT)" /usr/local/go` if it is elsewhere).
 
-Maintainers can opt in to remote execution with an rbe-west client
-certificate; see TESTING.md "Bazel cache tiers" for how to obtain one and
-the `.bazelrc.local` lines, then use `--config=remote-exec`. The pre-push
-hook picks the right mode automatically: remote execution when any rc file
-(`.bazelrc.local`, `~/.bazelrc`, `/etc/bazel.bazelrc`) names a remote
-executor, as agent hosts' `~/.bazelrc` does, and the read-only cache
+**Maintainers: remote execution.** With an rbe-west mTLS client certificate
+(TESTING.md "Bazel cache tiers" has how to obtain one and the four
+`build:remote-exec` lines for `.bazelrc.local`), `--config=remote-exec`
+executes every action on rbe-west's `oss` pool; your machine only analyzes.
+Results are written by rbe-west's workers alone, so CI and contributors hit
+what you ran. Add `build --config=remote-exec` to `.bazelrc.local` to make
+it the default.
+
+**Agent hosts.** The operator's `~/.bazelrc` names the executor and
+certificate, so plain `bazel test` already executes remotely.
+
+The pre-push hook picks the mode automatically: remote execution when any rc
+file (`.bazelrc.local`, `~/.bazelrc`, `/etc/bazel.bazelrc`) names a remote
+executor and the checkout's `worker-env` pin is main's, the read-only cache
 otherwise.
 
 ### 3. Verify
@@ -83,26 +102,27 @@ bazel test //internal/config  # tests too: "Executed 1 out of 1: 1 test passes" 
 ## Daily use
 
 ```bash
-bazel test //...                        # full suite (the number agents care about)
+make test                               # bazel test //...: CI's unit lane
+make check                              # make test plus the shell guards
 bazel test //internal/beads/...         # subtree
-bazel test //internal/config:config_test --test_output=errors  # one test, verbose
+bazel test //internal/config:config_test --test_filter=TestAgentFieldSync  # one test
+bazel test --config=acceptance //test/acceptance:acceptance_test           # make test-acceptance
+bazel test --config=integration //test:integration_packages                # gating integration lane
 bazel run //cmd/gc -- --help            # run a binary
 ```
 
-**Agents should prefer Bazel for repeated build+test cycles.** The first
-`bazel build //...` costs the same as `go build ./...`; every subsequent
-one is a cache hit (seconds). The remote CAS is shared across all
-worktrees, all CI runs, and all developers — a test that passed once on
-CI never re-executes for you locally.
+`make` passes `BAZEL_FLAGS` through, so `make test BAZEL_FLAGS=--config=fork-cache`
+works without editing `.bazelrc.local`.
 
 **When to use which:**
 
 | situation | use |
 |---|---|
-| iterating on one package's tests | `bazel test //pkg/...` (remote-cached) |
-| verifying a cross-cutting change | `bazel test //...` |
-| quick syntax check of one file | `go build ./pkg/` (no server startup) |
-| running the existing CI gate | `make test-cover-*` (go test, unchanged) |
+| iterating on one package's tests | `bazel test //pkg:pkg_test` (remote-cached) |
+| verifying a change before pushing | `make check` (`bazel test //...`) |
+| acceptance or integration behavior changed | the matching `--config=acceptance` / `--config=integration` target |
+| quick compile-and-run of one file, no Bazel server | `go build ./pkg/` or `go test ./pkg -run TestX` (inner loop only; not what CI checks) |
+| offline, or a host Bazel does not serve (macOS) | the `-go` make twins: `make test-go`, `make check-go` |
 | adding a new dependency | `go get` then `make bazel-sync` |
 
 **Test sharding:** the heavy suites (cmd/gc, scripts, api, examples) are
@@ -111,9 +131,9 @@ binary; if you add a helper-spawning test, strip `TEST_SHARD_INDEX` /
 `TEST_TOTAL_SHARDS` from the helper's env (see `sanitizedBaseEnv` in
 `cmd/gc/fast_loop_helpers_test.go`).
 
-**Do NOT commit machine-specific endpoints.** `grpc://127.0.0.1:5005x`
-endpoints belong in `.bazelrc.local` (gitignored) for dev machines, or
-in CI secrets. The repo's `.bazelrc` has no executor hardcoded.
+**Do NOT commit machine-specific endpoints or credentials.** They belong
+in `.bazelrc.local` (gitignored) for dev machines, or in CI secrets. The
+repo's `.bazelrc` has no executor hardcoded.
 
 ## When you change BUILD-relevant things
 
@@ -124,7 +144,7 @@ make bazel-sync     # regenerates BUILD files + the repo file trees
 git add -A && git commit -m "build: sync"   # the CI gate checks this
 ```
 
-The CI gate `BUILD files are in sync` fails if you forget.
+The CI gate `BUILD files in sync` fails if you forget.
 
 ## Declaring the repo files a test reads
 
@@ -157,8 +177,13 @@ every Go edit, and it takes its whole target with it.
 **Slow first build** → normal; the CAS is warming from your changes.
 Subsequent builds hit the cache.
 
-**Tests fail under bazel but pass under go test** → the test probably
-depends on something outside its declared inputs. Check
+**Remote actions sit queued** → the checkout's `worker-env` pin is not
+main's (TESTING.md "Stale `worker-env` pin"). Rebase onto main, or run with
+`--config=fork-cache` meanwhile.
+
+**Tests fail under bazel but pass under go test** → the Bazel result is the
+one CI sees. The test probably depends on something outside its declared
+inputs. Check
 `engdocs/bazel-ci-budget.md`'s hermetic-input notes, or the
 `internal/bazeltest` package docs.
 

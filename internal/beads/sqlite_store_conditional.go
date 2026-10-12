@@ -91,7 +91,10 @@ func (s *SQLiteStore) CloseIfMatch(id string, expectedRevision int64) error {
 		return err
 	}
 	return s.conditionalWrite(id, expectedRevision, func(ctx context.Context, tx *sql.Tx, b Bead) error {
-		b.Status = "closed"
+		if b.Status != "closed" {
+			setBeadStatus(&b, "closed")
+			recordCloseReason(&b)
+		}
 		b.UpdatedAt = time.Now()
 		return s.upsertBeadTx(ctx, tx, b)
 	})
@@ -194,6 +197,7 @@ func (s *SQLiteStore) CompareAndSetMetadataKey(id, key, expected, next string) (
 			}
 			return err
 		}
+		noteSessionKeys(b, map[string]string{key: next})
 		if b.Metadata[key] != expected {
 			return tx.Commit() // genuine mismatch: caller lost, not an error
 		}

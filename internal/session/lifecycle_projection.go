@@ -852,18 +852,28 @@ func shouldResetContinuation(base BaseState, input LifecycleInput, sleepReason s
 	if strings.TrimSpace(input.SessionKey) == "" && strings.TrimSpace(input.StartedConfigHash) == "" {
 		return false
 	}
-	// This list deliberately diverges from IsDeliberateSleepReason's near-identical
-	// list (this one has "runtime-missing" and lacks "failed-create"): that one
-	// decides churn suppression, this one decides continuation reset on wake — do
-	// not merge the lists.
-	switch SleepReason(strings.TrimSpace(sleepReason)) {
+	if SleepReasonKeepsContinuation(sleepReason) {
+		return false
+	}
+	return base == BaseStateActive || base == BaseStateCreating
+}
+
+// SleepReasonKeepsContinuation reports whether a session that slept for
+// reason keeps its continuation when its runtime is found missing: the
+// heal resets session_key and started_config_hash otherwise. This list
+// deliberately diverges from IsDeliberateSleepReason's near-identical list
+// (this one has "runtime-missing" and lacks "failed-create"): that one
+// decides churn suppression, this one decides continuation reset on wake —
+// do not merge the lists.
+func SleepReasonKeepsContinuation(reason string) bool {
+	switch SleepReason(strings.TrimSpace(reason)) {
 	case SleepReasonIdle, SleepReasonIdleTimeout, SleepReasonNoWakeReason,
 		SleepReasonConfigDrift, SleepReasonDrained, SleepReasonCityStop,
 		SleepReasonUserHold, SleepReasonWaitHold, SleepReasonRateLimit,
 		SleepReasonRuntimeMissing:
-		return false
+		return true
 	}
-	return base == BaseStateActive || base == BaseStateCreating
+	return false
 }
 
 func projectWakeCauses(input LifecycleInput) []WakeCause {

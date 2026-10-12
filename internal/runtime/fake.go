@@ -48,6 +48,7 @@ type Fake struct {
 	DialogErrors            map[string]error
 	ResetTurnErrors         map[string]error
 	InterruptBoundaryErrors map[string]error
+	ClearInputErrors        map[string]error
 	RemoveMetaErrors        map[string]map[string]error // per-session/key RemoveMeta errors for testing
 	GetMetaErrors           map[string]map[string]error // per-session/key GetMeta errors for testing
 	// WaitForIdleGates blocks WaitForIdle on a per-name channel until the
@@ -78,6 +79,7 @@ var (
 	_ ProcessTableScanner = (*Fake)(nil)
 	_ RelaunchProvider    = (*Fake)(nil)
 	_ ListingAttestation  = (*Fake)(nil)
+	_ InputClearProvider  = (*Fake)(nil)
 
 	_ AttachmentObserverWithError = (*Fake)(nil)
 )
@@ -150,6 +152,7 @@ func NewFake() *Fake {
 		DialogErrors:            make(map[string]error),
 		ResetTurnErrors:         make(map[string]error),
 		InterruptBoundaryErrors: make(map[string]error),
+		ClearInputErrors:        make(map[string]error),
 		RemoveMetaErrors:        make(map[string]map[string]error),
 		GetMetaErrors:           make(map[string]map[string]error),
 		PendingErrors:           make(map[string]error),
@@ -181,6 +184,7 @@ func NewFailFake() *Fake {
 		DialogErrors:            make(map[string]error),
 		ResetTurnErrors:         make(map[string]error),
 		InterruptBoundaryErrors: make(map[string]error),
+		ClearInputErrors:        make(map[string]error),
 		RemoveMetaErrors:        make(map[string]map[string]error),
 		WaitForIdleGates:        make(map[string]chan struct{}),
 		WaitForIdleStarted:      make(map[string]chan struct{}),
@@ -303,6 +307,21 @@ func (f *Fake) WaitForInterruptBoundary(_ context.Context, name string, since ti
 		return fmt.Errorf("session unavailable")
 	}
 	if err, ok := f.InterruptBoundaryErrors[name]; ok {
+		return err
+	}
+	return nil
+}
+
+// ClearInput records the call (the restore window in Value) and returns the
+// configured result.
+func (f *Fake) ClearInput(_ context.Context, name string, restoreWindow time.Duration) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, Call{Method: "ClearInput", Name: name, Value: restoreWindow.String()})
+	if f.broken {
+		return fmt.Errorf("session unavailable")
+	}
+	if err, ok := f.ClearInputErrors[name]; ok {
 		return err
 	}
 	return nil

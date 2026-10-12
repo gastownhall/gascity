@@ -17,6 +17,9 @@ func TestMemStore(t *testing.T) {
 	beadstest.RunCreationOrderTests(t, factory)
 	beadstest.RunDepTests(t, factory)
 	beadstest.RunMetadataTests(t, factory)
+	beadstest.RunCloseReasonTests(t, factory)
+	beadstest.RunCloseNotificationTests(t, func(*testing.T) beads.Store { return beads.NewMemStore() })
+	beadstest.RunCloseReasonAfterReopenTests(t, factory)
 	beadstest.RunFenceConformance(t, factory)
 }
 

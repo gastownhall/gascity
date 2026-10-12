@@ -36,6 +36,10 @@ type Provider struct {
 	handshakeOnce sync.Once
 	handshakeInfo runtime.ProtocolInfo
 	handshakeErr  error
+
+	// readyPrompts maps a session name to the ready-prompt prefix it was
+	// started with, so WaitForIdle scans for that agent's prompt (see idle.go).
+	readyPrompts sync.Map
 }
 
 type startupWatchEvent struct {
@@ -66,8 +70,9 @@ func (p *Provider) run(stdinData []byte, args ...string) (string, error) {
 // optionally piping stdinData to its stdin. Returns the trimmed stdout
 // on success.
 //
-// Exit code 2 is treated as success (unknown operation — forward compatible).
-// Any other non-zero exit code returns an error wrapping stderr.
+// Exit code 2 is treated as success (unknown operation — forward compatible)
+// on every op but is-attached; see [classifyExecExit]. Any other non-zero exit
+// code returns an error wrapping stderr.
 func (p *Provider) runWithTimeout(dur time.Duration, stdinData []byte, args ...string) (string, error) {
 	return p.runWithContext(context.Background(), dur, stdinData, args...)
 }
@@ -163,13 +168,16 @@ func (p *Provider) runError(runErr error, stderr string, args []string) error {
 
 // classifyExecExit maps an adapter op's exit code and message onto the
 // provider's contract. base is the formatted adapter error. Exit code 2 is an
-// unknown operation treated as success (forward compatible, nil error); a
+// unknown operation treated as success (forward compatible, nil error),
+// except from is-attached: that op runs only for a pack that declared
+// report-attachment, and a declared op cannot be unknown, so its exit 2 is a
+// failure that [Provider.IsAttachedWithError] reports as "could not tell". A
 // start-op name collision maps to [runtime.ErrSessionExists]; a start-op
 // [runtime.ExitCodeTempFail] is an endpoint capacity refusal
 // ([runtime.CapacityError]); everything else is base unchanged.
 func classifyExecExit(op string, code int, msg string, base error) error {
 	switch {
-	case code == 2:
+	case code == 2 && op != "is-attached":
 		return nil
 	case op == "start" && isStartCollision(msg):
 		return fmt.Errorf("%w: %w", runtime.ErrSessionExists, base)
@@ -209,6 +217,7 @@ func (p *Provider) runWithTTY(args ...string) error {
 // trust, bypass permissions) in Go using Peek + SendKeys, sharing the
 // same logic as the tmux provider via [runtime.AcceptStartupDialogs].
 func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	p.rememberReadyPrompt(name, cfg)
 	// Was this name already occupied before we touched it? Asked structurally,
 	// before the attempt, because it is the only question whose answer cannot
 	// be garbled by how the adapter happens to word a refusal — and it is the
@@ -223,6 +232,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	if _, err = p.runWithContext(ctx, p.startTimeout, data, "start", name); err != nil {
 		return p.cleanupAfterStartFailure(name, err, foreignBox)
 	}
+	p.publishReadyPrompt(ctx, name, cfg)
 
 	if err := p.dismissStartupDialogs(ctx, name, cfg); err != nil {
 		return p.cleanupAfterStartFailure(name, fmt.Errorf("exec provider: dismissing startup dialogs: %w", err), foreignBox)
@@ -284,6 +294,7 @@ func (p *Provider) supportsSeparableLaunch() bool {
 // agent is launched separately by launchAgent. Otherwise it falls back to the
 // welded Start (which both provisions and launches). (Un-weld B3b.)
 func (p *Provider) provisionBox(ctx context.Context, name string, cfg runtime.Config) error {
+	p.rememberReadyPrompt(name, cfg)
 	if !p.supportsSeparableLaunch() {
 		return p.Start(ctx, name, cfg)
 	}
@@ -304,6 +315,7 @@ func (p *Provider) provisionBox(ctx context.Context, name string, cfg runtime.Co
 // working directory and the box env is set at provision time, so neither an
 // explicit -c nor -e is needed (workdir + env are provision-half). (Un-weld B3b.)
 func (p *Provider) launchAgent(ctx context.Context, name string, cfg runtime.Config) error {
+	p.rememberReadyPrompt(name, cfg)
 	if !p.supportsSeparableLaunch() {
 		return nil
 	}
@@ -322,6 +334,7 @@ func (p *Provider) launchAgent(ctx context.Context, name string, cfg runtime.Con
 	} else if code != 0 {
 		return fmt.Errorf("exec provider: launching agent in %q: tmux exited %d", name, code)
 	}
+	p.publishReadyPrompt(ctx, name, cfg)
 	return p.dismissStartupDialogs(ctx, name, cfg)
 }
 
@@ -579,6 +592,7 @@ func (p *Provider) DismissKnownDialogs(ctx context.Context, name string, timeout
 
 // Stop destroys the named session: script stop <name>
 func (p *Provider) Stop(name string) error {
+	p.forgetReadyPrompt(name)
 	_, err := p.run(nil, "stop", name)
 	return err
 }
@@ -680,16 +694,10 @@ func (p *Provider) boxOccupancy(name string) (occupied, definite bool) {
 // IsAttached reports terminal attachment via `script is-attached <name>`
 // when the executable declared the report-attachment capability in its
 // protocol handshake; otherwise it is always false. Op errors read as
-// not attached.
+// not attached; [Provider.IsAttachedWithError] keeps them.
 func (p *Provider) IsAttached(name string) bool {
-	if !p.handshakeCapability(runtime.ProtocolCapabilityReportAttachment) {
-		return false
-	}
-	out, err := p.run(nil, "is-attached", name)
-	if err != nil {
-		return false
-	}
-	return out == "true"
+	attached, err := p.IsAttachedWithError(name)
+	return attached && err == nil
 }
 
 // Attach connects the terminal to the session: script attach <name>
@@ -827,9 +835,17 @@ func (p *Provider) Capabilities() runtime.ProviderCapabilities {
 	}
 }
 
-// SleepCapability reports that exec-backed sessions support timed-only idle
-// sleep via controller-driven lifecycle decisions.
+// SleepCapability reports the idle-sleep capability the pack's handshake
+// supports. A pack that declares report-activity, report-attachment and
+// proc.exec gets full idle sleep: it has an activity clock, an attachment
+// probe, and an idle boundary read from its in-box tmux pane (WaitForIdle).
+// Every other pack keeps the timed-only floor. The floor is never disabled:
+// non-interactive sleep and the queued-nudge poller rely on timed-only for
+// exec runtimes that report no activity.
 func (p *Provider) SleepCapability(string) runtime.SessionSleepCapability {
+	if p.idleBoundaryDeclared() {
+		return runtime.SessionSleepCapabilityFull
+	}
 	return runtime.SessionSleepCapabilityTimedOnly
 }
 
@@ -853,8 +869,12 @@ func (p *Provider) GetLastActivity(name string) (time.Time, error) {
 
 // Provider implements the optional connection primitive.
 var (
-	_ runtime.ExecProvider     = (*Provider)(nil)
-	_ runtime.RelaunchProvider = (*Provider)(nil)
+	_ runtime.ExecProvider                = (*Provider)(nil)
+	_ runtime.RelaunchProvider            = (*Provider)(nil)
+	_ runtime.SleepCapabilityProvider     = (*Provider)(nil)
+	_ runtime.IdleWaitProvider            = (*Provider)(nil)
+	_ runtime.AttachmentObserverWithError = (*Provider)(nil)
+	_ runtime.IdleProbeBudgetProvider     = (*Provider)(nil)
 )
 
 // Exec runs argv inside the session via the RPP `exec` op and implements

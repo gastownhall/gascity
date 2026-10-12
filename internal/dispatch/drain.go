@@ -52,7 +52,7 @@ func processDrain(store beads.Store, bead beads.Bead, opts ProcessOptions) (Cont
 	case beadmeta.DrainStateExpanded, beadmeta.DrainStateCompleting:
 		return completeDrain(store, bead, opts)
 	case beadmeta.DrainStateSucceeded, beadmeta.DrainStateFailed:
-		return ControlResult{}, nil
+		return finishRecordedDrainClose(store, bead, opts)
 	default:
 		return ControlResult{}, fmt.Errorf("%s: unsupported gc.drain_state %q", bead.ID, bead.Metadata[beadmeta.DrainStateMetadataKey])
 	}
@@ -84,26 +84,9 @@ func expandDrain(store beads.Store, bead beads.Bead, opts ProcessOptions) (Contr
 	}
 	manifest, members, err := loadOrBuildDrainManifest(store, bead, parentConvoyID, itemFormula, opts)
 	if err != nil {
-		if errors.Is(err, errDrainLimitExceeded) {
-			scopeResult, scopeErr := reconcileClosedDrainScope(store, bead.ID, opts)
-			if scopeErr != nil {
-				return ControlResult{}, scopeErr
-			}
-			return ControlResult{Processed: true, Action: "drain-limit-exceeded", Skipped: scopeResult.Skipped}, nil
-		}
-		if errors.Is(err, errDrainUnresolvedMember) {
-			scopeResult, scopeErr := reconcileClosedDrainScope(store, bead.ID, opts)
-			if scopeErr != nil {
-				return ControlResult{}, scopeErr
-			}
-			return ControlResult{Processed: true, Action: "drain-unresolved-member", Skipped: scopeResult.Skipped}, nil
-		}
-		// Validation failures above may have closed the control before
-		// erroring; reconcile the scope best-effort so a closed scoped drain
-		// does not strand its scope (mirrors markControllerSpawnError's tolerant
-		// reconcile).
-		if closed, getErr := store.Get(bead.ID); getErr == nil && closed.Status == "closed" {
-			_, _ = reconcileTerminalScopedMemberWithOptions(store, closed, opts)
+		var closed drainValidationClosedError
+		if errors.As(err, &closed) {
+			return closed.result, nil
 		}
 		return ControlResult{}, err
 	}
@@ -229,9 +212,11 @@ func loadOrBuildDrainManifest(store beads.Store, bead beads.Bead, parentConvoyID
 				beadmeta.FailureReasonMetadataKey:  "unresolved_member",
 				beadmeta.FailureSubjectMetadataKey: unresolved.MemberID,
 			}
-			if closeErr := updateMetadataAndClose(store, bead.ID, closeMetadata); closeErr != nil {
+			result, closeErr := closeDrainControl(store, bead.ID, closeMetadata, "drain-unresolved-member", opts)
+			if closeErr != nil {
 				return drainManifest{}, nil, fmt.Errorf("%s: closing unresolved-member drain: %w", bead.ID, closeErr)
 			}
+			return drainManifest{}, nil, drainValidationClosedError{result: result, err: err}
 		}
 		return drainManifest{}, nil, err
 	}
@@ -243,7 +228,7 @@ func loadOrBuildDrainManifest(store beads.Store, bead beads.Bead, parentConvoyID
 			beadmeta.FailureClassMetadataKey:  beadmeta.FailureClassHard,
 			beadmeta.FailureReasonMetadataKey: "drain_max_units_invalid",
 		}
-		if closeErr := updateMetadataAndClose(store, bead.ID, closeMetadata); closeErr != nil {
+		if _, closeErr := closeDrainControl(store, bead.ID, closeMetadata, "drain-max-units-invalid", opts); closeErr != nil {
 			return drainManifest{}, nil, fmt.Errorf("%s: closing invalid-max-units drain: %w", bead.ID, closeErr)
 		}
 		return drainManifest{}, nil, err
@@ -255,10 +240,11 @@ func loadOrBuildDrainManifest(store beads.Store, bead beads.Bead, parentConvoyID
 			beadmeta.FailureClassMetadataKey:  beadmeta.FailureClassHard,
 			beadmeta.FailureReasonMetadataKey: "limit_exceeded",
 		}
-		if err := updateMetadataAndClose(store, bead.ID, closeMetadata); err != nil {
+		result, err := closeDrainControl(store, bead.ID, closeMetadata, "drain-limit-exceeded", opts)
+		if err != nil {
 			return drainManifest{}, nil, fmt.Errorf("%s: closing limit-exceeded drain: %w", bead.ID, err)
 		}
-		return drainManifest{}, nil, errDrainLimitExceeded
+		return drainManifest{}, nil, drainValidationClosedError{result: result, err: errDrainLimitExceeded}
 	}
 	orderedMembers, err := orderDrainMembersByDependencies(store, members, opts)
 	if err != nil {
@@ -530,14 +516,7 @@ func completeDrain(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 	if err := releaseDrainReservations(store, bead.ID, manifest, opts); err != nil {
 		return ControlResult{}, err
 	}
-	if err := updateMetadataAndClose(store, bead.ID, metadata); err != nil {
-		return ControlResult{}, fmt.Errorf("%s: closing drain: %w", bead.ID, err)
-	}
-	scopeResult, err := reconcileClosedDrainScope(store, bead.ID, opts)
-	if err != nil {
-		return ControlResult{}, err
-	}
-	return ControlResult{Processed: true, Action: action, Skipped: scopeResult.Skipped}, nil
+	return closeDrainControl(store, bead.ID, metadata, action, opts)
 }
 
 func advanceSharedDrain(store beads.Store, bead beads.Bead, manifest drainManifest, members []beads.Bead, itemFormula string, parentVars map[string]string, opts ProcessOptions) (ControlResult, error) {
@@ -1020,14 +999,41 @@ func markRemainingSharedRowsSkipped(manifest *drainManifest, start int) {
 	}
 }
 
-// reconcileClosedDrainScope mirrors the fanout/retry/ralph terminal-close
-// behavior for drain controls: after a drain control closes, reconcile its
-// enclosing scope so a drain that was the scope's last open member finalizes
-// the scope (or aborts it on fail) instead of relying on another control's
-// close-time backstop. Returns the scope reconciliation result for Skipped
-// propagation; no-op for scope-less drains.
-func reconcileClosedDrainScope(store beads.Store, beadID string, opts ProcessOptions) (ControlResult, error) {
-	return reconcileClosedScopeMemberWithOptions(store, beadID, opts)
+// closeDrainControl is every terminal close of a drain control. A drain is
+// scope-check-exempt and reconciles its own enclosing scope, so the scope is
+// settled before the drain closes (closeScopedControl). A terminal drain
+// carries no controller error: a transient one recorded by an earlier pass
+// (markControllerSpawnError) is cleared with the close.
+func closeDrainControl(store beads.Store, drainID string, metadata map[string]string, action string, opts ProcessOptions) (ControlResult, error) {
+	clearControllerSpawnErrorMetadata(metadata)
+	return closeScopedControl(store, drainID, metadata, action, opts)
+}
+
+// drainValidationClosedError reports a drain that failed validation while its
+// manifest was being built and was closed as failed, together with the result
+// of that close.
+type drainValidationClosedError struct {
+	result ControlResult
+	err    error
+}
+
+func (e drainValidationClosedError) Error() string { return e.err.Error() }
+
+func (e drainValidationClosedError) Unwrap() error { return e.err }
+
+// finishRecordedDrainClose finishes a drain whose terminal state and outcome
+// are recorded but which is still open: it settles the enclosing scope and
+// closes the drain with the recorded outcome, without re-evaluating the drain.
+// A closed drain is left alone.
+func finishRecordedDrainClose(store beads.Store, bead beads.Bead, opts ProcessOptions) (ControlResult, error) {
+	if bead.Status == "closed" {
+		return ControlResult{}, nil
+	}
+	outcome := strings.TrimSpace(bead.Metadata[beadmeta.OutcomeMetadataKey])
+	if outcome == "" {
+		return ControlResult{}, fmt.Errorf("%w: %s: gc.drain_state %q recorded without gc.outcome", ErrControlGraphMalformed, bead.ID, bead.Metadata[beadmeta.DrainStateMetadataKey])
+	}
+	return closeDrainControl(store, bead.ID, map[string]string{beadmeta.OutcomeMetadataKey: outcome}, "drain-"+strings.TrimSpace(bead.Metadata[beadmeta.DrainStateMetadataKey]), opts)
 }
 
 func closeDrainWithManifest(store beads.Store, beadID string, manifest drainManifest, closeState, outcome, action string, opts ProcessOptions) (ControlResult, error) {
@@ -1043,14 +1049,7 @@ func closeDrainWithManifest(store beads.Store, beadID string, manifest drainMani
 	if err := releaseDrainReservations(store, beadID, manifest, opts); err != nil {
 		return ControlResult{}, err
 	}
-	if err := updateMetadataAndClose(store, beadID, metadata); err != nil {
-		return ControlResult{}, fmt.Errorf("%s: closing drain: %w", beadID, err)
-	}
-	scopeResult, err := reconcileClosedDrainScope(store, beadID, opts)
-	if err != nil {
-		return ControlResult{}, err
-	}
-	return ControlResult{Processed: true, Action: action, Skipped: scopeResult.Skipped}, nil
+	return closeDrainControl(store, beadID, metadata, action, opts)
 }
 
 func buildDrainManifest(bead beads.Bead, parentConvoyID, itemFormula string, members []beads.Bead) drainManifest {
@@ -1846,14 +1845,11 @@ func closeDrainReservationFailure(store beads.Store, bead beads.Bead, manifest d
 	if releaseErr := releaseDrainReservations(store, bead.ID, manifest, opts); releaseErr != nil {
 		return ControlResult{}, fmt.Errorf("%s: releasing reservations after %w: %w", bead.ID, err, releaseErr)
 	}
-	if closeErr := updateMetadataAndClose(store, bead.ID, metadata); closeErr != nil {
+	result, closeErr := closeDrainControl(store, bead.ID, metadata, "drain-reservation-failed", opts)
+	if closeErr != nil {
 		return ControlResult{}, fmt.Errorf("%s: closing reservation-failed drain after %w: %w", bead.ID, err, closeErr)
 	}
-	scopeResult, scopeErr := reconcileClosedDrainScope(store, bead.ID, opts)
-	if scopeErr != nil {
-		return ControlResult{}, scopeErr
-	}
-	return ControlResult{Processed: true, Action: "drain-reservation-failed", Skipped: scopeResult.Skipped}, nil
+	return result, nil
 }
 
 func closeDrainItemFormulaFailure(store beads.Store, bead beads.Bead, manifest drainManifest, err error, opts ProcessOptions) (ControlResult, error) {
@@ -1879,14 +1875,11 @@ func closeDrainItemFormulaFailure(store beads.Store, bead beads.Bead, manifest d
 	if releaseErr := releaseDrainReservations(store, bead.ID, manifest, opts); releaseErr != nil {
 		return ControlResult{}, fmt.Errorf("%s: releasing reservations after %w: %w", bead.ID, err, releaseErr)
 	}
-	if closeErr := updateMetadataAndClose(store, bead.ID, metadata); closeErr != nil {
+	result, closeErr := closeDrainControl(store, bead.ID, metadata, "drain-failed", opts)
+	if closeErr != nil {
 		return ControlResult{}, fmt.Errorf("%s: closing invalid-item-formula drain after %w: %w", bead.ID, err, closeErr)
 	}
-	scopeResult, scopeErr := reconcileClosedDrainScope(store, bead.ID, opts)
-	if scopeErr != nil {
-		return ControlResult{}, scopeErr
-	}
-	return ControlResult{Processed: true, Action: "drain-failed", Skipped: scopeResult.Skipped}, nil
+	return result, nil
 }
 
 func markIncompleteDrainRowsFailed(manifest *drainManifest, failureReason string) {

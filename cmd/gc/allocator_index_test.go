@@ -105,7 +105,7 @@ func oracleCity(t *testing.T, seed int64) allocInputs {
 		a := cfg.Agents[rng.Intn(nTemplates)]
 		id, slot := fmt.Sprintf("or-%04d", i), 1+rng.Intn(14)
 		name := instance(a, slot)
-		state := pick("active", "active", "active", "asleep", "asleep", "creating", "draining", "drained", "failed_create")
+		state := pick("active", "active", "active", "asleep", "asleep", "creating", "draining", "drained", "failed-create")
 		template := a.QualifiedName()
 		switch rng.Intn(10) {
 		case 0:
@@ -234,10 +234,8 @@ func oracleCity(t *testing.T, seed int64) allocInputs {
 		col.DefaultCounts[template], col.DefaultDemand[template] = d.Count, d
 		if rng.Intn(4) == 0 {
 			slot := 1 + rng.Intn(6)
-			f.in.Reservations = append(f.in.Reservations, planReservation{
-				EntryID: fmt.Sprintf("e-%s-%d", template, slot), Template: template,
-				QualifiedInstance: fmt.Sprintf("%s-%d", template, slot), Slot: slot, ReservedAt: allocNow,
-			})
+			f.in.InFlight.Entries = append(f.in.InFlight.Entries,
+				inFlightCreate(fmt.Sprintf("e-%s-%d", template, slot), template, fmt.Sprintf("%s-%d", template, slot), slot, ""))
 		}
 		if rng.Intn(4) == 0 {
 			if f.in.Backoff == nil {
@@ -361,7 +359,7 @@ func TestRealizationNilIndexIsLegacy(t *testing.T) {
 	}
 	bp := baseAgentBuildParams("city", "/city", cfg, nil, allocNow, nil, nil)
 	bp.sessionBeads = newSessionBeadSnapshotFromInfos(primary)
-	bp.sessionOccupancyInfos = []session.Info{info("gc-2", "worker-4", "4", "active"), info("rig-9", "worker-1", "1", "failed_create")}
+	bp.sessionOccupancyInfos = []session.Info{info("gc-2", "worker-4", "4", "active"), info("rig-9", "worker-1", "1", "failed-create")}
 	bp.assignedWorkBeads = []beads.Bead{{ID: "w-1", Status: "in_progress", Assignee: "gc-3"}}
 
 	var ids []string

@@ -521,6 +521,7 @@ func buildDesiredStateWithSessionBeadsAt(
 	}
 
 	bp := newAgentBuildParams(cityName, cityPath, cfg, sp, beaconTime, store, stderr)
+	bp.decisionTime = poolDecisionTime.UTC()
 	bp.sessionBeads = sessionBeads
 	bp.sessionSnapshotCompletenessKnown = true
 	bp.sessionSnapshotComplete = store == nil || (sessionBeads != nil && sessionBeads.LoadError() == nil)
@@ -1668,6 +1669,7 @@ func refreshDesiredStateWithSessionBeads(
 	}
 
 	bp := newAgentBuildParams(cityName, cityPath, cfg, sp, result.BeaconTime, store, stderr)
+	bp.decisionTime = time.Now().UTC()
 	bp.sessionBeads = sessionBeads
 	bp.sessionSnapshotCompletenessKnown = true
 	bp.sessionSnapshotComplete = false
@@ -3221,8 +3223,19 @@ func appendOpenAssignedMoleculeWorkUnique(dst *[]beads.Bead, stores *[]beads.Sto
 // by the assigned-work passes that establish real readiness (in-progress,
 // store-Ready()/deps, and assigned molecule roots) — never by the open-routed
 // orphan-release pass, whose beads have not passed any readiness gate.
+//
+// OPEN work parked on a dispatch hold is never marked: bd's Ready() is
+// hold-transparent, but the session's own hook refuses to serve a held row
+// (isHeldHookCandidate), so counting it as wake demand woke an on-demand named
+// session that drain-acked no_work and was re-woken every tick. The bead stays
+// in the assigned-work snapshot — orphan release, pool accounting and crash
+// recovery still see the assignment (ga-5736js) — it just carries no wake
+// readiness. assignedOpenWorkHeld is the shared predicate.
 func markReadyAssigned(readyIDs map[string]bool, b beads.Bead) {
 	if readyIDs == nil {
+		return
+	}
+	if assignedOpenWorkHeld(b) {
 		return
 	}
 	readyIDs[b.ID] = true
@@ -3368,70 +3381,83 @@ func discoverSessionBeadsWithRoots(
 		if !ok {
 			continue
 		}
-		var (
-			resolveAgent         *config.Agent
-			sessionQualifiedName string
-		)
-		if isManualSessionInfoForAgent(info, cfgAgent) {
-			sessionQualifiedName = sessionBeadQualifiedNameInfo(bp.cityPath, cfgAgent, bp.rigs, bInfo)
-			resolveAgent = sessionBeadConfigAgent(cfgAgent, sessionQualifiedName)
-		} else {
-			// Canonicalize agent identity before calling resolveTemplate so a
-			// pool-managed bead with pool_slot stamped resolves as the
-			// pool-instance form here — the same shape realizePoolDesiredSessions
-			// uses. Before GC_ALIAS was excluded from CoreFingerprint, this
-			// identity mismatch caused config-drift drains; the canonical shape
-			// still keeps routing/display identity and remaining fingerprint
-			// inputs aligned across buildDesiredState paths. Named beads
-			// resolve to their own stored alias so this seam reproduces the
-			// identity the named-session loop assigned (see
-			// canonicalSessionIdentity).
-			resolveAgent, sessionQualifiedName = canonicalSessionIdentityWithConfigInfo(cfg, cfgAgent, bInfo)
-		}
-		fpExtra := buildFingerprintExtra(resolveAgent)
-		tp, err := resolveTemplateForSessionBeadInfo(bp, resolveAgent, sessionQualifiedName, fpExtra, bInfo)
+		tp, err := resolveDiscoveredSessionTemplate(bp, cfg, cfgAgent, bInfo)
 		if err != nil {
 			fmt.Fprintf(stderr, "buildDesiredState: bead %s template %q: %v (skipping)\n", info.ID, template, err) //nolint:errcheck
 			continue
-		}
-		tp.ManualSession = isManualSessionInfoForAgent(info, cfgAgent)
-		if tp.ManualSession {
-			if manualAlias := strings.TrimSpace(info.Alias); manualAlias != "" {
-				// Explicit aliases from `gc session new --alias ...` are
-				// user-chosen command targets and must survive controller sync.
-				tp.Alias = manualAlias
-			}
-		}
-		if isEphemeralSessionInfoForAgent(info, cfgAgent) {
-			if !tp.ManualSession || strings.TrimSpace(info.Alias) == "" {
-				tp.Alias = ""
-			}
-			if tp.ManualSession && sessionQualifiedName != "" {
-				tp.InstanceName = sessionQualifiedName
-			} else {
-				tp.InstanceName = sn
-			}
-		}
-		if isNamedSessionInfo(info) {
-			// Rediscovery runs whenever the primary cfg-driven namedSpecs loop
-			// (build_desired_state.go ~1130-1139) did not populate this bead into
-			// desired this tick — e.g. during city suspend, which gates only that
-			// primary build and not this backfill. resolveTemplateForSessionBeadInfo
-			// above recovers identity/work-dir via canonicalSessionIdentityWithConfigInfo,
-			// but never sets these three fields, so without this the named-session
-			// markers session_beads.go and templateParamsSessionOrigin key off go
-			// missing and the bead is wrongly treated as non-named.
-			tp.ConfiguredNamedIdentity = info.ConfiguredNamedIdentity
-			tp.ConfiguredNamedMode = info.ConfiguredNamedMode
-			if tp.Env == nil {
-				tp.Env = make(map[string]string)
-			}
-			tp.Env["GC_SESSION_ORIGIN"] = "named"
 		}
 		installAgentSideEffects(bp, cfgAgent, tp, stderr)
 		desired[sn] = tp
 	}
 	return roots
+}
+
+// resolveDiscoveredSessionTemplate is the overlay's resolution of one open
+// session row of cfgAgent. Manual rows keep the concrete identity persisted
+// on the row (sessionBeadQualifiedNameInfo); pool-managed rows canonicalize
+// it (canonicalSessionIdentityWithConfigInfo). The v2 start's resolver
+// resolves manual and pool rows through it.
+func resolveDiscoveredSessionTemplate(bp *agentBuildParams, cfg *config.City, cfgAgent *config.Agent, info session.Info) (TemplateParams, error) {
+	var (
+		resolveAgent         *config.Agent
+		sessionQualifiedName string
+	)
+	if isManualSessionInfoForAgent(info, cfgAgent) {
+		sessionQualifiedName = sessionBeadQualifiedNameInfo(bp.cityPath, cfgAgent, bp.rigs, info)
+		resolveAgent = sessionBeadConfigAgent(cfgAgent, sessionQualifiedName)
+	} else {
+		// Canonicalize agent identity before calling resolveTemplate so a
+		// pool-managed bead with pool_slot stamped resolves as the
+		// pool-instance form here — the same shape realizePoolDesiredSessions
+		// uses. Before GC_ALIAS was excluded from CoreFingerprint, this
+		// identity mismatch caused config-drift drains; the canonical shape
+		// still keeps routing/display identity and remaining fingerprint
+		// inputs aligned across buildDesiredState paths. Named beads
+		// resolve to their own stored alias so this seam reproduces the
+		// identity the named-session loop assigned (see
+		// canonicalSessionIdentity).
+		resolveAgent, sessionQualifiedName = canonicalSessionIdentityWithConfigInfo(cfg, cfgAgent, info)
+	}
+	fpExtra := buildFingerprintExtra(resolveAgent)
+	tp, err := resolveTemplateForSessionBeadInfo(bp, resolveAgent, sessionQualifiedName, fpExtra, info)
+	if err != nil {
+		return TemplateParams{}, err
+	}
+	tp.ManualSession = isManualSessionInfoForAgent(info, cfgAgent)
+	if tp.ManualSession {
+		if manualAlias := strings.TrimSpace(info.Alias); manualAlias != "" {
+			// Explicit aliases from `gc session new --alias ...` are
+			// user-chosen command targets and must survive controller sync.
+			tp.Alias = manualAlias
+		}
+	}
+	if isEphemeralSessionInfoForAgent(info, cfgAgent) {
+		if !tp.ManualSession || strings.TrimSpace(info.Alias) == "" {
+			tp.Alias = ""
+		}
+		if tp.ManualSession && sessionQualifiedName != "" {
+			tp.InstanceName = sessionQualifiedName
+		} else {
+			tp.InstanceName = info.SessionNameMetadata
+		}
+	}
+	if isNamedSessionInfo(info) {
+		// Rediscovery runs whenever the primary cfg-driven namedSpecs loop
+		// (build_desired_state.go ~1130-1139) did not populate this bead into
+		// desired this tick — e.g. during city suspend, which gates only that
+		// primary build and not this backfill. resolveTemplateForSessionBeadInfo
+		// above recovers identity/work-dir via canonicalSessionIdentityWithConfigInfo,
+		// but never sets these three fields, so without this the named-session
+		// markers session_beads.go and templateParamsSessionOrigin key off go
+		// missing and the bead is wrongly treated as non-named.
+		tp.ConfiguredNamedIdentity = info.ConfiguredNamedIdentity
+		tp.ConfiguredNamedMode = info.ConfiguredNamedMode
+		if tp.Env == nil {
+			tp.Env = make(map[string]string)
+		}
+		tp.Env["GC_SESSION_ORIGIN"] = "named"
+	}
+	return tp, nil
 }
 
 // overlayVerdict is classifyOverlaySession's answer for one open session row.
@@ -4001,14 +4027,7 @@ func realizePoolDesiredSessionsAt(
 			// pool_slot metadata from before singleton normalization.
 			tp.PoolSlot = 0
 		} else {
-			tp.InstanceName = qualifiedInstance
-			tp.PoolSlot = poolSlot
-			if usesTransientPoolSlotIdentity(cfgAgent) {
-				clearPoolTemplateRuntimeIdentity(&tp)
-			} else {
-				tp.Alias = qualifiedInstance
-				setPoolTemplateRuntimeIdentityInfo(&tp, qualifiedInstance, sbInfo)
-			}
+			applyPoolInstanceIdentity(&tp, cfgAgent, qualifiedInstance, poolSlot, sbInfo)
 		}
 		segmentStart = bp.realizeNow()
 		installAgentSideEffects(bp, resolveAgent, tp, stderr)
@@ -4017,6 +4036,20 @@ func realizePoolDesiredSessionsAt(
 		stats.realized++
 	}
 	return stats
+}
+
+// applyPoolInstanceIdentity gives tp, a non-manual pool row's template, its
+// pool instance identity in slot poolSlot: the instance name, and the alias
+// and runtime identity unless the pool's slot identity is transient.
+func applyPoolInstanceIdentity(tp *TemplateParams, cfgAgent *config.Agent, qualifiedInstance string, poolSlot int, sbInfo session.Info) {
+	tp.InstanceName = qualifiedInstance
+	tp.PoolSlot = poolSlot
+	if usesTransientPoolSlotIdentity(cfgAgent) {
+		clearPoolTemplateRuntimeIdentity(tp)
+	} else {
+		tp.Alias = qualifiedInstance
+		setPoolTemplateRuntimeIdentityInfo(tp, qualifiedInstance, sbInfo)
+	}
 }
 
 // computePoolTriggerBindingPatch is the pure key-diff at the heart of
@@ -4271,6 +4304,12 @@ func verifiedPoolTriggerWorkDir(bp *agentBuildParams, cfgAgent *config.Agent, qu
 		// gc.work_dir before it writes the row.
 		return "", nil
 	}
+	return verifyPoolTriggerWorktree(bp, spec)
+}
+
+// verifyPoolTriggerWorktree verifies spec's worktree on disk and in git,
+// counting the probe: a realize's, never a plan's (verifiedPoolTriggerWorkDir).
+func verifyPoolTriggerWorktree(bp *agentBuildParams, spec worktree.Spec) (string, error) {
 	if bp != nil && bp.realizeProbe != nil {
 		bp.realizeProbe.worktreeVerifies.Add(1)
 	}
@@ -4901,17 +4940,26 @@ func existingPoolSlotWithConfig(cfg *config.City, cfgAgent *config.Agent, sessio
 // raw bead. Byte-identical to the raw form, oracle-pinned by
 // TestExistingPoolSlotWithConfigInfoMatchesRaw.
 func existingPoolSlotWithConfigInfo(cfg *config.City, cfgAgent *config.Agent, info session.Info) int {
+	return existingPoolSlotWithTemplates(cfg, nil, cfgAgent, &info)
+}
+
+// existingPoolSlotWithTemplates is existingPoolSlotWithConfigInfo with the
+// stored-template match answered through templates, a memo over cfg. Nil
+// computes it, as legacy does: only the v2 allocator builds one (A3). It
+// reads info through a pointer: the v2 fresh-slot occupancy asks it for
+// every row of every pool, and an Info is kilobytes.
+func existingPoolSlotWithTemplates(cfg *config.City, templates *slotTemplateMemo, cfgAgent *config.Agent, info *session.Info) int {
 	if cfgAgent == nil {
 		return 0
 	}
 	if cfgAgent.UsesCanonicalSingletonPoolIdentity() {
 		return 0
 	}
-	storedTemplateMatches := cfg == nil || storedTemplateMatchesPoolTemplate(sessionBeadStoredTemplateInfo(info), cfgAgent.QualifiedName(), cfg)
-	agentSlot := resolvePersistedPoolIdentitySlot(cfgAgent, storedTemplateMatches, sessionBeadAgentNameInfo(info))
+	storedTemplateMatches := cfg == nil || templates.storedTemplateMatchesPoolTemplate(storedTemplateRef(info), cfgAgent.QualifiedName(), cfg)
+	agentSlot := resolvePersistedPoolIdentitySlot(cfgAgent, storedTemplateMatches, sessionBeadAgentNameInfo(*info))
 	aliasSlot := resolvePersistedPoolIdentitySlot(cfgAgent, storedTemplateMatches, info.Alias)
 	sessionNameSlot := 0
-	if storedTemplateMatches && strings.TrimSpace(info.Alias) == "" && !infoOwnsPoolSessionName(info) {
+	if storedTemplateMatches && strings.TrimSpace(info.Alias) == "" && !infoOwnsPoolSessionName(*info) {
 		sessionNameSlot = resolvePersistedPoolIdentitySlot(cfgAgent, true, info.SessionNameMetadata)
 	}
 	if info.PoolSlot != "" {
@@ -5294,6 +5342,19 @@ func claimFreshPoolSlotInfo(bp *agentBuildParams, cfgAgent *config.Agent, usedSl
 		usedSlots[0] = true
 		return 0, nil
 	}
+	if bp != nil {
+		// The v2 realization memo counts its occupancy's slots once (A3).
+		if held := bp.realizeMemo.freshSlots(cfgAgent); held != nil {
+			for slot := 1; unlimited || slot <= upper; slot++ {
+				if usedSlots[slot] || held[slot] {
+					continue
+				}
+				usedSlots[slot] = true
+				return slot, nil
+			}
+			return 0, fmt.Errorf("%w: pool template %q has no free concrete slot", errPoolSessionNameUnavailable, cfgAgent.QualifiedName())
+		}
+	}
 	occupied := make(map[int]bool, len(usedSlots))
 	for slot, used := range usedSlots {
 		if used {
@@ -5388,6 +5449,12 @@ func beadIdentifiesAsCanonical(bead beads.Bead, canonical string) bool {
 
 // infoIdentifiesAsCanonical is the session.Info mirror of beadIdentifiesAsCanonical.
 func infoIdentifiesAsCanonical(i session.Info, canonical string) bool {
+	return infoRefIdentifiesAsCanonical(&i, canonical)
+}
+
+// infoRefIdentifiesAsCanonical is infoIdentifiesAsCanonical through a
+// pointer, for the v2 fresh-slot occupancy's every-row scan (A3).
+func infoRefIdentifiesAsCanonical(i *session.Info, canonical string) bool {
 	canonical = strings.TrimSpace(canonical)
 	if canonical == "" {
 		return false
@@ -5483,9 +5550,10 @@ type poolCreateView struct {
 	// allocator mints it at plan time as its ledger marker.
 	instanceToken string
 	// beforeWrite, when set, runs just before the row write with the row ID
-	// the store pre-mints (empty when it mints none). The allocator's effect
-	// uses it to tell a panic before the write from one after it.
-	beforeWrite func(rowID string)
+	// the store pre-mints (empty when it mints none); an error refuses the
+	// write. The allocator's effect uses it to tell a panic before the write
+	// from one after it, and to check its context last.
+	beforeWrite func(rowID string) error
 }
 
 // poolCreateViewOf is legacy's view: its build params, unchanged.
@@ -6872,6 +6940,11 @@ func (r *controlDispatcherRouteRepair) persist(bead *beads.Bead, store beads.Sto
 		deferRouteRepair(bead, needsRouteRepair)
 		return
 	}
+	r.write(bead, store, current, route, needsRouteRepair, clearFallback)
+}
+
+// write is persist's store write, and the in-memory mirror of what it wrote.
+func (r *controlDispatcherRouteRepair) write(bead *beads.Bead, store beads.Store, current, route string, needsRouteRepair, clearFallback bool) {
 	metadata := make(map[string]string, 2)
 	if needsRouteRepair {
 		metadata[beadmeta.RoutedToMetadataKey] = route

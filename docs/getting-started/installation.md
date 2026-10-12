@@ -227,18 +227,38 @@ for a local experiment. Successful local signing also removes stale
 
 ### Contributor setup
 
-After building, install the dev toolchain and pre-commit hooks:
+`make install` and `make build` produce the binary you run. To change Gas
+City itself, you test with [Bazel](https://bazel.build): CI checks every
+pull request with `bazel test`, and the `make` targets below run the same
+commands. Install [Bazelisk](https://github.com/bazelbuild/bazelisk), which
+reads the Bazel version the repo pins, then set up the dev toolchain and git
+hooks:
 
 ```bash
 make setup
-make check          # runs fmt, lint, vet, and unit tests
+echo 'build --config=fork-cache' >> .bazelrc.local   # read CI's build cache
+make check          # bazel test //...: unit tests, lint, vet, formatting, generated files
 ```
 
-See [CONTRIBUTING.md](https://github.com/gastownhall/gascity/blob/main/CONTRIBUTING.md)
-for the full contributor workflow, and
+The `fork-cache` line points Bazel at the project's anonymous, read-only
+cache, so anything CI already built or tested is reused instead of rerun on
+your machine. Nothing you build is uploaded.
+
+| Change | Run |
+|---|---|
+| Any change | `make check` |
+| `gc` command behavior | `make test-acceptance` |
+| Runtime, orchestrator, or formula behavior | `make test-integration` |
+| Docs | `make check-docs` |
+| Added packages, files, or imports | `make bazel-sync`, then commit the result |
+
+Plain `go test ./...` still works for a quick check of one package, but it
+is not what CI runs and skips the lint, formatting, and generated-file
+checks. See
+[CONTRIBUTING.md](https://github.com/gastownhall/gascity/blob/main/CONTRIBUTING.md)
+for the full contributor workflow and the
 [Bazel quickstart](https://github.com/gastownhall/gascity/blob/main/engdocs/bazel-quickstart.md)
-to set up the remote build cache — warm `bazel test //...` runs complete in
-under a second by sharing compiled artifacts across worktrees and CI.
+for remote execution and troubleshooting.
 
 ## Verify your installation
 

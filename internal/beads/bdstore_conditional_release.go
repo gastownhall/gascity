@@ -229,10 +229,12 @@ func isBdUnknownFlagError(msg, flag string) bool {
 	return false
 }
 
-// ErrConditionalTransferUnsupported reports that this bd does not understand the
-// --if-assignee / --if-status preconditions, so an assignee transfer cannot be
-// made conditional. Callers must not fall back to an unconditional write.
-var ErrConditionalTransferUnsupported = errors.New("bd does not support conditional assignee transfer")
+// ErrConditionalTransferUnsupported reports that a store cannot make an
+// assignee transfer conditional. BdStore wraps it when the bd on PATH does not
+// understand the --if-assignee / --if-status preconditions. A wrapper returns
+// it when the store beneath it is no ConditionalAssigneeTransferer. Match it
+// with errors.Is. Callers must not fall back to an unconditional write.
+var ErrConditionalTransferUnsupported = errors.New("conditional assignee transfer unsupported")
 
 // TransferIfCurrent moves an in_progress bead from one exact assignee spelling
 // to another, only while the bead still carries fromAssignee:
@@ -282,7 +284,7 @@ func (s *BdStore) TransferIfCurrent(id, fromAssignee, toAssignee string) (bool, 
 	}
 	detail := strings.TrimSpace(string(out)) + " " + runErr.Error()
 	if isBdUnknownFlagError(detail, "--if-assignee") || isBdUnknownFlagError(detail, "--if-status") {
-		return false, ErrConditionalTransferUnsupported
+		return false, fmt.Errorf("bd transfer-if-current: bd on PATH lacks --if-assignee/--if-status: %w", ErrConditionalTransferUnsupported)
 	}
 	if isBdIssueNotFound(runErr) {
 		return false, nil

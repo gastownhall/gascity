@@ -144,7 +144,9 @@ type runtimeStateSnapshot struct {
 
 // StateCache caches tmux runtime state to avoid spawning N subprocess calls per
 // status check or reconciler pass. Concurrent callers are coalesced via
-// singleflight so at most one tmux/process snapshot refresh runs at a time.
+// singleflight per cache generation: at most one refresh runs at a time for a
+// given generation, and an invalidation opens a new generation, so a caller
+// that arrives after one never joins the flight it superseded.
 // After a refresh fails, further TTL-expiry refreshes are held off for a window
 // that grows with each consecutive failure (see refreshBackoff).
 type StateCache struct {
@@ -294,7 +296,7 @@ func (c *StateCache) observe() cacheObservation {
 // observeRefreshing reads the cache, refreshing it first unless it is a hit,
 // and reports whether it was one.
 func (c *StateCache) observeRefreshing() (cacheObservation, bool) {
-	obs := c.observation()
+	obs, generation := c.observationAtGeneration()
 
 	// Cache hit: fresh data, not invalidated.
 	if obs.primed() && !obs.dirty && c.clock().Sub(obs.fetchedAt) < c.ttl {
@@ -308,13 +310,10 @@ func (c *StateCache) observeRefreshing() (cacheObservation, bool) {
 		return c.observation(), false
 	}
 
-	// Stale, empty, or dirty — trigger refresh.
-	// When dirty, forget any in-flight singleflight so we get a fresh fetch
-	// instead of coalescing with a pre-invalidation call.
-	if obs.dirty {
-		c.sf.Forget("refresh")
-	}
-	c.refresh()
+	// Stale, empty, or dirty — trigger a refresh. Calls from the same
+	// generation coalesce, while an invalidation advances the key so a
+	// fresh call never joins a pre-invalidation fetch.
+	c.refresh(generation)
 
 	// Read the (potentially updated) cache.
 	return c.observation(), false
@@ -329,6 +328,13 @@ func (c *StateCache) refreshHeld() bool {
 }
 
 func (c *StateCache) observation() cacheObservation {
+	obs, _ := c.observationAtGeneration()
+	return obs
+}
+
+// observationAtGeneration reads the cache together with the generation it was
+// read at, under one lock.
+func (c *StateCache) observationAtGeneration() (cacheObservation, uint64) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return cacheObservation{
@@ -338,7 +344,7 @@ func (c *StateCache) observation() cacheObservation {
 		lastErr:          c.lastError,
 		dirty:            c.dirty,
 		primedByNoServer: c.primedByNoServer,
-	}
+	}, c.generation
 }
 
 func (c *StateCache) clock() time.Time {
@@ -399,14 +405,15 @@ func classifyCacheObservation(obs cacheObservation, name string, now time.Time, 
 // succeeded; obs.lastErr then says why.
 func (c *StateCache) observeSince(since time.Time) (obs cacheObservation, ok bool) {
 	for attempt := 0; ; attempt++ {
-		obs = c.observation()
+		var generation uint64
+		obs, generation = c.observationAtGeneration()
 		if obs.lastErr == nil && obs.primed() && !obs.startedAt.Before(since) {
 			return obs, true
 		}
 		if attempt == 2 {
 			return obs, false
 		}
-		c.refresh()
+		c.refresh(generation)
 	}
 }
 
@@ -444,10 +451,12 @@ func (c *StateCache) EvictSession(name string) {
 	c.mu.Unlock()
 }
 
-// refresh executes a single coalesced fetch. If the fetch fails, the
-// last-known-good cache is preserved and the error is logged.
-func (c *StateCache) refresh() {
-	_, _, _ = c.sf.Do("refresh", func() (interface{}, error) {
+// refresh executes a single fetch, coalesced with concurrent refreshes keyed
+// by the same cache generation. If the fetch fails, the last-known-good cache
+// is preserved and the error is logged.
+func (c *StateCache) refresh(generation uint64) {
+	key := "refresh:" + strconv.FormatUint(generation, 10)
+	_, _, _ = c.sf.Do(key, func() (interface{}, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
 		defer cancel()
 
@@ -522,8 +531,8 @@ func (c *StateCache) refresh() {
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		if startGeneration < c.publishedGeneration {
-			// A dirty read forgot this flight and a newer fetch has already
-			// published; this observation is older than what readers see.
+			// A fetch keyed by a newer generation has already published;
+			// this observation is older than what readers see.
 			if verbose {
 				log.Printf("tmux state cache: discarded refresh from generation %d after %v (generation %d already published)", startGeneration, elapsed, c.publishedGeneration)
 			}
@@ -555,8 +564,8 @@ func (c *StateCache) refresh() {
 		c.primedByNoServer = false
 		c.dirty = superseded
 		c.publishedGeneration = startGeneration
-		for name, generation := range c.evictedAt {
-			if generation <= startGeneration {
+		for name, evictedGeneration := range c.evictedAt {
+			if evictedGeneration <= startGeneration {
 				delete(c.evictedAt, name)
 			}
 		}

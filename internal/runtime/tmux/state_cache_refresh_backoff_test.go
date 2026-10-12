@@ -618,13 +618,16 @@ func TestStateCacheBackoff_OverlappingFailuresAreOneOutage(t *testing.T) {
 	h.cache.Invalidate()
 
 	var readers sync.WaitGroup
-	for range 2 {
+	for read := range 2 {
 		readers.Add(1)
 		go func() {
 			defer readers.Done()
 			h.read()
 		}()
 		waitSignal(t, entered, "a fetch to start")
+		if read == 0 {
+			h.cache.Invalidate()
+		}
 	}
 	close(release)
 	waitGroup(t, &readers, "the overlapping reads to return")
@@ -767,7 +770,8 @@ func TestStateCacheBackoff_StaleFailureAfterANewerPublishOpensNoHold(t *testing.
 		h.read() // dirty: starts fetch 2, which waits
 	}()
 	waitSignal(t, entered, "the older fetch to start")
-	h.read() // dirty: forgets that flight; fetch 3 succeeds and publishes
+	h.cache.Invalidate()
+	h.read() // dirty: a new generation starts fetch 3, which succeeds and publishes
 	h.clock.advance(1500 * time.Millisecond)
 	close(release)
 	waitSignal(t, older, "the older read to return")

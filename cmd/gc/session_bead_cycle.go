@@ -104,6 +104,7 @@ func prevAssignedBeadStatus(topo storeref.Topology, id string) (open bool, close
 // conversation reset. We also update currently_processing_bead_id to the
 // new anchor so the divergence check does not refire on the next tick.
 func cycleAliveSessionForFreshReassign(
+	cityPath string,
 	info sessionpkg.Info,
 	tp TemplateParams,
 	sp runtime.Provider,
@@ -124,7 +125,7 @@ func cycleAliveSessionForFreshReassign(
 		return false, nil
 	}
 	prevBeadID := strings.TrimSpace(info.CurrentlyProcessingBeadID)
-	if err := workerKillSessionTargetWithConfig("", store, sp, cfg, name); err != nil {
+	if err := controllerKillSessionRow(cityPath, store, sp, cfg, info); err != nil {
 		if stderr != nil {
 			fmt.Fprintf(stderr, "session reconciler: stopping fresh-cycle %s: %v\n", name, err) //nolint:errcheck
 		}

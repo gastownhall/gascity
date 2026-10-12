@@ -15,23 +15,52 @@ contributors. Before making changes, read:
 1. Fork the repository.
 2. Clone your fork.
 3. Install prerequisites from
-   [docs/getting-started/installation.md](docs/getting-started/installation.md).
+   [docs/getting-started/installation.md](docs/getting-started/installation.md),
+   plus [Bazelisk](engdocs/bazel-quickstart.md#1-install-bazel): Bazel is how
+   Gas City is built and tested, and CI gates on `bazel test`.
 4. Set up tooling and hooks: `make setup`
-5. Build and run the fast quality gates: `make build && make check`
-6. Optional: if you use Bazel, opt in to the project's anonymous, read-only
-   build cache by adding `build --config=fork-cache` to your gitignored
-   `.bazelrc.local` (or pass `--config=fork-cache` per command). Results CI
-   already computed become cache hits; nothing you build is uploaded. See
+5. Opt in to the project's anonymous, read-only build cache: add
+   `build --config=fork-cache` to your gitignored `.bazelrc.local` (or pass
+   `--config=fork-cache` per command). Results CI already computed become
+   cache hits; misses run on your machine; nothing you build is uploaded.
+   Maintainers with an rbe-west client certificate use
+   `--config=remote-exec` instead, which executes on the build farm. See
    [engdocs/bazel-quickstart.md](engdocs/bazel-quickstart.md).
+6. Run the quality gates: `make check` (`bazel test //...` plus the shell
+   guards: unit tests, nogo lint and vet, formatting, generated artifacts,
+   docs sync and the policy checks, the same targets CI's unit lane runs).
+
+### Building and testing
+
+CI runs Bazel, so a change is ready when the Bazel tiers it touches pass:
+
+| What changed | Run |
+|---|---|
+| Anything | `make check` (= `bazel test //...` plus shell guards) |
+| Acceptance behavior (`gc` commands end to end) | `make test-acceptance` (= `bazel test --config=acceptance //test/acceptance:acceptance_test`) |
+| Runtime, controller, or workflow behavior | `make test-integration` (= `bazel test --config=integration //test:integration_packages //test/integration:integration_test`) |
+| Docs, navigation, or links | `make check-docs` (= `bazel test //test/docsync:docsync_test`) |
+| Imports, packages, or files added/removed | `make bazel-sync`, then commit the regenerated BUILD files |
+
+Narrow while iterating: `bazel test //internal/config:config_test`.
+`go test ./internal/config -run TestX` is fine as a quick inner loop, but it
+is not what CI enforces: it runs none of the nogo, format, generated-artifact
+or policy targets. Each `make` target above has a plain-Go twin
+(`make test-go`, `make check-go`, `make test-acceptance-go`,
+`make test-integration-go`, `make check-docs-go`) for offline work. TESTING.md
+"Building and testing" has the full tier table.
 
 `make setup` installs a pre-commit hook at `.githooks/pre-commit` that
 auto-formats staged Go files and, when any Go file is staged,
 regenerates `internal/api/openapi.json` and `docs/reference/schema/openapi.json`
 from the live supervisor. The hook stages both spec copies so the
 committed spec never drifts from what the server actually serves. It also
-runs the fast CI-equivalent gates for local changes: `make lint`,
-`make vet`, and `make test` for Go changes, and `make check-docs` for
-Markdown/docs/spec changes.
+runs nogo (lint and vet) over the staged Go packages
+(`make lint-changed LINT_CHANGED_SCOPE=staged`) and `make check-docs` for
+Markdown/docs/spec changes. The pre-push hook runs `bazel test //...` when a
+push changes Go sources; if it has to fall back to plain `go test` (no
+Bazel installed, or no Go at `/usr/local/go` for the cache mode) it says so
+loudly, because that suite is not what CI enforces.
 
 **Dashboard SPA.** The dashboard at `internal/api/dashboardspa/web/` is a
 TypeScript SPA that talks directly to the supervisor's OpenAPI-typed
@@ -44,35 +73,40 @@ npm is missing and a spec change is staged, the hook now fails closed with
 the recovery command, since a stale client would otherwise ship silently
 until CI catches it — for unrelated (docs/Go-only) changes it still just
 warns and skips the rebuild. The hook runs dashboard typecheck, Vitest, and
-production build for dashboard/API-schema changes. Run `make dashboard-dev`
+production build for dashboard/API-schema changes. Bazel builds and tests
+the SPA hermetically (rules_js: a pinned Node.js, and every npm package from
+`pnpm-lock.yaml`), and that is what CI gates on. Run `make dashboard-dev`
 to iterate with Vite HMR, `make dashboard-build` to produce a fresh
-bundle, `make dashboard-check` for typecheck + build + test. For
-API-schema changes, run `make dashboard-ci` instead — it also regenerates
-the typed client from the spec and fails if that or `dist/` is stale,
-which `dashboard-check` alone does not catch. For dashboard or API-schema
+bundle, `make dashboard-check` for typecheck + Vitest + build + the drift
+checks (the committed `dist/`, the generated client and `pnpm-lock.yaml`
+must match their sources; `make dashboard-generate-client` and
+`make dashboard-lock` regenerate the latter two). After changing npm
+dependencies with npm, run `make dashboard-lock`. For dashboard or API-schema
 changes, also smoke the built app with
 `npm run preview -- --host 127.0.0.1 --port <port>` from
 `internal/api/dashboardspa/web/` and load the served page before pushing.
 
 ## Development Workflow
 
-Every pull request links a documented issue, maintainers included. GitHub
-Issues is the public tracker, and the issue is where the context lives: why
-the change is needed, what it affects, and how we will know it works. The
-issue does not need maintainer approval before you open the pull request;
-file it first or alongside.
+GitHub Issues is the public tracker. Use an issue when it adds context
+reviewers need: a user-visible bug, a behavior or design change worth
+discussing first, or work that spans several pull requests. The issue holds
+why the change is needed, what it affects, and how we will know it works, and
+it does not need maintainer approval before you open the pull request. Small,
+self-explanatory changes (typos, flaky tests, refactors, CI or docs tweaks)
+can go straight to a pull request whose description explains the why.
 
-1. Find or file an issue. Use the issue forms: they ask for the motivation,
-   impact, risk, and verification plan (or, for a bug, the reproduction and
-   impact), which is most of what review needs. Changes that add SDK surface
-   should explain how they pass the
+1. If the change warrants an issue, find or file one. The issue forms ask for
+   the motivation, impact, risk, and verification plan (or, for a bug, the
+   reproduction and impact), which is most of what review needs. Changes that
+   add SDK surface should explain how they pass the
    [Primitive Test](engdocs/contributors/primitive-test.md).
 2. Create a branch from `main` (see [Branch Naming](#branch-naming)) and make
    the change.
-3. Run `make check`, and `make check-docs` if you touched docs, navigation,
-   or cross-links.
-4. Open a pull request whose description says `Closes #<issue>` and shows
-   evidence that the change works end to end.
+3. Run `make check`, plus the tiers your change touches from
+   [Building and testing](#building-and-testing).
+4. Open a pull request that explains the change, shows evidence that it works
+   end to end, and says `Closes #<issue>` when there is one.
 
 Using an AI agent is fine; you are accountable for what it produces. Agents
 working in this repo read [AGENTS.md](AGENTS.md), which carries the same
@@ -88,8 +122,8 @@ What is planned next is in [ROADMAP.md](ROADMAP.md).
 Only one directory can own `core.hooksPath`, and beads' installer claims it
 for `.beads/hooks`. Those hooks exec `bd hooks run <hook>` without chaining
 onward, so while beads owns the path every gate in `.githooks` — staged-Go
-formatting, `lint-changed`, the three codegen+stage steps, `make vet`, and the
-push-time suite — is skipped on every commit. Nothing reports this: git simply
+formatting, `lint-changed` (nogo), the three codegen+stage steps, and the
+push-time Bazel suite — is skipped on every commit. Nothing reports this: git simply
 stops invoking the hooks, so commits look clean while spec-derived drift lands
 on the mainline until a later suite failure surfaces the drift.
 
@@ -102,9 +136,11 @@ hook that beads manages means adding its `.githooks` counterpart too —
 Beads' installer can reclaim `core.hooksPath` at any time. When it does,
 `make check-hooks` fails and `make setup` puts it back.
 
-`make spec-ci` (run by the required `preflight-generated` CI job) is the
-backstop for spec/client drift, but it only sees work that reaches a PR —
-locally merged branches depend on the pre-commit gate actually running.
+The Bazel drift tests (`//cmd/genspec:genspec_in_sync_test`,
+`//internal/api/genclient:genclient_test`, `//cmd/genschema:genschema_in_sync_test`)
+are the CI backstop for spec/client drift, but they only see work that
+reaches a PR — locally merged branches depend on the pre-commit gate actually
+running.
 
 ### Branch Naming
 
@@ -202,17 +238,21 @@ Run `make help` for the full list. The most useful targets are:
 | `make setup` | Install local tools and git hooks |
 | `make build` | Build `gc` with version metadata |
 | `make install` | Install `gc` into `$(go env GOPATH)/bin` |
-| `make check` | Fast Go quality gates |
-| `make check-docs` | Docs sync tests (on-disk link checker; does not run `mint broken-links`) |
-| `make check-all` | Extended quality gates including integration tests |
-| `make test` | Unit and repo-level Go tests |
-| `make test-integration` | Integration tests |
+| `make check` | Fast quality gates: `bazel test //...` (unit, nogo, format, generated artifacts, policy) plus shell guards |
+| `make check-docs` | Docs sync tests, `bazel test //test/docsync:docsync_test` (on-disk link checker; does not run `mint broken-links`) |
+| `make check-all` | `make check` plus the acceptance and integration Bazel suites |
+| `make test` | `bazel test //...`, CI's unit lane |
+| `make test-acceptance` | Acceptance Tier A under Bazel (`--config=acceptance`) |
+| `make test-integration` | Integration-tagged suites under Bazel (`--config=integration`) |
+| `make bazel-sync` | Regenerate BUILD files after adding packages, files, or imports |
+| `make test-go`, `make check-go`, ... | Plain-Go twins of the targets above, for offline work; not what CI enforces |
 | `make test-integration-huma` | Supervisor binary smoke test (builds `gc`, boots the supervisor, asserts `/openapi.json` + `gc cities` work) |
-| `make dashboard-build` | Compile the dashboard bundle and sync it into the embedded `dist/` |
+| `make dashboard-build` | Build the dashboard bundle under Bazel and sync it into the embedded `dist/` (`dashboard-build-npm`: the same through local npm) |
 | `make dashboard-dev` | Vite dev server for SPA iteration |
-| `make dashboard-check` | Typecheck + build + test the dashboard |
-| `make dashboard-ci` | `dashboard-check` plus fail-on-drift for the generated API client and `dist/` — the gate for openapi.json/dashboard changes |
-| `make cover` | Coverage run |
+| `make dashboard-check` | The dashboard's Bazel gate: typecheck, Vitest, build, and drift checks for `dist/`, the generated API client and `pnpm-lock.yaml` (`dashboard-ci` is an alias; `dashboard-check-npm` runs the npm steps locally) |
+| `make dashboard-generate-client` | Regenerate the typed API client from `internal/api/openapi.json` |
+| `make dashboard-lock` | Re-derive `pnpm-lock.yaml` (what Bazel installs) from `package-lock.json` |
+| `make cover` | Go-native coverage run (CI's coverage is `bazel coverage //...`) |
 
 > **`make install` writes to the shared `$(go env GOPATH)/bin`.** It (and
 > `go install ./cmd/gc`) install `gc` there, and `make install` also re-points
@@ -283,7 +323,8 @@ Run this after changing build/packaging scripts or upgrading the Go toolchain.
 - Keep the first line under 72 characters
 - Explain *why* in the body; reviewers and `git blame` readers see the commit,
   not the PR thread
-- Reference the issue (`Closes #123`) in the pull request description
+- Reference the issue (`Closes #123`) in the pull request description when
+  there is one
 
 ## Issue Triage Labels
 

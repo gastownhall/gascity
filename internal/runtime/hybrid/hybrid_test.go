@@ -13,6 +13,88 @@ import (
 
 func isRemote(name string) bool { return strings.Contains(name, "remote-agent") }
 
+type unattendedStopCall struct {
+	name          string
+	expectedToken string
+}
+
+type unattendedStopperProvider struct {
+	runtime.Provider
+	calls []unattendedStopCall
+	err   error
+}
+
+func newUnattendedStopperProvider(err error) *unattendedStopperProvider {
+	return &unattendedStopperProvider{Provider: runtime.NewFake(), err: err}
+}
+
+func (p *unattendedStopperProvider) StopUnattendedSession(name, expectedToken string) error {
+	p.calls = append(p.calls, unattendedStopCall{name: name, expectedToken: expectedToken})
+	return p.err
+}
+
+func TestProviderStopUnattendedSessionRoutesOnlySelectedBackend(t *testing.T) {
+	t.Run("local", func(t *testing.T) {
+		local := newUnattendedStopperProvider(nil)
+		remote := newUnattendedStopperProvider(nil)
+		p := New(local, remote, isRemote)
+
+		if err := p.StopUnattendedSession("local-agent", "token-local"); err != nil {
+			t.Fatalf("StopUnattendedSession(local): %v", err)
+		}
+		if got := local.calls; len(got) != 1 || got[0] != (unattendedStopCall{name: "local-agent", expectedToken: "token-local"}) {
+			t.Fatalf("local unattended stops = %#v, want exact local-agent/token-local call", got)
+		}
+		if got := remote.calls; len(got) != 0 {
+			t.Fatalf("remote unattended stops = %#v, want none", got)
+		}
+	})
+
+	t.Run("remote", func(t *testing.T) {
+		local := newUnattendedStopperProvider(nil)
+		remote := newUnattendedStopperProvider(nil)
+		p := New(local, remote, isRemote)
+
+		if err := p.StopUnattendedSession("remote-agent-1", "token-remote"); err != nil {
+			t.Fatalf("StopUnattendedSession(remote): %v", err)
+		}
+		if got := remote.calls; len(got) != 1 || got[0] != (unattendedStopCall{name: "remote-agent-1", expectedToken: "token-remote"}) {
+			t.Fatalf("remote unattended stops = %#v, want exact remote-agent-1/token-remote call", got)
+		}
+		if got := local.calls; len(got) != 0 {
+			t.Fatalf("local unattended stops = %#v, want none", got)
+		}
+	})
+
+	t.Run("unsupported local does not probe remote", func(t *testing.T) {
+		remote := newUnattendedStopperProvider(nil)
+		p := New(runtime.NewFake(), remote, isRemote)
+
+		err := p.StopUnattendedSession("local-agent", "token")
+		if err == nil || !strings.Contains(err.Error(), "local backend") {
+			t.Fatalf("StopUnattendedSession error = %v, want contextual local-backend error", err)
+		}
+		if got := remote.calls; len(got) != 0 {
+			t.Fatalf("remote unattended stops = %#v, want no fallback probe", got)
+		}
+	})
+
+	t.Run("remote error does not probe local", func(t *testing.T) {
+		sentinel := errors.New("remote unattended stop unavailable")
+		local := newUnattendedStopperProvider(nil)
+		remote := newUnattendedStopperProvider(sentinel)
+		p := New(local, remote, isRemote)
+
+		err := p.StopUnattendedSession("remote-agent-1", "token")
+		if !errors.Is(err, sentinel) || !strings.Contains(err.Error(), "remote backend") {
+			t.Fatalf("StopUnattendedSession error = %v, want wrapped contextual remote error", err)
+		}
+		if got := local.calls; len(got) != 0 {
+			t.Fatalf("local unattended stops = %#v, want no fallback probe", got)
+		}
+	})
+}
+
 type livenessObservationErrorProvider struct {
 	*runtime.Fake
 	err error
@@ -638,6 +720,38 @@ func TestHybridBackends_NamesBackendsWithoutListing(t *testing.T) {
 	for i, b := range backends {
 		if b.Label != listings[i].Label || b.Provider != listings[i].Provider {
 			t.Errorf("backend %d = (%q, %T), listing = (%q, %T)", i, b.Label, b.Provider, listings[i].Label, listings[i].Provider)
+		}
+	}
+}
+
+// serverDeathFake is a Fake backend that confirms, or refuses to confirm, that
+// its server is dead, as tmux does through runtime.ServerDeathConfirmer.
+type serverDeathFake struct {
+	*runtime.Fake
+	dead bool
+}
+
+func (f *serverDeathFake) ServerConfirmedDead() bool { return f.dead }
+
+// hybrid forwards ServerDeathConfirmer to its local tmux backend, so
+// StopForCleanup absorbs a missing-server answer only for a server confirmed
+// dead, never for a live one whose socket file was deleted.
+func TestStopForCleanupMissingServerUsesLocalConfirmer(t *testing.T) {
+	serverGone := fmt.Errorf("killing session sky: %w", errors.New("no tmux server running"))
+	for _, dead := range []bool{false, true} {
+		local := &serverDeathFake{Fake: runtime.NewFake(), dead: dead}
+		local.StopErrors["sky"] = serverGone
+		p := New(local, runtime.NewFake(), isRemote)
+
+		if got := p.ServerConfirmedDead(); got != dead {
+			t.Errorf("ServerConfirmedDead() = %v, want the local backend's %v", got, dead)
+		}
+		err := runtime.StopForCleanup(p, "sky")
+		if dead && err != nil {
+			t.Errorf("StopForCleanup = %v over a dead server, want nil", err)
+		}
+		if !dead && !errors.Is(err, serverGone) {
+			t.Errorf("StopForCleanup = %v over a live server, want the missing-server answer", err)
 		}
 	}
 }

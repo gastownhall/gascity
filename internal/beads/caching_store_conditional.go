@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"time"
 
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 )
@@ -45,8 +44,9 @@ import (
 // Prime's concurrent-mutation path and PrimeActive fence on the write's
 // writeSeq as well as its beadSeq, so none of them can install a row read
 // before the write. An event with no cached row to merge onto is fenced on
-// writeSeq and deletedSeq, and a conflicting event is verified against the
-// backing while beadSeq is present or the local write is younger than
+// writeSeq and deletedSeq. A field-changing bead.updated is always verified
+// against the backing; a conflicting dependency-only update or bead.created is
+// verified while beadSeq is present or the local write is younger than
 // recentWriteVerifyWindow (see CacheRevision for the remaining known limits).
 // The refetched row feeds the change notification verbatim.
 var (
@@ -65,8 +65,10 @@ func (h *cachingAtomicConditionalCloser) CloseWithMetadataIfMatch(id string, exp
 		return Bead{}, ErrConditionalWriteUnsupported
 	}
 	before := h.cache.currentMutationSeq()
+	generation := h.cache.beginCloseIntent(id)
 	closed, err := closer.CloseWithMetadataIfMatch(id, expectedRevision, metadata)
 	if err != nil {
+		h.cache.endCloseIntent(id, generation)
 		h.cache.applyConditionalWriteFailure(id, err)
 		return Bead{}, err
 	}
@@ -75,12 +77,14 @@ func (h *cachingAtomicConditionalCloser) CloseWithMetadataIfMatch(id string, exp
 	// the backing write (ev.prior), and the evicted row, if any, is still the
 	// one at expectedRevision (a reconcile can absorb an external change
 	// without a seq bump).
-	ev := h.cache.evictForConditionalWrite(id)
+	ev, own := h.cache.evictForConditionalClose(id, generation)
 	if closed.ID == id && closed.Status == "closed" && ev.prior <= before &&
 		(!ev.cached || ev.revision == expectedRevision) {
 		h.cache.installAfterConditionalWrite(id, ev, closed)
 	}
-	h.cache.notifyChange(ChangeLocal, "bead.closed", closed)
+	if own {
+		h.cache.notifyChange(ChangeLocal, "bead.closed", closed)
+	}
 	return closed, nil
 }
 
@@ -193,14 +197,32 @@ func (c *CachingStore) UpdateIfMatch(id string, expectedRevision int64, opts Upd
 	if !ok {
 		return ErrConditionalWriteUnsupported
 	}
+	var generation uint64
+	if updateCloses(opts) {
+		generation = c.beginCloseIntent(id)
+	}
 	if err := writer.UpdateIfMatch(id, expectedRevision, opts); err != nil {
+		if updateCloses(opts) {
+			c.endCloseIntent(id, generation)
+		}
 		c.applyConditionalWriteFailure(id, err)
 		return err
 	}
 	// EVICT unconditionally, then refetch verbatim: installing local fields
 	// over an independently-refreshed revision would fabricate a snapshot
-	// that never existed (see the file comment).
-	ev := c.evictForConditionalWrite(id)
+	// that never existed (see the file comment). A status=closed update is a
+	// close, announced as bead.closed when it owns the close, as Update does.
+	eventType := "bead.updated"
+	var ev conditionalEviction
+	if updateCloses(opts) {
+		var own bool
+		ev, own = c.evictForConditionalClose(id, generation)
+		if own {
+			eventType = "bead.closed"
+		}
+	} else {
+		ev = c.evictForConditionalUpdate(id, opts)
+	}
 	fresh, err := c.refetchAfterConditionalWrite(id, ev, func(b Bead) bool {
 		return ev.postWriteRevision(b, expectedRevision) && updateReflected(b, opts)
 	})
@@ -208,7 +230,7 @@ func (c *CachingStore) UpdateIfMatch(id string, expectedRevision int64, opts Upd
 		c.recordProblem("refresh bead after conditional update", fmt.Errorf("%s: %w", id, err))
 		return nil
 	}
-	c.notifyChange(ChangeLocal, "bead.updated", fresh)
+	c.notifyChange(ChangeLocal, eventType, fresh)
 	return nil
 }
 
@@ -217,18 +239,22 @@ func (c *CachingStore) UpdateIfMatch(id string, expectedRevision int64, opts Upd
 // closed beads from Get do this on every successful close — and resolves to an
 // evict, so the next read reports exactly what the backing itself would.
 // Unlike the unconditional Close, a fenced re-close of an already-closed bead
-// is not suppressed and re-fires bead.closed: fenced paths carry no
-// idempotence short-circuits, and only the backing evaluates the fence.
+// is not short-circuited: fenced paths carry no idempotence short-circuits, and
+// only the backing evaluates the fence. Its bead.closed is announced only when
+// the write owns the close (claimCloseLocked), so a close the cache already
+// announced is not announced twice.
 func (c *CachingStore) CloseIfMatch(id string, expectedRevision int64) error {
 	writer, ok := ConditionalWriterFor(c.conditionalBacking())
 	if !ok {
 		return ErrConditionalWriteUnsupported
 	}
+	generation := c.beginCloseIntent(id)
 	if err := writer.CloseIfMatch(id, expectedRevision); err != nil {
+		c.endCloseIntent(id, generation)
 		c.applyConditionalWriteFailure(id, err)
 		return err
 	}
-	ev := c.evictForConditionalWrite(id)
+	ev, own := c.evictForConditionalClose(id, generation)
 	fresh, err := c.refetchAfterConditionalWrite(id, ev, func(b Bead) bool {
 		return ev.postWriteRevision(b, expectedRevision) && b.Status == "closed"
 	})
@@ -241,7 +267,9 @@ func (c *CachingStore) CloseIfMatch(id string, expectedRevision int64) error {
 	// The close is proven committed; forcing the status onto the event
 	// payload states that fact without installing anything in the cache.
 	setBeadStatus(&fresh, "closed")
-	c.notifyChange(ChangeLocal, "bead.closed", fresh)
+	if own {
+		c.notifyChange(ChangeLocal, "bead.closed", fresh)
+	}
 	return nil
 }
 
@@ -263,7 +291,7 @@ func (c *CachingStore) DeleteIfMatch(id string, expectedRevision int64) error {
 	seq := c.noteLocalMutationLocked(id)
 	c.tombstoneLocked(id, seq)
 	c.clearDependentReadyProjectionsLocked(id)
-	c.markFreshLocked(time.Now())
+	c.markFreshLocked(c.clockNow())
 	c.updateStatsLocked()
 	c.mu.Unlock()
 	if haveDeleted {
@@ -380,6 +408,39 @@ func (ev conditionalEviction) postWriteRevision(b Bead, expectedRevision int64) 
 func (c *CachingStore) evictForConditionalWrite(id string) conditionalEviction {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.evictForConditionalWriteLocked(id)
+}
+
+// evictForConditionalUpdate is evictForConditionalWrite for a fenced update
+// that does not close id. One that sets another status reopens the bead, so a
+// close after it is a new one, even when no refetch installs the reopened row
+// (noteNotClosedLocked).
+func (c *CachingStore) evictForConditionalUpdate(id string, opts UpdateOpts) conditionalEviction {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if opts.Status != nil {
+		c.noteNotClosedLocked(id)
+	}
+	return c.evictForConditionalWriteLocked(id)
+}
+
+// evictForConditionalClose is evictForConditionalWrite for a fenced write that
+// left id closed, whose close intent began in generation. Under the same lock
+// it first claims the bead.closed announcement (claimCloseIntentLocked) from
+// the row it is about to evict, and reports whether the write owns it: a close
+// a concurrent read already installed and announced is not announced again,
+// and one a read queued is announced by the write instead of the queue. A read
+// after the eviction finds no held row, so it queues nothing.
+func (c *CachingStore) evictForConditionalClose(id string, generation uint64) (conditionalEviction, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	own := c.claimCloseIntentLocked(id, generation, true, false)
+	return c.evictForConditionalWriteLocked(id), own
+}
+
+// evictForConditionalWriteLocked is evictForConditionalWrite's body. Caller
+// must hold c.mu in write mode.
+func (c *CachingStore) evictForConditionalWriteLocked(id string) conditionalEviction {
 	deps, hadDeps := c.deps[id]
 	row, cached := c.beads[id]
 	_, dirty := c.dirty[id]
@@ -397,7 +458,7 @@ func (c *CachingStore) evictForConditionalWrite(id string) conditionalEviction {
 	delete(c.deps, id)
 	c.dirty[id] = struct{}{}
 	c.clearDependentReadyProjectionsLocked(id)
-	c.markFreshLocked(time.Now())
+	c.markFreshLocked(c.clockNow())
 	c.updateStatsLocked()
 	return ev
 }
@@ -484,8 +545,8 @@ func (c *CachingStore) installAfterConditionalWrite(id string, ev conditionalEvi
 		opts.depsMode = depsExplicit
 		opts.deps = ev.deps
 	}
-	c.absorbFreshLocked(id, row, time.Now(), opts)
-	c.markFreshLocked(time.Now())
+	c.absorbFreshLocked(id, row, c.clockNow(), opts)
+	c.markFreshLocked(c.clockNow())
 	c.updateStatsLocked()
 }
 

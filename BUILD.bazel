@@ -1,7 +1,10 @@
 load("@gazelle//:def.bzl", "gazelle")
 load("@rules_go//go:def.bzl", "go_library")
+load("@rules_python//python:py_test.bzl", "py_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 # gazelle:prefix github.com/gastownhall/gascity
+# gazelle:build_tags integration
 
 # internal/config has two libraries sharing one importpath (hand-written bounded
 # experiment). All dependents must use the full :config closure.
@@ -9,10 +12,109 @@ load("@rules_go//go:def.bzl", "go_library")
 
 gazelle(name = "gazelle")
 
+# The integration lane's build (.bazelrc test:integration). Every go_test
+# compiles its `//go:build integration` files only there (the build_tags
+# directive above lists them in srcs; rules_go filters by the gotags define),
+# and selects on this for what only those files need: pinned tools as data,
+# the env that hands them over, GC_FAST_UNIT.
+config_setting(
+    name = "gotags_integration",
+    define_values = {"gotags": "integration"},
+    visibility = ["//:__subpackages__"],
+)
+
 exports_files([
+    "MODULE.bazel",
     "go.mod",
     "go.sum",
 ])
+
+# gofumpt + goimports over every Go file, the formatters `make fmt-check`
+# runs through golangci-lint, pinned in MODULE.bazel.
+sh_test(
+    name = "go_format_test",
+    srcs = ["//scripts:check-go-format.sh"],
+    args = [
+        "$(rootpath @cc_mvdan_gofumpt//:gofumpt)",
+        "$(rootpath @org_golang_x_tools//cmd/goimports)",
+    ],
+    data = [
+        "go.mod",
+        ":repo_go_srcs",
+        ":repo_go_test_srcs",
+        "@cc_mvdan_gofumpt//:gofumpt",
+        "@org_golang_x_tools//cmd/goimports",
+    ],
+)
+
+# `goreleaser check` over the release configuration (formerly ci.yml's
+# "Release config" job), with the GoReleaser pinned in MODULE.bazel.
+sh_test(
+    name = "goreleaser_check_test",
+    srcs = ["//scripts:check-goreleaser-config.sh"],
+    args = [
+        "$(rootpath @goreleaser_bin//:goreleaser)",
+        "$(rootpath .goreleaser.yml)",
+    ],
+    data = [
+        ".goreleaser.yml",
+        "@goreleaser_bin//:goreleaser",
+    ],
+)
+
+# Unit tests of the CI runner-selection and suite-coverage helpers the
+# workflows run (formerly `make test-ci-policy`'s Python half).
+py_test(
+    name = "ci_runner_policy_test",
+    srcs = [
+        ".github/workflows/scripts/runner_policy.py",
+        ".github/workflows/scripts/test_runner_policy.py",
+    ],
+    imports = [".github/workflows/scripts"],
+    main = ".github/workflows/scripts/test_runner_policy.py",
+)
+
+# tools/bazel/ci_analytics_extract.py: the lane/coverage job step that turns
+# a BEP file, compact exec log and profile into the redacted ci-analytics
+# artifact. testdata/ci_analytics/real/* are genuine Bazel 9.2.0 output
+# (regen.sh); poisoned-bep.json proves the redaction leaks nothing.
+py_test(
+    name = "ci_analytics_extract_test",
+    size = "small",
+    srcs = [
+        "tools/bazel/ci_analytics_extract.py",
+        "tools/bazel/ci_analytics_extract_test.py",
+    ],
+    data = glob(["tools/bazel/testdata/ci_analytics/**"]),
+    imports = ["tools/bazel"],
+    main = "tools/bazel/ci_analytics_extract_test.py",
+)
+
+# tools/bazel/rrc_verify.py: bazel-rrc-verify.yml's nightly check of the
+# remote repo contents cache against a cold fetch (ga-vnycm2.26). Its golden
+# keys come from Bazel 9.3.0's own writes; .bazelversion must name a release
+# it knows the cache GUID of.
+py_test(
+    name = "rrc_verify_test",
+    size = "small",
+    srcs = [
+        "tools/bazel/rrc_verify.py",
+        "tools/bazel/rrc_verify_test.py",
+    ],
+    data = [".bazelversion"],
+    imports = ["tools/bazel"],
+    main = "tools/bazel/rrc_verify_test.py",
+)
+
+py_test(
+    name = "ci_suite_coverage_test",
+    srcs = [
+        ".github/workflows/scripts/ci_suite_coverage.py",
+        ".github/workflows/scripts/test_ci_suite_coverage.py",
+    ],
+    imports = [".github/workflows/scripts"],
+    main = ".github/workflows/scripts/test_ci_suite_coverage.py",
+)
 
 go_library(
     name = "gascity",
@@ -171,6 +273,7 @@ exports_files([
     "deps.env",
     ".gitignore",
     ".golangci.yml",
+    ".goreleaser.yml",
     ".trivyignore.yaml",
 ])
 
@@ -238,6 +341,7 @@ filegroup(
         "//cmd/genspec:bazel_repo_srcs",
         "//cmd/openapi-breaking:bazel_repo_srcs",
         "//contrib:bazel_repo_srcs",
+        "//contrib/openclaw-bridge:bazel_repo_srcs",
         "//docs:bazel_repo_srcs",
         "//examples:bazel_repo_srcs",
         "//examples/bd:bazel_repo_srcs",
@@ -252,9 +356,13 @@ filegroup(
         "//internal/agent:bazel_repo_srcs",
         "//internal/agentutil:bazel_repo_srcs",
         "//internal/api:bazel_repo_srcs",
+        "//internal/api/apicontract:bazel_repo_srcs",
         "//internal/api/apierr:bazel_repo_srcs",
         "//internal/api/dashboardbff:bazel_repo_srcs",
         "//internal/api/dashboardspa:bazel_repo_srcs",
+        "//internal/api/dashboardspa/web:bazel_repo_srcs",
+        "//internal/api/dashboardspa/web/frontend:bazel_repo_srcs",
+        "//internal/api/dashboardspa/web/shared:bazel_repo_srcs",
         "//internal/api/genclient:bazel_repo_srcs",
         "//internal/bazeltest:bazel_repo_srcs",
         "//internal/bdflags:bazel_repo_srcs",
@@ -320,6 +428,7 @@ filegroup(
         "//internal/hostboot:bazel_repo_srcs",
         "//internal/importsvc:bazel_repo_srcs",
         "//internal/logutil:bazel_repo_srcs",
+        "//internal/loopbackport:bazel_repo_srcs",
         "//internal/mail:bazel_repo_srcs",
         "//internal/mail/beadmail:bazel_repo_srcs",
         "//internal/mail/exec:bazel_repo_srcs",
@@ -338,6 +447,7 @@ filegroup(
         "//internal/packregistry:bazel_repo_srcs",
         "//internal/pathdurability:bazel_repo_srcs",
         "//internal/pathutil:bazel_repo_srcs",
+        "//internal/pendingwatch:bazel_repo_srcs",
         "//internal/pidutil:bazel_repo_srcs",
         "//internal/poolplan:bazel_repo_srcs",
         "//internal/pricing:bazel_repo_srcs",
@@ -399,6 +509,7 @@ filegroup(
         "//internal/testpolicy/bazelhermetic:bazel_repo_srcs",
         "//internal/testpolicy/bepsummary:bazel_repo_srcs",
         "//internal/testpolicy/resourcecensus:bazel_repo_srcs",
+        "//internal/testpolicy/shardbudget:bazel_repo_srcs",
         "//internal/testpolicy/timingplan:bazel_repo_srcs",
         "//internal/testpolicy/timingplancli:bazel_repo_srcs",
         "//internal/testpolicy/timingsummary:bazel_repo_srcs",
@@ -421,7 +532,6 @@ filegroup(
         "//internal/worker/fakecmd:bazel_repo_srcs",
         "//internal/worker/transcript:bazel_repo_srcs",
         "//internal/worker/workertest:bazel_repo_srcs",
-        "//internal/workqueue:bazel_repo_srcs",
         "//internal/workrecord:bazel_repo_srcs",
         "//internal/workspacesvc:bazel_repo_srcs",
         "//internal/worktree:bazel_repo_srcs",
@@ -440,7 +550,10 @@ filegroup(
         "//test/acceptance/tier_c:bazel_repo_srcs",
         "//test/acceptance/tutorial_goldens:bazel_repo_srcs",
         "//test/acceptance/worker_inference:bazel_repo_srcs",
+        "//test/containerhost:bazel_repo_srcs",
         "//test/dashport:bazel_repo_srcs",
+        "//test/dashport/cmd/fakesupervisor:bazel_repo_srcs",
+        "//test/dashport/corpus:bazel_repo_srcs",
         "//test/docsync:bazel_repo_srcs",
         "//test/dolttest:bazel_repo_srcs",
         "//test/integration:bazel_repo_srcs",
@@ -450,6 +563,21 @@ filegroup(
         "//test/tmuxtest:bazel_repo_srcs",
         "//test/toolhome:bazel_repo_srcs",
         "//test/workflows:bazel_repo_srcs",
+        "//tools/nogo:bazel_repo_srcs",
+        "//tools/nogo/analyzers/errorlint:bazel_repo_srcs",
+        "//tools/nogo/analyzers/gocritic:bazel_repo_srcs",
+        "//tools/nogo/analyzers/internal/analyzertest:bazel_repo_srcs",
+        "//tools/nogo/analyzers/internal/position:bazel_repo_srcs",
+        "//tools/nogo/analyzers/internal/testunit:bazel_repo_srcs",
+        "//tools/nogo/analyzers/misspell:bazel_repo_srcs",
+        "//tools/nogo/analyzers/revive:bazel_repo_srcs",
+        "//tools/nogo/analyzers/runtimelease:bazel_repo_srcs",
+        "//tools/nogo/analyzers/testrelax:bazel_repo_srcs",
+        "//tools/nogo/analyzers/unconvert:bazel_repo_srcs",
+        "//tools/nogo/analyzers/unparam:bazel_repo_srcs",
+        "//tools/nogo/analyzers/unused:bazel_repo_srcs",
+        "//tools/nogo/analyzers/v2purity:bazel_repo_srcs",
+        "//tools/nogo/analyzers/worklegs:bazel_repo_srcs",
         ":go.mod",
         ":Makefile",
         ":TESTING.md",
@@ -471,6 +599,7 @@ filegroup(
         "//cmd/genspec:bazel_go_srcs",
         "//cmd/openapi-breaking:bazel_go_srcs",
         "//contrib:bazel_go_srcs",
+        "//contrib/openclaw-bridge:bazel_go_srcs",
         "//docs:bazel_go_srcs",
         "//examples:bazel_go_srcs",
         "//examples/bd:bazel_go_srcs",
@@ -485,9 +614,13 @@ filegroup(
         "//internal/agent:bazel_go_srcs",
         "//internal/agentutil:bazel_go_srcs",
         "//internal/api:bazel_go_srcs",
+        "//internal/api/apicontract:bazel_go_srcs",
         "//internal/api/apierr:bazel_go_srcs",
         "//internal/api/dashboardbff:bazel_go_srcs",
         "//internal/api/dashboardspa:bazel_go_srcs",
+        "//internal/api/dashboardspa/web:bazel_go_srcs",
+        "//internal/api/dashboardspa/web/frontend:bazel_go_srcs",
+        "//internal/api/dashboardspa/web/shared:bazel_go_srcs",
         "//internal/api/genclient:bazel_go_srcs",
         "//internal/bazeltest:bazel_go_srcs",
         "//internal/bdflags:bazel_go_srcs",
@@ -553,6 +686,7 @@ filegroup(
         "//internal/hostboot:bazel_go_srcs",
         "//internal/importsvc:bazel_go_srcs",
         "//internal/logutil:bazel_go_srcs",
+        "//internal/loopbackport:bazel_go_srcs",
         "//internal/mail:bazel_go_srcs",
         "//internal/mail/beadmail:bazel_go_srcs",
         "//internal/mail/exec:bazel_go_srcs",
@@ -571,6 +705,7 @@ filegroup(
         "//internal/packregistry:bazel_go_srcs",
         "//internal/pathdurability:bazel_go_srcs",
         "//internal/pathutil:bazel_go_srcs",
+        "//internal/pendingwatch:bazel_go_srcs",
         "//internal/pidutil:bazel_go_srcs",
         "//internal/poolplan:bazel_go_srcs",
         "//internal/pricing:bazel_go_srcs",
@@ -632,6 +767,7 @@ filegroup(
         "//internal/testpolicy/bazelhermetic:bazel_go_srcs",
         "//internal/testpolicy/bepsummary:bazel_go_srcs",
         "//internal/testpolicy/resourcecensus:bazel_go_srcs",
+        "//internal/testpolicy/shardbudget:bazel_go_srcs",
         "//internal/testpolicy/timingplan:bazel_go_srcs",
         "//internal/testpolicy/timingplancli:bazel_go_srcs",
         "//internal/testpolicy/timingsummary:bazel_go_srcs",
@@ -654,7 +790,6 @@ filegroup(
         "//internal/worker/fakecmd:bazel_go_srcs",
         "//internal/worker/transcript:bazel_go_srcs",
         "//internal/worker/workertest:bazel_go_srcs",
-        "//internal/workqueue:bazel_go_srcs",
         "//internal/workrecord:bazel_go_srcs",
         "//internal/workspacesvc:bazel_go_srcs",
         "//internal/worktree:bazel_go_srcs",
@@ -673,7 +808,10 @@ filegroup(
         "//test/acceptance/tier_c:bazel_go_srcs",
         "//test/acceptance/tutorial_goldens:bazel_go_srcs",
         "//test/acceptance/worker_inference:bazel_go_srcs",
+        "//test/containerhost:bazel_go_srcs",
         "//test/dashport:bazel_go_srcs",
+        "//test/dashport/cmd/fakesupervisor:bazel_go_srcs",
+        "//test/dashport/corpus:bazel_go_srcs",
         "//test/docsync:bazel_go_srcs",
         "//test/dolttest:bazel_go_srcs",
         "//test/integration:bazel_go_srcs",
@@ -683,6 +821,21 @@ filegroup(
         "//test/tmuxtest:bazel_go_srcs",
         "//test/toolhome:bazel_go_srcs",
         "//test/workflows:bazel_go_srcs",
+        "//tools/nogo:bazel_go_srcs",
+        "//tools/nogo/analyzers/errorlint:bazel_go_srcs",
+        "//tools/nogo/analyzers/gocritic:bazel_go_srcs",
+        "//tools/nogo/analyzers/internal/analyzertest:bazel_go_srcs",
+        "//tools/nogo/analyzers/internal/position:bazel_go_srcs",
+        "//tools/nogo/analyzers/internal/testunit:bazel_go_srcs",
+        "//tools/nogo/analyzers/misspell:bazel_go_srcs",
+        "//tools/nogo/analyzers/revive:bazel_go_srcs",
+        "//tools/nogo/analyzers/runtimelease:bazel_go_srcs",
+        "//tools/nogo/analyzers/testrelax:bazel_go_srcs",
+        "//tools/nogo/analyzers/unconvert:bazel_go_srcs",
+        "//tools/nogo/analyzers/unparam:bazel_go_srcs",
+        "//tools/nogo/analyzers/unused:bazel_go_srcs",
+        "//tools/nogo/analyzers/v2purity:bazel_go_srcs",
+        "//tools/nogo/analyzers/worklegs:bazel_go_srcs",
         ":schemas_embed.go",
     ],
     visibility = ["//visibility:public"],
@@ -701,6 +854,7 @@ filegroup(
         "//cmd/genspec:bazel_go_test_srcs",
         "//cmd/openapi-breaking:bazel_go_test_srcs",
         "//contrib:bazel_go_test_srcs",
+        "//contrib/openclaw-bridge:bazel_go_test_srcs",
         "//docs:bazel_go_test_srcs",
         "//examples:bazel_go_test_srcs",
         "//examples/bd:bazel_go_test_srcs",
@@ -715,9 +869,13 @@ filegroup(
         "//internal/agent:bazel_go_test_srcs",
         "//internal/agentutil:bazel_go_test_srcs",
         "//internal/api:bazel_go_test_srcs",
+        "//internal/api/apicontract:bazel_go_test_srcs",
         "//internal/api/apierr:bazel_go_test_srcs",
         "//internal/api/dashboardbff:bazel_go_test_srcs",
         "//internal/api/dashboardspa:bazel_go_test_srcs",
+        "//internal/api/dashboardspa/web:bazel_go_test_srcs",
+        "//internal/api/dashboardspa/web/frontend:bazel_go_test_srcs",
+        "//internal/api/dashboardspa/web/shared:bazel_go_test_srcs",
         "//internal/api/genclient:bazel_go_test_srcs",
         "//internal/bazeltest:bazel_go_test_srcs",
         "//internal/bdflags:bazel_go_test_srcs",
@@ -783,6 +941,7 @@ filegroup(
         "//internal/hostboot:bazel_go_test_srcs",
         "//internal/importsvc:bazel_go_test_srcs",
         "//internal/logutil:bazel_go_test_srcs",
+        "//internal/loopbackport:bazel_go_test_srcs",
         "//internal/mail:bazel_go_test_srcs",
         "//internal/mail/beadmail:bazel_go_test_srcs",
         "//internal/mail/exec:bazel_go_test_srcs",
@@ -801,6 +960,7 @@ filegroup(
         "//internal/packregistry:bazel_go_test_srcs",
         "//internal/pathdurability:bazel_go_test_srcs",
         "//internal/pathutil:bazel_go_test_srcs",
+        "//internal/pendingwatch:bazel_go_test_srcs",
         "//internal/pidutil:bazel_go_test_srcs",
         "//internal/poolplan:bazel_go_test_srcs",
         "//internal/pricing:bazel_go_test_srcs",
@@ -862,6 +1022,7 @@ filegroup(
         "//internal/testpolicy/bazelhermetic:bazel_go_test_srcs",
         "//internal/testpolicy/bepsummary:bazel_go_test_srcs",
         "//internal/testpolicy/resourcecensus:bazel_go_test_srcs",
+        "//internal/testpolicy/shardbudget:bazel_go_test_srcs",
         "//internal/testpolicy/timingplan:bazel_go_test_srcs",
         "//internal/testpolicy/timingplancli:bazel_go_test_srcs",
         "//internal/testpolicy/timingsummary:bazel_go_test_srcs",
@@ -884,7 +1045,6 @@ filegroup(
         "//internal/worker/fakecmd:bazel_go_test_srcs",
         "//internal/worker/transcript:bazel_go_test_srcs",
         "//internal/worker/workertest:bazel_go_test_srcs",
-        "//internal/workqueue:bazel_go_test_srcs",
         "//internal/workrecord:bazel_go_test_srcs",
         "//internal/workspacesvc:bazel_go_test_srcs",
         "//internal/worktree:bazel_go_test_srcs",
@@ -903,7 +1063,10 @@ filegroup(
         "//test/acceptance/tier_c:bazel_go_test_srcs",
         "//test/acceptance/tutorial_goldens:bazel_go_test_srcs",
         "//test/acceptance/worker_inference:bazel_go_test_srcs",
+        "//test/containerhost:bazel_go_test_srcs",
         "//test/dashport:bazel_go_test_srcs",
+        "//test/dashport/cmd/fakesupervisor:bazel_go_test_srcs",
+        "//test/dashport/corpus:bazel_go_test_srcs",
         "//test/docsync:bazel_go_test_srcs",
         "//test/dolttest:bazel_go_test_srcs",
         "//test/integration:bazel_go_test_srcs",
@@ -913,6 +1076,21 @@ filegroup(
         "//test/tmuxtest:bazel_go_test_srcs",
         "//test/toolhome:bazel_go_test_srcs",
         "//test/workflows:bazel_go_test_srcs",
+        "//tools/nogo:bazel_go_test_srcs",
+        "//tools/nogo/analyzers/errorlint:bazel_go_test_srcs",
+        "//tools/nogo/analyzers/gocritic:bazel_go_test_srcs",
+        "//tools/nogo/analyzers/internal/analyzertest:bazel_go_test_srcs",
+        "//tools/nogo/analyzers/internal/position:bazel_go_test_srcs",
+        "//tools/nogo/analyzers/internal/testunit:bazel_go_test_srcs",
+        "//tools/nogo/analyzers/misspell:bazel_go_test_srcs",
+        "//tools/nogo/analyzers/revive:bazel_go_test_srcs",
+        "//tools/nogo/analyzers/runtimelease:bazel_go_test_srcs",
+        "//tools/nogo/analyzers/testrelax:bazel_go_test_srcs",
+        "//tools/nogo/analyzers/unconvert:bazel_go_test_srcs",
+        "//tools/nogo/analyzers/unparam:bazel_go_test_srcs",
+        "//tools/nogo/analyzers/unused:bazel_go_test_srcs",
+        "//tools/nogo/analyzers/v2purity:bazel_go_test_srcs",
+        "//tools/nogo/analyzers/worklegs:bazel_go_test_srcs",
     ],
     visibility = ["//visibility:public"],
 )

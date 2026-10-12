@@ -343,6 +343,9 @@ func TestServedProbeForTestIsNeverCalledInProduction(t *testing.T) {
 		if strings.Contains(string(body), "ServedProbeForTest(") {
 			t.Errorf("%s calls ServedProbeForTest outside a test: only the probe session may mark a reality checked", path)
 		}
+		if strings.Contains(string(body), "CursorReportForTest(") {
+			t.Errorf("%s calls CursorReportForTest outside a test: only the probe session may mark a reality checked", path)
+		}
 		return nil
 	})
 	if err != nil {

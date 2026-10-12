@@ -235,7 +235,7 @@ func cmdHandoffRemoteWithForce(args []string, target string, force bool, stdout,
 		return 1
 	}
 	rec := openCityRecorder(stderr)
-	return doHandoffRemoteWithForce(msgStore, sessStore, rec, sp, targetInfo.sessionName, targetInfo.display, sender, args, force, stdout, stderr)
+	return doHandoffRemoteWithForce(cityPath, msgStore, sessStore, rec, sp, targetInfo.sessionName, targetInfo.display, sender, args, force, stdout, stderr)
 }
 
 func sessionRestartPersister(cityPath string, sessStore beads.Store, sp runtime.Provider, cfg *config.City, target string) func() error {
@@ -362,6 +362,13 @@ func createHandoffMail(msgStore, sessStore beads.Store, rec events.Recorder, sen
 	// two-store provider (mirroring newCityMailProvider): the message bead is
 	// ClassMessaging, beadmail's addressing reads are ClassSessions.
 	provider := beadmail.NewWithStores(msgStore, sessStore)
+	// Handoff mail is sent from the calling session. When its own bead id
+	// resolves, the provider takes the sender route from that bead instead of
+	// resolving senderAddress again. A failed lookup pins nothing: the sender
+	// resolution below asks the store itself and reports what it finds.
+	if identity, ok, err := resolveHookIdentity(sessStore); err == nil && ok {
+		identity.pinSender(provider)
+	}
 	msg, err := provider.SendHandoff(mail.HandoffIntent{
 		From:        senderAddress,
 		To:          recipientAddress,
@@ -443,15 +450,7 @@ func clearRestartRequest(sessStore beads.Store, dops drainOps, sessionName strin
 	return errors.Join(errs...)
 }
 
-// doHandoffRemote sends handoff mail to a remote session and kills its runtime.
-// Non-blocking: returns immediately after killing the session.
-func doHandoffRemote(msgStore, sessStore beads.Store, rec events.Recorder, sp runtime.Provider,
-	sessionName, targetAddress, sender string, args []string, stdout, stderr io.Writer,
-) int {
-	return doHandoffRemoteWithForce(msgStore, sessStore, rec, sp, sessionName, targetAddress, sender, args, false, stdout, stderr)
-}
-
-func doHandoffRemoteWithForce(msgStore, sessStore beads.Store, rec events.Recorder, sp runtime.Provider,
+func doHandoffRemoteWithForce(cityPath string, msgStore, sessStore beads.Store, rec events.Recorder, sp runtime.Provider,
 	sessionName, targetAddress, sender string, args []string, force bool, stdout, stderr io.Writer,
 ) int {
 	restartable, _, err := sessionRestartableByController(sessStore, sessionName)
@@ -496,7 +495,7 @@ func doHandoffRemoteWithForce(msgStore, sessStore beads.Store, rec events.Record
 	// still live. The metric label uses the agent identity (not the sanitized
 	// runtime session name) so handoff stops join the start/crash/kill counters.
 	agentIdentity := sessionAgentMetricIdentityByName(sessStore, sessionName)
-	if err := workerKillSessionTargetWithConfig("", sessStore, sp, nil, sessionName); err != nil {
+	if err := workerKillSessionTargetWithConfig(cityPath, sessStore, sp, nil, sessionName); err != nil {
 		fmt.Fprintf(stderr, "gc handoff: killing %s: %v\n", targetAddress, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}

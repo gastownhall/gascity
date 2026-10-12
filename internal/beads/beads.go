@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -74,6 +75,15 @@ var ErrConditionalReleaseUnsupported = errors.New("conditional assignment releas
 // capability veto: no code path in internal/beads converts it into an
 // unconditional write. See ConditionalWriter for the full contract.
 var ErrConditionalWriteUnsupported = errors.New("conditional writes unsupported")
+
+// ErrClaimUnsupported reports that a store cannot perform the two-argument
+// compare-and-swap Claim(id, assignee) capability. It is the same shape as
+// ErrConditionalReleaseUnsupported: a capability veto a forwarding wrapper
+// (beadPolicyStore, CachingStore, the emitting class store) returns when its
+// inner store does not implement the optional
+// `Claim(id, assignee string) (Bead, bool, error)` interface, rather than a
+// conflict or not-found outcome from an inner store that does.
+var ErrClaimUnsupported = errors.New("claim unsupported")
 
 // ErrBDSilentFallback reports that a bd-backed store operation saw bd exit
 // successfully after falling back to on-disk JSONL auto-import mode. BdStore
@@ -179,6 +189,13 @@ type Bead struct {
 	// means the store did not provide it and cached ready falls back to
 	// dependency-derived readiness for backward compatibility.
 	IsBlocked *bool `json:"is_blocked,omitempty"`
+	// CloseReason says why the bead was closed. It is empty while the bead is
+	// not closed, and when the closer gave no reason. bd-backed stores read
+	// bd's close_reason column (written by `bd close --reason`); stores that
+	// hold the whole row record the trimmed metadata.close_reason a closer
+	// stamped before closing, the same value BdStore and NativeDoltStore
+	// forward to their close. Reopening clears it.
+	CloseReason string `json:"close_reason,omitempty"`
 	// IndefinitelyDeferred preserves bd's status-based indefinite deferral
 	// after richer statuses normalize to Gas City's three-state model. Cache
 	// notifications restore status="deferred" on the event wire so another
@@ -239,8 +256,63 @@ type UpdateOpts struct {
 // ConditionalAssignmentReleaser is implemented by stores that can release an
 // in-progress assignment only when the current status and assignee still match
 // the expected snapshot.
+//
+// FAMILY DIVERGENCE LEDGER (not pinned by any conformance suite today). The
+// implementations do not agree on two edges, and both became visible when
+// NativeDoltStore moved onto issueops.Releaser (ga-8tiw9). They are recorded
+// rather than reconciled because deciding WHICH answer is right is a contract
+// question with callers on both sides:
+//
+//   - RELEASABLE STATUS. MemStore, SQLiteStore and the pre-role NativeDoltStore
+//     release only from in_progress; a row that is open but still carries an
+//     assignee is a no-op for them. issueops.Releaser's transition is defined
+//     over open ∪ in_progress, so the role-backed NativeDoltStore releases that
+//     row. The role's answer is arguably the useful one — an open row bearing
+//     an assignee is precisely the orphaned claim gc's reconcilers exist to
+//     clear — but it is a widening, and no case in
+//     storebindingtest's graph suite distinguishes the two.
+//   - AN EMPTY EXPECTED HOLDER over an in_progress row whose assignee is empty.
+//     MemStore and the pre-role NativeDoltStore report true (they compare "" to
+//     "" and release). The role-backed NativeDoltStore reports (false, nil)
+//     without dialing: the role refuses a non-nil expectation of "" as
+//     ErrValidation, and a nil one would select the unconditional path whose
+//     ownership fence's subject is the ACTOR — which for gc is the city, never
+//     the holder. "Release a row nobody holds" describes no release, so the
+//     role's own model calls this ErrNotClaimed.
+//
+// FOLLOW-UP QUESTION for the conformance suite, open as ga-0o6h8j: should
+// RunConditionalWriterConformance (or storebindingtest's graph suite) pin one
+// semantic for each? Until one does, NativeDoltStore's and MemStore's current
+// answers are pinned side by side in
+// TestReleaseIfCurrentPinsTheFamilyDivergenceEdges, so a flip in either store
+// fails a test instead of passing silently.
 type ConditionalAssignmentReleaser interface {
 	ReleaseIfCurrent(id, expectedAssignee string) (bool, error)
+}
+
+// ConditionalAssigneeTransferer is implemented by stores that can move an
+// in-progress assignment from one exact assignee spelling to another only
+// while the bead still carries the expected holder -- the same capability
+// family as ConditionalAssignmentReleaser, with the opposite terminal
+// assignee (a new holder instead of none). See BdStore.TransferIfCurrent
+// (bdstore_conditional_release.go) and NativeDoltStore.TransferIfCurrent
+// (native_dolt_store_conditional.go) for the full per-store contract,
+// including the reassignment-steal fence each skips because the CAS names
+// the holder explicitly. A store that cannot atomically transfer reports
+// ErrConditionalTransferUnsupported, discovered the same way as every other
+// optional capability here: type-assert on the resolved store, never on a
+// wrapper.
+//
+// GROUNDWORK: no production caller depends on this interface yet. Outside
+// the forwarding wrappers, the only production TransferIfCurrent call is
+// cmd/gc's hookClaimRestampWithBdStore, on a BdStore it constructs itself.
+// CachingStore and cmd/gc's emitting class-store wrapper forward the
+// capability. Wrappers that forward ReleaseIfCurrent but not this include
+// ProxiedStore, the cmd/gc policy wrapper and splittest's StrictStore, so a
+// type assertion on any of them fails even over a capable store. Wire them
+// before the first caller relies on the capability through a wrapper.
+type ConditionalAssigneeTransferer interface {
+	TransferIfCurrent(id, fromAssignee, toAssignee string) (bool, error)
 }
 
 // AssignmentGuardedUpdater is implemented by stores whose backend can apply an
@@ -689,11 +761,35 @@ func IsReadyBlockingDependencyType(t string) bool {
 // no gc.work_outcome yet (work_record_gate.go is warn-only), so the empty
 // value stays backward-compatible, and an unrecognized future value fails
 // open rather than newly stalling dependents it doesn't understand.
+//
+// Callers pass ReadinessWorkOutcome(dep.Metadata), not the raw gc.work_outcome,
+// so a dependency whose control-plane step passed is never vetoed.
 func DependencySatisfied(depStatus, depWorkOutcome string) bool {
 	if depStatus != "closed" {
 		return false
 	}
 	return depWorkOutcome != beadmeta.WorkOutcomeBlocked
+}
+
+// ReadinessWorkOutcome is the gc.work_outcome value readiness should judge a
+// closed dependency by. gc.outcome is the control-plane step result that
+// internal/dispatch sequences a workflow on, and gc.work_outcome the worker's
+// work-record disposition (ADR-0009); the two vocabularies are disjoint and can
+// disagree. A step that closed with gc.outcome=pass has already been advanced
+// past by dispatch, so letting gc.work_outcome=blocked veto its dependents
+// strands them: the graph waits on work that readiness never offers to any
+// worker. When the step passed, its work outcome does not gate readiness.
+//
+// The override applies only to formula step beads (those carrying
+// gc.step_ref). A plain work bead can also carry gc.outcome=pass — the core
+// mol-do-work formula stamps it on the work bead it closes, blocked or not —
+// and there gc.outcome is not a dispatch verdict, so its blocked work outcome
+// keeps withholding dependents.
+func ReadinessWorkOutcome(metadata map[string]string) string {
+	if metadata[beadmeta.StepRefMetadataKey] != "" && metadata[beadmeta.OutcomeMetadataKey] == beadmeta.OutcomePass {
+		return ""
+	}
+	return metadata[beadmeta.WorkOutcomeMetadataKey]
 }
 
 // IsReadyExcludedType reports whether the bead type is excluded from
@@ -762,10 +858,74 @@ func IsDeferred(b Bead, now time.Time) bool {
 }
 
 // setBeadStatus applies an explicit Gas City status transition. Any such
-// transition supersedes richer source status that was normalized on read.
+// transition supersedes richer source status that was normalized on read. A
+// bead that is not closed has no close reason, so leaving closed drops it, as
+// bd's reopen clears its close_reason column.
 func setBeadStatus(b *Bead, status string) {
 	b.Status = status
 	b.IndefinitelyDeferred = false
+	if status != "closed" {
+		b.CloseReason = ""
+	}
+}
+
+// dropCloseReasonMetadata removes metadata.close_reason from a bead a
+// whole-row store is reopening. That key is the input to the bead's next close
+// (recordCloseReason, BdStore's and NativeDoltStore's --reason forwarding), so a
+// reopened bead that kept it handed the old reason to a later close made
+// without one. The metadata map is replaced, never mutated in place, since
+// callers may share it.
+//
+// The stores that clear the key before reopening (BdStore, NativeDoltStore,
+// exec; staleCloseReasonToClear) set it to "" rather than removing it.
+// CachingStore's Reopen fallback patch removes it over any backing, so over
+// those three the next reconcile reads the backing's "" as a metadata change
+// and announces a bead.updated that no write made (ga-et1toc).
+func dropCloseReasonMetadata(b *Bead) {
+	if _, ok := b.Metadata[closeReasonMetadataKey]; !ok {
+		return
+	}
+	md := make(map[string]string, len(b.Metadata)-1)
+	for k, v := range b.Metadata {
+		if k != closeReasonMetadataKey {
+			md[k] = v
+		}
+	}
+	b.Metadata = md
+}
+
+// closeReasonMetadataKey is the metadata key a closer stamps with its reason
+// before closing (bd close --reason's input on stores that forward it).
+const closeReasonMetadataKey = "close_reason"
+
+// staleCloseReasonToClear reports whether b, about to be reopened, carries a
+// metadata.close_reason that must be cleared first. Stores whose reopen cannot
+// edit metadata in the same write (BdStore, NativeDoltStore, exec) clear it
+// BEFORE reopening, so a reopen replayed afterwards still finds it cleared. A
+// closed bead reports CloseReason from the store's own close_reason column,
+// which the clear leaves alone, but a reader of the key itself sees the clear
+// while the bead is still closed, and keeps seeing it if the reopen fails: a
+// retention-swept message (beadmail's isRemovedMessageBead) then reads as
+// removed by its user.
+func staleCloseReasonToClear(b Bead) bool {
+	return b.Status != "open" && strings.TrimSpace(b.Metadata[closeReasonMetadataKey]) != ""
+}
+
+// recordCloseReason stamps CloseReason on a bead a whole-row store (MemStore,
+// FileStore, SQLiteStore) has just moved from not-closed to closed. The reason
+// is the trimmed metadata.close_reason its closer stamped first, which is what
+// BdStore and NativeDoltStore forward to their close as well.
+func recordCloseReason(b *Bead) {
+	b.CloseReason = strings.TrimSpace(b.Metadata["close_reason"])
+}
+
+// forgetCloseReason drops the metadata.close_reason recordCloseReason reads,
+// on a bead a whole-row store has just moved from closed to not closed. That
+// reason belonged to the close the move undoes, as bd's reopen clears its
+// close_reason column; kept, the bead's next close would record it again. A
+// reason the same write sets is merged after this, so it survives.
+func forgetCloseReason(b *Bead) {
+	delete(b.Metadata, "close_reason")
 }
 
 func isReadyBlockingDependencyType(t string) bool {
@@ -834,8 +994,13 @@ type Store interface {
 	Reopen(id string) error
 
 	// CloseAll closes multiple beads in a single batch operation and sets
-	// the given metadata on each. Already-closed beads are skipped.
-	// Returns the number of beads actually closed.
+	// the given metadata on each bead it closes. An already-closed bead stays
+	// closed and is not an error. Past that, what happens to it is NOT part
+	// of this contract: stores that read each status first skip it, stores
+	// that batch without that read (bd, exec, the native Dolt store) write the
+	// metadata onto it, and bd and exec count it as closed. A caller that must
+	// leave a finished bead's metadata alone, or needs an exact count, drops
+	// its closed ids before calling. Returns the number of beads closed.
 	CloseAll(ids []string, metadata map[string]string) (int, error)
 
 	// List returns beads matching the query. Queries must include at least

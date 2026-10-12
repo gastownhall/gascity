@@ -12,8 +12,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
-	"testing/synctest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -23,15 +23,17 @@ import (
 	"github.com/gastownhall/gascity/internal/worktree"
 )
 
-// Create-effect tests run effects against MemStores with a recording
-// settler. Each test mints the plan's token the way the planner does at
-// submit, submits the plan, waits for the executor to drain (wg), then reads
-// the effect's one settlement and the stores. The effects read time.Now, so
-// tests under synctest move it with advance.
+// Create-effect tests run effects against MemStores and record their
+// settlements. Each test mints the plan's token the way the planner does at
+// submit, runs the plans, each on its own goroutine as the session executor
+// runs them, waits for them, then reads each effect's one settlement and the
+// stores. The effects read time.Now, so tests under synctest move it with
+// advance.
 
-// createHarness is one executor with a recorded settle.
+// createHarness is one create runner with recorded settlements.
 type createHarness struct {
-	x *createEffects
+	x  *createEffects
+	wg sync.WaitGroup
 
 	mu      sync.Mutex
 	tokens  map[string]string
@@ -42,13 +44,8 @@ func newCreateHarness(t *testing.T, edit func(*createEffectHost)) *createHarness
 	t.Helper()
 	h := &createHarness{tokens: make(map[string]string)}
 	host := createEffectHost{
-		cityPath: t.TempDir(),
-		cityName: "test-city",
-		settle: func(s createSettlement) {
-			h.mu.Lock()
-			defer h.mu.Unlock()
-			h.settled = append(h.settled, s)
-		},
+		cityPath:  t.TempDir(),
+		cityName:  "test-city",
 		withLocks: func(_ string, _ []string, fn func() error) error { return fn() },
 		verify: func(worktree.Spec) (worktree.Report, error) {
 			t.Error("worktree.Verify called for a plan without a worktree spec")
@@ -81,27 +78,30 @@ func (h *createHarness) reserve(t *testing.T, id string) string {
 }
 
 // submit stamps each plan without a token with its entry's minted token and
-// createHarnessRev, then submits them.
-func (h *createHarness) submit(pass *createPass, plans ...createPlan) bool {
-	h.mu.Lock()
-	stamped := make([]createPlan, len(plans))
-	for i, p := range plans {
+// createHarnessRev, then runs each on its own goroutine under ctx.
+func (h *createHarness) submit(ctx context.Context, pass *createPass, plans ...createPlan) {
+	for _, p := range plans {
+		h.mu.Lock()
 		if p.Token == "" {
-			p.Token, p.ConfigRev = h.tokens[p.EntryID], createHarnessRev
+			p.Token, p.ConfigRev = h.tokens[p.ID], createHarnessRev
 		}
-		stamped[i] = p
+		h.mu.Unlock()
+		h.wg.Add(1)
+		go func() {
+			defer h.wg.Done()
+			s := h.x.run(ctx, pass, p, nil, nil)
+			h.mu.Lock()
+			h.settled = append(h.settled, s)
+			h.mu.Unlock()
+		}()
 	}
-	h.mu.Unlock()
-	return h.x.submit(pass, stamped...)
 }
 
-// runAll submits plans and waits until every effect returned.
+// runAll runs plans and waits until every effect returned.
 func (h *createHarness) runAll(t *testing.T, pass *createPass, plans ...createPlan) {
 	t.Helper()
-	if !h.submit(pass, plans...) {
-		t.Fatal("submit refused")
-	}
-	h.x.wg.Wait()
+	h.submit(context.Background(), pass, plans...)
+	h.wg.Wait()
 }
 
 func (h *createHarness) settlements() []createSettlement {
@@ -116,7 +116,7 @@ func (h *createHarness) settlementOf(t *testing.T, id string) createSettlement {
 	t.Helper()
 	var out []createSettlement
 	for _, s := range h.settlements() {
-		if s.EntryID == id {
+		if s.ID == id {
 			out = append(out, s)
 		}
 	}
@@ -147,7 +147,7 @@ func (h *createHarness) assertNoRefusal(t *testing.T) {
 // cause under createHarnessRev.
 func (h *createHarness) assertRefused(t *testing.T, plan createPlan, cause string) {
 	t.Helper()
-	s := h.settlementOf(t, plan.EntryID)
+	s := h.settlementOf(t, plan.ID)
 	if s.Stage != cause || s.Identity != plan.identity().key() || s.ConfigRev != createHarnessRev {
 		t.Fatalf("settlement %+v, want identity %q refused with cause %q under %q", s, plan.identity().key(), cause, createHarnessRev)
 	}
@@ -202,9 +202,9 @@ func workerCity(maxSessions int) *config.City {
 	}
 }
 
-func workerPlan(cfg *config.City, entryID string, slot int) createPlan {
+func workerPlan(cfg *config.City, id string, slot int) createPlan {
 	_, qualifiedInstance, poolSlot := poolDesiredRequestIdentity(&cfg.Agents[0], slot)
-	return createPlan{EntryID: entryID, Template: cfg.Agents[0].QualifiedName(), QualifiedInstance: qualifiedInstance, Slot: poolSlot}
+	return createPlan{ID: id, Template: cfg.Agents[0].QualifiedName(), QualifiedInstance: qualifiedInstance, Slot: poolSlot}
 }
 
 // aliasQueryFailStore fails the first alias-keyed query, which is the
@@ -608,7 +608,7 @@ func TestCreateEffect_CommitsMarkerOrFailsNoWrite_AmbiguousLeavesMarker(t *testi
 		store := beads.NewMemStore()
 		h := newCreateHarness(t, nil)
 		h.reserve(t, "c1")
-		plan := createPlan{EntryID: "c1", Template: "ghost", QualifiedInstance: "ghost-1", Slot: 1}
+		plan := createPlan{ID: "c1", Template: "ghost", QualifiedInstance: "ghost-1", Slot: 1}
 
 		h.runAll(t, &createPass{cfg: cfg, store: store}, plan)
 
@@ -715,128 +715,14 @@ func TestCreateEffect_RefusedWriteFailsNoWriteAndBacksOff(t *testing.T) {
 	}
 }
 
-// gateLocker parks every effect inside the identifier locks until release,
-// counting how many are inside at once.
+// gateLocker parks every effect inside the identifier locks until release.
 type gateLocker struct {
 	release chan struct{}
-
-	mu        sync.Mutex
-	inside    int
-	maxInside int
 }
 
 func (g *gateLocker) withLocks(_ string, _ []string, fn func() error) error {
-	g.mu.Lock()
-	g.inside++
-	g.maxInside = max(g.maxInside, g.inside)
-	g.mu.Unlock()
 	<-g.release
-	defer func() {
-		g.mu.Lock()
-		g.inside--
-		g.mu.Unlock()
-	}()
 	return fn()
-}
-
-func (g *gateLocker) counts() (inside, maxInside int) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return g.inside, g.maxInside
-}
-
-// Kills: unbounded create fan-out (POOL-053, C1.10).
-func TestCreateEffect_ParallelBoundedAtEight(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		store := beads.NewMemStore()
-		cfg := workerCity(30)
-		gate := &gateLocker{release: make(chan struct{})}
-		h := newCreateHarness(t, func(host *createEffectHost) { host.withLocks = gate.withLocks })
-		var plans []createPlan
-		for i := 1; i <= 20; i++ {
-			id := fmt.Sprintf("c%02d", i)
-			h.reserve(t, id)
-			plans = append(plans, workerPlan(cfg, id, i))
-		}
-		pass := &createPass{cfg: cfg, store: store}
-
-		h.submit(pass, plans[:5]...)
-		h.submit(pass, plans[5:]...)
-		synctest.Wait()
-		if inside, _ := gate.counts(); inside != createEffectParallelism {
-			t.Fatalf("effects inside the locks = %d, want %d", inside, createEffectParallelism)
-		}
-		close(gate.release)
-		h.x.wg.Wait()
-
-		if _, maxInside := gate.counts(); maxInside != createEffectParallelism {
-			t.Fatalf("max concurrent effects = %d, want %d", maxInside, createEffectParallelism)
-		}
-		if rows := sessionRows(t, store); len(rows) != 20 {
-			t.Fatalf("rows = %d, want 20", len(rows))
-		}
-		for _, e := range h.settlements() {
-			if !e.Landed {
-				t.Fatalf("settlement %+v, want every create landed", e)
-			}
-		}
-	})
-}
-
-// Kills: leaked effect goroutines, and plans run after shutdown began (C1.8).
-// Shutdown stops admission, drops queued plans unsettled, and waits for the
-// effects in flight; with an expired context it returns without them.
-func TestCreateEffect_JoinedAtShutdown(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		store := beads.NewMemStore()
-		cfg := workerCity(30)
-		gate := &gateLocker{release: make(chan struct{})}
-		h := newCreateHarness(t, func(host *createEffectHost) { host.withLocks = gate.withLocks })
-		var plans []createPlan
-		for i := 1; i <= 10; i++ {
-			id := fmt.Sprintf("c%02d", i)
-			h.reserve(t, id)
-			plans = append(plans, workerPlan(cfg, id, i))
-		}
-		pass := &createPass{cfg: cfg, store: store}
-		h.submit(pass, plans...)
-		synctest.Wait()
-
-		expired, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		if err := h.x.shutdown(expired); !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("shutdown with effects in flight past its deadline = %v, want DeadlineExceeded", err)
-		}
-		done := make(chan error, 1)
-		go func() { done <- h.x.shutdown(context.Background()) }()
-		synctest.Wait()
-		select {
-		case err := <-done:
-			t.Fatalf("shutdown returned %v while effects were in flight", err)
-		default:
-		}
-		h.reserve(t, "late")
-		if h.submit(pass, workerPlan(cfg, "late", 20)) {
-			t.Fatal("submit accepted a plan after shutdown began")
-		}
-
-		close(gate.release)
-		if err := <-done; err != nil {
-			t.Fatalf("shutdown = %v, want nil once effects finished", err)
-		}
-		settled := h.settlements()
-		for _, e := range settled {
-			if !e.Landed {
-				t.Fatalf("settlement %+v, want only the landed effects that were in flight", e)
-			}
-		}
-		if len(settled) != createEffectParallelism {
-			t.Fatalf("settlements = %d, want %d: plans dropped at shutdown never run", len(settled), createEffectParallelism)
-		}
-		if rows := sessionRows(t, store); len(rows) != createEffectParallelism {
-			t.Fatalf("rows = %d, want %d", len(rows), createEffectParallelism)
-		}
-	})
 }
 
 // normalizedSessionRows reads every session row with the per-create random
@@ -1484,59 +1370,20 @@ type panicWriter struct{}
 
 func (panicWriter) Write([]byte) (int, error) { panic("stderr closed") }
 
-// Kills: a panicking settle or log sink killing the worker: the executor
-// loses a worker, or the process dies.
-func TestCreateEffect_PanickingSinksStillSettle(t *testing.T) {
+// Kills: a panicking log sink turning a settled create into a panic, which
+// the executor would settle failed and so lose the create's own outcome.
+func TestCreateEffect_PanickingLogStillSettles(t *testing.T) {
 	cfg := workerCity(20)
-	panicked := false
-	h := newCreateHarness(t, func(host *createEffectHost) {
-		record := host.settle
-		host.settle = func(s createSettlement) {
-			record(s)
-			if s.EntryID == "doomed" {
-				panicked = true
-				panic("settlement queue closed")
-			}
-		}
-		host.stderr = panicWriter{}
-	})
+	h := newCreateHarness(t, func(host *createEffectHost) { host.stderr = panicWriter{} })
 	h.reserve(t, "ok")
 	h.reserve(t, "doomed")
 	pass := &createPass{cfg: cfg, store: beads.NewMemStore()}
-	h.runAll(t, pass, workerPlan(cfg, "ok", 1), createPlan{EntryID: "doomed", Template: "ghost", QualifiedInstance: "ghost-1", Slot: 1})
+	h.runAll(t, pass, workerPlan(cfg, "ok", 1), createPlan{ID: "doomed", Template: "ghost", QualifiedInstance: "ghost-1", Slot: 1})
 	if e := h.settlementOf(t, "ok"); !e.Landed {
 		t.Fatalf("ok: %+v, want landed", e)
 	}
-	if e := h.settlementOf(t, "doomed"); e.Landed || !panicked {
-		t.Fatalf("doomed: %+v (sink panicked %v), want failed through a panicking sink", e, panicked)
-	}
-	h.reserve(t, "next")
-	h.runAll(t, pass, workerPlan(cfg, "next", 2))
-	if e := h.settlementOf(t, "next"); !e.Landed {
-		t.Fatalf("next: %+v, want landed by a live executor", e)
-	}
-}
-
-// Kills: a worker that exits without giving its slot back, so a later
-// submit, once every slot was used, starts no worker and its plan never runs.
-func TestCreateEffect_WorkersRestartAfterTheQueueDrains(t *testing.T) {
-	cfg := workerCity(30)
-	store := beads.NewMemStore()
-	h := newCreateHarness(t, nil)
-	pass := &createPass{cfg: cfg, store: store}
-	for round := 0; round < 2; round++ {
-		var plans []createPlan
-		for i := 1; i <= createEffectParallelism; i++ {
-			id := fmt.Sprintf("r%d-%d", round, i)
-			h.reserve(t, id)
-			plans = append(plans, workerPlan(cfg, id, round*createEffectParallelism+i))
-		}
-		h.runAll(t, pass, plans...)
-		for _, p := range plans {
-			if e := h.settlementOf(t, p.EntryID); !e.Landed {
-				t.Fatalf("round %d: %s = %+v, want landed", round, p.EntryID, e)
-			}
-		}
+	if e := h.settlementOf(t, "doomed"); e.Landed || e.Stage != createStageStalePlan {
+		t.Fatalf("doomed: %+v, want refused as a stale plan through a panicking log", e)
 	}
 }
 
@@ -1565,17 +1412,11 @@ func TestCreateEffect_ValidatesTransportWithLookPath(t *testing.T) {
 }
 
 // Kills: identifier locks taken without the city path, which fence this
-// process only (C7.1 tier 2), and an executor whose outcomes reach no one.
-// The executor refuses a host without either, and the effect hands its city
-// path to the real flock, which fails closed.
+// process only (C7.1 tier 2). The runner refuses a host without one, and
+// the effect hands its city path to the real flock, which fails closed.
 func TestCreateEffect_LocksFailClosedWithoutTheCityPath(t *testing.T) {
-	for name, host := range map[string]createEffectHost{
-		"no city path": {settle: func(createSettlement) {}},
-		"no settle":    {cityPath: t.TempDir()},
-	} {
-		if _, err := newCreateEffects(host); err == nil {
-			t.Errorf("%s: newCreateEffects accepted the host", name)
-		}
+	if _, err := newCreateEffects(createEffectHost{}); err == nil {
+		t.Error("newCreateEffects accepted a host without the city path")
 	}
 
 	cityPath := filepath.Join(t.TempDir(), "not-a-directory")
@@ -1627,8 +1468,8 @@ func TestCreateEffect_ReCensusSkipsSuspendedRigs(t *testing.T) {
 func TestCreateEffect_RefusesAPlanConfigDoesNotDerive(t *testing.T) {
 	cfg := workerCity(1) // canonical singleton: instance "worker", pool slot 0
 	for name, plan := range map[string]createPlan{
-		"singleton with a slot":    {EntryID: "c1", Template: "worker", QualifiedInstance: "worker", Slot: 1},
-		"instance of another slot": {EntryID: "c1", Template: "worker", QualifiedInstance: "worker-2", Slot: 0},
+		"singleton with a slot":    {ID: "c1", Template: "worker", QualifiedInstance: "worker", Slot: 1},
+		"instance of another slot": {ID: "c1", Template: "worker", QualifiedInstance: "worker-2", Slot: 0},
 	} {
 		t.Run(name, func(t *testing.T) {
 			store := beads.NewMemStore()
@@ -1691,7 +1532,7 @@ func TestCreateEffect_ParallelTemplatesRealFlocks(t *testing.T) {
 			id := fmt.Sprintf("c-%d-%d", ai, j)
 			h.reserve(t, id)
 			_, qi, ps := poolDesiredRequestIdentity(&cfg.Agents[ai], j)
-			plans = append(plans, createPlan{EntryID: id, Template: cfg.Agents[ai].QualifiedName(), QualifiedInstance: qi, Slot: ps})
+			plans = append(plans, createPlan{ID: id, Template: cfg.Agents[ai].QualifiedName(), QualifiedInstance: qi, Slot: ps})
 		}
 	}
 	pass := &createPass{cfg: cfg, store: store}
@@ -1700,11 +1541,11 @@ func TestCreateEffect_ParallelTemplatesRealFlocks(t *testing.T) {
 		wg.Add(1)
 		go func(k int) {
 			defer wg.Done()
-			h.submit(pass, plans[k*4:(k+1)*4]...)
+			h.submit(context.Background(), pass, plans[k*4:(k+1)*4]...)
 		}(k)
 	}
 	wg.Wait()
-	h.x.wg.Wait()
+	h.wg.Wait()
 	if rows := sessionRows(t, store); len(rows) != len(plans) {
 		t.Fatalf("rows = %d, want %d", len(rows), len(plans))
 	}
@@ -1715,8 +1556,7 @@ func TestCreateEffect_ParallelTemplatesRealFlocks(t *testing.T) {
 // the planner as exactly one settlement through the settle spy.
 func TestCreateEffectSettlesOnlyByMessage(t *testing.T) {
 	shared := map[reflect.Type]bool{
-		reflect.TypeFor[*intentLedger](): true, reflect.TypeFor[*backoffTable](): true,
-		reflect.TypeFor[*inflightMap](): true, reflect.TypeFor[v2Enqueuer](): true,
+		reflect.TypeFor[*backoffTable](): true, reflect.TypeFor[*inflightMap](): true,
 	}
 	host := reflect.TypeFor[createEffectHost]()
 	for i := range host.NumField() {
@@ -1868,5 +1708,49 @@ func TestCreateEffectFenceFailsClosedOnPartialLeg(t *testing.T) {
 	h.assertRefused(t, plan, createStageFence)
 	if all, err := mem.List(beads.ListQuery{AllowScan: true, IncludeClosed: true}); err != nil || len(all) != 0 {
 		t.Fatalf("rows = %+v (%v), want none past a partial sessions leg", all, err)
+	}
+}
+
+// censusCancelStore ends a context on the first List once armed: the
+// locked live re-census, when the identifier locks arm it.
+type censusCancelStore struct {
+	beads.Store
+	armed  atomic.Bool
+	cancel context.CancelFunc
+}
+
+func (s *censusCancelStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if s.armed.Load() {
+		s.cancel()
+	}
+	return s.Store.List(q)
+}
+
+// Kills a pool create that writes once its effect's context ended, or that
+// checks it only on entering the locks: the context ends during the locked
+// live re-census, and the create checks it just before the row write, so no
+// row lands and the identity is not backed off.
+func TestCreateEffect_PoolWritesNothingOnceItsContextEnded(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store := &censusCancelStore{Store: beads.NewMemStore(), cancel: cancel}
+	h := newCreateHarness(t, func(host *createEffectHost) {
+		host.withLocks = func(_ string, _ []string, fn func() error) error {
+			store.armed.Store(true)
+			return fn()
+		}
+	})
+	cfg := workerCity(2)
+	h.reserve(t, "c1")
+	h.submit(ctx, &createPass{cfg: cfg, store: store}, workerPlan(cfg, "c1", 1))
+	h.wg.Wait()
+	if ctx.Err() == nil {
+		t.Fatal("the locked re-census never listed the store")
+	}
+	if rows := sessionRows(t, store.Store); len(rows) != 0 {
+		t.Fatalf("rows = %+v, want none once the context ended", rows)
+	}
+	if e := h.entry(t); e.Landed || e.Ambiguous || e.Stage != "" || !errors.Is(e.Err, errCreateAbandoned) {
+		t.Fatalf("settlement = %+v, want an abandoned no-write that backs nothing off", e)
 	}
 }

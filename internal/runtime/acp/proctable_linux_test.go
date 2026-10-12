@@ -19,20 +19,21 @@ import (
 )
 
 // snapshotProcRoot copies the scanner-visible /proc files (environ, stat,
-// comm) of the given pids into a fresh fake procfs root. The proctable scanner
-// refuses the live /proc under go test (gastownhall/gascity#2839) so a test run
-// on a host with a live fleet cannot reap real agents; a snapshot restricted to
-// the test's own processes keeps that guarantee while still exercising the
-// real root-detection rules against real process state. Pids that are already
-// gone are omitted, so a rescan after a kill observes the kill.
+// comm, status) of the given pids into a fresh fake procfs root. The proctable
+// scanner refuses the live /proc under go test (gastownhall/gascity#2839) so a
+// test run on a host with a live fleet cannot reap real agents; a snapshot
+// restricted to the test's own processes keeps that guarantee while still
+// exercising the real root-detection rules against real process state. Pids
+// that are already gone are omitted, so a rescan after a kill observes the
+// kill.
 func snapshotProcRoot(t *testing.T, pids ...int) string {
 	t.Helper()
 	root := t.TempDir()
 	for _, pid := range pids {
 		src := filepath.Join("/proc", strconv.Itoa(pid))
-		files := make(map[string][]byte, 3)
+		files := make(map[string][]byte, 4)
 		complete := true
-		for _, name := range []string{"environ", "stat", "comm"} {
+		for _, name := range []string{"environ", "stat", "comm", "status"} {
 			data, err := os.ReadFile(filepath.Join(src, name))
 			if err != nil {
 				complete = false
@@ -60,8 +61,7 @@ func snapshotProcRoot(t *testing.T, pids ...int) string {
 // duration of fn.
 func scanSnapshot(t *testing.T, fn func(), pids ...int) {
 	t.Helper()
-	restore := proctable.SetScanRootForTesting(snapshotProcRoot(t, pids...))
-	defer restore()
+	proctable.SetScanRootForTesting(t, snapshotProcRoot(t, pids...))
 	fn()
 }
 
@@ -460,9 +460,8 @@ func TestFindRuntimesBySessionIDTracksOwnedHandshakeBeforeSocketBind(t *testing.
 	if err := os.WriteFile(filepath.Join(root, strconv.Itoa(agentPID), "environ"), []byte(environ), 0o644); err != nil {
 		t.Fatalf("write environ: %v", err)
 	}
-	restore := proctable.SetScanRootForTesting(root)
+	proctable.SetScanRootForTesting(t, root)
 	found := findOnly(t, p, sessionID)
-	restore()
 
 	if len(found) != 1 || !found[0].IsTracked || found[0].ProviderName != name {
 		t.Fatalf("found = %+v, want the handshaking agent tracked as %q", found, name)

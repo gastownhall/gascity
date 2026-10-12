@@ -15,6 +15,7 @@ go_test(
     name = "exec_test",
     srcs = [
         "br_script_test.go",
+        "br_test.go",
         "exec_test.go",
         "idprefix_test.go",
         "testenv_import_test.go",

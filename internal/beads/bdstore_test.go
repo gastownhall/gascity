@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
 // fakeRunner returns a CommandRunner that returns canned output for specific
@@ -775,6 +776,38 @@ func TestBdStoreReopenUsesReopenCommand(t *testing.T) {
 	s := beads.NewBdStore("/city", runner)
 	if err := s.Reopen("bd-abc-123"); err != nil {
 		t.Fatalf("Reopen() error = %v", err)
+	}
+}
+
+// TestBdStoreReopenClearsStaleCloseReasonFirst pins that a reopen clears the
+// metadata.close_reason Close forwards as --reason, before bd reopen runs, so a
+// later close without a reason does not report the previous close's reason.
+func TestBdStoreReopenClearsStaleCloseReasonFirst(t *testing.T) {
+	var calls []string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if name != "bd" {
+			return nil, fmt.Errorf("unexpected command name: %s", name)
+		}
+		call := strings.Join(args, " ")
+		calls = append(calls, call)
+		switch call {
+		case "show --json bd-abc-123":
+			return []byte(`[{"id":"bd-abc-123","title":"test","status":"closed","issue_type":"task","created_at":"2025-01-15T10:30:00Z","close_reason":"duplicate of bd-1","metadata":{"close_reason":"duplicate of bd-1"}}]`), nil
+		case "update --json bd-abc-123 --set-metadata close_reason=":
+			return []byte(`[{"id":"bd-abc-123","status":"closed"}]`), nil
+		case "reopen --json bd-abc-123":
+			return []byte(`{"id":"bd-abc-123","status":"open"}`), nil
+		default:
+			return nil, fmt.Errorf("unexpected command: bd %s", call)
+		}
+	}
+	s := beads.NewBdStore("/city", runner)
+	if err := s.Reopen("bd-abc-123"); err != nil {
+		t.Fatalf("Reopen() error = %v", err)
+	}
+	want := []string{"show --json bd-abc-123", "update --json bd-abc-123 --set-metadata close_reason=", "reopen --json bd-abc-123"}
+	if fmt.Sprint(calls) != fmt.Sprint(want) {
+		t.Fatalf("bd calls = %q, want %q", calls, want)
 	}
 }
 
@@ -2687,6 +2720,40 @@ func TestBdStoreReadyKeepsDependentWhenBlockerClosedWithNoWorkOutcome(t *testing
 	}
 	if len(got) != 1 || got[0].ID != "bd-dependent" {
 		t.Fatalf("Ready() = %+v, want [bd-dependent]: a blocker closed with no gc.work_outcome must still satisfy the dependency", got)
+	}
+}
+
+// TestBdStoreReadyKeepsDependentWhenBlockerStepPassedDespiteWorkOutcomeBlocked
+// is the shape that stalled real builds: a graph.v2 step closed with the
+// control-plane result gc.outcome=pass, which dispatch advances on, while its
+// worker recorded gc.work_outcome=blocked (a plan review that found required
+// changes). Vetoing the dependent here leaves the workflow waiting on work the
+// controller never counts as demand.
+func TestBdStoreReadyKeepsDependentWhenBlockerStepPassedDespiteWorkOutcomeBlocked(t *testing.T) {
+	runner, _ := bdStoreWorkOutcomeReadyRunner(`,"metadata":{"gc.step_ref":"review","gc.outcome":"pass","gc.work_outcome":"blocked"}`)
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.Ready()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != "bd-dependent" {
+		t.Fatalf("Ready() = %+v, want [bd-dependent]: a blocker whose step passed must satisfy the dependency whatever its gc.work_outcome", got)
+	}
+}
+
+// TestBdStoreReadyExcludesDependentWhenWorkBeadPassedWithWorkOutcomeBlocked
+// pins the default worker path: core mol-do-work stamps gc.outcome=pass on the
+// work bead itself (no gc.step_ref) even when the work is blocked, so the pass
+// must not release the blocked work's dependents.
+func TestBdStoreReadyExcludesDependentWhenWorkBeadPassedWithWorkOutcomeBlocked(t *testing.T) {
+	runner, _ := bdStoreWorkOutcomeReadyRunner(`,"metadata":{"gc.outcome":"pass","gc.work_outcome":"blocked"}`)
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.Ready()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("Ready() = %+v, want empty: a non-step work bead closed with gc.outcome=pass and gc.work_outcome=blocked must not satisfy its dependent", got)
 	}
 }
 
@@ -5486,4 +5553,61 @@ func TestBdStoreReclaimStaleReportsNothingReclaimed(t *testing.T) {
 	if reclaimed {
 		t.Fatalf("ReclaimStale reclaimed = true, want false; previousOwner=%q", previousOwner)
 	}
+}
+
+// bd stores the reason given to `bd close --reason` in its close_reason column
+// and returns it from show and list; BdStore must carry it onto Bead
+// (gastownhall/gascity#2663).
+func TestBdStoreGetReadsCloseReason(t *testing.T) {
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd show --json bd-closed`: {
+			out: []byte(`[{"id":"bd-closed","title":"done","status":"closed","issue_type":"task","created_at":"2025-01-15T10:30:00Z","close_reason":"fixed in commit abc123; tests pass"}]`),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+	b, err := s.Get("bd-closed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.CloseReason != "fixed in commit abc123; tests pass" {
+		t.Errorf("CloseReason = %q, want %q", b.CloseReason, "fixed in commit abc123; tests pass")
+	}
+}
+
+func TestBdStoreListReadsCloseReason(t *testing.T) {
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd list --json --all --include-infra --include-gates --limit 0`: {
+			out: []byte(`[{"id":"bd-open","title":"open","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"},{"id":"bd-closed","title":"done","status":"closed","issue_type":"task","created_at":"2025-01-15T10:31:00Z","close_reason":"superseded by bd-open"}]`),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reasons := map[string]string{}
+	for _, b := range got {
+		reasons[b.ID] = b.CloseReason
+	}
+	if reasons["bd-closed"] != "superseded by bd-open" {
+		t.Errorf("bd-closed CloseReason = %q, want %q", reasons["bd-closed"], "superseded by bd-open")
+	}
+	if reasons["bd-open"] != "" {
+		t.Errorf("bd-open CloseReason = %q, want empty", reasons["bd-open"])
+	}
+}
+
+// TestBdStoreCloseNotificationConformance runs the close-notification contract
+// through a CachingStore over a BdStore driving a fake bd, so bd's row shapes
+// (JSON rows, show/list refreshes, close --reason forwarding) are covered.
+func TestBdStoreCloseNotificationConformance(t *testing.T) {
+	beadstest.RunCloseNotificationTests(t, func(*testing.T) beads.Store {
+		return beadstest.NewFakeBd().NewBdStore()
+	})
 }

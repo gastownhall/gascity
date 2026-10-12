@@ -126,8 +126,11 @@ append_failed_db() {
     fi
 }
 
+# append_failed_detail is the only writer of FAILED_DETAILS, so every
+# diagnostic that reaches the escalation passes through redact_credentials.
 append_failed_detail() {
-    local detail_text="$2"
+    local detail_text
+    detail_text=$(printf '%s' "$2" | redact_credentials)
     [ -n "$detail_text" ] || detail_text="no diagnostic output"
     FAILED_DETAILS="$FAILED_DETAILS
   $1: $detail_text"
@@ -137,12 +140,35 @@ one_line() {
     tr '\n' ' ' <"$1" | sed 's/[[:space:]]\{1,\}/ /g; s/^ //; s/ $//'
 }
 
+# redact_credentials joins stdin onto one line and redacts the credential
+# shapes bd and its transports print: URL userinfo up to its last @ (so an
+# unescaped @ in a password stays hidden), JSON keys naming a password,
+# token, secret, API key, or authorization (prefixed or not), the same names
+# as key=value or key: value (spaces allowed around the separator, quoted
+# values whole), --flags ending in those names, and an Authorization value
+# with or without its scheme. It is idempotent, so a detail redacted twice
+# reads the same.
+redact_credentials() {
+    local key='([Pp][Aa][Ss][Ss]([Ww][Oo][Rr][Dd]|[Ww][Dd])|[Tt][Oo][Kk][Ee][Nn]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Aa][Pp][Ii][_-]?[Kk][Ee][Yy])[A-Za-z0-9_-]*'
+    local auth='[Aa][Uu][Tt][Hh][Oo][Rr][Ii][Zz][Aa][Tt][Ii][Oo][Nn]'
+    local dq='"([^"\\]|\\.)*"'
+    local sq="'[^']*'"
+    local word='[^[:space:],;]+'
+    tr '\n' ' ' | sed -E \
+        -e 's#([[:alpha:]][[:alnum:]+.-]*://)[^/?[:space:]]*@#\1[redacted]@#g' \
+        -e "s/(\"[A-Za-z0-9_-]*($key|$auth)\"[[:space:]]*:[[:space:]]*)($dq|[^[:space:],;}]+)/\\1\"[redacted]\"/g" \
+        -e "s/(${auth}[[:space:]]*[=:][[:space:]]*)($dq|$sq|([A-Za-z][A-Za-z0-9-]*[[:space:]]+)?$word)/\\1[redacted]/g" \
+        -e "s/(${key}[[:space:]]*[=:][[:space:]]*)($dq|$sq|$word)/\\1[redacted]/g" \
+        -e "s/(--[A-Za-z0-9-]*${key}[[:space:]]+)($dq|$sq|$word)/\\1[redacted]/g" \
+        -e 's/[[:space:]]+/ /g; s/^ //; s/ $//'
+}
+
 classify_sync_failure() {
     local classify_rc="$1"
     local classify_err_file="$2"
     local classify_stderr=""
     if [ -s "$classify_err_file" ]; then
-        classify_stderr=$(one_line "$classify_err_file")
+        classify_stderr=$(redact_credentials <"$classify_err_file" | cut -c1-2000)
     fi
 
     if [ "$classify_rc" -eq 124 ]; then
@@ -215,6 +241,7 @@ sync_scope() {
     local sync_attempt=1
     local sync_rc
     local sync_detail=""
+    local first_sync_detail=""
 
     sync_err_tmp=$(mktemp) || {
         printf 'cannot create temp file for sync diagnostics'
@@ -231,11 +258,14 @@ sync_scope() {
             return 0
         fi
         sync_detail=$(classify_sync_failure "$sync_rc" "$sync_err_tmp")
+        if [ -z "$first_sync_detail" ]; then
+            first_sync_detail="$sync_detail"
+        fi
         echo "backup: $SCOPE_LABEL: attempt $sync_attempt/$BACKUP_SYNC_ATTEMPTS failed — $sync_detail" >&2
         sync_attempt=$((sync_attempt + 1))
     done
     rm -f "$sync_err_tmp"
-    printf '%s' "$sync_detail"
+    printf '%s' "$first_sync_detail"
     return 1
 }
 
@@ -392,10 +422,13 @@ if [ "$FAILED_COUNT" -gt 0 ]; then
         "Dolt backup: $FAILED_COUNT/$TOTAL databases failed to sync [MEDIUM]" \
         "Failed databases:$FAILED_DBS
 
-Each scope was attempted up to $BACKUP_SYNC_ATTEMPTS times with a ${BACKUP_SYNC_TIMEOUT_SECS}s bound per attempt. Diagnostic from the final attempt:$FAILED_DETAILS
+Each backup sync was attempted up to $BACKUP_SYNC_ATTEMPTS times with a ${BACKUP_SYNC_TIMEOUT_SECS}s bound per attempt. Diagnostics (common credential shapes redacted; a failed sync reports its first failed attempt):$FAILED_DETAILS
 
 A scope listed here has no backup newer than its last successful sync, so the recoverable copy is as old as that run. Check freshness per scope with gc bd backup status." \
+        "dolt-backup:required-sync" "$FAILED_DBS|$FAILED_DETAILS" \
         2>/dev/null || true
+else
+    dolt_resolve_incident "dolt-backup:required-sync" || true
 fi
 
 case "$OFFSITE_STATUS" in

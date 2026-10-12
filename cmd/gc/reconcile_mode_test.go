@@ -393,7 +393,7 @@ func TestReloadSessionReconcilerDriftFollowsLatchedMode(t *testing.T) {
 	writeCityRuntimeConfig(t, filepath.Join(cityPath, "city.toml"), "fake")
 	cfg, rev := loadCityRuntimeControllerConfig(t, cityPath)
 	sp := runtime.NewFake()
-	wiring, _ := newTestV2Wiring(t, cfg, io.Discard)
+	wiring := newTestV2Wiring(t, cfg, io.Discard)
 	t.Cleanup(wiring.v2.stop)
 	cr := newTestCityRuntime(t, wiring.runtimeParams(CityRuntimeParams{
 		CityPath:  cityPath,

@@ -236,9 +236,9 @@ func TestProviderOverridesAndSuiteContractsCrossMakeIsolation(t *testing.T) {
 		wantFlags    map[string]string
 		wantPackages []string
 	}{
-		{name: "acceptance sqlite", target: "test-acceptance", envName: "GC_ACCEPTANCE_BEADS_PROVIDER", provider: "sqlite", exitCode: 23, wantFlags: acceptanceFlags, wantPackages: []string{"./test/acceptance/..."}},
-		{name: "acceptance file", target: "test-acceptance", envName: "GC_ACCEPTANCE_BEADS_PROVIDER", provider: "file", exitCode: 37, wantFlags: acceptanceFlags, wantPackages: []string{"./test/acceptance/..."}},
-		{name: "acceptance default", target: "test-acceptance", envName: "GC_ACCEPTANCE_BEADS_PROVIDER", exitCode: 23, wantFlags: acceptanceFlags, wantPackages: []string{"./test/acceptance/..."}},
+		{name: "acceptance sqlite", target: "test-acceptance-go", envName: "GC_ACCEPTANCE_BEADS_PROVIDER", provider: "sqlite", exitCode: 23, wantFlags: acceptanceFlags, wantPackages: []string{"./test/acceptance/..."}},
+		{name: "acceptance file", target: "test-acceptance-go", envName: "GC_ACCEPTANCE_BEADS_PROVIDER", provider: "file", exitCode: 37, wantFlags: acceptanceFlags, wantPackages: []string{"./test/acceptance/..."}},
+		{name: "acceptance default", target: "test-acceptance-go", envName: "GC_ACCEPTANCE_BEADS_PROVIDER", exitCode: 23, wantFlags: acceptanceFlags, wantPackages: []string{"./test/acceptance/..."}},
 		{name: "integration sqlite", target: "test-integration-bdstore", envName: "GC_BEADS", provider: "sqlite", exitCode: 37, wantFlags: bdstoreFlags, wantPackages: []string{"./test/integration"}},
 		{name: "integration file", target: "test-integration-bdstore", envName: "GC_BEADS", provider: "file", exitCode: 23, wantFlags: bdstoreFlags, wantPackages: []string{"./test/integration"}},
 		{name: "integration default", target: "test-integration-bdstore", envName: "GC_BEADS", exitCode: 37, wantFlags: bdstoreFlags, wantPackages: []string{"./test/integration"}},

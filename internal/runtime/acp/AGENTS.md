@@ -29,3 +29,19 @@
   `context.AfterFunc` callback closes that pipe without locks; disarm and join
   it before transferring the connection so late cancellation cannot close a
   successful session or interfere with retry cleanup.
+
+# ACP Turn Events
+
+- Take the turn-event hub lock on its own or while holding `sc.mu`; never
+  acquire `sc.mu` while holding it. Turn events are published under `sc.mu`,
+  so the reverse order deadlocks against a publisher.
+- Publishing never blocks on a subscriber. An event that does not fit in a
+  subscriber's channel is dropped and counted; a blocking send would stall
+  the JSON-RPC read loop or a Nudge behind one slow consumer.
+- Log dropped events only after releasing `sc.mu`: take the count under the
+  lock with `takeLostTurnEventsLocked`, then call `logLostTurnEvents`. A
+  stderr write under the lock lets a blocked stderr stall every user of the
+  connection.
+- The stream is best-effort; the session transcript is the durable record.
+  Consumers must tolerate a started event without its completed event, and
+  the reverse.

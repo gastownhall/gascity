@@ -2,8 +2,12 @@ package exec //nolint:revive // internal package, always imported with alias
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -114,5 +118,43 @@ func TestMarshalStartConfig_doesNotLeakSessionFields(t *testing.T) {
 		if _, ok := got[key]; ok {
 			t.Errorf("leaked internal field %q in JSON output", key)
 		}
+	}
+}
+
+// TestMarshalStartConfig_workDirExcludeForEveryWorkDir sends the list for a
+// work dir with no top-level .gc/ or .beads/ too: nested rig scopes below it
+// still hold controller state. A config with no work dir has nothing to
+// copy and stays empty (TestMarshalStartConfig_empty).
+func TestMarshalStartConfig_workDirExcludeForEveryWorkDir(t *testing.T) {
+	cityRoot := t.TempDir()
+	if err := os.Mkdir(filepath.Join(cityRoot, citylayout.RuntimeRoot), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, workDir := range map[string]string{
+		"city root": cityRoot,
+		"no marker": t.TempDir(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			data, err := marshalStartConfig(runtime.Config{WorkDir: workDir, Command: "agent"})
+			if err != nil {
+				t.Fatalf("marshalStartConfig: %v", err)
+			}
+			var raw map[string]json.RawMessage
+			if err := json.Unmarshal(data, &raw); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			field, ok := raw["work_dir_exclude"]
+			if !ok {
+				t.Fatalf("start config %s has no work_dir_exclude", data)
+			}
+			var got []string
+			if err := json.Unmarshal(field, &got); err != nil {
+				t.Fatalf("work_dir_exclude must be a JSON array of strings: %v (%s)", err, field)
+			}
+			want := citylayout.WorkDirExportExcludes()
+			if strings.Join(got, "\n") != strings.Join(want, "\n") {
+				t.Fatalf("work_dir_exclude = %v, want %v", got, want)
+			}
+		})
 	}
 }

@@ -294,7 +294,7 @@ gc convoy list                                        # List active convoys
 gc convoy status <id>                                 # Show convoy progress + metadata
 gc convoy add <id> <bead-ids...>                      # Add beads to convoy
 gc convoy close <id>                                  # Close convoy
-gc convoy check                                       # MUTATING: scans ALL open convoys city-wide and auto-closes any where all children are resolved
+gc convoy check                                       # MUTATING: auto-closes open convoys city-wide whose children are all resolved (a suspended rig's convoys wait until it resumes)
 gc convoy stranded                                    # Find convoys with no progress
 gc convoy autoclose <id>                              # Internal: invoked by bd's on_close hook to auto-close a closed bead's completed convoys
 ```

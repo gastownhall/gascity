@@ -327,7 +327,7 @@ func TestSleepWriteTwinsInfo(t *testing.T) {
 	})
 	t.Run("recoverPendingIdleSleep-recovers", func(t *testing.T) {
 		store, b := newBead(t, map[string]string{"session_name": "worker", "state": "active", "sleep_intent": "idle-stop-pending", "sleep_policy_fingerprint": "fp"})
-		if !recoverPendingIdleSleepInfo(sessiontest.SeedBead(t, b), sessionFrontDoor(store), false, clk) {
+		if recoverPendingIdleSleepInfo(sessiontest.SeedBead(t, b), sessionFrontDoor(store), false, clk) == nil {
 			t.Fatal("recoverPendingIdleSleepInfo = false, want true")
 		}
 		persisted, _ := store.Get(b.ID)
@@ -340,7 +340,7 @@ func TestSleepWriteTwinsInfo(t *testing.T) {
 	})
 	t.Run("recoverPendingIdleSleep-noop", func(t *testing.T) {
 		store, b := newBead(t, map[string]string{"session_name": "worker", "state": "active"})
-		if recoverPendingIdleSleepInfo(sessiontest.SeedBead(t, b), sessionFrontDoor(store), false, clk) {
+		if recoverPendingIdleSleepInfo(sessiontest.SeedBead(t, b), sessionFrontDoor(store), false, clk) != nil {
 			t.Fatal("recoverPendingIdleSleepInfo = true, want false (no pending intent)")
 		}
 	})

@@ -166,7 +166,7 @@ needs to be shown; keep them current.
 
 | Gate | When it runs | What it checks |
 |---|---|---|
-| `make check-docs` (`go test ./test/docsync`) | per-PR CI; pre-commit on staged docs | Tutorial command/txtar sync (today: tutorial 01 vs `cmd/gc/testdata/01-hello-gas-city.txtar`); schema download-link integrity; generated-page freshness; nav↔file correspondence; file-level link resolution across all doc trees (docs, engdocs, contrib, release-gates); bans on known-stale references |
+| `make check-docs` (`bazel test //test/docsync:docsync_test`) | per-PR CI; pre-commit on staged docs | Tutorial command/txtar sync (today: tutorial 01 vs `cmd/gc/testdata/01-hello-gas-city.txtar`); schema download-link integrity; generated-page freshness; nav↔file correspondence; file-level link resolution across all doc trees (docs, engdocs, contrib, release-gates); bans on known-stale references |
 | Tutorial goldens (`make test-tutorial-goldens`; `//go:build acceptance_c`; `test/acceptance/tutorial_goldens/`) | RC-gate CI (sharded); before each release | Executes the tutorial pages end-to-end with real inference. `manifests_test.go` pins the exact command sequence of every tutorial page; the per-tutorial tests assert outcomes. Tutorial edits and golden assertions move in lockstep — change a tutorial command and you must update the manifest and the matching `tutorialNN_test.go` |
 | Anchor hygiene | manual / review | docsync resolves links at file level only (fragments are stripped) — when citing a spec section anchor (`#3-runtime`), verify the heading exists |
 | Local preview | manual | `./mint.sh dev` from the repo root. Mintlify requires Node ≤ 24; the wrapper falls back to Homebrew `node@22` when the ambient Node is too new |

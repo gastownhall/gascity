@@ -16,6 +16,90 @@ import (
 
 var _ runtime.Provider = (*Provider)(nil)
 
+type unattendedStopCall struct {
+	name          string
+	expectedToken string
+}
+
+type unattendedStopperProvider struct {
+	runtime.Provider
+	calls []unattendedStopCall
+	err   error
+}
+
+func newUnattendedStopperProvider(err error) *unattendedStopperProvider {
+	return &unattendedStopperProvider{Provider: runtime.NewFake(), err: err}
+}
+
+func (p *unattendedStopperProvider) StopUnattendedSession(name, expectedToken string) error {
+	p.calls = append(p.calls, unattendedStopCall{name: name, expectedToken: expectedToken})
+	return p.err
+}
+
+func TestProviderStopUnattendedSessionRoutesOnlySelectedBackend(t *testing.T) {
+	t.Run("default", func(t *testing.T) {
+		defaultSP := newUnattendedStopperProvider(nil)
+		acpSP := newUnattendedStopperProvider(nil)
+		p := New(defaultSP, acpSP)
+
+		if err := p.StopUnattendedSession("plain", "token-default"); err != nil {
+			t.Fatalf("StopUnattendedSession(default): %v", err)
+		}
+		if got := defaultSP.calls; len(got) != 1 || got[0] != (unattendedStopCall{name: "plain", expectedToken: "token-default"}) {
+			t.Fatalf("default unattended stops = %#v, want exact plain/token-default call", got)
+		}
+		if got := acpSP.calls; len(got) != 0 {
+			t.Fatalf("ACP unattended stops = %#v, want none", got)
+		}
+	})
+
+	t.Run("ACP", func(t *testing.T) {
+		defaultSP := newUnattendedStopperProvider(nil)
+		acpSP := newUnattendedStopperProvider(nil)
+		p := New(defaultSP, acpSP)
+		p.RouteACP("acpsess")
+
+		if err := p.StopUnattendedSession("acpsess", "token-acp"); err != nil {
+			t.Fatalf("StopUnattendedSession(ACP): %v", err)
+		}
+		if got := acpSP.calls; len(got) != 1 || got[0] != (unattendedStopCall{name: "acpsess", expectedToken: "token-acp"}) {
+			t.Fatalf("ACP unattended stops = %#v, want exact acpsess/token-acp call", got)
+		}
+		if got := defaultSP.calls; len(got) != 0 {
+			t.Fatalf("default unattended stops = %#v, want none", got)
+		}
+	})
+
+	t.Run("unsupported default does not probe ACP", func(t *testing.T) {
+		acpSP := newUnattendedStopperProvider(nil)
+		p := New(runtime.NewFake(), acpSP)
+
+		err := p.StopUnattendedSession("plain", "token")
+		if err == nil || !strings.Contains(err.Error(), "default backend") {
+			t.Fatalf("StopUnattendedSession error = %v, want contextual default-backend error", err)
+		}
+		if got := acpSP.calls; len(got) != 0 {
+			t.Fatalf("ACP unattended stops = %#v, want no fallback probe", got)
+		}
+	})
+
+	t.Run("ACP error does not probe default", func(t *testing.T) {
+		sentinel := errors.New("ACP unattended stop unavailable")
+		defaultSP := newUnattendedStopperProvider(nil)
+		acpSP := newUnattendedStopperProvider(sentinel)
+		p := New(defaultSP, acpSP)
+		p.RouteACP("acpsess")
+
+		err := p.StopUnattendedSession("acpsess", "token")
+		if !errors.Is(err, sentinel) || !strings.Contains(err.Error(), "ACP backend") {
+			t.Fatalf("StopUnattendedSession error = %v, want wrapped contextual ACP error", err)
+		}
+		if got := defaultSP.calls; len(got) != 0 {
+			t.Fatalf("default unattended stops = %#v, want no fallback probe", got)
+		}
+	})
+}
+
 // Relaunch must reach the routed backend (default vs ACP), or the reconciler's
 // RelaunchProvider type-assert would be masked by the auto router and fall back
 // to Stop+Start.
@@ -922,6 +1006,85 @@ func TestAutoStartPassesFreshOnlyThrough(t *testing.T) {
 		calls := tc.backend.Calls
 		if len(calls) == 0 || calls[len(calls)-1].Method != "Start" || !calls[len(calls)-1].Config.FreshOnly {
 			t.Errorf("Start(%s) did not reach its backend with FreshOnly: %+v", tc.name, calls)
+		}
+	}
+}
+
+// serverDeathFake is a Fake backend that confirms, or refuses to confirm, that
+// its server is dead, as tmux does through runtime.ServerDeathConfirmer.
+type serverDeathFake struct {
+	*runtime.Fake
+	dead bool
+}
+
+func (f *serverDeathFake) ServerConfirmedDead() bool { return f.dead }
+
+// A live tmux server whose socket file was deleted answers "no server
+// running" exactly as a dead one does, while its sessions keep running. auto
+// must not merge that answer into success unless the backend confirms its
+// server dead, and must forward the capability so StopForCleanup decides the
+// same way. A backend without the capability keeps the old rule.
+func TestStopMergesMissingServerOnlyWhenConfirmedDead(t *testing.T) {
+	serverGone := fmt.Errorf("killing session sky: %w", errors.New("no tmux server running"))
+	for _, tc := range []struct {
+		name       string
+		confirmer  bool
+		dead       bool
+		acpRoute   bool
+		acpRunning bool
+		wantErr    bool
+	}{
+		{name: "default server not confirmed dead", confirmer: true, wantErr: true},
+		{name: "default server confirmed dead", confirmer: true, dead: true},
+		{name: "ACP gone, default server not confirmed dead", confirmer: true, acpRoute: true, wantErr: true},
+		{name: "ACP gone, default server confirmed dead", confirmer: true, dead: true, acpRoute: true},
+		{name: "stale route stopped on ACP beside an unconfirmed default server", confirmer: true, acpRunning: true},
+		{name: "default backend without the capability", confirmer: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			newProvider := func() *Provider {
+				fake := runtime.NewFake()
+				fake.StopErrors["sky"] = serverGone
+				var defaultSP runtime.Provider = fake
+				if tc.confirmer {
+					defaultSP = &serverDeathFake{Fake: fake, dead: tc.dead}
+				}
+				acpSP := runtime.NewFake()
+				if tc.acpRoute {
+					acpSP.StopErrors["sky"] = fmt.Errorf("%w: acp missing", runtime.ErrSessionNotFound)
+				}
+				if tc.acpRunning {
+					if err := acpSP.Start(context.Background(), "sky", runtime.Config{}); err != nil {
+						t.Fatalf("acp Start: %v", err)
+					}
+				}
+				p := New(defaultSP, acpSP)
+				if tc.acpRoute {
+					p.RouteACP("sky")
+				}
+				return p
+			}
+
+			err := newProvider().Stop("sky")
+			if tc.wantErr && !errors.Is(err, serverGone) {
+				t.Fatalf("Stop = %v, want the missing-server answer", err)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("Stop = %v, want nil", err)
+			}
+			if err := runtime.StopForCleanup(newProvider(), "sky"); tc.wantErr != (err != nil) {
+				t.Fatalf("StopForCleanup = %v, want error %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// auto forwards ServerDeathConfirmer to whichever backend implements it.
+func TestServerConfirmedDeadForwardsToConfirmingBackend(t *testing.T) {
+	for _, dead := range []bool{false, true} {
+		p := New(&serverDeathFake{Fake: runtime.NewFake(), dead: dead}, runtime.NewFake())
+		if got := p.ServerConfirmedDead(); got != dead {
+			t.Errorf("ServerConfirmedDead() = %v, want the tmux backend's %v", got, dead)
 		}
 	}
 }
