@@ -116,9 +116,9 @@ func TestProcessWorkflowFinalizePassedRootStillReadsPass(t *testing.T) {
 	}
 }
 
-// The shared close helper is the last line: whatever caller computes pass,
-// it must not merge pass over a closed, control-quarantined bead.
-func TestSetOutcomeAndCloseNeverPassesOverQuarantine(t *testing.T) {
+// The root close is the last line: whatever the finalizer computed, it must
+// not merge pass over a closed, control-quarantined root.
+func TestCloseWorkflowRootNeverPassesOverQuarantine(t *testing.T) {
 	t.Parallel()
 
 	store := beads.NewMemStore()
@@ -130,8 +130,8 @@ func TestSetOutcomeAndCloseNeverPassesOverQuarantine(t *testing.T) {
 		Status:   "closed",
 		Metadata: meta,
 	})
-	if err := setOutcomeAndClose(store, b.ID, "pass"); err != nil {
-		t.Fatalf("setOutcomeAndClose: %v", err)
+	if err := closeWorkflowRoot(store, b.ID, "pass"); err != nil {
+		t.Fatalf("closeWorkflowRoot: %v", err)
 	}
 	after, err := store.Get(b.ID)
 	if err != nil {
@@ -142,9 +142,10 @@ func TestSetOutcomeAndCloseNeverPassesOverQuarantine(t *testing.T) {
 	}
 }
 
-// The helper's guard is scoped to workflow ROOTS. A retry/ralph logical bead
-// that was quarantined and later passed keeps its own terminal semantics
-// (review of #162, S1): the pass is written, not silently dropped.
+// The quarantine guard is for workflow ROOTS only (closeWorkflowRoot). A
+// retry/ralph logical bead closes through setOutcomeAndClose and, quarantined
+// and later passed, keeps its own terminal semantics (review of #162, S1): the
+// pass is written, not silently dropped.
 func TestSetOutcomeAndCloseStillPassesAQuarantinedNonRoot(t *testing.T) {
 	t.Parallel()
 
