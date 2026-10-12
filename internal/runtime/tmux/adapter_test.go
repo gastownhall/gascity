@@ -388,6 +388,109 @@ func TestProvider_RelaunchInWarmSession(t *testing.T) {
 	}
 }
 
+// Relaunch replaces the agent pane (":^.0"), not whichever pane is active. A
+// human who opened and focused a second window must keep it: before the fix,
+// respawn-pane -t "=name:" killed the focused window's pane, ran the new agent
+// there, and left the old agent running in pane 0.0.
+func TestProvider_RelaunchRespawnsAgentPaneNotActiveWindow(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+
+	cfg := DefaultConfig()
+	cfg.SocketName = fmt.Sprintf("gctest-relaunch-pane-%d-%d", os.Getpid(), time.Now().UnixNano())
+	p := NewProviderWithConfig(cfg)
+	name := "gc-test-relaunch-pane"
+	socketPath := namedSocketPath(cfg.SocketName)
+	t.Cleanup(func() {
+		if err := p.TeardownServer(); err != nil && !errors.Is(err, ErrNoServer) {
+			t.Errorf("tear down test tmux server: %v", err)
+		}
+		if err := os.Remove(socketPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("remove test tmux socket: %v", err)
+		}
+	})
+
+	workDir := t.TempDir()
+	marker := filepath.Join(workDir, "marker")
+	agentCmd := func(tag string) string {
+		return fmt.Sprintf("sh -c 'echo %s > %s; sleep 300'", tag, marker)
+	}
+	if err := p.Start(context.Background(), name, runtime.Config{
+		Command: agentCmd("first"),
+		WorkDir: workDir,
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitForMarker(t, marker, "first")
+
+	agentPane, err := p.tm.GetPaneID(name)
+	if err != nil {
+		t.Fatalf("agent pane id: %v", err)
+	}
+	agentPIDBefore, err := p.tm.GetPanePID(agentPane)
+	if err != nil {
+		t.Fatalf("agent pane pid: %v", err)
+	}
+
+	// pane-base-index 1 (a common tmux.conf setting) leaves no pane index 0,
+	// so a literal ":^.0" respawn target fails; the agent pane must still be found.
+	if _, err := p.tm.run("set-option", "-g", "pane-base-index", "1"); err != nil {
+		t.Fatalf("set pane-base-index: %v", err)
+	}
+
+	// The human's window: created without -d, so it becomes the active window.
+	humanPane, err := p.tm.run("new-window", "-P", "-F", "#{pane_id}", "-t", paneTarget(name), "sleep 300")
+	if err != nil {
+		t.Fatalf("create second window: %v", err)
+	}
+	if !wellFormedTmuxID(humanPane, '%') {
+		t.Fatalf("second-window pane id = %q, want %%<digits>", humanPane)
+	}
+	active, err := p.tm.run("display-message", "-t", paneTarget(name), "-p", "#{pane_id}")
+	if err != nil {
+		t.Fatalf("read active pane: %v", err)
+	}
+	if strings.TrimSpace(active) != humanPane {
+		t.Fatalf("active pane = %q, want the second window's %q (precondition)", strings.TrimSpace(active), humanPane)
+	}
+	humanPID, err := p.tm.GetPanePID(humanPane)
+	if err != nil {
+		t.Fatalf("second-window pane pid: %v", err)
+	}
+
+	if err := p.Relaunch(context.Background(), name, runtime.Config{
+		Command: agentCmd("second"),
+		WorkDir: workDir,
+	}); err != nil {
+		t.Fatalf("Relaunch: %v", err)
+	}
+	waitForMarker(t, marker, "second")
+
+	// Pane 0.0 was respawned: same pane, new process, old agent gone.
+	if got, err := p.tm.GetPaneID(name); err != nil || got != agentPane {
+		t.Fatalf("pane ^.0 after Relaunch = (%q, %v), want %q", got, err, agentPane)
+	}
+	agentPIDAfter, err := p.tm.GetPanePID(agentPane)
+	if err != nil {
+		t.Fatalf("agent pane pid after Relaunch: %v", err)
+	}
+	if agentPIDAfter == agentPIDBefore {
+		t.Fatalf("agent pane pid unchanged (%s): pane 0.0 was not respawned", agentPIDAfter)
+	}
+	if processAlive(agentPIDBefore) {
+		t.Fatalf("old agent process %s still alive after Relaunch", agentPIDBefore)
+	}
+
+	// The second window survived with its original process.
+	if got, err := p.tm.GetPanePID(humanPane); err != nil || got != humanPID {
+		t.Fatalf("second-window pane pid after Relaunch = (%q, %v), want %q (pane respawned or killed)", got, err, humanPID)
+	}
+	if !processAlive(humanPID) {
+		t.Fatalf("second-window process %s killed by Relaunch", humanPID)
+	}
+}
+
 func waitForMarker(t *testing.T, path, want string) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)

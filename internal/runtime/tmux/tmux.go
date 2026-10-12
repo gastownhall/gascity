@@ -3723,16 +3723,25 @@ func (t *Tmux) FindAgentPane(session string) (string, error) {
 	return "", nil
 }
 
-// GetPaneID returns the pane identifier for a session's first pane.
+// GetPaneID returns the pane identifier of a session's agent pane: the first
+// pane of its first window, where every start path puts the agent.
 // Returns a pane ID like "%0" that can be used with RespawnPane.
-// Targets first window (:^.0) to be consistent with GetPaneCommand,
-// GetPanePID, and GetPaneWorkDir.
+//
+// list-panes over the first window (":^") lists panes in index order, so the
+// first line is that pane whatever pane-base-index is. ":^.0" names pane index
+// 0, which does not exist under pane-base-index 1: respawn-pane rejects it
+// ("can't find pane: 0") and display-message silently answers for the
+// window's active pane instead.
 func (t *Tmux) GetPaneID(session string) (string, error) {
-	out, err := t.run("display-message", "-t", primaryPaneTarget(session), "-p", "#{pane_id}")
+	target := session + ":^"
+	if validSessionNameRe.MatchString(session) {
+		target = paneTarget(session) + "^"
+	}
+	out, err := t.run("list-panes", "-t", target, "-F", "#{pane_id}")
 	if err != nil {
 		return "", err
 	}
-	result := strings.TrimSpace(out)
+	result, _, _ := strings.Cut(strings.TrimSpace(out), "\n")
 	if result == "" {
 		return "", fmt.Errorf("no panes found in session %s", session)
 	}
@@ -5366,23 +5375,43 @@ func (t *Tmux) SetMailClickBinding(_ string) error {
 
 // RespawnPane kills all processes in a pane and starts a new command.
 // This is used for "hot reload" of agent sessions - instantly restart in place.
-// The pane parameter should be a pane ID (e.g., "%0") or session:window.pane format.
+// The pane parameter is a pane ID (e.g., "%0"), a session:window.pane target,
+// or a session name. A session name is resolved to its agent pane (GetPaneID),
+// never the active pane: "=name:" would kill whichever pane a human left
+// focused and leave the old agent running.
 func (t *Tmux) RespawnPane(pane, command string) error {
-	_, err := t.run("respawn-pane", "-k", "-t", paneTarget(pane), t.wrapPaneCommand(command))
+	target, err := t.respawnTarget(pane)
+	if err != nil {
+		return err
+	}
+	_, err = t.run("respawn-pane", "-k", "-t", target, t.wrapPaneCommand(command))
 	return err
 }
 
 // RespawnPaneWithWorkDir kills all processes in a pane and starts a new command
 // in the specified working directory. Use this when the pane's current working
-// directory may have been deleted.
+// directory may have been deleted. The pane is resolved as in RespawnPane.
 func (t *Tmux) RespawnPaneWithWorkDir(pane, workDir, command string) error {
-	args := []string{"respawn-pane", "-k", "-t", paneTarget(pane)}
+	target, err := t.respawnTarget(pane)
+	if err != nil {
+		return err
+	}
+	args := []string{"respawn-pane", "-k", "-t", target}
 	if workDir != "" {
 		args = append(args, "-c", workDir)
 	}
 	args = append(args, t.wrapPaneCommand(command))
-	_, err := t.run(args...)
+	_, err = t.run(args...)
 	return err
+}
+
+// respawnTarget resolves a session name to its agent pane id; pane ids and
+// explicit targets pass through unchanged.
+func (t *Tmux) respawnTarget(pane string) (string, error) {
+	if !validSessionNameRe.MatchString(pane) {
+		return pane, nil
+	}
+	return t.GetPaneID(pane)
 }
 
 // ClearHistory clears the scrollback history buffer for a pane.
