@@ -165,3 +165,17 @@ func TestReconcileSessionBeads_FailedCreateCloseKeepsItsWork(t *testing.T) {
 		t.Fatal("the failed create closed over its work")
 	}
 }
+
+// The reconciler's not-running undesired close checks KeepsSlot on a pool
+// row alone: a non-pool (manual) row an operator suspended, whose agent is gone,
+// closes as legacy's did.
+func TestReconcileSessionBeads_NonPoolUndesiredCloseIgnoresTheHold(t *testing.T) {
+	env := newReconcilerTestEnv(t)
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "other", MaxActiveSessions: intPtr(1)}}}
+	session := env.createSessionBead("gone-1", "gone")
+	env.setSessionMetadata(&session, map[string]string{"session_origin": "manual", "state": "asleep", "sleep_reason": "user-hold", "sleep_intent": "user-hold", "held_until": env.clk.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339)})
+	env.reconcile([]beads.Bead{session})
+	if b, _ := env.store.Get(session.ID); b.Status != "closed" {
+		t.Fatalf("status %s, want the non-pool orphan closed whatever holds it", b.Status)
+	}
+}
