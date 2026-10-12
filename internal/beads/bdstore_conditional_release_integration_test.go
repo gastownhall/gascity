@@ -240,7 +240,7 @@ func TestBdStoreReleaseIfCurrentAgainstRealBd(t *testing.T) {
 // and the row hard-fails instead of skipping.
 func bdParsesConditionalReleaseFlags(t *testing.T, scope string) bool {
 	t.Helper()
-	out, err := newConditionalIntegrationRunner(scope)(scope, "bd", "update", "--help")
+	out, err := newConditionalIntegrationRunner(t, scope)(scope, "bd", "update", "--help")
 	if err != nil {
 		// The probe's OWN failure is not evidence about the flags — a bd that
 		// dropped the `update` verb errors here rather than reporting the flags

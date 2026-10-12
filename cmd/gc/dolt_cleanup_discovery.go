@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/pidutil"
 )
 
 // recordedScopeDoltPorts reads each scope's .beads/dolt-server.port. It exists
@@ -123,8 +124,6 @@ func discoverDoltProcesses() ([]DoltProcInfo, error) {
 		return discoverDoltProcessesFromPS()
 	}
 
-	pidPorts := portsByPID()
-
 	var out []DoltProcInfo
 	for _, entry := range entries {
 		if !entry.IsDir() {
@@ -141,13 +140,22 @@ func discoverDoltProcesses() ([]DoltProcInfo, error) {
 		out = append(out, DoltProcInfo{
 			PID:              pid,
 			Argv:             argv,
-			Ports:            pidPorts[pid],
 			RSSBytes:         readProcRSSBytes(pid),
 			StartTimeTicks:   readProcStartTimeTicks(pid),
 			CWDState:         doltProcCWDState(pid),
 			ConfigPathState:  doltConfigPathState(argv),
 			ContainerRuntime: doltProcContainerRuntime(pid),
 		})
+	}
+	// Ports are joined after argv filtering so only the dolt processes' fd
+	// tables are read, not every process on the host.
+	pids := make([]int, 0, len(out))
+	for _, proc := range out {
+		pids = append(pids, proc.PID)
+	}
+	pidPorts := portsByPID(pids)
+	for i := range out {
+		out[i].Ports = pidPorts[out[i].PID]
 	}
 	return out, nil
 }
@@ -157,7 +165,7 @@ func discoverDoltProcessesFromPS() ([]DoltProcInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	pidPorts := portsByPID()
+	pidPorts := portsByPID(nil)
 	var out []DoltProcInfo
 	for _, line := range lines {
 		proc, ok := parseDoltPSLine(line, pidPorts)
@@ -704,58 +712,16 @@ func looksLikeDoltSQLServer(argv []string) bool {
 	return argv[1] == "sql-server"
 }
 
-// portsByPID returns a map from PID to its listening TCP ports by reading
-// /proc/net/tcp{,6} and cross-referencing /proc/<pid>/fd/ socket inodes. On
-// hosts without /proc/net the map is empty (the reaper falls back to argv-
-// only protection).
-func portsByPID() map[int][]int {
-	out := map[int][]int{}
-	listenInodes, checkedProcNet := listenInodesByPortChecked()
-	if len(listenInodes) == 0 {
-		if checkedProcNet {
-			return out
-		}
-		return portsByPIDFromLsof()
-	}
-	inodeToPort := map[string]int{}
-	for port, inodes := range listenInodes {
-		for _, inode := range inodes {
-			inodeToPort[inode] = port
-		}
-	}
-
-	entries, err := os.ReadDir("/proc")
-	if err != nil {
+// portsByPID returns a map from each of pids to its listening TCP ports, read
+// from /proc/net/tcp{,6} and the given processes' /proc/<pid>/fd socket
+// inodes. On hosts without /proc/net it falls back to lsof, which reports every
+// listening process regardless of pids (the ps discovery path passes nil for
+// that reason).
+func portsByPID(pids []int) map[int][]int {
+	if out, checked := pidutil.ListeningPortsByPID(pids); checked {
 		return out
 	}
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		pid, err := strconv.Atoi(entry.Name())
-		if err != nil {
-			continue
-		}
-		fdDir := filepath.Join("/proc", strconv.Itoa(pid), "fd")
-		fds, err := os.ReadDir(fdDir)
-		if err != nil {
-			continue
-		}
-		for _, fd := range fds {
-			target, err := os.Readlink(filepath.Join(fdDir, fd.Name()))
-			if err != nil {
-				continue
-			}
-			if !strings.HasPrefix(target, "socket:[") {
-				continue
-			}
-			inode := strings.TrimSuffix(strings.TrimPrefix(target, "socket:["), "]")
-			if port, ok := inodeToPort[inode]; ok {
-				out[pid] = appendUniqueInt(out[pid], port)
-			}
-		}
-	}
-	return out
+	return portsByPIDFromLsof()
 }
 
 func portsByPIDFromLsof() map[int][]int {
@@ -807,34 +773,6 @@ func parseListeningPortLsofLine(line string) (int, int, bool) {
 		return 0, 0, false
 	}
 	return pid, port, true
-}
-
-func listenInodesByPortChecked() (map[int][]string, bool) {
-	out := map[int][]string{}
-	checked := false
-	for _, path := range []string{"/proc/net/tcp", "/proc/net/tcp6"} {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		checked = true
-		for _, line := range strings.Split(string(data), "\n") {
-			fields := strings.Fields(line)
-			if len(fields) < 10 || fields[3] != "0A" {
-				continue
-			}
-			_, portHex, ok := strings.Cut(fields[1], ":")
-			if !ok {
-				continue
-			}
-			port, err := strconv.ParseUint(portHex, 16, 16)
-			if err != nil {
-				continue
-			}
-			out[int(port)] = appendUniqueString(out[int(port)], fields[9])
-		}
-	}
-	return out, checked
 }
 
 func appendUniqueInt(s []int, v int) []int {

@@ -101,6 +101,50 @@ func NormalizeSourceStoreRef(sourceStoreRef string) string {
 	return strings.TrimSpace(sourceStoreRef)
 }
 
+// CanonicalSourceStoreRef returns the comparison form of a store ref inside
+// the city named cityName.
+//
+// A bare "city:" names this city's store. Callers that build the ref from
+// city.toml alone stamp and select that form when the city has no
+// [workspace] name, while gc renders the same store as "city:<name>" from the
+// effective city name (the city directory's basename when unnamed). Both
+// spellings mean the same store, so the bare form canonicalizes to
+// "city:<cityName>", falling back to "city:city" the same way gc renders an
+// unnamed city store. A ref naming another city keeps its name and stays
+// distinct. The name part of city and rig refs is trimmed, matching how the
+// store-ref resolver reads it. A bare "rig:" has no store to name and stays
+// as it is; other schemes are only whitespace-normalized.
+func CanonicalSourceStoreRef(sourceStoreRef, cityName string) string {
+	ref := NormalizeSourceStoreRef(sourceStoreRef)
+	scheme, name, ok := strings.Cut(ref, ":")
+	if !ok {
+		return ref
+	}
+	name = strings.TrimSpace(name)
+	switch scheme {
+	case "city":
+		if name == "" {
+			name = strings.TrimSpace(cityName)
+		}
+		if name == "" {
+			name = "city"
+		}
+		return "city:" + name
+	case "rig":
+		return "rig:" + name
+	default:
+		return ref
+	}
+}
+
+// SameSourceStoreRef reports whether two store refs name the same store inside
+// the city named cityName. See CanonicalSourceStoreRef. An empty ref names no
+// store and never matches.
+func SameSourceStoreRef(a, b, cityName string) bool {
+	canonical := CanonicalSourceStoreRef(a, cityName)
+	return canonical != "" && canonical == CanonicalSourceStoreRef(b, cityName)
+}
+
 // GraphStoreRefPrefix tags a city's relocated graph binding in a store ref, the
 // way "city" and "rig" tag a scope root. It is not a scope kind — graph roots
 // carry scope metadata of their own — only a store-identity tag, so a singleton
@@ -165,6 +209,23 @@ func LockScopeForStoreRef(cityPath, defaultStorePath, storeRef string, rigPath f
 // roots without SourceStoreRefMetadataKey are treated as belonging to the
 // store they physically live in (rootStoreRef).
 func WorkflowMatchesSource(root beads.Bead, sourceBeadID, sourceStoreRef, rootStoreRef string) bool {
+	return workflowMatchesSource(root, sourceBeadID, sourceStoreRef, rootStoreRef, exactStoreRefs)
+}
+
+// WorkflowMatchesSourceInCity is WorkflowMatchesSource with store refs
+// compared by SameSourceStoreRef inside the city named cityName, so a bare
+// "city:" on either side matches "city:<cityName>".
+func WorkflowMatchesSourceInCity(root beads.Bead, sourceBeadID, sourceStoreRef, rootStoreRef, cityName string) bool {
+	return workflowMatchesSource(root, sourceBeadID, sourceStoreRef, rootStoreRef, cityStoreRefs(cityName))
+}
+
+func exactStoreRefs(a, b string) bool { return a == b }
+
+func cityStoreRefs(cityName string) func(a, b string) bool {
+	return func(a, b string) bool { return SameSourceStoreRef(a, b, cityName) }
+}
+
+func workflowMatchesSource(root beads.Bead, sourceBeadID, sourceStoreRef, rootStoreRef string, sameStoreRef func(a, b string) bool) bool {
 	sourceBeadID = NormalizeSourceBeadID(sourceBeadID)
 	if sourceBeadID == "" {
 		return false
@@ -178,13 +239,13 @@ func WorkflowMatchesSource(root beads.Bead, sourceBeadID, sourceStoreRef, rootSt
 	}
 	rootSourceStoreRef := NormalizeSourceStoreRef(root.Metadata[SourceStoreRefMetadataKey])
 	if rootSourceStoreRef != "" {
-		return rootSourceStoreRef == sourceStoreRef
+		return sameStoreRef(rootSourceStoreRef, sourceStoreRef)
 	}
 	rootStoreRef = NormalizeSourceStoreRef(rootStoreRef)
 	if rootStoreRef == "" {
 		return false
 	}
-	return rootStoreRef == sourceStoreRef
+	return sameStoreRef(rootStoreRef, sourceStoreRef)
 }
 
 // ListLiveRoots returns the live (not-closed) workflow roots in store that
@@ -192,6 +253,17 @@ func WorkflowMatchesSource(root beads.Bead, sourceBeadID, sourceStoreRef, rootSt
 // indexes on gc.source_bead_id and filters via IsWorkflowRoot so both
 // legacy gc.kind=workflow roots and graph.v2-only roots are visible.
 func ListLiveRoots(store beads.Store, sourceBeadID, sourceStoreRef, rootStoreRef string) ([]beads.Bead, error) {
+	return listLiveRoots(store, sourceBeadID, sourceStoreRef, rootStoreRef, exactStoreRefs)
+}
+
+// ListLiveRootsInCity is ListLiveRoots with store refs compared by
+// SameSourceStoreRef inside the city named cityName (see
+// WorkflowMatchesSourceInCity).
+func ListLiveRootsInCity(store beads.Store, sourceBeadID, sourceStoreRef, rootStoreRef, cityName string) ([]beads.Bead, error) {
+	return listLiveRoots(store, sourceBeadID, sourceStoreRef, rootStoreRef, cityStoreRefs(cityName))
+}
+
+func listLiveRoots(store beads.Store, sourceBeadID, sourceStoreRef, rootStoreRef string, sameStoreRef func(a, b string) bool) ([]beads.Bead, error) {
 	sourceBeadID = NormalizeSourceBeadID(sourceBeadID)
 	if store == nil || sourceBeadID == "" {
 		return nil, nil
@@ -208,7 +280,7 @@ func ListLiveRoots(store beads.Store, sourceBeadID, sourceStoreRef, rootStoreRef
 		if !IsWorkflowRoot(root) {
 			return true
 		}
-		return !WorkflowMatchesSource(root, sourceBeadID, sourceStoreRef, rootStoreRef)
+		return !workflowMatchesSource(root, sourceBeadID, sourceStoreRef, rootStoreRef, sameStoreRef)
 	})
 	slices.SortFunc(roots, func(a, b beads.Bead) int {
 		return strings.Compare(a.ID, b.ID)
@@ -529,8 +601,9 @@ func closeRootWithMarker(store beads.Store, rootID string, rootMeta map[string]s
 		return store.CloseAll([]string{rootID}, rootMeta)
 	}
 	// Re-read as close to the write as possible and skip an already-closed root,
-	// so a concurrently finalized root is not re-stamped — the same guard CloseAll
-	// applies per id before it writes.
+	// so a concurrently finalized root is not re-stamped. CloseAll is no such
+	// guard: whether it stamps a closed id is store-specific (see the
+	// beads.Store CloseAll doc).
 	current, err := store.Get(rootID)
 	if err != nil {
 		return 0, err

@@ -20,7 +20,7 @@ func SnapshotTopologyFiles(fs fsys.FS, cityPath string, cfg *config.City) ([]Fil
 		return nil, err
 	}
 	snapshots = append(snapshots, cityToml)
-	packsLock, err := SnapshotOptionalFile(fs, filepath.Join(cityPath, "packs.lock"))
+	packsLock, err := SnapshotResolvedFile(fs, filepath.Join(cityPath, "packs.lock"))
 	if err != nil {
 		return nil, err
 	}

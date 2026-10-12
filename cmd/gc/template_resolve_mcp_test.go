@@ -127,7 +127,7 @@ args = ["notes-mcp"]
 		if err == nil {
 			t.Fatal("expected unsupported provider error, got nil")
 		}
-		if !strings.Contains(err.Error(), "effective MCP requires a supported provider family") {
+		if !strings.Contains(err.Error(), `runs on the "copilot" harness, which cannot receive MCP`) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 	})

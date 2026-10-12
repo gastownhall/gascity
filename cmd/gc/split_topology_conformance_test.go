@@ -71,7 +71,7 @@ import (
 //     store instead of replacing it).
 //   - CLOSED by S2 — I5's release-tier gap. Crash recovery, the retired-session
 //     sweep, `gc session close` and drain-ack all resolve the same leg set from
-//     the city's routes (assignedWorkSweepPlan), so a class-routed claim is
+//     the city's routes (workLegsFromCensus), so a class-routed claim is
 //     released by the same pass that releases a work-store one. What remains
 //     open there is ga-zp3uj, named in I5's own text: the AGENT-SIDE recovery
 //     tiers are raw bd commands in a work directory and stay topology-blind.
@@ -187,7 +187,7 @@ func conformanceReadyFederation(t *testing.T, e splitEnv) {
 		t.Fatalf("HQ bead %s classifies as infrastructure; this leg is about the WORK class specifically", hqWork.ID)
 	}
 
-	found, stores, refs, partial := collectOpenUnassignedRoutedWork(e.cityPath, e.cfg, e.sessionsStore(), e.rigStores, nil, os.Stderr)
+	found, stores, refs, partial := collectOpenUnassignedRoutedWork(e.cityPath, e.cfg, e.sessionsStore(), e.rigStores, nil, os.Stderr, nil, nil)
 	if partial {
 		t.Fatal("collectOpenUnassignedRoutedWork reported a partial scan; the demand read must be complete for this invariant to mean anything")
 	}
@@ -337,7 +337,7 @@ func conformanceAssignedWorkCapture(t *testing.T, e splitEnv) {
 		got, stores, refs,
 		e.rigStores,
 		nil,
-		nil,
+		nil, nil,
 	)
 	wantReleased := []string{dead.ID, hqDead.ID}
 	releasedIDs := make(map[string]bool, len(released))
@@ -1087,7 +1087,7 @@ func conformanceHookClaimClassRouting(t *testing.T, e splitEnv, workBeadID strin
 //
 // S2 UPDATE (ga-j4ob9): the second scan is no longer HANDED the binding by its
 // call site. Both rows now resolve the same leg set from the city's own routes
-// (assignedWorkSweepPlan), which is what closes the case the hand-threading
+// (workLegsFromCensus), which is what closes the case the hand-threading
 // never covered — the Info-form retired-session sweep, which took no class leg
 // at all, so a dead session's binding-resident claim had no automatic reopen
 // lane. The rows below are unchanged in what they assert; only the mechanism
@@ -1106,16 +1106,18 @@ func assertClassRoutedClaimIsReleasable(t *testing.T, e splitEnv) {
 		leading beads.Store
 	}{
 		{
-			name:    "reconciler scan — leads with the sessions-class store, which IS the binding",
+			name:    "reconciler scan — the session bead lives in the sessions-class store, which IS the binding",
 			leading: e.sessionsStore(),
 		},
 		{
-			name:    "gc session close — leads with the work store and resolves the binding from the routes",
+			name:    "gc session close — the session bead resolved through the work store",
 			leading: e.work,
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			plan, err := assignedWorkSweepPlan(e.cityPath, e.cfg, tt.leading, e.rigStores, nil)
+			// Both read through the city's WorkLegs over its work store, which
+			// resolve the binding from the routes.
+			plan, err := workLegsPlan(e.cityPath, e.cfg, e.work, e.rigStores)
 			if err != nil {
 				t.Fatalf("resolving the release scan's leg set: %v", err)
 			}
@@ -1125,10 +1127,13 @@ func assertClassRoutedClaimIsReleasable(t *testing.T, e splitEnv) {
 			sessionBead := beads.Bead{ID: "gcg-retired-session", Metadata: map[string]string{"session_name": "worker-1"}}
 			step := e.mintWispWith(t, wispOpts{
 				title:    "graph step claimed by a session that then died",
+				routedTo: "worker",
 				status:   "in_progress",
 				assignee: sessionBead.ID,
 			})
-			unclaimWorkAssignedToRetiredSessionBead(e.cityPath, e.cfg, tt.leading, e.rigStores, sessionBead, "", io.Discard)
+			// A configured "worker" lane the released step routes to.
+			legs := workLegsFromCensus(e.cityPath, servingRigsCity(e.cfg, "worker"), cityWorkLeg{store: e.work}, e.rigStores)
+			unclaimWorkAssignedToRetiredSessionBead(legs, tt.leading, sessionBead, "", io.Discard)
 			released, err := e.class.Get(step.ID)
 			if err != nil {
 				t.Fatalf("reading the claimed graph step back from the binding: %v", err)
@@ -1383,7 +1388,7 @@ func conformanceResidenceSweep(t *testing.T, e splitEnv) {
 		Title:    "worker-1",
 		Type:     session.BeadType,
 		Labels:   []string{session.LabelSession},
-		Metadata: map[string]string{"session_id": "sess-1"},
+		Metadata: map[string]string{"test_session_id": "sess-1"},
 	}); err != nil {
 		t.Fatalf("create session bead: %v", err)
 	}
@@ -1932,10 +1937,8 @@ func beadIDsOf(list []beads.Bead) []string {
 // executable FEDERATION CONTRACT written for this invariant: legs city → rigs
 // ascending → graph last, per-leg order whatever that leg's reader emits, dedupe
 // first-leg-wins, and — the load-bearing part — BOTH sides compared after
-// normalizing with beads.SortBeadsReadyOrder, because per-leg order is
-// deterministic but not canonical across leg kinds (a caching-wrapped work store
-// emits (priority, created_at, id); the canonical relocated binding emits
-// (created_at, id) with no priority term). So this runs the real API handler and
+// normalizing with beads.SortBeadsReadyOrder, because each leg is sorted but
+// their concatenation is not. So this runs the real API handler and
 // the real CLI reader over the SAME three stores and compares the two answers.
 //
 // The single-store row is not a formality: it is the byte-identity claim. There

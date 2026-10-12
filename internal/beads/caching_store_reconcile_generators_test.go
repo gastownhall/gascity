@@ -360,6 +360,7 @@ func genRandomState(rng *rand.Rand, idx int) mergeFixture {
 	st := storeState{
 		beads: map[string]Bead{}, deps: map[string][]Dep{}, dirty: map[string]struct{}{},
 		beadSeq: map[string]uint64{}, localBeadAt: map[string]time.Time{}, deletedSeq: map[string]uint64{},
+		writeSeq:    map[string]uint64{},
 		backingIsBd: rng.Intn(2) == 0,
 	}
 	in := snapshotInputs{
@@ -415,6 +416,11 @@ func genRandomState(rng *rand.Rand, idx int) mergeFixture {
 		}
 		if rng.Intn(3) == 0 {
 			st.dirty[id] = struct{}{}
+		}
+		// A local write revision, including on rows the merge evicts and on
+		// orphans whose only entry it is.
+		if rng.Intn(2) == 0 {
+			st.writeSeq[id] = randFence(rng, startSeq, st.mutationSeq)
 		}
 		// Orphan deps-only entries for a never-present id occasionally.
 		if presence == 3 && rng.Intn(2) == 0 {

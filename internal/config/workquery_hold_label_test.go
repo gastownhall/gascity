@@ -1,6 +1,7 @@
 package config
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -69,6 +70,49 @@ func TestPoolDemandCountShellInheritsDispatchHoldLabelExclusion(t *testing.T) {
 		want := `--exclude-label "` + label + `"`
 		if !strings.Contains(got, want) {
 			t.Errorf("poolDemandCountShell() = %q, missing %q (reconciler count-form must inherit the claim-path fix)", got, want)
+		}
+	}
+}
+
+// bd's native human label parks a bead for a person. It is not a dispatch hold:
+// beadmeta.DispatchHoldLabels names only the two canonical holds, and the hook's
+// held-candidate filter and the in_progress serve gate iterate that list, so the
+// exclusion rides the pool-demand serve rules alone. Every route-scoped query
+// renders from those rules and must carry it; the assignee-scoped probes must
+// stay transparent to it.
+
+func TestPoolDemandServeRulesExcludeHumanLabelWithoutMakingItADispatchHold(t *testing.T) {
+	if rules := PoolDemandServeRulesForQuery(); !slices.Contains(rules.ExcludeLabels, "human") {
+		t.Errorf("PoolDemandServeRulesForQuery().ExcludeLabels = %v, missing the human label", rules.ExcludeLabels)
+	}
+	if slices.Contains(beadmeta.DispatchHoldLabels, "human") {
+		t.Errorf("beadmeta.DispatchHoldLabels = %v, must not name the human label: it is not a dispatch hold", beadmeta.DispatchHoldLabels)
+	}
+}
+
+func TestRouteScopedPoolDemandShellsExcludeHumanLabel(t *testing.T) {
+	want := `--exclude-label "human"`
+	for name, got := range map[string]string{
+		"bdReadyPoolDemandShell":          bdReadyPoolDemandShell("--limit 0", QueryTopology{}),
+		"bdReadyPoolDemandMigrationShell": bdReadyPoolDemandMigrationShell("--limit=20", QueryTopology{}),
+		"poolDemandCountShell":            poolDemandCountShell("hello-world/worker", QueryTopology{}),
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("%s() = %q, missing %q", name, got, want)
+		}
+	}
+	if got := legacyEphemeralPoolDemandShell(20, QueryTopology{}, true); !strings.Contains(got, `"human"`) {
+		t.Errorf("legacyEphemeralPoolDemandShell() = %q, missing the human label in its jq label filter", got)
+	}
+}
+
+func TestAssigneeScopedProbesStayHumanTransparent(t *testing.T) {
+	for name, got := range map[string]string{
+		"ephemeralAssignedReadyProbeScript":      ephemeralAssignedReadyProbeScript("cand", QueryTopology{}),
+		"ephemeralAssignedInProgressProbeScript": ephemeralAssignedInProgressProbeScript("cand", QueryTopology{}),
+	} {
+		if strings.Contains(got, `"human"`) {
+			t.Errorf("%s() = %q, assignee-scoped tier must stay human-transparent", name, got)
 		}
 	}
 }

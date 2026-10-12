@@ -150,20 +150,20 @@ func isProvisionalGCSessionID(sessionID string) bool {
 // probe their real on-disk location even when given only a partial configured
 // search root.
 func HasKeyedTranscript(searchPaths []string, provider, workDir, sessionKey string) (exists, probeable bool) {
-	if strings.TrimSpace(sessionKey) == "" || strings.TrimSpace(workDir) == "" || !providerHasKeyedTranscript(provider) {
+	if strings.TrimSpace(sessionKey) == "" || strings.TrimSpace(workDir) == "" || !ProviderHasKeyedTranscript(provider) {
 		return false, false
 	}
 	return DiscoverKeyedPath(searchPaths, provider, workDir, sessionKey) != "", true
 }
 
-// providerHasKeyedTranscript reports whether the provider family can use keyed
+// ProviderHasKeyedTranscript reports whether the provider family can use keyed
 // transcript absence as a stale-resume signal. This is stricter than
 // SupportsIDLookup, which only answers whether transcript display lookup can
 // use a provider session id. Here we only claim a provider when its keyed
 // transcript absence is meaningful for resume-key invalidation, so the
 // stale-resume guard never clears a resume key for a provider whose restart
-// semantics we have not verified.
-func providerHasKeyedTranscript(provider string) bool {
+// semantics we have not verified. It is pure: it reads only the name.
+func ProviderHasKeyedTranscript(provider string) bool {
 	switch sessionlog.ProviderFamily(provider) {
 	case "copilot", "kiro", "kimi", "pi", "antigravity":
 		return true

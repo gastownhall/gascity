@@ -1461,6 +1461,17 @@ func TestLogicalRecipeStepIDV2AttemptAndIteration(t *testing.T) {
 			wantOK: true,
 		},
 		{
+			// Inside a ralph body gc.attempt is the iteration and the retry
+			// counter is gc.retry_attempt; the ref suffix names the latter.
+			name: "v2 retry attempt inside a later ralph iteration",
+			step: formula.RecipeStep{
+				ID:       "mol-feature.loop.iteration.3.review.attempt.1",
+				Metadata: map[string]string{"gc.attempt": "3", "gc.iteration": "3", "gc.retry_attempt": "1"},
+			},
+			wantID: "mol-feature.loop.iteration.3.review",
+			wantOK: true,
+		},
+		{
 			name: "v1 retry-run still works",
 			step: formula.RecipeStep{
 				ID:       "mol-feature.review.run.1",

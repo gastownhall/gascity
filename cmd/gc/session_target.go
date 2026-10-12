@@ -13,6 +13,7 @@ type sessionRuntimeTarget struct {
 	cityPath    string
 	display     string
 	sessionName string
+	sessionID   string // resolved session bead ID; empty for the env-derived current session
 }
 
 func defaultSessionDisplayIdentity() string {
@@ -65,5 +66,6 @@ func resolveSessionRuntimeTarget(identifier string, warningWriter ...io.Writer) 
 		cityPath:    target.cityPath,
 		display:     display,
 		sessionName: target.sessionName,
+		sessionID:   target.sessionID,
 	}, nil
 }

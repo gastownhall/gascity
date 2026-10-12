@@ -31,8 +31,8 @@ type OutboundRequest struct {
 // OutboundResult captures the outcome of a publish operation.
 type OutboundResult struct {
 	Receipt         PublishReceipt
-	DeliveryContext *DeliveryContextRecord
-	TranscriptEntry *ConversationTranscriptRecord
+	DeliveryContext *DeliveryContextRecord        `json:"DeliveryContext,omitempty"`
+	TranscriptEntry *ConversationTranscriptRecord `json:"TranscriptEntry,omitempty"`
 }
 
 // OutboundDeps bundles the dependencies for outbound processing.

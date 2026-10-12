@@ -30,6 +30,14 @@ func spawnReparentedChild(t *testing.T, env []string) int {
 		t.Fatalf("parse child pid from %q: %v", out, err)
 	}
 	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+	// ga-961qe1 / ga-cfr67u: this spawns a generic, un-setsid'd sleep 300
+	// that is indistinguishable BY NAME from any other test's target —
+	// including this file's own TestSetsidDoesNotPreventOrphanSelection,
+	// which reuses this helper as a deliberate concurrent decoy. Logging the
+	// pid here is what makes a given call's child distinguishable from any
+	// other sleep 300 in test output/logs; callers must not rely on argv or
+	// process name to tell two spawnReparentedChild children apart.
+	t.Logf("spawnReparentedChild: spawned pid=%d (generic sleep 300, un-setsid'd)", pid)
 	return pid
 }
 
@@ -116,26 +124,66 @@ func TestScrubbedForkedSupervisorIsNotSelected(t *testing.T) {
 //
 // The child below is setsid'd — a strictly stronger detachment than the
 // Setpgid the real fork path uses — and is still selected.
+//
+// ga-961qe1 / ga-cfr67u: the target is identified by capturing the spawning
+// shell's own $! directly, never by scanning for it after the fact — the
+// same pattern spawnReparentedChild uses. Two concurrent, unrelated `sleep
+// 300` decoys are deliberately present throughout — an ambient one from
+// spawnReparentedChild (this file's other helper, and exactly what
+// ga-961qe1's root cause names as a real-world decoy source), and a second
+// started immediately after the target in its own launcher — proving the
+// identification is correct regardless of what else matches that process
+// name on the host (ga-961qe1's old, unscoped `pgrep -f 'sleep 300' | tail
+// -1` lookup could not tell them apart; that form is preserved in this
+// bead's RED commit).
 func TestSetsidDoesNotPreventOrphanSelection(t *testing.T) {
 	if _, err := exec.LookPath("setsid"); err != nil {
 		t.Skip("setsid not available")
 	}
 	sessionID := "ga-repro-s434i0-setsid-" + strconv.Itoa(os.Getpid())
 
-	launcher := exec.Command("sh", "-c", "setsid sleep 300 >/dev/null 2>&1 & sleep 0.2; pgrep -f 'sleep 300' | tail -1")
+	// Concurrent decoys this test's identification must ignore: an ambient
+	// one already on the host, and a second started immediately after the
+	// target below, from the same launcher.
+	ambientDecoyPID := spawnReparentedChild(t, os.Environ())
+
+	// The trailing `sleep 0.2` is load-bearing, not leftover from the old
+	// pgrep-based lookup: `setsid CMD &` backgrounds a fork of the shell
+	// that has not yet called setsid(2)/exec'd into CMD at the moment `$!`
+	// is available, so reading /proc/<pid>/stat immediately can observe the
+	// child still in the parent's original session. Confirmed empirically —
+	// removing this sleep reproduces a ~80% local failure rate with sid
+	// stuck at an ancestor session instead of the target's own pid.
+	launcher := exec.Command("sh", "-c",
+		"setsid sleep 300 >/dev/null 2>&1 & echo $!; "+
+			"sleep 300 >/dev/null 2>&1 & echo $!; "+
+			"sleep 0.2")
 	launcher.Env = append(os.Environ(), "GC_SESSION_ID="+sessionID)
 	out, err := launcher.Output()
 	if err != nil {
 		t.Fatalf("spawn setsid child: %v", err)
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	lines := strings.Fields(strings.TrimSpace(string(out)))
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 pids (target, second decoy) from launcher, got %q", out)
+	}
+	pid, err := strconv.Atoi(lines[0])
 	if err != nil {
-		t.Fatalf("parse setsid child pid from %q: %v", out, err)
+		t.Fatalf("parse target pid from %q: %v", out, err)
+	}
+	secondDecoyPID, err := strconv.Atoi(lines[1])
+	if err != nil {
+		t.Fatalf("parse second decoy pid from %q: %v", out, err)
 	}
 	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+	t.Cleanup(func() { _ = syscall.Kill(secondDecoyPID, syscall.SIGKILL) })
+	t.Logf("ambient decoy pid=%d, second decoy pid=%d, target pid=%d (captured via $!, never scanned for)",
+		ambientDecoyPID, secondDecoyPID, pid)
 
 	// Prove the detachment is real: a fully setsid'd process leads its own
-	// session and process group.
+	// session and process group. Keeps the assertion's teeth (acceptance
+	// criterion 2): a genuinely broken setsid still fails here, on the
+	// correctly-identified target.
 	sid := procStatField(t, pid, 3)
 	if sid != pid {
 		t.Fatalf("child %d is not a session leader (sid=%d); setsid did not take effect", pid, sid)

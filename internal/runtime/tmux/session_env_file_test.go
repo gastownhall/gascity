@@ -289,7 +289,7 @@ func TestSetEnvironmentKeepsInertValueOnArgv(t *testing.T) {
 	if err := tm.SetEnvironment("gc-test-meta", "GC_SESSION_ID", "gc-123"); err != nil {
 		t.Fatalf("SetEnvironment: %v", err)
 	}
-	want := []string{"set-environment", "-t", "gc-test-meta", "GC_SESSION_ID", "gc-123"}
+	want := []string{"set-environment", "-t", "=gc-test-meta", "GC_SESSION_ID", "gc-123"}
 	if got := fake.calls[0]; !slices.Equal(got[len(got)-len(want):], want) {
 		t.Errorf("inert SetEnvironment argv = %v, want suffix %v", got, want)
 	}

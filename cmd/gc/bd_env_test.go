@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 func mustBdRuntimeEnv(t *testing.T, cityPath string) map[string]string {
@@ -5168,10 +5169,10 @@ func TestBdRuntimeEnvDisablesAutoExport(t *testing.T) {
 	}
 }
 
-// TestScopeIsGCManagedRecognizesExplicitAutoOff verifies that a config with
+// TestScopeJSONLIsReapableRecognizesExplicitAutoOff verifies that a config with
 // export.auto:false is recognized as gc-managed even when gc.endpoint_origin
 // is absent. This is the steady-state signal post-PR-1965.
-func TestScopeIsGCManagedRecognizesExplicitAutoOff(t *testing.T) {
+func TestScopeJSONLIsReapableRecognizesExplicitAutoOff(t *testing.T) {
 	scope := t.TempDir()
 	beadsDir := filepath.Join(scope, ".beads")
 	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
@@ -5182,17 +5183,17 @@ func TestScopeIsGCManagedRecognizesExplicitAutoOff(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	if !scopeIsGCManaged(scope) {
-		t.Fatalf("scopeIsGCManaged = false, want true for explicit export.auto:false")
+	if !scopeJSONLIsReapable(fsys.OSFS{}, scope) {
+		t.Fatalf("scopeJSONLIsReapable = false, want true for explicit export.auto:false")
 	}
 }
 
-// TestScopeIsGCManagedRecognizesManagedOrigin verifies that a long-lived
+// TestScopeJSONLIsReapableRecognizesManagedOrigin verifies that a long-lived
 // city whose config still pre-dates PR 1965 (export.auto absent) is still
 // recognized as gc-managed because gc.endpoint_origin proves it. This is
 // the transitional signal — without it the jsonl reaper would refuse to
 // clean up samtown-style cities until they hit a canonicalization event.
-func TestScopeIsGCManagedRecognizesManagedOrigin(t *testing.T) {
+func TestScopeJSONLIsReapableRecognizesManagedOrigin(t *testing.T) {
 	scope := t.TempDir()
 	beadsDir := filepath.Join(scope, ".beads")
 	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
@@ -5203,16 +5204,32 @@ func TestScopeIsGCManagedRecognizesManagedOrigin(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	if !scopeIsGCManaged(scope) {
-		t.Fatalf("scopeIsGCManaged = false, want true for gc.endpoint_origin: managed_city")
+	if !scopeJSONLIsReapable(fsys.OSFS{}, scope) {
+		t.Fatalf("scopeJSONLIsReapable = false, want true for gc.endpoint_origin: managed_city")
 	}
 }
 
-// TestScopeIsGCManagedDoesNotClaimExplicitOptOut verifies the carve-out
+func TestScopeJSONLIsReapableHonorsCityAutoExportOptOut(t *testing.T) {
+	scope := t.TempDir()
+	beadsDir := filepath.Join(scope, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"),
+		[]byte("issue_prefix: zz\nexport.auto: true\ngc.endpoint_origin: managed_city\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	if scopeJSONLIsReapable(fsys.OSFS{}, scope) {
+		t.Fatalf("scopeJSONLIsReapable = true, want false for city export.auto:true opt-out")
+	}
+}
+
+// TestScopeJSONLIsReapableDoesNotClaimExplicitOptOut verifies the carve-out
 // for rigs that deliberately keep JSONL-based sharing. Per PR 1965 docs,
 // gc.endpoint_origin: explicit is the supported opt-out path; issues.jsonl
-// there is load-bearing, not stale, so scopeIsGCManaged must return false.
-func TestScopeIsGCManagedDoesNotClaimExplicitOptOut(t *testing.T) {
+// there is load-bearing, not stale, so scopeJSONLIsReapable must return false.
+func TestScopeJSONLIsReapableDoesNotClaimExplicitOptOut(t *testing.T) {
 	scope := t.TempDir()
 	beadsDir := filepath.Join(scope, ".beads")
 	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
@@ -5223,19 +5240,19 @@ func TestScopeIsGCManagedDoesNotClaimExplicitOptOut(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	if scopeIsGCManaged(scope) {
-		t.Fatalf("scopeIsGCManaged = true, want false for explicit opt-out")
+	if scopeJSONLIsReapable(fsys.OSFS{}, scope) {
+		t.Fatalf("scopeJSONLIsReapable = true, want false for explicit opt-out")
 	}
 }
 
-// TestScopeIsGCManagedExplicitOptOutBeatsExportAutoFalse verifies the
+// TestScopeJSONLIsReapableExplicitOptOutBeatsExportAutoFalse verifies the
 // precedence contract: when a scope has gc.endpoint_origin: explicit
 // (deliberate opt-out, JSONL is load-bearing) AND also has export.auto:
 // false (left over from a prior canonicalization, or hand-set), the
 // endpoint_origin signal wins. Without this ordering, a stale
 // export.auto value could trick the reaper into deleting issues.jsonl
 // on an opt-out rig.
-func TestScopeIsGCManagedExplicitOptOutBeatsExportAutoFalse(t *testing.T) {
+func TestScopeJSONLIsReapableExplicitOptOutBeatsExportAutoFalse(t *testing.T) {
 	scope := t.TempDir()
 	beadsDir := filepath.Join(scope, ".beads")
 	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
@@ -5246,8 +5263,8 @@ func TestScopeIsGCManagedExplicitOptOutBeatsExportAutoFalse(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	if scopeIsGCManaged(scope) {
-		t.Fatalf("scopeIsGCManaged = true, want false for explicit opt-out (export.auto:false must not override endpoint_origin)")
+	if scopeJSONLIsReapable(fsys.OSFS{}, scope) {
+		t.Fatalf("scopeJSONLIsReapable = true, want false for explicit opt-out (export.auto:false must not override endpoint_origin)")
 	}
 }
 
@@ -5275,6 +5292,123 @@ func TestReapStaleBdExportJSONLRemovesFileOnManagedScope(t *testing.T) {
 
 	if _, err := os.Stat(jsonlPath); !os.IsNotExist(err) {
 		t.Fatalf("jsonl present after reap; stat err = %v, want IsNotExist", err)
+	}
+}
+
+func TestReapStaleBdExportJSONLLeavesFileOnCityAutoExportOptOut(t *testing.T) {
+	scope := t.TempDir()
+	beadsDir := filepath.Join(scope, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+	if err := os.WriteFile(jsonlPath, []byte(`{"_type":"issue","id":"zz-1"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write jsonl: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"),
+		[]byte("issue_prefix: zz\nexport.auto: true\ngc.endpoint_origin: managed_city\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	reapStaleBdExportJSONL(scope)
+
+	if _, err := os.Stat(jsonlPath); err != nil {
+		t.Fatalf("jsonl removed despite city export.auto:true opt-out; stat err = %v", err)
+	}
+}
+
+// TestReapStaleBdExportJSONLRemovesFileWhenTrueDuplicatesFalse pins the
+// runbook's warning: appending export.auto: true below the canonical
+// export.auto: false is not an opt-in. gc honors the first key, so the
+// managed scope's stale export is still reaped.
+func TestReapStaleBdExportJSONLRemovesFileWhenTrueDuplicatesFalse(t *testing.T) {
+	scope := t.TempDir()
+	beadsDir := filepath.Join(scope, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+	if err := os.WriteFile(jsonlPath, []byte(`{"_type":"issue","id":"zz-1"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write jsonl: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"),
+		[]byte("issue_prefix: zz\nexport.auto: false\nexport.auto: true\ngc.endpoint_origin: managed_city\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	reapStaleBdExportJSONL(scope)
+
+	if _, err := os.Stat(jsonlPath); !os.IsNotExist(err) {
+		t.Fatalf("jsonl present after reap despite a duplicate export.auto key; stat err = %v, want IsNotExist", err)
+	}
+}
+
+// configReadFaultFS fails the listed ReadFile calls (1-based) of one
+// config.yaml and passes every other call through to the real filesystem. A
+// fault that clears between two reads is the window in which an export.auto
+// opt-in could be misread as absent.
+type configReadFaultFS struct {
+	fsys.OSFS
+	path      string
+	failCalls map[int]bool
+	calls     int
+}
+
+func (f *configReadFaultFS) ReadFile(name string) ([]byte, error) {
+	if name == f.path {
+		f.calls++
+		if f.failCalls[f.calls] {
+			return nil, fmt.Errorf("injected read failure of %s (call %d)", name, f.calls)
+		}
+	}
+	return f.OSFS.ReadFile(name)
+}
+
+// TestScopeJSONLIsReapableFailsClosedOnUnreadableExportAuto verifies that an
+// export.auto read failure leaves the JSONL alone even when the endpoint
+// origin reads fine a moment later: the value that could not be read may be
+// the city's explicit true. The quoted spelling is valid YAML that bd honors
+// but the line scanner cannot read, so the fault must not be retried through
+// it.
+func TestScopeJSONLIsReapableFailsClosedOnUnreadableExportAuto(t *testing.T) {
+	scope := t.TempDir()
+	beadsDir := filepath.Join(scope, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	configPath := filepath.Join(beadsDir, "config.yaml")
+	if err := os.WriteFile(configPath,
+		[]byte("issue_prefix: zz\nexport.auto: \"true\"\ngc.endpoint_origin: managed_city\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	// ReadExportAuto's read fails; any later read succeeds.
+	fs := &configReadFaultFS{path: configPath, failCalls: map[int]bool{1: true}}
+
+	if scopeJSONLIsReapable(fs, scope) {
+		t.Fatalf("scopeJSONLIsReapable = true, want false when export.auto could not be read")
+	}
+	if fs.calls < 1 {
+		t.Fatalf("injected fault never reached ReadExportAuto (%d config reads)", fs.calls)
+	}
+}
+
+// TestScopeJSONLIsReapableReapsUnparseableManagedConfig verifies that only a
+// read failure fails closed. A config.yaml that reads but does not parse, with
+// no export.auto line, holds no opt-in to protect, so a managed scope's stale
+// export is still reaped (sa-41j3kp).
+func TestScopeJSONLIsReapableReapsUnparseableManagedConfig(t *testing.T) {
+	scope := t.TempDir()
+	beadsDir := filepath.Join(scope, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"),
+		[]byte("issue_prefix: zz\ngc.endpoint_origin: managed_city\n: not yaml\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	if !scopeJSONLIsReapable(fsys.OSFS{}, scope) {
+		t.Fatalf("scopeJSONLIsReapable = false, want true for an unparseable managed_city config without export.auto")
 	}
 }
 
@@ -5952,7 +6086,7 @@ func TestBdStoreForCityWithConfigSkipsLoad(t *testing.T) {
 	}
 
 	before = loadCityConfigCalls.Load()
-	if _, err := openOneShotBdStoreAtWithConfig(cityDir, cityDir, cfg); err != nil {
+	if _, err := openOneShotBdStoreAtWithConfig(cityDir, cityDir, cfg, beads.NativeTransportUnset); err != nil {
 		t.Fatalf("openOneShotBdStoreAtWithConfig(cfg): %v", err)
 	}
 	if grew := loadCityConfigCalls.Load() - before; grew != 0 {
@@ -5962,7 +6096,7 @@ func TestBdStoreForCityWithConfigSkipsLoad(t *testing.T) {
 	// The shared path must ignore even an empty stand-in cfg (what the order
 	// dispatcher substitutes for nil) and read the prefix from disk.
 	before = loadCityConfigCalls.Load()
-	shared, err := openBdStoreAtWithConfig(cityDir, cityDir, &config.City{})
+	shared, err := openBdStoreAtWithConfig(cityDir, cityDir, &config.City{}, beads.NativeTransportUnset)
 	if err != nil {
 		t.Fatalf("openBdStoreAtWithConfig(empty cfg): %v", err)
 	}

@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // countingCancelContext cancels its embedded context the Nth time Err is
@@ -68,21 +69,54 @@ func seedArchives(t *testing.T) string {
 }
 
 // TestReadFilteredContextMatchesReadFilteredWhenNotCanceled is the control
-// case: a non-canceled context must not change ReadFiltered's behavior.
+// case: a non-canceled context must not change what either twin returns. A
+// Since window the active log covers is answered by the backward walk, which
+// leaves out the sentinel log's seq-2 record, so a twin that scanned forward
+// instead would return it.
 func TestReadFilteredContextMatchesReadFilteredWhenNotCanceled(t *testing.T) {
-	dir := seedArchives(t)
-	path := filepath.Join(dir, "events.jsonl")
-
-	want, wantErr := ReadFiltered(path, Filter{})
-	if wantErr != nil {
-		t.Fatalf("ReadFiltered: %v", wantErr)
+	twins := []struct {
+		name  string
+		plain func(string, Filter) ([]Event, error)
+		ctx   func(context.Context, string, Filter) ([]Event, error)
+	}{
+		{"ReadFilteredContext", ReadFiltered, ReadFilteredContext},
+		{"ReadFilteredWithInFlightContext", ReadFilteredWithInFlight, ReadFilteredWithInFlightContext},
 	}
-	got, err := ReadFilteredContext(context.Background(), path, Filter{})
-	if err != nil {
-		t.Fatalf("ReadFilteredContext: %v", err)
+	logs := []struct {
+		name string
+		seed func(t *testing.T) (string, Filter)
+	}{
+		{"archives without a filter", func(t *testing.T) (string, Filter) {
+			return filepath.Join(seedArchives(t), "events.jsonl"), Filter{}
+		}},
+		{"Since predating the active log", func(t *testing.T) (string, Filter) {
+			return filepath.Join(seedArchives(t), "events.jsonl"), Filter{Since: time.Now().Add(-time.Hour)}
+		}},
+		{"Since inside the active log", func(t *testing.T) (string, Filter) {
+			path := filepath.Join(t.TempDir(), "events.jsonl")
+			return path, writeSentinelLog(t, path, time.Now().UTC())
+		}},
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("ReadFilteredContext = %v, want %v (ReadFiltered)", got, want)
+	for _, tw := range twins {
+		for _, lg := range logs {
+			t.Run(tw.name+"/"+lg.name, func(t *testing.T) {
+				path, filter := lg.seed(t)
+				want, err := tw.plain(path, filter)
+				if err != nil {
+					t.Fatalf("plain reader: %v", err)
+				}
+				if len(want) == 0 {
+					t.Fatal("plain reader returned no events; the comparison would be vacuous")
+				}
+				got, err := tw.ctx(context.Background(), path, filter)
+				if err != nil {
+					t.Fatalf("%s: %v", tw.name, err)
+				}
+				if !reflect.DeepEqual(got, want) {
+					t.Fatalf("%s = %v, want %v (plain reader)", tw.name, got, want)
+				}
+			})
+		}
 	}
 }
 
@@ -129,6 +163,37 @@ func TestReadFilteredContextAbortsUpfrontWhenAlreadyCanceled(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Fatalf("got %d events, want 0 (canceled before any archive opened): %+v", len(got), got)
+	}
+}
+
+// TestReadFilteredContextTwinsAbortSinceWalk covers the bounded path both
+// twins take for a Since filter. The backward walk of the active log checks
+// ctx before each chunk, so a canceled caller gets context.Canceled with the
+// matches read so far instead of a walk to the window's close. The sentinel
+// log's first chunk holds seqs 100 and 101 but not the whole closing run.
+func TestReadFilteredContextTwinsAbortSinceWalk(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	filter := writeSentinelLog(t, path, time.Now().UTC())
+	twins := map[string]func(context.Context, string, Filter) ([]Event, error){
+		"ReadFilteredContext":             ReadFilteredContext,
+		"ReadFilteredWithInFlightContext": ReadFilteredWithInFlightContext,
+	}
+	for name, read := range twins {
+		for _, tc := range []struct {
+			cancelAt int
+			want     []uint64
+		}{
+			{cancelAt: 1, want: []uint64{}},         // before the first chunk
+			{cancelAt: 2, want: []uint64{100, 101}}, // before the second
+		} {
+			got, err := read(newCancelAfter(tc.cancelAt), path, filter)
+			if !errors.Is(err, context.Canceled) {
+				t.Errorf("%s cancelAt=%d: err = %v, want context.Canceled", name, tc.cancelAt, err)
+			}
+			if !reflect.DeepEqual(seqsOf(got), tc.want) {
+				t.Errorf("%s cancelAt=%d: got %v, want %v", name, tc.cancelAt, seqsOf(got), tc.want)
+			}
+		}
 	}
 }
 

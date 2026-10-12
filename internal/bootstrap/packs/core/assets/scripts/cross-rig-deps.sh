@@ -41,7 +41,14 @@ fi
 # non-empty array on lines 26-29, so CLOSED_IDS is non-empty here.
 RESOLVED=0
 CLOSED_IDS=$(echo "$CLOSED" | jq -r '.[].id' 2>/dev/null)
+# Bead-id prefixes of suspended rigs. A suspended rig is left cold: any bd
+# read restarts its retired proxy, so its beads wait for it to resume.
+SUSPENDED_PREFIXES=$(gc rig list --json 2>/dev/null \
+    | jq -r '(.rigs // [])[] | select(.hq != true and .suspended == true) | .prefix' 2>/dev/null) || SUSPENDED_PREFIXES=""
 while IFS= read -r closed_id; do
+    if [ -n "$SUSPENDED_PREFIXES" ] && printf '%s\n' "$SUSPENDED_PREFIXES" | grep -qxF "${closed_id%%-*}"; then
+        continue
+    fi
     # Find beads that have a blocks dep on this closed issue.
     DEPS=$(gc bd dep list "$closed_id" --direction=up --type=blocks --json 2>/dev/null) || continue
     if [ -z "$DEPS" ] || [ "$DEPS" = "[]" ]; then
@@ -57,6 +64,9 @@ while IFS= read -r closed_id; do
         continue
     fi
     while IFS= read -r dep_id; do
+        if [ -n "$SUSPENDED_PREFIXES" ] && printf '%s\n' "$SUSPENDED_PREFIXES" | grep -qxF "${dep_id%%-*}"; then
+            continue
+        fi
         # Convert blocks → related: remove blocking semantics, keep audit trail.
         gc bd dep remove "$dep_id" "external:$closed_id" 2>/dev/null || true
         gc bd dep add "$dep_id" "external:$closed_id" --type=related 2>/dev/null || true

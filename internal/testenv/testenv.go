@@ -133,6 +133,7 @@ var LeakVectorVars = []string{
 	"GC_AGENT",
 	"GC_ALIAS",
 	"GC_BEADS",
+	"GC_BEADS_ALLOW_SCHEMA_BEHIND_MIGRATE",
 	"GC_BEADS_CONDITIONAL_WRITES",
 	"GC_BEADS_GUARDED_RELEASE",
 	"GC_BEADS_SCOPE_ROOT",
@@ -332,6 +333,7 @@ func init() {
 		refuseProdDoltPort(func(string) bool { return true })
 		return
 	}
+	prependBazelTools()
 	keep := map[string]bool{}
 	if list := os.Getenv(PassthroughVar); list != "" {
 		for _, name := range strings.Split(list, ",") {

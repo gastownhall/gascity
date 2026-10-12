@@ -231,7 +231,7 @@ func TestSingletonPendingCreateRetryPreservesOccupiedRuntimeWithoutBeadChurn(t *
 	}
 	create := func() (sessionpkg.Info, error) {
 		bp.sessionBeads = newSessionBeadSnapshot(nil)
-		return createPoolSessionBeadWithGuardedAliasUsingLock(bp, &cfg.Agents[0], "worker", "worker", 0, nil,
+		return createPoolSessionBeadWithGuardedAliasUsingLock(poolCreateViewOf(bp), &cfg.Agents[0], "worker", "worker", 0, nil,
 			func(_ string, _ []string, fn func() error) error { return fn() })
 	}
 	for range 5 {
@@ -241,7 +241,7 @@ func TestSingletonPendingCreateRetryPreservesOccupiedRuntimeWithoutBeadChurn(t *
 		}
 		if info.ID != "" {
 			// Model the old retry loop, which invalidates each new pending bead.
-			closeFailedCreateBead(sessionFrontDoor(store), info.ID, now, io.Discard)
+			closeFailedCreateBead(sessionFrontDoor(store), info, now, io.Discard)
 		}
 	}
 	all, err := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
