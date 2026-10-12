@@ -1441,22 +1441,17 @@ const (
 	ownStartLeaseUnverifiable ownStartLive = "unverifiable" // the lease could not be read: held, fail closed
 )
 
-// inFlightFutureSkew bounds how far in the future a last_woke_at may sit and
-// still hold a pending create's in-flight window: a later one proves nothing
-// (a clock stepped back).
-const inFlightFutureSkew = 5 * time.Minute
-
 // pendingCreateOwnStartLive reports whether, and why, a pending create's own
 // start may still be creating its runtime, so a live runtime with no identity
 // is not rolled back from under it: the start is inside its in-flight window,
 // or a live holder has the row's runtime lease (startHolderLiveErr), which
-// covers a start that outlives the window. A last_woke_at inFlightFutureSkew
+// covers a start that outlives the window. A last_woke_at pendingCreateFutureSkew
 // or more in the future holds no window, so only the lease can hold the row
 // then. A lease that cannot be verified holds it (fail closed), and its error
 // is returned for the caller to report.
 func pendingCreateOwnStartLive(store beads.Store, cityPath string, info sessionpkg.Info, now time.Time, startupTimeout time.Duration) (ownStartLive, error) {
 	if pendingCreateStartInFlightAt(info, now, startupTimeout) {
-		if wokeAt, ok := parseRFC3339Metadata(info.LastWokeAt); ok && wokeAt.Sub(now) < inFlightFutureSkew {
+		if wokeAt, ok := parseRFC3339Metadata(info.LastWokeAt); ok && wokeAt.Sub(now) < pendingCreateFutureSkew {
 			return ownStartInWindow, nil
 		}
 	}

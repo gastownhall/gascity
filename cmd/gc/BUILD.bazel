@@ -402,6 +402,7 @@ go_library(
         "order_store.go",
         "orders_lane.go",
         "path_util.go",
+        "pending_create_skew.go",
         "pending_interaction_lane.go",
         "pool.go",
         "pool_desired_state.go",
