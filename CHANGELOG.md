@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
+- **Upgrade Beads (`bd`) to v1.3.2-rc.2.** This build pins and is tested
+  against bd v1.3.2-rc.2 (`deps.env` `BD_VERSION` and the go.mod library),
+  v1.3.1 plus the `bd purge` live-dependent fix (beads#7031), the backup
+  watermark fix (beads#7032) and the blocked-state recheck publication fix
+  (beads#6876, backported in beads#7146), with the same schema. It is a
+  prerelease and is not on Homebrew: download `bd` from the
+  [v1.3.2-rc.2 release assets](https://github.com/gastownhall/beads/releases/tag/v1.3.2-rc.2)
+  or build it without ICU:
+  `CGO_ENABLED=1 GOFLAGS=-tags=gms_pure_go go install github.com/steveyegge/beads/cmd/bd@v1.3.2-rc.2`.
+  `brew install beads` still installs v1.3.1, which lacks these fixes. A
+  proxied city or rig (the default for new cities) always uses the bd CLI, and
+  `gc doctor` does not flag bd v1.3.1 there; one that connects to its Dolt
+  server directly falls back from its native store to the bd CLI
+  (`version_compat` preflight gate), with a `gc doctor` `beads-store` warning.
 - **The first `gc start` after a bd upgrade runs `bd recompute-blocked` once
   per scope.** beads migration 0059 wrongly marks some beads blocked (beads#7037).
   It hits any store that crossed 0059: one upgraded from bd v1.2.x or older,
@@ -63,8 +77,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     absent records and `Metadata` of external-messaging inbound/outbound
     results. The OpenAPI spec no longer lists them as required.
 
+### Changed
+
+- **Ready work in a SQLite infra ledger is ordered priority-first.** On a city
+  that relocates classes to a `sqlite-beads` binding, that ledger's ready read
+  returned rows oldest-first (`created_at, id`). It now returns the canonical
+  `(priority, created_at, id)` order that `bd ready` and gc's cached ready
+  reads already use, and applies `Limit` after sorting. When several ready
+  beads in the ledger route to one pool template, the bead a new session takes
+  its trigger, worktree and pack from is now the highest-priority one, oldest
+  first within a priority; the order in which sessions claim work does not
+  change. `GET /v0/beads/ready` also returns the relocated graph leg's rows in
+  this order (#6863).
+
 ### Fixed
 
+- **Fenced writes to relocated classes honor `[beads] conditional_writes` on
+  split cities.** On a city that relocates sessions, graph, messaging, orders
+  or nudges to a storage binding, nothing stamped the conditional-writes mode
+  onto the binding engine, and the one-shot CLI's emitting wrapper hid the
+  stamp again. Under `auto` and `require` every fenced write to a relocated
+  class (session wake/kill fences, pending-create rollback, molecule attach,
+  control epoch, drain reservations) silently took the unconditional legacy
+  path. The binding engine is now stamped, the SQLite engine reports whether it
+  can fence, the `require` boot preflight probes the binding once per engine,
+  and `gc status` reports the binding engine's mode (#6917, #7194).
+- **A control row only wakes the control dispatcher of its own root scope on a
+  split city.** The default `scale_check` probe re-read the durable route of a
+  control bead whose route repair had been suppressed or deferred, and on a
+  class-binding city every dispatcher reads the binding, so the dispatcher the
+  stale route named was demand-spawned for a row it must not serve (#7206).
+- **Large graph cooks in a SQLite infra ledger keep `BEGIN IMMEDIATE`.** The
+  write connection's DSN builder no longer drops `_txlock=immediate` when the
+  store path does not parse as a URL, and MemStore's pinned-id sequence lift
+  uses the same strict suffix parse as SQLite so an overflowed pinned id cannot
+  wrap the sequence (#6833, follow-up to #6827).
 - **Work hidden by beads migration 0059 is dispatched again.** On the first
   start under a new bd version, `gc start` (and the supervisor, and
   `gc rig add` for the rig it adds) runs `bd recompute-blocked` once over each
@@ -74,6 +121,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   clears the `is_blocked` flags migration 0059 set across relates-to,
   discovered-from and other non-blocking edges on any store that crossed it
   (beads#7037).
+- **Split-storage cities no longer close seats that still hold work-store
+  claims.** On a city whose sessions live on a class binding, the pool-slot
+  close gate, the drain-ack escalation, the pool-slot retire and the stranded
+  repair read the sessions binding as the work leg and never saw claims on the
+  city work store, so seats closed while holding claims and the stranded
+  branch never ran. Every close gate now reads the census's leg set (the city
+  work store, the serving rigs, the bindings) for every seat, from a per-tick
+  seat work index that reads each leg once per tick. A rig-bound seat's
+  city-store claim now holds the seat, and rig stores `city.toml` does not
+  declare are no longer read (#7480).
+- **The close cascade releases a closed seat's work on every leg.** On a split
+  city a dead or closed seat's claims on the city work store and the rigs
+  stayed on the closed row until the orphan sweep reset them. The cascade now
+  releases on the gates' legs and under the gates' identities (a claim made
+  under an old alias is left to the orphan sweep), fencing each release on the
+  row's status and assignee (#7487).
+- **A claim made after a tick's read stops the close.** Before a gate-decided
+  close, and before an idle-timeout kill, gc re-reads the seat's claims and
+  keeps the seat when it finds one; a close that releases anyway releases the
+  late claim too. The re-read is live on local stores and answers from the
+  cache only on the work store and bd rigs: when the cache cannot answer, the
+  close or kill goes ahead on the tick's read, and a late claim there stays on
+  the seat (#7525).
+- **`gc bd show <id>` works again on a refused split city whose binding holds
+  migrated beads.** The by-id relic refusal now applies per id: only an id the
+  class binding holds, or that the migration's copy manifest records
+  delivering, is refused as a frozen pre-migration copy. Every other work bead
+  reaches bd. Without a readable manifest the old city-wide refusal still
+  applies whenever the binding holds any id outside its reserved prefixes
+  (#7430).
+- **The test suite's startup Dolt orphan sweep no longer deletes a live Dolt
+  data directory when its `lsof` scan fails.** A scan that hit its 30-second
+  deadline returned partial output with no error, so directories a running
+  Dolt server held open looked orphaned and were removed. The sweep now
+  refuses to delete anything when the scan times out, is killed by a signal,
+  exits with an unexpected status, or prints no output (#7138). This affects
+  only people running the gascity test suite; no `gc` command runs this sweep.
+- **Releasing a dead session's claim no longer erases a newer claim on the
+  same bead.** With `[beads].conditional_writes` at `auto` or `require` on a
+  capable store, the retired-session and orphaned-pool release paths clear the
+  assignment and affinity metadata in one write guarded by the snapshot's
+  revision, so a successor that re-claimed the bead after the controller's
+  `List` (even under a reused assignee name) is left alone. Native-store list
+  rows carry that revision. The guard cannot tell a newer claim from any other
+  write, so a status, assignee or metadata change since the `List` is reported
+  as a conflict, the bead is left as it is, and the next tick decides again.
+  `require` refuses a store without the capability, `auto` degrades to the
+  legacy release, and `off` (the builtin default) is unchanged. A snapshot
+  without a revision (a row not rewritten since its store began recording
+  revisions) keeps the legacy status-and-assignee fence. Hand-backport of #7384.
 - `gc stop` stops the city's nudge pollers and never reopens a stopped city's
   store (#6857).
 - The supervisor event stream includes cities started after the client

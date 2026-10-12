@@ -19,7 +19,8 @@ managers). Choose source when you need unreleased changes or plan to contribute.
 ## Prerequisites
 
 Gas City requires a small set of runtime tools. Homebrew installs all of them
-for you; the other methods require manual installation.
+for you except the tested `bd` prerelease, which comes from the release assets
+in the table below; the other methods require manual installation.
 
 | Tool | Required | Min version | macOS | Linux | Notes |
 |------|----------|-------------|-------|-------|-------|
@@ -27,7 +28,7 @@ for you; the other methods require manual installation.
 | jq | Yes | — | `brew install jq` | `apt install jq` | JSON processing |
 | git | Yes | — | (built-in) | (built-in) | Version control |
 | dolt | Yes | 2.1.0 or newer | `brew install dolt` | [releases](https://github.com/dolthub/dolt/releases) | Beads data plane |
-| bd (Beads CLI) | Yes | 1.0.4 minimum; 1.3.1 tested | `brew install beads` | [releases](https://github.com/gastownhall/beads/releases) | Issue tracking |
+| bd (Beads CLI) | Yes | 1.0.4 minimum; 1.3.2-rc.2 tested | [v1.3.2-rc.2 release](https://github.com/gastownhall/beads/releases/tag/v1.3.2-rc.2) | [v1.3.2-rc.2 release](https://github.com/gastownhall/beads/releases/tag/v1.3.2-rc.2) | Issue tracking |
 | flock | Yes | — | `brew install flock` | (built-in via util-linux) | File locking |
 | gh | Optional | — | `brew install gh` | [cli.github.com](https://cli.github.com/) | GitHub gate checks |
 | Go 1.26+ | Source only | 1.26 | `brew install go` | [golang.org](https://go.dev/dl/) | Compiler |
@@ -41,14 +42,27 @@ under heavy write load.
 
 The exact versions CI pins are in [`deps.env`](https://github.com/gastownhall/gascity/blob/main/deps.env).
 
-The tested bd is v1.3.1: `brew install beads` (or `brew upgrade beads`)
-installs it, or download `bd` for your platform from the
-[v1.3.1 release assets](https://github.com/gastownhall/beads/releases/tag/v1.3.1).
-With bd v1.3.0 Gas City falls back from its native store to the bd CLI, and
-proxied `bd backup` and closed-wisp purge are skipped.
+The tested bd is v1.3.2-rc.2, a prerelease that Homebrew does not ship:
+download `bd` for your platform from the
+[v1.3.2-rc.2 release assets](https://github.com/gastownhall/beads/releases/tag/v1.3.2-rc.2)
+or build it from source with the `gms_pure_go` tag, which drops the ICU
+dependency that a plain cgo build of bd needs:
 
-Gas City 1.4.2 pairs the native store with Beads 1.3.0, and main pairs it with
-Beads 1.3.1, which keeps the same schema. When upgrading
+```bash
+CGO_ENABLED=1 GOFLAGS=-tags=gms_pure_go go install github.com/steveyegge/beads/cmd/bd@v1.3.2-rc.2
+```
+
+`brew install beads` still installs v1.3.1, which lacks the v1.3.2-rc.2
+fixes; run `bd version` to see which bd you have. A proxied city or rig (the
+default for new cities) always uses the bd CLI, and `gc doctor` does not flag
+bd v1.3.1 there. A city or rig that connects to its Dolt server directly
+falls back from its native store to the bd CLI instead, because bd v1.3.1
+fails the `version_compat` preflight gate against this build's beads library;
+`gc doctor` reports this as a `beads-store` warning. With bd v1.3.0, proxied
+`bd backup` and closed-wisp purge are also skipped.
+
+Gas City 1.4.2 pairs the native store with Beads 1.3.0, and this build pairs it
+with Beads 1.3.2-rc.2, which keeps the same schema. When upgrading
 an existing shared database from Beads 1.2.2, coordinate the upgrade of all
 clients using that database, then run `bd migrate schema` from the workspace.
 The tested upgrade moves schema 53 to 66 and preserves existing beads. Older

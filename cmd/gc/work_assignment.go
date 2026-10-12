@@ -113,26 +113,6 @@ func (w workAssignment) HasNonSessionWork(items []beads.Bead) bool {
 	return false
 }
 
-// OpenAssignedToBasic returns the WORK beads assigned to the given identity with
-// the given status, using the no-flags List{Assignee,Status} query (no Live, no
-// TierMode). It is the typed form of the raw probe in
-// releaseWorkFromClosedSessionBead, kept distinct from OpenAssignedTo because the
-// close-release path deliberately runs the unflagged query — making it byte-
-// identical to OpenAssignedTo's flagged query would change the emitted bead op.
-// Like OpenAssignedTo, mail message beads are excluded (ra-59207): they are not
-// WORK and have no claim/routing semantics for the release path to act on.
-func (w workAssignment) OpenAssignedToBasic(assignee, status string) ([]beads.Bead, error) {
-	store := w.unwrapped()
-	if store == nil {
-		return nil, nil
-	}
-	items, err := store.List(beads.ListQuery{Assignee: assignee, Status: status})
-	if err != nil {
-		return nil, err
-	}
-	return excludeMailMessageBeads(items), nil
-}
-
 // excludeMailMessageBeads filters mail message beads (beadmail.IsMessageBead)
 // out of a WORK query result. A mail wisp is a delivery route, not a claimable
 // unit of work — it can be neither released nor reassigned — so every WORK
@@ -176,6 +156,22 @@ func excludeMailMessageBeads(items []beads.Bead) []beads.Bead {
 // ReleaseIfCurrent swaps status/assignee itself, so when that tier applies the
 // metadata clear rides a second write — which is also why it does not always
 // apply (see singleWriteRequired below).
+//
+// The tiers return nil when the release landed or the bead had already moved
+// on since the snapshot, and an error while the bead may still be assigned.
+//
+// Before either tier, when conditional_writes resolves a writer and the
+// snapshot carries a revision, all release fields are applied in one update
+// guarded by that revision. Such a snapshot never releases a newer
+// incarnation, even one that reuses the same assignee, which the tiers' status
+// and assignee fence cannot tell apart. That update returns nil only when the
+// release landed or the bead is gone: any write since the snapshot is a
+// conflict error, because the guard cannot tell a newer claim from an
+// unrelated write. Native-store list rows, and a CachingStore's copies of
+// them, carry that revision; a snapshot without one (such as a row not
+// rewritten since its store began recording revisions) takes the tiers. Under
+// conditional_writes=require, a store without the capability is refused
+// before either tier.
 func (w workAssignment) ReleaseWorkBead(item beads.Bead, runTargetFallback string) error {
 	store := w.unwrapped()
 	if store == nil {
@@ -187,6 +183,16 @@ func (w workAssignment) ReleaseWorkBead(item beads.Bead, runTargetFallback strin
 		strings.TrimSpace(item.Metadata[beadmeta.RoutedToMetadataKey]) == ""
 	if stampFallbackRoute {
 		metadata[beadmeta.RunTargetMetadataKey] = runTargetFallback
+	}
+	update := beads.UpdateOpts{
+		Assignee: stringPtr(""),
+		Metadata: metadata,
+	}
+	if item.Status == "in_progress" {
+		update.Status = stringPtr("open")
+	}
+	if _, handled, err := releaseWorkAssignmentIfRevisionMatches(store, item, update); handled {
+		return err
 	}
 	// Tier 1 clears status/assignee atomically but leaves the metadata to a second
 	// write, so it is usable only when that second write is not routing-
@@ -253,16 +259,37 @@ func (w workAssignment) ReleaseWorkBead(item beads.Bead, runTargetFallback strin
 		log.Printf("ReleaseWorkBead: skipping release for %s: assignment changed between snapshot and release write", item.ID)
 		return nil
 	}
-	empty := ""
-	update := beads.UpdateOpts{
-		Assignee: &empty,
-		Metadata: metadata,
-	}
-	if item.Status == "in_progress" {
-		open := "open"
-		update.Status = &open
-	}
 	return store.Update(item.ID, update)
+}
+
+// releaseWorkAssignmentIfRevisionMatches keeps assignment and affinity cleanup
+// in one CAS on the snapshot's revision. Unlike the legacy tiers' status and
+// assignee fence, it also refuses a newer claim that reuses the snapshot's
+// assignee. A conflict belongs to a later tick's fresh liveness decision, not
+// an immediate retry with a newer revision and the same stale release decision.
+// Return the conflict: the assignee may be unchanged, so callers must not count
+// it as a completed release when deciding whether to close the owning session.
+//
+// A snapshot without a revision is left to the legacy tiers (handled=false):
+// refusing it would strand the claim, since the next List returns the same row
+// still without one. Native-store list rows, and a CachingStore's copies of
+// them, carry the revision and take this guard.
+func releaseWorkAssignmentIfRevisionMatches(store beads.Store, item beads.Bead, update beads.UpdateOpts) (released, handled bool, err error) {
+	writer, _, err := beads.ResolveConditionalWriter(store)
+	if err != nil {
+		return false, true, fmt.Errorf("conditional release of %q: %w", item.ID, err)
+	}
+	if writer == nil || item.Revision == 0 {
+		return false, false, nil
+	}
+	if err := writer.UpdateIfMatch(item.ID, item.Revision, update); err != nil {
+		if errors.Is(err, beads.ErrNotFound) {
+			log.Printf("conditional release of %q: skipping removed bead: %v", item.ID, err)
+			return false, true, nil
+		}
+		return false, true, fmt.Errorf("conditional release of %q: %w", item.ID, err)
+	}
+	return true, true, nil
 }
 
 // releaseWorkAssignmentIfCurrent attempts the store's atomic conditional

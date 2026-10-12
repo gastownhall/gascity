@@ -701,48 +701,12 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	// Wrapped in safeTick so a panic during startup reconciliation (e.g.
 	// a transient bead-store failure triggering a downstream nil deref)
 	// does not propagate to the supervisor's panic recovery and cascade
-	// into cityRuntime.shutdown(). See issue #663. The trace cycle is
-	// ended inside the closure via defer so it's closed out on panic,
-	// ctx cancellation, or normal completion alike.
+	// into cityRuntime.shutdown(). See issue #663. startupReconcile ends
+	// its trace cycle via defer so it's closed out on panic, ctx
+	// cancellation, or normal completion alike.
 	startupComplete := false
 	if !retryStartupStep("startup", func() bool { return startupComplete }, func() {
-		cr.ensureManagedDoltPublishedForTick()
-		sessionBeads := cr.loadSessionBeadSnapshot()
-		startupTrace := cr.beginTraceCycle("startup", "initial_reconcile", sessionBeads)
-		completion := TraceCompletionAborted
-		defer func() {
-			if startupTrace != nil {
-				startupTrace.end(completion, traceRecordPayload{"phase": "startup"})
-			}
-		}()
-
-		cleanupDeadRuntimeSessionCorpses(cr.sessionsBeadStore().Store, cr.rigBeadStores(), cr.cfg, sessionBeads, cr.sessionDrains, cr.sp, clock.Real{}, cr.stderr)
-		// Reap live runtimes still bound to a closed bead (e.g. a named-session
-		// identity re-minted as a pool slot) so the name's current owner can
-		// rebind it and attach lands on the right runtime.
-		reapRuntimesBoundToClosedBeads(cr.sessionsBeadStore().Store, sessionBeads, cr.sessionDrains, cr.sp, cr.stderr)
-		if swept := sweepProcessTableOrphans(cr.sp, sessionBeads, cr.sessionsBeadStore().Store, cr.cityPath, cr.stderr); swept > 0 {
-			fmt.Fprintf(cr.stderr, "session reconciler: swept %d process-table orphan runtime(s)\n", swept) //nolint:errcheck
-		}
-		// Reap stale session beads from a previous run before building desired
-		// state, so desired state does not reference already-closed beads (#742).
-		if reapStaleSessionBeads(cr.sessionsBeadStore().Store, cr.sp, cr.sessionDrains, clock.Real{}, cr.stderr) > 0 {
-			sessionBeads = cr.loadSessionBeadSnapshot()
-		}
-		result := cr.buildDesiredState(sessionBeads, startupTrace)
-		sessionBeads = cr.loadSessionBeadSnapshot()
-		result = cr.refreshDesiredState(result, sessionBeads)
-		sessionBeads = cr.syncBeadsAndUpdateIndex(result.State, sessionBeads, nil)
-		result = cr.refreshDesiredState(result, sessionBeads)
-		if ctx.Err() != nil {
-			return
-		}
-
-		if cr.sessionDrains != nil {
-			cr.beadReconcileTick(ctx, result, sessionBeads, startupTrace, true)
-		}
-		completion = TraceCompletionCompleted
-		startupComplete = true
+		startupComplete = cr.startupReconcile(ctx)
 	}) {
 		return
 	}
@@ -912,6 +876,52 @@ func (cr *CityRuntime) run(ctx context.Context) {
 			return
 		}
 	}
+}
+
+// startupReconcile runs the startup step, the first reconcile before the city
+// reports ready, and reports whether it completed. Its trace cycle ends on
+// every exit, panic included.
+func (cr *CityRuntime) startupReconcile(ctx context.Context) bool {
+	cr.ensureManagedDoltPublishedForTick()
+	sessionBeads := cr.loadSessionBeadSnapshot()
+	startupTrace := cr.beginTraceCycle("startup", "initial_reconcile", sessionBeads)
+	completion := TraceCompletionAborted
+	defer func() {
+		if startupTrace != nil {
+			startupTrace.end(completion, traceRecordPayload{"phase": "startup"})
+		}
+	}()
+	// The sweeps' closes, the demand build and the reconcile share one seat
+	// work index (seat_work.go), as a tick's session phases do.
+	defer installSeatWorkIndex(cr.cityPath, cr.cfg, cr.sessionsBeadStore().Store, cr.rigBeadStores())() // residency:allow — handed to assignedWorkSweepPlan, which plans the legs
+
+	cleanupDeadRuntimeSessionCorpses(cr.cityPath, cr.sessionsBeadStore().Store, cr.rigBeadStores(), cr.cfg, sessionBeads, cr.sessionDrains, cr.sp, clock.Real{}, cr.stderr)
+	// Reap live runtimes still bound to a closed bead (e.g. a named-session
+	// identity re-minted as a pool slot) so the name's current owner can
+	// rebind it and attach lands on the right runtime.
+	reapRuntimesBoundToClosedBeads(cr.sessionsBeadStore().Store, sessionBeads, cr.sessionDrains, cr.sp, cr.stderr)
+	if swept := sweepProcessTableOrphans(cr.sp, sessionBeads, cr.sessionsBeadStore().Store, cr.cityPath, cr.stderr); swept > 0 {
+		fmt.Fprintf(cr.stderr, "session reconciler: swept %d process-table orphan runtime(s)\n", swept) //nolint:errcheck
+	}
+	// Reap stale session beads from a previous run before building desired
+	// state, so desired state does not reference already-closed beads (#742).
+	if reapStaleSessionBeads(cr.cityPath, cr.sessionsBeadStore().Store, cr.sp, cr.sessionDrains, clock.Real{}, cr.stderr) > 0 {
+		sessionBeads = cr.loadSessionBeadSnapshot()
+	}
+	result := cr.buildDesiredState(sessionBeads, startupTrace)
+	sessionBeads = cr.loadSessionBeadSnapshot()
+	result = cr.refreshDesiredState(result, sessionBeads)
+	sessionBeads = cr.syncBeadsAndUpdateIndex(result.State, sessionBeads, nil)
+	result = cr.refreshDesiredState(result, sessionBeads)
+	if ctx.Err() != nil {
+		return false
+	}
+
+	if cr.sessionDrains != nil {
+		cr.beadReconcileTick(ctx, result, sessionBeads, startupTrace, true)
+	}
+	completion = TraceCompletionCompleted
+	return true
 }
 
 // safeTick runs fn with panic recovery. A panic inside fn is logged to
@@ -1274,6 +1284,11 @@ func (cr *CityRuntime) tick(
 
 	// Session-management phases: snapshot, corpse sweeps, drain finalization,
 	// demand/desired state, bead-driven reconcile.
+	//
+	// The session phases share one seat work index per tick (seat_work.go),
+	// installed here, after the config reload, so it reads this tick's legs.
+	// The reconcile pass finds it installed and keeps it.
+	defer installSeatWorkIndex(cr.cityPath, cr.cfg, cr.sessionsBeadStore().Store, cr.rigBeadStores())() // residency:allow — handed to assignedWorkSweepPlan, which plans the legs
 	phaseStart = time.Now()
 	sessionBeads := cr.loadSessionBeadSnapshot()
 	recordPhase(TraceSiteSessionSnapshot, "load_session_snapshot.initial", phaseStart, traceSessionSnapshotFields(sessionBeads))
@@ -1291,7 +1306,7 @@ func (cr *CityRuntime) tick(
 	// Reap open session beads whose tmux session is dead before loading demand
 	// so stale names cannot block desired-state computation (#742).
 	phaseStart = time.Now()
-	cleanupDeadRuntimeSessionCorpses(cr.sessionsBeadStore().Store, cr.rigBeadStores(), cr.cfg, sessionBeads, cr.sessionDrains, cr.sp, clock.Real{}, cr.stderr)
+	cleanupDeadRuntimeSessionCorpses(cr.cityPath, cr.sessionsBeadStore().Store, cr.rigBeadStores(), cr.cfg, sessionBeads, cr.sessionDrains, cr.sp, clock.Real{}, cr.stderr)
 	recordPhase(TraceSiteControllerTickPhase, "cleanup_dead_runtime_session_corpses", phaseStart, nil)
 	// Reap live runtimes still bound to a closed bead (e.g. a named-session
 	// identity re-minted as a pool slot) so the name's current owner can rebind
@@ -1306,7 +1321,7 @@ func (cr *CityRuntime) tick(
 	}
 	recordPhase(TraceSiteControllerTickPhase, "sweep_process_table_orphans", phaseStart, map[string]any{"reaped": swept})
 	phaseStart = time.Now()
-	reaped := reapStaleSessionBeads(cr.sessionsBeadStore().Store, cr.sp, cr.sessionDrains, clock.Real{}, cr.stderr)
+	reaped := reapStaleSessionBeads(cr.cityPath, cr.sessionsBeadStore().Store, cr.sp, cr.sessionDrains, clock.Real{}, cr.stderr)
 	recordPhase(TraceSiteControllerTickPhase, "reap_stale_session_beads", phaseStart, map[string]any{"reaped": reaped})
 	if reaped > 0 {
 		phaseStart = time.Now()
@@ -3309,7 +3324,7 @@ func sweepUndesiredPoolSessionBeads(
 		// front door.
 		candidates = append(candidates, info)
 	}
-	return len(GCSweepSessionBeads(cityPath, store.Store, rigStores, candidates))
+	return len(GCSweepSessionBeads(cityPath, cfg, store.Store, rigStores, candidates))
 }
 
 func poolSessionBeadRuntimeRunning(bead beads.Bead, sp runtime.Provider, processNames []string) (bool, error) {

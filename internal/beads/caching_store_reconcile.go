@@ -319,12 +319,7 @@ func (c *CachingStore) runReconciliation() {
 		recordCacheScanLarge(context.Background(), c.idPrefix, len(fresh),
 			cacheReconcileScanWarnThreshold, time.Since(bdStart))
 	}
-	// The reconcile pass never marked the snapshot partial on an enrichment
-	// failure — the rows it just listed are whole either way — so it discards
-	// the completeness verdict applyReadyProjection returns and keeps only the
-	// problem-log entry it already recorded.
-	fresh, _ = c.applyReadyProjection("reconcile ready projection", fresh)
-	bdLatency := time.Since(bdStart)
+	listLatency := time.Since(bdStart)
 
 	freshByID := make(map[string]Bead, len(fresh))
 	for _, b := range fresh {
@@ -338,6 +333,20 @@ func (c *CachingStore) runReconciliation() {
 		c.recordProblem("refresh dep cache during reconcile", depErr)
 	}
 	useFreshDeps := depsComplete && depErr == nil
+
+	// Project after the deps read (see applyReadyProjection). The reconcile
+	// pass never marked the snapshot partial on an enrichment failure — the
+	// rows it just listed are whole either way — so it discards the
+	// completeness verdict and keeps only the problem-log entry.
+	// Its backing read still counts toward the latency that sets the cadence.
+	projectStart := time.Now()
+	enriched, _ := c.applyReadyProjection("reconcile ready projection", fresh)
+	bdLatency := listLatency + time.Since(projectStart)
+	for _, b := range enriched {
+		if _, kept := freshByID[b.ID]; kept {
+			freshByID[b.ID] = cloneBead(b)
+		}
+	}
 
 	c.mu.Lock()
 	now := time.Now()

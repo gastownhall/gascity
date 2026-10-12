@@ -23,21 +23,22 @@ FROM golang:1.26.9-bookworm@sha256:d9c68c2c51161e12fd77e4c6320687c9cd86e1af1e3ad
 # deps.env BD_CURRENT_VERSION -- not deps.env BD_VERSION, which is the published
 # tarball CI installs and may lag. The `grep Version = "${bd_version}"` below
 # fails the build if this drifts from the fetched source.
-ARG BD_VERSION=v1.3.1
-ARG BD_SOURCE_REF=c1c4b642ac1c08d8c828007a1c2f96e47e43ef7c
-ARG BD_SOURCE_SHA256=1c836ff4c4e021d0774d3fd0f972bc2d7bf552a8355fbf10a368199c93df1cc8
-ARG BD_BUILD=c1c4b642ac1
+ARG BD_VERSION=v1.3.2-rc.2
+ARG BD_SOURCE_REF=53637a74ad77d7af83ac9bd2d644f7619e7351f3
+ARG BD_SOURCE_SHA256=b30cc405a3847d012f79be887d6381906b5962c7acfc50d8a110076a2eb3c06c
+ARG BD_BUILD=53637a74ad7
 ARG BD_BRANCH=HEAD
 ARG GRPC_VERSION=1.83.2
 ARG THRIFT_VERSION=0.24.0
+ARG XNET_VERSION=0.60.0
 
 # Rebuild the exact released source with its production CGO/pure-Go-regex
-# configuration and release identity. GRPC_VERSION and THRIFT_VERSION override
-# the source's own requirements with the current security floor. Keep each
-# `go get` and its trailing `go version -m` check: together they fail the
-# build if a future beads release regresses below these versions instead of
-# silently shipping it. Raise them with the upstream requirement -- never
-# leave either behind, or the `go get` downgrades the release while the check
+# configuration and release identity. GRPC_VERSION, THRIFT_VERSION and
+# XNET_VERSION override the source's own requirements with the current
+# security floor. Keep each `go get` and its trailing `go version -m` check:
+# together they fail the build if a future beads release regresses below these
+# versions instead of silently shipping it. Raise them with the upstream
+# requirement -- never leave one behind, or the `go get` downgrades the release while the check
 # still passes.
 RUN mkdir -p /src/bd /out \
     && curl -fsSL --retry 3 \
@@ -52,6 +53,7 @@ RUN bd_version="${BD_VERSION#v}" \
     && grep -Fq "Version = \"${bd_version}\"" cmd/bd/version.go \
     && go get "google.golang.org/grpc@v${GRPC_VERSION}" \
     && go get "github.com/apache/thrift@v${THRIFT_VERSION}" \
+    && go get "golang.org/x/net@v${XNET_VERSION}" \
     && CGO_ENABLED=1 go build \
        -tags="gms_pure_go" \
        -trimpath \
@@ -60,7 +62,8 @@ RUN bd_version="${BD_VERSION#v}" \
        ./cmd/bd \
     && /out/bd --version | grep -Fq "bd version ${bd_version} (${BD_BUILD})" \
     && go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep google.golang.org/grpc v${GRPC_VERSION} " \
-    && go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep github.com/apache/thrift v${THRIFT_VERSION} "
+    && go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep github.com/apache/thrift v${THRIFT_VERSION} " \
+    && go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep golang.org/x/net v${XNET_VERSION} "
 
 FROM ${BASE_IMAGE}
 

@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -274,6 +275,28 @@ func (bp *agentBuildParams) releasePoolSessionCreate() {
 	}
 	bp.poolSessionCreateBudget.Release()
 }
+
+// recoverLeg turns a panic in one demand-pass goroutine into that leg's error
+// and writes the stack to stderr. safeTick recovers only the tick goroutine,
+// and recover works only on the goroutine that panicked, so without this a
+// panic inside one leg's store read killed the controller (mc-zndi7.40). The
+// leg then reads as failed and the pass's existing partial rules apply. Defer
+// it right after wg.Done, so it runs before Done and the error is written
+// before Wait returns.
+func recoverLeg(dst *error, label string, stderr io.Writer) {
+	r := recover()
+	if r == nil {
+		return
+	}
+	*dst = fmt.Errorf("%s panicked: %v", label, r)
+	// Sibling legs share the pass's stderr, which nothing else writes while
+	// they run (each fold prints after Wait), so serializing here is enough.
+	recoverLegMu.Lock()
+	defer recoverLegMu.Unlock()
+	fmt.Fprintf(stderr, "buildDesiredState: %s panicked: %v\n%s", label, r, debug.Stack()) //nolint:errcheck
+}
+
+var recoverLegMu sync.Mutex
 
 func evaluatePendingPools(
 	cfg *config.City,

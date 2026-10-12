@@ -193,7 +193,7 @@ func controllerClosePaths(now time.Time) []struct {
 		{
 			name: "closeBead",
 			close: func(store beads.Store, id string, stderr *bytes.Buffer) bool {
-				return closeBead(store, id, "dead-runtime", now, stderr)
+				return closeBead(store, workLegs{}, id, "dead-runtime", now, stderr)
 			},
 			want: session.ClosePatch(now, "dead-runtime"),
 		},
@@ -379,7 +379,7 @@ func TestCloseFailedCreateBeadLeavesAnAlreadyClosedRowRecordAlone(t *testing.T) 
 	}
 	created := createControllerCloseSession(t, store)
 	var stderr bytes.Buffer
-	if !closeBead(store, created.ID, "orphaned", now, &stderr) {
+	if !closeBead(store, workLegs{}, created.ID, "orphaned", now, &stderr) {
 		t.Fatalf("closeBead: %s", stderr.String())
 	}
 	before, err := store.Get(created.ID)

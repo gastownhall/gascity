@@ -159,7 +159,7 @@ cmd/gc/city_runtime.go	readyDemandSnapshotFingerprint	a:rigBeadStores	1
 cmd/gc/city_runtime.go	rigBeadStores	a:BeadStores	1
 cmd/gc/city_runtime.go	rigBeadStores	a:rigBeadStores	1
 cmd/gc/city_runtime.go	rigBeadStores	ast:returns-store-list	1
-cmd/gc/city_runtime.go	run	a:rigBeadStores	1
+cmd/gc/city_runtime.go	startupReconcile	a:rigBeadStores	1
 cmd/gc/city_runtime.go	sweepOrphanedOrderTrackingAtBoot	c:beads.Store-literal	1
 cmd/gc/city_runtime.go	syncBeadsAndUpdateIndex	a:rigBeadStores	1
 cmd/gc/city_runtime.go	tick	a:rigBeadStores	4

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"math"
 	"slices"
 	"strings"
 	"sync"
@@ -127,8 +128,15 @@ func (m *MemStore) Create(b Bead) (Bead, error) {
 		// Honoring a pinned "<prefix>-<n>" consumes that suffix, exactly as
 		// SQLiteStore.normalizeCreate's ensureSequenceAtLeast does: without it
 		// the very next store-minted id re-issues the pinned one.
-		if n := numericIDSuffix(explicit); n > m.seq {
-			m.seq = n
+		prefix := m.IDPrefix
+		if prefix == "" {
+			prefix = "gc"
+		}
+		// A suffix past math.MaxInt is out of mintIDLocked's reach, so skip it
+		// instead of letting int(n) wrap seq negative on a 32-bit int (CodeQL
+		// go/incorrect-integer-conversion).
+		if n, ok := parseSQLiteAutoIDSuffix(prefix, explicit); ok && n > 0 && n <= math.MaxInt && n > int64(m.seq) {
+			m.seq = int(n)
 		}
 		b.ID = explicit
 	} else {

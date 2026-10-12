@@ -37,7 +37,7 @@ concurrency:
 
 env:
   DOLT_VERSION: "2.2.0"
-  BD_VERSION: "v1.3.1"
+  BD_VERSION: "v1.3.2-rc.2"
 
 jobs:
   runner-policy:

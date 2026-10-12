@@ -406,7 +406,9 @@ beads_rust (br) binary as a real external provider (build tag:
   CommandRunner plus real bd in integration tests.
 
 - **Ordering varies by implementation.** In-process stores (MemStore,
-  FileStore) guarantee creation order for List and Ready. BdStore
+  FileStore) guarantee creation order for List and Ready. SQLiteStore
+  returns Ready in the canonical (priority, created_at, id) order, the
+  order a CachingStore serves Ready in. BdStore
   returns bd's default sort order (which may differ for beads sharing
   the same second-precision timestamp). ListByLabel returns newest-first
   across all implementations.

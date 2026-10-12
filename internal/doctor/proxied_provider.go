@@ -26,8 +26,8 @@ const pendingScopeDetailSuffix = "(still initializing)"
 
 // proxiedBackupRefusal states why a proxied scope has no backup when its bd
 // refuses one. bd older than v1.3.1 lists `backup*` in its proxied refusal
-// matrix (beads cmd/bd/proxy_capability.go); the pinned bd (v1.3.1) supports
-// proxied backup, and there the city-level proxied-backup-coverage check reads
+// matrix (beads cmd/bd/proxy_capability.go); the pinned bd supports proxied
+// backup, and there the city-level proxied-backup-coverage check reads
 // `bd backup status` instead. It is said only after the refusal was observed,
 // or next to the note that it applies to an older bd.
 const proxiedBackupRefusal = "a bd older than v1.3.1 refuses backup on proxied scopes"
