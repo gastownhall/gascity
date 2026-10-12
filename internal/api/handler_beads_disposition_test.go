@@ -255,9 +255,10 @@ func TestBeadCreateNeverMakesASessionRow(t *testing.T) {
 	}
 }
 
-// TestBeadWriteRefusesACSVLabel (mc-ojhnu round 2): bd reads labels as a CSV
-// list, so a label holding a comma or a double quote would add or strip the
-// session label ("note,gc:session", '"gc:session"'). Create and update
+// TestBeadWriteRefusesACSVLabel (mc-ojhnu rounds 2 and 3): bd reads labels
+// as a CSV record, so a label holding a comma, a double quote, a newline or a
+// trailing CR would add or strip the session label ("note,gc:session",
+// '"gc:session"', "gc:session\n"). Create and update
 // refuse one on either side with 422 at the label's index; nothing is
 // written.
 func TestBeadWriteRefusesACSVLabel(t *testing.T) {
@@ -271,6 +272,15 @@ func TestBeadWriteRefusesACSVLabel(t *testing.T) {
 		{"a removed label with a comma", "PATCH", "", `{"remove_labels":["x,gc:session"]}`, true, "body.remove_labels[0]"},
 		{"a removed label with a quote", "PATCH", "", `{"remove_labels":["\"gc:session\""]}`, true, "body.remove_labels[0]"},
 		{"a created label with a comma", "POST", "/beads", `{"title":"w","labels":["note,gc:session"]}`, false, "body.labels[0]"},
+		{"an added label with a trailing newline", "PATCH", "", `{"labels":["gc:session\n"]}`, false, "body.labels[0]"},
+		{"an added label with a leading newline", "PATCH", "", `{"labels":["\ngc:session"]}`, false, "body.labels[0]"},
+		{"an added label with a trailing CR", "PATCH", "", `{"labels":["gc:session\r"]}`, false, "body.labels[0]"},
+		{"a removed label with a trailing newline", "PATCH", "", `{"remove_labels":["gc:session\n"]}`, true, "body.remove_labels[0]"},
+		{"a removed label with a leading newline", "PATCH", "", `{"remove_labels":["\ngc:session"]}`, true, "body.remove_labels[0]"},
+		{"a removed label with a trailing CR", "PATCH", "", `{"remove_labels":["gc:session\r"]}`, true, "body.remove_labels[0]"},
+		{"a created label with a trailing newline", "POST", "/beads", `{"title":"w","labels":["gc:session\n"]}`, false, "body.labels[0]"},
+		{"a created label with a leading newline", "POST", "/beads", `{"title":"w","labels":["\ngc:session"]}`, false, "body.labels[0]"},
+		{"a created label with a trailing CR", "POST", "/beads", `{"title":"w","labels":["gc:session\r"]}`, false, "body.labels[0]"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			state := newFakeState(t)

@@ -956,9 +956,9 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 // assignee's materialized session included), a generic bead create or update
 // (ARCH-RESTRUCTURE-2 R7, mc-ojhnu; CONTRACT v5.9p):
 //   - a metadata key that fails beadmeta.ValidKey: a bd-backed store would
-//     split "wait_hold=true" into a disposition key; and a label holding a
-//     comma or a double quote, which bd reads as a CSV list ("x,gc:session"
-//     would add the session label);
+//     split "wait_hold=true" into a disposition key; and a label that fails
+//     beadmeta.ValidLabel, which bd reads as a CSV record ("x,gc:session" or
+//     "gc:session\n" would add the session label);
 //   - a change of whether the row is a session row
 //     (session.IsSessionBeadOrRepairable), or of either session marker (the
 //     session type, the gc:session label): the session verbs own session
@@ -979,8 +979,8 @@ func refuseGenericSessionWrite(id string, before *beads.Bead, after beads.Bead, 
 	}
 	for field, labels := range map[string][]string{"labels": w.labels, "remove_labels": w.removeLabels} {
 		for i, l := range labels {
-			if strings.ContainsAny(l, `,"`) {
-				invalid = append(invalid, &huma.ErrorDetail{Location: fmt.Sprintf("body.%s[%d]", field, i), Message: `a label may not contain "," or '"' (bd reads labels as a CSV list)`, Value: l})
+			if !beadmeta.ValidLabel(l) {
+				invalid = append(invalid, &huma.ErrorDetail{Location: fmt.Sprintf("body.%s[%d]", field, i), Message: "a label must read back as itself from one CSV record: no comma, quote, newline or carriage return (bd reads labels as a CSV list)", Value: l})
 			}
 		}
 	}

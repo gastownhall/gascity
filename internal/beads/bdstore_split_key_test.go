@@ -2,6 +2,7 @@ package beads
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -66,6 +67,48 @@ func TestBdStoreRefusesASplitKeyOrLabelPastItsProbes(t *testing.T) {
 		writes = nil
 		if err := c.call(); !errors.Is(err, c.want) || len(writes) != 0 {
 			t.Errorf("%s = %v (bd writes %v), want %v before any write", name, err, writes, c.want)
+		}
+	}
+}
+
+// TestBdStoreRefusesALabelCSVReadsAsAnother (round 3, D05-D07): bd parses a
+// label as one CSV record, so a newline or trailing CR would add or match
+// gc:session. UpdateReporting and Create refuse one with ErrBdSplitLabel,
+// adding or removing, before any bd write; UpdateIfMatch and
+// UpdateIfAssignment refuse every label before they write.
+func TestBdStoreRefusesALabelCSVReadsAsAnother(t *testing.T) {
+	var writes []string
+	s := NewBdStore(t.TempDir(), func(_, _ string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[len(args)-1] == "--help" {
+			return []byte(conditionalWriteFlag), nil // capable
+		}
+		if len(args) > 0 && (args[0] == "update" || args[0] == "create") {
+			writes = append(writes, args[0])
+		}
+		return nil, errors.New("not found")
+	})
+	for _, label := range []string{"gc:session\n", "\ngc:session", "gc:session\r"} {
+		for _, opts := range []UpdateOpts{{Labels: []string{label}}, {RemoveLabels: []string{label}}} {
+			var unsupported *ConditionalUpdateFieldUnsupportedError
+			for name, call := range map[string]func() error{
+				"UpdateIfMatch": func() error { return s.UpdateIfMatch("b-1", 1, opts) },
+				"UpdateIfAssignment": func() error {
+					_, err := s.UpdateIfAssignment("b-1", "open", "a", opts)
+					return err
+				},
+				"UpdateReporting": func() error { _, err := s.UpdateReporting("b-1", opts); return err },
+				"Create": func() error {
+					_, err := s.Create(Bead{Title: "w", Labels: append(opts.Labels, opts.RemoveLabels...)})
+					return err
+				},
+			} {
+				writes = nil
+				err := call()
+				refused := errors.Is(err, ErrBdSplitLabel) || strings.HasPrefix(name, "UpdateIf") && errors.As(err, &unsupported)
+				if !refused || len(writes) != 0 {
+					t.Errorf("%s(%+v) = %v (bd writes %v), want ErrBdSplitLabel before any write", name, opts, err, writes)
+				}
+			}
 		}
 	}
 }

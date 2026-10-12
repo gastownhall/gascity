@@ -38,8 +38,9 @@ The spec is the full reference. A brief summary of the surfaces:
   (`POST /v0/city/{cityName}/beads`) or update (`PATCH
   /v0/city/{cityName}/bead/{id}` or `POST .../bead/{id}/update`) is
   refused with 422 and nothing written when it carries a metadata key
-  that is not a valid bead-metadata key or a label holding `,` or `"`
-  (bd reads labels as a CSV list), when it would make a row a
+  that is not a valid bead-metadata key or a label that does not read
+  back as itself from one CSV record (a comma, a quote, a newline or a
+  carriage return; bd reads labels as CSV), when it would make a row a
   session or stop it being one (its type or the `gc:session` label), or
   when it sets, on a session row, a key the session's disposition decodes
   (`held_until`, `sleep_intent`, `wait_hold`, `quarantined_until`,

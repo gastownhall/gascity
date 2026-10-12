@@ -1588,17 +1588,18 @@ func bdSplitSafeKeys(meta map[string]string) error {
 	return nil
 }
 
-// ErrBdSplitLabel refuses a label containing "," or '"': bd reads
-// --add-label, --remove-label and create's --labels as CSV lists, so
-// "note,gc:session" would add gc:session and '"gc:session"' would match it.
-var ErrBdSplitLabel = errors.New(`bd label contains "," or '"'`)
+// ErrBdSplitLabel refuses a label that fails beadmeta.ValidLabel: bd reads
+// --add-label, --remove-label and create's --labels as CSV records, so
+// "note,gc:session" would add gc:session, and '"gc:session"' or
+// "gc:session\n" would match it.
+var ErrBdSplitLabel = errors.New("bd label does not read back as itself from one CSV record")
 
-// bdSplitSafeLabels refuses, before any bd call, a label bd would split or
-// unquote (ErrBdSplitLabel).
+// bdSplitSafeLabels refuses, before any bd call, a label bd would split,
+// unquote or trim (ErrBdSplitLabel).
 func bdSplitSafeLabels(lists ...[]string) error {
 	for _, labels := range lists {
 		for _, l := range labels {
-			if strings.ContainsAny(l, `,"`) {
+			if !beadmeta.ValidLabel(l) {
 				return fmt.Errorf("%w: %q", ErrBdSplitLabel, l)
 			}
 		}
