@@ -1018,10 +1018,10 @@ func (s *sim) snapshot() map[string]beads.Bead {
 	return out
 }
 
-// run runs steps until a violation, then quiesces.
-func (s *sim) run(steps int) {
+// run runs simSteps steps until a violation, then quiesces.
+func (s *sim) run() {
 	s.inventory()
-	for range steps {
+	for range simSteps {
 		if s.step(); len(s.failures) > 0 {
 			return
 		}
@@ -1379,7 +1379,7 @@ func TestSimCorpus(t *testing.T) {
 	for _, seed := range simSeeds(t) {
 		t.Run(fmt.Sprint(seed), func(t *testing.T) {
 			s := newSim(t, seed, simOpts{})
-			s.run(simSteps)
+			s.run()
 			s.report(t)
 		})
 	}
@@ -1403,7 +1403,7 @@ func TestSimCorpusFloored(t *testing.T) {
 		t.Run(fmt.Sprint(seed), func(t *testing.T) {
 			s := newSim(t, seed, simOpts{})
 			s.cfg.Agents[0].MinActiveSessions = intPtr(1 + int(seed%2))
-			s.run(simSteps)
+			s.run()
 			s.report(t)
 		})
 	}
@@ -1419,7 +1419,7 @@ func TestSimCorpusPinnedSeeds(t *testing.T) {
 	for _, seed := range []uint64{107, 337, 338, 427, 452, 465, 553, 657} {
 		t.Run(fmt.Sprint(seed), func(t *testing.T) {
 			s := newSim(t, seed, simOpts{})
-			s.run(simSteps)
+			s.run()
 			s.report(t)
 		})
 	}
@@ -1473,7 +1473,7 @@ func TestSimInvariantsCatchSeededMutants(t *testing.T) {
 				var s *sim
 				t.Run(fmt.Sprint(seed), func(t *testing.T) {
 					s = newSim(t, seed, m.opts)
-					s.run(simSteps)
+					s.run()
 				})
 				if slices.ContainsFunc(s.failures, func(f string) bool { return strings.HasPrefix(f, m.inv) }) {
 					return
