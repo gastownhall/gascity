@@ -18,7 +18,9 @@ func newPackCmd(stdout, stderr io.Writer) *cobra.Command {
 
 Packs are git repositories containing pack.toml files that
 define agent configurations for rigs. They are cached locally and
-can be pinned to specific git refs.`,
+can be pinned to specific git refs. "gc pack capability" and "gc pack diff"
+compute a pack directory's capability surface and classify the change
+between two versions of a pack.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return cmd.Help()
@@ -28,6 +30,8 @@ can be pinned to specific git refs.`,
 	cmd.AddCommand(newPackReleaseCmd(stdout, stderr))
 	cmd.AddCommand(newPackFetchCmd(stdout, stderr))
 	cmd.AddCommand(newPackListCmd(stdout, stderr))
+	cmd.AddCommand(newPackCapabilityCmd(stdout, stderr))
+	cmd.AddCommand(newPackDiffCmd(stdout, stderr))
 	return cmd
 }
 

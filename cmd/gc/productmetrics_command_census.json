@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 210,
+  "next_id": 212,
   "permanent_ids": [
     {
       "name": "help",
@@ -2796,6 +2796,36 @@
       "canonical_target": "@help",
       "owner": "immediate",
       "id": 1
+    },
+    {
+      "path": "gc pack capability",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "pack-capability",
+      "owner": "immediate",
+      "id": 210
+    },
+    {
+      "path": "gc pack diff",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "pack-diff",
+      "owner": "immediate",
+      "id": 211
     },
     {
       "path": "gc pack fetch",
