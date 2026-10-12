@@ -1009,6 +1009,9 @@ func tryReloadConfig(tomlPath, lockedWorkspaceName, cityRoot string) (*reloadRes
 //  1. Send Interrupt (Ctrl-C) to all sessions
 //  2. Wait shutdown_timeout
 //  3. Stop (force-kill) any survivors
+//
+// It is the compatibility wrapper direct tests call; the stop paths call
+// gracefulStopAllWithForceSignal.
 func gracefulStopAll(
 	names []string,
 	sp runtime.Provider,
@@ -1077,11 +1080,11 @@ func gracefulStopAllWithForceSignal(
 		}
 		var allExited bool
 		if runningSet, ok := runningSessionSet(sp, names); ok {
-			allExited = len(runningSet) == 0 && namesObservedExited(sp, setKeys(unlisted))
+			allExited = len(runningSet) == 0 && namesObservedExited(sp, setKeys(unlisted), deadline)
 		} else {
 			// An unknown state is not an exit: keep waiting out the grace
 			// window rather than cutting it short on a failed observation.
-			allExited = namesObservedExited(sp, names)
+			allExited = namesObservedExited(sp, names, deadline)
 		}
 		if allExited {
 			break
@@ -1185,8 +1188,10 @@ func stopProbeRunning(sp runtime.Provider, name string) (bool, error) {
 // unlistedSessionSet returns the names that a complete runtime inventory does
 // not list but that a per-name probe reports running or cannot rule out,
 // together with known, the names the caller's own probe already found so
-// (they are not probed again). Nil when the inventory is incomplete (every
-// name is then read per name anyway), when it lists every name, or when the
+// (they are not probed again). When the inventory is incomplete it returns
+// every name, unprobed: that listing vouches for none of them, and a later
+// one that answers blind would read them all as exited, so each later read
+// of them is per name. Nil when the inventory lists every name, or when the
 // provider attests its listing complete (runtime.ListRunningAttested): a
 // name an attested list does not show is gone, and probing it would only
 // add a round trip per name, or a timeout per name on a wedged server.
@@ -1196,7 +1201,7 @@ func unlistedSessionSet(sp runtime.Provider, names []string, known map[string]bo
 	}
 	runningSet, ok := runningSessionSet(sp, names)
 	if !ok {
-		return nil
+		return setOf(names)
 	}
 	var unlisted map[string]bool
 	add := func(name string) {
@@ -1225,9 +1230,15 @@ func unlistedSessionSet(sp runtime.Provider, names []string, known map[string]bo
 // namesObservedExited reports whether a per-name probe sees every name
 // exited. An unknown state is not an exit. It probes one name at a time and
 // stops at the first that is not exited: the grace-window poll asks this
-// every 500 ms, and while agents are still up one probe answers it.
-func namesObservedExited(sp runtime.Provider, names []string) bool {
+// every 500 ms, and while agents are still up one probe answers it. It
+// begins no probe once deadline (the end of the grace window) has passed,
+// and a walk cut short there is not an exit, so a backend that answers
+// slowly overruns the window by at most the one probe in flight.
+func namesObservedExited(sp runtime.Provider, names []string, deadline time.Time) bool {
 	for _, name := range names {
+		if !time.Now().Before(deadline) {
+			return false
+		}
 		if running, err := stopProbeRunning(sp, name); err != nil || running {
 			return false
 		}

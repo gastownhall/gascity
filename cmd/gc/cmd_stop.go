@@ -336,7 +336,9 @@ func defaultStopWallClockTimeout(cfg *config.City) time.Duration {
 // (stopTargetsBounded), so serial prices each such pass's stops one at a
 // time. Only sessions a probe reported running count: an unknown one is not
 // stopped by this pass (it is reported instead), and a runtime whose probes
-// fail must not buy itself a longer stop.
+// fail must not buy itself a longer stop. Like the default cap this is an
+// estimate: listed orphans share the pass uncounted (an unresolved one among
+// them also sends it serial), and can still require an explicit --timeout.
 func stopCapExtensionForRecorded(cfg *config.City, recorded int, serial bool) time.Duration {
 	if recorded <= 0 {
 		return 0
@@ -512,11 +514,15 @@ func cmdStopBodyWithoutSuccessExtendingCap(cityPath string, cfg *config.City, fo
 	// default wall-clock cap counts configured targets only, so it grows by
 	// that pass's budget (stopCapExtensionForRecorded). A name whose probe
 	// failed is unknown, not running: like a configured name whose
-	// observation failed, it is reported and the stop is not confirmed.
+	// observation failed, it is reported and the stop is not confirmed (the
+	// controller shutdown stops such a row instead; see storeRecordedSweep).
+	// A store that cannot list the city's sessions leaves the sweep blind to
+	// them, so that is reported and the stop is not confirmed either.
 	// unreachable records that listing call failing; the check of rows left
 	// creating below then does not probe them either.
 	unreachable := false
 	var recorded, recordedUnknown []string
+	var recordedUnread error
 	if !runtime.ListRunningAttested(sp) {
 		listed, listErr := sp.ListRunning("")
 		unreachable = listErr != nil
@@ -526,7 +532,7 @@ func cmdStopBodyWithoutSuccessExtendingCap(cityPath string, cfg *config.City, fo
 				skip[strings.TrimSpace(name)] = true
 			}
 			var found []string
-			found, recordedUnknown = storeRecordedSweep(skip, sessionFrontDoor(sessStore), sp, "gc stop", stderr)
+			found, recordedUnknown, recordedUnread = storeRecordedSweep(skip, sessionFrontDoor(sessStore), sp, "gc stop", stderr)
 			recorded = slices.DeleteFunc(found, func(sn string) bool { return slices.Contains(recordedUnknown, sn) })
 			if extendCap != nil && len(recorded) > 0 {
 				extendCap(stopCapExtensionForRecorded(cfg, len(recorded), !stopTargetsAllResolved(recorded, cfg, sessStore)))
@@ -576,7 +582,18 @@ func cmdStopBodyWithoutSuccessExtendingCap(cityPath string, cfg *config.City, fo
 		fmt.Fprintf(stderr, "gc stop: stop not confirmed: could not observe recorded session(s) %s, so they may still be running; resolve the runtime error and run gc stop again\n", strings.Join(recordedUnknown, ", ")) //nolint:errcheck // best-effort stderr
 		code = 1
 	}
+	if recordedUnread != nil {
+		fmt.Fprintf(stderr, "gc stop: stop not confirmed: could not read the city's recorded sessions (%v), so sessions the runtime cannot list may still be running; resolve the store error and run gc stop again\n", recordedUnread) //nolint:errcheck // best-effort stderr
+		code = 1
+	}
 
+	// The server comes down whether or not this stop is confirmed, including
+	// when the runtime could not be listed or the recorded-session sweep could
+	// not read the store. On a runtime whose sessions live inside its server,
+	// a session this stop could not see then ends with the server, without a
+	// graceful stop. The controller shutdown keeps the server in those two
+	// cases instead (sweepEnumerated in CityRuntime.shutdown), leaving such a
+	// session running rather than killing it unlisted.
 	teardownServerForStop(sp, stderr, "gc stop")
 
 	// Stop the bead store's backing service LAST, and only here. The order
@@ -592,9 +609,12 @@ func cmdStopBodyWithoutSuccessExtendingCap(cityPath string, cfg *config.City, fo
 	// would leave the city up with a live proxy every time.
 	//
 	// The call is re-runnable: `bd dolt stop` is idempotent on rc.2 (exit 0,
-	// stopped/verified true, with or without a live proxy). A second `gc stop`
-	// of a fully stopped proxied city does not get this far: it returns at
-	// cityAlreadyStoppedForStop above without reading the store.
+	// stopped/verified true, with or without a live proxy). On a runtime that
+	// attests its listing, a second `gc stop` of a fully stopped proxied city
+	// does not get this far: it returns at cityAlreadyStoppedForStop above
+	// without reading the store. On one that does not, every stop takes this
+	// flow, so a repeat stop restarts the proxy and Dolt child to read the
+	// city's sessions, and this call retires them again.
 	if err := shutdownBeadsProviderForStop(cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc stop: bead store: %v\n", err) //nolint:errcheck // best-effort stderr
 		// Non-fatal warning.
@@ -623,16 +643,16 @@ func cmdStopBodyWithoutSuccessExtendingCap(cityPath string, cfg *config.City, fo
 // the same failure. They are reported as not checked.
 //
 // left is true when any creating runtime is not known stopped (a start in
-// flight, a row not checked, a failed liveness probe, a failed stop), so the
-// stop is not confirmed.
+// flight, a row not checked, rows the store could not list, a failed
+// liveness probe, a failed stop), so the stop is not confirmed.
 func stopInterruptedStartsForStop(cityPath string, sessFront *session.Store, sp runtime.Provider, unreachable bool, stdout, stderr io.Writer) (inFlight map[string]bool, left bool) {
 	if !filepath.IsAbs(cityPath) || !sessFront.Backed() || sp == nil {
 		return nil, false
 	}
 	infos, err := sessFront.ListLabeledSessionInfosUnfiltered()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc stop: listing the city's sessions: %v\n", err) //nolint:errcheck // best-effort stderr
-		return nil, false
+		fmt.Fprintf(stderr, "gc stop: could not check for sessions left creating by an interrupted start, so they may still be running: listing the city's sessions: %v\n", err) //nolint:errcheck // best-effort stderr
+		return nil, true
 	}
 	// free holds the rows whose flock this stop took; each lease is held
 	// until its row is done, so no start can begin under the stop.

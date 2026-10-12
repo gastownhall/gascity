@@ -2801,6 +2801,130 @@ func TestCmdStopBodyWithholdsSuccessWhenARecordedSessionProbeFails(t *testing.T)
 	}
 }
 
+// A session store that cannot list the city's sessions hides what the
+// city started beyond what the runtime lists. On a runtime that does not
+// attest its listing, a recorded session it cannot list may still be
+// running; on any runtime, so may a start an interrupted controller left
+// creating. The standalone stop must not confirm itself over either.
+func TestCmdStopBodyDoesNotConfirmWhenTheSessionStoreCannotList(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		sp      func(*runtime.Fake) runtime.Provider
+		running []string
+		want    string
+	}{
+		{
+			name:    "unattested runtime",
+			sp:      func(fake *runtime.Fake) runtime.Provider { return blindListProvider{fake} },
+			running: []string{"idler-adhoc-1"},
+			want:    "stop not confirmed: could not read the city's recorded sessions",
+		},
+		{
+			name: "attested runtime",
+			sp:   func(fake *runtime.Fake) runtime.Provider { return fake },
+			want: "could not check for sessions left creating by an interrupted start",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := runtime.NewFake()
+			startStopTestSessions(t, fake, tc.running...)
+			cityDir, cfg := stopTestCityWithRecordedSessions(t, "0s", nil, tc.sp(fake),
+				map[string]string{"session_name": "idler-adhoc-1", "template": "idler", "state": "awake"},
+				map[string]string{"session_name": "idler-crashed-start", "template": "idler", "state": "creating"},
+			)
+			store, err := openCityStoreForStop(cityDir)
+			if err != nil {
+				t.Fatalf("opening the test city's store: %v", err)
+			}
+			// stopTestCityWithRecordedSessions restores the real opener.
+			openCityStoreForStop = func(string) (beads.Store, error) {
+				return failingListByLabelStore{Store: store, err: errors.New("injected: session listing failed")}, nil
+			}
+
+			var stdout, stderr lockedBuffer
+			code := cmdStopBody(cityDir, cfg, false, &stdout, &stderr)
+			if code == 0 || strings.Contains(stdout.String(), "City stopped.") {
+				t.Fatalf("cmdStopBody = %d over a session store it could not list; stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stderr.String(), tc.want) {
+				t.Errorf("stderr does not report %q; stderr = %q", tc.want, stderr.String())
+			}
+		})
+	}
+}
+
+// A store read that fails once, on the recorded-session sweep alone, leaves
+// that sweep blind to the sessions the runtime cannot list, though the reads
+// before and after it succeed. The sweep's own report must withhold success:
+// the check of rows left creating reads the store again and finds nothing to
+// report.
+func TestCmdStopBodyDoesNotConfirmWhenOnlyTheRecordedSweepCannotReadTheStore(t *testing.T) {
+	fake := runtime.NewFake()
+	startStopTestSessions(t, fake, "idler-adhoc-1")
+	cityDir, cfg := stopTestCityWithRecordedSessions(t, "0s", nil, blindListProvider{fake},
+		map[string]string{"session_name": "idler-adhoc-1", "template": "idler", "state": "awake"},
+	)
+	store, err := openCityStoreForStop(cityDir)
+	if err != nil {
+		t.Fatalf("opening the test city's store: %v", err)
+	}
+	// The stop lists the city's sessions three times, in a fixed order: the
+	// sleep-reason marks, the recorded-session sweep, then the check of rows
+	// left creating. Fail the second listing only.
+	reads := &failingNthListByLabelStore{Store: store, failOn: 2, err: errors.New("injected: session listing failed")}
+	// stopTestCityWithRecordedSessions restores the real opener.
+	openCityStoreForStop = func(string) (beads.Store, error) { return reads, nil }
+
+	var stdout, stderr lockedBuffer
+	code := cmdStopBody(cityDir, cfg, false, &stdout, &stderr)
+	if calls, fired := reads.counts(); calls != 3 || fired != 1 {
+		t.Fatalf("the stop listed the city's sessions %d times with %d injected failures, want 3 listings (marks, sweep, creating check) and 1 failure; stderr = %q", calls, fired, stderr.String())
+	}
+	if code == 0 || strings.Contains(stdout.String(), "City stopped.") {
+		t.Fatalf("cmdStopBody = %d when the recorded-session sweep could not read the store; stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+	}
+	if want := "stop not confirmed: could not read the city's recorded sessions"; !strings.Contains(stderr.String(), want) {
+		t.Errorf("stderr does not report %q; stderr = %q", want, stderr.String())
+	}
+	for _, other := range []string{"gc stop: marking sessions:", "could not check for sessions left creating"} {
+		if strings.Contains(stderr.String(), other) {
+			t.Errorf("stderr reports %q, so the injected failure did not land on the sweep alone; stderr = %q", other, stderr.String())
+		}
+	}
+}
+
+// failingNthListByLabelStore fails its failOn-th ListByLabel call (1-based)
+// with err and counts every call.
+type failingNthListByLabelStore struct {
+	beads.Store
+	failOn int
+	err    error
+
+	mu    sync.Mutex
+	calls int
+	fired int
+}
+
+func (s *failingNthListByLabelStore) ListByLabel(label string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+	s.mu.Lock()
+	s.calls++
+	fail := s.calls == s.failOn
+	if fail {
+		s.fired++
+	}
+	s.mu.Unlock()
+	if fail {
+		return nil, s.err
+	}
+	return s.Store.ListByLabel(label, limit, opts...)
+}
+
+func (s *failingNthListByLabelStore) counts() (calls, fired int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls, s.fired
+}
+
 // A runtime that does not attest its listing (an exec pack whose
 // list-running is unsupported answers an empty inventory) cannot prove a
 // retired-store city has nothing running: the stop takes the full flow,

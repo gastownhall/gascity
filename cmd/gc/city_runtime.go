@@ -5003,7 +5003,11 @@ func (cr *CityRuntime) shutdown() {
 		// runtime that will adopt them. A forced shutdown still probes every
 		// row (an unprobed row is a session left running past a stop that
 		// reports success); the probes run wide, so a hung backend costs about
-		// one op timeout.
+		// one op timeout. A row whose probe fails is stopped with the rest, in
+		// an unknown state; the standalone stop leaves such a row and is not
+		// confirmed instead (storeRecordedSweep). A store that cannot list the
+		// city's sessions leaves the fleet unenumerated, as a failed runtime
+		// listing does: the shutdown says so and keeps the server.
 		//
 		// Under a supervisor this shutdown runs inside stopManagedCity's
 		// budget: shutdown_timeout, then 5 x shutdown_timeout once forced (30 s
@@ -5016,7 +5020,12 @@ func (cr *CityRuntime) shutdown() {
 		// without the sweep.
 		var recorded []string
 		if cr.ownedCity.Load() && recordedSweepAllowed(cr.sp, listErr) {
-			recorded = storeRecordedRunningOutside(setOf(running), sessionFrontDoor(store.Store), cr.sp, "shutdown", cr.stderr)
+			var sweepErr error
+			recorded, sweepErr = storeRecordedRunningOutside(setOf(running), sessionFrontDoor(store.Store), cr.sp, "shutdown", cr.stderr)
+			if sweepErr != nil {
+				fmt.Fprintf(cr.stderr, "%s: shutdown could not read the city's recorded sessions, so sessions the runtime cannot list may still be running: %v\n", cr.logPrefix, sweepErr) //nolint:errcheck // best-effort stderr
+				sweepEnumerated = false
+			}
 			running = append(running, recorded...)
 		}
 		markCityStopSessionSleepReason(sessionFrontDoor(store.Store), cr.stderr)
@@ -5046,7 +5055,8 @@ func (cr *CityRuntime) shutdown() {
 		//     city; a controller-lock/socket/token failure) calls shutdown()
 		//     too, and must never kill the live owner's server.
 		//   - sweepEnumerated: only tear down after a stop that actually
-		//     listed the fleet, never on the empty slice a failed list leaves.
+		//     listed the fleet, never on the empty slice a failed list leaves
+		//     or over recorded sessions the shutdown could not read.
 		// The preserve-sessions shutdown returned above, before the session
 		// stops — preserved sessions live inside this server, so keeping it
 		// up there is by design, not an omission.
@@ -5072,11 +5082,18 @@ func (cr *CityRuntime) shutdown() {
 // draining, or one recorded asleep whose sandbox survived, is as running as
 // an awake one, so a per-name probe (stopProbeRunning, one provider op, in
 // bounded parallel) decides, and a probe that fails keeps the name (unknown
-// is not absent; the stop reports it as unknown). A session recorded
+// is not absent; the stop reports it as unknown). That holds only where the
+// provider reports a failed probe (runtime.LivenessObserverWithError); on
+// one that does not (exec, ssh, herdr) a failed probe reads as not running,
+// and the row is passed over like a stopped one. A session recorded
 // creating is skipped: it is its start's to finish (shutdown waits for async
 // starts first, and a standalone stop reaps one whose start died with its
-// controller in stopInterruptedStartsForStop). A store read error is
-// reported under prefix and returns nothing.
+// controller in stopInterruptedStartsForStop).
+//
+// A store that cannot list the city's sessions returns its error and no
+// names: the sweep has not seen what the runtime cannot list, so the caller
+// must not take the empty answer for nothing running. A front door with no
+// store behind it has no record to read and returns nothing.
 //
 // Every candidate is probed, storeSweepMaxParallelProbes at a time, forced
 // stop or not: a row left unprobed would be a session left running while the
@@ -5086,22 +5103,26 @@ func (cr *CityRuntime) shutdown() {
 // no stop-level probe reads these names again before their interrupt; the
 // worker boundary's own reads of each name (inside the interrupt and the
 // stop) remain.
-func storeRecordedRunningOutside(skip map[string]bool, sessFront *sessionpkg.Store, sp runtime.Provider, prefix string, stderr io.Writer) []string {
-	found, _ := storeRecordedSweep(skip, sessFront, sp, prefix, stderr)
-	return found
+func storeRecordedRunningOutside(skip map[string]bool, sessFront *sessionpkg.Store, sp runtime.Provider, prefix string, stderr io.Writer) ([]string, error) {
+	found, _, err := storeRecordedSweep(skip, sessFront, sp, prefix, stderr)
+	return found, err
 }
 
 // storeRecordedSweep is storeRecordedRunningOutside that also returns the
 // subset of found whose probe failed (unknown, not known running), for a stop
-// that must withhold success over a session it could not observe.
-func storeRecordedSweep(skip map[string]bool, sessFront *sessionpkg.Store, sp runtime.Provider, prefix string, stderr io.Writer) (found, unknown []string) {
+// that must withhold success over a session it could not observe. The two
+// stop paths treat an unknown row differently. The controller shutdown
+// stops it with the rest (gracefulStopAllWithForceSignal stops a name in an
+// unknown state without claiming a graceful exit). The standalone stop
+// leaves it, reports it and is not confirmed, as doStopWithoutSuccess does
+// for a configured name it cannot observe.
+func storeRecordedSweep(skip map[string]bool, sessFront *sessionpkg.Store, sp runtime.Provider, prefix string, stderr io.Writer) (found, unknown []string, err error) {
 	if !sessFront.Backed() || sp == nil || runtime.ListRunningAttested(sp) {
-		return nil, nil
+		return nil, nil, nil
 	}
 	infos, err := sessFront.ListLabeledSessionInfosUnfiltered()
 	if err != nil {
-		fmt.Fprintf(stderr, "%s: listing the city's sessions: %v\n", prefix, err) //nolint:errcheck // best-effort stderr
-		return nil, nil
+		return nil, nil, fmt.Errorf("listing the city's sessions: %w", err)
 	}
 	seen := make(map[string]bool)
 	var candidates []string
@@ -5124,7 +5145,7 @@ func storeRecordedSweep(skip map[string]bool, sessFront *sessionpkg.Store, sp ru
 			unknown = append(unknown, name)
 		}
 	}
-	return found, unknown
+	return found, unknown, nil
 }
 
 // recordedSweepAllowed reports whether a stop should sweep the city's

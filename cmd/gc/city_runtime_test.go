@@ -1047,6 +1047,102 @@ func TestGracefulStopAllReadsUnlistedSessionsPerName(t *testing.T) {
 	}
 }
 
+// On a runtime that does not attest its listing, the city's store is the
+// only record of the sessions the listing cannot see. A shutdown that could
+// not read it has not enumerated the fleet: it must say so, and must not tear
+// the runtime's server down under sessions it never stopped.
+func TestCityRuntimeShutdownKeepsServerWhenRecordedSessionsCannotBeRead(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		listErr       error
+		wantTeardowns int
+	}{
+		{name: "store lists", wantTeardowns: 1},
+		{name: "store listing fails", listErr: errors.New("injected: session listing failed"), wantTeardowns: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := runtime.NewFake()
+			fake.ListingUnattested = true
+			sp := &lifecycleOrderProvider{Fake: fake}
+			var store beads.Store = beads.NewMemStore()
+			if tc.listErr != nil {
+				store = failingListByLabelStore{Store: store, err: tc.listErr}
+			}
+			var stdout, stderr lockedBuffer
+			cr := &CityRuntime{
+				cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}},
+				sp:                  sp,
+				rec:                 events.Discard,
+				standaloneCityStore: store,
+				stdout:              &stdout,
+				stderr:              &stderr,
+			}
+			markOwnedForTest(cr)
+
+			cr.shutdown()
+
+			if teardowns, _, _ := teardownEvents(sp.snapshotEvents()); teardowns != tc.wantTeardowns {
+				t.Fatalf("shutdown tore down the server %d time(s), want %d (events: %v); stderr = %q", teardowns, tc.wantTeardowns, sp.snapshotEvents(), stderr.String())
+			}
+			if tc.listErr != nil && !strings.Contains(stderr.String(), "could not read the city's recorded sessions") {
+				t.Errorf("shutdown does not report the unread recorded sessions; stderr = %q", stderr.String())
+			}
+		})
+	}
+}
+
+// failOnceListProvider is a blindProbeProvider whose first listing fails (a
+// one-off transport error) and whose later listings answer its blind, empty
+// inventory again.
+type failOnceListProvider struct {
+	blindProbeProvider
+	failed atomic.Bool
+}
+
+func (p *failOnceListProvider) ListRunning(prefix string) ([]string, error) {
+	if p.failed.CompareAndSwap(false, true) {
+		return nil, errors.New("list-running: transport error")
+	}
+	return p.blindProbeProvider.ListRunning(prefix)
+}
+
+// A listing that fails once and then answers blind must not read the names it
+// cannot see as exited: gracefulStopAll still waits out the grace window for
+// an agent that has not exited, and reports only a real exit as graceful.
+func TestGracefulStopAllReadsSessionsPerNameAfterAFailedListing(t *testing.T) {
+	fake := runtime.NewFake()
+	for _, name := range []string{"exits", "lingers"} {
+		if err := fake.Start(context.Background(), name, runtime.Config{}); err != nil {
+			t.Fatalf("Start %s: %v", name, err)
+		}
+	}
+	sp := &failOnceListProvider{blindProbeProvider: blindProbeProvider{
+		blindListProvider: blindListProvider{fake},
+		exitOnInterrupt:   map[string]bool{"exits": true},
+	}}
+	var stdout, stderr lockedBuffer
+	const grace = time.Second
+	began := time.Now()
+	gracefulStopAll([]string{"exits", "lingers"}, sp, grace, events.Discard, &config.City{}, beads.SessionStore{Store: beads.NewMemStore()}, &stdout, &stderr)
+	elapsed := time.Since(began)
+
+	if !sp.failed.Load() {
+		t.Fatal("gracefulStopAll never listed the runtime; the test needs its first listing to fail")
+	}
+	if elapsed < grace {
+		t.Errorf("gracefulStopAll returned after %s, want the full %s grace window for an agent that has not exited", elapsed, grace)
+	}
+	if fake.IsRunning("lingers") || fake.IsRunning("exits") {
+		t.Fatalf("a session survived gracefulStopAll; stdout = %q, stderr = %q", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Agent 'exits' exited gracefully") {
+		t.Errorf("the agent that exited on its interrupt is not reported as exited gracefully; stdout = %q", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "Agent 'lingers' exited gracefully") {
+		t.Errorf("the agent that ignored its interrupt is reported as exited gracefully; stdout = %q", stdout.String())
+	}
+}
+
 func TestCityRuntimeDemandSnapshotReusesStablePatrolDemand(t *testing.T) {
 	buildCalls := 0
 	cr := &CityRuntime{
@@ -8304,7 +8400,10 @@ func TestStopReadsUnlistedSessionsWithOneProbeEach(t *testing.T) {
 		}
 		all := map[string]int{"up-1": 1, "up-2": 1, "down": 1}
 
-		got := storeRecordedRunningOutside(nil, sessionFrontDoor(store), sp, "test", io.Discard)
+		got, err := storeRecordedRunningOutside(nil, sessionFrontDoor(store), sp, "test", io.Discard)
+		if err != nil {
+			t.Fatalf("storeRecordedRunningOutside: %v", err)
+		}
 		slices.Sort(got)
 		if !slices.Equal(got, []string{"up-1", "up-2"}) {
 			t.Errorf("storeRecordedRunningOutside = %v, want [up-1 up-2]", got)
@@ -8318,7 +8417,7 @@ func TestStopReadsUnlistedSessionsWithOneProbeEach(t *testing.T) {
 		assertOneIsRunningEach(t, sp, "unlistedSessionSet", all)
 
 		// The poll stops at the first name still up.
-		if namesObservedExited(sp, []string{"down", "up-1", "up-2"}) {
+		if namesObservedExited(sp, []string{"down", "up-1", "up-2"}, time.Now().Add(time.Minute)) {
 			t.Error("namesObservedExited = true with up-1 and up-2 running")
 		}
 		assertOneIsRunningEach(t, sp, "poll", map[string]int{"down": 1, "up-1": 1})
@@ -8596,8 +8695,8 @@ func TestStoreRecordedSweepProbesRowsTogether(t *testing.T) {
 	store := recordedStopTestStore(t, recorded...)
 	sp := newConcurrencyGaugeProvider(runtime.NewFake(), rows)
 
-	if got := storeRecordedRunningOutside(nil, sessionFrontDoor(store), sp, "shutdown", io.Discard); len(got) != 0 {
-		t.Errorf("storeRecordedRunningOutside = %v, want none (no row is running)", got)
+	if got, err := storeRecordedRunningOutside(nil, sessionFrontDoor(store), sp, "shutdown", io.Discard); err != nil || len(got) != 0 {
+		t.Errorf("storeRecordedRunningOutside = %v, %v, want none (no row is running)", got, err)
 	}
 	if got := sp.probes.Load(); got != int64(rows) {
 		t.Errorf("probed %d row(s), want %d", got, rows)
@@ -8628,8 +8727,8 @@ func TestStoreRecordedSweepSkipsAnAttestedRuntimeWhoseListingOmitsRows(t *testin
 
 	t.Run("sweep", func(t *testing.T) {
 		sp := newProvider(t)
-		if got := storeRecordedRunningOutside(nil, sessionFrontDoor(recordedStopTestStore(t, rows...)), sp, "shutdown", io.Discard); got != nil {
-			t.Errorf("storeRecordedRunningOutside = %v, want nil on an attested runtime", got)
+		if got, err := storeRecordedRunningOutside(nil, sessionFrontDoor(recordedStopTestStore(t, rows...)), sp, "shutdown", io.Discard); err != nil || got != nil {
+			t.Errorf("storeRecordedRunningOutside = %v, %v, want nil on an attested runtime", got, err)
 		}
 		if got := sp.probes.Load(); got != 0 {
 			t.Errorf("the sweep made %d probe(s) on an attested runtime, want 0", got)
@@ -8679,6 +8778,75 @@ func TestUnlistedSessionSetTrustsAnAttestedListing(t *testing.T) {
 	if got := sp.probes.Load(); got != 0 {
 		t.Errorf("unlistedSessionSet made %d per-name probe(s) on an attested runtime, want 0", got)
 	}
+}
+
+// An unattested runtime whose listing fails vouches for no name:
+// unlistedSessionSet returns every name, so each later read of them is per
+// name whatever a later listing answers. It probes none of them itself.
+func TestUnlistedSessionSetReturnsEveryNameWhenAnUnattestedListingFails(t *testing.T) {
+	fake := runtime.NewFake()
+	fake.ListingUnattested = true
+	sp := &wedgedListingProvider{Fake: fake}
+	got := unlistedSessionSet(sp, []string{"probed-before", "unprobed"}, map[string]bool{"probed-before": true})
+	if want := map[string]bool{"probed-before": true, "unprobed": true}; !maps.Equal(got, want) {
+		t.Errorf("unlistedSessionSet = %v, want %v", got, want)
+	}
+	if got := sp.probes.Load(); got != 0 {
+		t.Errorf("unlistedSessionSet made %d per-name probe(s), want 0", got)
+	}
+}
+
+// slowProbeFake is a probeCountingFake whose probe of slow answers only once
+// until has passed: a backend whose probe outlasts the grace window.
+type slowProbeFake struct {
+	*probeCountingFake
+	slow  string
+	until time.Time
+}
+
+func (p *slowProbeFake) IsRunning(name string) bool {
+	if name == p.slow {
+		timer := time.NewTimer(time.Until(p.until))
+		defer timer.Stop()
+		<-timer.C
+	}
+	return p.probeCountingFake.IsRunning(name)
+}
+
+// namesObservedExited serves the grace-window poll, so it answers within the
+// window: once its deadline has passed it probes no further name and does
+// not read the names as exited. A backend that answers slowly cannot stretch
+// the window by a probe per name.
+func TestNamesObservedExitedStopsProbingAtItsDeadline(t *testing.T) {
+	names := []string{"exited-1", "exited-2"}
+	t.Run("before the deadline", func(t *testing.T) {
+		sp := &probeCountingFake{Fake: runtime.NewFake()}
+		if !namesObservedExited(sp, names, time.Now().Add(time.Minute)) {
+			t.Error("namesObservedExited = false over exited names before its deadline, want true")
+		}
+		if got := sp.probes.Load(); got != int64(len(names)) {
+			t.Errorf("probed %d name(s), want %d", got, len(names))
+		}
+	})
+	t.Run("deadline passed", func(t *testing.T) {
+		sp := &probeCountingFake{Fake: runtime.NewFake()}
+		if namesObservedExited(sp, names, time.Now()) {
+			t.Error("namesObservedExited = true past its deadline, want false")
+		}
+		if got := sp.probes.Load(); got != 0 {
+			t.Errorf("probed %d name(s) past the deadline, want 0", got)
+		}
+	})
+	t.Run("deadline passes during a probe", func(t *testing.T) {
+		deadline := time.Now().Add(250 * time.Millisecond)
+		sp := &slowProbeFake{probeCountingFake: &probeCountingFake{Fake: runtime.NewFake()}, slow: "exited-1", until: deadline}
+		if namesObservedExited(sp, names, deadline) {
+			t.Error("namesObservedExited = true after its deadline passed mid-walk, want false")
+		}
+		if got := sp.probes.Load(); got != 1 {
+			t.Errorf("probed %d name(s), want only the 1 begun before the deadline", got)
+		}
+	})
 }
 
 // probeCountingFake is an attested Fake that counts per-name liveness reads
