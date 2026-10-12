@@ -96,6 +96,9 @@ func TestFindInvalidHookMatchers_Classification(t *testing.T) {
 		{"permission syntax", "PreToolUse", "Bash(*bd mol pour*patrol*)", SeverityError, "permission-rule syntax"},
 		{"permission syntax with alternation", "PreToolUse", "Edit|Write(*.go)", SeverityError, "permission-rule syntax"},
 		{"permission syntax that compiles under RE2", "PreToolUse", "Bash(git:*)", SeverityError, "permission-rule syntax"},
+		{"permission syntax with spaces", "PreToolUse", "Bash(npm run test)", SeverityError, "permission-rule syntax"},
+		{"permission syntax with domain arg", "PreToolUse", "WebFetch(domain:example.com)", SeverityError, "permission-rule syntax"},
+		{"permission syntax with path arg", "PreToolUse", "Read(src/main.go)", SeverityError, "permission-rule syntax"},
 
 		// Not a regular expression at all.
 		{"unbalanced bracket", "PreToolUse", "[Bash", SeverityError, "does not compile"},
@@ -114,6 +117,7 @@ func TestFindInvalidHookMatchers_Classification(t *testing.T) {
 		{"JS named backreference only warns", "PreToolUse", `^(?<t>Bash)\k<t>?$`, SeverityWarning, "JavaScript"},
 		{"JS any-char class only warns", "PreToolUse", `^Bas[^]$`, SeverityWarning, "JavaScript"},
 		{"JS identity escape only warns", "PreToolUse", `^\Read$`, SeverityWarning, "JavaScript"},
+		{"repeat count over RE2 limit only warns", "PreToolUse", "^.{1001}$", SeverityWarning, "verify it by hand"},
 
 		// Compiles, but names nothing Claude Code has.
 		{"unknown tool", "PreToolUse", "^Frobnicate$", SeverityWarning, "no known Claude Code tool"},
@@ -123,6 +127,9 @@ func TestFindInvalidHookMatchers_Classification(t *testing.T) {
 		{"unknown tools on PermissionRequest", "PermissionRequest", "Frobnicate|Quux", SeverityWarning, "no known Claude Code tool"},
 		{"grouped regex over unknown tools only warns", "PreToolUse", "Future(Tool)", SeverityWarning, "no known Claude Code tool"},
 		{"grouped alternation over unknown tools only warns", "PreToolUse", "Browser(Open|Close)", SeverityWarning, "no known Claude Code tool"},
+		{"suffixed grouped regex over unknown tools only warns", "PreToolUse", "Browser(Open|Close).*", SeverityWarning, "no known Claude Code tool"},
+		{"class in group over unknown tools only warns", "PreToolUse", "Future(Tool[0-9]+)", SeverityWarning, "no known Claude Code tool"},
+		{"group-any over unknown tool only warns", "PreToolUse", "Future(.*)", SeverityWarning, "no known Claude Code tool"},
 
 		// Clean: the all-tools forms.
 		{"empty matcher means all tools", "PreToolUse", "", "", ""},

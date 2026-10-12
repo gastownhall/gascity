@@ -803,6 +803,22 @@ func TestLintWarnsOnUnknownToolHookMatcherWithoutFailing(t *testing.T) {
 	}
 }
 
+// A grouped regex over unknown tools with a suffix after the group is a regex,
+// not a permission rule; lint must warn about the unknown tool, not fail.
+func TestLintWarnsOnGroupedRegexOverUnknownToolWithoutFailing(t *testing.T) {
+	packDir := writeLintHookSettings(t, `{"hooks":{"PreToolUse":[{"matcher":"Browser(Open|Close).*","hooks":[{"type":"command","command":"true"}]}]}}`)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"lint", packDir}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc lint = %d, want 0 (a grouped regex over unknown tools only warns)\nstdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
+	}
+	wantLoc := filepath.Join(".claude", "settings.json") + ": warning: hooks.PreToolUse[0] matcher"
+	if !strings.Contains(stderr.String(), wantLoc) {
+		t.Errorf("stderr missing %q:\n%s", wantLoc, stderr.String())
+	}
+}
+
 // A JavaScript-only escape such as \u0042 is valid in Claude Code but does not
 // compile under Go RE2; lint must warn, not fail the pack.
 func TestLintWarnsOnJavaScriptOnlyHookMatcherWithoutFailing(t *testing.T) {
