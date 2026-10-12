@@ -662,6 +662,33 @@ func TestBdStoreGetRetriesTransientWispTierFailure(t *testing.T) {
 	}
 }
 
+func TestBdStoreGetWispTierFailureWithNoMatchTextIsNotNotFound(t *testing.T) {
+	// A failure can carry bd's no-match wording without bd having answered:
+	// a transport fault that outlasted the read retries, or an infrastructure
+	// failure. Nor does bd show's "issue X not found" wording count: bd query
+	// answers a miss with an empty list, so that text on its failure path came
+	// from somewhere other than a lookup. Absence is unproven, so Get must not
+	// report ErrNotFound.
+	for name, failure := range map[string]string{
+		"transport":      "exit status 1: connection reset by peer; no issues found in retry",
+		"infrastructure": "exit status 1: database not found; no issues found",
+		"show wording":   "exit status 1: issue gc-1 not found",
+	} {
+		t.Run(name, func(t *testing.T) {
+			runner := func(_, _ string, args ...string) ([]byte, error) {
+				if args[0] == "show" {
+					return nil, fmt.Errorf("exit status 1: Error fetching gc-1: no issue found matching \"gc-1\"")
+				}
+				return nil, errors.New(failure)
+			}
+			_, err := beads.NewBdStore("/city", runner).Get("gc-1")
+			if err == nil || errors.Is(err, beads.ErrNotFound) || !strings.Contains(err.Error(), failure) {
+				t.Fatalf("Get with wisp-tier failure %q = %v, want that failure, not ErrNotFound", failure, err)
+			}
+		})
+	}
+}
+
 func TestBdStoreGetBadJSON(t *testing.T) {
 	runner := func(_, _ string, _ ...string) ([]byte, error) {
 		return []byte(`not json`), nil

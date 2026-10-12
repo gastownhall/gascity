@@ -1187,10 +1187,12 @@ func isBdNotFound(err error) bool {
 }
 
 // isBdNoIssueMatch reports whether err is bd's own "no issue(s) found"
-// answer, the narrow subset of isBdNotFound that proves a lookup matched
-// nothing rather than failed.
+// answer, the narrow subset of isBdBeadNotFound that proves a lookup matched
+// nothing rather than failed. A transport failure never qualifies, even when
+// its text carries that wording: bd may not have answered at all, which is
+// the same rule classifyConditionalWriteResult applies to writes.
 func isBdNoIssueMatch(err error) bool {
-	if err == nil {
+	if !isBdBeadNotFound(err) || isBdAmbiguousWriteError(err) {
 		return false
 	}
 	msg := strings.ToLower(err.Error())

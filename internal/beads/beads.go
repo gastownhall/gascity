@@ -1170,6 +1170,11 @@ type StorageGraphApplyStore interface {
 type ParentProjectionWaiter interface {
 	// WaitForParentProjection blocks until the store's parent-child listing
 	// view reflects a reparent from oldParentID to newParentID for id, or
-	// returns an error if the projection does not converge.
+	// returns an error if the projection does not converge. The error wraps
+	// ErrParentProjectionSuperseded when another writer moved id to a
+	// different parent, and ErrNotFound when id was deleted. When the wait
+	// stops because ctx ended, the error's chain holds ctx.Err() and no other
+	// context error, so errors.Is reports why the wait stopped even if a
+	// backend read failed earlier with its own timeout.
 	WaitForParentProjection(ctx context.Context, id, oldParentID, newParentID string) error
 }

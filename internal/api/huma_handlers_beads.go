@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"maps"
 	"slices"
 	"strings"
@@ -923,10 +924,6 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 		}
 		opts.Assignee = &assignee
 	}
-	waitStatus := current.Status
-	if opts.Status != nil {
-		waitStatus = *opts.Status
-	}
 	if closesStatus(opts.Status) {
 		// This spelling closes the bead, so it answers to the same contract as
 		// the close route. body.Metadata rides along because the documented
@@ -945,31 +942,10 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 		}
 		return nil, apierr.Internal.Msg(err.Error())
 	}
-	if opts.ParentID != nil && current.ParentID != *opts.ParentID && waitStatus != "closed" {
+	if opts.ParentID != nil && current.ParentID != *opts.ParentID && !closesStatus(opts.Status) {
 		if waiter, ok := store.(beads.ParentProjectionWaiter); ok {
-			waitCtx, cancel := context.WithTimeout(ctx, beadParentProjectionWaitTimeout)
-			defer cancel()
-			if err := waiter.WaitForParentProjection(waitCtx, id, current.ParentID, *opts.ParentID); err != nil {
-				if errors.Is(err, beads.ErrParentProjectionSuperseded) {
-					return nil, apierr.ConflictConcurrentModify.Msg("conflict: bead " + id + " was reparented concurrently")
-				}
-				if errors.Is(err, beads.ErrNotFound) {
-					return nil, apierr.ConflictConcurrentDelete.Msg("conflict: bead " + id + " was deleted concurrently")
-				}
-				// Classify by why this wait stopped: its own context says so
-				// directly, whereas err may also carry an earlier backend
-				// timeout from inside the wait.
-				stopped := waitCtx.Err()
-				if stopped == nil {
-					stopped = err
-				}
-				if errors.Is(stopped, context.DeadlineExceeded) {
-					return nil, apierr.GatewayTimeout.Msg("bead " + id + " was updated, but its parent projection was not confirmed before the timeout")
-				}
-				if errors.Is(stopped, context.Canceled) {
-					return nil, apierr.ServiceUnavailable.Msg("bead " + id + " was updated, but parent projection confirmation was canceled")
-				}
-				return nil, apierr.Internal.Msg(err.Error())
+			if err := awaitBeadParentProjection(ctx, waiter, id, current.ParentID, *opts.ParentID); err != nil {
+				return nil, err
 			}
 		}
 	}
@@ -1079,6 +1055,40 @@ func afterUpdate(current beads.Bead, body beadUpdateBody) beads.Bead {
 	labels = append(labels, body.Labels...)
 	after.Labels = slices.DeleteFunc(labels, func(l string) bool { return slices.Contains(body.RemoveLabels, l) })
 	return after
+}
+
+// awaitBeadParentProjection waits, for at most
+// beadParentProjectionWaitTimeout, until the parent-child listings reflect a
+// reparent of bead id that the store has already applied, and maps a failed
+// wait to its HTTP error.
+func awaitBeadParentProjection(ctx context.Context, waiter beads.ParentProjectionWaiter, id, oldParentID, newParentID string) error {
+	waitCtx, cancel := context.WithTimeout(ctx, beadParentProjectionWaitTimeout)
+	defer cancel()
+	err := waiter.WaitForParentProjection(waitCtx, id, oldParentID, newParentID)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, beads.ErrParentProjectionSuperseded):
+		return apierr.ConflictConcurrentModify.Msg("conflict: bead " + id + " was reparented concurrently")
+	case errors.Is(err, beads.ErrNotFound):
+		return apierr.ConflictConcurrentDelete.Msg("conflict: bead " + id + " was deleted concurrently")
+	}
+	log.Printf("api: bead %s parent projection confirmation failed after update: %v", id, err)
+	// Classify by why this wait stopped: its own context says so directly,
+	// whereas err may also carry an earlier backend timeout from inside the
+	// wait. Reading it before cancel runs keeps that answer.
+	stopped := waitCtx.Err()
+	if stopped == nil {
+		stopped = err
+	}
+	switch {
+	case errors.Is(stopped, context.DeadlineExceeded):
+		return apierr.GatewayTimeout.Msg("bead " + id + " was updated, but its parent projection was not confirmed before the timeout")
+	case errors.Is(stopped, context.Canceled):
+		return apierr.ServiceUnavailable.Msg("bead " + id + " was updated, but parent projection confirmation was canceled")
+	default:
+		return apierr.Internal.Msg(err.Error())
+	}
 }
 
 // humaHandleBeadDelete is the Huma-typed handler for DELETE /v0/bead/{id}.
