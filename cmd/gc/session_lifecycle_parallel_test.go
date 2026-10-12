@@ -8550,6 +8550,40 @@ func TestBuildPreparedStartReadsObservePaths(t *testing.T) {
 	}
 }
 
+// Kills a stale-resume clear of an allocated key (mc-keie0): with its
+// transcript absent, a key no start committed (no started_config_hash) is
+// kept, with no continuation reset, and launched with --session-id; a
+// committed key is cleared and the start mints a fresh one.
+func TestBuildPreparedStartKeepsAnAllocatedKey(t *testing.T) {
+	prev := staleResumeKeyProbe
+	staleResumeKeyProbe = func([]string, string, string, string) (bool, bool) { return false, true }
+	t.Cleanup(func() { staleResumeKeyProbe = prev })
+	workDir := t.TempDir()
+	for _, committed := range []bool{false, true} {
+		store := beads.NewMemStore()
+		meta := map[string]string{"session_name": "worker", "template": "worker", "state": "asleep", "provider": "claude", "work_dir": workDir, "session_key": "k-1"}
+		if committed {
+			meta["started_config_hash"] = "h-1"
+		}
+		row, err := store.Create(beads.Bead{Title: "worker", Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: meta})
+		if err != nil {
+			t.Fatal(err)
+		}
+		candidate := startCandidate{info: sessiontest.SeedBead(t, row), tp: TemplateParams{
+			TemplateName: "worker", SessionName: "worker", Command: "claude", WorkDir: workDir, ResolvedProvider: claudeResumeProvider(),
+		}}
+		prepared, info, err := buildPreparedStart(candidate, &config.City{}, store)
+		if err != nil {
+			t.Fatalf("committed %v: buildPreparedStart: %v", committed, err)
+		}
+		got, _ := store.Get(row.ID)
+		kept := info.SessionKey == "k-1" && got.Metadata["session_key"] == "k-1" && got.Metadata["continuation_reset_pending"] == ""
+		if kept == committed || !strings.Contains(prepared.cfg.Command, "--session-id "+info.SessionKey) {
+			t.Fatalf("committed %v: key %q (stored %q, reset pending %q), command %q; want kept=%v and launched with --session-id", committed, info.SessionKey, got.Metadata["session_key"], got.Metadata["continuation_reset_pending"], prepared.cfg.Command, !committed)
+		}
+	}
+}
+
 // TestPrepareStartCandidateForCity_ClearsStaleNamedTriggerEnv is the
 // launch-layer assertion for gascity#4373. resolvePreservedConfiguredNamedSessionTemplate
 // clearing the stamp is not enough on its own: buildPreparedStartWithWorkDirResolver

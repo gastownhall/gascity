@@ -313,13 +313,23 @@ func TestLaunchDeadlines(t *testing.T) {
 	}
 }
 
-// Kills legacy's blind clear and re-mint (S-1): PreWake fills an empty key
-// once and replaces a key whose transcript is gone, in its CAS, and the
-// launch runs that key.
+// Kills legacy's blind clear and re-mint (S-1), and a clear of an allocated
+// key (mc-keie0): PreWake fills an empty key once and replaces a committed
+// key (a started_config_hash beside it) whose transcript is gone, in its
+// CAS; an allocated key no start committed keeps, with no continuation
+// reset; the launch runs the row's key.
 func TestStartEffectFreshKeyNotClearedOrReminted(t *testing.T) {
-	for _, meta := range [][]string{nil, {"session_key", "stale"}} {
+	for _, c := range []struct {
+		name  string
+		meta  []string
+		fresh bool // a fresh key, not the row's
+	}{
+		{"no key", nil, true},
+		{"a committed key whose transcript is gone", []string{"session_key", "stale", "started_config_hash", "h-1"}, true},
+		{"an allocated key", []string{"session_key", "allocated", "continuation_epoch", "5"}, false},
+	} {
 		stubTranscript(t, false)
-		k, _ := launchKit(t, "asleep", meta...)
+		k, _ := launchKit(t, "asleep", c.meta...)
 		k.p.Clock.(*fakePlannerClock).auto = true // the stale-key wait
 		row := k.p.World.Census.Rows[k.it.Key]
 		tp := TemplateParams{TemplateName: "worker", Command: "agent", WorkDir: t.TempDir(), ResolvedProvider: &config.ResolvedProvider{Name: "claude", SessionIDFlag: "--session-id"}}
@@ -327,14 +337,17 @@ func TestStartEffectFreshKeyNotClearedOrReminted(t *testing.T) {
 		var cmd string
 		k.p.Runtime.(*startHookLeaf).onStart = func(context.Context) {}
 		if s := k.runKind(); s.Outcome != settledLanded {
-			t.Fatalf("settlement %+v, want landed", s)
+			t.Fatalf("%s: settlement %+v, want landed", c.name, s)
 		}
 		key := k.meta("session_key")
 		if cfgs := k.p.Runtime.(*startHookLeaf).cfgs; len(cfgs) > 0 {
 			cmd = cfgs[0].Command
 		}
-		if key == "" || key == "stale" || !strings.HasSuffix(cmd, "--session-id "+key) {
-			t.Fatalf("row key %q, command %q; want a fresh key launched with --session-id", key, cmd)
+		if key == "" || (key == "stale" || key == "allocated") == c.fresh || !strings.HasSuffix(cmd, "--session-id "+key) {
+			t.Fatalf("%s: row key %q, command %q; want a fresh key %v, launched with --session-id", c.name, key, cmd, c.fresh)
+		}
+		if !c.fresh && (k.meta("continuation_reset_pending") != "" || k.meta("continuation_epoch") != "5") {
+			t.Fatalf("%s: continuation reset %q epoch %q; want none for an allocated key", c.name, k.meta("continuation_reset_pending"), k.meta("continuation_epoch"))
 		}
 	}
 }

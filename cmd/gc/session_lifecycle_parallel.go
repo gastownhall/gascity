@@ -1256,7 +1256,12 @@ func buildPreparedStartWithTranscript(
 				transcriptState = sessTranscriptAbsent
 			}
 		}
-		if probeable && !present {
+		// Only a committed key is stale: a key with no started_config_hash
+		// was allocated for a start that has not committed yet (CreateSession,
+		// or a first start that failed) and has no transcript until that start
+		// writes one, so it is kept and launched with --session-id. The probe
+		// still runs for it, since firstStart reads its result.
+		if probeable && !present && strings.TrimSpace(candidate.info.StartedConfigHash) != "" {
 			var sessFront *sessionpkg.Store
 			if store != nil {
 				sessFront = sessionFrontDoor(store)

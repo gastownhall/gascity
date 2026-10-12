@@ -141,7 +141,9 @@ func foldPreWake(_ context.Context, r effectReads, v txView) (preWakeFold, error
 	next := foldInfo(foldInfo(base, patch), f.bind)
 	f.repair = concretePoolWorkDirRepairPatch(startCandidate{info: next, tp: tp}, v.World.CityPath, v.World.Env.Cfg)
 	next = foldInfo(next, f.repair)
-	if f.transcript = transcriptOf(r, v.World, next, tp); f.transcript == sessTranscriptAbsent {
+	// Only a committed key (a started_config_hash beside it) whose transcript
+	// is gone is reset; an allocated key no start committed yet is kept.
+	if f.transcript = transcriptOf(r, v.World, next, tp); f.transcript == sessTranscriptAbsent && strings.TrimSpace(next.StartedConfigHash) != "" {
 		f.reset = clearStaleResumeKeyMetadata("", nil) // its patch only
 	}
 	return f, nil
