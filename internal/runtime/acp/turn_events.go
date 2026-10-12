@@ -12,12 +12,16 @@ import (
 
 // This file implements [runtime.TurnEventProvider] from the turn records a
 // sessionConn keeps: a started event when a turn opens (the session/prompt
-// request is about to be written) and a completed event when it ends. The
-// hub never blocks the JSON-RPC read loop or Nudge: an event a subscriber
-// has no room for is dropped and counted, and the count is logged once the
-// connection lock is released.
+// request is about to be written) and a completed event when it ends. A slow
+// subscriber never blocks the JSON-RPC read loop or Nudge: an event it has
+// no room for is dropped and counted, and the count is logged, after the
+// connection lock is released, once that subscriber receives an event again
+// or unsubscribes.
 
-// turnEventBuffer sizes each subscriber channel.
+// turnEventBuffer sizes each subscriber channel. It is larger than
+// sessionEventBuffer because nothing recovers a dropped turn event: the hub
+// only counts and logs the loss, while a dropped session event is followed
+// by a resync.
 const turnEventBuffer = 256
 
 // sessionIDEnvKey is the environment variable that carries the gc session
@@ -40,7 +44,9 @@ func (p *Provider) SubscribeTurnEvents(ctx context.Context) (<-chan runtime.Turn
 }
 
 // turnEventHub fans turn events out to subscribers without blocking the
-// publisher. The zero value is ready to use.
+// publisher. The zero value is ready to use: subscribe makes subs on first
+// use, so Provider holds the hub as a plain value field rather than building
+// it with a constructor the way it builds sessionEventHub.
 type turnEventHub struct {
 	mu sync.Mutex
 	// seq numbers started turns, so a subscriber skips the end of a turn
@@ -101,8 +107,10 @@ func (h *turnEventHub) publishCompleted(ev runtime.TurnEvent, seq uint64) int64 
 }
 
 // offerLocked delivers ev for turn seq without blocking. A full subscriber
-// drops ev and counts the loss; the first delivery after a loss returns the
-// count so the caller can log it outside the lock. Caller holds h.mu.
+// drops ev and counts the loss. Only that subscriber's next successful
+// delivery hands the count back, for the caller to log outside the lock;
+// failing that, the unsubscribe goroutine logs it. A subscriber that stays
+// full is therefore not logged while it stalls. Caller holds h.mu.
 func (h *turnEventHub) offerLocked(ev runtime.TurnEvent, seq uint64) int64 {
 	var lost int64
 	for sub := range h.subs {
@@ -140,8 +148,10 @@ func (sc *sessionConn) takeLostTurnEventsLocked() int64 {
 	return n
 }
 
-// logLostTurnEvents writes one stderr line for n dropped events. Never call
-// it with sc.mu held: a blocked stderr would stall the read loop and Nudge.
+// logLostTurnEvents writes one stderr line for n dropped events. Call it
+// after releasing sc.mu, so a blocked stderr cannot hold the connection
+// lock. The caller still waits on the write itself, as it does for the
+// package's other stderr lines.
 func logLostTurnEvents(n int64) {
 	if n == 0 {
 		return

@@ -9,8 +9,9 @@ import (
 type TurnEventKind string
 
 const (
-	// TurnEventStarted means the runtime handed a prompt to the session's
-	// agent and a turn is now running.
+	// TurnEventStarted means the runtime opened a turn and is about to
+	// write the prompt to the session's agent. A failed write is reported
+	// as a failed completion.
 	TurnEventStarted TurnEventKind = "started"
 	// TurnEventCompleted means a running turn ended. TurnEvent.Status says
 	// how.
@@ -95,8 +96,10 @@ type TurnEvent struct {
 //   - A subscription reports turns that start after it was opened; a turn
 //     already running at subscribe time is not reported, not even its end.
 //   - Delivery is best-effort: each subscriber has a bounded buffer, and an
-//     event that does not fit is dropped and the loss logged. The session
-//     transcript, not this stream, is the durable record.
+//     event that does not fit is dropped and counted. The count is logged
+//     when that subscriber next receives an event or its subscription ends,
+//     so a subscriber that stays stalled is not reported while it stalls.
+//     The session transcript, not this stream, is the durable record.
 //   - Canceling ctx ends the stream and closes the channel.
 type TurnEventProvider interface {
 	SubscribeTurnEvents(ctx context.Context) (<-chan TurnEvent, error)

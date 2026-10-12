@@ -274,7 +274,8 @@ func TestTurnEventsRequireAContext(t *testing.T) {
 // TestTurnEventsSlowSubscriberDropsAndCounts pins the overflow contract: a
 // subscriber that stops reading keeps the first turnEventBuffer events,
 // later events are dropped and counted without blocking the publisher, and
-// delivery resumes once the subscriber has room.
+// delivery resumes once the subscriber has room, handing back the count for
+// logging.
 func TestTurnEventsSlowSubscriberDropsAndCounts(t *testing.T) {
 	h := &turnEventHub{}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -302,7 +303,9 @@ func TestTurnEventsSlowSubscriberDropsAndCounts(t *testing.T) {
 	expectNoTurnEvent(t, ch)
 
 	rec := &turnRecord{ID: "after", StartedAt: time.Now()}
-	src.started(rec)
+	if lost := src.started(rec); lost != turns {
+		t.Fatalf("count handed back by the first delivery after the loss = %d, want %d", lost, turns)
+	}
 	if ev := nextTurnEvent(t, ch); ev.Kind != runtime.TurnEventStarted || ev.TurnID != "after" {
 		t.Fatalf("event after the loss = %s(%s), want started(after)", ev.Kind, ev.TurnID)
 	}
