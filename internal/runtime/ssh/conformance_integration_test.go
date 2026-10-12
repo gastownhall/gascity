@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -260,6 +261,11 @@ func TestSSHProviderAgentPaneOnRealTmux(t *testing.T) {
 	}
 	p := NewProvider(sshConformanceEndpoint(t))
 	p.postStartSettle = 0
+	// A remote ssh session (or a CI sandbox) often has no UTF-8 locale, and
+	// tmux run without -u there prints control characters in format output
+	// as "_": a tab-separated row read "agent_@0.%0" and nothing resolved.
+	t.Setenv("LANG", "C")
+	t.Setenv("LC_ALL", "C")
 	ctx := context.Background()
 	dir := t.TempDir()
 	run := func(args ...string) string {
@@ -274,6 +280,22 @@ func TestSSHProviderAgentPaneOnRealTmux(t *testing.T) {
 		b, _ := os.ReadFile(path)
 		return string(b)
 	}
+	// Capture the provider's log (a failed mark is logged) for diagnosis.
+	var logged strings.Builder
+	prevLog := log.Writer()
+	log.SetOutput(&logged)
+	t.Cleanup(func() { log.SetOutput(prevLog) })
+	const name = "ssh-agent-pane"
+	agentIn, humanIn := filepath.Join(dir, "agent-in"), filepath.Join(dir, "human-in")
+	// diagnose renders the session's pane table, with the marker column, the
+	// session flag, the records and the provider log.
+	diagnose := func() string {
+		panes, _, _ := p.tmux(ctx, "", "list-panes", "-s", "-t", "="+name+":", "-F",
+			"#{pane_id} #{window_id} active=#{pane_active} dead=#{pane_dead} cmd=#{pane_current_command} @gc_agent=#{@gc_agent} session=#{session_id} row="+runtime.TmuxAgentPaneMarkerFormat)
+		flag, _, _ := p.tmux(ctx, "", "show-options", "-t", "="+name+":", "-v", runtime.TmuxAgentSessionOption)
+		return fmt.Sprintf("panes:\n%s\nsession flag: %q\nagent record: %q\nhuman record: %q\nprovider log:\n%s",
+			panes, flag, record(agentIn), record(humanIn), logged.String())
+	}
 	waitFile := func(path, want string) {
 		t.Helper()
 		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -284,12 +306,10 @@ func TestSSHProviderAgentPaneOnRealTmux(t *testing.T) {
 			_, _, _ = p.conn.Exec(ctx, "", []string{"sh", "-c", "until grep -qx " + shellQuote([]string{want}) + " " + shellQuote([]string{path}) + " 2>/dev/null; do sleep 0.05; done; tmux wait-for -S " + ready})
 		}()
 		if _, code, err := p.tmux(ctx, "", "wait-for", ready); err != nil || code != 0 {
-			t.Fatalf("waiting for %s to hold %q: exit %d, %v (have %q)", path, want, code, err, record(path))
+			t.Fatalf("waiting for %s to hold %q: exit %d, %v\n%s", path, want, code, err, diagnose())
 		}
 	}
 
-	const name = "ssh-agent-pane"
-	agentIn, humanIn := filepath.Join(dir, "agent-in"), filepath.Join(dir, "human-in")
 	if err := p.Start(ctx, name, runtime.Config{Command: "cat > " + agentIn, WorkDir: dir}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -298,11 +318,20 @@ func TestSSHProviderAgentPaneOnRealTmux(t *testing.T) {
 	human := run("split-window", "-b", "-P", "-F", "#{pane_id}", "-t", agent, "cat > "+humanIn)
 	run("new-window", "-t", "="+name+":", "sleep 300")
 
-	_ = p.SendKeys(name, "Enter")
-	_ = p.Nudge(name, runtime.TextContent("to-the-agent"))
+	// The driving verbs are best-effort and return nil even when the lookup
+	// fails, so check the resolution itself before sending.
+	if got, err := p.agentPane(ctx, name, false); err != nil || !strings.HasSuffix(got, "."+agent) {
+		t.Fatalf("agentPane = (%q, %v), want the agent pane %s\n%s", got, err, agent, diagnose())
+	}
+	if err := p.SendKeys(name, "Enter"); err != nil {
+		t.Fatalf("SendKeys: %v", err)
+	}
+	if err := p.Nudge(name, runtime.TextContent("to-the-agent")); err != nil {
+		t.Fatalf("Nudge: %v", err)
+	}
 	waitFile(agentIn, "to-the-agent")
 	if got := record(humanIn); got != "" {
-		t.Errorf("human pane received %q, want nothing", got)
+		t.Errorf("human pane received %q, want nothing\n%s", got, diagnose())
 	}
 	pidBefore := run("display-message", "-p", "-t", agent, "#{pane_pid}")
 	if err := p.Relaunch(ctx, name, runtime.Config{Command: "cat > " + agentIn + "-2", WorkDir: dir}); err != nil {
@@ -314,6 +343,20 @@ func TestSSHProviderAgentPaneOnRealTmux(t *testing.T) {
 	if dead := run("display-message", "-p", "-t", human, "#{pane_dead}"); dead != "0" {
 		t.Errorf("human pane %s dead=%s after Relaunch, want untouched", human, dead)
 	}
+	// The respawned agent is reading (this also proves cat is running before
+	// ProcessAlive looks for it).
+	if err := p.Nudge(name, runtime.TextContent("after-relaunch")); err != nil {
+		t.Fatalf("Nudge: %v", err)
+	}
+	waitFile(agentIn+"-2", "after-relaunch")
+	// ProcessAlive judges the agent pane only: the human's window runs sleep,
+	// which must not keep the session's agent alive.
+	if p.ProcessAlive(name, []string{"sleep"}) {
+		t.Errorf("ProcessAlive(sleep) = true: matched the human window's sleep\n%s", diagnose())
+	}
+	if !p.ProcessAlive(name, []string{"cat"}) {
+		t.Errorf("ProcessAlive(cat) = false, want the agent pane's cat\n%s", diagnose())
+	}
 
 	// Another gc session's agent pane joined in front reads as foreign.
 	if err := p.Start(ctx, "ssh-agent-other", runtime.Config{Command: "sleep 300", WorkDir: dir}); err != nil {
@@ -324,7 +367,7 @@ func TestSSHProviderAgentPaneOnRealTmux(t *testing.T) {
 	run("new-session", "-d", "-s", "ssh-agent-keepalive", "sleep 300")
 	t.Cleanup(func() { _ = p.Stop("ssh-agent-keepalive") })
 	run("join-pane", "-b", "-s", foreign, "-t", agent)
-	if got, err := p.agentPane(ctx, name); err != nil || !strings.HasSuffix(got, "."+agent) {
+	if got, err := p.agentPane(ctx, name, false); err != nil || !strings.HasSuffix(got, "."+agent) {
 		t.Errorf("agentPane with a foreign agent pane joined = (%q, %v), want the session's own %s", got, err, agent)
 	}
 

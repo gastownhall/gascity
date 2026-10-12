@@ -98,7 +98,7 @@ func (p *Provider) Exec(ctx context.Context, name string, argv []string) ([]byte
 // for the operation (see [Provider.agentPane]): one host runs many named
 // sessions, and a session's active pane may be a human's split or window.
 func (p *Provider) carrier(ctx context.Context, name string) (runtime.Carrier, error) {
-	target, err := p.agentPane(ctx, name)
+	target, err := p.agentPane(ctx, name, false)
 	if err != nil {
 		return nil, err
 	}
@@ -112,15 +112,27 @@ func (p *Provider) carrier(ctx context.Context, name string) (runtime.Carrier, e
 // pane of the first window. A marked session whose agent pane is gone, or
 // with two, fails closed. The pane is returned fenced to its session and
 // window ("=name:@W.%P"), so a stale id cannot name another pane.
-func (p *Provider) agentPane(ctx context.Context, name string) (string, error) {
-	out, code, err := p.tmux(ctx, name, "list-panes", "-s", "-t", paneTarget(name), "-F", runtime.TmuxAgentPaneMarkerFormat+"\t#{window_id}.#{pane_id}")
+//
+// With adopt, a session with exactly one pane, unmarked, is marked first
+// (Relaunch on a warm box from before the marker): that pane can only be the
+// agent's. The same call serves both.
+func (p *Provider) agentPane(ctx context.Context, name string, adopt bool) (string, error) {
+	out, code, err := p.tmux(ctx, name, "list-panes", "-s", "-t", paneTarget(name), "-F", agentPaneRowFormat)
 	if err != nil {
 		return "", err
 	}
 	if code != 0 {
 		return "", fmt.Errorf("%w: ssh session %q", runtime.ErrSessionNotFound, name)
 	}
-	pane, err := runtime.PickTmuxAgentPaneRow(strings.TrimSpace(out))
+	out = tabSeparateRows(strings.TrimSpace(out))
+	if rows := strings.Split(out, "\n"); adopt && len(rows) == 1 {
+		if mark, fields, _ := strings.Cut(rows[0], "\t"); mark == "pane" {
+			if _, id, ok := strings.Cut(fields, "."); ok {
+				p.markAgentPane(ctx, name, id)
+			}
+		}
+	}
+	pane, err := runtime.PickTmuxAgentPaneRow(out)
 	if err != nil {
 		return "", fmt.Errorf("ssh session %q: %w", name, err)
 	}
@@ -131,11 +143,28 @@ func (p *Provider) agentPane(ctx context.Context, name string) (string, error) {
 	return paneTarget(name) + pane, nil
 }
 
+// agentPaneRowFormat is the agent-pane list-panes row: "<mark> @W.%P". The
+// separator is a space, not the tab the local provider uses: tmux run
+// without -u in a non-UTF-8 locale (an ssh session, a CI sandbox with no
+// LANG) prints control characters in format output as "_", so a tab would
+// arrive as "agent_@0.%0". Neither field can contain a space.
+const agentPaneRowFormat = runtime.TmuxAgentPaneMarkerFormat + " #{window_id}.#{pane_id}"
+
+// tabSeparateRows turns agentPaneRowFormat rows into the "<mark>\t<fields>"
+// rows [runtime.PickTmuxAgentPaneRow] classifies.
+func tabSeparateRows(out string) string {
+	rows := strings.Split(out, "\n")
+	for i, row := range rows {
+		rows[i] = strings.Replace(strings.TrimSpace(row), " ", "\t", 1)
+	}
+	return strings.Join(rows, "\n")
+}
+
 // markAgentPane marks pane (the id new-session printed) as the session's agent
 // pane, valued with the session's id, then flags the session as marked; the
 // flag follows a successful mark only, since a flagged session with no marked
 // pane fails closed. Best-effort and logged: an unmarked session falls back to
-// its first pane, and Relaunch adopts a lone unmarked pane.
+// its first pane, and Relaunch adopts a lone unmarked pane (agentPane).
 func (p *Provider) markAgentPane(ctx context.Context, name, pane string) {
 	pane = strings.TrimSpace(pane)
 	if !strings.HasPrefix(pane, "%") {
@@ -147,23 +176,6 @@ func (p *Provider) markAgentPane(ctx context.Context, name, pane string) {
 	}
 	if _, code, err := p.tmux(ctx, name, "set-option", "-t", paneTarget(name), runtime.TmuxAgentSessionOption, "1"); err != nil || code != 0 {
 		log.Printf("ssh session %q: flagging marked session failed (exit %d): %v", name, code, err)
-	}
-}
-
-// adoptAgentPane marks an unmarked session (one created before the marker, or
-// whose mark failed) when it has exactly one pane, which can only be the
-// agent's. Best-effort.
-func (p *Provider) adoptAgentPane(ctx context.Context, name string) {
-	out, code, err := p.tmux(ctx, name, "list-panes", "-s", "-t", paneTarget(name), "-F", runtime.TmuxAgentPaneMarkerFormat+"\t#{pane_id}")
-	if err != nil || code != 0 {
-		return
-	}
-	rows := strings.Split(strings.TrimSpace(out), "\n")
-	if len(rows) != 1 {
-		return
-	}
-	if mark, pane, _ := strings.Cut(rows[0], "\t"); mark == "pane" {
-		p.markAgentPane(ctx, name, pane)
 	}
 }
 
@@ -391,8 +403,7 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 	// session or opened a window would otherwise have that pane killed and the
 	// old agent left running. A warm box from before the marker is marked first
 	// while it still has only the agent's pane.
-	p.adoptAgentPane(ctx, name)
-	target, err := p.agentPane(ctx, name)
+	target, err := p.agentPane(ctx, name, true)
 	if err != nil {
 		return fmt.Errorf("ssh relaunch %q: %w", name, err)
 	}
@@ -488,8 +499,9 @@ func (p *Provider) Attach(name string) error {
 	return cmd.Run()
 }
 
-// ProcessAlive reports whether one of processNames runs in the session: in a
-// pane's process or anything beneath it, judged as the local tmux provider
+// ProcessAlive reports whether one of processNames runs in the session's agent
+// pane (every pane, in a session from before the marker): in the pane's
+// process or anything beneath it, judged as the local tmux provider
 // judges its panes (by command, argv[0], or an interpreter's script; see
 // [proctable.ProcessMatchesNameSet]). It is scoped to this session's panes: a
 // box-wide match would read a dead session alive whenever another session on
@@ -532,9 +544,9 @@ func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 // (processTreeAwk), so only those rows cross the connection, not the whole
 // table of a busy box.
 func processAliveScript(name string) string {
-	return "panes=$(tmux list-panes -s -t " + shellQuote([]string{paneTarget(name)}) + " -F '#{pane_pid}') || exit 3\n" +
+	return "panes=$(tmux list-panes -s -t " + shellQuote([]string{paneTarget(name)}) + " -F " + shellQuote([]string{runtime.TmuxAgentPaneMarkerFormat + " #{pane_pid}"}) + ") || exit 3\n" +
 		"echo \"$panes\"\n" +
-		"roots=$(echo $panes)\n" +
+		"roots=$(echo \"$panes\" | awk '{print $2}')\n" +
 		"echo " + processSectionComm + "\n" +
 		"ps -A -o pid= -o ppid= -o comm= | awk -v roots=\"$roots\" " + shellQuote([]string{processTreeAwk}) + "\n" +
 		"echo " + processSectionArgs + "\n" +
@@ -568,7 +580,13 @@ const (
 // failed or printed nothing), which reads alive.
 func paneTreeRunsNames(out string, names map[string]struct{}) (alive, degraded bool) {
 	type proc struct{ ppid, comm, args string }
-	var roots []string
+	// Pane rows are "<agent|orphan|pane> <pid>". A marked session is judged
+	// by its agent pane only, so a human running the agent's CLI in a split
+	// cannot make a dead agent read alive; with its agent pane gone it reads
+	// dead. An unmarked session (from before the marker) is judged by every
+	// pane. Two agent panes (ambiguous) are both judged.
+	var agents, all []string
+	marked := false
 	procs := map[string]*proc{}
 	children := map[string][]string{}
 	section := ""
@@ -581,7 +599,18 @@ func paneTreeRunsNames(out string, names map[string]struct{}) (alive, degraded b
 			section = line
 			continue
 		case section == "":
-			roots = append(roots, line)
+			mark, pid, ok := strings.Cut(line, " ")
+			if !ok {
+				continue
+			}
+			all = append(all, pid)
+			switch mark {
+			case runtime.TmuxAgentPaneMarked:
+				agents = append(agents, pid)
+				marked = true
+			case runtime.TmuxAgentPaneOrphan:
+				marked = true
+			}
 			continue
 		}
 		fields := strings.Fields(line)
@@ -602,8 +631,15 @@ func paneTreeRunsNames(out string, names map[string]struct{}) (alive, degraded b
 			pr.args = rest
 		}
 	}
-	if len(roots) == 0 {
+	if len(all) == 0 {
 		return false, false // no panes: the session is gone
+	}
+	roots := all
+	if marked {
+		roots = agents
+	}
+	if len(roots) == 0 {
+		return false, false // a marked session whose agent pane is gone
 	}
 	if len(procs) == 0 {
 		return true, true // the panes exist but the process table is unreadable

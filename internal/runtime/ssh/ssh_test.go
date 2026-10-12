@@ -34,14 +34,12 @@ func (f *fakeRunner) run(_ context.Context, _ Endpoint, remoteArgv []string, std
 	f.calls = append(f.calls, remoteArgv)
 	f.stdins = append(f.stdins, stdin)
 	if !f.rawPanes && isAgentPaneLookup(remoteArgv) {
+		// Answer as tmux does: the format's separator, a space.
 		rows := f.panes
 		if rows == "" {
 			rows = "agent\t@1.%1"
 		}
-		if remoteArgv[len(remoteArgv)-1] == runtime.TmuxAgentPaneMarkerFormat+"\t#{pane_id}" {
-			rows = strings.ReplaceAll(rows, "@1.", "")
-		}
-		return []byte(rows + "\n"), 0, nil
+		return []byte(strings.ReplaceAll(rows, "\t", " ") + "\n"), 0, nil
 	}
 	if f.respond != nil {
 		return f.respond(remoteArgv)
@@ -205,5 +203,5 @@ func TestTmuxCarrierDrivesOverSSH(t *testing.T) {
 // isAgentPaneLookup matches the provider's agent-pane list-panes calls.
 func isAgentPaneLookup(argv []string) bool {
 	return len(argv) >= 2 && argv[0] == "tmux" && argv[1] == "list-panes" &&
-		strings.HasPrefix(argv[len(argv)-1], runtime.TmuxAgentPaneMarkerFormat+"\t")
+		argv[len(argv)-1] == agentPaneRowFormat
 }
