@@ -251,7 +251,7 @@ func TestReadContents(t *testing.T) {
 	}()
 	select { // the read respects its context: it returns at the bound, the hung snapshot abandoned
 	case <-returned:
-	case <-time.After(5 * time.Second):
+	case <-time.After(2 * time.Second):
 		t.Fatal("readContents outlived its context on a hung snapshot")
 	}
 	if slow["slow"].Content != contentUnread {

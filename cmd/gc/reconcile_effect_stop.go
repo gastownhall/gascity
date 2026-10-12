@@ -137,7 +137,11 @@ func stopDecide(v txView) txStep {
 		plan.foreign = true
 		return txStep{Pass: plan}
 	}
-	fv := fenceDestructive(v.RT, v.Fence, fenceRequest{Row: v.Row, Legs: stopLegs(v.It)})
+	legs := stopLegs(v.It)
+	if plan.idle && pendingExempt(v.Row, v.Now) { // the ladder's wait-hold exemption, legacy's pendingInteractionHoldInfo
+		legs &^= legPending
+	}
+	fv := fenceDestructive(v.RT, v.Fence, fenceRequest{Row: v.Row, Legs: legs})
 	if !fv.Proceed {
 		return txStep{Refuse: fv.Reason}
 	}

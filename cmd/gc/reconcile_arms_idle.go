@@ -396,12 +396,12 @@ func (m *idleMemory) update(w *World, a *allocDecision, patrol time.Duration, st
 // resets.
 func (m *idleMemory) updateRow(w *World, a *allocDecision, row censusRow, patrol time.Duration, live map[idleIncarnation]bool, want map[string]bool) (rowTrace, bool) {
 	p := w.Idle
+	p.settings[row.Key], _ = resolveIdleSetting(w, row.Info) // memoized, a row with no timeout too
 	r := &rowFacts{w: w, k: row.Key, entry: a.Snapshot.Entries[row.Key], row: row}
 	s, ok := r.idleSetting()
 	if !ok {
 		return rowTrace{}, false
 	}
-	p.settings[row.Key] = s
 	if idleTrackerContentClockApplies(row.Info.Provider, row.Info.Transport) {
 		want[strings.TrimSpace(row.Info.SessionName)] = true
 		obs, _ := r.observation()

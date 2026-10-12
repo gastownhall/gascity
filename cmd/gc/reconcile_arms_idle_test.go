@@ -400,8 +400,8 @@ func claimWork(t *testing.T, store beads.Store, id string) {
 // Kills an idle kill on a stale read, over a human, a prompt or a claim
 // since the pass, or one that loses legacy's side effects (v5.9s,
 // SESS-574/575/576): the idle stop refuses on a fresh activity (the agent
-// started a turn after the lane's read), a fresh attach, a prompt or an
-// in-progress claim; an open bead it holds unclaimed does not hold it
+// started a turn after the lane's read), a fresh attach, a prompt (but
+// under a wait hold, as the ladder exempts it) or an in-progress claim; an open bead it holds unclaimed does not hold it
 // (legacy's late claim); the forced stop stops over the claim; a landed
 // idle stop clears the pane's scrollback, emits session.idle_killed and
 // sleeps the row with its reason; every outcome settles on the idle key.
@@ -409,6 +409,7 @@ func TestIdleStopThroughTheEffectPass(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		exhausted bool
+		meta      []string
 		set       func(*testing.T, *fenceLeaf, beads.Store, string)
 		cause     string // a refusal's; "" lands
 	}{
@@ -419,6 +420,9 @@ func TestIdleStopThroughTheEffectPass(t *testing.T) {
 		{name: "a pending interaction", set: func(_ *testing.T, l *fenceLeaf, _ beads.Store, _ string) {
 			l.SetPendingInteraction("s-gc-1", &runtime.PendingInteraction{RequestID: "r", Kind: "approval"})
 		}, cause: fencePending},
+		{name: "a pending interaction under a wait hold", meta: []string{"wait_hold", "true"}, set: func(_ *testing.T, l *fenceLeaf, _ beads.Store, _ string) {
+			l.SetPendingInteraction("s-gc-1", &runtime.PendingInteraction{RequestID: "r", Kind: "approval"})
+		}},
 		{name: "a claim since the pass", set: func(t *testing.T, _ *fenceLeaf, s beads.Store, id string) { claimWork(t, s, id) }, cause: fenceHasWork},
 		{name: "an open bead unclaimed", set: func(t *testing.T, _ *fenceLeaf, s beads.Store, id string) {
 			if _, err := s.Create(beads.Bead{Title: "blocked", Type: "task", Status: "open", Assignee: id}); err != nil {
@@ -428,7 +432,7 @@ func TestIdleStopThroughTheEffectPass(t *testing.T) {
 		{name: "exhausted, over a claim", exhausted: true, set: func(t *testing.T, _ *fenceLeaf, s beads.Store, id string) { claimWork(t, s, id) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			p, it, store, leaf := idleOn(t, tc.exhausted)
+			p, it, store, leaf := idleOn(t, tc.exhausted, tc.meta...)
 			want := map[bool]string{false: decideIdleTimeout, true: decideIdleExhausted}[tc.exhausted]
 			if it.Kind != intentStop || it.Reason != want {
 				t.Fatalf("decided (%q, %q) %v, want the stop for %q", it.Kind, it.Reason, it.Patch, want)
@@ -524,8 +528,15 @@ func TestIdleStopReadsItsProof(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
-	if got := readLegs(ctx, leaf, "slow", needs{Content: true}, gatherNow, gatherNow, nil).Content; got != contentUnread {
-		t.Errorf("a hung snapshot: %d, want unread", got)
+	hung := make(chan contentState, 1)
+	go func() { hung <- readLegs(ctx, leaf, "slow", needs{Content: true}, gatherNow, gatherNow, nil).Content }()
+	select { // the read respects its bound: it returns, the hung snapshot abandoned
+	case got := <-hung:
+		if got != contentUnread {
+			t.Errorf("a hung snapshot: %d, want unread", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the content read outlived its bound on a hung snapshot")
 	}
 	if got := readLegs(context.Background(), runtime.NewFake(), "idle", needs{Content: true}, gatherNow, gatherNow, nil).Content; got != contentUnread {
 		t.Errorf("no snapshot: %d, want unread", got)
