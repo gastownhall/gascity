@@ -277,6 +277,10 @@ type preparedStart struct {
 	// transcriptRoots is sessionTranscriptSearchPaths of the city the start
 	// was prepared for, for commitStartFailure's conversation probe.
 	transcriptRoots []string
+	// conversationReset reports that the stale-resume clear reset a committed
+	// manual conversation, which the caller records as
+	// session.conversation_reset (staleKeyConversationResetEvent).
+	conversationReset bool
 }
 
 type startResult struct {
@@ -1244,6 +1248,7 @@ func buildPreparedStartWithTranscript(
 	// classification below, so the disk is read once per launch.
 	transcriptState := sessTranscriptUnknown
 	transcriptRoots := sessionTranscriptSearchPaths(cfg)
+	conversationReset := false
 	if transcript != nil {
 		transcriptState = *transcript
 	} else if sk := strings.TrimSpace(candidate.info.SessionKey); sk != "" && agentCfg.WorkDir != "" {
@@ -1274,6 +1279,7 @@ func buildPreparedStartWithTranscript(
 			// Info.ApplyPatch's switch), so no re-Get is needed for the post-prep
 			// reads (session_key at runPreparedStartCandidate; recordWakeFailure).
 			candidate.info = candidate.info.ApplyPatch(clearStaleResumeKeyMetadata(candidate.info.ID, sessFront))
+			conversationReset = isManualSessionInfo(candidate.info)
 		}
 	}
 	if transcript == nil && candidate.info.SessionKey == "" && tp.ResolvedProvider != nil && tp.ResolvedProvider.SessionIDFlag != "" {
@@ -1423,16 +1429,17 @@ func buildPreparedStartWithTranscript(
 	agentCfg.Env = git.ApplySSHKeepaliveEnv(agentCfg.Env)
 	agentCfg = runtime.SyncWorkDirEnv(agentCfg)
 	return &preparedStart{
-		candidate:       candidate,
-		cfg:             agentCfg,
-		coreHash:        coreHash,
-		coreBreakdown:   coreBreakdown,
-		liveHash:        liveHash,
-		provisionHash:   provisionHash,
-		launchHash:      launchHash,
-		promptDelivered: promptDelivered,
-		promptHash:      promptHash,
-		transcriptRoots: transcriptRoots,
+		candidate:         candidate,
+		cfg:               agentCfg,
+		coreHash:          coreHash,
+		coreBreakdown:     coreBreakdown,
+		liveHash:          liveHash,
+		provisionHash:     provisionHash,
+		launchHash:        launchHash,
+		promptDelivered:   promptDelivered,
+		promptHash:        promptHash,
+		transcriptRoots:   transcriptRoots,
+		conversationReset: conversationReset,
 	}, candidate.info, nil
 }
 
@@ -2609,6 +2616,21 @@ func keyedProbeRoots(searchPaths []string, provider string) []string {
 		return worker.DefaultSearchPaths()
 	}
 	return searchPaths
+}
+
+// staleKeyConversationResetEvent is session.conversation_reset for info, a
+// committed manual conversation whose session key the stale-resume clear
+// reset because its keyed transcript is gone: the next start is fresh. Legacy
+// records it when the clear lands in prepare, v2 when its PreWake lands.
+func staleKeyConversationResetEvent(info sessionpkg.Info, tp TemplateParams) events.Event {
+	return events.Event{
+		Type:      events.SessionConversationReset,
+		Actor:     "gc",
+		Subject:   tp.DisplayName(),
+		SessionID: info.ID,
+		Message:   fmt.Sprintf("session %s: the transcript of its conversation is gone; its next start is fresh", info.ID),
+		Payload:   api.SessionLifecyclePayloadJSON(info.ID, tp.TemplateName, "stale-key"),
+	}
 }
 
 // sessionTranscriptSearchPaths is the transcript roots the stale-resume probe
@@ -4272,6 +4294,9 @@ func executePlannedStartsTraced(
 					fmt.Fprintf(stderr, "session reconciler: pre-wake %s: %s\n", candidate.name(), formatLifecycleError(err)) //nolint:errcheck
 					drop("failed", err)
 					continue
+				}
+				if item.conversationReset && rec != nil {
+					rec.Record(staleKeyConversationResetEvent(item.candidate.info, item.candidate.tp))
 				}
 				item.capacityTicket = ticket
 				if ticket != nil && ticket.probe {

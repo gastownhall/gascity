@@ -5717,6 +5717,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeRigProvisionProgress) | ({
     type: 'session.cold_start_timeout';
 } & TypedEventStreamEnvelopeSessionColdStartTimeout) | ({
+    type: 'session.conversation_reset';
+} & TypedEventStreamEnvelopeSessionConversationReset) | ({
     type: 'session.crashed';
 } & TypedEventStreamEnvelopeSessionCrashed) | ({
     type: 'session.demand_claim_divergence';
@@ -7069,6 +7071,24 @@ export type TypedEventStreamEnvelopeSessionColdStartTimeout = {
 };
 
 /**
+ * TypedEventStreamEnvelope session.conversation_reset
+ */
+export type TypedEventStreamEnvelopeSessionConversationReset = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionLifecyclePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.conversation_reset';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope session.crashed
  */
 export type TypedEventStreamEnvelopeSessionCrashed = {
@@ -7844,6 +7864,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeRigProvisionProgress) | ({
     type: 'session.cold_start_timeout';
 } & TypedTaggedEventStreamEnvelopeSessionColdStartTimeout) | ({
+    type: 'session.conversation_reset';
+} & TypedTaggedEventStreamEnvelopeSessionConversationReset) | ({
     type: 'session.crashed';
 } & TypedTaggedEventStreamEnvelopeSessionCrashed) | ({
     type: 'session.demand_claim_divergence';
@@ -9263,6 +9285,25 @@ export type TypedTaggedEventStreamEnvelopeSessionColdStartTimeout = {
     subject?: string;
     ts: string;
     type: 'session.cold_start_timeout';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope session.conversation_reset
+ */
+export type TypedTaggedEventStreamEnvelopeSessionConversationReset = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionLifecyclePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.conversation_reset';
     workflow?: WorkflowEventProjection;
 };
 
