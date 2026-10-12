@@ -3465,6 +3465,9 @@ type partialPasteExecutor struct {
 func (f *partialPasteExecutor) execute(args []string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if row, ok := fakeAgentPaneRow(args); ok {
+		return row, nil
+	}
 	// tmux invocations carry leading flags (-u, socket selection), so match the
 	// subcommand anywhere in the argument list rather than at a fixed index.
 	switch {

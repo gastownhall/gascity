@@ -772,6 +772,120 @@ func TestProvider_UnmarkedSessionFallsBackToFirstPane(t *testing.T) {
 	f.relaunchAndRequireAgentRespawned(t, human)
 }
 
+// Input and capture paths reach the marked agent pane, not a human pane that
+// runs the same CLI and is listed (and focused) first. Process detection alone
+// would pick the human pane here: both panes run sh, a configured process name.
+func TestProvider_InputPathsReachMarkedAgentPaneOverSameCLIHumanPane(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+	cfg := DefaultConfig()
+	cfg.SocketName = privateSocketName("api")
+	p := NewProviderWithConfig(cfg)
+	socketPath := namedSocketPath(cfg.SocketName)
+	t.Cleanup(func() {
+		if err := p.TeardownServer(); err != nil && !errors.Is(err, ErrNoServer) {
+			t.Errorf("tear down test tmux server: %v", err)
+		}
+		if err := os.Remove(socketPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("remove test tmux socket: %v", err)
+		}
+	})
+	dir := t.TempDir()
+	agentIn, humanIn := filepath.Join(dir, "agent-in"), filepath.Join(dir, "human-in")
+	pane := func(label, in string) string {
+		return fmt.Sprintf("sh -c 'echo %s-SCREEN; exec cat > %s'", label, in)
+	}
+	const name = "gc-test-input-paths"
+	if err := p.Start(context.Background(), name, runtime.Config{
+		Command: pane("AGENT", agentIn),
+		WorkDir: dir,
+		Env:     map[string]string{"GT_PROCESS_NAMES": "sh,cat"},
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	tm := p.tm
+	agent := markedAgentPane(t, tm, name)
+	// The human's split goes first in the window (-b) and is focused.
+	human, err := tm.run("split-window", "-b", "-P", "-F", "#{pane_id}", "-t", agent, pane("HUMAN", humanIn))
+	if err != nil {
+		t.Fatalf("split-window: %v", err)
+	}
+	if first, _ := tm.run("display-message", "-p", "-t", paneTarget(name), "#{pane_id}"); first != human {
+		t.Fatalf("active pane = %q, want the human split %q (precondition)", first, human)
+	}
+	readFile := func(path string) string {
+		b, _ := os.ReadFile(path)
+		return string(b)
+	}
+	waitForValue(t, "human pane screen", "true", func() string {
+		out, _ := tm.run("capture-pane", "-p", "-t", human)
+		return strconv.FormatBool(strings.Contains(out, "HUMAN-SCREEN"))
+	})
+
+	if got, err := tm.FindAgentPane(name); err != nil || got != agent {
+		t.Errorf("FindAgentPane = (%q, %v), want the marked %q", got, err, agent)
+	}
+	peek, err := p.Peek(name, 20)
+	if err != nil || !strings.Contains(peek, "AGENT-SCREEN") || strings.Contains(peek, "HUMAN-SCREEN") {
+		t.Errorf("Peek = (%q, %v), want the agent pane's screen", peek, err)
+	}
+	if err := tm.SendKeysDebounced(name, "debounced", 0); err != nil {
+		t.Fatalf("SendKeysDebounced: %v", err)
+	}
+	if err := tm.SendKeysReplace(name, "replaced", 0); err != nil {
+		t.Fatalf("SendKeysReplace: %v", err)
+	}
+	waitForValue(t, "agent pane input", "debounced\nreplaced\n", func() string { return readFile(agentIn) })
+	if got := readFile(humanIn); got != "" {
+		t.Errorf("human pane received %q, want nothing", got)
+	}
+}
+
+// Idle detection and the approval check read the agent's pane, not a focused
+// human pane. A human prompt ("❯ ", which is Claude's ready prefix and a p10k
+// prompt line) on the active pane must not make a busy agent read idle, and a
+// real approval prompt on the agent's pane must be seen with the human pane
+// focused (#7657 review, mc-zndi7.101).
+func TestProvider_IdleAndPendingReadAgentPaneNotFocusedHumanPrompt(t *testing.T) {
+	f := newAgentPaneFixture(t, "api", "1")
+	tm := f.p.tm
+	show := func(pane, text string) {
+		t.Helper()
+		f.mustRun(t, "respawn-pane", "-k", "-t", pane, "printf '%b\\n' "+shellquote.Quote(text)+"; exec sleep 300")
+	}
+	human := f.mustRun(t, "split-window", "-P", "-F", "#{pane_id}", "-t", f.agent, "sleep 300")
+	show(human, "❯ ")
+	if active := f.mustRun(t, "display-message", "-p", "-t", paneTarget(f.name), "#{pane_id}"); active != human {
+		t.Fatalf("active pane = %s, want the human pane %s (precondition)", active, human)
+	}
+	captured := func(pane, want string) {
+		t.Helper()
+		waitForValue(t, "pane "+pane+" shows "+want, "true", func() string {
+			out, _ := tm.run("capture-pane", "-p", "-t", pane)
+			return strconv.FormatBool(strings.Contains(out, want))
+		})
+	}
+	captured(human, "❯")
+
+	// The agent is busy.
+	show(f.agent, "✻ Thinking… (12s · esc to interrupt)")
+	captured(f.agent, "esc to interrupt")
+	if idle, err := tm.SnapshotIdle(f.name); err != nil || idle {
+		t.Errorf("SnapshotIdle = (%v, %v), want busy: the agent's pane shows its spinner", idle, err)
+	}
+	if err := tm.WaitForIdle(context.Background(), f.name, time.Second); !errors.Is(err, ErrIdleTimeout) {
+		t.Errorf("WaitForIdle = %v, want ErrIdleTimeout while the agent is busy", err)
+	}
+
+	// The agent waits on an approval prompt.
+	show(f.agent, "● Read(file_path: /tmp/test.txt)\n\n This command requires approval\n\n Do you want to proceed?\n ❯ 1. Yes\n   2. Yes, and don't ask again for: Read:*\n   3. No")
+	captured(f.agent, "Do you want to proceed?")
+	if pending, err := tm.Pending(f.name); err != nil || pending == nil {
+		t.Errorf("Pending = (%v, %v), want the agent pane's approval prompt", pending, err)
+	}
+}
+
 func waitForMarker(t *testing.T, path, want string) {
 	t.Helper()
 	waitForValue(t, "marker "+strconv.Quote(path), want, func() string {

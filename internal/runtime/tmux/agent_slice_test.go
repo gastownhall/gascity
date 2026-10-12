@@ -202,7 +202,7 @@ func TestFindAgentPane_WrappedPane(t *testing.T) {
 	exec := &fakeExecutor{outs: []string{
 		// list-panes -s: a user's split pane plus the wrapped agent pane.
 		// The bogus PID has no live process, so the first pane cannot match.
-		"%1\tvim\t999999999\n%2\tsystemd-run\t" + panePID,
+		"pane\t@1.%1\tvim\t999999999\npane\t@1.%2\tsystemd-run\t" + panePID,
 		// show-environment GT_PROCESS_NAMES
 		"GT_PROCESS_NAMES=sleep",
 	}}

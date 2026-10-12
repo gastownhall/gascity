@@ -48,7 +48,7 @@ func TestNudgeNowHiddenAttachedRecordsPoke(t *testing.T) {
 
 	// rawSessionActivity reads list-windows #{window_activity}; return the
 	// genuine turn's unix seconds so pokePrior snapshots it as the poke's prior.
-	fe := &fakeExecutor{out: strconv.FormatInt(genuine.Unix(), 10)}
+	fe := &fakeExecutor{agentPane: true, out: strconv.FormatInt(genuine.Unix(), 10)}
 	tm := NewTmux()
 	tm.exec = fe
 	tm.cfg.DebounceMs = 0 // no wall-clock debounce in a unit test
@@ -119,7 +119,7 @@ func TestSendKeysHiddenAttachedRecordsPoke(t *testing.T) {
 
 	// rawSessionActivity reads list-windows #{window_activity}; return the
 	// genuine turn's unix seconds so pokePrior snapshots it as the poke's prior.
-	fe := &fakeExecutor{out: strconv.FormatInt(genuine.Unix(), 10)}
+	fe := &fakeExecutor{agentPane: true, out: strconv.FormatInt(genuine.Unix(), 10)}
 	tm := NewTmux()
 	tm.exec = fe
 

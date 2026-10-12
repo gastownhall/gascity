@@ -299,12 +299,31 @@ func validateSessionName(name string) error {
 // sessionTarget returns the exact target-session form of a bare session name.
 // tmux resolves a bare -t name by unique prefix, so once "worker-1" has exited
 // "-t worker-1" names a live "worker-10"; the "=" prefix disables that. Pane
-// ids ("%5") and already-qualified targets pass through unchanged.
+// ids ("%5") and already-qualified targets pass through unchanged, except a
+// resolved agent pane ("=name:@W.%P", see agentPaneTarget), which names its
+// session exactly as "=name".
 func sessionTarget(name string) string {
+	if session, ok := fencedPaneSession(name); ok {
+		return "=" + session
+	}
 	if !validSessionNameRe.MatchString(name) {
 		return name
 	}
 	return "=" + name
+}
+
+// fencedPaneSession returns the session of a resolved agent pane target
+// ("=name:@W.%P").
+func fencedPaneSession(target string) (string, bool) {
+	rest, ok := strings.CutPrefix(target, "=")
+	if !ok {
+		return "", false
+	}
+	session, pane, ok := strings.Cut(rest, ":@")
+	if !ok || !validSessionNameRe.MatchString(session) || !strings.Contains(pane, ".%") {
+		return "", false
+	}
+	return session, true
 }
 
 // paneTarget is [sessionTarget] for commands whose -t is a target-window or
@@ -1765,12 +1784,14 @@ func (t *Tmux) ListSessionIDs() (map[string]string, error) {
 // are never wheel-parked. Probe and cancel errors are deliberately swallowed:
 // a copy-mode guard must never abort delivery on a pane that simply is not in
 // a mode.
-func (t *Tmux) cancelCopyModeIfParked(session string) {
-	inMode, err := t.run("display-message", "-t", paneTarget(session), "-p", "#{pane_in_mode}")
+//
+// target is the pane to probe: callers pass their resolved agent pane.
+func (t *Tmux) cancelCopyModeIfParked(target string) {
+	inMode, err := t.run("display-message", "-t", paneTarget(target), "-p", "#{pane_in_mode}")
 	if err != nil || strings.TrimSpace(inMode) != "1" {
 		return
 	}
-	_, _ = t.run("send-keys", "-t", paneTarget(session), "-X", "cancel")
+	_, _ = t.run("send-keys", "-t", paneTarget(target), "-X", "cancel")
 }
 
 // SendKeys sends keystrokes to a session and presses Enter.
@@ -1783,17 +1804,30 @@ func (t *Tmux) SendKeys(session, keys string) error {
 // SendKeysDebounced sends keystrokes with a configurable delay before Enter.
 // The debounceMs parameter controls how long to wait after paste before sending Enter.
 // This prevents race conditions where Enter arrives before paste is processed.
+//
+// The keys go to the session's agent pane (agentPaneTarget), resolved once so
+// the text and its Enter land in the same pane.
 func (t *Tmux) SendKeysDebounced(session, keys string, debounceMs int) error {
+	target, err := t.agentPaneTarget(session)
+	if err != nil {
+		return err
+	}
+	return t.sendKeysDebouncedTo(session, target, keys, debounceMs)
+}
+
+// sendKeysDebouncedTo is SendKeysDebounced into session's already-resolved
+// agent pane target.
+func (t *Tmux) sendKeysDebouncedTo(session, target, keys string, debounceMs int) error {
 	// A human may have scrolled this pane into copy-mode (the ga-c4w wheel
 	// binding); exit it first so the keystrokes reach the program instead of
 	// being swallowed by copy-mode.
-	t.cancelCopyModeIfParked(session)
+	t.cancelCopyModeIfParked(target)
 	// Record this poke (and the genuine activity just before it) so that
 	// GetSessionActivity can later discount our own keystroke echo for an
 	// agent that never actually responds. See discountPokeActivity.
 	t.recordPoke(session)
 	// Send text using literal mode (-l) to handle special chars
-	if _, err := t.run("send-keys", "-t", paneTarget(session), "-l", keys); err != nil {
+	if _, err := t.run("send-keys", "-t", target, "-l", keys); err != nil {
 		return err
 	}
 	// Wait for paste to be processed
@@ -1801,13 +1835,18 @@ func (t *Tmux) SendKeysDebounced(session, keys string, debounceMs int) error {
 		time.Sleep(time.Duration(debounceMs) * time.Millisecond)
 	}
 	// Send Enter separately - more reliable than appending to send-keys
-	_, err := t.run("send-keys", "-t", paneTarget(session), "Enter")
+	_, err := t.run("send-keys", "-t", target, "Enter")
 	return err
 }
 
-// SendKeysRaw sends keystrokes without adding Enter.
+// SendKeysRaw sends keystrokes without adding Enter, to the session's agent
+// pane (agentPaneTarget); an already-resolved target is used as is.
 func (t *Tmux) SendKeysRaw(session, keys string) error {
-	_, err := t.run("send-keys", "-t", paneTarget(session), keys)
+	target, err := t.agentPaneTarget(session)
+	if err != nil {
+		return err
+	}
+	_, err = t.run("send-keys", "-t", target, keys)
 	return err
 }
 
@@ -1815,9 +1854,15 @@ func (t *Tmux) SendKeysRaw(session, keys string) error {
 // This is useful for "replaceable" notifications where only the latest matters.
 // Uses Ctrl-U to clear the input line before sending the new message.
 // The delay parameter controls how long to wait after clearing before sending (ms).
+//
+// The clear and the message go to the same agent pane, resolved once.
 func (t *Tmux) SendKeysReplace(session, keys string, clearDelayMs int) error {
+	target, err := t.agentPaneTarget(session)
+	if err != nil {
+		return err
+	}
 	// Send Ctrl-U to clear any pending input on the line
-	if _, err := t.run("send-keys", "-t", paneTarget(session), "C-u"); err != nil {
+	if _, err := t.run("send-keys", "-t", target, "C-u"); err != nil {
 		return err
 	}
 
@@ -1826,8 +1871,9 @@ func (t *Tmux) SendKeysReplace(session, keys string, clearDelayMs int) error {
 		time.Sleep(time.Duration(clearDelayMs) * time.Millisecond)
 	}
 
-	// Now send the actual message
-	return t.SendKeys(session, keys)
+	// Now send the actual message. The poke is keyed by session; the keys
+	// go to the resolved pane.
+	return t.sendKeysDebouncedTo(session, target, keys, t.cfg.DebounceMs)
 }
 
 // SendKeysDelayed sends keystrokes after a delay (in milliseconds).
@@ -2252,6 +2298,14 @@ func hiddenAttachedKeyBytes(key string) ([]byte, bool) {
 	}
 }
 
+// sendHiddenAttachedKeys types keys through target's hidden attach client and
+// reports whether target has one.
+//
+// Known limit, left as is: these bytes go to an attached PTY client, and tmux
+// delivers a client's input to that client's active pane, not to the marked
+// agent pane (agentPaneTarget). A hidden client attaches to a session gc
+// created with a single pane, so the two agree unless a human splits or adds
+// windows in a Gemini session; send-keys paths are resolved instead.
 func (t *Tmux) sendHiddenAttachedKeys(target string, keys ...string) (bool, error) {
 	client := t.hiddenAttachClient(target)
 	if client == nil {
@@ -2294,7 +2348,9 @@ func (t *Tmux) sendHiddenAttachedKeys(target string, keys ...string) (bool, erro
 // attach client, and reports whether target has one. Only Gemini sessions get
 // a hidden attach client (requiresHiddenAttachedInterrupt), so this path takes
 // no look for a permission prompt between the text and Enter; it must gain
-// NudgeSession's (#2892) before it serves a Claude session.
+// NudgeSession's (#2892) before it serves a Claude session. Like
+// sendHiddenAttachedKeys it reaches the client's active pane, not necessarily
+// the marked agent pane.
 func (t *Tmux) sendHiddenAttachedText(target, text string) (bool, error) {
 	client := t.hiddenAttachClient(target)
 	if client == nil {
@@ -3031,11 +3087,12 @@ func (t *Tmux) nudgeSession(
 	}
 	defer releaseNudgeLock(session)
 
-	// Resolve the correct target: in multi-pane sessions, find the pane
-	// running the agent rather than sending to the focused pane.
-	target := session
-	if agentPane, err := t.FindAgentPane(session); err == nil && agentPane != "" {
-		target = agentPane
+	// Resolve the agent's pane once for the whole nudge, never the focused
+	// pane: a human's split or window may be active, even one running the
+	// same CLI.
+	target, err := t.agentInputTarget(session)
+	if err != nil {
+		return err
 	}
 
 	// A human may have scrolled this pane into copy-mode (the ga-c4w wheel
@@ -3114,7 +3171,7 @@ func (t *Tmux) nudgeSession(
 	// busy indicator, composer prefix still matches), so this cannot be
 	// gated on an idle-wait failure the way DismissModelSwitchModalIfPresent
 	// is in Provider.Nudge -- it must run unconditionally, here.
-	if err := t.DismissFeedbackSurveyModalIfPresent(session); err != nil {
+	if err := t.dismissFeedbackSurveyModalIn(session, target); err != nil {
 		return fmt.Errorf("dismissing feedback survey before nudge: %w", err)
 	}
 
@@ -3473,6 +3530,8 @@ const midSessionDialogSettleDelay = 500 * time.Millisecond
 // transient capture-pane error even though the message could still be
 // delivered. Mirrors DismissModelSwitchModalIfPresent, which swallows the
 // identical errors.
+//
+// target is the nudge's resolved agent pane (agentInputTarget).
 func (t *Tmux) dismissMidSessionDialogBeforeNudge(target string) bool {
 	dismissed, err := runtime.DismissMidSessionDialogs(
 		context.Background(),
@@ -3501,9 +3560,9 @@ func (t *Tmux) dismissMidSessionDialogBeforeNudge(target string) bool {
 // runtime.DismissMidSessionDialogs (see midSessionDialogs) via
 // dismissMidSessionDialogBeforeNudge.
 func (t *Tmux) DismissModelSwitchModalIfPresent(session string) {
-	target := session
-	if agentPane, err := t.FindAgentPane(session); err == nil && agentPane != "" {
-		target = agentPane
+	target, err := t.agentInputTarget(session)
+	if err != nil {
+		return
 	}
 	content, err := t.CapturePane(target, promptObservationLines)
 	if err != nil {
@@ -3626,10 +3685,17 @@ func feedbackSurveyComposer(content string) (string, bool) {
 // typed and its fate could not be confirmed, so the caller must not paste on
 // top of it.
 func (t *Tmux) DismissFeedbackSurveyModalIfPresent(session string) error {
-	target := session
-	if agentPane, err := t.FindAgentPane(session); err == nil && agentPane != "" {
-		target = agentPane
+	// Nothing is keyed when the lookup fails, so the nudge can still go on.
+	target, err := t.agentInputTarget(session)
+	if err != nil {
+		return nil
 	}
+	return t.dismissFeedbackSurveyModalIn(session, target)
+}
+
+// dismissFeedbackSurveyModalIn is DismissFeedbackSurveyModalIfPresent for
+// session's already-resolved agent pane target.
+func (t *Tmux) dismissFeedbackSurveyModalIn(session, target string) error {
 	sendKeys := func(keys ...string) error {
 		for _, k := range keys {
 			if _, err := t.run("send-keys", "-t", paneTarget(target), k); err != nil {
@@ -3668,67 +3734,102 @@ func (t *Tmux) GetPaneCommand(session string) (string, error) {
 	return result, nil
 }
 
-// FindAgentPane finds the pane running an agent process within a session.
-// In multi-pane sessions, send-keys -t <session> targets the active/focused pane,
-// which may not be the agent pane. This method enumerates all panes and returns
-// the pane ID (e.g., "%5") of the one running the agent.
+// FindAgentPane finds the agent's pane within a session and returns its pane
+// ID (e.g., "%5"). In multi-pane sessions, send-keys -t <session> targets the
+// active/focused pane, which may be a human's.
 //
-// Detection checks pane_current_command, then falls back to process tree inspection
-// (same logic as IsRuntimeRunning) to handle agents started via shell wrappers.
+// The pane carrying the agent-pane marker (agentPaneOption) is the agent's,
+// whatever runs in it and wherever it has moved: a human pane running the same
+// CLI is never picked over it. Only a session created before the marker falls
+// back to process detection: pane_current_command, then process tree
+// inspection (same logic as IsRuntimeRunning) for agents started via shell
+// wrappers.
 //
-// Returns ("", nil) if the session has only one pane (no disambiguation needed),
-// or if no agent pane can be identified (caller should fall back to session targeting).
+// Returns ("", nil) for an unmarked session with only one pane (no
+// disambiguation needed) or no identifiable agent pane.
 func (t *Tmux) FindAgentPane(session string) (string, error) {
-	// List all panes across all windows (-s) with ID, command, and PID.
-	// Without -s, list-panes only shows the active window's panes, missing
-	// agent panes in other windows.
-	out, err := t.run("list-panes", "-s", "-t", paneTarget(session), "-F", "#{pane_id}\t#{pane_current_command}\t#{pane_pid}")
-	if err != nil {
+	target, identified, err := t.locateAgentPane(session)
+	if err != nil || !identified {
 		return "", err
 	}
+	_, id, _ := strings.Cut(strings.TrimPrefix(target, paneTarget(session)), ".")
+	return id, nil
+}
 
-	lines := strings.Split(strings.TrimSpace(out), "\n")
-	if len(lines) <= 1 {
+// agentInputTarget is agentPaneTarget for the input paths that historically
+// went through FindAgentPane (nudge, input clear, modal dismissal, busy
+// probes): the marked pane, else (an unmarked session) the process-detected
+// agent pane, else the first pane. Fenced to its session and window.
+func (t *Tmux) agentInputTarget(session string) (string, error) {
+	target, _, err := t.locateAgentPane(session)
+	return target, err
+}
+
+// locateAgentPane resolves session's agent pane in one list-panes call (plus
+// a show-environment for process names, unmarked multi-pane sessions only).
+// It returns the pane as an agentPaneTarget-style fenced target and whether
+// it was identified (marked, or process-detected) rather than defaulted to
+// the first pane. Pane ids and explicit targets pass through, identified.
+func (t *Tmux) locateAgentPane(session string) (string, bool, error) {
+	if !validSessionNameRe.MatchString(session) {
+		return session, true, nil
+	}
+	// List all panes across all windows (-s). Without -s, list-panes only
+	// shows the active window's panes, missing agent panes in other windows.
+	out, err := t.run("list-panes", "-s", "-t", paneTarget(session), "-F",
+		agentPaneMarkerFormat+"\t#{window_id}.#{pane_id}\t#{pane_current_command}\t#{pane_pid}")
+	if err != nil {
+		return "", false, err
+	}
+	type row struct{ target, cmd, pid string }
+	var rows []row
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		parts := strings.SplitN(line, "\t", 4)
+		if len(parts) < 4 || !strings.HasPrefix(parts[1], "@") || !strings.Contains(parts[1], ".%") {
+			continue
+		}
+		r := row{target: paneTarget(session) + parts[1], cmd: parts[2], pid: parts[3]}
+		if parts[0] == agentPaneMarked {
+			return r.target, true, nil
+		}
+		rows = append(rows, r)
+	}
+	if len(rows) == 0 {
+		return "", false, fmt.Errorf("no panes found in session %s (got %q)", session, out)
+	}
+	if len(rows) == 1 {
 		// Single pane - no disambiguation needed
-		return "", nil
+		return rows[0].target, false, nil
 	}
 
 	// Get agent process names from session environment
 	processNames := t.resolveSessionProcessNames(session)
 
 	// Check each pane for agent process
-	for _, line := range lines {
-		parts := strings.SplitN(line, "\t", 3)
-		if len(parts) < 3 {
-			continue
-		}
-		paneID := parts[0]
-		paneCmd := parts[1]
-		panePID := parts[2]
-
+	for _, r := range rows {
 		// Direct command match
 		for _, name := range processNames {
-			if paneCmd == name {
-				return paneID, nil
+			if r.cmd == name {
+				return r.target, true, nil
 			}
 		}
 
 		// Version-as-argv[0] (e.g., "2.1.30") — check real binary name
-		if processMatchesNames(panePID, processNames) {
-			return paneID, nil
+		if processMatchesNames(r.pid, processNames) {
+			return r.target, true, nil
 		}
 
 		// Descendant walk: agents under shells ("bash -c 'exec claude'")
 		// or wrapper roots (systemd-run when GC_AGENT_SLICE is set) keep
 		// the shell/wrapper as pane_current_command — same unconditional
 		// descendant fallback as IsRuntimeRunning.
-		if hasDescendantWithNames(panePID, processNames, 0) {
-			return paneID, nil
+		if hasDescendantWithNames(r.pid, processNames, 0) {
+			return r.target, true, nil
 		}
 	}
 
-	// No agent pane found
-	return "", nil
+	// No agent pane found: the first pane, as for every other agent-pane read.
+	return rows[0].target, false, nil
 }
 
 // agentPaneOption is the pane user option that marks a session's agent pane;
@@ -4380,10 +4481,15 @@ func (t *Tmux) FindSessionByWorkDir(targetDir string, processNames []string) ([]
 }
 
 // CapturePane captures the visible screen plus the last `lines` rows of
-// scrollback history of a pane.
+// scrollback history of a pane. A session name captures its agent pane
+// (agentPaneTarget), as do the other CapturePane variants; a polling caller
+// resolves the pane once and passes the resolved target, which is used as is.
 func (t *Tmux) CapturePane(session string, lines int) (string, error) {
-	content, err := t.run("capture-pane", "-p", "-t", paneTarget(session), "-S", fmt.Sprintf("-%d", lines))
-	return content, err
+	target, err := t.agentPaneTarget(session)
+	if err != nil {
+		return "", err
+	}
+	return t.run("capture-pane", "-p", "-t", target, "-S", fmt.Sprintf("-%d", lines))
 }
 
 // CaptureVisiblePane captures only the current visible screen of a pane, with
@@ -4394,7 +4500,11 @@ func (t *Tmux) CapturePane(session string, lines int) (string, error) {
 // the intended nudge. A live blocking dialog occupies the visible footer, so
 // the visible screen is the correct and sufficient window for that check.
 func (t *Tmux) CaptureVisiblePane(session string) (string, error) {
-	return t.run("capture-pane", "-p", "-t", paneTarget(session))
+	target, err := t.agentPaneTarget(session)
+	if err != nil {
+		return "", err
+	}
+	return t.run("capture-pane", "-p", "-t", target)
 }
 
 // CapturePaneJoined captures the visible content of a pane with wrapped lines
@@ -4407,12 +4517,20 @@ func (t *Tmux) CaptureVisiblePane(session string) (string, error) {
 // text for a known string want this variant; callers that reason about the
 // visible layout want the plain one.
 func (t *Tmux) CapturePaneJoined(session string, lines int) (string, error) {
-	return t.run("capture-pane", "-p", "-J", "-t", paneTarget(session), "-S", fmt.Sprintf("-%d", lines))
+	target, err := t.agentPaneTarget(session)
+	if err != nil {
+		return "", err
+	}
+	return t.run("capture-pane", "-p", "-J", "-t", target, "-S", fmt.Sprintf("-%d", lines))
 }
 
 // CapturePaneAll captures all scrollback history.
 func (t *Tmux) CapturePaneAll(session string) (string, error) {
-	return t.run("capture-pane", "-p", "-t", paneTarget(session), "-S", "-")
+	target, err := t.agentPaneTarget(session)
+	if err != nil {
+		return "", err
+	}
+	return t.run("capture-pane", "-p", "-t", target, "-S", "-")
 }
 
 // CapturePaneLines captures the last N lines of a pane as a slice.
@@ -4830,6 +4948,9 @@ func (t *Tmux) WaitForRuntimeReady(ctx context.Context, session string, rc *Runt
 		return nil
 	}
 
+	// Resolve the agent pane once for this wait (see WaitForIdle). A failed
+	// lookup is retried like a failed capture: the pane may not exist yet.
+	target := ""
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		select {
@@ -4837,9 +4958,16 @@ func (t *Tmux) WaitForRuntimeReady(ctx context.Context, session string, rc *Runt
 			return ctx.Err()
 		default:
 		}
+		var err error
+		if target == "" {
+			target, err = t.agentPaneTarget(session)
+		}
 		// Claude-style full-screen UIs often leave the prompt above a footer of
 		// blank lines, so the last 10 lines can miss a perfectly visible prompt.
-		lines, err := t.CapturePaneLines(session, promptObservationLines)
+		var lines []string
+		if err == nil {
+			lines, err = t.CapturePaneLines(target, promptObservationLines)
+		}
 		if err != nil {
 			select {
 			case <-ctx.Done():
@@ -5027,6 +5155,13 @@ func (t *Tmux) WaitForIdle(ctx context.Context, session string, timeout time.Dur
 	// and re-reading it per tick would add a tmux show-environment exec to
 	// every 200ms poll.
 	promptPrefix := t.resolveIdlePromptPrefix(session)
+	// The agent pane likewise, so each tick costs one capture-pane. Scoped to
+	// this wait: a later wait resolves again, so a respawn between waits is
+	// never answered from a stale pane.
+	target, err := t.agentPaneTarget(session)
+	if err != nil {
+		return err
+	}
 
 	consecutiveIdle := 0
 
@@ -5035,7 +5170,7 @@ func (t *Tmux) WaitForIdle(ctx context.Context, session string, timeout time.Dur
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		idle, err := t.snapshotPaneIdleWithPrefix(session, promptPrefix)
+		idle, err := t.snapshotPaneIdleWithPrefix(target, promptPrefix)
 		if err != nil {
 			// Distinguish terminal errors from transient ones.
 			// Session not found or no server means the session is gone —

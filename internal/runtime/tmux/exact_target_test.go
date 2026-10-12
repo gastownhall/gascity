@@ -52,8 +52,9 @@ func (s *scriptedTargetExecutor) execute(args []string) (string, error) {
 		if s.listPanes != nil {
 			return s.listPanes(format), nil
 		}
-		if format == agentPaneMarkerFormat+"\t#{window_id}.#{pane_id}" {
-			return "pane\t@1.%1", nil
+		if strings.Contains(format, "#{window_id}.#{pane_id}") {
+			row, _ := fakeAgentPaneRow(args)
+			return row, nil
 		}
 		if strings.HasPrefix(format, agentPaneMarkerFormat+"\t") {
 			return "pane\t" + s.display, nil

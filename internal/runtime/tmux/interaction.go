@@ -687,8 +687,8 @@ func (t *Tmux) checkNoApprovalPrompt(name string) error {
 	return t.checkNoApprovalPromptIn(name, name)
 }
 
-// checkNoApprovalPromptIn is checkNoApprovalPrompt for session name's agent
-// pane target (a pane id in a multi-pane session).
+// checkNoApprovalPromptIn is checkNoApprovalPrompt for session name's
+// already-resolved agent pane target.
 func (t *Tmux) checkNoApprovalPromptIn(name, target string) error {
 	paneText, err := t.CapturePane(target, 40)
 	if err != nil {
@@ -712,9 +712,19 @@ var (
 
 // Respond sends the appropriate keystroke to the tmux pane to approve or deny
 // a pending tool approval, then verifies the prompt was consumed.
+//
+// The prompt is the agent's: every capture and the answer key go to its pane
+// (agentPaneTarget), resolved once for this response.
 func (t *Tmux) Respond(name string, response runtime.InteractionResponse) error {
+	target, err := t.agentPaneTarget(name)
+	if err != nil {
+		if errors.Is(err, ErrSessionNotFound) {
+			return fmt.Errorf("pre-verify capture failed: %w: %w", runtime.ErrSessionNotFound, err)
+		}
+		return fmt.Errorf("pre-verify capture failed: %w", err)
+	}
 	// Verify the expected approval is still present before sending keys.
-	paneText, err := t.CapturePane(name, 40)
+	paneText, err := t.CapturePane(target, 40)
 	if err != nil {
 		if errors.Is(err, ErrSessionNotFound) {
 			return fmt.Errorf("pre-verify capture failed: %w: %w", runtime.ErrSessionNotFound, err)
@@ -742,10 +752,10 @@ func (t *Tmux) Respond(name string, response runtime.InteractionResponse) error 
 	// Exit copy-mode first if the pane is parked (the ga-c4w wheel binding),
 	// so the approval keystroke reaches the prompt instead of being swallowed
 	// by copy-mode.
-	t.cancelCopyModeIfParked(name)
+	t.cancelCopyModeIfParked(target)
 
 	// Send the keystroke once.
-	if _, err := t.run("send-keys", "-t", paneTarget(name), "-l", key); err != nil {
+	if _, err := t.run("send-keys", "-t", target, "-l", key); err != nil {
 		if errors.Is(err, ErrSessionNotFound) {
 			return fmt.Errorf("send-keys failed: %w: %w", runtime.ErrSessionNotFound, err)
 		}
@@ -759,7 +769,7 @@ func (t *Tmux) Respond(name string, response runtime.InteractionResponse) error 
 	for time.Now().Before(deadline) {
 		time.Sleep(respondVerifyInterval)
 
-		verifyText, verifyErr := t.CapturePane(name, 40)
+		verifyText, verifyErr := t.CapturePane(target, 40)
 		if verifyErr != nil {
 			// Pane gone — session ended, treat as success.
 			t.approvalDedup().clear(name)
