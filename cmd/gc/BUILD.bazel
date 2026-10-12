@@ -1550,6 +1550,7 @@ go_test(
         "providers_events_rotation_test.go",
         "providers_test.go",
         "quality_gate_fallback_test.go",
+        "ralph_finalize_wiring_test.go",
         "reconcile_admit_test.go",
         "reconcile_arms_drain_test.go",
         "reconcile_arms_heals_test.go",
