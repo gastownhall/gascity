@@ -34,7 +34,7 @@ func legacyWakeFailure(t *testing.T, row beads.Bead) map[string]string {
 	t.Helper()
 	row.Metadata = maps.Clone(row.Metadata)
 	m := beads.NewMemStoreFrom(0, []beads.Bead{row}, nil)
-	recordWakeFailure(sessionInfoFromBead(row), sessionFrontDoor(m), &clock.Fake{Time: gatherNow}, "worker")
+	recordWakeFailure(sessionInfoFromBead(row), sessionTranscriptSearchPaths(nil), sessionFrontDoor(m), &clock.Fake{Time: gatherNow}, "worker")
 	b, err := m.Get(row.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -50,6 +50,30 @@ func hasAny(patch session.MetadataPatch, keys ...string) bool {
 		}
 	}
 	return false
+}
+
+// Kills a v2 wake failure that probes only the default transcript roots
+// (mc-zmg7h): a failed start of a claude conversation kept only under a
+// configured observe path keeps its key and hash and accrues the attempt;
+// without the root it resets them.
+func TestAbandonKeepsConversationUnderObservePaths(t *testing.T) {
+	workDir := t.TempDir()
+	root := observedTranscript(t, workDir)
+	for _, observed := range []bool{true, false} {
+		k := startKit(t, intentStart, "creating")
+		if observed {
+			k.p.World.Env.Cfg.Daemon.ObservePaths = []string{root}
+		}
+		row := poolRow("gc-1", "worker", 1, "creating", "generation", "4", "instance_token", "tok-4", "provider", "claude", "work_dir", workDir,
+			"session_key", "k-1", "started_config_hash", "h-1", "wake_attempts", "0")
+		v := abandonView(k, row, txRuntime{Class: rtAbsent}, startFailureRead{})
+		f := failStart(v, startOutcome{}, causeStartError, errors.New("boom")).Pass.(startEnd).failed
+		read := readStartFailure(context.Background(), txCaps{}, *f)
+		step := abandonStep(abandonView(k, row, txRuntime{Class: rtAbsent}, read))
+		if read.keeps != observed || hasAny(step.Write, "session_key", "started_config_hash") == observed || step.Write["wake_attempts"] != "1" {
+			t.Fatalf("observed %v: keeps %v, write %+v; want the conversation kept=%v and the attempt accrued", observed, read.keeps, step.Write, observed)
+		}
+	}
 }
 
 // Kills a class that writes the wrong patch, an abandon that does not fail,

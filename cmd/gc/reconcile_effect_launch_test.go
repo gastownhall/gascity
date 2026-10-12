@@ -436,7 +436,7 @@ func TestLaunchUsesAssignedTaskWorkDir(t *testing.T) {
 		k.p.World.Demand = demandView{StorePartial: partial, AssignedWork: []beads.Bead{{ID: "w-1", Status: "in_progress", Assignee: "gc-1", Metadata: map[string]string{"work_dir": taskDir}}}}
 		var probed string
 		old := staleResumeKeyProbe
-		staleResumeKeyProbe = func(_, dir, _ string) (bool, bool) { probed = dir; return true, true }
+		staleResumeKeyProbe = func(_ []string, _, dir, _ string) (bool, bool) { probed = dir; return true, true }
 		s := k.runKind()
 		staleResumeKeyProbe = old
 		want := taskDir
@@ -950,7 +950,7 @@ func TestLaunchPersistsTheMCPSnapshotOnSuccessOnly(t *testing.T) {
 // from the transcript layer the key stays, unrotated.
 func TestUnprobeableTranscriptKeepsTheKey(t *testing.T) {
 	old := staleResumeKeyProbe
-	staleResumeKeyProbe = func(string, string, string) (bool, bool) { return false, false }
+	staleResumeKeyProbe = func([]string, string, string, string) (bool, bool) { return false, false }
 	t.Cleanup(func() { staleResumeKeyProbe = old })
 	k, _ := launchKit(t, "asleep", "session_key", "k-1", "continuation_epoch", "5")
 	k.p.Clock.(*fakePlannerClock).auto = true

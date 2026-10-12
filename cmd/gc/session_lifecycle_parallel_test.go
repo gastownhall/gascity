@@ -8397,7 +8397,7 @@ func TestStaleResumeKeyProbe(t *testing.T) {
 
 	// Missing transcript: claude is probeable and reports absent, so the guard
 	// would treat the resume key as stale.
-	if present, probeable := staleResumeKeyProbe("claude", workDir, key); !probeable || present {
+	if present, probeable := staleResumeKeyProbe(sessionTranscriptSearchPaths(nil), "claude", workDir, key); !probeable || present {
 		t.Fatalf("missing claude transcript: probeable=%v present=%v, want probeable && !present", probeable, present)
 	}
 
@@ -8411,21 +8411,84 @@ func TestStaleResumeKeyProbe(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(projDir, key+".jsonl"), []byte("{}\n"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	if present, probeable := staleResumeKeyProbe("claude", workDir, key); !probeable || !present {
+	if present, probeable := staleResumeKeyProbe(sessionTranscriptSearchPaths(nil), "claude", workDir, key); !probeable || !present {
 		t.Fatalf("present claude transcript: probeable=%v present=%v, want probeable && present", probeable, present)
 	}
 
 	// Codex resolves transcripts by cwd/date, not a keyed file, so it is never
 	// probeable and the guard leaves its metadata untouched.
-	if _, probeable := staleResumeKeyProbe("codex", workDir, key); probeable {
+	if _, probeable := staleResumeKeyProbe(sessionTranscriptSearchPaths(nil), "codex", workDir, key); probeable {
 		t.Fatal("codex probeable = true, want false")
 	}
 	// Empty inputs are not probeable.
-	if _, probeable := staleResumeKeyProbe("claude", "", key); probeable {
+	if _, probeable := staleResumeKeyProbe(sessionTranscriptSearchPaths(nil), "claude", "", key); probeable {
 		t.Fatal("empty workDir probeable = true, want false")
 	}
-	if _, probeable := staleResumeKeyProbe("claude", workDir, ""); probeable {
+	if _, probeable := staleResumeKeyProbe(sessionTranscriptSearchPaths(nil), "claude", workDir, ""); probeable {
 		t.Fatal("empty key probeable = true, want false")
+	}
+}
+
+// observedTranscript puts the claude transcript of key k-1 for workDir under
+// a fresh root that is not a default one, with an empty HOME, and returns the
+// root: only a probe that searches the configured [daemon] observe_paths
+// finds it.
+func observedTranscript(t *testing.T, workDir string) string {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", "")
+	root := filepath.Join(t.TempDir(), "projects")
+	dir := filepath.Join(root, sessionlog.ProjectSlug(workDir))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "k-1.jsonl"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+// claudeResumeProvider is a claude provider that resumes by --resume.
+func claudeResumeProvider() *config.ResolvedProvider {
+	return &config.ResolvedProvider{Name: "claude", Command: "claude", SessionIDFlag: "--session-id", ResumeFlag: "--resume", ResumeStyle: "flag"}
+}
+
+// Kills a legacy stale-resume guard blind to [daemon] observe_paths
+// (mc-zmg7h): a claude conversation kept only under a configured root
+// resumes with its key and hash untouched, and the start hands those roots to
+// its failure's probe; without the root the guard resets the conversation.
+func TestBuildPreparedStartReadsObservePaths(t *testing.T) {
+	workDir := t.TempDir()
+	root := observedTranscript(t, workDir)
+	for _, observed := range []bool{true, false} {
+		store := beads.NewMemStore()
+		row, err := store.Create(beads.Bead{Title: "worker", Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: map[string]string{
+			"session_name": "worker", "template": "worker", "state": "asleep", "provider": "claude", "work_dir": workDir,
+			"session_key": "k-1", "started_config_hash": "h-1",
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := &config.City{}
+		if observed {
+			cfg.Daemon.ObservePaths = []string{root}
+		}
+		candidate := startCandidate{info: sessiontest.SeedBead(t, row), tp: TemplateParams{
+			TemplateName: "worker", SessionName: "worker", Command: "claude", WorkDir: workDir, ResolvedProvider: claudeResumeProvider(),
+		}}
+		prepared, info, err := buildPreparedStart(candidate, cfg, store)
+		if err != nil {
+			t.Fatalf("observed %v: buildPreparedStart: %v", observed, err)
+		}
+		got, _ := store.Get(row.ID)
+		kept := info.SessionKey == "k-1" && got.Metadata["session_key"] == "k-1" && got.Metadata["started_config_hash"] == "h-1" && got.Metadata["continuation_reset_pending"] == ""
+		resumed := strings.Contains(prepared.cfg.Command, "--resume k-1")
+		if kept != observed || resumed != observed {
+			t.Fatalf("observed %v: kept %v resumed %v (metadata %v, command %q)", observed, kept, resumed, got.Metadata, prepared.cfg.Command)
+		}
+		if found, _ := staleResumeKeyProbe(prepared.transcriptRoots, "claude", workDir, "k-1"); found != observed {
+			t.Fatalf("observed %v: the start's transcript roots %v find the transcript: %v", observed, prepared.transcriptRoots, found)
+		}
 	}
 }
 

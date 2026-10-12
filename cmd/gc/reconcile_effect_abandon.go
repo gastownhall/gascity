@@ -47,6 +47,7 @@ type startFailure struct {
 	relaunched      bool // PreWake found the row creating (#7570): its marker stays
 	undo            preWakeUndo
 	row             session.Info // the fresh row, for the conversation probe
+	cfg             *config.City // the city, for the probe's transcript roots (sessionTranscriptSearchPaths)
 	name, display   string       // the runtime name; the agent, for the quarantine metric
 	episode         string       // the #46 episode key
 }
@@ -83,6 +84,7 @@ func failStart(v txView, out startOutcome, cause string, err error) txStep {
 		f.terminal = runtime.ProviderTerminalErrorReason(err.Error())
 	}
 	if env := v.World.Env; env != nil && env.Cfg != nil {
+		f.cfg = env.Cfg
 		f.configured = configuredNamedSessionBeadHasSpecInfo(v.Row, env.Cfg, config.EffectiveCityName(env.Cfg, ""))
 		f.peek = started && f.terminal == "" && env.Cfg.Session.Provider != "subprocess" && v.RT.Class != rtAbsent
 	}
@@ -107,7 +109,7 @@ func readStartFailure(ctx context.Context, c txCaps, f startFailure) startFailur
 	case f.pending, f.cause == causePrepare, f.cause == causeAttribution:
 		_ = c.episode.fail(f.episode, f.err, c.start.clock.Now())
 	default:
-		r.keeps = wakeFailureKeepsConversation(f.row)
+		r.keeps = wakeFailureKeepsConversation(f.row, sessionTranscriptSearchPaths(f.cfg))
 	}
 	return r
 }

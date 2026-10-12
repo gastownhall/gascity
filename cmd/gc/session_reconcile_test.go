@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -16,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -1550,7 +1553,7 @@ func TestCheckStability_SubprocessProviderSkipsCrashCounting(t *testing.T) {
 // conversation is actually unresumable. Attempt accrual is unaffected.
 func TestRecordWakeFailure_KeepsResumableConversation(t *testing.T) {
 	prevProbe := staleResumeKeyProbe
-	staleResumeKeyProbe = func(_, _, _ string) (present, probeable bool) { return true, true }
+	staleResumeKeyProbe = func(_ []string, _, _, _ string) (present, probeable bool) { return true, true }
 	t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
 
 	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
@@ -1563,7 +1566,7 @@ func TestRecordWakeFailure_KeepsResumableConversation(t *testing.T) {
 		"work_dir":            "/work",
 	})
 
-	recordWakeFailure(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+	recordWakeFailure(seedSessionInfo(session), sessionTranscriptSearchPaths(nil), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
 	syncBeadFromStore(&session, store)
 
 	if got := session.Metadata["session_key"]; got != "live-key" {
@@ -1577,11 +1580,61 @@ func TestRecordWakeFailure_KeepsResumableConversation(t *testing.T) {
 	}
 }
 
+// Kills a legacy wake failure that probes only the default transcript roots
+// (mc-zmg7h): both of its entrances, a rapid crash and a failed start, keep a
+// claude conversation kept only under a configured observe path, and accrue
+// the attempt; without the root both reset it.
+func TestWakeFailureUsesConfiguredTranscriptRoots(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	workDir := t.TempDir()
+	root := observedTranscript(t, workDir)
+	row := func() beads.Bead {
+		return makeBead("b1", map[string]string{
+			"session_name": "worker", "provider": "claude", "work_dir": workDir, "session_key": "k-1", "started_config_hash": "h-1",
+			"wake_attempts": "0", "last_woke_at": now.Add(-10 * time.Second).Format(time.RFC3339),
+		})
+	}
+	entrances := map[string]func(store *testStore, session beads.Bead, cfg *config.City){
+		"rapid crash": func(store *testStore, session beads.Bead, cfg *config.City) {
+			store.persistRow(session)
+			if _, stab := checkStability(seedSessionInfo(session), cfg, false, newDrainTracker(), sessionFrontDoor(store), clk, nil); !stab {
+				t.Fatal("rapid exit not recorded")
+			}
+		},
+		"failed start": func(store *testStore, session beads.Bead, cfg *config.City) {
+			store.persistRow(session)
+			commitStartFailure(startResult{
+				prepared: preparedStart{candidate: startCandidate{info: seedSessionInfo(session), tp: TemplateParams{SessionName: "worker", TemplateName: "worker"}}, transcriptRoots: sessionTranscriptSearchPaths(cfg)},
+				err:      errors.New("boom"),
+				outcome:  TraceOutcomeProviderError,
+			}, sessionFrontDoor(store), clk, events.Discard, 0, io.Discard, nil)
+		},
+	}
+	for name, run := range entrances {
+		for _, observed := range []bool{true, false} {
+			cfg := &config.City{}
+			if observed {
+				cfg.Daemon.ObservePaths = []string{root}
+			}
+			store := newTestStore()
+			session := row()
+			run(store, session, cfg)
+			syncBeadFromStore(&session, store)
+			kept := session.Metadata["session_key"] == "k-1" && session.Metadata["started_config_hash"] == "h-1"
+			if kept != observed || session.Metadata["wake_attempts"] != "1" {
+				t.Errorf("%s, observed %v: session_key %q hash %q wake_attempts %q; want kept=%v and the attempt accrued",
+					name, observed, session.Metadata["session_key"], session.Metadata["started_config_hash"], session.Metadata["wake_attempts"], observed)
+			}
+		}
+	}
+}
+
 // TestRecordWakeFailure_ClearsUnresumableConversation is the other half: an
 // absent transcript keeps the existing unconditional reset.
 func TestRecordWakeFailure_ClearsUnresumableConversation(t *testing.T) {
 	prevProbe := staleResumeKeyProbe
-	staleResumeKeyProbe = func(_, _, _ string) (present, probeable bool) { return false, true }
+	staleResumeKeyProbe = func(_ []string, _, _, _ string) (present, probeable bool) { return false, true }
 	t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
 
 	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
@@ -1594,7 +1647,7 @@ func TestRecordWakeFailure_ClearsUnresumableConversation(t *testing.T) {
 		"work_dir":            "/work",
 	})
 
-	recordWakeFailure(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+	recordWakeFailure(seedSessionInfo(session), sessionTranscriptSearchPaths(nil), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
 	syncBeadFromStore(&session, store)
 
 	if got := session.Metadata["session_key"]; got != "" {
@@ -1610,7 +1663,7 @@ func TestRecordWakeFailure_ClearsUnresumableConversation(t *testing.T) {
 // gaining the new keep-the-conversation behavior.
 func TestRecordWakeFailure_ClearsWhenProviderUnprobeable(t *testing.T) {
 	prevProbe := staleResumeKeyProbe
-	staleResumeKeyProbe = func(_, _, _ string) (present, probeable bool) { return false, false }
+	staleResumeKeyProbe = func(_ []string, _, _, _ string) (present, probeable bool) { return false, false }
 	t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
 
 	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
@@ -1622,7 +1675,7 @@ func TestRecordWakeFailure_ClearsWhenProviderUnprobeable(t *testing.T) {
 		"work_dir":      "/work",
 	})
 
-	recordWakeFailure(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+	recordWakeFailure(seedSessionInfo(session), sessionTranscriptSearchPaths(nil), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
 	syncBeadFromStore(&session, store)
 
 	if got := session.Metadata["session_key"]; got != "" {
@@ -1639,7 +1692,7 @@ func TestRecordWakeFailure_Quarantine(t *testing.T) {
 		"wake_attempts": "4", // one below threshold
 	})
 
-	recordWakeFailure(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+	recordWakeFailure(seedSessionInfo(session), sessionTranscriptSearchPaths(nil), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
 	syncBeadFromStore(&session, store)
 
 	if session.Metadata["wake_attempts"] != "5" {
@@ -1662,7 +1715,7 @@ func TestRecordWakeFailure_BelowThreshold(t *testing.T) {
 		"wake_attempts": "1",
 	})
 
-	recordWakeFailure(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+	recordWakeFailure(seedSessionInfo(session), sessionTranscriptSearchPaths(nil), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
 	syncBeadFromStore(&session, store)
 
 	if session.Metadata["wake_attempts"] != "2" {
@@ -1683,7 +1736,7 @@ func TestRecordWakeFailure_ClearsStartedConfigHash(t *testing.T) {
 		"started_config_hash": "abc123",
 	})
 
-	recordWakeFailure(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+	recordWakeFailure(seedSessionInfo(session), sessionTranscriptSearchPaths(nil), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
 	syncBeadFromStore(&session, store)
 
 	if session.Metadata["session_key"] != "" {
@@ -1703,7 +1756,7 @@ func TestRecordWakeFailure_ClearsStartedConfigHashWhenSessionKeyAlreadyEmpty(t *
 		"started_config_hash": "abc123",
 	})
 
-	recordWakeFailure(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+	recordWakeFailure(seedSessionInfo(session), sessionTranscriptSearchPaths(nil), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
 	syncBeadFromStore(&session, store)
 
 	if session.Metadata["started_config_hash"] != "" {
