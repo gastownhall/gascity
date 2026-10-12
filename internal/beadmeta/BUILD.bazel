@@ -13,6 +13,7 @@ go_library(
         "reserved_prefixes.go",
         "runid.go",
         "values.go",
+        "workflow_admission.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/beadmeta",
     visibility = ["//:__subpackages__"],

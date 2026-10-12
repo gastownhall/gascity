@@ -1237,6 +1237,10 @@ func TestInstantiateRootOnlyGraphWorkflowOmitsWorkflowExpanded(t *testing.T) {
 		RootOnly: true,
 		Steps: []formula.RecipeStep{
 			{ID: "wf", Title: "Workflow", Type: "task", IsRoot: true, Metadata: map[string]string{"gc.kind": "workflow"}},
+			{ID: "wf.finalize", Title: "Finalize", Type: "task"},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "wf", DependsOnID: "wf.finalize", Type: "blocks"},
 		},
 	}
 
@@ -1250,6 +1254,9 @@ func TestInstantiateRootOnlyGraphWorkflowOmitsWorkflowExpanded(t *testing.T) {
 	}
 	if got, ok := root.Metadata[beadmeta.WorkflowExpandedMetadataKey]; ok {
 		t.Fatalf("root-only workflow root carries gc.workflow_expanded = %q, want unset", got)
+	}
+	if got := root.Metadata[beadmeta.NativeStepDependenciesMetadataKey]; got != "[]" {
+		t.Fatalf("root-only workflow root native dependencies = %q, want []", got)
 	}
 }
 

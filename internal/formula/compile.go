@@ -680,11 +680,14 @@ func isDetachedGraphStep(step *Step) bool {
 // "blocks" edge here would make the root permanently unclosable: the store
 // refuses to close a blocked issue and the finalizer is the only bead that
 // would ever clear the blocker (ga-a6zy9). Ordering does not need the edge —
-// the finalizer already blocks on every graph sink, so it cannot run early,
-// and the root is a latch that is never routed or dispatched
-// (beadmeta.WorkflowTopologyKinds). The edge is retained as "tracks" so the
-// root still reaches its finalizer through the dependency graph for cascade
-// delete and open-descendant traversal, both of which accept that type.
+// the finalizer already blocks on every graph sink, so it cannot run early.
+// The root is therefore dependency-ready from creation while carrying
+// gc.routed_to (#2763); what keeps that harmless is the gc.workflow_expanded
+// stamp molecule.Instantiate writes for this shape, which every fresh-work
+// reader refuses (beadmeta.IsExpandedWorkflow; #5900, #6461). The edge is
+// retained as "tracks" so the root still reaches its finalizer through the
+// dependency graph for cascade delete and open-descendant traversal, both of
+// which accept that type.
 func addWorkflowRootDeps(rootID string, steps []*Step, idMapping map[string]string, deps *[]RecipeDep) {
 	for _, step := range steps {
 		if step != nil && step.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflowFinalize {
