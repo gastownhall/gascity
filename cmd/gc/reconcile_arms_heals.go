@@ -1,12 +1,15 @@
 package main
 
 import (
+	"maps"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worker/transcript"
 )
 
 // Arm A6's row-local heals and markers beside the timer heals (CONTRACT v5
@@ -38,8 +41,13 @@ const (
 
 // heal is the row write of patch as kind, at the incarnation the pass saw.
 func (r *rowFacts) heal(kind, reason string, patch session.MetadataPatch) (intent, bool) {
+	return r.healClass(kind, reason, patch, session.DispositionPatch{})
+}
+
+// healClass is heal with the disposition cells' keys class beside patch.
+func (r *rowFacts) healClass(kind, reason string, patch session.MetadataPatch, class session.DispositionPatch) (intent, bool) {
 	basis := rowBasis{Incarnation: r.row.Incarnation, InstanceToken: r.row.InstanceToken}
-	return intent{Kind: kind, Reason: reason, Basis: basis, Patch: patch}, true
+	return intent{Kind: kind, Reason: reason, Basis: basis, Patch: patch, Class: class}, true
 }
 
 // freshGone is gone for a fresh kind's arm: it rests the decision on the
@@ -141,20 +149,90 @@ func armCreatingHeal(r *rowFacts) (intent, bool) {
 // asleep with runtime-missing, which A21's pool-slot close can free; a named
 // row no close arm takes would otherwise read active forever. A row still
 // holding a claim is armClaimClear's first, as legacy projects it
-// start-pending. A heartbeat-held row waits for A17 (C5b): healed, A21 would
-// close the seat legacy respawns through its hold (SESS-602).
+// start-pending. The heal carries the death's accrual (deadRuntimePatch);
+// decideRow composes it with the row's restart (startHealed).
 func armDeadRuntimeHeal(r *rowFacts) (intent, bool) {
 	info := r.row.Info
-	if r.entry == nil || !committed(info) || r.entry.Desired == desireDrain || heartbeatHeld(info, r.w.Now) || !r.freshGone() {
+	if r.entry == nil || !committed(info) || r.entry.Desired == desireDrain || !r.freshGone() {
 		return intent{}, false
 	}
-	return r.heal(intentRowHealFresh, decideDeadRuntimeHeal, asleepHealPatch(info))
+	patch, class, _ := deadRuntimePatch(r, true)
+	return r.healClass(intentRowHealFresh, decideDeadRuntimeHeal, patch, class)
 }
 
-// heartbeatHeld reports a live hold no sleep intent explains: SESS-602's
-// heartbeat hold. The timer is trimmed, as operatorDormant's.
+// deadRuntimePatch is legacy's write for a committed row whose runtime is
+// gone, in legacy's order: the state heal (SESS-531), then the death's
+// accrual (SESS-537 a wake failure inside the stability threshold, SESS-538
+// churn before the productivity threshold, or a productive death's churn
+// clear), each edge-triggered by clearing last_woke_at. A drain the row asked
+// for is no crash. The provider-screen lane (rate limit, terminal error) is
+// C5a3's classification.
+//
+// accrued reports a wake failure or churn recorded, after which legacy skips
+// the row for the tick ("record, fold, continue"): A18 starts it on the next
+// pass, as legacy's next tick does (a stranded seat's in this one:
+// asleepStranded).
+//
+// With heal false the patch is the death's accrual alone, the row left
+// committed: a stranded seat's record of its death while its restart
+// cannot run (startHealed).
+func deadRuntimePatch(r *rowFacts, heal bool) (patch session.MetadataPatch, class session.DispositionPatch, accrued bool) {
+	info := r.row.Info
+	patch = session.MetadataPatch{}
+	if heal {
+		patch = asleepHealPatch(info)
+	}
+	if strings.TrimSpace(info.SleepIntent) == sleepIntentIdle {
+		// SESS-532: an idle stop was pending, so the death is the idle
+		// sleep it asked for, which accrues nothing. Legacy heals the state
+		// first (its continuation reset), then writes SleepPatch(idle) over
+		// it, which keeps the pre-drain sleep_policy_fingerprint, with the
+		// disposition's Sleep cell.
+		maps.Copy(patch, session.SleepPatch(r.w.Now, drainIdle))
+		return patch, session.CellInfo(info, session.ActorController, session.DispEvent{Kind: session.EvSleep}, r.w.Now), false
+	}
+	_, draining := activeStop(r.row)
+	until := r.w.Now.Add(defaultQuarantineDuration)
+	var accrual session.ExitAccrual
+	switch session.DecideSessionExit(session.ExitFacts{
+		SubprocessProvider: r.w.Env != nil && r.w.Env.Cfg != nil && r.w.Env.Cfg.Session.Provider == "subprocess",
+		DrainPending:       draining, PendingCreateClaim: info.PendingCreateClaim, SleepReason: info.SleepReason, LastWokeAt: info.LastWokeAt,
+		StartUncommitted: strings.TrimSpace(info.PendingCreateStartedAt) != "",
+		Now:              r.w.Now, StabilityThreshold: stabilityThreshold, ProductivityThreshold: churnProductivityThreshold,
+	}) {
+	case session.ExitRapidCrash:
+		// Legacy resets the conversation unless a probe finds its transcript:
+		// the PreWake's stale-key clear probes a keyed one; nothing can probe
+		// the others, so their reset is written here.
+		if folded := foldInfo(info, patch); (strings.TrimSpace(folded.SessionKey) != "" || strings.TrimSpace(folded.StartedConfigHash) != "") &&
+			!transcript.ProviderHasKeyedTranscript(sessionTranscriptProvider(nil, info)) {
+			maps.Copy(patch, session.ConversationResetPatch(true))
+		}
+		attempts, _ := strconv.Atoi(info.WakeAttemptsMetadata)
+		accrual = session.WakeFailureAccrualPatch(attempts, defaultMaxWakeAttempts, until)
+	case session.ExitChurn:
+		if strings.TrimSpace(foldInfo(info, patch).SessionKey) != "" {
+			maps.Copy(patch, session.ConversationResetPatch(false))
+		}
+		cycles, _ := strconv.Atoi(info.ChurnCount)
+		accrual = session.ChurnAccrualPatch(cycles, defaultMaxChurnCycles, until)
+	case session.ExitProductiveDeath:
+		if info.ChurnCount != "" && info.ChurnCount != "0" {
+			patch["churn_count"] = "0"
+		}
+		return patch, class, false
+	default:
+		return patch, class, false
+	}
+	maps.Copy(patch, accrual.Patch)
+	class = accrual.Class(info, r.w.Now)
+	patch["last_woke_at"] = ""
+	return patch, class, true
+}
+
+// heartbeatHeld reports SESS-602's heartbeat hold (Disposition.HeartbeatHeld).
 func heartbeatHeld(info session.Info, now time.Time) bool {
-	return metadataTimeInFuture(strings.TrimSpace(info.HeldUntil), now) && strings.TrimSpace(info.SleepIntent) == ""
+	return session.DispositionOfInfo(info).HeartbeatHeld(now)
 }
 
 // armAwakeHeal is legacy's heal of an asleep row whose own runtime is alive
@@ -205,16 +283,18 @@ func armStabilityClear(r *rowFacts) (intent, bool) {
 	if info.WakeAttemptsMetadata != "" && info.WakeAttemptsMetadata != "0" {
 		patch["wake_attempts"] = "0"
 	}
+	var class session.DispositionPatch
 	if info.QuarantinedUntil != "" {
-		patch["quarantined_until"] = ""
+		// The Quarantine cell with no deadline: the quarantine ends.
+		class = session.CellInfo(info, session.ActorController, session.DispEvent{Kind: session.EvQuarantine}, r.w.Now)
 	}
 	if info.ChurnCount != "" && info.ChurnCount != "0" && r.w.Now.Sub(woke) >= churnProductivityThreshold {
 		patch["churn_count"] = "0"
 	}
-	if len(patch) == 0 {
+	if len(patch) == 0 && class.Len() == 0 {
 		return intent{}, false
 	}
-	return r.heal(intentRowHeal, decideStabilityClear, patch)
+	return r.healClass(intentRowHeal, decideStabilityClear, patch, class)
 }
 
 // armDetachedAt is SESS-533/535/536 (reconcileDetachedAtInfo; v5.8 A6 item
@@ -294,9 +374,6 @@ func asleepHealPatch(info session.Info) session.MetadataPatch {
 	if isNamedSessionInfo(info) && namedSessionModeInfo(info) == "always" {
 		return patch
 	}
-	for _, key := range []string{"session_key", "started_config_hash", session.PrimedAtMetadataKey, session.PrimingAttemptedAtMetadataKey, session.PromptHashMetadataKey} {
-		patch[key] = ""
-	}
-	patch["continuation_reset_pending"] = "true"
+	maps.Copy(patch, session.ConversationResetPatch(true))
 	return patch
 }

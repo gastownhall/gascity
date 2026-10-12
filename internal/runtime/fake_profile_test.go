@@ -1,6 +1,8 @@
 package runtime_test
 
 import (
+	"context"
+	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -38,9 +40,11 @@ var optionalInterfaces = map[string]reflect.Type{
 	"FreshByConstruction":            reflect.TypeFor[runtime.FreshByConstruction](),
 	"FreshLivenessObserver":          reflect.TypeFor[runtime.FreshLivenessObserver](),
 	"IdentitySidecarProvider":        reflect.TypeFor[runtime.IdentitySidecarProvider](),
+	"IdleProbeBudgetProvider":        reflect.TypeFor[runtime.IdleProbeBudgetProvider](),
 	"IdleSnapshotProvider":           reflect.TypeFor[runtime.IdleSnapshotProvider](),
 	"IdleWaitProvider":               reflect.TypeFor[runtime.IdleWaitProvider](),
 	"ImmediateNudgeProvider":         reflect.TypeFor[runtime.ImmediateNudgeProvider](),
+	"InputClearProvider":             reflect.TypeFor[runtime.InputClearProvider](),
 	"InteractionProvider":            reflect.TypeFor[runtime.InteractionProvider](),
 	"InterruptBoundaryWaitProvider":  reflect.TypeFor[runtime.InterruptBoundaryWaitProvider](),
 	"InterruptedTurnResetProvider":   reflect.TypeFor[runtime.InterruptedTurnResetProvider](),
@@ -155,7 +159,7 @@ current-context: c
 // Kills a profile that drifts from its backend: one optional interface more
 // or fewer than the provider production builds, other capabilities, another
 // answer from a fixed trait (sleep capability, fresh reads, an identity
-// sidecar, a transport), or no backend checked.
+// sidecar, a transport, an idle-proof budget), or no backend checked.
 func TestFakeProfilesMatchTheirBackends(t *testing.T) {
 	backends := productionBackends(t)
 	for p := runtime.ProfileTmux; p <= runtime.ProfileT3Bridge; p++ {
@@ -180,7 +184,7 @@ func TestFakeProfilesMatchTheirBackends(t *testing.T) {
 // traits are p's answers to the optional interfaces that report a backend's
 // fixed traits, "-" for one it does not implement.
 func traits(p runtime.Provider) string {
-	out := []string{"-", "-", "-", "-"}
+	out := []string{"-", "-", "-", "-", "-"}
 	if s, ok := p.(runtime.SleepCapabilityProvider); ok {
 		out[0] = string(s.SleepCapability("s"))
 	}
@@ -192,6 +196,9 @@ func traits(p runtime.Provider) string {
 	}
 	if f, ok := p.(runtime.TransportCapabilityProvider); ok {
 		out[3] = strconv.FormatBool(f.SupportsTransport("acp")) + "/" + strconv.FormatBool(f.SupportsTransport("tmux"))
+	}
+	if f, ok := p.(runtime.IdleProbeBudgetProvider); ok {
+		out[4] = f.IdleProbeBudget().String()
 	}
 	return strings.Join(out, " ")
 }
@@ -235,4 +242,40 @@ func TestFullFakeAnswersFromItsState(t *testing.T) {
 	if _, err := broken.ObserveLivenessWithError("s", nil); err == nil {
 		t.Fatal("a broken fake's error-bearing read succeeded")
 	}
+}
+
+// A profiled tmux must preserve composer clearing, including its caller's
+// cancellation context and the backend's refusal to clear protected input.
+func TestTmuxProfileForwardsInputClear(t *testing.T) {
+	for _, result := range []error{nil, runtime.ErrInputClearSkipped} {
+		b := &profileInputClearSpy{FullFake: runtime.FullFake{Fake: runtime.NewFake()}, result: result}
+		p := runtime.NewFakeProfile(runtime.ProfileTmux, b)
+		clearer, ok := p.(runtime.InputClearProvider)
+		if !ok {
+			t.Fatal("tmux profile lacks InputClearProvider")
+		}
+		ctx := t.Context()
+		const window = 2 * time.Second
+		if err := clearer.ClearInput(ctx, "session", window); !errors.Is(err, result) {
+			t.Fatalf("ClearInput error = %v, want %v", err, result)
+		}
+		if b.calls != 1 || b.ctx != ctx || b.name != "session" || b.window != window {
+			t.Fatalf("ClearInput did not forward context, session and restore window: %+v", b)
+		}
+	}
+}
+
+type profileInputClearSpy struct {
+	runtime.FullFake
+	ctx    context.Context
+	name   string
+	window time.Duration
+	result error
+	calls  int
+}
+
+func (b *profileInputClearSpy) ClearInput(ctx context.Context, name string, window time.Duration) error {
+	b.ctx, b.name, b.window = ctx, name, window
+	b.calls++
+	return b.result
 }

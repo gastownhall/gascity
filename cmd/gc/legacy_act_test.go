@@ -27,7 +27,7 @@ func heldDrainAckFixture(t *testing.T, tracked bool) (*reconcilerTestEnv, beads.
 // drainAckFixture is heldDrainAckFixture, the row held or not.
 func drainAckFixture(t *testing.T, tracked, held bool) (*reconcilerTestEnv, beads.Bead, beads.Bead, *fakeDrainOps) {
 	t.Helper()
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "other"}}}
 	if err := env.sp.Start(context.Background(), "worker", runtime.Config{}); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -65,8 +65,8 @@ func drainAckFixture(t *testing.T, tracked, held bool) (*reconcilerTestEnv, bead
 }
 
 func reconcileDrainAckTick(env *reconcilerTestEnv, snapshot, work beads.Bead, dops drainOps) {
-	reconcileSessionBeadsAtPath(context.Background(), "", []beads.Bead{snapshot}, nil, nil, env.cfg, env.sp, env.store, dops,
-		[]beads.Bead{work}, nil, nil, env.dt, map[string]int{}, false, nil, "", nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr)
+	reconcileSessionBeadsAtPath(context.Background(), env.city, []beads.Bead{snapshot}, nil, nil, env.cfg, env.sp, env.store, dops,
+		[]beads.Bead{work}, nil, nil, env.dt, map[string]int{}, false, nil, "", nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr, env.startOptions...)
 }
 
 // operatorResume is `gc session wake`: it consumes the operator's hold.
@@ -220,7 +220,7 @@ func TestDrainTimeoutOverAConsumedHoldIsRefused(t *testing.T) {
 		}
 		operatorResume(t, env, snapshot.ID)
 		env.clk.Advance(2 * time.Minute) // past the drain's deadline
-		advanceSessionDrainsWithSessionsTraced("", env.dt, env.sp, env.store, func(id string) (sessionpkg.Info, bool) {
+		advanceSessionDrainsWithSessionsTraced(env.city, env.dt, env.sp, env.store, func(id string) (sessionpkg.Info, bool) {
 			return env.sessionInfo(id), id == snapshot.ID
 		}, map[string]wakeEvaluation{}, env.cfg, env.clk, nil)
 		assertNotStopPending(t, env, snapshot.ID)
@@ -255,7 +255,7 @@ func TestResetStallEvictionDecidesOnItsRow(t *testing.T) {
 		{map[string]string{"continuation_reset_pending": ""}, false},
 		{map[string]string{"generation": "2", "sleep_intent": "user-hold"}, true},
 	} {
-		env := newReconcilerTestEnv()
+		env := newReconcilerTestEnv(t)
 		env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}, Session: config.SessionConfig{StartupTimeout: "60s"}}
 		if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "x"}); err != nil {
 			t.Fatal(err)
@@ -267,7 +267,7 @@ func TestResetStallEvictionDecidesOnItsRow(t *testing.T) {
 		})
 		decided := sessionInfoFromBead(mustGetBead(t, env.store, session.ID))
 		env.setSessionMetadata(&session, c.move)
-		recordResetStallIfDue("", env.store, env.sp, env.cfg, decided, "worker", "worker", true, false, time.Minute, env.clk.Now().UTC(), env.dt, nil, &env.stderr, nil)
+		recordResetStallIfDue(env.city, env.store, env.sp, env.cfg, decided, "worker", "worker", true, false, time.Minute, env.clk.Now().UTC(), env.dt, nil, &env.stderr, nil)
 		if evicted := env.sp.CountCalls("Stop", "worker") > 0; evicted != c.evict {
 			t.Errorf("moved %v: evicted %v, want %v (stderr %q)", c.move, evicted, c.evict, env.stderr.String())
 		}
@@ -278,7 +278,7 @@ func TestResetStallEvictionDecidesOnItsRow(t *testing.T) {
 // idle-stop-pending before it begins, and its basis is that row as stored, so
 // its stop-pending mark and timeout kill are not refused by its own write.
 func TestIdleDrainBasisIsTheStoredRow(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{SessionSleep: config.SessionSleepConfig{InteractiveResume: "60s"}, Agents: []config.Agent{{Name: "worker"}}}
 	env.addDesired("worker", "worker", true)
 	session := env.createSessionBead("worker", "worker")
@@ -288,8 +288,8 @@ func TestIdleDrainBasisIsTheStoredRow(t *testing.T) {
 	idleGate := make(chan struct{})
 	env.sp.WaitForIdleGates["worker"] = idleGate
 	tick := func(b beads.Bead) {
-		reconcileSessionBeads(context.Background(), []beads.Bead{b}, env.desiredState, configuredSessionNames(env.cfg, "", env.store), env.cfg, env.sp,
-			env.store, nil, nil, nil, env.dt, map[string]int{"worker": 1}, false, nil, "", nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr)
+		reconcileSessionBeadsAtPath(context.Background(), env.city, []beads.Bead{b}, env.desiredState, configuredSessionNames(env.cfg, "", env.store), env.cfg, env.sp,
+			env.store, nil, nil, nil, nil, env.dt, map[string]int{"worker": 1}, false, nil, "", nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr, env.startOptions...)
 	}
 	tick(session)
 	close(idleGate)
@@ -393,7 +393,7 @@ func TestDrainMidDrainHeartbeatAndSuspend(t *testing.T) {
 	assertStopPending(t, env, snapshot.ID)
 
 	env, snapshot, work, dops = drainAckFixture(t, true, false)
-	if err := sessionFrontDoor(env.store).OperatorSuspend(snapshot.ID, env.clk.Now()); err != nil {
+	if _, err := sessionFrontDoor(env.store).OperatorSuspend(snapshot.ID, env.clk.Now()); err != nil {
 		t.Fatal(err)
 	}
 	reconcileDrainAckTick(env, mustGetBead(t, env.store, snapshot.ID), work, dops)
@@ -433,6 +433,34 @@ func TestIdleRespawnOverAnIdleStopPendingIntentKeepsItsBasis(t *testing.T) {
 	}
 }
 
+// TestIdleRespawnRefusedCommitUnmints: an idle respawn whose fenced record of
+// the attempt is refused (the row moved) begins no drain and leaves no open
+// disposition mint for the idle stop's clear it carried.
+func TestIdleRespawnRefusedCommitUnmints(t *testing.T) {
+	clk := &clock.Fake{Time: time.Now().UTC()}
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "w", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	info := sessionpkg.Info{ID: "s1", SessionNameMetadata: "w", Generation: "1", SleepIntent: "idle-stop-pending", DetachedAt: clk.Now().Add(-2 * time.Minute).Format(time.RFC3339)}
+	policy := resolvedSessionSleepPolicy{Class: config.SessionSleepInteractiveResume, Effective: "60s", Capability: runtime.SessionSleepCapabilityFull, Duration: time.Minute}
+	eval := wakeEvaluation{Reason: "assigned-work", Reasons: []WakeReason{WakeWork}, Policy: policy, AssignedWorkBeadID: "work-1"}
+	sessFront := idleRespawnUnitStore(t, info)
+	if err := sessFront.ApplyPatch(info.ID, sessionpkg.MetadataPatch{"sleep_intent": "idle-stop-pending", "generation": "2"}); err != nil { // the row moved
+		t.Fatal(err)
+	}
+	dt := newDrainTracker()
+	probe := dt.startIdleProbe(info.ID)
+	dt.finishIdleProbe(info.ID, probe, true, clk.Now().Add(-time.Second))
+	before := sessionpkg.OpenDispositionMints(info.ID)
+	if began, _, err := beginIdleRespawnDrainIfIdle(info, eval, dt, sp, sessFront, clk); err != nil || began {
+		t.Fatalf("begin over a moved row = %v, %v; want refused", began, err)
+	}
+	if n := sessionpkg.OpenDispositionMints(info.ID) - before; n != 0 {
+		t.Errorf("the refused attempt left %d open mints", n)
+	}
+}
+
 // TestUnreadableAckSourceDefers: an ack whose source cannot be read is
 // neither the agent's nor the controller's. Over a consumed hold, the mark
 // and the timeout both defer: the row is not marked stop-pending, the drain
@@ -447,7 +475,7 @@ func TestUnreadableAckSourceDefers(t *testing.T) {
 				reconcileDrainAckTick(env, mustGetBead(t, env.store, snapshot.ID), work, dops)
 			} else {
 				env.clk.Advance(2 * time.Minute) // past the drain's deadline
-				advanceSessionDrainsWithSessionsTraced("", env.dt, env.sp, env.store, func(id string) (sessionpkg.Info, bool) {
+				advanceSessionDrainsWithSessionsTraced(env.city, env.dt, env.sp, env.store, func(id string) (sessionpkg.Info, bool) {
 					return env.sessionInfo(id), id == snapshot.ID
 				}, map[string]wakeEvaluation{}, env.cfg, env.clk, nil)
 			}

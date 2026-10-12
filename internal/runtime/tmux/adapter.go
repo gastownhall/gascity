@@ -56,6 +56,7 @@ var (
 	_ runtime.ImmediateNudgeProvider        = (*Provider)(nil)
 	_ runtime.InterruptBoundaryWaitProvider = (*Provider)(nil)
 	_ runtime.InterruptedTurnResetProvider  = (*Provider)(nil)
+	_ runtime.InputClearProvider            = (*Provider)(nil)
 	_ runtime.ProcessTableScanner           = (*Provider)(nil)
 	_ runtime.ServerLifecycleProvider       = (*Provider)(nil)
 	_ runtime.UnattendedSessionStopper      = (*Provider)(nil)
@@ -637,9 +638,23 @@ func (p *Provider) WaitForIdle(ctx context.Context, name string, timeout time.Du
 
 // SnapshotIdle reports, in a single non-blocking observation, whether the named
 // session is at an idle interactive boundary right now. It implements
-// [runtime.IdleSnapshotProvider].
+// [runtime.IdleSnapshotProvider] by forwarding to [Tmux.SnapshotIdle], so the
+// tri-state contract is the leaf's: (false, nil) means the capture contains a
+// busy-indicator string, and a pane showing neither that nor the ready prompt
+// returns [runtime.ErrIdleIndeterminate].
 func (p *Provider) SnapshotIdle(name string) (bool, error) {
 	return p.tm.SnapshotIdle(name)
+}
+
+// ClearInput empties a Claude Code session's input box, waiting up to
+// restoreWindow for Claude to restore an interrupted prompt into it. It
+// implements [runtime.InputClearProvider].
+func (p *Provider) ClearInput(ctx context.Context, name string, restoreWindow time.Duration) error {
+	err := p.tm.ClearInput(ctx, name, restoreWindow)
+	if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
+		return nil
+	}
+	return err
 }
 
 // WaitForInterruptBoundary waits for a provider-native interrupt acknowledgement
@@ -717,6 +732,11 @@ func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 	// in scrollback during inter-tool-call gaps, so immediate send-keys
 	// would inject text mid-execution. See upstream dfd945e9/6bc898ce.
 	if idleTimeout := p.tm.cfg.NudgeIdleTimeout; idleTimeout > 0 {
+		// A pending permission prompt does not turn idle on its own, and
+		// NudgeNow refuses it anyway: refuse it now, not after the whole wait.
+		if err := p.tm.checkNoApprovalPrompt(name); errors.Is(err, runtime.ErrPendingInteraction) {
+			return err
+		}
 		// Best-effort wait — if it fails (session gone, timeout), proceed
 		// with the nudge anyway. The message may arrive during active work,
 		// but Claude's cooperative queue will handle it at the next turn.
@@ -757,6 +777,18 @@ func (p *Provider) NudgeNow(name string, content []runtime.ContentBlock) error {
 	message := strings.Join(parts, "\n")
 	if message == "" {
 		return nil
+	}
+
+	// Never type into a pending permission prompt: Enter would pick the
+	// highlighted option ("Yes") and digits would pick others (#2892).
+	if err := p.tm.checkNoApprovalPrompt(name); err != nil {
+		if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
+			return nil
+		}
+		if errors.Is(err, runtime.ErrPendingInteraction) {
+			return err
+		}
+		return fmt.Errorf("checking %q for a pending permission prompt before sending text: %w", name, err)
 	}
 
 	if used, err := p.tm.sendHiddenAttachedText(name, message); used {

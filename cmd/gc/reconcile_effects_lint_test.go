@@ -42,7 +42,7 @@ var effectBannedMethods = []string{
 	"RollbackPendingCreateAtomicallyUnder", "CommitStartedIfCurrentUnder", "Commit",
 	"Create", "Update", "Close", "Reopen", "CloseAll", "Delete", "Tx", "DepAdd", "DepRemove",
 	"CommitStartedIfCurrent",
-	"WakeSession", "RequestWakeUnlessHeld", "OperatorSuspend", "ApplyKeepingUserHold", "CreateSession", "CreateSessionInfo", "SaveStartupHealthEpisode",
+	"WakeSession", "RequestWakeUnlessHeld", "OperatorSuspend", "ApplyDisposition", "ApplyDispositionFresh", "ApplySleep", "ApplyLifecycle", "CreateSession", "CreateSessionInfo", "SaveStartupHealthEpisode",
 	"CreateWait", "CancelWait", "CancelWaits", "ExpireWait", "FailWait", "CloseWaitFromNudge", "FailWaitFromNudge",
 	"MarkWaitReady", "MarkWaitReadyForRedelivery", "SetWaitNudgeID", "RetryClosedWait", "ReassignWaits",
 	"StopUnattendedSession", "StopForCleanup",
@@ -90,8 +90,8 @@ var effectProviderVerbs = []string{"Start", "Stop", "SetMeta", "Nudge", "Interru
 // them allowed wherever they live. fenceDestructive and the
 // SessionObjectKiller kills call no verb.
 var effectProviderAllowed = map[string][]string{
-	"startEffect.launch": {"Start"}, // the start effect's FreshOnly provider Start (C5a1)
-	"stopFenced":         {"Stop"},  // the fenced leaf's Stop, then C8.8
+	"startLaunch": {"Start"}, // the start effect's launch Call: the FreshOnly provider Start (C5a1)
+	"stopFenced":  {"Stop"},  // the fenced leaf's Stop, then C8.8
 }
 
 // effectTxOnly are the effect mechanics only the transaction

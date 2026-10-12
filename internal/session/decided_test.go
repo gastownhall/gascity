@@ -112,6 +112,17 @@ func TestDecidedMatch(t *testing.T) {
 		{site: FactsLegacyResetEvict, move: map[string]string{"continuation_reset_pending": ""}},
 		{site: FactsLegacyResetEvict, move: map[string]string{"reset_committed_at": "2026-02-01T00:00:00Z"}},
 		{site: FactsLegacyResetEvict, move: map[string]string{"generation": "3"}, wantMatch: true},
+
+		// mc-uhvqj: a wake failure or churn accrues only for the wake it read.
+		{site: FactsLegacyExitAccrual, decided: map[string]string{"last_woke_at": "2026-01-01T00:00:00Z"}, wantMatch: true},
+		{site: FactsLegacyExitAccrual, closeRow: true},
+		{site: FactsLegacyExitAccrual, decided: map[string]string{"last_woke_at": "2026-01-01T00:00:00Z"}, move: map[string]string{"last_woke_at": "", "sleep_reason": "killed"}},
+		{site: FactsLegacyExitAccrual, decided: map[string]string{"last_woke_at": "2026-01-01T00:00:00Z"}, move: map[string]string{"last_woke_at": ""}},
+		{site: FactsLegacyExitAccrual, move: map[string]string{"sleep_reason": "killed"}},
+		{site: FactsLegacyExitAccrual, move: map[string]string{"generation": "3"}},
+		{site: FactsLegacyExitAccrual, move: map[string]string{"instance_token": "tok-2"}},
+		// The tick's own heal of the dead row's state is the same decision.
+		{site: FactsLegacyExitAccrual, move: map[string]string{"state": string(StateAsleep)}, wantMatch: true},
 	} {
 		decidedMeta, freshMeta := map[string]string{}, map[string]string{}
 		for k, v := range base {

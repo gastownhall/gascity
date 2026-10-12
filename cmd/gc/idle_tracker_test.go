@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -273,6 +274,43 @@ func TestIdleTracker_ContentClockErrorLeavesAnchor(t *testing.T) {
 	delete(sp.err, "deacon")
 	if !it.checkIdle("deacon", "", "claude", "", sp, base.Add(61*time.Minute)) {
 		t.Fatalf("checkIdle did not fire after recovery; the error reset the anchor")
+	}
+}
+
+// TestIdleTracker_ContentClockIndeterminateResetsAnchor verifies a scan that
+// sees neither a ready prompt nor a busy indicator (runtime.ErrIdleIndeterminate)
+// resets the idle-since anchor the way a busy observation does, unlike a
+// transient snapshot error: the anchor must not span a stretch the scan could
+// not read as idle and then fire early once the prompt returns.
+func TestIdleTracker_ContentClockIndeterminateResetsAnchor(t *testing.T) {
+	t.Parallel()
+
+	it := newIdleTracker()
+	it.setTimeout("deacon", 1*time.Hour)
+
+	sp := newFakeIdleSnapshotProvider()
+	base := time.Now()
+
+	sp.idle["deacon"] = true
+	if it.checkIdle("deacon", "", "claude", "", sp, base) {
+		t.Fatalf("unexpected fire on first idle observation")
+	}
+
+	// The prompt leaves the screen mid-run: must not fire, and must reset.
+	sp.err["deacon"] = fmt.Errorf("scanning pane: %w", runtime.ErrIdleIndeterminate)
+	if it.checkIdle("deacon", "", "claude", "", sp, base.Add(30*time.Minute)) {
+		t.Fatalf("checkIdle fired on an indeterminate snapshot")
+	}
+
+	// The prompt returns: the clock restarts here, so 61m from base must not
+	// fire.
+	delete(sp.err, "deacon")
+	if it.checkIdle("deacon", "", "claude", "", sp, base.Add(61*time.Minute)) {
+		t.Fatalf("checkIdle fired 61m from base; the indeterminate snapshot left the pre-gap anchor in place")
+	}
+	// 61m of continuous idle after the restart: fires.
+	if !it.checkIdle("deacon", "", "claude", "", sp, base.Add(122*time.Minute)) {
+		t.Fatalf("checkIdle did not fire after 61m of continuous idle following the reset")
 	}
 }
 

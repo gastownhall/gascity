@@ -5,13 +5,18 @@ go_library(
     srcs = [
         "dolt.go",
         "failure_artifacts.go",
+        "flock_linux.go",
         "git.go",
+        "loopback_port.go",
         "path.go",
         "timeout.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/testutil",
     visibility = ["//:__subpackages__"],
-    deps = ["//internal/pathutil"],
+    deps = [
+        "//internal/loopbackport",
+        "//internal/pathutil",
+    ],
 )
 
 go_test(

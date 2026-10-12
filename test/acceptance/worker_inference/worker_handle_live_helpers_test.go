@@ -48,6 +48,12 @@ type liveWorkerHandleHarness struct {
 	store      beads.Store       // the manager's bead store (shared city store for city-backed profiles)
 	sessionEnv map[string]string // env the provider session (and its gc children) receives
 	adapter    workerpkg.SessionLogAdapter
+	city       sessionpkg.CityDir // the manager's city, whose runtime dir holds the lease
+}
+
+// as is an Actor of kind on the harness's city.
+func (h *liveWorkerHandleHarness) as(kind sessionpkg.ActorKind) sessionpkg.Actor {
+	return sessionpkg.Actor{Kind: kind, City: h.city}
 }
 
 func newLiveWorkerHandleHarness(t *testing.T) (*liveWorkerHandleHarness, error) {
@@ -131,6 +137,10 @@ func newLiveWorkerHandleHarness(t *testing.T) (*liveWorkerHandleHarness, error) 
 
 	provider := runtimetmux.NewProviderWithConfig(tmuxCfg)
 	manager := sessionpkg.NewManagerWithOptions(store, provider, sessionpkg.WithCityPath(root))
+	city, err := sessionpkg.NewCityDir(root)
+	if err != nil {
+		return nil, err
+	}
 	sessionEnv := mergeStringMaps(envMapFromAcceptanceEnv(env), resolved.Env)
 	handle, err := workerpkg.NewSessionHandle(workerpkg.SessionHandleConfig{
 		Manager: manager,
@@ -168,6 +178,7 @@ func newLiveWorkerHandleHarness(t *testing.T) (*liveWorkerHandleHarness, error) 
 		workDir:    root,
 		gcHome:     gcHome,
 		cityDir:    cityDir,
+		city:       city,
 		store:      store,
 		sessionEnv: sessionEnv,
 		adapter: workerpkg.SessionLogAdapter{
@@ -175,7 +186,7 @@ func newLiveWorkerHandleHarness(t *testing.T) (*liveWorkerHandleHarness, error) 
 		},
 	}
 	t.Cleanup(func() {
-		_ = harness.handle.Stop(context.Background())
+		_ = harness.handle.Stop(context.Background(), harness.as(sessionpkg.ActorOperator))
 		if harness.cityDir != "" {
 			// Reap any runtime started against the city (e.g. nudge-poller
 			// sidecars spawned by gc prime --hook) before removing it.
@@ -365,7 +376,7 @@ func seedLiveProviderStateFor(profile workerpkg.Profile, gcHome, workDir string)
 func (h *liveWorkerHandleHarness) start() (workerpkg.State, map[string]string, error) {
 	ctx := context.Background()
 	evidence := h.baseEvidence()
-	err := h.handle.Start(ctx)
+	err := h.handle.Start(ctx, h.as(sessionpkg.ActorAgent))
 	state, stateErr := h.handle.State(ctx)
 	evidence = h.withStateEvidence(evidence, state, stateErr)
 	liveWorkerDebugf("start work_dir=%s phase=%s session_id=%s session_name=%s err=%v state_err=%v", h.workDir, state.Phase, state.SessionID, state.SessionName, err, stateErr)
@@ -378,7 +389,7 @@ func (h *liveWorkerHandleHarness) start() (workerpkg.State, map[string]string, e
 func (h *liveWorkerHandleHarness) stop() (workerpkg.State, map[string]string, error) {
 	ctx := context.Background()
 	evidence := h.baseEvidence()
-	err := h.handle.Stop(ctx)
+	err := h.handle.Stop(ctx, h.as(sessionpkg.ActorOperator))
 	state, stateErr := h.handle.State(ctx)
 	evidence = h.withStateEvidence(evidence, state, stateErr)
 	liveWorkerDebugf("stop work_dir=%s phase=%s session_id=%s session_name=%s err=%v state_err=%v", h.workDir, state.Phase, state.SessionID, state.SessionName, err, stateErr)
@@ -397,7 +408,7 @@ func (h *liveWorkerHandleHarness) submitAndWaitForFile(prompt, outputRel string,
 	actualPrompt := prompt + "\n\nWrite the requested output file at this exact path: " + outputPath
 	evidence["prompt"] = actualPrompt
 
-	result, err := h.handle.Message(ctx, workerpkg.MessageRequest{
+	result, err := h.handle.Message(ctx, h.as(sessionpkg.ActorAgent), workerpkg.MessageRequest{
 		Text:     actualPrompt,
 		Delivery: delivery,
 	})
@@ -425,7 +436,7 @@ func (h *liveWorkerHandleHarness) submit(prompt string, delivery workerpkg.Deliv
 	evidence["prompt"] = prompt
 	evidence["submit_delivery"] = string(delivery)
 
-	result, err := h.handle.Message(ctx, workerpkg.MessageRequest{
+	result, err := h.handle.Message(ctx, h.as(sessionpkg.ActorAgent), workerpkg.MessageRequest{
 		Text:     prompt,
 		Delivery: delivery,
 	})

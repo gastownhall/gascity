@@ -159,15 +159,24 @@ var (
 	v2SatisfiedWake = Site{Mode: ModeV2, File: srcHeals}.pending("mc-fmhlc", "A6's satisfied-wake clear (D7)")
 	v2AdoptCommit   = Site{Mode: ModeV2, File: "cmd/gc/reconcile_effect_start.go"}.pending("mc-h28bx",
 		"S2's adopt commit clears the wake request (D7)")
-	v2Accrual = Site{Mode: ModeV2, File: "cmd/gc/reconcile_effect_start.go"}.pending("mc-7je1h",
-		"S3/S5 accrue a failed or dying start (SESS-537/538)")
+	// v2Accrual is A6's accrual of a dead runtime (SESS-537/538), which
+	// also finishes a pending idle stop's sleep (SESS-532: sleep_reason=idle,
+	// sleep_intent cleared); v2StartAccrual is C5a2's of a failed start.
+	v2Accrual = v2(srcHeals, "deadRuntimePatch")
+	// v2SleepIntentClear is A20's clear of a woken row's leftover
+	// idle-stop-pending mark (SESS-616).
+	v2SleepIntentClear = v2("cmd/gc/reconcile_arms_drain.go", "armDrainBegin")
+	v2StartAccrual     = Site{Mode: ModeV2, File: "cmd/gc/reconcile_effect_start.go"}.pending("mc-7je1h",
+		"S3/S5 accrue a failed start (SESS-537)")
 	opCreate = op(srcManager, "Manager.createBeadOnly")
 	// opConsumeHold is an operator's resume consuming a user hold (#7424's
 	// interim D8 consume; D8 B's lease-fenced consume replaces it).
 	opConsumeHold = op("internal/session/resume_user_hold.go", "Manager.consumeUserHold")
-	legacyCreate  = legacy(srcBeads, "syncCreateMetadata")
-	waitHold      = v2("cmd/gc/reconcile_steps_waits.go", "clearSessionWaitHoldFenced")
-	sleepPolicy   = sites(legacy(srcSleep, "persistSleepPolicyMetadataInfo"))
+	// opEncode is the disposition class's one encoder (R7).
+	opEncode     = op("internal/session/disposition.go", "Disposition.Encode")
+	legacyCreate = legacy(srcBeads, "syncCreateMetadata")
+	waitHold     = v2("cmd/gc/reconcile_steps_waits.go", "clearSessionWaitHoldFenced")
+	sleepPolicy  = sites(legacy(srcSleep, "persistSleepPolicyMetadataInfo"))
 	// leaseAcquire is the record's one writer, in session; legacy's starters
 	// and stoppers (L1b) and v2's leased effects (runTx, B-a4) call it.
 	leaseAcquire = legacy("internal/session/runtime_lease.go", "RuntimeLease.acquireRecord")
@@ -186,9 +195,16 @@ func with(fields []Field, asClear bool, site Site, keys ...string) []Field {
 	return fields
 }
 
-// fields is the registry, grouped by class, then the writers of v2's create
-// (C1) and named reopen effects, which stamp a row's whole starting state.
-var fields = withObserved(with(with(with(with(registry, false, v2("cmd/gc/reconcile_steps_nudges.go", "externalReadsLane.nudges"),
+// fields is the registry, grouped by class, then v2's writers: A7's
+// identity (M1), A8's baseline (M2), and the create (C1) and named reopen
+// effects, which stamp a row's whole starting state.
+var fields = withObserved(with(with(with(with(with(with(with(registry, false, v2("cmd/gc/reconcile_arms_drift.go", "rowFacts.driftRepair"),
+	"config_drift_deferred_at", "config_drift_deferred_key", "attached_config_drift_deferred_at", "attached_config_drift_deferred_key", "session_key"), false, v2("cmd/gc/reconcile_arms_metadata.go", "identityPatch"),
+	"template", "session_origin", "pool_managed", "pool_slot", "agent_name", "dependency_only", NamedSessionMetadataKey,
+	NamedSessionIdentityMetadata, NamedSessionModeMetadata, "alias", "alias_history", "pool_alias_conflict", "pool_alias_conflict_count",
+	"pool_alias_conflict_at", "synced_at", "work_dir", "wake_mode", "session_key", "continuation_epoch", "command", "provider", "provider_kind",
+	"builtin_ancestor", "resume_flag", "resume_style", "resume_command", "session_id_flag", "close_reason", "closed_at"), false, v2("cmd/gc/reconcile_baseline.go", "baselinePatch"),
+	"started_config_hash", "started_provision_hash", "started_launch_hash", "core_hash_breakdown", "started_live_hash", "live_hash"), false, v2("cmd/gc/reconcile_steps_nudges.go", "externalReadsLane.nudges"),
 	"idle_claim_nudge_trigger", "idle_claim_nudge_count", "idle_claim_nudge_at", "continuation_claim_nudge_work",
 	"continuation_claim_nudge_root", "continuation_claim_nudge_store_ref", "continuation_claim_nudge_generation",
 	"continuation_claim_nudge_count", "continuation_claim_nudge_at", "execution_claim_nudge_work", "execution_claim_nudge_root",
@@ -227,18 +243,22 @@ var observed = []struct {
 	keys    []string
 }{
 	{legacy(srcReconciler, "finalizeDrainAckStoppedSession"), false, []string{"last_woke_at", "pending_create_claim", "pending_create_started_at", "slept_at", "state", "state_reason"}},
-	{op("internal/session/kill_fence.go", "KillPendingPatch"), false, []string{"last_woke_at", "pending_create_claim", "pending_create_started_at", "sleep_intent", "sleep_reason", "state", "suspended_at", "synced_at"}},
+	{op("internal/session/kill_fence.go", "KillPendingPatch"), false, []string{"last_woke_at", "pending_create_claim", "pending_create_started_at", "sleep_reason", "state", "synced_at"}},
 	{op("internal/session/kill_fence.go", "KillPendingPatch"), true, []string{"wake_request", "wake_requested_at"}},
 	{legacy(srcTransition, "CommitStartedPatch"), true, []string{"reset_committed_at"}},
 	{legacy(srcTransition, "ConfigDriftResetPatch"), false, []string{"continuation_reset_pending", "last_woke_at", "live_hash", "pending_create_claim", "pending_create_started_at", "primed_at", "priming_attempted_at", "prompt_hash", "session_key", "started_config_hash", "started_live_hash", "startup_dialog_verified", "state"}},
 	{legacy(srcTransition, "ConfigDriftResetPatch"), true, []string{"restart_requested"}},
+	{v2(srcTransition, "ConfigDriftAsleepResetPatch"), false, []string{"continuation_reset_pending", "last_woke_at", "live_hash", "pending_create_claim", "pending_create_started_at", "primed_at", "priming_attempted_at", "prompt_hash", "started_config_hash", "started_live_hash", "startup_dialog_verified", "state"}},
+	{v2(srcTransition, "ConfigDriftAsleepResetPatch"), true, []string{"restart_requested"}},
 	{legacy(srcTransition, "PreWakePatch"), false, []string{"sleep_reason"}},
-	{legacy(srcTransition, "PreWakePatch"), true, []string{"sleep_intent"}},
+	// A fresh wake's conversation reset (applyFreshWakeConversationReset),
+	// which v2's PreWake reuses: the baseline cleared for its commit.
+	{legacy(srcTransition, "PreWakePatch"), true, []string{"started_config_hash", "started_live_hash", "live_hash"}},
 	{legacy(srcTransition, "RestartRequestPatch"), false, []string{"continuation_reset_pending", "last_woke_at", "pending_create_claim", "pending_create_started_at", "primed_at", "priming_attempted_at", "prompt_hash", "session_key", "started_config_hash"}},
 	{legacy(srcTransition, "RetireNamedSessionPatch"), false, []string{"pending_create_claim", "pending_create_started_at", "state", "state_reason"}},
 	{op(srcManager, "Manager.createBeadOnly"), false, []string{"continuation_epoch", "instance_token", "pending_create_claim", "pending_create_started_at", "provider", "resume_command", "resume_flag", "resume_style", "session_id_flag", "session_origin", "state", "work_dir"}},
-	{op(srcManager, "Manager.suspend"), false, []string{"held_until", "sleep_intent", "sleep_reason", "slept_at", "state"}},
-	{op(srcManager, "Manager.suspend"), true, []string{"wake_request", "wake_requested_at"}},
+	{op(srcManager, "Manager.Suspend"), false, []string{"held_until", "sleep_intent", "sleep_reason", "slept_at", "state"}},
+	{op(srcManager, "Manager.Suspend"), true, []string{"wake_request", "wake_requested_at"}},
 	{op("internal/session/store.go", "Store.SetState"), false, []string{"state", "state_reason"}},
 	{op(srcWaitStore, "Store.wakeSessionFromBead"), false, []string{"churn_count", "held_until", "quarantined_until", "sleep_intent", "wait_hold", "wake_attempts", "wake_refused_event_at"}},
 	{v2("cmd/gc/allocator_create_named.go", "reopenNamed"), true, []string{RuntimeLeaseHolderKey, RuntimeLeaseExpiresKey, RuntimeLeaseTTLKey, RuntimeLeaseFlockKey}},
@@ -261,7 +281,7 @@ var registry = slices.Concat([]Field{
 	// Lifecycle.
 	{Key: "state", Class: ClassLifecycle, Writers: sites(legacyPreWake, v2(srcHeals, "armAwakeHeal"), v2(srcHeals, "asleepHealPatch"))},
 	{Key: "state_reason", Class: ClassLifecycle, Writers: sites(legacyCommit, op("internal/session/kill_fence.go", "KillPendingPatch"))},
-	{Key: "sleep_reason", Class: ClassLifecycle, Writers: sites(legacy(srcTransition, "SleepPatch"), v2(srcHeals, "asleepHealPatch")), Clears: sites(waitHold)},
+	{Key: "sleep_reason", Class: ClassLifecycle, Writers: sites(legacy(srcTransition, "SleepPatch"), v2(srcHeals, "asleepHealPatch"), v2Accrual), Clears: sites(waitHold)},
 	{Key: "slept_at", Class: ClassLifecycle, Writers: sites(legacy(srcTransition, "SleepPatch"),
 		op("internal/session/kill_fence.go", "KillPendingPatch"))},
 	{Key: "last_woke_at", Class: ClassLifecycle, Writers: sites(legacyPreWake, v2PreWake)},
@@ -275,11 +295,11 @@ var registry = slices.Concat([]Field{
 	{Key: "closed_at", Class: ClassLifecycle, Writers: sites(legacy(srcTransition, "ClosePatch"))},
 
 	// Operator intent.
-	{Key: "held_until", Class: ClassOperatorIntent, Writers: sites(op(srcTransition, "OperatorSuspendPatch")), Clears: sites(v2(srcTransition, "ClearExpiredHoldPatch"), opConsumeHold, op("cmd/gc/cmd_session_kill_fence.go", "writeSessionKillFence"))},
-	{Key: "quarantined_until", Class: ClassOperatorIntent, Writers: sites(legacy(srcReconcile, "recordRateLimitQuarantine"), v2Accrual), Clears: sites(v2(srcHeals, "armStabilityClear"))},
-	{Key: "sleep_intent", Class: ClassOperatorIntent, Writers: sites(op(srcTransition, "OperatorSuspendPatch"), legacy(srcSleep, "markIdleSleepPendingInfo")), Clears: sites(waitHold, opConsumeHold)},
-	{Key: "wait_hold", Class: ClassOperatorIntent, Writers: sites(op("cmd/gc/cmd_wait.go", "doSessionWait")), Clears: sites(waitHold)},
-	{Key: "suspended_at", Class: ClassOperatorIntent, Writers: sites(op(srcManager, "Manager.suspend")), Clears: sites(opConsumeHold)},
+	{Key: "held_until", Class: ClassOperatorIntent, Writers: sites(opEncode), Clears: sites(opConsumeHold, op("cmd/gc/cmd_session_kill_fence.go", "writeSessionKillFence"), op("cmd/gc/cmd_session_kill_fence.go", "killSleepPatch"))},
+	{Key: "quarantined_until", Class: ClassOperatorIntent, Writers: sites(opEncode, legacy(srcReconcile, "recordRateLimitQuarantine"), v2Accrual, v2StartAccrual), Clears: sites(v2(srcHeals, "armStabilityClear"))},
+	{Key: "sleep_intent", Class: ClassOperatorIntent, Writers: sites(opEncode, legacy(srcSleep, "markIdleSleepPendingInfo")), Clears: sites(waitHold, opConsumeHold, op("cmd/gc/cmd_session_kill_fence.go", "writeSessionKillFence"), v2SleepIntentClear, v2Accrual)},
+	{Key: "wait_hold", Class: ClassOperatorIntent, Writers: sites(opEncode, op("cmd/gc/cmd_wait.go", "doSessionWait")), Clears: sites(waitHold)},
+	{Key: "suspended_at", Class: ClassOperatorIntent, Writers: sites(opEncode, op(srcManager, "Manager.Suspend")), Clears: sites(opConsumeHold, op("cmd/gc/cmd_session_kill_fence.go", "writeSessionKillFence"))},
 	{Key: "pin_awake", Class: ClassOperatorIntent, Writers: sites(op("cmd/gc/cmd_session_pin.go", "cmdSessionSetPin")), Readers: sites(v2("cmd/gc/allocator_decide.go", "decidePass.awake"))},
 	// template_overrides is a per-session setting the start reads and nothing
 	// clears, so it is operator intent, not a request.
@@ -300,8 +320,8 @@ var registry = slices.Concat([]Field{
 	{Key: DrainAckAtKey, Class: ClassStopRequest, NewKey: true, Writers: sites(op("cmd/gc/cmd_runtime_drain.go", "drainAckRowPatch")), Readers: sites(v2(srcStopKeys, "readStopKeys")), Clears: sites(v2(srcStopKeys, "stopVoidResiduePatch"))},
 
 	// Counters.
-	{Key: "wake_attempts", Class: ClassCounter, Writers: sites(legacy(srcReconcile, "recordWakeFailure"), v2(srcHeals, "armStabilityClear"), v2Accrual)},
-	{Key: "churn_count", Class: ClassCounter, Writers: sites(legacy(srcReconcile, "recordChurn"), v2(srcHeals, "armStabilityClear"), v2Accrual)},
+	{Key: "wake_attempts", Class: ClassCounter, Writers: sites(legacy(srcReconcile, "recordWakeFailure"), v2(srcHeals, "armStabilityClear"), v2Accrual, v2StartAccrual)},
+	{Key: "churn_count", Class: ClassCounter, Writers: sites(legacy(srcReconcile, "recordChurn"), v2(srcHeals, "armStabilityClear"), v2Accrual, v2StartAccrual)},
 	{Key: "crash_count", Class: ClassCounter, NoWriter: "dead: only ReactivatePatch writes it, and nothing calls that"},
 	{Key: "quarantine_cycle", Class: ClassCounter, NoWriter: "dead: only QuarantinePatch writes it, and nothing calls that"},
 	{Key: "idle_respawn_attempts", Class: ClassCounter, Writers: sites(legacy(srcReconciler, "beginIdleRespawnDrainIfIdle"))},
@@ -309,9 +329,9 @@ var registry = slices.Concat([]Field{
 	// Markers.
 	{Key: "detached_at", Class: ClassMarker, Writers: sites(legacy(srcSleep, "reconcileDetachedAtInfo"), v2(srcHeals, "armDetachedAt")), Clears: sites(legacyPreWake)},
 	{Key: "stranded_event_emitted_at", Class: ClassMarker, Writers: sites(legacy(srcReconciler, "emitSessionStrandedDiagnostic")), Clears: sites(v2(srcHeals, "armStrandedClear"))},
-	// D2's idle latch: v2 reads it through configWakeSuppressedInfo and has
-	// no writer yet (DIF-M2).
-	{Key: "sleep_policy_fingerprint", Class: ClassMarker, Writers: sites(sleepPolicy[0], Site{Mode: ModeV2, File: srcStopKeys}.pending("mc-v3jws", "D2: the idle drain begin's CAS writes the latch")), Readers: sites(v2(srcSleep, "configWakeSuppressedInfoWithError"))},
+	// D2's idle latch: A20's idle begin writes it in its CAS (C6a2); v2
+	// reads it through configWakeSuppressedInfo.
+	{Key: "sleep_policy_fingerprint", Class: ClassMarker, Writers: sites(sleepPolicy[0], v2("cmd/gc/reconcile_arms_drain.go", "armDrainBegin")), Readers: sites(v2(srcSleep, "configWakeSuppressedInfoWithError"))},
 	{Key: CurrentBeadIDKey, Class: ClassMarker, Writers: sites(legacy("cmd/gc/session_bead_cycle.go", "recordCurrentBeadIDOnWake"), v2(srcHeals, "armCurrentBead"))},
 	{Key: beadmeta.CurrentClaimBeadIDMetadataKey, Class: ClassMarker, Writers: sites(op("internal/session/store.go", "Store.SetCurrentClaim"))},
 	{Key: ResetCommittedAtKey, Class: ClassMarker, Writers: sites(legacy(srcTransition, "RestartRequestPatch"))},

@@ -333,6 +333,33 @@ func TestAdmitOpenEndpointAdmitsNothing(t *testing.T) {
 	}
 }
 
+// Kills a heal lost behind its start (should-fix 2): a start that carries
+// its A6 heal and is deferred (an open endpoint, the row-repeated rule
+// aside) admits the heal in its stead, as the row write it is, under the
+// row write's own cap; a start without one admits nothing.
+func TestAdmitHealsInsteadOfADeferredStart(t *testing.T) {
+	in := admitIn(5, 1)
+	shut := map[endpointKey]endpointView{"provider:a": {Gate: gateShut}}
+	in.Endpoints = shut
+	healed := func(i int) intent {
+		it := startOn(i, "provider:a", time.Duration(i))
+		it.Heal = &intent{Kind: intentRowHealFresh, Key: it.Key, Patch: session.MetadataPatch{"state": "asleep"}}
+		return it
+	}
+	res := admit(in, []intent{healed(1), healed(2), startOn(3, "provider:a", 3)})
+	if got := keysOf(res.Admitted); !slices.Equal(got, []string{intentRowHealFresh + ":gc-1"}) || res.Admitted[0].Patch["state"] != "asleep" {
+		t.Fatalf("admitted %v, want gc-1's heal alone (one row write)", got)
+	}
+	if got := causesOf(res.Deferred); len(got) != 3 || got["start:gc-1"] != causeEndpointGate || got["start:gc-2"] != causeEndpointGate {
+		t.Fatalf("deferred %v, want the three starts on the endpoint", got)
+	}
+	twice := admitIn(5, 4)
+	twice.Endpoints = shut
+	if res := admit(twice, []intent{healed(1), healed(1)}); len(res.Admitted) != 1 {
+		t.Fatalf("admitted %v, want one heal for a row proposed twice", keysOf(res.Admitted))
+	}
+}
+
 // Kills rank inversion (START-009): starts go oldest wakeFairnessTime first,
 // and a never-woken row ranks by its CreatedAt.
 func TestAdmitLRUOrderUsesWakeFairnessTime(t *testing.T) {
@@ -467,7 +494,7 @@ func TestAdmitProbeEffectsCappedAtProbeConcurrency(t *testing.T) {
 }
 
 // Kills a reintroduced special deadline (P3): every kind's deadline is its
-// class's, a start startup_timeout + 10s, a row write 30s, the rest 60s.
+// class's, a start startup_timeout + 30s, a row write 30s, the rest 60s.
 func TestIntentDeadlinesAreFlat(t *testing.T) {
 	rowWrites := []string{intentBaseline, intentDrainBegin, intentDrainCancel, intentDrainVoid, intentRowHeal, intentRowMetadata, intentSignal}
 	in := admitIn(50, 50)
@@ -481,7 +508,7 @@ func TestIntentDeadlinesAreFlat(t *testing.T) {
 		want := providerEffectDeadline
 		switch {
 		case kind == intentStart:
-			want = 2*time.Minute + 10*time.Second
+			want = 2*time.Minute + 30*time.Second
 		case slices.Contains(rowWrites, kind):
 			want = 30 * time.Second
 		}
@@ -492,8 +519,8 @@ func TestIntentDeadlinesAreFlat(t *testing.T) {
 	// A startup_timeout that is not positive reads as the 60s default.
 	for _, timeout := range []string{"0s", "-5s"} {
 		in.Cfg.Session.StartupTimeout = timeout
-		if res := admit(in, []intent{startOn(1, "", 0)}); res.Admitted[0].Deadline.Sub(admitT0) != 70*time.Second {
-			t.Errorf("startup_timeout %s: deadline +%v, want +70s", timeout, res.Admitted[0].Deadline.Sub(admitT0))
+		if res := admit(in, []intent{startOn(1, "", 0)}); res.Admitted[0].Deadline.Sub(admitT0) != 90*time.Second {
+			t.Errorf("startup_timeout %s: deadline +%v, want +90s", timeout, res.Admitted[0].Deadline.Sub(admitT0))
 		}
 	}
 }

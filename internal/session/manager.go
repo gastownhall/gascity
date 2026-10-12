@@ -1236,15 +1236,18 @@ func (m *Manager) createBeadOnly(spec CreateOptions) (Info, error) {
 
 // Attach attaches the user's terminal to the session. If the session is
 // dormant, it is resumed first using resumeCommand, consuming the operator's
-// hold (ResumeOperator, CONTRACT v5.9 D8). If the tmux session died (active
-// bead but no process), it is restarted.
-func (m *Manager) Attach(ctx context.Context, id string, resumeCommand string, hints runtime.Config) error {
+// hold when by is an operator (CONTRACT v5.9 D8). If the tmux session died
+// (active bead but no process), it is restarted.
+func (m *Manager) Attach(ctx context.Context, by Actor, id string, resumeCommand string, hints runtime.Config) error {
+	if err := m.checkStarter(by); err != nil {
+		return err
+	}
 	return withSessionStartLock(ctx, id, func() error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
 		}
-		if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints, ResumeOperator); err != nil {
+		if err := m.ensureRunning(ctx, by, id, b, sessName, resumeCommand, hints, false); err != nil {
 			return err
 		}
 
@@ -1252,10 +1255,44 @@ func (m *Manager) Attach(ctx context.Context, id string, resumeCommand string, h
 	})
 }
 
+// suspendRollback is the restore of a failed stop's suspend w over the row
+// meta reads now: nothing unless meta still carries the suspend's stamp, and
+// then Was for each key w changed that meta still reads as w wrote it.
+// rollbackSuspend writes suspendRollback on a fresh read, fenced.
+func (m *Manager) rollbackSuspend(id string, suspended DispositionWrite) error {
+	_, err := m.PersistedStore().UpdateMetadataFenced(id, operatorSuspendAttempts, func(_ Info, p PersistedResponse) MetadataPatch {
+		return suspendRollback(id, suspended, p.Metadata)
+	})
+	return err
+}
+
+// stampSoftSuspend writes a suspend that holds nothing (the chat idle
+// auto-suspend, the city stop sweep): patch's state and stamp.
+func (m *Manager) stampSoftSuspend(id string, patch MetadataPatch) error {
+	if err := m.store.Update(id, beads.UpdateOpts{Metadata: map[string]string(patch)}); err != nil {
+		return fmt.Errorf("updating suspension state: %w", err)
+	}
+	return nil
+}
+
+func suspendRollback(id string, w DispositionWrite, meta map[string]string) MetadataPatch {
+	if w.Wrote == nil || meta["suspended_at"] != w.Wrote["suspended_at"] {
+		return nil
+	}
+	restore := MetadataPatch{}
+	for k, v := range LifecycleOnly(w.Wrote) {
+		if meta[k] == v && w.Was[k] != v {
+			restore[k] = w.Was[k]
+		}
+	}
+	// The class keys' undo is the Suspend cell's.
+	return UndoDisposition(w.Was, w.Wrote, meta).Into(id, restore)
+}
+
 // suspendIntent distinguishes an operator's explicit, targeted suspend from the
-// city-shutdown sweep. `gc stop` / `gc restart` issue suspend across every
-// session bead with no state pre-filter, so the sweep needs latitude on states
-// that have no live turn to suspend. An operator naming ONE session does not:
+// city-shutdown sweep (ActorSweep). `gc stop` / `gc restart` issue suspend
+// across every session bead with no state pre-filter, so the sweep needs
+// latitude on states that have no live turn to suspend. An operator naming ONE session does not:
 // for them a state that cannot be suspended must still say so rather than
 // quietly killing a runtime under a different name.
 type suspendIntent int
@@ -1270,40 +1307,34 @@ const (
 	suspendIntentIdle
 )
 
-// Suspend saves session state and kills the runtime session. This is the
-// targeted, operator-facing form: a state the machine cannot suspend returns
-// ErrIllegalTransition rather than tearing a runtime down anyway.
-func (m *Manager) Suspend(id string) error {
-	return m.SuspendContext(context.Background(), id)
-}
-
-// SuspendContext is Suspend under ctx's runtime lease mode: the controller's
-// (WithoutLeaseWait) never waits for the lease and returns
-// ErrRuntimeLeaseBusy; an operator's waits up to RuntimeLeaseOperatorWait.
-func (m *Manager) SuspendContext(ctx context.Context, id string) error {
-	return m.suspend(ctx, id, suspendIntentOperator)
-}
-
-// SuspendIdle is Suspend for the chat idle auto-suspend ([chat_sessions]
-// idle_timeout). It follows the operator's transition rules and clears a
-// pending wake, but writes no hold: the controller's next wake reason
-// resumes the session. An already-suspended row is left as it is. It runs
-// under ctx's runtime lease mode, as SuspendContext does.
-func (m *Manager) SuspendIdle(ctx context.Context, id string) error {
-	return m.suspend(ctx, id, suspendIntentIdle)
-}
-
-// SuspendForShutdown is Suspend for the city stop/restart sweep, which issues
-// suspend across every session bead with no state pre-filter. It additionally
-// tolerates a draining seat: rejecting those with an illegal transition made
-// every restart SKIP them, so they survived as live panes still holding their
-// pool slot names (ga-rxhu2). The runtime is torn down and the bead is left in
-// draining for the drain machinery or the reconciler to finish.
-func (m *Manager) SuspendForShutdown(id string) error {
-	return m.suspend(context.Background(), id, suspendIntentShutdown)
-}
-
-func (m *Manager) suspend(ctx context.Context, id string, intent suspendIntent) error {
+// Suspend saves session state and kills the runtime session, under by's
+// runtime lease mode. This is the targeted form: a state the machine cannot
+// suspend returns ErrIllegalTransition rather than tearing a runtime down
+// anyway.
+//
+// soft is the chat idle auto-suspend ([chat_sessions] idle_timeout): it
+// follows the same transition rules and clears a pending wake, but writes no
+// hold, so the controller's next wake reason resumes the session; an
+// already-suspended row is left as it is.
+//
+// An ActorSweep suspend is the city stop/restart sweep's, which issues
+// suspend across every session bead with no state pre-filter and takes no
+// runtime lease. It additionally tolerates a draining seat: rejecting those
+// with an illegal transition made every restart SKIP them, so they survived
+// as live panes still holding their pool slot names (ga-rxhu2). The runtime
+// is torn down and the bead is left in draining for the drain machinery or
+// the reconciler to finish.
+func (m *Manager) Suspend(ctx context.Context, by Actor, id string, soft bool) error {
+	if err := m.checkActor(by); err != nil {
+		return err
+	}
+	intent := suspendIntentOperator
+	switch {
+	case by.Kind == ActorSweep:
+		intent = suspendIntentShutdown
+	case soft:
+		intent = suspendIntentIdle
+	}
 	return withSessionStartLock(ctx, id, func() error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
@@ -1316,12 +1347,13 @@ func (m *Manager) suspend(ctx context.Context, id string, intent suspendIntent) 
 		}
 		current := State(b.Metadata["state"])
 		if current == StateSuspended {
-			// Idempotent, except that an operator's suspend of a row left
-			// suspended without the user hold (by the shutdown sweep) writes
-			// the hold: a suspended state alone does not stop legacy's
-			// assigned-work wake.
-			if intent == suspendIntentOperator && Holds(b.Metadata, m.now()).In&HoldUser == 0 {
-				return m.PersistedStore().OperatorSuspend(id, m.now())
+			// An operator's suspend of a suspended row writes the hold (a
+			// suspended state alone, as the shutdown sweep leaves it, does not
+			// stop legacy's assigned-work wake), or stamps the one in force
+			// again; the runtime is already down.
+			if intent == suspendIntentOperator {
+				_, err := m.PersistedStore().OperatorSuspend(id, m.now())
+				return err
 			}
 			return nil
 		}
@@ -1329,7 +1361,7 @@ func (m *Manager) suspend(ctx context.Context, id string, intent suspendIntent) 
 		// under its lease, taken before any write; the city stop sweep takes
 		// none (it stops every runtime).
 		if intent != suspendIntentShutdown {
-			release, err := m.leaseForStop(ctx, id, sessName, 0)
+			release, err := m.leaseForStop(ctx, by, id, sessName, 0)
 			if err != nil {
 				return err
 			}
@@ -1395,33 +1427,26 @@ func (m *Manager) suspend(ctx context.Context, id string, intent suspendIntent) 
 			return err
 		}
 
-		// An operator's suspend is OperatorSuspendPatch's one shape, fenced,
+		// An operator's suspend is the disposition's Suspend cell, fenced,
 		// and written BEFORE the runtime goes: the user hold keeps legacy's
 		// assigned-work wake and its heartbeat crash recovery from undoing it,
 		// so a tick between the write and the stop drains the row instead of
 		// restarting it. It supersedes any pending wake request (D7). A failed
 		// stop restores the row.
 		if intent == suspendIntentOperator {
-			now := m.now()
-			if err := m.PersistedStore().OperatorSuspend(id, now); err != nil {
+			suspended, err := m.PersistedStore().OperatorSuspend(id, m.now())
+			if err != nil {
 				return fmt.Errorf("updating suspension state: %w", err)
 			}
 			if err := m.tearDownRuntimeForSuspend(sessName); err != nil {
 				// The runtime is still live: restore what the suspend wrote, as
 				// a failed kill's rollback does, so the row never reads
-				// suspended over a live runtime. Fenced, and only while the row
-				// still carries this suspend's hold and stamp.
-				written := OperatorSuspendPatch(now)
-				prior := MetadataPatch{}
-				for k := range written {
-					prior[k] = b.Metadata[k]
-				}
-				if _, rbErr := m.PersistedStore().UpdateMetadataFenced(id, operatorSuspendAttempts, func(_ Info, p PersistedResponse) MetadataPatch {
-					if p.Metadata["held_until"] != written["held_until"] || p.Metadata["suspended_at"] != written["suspended_at"] {
-						return nil
-					}
-					return prior
-				}); rbErr != nil {
+				// suspended over a live runtime. Decided on a fresh read and
+				// fenced: only while the row still carries this suspend's
+				// stamp, and only the keys the suspend changed that still read
+				// as it wrote them, so a write since (a wait, a quarantine)
+				// stands.
+				if rbErr := m.rollbackSuspend(id, suspended); rbErr != nil {
 					return fmt.Errorf("%w (restoring the row: %w)", err, rbErr)
 				}
 				return err
@@ -1439,7 +1464,6 @@ func (m *Manager) suspend(ctx context.Context, id string, intent suspendIntent) 
 		// the shutdown sweep leaves the wake for the next start.
 		patch := MetadataPatch{
 			"state":        string(StateSuspended),
-			"suspended_at": m.now().UTC().Format(time.RFC3339),
 			"slept_at":     "",
 			"sleep_reason": "",
 		}
@@ -1448,11 +1472,9 @@ func (m *Manager) suspend(ctx context.Context, id string, intent suspendIntent) 
 				patch[k] = v
 			}
 		}
-		if err := m.store.Update(id, beads.UpdateOpts{Metadata: map[string]string(patch)}); err != nil {
-			return fmt.Errorf("updating suspension state: %w", err)
-		}
-
-		return nil
+		// The stamp is the disposition's SuspendSoft cell (no hold).
+		patch = CellInto(id, b.Metadata, by.Kind, DispEvent{Kind: EvSuspendSoft}, m.now(), patch)
+		return m.stampSoftSuspend(id, patch)
 	})
 }
 
@@ -1514,15 +1536,19 @@ func (m *Manager) RequestFreshRestart(id string) error {
 }
 
 // Close ends a conversation permanently.
-func (m *Manager) Close(id string) error {
-	_, err := m.CloseDetailed(id)
+func (m *Manager) Close(ctx context.Context, by Actor, id string) error {
+	_, err := m.CloseDetailed(ctx, by, id)
 	return err
 }
 
-// CloseDetailed ends a conversation permanently and reports cleanup artifacts.
-func (m *Manager) CloseDetailed(id string) (CloseResult, error) {
+// CloseDetailed ends a conversation permanently and reports cleanup
+// artifacts. It stops the runtime under by's runtime lease mode.
+func (m *Manager) CloseDetailed(ctx context.Context, by Actor, id string) (CloseResult, error) {
+	if err := m.checkActor(by); err != nil {
+		return CloseResult{}, err
+	}
 	result := CloseResult{}
-	err := withSessionStartLock(context.Background(), id, func() error {
+	err := withSessionStartLock(ctx, id, func() error {
 		b, sessName, err := m.loadSessionBead(id, true)
 		if err != nil {
 			return err
@@ -1540,7 +1566,7 @@ func (m *Manager) CloseDetailed(id string) (CloseResult, error) {
 		if _, err := Transition(current, CmdClose); err != nil {
 			return err
 		}
-		release, err := m.leaseForStop(context.Background(), id, sessName, 0)
+		release, err := m.leaseForStop(ctx, by, id, sessName, 0)
 		if err != nil {
 			return err
 		}
@@ -1569,7 +1595,7 @@ func (m *Manager) CloseDetailed(id string) (CloseResult, error) {
 			log.Printf("session %s: closing after capped wait cancellation lookup", id)
 		}
 		result.WaitNudgeIDs = append(result.WaitNudgeIDs, nudgeIDs...)
-		if err := m.clearWakeAndHoldOverrides(id); err != nil {
+		if err := m.clearWakeAndHoldOverrides(id, b.Metadata); err != nil {
 			return err
 		}
 		if err := m.retireConfiguredNamedSessionIdentifiers(id, b); err != nil {
@@ -1585,12 +1611,9 @@ func (m *Manager) CloseDetailed(id string) (CloseResult, error) {
 	return result, err
 }
 
-func (m *Manager) clearWakeAndHoldOverrides(id string) error {
-	update := map[string]string{
-		"pin_awake":    "",
-		"held_until":   "",
-		"sleep_intent": "",
-	}
+func (m *Manager) clearWakeAndHoldOverrides(id string, meta map[string]string) error {
+	// The holds go as a retired row's (the disposition's Retire cell).
+	update := CellInto(id, meta, ActorController, DispEvent{Kind: EvRetire}, m.now(), MetadataPatch{"pin_awake": ""})
 	if err := m.store.SetMetadataBatch(id, update); err != nil {
 		return fmt.Errorf("clearing wake and hold overrides: %w", err)
 	}
@@ -1630,14 +1653,13 @@ func (m *Manager) retireConfiguredNamedSessionIdentifiers(id string, b beads.Bea
 // Like Close, it is a cleanup path: a session that is already gone is the
 // outcome Kill was asked for, so it reports success rather than surfacing the
 // provider's "nothing to stop" answer to the operator.
-func (m *Manager) Kill(id string) error {
-	return m.KillContext(context.Background(), id)
-}
-
-// KillContext is Kill under the session's runtime lease: ctx's, when it
-// carries its caller's (ContextWithRuntimeLease), or one waited for up to
-// RuntimeLeaseOperatorWait.
-func (m *Manager) KillContext(ctx context.Context, id string) error {
+//
+// It runs under the session's runtime lease: by.Lease, or one taken in by's
+// mode, an operator's waited for up to RuntimeLeaseOperatorWait.
+func (m *Manager) Kill(ctx context.Context, by Actor, id string) error {
+	if err := m.checkActor(by); err != nil {
+		return err
+	}
 	b, sessName, err := m.sessionBead(id)
 	if err != nil {
 		return err
@@ -1654,7 +1676,7 @@ func (m *Manager) KillContext(ctx context.Context, id string) error {
 			return fmt.Errorf("session %s is not active", id)
 		}
 	}
-	release, err := m.leaseForStop(ctx, id, sessName, operatorLeaseWait)
+	release, err := m.leaseForStop(ctx, by, id, sessName, operatorLeaseWait)
 	if err != nil {
 		return err
 	}

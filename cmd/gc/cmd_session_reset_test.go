@@ -67,8 +67,7 @@ func TestCmdSessionReset_ClearsCircuitBreaker(t *testing.T) {
 		Window:      30 * time.Minute,
 		MaxRestarts: 3,
 	})
-	restore := setSessionCircuitBreakerForTest(cb)
-	defer restore()
+	setSessionCircuitBreakerForTest(t, cb)
 	now := time.Date(2026, 4, 10, 12, 0, 0, 0, time.UTC)
 	for i := 0; i < 4; i++ {
 		cb.RecordRestart(identity, now.Add(time.Duration(i)*time.Second))
@@ -216,8 +215,7 @@ func TestCmdSessionKill_ClearsCircuitBreaker(t *testing.T) {
 		Window:      30 * time.Minute,
 		MaxRestarts: 3,
 	})
-	restore := setSessionCircuitBreakerForTest(cb)
-	defer restore()
+	setSessionCircuitBreakerForTest(t, cb)
 	now := time.Date(2026, 4, 10, 12, 0, 0, 0, time.UTC)
 	for i := 0; i < 4; i++ {
 		cb.RecordRestart(identity, now.Add(time.Duration(i)*time.Second))
@@ -393,8 +391,7 @@ func TestCmdSessionKill_ClearsCircuitBreakerForAsleepNamedSession(t *testing.T) 
 		Window:      30 * time.Minute,
 		MaxRestarts: 3,
 	})
-	restore := setSessionCircuitBreakerForTest(cb)
-	defer restore()
+	setSessionCircuitBreakerForTest(t, cb)
 	now := time.Date(2026, 4, 10, 12, 0, 0, 0, time.UTC)
 	for i := 0; i < 4; i++ {
 		cb.RecordRestart(identity, now.Add(time.Duration(i)*time.Second))

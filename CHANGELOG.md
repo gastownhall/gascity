@@ -89,6 +89,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   controller warned and ran with that gate off. Correct the value before
   upgrading (#7036).
 
+- **An exec runtime that declares `report-activity`, `report-attachment` and
+  `proc.exec` now reports `sleep_capability = full`, and its sleep is
+  `stop`.** Before, every exec runtime reported `timed_only`. With all three
+  declared, an interactive `[session_sleep]` policy applies: an idle
+  interactive session is stopped and started again on wake, so anything kept
+  only inside the box, such as the agent's conversation, is lost unless
+  `stop` preserves it. Interrupts, nudges and restarts on such a runtime wait
+  for the agent's ready prompt in the in-box tmux session `main`. For any
+  runtime that declares `report-attachment`, an `is-attached` op that fails
+  (any non-zero exit, 2 included) used to read as "not attached"; it now
+  keeps the session awake and holds destructive actions. No runtime shipped
+  with gc declares these capabilities (#7533).
+
+- **A convoy sling through the API that routes some children and fails others
+  answers 200 with `status: "partial"`.** The routed children have already
+  changed state, so `POST /sling` returns the per-child outcomes instead of an
+  error; a child refused because its source bead already has a live workflow
+  also names the blocking workflows and the cleanup command. `gc sling`
+  against a remote city prints the same per-child lines as a local sling and
+  exits 1, or 3 when a child was refused that way. A gc built before this
+  release, slinging a convoy through an upgraded supervisor, prints
+  `"success": true` and exits 0 for such a result, though its `status` reads
+  `partial`: upgrade gc with the supervisor, or have scripts check `status`
+  (#7083).
+
+- **`session.pending` and `session.pending_cleared` now carry actor
+  `controller` instead of `api`.** The controller records them whether or not
+  a client watches the event stream; a consumer that matches these events on
+  actor `api` must match `controller` (#7083).
+
+- **An ACP agent's permission request now waits for an answer through `/pending`
+  and `/respond`.** gc used to drop the agent's `session/request_permission`, so
+  the turn hung. It now holds the request, and `POST .../respond` answers it
+  with 202 where it used to return 501. Echo the `request_id` from `/pending`;
+  ACP ids have the form `acp-<nonce>-<id>`, so do not construct one. A stale id,
+  an unknown `action` or an option kind the agent did not offer gets `409
+  invalid_interaction`, and the request stays pending. An `action` equal to an
+  offered option id selects that option, even an id that reads like `approve` or
+  `cancel`. While a request is outstanding, a submit or nudge is refused with
+  `409 pending_interaction`, including one already waiting on the busy turn,
+  which used to wait out `nudge_busy_timeout`. Queued nudges stay queued,
+  without spending retry attempts, until the request is answered or the nudge
+  expires. The reconciler treats such a session as waiting on a human: it stays
+  awake, and it is exempt from idle kill, max-age restart and config-drift
+  drain. An unattended agent that asks therefore waits until an API client
+  answers, so configure unattended pools not to ask, through the agent's
+  permission mode or a permission timeout in the agent. A pool slot that
+  holds a claimed bead is the exception, as before: the pool-slot backstop
+  still drains it once it goes quiet, and the request goes with it. Every
+  other agent-to-client request, such as `fs/read_text_file`, now gets
+  JSON-RPC `-32601` instead of hanging the turn (#6598).
+
 ### Added
 
 - **`[beads] proxied_idle_timeout` sets how long a bd-owned proxied scope's
@@ -151,6 +203,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the configured value with the scope's sidecar and with the running proxy,
   and reports drift as an advisory (#6561).
 
+- **`submit`, `messages` and `interrupt_now` refuse a Claude session that is
+  waiting on a permission prompt.** `POST /v0/session/{id}/submit` and
+  `POST /v0/session/{id}/messages` used to answer 202 and deliver later, which
+  typed the text into the prompt. While `GET .../pending` reports a prompt
+  they now answer 409 `session-conflict` with a `pending_interaction:` detail
+  right away, and accept nothing. `submit` with intent `interrupt_now` is
+  refused the same way instead of interrupting, because its interrupt key
+  would dismiss the prompt. Answer the prompt with `respond`, then send again
+  (#2892).
+- **Stopping a Claude turn clears its input box.** On the tmux runtime, once
+  `POST .../stop` (or `interrupt_now`) has left the turn idle, gc waits up to
+  2 s for Claude Code to put the interrupted prompt back into the input box,
+  then deletes it with Ctrl-U Ctrl-K (never Ctrl-C), so a stop can take up to
+  2 s longer. When a client is attached to the session, or gc cannot tell,
+  the input box is left alone, since a human may be typing in it. A draft
+  that will not clear is logged; neither case fails the stop.
+- **A Claude session waiting on a permission prompt no longer reads as
+  idle.** Idle detection scans the pane for Claude's `❯` ready prompt, and the
+  permission prompt's highlighted option (`❯ 1. Yes`) matched it. A permission
+  prompt is now never an idle boundary: the idle probe behind
+  `sleep_after_idle` does not pass while one is up, and `idle_timeout` judges
+  such a session by pane activity alone (#2892).
+
 - **Ready work in a SQLite infra ledger is ordered priority-first.** On a city
   that relocates classes to a `sqlite-beads` binding, that ledger's ready read
   returned rows oldest-first (`created_at, id`). It now returns the canonical
@@ -187,6 +262,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same way. Pass `--version` to choose another constraint.
 
 ### Fixed
+
+- **Text sent to a Claude session no longer answers its permission prompt,
+  and approvals are detected and answered on current Claude Code.** On
+  Claude Code 2.1.28x the tmux pane scraper missed the permission dialog
+  (new tool-line glyph, no "This command requires approval" line in the
+  default mode, a fourth menu option), so `GET .../pending` stayed empty and
+  `respond` returned `409 no_pending`, while an ordinary `submit` typed into
+  the prompt and its Enter approved the pending tool call. The dialog is now
+  recognized by its "Do you want to …?" question and numbered menu, and
+  `respond` picks the option by its label ("Yes", "No", …) instead of a fixed
+  digit, so `deny` can no longer select "Yes, and switch to auto mode"; when
+  no single option matches it sends nothing and returns 409
+  `invalid_interaction`. A question that Claude wraps onto several rows (a
+  long file name) is recognized too. While a prompt is pending, `submit` and
+  `messages` return 409 (see Changed), `gc session nudge
+  --delivery=immediate` exits non-zero, `--delivery=wait-idle` queues behind
+  the prompt, and the tmux runtime refuses to type into it on every other
+  delivery path. It looks again under the nudge lock, right before it pastes
+  and right before it presses Enter, so a prompt that appears mid-delivery is
+  not answered either. Sessions that the auto and hybrid providers route to
+  tmux are covered too; the exec, k8s, ssh and herdr runtimes do not look for
+  the prompt yet, so text sent to their sessions can still answer it (#2892).
+
+- **A message sent after stopping a Claude turn early is no longer merged
+  into the stopped prompt.** When `POST .../stop` (or `interrupt_now`) lands
+  before Claude's first response chunk, Claude Code puts the interrupted
+  prompt back into its input box. gc cleared the input box with one Ctrl-U,
+  which on Claude Code 2.1.288 deletes only one wrapped row, so the next
+  message was pasted behind the rest of the old prompt and both went out as
+  one. On the tmux runtime gc now presses Ctrl-U Ctrl-K until the input box
+  reads empty, wherever the cursor is, and fails the delivery if it will not
+  empty; `stop` clears the restored prompt too (see Changed). A submit whose
+  input box still holds any text is no longer reported as delivered.
 
 - **A new scope directory over an existing current-era managed Dolt database
   initializes instead of being refused as a legacy Dolt server workspace.**
@@ -252,6 +360,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   while running inside an agent session (or under a supervisor that
   inherited one's `GC_*` session variables) now exit 1 with "does not match
   this session's own identity".
+
+- **The reaper's stale workflow-root sweep works on large stores again.**
+  Step 2 checked every candidate workflow root for live descendants in one
+  recursive query, which on a large store ran past bd's 10s read timeout, so
+  no stale root ever closed. It now checks
+  `GC_REAPER_WORKFLOW_ROOT_BATCH_SIZE` candidates per query (a positive
+  integer, default 1) in id order, and stamps and closes each page's stale
+  roots before it reads the next. Keep the batch small: one query walks the
+  subtrees of a whole page, so a batch as large as the candidate set brings
+  back the single query that timed out. `GC_REAPER_WORKFLOW_ROOT_BUDGET_SECS`
+  (default 300s, inside `GC_REAPER_RUN_BUDGET_SECS`) is a window that opens at
+  the run's first census and runs on through the purge, the later steps and
+  the later scopes; once it has closed, each census checks one page. Each
+  census starts at a random candidate and wraps around, so roots it keeps
+  cannot hold back the roots behind them run after run. A census cut short is
+  reported as a partial outcome. The summary's new
+  `workflow_root_census:<checked>/<candidates>` field shows how many of the
+  counted candidates a run checked; a root that becomes a candidate during a
+  census can wait for the next run. Outside the city scope, workflow issue
+  roots are only counted: `skipped_non_city_workflow_issue_roots` is now a
+  candidate count (#6050).
 
 ## [1.5.0] - 2026-10-05
 

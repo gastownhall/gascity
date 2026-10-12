@@ -3364,14 +3364,17 @@ When agent-name is omitted, `GC_ALIAS` is used (falling back to `GC_AGENT`).
 If agent-name matches a configured agent with a prompt_template,
 that template is output. Otherwise outputs a default worker prompt.
 
-Pass --strict to fail on debugging mistakes instead of silently falling
-back to the default prompt. Strict errors on:
+Pass --strict to fail on debugging mistakes instead of falling back to
+the default prompt. Strict errors on:
 
   - no city config found
   - city config fails to load
   - no agent name given (from args, GC_ALIAS, or GC_AGENT)
   - agent name not in city config (typo detection — the main use case)
   - agent's prompt_template points at a file that cannot be read
+
+Without --strict, a prompt_template that cannot be read is reported on
+stderr and the default prompt is output.
 
 Strict does NOT error on agents whose config intentionally lacks a
 prompt_template (a supported minimal config), on templates that render
@@ -5033,16 +5036,23 @@ Stop the running machine-wide supervisor and all its cities.
 
 By default, returns as soon as the supervisor acknowledges the stop
 request — shutdown continues asynchronously. Pass --wait to block
-until the supervisor socket is no longer answering, which is what
-most callers that need deterministic cleanup want (e.g., integration
-tests that then expect to remove temp directories without racing
-against lingering supervisor / controller subprocesses).
+until the supervisor process has exited and released its
+single-instance lock, which is what most callers that need
+deterministic cleanup want (e.g., integration tests that then expect
+to remove temp directories without racing against lingering
+supervisor / controller subprocesses, or a 'gc supervisor start'
+right after the stop). --wait waits for the control socket to stop
+answering and then for the process to exit, within --wait-timeout,
+except that the process always gets at least 10s after its socket
+closes to finish shutting down. A supervisor process this host
+cannot see (one in another PID namespace) is waited for only until
+its socket stops answering.
 
 Stopping the supervisor also stops the platform service that manages
 it, and stop exits non-zero when that fails; with --wait, gc further
 verifies on macOS that the launchd job is really gone before
-returning, sharing the same --wait-timeout deadline as the socket
-wait, and fails when it cannot confirm that. An operator stop also
+returning, sharing the same --wait-timeout deadline, and fails when
+it cannot confirm that. An operator stop also
 disables the launchd job, so it will not come back at the next login
 until 'gc supervisor install' — or 'gc start', which routes through
 install — re-enables it.
@@ -5061,8 +5071,8 @@ gc supervisor stop [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSONL summary |
-| `--wait` | bool |  | Wait for the supervisor to finish stopping all managed cities and release its socket before returning |
-| `--wait-timeout` | duration | `30s` | Maximum time to wait when --wait is set (in delegated mode, bounds the synchronous systemctl stop regardless of --wait) |
+| `--wait` | bool |  | Wait for the supervisor to finish stopping all managed cities and for its process to exit before returning |
+| `--wait-timeout` | duration | `30s` | Maximum time to wait when --wait is set, except that the supervisor process gets at least 10s to exit after its socket closes (in delegated mode, bounds the synchronous systemctl stop regardless of --wait) |
 
 ## gc supervisor uninstall
 

@@ -82,7 +82,7 @@ func rollbackVariants(now time.Time) []rollbackVariant {
 		for k, v := range preClose {
 			out[k] = v
 		}
-		for k, v := range failedCreateClosePatch(now) {
+		for k, v := range failedCreateClosePatch(session.Info{ID: "want"}, now) {
 			out[k] = v
 		}
 		out["session_name"] = ""
