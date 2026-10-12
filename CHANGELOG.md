@@ -236,6 +236,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the full configured age. The session-prune guard now counts candidates on
   the same UTC cutoff `bd prune` uses, so it can no longer miss non-session
   beads `bd prune` would delete (#7136, backported in #7498).
+- **An unchanged reaper or Dolt backup escalation mails once a day, not on
+  every run.** The `reaper` order (every 30m) and the `mol-dog-backup` order
+  now raise their failures as incidents. `escalate.sh` records each delivered
+  incident under `GC_ESCALATE_INCIDENT_DIR` (default `<city>/.gc/incidents`)
+  and, while its fingerprint is unchanged, sends nothing until
+  `GC_ESCALATE_REMINDER_SECONDS` (default 86400) have passed; a changed
+  fingerprint mails at once, and a clean run resolves the incident so the
+  next failure mails at once too. A suppressed run says so on stdout and
+  exits 0. To have the next run mail an incident at once, delete its
+  `.gc/incidents/*.state` file. A pack that overrides `escalate.sh` now
+  receives `--incident-key KEY --fingerprint F` on an alert and
+  `--resolve-incident KEY` on a clean run: the override must accept or
+  ignore those flags and must send nothing for `--resolve-incident`, or it
+  loses the alert. See "Why a maintenance alert did not repeat" in
+  `docs/getting-started/troubleshooting.md` (#6363).
 
 ### Added
 
@@ -463,6 +478,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   current hold in `execution_claim_hold` as `<reason> <time>` (#5701).
 - The core `orphan-sweep` order no longer misses live sessions when the
   session list exceeds the pipe buffer (#6714, #6728).
+- **Unchanged Dolt backup sync failures and reaper anomalies no longer mail
+  on every run.** `escalate.sh` takes `--incident-key` and `--fingerprint`:
+  an alert whose fingerprint matches its last delivered one stays quiet for
+  `GC_ESCALATE_REMINDER_SECONDS` (default one day), a changed fingerprint
+  alerts at once, and both orders pass `--resolve-incident` on a clean run so
+  the next failure alerts at once too. Deduplication is best-effort: when the
+  state under `.gc/incidents/` cannot be read or written the alert is sent
+  anyway, and a failed send is retried on the next run. The reaper's
+  fingerprint ignores only a measured backup age, so a backup that goes
+  missing alerts at once. The backup order's escalation reports each
+  database's first failed attempt instead of its last, with common credential
+  shapes redacted from every diagnostic. When `GC_ESCALATE_SEND_TIMEOUT_SECS`
+  cuts a send off before `gc mail send` reports the mail written,
+  `escalate.sh` now exits non-zero so callers that check the exit status can
+  retry it; keyed incidents also retry, because a failed send records no
+  incident state. A send cut off only after that report still counts as
+  delivered. The backup order's missing-`flock` and offsite-publication
+  alerts still mail on every run, and an `escalate.sh` override must accept
+  or ignore the new flags (#6363).
 - herdr agent starts retry when a fresh pane reports `agent_pane_busy` on a
   non-zero exit (#6637).
 - A nudge that races an ACP agent's exit is dropped with a stderr line instead

@@ -689,9 +689,20 @@ environment, so set these at orchestrator start to customize routing:
 - `GC_ESCALATE_SEND_TIMEOUT_SECS` — wall-clock bound on one escalation
   send (default: 30). The wake can outlive the send it follows, and
   escalations run inline in maintenance orders, so the bound keeps a slow
-  wake from stalling the run that raised the alarm. The mail is written
-  before the wake blocks, so a tripped bound costs the wake, not the
-  message, and the script still exits 0.
+  wake from stalling the run that raised the alarm. `gc mail send` prints
+  `Sent message` once the mail is written, before the wake. A bound that
+  trips after that line costs at most the wake, never the message, and the
+  script still exits 0. A bound that trips before it means the mail may not
+  exist, for any recipient: the script exits non-zero and the next run
+  sends again.
+- `GC_ESCALATE_REMINDER_SECONDS` — how long an unchanged incident stays
+  quiet before it is mailed again (default: 86400, one day). See
+  [Why a maintenance alert did not repeat](#why-a-maintenance-alert-did-not-repeat).
+- `GC_ESCALATE_INCIDENT_DIR` — where incident state is kept (default:
+  `<city>/.gc/incidents`).
+- `GC_ESCALATE_NOW_EPOCH` — test-only: pins the script's clock. Leave it
+  unset; a fixed clock never reaches the reminder interval, so an unchanged
+  incident is never mailed again.
 - `GC_MAINTENANCE_DONE_TARGET` — session target to nudge with
   `MAINTENANCE_DONE:`/warn summaries when a maintenance run completes
   (default: unset, no completion nudge). Deployments that relied on the
@@ -720,6 +731,46 @@ host is down for scheduled maintenance), set
 restart the city with `gc restart`. That bumps the escalation threshold
 from 3 to 99, which at the current 15-minute tick rate is ~24 hours of
 silence.
+
+### Why a maintenance alert did not repeat
+
+A maintenance order that keeps finding the same problem would otherwise mail
+it on every run: 48 times a day for the 30-minute `reaper` order. So two
+orders raise their failures as **incidents**: an alert that is unchanged since
+it was last mailed stays quiet for `GC_ESCALATE_REMINDER_SECONDS` (default:
+one day). A change in what failed mails at once, and a clean run resolves the
+incident, so the next failure mails at once too.
+
+| Order | Incident key | Mails again sooner when |
+| --- | --- | --- |
+| `mol-dog-backup` | `dolt-backup:required-sync` | the failing databases or their diagnostics change |
+| `reaper` | `reaper:anomalies` | the anomalies change; a stale backup that only grows older does not count |
+
+A quiet run says so in its output:
+
+```
+escalate: incident reaper:anomalies unchanged since 2026-10-08T09:00:00Z; next reminder after 2026-10-09T09:00:00Z
+```
+
+The backup order's missing-`flock` and offsite-publication alerts are not
+incidents and still mail on every run.
+
+Deduplication is best-effort. When the incident state cannot be read or
+written, the alert is mailed anyway, and a send that fails is not recorded,
+so the next run sends it again. To make the next run mail an incident at
+once, delete its state file. From the city directory:
+
+```bash
+# Forget one incident...
+rm -f "$(grep -l '^key=reaper:anomalies$' .gc/incidents/*.state)"
+# ...or all of them.
+rm -f .gc/incidents/*.state
+```
+
+A pack that overrides `escalate.sh` receives `--incident-key KEY
+--fingerprint F` on an alert and `--resolve-incident KEY` on a clean run. The
+override must accept or ignore those flags and must send nothing for
+`--resolve-incident`; an override that rejects them loses the alert.
 
 ## WSL (Windows Subsystem for Linux)
 
