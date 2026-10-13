@@ -3527,8 +3527,30 @@ func reapRuntimesBoundToClosedBeads(
 	cityPath string,
 	stderr io.Writer,
 ) int {
+	return reapRuntimesBoundToClosedBeadsWith(store, sessionBeads, dt, sp, inv, cityPath, nil, time.Time{}, stderr)
+}
+
+// reapRuntimesBoundToClosedBeadsWith is reapRuntimesBoundToClosedBeads that,
+// with ownerless (the controller's sightings) set, also reaps a dead runtime
+// whose owner the store does not hold at all (reapOwnerlessRuntime, CONTRACT
+// v5.10j), at now.
+func reapRuntimesBoundToClosedBeadsWith(
+	store beads.Store,
+	sessionBeads *sessionBeadSnapshot,
+	dt *drainTracker,
+	sp runtime.Provider,
+	inv *runtimeInventoryView,
+	cityPath string,
+	ownerless *ownerlessSightings,
+	now time.Time,
+	stderr io.Writer,
+) int {
 	if store == nil || sp == nil {
 		return 0
+	}
+	if ownerless != nil {
+		ownerless.begin()
+		defer ownerless.end()
 	}
 	if stderr == nil {
 		stderr = io.Discard
@@ -3600,6 +3622,19 @@ func reapRuntimesBoundToClosedBeads(
 		// goes past any cache: a reopen another process wrote without an
 		// event leaves a cached row still saying closed.
 		bead, err := beads.HandlesFor(store).Live.Get(liveID)
+		if errors.Is(err, beads.ErrNotFound) && ownerless != nil {
+			// No row at all: no closed owner to reap it, and no row's arm
+			// sees it. Only a dead runtime of this city, confirmed across
+			// sightings, is reaped (CONTRACT v5.10j).
+			var nameOwnerID string
+			if owner, ok := sessionBeads.FindInfoBySessionName(name); ok {
+				nameOwnerID = owner.ID
+			}
+			if reapOwnerlessRuntime(store, cityPath, name, liveID, nameOwnerID, sp, ownerless, now, stderr) {
+				reaped++
+			}
+			continue
+		}
 		if err != nil {
 			continue
 		}

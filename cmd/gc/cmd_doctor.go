@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/rollout"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/spf13/cobra"
 )
@@ -372,6 +373,10 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	register(doctor.NewSupervisorUnitOwnershipCheck(opts.SupervisorRunning, opts.SupervisorPID, opts.SupervisorUnitOwnership))
 	register(doctor.NewSupervisorBinaryCheck(opts.SupervisorRunning, opts.SupervisorPID, opts.SupervisorBinary))
 
+	// sessionSP is the session provider the session checks read, and the
+	// ownerless-runtimes check after them; sessionSPErr is why there is none.
+	var sessionSP runtime.Provider
+	sessionSPErr := errors.New("the session provider was not built")
 	if cfgErr == nil && cfg != nil {
 		cityName := loadedCityName(cfg, cityPath)
 		st := cfg.Workspace.SessionTemplate
@@ -385,10 +390,12 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			sp, err := newSessionProvider()
 			if err != nil {
 				register(doctor.ErrorCheck("session-provider", err.Error()))
+				sessionSPErr = err
 			} else {
 				register(doctor.NewAgentSessionsCheck(cfg, cityName, st, sp))
 				register(doctor.NewZombieSessionsCheck(cfg, cityName, st, sp))
 				register(doctor.NewOrphanSessionsCheck(cfg, cityName, st, sp))
+				sessionSP = sp
 			}
 		}
 	}
@@ -463,6 +470,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			registerCityStoreCheck(newOrderTrackingRetentionCheck(cityPath, storeFactory))
 			registerCityStoreCheck(&sessionModelDoctorCheck{cfg: cfg, cityPath: cityPath, newStore: storeFactory})
 			registerCityStoreCheck(newStartupHealthEpisodesCheck(cfg, cityPath, storeFactory))
+			registerCityStoreCheck(newOwnerlessRuntimesCheck(cfg, cityPath, storeFactory, sessionSP, sessionSPErr))
 			// Differential probe: the preflight above just proved the store
 			// reachable with the controller's environment, so a read that
 			// fails under the gate sandbox isolates the sandbox (ga-pqlgh).

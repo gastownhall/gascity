@@ -73,7 +73,8 @@ var allowed = map[string]Allowance{
 		Callers: []string{"commitAsyncStartResultWithContext", "commitStartFailure", "releaseBeadScopedPoolRuntimeLeased"},
 	},
 	cmdGC + ":cleanDeadRuntimeCorpse":            {Reason: "a dead runtime's cleanup, under the name's flock", Callers: []string{"cleanupDeadRuntimeSessionCorpses"}},
-	cmdGC + ":stopStillBoundClosedRuntimeLeased": {Reason: "the closed-row reaper: takes the lease itself, and decides again under it", Callers: []string{"reapRuntimesBoundToClosedBeads", "stopStillBoundClosedRuntime"}},
+	cmdGC + ":stopStillBoundClosedRuntimeLeased": {Reason: "the closed-row reaper: takes the lease itself, and decides again under it", Callers: []string{"reapRuntimesBoundToClosedBeadsWith", "stopStillBoundClosedRuntime"}},
+	cmdGC + ":reapOwnerlessRuntime":              {Reason: "the ownerless reap (CONTRACT v5.10j): takes the name's lease itself (tryRuntimeLease), and decides again under it"},
 	cmdGC + ":terminateDrainAckRuntimeByProcessTable": {
 		Reason:  "the drain-ack escalation's process kill, under controllerStopLease",
 		Callers: []string{"queueDrainAckForcedTermination"},

@@ -243,7 +243,11 @@ type CityRuntime struct {
 	storageRoutes *storageRoutes
 
 	// Bead-driven reconciler state (Phase 2f).
-	sessionDrains      *drainTracker       // in-memory drain tracker; nil when bead reconciler disabled
+	sessionDrains *drainTracker // in-memory drain tracker; nil when bead reconciler disabled
+	// ownerlessRuntimes is the closed-bead reap's memory of runtimes whose
+	// owner row the store does not hold, across ticks (CONTRACT v5.10j); a
+	// restart forgets it.
+	ownerlessRuntimes  ownerlessSightings
 	providerHealthGate *providerHealthGate // ADR-0013 A1 M3a; nil until bead reconciler initialized
 	asyncStartLimiter  *asyncStartLimiter
 	asyncStarts        asyncStartTracker
@@ -1637,7 +1641,7 @@ func (cr *CityRuntime) phaseCleanupDeadRuntimeSessionCorpses(p *tickPass) bool {
 // name's current owner can rebind it and attach lands on the right runtime.
 func (cr *CityRuntime) phaseReapRuntimesBoundToClosedBeads(p *tickPass) bool {
 	phaseStart := time.Now()
-	reapRuntimesBoundToClosedBeads(cr.sessionsBeadStore().Store, p.sessionBeads, cr.sessionDrains, cr.sp, p.inv, cr.cityPath, cr.stderr)
+	reapRuntimesBoundToClosedBeadsWith(cr.sessionsBeadStore().Store, p.sessionBeads, cr.sessionDrains, cr.sp, p.inv, cr.cityPath, &cr.ownerlessRuntimes, time.Now(), cr.stderr)
 	p.recordPhase(TraceSiteControllerTickPhase, "reap_runtimes_bound_to_closed_beads", phaseStart, p.inv.closedBoundPhaseFields())
 	return false
 }
