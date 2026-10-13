@@ -255,7 +255,7 @@ func (s *sim) checkWrite(w simWrite) {
 			}
 		}
 	}
-	if k := dormantChange(w.Before, a, w.At, s.stable[w.After.ID]); k != "" && (!closes || !closeEndsSuspend(w.Before, k, w.At)) && (!closes || !pendingCreateRollback(w)) && !pendingCreateAdopt(w, k) && !s.quarantinedCommit(id, w, k) {
+	if k := dormantChange(w.Before, a, w.At, s.stable[w.After.ID]); k != "" && (!closes || !closeEndsSuspend(w.Before, k, w.At)) && (!closes || !pendingCreateRollback(w)) && !pendingCreateScreenPark(w, k) && !pendingCreateAdopt(w, k) && !s.quarantinedCommit(id, w, k) {
 		s.failf("I15 I-STOP-3/4", "v2 rewrote %s %q -> %q on %s, which an operator holds dormant at %s", k, b[k], a[k], id, w.At.Format(time.RFC3339))
 	}
 	terminal := (w.After.Status == "closed" && w.Before.Status != "closed") ||
