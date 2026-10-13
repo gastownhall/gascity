@@ -18,9 +18,12 @@ import (
 // through to the backing store and update the cache on success.
 //
 // Writes that emit no gc event (agents running bd directly, humans, raw SQL)
-// reach the cache only when the background reconciler's scan notices them,
-// collapsed to the latest state; the bd hook -> gc event emit path that once
-// delivered them is gone (cmd/gc/hooks.go). ApplyEvent installs bead events
+// reach the cache when the background reconciler's scan notices them,
+// collapsed to the latest state, or sooner when a consumer that tails the
+// scope's durable mutation journal refreshes the rows it names (RefreshRow,
+// RefreshRowReport) and asks for a re-scan on a gap (RequestReconcile); the
+// bd hook -> gc event emit path that once delivered them is gone
+// (cmd/gc/hooks.go). ApplyEvent installs bead events
 // from the event bus, which carries gc's own writes. The cache is therefore
 // always potentially stale: a caller whose decision leads to a write must
 // fence that write at the store, never trust the cached row.
@@ -123,7 +126,12 @@ type CachingStore struct {
 	// caches the closed row while the write is in flight.
 	closeIntents map[string]*closeIntent
 
-	reconciling    atomic.Bool
+	reconciling atomic.Bool
+	// reconcileRequested is set by RequestReconcile and cleared when a
+	// reconcile run starts; while set the cache is due (nextReconcileDelay).
+	reconcileRequested atomic.Bool
+	// reconcileKick wakes the reconcile loop on a request (capacity 1).
+	reconcileKick  chan struct{}
 	syncFailures   int
 	circuitTripped bool
 	stats          CacheStats
@@ -396,6 +404,8 @@ type CacheStats struct {
 	// "latency" (P95 above the high-water mark), or "both" (bead count
 	// and latency both push to MEDIUM).
 	CadenceDriver string
+	// ReconcileRequests counts RequestReconcile calls.
+	ReconcileRequests int64
 }
 
 const (
@@ -651,6 +661,7 @@ func newCachingStore(backing Store, idPrefix string, onChange func(source Change
 		},
 		primeRetryDelay: defaultCachePrimeRetryDelay,
 		stopCh:          make(chan struct{}),
+		reconcileKick:   make(chan struct{}, 1),
 	}
 }
 
@@ -676,6 +687,12 @@ func (c *CachingStore) IDPrefix() string {
 
 func normalizeIDPrefix(prefix string) string {
 	return strings.Trim(strings.ToLower(strings.TrimSpace(prefix)), "-")
+}
+
+// OwnsBeadID reports whether id is in a namespace this cache holds rows for:
+// the filter ApplyEvent applies to bead events, and RefreshRow to its ids.
+func (c *CachingStore) OwnsBeadID(id string) bool {
+	return c.ownsBeadID(id)
 }
 
 func (c *CachingStore) ownsBeadID(id string) bool {
@@ -1839,6 +1856,13 @@ func (c *CachingStore) StopReconciler() {
 		cancel()
 	}
 	c.lifecycleWG.Wait()
+}
+
+// Stopped returns a channel closed once StopReconciler has stopped the
+// cache's background work. A consumer that runs alongside the cache (the
+// controller's journal feed) ends with it.
+func (c *CachingStore) Stopped() <-chan struct{} {
+	return c.stopCh
 }
 
 // Stats returns current cache statistics.
