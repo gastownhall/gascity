@@ -711,6 +711,37 @@ func TestNoWakeSignalReadsWorkAfterAttach(t *testing.T) {
 	}
 }
 
+// staleReadyLeg is a caching work leg whose cached ready set (Ready) is
+// stale while its backing (Backing) and live lists see the store.
+type staleReadyLeg struct {
+	beads.Store
+	stale beads.Store
+}
+
+func (l staleReadyLeg) Ready(q ...beads.ReadyQuery) ([]beads.Bead, error) { return l.stale.Ready(q...) }
+func (l staleReadyLeg) Backing() beads.Store                              { return l.Store }
+
+// TestSignalReadsReadyWorkLive (v5.10b-1). Kills a signal L5 whose ready-open
+// half reads the cache through the effect's read-only wrappers: an open bead
+// assigned after the pass, visible only live, refuses has-work.
+func TestSignalReadsReadyWorkLive(t *testing.T) {
+	for _, c := range signalWorkCases {
+		p, it, store, _ := admittedBeginOn(t, intentBegunAt(c.reason, time.Minute), c.entry)
+		if it.Kind != c.kind {
+			t.Fatalf("%s: decided %+v, want %s", c.reason, it, c.kind)
+		}
+		p.reads.legs = testWorkLegs(p.World.CityPath, p.World.Env.Cfg, staleReadyLeg{Store: store, stale: beads.NewMemStore()}, nil).readOnly()
+		if _, err := store.Create(beads.Bead{Title: "slung", Type: "task", Status: "open", Assignee: it.Key.ID}); err != nil {
+			t.Fatal(err)
+		}
+		s := runTx(context.Background(), p, it, effectSpecs[it.Kind], nil)
+		got, _ := store.Get(it.Key.ID)
+		if s.Outcome != settledRefused || s.Cause != causeHasWork || isDrainAckStopPendingInfo(censusRowOf(t, got).Info) {
+			t.Fatalf("%s, open work assigned after the pass: %+v, want refused %q and no signal", c.reason, s, causeHasWork)
+		}
+	}
+}
+
 // TestSignalWorkReadErrorCountsAsWork (v5.10a B, F1 L5). Kills a signal that
 // reads a failed work read as no work: it refuses has-work.
 func TestSignalWorkReadErrorCountsAsWork(t *testing.T) {

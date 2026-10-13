@@ -91,13 +91,15 @@ func (w workAssignment) CachedOpenAssignedWisps(assignee, status string) ([]bead
 // ReadyAssignedTo returns the ready (unblocked, actionable) WORK beads assigned
 // to the given identity for the given tier mode. It is the typed form of the raw
 // beads.ReadyLive(ReadyQuery{Assignee,TierMode}) probe. ReadyLive is called on
-// the embedded .Store so its Backing() live-read fast-path is preserved.
+// the embedded .Store so its Backing() live-read fast-path is preserved, past
+// any wrapper that hides it (peelStoreWrappers: a v2 effect's read-only
+// store reads live, as legacy's unwrapped call does).
 func (w workAssignment) ReadyAssignedTo(assignee string, tierMode beads.TierMode) ([]beads.Bead, error) {
 	store := w.unwrapped()
 	if store == nil {
 		return nil, nil
 	}
-	return beads.ReadyLive(store, beads.ReadyQuery{Assignee: assignee, TierMode: tierMode})
+	return beads.ReadyLive(peelStoreWrappers(store), beads.ReadyQuery{Assignee: assignee, TierMode: tierMode})
 }
 
 // HasNonSessionWork reports whether any bead in items is non-session WORK

@@ -137,28 +137,31 @@ func claimedWorkStillHeldBy(work beads.Bead, sessionID string) bool {
 }
 
 // liveBeadRead reads one bead through the store's authoritative live handle,
-// bypassing a caching layer. The typed class wrappers (beads.SessionStore,
-// beads.WorkStore) and v2's read-only wrappers (readOnlyStore,
-// blindWriteRefusingStore: a v2 effect's stores) do not promote the Handles
-// capability, so they are peeled first; without that the read would silently
-// fall back to the cache. Only the live Get is taken from the peeled store.
+// bypassing a caching layer (peelStoreWrappers): without the peel the read
+// would silently fall back to the cache.
 func liveBeadRead(store beads.Store, id string) (beads.Bead, error) {
+	return beads.HandlesFor(peelStoreWrappers(store)).Live.Get(id)
+}
+
+// peelStoreWrappers is store under the wrappers that do not promote its
+// live capabilities (Handles, Backing): the typed class wrappers
+// (beads.SessionStore, beads.WorkStore) and v2's read-only wrappers
+// (readOnlyStore, blindWriteRefusingStore: a v2 effect's stores). Callers
+// take only a live read from the peeled store.
+func peelStoreWrappers(store beads.Store) beads.Store {
 	for {
 		switch v := store.(type) {
 		case beads.SessionStore:
 			store = v.Store
-			continue
 		case beads.WorkStore:
 			store = v.Store
-			continue
 		case readOnlyStore:
 			store = v.Store
-			continue
 		case blindWriteRefusingStore:
 			store = v.inner
-			continue
+		default:
+			return store
 		}
-		return beads.HandlesFor(store).Live.Get(id)
 	}
 }
 
