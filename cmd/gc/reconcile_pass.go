@@ -122,7 +122,7 @@ func (p *planner) tracePass(e gatherEnv, now time.Time) passResult {
 			intents = append(intents, it)
 		}
 	}
-	rec.IdleTraces = append(rec.IdleTraces, p.idle.stopTraces(&w, intents, p.patrol())...)
+	rec.IdleTraces = append(rec.IdleTraces, p.idle.stopTraces(&w, &a, intents, p.patrol())...)
 	for _, ap := range a.Plans {
 		intents = append(intents, createIntent(cfg, w.Env.ConfigRev, ap))
 	}

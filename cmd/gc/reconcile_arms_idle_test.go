@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -631,31 +632,42 @@ func TestIdleStopReadsTheLateClaim(t *testing.T) {
 	}
 }
 
-// Kills a stop record legacy emits and v2 drops (mc-ensxp), or one emitted
-// every pass: a decided idle stop is recorded at the idle-timeout site with
-// legacy's codes, idle_timeout/stop or assigned_work_exhausted/stop, again
-// only a patrol later or on another reason; any other stop is not.
+// Kills a stop record legacy emits and v2 drops (mc-ensxp), one emitted
+// every pass, and one whose codes are not the decision's (#7791 review): a
+// decided idle stop is recorded at the idle-timeout site with the codes
+// legacy takes through timerTraceCodes, idle_timeout/stop, or for the
+// forced stop assigned_work_exhausted/stop_defer_exhausted, again only a
+// patrol later or on another reason; any other stop is not.
 func TestIdleMemoryTracesStops(t *testing.T) {
 	const patrol = 15 * time.Second
 	var m idleMemory
 	c := idleCase(t, idleCity(), time.Hour, contentUnread)
 	m.update(c.w, c.a, patrol, io.Discard)
+	exhaust := func(on bool) {
+		e := c.a.Snapshot.Entries[c.k]
+		e.AssignedWork, c.w.Idle.defers[c.k] = nil, 0
+		if on { // assigned work deferred past the streak's limit: the forced stop
+			e.AssignedWork, c.w.Idle.defers[c.k] = &assignedWorkView{BeadID: "gw-1"}, 9
+		}
+	}
 	idle, exhausted := intent{Key: c.k, Kind: intentStop, Reason: decideIdleTimeout}, intent{Key: c.k, Kind: intentStop, Reason: decideIdleExhausted}
 	for i, step := range []struct {
-		at   time.Duration
-		it   intent
-		want string
+		at        time.Duration
+		it        intent
+		exhausted bool
+		want      string
 	}{
-		{0, idle, "idle_timeout/stop"},
-		{time.Second, idle, ""},
-		{2 * time.Second, exhausted, "assigned_work_exhausted/stop"},
-		{2*time.Second + patrol, exhausted, "assigned_work_exhausted/stop"},
-		{time.Minute, intent{Key: c.k, Kind: intentStop, Reason: decideDormantStop}, ""},
-		{2 * time.Minute, intent{Key: c.k, Kind: intentStart, Reason: decideIdleTimeout}, ""},
+		{0, idle, false, "idle_timeout/stop"},
+		{time.Second, idle, false, ""},
+		{2 * time.Second, exhausted, true, "assigned_work_exhausted/stop_defer_exhausted"},
+		{2*time.Second + patrol, exhausted, true, "assigned_work_exhausted/stop_defer_exhausted"},
+		{time.Minute, intent{Key: c.k, Kind: intentStop, Reason: decideDormantStop}, false, ""},
+		{2 * time.Minute, intent{Key: c.k, Kind: intentStart, Reason: decideIdleTimeout}, false, ""},
 	} {
 		c.w.Now = censusNow.Add(step.at)
+		exhaust(step.exhausted)
 		var got string
-		for _, tr := range m.stopTraces(c.w, []intent{step.it}, patrol) {
+		for _, tr := range m.stopTraces(c.w, c.a, []intent{step.it}, patrol) {
 			if tr.Site != TraceSiteReconcilerIdleTimeout || tr.Template != "worker" || tr.SessionName != "s-heal" || tr.Key != c.k {
 				t.Fatalf("step %d: trace %+v, want the idle-timeout site for worker/s-heal", i, tr)
 			}
@@ -702,30 +714,50 @@ func TestIdleStopFinalizeReadsNoWork(t *testing.T) {
 	}
 }
 
-// Kills a pass that drops A15's stop records (mc-ensxp): a simulated seat
-// idle past its idle_timeout is stopped, and the pass that decides the
-// stop records it at the idle-timeout site with outcome stop.
+// Kills a pass that drops A15's stop records (mc-ensxp), or records them
+// under codes other than the decision's (#7791 review): a simulated seat
+// idle past its idle_timeout is stopped, and the pass that decides the stop
+// records it at the idle-timeout site, idle_timeout/stop for a seat with no
+// work, assigned_work_exhausted/stop_defer_exhausted for one whose assigned
+// work defers it past its limit.
 func TestPassRecordsTheIdleStop(t *testing.T) {
-	s := respawnSim(t)
-	s.cfg.Agents[0].IdleTimeout = "30s"
-	s.sp.mu.Lock()
-	s.sp.SetActivity("s-gc-1", s.clk.Now().Add(-10*time.Minute))
-	s.sp.mu.Unlock()
-	var stops []rowTrace
-	pass := s.p.pass
-	s.p.pass = func(now time.Time) passResult {
-		res := pass(now)
-		for _, tr := range s.p.out.record.Load().IdleTraces {
-			if tr.Outcome == string(TraceOutcomeStop) {
-				stops = append(stops, tr)
+	for _, c := range []struct {
+		name   string
+		noWork bool
+		want   string
+	}{
+		{"no work", true, "idle_timeout/stop"},
+		{"assigned work past its limit", false, "assigned_work_exhausted/stop_defer_exhausted"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s := respawnSim(t)
+			s.cfg.Agents[0].IdleTimeout = "30s"
+			if c.noWork { // routed demand keeps the seat wanted; no work is assigned to it
+				empty := ""
+				if err := s.legs[0].backing.Update("gw-1", beads.UpdateOpts{Assignee: &empty}); err != nil {
+					t.Fatal(err)
+				}
+				s.legs[0].cache.ReconcileNowForTest()
 			}
-		}
-		return res
+			s.sp.mu.Lock()
+			s.sp.SetActivity("s-gc-1", s.clk.Now().Add(-10*time.Minute))
+			s.sp.mu.Unlock()
+			var stops []rowTrace
+			pass := s.p.pass
+			s.p.pass = func(now time.Time) passResult {
+				res := pass(now)
+				for _, tr := range s.p.out.record.Load().IdleTraces {
+					if strings.HasPrefix(tr.Outcome, string(TraceOutcomeStop)) {
+						stops = append(stops, tr)
+					}
+				}
+				return res
+			}
+			s.tickUntil(t, 20, "recorded an idle stop", func() bool { return len(stops) > 0 })
+			if tr := stops[0]; tr.Site != TraceSiteReconcilerIdleTimeout || tr.SessionName != "s-gc-1" || tr.Reason+"/"+tr.Outcome != c.want {
+				t.Fatalf("stop record %+v, want %s at the idle-timeout site for s-gc-1", tr, c.want)
+			}
+			s.noViolations(t)
+		})
 	}
-	s.tickUntil(t, 20, "recorded an idle stop", func() bool { return len(stops) > 0 })
-	if tr := stops[0]; tr.Site != TraceSiteReconcilerIdleTimeout || tr.SessionName != "s-gc-1" ||
-		(tr.Reason != string(TraceReasonIdleTimeout) && tr.Reason != string(TraceReasonAssignedWorkExhausted)) {
-		t.Fatalf("stop record %+v, want the idle-timeout site's stop for s-gc-1", tr)
-	}
-	s.noViolations(t)
 }

@@ -449,10 +449,14 @@ func (m *idleMemory) trace(row censusRow, template, reason, outcome string, now 
 }
 
 // stopTraces are legacy's records of the idle stops the pass decided
-// (reconciler.session.idle_timeout, idle_timeout/stop or
-// assigned_work_exhausted/stop; mc-ensxp), recorded as legacy records them
-// when it decides the kill, at most one a patrol per row and reason.
-func (m *idleMemory) stopTraces(w *World, intents []intent, patrol time.Duration) []rowTrace {
+// (reconciler.session.idle_timeout; mc-ensxp), with the codes legacy takes
+// from the stop's decision through timerTraceCodes: idle_timeout/stop, or
+// assigned_work_exhausted/stop_defer_exhausted for the forced stop
+// (DecideAssignedWorkExhausted). The decision is the row's ladder on the
+// pass's facts (idleLadder), the one armIdleTimeout stopped on. As legacy
+// records them when it decides the kill, at most one a patrol per row and
+// reason.
+func (m *idleMemory) stopTraces(w *World, a *allocDecision, intents []intent, patrol time.Duration) []rowTrace {
 	var out []rowTrace
 	for _, it := range intents {
 		if it.Kind != intentStop || !isIdleReason(it.Reason) {
@@ -462,12 +466,14 @@ func (m *idleMemory) stopTraces(w *World, intents []intent, patrol time.Duration
 		if !ok {
 			continue
 		}
-		reason := TraceReasonIdleTimeout
-		if it.Reason == decideIdleExhausted {
-			reason = TraceReasonAssignedWorkExhausted
+		r := &rowFacts{w: w, k: it.Key, entry: a.Snapshot.Entries[it.Key], row: row}
+		dec, ok := r.idleLadder()
+		if !ok || dec.Action != session.TimerActionStop {
+			continue
 		}
 		s, _ := w.idleSettingOf(it.Key, row.Info)
-		if t, ok := m.trace(row, s.Template, string(reason), string(TraceOutcomeStop), w.Now, patrol); ok {
+		reason, outcome := timerTraceCodes(dec)
+		if t, ok := m.trace(row, s.Template, string(reason), string(outcome), w.Now, patrol); ok {
 			out = append(out, t)
 		}
 	}
