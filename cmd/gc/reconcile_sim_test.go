@@ -519,6 +519,13 @@ func newSim(t *testing.T, seed uint64, o simOpts) *sim {
 		return res
 	}
 	s.p.effects = s.x
+	// The create effects (C1, C2), on the sessions leg under the city's
+	// identifier locks, so the allocation's plans land rows (mc-i7efm).
+	creates, err := newCreateEffects(createEffectHost{cityPath: s.env.CityPath, cityName: s.env.CityName, lookPath: s.env.LookPath, now: s.clk.Now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.p.creates = creates
 	// The planner notes effects' fresh observations in the lane's cache, as
 	// production wires it (plannerRuntime.bindHost): a start's alive read
 	// and any effect's absent one (CONTRACT O4, v5.10g).
@@ -1549,6 +1556,13 @@ func (s *sim) lastTimer() time.Time {
 	for _, r := range s.p.backoff.Snapshot() {
 		if r.Until.After(last) {
 			last = r.Until
+		}
+	}
+	// An ambiguous create holds its identity's plan until its row shows or
+	// the hard bound passes (P5).
+	for _, e := range s.inflight.creates {
+		if at := e.SettledAt.Add(inflightHardBound); e.Ambiguous && at.After(last) {
+			last = at
 		}
 	}
 	return last

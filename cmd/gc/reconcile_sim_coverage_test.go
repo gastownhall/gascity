@@ -202,9 +202,6 @@ func settleOutcomes() []string {
 // for want of a generator (mc-i7efm). The gate fails on a listed key that
 // gets hits, so each entry goes when its generator lands.
 var simCoverageAllowlist = map[string]string{
-	// No generator wires the create effects (p.creates): every create
-	// intent is unregistered, and pending creates are an external op.
-	"effect:" + intentCreate: "mc-i7efm: creates",
 	// No generator asks a row to restart (generators frozen for the
 	// release; the scripted A13 scenarios cover it).
 	"arm:A13/armRestartRequested": "mc-i7efm: restart requested",
