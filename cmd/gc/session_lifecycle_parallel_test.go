@@ -8550,37 +8550,55 @@ func TestBuildPreparedStartReadsObservePaths(t *testing.T) {
 	}
 }
 
-// Kills a stale-resume clear of an allocated key (mc-keie0): with its
-// transcript absent, a key no start committed (no started_config_hash) is
-// kept, with no continuation reset, and launched with --session-id; a
-// committed key is cleared and the start mints a fresh one.
+// Kills a stale-resume clear of an allocated key (mc-keie0), and a gate on
+// the probe instead of the clear: with its transcript absent, a key no start
+// committed (no started_config_hash) is kept, with no continuation reset, and
+// launched with --session-id; with its transcript present it resumes; a
+// committed key, or any key of a provider with no session_id_flag, is cleared
+// and the start runs fresh.
 func TestBuildPreparedStartKeepsAnAllocatedKey(t *testing.T) {
-	prev := staleResumeKeyProbe
-	staleResumeKeyProbe = func([]string, string, string, string) (bool, bool) { return false, true }
-	t.Cleanup(func() { staleResumeKeyProbe = prev })
-	workDir := t.TempDir()
-	for _, committed := range []bool{false, true} {
-		store := beads.NewMemStore()
-		meta := map[string]string{"session_name": "worker", "template": "worker", "state": "asleep", "provider": "claude", "work_dir": workDir, "session_key": "k-1"}
-		if committed {
-			meta["started_config_hash"] = "h-1"
-		}
-		row, err := store.Create(beads.Bead{Title: "worker", Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: meta})
-		if err != nil {
-			t.Fatal(err)
-		}
-		candidate := startCandidate{info: sessiontest.SeedBead(t, row), tp: TemplateParams{
-			TemplateName: "worker", SessionName: "worker", Command: "claude", WorkDir: workDir, ResolvedProvider: claudeResumeProvider(),
-		}}
-		prepared, info, err := buildPreparedStart(candidate, &config.City{}, store)
-		if err != nil {
-			t.Fatalf("committed %v: buildPreparedStart: %v", committed, err)
-		}
-		got, _ := store.Get(row.ID)
-		kept := info.SessionKey == "k-1" && got.Metadata["session_key"] == "k-1" && got.Metadata["continuation_reset_pending"] == ""
-		if kept == committed || !strings.Contains(prepared.cfg.Command, "--session-id "+info.SessionKey) {
-			t.Fatalf("committed %v: key %q (stored %q, reset pending %q), command %q; want kept=%v and launched with --session-id", committed, info.SessionKey, got.Metadata["session_key"], got.Metadata["continuation_reset_pending"], prepared.cfg.Command, !committed)
-		}
+	resumeOnly := claudeResumeProvider()
+	resumeOnly.SessionIDFlag = ""
+	for _, c := range []struct {
+		name      string
+		committed bool
+		present   bool
+		rp        *config.ResolvedProvider
+		kept      bool
+		want      string // a command substring
+	}{
+		{"an allocated key, transcript absent", false, false, claudeResumeProvider(), true, "--session-id k-1"},
+		{"an allocated key, transcript present", false, true, claudeResumeProvider(), true, "--resume k-1"},
+		{"a committed key, transcript absent", true, false, claudeResumeProvider(), false, "--session-id "},
+		{"a resume-only provider's allocated key, transcript absent", false, false, resumeOnly, false, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			prev := staleResumeKeyProbe
+			staleResumeKeyProbe = func([]string, string, string, string) (bool, bool) { return c.present, true }
+			t.Cleanup(func() { staleResumeKeyProbe = prev })
+			workDir := t.TempDir()
+			store := beads.NewMemStore()
+			meta := map[string]string{"session_name": "worker", "template": "worker", "state": "asleep", "provider": "claude", "work_dir": workDir, "session_key": "k-1"}
+			if c.committed {
+				meta["started_config_hash"] = "h-1"
+			}
+			row, err := store.Create(beads.Bead{Title: "worker", Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: meta})
+			if err != nil {
+				t.Fatal(err)
+			}
+			candidate := startCandidate{info: sessiontest.SeedBead(t, row), tp: TemplateParams{
+				TemplateName: "worker", SessionName: "worker", Command: "claude", WorkDir: workDir, ResolvedProvider: c.rp,
+			}}
+			prepared, info, err := buildPreparedStart(candidate, &config.City{}, store)
+			if err != nil {
+				t.Fatalf("buildPreparedStart: %v", err)
+			}
+			got, _ := store.Get(row.ID)
+			kept := info.SessionKey == "k-1" && got.Metadata["session_key"] == "k-1" && got.Metadata["continuation_reset_pending"] == ""
+			if kept != c.kept || !strings.Contains(prepared.cfg.Command, c.want) || (!c.kept && strings.Contains(prepared.cfg.Command, "k-1")) {
+				t.Fatalf("key %q (stored %q, reset pending %q), command %q; want kept=%v and a command with %q", info.SessionKey, got.Metadata["session_key"], got.Metadata["continuation_reset_pending"], prepared.cfg.Command, c.kept, c.want)
+			}
+		})
 	}
 }
 

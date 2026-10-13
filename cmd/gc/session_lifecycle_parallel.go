@@ -1260,8 +1260,10 @@ func buildPreparedStartWithTranscript(
 		// was allocated for a start that has not committed yet (CreateSession,
 		// or a first start that failed) and has no transcript until that start
 		// writes one, so it is kept and launched with --session-id. The probe
-		// still runs for it, since firstStart reads its result.
-		if probeable && !present && strings.TrimSpace(candidate.info.StartedConfigHash) != "" {
+		// still runs for it, since firstStart reads its result. A provider with
+		// no session_id_flag would resume any key it is handed, so its key is
+		// still cleared (staleResumeKeyClears).
+		if probeable && !present && staleResumeKeyClears(candidate.info, tp.ResolvedProvider) {
 			var sessFront *sessionpkg.Store
 			if store != nil {
 				sessFront = sessionFrontDoor(store)
@@ -2573,6 +2575,16 @@ func observeRuntimeProviderLiveness(sp runtime.Provider, name string, processNam
 	}
 	obs, err := runtime.ObserveLivenessWithError(sp, name, processNames)
 	return obs.Running, obs.Alive, err
+}
+
+// staleResumeKeyClears reports whether the stale-resume clear resets info's
+// key once its keyed transcript reads absent: a committed key (a
+// started_config_hash beside it), or any key of a provider with no
+// session_id_flag, which resolveSessionCommand would hand to a resume even
+// on a first start. An allocated key of a provider that can name a new
+// conversation is kept and launched with that flag.
+func staleResumeKeyClears(info sessionpkg.Info, rp *config.ResolvedProvider) bool {
+	return strings.TrimSpace(info.StartedConfigHash) != "" || rp == nil || rp.SessionIDFlag == ""
 }
 
 // staleResumeKeyProbe reports whether the keyed transcript a resume would

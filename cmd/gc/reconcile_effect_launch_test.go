@@ -352,6 +352,24 @@ func TestStartEffectFreshKeyNotClearedOrReminted(t *testing.T) {
 	}
 }
 
+// Kills an allocated key kept for a provider with no session_id_flag
+// (mc-keie0 ruling): it would resume any key it is handed, so PreWake still
+// resets a key whose transcript is gone and launches with none.
+func TestStartEffectClearsAResumeOnlyProvidersAllocatedKey(t *testing.T) {
+	stubTranscript(t, false)
+	k, leaf := launchKit(t, "asleep", "session_key", "allocated", "continuation_epoch", "5")
+	k.p.Clock.(*fakePlannerClock).auto = true // the stale-key wait
+	row := k.p.World.Census.Rows[k.it.Key]
+	tp := TemplateParams{TemplateName: "worker", Command: "agent", WorkDir: t.TempDir(), ResolvedProvider: &config.ResolvedProvider{Name: "claude", ResumeFlag: "--resume", ResumeStyle: "flag"}}
+	k.p.World.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(row.Info): {TP: tp}}}
+	if s := k.runKind(); s.Outcome != settledLanded || len(leaf.cfgs) != 1 {
+		t.Fatalf("settlement %+v, want landed", s)
+	}
+	if k.meta("session_key") != "" || k.meta("continuation_epoch") != "6" || strings.Contains(leaf.cfgs[0].Command, "allocated") {
+		t.Fatalf("key %q epoch %q command %q; want the key reset and a bare launch", k.meta("session_key"), k.meta("continuation_epoch"), leaf.cfgs[0].Command)
+	}
+}
+
 // Kills a Noop that takes a half-open endpoint's single probe, and a launch
 // without the ticket (SC N1): only the launch admits, and holds it through
 // the Start; its success closes the breaker.
