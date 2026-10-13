@@ -89,6 +89,7 @@ type simKill struct {
 	Hit          *simRuntime
 	External     bool
 	Effect       string // the intent kind of the v2 effect that made it, when one ran
+	Reason       string // that effect's reason
 }
 
 var errSimListing = errors.New("sim: list-sessions failed")
@@ -117,6 +118,7 @@ type simProvider struct {
 	confirmable bool   // a down server confirms dead (LL2)
 	external    bool   // the calls now are an operator's or a second controller's
 	effect      string // the intent kind of the v2 effect now running (reconcile_sim_pending_test.go)
+	reason      string // its reason
 	nextStart   error  // the next Start's scripted outcome
 	starts      []simStart
 	kills       []simKill
@@ -297,7 +299,7 @@ func (p *simProvider) killLocked(method, name string) {
 		hit = &c
 		p.drop(name)
 	}
-	p.kills = append(p.kills, simKill{Method: method, Name: name, Hit: hit, External: p.external, Effect: p.effect})
+	p.kills = append(p.kills, simKill{Method: method, Name: name, Hit: hit, External: p.external, Effect: p.effect, Reason: p.reason})
 }
 
 // simBacking is one leg's revisioned store: a MemStore stamped require, whose

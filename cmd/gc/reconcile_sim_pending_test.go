@@ -445,15 +445,15 @@ func (s *sim) pendingCreateTimers() []time.Time {
 	return out
 }
 
-// markEffect records, for the provider's kills, the kind of the v2 effect
-// now running (simKill.Effect), until it settles.
+// markEffect records, for the provider's kills, the kind and reason of the
+// v2 effect now running (simKill.Effect, Reason), until it settles.
 func (s *sim) markEffect(e *simEffect) func(settlement) {
 	s.sp.mu.Lock()
-	s.sp.effect = e.it.Kind
+	s.sp.effect, s.sp.reason = e.it.Kind, e.it.Reason
 	s.sp.mu.Unlock()
 	return func(settlement) {
 		s.sp.mu.Lock()
-		s.sp.effect = ""
+		s.sp.effect, s.sp.reason = "", ""
 		s.sp.mu.Unlock()
 	}
 }
@@ -471,10 +471,11 @@ func (s *sim) ownRuntimeException(k simKill, row beads.Bead, own bool) bool {
 }
 
 // ownRuntimeEffect reports a Stop made by an effect the own-runtime
-// exception covers: a rollback (its teardown, S7's exit) or a start (its
-// lost commit, its abandon's teardown).
+// exception covers: a rollback (its teardown, S7's exit), a start (its
+// lost commit, its abandon's teardown), or A13's restart, which waives the
+// attach leg (CONTRACT v5.10u).
 func ownRuntimeEffect(k simKill) bool {
-	return k.Method == "Stop" && (k.Effect == intentRollback || k.Effect == intentStart)
+	return k.Method == "Stop" && (k.Effect == intentRollback || k.Effect == intentStart || k.Effect == intentStop && k.Reason == decideRestartRequested)
 }
 
 // stopAdmission is a stop a pass admitted (sim.stopAdmissions): whether

@@ -29,10 +29,10 @@ func converged(t *testing.T, live []string, rows ...beads.Bead) *sim {
 	return s
 }
 
-// ask writes kv to the city row id as an outside writer, and lets the
+// ask writes kv to the city row gc-1 as an outside writer, and lets the
 // cache see it.
-func (s *sim) ask(id string, kv ...string) {
-	s.legs[0].cache.ApplyEvent("bead.updated", s.operator(id, kv...))
+func (s *sim) ask(kv ...string) {
+	s.legs[0].cache.ApplyEvent("bead.updated", s.operator("gc-1", kv...))
 }
 
 // TestSimRestartRequestedRestartsALiveRow (CONTRACT v5.10q, A13; SESS-520,
@@ -50,7 +50,7 @@ func TestSimRestartRequestedRestartsALiveRow(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			s.ask("gc-1", restartAsked...)
+			s.ask(restartAsked...)
 			s.settle()
 			m := s.gc1()
 			if m["state"] != "asleep" || m["restart_requested"] != "" || m["session_key"] == "k-1" || m["continuation_reset_pending"] != "true" || m[session.ResetCommittedAtKey] == "" || m["started_config_hash"] != "" {
@@ -82,12 +82,28 @@ func TestSimRestartRequestedRestartsALiveRow(t *testing.T) {
 	}
 }
 
+// TestSimRestartRequestedStopsAnAttachedRow (CONTRACT v5.10u): the restart
+// is the operator's or agent's intent, so a human attached to the live row
+// does not defer it (legacy parity): the row is stopped and handed off.
+func TestSimRestartRequestedStopsAnAttachedRow(t *testing.T) {
+	s := converged(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-1", "session_key", "k-1", "last_woke_at", rowAt(-time.Hour)), gc1Work())
+	s.sp.mu.Lock()
+	s.sp.rts["s-gc-1"].attached = true
+	s.sp.mu.Unlock()
+	s.ask(restartAsked...)
+	s.settle()
+	if m := s.gc1(); m["restart_requested"] != "" || m[session.ResetCommittedAtKey] == "" || len(s.sp.kills) != 1 {
+		t.Fatalf("row %v, kills %d; want the attached row stopped and handed off", m, len(s.sp.kills))
+	}
+	s.noViolations(t)
+}
+
 // TestSimRestartRequestedHandsOffAGoneRow (A13; SESS-526): a row whose
 // runtime is already gone is handed off without a stop, ahead of its start,
 // and started a pass later.
 func TestSimRestartRequestedHandsOffAGoneRow(t *testing.T) {
 	s := scripted(t, nil, poolRow("gc-1", "worker", 1, "asleep", "instance_token", "tok-1", "started_config_hash", "h-1"), gc1Work())
-	s.ask("gc-1", restartAsked...)
+	s.ask(restartAsked...)
 	handedOff := false
 	for range 6 {
 		s.settle()
@@ -127,7 +143,7 @@ func TestSimRestartRequestedLeavesHeldRows(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			meta := append([]string{"instance_token", "tok-1", "session_key", "k-1", "last_woke_at", rowAt(-time.Hour)}, tc.meta...)
 			s := converged(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", meta...), gc1Work())
-			s.ask("gc-1", tc.asked...)
+			s.ask(tc.asked...)
 			s.settle()
 			s.settle()
 			m := s.gc1()

@@ -75,6 +75,8 @@ func stopLegs(it intent) fenceLegs {
 		return legToken | legAttach | legPending | legWork
 	case it.Reason == decideIdleExhausted: // stopped over its work (SESS-575)
 		return legToken | legAttach | legPending
+	case it.Reason == decideRestartRequested: // A13 (v5.10u): an explicit restart stops an attached session, as legacy's
+		return legToken
 	}
 	return legToken | legAttach
 }
