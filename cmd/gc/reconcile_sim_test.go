@@ -1559,7 +1559,7 @@ func (s *sim) lastTimer() time.Time {
 		}
 	}
 	// An ambiguous create holds its identity's plan until its row shows or
-	// the hard bound passes (P5).
+	// the hard bound passes (P5; ruling on seed 60 of the corpus, mc-i7efm).
 	for _, e := range s.inflight.creates {
 		if at := e.SettledAt.Add(inflightHardBound); e.Ambiguous && at.After(last) {
 			last = at
@@ -1585,6 +1585,14 @@ func (s *sim) rowTimers() time.Time {
 			if at, err := time.Parse(time.RFC3339, b.Metadata[k]); err == nil {
 				later(at.Add(grace))
 			}
+		}
+		// A fresh pool create keeps its scaled slot postCreateProtectionTimeout
+		// past its commit (poolSessionWithinPostCreateProtection), and the
+		// slot's ranking moves when it ends (ruling on seed 716 of the
+		// floored corpus, mc-i7efm).
+		if at, err := time.Parse(time.RFC3339, b.Metadata["creation_complete_at"]); err == nil && b.Status != "closed" &&
+			slices.Contains([]string{"active", "awake"}, b.Metadata["state"]) && b.Metadata["state_reason"] == "creation_complete" {
+			later(at.Add(postCreateProtectionTimeout))
 		}
 		// The churn clear is A6's at its threshold on an open committed row
 		// (SESS-540), which a patrol reaches.

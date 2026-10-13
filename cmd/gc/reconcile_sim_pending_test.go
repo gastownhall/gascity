@@ -627,6 +627,26 @@ func TestSimPendingRelaxationsBite(t *testing.T) {
 			s.stopAdmissions = map[rowKey]stopAdmission{k: {moves: len(s.basisMoves)}}
 			s.checkFinalized(&simEffect{it: intent{Kind: intentStop, Key: k}})(settlement{Outcome: settledRefused, Cause: causePremise})
 		}},
+		// I15's named-reopen exception (mc-i7efm): only a configured named
+		// session's closed row reopened; a reopen of another closed row, or
+		// a named row's open write, that clears a hold still fails.
+		{"I15: a reopen of a closed row no configured named session holds", "I15 ", func(s *sim) {
+			b := row("x", held...)
+			b.Status = "closed"
+			s.checkWrite(simWrite{Leg: "city", At: s.clk.Now(), Before: b, After: row("x", "state", "stopped")})
+		}},
+		{"I15: a named row's open write that clears its hold", "I15 ", func(s *sim) {
+			b := row("x", append(held, "configured_named_session", "true")...)
+			s.checkWrite(simWrite{Leg: "city", At: s.clk.Now(), Before: b, After: row("x", "configured_named_session", "true", "state", "stopped")})
+		}},
+		// I16's deadline exception (mc-i7efm): a stop abandoned at its
+		// deadline only; one that failed on any other cause still fails.
+		{"I16: a stop failed on its write with no pane, left signaled", "I16 ", func(s *sim) {
+			s.setMeta(s.legs[0], "gc-1", signaled...)
+			s.sp.drop("s-gc-1")
+			k := rowKey{Leg: rowLeg, ID: "gc-1"}
+			s.checkFinalized(&simEffect{it: intent{Kind: intentStop, Key: k}})(settlement{Outcome: settledFailed, Cause: causeWrite})
+		}},
 		{"I16: signaled at quiescence with no pane, its probe answering", "I16 ", func(s *sim) {
 			s.setMeta(s.legs[0], "gc-1", signaled...)
 			s.sp.drop("s-gc-1")
@@ -990,5 +1010,41 @@ func TestRollbackScreenParkRewritesHolds(t *testing.T) {
 		if failed != c.fails {
 			t.Errorf("%s: failures %q, want an I15 failure %t", c.name, s.failures, c.fails)
 		}
+	}
+}
+
+// Kills I10's timer table counting what holds no plan back (mc-i7efm): an
+// ambiguous create's hard bound counts, a landed create's entry does not;
+// a fresh pool create's post-create protection counts, a committed row
+// past its creation_complete does not.
+func TestSimLastTimerCounts(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		arrange func(s *sim)
+		want    time.Duration
+	}{
+		{"nothing", func(*sim) {}, 0},
+		{"an ambiguous create", func(s *sim) {
+			s.inflight.creates["tok-a"] = inflightEntry{Kind: inflightCreate, Token: "tok-a", Ambiguous: true, SettledAt: s.clk.Now()}
+		}, inflightHardBound},
+		{"a running create", func(s *sim) {
+			s.inflight.creates["tok-a"] = inflightEntry{Kind: inflightCreate, Token: "tok-a", SettledAt: s.clk.Now()}
+		}, 0},
+		{"a fresh pool create", func(s *sim) {
+			s.setMeta(s.legs[0], "gc-1", "state", "awake", "state_reason", "creation_complete", "creation_complete_at", s.rel(0))
+		}, postCreateProtectionTimeout},
+		{"a committed row past its creation", func(s *sim) {
+			s.setMeta(s.legs[0], "gc-1", "state", "awake", "state_reason", "", "creation_complete_at", s.rel(0))
+		}, 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s := newSim(t, 3, simOpts{rows: func(*sim) ([]beads.Bead, []beads.Bead) {
+				return []beads.Bead{poolRow("gc-1", "worker", 1, "asleep", "instance_token", "tok-gc-1-1")}, nil
+			}})
+			c.arrange(s)
+			if got := s.lastTimer().Sub(s.clk.Now()); got != c.want {
+				t.Errorf("lastTimer = now+%s, want now+%s", got, c.want)
+			}
+		})
 	}
 }

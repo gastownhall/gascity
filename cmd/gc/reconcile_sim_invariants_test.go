@@ -258,7 +258,7 @@ func (s *sim) checkWrite(w simWrite) {
 			}
 		}
 	}
-	if k := dormantChange(w.Before, a, w.At, s.stable[w.After.ID]); k != "" && (!closes || !closeEndsSuspend(w.Before, k, w.At)) && (!closes || !pendingCreateRollback(w)) && !pendingCreateScreenPark(w, s.stable[w.After.ID]) && !pendingCreateAdopt(w, k) && !s.quarantinedCommit(id, w, k) {
+	if k := dormantChange(w.Before, a, w.At, s.stable[w.After.ID]); k != "" && (!closes || !closeEndsSuspend(w.Before, k, w.At)) && (!closes || !pendingCreateRollback(w)) && !pendingCreateScreenPark(w, s.stable[w.After.ID]) && !pendingCreateAdopt(w, k) && !s.quarantinedCommit(id, w, k) && !namedReopen(w) {
 		s.failf("I15 I-STOP-3/4", "v2 rewrote %s %q -> %q on %s, which an operator holds dormant at %s", k, b[k], a[k], id, w.At.Format(time.RFC3339))
 	}
 	terminal := (w.After.Status == "closed" && w.Before.Status != "closed") ||
@@ -470,6 +470,16 @@ var suspendKey = map[string]bool{"state": true, "suspended_at": true}
 // closeEndsSuspend reports whether a close may change k on b at t: k is a
 // suspend's key and no deliberate hold is in force or unreadable (§12.2 #27).
 // A held suspended row is never closed.
+// namedReopen reports w a configured named session's reopen of its closed
+// row (v5 C2, AM-N2): a fresh spawn on the row, which retires the closed
+// row's holds (its suspend, hold, quarantine and their reasons) as legacy's
+// reopenNamedSessionBatch does (the disposition's Retire cell and
+// ClearWakeBlockersPatch), so no dormant key it moves is an operator's
+// (ruling on the creates generator's seeds 250, 783 and 1001, mc-i7efm).
+func namedReopen(w simWrite) bool {
+	return w.Before.Status == "closed" && w.After.Status != "closed" && w.Before.Metadata["configured_named_session"] == "true"
+}
+
 func closeEndsSuspend(b beads.Bead, k string, t time.Time) bool {
 	return suspendKey[k] && !session.DecodeDisposition(b.Metadata).HoldsDeliberately(t)
 }
@@ -663,6 +673,9 @@ func (s *sim) checkFinalized(e *simEffect) func(settlement) {
 		b, err := l.backing.Get(e.it.Key.ID)
 		if res.Cause == causePremise && (s.basisMovedOutside(l.name, e.it.Key.ID, window) || s.stopBasisMovedSinceRead(l.name, e.it.Key)) {
 			return
+		}
+		if res.Cause == causeDeadline {
+			return // abandoned at its deadline, the stop confirmed nothing; I17's bound holds the row (ruling on seed 222 of the floored-pending corpus, mc-i7efm)
 		}
 		if res.Cause == fenceLivenessUnknown && s.probeErring(b) {
 			return // an erroring probe proves no absence (O3), as I17 rules it not stoppable (v5.9n; seed 606 of the floored-pending corpus)
