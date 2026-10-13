@@ -1408,7 +1408,7 @@ func TestCheckStability_AliveReturnsFalse(t *testing.T) {
 		"last_woke_at": clk.Now().Add(-10 * time.Second).Format(time.RFC3339),
 	})
 
-	if _, stab := checkStability(seedSessionInfo(session), nil, true, dt, sessionFrontDoor(store), clk, nil); stab {
+	if _, stab := checkStability(seedSessionInfo(session), nil, true, dt, sessionFrontDoor(store), clk, nil, nil); stab {
 		t.Error("alive session should not report stability failure")
 	}
 }
@@ -1425,7 +1425,7 @@ func TestCheckStability_RapidExit(t *testing.T) {
 	})
 
 	store.persistRow(session) // the row the accrual reads fresh (mc-uhvqj)
-	_, stab := checkStability(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), clk, nil)
+	_, stab := checkStability(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), clk, nil, nil)
 	syncBeadFromStore(&session, store)
 	if !stab {
 		t.Error("rapid exit should report stability failure")
@@ -1453,7 +1453,7 @@ func TestCheckStability_PendingCreateInFlightNotCounted(t *testing.T) {
 		"wake_attempts":        "0",
 	})
 
-	_, stab := checkStability(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), clk, nil)
+	_, stab := checkStability(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), clk, nil, nil)
 	syncBeadFromStore(&session, store)
 	if stab {
 		t.Fatal("in-flight pending create should not be counted as a rapid exit")
@@ -1477,7 +1477,7 @@ func TestCheckStability_PendingCreateClaimNotCountedAfterStartupLeaseExpires(t *
 		"wake_attempts":        "0",
 	})
 
-	_, stab := checkStability(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), clk, nil)
+	_, stab := checkStability(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), clk, nil, nil)
 	syncBeadFromStore(&session, store)
 	if stab {
 		t.Fatal("pending_create_claim should suppress stability counting until create recovery clears the claim")
@@ -1498,7 +1498,7 @@ func TestCheckStability_DrainingNotCounted(t *testing.T) {
 		"last_woke_at": now.Add(-10 * time.Second).Format(time.RFC3339),
 	})
 
-	if _, stab := checkStability(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), clk, nil); stab {
+	if _, stab := checkStability(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), clk, nil, nil); stab {
 		t.Error("draining session death should not count as stability failure")
 	}
 }
@@ -1514,7 +1514,7 @@ func TestCheckStability_StableSession(t *testing.T) {
 		"last_woke_at": now.Add(-2 * time.Minute).Format(time.RFC3339),
 	})
 
-	if _, stab := checkStability(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), clk, nil); stab {
+	if _, stab := checkStability(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), clk, nil, nil); stab {
 		t.Error("session that lived past threshold should not be stability failure")
 	}
 }
@@ -1533,7 +1533,7 @@ func TestCheckStability_SubprocessProviderSkipsCrashCounting(t *testing.T) {
 		"wake_attempts": "0",
 	})
 
-	_, stab := checkStability(seedSessionInfo(session), cfg, false, dt, sessionFrontDoor(store), clk, nil)
+	_, stab := checkStability(seedSessionInfo(session), cfg, false, dt, sessionFrontDoor(store), clk, nil, nil)
 	syncBeadFromStore(&session, store)
 	if stab {
 		t.Fatal("subprocess rapid exit should not be counted as a crash")
@@ -1598,7 +1598,7 @@ func TestWakeFailureUsesConfiguredTranscriptRoots(t *testing.T) {
 	entrances := map[string]func(store *testStore, session beads.Bead, cfg *config.City){
 		"rapid crash": func(store *testStore, session beads.Bead, cfg *config.City) {
 			store.persistRow(session)
-			if _, stab := checkStability(seedSessionInfo(session), cfg, false, newDrainTracker(), sessionFrontDoor(store), clk, nil); !stab {
+			if _, stab := checkStability(seedSessionInfo(session), cfg, false, newDrainTracker(), sessionFrontDoor(store), clk, nil, sessionTranscriptSearchPaths(cfg)); !stab {
 				t.Fatal("rapid exit not recorded")
 			}
 		},
@@ -2750,7 +2750,7 @@ func TestCheckStability_RapidExitAfterHealStateKeepsStartedConfigHashCleared(t *
 	if session.Metadata["started_config_hash"] != "" {
 		t.Fatalf("healState started_config_hash = %q, want empty", session.Metadata["started_config_hash"])
 	}
-	_, stab := checkStability(seedSessionInfo(session), nil, false, nil, sessionFrontDoor(store), clk, nil)
+	_, stab := checkStability(seedSessionInfo(session), nil, false, nil, sessionFrontDoor(store), clk, nil, nil)
 	syncBeadFromStore(&session, store)
 	if !stab {
 		t.Fatal("checkStability should record the rapid exit")

@@ -46,10 +46,11 @@ type startFailure struct {
 	peek            bool // a rate-limit screen may show: the pane is listed (START-022)
 	relaunched      bool // PreWake found the row creating (#7570): its marker stays
 	undo            preWakeUndo
-	row             session.Info // the fresh row, for the conversation probe
-	cfg             *config.City // the city, for the probe's transcript roots (sessionTranscriptSearchPaths)
-	name, display   string       // the runtime name; the agent, for the quarantine metric
-	episode         string       // the #46 episode key
+	row             session.Info   // the fresh row, for the conversation probe
+	cfg             *config.City   // the city and the launch, for the probe's transcript roots (launchTranscriptRoots)
+	launch          TemplateParams // its template
+	name, display   string         // the runtime name; the agent, for the quarantine metric
+	episode         string         // the #46 episode key
 }
 
 // startFailureRead is what the failure Call read, past what it accrued.
@@ -77,7 +78,7 @@ func failStart(v txView, out startOutcome, cause string, err error) txStep {
 	}
 	f := startFailure{
 		cause: cause, err: err, pending: v.Row.PendingCreateClaim, died: cause == causeDiedDuringStartup, relaunched: out.relaunched, undo: out.undo,
-		row: v.Row, name: name, display: out.tp.DisplayName(), episode: startupHealthEpisodeKey(v.Row, name),
+		row: v.Row, name: name, display: out.tp.DisplayName(), episode: startupHealthEpisodeKey(v.Row, name), launch: out.tp,
 	}
 	started := cause != causePrepare && cause != causeAttribution // a Start's own failure, which the provider screens
 	if started {
@@ -109,7 +110,7 @@ func readStartFailure(ctx context.Context, c txCaps, f startFailure) startFailur
 	case f.pending, f.cause == causePrepare, f.cause == causeAttribution:
 		_ = c.episode.fail(f.episode, f.err, c.start.clock.Now())
 	default:
-		r.keeps = wakeFailureKeepsConversation(f.row, sessionTranscriptSearchPaths(f.cfg))
+		r.keeps = wakeFailureKeepsConversation(f.row, launchTranscriptRoots(f.cfg, f.launch))
 	}
 	return r
 }

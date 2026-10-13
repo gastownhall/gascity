@@ -274,8 +274,8 @@ type preparedStart struct {
 	// preWakeUndo is what a capacity refusal needs to undo this attempt's
 	// PreWake (restorePreWakeState). Zero when the start had no persisted row.
 	preWakeUndo preWakeUndo
-	// transcriptRoots is sessionTranscriptSearchPaths of the city the start
-	// was prepared for, for commitStartFailure's conversation probe.
+	// transcriptRoots is launchTranscriptRoots of the launch the start was
+	// prepared for, for commitStartFailure's conversation probe.
 	transcriptRoots []string
 	// conversationReset reports that the stale-resume clear reset a committed
 	// manual conversation, which the caller records as
@@ -1247,7 +1247,7 @@ func buildPreparedStartWithTranscript(
 	// transcriptState carries the same probe result forward to the firstStart
 	// classification below, so the disk is read once per launch.
 	transcriptState := sessTranscriptUnknown
-	transcriptRoots := sessionTranscriptSearchPaths(cfg)
+	transcriptRoots := launchTranscriptRoots(cfg, tp)
 	conversationReset := false
 	if transcript != nil {
 		transcriptState = *transcript
@@ -2616,6 +2616,28 @@ func keyedProbeRoots(searchPaths []string, provider string) []string {
 		return worker.DefaultSearchPaths()
 	}
 	return searchPaths
+}
+
+// launchTranscriptRoots is the roots a keyed probe searches for a launch of
+// tp (mc-bm1af). When the operator's env for it (tp.OperatorEnv: workspace,
+// provider and agent env) names an absolute CLAUDE_CONFIG_DIR, only that
+// dir's projects, the one root the launch reads: a conversation an agent
+// left under another observed root when it moved reads gone rather than
+// resumable. Otherwise sessionTranscriptSearchPaths(cfg):
+//   - a CLAUDE_CONFIG_DIR passed through from gc's own environment is
+//     ambient, not the launch's choice, and is not read;
+//   - a relative or ~ value is resolved by the provider against its own
+//     working dir and home, which the probe cannot reproduce, so it does
+//     not pin the probe.
+//
+// A wrapper that sets its own CLAUDE_CONFIG_DIR wins at runtime: an
+// operator value beside such a wrapper pins the probe to a root the launch
+// does not read, and every start reads its conversation gone.
+func launchTranscriptRoots(cfg *config.City, tp TemplateParams) []string {
+	if dir := strings.TrimSpace(tp.OperatorEnv["CLAUDE_CONFIG_DIR"]); filepath.IsAbs(dir) {
+		return []string{filepath.Join(dir, "projects")}
+	}
+	return sessionTranscriptSearchPaths(cfg)
 }
 
 // staleKeyConversationResetEvent is session.conversation_reset for info, a

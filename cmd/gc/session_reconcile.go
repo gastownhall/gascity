@@ -516,7 +516,10 @@ func healExpiredTimersInfo(info sessionpkg.Info, sessFront *sessionpkg.Store, cl
 // snapshot advanced by every write on that path (front-door migration Step 6d,
 // write-returns-Info, STEP6-PREPASS-AUDIT group 2). Returns (info, false)
 // otherwise with the input Info unchanged (no write occurred).
-func checkStability(info sessionpkg.Info, cfg *config.City, alive bool, dt *drainTracker, sessFront *sessionpkg.Store, clk clock.Clock, peek func(lines int) (string, error)) (sessionpkg.Info, bool) {
+//
+// transcriptRoots is the wake failure's conversation probe roots:
+// launchTranscriptRoots of the row's template.
+func checkStability(info sessionpkg.Info, cfg *config.City, alive bool, dt *drainTracker, sessFront *sessionpkg.Store, clk clock.Clock, peek func(lines int) (string, error), transcriptRoots []string) (sessionpkg.Info, bool) {
 	if next, handled, err := checkRateLimitStability(info, cfg, alive, dt, sessFront, clk, peek); handled || err != nil {
 		return next, true
 	}
@@ -526,7 +529,7 @@ func checkStability(info sessionpkg.Info, cfg *config.City, alive bool, dt *drai
 	if !exitAccrualHolds(info, sessFront) {
 		return info, true
 	}
-	info = recordWakeFailure(info, sessionTranscriptSearchPaths(cfg), sessFront, clk, sessionAgentMetricIdentityInfo(info, cfg))
+	info = recordWakeFailure(info, transcriptRoots, sessFront, clk, sessionAgentMetricIdentityInfo(info, cfg))
 	info = clearLastWokeAt(info, sessFront)
 	return info, true
 }
