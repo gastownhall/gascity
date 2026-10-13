@@ -133,6 +133,33 @@ func (l WorkLegs) readOnly() WorkLegs {
 // live-claim veto, the confirmed-orphan release), which plans its own legs.
 func (l WorkLegs) workStore() beads.Store { return l.work }
 
+// readLive reads bead id live (beads.HandlesFor's Live handle, past any
+// cache) from the leg its canonical store ref names: the city work store
+// for a city ref, a serving rig for rig:<name>. found is false when no leg
+// is that store (a relocated class binding included, whose rows the city
+// ref also names), so a caller that needs proof reads that as no proof.
+func (l WorkLegs) readLive(id, storeRef string) (beads.Bead, bool, error) {
+	var store beads.Store
+	switch ref := normalizeIdleClaimStoreRef(storeRef); {
+	case ref == "city":
+		store = l.work
+	case strings.HasPrefix(ref, "rig:"):
+		store = l.rigs[strings.TrimPrefix(ref, "rig:")]
+	}
+	if store == nil || strings.TrimSpace(id) == "" {
+		return beads.Bead{}, false, nil
+	}
+	live := beads.HandlesFor(store).Live
+	if live == nil {
+		return beads.Bead{}, false, nil
+	}
+	b, err := live.Get(id)
+	if err != nil {
+		return beads.Bead{}, false, err
+	}
+	return b, b.ID == id, nil
+}
+
 // isWork reports whether store is l's city work store.
 func (l WorkLegs) isWork(store beads.Store) bool {
 	return l.work != nil && unwrapClassStore(store) == unwrapClassStore(l.work)

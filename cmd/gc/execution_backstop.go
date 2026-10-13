@@ -301,17 +301,24 @@ func (p poolExecutionBackstop) resolve(s beads.Bead, _ map[string]beads.Bead, se
 // storms. The snapshot is taken only once activity is stale, so a session still
 // producing output costs no pane capture.
 func (p poolExecutionBackstop) quietHold(s beads.Bead, sessName string) string {
-	last, err := p.sp.GetLastActivity(sessName)
-	if err != nil || last.IsZero() || p.now.Sub(last) < idleClaimNudgeGrace {
+	return sessionQuietHold(p.sp, s, sessName, p.now)
+}
+
+// sessionQuietHold is quietHold for any backstop: the hold that keeps sp's
+// session sessName (its row s) from being treated as quiet at now, "" when it
+// is quiet. The pool-claim backstop reads it before its terminal drain.
+func sessionQuietHold(sp runtime.Provider, s beads.Bead, sessName string, now time.Time) string {
+	last, err := sp.GetLastActivity(sessName)
+	if err != nil || last.IsZero() || now.Sub(last) < idleClaimNudgeGrace {
 		return executionHoldNotQuiet
 	}
 	if !executionSnapshotVetoApplies(s.Metadata) {
 		return ""
 	}
-	return p.snapshotHold(sessName)
+	return snapshotHoldFor(sp, sessName)
 }
 
-// snapshotHold asks the runtime whether a session whose activity clock is
+// snapshotHoldFor asks the runtime sp whether a session whose activity clock is
 // already stale still shows its provider's busy indicator. Tmux activity
 // measures pane output, not whether an agent turn is still running, so a long
 // model turn or a quiet tool call can age past the grace while the indicator
@@ -324,8 +331,8 @@ func (p poolExecutionBackstop) quietHold(s beads.Bead, sessName string) string {
 // was displaced reports indefinitely), and a runtime that cannot take the
 // observation, whether it lacks IdleSnapshotProvider or is a composite (auto,
 // hybrid) whose routed backend reports ErrInteractionUnsupported.
-func (p poolExecutionBackstop) snapshotHold(sessName string) string {
-	snap, ok := p.sp.(runtime.IdleSnapshotProvider)
+func snapshotHoldFor(sp runtime.Provider, sessName string) string {
+	snap, ok := sp.(runtime.IdleSnapshotProvider)
 	if !ok {
 		return ""
 	}

@@ -194,7 +194,7 @@ func TestDeliverWarmBindClaimNudge_NoMarkerOnDeliveryFailure(t *testing.T) {
 	}
 }
 
-// isUnclaimedTrigger: only an open bead not already assigned to this slot counts.
+// isUnclaimedTrigger: only an open bead assigned to no one counts.
 func TestIsUnclaimedTrigger(t *testing.T) {
 	cases := []struct {
 		name string
@@ -202,14 +202,14 @@ func TestIsUnclaimedTrigger(t *testing.T) {
 		want bool
 	}{
 		{"open unassigned", beads.Bead{Status: "open"}, true},
-		{"open assigned elsewhere", beads.Bead{Status: "open", Assignee: "worker-9"}, true},
+		{"open assigned elsewhere", beads.Bead{Status: "open", Assignee: "worker-9"}, false}, // another session's work (#7752 review)
 		{"open assigned to self", beads.Bead{Status: "open", Assignee: "worker-1"}, false},
 		{"in_progress", beads.Bead{Status: "in_progress"}, false},
 		{"closed", beads.Bead{Status: "closed"}, false},
 		{"blocked", beads.Bead{Status: "blocked"}, false},
 	}
 	for _, tc := range cases {
-		if got := isUnclaimedTrigger(tc.w, "worker-1"); got != tc.want {
+		if got := isUnclaimedTrigger(tc.w); got != tc.want {
 			t.Errorf("%s: isUnclaimedTrigger = %v, want %v", tc.name, got, tc.want)
 		}
 	}

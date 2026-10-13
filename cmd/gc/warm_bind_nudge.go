@@ -93,7 +93,7 @@ func buildWarmClaimTriggerProbe(resolve warmClaimTriggerResolver, faults io.Writ
 			}
 			return false
 		}
-		return isUnclaimedTrigger(wb, strings.TrimSpace(session.Metadata["session_name"]))
+		return isUnclaimedTrigger(wb)
 	}
 }
 

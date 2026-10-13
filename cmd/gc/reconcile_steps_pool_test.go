@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // newPoolStepsTestLane is a lane over env at stepsTestNow with the pool
@@ -267,13 +268,18 @@ func TestOrphanReleaseDetectsStrandedClaims(t *testing.T) {
 }
 
 // Kills v2's claim backstop leaving a wedged slot on its seat (mc-zndi7.80):
-// at the cap, with the slot's own trigger still ready routed work in the last
-// allocation, the nudges step posts the slot's execution-stalled request to
+// at the cap, with the slot quiet and its own trigger still ready routed work
+// in the last allocation and open on a live read through the work legs, the
+// nudges step posts the slot's execution-stalled request to
 // the planner (A16 turns it into a drain no lens cancels) once, at the row's
 // generation; a trigger no longer in the allocation posts nothing.
 func TestNudgeStepsDrainAWedgedSlot(t *testing.T) {
 	for _, routed := range []bool{true, false} {
 		env, store := nudgeStepsFixture(t)
+		store = beads.NewMemStoreFrom(0, []beads.Bead{mustGetTestBead(t, store, "session-bead-a"), {ID: "work-a", Title: "work-a", Type: "task", Status: "open"}}, nil)
+		env.CityStore = store
+		env.WorkLegs = workLegsFromCensus(t.TempDir(), env.Cfg, cityWorkLegOf(beads.WorkStore{Store: store}), nil)
+		env.SP.(*runtime.Fake).SetActivity("session-a", stepsTestNow.Add(-time.Hour)) // quiet
 		if err := store.SetMetadataBatch("session-bead-a", map[string]string{
 			idleClaimNudgeTriggerKey: "work-a", idleClaimNudgeCountKey: strconv.Itoa(idleClaimNudgeMaxAttempts),
 			idleClaimNudgeAtKey: stepsTestNow.Add(-time.Hour).Format(time.RFC3339), "generation": "7", "instance_token": "tok-7",

@@ -3424,7 +3424,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, sw *SeatWork, resu
 		claimWorkStoreRefs := make([]string, len(claimWork))
 		copy(claimWorkStoreRefs, assignedWorkStoreRefs)
 		copy(claimWorkStoreRefs[len(assignedWorkBeads):], result.ReadyUnassignedRoutedWorkStoreRefs)
-		nudgeStalledPoolClaims(cr.sp, cr.cfg, sessStore, stalledPoolBeads, claimWork, claimWorkStoreRefs, time.Now(), cr.requestExecutionStalledDrain, cr.stdout)
+		nudgeStalledPoolClaims(cr.sp, cr.cfg, sessStore, stalledPoolBeads, claimWork, claimWorkStoreRefs, time.Now(), poolClaimDrainOver(cr.workLegs(), cr.requestExecutionStalledDrain), cr.stdout)
 		nudgeStalledPoolContinuations(
 			cr.sp,
 			cr.cfg,
