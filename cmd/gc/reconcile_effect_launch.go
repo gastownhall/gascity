@@ -213,7 +213,7 @@ func preWakeStep(v txView, f preWakeFold, probeErr error) txStep {
 	pass := launchPass{launchRow: launch, bound: foldInfo(base, f.bind), transcript: transcript, ticket: ticket, undo: preWakeUndoOf(v, foldClass(patch, class), len(f.reset) > 0)}
 	pass.undo.token, pass.relaunched = f.token, creating(v.Row)
 	facts := effectFacts{Work: f.work}
-	if len(f.reset) > 0 && isManualSessionInfo(base) { // recorded once the PreWake lands
+	if len(f.reset) > 0 && session.HasStartedManualConversation(base) { // recorded once the PreWake lands
 		facts.Events = append(facts.Events, staleKeyConversationResetEvent(base, tp))
 	}
 	return txStep{Write: patch, Class: class, Facts: facts, Pass: pass}

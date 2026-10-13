@@ -7427,6 +7427,10 @@ func relaunchAgentForLaunchDrift(
 		return false, relaunchAbortResidueFold(preparedInfo, sessFront, hadResumeKeyBeforePrepare)
 	}
 	fmt.Fprintf(stdout, "Launch-only config change for '%s', relaunched agent in warm box\n", tp.DisplayName()) //nolint:errcheck
+	// The relaunch started a committed manual conversation fresh.
+	if prepared.conversationReset {
+		rec.Record(staleKeyConversationResetEvent(info, tp))
+	}
 	// Rebaseline the Core baseline (started_config_hash) and the partition
 	// sub-hashes so the next tick sees no Core drift. The hashes come from
 	// buildPreparedStart's PRE-rewrite fingerprints (prepared.coreHash etc.), NOT

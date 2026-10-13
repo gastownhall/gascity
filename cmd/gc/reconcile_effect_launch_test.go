@@ -395,7 +395,7 @@ func TestStaleKeyResetRecordsConversationReset(t *testing.T) {
 		if s.Outcome != settledLanded {
 			t.Fatalf("%s: settlement %+v, want landed", c.name, s)
 		}
-		if got := conversationResets(t, s.Facts.Events, "gc-1"); got != c.want {
+		if got := conversationResets(t, s.Facts.Events, "gc-1", tp); got != c.want {
 			t.Errorf("%s: %d session.conversation_reset events, want %d", c.name, got, c.want)
 		}
 	}

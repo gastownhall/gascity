@@ -1278,8 +1278,8 @@ func buildPreparedStartWithTranscript(
 			// started_config_hash / continuation_reset_pending are all in
 			// Info.ApplyPatch's switch), so no re-Get is needed for the post-prep
 			// reads (session_key at runPreparedStartCandidate; recordWakeFailure).
+			conversationReset = sessionpkg.HasStartedManualConversation(candidate.info) // read before the clear empties the key
 			candidate.info = candidate.info.ApplyPatch(clearStaleResumeKeyMetadata(candidate.info.ID, sessFront))
-			conversationReset = isManualSessionInfo(candidate.info)
 		}
 	}
 	if transcript == nil && candidate.info.SessionKey == "" && tp.ResolvedProvider != nil && tp.ResolvedProvider.SessionIDFlag != "" {
@@ -2619,9 +2619,11 @@ func keyedProbeRoots(searchPaths []string, provider string) []string {
 }
 
 // staleKeyConversationResetEvent is session.conversation_reset for info, a
-// committed manual conversation whose session key the stale-resume clear
-// reset because its keyed transcript is gone: the next start is fresh. Legacy
-// records it when the clear lands in prepare, v2 when its PreWake lands.
+// committed manual conversation (session.HasStartedManualConversation, the
+// rule that keeps it across runtime loss) whose session key the stale-resume
+// clear reset because its keyed transcript is gone: the next start is fresh.
+// Legacy records it when the clear lands in prepare (the planned start, and
+// a launch-drift relaunch once it succeeds), v2 when its PreWake lands.
 func staleKeyConversationResetEvent(info sessionpkg.Info, tp TemplateParams) events.Event {
 	return events.Event{
 		Type:      events.SessionConversationReset,
