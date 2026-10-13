@@ -205,7 +205,9 @@ func killDead(ctx context.Context, c txCaps, k deadKill) (deadKilled, error) {
 // SESS-537/538): the heal, and a rapid crash's wake failure or churn. A
 // death that accrues ends the effect with its record, so the row restarts
 // the next pass, as legacy's does (and a quarantine holds it); any other
-// rides ahead of the PreWake. An attached pane or a refused kill refuses.
+// rides ahead of the PreWake. An attached pane or a refused kill refuses,
+// and so does a runtime this section's own read finds under the name again
+// (goneNow): the death is accounted only over a name its read proves gone.
 func deathStep(v txView) txStep {
 	out, err := callResult[deadKilled](v)
 	switch {
@@ -215,9 +217,15 @@ func deathStep(v txView) txStep {
 		return txStep{Refuse: causeOperatorPane}
 	case !out.killed || !out.account || !committed(v.Row):
 		return txStep{}
+	case !goneNow(v):
+		return txStep{Refuse: causeRuntimePresent}
 	}
 	w := *v.World
 	w.Now = v.Now
-	patch, class, accrued := deadRuntimePatch(&rowFacts{w: &w, k: v.It.Key, row: v.World.Census.reread(v.It.Key, v.Row, v.Meta), found: true}, true) // the fresh row's stop keys: a drain's death is no crash
-	return txStep{Write: patch, Class: class, Done: accrued}
+	patch, class, accrued, ev := deadRuntimePatch(&rowFacts{w: &w, k: v.It.Key, row: v.World.Census.reread(v.It.Key, v.Row, v.Meta), found: true}, true) // the fresh row's stop keys: a drain's death is no crash
+	step := txStep{Write: patch, Class: class, Done: accrued}
+	if ev != nil { // recorded once the write lands
+		step.Facts.Events = append(step.Facts.Events, *ev)
+	}
+	return step
 }

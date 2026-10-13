@@ -5092,7 +5092,7 @@ func TestKill_AwakeState(t *testing.T) {
 
 func TestKill_StoppedState_NotRunning(t *testing.T) {
 	store := beads.NewMemStore()
-	sp := runtime.NewFake()
+	sp := runtime.FullFake{Fake: runtime.NewFake()}
 	mgr := newTestManager(t, store, sp)
 
 	b, err := store.Create(beads.Bead{

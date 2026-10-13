@@ -84,11 +84,14 @@ func TestPassRecordCarriesSoakFields(t *testing.T) {
 	for _, s := range []settlement{
 		{Kind: intentRekey, Outcome: settledLanded},
 		{Kind: intentRekey, Outcome: settledRefused, Cause: "name-busy"},
-		{Kind: intentDrainBeginFresh, Reason: idleRespawnDrainReason, Outcome: settledLanded},
-		{Kind: intentDrainBeginFresh, Reason: "idle", Outcome: settledLanded},
-		{Kind: intentDrainVoid, Reason: idleRespawnDrainReason, Outcome: settledLanded},
-		{Kind: intentStop, Reason: idleRespawnDrainReason, Outcome: settledLanded},
-		{Kind: intentStop, Reason: idleRespawnDrainReason, Outcome: settledRefused, Cause: "attached"},
+		{Kind: intentDrainBeginFresh, Reason: decideDrainBegin + idleRespawnDrainReason, Outcome: settledLanded},
+		{Kind: intentDrainBeginFresh, Reason: decideDrainBegin + "idle", Outcome: settledLanded},
+		{Kind: intentDrainVoid, Reason: decideDrainVoid + idleRespawnDrainReason, Outcome: settledLanded},
+		{Kind: intentDrainCancel, Reason: decideDrainCancel + idleRespawnDrainReason, Outcome: settledLanded},
+		{Kind: intentSignalFresh, Reason: decideDrainSignal + idleRespawnDrainReason, Outcome: settledLanded, Cause: causeIdleRespawnVoid + "activity-resumed"},
+		{Kind: intentSignalFresh, Reason: decideDrainSignal + idleRespawnDrainReason, Outcome: settledLanded},
+		{Kind: intentStop, Reason: decideStopVerb + idleRespawnDrainReason, Outcome: settledLanded},
+		{Kind: intentStop, Reason: decideStopVerb + idleRespawnDrainReason, Outcome: settledRefused, Cause: "attached"},
 		{Kind: intentStart, Key: rowKey{ID: "gc-3"}, Outcome: settledFailed, Cause: causeDeadline},
 	} {
 		f.p.settlements.post(s)
@@ -107,7 +110,7 @@ func TestPassRecordCarriesSoakFields(t *testing.T) {
 	assertLinesEqual(t, "reconcile.pass fields", names, v2PassRecordWireFields)
 	for field, want := range map[string]any{
 		"rows": 2, "stops_outstanding_30m": 1, "stop_escalations": uint64(1), "stale_self_rekeys": uint64(1),
-		"idle_respawn_begun": uint64(1), "idle_respawn_voided": uint64(1), "idle_respawn_completed": uint64(1),
+		"idle_respawn_begun": uint64(1), "idle_respawn_voided": uint64(3), "idle_respawn_completed": uint64(1),
 		"effects": "trace-only", "passes": uint64(1),
 	} {
 		if rec[field] != want {

@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/config"
@@ -212,7 +213,14 @@ func preWakeStep(v txView, f preWakeFold, probeErr error) txStep {
 	launch := launchRow{w: v.World, row: next, tp: boundTemplate(tp, next), agent: ticket.launch.agent}
 	pass := launchPass{launchRow: launch, bound: foldInfo(base, f.bind), transcript: transcript, ticket: ticket, undo: preWakeUndoOf(v, foldClass(patch, class), len(f.reset) > 0)}
 	pass.undo.token, pass.relaunched = f.token, creating(v.Row)
-	return txStep{Write: patch, Class: class, Facts: effectFacts{Work: f.work}, Pass: pass}
+	facts := effectFacts{Work: f.work}
+	if heal := v.It.Heal; heal != nil && heal.Reason == decideDeadRuntimeHeal && heal.Event != nil { // the death's record, its write folded into this one
+		facts.Events = append(facts.Events, *heal.Event)
+	}
+	if len(f.reset) > 0 && session.HasStartedManualConversation(base) { // recorded once the PreWake lands
+		facts.Events = append(facts.Events, staleKeyConversationResetEvent(base, tp))
+	}
+	return txStep{Write: patch, Class: class, Facts: facts, Pass: pass}
 }
 
 // preWakeUndoOf is what a failed launch restores (S3) of the PreWake
@@ -242,11 +250,16 @@ func preWakeUndoOf(v txView, patch session.MetadataPatch, staleKey bool) preWake
 // which no heal clears. A17's respawn is not held by the agent heartbeat's
 // hold it respawns through (v5.9i), which the premise holds the fresh row to.
 func preWakeRefused(v txView) bool {
-	d := session.DispositionOfInfo(foldInfo(v.Row, v.It.folded()))
-	if v.It.Reason == decideHeartbeatRespawn {
-		return d.RefusesHeartbeatRespawn(v.Now)
+	return preWakeRefuses(session.DispositionOfInfo(foldInfo(v.Row, v.It.folded())), v.It.Reason, v.Now)
+}
+
+// preWakeRefuses is the PreWake's hold test over d for a start decided as
+// reason, which A18 also holds on (startIntent, CONTRACT v5.9u).
+func preWakeRefuses(d session.Disposition, reason string, now time.Time) bool {
+	if reason == decideHeartbeatRespawn {
+		return d.RefusesHeartbeatRespawn(now)
 	}
-	return d.RefusesPreWake(v.Now)
+	return d.RefusesPreWake(now)
 }
 
 // triggerEnvKeys are the template env keys a row's trigger stamps

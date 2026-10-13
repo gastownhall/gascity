@@ -250,7 +250,7 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 		if rigName != "" {
 			scope = "rig"
 		}
-		expanded := expandAgent(a, cityName, sessTmpl, sp)
+		expanded := expandAgent(a, cityName, sessTmpl, sp, cfg.NamedSessions)
 		expanded = appendUnlimitedPoolSessionBeads(expanded, a, cityName, sessTmpl, sessionSnapshot)
 		isPool := len(expanded) > 1 || a.SupportsInstanceExpansion()
 		groupName := a.QualifiedName()
@@ -260,7 +260,7 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 			if rigName != "" {
 				perRigAgentTotals[rigName]++
 			}
-			sessName := statusRuntimeSessionName(cityName, sessTmpl, ea.qualifiedName, groupName, sessionSnapshot)
+			sessName := statusRuntimeSessionName(cityName, sessTmpl, ea.qualifiedName, groupName, statusListsTemplateBeads(a), sessionSnapshot)
 			info, hasInfo := sessionSnapshot.bySessionName[sessName]
 			running := statusProviderRunning(sp, sessName)
 			// An agent whose work runs under a relocated-graph wisp session is
@@ -464,23 +464,13 @@ func (s *Server) cityBeadsDiagnostic() *beads.BeadsDiagnostic {
 // poolScaleLabel renders the "scaled (min=N, max=M)" banner the CLI emits
 // once per pool group. Mirrors the label buildCityStatusSnapshot emits
 // client-side so human output is identical whether served via API or
-// fallback.
+// fallback: an unset max_active_sessions is unlimited, as in scaleParamsFor.
 func poolScaleLabel(a config.Agent) string {
-	minSessions := 0
-	if a.MinActiveSessions != nil {
-		minSessions = *a.MinActiveSessions
+	maxLabel := "max=unlimited"
+	if maxSessions := a.EffectiveMaxActiveSessions(); maxSessions != nil && *maxSessions >= 0 {
+		maxLabel = fmt.Sprintf("max=%d", *maxSessions)
 	}
-	maxSessions := 1
-	maxLabel := fmt.Sprintf("max=%d", maxSessions)
-	if a.MaxActiveSessions != nil {
-		maxSessions = *a.MaxActiveSessions
-		if maxSessions < 0 {
-			maxLabel = "max=unlimited"
-		} else {
-			maxLabel = fmt.Sprintf("max=%d", maxSessions)
-		}
-	}
-	return fmt.Sprintf("scaled (min=%d, %s)", minSessions, maxLabel)
+	return fmt.Sprintf("scaled (min=%d, %s)", a.EffectiveMinActiveSessions(), maxLabel)
 }
 
 // namedSessionStatus classifies a named session for the StatusBody detail
@@ -1052,9 +1042,16 @@ func statusMailCountWithTimeout(mp interface {
 	}
 }
 
-func appendUnlimitedPoolSessionBeads(expanded []expandedAgent, a config.Agent, cityName, sessTmpl string, snapshot statusSessionSnapshot) []expandedAgent {
+// statusListsTemplateBeads reports whether status lists every session bead
+// recorded against the agent's template as a row of its own: true for an
+// unlimited pool, whose instances config cannot enumerate.
+func statusListsTemplateBeads(a config.Agent) bool {
 	maxSess := a.EffectiveMaxActiveSessions()
-	if !a.SupportsInstanceExpansion() || (maxSess != nil && *maxSess >= 0) {
+	return a.SupportsInstanceExpansion() && (maxSess == nil || *maxSess < 0)
+}
+
+func appendUnlimitedPoolSessionBeads(expanded []expandedAgent, a config.Agent, cityName, sessTmpl string, snapshot statusSessionSnapshot) []expandedAgent {
+	if !statusListsTemplateBeads(a) {
 		return expanded
 	}
 
@@ -1130,10 +1127,23 @@ func statusSessionStateInfo(info session.Info) session.State {
 //  3. for a single-instance identity, the one session bead recorded against
 //     it as template.
 //
+// templateBeadsListed is statusListsTemplateBeads for the agent. When it
+// holds, every session bead recorded against the template is already listed
+// as a row of its own, so the template's own row (the named session a
+// template declares under its bare name) stops after step 1: any other bead
+// is another row's session, whether it names a sibling instance such as the
+// <template>-1 seat routed work mints or records no identity at all, and
+// taking it would count that session twice. A named session runs under its
+// canonical name anyway. A bounded template lists no beads, so steps 2 and 3
+// still find a single seat recorded under a slot-suffixed identity.
+//
 // Anything ambiguous falls back to the canonical name rather than guessing.
-func statusRuntimeSessionName(cityName, sessTmpl, qualifiedName, groupName string, snapshot statusSessionSnapshot) string {
+func statusRuntimeSessionName(cityName, sessTmpl, qualifiedName, groupName string, templateBeadsListed bool, snapshot statusSessionSnapshot) string {
 	canonical := agentSessionName(cityName, qualifiedName, sessTmpl)
 	if _, ok := snapshot.bySessionName[canonical]; ok {
+		return canonical
+	}
+	if templateBeadsListed && qualifiedName == groupName {
 		return canonical
 	}
 

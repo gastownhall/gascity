@@ -159,12 +159,24 @@ type ExitAccrual struct {
 }
 
 // Class is a's class keys over row info: for a quarantining accrual the
-// Quarantine cell's quarantined_until, else none. It mints nothing.
+// Quarantine cell's quarantined_until (ExtendQuarantine), else none. It
+// mints nothing.
 func (a ExitAccrual) Class(info Info, now time.Time) DispositionPatch {
 	if !a.Quarantined {
 		return DispositionPatch{}
 	}
-	return CellInfo(info, ActorController, DispEvent{Kind: EvQuarantine, Until: a.Until}, now)
+	return ExtendQuarantine(info, a.Until, now)
+}
+
+// ExtendQuarantine is the controller's Quarantine cell over row info to
+// until, a crash, churn or rate-limit quarantine's: it never shortens a
+// quarantine already in force (an operator's longer one), writing the later
+// of the two deadlines (the #7706 review).
+func ExtendQuarantine(info Info, until, now time.Time) DispositionPatch {
+	if live := DispositionOfInfo(info).Quarantine; live.After(now) && live.After(until) {
+		until = live
+	}
+	return CellInfo(info, ActorController, DispEvent{Kind: EvQuarantine, Until: until}, now)
 }
 
 // PatchFor is a's write to row info: its patch with its Class.
@@ -211,6 +223,7 @@ func ConversationResetPatch(clearStartedConfigHash bool) MetadataPatch {
 		"session_key":                "",
 		"continuation_reset_pending": "true",
 	}
+	ClearResumeRun(patch) // a new conversation's run starts anew (mc-bm1af)
 	if clearStartedConfigHash {
 		patch["started_config_hash"] = ""
 		// Priming markers share started_config_hash's lifetime (S19 Stage 2): a

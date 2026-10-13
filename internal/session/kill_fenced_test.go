@@ -3,16 +3,20 @@ package session
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/auto"
+	"github.com/gastownhall/gascity/internal/runtime/hybrid"
 )
 
 // stopErrGoneProvider stops the runtime but reports an error, as a provider
-// whose teardown raced the process's own exit does.
-type stopErrGoneProvider struct{ *runtime.Fake }
+// whose teardown raced the process's own exit does. It reads liveness fresh,
+// as tmux does, so the kill can confirm the runtime gone.
+type stopErrGoneProvider struct{ runtime.FullFake }
 
 func (p stopErrGoneProvider) Stop(name string) error {
 	_ = p.Fake.Stop(name)
@@ -35,7 +39,7 @@ func newKillFencedSession(t *testing.T, sp runtime.Provider, fake *runtime.Fake)
 // lifted, rather than restoring a row that claims a runtime.
 func TestKillFencedStopErrorWithRuntimeGoneSucceeds(t *testing.T) {
 	fake := runtime.NewFake()
-	mgr, store, info := newKillFencedSession(t, stopErrGoneProvider{fake}, fake)
+	mgr, store, info := newKillFencedSession(t, stopErrGoneProvider{runtime.FullFake{Fake: fake}}, fake)
 	kill := func(ctx context.Context, by Actor) error { return mgr.Kill(ctx, by, info.ID) }
 	if err := mgr.KillFenced(context.Background(), testActor(mgr, ActorOperator), info.ID, kill); err != nil {
 		t.Fatalf("KillFenced = %v, want nil: the runtime is gone", err)
@@ -52,15 +56,17 @@ func TestKillFencedStopErrorWithRuntimeGoneSucceeds(t *testing.T) {
 // session kill` does, so the kill supersedes its pending wake.
 func TestKillFencedRuntimeAlreadyGone(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		named bool
+		name   string
+		named  bool
+		killOK bool // the kill itself succeeds (a runtime that came back for it)
 	}{
-		{"unconfigured session", false},
-		{"configured named session", true},
+		{"unconfigured session", false, false},
+		{"configured named session", true, false},
+		{"unconfigured session, kill succeeds", false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := runtime.NewFake()
-			mgr, store, info := newKillFencedSession(t, fake, fake)
+			mgr, store, info := newKillFencedSession(t, runtime.FullFake{Fake: fake}, fake)
 			meta := map[string]string{"state": string(StateAsleep), "wake_request": "explicit", "wake_requested_at": time.Now().UTC().Format(time.RFC3339)}
 			if tc.named {
 				meta["configured_named_session"], meta["configured_named_identity"] = "true", "chat"
@@ -71,6 +77,9 @@ func TestKillFencedRuntimeAlreadyGone(t *testing.T) {
 			_ = fake.Stop(info.SessionName)
 			calls := len(fake.SnapshotCalls())
 			want := errors.New("not active")
+			if tc.killOK {
+				want = nil
+			}
 			got := mgr.KillFenced(context.Background(), testActor(mgr, ActorOperator), info.ID, func(context.Context, Actor) error { return want })
 			if !errors.Is(got, want) {
 				t.Fatalf("KillFenced = %v, want kill's own error", got)
@@ -84,14 +93,14 @@ func TestKillFencedRuntimeAlreadyGone(t *testing.T) {
 			if after.Metadata["state_reason"] == KillPendingReason {
 				t.Errorf("a fence was written for a runtime already gone: %v", after.Metadata)
 			}
-			if !tc.named {
+			if !tc.named && !tc.killOK {
 				if after.Metadata["wake_request"] != "explicit" || after.Metadata["sleep_reason"] != "" {
 					t.Errorf("unconfigured row rewritten: %v", after.Metadata)
 				}
 				return
 			}
 			if after.Metadata["sleep_reason"] != string(SleepReasonKilled) || after.Metadata["wake_request"] != "" {
-				t.Errorf("named row = %v, want asleep/killed with the pending wake cleared", after.Metadata)
+				t.Errorf("row = %v, want asleep/killed with the pending wake cleared: a named session's row, or any row whose kill succeeded", after.Metadata)
 			}
 		})
 	}
@@ -250,5 +259,247 @@ func TestKillFencedDecidesUnderTheLease(t *testing.T) {
 	b, _ := store.Get(info.ID)
 	if b.Metadata["state"] != string(StateAsleep) || b.Metadata["sleep_reason"] != string(SleepReasonKilled) || b.Metadata["state_reason"] != "" {
 		t.Errorf("row after the kill = %v, want asleep/killed with the fence lifted", b.Metadata)
+	}
+}
+
+// staleRunningProvider answers IsRunning from a listing taken before the
+// runtime came up, as tmux's state cache can for up to 2s, while its fresh
+// liveness read sees the runtime.
+type staleRunningProvider struct{ *runtime.Fake }
+
+func (p staleRunningProvider) IsRunning(string) bool { return false }
+
+func (p staleRunningProvider) ObserveLivenessSince(name string, _ []string, _ time.Time) (runtime.Liveness, error) {
+	running := p.Fake.IsRunning(name)
+	return runtime.Liveness{Running: running, Alive: running}, nil
+}
+
+// Kills KillFenced deciding "runtime gone" from Provider.IsRunning
+// (STALE-READ-ARCH-VERIFY §7.4): a cached IsRunning that reads a live
+// runtime gone must not send the kill down the unfenced dead path. The
+// decision reads liveness fresh, under the lease.
+func TestKillFencedReadsLivenessFresh(t *testing.T) {
+	fake := runtime.NewFake()
+	mgr, store, info := newKillFencedSession(t, staleRunningProvider{fake}, fake)
+	if err := store.SetMetadataBatch(info.ID, map[string]string{"state": string(StateAsleep)}); err != nil {
+		t.Fatal(err)
+	}
+	if !fake.IsRunning(info.SessionName) {
+		t.Fatal("premise: the runtime is live")
+	}
+	fenced := false
+	kill := func(context.Context, Actor) error {
+		b, _ := store.Get(info.ID)
+		fenced = b.Metadata["state_reason"] == KillPendingReason
+		return fake.Stop(info.SessionName)
+	}
+	if err := mgr.KillFenced(context.Background(), testActor(mgr, ActorOperator), info.ID, kill); err != nil {
+		t.Fatalf("KillFenced: %v", err)
+	}
+	if !fenced {
+		t.Error("a live runtime was killed without its kill fence: a cached IsRunning read it gone")
+	}
+}
+
+// After a failed stop, "the runtime is gone" (the kill succeeded after all)
+// is a fresh read too: a cached IsRunning that reads the surviving runtime
+// gone must not lift the fence over it as if the kill had landed.
+func TestKillFencedFailedStopReadsLivenessFresh(t *testing.T) {
+	fake := runtime.NewFake()
+	mgr, store, info := newKillFencedSession(t, staleRunningProvider{fake}, fake)
+	before, _ := store.Get(info.ID)
+	refused := errors.New("stop refused")
+	err := mgr.KillFenced(context.Background(), testActor(mgr, ActorOperator), info.ID, func(context.Context, Actor) error { return refused })
+	if !errors.Is(err, refused) {
+		t.Fatalf("KillFenced = %v, want the failed stop's error: the runtime survived", err)
+	}
+	after, _ := store.Get(info.ID)
+	if after.Metadata["state"] != before.Metadata["state"] || after.Metadata["state_reason"] == KillPendingReason {
+		t.Errorf("row after the failed kill = %v, want it restored", after.Metadata)
+	}
+}
+
+// unreadableLivenessProvider's fresh liveness read fails with err, and its
+// cached IsRunning reads the name gone.
+type unreadableLivenessProvider struct {
+	*runtime.Fake
+	err error
+}
+
+func (p unreadableLivenessProvider) IsRunning(string) bool { return false }
+
+func (p unreadableLivenessProvider) ObserveLivenessSince(string, []string, time.Time) (runtime.Liveness, error) {
+	return runtime.Liveness{}, p.err
+}
+
+// A liveness read that cannot answer is not proof the runtime is gone: the
+// kill keeps its fence. That holds for an incomplete read (the runtime
+// server did not answer, ErrRuntimeUnavailable) and for a read that
+// completed carrying any other error.
+func TestKillFencedUnreadableLivenessKeepsTheFence(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"incomplete read", fmt.Errorf("probe: %w", runtime.ErrRuntimeUnavailable)},
+		{"complete read with an error", errors.New("probe: unexpected answer")},
+	} {
+		t.Run(tc.name, func(t *testing.T) { killFencedKeepsFenceOnUnreadableLiveness(t, tc.err) })
+	}
+}
+
+func killFencedKeepsFenceOnUnreadableLiveness(t *testing.T, readErr error) {
+	fake := runtime.NewFake()
+	mgr, store, info := newKillFencedSession(t, unreadableLivenessProvider{fake, readErr}, fake)
+	if err := store.SetMetadataBatch(info.ID, map[string]string{"state": string(StateAsleep)}); err != nil {
+		t.Fatal(err)
+	}
+	fenced := false
+	kill := func(context.Context, Actor) error {
+		b, _ := store.Get(info.ID)
+		fenced = b.Metadata["state_reason"] == KillPendingReason
+		return fake.Stop(info.SessionName)
+	}
+	if err := mgr.KillFenced(context.Background(), testActor(mgr, ActorOperator), info.ID, kill); err != nil {
+		t.Fatalf("KillFenced: %v", err)
+	}
+	if !fenced {
+		t.Error("an unreadable liveness read sent the kill down the unfenced dead path")
+	}
+}
+
+// In a hybrid city the fresh read is the routed leaf's: hybrid offers no
+// fresh read of its own (its read is its leaves' cached one), so KillFenced
+// resolves the leaf and reads it, and a cached IsRunning on the way that
+// reads the live runtime gone must not send the kill down the unfenced dead
+// path.
+func TestKillFencedReadsTheRoutedLeafFresh(t *testing.T) {
+	fake := runtime.NewFake()
+	remote := runtime.NewFake()
+	sp := hybrid.New(staleRunningProvider{fake}, remote, func(string) bool { return false })
+	mgr, store, info := newKillFencedSession(t, sp, fake)
+	if err := store.SetMetadataBatch(info.ID, map[string]string{"state": string(StateAsleep)}); err != nil {
+		t.Fatal(err)
+	}
+	if sp.IsRunning(info.SessionName) || !fake.IsRunning(info.SessionName) {
+		t.Fatal("premise: hybrid's IsRunning reads the live runtime gone")
+	}
+	fenced := false
+	kill := func(context.Context, Actor) error {
+		b, _ := store.Get(info.ID)
+		fenced = b.Metadata["state_reason"] == KillPendingReason
+		return fake.Stop(info.SessionName)
+	}
+	if err := mgr.KillFenced(context.Background(), testActor(mgr, ActorOperator), info.ID, kill); err != nil {
+		t.Fatalf("KillFenced: %v", err)
+	}
+	if !fenced {
+		t.Error("a live runtime in a hybrid city was killed without its kill fence: the read fell back to the cache")
+	}
+}
+
+// The routed leaf's read alone does not confirm a runtime gone: auto falls
+// through to its other backend, which can hold a runtime its route table
+// missed (an ACP session whose bead does not record ACP), and a route that is
+// only a guess (auto before its routes are seeded) confirms nothing. Either
+// way the live runtime is killed under its fence.
+func TestKillFencedRuntimeGoneNeedsTheCompositeToAgree(t *testing.T) {
+	for _, seeded := range []bool{true, false} {
+		t.Run(fmt.Sprintf("seeded=%v", seeded), func(t *testing.T) {
+			acp := runtime.NewFake()
+			sp := auto.New(staleRunningProvider{runtime.NewFake()}, staleRunningProvider{acp})
+			if seeded {
+				sp.SeedRoutes(nil)
+			}
+			mgr, store, info := newKillFencedSession(t, sp, acp)
+			if err := store.SetMetadataBatch(info.ID, map[string]string{"state": string(StateAsleep)}); err != nil {
+				t.Fatal(err)
+			}
+			if leaf, _, _ := runtime.ResolveBackend(sp, info.SessionName); leaf.IsRunning(info.SessionName) || !acp.IsRunning(info.SessionName) {
+				t.Fatal("premise: the runtime lives in the backend the route does not name")
+			}
+			fenced := false
+			kill := func(context.Context, Actor) error {
+				b, _ := store.Get(info.ID)
+				fenced = b.Metadata["state_reason"] == KillPendingReason
+				return acp.Stop(info.SessionName)
+			}
+			if err := mgr.KillFenced(context.Background(), testActor(mgr, ActorOperator), info.ID, kill); err != nil {
+				t.Fatalf("KillFenced: %v", err)
+			}
+			if !fenced {
+				t.Error("a live runtime was killed without its fence: the leaf's read alone confirmed it gone")
+			}
+		})
+	}
+}
+
+// cachedGoneBackend reads every runtime gone whatever runs, as a runtime
+// that cannot read fresh can: a bool-only probe that failed, or a caching
+// herdr's listing taken before the runtime came up.
+type cachedGoneBackend struct{ runtime.FullFake }
+
+func (cachedGoneBackend) IsRunning(string) bool { return false }
+
+func (cachedGoneBackend) ObserveLiveness(string, []string) runtime.Liveness {
+	return runtime.Liveness{}
+}
+
+func (b cachedGoneBackend) ObserveLivenessWithError(name string, _ []string) (runtime.Liveness, error) {
+	_, err := b.FullFake.ObserveLivenessWithError(name, nil)
+	return runtime.Liveness{}, err
+}
+
+// A runtime that cannot read liveness fresh (herdr, k8s, exec answer from
+// IsRunning) proves no absence, as v2's freshReadable rules: its "gone" keeps
+// the fence. A live runtime it reads gone is killed under the fence, and a
+// failed stop it reads gone is rolled back and fails, not lifted over a
+// runtime that may still run.
+func TestKillFencedUnprovenGoneKeepsTheFence(t *testing.T) {
+	for _, profile := range []struct {
+		name string
+		p    runtime.Profile
+	}{{"herdr", runtime.ProfileHerdr}, {"k8s", runtime.ProfileK8s}, {"exec", runtime.ProfileExec}} {
+		t.Run(profile.name, func(t *testing.T) {
+			fake := runtime.NewFake()
+			sp := runtime.NewFakeProfile(profile.p, cachedGoneBackend{runtime.FullFake{Fake: fake}})
+			if runtime.FreshReadable(sp) || sp.IsRunning("x") {
+				t.Fatalf("premise: %s reads fresh %v", profile.name, runtime.FreshReadable(sp))
+			}
+			mgr, store, info := newKillFencedSession(t, sp, fake)
+			if err := store.SetMetadataBatch(info.ID, map[string]string{"state": string(StateAsleep)}); err != nil {
+				t.Fatal(err)
+			}
+			if !fake.IsRunning(info.SessionName) {
+				t.Fatal("premise: the runtime runs")
+			}
+
+			fenced := false
+			kill := func(context.Context, Actor) error {
+				b, _ := store.Get(info.ID)
+				fenced = b.Metadata["state_reason"] == KillPendingReason
+				return fake.Stop(info.SessionName)
+			}
+			if err := mgr.KillFenced(context.Background(), testActor(mgr, ActorOperator), info.ID, kill); err != nil {
+				t.Fatalf("KillFenced: %v", err)
+			}
+			if !fenced {
+				t.Error("a live runtime read gone by IsRunning was killed without its fence")
+			}
+
+			if err := fake.Start(context.Background(), info.SessionName, runtime.Config{Command: "claude"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.SetMetadataBatch(info.ID, map[string]string{"state": string(StateAwake), "sleep_reason": ""}); err != nil {
+				t.Fatal(err)
+			}
+			stopErr := errors.New("stop failed")
+			if err := mgr.KillFenced(context.Background(), testActor(mgr, ActorOperator), info.ID, func(context.Context, Actor) error { return stopErr }); !errors.Is(err, stopErr) {
+				t.Errorf("KillFenced after a failed stop = %v, want the stop's error: IsRunning's gone proves nothing", err)
+			}
+			if b, _ := store.Get(info.ID); b.Metadata["state"] != string(StateAwake) || b.Metadata["state_reason"] == KillPendingReason {
+				t.Errorf("row after the failed kill = %v, want it restored awake, the fence rolled back", b.Metadata)
+			}
+		})
 	}
 }

@@ -2792,3 +2792,44 @@ func TestSessionHandleLiveObservationCarriesAttachError(t *testing.T) {
 		t.Fatalf("Attached, AttachedErr = %v, %v; want false, %v", obs.Attached, obs.AttachedErr, probeErr)
 	}
 }
+
+// TestRuntimeHandleWaitIdleGateTakesTheProviderFamily pins that the runtime
+// handle compares the name it is given with "claude", so callers pass the
+// builtin provider family and resolve a wrapped alias first.
+func TestRuntimeHandleWaitIdleGateTakesTheProviderFamily(t *testing.T) {
+	for _, tc := range []struct {
+		providerName    string
+		wantDelivered   bool
+		wantUndelivered NudgeUndeliveredReason
+		wantWaitCalls   int
+	}{
+		{providerName: "claude", wantDelivered: true, wantWaitCalls: 1},
+		{providerName: "claude-mux", wantUndelivered: NudgeUndeliveredProviderUnsupported},
+	} {
+		t.Run(tc.providerName, func(t *testing.T) {
+			sp := runtime.NewFake()
+			if err := sp.Start(context.Background(), "legacy-worker", runtime.Config{}); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			sp.WaitForIdleErrors["legacy-worker"] = nil // the pane is idle
+			handle, err := NewRuntimeHandle(RuntimeHandleConfig{Provider: sp, SessionName: "legacy-worker", ProviderName: tc.providerName})
+			if err != nil {
+				t.Fatalf("NewRuntimeHandle: %v", err)
+			}
+			result, err := handle.Nudge(context.Background(), testOperator(t), NudgeRequest{Text: "hello", Delivery: NudgeDeliveryWaitIdle})
+			if err != nil {
+				t.Fatalf("Nudge: %v", err)
+			}
+			waits := 0
+			for _, call := range sp.Calls {
+				if call.Method == "WaitForIdle" {
+					waits++
+				}
+			}
+			if result.Delivered != tc.wantDelivered || result.Undelivered != tc.wantUndelivered || waits != tc.wantWaitCalls {
+				t.Fatalf("Delivered=%v Undelivered=%q WaitForIdle=%d, want %v %q %d",
+					result.Delivered, result.Undelivered, waits, tc.wantDelivered, tc.wantUndelivered, tc.wantWaitCalls)
+			}
+		})
+	}
+}

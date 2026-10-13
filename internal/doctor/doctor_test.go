@@ -349,6 +349,25 @@ func TestDoctor_FixHint(t *testing.T) {
 	}
 }
 
+// TestPrintResultIndentsMultiLineFixHint keeps every line of a multi-line
+// hint under its "hint:" label.
+func TestPrintResultIndentsMultiLineFixHint(t *testing.T) {
+	var buf bytes.Buffer
+	printResult(&buf, &CheckResult{
+		Name:    "hint-check",
+		Status:  StatusWarning,
+		Message: "problem",
+		FixHint: "Fix, either:\n  - one\n  - two",
+	}, false)
+
+	want := "      hint: Fix, either:\n" +
+		"              - one\n" +
+		"              - two\n"
+	if !strings.HasSuffix(buf.String(), want) {
+		t.Errorf("printResult output =\n%s\nwant it to end with\n%s", buf.String(), want)
+	}
+}
+
 // detailCheck returns a result with Details for verbose testing.
 type detailCheck struct{}
 
