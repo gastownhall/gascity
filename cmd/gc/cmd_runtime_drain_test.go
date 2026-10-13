@@ -1222,6 +1222,78 @@ func TestCmdRuntimeDrainCheckNamedUnknownSessionExitsOne(t *testing.T) {
 	}
 }
 
+// A [name] drain-check whose name matches two open sessions has not learned
+// which row to read: that is unknown, not 1.
+func TestCmdRuntimeDrainCheckNamedAmbiguousTargetIsUnknown(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		identifier string
+		metadata   map[string]string
+	}{
+		{
+			name:       "shared alias",
+			identifier: "worker",
+			metadata: map[string]string{
+				"alias":        "worker",
+				"agent_name":   "frontend/worker",
+				"template":     "frontend/worker",
+				"session_name": "test-city--frontend--worker-2",
+				"state":        "awake",
+			},
+		},
+		{
+			name:       "shared session_name",
+			identifier: "test-city--frontend--worker",
+			metadata: map[string]string{
+				"agent_name":   "frontend/worker",
+				"template":     "frontend/worker",
+				"session_name": "test-city--frontend--worker",
+				"state":        "awake",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath, _ := drainCheckNamedCity(t)
+			store, err := openScopeLocalFileStore(cityPath)
+			if err != nil {
+				t.Fatalf("open city store: %v", err)
+			}
+			if _, err := store.Create(beads.Bead{
+				Title:    "second row",
+				Type:     sessionBeadType,
+				Labels:   []string{sessionBeadLabel},
+				Metadata: tc.metadata,
+			}); err != nil {
+				t.Fatalf("create second row: %v", err)
+			}
+
+			var stdout, stderr bytes.Buffer
+			if code := cmdRuntimeDrainCheck([]string{tc.identifier}, false, &stdout, &stderr); code != drainCheckUnknownExit {
+				t.Fatalf("text: code = %d, want %d; stderr=%q", code, drainCheckUnknownExit, stderr.String())
+			}
+			lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
+			if len(lines) != 1 || !strings.Contains(lines[0], drainCheckSourceRow+":") || !strings.Contains(lines[0], session.ErrAmbiguous.Error()) {
+				t.Fatalf("text: stderr = %q, want one line naming %s and the ambiguity", stderr.String(), drainCheckSourceRow)
+			}
+
+			stdout.Reset()
+			stderr.Reset()
+			code := cmdRuntimeDrainCheck([]string{tc.identifier}, true, &stdout, &stderr)
+			if code != drainCheckUnknownExit {
+				t.Fatalf("json: code = %d, want %d; stderr=%q", code, drainCheckUnknownExit, stderr.String())
+			}
+			var result cliJSONErrorOutput
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+				t.Fatalf("json: stdout is not JSON: %v\nraw: %s", err, stdout.String())
+			}
+			if result.OK || result.Error.Code != drainCheckUnknownCode || result.Error.ExitCode != drainCheckUnknownExit ||
+				!strings.Contains(result.Error.Message, session.ErrAmbiguous.Error()) {
+				t.Fatalf("json: unexpected error envelope: %+v", result)
+			}
+		})
+	}
+}
+
 // The [name] form reads the row the target resolved to, by its id: a by-name
 // lookup of the shared session_name would land on the other row.
 func TestCmdRuntimeDrainCheckNamedReadsRowByResolvedID(t *testing.T) {

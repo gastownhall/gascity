@@ -43,11 +43,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Cases that move from exit 1 to exit 3: a `[name]` target that cannot be
   resolved because the city, its config or its store cannot be read, or
   that is ambiguous (a name a store that opened does not know still exits
-  1); a session row that cannot be read or found (for example a stale
-  `GC_SESSION_ID`) while `GC_DRAIN` is clear; a session provider that
-  cannot be constructed; a runtime error that is not a typed "session not
-  found", including a local city whose tmux server is not running and an
-  exec adapter whose `get-meta` fails for any reason.
+  1); a session row that cannot be read or found (for example a
+  `GC_SESSION_ID` that names no session row) while `GC_DRAIN` is clear; a
+  session provider that cannot be constructed; a runtime error that is not
+  a typed "session not found", including a local city whose tmux server is
+  not running and an exec adapter whose `get-meta` fails for any reason.
 
 - **New proxied scopes retire their proxy and Dolt child after 30 minutes
   idle.** Before this release every scope gc created was pinned to never, so a
