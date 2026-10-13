@@ -1141,10 +1141,11 @@ func TestSimOperatorDrainSurvivesACanceledControllerRequest(t *testing.T) {
 
 // lostCommitRun drives seed's simulation to its first start and lands op on
 // the start's row after its launch Call (S2's lost commit): the outcome of
-// that start, and the runtime under its name once it settled.
-func lostCommitRun(t *testing.T, seed uint64, op func(s *sim, l *simLeg, b beads.Bead)) (s *sim, outcome string, up bool) {
+// that start, the runtime under its name once it settled, and whether op
+// fired at all (a start that ended before the seam never runs it).
+func lostCommitRun(t *testing.T, seed uint64, op func(s *sim, l *simLeg, b beads.Bead)) (s *sim, outcome string, up, fired bool) {
 	t.Helper()
-	s = newSim(t, seed, simOpts{noPendingCreates: true}) // main's scenarios: the seeds these tests pin reach the lost commit there
+	s = newSim(t, seed, simOpts{})
 	s.inventory()
 	for step := 0; step < 400 && len(s.failures) == 0; step++ {
 		idx := slices.IndexFunc(s.parked, func(e *simEffect) bool { return e.it.Kind == intentStart && !e.settled })
@@ -1160,6 +1161,7 @@ func lostCommitRun(t *testing.T, seed uint64, op func(s *sim, l *simLeg, b beads
 		fire := func() {
 			l := s.legOf(e.it.Key.Leg)
 			if b, err := l.backing.Get(e.it.Key.ID); err == nil {
+				fired = true
 				s.outside("lost commit of "+e.it.Key.ID, l, b, func(l *simLeg, b beads.Bead) { op(s, l, b) })
 			}
 		}
@@ -1176,9 +1178,9 @@ func lostCommitRun(t *testing.T, seed uint64, op func(s *sim, l *simLeg, b beads
 				break
 			}
 		}
-		return s, outcome, up
+		return s, outcome, up, fired
 	}
-	return s, "", false
+	return s, "", false, false
 }
 
 // Kills a lost commit left running (v5 S2; the #7650 review): an operator
@@ -1192,7 +1194,7 @@ func TestSimLostCommit(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			for seed := uint64(1); seed <= 32; seed++ {
-				s, outcome, up := lostCommitRun(t, seed, op)
+				s, outcome, up, _ := lostCommitRun(t, seed, op)
 				if !strings.Contains(outcome, "commit-lost") {
 					continue
 				}
@@ -1246,9 +1248,9 @@ func TestSimLostCommitSparesASecondControllersRuntime(t *testing.T) {
 		}
 	}
 	for seed := uint64(1); seed <= 32; seed++ {
-		s, outcome, up := lostCommitRun(t, seed, op)
-		if outcome == "" || strings.Contains(outcome, "outcome 1 ") {
-			continue // never reached, or committed ahead of the write
+		s, outcome, up, fired := lostCommitRun(t, seed, op)
+		if outcome == "" || !fired || strings.Contains(outcome, "outcome 1 ") {
+			continue // never reached, the op never fired (the start ended first), or committed ahead of the write
 		}
 		if !up {
 			t.Fatalf("seed %d: %q stopped the second controller's runtime", seed, outcome)

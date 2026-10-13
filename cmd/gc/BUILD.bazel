@@ -2188,20 +2188,33 @@ go_variant_test(
 )
 
 # The full 1024-seed v2 simulator corpus, a CI gate (CONTRACT v5.9n): gc_test
-# runs the first simCISeeds; these run all 1024 in eight ranges of 128, each
+# runs the first simCISeeds; these run all 1024 in sixteen ranges of 64, each
 # a target of its own (the same binary, no extra compile), so they run in
-# parallel beside gc_test's shards. A range ran in 19-29 s on RBE
-# (2026-10-12); medium's timeout fails a hang fast.
+# parallel beside gc_test's shards; medium's timeout fails a hang fast. The
+# pending creates (mc-cjtkj) grew a range's run, so the ranges halved.
 [go_variant_test(
     name = "gc_sim_corpus_%d_test" % i,
     size = "medium",
     args = ["-test.run=^TestSimCorpus$$"],
     env = {
-        "GC_V2_SIM_SEEDS": "128",
-        "GC_V2_SIM_SEED_FIRST": str(1 + 128 * i),
+        "GC_V2_SIM_SEEDS": "64",
+        "GC_V2_SIM_SEED_FIRST": str(1 + 64 * i),
     },
     test = ":gc_test",
-) for i in range(8)]
+) for i in range(16)]
+
+# The floored corpus with pending creates seeded, all 1024 seeds in sixteen
+# ranges of 64, the same way (TestSimCorpusFlooredPending, mc-cjtkj).
+[go_variant_test(
+    name = "gc_sim_corpus_floored_pending_%d_test" % i,
+    size = "medium",
+    args = ["-test.run=^TestSimCorpusFlooredPending$$"],
+    env = {
+        "GC_V2_SIM_SEEDS": "64",
+        "GC_V2_SIM_SEED_FIRST": str(1 + 64 * i),
+    },
+    test = ":gc_test",
+) for i in range(16)]
 
 # INTEGRATION_SOLO_TESTS, each alone, and INTEGRATION_SOLO_SPLIT_TESTS, by
 # subtest, in gc_test's integration build.

@@ -1,13 +1,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"maps"
 	"reflect"
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -33,12 +33,15 @@ import (
 //   - PC2 I-S7: at quiescence no pending create rests with a StaleSelf
 //     runtime under its name that S7's exit could take;
 //   - PC3 I-lost-commit: a start whose row moved under it (closed, or
-//     retokened) leaves no live runtime it created under the moved token.
+//     retokened) leaves no live runtime it created under the moved token;
+//   - PC4 I-teardown: a rollback that closed its row left nothing C3
+//     required it to stop: the row's own runtime (O2: Current, or StaleSelf
+//     at its generation) or, for a pool row, anything under its bead-scoped
+//     name (C8.2(a), v5.9q).
 
 func init() {
-	simEffectChecks = append(simEffectChecks, (*sim).markEffect, (*sim).checkLeaseRollback, (*sim).checkLostCommit)
+	simEffectChecks = append(simEffectChecks, (*sim).markEffect, (*sim).checkLeaseRollback, (*sim).checkLostCommit, (*sim).checkRollbackTeardown)
 	simQuietChecks = append(simQuietChecks, (*sim).checkStaleCreates)
-	simStepChecks = append(simStepChecks, (*sim).noteStopAdmissions)
 	simMutants = append(simMutants, []struct {
 		name, inv string
 		opts      simOpts
@@ -68,6 +71,23 @@ func init() {
 			}
 			return it, ok
 		})}},
+		{"a rollback closes without its teardown's stop", "PC4 ", simOpts{specs: func(specs map[string]effectSpec) {
+			// The teardown's stop skipped, and the close no longer holds
+			// the row open while its own runtime stays (C3's ga-vcjr9
+			// guard): P4d and P4e of the #7706 review in one.
+			spec := specs[intentRollback]
+			spec.sections = slices.Clone(spec.sections)
+			spec.sections[0] = called(0, probed(paneScreen, rollbackStep), func(_ context.Context, _ txCaps, in teardown) (teardown, error) { return in, nil })
+			spec.sections[1].Decide = func(v txView) txStep {
+				td, err := callResult[teardown](v)
+				if err != nil || !rollbackable(v.Row) {
+					return txStep{Refuse: causeRedecided, Err: err}
+				}
+				patch, class := rollbackPatch(v.Row, v.Now, td.more)
+				return txStep{Terminal: patch, Class: class, Fail: td.fail, Err: td.err}
+			}
+			specs[intentRollback] = spec
+		}}},
 		{"a lost commit leaves its runtime", "PC3 ", simOpts{specs: func(specs map[string]effectSpec) {
 			spec := specs[intentStart]
 			spec.sections = slices.Clone(spec.sections)
@@ -219,11 +239,13 @@ var pendingCreateOps = []struct {
 			return // the legs' stores mint IDs on one prefix: a rig-leg create could reuse a city row's ID and name
 		}
 		id := fmt.Sprintf("gc-mc%d", s.rng.IntN(1_000_000))
-		b := sessionRow(id, "template", "worker", "agent_name", "worker", "state", "start-pending", "session_origin", "manual",
+		origin := []string{"manual", "ephemeral"}[s.rng.IntN(2)] // gc session new, or an API agent create (the pool side of J45)
+		b := sessionRow(id, "template", "worker", "agent_name", "worker", "state", "start-pending", "session_origin", origin,
 			"generation", "1", "instance_token", "tok-"+id+"-1", "pending_create_claim", "true", "pending_create_started_at", s.rel(0))
 		if _, err := l.backing.Create(b); err != nil {
 			s.t.Fatalf("seed %d: manual create: %v", s.seed, err)
 		}
+		s.logf("manual-create: %s/%s (%s), nameless", l.name, id, origin)
 	}},
 	{"name-lands", func(s *sim, l *simLeg, _ beads.Bead) {
 		rows, _ := l.backing.List(beads.ListQuery{AllowScan: true})
@@ -233,6 +255,7 @@ var pendingCreateOps = []struct {
 		if len(rows) > 0 {
 			b := rows[s.rng.IntN(len(rows))]
 			s.setMeta(l, b.ID, "session_name", "s-"+b.ID)
+			s.logf("name-lands: %s/%s", l.name, b.ID)
 		}
 	}},
 }
@@ -359,14 +382,17 @@ func (s *sim) checkStaleCreates() {
 	}
 }
 
-// pendingCreateRollback reports a v2 close of a row holding its pending
-// create's claim as failed-create: a rollback (A10, S3) or A21's failed
-// create close, which end the row and its holds with the Retire cell, as
-// legacy's rollbackPendingCreate does whatever holds the row
-// (failedCreateClosePatch). I15 leaves the holds to it; PC1 judges when it
-// may land.
+// pendingCreateRollback reports a v2 close as failed-create of a row
+// holding its pending create's claim, or of a row already failed-create
+// whose claim another writer cleared (ensureRunning's confirm, aebd4cf's
+// seed 291): a rollback (A10, S3) or A21's failed-create close, which end
+// the row and its holds with the Retire cell, as legacy's
+// failedCreateClosePatch does whatever holds the row (SESS-605). I15 leaves
+// the holds to it; PC1 judges when it may land.
 func pendingCreateRollback(w simWrite) bool {
-	return w.Before.Metadata["pending_create_claim"] == "true" && w.After.Metadata["state"] == string(session.StateFailedCreate)
+	failedCreate := string(session.StateFailedCreate)
+	return w.After.Metadata["state"] == failedCreate &&
+		(w.Before.Metadata["pending_create_claim"] == "true" || w.Before.Metadata["state"] == failedCreate)
 }
 
 // pendingCreateTimers are the lease edges of each open row holding its
@@ -421,35 +447,25 @@ func ownRuntimeEffect(k simKill) bool {
 	return k.Method == "Stop" && (k.Effect == intentRollback || k.Effect == intentStart)
 }
 
-// simStopAdmissions records, per sim, for each stop a pass admitted:
-// whether the cache held its row with another drain basis than its backing
-// (an outside write whose event the cache had not applied), and how many
-// outside drain-basis moves had happened then. A stop's after-stop premise
-// refuses a row an outside writer moved after the pass read it, by design,
-// whether the move landed before the pass (unseen), between the pass and
-// the release (the effect parked), or inside the effect (I16's v5.9n
-// excuse); the next pass finalizes it.
-var simStopAdmissions = struct {
-	sync.Mutex
-	by   map[*sim]map[rowKey]stopAdmission
-	seen map[*sim]*passTrace // the pass record last noted
-}{by: map[*sim]map[rowKey]stopAdmission{}, seen: map[*sim]*passTrace{}}
-
+// stopAdmission is a stop a pass admitted (sim.stopAdmissions): whether
+// the cache held its row with another drain basis than its backing (an
+// outside write whose event the cache had not applied), and how many outside
+// drain-basis moves had happened then. A stop's after-stop premise refuses a
+// row an outside writer moved after the pass read it, by design, whether the
+// move landed before the pass (unseen), between the pass and the release
+// (the effect parked), or inside the effect (I16's v5.9n excuse); the next
+// pass finalizes it.
 type stopAdmission struct {
 	lagged bool
 	moves  int
 }
 
-// noteStopAdmissions is a step check: after a pass, it records each stop
-// the pass admitted (simStopAdmissions).
-func (s *sim) noteStopAdmissions() {
-	rec := s.p.out.record.Load()
-	simStopAdmissions.Lock()
-	defer simStopAdmissions.Unlock()
-	if rec == nil || simStopAdmissions.seen[s] == rec {
-		return // each pass's admissions are noted once, at that pass's step
+// noteStopAdmissions records the stops pass record rec admitted, as the pass
+// admits them (sim.pass).
+func (s *sim) noteStopAdmissions(rec *passTrace) {
+	if rec == nil {
+		return
 	}
-	simStopAdmissions.seen[s] = rec
 	for _, it := range rec.Admitted {
 		l := s.legOf(it.Key.Leg)
 		if it.Kind != intentStop || l == nil {
@@ -458,10 +474,10 @@ func (s *sim) noteStopAdmissions() {
 		cached, err1 := l.cache.Get(it.Key.ID)
 		backing, err2 := l.backing.Get(it.Key.ID)
 		lagged := err1 == nil && err2 == nil && len(session.FactsDrainBasis.Moved(session.FactsOf(backing.Metadata), session.FactsOf(cached.Metadata))) > 0
-		if simStopAdmissions.by[s] == nil {
-			simStopAdmissions.by[s] = map[rowKey]stopAdmission{}
+		if s.stopAdmissions == nil {
+			s.stopAdmissions = map[rowKey]stopAdmission{}
 		}
-		simStopAdmissions.by[s][it.Key] = stopAdmission{lagged: lagged, moves: len(s.basisMoves)}
+		s.stopAdmissions[it.Key] = stopAdmission{lagged: lagged, moves: len(s.basisMoves)}
 	}
 }
 
@@ -469,19 +485,8 @@ func (s *sim) noteStopAdmissions() {
 // lagged drain basis, or an outside writer moved the row's drain basis on
 // leg since its admission (noteStopAdmissions).
 func (s *sim) stopBasisMovedSinceRead(leg string, k rowKey) bool {
-	simStopAdmissions.Lock()
-	a, ok := simStopAdmissions.by[s][k]
-	simStopAdmissions.Unlock()
+	a, ok := s.stopAdmissions[k]
 	return ok && (a.lagged || s.basisMovedOutside(leg, k.ID, a.moves))
-}
-
-// unstampedPane reports whether b's name holds a live runtime with no
-// session ID (Ownerless, or a token alone).
-func (s *sim) unstampedPane(b beads.Bead) bool {
-	s.sp.mu.Lock()
-	defer s.sp.mu.Unlock()
-	rt := s.sp.rts[b.Metadata["session_name"]]
-	return rt != nil && !rt.corpse && rt.id == ""
 }
 
 // Kills each v5.9t harness relaxation (mc-cjtkj) that excuses too much: a
@@ -512,6 +517,14 @@ func TestSimPendingRelaxationsBite(t *testing.T) {
 		{"I15: a held row closed failed-create without its claim", "I15 ", func(s *sim) {
 			b := row("x", held...)
 			s.checkWrite(simWrite{Leg: "city", At: s.clk.Now(), Before: b, After: closedAs(b, string(session.StateFailedCreate))})
+		}},
+		{"I15: a held row, not failed-create and claimless, closed failed-create", "I15 ", func(s *sim) {
+			b := row("x", append(held, "state", "asleep")...)
+			s.checkWrite(simWrite{Leg: "city", At: s.clk.Now(), Before: b, After: closedAs(b, string(session.StateFailedCreate))})
+		}},
+		{"I15: a held failed-create row closed orphaned", "I15 ", func(s *sim) {
+			b := row("x", append(held, "state", string(session.StateFailedCreate))...)
+			s.checkWrite(simWrite{Leg: "city", At: s.clk.Now(), Before: b, After: closedAs(b, "orphaned")})
 		}},
 		{"I15: a held pending create closed orphaned, not failed-create", "I15 ", func(s *sim) {
 			b := row("x", append(held, "pending_create_claim", "true")...)
@@ -554,9 +567,7 @@ func TestSimPendingRelaxationsBite(t *testing.T) {
 			s.setMeta(s.legs[0], "gc-1", signaled...)
 			s.sp.drop("s-gc-1")
 			k := rowKey{Leg: rowLeg, ID: "gc-1"}
-			simStopAdmissions.Lock()
-			simStopAdmissions.by[s] = map[rowKey]stopAdmission{k: {moves: len(s.basisMoves)}}
-			simStopAdmissions.Unlock()
+			s.stopAdmissions = map[rowKey]stopAdmission{k: {moves: len(s.basisMoves)}}
 			s.checkFinalized(&simEffect{it: intent{Kind: intentStop, Key: k}})(settlement{Outcome: settledRefused, Cause: causePremise})
 		}},
 		{"I16: a move before the stop's admission excuses nothing", "I16 ", func(s *sim) {
@@ -564,9 +575,7 @@ func TestSimPendingRelaxationsBite(t *testing.T) {
 			s.sp.drop("s-gc-1")
 			s.basisMoves = append(s.basisMoves, s.legs[0].name+"/gc-1")
 			k := rowKey{Leg: rowLeg, ID: "gc-1"}
-			simStopAdmissions.Lock()
-			simStopAdmissions.by[s] = map[rowKey]stopAdmission{k: {moves: len(s.basisMoves)}}
-			simStopAdmissions.Unlock()
+			s.stopAdmissions = map[rowKey]stopAdmission{k: {moves: len(s.basisMoves)}}
 			s.checkFinalized(&simEffect{it: intent{Kind: intentStop, Key: k}})(settlement{Outcome: settledRefused, Cause: causePremise})
 		}},
 		{"I16: signaled at quiescence with no pane, its probe answering", "I16 ", func(s *sim) {
@@ -593,10 +602,13 @@ func TestSimPendingRelaxationsBite(t *testing.T) {
 	}
 }
 
-// Kills I10's paced excuses for a start held or attached, and a stop held by
-// an unstamped runtime, excusing a retry loop: each is quiescent only at or
-// past its row's backoff expiry with no change but the runtime lease record,
-// and a stop refused token_absent under a stamped runtime is not paced.
+// Kills I10's paced excuses for a start refused held or attached excusing a
+// retry loop or the code's own cause: each is quiescent only at or past its
+// row's backoff expiry with no change but the runtime lease record, and only
+// when the sim's own model agrees: the hold model holds the row (simHeld), or
+// the pane is attached. A refusal the model does not back (planted X1, X2)
+// is no pacing. A rollback refused liveness-unknown is paced only over a
+// probe that keeps erroring.
 func TestSimPendingPacedRetries(t *testing.T) {
 	k := rowKey{Leg: rowLeg, ID: "gc-1"}
 	at := plannerT0.Add(time.Hour)
@@ -607,28 +619,92 @@ func TestSimPendingPacedRetries(t *testing.T) {
 		name          string
 		kind, cause   string
 		until         time.Duration
-		stamped       bool
+		attached      bool
+		probeErr      bool
 		before, after map[string]beads.Bead
 		paced         bool
 	}{
-		{"a held start at the expiry", intentStart, causeHeld, -time.Second, false, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4"), true},
-		{"a held start before the expiry", intentStart, causeHeld, time.Second, false, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4"), false},
-		{"an attached start at the expiry", intentStart, causeAttached, -time.Second, false, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4"), true},
-		{"a held start that moved another key", intentStart, causeHeld, -time.Second, false, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4", "state", "asleep"), false},
-		{"a start refused for another cause", intentStart, causePrepare, -time.Second, false, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4"), false},
-		{"a stop held by an unstamped runtime", intentStop, fenceTokenAbsent, -time.Second, false, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4"), true},
-		{"a stop refused token_absent under a stamped runtime", intentStop, fenceTokenAbsent, -time.Second, true, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4"), false},
+		{"a held start at the expiry", intentStart, causeHeld, -time.Second, false, false, row("runtime_lease_epoch", "3", "sleep_intent", "user-hold"), row("runtime_lease_epoch", "4", "sleep_intent", "user-hold"), true},
+		{"a start refused held on a row the hold model holds not (X1)", intentStart, causeHeld, -time.Second, false, false, row("runtime_lease_epoch", "3", "sleep_reason", "idle"), row("runtime_lease_epoch", "4", "sleep_reason", "idle"), false},
+		{"a held start before the expiry", intentStart, causeHeld, time.Second, false, false, row("runtime_lease_epoch", "3", "sleep_intent", "user-hold"), row("runtime_lease_epoch", "4", "sleep_intent", "user-hold"), false},
+		{"an attached start at the expiry", intentStart, causeAttached, -time.Second, true, false, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4"), true},
+		{"a start refused attached on an unattached pane (X2)", intentStart, causeAttached, -time.Second, false, false, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4"), false},
+		{"a held start that moved another key", intentStart, causeHeld, -time.Second, false, false, row("runtime_lease_epoch", "3", "sleep_intent", "user-hold"), row("runtime_lease_epoch", "4", "sleep_intent", "user-hold", "state", "asleep"), false},
+		{"a start refused for another cause", intentStart, causePrepare, -time.Second, false, false, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4"), false},
+		{"a rollback refused liveness-unknown over an erroring probe", intentRollback, causeLivenessUnknown, -time.Second, false, true, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4"), true},
+		{"a rollback refused liveness-unknown with its probe answering", intentRollback, causeLivenessUnknown, -time.Second, false, false, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4"), false},
 	} {
 		s := &sim{round: []simResult{{it: intent{Kind: c.kind, Key: k}, res: settlement{Outcome: settledRefused, Cause: c.cause}}}}
-		rt := &simRuntime{}
-		if c.stamped {
-			rt.id = "gc-1"
-		}
+		rt := &simRuntime{id: "gc-1", attached: c.attached, probeErr: c.probeErr}
 		s.sp = &simProvider{rts: map[string]*simRuntime{"s-gc-1": rt}}
 		backoff := map[string]backoffRecord{rowBackoffKey(k): {Consecutive: 2, Until: at.Add(c.until), Cause: c.cause}}
 		if got := s.pacedRetries(backoff, at, c.before, c.after); got != c.paced {
 			t.Errorf("%s: paced %t, want %t", c.name, got, c.paced)
 		}
+	}
+}
+
+// checkRollbackTeardown is PC4 I-teardown: a rollback whose close landed
+// left no live runtime C3 required it to stop, under the name the row held:
+// its own (O2: Current, or StaleSelf at its generation) or, under a pool
+// row's bead-scoped name, any (C8.2(a), v5.9q).
+func (s *sim) checkRollbackTeardown(e *simEffect) func(settlement) {
+	l := s.legOf(e.it.Key.Leg)
+	if e.it.Kind != intentRollback || l == nil {
+		return func(settlement) {}
+	}
+	before, err := l.backing.Get(e.it.Key.ID)
+	if err != nil || before.Status == "closed" {
+		return func(settlement) {}
+	}
+	return func(res settlement) {
+		name := before.Metadata["session_name"]
+		if !res.Closed || name == "" {
+			return
+		}
+		s.sp.mu.Lock()
+		rt := s.sp.rts[name]
+		s.sp.mu.Unlock()
+		if rt == nil || rt.corpse {
+			return
+		}
+		own := rt.id == before.ID && (rt.token == before.Metadata["instance_token"] || rt.epoch == before.Metadata["generation"])
+		if own || ownsName(sessionInfoFromBead(before), name) {
+			s.failf("PC4 I-teardown", "rollback %s (%s) closed the row and left %s's runtime %s/%s/%s running", e.it.Key.ID, e.it.Reason, name, rt.id, rt.epoch, rt.token)
+		}
+	}
+}
+
+// simHeld is the sim's own hold model for I10's paced start excuse, apart
+// from the code under test's: an operator's user-hold, a hold or quarantine
+// timer in force at now, a kill fence, a wait hold, or a soft suspend.
+//
+// TODO(v5.9u): a soft suspend (state suspended, no sleep_intent) is no hold;
+// drop it once #7718 stops RefusesPreWake refusing it.
+func simHeld(b beads.Bead, now time.Time) bool {
+	m := b.Metadata
+	future := func(k string) bool {
+		t, err := time.Parse(time.RFC3339, m[k])
+		return err == nil && t.After(now)
+	}
+	return m["sleep_intent"] == string(session.SleepReasonUserHold) || future("held_until") || future("quarantined_until") ||
+		session.IsKillPendingInfo(sessionInfoFromBead(b), now) || strings.TrimSpace(m["wait_hold"]) != "" ||
+		m["state"] == string(session.StateSuspended)
+}
+
+// TestSimCorpusFlooredPending is the floored corpus with pending creates
+// seeded (mc-cjtkj review): a min_active_sessions floor beside every pending
+// create path. Its floor-ack coverage is TestSimCorpusFloored's; this one
+// gates the invariants over floors and pending creates together. CI runs all
+// 1024 seeds in ranges (BUILD.bazel).
+func TestSimCorpusFlooredPending(t *testing.T) {
+	for _, seed := range simSeeds(t) {
+		t.Run(fmt.Sprint(seed), func(t *testing.T) {
+			s := newSim(t, seed, simOpts{})
+			s.cfg.Agents[0].MinActiveSessions = intPtr(1 + int(seed%2))
+			s.run()
+			s.report(t)
+		})
 	}
 }
 

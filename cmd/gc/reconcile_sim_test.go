@@ -90,6 +90,10 @@ type simKill struct {
 
 var errSimListing = errors.New("sim: list-sessions failed")
 
+// errSimEmptyName is the provider's refusal of an empty session name, as
+// tmux refuses one.
+var errSimEmptyName = errors.New("sim: empty session name")
+
 // simProvider is a fake tmux backend over runtime.Fake, whose other knobs
 // (peek, pending) it keeps: it lists corpses, keeps identity env per runtime,
 // and records every Start and destructive call. Once listed it caches as tmux
@@ -252,6 +256,9 @@ func (p *simProvider) IsAttachedWithError(name string) (bool, error) {
 // Start creates a runtime carrying cfg's identity env, unless a scripted
 // outcome fails it or the name is held (FreshOnly's ErrSessionExists).
 func (p *simProvider) Start(_ context.Context, name string, cfg runtime.Config) error {
+	if name == "" {
+		return errSimEmptyName // tmux refuses an empty session name
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	s := simStart{Name: name, ID: cfg.Env["GC_SESSION_ID"], Token: cfg.Env["GC_INSTANCE_TOKEN"], FreshOnly: cfg.FreshOnly, External: p.external}
@@ -271,6 +278,9 @@ func (p *simProvider) Start(_ context.Context, name string, cfg runtime.Config) 
 }
 
 func (p *simProvider) Stop(name string) error {
+	if name == "" {
+		return errSimEmptyName
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.killLocked("Stop", name)
@@ -641,6 +651,7 @@ func (s *sim) pass() {
 	s.p.runPass(now)
 	rec := s.p.out.record.Load()
 	s.logf("pass: admitted %v, %d deferred %s", intentKeys(rec.Admitted), len(rec.Deferred), rec.Err)
+	s.noteStopAdmissions(rec) // reconcile_sim_pending_test.go: as the pass admits them
 	census, obs := s.observed()
 	for _, d := range rec.Deferred {
 		if strings.HasPrefix(d.Cause, "rests-") {
@@ -1337,14 +1348,16 @@ func (s *sim) pacedRetries(backoff map[string]backoffRecord, at time.Time, befor
 			// A probe that keeps erroring holds the stop, as I17 rules it
 			// not stoppable (v5.9n).
 			r.it.Kind == intentStop && r.res.Cause == fenceLivenessUnknown && s.probeErring(row) ||
-			// An unstamped runtime under the name holds the stop: L2 finds
-			// no token to fence on, and no verdict proves the row's gone.
-			r.it.Kind == intentStop && r.res.Cause == fenceTokenAbsent && s.unstampedPane(row) ||
+			// Likewise a rollback (A10): a runtime whose probe keeps erroring
+			// leaves its fresh read unknown, and C3 refuses on it
+			// (mc-cjtkj; seed 290).
+			r.it.Kind == intentRollback && r.res.Cause == causeLivenessUnknown && s.probeErring(row) ||
 			// A start AL1 proposes for a row an operator holds (a pending
 			// create's claim, a manual session) that its PreWake refuses
 			// (RefusesPreWake), or whose recycle an attached pane refuses,
 			// paced by its backoff (mc-cjtkj).
-			r.it.Kind == intentStart && (r.res.Cause == causeHeld || r.res.Cause == causeAttached)
+			r.it.Kind == intentStart && r.res.Cause == causeHeld && simHeld(row, at) ||
+			r.it.Kind == intentStart && r.res.Cause == causeAttached && s.sp.IsAttached(row.Metadata["session_name"])
 		rec, backedOff := backoff[rowBackoffKey(r.it.Key)]
 		if r.res.Outcome != settledRefused || !held || !backedOff || rec.Until.After(at) {
 			return false
@@ -1489,7 +1502,7 @@ func TestSimCorpusFloored(t *testing.T) {
 func TestSimCorpusPinnedSeeds(t *testing.T) {
 	for _, seed := range []uint64{107, 337, 338, 427, 452, 465, 553, 657} {
 		t.Run(fmt.Sprint(seed), func(t *testing.T) {
-			s := newSim(t, seed, simOpts{})
+			s := newSim(t, seed, simOpts{noPendingCreates: true}) // main's scenarios: the seeds v5.9n pins
 			s.run()
 			s.report(t)
 		})

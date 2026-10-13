@@ -321,9 +321,12 @@ func (s *sim) checkQuarantinedCommits() {
 		})
 		switch {
 		case b.Status == "closed", !s.livePane(b), b.Metadata[session.DrainIntentReasonKey] != "",
-			!session.DecodeDisposition(b.Metadata).Quarantine.After(now), worked,
-			s.sp.IsAttached(b.Metadata["session_name"]): // an attach keeps it up, as legacy's attached override wakes it (mc-cjtkj)
+			!session.DecodeDisposition(b.Metadata).Quarantine.After(now), worked:
 			delete(s.quarantinedCommits, id)
+		case s.sp.IsAttached(b.Metadata["session_name"]):
+			// An attach keeps it up while it lasts, as legacy's attached
+			// override wakes it (mc-cjtkj): the bound runs from the detach.
+			s.quarantinedCommits[id] = now
 		case now.Sub(at) > quarantineDrainBound:
 			s.failf("I15 I-STOP-3/4", "%s, committed under a quarantine that landed after its PreWake, is still up undrained %s later", id, now.Sub(at))
 			delete(s.quarantinedCommits, id)
@@ -446,7 +449,7 @@ func dormantChange(b beads.Bead, a map[string]string, t time.Time, stable bool) 
 // inside the stop) is finalized by then (v5.9n). I17 sees only live panes.
 func (s *sim) checkStranded() {
 	for _, k := range slices.Sorted(maps.Keys(s.prev)) {
-		if b := s.prev[k]; signaledRow(b) && !s.namedPane(b) && !s.probeErring(b) { // an erroring probe proves no absence (O3)
+		if b := s.prev[k]; signaledRow(b) && !s.namedPane(b) {
 			s.failf("I16 I-STOP-5", "%s is still signaled at quiescence with no live pane: the next pass never finalized it", k)
 		}
 	}
@@ -471,8 +474,7 @@ func (s *sim) livePane(b beads.Bead) bool {
 }
 
 // namedPane reports whether b's name holds a live pane the stop verb must
-// not finalize over: b's own runtime, whatever its token, an unstamped one
-// (Ownerless or Unknown: no verdict, L2 refuses it), or, under b's
+// not finalize over: b's own runtime, whatever its token, or, under b's
 // bead-scoped pool name, any runtime (never Foreign there, v5.2 D3; L2
 // refuses it). Another row's runtime under any other name is the Foreign
 // verdict, which proves b's gone.
@@ -482,7 +484,7 @@ func (s *sim) namedPane(b beads.Bead) bool {
 	name := b.Metadata["session_name"]
 	rt := s.sp.rts[name]
 	beadScoped := b.Metadata["pool_managed"] == "true" && strings.HasSuffix(name, "-"+b.ID)
-	return rt != nil && !rt.corpse && (rt.id == b.ID || rt.id == "" || beadScoped)
+	return rt != nil && !rt.corpse && (rt.id == b.ID || beadScoped)
 }
 
 // basisMovedOutside reports an outside write since basisMoves[from] that
@@ -517,7 +519,7 @@ func (s *sim) checkFinalized(e *simEffect) func(settlement) {
 			return
 		}
 		if res.Cause == fenceLivenessUnknown && s.probeErring(b) {
-			return // an erroring probe proves no absence (O3), as I17 rules it not stoppable (v5.9n)
+			return // an erroring probe proves no absence (O3), as I17 rules it not stoppable (v5.9n; seed 606 of the floored-pending corpus)
 		}
 		if !paneBefore && res.Cause != "name-busy" && err == nil && signaledRow(b) && !s.namedPane(b) {
 			s.failf("I16 I-STOP-5", "the stop effect on %v confirmed no live pane and left the request signaled", e.it.Key)
