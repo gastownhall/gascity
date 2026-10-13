@@ -85,7 +85,10 @@ type controllerState struct {
 	// reconcile from the next tick on, with no reload: any bd read restarts
 	// the rig's retired proxy.
 	suspendedRigs atomic.Pointer[map[string]bool]
-	cfg           *config.City
+	// pendingPoke pokes the city runtime's pending-interaction lane; nil
+	// when the lane is not running (pending_interaction_lane.go).
+	pendingPoke atomic.Pointer[func(sessionID string)]
+	cfg         *config.City
 	// rawCfg is the raw (pre-expansion, site-bound) config snapshot captured
 	// at the same generation as cfg. It is the basis the mutation gate uses
 	// (Editor.UpdateAgent → AgentOrigin), cached here so provenance reads
@@ -1337,7 +1340,11 @@ func closeBeadStoreHandle(store beads.Store) error {
 	if store == nil {
 		return nil
 	}
-	if base, _, ok := unwrapBeadPolicyStore(store); ok {
+	if base, policy, ok := unwrapBeadPolicyStore(store); ok {
+		if policy.borrowed {
+			// The invocation memo owns the store and closes it at exit.
+			return nil
+		}
 		return closeBeadStoreHandle(base)
 	}
 	if cached, ok := store.(*beads.CachingStore); ok {

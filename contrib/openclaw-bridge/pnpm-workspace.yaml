@@ -8,16 +8,14 @@
 # same under `npm ci --ignore-scripts`.
 allowBuilds:
   "@google/genai": false
+  koffi: false
   openclaw: false
   protobufjs: false
   tree-sitter-bash: false
 
-# openclaw publishes an npm-shrinkwrap.json, which npm honors and pnpm
-# ignores. These pins are where pnpm's own resolution differs from it;
-# pinning them keeps pnpm-lock.yaml the same tree as package-lock.json
-# (lockfiles_in_sync_test). Update them from the shrinkwrap with openclaw.
+# Security pin, mirrored by package.json "overrides" for npm so both lockfiles
+# resolve the same tree (lockfiles_in_sync_test): openclaw 2026.8.35 pins
+# @modelcontextprotocol/sdk 1.30.0 (GHSA-6qxp-vccf-f47h, fixed in 1.31.0, the
+# version openclaw 2026.10.1 ships). Drop both once openclaw pins >= 1.31.0.
 overrides:
-  "@types/retry": 0.12.5
-  node-domexception: npm:@nolyfill/domexception@1.0.28
-  protobufjs: 8.4.0
-  "@openclaw/fs-safe>tar": 7.5.15
+  "@modelcontextprotocol/sdk": 1.31.0

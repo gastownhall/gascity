@@ -409,9 +409,11 @@ func (c *bdTopologyCity) bdSupportsPurgeWispsPlane(t *testing.T) bool {
 }
 
 // seedScope creates, in one scope: an old closed parent wisp with an old open
-// child (Step 1 closes the child), an old stale durable task (Step 5 closes it
-// in the city), an expired unassigned gc:nudge bead (Step 4 closes it in any
-// scope) and an old closed standalone wisp (Step 3 purges it).
+// child (Step 1 closes the child), three old open workflow wisp roots (Step 2
+// closes the one with no descendants and keeps the one with an open step and
+// the one with an in-progress child), an old stale durable task (Step 5 closes
+// it in the city), an expired unassigned gc:nudge bead (Step 4 closes it in
+// any scope) and an old closed standalone wisp (Step 3 purges it).
 func (c *bdTopologyCity) seedScope(t *testing.T, s bdTopologyScope) map[string]string {
 	t.Helper()
 	ids := map[string]string{}
@@ -433,12 +435,24 @@ func (c *bdTopologyCity) seedScope(t *testing.T, s bdTopologyScope) map[string]s
 	create("heldRoot", "-t", "molecule", "closed held root", "--ephemeral")
 	create("heldMid", "-t", "task", "stale mid over a young leaf", "--ephemeral", "--parent", ids["heldRoot"])
 	create("heldYoung", "-t", "task", "young leaf", "--ephemeral", "--parent", ids["heldMid"])
+	// Workflow roots: a step names its root in gc.root_bead_id, a child hangs
+	// off it by a parent-child dependency.
+	workflow := `{"gc.kind":"workflow"}`
+	create("wfStale", "-t", "molecule", "stale workflow root", "--ephemeral", "--metadata", workflow)
+	create("wfStepRoot", "-t", "molecule", "workflow root with an open step", "--ephemeral", "--metadata", workflow)
+	create("wfStep", "-t", "task", "open workflow step", "--ephemeral", "--metadata", fmt.Sprintf(`{"gc.root_bead_id":%q}`, ids["wfStepRoot"]))
+	create("wfBusyRoot", "-t", "molecule", "workflow root with an in-progress child", "--ephemeral", "--metadata", workflow)
+	create("wfBusy", "-t", "task", "in-progress workflow child", "--ephemeral", "--parent", ids["wfBusyRoot"])
+	c.bdIn(t, s, "update", ids["wfBusy"], "--status", "in_progress")
 	create("stale", "-t", "task", "-p", "3", "stale durable task")
 	create("nudge", "-t", "task", "expired nudge", "-l", "gc:nudge", "--metadata", `{"expires_at":"2020-01-01T00:00:00Z"}`)
 	c.bdIn(t, s, "close", ids["parent"], ids["purgeable"], ids["protected"], ids["chainRoot"], ids["heldRoot"], "--force", "--reason", "seed")
 	c.bdIn(t, s, "sql", fmt.Sprintf(
 		"UPDATE wisps SET created_at = DATE_SUB(NOW(), INTERVAL 48 HOUR), updated_at = DATE_SUB(NOW(), INTERVAL 48 HOUR), closed_at = IF(status = 'closed', DATE_SUB(NOW(), INTERVAL 400 HOUR), closed_at) WHERE id IN ('%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s')",
 		ids["parent"], ids["child"], ids["purgeable"], ids["protected"], ids["chainRoot"], ids["chainMid"], ids["chainLeaf"], ids["heldRoot"], ids["heldMid"]))
+	c.bdIn(t, s, "sql", fmt.Sprintf(
+		"UPDATE wisps SET created_at = DATE_SUB(NOW(), INTERVAL 48 HOUR), updated_at = DATE_SUB(NOW(), INTERVAL 48 HOUR) WHERE id IN ('%s', '%s', '%s', '%s', '%s')",
+		ids["wfStale"], ids["wfStepRoot"], ids["wfStep"], ids["wfBusyRoot"], ids["wfBusy"]))
 	c.bdIn(t, s, "sql", fmt.Sprintf("UPDATE issues SET updated_at = DATE_SUB(NOW(), INTERVAL 800 HOUR) WHERE id = '%s'", ids["stale"]))
 	if !s.proxied {
 		c.bdIn(t, s, "dolt", "commit", "-m", "seed maintenance fixture")
@@ -497,12 +511,27 @@ func checkMaintenanceOrdersOnRealBdTopology(t *testing.T, cityProx bool, rigProx
 		seeds[rig.name] = c.seedScope(t, rig)
 	}
 
-	// Reaper.
-	out, outcome := c.runOrder(t, coreScriptPath("reaper.sh"))
+	// Reaper. Each workflow-root census starts at its second root, so the
+	// start lookup and the wrapped page run through real bd too.
+	out, outcome := c.runOrder(t, coreScriptPath("reaper.sh"), "GC_REAPER_WORKFLOW_ROOT_CENSUS_START=1")
+	scopes := 1 + len(rigs)
+	if want := fmt.Sprintf("workflow_roots:%d, workflow_root_census:%d/%d,", scopes, 3*scopes, 3*scopes); !strings.Contains(out, want) {
+		t.Errorf("reaper summary does not report a complete workflow-root census (%s):\n%s", want, out)
+	}
 	for _, s := range append([]bdTopologyScope{city}, rigs...) {
 		ids := seeds[s.name]
 		if got := c.status(t, s, ids["child"]); got != "closed" {
 			t.Errorf("%s: stale child wisp %s = %s, want closed (Step 1)\n%s", s.dir, ids["child"], got, out)
+		}
+		if got := c.status(t, s, ids["wfStale"]); got != "closed" {
+			t.Errorf("%s: stale workflow root %s = %s, want closed (Step 2)", s.dir, ids["wfStale"], got)
+		} else if got := c.sqlValue(t, s, fmt.Sprintf(`SELECT JSON_UNQUOTE(JSON_EXTRACT(metadata, '$."gc.outcome"')) FROM wisps WHERE id = '%s'`, ids["wfStale"])); got != "skipped" {
+			t.Errorf("%s: closed workflow wisp root %s has gc.outcome %q, want skipped", s.dir, ids["wfStale"], got)
+		}
+		for _, key := range []string{"wfStepRoot", "wfBusyRoot"} {
+			if got := c.status(t, s, ids[key]); got != "open" {
+				t.Errorf("%s: %s %s = %s, want open (Step 2 keeps a workflow root with a live descendant)", s.dir, key, ids[key], got)
+			}
 		}
 		for _, key := range []string{"chainMid", "chainLeaf"} {
 			if got := c.status(t, s, ids[key]); got != "closed" {
@@ -548,7 +577,7 @@ func checkMaintenanceOrdersOnRealBdTopology(t *testing.T, cityProx bool, rigProx
 		t.Errorf("bd without wisps-plane purge must be declared, outcome = %s", outcome)
 	}
 	if gcLog, _ := os.ReadFile(c.gcLog); strings.Contains(string(gcLog), "ESCALATION") {
-		for _, bad := range []string{"unreachable", "open child", "close failed"} {
+		for _, bad := range []string{"unreachable", "open child", "close failed", "census incomplete", "census stopped"} {
 			if strings.Contains(string(gcLog), bad) {
 				t.Errorf("reaper escalated %q:\n%s", bad, gcLog)
 			}

@@ -55,7 +55,7 @@ func drainAckRewakeTick(
 		t.Fatalf("loadSessionBeads(before finalize): %v", err)
 	}
 	finalizeDrainAckStopPendingSessions(
-		cityPath, cfg, sp, beads.SessionStore{Store: store}, nil, sessionInfosFromBeads(before),
+		cityPath, cfg, sp, beads.SessionStore{Store: store}, testSeatWork(cityPath, cfg, beads.SessionStore{Store: store}, nil), sessionInfosFromBeads(before),
 		dops, dt, tracker, clk, events.Discard, out,
 	)
 	ds := buildDesiredState(cfg.EffectiveCityName(), cityPath, clk.Now().UTC(), cfg, sp, store, out)
@@ -73,7 +73,7 @@ func drainAckRewakeTick(
 	snap := newSessionBeadSnapshot(sessions)
 	reconcileSessionBeadsAtPathWithNamedDemand(
 		context.Background(), cityPath, snap.OpenForReconcile(), snap, ds.State, cfgNames, cfg, sp,
-		store, dops, ds.AssignedWorkBeads, nil, nil, dt, nil, poolDesired,
+		store, testSeatWork(cityPath, cfg, store, nil), dops, ds.AssignedWorkBeads, nil, nil, dt, nil, poolDesired,
 		ds.NamedSessionDemand, ds.NamedSessionRoutedDemand, ds.StoreQueryPartial, ds.WorkSet, cfg.EffectiveCityName(),
 		nil, clk, events.Discard, 0, 0, out, out,
 		withAsyncDrainAckStopTracker(tracker),

@@ -1009,6 +1009,9 @@ func tryReloadConfig(tomlPath, lockedWorkspaceName, cityRoot string) (*reloadRes
 //  1. Send Interrupt (Ctrl-C) to all sessions
 //  2. Wait shutdown_timeout
 //  3. Stop (force-kill) any survivors
+//
+// It is the compatibility wrapper direct tests call; the stop paths call
+// gracefulStopAllWithForceSignal.
 func gracefulStopAll(
 	names []string,
 	sp runtime.Provider,
@@ -1018,11 +1021,18 @@ func gracefulStopAll(
 	store beads.SessionStore,
 	stdout, stderr io.Writer,
 ) {
-	gracefulStopAllWithForceSignal(names, sp, timeout, rec, cfg, store, stdout, stderr, nil)
+	gracefulStopAllWithForceSignal(names, nil, sp, timeout, rec, cfg, store, stdout, stderr, nil)
 }
 
+// gracefulStopAllWithForceSignal is gracefulStopAll that a force stop can cut
+// short. knownUnlisted holds names the caller's own per-name probe already found
+// running (or could not rule out) that the runtime inventory did not list.
+// They are read per name without probing them again before the interrupt; on
+// a remote runtime every probe is a round trip. Nil when the caller probed
+// nothing.
 func gracefulStopAllWithForceSignal(
 	names []string,
+	knownUnlisted map[string]bool,
 	sp runtime.Provider,
 	timeout time.Duration,
 	rec events.Recorder,
@@ -1041,6 +1051,12 @@ func gracefulStopAllWithForceSignal(
 	for _, target := range targets {
 		targetByName[target.name] = target
 	}
+	// A name the runtime inventory does not list but a per-name probe does not
+	// rule out is one the list cannot see (an exec pack whose list-running is
+	// unsupported answers an empty inventory). Read its liveness per name below:
+	// trusting the list would read it as exited at once, cut the grace window
+	// short and stop it outside the worker boundary as "exited gracefully".
+	unlisted := unlistedSessionSet(sp, names, knownUnlisted)
 
 	// Pass 1: interrupt all in a single bounded broadcast wave.
 	// This is intentionally flat: interrupts are a best-effort graceful hint,
@@ -1062,19 +1078,13 @@ func gracefulStopAllWithForceSignal(
 		if stopForceRequested(forceStopRequested) {
 			break
 		}
-		allExited := true
+		var allExited bool
 		if runningSet, ok := runningSessionSet(sp, names); ok {
-			allExited = len(runningSet) == 0
+			allExited = len(runningSet) == 0 && namesObservedExited(sp, setKeys(unlisted), deadline)
 		} else {
-			for _, name := range names {
-				// An unknown state is not an exit: keep waiting out the grace
-				// window rather than cutting it short on a failed observation.
-				running, err := workerSessionTargetRunningWithConfig("", nil, sp, nil, name)
-				if err != nil || running {
-					allExited = false
-					break
-				}
-			}
+			// An unknown state is not an exit: keep waiting out the grace
+			// window rather than cutting it short on a failed observation.
+			allExited = namesObservedExited(sp, names, deadline)
 		}
 		if allExited {
 			break
@@ -1093,13 +1103,22 @@ func gracefulStopAllWithForceSignal(
 	// Pass 2: kill survivors.
 	var survivors []string
 	runningSet, listed := runningSessionSet(sp, names)
+	// Names the list cannot vouch for (all of them when it failed) are read
+	// per name, in one bounded parallel wave.
+	var toProbe []string
+	for _, name := range names {
+		if !listed || unlisted[name] {
+			toProbe = append(toProbe, name)
+		}
+	}
+	probed := probeNamesRunning(sp, toProbe, defaultMaxParallelInterrupts)
 	for _, name := range names {
 		running := false
 		var observeErr error
-		if listed {
-			running = runningSet[name]
+		if p, ok := probed[name]; ok {
+			running, observeErr = p.running, p.err
 		} else {
-			running, observeErr = workerSessionTargetRunningWithConfig("", nil, sp, nil, name)
+			running = runningSet[name]
 		}
 		if observeErr != nil {
 			// The state is unknown, not exited: still stop it, but neither
@@ -1153,6 +1172,140 @@ func gracefulStopAllWithForceSignal(
 
 func stopForceRequested(forceStopRequested func() bool) bool {
 	return forceStopRequested != nil && forceStopRequested()
+}
+
+// stopProbeRunning is the per-name liveness read for a name the runtime
+// inventory did not list. It is the bare provider liveness observation, one
+// provider op on a remote runtime (the worker observation also reads
+// metadata, attachment and activity, several round trips each), and it
+// reports a failed probe as an error wherever the provider can tell one
+// (runtime.LivenessObserverWithError); elsewhere it is the bool IsRunning.
+func stopProbeRunning(sp runtime.Provider, name string) (bool, error) {
+	obs, err := runtime.ObserveLivenessWithError(sp, name, nil)
+	return obs.Running, err
+}
+
+// unlistedSessionSet returns the names that a complete runtime inventory does
+// not list but that a per-name probe reports running or cannot rule out,
+// together with known, the names the caller's own probe already found so
+// (they are not probed again). When the inventory is incomplete it returns
+// every name, unprobed: that listing vouches for none of them, and a later
+// one that answers blind would read them all as exited, so each later read
+// of them is per name. Nil when the inventory lists every name, or when the
+// provider attests its listing complete (runtime.ListRunningAttested): a
+// name an attested list does not show is gone, and probing it would only
+// add a round trip per name, or a timeout per name on a wedged server.
+func unlistedSessionSet(sp runtime.Provider, names []string, known map[string]bool) map[string]bool {
+	if runtime.ListRunningAttested(sp) {
+		return nil
+	}
+	runningSet, ok := runningSessionSet(sp, names)
+	if !ok {
+		return setOf(names)
+	}
+	var unlisted map[string]bool
+	add := func(name string) {
+		if unlisted == nil {
+			unlisted = make(map[string]bool)
+		}
+		unlisted[name] = true
+	}
+	var toProbe []string
+	for _, name := range names {
+		switch {
+		case known[name]:
+			add(name)
+		case !runningSet[name]:
+			toProbe = append(toProbe, name)
+		}
+	}
+	for name, p := range probeNamesRunning(sp, toProbe, defaultMaxParallelInterrupts) {
+		if p.err != nil || p.running {
+			add(name)
+		}
+	}
+	return unlisted
+}
+
+// namesObservedExited reports whether a per-name probe sees every name
+// exited. An unknown state is not an exit. It probes one name at a time and
+// stops at the first that is not exited: the grace-window poll asks this
+// every 500 ms, and while agents are still up one probe answers it. It
+// begins no probe once deadline (the end of the grace window) has passed,
+// and a walk cut short there is not an exit, so a backend that answers
+// slowly overruns the window by at most the one probe in flight.
+func namesObservedExited(sp runtime.Provider, names []string, deadline time.Time) bool {
+	for _, name := range names {
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		if running, err := stopProbeRunning(sp, name); err != nil || running {
+			return false
+		}
+	}
+	return true
+}
+
+// stopProbe is one stopProbeRunning answer.
+type stopProbe struct {
+	running bool
+	err     error
+}
+
+// probeNamesRunning reads stopProbeRunning for each name, at most parallel
+// at a time: on a remote runtime every probe is a round trip, and a stop that
+// probed one name at a time would outlast the caller's wait on a city of any
+// size. Every name is probed; a forced stop does not cut this short, because
+// a name left unprobed is a session left running past a stop that reports
+// success. The callers bound the cost with the width instead.
+func probeNamesRunning(sp runtime.Provider, names []string, parallel int) map[string]stopProbe {
+	if len(names) == 0 {
+		return nil
+	}
+	if parallel < 1 {
+		parallel = 1
+	}
+	results := make([]stopProbe, len(names))
+	sem := make(chan struct{}, parallel)
+	var wg sync.WaitGroup
+	for i, name := range names {
+		sem <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			running, err := stopProbeRunning(sp, name)
+			results[i] = stopProbe{running: running, err: err}
+		}()
+	}
+	wg.Wait()
+	out := make(map[string]stopProbe, len(names))
+	for i, name := range names {
+		out[name] = results[i]
+	}
+	return out
+}
+
+// storeSweepMaxParallelProbes is how many of the city's recorded sessions a
+// stop probes at once (storeRecordedRunningOutside, and the standalone stop's
+// check of rows left creating). It is wider than the interrupt wave
+// (defaultMaxParallelInterrupts): these probes only read, and on a runtime
+// whose backend hangs each one waits out the provider's whole op timeout (30 s
+// on an exec pack), so a narrow wave would add one op timeout per wave to
+// every stop, forced or not. At this width a city of up to this many recorded
+// rows pays about one op timeout.
+const storeSweepMaxParallelProbes = 64
+
+// setKeys returns the members of set.
+func setKeys(set map[string]bool) []string {
+	if len(set) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(set))
+	for k := range set {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 func runningSessionSet(sp runtime.Provider, names []string) (map[string]bool, bool) {

@@ -72,6 +72,7 @@ func (cr *CityRuntime) installPlanner(rt *plannerRuntime) {
 func (cr *CityRuntime) newPlannerHost() plannerHost {
 	guard := cr.ensureEndpointCapacityGuard()
 	return plannerHost{
+		preserveSessions: cr.preserveSessionsShutdown.Load,
 		gather: gatherEnv{
 			CityPath: cr.cityPath, CityName: cr.cityName,
 			Sessions:  cr.v2SessionsStore,
@@ -118,6 +119,7 @@ func (cr *CityRuntime) newPlannerHost() plannerHost {
 		safeTick: cr.safeTick,
 		rec:      cr.rec,
 		stderr:   cr.stderr,
+		stranded: cr.strandedClaimAlerter(),
 	}
 }
 
@@ -264,7 +266,7 @@ func (cr *CityRuntime) reloadV2(p *tickPass, source reloadSource) {
 	r := cr.reloadConfigTraced(p.ctx, p.lastProviderName, p.cityRoot, p.trace, source)
 	cr.v2.publishEnv()
 	if r.Outcome != reloadOutcomeFailed {
-		cr.v2.softReload(reloadIntent{Source: source, Soft: p.manualReload != nil && p.manualReload.soft}, &r)
+		cr.v2.softReload(p.ctx, reloadIntent{Source: source, Soft: p.manualReload != nil && p.manualReload.soft}, &r)
 	}
 	cr.v2.planner.markDirty("reload")
 	p.manualReply = r
@@ -299,7 +301,7 @@ func (cr *CityRuntime) beforeProviderSwap(ctx context.Context, cfg *config.City)
 		cr.v2.exec.openStarts()
 		cr.v2.planner.resumeStarts()
 	}
-	if err := cr.v2.exec.waitStarts(startup + startDeadlineSlack); err != nil {
+	if err := cr.v2.exec.waitStarts(startup + startDeadlineSlack + startFailureSlack); err != nil {
 		return resume, err
 	}
 	return resume, ctx.Err()

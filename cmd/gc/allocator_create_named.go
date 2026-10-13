@@ -320,7 +320,7 @@ func reopenNamed(ctx context.Context, store beads.Store, live beads.Store, cfg *
 	if plan.AdoptLive {
 		state = string(session.StateActive)
 	}
-	batch := reopenNamedSessionBatch(state, closed.Metadata["sleep_reason"], now)
+	batch := reopenNamedSessionBatch(closed, state, now)
 	maps.Copy(batch, startupKickoffReopenMetadata(plan.BoundStepID, now))
 	open := "open"
 	opts := beads.UpdateOpts{Status: &open, Metadata: batch}

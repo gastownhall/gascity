@@ -743,11 +743,11 @@ func TestReapStaleSessionBeadsSparesALiveHoldersStart(t *testing.T) {
 		t.Fatal(err)
 	}
 	var log bytes.Buffer
-	if n := reapStaleSessionBeads(city, store, sp, newDrainTracker(), nil, clk, &log); n != 0 {
+	if n := reapStaleSessionBeads(city, store, testSeatWork(city, nil, store, nil), sp, newDrainTracker(), nil, clk, &log); n != 0 {
 		t.Fatalf("reaped %d under a live holder's lease, want 0", n)
 	}
 	held.Release()
-	if n := reapStaleSessionBeads(city, store, sp, newDrainTracker(), nil, clk, &log); n != 1 {
+	if n := reapStaleSessionBeads(city, store, testSeatWork(city, nil, store, nil), sp, newDrainTracker(), nil, clk, &log); n != 1 {
 		t.Fatalf("reaped %d once the holder is gone, want the stale row reaped; log %q", n, log.String())
 	}
 }

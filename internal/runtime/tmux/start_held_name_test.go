@@ -62,19 +62,21 @@ func (h *heldNameTmux) execute(args []string) (string, error) {
 		err := h.hasSessionErrs[0]
 		h.hasSessionErrs = h.hasSessionErrs[1:]
 		return "", err
-	case "display-message":
-		format := args[len(args)-1]
-		switch {
-		case strings.Contains(format, "#{pane_pid}"):
-			return "", errors.New("pane pid unavailable")
-		case strings.Contains(format, "#{pane_current_command}"):
-			return h.paneCommand, nil
-		case strings.Contains(format, "#{pane_dead}"):
-			return "0", nil
-		}
 	case "show-environment":
 		return "GC_INSTANCE_TOKEN=" + h.liveToken, nil
 	case "list-panes":
+		// An agent-pane read: the held session's one, unmarked pane.
+		format := args[len(args)-1]
+		if rest, ok := strings.CutPrefix(format, agentPaneMarkerFormat+"\t"); ok {
+			switch {
+			case strings.Contains(rest, "#{pane_pid}"):
+				return "", errors.New("pane pid unavailable")
+			case strings.Contains(rest, "#{pane_current_command}"):
+				return "pane\t" + h.paneCommand, nil
+			case strings.Contains(rest, "#{pane_dead}"):
+				return "pane\t0", nil
+			}
+		}
 		return h.listRows, nil
 	}
 	return "", nil
