@@ -626,8 +626,8 @@ func TestCloseRechecksWorkBeforeClosing(t *testing.T) {
 // fence passed on the row's own runtime refuses runtime_moved, stopping
 // nothing and finalizing nothing, when the runtime under the name is
 // replaced between the fence's read and the Stop, by another row's identity,
-// or by another session object carrying the row's own; with nothing
-// replaced the stop goes ahead.
+// or by another session object carrying the row's own (its id, its creation
+// or both differing); with nothing replaced the stop goes ahead.
 func TestStopRefusesARuntimeReplacedBeforeTheStop(t *testing.T) {
 	s, got, leaf := stopRun(t, signaled(drainOrphaned), undesired(drainOrphaned), func(p *effectPass, leaf *fenceLeaf, _ beads.Store, _ string) {
 		p.seam = func(_ context.Context, at txSeam, _ intent, section, _ int) error {
@@ -645,7 +645,15 @@ func TestStopRefusesARuntimeReplacedBeforeTheStop(t *testing.T) {
 		t.Fatalf("another row's identity before the Stop: settlement %+v, %d stops, row %v; want no stop and no finalize", s, stops(leaf), got.Metadata)
 	}
 
-	for _, replace := range []bool{true, false} {
+	for _, c := range []struct {
+		name, id, created string
+	}{
+		{"another object", "$2", "2"},
+		{"another object id", "$2", "1"},
+		{"another creation", "$1", "2"},
+		{"nothing replaced", "$1", "1"},
+	} {
+		replace := c.id != "$1" || c.created != "1"
 		var obs *freshObserver
 		s, got, _ = stopRun(t, signaled(drainOrphaned), undesired(drainOrphaned), func(p *effectPass, _ *fenceLeaf, _ beads.Store, id string) {
 			obs = &freshObserver{Fake: runtime.NewFake(), l: runtime.Liveness{Running: true, Alive: true, ObjectID: "$1", ObjectCreated: "1"}, env: map[string]string{"GC_SESSION_ID": id, "GC_INSTANCE_TOKEN": "tok-3"}}
@@ -654,14 +662,14 @@ func TestStopRefusesARuntimeReplacedBeforeTheStop(t *testing.T) {
 			}
 			p.Runtime = obs.tmux()
 			p.seam = func(_ context.Context, at txSeam, _ intent, section, _ int) error {
-				if replace && at == seamBeforeCall && section == 0 {
-					obs.l.ObjectID, obs.l.ObjectCreated = "$2", "2" // the row's identity on another object
+				if at == seamBeforeCall && section == 0 {
+					obs.l.ObjectID, obs.l.ObjectCreated = c.id, c.created // the row's identity, on another object when replaced
 				}
 				return nil
 			}
 		})
-		if n := obs.Fake.CountCalls("Stop", "s-gc-1"); replace && (n != 0 || s.Cause == "" && s.Outcome == settledLanded) || !replace && n != 1 {
-			t.Fatalf("object replaced %t: settlement %+v, %d stops, row %v; want a stop only on the fenced object", replace, s, n, got.Metadata)
+		if n := obs.Fake.CountCalls("Stop", "s-gc-1"); replace && (n != 0 || s.Cause != fenceRuntimeMoved) || !replace && n != 1 {
+			t.Fatalf("%s: settlement %+v, %d stops, row %v; want a stop only on the fenced object", c.name, s, n, got.Metadata)
 		}
 	}
 }

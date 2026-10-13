@@ -103,7 +103,7 @@ type corpseObject struct {
 // stopped is the Call's outcome, which the finalize reads.
 type stopped struct {
 	Confirmed bool
-	Performed bool   // a provider Stop was issued
+	Performed bool   // the fence passed: a provider Stop was issued, or the passed runtime had already left the name
 	Reason    string // why not confirmed
 }
 
@@ -415,5 +415,6 @@ func stopFacts(v txView, out stopped, kept *beads.Bead) effectFacts {
 }
 
 // agentStop is a performed stop, for legacy's stop metric
-// (telemetry.RecordAgentStop).
+// (telemetry.RecordAgentStop): one the fence passed, recorded as before
+// mc-rq4d0 also when the runtime had left the name and no Stop was issued.
 type agentStop struct{ Name, Identity string }

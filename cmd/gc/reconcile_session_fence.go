@@ -199,7 +199,7 @@ func stopFenced(ctx context.Context, sp runtime.Provider, v fenceVerdict, proces
 		v.Proceed, v.Reason = false, fenceAttached
 		return v, false
 	}
-	switch held, reason := v.stillHeld(ctx, name, processNames); {
+	switch held, reason := v.stillHeld(ctx, name); {
 	case reason != "":
 		v.Proceed, v.Reason = false, reason
 		return v, false
@@ -224,10 +224,11 @@ func stopFenced(ctx context.Context, sp runtime.Provider, v fenceVerdict, proces
 // the name since the verdict (another row's, a squatter's) is never stopped
 // by name. held is false when nothing is present under the name any more;
 // a read that fails holds (liveness unknown), and a different object or
-// identity refuses (runtime moved).
-func (v fenceVerdict) stillHeld(ctx context.Context, name string, processNames []string) (held bool, reason string) {
+// identity refuses (runtime moved). The object read takes no process names:
+// its object, not its agent, is what it compares (#7762 r3's form).
+func (v fenceVerdict) stillHeld(ctx context.Context, name string) (held bool, reason string) {
 	if v.objectID != "" {
-		again, ok := freshRead(ctx, v.Leaf, name, processNames, time.Now())
+		again, ok := freshRead(ctx, v.Leaf, name, nil, time.Now())
 		switch {
 		case !ok:
 			return false, fenceLivenessUnknown
@@ -237,10 +238,16 @@ func (v fenceVerdict) stillHeld(ctx context.Context, name string, processNames [
 			return false, fenceRuntimeMoved
 		}
 	}
-	if v.token && compareIdentity(v.Row, readRuntimeIdentity(ctx, v.Leaf, name)) != identityCurrent {
-		return false, fenceRuntimeMoved
+	if !v.token {
+		return true, ""
 	}
-	return true, ""
+	switch compareIdentity(v.Row, readRuntimeIdentity(ctx, v.Leaf, name)) {
+	case identityCurrent:
+		return true, ""
+	case identityUnknown: // unreadable or undecided
+		return false, fenceLivenessUnknown
+	}
+	return false, fenceRuntimeMoved
 }
 
 // unroute drops name's route on every router hop from sp to its leaf that

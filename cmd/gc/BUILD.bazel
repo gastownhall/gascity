@@ -1630,6 +1630,7 @@ go_test(
         "reconcile_effect_signal_test.go",
         "reconcile_effect_start_test.go",
         "reconcile_effect_stop_test.go",
+        "reconcile_effect_stop_tmux_integration_test.go",
         "reconcile_effect_tx_test.go",
         "reconcile_effect_write_test.go",
         "reconcile_effect_zombie_test.go",
