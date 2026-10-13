@@ -1072,6 +1072,25 @@ func TestCachingStoreRefreshRowReport(t *testing.T) {
 			wantFound: true, wantEvent: "bead.closed", wantStatus: "closed",
 		},
 		{
+			// The cache's own close, evicted by a re-scan before the refresh:
+			// its retained write fence shows the close was this cache's, and
+			// announced by its write, so the refresh installs it silently.
+			name: "own_close_evicted_with_option",
+			setup: func(t *testing.T, cache *CachingStore, _ Store) string {
+				id := mustCreateCached(t, cache).ID
+				if err := cache.Close(id); err != nil {
+					t.Fatalf("Close: %v", err)
+				}
+				cache.ReconcileNowForTest()
+				if _, held, _ := cachedRowState(cache, id); held {
+					t.Fatal("the re-scan kept the closed row")
+				}
+				return id
+			},
+			opts:      RowRefreshOptions{AnnounceUnheldClose: true},
+			wantFound: true, wantStatus: "closed",
+		},
+		{
 			name: "held_closed_with_option",
 			setup: func(t *testing.T, cache *CachingStore, backing Store) string {
 				id := unheldClosedRow(t, cache, backing)

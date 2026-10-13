@@ -736,10 +736,13 @@ func (c *CachingStore) RefreshRow(id string) (Bead, error) {
 type RowRefreshOptions struct {
 	// AnnounceUnheldClose announces, as bead.closed (ChangeRefresh), a closed
 	// row the refresh installs that the cache did not hold, unless a closing
-	// write of this cache is in flight for it (that write announces it). Pass
-	// it only with evidence the row closed recently: a re-scan holds no
-	// closed rows, so without it a long-closed row would be announced again
-	// every time a read installed it.
+	// write of this cache is in flight for it (that write announces it) or
+	// the cache still retains a write fence for it: a row this cache wrote
+	// was held when it closed, so its close was announced then, by the
+	// closing write or by the re-scan that evicted it, and a re-scan evicts
+	// closed rows silently. Pass it only with evidence the row closed
+	// recently: a re-scan holds no closed rows, so without it a long-closed
+	// row would be announced again every time a read installed it.
 	AnnounceUnheldClose bool
 }
 
@@ -800,7 +803,8 @@ func (c *CachingStore) RefreshRowReport(id string, opts RowRefreshOptions) (RowR
 	}
 	cached, held := c.beads[id]
 	cachedDeps := c.deps[id]
-	announceUnheld := opts.AnnounceUnheldClose && found && !held && fresh.Status == "closed" && c.closeIntents[id] == nil
+	announceUnheld := opts.AnnounceUnheldClose && found && !held && fresh.Status == "closed" &&
+		c.closeIntents[id] == nil && !c.retainsWriteFenceLocked(id)
 	var installed Bead
 	evicted := false
 	if found {
