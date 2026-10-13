@@ -19,14 +19,18 @@ import (
 // attach probe reports attached.
 type recycleLeaf struct {
 	*startHookLeaf
-	peekErr   error
-	attached  bool
-	attachErr error
-	peeks     int
+	peekErr    error
+	duringPeek func() // runs inside Peek, after the classification's read
+	attached   bool
+	attachErr  error
+	peeks      int
 }
 
 func (l *recycleLeaf) Peek(name string, lines int) (string, error) {
 	l.peeks++
+	if l.duringPeek != nil {
+		l.duringPeek()
+	}
 	if l.peekErr != nil {
 		return "", l.peekErr
 	}
@@ -162,6 +166,31 @@ func TestStartRecycleRefusals(t *testing.T) {
 	leaf.peekErr = errors.New("peek failed")
 	if s := k.runKind(); s.Cause != causePeekError || len(k.sp.kills) != 0 {
 		t.Fatalf("peek error: settlement %+v kills %d, want refused peek-error", s, len(k.sp.kills))
+	}
+	k, leaf, _ = deadKit(t, false, "gc-1", "tok", "")
+	leaf.peekErr = runtime.ErrTmuxAgentPaneAmbiguous
+	if s := k.runKind(); s.Cause != causePeekError || len(k.sp.kills) != 0 {
+		t.Fatalf("an ambiguous agent pane: settlement %+v kills %d, want refused peek-error", s, len(k.sp.kills))
+	}
+	// The session object replaced between the classification's read and the
+	// capture: the screen may be the new object's (the #7762 review).
+	k, leaf, _ = deadKit(t, false, "gc-1", "tok", "Usage limit reached", "last_woke_at", gatherNow.Add(-5*time.Second).Format(time.RFC3339))
+	leaf.duringPeek = func() { k.runtimeAs("gc-1", "tok", func(r *simRuntime) { r.corpse = true }) }
+	if s := k.runKind(); s.Cause != causePeekError || len(k.sp.kills) != 0 || k.meta("sleep_reason") != "" {
+		t.Fatalf("an object replaced across the peek: settlement %+v kills %d reason %q, want refused peek-error, nothing classified", s, len(k.sp.kills), k.meta("sleep_reason"))
+	}
+}
+
+// Kills a corpse that blocks its start forever (the #7762 review): a
+// session whose agent pane is gone (an operator's split, its only dead
+// pane) has no agent screen to classify; the peek's ErrTmuxAgentPaneGone
+// reads empty, so the recycle removes the corpse by exact object and the
+// start launches.
+func TestStartRecycleRemovesACorpseWithNoAgentPane(t *testing.T) {
+	k, leaf, rec := deadKit(t, false, "gc-1", "tok", "")
+	leaf.peekErr = runtime.ErrTmuxAgentPaneGone
+	if s := k.runKind(); s.Outcome != settledLanded || k.killsBy("KillCorpseObject") != 1 || len(k.starts()) != 1 || crashes(rec) != 0 {
+		t.Fatalf("settlement %+v corpse kills %d starts %d crashes %d, want the corpse removed and the start launched", s, k.killsBy("KillCorpseObject"), len(k.starts()), crashes(rec))
 	}
 }
 

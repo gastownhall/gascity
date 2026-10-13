@@ -45,14 +45,24 @@ func TestStartRecycleQuarantinesARateLimitCorpseOnRealTmux(t *testing.T) {
 		case <-tick.C:
 		}
 	}
+	observe := func() runtime.Liveness {
+		l, err := sp.(runtime.FreshLivenessObserver).ObserveLivenessSince("s-gc-1", nil, time.Now())
+		if err != nil {
+			t.Fatalf("fresh read: %v", err)
+		}
+		return l
+	}
+	before := observe()
+	if !before.Corpse || before.ObjectID == "" {
+		t.Fatalf("before the recycle: %+v, want a corpse (pane_dead=1) with its session object", before)
+	}
 	k.p.Runtime = sp
 
 	s := k.runKind()
 	if k.meta("sleep_reason") != string(session.SleepReasonRateLimit) || k.meta("quarantined_until") == "" {
 		t.Fatalf("settlement %+v reason %q quarantine %q, want the rate-limit quarantine", s, k.meta("sleep_reason"), k.meta("quarantined_until"))
 	}
-	roster, err := sp.(runtime.SessionRosterProvider).SessionRoster()
-	if _, ok := roster["s-gc-1"]; err != nil || !ok {
-		t.Fatalf("the corpse was removed (roster %v, %v), want it left in place with no relaunch", roster, err)
+	if after := observe(); !after.Corpse || after.ObjectID != before.ObjectID || after.ObjectCreated != before.ObjectCreated {
+		t.Fatalf("after the recycle: %+v, want the same corpse (session %s created %s, pane_dead=1) left in place, nothing killed or relaunched", after, before.ObjectID, before.ObjectCreated)
 	}
 }
