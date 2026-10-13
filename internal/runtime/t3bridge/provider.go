@@ -3005,8 +3005,9 @@ func (p *Provider) nudge(name string, content []runtime.ContentBlock, key string
 
 // SetMeta persists a session metadata value and reflects drain transitions onto
 // the T3 thread. The local value always lands first; when a drain transition
-// cannot be reflected because T3 is unreachable, SetMeta reports
-// [runtime.ErrRuntimeUnavailable].
+// cannot be reflected because T3 cannot be read, SetMeta reports
+// [runtime.ErrMetadataNotMirrored] (wrapping [runtime.ErrRuntimeUnavailable]
+// when T3 is unreachable).
 func (p *Provider) SetMeta(name, key, value string) error {
 	if err := writeMetaValue(name, key, value); err != nil {
 		return err
@@ -3025,9 +3026,9 @@ func (p *Provider) SetMeta(name, key, value string) error {
 	snapshot, err := p.rpcSnapshot()
 	if err != nil {
 		if isSoftBridgeUnavailable(err) {
-			return fmt.Errorf("%w: %s stored for %q but not reflected onto its t3 thread: %w", runtime.ErrRuntimeUnavailable, key, name, err)
+			err = fmt.Errorf("%w: %w", runtime.ErrRuntimeUnavailable, err)
 		}
-		return err
+		return fmt.Errorf("%w: %s stored for %q but not reflected onto its t3 thread: %w", runtime.ErrMetadataNotMirrored, key, name, err)
 	}
 	binding := snapshotThreadBinding(snapshotThreadBySessionName(snapshot, name))
 	if binding == nil {

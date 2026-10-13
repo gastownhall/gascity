@@ -226,8 +226,8 @@ func TestSeamBackedStopWithoutThreadSucceeds(t *testing.T) {
 func TestSetMetaDrainAckSoftUnavailableIsRuntimeUnavailable(t *testing.T) {
 	backed, sp := newSeamBackedSnapshotTestProvider(t, unreachableBridgeURL)
 	err := sp.SetMeta("agent-a", "GC_DRAIN_ACK", "1")
-	if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
-		t.Fatalf("SetMeta(GC_DRAIN_ACK) during bridge outage = %v, want errors.Is(runtime.ErrRuntimeUnavailable)", err)
+	if !errors.Is(err, runtime.ErrRuntimeUnavailable) || !errors.Is(err, runtime.ErrMetadataNotMirrored) {
+		t.Fatalf("SetMeta(GC_DRAIN_ACK) during bridge outage = %v, want errors.Is(runtime.ErrRuntimeUnavailable) and errors.Is(runtime.ErrMetadataNotMirrored)", err)
 	}
 	if got, _ := backed.raw.GetMeta("agent-a", "GC_DRAIN_ACK"); got != "1" {
 		t.Fatalf("GC_DRAIN_ACK = %q, want the local value persisted", got)

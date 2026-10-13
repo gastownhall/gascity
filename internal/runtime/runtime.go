@@ -166,6 +166,12 @@ var ErrStopUnsupported = fmt.Errorf("%w: stop not implemented", ErrStopRefused)
 // "absent by construction", never "unverifiable".
 var ErrMetaUnsupported = errors.New("runtime does not implement session metadata")
 
+// ErrMetadataNotMirrored reports that SetMeta stored the value, which is in
+// force, but the runtime could not reflect it onto its own view of the
+// session (a UI projection). A caller that needs only the value in force
+// may treat the write as done and report the error as a warning.
+var ErrMetadataNotMirrored = errors.New("session metadata stored but not mirrored by the runtime")
+
 // ErrListUnsupported reports that the runtime cannot enumerate sessions (exec
 // list-running answered exit 2). It is never a complete empty list.
 var ErrListUnsupported = errors.New("runtime does not implement session listing")

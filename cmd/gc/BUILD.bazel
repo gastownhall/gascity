@@ -1191,6 +1191,7 @@ go_test(
         "cmd_rig_test.go",
         "cmd_runtime_check_test.go",
         "cmd_runtime_conformance_test.go",
+        "cmd_runtime_drain_mirror_test.go",
         "cmd_runtime_drain_test.go",
         "cmd_runtime_heartbeat_test.go",
         "cmd_runtime_workdir_export_test.go",
