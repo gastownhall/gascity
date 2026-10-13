@@ -196,6 +196,11 @@ func TestArmCloseDecides(t *testing.T) {
 		{name: "an undesired pool row under a wait hold keeps its slot", liveness: livenessGone, desired: desireDrain, drain: drainOrphaned, meta: []string{"state", "asleep", "wait_hold", "w-1"}},
 		{name: "an undesired pool row under a quarantine keeps its slot", liveness: livenessGone, desired: desireDrain, drain: drainOrphaned, meta: []string{"state", "asleep", "quarantined_until", at(time.Hour)}},
 		{name: "an undesired pool row under a hold timer keeps its slot", liveness: livenessGone, desired: desireDrain, drain: drainOrphaned, meta: []string{"state", "suspended", "held_until", at(time.Hour)}},
+		// Any row, not only a pool row: an orphan close never ends an
+		// operator's hold (the A14 generator's seed 660, mc-i7efm).
+		{name: "an undesired manual row under an operator's suspend is kept", liveness: livenessGone, desired: desireDrain, drain: drainOrphaned, meta: []string{"pool_managed", "", "pool_slot", "", "session_origin", "manual", "state", "suspended", "sleep_intent", "user-hold", "held_until", at(1000 * time.Hour), "suspended_at", at(-time.Minute)}},
+		{name: "an undesired manual row under a hold timer is kept", liveness: livenessGone, desired: desireDrain, drain: drainOrphaned, meta: []string{"pool_managed", "", "pool_slot", "", "session_origin", "manual", "state", "asleep", "held_until", at(time.Hour)}},
+		{name: "an undesired manual row under no hold closes", liveness: livenessGone, desired: desireDrain, drain: drainOrphaned, meta: []string{"pool_managed", "", "pool_slot", "", "session_origin", "manual", "state", "asleep"}, want: decideCloseOrphan},
 		{name: "an undesired soft-suspended pool row heals asleep first (v5.9u)", liveness: livenessGone, desired: desireDrain, drain: drainOrphaned, meta: []string{"state", "suspended", "suspended_at", at(-time.Minute)}, want: decideSuspendHeal},
 		{name: "and once healed, with its suspended_at left, closes", liveness: livenessGone, desired: desireDrain, drain: drainOrphaned, meta: []string{"state", "asleep", "suspended_at", at(-time.Minute)}, want: decideCloseOrphan},
 		{
