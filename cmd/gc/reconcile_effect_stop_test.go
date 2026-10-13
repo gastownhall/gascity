@@ -521,14 +521,15 @@ func TestSameObjectGuardsForeignAndCorpse(t *testing.T) {
 // rebuilt without its stop keys, or that clears only an active request: an
 // operator-dormant stop of a row carrying a current ack clears it in its
 // finalize, as D4 does always; on a suspended row the ack is residue
-// (activeStop's rule 2), cleared just the same.
+// (activeStop's rule 2), cleared just the same. A soft suspend is no
+// dormant row (v5.9u): the awake heal takes it.
 func TestDormantFinalizeClearsALeftoverRequest(t *testing.T) {
 	for _, c := range []struct {
 		name string
 		meta []string
 	}{
 		{"user-hold", []string{"sleep_intent", "user-hold"}},
-		{"suspended", []string{"state", string(session.StateSuspended), "suspended_at", rowAt(-time.Minute)}},
+		{"suspended", []string{"state", string(session.StateSuspended), "sleep_intent", "user-hold", "suspended_at", rowAt(-time.Minute)}},
 	} {
 		s, got, leaf := stopRun(t, append(c.meta, session.DrainAckIncarnationKey, "3", session.DrainAckAtKey, rowAt(-time.Minute)), undesired(drainOrphaned), nil)
 		if s.Outcome != settledLanded || stops(leaf) != 1 || got.Metadata[session.DrainAckIncarnationKey] != "" || got.Metadata[session.DrainAckAtKey] != "" {

@@ -34,6 +34,7 @@ const (
 	decideCreatingHeal    = "creating-heal"
 	decideDeadRuntimeHeal = "dead-runtime-heal"
 	decideAwakeHeal       = "awake-heal"
+	decideSuspendHeal     = "soft-suspend-heal"
 	decideStabilityClear  = "stability-clear"
 	decideDetachedAt      = "detached-at"
 	decideStrandedClear   = "stranded-clear"
@@ -260,19 +261,33 @@ func heartbeatHeld(info session.Info, now time.Time) bool {
 	return session.DispositionOfInfo(info).HeartbeatHeld(now)
 }
 
-// armAwakeHeal is legacy's heal of an asleep row whose own runtime is alive
-// (ProjectLifecycle's alive projection): the row reads awake again. The
-// inventory's identity read must find the row's token (O2 Current); the
-// effect proves it again fresh. Without it a runtime started outside the
-// controller on an asleep row (`gc session attach`) stays orphaned, as S1
-// reads the shape as Noop. Unlike legacy, a row an operator holds dormant is
-// never woken (I15, I-STOP-3/4; Disposition.OperatorDormant): its runtime is the
-// operator-dormant stop path's (C5a3's lost-commit stop, C6b2). That covers a
-// `gc session kill` that lands between a PreWake and its provider Start,
-// before any runtime exists to fence.
+// armSoftSuspendHeal is legacy's state heal of a soft-suspended row whose
+// runtime is gone (CONTRACT v5.9u): the row reads asleep, its suspended_at
+// left as legacy leaves it, and decideRow composes the heal with the row's
+// restart (startHealed), so its assigned work wakes it in the same pass, as
+// legacy heals and wakes in one tick. A live one is armAwakeHeal's.
+func armSoftSuspendHeal(r *rowFacts) (intent, bool) {
+	if !softSuspended(r.row.Info, r.w.Now) || !r.freshGoneOrClassified() {
+		return intent{}, false
+	}
+	return r.heal(intentRowHealFresh, decideSuspendHeal, session.MetadataPatch{"state": string(session.StateAsleep)})
+}
+
+// armAwakeHeal is legacy's heal of an asleep or soft-suspended row whose own
+// runtime is alive (ProjectLifecycle's alive projection; CONTRACT v5.9u):
+// the row reads awake again. The inventory's identity read must find the
+// row's token (O2 Current); the effect proves it again fresh. Without it a
+// runtime started outside the controller on an asleep row (`gc session
+// attach`) stays orphaned, as S1 reads the shape as Noop. Unlike legacy, a
+// row an operator holds dormant is never woken (I15, I-STOP-3/4;
+// Disposition.OperatorDormant): its runtime is the operator-dormant stop
+// path's (C5a3's lost-commit stop, C6b2). That covers a `gc session kill`
+// that lands between a PreWake and its provider Start, before any runtime
+// exists to fence.
 func armAwakeHeal(r *rowFacts) (intent, bool) {
 	info := r.row.Info
-	if strings.TrimSpace(info.MetadataState) != string(session.StateAsleep) || session.DispositionOfInfo(info).OperatorDormant(r.w.Now) || !r.freshOwnAlive() {
+	asleep := strings.TrimSpace(info.MetadataState) == string(session.StateAsleep) && !session.DispositionOfInfo(info).OperatorDormant(r.w.Now)
+	if !asleep && !softSuspended(info, r.w.Now) || !r.freshOwnAlive() {
 		return intent{}, false
 	}
 	return r.heal(intentRowHealFresh, decideAwakeHeal, session.MetadataPatch{"state": string(session.StateAwake)})

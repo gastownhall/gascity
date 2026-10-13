@@ -858,7 +858,7 @@ var externalOps = []struct {
 		}
 	}},
 	{"close", func(_ *sim, l *simLeg, b beads.Bead) { _ = l.backing.Close(b.ID) }},
-	{"suspend", func(s *sim, l *simLeg, b beads.Bead) { // gc session suspend: the stop, then the state
+	{"suspend", func(s *sim, l *simLeg, b beads.Bead) { // the stop and rig-restart sweeps' soft suspend (v5.9u): the stop, then the state
 		_ = s.sp.Stop(b.Metadata["session_name"])
 		s.setMeta(l, b.ID, "state", string(session.StateSuspended), "suspended_at", s.rel(0), "slept_at", "", "sleep_reason", "")
 	}},
@@ -1150,7 +1150,9 @@ func (s *sim) checkInflight() {
 
 // quiesce holds the inputs stable: every held event and listing is
 // delivered, then a pass runs each patrol, every effect released at once,
-// until 2 × patrol + startup_timeout past the last pending timer. From
+// until 2 × patrol + startup_timeout past the last pending timer, as read
+// after the first such pass (which records the settlements still pending).
+// From
 // there, two passes in a row must admit nothing and change nothing (I10),
 // and the in-flight map must then be empty (I8).
 func (s *sim) quiesce() {
@@ -1176,7 +1178,7 @@ func (s *sim) quiesce() {
 	slack := 2*simPatrol + s.cfg.Session.StartupTimeoutDuration()
 	bound := s.lastTimer().Add(slack)
 	rounds := quiesceRounds{}
-	for done := false; !done && len(s.failures) == 0; {
+	for first, done := true, false; !done && len(s.failures) == 0; first = false {
 		before, backoff, at := s.snapshot(), s.p.backoff.Snapshot(), s.clk.Now()
 		s.round = nil
 		s.inventory()
@@ -1186,6 +1188,12 @@ func (s *sim) quiesce() {
 			s.release(0)
 		}
 		s.audit("v2")
+		if b := s.lastTimer().Add(slack); first && b.After(bound) {
+			// Once, after the first pass: it records the settlements still
+			// pending at quiescence, so the backoff of the last refusal
+			// before it is in the table, and the bound covers it.
+			bound = b
+		}
 		after := s.snapshot()
 		changed := !maps.EqualFunc(before, after, sameBead)
 		switch {

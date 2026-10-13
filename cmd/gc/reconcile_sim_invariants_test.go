@@ -367,7 +367,7 @@ func closeEndsSuspend(b beads.Bead, k string, t time.Time) bool {
 // quarantine's timer, and with it its own quarantine or rate_limit reason
 // (§12.2 #57, mc-bwvzv), on a row its pass read stable (v5.8, SESS-539;
 // stable, sim.stable). No such row is woken. Only an operator-dormant row (D1 rule
-// 2: killed, suspended, or sleep_intent=user-hold) is never given a stop
+// 2: killed, suspended under a hold, or sleep_intent=user-hold) is never given a stop
 // request, though one it holds may be cleared; a hold or quarantine alone
 // is not dormant, and legacy drains under one (owner ruling at C6a2).
 func dormantChange(b beads.Bead, a map[string]string, t time.Time, stable bool) string {
@@ -379,7 +379,13 @@ func dormantChange(b beads.Bead, a map[string]string, t time.Time, stable bool) 
 	if session.KillPendingMetadata(m["state"], m["state_reason"], m["sleep_reason"], m["slept_at"], t) {
 		owned, dormant = append(owned, "state", "state_reason", "sleep_reason", "slept_at"), true
 	}
-	suspended := m["state"] == string(session.StateSuspended)
+	// A soft suspend, under no hold, is no operator's (CONTRACT v5.9u):
+	// legacy's state heal and its work's wake take it. A city stop's
+	// sleep_reason beside it is no hold, as softSuspended reads it.
+	suspended := m["state"] == string(session.StateSuspended) && !softSuspended(session.Info{
+		MetadataState: m["state"], HeldUntil: m["held_until"], QuarantinedUntil: m["quarantined_until"], SleepIntent: m["sleep_intent"],
+		WaitHold: m["wait_hold"], SuspendedAt: m["suspended_at"], SleepReason: m["sleep_reason"],
+	}, t)
 	if suspended {
 		owned, dormant = append(owned, "suspended_at"), true
 	}
@@ -779,7 +785,7 @@ func TestDormantChangeFollowsRule2(t *testing.T) {
 		{"held", map[string]string{"held_until": soon, "sleep_reason": "user-hold"}, false},
 		{"quarantined", map[string]string{"quarantined_until": soon, "sleep_reason": "quarantine"}, false},
 		{"user-hold", map[string]string{"sleep_intent": "user-hold"}, true},
-		{"suspended", map[string]string{"state": "suspended"}, true},
+		{"suspended under a hold timer", map[string]string{"state": "suspended", "held_until": soon}, true},
 		{"killed", map[string]string{"state": "asleep", "state_reason": session.KillPendingReason, "sleep_reason": "killed", "slept_at": at.Format(time.RFC3339)}, true},
 	} {
 		after := maps.Clone(c.meta)
@@ -793,10 +799,26 @@ func TestDormantChangeFollowsRule2(t *testing.T) {
 			t.Errorf("%s: a wake is no violation", c.name)
 		}
 	}
+	// A soft suspend is no operator's (v5.9u): its stop request, its wake
+	// and its heal by the runtime are free.
+	soft := map[string]string{"state": "suspended", "suspended_at": at.Add(-time.Hour).Format(time.RFC3339)}
+	cityStop := maps.Clone(soft)
+	cityStop["sleep_reason"] = "city-stop"
+	for _, m := range []map[string]string{soft, cityStop} {
+		for _, st := range []string{"active", "awake", "asleep"} {
+			after := maps.Clone(m)
+			after["state"], after[session.DrainIntentReasonKey] = st, "orphaned"
+			if got := dormantChange(beads.Bead{Metadata: m}, after, at, false); got != "" {
+				t.Errorf("soft suspend %v to %s: dormantChange = %q, want none", m, st, got)
+			}
+		}
+	}
 }
 
 // I15's close relaxation ends a bare suspend and nothing an operator holds
-// (§12.2 #27): a held suspended row is never closed.
+// (§12.2 #27): a held suspended row is never closed. A bare suspend, and one
+// beside an unreadable timer, which holds no PreWake, are soft (v5.9u): no
+// operator owns them, so I15 has nothing to relax.
 func TestCloseEndsSuspend(t *testing.T) {
 	now := gatherNow
 	later, bad := now.Add(time.Hour).Format(time.RFC3339), "soon"
@@ -808,7 +830,7 @@ func TestCloseEndsSuspend(t *testing.T) {
 		{"a bare suspend", nil, true},
 		{"a user hold", []string{"sleep_intent", "user-hold"}, false},
 		{"a hold timer", []string{"held_until", later}, false},
-		{"an unreadable hold timer", []string{"held_until", bad}, false},
+		{"an unreadable hold timer", []string{"held_until", bad}, true},
 		{"a quarantine", []string{"quarantined_until", later}, false},
 		{"a wait hold", []string{"wait_hold", "true"}, false},
 		{"an expired hold timer", []string{"held_until", now.Add(-time.Hour).Format(time.RFC3339)}, true},
@@ -822,7 +844,7 @@ func TestCloseEndsSuspend(t *testing.T) {
 			maps.Copy(after, session.ClosePatch(now, "orphaned"))
 			b := beads.Bead{ID: "gc-1", Status: "open", Metadata: m}
 			k := dormantChange(b, after, now, false)
-			if got := k != "" && closeEndsSuspend(b, k, now); got != tc.want {
+			if got := k == "" || closeEndsSuspend(b, k, now); got != tc.want {
 				t.Fatalf("change %q exempted = %t, want %t", k, got, tc.want)
 			}
 		})

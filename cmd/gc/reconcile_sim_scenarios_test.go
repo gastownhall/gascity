@@ -1258,3 +1258,69 @@ func TestSimLostCommitSparesASecondControllersRuntime(t *testing.T) {
 	}
 	t.Fatal("no seed reached the second controller's PreWake after the launch")
 }
+
+// Scenario v5.9u (the mc-yxjzl reversal; I15, I10): a soft suspend, the
+// stop and rig-restart sweeps', is no hold, and a managed suspend is one.
+// Over ten patrols a soft-suspended seat with work keeps its live runtime
+// running, as legacy's state heal reads it awake, and one the sweep stopped
+// (`gc rig restart`) is restarted. A managed suspend stops its seat's
+// runtime and keeps its hold through the dormant finalize, and with no work
+// through A21 as well. No start is ever refused `held`: A18 holds what the
+// PreWake would refuse, so its admit-and-refuse loop cannot recur.
+func TestSimSoftSuspendIsNoHold(t *testing.T) {
+	soft := []string{"instance_token", "tok-1", "suspended_at", rowAt(-time.Minute)}
+	managed := slices.Concat(soft, []string{"sleep_intent", "user-hold", "held_until", rowAt(1000 * time.Hour)})
+	for _, c := range []struct {
+		name       string
+		meta       []string
+		live, work bool
+		up, same   bool // the seat runs at the end; on its first runtime
+	}{
+		{"soft, live, with work: kept running", soft, true, true, true, true},
+		{"soft, stopped by the rig-restart sweep, with work: restarted", soft, false, true, true, false},
+		{"managed, live, with work: stopped and held", managed, true, true, false, false},
+		{"managed, stopped, with work: held", managed, false, true, false, false},
+		{"managed, live, no work: stopped and held", managed, true, false, false, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			rows := []beads.Bead{poolRow("gc-1", "worker", 1, "suspended", c.meta...)}
+			if c.work {
+				rows = append(rows, gc1Work())
+			}
+			var live []string
+			if c.live {
+				live = []string{"gc-1"}
+			}
+			s := scripted(t, live, rows...)
+			first := s.object("s-gc-1")
+			for range 10 {
+				s.settle()
+				s.advance(simPatrol)
+			}
+			for _, l := range s.schedule {
+				if strings.Contains(l, "effect start gc-1:") && strings.Contains(l, causeHeld) {
+					t.Fatalf("a start was admitted and refused held: %s", l)
+				}
+			}
+			b, _ := s.legs[0].backing.Get("gc-1")
+			m, obj := b.Metadata, s.object("s-gc-1")
+			if up := obj != 0 && (m["state"] == "awake" || m["state"] == "active"); up != c.up || c.same && obj != first {
+				t.Fatalf("runtime object %d (first %d), state %q; want up %t on its first runtime %t", obj, first, m["state"], c.up, c.same)
+			}
+			if !c.up && (b.Status != "open" || m["sleep_intent"] != "user-hold" || m["held_until"] != managed[7] || m["suspended_at"] != soft[3]) {
+				t.Fatalf("row %s %v: want the managed suspend kept", b.Status, m)
+			}
+			s.noViolations(t)
+		})
+	}
+}
+
+// object is the tmux object of the live runtime under name, else 0.
+func (s *sim) object(name string) int64 {
+	s.sp.mu.Lock()
+	defer s.sp.mu.Unlock()
+	if rt := s.sp.rts[name]; rt != nil && !rt.corpse {
+		return rt.object
+	}
+	return 0
+}

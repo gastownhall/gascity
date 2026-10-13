@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/config"
@@ -246,11 +247,16 @@ func preWakeUndoOf(v txView, patch session.MetadataPatch, staleKey bool) preWake
 // which no heal clears. A17's respawn is not held by the agent heartbeat's
 // hold it respawns through (v5.9i), which the premise holds the fresh row to.
 func preWakeRefused(v txView) bool {
-	d := session.DispositionOfInfo(foldInfo(v.Row, v.It.folded()))
-	if v.It.Reason == decideHeartbeatRespawn {
-		return d.RefusesHeartbeatRespawn(v.Now)
+	return preWakeRefuses(session.DispositionOfInfo(foldInfo(v.Row, v.It.folded())), v.It.Reason, v.Now)
+}
+
+// preWakeRefuses is the PreWake's hold test over d for a start decided as
+// reason, which A18 also holds on (startIntent, CONTRACT v5.9u).
+func preWakeRefuses(d session.Disposition, reason string, now time.Time) bool {
+	if reason == decideHeartbeatRespawn {
+		return d.RefusesHeartbeatRespawn(now)
 	}
-	return d.RefusesPreWake(v.Now)
+	return d.RefusesPreWake(now)
 }
 
 // triggerEnvKeys are the template env keys a row's trigger stamps

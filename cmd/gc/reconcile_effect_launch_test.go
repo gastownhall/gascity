@@ -168,7 +168,7 @@ func TestPreWakeRefusesWhatHoldsOrMovedSinceThePass(t *testing.T) {
 		{"held at the pass", []string{"held_until", future}, nil, causeHeld},
 		{"user-hold at the pass", []string{"sleep_intent", "user-hold"}, nil, causeHeld},
 		{"quarantined at the pass", []string{"quarantined_until", future}, nil, causeHeld},
-		{"suspended at the pass", []string{"state", "suspended"}, nil, causeHeld},
+		{"managed suspend at the pass", []string{"state", "suspended", "sleep_intent", "user-hold", "held_until", future}, nil, causeHeld},
 		{"held since", nil, []string{"held_until", future}, causePremise},
 		{"quarantined since", nil, []string{"quarantined_until", future}, causePremise},
 		{"kill fence since", nil, []string{"state", "asleep", "state_reason", session.KillPendingReason, "sleep_reason", string(session.SleepReasonKilled), "slept_at", gatherNow.Format(time.RFC3339)}, causePremise},
@@ -1147,7 +1147,8 @@ func TestPlannerHandsItsGuardToTheStartAndFlushes(t *testing.T) {
 
 // Kills the heartbeat-hold exemption widened or lost (v5.9i): A17's respawn
 // launches through an agent heartbeat's hold; an A18 start over the same row,
-// and A17 over an operator's hold, are refused held.
+// and A17 over an operator's hold, are refused held. A soft suspend holds
+// neither (v5.9u).
 func TestPreWakeExemptsTheHeartbeatHoldForA17Only(t *testing.T) {
 	soon := gatherNow.Add(time.Hour).Format(time.RFC3339)
 	for _, c := range []struct {
@@ -1159,7 +1160,8 @@ func TestPreWakeExemptsTheHeartbeatHoldForA17Only(t *testing.T) {
 		{"A18 over a heartbeat hold", decideStart, []string{"held_until", soon}, false},
 		{"A17 over an operator's hold", decideHeartbeatRespawn, []string{"held_until", soon, "sleep_intent", "user-hold"}, false},
 		{"A17 over a live quarantine", decideHeartbeatRespawn, []string{"held_until", soon, "quarantined_until", soon}, false},
-		{"A17 over a soft suspend", decideHeartbeatRespawn, []string{"held_until", soon, "state", "suspended"}, false},
+		{"A17 over a soft suspend", decideHeartbeatRespawn, []string{"held_until", soon, "state", "suspended"}, true},
+		{"A18 over a soft suspend", decideStart, []string{"state", "suspended", "suspended_at", gatherNow.Add(-time.Hour).Format(time.RFC3339)}, true},
 	} {
 		k, _ := launchKit(t, "asleep", c.meta...)
 		k.it.Reason = c.reason

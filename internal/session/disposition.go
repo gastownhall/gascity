@@ -22,7 +22,8 @@ const (
 	// until Until; it outlives a drain and keeps the row's slot.
 	OperatorSuspended
 	// OperatorSuspendedSoft is state=suspended with no operator hold (the chat
-	// idle auto-suspend, the city stop sweep). Any wake brings it back.
+	// idle auto-suspend, the stop and rig-restart sweeps). Any wake brings it
+	// back, and the controller never holds it (CONTRACT v5.9u).
 	OperatorSuspendedSoft
 )
 
@@ -271,20 +272,20 @@ func (d Disposition) BlocksConsume(now time.Time) bool {
 }
 
 // RefusesPreWake reports a hold that refuses the controller's PreWake (C5a1,
-// S1): an operator suspend, soft or not, or a live timer. A wait does not:
-// wait-ready launches it (POOL-077/080). Nor does an unreadable timer, which
-// would never heal. It replaced C5a1's hold mask (a timer, a quarantine, a
-// user hold, a suspended state) in R7d with no change. CONTRACT v5.9i
-// adds A17's agent-heartbeat exemption on top; that is A17's, not this.
+// S1): an operator's suspend or a live timer. A soft suspend does not
+// (CONTRACT v5.9u): it is no hold, and legacy's state heal and assigned-work
+// wake bring it back. A wait does not: wait-ready launches it (POOL-077/080).
+// Nor does an unreadable timer, which would never heal. CONTRACT v5.9i adds
+// A17's agent-heartbeat exemption on top; that is A17's, not this.
 func (d Disposition) RefusesPreWake(now time.Time) bool {
-	return d.Operator != OperatorNone || d.Until.After(now) || d.Heartbeat.After(now) || d.Quarantine.After(now)
+	return d.Operator == OperatorSuspended || d.Until.After(now) || d.Heartbeat.After(now) || d.Quarantine.After(now)
 }
 
 // RefusesHeartbeatRespawn is RefusesPreWake for A17's respawn through an
-// agent heartbeat (v5.9i), which no live timer refuses: an operator suspend,
-// soft or not, or a live quarantine.
+// agent heartbeat (v5.9i), which no live timer refuses: an operator's
+// suspend, or a live quarantine.
 func (d Disposition) RefusesHeartbeatRespawn(now time.Time) bool {
-	return d.Operator != OperatorNone || d.Quarantine.After(now)
+	return d.Operator == OperatorSuspended || d.Quarantine.After(now)
 }
 
 // OperatorDormant reports a row its disposition holds dormant: an operator's
