@@ -706,6 +706,7 @@ func TestSimPendingPacedRetries(t *testing.T) {
 		{"a start refused held on a row the hold model holds not (X1)", intentStart, causeHeld, -time.Second, false, false, row("runtime_lease_epoch", "3", "sleep_reason", "idle"), row("runtime_lease_epoch", "4", "sleep_reason", "idle"), false},
 		{"a held start before the expiry", intentStart, causeHeld, time.Second, false, false, row("runtime_lease_epoch", "3", "sleep_intent", "user-hold"), row("runtime_lease_epoch", "4", "sleep_intent", "user-hold"), false},
 		{"an attached start at the expiry (paced: shifted seed 474)", intentStart, causeAttached, -time.Second, true, false, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4"), true},
+		{"an attached start before the expiry", intentStart, causeAttached, time.Second, true, false, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4"), false},
 		{"a start refused attached on an unattached pane (X2)", intentStart, causeAttached, -time.Second, false, false, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4"), false},
 		{"a held start that moved another key", intentStart, causeHeld, -time.Second, false, false, row("runtime_lease_epoch", "3", "sleep_intent", "user-hold"), row("runtime_lease_epoch", "4", "sleep_intent", "user-hold", "state", "asleep"), false},
 		{"a start refused for another cause", intentStart, causePrepare, -time.Second, false, false, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4"), false},

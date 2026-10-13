@@ -1377,6 +1377,10 @@ func (s *sim) quiesce() {
 		changed := !maps.EqualFunc(before, after, sameBead)
 		switch {
 		case s.clk.Now().Before(bound):
+		case (len(admitted) > 0 || changed) && s.attachedDriftRestamps(before, after):
+			// A14's throttled attached-deferral re-stamp on a row that stays
+			// attached and drifted (CONTRACT v5.10m): no round of progress,
+			// nor a failure.
 		case (len(admitted) > 0 || changed) && s.pacedRetries(backoff, at, before, after):
 			var keys []rowKey
 			for _, r := range s.round {
@@ -1526,6 +1530,57 @@ func (s *sim) pacedRetries(backoff map[string]backoffRecord, at time.Time, befor
 		}
 	}
 	return true
+}
+
+// attachedDriftRestamps reports a round whose only effects are A14's
+// attached-deferral re-stamps (decideDriftAttached), landed, each moving only
+// the stamp's two keys on a row that stays attached under the same drift,
+// at most once per sessionAttachedConfigDriftRefreshInterval: legacy's
+// throttled re-stamp, a periodic write by design (CONTRACT v5.10m).
+func (s *sim) attachedDriftRestamps(before, after map[string]beads.Bead) bool {
+	if len(s.round) == 0 || len(before) != len(after) {
+		return false
+	}
+	for _, r := range s.round {
+		if r.it.Kind != intentRowHeal || r.it.Reason != decideDriftAttached || r.res.Outcome != settledLanded {
+			return false
+		}
+	}
+	stamp := map[string]bool{sessionAttachedConfigDriftDeferredAtMetadata: true, sessionAttachedConfigDriftDeferredKeyMetadata: true}
+	for k, b := range after {
+		a, ok := before[k]
+		switch {
+		case !ok || a.Status != b.Status:
+			return false
+		case sameBead(a, b):
+			continue
+		}
+		for key := range keyUnion(a.Metadata, b.Metadata) {
+			if a.Metadata[key] != b.Metadata[key] && !stamp[key] {
+				return false
+			}
+		}
+		prev, err1 := time.Parse(time.RFC3339, a.Metadata[sessionAttachedConfigDriftDeferredAtMetadata])
+		next, err2 := time.Parse(time.RFC3339, b.Metadata[sessionAttachedConfigDriftDeferredAtMetadata])
+		key := b.Metadata[sessionAttachedConfigDriftDeferredKeyMetadata]
+		attached := s.sp.IsAttached(b.Metadata["session_name"])
+		if err1 != nil || err2 != nil || next.Sub(prev) < sessionAttachedConfigDriftRefreshInterval || key == "" || key != a.Metadata[sessionAttachedConfigDriftDeferredKeyMetadata] || !attached {
+			return false
+		}
+	}
+	return true
+}
+
+// keyUnion is the keys of a and b.
+func keyUnion(a, b map[string]string) map[string]bool {
+	out := make(map[string]bool, len(a)+len(b))
+	for k := range a {
+		out[k] = true
+	}
+	for k := range b {
+		out[k] = true
+	}
+	return out
 }
 
 // withoutLeaseKeys is meta without the runtime lease record's keys.
