@@ -68,23 +68,29 @@ func EncodeBundle(b Bundle) ([]byte, error) {
 	return data, nil
 }
 
-// DecodeBundle parses a bundle. The schema version and contract are checked
-// before the body, so a bundle from a newer controller is refused with
-// CodeBundleVersion or CodeContractUnsupported even when its shape changed.
+// DecodeBundle parses a bundle. The schema version is decoded alone and
+// checked first, then the contract, then the body, so a bundle from a newer
+// controller is refused with CodeBundleVersion or CodeContractUnsupported
+// even when its shape, including the contract's type, changed.
 // The result is validated; every error is a *Refusal.
 func DecodeBundle(data []byte) (Bundle, error) {
+	var version struct {
+		V *int `json:"v"`
+	}
+	if err := json.Unmarshal(data, &version); err != nil {
+		return Bundle{}, &Refusal{Code: CodeBundleInvalid, Detail: "bundle is not a JSON object with an integer v", Err: err}
+	}
+	if version.V == nil {
+		return Bundle{}, refuse(CodeBundleInvalid, "bundle has no v")
+	}
+	if *version.V != BundleVersion {
+		return Bundle{}, refuse(CodeBundleVersion, fmt.Sprintf("bundle schema v%d; this gc decodes v%d", *version.V, BundleVersion))
+	}
 	var header struct {
-		V        *int `json:"v"`
 		Contract *int `json:"contract"`
 	}
 	if err := json.Unmarshal(data, &header); err != nil {
-		return Bundle{}, &Refusal{Code: CodeBundleInvalid, Detail: "bundle is not a JSON object with integer v and contract", Err: err}
-	}
-	if header.V == nil {
-		return Bundle{}, refuse(CodeBundleInvalid, "bundle has no v")
-	}
-	if *header.V != BundleVersion {
-		return Bundle{}, refuse(CodeBundleVersion, fmt.Sprintf("bundle schema v%d; this gc decodes v%d", *header.V, BundleVersion))
+		return Bundle{}, &Refusal{Code: CodeBundleInvalid, Detail: "bundle contract is not an integer", Err: err}
 	}
 	if header.Contract == nil {
 		return Bundle{}, refuse(CodeBundleInvalid, "bundle has no contract")
