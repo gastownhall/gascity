@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
@@ -5044,36 +5045,50 @@ func TestCacheLocalBeadClosedRecordsSynchronously(t *testing.T) {
 }
 
 // TestSplitCityOneShotCloseRecordsItsFactThroughTheLiveRead is the regression
-// for graph steps that render Running forever: a split city's one-shot CLI
-// emitter stamps its bead.closed with eventActor(), not a cache actor. That
-// close must still reach the completion fact, now through the live read on
-// the dispatched (asynchronous) path.
+// for graph steps that render Running forever: on a split city the graph row
+// lives in the binding, and a one-shot CLI close stamps its bead.closed with
+// eventActor(), not a cache actor. Fed from the city journal, that close must
+// still reach exactly one completion fact, through the live read routed to the
+// binding cache on the dispatched (asynchronous) path.
 func TestSplitCityOneShotCloseRecordsItsFactThroughTheLiveRead(t *testing.T) {
 	clearGCEnv(t)
 	t.Setenv("GC_ALIAS", "worker-7")
 
-	mem := beads.NewMemStore()
-	mem.HonorExplicitIDs = true
-	step, _, _ := graphStepFixture(t, mem)
-	if err := mem.Close(step.ID); err != nil {
-		t.Fatal(err)
+	engine := openBindingEngineForTest(t)
+	if _, err := engine.CreateWithForeignID(beads.Bead{ID: "gcg-run", Title: "run", Type: "task", Metadata: map[string]string{
+		"gc.kind": "workflow", "gc.formula_contract": "graph.v2",
+	}}); err != nil {
+		t.Fatalf("seed run root: %v", err)
 	}
-	closed, err := mem.Get(step.ID)
-	if err != nil {
-		t.Fatal(err)
+	if _, err := engine.CreateWithForeignID(beads.Bead{ID: "gcg-step", Title: "step", Type: "task", Metadata: map[string]string{
+		"gc.root_bead_id": "gcg-run", "gc.step_id": "build", "gc.session_id": "gcs-session",
+	}}); err != nil {
+		t.Fatalf("seed step: %v", err)
 	}
-	payload, err := beads.EncodeBeadEventPayload(closed)
-	if err != nil {
-		t.Fatal(err)
-	}
-	rec := events.NewFake()
-	cs := &controllerState{cityBeadStore: mem, storageRoutes: splitRoutes(mem), eventProv: rec}
+	cs, rec := newCachedSplitControllerState(context.Background(), t, splitClassRoutes(engine), beads.NewMemStore())
 
-	cs.applyBeadEventToStores(events.Event{Type: events.BeadClosed, Actor: eventActor(), Subject: step.ID, Payload: payload})
+	cityPath := t.TempDir()
+	cli := splitClassRoutes(engine).withCLIEmission(cityPath)
+	if err := cli.stores[coordclass.ClassGraph].Close("gcg-step"); err != nil {
+		t.Fatalf("one-shot close: %v", err)
+	}
+	journal := beadEvents(readCityJournal(t, cityPath))
+	if len(journal) == 0 {
+		t.Fatal("the one-shot emitter appended no bead event")
+	}
+	for _, evt := range journal {
+		cs.applyBeadEventToStores(evt)
+	}
 	awaitCond(t, func() bool { return !cs.storeWorkInFlight() }, "the dispatched close's store work")
 
-	if got := fmt.Sprint(completedSessionsFor(rec, step.ID)); got != "[gcs-session]" {
-		t.Fatalf("completion facts carry sessions %s, want one fact for the one-shot close", got)
+	var facts []string
+	for _, evt := range rec.Events {
+		if evt.Type == events.ExecutionStepCompleted && evt.Subject == "gcg-step" {
+			facts = append(facts, evt.Actor+"/"+evt.SessionID)
+		}
+	}
+	if got := fmt.Sprint(facts); got != "[worker-7/gcs-session]" {
+		t.Fatalf("completion facts = %s, want one fact by the one-shot closer carrying the live row's session", got)
 	}
 }
 
