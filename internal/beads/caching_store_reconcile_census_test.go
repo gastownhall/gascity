@@ -151,6 +151,9 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		// localWrites counts local writes in flight for a yielding
 		// RefreshRowReport; only the writers and that refresh touch it.
 		"localWrites": true,
+		// lastScanAt is set by Prime and PrimeActive, never by the merge
+		// seam; it dates the backstop only until the first reconcile.
+		"lastScanAt": true,
 	}
 	assertFieldsClassified(t, reflect.TypeOf(CachingStore{}), comparedStore, excludedStore)
 
