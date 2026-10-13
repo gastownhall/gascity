@@ -28,6 +28,12 @@ func TestTurnInterruptModeForDefaultsToKeystroke(t *testing.T) {
 			t.Fatalf("declared mode = %q, want %q", got, mode)
 		}
 	}
+	// A mode this build does not know reads as the default, so every caller
+	// classifies it the same way instead of each picking its own fallback.
+	f.TurnInterruptModeValue = "telepathy"
+	if got := runtime.TurnInterruptModeFor(f, "s"); got != runtime.TurnInterruptKeystroke {
+		t.Fatalf("unknown declared mode = %q, want keystroke", got)
+	}
 }
 
 // Kills a composite that answers for itself instead of the session's routed

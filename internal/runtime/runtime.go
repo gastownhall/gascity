@@ -778,10 +778,12 @@ type InterruptBoundaryWaitProvider interface {
 type TurnInterruptMode string
 
 const (
-	// TurnInterruptKeystroke means the runtime drives the agent's terminal:
-	// [Provider.SendKeys] delivers keys and [Provider.Interrupt] sends Ctrl-C,
-	// so the caller picks the keys the agent provider understands. A runtime
-	// that does not implement [TurnInterruptCapabilityProvider] has this mode.
+	// TurnInterruptKeystroke means the caller treats the runtime as driving
+	// the agent's terminal: it picks the keys the agent provider understands,
+	// sends them through [Provider.SendKeys], and uses [Provider.Interrupt] as
+	// Ctrl-C. It is the mode assumed for a runtime that does not implement
+	// [TurnInterruptCapabilityProvider]; such a runtime may still drop keys
+	// (subprocess and ACP do), which this mode cannot express.
 	TurnInterruptKeystroke TurnInterruptMode = "keystroke"
 	// TurnInterruptProtocol means the runtime drives turns through a protocol:
 	// [Provider.Interrupt] cancels the in-flight turn for every agent provider,
@@ -802,14 +804,19 @@ type TurnInterruptCapabilityProvider interface {
 
 // TurnInterruptModeFor reports how p cancels the in-flight turn of session
 // name: the mode p reports, or [TurnInterruptKeystroke] when p does not
-// implement [TurnInterruptCapabilityProvider] or reports no mode.
+// implement [TurnInterruptCapabilityProvider] or reports no mode or a mode
+// this build does not know.
 func TurnInterruptModeFor(p Provider, name string) TurnInterruptMode {
-	if tp, ok := p.(TurnInterruptCapabilityProvider); ok {
-		if mode := tp.TurnInterruptMode(name); mode != "" {
-			return mode
-		}
+	tp, ok := p.(TurnInterruptCapabilityProvider)
+	if !ok {
+		return TurnInterruptKeystroke
 	}
-	return TurnInterruptKeystroke
+	switch mode := tp.TurnInterruptMode(name); mode {
+	case TurnInterruptProtocol, TurnInterruptUnsupported:
+		return mode
+	default:
+		return TurnInterruptKeystroke
+	}
 }
 
 // RelaunchProvider is an optional extension for runtimes that can re-launch the
