@@ -616,6 +616,66 @@ func TestRuntimeDrainAckV2RealReleaseBeforeRowCAS(t *testing.T) {
 	}
 }
 
+// TestRuntimeDrainAckReleasesARoutelessClaimInBothModes (mc-sca8r, J29 Z):
+// the agent's drain-ack, in a legacy city and in a v2 city, gives back an
+// unexecuted claim with no route into the seat's own lane (run_target = its
+// template) and a routed one as it is; only a claim routed to a lane nothing
+// serves stays assigned. Kills: drain-ack without the seat's route (the
+// routeless claim kept, the seat asleep holding it).
+func TestRuntimeDrainAckReleasesARoutelessClaimInBothModes(t *testing.T) {
+	for _, v2 := range []bool{false, true} {
+		t.Run(map[bool]string{false: "legacy", true: "v2"}[v2], func(t *testing.T) {
+			reconciler := ""
+			if v2 {
+				reconciler = "v2"
+			}
+			cityPath, store, id := drainAckCity(t, reconciler, v2)
+			if err := store.SetMetadata(id, "template", "worker"); err != nil {
+				t.Fatal(err)
+			}
+			claim := func(title string, meta map[string]string) beads.Bead {
+				return mustCreateDrainAckBead(t, store, beads.Bead{Title: title, Type: "task", Metadata: meta}, "in_progress", id)
+			}
+			plain := claim("plain, never executed", nil)
+			routed := claim("routed, never executed", map[string]string{beadmeta.RoutedToMetadataKey: "worker"})
+			ghost := claim("routed to no configured agent", map[string]string{beadmeta.RoutedToMetadataKey: "ghost"})
+			original := drainAckPokeController
+			t.Cleanup(func() { drainAckPokeController = original })
+			drainAckPokeController = func(string, reconcilekey.Key) error { return nil }
+
+			target := sessionRuntimeTarget{cityPath: cityPath, display: "worker", sessionName: "worker"}
+			var stdout, stderr bytes.Buffer
+			if code := runtimeDrainAck(newDrainOps(runtime.NewFake()), target, false, "tok-a", false, &stdout, &stderr); code != 0 {
+				t.Fatalf("drain-ack = %d, want 0; stderr=%s", code, stderr.String())
+			}
+			// A fresh handle: the file store opened above may not see the
+			// CLI's writes.
+			cfg, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fresh, err := openCityStoreAtWithConfig(cityPath, cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, c := range []struct {
+				bead                        beads.Bead
+				status, assignee, runTarget string
+			}{
+				{plain, "open", "", "worker"},
+				{routed, "open", "", ""},
+				{ghost, "in_progress", id, ""},
+			} {
+				got := mustGetBead(t, fresh, c.bead.ID)
+				if got.Status != c.status || got.Assignee != c.assignee || got.Metadata[beadmeta.RunTargetMetadataKey] != c.runTarget {
+					t.Errorf("%s: status=%q assignee=%q run_target=%q, want %q %q %q; stderr=%s", c.bead.Title,
+						got.Status, got.Assignee, got.Metadata[beadmeta.RunTargetMetadataKey], c.status, c.assignee, c.runTarget, stderr.String())
+				}
+			}
+		})
+	}
+}
+
 // TestRuntimeUndrainModeSwitch drives runtimeUndrain over temp cities: a
 // legacy city is doRuntimeUndrain's output and also clears the row ack (a
 // v2 run's leftover, PAR-FLOORACK round 3); a v2 city clears it too. Kills: mode mutants on undrain, and a v2 undrain
