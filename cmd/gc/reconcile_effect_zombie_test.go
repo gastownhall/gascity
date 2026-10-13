@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -163,6 +164,13 @@ func TestZombieRefusals(t *testing.T) {
 	}
 	if s := k.runKind(); s.Cause != causeLivenessUnknown || s.Facts.Classified != nil || crashFacts(s) != 0 {
 		t.Fatalf("object replaced: settlement %+v, want refused liveness-unknown, unrecorded", s)
+	}
+	// A probe that errs reads unknown: refused, so the backoff paces A12
+	// (mc-nxpo8), not settled under the read's empty token.
+	k, _ = zombieKit(t, true, "gc-1", "tok", "panic: boom")
+	k.mutate(func(r *simRuntime) { r.probeErr = true })
+	if s := k.runKind(); s.Cause != causeLivenessUnknown || s.Facts.Classified != nil || crashFacts(s) != 0 {
+		t.Fatalf("probe error: settlement %+v, want refused liveness-unknown, unrecorded", s)
 	}
 }
 
@@ -390,5 +398,37 @@ func TestZombieOverAGoneRuntimeIsNotProposedAgain(t *testing.T) {
 	alive := zombieStep(txView{It: intent{Key: c.k}, World: c.w, Row: c.w.Census.Rows[c.k].Info, RT: &txRuntime{Class: rtAlive, Same: true, Identity: fresh}, Now: gatherNow}, deadPeek{}, nil)
 	if alive.Facts.Classified == nil || !alive.Facts.Classified.classifies(fresh) {
 		t.Fatalf("alive step %+v, want the fresh runtime's token recorded", alive)
+	}
+}
+
+// TestZombieOnABoolOnlyLeafIsNotProposedAgain (mc-nxpo8): on a leaf that
+// reports a dead agent to the inventory but cannot read fresh (t3bridge's
+// shape: ObserveLivenessWithError without ObserveLivenessSince), A12's read
+// is unsupported and proves nothing, so the effect classifies the
+// decision's pair and the next decision over the same dead read proposes
+// nothing; before, it settled under the read's empty token and A12 ran
+// every pass. Kills: an unsupported read settled under its own token.
+func TestZombieOnABoolOnlyLeafIsNotProposedAgain(t *testing.T) {
+	c := newHealCase(t, livenessDead, desireSleep, "state", "asleep", "sleep_reason", "runtime-missing")
+	id := runtimeIdentity{Known: true, SessionID: c.k.ID, Epoch: "3", Token: "tok-3"}
+	c.w.Observed = map[rowKey]rowObservation{c.k: {Liveness: livenessDead, Identity: id}}
+	if it := c.decide(); it.Kind != intentZombie {
+		t.Fatalf("decideRow = (%q, %q), want A12 on the dead read", it.Kind, it.Reason)
+	}
+	leaf, fake := fakeProfile(runtime.ProfileT3Bridge)
+	name := c.w.Census.Rows[c.k].Info.SessionName
+	startRuntime(t, fake, name, map[string]string{"GC_SESSION_ID": c.k.ID, "GC_INSTANCE_TOKEN": "tok-3"})
+	rt, cause := readRuntime(context.Background(), leaf, nil, name, gatherNow, time.Now)
+	if cause != "" || rt.Class != rtUnsupported {
+		t.Fatalf("read (%+v, %q), want unsupported", rt, cause)
+	}
+	step := zombieStep(txView{It: intent{Key: c.k}, World: c.w, Row: c.w.Census.Rows[c.k].Info, RT: rt, Now: gatherNow}, deadPeek{}, nil)
+	got := step.Facts.Classified
+	if !step.Done || got == nil || !got.classifies(id) || len(step.Write) != 0 {
+		t.Fatalf("step %+v, want Done with the decision's pair classified and nothing written", step)
+	}
+	c.w.Classified = map[rowKey]classifiedRuntime{c.k: *got}
+	if it := c.decide(); it.Kind == intentZombie {
+		t.Fatalf("decideRow = (%q, %q) again on the same dead read, want A12 settled", it.Kind, it.Reason)
 	}
 }

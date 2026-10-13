@@ -70,12 +70,18 @@ func zombieStep(v txView, peek deadPeek, peekErr error) txStep {
 	switch {
 	case dead && !v.RT.Same:
 		return txStep{Refuse: causeLivenessUnknown} // the object changed across the read
-	case v.RT.Class == rtAbsent:
-		// The runtime the decision read dead is gone, on every hop, and no
-		// runtime comes back under its token: the pair classified is the
-		// decision's, so A12 does not propose it again, taking and dropping
-		// the row's lease record each pass, while the census still lists it
-		// (mc-98agx).
+	case v.RT.Class == rtUnknown:
+		// A read that failed or disagreed proves nothing: the backoff paces
+		// the retry, where a settlement under the read's empty token would
+		// propose A12 again on the next pass (mc-nxpo8).
+		return txStep{Refuse: causeLivenessUnknown}
+	case v.RT.Class == rtAbsent, v.RT.Class == rtUnsupported:
+		// The runtime the decision read dead is gone, on every hop, or the
+		// leaf cannot read fresh (a bool-only one: herdr, k8s, exec,
+		// t3bridge), so nothing contradicts the decision: the pair
+		// classified is the decision's, so A12 does not propose it again,
+		// taking and dropping the row's lease record each pass, while the
+		// census still lists it dead (mc-98agx, mc-nxpo8).
 		done.Classified.Token = deadToken(v.World.Observed[v.It.Key].Identity)
 		return txStep{Done: true, Facts: done}
 	case !dead, !peek.read && peekErr == nil:
