@@ -508,8 +508,20 @@ func (l *RuntimeLease) Watch(ctx context.Context, every time.Duration) (context.
 // drops the flock. A failed clear is logged and leaves the record to expire.
 // A nil lease releases nothing.
 func (l *RuntimeLease) Release() {
+	if err := l.release(); err != nil {
+		log.Printf("runtime lease: session %q: clearing the record at release: %v", l.id, err)
+	}
+}
+
+// ReleaseChecked is Release returning the failed clear instead of logging
+// it, for a holder whose next write must follow the release (the kill
+// fence's lift, CONTRACT v5.10p). Only the call that releases reports; a
+// later Release or ReleaseChecked returns nil.
+func (l *RuntimeLease) ReleaseChecked() error { return l.release() }
+
+func (l *RuntimeLease) release() (err error) {
 	if l == nil {
-		return
+		return nil
 	}
 	l.once.Do(func() {
 		l.mu.Lock()
@@ -520,15 +532,16 @@ func (l *RuntimeLease) Release() {
 		l.watchers = nil
 		l.mu.Unlock()
 		if l.id != "" {
-			_, err := l.updateMetadataFenced(runtimeLeaseAttempts, func(Info, PersistedResponse) MetadataPatch {
+			_, err = l.updateMetadataFenced(runtimeLeaseAttempts, func(Info, PersistedResponse) MetadataPatch {
 				return RuntimeLeaseClearPatch()
 			})
-			if err != nil && !errors.Is(err, ErrRuntimeLeaseLost) {
-				log.Printf("runtime lease: session %q: clearing the record at release: %v", l.id, err)
+			if errors.Is(err, ErrRuntimeLeaseLost) {
+				err = nil
 			}
 		}
 		unlockRuntimeNameFile(l.lock)
 	})
+	return err
 }
 
 // holdsRow reports whether the row bead is open and records this lease.

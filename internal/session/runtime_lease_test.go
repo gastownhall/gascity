@@ -1069,3 +1069,61 @@ func mustBead(t *testing.T, s beads.Store, id string) beads.Bead {
 	}
 	return b
 }
+
+// clearRefusingStore refuses a runtime lease record's clear, and passes the
+// rest. It hides conditional writes, so the clear is a plain batch write.
+type clearRefusingStore struct{ beads.Store }
+
+func (s clearRefusingStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if h, ok := kvs[RuntimeLeaseHolderKey]; ok && h == "" {
+		return errors.New("store unavailable")
+	}
+	return s.Store.SetMetadataBatch(id, kvs)
+}
+
+// TestRuntimeLeaseReleaseChecked (CONTRACT v5.10p). Kills a release that
+// hides a failed clear from the kill (which then lifts its fence over the
+// record), or that reports a record another holder took as a failure (the
+// fence would stay for nothing), and a Release that stops logging what it
+// cannot report: ReleaseChecked returns the failed clear once, nil for a
+// lost record; Release logs the failed clear.
+func TestRuntimeLeaseReleaseChecked(t *testing.T) {
+	onHost(t, "host-a")
+	city := t.TempDir()
+	f := leaseFixtureOver(t, beads.NewMemStore())
+	refusing := NewStore(beads.SessionStore{Store: clearRefusingStore{f.store}})
+	l, err := TryRuntimeLease(refusing, f.req(city, leaseT0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := l.ReleaseChecked(); err == nil || f.meta(t)[RuntimeLeaseHolderKey] == "" {
+		t.Fatalf("ReleaseChecked = %v over a refused clear, record %v; want the error and the record left", err, f.meta(t))
+	}
+	if err := l.ReleaseChecked(); err != nil {
+		t.Fatalf("a second ReleaseChecked = %v, want nil: only the release reports", err)
+	}
+
+	f.write(t, RuntimeLeaseClearPatch())
+	lost, err := TryRuntimeLease(f.front, f.req(city, leaseT0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.write(t, MetadataPatch{RuntimeLeaseHolderKey: "host-b/1/other", RuntimeLeaseEpochKey: "9"}) // another host took it
+	if err := lost.ReleaseChecked(); err != nil || f.meta(t)[RuntimeLeaseHolderKey] != "host-b/1/other" {
+		t.Fatalf("ReleaseChecked of a lost record = %v, record %v; want nil and the taker's record kept", err, f.meta(t))
+	}
+
+	f.write(t, RuntimeLeaseClearPatch())
+	logged, err := TryRuntimeLease(refusing, f.req(city, leaseT0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(prev) })
+	logged.Release()
+	if !strings.Contains(buf.String(), "clearing the record at release") {
+		t.Fatalf("Release over a refused clear logged %q, want the failure", buf.String())
+	}
+}
