@@ -101,11 +101,12 @@ func zombieStep(v txView, peek deadPeek, peekErr error) txStep {
 	}
 	res, _ := v.World.Templates.lookup(v.Row)
 	// A row whose template the pass no longer resolves (an orphaned named
-	// row) names its own, as legacy's preserved-template read does.
+	// row) names its own, as legacy's preserved-template read does: its
+	// identity as the subject, its template in the payload.
 	template, subject := res.TP.TemplateName, res.TP.DisplayName()
 	if template == "" {
 		template = strings.TrimSpace(v.Row.Template)
-		subject = cmp.Or(subject, template)
+		subject = cmp.Or(subject, namedSessionIdentityInfo(v.Row), template)
 	}
 	crash := events.Event{
 		Type: events.SessionCrashed, Actor: "gc", Subject: subject,

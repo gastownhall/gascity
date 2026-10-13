@@ -1785,6 +1785,18 @@ func parityFixtures() []parityFixture {
 			Explain:  map[string]string{"row:gc-c:*policy": "sleep-policy-keys", "row:gc-c:*meta": "§12.2#62 a7-undesired-row"},
 		},
 		{
+			Name: "an orphaned named row whose identity is apart from its template drains, its crash named by the identity", Behaviors: []string{"SESS-085"},
+			City: func() *config.City {
+				cfg := workerCity(3)
+				cfg.Agents = append(cfg.Agents, config.Agent{Name: "chat", StartCommand: "true"})
+				return cfg
+			},
+			Rows:     []parityRow{chatRow("gc-c", "1", "session_name", "chat", "state", "awake", "instance_token", "tok-gc-c", "last_woke_at", at(-time.Hour), "configured_named_mode", "always", "configured_named_identity", "other-chat")},
+			Runtimes: []simRuntime{{id: "gc-c", epoch: "1", token: "tok-gc-c", zombie: true}},
+			Panes:    map[string]string{"gc-c": "panic: boom"},
+			Explain:  map[string]string{"row:gc-c:*policy": "sleep-policy-keys", "row:gc-c:*meta": "§12.2#62 a7-undesired-row"},
+		},
+		{
 			Name: "a stale terminal mark does not hold a named row's crashed zombie", Behaviors: []string{"SESS-089"}, City: chat(false),
 			Rows: []parityRow{chatRow("gc-c", "1", "session_name", "chat", "state", "awake", "instance_token", "tok-gc-c", "last_woke_at", at(-time.Hour),
 				"provider_terminal_error", "quota_exceeded", "provider_terminal_error_at", at(-7*24*time.Hour), "session_health", "unhealthy", "session_health_reason", "quota_exceeded", "session_drainable", "true")},

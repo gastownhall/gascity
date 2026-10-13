@@ -342,8 +342,9 @@ func TestA12AdoptsTheRecyclesClassification(t *testing.T) {
 }
 
 // Kills the crash-name fallback naming the identity, or nothing, for a row
-// whose template the pass no longer resolves (mc-q64l4): the crash names
-// the row's own template, as legacy's preserved-template read does.
+// whose template the pass no longer resolves (mc-q64l4): the crash's
+// subject is the row's identity and its payload the row's template, as
+// legacy's preserved-template read gives them.
 func TestZombieCrashNamesAnUnresolvedRowsTemplate(t *testing.T) {
 	c := newHealCase(t, livenessDead, desireDrain, "state", "active", "template", "chat", "configured_named_session", "true", "configured_named_identity", "other-chat")
 	id := runtimeIdentity{Known: true, SessionID: c.k.ID, Epoch: "3", Token: "tok-3"}
@@ -357,7 +358,7 @@ func TestZombieCrashNamesAnUnresolvedRowsTemplate(t *testing.T) {
 	if err := json.Unmarshal(e.Payload, &payload); err != nil {
 		t.Fatal(err)
 	}
-	if e.Subject != "chat" || payload["template"] != "chat" {
-		t.Fatalf("crash subject %q template %v, want the row's template chat", e.Subject, payload["template"])
+	if e.Subject != "other-chat" || payload["template"] != "chat" {
+		t.Fatalf("crash subject %q template %v, want the identity other-chat and the template chat", e.Subject, payload["template"])
 	}
 }

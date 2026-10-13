@@ -94,14 +94,15 @@ func authorizedByRank(r *rowFacts, reason string) bool {
 // no-wake-reason. A heartbeat hold (held_until with no intent, SESS-617)
 // has none. Legacy's live-claim veto is not ported (PAR-LIVECLAIM).
 // drainableLiveness reports a runtime A20 may begin a drain over: alive, or
-// for a named Drain row a dead runtime, which A21 never closes (mc-q64l4)
+// for a named Drain row a dead runtime, which A21 never closes
+// (deadRuntimeCloses excludes named rows; mc-q64l4)
 // and A12, ahead of A20, has classified by then. A held pool orphan's dead
 // runtime is no drain's: A21's orphan guard keeps its slot (§12.2 #27). Its orphan
 // drain then runs as legacy's, whose stop A4 runs on any liveness but gone
 // (D2, A4); a closable one is A21's.
 func (r *rowFacts) drainableLiveness() bool {
 	e := r.entry
-	return e.Liveness == livenessAlive || e.Liveness == livenessDead && e.Desired == desireDrain && isNamedSessionInfo(r.row.Info) && !r.deadRuntimeCloses()
+	return e.Liveness == livenessAlive || e.Liveness == livenessDead && e.Desired == desireDrain && isNamedSessionInfo(r.row.Info)
 }
 
 func drainReasonOf(r *rowFacts) string {
