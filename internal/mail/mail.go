@@ -67,8 +67,9 @@ type Message struct {
 // subject, body — plus the handoff-specific routing details that ordinary
 // [Provider.Send] does not surface: an explicit thread ID (so a handoff thread
 // is stable and addressable), extra labels (the auto-handoff / archive-after-
-// inject markers), and an optional dedup key that suppresses the send while a
-// live message with the same key sits in the recipient's mailbox. The bead
+// inject markers), and an optional dedup key that suppresses the send only while an
+// unread archive-after-inject auto-handoff with the same key is pending for the
+// recipient; a handoff that was read but left open does not suppress. The bead
 // translation of these fields is confined to the backend implementation;
 // callers never construct a message bead themselves.
 type HandoffIntent struct {

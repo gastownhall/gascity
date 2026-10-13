@@ -126,14 +126,14 @@ func TestSendHandoffResolvesSenderRoute(t *testing.T) {
 	}
 }
 
-func autoHandoffIntent(to, key string) mail.HandoffIntent {
+func autoHandoffIntent() mail.HandoffIntent {
 	return mail.HandoffIntent{
-		From:        to,
-		To:          to,
+		From:        "mayor",
+		To:          "mayor",
 		Subject:     "HANDOFF: context full",
 		Body:        "drain now",
 		ThreadID:    "thread-deadbeef",
-		DedupKey:    key,
+		DedupKey:    "precompact:s1",
 		ExtraLabels: []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel},
 	}
 }
@@ -141,11 +141,11 @@ func autoHandoffIntent(to, key string) mail.HandoffIntent {
 func TestSendHandoffSuppressesWhileUnreadHandoffPending(t *testing.T) {
 	p := New(beads.NewMemStore())
 
-	first, suppressed, err := p.SendHandoff(autoHandoffIntent("mayor", "precompact:s1"))
+	first, suppressed, err := p.SendHandoff(autoHandoffIntent())
 	if err != nil || suppressed {
 		t.Fatalf("first SendHandoff = suppressed %v, err %v; want created", suppressed, err)
 	}
-	second, suppressed, err := p.SendHandoff(autoHandoffIntent("mayor", "precompact:s1"))
+	second, suppressed, err := p.SendHandoff(autoHandoffIntent())
 	if err != nil {
 		t.Fatalf("second SendHandoff: %v", err)
 	}
@@ -161,7 +161,7 @@ func TestSendHandoffResendsAfterPendingHandoffRead(t *testing.T) {
 	store := beads.NewMemStore()
 	p := New(store)
 
-	first, _, err := p.SendHandoff(autoHandoffIntent("mayor", "precompact:s1"))
+	first, _, err := p.SendHandoff(autoHandoffIntent())
 	if err != nil {
 		t.Fatalf("first SendHandoff: %v", err)
 	}
@@ -173,7 +173,7 @@ func TestSendHandoffResendsAfterPendingHandoffRead(t *testing.T) {
 		t.Fatalf("read handoff = status %q, err %v; want it still open", b.Status, err)
 	}
 
-	second, suppressed, err := p.SendHandoff(autoHandoffIntent("mayor", "precompact:s1"))
+	second, suppressed, err := p.SendHandoff(autoHandoffIntent())
 	if err != nil {
 		t.Fatalf("second SendHandoff: %v", err)
 	}

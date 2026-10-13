@@ -263,7 +263,11 @@ func (p *Provider) findLiveDuplicate(to, key string, pendingHandoffOnly bool) (m
 // mail.Message at the boundary while confining the type=message bead, the
 // stable thread label, and the handoff-specific extra labels to this
 // implementation. Sender-route metadata is resolved exactly as [Provider.Send]
-// does, so handoff mail replies route correctly.
+// does, so handoff mail replies route correctly. When intent.DedupKey is
+// non-empty the send is suppressed, returning the existing message with
+// suppressed=true, only while an unread archive-after-inject auto-handoff for
+// the same recipient and key is pending; a handoff that was read but left open
+// does not suppress.
 func (p *Provider) SendHandoff(intent mail.HandoffIntent) (mail.Message, bool, error) {
 	if intent.To == "" {
 		return mail.Message{}, false, fmt.Errorf("beadmail handoff: recipient is required")
