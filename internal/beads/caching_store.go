@@ -125,6 +125,10 @@ type CachingStore struct {
 	// close of a bead the cache never held goes unannounced, even when a read
 	// caches the closed row while the write is in flight.
 	closeIntents map[string]*closeIntent
+	// localWrites tracks the local writes between their start and their
+	// return, so a yielding RefreshRowReport does not announce a write's row
+	// before the write absorbs it (localWritesInFlight).
+	localWrites localWritesInFlight
 
 	reconciling atomic.Bool
 	// reconcileRequested is set by RequestReconcile and cleared when a

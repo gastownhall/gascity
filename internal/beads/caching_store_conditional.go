@@ -64,7 +64,8 @@ func (h *cachingAtomicConditionalCloser) CloseWithMetadataIfMatch(id string, exp
 	if !ok {
 		return Bead{}, ErrConditionalWriteUnsupported
 	}
-	before := h.cache.currentMutationSeq()
+	before, endWrite := h.cache.beginLocalWrite(id)
+	defer endWrite()
 	generation := h.cache.beginCloseIntent(id)
 	closed, err := closer.CloseWithMetadataIfMatch(id, expectedRevision, metadata)
 	if err != nil {
@@ -197,6 +198,8 @@ func (c *CachingStore) UpdateIfMatch(id string, expectedRevision int64, opts Upd
 	if !ok {
 		return ErrConditionalWriteUnsupported
 	}
+	_, endWrite := c.beginLocalWrite(id)
+	defer endWrite()
 	var generation uint64
 	if updateCloses(opts) {
 		generation = c.beginCloseIntent(id)
@@ -248,6 +251,8 @@ func (c *CachingStore) CloseIfMatch(id string, expectedRevision int64) error {
 	if !ok {
 		return ErrConditionalWriteUnsupported
 	}
+	_, endWrite := c.beginLocalWrite(id)
+	defer endWrite()
 	generation := c.beginCloseIntent(id)
 	if err := writer.CloseIfMatch(id, expectedRevision); err != nil {
 		c.endCloseIntent(id, generation)
@@ -281,6 +286,8 @@ func (c *CachingStore) DeleteIfMatch(id string, expectedRevision int64) error {
 	if !ok {
 		return ErrConditionalWriteUnsupported
 	}
+	_, endWrite := c.beginLocalWrite(id)
+	defer endWrite()
 	deleted, haveDeleted := c.snapshotBeadBeforeDelete(id)
 	if err := writer.DeleteIfMatch(id, expectedRevision); err != nil {
 		c.applyConditionalWriteFailure(id, err)
@@ -318,6 +325,8 @@ func (c *CachingStore) CompareAndSetMetadataKey(id, key, expected, next string) 
 	if !ok {
 		return false, ErrConditionalWriteUnsupported
 	}
+	_, endWrite := c.beginLocalWrite(id)
+	defer endWrite()
 	swapped, err := writer.CompareAndSetMetadataKey(id, key, expected, next)
 	if err != nil {
 		c.applyConditionalWriteFailure(id, err)

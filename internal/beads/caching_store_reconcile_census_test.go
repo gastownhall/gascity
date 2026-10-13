@@ -148,6 +148,9 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		// reconcileRequested and reconcileKick schedule the reconcile loop
 		// (RequestReconcile); the merge neither reads nor writes them.
 		"reconcileRequested": true, "reconcileKick": true,
+		// localWrites counts local writes in flight for a yielding
+		// RefreshRowReport; only the writers and that refresh touch it.
+		"localWrites": true,
 	}
 	assertFieldsClassified(t, reflect.TypeOf(CachingStore{}), comparedStore, excludedStore)
 
