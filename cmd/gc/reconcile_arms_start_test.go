@@ -203,7 +203,8 @@ func TestDeadRuntimeAccrualMatchesLegacy(t *testing.T) {
 // Kills a dead seat's quarantining accrual that shortens a live quarantine
 // (the #7706 review): A6's crash or churn accrual at the limit writes the
 // later of its deadline and the row's unexpired quarantined_until, so it
-// extends a shorter one and keeps an operator's longer one, as legacy's.
+// extends a shorter one and keeps an operator's longer one, as legacy's;
+// and so does its rate-limit quarantine.
 func TestDeadRuntimeAccrualNeverShortensAQuarantine(t *testing.T) {
 	at := func(d time.Duration) string { return gatherNow.Add(d).Format(time.RFC3339) }
 	accrued := at(defaultQuarantineDuration)
@@ -224,6 +225,18 @@ func TestDeadRuntimeAccrualNeverShortensAQuarantine(t *testing.T) {
 			if got != want {
 				t.Errorf("%s over quarantined_until %s: it is %s (patch %v), want %s", death.name, existing, got, it.folded(), want)
 			}
+		}
+	}
+	// So does v2's rate-limit quarantine (the abandon and recycle paths').
+	for existing, want := range map[string]string{at(time.Minute): at(defaultRateLimitQuarantineDuration), at(24 * time.Hour): at(24 * time.Hour)} {
+		row := session.Info{ID: "gc-1", QuarantinedUntil: existing}
+		_, class := rateLimitQuarantine(row, gatherNow)
+		got, wrote := class.Into(row.ID, nil)["quarantined_until"]
+		if !wrote {
+			got = existing
+		}
+		if got != want {
+			t.Errorf("rate limit over quarantined_until %s: it is %s, want %s", existing, got, want)
 		}
 	}
 }

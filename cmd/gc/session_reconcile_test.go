@@ -3534,9 +3534,10 @@ func TestRecordChurn_Quarantine(t *testing.T) {
 }
 
 // TestRecordAccrualNeverShortensAQuarantine (the #7706 review): legacy's
-// quarantining wake-failure and churn accruals write the later of their
-// deadline and the row's unexpired quarantined_until, extending a shorter
-// one and keeping an operator's longer one.
+// quarantining wake-failure and churn accruals and its rate-limit
+// quarantine write the later of their deadline and the row's unexpired
+// quarantined_until, extending a shorter one and keeping an operator's
+// longer one.
 func TestRecordAccrualNeverShortensAQuarantine(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	at := func(d time.Duration) string { return now.Add(d).Format(time.RFC3339) }
@@ -3547,8 +3548,16 @@ func TestRecordAccrualNeverShortensAQuarantine(t *testing.T) {
 		"churn": func(info sessionpkg.Info, s *sessionpkg.Store, clk clock.Clock) sessionpkg.Info {
 			return recordChurn(info, s, clk, "worker")
 		},
+		"rate limit": func(info sessionpkg.Info, s *sessionpkg.Store, clk clock.Clock) sessionpkg.Info {
+			next, _ := recordRateLimitQuarantine(info, s, clk)
+			return next
+		},
 	} {
-		for existing, want := range map[string]string{at(time.Minute): at(defaultQuarantineDuration), at(24 * time.Hour): at(24 * time.Hour)} {
+		accrued := at(defaultQuarantineDuration)
+		if name == "rate limit" {
+			accrued = at(defaultRateLimitQuarantineDuration)
+		}
+		for existing, want := range map[string]string{at(time.Minute): accrued, at(24 * time.Hour): at(24 * time.Hour)} {
 			store := newTestStore()
 			session := makeBead("b1", map[string]string{"wake_attempts": "4", "churn_count": "2", "quarantined_until": existing, "sleep_reason": "quarantine"})
 			record(seedSessionInfo(session), sessionFrontDoor(store), &clock.Fake{Time: now})

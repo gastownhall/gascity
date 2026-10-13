@@ -337,10 +337,10 @@ func rollbackable(row session.Info) bool {
 }
 
 // rateLimitQuarantine is legacy's recordRateLimitQuarantine for row at now: its
-// lifecycle and the Quarantine cell's quarantined_until (class, minted by the
-// write).
+// lifecycle and the Quarantine cell's quarantined_until, never shortening one
+// in force (class, minted by the write).
 func rateLimitQuarantine(row session.Info, now time.Time) (session.MetadataPatch, session.DispositionPatch) {
-	return session.RateLimitQuarantinePatch(), session.CellInfo(row, session.ActorController, session.DispEvent{Kind: session.EvQuarantine, Until: now.Add(defaultRateLimitQuarantineDuration)}, now)
+	return session.RateLimitQuarantinePatch(), session.ExtendQuarantine(row, now.Add(defaultRateLimitQuarantineDuration), now)
 }
 
 // rollbackPatch is legacy's rollbackPendingCreateClears as one atomic close:
