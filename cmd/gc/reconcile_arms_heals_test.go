@@ -953,6 +953,60 @@ func TestNoArmActsOnACensusOnlyRow(t *testing.T) {
 	}
 }
 
+// Kills an acked drain request's dead runtime healed into a restart
+// (CONTRACT v5.10k, §12.2 row 68; mc-7zlhz): a row wanted awake whose
+// operator's or controller's drain the agent acked, its runtime gone, a
+// classified dead pane, or a squatter's under a name it does not own, is
+// A11's ack signal, which D3 then finalizes; neither heal takes it, so A18
+// does not restart it. A bare ack, off the floor or on it (row 66), is
+// healed and restarted as before.
+func TestAckedRequestIsNotHealedIntoARestart(t *testing.T) {
+	ack := []string{session.DrainAckIncarnationKey, "3", session.DrainAckAtKey, rowAt(-time.Minute)}
+	deaths := map[string]func(t *testing.T, desired desire, meta ...string) *healCase{
+		"gone": func(t *testing.T, desired desire, meta ...string) *healCase {
+			return newHealCase(t, livenessGone, desired, append([]string{"state", "active"}, meta...)...)
+		},
+		"a classified dead pane": func(t *testing.T, desired desire, meta ...string) *healCase {
+			c := newHealCase(t, livenessDead, desired, append([]string{"state", "active"}, meta...)...)
+			id := runtimeIdentity{Known: true, SessionID: c.k.ID, Epoch: "3", Token: "tok-3"}
+			c.w.Observed = map[rowKey]rowObservation{c.k: {Liveness: livenessDead, Identity: id}}
+			c.w.Classified = map[rowKey]classifiedRuntime{c.k: {Token: c.k.ID + "/tok-3"}}
+			return c
+		},
+		"a squatter": func(t *testing.T, desired desire, meta ...string) *healCase {
+			return squatterCase(t, foreignEnv, desired, meta...)
+		},
+	}
+	for _, rq := range []struct {
+		name   string
+		meta   []string
+		floor  bool
+		signal string // A11's reason; "" for the heal and restart
+	}{
+		{"an operator's drain, acked", append(slices.Clone(ack), session.OperatorDrainKey, "3"), false, decideDrainSignal + drainOperator},
+		{"a controller's drain, acked", append(slices.Clone(ack), intentBegunAt(drainConfigDrift, time.Minute)...), false, decideDrainSignal + drainConfigDrift},
+		{"a bare ack", ack, false, ""},
+		{"a bare ack on the floor", ack, true, ""},
+	} {
+		for death, newCase := range deaths {
+			t.Run(rq.name+", "+death, func(t *testing.T) {
+				c := newCase(t, desireWake, rq.meta...)
+				if rq.floor {
+					onFloor(c.a.Snapshot.Entries[c.k])
+				}
+				it := c.decide()
+				healed := it.Kind == intentStart || it.Reason == decideDeadRuntimeHeal || it.Reason == decideSquatterHeal
+				switch {
+				case rq.signal != "" && (it.Kind != intentSignalAck || it.Reason != rq.signal):
+					t.Fatalf("decideRow = (%q, %q), want A11's %q", it.Kind, it.Reason, rq.signal)
+				case rq.signal == "" && !healed:
+					t.Fatalf("decideRow = (%q, %q), want the heal or its restart", it.Kind, it.Reason)
+				}
+			})
+		}
+	}
+}
+
 // Kills a classified dead runtime never healed (the C5c2 review's
 // must-fix; CONTRACT A6, v5.9m): a committed row whose corpse or zombie A12
 // classified for this token heals asleep by the fresh heal, the zombie's

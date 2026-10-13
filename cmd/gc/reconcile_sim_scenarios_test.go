@@ -375,6 +375,66 @@ func deadRuntimeHealAcrossTime(t *testing.T, held bool) {
 	s.noViolations(t)
 }
 
+// Kills an acked drain request's dead runtime restarted (CONTRACT v5.10k,
+// §12.2 row 68; mc-7zlhz, J40 C): an operator's or a controller's drain
+// that the agent acked, whose runtime is gone, a dead pane, or a squatter's
+// under a name the row does not own before the stop, is finalized as a
+// drain's exit, the row closed with no work, and nothing is started under
+// its name. A squatter under its bead-scoped name, which D3 reads as the
+// row's own, is the squatter heal's still: the row parks asleep, never
+// stuck stop-pending on a stop that only refuses.
+func TestSimAckedRequestWithADeadRuntimeIsFinalized(t *testing.T) {
+	for _, operator := range []bool{true, false} {
+		for _, death := range []string{"gone", "dead pane", "squatter", "squatter, bead-scoped name"} {
+			t.Run(fmt.Sprintf("operator %t, %s", operator, death), func(t *testing.T) {
+				name := "s-slot-1" // a name the row does not own
+				if death == "squatter, bead-scoped name" {
+					name = "s-gc-1"
+				}
+				s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-1", "session_name", name))
+				now := s.clk.Now().Format(time.RFC3339)
+				req := []string{session.DrainIntentReasonKey, drainConfigDrift, session.DrainIntentAtKey, now, session.DrainIntentIncarnationKey, "1"}
+				if operator {
+					req = []string{session.OperatorDrainKey, "1"}
+				}
+				s.operator("gc-1", append(req, session.DrainAckIncarnationKey, "1", session.DrainAckAtKey, now)...)
+				s.sp.mu.Lock()
+				switch death {
+				case "gone":
+					s.sp.drop(name)
+				case "dead pane":
+					s.sp.rts[name].corpse = true
+					s.sp.touch(name)
+				default:
+					s.sp.drop(name)
+					s.sp.put(name, "gc-other", "1", "tok-squatter")
+				}
+				s.sp.mu.Unlock()
+				for range 4 {
+					s.settle()
+					s.advance(simPatrol)
+				}
+				b, err := s.legs[0].backing.Get("gc-1")
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, st := range s.sp.starts {
+					if st.Name == name {
+						t.Errorf("started %+v; want nothing started under the acked row's name", st)
+					}
+				}
+				switch {
+				case death == "squatter, bead-scoped name" && (b.Status != "open" || b.Metadata["state"] != "asleep"):
+					t.Errorf("row %s %v; want the squatter heal's park", b.Status, b.Metadata)
+				case death != "squatter, bead-scoped name" && b.Status != "closed":
+					t.Errorf("row %s %v; want the drain finalized, the row closed", b.Status, b.Metadata)
+				}
+				s.noViolations(t)
+			})
+		}
+	}
+}
+
 // Kills an I15 oracle that lets any write end a live quarantine: A6's
 // stability clear may clear quarantined_until only on a row its deciding pass
 // read committed, its own runtime alive and 30s past its wake. A clear inside

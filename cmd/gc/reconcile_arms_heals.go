@@ -177,16 +177,29 @@ func armCreatingHeal(r *rowFacts) (intent, bool) {
 // row no close arm takes would otherwise read active forever. A row still
 // holding a claim is armClaimClear's first, as legacy projects it
 // start-pending. The heal carries the death's accrual (deadRuntimePatch);
-// decideRow composes it with the row's restart (startHealed).
+// decideRow composes it with the row's restart (startHealed). A row with an
+// acked request is A11's (ackedRequest).
 func armDeadRuntimeHeal(r *rowFacts) (intent, bool) {
 	info := r.row.Info
-	if r.entry == nil || !committed(info) || r.entry.Desired == desireDrain || !r.freshGoneOrClassified() {
+	if r.entry == nil || !committed(info) || r.entry.Desired == desireDrain || r.ackedRequest() || !r.freshGoneOrClassified() {
 		return intent{}, false
 	}
 	patch, class, _, ev := deadRuntimePatch(r, true)
 	it, ok := r.healClass(intentRowHealFresh, decideDeadRuntimeHeal, patch, class)
 	it.Event = ev
 	return it, ok
+}
+
+// ackedRequest reports a row whose stop request is acked and carries a
+// request, a controller reason or the operator's drain (CONTRACT v5.10k,
+// §12.2 row 68): the dead-runtime heal does not take it, nor the squatter
+// heal under a name it does not own, so its runtime's death or squatter is
+// no restart. A11 signals it at once (D2's ack row) and A4's verb
+// finalizes it by D3's gone or Foreign path, a drain's exit, as legacy
+// finalizes an ack read off a dead pane. A bare ack is row 66's.
+func (r *rowFacts) ackedRequest() bool {
+	req, ok := activeStop(r.row)
+	return ok && req.Phase == stopAcked && (req.Reason != "" || req.Operator)
 }
 
 // armSquatterHeal is A6 item 4's occupied case (CONTRACT v5.10c, §12.2 #23,
@@ -196,10 +209,14 @@ func armDeadRuntimeHeal(r *rowFacts) (intent, bool) {
 // crash: no death accrues and the conversation is kept, so a squatter can
 // neither quarantine the seat nor wipe its conversation. It stops nothing.
 // The row stays down while the name is held (AL1's name-occupied, S1's
-// refusals) and A18 starts it once the name frees.
+// refusals) and A18 starts it once the name frees. A row with an acked
+// request is A11's (ackedRequest), under a name it does not own: D3
+// finalizes on the Foreign verdict there, where a bead-scoped name's
+// squatter reads as the row's own (C8.2(a)) and its stop would only refuse.
 func armSquatterHeal(r *rowFacts) (intent, bool) {
 	info := r.row.Info
-	if r.entry == nil || !committed(info) || r.entry.Desired == desireDrain || !r.freshSquatted() {
+	acked := r.ackedRequest() && !ownsName(info, strings.TrimSpace(info.SessionName))
+	if r.entry == nil || !committed(info) || r.entry.Desired == desireDrain || acked || !r.freshSquatted() {
 		return intent{}, false
 	}
 	patch := session.MetadataPatch{"state": string(session.StateAsleep)}
