@@ -558,3 +558,44 @@ func TestRequestWakeCoalesceConfirmsAgainstTheLiveRow(t *testing.T) {
 		}
 	})
 }
+
+// failingLiveStore is a store whose Live.Get fails with err; every other read
+// and write goes to the wrapped store.
+type failingLiveStore struct {
+	beads.Store
+	err error
+}
+
+func (s failingLiveStore) Handles() beads.StoreHandles {
+	h := beads.HandlesFor(s.Store)
+	h.Live = failingLiveReader{LiveReader: h.Live, err: s.err}
+	return h
+}
+
+type failingLiveReader struct {
+	beads.LiveReader
+	err error
+}
+
+func (r failingLiveReader) Get(string) (beads.Bead, error) { return beads.Bead{}, r.err }
+
+// TestRequestWakeCoalesceFailsWhenTheLiveRowIsUnreadable: a coalesce verdict
+// that cannot be confirmed on a live read is an error, not WakeRecorded.
+// Kills swallowing the live-read error, which reports a wake recorded on an
+// unconfirmed cached read and writes nothing.
+func TestRequestWakeCoalesceFailsWhenTheLiveRowIsUnreadable(t *testing.T) {
+	store, id := coalesceRow(t, policyRow(map[string]string{
+		"wake_request":      string(WakeCauseExplicit),
+		"wake_requested_at": "2026-10-08T11:00:00Z",
+	}))
+	rev0, _ := rowRevision(t, store, id)
+	sentinel := errors.New("backing unreachable")
+
+	got, err := NewStore(beads.SessionStore{Store: failingLiveStore{Store: store, err: sentinel}}).RequestWakeUnlessHeld(id, false, resumeNow)
+	if !errors.Is(err, sentinel) || got != 0 {
+		t.Fatalf("RequestWakeUnlessHeld = %v, %v; want 0, error wrapping %v", got, err, sentinel)
+	}
+	if rev1, meta := rowRevision(t, store, id); rev1 != rev0 || meta["wake_requested_at"] != "2026-10-08T11:00:00Z" {
+		t.Fatalf("row revision %d -> %d, wake_requested_at %q; want no write", rev0, rev1, meta["wake_requested_at"])
+	}
+}
