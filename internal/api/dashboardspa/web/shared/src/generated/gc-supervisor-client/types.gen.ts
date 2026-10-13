@@ -2238,6 +2238,7 @@ export type OutboundResult = {
 };
 
 export type OutputTurn = {
+    id?: string;
     role: string;
     text: string;
     timestamp?: string;

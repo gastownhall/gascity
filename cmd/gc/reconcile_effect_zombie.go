@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"strings"
 
@@ -34,17 +35,12 @@ func armZombie(r *rowFacts) (intent, bool) {
 	if e == nil || e.Liveness != livenessDead || e.Desired == desireWake || r.deadRuntimeCloses() {
 		return intent{}, false // A21 closes it, unclassified, as legacy does
 	}
-	if token, ok := r.w.Classified[r.k]; ok && token == deadToken(r.w.Observed[r.k].Identity) {
-		return intent{}, false
+	if c, ok := r.w.Classified[r.k]; ok && !c.Recycle && c.classifies(r.w.Observed[r.k].Identity) {
+		return intent{}, false // the start's recycle's classification A12 adopts
 	}
 	r.rests |= restRuntime
 	basis := rowBasis{Incarnation: r.row.Incarnation, InstanceToken: r.row.InstanceToken}
 	return intent{Kind: intentZombie, Reason: decideZombie, Basis: basis}, true
-}
-
-// deadToken is a dead runtime's identity key for the classified set.
-func deadToken(id runtimeIdentity) string {
-	return strings.TrimSpace(id.SessionID) + "/" + strings.TrimSpace(id.Token)
 }
 
 // zombieSections are the zombie effect's one section, with the crash
@@ -78,6 +74,17 @@ func zombieStep(v txView, peek deadPeek, peekErr error) txStep {
 		return txStep{Done: true, Facts: done} // nothing of this row's to classify
 	case peekErr != nil:
 		return txStep{Refuse: causePeekError, Err: peekErr}
+	case peek.known != nil:
+		// The start's recycle classified this dead runtime and recorded the
+		// crash it found, its kill refused: A12 adopts the classification
+		// without peeking again, records that crash once, and records the
+		// pair as its own, which A6's heals then take (CONTRACT A6, v5.9m).
+		step := txStep{Done: true, Facts: done}
+		if c := peek.known.Crash; c != nil {
+			step.Facts.Events = []events.Event{*c}
+			step.Done, step.Last, step.Pass = false, true, zombieCrash{agent: c.Subject, output: c.Message}
+		}
+		return step
 	case strings.TrimSpace(peek.content) == "":
 		return txStep{Done: true, Facts: done}
 	}
@@ -93,10 +100,18 @@ func zombieStep(v txView, peek deadPeek, peekErr error) txStep {
 		return step // legacy records a crash for a zombie alone, and never a rate-limit screen's
 	}
 	res, _ := v.World.Templates.lookup(v.Row)
+	// A row whose template the pass no longer resolves (an orphaned named
+	// row) names its own, as legacy's preserved-template read does: its
+	// identity as the subject, its template in the payload.
+	template, subject := res.TP.TemplateName, res.TP.DisplayName()
+	if template == "" {
+		template = strings.TrimSpace(v.Row.Template)
+		subject = cmp.Or(subject, namedSessionIdentityInfo(v.Row), template)
+	}
 	crash := events.Event{
-		Type: events.SessionCrashed, Actor: "gc", Subject: res.TP.DisplayName(),
+		Type: events.SessionCrashed, Actor: "gc", Subject: subject,
 		Message: truncateCrashPaneOutput(peek.content, crashEventPaneOutputMaxLines),
-		Payload: api.SessionLifecyclePayloadJSON(v.Row.ID, res.TP.TemplateName, "zombie process"),
+		Payload: api.SessionLifecyclePayloadJSON(v.Row.ID, template, "zombie process"),
 	}
 	step.Facts.Events = []events.Event{crash}
 	step.Done, step.Last, step.Pass = false, true, zombieCrash{agent: crash.Subject, output: crash.Message}

@@ -270,10 +270,12 @@ func TestCreatingHealSkipsPendingCreateAndWakeRows(t *testing.T) {
 // close), a census-only rig-leg row (another city's, on a shared rig store), a
 // dead runtime A12 has not classified, a creating row (the creating heal's)
 // and an asleep row are not healed by it. A Wake row is restarted in the same
-// pass instead: A18's start carries legacy's heal patch into its PreWake.
+// pass instead: A18's start carries legacy's heal patch into its PreWake. A
+// committed manual conversation (key and hash) heals as legacy heals it.
 func TestDeadRuntimeHealCoversEveryCommittedRowAL1DoesNotDrain(t *testing.T) {
 	named := []string{"configured_named_session", "true", "configured_named_identity", "chat", "configured_named_mode", "always"}
 	held := []string{"held_until", rowAt(time.Hour)}
+	manual := []string{"session_origin", "manual"}
 	for _, tc := range []struct {
 		name     string
 		liveness rowLiveness
@@ -284,6 +286,9 @@ func TestDeadRuntimeHealCoversEveryCommittedRowAL1DoesNotDrain(t *testing.T) {
 	}{
 		{"named active", livenessGone, desireNone, append([]string{"state", "active"}, named...), "", true},
 		{"named awake", livenessGone, desireSleep, append([]string{"state", "awake"}, named...), "", true},
+		{"manual active", livenessGone, desireNone, append([]string{"state", "active"}, manual...), "", true},
+		{"manual awake, legacy marker", livenessGone, desireSleep, []string{"state", "awake", "manual_session", "true"}, "", true},
+		{"manual wake: restarted, the heal in its start", livenessGone, desireWake, append([]string{"state", "active"}, manual...), "", false},
 		{"wake: restarted, the heal in its start", livenessGone, desireWake, []string{"state", "active"}, "", false},
 		{"pool sleep", livenessGone, desireSleep, []string{"state", "active"}, "", true},
 		{"pool keep", livenessGone, desireKeep, []string{"state", "awake"}, "", true},
@@ -333,7 +338,7 @@ func TestDeadRuntimeHealCoversEveryCommittedRowAL1DoesNotDrain(t *testing.T) {
 // Kills asleepHealPatch drifting from legacy's healStatePatchWithRollbackInfo
 // for every row it heals: a claimless creating row past the stale window and
 // a committed row, each sleep reason, with and without a continuation, named
-// mode always or not.
+// mode always or not, manual (by origin or the legacy marker) or not.
 func TestAsleepHealPatchMatchesLegacy(t *testing.T) {
 	reasons := []session.SleepReason{
 		"", "crashed", session.SleepReasonKilled, session.SleepReasonIdle, session.SleepReasonIdleTimeout, session.SleepReasonNoWakeReason,
@@ -344,14 +349,18 @@ func TestAsleepHealPatchMatchesLegacy(t *testing.T) {
 	}
 	for _, state := range []string{"creating", "active", "awake"} {
 		for _, reason := range reasons {
-			for _, cont := range []session.Info{{}, {SessionKey: "k"}, {StartedConfigHash: " h "}} {
+			for _, cont := range []session.Info{{}, {SessionKey: "k"}, {StartedConfigHash: " h "}, {SessionKey: "k", StartedConfigHash: "h"}} {
 				for _, mode := range []string{"", "on_demand", "always"} {
-					info := cont
-					info.ID, info.MetadataState, info.SleepReason = "gc-1", state, string(reason)
-					info.CreatedAt = gatherNow.Add(-time.Hour)
-					info.ConfiguredNamedSession, info.ConfiguredNamedMode = mode != "", mode
-					if got, want := asleepHealPatch(info, gatherNow), legacyHeal(info); !maps.Equal(got, want) {
-						t.Errorf("%s/%q/%+v/%q: patch %v, legacy %v", state, reason, cont, mode, got, want)
+					// A manual row by origin or by the legacy marker (#7470).
+					for _, manual := range []session.Info{{}, {SessionOrigin: "manual"}, {ManualSessionMetadata: "true"}} {
+						info := cont
+						info.ID, info.MetadataState, info.SleepReason = "gc-1", state, string(reason)
+						info.CreatedAt = gatherNow.Add(-time.Hour)
+						info.ConfiguredNamedSession, info.ConfiguredNamedMode = mode != "", mode
+						info.SessionOrigin, info.ManualSessionMetadata = manual.SessionOrigin, manual.ManualSessionMetadata
+						if got, want := asleepHealPatch(info, gatherNow), legacyHeal(info); !maps.Equal(got, want) {
+							t.Errorf("%s/%q/%+v/%q/%+v: patch %v, legacy %v", state, reason, cont, mode, manual, got, want)
+						}
 					}
 				}
 			}
@@ -884,13 +893,17 @@ func TestDeadRuntimeHealTakesAClassifiedDeadRuntime(t *testing.T) {
 		{"classified under another token", false, "tok-2", false, "", ""},
 		{"classified, another runtime by the fresh read", false, "tok-3", true, "", "tok-9"},
 		{"classified, the object moving across the fresh read", false, "tok-3", true, "", "moving"},
+		{"classified by the start's recycle", false, "tok-3", false, "", "recycle"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := newHealCase(t, livenessDead, desireSleep, "state", "active", "last_woke_at", woke)
 			id := runtimeIdentity{Known: true, SessionID: c.k.ID, Epoch: "3", Token: "tok-3"}
 			c.w.Observed = map[rowKey]rowObservation{c.k: {Liveness: livenessDead, Identity: id}}
 			if tc.token != "" {
-				c.w.Classified = map[rowKey]string{c.k: c.k.ID + "/" + tc.token}
+				c.w.Classified = map[rowKey]classifiedRuntime{c.k: {Token: c.k.ID + "/" + tc.token}}
+			}
+			if tc.fresh == "recycle" { // the start's recycle classified it: no heal takes it (CONTRACT A6)
+				c.w.Classified = map[rowKey]classifiedRuntime{c.k: {Token: c.k.ID + "/" + tc.token, Recycle: true}}
 			}
 			it := c.decide()
 			if got := it.Reason == decideDeadRuntimeHeal; got != tc.heal {
@@ -932,10 +945,46 @@ func TestCreatingHealTakesAClassifiedCorpse(t *testing.T) {
 		id := runtimeIdentity{Known: true, SessionID: c.k.ID, Epoch: "3", Token: "tok-3"}
 		c.w.Observed = map[rowKey]rowObservation{c.k: {Liveness: livenessDead, Identity: id}}
 		if classified {
-			c.w.Classified = map[rowKey]string{c.k: deadToken(id)}
+			c.w.Classified = map[rowKey]classifiedRuntime{c.k: {Token: deadToken(id)}}
 		}
 		if it := c.decide(); (it.Reason == decideCreatingHeal) != classified {
 			t.Fatalf("classified %v: decideRow = (%q, %q), want the creating heal %v", classified, it.Kind, it.Reason, classified)
+		}
+	}
+}
+
+// Kills §12.2 #57's end state keeping the late quarantine's sleep reason on
+// an awake row (mc-bwvzv): the stability clear that ends the quarantine
+// clears quarantine and rate_limit, so a later death counts as a crash, and
+// leaves any other reason.
+func TestStabilityClearEndsTheQuarantinesReason(t *testing.T) {
+	for _, c := range []struct {
+		reason string
+		clear  bool
+	}{{"quarantine", true}, {"rate_limit", true}, {"idle", false}, {"context-churn", false}} {
+		h := newHealCase(t, livenessAlive, desireKeep, "state", "awake", "last_woke_at", rowAt(-time.Minute), "quarantined_until", rowAt(time.Hour), "sleep_reason", c.reason)
+		it := h.decide()
+		got, ok := it.Patch["sleep_reason"]
+		if it.Reason != decideStabilityClear || ok != c.clear || ok && got != "" {
+			t.Fatalf("%s: decideRow = (%q, %v), want the clear, sleep_reason cleared %v", c.reason, it.Reason, it.Patch, c.clear)
+		}
+	}
+}
+
+// Kills A6's idle-sleep heal overwriting a quarantine's reason (mc-slkxd):
+// a committed row with an idle stop pending whose runtime is gone heals to
+// SleepPatch(idle), but keeps quarantine while quarantined_until is ahead
+// (an expired one is the timer heal's first).
+func TestIdleStopHealKeepsAQuarantinesReason(t *testing.T) {
+	for _, c := range []struct {
+		until time.Duration
+		want  string
+	}{{time.Hour, "quarantine"}} {
+		h := newHealCase(t, livenessGone, desireSleep, "state", "active", "sleep_intent", "idle-stop-pending", "sleep_reason", "quarantine", "quarantined_until", rowAt(c.until))
+		it := h.decide()
+		got, set := it.folded()["sleep_reason"]
+		if it.Reason != decideDeadRuntimeHeal || c.want == "quarantine" && set || c.want == "idle" && got != "idle" {
+			t.Fatalf("until %s: decideRow = (%q, %v), want the heal with sleep_reason %q", c.until, it.Reason, it.folded(), c.want)
 		}
 	}
 }

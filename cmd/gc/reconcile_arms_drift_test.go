@@ -296,7 +296,7 @@ func TestDriftRepairSkipsAClassifiedDeadRuntime(t *testing.T) {
 			w.Env = &reconcileEnv{Cfg: &config.City{Agents: []config.Agent{{Name: "worker"}}}, SP: struct{ runtime.Provider }{runtime.NewFake()}}
 			w.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(info): {TP: tp}}}
 			w.Observed = map[rowKey]rowObservation{rowKeyOf("gc-1"): {Liveness: livenessDead, Identity: id}}
-			w.Classified = map[rowKey]string{rowKeyOf("gc-1"): deadToken(id)}
+			w.Classified = map[rowKey]classifiedRuntime{rowKeyOf("gc-1"): {Token: deadToken(id)}}
 		})
 		if repaired := it.Reason == decideDriftRepair || it.Heal != nil && it.Heal.Reason == decideDriftRepair; repaired != gone {
 			t.Fatalf("gone %v: decideRow = (%q, %q), want the drift repair %v", gone, it.Kind, it.Reason, gone)

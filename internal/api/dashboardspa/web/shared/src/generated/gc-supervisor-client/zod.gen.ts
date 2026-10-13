@@ -1047,6 +1047,7 @@ export const zOutboundEventPayload = z.object({
 });
 
 export const zOutputTurn = z.object({
+    id: z.string().optional(),
     role: z.string(),
     text: z.string(),
     timestamp: z.string().optional()

@@ -76,3 +76,26 @@ func TestPinnedValues(t *testing.T) {
 		}
 	}
 }
+
+// TestValidLabel: a label is valid only when bd's CSV parse (pflag's string
+// slice) reads it back unchanged as one field.
+func TestValidLabel(t *testing.T) {
+	for label, want := range map[string]bool{
+		"gc:session":      true,
+		"pool:hw/polecat": true,
+		"a b":             true,
+		"":                false, // pflag reads no label at all
+		"note,gc:session": false,
+		`"gc:session"`:    false,
+		`a"b`:             false,
+		"gc:session\n":    false,
+		"\ngc:session":    false,
+		"gc:session\r":    false,
+		"gc:session\r\n":  false,
+		"a\nb":            false,
+	} {
+		if got := ValidLabel(label); got != want {
+			t.Errorf("ValidLabel(%q) = %v, want %v", label, got, want)
+		}
+	}
+}

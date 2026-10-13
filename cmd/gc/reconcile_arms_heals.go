@@ -77,10 +77,11 @@ func (r *rowFacts) freshGoneOrClassified() bool {
 	return r.entry != nil && r.entry.Liveness == livenessDead && r.classified(r.w.Observed[r.k].Identity)
 }
 
-// classified reports that A12 classified the row's dead runtime id.
+// classified reports that A12 classified the row's dead runtime id (the
+// start's recycle records its own, which no heal takes: CONTRACT A6).
 func (r *rowFacts) classified(id runtimeIdentity) bool {
 	c, ok := r.w.Classified[r.k]
-	return ok && c == deadToken(id)
+	return ok && !c.Recycle && c.classifies(id)
 }
 
 // freshIdentity is the row's runtime identity for a fresh kind's arm (A3's
@@ -212,6 +213,7 @@ func deadRuntimePatch(r *rowFacts, heal bool) (patch session.MetadataPatch, clas
 		// it, which keeps the pre-drain sleep_policy_fingerprint, with the
 		// disposition's Sleep cell.
 		maps.Copy(patch, session.SleepPatch(r.w.Now, drainIdle))
+		session.KeepQuarantineReason(patch, session.DispositionOfInfo(info), info.SleepReason, r.w.Now) // a quarantine's reason dominates (mc-slkxd)
 		return patch, session.CellInfo(info, session.ActorController, session.DispEvent{Kind: session.EvSleep}, r.w.Now), false
 	}
 	_, draining := activeStop(r.row)
@@ -299,6 +301,13 @@ func armStabilityClear(r *rowFacts) (intent, bool) {
 	if info.ChurnCount != "" && info.ChurnCount != "0" && r.w.Now.Sub(woke) >= churnProductivityThreshold {
 		patch["churn_count"] = "0"
 	}
+	switch session.SleepReason(strings.TrimSpace(info.SleepReason)) {
+	case session.SleepReasonQuarantine, session.SleepReasonRateLimit:
+		// §12.2 #57: a late quarantine an awake row's commit kept ends here
+		// with its sleep reason, as legacy's commit wipes it, so a later
+		// death reads as a crash, not a deliberate sleep (mc-bwvzv).
+		patch["sleep_reason"] = ""
+	}
 	if len(patch) == 0 && class.Len() == 0 {
 		return intent{}, false
 	}
@@ -383,5 +392,9 @@ func asleepHealPatch(info session.Info, now time.Time) session.MetadataPatch {
 		return patch
 	}
 	maps.Copy(patch, session.ConversationResetPatch(true, now))
+	// asleepHealPatch is pinned byte-identical to the frozen legacy reference
+	// (healStatePatchWithRollbackInfo), which predates reset_committed_at and
+	// never writes it (see fields.go's registered writers for the key).
+	delete(patch, session.ResetCommittedAtKey)
 	return patch
 }

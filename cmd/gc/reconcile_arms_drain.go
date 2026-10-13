@@ -26,8 +26,9 @@ const (
 	decideStopResidue    = "drain-void:residue"
 	decideStopActive     = "stop-requested"
 	decideDrainSignal    = "drain-signal:"
-	decideAckVoid        = "drain-ack-void"       // C6a ruling 3
-	decideWakeGrace      = "undesired-wake-grace" // INC-003
+	decideAckVoid        = "drain-ack-void"             // C6a ruling 3
+	decideFloorAckCancel = "drain-ack-cancel:min-floor" // DRAIN-010, PAR-FLOORACK
+	decideWakeGrace      = "undesired-wake-grace"       // INC-003
 	decideDrainWorkKept  = "drain-kept:assigned-work"
 	decideIdleUnprovable = "drain-kept:idle-unprovable" // SESS-621
 	decideIdleStopClear  = "idle-stop-pending-clear"    // SESS-616
@@ -37,6 +38,9 @@ const (
 const (
 	drainIdle        = string(session.SleepReasonIdle)
 	drainConfigDrift = "config-drift"
+	// drainOperator names the signal of an ack an operator's `gc runtime
+	// drain` explains (stopRequest.Operator).
+	drainOperator    = "operator-drain"
 	reasonIdleSleep  = "idle-sleep"
 	sleepIntentIdle  = "idle-stop-pending"
 	timerBlockerHold = "user_hold"
@@ -89,6 +93,18 @@ func authorizedByRank(r *rowFacts, reason string) bool {
 // suspended (a configured named row of a suspended city), else
 // no-wake-reason. A heartbeat hold (held_until with no intent, SESS-617)
 // has none. Legacy's live-claim veto is not ported (PAR-LIVECLAIM).
+// drainableLiveness reports a runtime A20 may begin a drain over: alive, or
+// for a named Drain row a dead runtime, which A21 never closes
+// (deadRuntimeCloses excludes named rows; mc-q64l4)
+// and A12, ahead of A20, has classified by then. A held pool orphan's dead
+// runtime is no drain's: A21's orphan guard keeps its slot (§12.2 #27). Its orphan
+// drain then runs as legacy's, whose stop A4 runs on any liveness but gone
+// (D2, A4); a closable one is A21's.
+func (r *rowFacts) drainableLiveness() bool {
+	e := r.entry
+	return e.Liveness == livenessAlive || e.Liveness == livenessDead && e.Desired == desireDrain && isNamedSessionInfo(r.row.Info)
+}
+
 func drainReasonOf(r *rowFacts) string {
 	e, info := r.entry, r.row.Info
 	intent := strings.TrimSpace(info.SleepIntent)
@@ -214,6 +230,17 @@ func workKeepsNoWakeRow(r *rowFacts) bool {
 // whose time is missing or unreadable is void at once (#7635 review
 // ruling): never stop a runtime that may have been replaced; the agent
 // can ack again.
+//
+// DRAIN-010 (PAR-FLOORACK, legacy's cancelSelfInitiatedDrainAckAtMinFloor):
+// a bare ack, one no request on the row explains, on a member of
+// its template's min_active_sessions floor (the allocator's floor set,
+// legacy's lowest-bead-id membership) is the agent's own idle ack, and
+// stopping the seat only recreates it (sc-j27j0d): the ack is canceled,
+// its half voided, and the seat stays warm, whatever the allocation
+// wants of it (Keep, Sleep or Drain, as legacy cancels them), while its
+// runtime is alive. A request the row carries outranks the floor: the
+// controller's own drains, and an operator's `gc runtime drain`
+// (stopRequest.Operator, legacy's GC_DRAIN).
 func armAck(r *rowFacts) (intent, bool) {
 	req, ok := activeStop(r.row)
 	if !ok || req.Phase != stopAcked {
@@ -223,7 +250,21 @@ func armAck(r *rowFacts) (intent, bool) {
 	if stale := r.ackPredatesRuntime(req.AckAt); stale || req.AckAt.IsZero() {
 		return intent{Kind: intentSignalAck, Reason: decideAckVoid, Basis: basis, Patch: stopAckVoidPatch()}, true
 	}
-	return intent{Kind: intentSignalAck, Reason: decideDrainSignal + req.Reason, Basis: basis, Patch: session.DrainAckStopPendingPatch(r.w.Now)}, true
+	// The floor check stays after the stale-ack void: that check records
+	// the runtime rest the probing kind needs, so a cancel decided first
+	// would defer at admission (rests-missing). Legacy cancels only on a
+	// live runtime: a dead floor seat's ack signals, and the seat is
+	// stopped and recreated.
+	// TODO(#7626, mc-7is1r): when A12 restarts a dead pane in place, lift
+	// the liveness gate and assert the seat runs again.
+	if req.Reason == "" && !req.Operator && r.entry.Floor != nil && r.entry.Liveness == livenessAlive {
+		return intent{Kind: intentSignalAck, Reason: decideFloorAckCancel, Basis: basis, Patch: stopAckVoidPatch()}, true
+	}
+	reason := req.Reason
+	if reason == "" && req.Operator {
+		reason = drainOperator
+	}
+	return intent{Kind: intentSignalAck, Reason: decideDrainSignal + reason, Basis: basis, Patch: session.DrainAckStopPendingPatch(r.w.Now)}, true
 }
 
 // ackPredatesRuntime reports, on the effect's fresh read, a runtime object
@@ -340,7 +381,7 @@ func armDrainBegin(r *rowFacts) (intent, bool) {
 	// too, and its fence writes the row asleep, which claims no live runtime.
 	// No other hold (a wait, a timer: OperatorDormant) stops a live runtime
 	// here.
-	if e.Liveness != livenessAlive || !sessionBeadClaimsLiveRuntime(info) || session.DispositionOfInfo(info).KeepsSlot() {
+	if !r.drainableLiveness() || !sessionBeadClaimsLiveRuntime(info) || session.DispositionOfInfo(info).KeepsSlot() {
 		return intent{}, false
 	}
 	basis := rowBasis{Incarnation: r.row.Incarnation, InstanceToken: r.row.InstanceToken}
