@@ -81,6 +81,13 @@ func (c *CachingStore) reconcileLoop(ctx context.Context, stagger time.Duration)
 		case <-ctx.Done():
 			return
 		case <-timer.C:
+		case <-c.reconcileKick:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
 		}
 
 		c.reconcileIfDue(c.clockNow())
@@ -283,6 +290,11 @@ func (c *CachingStore) nextReconcileDelay(now time.Time) time.Duration {
 		return 0
 	}
 
+	// After the failure backoff: a request never hurries a failing backing.
+	if c.reconcileRequested.Load() {
+		return 0
+	}
+
 	if c.lastFreshAt.IsZero() {
 		return 0
 	}
@@ -298,7 +310,29 @@ func (c *CachingStore) nextReconcileDelay(now time.Time) time.Duration {
 	return dueAt.Sub(now)
 }
 
+// RequestReconcile asks for a full re-scan as soon as the reconcile gate
+// (WithReconcileGate) and the failure backoff allow, instead of at the next
+// cadence tick. It returns at once, and requests coalesce: any number made
+// before a run starts are honored by that run. A request made while a run is
+// in flight gets a run of its own, whose list read comes after the request,
+// so a caller that asks after a write committed is covered by a scan that
+// sees it. A closed gate keeps the request pending until it opens. The cache
+// must be reconciling (StartReconciler) for the request to be acted on.
+func (c *CachingStore) RequestReconcile() {
+	c.reconcileRequested.Store(true)
+	c.mu.Lock()
+	c.stats.ReconcileRequests++
+	c.mu.Unlock()
+	select {
+	case c.reconcileKick <- struct{}{}:
+	default: // a kick is already pending
+	}
+}
+
 func (c *CachingStore) runReconciliation() {
+	// Cleared before the list read, so a request made from here on gets
+	// another run (RequestReconcile).
+	c.reconcileRequested.Store(false)
 	start := time.Now()
 
 	c.mu.RLock()

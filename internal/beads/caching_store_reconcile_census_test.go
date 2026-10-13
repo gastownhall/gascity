@@ -145,6 +145,9 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		// ownEmits records what onChange emitted, to recognize its echoes in
 		// applyEvent; the merge neither reads nor writes it.
 		"ownEmitMu": true, "ownEmits": true, "ownEmitsSweptAt": true,
+		// reconcileRequested and reconcileKick schedule the reconcile loop
+		// (RequestReconcile); the merge neither reads nor writes them.
+		"reconcileRequested": true, "reconcileKick": true,
 	}
 	assertFieldsClassified(t, reflect.TypeOf(CachingStore{}), comparedStore, excludedStore)
 
@@ -158,6 +161,7 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		"SyncFailures": true, "ProblemCount": true, "LastProblemAt": true,
 		"LastProblem": true, "State": true, "StaggerOffsetMs": true,
 		"CurrentReconcileInterval": true, "LatencyP95Ms": true, "CadenceDriver": true,
+		"ReconcileRequests": true, // counts RequestReconcile calls, not merge outcome
 	}
 	assertFieldsClassified(t, reflect.TypeOf(CacheStats{}), comparedStats, excludedStats)
 }
