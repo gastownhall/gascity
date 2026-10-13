@@ -64,13 +64,6 @@ func init() {
 			it.Closing = closeSpec{Kind: closeFailedCreate, Row: info}
 			return it, true
 		})}},
-		{"A10 skips S7's exit", "PC2 ", simOpts{arms: mutateArm("A10", reflect.ValueOf(armRollback).Pointer(), func(r *rowFacts) (intent, bool) {
-			it, ok := armRollback(r)
-			if it.Reason == decideStaleCreate {
-				return intent{}, false
-			}
-			return it, ok
-		})}},
 		{"a rollback closes without its teardown's stop", "PC4 ", simOpts{specs: func(specs map[string]effectSpec) {
 			// The teardown's stop skipped, and the close no longer holds
 			// the row open while its own runtime stays (C3's ga-vcjr9
@@ -87,14 +80,6 @@ func init() {
 				return txStep{Terminal: patch, Class: class, Fail: td.fail, Err: td.err}
 			}
 			specs[intentRollback] = spec
-		}}},
-		{"a lost commit leaves its runtime", "PC3 ", simOpts{specs: func(specs map[string]effectSpec) {
-			spec := specs[intentStart]
-			spec.sections = slices.Clone(spec.sections)
-			for i := range spec.sections {
-				spec.sections[i].Moved = nil
-			}
-			specs[intentStart] = spec
 		}}},
 	}...)
 }
@@ -383,16 +368,31 @@ func (s *sim) checkStaleCreates() {
 }
 
 // pendingCreateRollback reports a v2 close as failed-create of a row
-// holding its pending create's claim, or of a row already failed-create
-// whose claim another writer cleared (ensureRunning's confirm, aebd4cf's
-// seed 291): a rollback (A10, S3) or A21's failed-create close, which end
-// the row and its holds with the Retire cell, as legacy's
-// failedCreateClosePatch does whatever holds the row (SESS-605). I15 leaves
-// the holds to it; PC1 judges when it may land.
+// holding its pending create's claim: a rollback (A10, S3) or A21's
+// failed-create close, which end the row and its holds with the Retire
+// cell, as legacy's failedCreateClosePatch does whatever holds the row
+// (SESS-061). I15 leaves the holds to it; PC1 judges when it may land.
 func pendingCreateRollback(w simWrite) bool {
-	failedCreate := string(session.StateFailedCreate)
-	return w.After.Metadata["state"] == failedCreate &&
-		(w.Before.Metadata["pending_create_claim"] == "true" || w.Before.Metadata["state"] == failedCreate)
+	return w.Before.Metadata["pending_create_claim"] == "true" && w.After.Metadata["state"] == string(session.StateFailedCreate)
+}
+
+// pendingCreateAdopt reports v2's adopt (A10, S2) of a pending create whose
+// own runtime is up, a write I15 lets move the row's state alone under a
+// hold, as #57 lets a commit (mc-cjtkj ruling; shifted seed 382): legacy's
+// recoverRunningPendingCreate adopts with no hold check. The adopt commits
+// the claimed creating row awake or active and leaves every hold as it was.
+func pendingCreateAdopt(w simWrite, k string) bool {
+	b, a := w.Before.Metadata, w.After.Metadata
+	if k != "state" || b["pending_create_claim"] != "true" || !pendingCreateQueuedOrCreatingState(b["state"]) ||
+		!slices.Contains([]string{"awake", "active"}, a["state"]) {
+		return false
+	}
+	for _, hold := range []string{"held_until", "quarantined_until", "sleep_intent", "sleep_reason", "wait_hold", "suspended_at"} {
+		if a[hold] != b[hold] {
+			return false
+		}
+	}
+	return true
 }
 
 // pendingCreateTimers are the lease edges of each open row holding its
@@ -526,6 +526,24 @@ func TestSimPendingRelaxationsBite(t *testing.T) {
 			b := row("x", append(held, "state", string(session.StateFailedCreate))...)
 			s.checkWrite(simWrite{Leg: "city", At: s.clk.Now(), Before: b, After: closedAs(b, "orphaned")})
 		}},
+		// I15's adopt exception: a claimed pending create committed awake
+		// keeps its holds; a claimless row woken under a hold, or an adopt
+		// that clears a hold, still fails.
+		{"I15: a held row without a claim moved creating to awake", "I15 ", func(s *sim) {
+			b := row("x", append(held, "state", "creating")...)
+			a := row("x", append(held, "state", "awake")...)
+			s.checkWrite(simWrite{Leg: "city", At: s.clk.Now(), Before: b, After: a})
+		}},
+		{"I15: an adopt of a held pending create that drops its user-hold intent", "I15 ", func(s *sim) {
+			b := row("x", append(held, "state", "creating", "pending_create_claim", "true")...)
+			a := row("x", append(held, "state", "awake", "pending_create_claim", "", "sleep_intent", "")...)
+			s.checkWrite(simWrite{Leg: "city", At: s.clk.Now(), Before: b, After: a})
+		}},
+		{"I15: an adopt of a held pending create that clears its hold", "I15 ", func(s *sim) {
+			b := row("x", append(held, "state", "creating", "pending_create_claim", "true")...)
+			a := row("x", "state", "awake", "pending_create_claim", "")
+			s.checkWrite(simWrite{Leg: "city", At: s.clk.Now(), Before: b, After: a})
+		}},
 		{"I15: a held pending create closed orphaned, not failed-create", "I15 ", func(s *sim) {
 			b := row("x", append(held, "pending_create_claim", "true")...)
 			s.checkWrite(simWrite{Leg: "city", At: s.clk.Now(), Before: b, After: closedAs(b, "orphaned")})
@@ -602,12 +620,12 @@ func TestSimPendingRelaxationsBite(t *testing.T) {
 	}
 }
 
-// Kills I10's paced excuses for a start refused held or attached excusing a
-// retry loop or the code's own cause: each is quiescent only at or past its
-// row's backoff expiry with no change but the runtime lease record, and only
-// when the sim's own model agrees: the hold model holds the row (simHeld), or
-// the pane is attached. A refusal the model does not back (planted X1, X2)
-// is no pacing. A rollback refused liveness-unknown is paced only over a
+// Kills I10's paced excuse for a start refused held excusing a retry loop or
+// the code's own cause: it is quiescent only at or past its row's backoff
+// expiry with no change but the runtime lease record, and only when the
+// sim's own hold model holds the row (simHeld). A refusal the model does not
+// back (planted X1), and a start refused attached (planted X2), are no
+// pacing. A rollback refused liveness-unknown is paced only over a
 // probe that keeps erroring.
 func TestSimPendingPacedRetries(t *testing.T) {
 	k := rowKey{Leg: rowLeg, ID: "gc-1"}
@@ -627,7 +645,7 @@ func TestSimPendingPacedRetries(t *testing.T) {
 		{"a held start at the expiry", intentStart, causeHeld, -time.Second, false, false, row("runtime_lease_epoch", "3", "sleep_intent", "user-hold"), row("runtime_lease_epoch", "4", "sleep_intent", "user-hold"), true},
 		{"a start refused held on a row the hold model holds not (X1)", intentStart, causeHeld, -time.Second, false, false, row("runtime_lease_epoch", "3", "sleep_reason", "idle"), row("runtime_lease_epoch", "4", "sleep_reason", "idle"), false},
 		{"a held start before the expiry", intentStart, causeHeld, time.Second, false, false, row("runtime_lease_epoch", "3", "sleep_intent", "user-hold"), row("runtime_lease_epoch", "4", "sleep_intent", "user-hold"), false},
-		{"an attached start at the expiry", intentStart, causeAttached, -time.Second, true, false, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4"), true},
+		{"an attached start at the expiry (no pacing: no seed needs it)", intentStart, causeAttached, -time.Second, true, false, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4"), false},
 		{"a start refused attached on an unattached pane (X2)", intentStart, causeAttached, -time.Second, false, false, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4"), false},
 		{"a held start that moved another key", intentStart, causeHeld, -time.Second, false, false, row("runtime_lease_epoch", "3", "sleep_intent", "user-hold"), row("runtime_lease_epoch", "4", "sleep_intent", "user-hold", "state", "asleep"), false},
 		{"a start refused for another cause", intentStart, causePrepare, -time.Second, false, false, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4"), false},
@@ -677,10 +695,9 @@ func (s *sim) checkRollbackTeardown(e *simEffect) func(settlement) {
 
 // simHeld is the sim's own hold model for I10's paced start excuse, apart
 // from the code under test's: an operator's user-hold, a hold or quarantine
-// timer in force at now, a kill fence, a wait hold, or a soft suspend.
-//
-// TODO(v5.9u): a soft suspend (state suspended, no sleep_intent) is no hold;
-// drop it once #7718 stops RefusesPreWake refusing it.
+// timer in force at now, a kill fence, or a wait hold. A soft suspend is no
+// hold (v5.9u, #7718: A18 holds it at the arm, so no start is refused for
+// it).
 func simHeld(b beads.Bead, now time.Time) bool {
 	m := b.Metadata
 	future := func(k string) bool {
@@ -688,8 +705,7 @@ func simHeld(b beads.Bead, now time.Time) bool {
 		return err == nil && t.After(now)
 	}
 	return m["sleep_intent"] == string(session.SleepReasonUserHold) || future("held_until") || future("quarantined_until") ||
-		session.IsKillPendingInfo(sessionInfoFromBead(b), now) || strings.TrimSpace(m["wait_hold"]) != "" ||
-		m["state"] == string(session.StateSuspended)
+		session.IsKillPendingInfo(sessionInfoFromBead(b), now) || strings.TrimSpace(m["wait_hold"]) != ""
 }
 
 // TestSimCorpusFlooredPending is the floored corpus with pending creates
@@ -729,4 +745,123 @@ func TestSimPendingCreateTimers(t *testing.T) {
 	if !slices.Equal(got, want) {
 		t.Fatalf("timers %v, want %v", got, want)
 	}
+}
+
+// Kills a start that launches over a row closed under it before its
+// PreWake (P7a of the #7706 review, which only the corpus caught): the
+// start's premise refuses a closed row, so no PreWake lands on it and its
+// provider Start never runs.
+func TestStartRefusesARowClosedBeforeItsPreWake(t *testing.T) {
+	k, leaf := launchKit(t, "asleep", "wake_attempts", "1")
+	started := false
+	leaf.onStart = func(context.Context) { started = true }
+	gen := k.meta("generation")
+	if err := k.backing.Close("gc-1"); err != nil {
+		t.Fatal(err)
+	}
+	s := k.runKind()
+	if started || k.meta("generation") != gen || s.Outcome == settledLanded {
+		t.Fatalf("settlement %+v, started %v, generation %q (was %q): want refused, no PreWake, no Start", s, started, k.meta("generation"), gen)
+	}
+}
+
+// Kills I15 failing v2's adopt of a held pending create (the adopt exception,
+// shifted seed 382): a claimed creating row committed awake under a user hold
+// and a live quarantine, every hold kept, is no violation, as legacy's
+// recoverRunningPendingCreate adopts with no hold check.
+func TestSimPendingAdoptUnderHold(t *testing.T) {
+	s := newSim(t, 3, simOpts{rows: func(*sim) ([]beads.Bead, []beads.Bead) { return nil, nil }})
+	held := []string{
+		"held_until", plannerT0.Add(time.Hour).Format(time.RFC3339), "sleep_intent", "user-hold", "sleep_reason", "user-hold",
+		"quarantined_until", plannerT0.Add(time.Hour).Format(time.RFC3339),
+	}
+	b := sessionRow("x", append([]string{"session_name", "s-x", "generation", "2", "instance_token", "tok-2", "state", "creating", "pending_create_claim", "true"}, held...)...)
+	a := sessionRow("x", append([]string{"session_name", "s-x", "generation", "2", "instance_token", "tok-2", "state", "awake"}, held...)...)
+	b.Status, a.Status = "open", "open"
+	s.checkWrite(simWrite{Leg: "city", At: s.clk.Now(), Before: b, After: a})
+	if len(s.failures) > 0 {
+		t.Fatalf("an adopt that keeps every hold: failures %q, want none", s.failures)
+	}
+}
+
+// pc2Mutant is A10 skipping S7's exit; pc3Mutant a lost commit that leaves
+// its runtime (no Moved hook). Directed scenarios drive both, not the
+// seeded sweep (the #7706 review).
+var (
+	pc2Mutant = simOpts{arms: mutateArm("A10", reflect.ValueOf(armRollback).Pointer(), func(r *rowFacts) (intent, bool) {
+		it, ok := armRollback(r)
+		if it.Reason == decideStaleCreate {
+			return intent{}, false
+		}
+		return it, ok
+	})}
+	pc3Mutant = simOpts{specs: func(specs map[string]effectSpec) {
+		spec := specs[intentStart]
+		spec.sections = slices.Clone(spec.sections)
+		for i := range spec.sections {
+			spec.sections[i].Moved = nil
+		}
+		specs[intentStart] = spec
+	}}
+)
+
+// staleCreateSim is a sim over one manual pending create inside its lease
+// whose name holds its own StaleSelf runtime at its generation (S7).
+func staleCreateSim(t *testing.T, o simOpts) *sim {
+	t.Helper()
+	row := sessionRow("gc-m1", "template", "worker", "agent_name", "worker", "state", "start-pending", "session_origin", "manual",
+		"generation", "2", "instance_token", "tok-gc-m1-2", "pending_create_claim", "true", "pending_create_started_at", rowAt(-time.Minute), "session_name", "s-gc-m1")
+	o.rows = func(s *sim) ([]beads.Bead, []beads.Bead) {
+		s.sp.put("s-gc-m1", "gc-m1", "2", "tok-gc-m1-2-old")
+		return []beads.Bead{row}, nil
+	}
+	s := newSim(t, 1, o)
+	s.lag = false
+	s.advance(time.Second)
+	return s
+}
+
+// Kills PC2 (I-S7) not catching a skipped S7 exit: a pending create whose
+// name holds its own StaleSelf runtime is rolled back (S7) in production; with
+// A10 skipping S7's exit it rests there at quiescence, which PC2 reports.
+func TestSimPC2CatchesASkippedStaleCreateExit(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		o    simOpts
+		want bool
+	}{
+		{"production", simOpts{}, false},
+		{"A10 skips S7's exit", pc2Mutant, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s := staleCreateSim(t, c.o)
+			for range 3 {
+				s.settle()
+				s.advance(simPatrol)
+			}
+			s.quiesce()
+			got := slices.ContainsFunc(s.failures, func(f string) bool { return strings.HasPrefix(f, "PC2 ") })
+			if got != c.want {
+				t.Fatalf("PC2 reported %v, want %v; failures %q", got, c.want, s.failures)
+			}
+		})
+	}
+}
+
+// Kills PC3 (I-lost-commit) not catching a lost commit left running: an
+// outside close after the start's launch, with the start's Moved hook gone,
+// leaves the runtime it created, which PC3 reports.
+func TestSimPC3CatchesALostCommitLeftRunning(t *testing.T) {
+	closeRow := func(_ *sim, l *simLeg, b beads.Bead) { _ = l.backing.Close(b.ID) }
+	for seed := uint64(1); seed <= 32; seed++ {
+		s, outcome, _, fired := lostCommitRunWith(t, seed, pc3Mutant, closeRow)
+		if !fired || outcome == "" || strings.Contains(outcome, "outcome 1 ") {
+			continue
+		}
+		if !slices.ContainsFunc(s.failures, func(f string) bool { return strings.HasPrefix(f, "PC3 ") }) {
+			t.Fatalf("seed %d: %q, failures %q: want PC3 to report the start's runtime left running", seed, outcome, s.failures)
+		}
+		return
+	}
+	t.Fatal("no seed reached the lost commit")
 }

@@ -141,12 +141,12 @@ func (s *sim) checkDestructive() {
 			continue
 		}
 		row, closed := s.rowNamed(k.Name)
-		// The own-runtime exception's effects (a rollback's teardown and
-		// S7's exit, the lost commit) take O2's own-runtime test: Current,
-		// or StaleSelf at the row's generation.
-		own := k.Hit.id == row.ID && (k.Hit.token == row.Metadata["instance_token"] ||
-			ownRuntimeEffect(k) && k.Hit.epoch == row.Metadata["generation"])
-		if k.Hit.attached && !s.ownRuntimeException(k, row, own) {
+		own := k.Hit.id == row.ID && k.Hit.token == row.Metadata["instance_token"]
+		// The own-runtime exception takes O2's own-runtime test: Current, or
+		// StaleSelf at the row's generation (S7's exit stops that one;
+		// seeds 23, 38, 153, 519, 1007).
+		ownForException := own || k.Hit.id == row.ID && k.Hit.epoch == row.Metadata["generation"]
+		if k.Hit.attached && !s.ownRuntimeException(k, row, ownForException) {
 			s.failf("I5 I-attached", "v2 %s on %s while attached", k.Method, k.Name)
 		}
 		switch {
@@ -255,7 +255,7 @@ func (s *sim) checkWrite(w simWrite) {
 			}
 		}
 	}
-	if k := dormantChange(w.Before, a, w.At, s.stable[w.After.ID]); k != "" && (!closes || !closeEndsSuspend(w.Before, k, w.At)) && (!closes || !pendingCreateRollback(w)) && !s.quarantinedCommit(id, w, k) {
+	if k := dormantChange(w.Before, a, w.At, s.stable[w.After.ID]); k != "" && (!closes || !closeEndsSuspend(w.Before, k, w.At)) && (!closes || !pendingCreateRollback(w)) && !pendingCreateAdopt(w, k) && !s.quarantinedCommit(id, w, k) {
 		s.failf("I15 I-STOP-3/4", "v2 rewrote %s %q -> %q on %s, which an operator holds dormant at %s", k, b[k], a[k], id, w.At.Format(time.RFC3339))
 	}
 	terminal := (w.After.Status == "closed" && w.Before.Status != "closed") ||
@@ -289,9 +289,9 @@ func (s *sim) quarantinedCommit(id string, w simWrite, k string) bool {
 		return false // the quarantine was there at the PreWake, which must have refused
 	}
 	if s.quarantinedCommits == nil {
-		s.quarantinedCommits = map[string]time.Time{}
+		s.quarantinedCommits = map[string]*quarantinedClock{}
 	}
-	s.quarantinedCommits[id] = w.At
+	s.quarantinedCommits[id] = &quarantinedClock{start: w.At, checked: w.At, moves: len(s.basisMoves)}
 	return true
 }
 
@@ -304,18 +304,41 @@ func quarantineAlone(meta map[string]string, now time.Time) bool {
 		strings.TrimSpace(meta["sleep_intent"]) != string(session.SleepReasonUserHold) && (err != nil || !held.After(now))
 }
 
+// quarantinedClock is a quarantined commit's bound clock (CONTRACT v5.9x):
+// start moves on while v2 cannot act on the row, from the last check
+// (checked), and restarts at an outside write that moved its drain basis
+// past basisMoves[moves].
+type quarantinedClock struct {
+	start, checked time.Time
+	moves          int
+}
+
 // checkQuarantinedCommits is I15's bound on §12.2 #57: a row whose commit
-// kept a late quarantine is, within quarantineDrainBound, closed, stopped,
-// asked to stop (A20's begin; A4 stops it), out of its quarantine, or kept
-// by its assigned work, as legacy's assigned-work lens keeps it (DRAIN-046).
+// kept a late quarantine is, within quarantineDrainBound of v2's own time,
+// closed, stopped, asked to stop (A20's begin; A4 stops it), out of its
+// quarantine, or kept by its assigned work, as legacy's assigned-work lens
+// keeps it (DRAIN-046). The bound pauses while the row's liveness reads
+// unknown (A9 holds every arm, GUAR-053) and restarts at an outside write
+// that moves its incarnation or drain basis, whose refusal and backoff are
+// not v2's delay (CONTRACT v5.9x).
 func (s *sim) checkQuarantinedCommits() {
 	if len(s.quarantinedCommits) == 0 {
 		return
 	}
 	now := s.clk.Now()
 	rows := s.snapshot()
-	for id, at := range s.quarantinedCommits {
+	_, obs := s.observed()
+	for id, c := range s.quarantinedCommits {
 		b := rows[id]
+		leg, _, _ := strings.Cut(id, "/")
+		switch {
+		case s.basisMovedOutside(leg, b.ID, c.moves):
+			c.start, c.moves = now, len(s.basisMoves)
+		case obs == nil || obs[rowKey{Leg: rowLeg, ID: b.ID}].Liveness == livenessUnknown:
+			c.start = c.start.Add(now.Sub(c.checked))
+		}
+		c.checked = now
+		at := c.start
 		worked := slices.ContainsFunc(slices.Collect(maps.Values(rows)), func(w beads.Bead) bool {
 			return w.Assignee == b.ID && (w.Status == "open" || w.Status == "in_progress")
 		})
@@ -323,10 +346,6 @@ func (s *sim) checkQuarantinedCommits() {
 		case b.Status == "closed", !s.livePane(b), b.Metadata[session.DrainIntentReasonKey] != "",
 			!session.DecodeDisposition(b.Metadata).Quarantine.After(now), worked:
 			delete(s.quarantinedCommits, id)
-		case s.sp.IsAttached(b.Metadata["session_name"]):
-			// An attach keeps it up while it lasts, as legacy's attached
-			// override wakes it (mc-cjtkj): the bound runs from the detach.
-			s.quarantinedCommits[id] = now
 		case now.Sub(at) > quarantineDrainBound:
 			s.failf("I15 I-STOP-3/4", "%s, committed under a quarantine that landed after its PreWake, is still up undrained %s later", id, now.Sub(at))
 			delete(s.quarantinedCommits, id)
@@ -726,7 +745,7 @@ func TestSimChecksBite(t *testing.T) {
 		}},
 		{"I15 ", func(s *sim) { // §12.2 #57: a late-quarantined commit left up undrained past the bound
 			s.setMeta(s.legs[0], "gc-1", "quarantined_until", s.rel(time.Hour), "sleep_reason", "quarantine", "instance_token", "tok-gc-1-1", "generation", "1")
-			s.quarantinedCommits = map[string]time.Time{"city/gc-1": s.clk.Now().Add(-quarantineDrainBound - time.Second)}
+			s.quarantinedCommits = map[string]*quarantinedClock{"city/gc-1": {start: s.clk.Now().Add(-quarantineDrainBound - time.Second), checked: s.clk.Now(), moves: len(s.basisMoves)}}
 		}},
 		{"I16 ", func(s *sim) {
 			s.setMeta(s.legs[0], "gc-1", signaled...)

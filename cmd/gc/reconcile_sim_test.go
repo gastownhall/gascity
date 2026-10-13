@@ -407,9 +407,9 @@ type sim struct {
 	stable map[string]bool
 	// preWakeQuarantine is each row's quarantined_until at v2's last PreWake
 	// of it; quarantinedCommits the rows whose commit kept a quarantine that
-	// landed after it (§12.2 #57), by the time the commit landed.
+	// landed after it (§12.2 #57), by their bound's clock (v5.9x).
 	preWakeQuarantine  map[string]string
-	quarantinedCommits map[string]time.Time
+	quarantinedCommits map[string]*quarantinedClock
 	failures           []string
 	locks              *lockObserver // the sections holding each row's mutation lock
 	runMu              sync.Mutex
@@ -1356,8 +1356,7 @@ func (s *sim) pacedRetries(backoff map[string]backoffRecord, at time.Time, befor
 			// create's claim, a manual session) that its PreWake refuses
 			// (RefusesPreWake), or whose recycle an attached pane refuses,
 			// paced by its backoff (mc-cjtkj).
-			r.it.Kind == intentStart && r.res.Cause == causeHeld && simHeld(row, at) ||
-			r.it.Kind == intentStart && r.res.Cause == causeAttached && s.sp.IsAttached(row.Metadata["session_name"])
+			r.it.Kind == intentStart && r.res.Cause == causeHeld && simHeld(row, at)
 		rec, backedOff := backoff[rowBackoffKey(r.it.Key)]
 		if r.res.Outcome != settledRefused || !held || !backedOff || rec.Until.After(at) {
 			return false

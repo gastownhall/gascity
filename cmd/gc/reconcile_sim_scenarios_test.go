@@ -1145,7 +1145,13 @@ func TestSimOperatorDrainSurvivesACanceledControllerRequest(t *testing.T) {
 // fired at all (a start that ended before the seam never runs it).
 func lostCommitRun(t *testing.T, seed uint64, op func(s *sim, l *simLeg, b beads.Bead)) (s *sim, outcome string, up, fired bool) {
 	t.Helper()
-	s = newSim(t, seed, simOpts{})
+	return lostCommitRunWith(t, seed, simOpts{}, op)
+}
+
+// lostCommitRunWith is lostCommitRun over a sim with o's faults.
+func lostCommitRunWith(t *testing.T, seed uint64, o simOpts, op func(s *sim, l *simLeg, b beads.Bead)) (s *sim, outcome string, up, fired bool) {
+	t.Helper()
+	s = newSim(t, seed, o)
 	s.inventory()
 	for step := 0; step < 400 && len(s.failures) == 0; step++ {
 		idx := slices.IndexFunc(s.parked, func(e *simEffect) bool { return e.it.Kind == intentStart && !e.settled })
