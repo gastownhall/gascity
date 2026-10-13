@@ -247,3 +247,33 @@ func TestSetMetaUnreflectedKeyIgnoresBridgeOutage(t *testing.T) {
 		t.Fatalf("GC_DRAIN_ACK_SOURCE = %q, want agent", got)
 	}
 }
+
+// Clearing a drain ack clears the local drained marker even when T3 cannot be
+// told, mirroring SetMeta: a marker left behind would make a later, unrelated
+// Stop archive the live thread.
+func TestRemoveMetaDrainAckDuringOutageClearsDrainedMarker(t *testing.T) {
+	_, sp := newSeamBackedSnapshotTestProvider(t, unreachableBridgeURL)
+	if err := sp.SetMeta("agent-a", "GC_DRAIN_ACK", "1"); !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		t.Fatalf("SetMeta(GC_DRAIN_ACK) during outage = %v, want errors.Is(runtime.ErrRuntimeUnavailable)", err)
+	}
+	if err := sp.RemoveMeta("agent-a", "GC_DRAIN_ACK"); err != nil && !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		t.Fatalf("RemoveMeta(GC_DRAIN_ACK) during outage = %v, want nil or errors.Is(runtime.ErrRuntimeUnavailable)", err)
+	}
+
+	server := newT3BridgeTestServer(t, boundThreadSnapshot("ready"))
+	t.Cleanup(server.Close)
+	t.Setenv("T3_WS_URL", server.wsURL())
+	resetBridgeAuthCacheForTest(t)
+	recovered := NewSeamBacked()
+	if got, _ := recovered.GetMeta("agent-a", "drained"); got != "" {
+		t.Fatalf("drained after the ack was cleared = %q, want empty", got)
+	}
+	if err := recovered.Stop("agent-a"); err != nil {
+		t.Fatalf("Stop after recovery: %v", err)
+	}
+	for _, payload := range server.commandPayloads("thread.meta.update") {
+		if meta, _ := payload["customMetadata"].(map[string]interface{}); meta["gc.state"] == "archived" {
+			t.Fatalf("Stop archived the thread after its drain ack was cleared: %v", payload)
+		}
+	}
+}

@@ -2972,11 +2972,18 @@ func (p *Provider) GetMeta(name, key string) (string, error) {
 }
 
 // RemoveMeta deletes a session metadata key and reflects drain-clearing onto the
-// T3 thread.
+// T3 thread. Like SetMeta, the local state changes first: clearing a drain
+// ack clears the drained marker Stop archives on whether or not T3 can be
+// told.
 func (p *Provider) RemoveMeta(name, key string) error {
 	err := removeMetaValue(name, key)
 	if err != nil {
 		return err
+	}
+	if key == "GC_DRAIN_ACK" {
+		if err := removeMetaValue(name, "drained"); err != nil {
+			return err
+		}
 	}
 	snapshot, loadErr := p.rpcSnapshot()
 	if loadErr != nil {
@@ -2993,7 +3000,6 @@ func (p *Provider) RemoveMeta(name, key string) error {
 	case "GC_DRAIN":
 		p.recordStateChange(binding.ThreadID, "active", "GC drain cleared", map[string]interface{}{"reason": "drain cleared"})
 	case "GC_DRAIN_ACK":
-		_ = removeMetaValue(name, "drained")
 		p.recordStateChange(binding.ThreadID, "active", "GC drain acknowledgment cleared", map[string]interface{}{"reason": "drain acknowledgment cleared"})
 	}
 	return nil
