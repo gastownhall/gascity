@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	goruntime "runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,19 +27,20 @@ const (
 )
 
 // commitGateStore is a beads.Store whose Get can hang the way a stalled store
-// does: a hung Get ignores everything and returns only when release is called.
-// Gets before the gate is armed pass through, so a scenario lets the start
-// phase read the store normally and wedges the commit phase that follows.
+// does, but only for the Gets the commit and settle phase makes: a hung Get
+// ignores everything and returns only when release is called. The start phase
+// reads the store normally, so a scenario wedges exactly the phase under test
+// whatever the start phase happens to read.
 type commitGateStore struct {
 	beads.Store
 
-	// passGets is how many Get calls pass through before the gate hangs the
-	// next one. A negative value never hangs.
-	passGets atomic.Int64
+	// hangCommit makes the commit phase's Gets hang.
+	hangCommit atomic.Bool
 
-	gets    atomic.Int64
-	hung    atomic.Int64
-	hanging atomic.Int64
+	// commitGets counts the Gets the commit phase made, hung or not.
+	commitGets atomic.Int64
+	hung       atomic.Int64
+	hanging    atomic.Int64
 
 	releaseC    chan struct{}
 	releaseOnce sync.Once
@@ -46,17 +48,35 @@ type commitGateStore struct {
 
 func newCommitGateStore(inner beads.Store) *commitGateStore {
 	s := &commitGateStore{Store: inner, releaseC: make(chan struct{})}
-	s.passGets.Store(-1)
+	s.hangCommit.Store(true)
 	return s
 }
 
+// inCommitPhase reports whether the calling goroutine is inside
+// commitAsyncStartResultWithContext.
+func inCommitPhase() bool {
+	pcs := make([]uintptr, 64)
+	frames := goruntime.CallersFrames(pcs[:goruntime.Callers(2, pcs)])
+	for {
+		frame, more := frames.Next()
+		if strings.HasSuffix(frame.Function, ".commitAsyncStartResultWithContext") {
+			return true
+		}
+		if !more {
+			return false
+		}
+	}
+}
+
 func (s *commitGateStore) Get(id string) (beads.Bead, error) {
-	n := s.gets.Add(1)
-	if pass := s.passGets.Load(); pass >= 0 && n > pass {
-		s.hung.Add(1)
-		s.hanging.Add(1)
-		defer s.hanging.Add(-1)
-		<-s.releaseC
+	if inCommitPhase() {
+		s.commitGets.Add(1)
+		if s.hangCommit.Load() {
+			s.hung.Add(1)
+			s.hanging.Add(1)
+			defer s.hanging.Add(-1)
+			<-s.releaseC
+		}
 	}
 	return s.Store.Get(id)
 }
@@ -96,6 +116,8 @@ type commitPhaseRun struct {
 	finishedC chan struct{}
 	stderr    *lockedLog
 	rec       *events.Fake
+	// releaseLease gives back the start lease the test took for the session.
+	releaseLease func()
 }
 
 // enqueueCommitPhaseStart reserves a slot and enqueues one async start of the
@@ -113,7 +135,9 @@ func enqueueCommitPhaseStart(ctx context.Context, t *testing.T, city string, ite
 		t.Fatalf("reserve async start slot: %s", reason)
 	}
 	item, releaseLease := leasedStart(t, city, item)
-	t.Cleanup(releaseLease)
+	var releaseLeaseOnce sync.Once
+	run.releaseLease = func() { releaseLeaseOnce.Do(releaseLease) }
+	t.Cleanup(run.releaseLease)
 	enqueuePreparedStartWaveForCity(
 		ctx,
 		[]asyncPreparedStart{{
@@ -153,36 +177,16 @@ func (r *commitPhaseRun) inFlight() int {
 	return r.limiter.inFlight
 }
 
-// calibrateStartPhaseGets reports how many store Gets one start phase makes
-// before its commit, on a fresh fixture. The commit-phase scenarios hang the
-// Get after those, so they keep hitting the commit's own read if the start
-// phase later reads the store more or less often.
-func calibrateStartPhaseGets(t *testing.T, workDir string) int64 {
-	t.Helper()
-	var gets int64
-	synctest.Test(t, func(t *testing.T) {
-		clk := &clock.Fake{Time: time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)}
-		inner, _, _, item := postStartBeadItem(t, clk, workDir)
-		store := newCommitGateStore(inner)
-		sp := newPostStartProvider()
-		runPostStartAttempt(context.Background(), t, item, sp, store, postStartTimeout)
-		gets = store.gets.Load()
-	})
-	return gets
-}
-
 // The async start goroutine holds its asyncStartLimiter slot until the commit
 // finishes, so a commit that waits forever on the store holds it forever. The
 // bound on the commit phase gives the slot back and still runs the follow-up.
 func TestEnqueuePreparedStartWaveReleasesItsSlotWhenTheCommitHangs(t *testing.T) {
 	testCity := t.TempDir()
 	workDir := t.TempDir()
-	startGets := calibrateStartPhaseGets(t, workDir)
 	synctest.Test(t, func(t *testing.T) {
 		clk := &clock.Fake{Time: time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)}
 		inner, bead, _, item := postStartBeadItem(t, clk, workDir)
 		store := newCommitGateStore(inner)
-		store.passGets.Store(startGets)
 		sp := newPostStartProvider()
 		defer sp.release()
 		defer store.release()
@@ -211,7 +215,7 @@ func TestEnqueuePreparedStartWaveReleasesItsSlotWhenTheCommitHangs(t *testing.T)
 		}
 		// The waiter writes nothing: the row is exactly what the start phase
 		// left, and the runtime is not touched. The age of the lease is the
-		// repair path's input (SESSION-RUNTIME-016).
+		// repair path's input (SESSION-RUNTIME-017).
 		got := mustGetBead(t, inner, bead.ID)
 		if got.Status != "open" || got.Metadata["pending_create_claim"] != "true" {
 			t.Fatalf("session after the abandoned commit: status=%q pending_create_claim=%q, want it open and still claimed", got.Status, got.Metadata["pending_create_claim"])
@@ -246,12 +250,10 @@ func TestEnqueuePreparedStartWaveReleasesItsSlotWhenTheCommitHangs(t *testing.T)
 func TestAbandonedCommitRunsToCompletionOnTheControllerContext(t *testing.T) {
 	testCity := t.TempDir()
 	workDir := t.TempDir()
-	startGets := calibrateStartPhaseGets(t, workDir)
 	synctest.Test(t, func(t *testing.T) {
 		clk := &clock.Fake{Time: time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)}
 		inner, bead, before, item := postStartBeadItem(t, clk, workDir)
 		store := newCommitGateStore(inner)
-		store.passGets.Store(startGets)
 		sp := newPostStartProvider()
 		defer sp.release()
 		defer store.release()
@@ -259,6 +261,9 @@ func TestAbandonedCommitRunsToCompletionOnTheControllerContext(t *testing.T) {
 
 		run := enqueueCommitPhaseStart(context.Background(), t, testCity, item, sp, store, clk, immediateStartStabilityWaiter)
 		run.awaitFinished(t, sp, store, begin)
+		if got := sp.CountCalls("Stop", "worker"); got != 0 {
+			t.Fatalf("Stop calls = %d at expiry, want 0: the waiter must not tear the runtime down", got)
+		}
 		store.release()
 		synctest.Wait()
 
@@ -266,25 +271,23 @@ func TestAbandonedCommitRunsToCompletionOnTheControllerContext(t *testing.T) {
 		if got.Metadata["pending_create_claim"] == before["pending_create_claim"] && got.Metadata["state"] == before["state"] {
 			t.Fatalf("session after the late commit returned: state=%q pending_create_claim=%q, want the commit to have run to completion on the controller's context", got.Metadata["state"], got.Metadata["pending_create_claim"])
 		}
-		if got := sp.CountCalls("Stop", "worker"); got != 0 {
-			t.Fatalf("Stop calls = %d, want 0: a late commit on a live controller is not a shutdown", got)
+		if !strings.Contains(run.stderr.String(), "async_start_drift_rolled_back") {
+			t.Fatalf("log = %q, want the late commit's own outcome line: it ran to completion on the controller's context", run.stderr.String())
 		}
 	})
 }
 
 // Controller shutdown is not the commit bound. A commit that is waiting when
-// the controller's context is cancelled is still waited for: the wait is not
+// the controller's context is canceled is still waited for: the wait is not
 // abandoned, so the shutdown branch inside the commit runs and the shutdown
 // accounting (waitForAsyncStarts) sees the start finish when its work does.
 func TestControllerShutdownDoesNotAbandonTheCommitWait(t *testing.T) {
 	testCity := t.TempDir()
 	workDir := t.TempDir()
-	startGets := calibrateStartPhaseGets(t, workDir)
 	synctest.Test(t, func(t *testing.T) {
 		clk := &clock.Fake{Time: time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)}
 		inner, _, _, item := postStartBeadItem(t, clk, workDir)
 		store := newCommitGateStore(inner)
-		store.passGets.Store(startGets)
 		sp := newPostStartProvider()
 		defer sp.release()
 		defer store.release()
@@ -329,12 +332,10 @@ func TestControllerShutdownDoesNotAbandonTheCommitWait(t *testing.T) {
 func TestRepeatedStartsLeaveOneAbandonedCommitPerSession(t *testing.T) {
 	testCity := t.TempDir()
 	workDir := t.TempDir()
-	startGets := calibrateStartPhaseGets(t, workDir)
 	synctest.Test(t, func(t *testing.T) {
 		clk := &clock.Fake{Time: time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)}
 		inner, _, _, item := postStartBeadItem(t, clk, workDir)
 		store := newCommitGateStore(inner)
-		store.passGets.Store(startGets)
 		sp := newPostStartProvider()
 		defer sp.release()
 		defer store.release()
@@ -348,6 +349,7 @@ func TestRepeatedStartsLeaveOneAbandonedCommitPerSession(t *testing.T) {
 			// without spawning another.
 			run := enqueueCommitPhaseStart(context.Background(), t, testCity, item, sp, store, clk, immediateStartStabilityWaiter)
 			run.awaitFinished(t, sp, store, time.Now())
+			run.releaseLease()
 			if got := run.inFlight(); got != 0 {
 				t.Fatalf("attempt %d: asyncStartLimiter has %d starts in flight, want the slot back", i, got)
 			}
@@ -377,33 +379,31 @@ func TestCommitIsRefusedWithoutRunningWhenTheSessionObservationIsOutstanding(t *
 		clk := &clock.Fake{Time: time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)}
 		inner, bead, _, item := postStartBeadItem(t, clk, workDir)
 		store := newCommitGateStore(inner)
+		store.hangCommit.Store(false)
 		sp := newPostStartProvider()
 		defer sp.release()
 		defer store.release()
 		wedged := make(chan struct{})
 		defer close(wedged)
-		var startGets atomic.Int64
 		// The waiter runs after provider.Start. Wedging an observation of the
 		// session there is an R3a zombie holding the key before the commit.
 		occupy := startStabilityWaiter(func(ctx context.Context, name string) bool {
 			wctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
 			_, _ = observeSessionBounded(wctx, testCity, "worker", func() (int, error) { <-wedged; return 0, nil })
-			// The start phase's own reads are done; what follows is the commit.
-			startGets.Store(store.gets.Load())
 			return immediateStartStabilityWaiter(ctx, name)
 		})
 		begin := time.Now()
 
 		run := enqueueCommitPhaseStart(context.Background(), t, testCity, item, sp, store, clk, occupy)
 		elapsed := run.awaitFinished(t, sp, store, begin)
-		commitGets := store.gets.Load() - startGets.Load()
+		commitGets := store.commitGets.Load()
 
 		if elapsed >= commitBound {
 			t.Fatalf("the async start took %v, want the commit refused at once, not after the %v bound", elapsed, commitBound)
 		}
 		if commitGets != 0 {
-			t.Fatalf("%d store Gets after the start phase, want 0: the commit must not run while an observation of the session is outstanding", commitGets)
+			t.Fatalf("%d store Gets by the commit, want 0: the commit must not run while an observation of the session is outstanding", commitGets)
 		}
 		if !strings.Contains(run.stderr.String(), "commit_unavailable") {
 			t.Fatalf("log = %q, want a commit_unavailable lifecycle line", run.stderr.String())

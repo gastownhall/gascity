@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"io"
 	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -30,6 +33,14 @@ const postStartObservationBound = 10 * time.Second
 // "no rate-limit screen". A read that does not answer leaves the attribution
 // unknown, so the start defers instead of rolling the create back.
 const startFailureProbeBudget = 10 * time.Second
+
+// commitPhaseBound is the longest the async start goroutine waits for the
+// commit and settle phase that follows runPreparedStartCandidate while it holds
+// its start slot. The phase reads and writes the session store and can stop or
+// probe the runtime, none of it cancellable, so on expiry the wait is abandoned
+// and the slot is released (SESSION-RUNTIME-017). The bound covers the whole
+// phase, so it is wider than one post-start observation.
+const commitPhaseBound = 30 * time.Second
 
 // postStartObservationKey names what ObserveBounded keeps at one in-flight
 // observation: one session in one city. The city is part of it because two
@@ -93,4 +104,51 @@ func readPendingCreateIdentityBounded(ctx context.Context, cityPath string, info
 			return sp.GetMeta(sessionName, key)
 		})
 	})
+}
+
+// commitAsyncStartBounded is commitAsyncStartResultWithContext held to
+// commitPhaseBound, under the same per-session key as the post-start
+// observations. It returns whether the commit succeeded. When the commit does
+// not answer in time, or an observation of the session is already outstanding
+// so it is refused without running, it logs commit_unavailable and returns
+// false; the waiter writes nothing to the session, and a commit that was
+// started keeps running on the controller's ctx and finishes on its own. The
+// pending claim and its lease stay as they are and the reconciler's repair
+// paths pick the row up when the lease ages out.
+//
+// The wait ends on the bound only, never on ctx: controller shutdown must not
+// abandon a commit, whose shutdown branch settles the row on ctx. The commit
+// itself runs on ctx unchanged.
+func commitAsyncStartBounded(
+	ctx context.Context,
+	cityPath string,
+	result startResult,
+	sp runtime.Provider,
+	store beads.Store,
+	clk clock.Clock,
+	rec events.Recorder,
+	wave int,
+	stdout, stderr io.Writer,
+	trace *sessionReconcilerTraceCycle,
+) bool {
+	name := result.prepared.candidate.name()
+	template := result.prepared.candidate.tp.TemplateName
+	// The commit owns result from here on. The waiter keeps its own copies of
+	// the two fields it logs, so the two sides share no state after expiry.
+	started := result.started
+	phases := result.phases
+	base := ctx
+	if base == nil {
+		base = context.Background()
+	}
+	waitCtx, cancel := context.WithTimeout(context.WithoutCancel(base), commitPhaseBound)
+	defer cancel()
+	committed, err := observeSessionBounded(waitCtx, cityPath, name, func() (bool, error) {
+		return commitAsyncStartResultWithContext(ctx, result, sp, store, clk, rec, wave, stdout, stderr, trace), nil
+	})
+	if err != nil {
+		logLifecycleOutcome(stderr, "start", wave, name, template, "commit_unavailable", started, time.Now(), err, phases)
+		return false
+	}
+	return committed
 }

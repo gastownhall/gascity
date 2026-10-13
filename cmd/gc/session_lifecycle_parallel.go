@@ -2374,8 +2374,11 @@ func enqueuePreparedStartWaveForCity(
 			// Resolve before the commit so a stale, refused, or panicking
 			// commit cannot lose the endpoint verdict.
 			result = resolveStartCapacity(result, rec, stderr)
-			commitAsyncStartResultWithContext(ctx, result, sp, store, clk, rec, wave, stdout, stderr, trace)
-			// The commit is done: release the lease and the slot before the
+			// Bounded: a commit that wedges on the store or the runtime must not
+			// hold the slot (SESSION-RUNTIME-017). Resolving the endpoint
+			// verdict above stays outside the bound.
+			commitAsyncStartBounded(ctx, cityPath, result, sp, store, clk, rec, wave, stdout, stderr, trace)
+			// The commit is done or abandoned: release the lease and the slot before the
 			// follow-up, so the pass it wakes finds the name free.
 			releaseStart()
 			if asyncFollowUp != nil {
