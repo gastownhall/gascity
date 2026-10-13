@@ -593,14 +593,22 @@ func TestRunStopsWhenOnErrorSaysSo(t *testing.T) {
 	permanent := errors.New("journal refused for good")
 	j := &fakeJournal{failErr: permanent}
 	r := &recorder{}
-	tl := &Tailer{Source: j, Apply: r.apply, OnGap: r.onGap, OnError: func(err error) error {
+	// The clock ends a Run that ignored the stop, so the test fails on an
+	// assertion instead of hanging until the package timeout.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	clock := &scriptedSleep{after: 3, cancel: cancel}
+	tl := &Tailer{Source: j, Apply: r.apply, OnGap: r.onGap, Sleep: clock.sleep, OnError: func(err error) error {
 		if errors.Is(err, permanent) {
 			return err
 		}
 		return nil
 	}}
-	if err := tl.Run(context.Background()); !errors.Is(err, permanent) {
+	if err := tl.Run(ctx); !errors.Is(err, permanent) {
 		t.Fatalf("Run = %v, want the permanent refusal", err)
+	}
+	if len(clock.delays) != 0 {
+		t.Fatalf("Run slept %v before stopping, want it to stop on the first refusal", clock.delays)
 	}
 }
 
