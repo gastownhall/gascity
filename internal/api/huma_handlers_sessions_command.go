@@ -927,9 +927,12 @@ type sessionControlNoBody struct{}
 // humaHandleSessionStop is the Huma-typed handler for POST /v0/session/{id}/stop.
 
 func (s *Server) humaHandleSessionStop(_ context.Context, input *SessionControlInput) (*OKWithIDResponse, error) {
-	// Idempotency: stop the turn at most once per Idempotency-Key, so a
-	// retried stop cannot interrupt a turn that started after the first one.
-	// The cached value is the resolved session ID; a replay rebuilds the body.
+	// Idempotency: a completed stop is replayed and a concurrent same-key
+	// stop gets 409, so a retry after a successful stop cannot interrupt a
+	// later turn. Any error releases the key, even one returned after the
+	// interrupt was sent (e.g. StopTurn's idle wait timing out), so such a
+	// retry interrupts again. The cached value is the resolved session ID; a
+	// replay rebuilds the body.
 	id, err := withIdempotency(s.idem, sessionActionIdempotencyPath(input.ID, "stop"), input.IdempotencyKey, sessionControlNoBody{},
 		func() (string, error) {
 			store := s.state.SessionsBeadStore()
