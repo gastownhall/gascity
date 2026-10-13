@@ -556,8 +556,8 @@ func floorWith(d desire) func(*selectionEntry) {
 
 // TestFloorAckCancels (DRAIN-010, PAR-FLOORACK; sc-j27j0d). Kills a floor
 // member's own idle ack stopping it, only for the floor to recreate it: a
-// bare ack on a floor member cancels (its half voided, nothing signaled),
-// whether its runtime is alive or dead (A12 recycles a dead pane); an
+// bare ack on a live floor member cancels (its half voided, nothing
+// signaled), and on a dead one A11 proposes nothing and A18 starts it; an
 // ack off the floor, or one a drain the controller began explains, signals;
 // an ack older than its runtime is void first.
 func TestFloorAckCancels(t *testing.T) {
@@ -578,8 +578,6 @@ func TestFloorAckCancels(t *testing.T) {
 		// An operator's `gc runtime drain` explains the ack (legacy's GC_DRAIN).
 		{"an ack an operator's drain explains, on the floor", append(ackMeta("3"), session.OperatorDrainKey, "3"), onFloor, decideDrainSignal + drainOperator},
 		{"an ack beside an operator's drain of an older generation, on the floor", append(ackMeta("3"), session.OperatorDrainKey, "2"), onFloor, decideFloorAckCancel},
-		// A dead floor seat's ack cancels too: A12 recycles the pane in place (mc-7is1r).
-		{"a bare ack on a floor member whose runtime is dead", ackMeta("3"), func(e *selectionEntry) { onFloor(e); e.Liveness = livenessDead }, decideFloorAckCancel},
 	} {
 		it, _ := decideDrain(t, c.meta, c.entry)
 		switch {
@@ -588,6 +586,12 @@ func TestFloorAckCancels(t *testing.T) {
 		case c.reason == decideFloorAckCancel && (it.Patch["state"] != "" || it.Patch[session.DrainAckIncarnationKey] != "" || it.Patch[session.DrainAckAtKey] != "" || len(it.Patch) != 2):
 			t.Errorf("%s: patch %v, want the ack half voided alone", c.name, it.Patch)
 		}
+	}
+	// A dead floor seat's ack proposes nothing of A11's (§12.2 row 66): A18's
+	// recycle restarts the seat in place with the ack on the row, so its
+	// death is a drain's and the PreWake clears the request.
+	if it, _ := decideDrain(t, ackMeta("3"), func(e *selectionEntry) { onFloor(e); e.Liveness = livenessDead }); it.Kind != intentStart || it.Patch[session.DrainAckIncarnationKey] != "" && it.Patch[session.DrainAckIncarnationKey] != "3" {
+		t.Errorf("a bare ack on a dead floor member: %s %q patch %v, want A18's start, the ack left to its PreWake", it.Kind, it.Reason, it.Patch)
 	}
 }
 

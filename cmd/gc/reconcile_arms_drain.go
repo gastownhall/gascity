@@ -260,6 +260,14 @@ func armAck(r *rowFacts) (intent, bool) {
 	// the runtime rest the probing kind needs, so a cancel decided first
 	// would defer at admission (rests-missing).
 	if req.Reason == "" && !req.Operator && r.entry.Floor != nil {
+		if r.entry.Liveness == livenessDead {
+			// A dead floor seat proposes nothing (§12.2 row 66): A18's
+			// recycle restarts it in place with the ack still on the row, so
+			// its death is a drain's (nothing accrues), and the PreWake
+			// clears the stop request. A cancel first would void the ack and
+			// account a recent wake's death as a crash (mc-7is1r review).
+			return intent{}, false
+		}
 		return intent{Kind: intentSignalAck, Reason: decideFloorAckCancel, Basis: basis, Patch: stopAckVoidPatch()}, true
 	}
 	reason := req.Reason

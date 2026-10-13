@@ -1043,12 +1043,13 @@ func TestSimFloorAckKeepsTheSeatWarm(t *testing.T) {
 	}
 }
 
-// Scenario M12 (PAR-FLOORACK, CONTRACT v5.9p; mc-7is1r): a floor member
-// acks and its pane then dies before the controller's pass, the normal exit
-// after a drain (remain-on-exit keeps the dead pane listed). The ack is
-// canceled as on a live seat, and A12 (#7626) recycles the dead pane in
-// place: the corpse is killed and the same row runs again under a new
-// runtime and token, never stop-pending and never closed. Legacy differs:
+// Scenario M12 (PAR-FLOORACK, CONTRACT v5.9p; mc-7is1r; §12.2 row 66): a
+// floor member acks and its pane then dies before the controller's pass,
+// the normal exit after a drain (remain-on-exit keeps the dead pane
+// listed). A11 proposes nothing for the dead seat; A18's recycle kills the
+// corpse and restarts the same row in place under a new runtime and token,
+// with the ack on the row (so the death is a drain's), and its PreWake
+// clears the request: never stop-pending and never closed. Legacy differs:
 // it cancels only a live runtime's ack, so its dead floor seat is stopped,
 // its row closed and the floor's create replaces it.
 func TestSimFloorAckOnADeadPaneRunsAgainInPlace(t *testing.T) {
@@ -1076,6 +1077,63 @@ func TestSimFloorAckOnADeadPaneRunsAgainInPlace(t *testing.T) {
 		t.Errorf("runtime %+v (dead %+v), row token %q; want the same row running again under a new runtime and token", rt, dead, b.Metadata["instance_token"])
 	case len(kills) != 1 || kills[0].Method != "KillCorpseObject":
 		t.Errorf("kills %+v; want only the corpse killed", kills)
+	}
+	s.noViolations(t)
+}
+
+// floorAckThenDie seeds a floor seat that woke age ago, lands its agent's
+// bare ack, and kills its pane showing pane, as an agent that acks and exits
+// leaves it; then runs patrols patrols.
+func floorAckThenDie(t *testing.T, age time.Duration, pane string, patrols int) (*sim, bool) {
+	t.Helper()
+	s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-gc-1", "last_woke_at", rowAt(-age)))
+	s.cfg.Agents[0].MinActiveSessions = intPtr(1)
+	s.settle()
+	if !s.simAck("gc-1", "tok-gc-1") {
+		t.Fatalf("woke %v ago: the agent's ack did not land", age)
+	}
+	s.sp.mu.Lock()
+	s.sp.rts["s-gc-1"].corpse = true
+	s.sp.touch("s-gc-1")
+	s.sp.mu.Unlock()
+	s.sp.SetPeekOutput("s-gc-1", pane)
+	return s, s.floorRun("gc-1", patrols)
+}
+
+// Scenario M12 by wake age (mc-7is1r review, §12.2 row 66): a floor seat's
+// agent acks and exits however soon after its wake, the normal idle case
+// included (under 5 minutes, which would read a rapid crash or churn): the
+// seat restarts in place and nothing accrues (no wake attempt, churn or
+// quarantine), its death a drain's. Kills: A11 canceling the dead seat's
+// ack before A18's recycle accounts its death.
+func TestSimFloorAckOnADeadPaneByWakeAge(t *testing.T) {
+	for _, age := range []time.Duration{5 * time.Second, 2 * time.Minute, 20 * time.Minute, time.Hour} {
+		t.Run(age.String(), func(t *testing.T) {
+			s, pending := floorAckThenDie(t, age, "", 30)
+			b, _ := s.legs[0].backing.Get("gc-1")
+			s.sp.mu.Lock()
+			rt := s.sp.rts["s-gc-1"]
+			s.sp.mu.Unlock()
+			switch {
+			case pending || b.Status != "open" || rt == nil || rt.corpse || rt.token == "tok-gc-1" || rt.token != b.Metadata["instance_token"]:
+				t.Errorf("ever stop-pending %v, row %s %v, runtime %+v; want the same row running again under a new token", pending, b.Status, b.Metadata, rt)
+			case b.Metadata["wake_attempts"] != "" && b.Metadata["wake_attempts"] != "0", b.Metadata["churn_count"] != "" && b.Metadata["churn_count"] != "0", b.Metadata["quarantined_until"] != "":
+				t.Errorf("row %v; want nothing accrued for a drain's death", b.Metadata)
+			}
+			s.noViolations(t)
+		})
+	}
+}
+
+// Scenario M12 over a rate-limit screen (§12.2 row 66): the ack's pending
+// drain suppresses only the death's crash and churn accounting, so a dead
+// floor seat whose pane shows a rate-limit screen is quarantined, not
+// relaunched into the limit. Kills: a bare ack suppressing the screen check.
+func TestSimFloorAckOnARateLimitedDeadPaneIsQuarantined(t *testing.T) {
+	s, _ := floorAckThenDie(t, 5*time.Second, "Usage limit reached", 2)
+	b, _ := s.legs[0].backing.Get("gc-1")
+	if b.Status != "open" || b.Metadata["quarantined_until"] == "" || b.Metadata["sleep_reason"] != string(session.SleepReasonRateLimit) {
+		t.Errorf("row %s %v; want it quarantined on the rate-limit screen", b.Status, b.Metadata)
 	}
 	s.noViolations(t)
 }

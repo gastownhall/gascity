@@ -160,7 +160,14 @@ func deadScreen(v txView, content string) (screenWrite, bool) {
 	if !runtime.ContainsProviderRateLimitScreen(content) {
 		return screenWrite{}, false
 	}
-	_, draining := activeStop(v.World.Census.reread(v.It.Key, v.Row, v.Meta)) // the fresh row's stop keys
+	// A drain a request explains (the controller's, or an operator's)
+	// quarantines no screen, as legacy's exit decision (D09). A bare ack,
+	// the agent's own (a dead floor seat's, which A18 restarts in place
+	// with the ack on the row), suppresses only the death's crash and churn
+	// accounting (deadRuntimePatch), not this screen, so the seat is not
+	// relaunched into the limit (§12.2 row 66).
+	req, draining := activeStop(v.World.Census.reread(v.It.Key, v.Row, v.Meta)) // the fresh row's stop keys
+	draining = draining && (req.Reason != "" || req.Operator)
 	facts := session.ExitFacts{LastWokeAt: v.Row.LastWokeAt, Now: v.Now, ScreenAvailable: true, Screen: session.ScreenRateLimit, DrainPending: draining}
 	if cfg := v.World.Env.Cfg; cfg != nil {
 		facts.SubprocessProvider = cfg.Session.Provider == "subprocess"
