@@ -38,8 +38,12 @@ import (
 //     session.stopped with the stop metric when a stop was performed, and
 //     session.drain_acked_with_assigned_work when a drained row keeps work.
 
-// causeDispositionRefused: the Sleep cell refused the finalize's move.
-const causeDispositionRefused = "disposition-refused"
+const (
+	// causeDispositionRefused: the Sleep cell refused the finalize's move.
+	causeDispositionRefused = "disposition-refused"
+	// causeAlreadyGone: an operator-dormant stop found its runtime gone.
+	causeAlreadyGone = "already-gone"
+)
 
 // stopSections are the fence and the Call, the finalize write, and the
 // premise close, which only a finalize that closes reaches: a store that
@@ -115,6 +119,9 @@ func stopDecide(v txView) txStep {
 	// only an idle stop's, must hold too, so the idle finalize never applies
 	// to another stop (a stop request's verb turns finalize on its own).
 	if fresh, _ := decideRow(&w, v.Alloc, v.It.Key); fresh.Kind != v.It.Kind || (isIdleReason(fresh.Reason) || isIdleReason(v.It.Reason)) && fresh.Reason != v.It.Reason {
+		if dormantGone(v) {
+			return txStep{Done: true, Cause: causeAlreadyGone, Facts: effectFacts{Noted: &notedRuntime{Name: strings.TrimSpace(v.Row.SessionName), At: v.Now, Gone: true}}}
+		}
 		return txStep{Refuse: causeRedecided}
 	}
 	name := strings.TrimSpace(v.Row.SessionName)
@@ -150,6 +157,15 @@ func stopDecide(v txView) txStep {
 	}
 	plan.verdict = fv
 	return txStep{Pass: plan}
+}
+
+// dormantGone reports an operator-dormant stop whose fresh read finds
+// nothing under the name: the runtime is already gone (a kill's own stop
+// finished after the pass read it alive). It settles as a no-op, with no row
+// backoff, and notes the absence, so the next pass decides the row on it
+// (CONTRACT v5.10d (a)). Any other redecided stop keeps its backoff.
+func dormantGone(v txView) bool {
+	return v.It.Reason == decideDormantStop && v.RT != nil && v.RT.Class == rtAbsent
 }
 
 // stopCall stops a live runtime through its fence, or, with nothing live,

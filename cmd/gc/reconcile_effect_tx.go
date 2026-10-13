@@ -527,7 +527,8 @@ type effectFacts struct {
 	Transition *drainTransition // legacy's drain telemetry
 	Work       *workVerdict     // a worktree verdict for the work item's backoff
 	// Noted is a fresh read that found the row's runtime alive and Current,
-	// which the planner notes in the observation cache (v5 O4).
+	// or (Gone) found nothing under its name, which the planner notes in the
+	// observation cache (v5 O4; v5.10d (a)).
 	Noted *notedRuntime
 	// Quarantined is the agent a landed death accrual quarantined, for
 	// legacy's RecordAgentQuarantine.
@@ -558,10 +559,12 @@ type classifiedRuntime struct {
 	Recycle bool
 }
 
-// notedRuntime is a runtime name a fresh read issued at At found alive.
+// notedRuntime is a runtime name a fresh read issued at At found alive, or
+// absent when Gone.
 type notedRuntime struct {
 	Name string
 	At   time.Time
+	Gone bool
 }
 
 func (f effectFacts) empty() bool {

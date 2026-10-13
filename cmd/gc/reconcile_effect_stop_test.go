@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
@@ -589,6 +590,99 @@ func TestDormantStopOrigins(t *testing.T) {
 		})
 		if s.Outcome != settledLanded || stops(leaf) != 1 || got.Status == "closed" || got.Metadata["sleep_reason"] != c.reason {
 			t.Errorf("%s: settlement %+v, %d stops, status %s, row %v; want stopped, open, sleep_reason %q", c.name, s, stops(leaf), got.Status, got.Metadata, c.reason)
+		}
+	}
+}
+
+// killedWoken is a killed row the allocation wants awake: a manual or
+// always-named seat after `gc session kill` (CONTRACT v5.10d).
+func killedWoken(e *selectionEntry) { e.Desired, e.InDesired = desireWake, true }
+
+// killedMeta is a killed row's metadata.
+var killedMeta = []string{"state", "asleep", "sleep_reason", "killed", "slept_at", rowAt(-time.Hour)}
+
+// dormantSettled applies a dormant stop's settlement s of row id to a fresh
+// planner's backoff table and returns the row's record.
+func dormantSettled(id string, s settlement) backoffRecord {
+	p := newPlanner(newFakePlannerClock(plannerT0), func() time.Duration { return time.Minute }, nil, newInflightMap(), nil, io.Discard)
+	k := rowKey{Leg: rowLeg, ID: id}
+	s.Key, s.Kind, s.Reason, s.At = k, intentStop, decideDormantStop, plannerT0
+	p.backoffSettled(s)
+	return p.backoff.Record(rowBackoffKey(k))
+}
+
+// TestDormantStopOfAGoneRuntimeSettlesNoop (CONTRACT v5.10d (a)). Kills a
+// killed seat's restart held by a row backoff: the pass read the runtime
+// alive before the kill's own stop ended it, so A4 proposed the dormant
+// stop; its fresh read finds nothing under the name, and the stop settles as
+// a no-op (no Stop, no write) that backs nothing off and notes the runtime
+// gone for the next pass.
+func TestDormantStopOfAGoneRuntimeSettlesNoop(t *testing.T) {
+	var before int
+	s, got, leaf := stopRun(t, killedMeta, killedWoken, func(_ *effectPass, l *fenceLeaf, _ beads.Store, _ string) {
+		if err := l.Stop("s-gc-1"); err != nil { // the kill's own stop, after the pass read
+			t.Fatal(err)
+		}
+		before = stops(l)
+	})
+	if s.Outcome != settledNoop || s.Cause != causeAlreadyGone || stops(leaf) != before || got.Metadata["state"] != "asleep" || got.Metadata["sleep_reason"] != "killed" {
+		t.Fatalf("settlement %+v, %d stops, row %v; want a no-op %q, no stop, the killed row untouched", s, stops(leaf)-before, got.Metadata, causeAlreadyGone)
+	}
+	if n := s.Facts.Noted; n == nil || !n.Gone || n.Name != "s-gc-1" {
+		t.Fatalf("noted %+v, want s-gc-1 gone", n)
+	}
+	if r := dormantSettled(got.ID, s); r.live(plannerT0) {
+		t.Fatalf("row backoff %+v after the gone runtime's no-op, want none", r)
+	}
+}
+
+// TestDormantStopRedecidedOverALiveRuntimeBacksOff (CONTRACT v5.10d (a),
+// scoped). Kills the already-gone no-op widened to every redecided stop: a
+// dormant stop whose fresh read finds a runtime still under the name, no
+// longer the row's own, refuses redecided and keeps its row backoff (the
+// lease churn the backoff paces).
+func TestDormantStopRedecidedOverALiveRuntimeBacksOff(t *testing.T) {
+	s, got, leaf := stopRun(t, killedMeta, killedWoken, func(_ *effectPass, l *fenceLeaf, _ beads.Store, _ string) {
+		if err := l.Stop("s-gc-1"); err != nil {
+			t.Fatal(err)
+		}
+		startRuntime(t, l.Fake, "s-gc-1", map[string]string{"GC_SESSION_ID": "gc-9", "GC_INSTANCE_TOKEN": "tok-9"})
+	})
+	if !leaf.IsRunning("s-gc-1") {
+		t.Fatal("premise: a runtime runs under the name")
+	}
+	if s.Outcome != settledRefused || s.Cause != causeRedecided || s.Facts.Noted != nil {
+		t.Fatalf("settlement %+v, want refused %q with nothing noted", s, causeRedecided)
+	}
+	if r := dormantSettled(got.ID, s); !r.live(plannerT0) || r.Cause != causeRedecided {
+		t.Fatalf("row backoff %+v, want a live redecided backoff", r)
+	}
+}
+
+// TestOnlyTheDormantStopOfAGoneRuntimeIsANoop (CONTRACT v5.10d (a),
+// scoped). Kills the already-gone no-op taken by any stop the fresh read
+// redecides: on the same killed row and the same absent runtime, the
+// operator-dormant stop settles as the no-op, and an idle stop refuses
+// redecided, keeping its backoff.
+func TestOnlyTheDormantStopOfAGoneRuntimeIsANoop(t *testing.T) {
+	p, it, store, _ := admittedBeginOn(t, killedMeta, killedWoken)
+	b, err := store.Get(it.Key.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		reason string
+		want   txStep
+	}{
+		{decideDormantStop, txStep{Done: true, Cause: causeAlreadyGone}},
+		{decideIdleTimeout, txStep{Refuse: causeRedecided}},
+	} {
+		v := txView{
+			It: intent{Key: it.Key, Kind: intentStop, Reason: c.reason, Basis: it.Basis}, World: p.World, Alloc: p.Alloc,
+			Row: sessionInfoFromBead(b), Meta: b.Metadata, RT: &txRuntime{Class: rtAbsent}, Now: gatherNow,
+		}
+		if got := stopDecide(v); got.Done != c.want.Done || got.Cause != c.want.Cause || got.Refuse != c.want.Refuse {
+			t.Errorf("%s over an absent runtime: %+v, want %+v", c.reason, got, c.want)
 		}
 	}
 }
