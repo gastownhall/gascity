@@ -17,6 +17,7 @@ go_library(
         "//internal/beadmeta",
         "//internal/beads",
         "//internal/beads/closeorder",
+        "//internal/coordclass",
         "//internal/formula",
         "//internal/fsys",
         "//internal/pathutil",

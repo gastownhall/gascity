@@ -120,12 +120,12 @@ option_defaults = { model = "o4-mini", permission_mode = "suggest" }
 ```
 
 <Note>
-`suggest` maps to `--ask-for-approval untrusted --sandbox read-only`: trusted
-read-only commands run without prompting, but anything outside that boundary —
-including writing a file — blocks on interactive approval. So an agent set to
-`suggest` can't finish unattended work like the `gc sling` walkthrough below,
-which has to write `review.md`. Reach for `suggest` on an agent you'll attach
-to and approve step-by-step; for fire-and-forget slung work, use a mode that
+`suggest` maps to `--ask-for-approval on-request --sandbox read-only`, Codex's
+Read Only preset: commands run in a read-only sandbox, and anything outside that
+boundary — including writing a file — blocks on interactive approval. So an
+agent set to `suggest` can't finish unattended work like the `gc sling`
+walkthrough below, which has to write `review.md`. Reach for `suggest` on an
+agent you'll attach to and approve step-by-step; for fire-and-forget slung work, use a mode that
 doesn't block on approval, such as `auto-edit` or `unrestricted`.
 </Note>
 

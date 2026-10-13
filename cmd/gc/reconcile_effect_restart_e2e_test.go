@@ -144,6 +144,23 @@ func TestDriftRestartStopIsFenced(t *testing.T) {
 	}
 }
 
+// Kills a drift restart that resets the row over a runtime its own section
+// reads (STALE-READ E1): one back under the name after the confirmed stop
+// refuses runtime-present, and the row is not reset to start-pending.
+func TestDriftRestartRestsOnItsOwnRead(t *testing.T) {
+	p, it, store, leaf := driftOn(t, true, false)
+	p.seam = func(_ context.Context, s txSeam, _ intent, section, _ int) error {
+		if s == seamAfterCall && section == driftLeaseAt { // the stop Call's section
+			startRuntime(t, leaf.Fake, "s-gc-1", map[string]string{"GC_SESSION_ID": it.Key.ID, "GC_INSTANCE_TOKEN": "tok-3"})
+		}
+		return nil
+	}
+	s := runTx(context.Background(), p, it, effectSpecs[it.Kind], nil)
+	if got, _ := store.Get(it.Key.ID); s.Outcome != settledRefused || s.Cause != causeRuntimePresent || got.Metadata["state"] == "start-pending" {
+		t.Fatalf("a runtime back after the stop: settled %+v, state %q; want refused %q, no reset", s, got.Metadata["state"], causeRuntimePresent)
+	}
+}
+
 // Kills a relaunch that skips the re-decide or the L3 re-read before
 // Relaunch (C8.7): a runtime gone between the deferral and the relaunch refuses as re-decided; an
 // attach that lands after the relaunch section's reads holds the Relaunch,

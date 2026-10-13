@@ -1546,7 +1546,7 @@ func snapshotGraphV2ReplacementRoot(store beads.Store, formulaName string, vars 
 	if err := closeFailedGraphV2RootsByKey(store, key); err != nil {
 		return graphV2ReplacementSnapshot{}, err
 	}
-	matches, err := store.ListByMetadata(map[string]string{beadmeta.Graphv2RootKeyMetadataKey: key}, 2, beads.WithBothTiers)
+	matches, err := sourceworkflow.KeyedRoots(store, beadmeta.Graphv2RootKeyMetadataKey, key, beads.WithBothTiers)
 	if err != nil {
 		return graphV2ReplacementSnapshot{}, fmt.Errorf("looking up formulas v2 root key %s: %w", key, err)
 	}
@@ -1598,7 +1598,7 @@ func closeFailedGraphV2Roots(store beads.Store, recipe *formula.Recipe) error {
 }
 
 func closeFailedGraphV2RootsByKey(store beads.Store, key string) error {
-	matches, err := store.ListByMetadata(map[string]string{beadmeta.Graphv2RootKeyMetadataKey: key}, 0, beads.WithBothTiers)
+	matches, err := sourceworkflow.KeyedRoots(store, beadmeta.Graphv2RootKeyMetadataKey, key, beads.WithBothTiers)
 	if err != nil {
 		return fmt.Errorf("looking up failed formulas v2 roots for key %s: %w", key, err)
 	}
@@ -1651,7 +1651,7 @@ func existingGraphV2Root(store beads.Store, recipe *formula.Recipe) (*molecule.R
 	if key == "" {
 		return nil, nil
 	}
-	matches, err := store.ListByMetadata(map[string]string{beadmeta.Graphv2RootKeyMetadataKey: key}, 2, beads.WithBothTiers)
+	matches, err := sourceworkflow.KeyedRoots(store, beadmeta.Graphv2RootKeyMetadataKey, key, beads.WithBothTiers)
 	if err != nil {
 		return nil, fmt.Errorf("looking up formulas v2 root key %s: %w", key, err)
 	}

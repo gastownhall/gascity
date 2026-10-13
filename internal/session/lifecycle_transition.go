@@ -61,6 +61,19 @@ func clearPrimingMarkers(patch MetadataPatch) {
 	}
 }
 
+// resumeRunKeys are the resume backstop's run (mc-bm1af): its count of
+// resume-shaped failures, and whether the last committed launch resumed.
+// They belong to one conversation, so every conversation reset clears them
+// (ClearResumeRun): a new conversation must not inherit the old one's run.
+var resumeRunKeys = []string{"resume_failures", "resume_launch"}
+
+// ClearResumeRun adds the resume backstop's run to patch, cleared.
+func ClearResumeRun(patch MetadataPatch) {
+	for _, k := range resumeRunKeys {
+		patch[k] = ""
+	}
+}
+
 // PromptHash returns the sha256 hex digest of the exact rendered startup
 // prompt. The empty prompt hashes to "" (not the sha256 of the empty string),
 // so it is one of the two independent gates — alongside promptDelivery("")
@@ -93,6 +106,9 @@ var freshWakeConversationResetKeys = []string{
 	PrimedAtMetadataKey,
 	PrimingAttemptedAtMetadataKey,
 	PromptHashMetadataKey,
+	// The resume backstop's run belongs to the conversation (ClearResumeRun).
+	"resume_failures",
+	"resume_launch",
 }
 
 // ResetCommittedAtKey records when a restart handoff durably committed.
@@ -132,6 +148,7 @@ func applyFreshWakeConversationReset(patch MetadataPatch) {
 	patch["live_hash"] = ""
 	patch[startupDialogVerifiedKey] = ""
 	clearPrimingMarkers(patch)
+	ClearResumeRun(patch)
 }
 
 func pendingCreateStartedAt(now time.Time) string {
@@ -530,8 +547,10 @@ func RestartRequestPatch(sessionKey string, now time.Time) MetadataPatch {
 	// A restart handoff clears started_config_hash to force the next wake onto a
 	// first-start path, so the priming markers share that clear (S19 Stage 2
 	// priming-key lifetime rule): the fresh conversation must re-prime rather
-	// than inherit the previous incarnation's confirmation pair.
+	// than inherit the previous incarnation's confirmation pair. The fresh
+	// conversation starts the resume backstop's run anew too.
 	clearPrimingMarkers(patch)
+	ClearResumeRun(patch)
 	if sessionKey != "" {
 		patch["session_key"] = sessionKey
 	}

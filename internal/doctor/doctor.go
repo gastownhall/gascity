@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"time"
 )
@@ -329,7 +330,10 @@ func printResult(w io.Writer, r *CheckResult, verbose bool) {
 		fmt.Fprintf(w, "      fix attempted; check still failing\n") //nolint:errcheck // best-effort output
 	}
 	if r.FixHint != "" && r.Status != StatusOK && !r.Fixed {
-		fmt.Fprintf(w, "      hint: %s\n", r.FixHint) //nolint:errcheck // best-effort output
+		// Continuation lines of a multi-line hint align under its first.
+		const label = "      hint: "
+		hint := strings.ReplaceAll(r.FixHint, "\n", "\n"+strings.Repeat(" ", len(label)))
+		fmt.Fprintf(w, "%s%s\n", label, hint) //nolint:errcheck // best-effort output
 	}
 }
 

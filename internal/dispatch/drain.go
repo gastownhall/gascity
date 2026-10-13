@@ -1271,15 +1271,19 @@ func drainUnitConvoyByKey(store beads.Store, unitKey string, opts ProcessOptions
 		owner beads.Store
 	)
 	err := walkDrainUnitConvoyLegs(store, opts, func(probe beads.Store) (bool, error) {
-		existing, err := probe.ListByMetadata(map[string]string{beadmeta.DrainUnitKeyMetadataKey: unitKey}, 1, beads.WithBothTiers)
+		existing, err := probe.ListByMetadata(map[string]string{beadmeta.DrainUnitKeyMetadataKey: unitKey}, 0, beads.WithBothTiers)
 		if err != nil {
 			return false, err
 		}
-		if len(existing) == 0 {
-			return false, nil
+		// Only a convoy is a unit convoy: another bead carrying the key (a
+		// task's) is no mint to resume (architecture B).
+		for _, b := range existing {
+			if b.Type == "convoy" {
+				found, owner = b, probe
+				return true, nil
+			}
 		}
-		found, owner = existing[0], probe
-		return true, nil
+		return false, nil
 	})
 	if err != nil {
 		return beads.Bead{}, nil, false, err
@@ -1402,7 +1406,7 @@ func ensureDrainItemRoot(store beads.Store, control, unit, member beads.Bead, co
 	if err := closeFailedDrainItemRoots(store, control.ID, row.ItemRootKey); err != nil {
 		return "", false, err
 	}
-	existing, err := store.ListByMetadata(map[string]string{beadmeta.ItemRootKeyMetadataKey: row.ItemRootKey}, 0, beads.IncludeClosed, beads.WithBothTiers)
+	existing, err := sourceworkflow.KeyedRoots(store, beadmeta.ItemRootKeyMetadataKey, row.ItemRootKey, beads.IncludeClosed, beads.WithBothTiers)
 	if err != nil {
 		return "", false, fmt.Errorf("%s: looking up item root %s: %w", control.ID, row.ItemRootKey, err)
 	}
@@ -1515,7 +1519,7 @@ func closeFailedDrainItemRoots(store beads.Store, controlID, itemRootKey string)
 	if store == nil || itemRootKey == "" {
 		return nil
 	}
-	matches, err := store.ListByMetadata(map[string]string{beadmeta.ItemRootKeyMetadataKey: itemRootKey}, 0, beads.WithBothTiers)
+	matches, err := sourceworkflow.KeyedRoots(store, beadmeta.ItemRootKeyMetadataKey, itemRootKey, beads.WithBothTiers)
 	if err != nil {
 		return fmt.Errorf("%s: looking up failed drain item roots for key %s: %w", controlID, itemRootKey, err)
 	}

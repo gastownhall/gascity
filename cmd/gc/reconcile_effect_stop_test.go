@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -57,6 +59,38 @@ func eventTypes(s settlement) []string {
 		out = append(out, ev.Type)
 	}
 	return out
+}
+
+// TestStopFinalizeAndCloseRestOnTheirOwnRead (STALE-READ M1, E1). Kills a
+// finalize or premise close that rests on section 0's relayed C8.8: a
+// runtime back under the name after the confirmed stop, which the finalize
+// section's (or the close section's) own read finds, refuses
+// runtime-present, writing no drained finalize and closing nothing.
+func TestStopFinalizeAndCloseRestOnTheirOwnRead(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		meta    []string
+		entry   func(*selectionEntry)
+		section int // the section after whose Call the runtime comes back
+	}{
+		{"the finalize", signaled(drainOrphaned, "operator_drain", "3"), wanted, 0},
+		{"the premise close", signaled(drainOrphaned, "pool_managed", "true"), undesired(drainOrphaned), 1},
+	} {
+		s, got, leaf := stopRun(t, c.meta, c.entry, func(p *effectPass, leaf *fenceLeaf, _ beads.Store, id string) {
+			p.seam = func(_ context.Context, at txSeam, _ intent, section, _ int) error {
+				if at == seamAfterCall && section == c.section {
+					startRuntime(t, leaf.Fake, "s-gc-1", map[string]string{"GC_SESSION_ID": id, "GC_INSTANCE_TOKEN": "tok-3"})
+				}
+				return nil
+			}
+		})
+		if !leaf.IsRunning("s-gc-1") {
+			t.Fatalf("%s: the runtime did not come back", c.name)
+		}
+		if s.Outcome != settledRefused || s.Cause != causeRuntimePresent || got.Status == "closed" || got.Metadata["state"] == string(session.StateDrained) {
+			t.Errorf("%s: settled %+v, row %s state %q; want refused %q, nothing finalized or closed", c.name, s, got.Status, got.Metadata["state"], causeRuntimePresent)
+		}
+	}
 }
 
 // TestStopVerbStopsConfirmsAndFinalizes (D3, D4; SESS-035, DRAIN-054).
@@ -284,6 +318,108 @@ func TestFinalizeWorkReadErrorKeepsOpen(t *testing.T) {
 		closed := got.Status == "closed"
 		if s.Outcome != settledLanded || closed == failed || (failed && got.Metadata["sleep_reason"] != "idle") {
 			t.Errorf("read failed=%v: settlement %+v, closed %v, row %v; want closed only on a clean read", failed, s, closed, got.Metadata)
+		}
+	}
+}
+
+// blockingWork is a work leg whose seat-scoped live lists block while
+// armed, until release closes: the finalize's bounded probe expires at
+// fenceProbeTimeout and hands the decide a zero finalizeWork. (A panicking
+// list would not do: seat_work recovers it per store as a read error.)
+type blockingWork struct {
+	beads.Store
+	armed   *atomic.Bool
+	release <-chan struct{}
+}
+
+func (s blockingWork) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if q.Assignee != "" && q.Live && s.armed.Load() {
+		<-s.release
+	}
+	return s.Store.List(q)
+}
+
+// claimFor gives the row id an in-progress work bead and returns its ID.
+func claimFor(t *testing.T, store beads.Store, id string) string {
+	t.Helper()
+	b, err := store.Create(beads.Bead{Title: "w", Type: "task", Assignee: id})
+	if err == nil {
+		err = store.Update(b.ID, beads.UpdateOpts{Status: stringPtr("in_progress")})
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b.ID
+}
+
+// Kills a close over a lost work read (STALE-READ-ARCH §7.1, PR 1), under
+// synctest so the expiries cost no real time: a pool seat holding
+// in-progress work whose finalize work read expires is not closed, its
+// work kept; a seat whose clean finalize read found none, assigned work
+// after it, whose premise close's own read expires, is not closed either;
+// a clean read with no work closes. The zero value or a probe error holds
+// an ordinary row and a soft-suspended pool seat alike in stopChoice.
+func TestFinalizeLostWorkReadNeverCloses(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		lose   int // the section whose probe expires: 1 the finalize's, 2 the close's; 0 none
+		closed bool
+	}{{"a clean read", 0, true}, {"the finalize's read expires over work", 1, false}, {"the close's read expires after a late claim", 2, false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				release := make(chan struct{})
+				defer close(release)
+				armed := &atomic.Bool{}
+				var workID string
+				var work beads.Store
+				s, got, _ := stopRun(t, signaled(drainOrphaned, "pool_managed", "true"), undesired(drainOrphaned), func(p *effectPass, _ *fenceLeaf, store beads.Store, id string) {
+					work = store
+					if tc.lose == 1 {
+						workID = claimFor(t, store, id)
+						armed.Store(true)
+					}
+					p.reads.legs = testWorkLegs(p.World.CityPath, p.World.Env.Cfg, blockingWork{Store: store, armed: armed, release: release}, nil).readOnly()
+					p.seam = func(_ context.Context, at txSeam, _ intent, section, _ int) error {
+						if tc.lose == 2 && at == seamAfterCall && section == 1 { // after the finalize's clean read, before the close's
+							workID = claimFor(t, store, id)
+							armed.Store(true)
+						}
+						return nil
+					}
+				})
+				if tc.lose != 0 && workID == "" {
+					t.Fatal("the run never reached the section whose read it loses")
+				}
+				closed := got.Status == "closed"
+				if closed != tc.closed {
+					t.Fatalf("settlement %+v, status %s, row %v; want closed %v", s, got.Status, got.Metadata, tc.closed)
+				}
+				if workID != "" {
+					if wb, _ := work.Get(workID); wb.Status != "in_progress" || wb.Assignee != got.ID {
+						t.Fatalf("work %s %q assignee %q; want kept on the seat", workID, wb.Status, wb.Assignee)
+					}
+				}
+			})
+		})
+	}
+	// A soft-suspended pool seat keeps no slot (#7718, KeepsSlot), so only
+	// its work read stands between it and a close.
+	soft := censusRowOf(t, drainRow("state", "suspended", "pool_managed", "true", "suspended_at", rowAt(-time.Hour))).Info
+	if session.DispositionOfInfo(soft).KeepsSlot() {
+		t.Fatal("fixture: want a soft suspend, which keeps no slot")
+	}
+	for _, row := range []session.Info{fenceRow("a", "tok-a"), soft} {
+		v := txView{It: intent{Kind: intentStop, Reason: decideStopVerb + drainOrphaned}, Row: row, Now: gatherNow}
+		if !stopChoice(v, finalizeWork{free: true}, nil).CloseSeat {
+			t.Fatalf("%s: a clean read closes no seat; the cases below prove nothing", row.ID)
+		}
+		for _, c := range []struct {
+			work finalizeWork
+			err  error
+		}{{finalizeWork{}, nil}, {finalizeWork{free: true}, errProbeExpired}, {finalizeWork{}, errProbeExpired}} {
+			if stopChoice(v, c.work, c.err).CloseSeat {
+				t.Errorf("%s: work %+v, probe error %v: the finalize closes, want it held as work", row.ID, c.work, c.err)
+			}
 		}
 	}
 }
@@ -521,14 +657,15 @@ func TestSameObjectGuardsForeignAndCorpse(t *testing.T) {
 // rebuilt without its stop keys, or that clears only an active request: an
 // operator-dormant stop of a row carrying a current ack clears it in its
 // finalize, as D4 does always; on a suspended row the ack is residue
-// (activeStop's rule 2), cleared just the same.
+// (activeStop's rule 2), cleared just the same. A soft suspend is no
+// dormant row (v5.9u): the awake heal takes it.
 func TestDormantFinalizeClearsALeftoverRequest(t *testing.T) {
 	for _, c := range []struct {
 		name string
 		meta []string
 	}{
 		{"user-hold", []string{"sleep_intent", "user-hold"}},
-		{"suspended", []string{"state", string(session.StateSuspended), "suspended_at", rowAt(-time.Minute)}},
+		{"suspended", []string{"state", string(session.StateSuspended), "sleep_intent", "user-hold", "suspended_at", rowAt(-time.Minute)}},
 	} {
 		s, got, leaf := stopRun(t, append(c.meta, session.DrainAckIncarnationKey, "3", session.DrainAckAtKey, rowAt(-time.Minute)), undesired(drainOrphaned), nil)
 		if s.Outcome != settledLanded || stops(leaf) != 1 || got.Metadata[session.DrainAckIncarnationKey] != "" || got.Metadata[session.DrainAckAtKey] != "" {

@@ -345,7 +345,7 @@ func (t *Tmux) ClearInput(ctx context.Context, session string, restoreWindow tim
 		return runtime.ErrInteractionUnsupported
 	}
 	// A detached pane may not have redrawn since the interrupt.
-	t.WakePaneIfDetached(session)
+	t.WakePaneIfDetached(session, target)
 
 	mayType := func() error { return t.noClientAttached(session) }
 	deadline := time.Now().Add(restoreWindow)

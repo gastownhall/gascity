@@ -106,6 +106,12 @@ func contractSessionsFamily(t *testing.T, h *contractHarness) {
 	if got := h.getSession(t, sess.Id); got.Title != "contract session renamed" {
 		t.Fatalf("title after rename = %q", got.Title)
 	}
+	pinned, err := c.PostV0CityByCityNameSessionByIdPinWithResponse(ctx, city, sess.Id,
+		&genclient.PostV0CityByCityNameSessionByIdPinParams{XGCRequest: contractCSRF})
+	expectStatus(t, "pin session", pinned, err, http.StatusOK)
+	unpinned, err := c.PostV0CityByCityNameSessionByIdUnpinWithResponse(ctx, city, sess.Id,
+		&genclient.PostV0CityByCityNameSessionByIdUnpinParams{XGCRequest: contractCSRF})
+	expectStatus(t, "unpin session", unpinned, err, http.StatusOK)
 
 	transcript, err := c.GetV0CityByCityNameSessionByIdTranscriptWithResponse(ctx, city, sess.Id, nil)
 	expectStatus(t, "session transcript", transcript, err, http.StatusOK)

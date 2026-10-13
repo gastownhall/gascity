@@ -156,11 +156,13 @@ func (s *Store) List(stateFilter, templateFilter string) ([]Info, error) {
 	return out, nil
 }
 
-// ListByMetadataInfos returns the Info projection of every bead matching the given
-// metadata filters, keeping the raw-bead codec confined to this edge. It is the typed
-// front door for the session-log workdir fallback's ListByMetadata scans (the callers
-// need only Info fields). limit is passed through to the store; a zero limit is
-// unbounded. No raw bead escapes.
+// ListByMetadataInfos returns the Info projection of every session row
+// (IsSessionBeadOrRepairable) matching the given metadata filters, keeping the
+// raw-bead codec confined to this edge. It is the typed front door for the
+// session-log workdir fallback's ListByMetadata scans (the callers need only
+// Info fields). Only a session row is one: another bead carrying the keys (a
+// task's) is no sibling session (architecture B). limit is passed through to
+// the store; a zero limit is unbounded. No raw bead escapes.
 func (s *Store) ListByMetadataInfos(filters map[string]string, limit int) ([]Info, error) {
 	if s == nil || s.store.Store == nil {
 		return nil, nil
@@ -171,7 +173,9 @@ func (s *Store) ListByMetadataInfos(filters map[string]string, limit int) ([]Inf
 	}
 	out := make([]Info, 0, len(found))
 	for _, b := range found {
-		out = append(out, infoFromPersistedBead(b))
+		if IsSessionBeadOrRepairable(b) {
+			out = append(out, infoFromPersistedBead(b))
+		}
 	}
 	return out, nil
 }
