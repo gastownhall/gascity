@@ -93,7 +93,7 @@ func (c *ledgerFeedDoctorCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResul
 	tailed, scanOnly := 0, 0
 	for _, s := range st.Scopes {
 		r.Details = append(r.Details, ledgerFeedScopeDetail(s))
-		if s.State == ledgerFeedStateScanOnly {
+		if s.State == ledgerFeedStateScanOnly || ledgerFeedWaiting(s) {
 			scanOnly++
 			continue
 		}
@@ -138,10 +138,27 @@ func ledgerFeedScopeWarnings(s ledgerFeedScopeStatus) []string {
 	return out
 }
 
+// ledgerFeedWaiting reports a feed that has not read its journal since it
+// started and is waiting for it (inactive, unavailable, or a late baseline):
+// its scope is on the re-scan, which is not a fault.
+func ledgerFeedWaiting(s ledgerFeedScopeStatus) bool {
+	if s.ReadOK {
+		return false
+	}
+	switch s.State {
+	case ledgerFeedStateStarting, ledgerFeedStateLate, ledgerFeedStateInactive, ledgerFeedStateUnavailable:
+		return true
+	}
+	return false
+}
+
 // ledgerFeedScopeDetail is one scope's detail line.
 func ledgerFeedScopeDetail(s ledgerFeedScopeStatus) string {
 	if s.State == ledgerFeedStateScanOnly {
 		return fmt.Sprintf("%s: re-scan only (%s)", s.Scope, s.Reason)
+	}
+	if ledgerFeedWaiting(s) {
+		return fmt.Sprintf("%s: re-scan only until its journal can be read via %s (%s: %s)", s.Scope, s.Lane, s.State, s.Reason)
 	}
 	parts := []string{
 		fmt.Sprintf("%s: %s via %s", s.Scope, s.State, s.Lane),

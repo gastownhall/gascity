@@ -2,8 +2,12 @@ package main
 
 // The controller's ledger feed: CD slice 1a's second half.
 //
-// With [beads] ledger_feed = "auto", every city or rig cache whose scope has
-// its durable mutation journal active is tailed (internal/beads/ledgerfeed).
+// With [beads] ledger_feed = "auto", every city or rig cache whose store
+// carries a durable mutation journal gets a feed (internal/beads/ledgerfeed).
+// The feed tails the journal while the scope has it active, and waits while
+// it is inactive or unavailable (a proxied store demoted at boot, a scope
+// that turns the journal on later), reported as on the re-scan until its
+// first good read; it never turns the journal on.
 // Each page names the rows that changed; the feed refreshes every distinct id
 // the cache owns through the cache (RefreshRowReport), so bead.* events keep
 // exactly one author, the cache's onChange, and a refresh notifies only a
@@ -266,8 +270,9 @@ type ledgerFeedAttachment struct {
 }
 
 // attachLedgerFeed decides whether store's cache gets a feed (it needs mode
-// auto, a background-refreshed cache with a cancellable ctx, and an active
-// journal). It returns nil when req is nil or the mode is off.
+// auto, a background-refreshed cache with a cancellable ctx, and a store that
+// carries a journal, active or not). It returns nil when req is nil or the
+// mode is off.
 func attachLedgerFeed(ctx context.Context, req *ledgerFeedRequest, store beads.Store, backgroundRefresh bool) *ledgerFeedAttachment {
 	if req == nil || req.set == nil || req.mode != config.BeadsLedgerFeedAuto {
 		return nil
@@ -288,14 +293,16 @@ func attachLedgerFeed(ctx context.Context, req *ledgerFeedRequest, store beads.S
 	return &ledgerFeedAttachment{entry: entry}
 }
 
-// ledgerFeedLane finds the journal a feed would tail through store and
-// names the lane, or says why there is none.
+// ledgerFeedLane finds the journal a feed would tail through store, active
+// or not, and names the lane, or says why there is none. Whether the journal
+// is active is the reads' answer (ErrEventsJournalInactive), so a scope
+// whose journal turns on after its store was built is tailed without a
+// rebuild.
 func ledgerFeedLane(store beads.Store) (journalops.Journal, string, string) {
-	if journal, ok := beads.ActiveEventsJournal(store); ok {
-		return journal, fmt.Sprintf("%T", journal), ""
-	}
 	if carrier := journalCarrier(store); carrier != nil {
-		return nil, fmt.Sprintf("%T", carrier), "journal not active"
+		if journal, ok := carrier.(journalops.Journal); ok {
+			return journal, fmt.Sprintf("%T", carrier), ""
+		}
 	}
 	return nil, fmt.Sprintf("%T", store), fmt.Sprintf("lane %T cannot be tailed", store)
 }
@@ -371,7 +378,10 @@ type ledgerFeed struct {
 	// refreshMu serializes the page applies and the retry passes.
 	refreshMu sync.Mutex
 
-	mu                 sync.Mutex
+	mu sync.Mutex
+	// readOK is set by the feed's first good journal read; until then a
+	// feed waiting for its journal is reported as on the re-scan.
+	readOK             bool
 	state              string
 	stateSince         time.Time
 	reason             string
@@ -808,6 +818,7 @@ func (f *ledgerFeed) logRefreshError(id string, err error) {
 func (f *ledgerFeed) noteReadOK() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.readOK = true
 	switch f.state {
 	case ledgerFeedStateGated, ledgerFeedStateInactive, ledgerFeedStateUnavailable, ledgerFeedStateRetrying:
 		f.setStateLocked(ledgerFeedStateTailing, nil, f.now())
@@ -1017,23 +1028,26 @@ type ledgerFeedStatus struct {
 
 // ledgerFeedScopeStatus is one scope's feed, or why it has none.
 type ledgerFeedScopeStatus struct {
-	Scope             string           `json:"scope"`
-	Lane              string           `json:"lane"`
-	State             string           `json:"state"`
-	StateAgeMS        int64            `json:"state_age_ms"`
-	Reason            string           `json:"reason,omitempty"`
-	Seq               int64            `json:"seq"`
-	Head              int64            `json:"head"`
-	Lag               int64            `json:"lag"`
-	Pages             int64            `json:"pages"`
-	Rows              int64            `json:"rows"`
-	IDs               int64            `json:"ids"`
-	Refreshed         int64            `json:"refreshed"`
-	Fenced            int64            `json:"fenced"`
-	Unavailable       int64            `json:"unavailable"`
-	RefreshErrors     int64            `json:"refresh_errors"`
-	Unowned           int64            `json:"unowned"`
-	UnheldCloses      int64            `json:"unheld_closes"`
+	Scope         string `json:"scope"`
+	Lane          string `json:"lane"`
+	State         string `json:"state"`
+	StateAgeMS    int64  `json:"state_age_ms"`
+	Reason        string `json:"reason,omitempty"`
+	Seq           int64  `json:"seq"`
+	Head          int64  `json:"head"`
+	Lag           int64  `json:"lag"`
+	Pages         int64  `json:"pages"`
+	Rows          int64  `json:"rows"`
+	IDs           int64  `json:"ids"`
+	Refreshed     int64  `json:"refreshed"`
+	Fenced        int64  `json:"fenced"`
+	Unavailable   int64  `json:"unavailable"`
+	RefreshErrors int64  `json:"refresh_errors"`
+	Unowned       int64  `json:"unowned"`
+	UnheldCloses  int64  `json:"unheld_closes"`
+	// ReadOK reports a good journal read since the feed started; a feed
+	// without one is waiting for its journal and the scope is on the re-scan.
+	ReadOK            bool             `json:"read_ok"`
 	PendingRetries    int64            `json:"pending_retries"`
 	RetryGiveUps      int64            `json:"retry_give_ups"`
 	Wakes             int64            `json:"wakes"`
@@ -1109,7 +1123,7 @@ func (f *ledgerFeed) status(now time.Time) ledgerFeedScopeStatus {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	s := f.stats
-	st.State, st.Reason = f.state, f.reason
+	st.State, st.Reason, st.ReadOK = f.state, f.reason, f.readOK
 	st.StateAgeMS = now.Sub(f.stateSince).Milliseconds()
 	st.IDs, st.Refreshed, st.Fenced = s.ids, s.refreshed, s.fenced
 	st.Unavailable, st.RefreshErrors, st.Unowned = s.unavailable, s.refreshErrors, s.unowned

@@ -1025,7 +1025,8 @@ func TestAttachLedgerFeedDecision(t *testing.T) {
 		{"suspended", ctx, newJournalingStore(), false, "suspended at start"},
 		{"no cancellable ctx", context.Background(), newJournalingStore(), true, "no background refresh"},
 		{"untailable lane", ctx, beads.NewMemStore(), true, "lane *beads.MemStore cannot be tailed"},
-		{"inactive", ctx, inactive, true, "journal not active"},
+		// A scope whose journal is off gets a feed that waits for it.
+		{"inactive", ctx, inactive, true, ""},
 		{"tailed", ctx, newJournalingStore(), true, ""},
 	} {
 		att := attachLedgerFeed(tc.ctx, req(config.BeadsLedgerFeedAuto), tc.store, tc.background)
@@ -1033,6 +1034,42 @@ func TestAttachLedgerFeedDecision(t *testing.T) {
 			t.Fatalf("%s: attachment %+v, want reason %q", tc.name, att, tc.reason)
 		}
 	}
+}
+
+// A scope whose journal is off when its store is built is tailed once the
+// journal turns on, without a rebuild: the feed waits, reported as on the
+// re-scan, and its first good read forces a re-scan.
+func TestLedgerFeedWaitsForAJournalTurnedOnLater(t *testing.T) {
+	store := newJournalingStore()
+	store.j.active.Store(false)
+	set := newLedgerFeedSet(t.TempDir(), ledgerFeedHooks{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req := &ledgerFeedRequest{set: set, scope: ledgerFeedCityScope, mode: config.BeadsLedgerFeedAuto}
+	cache := wrapWithCachingStoreFeed(ctx, store, events.NewFake(), true, req).(*beads.CachingStore)
+	defer cache.StopReconciler()
+	_, entries := set.snapshot()
+	if len(entries) != 1 || entries[0].feed == nil {
+		t.Fatalf("entries = %+v, want a feed waiting for the journal", entries)
+	}
+	f := entries[0].feed
+	if st := f.status(time.Now()); st.ReadOK {
+		t.Fatalf("status = %+v, want no good read yet", st)
+	}
+	store.j.active.Store(true)
+	waitForLedgerFeed(t, 5*time.Second, func() bool {
+		st := f.status(time.Now())
+		return st.State == ledgerFeedStateTailing && st.ReadOK && cache.Stats().ReconcileRequests >= 1
+	}, "the feed to tail the journal once it turned on")
+	row, err := store.Store.Create(beads.Bead{Title: "out of band"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.j.add(journalOpCreate, row.ID, "", "")
+	waitForLedgerFeed(t, 5*time.Second, func() bool {
+		_, err := cache.Get(row.ID)
+		return err == nil && f.status(time.Now()).Refreshed >= 1
+	}, "the feed to refresh a row after the journal turned on")
 }
 
 // A binding cache and the shared legacy file store take wrapWithCachingStore,
@@ -1177,7 +1214,7 @@ func TestLedgerFeedDoctorCheck(t *testing.T) {
 		return &config.City{Beads: config.BeadsConfig{LedgerFeed: mode}}
 	}
 	tailed := func(mut func(*ledgerFeedScopeStatus)) ledgerFeedStatus {
-		s := ledgerFeedScopeStatus{Scope: "city", State: ledgerFeedStateTailing, Lane: "*beads.NativeDoltStore"}
+		s := ledgerFeedScopeStatus{Scope: "city", State: ledgerFeedStateTailing, Lane: "*beads.NativeDoltStore", ReadOK: true}
 		if mut != nil {
 			mut(&s)
 		}
@@ -1204,6 +1241,9 @@ func TestLedgerFeedDoctorCheck(t *testing.T) {
 		}), nil, doctor.StatusWarning, "feed retrying for 2m0s"},
 		{"not yet stuck", "auto", tailed(func(s *ledgerFeedScopeStatus) { s.State, s.StateAgeMS = ledgerFeedStateRetrying, 1000 }), nil, doctor.StatusOK, "tailed"},
 		{"echo loop", "auto", tailed(func(s *ledgerFeedScopeStatus) { s.WakesLastMinute = ledgerFeedDoctorWakesPerMinute + 1 }), nil, doctor.StatusWarning, "possible echo loop"},
+		{"waiting for its journal", "auto", tailed(func(s *ledgerFeedScopeStatus) {
+			s.State, s.StateAgeMS, s.ReadOK = ledgerFeedStateInactive, (2 * time.Minute).Milliseconds(), false
+		}), nil, doctor.StatusOK, "0 scope(s) tailed, 2 on the re-scan"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			check := newLedgerFeedDoctorCheck(cfgWith(tc.mode), func(string) (ledgerFeedStatus, error) { return tc.st, tc.err })
