@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
-	"net"
 	"net/url"
 	"regexp"
 	"strings"
@@ -168,8 +167,13 @@ func (l Ledger) validate() error {
 
 // ValidateLedgerURL checks a ledger URL against the connect URL rules: https;
 // or http to a loopback host; or http anywhere when allowPlaintext is set (a
-// tailnet path). The host must be non-empty, and userinfo, a query, and a
-// fragment are refused. Errors never echo the URL, which may hold userinfo.
+// tailnet path). Loopback mirrors bd's insecure-credential guard
+// (configfile.IsLocalHostString), which sends a credential over plain http
+// only to the literal hosts localhost, 127.0.0.1 and ::1; any other http host,
+// including the rest of 127/8 and IPv4-mapped or expanded loopback forms,
+// needs allowPlaintext. The host must be non-empty, and userinfo, a query,
+// and a fragment are refused. Errors never echo the URL, which may hold
+// userinfo.
 func ValidateLedgerURL(raw string, allowPlaintext bool) error {
 	if raw == "" {
 		return fmt.Errorf("url is empty")
@@ -206,12 +210,14 @@ func ValidateLedgerURL(raw string, allowPlaintext bool) error {
 	}
 }
 
+// isLoopbackHost reports whether bd treats host as local for an http
+// credential: exactly localhost (any case), 127.0.0.1 or ::1.
 func isLoopbackHost(host string) bool {
-	if strings.EqualFold(host, "localhost") {
+	switch strings.ToLower(host) {
+	case "localhost", "127.0.0.1", "::1":
 		return true
 	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	return false
 }
 
 // validateCertificatesPEM requires one or more CERTIFICATE blocks that parse
