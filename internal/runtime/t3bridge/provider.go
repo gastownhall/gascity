@@ -475,10 +475,23 @@ var t3CommandRejectionTags = map[string]bool{
 	"OrchestrationCommandPreviouslyRejectedError": true,
 }
 
+// t3DispatchCommandErrorTag is the error tag upstream T3's WS
+// orchestration.dispatchCommand rewraps every engine error in, keeping the
+// engine error's message and carrying the engine error as its cause.
+const t3DispatchCommandErrorTag = "OrchestrationDispatchCommandError"
+
+// t3CommandRejectionMessagePrefixes are the messages of the
+// [t3CommandRejectionTags] errors (T3 orchestration/Errors.ts), which survive
+// the dispatchCommand rewrap even when the cause's encoding drops its tag.
+var t3CommandRejectionMessagePrefixes = []string{
+	"Orchestration command invariant failed (",
+	"Command previously rejected (",
+}
+
 // t3ExitCauseIsRejection reports whether an Exit Failure cause is a
-// definitive refusal: every failure in it is a Fail carrying one of
-// [t3CommandRejectionTags]. A Die, an Interrupt, an unknown error or an
-// unparseable cause is ambiguous. It reads both Effect cause encodings: the
+// definitive refusal: every failure in it is a Fail carrying a T3 command
+// rejection (t3FailureIsRejection). A Die, an Interrupt, an unknown error or
+// an unparseable cause is ambiguous. It reads both Effect cause encodings: the
 // tagged tree (Fail, Die, Interrupt, Sequential, Parallel, Empty) and the
 // flattened list ({"failures": [...]}, {"reasons": [...]} or a bare list).
 func t3ExitCauseIsRejection(raw json.RawMessage) bool {
@@ -495,12 +508,37 @@ func t3ExitCauseIsRejection(raw json.RawMessage) bool {
 			return false
 		}
 		failure, _ := leaf["error"].(map[string]interface{})
-		tag, _ := failure["_tag"].(string)
-		if !t3CommandRejectionTags[tag] {
+		if !t3FailureIsRejection(failure) {
 			return false
 		}
 	}
 	return true
+}
+
+// t3FailureIsRejection reports whether a Fail's error is a T3 command
+// rejection: one of [t3CommandRejectionTags] as the engine raises it, or the
+// dispatchCommand rewrap of one, recognized by its cause's tag or by the
+// engine error's message it keeps.
+func t3FailureIsRejection(failure map[string]interface{}) bool {
+	tag, _ := failure["_tag"].(string)
+	if t3CommandRejectionTags[tag] {
+		return true
+	}
+	if tag != t3DispatchCommandErrorTag {
+		return false
+	}
+	if cause, ok := failure["cause"].(map[string]interface{}); ok {
+		if causeTag, _ := cause["_tag"].(string); t3CommandRejectionTags[causeTag] {
+			return true
+		}
+	}
+	message, _ := failure["message"].(string)
+	for _, prefix := range t3CommandRejectionMessagePrefixes {
+		if strings.HasPrefix(message, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // t3CauseLeaves flattens a decoded cause into its Fail, Die and Interrupt

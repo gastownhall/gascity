@@ -100,6 +100,27 @@ func TestNudgeKeyedRejectionIsErrNudgeRejected(t *testing.T) {
 	}
 }
 
+// Upstream T3 delivers an engine refusal rewrapped as
+// OrchestrationDispatchCommandError; it is still a definitive rejection.
+func TestNudgeKeyedUpstreamWrappedRejectionIsErrNudgeRejected(t *testing.T) {
+	server := newT3BridgeTestServer(t, boundThreadSnapshot("ready"))
+	t.Cleanup(server.Close)
+	server.failCommand("thread.turn.start", map[string]interface{}{
+		"_tag": "Fail",
+		"error": map[string]interface{}{
+			"_tag":    "OrchestrationDispatchCommandError",
+			"message": "Orchestration command invariant failed (thread.turn.start): Thread 'thread-1' does not exist.",
+			"cause":   map[string]interface{}{"name": "Error", "message": "Orchestration command invariant failed (thread.turn.start): Thread 'thread-1' does not exist."},
+		},
+	})
+	_, sp := newSeamBackedSnapshotTestProvider(t, server.wsURL())
+
+	err := sp.(runtime.KeyedNudgeProvider).NudgeKeyed("agent-a", runtime.TextContent("hello"), "batch-1")
+	if !errors.Is(err, runtime.ErrNudgeRejected) {
+		t.Fatalf("NudgeKeyed with an upstream-wrapped rejection = %v, want errors.Is(runtime.ErrNudgeRejected)", err)
+	}
+}
+
 // A transport failure leaves the outcome unknown, so it is never reported as
 // a rejection: the caller must redeliver under the same key.
 func TestTransportFailureIsNotARejection(t *testing.T) {
@@ -121,6 +142,16 @@ func TestT3ExitCauseIsRejection(t *testing.T) {
 	previously := fail("OrchestrationCommandPreviouslyRejectedError")
 	die := map[string]interface{}{"_tag": "Die", "defect": "boom"}
 	interrupt := map[string]interface{}{"_tag": "Interrupt", "fiberId": map[string]interface{}{"id": 3}}
+	// Upstream T3's WS dispatchCommand rewraps every engine error as
+	// OrchestrationDispatchCommandError{message, cause}; the message is the
+	// engine error's own.
+	wrapped := func(message string, cause interface{}) map[string]interface{} {
+		failure := map[string]interface{}{"_tag": "OrchestrationDispatchCommandError", "message": message}
+		if cause != nil {
+			failure["cause"] = cause
+		}
+		return map[string]interface{}{"_tag": "Fail", "error": failure}
+	}
 	for _, tc := range []struct {
 		name  string
 		cause interface{}
@@ -140,6 +171,12 @@ func TestT3ExitCauseIsRejection(t *testing.T) {
 		{name: "bare list", cause: []interface{}{invariant}, want: true},
 		{name: "empty list", cause: []interface{}{}, want: false},
 		{name: "string", cause: "thread is archived", want: false},
+		{name: "wrapped invariant", cause: wrapped("Orchestration command invariant failed (thread.turn.start): Thread 't' does not exist", map[string]interface{}{"name": "Error", "message": "x"}), want: true},
+		{name: "wrapped previously rejected", cause: wrapped("Command previously rejected (cmd-1): Thread 't' does not exist", nil), want: true},
+		{name: "wrapped with a tagged engine cause", cause: wrapped("Failed to dispatch orchestration command", map[string]interface{}{"_tag": "OrchestrationCommandInvariantError", "detail": "no"}), want: true},
+		{name: "wrapped storage failure", cause: wrapped("Failed to dispatch orchestration command", map[string]interface{}{"_tag": "PersistenceSqlError"}), want: false},
+		{name: "wrapped id conflict", cause: wrapped("Command id 'c' already used for thread 'a'; refusing to replay its receipt for thread 'b'.", nil), want: false},
+		{name: "wrapped without a message", cause: map[string]interface{}{"_tag": "Fail", "error": map[string]interface{}{"_tag": "OrchestrationDispatchCommandError"}}, want: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			raw, err := json.Marshal(tc.cause)
