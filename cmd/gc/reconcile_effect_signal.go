@@ -96,13 +96,23 @@ func respawnReads(r effectReads, v txView) respawnRecheck {
 	return respawnRecheck{}
 }
 
+// respawnClaimMoved reports a claim recorded on the fresh row since the pass
+// (#7688 review): a `gc hook --claim` that lands after the probe's claim
+// read and before the CAS, which the drain basis does not compare. The key
+// is a sticky most-recent-claim marker, so it is compared with the pass's
+// value, not tested for non-empty.
+func respawnClaimMoved(v txView) bool {
+	return strings.TrimSpace(v.Row.CurrentClaimBeadID) != strings.TrimSpace(v.World.Census.Rows[v.It.Key].Info.CurrentClaimBeadID)
+}
+
 // signalFreshNeeds are the fresh signal's reads: the runtime, with L3 and
 // L4 (C8.9).
 var signalFreshNeeds = needs{Runtime: true, Legs: legAttach | legPending}
 
 // redecideSignal is redecideRow, then, for the fresh kind, an idle-respawn
 // drain's revalidation, which voids the drain in the signal's stead (its
-// attempt kept, so the bead gets no second one), then L3 and L4. A floor
+// attempt kept, so the bead gets no second one), as does a claim recorded on
+// the fresh row since the pass (respawnClaimMoved), then L3 and L4. A floor
 // member's canceled ack (DRAIN-010) carries legacy's "min-floor cancel"
 // drain transition, a fact only once its write lands.
 func redecideSignal(v txView, chk respawnRecheck, _ error) txStep {
@@ -112,6 +122,9 @@ func redecideSignal(v txView, chk respawnRecheck, _ error) txStep {
 	}
 	if len(step.Write) == 0 || v.It.Kind != intentSignalFresh {
 		return step
+	}
+	if respawnSignal(v.It) && chk.unsafe == "" && respawnClaimMoved(v) {
+		chk.unsafe = "claim-moved"
 	}
 	if respawnSignal(v.It) && (!chk.checked || chk.unsafe != "") {
 		void := txStep{Write: stopCancelPatch(), Cause: causeIdleRespawnVoid + cmp.Or(chk.unsafe, "unchecked")}

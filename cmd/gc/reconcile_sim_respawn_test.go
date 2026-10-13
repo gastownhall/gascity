@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"io"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -56,11 +57,18 @@ func (s *sim) checkRespawnSignal(e *simEffect) func(settlement) {
 
 // restartController replaces the planner, as a controller restart does: its
 // in-memory state (backoff, memo, in-flight map) is gone; the stores and the
-// runtimes stay.
+// runtimes stay. The released effects' writes are checked first, against the
+// controller that wrote them (I4's zombie exception reads its
+// classifications), and I9's start window begins again, as a new
+// controller's token bucket is full. It models a graceful restart only: no
+// crash inside an effect, and the observation cache stays warm, where a real
+// restart starts cold.
 func (s *sim) restartController() {
 	for len(s.parked) > 0 {
 		s.release(0)
 	}
+	s.audit("v2")
+	s.admitted = nil
 	s.inflight = newInflightMap()
 	s.p = newPlanner(s.clk, func() time.Duration { return simPatrol }, nil, s.inflight, nil, io.Discard)
 	s.p.pass = func(now time.Time) passResult { return s.p.tracePass(s.env, now) }
@@ -249,10 +257,11 @@ func (l *simLeg) mustGet(t *testing.T, id string) beads.Bead {
 	return b
 }
 
-// TestSimRespawnChecksBite (I25). Kills an I25 that checks nothing: a second
-// idle-respawn begin for one (row, bead) reports, and so does an
-// idle-respawn signal that left the row stop-pending over a claim the seat
-// held when it was released.
+// TestSimRespawnChecksBite (I25). Kills an I25 that checks nothing, or too
+// much: a second idle-respawn begin for one (row, bead) reports, and a begin
+// for a new bead on the same row does not; an idle-respawn signal that left
+// the row stop-pending over a claim the seat held when it was released
+// reports, and one over a claim taken after its release does not.
 func TestSimRespawnChecksBite(t *testing.T) {
 	begin := func(id string) simWrite {
 		return simWrite{Leg: simCityLeg, Before: sessionRow(id), After: sessionRow(id, session.DrainIntentReasonKey, idleRespawnDrainReason, idleRespawnBeadIDMetadataKey, "gw-1")}
@@ -260,25 +269,71 @@ func TestSimRespawnChecksBite(t *testing.T) {
 	s := respawnSim(t)
 	s.checkRespawnBegin(begin("gc-1"))
 	s.checkRespawnBegin(begin("gc-2")) // another row's begin for the bead
+	next := begin("gc-1")
+	next.After.Metadata[idleRespawnBeadIDMetadataKey] = "gw-2"
+	s.checkRespawnBegin(next) // the row's begin for a new bead
 	if len(s.failures) != 0 {
-		t.Fatalf("one begin per row reported %q", s.failures)
+		t.Fatalf("one begin per (row, bead) reported %q", s.failures)
 	}
 	s.checkRespawnBegin(begin("gc-1"))
 	if len(s.failures) != 1 || !strings.HasPrefix(s.failures[0], "I25 ") {
 		t.Fatalf("a second begin for gc-1/gw-1 reported %q, want I25", s.failures)
 	}
 
-	s = respawnSim(t)
-	l := s.legs[0]
-	b, _ := l.backing.Get("gw-1")
-	status := "in_progress"
-	if err := l.backing.Update(b.ID, beads.UpdateOpts{Status: &status}); err != nil {
-		t.Fatal(err)
+	for _, late := range []bool{false, true} {
+		s = respawnSim(t)
+		l := s.legs[0]
+		claim := func() {
+			status := "in_progress"
+			if err := l.backing.Update("gw-1", beads.UpdateOpts{Status: &status}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if !late {
+			claim()
+		}
+		settle := s.checkRespawnSignal(&simEffect{it: intent{Kind: intentSignalFresh, Key: rowKey{Leg: rowLeg, ID: "gc-1"}, Reason: decideDrainSignal + idleRespawnDrainReason}})
+		if late {
+			claim() // after the release: the effect's probe could not see it
+		}
+		s.setMeta(l, "gc-1", "state", string(session.StateDraining), "state_reason", session.DrainAckStopPendingReason)
+		settle(settlement{Outcome: settledLanded})
+		switch {
+		case late && len(s.failures) != 0:
+			t.Fatalf("a signal over a claim taken after its release reported %q", s.failures)
+		case !late && (len(s.failures) != 1 || !strings.HasPrefix(s.failures[0], "I25 ")):
+			t.Fatalf("a signal over a held claim reported %q, want I25", s.failures)
+		}
 	}
-	settle := s.checkRespawnSignal(&simEffect{it: intent{Kind: intentSignalFresh, Key: rowKey{Leg: rowLeg, ID: "gc-1"}, Reason: decideDrainSignal + idleRespawnDrainReason}})
-	s.setMeta(l, "gc-1", "state", string(session.StateDraining), "state_reason", session.DrainAckStopPendingReason)
-	settle(settlement{Outcome: settledLanded})
-	if len(s.failures) != 1 || !strings.HasPrefix(s.failures[0], "I25 ") {
-		t.Fatalf("a signal over a held claim reported %q, want I25", s.failures)
+}
+
+// TestSimRestartChecksTheOldControllersWrites (the #7688 review's restart
+// helper). Kills a restart that swaps the planner before the writes of the
+// effects it released are checked, so the checks judge them against the new
+// controller's empty memory, or that keeps I9's start window across it.
+func TestSimRestartChecksTheOldControllersWrites(t *testing.T) {
+	s := scripted(t, nil, heldRow())
+	s.inventory()
+	s.pass()
+	if len(s.parked) != 1 {
+		t.Fatalf("parked %d effects, want gc-1's heal", len(s.parked))
 	}
+	old := s.p
+	var saw []*planner
+	checks := simWriteChecks
+	t.Cleanup(func() { simWriteChecks = checks })
+	simWriteChecks = append(slices.Clone(checks), func(s *sim, w simWrite) {
+		if w.After.ID == "gc-1" {
+			saw = append(saw, s.p)
+		}
+	})
+	s.admitted = []time.Time{s.clk.Now()}
+	s.restartController()
+	if len(saw) != 1 || saw[0] != old {
+		t.Fatalf("the heal's write was checked %d times, under the old planner %t; want once, under it", len(saw), len(saw) > 0 && saw[0] == old)
+	}
+	if len(s.admitted) != 0 {
+		t.Fatalf("I9's window kept %d starts across the restart", len(s.admitted))
+	}
+	s.noViolations(t)
 }

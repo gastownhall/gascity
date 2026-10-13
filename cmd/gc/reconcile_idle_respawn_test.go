@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -172,6 +173,48 @@ func TestIdleRespawnRevalidationVoidsOnClaimReadErrorOrActivity(t *testing.T) {
 			t.Errorf("%s: %+v, row %v; want the drain voided (%s), its attempt kept", c.name, s, m, c.void)
 		case c.void != "" && (s.Facts.Transition == nil || s.Facts.Transition.Transition != "cancel" || s.Facts.Transition.Reason != idleRespawnDrainReason):
 			t.Errorf("%s: transition %+v, want legacy's idle-respawn cancel", c.name, s.Facts.Transition)
+		}
+	}
+}
+
+// TestIdleRespawnSignalVoidsOnAClaimSinceThePass (#7688 review). Kills a
+// respawn signal that lands over a claim recorded after the probe's claim
+// read (the drain basis does not compare it), or that treats the sticky
+// most-recent-claim marker as a claim: current_claim_bead_id moved since the
+// pass voids the drain; one the pass already read, unchanged, signals.
+func TestIdleRespawnSignalVoidsOnAClaimSinceThePass(t *testing.T) {
+	for _, c := range []struct {
+		name        string
+		pass, fresh string
+		void        bool
+	}{
+		{"no claim marker", "", "", false},
+		{"the pass's marker, unchanged", "gw-0", "gw-0", false},
+		{"a claim recorded since the pass", "", "gw-9", true},
+		{"a newer claim since the pass", "gw-0", "gw-9", true},
+	} {
+		extra := []string{idleRespawnAttemptsMetadataKey, "1", idleRespawnBeadIDMetadataKey, "gw-1"}
+		if c.pass != "" {
+			extra = append(extra, beadmeta.CurrentClaimBeadIDMetadataKey, c.pass)
+		}
+		meta := respawnRow(append(intentBegunAt(idleRespawnDrainReason, time.Hour), extra...)...)
+		p, it, store, _ := admittedBeginOn(t, meta, awakeForWork, napsFull)
+		if it.Kind != intentSignalFresh {
+			t.Fatalf("%s: decided %+v, want the respawn signal", c.name, it)
+		}
+		if c.fresh != c.pass {
+			if err := store.SetMetadata(it.Key.ID, beadmeta.CurrentClaimBeadIDMetadataKey, c.fresh); err != nil {
+				t.Fatal(err)
+			}
+		}
+		s := runTx(context.Background(), p, it, effectSpecs[it.Kind], nil)
+		got, _ := store.Get(it.Key.ID)
+		pending := isDrainAckStopPendingInfo(censusRowOf(t, got).Info)
+		switch {
+		case !c.void && (s.Outcome != settledLanded || !pending):
+			t.Errorf("%s: %+v, want the signal", c.name, s)
+		case c.void && (s.Outcome != settledLanded || s.Cause != causeIdleRespawnVoid+"claim-moved" || pending || got.Metadata[session.DrainIntentReasonKey] != ""):
+			t.Errorf("%s: %+v, row %v; want the drain voided (claim-moved)", c.name, s, got.Metadata)
 		}
 	}
 }
