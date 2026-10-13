@@ -27,7 +27,17 @@ func driftView(t *testing.T, named bool, f txFence, meta ...string) txView {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return txView{It: intent{Key: c.k}, World: c.w, Row: row, Meta: b.Metadata, Fence: f, Now: gatherNow}
+	return txView{It: intent{Key: c.k}, World: c.w, Alloc: c.a, Row: row, Meta: b.Metadata, Fence: f, Now: gatherNow}
+}
+
+// asDecided is v carrying the kind its row decides on its fresh read, the
+// relaunch fallback's re-decision (TestDriftRelaunchThroughTheEffectPass
+// pins a row that decides another).
+func asDecided(v txView) txView {
+	w := v.World.withRow(v.It.Key, v.Row, v.Meta).withRuntime(v.It.Key, v.RT)
+	fresh, _ := decideRow(&w, v.Alloc, v.It.Key)
+	v.It.Kind = fresh.Kind
+	return v
 }
 
 // Kills a deferral dropped, unbounded, or unstamped (SESS-555, legacy's
@@ -169,6 +179,7 @@ func TestRelaunchResultStep(t *testing.T) {
 	ordinary.prev = relaunched{Err: errors.New("no box")}
 	ordinary.RT = &txRuntime{Class: rtAlive, Same: true, Identity: runtimeIdentity{Known: true, SessionID: v.Row.ID, Token: v.Row.InstanceToken}}
 	ordinary.Fence = txFence{Read: legAttach | legWork, Work: &txWork{Free: true}}
+	ordinary = asDecided(ordinary)
 	if step := relaunchResultStep(ordinary); !step.Done || step.Write[session.DrainIntentReasonKey] != drainConfigDrift || len(step.Facts.Events) != 1 || step.Facts.Transition == nil {
 		t.Fatalf("ordinary failure: step %+v, want the config-drift drain begun with its transition", step)
 	}

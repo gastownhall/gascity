@@ -55,13 +55,19 @@ func TestDriftRelaunchThroughTheEffectPass(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
 		named, fails  bool
+		killed        bool
 		stops         int
 		state, drains string
+		refused       string
 	}{
 		{name: "ordinary, landed"},
 		{name: "named, landed", named: true},
 		{name: "named, failed: the restart", named: true, fails: true, stops: 1, state: "start-pending"},
 		{name: "ordinary, failed: the drain", fails: true, drains: drainConfigDrift},
+		// CONTRACT v5.10e (mc-i7efm): an operator's kill landing while the
+		// relaunch runs makes the row A2's; the fallback re-decides the
+		// fresh row and begins no drain.
+		{name: "ordinary, failed, killed meanwhile: no drain", fails: true, killed: true, refused: causeRedecided, state: "asleep"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p, it, store, leaf := driftOn(t, tc.named, true)
@@ -71,11 +77,24 @@ func TestDriftRelaunchThroughTheEffectPass(t *testing.T) {
 			if tc.fails {
 				leaf.RelaunchErrors = map[string]error{"s-gc-1": errors.New("box gone")}
 			}
+			if tc.killed {
+				p.seam = func(_ context.Context, at txSeam, _ intent, _, _ int) error {
+					if at == seamAfterCall && leaf.CountCalls("Relaunch", "s-gc-1") == 1 {
+						p.seam = nil
+						if _, err := session.WriteKillFence(store, it.Key.ID, gatherNow); err != nil {
+							t.Error(err)
+						}
+					}
+					return nil
+				}
+			}
 			s := runTx(context.Background(), p, it, effectSpecs[it.Kind], nil)
 			got, _ := store.Get(it.Key.ID)
 			stale := got.Metadata["started_config_hash"] == runtime.FingerprintVersion+":stale"
 			switch {
-			case s.Outcome != settledLanded || leaf.CountCalls("Relaunch", "s-gc-1") != 1 || stops(leaf) != tc.stops:
+			case tc.refused != "" && (s.Outcome != settledRefused || s.Cause != tc.refused):
+				t.Fatalf("settled %+v, want refused %q", s, tc.refused)
+			case tc.refused == "" && s.Outcome != settledLanded, leaf.CountCalls("Relaunch", "s-gc-1") != 1, stops(leaf) != tc.stops:
 				t.Fatalf("settled %+v, relaunches %d, stops %d; want landed, one relaunch, %d stops", s, leaf.CountCalls("Relaunch", "s-gc-1"), stops(leaf), tc.stops)
 			case !tc.fails && stale:
 				t.Fatalf("row %v: want the relaunch baseline", got.Metadata)

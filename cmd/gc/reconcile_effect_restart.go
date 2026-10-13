@@ -216,6 +216,14 @@ func relaunchResultStep(v txView) txStep {
 	if _, active := activeStop(row); active {
 		return txStep{Refuse: causeStopActive}
 	}
+	// The fallback rests on the drift the pass decided, on the row read
+	// before the relaunch: an operator's kill or hold since then makes the
+	// row another arm's, and the fresh row decides (CONTRACT v5.10e;
+	// the A14 generator's seeds 784, 958, 554, 683, 368, 238, 74, mc-i7efm).
+	w := v.World.withRow(v.It.Key, v.Row, v.Meta).withRuntime(v.It.Key, v.RT)
+	if fresh, _ := decideRow(&w, v.Alloc, v.It.Key); fresh.Kind != v.It.Kind {
+		return txStep{Refuse: causeRedecided}
+	}
 	step := txStep{Write: stopBeginPatch(row, drainConfigDrift, v.Now), Done: true}
 	step.Facts.Events = []events.Event{{Type: events.SessionDraining, Actor: "gc", Subject: res.TP.DisplayName(), Message: "config drift detected", SessionID: v.Row.ID}}
 	return drainBeginChecks(v, drainConfigDrift, step)
