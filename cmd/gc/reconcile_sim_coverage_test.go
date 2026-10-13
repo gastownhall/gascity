@@ -205,6 +205,9 @@ var simCoverageAllowlist = map[string]string{
 	// No generator wires the create effects (p.creates): every create
 	// intent is unregistered, and pending creates are an external op.
 	"effect:" + intentCreate: "mc-i7efm: creates",
+	// No generator asks a row to restart (generators frozen for the
+	// release; the scripted A13 scenarios cover it).
+	"arm:A13/armRestartRequested": "mc-i7efm: restart requested",
 	// No generator drifts an agent's config.
 	"arm:A14/armConfigDrift":        "mc-i7efm: config drift",
 	"effect:" + intentDriftRepair:   "mc-i7efm: config drift",

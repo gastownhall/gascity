@@ -220,6 +220,7 @@ var rowArms = []rowArm{
 	{"A10", armRollback},
 	{"A11", armAck},
 	{"A12", armZombie},
+	{"A13", armRestartRequested},
 	{"A14", armConfigDrift},
 	{"A15", armIdleTimeout},
 	{"A16", armExecutionStalled},

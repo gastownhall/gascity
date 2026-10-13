@@ -536,6 +536,12 @@ func RestartRequestPatch(sessionKey string, now time.Time) MetadataPatch {
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
+	return RestartRequestPatchAt(sessionKey, now)
+}
+
+// RestartRequestPatchAt is RestartRequestPatch at now, reading no clock:
+// v2's restart handoff (A13).
+func RestartRequestPatchAt(sessionKey string, now time.Time) MetadataPatch {
 	patch := MetadataPatch{
 		"restart_requested":          "",
 		"started_config_hash":        "",
