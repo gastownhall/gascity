@@ -219,13 +219,13 @@ func TestV2RunsOnlyOnRuntimesThatReadFresh(t *testing.T) {
 		t.Fatalf("v2SessionRuntimesAdmitted = %v, want %v; a new runtime must read fresh (ruling (c))", v2SessionRuntimesAdmitted, want)
 	}
 	for name, p := range map[string]runtime.Provider{"tmux": (*tmux.Provider)(nil), "acp": (*acp.Provider)(nil), "subprocess": (*subprocess.Provider)(nil)} {
-		if !freshReadable(p) {
+		if !runtime.FreshReadable(p) {
 			t.Errorf("admitted runtime %s cannot read fresh", name)
 		}
 	}
 	for name, p := range map[string]runtime.Provider{"herdr": (*herdr.Provider)(nil), "k8s": (*k8s.Provider)(nil), "exec": (*exec.Provider)(nil)} {
-		if v2SessionRuntimesAdmitted[name] || freshReadable(p) {
-			t.Errorf("%s: admitted %t, reads fresh %t; want refused, and not fresh (else revisit ruling (c))", name, v2SessionRuntimesAdmitted[name], freshReadable(p))
+		if v2SessionRuntimesAdmitted[name] || runtime.FreshReadable(p) {
+			t.Errorf("%s: admitted %t, reads fresh %t; want refused, and not fresh (else revisit ruling (c))", name, v2SessionRuntimesAdmitted[name], runtime.FreshReadable(p))
 		}
 	}
 }

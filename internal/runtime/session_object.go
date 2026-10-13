@@ -60,6 +60,19 @@ type FreshByConstruction interface {
 	LivenessReadsFresh() bool
 }
 
+// FreshReadable reports a leaf whose liveness read reports errors and is
+// fresh: it implements the fresh read, or reads fresh by construction (acp,
+// subprocess). Any other leaf (a bool-only one: herdr, k8s, exec) proves
+// neither presence nor absence.
+func FreshReadable(leaf Provider) bool {
+	if _, ok := leaf.(LivenessObserverWithError); !ok {
+		return false
+	}
+	_, fresh := leaf.(FreshLivenessObserver)
+	m, byConstruction := leaf.(FreshByConstruction)
+	return fresh || byConstruction && m.LivenessReadsFresh()
+}
+
 // FreshLivenessObserver is the optional capability for a liveness read that
 // reflects the runtime at or after since (v5 O1 "fresh for the effect").
 type FreshLivenessObserver interface {

@@ -371,14 +371,16 @@ const killLivenessTimeout = 5 * time.Second
 // cached one), so asking it would fall back to the cache. The route comes
 // from the bead (loadSessionBead registers an ACP session's route), so call
 // this after reading the row. A route that is only a guess confirms nothing,
-// and the composite's own read must agree with the leaf's: auto falls through
-// to its other backend, which can hold a runtime the route table missed.
+// nor does a leaf that cannot read fresh (runtime.FreshReadable: herdr, k8s,
+// exec answer from IsRunning, which proves no absence), and the composite's
+// own read must agree with the leaf's: auto falls through to its other
+// backend, which can hold a runtime the route table missed.
 func (m *Manager) runtimeConfirmedGone(ctx context.Context, name string) bool {
 	if m.sp == nil || strings.TrimSpace(name) == "" {
 		return false
 	}
 	leaf, _, known := runtime.ResolveBackend(m.sp, name)
-	if !known || leaf == nil {
+	if !known || leaf == nil || !runtime.FreshReadable(leaf) {
 		return false
 	}
 	gone := func(sp runtime.Provider) bool {
