@@ -28,6 +28,8 @@ var requireIdempotency = map[string]bool{
 	"submit-session":          true,
 	"send-session-message":    true,
 	"respond-session":         true,
+	"post-v0-city-by-city-name-session-by-id-stop": true,
+	"post-v0-city-by-city-name-session-by-id-wake": true,
 }
 
 // pendingIdempotency lists known create operations that are deliberately NOT
@@ -85,10 +87,8 @@ var exemptFromIdempotency = map[string]bool{
 	"post-v0-city-by-city-name-session-by-id-pin":              true,
 	"post-v0-city-by-city-name-session-by-id-rename":           true,
 	"post-v0-city-by-city-name-session-by-id-reset":            true,
-	"post-v0-city-by-city-name-session-by-id-stop":             true,
 	"post-v0-city-by-city-name-session-by-id-suspend":          true,
 	"post-v0-city-by-city-name-session-by-id-unpin":            true,
-	"post-v0-city-by-city-name-session-by-id-wake":             true,
 	"post-v0-city-by-city-name-sling":                          true,
 	"post-v0-city-by-city-name-unregister":                     true,
 	"rotate-events":                                            true,
