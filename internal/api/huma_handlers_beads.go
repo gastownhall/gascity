@@ -774,6 +774,9 @@ func (s *Server) humaHandleBeadClose(ctx context.Context, input *BeadCloseInput)
 	if err != nil {
 		return nil, err
 	}
+	if err := refuseGenericSessionClose(id, current); err != nil {
+		return nil, err
+	}
 	var submitted map[string]string
 	reason := ""
 	if input.Body != nil {
@@ -920,6 +923,9 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 		waitStatus = *opts.Status
 	}
 	if closesStatus(opts.Status) {
+		if err := refuseGenericSessionClose(id, current); err != nil {
+			return nil, err
+		}
 		// This spelling closes the bead, so it answers to the same contract as
 		// the close route. body.Metadata rides along because the documented
 		// atomic close stamps the work record in this very request.
@@ -969,6 +975,19 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 // before is the row as read, nil for a create; after is the row with the
 // request's type and labels applied. Each refusal is 422 with an errors[]
 // entry per offending field.
+// refuseGenericSessionClose refuses a generic bead close or delete of a
+// session row (PATCH status=closed, POST /bead/{id}/close, DELETE): those
+// bypass the session close (its closeAllowed gate, closeSeat and the
+// decided CommitClose), so the runtime stays up and its claims unreleased
+// (mc-dkblm). The session verbs own the close.
+func refuseGenericSessionClose(id string, current beads.Bead) error {
+	if !session.IsSessionBeadOrRepairable(current) {
+		return nil
+	}
+	return apierr.ValidationFailed.Msg(fmt.Sprintf(
+		"bead %s is a session row: the generic bead API never closes or deletes one; close it with gc session close|kill or POST /v0/city/{cityName}/session/{id}/close (or /kill), which stop its runtime and release its claims; nothing was written", id))
+}
+
 func refuseGenericSessionWrite(id string, before *beads.Bead, after beads.Bead, w genericWrite) error {
 	const verbs = "POST /v0/city/{cityName}/session/{id}/suspend, /wake or /kill, gc session suspend|wake|kill, gc runtime heartbeat, gc session wait"
 	var invalid []*huma.ErrorDetail
@@ -1080,8 +1099,11 @@ func afterUpdate(current beads.Bead, body beadUpdateBody) beads.Bead {
 // refused per-bead close: each tears down an entire subtree rather than one bead.
 func (s *Server) humaHandleBeadDelete(_ context.Context, input *BeadDeleteInput) (*OKResponse, error) {
 	id := input.ID
-	store, _, err := s.resolveBeadOwner(id)
+	store, current, err := s.resolveBeadOwner(id)
 	if err != nil {
+		return nil, err
+	}
+	if err := refuseGenericSessionClose(id, current); err != nil {
 		return nil, err
 	}
 	if err := store.Close(id); err != nil {

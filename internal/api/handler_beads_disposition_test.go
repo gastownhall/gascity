@@ -366,3 +366,43 @@ func TestBeadUpdateSessionStatusRefusals(t *testing.T) {
 		})
 	}
 }
+
+// TestBeadAPINeverClosesASessionRow (mc-dkblm): a generic close of a
+// session row (PATCH or POST /update with status=closed, POST
+// /bead/{id}/close, DELETE) is refused with 422, names the session close,
+// and leaves the row open, since it would bypass the session close
+// (closeAllowed, closeSeat, CommitClose) and leave its runtime and claims;
+// the same requests close a work bead.
+func TestBeadAPINeverClosesASessionRow(t *testing.T) {
+	for _, c := range []struct {
+		name, method, path, body string
+	}{
+		{"PATCH status=closed", "PATCH", "", `{"status":"closed"}`},
+		{"POST /update status=closed", "POST", "/update", `{"status":"closed"}`},
+		{"POST /close", "POST", "/close", `{}`},
+		{"DELETE", "DELETE", "", ""},
+	} {
+		for _, isSession := range []bool{true, false} {
+			state := newFakeState(t)
+			store := state.stores["myrig"]
+			h := newTestCityHandler(t, state)
+			row, err := store.Create(beads.Bead{Title: "w", Type: "task"})
+			if isSession {
+				row = sessionRow(t, store)
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			rec := beadRequest(t, h, c.method, cityURL(state, "/bead/")+row.ID+c.path, c.body)
+			got, _ := store.Get(row.ID)
+			if isSession {
+				if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "gc session close") || got.Status == "closed" {
+					t.Fatalf("%s on a session row: status %d (%s), row %s; want 422 naming the session close, the row open", c.name, rec.Code, rec.Body.String(), got.Status)
+				}
+				continue
+			}
+			if rec.Code >= 300 || got.Status != "closed" {
+				t.Fatalf("%s on a work bead: status %d (%s), row %s; want it closed", c.name, rec.Code, rec.Body.String(), got.Status)
+			}
+		}
+	}
+}
