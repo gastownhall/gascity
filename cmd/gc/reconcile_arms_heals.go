@@ -212,30 +212,55 @@ func armSquatterHeal(r *rowFacts) (intent, bool) {
 // freshSquatted reports the row's name held by a runtime that is not its own
 // (squatter), for a fresh kind's arm: on the pass's facts, a name the
 // inventory reads occupied or Ownerless; on the effect's fresh read, the
-// identity read on one present object across its brackets.
+// identity read on one present object across its brackets. An Ownerless one
+// must read alive (CONTRACT v5.10c-1): the row's own exiting runtime reads
+// Ownerless briefly on acp and subprocess, and its death is the dead-runtime
+// heal's to count.
 func (r *rowFacts) freshSquatted() bool {
 	r.rests |= restRuntime
 	info := r.row.Info
 	if r.fresh != nil {
-		return r.fresh.Same && squatter(info, r.fresh.Identity)
+		return squatterProven(info, r.fresh)
 	}
 	o := r.w.Observed[r.k]
-	return r.entry != nil && (r.entry.Liveness == livenessOccupied || o.Reason == observeReasonOwnerless) && squatter(info, o.Identity)
+	if r.entry == nil || r.entry.Liveness != livenessOccupied && o.Reason != observeReasonOwnerless {
+		return false
+	}
+	v, ok := squatter(info, o.Identity)
+	return ok && (v == identityForeign || r.inventoryAlive())
+}
+
+// squatterProven is the squatter heal's fresh proof (CONTRACT v5.10c,
+// v5.10c-1): one object across the read's brackets, Foreign, or Ownerless
+// under a tokened row and alive.
+func squatterProven(row session.Info, rt *txRuntime) bool {
+	v, ok := squatter(row, rt.Identity)
+	return rt.Same && ok && (v == identityForeign || rt.Alive())
+}
+
+// inventoryAlive reports the row's runtime running with its agent not read
+// dead on the pass's facts (O1's alive, whoever owns it).
+func (r *rowFacts) inventoryAlive() bool {
+	name := strings.TrimSpace(r.row.Info.SessionName)
+	return r.w.Obs.Fact(name, FactRunning, r.w.Now, r.w.ObsMaxAge).Value == ObsYes &&
+		r.w.Obs.Fact(name, FactProcessAlive, r.w.Now, r.w.ObsMaxAge).Value != ObsNo
 }
 
 // squatter reports a runtime identity that proves the row's own runtime gone
-// (CONTRACT v5.10c): Foreign, as A4/D3 read it; or Ownerless while the row
-// carries a token, since every admitted runtime is started with RuntimeEnv
-// and only a leaf that writes it atomically with liveness reads Ownerless
-// (O2, X3; any other leaf's identity is never Known, so Unknown).
-func squatter(row session.Info, rt runtimeIdentity) bool {
-	switch compareIdentity(row, rt) {
+// (CONTRACT v5.10c), with its verdict: Foreign, as A4/D3 read it; or
+// Ownerless while the row carries a token, since every admitted runtime is
+// started with RuntimeEnv and only a leaf that writes it atomically with
+// liveness reads Ownerless (O2, X3; any other leaf's identity is never
+// Known, so Unknown).
+func squatter(row session.Info, rt runtimeIdentity) (identityVerdict, bool) {
+	switch v := compareIdentity(row, rt); v {
 	case identityForeign:
-		return true
+		return v, true
 	case identityOwnerless:
-		return strings.TrimSpace(row.InstanceToken) != ""
+		return v, strings.TrimSpace(row.InstanceToken) != ""
+	default:
+		return v, false
 	}
-	return false
 }
 
 // deadRuntimePatch is legacy's write for a committed row whose runtime is

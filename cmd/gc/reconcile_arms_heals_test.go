@@ -1071,27 +1071,26 @@ func TestIdleStopHealKeepsAQuarantinesReason(t *testing.T) {
 }
 
 // squatterCase is a committed row holding a conversation and a fresh wake
-// failure, whose name the inventory reads held by a runtime with identity
-// env (occupied when Foreign, unknown otherwise, as observeRow reads it).
+// failure, whose name the inventory lists held by a live runtime with
+// identity env, observed as observeCensus reads it (occupied when Foreign,
+// unknown otherwise).
 func squatterCase(t *testing.T, env map[string]string, desired desire, meta ...string) *healCase {
+	t.Helper()
+	return squatterCaseLive(t, env, true, desired, meta...)
+}
+
+// squatterCaseLive is squatterCase with the runtime's agent read alive, or
+// dead by a complete process probe.
+func squatterCaseLive(t *testing.T, env map[string]string, alive bool, desired desire, meta ...string) *healCase {
 	t.Helper()
 	base := []string{"state", "awake", "session_key", "k-1", "started_config_hash", "h", "wake_attempts", "1", "churn_count", "1", "last_woke_at", rowAt(-time.Second)}
 	c := newHealCase(t, livenessUnknown, desired, append(base, meta...)...)
-	row := c.w.Census.Rows[c.k].Info
+	c.w.Now, c.w.ObsMaxAge = censusNow, observeMaxAge
 	id := runtimeIdentity{Known: true, SessionID: env["GC_SESSION_ID"], Epoch: env["GC_RUNTIME_EPOCH"], Token: env["GC_INSTANCE_TOKEN"]}
-	o := rowObservation{Identity: id}
-	switch compareIdentity(row, id) {
-	case identityForeign:
-		o.Liveness = livenessOccupied
-	case identityOwnerless:
-		o.Reason = observeReasonOwnerless
-	case identityCurrent:
-		o.Liveness = livenessAlive
-	default:
-		o.Reason = observeReasonIdentityUnknown
-	}
-	c.a.Snapshot.Entries[c.k].Liveness = o.Liveness
-	c.w.Observed = map[rowKey]rowObservation{c.k: o}
+	attrs := InventoryAttrs{Identity: id, DeadKnown: true, ProcessProbed: true, ProcessKnown: true, ProcessAlive: alive}
+	c.w.Obs = newObserveCache().publish(censusNow, map[string]InventoryAttrs{"s-heal": attrs}, completeBackend("tmux", "s-heal"))
+	c.w.Observed = observeCensus(c.w.Obs, c.w.Census, c.w.Now, c.w.ObsMaxAge)
+	c.a.Snapshot.Entries[c.k].Liveness = c.w.Observed[c.k].Liveness
 	return c
 }
 
@@ -1120,6 +1119,7 @@ func TestSquatterHealParksACommittedRowNotAsACrash(t *testing.T) {
 		{"A: another session's runtime", foreignEnv, desireNone, nil, false, true},
 		{"A: another session's runtime, wanted awake", foreignEnv, desireWake, nil, false, true},
 		{"A: on acp", foreignEnv, desireNone, nil, true, true},
+		{"A: a kept rate_limit reason stays", foreignEnv, desireNone, []string{"sleep_reason", string(session.SleepReasonRateLimit), "quarantined_until", rowAt(time.Hour)}, false, true},
 		{"B: an identity-less runtime", ownerlessEnv, desireWake, nil, false, true},
 		{"B: on acp", ownerlessEnv, desireNone, nil, true, true},
 		{"B: a row with no token holds", ownerlessEnv, desireWake, []string{"instance_token", ""}, false, false},
@@ -1140,6 +1140,9 @@ func TestSquatterHealParksACommittedRowNotAsACrash(t *testing.T) {
 				return
 			}
 			want := session.MetadataPatch{"state": "asleep", "sleep_reason": string(session.SleepReasonRuntimeMissing)}
+			if reason := before["sleep_reason"]; reason != "" {
+				want = session.MetadataPatch{"state": "asleep"} // a reason the row already carries is kept
+			}
 			if it.Kind != intentRowHealFresh || !maps.Equal(it.folded(), want) || it.Class.Len() != 0 {
 				t.Fatalf("intent (%q, %v, class %v), want a fresh heal of exactly %v", it.Kind, it.folded(), it.Class.Fold(), want)
 			}
@@ -1150,8 +1153,12 @@ func TestSquatterHealParksACommittedRowNotAsACrash(t *testing.T) {
 			}
 			_, s := c.run(t, leaf, nil)
 			m := c.meta(t)
-			if s.Outcome != settledLanded || m["state"] != "asleep" || m["sleep_reason"] != string(session.SleepReasonRuntimeMissing) {
-				t.Fatalf("settlement %+v, row %v, want the row parked asleep with runtime-missing", s, m)
+			wantReason := string(session.SleepReasonRuntimeMissing)
+			if before["sleep_reason"] != "" {
+				wantReason = before["sleep_reason"]
+			}
+			if s.Outcome != settledLanded || m["state"] != "asleep" || m["sleep_reason"] != wantReason {
+				t.Fatalf("settlement %+v, row %v, want the row parked asleep with %s", s, m, wantReason)
 			}
 			for _, key := range []string{"session_key", "started_config_hash", "wake_attempts", "churn_count", "last_woke_at", "quarantined_until", "continuation_epoch"} {
 				if m[key] != before[key] {
@@ -1213,7 +1220,7 @@ func TestSquatterHealIgnoresOwnerlessOffAtomicLeaves(t *testing.T) {
 	id := readIdentityEnv(leaf, "s-heal")
 	c := squatterCase(t, ownerlessEnv, desireWake)
 	row := c.w.Census.Rows[c.k].Info
-	if id.Known || squatter(row, id) {
+	if _, ok := squatter(row, id); id.Known || ok {
 		t.Fatalf("exec leaf identity %+v reads a squatter, want Unknown", id)
 	}
 	c.w.Observed[c.k] = rowObservation{Identity: id, Reason: observeReasonIdentity}
@@ -1237,5 +1244,30 @@ func TestSquatterHealedRowStartsOnceTheNameFrees(t *testing.T) {
 	freed.a = &allocDecision{Snapshot: &selectionSnapshot{Entries: map[rowKey]*selectionEntry{c.k: {Key: c.k, Liveness: livenessGone, Desired: desireWake}}}}
 	if it := freed.decide(); it.Kind != intentStart {
 		t.Fatalf("decideRow = (%q, %q), want A18's start of the freed seat", it.Kind, it.Reason)
+	}
+}
+
+// Kills an exiting own runtime parked as an Ownerless squatter (CONTRACT
+// v5.10c-1; review probe R8): the row's own acp or subprocess runtime reads
+// Ownerless briefly while it exits (compareIdentity), so case B needs the
+// runtime alive. On the pass's facts an Ownerless runtime whose agent reads
+// dead proposes no park; on the effect's fresh read, an agent dead or a
+// corpse refuses it, so the death stays the dead-runtime heal's to count.
+// A Foreign corpse still proves the row's runtime gone (case A).
+func TestSquatterHealNeedsAnOwnerlessRuntimeAlive(t *testing.T) {
+	if it := squatterCaseLive(t, ownerlessEnv, false, desireWake).decide(); it.Reason == decideSquatterHeal {
+		t.Fatalf("an Ownerless runtime whose agent reads dead proposed %q, want no park", it.Reason)
+	}
+	for name, l := range map[string]runtime.Liveness{"agent dead": {Running: true}, "corpse": {Corpse: true}} {
+		c := squatterCase(t, ownerlessEnv, desireWake)
+		before := c.meta(t)
+		_, s := c.run(t, (&freshObserver{Fake: runtime.NewFake(), l: l, env: map[string]string{}}).acp(), nil)
+		if m := c.meta(t); s.Outcome == settledLanded && m["wake_attempts"] == before["wake_attempts"] {
+			t.Errorf("%s: an exiting Ownerless runtime was parked as a non-crash squatter (%+v)", name, s)
+		}
+	}
+	c := squatterCase(t, foreignEnv, desireWake)
+	if _, s := c.run(t, (&freshObserver{Fake: runtime.NewFake(), l: runtime.Liveness{Corpse: true}, env: foreignEnv}).tmux(), nil); s.Outcome != settledLanded || c.meta(t)["state"] != "asleep" {
+		t.Fatalf("a Foreign corpse: settlement %+v, state %q, want the row parked", s, c.meta(t)["state"])
 	}
 }

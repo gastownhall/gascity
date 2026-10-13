@@ -1464,20 +1464,26 @@ var simSquatterHeals atomic.Int64
 
 func TestSimCorpus(t *testing.T) {
 	t.Cleanup(func() { writeSimCoverage(t) })
+	seeds := simSeeds(t)
 	before, squatters := simDrainBegins.Load(), simSquatterHeals.Load()
 	t.Cleanup(func() {
+		// The admission checks need a corpus: one replayed seed, or a
+		// range smaller than CI's, need not admit either.
+		if t.Failed() || os.Getenv("GC_V2_SIM_SEED") != "" || len(seeds) < simCISeeds {
+			return
+		}
 		// Kills a corpus that never exercises A20 (C6a2 review): every
 		// undesired row inside the grace, or already requested.
-		if !t.Failed() && simDrainBegins.Load() == before {
+		if simDrainBegins.Load() == before {
 			t.Error("the sim corpus admitted no A20 drain begin")
 		}
 		// Kills a corpus whose occupant faults never land on a committed
 		// row, which would leave v5.10c's heal unchecked by every invariant.
-		if !t.Failed() && simSquatterHeals.Load() == squatters {
+		if simSquatterHeals.Load() == squatters {
 			t.Error("the sim corpus admitted no squatter heal")
 		}
 	})
-	for _, seed := range simSeeds(t) {
+	for _, seed := range seeds {
 		t.Run(fmt.Sprint(seed), func(t *testing.T) {
 			s := newSim(t, seed, simOpts{})
 			s.run()
