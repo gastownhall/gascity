@@ -31,14 +31,24 @@ func (s *nativeJournalReaderSpy) SetEventsJournalEnabled(bool) {}
 
 func (s *nativeJournalReaderSpy) IsClosed() bool { return s.closed }
 
+// activatedJournalSpy records spy as an activated handle, as
+// openNativeDoltStorage does for a workspace with the journal on, and
+// retires it when the test ends.
+func activatedJournalSpy(t *testing.T, spy *nativeJournalReaderSpy) *nativeJournalReaderSpy {
+	t.Helper()
+	nativeEventsJournalActivations.record(spy)
+	t.Cleanup(func() { spy.closed = true })
+	return spy
+}
+
 func TestNativeDoltStoreReadEventsJournalPageForwardsTheRead(t *testing.T) {
 	want := journalops.Page{Rows: []journalops.Row{{Seq: 4, IssueID: "gc-1"}}, Head: 9}
 	var gotSince int64
 	var gotLimit int
-	spy := &nativeJournalReaderSpy{read: func(_ context.Context, since int64, limit int) (journalops.Page, error) {
+	spy := activatedJournalSpy(t, &nativeJournalReaderSpy{read: func(_ context.Context, since int64, limit int) (journalops.Page, error) {
 		gotSince, gotLimit = since, limit
 		return want, nil
-	}}
+	}})
 	store := newNativeDoltStoreForTest(spy)
 
 	page, err := store.ReadEventsJournalPage(context.Background(), 3, 50)
@@ -51,9 +61,9 @@ func TestNativeDoltStoreReadEventsJournalPageForwardsTheRead(t *testing.T) {
 }
 
 func TestNativeDoltStoreReadEventsJournalPageKeepsTruncationTyped(t *testing.T) {
-	spy := &nativeJournalReaderSpy{read: func(context.Context, int64, int) (journalops.Page, error) {
+	spy := activatedJournalSpy(t, &nativeJournalReaderSpy{read: func(context.Context, int64, int) (journalops.Page, error) {
 		return journalops.Page{}, &journalops.TruncatedError{Since: 1, Floor: 10, Head: 20}
-	}}
+	}})
 	_, err := newNativeDoltStoreForTest(spy).ReadEventsJournalPage(context.Background(), 1, 0)
 	var truncated *journalops.TruncatedError
 	if !errors.As(err, &truncated) || truncated.Floor != 10 || truncated.Head != 20 {
@@ -62,15 +72,30 @@ func TestNativeDoltStoreReadEventsJournalPageKeepsTruncationTyped(t *testing.T) 
 }
 
 func TestNativeDoltStoreReadEventsJournalPageHonorsCallerCancel(t *testing.T) {
-	spy := &nativeJournalReaderSpy{read: func(ctx context.Context, _ int64, _ int) (journalops.Page, error) {
+	spy := activatedJournalSpy(t, &nativeJournalReaderSpy{read: func(ctx context.Context, _ int64, _ int) (journalops.Page, error) {
 		<-ctx.Done()
 		return journalops.Page{}, errors.New("read aborted")
-	}}
+	}})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	_, err := newNativeDoltStoreForTest(spy).ReadEventsJournalPage(ctx, 0, 0)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+}
+
+func TestNativeDoltStoreReadEventsJournalPageRefusesAnInactiveJournal(t *testing.T) {
+	read := false
+	spy := &nativeJournalReaderSpy{read: func(context.Context, int64, int) (journalops.Page, error) {
+		read = true
+		return journalops.Page{}, nil
+	}}
+	store := newNativeDoltStoreForTest(spy)
+	if _, err := store.ReadEventsJournalPage(context.Background(), 0, 0); !errors.Is(err, ErrEventsJournalInactive) {
+		t.Fatalf("error = %v, want ErrEventsJournalInactive", err)
+	}
+	if read {
+		t.Fatal("an inactive journal was read; an idle answer would read as caught up")
 	}
 }
 
@@ -144,7 +169,9 @@ func TestNativeJournalActivationSetDropsClosedHandles(t *testing.T) {
 
 func TestProxiedStoreEventsJournalReadsThroughTheNativeLeaf(t *testing.T) {
 	store, native, _ := newSplitFixture(t)
+	store.journalActive = true
 	want := journalops.Page{Rows: []journalops.Row{{Seq: 1, IssueID: "prx-1"}}, Head: 1}
+	// The leaf's own activation is not consulted: bd does the writes.
 	native.storage = &nativeJournalReaderSpy{read: func(context.Context, int64, int) (journalops.Page, error) {
 		return want, nil
 	}}
@@ -156,10 +183,55 @@ func TestProxiedStoreEventsJournalReadsThroughTheNativeLeaf(t *testing.T) {
 	if page.Head != 1 || len(page.Rows) != 1 || page.Rows[0].IssueID != "prx-1" {
 		t.Fatalf("page = %+v", page)
 	}
+	if !store.EventsJournalActive() {
+		t.Fatal("EventsJournalActive = false on a serving, journaled scope")
+	}
+}
+
+func TestProxiedStoreRefusesAnInactiveJournal(t *testing.T) {
+	store, _, _ := newSplitFixture(t)
+	if _, err := store.ReadEventsJournalPage(context.Background(), 0, 0); !errors.Is(err, ErrEventsJournalInactive) {
+		t.Fatalf("error = %v, want ErrEventsJournalInactive", err)
+	}
+	if store.EventsJournalActive() {
+		t.Fatal("EventsJournalActive = true on a scope whose writes are not journaled")
+	}
+}
+
+// bd does every proxied write and resolves activation env-first, so the
+// proxied answer must too, even though the native leaf opens with the BD_
+// namespace withheld.
+func TestProxiedEventsJournalActiveFollowsBdPrecedence(t *testing.T) {
+	for _, tc := range []struct {
+		name, env, config string
+		want              bool
+	}{
+		{name: "config on", config: "events-journal: true\n", want: true},
+		{name: "env off beats config on", env: "0", config: "events-journal: true\n"},
+		{name: "env on without config", env: "1", want: true},
+		{name: "neither"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("BD_EVENTS_JOURNAL", tc.env)
+			scope := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(scope, ".beads"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if tc.config != "" {
+				if err := os.WriteFile(filepath.Join(scope, ".beads", "config.yaml"), []byte(tc.config), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := proxiedEventsJournalActive(PinForTest(scope, "", "beads")); got != tc.want {
+				t.Fatalf("proxiedEventsJournalActive = %v, want %v", got, tc.want)
+			}
+		})
+	}
 }
 
 func TestProxiedStoreEventsJournalUnavailableWhenDemoted(t *testing.T) {
 	store, _, _ := newSplitFixture(t)
+	store.journalActive = true
 	store.standDown(NewNonTerminalProxiedVerdictError(ProxiedVerdictProxyGone, "bd restarted its proxy", nil))
 
 	if _, err := store.ReadEventsJournalPage(context.Background(), 0, 0); !errors.Is(err, ErrEventsJournalUnavailable) {
@@ -171,108 +243,96 @@ func TestProxiedStoreEventsJournalUnavailableWhenDemoted(t *testing.T) {
 }
 
 // TestNativeDoltStoreLedgerfeedTailsRealWrites drives a real embedded store
-// opened through gc's production open: the tailer sees the store's own
-// writes in commit order, each carrying the issue's post-image.
+// opened through gc's production open with the journal on: the tailer sees
+// the store's own writes in commit order, each carrying the issue's
+// post-image. The journal-off answer is covered over a spy
+// (TestNativeDoltStoreEventsJournalActiveReportsTheOpenActivation), which
+// keeps this to one embedded Dolt open.
 func TestNativeDoltStoreLedgerfeedTailsRealWrites(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		enabled bool
-	}{
-		{name: "enabled", enabled: true},
-		{name: "disabled"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("HOME", t.TempDir())
-			t.Setenv("BD_EVENTS_JOURNAL", "")
-			ctx := context.Background()
-			scopeRoot := t.TempDir()
-			beadsDir := filepath.Join(scopeRoot, ".beads")
-			seed, err := beadslib.OpenBestAvailable(ctx, beadsDir)
-			if err != nil {
-				t.Skipf("upstream beads storage unavailable: %v", err)
-			}
-			if err := seed.SetConfig(ctx, nativeIssuePrefixConfigKey, "gc"); err != nil {
-				t.Fatalf("SetConfig(issue_prefix): %v", err)
-			}
-			if err := seed.Close(); err != nil {
-				t.Fatalf("close seed storage: %v", err)
-			}
-			if tc.enabled {
-				if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("events-journal: true\n"), 0o644); err != nil {
-					t.Fatal(err)
-				}
-			}
-			store, err := OpenNativeDoltStoreAt(ctx, scopeRoot, nil)
-			if err != nil {
-				t.Fatalf("OpenNativeDoltStoreAt: %v", err)
-			}
-			t.Cleanup(func() {
-				if err := store.CloseStore(); err != nil {
-					t.Fatalf("CloseStore: %v", err)
-				}
-			})
-			if got := store.EventsJournalActive(); got != tc.enabled {
-				t.Fatalf("EventsJournalActive = %v, want %v", got, tc.enabled)
-			}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("BD_EVENTS_JOURNAL", "")
+	ctx := context.Background()
+	scopeRoot := t.TempDir()
+	beadsDir := filepath.Join(scopeRoot, ".beads")
+	seed, err := beadslib.OpenBestAvailable(ctx, beadsDir)
+	if err != nil {
+		t.Skipf("upstream beads storage unavailable: %v", err)
+	}
+	if err := seed.SetConfig(ctx, nativeIssuePrefixConfigKey, "gc"); err != nil {
+		t.Fatalf("SetConfig(issue_prefix): %v", err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatalf("close seed storage: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("events-journal: true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store, err := OpenNativeDoltStoreAt(ctx, scopeRoot, nil)
+	if err != nil {
+		t.Fatalf("OpenNativeDoltStoreAt: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.CloseStore(); err != nil {
+			t.Fatalf("CloseStore: %v", err)
+		}
+	})
+	if !store.EventsJournalActive() {
+		t.Fatal("EventsJournalActive = false on a workspace that enables the journal")
+	}
 
-			var rows []journalops.Row
-			tailer := &ledgerfeed.Tailer{
-				Source:    store,
-				PageLimit: 2,
-				Apply: func(_ context.Context, page journalops.Page) error {
-					rows = append(rows, page.Rows...)
-					return nil
-				},
-				OnGap: func(gap ledgerfeed.Gap) { t.Errorf("unexpected gap: %+v", gap) },
-			}
-			if _, err := tailer.Baseline(ctx); err != nil {
-				t.Fatalf("Baseline: %v", err)
-			}
+	var rows []journalops.Row
+	tailer := &ledgerfeed.Tailer{
+		Source:    store,
+		PageLimit: 2,
+		Apply: func(_ context.Context, page journalops.Page) error {
+			rows = append(rows, page.Rows...)
+			return nil
+		},
+		OnGap: func(_ context.Context, gap ledgerfeed.Gap) error {
+			t.Errorf("unexpected gap: %+v", gap)
+			return nil
+		},
+	}
+	// Baseline before the writes, as a consumer baselines before its scan.
+	if _, err := tailer.Baseline(ctx); err != nil {
+		t.Fatalf("Baseline: %v", err)
+	}
 
-			first, err := store.Create(Bead{Title: "first"})
-			if err != nil {
-				t.Fatalf("Create first: %v", err)
-			}
-			retitled := "first, retitled"
-			if err := store.Update(first.ID, UpdateOpts{Title: &retitled}); err != nil {
-				t.Fatalf("Update: %v", err)
-			}
-			second, err := store.Create(Bead{Title: "second"})
-			if err != nil {
-				t.Fatalf("Create second: %v", err)
-			}
-			if err := store.Close(first.ID); err != nil {
-				t.Fatalf("Close: %v", err)
-			}
+	first, err := store.Create(Bead{Title: "first"})
+	if err != nil {
+		t.Fatalf("Create first: %v", err)
+	}
+	retitled := "first, retitled"
+	if err := store.Update(first.ID, UpdateOpts{Title: &retitled}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	second, err := store.Create(Bead{Title: "second"})
+	if err != nil {
+		t.Fatalf("Create second: %v", err)
+	}
+	if err := store.Close(first.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
 
-			drainTailer(ctx, t, tailer)
-			if !tc.enabled {
-				if len(rows) != 0 {
-					t.Fatalf("a workspace with the journal off recorded %d rows", len(rows))
-				}
-				return
-			}
-
-			var ids []string
-			for i, row := range rows {
-				if i > 0 && row.Seq != rows[i-1].Seq+1 {
-					t.Fatalf("rows are not gapless and seq-ascending: %+v", rows)
-				}
-				ids = append(ids, row.IssueID)
-			}
-			if want := []string{first.ID, first.ID, second.ID, first.ID}; !slices.Equal(ids, want) {
-				t.Fatalf("journal issue order = %v, want %v (commit order)", ids, want)
-			}
-			if title := postImage(t, rows[1]).Title; title != retitled {
-				t.Fatalf("update row post-image title = %q, want %q", title, retitled)
-			}
-			if status := postImage(t, rows[3]).Status; status != "closed" {
-				t.Fatalf("close row post-image status = %q, want closed", status)
-			}
-			if cp := tailer.Checkpoint(); cp.Seq != rows[3].Seq || cp.Last.IssueID != first.ID {
-				t.Fatalf("checkpoint = %+v, want the last row applied", cp)
-			}
-		})
+	drainTailer(ctx, t, tailer)
+	var ids []string
+	for i, row := range rows {
+		if i > 0 && row.Seq != rows[i-1].Seq+1 {
+			t.Fatalf("rows are not gapless and seq-ascending: %+v", rows)
+		}
+		ids = append(ids, row.IssueID)
+	}
+	if want := []string{first.ID, first.ID, second.ID, first.ID}; !slices.Equal(ids, want) {
+		t.Fatalf("journal issue order = %v, want %v (commit order)", ids, want)
+	}
+	if title := postImage(t, rows[1]).Title; title != retitled {
+		t.Fatalf("update row post-image title = %q, want %q", title, retitled)
+	}
+	if status := postImage(t, rows[3]).Status; status != "closed" {
+		t.Fatalf("close row post-image status = %q, want closed", status)
+	}
+	if cp := tailer.Checkpoint(); cp.Seq != rows[3].Seq || cp.Last.IssueID != first.ID {
+		t.Fatalf("checkpoint = %+v, want the last row applied", cp)
 	}
 }
 
@@ -304,4 +364,34 @@ func postImage(t *testing.T, row journalops.Row) journalPostImage {
 		t.Fatalf("decoding row %d IssueJSON %q: %v", row.Seq, row.IssueJSON, err)
 	}
 	return image
+}
+
+func TestCachingStoreForwardsTheEventsJournalToItsBacking(t *testing.T) {
+	want := journalops.Page{Rows: []journalops.Row{{Seq: 2, IssueID: "gc-2"}}, Head: 2}
+	spy := &nativeJournalReaderSpy{read: func(_ context.Context, since int64, _ int) (journalops.Page, error) {
+		if since != 1 {
+			t.Errorf("since = %d, want 1", since)
+		}
+		return want, nil
+	}}
+	activatedJournalSpy(t, spy)
+	cache := NewCachingStoreForTest(newNativeDoltStoreForTest(spy), nil)
+
+	page, err := cache.ReadEventsJournalPage(context.Background(), 1, 10)
+	if err != nil || page.Head != 2 || len(page.Rows) != 1 {
+		t.Fatalf("ReadEventsJournalPage = (%+v, %v)", page, err)
+	}
+	if !cache.EventsJournalActive() {
+		t.Fatal("the cache hides its backing's activation")
+	}
+}
+
+func TestCachingStoreOverAStoreWithoutAJournalRefuses(t *testing.T) {
+	cache := NewCachingStoreForTest(NewMemStore(), nil)
+	if _, err := cache.ReadEventsJournalPage(context.Background(), 0, 0); !errors.Is(err, ErrEventsJournalUnsupported) {
+		t.Fatalf("error = %v, want ErrEventsJournalUnsupported", err)
+	}
+	if cache.EventsJournalActive() {
+		t.Fatal("a cache over a store with no journal reports one active")
+	}
 }

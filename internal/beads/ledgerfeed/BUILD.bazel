@@ -10,9 +10,15 @@ go_library(
 
 go_test(
     name = "ledgerfeed_test",
-    srcs = ["tailer_test.go"],
+    srcs = [
+        "tailer_test.go",
+        "testenv_import_test.go",
+    ],
     embed = [":ledgerfeed"],
-    deps = ["@com_github_steveyegge_beads//journalops"],
+    deps = [
+        "//internal/testenv",
+        "@com_github_steveyegge_beads//journalops",
+    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

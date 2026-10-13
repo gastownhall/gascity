@@ -22,41 +22,55 @@ var ErrEventsJournalUnsupported = errors.New("events journal unsupported by the 
 // A caller keeps the scope on its scan path while it sees this error.
 var ErrEventsJournalUnavailable = errors.New("events journal unavailable: no native read leaf")
 
+// ErrEventsJournalInactive reports that the scope's writes are not being
+// journaled, so a page read would answer "caught up" while mutations went
+// unrecorded. bd serve refuses its events endpoint for the same reason.
+var ErrEventsJournalInactive = errors.New("events journal is not activated for this scope")
+
 var _ journalops.Journal = (*NativeDoltStore)(nil)
 
 // ReadEventsJournalPage pages the scope's durable mutation journal from the
 // caller's exclusive checkpoint, on the terms journalops.Journal states.
 //
-// The read goes through withReadRetry, so it rides a managed-Dolt rebind the
-// way every other native read does. A *journalops.TruncatedError, and the
-// ErrEventsJournalUnsupported refusal of a backend that cannot journal, come
-// back wrapped with %w: errors.As and errors.Is recover them. A caller
-// cancellation cancels the read and is returned as the context error.
+// It refuses with ErrEventsJournalInactive when the handle it reads through
+// was not opened with the journal activated (EventsJournalActive), and with
+// ErrEventsJournalUnsupported when the backend cannot journal at all.
+//
+// The read goes through the read-retry chain, so it rides a managed-Dolt
+// rebind the way every other native read does, and the caller's ctx bounds
+// that whole chain: a cancellation ends a reconnect in progress and is
+// returned as the context error. A *journalops.TruncatedError comes back
+// wrapped with %w, so errors.As recovers it.
 func (s *NativeDoltStore) ReadEventsJournalPage(ctx context.Context, since int64, limit int) (journalops.Page, error) {
+	return s.readEventsJournalPage(ctx, since, limit, true)
+}
+
+// readEventsJournalPage is ReadEventsJournalPage with the activation gate
+// optional, for a wrapper (ProxiedStore) whose writes go through another
+// leaf and which therefore answers the activation question itself.
+func (s *NativeDoltStore) readEventsJournalPage(ctx context.Context, since int64, limit int, requireActive bool) (journalops.Page, error) {
 	var page journalops.Page
-	err := s.withReadRetry(func(readCtx context.Context, storage beadslib.Storage) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
+	err := s.withReadRetryContext(ctx, func(readCtx context.Context, storage beadslib.Storage) error {
 		journal, ok := storage.(journalops.Journal)
 		if !ok {
 			return fmt.Errorf("storage %T: %w", storage, ErrEventsJournalUnsupported)
 		}
-		pageCtx, cancel := context.WithCancel(readCtx)
-		defer cancel()
-		stop := context.AfterFunc(ctx, cancel)
-		defer stop()
-		read, err := journal.ReadEventsJournalPage(pageCtx, since, limit)
+		if requireActive && !nativeEventsJournalActivations.active(storage) {
+			return ErrEventsJournalInactive
+		}
+		read, err := journal.ReadEventsJournalPage(readCtx, since, limit)
 		if err != nil {
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return ctxErr
-			}
 			return err
 		}
 		page = read
 		return nil
 	})
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			// The caller gave up; whatever the chain was doing is not a
+			// verdict about the endpoint.
+			return journalops.Page{}, ctxErr
+		}
 		return journalops.Page{}, fmt.Errorf("reading events journal after seq %d: %w", since, err)
 	}
 	return page, nil
@@ -86,12 +100,13 @@ var nativeEventsJournalActivations = &nativeJournalActivationSet{}
 
 // nativeJournalActivationSet is a set of storage handles keyed by identity.
 //
-// It holds a handle only while that handle is open: every record first drops
-// the handles that report themselves closed (the library's stores implement
-// IsClosed), so a process that reconnects or reopens repeatedly carries at
-// most its live activated handles plus the ones closed since the last open.
-// A handle whose dynamic type is not comparable cannot be a map key and is not
-// recorded; every library backend is a pointer.
+// It exists because the library exposes the activation setter and no getter,
+// and openNativeDoltStorage's callers (the open paths and the reconnect hook)
+// hand storage around without room for a flag beside it. It holds a handle
+// only while that handle is open: every record and every lookup drops the
+// handles that report themselves closed (the library's stores implement
+// IsClosed). A handle whose dynamic type is not comparable cannot be a map key
+// and is not recorded; every library backend is a pointer.
 type nativeJournalActivationSet struct {
 	mu      sync.Mutex
 	handles map[beadslib.Storage]struct{}
@@ -103,11 +118,7 @@ func (a *nativeJournalActivationSet) record(storage beadslib.Storage) {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	for handle := range a.handles {
-		if closer, ok := handle.(interface{ IsClosed() bool }); ok && closer.IsClosed() {
-			delete(a.handles, handle)
-		}
-	}
+	a.sweepLocked()
 	if a.handles == nil {
 		a.handles = make(map[beadslib.Storage]struct{})
 	}
@@ -120,8 +131,18 @@ func (a *nativeJournalActivationSet) active(storage beadslib.Storage) bool {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.sweepLocked()
 	_, ok := a.handles[storage]
 	return ok
+}
+
+// sweepLocked drops the handles that report themselves closed.
+func (a *nativeJournalActivationSet) sweepLocked() {
+	for handle := range a.handles {
+		if closer, ok := handle.(interface{ IsClosed() bool }); ok && closer.IsClosed() {
+			delete(a.handles, handle)
+		}
+	}
 }
 
 func nativeStorageComparable(storage beadslib.Storage) bool {

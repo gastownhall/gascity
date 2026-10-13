@@ -13,14 +13,15 @@ import (
 )
 
 // fakeJournal is a scripted journalops.Journal: an in-memory row log with a
-// head counter and a retention floor, behaving as the role documents.
+// head counter. Its truncation follows beads' ComputeEventsTruncation: a read
+// whose first row is not since+1, or that finds nothing while since is below
+// the head, is a *journalops.TruncatedError.
 type fakeJournal struct {
-	mu    sync.Mutex
-	rows  []journalops.Row // seq-ascending
-	head  int64
-	floor int64 // lowest retained seq; 0 or 1 retains everything
-	fail  error // returned once by the next read, then cleared
-	reads []readCall
+	mu      sync.Mutex
+	rows    []journalops.Row // seq-ascending
+	head    int64
+	failErr error // returned once by the next read, then cleared
+	reads   []readCall
 }
 
 type readCall struct {
@@ -44,39 +45,40 @@ func (f *fakeJournal) append(issueIDs ...string) {
 func (f *fakeJournal) prune(floor int64) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.floor = floor
 	f.rows = slices.DeleteFunc(f.rows, func(r journalops.Row) bool { return r.Seq < floor })
 }
 
-// reseed wipes the journal and restarts its counter at seq, as a recreated
-// journal table seeded at the old high-water mark would.
+// reseed wipes the journal and restarts its counter at seq, as a journal
+// table recreated with its counter seeded at seq would.
 func (f *fakeJournal) reseed(seq int64) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.rows = nil
 	f.head = seq
-	f.floor = 0
 }
 
 func (f *fakeJournal) ReadEventsJournalPage(_ context.Context, since int64, limit int) (journalops.Page, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.reads = append(f.reads, readCall{since: since, limit: limit})
-	if err := f.fail; err != nil {
-		f.fail = nil
+	if err := f.failErr; err != nil {
+		f.failErr = nil
 		return journalops.Page{}, err
-	}
-	if since >= f.head {
-		return journalops.Page{Head: f.head}, nil
-	}
-	if f.floor > 1 && since < f.floor-1 {
-		return journalops.Page{}, &journalops.TruncatedError{Since: since, Floor: f.floor, Head: f.head}
 	}
 	var out []journalops.Row
 	for _, r := range f.rows {
 		if r.Seq > since && (limit == 0 || len(out) < limit) {
 			out = append(out, r)
 		}
+	}
+	if len(out) == 0 {
+		if since >= f.head {
+			return journalops.Page{Head: f.head}, nil
+		}
+		return journalops.Page{}, &journalops.TruncatedError{Since: since, Floor: f.head + 1, Head: f.head}
+	}
+	if out[0].Seq != since+1 {
+		return journalops.Page{}, &journalops.TruncatedError{Since: since, Floor: out[0].Seq, Head: f.head}
 	}
 	return journalops.Page{Rows: out, Head: f.head}, nil
 }
@@ -89,10 +91,11 @@ func (f *fakeJournal) readLog() []readCall {
 
 // recorder collects applied rows and gaps.
 type recorder struct {
-	mu      sync.Mutex
-	applied []int64
-	gaps    []Gap
-	failN   int // fail the next N Apply calls
+	mu       sync.Mutex
+	applied  []int64
+	gaps     []Gap
+	failN    int // fail the next N Apply calls
+	gapFailN int // fail the next N OnGap calls
 }
 
 func (r *recorder) apply(_ context.Context, page journalops.Page) error {
@@ -108,10 +111,15 @@ func (r *recorder) apply(_ context.Context, page journalops.Page) error {
 	return nil
 }
 
-func (r *recorder) onGap(g Gap) {
+func (r *recorder) onGap(_ context.Context, g Gap) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.gapFailN > 0 {
+		r.gapFailN--
+		return errors.New("resync failed")
+	}
 	r.gaps = append(r.gaps, g)
+	return nil
 }
 
 func (r *recorder) seqs() []int64 {
@@ -120,7 +128,13 @@ func (r *recorder) seqs() []int64 {
 	return slices.Clone(r.applied)
 }
 
-func newTailer(j *fakeJournal, r *recorder) *Tailer {
+func (r *recorder) gapList() []Gap {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.gaps)
+}
+
+func newTailer(j journalops.Journal, r *recorder) *Tailer {
 	return &Tailer{Source: j, Apply: r.apply, OnGap: r.onGap, PageLimit: 2}
 }
 
@@ -158,18 +172,18 @@ func TestStepAppliesInOrderAndReportsMoreAfterAFullPage(t *testing.T) {
 	if stats.RowsApplied != 3 || stats.Pages != 2 || stats.Seq != 3 || stats.Head != 3 || stats.Lag != 0 {
 		t.Fatalf("stats = %+v", stats)
 	}
-	for _, call := range j.readLog() {
-		if call.limit != 2 {
-			t.Fatalf("read with limit %d, want PageLimit 2", call.limit)
-		}
+	// The first read has no row to check; every later one re-reads the
+	// checkpoint row and asks for one extra.
+	want := []readCall{{since: 0, limit: 2}, {since: 1, limit: 3}, {since: 2, limit: 3}}
+	if got := j.readLog(); !slices.Equal(got, want) {
+		t.Fatalf("reads = %+v, want %+v", got, want)
 	}
 }
 
 func TestStepReportsLagWhileBehind(t *testing.T) {
 	j := &fakeJournal{}
 	j.append("a", "b", "c", "d", "e")
-	r := &recorder{}
-	tl := newTailer(j, r)
+	tl := newTailer(j, &recorder{})
 	mustStep(t, tl)
 	if stats := tl.Stats(); stats.Lag != 3 || stats.Head != 5 {
 		t.Fatalf("stats = %+v, want lag 3 behind head 5", stats)
@@ -205,10 +219,11 @@ func TestReadErrorLeavesCheckpointAndIsReturned(t *testing.T) {
 	j := &fakeJournal{}
 	j.append("a")
 	boom := errors.New("connection reset")
-	j.fail = boom
+	j.failErr = boom
 	tl := newTailer(j, &recorder{})
-	if _, err := tl.Step(context.Background()); !errors.Is(err, boom) {
-		t.Fatalf("Step error = %v, want it to wrap %v", err, boom)
+	more, err := tl.Step(context.Background())
+	if !errors.Is(err, boom) || more {
+		t.Fatalf("Step = (%v, %v), want it to wrap %v with no re-read", more, err, boom)
 	}
 	if got := tl.Checkpoint(); got.Seq != 0 {
 		t.Fatalf("checkpoint = %+v after a failed read", got)
@@ -227,10 +242,11 @@ func TestTruncationGapRebaselinesAtHeadAndNeverReplaysFromZero(t *testing.T) {
 	if !mustStep(t, tl) {
 		t.Fatal("a gap must ask for an immediate re-read from the new baseline")
 	}
-	if len(r.gaps) != 1 {
-		t.Fatalf("gaps = %+v, want one", r.gaps)
+	gaps := r.gapList()
+	if len(gaps) != 1 {
+		t.Fatalf("gaps = %+v, want one", gaps)
 	}
-	gap := r.gaps[0]
+	gap := gaps[0]
 	if gap.Kind != GapTruncated || gap.From.Seq != 2 || gap.Floor != 5 || gap.Head != 6 || gap.To.Seq != 6 || gap.To.Last.IssueID != "f" {
 		t.Fatalf("gap = %+v", gap)
 	}
@@ -262,11 +278,40 @@ func TestTruncatedBaselineRowGetsAnUnverifiableCheckpoint(t *testing.T) {
 	tl.Resume(Checkpoint{Seq: 1}) // unverifiable: no fingerprint
 
 	mustStep(t, tl)
-	if len(r.gaps) != 1 || r.gaps[0].Kind != GapTruncated {
-		t.Fatalf("gaps = %+v, want one truncation", r.gaps)
+	if gaps := r.gapList(); len(gaps) != 1 || gaps[0].Kind != GapTruncated {
+		t.Fatalf("gaps = %+v, want one truncation", gaps)
 	}
 	if got := tl.Checkpoint(); got.Seq != 3 || got.Last.Seq != 0 {
 		t.Fatalf("checkpoint = %+v, want seq 3 with no fingerprint (row pruned)", got)
+	}
+}
+
+func TestOnGapErrorKeepsTheCheckpointAndRetries(t *testing.T) {
+	j := &fakeJournal{}
+	j.append("a", "b")
+	r := &recorder{gapFailN: 1}
+	tl := newTailer(j, r)
+	mustStep(t, tl)
+	saved := tl.Checkpoint()
+	j.append("c", "d", "e")
+	j.prune(5)
+
+	more, err := tl.Step(context.Background())
+	if err == nil || more {
+		t.Fatalf("Step = (%v, %v), want OnGap's error and no re-read", more, err)
+	}
+	if got := tl.Checkpoint(); got != saved {
+		t.Fatalf("checkpoint moved to %+v though the resync failed", got)
+	}
+	if stats := tl.Stats(); len(stats.Gaps) != 0 || stats.Errors != 1 {
+		t.Fatalf("stats = %+v, want no gap counted and one error", stats)
+	}
+	mustStep(t, tl)
+	if gaps := r.gapList(); len(gaps) != 1 || gaps[0].From != saved {
+		t.Fatalf("gaps = %+v, want the same gap offered again", gaps)
+	}
+	if got := tl.Checkpoint(); got.Seq != 5 {
+		t.Fatalf("checkpoint = %+v, want the head after the resync succeeded", got)
 	}
 }
 
@@ -282,8 +327,8 @@ func TestHeadRegressedGap(t *testing.T) {
 	if !mustStep(t, tl) {
 		t.Fatal("a gap must ask for an immediate re-read")
 	}
-	if len(r.gaps) != 1 || r.gaps[0].Kind != GapHeadRegressed || r.gaps[0].Head != 1 || r.gaps[0].From.Seq != 3 {
-		t.Fatalf("gaps = %+v, want one head regression from 3 to head 1", r.gaps)
+	if gaps := r.gapList(); len(gaps) != 1 || gaps[0].Kind != GapHeadRegressed || gaps[0].Head != 1 || gaps[0].From.Seq != 3 {
+		t.Fatalf("gaps = %+v, want one head regression from 3 to head 1", gaps)
 	}
 	if got := tl.Checkpoint(); got.Seq != 1 || got.Last.IssueID != "x" {
 		t.Fatalf("checkpoint = %+v, want re-baselined at head 1 on x", got)
@@ -295,80 +340,131 @@ func TestHeadRegressedGap(t *testing.T) {
 	}
 }
 
-func TestResumeDetectsACounterReseededAtTheHighWaterMark(t *testing.T) {
+func TestResumeDetectsACounterReseededBelowTheHighWaterMark(t *testing.T) {
 	j := &fakeJournal{}
 	j.append("a", "b", "c")
-	r := &recorder{}
-	first := &Tailer{Source: j, Apply: r.apply}
+	first := newTailer(j, &recorder{})
+	mustStep(t, first)
 	mustStep(t, first)
 	saved := first.Checkpoint()
 
-	// While the consumer was away the journal was recreated and its counter
-	// seeded at the old head; new writes landed above it. The head did not
+	// While the consumer was away the journal was recreated with its counter
+	// seeded below the old head, and new writes passed it. The head did not
 	// regress, so only the fingerprint can tell.
 	j.reseed(2)
 	j.append("p", "q")
 
-	r2 := &recorder{}
-	tl := &Tailer{Source: j, Apply: r2.apply, OnGap: r2.onGap}
+	r := &recorder{}
+	tl := newTailer(j, r)
 	tl.Resume(saved)
 	if !mustStep(t, tl) {
 		t.Fatal("a gap must ask for an immediate re-read")
 	}
-	if len(r2.gaps) != 1 || r2.gaps[0].Kind != GapReset || r2.gaps[0].From != saved {
-		t.Fatalf("gaps = %+v, want one reset from %+v", r2.gaps, saved)
+	if gaps := r.gapList(); len(gaps) != 1 || gaps[0].Kind != GapReset || gaps[0].From != saved {
+		t.Fatalf("gaps = %+v, want one reset from %+v", gaps, saved)
 	}
 	if got := tl.Checkpoint(); got.Seq != 4 || got.Last.IssueID != "q" {
 		t.Fatalf("checkpoint = %+v, want re-baselined at head 4", got)
 	}
-	if len(r2.seqs()) != 0 {
-		t.Fatalf("applied %v across a reset; the consumer must resync instead", r2.seqs())
+	if len(r.seqs()) != 0 {
+		t.Fatalf("applied %v across a reset; the consumer must resync instead", r.seqs())
+	}
+}
+
+// A counter re-seeded exactly at the checkpoint: the checkpoint row is gone
+// and every new row is above it, which a conforming journal reports as a
+// truncation of the verification read.
+func TestReseedAtTheCheckpointIsAReset(t *testing.T) {
+	j := &fakeJournal{}
+	j.append("a", "b", "c")
+	first := newTailer(j, &recorder{})
+	mustStep(t, first)
+	mustStep(t, first)
+	saved := first.Checkpoint() // {3, c}
+
+	j.reseed(3)
+	j.append("p", "q")
+
+	r := &recorder{}
+	tl := newTailer(j, r)
+	tl.Resume(saved)
+	mustStep(t, tl)
+	if gaps := r.gapList(); len(gaps) != 1 || gaps[0].Kind != GapReset {
+		t.Fatalf("gaps = %+v, want one reset", gaps)
+	}
+	if len(r.seqs()) != 0 {
+		t.Fatalf("applied %v across a reset", r.seqs())
+	}
+}
+
+// A busy feed: the counter resets and new rows overtake the checkpoint
+// between two reads. No resume, no idle poll — the next read must catch it.
+func TestABusyFeedDetectsAResetOnTheNextRead(t *testing.T) {
+	j := &fakeJournal{}
+	j.append("a", "b", "c", "d", "e")
+	r := &recorder{}
+	tl := &Tailer{Source: j, Apply: r.apply, OnGap: r.onGap}
+	mustStep(t, tl) // checkpoint {5, e}
+
+	j.reseed(2)
+	j.append("v", "w", "x", "y", "z") // seqs 3..7
+
+	mustStep(t, tl)
+	if gaps := r.gapList(); len(gaps) != 1 || gaps[0].Kind != GapReset || gaps[0].To.Seq != 7 {
+		t.Fatalf("gaps = %+v, want one reset re-baselined at 7", gaps)
+	}
+	if got, want := r.seqs(), []int64{1, 2, 3, 4, 5}; !slices.Equal(got, want) {
+		t.Fatalf("applied %v, want %v (no new-history row applied as a continuation)", got, want)
 	}
 }
 
 func TestResumeWithAMatchingFingerprintContinues(t *testing.T) {
 	j := &fakeJournal{}
 	j.append("a", "b")
-	r := &recorder{}
-	first := &Tailer{Source: j, Apply: r.apply}
+	first := &Tailer{Source: j, Apply: (&recorder{}).apply, OnGap: (&recorder{}).onGap}
 	mustStep(t, first)
 	j.append("c")
 
-	r2 := &recorder{}
-	tl := &Tailer{Source: j, Apply: r2.apply, OnGap: r2.onGap}
+	r := &recorder{}
+	tl := &Tailer{Source: j, Apply: r.apply, OnGap: r.onGap}
 	tl.Resume(first.Checkpoint())
 	mustStep(t, tl)
-	if len(r2.gaps) != 0 {
-		t.Fatalf("gaps = %+v on a healthy resume", r2.gaps)
+	if gaps := r.gapList(); len(gaps) != 0 {
+		t.Fatalf("gaps = %+v on a healthy resume", gaps)
 	}
-	if got, want := r2.seqs(), []int64{3}; !slices.Equal(got, want) {
+	if got, want := r.seqs(), []int64{3}; !slices.Equal(got, want) {
 		t.Fatalf("applied %v, want %v", got, want)
 	}
 	reads := j.readLog()
-	verify := reads[len(reads)-2]
-	if verify.since != 1 || verify.limit != 1 {
-		t.Fatalf("verification read = %+v, want since=seq-1=1, limit=1", verify)
+	if last := reads[len(reads)-1]; last.since != 1 || last.limit != DefaultPageLimit+1 {
+		t.Fatalf("resume read = %+v, want since=seq-1=1 with one extra row", last)
 	}
 }
 
-func TestIdlePollsReverifyTheFingerprint(t *testing.T) {
-	j := &fakeJournal{}
-	j.append("a", "b")
+// skippingJournal serves rows above since+1 without reporting truncation,
+// which a conforming journal never does.
+type skippingJournal struct{ rows []journalops.Row }
+
+func (s *skippingJournal) ReadEventsJournalPage(_ context.Context, since int64, _ int) (journalops.Page, error) {
+	var out []journalops.Row
+	for _, r := range s.rows {
+		if r.Seq > since {
+			out = append(out, r)
+		}
+	}
+	return journalops.Page{Rows: out, Head: s.rows[len(s.rows)-1].Seq}, nil
+}
+
+func TestANonConformingSourceCannotMakeTheTailerSkipRows(t *testing.T) {
+	src := &skippingJournal{rows: []journalops.Row{{Seq: 3, IssueID: "c"}, {Seq: 4, IssueID: "d"}}}
 	r := &recorder{}
-	tl := &Tailer{Source: j, Apply: r.apply, OnGap: r.onGap, VerifyEvery: 3}
+	tl := &Tailer{Source: src, Apply: r.apply, OnGap: r.onGap}
 	mustStep(t, tl)
-	// Same head, different row: a reset only the fingerprint sees.
-	j.reseed(1)
-	j.append("z")
-	for range 3 {
-		mustStep(t, tl) // idle reads
+	if gaps := r.gapList(); len(gaps) != 1 || gaps[0].Kind != GapTruncated || gaps[0].Floor != 3 {
+		t.Fatalf("gaps = %+v, want a truncation at floor 3", gaps)
 	}
-	if len(r.gaps) != 0 {
-		t.Fatalf("gap reported before the verification was due: %+v", r.gaps)
-	}
-	mustStep(t, tl) // verification
-	if len(r.gaps) != 1 || r.gaps[0].Kind != GapReset {
-		t.Fatalf("gaps = %+v, want one reset found by the idle verification", r.gaps)
+	if len(r.seqs()) != 0 {
+		t.Fatalf("applied %v, skipping rows 1..2", r.seqs())
 	}
 }
 
@@ -376,7 +472,7 @@ func TestBaselineStartsAtTheHeadWithAFingerprint(t *testing.T) {
 	j := &fakeJournal{}
 	j.append("a", "b", "c")
 	r := &recorder{}
-	tl := &Tailer{Source: j, Apply: r.apply}
+	tl := &Tailer{Source: j, Apply: r.apply, OnGap: r.onGap}
 	cp, err := tl.Baseline(context.Background())
 	if err != nil {
 		t.Fatalf("Baseline: %v", err)
@@ -392,8 +488,8 @@ func TestBaselineStartsAtTheHeadWithAFingerprint(t *testing.T) {
 }
 
 func TestBaselineOnAnEmptyJournal(t *testing.T) {
-	j := &fakeJournal{}
-	tl := &Tailer{Source: j, Apply: (&recorder{}).apply}
+	r := &recorder{}
+	tl := &Tailer{Source: &fakeJournal{}, Apply: r.apply, OnGap: r.onGap}
 	cp, err := tl.Baseline(context.Background())
 	if err != nil || cp != (Checkpoint{}) {
 		t.Fatalf("Baseline = (%+v, %v), want the zero checkpoint", cp, err)
@@ -401,11 +497,15 @@ func TestBaselineOnAnEmptyJournal(t *testing.T) {
 }
 
 func TestStepRefusesAnUnconfiguredTailer(t *testing.T) {
-	if _, err := (&Tailer{Apply: (&recorder{}).apply}).Step(context.Background()); err == nil {
-		t.Fatal("Step without a Source succeeded")
-	}
-	if _, err := (&Tailer{Source: &fakeJournal{}}).Step(context.Background()); err == nil {
-		t.Fatal("Step without Apply succeeded")
+	r := &recorder{}
+	for name, tl := range map[string]*Tailer{
+		"no Source": {Apply: r.apply, OnGap: r.onGap},
+		"no Apply":  {Source: &fakeJournal{}, OnGap: r.onGap},
+		"no OnGap":  {Source: &fakeJournal{}, Apply: r.apply},
+	} {
+		if _, err := tl.Step(context.Background()); err == nil {
+			t.Errorf("Step with %s succeeded", name)
+		}
 	}
 }
 
@@ -440,7 +540,7 @@ func TestRunBacksOffWhenIdleAndReadsAtOnceAfterAFullPage(t *testing.T) {
 			j.append("f")
 		}
 	}
-	tl := &Tailer{Source: j, Apply: r.apply, PageLimit: 2, Sleep: clock.sleep}
+	tl := &Tailer{Source: j, Apply: r.apply, OnGap: r.onGap, PageLimit: 2, Sleep: clock.sleep}
 
 	if err := tl.Run(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run = %v, want context.Canceled", err)
@@ -458,10 +558,10 @@ func TestRunBacksOffWhenIdleAndReadsAtOnceAfterAFullPage(t *testing.T) {
 }
 
 func TestRunCapsIdleBackoff(t *testing.T) {
-	j := &fakeJournal{}
 	ctx, cancel := context.WithCancel(context.Background())
 	clock := &scriptedSleep{after: 5, cancel: cancel}
-	tl := &Tailer{Source: j, Apply: (&recorder{}).apply, Sleep: clock.sleep}
+	r := &recorder{}
+	tl := &Tailer{Source: &fakeJournal{}, Apply: r.apply, OnGap: r.onGap, Sleep: clock.sleep}
 	_ = tl.Run(ctx)
 	want := []time.Duration{250 * time.Millisecond, 500 * time.Millisecond, time.Second, time.Second, time.Second}
 	if !slices.Equal(clock.delays, want) {
@@ -476,7 +576,10 @@ func TestRunReportsErrorsAndRetries(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	clock := &scriptedSleep{after: 2, cancel: cancel}
 	var reported []error
-	tl := &Tailer{Source: j, Apply: r.apply, Sleep: clock.sleep, OnError: func(err error) { reported = append(reported, err) }}
+	tl := &Tailer{Source: j, Apply: r.apply, OnGap: r.onGap, Sleep: clock.sleep, OnError: func(err error) error {
+		reported = append(reported, err)
+		return nil
+	}}
 	_ = tl.Run(ctx)
 	if len(reported) != 1 {
 		t.Fatalf("OnError saw %v, want one apply failure", reported)
@@ -486,10 +589,25 @@ func TestRunReportsErrorsAndRetries(t *testing.T) {
 	}
 }
 
+func TestRunStopsWhenOnErrorSaysSo(t *testing.T) {
+	permanent := errors.New("journal refused for good")
+	j := &fakeJournal{failErr: permanent}
+	r := &recorder{}
+	tl := &Tailer{Source: j, Apply: r.apply, OnGap: r.onGap, OnError: func(err error) error {
+		if errors.Is(err, permanent) {
+			return err
+		}
+		return nil
+	}}
+	if err := tl.Run(context.Background()); !errors.Is(err, permanent) {
+		t.Fatalf("Run = %v, want the permanent refusal", err)
+	}
+}
+
 func TestRunStopsOnCancel(t *testing.T) {
-	j := &fakeJournal{}
 	ctx, cancel := context.WithCancel(context.Background())
-	tl := &Tailer{Source: j, Apply: (&recorder{}).apply, Poll: time.Millisecond, IdlePoll: time.Millisecond}
+	r := &recorder{}
+	tl := &Tailer{Source: &fakeJournal{}, Apply: r.apply, OnGap: r.onGap, Poll: time.Millisecond, IdlePoll: time.Millisecond}
 	done := make(chan error, 1)
 	go func() { done <- tl.Run(ctx) }()
 	cancel()
