@@ -42,6 +42,10 @@ var allowedNonMetadata = map[string]string{
 	"gc.healthz.v1":            "workspace healthz workflow contract (internal/workspacesvc)",
 	"gc.worker.conformance.v1": "worker conformance report schema version (internal/worker/workertest)",
 
+	// HMAC domain-separation tags (MAC input prefixes, never stored anywhere).
+	"gc.connect.bearer.v1":   "connect bearer HMAC domain tag (internal/connect/bearer.go)",
+	"gc.connect.sentinel.v1": "connect token-file sentinel HMAC domain tag (internal/connect/bearer.go)",
+
 	// Cobra command-tree annotations (not bead metadata).
 	"gc.docgen.skip":                "cobra annotation: skip CLI doc generation",
 	"gc.json.schema_dir":            "cobra annotation: JSON schema output dir",
