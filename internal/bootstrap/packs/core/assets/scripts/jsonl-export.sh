@@ -53,12 +53,54 @@ ARCHIVE_REPO="${GC_JSONL_ARCHIVE_REPO:-$PACK_STATE_DIR/jsonl-archive}"
 # transition, so operators who missed the first line still see the current
 # configuration. Default one week.
 MODE_RELOG_INTERVAL_SECONDS="${GC_JSONL_MODE_RELOG_INTERVAL:-604800}"
+# Keep the local archive's Git object database bounded. Each export commit
+# creates loose objects even in local-only mode; without periodic packing a
+# busy city can exhaust the host filesystem long before Git's object count
+# alone reaches its built-in auto-gc trigger.
+GC_LOOSE_OBJECT_LIMIT="${GC_JSONL_GC_LOOSE_OBJECTS:-2000}"
+GC_LOOSE_KB_LIMIT="${GC_JSONL_GC_LOOSE_KB:-262144}"
+GC_WINDOW_MEMORY="${GC_JSONL_GC_WINDOW_MEMORY:-256m}"
+# Packing rewrites the whole object database, so it only starts when the
+# archive's filesystem can hold another copy of it and still keep this many
+# KiB free (default 500 MiB, the managed Dolt floor). 0 disables the check.
+GC_MIN_FREE_KB="${GC_JSONL_GC_MIN_FREE_KB:-512000}"
 
 # Cached archive mode ("push" or "local-only"). Resolved once on the first
 # get_archive_mode call and reused thereafter so every push checkpoint in a
 # single run sees a consistent value even if an operator adds or removes the
 # origin remote mid-run.
 ARCHIVE_MODE=""
+
+require_non_negative_integer() {
+    local name="$1"
+    local value="$2"
+
+    case "$value" in
+        ''|*[!0-9]*)
+            echo "jsonl-export: $name must be a non-negative integer" >&2
+            exit 1
+            ;;
+    esac
+    # [ ] rejects a value beyond the 64-bit range with an error, which the
+    # later if tests of this setting would read as false.
+    if ! [ "$value" -ge 0 ] 2>/dev/null; then
+        echo "jsonl-export: $name must be at most 9223372036854775807" >&2
+        exit 1
+    fi
+}
+
+require_non_negative_integer GC_JSONL_GC_LOOSE_OBJECTS "$GC_LOOSE_OBJECT_LIMIT"
+require_non_negative_integer GC_JSONL_GC_LOOSE_KB "$GC_LOOSE_KB_LIMIT"
+require_non_negative_integer GC_JSONL_GC_MIN_FREE_KB "$GC_MIN_FREE_KB"
+# Git reads pack.windowMemory as a byte count with an optional unit suffix,
+# takes 0 to mean no limit and a leading 0 as octal; reject all of those now
+# rather than on the first packing run.
+case "${GC_WINDOW_MEMORY%[kKmMgG]}" in
+    ''|0*|*[!0-9]*)
+        echo "jsonl-export: GC_JSONL_GC_WINDOW_MEMORY must be a positive byte count, without leading zeros, with an optional k, m or g suffix in either case (e.g. 256m)" >&2
+        exit 1
+        ;;
+esac
 
 resolve_escalate_script() {
     local candidate
@@ -722,6 +764,96 @@ commit_archive_snapshot() {
     fi
 }
 
+run_archive_git_gc() {
+    local -a gc_command=(
+        git -C "$ARCHIVE_REPO"
+        -c "pack.windowMemory=$GC_WINDOW_MEMORY"
+        -c pack.threads=1
+        gc --quiet
+    )
+
+    # Pack at the lowest CPU and I/O priority the host allows. With -t, ionice
+    # still runs git when it cannot set the I/O class; the probe leaves out an
+    # ionice that cannot start a command here at all.
+    if command -v nice >/dev/null 2>&1; then
+        gc_command=(nice -n 19 "${gc_command[@]}")
+    fi
+    if command -v ionice >/dev/null 2>&1 && ionice -t -c 3 true >/dev/null 2>&1; then
+        gc_command=(ionice -t -c 3 "${gc_command[@]}")
+    fi
+    "${gc_command[@]}"
+}
+
+# Fails when rewriting archive_kb KiB of objects would leave less than
+# GC_MIN_FREE_KB free; warns and passes when df cannot report free space.
+check_archive_gc_free_space() {
+    local archive_kb="$1"
+    local free_kb
+
+    if [ "$GC_MIN_FREE_KB" -eq 0 ]; then
+        return 0
+    fi
+    free_kb=$(df -Pk "$ARCHIVE_REPO" 2>/dev/null | awk 'NR == 2 { print $4 }') || free_kb=""
+    case "$free_kb" in
+        ''|*[!0-9]*)
+            echo "jsonl-export: could not read free disk space for $ARCHIVE_REPO; packing without the free-space check" >&2
+            return 0
+            ;;
+    esac
+    if [ "$((free_kb - archive_kb))" -lt "$GC_MIN_FREE_KB" ]; then
+        echo "jsonl-export: not packing the archive object database: ${free_kb} KiB free, and rewriting the ${archive_kb} KiB archive would leave less than GC_JSONL_GC_MIN_FREE_KB=${GC_MIN_FREE_KB} KiB; free disk space or set GC_JSONL_GC_MIN_FREE_KB=0 to disable this check" >&2
+        printf 'jsonl-export: the archive size counts loose objects at their full size, though they usually pack to a small fraction of it; to pack the archive once by hand, run: git -C %q -c pack.windowMemory=%s -c pack.threads=1 gc\n' "$ARCHIVE_REPO" "$GC_WINDOW_MEMORY" >&2
+        return 1
+    fi
+}
+
+# Pack the archive once its loose objects reach either limit. Callers treat a
+# non-zero return as a failed run; call it in a condition so the explicit
+# returns below, not set -e, decide the outcome.
+maintain_archive_repository() {
+    local object_stats
+    local loose_objects=""
+    local loose_kb=""
+    local pack_kb=""
+    local key
+    local value
+
+    object_stats=$(git -C "$ARCHIVE_REPO" count-objects -v) || {
+        echo "jsonl-export: reading archive object statistics failed" >&2
+        return 1
+    }
+    while IFS=': ' read -r key value; do
+        case "$key" in
+            count) loose_objects="$value" ;;
+            size) loose_kb="$value" ;;
+            size-pack) pack_kb="$value" ;;
+        esac
+    done <<< "$object_stats"
+
+    case "$loose_objects:$loose_kb:$pack_kb" in
+        *[!0-9:]*)
+            echo "jsonl-export: archive object statistics were malformed" >&2
+            return 1
+            ;;
+        :*|*:|*::*)
+            echo "jsonl-export: archive object statistics were incomplete" >&2
+            return 1
+            ;;
+    esac
+
+    if [ "$loose_objects" -lt "$GC_LOOSE_OBJECT_LIMIT" ] \
+        && [ "$loose_kb" -lt "$GC_LOOSE_KB_LIMIT" ]; then
+        return 0
+    fi
+
+    check_archive_gc_free_space "$((pack_kb + loose_kb))" || return 1
+    echo "jsonl-export: packing archive object database (loose_objects=$loose_objects, loose_kb=$loose_kb)" >&2
+    if ! run_archive_git_gc; then
+        echo "jsonl-export: archive object database maintenance failed" >&2
+        return 1
+    fi
+}
+
 discard_failed_db_outputs() {
     local db="$1"
 
@@ -770,6 +902,11 @@ if [ -z "${GC_JSONL_ARCHIVE_REPO:-}" ] && [ ! -d "$ARCHIVE_REPO/.git" ]; then
         ARCHIVE_REPO="$LEGACY_ARCHIVE_REPO"
     fi
 fi
+# Later steps cd into the archive and still address it by this path.
+case "$ARCHIVE_REPO" in
+    /*) ;;
+    *) ARCHIVE_REPO="$PWD/$ARCHIVE_REPO" ;;
+esac
 if [ ! -e "$STATE_FILE" ] && [ -e "$LEGACY_PACK_STATE_FILE" ]; then
     STATE_FILE="$LEGACY_PACK_STATE_FILE"
 elif [ ! -e "$STATE_FILE" ] && [ -e "$LEGACY_STATE_FILE" ]; then
@@ -780,6 +917,15 @@ mkdir -p "$(dirname "$STATE_FILE")"
 
 log_archive_mode_if_needed
 retry_pending_spike_alert
+if [ -d "$ARCHIVE_REPO/.git" ] && ! maintain_archive_repository; then
+    # Exporting would only add loose objects to an archive that cannot be
+    # packed. Snapshots already committed still go off-box.
+    cd "$ARCHIVE_REPO"
+    if should_attempt_push && { has_pending_archive_push || archive_has_local_only_commits; }; then
+        push_archive_main || true
+    fi
+    exit 1
+fi
 
 # The first export in the bd format moves a scope's snapshot files from the
 # old `dolt sql -r json` layout ({"rows":[...]} issues.jsonl, the flat
@@ -1057,7 +1203,7 @@ fi
 # On HALT we still commit the new export so PREV_COUNT advances on the next
 # run — otherwise the same spike re-fires every cooldown and floods the inbox
 # (#1547 root cause #3). Push is skipped, so the spike snapshot stays local
-# until a later successful non-HALT run pushes the archive forward.
+# until a later run pushes the archive forward.
 if [ "$HALTED" -eq 1 ]; then
     if ! git diff --cached --quiet 2>/dev/null; then
         EXPORTED_DBS=$((TOTAL_DBS - FAILED_DB_COUNT))
@@ -1075,6 +1221,9 @@ if [ "$HALTED" -eq 1 ]; then
     else
         echo "jsonl-export: spike alert delivery failed; will retry from state" >&2
     fi
+    # Pack only after the alert is sent or saved for retry: the commit above
+    # already advanced the baseline, so this spike is never detected again.
+    maintain_archive_repository || exit 1
     maintenance_done "jsonl — HALTED on spike detection"
     exit 0
 fi
@@ -1128,6 +1277,9 @@ if should_attempt_push; then
 else
     PUSH_STATUS="skipped (local-only)"
 fi
+
+# After the push, so a packing failure never holds back the new snapshot.
+maintain_archive_repository || exit 1
 
 SUMMARY="jsonl — exported $EXPORTED_DBS/$TOTAL_DBS, records: $TOTAL_EXPORTED, push: $PUSH_STATUS"
 if [ -n "$FAILED_DBS" ]; then

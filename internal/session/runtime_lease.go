@@ -217,7 +217,7 @@ func TryRuntimeLease(s *Store, req RuntimeLeaseRequest) (*RuntimeLease, error) {
 		return nil, fmt.Errorf("runtime lease: city %q and name %q are required", req.City, req.Name)
 	}
 	if !filepath.IsAbs(req.City) {
-		return nil, fmt.Errorf("%w (%q): runtime %q", ErrRuntimeLeaseNoCity, req.City, req.Name)
+		return nil, RefuseWithoutCity(req.City, fmt.Sprintf("runtime %q", req.Name))
 	}
 	if req.ID != "" && (s == nil || req.TTL < runtimeLeaseMinTTL) {
 		return nil, fmt.Errorf("runtime lease: session %q: a store and a TTL of at least %v (got %v) are required", req.ID, runtimeLeaseMinTTL, req.TTL)

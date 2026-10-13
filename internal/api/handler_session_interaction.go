@@ -66,8 +66,8 @@ func (s *Server) handleSessionMessage(w http.ResponseWriter, r *http.Request) {
 		writeSessionManagerError(w, err)
 		return
 	}
-	// Publish the session.pending_cleared now rather than on the next tick.
-	s.pokePendingMonitor()
+	// Publish the session.pending_cleared now rather than on the next pass.
+	s.pokePendingInteractions(id)
 
 	resp := map[string]string{"status": "accepted", "id": id}
 	s.idem.storeResponse(idemKey, bodyHash, http.StatusAccepted, resp)
@@ -92,7 +92,8 @@ func (s *Server) handleSessionKill(w http.ResponseWriter, r *http.Request) {
 		writeSessionManagerError(w, err)
 		return
 	}
-	if err := handle.Kill(r.Context(), s.actor(session.ActorOperator)); err != nil {
+	// Under the kill fence, as `gc session kill` (see Manager.KillFenced).
+	if err := s.sessionManager(store.Store).KillFenced(r.Context(), s.actor(session.ActorOperator), id, handle.Kill); err != nil {
 		writeSessionManagerError(w, err)
 		return
 	}

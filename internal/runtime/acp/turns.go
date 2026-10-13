@@ -161,6 +161,8 @@ type turnRecord struct {
 	StopReason string     // set when State is turnCompleted
 	Usage      *turnUsage // set when the agent reported usage
 	Error      string     // set when State is turnFailed
+
+	eventSeq uint64 // turn-event number; 0 when no events were published
 }
 
 // clone returns a copy that shares no memory with r.
@@ -250,6 +252,9 @@ func (sc *sessionConn) startTurnLocked(id int64, now time.Time) {
 		StartedAt: now,
 		State:     turnRunning,
 	}
+	if sc.turnEvents != nil {
+		sc.turnEventsLost += sc.turnEvents.started(sc.currentTurn)
+	}
 }
 
 // endTurnLocked closes the running turn with outcome and makes it the last
@@ -266,6 +271,9 @@ func (sc *sessionConn) endTurnLocked(outcome turnOutcome, now time.Time) {
 	turn.Usage = outcome.usage
 	turn.Error = outcome.err
 	sc.lastTurn = turn
+	if sc.turnEvents != nil && turn.eventSeq != 0 {
+		sc.turnEventsLost += sc.turnEvents.completed(turn, outcome, now)
+	}
 }
 
 // turns returns copies of the running turn (nil when idle) and the last
@@ -381,10 +389,12 @@ func (sc *sessionConn) awaitIdle(ctx context.Context, name string, idleCh <-chan
 // response outstanding right now. A session this provider does not own, or
 // whose agent connection has closed, is an error, never idle.
 //
-// The only caller today is the reconciler's content clock, which excludes the
-// ACP transport by construction (idleTrackerContentClockApplies: ACP delivers
-// in-process, with no repainting pane to scan), so this answer is unreachable
-// through that path. It is implemented anyway to keep the optional-interface
+// Both callers today skip sessions whose recorded transport is ACP: the
+// reconciler's content clock (idleTrackerContentClockApplies: ACP delivers
+// in-process, with no repainting pane to scan) and the pool execution
+// backstop's snapshot veto (executionSnapshotVetoApplies: busy-readable
+// provider families on a non-ACP transport). So this answer is unreachable
+// through either path. It is implemented anyway to keep the optional-interface
 // set complete for a provider that can answer it cheaply and correctly — the
 // wrapping seam, auto, and hybrid all forward it, so a future caller that is
 // not gated on transport gets the real answer rather than

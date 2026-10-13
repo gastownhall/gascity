@@ -28,9 +28,10 @@ import (
 //
 // For a suspended rig the skips live where each periodic reader picks its
 // stores (rig caches, demand, order tracking, completions, convergence, the
-// maintenance orders). For a suspended city with no running session the tick
-// stops before its first phase, the order lane and the completions sweep stand
-// down, and every cache pauses its reconcile (controllerState.beadsQuiescent).
+// maintenance orders, the convoy check). For a suspended city with no running
+// session the tick stops before its first phase, the order lane and the
+// completions sweep stand down, and every cache pauses its reconcile
+// (controllerState.beadsQuiescent).
 
 // suspendedScopeRetirements remembers which suspended scopes' pairs this
 // controller already stopped in the current suspension episode, so a scope is

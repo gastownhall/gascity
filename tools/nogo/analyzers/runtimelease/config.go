@@ -81,6 +81,7 @@ var allowed = map[string]Allowance{
 	cmdGC + ":sweepProcessTableOrphans":           {Reason: "M3's process sweep: kills only roots whose row is closed or absent, or whose incarnation stopped and that started before that stop (its start-time bound, processStartSlack); a later start's roots are younger and spared"},
 	cmdGC + ":teardownServerForStop":              {Reason: "the city stop: tears the shared server down after every session stopped (the stop-sweep allowlist)"},
 	cmdGC + ":relaunchAgentForLaunchDrift":        {Reason: "a launch-only drift's warm-box relaunch: takes the lease itself (tryRuntimeLease) and relaunches on its Watch"},
+	cmdGC + ":stopInterruptedStartsForStop":       {Reason: "the standalone city stop (no controller): takes the name's flock itself (tryRuntimeLease) and leaves a name whose flock a live start holds"},
 	cmdGC + ":attachmentCachingProvider.Relaunch": {Reason: "the attachment-caching wrapper forwarding to its provider; its callers hold the lease"},
 	cmdGC + ":statusProvider.Relaunch":            {Reason: "the status wrapper forwarding to its base provider; its callers hold the lease"},
 	cmdGC + ":stopFenced":                         {Reason: "v2's fenced stop: its effects run under runTx's lockRuntimeName"},

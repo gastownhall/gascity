@@ -441,6 +441,90 @@ func TestTxCloseRacingLiveListAnnouncesBeadClosedOnce(t *testing.T) {
 	assertClosedExactlyOnce(t, rec, seed.ID, "after a Tx close raced a live list")
 }
 
+// newUncachedCloseRace primes a cache over a backing that already holds an
+// open bead the cache has NOT cached (it was created behind the cache after
+// the prime), and arms hook to run once inside the next backing Get.
+func newUncachedCloseRace(t *testing.T) (*getHookStore, *CachingStore, *closeEventRecorder, Bead) {
+	t.Helper()
+	mem := NewMemStore()
+	backing := &getHookStore{Store: mem}
+	rec := &closeEventRecorder{}
+	cs := NewCachingStoreForTest(backing, rec.onChange(t))
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	seed, err := mem.Create(Bead{Title: "never cached", Status: "open"})
+	if err != nil {
+		t.Fatalf("Create behind the cache: %v", err)
+	}
+	cs.mu.RLock()
+	_, cached := cs.beads[seed.ID]
+	cs.mu.RUnlock()
+	if cached {
+		t.Fatal("seed is cached; the never-cached race is vacuous")
+	}
+	rec.reset()
+	return backing, cs, rec, seed
+}
+
+// raceIncludeClosedList is the concurrent reader: a live list that returns the
+// just-closed, never-cached row and caches it as closed.
+func raceIncludeClosedList(t *testing.T, cs *CachingStore) func(string) {
+	return func(string) {
+		if _, err := cs.List(ListQuery{AllowScan: true, IncludeClosed: true, Live: true}); err != nil {
+			t.Errorf("racing live List: %v", err)
+		}
+	}
+}
+
+// A close of a bead the cache never cached, raced by a live list that caches
+// the closed row before Close claims the announcement, must still be announced
+// exactly once: the list must not swallow it as an already-closed row.
+func TestCloseOfNeverCachedBeadRacingListAnnouncesOnce(t *testing.T) {
+	t.Parallel()
+	backing, cs, rec, seed := newUncachedCloseRace(t)
+	backing.onGet = raceIncludeClosedList(t, cs)
+	if err := cs.Close(seed.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	cs.announceUnannouncedCloses()
+	assertClosedExactlyOnce(t, rec, seed.ID, "after Close of a never-cached bead raced a list")
+}
+
+// The same race for an Update that closes.
+func TestUpdateClosingNeverCachedBeadRacingListAnnouncesOnce(t *testing.T) {
+	t.Parallel()
+	backing, cs, rec, seed := newUncachedCloseRace(t)
+	backing.onGet = raceIncludeClosedList(t, cs)
+	closed := "closed"
+	if err := cs.Update(seed.ID, UpdateOpts{Status: &closed}); err != nil {
+		t.Fatalf("Update status=closed: %v", err)
+	}
+	cs.announceUnannouncedCloses()
+	// The list announced the close; the Update, which no longer owns it,
+	// still reports its own write as bead.updated.
+	if got := rec.count("bead.closed", seed.ID, "closed"); got != 1 {
+		t.Fatalf("bead.closed events = %d, want exactly 1; events=%s", got, rec)
+	}
+}
+
+// A list that caches someone else's old closed row, with no close of ours in
+// flight, announces nothing: only a close a write is making is owed.
+func TestListCachingAnUnrelatedClosedRowAnnouncesNothing(t *testing.T) {
+	t.Parallel()
+	_, cs, rec, seed := newUncachedCloseRace(t)
+	if err := cs.backing.Close(seed.ID); err != nil {
+		t.Fatalf("close behind the cache: %v", err)
+	}
+	if _, err := cs.List(ListQuery{AllowScan: true, IncludeClosed: true, Live: true}); err != nil {
+		t.Fatalf("live List: %v", err)
+	}
+	cs.runReconciliation()
+	if got := rec.count("bead.closed", seed.ID, ""); got != 0 {
+		t.Fatalf("bead.closed events = %d, want 0 for a closed row no cached open row preceded; events=%s", got, rec)
+	}
+}
+
 // A close whose install a racing local write fenced still announces the close
 // itself, so no read that later settles the row it left dirty may announce
 // that close again. The racer is a metadata-only Update that commits after the

@@ -196,6 +196,31 @@ func TestPreWakeCommit(t *testing.T) {
 	}
 }
 
+// TestPreWakeCommitIsThePreWakeCell: a start clears the idle stop's and a
+// wait's intent and a soft suspend's stamp (the disposition's PreWake cell),
+// and keeps a wait's hold.
+func TestPreWakeCommitIsThePreWakeCell(t *testing.T) {
+	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
+	for intent, want := range map[string]string{"idle-stop-pending": "", "wait-hold": "", "someday": ""} {
+		store := beads.NewMemStore()
+		b, err := store.Create(beads.Bead{Title: "test-session", Metadata: map[string]string{
+			"session_name": "test-worker", "template": "worker", "generation": "2",
+			"sleep_intent": intent, "wait_hold": "true", "suspended_at": "2026-03-08T11:00:00Z",
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, _, err := preWakeCommit(wakeInfo(t, b), sessionFrontDoor(store), clk); err != nil {
+			t.Fatalf("preWakeCommit: %v", err)
+		}
+		got, _ := store.Get(b.ID)
+		if got.Metadata["sleep_intent"] != want || got.Metadata["suspended_at"] != "" || got.Metadata["wait_hold"] != "true" {
+			t.Errorf("intent %q: after PreWake sleep_intent=%q suspended_at=%q wait_hold=%q, want the intent and stamp cleared and the wait kept",
+				intent, got.Metadata["sleep_intent"], got.Metadata["suspended_at"], got.Metadata["wait_hold"])
+		}
+	}
+}
+
 func TestPreWakeCommitUsesSingleBatchMetadataWrite(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
@@ -1577,6 +1602,29 @@ func TestCompleteDrain_ClearsLastWokeAt(t *testing.T) {
 	}
 	if got.Metadata["sleep_reason"] != "idle" {
 		t.Errorf("sleep_reason = %q, want idle", got.Metadata["sleep_reason"])
+	}
+}
+
+// TestCompleteDrain_KeepsALateQuarantinesReason (mc-slkxd): legacy's drain
+// completion over a quarantine that landed after the signal keeps its
+// reason while the quarantine is in force.
+func TestCompleteDrain_KeepsALateQuarantinesReason(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	store := beads.NewMemStore()
+	until := now.Add(time.Hour).UTC().Format(time.RFC3339)
+	b, _ := store.Create(beads.Bead{
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Title:  "test",
+		Metadata: map[string]string{
+			"session_name": "test-session", "state": "awake", "sleep_reason": "quarantine", "quarantined_until": until,
+		},
+	})
+	completeDrain(wakeInfo(t, b), sessionFrontDoor(store), &drainState{reason: "idle"}, clk)
+	got, _ := store.Get(b.ID)
+	if got.Metadata["state"] != "asleep" || got.Metadata["sleep_reason"] != "quarantine" || got.Metadata["quarantined_until"] != until {
+		t.Fatalf("row %v, want asleep with the quarantine and its reason kept", got.Metadata)
 	}
 }
 

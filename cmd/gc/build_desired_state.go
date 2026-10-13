@@ -4027,14 +4027,7 @@ func realizePoolDesiredSessionsAt(
 			// pool_slot metadata from before singleton normalization.
 			tp.PoolSlot = 0
 		} else {
-			tp.InstanceName = qualifiedInstance
-			tp.PoolSlot = poolSlot
-			if usesTransientPoolSlotIdentity(cfgAgent) {
-				clearPoolTemplateRuntimeIdentity(&tp)
-			} else {
-				tp.Alias = qualifiedInstance
-				setPoolTemplateRuntimeIdentityInfo(&tp, qualifiedInstance, sbInfo)
-			}
+			applyPoolInstanceIdentity(&tp, cfgAgent, qualifiedInstance, poolSlot, sbInfo)
 		}
 		segmentStart = bp.realizeNow()
 		installAgentSideEffects(bp, resolveAgent, tp, stderr)
@@ -4043,6 +4036,20 @@ func realizePoolDesiredSessionsAt(
 		stats.realized++
 	}
 	return stats
+}
+
+// applyPoolInstanceIdentity gives tp, a non-manual pool row's template, its
+// pool instance identity in slot poolSlot: the instance name, and the alias
+// and runtime identity unless the pool's slot identity is transient.
+func applyPoolInstanceIdentity(tp *TemplateParams, cfgAgent *config.Agent, qualifiedInstance string, poolSlot int, sbInfo session.Info) {
+	tp.InstanceName = qualifiedInstance
+	tp.PoolSlot = poolSlot
+	if usesTransientPoolSlotIdentity(cfgAgent) {
+		clearPoolTemplateRuntimeIdentity(tp)
+	} else {
+		tp.Alias = qualifiedInstance
+		setPoolTemplateRuntimeIdentityInfo(tp, qualifiedInstance, sbInfo)
+	}
 }
 
 // computePoolTriggerBindingPatch is the pure key-diff at the heart of

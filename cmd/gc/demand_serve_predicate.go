@@ -127,15 +127,15 @@ func demandRowServable(b beads.Bead) bool {
 			return false
 		}
 	}
-	// LABEL: case-insensitive. Here the query is NOT the last word: whatever
-	// `gc ready` returns, the hook re-applies the hold filter in Go with
-	// EqualFold (isHeldHookCandidate) before serving a candidate, so a
-	// "Hold:Mayor" bead is served by the reader and then stripped by the hook.
-	// The worker never sees it, so it is not capacity demand.
+	// LABEL: human is exact, case-sensitive, like the query's label filter;
+	// the hook does not apply a human post-filter. Dispatch holds are
+	// case-insensitive: the hook re-applies them with EqualFold
+	// (isHeldHookCandidate), so a "Hold:Mayor" bead is stripped even if the
+	// reader serves it. The worker never sees it, so it is not capacity demand.
 	for _, label := range b.Labels {
 		label = strings.TrimSpace(label)
 		for _, excluded := range rules.ExcludeLabels {
-			if strings.EqualFold(label, excluded) {
+			if label == excluded || (excluded != beadmeta.HumanLabel && strings.EqualFold(label, excluded)) {
 				return false
 			}
 		}
@@ -152,7 +152,7 @@ func demandRowServable(b beads.Bead) bool {
 //
 // The reason is the answer, not a bare "not ready", because the two consumers —
 // classifyDemandTrigger and the drain-ack open arm
-// (firstOpenClaimableAssignedWorkBeadInStoreByIdentifiers) — act differently on
+// (firstOpenClaimableAssignedWorkBeadForReachableStore) — act differently on
 // each cause: a deferral or a dispatch hold is PROOF of non-claimability, while
 // an unproven blockedness reading is only a question, to be settled against live
 // deps. Naming the cause here keeps that distinction in one place. Reconstructing

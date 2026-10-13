@@ -100,9 +100,10 @@ type PromptRenderResult struct {
 // pack directories; each may contain prompts/shared/ subdirectories
 // loaded as cross-pack shared templates (lower priority than the
 // sibling shared/ dir). injectFragments are named templates to append to
-// the output after rendering. Returns empty string if templatePath is empty
-// or the file doesn't exist. On parse or execute error, logs a warning to
-// stderr and returns the raw text (graceful fallback).
+// the output after rendering. Returns empty string if templatePath is empty.
+// A template path that cannot be read also returns empty, after a warning to
+// stderr. On parse or execute error, logs a warning to stderr and returns the
+// raw text (graceful fallback).
 func renderPrompt(fs fsys.FS, cityPath, cityName, templatePath string, ctx PromptContext, sessionTemplate string, stderr io.Writer, packDirs []string, injectFragments []string, store beads.Store) string {
 	return renderPromptWithMeta(fs, cityPath, cityName, templatePath, ctx, sessionTemplate, stderr, packDirs, injectFragments, store).Text
 }
@@ -118,6 +119,14 @@ func renderPromptWithMeta(fs fsys.FS, cityPath, cityName, templatePath string, c
 	sourcePath := promptTemplateSourcePath(cityPath, templatePath)
 	data, err := fs.ReadFile(sourcePath)
 	if err != nil {
+		// A template path that cannot be read is not "no template": say so,
+		// then keep the fallback (session resolution ships the beacon alone
+		// and a non-strict `gc prime` serves the built-in default).
+		if ctx.AgentName != "" {
+			fmt.Fprintf(stderr, "gc: prompt_template %q for agent %q: %v\n", templatePath, ctx.AgentName, err) //nolint:errcheck // best-effort stderr
+		} else {
+			fmt.Fprintf(stderr, "gc: prompt_template %q: %v\n", templatePath, err) //nolint:errcheck // best-effort stderr
+		}
 		return PromptRenderResult{}
 	}
 	raw := string(data)

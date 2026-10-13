@@ -6559,14 +6559,13 @@ func TestHandleSessionMessageRejectsPendingInteraction(t *testing.T) {
 	req := newPostRequest(cityURL(fs, "/session/")+info.ID+"/messages", strings.NewReader(`{"message":"hello"}`))
 	h.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusAccepted {
-		t.Fatalf("message status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
+	// A pending interaction is rejected synchronously with 409 rather than
+	// accepted (202) and failed later on the event stream (#2892).
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("message status = %d, want %d; body: %s", rec.Code, http.StatusConflict, rec.Body.String())
 	}
-
-	accepted := decodeAsyncAccepted(t, rec.Body)
-	_, failure := waitForSessionMessageResult(t, fs.eventProv, accepted.RequestID)
-	if failure == nil {
-		t.Fatalf("expected session message to fail (pending interaction should reject), got success")
+	if !strings.Contains(rec.Body.String(), "pending_interaction: ") {
+		t.Fatalf("message body = %s, want a pending_interaction detail", rec.Body.String())
 	}
 }
 
@@ -6782,6 +6781,14 @@ func TestHandleSessionStreamClosedSessionReturnsSnapshot(t *testing.T) {
 
 	if !strings.Contains(rec.Body.String(), "event: turn") || !strings.Contains(rec.Body.String(), "hello") || !strings.Contains(rec.Body.String(), "world") {
 		t.Errorf("stream body missing closed-session snapshot: %s", rec.Body.String())
+	}
+	var snapshot SessionStreamMessageEvent
+	frame := firstSSETestFrame(t, rec.Body.String(), "turn")
+	if err := json.Unmarshal([]byte(frame.Data), &snapshot); err != nil {
+		t.Fatalf("decode turn frame: %v; data=%s", err, frame.Data)
+	}
+	if len(snapshot.Turns) != 2 || snapshot.Turns[0].ID != "1" || snapshot.Turns[1].ID != "2" {
+		t.Errorf("snapshot turns = %+v, want the transcript entry ids 1 and 2", snapshot.Turns)
 	}
 	for _, event := range fs.eventProv.(*events.Fake).Events {
 		if event.Type == events.WorkerOperation {

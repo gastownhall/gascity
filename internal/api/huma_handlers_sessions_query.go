@@ -424,9 +424,10 @@ type cityPendingSnapshot struct {
 }
 
 // probeCityPending probes every session that could be holding a pending
-// decision. It backs both GET /v0/city/{cityName}/pending and the pending
-// monitor that publishes session.pending transitions, so the stream and the
-// snapshot always agree on what is pending.
+// decision. It backs GET /v0/city/{cityName}/pending. The controller's
+// pending-interaction lane (cmd/gc pending_interaction_lane.go), which
+// publishes session.pending transitions, probes the same active set through
+// the same runtime detector.
 //
 // The probe set is active sessions plus legacy empty-state ("none") beads,
 // which the codebase treats as active for upgrade/bootstrap cities (see

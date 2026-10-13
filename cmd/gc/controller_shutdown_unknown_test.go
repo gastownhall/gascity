@@ -51,7 +51,7 @@ func TestGracefulStopAllKeepsWaitingOnUnknownLiveness(t *testing.T) {
 	}
 	var stdout, stderr lockedBuffer
 
-	gracefulStopAllWithForceSignal([]string{"alpha"}, sp, time.Minute, events.Discard, nil, beads.SessionStore{}, &stdout, &stderr, func() bool { return false })
+	gracefulStopAllWithForceSignal([]string{"alpha"}, nil, sp, time.Minute, events.Discard, nil, beads.SessionStore{}, &stdout, &stderr, func() bool { return false })
 
 	// Pass 1 must not read the unknown first observation as an exit: it polls
 	// again, sees the confirmed absence, and only then pass 2 observes once.

@@ -1692,8 +1692,9 @@ func TestInventoryEnvReadSkipsLeavesWithoutLocalIdentity(t *testing.T) {
 	if id := cr.inventoryLane.cache.Snapshot().ByName["gc-x"].Identity; id.Known {
 		t.Fatalf("exec runtime identity = %+v, want unknown", id)
 	}
-	if got := readRuntimeIdentity(context.Background(), execLike, "gc-x"); got.Known || len(execLike.SnapshotCalls()) != 0 {
-		t.Fatalf("fresh read on an exec-shaped leaf = %+v with %d calls, want unknown and none", got, len(execLike.SnapshotCalls()))
+	before := len(execLike.SnapshotCalls())
+	if got := readRuntimeIdentity(context.Background(), execLike, "gc-x"); got.Known || len(execLike.SnapshotCalls()) != before {
+		t.Fatalf("fresh read on an exec-shaped leaf = %+v with %d calls, want unknown and none", got, len(execLike.SnapshotCalls())-before)
 	}
 }
 

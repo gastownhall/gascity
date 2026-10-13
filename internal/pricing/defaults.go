@@ -111,6 +111,19 @@ var claudeDefaults = []ModelPricing{
 			CacheCreationUSDPer1M: 6.25,
 		},
 	},
+	// Claude 5.5 Opus. Cache reads are published at 0.05x the prompt rate;
+	// most models use 0.1x.
+	{
+		Provider:     "claude",
+		Model:        "claude-opus-5-5",
+		LastVerified: "2026-09-25",
+		Tier: Tier{
+			PromptUSDPer1M:        4.00,
+			CompletionUSDPer1M:    20.00,
+			CacheReadUSDPer1M:     0.20,
+			CacheCreationUSDPer1M: 5.00,
+		},
+	},
 	// Claude 4.5 Haiku.
 	{
 		Provider:     "claude",

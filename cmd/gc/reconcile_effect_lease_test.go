@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -308,11 +309,35 @@ func TestEffectSpecsThatChangeARuntimeTakeTheLease(t *testing.T) {
 				t.Errorf("%s: a section with a Call, the commit or a close, without needs.Lease", kind)
 			}
 		}
+		if i := slices.IndexFunc(spec.sections, func(s section) bool { return s.call != nil }); i >= 0 && spec.needs.LeaseAt > i {
+			t.Errorf("%s: its lease record taken at section %d, after its first Call's (%d)", kind, spec.needs.LeaseAt, i)
+		}
 	}
 	for _, kind := range []string{intentStart, intentAdopt, intentStop, intentClose, intentRollback, intentZombie, intentRekey} {
 		if !effectSpecs[kind].needs.Lease {
 			t.Errorf("%s: without the row's lease record", kind)
 		}
+	}
+}
+
+// TestDrainEffectsTakeTheFlockOnly (v5.9h; #7638 review M8). Kills a drain
+// effect that takes the row's lease record: a drain begin, signal, cancel or
+// void writes request keys and the legacy projection, never a runtime, the
+// incarnation or a commit, so it takes the runtime name's flock alone (the
+// fresh kinds through their runtime read, the plain signal by NameLock), for
+// every drain reason.
+func TestDrainEffectsTakeTheFlockOnly(t *testing.T) {
+	w := &World{}
+	for _, kind := range []string{intentDrainBegin, intentDrainBeginFresh, intentSignal, intentSignalFresh, intentSignalAck, intentDrainCancel, intentDrainVoid} {
+		spec := effectSpecs[kind]
+		for _, reason := range []string{drainIdle, reasonNoWake, drainOrphaned, drainSuspended, drainConfigDrift, executionStalledDrainReason, idleRespawnDrainReason, "rate-limit"} {
+			if n := spec.needsOf(w, intent{Kind: kind, Reason: decideDrainBegin + reason}); n.Lease || spec.needs.Lease {
+				t.Errorf("%s for %s: takes the row's lease record, want the name's flock only", kind, reason)
+			}
+		}
+	}
+	if !effectSpecs[intentSignal].needs.locksName(effectSpecs[intentSignal]) {
+		t.Error("the plain signal does not hold the runtime name's flock")
 	}
 }
 
