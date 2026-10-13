@@ -1150,9 +1150,11 @@ func (s *Server) humaHandleBeadDelete(_ context.Context, input *BeadDeleteInput)
 
 // wakeAfterBeadWrite asks the controller to reconcile after a successful
 // generic bead write. The write lands through the controller's CachingStore
-// as a cache-authored bead event, which never wakes the reconciler, so
-// without this an API-written bead waits for the patrol interval. One call:
-// one legacy poke plus the control-dispatcher key, the pair sling wakes.
+// as a cache-authored bead event, which never wakes the legacy reconciler,
+// so without this an API-written bead waits for the patrol interval. One
+// call: one legacy poke plus the control-dispatcher key, the pair sling
+// wakes. Under v2 OnBeadEvent's relevance filter already marks the planner
+// for the same write, so this mark is redundant there.
 func (s *Server) wakeAfterBeadWrite() {
 	s.state.Enqueue(reconcilekey.Allocator(), reconcilekey.ControlDispatch())
 }
