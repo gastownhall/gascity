@@ -240,8 +240,11 @@ func workKeepsNoWakeRow(r *rowFacts) bool {
 // legacy's lowest-bead-id membership) is the agent's own idle ack, and
 // stopping the seat only recreates it (sc-j27j0d): the ack is canceled,
 // its half voided, and the seat stays warm, whatever the allocation
-// wants of it (Keep, Sleep or Drain, as legacy cancels them), while its
-// runtime is alive. A request the row carries outranks the floor: the
+// wants of it (Keep, Sleep or Drain, as legacy cancels them). Unlike
+// legacy, which cancels only on a live runtime, a dead floor seat's ack
+// cancels too: A12 recycles the dead pane in place (mc-7is1r), where
+// legacy stops the seat and the floor recreates it. A request the row
+// carries outranks the floor: the
 // controller's own drains, and an operator's `gc runtime drain`
 // (stopRequest.Operator, legacy's GC_DRAIN).
 func armAck(r *rowFacts) (intent, bool) {
@@ -255,12 +258,8 @@ func armAck(r *rowFacts) (intent, bool) {
 	}
 	// The floor check stays after the stale-ack void: that check records
 	// the runtime rest the probing kind needs, so a cancel decided first
-	// would defer at admission (rests-missing). Legacy cancels only on a
-	// live runtime: a dead floor seat's ack signals, and the seat is
-	// stopped and recreated.
-	// TODO(#7626, mc-7is1r): when A12 restarts a dead pane in place, lift
-	// the liveness gate and assert the seat runs again.
-	if req.Reason == "" && !req.Operator && r.entry.Floor != nil && r.entry.Liveness == livenessAlive {
+	// would defer at admission (rests-missing).
+	if req.Reason == "" && !req.Operator && r.entry.Floor != nil {
 		return intent{Kind: intentSignalAck, Reason: decideFloorAckCancel, Basis: basis, Patch: stopAckVoidPatch()}, true
 	}
 	reason := req.Reason

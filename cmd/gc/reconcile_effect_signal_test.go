@@ -556,7 +556,8 @@ func floorWith(d desire) func(*selectionEntry) {
 
 // TestFloorAckCancels (DRAIN-010, PAR-FLOORACK; sc-j27j0d). Kills a floor
 // member's own idle ack stopping it, only for the floor to recreate it: a
-// bare ack on a floor member cancels (its half voided, nothing signaled); an
+// bare ack on a floor member cancels (its half voided, nothing signaled),
+// whether its runtime is alive or dead (A12 recycles a dead pane); an
 // ack off the floor, or one a drain the controller began explains, signals;
 // an ack older than its runtime is void first.
 func TestFloorAckCancels(t *testing.T) {
@@ -577,7 +578,8 @@ func TestFloorAckCancels(t *testing.T) {
 		// An operator's `gc runtime drain` explains the ack (legacy's GC_DRAIN).
 		{"an ack an operator's drain explains, on the floor", append(ackMeta("3"), session.OperatorDrainKey, "3"), onFloor, decideDrainSignal + drainOperator},
 		{"an ack beside an operator's drain of an older generation, on the floor", append(ackMeta("3"), session.OperatorDrainKey, "2"), onFloor, decideFloorAckCancel},
-		{"a bare ack on a floor member whose runtime is dead", ackMeta("3"), func(e *selectionEntry) { onFloor(e); e.Liveness = livenessDead }, decideDrainSignal},
+		// A dead floor seat's ack cancels too: A12 recycles the pane in place (mc-7is1r).
+		{"a bare ack on a floor member whose runtime is dead", ackMeta("3"), func(e *selectionEntry) { onFloor(e); e.Liveness = livenessDead }, decideFloorAckCancel},
 	} {
 		it, _ := decideDrain(t, c.meta, c.entry)
 		switch {

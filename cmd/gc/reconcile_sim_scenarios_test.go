@@ -1043,15 +1043,15 @@ func TestSimFloorAckKeepsTheSeatWarm(t *testing.T) {
 	}
 }
 
-// Scenario M12 (PAR-FLOORACK, CONTRACT v5.9p): a floor member acks and its
-// pane then dies before the controller's pass, the normal exit after a
-// drain (remain-on-exit keeps the dead pane listed). Legacy cancels only a
-// live runtime's ack, and so does v2 until A12 restarts a dead pane in
-// place: the ack signals, the seat is stopped and its row closes, and the
-// floor's create replaces it, as on main.
-// TODO(#7626, mc-7is1r): when A12 lands, lift A11's liveness gate and
-// assert the seat runs again in place.
-func TestSimFloorAckOnADeadPaneStopsTheSeat(t *testing.T) {
+// Scenario M12 (PAR-FLOORACK, CONTRACT v5.9p; mc-7is1r): a floor member
+// acks and its pane then dies before the controller's pass, the normal exit
+// after a drain (remain-on-exit keeps the dead pane listed). The ack is
+// canceled as on a live seat, and A12 (#7626) recycles the dead pane in
+// place: the corpse is killed and the same row runs again under a new
+// runtime and token, never stop-pending and never closed. Legacy differs:
+// it cancels only a live runtime's ack, so its dead floor seat is stopped,
+// its row closed and the floor's create replaces it.
+func TestSimFloorAckOnADeadPaneRunsAgainInPlace(t *testing.T) {
 	s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-gc-1", "last_woke_at", rowAt(-time.Hour)))
 	s.cfg.Agents[0].MinActiveSessions = intPtr(1)
 	s.settle()
@@ -1059,12 +1059,23 @@ func TestSimFloorAckOnADeadPaneStopsTheSeat(t *testing.T) {
 		t.Fatal("the agent's ack did not land")
 	}
 	s.sp.mu.Lock()
-	s.sp.rts["s-gc-1"].corpse = true
+	dead := s.sp.rts["s-gc-1"]
+	dead.corpse = true
 	s.sp.touch("s-gc-1")
 	s.sp.mu.Unlock()
 	pending := s.floorRun("gc-1", 6)
-	if b, _ := s.legs[0].backing.Get("gc-1"); !pending || !s.stoppedRow("s-gc-1") || b.Status != "closed" {
-		t.Errorf("ever stop-pending %v, stopped %v, row %s; want the dead seat's ack to signal, the seat stopped and its row closed", pending, s.stoppedRow("s-gc-1"), b.Status)
+	b, _ := s.legs[0].backing.Get("gc-1")
+	s.sp.mu.Lock()
+	rt := s.sp.rts["s-gc-1"]
+	kills := slices.Clone(s.sp.kills)
+	s.sp.mu.Unlock()
+	switch {
+	case pending || b.Status != "open" || b.Metadata[session.DrainAckIncarnationKey] != "":
+		t.Errorf("ever stop-pending %v, row %s %v; want the ack canceled and the row open", pending, b.Status, b.Metadata)
+	case rt == nil || rt.corpse || rt.id != "gc-1" || rt.object == dead.object || rt.token == "tok-gc-1" || rt.token != b.Metadata["instance_token"]:
+		t.Errorf("runtime %+v (dead %+v), row token %q; want the same row running again under a new runtime and token", rt, dead, b.Metadata["instance_token"])
+	case len(kills) != 1 || kills[0].Method != "KillCorpseObject":
+		t.Errorf("kills %+v; want only the corpse killed", kills)
 	}
 	s.noViolations(t)
 }
