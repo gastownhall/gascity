@@ -654,8 +654,9 @@ func TestSimPendingRelaxationsBite(t *testing.T) {
 // the code's own cause: it is quiescent only at or past its row's backoff
 // expiry with no change but the runtime lease record, and only when the
 // sim's own hold model holds the row (simHeld). A refusal the model does not
-// back (planted X1), and a start refused attached (planted X2), are no
-// pacing. A rollback refused liveness-unknown is paced only over a
+// back (planted X1), and a start refused attached on an unattached pane
+// (planted X2), are no pacing; one refused attached under an attached pane
+// is. A rollback refused liveness-unknown is paced only over a
 // probe that keeps erroring.
 func TestSimPendingPacedRetries(t *testing.T) {
 	k := rowKey{Leg: rowLeg, ID: "gc-1"}
@@ -675,7 +676,7 @@ func TestSimPendingPacedRetries(t *testing.T) {
 		{"a held start at the expiry", intentStart, causeHeld, -time.Second, false, false, row("runtime_lease_epoch", "3", "sleep_intent", "user-hold"), row("runtime_lease_epoch", "4", "sleep_intent", "user-hold"), true},
 		{"a start refused held on a row the hold model holds not (X1)", intentStart, causeHeld, -time.Second, false, false, row("runtime_lease_epoch", "3", "sleep_reason", "idle"), row("runtime_lease_epoch", "4", "sleep_reason", "idle"), false},
 		{"a held start before the expiry", intentStart, causeHeld, time.Second, false, false, row("runtime_lease_epoch", "3", "sleep_intent", "user-hold"), row("runtime_lease_epoch", "4", "sleep_intent", "user-hold"), false},
-		{"an attached start at the expiry (no pacing: no seed needs it)", intentStart, causeAttached, -time.Second, true, false, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4"), false},
+		{"an attached start at the expiry (paced: shifted seed 474)", intentStart, causeAttached, -time.Second, true, false, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4"), true},
 		{"a start refused attached on an unattached pane (X2)", intentStart, causeAttached, -time.Second, false, false, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4"), false},
 		{"a held start that moved another key", intentStart, causeHeld, -time.Second, false, false, row("runtime_lease_epoch", "3", "sleep_intent", "user-hold"), row("runtime_lease_epoch", "4", "sleep_intent", "user-hold", "state", "asleep"), false},
 		{"a start refused for another cause", intentStart, causePrepare, -time.Second, false, false, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4"), false},

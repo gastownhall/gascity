@@ -1496,7 +1496,11 @@ func (s *sim) pacedRetries(backoff map[string]backoffRecord, at time.Time, befor
 			// create's claim, a manual session) that its PreWake refuses
 			// (RefusesPreWake), or whose recycle an attached pane refuses,
 			// paced by its backoff (mc-cjtkj).
-			r.it.Kind == intentStart && r.res.Cause == causeHeld && simHeld(row, at)
+			r.it.Kind == intentStart && r.res.Cause == causeHeld && simHeld(row, at) ||
+			// A start whose recycle an attached dead pane refuses (C8.1:
+			// it waits for the detach), only while the sim's pane is
+			// attached (seed 474 of the shifted corpus).
+			r.it.Kind == intentStart && r.res.Cause == causeAttached && s.paneAttached(row)
 		rec, backedOff := backoff[rowBackoffKey(r.it.Key)]
 		if r.res.Outcome != settledRefused || !held || !backedOff || rec.Until.After(at) {
 			return false
@@ -1890,4 +1894,12 @@ func TestSimAttachModelsEnsureRunning(t *testing.T) {
 			t.Errorf("%s: row %v, want no write", c.name, after.Metadata)
 		}
 	}
+}
+
+// paneAttached reports whether row's runtime name holds an attached pane.
+func (s *sim) paneAttached(row beads.Bead) bool {
+	s.sp.mu.Lock()
+	defer s.sp.mu.Unlock()
+	rt := s.sp.rts[row.Metadata["session_name"]]
+	return rt != nil && rt.attached
 }

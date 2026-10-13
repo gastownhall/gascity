@@ -161,7 +161,10 @@ func (s *sim) checkDestructive() {
 			// an outside writer closes the row inside the rollback (v5.9q).
 		case row.ID == "" || k.Hit.id != row.ID:
 			s.failf("I4 I-fence", "v2 %s on %s hit row %q's runtime, not its own", k.Method, k.Name, k.Hit.id)
-		case closed && !own:
+		case closed && !own && (k.Effect != intentRollback || !ownForException):
+			// A pending create's rollback stops the row's own runtime, Current
+			// or StaleSelf at its generation, as PC4 requires of it
+			// (checkRollbackTeardown), the row closed meanwhile included.
 			s.failf("I4 I-fence", "v2 %s on %s hit token %s, not the just-closed row %s's", k.Method, k.Name, k.Hit.token, row.ID)
 		case k.Hit.token != row.Metadata["instance_token"] && k.Hit.epoch != row.Metadata["generation"]:
 			s.failf("I4 I-fence", "v2 %s on %s hit token %s, not row %s's", k.Method, k.Name, k.Hit.token, row.ID)
