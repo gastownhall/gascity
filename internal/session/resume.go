@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"strings"
 	"time"
-
-	"github.com/gastownhall/gascity/internal/beads"
 )
 
 var (
@@ -116,7 +114,7 @@ func (s *Store) RequestWakeUnlessHeld(id string, runtimeRunning bool, now time.T
 		liveErr = nil
 		verdict = decideWakeRequest(id, info, persisted, runtimeRunning, now)
 		if verdict.coalesces {
-			live, err := beads.HandlesFor(s.store.Store).Live.Get(id)
+			live, err := s.freshBead(id)
 			if err != nil {
 				liveErr = fmt.Errorf("confirming wake request on session %q: %w", id, err)
 				return nil
