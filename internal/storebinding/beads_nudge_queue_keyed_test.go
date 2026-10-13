@@ -565,6 +565,47 @@ func TestBeadsNudgeQueueClaimRepairsWhatItTouches(t *testing.T) {
 	}
 }
 
+// TestBeadsNudgeQueueReleasingAnExpiredClaimRecordsItDead pins the touched
+// expiry on ReleaseClaims at the record, where the contract cannot see it: a
+// released expired item and a dead-lettered one read the same, because reads
+// project an expired live item as dead. Releasing a claim on an item that has
+// passed its deliver-by deadline must record it dead as expired, with the
+// claim cleared, rather than return it to the live lifecycle.
+func TestBeadsNudgeQueueReleasingAnExpiredClaimRecordsItDead(t *testing.T) {
+	store := openNudgeQueueStore(t, t.TempDir())
+	queue := newNudgeQueue(t, store)
+	now := time.Now().UTC()
+	claimedAt := now.Add(-time.Minute)
+
+	item := testNudgeItem("n-expired-claim", "", claimedAt)
+	item.ExpiresAt = now.Add(-time.Second)
+	if err := queue.Enqueue(item); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if claimed := claimAll(t, queue, claimedAt); len(claimed) != 1 {
+		t.Fatalf("ClaimDue = %v, want the unexpired nudge", nudgeItemIDs(claimed))
+	}
+	if err := queue.ReleaseClaims([]string{item.ID}); err != nil {
+		t.Fatalf("ReleaseClaims: %v", err)
+	}
+	record, err := store.Get(nudgeQueueBeadID(item.ID))
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got := record.Metadata[nudgeMetaQueueState]; got != nudgeQueueStateDead {
+		t.Errorf("queue_state after releasing an expired claim = %q, want %q", got, nudgeQueueStateDead)
+	}
+	if got := record.Metadata[nudgeMetaTerminalState]; got != "expired" {
+		t.Errorf("terminal_state = %q, want expired", got)
+	}
+	if got := record.Metadata[nudgeMetaDeadAt]; got != formatNudgeTime(item.ExpiresAt) {
+		t.Errorf("dead_at = %q, want the deliver-by deadline %q", got, formatNudgeTime(item.ExpiresAt))
+	}
+	if record.Assignee != "" {
+		t.Errorf("assignee = %q, want the claim cleared", record.Assignee)
+	}
+}
+
 // TestBeadsNudgeQueueSupersedeIsScopedToItsQueueKey pins supersession on the
 // keyed read: older live items for the same (agent, source, reference) are
 // dead-lettered, and another agent's item with the same reference is not.
