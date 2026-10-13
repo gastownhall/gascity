@@ -3341,6 +3341,7 @@ func TestQueuedNudgeReleaseAfter(t *testing.T) {
 		{"session mapping of the runtime refusal", fmt.Errorf("%w: %w", session.ErrPendingInteraction, runtimeRefusal), true, time.Time{}},
 		{"permission prompt the runtime would not type into", fmt.Errorf("sending message to session: %w: sess-worker", runtime.ErrPendingInteraction), true, backoff},
 		{"session pending-interaction refusal", session.ErrPendingInteraction, true, backoff},
+		{"runtime could not be observed", fmt.Errorf("sending message to session: %w: bridge down", runtime.ErrRuntimeUnavailable), true, backoff},
 		{"busy timeout", errors.New(`agent "sess-worker" busy, timed out waiting for idle`), false, time.Time{}},
 		{"submit delivered but unobserved", fmt.Errorf("nudging: %w", tmux.ErrNudgeSubmitDeliveredUnobserved), false, time.Time{}},
 	}

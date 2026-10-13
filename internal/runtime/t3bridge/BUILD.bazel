@@ -29,6 +29,7 @@ go_test(
         "reuse_test.go",
         "seams_test.go",
         "testenv_import_test.go",
+        "truthful_errors_test.go",
         "watch_latest_seq_test.go",
         "watched_bead_event_test.go",
     ],

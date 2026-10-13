@@ -52,3 +52,18 @@ func (s *seamBackedProvider) ObserveLivenessWithError(name string, processNames 
 func (s *seamBackedProvider) GetLastActivity(name string) (time.Time, error) {
 	return s.raw.GetLastActivity(name)
 }
+
+// Nudge delivers through the raw bridge rather than the generic seam adapter,
+// which answers nil for a session it cannot attach to. The bridge reports
+// runtime.ErrRuntimeUnavailable when T3 cannot be read and
+// runtime.ErrSessionNotFound when no live thread is bound, so the nudge queue
+// retries instead of acknowledging a nudge that never arrived.
+func (s *seamBackedProvider) Nudge(name string, content []runtime.ContentBlock) error {
+	return s.raw.Nudge(name, content)
+}
+
+// Interrupt reports the same typed errors as Nudge instead of the seam
+// adapter's silent nil for a session it cannot attach to.
+func (s *seamBackedProvider) Interrupt(name string) error {
+	return s.raw.Interrupt(name)
+}

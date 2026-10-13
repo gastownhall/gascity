@@ -2659,9 +2659,9 @@ func (p *Provider) Stop(name string) error {
 	snapshot, err := p.rpcSnapshot()
 	if err != nil {
 		if isSoftBridgeUnavailable(err) {
-			p.clearRecentStart(name)
-			p.clearBridgeMeta(name)
-			return nil
+			// Nothing was stopped. Keep the drain bookkeeping so the retried
+			// stop still archives a drained thread.
+			return fmt.Errorf("%w: t3bridge snapshot unavailable stopping %q: %w", runtime.ErrRuntimeUnavailable, name, err)
 		}
 		return err
 	}
@@ -2682,8 +2682,10 @@ func (p *Provider) Stop(name string) error {
 	}
 
 	drained, _ := p.GetMeta(name, "drained")
+	if err := p.dispatchThreadSessionStop(binding.ThreadID); err != nil {
+		return fmt.Errorf("stopping t3 thread %s for %q: %w", binding.ThreadID, name, err)
+	}
 	p.recordStateChange(binding.ThreadID, "stopped", "GC session stopped", nil)
-	_ = p.dispatchThreadSessionStop(binding.ThreadID)
 
 	if drained == "1" {
 		_ = p.dispatchThreadMeta(binding.ThreadID, map[string]interface{}{"gc.state": "archived"})
@@ -2696,17 +2698,12 @@ func (p *Provider) Stop(name string) error {
 }
 
 // Interrupt cancels the in-flight turn for the named session, if any.
+// It reports [runtime.ErrRuntimeUnavailable] when T3 cannot be read and
+// [runtime.ErrSessionNotFound] when no live thread is bound to name.
 func (p *Provider) Interrupt(name string) error {
-	snapshot, err := p.rpcSnapshot()
+	_, binding, err := p.liveThread(name)
 	if err != nil {
-		if isSoftBridgeUnavailable(err) {
-			return nil
-		}
 		return err
-	}
-	binding := snapshotThreadBinding(snapshotThreadBySessionName(snapshot, name))
-	if binding == nil {
-		return nil
 	}
 	if err := p.dispatchTurnInterrupt(binding.ThreadID); err != nil {
 		return err
@@ -2758,19 +2755,46 @@ func (p *Provider) ProcessAlive(name string, _ []string) bool {
 	return classifyT3SessionStatus(status) == t3SessionStatusLive
 }
 
-// Nudge delivers content to the session as a new user turn.
-func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
+// liveThread resolves the T3 thread that hosts name's live session. It
+// reports [runtime.ErrRuntimeUnavailable] when T3 cannot be read or its
+// answer cannot be classified, and [runtime.ErrSessionNotFound] when no thread
+// is bound to name or the bound thread's session is not live: a turn sent to
+// such a thread would start a session gc does not consider running.
+func (p *Provider) liveThread(name string) (map[string]interface{}, *threadBinding, error) {
 	snapshot, err := p.rpcSnapshot()
 	if err != nil {
 		if isSoftBridgeUnavailable(err) {
-			return nil
+			return nil, nil, fmt.Errorf("%w: t3bridge snapshot unavailable for %q: %w", runtime.ErrRuntimeUnavailable, name, err)
 		}
-		return err
+		return nil, nil, err
 	}
 	thread := snapshotThreadBySessionName(snapshot, name)
 	binding := snapshotThreadBinding(thread)
 	if binding == nil {
-		return nil
+		return nil, nil, fmt.Errorf("%w: no t3 thread is bound to %q", runtime.ErrSessionNotFound, name)
+	}
+	status := snapshotThreadSessionStatus(thread)
+	if isLegacyPreSessionStatus(status) && p.withinRecentStart(name) {
+		return thread, binding, nil
+	}
+	switch classifyT3SessionStatus(status) {
+	case t3SessionStatusLive:
+		return thread, binding, nil
+	case t3SessionStatusAbsent:
+		return nil, nil, fmt.Errorf("%w: t3 thread %s for %q has no live session (status %q)", runtime.ErrSessionNotFound, binding.ThreadID, name, status)
+	default:
+		return nil, nil, fmt.Errorf("%w: t3bridge snapshot has unknown session status %q for %q", runtime.ErrRuntimeUnavailable, status, name)
+	}
+}
+
+// Nudge delivers content to the session as a new user turn. It reports
+// [runtime.ErrRuntimeUnavailable] when T3 cannot be read and
+// [runtime.ErrSessionNotFound] when no live thread is bound to name, so a
+// caller never mistakes an undelivered nudge for a delivered one.
+func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
+	thread, binding, err := p.liveThread(name)
+	if err != nil {
+		return err
 	}
 	text := runtime.FlattenText(content)
 	if strings.TrimSpace(text) == "" {
@@ -2789,15 +2813,28 @@ func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 }
 
 // SetMeta persists a session metadata value and reflects drain transitions onto
-// the T3 thread.
+// the T3 thread. The local value always lands first; when a drain transition
+// cannot be reflected because T3 is unreachable, SetMeta reports
+// [runtime.ErrRuntimeUnavailable].
 func (p *Provider) SetMeta(name, key, value string) error {
 	if err := writeMetaValue(name, key, value); err != nil {
 		return err
 	}
+	drainAcked := key == "GC_DRAIN_ACK" && value == "1"
+	if drainAcked {
+		// Stop archives a drained thread on this marker, which is local state
+		// whether or not T3 can be told.
+		if err := writeMetaValue(name, "drained", "1"); err != nil {
+			return err
+		}
+	}
+	if key != "GC_DRAIN" && !drainAcked {
+		return nil
+	}
 	snapshot, err := p.rpcSnapshot()
 	if err != nil {
 		if isSoftBridgeUnavailable(err) {
-			return nil
+			return fmt.Errorf("%w: %s stored for %q but not reflected onto its t3 thread: %w", runtime.ErrRuntimeUnavailable, key, name, err)
 		}
 		return err
 	}
@@ -2805,12 +2842,10 @@ func (p *Provider) SetMeta(name, key, value string) error {
 	if binding == nil {
 		return nil
 	}
-	switch {
-	case key == "GC_DRAIN":
-		p.recordStateChange(binding.ThreadID, "draining", "GC session draining", nil)
-	case key == "GC_DRAIN_ACK" && value == "1":
-		_ = writeMetaValue(name, "drained", "1")
+	if drainAcked {
 		p.recordStateChange(binding.ThreadID, "drained", "GC session drained", nil)
+	} else {
+		p.recordStateChange(binding.ThreadID, "draining", "GC session draining", nil)
 	}
 	return nil
 }

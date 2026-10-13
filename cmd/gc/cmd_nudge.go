@@ -3210,6 +3210,10 @@ func queuedNudgeReleaseAfter(err error, now time.Time) (time.Time, bool) {
 		return time.Time{}, true
 	case errors.Is(err, runtime.ErrPendingInteraction):
 		return now.Add(defaultQueuedNudgeRetryDelay), true
+	// The runtime could not be observed, so nothing was delivered: back off
+	// without spending an attempt, so an outage cannot dead-letter the queue.
+	case errors.Is(err, runtime.ErrRuntimeUnavailable):
+		return now.Add(defaultQueuedNudgeRetryDelay), true
 	case errors.Is(err, runtime.ErrSessionNotFound):
 		return time.Time{}, true
 	default:
