@@ -100,12 +100,15 @@ func decideWakeRequest(id string, info Info, persisted PersistedResponse, runtim
 // refuses a wake returns *WakeConflictError, as WakeSession does; a CAS lost
 // on every attempt returns ErrWakeRequestContended.
 //
-// Coalescing is the one verdict that skips the CAS, so it is never taken on
-// the front door's read alone: a cached store can lag another process's write
-// (an operator suspend, or the owner consuming the wake and sleeping again).
-// The verdict is confirmed on a live read of the row; when the live row
-// decides otherwise that decision stands, and a write it needs goes through
-// the CAS at the stale revision, which fails, refreshes the cache and retries.
+// Coalescing is the one WakeRecorded verdict that skips the CAS, so it is
+// never taken on the front door's read alone: a cached store can lag another
+// process's write (an operator suspend, or the owner consuming the wake and
+// sleeping again). The verdict is confirmed on a live read of the row, and a
+// failed live read is returned as an error. When the live row decides
+// otherwise that decision stands; where the store fences writes, a write it
+// needs goes through the CAS at the stale revision, which fails, refreshes the
+// cache and retries. The held, not-dormant and conflict verdicts rest on the
+// front door's read.
 func (s *Store) RequestWakeUnlessHeld(id string, runtimeRunning bool, now time.Time) (WakeRequestOutcome, error) {
 	var verdict wakeVerdict
 	var liveErr error
