@@ -1,0 +1,271 @@
+package opjournal
+
+import (
+	"errors"
+	"maps"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/coordclass"
+)
+
+func TestCodecRoundTripProperty(t *testing.T) {
+	g := newOpGen(20261013)
+	seenKinds := map[Kind]bool{}
+	seenStatus := map[Status]bool{}
+	seenArms := map[Arm]bool{}
+	for i := range 500 {
+		op := g.op()
+		seenKinds[op.Kind] = true
+		seenStatus[op.Status] = true
+		seenArms[op.Outcome.Arm] = true
+		b, err := EncodeOp(op)
+		if err != nil {
+			t.Fatalf("case %d: EncodeOp(%+v): %v", i, op, err)
+		}
+		checkOpBeadShape(t, b, op)
+		got, err := DecodeOp(b)
+		if err != nil {
+			t.Fatalf("case %d: DecodeOp: %v\nbead: %+v", i, err, b)
+		}
+		if !reflect.DeepEqual(got, op) {
+			t.Fatalf("case %d: round trip changed the op\n got: %+v\nwant: %+v", i, got, op)
+		}
+	}
+	if len(seenKinds) != len(Kinds()) || len(seenStatus) != 5 || len(seenArms) != 5 {
+		t.Fatalf("generator coverage: kinds %d statuses %d arms %d", len(seenKinds), len(seenStatus), len(seenArms))
+	}
+}
+
+func checkOpBeadShape(t *testing.T, b beads.Bead, op Op) {
+	t.Helper()
+	if b.Type != BeadType || !b.NoHistory || b.Ephemeral || b.ParentID != "" || len(b.Needs) != 0 {
+		t.Fatalf("bead shape %+v", b)
+	}
+	if strings.Contains(b.Title, op.Payload) && op.Payload != "" && len(op.Payload) > 8 {
+		t.Fatalf("payload leaked into the title %q", b.Title)
+	}
+	wantStatus := "open"
+	if op.Status == StatusClosed {
+		wantStatus = "closed"
+	}
+	if b.Status != wantStatus {
+		t.Fatalf("bead status %q for op status %s", b.Status, op.Status)
+	}
+	for k, v := range b.Metadata {
+		if !beadmeta.ValidKey(k) || v == "" {
+			t.Fatalf("metadata %q=%q", k, v)
+		}
+		if k == "gc.routed_to" || k == "gc.root_bead_id" || k == "gc.kind" {
+			t.Fatalf("op row carries %s", k)
+		}
+	}
+	for _, l := range b.Labels {
+		if !beadmeta.ValidLabel(l) {
+			t.Fatalf("label %q is not valid", l)
+		}
+	}
+	if got := coordclass.Classify(b); got != coordclass.ClassSessions {
+		t.Fatalf("Classify(op %s) = %v, want sessions", op.Status, got)
+	}
+	if !beads.IsReadyExcludedBead(b) {
+		t.Fatalf("op row is not ready-excluded")
+	}
+}
+
+func sampleOp(t *testing.T) Op {
+	t.Helper()
+	spec, _ := Lookup(KindMessage)
+	op, err := normalizeRequest(baseMessage(), spec, time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	op.ID, _ = DeriveID("gc", op.Conversation, op.Producer.Principal, op.ClientKey)
+	op.PayloadDigest = RequestDigest(op)
+	op.Status = StatusSubmitted
+	op.Transitions = []Transition{{Status: StatusSubmitted, At: op.CreatedAt, By: op.Producer.Principal}}
+	return op
+}
+
+func encode(t *testing.T, op Op) beads.Bead {
+	t.Helper()
+	b, err := EncodeOp(op)
+	if err != nil {
+		t.Fatalf("EncodeOp: %v", err)
+	}
+	return b
+}
+
+func TestUnknownReasonRoundTripsAndReadsFailedOther(t *testing.T) {
+	for _, arm := range []Arm{ArmFailed, ArmSkipped} {
+		op := sampleOp(t)
+		op.Status = StatusClosed
+		op.Outcome = Outcome{Arm: arm, Reason: "brand_new_reason"}
+		got, err := DecodeOp(encode(t, op))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Outcome.Reason != "brand_new_reason" || got.Outcome.Arm != arm {
+			t.Fatalf("outcome %+v", got.Outcome)
+		}
+		if a, r := got.Outcome.Effective(); a != ArmFailed || r != ReasonOther {
+			t.Fatalf("Effective() = (%s, %s), want (failed, other)", a, r)
+		}
+	}
+	for _, o := range []Outcome{
+		{Arm: ArmFailed, Reason: "refused:quota"},
+		{Arm: ArmSkipped, Reason: ReasonStale},
+		{Arm: ArmSucceeded},
+	} {
+		if a, r := o.Effective(); a != o.Arm || r != o.Reason {
+			t.Errorf("Effective(%+v) = (%s, %s)", o, a, r)
+		}
+	}
+}
+
+func TestDecodeRefusals(t *testing.T) {
+	good := encode(t, sampleOp(t))
+	mutate := func(f func(b *beads.Bead)) beads.Bead {
+		b := good
+		b.Metadata = maps.Clone(good.Metadata)
+		b.Labels = append([]string(nil), good.Labels...)
+		f(&b)
+		return b
+	}
+	cases := []struct {
+		name string
+		bead beads.Bead
+		want error
+	}{
+		{"unknown kind", mutate(func(b *beads.Bead) { b.Metadata[keyKind] = "teleport" }), ErrUnsupportedKind},
+		{"schema 2", mutate(func(b *beads.Bead) { b.Metadata[keySchema] = "2" }), ErrUnsupportedSchema},
+		{"missing schema", mutate(func(b *beads.Bead) { delete(b.Metadata, keySchema) }), ErrCorruptOp},
+		{"missing kind", mutate(func(b *beads.Bead) { delete(b.Metadata, keyKind) }), ErrCorruptOp},
+		{"id mismatch", mutate(func(b *beads.Bead) { b.ID = "gc-op-aaaaaaaaaaaaaaaaaaaaaaaaaa" }), ErrCorruptOp},
+		{"key edited", mutate(func(b *beads.Bead) { b.Metadata[keyClientKey] = "k2" }), ErrCorruptOp},
+		{"non-lease assignee", mutate(func(b *beads.Bead) { b.Assignee = "alice" }), ErrCorruptOp},
+		{"open with outcome", mutate(func(b *beads.Bead) { b.Metadata[keyOutcome] = "succeeded" }), ErrCorruptOp},
+		{"closed without outcome", mutate(func(b *beads.Bead) { b.Metadata[keyStatus] = "closed" }), ErrCorruptOp},
+		{"bad status", mutate(func(b *beads.Bead) { b.Metadata[keyStatus] = "running" }), ErrCorruptOp},
+		{"bad integer", mutate(func(b *beads.Bead) { b.Metadata[keyLaneSeq] = "01" }), ErrCorruptOp},
+		{"bad time", mutate(func(b *beads.Bead) { b.Metadata[keyCreatedAt] = "noon" }), ErrCorruptOp},
+		{"bad transitions", mutate(func(b *beads.Bead) { b.Metadata[keyTransitions] = "[" }), ErrCorruptOp},
+		{"bad digest", mutate(func(b *beads.Bead) { b.Metadata[keyPayloadDigest] = "abc" }), ErrCorruptOp},
+		{"foreign policy", mutate(func(b *beads.Bead) { b.Metadata[keyRestartMode] = "fresh" }), ErrCorruptOp},
+		{"wrong type", mutate(func(b *beads.Bead) { b.Type = "task" }), ErrCorruptOp},
+		{"no op label", mutate(func(b *beads.Bead) { b.Labels = b.Labels[1:] }), ErrCorruptOp},
+		{"no conversation label", mutate(func(b *beads.Bead) { b.Labels = b.Labels[:1] }), ErrCorruptOp},
+	}
+	for _, c := range cases {
+		if _, err := DecodeOp(c.bead); !errors.Is(err, c.want) {
+			t.Errorf("%s: DecodeOp = %v, want %v", c.name, err, c.want)
+		}
+	}
+}
+
+func TestDecodeIgnoresUnknownKeys(t *testing.T) {
+	b := encode(t, sampleOp(t))
+	b.Metadata["gc.op.future_field"] = "x"
+	if _, err := DecodeOp(b); err != nil {
+		t.Fatalf("DecodeOp with an unknown key: %v", err)
+	}
+}
+
+func TestDecodeProjections(t *testing.T) {
+	t.Run("external close", func(t *testing.T) {
+		b := encode(t, sampleOp(t))
+		b.Status = "closed"
+		got, err := DecodeOp(b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status != StatusClosed || got.Outcome != (Outcome{Arm: ArmFailed, Reason: ReasonClosedExternally}) {
+			t.Fatalf("external close read %s %+v", got.Status, got.Outcome)
+		}
+	})
+	t.Run("torn close", func(t *testing.T) {
+		op := sampleOp(t)
+		op.Status = StatusClosed
+		op.Outcome = Outcome{Arm: ArmSucceeded}
+		b := encode(t, op)
+		b.Status = "open"
+		got, err := DecodeOp(b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status != StatusClosed || got.Outcome.Arm != ArmSucceeded {
+			t.Fatalf("torn close read %s %+v", got.Status, got.Outcome)
+		}
+	})
+}
+
+func TestEncodeRefusals(t *testing.T) {
+	cases := map[string]func(*Op){
+		"unknown kind":        func(op *Op) { op.Kind = "teleport" },
+		"schema":              func(op *Op) { op.SchemaRev = 2 },
+		"id":                  func(op *Op) { op.ID = "gc-op-aaaaaaaaaaaaaaaaaaaaaaaaaa" },
+		"digest":              func(op *Op) { op.PayloadDigest = "" },
+		"lifecycle executing": func(_ *Op) {},
+		"canceled without cancel": func(op *Op) {
+			op.Status = StatusClosed
+			op.Outcome = Outcome{Arm: ArmCanceled}
+		},
+		"degraded failure": func(op *Op) {
+			op.Status = StatusClosed
+			op.Outcome = Outcome{Arm: ArmFailed, Reason: ReasonPoison, Degradation: "x"}
+		},
+		"coalesced without target": func(op *Op) {
+			op.Status = StatusClosed
+			op.Outcome = Outcome{Arm: ArmSkipped, Reason: ReasonCoalescedInto}
+		},
+		"too many transitions": func(op *Op) {
+			for range maxTransitions {
+				op.Transitions = append(op.Transitions, op.Transitions[0])
+			}
+		},
+	}
+	for name, change := range cases {
+		op := sampleOp(t)
+		if name == "lifecycle executing" {
+			op = lifecycleSample(t)
+			op.Status = StatusExecuting
+		}
+		change(&op)
+		if _, err := EncodeOp(op); err == nil {
+			t.Errorf("%s: EncodeOp accepted %+v", name, op)
+		}
+	}
+}
+
+func lifecycleSample(t *testing.T) Op {
+	t.Helper()
+	spec, _ := Lookup(KindWake)
+	req := Request{
+		Conversation: "gc-1", Kind: KindWake, ClientKey: "w1",
+		Producer: Producer{Principal: "operator:alice", Actor: ActorOperator},
+	}
+	op, err := normalizeRequest(req, spec, time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	op.ID, _ = DeriveID("gc", op.Conversation, op.Producer.Principal, op.ClientKey)
+	op.PayloadDigest = RequestDigest(op)
+	op.Status = StatusSubmitted
+	op.Transitions = []Transition{{Status: StatusSubmitted, At: op.CreatedAt, By: "operator:alice"}}
+	return op
+}
+
+func TestAppendTransitionKeepsFirstAndLatest(t *testing.T) {
+	var ts []Transition
+	t0 := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	for i := range 40 {
+		ts = appendTransition(ts, Transition{Status: StatusAccepted, At: t0.Add(time.Duration(i) * time.Second), By: "x"})
+	}
+	if len(ts) != maxTransitions || !ts[0].At.Equal(t0) || !ts[len(ts)-1].At.Equal(t0.Add(39*time.Second)) {
+		t.Fatalf("transitions len %d first %s last %s", len(ts), ts[0].At, ts[len(ts)-1].At)
+	}
+}

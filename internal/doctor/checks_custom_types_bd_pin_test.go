@@ -116,9 +116,11 @@ func TestCustomTypesCheckFixPreservesTableOnlyTypes(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	v142 := RequiredCustomTypes[:len(RequiredCustomTypes)-1] // everything but startup-health-episode
-	if RequiredCustomTypes[len(RequiredCustomTypes)-1] != "startup-health-episode" {
-		t.Fatalf("test assumes startup-health-episode is the last required type: %v", RequiredCustomTypes)
+	// The list gc v1.4.2 registered: it predates startup-health-episode.
+	v142 := []string{
+		"molecule", "convoy", "message", "event", "gate",
+		"merge-request", "agent", "role", "rig", "session", "spec",
+		"convergence", "step",
 	}
 	table := append(append([]string{}, v142...), "ops-extra")
 	recorded := filepath.Join(dir, "bd-calls")

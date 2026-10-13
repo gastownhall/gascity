@@ -1,0 +1,844 @@
+package opjournal
+
+import (
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
+	"github.com/gastownhall/gascity/internal/clock"
+)
+
+var t0 = time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+
+type harness struct {
+	mem   *beads.MemStore
+	rec   *beadstest.OpRecordingStore
+	clk   *clock.Fake
+	store *Store
+}
+
+func newHarness(t *testing.T) *harness {
+	t.Helper()
+	mem := &beads.MemStore{IDPrefix: "gc", HonorExplicitIDs: true}
+	return newHarnessOver(t, mem, mem)
+}
+
+// newHarnessOver records every operation on backing (a store wrapping mem, or
+// mem itself) and checks, at cleanup, that the op store only ever listed by
+// the conversation key.
+func newHarnessOver(t *testing.T, mem *beads.MemStore, backing beads.Store) *harness {
+	t.Helper()
+	rec := beadstest.NewOpRecordingStore(backing)
+	clk := &clock.Fake{Time: t0}
+	s, err := NewStore(beads.SessionStore{Store: rec}, clk, WithIDPrefix("gc"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { assertOnlyKeyedLists(t, rec) })
+	return &harness{mem: mem, rec: rec, clk: clk, store: s}
+}
+
+func assertOnlyKeyedLists(t *testing.T, rec *beadstest.OpRecordingStore) {
+	t.Helper()
+	for _, op := range rec.Ops() {
+		if op.Kind != beadstest.OpList {
+			continue
+		}
+		if !strings.HasPrefix(op.Query.Label, labelOpConvPrefix) {
+			t.Errorf("unkeyed list %+v from %v", op.Query, op.Caller)
+		}
+		for _, req := range beads.NativeListPlan(op.Query) {
+			if !beads.NativeListRequestKeyed(req) {
+				t.Errorf("list %+v plans an unkeyed native request", op.Query)
+			}
+		}
+	}
+}
+
+func msgReq(key, payload string) Request {
+	return Request{
+		Conversation: "gc-1", Kind: KindMessage, ClientKey: key,
+		Producer: Producer{Principal: "operator:alice", Actor: ActorOperator}, Payload: payload,
+	}
+}
+
+func lifecycleReq(kind Kind, key string) Request {
+	r := Request{
+		Conversation: "gc-1", Kind: kind, ClientKey: key,
+		Producer: Producer{Principal: "operator:alice", Actor: ActorOperator},
+	}
+	if kind == KindKill {
+		r.Scope = Scope{Kind: ScopeSession, Generation: 3}
+	}
+	if kind == KindCreate {
+		r.Payload = `{"template":"x"}`
+	}
+	return r
+}
+
+func (h *harness) propose(t *testing.T, req Request) Op {
+	t.Helper()
+	op, created, err := h.store.Propose(req)
+	if err != nil || !created {
+		t.Fatalf("Propose(%+v) = created %v, %v", req, created, err)
+	}
+	return op
+}
+
+func (h *harness) revision(t *testing.T, id string) int64 {
+	t.Helper()
+	b, err := h.mem.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b.Revision
+}
+
+func (h *harness) countOps(kind string) int {
+	n := 0
+	for _, op := range h.rec.Ops() {
+		if op.Kind == kind {
+			n++
+		}
+	}
+	return n
+}
+
+func TestNewStoreRefusals(t *testing.T) {
+	clk := &clock.Fake{Time: t0}
+	t.Run("nil store", func(t *testing.T) {
+		if _, err := NewStore(beads.SessionStore{}, clk, WithIDPrefix("gc")); err == nil {
+			t.Fatal("accepted a nil store")
+		}
+		var nilMem *beads.MemStore
+		if _, err := NewStore(beads.SessionStore{Store: nilMem}, clk, WithIDPrefix("gc")); err == nil {
+			t.Fatal("accepted a typed nil store")
+		}
+	})
+	t.Run("no clock", func(t *testing.T) {
+		if _, err := NewStore(beads.SessionStore{Store: beads.NewMemStore()}, nil, WithIDPrefix("gc")); err == nil {
+			t.Fatal("accepted a nil clock")
+		}
+	})
+	t.Run("no conditional writer", func(t *testing.T) {
+		rec := beadstest.NewRecordingStore(beads.NewMemStore())
+		_, err := NewStore(beads.SessionStore{Store: rec}, clk, WithIDPrefix("gc"))
+		if !errors.Is(err, beads.ErrConditionalWriteUnsupported) {
+			t.Fatalf("NewStore(no writer) = %v, want ErrConditionalWriteUnsupported", err)
+		}
+	})
+	t.Run("conditional writes disabled", func(t *testing.T) {
+		mem := &beads.MemStore{DisableConditionalWrites: true}
+		_, err := NewStore(beads.SessionStore{Store: mem}, clk, WithIDPrefix("gc"))
+		if !errors.Is(err, beads.ErrConditionalWriteUnsupported) {
+			t.Fatalf("NewStore(disabled) = %v, want ErrConditionalWriteUnsupported", err)
+		}
+	})
+	t.Run("no prefix", func(t *testing.T) {
+		_, err := NewStore(beads.SessionStore{Store: beads.NewMemStore()}, clk)
+		if !errors.Is(err, ErrNoNamespace) {
+			t.Fatalf("NewStore(no prefix) = %v, want ErrNoNamespace", err)
+		}
+	})
+	t.Run("bad prefix", func(t *testing.T) {
+		_, err := NewStore(beads.SessionStore{Store: beads.NewMemStore()}, clk, WithIDPrefix("gc-"))
+		if !errors.Is(err, ErrInvalidRequest) {
+			t.Fatalf("NewStore(gc-) = %v, want ErrInvalidRequest", err)
+		}
+	})
+}
+
+func TestNewStoreDiscoversThePrefixAndWorksOverSQLite(t *testing.T) {
+	sq, err := beads.OpenSQLiteStore(t.TempDir(), beads.WithSQLiteStoreIDPrefix("gcs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if c, ok := sq.(interface{ CloseStore() error }); ok {
+			_ = c.CloseStore()
+		}
+	})
+	s, err := NewStore(beads.SessionStore{Store: sq}, &clock.Fake{Time: t0})
+	if err != nil {
+		t.Fatalf("NewStore(sqlite): %v", err)
+	}
+	if s.Prefix() != "gcs" {
+		t.Fatalf("Prefix() = %q, want gcs", s.Prefix())
+	}
+	op, created, err := s.Propose(msgReq("k1", "hello"))
+	if err != nil || !created || !strings.HasPrefix(op.ID, "gcs-op-") {
+		t.Fatalf("Propose over sqlite = %s created %v, %v", op.ID, created, err)
+	}
+	if open, err := s.ListOpen("gc-1"); err != nil || len(open) != 1 || open[0].ID != op.ID {
+		t.Fatalf("ListOpen over sqlite = %v, %v", ids(open), err)
+	}
+	if _, err := s.Transition(op.ID, StatusSubmitted, StatusExecuting, "lane"); err != nil {
+		t.Fatalf("Transition over sqlite: %v", err)
+	}
+	if _, err := s.Close(op.ID, Outcome{Arm: ArmSucceeded, Result: Result{Generation: 1}}, "lane"); err != nil {
+		t.Fatalf("Close over sqlite: %v", err)
+	}
+	got, err := s.Get(op.ID)
+	if err != nil || got.Status != StatusClosed || got.Outcome.Result.Generation != 1 {
+		t.Fatalf("Get over sqlite = %+v, %v", got, err)
+	}
+	if open, err := s.ListOpen("gc-1"); err != nil || len(open) != 0 {
+		t.Fatalf("ListOpen over sqlite after Close = %v, %v", ids(open), err)
+	}
+	b, _ := sq.Get(op.ID)
+	if b.Status != "closed" {
+		t.Fatalf("bead status %q after Close", b.Status)
+	}
+	if again, created, err := s.Propose(msgReq("k1", "hello")); err != nil || created || again.Status != StatusClosed {
+		t.Fatalf("re-Propose of a closed op = %+v created %v, %v", again, created, err)
+	}
+}
+
+func TestProposeCreatesASubmittedOp(t *testing.T) {
+	h := newHarness(t)
+	op := h.propose(t, msgReq("k1", "hello"))
+	if op.ID != "gc-op-kdpftlql5feaypldytje3nypwy" {
+		t.Fatalf("id %s", op.ID)
+	}
+	if op.Status != StatusSubmitted || len(op.Transitions) != 1 ||
+		op.Transitions[0] != (Transition{Status: StatusSubmitted, At: t0, By: "operator:alice"}) {
+		t.Fatalf("op %+v", op)
+	}
+	if !op.CreatedAt.Equal(t0) || !op.StartBy.Equal(t0.Add(24*time.Hour)) || !op.FinishBy.Equal(t0.Add(24*time.Hour+10*time.Minute)) {
+		t.Fatalf("times created %s start %s finish %s", op.CreatedAt, op.StartBy, op.FinishBy)
+	}
+	b, err := h.mem.Get(op.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Type != BeadType || b.Status != "open" || !b.NoHistory || b.Ephemeral || b.Assignee != "" || b.ParentID != "" {
+		t.Fatalf("bead %+v", b)
+	}
+	got, err := h.store.Get(op.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != op.ID || got.PayloadDigest != op.PayloadDigest || got.Payload != "hello" {
+		t.Fatalf("Get = %+v", got)
+	}
+	ready, err := h.mem.Ready()
+	if err != nil || len(ready) != 0 {
+		t.Fatalf("Ready() = %v, %v; ops must never be ready", ready, err)
+	}
+}
+
+func TestProposeIsIdempotent(t *testing.T) {
+	h := newHarness(t)
+	first := h.propose(t, msgReq("k1", "hello"))
+	rev := h.revision(t, first.ID)
+	h.clk.Advance(time.Minute)
+	retry := msgReq("k1", "hello")
+	retry.Policy.Message.When = WhenBoundary // an explicit default
+	retry.StartBy = t0.Add(2 * time.Hour)    // deadlines are not covered
+	again, created, err := h.store.Propose(retry)
+	if err != nil || created {
+		t.Fatalf("re-Propose = created %v, %v", created, err)
+	}
+	if again.ID != first.ID || !again.CreatedAt.Equal(first.CreatedAt) || !again.StartBy.Equal(first.StartBy) {
+		t.Fatalf("re-Propose returned %+v, want the stored op %+v", again, first)
+	}
+	if h.revision(t, first.ID) != rev {
+		t.Fatal("re-Propose wrote the row")
+	}
+}
+
+func TestProposeKeyReuse(t *testing.T) {
+	h := newHarness(t)
+	first := h.propose(t, msgReq("k1", "hello"))
+	rev := h.revision(t, first.ID)
+	_, _, err := h.store.Propose(msgReq("k1", "goodbye"))
+	var reuse *KeyReuseError
+	if !errors.As(err, &reuse) || !errors.Is(err, ErrKeyReuse) {
+		t.Fatalf("Propose(other payload) = %v, want *KeyReuseError", err)
+	}
+	if reuse.Existing.ID != first.ID || reuse.Existing.Payload != "hello" {
+		t.Fatalf("Existing = %+v", reuse.Existing)
+	}
+	if h.revision(t, first.ID) != rev {
+		t.Fatal("key reuse wrote the row")
+	}
+}
+
+func TestProposePayloadCap(t *testing.T) {
+	h := newHarness(t)
+	if _, _, err := h.store.Propose(msgReq("max", strings.Repeat("a", MaxInlinePayload))); err != nil {
+		t.Fatalf("16384-byte payload refused: %v", err)
+	}
+	creates := h.countOps(beadstest.OpCreate)
+	if _, _, err := h.store.Propose(msgReq("big", strings.Repeat("a", MaxInlinePayload+1))); !errors.Is(err, ErrPayloadTooLarge) {
+		t.Fatalf("16385-byte payload = %v, want ErrPayloadTooLarge", err)
+	}
+	if h.countOps(beadstest.OpCreate) != creates {
+		t.Fatal("an oversized payload reached the store")
+	}
+}
+
+func TestProposeValidation(t *testing.T) {
+	h := newHarness(t)
+	withKind := func(k Kind, f func(*Request)) Request {
+		r := lifecycleReq(k, "v")
+		f(&r)
+		return r
+	}
+	msg := func(f func(*Request)) Request {
+		r := msgReq("v", "hello")
+		f(&r)
+		return r
+	}
+	cases := map[string]struct {
+		req  Request
+		want error
+	}{
+		"unknown kind":              {withKind("teleport", func(*Request) {}), ErrUnknownKind},
+		"message without payload":   {msg(func(r *Request) { r.Payload = "" }), ErrInvalidRequest},
+		"wake with payload":         {withKind(KindWake, func(r *Request) { r.Payload = "x" }), ErrInvalidRequest},
+		"bad when":                  {msg(func(r *Request) { r.Policy.Message.When = "later" }), ErrInvalidRequest},
+		"foreign policy":            {msg(func(r *Request) { r.Policy.Restart.Mode = RestartFresh }), ErrInvalidRequest},
+		"lifecycle guarantee":       {withKind(KindWake, func(r *Request) { r.Policy.Guarantee = GuaranteeAtMostOnce }), ErrInvalidRequest},
+		"interrupt without session": {Request{Conversation: "gc-1", Kind: KindInterrupt, ClientKey: "s", Producer: Producer{Principal: "p", Actor: "agent"}}, ErrInvalidRequest},
+		"respond without interaction": {Request{
+			Conversation: "gc-1", Kind: KindRespond, ClientKey: "r", Payload: "yes",
+			Producer: Producer{Principal: "p", Actor: "agent"}, Scope: Scope{Kind: ScopeSession, Generation: 2},
+		}, ErrInvalidRequest},
+		"message with turn":       {msg(func(r *Request) { r.Scope = Scope{Kind: ScopeSession, Generation: 2, Turn: "t"} }), ErrInvalidRequest},
+		"context without epoch":   {msg(func(r *Request) { r.Scope = Scope{Kind: ScopeContext} }), ErrInvalidRequest},
+		"kill conversation scope": {withKind(KindKill, func(r *Request) { r.Scope = Scope{Kind: ScopeConversation} }), ErrInvalidRequest},
+		"interrupt with after": {Request{
+			Conversation: "gc-1", Kind: KindInterrupt, ClientKey: "s", After: "gc-op-kdpftlql5feaypldytje3nypwy",
+			Producer: Producer{Principal: "p", Actor: "agent"}, Scope: Scope{Kind: ScopeSession, Generation: 2},
+		}, ErrInvalidRequest},
+		"after not an op id":      {msg(func(r *Request) { r.After = "gc-12" }), ErrInvalidRequest},
+		"after itself":            {msg(func(r *Request) { r.ClientKey = "k1"; r.After = "gc-op-kdpftlql5feaypldytje3nypwy" }), ErrInvalidRequest},
+		"start before not_before": {msg(func(r *Request) { r.NotBefore = t0.Add(time.Hour); r.StartBy = t0 }), ErrInvalidRequest},
+		"finish before start":     {msg(func(r *Request) { r.StartBy = t0.Add(time.Hour); r.FinishBy = t0 }), ErrInvalidRequest},
+		"bad actor":               {msg(func(r *Request) { r.Producer.Actor = "Operator" }), ErrInvalidRequest},
+		"no principal":            {msg(func(r *Request) { r.Producer.Principal = "" }), ErrInvalidRequest},
+		"negative owner epoch":    {msg(func(r *Request) { r.Producer.OwnerEpoch = -1 }), ErrInvalidRequest},
+		"bad conversation":        {msg(func(r *Request) { r.Conversation = "gc#1" }), ErrInvalidRequest},
+		"bad payload utf8":        {msg(func(r *Request) { r.Payload = "\xff" }), ErrInvalidRequest},
+		"negative kill grace":     {withKind(KindKill, func(r *Request) { r.Policy.Kill.Grace = -time.Second }), ErrInvalidRequest},
+	}
+	for name, c := range cases {
+		if _, _, err := h.store.Propose(c.req); !errors.Is(err, c.want) {
+			t.Errorf("%s: Propose = %v, want %v", name, err, c.want)
+		}
+	}
+	if n := h.countOps(beadstest.OpCreate); n != 0 {
+		t.Fatalf("refused requests reached the store %d times", n)
+	}
+}
+
+func TestProposeEveryKindWithDefaults(t *testing.T) {
+	h := newHarness(t)
+	reqs := []Request{
+		msgReq("m", "hi"),
+		{
+			Conversation: "gc-1", Kind: KindInterrupt, ClientKey: "stop:3:t1", Producer: Producer{Principal: "p", Actor: "operator"},
+			Scope: Scope{Kind: ScopeSession, Generation: 3, Turn: "t1"},
+		},
+		{
+			Conversation: "gc-1", Kind: KindRespond, ClientKey: "respond:3:r1", Payload: "allow", Producer: Producer{Principal: "p", Actor: "operator"},
+			Scope: Scope{Kind: ScopeSession, Generation: 3, Interaction: "r1"},
+		},
+	}
+	for _, k := range []Kind{KindCreate, KindWake, KindSuspend, KindResume, KindRestart, KindKill, KindClose} {
+		reqs = append(reqs, lifecycleReq(k, string(k)))
+	}
+	for _, r := range reqs {
+		op := h.propose(t, r)
+		if op.Kind == KindRestart && op.Policy.Restart.Mode != RestartContinue {
+			t.Errorf("restart mode default = %q", op.Policy.Restart.Mode)
+		}
+		if op.Kind == KindInterrupt && (op.Policy.Interrupt.OnFailure != OnFailureFail || !op.StartBy.Equal(t0.Add(time.Minute))) {
+			t.Errorf("interrupt defaults %+v start %s", op.Policy, op.StartBy)
+		}
+	}
+	open, err := h.store.ListOpen("gc-1")
+	if err != nil || len(open) != len(reqs) {
+		t.Fatalf("ListOpen = %d ops, %v; want %d", len(open), err, len(reqs))
+	}
+}
+
+// A MemStore without HonorExplicitIDs mints its own id over the pinned one.
+func TestProposePinnedIDNotHonored(t *testing.T) {
+	mem := &beads.MemStore{IDPrefix: "gc"}
+	h := newHarnessOver(t, mem, mem)
+	_, _, err := h.store.Propose(msgReq("k1", "hello"))
+	if !errors.Is(err, ErrPinnedIDNotHonored) {
+		t.Fatalf("Propose = %v, want ErrPinnedIDNotHonored", err)
+	}
+	if all, _ := mem.List(beads.ListQuery{AllowScan: true, IncludeClosed: true}); len(all) != 0 {
+		t.Fatalf("stray row left behind: %+v", all)
+	}
+}
+
+// typeRefusingStore is a MemStore whose bd refuses the op type.
+type typeRefusingStore struct{ *beads.MemStore }
+
+func (s typeRefusingStore) Create(b beads.Bead) (beads.Bead, error) {
+	return beads.Bead{}, fmt.Errorf("bd create: invalid issue type: %s", b.Type)
+}
+
+func TestProposeUnregisteredType(t *testing.T) {
+	mem := &beads.MemStore{IDPrefix: "gc", HonorExplicitIDs: true}
+	h := newHarnessOver(t, mem, typeRefusingStore{mem})
+	_, _, err := h.store.Propose(msgReq("k1", "hello"))
+	if !errors.Is(err, ErrBeadTypeUnregistered) || !strings.Contains(err.Error(), "gc doctor --fix") {
+		t.Fatalf("Propose = %v, want ErrBeadTypeUnregistered naming the remedy", err)
+	}
+}
+
+func TestProposeConcurrentOneKey(t *testing.T) {
+	h := newHarness(t)
+	const n = 32
+	var wg sync.WaitGroup
+	var createdCount atomic.Int32
+	ids := make([]string, n)
+	errs := make([]error, n)
+	for i := range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			op, created, err := h.store.Propose(msgReq("same", "hello"))
+			ids[i], errs[i] = op.ID, err
+			if created {
+				createdCount.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	for i := range n {
+		if errs[i] != nil || ids[i] != ids[0] {
+			t.Fatalf("goroutine %d: id %s err %v (want %s)", i, ids[i], errs[i], ids[0])
+		}
+	}
+	if createdCount.Load() != 1 {
+		t.Fatalf("%d goroutines created the op, want exactly 1", createdCount.Load())
+	}
+	if all, _ := h.mem.List(beads.ListQuery{AllowScan: true, IncludeClosed: true}); len(all) != 1 {
+		t.Fatalf("%d rows, want 1", len(all))
+	}
+}
+
+func TestProposeConcurrentDistinctKeys(t *testing.T) {
+	h := newHarness(t)
+	var wg sync.WaitGroup
+	for i := range 32 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, created, err := h.store.Propose(msgReq(fmt.Sprintf("k%d", i), "hello")); err != nil || !created {
+				t.Errorf("key %d: created %v, %v", i, created, err)
+			}
+		}()
+	}
+	wg.Wait()
+	open, err := h.store.ListOpen("gc-1")
+	if err != nil || len(open) != 32 {
+		t.Fatalf("ListOpen = %d, %v; want 32", len(open), err)
+	}
+}
+
+func TestGet(t *testing.T) {
+	h := newHarness(t)
+	if _, err := h.store.Get("gc-op-kdpftlql5feaypldytje3nypwy"); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("Get(missing) = %v, want ErrNotFound", err)
+	}
+	corrupt, err := h.mem.Create(beads.Bead{
+		Type: BeadType, Labels: []string{LabelOp, ConversationLabel("gc-1")},
+		Metadata: map[string]string{keySchema: "1", keyKind: "message"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.store.Get(corrupt.ID); !errors.Is(err, ErrCorruptOp) {
+		t.Fatalf("Get(corrupt) = %v, want ErrCorruptOp", err)
+	}
+}
+
+func TestListOpen(t *testing.T) {
+	h := newHarness(t)
+	a := h.propose(t, msgReq("a", "first"))
+	h.clk.Advance(time.Second)
+	deferred := msgReq("b", "deferred")
+	deferred.NotBefore = t0.Add(time.Hour)
+	b := h.propose(t, deferred)
+	h.clk.Advance(time.Second)
+	c := h.propose(t, msgReq("c", "third"))
+	h.clk.Advance(time.Second)
+	closedOp := h.propose(t, msgReq("d", "closed"))
+	if _, err := h.store.Close(closedOp.ID, Outcome{Arm: ArmSucceeded}, "lane"); err != nil {
+		t.Fatal(err)
+	}
+	torn := h.propose(t, msgReq("e", "torn"))
+	tornClose(t, h, torn.ID)
+	other := msgReq("x", "elsewhere")
+	other.Conversation = "gc-2"
+	h.propose(t, other)
+
+	h.rec.Reset()
+	got, err := h.store.ListOpen("gc-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{a.ID, c.ID, b.ID}; fmt.Sprint(ids(got)) != fmt.Sprint(want) {
+		t.Fatalf("ListOpen = %v, want %v", ids(got), want)
+	}
+	if ops := h.rec.Ops(); len(ops) != 1 || ops[0].Kind != beadstest.OpList || ops[0].Query.Label != ConversationLabel("gc-1") {
+		t.Fatalf("ListOpen issued %+v, want exactly one keyed List", ops)
+	}
+
+	if _, err := h.mem.Create(beads.Bead{
+		ID: "gc-op-bogus", Type: BeadType, Labels: []string{LabelOp, ConversationLabel("gc-1")},
+		Metadata: map[string]string{keySchema: "1", keyKind: "message"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.store.ListOpen("gc-1"); !errors.Is(err, ErrCorruptOp) || !strings.Contains(err.Error(), "gc-op-bogus") {
+		t.Fatalf("ListOpen over a corrupt row = %v, want ErrCorruptOp naming it", err)
+	}
+	if _, err := h.store.ListOpen("gc 1"); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("ListOpen(bad id) = %v", err)
+	}
+}
+
+// tornClose writes a closed outcome to the metadata and leaves the bead open,
+// as a crash between Close's two writes does.
+func tornClose(t *testing.T, h *harness, id string) {
+	t.Helper()
+	b, _ := h.mem.Get(id)
+	if err := h.mem.UpdateIfMatch(id, b.Revision, beads.UpdateOpts{Metadata: map[string]string{
+		keyStatus: string(StatusClosed), keyOutcome: string(ArmSucceeded),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTransitionMachine(t *testing.T) {
+	legal := [][]Status{
+		{StatusSubmitted, StatusAccepted, StatusExecuting, StatusSettling},
+		{StatusSubmitted, StatusExecuting, StatusSettling},
+		{StatusSubmitted, StatusAccepted, StatusSettling},
+	}
+	for i, path := range legal {
+		h := newHarness(t)
+		op := h.propose(t, msgReq(fmt.Sprintf("p%d", i), "x"))
+		for j := 1; j < len(path); j++ {
+			h.clk.Advance(time.Second)
+			next, err := h.store.Transition(op.ID, path[j-1], path[j], "lane")
+			if err != nil {
+				t.Fatalf("path %v step %d: %v", path, j, err)
+			}
+			if next.Status != path[j] || len(next.Transitions) != j+1 || next.Transitions[j].By != "lane" {
+				t.Fatalf("after %s: %+v", path[j], next)
+			}
+		}
+		got, _ := h.store.Get(op.ID)
+		if got.Status != path[len(path)-1] || len(got.Transitions) != len(path) {
+			t.Fatalf("stored %s with %d transitions", got.Status, len(got.Transitions))
+		}
+	}
+}
+
+func TestTransitionRefusals(t *testing.T) {
+	h := newHarness(t)
+	op := h.propose(t, msgReq("k", "x"))
+	wake := h.propose(t, lifecycleReq(KindWake, "w"))
+	rev := h.revision(t, op.ID)
+	cases := []struct {
+		id         string
+		expect, to Status
+		want       error
+	}{
+		{op.ID, StatusSubmitted, StatusClosed, ErrIllegalTransition},
+		{op.ID, StatusSubmitted, StatusSubmitted, ErrIllegalTransition},
+		{op.ID, StatusSubmitted, StatusSettling, ErrIllegalTransition},
+		{op.ID, StatusAccepted, StatusExecuting, ErrStatusMismatch},
+		{op.ID, StatusSubmitted, "running", ErrIllegalTransition},
+		{wake.ID, StatusSubmitted, StatusExecuting, ErrIllegalTransition},
+	}
+	for _, c := range cases {
+		if _, err := h.store.Transition(c.id, c.expect, c.to, "lane"); !errors.Is(err, c.want) {
+			t.Errorf("Transition(%s, %s->%s) = %v, want %v", c.id, c.expect, c.to, err, c.want)
+		}
+	}
+	var se *StatusError
+	if _, err := h.store.Transition(op.ID, StatusExecuting, StatusSettling, "lane"); !errors.As(err, &se) ||
+		se.Current != StatusSubmitted || se.Expected != StatusExecuting {
+		t.Fatalf("StatusError = %+v", se)
+	}
+	if h.revision(t, op.ID) != rev {
+		t.Fatal("a refused transition wrote the row")
+	}
+	if _, err := h.store.Close(op.ID, Outcome{Arm: ArmSucceeded}, "lane"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.store.Transition(op.ID, StatusClosed, StatusAccepted, "lane"); !errors.Is(err, ErrIllegalTransition) {
+		t.Fatalf("out of closed = %v", err)
+	}
+	if _, err := h.store.Transition(wake.ID, StatusSubmitted, StatusAccepted, ""); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("empty by = %v", err)
+	}
+	if _, err := h.store.Transition("gc-op-kdpftlql5feaypldytje3nypwz", StatusSubmitted, StatusAccepted, "lane"); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("missing op = %v", err)
+	}
+}
+
+// racingStore moves the revision under the op store's feet: every
+// UpdateIfMatch first lets a concurrent writer touch the row, up to races
+// times.
+type racingStore struct {
+	*beads.MemStore
+	races atomic.Int32
+}
+
+func (s *racingStore) UpdateIfMatch(id string, rev int64, opts beads.UpdateOpts) error {
+	if s.races.Add(-1) >= 0 {
+		if err := s.SetMetadata(id, "x.concurrent", fmt.Sprint(s.races.Load())); err != nil {
+			return err
+		}
+	}
+	return s.MemStore.UpdateIfMatch(id, rev, opts)
+}
+
+func TestTransitionRetriesARevisionRace(t *testing.T) {
+	mem := &beads.MemStore{IDPrefix: "gc", HonorExplicitIDs: true}
+	racer := &racingStore{MemStore: mem}
+	h := newHarnessOver(t, mem, racer)
+	op := h.propose(t, msgReq("k", "x"))
+	racer.races.Store(1)
+	if _, err := h.store.Transition(op.ID, StatusSubmitted, StatusAccepted, "lane"); err != nil {
+		t.Fatalf("Transition under one race: %v", err)
+	}
+	if n := h.countOps(beadstest.OpUpdateIfMatch); n != 2 {
+		t.Fatalf("%d UpdateIfMatch calls, want 2 (one lost race, one win)", n)
+	}
+	got, _ := h.store.Get(op.ID)
+	if got.Status != StatusAccepted || len(got.Transitions) != 2 {
+		t.Fatalf("after the race: %+v", got)
+	}
+
+	racer.races.Store(1 << 20)
+	_, err := h.store.Transition(op.ID, StatusAccepted, StatusExecuting, "lane")
+	if !errors.Is(err, ErrContention) || !beads.IsPreconditionFailed(err) {
+		t.Fatalf("Transition under constant interference = %v, want ErrContention wrapping the conflict", err)
+	}
+}
+
+func TestClose(t *testing.T) {
+	for _, from := range []Status{StatusSubmitted, StatusAccepted, StatusExecuting, StatusSettling} {
+		h := newHarness(t)
+		op := h.propose(t, msgReq("k", "x"))
+		path := map[Status][]Status{
+			StatusAccepted:  {StatusAccepted},
+			StatusExecuting: {StatusExecuting},
+			StatusSettling:  {StatusExecuting, StatusSettling},
+		}[from]
+		cur := StatusSubmitted
+		for _, s := range path {
+			if _, err := h.store.Transition(op.ID, cur, s, "lane"); err != nil {
+				t.Fatal(err)
+			}
+			cur = s
+		}
+		outcome := Outcome{Arm: ArmSucceeded, Degradation: "restarted_instead_of_interrupted", Result: Result{Generation: 4, Turn: "t9", Via: "hook"}}
+		closedOp, err := h.store.Close(op.ID, outcome, "lane")
+		if err != nil {
+			t.Fatalf("Close from %s: %v", from, err)
+		}
+		if closedOp.Status != StatusClosed || closedOp.Outcome != outcome {
+			t.Fatalf("Close returned %+v", closedOp)
+		}
+		b, _ := h.mem.Get(op.ID)
+		got, _ := h.store.Get(op.ID)
+		if b.Status != "closed" || got.Outcome != outcome || got.Transitions[len(got.Transitions)-1].Status != StatusClosed {
+			t.Fatalf("stored bead %s op %+v", b.Status, got)
+		}
+		rev := b.Revision
+		if _, err := h.store.Close(op.ID, outcome, "lane"); err != nil {
+			t.Fatalf("idempotent Close: %v", err)
+		}
+		if _, err := h.store.Close(op.ID, Outcome{Arm: ArmFailed, Reason: ReasonPoison}, "lane"); !errors.Is(err, ErrAlreadyTerminal) {
+			t.Fatalf("second outcome = %v, want ErrAlreadyTerminal", err)
+		}
+		if h.revision(t, op.ID) != rev {
+			t.Fatal("a repeated Close wrote the row")
+		}
+	}
+}
+
+func TestCloseClearsTheLease(t *testing.T) {
+	h := newHarness(t)
+	op := h.propose(t, msgReq("k", "x"))
+	lease := Lease{Lane: "conversation", Conversation: "gc-1", Generation: 1, Nonce: "n", Deadline: t0.Add(time.Minute)}
+	b, _ := h.mem.Get(op.ID)
+	assignee := lease.String()
+	if err := h.mem.UpdateIfMatch(op.ID, b.Revision, beads.UpdateOpts{
+		Assignee: &assignee,
+		Metadata: map[string]string{keyStatus: string(StatusExecuting)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := h.store.Get(op.ID); got.Lease != lease {
+		t.Fatalf("lease read %+v", got.Lease)
+	}
+	if _, err := h.store.Close(op.ID, Outcome{Arm: ArmSucceeded}, "lane"); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := h.mem.Get(op.ID); b.Assignee != "" {
+		t.Fatalf("assignee %q survived Close", b.Assignee)
+	}
+}
+
+func TestCloseValidatesTheOutcome(t *testing.T) {
+	h := newHarness(t)
+	op := h.propose(t, msgReq("k", "x"))
+	for name, o := range map[string]Outcome{
+		"unknown arm":              {Arm: "won"},
+		"succeeded with reason":    {Arm: ArmSucceeded, Reason: "x"},
+		"failed without reason":    {Arm: ArmFailed},
+		"reason not a token":       {Arm: ArmFailed, Reason: "Bad Reason"},
+		"canceled without cancel":  {Arm: ArmCanceled},
+		"degraded skip":            {Arm: ArmSkipped, Reason: ReasonStale, Degradation: "x"},
+		"coalesced without target": {Arm: ArmSkipped, Reason: ReasonCoalescedInto},
+		"target without coalesce":  {Arm: ArmSkipped, Reason: ReasonStale, Result: Result{CoalescedInto: op.ID}},
+	} {
+		if _, err := h.store.Close(op.ID, o, "lane"); !errors.Is(err, ErrInvalidRequest) {
+			t.Errorf("%s: Close = %v, want ErrInvalidRequest", name, err)
+		}
+	}
+	if _, err := h.store.Close(op.ID, Outcome{Arm: ArmSkipped, Reason: ReasonCoalescedInto, Result: Result{CoalescedInto: op.ID}}, "lane"); err != nil {
+		t.Fatalf("coalesced_into: %v", err)
+	}
+}
+
+func TestCloseRepairsATornClose(t *testing.T) {
+	h := newHarness(t)
+	op := h.propose(t, msgReq("k", "x"))
+	tornClose(t, h, op.ID)
+	if b, _ := h.mem.Get(op.ID); b.Status != "open" {
+		t.Fatal("setup: bead should still be open")
+	}
+	if _, err := h.store.Close(op.ID, Outcome{Arm: ArmSucceeded}, "lane"); err != nil {
+		t.Fatalf("repairing Close: %v", err)
+	}
+	if b, _ := h.mem.Get(op.ID); b.Status != "closed" {
+		t.Fatalf("bead %s after the repairing Close", b.Status)
+	}
+}
+
+func TestCancelMatrix(t *testing.T) {
+	type row struct {
+		name   string
+		req    Request
+		path   []Status
+		result CancelResult
+		status Status
+		writes bool
+	}
+	rows := []row{
+		{"conversation submitted", msgReq("a", "x"), nil, CancelClosed, StatusClosed, true},
+		{"conversation accepted", msgReq("b", "x"), []Status{StatusAccepted}, CancelClosed, StatusClosed, true},
+		{"conversation executing", msgReq("c", "x"), []Status{StatusExecuting}, CancelRequested, StatusExecuting, true},
+		{"conversation settling", msgReq("d", "x"), []Status{StatusExecuting, StatusSettling}, CancelAlreadyDecided, StatusSettling, false},
+		{"lifecycle submitted", lifecycleReq(KindKill, "e"), nil, CancelClosed, StatusClosed, true},
+		{"lifecycle accepted", lifecycleReq(KindKill, "f"), []Status{StatusAccepted}, CancelRequested, StatusAccepted, true},
+		{"lifecycle settling", lifecycleReq(KindKill, "g"), []Status{StatusAccepted, StatusSettling}, CancelAlreadyDecided, StatusSettling, false},
+	}
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			h := newHarness(t)
+			op := h.propose(t, r.req)
+			cur := StatusSubmitted
+			for _, s := range r.path {
+				if _, err := h.store.Transition(op.ID, cur, s, "lane"); err != nil {
+					t.Fatal(err)
+				}
+				cur = s
+			}
+			rev := h.revision(t, op.ID)
+			h.clk.Advance(time.Minute)
+			result, got, err := h.store.Cancel(op.ID, "operator:bob", "changed my mind")
+			if err != nil || result != r.result || got.Status != r.status {
+				t.Fatalf("Cancel = %s %s, %v; want %s %s", result, got.Status, err, r.result, r.status)
+			}
+			if wrote := h.revision(t, op.ID) != rev; wrote != r.writes {
+				t.Fatalf("Cancel wrote=%v, want %v", wrote, r.writes)
+			}
+			stored, _ := h.store.Get(op.ID)
+			if r.writes && (stored.Cancel != Cancel{By: "operator:bob", At: t0.Add(time.Minute), Reason: "changed my mind"}) {
+				t.Fatalf("cancel record %+v", stored.Cancel)
+			}
+			if r.result == CancelClosed {
+				b, _ := h.mem.Get(op.ID)
+				if stored.Outcome != (Outcome{Arm: ArmCanceled}) || b.Status != "closed" {
+					t.Fatalf("closed-canceled op %+v bead %s", stored.Outcome, b.Status)
+				}
+			}
+			if r.result == CancelRequested {
+				// The first cancel record wins; a second request writes nothing.
+				rev := h.revision(t, op.ID)
+				result, again, err := h.store.Cancel(op.ID, "operator:carol", "me too")
+				if err != nil || result != CancelRequested || again.Cancel.By != "operator:bob" || h.revision(t, op.ID) != rev {
+					t.Fatalf("second Cancel = %s %+v, %v", result, again.Cancel, err)
+				}
+				// The lane may then close the op canceled.
+				if _, err := h.store.Close(op.ID, Outcome{Arm: ArmCanceled}, "lane"); err != nil {
+					t.Fatalf("lane closing canceled: %v", err)
+				}
+			}
+			closedRev := h.revision(t, op.ID)
+			if stored, _ := h.store.Get(op.ID); stored.Status == StatusClosed {
+				result, _, err := h.store.Cancel(op.ID, "operator:bob", "")
+				if err != nil || result != CancelAlreadyTerminal || h.revision(t, op.ID) != closedRev {
+					t.Fatalf("Cancel(closed) = %s, %v", result, err)
+				}
+			}
+		})
+	}
+}
+
+func TestCancelRefusals(t *testing.T) {
+	h := newHarness(t)
+	op := h.propose(t, msgReq("k", "x"))
+	if _, _, err := h.store.Cancel(op.ID, "", "r"); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("Cancel without by = %v", err)
+	}
+	if _, _, err := h.store.Cancel(op.ID, "p", "bad\x00reason"); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("Cancel with a control character = %v", err)
+	}
+}
+
+func TestStoreNeverLists(t *testing.T) {
+	h := newHarness(t)
+	op := h.propose(t, msgReq("k", "x"))
+	if _, created, err := h.store.Propose(msgReq("k", "x")); err != nil || created {
+		t.Fatalf("re-Propose = created %v, %v", created, err)
+	}
+	if _, err := h.store.Transition(op.ID, StatusSubmitted, StatusExecuting, "lane"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := h.store.Cancel(op.ID, "p", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.store.Close(op.ID, Outcome{Arm: ArmCanceled}, "lane"); err != nil {
+		t.Fatal(err)
+	}
+	if n := h.countOps(beadstest.OpList); n != 0 {
+		t.Fatalf("Propose/Transition/Cancel/Close issued %d lists", n)
+	}
+	if n := h.countOps(beadstest.OpDelete) + h.countOps(beadstest.OpDeleteIfMatch); n != 0 {
+		t.Fatalf("the op store deleted %d rows", n)
+	}
+}

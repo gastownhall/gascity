@@ -11,8 +11,10 @@
 // Scope: this package owns engine-touched bead-metadata KEY NAMES only. It
 // deliberately excludes (each a separate owner): gc.* event-type names
 // (internal/events.KnownEventTypes), telemetry metric names (internal/telemetry),
-// JSON schema-version contract strings (e.g. gc.dolt.cleanup.v1), and the
-// t3bridge UI thread-metadata namespace (internal/runtime/t3bridge). Pack- and
+// JSON schema-version contract strings (e.g. gc.dolt.cleanup.v1), the
+// t3bridge UI thread-metadata namespace (internal/runtime/t3bridge), and the
+// conversation operation journal's gc.op.* / gc.fact.* row namespace
+// (internal/opjournal, whose bead codec is the only reader and writer). Pack- and
 // prompt-private keys that no Go file reads stay open-world by design and are
 // intentionally NOT declared here (see KnownMetadataPrefixes for the dynamic
 // gc.var.<name> case).
