@@ -842,15 +842,16 @@ func IsReadyExcludedBead(b Bead) bool {
 }
 
 // HasReadyExcludedLabel reports whether a bead carries a label that marks it
-// as infrastructure bookkeeping (session continuity, order tracking) rather
-// than actionable Ready work. Distinct from IsReadyExcludedType: a bead may be
-// label-excluded regardless of its type. Callers that have already constrained
-// the bead's type (e.g. iterating known-convoy beads) use this to test only
-// the label dimension.
+// as infrastructure bookkeeping (session continuity, order tracking,
+// conversation operation journal rows) rather than actionable Ready work.
+// Distinct from IsReadyExcludedType: a bead may be label-excluded regardless
+// of its type. Callers that have already constrained the bead's type (e.g.
+// iterating known-convoy beads) use this to test only the label dimension.
 func HasReadyExcludedLabel(b Bead) bool {
 	for _, label := range b.Labels {
 		switch label {
-		case "gc:session", "gc:order-tracking", "order-tracking":
+		case "gc:session", "gc:order-tracking", "order-tracking",
+			"gc:op", "gc:fact": // op and fact rows; canonical: internal/opjournal
 			return true
 		}
 	}

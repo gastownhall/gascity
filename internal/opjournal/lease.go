@@ -5,11 +5,16 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 )
 
+// maxLeaseLen is bd's assignee limit in runes. bd refuses a longer assignee,
+// so a lease that renders longer is refused before any write.
+const maxLeaseLen = 255
+
 // Lease is a lane's hold on an executing op, stored as the bead's assignee:
-// <lane>@<conversation>#<gen>#<nonce>@<deadline RFC3339Nano UTC>. O0 only
-// encodes and decodes it; lanes write it in O1.
+// <lane>@<conversation>#<gen>#<nonce>@<deadline RFC3339Nano UTC>, at most
+// maxLeaseLen runes. O0 only encodes and decodes it; lanes write it in O1.
 type Lease struct {
 	Lane         string
 	Conversation string
@@ -30,7 +35,8 @@ func (l Lease) String() string {
 		l.Nonce + "@" + formatTime(l.Deadline)
 }
 
-// validate refuses a lease whose parts would not parse back.
+// validate refuses a lease whose parts would not parse back or whose assignee
+// form bd would not store.
 func (l Lease) validate() error {
 	if err := validateLeasePart("lane", l.Lane); err != nil {
 		return err
@@ -46,6 +52,9 @@ func (l Lease) validate() error {
 	}
 	if l.Deadline.IsZero() {
 		return invalidf("lease deadline is zero")
+	}
+	if n := utf8.RuneCountInString(l.String()); n > maxLeaseLen {
+		return invalidf("lease is %d runes, max %d (bd's assignee limit)", n, maxLeaseLen)
 	}
 	return nil
 }

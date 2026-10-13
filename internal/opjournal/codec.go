@@ -243,7 +243,9 @@ func checkOpID(op Op) error {
 // Two projections reconcile the bead status with gc.op.status, which is
 // authoritative: an op closed in metadata whose bead is still open (a torn
 // close) reads closed, and a bead closed outside the journal whose metadata is
-// still open reads closed with outcome failed{closed_externally}.
+// still open reads closed with outcome failed{closed_externally}. Decoding
+// never writes; the store's next Close, Cancel or Transition of the row stores
+// that outcome.
 func DecodeOp(b beads.Bead) (Op, error) {
 	if b.Type != BeadType || !slices.Contains(b.Labels, LabelOp) {
 		return Op{}, corruptf(b.ID, "not an op row (type %q, labels %v)", b.Type, b.Labels)
@@ -301,7 +303,7 @@ func DecodeOp(b beads.Bead) (Op, error) {
 		Status:      Status(d.required(keyStatus)),
 		ArrivalSeq:  d.uint64(keyArrivalSeq),
 		LaneSeq:     d.uint64(keyLaneSeq),
-		Attempt:     int(d.int64(keyAttempt)),
+		Attempt:     d.int(keyAttempt),
 		Cancel: Cancel{
 			By:     d.meta[keyCancelBy],
 			At:     d.time(keyCancelAt),
@@ -349,11 +351,17 @@ func DecodeOp(b beads.Bead) (Op, error) {
 	if err := validateState(op, spec); err != nil {
 		return Op{}, corruptf(b.ID, "%v", err)
 	}
-	if b.Status == beadStatusClosed && op.Status != StatusClosed {
+	if closedExternally(b) {
 		op.Status = StatusClosed
 		op.Outcome = Outcome{Arm: ArmFailed, Reason: ReasonClosedExternally}
 	}
 	return op, nil
+}
+
+// closedExternally reports whether op row b's bead was closed outside the
+// journal: the bead is closed and gc.op.status is not.
+func closedExternally(b beads.Bead) bool {
+	return b.Status == beadStatusClosed && b.Metadata[keyStatus] != string(StatusClosed)
 }
 
 // checkVocabulary reports a policy or scope value outside this build's
@@ -440,6 +448,20 @@ func (d *metaDecoder) int64(key string) int64 {
 	n, err := strconv.ParseInt(v, 10, 64)
 	if err != nil || formatInt(n) != v {
 		d.fail(key, "%q is not a canonical integer", v)
+	}
+	return n
+}
+
+// int reads an integer that must fit this platform's int: a wider value is
+// refused, never wrapped.
+func (d *metaDecoder) int(key string) int {
+	v := d.meta[key]
+	if v == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || formatInt(int64(n)) != v {
+		d.fail(key, "%q is not a canonical integer within int range", v)
 	}
 	return n
 }

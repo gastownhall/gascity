@@ -3,7 +3,9 @@ package opjournal
 import (
 	"errors"
 	"maps"
+	"math"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -72,8 +74,8 @@ func checkOpBeadShape(t *testing.T, b beads.Bead, op Op) {
 	if got := coordclass.Classify(b); got != coordclass.ClassSessions {
 		t.Fatalf("Classify(op %s) = %v, want sessions", op.Status, got)
 	}
-	if !beads.IsReadyExcludedBead(b) {
-		t.Fatalf("op row is not ready-excluded")
+	if !beads.IsReadyExcludedBead(b) || !beads.HasReadyExcludedLabel(b) {
+		t.Fatalf("op row is not ready-excluded by type and by label")
 	}
 }
 
@@ -146,6 +148,8 @@ func TestDecodeRefusals(t *testing.T) {
 		{"missing schema", mutate(func(b *beads.Bead) { delete(b.Metadata, keySchema) }), ErrCorruptOp},
 		{"missing kind", mutate(func(b *beads.Bead) { delete(b.Metadata, keyKind) }), ErrCorruptOp},
 		{"id mismatch", mutate(func(b *beads.Bead) { b.ID = "gc-op-aaaaaaaaaaaaaaaaaaaaaaaaaa" }), ErrCorruptOp},
+		{"reserved id prefix", mutate(func(b *beads.Bead) { b.ID = "g.c" + strings.TrimPrefix(b.ID, "gc") }), ErrCorruptOp},
+		{"empty id prefix", mutate(func(b *beads.Bead) { b.ID = strings.TrimPrefix(b.ID, "gc") }), ErrCorruptOp},
 		{"key edited", mutate(func(b *beads.Bead) { b.Metadata[keyClientKey] = "k2" }), ErrCorruptOp},
 		{"non-lease assignee", mutate(func(b *beads.Bead) { b.Assignee = "alice" }), ErrCorruptOp},
 		{"open with outcome", mutate(func(b *beads.Bead) { b.Metadata[keyOutcome] = "succeeded" }), ErrCorruptOp},
@@ -169,6 +173,35 @@ func TestDecodeRefusals(t *testing.T) {
 	for _, c := range cases {
 		if _, err := DecodeOp(c.bead); !errors.Is(err, c.want) {
 			t.Errorf("%s: DecodeOp = %v, want %v", c.name, err, c.want)
+		}
+	}
+}
+
+// An attempt count that does not fit this platform's int is a corrupt row,
+// never a silently wrapped count.
+func TestDecodeAttemptOutsideIntIsRefused(t *testing.T) {
+	good := encode(t, sampleOp(t))
+	cases := []struct {
+		attempt string
+		fits    bool
+	}{
+		{strconv.Itoa(math.MaxInt), true},
+		{"4294967297", strconv.IntSize == 64}, // 2^32+1 wraps to 1 in a 32-bit int
+		{strconv.FormatUint(uint64(math.MaxInt)+1, 10), false},
+	}
+	for _, c := range cases {
+		b := good
+		b.Metadata = maps.Clone(good.Metadata)
+		b.Metadata[keyAttempt] = c.attempt
+		op, err := DecodeOp(b)
+		if !c.fits {
+			if !errors.Is(err, ErrCorruptOp) {
+				t.Errorf("attempt %s: DecodeOp = (%d, %v), want ErrCorruptOp", c.attempt, op.Attempt, err)
+			}
+			continue
+		}
+		if err != nil || strconv.Itoa(op.Attempt) != c.attempt {
+			t.Errorf("attempt %s: DecodeOp = (%d, %v), want the count back", c.attempt, op.Attempt, err)
 		}
 	}
 }

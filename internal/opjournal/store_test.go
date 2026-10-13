@@ -663,6 +663,21 @@ func TestTransitionRetriesARevisionRace(t *testing.T) {
 	}
 }
 
+// Repairing a torn close is fenced like any other write, and losing every race
+// reports the last conflict as mutate does.
+func TestTornCloseRepairUnderContentionWrapsTheConflict(t *testing.T) {
+	mem := &beads.MemStore{IDPrefix: "gc", HonorExplicitIDs: true}
+	racer := &racingStore{MemStore: mem}
+	h := newHarnessOver(t, mem, racer)
+	op := h.propose(t, msgReq("k", "x"))
+	tornClose(t, h, op.ID)
+	racer.races.Store(1 << 20)
+	_, _, err := h.store.Cancel(op.ID, "operator:bob", "")
+	if !errors.Is(err, ErrContention) || !beads.IsPreconditionFailed(err) {
+		t.Fatalf("Cancel(torn) under constant interference = %v, want ErrContention wrapping the conflict", err)
+	}
+}
+
 func TestClose(t *testing.T) {
 	for _, from := range []Status{StatusSubmitted, StatusAccepted, StatusExecuting, StatusSettling} {
 		h := newHarness(t)
@@ -1070,6 +1085,80 @@ func TestTornCloseIsRepairedByAnyTerminalCall(t *testing.T) {
 			t.Fatalf("bead %s after Close", b.Status)
 		}
 	})
+}
+
+// A bead closed outside the journal while its op executes under a lease reads
+// closed failed{closed_externally}. The next Close, Cancel or Transition stores
+// that outcome under the revision fence, so reopening the bead cannot bring the
+// op back.
+func TestExternalCloseIsStoredByTheNextWrite(t *testing.T) {
+	externally := Outcome{Arm: ArmFailed, Reason: ReasonClosedExternally}
+	for _, c := range []struct {
+		name string
+		call func(h *harness, id string) error
+	}{
+		{"close with that outcome", func(h *harness, id string) error {
+			_, err := h.store.Close(id, externally, "lane")
+			return err
+		}},
+		{"close with another outcome", func(h *harness, id string) error {
+			if _, err := h.store.Close(id, Outcome{Arm: ArmSucceeded}, "lane"); !errors.Is(err, ErrAlreadyTerminal) {
+				return fmt.Errorf("Close(succeeded) = %w, want ErrAlreadyTerminal", err)
+			}
+			return nil
+		}},
+		{"cancel", func(h *harness, id string) error {
+			if r, _, err := h.store.Cancel(id, "operator:bob", ""); err != nil || r != CancelAlreadyTerminal {
+				return fmt.Errorf("Cancel = %s, %w, want %s", r, err, CancelAlreadyTerminal)
+			}
+			return nil
+		}},
+		{"transition", func(h *harness, id string) error {
+			var se *StatusError
+			if _, err := h.store.Transition(id, StatusExecuting, StatusSettling, "lane"); !errors.As(err, &se) || se.Current != StatusClosed {
+				return fmt.Errorf("Transition = %w, want a StatusError at closed", err)
+			}
+			return nil
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHarness(t)
+			op := h.propose(t, msgReq("k", "x"))
+			b, _ := h.mem.Get(op.ID)
+			assignee := Lease{Lane: "conversation", Conversation: "gc-1", Generation: 1, Nonce: "n", Deadline: t0.Add(time.Minute)}.String()
+			if err := h.mem.UpdateIfMatch(op.ID, b.Revision, beads.UpdateOpts{
+				Assignee: &assignee,
+				Metadata: map[string]string{keyStatus: string(StatusExecuting)},
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := h.mem.Close(op.ID); err != nil {
+				t.Fatal(err)
+			}
+			if err := c.call(h, op.ID); err != nil {
+				t.Fatal(err)
+			}
+			b, _ = h.mem.Get(op.ID)
+			if b.Metadata[keyStatus] != string(StatusClosed) || b.Metadata[keyOutcome] != string(ArmFailed) ||
+				b.Metadata[keyOutcomeReason] != ReasonClosedExternally || b.Assignee != "" {
+				t.Fatalf("stored status %q outcome %q{%q} assignee %q, want closed failed{%s} and no lease",
+					b.Metadata[keyStatus], b.Metadata[keyOutcome], b.Metadata[keyOutcomeReason], b.Assignee, ReasonClosedExternally)
+			}
+			if err := h.mem.Reopen(op.ID); err != nil {
+				t.Fatal(err)
+			}
+			got, err := h.store.Get(op.ID)
+			if err != nil || got.Status != StatusClosed || got.Outcome != externally {
+				t.Fatalf("Get after reopen = %s %+v, %v; want closed failed{%s}", got.Status, got.Outcome, err, ReasonClosedExternally)
+			}
+			if last := got.Transitions[len(got.Transitions)-1]; last.Status != StatusClosed {
+				t.Fatalf("last transition %+v, want the stored close", last)
+			}
+			if open, err := h.store.ListOpen("gc-1"); err != nil || len(open) != 0 {
+				t.Fatalf("ListOpen after reopen = %v, %v; want none", open, err)
+			}
+		})
+	}
 }
 
 // One explicit deadline bounds the defaulted other: a finish_by inside the

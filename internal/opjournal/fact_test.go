@@ -4,6 +4,7 @@ import (
 	"errors"
 	"maps"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -66,8 +67,8 @@ func TestFactRoundTrip(t *testing.T) {
 				t.Fatalf("invalid key %q", k)
 			}
 		}
-		if coordclass.Classify(b) != coordclass.ClassSessions || !beads.IsReadyExcludedBead(b) {
-			t.Fatalf("fact row routing: class %v ready-excluded %v", coordclass.Classify(b), beads.IsReadyExcludedBead(b))
+		if coordclass.Classify(b) != coordclass.ClassSessions || !beads.IsReadyExcludedBead(b) || !beads.HasReadyExcludedLabel(b) {
+			t.Fatalf("fact row routing: class %v ready-excluded %v by label %v", coordclass.Classify(b), beads.IsReadyExcludedBead(b), beads.HasReadyExcludedLabel(b))
 		}
 		got, err := DecodeFact(b)
 		if err != nil {
@@ -124,6 +125,8 @@ func TestDecodeFactRefusals(t *testing.T) {
 		{"schema 2", mutate(func(b *beads.Bead) { b.Metadata[keyFactSchema] = "2" }), ErrUnsupportedSchema},
 		{"edited turn", mutate(func(b *beads.Bead) { b.Metadata[keyFactTurn] = "run-9:3" }), ErrCorruptOp},
 		{"bad generation", mutate(func(b *beads.Bead) { b.Metadata[keyFactGeneration] = "x" }), ErrCorruptOp},
+		{"reserved id prefix", mutate(func(b *beads.Bead) { b.ID = "g.c" + strings.TrimPrefix(b.ID, "gc") }), ErrCorruptOp},
+		{"empty id prefix", mutate(func(b *beads.Bead) { b.ID = strings.TrimPrefix(b.ID, "gc") }), ErrCorruptOp},
 		{"an op row", encode(t, sampleOp(t)), ErrCorruptOp},
 	}
 	for _, c := range cases {

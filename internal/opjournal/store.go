@@ -246,7 +246,7 @@ func (s *Store) Transition(id string, expect, to Status, by string) (Op, error) 
 	if err := validateText("transition by", by, maxPrincipalLen); err != nil {
 		return Op{}, err
 	}
-	return s.mutate(id, func(cur Op, spec Spec) (Op, bool, error) {
+	return s.mutate(id, by, func(cur Op, spec Spec) (Op, bool, error) {
 		if cur.Status != expect {
 			return Op{}, false, &StatusError{ID: id, Expected: expect, Current: cur.Status}
 		}
@@ -266,7 +266,8 @@ func (s *Store) Transition(id string, expect, to Status, by string) (Op, error) 
 // Close records op id's single terminal outcome and closes its bead in one
 // fenced write. Closing again with the same outcome is idempotent; another
 // outcome is ErrAlreadyTerminal. Either way a torn close (metadata closed,
-// bead open) is repaired.
+// bead open) is repaired, and a bead closed outside the journal is first
+// stored as closed failed{closed_externally}.
 func (s *Store) Close(id string, outcome Outcome, by string) (Op, error) {
 	if err := validateText("close by", by, maxPrincipalLen); err != nil {
 		return Op{}, err
@@ -274,7 +275,7 @@ func (s *Store) Close(id string, outcome Outcome, by string) (Op, error) {
 	if err := validateOutcomeUpdateText(outcome); err != nil {
 		return Op{}, err
 	}
-	op, err := s.mutate(id, func(cur Op, _ Spec) (Op, bool, error) {
+	op, err := s.mutate(id, by, func(cur Op, _ Spec) (Op, bool, error) {
 		if err := validateOutcome(outcome, cur.Cancel); err != nil {
 			return Op{}, false, err
 		}
@@ -328,7 +329,9 @@ const (
 	CancelRequested CancelResult = "requested"
 	// CancelAlreadyDecided means the op is settling; nothing was written.
 	CancelAlreadyDecided CancelResult = "already_decided"
-	// CancelAlreadyTerminal means the op is closed; nothing was written.
+	// CancelAlreadyTerminal means the op is closed; the cancel is not
+	// recorded (a torn close or a close made outside the journal is still
+	// repaired or stored).
 	CancelAlreadyTerminal CancelResult = "already_terminal"
 )
 
@@ -336,8 +339,9 @@ const (
 // the op closes canceled. While executing, or once a lifecycle op is lowered,
 // the request is recorded — the first recorded cancel wins — and the lane
 // decides the outcome. A settling op is AlreadyDecided and a closed op
-// AlreadyTerminal; neither is written, beyond repairing a torn close, and the
-// caller audits the typed result.
+// AlreadyTerminal; neither is written, beyond repairing a torn close or
+// storing a close made outside the journal, and the caller audits the typed
+// result.
 func (s *Store) Cancel(id, by, reason string) (CancelResult, Op, error) {
 	if err := validateText("cancel by", by, maxPrincipalLen); err != nil {
 		return "", Op{}, err
@@ -349,7 +353,7 @@ func (s *Store) Cancel(id, by, reason string) (CancelResult, Op, error) {
 		return "", Op{}, err
 	}
 	var result CancelResult
-	op, err := s.mutate(id, func(cur Op, spec Spec) (Op, bool, error) {
+	op, err := s.mutate(id, by, func(cur Op, spec Spec) (Op, bool, error) {
 		cancel := cur.Cancel
 		if !cancel.Recorded() {
 			cancel = Cancel{By: by, At: utc(s.clk.Now()), Reason: reason}
@@ -390,11 +394,15 @@ func (s *Store) Cancel(id, by, reason string) (CancelResult, Op, error) {
 
 // mutate runs one revision-fenced read-decide-write on op id, retrying when a
 // concurrent writer moves the revision. decide returns the next op and
-// whether to write it; the write carries only the fields that changed. A
-// revision of 0 is a real revision on some backends (SQLite starts there), so
-// it is passed through; a store that cannot fence answers
-// ErrConditionalWriteUnsupported itself and that error is returned as is.
-func (s *Store) mutate(id string, decide func(cur Op, spec Spec) (Op, bool, error)) (Op, error) {
+// whether to write it; the write carries only the fields that changed. A row
+// whose bead was closed outside the journal is first stored as DecodeOp reads
+// it, closed failed{closed_externally} with no lease and a closed transition
+// by by, and decide then sees the stored row, so reopening the bead cannot
+// bring the op back. A revision of 0 is a real revision on some backends
+// (SQLite starts there), so it is passed through; a store that cannot fence
+// answers ErrConditionalWriteUnsupported itself and that error is returned as
+// is.
+func (s *Store) mutate(id, by string, decide func(cur Op, spec Spec) (Op, bool, error)) (Op, error) {
 	var lastConflict error
 	for range casAttempts {
 		b, err := s.store.Get(id)
@@ -405,22 +413,32 @@ func (s *Store) mutate(id string, decide func(cur Op, spec Spec) (Op, bool, erro
 		if err != nil {
 			return Op{}, err
 		}
-		spec, err := Lookup(cur.Kind)
-		if err != nil {
-			return Op{}, err
-		}
-		next, write, err := decide(cur, spec)
-		if err != nil {
-			return Op{}, err
-		}
-		if !write {
-			return next, nil
+		var next Op
+		external := closedExternally(b)
+		if external {
+			next = closed(cur, cur.Outcome, by, s.clk)
+		} else {
+			spec, err := Lookup(cur.Kind)
+			if err != nil {
+				return Op{}, err
+			}
+			var write bool
+			next, write, err = decide(cur, spec)
+			if err != nil {
+				return Op{}, err
+			}
+			if !write {
+				return next, nil
+			}
 		}
 		opts, err := patch(b, cur, next)
 		if err != nil {
 			return Op{}, err
 		}
 		err = s.writer.UpdateIfMatch(id, b.Revision, opts)
+		if err == nil && external {
+			continue
+		}
 		if err == nil {
 			return next, nil
 		}
@@ -474,6 +492,7 @@ func patch(b beads.Bead, cur, next Op) (beads.UpdateOpts, error) {
 // closeBead repairs a torn close: it closes op id's bead when the metadata is
 // already closed and the bead is not. An already-closed bead is done.
 func (s *Store) closeBead(id string) error {
+	var lastConflict error
 	for range casAttempts {
 		b, err := s.store.Get(id)
 		if err != nil {
@@ -491,6 +510,7 @@ func (s *Store) closeBead(id string) error {
 		if !errors.As(err, &stale) {
 			return fmt.Errorf("closing op %s: %w", id, err)
 		}
+		lastConflict = err
 	}
-	return fmt.Errorf("%w: closing op %s lost %d revision races", ErrContention, id, casAttempts)
+	return fmt.Errorf("%w: closing op %s lost %d revision races: %w", ErrContention, id, casAttempts, lastConflict)
 }

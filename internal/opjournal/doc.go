@@ -2,9 +2,12 @@
 // shadow store: op and fact rows, the closed kind registry, pinned op ids, the
 // bead codec, and a store over the sessions-class beads store that holds the
 // conversation rows. In O0 it decides and executes nothing: API and CLI write an
-// op before running their legacy path; lanes arrive in O1 and O2. Spec:
-// engdocs/design/conversation-operation-journal.md §3.1–3.6, §5.2, §5.5 O0, its
-// recorded decisions and critic corrections.
+// op before running their legacy path; lanes arrive in O1 and O2.
+//
+// The design is engdocs/design/conversation-operation-journal.md §3.1–3.6,
+// §5.2 and §5.5 O0, with its recorded decisions and critic corrections. That
+// document is not on main yet; until it lands, the rules below and the tests
+// that pin them are the in-tree contract.
 //
 // # Rows
 //
@@ -16,7 +19,10 @@
 // gc:fact-conv:<conversation>), closed on create. Rows are no-history and never
 // ephemeral. Type "op" is ready-excluded, rows carry no gc.routed_to, and an
 // op's assignee is only ever a lane lease <lane>@<conversation>#<gen>#<nonce>@<deadline>,
-// so ops never reach Ready or work queries. Fields live in gc.op.* metadata.
+// so ops never reach Ready or work queries. A lease is at most 255 runes, bd's
+// assignee limit. Fields live in gc.op.* metadata. Rows are not yet
+// coordclass.ControllerOwned, so the generic bead API can still write them; the
+// design's DES-O0API decides whether they join it before OJ-2 writes real rows.
 //
 // # Status and outcome
 //
@@ -24,12 +30,14 @@
 // submitted → accepted|executing|closed; accepted → executing|settling|closed;
 // executing → settling|closed; settling → closed. Lifecycle kinds never enter
 // executing: they are lowered (accepted), decided (settling), settled. The bead
-// is open until the op closes; metadata is authoritative. A closed op has one
-// outcome: arm succeeded|failed|skipped|canceled plus an open reason; an
-// unknown failed or skipped reason reads failed{other}. O1 lanes Take with a
-// guarded update expecting assignee "" (or the expired lease) and finish with one
-// update that closes op and bead expecting their own lease; until bd batch
-// guards exist the revision CAS subsumes both.
+// is open until the op closes; metadata is authoritative. A bead closed outside
+// the journal reads closed failed{closed_externally}, and the next Close,
+// Cancel or Transition stores that outcome. A closed op has one outcome: arm
+// succeeded|failed|skipped|canceled plus an open reason; an unknown failed or
+// skipped reason reads failed{other}. O1 lanes Take with a guarded update
+// expecting assignee "" (or the expired lease) and finish with one update that
+// closes op and bead expecting their own lease; until bd batch guards exist the
+// revision CAS subsumes both.
 //
 // # Identity
 //
@@ -66,10 +74,12 @@
 // id) via CompareOrder. Cancel: before Take (or, for lifecycle, before
 // lowering) closes canceled; executing or lowered records the request and the
 // outcome says who won; settling is already_decided, closed already_terminal,
-// neither written. On conversation close, open ops close
+// and neither records the cancel. On conversation close, open ops close
 // skipped{conversation_closed} except settling ops and the close op. Facts:
 // session.started/ended, turn.started/ended, interaction.raised/resolved,
 // create-if-absent by occurrence; planner level changes stay cells and reach L1
-// as session.ended{reason}. This package never deletes a row: retention,
-// archive and permanent tombstones are OJ-29, OJ-30 and BD-6.
+// as session.ended{reason}. This package never deletes an op or fact row; its
+// one delete is Propose removing a row a store minted under its own id instead
+// of the pinned one (ErrPinnedIDNotHonored). Retention, archive and permanent
+// tombstones are later milestones (the design's OJ-29, OJ-30 and BD-6).
 package opjournal

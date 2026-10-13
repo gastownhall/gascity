@@ -180,8 +180,8 @@ func validateFactBody(f Fact) error {
 }
 
 // DecodeFact reads a fact row. An unknown kind is ErrUnsupportedKind; a
-// malformed row, or one whose id does not match its occurrence, is
-// ErrCorruptOp.
+// malformed row, or one whose id is not <prefix>-fact-<hash of its occurrence>
+// under a valid prefix, is ErrCorruptOp.
 func DecodeFact(b beads.Bead) (Fact, error) {
 	if b.Type != BeadType || !slices.Contains(b.Labels, LabelFact) {
 		return Fact{}, corruptf(b.ID, "not a fact row (type %q, labels %v)", b.Type, b.Labels)
@@ -222,8 +222,12 @@ func DecodeFact(b beads.Bead) (Fact, error) {
 	if !slices.Contains(b.Labels, FactConversationLabel(f.Conversation)) {
 		return Fact{}, corruptf(b.ID, "missing label %s", FactConversationLabel(f.Conversation))
 	}
-	if !strings.HasSuffix(b.ID, factIDInfix+factIDSuffix(f)) {
+	prefix, ok := strings.CutSuffix(b.ID, factIDInfix+factIDSuffix(f))
+	if !ok {
 		return Fact{}, corruptf(b.ID, "id does not match its occurrence")
+	}
+	if err := validatePrefix(prefix); err != nil {
+		return Fact{}, corruptf(b.ID, "id prefix: %v", err)
 	}
 	return f, nil
 }

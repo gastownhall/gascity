@@ -86,6 +86,39 @@ func TestIsReadyExcludedType(t *testing.T) {
 	}
 }
 
+// A bookkeeping label excludes a bead from Ready whatever its type.
+func TestHasReadyExcludedLabel(t *testing.T) {
+	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name   string
+		labels []string
+		want   bool
+	}{
+		{"session continuity", []string{"gc:session"}, true},
+		{"order tracking", []string{"gc:order-tracking"}, true},
+		{"legacy order tracking", []string{"order-tracking"}, true},
+		{"op journal op row", []string{"gc:op", "gc:op-conv:gc-7"}, true},       // internal/opjournal
+		{"op journal fact row", []string{"gc:fact", "gc:fact-conv:gc-7"}, true}, // internal/opjournal
+		{"op conversation label alone", []string{"gc:op-conv:gc-7"}, false},
+		{"fact conversation label alone", []string{"gc:fact-conv:gc-7"}, false},
+		{"unrelated label", []string{"priority:high"}, false},
+		{"no labels", nil, false},
+		{"case-sensitive", []string{"GC:OP"}, false},
+	}
+	for _, tt := range tests {
+		b := Bead{Status: "open", Type: "task", Labels: tt.labels}
+		if got := HasReadyExcludedLabel(b); got != tt.want {
+			t.Errorf("%s: HasReadyExcludedLabel(%v) = %v, want %v", tt.name, tt.labels, got, tt.want)
+		}
+		if got := IsReadyExcludedBead(b); got != tt.want {
+			t.Errorf("%s: IsReadyExcludedBead(task %v) = %v, want %v", tt.name, tt.labels, got, tt.want)
+		}
+		if got := IsReadyCandidate(b, now); got == tt.want {
+			t.Errorf("%s: IsReadyCandidate(open task %v) = %v, want %v", tt.name, tt.labels, got, !tt.want)
+		}
+	}
+}
+
 func TestIsReadyCandidate(t *testing.T) {
 	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
 	past := now.Add(-time.Minute)
