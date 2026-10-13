@@ -467,10 +467,11 @@ func (p *planner) applyFacts(f effectFacts, at time.Time) {
 		p.classified[c.Key] = *c
 	}
 	if n := f.Noted; n != nil && p.observations != nil {
-		if cache := p.observations(); cache != nil {
+		if cache := p.observations(); cache != nil && (!n.Clears || goneNoted(cache, n.Name)) {
 			// Listed, running and the agent alive (or none of them, for a
 			// runtime gone), at the read's issue time, so a later inventory
-			// pass overrides it either way (v5 O4).
+			// pass overrides it either way (v5 O4). An effect's alive read
+			// is written only over a name the cache reads unlisted (noteFresh).
 			v := ObsYes
 			if n.Gone {
 				v = ObsNo
@@ -480,6 +481,13 @@ func (p *planner) applyFacts(f effectFacts, at time.Time) {
 			}
 		}
 	}
+}
+
+// goneNoted reports that the cache reads name unlisted: an effect's gone
+// note, or an inventory's absence, which a newer fresh alive read overrides
+// with nothing of the pass's to lose.
+func goneNoted(cache *ObservationCache, name string) bool {
+	return cache.Snapshot().ByName[name].Listed.Value == ObsNo
 }
 
 // recordDrainTransition, recordAgentQuarantine, recordAgentIdleKill and

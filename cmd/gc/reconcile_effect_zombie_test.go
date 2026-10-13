@@ -475,16 +475,17 @@ func TestAbsenceNoteRules(t *testing.T) {
 // TestAliveNoteFromAnyEffect (CONTRACT O4's other half, v5.10g; the #7799
 // review's note). Kills alive notes from starts alone, and an alive note a
 // stop leaves behind: any effect whose fresh read finds the row's runtime
-// alive and Current notes it alive at the read (clearing a gone note over a
-// runtime that came back at the next effect read, not the next inventory);
+// alive and Current notes it alive at the read, to clear only (a gone note
+// over a runtime that came back clears at the next effect read, not the next
+// inventory; TestEffectAliveNoteOnlyClearsAGoneNote);
 // another row's runtime notes nothing; a stop that stopped the runtime
 // notes no alive.
 func TestAliveNoteFromAnyEffect(t *testing.T) {
 	k, _ := zombieKit(t, true, "gc-1", "tok", "")
 	k.mutate(func(r *simRuntime) { r.zombie = false })
 	read := k.p.Clock.Now()
-	if n := k.runKind().Facts.Noted; n == nil || n.Gone || n.Name != "s-gc-1" || !n.At.Equal(read) {
-		t.Fatalf("noted %+v over the row's own runtime alive, want it noted alive at %v", n, read)
+	if n := k.runKind().Facts.Noted; n == nil || n.Gone || !n.Clears || n.Name != "s-gc-1" || !n.At.Equal(read) {
+		t.Fatalf("noted %+v over the row's own runtime alive, want it noted alive (clearing only) at %v", n, read)
 	}
 	k, _ = zombieKit(t, true, "gc-9", "theirs", "")
 	k.mutate(func(r *simRuntime) { r.zombie = false })

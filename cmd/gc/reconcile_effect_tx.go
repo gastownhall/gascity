@@ -560,11 +560,13 @@ type classifiedRuntime struct {
 }
 
 // notedRuntime is a runtime name a fresh read issued at At found alive, or
-// absent when Gone.
+// absent when Gone. An alive note that only Clears is written only over a
+// name the cache reads unlisted (applyFacts: goneNoted).
 type notedRuntime struct {
-	Name string
-	At   time.Time
-	Gone bool
+	Name   string
+	At     time.Time
+	Gone   bool
+	Clears bool
 }
 
 func (f effectFacts) empty() bool {
@@ -816,9 +818,14 @@ func (t *tx) run(ctx context.Context, sections []section) settlement {
 }
 
 // noteFresh publishes the latest fresh read (CONTRACT O4, amended in
-// v5.10g): the planner notes the name gone, or the row's runtime alive and
-// Current, at the read's issue time, so the next pass reads what this
-// effect read rather than deciding again on an inventory that lags it. A
+// v5.10g): the planner notes the name gone at the read's issue time, so the
+// next pass reads what this effect read rather than deciding again on an
+// inventory that lags it; or, where the cache reads the name unlisted (an
+// effect's gone note standing), the row's runtime alive and Current, which
+// clears it. Over an inventory that
+// already lists the runtime an alive note is not written: its listing would
+// not be the pass's enrichment, so the row would read its identity unread,
+// and A9 would hold it until the next pass (#7799 review). A
 // note the effect made itself at or after the read (a start's commit)
 // stands; a later inventory pass overrides either.
 func (t *tx) noteFresh() {
@@ -972,7 +979,7 @@ func (t *tx) read(ctx context.Context, sec section) (settlement, bool) {
 		case rt.Class == rtAbsent:
 			t.fresh = notedRuntime{Name: t.name, At: t.view.Now, Gone: true}
 		case rt.Alive() && compareIdentity(t.expect, rt.Identity) == identityCurrent:
-			t.fresh = notedRuntime{Name: t.name, At: t.view.Now}
+			t.fresh = notedRuntime{Name: t.name, At: t.view.Now, Clears: true}
 		default:
 			t.fresh = notedRuntime{}
 		}
