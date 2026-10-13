@@ -381,22 +381,29 @@ func pendingCreateRollback(w simWrite) bool {
 
 // pendingCreateScreenPark reports A10's rollback screen parking a pending
 // create instead of closing it (SESS-051/092; CONTRACT v5.9z-1 (i), "close
-// or park"): a write of a row holding its claim that leaves it open with a
-// provider terminal error's park or a rate-limit quarantine, which legacy's
-// checkRateLimitStability writes whatever holds the row. I15 leaves it the
-// keys the park writes: state, sleep_reason and the quarantine's timer.
-func pendingCreateScreenPark(w simWrite, k string) bool {
-	a := w.After.Metadata
-	if w.Before.Metadata["pending_create_claim"] != "true" || w.After.Status == "closed" || !slices.Contains([]string{"state", "sleep_reason", "quarantined_until"}, k) {
+// or park"): a write of a row holding its claim that leaves it open and
+// asleep with a provider terminal error's park or a rate-limit quarantine,
+// which legacy's checkRateLimitStability writes whatever holds the row. I15
+// leaves it the hold's reason alone: no other held key, no wake, and no
+// quarantine shortened (an extension is no change).
+func pendingCreateScreenPark(w simWrite, stable bool) bool {
+	b, a := w.Before.Metadata, w.After.Metadata
+	if b["pending_create_claim"] != "true" || w.After.Status == "closed" || a["state"] != string(session.StateAsleep) {
 		return false
 	}
 	switch session.SleepReason(a["sleep_reason"]) {
 	case session.SleepReasonProviderTerminalError:
-		return a[sessionProviderTerminalErrorMetadataKey] != ""
+		if a[sessionProviderTerminalErrorMetadataKey] == "" {
+			return false
+		}
 	case session.SleepReasonRateLimit:
-		return a["quarantined_until"] != ""
+		if a["quarantined_until"] == "" {
+			return false
+		}
+	default:
+		return false
 	}
-	return false
+	return slices.Equal(dormantChanges(w.Before, a, w.At, stable), []string{"sleep_reason"})
 }
 
 // pendingCreateAdopt reports v2's adopt (A10, S2) of a pending create whose
@@ -932,28 +939,48 @@ func TestFailedCreateCloseRetiresHolds(t *testing.T) {
 // I15.
 func TestRollbackScreenParkRewritesHolds(t *testing.T) {
 	held := []string{"sleep_intent", "user-hold", "held_until", rowAt(1000 * time.Hour), "sleep_reason", "user-hold"}
-	park := func(claim bool, kv ...string) simWrite {
-		before := poolRow("gc-1", "worker", 1, "creating", held...)
+	quarantined := func(d time.Duration) []string { return append(slices.Clone(held), "quarantined_until", rowAt(d)) }
+	park := func(claim bool, base []string, patch map[string]string) simWrite {
+		before := poolRow("gc-1", "worker", 1, "creating", base...)
 		if claim {
 			before.Metadata["pending_create_claim"] = "true"
 		}
-		after := poolRow("gc-1", "worker", 1, "creating", held...)
-		for i := 0; i+1 < len(kv); i += 2 {
-			after.Metadata[kv[i]] = kv[i+1]
-		}
+		after := poolRow("gc-1", "worker", 1, "creating", base...)
+		maps.Copy(after.Metadata, patch)
 		return simWrite{Leg: simCityLeg, Before: before, After: after, At: plannerT0}
 	}
-	terminal := []string{"state", "asleep", "sleep_reason", string(session.SleepReasonProviderTerminalError), sessionProviderTerminalErrorMetadataKey, "model_not_found"}
-	rateLimit := []string{"sleep_reason", string(session.SleepReasonRateLimit), "quarantined_until", rowAt(30 * time.Minute)}
+	closed := func(w simWrite) simWrite { w.After.Status = "closed"; return w }
+	// The parks are production's: A10's screen writes these patches.
+	terminal := providerTerminalErrorPatch("model_not_found", plannerT0)
+	rateLimit := maps.Clone(session.RateLimitQuarantinePatch())
+	rateLimit["quarantined_until"] = rowAt(30 * time.Minute)
+	with := func(p map[string]string, kv ...string) map[string]string {
+		p = maps.Clone(p)
+		for i := 0; i+1 < len(kv); i += 2 {
+			p[kv[i]] = kv[i+1]
+		}
+		return p
+	}
+	without := func(p map[string]string, k string) map[string]string { p = maps.Clone(p); delete(p, k); return p }
 	for _, c := range []struct {
 		name  string
 		w     simWrite
 		fails bool
 	}{
-		{"a terminal-error park of a held pending create", park(true, terminal...), false},
-		{"a rate-limit quarantine of a held pending create", park(true, rateLimit...), false},
-		{"the same park of a row holding no claim", park(false, terminal...), true},
-		{"a park that also clears the hold's timer", park(true, append(slices.Clone(terminal), "held_until", "")...), true},
+		{"a terminal-error park of a held pending create", park(true, held, terminal), false},
+		{"a rate-limit quarantine of a held pending create", park(true, held, rateLimit), false},
+		{"a rate-limit park extending an operator's quarantine", park(true, quarantined(10*time.Minute), rateLimit), false},
+		{"the same park of a row holding no claim", park(false, held, terminal), true},
+		{"a park that also clears the hold's timer", park(true, held, with(terminal, "held_until", "")), true},
+		{"a park that closes the row", closed(park(true, held, terminal)), true},
+		{"an asleep write with another reason", park(true, held, with(terminal, "sleep_reason", string(session.SleepReasonIdle))), true},
+		{"a terminal-error park with no terminal error", park(true, held, without(terminal, sessionProviderTerminalErrorMetadataKey)), true},
+		{"a rate-limit park with no quarantine", park(true, held, without(rateLimit, "quarantined_until")), true},
+		{"a rate-limit park shortening an operator's quarantine", park(true, quarantined(24*time.Hour), rateLimit), true},
+		{"a terminal-error write that wakes the held row", park(true, held, with(terminal, "state", "active")), true},
+		{"a rate-limit write that wakes the held row", park(true, held, with(rateLimit, "state", "active")), true},
+		{"a terminal-error park that leaves the row creating", park(true, held, without(terminal, "state")), true},
+		{"a rate-limit park that leaves the row creating", park(true, held, without(rateLimit, "state")), true},
 	} {
 		s := scripted(t, nil, poolRow("gc-1", "worker", 1, "asleep"))
 		s.checkWrite(c.w)

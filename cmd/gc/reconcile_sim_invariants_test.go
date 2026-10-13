@@ -255,7 +255,7 @@ func (s *sim) checkWrite(w simWrite) {
 			}
 		}
 	}
-	if k := dormantChange(w.Before, a, w.At, s.stable[w.After.ID]); k != "" && (!closes || !closeEndsSuspend(w.Before, k, w.At)) && (!closes || !pendingCreateRollback(w)) && !pendingCreateScreenPark(w, k) && !pendingCreateAdopt(w, k) && !s.quarantinedCommit(id, w, k) {
+	if k := dormantChange(w.Before, a, w.At, s.stable[w.After.ID]); k != "" && (!closes || !closeEndsSuspend(w.Before, k, w.At)) && (!closes || !pendingCreateRollback(w)) && !pendingCreateScreenPark(w, s.stable[w.After.ID]) && !pendingCreateAdopt(w, k) && !s.quarantinedCommit(id, w, k) {
 		s.failf("I15 I-STOP-3/4", "v2 rewrote %s %q -> %q on %s, which an operator holds dormant at %s", k, b[k], a[k], id, w.At.Format(time.RFC3339))
 	}
 	terminal := (w.After.Status == "closed" && w.Before.Status != "closed") ||
@@ -485,6 +485,19 @@ func closeEndsSuspend(b beads.Bead, k string, t time.Time) bool {
 // request, though one it holds may be cleared; a hold or quarantine alone
 // is not dormant, and legacy drains under one (owner ruling at C6a2).
 func dormantChange(b beads.Bead, a map[string]string, t time.Time, stable bool) string {
+	if ks := dormantChanges(b, a, t, stable); len(ks) > 0 {
+		return ks[0]
+	}
+	return ""
+}
+
+// dormantChanges is every key dormantChange would report, in its order.
+func dormantChanges(b beads.Bead, a map[string]string, t time.Time, stable bool) (out []string) {
+	add := func(k string) {
+		if !slices.Contains(out, k) {
+			out = append(out, k)
+		}
+	}
 	m := b.Metadata
 	until := func(k string) bool { at, err := time.Parse(time.RFC3339, m[k]); return err == nil && at.After(t) }
 	reason := session.SleepReason(m["sleep_reason"])
@@ -524,27 +537,27 @@ func dormantChange(b beads.Bead, a map[string]string, t time.Time, stable bool) 
 	}
 	for _, k := range owned {
 		if a[k] != m[k] {
-			return k
+			add(k)
 		}
 	}
 	// A suspend owns the row's state, but for the drain completion the
 	// operator-dormant stop writes, as legacy's does (asleep or drained,
 	// the hold kept; C6b2 ruling).
 	if suspended && a["state"] != m["state"] && a["state"] != string(session.StateAsleep) && a["state"] != string(session.StateDrained) {
-		return "state"
+		add("state")
 	}
 	for _, k := range stopKeys { // the residue void clears them (v5 D1, R1 as amended at C6a)
 		if dormant && a[k] != m[k] && a[k] != "" {
-			return k
+			add(k)
 		}
 	}
 	// An agent heartbeat's hold (held_until with no intent) does not hold
 	// A17's respawn (v5.9i): waking a row it alone holds is no violation.
 	heartbeat := len(owned) == 1 && owned[0] == "held_until" && !quarantined && strings.TrimSpace(m["sleep_intent"]) == ""
 	if (dormant || quarantined || len(owned) > 0) && !heartbeat && a["state"] != m["state"] && slices.Contains([]string{"awake", "active", "creating", string(session.StateStartPending)}, a["state"]) {
-		return "state"
+		add("state")
 	}
-	return ""
+	return out
 }
 
 // quarantineExtension reports a write's extension of b's live quarantine

@@ -29,6 +29,12 @@ func scripted(t *testing.T, live []string, rows ...beads.Bead) *sim {
 
 // scriptedWith is scripted with o's faults; o.rows is replaced.
 func scriptedWith(t *testing.T, o simOpts, live []string, rows ...beads.Bead) *sim {
+	// The store keeps the beads it is seeded with: a clone leaves the
+	// caller's rows the seed, so comparing one after a write is not vacuous.
+	rows = slices.Clone(rows)
+	for i := range rows {
+		rows[i].Metadata = maps.Clone(rows[i].Metadata)
+	}
 	o.rows = func(s *sim) ([]beads.Bead, []beads.Bead) {
 		for _, b := range rows {
 			for _, id := range live {
