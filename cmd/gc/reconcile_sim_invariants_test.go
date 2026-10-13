@@ -998,7 +998,8 @@ func TestCloseEndsSuspend(t *testing.T) {
 // loop: a refused re-issue held by an attach is quiescent only at or past
 // its row's backoff expiry and with no change but the runtime lease record;
 // one before the expiry, one with any other change, or one refused for
-// another cause is not.
+// another cause is not. A fresh heal refused liveness-unknown over an
+// erroring probe is paced as the stop is (v5.10l).
 func TestSimPacedRetries(t *testing.T) {
 	k := rowKey{Leg: rowLeg, ID: "gc-1"}
 	at := plannerT0.Add(time.Hour)
@@ -1007,21 +1008,25 @@ func TestSimPacedRetries(t *testing.T) {
 	}
 	for _, c := range []struct {
 		name          string
+		kind          string
 		until         time.Duration
 		cause         string
 		before, after map[string]beads.Bead
 		paced         bool
 	}{
-		{"at the expiry, the lease alone", -time.Second, fenceAttached, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4"), true},
-		{"before the expiry", time.Second, fenceAttached, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4"), false},
-		{"another key moved", -time.Second, fenceAttached, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4", "state", "asleep"), false},
-		{"another cause", -time.Second, fencePending, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4"), false},
-		{"no backoff record", 0, fenceAttached, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4"), false},
-		{"liveness unknown, the probe erroring, at the expiry", -time.Second, fenceLivenessUnknown, row("session_name", "s-gc-1", "runtime_lease_epoch", "3"), row("session_name", "s-gc-1", "runtime_lease_epoch", "4"), true},
-		{"liveness unknown, the probe erroring, before the expiry", time.Second, fenceLivenessUnknown, row("session_name", "s-gc-1", "runtime_lease_epoch", "3"), row("session_name", "s-gc-1", "runtime_lease_epoch", "4"), false},
-		{"liveness unknown, the probe reading", -time.Second, fenceLivenessUnknown, row("session_name", "s-gc-2", "runtime_lease_epoch", "3"), row("session_name", "s-gc-2", "runtime_lease_epoch", "4"), false},
+		{"at the expiry, the lease alone", intentStop, -time.Second, fenceAttached, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4"), true},
+		{"before the expiry", intentStop, time.Second, fenceAttached, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4"), false},
+		{"another key moved", intentStop, -time.Second, fenceAttached, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4", "state", "asleep"), false},
+		{"another cause", intentStop, -time.Second, fencePending, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4"), false},
+		{"no backoff record", intentStop, 0, fenceAttached, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4"), false},
+		{"liveness unknown, the probe erroring, at the expiry", intentStop, -time.Second, fenceLivenessUnknown, row("session_name", "s-gc-1", "runtime_lease_epoch", "3"), row("session_name", "s-gc-1", "runtime_lease_epoch", "4"), true},
+		{"liveness unknown, the probe erroring, before the expiry", intentStop, time.Second, fenceLivenessUnknown, row("session_name", "s-gc-1", "runtime_lease_epoch", "3"), row("session_name", "s-gc-1", "runtime_lease_epoch", "4"), false},
+		{"liveness unknown, the probe reading", intentStop, -time.Second, fenceLivenessUnknown, row("session_name", "s-gc-2", "runtime_lease_epoch", "3"), row("session_name", "s-gc-2", "runtime_lease_epoch", "4"), false},
+		{"fresh heal, liveness unknown, the probe erroring", intentRowHealFresh, -time.Second, causeLivenessUnknown, row("session_name", "s-gc-1"), row("session_name", "s-gc-1"), true},
+		{"fresh heal, liveness unknown, the probe reading", intentRowHealFresh, -time.Second, causeLivenessUnknown, row("session_name", "s-gc-2"), row("session_name", "s-gc-2"), false},
+		{"fresh heal, another cause", intentRowHealFresh, -time.Second, causeRuntimePresent, row("session_name", "s-gc-1"), row("session_name", "s-gc-1"), false},
 	} {
-		s := &sim{round: []simResult{{it: intent{Kind: intentStop, Key: k}, res: settlement{Outcome: settledRefused, Cause: c.cause}}}}
+		s := &sim{round: []simResult{{it: intent{Kind: c.kind, Key: k}, res: settlement{Outcome: settledRefused, Cause: c.cause}}}}
 		s.sp = &simProvider{rts: map[string]*simRuntime{"s-gc-1": {id: "gc-1", probeErr: true}, "s-gc-2": {id: "gc-1"}}}
 		backoff := map[string]backoffRecord{rowBackoffKey(k): {Consecutive: 2, Until: at.Add(c.until), Cause: c.cause}}
 		if c.until == 0 {

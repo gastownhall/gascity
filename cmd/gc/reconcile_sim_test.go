@@ -1446,8 +1446,9 @@ type simResult struct {
 // effects all refused a re-issue the contract holds, each no earlier than
 // its row's backoff expiry (a paced retry, not a loop), and whose only store
 // change is the runtime lease record each attempt writes. The holds: a stop
-// a human's attach holds (§12.2 #10), and a stop refused liveness-unknown
-// while its runtime's probe keeps erroring (I17).
+// a human's attach holds (§12.2 #10), and a stop, rollback or fresh heal
+// refused liveness-unknown while its runtime's probe keeps erroring (I17,
+// v5.10l).
 func (s *sim) pacedRetries(backoff map[string]backoffRecord, at time.Time, before, after map[string]beads.Bead) bool {
 	for k, b := range after {
 		a, ok := before[k]
@@ -1473,6 +1474,10 @@ func (s *sim) pacedRetries(backoff map[string]backoffRecord, at time.Time, befor
 			// leaves its fresh read unknown, and C3 refuses on it
 			// (mc-cjtkj; seed 290).
 			r.it.Kind == intentRollback && r.res.Cause == causeLivenessUnknown && s.probeErring(row) ||
+			// Likewise a fresh heal (A6): the squatter heal over a Foreign
+			// occupant whose probe keeps erroring cannot re-prove it, and
+			// refuses (v5.10l; seeds 621, 780).
+			r.it.Kind == intentRowHealFresh && r.res.Cause == causeLivenessUnknown && s.probeErring(row) ||
 			// A start AL1 proposes for a row an operator holds (a pending
 			// create's claim, a manual session) that its PreWake refuses
 			// (RefusesPreWake), or whose recycle an attached pane refuses,
@@ -1671,6 +1676,21 @@ func TestSimCorpusPinnedSeeds(t *testing.T) {
 	for _, seed := range []uint64{107, 337, 338, 427, 452, 465, 553, 657} {
 		t.Run(fmt.Sprint(seed), func(t *testing.T) {
 			s := newSim(t, seed, simOpts{noPendingCreates: true}) // main's scenarios: the seeds v5.9n pins
+			s.run()
+			s.report(t)
+		})
+	}
+}
+
+// TestSimCorpusFlooredPinnedSeeds (CONTRACT v5.10l). Kills an I10 model
+// that calls a paced fresh heal a loop: in floored seeds 621 and 780 the
+// squatter heal over a Foreign occupant whose probe keeps erroring refuses
+// liveness-unknown on its backoff through quiescence (mc-su7hv).
+func TestSimCorpusFlooredPinnedSeeds(t *testing.T) {
+	for _, seed := range []uint64{621, 780} {
+		t.Run(fmt.Sprint(seed), func(t *testing.T) {
+			s := newSim(t, seed, simOpts{noPendingCreates: true}) // TestSimCorpusFloored's scenario
+			s.cfg.Agents[0].MinActiveSessions = intPtr(1 + int(seed%2))
 			s.run()
 			s.report(t)
 		})

@@ -2268,6 +2268,22 @@ go_variant_test(
     test = ":gc_test",
 ) for i in range(16)]
 
+# The floored corpus (TestSimCorpusFloored: a min_active_sessions floor, no
+# pending creates), all 1024 seeds in sixteen ranges of 64 (CONTRACT v5.10l,
+# mc-su7hv); gc_test runs only its first 64. Ordinary test targets outside
+# SIM_CORPORA, as the shifted ranges are. Replay one seed with
+#   GC_V2_SIM_SEED=<seed> go test -run '^TestSimCorpusFloored$' ./cmd/gc/
+[go_variant_test(
+    name = "gc_sim_corpus_floored_%d_test" % i,
+    size = "medium",
+    args = ["-test.run=^TestSimCorpusFloored$$"],
+    env = {
+        "GC_V2_SIM_SEEDS": "64",
+        "GC_V2_SIM_SEED_FIRST": str(1 + 64 * i),
+    },
+    test = ":gc_test",
+) for i in range(16)]
+
 # INTEGRATION_SOLO_TESTS, each alone, and INTEGRATION_SOLO_SPLIT_TESTS, by
 # subtest, in gc_test's integration build.
 # Manual: the unit lane's //... does not run them (gc_test runs them there);
