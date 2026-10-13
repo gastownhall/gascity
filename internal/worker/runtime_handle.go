@@ -21,8 +21,11 @@ var ErrOperationUnsupported = errors.New("worker operation is unsupported")
 // RuntimeHandleConfig configures a worker handle for a legacy runtime-only
 // session target that has no bead-backed session identity.
 type RuntimeHandleConfig struct {
-	Provider     runtime.Provider
-	SessionName  string
+	Provider    runtime.Provider
+	SessionName string
+	// ProviderName is the builtin provider family (for example "claude"), not
+	// the configured provider name. Callers resolve a wrapped alias first with
+	// config.BuiltinFamily or ResolvedProvider.BuiltinAncestor.
 	ProviderName string
 	Transport    string
 	ProcessNames []string

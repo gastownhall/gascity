@@ -183,6 +183,34 @@ func (h *SessionHandle) Kill(ctx context.Context, by sessionpkg.Actor) (err erro
 	return err
 }
 
+// KillFenced is Kill under the session kill fence
+// (session.Manager.KillFencedReport), the operator kill `gc session kill`
+// runs: the caller's lease (by.Lease) covers the fence write, the stop and the
+// asleep sync, and the report says whether a fresh read under the lease found
+// the runtime already gone. warn receives the best-effort warnings.
+func (h *SessionHandle) KillFenced(ctx context.Context, by sessionpkg.Actor, warn func(string)) (report sessionpkg.KillReport, err error) {
+	event := h.beginOperationEvent(ctx, workerOperationKill)
+	defer func() { event.finish(err) }()
+
+	id := h.currentSessionID()
+	if id == "" {
+		return report, nil
+	}
+	kill := func(ctx context.Context, by sessionpkg.Actor) error { return h.manager.Kill(ctx, by, id) }
+	report, err = h.manager.KillFencedReport(ctx, by, id, kill, warn)
+	return report, err
+}
+
+// KillRuntimeGone reports KillFenced's "runtime already gone" verdict taken
+// now, without the lease (session.Manager.KillRuntimeGone).
+func (h *SessionHandle) KillRuntimeGone(ctx context.Context) (bool, error) {
+	id := h.currentSessionID()
+	if id == "" {
+		return false, nil
+	}
+	return h.manager.KillRuntimeGone(ctx, id)
+}
+
 // Close permanently ends the worker session.
 func (h *SessionHandle) Close(ctx context.Context, by sessionpkg.Actor) (err error) {
 	_, err = h.CloseDetailed(ctx, by)

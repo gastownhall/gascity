@@ -28,7 +28,7 @@ import (
 // silently blocking.
 type BlockingParam struct {
 	Index string `query:"index" doc:"Event sequence number; when provided, blocks until a newer event arrives." required:"false"`
-	Wait  string `query:"wait" doc:"How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m." required:"false"`
+	Wait  string `query:"wait" doc:"How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m." required:"false"`
 }
 
 // Resolve validates the blocking-query parameters. Implements huma.Resolver;
