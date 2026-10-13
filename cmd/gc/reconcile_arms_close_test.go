@@ -565,7 +565,7 @@ func TestCloseEffectEdges(t *testing.T) {
 		} {
 			c := newCloseCase(t, livenessDead, desireDrain, append([]string{"state", "active"}, meta...)...)
 			c.entry().DrainReason = drainOrphaned
-			c.w.Classified = map[rowKey]string{c.k: deadToken(c.w.Observed[c.k].Identity)} // A12 is done with it
+			c.w.Classified = map[rowKey]classifiedRuntime{c.k: {Token: deadToken(c.w.Observed[c.k].Identity)}} // A12 is done with it
 			if it := c.decide(); it.Kind == intentClose {
 				t.Fatalf("%s: decide proposed %q, want no close", name, it.Reason)
 			}
@@ -576,7 +576,7 @@ func TestCloseEffectEdges(t *testing.T) {
 		} {
 			c := newCloseCase(t, livenessDead, desireDrain, append([]string{"state", "active"}, meta...)...)
 			c.entry().DrainReason = drainOrphaned
-			c.w.Classified = map[rowKey]string{c.k: deadToken(c.w.Observed[c.k].Identity)}
+			c.w.Classified = map[rowKey]classifiedRuntime{c.k: {Token: deadToken(c.w.Observed[c.k].Identity)}}
 			if it := c.decide(); it.Kind != intentClose {
 				t.Fatalf("%s: decide = (%q, %q), want the close", name, it.Kind, it.Reason)
 			}
@@ -845,10 +845,10 @@ func TestReadWorkScopeByKind(t *testing.T) {
 	w.Env = &reconcileEnv{Cfg: c.cfg}
 	p := newEffectPass(&w, c.a)
 	row := c.w.Census.Rows[c.k].Info
-	if got := p.readWork(row, intentClose); !got.Free {
+	if got := p.readWork(row, intent{Kind: intentClose}); !got.Free {
 		t.Fatalf("close's L5 = %+v, want free: a prior alias is not the dead seat's", got)
 	}
-	if got := p.readWork(row, intentDrainBegin); got.Free {
+	if got := p.readWork(row, intent{Kind: intentDrainBegin}); got.Free {
 		t.Fatalf("a drain's L5 = %+v, want work: the live seat may hold a prior alias's claim", got)
 	}
 }
@@ -868,6 +868,40 @@ func TestFreshClosableOwnZombieOnly(t *testing.T) {
 		r := &rowFacts{w: c.w, k: c.k, row: row, found: true, entry: c.entry(), fresh: &txRuntime{Class: rtZombie, Same: true, Identity: id}}
 		if got := r.freshClosable(); got != (name == "own") {
 			t.Fatalf("%s zombie: freshClosable = %v", name, got)
+		}
+	}
+}
+
+// Kills a failed create closed under its still-leased claim (SESS-058,
+// mc-mcud0): legacy keeps it open while the pending-create lease holds, a
+// start possibly holding it; once the lease expires, or its agent is
+// suspended, A21 closes it, and a lease anchor skewed ahead of the clock
+// (v5.9r) holds nothing.
+func TestFailedCreateHeldWhileLeased(t *testing.T) {
+	ago := func(d time.Duration) string { return gatherNow.Add(d).Format(time.RFC3339) }
+	for _, c := range []struct {
+		name      string
+		meta      []string
+		suspended bool
+		want      string
+	}{
+		{"leased (never started, inside the deadline)", []string{"pending_create_started_at", ago(-time.Minute)}, false, decideFailedCreateLeased},
+		{"leased (a start in flight)", []string{"pending_create_started_at", ago(-11 * time.Minute), "last_woke_at", ago(-10 * time.Second)}, false, decideFailedCreateLeased},
+		{"the lease expired", []string{"pending_create_started_at", ago(-11 * time.Minute)}, false, decideCloseFailedCreate},
+		{"its agent suspended", []string{"pending_create_started_at", ago(-time.Minute)}, true, decideCloseFailedCreate},
+		{"an anchor 6 minutes ahead", []string{"pending_create_started_at", ago(6 * time.Minute)}, false, decideCloseFailedCreate},
+		{"an anchor a year ahead", []string{"pending_create_started_at", ago(365 * 24 * time.Hour)}, false, decideCloseFailedCreate},
+	} {
+		cc := newCloseCase(t, livenessGone, desireNone, append([]string{"state", "failed-create", "pending_create_claim", "true"}, c.meta...)...)
+		cc.entry().Reason = reasonFailedCreate
+		for i := range cc.cfg.Agents {
+			if cc.cfg.Agents[i].Name == "worker" {
+				cc.cfg.Agents[i].Suspended = c.suspended
+			}
+		}
+		cc.w.Env = &reconcileEnv{Cfg: cc.cfg}
+		if it := cc.decide(); it.Reason != c.want || (c.want == decideFailedCreateLeased) != (it.Kind == "") {
+			t.Fatalf("%s: decideRow = (%q, %q), want %q", c.name, it.Kind, it.Reason, c.want)
 		}
 	}
 }

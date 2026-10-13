@@ -1102,6 +1102,39 @@ func validateEngineMintedKindMetadata(steps []*Step, errs *[]string, prefix stri
 	}
 }
 
+// sessionStepType and sessionStepLabel are session.BeadType and
+// session.LabelSession (a test pins them): the marks of a session row,
+// which only the session verbs mint.
+const (
+	sessionStepType  = "session"
+	sessionStepLabel = "gc:session"
+)
+
+// validateNoSessionSteps refuses a step typed session or tagged gc:session
+// (mc-okw9n): compile copies a step's type, labels and metadata straight
+// onto its bead, so a formula would mint a session row with hand-written
+// hold keys past the session verbs.
+func validateNoSessionSteps(steps []*Step, errs *[]string, prefix string) {
+	for i, step := range steps {
+		if step == nil {
+			continue
+		}
+		stepPrefix := fmt.Sprintf("%s[%d] (%s)", prefix, i, step.ID)
+		if strings.EqualFold(strings.TrimSpace(step.Type), sessionStepType) {
+			*errs = append(*errs, fmt.Sprintf("%s: type %q makes a session row, which only the session verbs create (gc session new, POST /sessions)", stepPrefix, step.Type))
+		}
+		for _, l := range step.Labels {
+			if strings.TrimSpace(l) == sessionStepLabel {
+				*errs = append(*errs, fmt.Sprintf("%s: tag %q marks a session row, which only the session verbs create (gc session new, POST /sessions)", stepPrefix, l))
+			}
+		}
+		if step.Loop != nil {
+			validateNoSessionSteps(step.Loop.Body, errs, stepPrefix+".loop.body")
+		}
+		validateNoSessionSteps(step.Children, errs, stepPrefix+".children")
+	}
+}
+
 // Validate checks the formula for structural errors.
 func (f *Formula) Validate() error {
 	var errs []string
@@ -1120,6 +1153,8 @@ func (f *Formula) Validate() error {
 	}
 	validateEngineMintedKindMetadata(f.Steps, &errs, "steps")
 	validateEngineMintedKindMetadata(f.Template, &errs, "template")
+	validateNoSessionSteps(f.Steps, &errs, "steps")
+	validateNoSessionSteps(f.Template, &errs, "template")
 
 	if f.Type != "" && !f.Type.IsValid() {
 		errs = append(errs, fmt.Sprintf("type: invalid value %q (must be workflow, expansion, or aspect)", f.Type))

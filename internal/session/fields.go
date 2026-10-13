@@ -301,11 +301,11 @@ var registry = slices.Concat([]Field{
 	{Key: "closed_at", Class: ClassLifecycle, Writers: sites(legacy(srcTransition, "ClosePatch"))},
 
 	// Operator intent.
-	{Key: "held_until", Class: ClassOperatorIntent, Writers: sites(opEncode), Clears: sites(opConsumeHold, op("cmd/gc/cmd_session_kill_fence.go", "writeSessionKillFence"), op("cmd/gc/cmd_session_kill_fence.go", "killSleepPatch"))},
+	{Key: "held_until", Class: ClassOperatorIntent, Writers: sites(opEncode), Clears: sites(opConsumeHold, op("internal/session/kill_fence.go", "WriteKillFence"), op("internal/session/kill_fence.go", "KillSleepPatch"))},
 	{Key: "quarantined_until", Class: ClassOperatorIntent, Writers: sites(opEncode, legacy(srcReconcile, "recordRateLimitQuarantine"), v2Accrual, v2StartAccrual), Clears: sites(v2(srcHeals, "armStabilityClear"))},
-	{Key: "sleep_intent", Class: ClassOperatorIntent, Writers: sites(opEncode, legacy(srcSleep, "markIdleSleepPendingInfo")), Clears: sites(waitHold, opConsumeHold, op("cmd/gc/cmd_session_kill_fence.go", "writeSessionKillFence"), v2SleepIntentClear, v2Accrual)},
+	{Key: "sleep_intent", Class: ClassOperatorIntent, Writers: sites(opEncode, legacy(srcSleep, "markIdleSleepPendingInfo")), Clears: sites(waitHold, opConsumeHold, op("internal/session/kill_fence.go", "WriteKillFence"), v2SleepIntentClear, v2Accrual)},
 	{Key: "wait_hold", Class: ClassOperatorIntent, Writers: sites(opEncode, op("cmd/gc/cmd_wait.go", "doSessionWait")), Clears: sites(waitHold)},
-	{Key: "suspended_at", Class: ClassOperatorIntent, Writers: sites(opEncode, op(srcManager, "Manager.Suspend")), Clears: sites(opConsumeHold, op("cmd/gc/cmd_session_kill_fence.go", "writeSessionKillFence"))},
+	{Key: "suspended_at", Class: ClassOperatorIntent, Writers: sites(opEncode, op(srcManager, "Manager.Suspend")), Clears: sites(opConsumeHold, op("internal/session/kill_fence.go", "WriteKillFence"))},
 	{Key: "pin_awake", Class: ClassOperatorIntent, Writers: sites(op("cmd/gc/cmd_session_pin.go", "cmdSessionSetPin")), Readers: sites(v2("cmd/gc/allocator_decide.go", "decidePass.awake"))},
 	// template_overrides is a per-session setting the start reads and nothing
 	// clears, so it is operator intent, not a request.
@@ -324,13 +324,16 @@ var registry = slices.Concat([]Field{
 	{Key: DrainIntentIncarnationKey, Class: ClassStopRequest, NewKey: true, Writers: sites(v2(srcStopKeys, "stopBeginPatch")), Readers: sites(v2(srcStopKeys, "readStopKeys")), Clears: sites(v2(srcStopKeys, "stopCancelPatch"), opRestartConfirm, opConsumeHold)},
 	{Key: DrainAckIncarnationKey, Class: ClassStopRequest, NewKey: true, Writers: sites(op("cmd/gc/cmd_runtime_drain.go", "drainAckRowPatch")), Readers: sites(v2(srcStopKeys, "readStopKeys")), Clears: sites(v2(srcStopKeys, "stopVoidResiduePatch"), v2(srcStopKeys, "stopAckVoidPatch"), opRestartConfirm, opConsumeHold)},
 	{Key: DrainAckAtKey, Class: ClassStopRequest, NewKey: true, Writers: sites(op("cmd/gc/cmd_runtime_drain.go", "drainAckRowPatch")), Readers: sites(v2(srcStopKeys, "readStopKeys")), Clears: sites(v2(srcStopKeys, "stopVoidResiduePatch"), v2(srcStopKeys, "stopAckVoidPatch"), opRestartConfirm, opConsumeHold)},
+	// The operator's drain (`gc runtime drain` in a v2 city, PAR-FLOORACK):
+	// it explains an agent's ack (A11) and nothing else reads it.
+	{Key: OperatorDrainKey, Class: ClassStopRequest, NewKey: true, Writers: sites(op(srcStopKeys, "operatorDrainPatch")), Readers: sites(v2(srcStopKeys, "readStopKeys")), Clears: sites(op(srcStopKeys, "operatorUndrainPatch"), v2(srcStopKeys, "stopEndPatch"), opRestartConfirm)},
 
 	// Counters.
 	{Key: "wake_attempts", Class: ClassCounter, Writers: sites(legacy(srcReconcile, "recordWakeFailure"), v2(srcHeals, "armStabilityClear"), v2Accrual, v2StartAccrual)},
 	{Key: "churn_count", Class: ClassCounter, Writers: sites(legacy(srcReconcile, "recordChurn"), v2(srcHeals, "armStabilityClear"), v2Accrual, v2StartAccrual)},
 	{Key: "crash_count", Class: ClassCounter, NoWriter: "dead: only ReactivatePatch writes it, and nothing calls that"},
 	{Key: "quarantine_cycle", Class: ClassCounter, NoWriter: "dead: only QuarantinePatch writes it, and nothing calls that"},
-	{Key: "idle_respawn_attempts", Class: ClassCounter, Writers: sites(legacy(srcReconciler, "beginIdleRespawnDrainIfIdle"))},
+	{Key: "idle_respawn_attempts", Class: ClassCounter, Writers: sites(legacy(srcReconciler, "beginIdleRespawnDrainIfIdle"), v2("cmd/gc/reconcile_arms_drain.go", "rowFacts.idleRespawnBegin"))},
 
 	// Markers.
 	{Key: "detached_at", Class: ClassMarker, Writers: sites(legacy(srcSleep, "reconcileDetachedAtInfo"), v2(srcHeals, "armDetachedAt")), Clears: sites(legacyPreWake)},
@@ -413,7 +416,7 @@ var registry = slices.Concat([]Field{
 	same(ClassMarker, false, sites(legacy(srcReconcile, "providerTerminalErrorPatch")), "provider_terminal_error",
 		"provider_terminal_error_at", "session_health", "session_health_reason", "session_drainable"),
 	same(ClassMarker, false, sites(legacy(srcReconciler, "emitSessionWakeRefused")), "wake_refused_event_at"),
-	same(ClassMarker, false, sites(legacy(srcReconciler, "beginIdleRespawnDrainIfIdle")), "idle_respawn_bead_id"),
+	same(ClassMarker, false, sites(legacy(srcReconciler, "beginIdleRespawnDrainIfIdle"), v2("cmd/gc/reconcile_arms_drain.go", "rowFacts.idleRespawnBegin")), "idle_respawn_bead_id"),
 
 	// Advisory: diagnostics, pacing and usage stamps. The execution backstop's
 	// are written every pass, under either controller.

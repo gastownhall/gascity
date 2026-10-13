@@ -321,9 +321,14 @@ func newReconcilerTestEnv(t testing.TB) *reconcilerTestEnv {
 		city:  t.TempDir(),
 		stops: &asyncStartTracker{},
 	}
-	// The drain-ack's async stops finish before the city is removed.
+	// The drain-ack's async stops finish before the city is removed. The wait
+	// is unbounded: each stop ends by its own confirm-dead bound
+	// (drainAckStopConfirmDeadTimeout, bound at queue time), and a wait
+	// shorter than that bound let a stop on an immortal runtime outlive the
+	// test, still holding its runtime lease under the city's .gc, while
+	// TempDir removed the city (mc-y861o).
 	env.startOptions = append(env.startOptions, withAsyncDrainAckStopTracker(env.stops))
-	t.Cleanup(func() { env.stops.wait(5 * time.Second) })
+	t.Cleanup(func() { env.stops.wait(-1) })
 	return env
 }
 
