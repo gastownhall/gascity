@@ -50,6 +50,12 @@ func TestDecideRowConfigDrift(t *testing.T) {
 		wantReason       string
 	}{
 		{name: "a drift drains", meta: []string{"started_config_hash", stale}, alive: true, wantKind: intentDrainBegin, wantReason: decideDrainBegin + drainConfigDrift},
+		// The begin is idempotent (the A14 generator's shifted seed 296): a
+		// drained row whose own runtime came back carries this incarnation's
+		// request as residue, which A14 does not rewrite; another
+		// incarnation's request is no such residue.
+		{name: "a drained row's standing drift request is not begun again", meta: slices.Concat([]string{"started_config_hash", stale, "state", "drained"}, intentAt(drainConfigDrift, "3")), alive: true},
+		{name: "another incarnation's drift request is begun anew", meta: slices.Concat([]string{"started_config_hash", stale, "state", "drained"}, intentAt(drainConfigDrift, "2")), alive: true, wantKind: intentDrainBegin, wantReason: decideDrainBegin + drainConfigDrift},
 		{name: "attached stamps its deferral", meta: []string{"started_config_hash", stale}, alive: true, attached: true, wantKind: intentRowHeal, wantReason: decideDriftAttached},
 		{name: "an attach unknown stamps its deferral", meta: []string{"started_config_hash", stale}, alive: true, unsure: true, wantKind: intentRowHeal, wantReason: decideDriftAttached},
 		{name: "attached with a fresh stamp writes nothing", meta: []string{"started_config_hash", stale, "attached_config_drift_deferred_key", key, "attached_config_drift_deferred_at", rowAt(-time.Minute)}, alive: true, attached: true},

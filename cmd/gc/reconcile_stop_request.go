@@ -65,6 +65,14 @@ type stopRequest struct {
 	Residue bool
 }
 
+// intentStands reports that row carries the controller's stop request for
+// reason at its own incarnation, whether activeStop reads it active or as
+// residue (a row that claims no live runtime).
+func intentStands(row censusRow, reason string) bool {
+	k := row.StopKeys
+	return k.rawIntentReason == reason && k.rawIntentIncarnation == strconv.FormatInt(row.Incarnation, 10)
+}
+
 // activeStop is a row's active stop request, by D1's rules in order:
 //  1. a half whose incarnation is not the row's generation is no request;
 //  2. a row that no longer claims a runtime and is not stop-pending has
