@@ -9,12 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
-- **Upgrade Beads (`bd`) to v1.3.2-rc.2.** This build pins and is tested
-  against bd v1.3.2-rc.2 (`deps.env` `BD_VERSION` and the go.mod library),
-  v1.3.1 plus the `bd purge` live-dependent fix (beads#7031), the backup
-  watermark fix (beads#7032) and the blocked-state recheck publication fix
-  (beads#6876, backported in beads#7146), with the same schema. It is a
-  prerelease and is not on Homebrew: download `bd` from the
+- **Upgrade Beads (`bd`) to v1.3.2-rc.2 for this release candidate.** This
+  build pins and is tested against bd v1.3.2-rc.2 (`deps.env` `BD_VERSION`
+  and the go.mod library): v1.3.1 plus the `bd purge` live-dependent fix
+  (beads#7031), the backup watermark fix (beads#7032) and the blocked-state
+  recheck publication fix (beads#6876, backported in beads#7146), with the
+  same schema. The RC pin is temporary: the final gc 1.5.1 pins beads v1.3.2,
+  which is released before the `v1.5.1` tag. v1.3.2-rc.2 is a prerelease and
+  is not on Homebrew: download `bd` from the
   [v1.3.2-rc.2 release assets](https://github.com/gastownhall/beads/releases/tag/v1.3.2-rc.2)
   or build it without ICU:
   `CGO_ENABLED=1 GOFLAGS=-tags=gms_pure_go go install github.com/steveyegge/beads/cmd/bd@v1.3.2-rc.2`.
@@ -24,24 +26,137 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   server directly falls back from its native store to the bd CLI
   (`version_compat` preflight gate), with a `gc doctor` `beads-store` warning.
 - **The first `gc start` after a bd upgrade runs `bd recompute-blocked` once
-  per scope.** beads migration 0059 wrongly marks some beads blocked (beads#7037).
-  It hits any store that crossed 0059: one upgraded from bd v1.2.x or older,
-  or one that ever ran bd v1.3.0 or v1.3.1. Those beads drop out of
-  `bd ready` and gc stops dispatching them. gc repairs the city and each rig
-  it owns, logs `recomputed is_blocked for <scope> under bd <version>: N rows
-  corrected`, and emits `beads.blocked.recomputed` (a fresh city records one
-  0-row event per scope). `gc rig add` repairs the rig it adds the same way.
-  It does not touch external Dolt servers, complete storage bindings or non-bd
-  providers: run `bd recompute-blocked` in those scopes yourself. Scopes are
-  repaired four at a time before agents start: a city with three rigs and
-  5,000 beads per scope took about 1.5s. A failed repair only warns, and gc
-  retries it on the next start. If you upgrade bd while the supervisor is
-  running, the repair waits for the next `gc start`.
+  per scope.** beads migration 0059 wrongly marks some beads blocked across
+  relates-to, discovered-from and other non-blocking edges (beads#7037). It
+  hits any store that crossed 0059: one upgraded from bd v1.2.x or older, or
+  one that ever ran bd v1.3.0 or v1.3.1. Those beads drop out of `bd ready`
+  and gc stops dispatching them. gc repairs the city and each Dolt-backed bd
+  scope it owns, records the bd version in that scope's bd config
+  (`custom.gascity.blocked_repair_bd_version`) so later starts skip it, logs
+  `recomputed is_blocked for <scope> under bd <version>: N rows corrected`,
+  and emits `beads.blocked.recomputed` (a fresh city records one 0-row event
+  per scope). The supervisor does the same, and `gc rig add` repairs the rig
+  it adds. It does not touch external Dolt servers, complete storage bindings
+  or non-bd providers: run `bd recompute-blocked` in those scopes yourself.
+  Scopes are repaired four at a time before agents start: a city with three
+  rigs and 5,000 beads per scope took about 1.5s. A failed repair only warns,
+  and gc retries it on the next start. If you upgrade bd while the supervisor
+  is running, the repair waits for the next `gc start` (#7087).
+- **A city migrated by `gc storage migrate` in gc 1.5.0 refuses to start
+  until you repair it.** 1.5.0's migration kept the work store's copy of every
+  bead it moved, and any reader that reached the work store first was served
+  the frozen copy, so finished workflow steps were dispatched again and again
+  (#5987). `gc storage migrate` now clears those copies after the copy is
+  proven: it writes every row the copy manifest names, with its edges and
+  payloads, to `<binding root>/infra.retained-source.jsonl`, re-reads the
+  backup and checks it against the source, and only then removes the rows.
+  Rows the manifest never proved block the clear and name
+  `gc storage recover-stranded`. Boot refuses a converged city that still
+  holds copies (`storage.binding.unconverged`, outcome `retained-copies`)
+  and prints the repair: `gc stop`, then
+  `gc storage migrate --from-work --fleet-stopped`, then `gc start`. The same
+  run resumes an interrupted clear. `gc storage status` reports the backup
+  and the retained copies and exits non-zero while copies remain. After a
+  clear, pointing `[storage.classes]` back at `work` (or deleting
+  `[storage]`) is refused, because the work store no longer holds that
+  state; rolling back now needs the backup. The backup holds the bead fields
+  the copy carried, not bd-only fields (notes, comments, close reason,
+  history). On bd and native Dolt work stores, a blocking edge from a work
+  bead into a still-open moved bead, and `tracks`/`related` edges into moved
+  beads, cannot be kept: migrate lists each one before it deletes anything,
+  records it in `gc storage status` and on the `storage.binding.*` event
+  (`lost_cross_edges`), and keeps it in the backup. This replaces 1.5.0's
+  "`gc storage migrate` is experimental" note: the split-city issues it
+  listed as open, #5974, #5987, #6015 and #6129, are fixed in this release
+  (see Fixed). Still run `gc storage preflight` and back up every store
+  before migrating. See the "Upgrading a city migrated by gc 1.5.0" section
+  of `docs/runbooks/split-storage-classes.md` (#7074).
+- **`gc init` and `gc start` refuse to register a city with a supervisor
+  from a different gc installation.** When the running supervisor's
+  executable is a different file from the invoking `gc` (for example a
+  Homebrew launchd supervisor and a tarball `gc`), registering would hand the
+  city to the other binary. Both commands now refuse and print both
+  identities and the fix: `<this gc> supervisor install --force` for a
+  launchd or systemd supervisor, or stop a directly started one. `gc init`
+  has already written the city and tells you to run `gc start` afterwards.
+  Pass `--allow-supervisor-mismatch` to keep a deliberate mixed setup; `gc
+  start` then also skips the build-drift restart, which could only relaunch
+  the other binary. An in-place upgrade of the same executable never refuses:
+  `gc start` restarts the supervisor on build drift, now also after a
+  Homebrew upgrade, where both build ids read `unknown` and the release
+  version decides. `gc status` only warns, on stderr. The check adds one
+  `/health` call (2s bound) when a supervisor is running and is silent when
+  none answers (#7046).
+- **Restart the supervisor on the new binary before running
+  `gc doctor --fix`.** gc 1.5.1 moves the pin `gc init` writes for the
+  bundled `[imports.core]` and `[imports.bd]` packs to a commit whose trees
+  match the content this binary embeds. The June 2026 pin every gc through
+  1.5.0 wrote is now always served from the embedded packs and never fetched
+  (fetching it would install the June core pack), so an upgraded city keeps
+  loading unchanged.
+  `gc doctor` now reports the old pin as a `packv2-import-state` warning, and
+  `--fix` re-pins it offline. A 1.5.0 supervisor that is still running does
+  not know the new pin and fails with "locked but not cached" until
+  `gc import install` fetches it, so run `gc supervisor stop` and
+  `gc supervisor start` on the new binary first. Each superseded pin gets its
+  own synthetic cache directory until `gc doctor --fix`. Downgrading a city
+  initialized or re-pinned by 1.5.1 to gc 1.5.0 needs one `gc import install`
+  with network (#7070).
+- **Dolt 2.2.0 is the pinned Dolt.** `deps.env`, the installers, CI, the
+  container images, the Kubernetes manifests and Bazel move from Dolt 2.1.7
+  to 2.2.0, the Dolt the pinned beads release is tested on. Do not move a
+  city to Dolt 2.3.x: 2.3.0 and 2.3.1 break `CALL DOLT_RESET('--hard')` on
+  some fresh databases, and later releases have not been measured by beads
+  (#7070).
+- **`gc stop` exits non-zero when it cannot confirm that every session
+  stopped.** When listing sessions fails completely or in part, the orphan
+  sweep's listing fails, or checking a target session returns an error,
+  `gc stop` no longer prints `City stopped.` and exits 0. It still stops
+  every session it did see and shuts down servers and the bead store as
+  before, names the sessions it could not verify, prints
+  `gc stop: stop not confirmed: ...` and exits 1; on the supervisor path the
+  registration is restored. An absent runtime server still counts as a
+  complete, empty inventory, so stopping a stopped city still succeeds.
+  Scripts that treat a non-zero `gc stop` as fatal should resolve the
+  reported runtime error and run `gc stop` again (#6764).
+- **A SQLite bead store holding wrapped ids refuses to mint until you run
+  `gc storage repair-sequence`.** Older builds could wrap a SQLite store's id
+  sequence past 9223372036854775807 into `<prefix>--<n>` ids and then re-issue
+  ids. gc now keeps a persisted, fsynced floor per prefix and never re-issues
+  an id: on a store where a negative `<prefix>--<n>` id ranks above the floor,
+  creates fail with an error naming `gc storage repair-sequence`. Run it
+  without `--floor` to see the floor and the highest id; the command help
+  explains whether to delete stray rows or raise the floor (a negative floor
+  on a wrapped store cannot be undone). Stop every process running an older
+  build before repairing. Builds without this fix refuse to open a store whose
+  floor is negative (#6834).
+- **`gc doctor --json` reports `"ok": false` when a blocking check fails.**
+  The JSON envelope always said `"ok": true`. It now matches the exit code:
+  `false` only when `blocking_failed` is non-zero, `true` for advisory-only
+  failures. Automation that read `ok` alone was missing real failures
+  (#5950, #6006).
+- **`gc import add --version <semver>` resolves registry packs against the
+  registry's releases.** A pack published in a configured registry, such as
+  the gascity-packs catalog, is versioned by its `[[pack.release]]` entries,
+  not by git tags, so the "Exactly this version" command
+  `gc pack registry show` prints failed with `no tags ... match constraint`.
+  Worse, a range such as `--version '>=0.1.1'`, a plain `gc import add`, and
+  `gc import install`/`upgrade` of a semver constraint resolved against the
+  gascity-packs repository's own tags and could lock the wrong content (for
+  bmad, `0.4.0`, a repository tag that is no pack release). Every lock sync
+  (add, install, upgrade, `gc rig add`, doctor repairs, init) now resolves
+  those sources against the registry's non-withdrawn releases, records the
+  release version and commit, and verifies the fetched content against the
+  release hash; a mismatch fails without writing `pack.toml` or
+  `packs.lock`. If a 1.5.0 `gc import add` of a registry pack locked a
+  version that is not one of that pack's releases, run
+  `gc import upgrade <name>` to re-resolve it (#7071).
 - **A formula step that means "blocked, stop the graph" must close with
   `gc.outcome=fail`.** A formula step bead (one carrying `gc.step_ref`) that
   closes with `gc.outcome=pass` now satisfies its dependents even when it also
-  records `gc.work_outcome=blocked`. Plain work beads are unchanged: a blocked
-  work outcome still withholds their dependents.
+  records `gc.work_outcome=blocked`, so workflows no longer stall after such
+  a step. Plain work beads are unchanged: a blocked work outcome still
+  withholds their dependents.
 - **`bead.closed` is emitted for every close gc observes.** A
   `Update(status=closed)` now emits `bead.closed` instead of `bead.updated`,
   re-closing an already-closed bead no longer re-emits, and orders and
@@ -57,9 +172,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `POST /v0/city/{city}/sling` reports a convoy whose children were routed
   only in part as 200 with `status: "partial"` and the failed children in
   `batch.failures`, so API clients must check `status`, not only the HTTP
-  code. A remote `gc sling` older than 1.5.1 does not check `status`: it
-  exits 0, and its `--json` output reports `success: true`. Upgrade remote
-  `gc` clients alongside the server.
+  code. A convoy where nothing routed is still an error. A remote `gc sling`
+  older than 1.5.1 does not check `status`: it exits 0, and its `--json`
+  output reports `success: true`. Upgrade remote `gc` clients alongside the
+  server.
 - **Supervisor API status codes and payload shapes changed for several
   edits and reads.** API clients that branch on the old codes or on `null`
   fields need updating:
@@ -76,6 +192,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `OptionDefaults`, `Pool`, `ContextAdvisory`, `FormulaVars`), and the
     absent records and `Metadata` of external-messaging inbound/outbound
     results. The OpenAPI spec no longer lists them as required.
+- **The reaper's age gates use UTC on non-UTC Dolt servers.** Bead
+  timestamps are stored in UTC, but the reaper compared them with the
+  server-local `NOW()`. It now uses `UTC_TIMESTAMP()`. On a UTC server
+  nothing changes. West of UTC, the first run after upgrading catches up on
+  the closes, stale-issue closes and session prunes the old gates delayed by
+  the server's offset; east of UTC, rows the old gates handled early now wait
+  the full configured age. The session-prune guard now counts candidates on
+  the same UTC cutoff `bd prune` uses, so it can no longer miss non-session
+  beads `bd prune` would delete (#7136, backported in #7498).
+
+### Added
+
+- **`gc storage repair-sequence`** inspects a SQLite bead store's id-sequence
+  floor and, with `--floor`, raises it (`--dir` for a store other than the
+  city's SQLite infrastructure binding, `--prefix`, default `gcg`). See
+  Upgrading Notes (#6834).
+- **`gc storage migrate --from-backup`** re-copies a cleared city's binding
+  whose database is gone from the retained-source backup, with edges and
+  payloads. It runs only in that state; `--from-work` refuses there, since the
+  work store no longer holds the slice (#7074).
+- **`--allow-supervisor-mismatch` on `gc init` and `gc start`** registers or
+  starts a city even when the running supervisor is a different gc
+  installation (#7046).
 
 ### Changed
 
@@ -89,9 +228,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   first within a priority; the order in which sessions claim work does not
   change. `GET /v0/beads/ready` also returns the relocated graph leg's rows in
   this order (#6863).
+- **`gc supervisor start` on macOS starts the installed launchd job.** When
+  the supervisor LaunchAgent is installed and launches this `gc`, `gc
+  supervisor start` loads and kickstarts it instead of forking a detached
+  supervisor that ran outside launchd's KeepAlive and passed every provider
+  credential in your shell to agent sessions, even with
+  `GC_SUPERVISOR_OMIT_PROVIDER_CREDS=1`. Where launchctl cannot start the job
+  (no GUI session over SSH, CI) it warns and forks as before. A plist that
+  launches a different gc installation is never started; `gc` forks and names
+  `<gc> supervisor install --force` (#6966, #7048).
+- **Slow Dolt and bd version probes are retried instead of failing `gc init`
+  and `gc start`.** The `dolt config` identity probe and the `dolt version`
+  and `bd version` probes ran once with a fixed 2s deadline, so a loaded host
+  stopped startup with `dolt config probe timed out after 2s`. A probe that
+  hits its deadline is now retried with 5s, 10s and 20s budgets and a stderr
+  notice per retry; the two identity probes share a 60s total. A probe that
+  exits on its own still reports its result at once (#7044).
+- **The `gascity/roles` rig pack is served from the gascity pack's embedded
+  copy.** `gc init` with the default gascity template and `gc rig add` no
+  longer clone the whole gascity-packs repository for it, so they work
+  offline. Existing cities need no migration; `gc import prune` reclaims the
+  old clone (ga-73eoo, #7005).
+- **Tutorial 01's sample `city.toml` matches what `gc init` writes,** and it
+  explains that `sha:<pinned commit>` on the `core` and `bd` imports names the
+  copy of each pack bundled with `gc` (#7045).
 
 ### Fixed
 
+- **Split storage: relocated beads are never answered from the work store's
+  pre-migration copy.** `gc bd show --long <id>`, `gc bd show <id1> <id2>`
+  and `gc bd dep list`/`dep tree` of a relocated bead fell through to bd on
+  the work store and answered from the retained copy; unserved by-id reads now
+  go through the same residence check as writes (#6015, #7066).
+- **Split storage: `gc sling <target> <formula> --formula` works on a city
+  whose graph class is relocated.** It failed with `setting gc.routed_to on
+  gcg-1: ... bead not found` and leaked an open, unrouted wisp per attempt;
+  the root is now routed through the store that minted it (#6054, #7059).
+- **Split storage: `gc sling` refuses a reserved coordination-class id**
+  (`gcg-`, `gcm-`, `gcs-`, `gco-`, `gcn-`) that no store holds, instead of
+  creating a new task bead titled with it (#5974, #5975).
+- **Split storage: `gc workflow delete` and `gc convoy delete-source` reach
+  ephemeral steps in a relocated binding.** Wisp-tier steps, ephemeral roots
+  and nested workflows launched from a wisp step were left open and rootless
+  (#6129).
+- **Split storage: pools demand-spawn for routed work in the city work
+  ledger.** On a converged split city the pool-demand probe read only the
+  class binding, so a routed bead in the work ledger was claimable but never
+  counted; demand now counts over the work ledger then the binding, as
+  `gc ready` reads them. Single-store cities are unchanged (#6019).
 - **Fenced writes to relocated classes honor `[beads] conditional_writes` on
   split cities.** On a city that relocates sessions, graph, messaging, orders
   or nudges to a storage binding, nothing stamped the conditional-writes mode
@@ -107,20 +291,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   control bead whose route repair had been suppressed or deferred, and on a
   class-binding city every dispatcher reads the binding, so the dispatcher the
   stale route named was demand-spawned for a row it must not serve (#7206).
-- **Large graph cooks in a SQLite infra ledger keep `BEGIN IMMEDIATE`.** The
-  write connection's DSN builder no longer drops `_txlock=immediate` when the
-  store path does not parse as a URL, and MemStore's pinned-id sequence lift
-  uses the same strict suffix parse as SQLite so an overflowed pinned id cannot
-  wrap the sequence (#6833, follow-up to #6827).
-- **Work hidden by beads migration 0059 is dispatched again.** On the first
-  start under a new bd version, `gc start` (and the supervisor, and
-  `gc rig add` for the rig it adds) runs `bd recompute-blocked` once over each
-  gc-owned, Dolt-backed bd scope and
-  records the bd version in the scope's own bd config
-  (`custom.gascity.blocked_repair_bd_version`), so later starts skip it. This
-  clears the `is_blocked` flags migration 0059 set across relates-to,
-  discovered-from and other non-blocking edges on any store that crossed it
-  (beads#7037).
 - **Split-storage cities no longer close seats that still hold work-store
   claims.** On a city whose sessions live on a class binding, the pool-slot
   close gate, the drain-ack escalation, the pool-slot retire and the stranded
@@ -151,13 +321,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reaches bd. Without a readable manifest the old city-wide refusal still
   applies whenever the binding holds any id outside its reserved prefixes
   (#7430).
-- **The test suite's startup Dolt orphan sweep no longer deletes a live Dolt
-  data directory when its `lsof` scan fails.** A scan that hit its 30-second
-  deadline returned partial output with no error, so directories a running
-  Dolt server held open looked orphaned and were removed. The sweep now
-  refuses to delete anything when the scan times out, is killed by a signal,
-  exits with an unexpected status, or prints no output (#7138). This affects
-  only people running the gascity test suite; no `gc` command runs this sweep.
+- **`gc storage status` exits non-zero whenever boot would refuse the
+  city.** Two of its three paths, including a served split city, returned 0
+  without resolving the boot plan; the refusal is now reported in the readout
+  and in the exit code (#5219, #5233).
+- **Large graph cooks into a SQLite store no longer fail with
+  `database is locked (517)`.** The id allocator no longer overflows into a
+  walk over occupied ids, the graph transaction starts `BEGIN IMMEDIATE`
+  (also when the store path does not parse as a URL), and busy retries back
+  off with jittered exponential backoff (#6827, #6833).
 - **Releasing a dead session's claim no longer erases a newer claim on the
   same bead.** With `[beads].conditional_writes` at `auto` or `require` on a
   capable store, the retired-session and orphaned-pool release paths clear the
@@ -170,25 +342,92 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `require` refuses a store without the capability, `auto` degrades to the
   legacy release, and `off` (the builtin default) is unchanged. A snapshot
   without a revision (a row not rewritten since its store began recording
-  revisions) keeps the legacy status-and-assignee fence. Hand-backport of #7384.
+  revisions) keeps the legacy status-and-assignee fence (#7384, backported in
+  #7581).
+- **Closed session rows no longer read as live.** On file-backed and SQLite
+  stores, closing a session wrote its terminal metadata and its closed status
+  as two writes, so a concurrent wake could leave a row `status=closed
+  state=awake` that the reconciler and `gc session list` treated as running.
+  Session closes, controller closes and pending-create rollbacks now use one
+  revision-fenced write; a stale status heal no longer reverts a concurrent
+  `gc session suspend`, `kill` or close; a terminal provider error during a
+  pending create closes the row as `failed-create`; and ACP startup and
+  rollback are fenced so a completed start is not closed as failed (#6109,
+  #6114, #6583, #6745, #6747, #6756, #6784, #6802).
+- **tmux commands target sessions by exact name.** tmux resolves a bare
+  `-t name` by unique prefix, so stopping an already-exited `worker-1` killed
+  a live `worker-10`, and metadata reads, `send-keys` and `capture-pane` could
+  land on another agent. Every session-keyed tmux command now uses an exact
+  target, and a tmux metadata read error is no longer reported as an unset
+  key (#6876).
+- **tmux session state no longer reads every session as absent on a busy
+  city.** Steady invalidation could keep the state cache from publishing any
+  fetch until it went stale, so healthy sessions were drained, restarted or
+  reaped (#6800).
+- **`gc stop` holds the controller lock through bead-store shutdown, and
+  `gc start --foreground` takes it before starting the bead-store
+  provider,** so a racing start or supervisor restart can no longer run a
+  controller against, or restart, a provider that `gc stop` is retiring
+  (#6742, #6789).
 - `gc stop` stops the city's nudge pollers and never reopens a stopped city's
   store (#6857).
+- **Event log rotation no longer loses events.** A short-lived `gc` command
+  could rotate `events.jsonl` from a stale file handle, after which the
+  supervisor appended to a deleted file; one city lost about 225,000 events.
+  Only the supervisor's recorder (or a standalone controller holding the
+  controller lock) rotates now, every writer locks a stable
+  `events.jsonl.lock` sidecar and reopens a replaced handle, sequence numbers
+  stay monotonic across rotation, and watchers no longer hold a rotated file
+  open. The on-disk format and archive names are unchanged (#7022).
 - The supervisor event stream includes cities started after the client
   connected (#6861). Delivery is at-least-once when a city's watcher is
   re-attached mid-connection, for example after the city stops and starts
   again: events already buffered for that city can be delivered again, and
   its seq in the composite SSE id can move back. Dedupe on city and seq.
-- Workflows no longer stall after a formula step that passed but recorded a
-  blocked work outcome.
+- **Concurrent `gc init` runs sharing a Dolt database no longer force a
+  second initialization over an active migration,** and a verified-empty
+  store is initialized with plain `bd init` instead of a forced reinit that
+  could stop partway through the schema on a loaded host (#6658, #6709).
+- **One agent on a harness that cannot receive MCP no longer fails the whole
+  city's start.** gc skips that agent's MCP projection with a warning naming
+  the harness and the fix; that agent's own session start still fails with the
+  same error (#6661).
+- **The codex, copilot and antigravity managed hooks use the launcher's
+  `gc`** (`${GC_BIN:-gc}`, with user bin directories appended to `PATH`), so
+  an older `gc` in `~/go/bin` no longer rewrites a fresh city's bd shim
+  (#6579).
+- **Terminal steps of the core commit, report and prompt-synthesis formulas
+  close themselves before `gc runtime drain-ack`,** so another session can no
+  longer re-run a step the drain released. After three failed pushes the
+  commit formula closes its step as a hard failure and leaves the work bead
+  open with the commits in the checkout (#6992).
+- **Drained on-demand named sessions wake for routed demand** aimed at their
+  identity (#6692).
+- **Namepool and other stable-alias seats are no longer retired while they
+  hold a claim.** The awake, drain and reuse guards now match claims recorded
+  under a session's stable alias (#6413, #6766).
+- **The execution backstop's stall latch is bound to the session incarnation
+  and expires after 30 minutes,** so a supervisor restart mid-drain no longer
+  silences it for the rest of the seat's life, and every hold is named in the
+  log (#5701).
+- `gc bd update <id> ... --force` is no longer rejected by gc's bead-id guard
+  (#5967, #5969).
+- The core `orphan-sweep` order no longer misses live sessions when the
+  session list exceeds the pipe buffer (#6714, #6728).
+- herdr agent starts retry when a fresh pane reports `agent_pane_busy` on a
+  non-zero exit (#6637).
+- A nudge that races an ACP agent's exit is dropped with a stderr line instead
+  of failing with `file already closed` (#6540).
 - Claude Code's feedback-survey dismissal no longer submits a stray `0` into
-  the session (#6859; backport of #7013).
+  the session (#6859, #7013).
 - A gateway login reaches the Claude provider readiness probe.
 - `POST /v0/city/{city}/sling` routes and cooks formulas exactly like
   `gc sling`: a rig bead's default formula is cooked in the rig store, title
   and vars reach the default formula, and a convoy's children are routed one
-  by one. When some convoy children fail, the response is 200 with status
-  `partial` and `batch.failures`; `gc sling` against a remote city exits 1 for
-  it. `gc sling --on` stays refused for a remote city.
+  by one. `gc sling` against a remote city reports a partial convoy failure
+  like a local one: it prints the failed children, `--json` reports
+  `success: false`, and it exits 1. `gc sling --on` stays refused for a
+  remote city.
 - A session can close a bead it claimed under its session bead id without
   `--force`; `gc bd close` runs bd as that id. Claims recorded under a session
   name or alias still need `--force` (#6324). The close's audit actor is the
@@ -203,11 +442,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   concurrent API mutation (ga-opn27h; backport of #7084).
 - `GET /v0/city/{city}/patches/...` returns the patches declared in
   `city.toml` instead of 404/empty after they were applied (ga-8hk1fe).
-- Edits to a rig-qualified agent served by a generic rig-scoped template reach
-  that template, and so every rig it serves, instead of answering 404
-  (ga-l24lrx).
 - `GET /v0/city/{city}/agents` reflects a config change right away instead of
   serving a cached list keyed only on session state (ga-79peco).
+- **The test suite's startup Dolt orphan sweep no longer deletes a live Dolt
+  data directory when its `lsof` scan fails.** A scan that hit its 30-second
+  deadline returned partial output with no error, so directories a running
+  Dolt server held open looked orphaned and were removed. The sweep now
+  refuses to delete anything when the scan times out, is killed by a signal,
+  exits with an unexpected status, or prints no output (#7138, backported in
+  #7507). This affects only people running the gascity test suite; no `gc`
+  command runs this sweep.
 
 ### Security
 
@@ -220,9 +464,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   package the `gc` binary links. The `go.mod` floor, the Bazel `go_sdk` and
   the `contrib/k8s` Go build images all move to 1.26.9; building from source
   now needs Go 1.26.9 or newer (#7387).
+- **OpenTelemetry log modules v0.21.0** fix GO-2026-6615 (the log
+  `BatchProcessor` could busy-spin when its export buffer was full) (#7056).
+- **`gc-mcp-mail` image: PyJWT 2.14.0, urllib3 2.8.0 and GitPython 3.1.60.**
+  Fixes CVE-2026-102268 (CRITICAL) and CVE-2026-102266, -102267, -102271,
+  -102272 and -102273 in PyJWT, CVE-2026-97687 and CVE-2026-97689 in urllib3,
+  and CVE-2026-87817 and CVE-2026-87819 in GitPython (all HIGH unless noted)
+  (#7058).
 - **`gc-mcp-mail` image: `fsspec` 2026.6.0.** Fixes CVE-2026-104851 (HIGH,
   arbitrary code execution via a crafted URL) in the transitive `fsspec`
   dependency (#7388).
+- **Container images rebuild `gh`, `dolt` and `bd` with `golang.org/x/net`
+  v0.60.0** (CVE-2026-78669), and `apache/thrift` moves to v0.24.0
+  (CVE-2026-43871). The `kubectl` prebuilt in the controller image still
+  carries CVE-2026-78669, CVE-2026-78667 and CVE-2026-97031, which no kubectl
+  release fixes yet; they are waived for that path only, through 2026-11-07
+  (#7510, #7579, backported in #7621).
+- CodeQL, govulncheck, container-scan, complexity and macOS regression checks
+  now also run on pull requests to `hotfix/**` and `release/**` branches
+  (#7055, backported in #7494).
+
+### Known Issues
+
+- **On a city using the default bd-owned proxied Dolt, the proxy and its Dolt
+  server can keep running after `gc stop`.** Read-only commands on a stopped
+  city, such as `gc session list` and `gc bd list`, can also start them again.
+  gc 1.5.2 retires idle proxied scopes after a timeout.
+- **`gc doctor` can skip a proxied store's checks without saying the store
+  might be running.** When gc cannot read the proxy's process details (for
+  example under `hidepid`, or with a proxy owned by another user), the store
+  checks report `not checked: store not running` as passing. Planned for
+  1.5.2.
+- **The reaper reports `partial` on every run while a subtree is held.** On a
+  city with a permanently held subtree, every reaper run (every 30 minutes)
+  emits an `order.skipped` event with outcome `partial`. This is expected and
+  not a failure. Under `GC_REAPER_DRY_RUN`, the summary reports the prune
+  preview as `sessions-pruned:N`, although nothing was pruned. Planned for
+  1.5.2.
+- **Two cities sharing one rig store can release each other's live claims.**
+  Each city's pool orphan sweep judges a `<rig>/<name>` assignee by its own
+  sessions only, so it can reopen work the other city holds (#5959). The fix
+  is not in 1.5.1.
 
 ## [1.5.0] - 2026-10-05
 
