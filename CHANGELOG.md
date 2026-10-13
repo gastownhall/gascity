@@ -32,6 +32,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `gc:wait`, `gc:nudge`, `order-tracking`, `gc:wisp`, `gc:extmsg-*`)
   are unchanged.
 
+- **`gc runtime drain-check` has a third exit code, 3 ("unknown").** It now
+  reads the session row's state as well as the runtime's `GC_DRAIN`, and
+  exits 1 ("not draining") only when both sources answered. When a source
+  cannot be read and none says draining, it exits 3 with one stderr line
+  naming the source that failed. `if gc runtime drain-check` still treats 3
+  as false. Under `--json`, that case is now the error envelope with code
+  `drain_state_unknown` and `exit_code` 3, where it used to be
+  `command_failed` with exit 1; a successful result adds a `source` field.
+  Cases that move from exit 1 to exit 3: a `[name]` target that cannot be
+  resolved because the city, its config or its store cannot be read (a name
+  a store that opened does not know still exits 1); a session provider that
+  cannot be constructed; a runtime error that is not a typed "session not
+  found", including a local city whose tmux server is not running and an
+  exec adapter whose `get-meta` fails for any reason.
+
 - **New proxied scopes retire their proxy and Dolt child after 30 minutes
   idle.** Before this release every scope gc created was pinned to never, so a
   pair started by a stray read after `gc stop`, by `gc init --no-start`, or by
