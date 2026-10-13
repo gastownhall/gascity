@@ -366,9 +366,10 @@ func closeEndsSuspend(b beads.Bead, k string, t time.Time) bool {
 // timer and sleep reason, though A6's stability clear may clear the
 // quarantine's timer, and with it its own quarantine or rate_limit reason
 // (§12.2 #57, mc-bwvzv), on a row its pass read stable (v5.8, SESS-539;
-// stable, sim.stable), and a crash or churn accrual may extend the timer,
-// never shorten it (the #7706 review). No such row is woken. Only an operator-dormant row (D1 rule
-// 2: killed, suspended under a hold, or sleep_intent=user-hold) is never given a stop
+// stable, sim.stable), and a crash, churn or rate-limit quarantine may
+// extend the timer, never shorten it (quarantineExtension). No such row is
+// woken. Only an operator-dormant row (D1 rule 2: killed, suspended under a
+// hold, or sleep_intent=user-hold) is never given a stop
 // request, though one it holds may be cleared; a hold or quarantine alone
 // is not dormant, and legacy drains under one (owner ruling at C6a2).
 func dormantChange(b beads.Bead, a map[string]string, t time.Time, stable bool) string {
@@ -399,10 +400,7 @@ func dormantChange(b beads.Bead, a map[string]string, t time.Time, stable bool) 
 	quarantined := until("quarantined_until")
 	if quarantined {
 		ended := stable && a["quarantined_until"] == "" // A6's stability clear ends it (SESS-539)
-		// An accrual may extend it, never shorten it (the #7706 review).
-		was, _ := time.Parse(time.RFC3339, m["quarantined_until"])
-		later, err := time.Parse(time.RFC3339, a["quarantined_until"])
-		if extended := err == nil && later.After(was); !ended && !extended {
+		if !ended && !quarantineExtension(m, a, t) {
 			owned = append(owned, "quarantined_until")
 		}
 		// The clear ends a quarantine's own reason with it (§12.2 #57,
@@ -435,6 +433,28 @@ func dormantChange(b beads.Bead, a map[string]string, t time.Time, stable bool) 
 		return "state"
 	}
 	return ""
+}
+
+// quarantineExtension reports a write's extension of b's live quarantine
+// to a that I15 accepts (the #7706 and #7726 reviews): a later deadline, no
+// later than the write's time t plus the longest quarantine the controller
+// writes, on a write carrying an accrual's or a rate-limit quarantine's
+// signature, its counter advanced or a quarantine reason. Nothing shortens
+// one.
+func quarantineExtension(b, a map[string]string, t time.Time) bool {
+	was, _ := time.Parse(time.RFC3339, b["quarantined_until"])
+	later, err := time.Parse(time.RFC3339, a["quarantined_until"])
+	if err != nil || !later.After(was) || later.After(t.Add(max(defaultQuarantineDuration, defaultRateLimitQuarantineDuration))) {
+		return false
+	}
+	advanced := func(k string) bool {
+		n, _ := strconv.Atoi(b[k])
+		m, err := strconv.Atoi(a[k])
+		return err == nil && m > n
+	}
+	reason := session.SleepReason(a["sleep_reason"])
+	return advanced("wake_attempts") || advanced("churn_count") ||
+		reason == session.SleepReasonQuarantine || reason == session.SleepReasonContextChurn || reason == session.SleepReasonRateLimit
 }
 
 // checkStranded is I16 (I-STOP-5) at quiescence: no row is still signaled

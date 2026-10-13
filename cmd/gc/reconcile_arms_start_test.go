@@ -227,6 +227,19 @@ func TestDeadRuntimeAccrualNeverShortensAQuarantine(t *testing.T) {
 			}
 		}
 	}
+	// So does the start-failure abandon's accrual (S3's otherFailurePatch,
+	// the #7726 review's o1).
+	for existing, want := range map[string]string{at(time.Minute): at(defaultQuarantineDuration), at(24 * time.Hour): at(24 * time.Hour)} {
+		row := session.Info{ID: "gc-1", MetadataState: string(session.StateCreating), WakeAttemptsMetadata: "4", QuarantinedUntil: existing}
+		patch, class, quarantined := otherFailurePatch(row, map[string]string{"quarantined_until": existing}, startFailureRead{}, gatherNow)
+		got, wrote := class.Into(row.ID, patch)["quarantined_until"]
+		if !wrote {
+			got = existing
+		}
+		if !quarantined || got != want {
+			t.Errorf("start-failure abandon over quarantined_until %s: it is %s (quarantined %t), want %s", existing, got, quarantined, want)
+		}
+	}
 	// So does v2's rate-limit quarantine (the abandon and recycle paths').
 	for existing, want := range map[string]string{at(time.Minute): at(defaultRateLimitQuarantineDuration), at(24 * time.Hour): at(24 * time.Hour)} {
 		row := session.Info{ID: "gc-1", QuarantinedUntil: existing}

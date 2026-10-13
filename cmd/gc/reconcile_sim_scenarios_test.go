@@ -436,16 +436,36 @@ func TestSimI15StabilityCarveOut(t *testing.T) {
 		}
 		s.noViolations(t)
 	}
-	// An accrual's extension of a live quarantine is no violation; its
-	// shortening is.
-	b := quarantined("active", -time.Hour, "sleep_reason", "quarantine")
-	for at, want := range map[time.Duration]string{2 * time.Hour: "", 30 * time.Minute: "quarantined_until"} {
-		a := maps.Clone(b.Metadata)
-		a["quarantined_until"] = rowAt(at)
-		if k := dormantChange(b, a, plannerT0, false); k != want {
-			t.Fatalf("quarantine to %s: dormantChange = %q, want %q", at, k, want)
+	// An accrual's or a rate-limit quarantine's extension of a live
+	// quarantine is no violation; a shortening is, as are an unsigned
+	// extension (no counter advanced, no quarantine reason) and one past the
+	// longest quarantine the controller writes (the #7726 review).
+	b := quarantined("active", -time.Hour, "sleep_reason", "idle", "wake_attempts", "4")
+	short := quarantined("active", -time.Hour, "quarantined_until", rowAt(time.Minute), "sleep_reason", "idle", "wake_attempts", "4")
+	for _, c := range []struct {
+		name string
+		row  beads.Bead
+		to   time.Duration
+		meta []string
+		want string
+	}{
+		{"an accrual's extension", short, defaultQuarantineDuration, []string{"wake_attempts", "5", "sleep_reason", "quarantine"}, ""},
+		{"a churn accrual's extension", short, defaultQuarantineDuration, []string{"churn_count", "3"}, ""},
+		{"a rate-limit quarantine's extension", short, defaultRateLimitQuarantineDuration, []string{"sleep_reason", "rate_limit"}, ""},
+		{"an unsigned extension", short, defaultQuarantineDuration, nil, "quarantined_until"},
+		{"a signed extension past the longest quarantine", b, 2 * time.Hour, []string{"wake_attempts", "5", "sleep_reason", "quarantine"}, "quarantined_until"},
+		{"a shortening", b, 30 * time.Minute, []string{"wake_attempts", "5", "sleep_reason", "quarantine"}, "quarantined_until"},
+	} {
+		a := maps.Clone(c.row.Metadata)
+		a["quarantined_until"] = rowAt(c.to)
+		for i := 0; i+1 < len(c.meta); i += 2 {
+			a[c.meta[i]] = c.meta[i+1]
+		}
+		if k := dormantChange(c.row, a, gatherNow, false); k != c.want {
+			t.Fatalf("%s: dormantChange = %q, want %q", c.name, k, c.want)
 		}
 	}
+	b = quarantined("active", -time.Hour, "sleep_reason", "quarantine")
 	// A quarantine's reason cleared while the quarantine stands is still
 	// the quarantine's to keep.
 	a := maps.Clone(b.Metadata)
