@@ -20,6 +20,7 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
@@ -5302,15 +5303,77 @@ func drainStepRootFormulaName(root beads.Bead) string {
 // ready-excluded) and not parked on a dispatch hold (assignedOpenWorkHeld).
 func sessionHasAwakeAssignedWorkForReachableStore(sw *SeatWork, info sessionpkg.Info) (bool, error) {
 	scope := releaseScope(info, sw.Legs().cfg)
-	// Readiness is not sw's to answer, so it only picks the legs: a leg with
-	// no open or in_progress row for the seat holds no awake work.
-	legs, unknown := sw.stores(seatWorkQuery{scope: scope, statuses: seatWorkStatuses})
-	for _, s := range legs {
-		if has, err := sessionHasAwakeAssignedWorkInStoreByIdentifiers(s, scope.scopeIDs()); err != nil || has {
-			return has, err
+	if sw == nil || sw.ids == nil {
+		// The legacy tick's read: it only picks the legs (readiness is not
+		// sw's to answer; a leg with no open or in_progress row for the seat
+		// holds no awake work), and each identity and tier is probed live.
+		legs, unknown := sw.stores(seatWorkQuery{scope: scope, statuses: seatWorkStatuses})
+		for _, s := range legs {
+			if has, err := sessionHasAwakeAssignedWorkInStoreByIdentifiers(s, scope.scopeIDs()); err != nil || has {
+				return has, err
+			}
+		}
+		return false, unknown
+	}
+	// One seat's live read (a v2 effect's L5, a one-shot command): it lists
+	// every leg, identity and status at once, so it answers the in-progress
+	// half itself; the ready query, which a SeatWork cannot answer, runs
+	// only where the seat holds open rows, concurrently. On a slow store the
+	// answer costs two round trips, not one per identity, status and tier in
+	// series, which outran v2's 5s fence bound for a seat holding only
+	// non-ready work (mc-m4fgc).
+	if hits, err := sw.snapshot(seatWorkQuery{scope: scope, statuses: []string{"in_progress"}}, true); len(hits) > 0 || err != nil {
+		return len(hits) > 0, err
+	}
+	open, unknown := sw.snapshot(seatWorkQuery{scope: scope, statuses: []string{"open"}}, false)
+	return readyAssignedWorkIn(open, unknown)
+}
+
+// readyAssignedWorkIn reports whether the ready query, run once per (leg,
+// assignee) that holds an open row in open, concurrently and on both tiers,
+// finds unheld non-session work; unknown is the seat read's incomplete
+// legs, which fail the answer closed when nothing is found.
+func readyAssignedWorkIn(open []seatWorkHit, unknown error) (bool, error) {
+	type probe struct {
+		store    beads.Store
+		assignee string
+	}
+	var probes []probe
+	seen := make(map[probe]bool)
+	for _, hit := range open {
+		p := probe{store: hit.store, assignee: strings.TrimSpace(hit.bead.Assignee)}
+		if !seen[p] {
+			seen[p] = true
+			probes = append(probes, p)
 		}
 	}
-	return false, unknown
+	var (
+		wg    sync.WaitGroup
+		mu    sync.Mutex
+		found bool
+		errs  = unknown
+	)
+	for _, p := range probes {
+		for _, tier := range []beads.TierMode{beads.TierIssues, beads.TierWisps} {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				has, err := func() (has bool, err error) {
+					defer recoverLeg(&err, "ready assigned work", log.Writer()) // a panic counts as work
+					return sessionHasReadyAssignedWorkForTier(p.store, p.assignee, tier)
+				}()
+				mu.Lock()
+				defer mu.Unlock()
+				found = found || has
+				errs = errors.Join(errs, err)
+			}()
+		}
+	}
+	wg.Wait()
+	if found {
+		return true, nil
+	}
+	return false, errs
 }
 
 // firstOpenClaimableAssignedWorkBeadForReachableStore returns the first OPEN,

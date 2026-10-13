@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1001,5 +1002,141 @@ func TestLiveBeadReadPeelsTheEffectWrappers(t *testing.T) {
 		if got, err := liveBeadRead(wrapped, b.ID); err != nil || got.ID != b.ID {
 			t.Errorf("liveBeadRead through %s = %+v, %v; want the live bead %s", name, got, err, b.ID)
 		}
+	}
+}
+
+// pairedReadyLeg counts the backing lists and ready reads, and holds each
+// ready read until a second is in flight with it, so ready reads made one
+// after another never return (the fence's own bound then expires).
+type pairedReadyLeg struct {
+	beads.Store
+	lists, readies *atomic.Int64
+	mu             *sync.Mutex
+	waiting        *int
+	pair, stop     chan struct{}
+}
+
+func (l pairedReadyLeg) List(q beads.ListQuery) ([]beads.Bead, error) {
+	l.lists.Add(1)
+	return l.Store.List(q)
+}
+
+func (l pairedReadyLeg) Ready(q ...beads.ReadyQuery) ([]beads.Bead, error) {
+	l.readies.Add(1)
+	l.mu.Lock()
+	if *l.waiting++; *l.waiting == 2 {
+		close(l.pair)
+	}
+	l.mu.Unlock()
+	select {
+	case <-l.pair:
+	case <-l.stop: // the test ended
+	}
+	return l.Store.Ready(q...)
+}
+
+// TestSignalL5ReadsOnceThenReadyAtOnce (mc-m4fgc; the #7771 review's
+// finding 2). Kills L5's serial chain, which on a slow work store (bd over a
+// remote database; staging's bd CLI work store measured 0.3-0.7s a call on
+// idle lanes) outran the 5s fence bound, refusing has-work forever for a
+// seat holding only non-ready work: a seat holding one blocked open bead
+// lists only its one concurrent seat read (as many lists as a seat with no
+// work), then makes its two ready reads (one assignee, both tiers) at once,
+// and the signal lands. Ready work refuses.
+func TestSignalL5ReadsOnceThenReadyAtOnce(t *testing.T) {
+	run := func(t *testing.T, seed func(beads.Store, string)) (settlement, int64, int64) {
+		p, it, store, _ := admittedBeginOn(t, intentBegunAt(reasonNoWake, time.Minute), signalWorkCases[0].entry)
+		seed(store, it.Key.ID)
+		var lists, readies atomic.Int64
+		waiting := 0
+		leg := pairedReadyLeg{Store: store, lists: &lists, readies: &readies, mu: &sync.Mutex{}, waiting: &waiting, pair: make(chan struct{}), stop: make(chan struct{})}
+		t.Cleanup(func() { close(leg.stop) })
+		p.reads.legs = testWorkLegs(p.World.CityPath, p.World.Env.Cfg, leg, nil).readOnly()
+		return runTx(context.Background(), p, it, effectSpecs[it.Kind], nil), lists.Load(), readies.Load()
+	}
+	open := func(blocked bool) func(beads.Store, string) {
+		return func(store beads.Store, seat string) {
+			blocker, err := store.Create(beads.Bead{Title: "blocker", Type: "task"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			w, err := store.Create(beads.Bead{Title: "w", Type: "task", Assignee: seat})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if blocked {
+				if err := store.DepAdd(w.ID, blocker.ID, "blocks"); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+	}
+	_, seatLists, _ := run(t, func(beads.Store, string) {})
+	s, lists, readies := run(t, open(true))
+	if s.Outcome != settledLanded || lists != seatLists || readies != 2 {
+		t.Errorf("blocked work only: settlement %+v, %d lists (a seat read is %d), %d ready reads; want the signal landed, one seat read, two ready reads at once", s, lists, seatLists, readies)
+	}
+	if s, _, _ := run(t, open(false)); s.Cause != causeHasWork {
+		t.Errorf("ready work: settlement %+v, want refused %s", s, causeHasWork)
+	}
+}
+
+// faultyReadyLeg fails or panics every ready read, and fails every list of
+// listFails.
+type faultyReadyLeg struct {
+	beads.Store
+	panics    bool
+	listFails string
+}
+
+func (l faultyReadyLeg) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if l.listFails != "" && q.Status == l.listFails {
+		return nil, errors.New("list failed")
+	}
+	return l.Store.List(q)
+}
+
+func (l faultyReadyLeg) Ready(...beads.ReadyQuery) ([]beads.Bead, error) {
+	if l.panics {
+		panic("ready read")
+	}
+	return nil, errors.New("ready read failed")
+}
+
+// TestSignalL5ReadyFaultCountsAsWork (mc-m4fgc): the seat read fails
+// closed: a ready read that errs or panics over the seat's open row counts
+// as work, and so does a failed in-progress or open list with no open row
+// read. Kills a fault dropped by the fan-out, and a failed list taken as
+// no work.
+func TestSignalL5ReadyFaultCountsAsWork(t *testing.T) {
+	for _, panics := range []bool{false, true} {
+		p, it, store, _ := admittedBeginOn(t, intentBegunAt(reasonNoWake, time.Minute), signalWorkCases[0].entry)
+		if _, err := store.Create(beads.Bead{Title: "w", Type: "task", Assignee: it.Key.ID}); err != nil {
+			t.Fatal(err)
+		}
+		p.reads.legs = testWorkLegs(p.World.CityPath, p.World.Env.Cfg, faultyReadyLeg{Store: store, panics: panics}, nil).readOnly()
+		if s := runTx(context.Background(), p, it, effectSpecs[it.Kind], nil); s.Cause != causeHasWork {
+			t.Errorf("panics %t: settlement %+v, want refused %s", panics, s, causeHasWork)
+		}
+	}
+	for _, status := range []string{"in_progress", "open"} {
+		p, it, store, _ := admittedBeginOn(t, intentBegunAt(reasonNoWake, time.Minute), signalWorkCases[0].entry)
+		p.reads.legs = testWorkLegs(p.World.CityPath, p.World.Env.Cfg, faultyReadyLeg{Store: store, listFails: status}, nil).readOnly()
+		if s := runTx(context.Background(), p, it, effectSpecs[it.Kind], nil); s.Cause != causeHasWork {
+			t.Errorf("the %s list failed: settlement %+v, want refused %s", status, s, causeHasWork)
+		}
+	}
+}
+
+// TestSignalL5ReadsReadyWisps (mc-m4fgc): ready work on the wisp tier holds
+// the seat too, as legacy's per-tier probe reads it. Kills the fan-out
+// reading the issues tier alone.
+func TestSignalL5ReadsReadyWisps(t *testing.T) {
+	p, it, store, _ := admittedBeginOn(t, intentBegunAt(reasonNoWake, time.Minute), signalWorkCases[0].entry)
+	if _, err := store.Create(beads.Bead{Title: "w", Type: "task", Assignee: it.Key.ID, Ephemeral: true}); err != nil {
+		t.Fatal(err)
+	}
+	if s := runTx(context.Background(), p, it, effectSpecs[it.Kind], nil); s.Cause != causeHasWork {
+		t.Errorf("ready wisp: settlement %+v, want refused %s", s, causeHasWork)
 	}
 }
