@@ -263,10 +263,10 @@ func (s *Store) Transition(id string, expect, to Status, by string) (Op, error) 
 	})
 }
 
-// Close records op id's single terminal outcome and closes its bead. The
-// metadata write is the commit point. Closing again with the same outcome is
-// idempotent and repairs a torn bead close; another outcome is
-// ErrAlreadyTerminal.
+// Close records op id's single terminal outcome and closes its bead in one
+// fenced write. Closing again with the same outcome is idempotent; another
+// outcome is ErrAlreadyTerminal. Either way a torn close (metadata closed,
+// bead open) is repaired.
 func (s *Store) Close(id string, outcome Outcome, by string) (Op, error) {
 	if err := validateText("close by", by, maxPrincipalLen); err != nil {
 		return Op{}, err
@@ -283,6 +283,9 @@ func (s *Store) Close(id string, outcome Outcome, by string) (Op, error) {
 		}
 		return closed(cur, outcome, by, s.clk), true, nil
 	})
+	if errors.Is(err, ErrAlreadyTerminal) {
+		return Op{}, errors.Join(err, s.closeBead(id))
+	}
 	if err != nil {
 		return Op{}, err
 	}
@@ -319,7 +322,8 @@ const (
 // the op closes canceled. While executing, or once a lifecycle op is lowered,
 // the request is recorded — the first recorded cancel wins — and the lane
 // decides the outcome. A settling op is AlreadyDecided and a closed op
-// AlreadyTerminal; neither is written, and the caller audits the typed result.
+// AlreadyTerminal; neither is written, beyond repairing a torn close, and the
+// caller audits the typed result.
 func (s *Store) Cancel(id, by, reason string) (CancelResult, Op, error) {
 	if err := validateText("cancel by", by, maxPrincipalLen); err != nil {
 		return "", Op{}, err
@@ -359,7 +363,7 @@ func (s *Store) Cancel(id, by, reason string) (CancelResult, Op, error) {
 	if err != nil {
 		return "", Op{}, err
 	}
-	if result == CancelClosed {
+	if result == CancelClosed || result == CancelAlreadyTerminal {
 		if err := s.closeBead(id); err != nil {
 			return "", Op{}, err
 		}
@@ -413,10 +417,11 @@ func (s *Store) mutate(id string, decide func(cur Op, spec Spec) (Op, bool, erro
 }
 
 // patch is the update that turns row b, which decoded as cur, into next's
-// encoding: the changed metadata keys and the assignee. A key is written
-// empty only when cur's encoding has it and next's does not, so a gc.op.* key
-// a newer build added — which decoding ignores — is never this build's to
-// remove. The bead status is left to the caller.
+// encoding: the changed metadata keys, the assignee and, when next is closed,
+// the bead status, so an outcome and its bead close commit together. A key is
+// written empty only when cur's encoding has it and next's does not, so a
+// gc.op.* key a newer build added — which decoding ignores — is never this
+// build's to remove.
 func patch(b beads.Bead, cur, next Op) (beads.UpdateOpts, error) {
 	have, err := EncodeOp(cur)
 	if err != nil {
@@ -438,6 +443,10 @@ func patch(b beads.Bead, cur, next Op) (beads.UpdateOpts, error) {
 		}
 	}
 	opts := beads.UpdateOpts{Metadata: meta}
+	if want.Status == beadStatusClosed && b.Status != beadStatusClosed {
+		status := beadStatusClosed
+		opts.Status = &status
+	}
 	if want.Assignee != b.Assignee {
 		assignee := want.Assignee
 		opts.Assignee = &assignee
@@ -445,8 +454,8 @@ func patch(b beads.Bead, cur, next Op) (beads.UpdateOpts, error) {
 	return opts, nil
 }
 
-// closeBead closes op id's bead after its metadata closed. An already-closed
-// bead is done.
+// closeBead repairs a torn close: it closes op id's bead when the metadata is
+// already closed and the bead is not. An already-closed bead is done.
 func (s *Store) closeBead(id string) error {
 	for range casAttempts {
 		b, err := s.store.Get(id)
@@ -456,7 +465,8 @@ func (s *Store) closeBead(id string) error {
 		if b.Status == beadStatusClosed {
 			return nil
 		}
-		err = s.writer.CloseIfMatch(id, b.Revision)
+		status := beadStatusClosed
+		err = s.writer.UpdateIfMatch(id, b.Revision, beads.UpdateOpts{Status: &status})
 		if err == nil {
 			return nil
 		}

@@ -996,3 +996,76 @@ func TestProposeRetryNeverRecreates(t *testing.T) {
 		t.Fatalf("stored op after retries: %s %q", got.Status, got.Payload)
 	}
 }
+
+// closeRefusingStore fails every CloseIfMatch, as a transient bd error does.
+type closeRefusingStore struct{ *beads.MemStore }
+
+func (closeRefusingStore) CloseIfMatch(string, int64) error {
+	return errors.New("bd close: transient failure")
+}
+
+// Close and Cancel commit the outcome and close the bead in one fenced write,
+// so there is no second write to fail and leave the bead open.
+func TestCloseIsOneFencedWrite(t *testing.T) {
+	newH := func(t *testing.T) *harness {
+		mem := &beads.MemStore{IDPrefix: "gc", HonorExplicitIDs: true}
+		return newHarnessOver(t, mem, closeRefusingStore{mem})
+	}
+	assertClosed := func(t *testing.T, h *harness, id string) {
+		t.Helper()
+		if b, _ := h.mem.Get(id); b.Status != "closed" {
+			t.Fatalf("bead %s is %s", id, b.Status)
+		}
+		if n := h.countOps(beadstest.OpCloseIfMatch); n != 0 {
+			t.Fatalf("%d CloseIfMatch calls; the close must ride the metadata write", n)
+		}
+	}
+	t.Run("close", func(t *testing.T) {
+		h := newH(t)
+		op := h.propose(t, msgReq("k", "x"))
+		updates := h.countOps(beadstest.OpUpdateIfMatch)
+		if _, err := h.store.Close(op.ID, Outcome{Arm: ArmSucceeded}, "lane"); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		if n := h.countOps(beadstest.OpUpdateIfMatch) - updates; n != 1 {
+			t.Fatalf("Close issued %d fenced writes, want 1", n)
+		}
+		assertClosed(t, h, op.ID)
+	})
+	t.Run("cancel", func(t *testing.T) {
+		h := newH(t)
+		op := h.propose(t, msgReq("k", "x"))
+		if r, _, err := h.store.Cancel(op.ID, "operator:bob", ""); err != nil || r != CancelClosed {
+			t.Fatalf("Cancel = %s, %v", r, err)
+		}
+		assertClosed(t, h, op.ID)
+	})
+}
+
+// A torn close (metadata closed, bead open) left by an older build or an
+// out-of-band write is repaired by any later Close or Cancel, not only by a
+// Close with the identical outcome.
+func TestTornCloseIsRepairedByAnyTerminalCall(t *testing.T) {
+	t.Run("cancel", func(t *testing.T) {
+		h := newHarness(t)
+		op := h.propose(t, msgReq("k", "x"))
+		tornClose(t, h, op.ID)
+		if r, _, err := h.store.Cancel(op.ID, "operator:bob", ""); err != nil || r != CancelAlreadyTerminal {
+			t.Fatalf("Cancel(torn) = %s, %v", r, err)
+		}
+		if b, _ := h.mem.Get(op.ID); b.Status != "closed" {
+			t.Fatalf("bead %s after Cancel", b.Status)
+		}
+	})
+	t.Run("close with another outcome", func(t *testing.T) {
+		h := newHarness(t)
+		op := h.propose(t, msgReq("k", "x"))
+		tornClose(t, h, op.ID)
+		if _, err := h.store.Close(op.ID, Outcome{Arm: ArmFailed, Reason: ReasonPoison}, "lane"); !errors.Is(err, ErrAlreadyTerminal) {
+			t.Fatalf("Close(torn, other outcome) = %v, want ErrAlreadyTerminal", err)
+		}
+		if b, _ := h.mem.Get(op.ID); b.Status != "closed" {
+			t.Fatalf("bead %s after Close", b.Status)
+		}
+	})
+}
