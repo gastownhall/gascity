@@ -393,10 +393,12 @@ type NudgeQueue interface {
 	RecordFailure([]string, error, time.Time) ([]nudgequeue.Item, error)
 	Rollback(nudgequeue.Item, string) error
 	WithdrawQueuedWaitNudges([]string) error
-	// Maintain runs one bounded whole-queue recovery pass as of now. It stops
-	// when ctx ends. A failed transition does not stop the pass: every failure
-	// is joined into the returned error. Records it could not decode are not a
-	// failure; they are listed in the report.
+	// Maintain runs one whole-queue recovery pass as of now. ctx is checked
+	// between transitions, so it bounds the writes, not a read already in
+	// progress; the sweep deletes at most one batch per pass. A failed
+	// transition does not stop the pass: every failure is joined into the
+	// returned error. Records it could not decode are not a failure; they are
+	// listed in the report.
 	Maintain(context.Context, time.Time) (NudgeMaintenance, error)
 }
 

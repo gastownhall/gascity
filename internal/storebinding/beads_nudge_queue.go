@@ -529,14 +529,18 @@ func (q *beadsNudgeQueue) WithdrawQueuedWaitNudges(ids []string) error {
 // idempotent, so running them as a sequence rather than as one transaction
 // converges on the same state.
 //
-// It is the only whole-queue pass, and it is bounded: it stops when ctx ends,
-// and one pass deletes at most sweepBatch retired records, oldest first. A
-// failed transition does not stop it; every failure is joined into the
-// returned error. An undecodable record is not a failure either: it is named
-// in the report's Corrupt list, each entry wrapping ErrBeadsNudgeQueueCorrupt.
+// It is the only whole-queue pass. ctx bounds its transitions: it is checked
+// before each one, and the pass stops when it ends. One pass deletes at most
+// sweepBatch retired records, oldest first. A failed transition does not stop
+// it; every failure is joined into the returned error. An undecodable record
+// is not a failure either: it is named in the report's Corrupt list, each
+// entry wrapping ErrBeadsNudgeQueueCorrupt.
 //
-// On SQLite the live pass lists the queue family by label, which the engine
-// answers by scanning the store; the bound is ctx.
+// The reads are not bounded by either. beads.Store.List takes no ctx, so the
+// live pass's family List cannot be interrupted once issued, and on SQLite it
+// lists by label, which the engine answers by scanning the store. The sweep's
+// read is sized by the retained terminal records, not the batch: see
+// sweepTerminalRecords.
 func (q *beadsNudgeQueue) Maintain(ctx context.Context, now time.Time) (NudgeMaintenance, error) {
 	var report NudgeMaintenance
 	if err := ctx.Err(); err != nil {
@@ -597,8 +601,11 @@ func (q *beadsNudgeQueue) maintainEntry(entry nudgeQueueEntry, now time.Time) er
 //
 // Every predicate is pushed to the store — the family label, the terminal
 // lifecycle (the indexed key), closed status, the retention cutoff and the
-// batch limit — so every record the sweep lists is due and the read is bounded
-// by the batch, not by the queue or the store.
+// batch limit — so every record the sweep lists is due, and the rows it gets
+// back and the deletes it issues are bounded by the batch. The engine's work
+// is not: on SQLite the queue_state=terminal lookup visits and sorts every
+// retained terminal record before the limit applies, so it scales with the
+// records retired within the retention window.
 //
 // Deleting a queue bead destroys no history. The queue's beads are its own
 // family (label "gc:nudge-queue"); the nudge SHADOW beads the audit trail is
