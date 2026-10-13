@@ -34,6 +34,7 @@ func openNativeDoltStorage(ctx context.Context, beadsDir string) (beadslib.Stora
 		return nil, fmt.Errorf("%s enables the events journal, but its storage backend does not support it", beadsDir)
 	}
 	configurer.SetEventsJournalEnabled(true)
+	nativeEventsJournalActivations.record(storage)
 	return storage, nil
 }
 
