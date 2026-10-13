@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
@@ -1059,6 +1060,54 @@ func TestStorageMigrateRefusesRigResidueByName(t *testing.T) {
 	}
 	assertNoConvergenceMarker(t, mustResolveInfraTarget(t, request.CityPath, cfg),
 		"a migrator that refused must record no convergence")
+}
+
+// TestStorageMigrateAcceptsRigSharingTheCityStore covers a rig whose binding
+// is the city's own work store (a unified city whose rig .beads carries a copy
+// of the city's remote binding, or resolves to the same database). Its rows
+// ARE the copy's source rows, so they are not residue: refusing them sent the
+// operator to blank the rig path to get a migration through (MC shadow F1).
+// A row the city store holds in a different state is still refused, because
+// the copy would carry the city's version and strand the rig's.
+func TestStorageMigrateAcceptsRigSharingTheCityStore(t *testing.T) {
+	rigPath := t.TempDir()
+	cfg := infraSplitConfig(filepath.Join(t.TempDir(), "store"))
+	request := storageTestRequest(t, cfg)
+	cfg.Rigs = []config.Rig{{Name: "sandbox", Prefix: "sb", Path: rigPath}}
+
+	city := stubInfraMigrationSource(t)
+	stubInfraControllerPing(t, 0)
+	shared := mustCreateInfraBead(t, city, beads.Bead{Title: "a city wisp", Type: "session"})
+	mustCreateInfraBead(t, city, beads.Bead{Title: "ordinary work", Type: "task"})
+
+	prev := openStorageScopeStore
+	openStorageScopeStore = func(storePath, cityPath string) (beads.Store, error) {
+		if storePath == rigPath {
+			return city, nil
+		}
+		return prev(storePath, cityPath)
+	}
+	t.Cleanup(func() { openStorageScopeStore = prev })
+
+	if err := censusRigInfraResidue(request.CityPath, cfg); err != nil {
+		t.Fatalf("a rig sharing the city work store was refused as residue: %v", err)
+	}
+
+	// A separate rig store holding the same id in another state is residue.
+	stale := shared
+	stale.Title = "the rig's own copy"
+	stale.UpdatedAt = shared.UpdatedAt.Add(-time.Hour)
+	diverged := beads.NewMemStoreFrom(1, []beads.Bead{stale}, nil)
+	openStorageScopeStore = func(storePath, cityPath string) (beads.Store, error) {
+		if storePath == rigPath {
+			return diverged, nil
+		}
+		return prev(storePath, cityPath)
+	}
+	err := censusRigInfraResidue(request.CityPath, cfg)
+	if err == nil || !strings.Contains(err.Error(), shared.ID) {
+		t.Fatalf("a diverged rig copy of a city id was not refused by name: %v", err)
+	}
 }
 
 // TestStorageMigrateRequiresItsSourceExplicitly proves the command will not
