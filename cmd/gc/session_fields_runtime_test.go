@@ -160,7 +160,7 @@ func TestSessionFieldsFlowsWriteTheirKeys(t *testing.T) {
 			plan := namedPlan(t, cfg, "c1", "mayor")
 			plan.Named.BoundStepID = "gc-step"
 			rec.reset()
-			h.runAll(t, &createPass{cfg: cfg, sp: runtime.NewFake(), store: rec}, plan)
+			h.runAll(t, &createPass{cfg: cfg, sp: newSimProvider(), store: rec}, plan)
 		}},
 		{"v2 heal effect", "stranded_event_emitted_at", []string{"cmd/gc/reconcile_arms_heals.go:armStrandedClear"}, func(t *testing.T, rec *sessionKeyRecorder) {
 			heal := newHealCase(t, livenessAlive, desireKeep, "state", "active", strandedEventEmittedKey, now.Format(time.RFC3339))
@@ -383,7 +383,7 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 				closed := seedClosedNamedRow(t, store, cfg, pairs(meta))
 				h := newNamedHarness(t, t.TempDir(), nil)
 				h.reserve(t, "c1")
-				h.runAll(t, &createPass{cfg: cfg, sp: runtime.NewFake(), store: store}, namedPlan(t, cfg, "c1", "mayor"))
+				h.runAll(t, &createPass{cfg: cfg, sp: newSimProvider(), store: store}, namedPlan(t, cfg, "c1", "mayor"))
 				return fieldBead(t, store, closed.ID).Metadata
 			},
 		},
