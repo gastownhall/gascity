@@ -58,6 +58,7 @@ var optionalInterfaces = map[string]reflect.Type{
 	"Router":                          reflect.TypeFor[runtime.Router](),
 	"ServerDeathConfirmer":            reflect.TypeFor[runtime.ServerDeathConfirmer](),
 	"ServerLifecycleProvider":         reflect.TypeFor[runtime.ServerLifecycleProvider](),
+	"SessionBindingProvider":          reflect.TypeFor[runtime.SessionBindingProvider](),
 	"SessionEventProvider":            reflect.TypeFor[runtime.SessionEventProvider](),
 	"SessionObjectKiller":             reflect.TypeFor[runtime.SessionObjectKiller](),
 	"SessionRosterProvider":           reflect.TypeFor[runtime.SessionRosterProvider](),

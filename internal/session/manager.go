@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"strings"
 	"time"
 
@@ -71,6 +72,15 @@ const LabelSession = "gc:session"
 // MetadataLastNudgeDeliveredAt is the session-bead metadata key that records
 // the wall-clock time of the most recent successful nudge delivery.
 const MetadataLastNudgeDeliveredAt = "last_nudge_delivered_at"
+
+// MetadataRuntimeThreadID and MetadataRuntimeProjectID record, for a runtime
+// that hosts the session in a thread of its own ([runtime.SessionBinding]),
+// the thread and the project that scopes it, as of the session's last
+// confirmed start.
+const (
+	MetadataRuntimeThreadID  = "runtime_thread_id"
+	MetadataRuntimeProjectID = "runtime_project_id"
+)
 
 // Info holds the user-facing details of a chat session.
 type Info struct {
@@ -1056,7 +1066,7 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 		}
 		if err := m.sp.Start(ctx, sessName, cfg); err != nil {
 			if runtimeSessionMatchesBead(m.sp, sessName, b.ID, meta["instance_token"]) {
-				if metaErr := m.confirmStartedRuntimeMetadata(b.ID, &b); metaErr != nil {
+				if metaErr := m.confirmStartedRuntimeMetadata(b.ID, sessName, &b); metaErr != nil {
 					return metaErr
 				}
 				info = m.infoFromBead(b)
@@ -1073,7 +1083,7 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 			}
 			return fmt.Errorf("starting session: %w", err)
 		}
-		if metaErr := m.confirmStartedRuntimeMetadata(b.ID, &b); metaErr != nil {
+		if metaErr := m.confirmStartedRuntimeMetadata(b.ID, sessName, &b); metaErr != nil {
 			if stopErr := m.sp.Stop(sessName); stopErr != nil {
 				metaErr = errors.Join(metaErr, fmt.Errorf("stopping runtime after metadata failure: %w", stopErr))
 			}
@@ -1092,8 +1102,14 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 	return info, nil
 }
 
-func (m *Manager) confirmStartedRuntimeMetadata(id string, b *beads.Bead) error {
+func (m *Manager) confirmStartedRuntimeMetadata(id, sessName string, b *beads.Bead) error {
 	metadata := ConfirmStartedPatch(time.Now().UTC())
+	binding, err := ReadRuntimeBinding(m.sp, sessName)
+	if err != nil {
+		// The binding is advisory: the start it describes stands without it.
+		log.Printf("session: %q started; reading its runtime binding: %v", sessName, err)
+	}
+	maps.Copy(metadata, runtimeBindingPatch(binding))
 	if err := m.store.SetMetadataBatch(id, metadata); err != nil {
 		return fmt.Errorf("storing started runtime metadata: %w", err)
 	}

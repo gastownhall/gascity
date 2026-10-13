@@ -62,6 +62,7 @@ type ProfileBackend interface {
 	ServerDeathConfirmer
 	ServerLifecycleProvider
 	SessionEventProvider
+	SessionBindingProvider
 	SessionObjectKiller
 	SessionRosterProvider
 	TurnEventProvider
@@ -89,7 +90,7 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 	case ProfileSSH:
 		return sshProfile{core, b, timed}
 	case ProfileT3Bridge:
-		return t3bridgeProfile{core, b, b, timed, turnInterruptTrait{TurnInterruptProtocol}}
+		return t3bridgeProfile{core, b, b, b, timed, turnInterruptTrait{TurnInterruptProtocol}}
 	}
 	panic(fmt.Sprintf("runtime: unknown profile %d", p))
 }
@@ -221,6 +222,7 @@ type (
 		Provider
 		KeyedNudgeProvider
 		LivenessObserverWithError
+		SessionBindingProvider
 		sleepTrait
 		turnInterruptTrait
 	}
@@ -264,6 +266,22 @@ func (f FullFake) NudgeKeyed(name string, content []ContentBlock, key string) er
 		return err
 	}
 	return nil
+}
+
+// SessionBinding implements [SessionBindingProvider] from the fake's
+// Bindings.
+func (f FullFake) SessionBinding(name string) (SessionBinding, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, Call{Method: "SessionBinding", Name: name})
+	if f.broken {
+		return SessionBinding{}, ErrRuntimeUnavailable
+	}
+	b, ok := f.Bindings[name]
+	if !ok {
+		return SessionBinding{}, fmt.Errorf("%w: no thread bound to %q", ErrSessionNotFound, name)
+	}
+	return b, nil
 }
 
 // ObserveLiveness implements [LivenessObserver].

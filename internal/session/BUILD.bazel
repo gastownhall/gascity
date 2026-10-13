@@ -168,6 +168,7 @@ go_test(
         "resume_controller_test.go",
         "resume_test.go",
         "resume_user_hold_test.go",
+        "runtime_binding_test.go",
         "runtime_lease_crossproc_test.go",
         "runtime_lease_test.go",
         "sleep_reason_test.go",

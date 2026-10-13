@@ -29,6 +29,7 @@ go_library(
         "router.go",
         "runtime.go",
         "seam_adapter.go",
+        "session_binding.go",
         "session_events.go",
         "session_events_merge.go",
         "session_object.go",

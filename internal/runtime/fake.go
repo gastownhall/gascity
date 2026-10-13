@@ -29,16 +29,19 @@ type Fake struct {
 	// IsTracked=true, because the tmux scanner keys tracked-ness by session id,
 	// so they cannot be modeled through OrphanedRuntimes, whose contract is that
 	// its entries are untracked orphans.
-	ExtraRuntimes           []LiveRuntime
-	Zombies                 map[string]bool      // sessions with dead agent processes
-	Attached                map[string]bool      // sessions with attached terminals
-	AttachedSequence        map[string][]bool    // scripted IsAttached results by session
-	AttachedErrors          map[string]error     // per-session IsAttachedWithError errors for testing
-	PeekOutput              map[string]string    // session → canned peek output
-	Activity                map[string]time.Time // session → last activity time
-	StartErrors             map[string]error     // per-session Start errors for testing
-	StopErrors              map[string]error     // per-session Stop errors for testing
-	StopLeavesRunning       map[string]bool      // per-session Stop returns nil without deleting the session
+	ExtraRuntimes    []LiveRuntime
+	Zombies          map[string]bool      // sessions with dead agent processes
+	Attached         map[string]bool      // sessions with attached terminals
+	AttachedSequence map[string][]bool    // scripted IsAttached results by session
+	AttachedErrors   map[string]error     // per-session IsAttachedWithError errors for testing
+	PeekOutput       map[string]string    // session → canned peek output
+	Activity         map[string]time.Time // session → last activity time
+	// Bindings are the threads a [FullFake]'s SessionBinding reports, by
+	// session name.
+	Bindings                map[string]SessionBinding
+	StartErrors             map[string]error // per-session Start errors for testing
+	StopErrors              map[string]error // per-session Stop errors for testing
+	StopLeavesRunning       map[string]bool  // per-session Stop returns nil without deleting the session
 	PendingInteractions     map[string]*PendingInteraction
 	PendingErrors           map[string]error // per-session Pending errors for testing
 	Responses               map[string][]InteractionResponse

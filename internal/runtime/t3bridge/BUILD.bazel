@@ -29,6 +29,7 @@ go_test(
         "provider_test.go",
         "reuse_test.go",
         "seams_test.go",
+        "session_binding_test.go",
         "testenv_import_test.go",
         "truthful_errors_test.go",
         "watch_latest_seq_test.go",

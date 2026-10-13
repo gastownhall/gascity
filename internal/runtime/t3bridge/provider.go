@@ -2856,6 +2856,25 @@ func (p *Provider) liveThread(name string) (map[string]interface{}, *threadBindi
 	}
 }
 
+// SessionBinding implements [runtime.SessionBindingProvider]: the T3 thread
+// and project bound to name, whether or not the thread's session is live. It
+// reports [runtime.ErrRuntimeUnavailable] when T3 cannot be read and
+// [runtime.ErrSessionNotFound] when no thread is bound to name.
+func (p *Provider) SessionBinding(name string) (runtime.SessionBinding, error) {
+	snapshot, err := p.rpcSnapshot()
+	if err != nil {
+		if isSoftBridgeUnavailable(err) {
+			return runtime.SessionBinding{}, fmt.Errorf("%w: t3bridge snapshot unavailable for %q: %w", runtime.ErrRuntimeUnavailable, name, err)
+		}
+		return runtime.SessionBinding{}, err
+	}
+	binding := snapshotThreadBinding(snapshotThreadBySessionName(snapshot, name))
+	if binding == nil {
+		return runtime.SessionBinding{}, fmt.Errorf("%w: no t3 thread is bound to %q", runtime.ErrSessionNotFound, name)
+	}
+	return runtime.SessionBinding{ThreadID: binding.ThreadID, ProjectID: binding.ProjectID}, nil
+}
+
 // Nudge delivers content to the session as a new user turn. It reports
 // [runtime.ErrRuntimeUnavailable] when T3 cannot be read and
 // [runtime.ErrSessionNotFound] when no live thread is bound to name, so a

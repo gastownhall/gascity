@@ -27,3 +27,19 @@ func TestNudgeKeyedForwardsToTheRoutedBackend(t *testing.T) {
 		t.Fatalf("plain leaf calls = %+v, want one plain Nudge", plainLeaf.Calls)
 	}
 }
+
+// SessionBinding answers from the routed backend when it hosts sessions in
+// threads of its own, and reports no binding otherwise.
+func TestSessionBindingForwardsToTheRoutedBackend(t *testing.T) {
+	keyedLeaf := runtime.NewFake()
+	keyedLeaf.Bindings = map[string]runtime.SessionBinding{"bound": {ThreadID: "thread-1", ProjectID: "project-1"}}
+	p := New(runtime.NewFakeProfile(runtime.ProfileT3Bridge, runtime.FullFake{Fake: keyedLeaf}), runtime.NewFake())
+	p.RouteACP("plain")
+
+	if got, err := p.SessionBinding("bound"); err != nil || got != keyedLeaf.Bindings["bound"] {
+		t.Fatalf("SessionBinding(bound) = %+v, %v; want %+v", got, err, keyedLeaf.Bindings["bound"])
+	}
+	if got, err := p.SessionBinding("plain"); err != nil || !got.IsZero() {
+		t.Fatalf("SessionBinding(plain) = %+v, %v; want none", got, err)
+	}
+}

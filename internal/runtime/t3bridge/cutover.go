@@ -21,6 +21,7 @@ var (
 	_ runtime.LivenessObserverWithError       = (*seamBackedProvider)(nil)
 	_ runtime.TurnInterruptCapabilityProvider = (*seamBackedProvider)(nil)
 	_ runtime.KeyedNudgeProvider              = (*seamBackedProvider)(nil)
+	_ runtime.SessionBindingProvider          = (*seamBackedProvider)(nil)
 )
 
 // NewSeamBacked constructs a t3bridge provider served through the seams.
@@ -73,4 +74,9 @@ func (s *seamBackedProvider) Interrupt(name string) error {
 // which derives T3's idempotency ids from it.
 func (s *seamBackedProvider) NudgeKeyed(name string, content []runtime.ContentBlock, key string) error {
 	return s.raw.NudgeKeyed(name, content, key)
+}
+
+// SessionBinding reports the T3 thread and project bound to name.
+func (s *seamBackedProvider) SessionBinding(name string) (runtime.SessionBinding, error) {
+	return s.raw.SessionBinding(name)
 }

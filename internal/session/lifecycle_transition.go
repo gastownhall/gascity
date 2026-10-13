@@ -4,8 +4,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"maps"
 	"strings"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // Priming markers record that a session's launch path attempted delivery of
@@ -381,6 +384,9 @@ type CommitStartedPatchInput struct {
 	// priming_attempted_at is never emitted here.
 	PrimedAt   time.Time
 	PromptHash string
+	// RuntimeBinding is the thread the runtime hosts the session in, read
+	// after the start; zero writes no binding keys.
+	RuntimeBinding runtime.SessionBinding
 }
 
 // CommitStartedPatch records a successful runtime start atomically with the
@@ -432,7 +438,35 @@ func CommitStartedPatch(input CommitStartedPatchInput) MetadataPatch {
 		patch[PrimedAtMetadataKey] = input.PrimedAt.UTC().Format(time.RFC3339)
 		patch[PromptHashMetadataKey] = input.PromptHash
 	}
+	maps.Copy(patch, runtimeBindingPatch(input.RuntimeBinding))
 	return patch
+}
+
+// runtimeBindingPatch records binding on the session row; a zero binding
+// writes nothing.
+func runtimeBindingPatch(binding runtime.SessionBinding) MetadataPatch {
+	if binding.IsZero() {
+		return MetadataPatch{}
+	}
+	return MetadataPatch{
+		MetadataRuntimeThreadID:  binding.ThreadID,
+		MetadataRuntimeProjectID: binding.ProjectID,
+	}
+}
+
+// ReadRuntimeBinding reads the thread sp hosts the session name in, when sp
+// is a [runtime.SessionBindingProvider]; a provider that is not reports no
+// binding.
+func ReadRuntimeBinding(sp runtime.Provider, name string) (runtime.SessionBinding, error) {
+	bp, ok := sp.(runtime.SessionBindingProvider)
+	if !ok {
+		return runtime.SessionBinding{}, nil
+	}
+	binding, err := bp.SessionBinding(name)
+	if err != nil {
+		return runtime.SessionBinding{}, fmt.Errorf("reading the runtime binding of %q: %w", name, err)
+	}
+	return binding, nil
 }
 
 // BeginDrainPatch transitions a live session into draining.
