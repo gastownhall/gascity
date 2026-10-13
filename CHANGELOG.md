@@ -41,8 +41,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `drain_state_unknown` and `exit_code` 3, where it used to be
   `command_failed` with exit 1; a successful result adds a `source` field.
   Cases that move from exit 1 to exit 3: a `[name]` target that cannot be
-  resolved because the city, its config or its store cannot be read (a name
-  a store that opened does not know still exits 1); a session provider that
+  resolved because the city, its config or its store cannot be read, or
+  that is ambiguous (a name a store that opened does not know still exits
+  1); a session row that cannot be read or found (for example a stale
+  `GC_SESSION_ID`) while `GC_DRAIN` is clear; a session provider that
   cannot be constructed; a runtime error that is not a typed "session not
   found", including a local city whose tmux server is not running and an
   exec adapter whose `get-meta` fails for any reason.
