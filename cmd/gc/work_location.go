@@ -49,7 +49,8 @@ type WorkLegs struct {
 	work beads.Store
 	rigs map[string]beads.Store // the serving rigs
 	plan storeref.ResolvedPlan
-	err  error // no leg set: a refused city
+	topo storeref.Topology // the residency topology plan was built from, for by-id reads
+	err  error             // no leg set: a refused city
 }
 
 // errNoWorkStore: a WorkLegs minted without a city work store, which answers
@@ -68,7 +69,8 @@ func workLegsFromCensus(cityPath string, cfg *config.City, work cityWorkLeg, rig
 		return l
 	}
 	l.rigs = servingRigStores(cfg, rigs, buildSuspendedRigPathsForCity(cfg, cityPath))
-	l.plan, l.err = storeref.Plan(storeref.AssignedWork{}, residencyTopologyForCity(cityPath, cfg, work.store, l.rigs))
+	l.topo = residencyTopologyForCity(cityPath, cfg, work.store, l.rigs)
+	l.plan, l.err = storeref.Plan(storeref.AssignedWork{}, l.topo)
 	return l
 }
 
@@ -132,6 +134,45 @@ func (l WorkLegs) readOnly() WorkLegs {
 // workStore is l's city work store, for a by-ID residency topology (the
 // live-claim veto, the confirmed-orphan release), which plans its own legs.
 func (l WorkLegs) workStore() beads.Store { return l.work }
+
+// readLive reads bead id live from the store that owns it by residency
+// (byIDOwnerRowForTopology over l's topology): a relocated class binding
+// before the work ledger, so a stale pre-migration copy co-resident in the
+// ledger never answers, then the serving rigs and the work store. It reads
+// through that store's Live handle, past any cache. No store ref is
+// consulted: a slot's gc.trigger_bead_store_ref names the demand leg, which on
+// a split city is the work ledger even for a step that lives only in the
+// binding (ga-bmfmt, the warm-bind probe's trap). found is false on a clean
+// miss; any other failure is err, which a caller needing proof reads as none.
+func (l WorkLegs) readLive(id string) (beads.Bead, bool, error) {
+	if err := l.unusable(); err != nil {
+		return beads.Bead{}, false, err
+	}
+	if strings.TrimSpace(id) == "" {
+		return beads.Bead{}, false, nil
+	}
+	owner, err := byIDOwnerRowForTopology(l.topo, id)
+	switch {
+	case errors.Is(err, beads.ErrNotFound):
+		return beads.Bead{}, false, nil
+	case err != nil:
+		return beads.Bead{}, false, err
+	case owner.Store == nil:
+		return beads.Bead{}, false, nil
+	}
+	live := beads.HandlesFor(owner.Store).Live
+	if live == nil {
+		return beads.Bead{}, false, nil
+	}
+	b, err := live.Get(id)
+	switch {
+	case errors.Is(err, beads.ErrNotFound):
+		return beads.Bead{}, false, nil
+	case err != nil:
+		return beads.Bead{}, false, err
+	}
+	return b, b.ID == id, nil
+}
 
 // isWork reports whether store is l's city work store.
 func (l WorkLegs) isWork(store beads.Store) bool {

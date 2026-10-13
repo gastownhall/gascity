@@ -8,10 +8,13 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
 
@@ -194,22 +197,25 @@ func TestDeliverWarmBindClaimNudge_NoMarkerOnDeliveryFailure(t *testing.T) {
 	}
 }
 
-// isUnclaimedTrigger: only an open bead not already assigned to this slot counts.
+// isUnclaimedTrigger: only an open bead assigned to no session counts; a pool
+// template assignee is demand, not a claim.
 func TestIsUnclaimedTrigger(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MaxActiveSessions: intPtr(3)}}}
 	cases := []struct {
 		name string
 		w    beads.Bead
 		want bool
 	}{
 		{"open unassigned", beads.Bead{Status: "open"}, true},
-		{"open assigned elsewhere", beads.Bead{Status: "open", Assignee: "worker-9"}, true},
+		{"open assigned elsewhere", beads.Bead{Status: "open", Assignee: "worker-9"}, false},         // another session's work (#7752 review)
+		{"open assigned to the pool template", beads.Bead{Status: "open", Assignee: "worker"}, true}, // template-assigned pool demand
 		{"open assigned to self", beads.Bead{Status: "open", Assignee: "worker-1"}, false},
 		{"in_progress", beads.Bead{Status: "in_progress"}, false},
 		{"closed", beads.Bead{Status: "closed"}, false},
 		{"blocked", beads.Bead{Status: "blocked"}, false},
 	}
 	for _, tc := range cases {
-		if got := isUnclaimedTrigger(tc.w, "worker-1"); got != tc.want {
+		if got := isUnclaimedTrigger(cfg, tc.w); got != tc.want {
 			t.Errorf("%s: isUnclaimedTrigger = %v, want %v", tc.name, got, tc.want)
 		}
 	}
@@ -236,7 +242,7 @@ func warmClaimResolverFor(cfg *config.City, work beads.Store, rigs map[string]be
 
 // warmClaimProbeFor builds the probe the reconciler installs over that resolver.
 func warmClaimProbeFor(cfg *config.City, work beads.Store, rigs map[string]beads.Store, routes *storageRoutes) warmClaimTriggerProbe {
-	return buildWarmClaimTriggerProbe(warmClaimResolverFor(cfg, work, rigs, routes), io.Discard)
+	return buildWarmClaimTriggerProbe(cfg, warmClaimResolverFor(cfg, work, rigs, routes), io.Discard)
 }
 
 // warmClaimByIDPlan is the by-id plan the warm-bind resolver executes for id.
@@ -401,7 +407,7 @@ func TestBuildWarmClaimTriggerProbe_SameIDCollisionResolvesToCityCopy(t *testing
 		)
 	}
 	probeOf := func(cr *CityRuntime) warmClaimTriggerProbe {
-		return buildWarmClaimTriggerProbe(cr.newWarmClaimTriggerResolver(cr.rigBeadStores()), io.Discard)
+		return cr.warmClaimTriggerProbe(cr.newWarmClaimTriggerResolver(cr.rigBeadStores()))
 	}
 
 	// Precondition: BOTH ledgers are in the plan and the work leg leads. Without
@@ -508,7 +514,7 @@ func TestBuildWarmClaimTriggerProbe_ResolutionErrorsNeverNudge(t *testing.T) {
 			if errors.Is(err, beads.ErrNotFound) {
 				t.Fatalf("resolving %s: an unreadable leg reported absence (%v); a fault must never read as a miss", tc.trigger, err)
 			}
-			if buildWarmClaimTriggerProbe(tc.resolver, io.Discard)(warmBindStampedSession(tc.trigger, "")) {
+			if buildWarmClaimTriggerProbe(nil, tc.resolver, io.Discard)(warmBindStampedSession(tc.trigger, "")) {
 				t.Errorf("%s: the probe nudged on an unresolvable trigger", name)
 			}
 		})
@@ -528,7 +534,7 @@ func TestBuildWarmClaimTriggerProbe_ReportsResolutionFaultOncePerTick(t *testing
 		map[string]beads.Store{"alpha": unavailableStore{err: errors.New("open rig store alpha: no such file or directory")}},
 		nil,
 	)
-	probe := buildWarmClaimTriggerProbe(dark, &log)
+	probe := buildWarmClaimTriggerProbe(nil, dark, &log)
 	for range 3 {
 		if probe(warmBindStampedSession("ra-1", "rig:alpha")) {
 			t.Fatal("dark rig leg: the probe must decline")
@@ -543,11 +549,109 @@ func TestBuildWarmClaimTriggerProbe_ReportsResolutionFaultOncePerTick(t *testing
 
 	// An ordinary miss is not a fault and stays silent.
 	var quiet bytes.Buffer
-	miss := buildWarmClaimTriggerProbe(warmClaimResolverFor(residencyTestConfig(), beads.NewMemStore(), nil, nil), &quiet)
+	miss := buildWarmClaimTriggerProbe(nil, warmClaimResolverFor(residencyTestConfig(), beads.NewMemStore(), nil, nil), &quiet)
 	if miss(warmBindStampedSession("nobody-holds-me", "")) {
 		t.Fatal("missing trigger: the probe must decline")
 	}
 	if quiet.Len() != 0 {
 		t.Errorf("a trigger no leg holds logged %q; only faults are worth a line", quiet.String())
+	}
+}
+
+// Kills the controller's warm-bind probe judging triggers without its config
+// (#7752 review r2): a trigger assigned to a pool template identity is
+// template-assigned demand, so the probe the controller builds reads it as
+// unclaimed and the warm slot is nudged; one assigned to a session is not.
+func TestControllerWarmClaimProbeTreatsATemplateAssigneeAsDemand(t *testing.T) {
+	cfg := residencyTestConfig()
+	cfg.Agents = append(cfg.Agents, config.Agent{Name: "worker", MaxActiveSessions: intPtr(3)})
+	for assignee, want := range map[string]bool{"worker": true, "worker-1": false} {
+		cr := warmClaimRuntimeFor(cfg, beads.NewMemStoreFrom(0, []beads.Bead{{ID: "hq-1", Status: "open", Assignee: assignee}}, nil), nil, nil)
+		cr.stderr = io.Discard
+		if got := cr.warmClaimTriggerProbe(cr.newWarmClaimTriggerResolver(cr.rigBeadStores()))(warmBindStampedSession("hq-1", "city")); got != want {
+			t.Errorf("assignee %q: probe = %v, want %v", assignee, got, want)
+		}
+	}
+}
+
+// upAtPreWakeStore brings a session's runtime up, under the incarnation the
+// start path's PreWake write mints, the moment that write lands: the slot is
+// already running when the start reaches the provider, which is the
+// warm-reuse branch startPreparedStartCandidate delivers the warm-bind claim
+// nudge from.
+type upAtPreWakeStore struct {
+	beads.Store
+	sp *runtime.Fake
+}
+
+func (s *upAtPreWakeStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if err := s.Store.SetMetadataBatch(id, kvs); err != nil {
+		return err
+	}
+	if kvs["state"] != "creating" {
+		return nil
+	}
+	name := "worker-1"
+	if err := s.sp.Start(context.Background(), name, runtime.Config{Command: "claude"}); err != nil {
+		return err
+	}
+	for key, value := range map[string]string{"GC_SESSION_ID": id, "GC_INSTANCE_TOKEN": kvs["instance_token"], "GC_RUNTIME_EPOCH": kvs["generation"]} {
+		if err := s.sp.SetMeta(name, key, value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Kills beadReconcileTick installing a warm-bind probe that judges triggers
+// without the controller's config (#7752 review r3, mutant T7: the call site
+// built with a nil cfg): a pending pool slot whose runtime is already up when
+// its start runs gets the claim nudge for a trigger assigned to its pool
+// template, which is demand, and none for a trigger its own session holds.
+func TestBeadReconcileTickWarmBindNudgesTemplateAssignedDemand(t *testing.T) {
+	for assignee, wantNudges := range map[string]int{"worker": 1, "worker-1": 0} {
+		t.Run(assignee, func(t *testing.T) {
+			store := beads.NewMemStore()
+			trigger, err := store.Create(beads.Bead{Title: "step", Type: "task", Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "worker"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			session, err := store.Create(beads.Bead{Title: "worker", Type: sessionBeadType, Labels: []string{sessionBeadLabel, "agent:worker"}, Metadata: map[string]string{
+				"session_name": "worker-1", "template": "worker", "agent_name": "worker", "pool_slot": "1", poolManagedMetadataKey: boolMetadata(true),
+				"state": string(sessionpkg.StateStartPending), "pending_create_claim": "true", "generation": "1",
+				beadmeta.TriggerBeadIDMetadataKey: trigger.ID,
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			sp := runtime.NewFake()
+			cr := &CityRuntime{
+				cityPath: t.TempDir(), cityName: "test-city", sp: sp, standaloneCityStore: &upAtPreWakeStore{Store: store, sp: sp},
+				cfg:           &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)}}},
+				sessionDrains: newDrainTracker(), rec: events.Discard, stdout: io.Discard, stderr: io.Discard,
+			}
+			cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), DesiredStateResult{
+				State: map[string]TemplateParams{"worker-1": {
+					TemplateName: "worker", SessionName: "worker-1", Command: "claude", Hints: agent.StartupHints{Nudge: warmClaimText},
+				}},
+				PoolDesiredCounts: map[string]int{"worker": 1},
+			}, cr.loadSessionBeadSnapshot(), nil, false)
+			if !cr.waitForAsyncStarts() {
+				t.Fatal("async starts did not settle after the tick")
+			}
+			if got := sp.CountCalls("Start", "worker-1"); got != 1 {
+				t.Fatalf("runtime Start calls = %d, want only the fixture's: the tick must reuse the running slot", got)
+			}
+			if got := sp.CountCalls("Nudge", "worker-1"); got != wantNudges {
+				t.Errorf("claim nudges = %d, want %d", got, wantNudges)
+			}
+			got, err := store.Get(session.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if marked := got.Metadata[warmBindNudgedForTriggerKey] == trigger.ID; marked != (wantNudges == 1) {
+				t.Errorf("%s = %q, want marked=%v", warmBindNudgedForTriggerKey, got.Metadata[warmBindNudgedForTriggerKey], wantNudges == 1)
+			}
+		})
 	}
 }

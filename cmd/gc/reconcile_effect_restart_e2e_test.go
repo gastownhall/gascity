@@ -55,13 +55,19 @@ func TestDriftRelaunchThroughTheEffectPass(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
 		named, fails  bool
+		killed        bool
 		stops         int
 		state, drains string
+		refused       string
 	}{
 		{name: "ordinary, landed"},
 		{name: "named, landed", named: true},
 		{name: "named, failed: the restart", named: true, fails: true, stops: 1, state: "start-pending"},
 		{name: "ordinary, failed: the drain", fails: true, drains: drainConfigDrift},
+		// CONTRACT v5.10e (mc-i7efm): an operator's kill landing while the
+		// relaunch runs makes the row A2's; the fallback re-decides the
+		// fresh row and begins no drain.
+		{name: "ordinary, failed, killed meanwhile: no drain", fails: true, killed: true, refused: causeRedecided, state: "asleep"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p, it, store, leaf := driftOn(t, tc.named, true)
@@ -71,11 +77,24 @@ func TestDriftRelaunchThroughTheEffectPass(t *testing.T) {
 			if tc.fails {
 				leaf.RelaunchErrors = map[string]error{"s-gc-1": errors.New("box gone")}
 			}
+			if tc.killed {
+				p.seam = func(_ context.Context, at txSeam, _ intent, _, _ int) error {
+					if at == seamAfterCall && leaf.CountCalls("Relaunch", "s-gc-1") == 1 {
+						p.seam = nil
+						if _, err := session.WriteKillFence(store, it.Key.ID, gatherNow); err != nil {
+							t.Error(err)
+						}
+					}
+					return nil
+				}
+			}
 			s := runTx(context.Background(), p, it, effectSpecs[it.Kind], nil)
 			got, _ := store.Get(it.Key.ID)
 			stale := got.Metadata["started_config_hash"] == runtime.FingerprintVersion+":stale"
 			switch {
-			case s.Outcome != settledLanded || leaf.CountCalls("Relaunch", "s-gc-1") != 1 || stops(leaf) != tc.stops:
+			case tc.refused != "" && (s.Outcome != settledRefused || s.Cause != tc.refused):
+				t.Fatalf("settled %+v, want refused %q", s, tc.refused)
+			case tc.refused == "" && s.Outcome != settledLanded, leaf.CountCalls("Relaunch", "s-gc-1") != 1, stops(leaf) != tc.stops:
 				t.Fatalf("settled %+v, relaunches %d, stops %d; want landed, one relaunch, %d stops", s, leaf.CountCalls("Relaunch", "s-gc-1"), stops(leaf), tc.stops)
 			case !tc.fails && stale:
 				t.Fatalf("row %v: want the relaunch baseline", got.Metadata)
@@ -141,6 +160,23 @@ func TestDriftRestartStopIsFenced(t *testing.T) {
 	s := runTx(context.Background(), p, it, effectSpecs[it.Kind], nil)
 	if got, _ := store.Get(it.Key.ID); s.Outcome == settledLanded || got.Metadata["state"] == "start-pending" {
 		t.Fatalf("a refused stop: settled %+v, state %q; want no reset", s, got.Metadata["state"])
+	}
+}
+
+// Kills a drift restart that resets the row over a runtime its own section
+// reads (STALE-READ E1): one back under the name after the confirmed stop
+// refuses runtime-present, and the row is not reset to start-pending.
+func TestDriftRestartRestsOnItsOwnRead(t *testing.T) {
+	p, it, store, leaf := driftOn(t, true, false)
+	p.seam = func(_ context.Context, s txSeam, _ intent, section, _ int) error {
+		if s == seamAfterCall && section == driftLeaseAt { // the stop Call's section
+			startRuntime(t, leaf.Fake, "s-gc-1", map[string]string{"GC_SESSION_ID": it.Key.ID, "GC_INSTANCE_TOKEN": "tok-3"})
+		}
+		return nil
+	}
+	s := runTx(context.Background(), p, it, effectSpecs[it.Kind], nil)
+	if got, _ := store.Get(it.Key.ID); s.Outcome != settledRefused || s.Cause != causeRuntimePresent || got.Metadata["state"] == "start-pending" {
+		t.Fatalf("a runtime back after the stop: settled %+v, state %q; want refused %q, no reset", s, got.Metadata["state"], causeRuntimePresent)
 	}
 }
 

@@ -138,6 +138,7 @@ func (p *planner) tracePass(e gatherEnv, now time.Time) passResult {
 		BootOpen: w.Boot.open(), // P2
 	}, intents)
 	res.Deferred = append(res.Deferred, unregistered...)
+	next = earliest(next, res.NextBackoff) // a row backoff's expiry is a row deadline (v5.10d (b))
 	// The planner state admission leaves is stored before any submit. A
 	// trace-only pass submits nothing, so it keeps no token debit, and no
 	// refill is a reason for a pass.

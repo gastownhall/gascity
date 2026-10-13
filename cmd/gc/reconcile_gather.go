@@ -107,6 +107,9 @@ type World struct {
 	TransportRefused  map[string]string                     // by qualified name
 	ReadyWaits        map[string]bool                       // I10, by session bead ID
 	Templates         *templateMemo
+	// Suspension is the suspension state the pass read, for the live-claim
+	// veto's scope (liveClaimVetoApplies, the orphaned signal's L5).
+	Suspension suspensionstate.State
 	// ExecutionStalled are the execution backstop's drain requests by row
 	// ID, for arm A16 (C7b1).
 	ExecutionStalled map[string]executionStalledRequest
@@ -163,7 +166,7 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 	if e.Suspension != nil {
 		st = e.Suspension()
 	}
-	w.CitySuspended, w.SuspendedRigPaths = effectiveCitySuspended(cfg, st), suspendedRigPathsWithState(cfg, st)
+	w.CitySuspended, w.SuspendedRigPaths, w.Suspension = effectiveCitySuspended(cfg, st), suspendedRigPathsWithState(cfg, st), st
 	rec := e.Recording()
 	if e.Observations != nil {
 		w.Obs = e.Observations().Snapshot()

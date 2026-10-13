@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"maps"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,14 +19,18 @@ import (
 // attach probe reports attached.
 type recycleLeaf struct {
 	*startHookLeaf
-	peekErr   error
-	attached  bool
-	attachErr error
-	peeks     int
+	peekErr    error
+	duringPeek func() // runs inside Peek, after the classification's read
+	attached   bool
+	attachErr  error
+	peeks      int
 }
 
 func (l *recycleLeaf) Peek(name string, lines int) (string, error) {
 	l.peeks++
+	if l.duringPeek != nil {
+		l.duringPeek()
+	}
 	if l.peekErr != nil {
 		return "", l.peekErr
 	}
@@ -162,6 +167,47 @@ func TestStartRecycleRefusals(t *testing.T) {
 	if s := k.runKind(); s.Cause != causePeekError || len(k.sp.kills) != 0 {
 		t.Fatalf("peek error: settlement %+v kills %d, want refused peek-error", s, len(k.sp.kills))
 	}
+	k, leaf, _ = deadKit(t, false, "gc-1", "tok", "")
+	leaf.peekErr = runtime.ErrTmuxAgentPaneAmbiguous
+	if s := k.runKind(); s.Cause != causePeekError || len(k.sp.kills) != 0 {
+		t.Fatalf("an ambiguous agent pane: settlement %+v kills %d, want refused peek-error", s, len(k.sp.kills))
+	}
+	// The session object replaced between the classification's read and the
+	// capture: the screen may be the new object's (the #7762 review).
+	k, leaf, _ = deadKit(t, false, "gc-1", "tok", "Usage limit reached", "last_woke_at", gatherNow.Add(-5*time.Second).Format(time.RFC3339))
+	leaf.duringPeek = func() { k.runtimeAs("gc-1", "tok", func(r *simRuntime) { r.corpse = true }) }
+	if s := k.runKind(); s.Cause != causePeekError || len(k.sp.kills) != 0 || k.meta("sleep_reason") != "" {
+		t.Fatalf("an object replaced across the peek: settlement %+v kills %d reason %q, want refused peek-error, nothing classified", s, len(k.sp.kills), k.meta("sleep_reason"))
+	}
+	// The same object id under a new created time (tmux reuses ids after a
+	// server restart): another object, and the peek refuses (the #7762 r2
+	// review's R2-M5).
+	k, leaf, _ = deadKit(t, false, "gc-1", "tok", "Usage limit reached", "last_woke_at", gatherNow.Add(-5*time.Second).Format(time.RFC3339))
+	leaf.duringPeek = func() { k.mutate(func(r *simRuntime) { r.created++ }) }
+	if s := k.runKind(); s.Cause != causePeekError || len(k.sp.kills) != 0 || k.meta("sleep_reason") != "" {
+		t.Fatalf("a reused object id under a new created time: settlement %+v kills %d reason %q, want refused peek-error", s, len(k.sp.kills), k.meta("sleep_reason"))
+	}
+	// An own zombie whose agent pane is gone: its live pane may be an
+	// operator's split, so nothing is killed or started (the #7762 r2
+	// review's must-fix).
+	k, leaf, _ = deadKit(t, true, "gc-1", "tok", "")
+	leaf.peekErr = runtime.ErrTmuxAgentPaneGone
+	if s := k.runKind(); s.Cause != causePeekError || k.killsBy("KillZombieObject") != 0 || len(k.starts()) != 0 {
+		t.Fatalf("a zombie with no agent pane: settlement %+v zombie kills %d starts %d, want refused peek-error, nothing killed or started", s, k.killsBy("KillZombieObject"), len(k.starts()))
+	}
+}
+
+// Kills a corpse that blocks its start forever (the #7762 review): a
+// session whose agent pane is gone (an operator's split, its only dead
+// pane) has no agent screen to classify; the peek's ErrTmuxAgentPaneGone
+// reads empty, so the recycle removes the corpse by exact object and the
+// start launches.
+func TestStartRecycleRemovesACorpseWithNoAgentPane(t *testing.T) {
+	k, leaf, rec := deadKit(t, false, "gc-1", "tok", "")
+	leaf.peekErr = runtime.ErrTmuxAgentPaneGone
+	if s := k.runKind(); s.Outcome != settledLanded || k.killsBy("KillCorpseObject") != 1 || len(k.starts()) != 1 || crashes(rec) != 0 {
+		t.Fatalf("settlement %+v corpse kills %d starts %d crashes %d, want the corpse removed and the start launched", s, k.killsBy("KillCorpseObject"), len(k.starts()), crashes(rec))
+	}
 }
 
 // Kills a PreWake that stamps a token on a dead incarnation: the recycle
@@ -279,6 +325,80 @@ func TestStartRecycleAccountsTheDeath(t *testing.T) {
 	k, _, _ = deadKit(t, false, "gc-1", "tok", "", "state", "awake", "last_woke_at", gatherNow.Add(-time.Hour).Format(time.RFC3339), "churn_count", "2")
 	if s := k.runKind(); s.Outcome != settledLanded || len(k.starts()) != 1 || k.meta("churn_count") != "0" || k.meta("state") != "awake" {
 		t.Fatalf("a productive death: settlement %+v starts %d churn %q state %q, want healed and restarted", s, len(k.starts()), k.meta("churn_count"), k.meta("state"))
+	}
+}
+
+// Kills a resume-failed reset the v2 paths that write a death's accrual drop
+// (mc-bm1af): A6's dead-runtime heal intent, a stranded seat's start that
+// carries its death alone into its PreWake, and the start recycle's death
+// step each record session.conversation_reset{reason:resume-failed} for a
+// committed manual conversation's third resume launch in a row to crash.
+// Until #7470, a manual row's heal resets its conversation before the
+// accrual, so the heal and recycle rows here are also named mode=always,
+// whose heal keeps it.
+func TestResumeFailedResetIsRecordedOnEveryDeathPath(t *testing.T) {
+	recent := gatherNow.Add(-10 * time.Second).Format(time.RFC3339)
+	run := []string{"provider", "claude", "session_key", "k-1", "started_config_hash", "h-1", "resume_launch", "true", "resume_failures", "2", "last_woke_at", recent}
+	named := append([]string{"manual_session", "true", "configured_named_session", "true", "configured_named_identity", "worker", "configured_named_mode", "always"}, run...)
+	resumeFailed := func(evs []events.Event) bool {
+		for _, e := range evs {
+			if e.Type == events.SessionConversationReset && strings.Contains(string(e.Payload), `"reason":"resume-failed"`) {
+				return true
+			}
+		}
+		return false
+	}
+
+	t.Run("A6's heal", func(t *testing.T) {
+		c := newHealCase(t, livenessGone, desireSleep, append([]string{"state", "awake"}, named...)...)
+		if it := c.decide(); it.Reason != decideDeadRuntimeHeal || it.Event == nil || !resumeFailed([]events.Event{*it.Event}) {
+			t.Fatalf("decideRow = (%q, %q) event %+v, want the heal recording the reset", it.Kind, it.Reason, it.Event)
+		}
+		if _, s := c.run(t, gone().tmux(), nil); s.Outcome != settledLanded || !resumeFailed(s.Facts.Events) {
+			t.Fatalf("settlement %+v, want the heal landed with its record", s)
+		}
+	})
+
+	t.Run("a stranded seat's start", func(t *testing.T) {
+		// A stranded seat is never configured-named, and records its death
+		// without the heal, so a plain manual row.
+		k, _ := launchKit(t, "active", append([]string{"session_origin", "manual"}, run...)...)
+		k.p.Clock.(*fakePlannerClock).auto = true // the stale-key wait
+		row := k.p.World.Census.Rows[k.it.Key]
+		r := &rowFacts{w: k.p.World, k: k.it.Key, row: row, found: true, entry: &selectionEntry{Key: k.it.Key, Liveness: livenessGone, Desired: desireWake, Template: "worker"}}
+		if !r.asleepStranded() {
+			t.Fatal("the seat is not stranded: the case is vacuous")
+		}
+		heal, class, _, ev := deadRuntimePatch(r, true)
+		it := r.startHealed(intent{Kind: intentRowHealFresh, Reason: decideDeadRuntimeHeal, Key: k.it.Key, Patch: heal, Class: class, Event: ev})
+		if it.Kind != intentStart || it.Heal == nil || it.Heal.Event == nil {
+			t.Fatalf("startHealed = %+v, want a start whose heal records the reset", it)
+		}
+		it.Deadline = k.it.Deadline
+		k.it = it
+		if s := k.runKind(); !resumeFailed(s.Facts.Events) {
+			t.Fatalf("settlement %+v, want the PreWake landed with the death's record", s)
+		}
+	})
+
+	t.Run("the start recycle", func(t *testing.T) {
+		k, _, _ := deadKit(t, false, "gc-1", "tok", "", append([]string{"state", "awake"}, named...)...)
+		if s := k.runKind(); !resumeFailed(s.Facts.Events) || k.meta("session_key") != "" {
+			t.Fatalf("settlement %+v key %q, want the death accrued with the reset recorded", s, k.meta("session_key"))
+		}
+	})
+}
+
+// Kills a death accounted over a runtime the death section reads (STALE-READ
+// E1): a runtime back under the name after the dead one is removed refuses
+// runtime-present, and the death accrues nothing.
+func TestStartRecycleAccountsTheDeathOnlyOverAGoneName(t *testing.T) {
+	recent := gatherNow.Add(-10 * time.Second).Format(time.RFC3339)
+	k, _, _ := deadKit(t, false, "gc-1", "tok", "", "state", "awake", "last_woke_at", recent, "wake_attempts", "1")
+	k.on(seamAfterCall, func() { k.runtimeAs("gc-1", "tok", nil) })
+	s := k.runKind()
+	if s.Outcome != settledRefused || s.Cause != causeRuntimePresent || k.meta("wake_attempts") != "1" || len(k.starts()) != 0 {
+		t.Fatalf("a runtime back after the kill: settlement %+v attempts %q starts %d; want refused %q, nothing accrued or started", s, k.meta("wake_attempts"), len(k.starts()), causeRuntimePresent)
 	}
 }
 

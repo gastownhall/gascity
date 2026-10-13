@@ -3648,6 +3648,9 @@ func TestHandleProviderSessionCreateWithMessageRollsBackOnDeliveryFailure(t *tes
 	if failure.ErrorCode != "message_delivery_failed" {
 		t.Fatalf("failure error_code = %q, want message_delivery_failed; message=%s", failure.ErrorCode, failure.ErrorMessage)
 	}
+	if failure.SessionID != "" {
+		t.Fatalf("failure session_id = %q, want empty: the rollback removed the session", failure.SessionID)
+	}
 	mgr := session.NewManagerWithOptions(fs.cityBeadStore, provider)
 	sessions, err := mgr.List("", "")
 	if err != nil {

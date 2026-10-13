@@ -1069,10 +1069,12 @@ func finishRuntimeDrainAck(dops drainOps, cityPath, targetName, sn, sessionID st
 const drainAckRefused = 2
 
 // drainAckModeLookupEnv is the environment drainAckCityMode latches the mode
-// with. Nil in production, so the mode is v2 only when this build admits v2
-// on its own; tests set the developer override instead of the process
-// environment and MUST NOT call t.Parallel().
-var drainAckModeLookupEnv func(string) (string, bool)
+// with: the process environment, as the controller latches it, so the
+// staging override (GC_RECONCILER_V2_SKELETON=1) makes runtime drain,
+// undrain, drain-ack and the hook's ack v2 before C9 (mc-t9wb5). Production
+// never sets the override, so there the mode is v2 only when this build
+// admits v2 on its own. Tests that replace it MUST NOT call t.Parallel().
+var drainAckModeLookupEnv = os.LookupEnv
 
 // drainAckCityMode reports whether the city at cityPath runs the v2 session
 // reconciler, the only reader of the row ack, and returns the config it read.

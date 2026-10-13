@@ -1464,6 +1464,17 @@ func (m *Manager) TranscriptPathClassified(id string, searchPaths []string) (str
 	); path != "" {
 		return path, TranscriptFound, nil
 	}
+	// A provider with a session-id flag runs each new conversation under a new
+	// key. A creating row of such a provider without a key is a start whose
+	// conversation has no key yet, and the work-directory fallback cannot tell
+	// its transcript from the one that start replaces. Other sessions in the
+	// work directory leave nothing to disambiguate before that key exists, so
+	// the window is absent, not ambiguous.
+	if strings.TrimSpace(b.Metadata["session_key"]) == "" &&
+		strings.TrimSpace(b.Metadata["session_id_flag"]) != "" &&
+		State(strings.TrimSpace(b.Metadata["state"])) == StateCreating {
+		return "", TranscriptAbsent, nil
+	}
 
 	sameWorkDirSessions, err := m.sameWorkDirSessionBeads(b, provider, workDir)
 	if err != nil {
@@ -1481,7 +1492,7 @@ func (m *Manager) TranscriptPathClassified(id string, searchPaths []string) (str
 		// workdir cannot be mapped safely to a single transcript.
 		return "", TranscriptAmbiguous, nil
 	}
-	if path := workertranscript.DiscoverPath(searchPaths, provider, workDir, ""); path != "" {
+	if path := workertranscript.DiscoverPath(searchPaths, provider, workDir, b.Metadata["session_key"]); path != "" {
 		return path, TranscriptFound, nil
 	}
 	return "", TranscriptAbsent, nil

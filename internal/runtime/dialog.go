@@ -1956,6 +1956,30 @@ func ProviderTerminalErrorReason(content string) string {
 	}
 }
 
+// ProviderResumeRefusalReason classifies content, a startup death's error
+// (which carries its last pane output) or a dead pane's screen, as the
+// provider's own refusal to resume sessionKey, the conversation it was
+// handed, "" when it is not: claude's "No conversation found with session
+// ID: <key>", the phrase and that key on one line. A refused resume cannot
+// succeed from that launch, so its caller starts the conversation fresh
+// instead of retrying the same resume (mc-bm1af).
+//
+// The key anchors it: a resumed claude draws its history before it can die,
+// so the phrase about another conversation (or the resume picker's "No
+// conversations found") in that history is no refusal.
+func ProviderResumeRefusalReason(content, sessionKey string) string {
+	key := strings.ToLower(strings.TrimSpace(sessionKey))
+	if key == "" {
+		return ""
+	}
+	for _, line := range strings.Split(strings.ToLower(content), "\n") {
+		if strings.Contains(line, "no conversation found with session id") && strings.Contains(line, key) {
+			return "conversation_not_found"
+		}
+	}
+	return ""
+}
+
 // lineContainsAll reports whether any single line of content contains every
 // substring in subs. It bounds loose multi-token matches to one line so the
 // tokens must co-occur in the same message rather than anywhere in scrollback.

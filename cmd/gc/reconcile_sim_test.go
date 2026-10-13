@@ -43,6 +43,9 @@ const (
 	simSteps  = 500
 	// simMaxPacedRounds bounds I10's paced re-issues at quiescence (v5.9n).
 	simMaxPacedRounds = 8
+	// simQuietExtension caps how far row timers armed during quiescence
+	// move I10's bound (quietBound).
+	simQuietExtension = 15 * time.Minute
 	simCISeeds        = 64
 	simGuard          = 10 * time.Second // real time: turns a hang into a failure
 	simCityLeg        = "city"
@@ -85,9 +88,14 @@ type simKill struct {
 	Method, Name string
 	Hit          *simRuntime
 	External     bool
+	Effect       string // the intent kind of the v2 effect that made it, when one ran
 }
 
 var errSimListing = errors.New("sim: list-sessions failed")
+
+// errSimEmptyName is the provider's refusal of an empty session name, as
+// tmux refuses one.
+var errSimEmptyName = errors.New("sim: empty session name")
 
 // simProvider is a fake tmux backend over runtime.Fake, whose other knobs
 // (peek, pending) it keeps: it lists corpses, keeps identity env per runtime,
@@ -106,9 +114,10 @@ type simProvider struct {
 	now         func() time.Time
 	listing     int // 0 complete; 1 partial, the first name missing; 2 failed (v5 O1)
 	serverDown  bool
-	confirmable bool  // a down server confirms dead (LL2)
-	external    bool  // the calls now are an operator's or a second controller's
-	nextStart   error // the next Start's scripted outcome
+	confirmable bool   // a down server confirms dead (LL2)
+	external    bool   // the calls now are an operator's or a second controller's
+	effect      string // the intent kind of the v2 effect now running (reconcile_sim_pending_test.go)
+	nextStart   error  // the next Start's scripted outcome
 	starts      []simStart
 	kills       []simKill
 	cached      map[string]simRuntime // the runtimes at the last listing
@@ -250,6 +259,9 @@ func (p *simProvider) IsAttachedWithError(name string) (bool, error) {
 // Start creates a runtime carrying cfg's identity env, unless a scripted
 // outcome fails it or the name is held (FreshOnly's ErrSessionExists).
 func (p *simProvider) Start(_ context.Context, name string, cfg runtime.Config) error {
+	if name == "" {
+		return errSimEmptyName // tmux refuses an empty session name
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	s := simStart{Name: name, ID: cfg.Env["GC_SESSION_ID"], Token: cfg.Env["GC_INSTANCE_TOKEN"], FreshOnly: cfg.FreshOnly, External: p.external}
@@ -269,6 +281,9 @@ func (p *simProvider) Start(_ context.Context, name string, cfg runtime.Config) 
 }
 
 func (p *simProvider) Stop(name string) error {
+	if name == "" {
+		return errSimEmptyName
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.killLocked("Stop", name)
@@ -282,7 +297,7 @@ func (p *simProvider) killLocked(method, name string) {
 		hit = &c
 		p.drop(name)
 	}
-	p.kills = append(p.kills, simKill{Method: method, Name: name, Hit: hit, External: p.external})
+	p.kills = append(p.kills, simKill{Method: method, Name: name, Hit: hit, External: p.external, Effect: p.effect})
 }
 
 // simBacking is one leg's revisioned store: a MemStore stamped require, whose
@@ -368,6 +383,11 @@ type sim struct {
 	// respawnBegun are the (row, bead) pairs with an idle-respawn begin
 	// (I25).
 	respawnBegun map[string]bool
+	// noPendingCreates is simOpts.noPendingCreates (reconcile_sim_pending_test.go).
+	noPendingCreates bool
+	// stopAdmissions are the stops each pass admitted, by row
+	// (reconcile_sim_pending_test.go), for I16's moved-basis excuse.
+	stopAdmissions map[rowKey]stopAdmission
 	// killsChecked is how many of the provider's kills I4 and I5 judged.
 	killsChecked int
 	// closedInStep is, by session name, each row an outside writer closed
@@ -379,6 +399,12 @@ type sim struct {
 	// basisMoves are the outside writes that moved a row's drain basis, as
 	// "leg/id", in order (I16, v5.9n); writes is cleared every step.
 	basisMoves []string
+	// lastWriter is, by "leg/id" and key, the actor whose write last changed
+	// the key; premiseRefusals are the rows, as "leg/id", whose own effect
+	// refused on its premise over a key an outside writer last changed, in
+	// order (I15's #57 clock, v5.9x).
+	lastWriter      map[string]map[string]string
+	premiseRefusals []string
 	// round is the effects quiescence's current round released, with
 	// their settlements (I10's paced retries, v5.9n).
 	round    []simResult
@@ -390,13 +416,14 @@ type sim struct {
 	stable map[string]bool
 	// preWakeQuarantine is each row's quarantined_until at v2's last PreWake
 	// of it; quarantinedCommits the rows whose commit kept a quarantine that
-	// landed after it (§12.2 #57), by the time the commit landed.
+	// landed after it (§12.2 #57), by their bound's clock (v5.9x).
 	preWakeQuarantine  map[string]string
-	quarantinedCommits map[string]time.Time
+	quarantinedCommits map[string]*quarantinedClock
 	failures           []string
 	locks              *lockObserver // the sections holding each row's mutation lock
 	runMu              sync.Mutex
 	running            map[effectKey]*simEffect // released, by key, for their seams
+	credit             decisionCredit           // the arm decisions the census credits (reconcile_sim_coverage_test.go)
 }
 
 // simOpts scripts a run: rows replaces the seeded rows, and the other fields
@@ -408,6 +435,9 @@ type simOpts struct {
 	// rowLock replaces runTx's session mutation lock, unobserved.
 	rowLock func(id string, fn func() error) error
 	arms    func([]rowArm) []rowArm
+	// noPendingCreates seeds no pending creates (reconcile_sim_pending_test.go):
+	// the floored corpus keeps its floor members' acks in reach.
+	noPendingCreates bool
 }
 
 func newSim(t *testing.T, seed uint64, o simOpts) *sim {
@@ -425,6 +455,7 @@ func newSim(t *testing.T, seed uint64, o simOpts) *sim {
 	if o.rows == nil {
 		o.rows = (*sim).seedRows
 	}
+	s.noPendingCreates = o.noPendingCreates
 	city, rig := o.rows(s)
 	for name, rows := range map[string][]beads.Bead{simCityLeg: city, simRigLeg: rig} {
 		m := beads.NewMemStoreFrom(0, rows, nil)
@@ -481,7 +512,10 @@ func newSim(t *testing.T, seed uint64, o simOpts) *sim {
 		}()
 	}
 	s.p = newPlanner(s.clk, func() time.Duration { return simPatrol }, nil, inflight, nil, io.Discard)
-	s.p.pass = func(now time.Time) passResult { return s.p.tracePass(s.env, now) }
+	s.p.pass = func(now time.Time) (res passResult) {
+		s.credit.planning(func() { res = s.p.tracePass(s.env, now) }) // the census credits its decisions
+		return res
+	}
 	s.p.effects = s.x
 	if simPristineSpecs == nil {
 		simPristineSpecs = effectSpecs
@@ -501,11 +535,12 @@ func newSim(t *testing.T, seed uint64, o simOpts) *sim {
 		withRowMutationLock = o.rowLock
 		t.Cleanup(func() { withRowMutationLock = saved })
 	}
+	savedArms, arms := rowArms, slices.Clone(rowArms)
 	if o.arms != nil {
-		saved := rowArms
-		rowArms = o.arms(slices.Clone(saved))
-		t.Cleanup(func() { rowArms = saved })
+		arms = o.arms(arms)
 	}
+	rowArms = countArms(arms, &s.credit) // reconcile_sim_coverage_test.go
+	t.Cleanup(func() { rowArms = savedArms })
 	t.Cleanup(s.teardown)
 	s.prev = s.snapshot()
 	return s
@@ -538,6 +573,9 @@ func (s *sim) seedRows() (city, rig []beads.Bead) {
 		city = append(city, row(fmt.Sprintf("gc-%d", i), i))
 	}
 	city = append(city, routedDemandBead("gc-w1"), routedDemandBead("gc-w2"))
+	if !s.noPendingCreates {
+		city = append(city, s.pendingCreateRows()...) // reconcile_sim_pending_test.go
+	}
 	for i := 1; i <= 1+s.rng.IntN(2); i++ {
 		rig = append(rig, row(fmt.Sprintf("rg-%d", i), 10+i))
 	}
@@ -627,6 +665,7 @@ func (s *sim) pass() {
 	s.p.runPass(now)
 	rec := s.p.out.record.Load()
 	s.logf("pass: admitted %v, %d deferred %s", intentKeys(rec.Admitted), len(rec.Deferred), rec.Err)
+	s.noteStopAdmissions(rec) // reconcile_sim_pending_test.go: as the pass admits them
 	census, obs := s.observed()
 	for _, d := range rec.Deferred {
 		if strings.HasPrefix(d.Cause, "rests-") {
@@ -642,6 +681,9 @@ func (s *sim) pass() {
 		}
 		if it.Kind == intentSignalAck && it.Reason == decideFloorAckCancel {
 			simFloorCancels.Add(1)
+		}
+		if it.Reason == decideSquatterHeal {
+			simSquatterHeals.Add(1)
 		}
 		if census != nil {
 			info := census.Rows[it.Key].Info
@@ -713,7 +755,7 @@ func (s *sim) releaseInside(i int) {
 		seams = append(seams, seamAfterCall)
 	}
 	e.seam = seams[s.rng.IntN(len(seams))]
-	op := externalOps[s.rng.IntN(len(externalOps))]
+	op := s.pickExternalOp()
 	fire := func() {
 		l := s.legOf(e.it.Key.Leg)
 		if b, err := l.backing.Get(e.it.Key.ID); err == nil {
@@ -864,6 +906,107 @@ var externalOps = []struct {
 	}},
 }
 
+// ensureRunningAllows is Manager.ensureRunning's refusal before any start: a
+// kill-fenced row, or one whose drain-ack stop is pending (the controller's
+// stop owns its runtime), starts nothing.
+func (s *sim) ensureRunningAllows(b beads.Bead) bool {
+	m := b.Metadata
+	return !session.KillPendingMetadata(m["state"], m["state_reason"], m["sleep_reason"], m["slept_at"], s.clk.Now()) &&
+		(m["state"] != string(session.StateDraining) || m["state_reason"] != session.DrainAckStopPendingReason)
+}
+
+// ensureRunningConfirms is Manager.ensureRunning's write once the runtime
+// is up, started by this attach or found running (started false):
+//   - on a row an operator holds (KeepsSlot) whose runtime it started, or
+//     that is suspended, active or awake (liveUserHoldDecision for a running
+//     one), the hold's consume (consumeUserHold): the operator's Resume
+//     cell, and the row active with its wake request, sleep reason, slept_at
+//     and claim cleared; nothing at all when the cell refuses (a draining
+//     row);
+//   - otherwise confirmLiveSessionState: the row active from a dormant or
+//     uncommitted state, its claim cleared.
+//
+// Either clears the stop request, operator_drain included
+// (restartStopRequestClears), only for a runtime it started, as PreWake
+// does (#7635), so the controller never adopts an operator's attach
+// (mc-946b6 seed 848's sim gap; the #7765 review).
+func (s *sim) ensureRunningConfirms(l *simLeg, b beads.Bead, started bool) {
+	m, now := b.Metadata, s.clk.Now()
+	patch := session.MetadataPatch{}
+	if started {
+		for k := range session.ClearStopRequestPatch() {
+			if m[k] != "" {
+				patch[k] = ""
+			}
+		}
+		if m[session.OperatorDrainKey] != "" {
+			patch[session.OperatorDrainKey] = ""
+		}
+	}
+	state := session.State(strings.TrimSpace(m["state"]))
+	d := session.DecodeDisposition(m)
+	// ensureRunning consumes the hold where it starts the runtime (a dead
+	// one, or a suspended row's), or over a running one only on an active or
+	// awake row (liveUserHoldDecision); every other held row it confirms.
+	if consumes := started || state == session.StateSuspended || state == session.StateActive || state == session.StateAwake; d.KeepsSlot() && consumes {
+		to, err := d.Apply(session.ActorOperator, session.DispEvent{Kind: session.EvResume}, state, now)
+		if err != nil {
+			return // the Resume cell refused (a draining row): consumeUserHold writes nothing
+		}
+		maps.Copy(patch, to.Changed().Fold())
+		maps.Copy(patch, session.ClearWakeRequestPatch())
+		for k, v := range map[string]string{"state": string(session.StateActive), "state_reason": "creation_complete", "sleep_reason": "", "slept_at": "", "pending_create_claim": "", "pending_create_started_at": ""} {
+			patch[k] = v
+		}
+	} else {
+		switch state {
+		case "", session.StateStartPending, session.StateCreating, session.StateAsleep, session.StateSuspended:
+			patch["state"], patch["state_reason"] = string(session.StateActive), "creation_complete"
+		}
+		if strings.TrimSpace(m["pending_create_claim"]) != "" {
+			patch["pending_create_claim"], patch["pending_create_started_at"] = "", ""
+		}
+	}
+	var kv []string
+	for _, k := range slices.Sorted(maps.Keys(patch)) {
+		if m[k] != patch[k] {
+			kv = append(kv, k, patch[k])
+		}
+	}
+	if len(kv) > 0 {
+		s.setMeta(l, b.ID, kv...)
+	}
+}
+
+// runtimeOpStarts are the outside starts among runtimeOps, by name, with
+// the row write each makes once its runtime is up; each runs only when
+// ensureRunning would start at all.
+var runtimeOpStarts = map[string]func(s *sim, l *simLeg, b beads.Bead, started bool){
+	"attach-recreates": (*sim).ensureRunningConfirms, // gc session attach
+}
+
+// runtimeOp runs the runtime op name (fn) on row b. An outside start
+// (runtimeOpStarts) runs only where ensureRunning would start at all
+// (ensureRunningAllows), starts nothing over a running session, and then
+// writes the row as ensureRunning does.
+func (s *sim) runtimeOp(name string, fn func(p *simProvider, name string, b beads.Bead), l *simLeg, b beads.Bead) {
+	confirm := runtimeOpStarts[name]
+	if confirm != nil && !s.ensureRunningAllows(b) {
+		return
+	}
+	sessName := b.Metadata["session_name"]
+	s.sp.mu.Lock()
+	rt := s.sp.rts[sessName]
+	running := rt != nil && !rt.corpse
+	if confirm == nil || !running {
+		fn(s.sp, sessName, b)
+	}
+	s.sp.mu.Unlock()
+	if confirm != nil {
+		confirm(s, l, b, !running)
+	}
+}
+
 // runtimeOps change the runtime under a row's name, under the provider's mu.
 var runtimeOps = []struct {
 	name string
@@ -964,16 +1107,12 @@ func (s *sim) step() {
 	case r < 70:
 		s.deliver()
 	case r < 84:
-		op := externalOps[s.rng.IntN(len(externalOps))]
+		op := s.pickExternalOp()
 		s.external(op.name, func(l *simLeg, b beads.Bead) { op.fn(s, l, b) })
 		return
 	default:
-		op := runtimeOps[s.rng.IntN(len(runtimeOps))]
-		s.external("runtime "+op.name, func(_ *simLeg, b beads.Bead) {
-			s.sp.mu.Lock()
-			defer s.sp.mu.Unlock()
-			op.fn(s.sp, b.Metadata["session_name"], b)
-		})
+		op := s.pickRuntimeOp()
+		s.external("runtime "+op.name, func(l *simLeg, b beads.Bead) { s.runtimeOp(op.name, op.fn, l, b) })
 		return
 	}
 	s.audit("v2")
@@ -994,6 +1133,7 @@ func (s *sim) audit(actor string) {
 		}
 		leg, _, _ := strings.Cut(k, "/")
 		s.writes = append(s.writes, simWrite{Leg: leg, Actor: actor, Before: before, After: after, At: s.clk.Now()})
+		s.noteWriter(k, actor, before, after)
 		if actor == "v2" {
 			continue
 		}
@@ -1051,6 +1191,20 @@ func (s *sim) snapshot() map[string]beads.Bead {
 func (s *sim) run() {
 	s.inventory()
 	for range simSteps {
+		if s.step(); len(s.failures) > 0 {
+			return
+		}
+	}
+	s.quiesce()
+}
+
+// runShifted is run with one extra RNG draw before every step: the same
+// operations on a schedule the corpus never takes, so a model gap that fits
+// only main's stream shows here (mc-946b6).
+func (s *sim) runShifted() {
+	s.inventory()
+	for range simSteps {
+		_ = s.rng.IntN(100)
 		if s.step(); len(s.failures) > 0 {
 			return
 		}
@@ -1177,6 +1331,7 @@ func (s *sim) quiesce() {
 	s.audit("v2")
 	slack := 2*simPatrol + s.cfg.Session.StartupTimeoutDuration()
 	bound := s.lastTimer().Add(slack)
+	ceiling := bound.Add(simQuietExtension)
 	rounds := quiesceRounds{}
 	for first, done := true, false; !done && len(s.failures) == 0; first = false {
 		before, backoff, at := s.snapshot(), s.p.backoff.Snapshot(), s.clk.Now()
@@ -1194,6 +1349,7 @@ func (s *sim) quiesce() {
 			// before it is in the table, and the bound covers it.
 			bound = b
 		}
+		bound = quietBound(bound, s.rowTimers(), s.clk.Now(), slack, ceiling)
 		after := s.snapshot()
 		changed := !maps.EqualFunc(before, after, sameBead)
 		switch {
@@ -1300,8 +1456,9 @@ type simResult struct {
 // effects all refused a re-issue the contract holds, each no earlier than
 // its row's backoff expiry (a paced retry, not a loop), and whose only store
 // change is the runtime lease record each attempt writes. The holds: a stop
-// a human's attach holds (§12.2 #10), and a stop refused liveness-unknown
-// while its runtime's probe keeps erroring (I17).
+// a human's attach holds (§12.2 #10), and a stop, rollback or fresh heal
+// refused liveness-unknown while its runtime's probe keeps erroring (I17,
+// v5.10l).
 func (s *sim) pacedRetries(backoff map[string]backoffRecord, at time.Time, before, after map[string]beads.Bead) bool {
 	for k, b := range after {
 		a, ok := before[k]
@@ -1322,7 +1479,20 @@ func (s *sim) pacedRetries(backoff map[string]backoffRecord, at time.Time, befor
 		held := r.it.Kind == intentStop && r.res.Cause == fenceAttached ||
 			// A probe that keeps erroring holds the stop, as I17 rules it
 			// not stoppable (v5.9n).
-			r.it.Kind == intentStop && r.res.Cause == fenceLivenessUnknown && s.probeErring(row)
+			r.it.Kind == intentStop && r.res.Cause == fenceLivenessUnknown && s.probeErring(row) ||
+			// Likewise a rollback (A10): a runtime whose probe keeps erroring
+			// leaves its fresh read unknown, and C3 refuses on it
+			// (mc-cjtkj; seed 290).
+			r.it.Kind == intentRollback && r.res.Cause == causeLivenessUnknown && s.probeErring(row) ||
+			// Likewise a fresh heal (A6): the squatter heal over a Foreign
+			// occupant whose probe keeps erroring cannot re-prove it, and
+			// refuses (v5.10l; seeds 621, 780).
+			r.it.Kind == intentRowHealFresh && r.res.Cause == causeLivenessUnknown && s.probeErring(row) ||
+			// A start AL1 proposes for a row an operator holds (a pending
+			// create's claim, a manual session) that its PreWake refuses
+			// (RefusesPreWake), or whose recycle an attached pane refuses,
+			// paced by its backoff (mc-cjtkj).
+			r.it.Kind == intentStart && r.res.Cause == causeHeld && simHeld(row, at)
 		rec, backedOff := backoff[rowBackoffKey(r.it.Key)]
 		if r.res.Outcome != settledRefused || !held || !backedOff || rec.Until.After(at) {
 			return false
@@ -1342,10 +1512,41 @@ func withoutLeaseKeys(meta map[string]string) map[string]string {
 	return out
 }
 
+// quietBound is I10's bound past a row timer armed during quiescence (a
+// start's churn clear, a heal's quarantine): one still ahead of now moves
+// the bound out to it plus slack, never past ceiling (simQuietExtension past
+// the bound read at quiescence), and never earlier than it was. The
+// backoff table does not move it: its paced re-issues re-arm it.
+func quietBound(bound, timer, now time.Time, slack time.Duration, ceiling time.Time) time.Time {
+	if !timer.After(now) {
+		return bound
+	}
+	b := timer.Add(slack)
+	if b.After(ceiling) {
+		b = ceiling
+	}
+	if b.After(bound) {
+		return b
+	}
+	return bound
+}
+
 // lastTimer is the latest pending timer: a row's hold, quarantine or kill
 // fence, A6's churn clear past an open committed row's wake (SESS-540), or
 // a backoff's expiry.
 func (s *sim) lastTimer() time.Time {
+	last := s.rowTimers()
+	for _, r := range s.p.backoff.Snapshot() {
+		if r.Until.After(last) {
+			last = r.Until
+		}
+	}
+	return last
+}
+
+// rowTimers is the latest timer the rows hold: lastTimer without the
+// backoff table, whose paced retries re-arm it.
+func (s *sim) rowTimers() time.Time {
 	last := s.clk.Now()
 	later := func(t time.Time) {
 		if t.After(last) {
@@ -1370,8 +1571,8 @@ func (s *sim) lastTimer() time.Time {
 			}
 		}
 	}
-	for _, r := range s.p.backoff.Snapshot() {
-		later(r.Until)
+	for _, t := range s.pendingCreateTimers() { // reconcile_sim_pending_test.go
+		later(t)
 	}
 	return last
 }
@@ -1399,21 +1600,50 @@ func simSeeds(t *testing.T) []uint64 {
 	return seeds
 }
 
+// TestSimCorpusShiftedRNG is the corpus on the shifted stream (runShifted),
+// a CI gate beside it (mc-946b6): every seed's schedule differs from main's,
+// so the invariants are checked on 1024 schedules more.
+func TestSimCorpusShiftedRNG(t *testing.T) {
+	for _, seed := range simSeeds(t) {
+		t.Run(fmt.Sprint(seed), func(t *testing.T) {
+			s := newSim(t, seed, simOpts{})
+			s.runShifted()
+			s.report(t)
+		})
+	}
+}
+
 // Kills any merged path that breaks an invariant a run can observe: every
 // seed runs simSteps steps, then quiesces.
 // simDrainBegins counts the A20 begins the sims admitted.
 var simDrainBegins atomic.Int64
 
+// simSquatterHeals counts the squatter heals (CONTRACT v5.10c) the sims
+// admitted.
+var simSquatterHeals atomic.Int64
+
 func TestSimCorpus(t *testing.T) {
-	before := simDrainBegins.Load()
+	t.Cleanup(func() { writeSimCoverage(t) })
+	seeds := simSeeds(t)
+	before, squatters := simDrainBegins.Load(), simSquatterHeals.Load()
 	t.Cleanup(func() {
+		// The admission checks need a corpus: one replayed seed, or a
+		// range smaller than CI's, need not admit either.
+		if t.Failed() || os.Getenv("GC_V2_SIM_SEED") != "" || len(seeds) < simCISeeds {
+			return
+		}
 		// Kills a corpus that never exercises A20 (C6a2 review): every
 		// undesired row inside the grace, or already requested.
-		if !t.Failed() && simDrainBegins.Load() == before {
+		if simDrainBegins.Load() == before {
 			t.Error("the sim corpus admitted no A20 drain begin")
 		}
+		// Kills a corpus whose occupant faults never land on a committed
+		// row, which would leave v5.10c's heal unchecked by every invariant.
+		if simSquatterHeals.Load() == squatters {
+			t.Error("the sim corpus admitted no squatter heal")
+		}
 	})
-	for _, seed := range simSeeds(t) {
+	for _, seed := range seeds {
 		t.Run(fmt.Sprint(seed), func(t *testing.T) {
 			s := newSim(t, seed, simOpts{})
 			s.run()
@@ -1438,7 +1668,7 @@ func TestSimCorpusFloored(t *testing.T) {
 	})
 	for _, seed := range simSeeds(t) {
 		t.Run(fmt.Sprint(seed), func(t *testing.T) {
-			s := newSim(t, seed, simOpts{})
+			s := newSim(t, seed, simOpts{noPendingCreates: true})
 			s.cfg.Agents[0].MinActiveSessions = intPtr(1 + int(seed%2))
 			s.run()
 			s.report(t)
@@ -1455,7 +1685,22 @@ func TestSimCorpusFloored(t *testing.T) {
 func TestSimCorpusPinnedSeeds(t *testing.T) {
 	for _, seed := range []uint64{107, 337, 338, 427, 452, 465, 553, 657} {
 		t.Run(fmt.Sprint(seed), func(t *testing.T) {
-			s := newSim(t, seed, simOpts{})
+			s := newSim(t, seed, simOpts{noPendingCreates: true}) // main's scenarios: the seeds v5.9n pins
+			s.run()
+			s.report(t)
+		})
+	}
+}
+
+// TestSimCorpusFlooredPinnedSeeds (CONTRACT v5.10l). Kills an I10 model
+// that calls a paced fresh heal a loop: in floored seeds 621 and 780 the
+// squatter heal over a Foreign occupant whose probe keeps erroring refuses
+// liveness-unknown on its backoff through quiescence (mc-su7hv).
+func TestSimCorpusFlooredPinnedSeeds(t *testing.T) {
+	for _, seed := range []uint64{621, 780} {
+		t.Run(fmt.Sprint(seed), func(t *testing.T) {
+			s := newSim(t, seed, simOpts{noPendingCreates: true}) // TestSimCorpusFloored's scenario
+			s.cfg.Agents[0].MinActiveSessions = intPtr(1 + int(seed%2))
 			s.run()
 			s.report(t)
 		})
@@ -1518,5 +1763,127 @@ func TestSimInvariantsCatchSeededMutants(t *testing.T) {
 			}
 			t.Errorf("no seed of %d caught the mutant on %s", simCISeeds, m.inv)
 		})
+	}
+}
+
+// Kills I10's bound left behind a row timer armed during quiescence (shifted
+// seeds 99, 668: a start's churn clear), or moved by one it should not
+// follow: a timer ahead of now extends the bound to it plus slack, one not
+// ahead does not, the ceiling caps it, and the bound never moves earlier.
+func TestQuietBoundFollowsRowTimersArmedInQuiescence(t *testing.T) {
+	now, slack := plannerT0, time.Minute
+	bound, ceiling := now.Add(2*time.Minute), now.Add(17*time.Minute)
+	for _, c := range []struct {
+		name         string
+		bound, timer time.Time
+		want         time.Time
+	}{
+		{"a churn clear five minutes out", bound, now.Add(5 * time.Minute), now.Add(6 * time.Minute)},
+		{"a timer not ahead of now, the bound already passed", now.Add(-time.Minute), now, now.Add(-time.Minute)},
+		{"a timer past the ceiling", bound, now.Add(time.Hour), ceiling},
+		{"a timer whose bound would be earlier", bound, now.Add(30 * time.Second), bound},
+	} {
+		if got := quietBound(c.bound, c.timer, now, slack, ceiling); !got.Equal(c.want) {
+			t.Errorf("%s: bound %s, want %s", c.name, got.Sub(now), c.want.Sub(now))
+		}
+	}
+}
+
+// Kills a sim attach that writes where production's ensureRunning does not,
+// or leaves what it consumes (mc-946b6 seed 848; the #7765 review):
+//   - a kill-fenced row, or one whose drain-ack stop is pending, gets no
+//     row write and no start (ensureRunningAllows);
+//   - a claimed creating row with no runtime is started and made active,
+//     its claim cleared;
+//   - a running session is not restarted, and its stop request stays
+//     (started false); a dead one is started and its stop request cleared;
+//   - an operator's hold is consumed: its timer, intent and stamp, the sleep
+//     reason, slept_at and the wake request go, and the row reads active.
+func TestSimAttachModelsEnsureRunning(t *testing.T) {
+	var fn func(p *simProvider, name string, b beads.Bead)
+	for _, op := range runtimeOps {
+		if op.name == "attach-recreates" {
+			fn = op.fn
+		}
+	}
+	attach := func(t *testing.T, live bool, row beads.Bead) (beads.Bead, int) {
+		t.Helper()
+		var running []string
+		if live {
+			running = []string{row.ID}
+		}
+		s := scripted(t, running, row)
+		l := s.legs[0]
+		before, _ := l.backing.Get(row.ID)
+		starts := len(s.sp.starts)
+		s.runtimeOp("attach-recreates", fn, l, before)
+		after, _ := l.backing.Get(row.ID)
+		return after, len(s.sp.starts) - starts
+	}
+	now := rowAt(0)
+	stopReq := []string{session.DrainIntentReasonKey, "orphaned", session.DrainIntentAtKey, now, session.DrainIntentIncarnationKey, "1", session.OperatorDrainKey, "operator"}
+
+	for name, row := range map[string]beads.Bead{
+		"kill-fenced":            poolRow("gc-1", "worker", 1, "asleep", "instance_token", "tok-1", "state_reason", session.KillPendingReason, "sleep_reason", "killed", "slept_at", now),
+		"drain-ack stop pending": poolRow("gc-1", "worker", 1, string(session.StateDraining), "instance_token", "tok-1", "state_reason", session.DrainAckStopPendingReason),
+	} {
+		want := maps.Clone(row.Metadata) // the store shares row's map: compare with a copy
+		after, starts := attach(t, false, row)
+		if !maps.Equal(after.Metadata, want) || starts != 0 {
+			t.Errorf("%s: row %v, %d starts; want no write and no start", name, after.Metadata, starts)
+		}
+	}
+
+	after, starts := attach(t, false, poolRow("gc-1", "worker", 1, "creating", "instance_token", "tok-1", "pending_create_claim", "true", "pending_create_started_at", now))
+	if m := after.Metadata; starts != 1 || m["state"] != string(session.StateActive) || m["pending_create_claim"] != "" || m["pending_create_started_at"] != "" {
+		t.Errorf("a claimed creating row: row %v, %d starts; want started, active, its claim cleared", m, starts)
+	}
+
+	after, starts = attach(t, true, poolRow("gc-1", "worker", 1, "active", append([]string{"instance_token", "tok-1"}, stopReq...)...))
+	if m := after.Metadata; starts != 0 || m[session.DrainIntentReasonKey] != "orphaned" || m[session.OperatorDrainKey] != "operator" {
+		t.Errorf("a running session: row %v, %d starts; want no restart and its stop request kept", m, starts)
+	}
+	after, starts = attach(t, false, poolRow("gc-1", "worker", 1, "asleep", append([]string{"instance_token", "tok-1"}, stopReq...)...))
+	if m := after.Metadata; starts != 1 || m[session.DrainIntentReasonKey] != "" || m[session.OperatorDrainKey] != "" {
+		t.Errorf("a dead session: row %v, %d starts; want started, its stop request and operator_drain cleared", m, starts)
+	}
+
+	held := poolRow("gc-1", "worker", 1, "suspended", "instance_token", "tok-1", "sleep_intent", "user-hold", "held_until", rowAt(1000*time.Hour),
+		"suspended_at", rowAt(-time.Minute), "sleep_reason", "user-hold", "slept_at", now, "wake_request", "operator", "wake_requested_at", now)
+	after, _ = attach(t, false, held)
+	m := after.Metadata
+	for _, k := range []string{"sleep_intent", "held_until", "suspended_at", "sleep_reason", "slept_at", "wake_request", "wake_requested_at"} {
+		if m[k] != "" {
+			t.Errorf("an operator-held row: %s = %q after the attach, want consumed", k, m[k])
+		}
+	}
+	if m["state"] != string(session.StateActive) {
+		t.Errorf("an operator-held row: state %q, want active", m["state"])
+	}
+
+	// A held row ensureRunning only confirms (mc-37xy0): asleep with its
+	// runtime running (liveUserHoldDecision consumes only an active or awake
+	// one), so the row reads active and the hold stands; drained and running,
+	// a state the confirm leaves alone, gets no write. A held draining row
+	// whose runtime is gone is started, and the Resume cell refuses (the
+	// drain's stop owns the runtime), so consumeUserHold writes nothing.
+	hold := []string{"instance_token", "tok-1", "sleep_intent", "user-hold", "held_until", rowAt(1000 * time.Hour), "suspended_at", rowAt(-time.Minute)}
+	after, _ = attach(t, true, poolRow("gc-1", "worker", 1, "asleep", hold...))
+	if m := after.Metadata; m["state"] != string(session.StateActive) || m["sleep_intent"] != "user-hold" || m["held_until"] == "" || m["suspended_at"] == "" {
+		t.Errorf("a held asleep row with its runtime running: row %v, want active with the hold kept", m)
+	}
+	for _, c := range []struct {
+		name  string
+		live  bool
+		state string
+	}{
+		{"a held drained row with its runtime running", true, string(session.StateDrained)},
+		{"a held draining row with its runtime gone", false, string(session.StateDraining)},
+	} {
+		row := poolRow("gc-1", "worker", 1, c.state, hold...)
+		want := maps.Clone(row.Metadata)
+		if after, _ = attach(t, c.live, row); !maps.Equal(after.Metadata, want) {
+			t.Errorf("%s: row %v, want no write", c.name, after.Metadata)
+		}
 	}
 }

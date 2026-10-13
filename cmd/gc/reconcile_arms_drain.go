@@ -95,7 +95,8 @@ func authorizedByRank(r *rowFacts, reason string) bool {
 // DrainReason; for a Sleep entry the row's sleep intent, then idle, then
 // suspended (a configured named row of a suspended city), else
 // no-wake-reason. A heartbeat hold (held_until with no intent, SESS-617)
-// has none. Legacy's live-claim veto is not ported (PAR-LIVECLAIM).
+// has none. Legacy's live-claim veto is read at the orphaned signal (L5,
+// v5.10a B), not here.
 // drainableLiveness reports a runtime A20 may begin a drain over: alive, or
 // for a named Drain row a dead runtime, which A21 never closes
 // (deadRuntimeCloses excludes named rows; mc-q64l4)
@@ -240,8 +241,11 @@ func workKeepsNoWakeRow(r *rowFacts) bool {
 // legacy's lowest-bead-id membership) is the agent's own idle ack, and
 // stopping the seat only recreates it (sc-j27j0d): the ack is canceled,
 // its half voided, and the seat stays warm, whatever the allocation
-// wants of it (Keep, Sleep or Drain, as legacy cancels them), while its
-// runtime is alive. A request the row carries outranks the floor: the
+// wants of it (Keep, Sleep or Drain, as legacy cancels them). Unlike
+// legacy, which cancels only on a live runtime, a dead floor seat's ack
+// cancels too: A12 recycles the dead pane in place (mc-7is1r), where
+// legacy stops the seat and the floor recreates it. A request the row
+// carries outranks the floor: the
 // controller's own drains, and an operator's `gc runtime drain`
 // (stopRequest.Operator, legacy's GC_DRAIN).
 func armAck(r *rowFacts) (intent, bool) {
@@ -255,12 +259,16 @@ func armAck(r *rowFacts) (intent, bool) {
 	}
 	// The floor check stays after the stale-ack void: that check records
 	// the runtime rest the probing kind needs, so a cancel decided first
-	// would defer at admission (rests-missing). Legacy cancels only on a
-	// live runtime: a dead floor seat's ack signals, and the seat is
-	// stopped and recreated.
-	// TODO(#7626, mc-7is1r): when A12 restarts a dead pane in place, lift
-	// the liveness gate and assert the seat runs again.
-	if req.Reason == "" && !req.Operator && r.entry.Floor != nil && r.entry.Liveness == livenessAlive {
+	// would defer at admission (rests-missing).
+	if req.Reason == "" && !req.Operator && r.entry.Floor != nil {
+		if r.entry.Liveness == livenessDead {
+			// A dead floor seat proposes nothing (§12.2 row 66): A18's
+			// recycle restarts it in place with the ack still on the row, so
+			// its death is a drain's (nothing accrues), and the PreWake
+			// clears the stop request. A cancel first would void the ack and
+			// account a recent wake's death as a crash (mc-7is1r review).
+			return intent{}, false
+		}
 		return intent{Kind: intentSignalAck, Reason: decideFloorAckCancel, Basis: basis, Patch: stopAckVoidPatch()}, true
 	}
 	reason := req.Reason

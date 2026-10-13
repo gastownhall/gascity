@@ -1,6 +1,7 @@
 package dispatch
 
 import (
+	"fmt"
 	"maps"
 	"slices"
 	"strings"
@@ -68,6 +69,22 @@ func rootViewAll(opts ProcessOptions, rootID string) ([]beads.Bead, bool) {
 		return nil, false
 	}
 	return opts.view.root, true
+}
+
+// getRootInView is store.Get(rootID) answered from the root's direct members
+// when the invocation has already read them. A loaded view without the root
+// read it missing, so the answer is beads.ErrNotFound, as the Get would be.
+func getRootInView(store beads.Store, rootID string, opts ProcessOptions) (beads.Bead, error) {
+	all, ok := rootViewAll(opts, rootID)
+	if !ok {
+		return store.Get(rootID)
+	}
+	for _, member := range all {
+		if member.ID == rootID {
+			return member, nil
+		}
+	}
+	return beads.Bead{}, fmt.Errorf("root %s: %w", rootID, beads.ErrNotFound)
 }
 
 func readDirectMembers(store beads.Store, rootID string, gateRoot *beads.Bead) ([]beads.Bead, error) {

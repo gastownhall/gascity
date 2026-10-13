@@ -12,6 +12,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -24,6 +25,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -519,7 +521,8 @@ func healExpiredTimersInfo(info sessionpkg.Info, sessFront *sessionpkg.Store, cl
 //
 // transcriptRoots is the wake failure's conversation probe roots:
 // launchTranscriptRoots of the row's template.
-func checkStability(info sessionpkg.Info, cfg *config.City, alive bool, dt *drainTracker, sessFront *sessionpkg.Store, clk clock.Clock, peek func(lines int) (string, error), transcriptRoots []string) (sessionpkg.Info, bool) {
+// rec records a committed manual conversation's resume-failed reset.
+func checkStability(info sessionpkg.Info, cfg *config.City, alive bool, dt *drainTracker, sessFront *sessionpkg.Store, clk clock.Clock, peek func(lines int) (string, error), transcriptRoots []string, rec events.Recorder) (sessionpkg.Info, bool) {
 	if next, handled, err := checkRateLimitStability(info, cfg, alive, dt, sessFront, clk, peek); handled || err != nil {
 		return next, true
 	}
@@ -529,7 +532,8 @@ func checkStability(info sessionpkg.Info, cfg *config.City, alive bool, dt *drai
 	if !exitAccrualHolds(info, sessFront) {
 		return info, true
 	}
-	info = recordWakeFailure(info, transcriptRoots, sessFront, clk, sessionAgentMetricIdentityInfo(info, cfg))
+	// A rapid crash of a resume launch is resume-shaped.
+	info = recordWakeFailure(info, transcriptRoots, sessFront, clk, sessionAgentMetricIdentityInfo(info, cfg), resumeFailure{counted: info.ResumeLaunch == "true"}, rec)
 	info = clearLastWokeAt(info, sessFront)
 	return info, true
 }
@@ -618,13 +622,14 @@ func clearLastWokeAt(info sessionpkg.Info, sessFront *sessionpkg.Store) sessionp
 
 // recordRateLimitQuarantine backs off a session that exited into a provider
 // rate-limit screen without treating the exit as a crash or resetting its
-// conversation metadata. Returns (folded Info, nil) on success so the caller
-// advances the typed snapshot with the quarantine write (front-door migration
+// conversation metadata, never shortening a quarantine in force. Returns
+// (folded Info, nil) on success so the caller advances the typed snapshot
+// with the quarantine write (front-door migration
 // Step 6d, write-returns-Info); returns (info unchanged, err) on persist failure
 // (ApplyPatchInfo leaves the snapshot pinned to the rejected write).
 func recordRateLimitQuarantine(info sessionpkg.Info, sessFront *sessionpkg.Store, clk clock.Clock) (sessionpkg.Info, error) {
 	now := clk.Now()
-	batch := sessionpkg.CellIntoInfo(info, sessionpkg.ActorController, sessionpkg.DispEvent{Kind: sessionpkg.EvQuarantine, Until: now.Add(defaultRateLimitQuarantineDuration)}, now, sessionpkg.RateLimitQuarantinePatch())
+	batch := sessionpkg.ExtendQuarantine(info, now.Add(defaultRateLimitQuarantineDuration), now).Into(info.ID, sessionpkg.RateLimitQuarantinePatch())
 	next, err := sessFront.ApplyPatchInfo(info, batch)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "recordRateLimitQuarantine: SetMetadataBatch %s: %v\n", info.ID, err) //nolint:errcheck
@@ -712,7 +717,69 @@ func wakeFailureKeepsConversation(info sessionpkg.Info, searchPaths []string) bo
 	return probeable && present
 }
 
-func recordWakeFailure(info sessionpkg.Info, transcriptRoots []string, sessFront *sessionpkg.Store, clk clock.Clock, agentIdentity string) sessionpkg.Info {
+// maxResumeFailuresBeforeReset is how many resume-shaped wake failures in a
+// row reset a conversation whose transcript reads present (mc-bm1af,
+// CONTRACT v5.9w): a resume the provider keeps losing, its transcript under a
+// root the launch no longer reads, would otherwise keep its key through
+// every quarantine and never start.
+const maxResumeFailuresBeforeReset = 3
+
+// resumeFailure is what a wake failure tells the resume backstop.
+type resumeFailure struct {
+	// refused: the provider refused the resume it was handed
+	// (runtime.ProviderResumeRefusalReason); it resets at once.
+	refused bool
+	// counted: the failure is resume-shaped, a resume launch whose provider
+	// process died (a startup death or a rapid crash); it counts toward
+	// maxResumeFailuresBeforeReset. A capacity refusal, a deadline, a name
+	// collision and a spawn error are not.
+	counted bool
+}
+
+// startResumeFailure classifies a start that did not commit: resumed, its
+// launch was a resume of sessionKey; died, its provider process died during
+// startup; err, its error, which a startup death's last pane output rides
+// in; pane, the dead pane's screen when one was read.
+func startResumeFailure(resumed, died bool, sessionKey string, err error, pane string) resumeFailure {
+	if !resumed || err == nil || runtime.IsProviderCapacity(err) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, runtime.ErrSessionExists) {
+		return resumeFailure{}
+	}
+	return resumeFailure{
+		refused: runtime.ProviderResumeRefusalReason(err.Error(), sessionKey) != "" || runtime.ProviderResumeRefusalReason(pane, sessionKey) != "",
+		counted: died || errors.Is(err, runtime.ErrSessionDiedDuringStartup),
+	}
+}
+
+// resumeBackstop decides the backstop for a wake failure rf of a
+// conversation the probe would keep (keeps) with failures resume-shaped
+// failures before it in a row: a refusal resets, a resume-shaped failure
+// counts and resets at the bound, and anything else neither resets nor
+// counts. count is the run after it. A conversation the probe would not keep
+// resets anyway, outside the backstop.
+func resumeBackstop(failures int, keeps bool, rf resumeFailure) (reset bool, count int) {
+	switch {
+	case !keeps || !rf.refused && !rf.counted:
+		return false, failures
+	case rf.refused || failures+1 >= maxResumeFailuresBeforeReset:
+		return true, 0
+	}
+	return false, failures + 1
+}
+
+// resumeFailuresPatch writes count as info's resume_failures, "" for none,
+// or nothing when it already holds it.
+func resumeFailuresPatch(info sessionpkg.Info, count int) sessionpkg.MetadataPatch {
+	want := ""
+	if count > 0 {
+		want = strconv.Itoa(count)
+	}
+	if want == info.ResumeFailures {
+		return nil
+	}
+	return sessionpkg.MetadataPatch{"resume_failures": want}
+}
+
+func recordWakeFailure(info sessionpkg.Info, transcriptRoots []string, sessFront *sessionpkg.Store, clk clock.Clock, agentIdentity string, rf resumeFailure, rec events.Recorder) sessionpkg.Info {
 	// Parse the raw wake_attempts mirror (not the pre-parsed info.WakeAttempts,
 	// which zeroes on strconv.ErrRange) so an out-of-range counter yields the
 	// same clamped value the old strconv.Atoi(session.Metadata[...]) path did —
@@ -740,11 +807,26 @@ func recordWakeFailure(info sessionpkg.Info, transcriptRoots []string, sessFront
 	// transcript is there; unprobeable providers and absent transcripts keep the
 	// existing unconditional behavior. Attempt accrual and quarantine below are
 	// untouched either way, so a genuinely broken session still escalates.
+	//
+	// The keep has a backstop (resumeBackstop): a resume the provider refused
+	// resets at once, and the maxResumeFailuresBeforeReset-th resume-shaped
+	// failure in a row resets too; a committed manual conversation's reset
+	// records session.conversation_reset{reason:resume-failed}.
 	if info.SessionKey != "" || info.StartedConfigHash != "" {
-		if !wakeFailureKeepsConversation(info, transcriptRoots) {
-			reset := sessionpkg.ConversationResetPatch(true)
-			_ = sessFront.ApplyPatch(info.ID, reset)
-			info = info.ApplyPatch(reset)
+		failures, _ := strconv.Atoi(info.ResumeFailures)
+		keeps := wakeFailureKeepsConversation(info, transcriptRoots)
+		backstop, count := resumeBackstop(failures, keeps, rf)
+		patch := resumeFailuresPatch(info, count)
+		if !keeps || backstop {
+			if backstop && rec != nil && sessionpkg.HasStartedManualConversation(info) {
+				rec.Record(resumeFailedConversationResetEvent(info, agentIdentity))
+			}
+			patch = sessionpkg.ConversationResetPatch(true)
+			maps.Copy(patch, resumeFailuresPatch(info, 0))
+		}
+		if len(patch) > 0 {
+			_ = sessFront.ApplyPatch(info.ID, patch)
+			info = info.ApplyPatch(patch)
 		}
 	}
 	accrual := sessionpkg.WakeFailureAccrualPatch(attempts, defaultMaxWakeAttempts, clk.Now().Add(defaultQuarantineDuration))
@@ -772,6 +854,7 @@ func clearWakeFailures(info sessionpkg.Info, sessFront *sessionpkg.Store) sessio
 	if info.WakeAttemptsMetadata != "" && info.WakeAttemptsMetadata != "0" {
 		batch["wake_attempts"] = "0"
 	}
+	maps.Copy(batch, resumeFailuresPatch(info, 0)) // a stable run ends the resume backstop's run
 	if info.QuarantinedUntil != "" {
 		// The Quarantine cell with no deadline: the quarantine ends.
 		batch = sessionpkg.CellIntoInfo(info, sessionpkg.ActorController, sessionpkg.DispEvent{Kind: sessionpkg.EvQuarantine}, time.Time{}, batch)
@@ -1071,6 +1154,7 @@ func healStatePatchWithRollbackInfo(info sessionpkg.Info, alive bool, observed b
 				batch[sessionpkg.PrimedAtMetadataKey] = ""
 				batch[sessionpkg.PrimingAttemptedAtMetadataKey] = ""
 				batch[sessionpkg.PromptHashMetadataKey] = ""
+				sessionpkg.ClearResumeRun(batch) // the next conversation's run starts anew (mc-bm1af)
 			}
 		}
 	}

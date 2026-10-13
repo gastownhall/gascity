@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
+- **The generic bead API no longer writes session rows, startup-health
+  episodes or convergence roots.** `POST /beads`, `PATCH /bead/{id}`,
+  `POST /bead/{id}/update`, `/close`, `/reopen`, `/assign`, `DELETE
+  /bead/{id}`, `POST /sling` naming one, and convoy create, add and remove
+  tracking one return 422, writing nothing. Workflow delete, graph convoy
+  delete, run cancel, sling `force` and wisp autoclose leave one alone
+  whatever links it to the workflow. Type and label match in any case and
+  spacing. A row is a session row by type `session` or by the `gc:session`
+  label. Use the owner's routes instead:
+  - client metadata: the new `metadata` map (`real_world_app_*` keys only)
+    on `POST /v0/city/{cityName}/sessions` and `PATCH /session/{id}`;
+  - pinning: the new `POST /session/{id}/pin` and `/unpin` (`gc session
+    pin|unpin`);
+  - title and alias: `PATCH /session/{id}`; lifecycle: the session verbs.
+
+  **Deliberately removed, with no replacement route:** setting a session
+  row's labels, description, priority, assignee or parent, or any other
+  metadata key, over HTTP. A typed work bead carrying the `gc:session`
+  label is written only by `bd`. `bd update` stays the operator escape
+  hatch for all of these. The coordination classes (`message`,
+  `gc:wait`, `gc:nudge`, `order-tracking`, `gc:wisp`, `gc:extmsg-*`)
+  are unchanged.
+
 - **New proxied scopes retire their proxy and Dolt child after 30 minutes
   idle.** Before this release every scope gc created was pinned to never, so a
   pair started by a stray read after `gc stop`, by `gc init --no-start`, or by
@@ -280,6 +303,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same way. Pass `--version` to choose another constraint.
 
 ### Fixed
+
+- **The pool orphan sweep treats a claim it cannot observe as unobservable,
+  not dead.** On a shared store, an assignee in `<rig>/<name>` form that this
+  city's config does not mint — another city's identity, a binding this city
+  imports only on another rig, or an agent, binding or namepool name since
+  REMOVED from local config — used to be judged by local session evidence
+  alone and silently stripped (`in_progress` → `open`, assignee cleared).
+  The dead-assignee sweep now keeps such a claim unless one of this city's
+  own session beads, open or closed, answers to the identity under its alias,
+  its configured named identity or its sole alias-history entry (looked up per
+  identity, at most once per pass), and logs one
+  `protected N foreign/unknown identities` summary per pass naming each
+  identity it kept and its claims. A namepool seat whose name was trimmed
+  therefore stays reapable after it closes; claims under the earlier aliases
+  of a seat renamed more than once are kept and named. The orphan-close
+  release of a confirmed orphaned session is unchanged. Only this Go sweep is
+  guarded: the core pack's `orphan-sweep.sh` order still releases a foreign
+  `<rig>/<name>` claim (#5955). Migration notes: a `<rig>/<name>` identity
+  moved to another city on the shared rig store keeps being released here
+  until this city's closed session records for it are purged or re-aliased.
+  The session record of a removed agent, binding or namepool name lasts until
+  closed session beads are purged, which happens only after
+  `GC_INFRA_SESSION_PURGE_AGE` (default 72h) on a relocated SQLite sessions
+  ledger with `wisp_ttl` set, or after `GC_REAPER_SESSION_PURGE_AGE` (default
+  720h) in the city store when the reaper's `GC_REAPER_SESSION_BEAD_PATTERN`
+  (default `gm-*`) matches the city's session bead IDs or is set to `""`.
+  Anywhere else closed session beads are kept indefinitely. Once the record is
+  purged, the sweep protects the identity's outstanding claims, so release them
+  explicitly (`gc bd release-if-current <id> <assignee>`/reassign) when
+  retiring one, and watch the summary line for claims held back.
+
+- **Codex `suggest` sessions start on current codex-cli and ask before
+  acting.** `permission_mode = "suggest"` passed `--ask-for-approval
+  untrusted`, a policy codex-cli 0.149.0 retired, so suggest sessions exited
+  at launch. Suggest now passes `--ask-for-approval on-request --sandbox
+  read-only`. Provider or agent `args` that spell the retired `untrusted`
+  policy, or name `--ask-for-approval on-request` alone or beside `--sandbox
+  workspace-write`, select suggest. Before, depending on the shape and the
+  start path, they launched with the unrestricted
+  `--dangerously-bypass-approvals-and-sandbox` default or failed to start.
+  Agent `args` are now normalized like provider `args` when every
+  schema-managed flag in them belongs to an option the `args` select: the
+  options they select beat the agent's own `option_defaults` for those keys.
+  Before, `gc session new` and API-created sessions dropped such flags and
+  launched the provider's default mode, so an agent that asked for approvals
+  through `args` could run with the bypass flag. Agent `args` with a flag that
+  belongs to no option they select, such as a lone `--ask-for-approval never`
+  or `--sandbox workspace-write`, are kept as written, as before, and are
+  still stripped by `gc session new` and API-created sessions, which then
+  launch the default mode: for codex, the bypass flag unless `option_defaults`
+  choose another mode (ga-kg2mqb). A provider `resume_command` that names an
+  `--ask-for-approval` policy no longer gets the bypass flag added beside it,
+  which codex rejected. Suggest sessions, and sessions of agents whose `args`
+  are now normalized, restart once after the upgrade because their launch
+  command changes (#7671).
 
 - **The OpenCode and MiMo Code plugins keep the stable prime at the head of
   the system prompt and drain queued nudges once per turn, per session.**

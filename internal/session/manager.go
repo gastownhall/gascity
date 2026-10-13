@@ -106,9 +106,10 @@ type Info struct {
 	LastNudgeDeliveredAt time.Time
 	Attached             bool
 	// ContinuationEpoch is the persisted continuation_epoch marker, used by the
-	// wait registration/retry paths to stamp registered_epoch on wait beads.
-	// Additive, internal-only: it is NOT emitted on the HTTP session-response
-	// wire (the response builder maps a fixed field set).
+	// wait registration/retry paths to stamp registered_epoch on wait beads and
+	// to scope LogicalConversationID. Additive, internal-only: it is NOT emitted
+	// on the HTTP session-response wire (the response builder maps a fixed field
+	// set).
 	ContinuationEpoch string
 	// SleepReason is the persisted sleep_reason marker, read by the wait-hold
 	// clear path to decide whether to clear sleep_reason. Additive,
@@ -479,6 +480,12 @@ type Info struct {
 	// the raw string (!= "" && != "0"), which the int form cannot reproduce (it collapses
 	// missing/"0"/malformed all to 0); the mirror preserves that distinction for Step 6b.
 	WakeAttemptsMetadata string // wake_attempts (raw)
+	// ResumeFailures is the RAW resume_failures metadata: the resume-shaped
+	// wake failures in a row of the current conversation (mc-bm1af).
+	ResumeFailures string // resume_failures (raw)
+	// ResumeLaunch is the RAW resume_launch metadata: "true" when the
+	// incarnation that last committed was launched as a resume.
+	ResumeLaunch string // resume_launch (raw)
 	// WakeRefusedEventAt is the RAW wake_refused_event_at metadata — the
 	// idempotency marker emitSessionWakeRefused checks (trimmed != "") before
 	// firing session.wake_refused, so repeated reconciler ticks on the same
@@ -1661,13 +1668,16 @@ func (m *Manager) Kill(ctx context.Context, by Actor, id string) error {
 	}
 	// Accept any state where a runtime process could plausibly exist.
 	// The reconciler uses "awake" as equivalent to "active", and metadata
-	// state can lag behind reality, so also check provider liveness.
+	// state can lag behind reality, so also check provider liveness, on a
+	// fresh read: a cached IsRunning (tmux's state cache) can read a runtime
+	// that just came up gone, and a kill-fenced row (asleep) would then be
+	// refused while its runtime runs.
 	state := State(b.Metadata["state"])
 	switch state {
 	case StateActive, StateStartPending, StateCreating, StateDraining, StateAwake:
 		// Known live states — proceed.
 	default:
-		if !m.sp.IsRunning(sessName) {
+		if m.runtimeConfirmedGone(ctx, sessName) {
 			return fmt.Errorf("session %s: %w", id, ErrSessionInactive)
 		}
 	}

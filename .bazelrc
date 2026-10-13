@@ -149,6 +149,10 @@ test:ci --experimental_use_validation_aspect
 # ran it (--noremote_upload_local_results, build:remote-exec above, is
 # unaffected: this flag only stops a read, never a write).
 test:fresh --nocache_test_results
+# The v2 simulator corpus ranges run as GoTestRun build actions
+# (tools/bazel/rules/go_test_run.bzl), which --nocache_test_results does not
+# reach: fresh re-executes them too (bazel_key_parity_test.go classifies it).
+test:fresh --modify_execution_info=GoTestRun=+no-cache
 
 # The tagged suites, as bazel.yml's lanes run them (byte-identical values:
 # --define and --test_timeout are key inputs). --test_timeout stays at or
@@ -165,6 +169,18 @@ test:integration --test_env=GC_FAST_UNIT=0
 # open findings, so their lanes skip validation actions until those are fixed.
 test:acceptance --norun_validations
 test:integration --norun_validations
+# bazel.yml's integration-packages lane: --config=integration plus a --jobs
+# that fits all of //test:integration_packages' test actions (77 shards,
+# scripts/bazel_integration_packages_budget_test.go) in Bazel's first wave.
+# Under remote-exec's --jobs=64 they ran in two, and Bazel does not schedule
+# the longest action first, so a long shard left for the second wave added
+# its whole duration to the lane's critical path (closed PR #7542 measured
+# up to +575s from such a tail). The lane selects this config on its
+# command line, which outranks the rc-file `build --config=remote-exec`
+# setup-bazel writes; no other lane's --jobs changes, and --jobs is no
+# action-key input (bazel_key_parity_test.go).
+test:integration-packages --config=integration
+test:integration-packages --jobs=128
 # The gating subset of //test/integration (bazel.yml's integration-smoke
 # lane): scripts/test-integration-shard's bdstore_tests and rest_smoke_tests,
 # which scripts/bazel_integration_smoke_test.go keeps this filter equal to.

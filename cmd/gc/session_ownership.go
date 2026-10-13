@@ -137,17 +137,45 @@ func claimedWorkStillHeldBy(work beads.Bead, sessionID string) bool {
 }
 
 // liveBeadRead reads one bead through the store's authoritative live handle,
-// bypassing a caching layer. The typed class wrappers (beads.SessionStore,
-// beads.WorkStore) do not promote the Handles capability, so they are peeled
-// first; without that the read would silently fall back to the cache.
+// bypassing a caching layer (liveReads): without the peel the read would
+// silently fall back to the cache, as CachingStore.Get serves the cache first.
 func liveBeadRead(store beads.Store, id string) (beads.Bead, error) {
-	switch v := store.(type) {
-	case beads.SessionStore:
-		store = v.Store
-	case beads.WorkStore:
-		store = v.Store
+	return liveReads(store).Get(id)
+}
+
+// liveRead is a read-only live handle on a store under its wrappers
+// (liveReads). It offers reads only, so a wrapper that refuses writes
+// (a v2 effect's read-only store) never hands its writable inner store on.
+type liveRead struct{ store beads.Store }
+
+// Get reads id through the peeled store's live handle, past any cache.
+func (r liveRead) Get(id string) (beads.Bead, error) { return beads.HandlesFor(r.store).Live.Get(id) }
+
+// Ready is beads.ReadyLive on the peeled store: its Backing() fast path
+// where it has one.
+func (r liveRead) Ready(q ...beads.ReadyQuery) ([]beads.Bead, error) {
+	return beads.ReadyLive(r.store, q...)
+}
+
+// liveReads is store's live read handle under the wrappers that do not
+// promote its live capabilities (Handles, Backing): the typed class wrappers
+// (beads.SessionStore, beads.WorkStore) and v2's read-only wrappers
+// (readOnlyStore, blindWriteRefusingStore: a v2 effect's stores).
+func liveReads(store beads.Store) liveRead {
+	for {
+		switch v := store.(type) {
+		case beads.SessionStore:
+			store = v.Store
+		case beads.WorkStore:
+			store = v.Store
+		case readOnlyStore:
+			store = v.Store
+		case blindWriteRefusingStore:
+			store = v.inner
+		default:
+			return liveRead{store: store}
+		}
 	}
-	return beads.HandlesFor(store).Live.Get(id)
 }
 
 // liveClaimVeto runs the ownership check for a demand-class drain decider and

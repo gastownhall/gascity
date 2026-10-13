@@ -143,6 +143,18 @@ func (m *Manager) submit(ctx context.Context, by Actor, id, message, resumeComma
 			return m.interruptAndSubmitLocked(ctx, by, id, b, sessName, message, resumeCommand, hints)
 		default:
 			running := m.sp.IsRunning(sessName)
+			if running && State(b.Metadata["state"]) != StateSuspended && len(hints.ProcessNames) > 0 && !m.sp.ProcessAlive(sessName, hints.ProcessNames) {
+				// The pane is up but its agent is dead: a crash the controller
+				// has not healed yet. Text typed into that pane is lost with
+				// it, so queue it for the incarnation the heal brings up, and
+				// fenced by the session alone: the crash heal may reset the
+				// conversation and rotate its epoch (mc-48az4).
+				if err := m.enqueueDeferredSubmitEpochLocked(b, sessName, message, ""); err != nil {
+					return err
+				}
+				outcome.Queued, outcome.Deferred = true, true
+				return nil
+			}
 			if pendingConversationRestart(b) && !running {
 				// A reset or restart is recorded but the replacement runtime is
 				// not up yet. Delivering now would start the pane just to carry
@@ -657,6 +669,12 @@ func needsDeferredStartupDialogVerification(b beads.Bead) bool {
 }
 
 func (m *Manager) enqueueDeferredSubmitLocked(b beads.Bead, sessName, message string) error {
+	return m.enqueueDeferredSubmitEpochLocked(b, sessName, message, deferredSubmitEpoch(b))
+}
+
+// enqueueDeferredSubmitEpochLocked is enqueueDeferredSubmitLocked fenced to
+// epoch ("" fences by the session alone).
+func (m *Manager) enqueueDeferredSubmitEpochLocked(b beads.Bead, sessName, message, epoch string) error {
 	if strings.TrimSpace(m.cityPath) == "" {
 		return errors.New("deferred submit is unavailable without a city path")
 	}
@@ -665,7 +683,7 @@ func (m *Manager) enqueueDeferredSubmitLocked(b beads.Bead, sessName, message st
 		ID:                "nudge-" + NewInstanceToken()[:12],
 		Agent:             deferredSubmitAgentKey(b),
 		SessionID:         b.ID,
-		ContinuationEpoch: deferredSubmitEpoch(b),
+		ContinuationEpoch: epoch,
 		Source:            "session",
 		Message:           message,
 		CreatedAt:         now,

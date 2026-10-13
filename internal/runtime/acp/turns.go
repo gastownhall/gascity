@@ -31,8 +31,11 @@ const (
 )
 
 // turnFailureConnClosed is the failure message recorded when the agent's
-// stdout reaches EOF while a prompt response is outstanding. EOF alone does
-// not say whether the process exited or only closed its output.
+// stdout reaches EOF, or its read end is closed by exec.Cmd.Wait after the
+// agent exits, while a prompt response is outstanding. The message names the
+// connection, not the process: a read end closed by Wait means the agent
+// exited, but EOF alone does not say whether it exited or only closed its
+// output.
 const turnFailureConnClosed = "agent connection closed before the turn completed"
 
 // turnFailureReadPrefix prefixes the failure message recorded when reading
@@ -41,7 +44,7 @@ const turnFailureConnClosed = "agent connection closed before the turn completed
 const turnFailureReadPrefix = "reading agent output: "
 
 // drainFailure is the turn failure message for a connection drained because
-// of cause (nil means EOF).
+// of cause (nil means EOF or a closed stdout pipe; see readLoopCause).
 func drainFailure(cause error) string {
 	if cause == nil {
 		return turnFailureConnClosed

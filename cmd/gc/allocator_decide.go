@@ -479,9 +479,15 @@ func (p *decidePass) openAssignedWork(info session.Info) *assignedWorkView {
 // not, as in legacy, whose lease reads only the agent. A lease anchor
 // (last_woke_at, pending_create_started_at) pendingCreateFutureSkew or more
 // in the future holds nothing, in a running or a suspended city, so a clock
-// stepped back cannot pin the row.
-// Legacy's other leased shape, a claimless start-pending row, has no
-// deadline, so it is not kept. Past its lease, A10 rolls the row back.
+// stepped back cannot pin the row. Past its lease, A10 rolls the row back.
+// Legacy also leases rows that hold no claim; a running city does not keep
+// them. A claimless start-pending row has no deadline. A client's create
+// still starting its runtime (manualCreateStartInFlightAt) has one, its
+// CreatedAt plus the in-flight window, and legacy keeps it, so not keeping
+// it here is a gap (ga-j07r38). The suspended-city keep, failedCreateLeased
+// and occupantLeaseHolds honor it through pendingCreateSessionStillLeasedAt;
+// pendingCreateAnchorAhead does not read CreatedAt, so a CreatedAt ahead of
+// the clock lengthens that hold (ga-mmq1ft).
 func (p *decidePass) keepReason(e *selectionEntry, info session.Info) string {
 	if e.Desired != desireSleep && e.Desired != desireDrain {
 		return ""

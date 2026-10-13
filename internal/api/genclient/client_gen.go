@@ -3348,6 +3348,9 @@ type RequestFailedPayload struct {
 
 	// RequestId Correlation ID from the 202 response.
 	RequestId string `json:"request_id"`
+
+	// SessionId Session a failed session.create had already written, when the server could identify it, so the client can inspect or clean it up instead of retrying into a duplicate. Absence does not prove that no session was written. The event subject does not carry this ID; match the event to its request by request_id.
+	SessionId *string `json:"session_id,omitempty"`
 }
 
 // RequestFailedPayloadOperation Which operation failed.
@@ -3742,6 +3745,9 @@ type SessionCreateBody struct {
 	// Message Initial message to send to the session.
 	Message *string `json:"message,omitempty"`
 
+	// Metadata External client metadata: real_world_app_* keys only (any other key is refused with 422). The generic bead API never writes a session row.
+	Metadata *map[string]string `json:"metadata,omitempty"`
+
 	// Name Agent or provider name.
 	Name *string `json:"name,omitempty"`
 
@@ -3843,6 +3849,9 @@ type SessionMessageSucceededPayload struct {
 type SessionPatchBody struct {
 	// Alias Session alias. Empty string clears the alias.
 	Alias *string `json:"alias,omitempty"`
+
+	// Metadata External client metadata: real_world_app_* keys only (any other key is refused with 422); an empty value clears the key.
+	Metadata *map[string]string `json:"metadata,omitempty"`
 
 	// Title Session title. If provided, must be non-empty.
 	Title *string `json:"title,omitempty"`
@@ -9678,7 +9687,7 @@ type GetV0CityByCityNameAgentsParams struct {
 	// Index Event sequence number; when provided, blocks until a newer event arrives.
 	Index *string `form:"index,omitempty" json:"index,omitempty"`
 
-	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
+	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.
 	Wait *string `form:"wait,omitempty" json:"wait,omitempty"`
 
 	// Pool Filter by pool name.
@@ -9747,7 +9756,7 @@ type GetV0CityByCityNameBeadsParams struct {
 	// Index Event sequence number; when provided, blocks until a newer event arrives.
 	Index *string `form:"index,omitempty" json:"index,omitempty"`
 
-	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
+	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.
 	Wait *string `form:"wait,omitempty" json:"wait,omitempty"`
 
 	// Cursor Opaque keyset pagination token from a previous response's next_cursor field. Invalid or legacy tokens are rejected with a typed 400 (invalid-cursor); re-fetch the first page.
@@ -9789,7 +9798,7 @@ type GetV0CityByCityNameBeadsReadyParams struct {
 	// Index Event sequence number; when provided, blocks until a newer event arrives.
 	Index *string `form:"index,omitempty" json:"index,omitempty"`
 
-	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
+	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.
 	Wait *string `form:"wait,omitempty" json:"wait,omitempty"`
 }
 
@@ -9822,7 +9831,7 @@ type GetV0CityByCityNameConvoysParams struct {
 	// Index Event sequence number; when provided, blocks until a newer event arrives.
 	Index *string `form:"index,omitempty" json:"index,omitempty"`
 
-	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
+	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.
 	Wait *string `form:"wait,omitempty" json:"wait,omitempty"`
 
 	// Cursor Opaque keyset pagination token from a previous response's next_cursor field. Invalid or legacy tokens are rejected with a typed 400 (invalid-cursor); re-fetch the first page.
@@ -9846,7 +9855,7 @@ type GetV0CityByCityNameEventsParams struct {
 	// Index Event sequence number; when provided, blocks until a newer event arrives.
 	Index *string `form:"index,omitempty" json:"index,omitempty"`
 
-	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
+	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.
 	Wait *string `form:"wait,omitempty" json:"wait,omitempty"`
 
 	// Cursor Opaque keyset pagination token from a previous response's next_cursor field. Invalid or legacy tokens are rejected with a typed 400 (invalid-cursor); re-fetch the first page.
@@ -10098,7 +10107,7 @@ type GetV0CityByCityNameMailParams struct {
 	// Index Event sequence number; when provided, blocks until a newer event arrives.
 	Index *string `form:"index,omitempty" json:"index,omitempty"`
 
-	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
+	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.
 	Wait *string `form:"wait,omitempty" json:"wait,omitempty"`
 
 	// Cursor Opaque keyset pagination token from a previous response's next_cursor field. Invalid or legacy tokens are rejected with a typed 400 (invalid-cursor); re-fetch the first page.
@@ -10386,7 +10395,7 @@ type GetV0CityByCityNameRigsParams struct {
 	// Index Event sequence number; when provided, blocks until a newer event arrives.
 	Index *string `form:"index,omitempty" json:"index,omitempty"`
 
-	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
+	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.
 	Wait *string `form:"wait,omitempty" json:"wait,omitempty"`
 
 	// Git Include git status.
@@ -10468,6 +10477,12 @@ type PostV0CityByCityNameSessionByIdPermissionModeParams struct {
 	XGCRequest string `json:"X-GC-Request"`
 }
 
+// PostV0CityByCityNameSessionByIdPinParams defines parameters for PostV0CityByCityNameSessionByIdPin.
+type PostV0CityByCityNameSessionByIdPinParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
 // PostV0CityByCityNameSessionByIdRenameParams defines parameters for PostV0CityByCityNameSessionByIdRename.
 type PostV0CityByCityNameSessionByIdRenameParams struct {
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
@@ -10493,6 +10508,9 @@ type RespondSessionParams struct {
 type PostV0CityByCityNameSessionByIdStopParams struct {
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
 	XGCRequest string `json:"X-GC-Request"`
+
+	// IdempotencyKey Idempotency key for safe retries.
+	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
 }
 
 // StreamSessionParams defines parameters for StreamSession.
@@ -10549,10 +10567,19 @@ type GetV0CityByCityNameSessionByIdTranscriptParams struct {
 // GetV0CityByCityNameSessionByIdTranscriptParamsFormat defines parameters for GetV0CityByCityNameSessionByIdTranscript.
 type GetV0CityByCityNameSessionByIdTranscriptParamsFormat string
 
+// PostV0CityByCityNameSessionByIdUnpinParams defines parameters for PostV0CityByCityNameSessionByIdUnpin.
+type PostV0CityByCityNameSessionByIdUnpinParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
 // PostV0CityByCityNameSessionByIdWakeParams defines parameters for PostV0CityByCityNameSessionByIdWake.
 type PostV0CityByCityNameSessionByIdWakeParams struct {
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
 	XGCRequest string `json:"X-GC-Request"`
+
+	// IdempotencyKey Idempotency key for safe retries.
+	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
 }
 
 // GetV0CityByCityNameSessionsParams defines parameters for GetV0CityByCityNameSessions.
@@ -10590,7 +10617,7 @@ type GetV0CityByCityNameStatusParams struct {
 	// Index Event sequence number; when provided, blocks until a newer event arrives.
 	Index *string `form:"index,omitempty" json:"index,omitempty"`
 
-	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
+	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.
 	Wait *string `form:"wait,omitempty" json:"wait,omitempty"`
 
 	// Lite When true, omit the expensive store-health, session-count, and work-count blocks for low-cost dashboard polls.
@@ -21158,6 +21185,9 @@ type ClientInterface interface {
 
 	PostV0CityByCityNameSessionByIdPermissionMode(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdPermissionModeParams, body PostV0CityByCityNameSessionByIdPermissionModeJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// PostV0CityByCityNameSessionByIdPin request
+	PostV0CityByCityNameSessionByIdPin(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdPinParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// PostV0CityByCityNameSessionByIdRenameWithBody request with any body
 	PostV0CityByCityNameSessionByIdRenameWithBody(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdRenameParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -21187,6 +21217,9 @@ type ClientInterface interface {
 
 	// GetV0CityByCityNameSessionByIdTranscript request
 	GetV0CityByCityNameSessionByIdTranscript(ctx context.Context, cityName string, id string, params *GetV0CityByCityNameSessionByIdTranscriptParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// PostV0CityByCityNameSessionByIdUnpin request
+	PostV0CityByCityNameSessionByIdUnpin(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdUnpinParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameSessionByIdWake request
 	PostV0CityByCityNameSessionByIdWake(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdWakeParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -23410,6 +23443,18 @@ func (c *Client) PostV0CityByCityNameSessionByIdPermissionMode(ctx context.Conte
 	return c.Client.Do(req)
 }
 
+func (c *Client) PostV0CityByCityNameSessionByIdPin(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdPinParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameSessionByIdPinRequest(c.Server, cityName, id, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) PostV0CityByCityNameSessionByIdRenameWithBody(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdRenameParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewPostV0CityByCityNameSessionByIdRenameRequestWithBody(c.Server, cityName, id, params, contentType, body)
 	if err != nil {
@@ -23532,6 +23577,18 @@ func (c *Client) PostV0CityByCityNameSessionByIdSuspend(ctx context.Context, cit
 
 func (c *Client) GetV0CityByCityNameSessionByIdTranscript(ctx context.Context, cityName string, id string, params *GetV0CityByCityNameSessionByIdTranscriptParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetV0CityByCityNameSessionByIdTranscriptRequest(c.Server, cityName, id, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PostV0CityByCityNameSessionByIdUnpin(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdUnpinParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameSessionByIdUnpinRequest(c.Server, cityName, id, params)
 	if err != nil {
 		return nil, err
 	}
@@ -32592,6 +32649,60 @@ func NewPostV0CityByCityNameSessionByIdPermissionModeRequestWithBody(server stri
 	return req, nil
 }
 
+// NewPostV0CityByCityNameSessionByIdPinRequest generates requests for PostV0CityByCityNameSessionByIdPin
+func NewPostV0CityByCityNameSessionByIdPinRequest(server string, cityName string, id string, params *PostV0CityByCityNameSessionByIdPinParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/session/%s/pin", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
+	return req, nil
+}
+
 // NewPostV0CityByCityNameSessionByIdRenameRequest calls the generic PostV0CityByCityNameSessionByIdRename builder with application/json body
 func NewPostV0CityByCityNameSessionByIdRenameRequest(server string, cityName string, id string, params *PostV0CityByCityNameSessionByIdRenameParams, body PostV0CityByCityNameSessionByIdRenameJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -32839,6 +32950,17 @@ func NewPostV0CityByCityNameSessionByIdStopRequest(server string, cityName strin
 		}
 
 		req.Header.Set("X-GC-Request", headerParam0)
+
+		if params.IdempotencyKey != nil {
+			var headerParam1 string
+
+			headerParam1, err = runtime.StyleParamWithOptions("simple", false, "Idempotency-Key", *params.IdempotencyKey, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("Idempotency-Key", headerParam1)
+		}
 
 	}
 
@@ -33214,6 +33336,60 @@ func NewGetV0CityByCityNameSessionByIdTranscriptRequest(server string, cityName 
 	return req, nil
 }
 
+// NewPostV0CityByCityNameSessionByIdUnpinRequest generates requests for PostV0CityByCityNameSessionByIdUnpin
+func NewPostV0CityByCityNameSessionByIdUnpinRequest(server string, cityName string, id string, params *PostV0CityByCityNameSessionByIdUnpinParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/session/%s/unpin", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
+	return req, nil
+}
+
 // NewPostV0CityByCityNameSessionByIdWakeRequest generates requests for PostV0CityByCityNameSessionByIdWake
 func NewPostV0CityByCityNameSessionByIdWakeRequest(server string, cityName string, id string, params *PostV0CityByCityNameSessionByIdWakeParams) (*http.Request, error) {
 	var err error
@@ -33262,6 +33438,17 @@ func NewPostV0CityByCityNameSessionByIdWakeRequest(server string, cityName strin
 		}
 
 		req.Header.Set("X-GC-Request", headerParam0)
+
+		if params.IdempotencyKey != nil {
+			var headerParam1 string
+
+			headerParam1, err = runtime.StyleParamWithOptions("simple", false, "Idempotency-Key", *params.IdempotencyKey, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("Idempotency-Key", headerParam1)
+		}
 
 	}
 
@@ -34837,6 +35024,9 @@ type ClientWithResponsesInterface interface {
 
 	PostV0CityByCityNameSessionByIdPermissionModeWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdPermissionModeParams, body PostV0CityByCityNameSessionByIdPermissionModeJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdPermissionModeResponse, error)
 
+	// PostV0CityByCityNameSessionByIdPinWithResponse request
+	PostV0CityByCityNameSessionByIdPinWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdPinParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdPinResponse, error)
+
 	// PostV0CityByCityNameSessionByIdRenameWithBodyWithResponse request with any body
 	PostV0CityByCityNameSessionByIdRenameWithBodyWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdRenameParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdRenameResponse, error)
 
@@ -34866,6 +35056,9 @@ type ClientWithResponsesInterface interface {
 
 	// GetV0CityByCityNameSessionByIdTranscriptWithResponse request
 	GetV0CityByCityNameSessionByIdTranscriptWithResponse(ctx context.Context, cityName string, id string, params *GetV0CityByCityNameSessionByIdTranscriptParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameSessionByIdTranscriptResponse, error)
+
+	// PostV0CityByCityNameSessionByIdUnpinWithResponse request
+	PostV0CityByCityNameSessionByIdUnpinWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdUnpinParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdUnpinResponse, error)
 
 	// PostV0CityByCityNameSessionByIdWakeWithResponse request
 	PostV0CityByCityNameSessionByIdWakeWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdWakeParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdWakeResponse, error)
@@ -35491,6 +35684,8 @@ type PatchV0CityByCityNameBeadByIdResponse struct {
 	ApplicationproblemJSON409 *ErrorModel
 	ApplicationproblemJSON422 *ErrorModel
 	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON503 *ErrorModel
+	ApplicationproblemJSON504 *ErrorModel
 }
 
 // Status returns HTTPResponse.Status
@@ -35630,6 +35825,8 @@ type PostV0CityByCityNameBeadByIdUpdateResponse struct {
 	ApplicationproblemJSON409 *ErrorModel
 	ApplicationproblemJSON422 *ErrorModel
 	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON503 *ErrorModel
+	ApplicationproblemJSON504 *ErrorModel
 }
 
 // Status returns HTTPResponse.Status
@@ -38772,6 +38969,36 @@ func (r PostV0CityByCityNameSessionByIdPermissionModeResponse) StatusCode() int 
 	return 0
 }
 
+type PostV0CityByCityNameSessionByIdPinResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON200                   *SessionResponse
+	ApplicationproblemJSON400 *ErrorModel
+	ApplicationproblemJSON401 *ErrorModel
+	ApplicationproblemJSON403 *ErrorModel
+	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON409 *ErrorModel
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON503 *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r PostV0CityByCityNameSessionByIdPinResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PostV0CityByCityNameSessionByIdPinResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type PostV0CityByCityNameSessionByIdRenameResponse struct {
 	Body                      []byte
 	HTTPResponse              *http.Response
@@ -38991,6 +39218,36 @@ func (r GetV0CityByCityNameSessionByIdTranscriptResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r GetV0CityByCityNameSessionByIdTranscriptResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type PostV0CityByCityNameSessionByIdUnpinResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON200                   *SessionResponse
+	ApplicationproblemJSON400 *ErrorModel
+	ApplicationproblemJSON401 *ErrorModel
+	ApplicationproblemJSON403 *ErrorModel
+	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON409 *ErrorModel
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON503 *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r PostV0CityByCityNameSessionByIdUnpinResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PostV0CityByCityNameSessionByIdUnpinResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -40974,6 +41231,15 @@ func (c *ClientWithResponses) PostV0CityByCityNameSessionByIdPermissionModeWithR
 	return ParsePostV0CityByCityNameSessionByIdPermissionModeResponse(rsp)
 }
 
+// PostV0CityByCityNameSessionByIdPinWithResponse request returning *PostV0CityByCityNameSessionByIdPinResponse
+func (c *ClientWithResponses) PostV0CityByCityNameSessionByIdPinWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdPinParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdPinResponse, error) {
+	rsp, err := c.PostV0CityByCityNameSessionByIdPin(ctx, cityName, id, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostV0CityByCityNameSessionByIdPinResponse(rsp)
+}
+
 // PostV0CityByCityNameSessionByIdRenameWithBodyWithResponse request with arbitrary body returning *PostV0CityByCityNameSessionByIdRenameResponse
 func (c *ClientWithResponses) PostV0CityByCityNameSessionByIdRenameWithBodyWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdRenameParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdRenameResponse, error) {
 	rsp, err := c.PostV0CityByCityNameSessionByIdRenameWithBody(ctx, cityName, id, params, contentType, body, reqEditors...)
@@ -41068,6 +41334,15 @@ func (c *ClientWithResponses) GetV0CityByCityNameSessionByIdTranscriptWithRespon
 		return nil, err
 	}
 	return ParseGetV0CityByCityNameSessionByIdTranscriptResponse(rsp)
+}
+
+// PostV0CityByCityNameSessionByIdUnpinWithResponse request returning *PostV0CityByCityNameSessionByIdUnpinResponse
+func (c *ClientWithResponses) PostV0CityByCityNameSessionByIdUnpinWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdUnpinParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdUnpinResponse, error) {
+	rsp, err := c.PostV0CityByCityNameSessionByIdUnpin(ctx, cityName, id, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostV0CityByCityNameSessionByIdUnpinResponse(rsp)
 }
 
 // PostV0CityByCityNameSessionByIdWakeWithResponse request returning *PostV0CityByCityNameSessionByIdWakeResponse
@@ -42544,6 +42819,20 @@ func ParsePatchV0CityByCityNameBeadByIdResponse(rsp *http.Response) (*PatchV0Cit
 		}
 		response.ApplicationproblemJSON500 = &dest
 
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 504:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON504 = &dest
+
 	}
 
 	return response, nil
@@ -42876,6 +43165,20 @@ func ParsePostV0CityByCityNameBeadByIdUpdateResponse(rsp *http.Response) (*PostV
 			return nil, err
 		}
 		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 504:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON504 = &dest
 
 	}
 
@@ -50030,6 +50333,88 @@ func ParsePostV0CityByCityNameSessionByIdPermissionModeResponse(rsp *http.Respon
 	return response, nil
 }
 
+// ParsePostV0CityByCityNameSessionByIdPinResponse parses an HTTP response from a PostV0CityByCityNameSessionByIdPinWithResponse call
+func ParsePostV0CityByCityNameSessionByIdPinResponse(rsp *http.Response) (*PostV0CityByCityNameSessionByIdPinResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PostV0CityByCityNameSessionByIdPinResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest SessionResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON400 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON401 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParsePostV0CityByCityNameSessionByIdRenameResponse parses an HTTP response from a PostV0CityByCityNameSessionByIdRenameWithResponse call
 func ParsePostV0CityByCityNameSessionByIdRenameResponse(rsp *http.Response) (*PostV0CityByCityNameSessionByIdRenameResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -50540,6 +50925,88 @@ func ParseGetV0CityByCityNameSessionByIdTranscriptResponse(rsp *http.Response) (
 			return nil, err
 		}
 		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParsePostV0CityByCityNameSessionByIdUnpinResponse parses an HTTP response from a PostV0CityByCityNameSessionByIdUnpinWithResponse call
+func ParsePostV0CityByCityNameSessionByIdUnpinResponse(rsp *http.Response) (*PostV0CityByCityNameSessionByIdUnpinResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PostV0CityByCityNameSessionByIdUnpinResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest SessionResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON400 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON401 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON403 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
 		var dest ErrorModel

@@ -3457,7 +3457,27 @@ func resolveDiscoveredSessionTemplate(bp *agentBuildParams, cfg *config.City, cf
 		}
 		tp.Env["GC_SESSION_ORIGIN"] = "named"
 	}
+	applyClientProviderChatStartupPrompt(bp, cfgAgent, resolveAgent, sessionQualifiedName, info.Alias, &tp)
 	return tp, nil
+}
+
+// applyClientProviderChatStartupPrompt applies the SessionStart hook's
+// predicate (see doPrimeWithHookFormatOpts) to the launch channel: when tp, the
+// resolved template of one of cfgAgent's sessions, is a client's provider chat
+// (isClientProviderChat), the chat starts, and resumes, with the beacon alone.
+// The beacon is still a delivered prompt, which stands the hook down, and it
+// drops the "Run `gc prime`" instruction, since an explicit `gc prime` hands
+// the worker persona back. It drops the assigned-skills appendix as well, which
+// only describes skills the session still materializes. Both resolutions of a
+// manual session's template call it, resolveDiscoveredSessionTemplate and the
+// pool realization of a session resumed for work assigned to it, so the two
+// cannot drift. identity is the session's qualified name, alias its GC_ALIAS.
+func applyClientProviderChatStartupPrompt(bp *agentBuildParams, cfgAgent, resolveAgent *config.Agent, identity, alias string, tp *TemplateParams) {
+	if !isClientProviderChat(cfgAgent, templateParamsSessionOrigin(*tp), alias) {
+		return
+	}
+	beacon := runtime.FormatBeaconAt(bp.cityName, identity, false, bp.beaconTime)
+	tp.Prompt = composeStartupPrompt(beacon, "", suppressStartupPromptForAgent(resolveAgent))
 }
 
 // overlayVerdict is classifyOverlaySession's answer for one open session row.
@@ -4029,6 +4049,7 @@ func realizePoolDesiredSessionsAt(
 		} else {
 			applyPoolInstanceIdentity(&tp, cfgAgent, qualifiedInstance, poolSlot, sbInfo)
 		}
+		applyClientProviderChatStartupPrompt(bp, cfgAgent, resolveAgent, qualifiedInstance, sbInfo.Alias, &tp)
 		segmentStart = bp.realizeNow()
 		installAgentSideEffects(bp, resolveAgent, tp, stderr)
 		stats.sideEffects += bp.realizeNow().Sub(segmentStart)

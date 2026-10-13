@@ -49,8 +49,10 @@ The spec is the full reference. A brief summary of the surfaces:
   set those. Each refusal names the offending field in `errors[]`.
   `gc bd update --set-metadata` on a session bead is an operator escape
   hatch: it bypasses the disposition and nothing checks it.
-- **Sessions.** CRUD under `/v0/city/{cityName}/sessions`, submit,
-  prompt, resume, interaction response, transcript, SSE stream.
+- **Sessions.** CRUD under `/v0/city/{cityName}/sessions`, submit
+  (and its `/messages` alias), wake, suspend, stop, kill, close,
+  interaction response, transcript, SSE stream. An explicit operator
+  resume is `resume: true` on submit or messages.
 - **External messaging.** `POST /v0/city/{cityName}/extmsg/adapters`
   registers a client's callback URL for a provider/account,
   `POST /v0/city/{cityName}/extmsg/inbound` delivers a turn to the
@@ -138,9 +140,9 @@ cannot parse and `415 Unsupported Media Type` for an unsupported content type;
 the `code`/`type` is the constant across those statuses, and the `errors` array
 pinpoints the fields that failed. A few endpoints perform their own additional
 validation and return a code-less `400`/`422` until converted, so treat a
-missing `code` as a legacy path (match on `status`/`detail`). Operations that
-enumerate their error responses (currently the bead and sling endpoints) list
-each status explicitly in the spec; others declare a single catch-all `default`
+missing `code` as a legacy path (match on `status`/`detail`). Most operations
+enumerate their error responses, listing each status explicitly in the spec; a
+few (including the event streams) still declare a single catch-all `default`
 error response. An enumerated list covers the operation's own errors plus the
 always-applied middleware errors (e.g. `403` on mutations); framework-level
 transport statuses may still occur, as with any HTTP API.
@@ -323,6 +325,21 @@ requests.
 - `gc events --watch` and `gc events --follow` in city scope output one
   `EventStreamEnvelope` JSON object per line.
 - `gc events --seq` in city scope prints the API's `X-GC-Index` value.
+
+#### Snapshot index
+
+City responses that carry `X-GC-Index` report the city event sequence
+captured before the response's state was read, including when the body
+comes from a response cache or an `Idempotency-Key` replay. Resuming the
+city event stream after that value (`after_seq` or `Last-Event-ID`), or
+blocking on it with `?index=`, observes every change made through the
+supervisor that the body does not already reflect. A change the body does
+reflect may be delivered again, so apply events idempotently by `seq`.
+
+A change that another process writes directly to the city's stores is
+reflected once the supervisor applies its event. A response served in
+between can report an index at or past that event without reflecting the
+change.
 
 ### Supervisor Scope
 

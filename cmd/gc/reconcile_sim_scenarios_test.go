@@ -29,6 +29,12 @@ func scripted(t *testing.T, live []string, rows ...beads.Bead) *sim {
 
 // scriptedWith is scripted with o's faults; o.rows is replaced.
 func scriptedWith(t *testing.T, o simOpts, live []string, rows ...beads.Bead) *sim {
+	// The store keeps the beads it is seeded with: a clone leaves the
+	// caller's rows the seed, so comparing one after a write is not vacuous.
+	rows = slices.Clone(rows)
+	for i := range rows {
+		rows[i].Metadata = maps.Clone(rows[i].Metadata)
+	}
 	o.rows = func(s *sim) ([]beads.Bead, []beads.Bead) {
 		for _, b := range rows {
 			for _, id := range live {
@@ -373,7 +379,8 @@ func deadRuntimeHealAcrossTime(t *testing.T, held bool) {
 // stability clear may clear quarantined_until only on a row its deciding pass
 // read committed, its own runtime alive and 30s past its wake. A clear inside
 // the 30s, on a dead runtime or on an uncommitted row is reported, and so is,
-// on a stable row, a rewrite of the quarantine or a stop request.
+// on a stable row, a shortening of the quarantine or a stop request; an
+// extension is not (an accrual's, the #7706 review).
 func TestSimI15StabilityCarveOut(t *testing.T) {
 	quarantined := func(state string, woke time.Duration, meta ...string) beads.Bead {
 		return poolRow("gc-1", "worker", 1, state, append([]string{"instance_token", "tok-1", "last_woke_at", rowAt(woke), "quarantined_until", rowAt(time.Hour)}, meta...)...)
@@ -388,7 +395,7 @@ func TestSimI15StabilityCarveOut(t *testing.T) {
 		{"inside 30s", quarantined("active", -10*time.Second), false, clearQ},
 		{"dead runtime", quarantined("active", -time.Hour), true, clearQ},
 		{"uncommitted", quarantined("creating", -time.Hour), false, clearQ},
-		{"stable, the quarantine rewritten", quarantined("active", -time.Hour), false, session.MetadataPatch{"quarantined_until": rowAt(2 * time.Hour)}},
+		{"stable, the quarantine shortened", quarantined("active", -time.Hour), false, session.MetadataPatch{"quarantined_until": rowAt(30 * time.Minute)}},
 		{"stable, a stop request on a user-hold row", quarantined("active", -time.Hour, "sleep_intent", "user-hold"), false, session.MetadataPatch{"quarantined_until": "", session.DrainIntentReasonKey: "idle"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -435,9 +442,43 @@ func TestSimI15StabilityCarveOut(t *testing.T) {
 		}
 		s.noViolations(t)
 	}
+	// An accrual's or a rate-limit quarantine's extension of a live
+	// quarantine is no violation; a shortening is, as are an unsigned
+	// extension (no counter advanced, no quarantine reason set, last_woke_at
+	// kept: a quarantine reason the row already carries signs nothing) and
+	// one past the longest quarantine the controller writes (the #7726
+	// review).
+	b := quarantined("active", -time.Hour, "sleep_reason", "idle", "wake_attempts", "4")
+	short := quarantined("active", -time.Hour, "quarantined_until", rowAt(time.Minute), "sleep_reason", "idle", "wake_attempts", "4")
+	shortQ := quarantined("active", -time.Hour, "quarantined_until", rowAt(time.Minute), "sleep_reason", "rate_limit")
+	for _, c := range []struct {
+		name string
+		row  beads.Bead
+		to   time.Duration
+		meta []string
+		want string
+	}{
+		{"an accrual's extension", short, defaultQuarantineDuration, []string{"wake_attempts", "5", "sleep_reason", "quarantine"}, ""},
+		{"a churn accrual's extension", short, defaultQuarantineDuration, []string{"churn_count", "3"}, ""},
+		{"a rate-limit quarantine's extension", short, defaultRateLimitQuarantineDuration, []string{"sleep_reason", "rate_limit"}, ""},
+		{"an unsigned extension", short, defaultQuarantineDuration, nil, "quarantined_until"},
+		{"an unsigned re-extension of a quarantined row", shortQ, defaultQuarantineDuration, nil, "quarantined_until"},
+		{"a re-extension clearing last_woke_at", shortQ, defaultRateLimitQuarantineDuration, []string{"last_woke_at", ""}, ""},
+		{"a signed extension past the longest quarantine", b, 2 * time.Hour, []string{"wake_attempts", "5", "sleep_reason", "quarantine"}, "quarantined_until"},
+		{"a shortening", b, 30 * time.Minute, []string{"wake_attempts", "5", "sleep_reason", "quarantine"}, "quarantined_until"},
+	} {
+		a := maps.Clone(c.row.Metadata)
+		a["quarantined_until"] = rowAt(c.to)
+		for i := 0; i+1 < len(c.meta); i += 2 {
+			a[c.meta[i]] = c.meta[i+1]
+		}
+		if k := dormantChange(c.row, a, gatherNow, false); k != c.want {
+			t.Fatalf("%s: dormantChange = %q, want %q", c.name, k, c.want)
+		}
+	}
+	b = quarantined("active", -time.Hour, "sleep_reason", "quarantine")
 	// A quarantine's reason cleared while the quarantine stands is still
 	// the quarantine's to keep.
-	b := quarantined("active", -time.Hour, "sleep_reason", "quarantine")
 	a := maps.Clone(b.Metadata)
 	a["sleep_reason"] = ""
 	if k := dormantChange(b, a, plannerT0, true); k != "sleep_reason" {
@@ -1008,15 +1049,16 @@ func TestSimFloorAckKeepsTheSeatWarm(t *testing.T) {
 	}
 }
 
-// Scenario M12 (PAR-FLOORACK, CONTRACT v5.9p): a floor member acks and its
-// pane then dies before the controller's pass, the normal exit after a
-// drain (remain-on-exit keeps the dead pane listed). Legacy cancels only a
-// live runtime's ack, and so does v2 until A12 restarts a dead pane in
-// place: the ack signals, the seat is stopped and its row closes, and the
-// floor's create replaces it, as on main.
-// TODO(#7626, mc-7is1r): when A12 lands, lift A11's liveness gate and
-// assert the seat runs again in place.
-func TestSimFloorAckOnADeadPaneStopsTheSeat(t *testing.T) {
+// Scenario M12 (PAR-FLOORACK, CONTRACT v5.9p; mc-7is1r; §12.2 row 66): a
+// floor member acks and its pane then dies before the controller's pass,
+// the normal exit after a drain (remain-on-exit keeps the dead pane
+// listed). A11 proposes nothing for the dead seat; A18's recycle kills the
+// corpse and restarts the same row in place under a new runtime and token,
+// with the ack on the row (so the death is a drain's), and its PreWake
+// clears the request: never stop-pending and never closed. Legacy differs:
+// it cancels only a live runtime's ack, so its dead floor seat is stopped,
+// its row closed and the floor's create replaces it.
+func TestSimFloorAckOnADeadPaneRunsAgainInPlace(t *testing.T) {
 	s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-gc-1", "last_woke_at", rowAt(-time.Hour)))
 	s.cfg.Agents[0].MinActiveSessions = intPtr(1)
 	s.settle()
@@ -1024,12 +1066,80 @@ func TestSimFloorAckOnADeadPaneStopsTheSeat(t *testing.T) {
 		t.Fatal("the agent's ack did not land")
 	}
 	s.sp.mu.Lock()
-	s.sp.rts["s-gc-1"].corpse = true
+	dead := s.sp.rts["s-gc-1"]
+	dead.corpse = true
 	s.sp.touch("s-gc-1")
 	s.sp.mu.Unlock()
 	pending := s.floorRun("gc-1", 6)
-	if b, _ := s.legs[0].backing.Get("gc-1"); !pending || !s.stoppedRow("s-gc-1") || b.Status != "closed" {
-		t.Errorf("ever stop-pending %v, stopped %v, row %s; want the dead seat's ack to signal, the seat stopped and its row closed", pending, s.stoppedRow("s-gc-1"), b.Status)
+	b, _ := s.legs[0].backing.Get("gc-1")
+	s.sp.mu.Lock()
+	rt := s.sp.rts["s-gc-1"]
+	kills := slices.Clone(s.sp.kills)
+	s.sp.mu.Unlock()
+	switch {
+	case pending || b.Status != "open" || b.Metadata[session.DrainAckIncarnationKey] != "":
+		t.Errorf("ever stop-pending %v, row %s %v; want the ack canceled and the row open", pending, b.Status, b.Metadata)
+	case rt == nil || rt.corpse || rt.id != "gc-1" || rt.object == dead.object || rt.token == "tok-gc-1" || rt.token != b.Metadata["instance_token"]:
+		t.Errorf("runtime %+v (dead %+v), row token %q; want the same row running again under a new runtime and token", rt, dead, b.Metadata["instance_token"])
+	case len(kills) != 1 || kills[0].Method != "KillCorpseObject":
+		t.Errorf("kills %+v; want only the corpse killed", kills)
+	}
+	s.noViolations(t)
+}
+
+// floorAckThenDie seeds a floor seat that woke age ago, lands its agent's
+// bare ack, and kills its pane showing pane, as an agent that acks and exits
+// leaves it; then runs patrols patrols.
+func floorAckThenDie(t *testing.T, age time.Duration, pane string, patrols int) (*sim, bool) {
+	t.Helper()
+	s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-gc-1", "last_woke_at", rowAt(-age)))
+	s.cfg.Agents[0].MinActiveSessions = intPtr(1)
+	s.settle()
+	if !s.simAck("gc-1", "tok-gc-1") {
+		t.Fatalf("woke %v ago: the agent's ack did not land", age)
+	}
+	s.sp.mu.Lock()
+	s.sp.rts["s-gc-1"].corpse = true
+	s.sp.touch("s-gc-1")
+	s.sp.mu.Unlock()
+	s.sp.SetPeekOutput("s-gc-1", pane)
+	return s, s.floorRun("gc-1", patrols)
+}
+
+// Scenario M12 by wake age (mc-7is1r review, §12.2 row 66): a floor seat's
+// agent acks and exits however soon after its wake, the normal idle case
+// included (under 5 minutes, which would read a rapid crash or churn): the
+// seat restarts in place and nothing accrues (no wake attempt, churn or
+// quarantine), its death a drain's. Kills: A11 canceling the dead seat's
+// ack before A18's recycle accounts its death.
+func TestSimFloorAckOnADeadPaneByWakeAge(t *testing.T) {
+	for _, age := range []time.Duration{5 * time.Second, 2 * time.Minute, 20 * time.Minute, time.Hour} {
+		t.Run(age.String(), func(t *testing.T) {
+			s, pending := floorAckThenDie(t, age, "", 30)
+			b, _ := s.legs[0].backing.Get("gc-1")
+			s.sp.mu.Lock()
+			rt := s.sp.rts["s-gc-1"]
+			s.sp.mu.Unlock()
+			switch {
+			case pending || b.Status != "open" || rt == nil || rt.corpse || rt.token == "tok-gc-1" || rt.token != b.Metadata["instance_token"]:
+				t.Errorf("ever stop-pending %v, row %s %v, runtime %+v; want the same row running again under a new token", pending, b.Status, b.Metadata, rt)
+			case b.Metadata["wake_attempts"] != "" && b.Metadata["wake_attempts"] != "0", b.Metadata["churn_count"] != "" && b.Metadata["churn_count"] != "0", b.Metadata["quarantined_until"] != "":
+				t.Errorf("row %v; want nothing accrued for a drain's death", b.Metadata)
+			}
+			s.noViolations(t)
+		})
+	}
+}
+
+// Scenario M12 over a rate-limit screen (§12.2 row 66): the ack's pending
+// drain suppresses only the death's crash and churn accounting, so a dead
+// floor seat whose pane shows a rate-limit screen is quarantined, not
+// relaunched into the limit. Kills: a bare ack suppressing the screen check.
+func TestSimFloorAckOnARateLimitedDeadPaneIsQuarantined(t *testing.T) {
+	s, _ := floorAckThenDie(t, 5*time.Second, "Usage limit reached", 2)
+	b, _ := s.legs[0].backing.Get("gc-1")
+	if b.Status != "open" || b.Metadata["quarantined_until"] == "" || b.Metadata["sleep_reason"] != string(session.SleepReasonRateLimit) {
+		t.Errorf("row %s %v; want it quarantined on the rate-limit screen", b.Status, b.Metadata)
 	}
 	s.noViolations(t)
 }
@@ -1141,10 +1251,17 @@ func TestSimOperatorDrainSurvivesACanceledControllerRequest(t *testing.T) {
 
 // lostCommitRun drives seed's simulation to its first start and lands op on
 // the start's row after its launch Call (S2's lost commit): the outcome of
-// that start, and the runtime under its name once it settled.
-func lostCommitRun(t *testing.T, seed uint64, op func(s *sim, l *simLeg, b beads.Bead)) (s *sim, outcome string, up bool) {
+// that start, the runtime under its name once it settled, and whether op
+// fired at all (a start that ended before the seam never runs it).
+func lostCommitRun(t *testing.T, seed uint64, op func(s *sim, l *simLeg, b beads.Bead)) (s *sim, outcome string, up, fired bool) {
 	t.Helper()
-	s = newSim(t, seed, simOpts{})
+	return lostCommitRunWith(t, seed, simOpts{}, op)
+}
+
+// lostCommitRunWith is lostCommitRun over a sim with o's faults.
+func lostCommitRunWith(t *testing.T, seed uint64, o simOpts, op func(s *sim, l *simLeg, b beads.Bead)) (s *sim, outcome string, up, fired bool) {
+	t.Helper()
+	s = newSim(t, seed, o)
 	s.inventory()
 	for step := 0; step < 400 && len(s.failures) == 0; step++ {
 		idx := slices.IndexFunc(s.parked, func(e *simEffect) bool { return e.it.Kind == intentStart && !e.settled })
@@ -1160,6 +1277,7 @@ func lostCommitRun(t *testing.T, seed uint64, op func(s *sim, l *simLeg, b beads
 		fire := func() {
 			l := s.legOf(e.it.Key.Leg)
 			if b, err := l.backing.Get(e.it.Key.ID); err == nil {
+				fired = true
 				s.outside("lost commit of "+e.it.Key.ID, l, b, func(l *simLeg, b beads.Bead) { op(s, l, b) })
 			}
 		}
@@ -1176,9 +1294,9 @@ func lostCommitRun(t *testing.T, seed uint64, op func(s *sim, l *simLeg, b beads
 				break
 			}
 		}
-		return s, outcome, up
+		return s, outcome, up, fired
 	}
-	return s, "", false
+	return s, "", false, false
 }
 
 // Kills a lost commit left running (v5 S2; the #7650 review): an operator
@@ -1192,7 +1310,7 @@ func TestSimLostCommit(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			for seed := uint64(1); seed <= 32; seed++ {
-				s, outcome, up := lostCommitRun(t, seed, op)
+				s, outcome, up, _ := lostCommitRun(t, seed, op)
 				if !strings.Contains(outcome, "commit-lost") {
 					continue
 				}
@@ -1246,9 +1364,9 @@ func TestSimLostCommitSparesASecondControllersRuntime(t *testing.T) {
 		}
 	}
 	for seed := uint64(1); seed <= 32; seed++ {
-		s, outcome, up := lostCommitRun(t, seed, op)
-		if outcome == "" || strings.Contains(outcome, "outcome 1 ") {
-			continue // never reached, or committed ahead of the write
+		s, outcome, up, fired := lostCommitRun(t, seed, op)
+		if outcome == "" || !fired || strings.Contains(outcome, "outcome 1 ") {
+			continue // never reached, the op never fired (the start ended first), or committed ahead of the write
 		}
 		if !up {
 			t.Fatalf("seed %d: %q stopped the second controller's runtime", seed, outcome)
@@ -1323,4 +1441,51 @@ func (s *sim) object(name string) int64 {
 		return rt.object
 	}
 	return 0
+}
+
+// Scenario R46 (CONTRACT R46, I23, M1; mc-phuxq, J14 E): an operator drains
+// a seat, its agent acks and exits, and its remain-on-exit corpse lost its
+// GC_INSTANCE_TOKEN (or all its identity). The corpse counts as stopped:
+// A11 signals the acked row though the census reads the identity Unknown,
+// and the stop verb finalizes it drained and removes the corpse, as it does
+// a corpse carrying the row's token. A token-less runtime still live is no
+// corpse and holds.
+func TestSimR46AckedRowOverATokenlessCorpseFinalizes(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		id, token string
+		corpse    bool
+		finalized bool
+	}{
+		{"the row's token", "gc-1", "tok-gc-1", true, true},
+		{"no token", "gc-1", "", true, true},
+		{"no identity at all", "", "", true, true},
+		{"no token, still live", "gc-1", "", false, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			row := poolRow("gc-1", "worker", 1, "awake", "instance_token", "tok-gc-1", "last_woke_at", rowAt(-10*time.Minute),
+				session.OperatorDrainKey, "1", session.DrainAckIncarnationKey, "1")
+			s := scripted(t, []string{"gc-1"}, row)
+			s.advance(time.Second)
+			s.operator("gc-1", session.DrainAckAtKey, s.rel(0)) // the ack lands after the runtime started
+			name := row.Metadata["session_name"]
+			rt := s.sp.rts[name]
+			rt.id, rt.token, rt.corpse = c.id, c.token, c.corpse
+			s.sp.touch(name)
+			for range 6 {
+				s.settle()
+				s.advance(simPatrol)
+			}
+			s.quiesce()
+			b, err := s.legs[0].backing.Get("gc-1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			finalized := b.Metadata["state"] == string(session.StateDrained)
+			if finalized != c.finalized || c.finalized && s.object(name) != 0 {
+				t.Fatalf("row %s/%s, corpse object %d; want finalized %v and the corpse removed", b.Status, b.Metadata["state"], s.object(name), c.finalized)
+			}
+			s.noViolations(t)
+		})
+	}
 }
