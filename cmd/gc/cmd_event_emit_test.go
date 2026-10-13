@@ -472,20 +472,25 @@ func recordedEvents(t *testing.T, dir string) []events.Event {
 }
 
 // TestEventEmitRefusesCacheActorsAndBeadPayloads: the cache-* actor class is
-// the controller's own, and a bead.* payload is a claim about a row the
-// emitter could have read instead. Both refusals exit 1 and record nothing,
-// in the plain and the --json paths.
+// the controller's own, and a bead row-snapshot payload is a claim about a row
+// the emitter could have read instead. Both refusals exit 1 and record
+// nothing; in --json mode stdout carries the typed failure object.
 func TestEventEmitRefusesCacheActorsAndBeadPayloads(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		args []string
-		want string
+		name  string
+		alias string
+		args  []string
+		want  string
+		code  string
 	}{
-		{name: "cache-local actor", args: []string{"bead.closed", "--subject", "gc-1", "--actor", cacheLocalActor}, want: "reserved for the controller's cache"},
-		{name: "cache-reconcile actor", args: []string{"bead.updated", "--actor", cacheReconcileActor}, want: "reserved for the controller's cache"},
-		{name: "other cache actor on a non-bead event", args: []string{"deploy.started", "--actor", "cache-anything"}, want: "reserved for the controller's cache"},
-		{name: "bead payload", args: []string{"bead.closed", "--subject", "gc-1", "--payload", `{"id":"gc-1","status":"closed"}`}, want: "--bead-payload"},
-		{name: "bead payload with bead-payload too", args: []string{"bead.updated", "--subject", "gc-1", "--payload", `{"id":"gc-1"}`, "--bead-payload", "gc-1"}, want: "--bead-payload"},
+		{name: "cache-local actor", args: []string{"bead.closed", "--subject", "gc-1", "--actor", cacheLocalActor}, want: "reserved for the controller's cache", code: eventEmitReservedActorCode},
+		{name: "cache-reconcile actor", args: []string{"bead.updated", "--actor", cacheReconcileActor}, want: "reserved for the controller's cache", code: eventEmitReservedActorCode},
+		{name: "other cache actor on a non-bead event", args: []string{"deploy.started", "--actor", "cache-anything"}, want: "reserved for the controller's cache", code: eventEmitReservedActorCode},
+		{name: "implicit actor that is the cache's own", alias: cacheLocalActor, args: []string{"custom.x"}, want: "reserved for the controller's cache", code: eventEmitReservedActorCode},
+		{name: "bead payload", args: []string{"bead.closed", "--subject", "gc-1", "--payload", `{"id":"gc-1","status":"closed"}`}, want: "--bead-payload", code: eventEmitBeadPayloadCode},
+		{name: "bead payload with bead-payload too", args: []string{"bead.updated", "--subject", "gc-1", "--payload", `{"id":"gc-1"}`, "--bead-payload", "gc-1"}, want: "--bead-payload", code: eventEmitBeadPayloadCode},
+		{name: "created payload", args: []string{"bead.created", "--payload", `{"id":"gc-1"}`}, want: "--bead-payload", code: eventEmitBeadPayloadCode},
+		{name: "deleted payload", args: []string{"bead.deleted", "--payload", `{"id":"gc-1"}`}, want: "--bead-payload", code: eventEmitBeadPayloadCode},
 	} {
 		for _, jsonOut := range []bool{false, true} {
 			name := tc.name
@@ -496,6 +501,7 @@ func TestEventEmitRefusesCacheActorsAndBeadPayloads(t *testing.T) {
 			}
 			t.Run(name, func(t *testing.T) {
 				dir, _ := eventEmitTestCity(t)
+				t.Setenv("GC_ALIAS", tc.alias)
 				var stdout, stderr bytes.Buffer
 				cmd := newEventEmitCmd(&stdout, &stderr)
 				cmd.SetArgs(args)
@@ -504,17 +510,72 @@ func TestEventEmitRefusesCacheActorsAndBeadPayloads(t *testing.T) {
 				if err := cmd.Execute(); !errors.Is(err, errExit) {
 					t.Fatalf("Execute = %v, want errExit", err)
 				}
-				if !strings.Contains(stderr.String(), tc.want) {
-					t.Fatalf("stderr = %q, want it to mention %q", stderr.String(), tc.want)
-				}
-				if stdout.Len() != 0 {
-					t.Fatalf("stdout = %q, want nothing for a refused emit", stdout.String())
+				if jsonOut {
+					var failure cliJSONErrorOutput
+					if err := json.Unmarshal(stdout.Bytes(), &failure); err != nil {
+						t.Fatalf("stdout = %q, want a JSON failure object: %v", stdout.String(), err)
+					}
+					if failure.OK || failure.Error.Code != tc.code || failure.Error.ExitCode != 1 || !strings.Contains(failure.Error.Message, tc.want) {
+						t.Fatalf("failure = %+v, want code %q, exit 1, message mentioning %q", failure, tc.code, tc.want)
+					}
+				} else {
+					if !strings.Contains(stderr.String(), tc.want) {
+						t.Fatalf("stderr = %q, want it to mention %q", stderr.String(), tc.want)
+					}
+					if stdout.Len() != 0 {
+						t.Fatalf("stdout = %q, want nothing for a refused emit", stdout.String())
+					}
 				}
 				if got := recordedEvents(t, dir); len(got) != 0 {
 					t.Fatalf("recorded %+v, want nothing", got)
 				}
 			})
 		}
+	}
+}
+
+// TestEventEmitJSONRefusalThroughRunIsTyped: the global --json wrapper passes
+// the refusal's typed failure object through instead of a generic
+// command_failed.
+func TestEventEmitJSONRefusalThroughRunIsTyped(t *testing.T) {
+	dir, _ := eventEmitTestCity(t)
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"event", "emit", "bead.closed", "--actor", cacheLocalActor, "--json"}, &stdout, &stderr); code != 1 {
+		t.Fatalf("run = %d, want 1; stderr: %s", code, stderr.String())
+	}
+	var failure cliJSONErrorOutput
+	if err := json.Unmarshal(stdout.Bytes(), &failure); err != nil {
+		t.Fatalf("stdout = %q, want one JSON failure object: %v", stdout.String(), err)
+	}
+	if failure.Error.Code != eventEmitReservedActorCode {
+		t.Fatalf("failure code = %q, want %q", failure.Error.Code, eventEmitReservedActorCode)
+	}
+	if got := recordedEvents(t, dir); len(got) != 0 {
+		t.Fatalf("recorded %+v, want nothing", got)
+	}
+}
+
+// TestEventEmitAcceptsCachePrefixedAgentNamesAndNonSnapshotPayloads: only the
+// cache's exact actors are reserved for the implicit actor, so an agent whose
+// alias merely starts with cache- still emits; and only the row-snapshot
+// lifecycle types refuse --payload.
+func TestEventEmitAcceptsCachePrefixedAgentNamesAndNonSnapshotPayloads(t *testing.T) {
+	dir, _ := eventEmitTestCity(t)
+	t.Setenv("GC_ALIAS", "cache-warmer")
+	for _, args := range [][]string{
+		{"custom.x"},
+		{events.BeadClaimRejected, "--subject", "gc-1", "--payload", `{"reason":"taken"}`},
+	} {
+		var stdout, stderr bytes.Buffer
+		cmd := newEventEmitCmd(&stdout, &stderr)
+		cmd.SetArgs(args)
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("Execute(%v) = %v; stderr: %s", args, err, stderr.String())
+		}
+	}
+	got := recordedEvents(t, dir)
+	if len(got) != 2 || got[0].Actor != "cache-warmer" || got[1].Type != events.BeadClaimRejected || string(got[1].Payload) != `{"reason":"taken"}` {
+		t.Fatalf("recorded %+v, want custom.x by cache-warmer and the claim_rejected payload", got)
 	}
 }
 

@@ -61,8 +61,11 @@ durable persistence.`,
 			if effectiveActor == "" {
 				effectiveActor = eventActor()
 			}
-			if err := eventEmitRefusal(args[0], effectiveActor, payload); err != nil {
-				fmt.Fprintf(stderr, "gc event emit: %v\n", err) //nolint:errcheck // best-effort stderr
+			if refusal := eventEmitRefusal(args[0], actor, effectiveActor, payload); refusal != nil {
+				if jsonOut {
+					return exitForCode(writeJSONError(stdout, stderr, refusal.code, refusal.reason, 1))
+				}
+				fmt.Fprintf(stderr, "gc event emit: %s\n", refusal.reason) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
 			finalPayload := eventPayloadForEmit(payload, beadPayload, stderr)
@@ -99,19 +102,44 @@ durable persistence.`,
 // cache's notifications (cacheLocalActor, cacheReconcileActor).
 const cacheActorPrefix = "cache-"
 
-// beadEventTypePrefix prefixes every bead lifecycle event type.
-const beadEventTypePrefix = "bead."
+// Typed codes for the --json failure object of a refused gc event emit.
+const (
+	eventEmitReservedActorCode = "reserved_actor"
+	eventEmitBeadPayloadCode   = "bead_payload_refused"
+)
+
+// beadSnapshotEventTypes are the bead lifecycle types whose payload is a row
+// snapshot the controller may read as the row's state.
+var beadSnapshotEventTypes = map[string]bool{
+	events.BeadCreated: true,
+	events.BeadUpdated: true,
+	events.BeadClosed:  true,
+	events.BeadDeleted: true,
+}
+
+// eventEmitRefused is why gc event emit refused to record an event.
+type eventEmitRefused struct {
+	code   string
+	reason string
+}
 
 // eventEmitRefusal reports why gc event emit must not record an event, or nil.
-// The cache-* actors belong to the controller's cache, whose notifications the
-// controller trusts; a bead.* event's payload is a row snapshot, which the
-// emitter must read from the store (--bead-payload) rather than supply.
-func eventEmitRefusal(eventType, actor, payload string) error {
-	if strings.HasPrefix(actor, cacheActorPrefix) {
-		return fmt.Errorf("actor %q: the %s* actor class is reserved for the controller's cache", actor, cacheActorPrefix)
+// An explicit --actor may not claim the cache-* class at all; the implicit
+// actor (GC_ALIAS and friends, which are user-configured names) may not be one
+// of the cache's own actors. A row-snapshot event's payload must come from
+// the store (--bead-payload), not from the caller.
+func eventEmitRefusal(eventType, explicitActor, effectiveActor, payload string) *eventEmitRefused {
+	if strings.HasPrefix(explicitActor, cacheActorPrefix) || isCacheActor(effectiveActor) {
+		return &eventEmitRefused{
+			code:   eventEmitReservedActorCode,
+			reason: fmt.Sprintf("actor %q: the %s* actor class is reserved for the controller's cache", effectiveActor, cacheActorPrefix),
+		}
 	}
-	if payload != "" && strings.HasPrefix(eventType, beadEventTypePrefix) {
-		return fmt.Errorf("--payload is not accepted for %s events; use --bead-payload <id> to attach the bead as the store holds it", eventType)
+	if payload != "" && beadSnapshotEventTypes[eventType] {
+		return &eventEmitRefused{
+			code:   eventEmitBeadPayloadCode,
+			reason: fmt.Sprintf("--payload is not accepted for %s events; use --bead-payload <id> to attach the bead as the store holds it", eventType),
+		}
 	}
 	return nil
 }
