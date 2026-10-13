@@ -362,3 +362,33 @@ func TestZombieCrashNamesAnUnresolvedRowsTemplate(t *testing.T) {
 		t.Fatalf("crash subject %q template %v, want the identity other-chat and the template chat", e.Subject, payload["template"])
 	}
 }
+
+// Kills A12 proposed again every pass over a runtime that is already gone
+// (mc-98agx): the census, not yet refreshed, still reads the row's runtime
+// dead, so A12 decides; the effect's fresh read finds nothing under the
+// name. It records the pair as the decision's token, so the next pass does
+// not decide A12 again on the same stale read (each A12 takes and drops the
+// row's lease record); a runtime still listed but alive under a new token
+// records that token, as before.
+func TestZombieOverAGoneRuntimeIsNotProposedAgain(t *testing.T) {
+	c := newHealCase(t, livenessDead, desireSleep, "state", "asleep", "sleep_reason", "runtime-missing")
+	id := runtimeIdentity{Known: true, SessionID: c.k.ID, Epoch: "3", Token: "tok-3"}
+	c.w.Observed = map[rowKey]rowObservation{c.k: {Liveness: livenessDead, Identity: id}}
+	if it := c.decide(); it.Kind != intentZombie {
+		t.Fatalf("decideRow = (%q, %q), want A12 on the stale dead read", it.Kind, it.Reason)
+	}
+	step := zombieStep(txView{It: intent{Key: c.k}, World: c.w, Row: c.w.Census.Rows[c.k].Info, RT: &txRuntime{Class: rtAbsent}, Now: gatherNow}, deadPeek{}, nil)
+	got := step.Facts.Classified
+	if !step.Done || got == nil || !got.classifies(id) || len(step.Write) != 0 {
+		t.Fatalf("step %+v, want Done with the decision's pair classified and nothing written", step)
+	}
+	c.w.Classified = map[rowKey]classifiedRuntime{c.k: *got}
+	if it := c.decide(); it.Kind == intentZombie {
+		t.Fatalf("decideRow = (%q, %q) again on the same stale read, want A12 settled", it.Kind, it.Reason)
+	}
+	fresh := runtimeIdentity{Known: true, SessionID: c.k.ID, Epoch: "4", Token: "tok-4"}
+	alive := zombieStep(txView{It: intent{Key: c.k}, World: c.w, Row: c.w.Census.Rows[c.k].Info, RT: &txRuntime{Class: rtAlive, Same: true, Identity: fresh}, Now: gatherNow}, deadPeek{}, nil)
+	if alive.Facts.Classified == nil || !alive.Facts.Classified.classifies(fresh) {
+		t.Fatalf("alive step %+v, want the fresh runtime's token recorded", alive)
+	}
+}

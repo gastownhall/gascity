@@ -353,7 +353,7 @@ func (s *Server) structuredTranscriptFallback(info session.Info, includeThinking
 		Provider:           info.Provider,
 		Format:             "structured",
 		SchemaVersion:      sessionStructuredSchemaVersion,
-		History:            structuredFallbackHistory(info.ID, info.SessionKey, activity),
+		History:            structuredFallbackHistory(info, activity),
 		StructuredMessages: structuredFallbackMessages(info.ID, info.Provider, output),
 	}, includeThinking)
 	return &IndexOutput[sessionTranscriptGetResponse]{

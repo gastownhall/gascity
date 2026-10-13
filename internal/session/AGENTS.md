@@ -66,3 +66,13 @@ evidence from tests, source, an issue, or a commit.
   Propagate that stale verdict to the provider-aware caller and clean up using
   the attempted identity outside the mutation lock. Persistence failure alone
   must not trigger runtime cleanup.
+
+When a session has a persisted native conversation key and its provider family
+resolves transcripts by that key (`transcript.SupportsIDLookup`),
+`Manager.TranscriptPathClassified` waits for that exact transcript. Another
+conversation in the same work directory is not a fallback. Nor is it for a
+provider with a session-id flag whose row is `creating` without a key: that
+start's conversation has no key yet. Families without `SupportsIDLookup`
+(Codex, Gemini, OpenCode, MiMo, ZCode) still fall back to work-directory
+discovery after a keyed miss, as does `SessionLogAdapter.DiscoverTranscript`;
+see `SESSION-HISTORY-EXACT-KEY`.

@@ -92,6 +92,7 @@ const (
 	settledRefused                 // refused before or instead of writing, with a cause
 	settledAmbiguous               // its write began and may have landed, or a create was abandoned
 	settledNoop                    // nothing to do: a start's already-running
+	settleOutcomeEnd               // one past the last: the simulator's census gates each outcome
 )
 
 // plannerInflight is the in-flight map the planner owns: *inflightMap

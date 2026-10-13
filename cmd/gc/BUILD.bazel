@@ -1,4 +1,5 @@
 load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+load("//tools/bazel/rules:go_test_run.bzl", "go_test_run")
 load("//tools/bazel/rules:go_variant_test.bzl", "go_variant_test")
 
 # productmetrics_testhook (beside the root's integration): the tagged files
@@ -407,6 +408,7 @@ go_library(
         "pool.go",
         "pool_desired_state.go",
         "pool_detached_orphan_sweep.go",
+        "pool_orphan_foreign_identity.go",
         "pool_session_name.go",
         "pool_slot_workdir.go",
         "prime_auto_handoff_inject.go",
@@ -1542,6 +1544,7 @@ go_test(
         "pool_fresh_slot_compat_test.go",
         "pool_hook_processgroup_test.go",
         "pool_on_boot_parallel_test.go",
+        "pool_orphan_foreign_identity_test.go",
         "pool_pieces_prerefactor_test.go",
         "pool_pieces_test.go",
         "pool_release_bd_guard_test.go",
@@ -1662,6 +1665,7 @@ go_test(
         "reconcile_session_namelock_test.go",
         "reconcile_session_timeline_test.go",
         "reconcile_settle_test.go",
+        "reconcile_sim_coverage_test.go",
         "reconcile_sim_invariants_test.go",
         "reconcile_sim_pending_test.go",
         "reconcile_sim_respawn_test.go",
@@ -1814,6 +1818,7 @@ go_test(
         "session_reconciler_inc003_test.go",
         "session_reconciler_killed_seat_test.go",
         "session_reconciler_killsite_fold_test.go",
+        "session_reconciler_manual_create_test.go",
         "session_reconciler_named_collapse_test.go",
         "session_reconciler_observation_regression_test.go",
         "session_reconciler_pool_replacement_test.go",
@@ -2196,33 +2201,56 @@ go_variant_test(
 )
 
 # The full 1024-seed v2 simulator corpus, a CI gate (CONTRACT v5.9n): gc_test
-# runs the first simCISeeds; these run all 1024 in sixteen ranges of 64, each
-# a target of its own (the same binary, no extra compile), so they run in
-# parallel beside gc_test's shards; medium's timeout fails a hang fast. The
-# pending creates (mc-cjtkj) grew a range's run, so the ranges halved.
-[go_variant_test(
-    name = "gc_sim_corpus_%d_test" % i,
-    size = "medium",
-    args = ["-test.run=^TestSimCorpus$$"],
-    env = {
-        "GC_V2_SIM_SEEDS": "64",
-        "GC_V2_SIM_SEED_FIRST": str(1 + 64 * i),
-    },
-    test = ":gc_test",
-) for i in range(16)]
+# runs the first simCISeeds; these run all 1024 of each corpus in sixteen
+# ranges of 64, the plain corpus and the floored one with pending creates
+# seeded (TestSimCorpusFlooredPending, mc-cjtkj). Each range runs once as an
+# action (go_test_run: the same binary, no extra compile), in parallel beside
+# gc_test's shards, writing its coverage census, and
+# gc_sim_coverage_gate_test sums the censuses (architecture item C), which
+# pulls every range into `bazel test`. A failing or hung range fails the
+# build with its failing seeds' violated: and replay: lines and its log's
+# tail, and is never cached; a passing one is cached as an action, so
+# --cache_test_results=no does not rerun it (--config=fresh does), and the
+# corpus's lines no longer reach bazel coverage's lcov (gc_test's shards still
+# cover its first 64 seeds). --test_filter, --test_arg and --test_env do not
+# reach a range; build one with
+#   bazel build //cmd/gc:gc_sim_corpus_<n>_run
+# and replay one seed with
+#   GC_V2_SIM_SEED=<seed> go test -run '^TestSimCorpus$' ./cmd/gc/
+# (TestSimCorpusFlooredPending for the floored ranges).
+SIM_CORPORA = {
+    "gc_sim_corpus": "TestSimCorpus",
+    "gc_sim_corpus_floored_pending": "TestSimCorpusFlooredPending",
+}
 
-# The floored corpus with pending creates seeded, all 1024 seeds in sixteen
-# ranges of 64, the same way (TestSimCorpusFlooredPending, mc-cjtkj).
-[go_variant_test(
-    name = "gc_sim_corpus_floored_pending_%d_test" % i,
-    size = "medium",
-    args = ["-test.run=^TestSimCorpusFlooredPending$$"],
+SIM_RANGES = ["%s_%d" % (name, i) for name in SIM_CORPORA for i in range(16)]
+
+[go_test_run(
+    name = "%s_%d_run" % (name, i),
+    testonly = True,
+    outs = {"GC_V2_SIM_COVERAGE": "%s_%d.census.json" % (name, i)},
+    args = ["-test.run=^%s$" % test],
     env = {
         "GC_V2_SIM_SEEDS": "64",
         "GC_V2_SIM_SEED_FIRST": str(1 + 64 * i),
     },
     test = ":gc_test",
-) for i in range(16)]
+) for name, test in SIM_CORPORA.items() for i in range(16)]
+
+# Fails on a registered arm, effect kind or settle outcome no range reaches,
+# unless simCoverageAllowlist names its generator bead (mc-i7efm), or when a
+# range's census is missing.
+go_variant_test(
+    name = "gc_sim_coverage_gate_test",
+    size = "small",
+    args = ["-test.run=^TestSimCoverageGate$$"],
+    data = [":%s_run" % r for r in SIM_RANGES],
+    env = {
+        "GC_V2_SIM_COVERAGE_FILES": " ".join(["$(rootpath :%s_run)" % r for r in SIM_RANGES]),
+        "GC_V2_SIM_COVERAGE_RANGES": str(len(SIM_RANGES)),
+    },
+    test = ":gc_test",
+)
 
 # INTEGRATION_SOLO_TESTS, each alone, and INTEGRATION_SOLO_SPLIT_TESTS, by
 # subtest, in gc_test's integration build.

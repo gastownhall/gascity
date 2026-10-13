@@ -1293,7 +1293,11 @@ func pendingCreateSessionStillLeasedInfo(i sessionpkg.Info, cfg *config.City, cl
 	if cfg != nil {
 		startupTimeout = cfg.Session.StartupTimeoutDuration()
 	}
-	return pendingCreateSessionStillLeased(i, cfg, pendingCreateLeaseActiveInfo(i, clk, startupTimeout), sessionStartRequestedInfo(i, clk))
+	now := time.Now()
+	if clk != nil {
+		now = clk.Now()
+	}
+	return pendingCreateSessionStillLeased(i, cfg, pendingCreateLeaseActiveInfo(i, clk, startupTimeout), sessionStartRequestedInfo(i, clk), manualCreateStartInFlightAt(i, now, startupTimeout))
 }
 
 // pendingCreateSessionStillLeasedAt is pendingCreateSessionStillLeasedInfo at
@@ -1303,14 +1307,36 @@ func pendingCreateSessionStillLeasedAt(i sessionpkg.Info, cfg *config.City, now 
 	if cfg != nil {
 		startupTimeout = cfg.Session.StartupTimeoutDuration()
 	}
-	return pendingCreateSessionStillLeased(i, cfg, pendingCreateLeaseActiveAt(i, now, startupTimeout), sessionStartRequestedAt(i, now))
+	return pendingCreateSessionStillLeased(i, cfg, pendingCreateLeaseActiveAt(i, now, startupTimeout), sessionStartRequestedAt(i, now), manualCreateStartInFlightAt(i, now, startupTimeout))
+}
+
+// manualCreateStartInFlightAt reports whether i is a client-created session
+// whose create may still be starting its runtime. Manager.CreateSession writes
+// the bead (state=active, session_origin=manual, no pending-create claim)
+// before it starts the runtime, and stamps creation_complete_at only once the
+// start succeeds. Until then the bead has no live runtime and may be missing
+// from a desired-state snapshot taken before it existed, so the orphan close
+// would reap it mid-start. The window matches the pending-create in-flight
+// lease; a create that is still unconfirmed after it is treated as dead.
+func manualCreateStartInFlightAt(i sessionpkg.Info, now time.Time, startupTimeout time.Duration) bool {
+	if i.PendingCreateClaim || i.CreatedAt.IsZero() ||
+		strings.TrimSpace(i.SessionOrigin) != "manual" ||
+		strings.TrimSpace(i.CreationCompleteAt) != "" {
+		return false
+	}
+	if startupTimeout <= 0 {
+		startupTimeout = time.Minute
+	}
+	return now.Before(i.CreatedAt.Add(startupTimeout + staleKeyDetectDelay + 5*time.Second))
 }
 
 // pendingCreateSessionStillLeased composes the lease answers. Template
 // resolution uses normalizedSessionTemplateInfo with an Info.Template fallback
 // (Info.Template is the raw metadata["template"] mirror), and
-// findAgentByTemplate keys off the resolved template.
-func pendingCreateSessionStillLeased(i sessionpkg.Info, cfg *config.City, leaseActive, startRequested bool) bool {
+// findAgentByTemplate keys off the resolved template. A manual create still
+// starting (manualCreateStartInFlight) holds the same lease as a requested
+// start, under the same rule: its template's agent must still be configured.
+func pendingCreateSessionStillLeased(i sessionpkg.Info, cfg *config.City, leaseActive, startRequested, manualCreateStartInFlight bool) bool {
 	if i.PendingCreateClaim {
 		if !leaseActive {
 			return false
@@ -1325,7 +1351,7 @@ func pendingCreateSessionStillLeased(i sessionpkg.Info, cfg *config.City, leaseA
 		}
 		return true
 	}
-	if !startRequested {
+	if !startRequested && !manualCreateStartInFlight {
 		return false
 	}
 	template := normalizedSessionTemplateInfo(i, cfg)
@@ -2356,6 +2382,27 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					}
 					continue
 				}
+			}
+			// A client's create still starting its runtime keeps the row as the
+			// create wrote it. The heal below would read the not-yet-started runtime
+			// as missing and reset the continuation (session_key,
+			// started_config_hash, continuation_reset_pending), which the create's
+			// start confirmation does not restore. A preserved named session keeps
+			// its own precedence below.
+			if !preserveNamed && manualCreateStartInFlightAt(infoByID[id], clk.Now(), startupTimeout) && pendingCreateSessionStillLeasedInfo(infoByID[id], cfg, clk) {
+				template := normalizedSessionTemplateInfo(infoByID[id], cfg)
+				if template == "" {
+					template = infoByID[id].Template
+				}
+				if trace != nil {
+					trace.RecordDecision(TraceSiteReconcilerPendingCreatePreserved, TraceReasonPendingCreate, TraceOutcomeKeptOpen, template, name, traceRecordPayload{
+						"pending_create_claim":    strings.TrimSpace(infoByID[id].PendingCreateClaimMetadata),
+						"manual_create_in_flight": true,
+						"provider_alive":          providerAlive,
+						"state":                   infoByID[id].MetadataState,
+					})
+				}
+				continue
 			}
 			// Heal state using provider liveness, not agent membership.
 			// rollbackAvailable mirrors the rollback gate at line ~639: when

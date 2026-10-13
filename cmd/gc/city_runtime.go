@@ -3038,6 +3038,13 @@ func (cr *CityRuntime) stopConfigWatcher() {
 	}
 }
 
+// warmClaimTriggerProbe is the warm-bind probe over resolve, judging a
+// trigger against this controller's config (isUnclaimedTrigger: a pool
+// template assignee is demand, not a claim).
+func (cr *CityRuntime) warmClaimTriggerProbe(resolve warmClaimTriggerResolver) warmClaimTriggerProbe {
+	return buildWarmClaimTriggerProbe(cr.cfg, resolve, cr.stderr)
+}
+
 // newWarmClaimTriggerResolver returns the reader the warm-bind claim probe asks
 // for one bound trigger bead, resolved over this controller's own topology: the
 // binding it opened at boot, its city work ledger, and the rig legs it is handed.
@@ -3108,13 +3115,6 @@ func (cr *CityRuntime) stopConfigWatcher() {
 // fault. That is accepted because the line is the only outside evidence the nudge
 // was declined at all. If the noise ever outweighs that evidence, hand this caller
 // servingRigStores as readyDemandSnapshotFingerprint does and delete this section.
-// warmClaimTriggerProbe is the warm-bind probe over resolve, judging a
-// trigger against this controller's config (isUnclaimedTrigger: a pool
-// template assignee is demand, not a claim).
-func (cr *CityRuntime) warmClaimTriggerProbe(resolve warmClaimTriggerResolver) warmClaimTriggerProbe {
-	return buildWarmClaimTriggerProbe(cr.cfg, resolve, cr.stderr)
-}
-
 func (cr *CityRuntime) newWarmClaimTriggerResolver(servingRigs map[string]beads.Store) warmClaimTriggerResolver {
 	topo := cr.residencyTopology(servingRigs)
 	return func(triggerID string) (beads.Bead, error) {
