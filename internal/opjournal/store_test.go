@@ -842,3 +842,90 @@ func TestStoreNeverLists(t *testing.T) {
 		t.Fatalf("the op store deleted %d rows", n)
 	}
 }
+
+// A gc.op.* key a newer build added is not this build's to remove: decoding
+// ignores it, and every write must leave it in place.
+func TestWritesKeepUnknownOpKeys(t *testing.T) {
+	const futureKey, futureVal = "gc.op.preempt_turn", "run-9"
+	seed := func(t *testing.T, h *harness, req Request) Op {
+		t.Helper()
+		op := h.propose(t, req)
+		if err := h.mem.SetMetadata(op.ID, futureKey, futureVal); err != nil {
+			t.Fatal(err)
+		}
+		return op
+	}
+	assertKept := func(t *testing.T, h *harness, id, after string) {
+		t.Helper()
+		b, err := h.mem.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if b.Metadata[futureKey] != futureVal {
+			t.Fatalf("%s removed %s (metadata %v)", after, futureKey, b.Metadata)
+		}
+	}
+	t.Run("transition", func(t *testing.T) {
+		h := newHarness(t)
+		op := seed(t, h, msgReq("k", "x"))
+		if _, err := h.store.Transition(op.ID, StatusSubmitted, StatusAccepted, "lane"); err != nil {
+			t.Fatal(err)
+		}
+		assertKept(t, h, op.ID, "Transition")
+	})
+	t.Run("close", func(t *testing.T) {
+		h := newHarness(t)
+		op := seed(t, h, msgReq("k", "x"))
+		if _, err := h.store.Close(op.ID, Outcome{Arm: ArmSucceeded}, "lane"); err != nil {
+			t.Fatal(err)
+		}
+		assertKept(t, h, op.ID, "Close")
+	})
+	t.Run("cancel closes", func(t *testing.T) {
+		h := newHarness(t)
+		op := seed(t, h, msgReq("k", "x"))
+		if r, _, err := h.store.Cancel(op.ID, "operator:bob", ""); err != nil || r != CancelClosed {
+			t.Fatalf("Cancel = %s, %v", r, err)
+		}
+		assertKept(t, h, op.ID, "Cancel")
+	})
+	t.Run("cancel requested", func(t *testing.T) {
+		h := newHarness(t)
+		op := seed(t, h, msgReq("k", "x"))
+		if _, err := h.store.Transition(op.ID, StatusSubmitted, StatusExecuting, "lane"); err != nil {
+			t.Fatal(err)
+		}
+		if r, _, err := h.store.Cancel(op.ID, "operator:bob", ""); err != nil || r != CancelRequested {
+			t.Fatalf("Cancel = %s, %v", r, err)
+		}
+		assertKept(t, h, op.ID, "Cancel")
+	})
+}
+
+// A key this build owns that the next encoding drops is still written empty.
+func TestCloseBlanksTheLeaseAndOwnedKeysItDrops(t *testing.T) {
+	h := newHarness(t)
+	op := h.propose(t, msgReq("k", "x"))
+	if _, err := h.store.Transition(op.ID, StatusSubmitted, StatusExecuting, "lane"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := h.store.Cancel(op.ID, "operator:bob", "stop"); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := h.mem.Get(op.ID)
+	if b.Metadata[keyCancelReason] != "stop" {
+		t.Fatalf("setup: cancel reason %q", b.Metadata[keyCancelReason])
+	}
+	cur, _ := h.store.Get(op.ID)
+	next := cur
+	next.Cancel = Cancel{}
+	opts, err := patch(b, cur, next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{keyCancelBy, keyCancelAt, keyCancelReason} {
+		if v, ok := opts.Metadata[k]; !ok || v != "" {
+			t.Errorf("patch did not blank %s: %v", k, opts.Metadata)
+		}
+	}
+}

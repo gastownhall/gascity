@@ -381,7 +381,7 @@ func (s *Store) mutate(id string, decide func(cur Op, spec Spec) (Op, bool, erro
 		if !write {
 			return next, nil
 		}
-		opts, err := patch(b, next)
+		opts, err := patch(b, cur, next)
 		if err != nil {
 			return Op{}, err
 		}
@@ -398,10 +398,16 @@ func (s *Store) mutate(id string, decide func(cur Op, spec Spec) (Op, bool, erro
 	return Op{}, fmt.Errorf("%w: updating op %s lost %d revision races: %w", ErrContention, id, casAttempts, lastConflict)
 }
 
-// patch is the update that turns row b into next's encoding: the changed
-// metadata keys (a removed key is written empty) and the assignee. The bead
-// status is left to closeBead.
-func patch(b beads.Bead, next Op) (beads.UpdateOpts, error) {
+// patch is the update that turns row b, which decoded as cur, into next's
+// encoding: the changed metadata keys and the assignee. A key is written
+// empty only when cur's encoding has it and next's does not, so a gc.op.* key
+// a newer build added — which decoding ignores — is never this build's to
+// remove. The bead status is left to the caller.
+func patch(b beads.Bead, cur, next Op) (beads.UpdateOpts, error) {
+	have, err := EncodeOp(cur)
+	if err != nil {
+		return beads.UpdateOpts{}, err
+	}
 	want, err := EncodeOp(next)
 	if err != nil {
 		return beads.UpdateOpts{}, err
@@ -412,8 +418,8 @@ func patch(b beads.Bead, next Op) (beads.UpdateOpts, error) {
 			meta[k] = v
 		}
 	}
-	for k, v := range b.Metadata {
-		if _, keep := want.Metadata[k]; !keep && v != "" && strings.HasPrefix(k, "gc.op.") {
+	for k := range have.Metadata {
+		if _, keep := want.Metadata[k]; !keep {
 			meta[k] = ""
 		}
 	}
