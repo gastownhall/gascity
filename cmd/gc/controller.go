@@ -179,8 +179,8 @@ func startControllerSocket(
 // Supported commands: "stop" (shutdown), "stop-force" (shutdown without
 // interrupt grace), "ping" (legacy liveness check, returns numeric PID),
 // "identify" (typed process identity), "converge:{json}" (convergence
-// commands routed to event loop), and "v2-pass" (the v2 planner's last pass,
-// for doctor).
+// commands routed to event loop), "v2-pass" (the v2 planner's last pass,
+// for doctor), and "ledger-feed" (the journal feeds' status, for doctor).
 func handleControllerConn(
 	conn net.Conn,
 	cityPath string,
@@ -247,6 +247,8 @@ func handleControllerConn(
 			handleTraceStatusSocketCmd(conn, cityPath)
 		case line == v2PassCommand:
 			writeJSONLine(conn, wake.v2PassStatus(time.Now()))
+		case line == ledgerFeedStatusCommand:
+			writeJSONLine(conn, ledgerFeedStatusFor(cityPath, time.Now()))
 		}
 	}
 }
