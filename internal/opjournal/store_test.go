@@ -1,8 +1,10 @@
 package opjournal
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1103,4 +1105,89 @@ func TestOneSidedDeadlines(t *testing.T) {
 	if !op.StartBy.Equal(t0.Add(48*time.Hour)) || !op.FinishBy.Equal(t0.Add(48*time.Hour)) {
 		t.Fatalf("start_by only: start %s finish %s, want both at +48h", op.StartBy, op.FinishBy)
 	}
+}
+
+// bdTypingStore applies bd's --set-metadata typing to every fenced update, as
+// BdStore's UpdateIfMatch is read back: "null" reads as "", and a number
+// spelling reads back in its normalized form.
+type bdTypingStore struct{ *beads.MemStore }
+
+func (s bdTypingStore) UpdateIfMatch(id string, rev int64, opts beads.UpdateOpts) error {
+	if opts.Metadata != nil {
+		typed := make(map[string]string, len(opts.Metadata))
+		for k, v := range opts.Metadata {
+			typed[k] = bdTypedReadBack(v)
+		}
+		opts.Metadata = typed
+	}
+	return s.MemStore.UpdateIfMatch(id, rev, opts)
+}
+
+func bdTypedReadBack(v string) string {
+	if v == "null" {
+		return ""
+	}
+	if json.Valid([]byte(v)) {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return strconv.FormatFloat(f, 'f', -1, 64)
+		}
+	}
+	return v
+}
+
+// Text that bd would type as a JSON scalar is refused before it is written,
+// so an update can never turn a conversation unreadable; everything else
+// round-trips through bd's typing.
+func TestUpdateTextSurvivesBdTyping(t *testing.T) {
+	newH := func(t *testing.T) *harness {
+		mem := &beads.MemStore{IDPrefix: "gc", HonorExplicitIDs: true}
+		return newHarnessOver(t, mem, bdTypingStore{mem})
+	}
+	t.Run("refused", func(t *testing.T) {
+		h := newH(t)
+		op := h.propose(t, msgReq("k", "x"))
+		rev := h.revision(t, op.ID)
+		for _, v := range []string{"null", "true", "false", "1.50", "1e3", "-0", "42"} {
+			if _, _, err := h.store.Cancel(op.ID, v, ""); !errors.Is(err, ErrInvalidRequest) {
+				t.Errorf("Cancel(by %q) = %v, want ErrInvalidRequest", v, err)
+			}
+			if _, _, err := h.store.Cancel(op.ID, "operator:bob", v); !errors.Is(err, ErrInvalidRequest) {
+				t.Errorf("Cancel(reason %q) = %v, want ErrInvalidRequest", v, err)
+			}
+			for name, o := range map[string]Outcome{
+				"reason":      {Arm: ArmFailed, Reason: v},
+				"degradation": {Arm: ArmSucceeded, Degradation: v},
+				"result turn": {Arm: ArmSucceeded, Result: Result{Turn: v}},
+				"result via":  {Arm: ArmSucceeded, Result: Result{Via: v}},
+			} {
+				if _, err := h.store.Close(op.ID, o, "lane"); !errors.Is(err, ErrInvalidRequest) {
+					t.Errorf("Close(%s %q) = %v, want ErrInvalidRequest", name, v, err)
+				}
+			}
+		}
+		if h.revision(t, op.ID) != rev {
+			t.Fatal("a refused update wrote the row")
+		}
+	})
+	t.Run("round trip", func(t *testing.T) {
+		h := newH(t)
+		op := h.propose(t, msgReq("k", "x"))
+		if _, err := h.store.Transition(op.ID, StatusSubmitted, StatusExecuting, "lane"); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := h.store.Cancel(op.ID, "operator:bob", "changed my mind at 10"); err != nil {
+			t.Fatal(err)
+		}
+		want := Outcome{Arm: ArmCanceled, Result: Result{Generation: 4, Turn: "t9", ContextEpoch: 2, Via: "hook"}}
+		if _, err := h.store.Close(op.ID, want, "lane"); err != nil {
+			t.Fatal(err)
+		}
+		got, err := h.store.Get(op.ID)
+		if err != nil || got.Outcome != want || got.Cancel.Reason != "changed my mind at 10" {
+			t.Fatalf("Get = %+v, %v", got, err)
+		}
+		if _, err := h.store.ListOpen("gc-1"); err != nil {
+			t.Fatalf("ListOpen: %v", err)
+		}
+	})
 }

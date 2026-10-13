@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/base32"
 	"encoding/binary"
+	"encoding/json"
 	"regexp"
 	"strconv"
 	"strings"
@@ -172,6 +173,34 @@ func validateOptionalText(what, v string) error {
 		return nil
 	}
 	return validateText(what, v, maxFreeTextLen)
+}
+
+// validateUpdateText refuses a value an update would not store as a string.
+// Fenced updates reach bd as --set-metadata k=v, and bd types v by its
+// spelling: "null" reads back as "", and a number spelling can read back
+// normalized. Text written by an update must therefore not be a JSON null,
+// boolean or number.
+func validateUpdateText(what, v string) error {
+	var scalar any
+	if err := json.Unmarshal([]byte(v), &scalar); err != nil {
+		return nil
+	}
+	switch scalar.(type) {
+	case nil, bool, float64:
+		return invalidf("%s %q reads as a JSON %s once stored; quote or reword it", what, v, jsonKind(scalar))
+	}
+	return nil
+}
+
+func jsonKind(v any) string {
+	switch v.(type) {
+	case nil:
+		return "null"
+	case bool:
+		return "boolean"
+	default:
+		return "number"
+	}
 }
 
 // validateToken refuses a value outside the token alphabet [a-z0-9_.:/-].

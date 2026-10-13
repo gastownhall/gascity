@@ -271,6 +271,9 @@ func (s *Store) Close(id string, outcome Outcome, by string) (Op, error) {
 	if err := validateText("close by", by, maxPrincipalLen); err != nil {
 		return Op{}, err
 	}
+	if err := validateOutcomeUpdateText(outcome); err != nil {
+		return Op{}, err
+	}
 	op, err := s.mutate(id, func(cur Op, _ Spec) (Op, bool, error) {
 		if err := validateOutcome(outcome, cur.Cancel); err != nil {
 			return Op{}, false, err
@@ -290,6 +293,17 @@ func (s *Store) Close(id string, outcome Outcome, by string) (Op, error) {
 		return Op{}, err
 	}
 	return op, s.closeBead(id)
+}
+
+// validateOutcomeUpdateText refuses outcome text an update would not store
+// as a string.
+func validateOutcomeUpdateText(o Outcome) error {
+	return errors.Join(
+		validateUpdateText("outcome reason", o.Reason),
+		validateUpdateText("outcome degradation", o.Degradation),
+		validateUpdateText("result turn", o.Result.Turn),
+		validateUpdateText("result via", o.Result.Via),
+	)
 }
 
 // closed returns cur moved to closed with outcome and no lease.
@@ -329,6 +343,9 @@ func (s *Store) Cancel(id, by, reason string) (CancelResult, Op, error) {
 		return "", Op{}, err
 	}
 	if err := validateOptionalText("cancel reason", reason); err != nil {
+		return "", Op{}, err
+	}
+	if err := errors.Join(validateUpdateText("cancel by", by), validateUpdateText("cancel reason", reason)); err != nil {
 		return "", Op{}, err
 	}
 	var result CancelResult
