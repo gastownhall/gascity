@@ -870,7 +870,16 @@ func teardownServerForStop(sp runtime.Provider, stderr io.Writer, logPrefix stri
 }
 
 func markCityStopSessionSleepReason(sessFront *session.Store, stderr io.Writer) {
-	if !sessFront.Backed() {
+	markSessionsCityStop(sessFront, nil, "gc stop", stderr)
+}
+
+// markSessionsCityStop stamps sleep_reason=city-stop on the active sessions
+// that carry no sleep reason, or only on those named in names when names is
+// non-nil. min_active_sessions' floor revival (cityStopPoolBeads) wakes
+// exactly the asleep city-stop pool seats, so a stop that should hand its
+// floor back marks it. logPrefix opens the warning lines.
+func markSessionsCityStop(sessFront *session.Store, names map[string]bool, logPrefix string, stderr io.Writer) {
+	if !sessFront.Backed() || names != nil && len(names) == 0 {
 		return
 	}
 	// The label-only, closed-excluded, IsSessionBeadOrRepairable-UNfiltered Info
@@ -880,18 +889,18 @@ func markCityStopSessionSleepReason(sessFront *session.Store, stderr io.Writer) 
 	// typed twin (sessionMetadataStateInfo) + the Info.SleepReason mirror.
 	sessions, err := sessFront.ListLabeledSessionInfosUnfiltered()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc stop: marking sessions: %v\n", err) //nolint:errcheck // best-effort warning
+		fmt.Fprintf(stderr, "%s: marking sessions: %v\n", logPrefix, err) //nolint:errcheck // best-effort warning
 		return
 	}
 	for _, info := range sessions {
-		if sessionMetadataStateInfo(info) != "active" {
+		if sessionMetadataStateInfo(info) != "active" || names != nil && !names[strings.TrimSpace(info.SessionName)] {
 			continue
 		}
 		if strings.TrimSpace(info.SleepReason) != "" {
 			continue
 		}
 		if err := sessFront.SetMarker(info.ID, "sleep_reason", string(session.SleepReasonCityStop)); err != nil {
-			fmt.Fprintf(stderr, "gc stop: marking session %s: %v\n", info.ID, err) //nolint:errcheck // best-effort warning
+			fmt.Fprintf(stderr, "%s: marking session %s: %v\n", logPrefix, info.ID, err) //nolint:errcheck // best-effort warning
 		}
 	}
 }

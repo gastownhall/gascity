@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -1775,6 +1777,92 @@ func TestSimFloorAckOverATokenlessCorpseFinalizes(t *testing.T) {
 				t.Fatalf("row %s/%s, runtime %+v; want the row finalized (closed, drained) and the corpse removed", b.Status, b.Metadata["state"], now)
 			}
 			s.noViolations(t)
+		})
+	}
+}
+
+// Kills `gc rig restart` leaving a min_active_sessions pool at zero live
+// seats under v2 (mc-ewptj): the real sweep (doRigRestart) runs as an
+// outside writer over three live pool seats with no work, then the planner
+// runs. A floor of 2 comes back to two live seats, revived from the
+// city-stop seats the restart marked; with no floor none restarts; a seat
+// with work restarts; no invariant breaks.
+func TestSimRigRestartRevivesTheFloor(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		floor int
+		work  []string
+		live  int
+	}{
+		{"no work, floor 2", 2, nil, 2},
+		{"no work, no floor", 0, nil, 0},
+		{"work on gc-1, no floor", 0, []string{"gc-1"}, 1},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var rows []beads.Bead
+			var live []string
+			for i := 1; i <= 3; i++ {
+				id := fmt.Sprintf("gc-%d", i)
+				rows = append(rows, poolRow(id, "worker", i, "awake", "instance_token", "tok-"+id, "last_woke_at", rowAt(-10*time.Minute)))
+				live = append(live, id)
+			}
+			for _, id := range c.work {
+				rows = append(rows, beads.Bead{ID: "gw-" + id, Title: "w", Type: "task", Status: "open", Assignee: id, Metadata: map[string]string{"gc.routed_to": "worker"}})
+			}
+			s := scripted(t, live, rows...)
+			if c.floor > 0 {
+				s.cfg.Agents[0].MinActiveSessions = intPtr(c.floor)
+			}
+			for range 3 {
+				s.settle()
+				s.advance(simPatrol)
+			}
+			first, err := s.legs[0].backing.Get("gc-1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var stderr bytes.Buffer
+			code := -1
+			s.outside("gc rig restart", s.legs[0], first, func(l *simLeg, _ beads.Bead) {
+				code = doRigRestart(s.sp, events.Discard, l.backing, s.cfg, s.cfg.Agents, "", "test-city", "", &bytes.Buffer{}, &stderr)
+				// The sweep stamps the wall clock; restamp its times on the
+				// sim's, or quiescence waits out the gap as a timer.
+				rows, _ := l.backing.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+				for _, b := range rows {
+					for _, key := range []string{"slept_at", "suspended_at"} {
+						if b.Metadata[key] != "" {
+							_ = l.backing.SetMetadata(b.ID, key, s.rel(0))
+						}
+					}
+				}
+			})
+			if code != 0 {
+				t.Fatalf("gc rig restart exited %d: %s", code, stderr.String())
+			}
+			for range 12 {
+				s.settle()
+				s.advance(simPatrol)
+			}
+			s.quiesce()
+			all, err := s.legs[0].backing.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := 0
+			var seats []string
+			for _, b := range all {
+				if b.Metadata["template"] != "worker" {
+					continue
+				}
+				if b.Status != "closed" && s.object(b.Metadata["session_name"]) != 0 {
+					got++
+				}
+				seats = append(seats, fmt.Sprintf("%s:%s/%s/%s", b.ID, b.Status, b.Metadata["state"], b.Metadata["sleep_reason"]))
+			}
+			if got != c.live {
+				t.Errorf("live seats after the restart = %d, want %d: %v", got, c.live, seats)
+			}
+			s.report(t)
 		})
 	}
 }
