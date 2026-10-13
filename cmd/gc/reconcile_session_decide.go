@@ -107,8 +107,8 @@ func decideRow(w *World, a *allocDecision, k rowKey) (it intent, next time.Time)
 			if arm.name == "A6" && it.Kind != "" {
 				it.Patch, it.Class = r.fold(it.Patch, it.Class, rowArms[i+1:])
 				// An acked request is A11's to signal, never restarted over
-				// (CONTRACT v5.10k-2).
-				if (it.Kind == intentRowHeal || it.Reason == decideDeadRuntimeHeal || it.Reason == decideSuspendHeal) && !r.ackedRequest() {
+				// (CONTRACT v5.10k-2); a pending restart is A13's (#7823 review).
+				if (it.Kind == intentRowHeal || it.Reason == decideDeadRuntimeHeal || it.Reason == decideSuspendHeal) && !r.ackedRequest() && !r.restartPending() {
 					it = r.startHealed(it)
 				}
 			}

@@ -32,7 +32,7 @@ const (
 // (restartHandoff).
 func armRestartRequested(r *rowFacts) (intent, bool) {
 	info := r.row.Info
-	if !r.found || strings.TrimSpace(info.RestartRequested) != "true" || operatorDormantStop(info, r.w.Now) || r.drained() {
+	if !r.found || !r.restartPending() {
 		return intent{}, false
 	}
 	if pinnedConfiguredNamedSessionKillProtected(info) && strings.TrimSpace(info.ContinuationResetPending) != "true" && r.runtimeUp() {
@@ -47,6 +47,15 @@ func armRestartRequested(r *rowFacts) (intent, bool) {
 		it.Finalize = true
 	}
 	return it, true
+}
+
+// restartPending reports a row A13 restarts: restart_requested on a row
+// no operator holds dormant and AL1 does not drain. A6's dead-runtime heal
+// and its composed start leave it to A13 (the #7823 review): a heal's start
+// would bring up a runtime with the marker still set, which A13 would then
+// stop again, and on a young row count the restart as a death.
+func (r *rowFacts) restartPending() bool {
+	return strings.TrimSpace(r.row.Info.RestartRequested) == "true" && !operatorDormantStop(r.row.Info, r.w.Now) && !r.drained()
 }
 
 // drained reports a row AL1 drains (orphaned, suspended, over its pool's

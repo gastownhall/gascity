@@ -181,7 +181,7 @@ func armCreatingHeal(r *rowFacts) (intent, bool) {
 // acked request is A11's (ackedRequest).
 func armDeadRuntimeHeal(r *rowFacts) (intent, bool) {
 	info := r.row.Info
-	if r.entry == nil || !committed(info) || r.entry.Desired == desireDrain || r.ackedRequest() || !r.freshGoneOrClassified() {
+	if r.entry == nil || !committed(info) || r.entry.Desired == desireDrain || r.ackedRequest() || r.restartPending() || !r.freshGoneOrClassified() {
 		return intent{}, false
 	}
 	patch, class, _, ev := deadRuntimePatch(r, true)

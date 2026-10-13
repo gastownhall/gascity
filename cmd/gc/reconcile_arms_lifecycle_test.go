@@ -259,3 +259,80 @@ func TestArmRestartRequested(t *testing.T) {
 		})
 	}
 }
+
+// TestRestartRequestedGoneRowIsA13s (the #7823 review): a committed row
+// asked to restart whose runtime is gone, or whose dead pane A12
+// classified, is A13's, not A6's dead-runtime heal (whose composed start
+// would bring up a runtime with the marker still set), whatever AL1 wants
+// of it short of a drain.
+func TestRestartRequestedGoneRowIsA13s(t *testing.T) {
+	for _, d := range []desire{desireWake, desireKeep, desireSleep} {
+		for _, live := range []rowLiveness{livenessGone, livenessDead} {
+			t.Run(fmt.Sprintf("%v, %v", d, live), func(t *testing.T) {
+				c := newHealCase(t, live, d, append([]string{"state", "active", "session_key", "k-1", "last_woke_at", rowAt(-10 * time.Second)}, restartAsked...)...)
+				if live == livenessDead { // A12 classified the dead pane
+					id := runtimeIdentity{Known: true, SessionID: c.k.ID, Epoch: "3", Token: "tok-3"}
+					c.w.Observed = map[rowKey]rowObservation{c.k: {Liveness: livenessDead, Identity: id}}
+					c.w.Classified = map[rowKey]classifiedRuntime{c.k: {Token: c.k.ID + "/tok-3"}}
+				}
+				if it := c.decide(); it.Reason != decideRestartRequested || it.Heal != nil {
+					t.Fatalf("decideRow = (%q, %q), heal %v; want A13's restart alone", it.Kind, it.Reason, it.Heal != nil)
+				}
+			})
+		}
+	}
+}
+
+// TestSimRestartRequestedOverAGoneRuntimeStartsOnce (the #7823 review): a
+// committed Wake row whose runtime is gone when its restart is asked (an
+// agent that exits after `gc runtime request-restart` on a provider that
+// leaves no pane) is handed off and started once: no runtime is stopped,
+// and no wake failure or churn accrues, at any wake age.
+func TestSimRestartRequestedOverAGoneRuntimeStartsOnce(t *testing.T) {
+	for _, age := range []time.Duration{10 * time.Second, 2 * time.Minute, time.Hour} {
+		t.Run(age.String(), func(t *testing.T) {
+			s := converged(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-1", "session_key", "k-1", "started_config_hash", "h-1", "last_woke_at", rowAt(-age)), gc1Work())
+			s.ask(restartAsked...)
+			s.sp.mu.Lock()
+			s.sp.drop("s-gc-1")
+			s.sp.mu.Unlock()
+			for range 6 {
+				s.settle()
+				s.advance(simPatrol)
+			}
+			s.sp.mu.Lock()
+			starts, kills := len(s.sp.starts), len(s.sp.kills)
+			s.sp.mu.Unlock()
+			m := s.gc1()
+			if starts != 1 || kills != 0 || m["restart_requested"] != "" {
+				t.Fatalf("starts %d, kills %d, row %v; want one start and no stop", starts, kills, m)
+			}
+			if a, c := m["wake_attempts"], m["churn_count"]; a != "" && a != "0" || c != "" && c != "0" {
+				t.Fatalf("row %v: the requested restart accrued a death", m)
+			}
+			s.noViolations(t)
+		})
+	}
+}
+
+// TestRestartStopKeepsTheTokenLeg (CONTRACT v5.10u, the #7823 review W2):
+// A13's restart waives only the attach leg; L2, the row's own runtime
+// read Current, stays, so a runtime whose identity read failed is never
+// stopped by name.
+func TestRestartStopKeepsTheTokenLeg(t *testing.T) {
+	legs := stopLegs(intent{Kind: intentStop, Reason: decideRestartRequested})
+	if legs&legToken == 0 || legs&legAttach != 0 {
+		t.Fatalf("stopLegs = %b, want L2 kept and L3 waived", legs)
+	}
+}
+
+// TestRestartRequestedHealComposesNoStart (the #7823 review): any other A6
+// heal on a gone row asked to restart (here an expired hold's clear) lands
+// alone, with no start composed beside it: A13 hands the row off on the
+// next pass, and the start follows the handoff.
+func TestRestartRequestedHealComposesNoStart(t *testing.T) {
+	c := newHealCase(t, livenessGone, desireWake, append([]string{"state", "asleep", "held_until", rowAt(-time.Minute)}, restartAsked...)...)
+	if it := c.decide(); it.Kind != intentRowHeal || it.Heal != nil {
+		t.Fatalf("decideRow = (%q, %q), heal %v; want the hold's clear alone, no start", it.Kind, it.Reason, it.Heal != nil)
+	}
+}
