@@ -1,6 +1,7 @@
 package t3bridge
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -52,32 +53,105 @@ func TestSeamBackedInterruptSoftUnavailableIsRuntimeUnavailable(t *testing.T) {
 	}
 }
 
-// With T3 reachable, a session that has no bound thread, or whose thread's
-// session is not live, cannot take a turn: report it as not found, and never
-// dispatch a turn that would resurrect a stopped thread.
-func TestSeamBackedNudgeAndInterruptWithoutLiveThreadAreSessionNotFound(t *testing.T) {
-	for _, tc := range []struct {
-		name     string
-		snapshot map[string]interface{}
-	}{
-		{name: "no thread", snapshot: map[string]interface{}{"threads": []interface{}{}}},
-		{name: "stopped thread", snapshot: boundThreadSnapshot("stopped")},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			server := newT3BridgeTestServer(t, tc.snapshot)
+// With T3 reachable, a session that has no bound thread cannot take a turn
+// or be interrupted: report it as not found and dispatch nothing.
+func TestSeamBackedNudgeAndInterruptWithoutThreadAreSessionNotFound(t *testing.T) {
+	server := newT3BridgeTestServer(t, map[string]interface{}{"threads": []interface{}{}})
+	t.Cleanup(server.Close)
+	_, sp := newSeamBackedSnapshotTestProvider(t, server.wsURL())
+
+	if err := sp.Nudge("agent-a", runtime.TextContent("hello")); !errors.Is(err, runtime.ErrSessionNotFound) {
+		t.Fatalf("Nudge = %v, want errors.Is(runtime.ErrSessionNotFound)", err)
+	}
+	if err := sp.Interrupt("agent-a"); !errors.Is(err, runtime.ErrSessionNotFound) {
+		t.Fatalf("Interrupt = %v, want errors.Is(runtime.ErrSessionNotFound)", err)
+	}
+	if got := server.commandTypes(); len(got) != 0 {
+		t.Fatalf("dispatched commands = %v, want none for a session without a thread", got)
+	}
+}
+
+// A bound thread whose T3 session is not live still takes a nudge: T3
+// relaunches the provider on thread.turn.start, which is how a reused or
+// idle-reaped thread wakes with its message. There is no turn to interrupt,
+// so Interrupt reports the session as not found.
+func TestSeamBackedNudgeWakesBoundThreadWithoutLiveSession(t *testing.T) {
+	for _, status := range []string{"stopped", "error", "interrupted"} {
+		t.Run(status, func(t *testing.T) {
+			server := newT3BridgeTestServer(t, boundThreadSnapshot(status))
 			t.Cleanup(server.Close)
 			_, sp := newSeamBackedSnapshotTestProvider(t, server.wsURL())
 
-			if err := sp.Nudge("agent-a", runtime.TextContent("hello")); !errors.Is(err, runtime.ErrSessionNotFound) {
-				t.Fatalf("Nudge = %v, want errors.Is(runtime.ErrSessionNotFound)", err)
+			if err := sp.Nudge("agent-a", runtime.TextContent("hello")); err != nil {
+				t.Fatalf("Nudge to a %s thread = %v, want nil", status, err)
+			}
+			if got := server.commandPayloads("thread.turn.start"); len(got) != 1 {
+				t.Fatalf("turn starts = %d, want 1 waking the %s thread", len(got), status)
 			}
 			if err := sp.Interrupt("agent-a"); !errors.Is(err, runtime.ErrSessionNotFound) {
-				t.Fatalf("Interrupt = %v, want errors.Is(runtime.ErrSessionNotFound)", err)
+				t.Fatalf("Interrupt of a %s thread = %v, want errors.Is(runtime.ErrSessionNotFound)", status, err)
 			}
-			if got := server.commandTypes(); len(got) != 0 {
-				t.Fatalf("dispatched commands = %v, want none for a session without a live thread", got)
+			if containsString(server.commandTypes(), "thread.turn.interrupt") {
+				t.Fatalf("dispatched commands = %v, want no interrupt for a %s thread", server.commandTypes(), status)
 			}
 		})
+	}
+}
+
+// Start's reuse path stops a thread whose session is not running and sends
+// no turn; the message that woke the session follows as a nudge and must
+// reach the thread.
+func TestStartReuseThenNudgeDeliversTheTurn(t *testing.T) {
+	const name = "agent-a"
+	cfg := runtime.Config{
+		WorkDir: "/tmp/agent-a",
+		Command: "codex",
+		Env: map[string]string{
+			"GC_CITY_PATH": "/tmp/gc",
+			"GC_ALIAS":     name,
+			"GC_TEMPLATE":  name,
+			"GC_PROVIDER":  "codex",
+			"GC_MODEL":     "gpt-5.4",
+		},
+	}
+	server := newT3BridgeTestServer(t, map[string]interface{}{
+		"projects": []interface{}{
+			map[string]interface{}{"id": "project-1", "workspaceRoot": cfg.WorkDir},
+		},
+		"threads": []interface{}{
+			map[string]interface{}{
+				"id":        "thread-1",
+				"projectId": "project-1",
+				"title":     name + " · " + name,
+				"model":     "gpt-5.4",
+				"customMetadata": map[string]interface{}{
+					"gc.agent":           name,
+					"gc.sessionName":     name,
+					"gc.startupTemplate": name,
+					"gc.startupWorkDir":  cfg.WorkDir,
+					"gc.runtimeProvider": "codex",
+					"gc.startupModel":    "gpt-5.4",
+				},
+				"session": map[string]interface{}{"status": "stopped"},
+			},
+		},
+	})
+	t.Cleanup(server.Close)
+	backed, sp := newSeamBackedSnapshotTestProvider(t, server.wsURL())
+	t.Cleanup(func() { backed.raw.stopEventWatcher(name) })
+
+	if err := sp.Start(context.Background(), name, cfg); err != nil {
+		t.Fatalf("Start(reuse): %v", err)
+	}
+	if got := server.commandPayloads("thread.turn.start"); len(got) != 0 {
+		t.Fatalf("Start(reuse) sent %d turn starts, want none", len(got))
+	}
+	if err := sp.Nudge(name, runtime.TextContent("wake up")); err != nil {
+		t.Fatalf("Nudge after reuse = %v, want nil", err)
+	}
+	turns := server.commandPayloads("thread.turn.start")
+	if len(turns) != 1 || turns[0]["threadId"] != "thread-1" {
+		t.Fatalf("turn starts after Nudge = %v, want one on thread-1", turns)
 	}
 }
 

@@ -2824,12 +2824,10 @@ func (p *Provider) ProcessAlive(name string, _ []string) bool {
 	return classifyT3SessionStatus(status) == t3SessionStatusLive
 }
 
-// liveThread resolves the T3 thread that hosts name's live session. It
-// reports [runtime.ErrRuntimeUnavailable] when T3 cannot be read or its
-// answer cannot be classified, and [runtime.ErrSessionNotFound] when no thread
-// is bound to name or the bound thread's session is not live: a turn sent to
-// such a thread would start a session gc does not consider running.
-func (p *Provider) liveThread(name string) (map[string]interface{}, *threadBinding, error) {
+// boundThread resolves the T3 thread bound to name, whatever its session
+// status. It reports [runtime.ErrRuntimeUnavailable] when T3 cannot be read
+// and [runtime.ErrSessionNotFound] when no thread is bound to name.
+func (p *Provider) boundThread(name string) (map[string]interface{}, *threadBinding, error) {
 	snapshot, err := p.rpcSnapshot()
 	if err != nil {
 		if isSoftBridgeUnavailable(err) {
@@ -2841,6 +2839,18 @@ func (p *Provider) liveThread(name string) (map[string]interface{}, *threadBindi
 	binding := snapshotThreadBinding(thread)
 	if binding == nil {
 		return nil, nil, fmt.Errorf("%w: no t3 thread is bound to %q", runtime.ErrSessionNotFound, name)
+	}
+	return thread, binding, nil
+}
+
+// liveThread resolves the T3 thread that hosts name's live session. Beyond
+// [Provider.boundThread]'s errors, it reports [runtime.ErrSessionNotFound]
+// when the bound thread's session is not live, and
+// [runtime.ErrRuntimeUnavailable] when its status cannot be classified.
+func (p *Provider) liveThread(name string) (map[string]interface{}, *threadBinding, error) {
+	thread, binding, err := p.boundThread(name)
+	if err != nil {
+		return nil, nil, err
 	}
 	status := snapshotThreadSessionStatus(thread)
 	if isLegacyPreSessionStatus(status) && p.withinRecentStart(name) {
@@ -2861,24 +2871,19 @@ func (p *Provider) liveThread(name string) (map[string]interface{}, *threadBindi
 // reports [runtime.ErrRuntimeUnavailable] when T3 cannot be read and
 // [runtime.ErrSessionNotFound] when no thread is bound to name.
 func (p *Provider) SessionBinding(name string) (runtime.SessionBinding, error) {
-	snapshot, err := p.rpcSnapshot()
+	_, binding, err := p.boundThread(name)
 	if err != nil {
-		if isSoftBridgeUnavailable(err) {
-			return runtime.SessionBinding{}, fmt.Errorf("%w: t3bridge snapshot unavailable for %q: %w", runtime.ErrRuntimeUnavailable, name, err)
-		}
 		return runtime.SessionBinding{}, err
-	}
-	binding := snapshotThreadBinding(snapshotThreadBySessionName(snapshot, name))
-	if binding == nil {
-		return runtime.SessionBinding{}, fmt.Errorf("%w: no t3 thread is bound to %q", runtime.ErrSessionNotFound, name)
 	}
 	return runtime.SessionBinding{ThreadID: binding.ThreadID, ProjectID: binding.ProjectID}, nil
 }
 
 // Nudge delivers content to the session as a new user turn. It reports
 // [runtime.ErrRuntimeUnavailable] when T3 cannot be read and
-// [runtime.ErrSessionNotFound] when no live thread is bound to name, so a
-// caller never mistakes an undelivered nudge for a delivered one.
+// [runtime.ErrSessionNotFound] when no thread is bound to name, so a caller
+// never mistakes an undelivered nudge for a delivered one. A bound thread
+// whose T3 session is stopped takes the turn: T3 relaunches the provider on
+// thread.turn.start, which is how a reused or idle-reaped thread wakes.
 func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 	return p.nudge(name, content, "")
 }
@@ -2893,7 +2898,7 @@ func (p *Provider) NudgeKeyed(name string, content []runtime.ContentBlock, key s
 }
 
 func (p *Provider) nudge(name string, content []runtime.ContentBlock, key string) error {
-	thread, binding, err := p.liveThread(name)
+	thread, binding, err := p.boundThread(name)
 	if err != nil {
 		return err
 	}
