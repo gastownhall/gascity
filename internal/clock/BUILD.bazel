@@ -1,8 +1,11 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "clock",
-    srcs = ["clock.go"],
+    srcs = [
+        "backstop.go",
+        "clock.go",
+    ],
     importpath = "github.com/gastownhall/gascity/internal/clock",
     visibility = ["//visibility:public"],
 )
@@ -36,4 +39,14 @@ filegroup(
         allow_empty = True,
     ),
     visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "clock_test",
+    srcs = [
+        "backstop_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":clock"],
+    deps = ["//internal/testenv"],
 )

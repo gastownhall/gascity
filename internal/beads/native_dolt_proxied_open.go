@@ -126,6 +126,7 @@ func OpenNativeDoltStoreAtProxied(parent context.Context, scopeRoot string, env 
 	for _, opt := range opts {
 		opt(store)
 	}
+	store.loadListPushableTypes(ctx)
 	return store, nil
 }
 
@@ -162,7 +163,7 @@ func openNativeStorageProxied(ctx context.Context, scopeRoot string, env map[str
 	if !readPrefix {
 		return storage, "", nil
 	}
-	prefix, err := storage.GetConfig(ctx, nativeIssuePrefixConfigKey)
+	prefix, err := nativeReadIssuePrefix(ctx, storage)
 	if err != nil {
 		_ = storage.Close()
 		return nil, "", fmt.Errorf("reading native issue prefix: %w", err)

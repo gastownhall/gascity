@@ -69,7 +69,7 @@ const BeadType = "session"
 const LabelSession = "gc:session"
 
 // MetadataLastNudgeDeliveredAt is the session-bead metadata key that records
-// the wall-clock time of the most recent successful queued-nudge delivery.
+// the wall-clock time of the most recent successful nudge delivery.
 const MetadataLastNudgeDeliveredAt = "last_nudge_delivered_at"
 
 // Info holds the user-facing details of a chat session.
@@ -280,6 +280,10 @@ type Info struct {
 	// clearing last_woke_at, so a same-tick sleep/drain-ack falls back to this
 	// instead of collapsing straight to CreatedAt (#2574).
 	SleptAt string // slept_at (raw)
+	// SuspendedAt is the RAW suspended_at metadata (RFC3339 or empty), stamped
+	// by a suspend. The process-table orphan sweep reads it, after SleptAt, as
+	// the row's last stop.
+	SuspendedAt string // suspended_at (raw)
 	// AwakeStartedAt is the RAW awake_started_at metadata (RFC3339 or empty):
 	// the immutable start-of-awake-interval epoch that survives sleep/drain
 	// teardowns (unlike last_woke_at / pending_create_started_at, which are
@@ -387,6 +391,10 @@ type Info struct {
 	// (CurrentBeadIDKey). compute_awake_bridge maps it (trimmed) onto
 	// LifecycleInput.CurrentlyProcessingBeadID.
 	CurrentlyProcessingBeadID string // currently_processing_bead_id (raw)
+	// CurrentClaimBeadID is the RAW current_claim_bead_id metadata
+	// (beadmeta.CurrentClaimBeadIDMetadataKey): the work the session claimed
+	// for itself (SetCurrentClaim), which CurrentClaimBeadID reads live.
+	CurrentClaimBeadID string // current_claim_bead_id (raw)
 	// CoreHashBreakdown is the RAW core_hash_breakdown metadata (a JSON blob). The
 	// config-drift path feeds it verbatim to runtime.CoreFingerprintDriftFieldsFromJSON
 	// / LogCoreFingerprintDrift for the drift trace payload; the mirror keeps the
@@ -445,6 +453,11 @@ type Info struct {
 	// explicit-wake cause. Mirror keeps the raw value so a typed LifecycleInput can
 	// be populated from Info without touching the bead.
 	WakeRequest string // wake_request (raw)
+	// WakeRequestedAt is the RAW wake_requested_at metadata (RFC3339 or empty),
+	// stamped with wake_request. The reconciler compares it against SleptAt to
+	// tell a still-pending explicit wake from one an earlier awake interval
+	// already served (PreWakePatch clears the pair only at a start).
+	WakeRequestedAt string // wake_requested_at (raw)
 	// RestartRequested is the RAW restart_requested metadata, the §5.2 intra-tick
 	// restart marker compute_awake_bridge reads (trimmed == "true") to surface a
 	// pending restart on the awake scan. Under raw-refresh coexistence the mirror
@@ -592,6 +605,7 @@ type Manager struct {
 	transportResolver       func(template, provider string) transportResolution
 	clk                     clock.Clock
 	staleKeyDetectionWaiter StaleKeyDetectionWaiter
+	leaseTTL                time.Duration // the runtime lease records' TTL (WithRuntimeLeaseTTL)
 }
 
 // PruneResult reports which sessions were pruned and which queued wait nudges
@@ -1221,15 +1235,19 @@ func (m *Manager) createBeadOnly(spec CreateOptions) (Info, error) {
 }
 
 // Attach attaches the user's terminal to the session. If the session is
-// suspended, it is resumed first using resumeCommand. If the tmux session
-// died (active bead but no process), it is restarted.
-func (m *Manager) Attach(ctx context.Context, id string, resumeCommand string, hints runtime.Config) error {
-	return withSessionMutationLock(id, func() error {
+// dormant, it is resumed first using resumeCommand, consuming the operator's
+// hold when by is an operator (CONTRACT v5.9 D8). If the tmux session died
+// (active bead but no process), it is restarted.
+func (m *Manager) Attach(ctx context.Context, by Actor, id string, resumeCommand string, hints runtime.Config) error {
+	if err := m.checkStarter(by); err != nil {
+		return err
+	}
+	return withSessionStartLock(ctx, id, func() error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
 		}
-		if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints); err != nil {
+		if err := m.ensureRunning(ctx, by, id, b, sessName, resumeCommand, hints, false); err != nil {
 			return err
 		}
 
@@ -1237,10 +1255,44 @@ func (m *Manager) Attach(ctx context.Context, id string, resumeCommand string, h
 	})
 }
 
+// suspendRollback is the restore of a failed stop's suspend w over the row
+// meta reads now: nothing unless meta still carries the suspend's stamp, and
+// then Was for each key w changed that meta still reads as w wrote it.
+// rollbackSuspend writes suspendRollback on a fresh read, fenced.
+func (m *Manager) rollbackSuspend(id string, suspended DispositionWrite) error {
+	_, err := m.PersistedStore().UpdateMetadataFenced(id, operatorSuspendAttempts, func(_ Info, p PersistedResponse) MetadataPatch {
+		return suspendRollback(id, suspended, p.Metadata)
+	})
+	return err
+}
+
+// stampSoftSuspend writes a suspend that holds nothing (the chat idle
+// auto-suspend, the city stop sweep): patch's state and stamp.
+func (m *Manager) stampSoftSuspend(id string, patch MetadataPatch) error {
+	if err := m.store.Update(id, beads.UpdateOpts{Metadata: map[string]string(patch)}); err != nil {
+		return fmt.Errorf("updating suspension state: %w", err)
+	}
+	return nil
+}
+
+func suspendRollback(id string, w DispositionWrite, meta map[string]string) MetadataPatch {
+	if w.Wrote == nil || meta["suspended_at"] != w.Wrote["suspended_at"] {
+		return nil
+	}
+	restore := MetadataPatch{}
+	for k, v := range LifecycleOnly(w.Wrote) {
+		if meta[k] == v && w.Was[k] != v {
+			restore[k] = w.Was[k]
+		}
+	}
+	// The class keys' undo is the Suspend cell's.
+	return UndoDisposition(w.Was, w.Wrote, meta).Into(id, restore)
+}
+
 // suspendIntent distinguishes an operator's explicit, targeted suspend from the
-// city-shutdown sweep. `gc stop` / `gc restart` issue suspend across every
-// session bead with no state pre-filter, so the sweep needs latitude on states
-// that have no live turn to suspend. An operator naming ONE session does not:
+// city-shutdown sweep (ActorSweep). `gc stop` / `gc restart` issue suspend
+// across every session bead with no state pre-filter, so the sweep needs
+// latitude on states that have no live turn to suspend. An operator naming ONE session does not:
 // for them a state that cannot be suspended must still say so rather than
 // quietly killing a runtime under a different name.
 type suspendIntent int
@@ -1250,27 +1302,40 @@ const (
 	suspendIntentOperator suspendIntent = iota
 	// suspendIntentShutdown is the city stop/restart sweep.
 	suspendIntentShutdown
+	// suspendIntentIdle is the chat idle auto-suspend: the operator's
+	// transition rules, but no hold, so any wake brings the session back.
+	suspendIntentIdle
 )
 
-// Suspend saves session state and kills the runtime session. This is the
-// targeted, operator-facing form: a state the machine cannot suspend returns
-// ErrIllegalTransition rather than tearing a runtime down anyway.
-func (m *Manager) Suspend(id string) error {
-	return m.suspend(id, suspendIntentOperator)
-}
-
-// SuspendForShutdown is Suspend for the city stop/restart sweep, which issues
-// suspend across every session bead with no state pre-filter. It additionally
-// tolerates a draining seat: rejecting those with an illegal transition made
-// every restart SKIP them, so they survived as live panes still holding their
-// pool slot names (ga-rxhu2). The runtime is torn down and the bead is left in
-// draining for the drain machinery or the reconciler to finish.
-func (m *Manager) SuspendForShutdown(id string) error {
-	return m.suspend(id, suspendIntentShutdown)
-}
-
-func (m *Manager) suspend(id string, intent suspendIntent) error {
-	return withSessionMutationLock(id, func() error {
+// Suspend saves session state and kills the runtime session, under by's
+// runtime lease mode. This is the targeted form: a state the machine cannot
+// suspend returns ErrIllegalTransition rather than tearing a runtime down
+// anyway.
+//
+// soft is the chat idle auto-suspend ([chat_sessions] idle_timeout): it
+// follows the same transition rules and clears a pending wake, but writes no
+// hold, so the controller's next wake reason resumes the session; an
+// already-suspended row is left as it is.
+//
+// An ActorSweep suspend is the city stop/restart sweep's, which issues
+// suspend across every session bead with no state pre-filter and takes no
+// runtime lease. It additionally tolerates a draining seat: rejecting those
+// with an illegal transition made every restart SKIP them, so they survived
+// as live panes still holding their pool slot names (ga-rxhu2). The runtime
+// is torn down and the bead is left in draining for the drain machinery or
+// the reconciler to finish.
+func (m *Manager) Suspend(ctx context.Context, by Actor, id string, soft bool) error {
+	if err := m.checkActor(by); err != nil {
+		return err
+	}
+	intent := suspendIntentOperator
+	switch {
+	case by.Kind == ActorSweep:
+		intent = suspendIntentShutdown
+	case soft:
+		intent = suspendIntentIdle
+	}
+	return withSessionStartLock(ctx, id, func() error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
@@ -1282,7 +1347,25 @@ func (m *Manager) suspend(id string, intent suspendIntent) error {
 		}
 		current := State(b.Metadata["state"])
 		if current == StateSuspended {
-			return nil // idempotent: already suspended
+			// An operator's suspend of a suspended row writes the hold (a
+			// suspended state alone, as the shutdown sweep leaves it, does not
+			// stop legacy's assigned-work wake), or stamps the one in force
+			// again; the runtime is already down.
+			if intent == suspendIntentOperator {
+				_, err := m.PersistedStore().OperatorSuspend(id, m.now())
+				return err
+			}
+			return nil
+		}
+		// An operator's suspend, and the idle auto-suspend, stop the runtime
+		// under its lease, taken before any write; the city stop sweep takes
+		// none (it stops every runtime).
+		if intent != suspendIntentShutdown {
+			release, err := m.leaseForStop(ctx, by, id, sessName, 0)
+			if err != nil {
+				return err
+			}
+			defer release()
 		}
 		// failed-create is a create-rollback terminal state: the create never
 		// reached creation_complete, so there is no live turn to suspend — only
@@ -1344,22 +1427,54 @@ func (m *Manager) suspend(id string, intent suspendIntent) error {
 			return err
 		}
 
+		// An operator's suspend is the disposition's Suspend cell, fenced,
+		// and written BEFORE the runtime goes: the user hold keeps legacy's
+		// assigned-work wake and its heartbeat crash recovery from undoing it,
+		// so a tick between the write and the stop drains the row instead of
+		// restarting it. It supersedes any pending wake request (D7). A failed
+		// stop restores the row.
+		if intent == suspendIntentOperator {
+			suspended, err := m.PersistedStore().OperatorSuspend(id, m.now())
+			if err != nil {
+				return fmt.Errorf("updating suspension state: %w", err)
+			}
+			if err := m.tearDownRuntimeForSuspend(sessName); err != nil {
+				// The runtime is still live: restore what the suspend wrote, as
+				// a failed kill's rollback does, so the row never reads
+				// suspended over a live runtime. Decided on a fresh read and
+				// fenced: only while the row still carries this suspend's
+				// stamp, and only the keys the suspend changed that still read
+				// as it wrote them, so a write since (a wait, a quarantine)
+				// stands.
+				if rbErr := m.rollbackSuspend(id, suspended); rbErr != nil {
+					return fmt.Errorf("%w (restoring the row: %w)", err, rbErr)
+				}
+				return err
+			}
+			return nil
+		}
+
 		if err := m.tearDownRuntimeForSuspend(sessName); err != nil {
 			return err
 		}
 
 		// Update state and suspension timestamp together so stores with a
-		// write-through cache preserve one coherent lifecycle transition.
-		if err := m.store.Update(id, beads.UpdateOpts{Metadata: map[string]string{
+		// write-through cache preserve one coherent lifecycle transition. The
+		// idle auto-suspend supersedes a pending wake (D7) but holds nothing;
+		// the shutdown sweep leaves the wake for the next start.
+		patch := MetadataPatch{
 			"state":        string(StateSuspended),
-			"suspended_at": time.Now().UTC().Format(time.RFC3339),
 			"slept_at":     "",
 			"sleep_reason": "",
-		}}); err != nil {
-			return fmt.Errorf("updating suspension state: %w", err)
 		}
-
-		return nil
+		if intent == suspendIntentIdle {
+			for k, v := range ClearWakeRequestPatch() {
+				patch[k] = v
+			}
+		}
+		// The stamp is the disposition's SuspendSoft cell (no hold).
+		patch = CellInto(id, b.Metadata, by.Kind, DispEvent{Kind: EvSuspendSoft}, m.now(), patch)
+		return m.stampSoftSuspend(id, patch)
 	})
 }
 
@@ -1421,15 +1536,19 @@ func (m *Manager) RequestFreshRestart(id string) error {
 }
 
 // Close ends a conversation permanently.
-func (m *Manager) Close(id string) error {
-	_, err := m.CloseDetailed(id)
+func (m *Manager) Close(ctx context.Context, by Actor, id string) error {
+	_, err := m.CloseDetailed(ctx, by, id)
 	return err
 }
 
-// CloseDetailed ends a conversation permanently and reports cleanup artifacts.
-func (m *Manager) CloseDetailed(id string) (CloseResult, error) {
+// CloseDetailed ends a conversation permanently and reports cleanup
+// artifacts. It stops the runtime under by's runtime lease mode.
+func (m *Manager) CloseDetailed(ctx context.Context, by Actor, id string) (CloseResult, error) {
+	if err := m.checkActor(by); err != nil {
+		return CloseResult{}, err
+	}
 	result := CloseResult{}
-	err := withSessionMutationLock(id, func() error {
+	err := withSessionStartLock(ctx, id, func() error {
 		b, sessName, err := m.loadSessionBead(id, true)
 		if err != nil {
 			return err
@@ -1447,6 +1566,11 @@ func (m *Manager) CloseDetailed(id string) (CloseResult, error) {
 		if _, err := Transition(current, CmdClose); err != nil {
 			return err
 		}
+		release, err := m.leaseForStop(ctx, by, id, sessName, 0)
+		if err != nil {
+			return err
+		}
+		defer release()
 
 		// Stop the live runtime before marking the bead closed. Close is a
 		// cleanup path, so it absorbs a missing-session or missing-server
@@ -1471,15 +1595,24 @@ func (m *Manager) CloseDetailed(id string) (CloseResult, error) {
 			log.Printf("session %s: closing after capped wait cancellation lookup", id)
 		}
 		result.WaitNudgeIDs = append(result.WaitNudgeIDs, nudgeIDs...)
-		if err := m.clearWakeAndHoldOverrides(id); err != nil {
-			return err
-		}
-		if err := m.retireConfiguredNamedSessionIdentifiers(id, b); err != nil {
-			return err
-		}
-
-		if err := m.store.Close(id); err != nil {
-			return err
+		// One terminal close (op.close): the holds go as a retired row's (the
+		// disposition's Retire cell), with the wake pin and a configured
+		// named session's identifiers, on the incarnation this close stopped.
+		terminal := retiredIdentifiersPatch(b)
+		terminal["pin_awake"] = ""
+		terminal = CellInto(id, b.Metadata, ActorController, DispEvent{Kind: EvRetire}, m.now(), terminal)
+		// Past a kill fence: the operator's close ends the session a kill was
+		// tearing down, as it did before CommitClose.
+		res, err := NewStore(beads.SessionStore{Store: m.store}).CommitClose(Decide(infoFromPersistedBead(b), FactsOpClose), terminal, m.now(), CommitPastKillFence())
+		switch {
+		case err != nil:
+			return fmt.Errorf("closing session %s: %w", id, err)
+		case res == CommitMoved:
+			return fmt.Errorf("closing session %s: %w", id, ErrSessionCloseSuperseded)
+		case res == CommitContended:
+			return fmt.Errorf("closing session %s: lost the revision fence %d times", id, terminalCloseMaxAttempts)
+		case res != CommitLanded && res != CommitClosed:
+			return fmt.Errorf("closing session %s: refused (%s)", id, res)
 		}
 		_ = clearRuntimeMCPServersSnapshot(m.cityPath, id)
 		return nil
@@ -1487,52 +1620,41 @@ func (m *Manager) CloseDetailed(id string) (CloseResult, error) {
 	return result, err
 }
 
-func (m *Manager) clearWakeAndHoldOverrides(id string) error {
-	update := map[string]string{
-		"pin_awake":    "",
-		"held_until":   "",
-		"sleep_intent": "",
-	}
-	if err := m.store.SetMetadataBatch(id, update); err != nil {
-		return fmt.Errorf("clearing wake and hold overrides: %w", err)
-	}
-	return nil
-}
-
-func (m *Manager) retireConfiguredNamedSessionIdentifiers(id string, b beads.Bead) error {
-	// Recognize configured named sessions by flag OR identity so a
-	// partially-tagged bead (identity recorded, boolean flag absent) still
-	// releases its reserved runtime name on close instead of stranding the
-	// name and blocking respawn (ga-841).
+// retiredIdentifiersPatch frees a configured named session's identifiers on
+// its close: its aliases, runtime name and canonical identity record, as
+// RetireNamedSessionPatch does. Recognized by flag OR identity, so a
+// partially-tagged bead (identity recorded, boolean flag absent) still
+// releases its reserved runtime name instead of stranding it and blocking
+// respawn (ga-841). Any other row's is empty.
+func retiredIdentifiersPatch(b beads.Bead) MetadataPatch {
 	if !wasConfiguredNamedSession(b) {
-		return nil
+		return MetadataPatch{}
 	}
-	update := beads.UpdateOpts{
-		Metadata: UpdatedAliasMetadata(b.Metadata, ""),
-	}
-	update.Metadata["session_name"] = ""
-	update.Metadata["session_name_explicit"] = ""
-	update.Metadata["pending_create_claim"] = ""
-	update.Metadata["pending_create_started_at"] = ""
-	// Free the durable canonical-identity record on this close path too, matching
-	// RetireNamedSessionPatch. Without it a configured named session closed via
-	// Manager.Close keeps a stale canonical instance name / pool slot — the same
-	// strand class the S19 retirement fix removed for the duplicate/removed/API
-	// paths, which this hand-rolled path is not one of.
-	freeCanonicalIdentityMetadata(update.Metadata)
-	if err := m.store.Update(id, update); err != nil {
-		return fmt.Errorf("retiring configured named session identifiers: %w", err)
-	}
-	return nil
+	patch := MetadataPatch(UpdatedAliasMetadata(b.Metadata, ""))
+	patch["session_name"] = ""
+	patch["session_name_explicit"] = ""
+	patch["pending_create_claim"] = ""
+	patch["pending_create_started_at"] = ""
+	freeCanonicalIdentityMetadata(patch)
+	return patch
 }
 
 // Kill force-kills the runtime process for a session without changing bead
 // state. This is intended for manual intervention; the reconciler will detect
 // the dead process and restart it according to the session's lifecycle rules.
-// Like Close, it is a cleanup path: a session that is already gone is the
-// outcome Kill was asked for, so it reports success rather than surfacing the
-// provider's "nothing to stop" answer to the operator.
-func (m *Manager) Kill(id string) error {
+// Like Close, it is a cleanup path: a runtime that is already gone when Kill
+// stops it is the outcome Kill was asked for, so it reports success rather
+// than surfacing the provider's "nothing to stop" answer to the operator. A
+// session whose state is not live and whose runtime is not running is
+// refused before the stop with ErrSessionInactive, wrapped; each caller
+// decides whether that already satisfies its request.
+//
+// It runs under the session's runtime lease: by.Lease, or one taken in by's
+// mode, an operator's waited for up to RuntimeLeaseOperatorWait.
+func (m *Manager) Kill(ctx context.Context, by Actor, id string) error {
+	if err := m.checkActor(by); err != nil {
+		return err
+	}
 	b, sessName, err := m.sessionBead(id)
 	if err != nil {
 		return err
@@ -1546,89 +1668,18 @@ func (m *Manager) Kill(id string) error {
 		// Known live states — proceed.
 	default:
 		if !m.sp.IsRunning(sessName) {
-			return fmt.Errorf("session %s is not active", id)
+			return fmt.Errorf("session %s: %w", id, ErrSessionInactive)
 		}
 	}
+	release, err := m.leaseForStop(ctx, by, id, sessName, operatorLeaseWait)
+	if err != nil {
+		return err
+	}
+	defer release()
+	if err := m.killPremiseHolds(ctx, id); err != nil {
+		return err
+	}
 	return runtime.StopForCleanup(m.sp, sessName)
-}
-
-// BeginDrain transitions a session to the draining state. The caller is
-// responsible for signaling the runtime process to finish its work.
-// Idempotent: returns nil if the session is already draining.
-//
-// Population warning for a new caller: this stamps drain_at (BeginDrainPatch),
-// and drain_at is the durable clock cmd/gc's poolSlotDrainRetireDeadline bound
-// reads to decide that a pool seat's drain has outlived its deadline and its
-// runtime may be killed and its bead force-retired. That bound's safety
-// argument currently rests on drain_at being stamped only by the controller's
-// drain-ack path — this exported entry point has no production caller today —
-// so wiring an operator-facing drain here widens the bound's population.
-// Re-read cmd/gc/session_pool_drain_deadline.go before adding one.
-func (m *Manager) BeginDrain(id, reason string) error {
-	return withSessionMutationLock(id, func() error {
-		cmdLegal, err := m.checkTransition(id, CmdDrain, StateDraining)
-		if err != nil {
-			return err
-		}
-		if !cmdLegal {
-			return nil // idempotent: already draining
-		}
-		return m.store.SetMetadataBatch(id, BeginDrainPatch(time.Now().UTC(), reason))
-	})
-}
-
-// Archive transitions a session from draining to archived. Idempotent:
-// returns nil if the session is already archived.
-func (m *Manager) Archive(id, reason string) error {
-	return withSessionMutationLock(id, func() error {
-		cmdLegal, err := m.checkTransition(id, CmdArchive, StateArchived)
-		if err != nil {
-			return err
-		}
-		if !cmdLegal {
-			return nil // idempotent: already archived
-		}
-		return m.store.SetMetadataBatch(id, ArchivePatch(time.Now().UTC(), reason, false))
-	})
-}
-
-// Quarantine marks a session as crash-quarantined until the given time.
-// Idempotent: returns nil if the session is already quarantined.
-func (m *Manager) Quarantine(id string, until time.Time, cycle int) error {
-	return withSessionMutationLock(id, func() error {
-		cmdLegal, err := m.checkTransition(id, CmdQuarantine, StateQuarantined)
-		if err != nil {
-			return err
-		}
-		if !cmdLegal {
-			return nil // idempotent: already quarantined
-		}
-		return m.store.SetMetadataBatch(id, QuarantinePatch(until, cycle))
-	})
-}
-
-// Reactivate clears archive/quarantine blockers and returns a session to
-// asleep so normal wake machinery owns the next runtime start. Idempotent:
-// returns nil if the session is already in an awake-eligible state.
-func (m *Manager) Reactivate(id string) error {
-	return withSessionMutationLock(id, func() error {
-		cmdLegal, err := m.checkTransition(id, CmdWake, StateAsleep)
-		if err != nil {
-			return err
-		}
-		if !cmdLegal {
-			return nil // idempotent: already in target state
-		}
-		b, err := m.store.Get(id)
-		if err != nil {
-			return err
-		}
-		view := ProjectLifecycle(LifecycleInputFromMetadata(b.Status, b.Metadata))
-		// Note: quarantine_cycle is intentionally preserved across reactivations.
-		// It tracks how many quarantine rounds the session has been through,
-		// enabling eviction after quarantine_max_attempts.
-		return m.store.SetMetadataBatch(id, ReactivatePatch(view.ContinuityEligible))
-	})
 }
 
 // ConfirmCreation transitions a session from creating to active after the

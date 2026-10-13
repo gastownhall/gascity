@@ -611,7 +611,7 @@ func TestBusyState_SetAndCleared(t *testing.T) {
 	}
 
 	// Simulate receiving a response that matches the active prompt.
-	sc.clearActivePrompt(42)
+	sc.abandonPrompt(42, errors.New("test abandon"))
 
 	if sc.isBusy() {
 		t.Error("should not be busy after clearing activePromptID")
@@ -631,7 +631,7 @@ func TestWaitIdleUnblocksPromptlyWhenBusyStateClears(t *testing.T) {
 	}()
 
 	time.Sleep(20 * time.Millisecond)
-	sc.clearActivePrompt(42)
+	sc.abandonPrompt(42, errors.New("test abandon"))
 
 	select {
 	case ok := <-done:
@@ -1159,17 +1159,6 @@ func TestStop_PreservesMetadataWhenSocketRejectsStop(t *testing.T) {
 	}
 }
 
-func TestPendingAndRespondUnsupported(t *testing.T) {
-	p := newTestProvider(t)
-
-	if _, err := p.Pending("any"); !errors.Is(err, runtime.ErrInteractionUnsupported) {
-		t.Fatalf("Pending error = %v, want ErrInteractionUnsupported", err)
-	}
-	if err := p.Respond("any", runtime.InteractionResponse{Action: "approve"}); !errors.Is(err, runtime.ErrInteractionUnsupported) {
-		t.Fatalf("Respond error = %v, want ErrInteractionUnsupported", err)
-	}
-}
-
 func TestHandshakeTimeout_RespectsConfig(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "acp")
 	p := NewProviderWithDir(dir, Config{
@@ -1218,7 +1207,7 @@ func TestReadLoopDeath_ClearsBusyState(t *testing.T) {
 	}
 
 	// Simulate readLoop exit (calls drainPending).
-	sc.drainPending()
+	sc.drainPending(nil)
 
 	if sc.isBusy() {
 		t.Error("should not be busy after drainPending")
@@ -1244,8 +1233,8 @@ func TestDrainPending_Idempotent(t *testing.T) {
 	sc.mu.Unlock()
 
 	// Call twice — should not panic on double-close.
-	sc.drainPending()
-	sc.drainPending() // second call should be a no-op
+	sc.drainPending(nil)
+	sc.drainPending(nil) // second call should be a no-op
 
 	if sc.isBusy() {
 		t.Error("should not be busy after double drain")

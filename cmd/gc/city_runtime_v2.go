@@ -65,10 +65,14 @@ func (cr *CityRuntime) installPlanner(rt *plannerRuntime) {
 // newPlannerHost is the one place the planner's view of the city is built
 // (F2). Every closure reads state a lock publishes or state fixed before run
 // starts; run sets inventoryLane before the startup step boots the planner.
-// The capacity guard and template resolutions are left out: no trace-only
-// arm reads them.
+// The endpoint capacity guard is built here, before run, so the planner and
+// its effects share the controller's guard without racing its lazy build.
+// A generation's template resolver builds its params once, as legacy's
+// buildDesiredState does each tick, over the sessions store gather reads.
 func (cr *CityRuntime) newPlannerHost() plannerHost {
+	guard := cr.ensureEndpointCapacityGuard()
 	return plannerHost{
+		preserveSessions: cr.preserveSessionsShutdown.Load,
 		gather: gatherEnv{
 			CityPath: cr.cityPath, CityName: cr.cityName,
 			Sessions:  cr.v2SessionsStore,
@@ -88,7 +92,11 @@ func (cr *CityRuntime) newPlannerHost() plannerHost {
 				return beads.NudgesStore{Store: resolveNudgesStore(cr.storageRoutes, cr.cityBeadStore(), cr.serviceConfigSnapshot(), cr.cityPath, cr.rec)}
 			},
 			WorkStore: cr.cityBeadStore,
-			LookPath:  exec.LookPath,
+			Capacity:  func() *endpointCapacityGuard { return guard },
+			Templates: func(env *reconcileEnv, now time.Time) templateResolver {
+				return newTemplateResolver(newAgentBuildParams(cr.cityName, cr.cityPath, env.Cfg, env.SP, now.UTC(), cr.v2SessionsStore(), cr.stderr))
+			},
+			LookPath: exec.LookPath,
 		},
 		snapshotEnv: cr.serviceEnvSnapshot,
 		setInventoryHook: func(fn func(prev, next *ObservationSnapshot)) {
@@ -111,6 +119,7 @@ func (cr *CityRuntime) newPlannerHost() plannerHost {
 		safeTick: cr.safeTick,
 		rec:      cr.rec,
 		stderr:   cr.stderr,
+		stranded: cr.strandedClaimAlerter(),
 	}
 }
 
@@ -257,7 +266,7 @@ func (cr *CityRuntime) reloadV2(p *tickPass, source reloadSource) {
 	r := cr.reloadConfigTraced(p.ctx, p.lastProviderName, p.cityRoot, p.trace, source)
 	cr.v2.publishEnv()
 	if r.Outcome != reloadOutcomeFailed {
-		cr.v2.softReload(reloadIntent{Source: source, Soft: p.manualReload != nil && p.manualReload.soft}, &r)
+		cr.v2.softReload(p.ctx, reloadIntent{Source: source, Soft: p.manualReload != nil && p.manualReload.soft}, &r)
 	}
 	cr.v2.planner.markDirty("reload")
 	p.manualReply = r
@@ -272,14 +281,19 @@ func (cr *CityRuntime) reloadV2(p *tickPass, source reloadSource) {
 // admitted before the pause, then waits for every in-flight
 // v2 start (effectExecutor.waitStarts), so the swap's listing cannot miss a
 // runtime a start is still creating; an error aborts the reload. The caller
-// resumes once the swap applied or aborted. Legacy waits on nothing.
-func (cr *CityRuntime) beforeProviderSwap(cfg *config.City) (resume func(), err error) {
-	if cr.v2 == nil {
-		return func() {}, nil
-	}
+// resumes once the swap applied or aborted. Legacy waits the same bound for
+// its launched async starts. A ctx done during the wait (a controller stop)
+// aborts the swap too.
+func (cr *CityRuntime) beforeProviderSwap(ctx context.Context, cfg *config.City) (resume func(), err error) {
 	startup := cfg.Session.StartupTimeoutDuration()
 	if startup <= 0 {
 		startup = 60 * time.Second // as admit's start deadline (CONTRACT v5.4 P3)
+	}
+	if cr.v2 == nil {
+		return func() {}, cr.asyncStarts.waitLaunchedStarts(ctx, startup+startDeadlineSlack)
+	}
+	if r, refused := v2ProviderSwapRefusal(cfg, reconcilerModeLookupEnv); refused {
+		return func() {}, fmt.Errorf("v2 refuses the provider swap: %s", r)
 	}
 	cr.v2.planner.pauseStarts()
 	cr.v2.exec.closeStarts()
@@ -287,7 +301,21 @@ func (cr *CityRuntime) beforeProviderSwap(cfg *config.City) (resume func(), err 
 		cr.v2.exec.openStarts()
 		cr.v2.planner.resumeStarts()
 	}
-	return resume, cr.v2.exec.waitStarts(startup + startDeadlineSlack)
+	if err := cr.v2.exec.waitStarts(startup + startDeadlineSlack + startFailureSlack); err != nil {
+		return resume, err
+	}
+	return resume, ctx.Err()
+}
+
+// v2ProviderSwapRefusal is the latch's refusal of the session provider cfg
+// runs under lookupEnv: at boot (v2LatchRefusals), and on a reload's provider
+// swap, so a v2 city never swaps onto a runtime it would not start on.
+func v2ProviderSwapRefusal(cfg *config.City, lookupEnv func(string) (string, bool)) (latchRefusal, bool) {
+	reg, err := runtimeRegistryForCity(cfg)
+	if err != nil { // a pack runtime collision; config load already rejects it
+		reg = runtimeRegistry
+	}
+	return v2SessionRuntimeRefusal(cfg, reg, v2SessionRuntimeName(cfg, lookupEnv))
 }
 
 // checkReconcilerWiring refuses runtime params whose v2 runtime and wake

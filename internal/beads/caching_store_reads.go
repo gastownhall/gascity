@@ -365,7 +365,7 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq, startScan u
 	if c.state != cacheLive && c.state != cachePartial {
 		return items
 	}
-	now := time.Now()
+	now := c.clockNow()
 	refreshed := make([]Bead, 0, len(items))
 	for _, item := range items {
 		if c.deletedSeq[item.ID] > startSeq {
@@ -452,7 +452,7 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq, startScan u
 		}
 		c.evictListedGoneLocked(id)
 	}
-	c.markFreshLocked(time.Now())
+	c.markFreshLocked(c.clockNow())
 	c.updateStatsLocked()
 	return refreshed
 }
@@ -609,8 +609,8 @@ func (c *CachingStore) Get(id string) (Bead, error) {
 			if depsFromBacking {
 				opts.depsMode, opts.deps = depsExplicit, freshDeps
 			}
-			c.absorbFreshLocked(id, fresh, time.Now(), opts)
-			c.markFreshLocked(time.Now())
+			c.absorbFreshLocked(id, fresh, c.clockNow(), opts)
+			c.markFreshLocked(c.clockNow())
 			c.updateStatsLocked()
 			c.mu.Unlock()
 			return fresh, nil
@@ -769,13 +769,16 @@ func (c *CachingStore) RefreshRow(id string) (Bead, error) {
 		if depsFromBacking {
 			opts.depsMode, opts.deps = depsExplicit, freshDeps
 		}
-		c.absorbFreshLocked(id, fresh, time.Now(), opts)
+		c.absorbFreshLocked(id, fresh, c.clockNow(), opts)
 		installed = cloneBead(c.beads[id])
 	} else if _, dirty := c.dirty[id]; held || dirty {
 		c.evictLocked(id)
 		evicted = true
 	}
 	eventType, changed := rowRefreshChange(held, cached, cachedDeps, found, installed, c.deps[id])
+	if eventType == "bead.closed" {
+		c.noteCloseAnnouncedLocked(id)
+	}
 	if changed || evicted {
 		// The eviction dropped the row's beadSeq, a dirty uncached row's
 		// included, so it is stamped anew.
@@ -783,7 +786,7 @@ func (c *CachingStore) RefreshRow(id string) (Bead, error) {
 		if (found && !held) || (held && (!found || cached.Status != installed.Status)) {
 			c.clearDependentReadyProjectionsLocked(id)
 		}
-		c.markFreshLocked(time.Now())
+		c.markFreshLocked(c.clockNow())
 		c.updateStatsLocked()
 	}
 	c.mu.Unlock()

@@ -198,8 +198,8 @@ func TestMergeControlReadyGroupsSkipsInstantiatingWithoutMarkingSeen(t *testing.
 // TestEvaluateControlReadyMatchesShellQueryPriority ports
 // TestWorkflowServeControlReadyQueryPreservesQueryPriorityWhenMerging's
 // scenario (cmd_convoy_dispatch_test.go) at the Go level: given the same
-// parsed query + env, and a ready set shaped like what CachedReady/the
-// batched fallback would return, evaluateControlReady must merge candidates
+// parsed query + env, and a ready set shaped like what the per-leg Ready
+// reads or the batched fallback would return, evaluateControlReady must merge candidates
 // before routes and drop later ID duplicates exactly like the shell's jq
 // reduce does.
 func TestEvaluateControlReadyMatchesShellQueryPriority(t *testing.T) {
@@ -279,11 +279,11 @@ func stringSlicesEqual(a, b []string) bool {
 	return true
 }
 
-// --- End-to-end: nextWorkflowServeBeads wiring (cache + fallback) ---
+// --- End-to-end: nextWorkflowServeBeads wiring (per-leg Ready + fallback) ---
 
 // setUpControlReadyFileStoreCity builds a scope-local FileStore-backed city
-// so tryControlReadyFromCacheOrFallback's cache path can PrimeActive() and
-// CachedReady() without any bd/dolt process at all, and returns the opened
+// so tryControlReadyScan's leg read answers in-process without any bd/dolt
+// process at all, and returns the opened
 // store for seeding fixture beads directly.
 func setUpControlReadyFileStoreCity(t *testing.T) (cityDir string, store *beads.FileStore) {
 	t.Helper()
@@ -315,7 +315,7 @@ func noBDOnPathForTest(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 }
 
-func TestTryControlReadyFromCacheOrFallbackAnswersFromCacheWithZeroSubprocessCalls(t *testing.T) {
+func TestTryControlReadyScanAnswersFileLegWithZeroSubprocessCalls(t *testing.T) {
 	cityDir, store := setUpControlReadyFileStoreCity(t)
 	noBDOnPathForTest(t)
 
@@ -336,12 +336,12 @@ func TestTryControlReadyFromCacheOrFallbackAnswersFromCacheWithZeroSubprocessCal
 	agentCfg := config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"}
 	query := workflowServeControlReadyQuery(agentCfg)
 
-	queue, handled, err := tryControlReadyFromCacheOrFallback(query, cityDir, nil)
+	queue, handled, err := tryControlReadyScan(query, cityDir, nil)
 	if err != nil {
-		t.Fatalf("tryControlReadyFromCacheOrFallback: %v", err)
+		t.Fatalf("tryControlReadyScan: %v", err)
 	}
 	if !handled {
-		t.Fatalf("tryControlReadyFromCacheOrFallback: handled = false, want true for a control-ready query")
+		t.Fatalf("tryControlReadyScan: handled = false, want true for a control-ready query")
 	}
 
 	var gotIDs []string
@@ -354,9 +354,9 @@ func TestTryControlReadyFromCacheOrFallbackAnswersFromCacheWithZeroSubprocessCal
 	}
 }
 
-func TestTryControlReadyFromCacheOrFallbackReturnsUnhandledForNonControlQuery(t *testing.T) {
+func TestTryControlReadyScanReturnsUnhandledForNonControlQuery(t *testing.T) {
 	cityDir := t.TempDir()
-	_, handled, err := tryControlReadyFromCacheOrFallback("bd ready --json --limit=20", cityDir, nil)
+	_, handled, err := tryControlReadyScan("bd ready --json --limit=20", cityDir, nil)
 	if handled {
 		t.Fatalf("handled = true, want false for a non-control-ready query")
 	}
@@ -365,11 +365,11 @@ func TestTryControlReadyFromCacheOrFallbackReturnsUnhandledForNonControlQuery(t 
 	}
 }
 
-// TestTryControlReadyFromCacheOrFallbackUsesSingleBatchedBDCallWhenCacheUnavailable
-// forces the cache path to fail (PrimeActive against a bd stub that errors on
-// `list`) and asserts the fallback makes exactly one bd invocation covering
-// the whole tick, not the shell script's N per-candidate/route calls.
-func TestTryControlReadyFromCacheOrFallbackUsesSingleBatchedBDCallWhenCacheUnavailable(t *testing.T) {
+// TestTryControlReadyScanMakesOneBDCallPerBdLeg pins the scan's cost on a
+// bd-backed scope (ga-vnycm2.19): the whole tick is one `bd ready` call -- not
+// the shell script's N per-candidate/route calls, and not the four-list prime
+// plus ready projection the snapshot it replaced paid on every scan.
+func TestTryControlReadyScanMakesOneBDCallPerBdLeg(t *testing.T) {
 	configureIsolatedRuntimeEnv(t)
 	cityDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
@@ -384,19 +384,14 @@ func TestTryControlReadyFromCacheOrFallbackUsesSingleBatchedBDCallWhenCacheUnava
 set -eu
 printf '%%s\n' "$*" >> "%s"
 case "$1" in
-  list)
-    exit 7
-    ;;
-esac
-case "$*" in
-  "--readonly --sandbox ready --json --exclude-type=epic --limit=%d")
-    printf '[{"id":"ga-fallback-ready","assignee":"%s"}]'
+  ready)
+    printf '[{"id":"ga-ready","status":"open","issue_type":"task","assignee":"%s"}]'
     ;;
   *)
     printf '[]'
     ;;
 esac
-`, logPath, controlReadyFallbackLimit, target)
+`, logPath, target)
 	if err := os.WriteFile(bdPath, []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake bd: %v", err)
 	}
@@ -406,15 +401,15 @@ esac
 	agentCfg := config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"}
 	query := workflowServeControlReadyQuery(agentCfg)
 
-	queue, handled, err := tryControlReadyFromCacheOrFallback(query, cityDir, nil)
+	queue, handled, err := tryControlReadyScan(query, cityDir, nil)
 	if err != nil {
-		t.Fatalf("tryControlReadyFromCacheOrFallback: %v", err)
+		t.Fatalf("tryControlReadyScan: %v", err)
 	}
 	if !handled {
 		t.Fatalf("handled = false, want true")
 	}
-	if len(queue) != 1 || queue[0].ID != "ga-fallback-ready" {
-		t.Fatalf("queue = %#v, want single ga-fallback-ready bead", queue)
+	if len(queue) != 1 || queue[0].ID != "ga-ready" {
+		t.Fatalf("queue = %#v, want single ga-ready bead", queue)
 	}
 
 	logData, err := os.ReadFile(logPath)
@@ -422,14 +417,8 @@ esac
 		t.Fatalf("read bd log: %v", err)
 	}
 	calls := strings.Split(strings.TrimSpace(string(logData)), "\n")
-	readyCalls := 0
-	for _, c := range calls {
-		if strings.HasPrefix(c, "--readonly --sandbox ready") {
-			readyCalls++
-		}
-	}
-	if readyCalls != 1 {
-		t.Fatalf("bd ready calls = %d, want exactly 1; all calls:\n%s", readyCalls, string(logData))
+	if len(calls) != 1 || !strings.HasPrefix(calls[0], "ready ") || !strings.Contains(calls[0], "--include-ephemeral") {
+		t.Fatalf("bd calls = %q, want exactly one `bd ready --include-ephemeral` call per scan", calls)
 	}
 }
 

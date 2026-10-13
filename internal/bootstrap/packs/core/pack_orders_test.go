@@ -385,3 +385,52 @@ func TestCoreEscalationScriptContract(t *testing.T) {
 		})
 	}
 }
+
+// TestConvoyAutocloseBackstopOrder pins the shape of the bundled backstop
+// order: a city-scoped, idempotent cooldown exec of `gc convoy check`, so the
+// scan runs once per city rather than once per importing rig, with a timeout
+// a full walk fits in and an interval longer than that timeout.
+func TestConvoyAutocloseBackstopOrder(t *testing.T) {
+	const file = "convoy-autoclose-backstop.toml"
+	o := readOrder(t, file)
+	if err := orders.Validate(o); err != nil {
+		t.Fatalf("%s failed validation: %v", file, err)
+	}
+	if o.Trigger != "cooldown" {
+		t.Errorf("trigger = %q, want %q", o.Trigger, "cooldown")
+	}
+	if o.On != "" {
+		t.Errorf("on = %q, want empty for a cooldown order", o.On)
+	}
+	if !o.IsExec() {
+		t.Errorf("want exec dispatch, got formula %q", o.Formula)
+	}
+	if o.Exec != "gc convoy check" {
+		t.Errorf("exec = %q, want %q", o.Exec, "gc convoy check")
+	}
+	if o.Pool != "" {
+		t.Errorf("exec orders must not set a pool, got %q", o.Pool)
+	}
+	if !o.IsCityScoped() {
+		t.Errorf("scope = %q, want city", o.Scope)
+	}
+	if !o.Idempotent {
+		t.Error("idempotent = false, want true")
+	}
+	// A full walk outlasts the 300s exec default, and the interval must stay
+	// longer than the timeout: the cooldown counts from when a run starts, and
+	// an idempotent order dispatches past a timed-out single-flight gate.
+	if o.Interval != "1h" {
+		t.Errorf("interval = %q, want %q", o.Interval, "1h")
+	}
+	if o.Timeout != "30m" {
+		t.Errorf("timeout = %q, want %q", o.Timeout, "30m")
+	}
+	interval, err := time.ParseDuration(o.Interval)
+	if err != nil {
+		t.Fatalf("interval %q is not a valid duration: %v", o.Interval, err)
+	}
+	if timeout := o.TimeoutOrDefault(); timeout >= interval {
+		t.Errorf("timeout %s is not shorter than interval %s, so a run still going could overlap the next", timeout, interval)
+	}
+}

@@ -94,7 +94,7 @@ func TestDrainClearsInflightBeforeAnyStepThatCanPanic(t *testing.T) {
 	for _, id := range []string{"a", "b"} {
 		k := rowKey{Leg: rowLeg, ID: id}
 		seq := m.add(inflightEntry{Kind: intentRowHeal, Key: k})
-		p.settlements.post(settlement{Key: k, Kind: intentRowHeal, Seq: seq, Outcome: settledRefused, Cause: "cas", Event: &ev})
+		p.settlements.post(settlement{Key: k, Kind: intentRowHeal, Seq: seq, Outcome: settledRefused, Cause: "cas", Facts: effectFacts{Events: []events.Event{ev}}})
 	}
 	var stderr strings.Builder
 	p.stderr = &stderr

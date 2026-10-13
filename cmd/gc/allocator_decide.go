@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -156,7 +155,6 @@ type decidePass struct {
 	snap *selectionSnapshot
 	obs  map[rowKey]rowObservation
 
-	sessionsLeg string
 	// none holds the rows the allocator does not manage, by reason (AM11,
 	// C2.11, C2.13).
 	none map[rowKey]string
@@ -209,6 +207,8 @@ type selection struct {
 
 // decideAllocation is the allocator's whole decision for one pass. It is
 // pure: identical inputs give identical outputs.
+//
+//gc:pure
 func decideAllocation(in allocInputs) (allocDecision, error) {
 	if in.Now.IsZero() {
 		return allocDecision{}, errDecideNoClock
@@ -248,7 +248,6 @@ func newDecidePass(in allocInputs) *decidePass {
 		selected: make(map[rowKey]*selection),
 	}
 	if c := p.in.Census; len(c.Legs) > 0 {
-		p.sessionsLeg = c.Legs[0].Ref
 		p.obs = observeCensus(in.Obs, c, in.Now, in.ObsMaxAge)
 	}
 	return p
@@ -280,19 +279,15 @@ func (p *decidePass) finish() allocDecision {
 // allocator does not manage are set aside with legacy's predicates. They
 // keep the slots and names legacy gives them (fail-closed): every one stays
 // in occupancy. A pending create (one holding pending_create_claim) is a
-// rollback candidate only when its own runtime is absent, absent-unconfirmed
-// or a name another row holds. Unknown liveness keeps it managed, and so does
+// rollback candidate only past A10's never-started deadline, with no lease
+// predicate (v5 P4, SC A5), and only when its own runtime is absent,
+// absent-unconfirmed or a name another row holds. Unknown liveness keeps it managed, and so does
 // a dead pane: legacy's IsRunning reads a corpse as not running, but v2's
 // start path recycles it. A creating row with no claim is never one (v5 C3,
 // B5): it stays managed and reusable, as legacy's is, and A6 heals it.
 // Any other row whose name another bead's runtime holds is None (C11).
 func (p *decidePass) classifyRows() {
 	c := p.in.Census
-	var startupTimeout time.Duration
-	if p.in.Cfg != nil {
-		startupTimeout = p.cfg.Session.StartupTimeoutDuration()
-	}
-	clk := &clock.Fake{Time: p.in.Now}
 	keys := make([]rowKey, 0, len(c.Rows))
 	for k := range c.Rows {
 		keys = append(keys, k)
@@ -327,13 +322,13 @@ func (p *decidePass) classifyRows() {
 		ep, viewed := p.in.Endpoints[e.Endpoint]
 		endpointHolds := e.Endpoint != "" && (!viewed || ep.HoldsPendingCreate)
 		switch {
-		case k.Leg != p.sessionsLeg:
+		case k.Leg != c.sessionsLeg():
 			p.none[k] = reasonCensusOnly
 		case row.UnknownState:
 			p.none[k] = reasonUnknownState
 		case isFailedCreateSessionInfo(info):
 			p.none[k] = reasonFailedCreate
-		case notRunning && info.PendingCreateClaim && pendingCreateLeaseExpiredForRollbackInfo(info, clk, startupTimeout) &&
+		case notRunning && pendingCreateNeverStartedExpiredAt(info, p.in.Now) && // A10's never-started deadline, no lease (v5 P4, SC A5)
 			!endpointHolds:
 			p.none[k] = reasonRollbackCandidate
 		case o.Liveness == livenessOccupied:
@@ -470,6 +465,23 @@ func (p *decidePass) openAssignedWork(info session.Info) *assignedWorkView {
 // or its template retained), then an uncertain observation. In a suspended
 // city a pending create legacy still leases and a row with open assigned
 // work keep too.
+//
+// In a running city an undesired pending create keeps while legacy still
+// leases it (v5.9r as amended; SESS-065, SESS-596): legacy preserves such a
+// row before any drain or close (session_reconciler.go:2368), and its
+// MAINT-051 sweep skips a leased claim (city_runtime.go:3880), pool rows
+// included. A fresh create read between its two writes (the row, then its
+// session_name) is undesired for want of a name (staging J45), whether made
+// by `gc session new` or by the API (session_origin ephemeral). Only a row
+// holding pending_create_claim keeps, so the claim's lease bounds the keep:
+// the never-started deadline (S6), or a started create's in-flight and
+// attempt windows. A suspended agent ends it at once; a suspended rig does
+// not, as in legacy, whose lease reads only the agent. A lease anchor
+// (last_woke_at, pending_create_started_at) pendingCreateFutureSkew or more
+// in the future holds nothing, in a running or a suspended city, so a clock
+// stepped back cannot pin the row.
+// Legacy's other leased shape, a claimless start-pending row, has no
+// deadline, so it is not kept. Past its lease, A10 rolls the row back.
 func (p *decidePass) keepReason(e *selectionEntry, info session.Info) string {
 	if e.Desired != desireSleep && e.Desired != desireDrain {
 		return ""
@@ -480,13 +492,28 @@ func (p *decidePass) keepReason(e *selectionEntry, info session.Info) string {
 	case e.ObservationUncertain:
 		return reasonObservationUncertain
 	case !p.in.CitySuspended:
+		if e.Desired == desireDrain && info.PendingCreateClaim && !pendingCreateAnchorAhead(info, p.in.Now) && pendingCreateSessionStillLeasedAt(info, p.cfg, p.in.Now) {
+			return reasonPendingCreate
+		}
 		return ""
-	case pendingCreateSessionStillLeasedInfo(info, p.cfg, &clock.Fake{Time: p.in.Now}):
+	case !pendingCreateAnchorAhead(info, p.in.Now) && pendingCreateSessionStillLeasedAt(info, p.cfg, p.in.Now):
 		return reasonPendingCreate
 	case e.AssignedWork != nil:
 		return reasonAssignedWork
 	}
 	return ""
+}
+
+// pendingCreateAnchorAhead reports a pending create's lease anchor
+// (last_woke_at or pending_create_started_at) pendingCreateFutureSkew or more
+// past now: a clock stepped back, which must not extend the keep.
+func pendingCreateAnchorAhead(info session.Info, now time.Time) bool {
+	for _, raw := range []string{info.LastWokeAt, info.PendingCreateStartedAt} {
+		if at, ok := parseRFC3339Metadata(raw); ok && at.Sub(now) >= pendingCreateFutureSkew {
+			return true
+		}
+	}
+	return false
 }
 
 // awake is steps 10 and 11: the awake set keyed by bead ID over the
@@ -559,13 +586,22 @@ func (p *decidePass) configSleepSuppressed(info session.Info, o rowObservation, 
 			ref.DetachedAt = obs.LastActivity.UTC().Format(time.RFC3339Nano)
 		}
 	}
-	if !configWakeSuppressedInfo(ref, policy, nil, &clock.Fake{Time: p.in.Now}) {
+	if suppressed, _ := configWakeSuppressedAt(ref, policy, nil, p.in.Now); !suppressed {
 		return false
+	}
+	// An uncertain attach reads attached for the awake set (C2.9), and
+	// classify keeps the wake that rests on it. It must not outrank the policy
+	// as well: a ready wait relabels that wake to "wait-ready", which classify
+	// does not hold, so the row would wake on an attach no one read. Left
+	// suppressed, it sleeps, and keepReason keeps it. observeRow never sets
+	// Uncertain with Attached, so a known attach still overrides.
+	if o.Uncertain {
+		d.Attached = false
 	}
 	eval := awakeSetToWakeEvals(map[string]AwakeDecision{info.SessionNameMetadata: d},
 		[]AwakeSessionBead{{ID: info.ID, SessionName: info.SessionNameMetadata}})[info.ID]
 	template := normalizedSessionTemplateInfo(info, p.cfg)
-	return !wakeDemandOverridesSleepSuppression(d, eval, policy, p.poolDesired, template, info.SleepIntent != "")
+	return !wakeDemandOverridesSleepSuppression(d, eval, policy, p.poolDesired, template, explicitSleepIntentInfo(info), explicitWakePendingInfo(info))
 }
 
 // classify is step 12 (CONTRACT §2.2): InDesired ∧ ShouldWake is Wake,
@@ -605,7 +641,7 @@ func (p *decidePass) classify(decisions map[string]AwakeDecision) {
 			e.Desired, e.Reason = desireSleep, firstNonEmpty(d.Reason, reasonNoWake)
 		default:
 			e.Desired, e.Reason = desireDrain, firstNonEmpty(d.Reason, reasonNoWake)
-			e.DrainReason = drainOrphaned
+			e.DrainReason, e.OpenWork = drainOrphaned, p.openAssignedWork(info)
 			if p.agentSuspended(e.Template) {
 				e.DrainReason = drainSuspended
 			}

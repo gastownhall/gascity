@@ -11,11 +11,15 @@ import (
 
 // ReadFilteredContext is ReadFiltered but aborts the archive scan as soon as
 // ctx is canceled, instead of always scanning every overlapping archive to
-// completion. Cancellation is checked once per archive in the loop, so a
-// caller that disconnects mid-scan gets back the events found so far plus
+// completion. Cancellation is checked once per archive in the loop, and
+// before each chunk of a Since filter's backward walk of the active log, so
+// a caller that disconnects mid-scan gets back the events found so far plus
 // ctx.Err(), rather than waiting for the full (potentially large) fallback
 // scan to finish.
 func ReadFilteredContext(ctx context.Context, path string, filter Filter) ([]Event, error) {
+	if result, bounded, err := readFilteredSince(ctx, path, filter); bounded || err != nil {
+		return result, err
+	}
 	result, _, err := readFilteredTrackedContext(ctx, path, filter)
 	return result, err
 }
@@ -98,6 +102,9 @@ func readFilteredTrackedContext(ctx context.Context, path string, filter Filter)
 // ctx cancellation through the underlying archive scan, the same way
 // ReadFilteredContext does for ReadFiltered.
 func ReadFilteredWithInFlightContext(ctx context.Context, path string, filter Filter) ([]Event, error) {
+	if result, bounded, err := readFilteredSince(ctx, path, filter); bounded || err != nil {
+		return result, err
+	}
 	base, listedArchives, baseErr := readFilteredTrackedContext(ctx, path, filter)
 	rotated, rotationErr := readRotationSources(path, filter, listedArchives)
 	if len(rotated) == 0 {

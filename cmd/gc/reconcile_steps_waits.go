@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -83,29 +84,50 @@ func (l *externalReadsLane) readyWaitSet() map[string]bool {
 // sleep_reason while each still reads wait-hold, so an operator's hold that
 // replaced ours survives. Otherwise it writes nothing.
 func clearSessionWaitHoldFenced(sessFront *sessionpkg.Store, sessionID string) error {
+	return clearSessionWaitHoldWith(sessFront, sessionID, (fencedWriter{store: sessFront.Store()}).updateMetadataFenced)
+}
+
+// waitEndLife is the lifecycle a wait's end writes beside the WaitEnd cell:
+// the wait's own sleep_reason, when the row still reads it.
+func waitEndLife(_, _ sessionpkg.Disposition, row sessionpkg.Info) sessionpkg.MetadataPatch {
+	if row.SleepReason == string(sessionpkg.SleepReasonWaitHold) {
+		return sessionpkg.MetadataPatch{"sleep_reason": ""}
+	}
+	return nil
+}
+
+// errWaitHoldClearContended reports a wait-hold clear whose every CAS lost to
+// another writer; the hold still stands and the caller should retry.
+var errWaitHoldClearContended = errors.New("wait-hold clear lost to concurrent writes; retry")
+
+// clearSessionWaitHoldWith is the wait-hold clear over a fenced update verb:
+// fencedWriter's for v2 (never blind), the session store's for legacy.
+func clearSessionWaitHoldWith(sessFront *sessionpkg.Store, sessionID string, update func(string, int, func(sessionpkg.Info, sessionpkg.PersistedResponse) sessionpkg.MetadataPatch) (bool, error)) error {
 	if sessionID == "" {
 		return nil
 	}
 	var waitsErr error
-	_, err := (fencedWriter{store: sessFront.Store()}).updateMetadataFenced(sessionID, waitHoldClearAttempts, func(row sessionpkg.Info, _ sessionpkg.PersistedResponse) sessionpkg.MetadataPatch {
+	var wanted bool
+	ok, err := update(sessionID, waitHoldClearAttempts, func(row sessionpkg.Info, persisted sessionpkg.PersistedResponse) sessionpkg.MetadataPatch {
+		wanted = false
 		held, err := hasNonTerminalWaits(sessFront, sessionID)
 		if waitsErr = err; err != nil || held {
 			return nil
 		}
-		patch := sessionpkg.MetadataPatch{}
-		if row.WaitHold != "" {
-			patch["wait_hold"] = ""
+		// The disposition's WaitEnd cell: the wait and its own intent go; an
+		// operator's user-hold intent stays. The wait's sleep_reason goes with it.
+		patch, _, err := sessionpkg.MoveDisposition(persisted.Metadata, row, sessionpkg.ActorController, sessionpkg.DispEvent{Kind: sessionpkg.EvWaitEnd}, waitEndLife, time.Time{})
+		if err != nil {
+			return nil
 		}
-		if row.SleepIntent == string(sessionpkg.SleepReasonWaitHold) {
-			patch["sleep_intent"] = ""
-		}
-		if row.SleepReason == string(sessionpkg.SleepReasonWaitHold) {
-			patch["sleep_reason"] = ""
-		}
+		wanted = len(patch) > 0
 		return patch
 	})
-	if err != nil {
+	switch {
+	case err != nil:
 		err = fmt.Errorf("clearing wait hold on %s: %w", sessionID, err)
+	case wanted && !ok:
+		err = fmt.Errorf("%w: %s", errWaitHoldClearContended, sessionID)
 	}
 	return errors.Join(err, waitsErr)
 }

@@ -56,7 +56,7 @@ func TestBeforeProviderSwapClosesExecutorStarts(t *testing.T) {
 	start := sessionEffect{Kind: intentStart, Deadline: time.Now().Add(time.Minute), Run: func(context.Context) settlement {
 		return settlement{Outcome: settledLanded}
 	}}
-	resume, err := cr.beforeProviderSwap(&config.City{})
+	resume, err := cr.beforeProviderSwap(context.Background(), &config.City{})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -15,6 +15,7 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/pricing"
@@ -1860,7 +1861,19 @@ type ACPSessionConfig struct {
 	// to the default. gc stop bounds each session at 30s, so keep stop_grace
 	// comfortably below that.
 	StopGrace string `toml:"stop_grace,omitempty" jsonschema:"default=5s"`
+	// CancelTimeout is how long interrupting an ACP session waits for the
+	// agent to end its turn after session/cancel before falling back to
+	// SIGINT. The interrupt never kills the agent. Duration string (e.g.,
+	// "10s", "30s"). Defaults to "10s"; non-positive or unparseable values
+	// fall back to the default.
+	CancelTimeout string `toml:"cancel_timeout,omitempty" jsonschema:"default=10s"`
 }
+
+// DefaultACPCancelTimeout is how long an ACP interrupt waits for
+// session/cancel to settle the turn when [session.acp] cancel_timeout is
+// unset or invalid. It matches acp.DefaultCancelTimeout, the provider's own
+// default for a Config without a CancelTimeout.
+const DefaultACPCancelTimeout = 10 * time.Second
 
 // DefaultACPStopGrace is the ACP SIGTERM-to-SIGKILL grace used when
 // [session.acp] stop_grace is unset or invalid. It matches the grace every
@@ -1886,6 +1899,16 @@ func (a *ACPSessionConfig) StopGraceDuration() time.Duration {
 		return d
 	}
 	return DefaultACPStopGrace
+}
+
+// CancelTimeoutDuration returns the ACP session/cancel settle bound as a
+// time.Duration. Defaults to DefaultACPCancelTimeout if empty, unparseable,
+// or non-positive.
+func (a *ACPSessionConfig) CancelTimeoutDuration() time.Duration {
+	if d := durationOr(a.CancelTimeout, DefaultACPCancelTimeout); d > 0 {
+		return d
+	}
+	return DefaultACPCancelTimeout
 }
 
 // OutputBufferLinesOrDefault returns the output buffer line count.
@@ -1930,6 +1953,10 @@ type MailConfig struct {
 	// purge. The sweep distinguishes the two: empty leaves it at its own
 	// 60-minute default, while "0" disables its mail-close phase.
 	RetentionTTL string `toml:"retention_ttl,omitempty"`
+	// UnreadRetentionTTL is how long a never-read mail bead stays open before
+	// the nudge-mail sweep closes it. Empty or "0" disables the unread-mail
+	// phase; it is opt-in so unread mail is never closed by default.
+	UnreadRetentionTTL string `toml:"unread_retention_ttl,omitempty"`
 }
 
 // RetentionTTLDuration parses RetentionTTL as a Go time.Duration. Empty or
@@ -1945,6 +1972,23 @@ func (m MailConfig) RetentionTTLDuration() (time.Duration, error) {
 	}
 	if d < 0 {
 		return 0, fmt.Errorf("[mail] retention_ttl must not be negative: got %q", raw)
+	}
+	return d, nil
+}
+
+// UnreadRetentionTTLDuration parses UnreadRetentionTTL as a Go
+// time.Duration. Empty or zero disables the unread-mail sweep phase.
+func (m MailConfig) UnreadRetentionTTLDuration() (time.Duration, error) {
+	raw := strings.TrimSpace(m.UnreadRetentionTTL)
+	if raw == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("[mail] unread_retention_ttl %q is not a valid Go duration: %w", raw, err)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("[mail] unread_retention_ttl must not be negative: got %q", raw)
 	}
 	return d, nil
 }
@@ -2696,8 +2740,9 @@ type DaemonConfig struct {
 	// stop/unregister path always honors the full grace.
 	DoltStopTimeout string `toml:"dolt_stop_timeout,omitempty" jsonschema:"default=30s"`
 	// DoltStartAddressInUseRetryWindow is how long the managed dolt start
-	// path waits on the originally requested port when bind fails with
-	// "address already in use" before falling back to a higher port. The
+	// path waits on the originally requested port when dolt reports it in
+	// use ("address already in use", or "Port N already in use." from dolt
+	// 2.3.3) before falling back to a higher port. The
 	// common cause is a TIME_WAIT socket left by an abrupt stop of a sibling
 	// dolt subprocess (external SIGTERM, supervisor restart, OOM kill); on
 	// Linux the listening-socket slot typically frees within ~30s. Falling
@@ -2897,9 +2942,12 @@ func (d *DaemonConfig) AutoPruneWorkerDirEnabled() bool {
 }
 
 // PatrolIntervalDuration returns the patrol interval as a time.Duration.
-// Defaults to 30s if empty or unparseable.
+// Defaults to 30s if empty or unparseable. A test-hooks gc run with
+// clock.BackstopSpeedupEnv set returns it already divided, so every duration
+// a caller derives from it is divided too. That constant's doc lists those
+// callers; a new caller is added to it.
 func (d *DaemonConfig) PatrolIntervalDuration() time.Duration {
-	return durationOr(d.PatrolInterval, 30*time.Second)
+	return clock.Backstop(durationOr(d.PatrolInterval, 30*time.Second))
 }
 
 // TickDebounceDuration returns the tick-debounce window as a
@@ -3041,7 +3089,8 @@ func (d *DaemonConfig) DoltStopTimeoutDuration() time.Duration {
 }
 
 // DefaultDoltStartAddressInUseRetryWindow is the per-port retry window used
-// when dolt's bind fails with "address already in use" before the start path
+// when dolt reports its port in use ("address already in use", or "Port N
+// already in use." from dolt 2.3.3) before the start path
 // falls back to the next available port. 30s is roughly half Linux's default
 // TCP TIME_WAIT — the listening-socket slot typically frees well before the
 // full TIME_WAIT elapses because there are no active half-open connections
@@ -3409,7 +3458,11 @@ type Agent struct {
 	// set -x or echoing secrets in setup commands.
 	PreStart []string `toml:"pre_start,omitempty"`
 	// PromptTemplate is the path to this agent's prompt template file.
-	// Relative paths resolve against the city directory.
+	// Relative paths resolve against the directory of the file that declares
+	// the agent: the city directory for city.toml, the fragment's directory
+	// for an included fragment, and the pack directory for an agent a pack
+	// declares — in pack.toml or in agents/<name>/agent.toml alike. Paths
+	// prefixed with "//" resolve against the city root.
 	PromptTemplate string `toml:"prompt_template,omitempty"`
 	// Nudge is text typed into the agent's session after startup.
 	// Used for CLI agents that don't accept command-line prompts. For a known
@@ -3518,6 +3571,11 @@ type Agent struct {
 	//   3. ready unassigned work with gc.routed_to=<qualified-name>
 	// When the controller probes for demand without session context, only the
 	// routed_to tier applies. Override to integrate with external task systems.
+	// A custom query that looks up assigned work should read $GC_ALIAS: under
+	// gc hook --claim, a single-slot pool session the supervisor collapsed onto
+	// the agent's canonical [[named_session]] identity runs the query with
+	// $GC_ALIAS set to that identity, while $GC_AGENT keeps the session's
+	// runtime value.
 	WorkQuery string `toml:"work_query,omitempty"`
 	// SlingQuery is the command template to route a bead to this session config.
 	// If it contains Go template placeholders, gc expands them using the same

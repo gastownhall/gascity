@@ -1423,6 +1423,9 @@ ref = "v1.2.3"
 
 	t.Setenv("GC_DOLT", "skip")
 	t.Setenv("GC_BEADS", "file")
+	// The [packs.ops] source is a non-bundled remote, so rig add resolves its
+	// version and lock the way gc import add does; fake that network leg.
+	stubRigIncludeImportSeams(t, "1.2.3")
 
 	var stdout, stderr bytes.Buffer
 	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, []string{"ops"}, "", "", "", false, false, &stdout, &stderr)

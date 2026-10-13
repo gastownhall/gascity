@@ -8,6 +8,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
+	"github.com/gastownhall/gascity/internal/pendingwatch"
 
 	// Blank import: emergency's init() registers emergency.Record as the payload
 	// type for EmergencySignaled and EmergencyAcked events.
@@ -88,8 +89,11 @@ func (SessionCreateSucceededPayload) IsEventPayload() {}
 
 // SessionMessageSucceededPayload is emitted on request.result.session.message.
 type SessionMessageSucceededPayload struct {
-	RequestID string `json:"request_id" doc:"Correlation ID from the 202 response."`
-	SessionID string `json:"session_id" doc:"Session ID that received the message."`
+	RequestID          string `json:"request_id" doc:"Correlation ID from the 202 response."`
+	SessionID          string `json:"session_id" doc:"Session ID that received the message."`
+	Queued             bool   `json:"queued" doc:"True when the message was queued rather than delivered: the session is held (or not running) and the message waits for its next run, expiring after 24h."`
+	WillStart          *bool  `json:"will_start,omitempty" doc:"Present when the message was queued because the session is not running: whether the controller will start it to deliver the message. False means it will not (see will_not_start_reason); resend with resume: true to start it now."`
+	WillNotStartReason string `json:"will_not_start_reason,omitempty" doc:"Why the controller will not start the session for a queued message, with the remedy."`
 }
 
 // IsEventPayload marks SessionMessageSucceededPayload as an events.Payload variant.
@@ -97,10 +101,12 @@ func (SessionMessageSucceededPayload) IsEventPayload() {}
 
 // SessionSubmitSucceededPayload is emitted on request.result.session.submit.
 type SessionSubmitSucceededPayload struct {
-	RequestID string `json:"request_id" doc:"Correlation ID from the 202 response."`
-	SessionID string `json:"session_id" doc:"Session ID that received the submission."`
-	Queued    bool   `json:"queued" doc:"Whether the message was queued for later delivery."`
-	Intent    string `json:"intent" doc:"Resolved submit intent (default, follow_up, interrupt_now)."`
+	RequestID          string `json:"request_id" doc:"Correlation ID from the 202 response."`
+	SessionID          string `json:"session_id" doc:"Session ID that received the submission."`
+	Queued             bool   `json:"queued" doc:"Whether the message was queued for later delivery."`
+	Intent             string `json:"intent" doc:"Resolved submit intent (default, follow_up, interrupt_now)."`
+	WillStart          *bool  `json:"will_start,omitempty" doc:"Present when the message was queued because the session is not running: whether the controller will start it to deliver the message. False means it will not (see will_not_start_reason); resend with resume: true to start it now."`
+	WillNotStartReason string `json:"will_not_start_reason,omitempty" doc:"Why the controller will not start the session for a queued message, with the remedy."`
 }
 
 // IsEventPayload marks SessionSubmitSucceededPayload as an events.Payload variant.
@@ -571,6 +577,40 @@ func SessionPoolSlotRetiredAtDrainDeadlinePayloadJSON(sessionID, sessionName, te
 	return b
 }
 
+// SessionStrandedClaimsPayload carries the machine-readable context for a
+// session.stranded_claims event: claims no lane serves that stay assigned to
+// a closed or retired session rather than being released into no lane.
+type SessionStrandedClaimsPayload struct {
+	SessionID   string          `json:"session_id" doc:"Canonical session bead ID of the closed or retired seat holding the claims."`
+	SessionName string          `json:"session_name,omitempty" doc:"Runtime session name from the session bead metadata, when set."`
+	Template    string          `json:"template,omitempty" doc:"Template of the seat, when set."`
+	Kind        string          `json:"kind" doc:"What left the claims on the seat: its close reason (drained, orphaned, ...), killed, retired, or manual (gc session close)."`
+	Claims      []StrandedClaim `json:"claims" doc:"The stranded claims, sorted by bead ID."`
+}
+
+// StrandedClaim is one claim a session.stranded_claims event reports.
+type StrandedClaim struct {
+	BeadID string `json:"bead_id" doc:"The claim's work bead ID."`
+	Route  string `json:"route,omitempty" doc:"The route the claim would be released into, when it has one: no configured agent serves it."`
+	Reason string `json:"reason" doc:"Why it was kept: unserved-route."`
+}
+
+// IsEventPayload marks SessionStrandedClaimsPayload as an events.Payload variant.
+func (SessionStrandedClaimsPayload) IsEventPayload() {}
+
+// SessionStrandedClaimsPayloadJSON builds the JSON wire form for attachment
+// to an events.Event.Payload field.
+func SessionStrandedClaimsPayloadJSON(sessionID, sessionName, template, kind string, claims []StrandedClaim) json.RawMessage {
+	b, _ := json.Marshal(SessionStrandedClaimsPayload{
+		SessionID:   sessionID,
+		SessionName: sessionName,
+		Template:    template,
+		Kind:        kind,
+		Claims:      claims,
+	})
+	return b
+}
+
 // BeadDeadAssigneeReopenedPayload is the typed payload for
 // bead.dead_assignee_reopened events. Emitted when the reconciler reopens a
 // routed work bead whose assignee no longer maps to any open session bead —
@@ -639,13 +679,13 @@ const (
 	// PendingClearedResolved: the session is still probed but no longer
 	// reports an interaction — it was answered (POST .../respond or at the
 	// terminal) or withdrawn by the session itself.
-	PendingClearedResolved = "resolved"
+	PendingClearedResolved = pendingwatch.ReasonResolved
 	// PendingClearedReplaced: the session now reports a different request_id.
 	// A session.pending for the new interaction follows immediately.
-	PendingClearedReplaced = "replaced"
+	PendingClearedReplaced = pendingwatch.ReasonReplaced
 	// PendingClearedSessionGone: the session left the probed set (closed,
 	// asleep, suspended, or otherwise no longer active).
-	PendingClearedSessionGone = "session_gone"
+	PendingClearedSessionGone = pendingwatch.ReasonSessionGone
 )
 
 // SessionPendingPayload is the typed payload for session.pending: a session
@@ -745,6 +785,7 @@ func init() {
 	events.RegisterPayload(events.SessionDrainStopEscalated, SessionLifecyclePayload{})
 	events.RegisterPayload(events.SessionStranded, SessionStrandedPayload{})
 	events.RegisterPayload(events.SessionPoolSlotRetiredAtDrainDeadline, SessionPoolSlotRetiredAtDrainDeadlinePayload{})
+	events.RegisterPayload(events.SessionStrandedClaims, SessionStrandedClaimsPayload{})
 	events.RegisterPayload(events.SessionUnknownState, SessionUnknownStatePayload{})
 	events.RegisterPayload(events.SessionWakeRefused, SessionWakeRefusedPayload{})
 	events.RegisterPayload(events.SessionResetStalled, events.SessionResetStalledPayload{})

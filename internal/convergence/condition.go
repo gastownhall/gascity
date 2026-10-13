@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,6 +26,15 @@ const (
 	textFileBusyRetryAttempts = 5
 	textFileBusyRetryDelay    = 25 * time.Millisecond
 )
+
+// ErrConditionNotRegular reports that a gate condition path resolved, inside its
+// containment boundary, to something other than a regular file (a directory,
+// device, socket or FIFO).
+var ErrConditionNotRegular = errors.New("not a regular file")
+
+// ErrConditionNotExecutable reports that a gate condition path resolved to a
+// regular file with no execute permission bit set.
+var ErrConditionNotExecutable = errors.New("file is not executable")
 
 // conditionGCHome resolves the gc state directory for gate subprocesses. Gate
 // HOME is intentionally sandboxed to the city, so it cannot also be used for
@@ -231,7 +241,7 @@ func containedIn(absPath, root string) bool {
 // imported and registry-installed packs can live outside the city/store roots.
 // Callers must only pass absolute paths from surfaces they trust. Returns the
 // canonical absolute path after symlink resolution and an exec-eligible file
-// check.
+// check. Unlaunchable targets are classified by IsConditionUnlaunchable.
 func ResolveConditionPath(envelope, base, conditionPath string) (string, error) {
 	if conditionPath == "" {
 		return "", fmt.Errorf("resolving gate condition path: empty path")
@@ -317,13 +327,29 @@ func ResolveConditionPath(envelope, base, conditionPath string) (string, error) 
 		return "", fmt.Errorf("resolving gate condition path: %w", err)
 	}
 	if !info.Mode().IsRegular() {
-		return "", fmt.Errorf("resolving gate condition path: not a regular file: %s", resolved)
+		return "", fmt.Errorf("resolving gate condition path: %w: %s", ErrConditionNotRegular, resolved)
 	}
 	if info.Mode().Perm()&0o111 == 0 {
-		return "", fmt.Errorf("resolving gate condition path: file is not executable: %s", resolved)
+		return "", fmt.Errorf("resolving gate condition path: %w: %s", ErrConditionNotExecutable, resolved)
 	}
 
 	return resolved, nil
+}
+
+// IsConditionUnlaunchable reports whether err, as returned by
+// ResolveConditionPath, means the declared condition names nothing that can be
+// executed: the target is missing (including a dangling symlink), is not a
+// regular file, or is not executable. These are repaired out of band (ship the
+// script, chmod it) and never by re-running. Containment refusals (traversal,
+// symlink escape) and argument errors are deliberately not unlaunchable, with
+// one exception: a dangling symlink whose absent target lies outside
+// containment still reports unlaunchable, because the post-resolution
+// containment check needs a resolved target and a dangling link has none. Once
+// that target exists, the same path is a containment refusal.
+func IsConditionUnlaunchable(err error) bool {
+	return errors.Is(err, fs.ErrNotExist) ||
+		errors.Is(err, ErrConditionNotRegular) ||
+		errors.Is(err, ErrConditionNotExecutable)
 }
 
 // RunCondition executes a gate condition script with the given environment.

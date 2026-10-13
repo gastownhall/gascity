@@ -1081,15 +1081,15 @@ func TestEmitDueComputeFactsSweepsKeylessCodexViaWorkdir(t *testing.T) {
 		Title:  "codex wisp session",
 		Labels: []string{session.LabelSession},
 		Metadata: map[string]string{
-			"state":               "asleep",
-			"session_name":        "codex-wisp-1",
-			"awake_started_at":    start.Format(time.RFC3339),
-			"slept_at":            slept.Format(time.RFC3339),
-			"work_dir":            workDir,
-			"provider":            "mc-codex-wrap", // wrapped manifold name
-			"builtin_ancestor":    "codex",         // canonical ladder resolves to codex
-			"molecule_id":         "run-Z",
-			"gc.active_work_bead": "run-Z.step-1",
+			"state":                 "asleep",
+			"session_name":          "codex-wisp-1",
+			"awake_started_at":      start.Format(time.RFC3339),
+			"slept_at":              slept.Format(time.RFC3339),
+			"work_dir":              workDir,
+			"provider":              "mc-codex-wrap", // wrapped manifold name
+			"builtin_ancestor":      "codex",         // canonical ladder resolves to codex
+			"molecule_id":           "run-Z",
+			"test_active_work_bead": "run-Z.step-1",
 			// NB: NO session_key — the whole point.
 		},
 	})

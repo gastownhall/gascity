@@ -89,7 +89,7 @@ func (h *createHarness) submit(ctx context.Context, pass *createPass, plans ...c
 		h.wg.Add(1)
 		go func() {
 			defer h.wg.Done()
-			s := h.x.run(ctx, pass, p)
+			s := h.x.run(ctx, pass, p, nil, nil)
 			h.mu.Lock()
 			h.settled = append(h.settled, s)
 			h.mu.Unlock()

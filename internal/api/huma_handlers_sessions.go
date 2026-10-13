@@ -57,8 +57,14 @@ func humaSessionManagerError(err error) error {
 		return apierr.SessionConflict.Msg("invalid_interaction: " + err.Error())
 	case errors.Is(err, session.ErrSessionClosed), errors.Is(err, session.ErrResumeRequired), errors.Is(err, session.ErrSessionKillPending):
 		return apierr.SessionConflict.Msg("conflict: " + err.Error())
-	case errors.Is(err, session.ErrSessionActive):
+	case errors.Is(err, session.ErrSessionActive), errors.Is(err, session.ErrSessionInactive):
 		return apierr.SessionConflict.Msg("conflict: " + err.Error())
+	case errors.Is(err, session.ErrSessionStarting):
+		// Retryable: another holder (usually the controller) has the runtime lease.
+		return apierr.SessionConflict.Msg("session_starting: " + err.Error())
+	case errors.Is(err, session.ErrSessionStopping):
+		// Retryable: the controller is stopping the runtime (drain-ack).
+		return apierr.SessionConflict.Msg("session_stopping: " + err.Error())
 	case errors.Is(err, session.ErrNotSession):
 		return apierr.InvalidRequest.Msg("invalid: " + err.Error())
 	case errors.Is(err, session.ErrIllegalTransition):

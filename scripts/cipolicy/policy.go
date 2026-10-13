@@ -306,7 +306,12 @@ const (
 	// takes base/ref from merge_group.base_sha/head_sha, empty on every other
 	// event (the action's defaults). Reviewed delta: two `with` inputs; no
 	// new job, step command or permission.
-	expectedCIExecutionHash     = "3ec93d8109aac28d7514142496ca3777ae1e1e6502683e8ca458149a944a7cf9"
+	//
+	// Bumped again (installation rate limit): the changes job's paths-filter
+	// gets `token: ''`, so pull requests diff with git instead of calling the
+	// pulls/files API on the shared github.token budget. Reviewed delta: one
+	// `with` input; no new job, step command or permission.
+	expectedCIExecutionHash     = "094fa149515765ad86669145929368481d2c8112e58396b4083a6947b6ec2564"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,

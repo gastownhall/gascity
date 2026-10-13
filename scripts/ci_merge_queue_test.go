@@ -237,6 +237,8 @@ var mergeQueueEventExprs = map[string]string{
 	"bazel.yml jobs.rbe.steps[decide].env.FORK":                                            "false",                      // ...never the mint
 	"bazel.yml jobs.rbe.steps[decide].env.PR_NUMBER":                                       "",                           // read in the fork arm only
 	"bazel.yml jobs.rbe.steps[lanes].env.EVENT":                                            "merge_group",                // the PR lane set
+	"bazel.yml jobs.rrc-seed.if":                                                           "false",                      // seeds on push to main only
+	"bazel.yml jobs.rrc-verify.if":                                                         "false",                      // nightly and dispatch only
 	"bazel.yml jobs.rbe.steps[base].if":                                                    "false",                      // the queue ref is already the merge
 	"bazel.yml jobs.rbe.steps[base].env.BASE_REF":                                          "",                           // (step skipped)
 	"bazel.yml jobs.rbe.steps[Pre-warm the OSS worker pool (rbe-west)].env.DEFAULT_BRANCH": "main",
@@ -250,7 +252,10 @@ var mergeQueueEventExprs = map[string]string{
 	"bazel.yml jobs.gate.steps[Evaluate].env.EVENT":                                        "merge_group", // logged only
 	"bazel.yml jobs.coverage.if":                                                           "false",       // nightly/dispatch only
 	"bazel.yml jobs.coverage.steps[worker-env].env.DEFAULT_BRANCH":                         "main",
+	"bazel.yml jobs.sync-check.steps[pin].env.DEFAULT_BRANCH":                              "main",
 	"bazel.yml jobs.coverage.steps[ci-analytics].env.PR_HINT":                              "0",
+	"bazel.yml jobs.worker-host.steps[default-branch].env.DEFAULT_BRANCH":                  "main",
+	"bazel.yml jobs.worker-host.steps[default-branch].env.BASE_SHA":                        mergeQueueBaseSHA, // merge_group.base_sha (fix 12)
 	// ci.yml
 	"ci.yml concurrency.group":                               "ci-merge_group-" + mergeQueueRef,
 	"ci.yml concurrency.cancel-in-progress":                  "false",

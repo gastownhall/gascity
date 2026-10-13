@@ -431,6 +431,7 @@ func (p *decidePass) selectPoolRow(cfgAgent *config.Agent, info session.Info, sl
 		}
 		if patch := computePoolTriggerBindingPatch(info, request, workDir); len(patch) > 0 {
 			sel.binding = bindingOf(request, workDir)
+			sel.binding.Patch = patch
 		}
 	}
 	p.selected[k] = sel

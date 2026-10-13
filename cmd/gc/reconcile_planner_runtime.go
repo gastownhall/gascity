@@ -1,11 +1,13 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"math/rand/v2"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -50,6 +52,10 @@ type plannerHost struct {
 	safeTick         func(fn func(), trigger string) (panicked bool)
 	rec              events.Recorder
 	stderr           io.Writer
+	// preserveSessions reports a shutdown that leaves the city's sessions
+	// running for the next boot to adopt (a supervisor's restart).
+	preserveSessions func() bool
+	stranded         *strandedClaimAlerts // the controller's (strandedClaimAlerter)
 }
 
 // plannerRuntime owns the planner and what runs beside it. mu orders
@@ -60,9 +66,8 @@ type plannerRuntime struct {
 	exec    *effectExecutor
 	lane    atomic.Pointer[externalReadsLane] // built at start
 	env     atomic.Pointer[reconcileEnv]
-	// softReload amends a reload's reply; v2SoftReloadUnavailable until C7c
-	// hands the planner a soft-reload request instead (v5 M2).
-	softReload func(intent reloadIntent, r *reloadControlReply)
+	// softReload amends a reload's reply (acceptSoftReload, v5 M2).
+	softReload func(ctx context.Context, intent reloadIntent, r *reloadControlReply)
 	census     atomic.Bool   // C11's boot census passed
 	ready      chan struct{} // closed by the first completed pass with the gate open
 	readyOnce  sync.Once
@@ -80,9 +85,11 @@ func newDefaultPlanner(stderr io.Writer) *plannerRuntime {
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	rt := &plannerRuntime{host: plannerHost{stderr: stderr}, softReload: v2SoftReloadUnavailable, ready: make(chan struct{})}
+	rt := &plannerRuntime{host: plannerHost{stderr: stderr}, ready: make(chan struct{})}
 	rt.exec = newEffectExecutor(func(s settlement) { rt.planner.settlements.post(s) }, stderr)
+	rt.exec.preserve = func() bool { return rt.host.preserveSessions != nil && rt.host.preserveSessions() }
 	rt.planner = newPlanner(realPlannerClock{}, func() time.Duration { return rt.env.Load().patrol() }, rt.pass, newInflightMap(), rt.exec.stop, stderr)
+	rt.softReload = rt.acceptSoftReload
 	if v2EffectsEnabled(reconcilerModeLookupEnv) {
 		rt.planner.effects = rt.exec
 	}
@@ -114,13 +121,17 @@ func (rt *plannerRuntime) bindHost(h plannerHost) {
 		return nil
 	}
 	rt.host = h
-	rt.planner.rec = h.rec
+	rt.planner.rec, rt.planner.observations, rt.planner.capacity = h.rec, h.gather.Observations, h.gather.Capacity
+	rt.planner.stranded = h.stranded
 	rt.planner.emitRecord = rt.emitPassRecord
 	creates, err := newCreateEffects(createEffectHost{cityPath: h.gather.CityPath, cityName: h.gather.CityName, lookPath: h.gather.LookPath, stderr: h.stderr})
 	if err != nil {
 		fmt.Fprintf(h.stderr, "v2 planner: creates disabled: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
 	rt.planner.creates = creates
+	if stagingSeam != nil {
+		rt.planner.seam = stagingSeam(h.gather.CityPath)
+	}
 }
 
 // publishEnv publishes the host's config as the next generation unless the
@@ -210,6 +221,7 @@ func (rt *plannerRuntime) start(parent context.Context) bool {
 	rt.cancel = cancel
 	h := rt.host
 	lane := newExternalReadsLane(rt.env.Load().patrol(), h.gather.externalReadsEnv, func() { rt.planner.markDirty("external-reads") }, h.safeTick, h.rec, h.stderr)
+	lane.stranded = h.stranded
 	lane.addWaitsStep()
 	lane.addPoolSteps(rt.planner.out.summary.Load, rt.planner.postExecutionStalled)
 	rt.lane.Store(lane)
@@ -245,7 +257,7 @@ func (rt *plannerRuntime) pass(now time.Time) passResult {
 	if rt.planner.boot.open() {
 		rt.readyOnce.Do(func() { close(rt.ready) })
 	}
-	rt.traceRows(rec.Rows)
+	rt.traceRows(append(slices.Clone(rec.Rows), rec.IdleDefers...))
 	return res
 }
 
@@ -256,7 +268,7 @@ func (rt *plannerRuntime) traceRows(rows []rowTrace) {
 	}
 	t := rt.host.beginTrace("v2-pass")
 	for _, r := range rows {
-		t.RecordDecision(TraceSiteV2SessionDecision, TraceReasonCode(r.Reason), TraceOutcomeCode(r.Outcome), r.Template, r.SessionName, map[string]any{
+		t.RecordDecision(cmp.Or(r.Site, TraceSiteV2SessionDecision), TraceReasonCode(r.Reason), TraceOutcomeCode(r.Outcome), r.Template, r.SessionName, map[string]any{
 			"key": r.Key.Leg + "/" + r.Key.ID,
 		})
 	}
