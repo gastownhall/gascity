@@ -933,9 +933,14 @@ func (s *Server) humaHandleSessionKill(_ context.Context, input *SessionIDInput)
 		return nil, humaResolveError(err)
 	}
 
+	// Under the kill fence, as `gc session kill`: without it the controller
+	// reads the kill as a crash (heal, accrual, a same-pass restart).
 	mgr := s.sessionManager(store.Store)
-	if err := mgr.Kill(context.Background(), s.actor(session.ActorOperator), id); err != nil {
-		if errors.Is(err, session.ErrSessionClosed) {
+	kill := func(ctx context.Context, by session.Actor) error { return mgr.Kill(ctx, by, id) }
+	if err := mgr.KillFenced(context.Background(), s.actor(session.ActorOperator), id, kill); err != nil {
+		// A closed session, or one whose runtime is already gone, is already
+		// killed: report the outcome rather than an error.
+		if errors.Is(err, session.ErrSessionClosed) || errors.Is(err, session.ErrSessionInactive) {
 			out := &OKWithIDResponse{}
 			out.Body.Status = "ok"
 			out.Body.ID = id

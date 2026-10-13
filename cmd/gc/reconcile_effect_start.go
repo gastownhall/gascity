@@ -92,7 +92,7 @@ func transcriptOf(r effectReads, w *World, row session.Info, tp TemplateParams) 
 	if dir == "" {
 		return sessTranscriptUnknown
 	}
-	switch present, probeable := staleResumeKeyProbe(sessionTranscriptProvider(tp.ResolvedProvider, row), dir, sk); {
+	switch present, probeable := staleResumeKeyProbe(launchTranscriptRoots(w.Env.Cfg, tp), sessionTranscriptProvider(tp.ResolvedProvider, row), dir, sk); {
 	case !probeable:
 		return sessTranscriptUnknown
 	case present:
@@ -207,7 +207,7 @@ func identityCause(row session.Info, ident runtimeIdentity) string {
 	switch compareIdentity(row, ident) {
 	case identityCurrent:
 		return ""
-	case identityStaleSelf: // arm A3 re-keys it (X1); a pending create's S7 exit is C5a3's
+	case identityStaleSelf: // arm A3 re-keys it (X1); a pending create's is A10's S7 exit
 		return causeTokenDrift
 	case identityNewerSelf:
 		return causeNewerSelf

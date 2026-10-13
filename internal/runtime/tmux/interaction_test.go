@@ -182,7 +182,7 @@ func TestPhase2ProviderPendingInteractionSeam(t *testing.T) {
 		"component": "tmux",
 	})
 	session := "phase2-pending"
-	fe := &fakeExecutor{out: approvalPromptPane()}
+	fe := &fakeExecutor{agentPane: true, out: approvalPromptPane()}
 	provider := &Provider{
 		tm: &Tmux{
 			cfg:  Config{SocketName: "phase2-sock"},
@@ -264,7 +264,7 @@ func TestPhase2ProviderRespondRejectsMismatchedRequest(t *testing.T) {
 		"component": "tmux",
 	})
 	session := "phase2-reject"
-	fe := &fakeExecutor{out: approvalPromptPane()}
+	fe := &fakeExecutor{agentPane: true, out: approvalPromptPane()}
 	provider := &Provider{
 		tm: &Tmux{
 			exec: fe,
@@ -286,6 +286,7 @@ func TestPhase2ProviderRespondApprovesAndClearsPrompt(t *testing.T) {
 	})
 	session := "phase2-approve"
 	fe := &fakeExecutor{
+		agentPane: true,
 		outs: []string{
 			approvalPromptPane(), // pre-verify capture: prompt present
 			"0",                  // #{pane_in_mode} probe -> not parked (no cancel)
@@ -404,16 +405,21 @@ func pendingInteractionSeamResult(session string, pending *runtime.PendingIntera
 		return workertest.Fail(profile, workertest.RequirementInteractionPending,
 			fmt.Sprintf("source = %q, want tmux", pending.Metadata["source"])).WithEvidence(evidence)
 	}
-	if len(calls) != 1 {
+	// The agent-pane lookup, then one capture of that pane.
+	if len(calls) != 2 {
 		return workertest.Fail(profile, workertest.RequirementInteractionPending,
-			fmt.Sprintf("tmux calls = %d, want 1", len(calls))).WithEvidence(evidence)
+			fmt.Sprintf("tmux calls = %d, want 2", len(calls))).WithEvidence(evidence)
 	}
-	want := []string{"-u", "-L", "phase2-sock", "capture-pane", "-p", "-t", "=" + session + ":", "-S", "-40"}
-	if err := matchTMuxCall(calls[0], want); err != nil {
-		evidence["tmux_call"] = strings.Join(calls[0], " ")
-		return workertest.Fail(profile, workertest.RequirementInteractionPending, err.Error()).WithEvidence(evidence)
+	for i, want := range [][]string{
+		phase2AgentPaneLookup(session),
+		{"-u", "-L", "phase2-sock", "capture-pane", "-p", "-t", fakeAgentPane(session), "-S", "-40"},
+	} {
+		if err := matchTMuxCall(calls[i], want); err != nil {
+			evidence["tmux_call"] = strings.Join(calls[i], " ")
+			return workertest.Fail(profile, workertest.RequirementInteractionPending, err.Error()).WithEvidence(evidence)
+		}
 	}
-	evidence["tmux_call"] = strings.Join(calls[0], " ")
+	evidence["tmux_call"] = strings.Join(calls[1], " ")
 	return workertest.Pass(profile, workertest.RequirementInteractionPending, "tmux provider exposed the pending approval interaction").WithEvidence(evidence)
 }
 
@@ -431,11 +437,12 @@ func rejectInteractionSeamResult(session string, err error, calls [][]string) wo
 		return workertest.Fail(profile, workertest.RequirementInteractionReject,
 			fmt.Sprintf("Respond error = %v, want approval prompt changed", err)).WithEvidence(evidence)
 	}
-	if len(calls) != 1 {
+	// The agent-pane lookup, then one capture; no keys.
+	if len(calls) != 2 {
 		return workertest.Fail(profile, workertest.RequirementInteractionReject,
-			fmt.Sprintf("tmux calls = %d, want 1", len(calls))).WithEvidence(evidence)
+			fmt.Sprintf("tmux calls = %d, want 2", len(calls))).WithEvidence(evidence)
 	}
-	call := strings.Join(calls[0], " ")
+	call := strings.Join(calls[1], " ")
 	evidence["tmux_call"] = call
 	if strings.Contains(call, "send-keys") {
 		return workertest.Fail(profile, workertest.RequirementInteractionReject,
@@ -454,19 +461,22 @@ func respondInteractionSeamResult(session string, err error, calls [][]string) w
 		evidence["error"] = err.Error()
 		return workertest.Fail(profile, workertest.RequirementInteractionRespond, fmt.Sprintf("Respond: %v", err)).WithEvidence(evidence)
 	}
-	if len(calls) != 4 {
+	if len(calls) != 5 {
 		return workertest.Fail(profile, workertest.RequirementInteractionRespond,
-			fmt.Sprintf("tmux calls = %d, want 4", len(calls))).WithEvidence(evidence)
+			fmt.Sprintf("tmux calls = %d, want 5", len(calls))).WithEvidence(evidence)
 	}
 	// The #{pane_in_mode} probe is the ga-c4w major #2 copy-mode guard: Respond
 	// checks whether the pane is parked in copy-mode before delivering the
 	// keystroke. Here the probe reports not-parked ("0"), so no -X cancel is
 	// issued and delivery is otherwise unchanged.
+	// One agent-pane lookup serves the whole response.
+	pane := fakeAgentPane(session)
 	wantCalls := [][]string{
-		{"-u", "-L", "phase2-sock", "capture-pane", "-p", "-t", "=" + session + ":", "-S", "-40"},
-		{"-u", "-L", "phase2-sock", "display-message", "-t", "=" + session + ":", "-p", "#{pane_in_mode}"},
-		{"-u", "-L", "phase2-sock", "send-keys", "-t", "=" + session + ":", "-l", "1"},
-		{"-u", "-L", "phase2-sock", "capture-pane", "-p", "-t", "=" + session + ":", "-S", "-40"},
+		phase2AgentPaneLookup(session),
+		{"-u", "-L", "phase2-sock", "capture-pane", "-p", "-t", pane, "-S", "-40"},
+		{"-u", "-L", "phase2-sock", "display-message", "-t", pane, "-p", "#{pane_in_mode}"},
+		{"-u", "-L", "phase2-sock", "send-keys", "-t", pane, "-l", "1"},
+		{"-u", "-L", "phase2-sock", "capture-pane", "-p", "-t", pane, "-S", "-40"},
 	}
 	for i, want := range wantCalls {
 		if callErr := matchTMuxCall(calls[i], want); callErr != nil {
@@ -476,10 +486,10 @@ func respondInteractionSeamResult(session string, err error, calls [][]string) w
 		}
 	}
 	evidence["tmux_calls"] = strings.Join([]string{
-		strings.Join(calls[0], " "),
 		strings.Join(calls[1], " "),
 		strings.Join(calls[2], " "),
 		strings.Join(calls[3], " "),
+		strings.Join(calls[4], " "),
 	}, " | ")
 	return workertest.Pass(profile, workertest.RequirementInteractionRespond, "tmux provider approved the interaction and cleared the prompt").WithEvidence(evidence)
 }
@@ -511,6 +521,12 @@ func interactionInstanceLocalDedupResult(approval *parsedApproval, tmA, tmB *Tmu
 			"tmB dedup state should remain intact after tmA clear").WithEvidence(evidence)
 	}
 	return workertest.Pass(profile, workertest.RequirementInteractionInstanceLocalDedup, "tmux approval dedup state is isolated per provider instance").WithEvidence(evidence)
+}
+
+// phase2AgentPaneLookup is the agent-pane list-panes call on the phase-2
+// socket.
+func phase2AgentPaneLookup(session string) []string {
+	return []string{"-u", "-L", "phase2-sock", "list-panes", "-s", "-t", "=" + session + ":", "-F", agentPaneMarkerFormat + "\t#{window_id}.#{pane_id}"}
 }
 
 func matchTMuxCall(got, want []string) error {
@@ -815,6 +831,7 @@ func TestApprovalOptionKey_FailsClosed(t *testing.T) {
 func TestRespond_DenySendsTheNoOptionNotThree(t *testing.T) {
 	session := "automode-deny"
 	fe := &fakeExecutor{
+		agentPane: true,
 		// pre-verify capture, #{pane_in_mode} probe (not parked), send-keys,
 		// then the verify capture showing the prompt cleared.
 		outs: []string{
@@ -848,7 +865,7 @@ func TestRespond_UnresolvableMenuSendsNothing(t *testing.T) {
  Do you want to proceed?
  ❯ 1. Yes
    2. Yes, and switch to auto mode`
-	fe := &fakeExecutor{out: pane}
+	fe := &fakeExecutor{agentPane: true, out: pane}
 	provider := &Provider{tm: &Tmux{exec: fe}}
 	err := provider.Respond(session, runtime.InteractionResponse{Action: "deny"})
 	if err == nil {
@@ -865,7 +882,7 @@ func TestRespond_UnresolvableMenuSendsNothing(t *testing.T) {
 }
 
 func TestPending_ReportsParsedOptionLabels(t *testing.T) {
-	fe := &fakeExecutor{out: readApprovalFixture(t, "bash-automode-option.txt")}
+	fe := &fakeExecutor{agentPane: true, out: readApprovalFixture(t, "bash-automode-option.txt")}
 	provider := &Provider{tm: &Tmux{exec: fe}}
 	pending, err := provider.Pending("s")
 	if err != nil {
@@ -891,7 +908,7 @@ func TestPending_ReportsParsedOptionLabels(t *testing.T) {
 }
 
 func TestNudgeNow_RefusesToTypeIntoApprovalPrompt(t *testing.T) {
-	fe := &fakeExecutor{out: readApprovalFixture(t, "bash-manual-80x24.txt")}
+	fe := &fakeExecutor{agentPane: true, out: readApprovalFixture(t, "bash-manual-80x24.txt")}
 	provider := &Provider{tm: &Tmux{exec: fe}}
 	err := provider.NudgeNow("s", runtime.TextContent("hello?"))
 	if !errors.Is(err, runtime.ErrPendingInteraction) {
@@ -909,7 +926,7 @@ func TestSnapshotPaneIdle_ApprovalPromptIsNotIdle(t *testing.T) {
 	// approval check a permission prompt reads as an idle composer and
 	// wait-idle delivery types into it. The pane shows no busy indicator
 	// either, so the scan reports it indeterminate rather than busy.
-	fe := &fakeExecutor{out: readApprovalFixture(t, "bash-manual-80x24.txt")}
+	fe := &fakeExecutor{agentPane: true, out: readApprovalFixture(t, "bash-manual-80x24.txt")}
 	tm := &Tmux{exec: fe}
 	idle, err := tm.snapshotPaneIdleWithPrefix("s", DefaultReadyPromptPrefix)
 	if idle {
@@ -1088,7 +1105,7 @@ func TestRespond_WaitsForASlowRedrawBeforeReportingFailure(t *testing.T) {
 		outs = append(outs, prompt)
 	}
 	outs = append(outs, readApprovalFixture(t, "idle-after-deny-80x24.txt"))
-	fe := &fakeExecutor{outs: outs}
+	fe := &fakeExecutor{agentPane: true, outs: outs}
 	provider := &Provider{tm: &Tmux{exec: fe}}
 	if err := provider.Respond("slow-redraw", runtime.InteractionResponse{Action: "deny"}); err != nil {
 		t.Fatalf("Respond(deny) on a slow redraw: %v", err)
@@ -1109,7 +1126,7 @@ func TestRespond_WaitsForASlowRedrawBeforeReportingFailure(t *testing.T) {
 func TestRespond_ReportsFailureWhenThePromptNeverClears(t *testing.T) {
 	withFastRespondVerify(t, 30*time.Millisecond)
 	prompt := readApprovalFixture(t, "bash-automode-option.txt")
-	fe := &fakeExecutor{outs: []string{prompt, "0", ""}, out: prompt}
+	fe := &fakeExecutor{agentPane: true, outs: []string{prompt, "0", ""}, out: prompt}
 	provider := &Provider{tm: &Tmux{exec: fe}}
 	err := provider.Respond("stuck", runtime.InteractionResponse{Action: "deny"})
 	if err == nil || !strings.Contains(err.Error(), "did not clear") {

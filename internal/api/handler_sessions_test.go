@@ -6782,6 +6782,14 @@ func TestHandleSessionStreamClosedSessionReturnsSnapshot(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "event: turn") || !strings.Contains(rec.Body.String(), "hello") || !strings.Contains(rec.Body.String(), "world") {
 		t.Errorf("stream body missing closed-session snapshot: %s", rec.Body.String())
 	}
+	var snapshot SessionStreamMessageEvent
+	frame := firstSSETestFrame(t, rec.Body.String(), "turn")
+	if err := json.Unmarshal([]byte(frame.Data), &snapshot); err != nil {
+		t.Fatalf("decode turn frame: %v; data=%s", err, frame.Data)
+	}
+	if len(snapshot.Turns) != 2 || snapshot.Turns[0].ID != "1" || snapshot.Turns[1].ID != "2" {
+		t.Errorf("snapshot turns = %+v, want the transcript entry ids 1 and 2", snapshot.Turns)
+	}
 	for _, event := range fs.eventProv.(*events.Fake).Events {
 		if event.Type == events.WorkerOperation {
 			t.Fatalf("closed session stream emitted worker operation event: %#v", event)

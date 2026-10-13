@@ -620,7 +620,7 @@ func (m *Manager) ensureRunning(ctx context.Context, by Actor, id string, b bead
 	fresh, err := m.PersistedStore().freshBead(id)
 	switch {
 	case err != nil:
-		err = fmt.Errorf("%w: reading session %s under its lease: %w", ErrStateSync, id, err)
+		err = fmt.Errorf("reading session %s under its lease: %w", id, err) // nothing started: no state sync to report
 	case KillPendingMetadata(fresh.Metadata["state"], fresh.Metadata["state_reason"], fresh.Metadata["sleep_reason"], fresh.Metadata["slept_at"], m.now()):
 		err = fmt.Errorf("%w: %s", ErrSessionKillPending, id)
 	case drainAckStopPendingMetadata(fresh.Metadata):
@@ -1268,6 +1268,11 @@ func (m *Manager) StopTurn(id string) error {
 			return err
 		}
 		running := State(b.Metadata["state"]) != StateSuspended && m.sp.IsRunning(sessName)
+		if !running {
+			// No runtime means no turn to interrupt: stopTurnLocked sends
+			// nothing, so there is nothing to wait for either.
+			return nil
+		}
 		interruptStartedAt := time.Now()
 		if err := m.stopTurnLocked(b, sessName); err != nil {
 			return err
@@ -1278,7 +1283,7 @@ func (m *Manager) StopTurn(id string) error {
 		if err := m.waitForInterruptBoundaryLocked(context.Background(), b, sessName, interruptStartedAt); err != nil {
 			return fmt.Errorf("waiting for stopped session interrupt boundary: %w", err)
 		}
-		if running && restoresInterruptedInput(b) {
+		if restoresInterruptedInput(b) {
 			// The stop already succeeded. A draft that will not clear is
 			// logged, not returned: the next submit clears the input box
 			// again before it pastes.

@@ -226,6 +226,13 @@ func TestReconcileSessionBeads_AlivePendingCreateRollbackInFlightFence(t *testin
 				if shouldAutoArmForTrace(r.ReasonCode, r.OutcomeCode) && !tc.wantRollback {
 					t.Fatalf("a deferral armed auto-trace: %+v", r)
 				}
+				// Every deferral here is inside the window: the lease is not read.
+				if r.OutcomeCode == TraceOutcomeStartInFlight && r.Fields["lease"] != string(ownStartInWindow) {
+					t.Fatalf("deferral lease = %v, want %q", r.Fields["lease"], ownStartInWindow)
+				}
+			}
+			if !tc.wantRollback && !strings.Contains(env.stderr.String(), "deferred: its start is in flight") {
+				t.Fatalf("the deferral line does not name the in-flight start; stderr=%s", env.stderr.String())
 			}
 			if !env.sp.IsRunning("worker") {
 				t.Fatal("the rollback stopped the runtime; a foreign or deferred runtime is never stopped here")
@@ -300,6 +307,9 @@ func TestReconcileSessionBeads_LeaseHoldsTheFencePastTheWindow(t *testing.T) {
 						t.Fatalf("deferral lease = %v, want %q", r.Fields["lease"], ownStartLeaseHeld)
 					}
 				}
+				if !strings.Contains(env.stderr.String(), "deferred: its start holds the runtime lease") {
+					t.Fatalf("the deferral line does not name the held lease; stderr=%s", env.stderr.String())
+				}
 			}
 		})
 	}
@@ -328,6 +338,7 @@ func TestReconcileSessionBeads_UnverifiableLeaseFailsClosedAndWarnsOnce(t *testi
 	if strings.Contains(env.stderr.String(), leaseWarning) {
 		t.Fatalf("warned inside the window, where the lease is not read; stderr=%s", env.stderr.String())
 	}
+	inWindow := env.stderr.Len()
 	env.clk.Advance(30 * time.Minute)
 	blockLeaseLocks(t, env.city)
 	for i := 1; i <= 3; i++ {
@@ -347,6 +358,9 @@ func TestReconcileSessionBeads_UnverifiableLeaseFailsClosedAndWarnsOnce(t *testi
 	}
 	if n := strings.Count(env.stderr.String(), leaseWarning); n != 1 {
 		t.Fatalf("lease warnings = %d, want 1 for the episode; stderr=%s", n, env.stderr.String())
+	}
+	if out := env.stderr.String()[inWindow:]; strings.Contains(out, "deferred:") {
+		t.Fatalf("past the window the WARNING alone says the hold, with no deferral line beside it; stderr=%s", out)
 	}
 	if !strings.Contains(env.stderr.String(), "creating lock dir") {
 		t.Fatalf("the warning does not carry the read error; stderr=%s", env.stderr.String())
@@ -371,6 +385,9 @@ func TestReconcileSessionBeads_UnverifiableLeaseFailsClosedAndWarnsOnce(t *testi
 	}
 	if n := strings.Count(env2.stderr.String(), leaseWarning); n != 1 {
 		t.Fatalf("fresh episode: lease warnings = %d, want 1; stderr=%s", n, env2.stderr.String())
+	}
+	if strings.Contains(env2.stderr.String(), "deferred:") {
+		t.Fatalf("fresh episode: the WARNING alone says the hold, with no deferral line beside it; stderr=%s", env2.stderr.String())
 	}
 }
 
@@ -398,5 +415,37 @@ func TestStartHolderLiveErrNamesWhatItCannotProbe(t *testing.T) {
 				t.Fatal("startHolderLive reads it free; want held")
 			}
 		})
+	}
+}
+
+// Kills a hold that moves from the in-flight window to a held lease without
+// saying so: the deferral line is one standing condition per reason, so the
+// row's first pass past the window, held by another host's lease, prints the
+// held line after the in-flight one.
+func TestReconcileSessionBeads_FenceWindowToHeldLeasePrintsTheHeldLine(t *testing.T) {
+	env, session := newAlivePendingCreateEnv(t)
+	env.setSessionMetadata(&session, map[string]string{
+		"last_woke_at": env.clk.Now().Add(-2 * time.Second).UTC().Format(time.RFC3339),
+	})
+	tick := func() {
+		cur, err := env.store.Get(session.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reconcileTraced(env, []beads.Bead{cur}, newPoolDesiredStateTestTrace("worker"))
+	}
+	tick()
+	if !strings.Contains(env.stderr.String(), "deferred: its start is in flight") {
+		t.Fatalf("inside the window: want the in-flight line; stderr=%s", env.stderr.String())
+	}
+	inWindow := env.stderr.Len()
+	env.clk.Advance(30 * time.Minute)
+	env.setSessionMetadata(&session, leaseRecord(time.Now().UTC().Add(time.Minute).Format(time.RFC3339)))
+	tick()
+	if got, _ := env.store.Get(session.ID); got.Status == "closed" {
+		t.Fatalf("rolled back under a held lease; stderr=%s", env.stderr.String())
+	}
+	if out := env.stderr.String()[inWindow:]; !strings.Contains(out, "deferred: its start holds the runtime lease") {
+		t.Fatalf("past the window, held: want the held line; stderr=%s", out)
 	}
 }

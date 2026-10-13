@@ -1963,7 +1963,27 @@ func TestKillPaneProcessesExcluding_FiltersPIDs(t *testing.T) {
 	}
 }
 
-func TestFindAgentPane_SinglePane(t *testing.T) {
+// markedAgentPane returns the one pane of session carrying the agent-pane
+// marker that every create path sets.
+func markedAgentPane(t *testing.T, tm *Tmux, session string) string {
+	t.Helper()
+	out, err := tm.run("list-panes", "-s", "-t", paneTarget(session), "-F", agentPaneMarkerFormat+"\t#{pane_id}")
+	if err != nil {
+		t.Fatalf("list-panes: %v", err)
+	}
+	var marked []string
+	for _, row := range strings.Split(strings.TrimSpace(out), "\n") {
+		if id, ok := strings.CutPrefix(row, agentPaneMarked+"\t"); ok {
+			marked = append(marked, id)
+		}
+	}
+	if len(marked) != 1 {
+		t.Fatalf("marked panes in %s = %q, want exactly one (rows %q)", session, marked, out)
+	}
+	return marked[0]
+}
+
+func TestAgentInputTarget_SinglePane(t *testing.T) {
 	if !hasTmux() {
 		t.Skip("tmux not installed")
 	}
@@ -1977,17 +1997,42 @@ func TestFindAgentPane_SinglePane(t *testing.T) {
 	}
 	defer func() { _ = tm.KillSession(sessionName) }()
 
-	// Single pane — should return empty (no disambiguation needed)
-	paneID, err := tm.FindAgentPane(sessionName)
-	if err != nil {
-		t.Fatalf("FindAgentPane: %v", err)
+	// The marked single pane is the agent's.
+	agentPane := markedAgentPane(t, tm, sessionName)
+	if got, err := inputPaneID(tm, sessionName); err != nil || got != agentPane {
+		t.Errorf("input pane of the marked single pane = (%q, %v), want the agent's %q", got, err, agentPane)
 	}
-	if paneID != "" {
-		t.Errorf("FindAgentPane single pane = %q, want empty", paneID)
+
+	// An unmarked (pre-upgrade) session's only pane is its agent pane.
+	unmarkSession(t, tm, sessionName, agentPane)
+	if got, err := inputPaneID(tm, sessionName); err != nil || got != agentPane {
+		t.Errorf("input pane of an unmarked single pane = (%q, %v), want %q", got, err, agentPane)
 	}
 }
 
-func TestFindAgentPane_MultiPaneWithNode(t *testing.T) {
+// inputPaneID returns the pane id of session's agentInputTarget.
+func inputPaneID(tm *Tmux, session string) (string, error) {
+	target, err := tm.agentInputTarget(session)
+	if err != nil {
+		return "", err
+	}
+	_, id, _ := strings.Cut(strings.TrimPrefix(target, paneTarget(session)), ".")
+	return id, nil
+}
+
+// unmarkSession turns session into one created before the agent-pane marker:
+// no pane marker and no session flag.
+func unmarkSession(t *testing.T, tm *Tmux, session, agentPane string) {
+	t.Helper()
+	if _, err := tm.run("set-option", "-p", "-u", "-t", agentPane, agentPaneOption); err != nil {
+		t.Fatalf("unset agent-pane marker: %v", err)
+	}
+	if _, err := tm.run("set-option", "-u", "-t", paneTarget(session), agentSessionOption); err != nil {
+		t.Fatalf("unset session flag: %v", err)
+	}
+}
+
+func TestAgentInputTarget_MultiPaneWithNode(t *testing.T) {
 	if !hasTmux() {
 		t.Skip("tmux not installed")
 	}
@@ -2024,15 +2069,21 @@ func TestFindAgentPane_MultiPaneWithNode(t *testing.T) {
 		t.Skipf("Expected 2 panes, got %d — skipping multi-pane test", len(lines))
 	}
 
-	// FindAgentPane should find the node pane
-	paneID, err := tm.FindAgentPane(sessionName)
-	if err != nil {
-		t.Fatalf("FindAgentPane: %v", err)
+	// The marked pane is the agent's, even though the split runs node (one of
+	// the default process names): a pane a human added never wins over it.
+	agentPane := markedAgentPane(t, tm, sessionName)
+	if got, err := inputPaneID(tm, sessionName); err != nil || got != agentPane {
+		t.Fatalf("input pane = (%q, %v), want the marked agent pane %q over the node split", got, err, agentPane)
 	}
 
-	// Verify it found the correct pane (the one running node)
-	if paneID == "" {
-		t.Log("FindAgentPane returned empty — node may not have started yet or detection missed it")
+	// Unmarked (a pre-upgrade session), process detection finds the node pane.
+	unmarkSession(t, tm, sessionName, agentPane)
+	paneID, err := inputPaneID(tm, sessionName)
+	if err != nil {
+		t.Fatalf("agentInputTarget: %v", err)
+	}
+	if paneID == agentPane {
+		t.Log("input pane fell back to the first pane — node may not have started yet or detection missed it")
 		// Not a hard failure since node startup timing varies
 		return
 	}
@@ -2045,7 +2096,7 @@ func TestFindAgentPane_MultiPaneWithNode(t *testing.T) {
 	paneCmd := strings.TrimSpace(cmdOut)
 	t.Logf("Agent pane %s running: %s", paneID, paneCmd)
 	if paneCmd != "node" {
-		t.Errorf("FindAgentPane returned pane running %q, want 'node'", paneCmd)
+		t.Errorf("input pane runs %q, want 'node'", paneCmd)
 	}
 }
 
@@ -2148,15 +2199,14 @@ func TestNudgeLockDifferentSessions(t *testing.T) {
 	}
 }
 
-func TestFindAgentPane_NonexistentSession(t *testing.T) {
+func TestAgentInputTarget_NonexistentSession(t *testing.T) {
 	if !hasTmux() {
 		t.Skip("tmux not installed")
 	}
 
 	tm := testTmux()
-	_, err := tm.FindAgentPane("nonexistent-session-findagent-xyz")
-	if err == nil {
-		t.Error("FindAgentPane on nonexistent session should return error")
+	if _, err := tm.agentInputTarget("nonexistent-session-findagent-xyz"); err == nil {
+		t.Error("agentInputTarget on nonexistent session should return error")
 	}
 }
 
@@ -2210,7 +2260,7 @@ func TestEnsureSessionFresh_RejectsInvalidName(t *testing.T) {
 	}
 }
 
-func TestFindAgentPane_MultiPaneNoAgent(t *testing.T) {
+func TestAgentInputTarget_MultiPaneNoAgent(t *testing.T) {
 	if !hasTmux() {
 		t.Skip("tmux not installed")
 	}
@@ -2232,13 +2282,20 @@ func TestFindAgentPane_MultiPaneNoAgent(t *testing.T) {
 
 	time.Sleep(200 * time.Millisecond)
 
-	// FindAgentPane should return empty (no agent in either pane)
-	paneID, err := tm.FindAgentPane(sessionName)
-	if err != nil {
-		t.Fatalf("FindAgentPane: %v", err)
+	// The marked pane is the agent's, whatever it runs.
+	agentPane := markedAgentPane(t, tm, sessionName)
+	if got, err := inputPaneID(tm, sessionName); err != nil || got != agentPane {
+		t.Errorf("input pane = (%q, %v), want the marked agent pane %q", got, err, agentPane)
 	}
-	if paneID != "" {
-		t.Errorf("FindAgentPane with no agent = %q, want empty", paneID)
+
+	// Unmarked, with no agent process in either pane: the first pane.
+	unmarkSession(t, tm, sessionName, agentPane)
+	first, _, _ := strings.Cut(strings.TrimSpace(func() string {
+		out, _ := tm.run("list-panes", "-s", "-t", paneTarget(sessionName), "-F", "#{pane_id}")
+		return out
+	}()), "\n")
+	if got, err := inputPaneID(tm, sessionName); err != nil || got != first {
+		t.Errorf("unmarked input pane with no agent = (%q, %v), want the first pane %q", got, err, first)
 	}
 }
 

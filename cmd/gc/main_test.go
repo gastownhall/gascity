@@ -8039,3 +8039,46 @@ func chdirToRealPackageDir(t *testing.T) {
 	t.Helper()
 	bazeltest.ChdirPackageDir(t, "cmd/gc")
 }
+
+// A buffered --json result that cannot be copied to stdout must say so on
+// stderr. The copy is the only write a full disk or closed descriptor can
+// fail; exiting 1 without a word leaves the caller an empty or truncated file
+// and nothing to diagnose it with.
+func TestRunBufferedJSONStdoutWriteFailureIsReportedOnStderr(t *testing.T) {
+	var stderr bytes.Buffer
+	code := run([]string{"version", "--json"}, errWriter{}, &stderr)
+	if code == 0 {
+		t.Fatalf("exit = 0 with an unwritable stdout, want non-zero; stderr=%q", stderr.String())
+	}
+	if got := stderr.String(); !strings.Contains(got, "writing JSON output") || !strings.Contains(got, "write failed") {
+		t.Fatalf("stderr = %q, want the stdout write error named", got)
+	}
+}
+
+// The failure-path twin of TestRunBufferedJSONStdoutWriteFailureIsReportedOnStderr:
+// a failing bounded --json command still buffers its own record, and copying
+// that record to stdout is a separate site that must name a write error too.
+func TestRunBufferedJSONFailureRecordWriteFailureIsReportedOnStderr(t *testing.T) {
+	args := []string{"lint", filepath.Join(t.TempDir(), "missing"), "--json"}
+
+	// Control: with a writable stdout the command fails and stdout carries
+	// lint's own report, not the command_failed fallback record, so the run
+	// below reaches the failure-path copy rather than the success-path one.
+	// The fallback record also decodes with a schema_version and passed=false,
+	// so the error_count check is what tells the two apart.
+	var stdout, controlStderr bytes.Buffer
+	code := run(args, &stdout, &controlStderr)
+	var report lintReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); code == 0 || err != nil || report.SchemaVersion == "" || report.Passed || report.ErrorCount == 0 {
+		t.Fatalf("control: exit = %d, stdout = %q (decode error %v), want a non-zero exit and a failing lint report; stderr=%q", code, stdout.String(), err, controlStderr.String())
+	}
+
+	var stderr bytes.Buffer
+	code = run(args, errWriter{}, &stderr)
+	if code == 0 {
+		t.Fatalf("exit = 0 with a failing lint and an unwritable stdout, want non-zero; stderr=%q", stderr.String())
+	}
+	if got := stderr.String(); !strings.Contains(got, "writing JSON output") || !strings.Contains(got, "write failed") {
+		t.Fatalf("stderr = %q, want the stdout write error named", got)
+	}
+}

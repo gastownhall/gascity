@@ -52,8 +52,9 @@ func (s *scriptedTargetExecutor) execute(args []string) (string, error) {
 		if s.listPanes != nil {
 			return s.listPanes(format), nil
 		}
-		if format == agentPaneMarkerFormat+"\t#{window_id}.#{pane_id}" {
-			return "pane\t@1.%1", nil
+		if strings.Contains(format, "#{window_id}.#{pane_id}") {
+			row, _ := fakeAgentPaneRow(args)
+			return row, nil
 		}
 		if strings.HasPrefix(format, agentPaneMarkerFormat+"\t") {
 			return "pane\t" + s.display, nil
@@ -383,7 +384,7 @@ func TestPaneReadsAndPaneOpsTargetExactSession(t *testing.T) {
 		{"PaneDeadInfo", "0|", func(tm *Tmux) { _, _ = tm.PaneDeadInfo("worker-1") }, "list-panes"},
 		{"IsSessionAttached", "1", func(tm *Tmux) { _ = tm.IsSessionAttached("worker-1") }, "display-message"},
 		{"GetSessionCreatedUnix", "1", func(tm *Tmux) { _, _ = tm.GetSessionCreatedUnix("worker-1") }, "display-message"},
-		{"FindAgentPane", "", func(tm *Tmux) { _, _ = tm.FindAgentPane("worker-1") }, "list-panes"},
+		{"agentInputTarget", "", func(tm *Tmux) { _, _ = tm.agentInputTarget("worker-1") }, "list-panes"},
 		{"CapturePane", "", func(tm *Tmux) { _, _ = tm.CapturePane("worker-1", 5) }, "capture-pane"},
 		{"RespawnPaneWithWorkDir", "%1", func(tm *Tmux) { _ = tm.RespawnPaneWithWorkDir("worker-1", "/w", "true") }, "respawn-pane"},
 		{"ClearHistory", "", func(tm *Tmux) { _ = tm.ClearHistory("worker-1") }, "clear-history"},

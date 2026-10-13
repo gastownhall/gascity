@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
@@ -34,12 +36,21 @@ func legacyWakeFailure(t *testing.T, row beads.Bead) map[string]string {
 	t.Helper()
 	row.Metadata = maps.Clone(row.Metadata)
 	m := beads.NewMemStoreFrom(0, []beads.Bead{row}, nil)
-	recordWakeFailure(sessionInfoFromBead(row), sessionFrontDoor(m), &clock.Fake{Time: gatherNow}, "worker")
+	recordWakeFailure(sessionInfoFromBead(row), sessionTranscriptSearchPaths(nil), sessionFrontDoor(m), &clock.Fake{Time: gatherNow}, "worker", resumeFailure{}, nil)
 	b, err := m.Get(row.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return b.Metadata
+}
+
+// withMeta is row with meta's key-value pairs set on a copy of its metadata.
+func withMeta(row beads.Bead, meta ...string) beads.Bead {
+	row.Metadata = maps.Clone(row.Metadata)
+	for i := 0; i+1 < len(meta); i += 2 {
+		row.Metadata[meta[i]] = meta[i+1]
+	}
+	return row
 }
 
 // hasAny reports whether patch writes any of keys.
@@ -50,6 +61,198 @@ func hasAny(patch session.MetadataPatch, keys ...string) bool {
 		}
 	}
 	return false
+}
+
+// Kills a v2 wake failure that probes only the default transcript roots
+// (mc-zmg7h): a failed start of a claude conversation kept only under a
+// configured observe path keeps its key and hash and accrues the attempt;
+// without the root it resets them.
+func TestAbandonKeepsConversationUnderObservePaths(t *testing.T) {
+	workDir := t.TempDir()
+	root := observedTranscript(t, workDir)
+	for _, observed := range []bool{true, false} {
+		k := startKit(t, intentStart, "creating")
+		if observed {
+			k.p.World.Env.Cfg.Daemon.ObservePaths = []string{root}
+		}
+		row := poolRow("gc-1", "worker", 1, "creating", "generation", "4", "instance_token", "tok-4", "provider", "claude", "work_dir", workDir,
+			"session_key", "k-1", "started_config_hash", "h-1", "wake_attempts", "0")
+		v := abandonView(k, row, txRuntime{Class: rtAbsent}, startFailureRead{})
+		f := failStart(v, startOutcome{}, causeStartError, errors.New("boom")).Pass.(startEnd).failed
+		read := readStartFailure(context.Background(), txCaps{}, *f)
+		step := abandonStep(abandonView(k, row, txRuntime{Class: rtAbsent}, read))
+		if read.keeps != observed || hasAny(step.Write, "session_key", "started_config_hash") == observed || step.Write["wake_attempts"] != "1" {
+			t.Fatalf("observed %v: keeps %v, write %+v; want the conversation kept=%v and the attempt accrued", observed, read.keeps, step.Write, observed)
+		}
+	}
+}
+
+// Kills a resume backstop that resets a conversation a fresh start cannot
+// help, or that misses a resume the provider refused (mc-bm1af, CONTRACT
+// v5.9w): for a failed start of a conversation whose transcript reads
+// present, a refusal resets on the first failure, a startup death of a
+// resume launch counts and resets at the third in a row, and a capacity
+// refusal (a CapacityError wrapping the startup death included), a deadline,
+// a name collision, a spawn error, or any failure of a fresh launch neither
+// resets nor counts. v2's abandon matches legacy's recordWakeFailure on every
+// key, and a committed manual conversation's reset alone records
+// session.conversation_reset{reason:resume-failed}.
+func TestResumeBackstopOnAFailedStart(t *testing.T) {
+	prev := staleResumeKeyProbe
+	staleResumeKeyProbe = func([]string, string, string, string) (bool, bool) { return true, true }
+	t.Cleanup(func() { staleResumeKeyProbe = prev })
+	died := fmt.Errorf("session %q: %w", "s-gc-1", runtime.ErrSessionDiedDuringStartup)
+	refusal := fmt.Errorf("%w; last pane output: No conversation found with session ID: k-1", runtime.ErrSessionDiedDuringStartup)
+	for _, c := range []struct {
+		name     string
+		resumed  bool
+		err      error
+		failures string
+		reset    bool
+		count    string // resume_failures after it
+	}{
+		{"a refusal, the first failure", true, refusal, "", true, ""},
+		{"another key's refusal in the history, a startup death", true, fmt.Errorf("%w; last pane output: > it said No conversation found with session ID: k-0\nkilled: out of memory", runtime.ErrSessionDiedDuringStartup), "", false, "1"},
+		{"a startup death, the first", true, died, "", false, "1"},
+		{"a startup death, the second", true, died, "1", false, "2"},
+		{"a startup death, the third", true, died, "2", true, ""},
+		{"a capacity refusal wrapping a startup death", true, &runtime.CapacityError{ExitCode: 75, Err: died}, "2", false, "2"},
+		{"a deadline on a startup death", true, fmt.Errorf("startup: %w (%w)", context.DeadlineExceeded, runtime.ErrSessionDiedDuringStartup), "2", false, "2"},
+		{"a name collision on a startup death", true, fmt.Errorf("%w (%w)", runtime.ErrSessionExists, runtime.ErrSessionDiedDuringStartup), "2", false, "2"},
+		{"a spawn error", true, errors.New("tmux: exec failed"), "2", false, "2"},
+		{"a fresh launch's startup death", false, refusal, "2", false, "2"},
+	} {
+		for _, manual := range []bool{true, false} {
+			name := fmt.Sprintf("%s, manual %v", c.name, manual)
+			meta := []string{"generation", "4", "instance_token", "tok-4", "provider", "claude", "work_dir", "/work", "session_key", "k-1", "started_config_hash", "h-1", "wake_attempts", "0", "resume_failures", c.failures}
+			if manual {
+				meta = append(meta, "session_origin", "manual")
+			}
+			row := poolRow("gc-1", "worker", 1, "creating", meta...)
+			rf := startResumeFailure(c.resumed, false, "k-1", c.err, "")
+
+			rec := events.NewFake()
+			m := beads.NewMemStoreFrom(0, []beads.Bead{withMeta(row)}, nil)
+			recordWakeFailure(sessionInfoFromBead(row), sessionTranscriptSearchPaths(nil), sessionFrontDoor(m), &clock.Fake{Time: gatherNow}, "worker", rf, rec)
+			legacy, _ := m.Get(row.ID)
+			if reset := legacy.Metadata["session_key"] == ""; reset != c.reset || legacy.Metadata["resume_failures"] != c.count {
+				t.Fatalf("%s: legacy reset %v resume_failures %q, want reset %v and %q", name, reset, legacy.Metadata["resume_failures"], c.reset, c.count)
+			}
+			want := 0
+			if c.reset && manual {
+				want = 1
+			}
+			if got := resumeFailedEvents(t, rec.Events, "worker"); got != want {
+				t.Fatalf("%s: legacy recorded %d resume-failed resets, want %d", name, got, want)
+			}
+
+			k := startKit(t, intentStart, "creating")
+			read := startFailureRead{startFailure: startFailure{cause: causeStartError, err: c.err, display: "worker", relaunched: true}, keeps: true, resume: rf}
+			step := abandonStep(abandonView(k, row, txRuntime{Class: rtAbsent}, read))
+			for key, v := range legacy.Metadata {
+				if v != row.Metadata[key] && step.Write[key] != v {
+					t.Errorf("%s: v2 writes %s = %q, legacy writes %q", name, key, step.Write[key], v)
+				}
+			}
+			if got := resumeFailedEvents(t, step.Facts.Events, "worker"); got != want {
+				t.Fatalf("%s: v2 recorded %d resume-failed resets, want %d", name, got, want)
+			}
+		}
+	}
+}
+
+// Kills a resume backstop run a conversation reset leaves behind (#7729
+// review): after `gc session reset` (RestartRequestPatch) or any other reset
+// (the wake-failure and churn resets, the stale-key clear, the fresh-wake
+// reset, legacy's dead-runtime heal) with the count at 2, the new
+// conversation's first resume death counts 1 and resets nothing, in both
+// modes.
+func TestConversationResetsEndTheResumeRun(t *testing.T) {
+	prev := staleResumeKeyProbe
+	staleResumeKeyProbe = func([]string, string, string, string) (bool, bool) { return true, true }
+	t.Cleanup(func() { staleResumeKeyProbe = prev })
+	run := map[string]string{"resume_failures": "2", "resume_launch": "true", "session_key": "k-old", "started_config_hash": "h-old"}
+	stale := session.MetadataPatch(clearStaleResumeKeyMetadata("", nil))
+	healInfo := session.Info{ID: "gc-1", MetadataState: "awake", SessionKey: "k-old", StartedConfigHash: "h-old", CreatedAt: gatherNow.Add(-time.Hour)}
+	freshWake := session.MetadataPatch{}
+	for _, k := range session.FreshWakeConversationResetKeys() {
+		freshWake[k] = ""
+	}
+	for name, reset := range map[string]session.MetadataPatch{
+		"gc session reset":           session.RestartRequestPatch("", gatherNow),
+		"a wake failure's reset":     session.ConversationResetPatch(true),
+		"a churn reset":              session.ConversationResetPatch(false),
+		"the stale-key clear":        stale,
+		"the fresh-wake reset":       freshWake,
+		"legacy's dead-runtime heal": legacyHeal(healInfo),
+	} {
+		meta := reset.Apply(run)
+		if meta["resume_failures"] != "" || meta["resume_launch"] != "" {
+			t.Fatalf("%s: run %q/%q left behind", name, meta["resume_failures"], meta["resume_launch"])
+		}
+		// The new conversation: committed, then its first resume dies while
+		// creating (the heal's asleep state is the old incarnation's).
+		meta["session_key"], meta["started_config_hash"] = "k-new", "h-new"
+		delete(meta, "state")
+		row := poolRow("gc-1", "worker", 1, "creating", append([]string{"generation", "4", "instance_token", "tok-4", "provider", "claude", "work_dir", "/work", "wake_attempts", "0"}, flatten(meta)...)...)
+		rf := startResumeFailure(true, true, "k-new", errors.New("boom"), "")
+
+		m := beads.NewMemStoreFrom(0, []beads.Bead{withMeta(row)}, nil)
+		recordWakeFailure(sessionInfoFromBead(row), sessionTranscriptSearchPaths(nil), sessionFrontDoor(m), &clock.Fake{Time: gatherNow}, "worker", rf, nil)
+		legacy, _ := m.Get(row.ID)
+		if legacy.Metadata["session_key"] != "k-new" || legacy.Metadata["resume_failures"] != "1" {
+			t.Fatalf("%s: legacy key %q resume_failures %q, want the new conversation kept and counted 1", name, legacy.Metadata["session_key"], legacy.Metadata["resume_failures"])
+		}
+		k := startKit(t, intentStart, "creating")
+		read := startFailureRead{startFailure: startFailure{cause: causeStartError, err: errors.New("boom"), display: "worker", relaunched: true}, keeps: true, resume: rf}
+		step := abandonStep(abandonView(k, row, txRuntime{Class: rtAbsent}, read))
+		if hasAny(step.Write, "session_key") || step.Write["resume_failures"] != "1" {
+			t.Fatalf("%s: v2 write %v, want the new conversation kept and counted 1", name, step.Write)
+		}
+	}
+}
+
+// Kills the failure Call blind to the dead pane: v2 classifies a refusal on
+// the peeked screen as well as in the error, and a launch's resume flag
+// rides from its prepare into the failure.
+func TestFailureCallClassifiesTheResume(t *testing.T) {
+	k := startKit(t, intentStart, "creating")
+	row := poolRow("gc-1", "worker", 1, "creating", "generation", "4", "instance_token", "tok-4", "session_key", "k-1", "started_config_hash", "h-1")
+	v := abandonView(k, row, txRuntime{Class: rtAbsent}, startFailureRead{})
+	out := startOutcome{prepared: &preparedStart{resumed: true}}
+	f := failStart(v, out, causeDiedDuringStartup, nil).Pass.(startEnd).failed
+	if !f.resumed || !f.died {
+		t.Fatalf("failure %+v, want a resume launch that died", f)
+	}
+	if rf := startResumeFailure(f.resumed, f.died, "k-1", f.err, "No conversation found with session ID: k-1"); !rf.refused || !rf.counted {
+		t.Fatalf("a refusal on the pane: %+v, want refused and counted", rf)
+	}
+	if rf := startResumeFailure(f.resumed, f.died, "k-1", f.err, ""); rf.refused || !rf.counted {
+		t.Fatalf("a death with a blank pane: %+v, want counted alone", rf)
+	}
+	refused := failStart(v, out, causeStartError, fmt.Errorf("%w; last pane output: No conversation found with session ID: k-1", runtime.ErrSessionDiedDuringStartup)).Pass.(startEnd).failed
+	if r := readStartFailure(context.Background(), txCaps{}, *refused); !r.resume.refused || !r.resume.counted {
+		t.Fatalf("the failure Call's read %+v, want the refusal classified", r.resume)
+	}
+}
+
+// resumeFailedEvents counts evs' session.conversation_reset events, each
+// checked for gc-1, subject, the template worker and the resume-failed
+// reason.
+func resumeFailedEvents(t *testing.T, evs []events.Event, subject string) int {
+	t.Helper()
+	n := 0
+	for _, e := range evs {
+		if e.Type != events.SessionConversationReset {
+			continue
+		}
+		var p api.SessionLifecyclePayload
+		if err := json.Unmarshal(e.Payload, &p); err != nil || e.SessionID != "gc-1" || e.Subject != subject || p.Template != "worker" || p.Reason != "resume-failed" {
+			t.Fatalf("event %+v (payload %+v, err %v), want gc-1, subject %q, template worker, reason resume-failed", e, p, err, subject)
+		}
+		n++
+	}
+	return n
 }
 
 // Kills a class that writes the wrong patch, an abandon that does not fail,
@@ -68,14 +271,25 @@ func TestAbandonStepClasses(t *testing.T) {
 	}
 	other := startFailureRead{startFailure: startFailure{cause: causeStartError, err: boom, undo: undo, display: "worker"}}
 
-	wake := legacyWakeFailure(t, creating)
 	step := abandonStep(abandonView(k, creating, txRuntime{Class: rtAbsent}, other))
 	if step.Fail != causeStartError || step.Write["state"] != "asleep" || step.Write["wake_request"] != "explicit" || step.Write["last_woke_at"] != "" {
 		t.Fatalf("any other failure: %+v, want the PreWake restored and the start's failure", step)
 	}
-	for key, v := range wake {
-		if v != creating.Metadata[key] && step.Write[key] != v {
-			t.Errorf("any other failure: %s = %q, legacy's recordWakeFailure writes %q", key, step.Write[key], v)
+	// A committed manual conversation (key and hash), by origin or by the
+	// legacy marker, fails as legacy's recordWakeFailure fails it (#7470):
+	// every key legacy changes, and no conversation key legacy keeps.
+	for _, row := range []beads.Bead{creating, withMeta(creating, "session_origin", "manual"), withMeta(creating, "manual_session", "true")} {
+		wake := legacyWakeFailure(t, row)
+		step := abandonStep(abandonView(k, row, txRuntime{Class: rtAbsent}, other))
+		for key, v := range wake {
+			if v != row.Metadata[key] && step.Write[key] != v {
+				t.Errorf("any other failure of %v: %s = %q, legacy's recordWakeFailure writes %q", row.Metadata, key, step.Write[key], v)
+			}
+		}
+		for _, key := range []string{"session_key", "started_config_hash", "continuation_reset_pending"} {
+			if v, ok := step.Write[key]; ok && v != wake[key] {
+				t.Errorf("any other failure of %v: %s = %q, legacy's recordWakeFailure leaves %q", row.Metadata, key, v, wake[key])
+			}
 		}
 	}
 
@@ -370,6 +584,97 @@ func TestRollbackEffect(t *testing.T) {
 		t.Fatalf("foreign: settlement %+v kills %+v, want rolled back without a stop", s, k.sp.kills)
 	}
 
+	// S7: a StaleSelf runtime at the row's generation is its own, stopped;
+	// the relaunch keeps the row, the rollback closes it. An older epoch is
+	// Foreign (CONTRACT v5.9q): a named row is rolled back without a stop,
+	// A18 and A21 owning its name; a pool row's bead-scoped name is its
+	// alone (C8.2(a)), so whatever runs under it is stopped and confirmed
+	// before the rollback lands, leaving no orphan runtime.
+	for _, c := range []struct {
+		name          string
+		epoch         string
+		named         bool
+		relaunch      bool
+		kills         int
+		closed, claim bool
+	}{
+		{"own, relaunched", "3", false, true, 1, false, true},
+		{"own, rolled back", "3", false, false, 1, true, false},
+		{"older epoch, a named row: no stop", "2", true, false, 0, true, false},
+		{"older epoch, a pool row's bead-scoped name: stopped first (v5.9q)", "2", false, false, 1, true, false},
+	} {
+		name := "s-gc-1"
+		k = rollback(t, "generation", "3")
+		if c.named {
+			name = "chat"
+			k = rollback(t, "generation", "3", "session_name", "chat", "configured_named_session", "true", "configured_named_identity", "chat", "pool_managed", "")
+		}
+		k.it.Reason, k.it.Relaunch = decideStaleCreate, c.relaunch
+		k.sp.put(name, "gc-1", c.epoch, "old")
+		k.p.World.Census = readCensus(t, gatherNow, censusLegs(rowLeg, k.cache))
+		s := k.runKind()
+		if len(k.sp.kills) != c.kills || s.Closed != c.closed || closed(k) != c.closed || (k.meta("pending_create_claim") == "true") != c.claim {
+			t.Fatalf("stale create %s: settlement %+v kills %+v claim %q, want kills %d closed %v", c.name, s, k.sp.kills, k.meta("pending_create_claim"), c.kills, c.closed)
+		}
+		if c.relaunch && (s.Outcome != settledNoop || s.Cause != decideStaleCreate) {
+			t.Fatalf("stale create %s: settlement %+v, want a no-op the backoff does not hold (M21)", c.name, s)
+		}
+	}
+	// The relaunch stops only what its own read still finds StaleSelf: a
+	// runtime an operator re-attached on the row's token reads Current, and
+	// the effect refuses redecided with nothing stopped. One that outlives
+	// the stop holds the row, the relaunch no-op behind it (M24).
+	k = rollback(t, "generation", "3")
+	k.it.Reason, k.it.Relaunch = decideStaleCreate, true
+	k.sp.put("s-gc-1", "gc-1", "3", "tok")
+	k.p.World.Census = readCensus(t, gatherNow, censusLegs(rowLeg, k.cache))
+	if s := k.runKind(); s.Cause != causeRedecided || len(k.sp.kills) != 0 {
+		t.Fatalf("re-attached on the row's token: settlement %+v kills %+v, want refused redecided, nothing stopped", s, k.sp.kills)
+	}
+	// Any stale-create exit, not only the relaunch, leaves a runtime that
+	// reads Current by the effect to A10's adopt (the #7650 review's ruling).
+	k = rollback(t, "generation", "3")
+	k.it.Reason = decideStaleCreate
+	k.sp.put("s-gc-1", "gc-1", "3", "tok")
+	k.p.World.Census = readCensus(t, gatherNow, censusLegs(rowLeg, k.cache))
+	if s := k.runKind(); s.Cause != causeRedecided || len(k.sp.kills) != 0 || closed(k) {
+		t.Fatalf("a rollback exit over a Current runtime: settlement %+v kills %+v, want refused redecided, nothing stopped or closed", s, k.sp.kills)
+	}
+	// A relaunch whose runtime is no longer its own StaleSelf by the effect
+	// (an older incarnation's now) stops nothing.
+	k = rollback(t, "generation", "3")
+	k.it.Reason, k.it.Relaunch = decideStaleCreate, true
+	k.sp.put("s-gc-1", "gc-1", "2", "older")
+	k.p.World.Census = readCensus(t, gatherNow, censusLegs(rowLeg, k.cache))
+	if s := k.runKind(); s.Cause != causeRedecided || len(k.sp.kills) != 0 {
+		t.Fatalf("a relaunch over another incarnation: settlement %+v kills %+v, want refused redecided, nothing stopped", s, k.sp.kills)
+	}
+	// A Current runtime that is a zombie by the effect is no adopt's (A10
+	// adopts only a live one): the exit stops it as the row's own and rolls
+	// the row back (Z08).
+	k = rollback(t, "generation", "3")
+	k.it.Reason = decideStaleCreate
+	k.runtimeAs("gc-1", "tok", func(r *simRuntime) { r.zombie = true })
+	k.p.World.Census = readCensus(t, gatherNow, censusLegs(rowLeg, k.cache))
+	if s := k.runKind(); s.Cause == causeRedecided || len(k.sp.kills) != 1 || !closed(k) {
+		t.Fatalf("a Current zombie: settlement %+v kills %+v, want it stopped and the row rolled back", s, k.sp.kills)
+	}
+	// A relaunch whose runtime is gone by the effect is a no-op, so no
+	// backoff delays A18's relaunch.
+	k = rollback(t, "generation", "3")
+	k.it.Reason, k.it.Relaunch = decideStaleCreate, true
+	if s := k.runKind(); s.Outcome != settledNoop || s.Cause != decideStaleCreate || closed(k) {
+		t.Fatalf("a relaunch over a gone runtime: settlement %+v, want a no-op keeping the row", s)
+	}
+	k = rollback(t, "generation", "3")
+	k.it.Reason, k.it.Relaunch = decideStaleCreate, true
+	k.sp.put("s-gc-1", "gc-1", "3", "old")
+	k.p.World.Census = readCensus(t, gatherNow, censusLegs(rowLeg, k.cache))
+	k.on(seamAfterCall, func() { k.sp.mu.Lock(); k.sp.put("s-gc-1", "gc-1", "3", "old"); k.sp.mu.Unlock() })
+	if s := k.runKind(); s.Cause != causeRuntimePresent {
+		t.Fatalf("outlives the stop: settlement %+v, want refused runtime-present", s)
+	}
+
 	k = rollback(t, "last_woke_at", gatherNow.Add(-5*time.Second).Format(time.RFC3339))
 	k.runtimeAs("gc-1", "tok", func(r *simRuntime) { r.zombie = true })
 	k.sp.SetPeekOutput("s-gc-1", "Usage limit reached")
@@ -395,6 +700,103 @@ func TestRollbackCancelsRetiredWaits(t *testing.T) {
 	}
 }
 
+// Kills an occupant rollback that lands after its occupant left (F1): A10
+// rolls back a pending create inside its lease because the pass read
+// another runtime under its name (Occupied) or its own StaleSelf one (S7).
+// When the effect's fresh read finds that runtime gone, a corpse, or the
+// row's own Current runtime, the occupant is gone and the effect refuses
+// redecided while its lease holds, closing nothing (legacy decides on one
+// live read); a Foreign or StaleSelf runtime still there rolls the row back
+// as before, and so does a gone or dead occupant past the lease.
+func TestRollbackEffectNeedsItsOccupant(t *testing.T) {
+	leased := []string{"pending_create_claim", "true", "pending_create_started_at", gatherNow.Add(-time.Minute).Format(time.RFC3339)}
+	long := gatherNow.Add(-20 * time.Minute).Format(time.RFC3339)
+	expired := []string{"pending_create_claim", "true", "pending_create_started_at", long, "last_woke_at", long} // started: no never-started deadline
+	for _, c := range []struct {
+		name   string
+		meta   []string
+		reason string
+		rt     func(k *txKit)
+		closed bool
+	}{
+		{"Occupied, its occupant gone", leased, decideRollback, func(*txKit) {}, false},
+		{"Occupied, its occupant now a corpse", leased, decideRollback, func(k *txKit) {
+			k.runtimeAs("gc-9", "theirs", func(r *simRuntime) { r.corpse = true })
+		}, false},
+		{"Occupied, the row's own Current runtime in its place", leased, decideRollback, func(k *txKit) { k.runtimeAs("gc-1", "tok", nil) }, false},
+		{"Occupied, an unstamped runtime in its place", leased, decideRollback, func(k *txKit) { k.runtimeAs("", "", nil) }, false},
+		{"Occupied, its Foreign occupant still there", leased, decideRollback, func(k *txKit) { k.runtimeAs("gc-9", "theirs", nil) }, true},
+		{"Occupied, its Foreign occupant still there as a zombie", leased, decideRollback, func(k *txKit) {
+			k.runtimeAs("gc-9", "theirs", func(r *simRuntime) { r.zombie = true })
+		}, true},
+		{"S7, its StaleSelf runtime gone", leased, decideStaleCreate, func(*txKit) {}, false},
+		{"S7, its StaleSelf runtime still there", leased, decideStaleCreate, func(k *txKit) { k.runtimeAs("gc-1", "old", nil) }, true},
+		// Past the lease a gone or dead occupant leaves nothing to wait for:
+		// the row rolls back, as main and legacy roll it back, so a started
+		// create whose name another row's corpse holds is never stranded.
+		// A live non-occupant still holds it at any lease.
+		{"past its lease, started, another row's corpse under its name", expired, decideRollback, func(k *txKit) {
+			k.runtimeAs("gc-9", "theirs", func(r *simRuntime) { r.corpse = true })
+		}, true},
+		{"past its lease, started, its occupant gone", expired, decideRollback, func(*txKit) {}, true},
+		{"past its lease, the row's own Current runtime in its place", expired, decideRollback, func(k *txKit) { k.runtimeAs("gc-1", "tok", nil) }, false},
+		{"past its lease, the row's own Current zombie in its place", expired, decideRollback, func(k *txKit) {
+			k.runtimeAs("gc-1", "tok", func(r *simRuntime) { r.zombie = true })
+		}, false},
+		{"a lease anchor two hours ahead (a clock stepped back), its occupant gone", []string{"pending_create_claim", "true", "pending_create_started_at", gatherNow.Add(2 * time.Hour).Format(time.RFC3339)}, decideRollback, func(*txKit) {}, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			k := startKit(t, intentRollback, "creating", c.meta...)
+			k.it.Deadline = gatherNow.Add(time.Minute)
+			k.it.Reason, k.it.Occupant = c.reason, true
+			c.rt(k)
+			k.p.World.Census = readCensus(t, gatherNow, censusLegs(rowLeg, k.cache))
+			s := k.runKind()
+			b, _ := k.backing.Get("gc-1")
+			if closed := b.Status == "closed"; closed != c.closed || s.Closed != c.closed {
+				t.Fatalf("settlement %+v, row %s: closed %v, want %v", s, b.Status, closed, c.closed)
+			}
+			if !c.closed && (s.Cause != causeRedecided || b.Metadata["pending_create_claim"] != "true") {
+				t.Fatalf("settlement %+v claim %q: want refused redecided, the pending create kept", s, b.Metadata["pending_create_claim"])
+			}
+		})
+	}
+}
+
+// Kills A10 dropping the occupant mark: the Occupied and S7 rollbacks rest on
+// another runtime under the name (intent.Occupant); a rollback past its
+// deadline, or of an undesired row whose runtime is gone, does not.
+func TestArmRollbackMarksItsOccupant(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		desired  desire
+		reason   string
+		liveness rowLiveness
+		stale    bool
+		occupant bool
+	}{
+		{"past its deadline", desireNone, reasonRollbackCandidate, livenessGone, false, false},
+		{"past its deadline, occupied", desireNone, reasonRollbackCandidate, livenessOccupied, false, false},
+		{"undesired and gone", desireDrain, "undesired", livenessGone, false, false},
+		{"another row's runtime", desireNone, reasonNameOccupied, livenessOccupied, false, true},
+		{"its StaleSelf runtime (S7)", desireWake, "", livenessAlive, true, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			row := poolRow("gc-1", "worker", 1, "creating", "instance_token", "tok", "generation", "3", "pending_create_claim", "true")
+			k := rowKeyOf(row.ID)
+			w := &World{Observed: map[rowKey]rowObservation{}}
+			if c.stale {
+				w.Observed[k] = rowObservation{Liveness: livenessAlive, Identity: runtimeIdentity{Known: true, SessionID: "gc-1", Epoch: "2", Token: "old"}}
+			}
+			r := &rowFacts{w: w, k: k, row: newCensusRow(k, sessionInfoFromBead(row)), found: true, entry: &selectionEntry{Key: k, Desired: c.desired, Reason: c.reason, Liveness: c.liveness}}
+			it, ok := armRollback(r)
+			if !ok || it.Kind != intentRollback || it.Occupant != c.occupant {
+				t.Fatalf("armRollback = (%+v, %v), want a rollback with Occupant %v", it, ok, c.occupant)
+			}
+		})
+	}
+}
+
 // Kills an A10 rollback proposed for a row that is not a pending create, a
 // wanted pending create inside its deadline, or a live one; and one missed
 // for the three shapes A10 rolls back.
@@ -413,6 +815,7 @@ func TestArmRollback(t *testing.T) {
 		{"another row's runtime", true, desireNone, reasonNameOccupied, livenessOccupied, true},
 		{"wanted within its deadline", true, desireWake, "", livenessGone, false},
 		{"undesired and alive", true, desireDrain, "undesired", livenessAlive, false},
+		{"alive and Current", true, desireWake, "", livenessAlive, false},
 		{"not a pending create", false, desireDrain, "undesired", livenessGone, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -422,10 +825,52 @@ func TestArmRollback(t *testing.T) {
 			}
 			row := poolRow("gc-1", "worker", 1, "creating", meta...)
 			k := rowKeyOf(row.ID)
-			r := &rowFacts{row: newCensusRow(k, sessionInfoFromBead(row)), found: true, entry: &selectionEntry{Key: k, Desired: c.desired, Reason: c.reason, Liveness: c.liveness}}
+			w := &World{Observed: map[rowKey]rowObservation{k: {Identity: runtimeIdentity{Known: true, SessionID: "gc-1", Epoch: "1", Token: "tok"}}}}
+			r := &rowFacts{w: w, k: k, row: newCensusRow(k, sessionInfoFromBead(row)), found: true, entry: &selectionEntry{Key: k, Desired: c.desired, Reason: c.reason, Liveness: c.liveness}}
 			it, ok := armRollback(r)
 			if ok != c.want || ok && (it.Kind != intentRollback || r.rests&restRuntime == 0) {
 				t.Fatalf("armRollback = (%+v, %v), want %v resting on the runtime", it, ok, c.want)
+			}
+		})
+	}
+}
+
+// Kills the S7 exit missed or mis-shaped (v5 S7): a pending create whose
+// live runtime reads StaleSelf is rolled back, and kept for A18's relaunch
+// only when it is the row's own runtime (its epoch the row's generation),
+// configured named and wanted awake. A Current one is A10's adopt.
+func TestArmRollbackStaleCreate(t *testing.T) {
+	named := []string{"configured_named_session", "true", "configured_named_identity", "chat", "configured_named_mode", "always", "session_name", "chat", "pool_managed", ""}
+	for _, c := range []struct {
+		name     string
+		epoch    string
+		token    string
+		named    bool
+		desired  desire
+		propose  bool
+		relaunch bool
+	}{
+		{"own, configured named, wanted: relaunched", "3", "old", true, desireWake, true, true},
+		{"own, configured named, unwanted: rolled back", "3", "old", true, desireNone, true, false},
+		{"own, pool: rolled back", "3", "old", false, desireWake, true, false},
+		{"older epoch, configured named: rolled back", "2", "old", true, desireWake, true, false},
+		{"Current: the adopt's", "3", "tok", true, desireWake, false, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			meta := []string{"generation", "3", "instance_token", "tok", "pending_create_claim", "true"}
+			if c.named {
+				meta = append(meta, named...)
+			}
+			row := poolRow("gc-1", "worker", 1, "creating", meta...)
+			k := rowKeyOf(row.ID)
+			cfg := workerCity(1)
+			cfg.Agents = append(cfg.Agents, config.Agent{Name: "chat", StartCommand: "true"})
+			cfg.NamedSessions = []config.NamedSession{{Template: "chat", Mode: "always"}}
+			w := &World{Env: &reconcileEnv{Cfg: cfg}, Observed: map[rowKey]rowObservation{k: {Liveness: livenessAlive, Identity: runtimeIdentity{Known: true, SessionID: "gc-1", Epoch: c.epoch, Token: c.token}}}}
+			r := &rowFacts{w: w, k: k, row: newCensusRow(k, sessionInfoFromBead(row)), found: true, entry: &selectionEntry{Key: k, Desired: c.desired, Liveness: livenessAlive}}
+			it, ok := armRollback(r)
+			if ok != c.propose || ok && (it.Kind != intentRollback || it.Reason != decideStaleCreate || it.Relaunch != c.relaunch) {
+				t.Fatalf("armRollback = (%+v, %v), want proposed %v relaunch %v", it, ok, c.propose, c.relaunch)
 			}
 		})
 	}
@@ -689,7 +1134,7 @@ func TestComposedStartKeepsTheFoldedHeal(t *testing.T) {
 	k, _ := launchKit(t, "active", "last_woke_at", woke, "detached_at", woke)
 	row := k.p.World.Census.Rows[k.it.Key]
 	r := &rowFacts{w: k.p.World, k: k.it.Key, row: row, found: true, entry: &selectionEntry{Key: k.it.Key, Liveness: livenessGone, Desired: desireWake, Template: "worker", AssignedWork: &assignedWorkView{BeadID: "gw-1"}}}
-	patch, class, _ := deadRuntimePatch(r, true)
+	patch, class, _, _ := deadRuntimePatch(r, true)
 	patch["detached_at"] = ""
 	it := r.startHealed(intent{Kind: intentRowHealFresh, Reason: decideDeadRuntimeHeal, Key: k.it.Key, Patch: patch, Class: class})
 	if it.Kind != intentStart {
@@ -755,7 +1200,7 @@ func TestStrandedComposedStartStaysCommitted(t *testing.T) {
 	if !r.asleepStranded() {
 		t.Fatal("the seat is not stranded: the case is vacuous")
 	}
-	heal, class, _ := deadRuntimePatch(r, true)
+	heal, class, _, _ := deadRuntimePatch(r, true)
 	it := r.startHealed(intent{Kind: intentRowHealFresh, Reason: decideDeadRuntimeHeal, Key: k.it.Key, Patch: heal, Class: class})
 	if it.Kind != intentStart {
 		t.Fatalf("startHealed = %+v, want a start", it)

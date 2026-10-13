@@ -1195,13 +1195,13 @@ func clearDrainAckRow(store beads.Store, sessionID string) error {
 }
 
 // casDrainAckRow is the kill fence's re-read/re-decide loop
-// (applySessionKillFencePatch) without its unconditional fallback: every
+// (session.ApplyKillFencePatch) without its unconditional fallback: every
 // write is an UpdateIfMatch at the revision just read.
 func casDrainAckRow(store beads.Store, writer beads.ConditionalWriter, sessionID string,
 	decide func(beads.Bead) (map[string]string, error),
 ) error {
 	var lastErr error
-	for attempt := 0; attempt < sessionKillFenceAttempts; attempt++ {
+	for attempt := 0; attempt < session.KillFenceAttempts; attempt++ {
 		b, err := store.Get(sessionID)
 		if err != nil {
 			return err

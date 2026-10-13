@@ -322,6 +322,9 @@ func (f *fakeClaudePane) execute(args []string) (string, error) {
 	if len(args) == 0 {
 		return "", nil
 	}
+	if row, ok := fakeAgentPaneRow(args); ok {
+		return row, nil
+	}
 	switch args[0] {
 	case "list-panes":
 		return "%1\tclaude\t4242", nil

@@ -1587,9 +1587,9 @@ func (o *tmuxStartOps) sendKeys(name, text string) error {
 // avoid blindly re-running the full C-u/paste/submit cycle against a pane
 // that already went busy (see sendStartupNudgeWithRetry).
 func (o *tmuxStartOps) paneBusy(name string) (bool, error) {
-	target := name
-	if agentPane, err := o.tm.FindAgentPane(name); err == nil && agentPane != "" {
-		target = agentPane
+	target, err := o.tm.agentInputTarget(name)
+	if err != nil {
+		return false, err
 	}
 	return o.tm.paneBusy(target)
 }

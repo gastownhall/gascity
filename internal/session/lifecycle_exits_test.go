@@ -297,6 +297,8 @@ func TestConversationResetPatch(t *testing.T) {
 	// start; churn clears only the conversation binding.
 	assertPatch(t, ConversationResetPatch(true), MetadataPatch{
 		"session_key":                "",
+		"resume_failures":            "",
+		"resume_launch":              "",
 		"started_config_hash":        "",
 		"continuation_reset_pending": "true",
 		// Priming markers share started_config_hash's lifetime (S19 Stage 2).
@@ -306,6 +308,8 @@ func TestConversationResetPatch(t *testing.T) {
 	})
 	assertPatch(t, ConversationResetPatch(false), MetadataPatch{
 		"session_key":                "",
+		"resume_failures":            "",
+		"resume_launch":              "",
 		"continuation_reset_pending": "true",
 	})
 }

@@ -171,12 +171,13 @@ func TestAgentSliceQuotesEmbeddedSingleQuotes(t *testing.T) {
 	}
 }
 
-// TestFindAgentPane_WrappedPane pins the detection contract for panes whose
-// root command is a wrapper such as systemd-run (GC_AGENT_SLICE): none of the
-// direct-name, shell-descendant, or version-as-argv[0] checks match the
-// wrapper process, so FindAgentPane must identify the agent through the
-// unconditional descendant walk, mirroring IsRuntimeRunning.
-func TestFindAgentPane_WrappedPane(t *testing.T) {
+// TestAgentInputTarget_WrappedPane pins the detection contract, for unmarked
+// sessions, for panes whose root command is a wrapper such as systemd-run
+// (GC_AGENT_SLICE): none of the direct-name, shell-descendant, or
+// version-as-argv[0] checks match the wrapper process, so agentInputTarget
+// must identify the agent through the unconditional descendant walk,
+// mirroring IsRuntimeRunning.
+func TestAgentInputTarget_WrappedPane(t *testing.T) {
 	// Real process tree: the test binary spawns "sleep 60", standing in for
 	// systemd-run spawning the agent. The fake executor reports the pane
 	// command as "systemd-run" with the test binary's PID, so only the
@@ -202,19 +203,19 @@ func TestFindAgentPane_WrappedPane(t *testing.T) {
 	exec := &fakeExecutor{outs: []string{
 		// list-panes -s: a user's split pane plus the wrapped agent pane.
 		// The bogus PID has no live process, so the first pane cannot match.
-		"%1\tvim\t999999999\n%2\tsystemd-run\t" + panePID,
+		"pane\t@1.%1\tvim\t999999999\npane\t@1.%2\tsystemd-run\t" + panePID,
 		// show-environment GT_PROCESS_NAMES
 		"GT_PROCESS_NAMES=sleep",
 	}}
 	tm := NewTmux()
 	tm.exec = exec
 
-	paneID, err := tm.FindAgentPane("gc-test-wrapped")
+	target, err := tm.agentInputTarget("gc-test-wrapped")
 	if err != nil {
-		t.Fatalf("FindAgentPane: %v", err)
+		t.Fatalf("agentInputTarget: %v", err)
 	}
-	if paneID != "%2" {
-		t.Fatalf("FindAgentPane = %q, want %q (wrapped agent pane via descendant fallback)", paneID, "%2")
+	if want := "=gc-test-wrapped:@1.%2"; target != want {
+		t.Fatalf("agentInputTarget = %q, want %q (wrapped agent pane via descendant fallback)", target, want)
 	}
 }
 
@@ -267,7 +268,7 @@ func (e *wrappedWaitExecutor) executeCtx(_ context.Context, args []string) (stri
 // when no agent ever appears.
 func TestWaitForCommand_WrappedPane(t *testing.T) {
 	// Real process tree: the test binary spawns "sleep 60" standing in for
-	// the agent, as in TestFindAgentPane_WrappedPane.
+	// the agent, as in TestAgentInputTarget_WrappedPane.
 	agent := osexec.Command("sleep", "60")
 	if err := agent.Start(); err != nil {
 		t.Fatalf("starting agent stand-in: %v", err)
