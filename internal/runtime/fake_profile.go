@@ -48,6 +48,7 @@ type ProfileBackend interface {
 	IdleSnapshotProvider
 	IdleWaitProvider
 	ImmediateNudgeProvider
+	InputClearProvider
 	InteractionProvider
 	InterruptBoundaryWaitProvider
 	InterruptedTurnResetProvider
@@ -62,6 +63,7 @@ type ProfileBackend interface {
 	SessionEventProvider
 	SessionObjectKiller
 	SessionRosterProvider
+	TurnEventProvider
 	UnattendedSessionStopper
 }
 
@@ -72,9 +74,9 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 	core, timed := profileProvider{b, profileCapabilities[p]}, sleepTrait{SessionSleepCapabilityTimedOnly}
 	switch p {
 	case ProfileTmux:
-		return tmuxProfile{core, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, sleepTrait{SessionSleepCapabilityFull}}
+		return tmuxProfile{core, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, sleepTrait{SessionSleepCapabilityFull}}
 	case ProfileACP:
-		return acpProfile{core, b, b, b, b, freshTrait{}, sidecarTrait{}, timed, transportTrait{}}
+		return acpProfile{core, b, b, b, b, b, b, b, b, freshTrait{}, sidecarTrait{}, timed, transportTrait{}}
 	case ProfileSubprocess:
 		return subprocessProfile{core, b, b, b, freshTrait{}, sidecarTrait{}, timed}
 	case ProfileHerdr:
@@ -82,7 +84,7 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 	case ProfileK8s:
 		return k8sProfile{core, b, b, timed}
 	case ProfileExec:
-		return execProfile{core, b, b, timed}
+		return execProfile{core, b, b, b, b, timed, probeBudgetTrait{}}
 	case ProfileSSH:
 		return sshProfile{core, b, timed}
 	case ProfileT3Bridge:
@@ -93,13 +95,16 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 
 // The fixed traits a backend reports.
 type (
-	sleepTrait     struct{ c SessionSleepCapability }
-	freshTrait     struct{} // acp and subprocess probe their control socket on every read
-	sidecarTrait   struct{} // acp and subprocess keep identity in a local sidecar
-	transportTrait struct{} // acp's
+	sleepTrait       struct{ c SessionSleepCapability }
+	freshTrait       struct{}                  // acp and subprocess probe their control socket on every read
+	sidecarTrait     struct{}                  // acp and subprocess keep identity in a local sidecar
+	transportTrait   struct{}                  // acp's
+	probeBudgetTrait struct{ d time.Duration } // exec's idle-proof budget: zero without a handshake, as the profile has none
 )
 
 func (t sleepTrait) SleepCapability(string) SessionSleepCapability { return t.c }
+
+func (t probeBudgetTrait) IdleProbeBudget() time.Duration { return t.d }
 
 func (freshTrait) LivenessReadsFresh() bool { return true }
 
@@ -139,6 +144,7 @@ type (
 		IdleSnapshotProvider
 		IdleWaitProvider
 		ImmediateNudgeProvider
+		InputClearProvider
 		InteractionProvider
 		InterruptBoundaryWaitProvider
 		InterruptedTurnResetProvider
@@ -157,10 +163,14 @@ type (
 	}
 	acpProfile struct {
 		Provider
+		IdleSnapshotProvider
+		IdleWaitProvider
 		InteractionProvider
 		ListingAttestation
 		LivenessObserverWithError
 		ProcessTableScanner
+		SessionEventProvider
+		TurnEventProvider
 		freshTrait
 		sidecarTrait
 		sleepTrait
@@ -191,9 +201,12 @@ type (
 	}
 	execProfile struct {
 		Provider
+		AttachmentObserverWithError
 		DialogProvider
+		IdleWaitProvider
 		RelaunchProvider
 		sleepTrait
+		probeBudgetTrait
 	}
 	sshProfile struct {
 		Provider
@@ -281,13 +294,14 @@ func (f FullFake) SnapshotIdle(name string) (bool, error) {
 }
 
 // RuntimeInventory implements [InventoryProvider]: every running session,
-// its attachment known.
+// its attachment known, and its activity when one was set.
 func (f FullFake) RuntimeInventory(context.Context) (map[string]InventoryEntry, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	inv := make(map[string]InventoryEntry, len(f.sessions))
 	for name := range f.sessions {
-		inv[name] = InventoryEntry{AttachedKnown: true, Attached: f.Attached[name]}
+		at := f.Activity[name]
+		inv[name] = InventoryEntry{AttachedKnown: true, Attached: f.Attached[name], ActivityKnown: !at.IsZero(), LastActivity: at}
 	}
 	return inv, nil
 }
@@ -341,6 +355,17 @@ func (f FullFake) KillZombieObject(name, _, _, _ string) (SessionObjectKillResul
 // sends nothing and closes with ctx.
 func (f FullFake) SubscribeSessionEvents(ctx context.Context) (<-chan SessionEvent, error) {
 	ch := make(chan SessionEvent)
+	go func() {
+		<-ctx.Done()
+		close(ch)
+	}()
+	return ch, nil
+}
+
+// SubscribeTurnEvents implements [TurnEventProvider]: a stream that sends
+// nothing and closes with ctx.
+func (f FullFake) SubscribeTurnEvents(ctx context.Context) (<-chan TurnEvent, error) {
+	ch := make(chan TurnEvent)
 	go func() {
 		<-ctx.Done()
 		close(ch)

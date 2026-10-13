@@ -24,6 +24,7 @@ var cfg = v2purity.Config{
 	ForbiddenPackages:   []string{"example.com/os"},
 	ForbiddenFuncs:      []string{pkg + ".Now"},
 	ForbiddenInterfaces: []string{pkg + ".Store"},
+	Sealed:              map[string]string{"proof": "mint.go"},
 }
 
 const osSrc = `package os
@@ -96,7 +97,9 @@ func check(t *testing.T, name string, got []string, want string) {
 // package (every implementing type's method), a promoted or embedded
 // interface method, a generic type's method, a variable assigned in init, a
 // function field read (and not a data field), a //gc:pure field and
-// //gc:pure-param parameter as roots, and another package's rules.
+// //gc:pure-param parameter as roots, a //gc:stored-param argument reached
+// only through a read of a field it is stored in, a field an assignment
+// writes (no read of it), and another package's rules.
 func TestPurityRules(t *testing.T) {
 	impure := "\n\nfunc impure() int { return Now() }\n\nfunc clean() int { return 1 }\n"
 	for _, c := range []struct {
@@ -127,6 +130,10 @@ func TestPurityRules(t *testing.T) {
 		{"a field root", "type section struct {\n\t//gc:pure\n\tDecide func() int\n}\n\nvar secs = []section{{Decide: impure}}" + impure, cfg, "but section.Decide is //gc:pure"},
 		{"an unmarked field", "type section struct {\n\tDecide func() int\n}\n\nvar secs = []section{{Decide: impure}}" + impure, cfg, ""},
 		{"a pure parameter", "//gc:pure-param d\nfunc probed(d func() int) int { return 0 }\n\nvar x = probed(impure)" + impure, cfg, "but probed(d) is //gc:pure"},
+		{"a stored parameter whose field is not read", "type sec struct {\n\tclass int\n\tp     func() int\n\tdefs  []any\n}\n\n//gc:stored-param p\nfunc probed(p func() int) sec { return sec{class: 1, p: func() int { return p() }, defs: []any{p}} }\n\nvar secs = []sec{probed(impure)}\n\n" + "//gc:pure\nfunc decide() int { return secs[0].class }" + impure, cfg, ""},
+		{"a stored parameter whose field is read", "type sec struct {\n\tclass int\n\tp     func() int\n\tdefs  []any\n}\n\n//gc:stored-param p\nfunc probed(p func() int) sec { return sec{class: 1, p: func() int { return p() }, defs: []any{p}} }\n\nvar secs = []sec{probed(impure)}\n\n" + "//gc:pure\nfunc decide() int { return secs[0].p() }" + impure, cfg, "(via decide -> p -> probed(p) -> impure)"},
+		{"a stored parameter's other field read", "type sec struct {\n\tclass int\n\tp     func() int\n\tdefs  []any\n}\n\n//gc:stored-param p\nfunc probed(p func() int) sec { return sec{class: 1, p: func() int { return p() }, defs: []any{p}} }\n\nvar secs = []sec{probed(impure)}\n\n" + "//gc:pure\nfunc decide() int { return len(secs[0].defs) }" + impure, cfg, "(via decide -> defs -> probed(p) -> impure)"},
+		{"a field written, not read", "type box struct{ f func() int }\n\nvar b box\n\nfunc init() { b.f = impure }\n\n//gc:pure\nfunc decide() int { b.f = clean; return 1 }" + impure, cfg, ""},
 		{"a promoted embedded interface implementing the call", "type getter interface{ Get() int }\n\ntype wrap struct{ Store }\n\n//gc:pure\nfunc decide(g getter) int { return g.Get() }\n", cfg, "reaches example.com/p.Store.Get"},
 		{"a generic type implementing the call", "type getter interface{ get() int }\n\ntype box[T any] struct{ v T }\n\nfunc (box[T]) get() int { return Now() }\n\n//gc:pure\nfunc decide(g getter) int { return g.get() }\n", cfg, "box.get reaches example.com/p.Now"},
 		{"a registry filled by index", "var reg = map[int]func() int{}\n\nfunc init() { reg[1] = impure }\n\n//gc:pure\nfunc decide() int { return reg[1]() }" + impure, cfg, "(via decide -> reg -> impure)"},
@@ -436,5 +443,62 @@ func TestFactsTravelPastADirectImport(t *testing.T) {
 			}
 		}
 		check(t, name, got, "reaches (example.com/lib3.wall).Now, which reaches example.com/os.Getenv")
+	}
+}
+
+const mint = `package p
+
+type proof struct{ F int }
+
+type plain struct{ F int }
+
+type twin struct{ F int }
+
+func mintProof() *proof { p := &proof{F: 1}; p.F++; return p }
+`
+
+// sealMessages runs cfg over the minting file and file, holding src.
+func sealMessages(t *testing.T, file, src string) []string {
+	t.Helper()
+	var out []string
+	pkgs := []analyzertest.Package{{Path: pkg, Files: map[string]string{"base.go": base, "mint.go": mint, file: "package p\n\n" + src}}}
+	for _, d := range analyzertest.RunGraph(t, v2purity.New(cfg), pkgs) {
+		out = append(out, d.File+":"+strconv.Itoa(d.Line)+": "+d.Message)
+	}
+	return out
+}
+
+// Kills each seal bypass left open: a literal, an alias's literal, an
+// elided literal in a slice, as a map value and as a map key, a conversion
+// from a look-alike struct, new, a var, a field write, an increment, an
+// address-of, a range clause's write, and a write to a field promoted
+// through an embedding struct, outside the minting file; and a finding in
+// the minting file, on another type, on a pointer var, or in a test file.
+func TestSealRules(t *testing.T) {
+	for _, c := range []struct {
+		name, file, src string
+		want            string
+	}{
+		{"literal", "use.go", "func f() proof { return proof{} }\n", "literal of sealed proof outside mint.go"},
+		{"another type's literal", "use.go", "func f() plain { return plain{} }\n", ""},
+		{"alias literal", "use.go", "type alias = proof\n\nfunc f() alias { return alias{} }\n", "literal of sealed proof"},
+		{"elided in a slice", "use.go", "func f() []proof { return []proof{{F: 1}} }\n", "literal of sealed proof"},
+		{"elided as a map value", "use.go", "func f() map[string]*proof { return map[string]*proof{\"a\": {}} }\n", "literal of sealed proof"},
+		{"elided as a map key", "use.go", "func f() map[proof]bool { return map[proof]bool{{}: true} }\n", "literal of sealed proof"},
+		{"conversion", "use.go", "func f(x twin) proof { return proof(x) }\n", "conversion of sealed proof"},
+		{"new", "use.go", "func f() *proof { return new(proof) }\n", "new of sealed proof"},
+		{"var", "use.go", "func f() int { var x proof; return x.F }\n", "var of sealed proof"},
+		{"pointer var", "use.go", "func f() int { var x *proof; _ = x; return 0 }\n", ""},
+		{"field write", "use.go", "func f(p *proof) { p.F = 2 }\n", "field write of sealed proof"},
+		{"another type's field write", "use.go", "func f(p *plain) { p.F = 2 }\n", ""},
+		{"increment", "use.go", "func f(p *proof) { p.F++ }\n", "field write of sealed proof"},
+		{"address-of a field", "use.go", "func f(p *proof) *int { return &p.F }\n", "field write of sealed proof"},
+		{"a range clause's write", "use.go", "func f(p *proof, xs []int) {\n\tfor _, p.F = range xs {\n\t}\n}\n", "field write of sealed proof"},
+		{"a promoted field's write", "use.go", "type wrap struct{ *proof }\n\nfunc f(w wrap) { w.F = 2 }\n", "field write of sealed proof"},
+		{"another embedded type's field", "use.go", "type wrap struct{ *plain }\n\nfunc f(w wrap) { w.F = 2 }\n", ""},
+		{"a test file", "use_test.go", "func f() proof { return proof{} }\n", ""},
+	} {
+		got := sealMessages(t, c.file, c.src)
+		check(t, c.name, got, c.want)
 	}
 }

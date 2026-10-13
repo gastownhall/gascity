@@ -10,8 +10,8 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 744
-baseline_files = 222
+baseline_calls = 748
+baseline_files = 226
 reported_calls = 495
 reported_files = 135
 owner_bead = "ga-cp3hwi"
@@ -23,7 +23,7 @@ expires = "2026-10-31"
 [[audit_baseline]]
 scope = "all"
 resource = "fixed_sleep"
-baseline_calls = 497
+baseline_calls = 495
 baseline_files = 184
 reported_calls = 447
 reported_files = 157
@@ -51,8 +51,8 @@ expires = "2026-10-31"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 496
-baseline_files = 148
+baseline_calls = 500
+baseline_files = 152
 reported_calls = 380
 reported_files = 98
 owner_bead = "ga-cp3hwi"
@@ -64,7 +64,7 @@ expires = "2026-10-31"
 [[debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 319
+baseline_calls = 318
 baseline_files = 123
 reported_calls = 295
 reported_files = 114
@@ -341,6 +341,28 @@ migration_target = "P0.4b"
 expires = "2026-10-31"
 
 [[medium]]
+package_dir = "internal/session"
+package_name = "session"
+owner = "TestNoCityGateFailsTheRun"
+resources = ["subprocess"]
+owner_bead = "ga-cp3hwi"
+invariant = "the no-city gate's self-test is a checked Medium subprocess owner"
+resource_owner = "the probe processes are confined to TestNoCityGateFailsTheRun, which re-execs the test binary on its own probe: the gate decides the exit code of a whole test binary after its last test, so only a real child run shows an undeclared refusal failing a run whose tests all pass"
+migration_target = "P0.4b"
+expires = "2026-10-31"
+
+[[medium]]
+package_dir = "internal/session/sessiontest"
+package_name = "sessiontest_test"
+owner = "TestNoCityRefusalWithoutTheGateExits"
+resources = ["subprocess"]
+owner_bead = "ga-cp3hwi"
+invariant = "the no-city gate's unarmed self-test is a checked Medium subprocess owner"
+resource_owner = "the probe process is confined to TestNoCityRefusalWithoutTheGateExits, which re-execs the test binary on its own probe: a refusal in a binary that does not run the gate exits that binary, so only a real child run shows it failing before its test can pass"
+migration_target = "P0.4b"
+expires = "2026-10-31"
+
+[[medium]]
 package_dir = "scripts"
 package_name = "scripts_test"
 owner = "TestDockerSessionProtocol"
@@ -442,11 +464,33 @@ expires = "2026-10-31"
 [[medium]]
 package_dir = "scripts"
 package_name = "scripts_test"
-owner = "TestCacheZstdProbe"
+owner = "TestBazelNightlyFreshDecision"
+resources = ["subprocess"]
+owner_bead = "ga-cp3hwi"
+invariant = "the nightly fresh-on-drift decision proof is a checked Medium subprocess owner"
+resource_owner = "the bash subprocess per case is confined to TestBazelNightlyFreshDecision, which exists to run bazel-nightly.yml's decide step script against a PATH-injected stub gh (shadow mode, a covered week, a new fingerprint, a key prefix, a PR-scoped cache entry, a dispatch, no canary run, a malformed fingerprint): the decision is shell and gh, so only a real shell run can prove when the nightly re-executes every test and that it fails open to fresh"
+migration_target = "P0.4b"
+expires = "2026-10-31"
+
+[[medium]]
+package_dir = "scripts"
+package_name = "scripts_test"
+owner = "TestCacheProbes"
 resources = ["http_test_server"]
 owner_bead = "ga-cp3hwi"
-invariant = "the anonymous-cache zstd probe's behavior proof is a checked Medium HTTP test server owner"
-resource_owner = "the loopback TLS HTTP/2 servers are confined to TestCacheZstdProbe, which exists to run tools/rbe/cache-zstd-probe.sh against a stand-in rbe-cache GetCapabilities (zstd advertised or not, gRPC and HTTP errors, malformed answers, a timeout): the probe is curl's HTTP/2 and gRPC trailers, so only a real server can prove when fork-cache asks for zstd"
+invariant = "the anonymous-cache probes' behavior proof is a checked Medium HTTP test server owner"
+resource_owner = "the loopback TLS HTTP/2 servers are confined to TestCacheProbes, whose one stand-in rbe-cache runs tools/rbe/cache-zstd-probe.sh (zstd advertised or not) and tools/rbe/cache-rrc-probe.sh (an answer or none, the action cache's and the CAS's NOT_FOUND or not, the kill switch off) through gRPC and HTTP errors, malformed answers and timeouts: the probes are curl's HTTP/2 and gRPC trailers, so only a real server can prove when fork-cache asks for zstd and when fork-cache lanes read the remote repo contents cache"
+migration_target = "P0.4b"
+expires = "2026-10-31"
+
+[[medium]]
+package_dir = "internal/hooks"
+package_name = "hooks"
+owner = "TestProviderPluginNodeSuite"
+resources = ["subprocess"]
+owner_bead = "ga-cp3hwi"
+invariant = "the embedded provider-plugin behavior proof is a checked Medium subprocess owner"
+resource_owner = "the one node subprocess is confined to TestProviderPluginNodeSuite, which exists to run the embedded OpenCode and MiMo Code plugins under node against a GC_BIN fake gc: the plugins are JavaScript the provider loads, so only a real node run can prove the system-prompt shape and the once-per-turn drain they produce"
 migration_target = "P0.4b"
 expires = "2026-10-31"
 
@@ -500,7 +544,7 @@ expires = "2026-10-31"
 [[small_debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 319
+baseline_calls = 318
 baseline_files = 123
 reported_calls = 287
 reported_files = 113

@@ -68,7 +68,7 @@ type census struct {
 
 // batchWriters write a row's metadata from a map argument.
 var batchWriters = map[string]bool{
-	"SetMetadataBatch": true, "CloseWithMetadataIfMatch": true, "CloseWithTerminalPatch": true, "CloseAll": true,
+	"SetMetadataBatch": true, "CloseWithMetadataIfMatch": true, "CommitClose": true, "CloseAll": true,
 	"ApplyPatch": true, "applyStore": true,
 }
 

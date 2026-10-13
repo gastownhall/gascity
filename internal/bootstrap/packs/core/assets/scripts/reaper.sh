@@ -79,6 +79,27 @@ WORKFLOW_ROOT_CLOSE_STATUSES="'open', 'hooked', 'in_progress'"
 WORKFLOW_ROOT_LIVE_STATUSES="'open', 'hooked', 'in_progress', 'blocked', 'deferred', 'pinned', 'review', 'testing'"
 WORKFLOW_ROOT_DESCENDANT_DEP_TYPES="'parent-child', 'tracks', 'blocks'"
 WORKFLOW_ROOT_CLOSE_REASON="stale inactive workflow root auto-closed by reaper"
+# Candidate workflow roots one Step 2 census query checks for descendants.
+# Keep it small: a batch as large as the candidate set walks every candidate's
+# subtree in one query again.
+WORKFLOW_ROOT_BATCH_SIZE="${GC_REAPER_WORKFLOW_ROOT_BATCH_SIZE:-1}"
+if ! [[ "$WORKFLOW_ROOT_BATCH_SIZE" =~ ^[1-9][0-9]*$ ]]; then
+    WORKFLOW_ROOT_BATCH_SIZE=1
+fi
+# Wall-clock window (seconds) for the Step 2 census, so a large census cannot
+# starve the later steps and scopes. It opens at the run's first census and
+# runs on through everything after it: the purge, the later steps and the
+# later scopes spend it too. Once it has closed, each census checks one page.
+WORKFLOW_ROOT_BUDGET_SECS="${GC_REAPER_WORKFLOW_ROOT_BUDGET_SECS:-300}"
+case "$WORKFLOW_ROOT_BUDGET_SECS" in ''|*[!0-9]*) WORKFLOW_ROOT_BUDGET_SECS=300 ;; esac
+WORKFLOW_ROOT_DEADLINE=""
+# Each census starts at a random candidate and wraps around (see
+# reap_workflow_roots). GC_REAPER_WORKFLOW_ROOT_CENSUS_START pins the start to
+# that 0-based position in id order, modulo the candidate count, for tests.
+WORKFLOW_ROOT_CENSUS_START="${GC_REAPER_WORKFLOW_ROOT_CENSUS_START:-}"
+if ! [[ "$WORKFLOW_ROOT_CENSUS_START" =~ ^(0|[1-9][0-9]{0,8})$ ]]; then
+    WORKFLOW_ROOT_CENSUS_START=""
+fi
 STALE_WISP_CLOSE_REASON="stale wisp whose owning parent or root is closed, auto-closed by reaper"
 # Step 3 purges the whole wisps plane (including --no-history rows, which is
 # where gc keeps order-tracking beads) and relies on gc bd purge to keep a closed
@@ -128,7 +149,11 @@ TOTAL_MAIL_WISPS=0
 TOTAL_WORKFLOW_ROOTS_CLOSED=0
 TOTAL_WOULD_CLOSE_WORKFLOW_ROOTS=0
 TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED=0
+# Candidate workflow issue roots in non-city scopes, which Step 2 counts but
+# does not close.
 TOTAL_WORKFLOW_ISSUE_ROOTS_SKIPPED=0
+TOTAL_WORKFLOW_ROOT_CANDIDATES=0
+TOTAL_WORKFLOW_ROOTS_CHECKED=0
 TOTAL_ISSUES_CLOSED=0
 TOTAL_STALE_ISSUES_SKIPPED=0
 TOTAL_EXPIRED_ISSUES_CLOSED=0
@@ -317,7 +342,10 @@ close_ids_by_mode() {
     CLOSE_IDS_FAILED="${failed}${failed:+ }${SCOPE_CHUNK_FAILED_IDS}"
 }
 
-workflow_root_candidates_cte() {
+# workflow_root_candidate_ctes prints the non-recursive CTEs that select the
+# candidate workflow roots: ${candidate_cte}_base (old, unassigned, open
+# topology roots) and $candidate_cte (those whose store ref is local).
+workflow_root_candidate_ctes() {
     local db="$1"
     local candidate_cte="$2"
     local table="$3"
@@ -325,7 +353,7 @@ workflow_root_candidates_cte() {
     local issue_type_exclusions="$5"
 
     cat <<SQL
-        WITH RECURSIVE ${candidate_cte}_base(id) AS (
+${candidate_cte}_base(id) AS (
             SELECT $alias.id FROM \`$db\`.$table $alias
             WHERE $alias.status IN ($WORKFLOW_ROOT_CLOSE_STATUSES)
             AND $alias.issue_type NOT IN ($issue_type_exclusions)
@@ -345,29 +373,60 @@ workflow_root_candidates_cte() {
             WHERE (
 $(workflow_root_store_ref_local_condition "$db" "$alias")
             )
+        )
+SQL
+}
+
+# workflow_root_candidates_cte prints the WITH RECURSIVE clause for one census
+# page: page_limit candidate roots after after_id in id order ('' for the first
+# page, which every id sorts after) and, when until_id is set, up to and
+# including until_id, and the live and recent descendants of those roots only.
+workflow_root_candidates_cte() {
+    local db="$1"
+    local candidate_cte="$2"
+    local table="$3"
+    local alias="$4"
+    local issue_type_exclusions="$5"
+    local page_limit="$6"
+    local after_id="$7"
+    local until_id="${8:-}"
+    local until_condition=""
+
+    if [ -n "$until_id" ]; then
+        until_condition="
+            AND id <= '$until_id'"
+    fi
+    cat <<SQL
+        WITH RECURSIVE $(workflow_root_candidate_ctes "$db" "$candidate_cte" "$table" "$alias" "$issue_type_exclusions"),
+        ${candidate_cte}_page(id) AS (
+            SELECT id
+            FROM $candidate_cte
+            WHERE id > '$after_id'$until_condition
+            ORDER BY id
+            LIMIT $page_limit
         ),
         workflow_descendants(root_id, id) AS (
             SELECT root.id, child_wisp.id
-            FROM $candidate_cte root
+            FROM ${candidate_cte}_page root
             INNER JOIN \`$db\`.wisps child_wisp
                 ON child_wisp.id != root.id
                 AND JSON_UNQUOTE(JSON_EXTRACT(child_wisp.metadata, '$."gc.root_bead_id"')) = root.id
             UNION
             SELECT root.id, child_issue.id
-            FROM $candidate_cte root
+            FROM ${candidate_cte}_page root
             INNER JOIN \`$db\`.issues child_issue
                 ON child_issue.id != root.id
                 AND JSON_UNQUOTE(JSON_EXTRACT(child_issue.metadata, '$."gc.root_bead_id"')) = root.id
             UNION
             SELECT root.id, child_dep.issue_id
-            FROM $candidate_cte root
+            FROM ${candidate_cte}_page root
             INNER JOIN \`$db\`.wisp_dependencies child_dep
                 ON child_dep.type IN ($WORKFLOW_ROOT_DESCENDANT_DEP_TYPES)
                 AND COALESCE(child_dep.depends_on_issue_id, child_dep.depends_on_wisp_id, child_dep.depends_on_external) = root.id
                 AND child_dep.issue_id != root.id
             UNION
             SELECT root.id, child_dep.issue_id
-            FROM $candidate_cte root
+            FROM ${candidate_cte}_page root
             INNER JOIN \`$db\`.dependencies child_dep
                 ON child_dep.type IN ($WORKFLOW_ROOT_DESCENDANT_DEP_TYPES)
                 AND COALESCE(child_dep.depends_on_issue_id, child_dep.depends_on_wisp_id, child_dep.depends_on_external) = root.id
@@ -417,52 +476,208 @@ workflow_root_store_ref_skipped_count_query() {
     local issue_type_exclusions="$5"
 
     cat <<SQL
-$(workflow_root_candidates_cte "$db" "$candidate_cte" "$table" "$alias" "$issue_type_exclusions")
+        WITH $(workflow_root_candidate_ctes "$db" "$candidate_cte" "$table" "$alias" "$issue_type_exclusions")
         SELECT COUNT(*) FROM ${candidate_cte}_base base
         LEFT JOIN $candidate_cte candidate ON candidate.id = base.id
         WHERE candidate.id IS NULL
 SQL
 }
 
-workflow_root_closeable_select() {
-    local candidate_cte="$1"
+workflow_root_candidate_count_query() {
+    local db="$1"
+    local candidate_cte="$2"
+    local table="$3"
+    local alias="$4"
+    local issue_type_exclusions="$5"
 
     cat <<SQL
-        SELECT DISTINCT root.id
-        FROM $candidate_cte root
+        WITH $(workflow_root_candidate_ctes "$db" "$candidate_cte" "$table" "$alias" "$issue_type_exclusions")
+        SELECT COUNT(*) FROM $candidate_cte
+SQL
+}
+
+# workflow_root_candidate_at_query <db> <candidate_cte> <table> <alias>
+# <issue_type_exclusions> <position> selects the id of the candidate root at
+# 0-based position in id order.
+workflow_root_candidate_at_query() {
+    local db="$1"
+    local candidate_cte="$2"
+    local table="$3"
+    local alias="$4"
+    local issue_type_exclusions="$5"
+    local position="$6"
+
+    cat <<SQL
+        WITH $(workflow_root_candidate_ctes "$db" "$candidate_cte" "$table" "$alias" "$issue_type_exclusions")
+        SELECT id FROM $candidate_cte
+        ORDER BY id
+        LIMIT 1 OFFSET $position
+SQL
+}
+
+# workflow_root_page_query <db> <candidate_cte> <table> <alias>
+# <issue_type_exclusions> <page_limit> <after_id> [until_id] selects one census
+# page: each candidate root after after_id (and up to until_id), in id order,
+# with "close" when no descendant is live or recent and "keep" otherwise.
+workflow_root_page_query() {
+    local candidate_cte="$2"
+
+    cat <<SQL
+SELECT id, verdict FROM (
+$(workflow_root_candidates_cte "$@")
+        SELECT root.id AS id,
+            CASE WHEN live.root_id IS NULL AND recent.root_id IS NULL THEN 'close' ELSE 'keep' END AS verdict
+        FROM ${candidate_cte}_page root
         LEFT JOIN roots_with_live_descendants live ON live.root_id = root.id
         LEFT JOIN roots_with_recent_descendants recent ON recent.root_id = root.id
-        WHERE live.root_id IS NULL
-        AND recent.root_id IS NULL
+) workflow_root_page
+ORDER BY id
 SQL
 }
 
-workflow_root_count_query() {
-    local db="$1"
+# close_workflow_roots <wisp|issue> <ids> closes one census page's stale
+# workflow roots. Wisp roots are stamped with the skipped outcome first: a
+# crash between the two verbs leaves an open root that a later census selects
+# again.
+close_workflow_roots() {
+    local kind="$1"
+    local ids="$2"
+    local count
+    local ids_file
+
+    count=$(count_lines "$ids")
+    [ "$count" -gt 0 ] || return 0
+    if [ -n "$DRY_RUN" ]; then
+        TOTAL_WOULD_CLOSE_WORKFLOW_ROOTS=$((TOTAL_WOULD_CLOSE_WORKFLOW_ROOTS + count))
+        return 0
+    fi
+    if [ "$kind" = "wisp" ]; then
+        ids_file=$(mktemp)
+        printf '%s\n' "$ids" >"$ids_file"
+        scope_bd_each_chunk "$VERB_BATCH" "$ids_file" update \
+            --set-metadata "gc.outcome=skipped" \
+            --set-metadata "close_reason=$WORKFLOW_ROOT_CLOSE_REASON"
+        rm -f "$ids_file"
+        if [ "$SCOPE_CHUNK_FAILED" -gt 0 ]; then
+            scope_anomaly "stamping stale workflow wisp roots failed for $SCOPE_CHUNK_FAILED bead(s) in $SCOPE_DB: $(sanitize_output "$SCOPE_CHUNK_ERRORS")"
+        fi
+        [ "$SCOPE_CHUNK_OK" -gt 0 ] || return 0
+    fi
+    close_ids "closing stale inactive workflow $kind roots" "$ids" "$WORKFLOW_ROOT_CLOSE_REASON"
+    TOTAL_WORKFLOW_ROOTS_CLOSED=$((TOTAL_WORKFLOW_ROOTS_CLOSED + CLOSE_IDS_OK))
+}
+
+# reap_workflow_roots <wisp|issue> <candidate_cte> <table> <alias>
+# <issue_type_exclusions> runs the Step 2 census of one kind of workflow root
+# in the current scope. It counts the candidates, then checks them
+# WORKFLOW_ROOT_BATCH_SIZE at a time in id order, so no single query walks the
+# subtrees of every candidate, and closes each page's stale roots before it
+# reads the next: a page's verdicts do not depend on any other page, and a
+# census cut short keeps what it closed. Pages are keyed on the last id read,
+# so closing a page cannot shift the next one. Each census starts at a random
+# candidate, pages to the last one, then wraps around to the first and stops
+# at its start, so censuses that are cut short run after run still reach
+# every candidate: the roots a census keeps cannot pin the next run's census
+# to the same page. A failed count, start lookup or page, or an unreadable row,
+# stops the census with an anomaly; the run budget and the census window stop
+# it with a skipped-scope declaration, and a later run checks what is left.
+WORKFLOW_ROOT_CENSUS_CUT=0
+reap_workflow_roots() {
+    local kind="$1"
     local candidate_cte="$2"
     local table="$3"
     local alias="$4"
     local issue_type_exclusions="$5"
+    local label="workflow $kind root"
+    local candidates
+    local checked=0
+    local pages=0
+    local offset=0
+    local start=""
+    local after=""
+    local until=""
+    local rows
+    local size
 
-    cat <<SQL
-$(workflow_root_candidates_cte "$db" "$candidate_cte" "$table" "$alias" "$issue_type_exclusions")
-        SELECT COUNT(*) FROM (
-$(workflow_root_closeable_select "$candidate_cte")
-        ) closeable_workflow_roots
-SQL
-}
+    if ! get_sql_count "$label candidate" "$(workflow_root_candidate_count_query "$SCOPE_DB" "$candidate_cte" "$table" "$alias" "$issue_type_exclusions")"; then
+        scope_anomaly "$label census incomplete: candidate count failed"
+        return 0
+    fi
+    candidates=$SQL_COUNT_RESULT
+    if [ -z "$WORKFLOW_ROOT_DEADLINE" ]; then
+        WORKFLOW_ROOT_DEADLINE=$(( $(date +%s) + WORKFLOW_ROOT_BUDGET_SECS ))
+    fi
+    if [ "$candidates" -gt 1 ]; then
+        if [ -n "$WORKFLOW_ROOT_CENSUS_START" ]; then
+            offset=$((WORKFLOW_ROOT_CENSUS_START % candidates))
+        else
+            # Random, not derived from the clock: the order runs on a fixed
+            # cooldown, so a clock-derived start could repeat every run.
+            # RANDOM is 15 bits; two draws cover any realistic census.
+            offset=$(( (RANDOM << 15 | RANDOM) % candidates ))
+        fi
+    fi
+    if [ "$offset" -gt 0 ]; then
+        # The census pages on from the candidate just before its start, which
+        # is also where it stops after the wrap. The id becomes a SQL bound.
+        if ! get_sql_rows "$label census start" "$(workflow_root_candidate_at_query "$SCOPE_DB" "$candidate_cte" "$table" "$alias" "$issue_type_exclusions" "$((offset - 1))")"; then
+            scope_anomaly "$label census incomplete: start lookup failed"
+            TOTAL_WORKFLOW_ROOT_CANDIDATES=$((TOTAL_WORKFLOW_ROOT_CANDIDATES + candidates))
+            return 0
+        fi
+        start=$SQL_ROWS_RESULT
+        if ! [[ "$start" =~ ^([A-Za-z0-9._-]+)?$ ]]; then
+            scope_anomaly "$label census stopped at an unreadable start row: $(sanitize_output "$start")"
+            TOTAL_WORKFLOW_ROOT_CANDIDATES=$((TOTAL_WORKFLOW_ROOT_CANDIDATES + candidates))
+            return 0
+        fi
+        after=$start
+    fi
 
-workflow_root_ids_query() {
-    local db="$1"
-    local candidate_cte="$2"
-    local table="$3"
-    local alias="$4"
-    local issue_type_exclusions="$5"
-
-    cat <<SQL
-$(workflow_root_candidates_cte "$db" "$candidate_cte" "$table" "$alias" "$issue_type_exclusions")
-$(workflow_root_closeable_select "$candidate_cte")
-SQL
+    while [ "$checked" -lt "$candidates" ]; do
+        run_budget_exhausted && break
+        if [ "$pages" -gt 0 ] && [ "$(date +%s)" -ge "$WORKFLOW_ROOT_DEADLINE" ]; then
+            if [ "$WORKFLOW_ROOT_CENSUS_CUT" -eq 0 ]; then
+                WORKFLOW_ROOT_CENSUS_CUT=1
+                order_outcome_scope_skipped "$SCOPE_LABEL" "workflow-root census remains after this run's census budget"
+            fi
+            break
+        fi
+        if ! get_sql_rows "$label page after ${after:-the first root}" "$(workflow_root_page_query "$SCOPE_DB" "$candidate_cte" "$table" "$alias" "$issue_type_exclusions" "$WORKFLOW_ROOT_BATCH_SIZE" "$after" "$until")"; then
+            scope_anomaly "$label census incomplete: page after ${after:-the first root} failed"
+            break
+        fi
+        rows=$SQL_ROWS_RESULT
+        # The last id becomes the next page's SQL cursor, so every row must be
+        # a bead id and a verdict.
+        if printf '%s\n' "$rows" | awk -F, 'NF && (NF != 2 || $1 !~ /^[A-Za-z0-9._-]+$/ || ($2 != "close" && $2 != "keep")) { bad = 1 } END { exit !bad }'; then
+            scope_anomaly "$label census stopped at an unreadable page row after ${after:-the first root}: $(sanitize_output "$rows")"
+            break
+        fi
+        size=$(count_lines "$rows")
+        close_workflow_roots "$kind" "$(printf '%s\n' "$rows" | awk -F, '$2 == "close" { print $1 }')"
+        checked=$((checked + size))
+        pages=$((pages + 1))
+        if [ -n "$start" ] && [ -z "$until" ] &&
+            { [ "$size" -lt "$WORKFLOW_ROOT_BATCH_SIZE" ] || [ "$checked" -ge $((candidates - offset)) ]; }; then
+            # The census reached the last candidate: wrap around to the first.
+            after=""
+            until=$start
+            continue
+        fi
+        if [ "$size" -lt "$WORKFLOW_ROOT_BATCH_SIZE" ]; then
+            # The page ran out of candidates (after the wrap, it reached the
+            # start): the census is complete.
+            candidates=$checked
+            break
+        fi
+        after=$(printf '%s\n' "$rows" | tail -n 1 | cut -d, -f1)
+    done
+    # A root that aged into the candidates after the count is checked and
+    # counted if its page is read; otherwise the next run's count picks it up.
+    [ "$checked" -le "$candidates" ] || candidates=$checked
+    TOTAL_WORKFLOW_ROOT_CANDIDATES=$((TOTAL_WORKFLOW_ROOT_CANDIDATES + candidates))
+    TOTAL_WORKFLOW_ROOTS_CHECKED=$((TOTAL_WORKFLOW_ROOTS_CHECKED + checked))
 }
 
 # stale_wisp_subtree_query selects, for Step 1, every stale open wisp whose
@@ -671,55 +886,27 @@ reap_scope() {
     # gc.root_store_ref for another store are skipped; cross-store subtrees
     # need cross-store traversal before reaping can be safe. Wisp roots are
     # closed in every scope; issue roots are city issues and close only in the
-    # city scope.
+    # city scope, so other scopes only count them. reap_workflow_roots closes
+    # each census page's stale roots as it goes; the census window leaves time
+    # for the later steps and scopes, and each census starts at a random
+    # candidate, so the censuses it cuts short still reach every root.
+    WORKFLOW_ROOT_CENSUS_CUT=0
     if get_sql_count "workflow wisp roots skipped by root store ref" "$(workflow_root_store_ref_skipped_count_query "$DB" "workflow_wisp_root_candidates" "wisps" "w" "'message'")"; then
         TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED=$((TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED + SQL_COUNT_RESULT))
     fi
+    reap_workflow_roots wisp "workflow_wisp_root_candidates" "wisps" "w" "'message'"
 
-    if get_sql_rows "stale inactive workflow wisp root" "$(workflow_root_ids_query "$DB" "workflow_wisp_root_candidates" "wisps" "w" "'message'")"; then
-        ids=$SQL_ROWS_RESULT
-        count=$(count_lines "$ids")
-        if [ "$count" -gt 0 ]; then
-            if [ -n "$DRY_RUN" ]; then
-                TOTAL_WOULD_CLOSE_WORKFLOW_ROOTS=$((TOTAL_WOULD_CLOSE_WORKFLOW_ROOTS + count))
-            else
-                # Stamp the skipped outcome first: a crash between the two
-                # verbs leaves an open root that the next run selects again.
-                local ids_file
-                ids_file=$(mktemp)
-                printf '%s\n' "$ids" >"$ids_file"
-                scope_bd_each_chunk "$VERB_BATCH" "$ids_file" update \
-                    --set-metadata "gc.outcome=skipped" \
-                    --set-metadata "close_reason=$WORKFLOW_ROOT_CLOSE_REASON"
-                rm -f "$ids_file"
-                if [ "$SCOPE_CHUNK_FAILED" -gt 0 ]; then
-                    scope_anomaly "stamping stale workflow wisp roots failed for $SCOPE_CHUNK_FAILED bead(s) in $DB: $(sanitize_output "$SCOPE_CHUNK_ERRORS")"
-                fi
-                if [ "$SCOPE_CHUNK_OK" -gt 0 ]; then
-                    close_ids "closing stale inactive workflow wisp roots" "$ids" "$WORKFLOW_ROOT_CLOSE_REASON"
-                    TOTAL_WORKFLOW_ROOTS_CLOSED=$((TOTAL_WORKFLOW_ROOTS_CLOSED + CLOSE_IDS_OK))
-                fi
-            fi
-        fi
-    fi
+    run_budget_exhausted && return 0
 
     if get_sql_count "workflow issue roots skipped by root store ref" "$(workflow_root_store_ref_skipped_count_query "$DB" "workflow_issue_root_candidates" "issues" "i" "'message', 'epic'")"; then
         TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED=$((TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED + SQL_COUNT_RESULT))
     fi
-
-    if get_sql_rows "stale inactive workflow issue root" "$(workflow_root_ids_query "$DB" "workflow_issue_root_candidates" "issues" "i" "'message', 'epic'")"; then
-        ids=$SQL_ROWS_RESULT
-        count=$(count_lines "$ids")
-        if [ "$count" -gt 0 ]; then
-            if [ "$SCOPE_KIND" != "city" ]; then
-                TOTAL_WORKFLOW_ISSUE_ROOTS_SKIPPED=$((TOTAL_WORKFLOW_ISSUE_ROOTS_SKIPPED + count))
-            elif [ -n "$DRY_RUN" ]; then
-                TOTAL_WOULD_CLOSE_WORKFLOW_ROOTS=$((TOTAL_WOULD_CLOSE_WORKFLOW_ROOTS + count))
-            else
-                close_ids "closing stale inactive workflow issue roots" "$ids" "$WORKFLOW_ROOT_CLOSE_REASON"
-                TOTAL_WORKFLOW_ROOTS_CLOSED=$((TOTAL_WORKFLOW_ROOTS_CLOSED + CLOSE_IDS_OK))
-            fi
+    if [ "$SCOPE_KIND" != "city" ]; then
+        if get_sql_count "workflow issue root candidate" "$(workflow_root_candidate_count_query "$DB" "workflow_issue_root_candidates" "issues" "i" "'message', 'epic'")"; then
+            TOTAL_WORKFLOW_ISSUE_ROOTS_SKIPPED=$((TOTAL_WORKFLOW_ISSUE_ROOTS_SKIPPED + SQL_COUNT_RESULT))
         fi
+    else
+        reap_workflow_roots issue "workflow_issue_root_candidates" "issues" "i" "'message', 'epic'"
     fi
 
     run_budget_exhausted && return 0
@@ -1234,14 +1421,22 @@ if [ "$TOTAL_SCOPES" -eq 0 ]; then
 fi
 order_outcome_write
 
-# Report.
+# Report. Only a measured age (age=<seconds>s) is normalized out of the
+# fingerprint, so a stale backup that merely grows older stays one incident
+# while a change of state (age=absent, age=unparseable) notifies at once. A
+# clean run resolves the incident so its next occurrence notifies at once.
 if [ -n "$ANOMALIES" ]; then
+    ANOMALY_FINGERPRINT=$(printf '%s' "$ANOMALIES" | sed -E 's/age=[0-9]+s/age=<dynamic>/g')
     "$ESCALATE_SCRIPT" \
         --subject "ESCALATION: Reaper anomalies detected [MEDIUM]" \
-        --message "$ANOMALIES" 2>/dev/null || true
+        --message "$ANOMALIES" \
+        --incident-key "reaper:anomalies" \
+        --fingerprint "$ANOMALY_FINGERPRINT" 2>/dev/null || true
+else
+    "$ESCALATE_SCRIPT" --resolve-incident "reaper:anomalies" >/dev/null || true
 fi
 
-SUMMARY="reaper — scopes:$TOTAL_SCOPES, stale_wisps:$TOTAL_STALE_WISPS, closed_wisps:$TOTAL_CLOSED_WISPS, held_wisps:$TOTAL_HELD_WISPS, workflow_roots:$TOTAL_WORKFLOW_ROOTS_CLOSED, skipped_cross_store_workflow_roots:$TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED, skipped_non_city_workflow_issue_roots:$TOTAL_WORKFLOW_ISSUE_ROOTS_SKIPPED, purged:$TOTAL_PURGED, sessions-pruned:$TOTAL_SESSIONS_PRUNED, closed:$TOTAL_ISSUES_CLOSED, expired:$TOTAL_EXPIRED_ISSUES_CLOSED, expired_skipped:$TOTAL_EXPIRED_ISSUES_SKIPPED, skipped_non_city_issues:$TOTAL_STALE_ISSUES_SKIPPED, mail_wisps:$TOTAL_MAIL_WISPS"
+SUMMARY="reaper — scopes:$TOTAL_SCOPES, stale_wisps:$TOTAL_STALE_WISPS, closed_wisps:$TOTAL_CLOSED_WISPS, held_wisps:$TOTAL_HELD_WISPS, workflow_roots:$TOTAL_WORKFLOW_ROOTS_CLOSED, workflow_root_census:$TOTAL_WORKFLOW_ROOTS_CHECKED/$TOTAL_WORKFLOW_ROOT_CANDIDATES, skipped_cross_store_workflow_roots:$TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED, skipped_non_city_workflow_issue_roots:$TOTAL_WORKFLOW_ISSUE_ROOTS_SKIPPED, purged:$TOTAL_PURGED, sessions-pruned:$TOTAL_SESSIONS_PRUNED, closed:$TOTAL_ISSUES_CLOSED, expired:$TOTAL_EXPIRED_ISSUES_CLOSED, expired_skipped:$TOTAL_EXPIRED_ISSUES_SKIPPED, skipped_non_city_issues:$TOTAL_STALE_ISSUES_SKIPPED, mail_wisps:$TOTAL_MAIL_WISPS"
 if [ -n "$DRY_RUN" ]; then
     SUMMARY="$SUMMARY, would_close_wisps:$TOTAL_WOULD_CLOSE_WISPS, would_close_workflow_roots:$TOTAL_WOULD_CLOSE_WORKFLOW_ROOTS, would_purge:$TOTAL_WOULD_PURGE, would_expire:$TOTAL_WOULD_EXPIRE (dry run)"
 fi

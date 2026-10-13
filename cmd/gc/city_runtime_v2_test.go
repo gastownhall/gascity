@@ -442,7 +442,7 @@ func TestCityRuntimeV2ReloadReplyAfterPublish(t *testing.T) {
 	rt.publishEnv()
 	doneCh := cr.activeReload.doneCh
 	var amendGen uint64
-	rt.softReload = func(intent reloadIntent, r *reloadControlReply) {
+	rt.softReload = func(_ context.Context, intent reloadIntent, r *reloadControlReply) {
 		amendGen = rt.env.Load().Gen
 		v2SoftReloadUnavailable(intent, r)
 	}
@@ -613,9 +613,10 @@ func TestCityRuntimeV2PanicInMaintenanceTickLeavesPlannerRunning(t *testing.T) {
 	}
 }
 
-// Kills: a soft reload under v2 answered as if drift acceptance ran (a
-// silent zero), or not answered (MAINT-025 is off until C7c). The reply
-// applies and says acceptance is unavailable; no session row is rewritten.
+// Kills: a soft reload under a trace-only v2 answered as if drift
+// acceptance ran (a silent zero), or not answered: no effect writes the
+// rows (acceptSoftReload). The reply applies and says acceptance is
+// unavailable; no session row is rewritten.
 func TestCityRuntimeV2SoftReloadRepliesUnavailable(t *testing.T) {
 	cr, store := newPhaseFixtureRuntime(t, true, false)
 	attachTestV2(t, cr)
@@ -1262,6 +1263,33 @@ func TestV2BindHostAfterStartPanics(t *testing.T) {
 	rt.bindHost(cr.newPlannerHost())
 }
 
+// Kills a planner whose effects never see the endpoint breaker (C5a1): the
+// host hands gather and the start effect the controller's own guard.
+func TestV2HostSharesEndpointCapacityGuard(t *testing.T) {
+	cr, _ := newPhaseFixtureRuntime(t, false, false)
+	h := cr.newPlannerHost()
+	if h.gather.Capacity == nil || h.gather.Capacity() == nil || h.gather.Capacity() != cr.ensureEndpointCapacityGuard() {
+		t.Fatal("the planner host does not share the controller's endpoint capacity guard")
+	}
+}
+
+// Kills the host leaving the template resolver out, which refuses every v2
+// start template-unresolved (C5a1-wire): the host's resolver resolves a
+// configured row and installs through its generation's params.
+func TestV2HostResolvesTemplates(t *testing.T) {
+	cr, _ := newPhaseFixtureRuntime(t, false, false)
+	h := cr.newPlannerHost()
+	if h.gather.Templates == nil {
+		t.Fatal("the planner host builds no template resolver")
+	}
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}, Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
+	r := h.gather.Templates(&reconcileEnv{Gen: 1, Cfg: cfg, SP: runtime.NewFake()}, time.Now())
+	res := r.Resolve(session.Info{ID: "gc-1", Template: "worker", SessionNameMetadata: "worker"})
+	if res.Err != nil || res.TP.SessionName != "worker" || res.Agent == nil || res.Agent.QualifiedName() != "worker" || r.Install == nil {
+		t.Fatalf("resolution %+v (agent %v, err %v), installer set %v; want worker resolved with an installer", res.TP, res.Agent, res.Err, r.Install != nil)
+	}
+}
+
 // Kills: the city runtime's reload drift judging admission without the
 // environment its controller latched with (mdrift-noenv). A legacy
 // controller latched with the developer override does not warn that a v2
@@ -1377,8 +1405,8 @@ func TestV2MaintenanceTraceRecordsReconcilePass(t *testing.T) {
 func TestV2LegacySessionEntriesReportedInTrace(t *testing.T) {
 	cr, _ := newPhaseFixtureRuntime(t, false, true)
 	attachTestV2(t, cr)
-	cr.beadReconcileTick(context.Background(), DesiredStateResult{}, nil, nil, false) // refused and counted
-	cr.controlDispatcherTick(context.Background())                                    // refused and counted
+	cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), DesiredStateResult{}, nil, nil, false) // refused and counted
+	cr.controlDispatcherTick(context.Background())                                                                // refused and counted
 	runFixtureTick(cr, "patrol")
 	recs := passRecords(closeTrace(t, cr))
 	if len(recs) != 1 {
@@ -1569,5 +1597,41 @@ func TestPlannerDoesNotReferenceCityRuntime(t *testing.T) {
 	}
 	if len(bad) > 0 {
 		t.Fatalf("planner code must reach the city only through plannerHost and the published env (F2):\n  %s", strings.Join(bad, "\n  "))
+	}
+}
+
+// Kills a shutdown mode the effects never see (#7592 review): an installed
+// planner's executor reports the city's preserve-sessions shutdown, so it
+// cancels with errEffectShutdown only then.
+func TestV2ExecutorSeesThePreserveSessionsShutdown(t *testing.T) {
+	cr, _ := newPhaseFixtureRuntime(t, false, false)
+	rt := newDefaultPlanner(io.Discard)
+	cr.installPlanner(rt)
+	if rt.exec.preserve() {
+		t.Fatal("the executor reports a preserve-sessions shutdown before one began")
+	}
+	cr.preserveSessionsOnShutdown()
+	if !rt.exec.preserve() {
+		t.Fatal("the executor does not see the city's preserve-sessions shutdown")
+	}
+}
+
+// Kills the v2 stranded-work detector never running: the controller's one
+// alerter reaches the planner host and the planner (A21's close cascade
+// strands through it), and the started lane's orphan-release step holds it
+// (D25, D26).
+func TestV2LaneHoldsTheControllersStrandedAlerter(t *testing.T) {
+	cr, _ := newPhaseFixtureRuntime(t, false, false)
+	rt := attachTestV2(t, cr)
+	if rt.host.stranded == nil || rt.host.stranded != cr.strandedClaimAlerter() {
+		t.Fatalf("host alerter = %p, want the controller's %p", rt.host.stranded, cr.strandedClaimAlerter())
+	}
+	if rt.planner.stranded != cr.strandedClaimAlerter() {
+		t.Fatal("the planner does not hold the controller's alerter")
+	}
+	rt.publishEnv()
+	rt.start(context.Background())
+	if lane := rt.lane.Load(); lane == nil || lane.stranded != cr.strandedClaimAlerter() {
+		t.Fatal("the started lane does not hold the controller's alerter")
 	}
 }

@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -227,6 +229,106 @@ func TestAgentListUnlimitedImportedPoolDiscovery(t *testing.T) {
 	}
 }
 
+// gc init writes an agent with no max_active_sessions plus a [[named_session]]
+// for it. That template is pool-shaped, and instance discovery only matches
+// "<name>-" sessions, so the named session has to reach the roster from
+// config, running or not. A routed-work instance of the template is live
+// here, so the roster is not empty and the configured-pool fallback cannot
+// stand in for the named session.
+func TestAgentListIncludesOwnNamedSessionOfUnlimitedTemplate(t *testing.T) {
+	for _, running := range []bool{true, false} {
+		t.Run(fmt.Sprintf("running=%v", running), func(t *testing.T) {
+			state := newFakeState(t)
+			initCfg := config.DefaultCity(state.cityName)
+			state.cfg.Agents = initCfg.Agents
+			state.cfg.NamedSessions = initCfg.NamedSessions
+			identity := initCfg.NamedSessions[0].QualifiedName()
+			instance := identity + "-1"
+			live := []string{instance}
+			if running {
+				live = append(live, identity)
+			}
+			for _, qn := range live {
+				if err := state.sp.Start(context.Background(), agentSessionName(state.cityName, qn, ""), runtime.Config{}); err != nil {
+					t.Fatalf("start session for %s: %v", qn, err)
+				}
+			}
+			srv := New(state)
+			h := newTestCityHandlerWith(t, state, srv)
+
+			req := httptest.NewRequest("GET", cityURL(state, "/agents"), nil)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+			}
+			var resp struct {
+				Items []agentResponse `json:"items"`
+				Total int             `json:"total"`
+			}
+			if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if resp.Total != 2 {
+				t.Fatalf("Total = %d, want 2: named session %s and instance %s (items=%+v)", resp.Total, identity, instance, resp.Items)
+			}
+			byName := make(map[string]agentResponse, len(resp.Items))
+			for _, item := range resp.Items {
+				byName[item.Name] = item
+			}
+			item, ok := byName[identity]
+			if !ok {
+				t.Fatalf("no row for named session %s (items=%+v)", identity, resp.Items)
+			}
+			if item.Running != running {
+				t.Errorf("%s Running = %v, want %v", identity, item.Running, running)
+			}
+			if item.Pool != identity {
+				t.Errorf("%s Pool = %q, want %q, matching GET /agent/%s", identity, item.Pool, identity, identity)
+			}
+			if inst, ok := byName[instance]; !ok || !inst.Running {
+				t.Errorf("instance %s = %+v (listed=%v), want a running row", instance, inst, ok)
+			}
+		})
+	}
+}
+
+// A failed session listing leaves the template's instances unknown, but its
+// own named session comes from config: the roster keeps that row and names
+// the failure in partial_errors rather than dropping the agent.
+func TestAgentListKeepsOwnNamedSessionWhenListingFails(t *testing.T) {
+	state := newFakeState(t)
+	state.sp = runtime.NewFailFake()
+	initCfg := config.DefaultCity(state.cityName)
+	state.cfg.Agents = initCfg.Agents
+	state.cfg.NamedSessions = initCfg.NamedSessions
+	identity := initCfg.NamedSessions[0].QualifiedName()
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/agents"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var resp struct {
+		Items         []agentResponse `json:"items"`
+		PartialErrors []string        `json:"partial_errors"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !slices.ContainsFunc(resp.PartialErrors, func(e string) bool { return strings.HasPrefix(e, "agent "+identity+": ") }) {
+		t.Fatalf("partial_errors = %v, want an entry naming agent %s", resp.PartialErrors, identity)
+	}
+	if !slices.ContainsFunc(resp.Items, func(item agentResponse) bool { return item.Name == identity }) {
+		t.Fatalf("no row for named session %s beside the listing error (items=%+v)", identity, resp.Items)
+	}
+}
+
 func TestFindAgentUnlimitedPoolMember(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
@@ -265,7 +367,7 @@ func TestFindAgentCanonicalSingletonPoolRejectsSuffix(t *testing.T) {
 	if _, ok := findAgent(cfg, "myrig/worker-1"); ok {
 		t.Fatal("findAgent(myrig/worker-1) = true, want false for canonical singleton pool")
 	}
-	expanded := expandAgent(cfg.Agents[0], "city", "", nil)
+	expanded := expandAgent(cfg.Agents[0], "city", "", nil, nil)
 	if len(expanded) != 1 {
 		t.Fatalf("expandAgent() returned %d entries, want 1", len(expanded))
 	}
@@ -283,7 +385,7 @@ func TestExpandAgentDisabledAgentUsesConfiguredIdentity(t *testing.T) {
 	if isMultiSessionAgent(cfg.Agents[0]) {
 		t.Fatal("isMultiSessionAgent(max=0) = true, want false")
 	}
-	expanded := expandAgent(cfg.Agents[0], "city", "", nil)
+	expanded := expandAgent(cfg.Agents[0], "city", "", nil, nil)
 	if len(expanded) != 1 {
 		t.Fatalf("expandAgent() returned %d entries, want 1", len(expanded))
 	}
@@ -292,6 +394,58 @@ func TestExpandAgentDisabledAgentUsesConfiguredIdentity(t *testing.T) {
 	}
 	if expanded[0].pool != "" {
 		t.Fatalf("expandAgent()[0].pool = %q, want empty", expanded[0].pool)
+	}
+}
+
+func TestExpandAgentListsOwnNamedSessionOfPool(t *testing.T) {
+	coordinator := config.Agent{Name: "coordinator"}
+	ownNamed := []config.NamedSession{{Template: "coordinator", Mode: "always"}}
+	tests := []struct {
+		name    string
+		agent   config.Agent
+		named   []config.NamedSession
+		running []string
+		noSP    bool
+		want    []string
+	}{
+		{name: "unlimited with nothing running", agent: coordinator, named: ownNamed, want: []string{"coordinator"}},
+		{
+			name: "unlimited keeps discovered instances", agent: coordinator, named: ownNamed,
+			running: []string{"coordinator", "coordinator-gc-7"},
+			want:    []string{"coordinator", "coordinator-gc-7"},
+		},
+		{
+			name: "explicit pool settings are left alone", agent: config.Agent{Name: "coordinator", MaxActiveSessions: intPtr(-1)}, named: ownNamed,
+			running: []string{"coordinator-gc-7"},
+			want:    []string{"coordinator-gc-7"},
+		},
+		{name: "no session provider lists it once", agent: coordinator, named: ownNamed, noSP: true, want: []string{"coordinator"}},
+		{
+			name:  "imported rig agent",
+			agent: config.Agent{Name: "refinery", Dir: "myrig", BindingName: "gs"},
+			named: []config.NamedSession{{Template: "refinery", Dir: "myrig", BindingName: "gs"}},
+			want:  []string{"myrig/gs.refinery"},
+		},
+		{name: "named session under another identity", agent: coordinator, named: []config.NamedSession{{Name: "lead", Template: "coordinator"}}},
+		{name: "no named session", agent: coordinator, running: []string{"coordinator-gc-7"}, want: []string{"coordinator-gc-7"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var sp sessionLister
+			if !tt.noSP {
+				sp = partialAgentSessionLister{running: tt.running}
+			}
+			var names []string
+			for _, ea := range expandAgent(tt.agent, "city", "", sp, tt.named) {
+				names = append(names, ea.qualifiedName)
+				if ea.pool != tt.agent.QualifiedName() {
+					t.Errorf("%s: pool = %q, want %q", ea.qualifiedName, ea.pool, tt.agent.QualifiedName())
+				}
+			}
+			if !slices.Equal(names, tt.want) {
+				t.Fatalf("expandAgent() = %v, want %v", names, tt.want)
+			}
+		})
 	}
 }
 

@@ -16,9 +16,9 @@ import (
 // when none is live).
 type InboundResult struct {
 	Message         ExternalInboundMessage
-	Binding         *SessionBindingRecord
-	GroupRoute      *GroupRouteDecision
-	TranscriptEntry *ConversationTranscriptRecord
+	Binding         *SessionBindingRecord         `json:"Binding,omitempty"`
+	GroupRoute      *GroupRouteDecision           `json:"GroupRoute,omitempty"`
+	TranscriptEntry *ConversationTranscriptRecord `json:"TranscriptEntry,omitempty"`
 	TargetSessionID string
 	TargetAgentName string
 }

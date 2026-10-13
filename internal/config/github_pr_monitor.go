@@ -32,6 +32,14 @@ type GitHubPRMonitor struct {
 	BaseBranches []string `toml:"base_branches" jsonschema:"required"`
 	// Rig is the Gas City rig that owns repair work for this repository.
 	Rig string `toml:"rig" jsonschema:"required"`
+	// Authors is an optional fail-closed allow-list of GitHub author logins.
+	// When empty, the monitor acts on every open PR against the monitored
+	// repo/base branches (the historical behavior). When non-empty, the monitor
+	// acts ONLY on PRs whose author login exactly (case-sensitively) matches an
+	// allowed value; a PR with an unresolved or empty author is skipped. This
+	// lets an operator scope the native monitor to their own PRs so it cannot
+	// mint repair beads for other contributors' pull requests.
+	Authors []string `toml:"authors,omitempty"`
 	// Notify lists session or mail recipients for readiness notifications.
 	Notify []string `toml:"notify,omitempty"`
 	// RepairRoute is the operator-supplied route target for repair work.
@@ -52,6 +60,27 @@ type GitHubPRMonitor struct {
 	// MergeQueuePolicy controls merge-queue signal handling. Empty defaults
 	// to "observe"; valid values are "ignore", "observe", and "repair".
 	MergeQueuePolicy string `toml:"merge_queue,omitempty" jsonschema:"enum=ignore,enum=observe,enum=repair"`
+}
+
+// AllowedAuthorSet returns the trimmed, deduped set of allowed author logins
+// for this monitor. Keys are compared case-sensitively at enforcement time. An
+// empty result means "no author restriction" (act on all PRs); a non-empty
+// result means the monitor is fail-closed to exactly these logins.
+func (m GitHubPRMonitor) AllowedAuthorSet() map[string]bool {
+	if len(m.Authors) == 0 {
+		return nil
+	}
+	set := make(map[string]bool, len(m.Authors))
+	for _, login := range m.Authors {
+		login = strings.TrimSpace(login)
+		if login != "" {
+			set[login] = true
+		}
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	return set
 }
 
 // MergeQueuePolicyOrDefault returns the normalized merge-queue policy.
@@ -150,6 +179,11 @@ func ValidateGitHubPRMonitors(cfg *City) error {
 		for _, recipient := range monitor.Notify {
 			if strings.TrimSpace(recipient) == "" {
 				return fmt.Errorf("%s %q: notify contains an empty recipient", ctx, name)
+			}
+		}
+		for _, login := range monitor.Authors {
+			if strings.TrimSpace(login) == "" {
+				return fmt.Errorf("%s %q: authors contains an empty login", ctx, name)
 			}
 		}
 		if envName := strings.TrimSpace(monitor.WebhookSecretEnv); envName != "" && !envVarName.MatchString(envName) {

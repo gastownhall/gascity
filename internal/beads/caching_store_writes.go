@@ -81,10 +81,17 @@ func (c *CachingStore) Update(id string, opts UpdateOpts) error {
 		return nil
 	}
 	startSeq := c.currentMutationSeq()
+	var generation uint64
+	if updateCloses(opts) {
+		generation = c.beginCloseIntent(id)
+	}
 	if err := c.backing.Update(id, opts); err != nil {
+		if updateCloses(opts) {
+			c.endCloseIntent(id, generation)
+		}
 		return err
 	}
-	c.absorbUpdate(id, opts, startSeq)
+	c.absorbUpdate(id, opts, startSeq, generation)
 	return nil
 }
 
@@ -100,7 +107,14 @@ func (c *CachingStore) UpdateIfAssignment(id, expectedStatus, expectedAssignee s
 		return false, ErrConditionalWriteUnsupported
 	}
 	startSeq := c.currentMutationSeq()
+	var generation uint64
+	if updateCloses(opts) {
+		generation = c.beginCloseIntent(id)
+	}
 	updated, err := updater.UpdateIfAssignment(id, expectedStatus, expectedAssignee, opts)
+	if (err != nil || !updated) && updateCloses(opts) {
+		c.endCloseIntent(id, generation)
+	}
 	switch {
 	case err != nil:
 		return false, err
@@ -108,22 +122,32 @@ func (c *CachingStore) UpdateIfAssignment(id, expectedStatus, expectedAssignee s
 		c.evictForConditionalWrite(id)
 		return false, nil
 	}
-	c.absorbUpdate(id, opts, startSeq)
+	c.absorbUpdate(id, opts, startSeq, generation)
 	return true, nil
 }
 
 // absorbUpdate refreshes the cached row for id after opts landed on the
-// backing store, starting from the backing's authoritative row.
-func (c *CachingStore) absorbUpdate(id string, opts UpdateOpts, startSeq uint64) {
+// backing store, starting from the backing's authoritative row. generation is
+// the close generation of a closing update's intent (beginCloseIntent).
+func (c *CachingStore) absorbUpdate(id string, opts UpdateOpts, startSeq, generation uint64) {
 	fresh, err := c.backing.Get(id)
 	c.mu.Lock()
+	// Every branch below claims (or declines) the close under this lock, so
+	// the intent can end here; a close announced elsewhere meanwhile is not
+	// claimed (claimCloseIntentLocked).
+	announcedElsewhere := updateCloses(opts) && c.endCloseIntentLocked(id, generation)
+	if opts.Status != nil && !updateCloses(opts) {
+		// A reopen spelled as an update starts a new close generation even
+		// when it installs nothing (noteNotClosedLocked).
+		c.noteNotClosedLocked(id)
+	}
 	raced := c.racedWriteLocked(id, startSeq)
 	if errors.Is(err, ErrNotFound) {
 		closed, notifyClosed := c.patchedCachedRowLocked(id, func(b *Bead) { setBeadStatus(b, "closed") })
 		// Only a held row's close is announced, once: a held row already
 		// closed was announced by whoever installed it, unless a read queued
 		// that close and has not drained it yet.
-		notifyClosed = notifyClosed && c.claimCloseLocked(id, false, raced)
+		notifyClosed = notifyClosed && !announcedElsewhere && c.claimCloseLocked(id, false, raced)
 		if !raced {
 			seq := c.noteLocalMutationLocked(id)
 			c.tombstoneLocked(id, seq)
@@ -144,7 +168,7 @@ func (c *CachingStore) absorbUpdate(id string, opts UpdateOpts, startSeq uint64)
 		patched, found := c.patchedCachedRowLocked(id, func(b *Bead) { *b = applyUpdateOptsToBead(*b, opts) })
 		eventType := "bead.updated"
 		if found {
-			eventType = c.updateEventTypeLocked(id, patched, opts, raced)
+			eventType = c.updateEventTypeLocked(id, patched, opts, generation, announcedElsewhere, raced)
 		}
 		if !raced {
 			c.noteLocalMutationLocked(id)
@@ -171,14 +195,14 @@ func (c *CachingStore) absorbUpdate(id string, opts UpdateOpts, startSeq uint64)
 	}
 	if raced {
 		// Notify with the backing's row, not the write laid over it.
-		eventType := c.updateEventTypeLocked(id, fresh, opts, true)
+		eventType := c.updateEventTypeLocked(id, fresh, opts, generation, announcedElsewhere, true)
 		c.updateStatsLocked()
 		c.mu.Unlock()
 		c.notifyChange(ChangeLocal, eventType, fresh)
 		return
 	}
 	fresh = applyUpdateOptsToBead(fresh, opts)
-	eventType := c.updateEventTypeLocked(id, fresh, opts, false)
+	eventType := c.updateEventTypeLocked(id, fresh, opts, generation, announcedElsewhere, false)
 	c.noteLocalMutationLocked(id)
 	c.absorbFreshLocked(id, fresh, c.clockNow(), absorbOpts{
 		depsMode:       depsFromFieldsIfCarried,
@@ -395,7 +419,9 @@ func (c *CachingStore) Close(id string) error {
 		return nil
 	}
 	startSeq := c.currentMutationSeq()
+	generation := c.beginCloseIntent(id)
 	if err := c.backing.Close(id); err != nil {
+		c.endCloseIntent(id, generation)
 		return err
 	}
 
@@ -416,6 +442,9 @@ func (c *CachingStore) Close(id string) error {
 	}
 
 	c.mu.Lock()
+	// The claim below runs under this same lock; a close announced elsewhere
+	// while this one was in flight is not claimed (claimCloseIntentLocked).
+	announcedElsewhere := c.endCloseIntentLocked(id, generation)
 	// A fenced close installs nothing but still notifies the closed row, as
 	// an unfenced one does: the close committed either way.
 	raced := c.racedWriteLocked(id, startSeq)
@@ -426,16 +455,24 @@ func (c *CachingStore) Close(id string) error {
 	setBeadStatus(&closed, "closed")
 	// A concurrent read that installed and announced this close first owns
 	// the announcement; announcing again here would duplicate it.
-	announce := found && c.claimCloseLocked(id, true, raced)
+	announce := found && !announcedElsewhere && c.claimCloseLocked(id, true, raced)
+	if announce {
+		c.noteCloseClaimedLocked(id, generation)
+	}
 	if !raced {
 		c.noteLocalMutationLocked(id)
 		if found {
-			// A patch reflects only this write, so any mark stands.
+			// A patch reflects only this write, so any mark stands. Only a
+			// claimed close is announced here; an unclaimed one installs as
+			// a read does, so a close queued since another one was announced
+			// (endCloseIntentLocked) stays queued, and a closed row laid over
+			// a reopen the cache saw is queued too: at worst a late repeat
+			// of an announced close, never a lost one.
 			c.absorbFreshLocked(id, closed, c.clockNow(), absorbOpts{
 				depsMode:       depsKeepCached,
 				seqMode:        seqKeep,
 				clearDirty:     refreshed,
-				closeAnnounced: true,
+				closeAnnounced: announce,
 			})
 		}
 		if c.clearDependentReadyProjectionsLocked(id) || found {
@@ -482,12 +519,18 @@ func (c *CachingStore) Reopen(id string) error {
 	}
 
 	c.mu.Lock()
+	// A close after this reopen is a new one, even when the reopen installs
+	// nothing (noteNotClosedLocked).
+	c.noteNotClosedLocked(id)
 	// Same as Close: a fenced reopen installs nothing and notifies the
 	// reopened row.
 	raced := c.racedWriteLocked(id, startSeq)
 	found := refreshed
 	if !refreshed {
-		reopened, found = c.patchedCachedRowLocked(id, func(*Bead) {})
+		// The patch drops metadata.close_reason, as a whole-row backing's
+		// reopen does; a backing that clears it first leaves "" instead
+		// (dropCloseReasonMetadata).
+		reopened, found = c.patchedCachedRowLocked(id, dropCloseReasonMetadata)
 	}
 	setBeadStatus(&reopened, "open")
 	if !raced {
