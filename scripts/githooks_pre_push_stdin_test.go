@@ -116,10 +116,18 @@ func (f *prePushFixture) gitOut(t *testing.T, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// run invokes the fixture's pre-push hook with the given ref lines on stdin.
+// run invokes the fixture's pre-push hook with the given ref lines on stdin,
+// as a push to the named remote origin.
 func (f *prePushFixture) run(t *testing.T, stdin string) (int, string) {
 	t.Helper()
-	cmd := testCommand(filepath.Join(f.repo, ".githooks", "pre-push"), "origin", "git@example.com:fixture.git")
+	return f.runAs(t, "origin", "git@example.com:fixture.git", stdin)
+}
+
+// runAs invokes the hook with git's two arguments: the remote's name (the URL
+// as typed, for a push to a URL) and its URL.
+func (f *prePushFixture) runAs(t *testing.T, remote, url, stdin string) (int, string) {
+	t.Helper()
+	cmd := testCommand(filepath.Join(f.repo, ".githooks", "pre-push"), remote, url)
 	cmd.Dir = f.repo
 	cmd.Env = f.env
 	cmd.Stdin = strings.NewReader(stdin)
@@ -190,11 +198,105 @@ func TestPrePushRunsSuiteForLargeGoDiff(t *testing.T) {
 	}
 }
 
+// TestPrePushRefusesUnfetchedRemoteTip covers the everyday way to reach the
+// scan without the remote's tip: someone else pushed and this clone never
+// fetched. git still runs the hook for a non-forced push and reports "fetch
+// first" only after the hook returns, so the hook's refusal is all the user
+// sees and must name the fetch that fixes it. The fetch names the ref, which a
+// plain `git fetch origin` can skip.
+func TestPrePushRefusesUnfetchedRemoteTip(t *testing.T) {
+	f := newPrePushFixture(t)
+	unfetched := strings.Repeat("1", 40)
+	code, out := f.run(t, "refs/heads/main "+f.commitNew+" refs/heads/main "+unfetched+"\n")
+	if code != 1 {
+		t.Fatalf("pre-push exit = %d, want 1 for an unfetched remote tip\n%s", code, out)
+	}
+	for _, want := range []string{"refs/heads/main is at " + unfetched + " on origin", "run 'git fetch origin refs/heads/main' and push again"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("pre-push refusal lacks %q\n%s", want, out)
+		}
+	}
+	// The remedy must be the only refusal: falling through to the diff would
+	// add git's `bad object` and a second, generic refusal.
+	for _, unwanted := range []string{"cannot inspect", "bad object"} {
+		if strings.Contains(out, unwanted) {
+			t.Fatalf("pre-push went on to diff an unfetched remote tip (output has %q)\n%s", unwanted, out)
+		}
+	}
+	if got := f.read(t, f.makeRuns); got != "" {
+		t.Fatalf("push-time suite ran over an unfetched remote tip: %q", got)
+	}
+}
+
+// TestPrePushRefusalStripsPushURLCredentials covers a push to a URL, which git
+// hands the hook as typed: the refusal must not echo a credential in it. An
+// http(s) user name can be the token itself, so that whole userinfo goes;
+// elsewhere only the password does, keeping the user an ssh fetch needs.
+func TestPrePushRefusalStripsPushURLCredentials(t *testing.T) {
+	const secret = "s3cr3t-token"
+	f := newPrePushFixture(t)
+	unfetched := strings.Repeat("1", 40)
+	for _, tc := range []struct {
+		name, url, want string
+	}{
+		{"https user and password", "https://user:" + secret + "@example.invalid/repo.git", "https://example.invalid/repo.git"},
+		{"https token as user name", "https://" + secret + "@example.invalid/repo.git", "https://example.invalid/repo.git"},
+		{"https token with placeholder password", "https://" + secret + ":x-oauth-basic@example.invalid/repo.git", "https://example.invalid/repo.git"},
+		{"http password containing at sign", "http://user:" + secret + "@part@example.invalid/repo.git", "http://example.invalid/repo.git"},
+		{"ssh password keeps user", "ssh://git:" + secret + "@example.invalid/repo.git", "ssh://git@example.invalid/repo.git"},
+		{"ssh password containing at sign", "ssh://git:" + secret + "@part@example.invalid/repo.git", "ssh://git@example.invalid/repo.git"},
+		{"ssh user and port unchanged", "ssh://git@example.invalid:2222/repo.git", "ssh://git@example.invalid:2222/repo.git"},
+		{"https port unchanged", "https://example.invalid:8443/repo.git", "https://example.invalid:8443/repo.git"},
+		{"scp-style unchanged", "git@example.invalid:o/repo.git", "git@example.invalid:o/repo.git"},
+		{"local path unchanged", "/srv/git/repo.git", "/srv/git/repo.git"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			code, out := f.runAs(t, tc.url, tc.url, "refs/heads/main "+f.commitNew+" refs/heads/main "+unfetched+"\n")
+			if code != 1 {
+				t.Fatalf("pre-push exit = %d, want 1 for an unfetched remote tip\n%s", code, out)
+			}
+			if strings.Contains(out, secret) {
+				t.Fatalf("pre-push refusal leaked the push URL's credential\n%s", out)
+			}
+			for _, want := range []string{" on " + tc.want + ", which", "run 'git fetch " + tc.want + " refs/heads/main' and push again"} {
+				if !strings.Contains(out, want) {
+					t.Fatalf("pre-push refusal lacks %q\n%s", want, out)
+				}
+			}
+		})
+	}
+}
+
+// TestPrePushDiffsAgainstPresentNonCommitRemoteTip pins the presence check: a
+// remote ref may name a tree this clone already has. A `^{commit}` peel fails
+// on it and would send the user to fetch something no fetch can change.
+func TestPrePushDiffsAgainstPresentNonCommitRemoteTip(t *testing.T) {
+	f := newPrePushFixture(t)
+	tree := f.gitOut(t, "rev-parse", f.commitOld+"^{tree}")
+	code, out := f.run(t, "refs/tags/snapshot "+f.commitNew+" refs/tags/snapshot "+tree+"\n")
+	if code != 0 {
+		t.Fatalf("pre-push exit = %d, want 0 for a present tree tip\n%s", code, out)
+	}
+	if got := f.read(t, f.makeRuns); !strings.Contains(got, "test-fast-parallel") {
+		t.Fatalf("Go change over a tree tip skipped the push-time suite: %q\n%s", got, out)
+	}
+}
+
+// TestPrePushFailsWhenGoDiffCannotBeRead keeps every other diff failure fail
+// closed with the hook's own message. The remote tip is present here, so the
+// failure is the comparison itself, not a missing fetch.
 func TestPrePushFailsWhenGoDiffCannotBeRead(t *testing.T) {
 	f := newPrePushFixture(t)
-	code, out := f.run(t, "refs/heads/main "+f.commitNew+" refs/heads/main "+strings.Repeat("1", 40)+"\n")
-	if code == 0 {
-		t.Fatalf("unreadable Go diff reported a successful push\n%s", out)
+	missing := strings.Repeat("2", 40)
+	code, out := f.run(t, "refs/heads/main "+missing+" refs/heads/main "+f.commitOld+"\n")
+	if code != 1 {
+		t.Fatalf("pre-push exit = %d, want 1 for an unreadable Go diff\n%s", code, out)
+	}
+	if want := "pre-push: cannot inspect Go changes for " + f.commitOld + ".." + missing; !strings.Contains(out, want) {
+		t.Fatalf("pre-push refusal lacks %q\n%s", want, out)
+	}
+	if strings.Contains(out, "git fetch") {
+		t.Fatalf("pre-push blamed a missing fetch for a present remote tip\n%s", out)
 	}
 	if got := f.read(t, f.makeRuns); got != "" {
 		t.Fatalf("push-time suite ran despite an unreadable comparison: %q", got)
