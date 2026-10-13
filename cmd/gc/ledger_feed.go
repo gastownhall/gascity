@@ -704,8 +704,9 @@ func (f *ledgerFeed) refreshRows(ids []string, closing map[string]bool, now time
 		f.miss.noteUnhealthy(now)
 		f.cache.RequestReconcile()
 	}
-	if w := legacyWakeOf(f.set.wake.Load()); w != nil && len(changed) > 0 {
-		w.Enqueue(wakeReasonLedgerFeed, ledgerFeedWakeKeys(changed)...)
+	if wake := legacyWakeOf(f.set.wake.Load()); wake != nil && len(changed) > 0 {
+		keys := ledgerFeedWakeKeys(changed)
+		wake.Enqueue(wakeReasonLedgerFeed, keys...)
 		counts.wakes++
 	}
 	return counts
