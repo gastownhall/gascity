@@ -15,8 +15,9 @@ import (
 // ownedRows are the controller-owned rows (coordclass.ControllerOwned;
 // architecture B), each spelling the generic API must take for one: a session
 // row, typed, crash-damaged (no type, the session label) or a typed bead
-// carrying the label; a startup-health episode; a convergence root; and a
-// type spelled in another case or with space around it.
+// carrying the label; a startup-health episode; a convergence root; an
+// operation-journal op or fact row (type op); and a type spelled in another
+// case or with space around it.
 var ownedRows = []struct {
 	name   string
 	typ    string
@@ -30,6 +31,9 @@ var ownedRows = []struct {
 	{"startup-health episode", session.StartupHealthEpisodeType, nil, map[string]string{session.StartupHealthSessionNameMetadataKey: "myrig--worker", session.StartupHealthQuarantinedUntilMetadataKey: "9999-01-01T00:00:00Z"}},
 	{"episode spelled 'Startup-Health-Episode'", "Startup-Health-Episode", nil, nil},
 	{"convergence root", "convergence", nil, nil},
+	{"operation-journal op row", "op", []string{"gc:op", "gc:op-conv:gc-7"}, map[string]string{"gc.op.status": "submitted", "gc.op.open": "gc-7"}},
+	{"operation-journal fact row", "op", []string{"gc:fact", "gc:fact-conv:gc-7"}, nil},
+	{"op row spelled ' OP '", " OP ", []string{"gc:op"}, nil},
 }
 
 // coordinationRows are the coordination-owned rows (coordclass.
@@ -148,6 +152,8 @@ func TestGenericAPINeverWritesAControllerOwnedRow(t *testing.T) {
 					t.Fatalf("status %d (%s), want 422 naming the owner", rec.Code, rec.Body.String())
 				case row.typ == "task" && slices.Contains(row.labels, session.LabelSession) && !strings.Contains(rec.Body.String(), "which only bd (bd update, bd close) writes"):
 					t.Fatalf("body %s: a typed work bead carrying the session label names bd as its only writer", rec.Body.String())
+				case strings.EqualFold(strings.TrimSpace(row.typ), "op") && !strings.Contains(rec.Body.String(), "operation-journal row, which only the operation journal"):
+					t.Fatalf("body %s: an op row names the operation journal as its only writer", rec.Body.String())
 				case strings.Join(problemLocations(t, rec), ",") != r.where:
 					t.Fatalf("errors %v, want %s", problemLocations(t, rec), r.where)
 				case !reflect.DeepEqual(got, before) || len(after) != len(all) || stillTracked != tracked:
@@ -175,6 +181,8 @@ func TestGenericAPINeverMakesAControllerOwnedRow(t *testing.T) {
 		{"create a ' Startup-Health-Episode '", "POST", `{"title":"e","type":" Startup-Health-Episode "}`, "body.type"},
 		{"create a convergence root", "POST", `{"title":"c","type":"convergence"}`, "body.type"},
 		{"create a 'Convergence' root", "POST", `{"title":"c","type":"Convergence"}`, "body.type"},
+		{"create an op row", "POST", `{"title":"o","type":"op","labels":["gc:op"]}`, "body.type"},
+		{"retype a task to ' Op '", "PATCH", `{"type":" Op "}`, "body.type"},
 		{"retype a task to a session", "PATCH", `{"type":"session"}`, "body.type"},
 		{"retype a task to an episode", "PATCH", `{"type":"startup-health-episode"}`, "body.type"},
 		{"retype a task to ' convergence '", "PATCH", `{"type":" convergence "}`, "body.type"},

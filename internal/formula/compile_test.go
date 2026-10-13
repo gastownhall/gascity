@@ -13,6 +13,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/coordclass"
+	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/session"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -2710,7 +2711,7 @@ func TestValidateRejectsSessionSteps(t *testing.T) {
 // session label and the coordination labels and wait shape in any case and
 // spacing, and for none of the work types or wisps.
 func TestValidateRefusesWhatControllerOwnedNames(t *testing.T) {
-	for _, typ := range []string{"session", " Session ", "startup-health-episode", "STARTUP-HEALTH-EPISODE", "convergence", " Convergence ", "message", " Message ", "task", "bug", "convoy", "molecule", "gate", "Wait", ""} {
+	for _, typ := range []string{"session", " Session ", "startup-health-episode", "STARTUP-HEALTH-EPISODE", "convergence", " Convergence ", "op", " OP ", "message", " Message ", "task", "bug", "convoy", "molecule", "gate", "Wait", ""} {
 		for _, labels := range [][]string{nil, {"gc:session"}, {"note", " GC:Session "}, {"gc:wait"}, {"GC:Nudge"}, {"gc:nudge-queue"}, {"order-tracking"}, {"note", "Order-Run:digest"}, {"gc:extmsg-binding"}, {"session:s-1"}, {"session:s-2"}, {"gc:wisp"}, {"gc:session-x"}, {"extmsg:binding:conv:v1:x"}} {
 			for _, meta := range []map[string]string{nil, {"session_id": "s-1"}} {
 				f := &Formula{Formula: "f", Steps: []*Step{{ID: "s", Title: "S", Type: typ, Labels: labels, Metadata: meta}}}
@@ -2727,6 +2728,9 @@ func TestValidateRefusesWhatControllerOwnedNames(t *testing.T) {
 // TestSessionStepMarksAreTheSessionPackages pins sessionStepType,
 // sessionStepLabel and startupHealthStepType to the session package's.
 func TestSessionStepMarksAreTheSessionPackages(t *testing.T) {
+	if opStepType != opjournal.BeadType {
+		t.Fatalf("opStepType %q, want opjournal's %q", opStepType, opjournal.BeadType)
+	}
 	if sessionStepType != session.BeadType || sessionStepLabel != session.LabelSession || startupHealthStepType != session.StartupHealthEpisodeType || convergenceStepType != "convergence" {
 		t.Fatalf("marks %q %q %q, want session's %q %q %q", sessionStepType, sessionStepLabel, startupHealthStepType, session.BeadType, session.LabelSession, session.StartupHealthEpisodeType)
 	}

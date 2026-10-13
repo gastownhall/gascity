@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/coordclass"
+	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/session"
@@ -1051,6 +1052,8 @@ func ownerOf(b beads.Bead) (kind, owner string) {
 			return "startup-health episode", "the controller's startup health"
 		case "convergence":
 			return "convergence root", "the convergence handler (gc converge, the convergence routes)"
+		case opjournal.BeadType:
+			return "operation-journal row", "the operation journal (the session verbs that record ops, the controller's op sweeper and lanes)"
 		case session.BeadType, "":
 			return "session row", "the session verbs (POST /v0/city/{cityName}/sessions and /session/{id}/..., /pin, /unpin, gc session)"
 		}

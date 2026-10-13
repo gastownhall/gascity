@@ -1102,17 +1102,19 @@ func validateEngineMintedKindMetadata(steps []*Step, errs *[]string, prefix stri
 	}
 }
 
-// sessionStepType, sessionStepLabel, startupHealthStepType and
-// convergenceStepType are the marks of a controller-owned row (a test pins
-// the check against coordclass.ControllerOwned): a session row, which only
-// the session verbs mint, a startup-health episode, which only the
-// controller records, and a convergence root, which only the convergence
-// handler creates.
+// sessionStepType, sessionStepLabel, startupHealthStepType,
+// convergenceStepType and opStepType are the marks of a controller-owned row
+// (a test pins the check against coordclass.ControllerOwned): a session row,
+// which only the session verbs mint, a startup-health episode, which only the
+// controller records, a convergence root, which only the convergence handler
+// creates, and an operation-journal row, which only the operation journal
+// writes.
 const (
 	sessionStepType       = "session"
 	sessionStepLabel      = "gc:session"
 	startupHealthStepType = "startup-health-episode"
 	convergenceStepType   = "convergence"
+	opStepType            = "op"
 )
 
 // sessionVerbs names the session verbs that create a session row.
@@ -1121,7 +1123,8 @@ const sessionVerbs = "gc session new, POST /v0/city/{cityName}/sessions"
 // controllerOnlyType is why a step of type typ may not be compiled, or "":
 // compile copies a step's type onto its bead, so a formula would mint a
 // session row (mc-okw9n), a startup-health episode, which holds its session
-// down (mc-lp7zb), or a convergence root (architecture B).
+// down (mc-lp7zb), a convergence root or an operation-journal row
+// (architecture B).
 func controllerOnlyType(typ string) string {
 	switch t := strings.TrimSpace(typ); {
 	case strings.EqualFold(t, sessionStepType):
@@ -1130,6 +1133,8 @@ func controllerOnlyType(typ string) string {
 		return "makes a startup-health episode, which only the controller records"
 	case strings.EqualFold(t, convergenceStepType):
 		return "makes a convergence root, which only the convergence handler creates"
+	case strings.EqualFold(t, opStepType):
+		return "makes an operation-journal row, which only the operation journal writes"
 	case strings.EqualFold(t, messageStepType):
 		return "makes a mail message, which only the mail routes create (POST /v0/city/{cityName}/mail, gc mail)"
 	}

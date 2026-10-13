@@ -66,6 +66,7 @@ func TestLeaseIsBoundedByTheAssigneeLimit(t *testing.T) {
 	}
 
 	op := sampleOp(t)
+	op.Executor = ExecutorLane
 	op.Conversation = conv
 	op.ID, _ = DeriveID("gc", conv, op.Producer.Principal, op.ClientKey)
 	op.PayloadDigest = RequestDigest(op)

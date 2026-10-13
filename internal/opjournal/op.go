@@ -173,6 +173,35 @@ const (
 
 var guarantees = []Guarantee{GuaranteeAtLeastOnce, GuaranteeAtMostOnce}
 
+// Executor names who executes an op, written by Propose and never changed.
+// A lane takes, leases and settles only ExecutorLane ops; every other value is
+// a legacy executor, which closes its own op (or an adopter or the sweeper
+// does). A row without the key reads ExecutorLegacy.
+type Executor string
+
+// Executors.
+const (
+	// ExecutorLane is an op a conversation or lifecycle lane executes.
+	ExecutorLane Executor = "lane"
+	// ExecutorLegacy is a legacy op from an unknown surface: never adopted,
+	// closed by its legacy path or the sweeper.
+	ExecutorLegacy Executor = "legacy"
+	// ExecutorLegacyAPI is a legacy op the API executes; only the API adopts
+	// one.
+	ExecutorLegacyAPI Executor = "legacy:api"
+	// ExecutorLegacyCLI is a legacy op a CLI process executes; it is never
+	// adopted.
+	ExecutorLegacyCLI Executor = "legacy:cli"
+)
+
+var executors = []Executor{ExecutorLane, ExecutorLegacy, ExecutorLegacyAPI, ExecutorLegacyCLI}
+
+// Valid reports whether e is one of the four executors.
+func (e Executor) Valid() bool { return slices.Contains(executors, e) }
+
+// Legacy reports whether e is a legacy executor: anything but ExecutorLane.
+func (e Executor) Legacy() bool { return e != ExecutorLane }
+
 // Actor values gc's own producers use. Actor is an open token; other
 // producers may send their own.
 const (
@@ -193,12 +222,17 @@ type Policy struct {
 	Kill      KillPolicy
 }
 
-// MessagePolicy is a message's policy.
+// MessagePolicy is a message's policy. NowGeneration and NowTurn name the
+// session and turn a deliver-now (When: now) targets, as the requester saw
+// them; they are valid only with When: now, and absent means the front door's
+// resolution (the current session and its current turn when known).
 type MessagePolicy struct {
 	When          When
 	Wake          Wake
 	Role          Role
 	OnUnsupported Fallback
+	NowGeneration int64
+	NowTurn       string
 }
 
 // InterruptPolicy is an interrupt's policy.
@@ -295,10 +329,15 @@ type Transition struct {
 }
 
 // Request is what a producer proposes. Zero policy fields, scope, start_by and
-// finish_by take the kind's defaults.
+// finish_by take the kind's defaults, and a zero Executor is ExecutorLegacy.
+// Executor is outside the request digest, so a retry after a mode flip returns
+// the stored op unchanged. MintedKey says the producer minted ClientKey in
+// this call, so no prior op can exist and Propose skips its read-first Get.
 type Request struct {
 	Conversation string
 	Kind         Kind
+	Executor     Executor
+	MintedKey    bool
 	ClientKey    string
 	Producer     Producer
 	Payload      string
@@ -316,9 +355,11 @@ type Request struct {
 // Op is one op row: the request as accepted plus the platform-owned status,
 // counters, lease, cancel, outcome and transitions.
 type Op struct {
-	ID            string
-	Conversation  string
-	Kind          Kind
+	ID           string
+	Conversation string
+	Kind         Kind
+	// Executor is who executes the op (see Executor).
+	Executor      Executor
 	SchemaRev     int
 	ClientKey     string
 	Payload       string
@@ -344,4 +385,10 @@ type Op struct {
 	Cancel      Cancel
 	Outcome     Outcome
 	Transitions []Transition
+
+	// Revision is the row's revision when it was read (or created), decoded
+	// from the bead and never encoded. An op returned by a write carries the
+	// revision read before that write, so CloseKnown on it takes its
+	// fallback.
+	Revision int64
 }

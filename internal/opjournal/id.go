@@ -85,6 +85,13 @@ func opIDSuffix(conversation, principal, clientKey string) string {
 	return hash16(opIDTag, conversation, principal, clientKey)
 }
 
+// ValidateClientKey refuses a client key Propose would refuse: empty, longer
+// than 512 bytes, not UTF-8, with a control character, or with leading or
+// trailing space. Producers check a supplied key with it before proposing.
+func ValidateClientKey(key string) error {
+	return validateText("client key", key, maxClientKeyLen)
+}
+
 // InterruptKey is the client key of an interrupt that targets one turn of one
 // session: stop:<gen>:<turn>. Two stops of the same turn collapse into one op.
 // A producer without a turn uses its own unique key instead, because a
@@ -101,7 +108,9 @@ func InterruptKey(gen int64, turn string) (string, error) {
 
 // RespondKey is the client key of a respond to one interaction of one
 // session: respond:<gen>:<request_id>. The generation is part of the key
-// because some runtimes derive request ids from content.
+// because some runtimes derive request ids from content. It is unused: in O0
+// respond ops are keyed by the client key, and OJ-16 keys them by the
+// interaction occurrence.
 func RespondKey(gen int64, requestID string) (string, error) {
 	if gen < 1 {
 		return "", invalidf("respond key: generation %d must be >= 1", gen)

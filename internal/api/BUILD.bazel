@@ -210,6 +210,7 @@ go_library(
         "//internal/materialize",
         "//internal/molecule",
         "//internal/nudgequeue",
+        "//internal/opjournal",
         "//internal/orderdispatch",
         "//internal/orders",
         "//internal/packman",

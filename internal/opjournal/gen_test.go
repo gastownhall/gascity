@@ -62,6 +62,7 @@ func (g *opGen) op() Op {
 	op := Op{
 		Conversation: pick(r, []string{"gc-1", "gc-a3f8e", "my-city-x9", "conv_" + fmt.Sprint(r.IntN(1e6))}),
 		Kind:         kind,
+		Executor:     pick(r, executors),
 		SchemaRev:    SchemaRev,
 		ClientKey:    g.text(30),
 		Producer: Producer{
@@ -84,6 +85,12 @@ func (g *opGen) op() Op {
 			Wake:          pick(r, []Wake{WakeIfNeeded, WakeLiveOnly}),
 			Role:          pick(r, []Role{RolePrompt, RoleNotice}),
 			OnUnsupported: pick(r, []Fallback{FallbackBoundary, FallbackFail}),
+		}
+		if op.Policy.Message.When == WhenNow && r.IntN(2) == 0 {
+			op.Policy.Message.NowGeneration = 1 + r.Int64N(100)
+			if r.IntN(2) == 0 {
+				op.Policy.Message.NowTurn = g.text(10)
+			}
 		}
 	case KindInterrupt:
 		op.Policy.Interrupt.OnFailure = pick(r, []OnFailure{OnFailureFail, OnFailureRestart})
@@ -133,7 +140,7 @@ func (g *opGen) op() Op {
 	op.ArrivalSeq = r.Uint64N(1 << 50)
 	op.LaneSeq = r.Uint64N(1 << 50)
 	op.Attempt = r.IntN(6)
-	if spec.Lane == LaneConversation && op.Status != StatusClosed && r.IntN(2) == 0 {
+	if spec.Lane == LaneConversation && op.Executor == ExecutorLane && op.Status != StatusClosed && r.IntN(2) == 0 {
 		op.Lease = Lease{
 			Lane: string(spec.Lane), Conversation: op.Conversation,
 			Generation: 1 + r.Int64N(50), Nonce: "n" + fmt.Sprint(r.IntN(1e9)), Deadline: g.time(),
