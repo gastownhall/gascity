@@ -31,16 +31,74 @@ func TestReleaseListedPreservesRawBlockedHold(t *testing.T) {
 			}
 			want := before
 			want.Assignee = ""
+			want.Metadata = make(map[string]string, len(before.Metadata))
+			for key, value := range before.Metadata {
+				want.Metadata[key] = value
+			}
+			for _, key := range beadmeta.SessionAffinityMetadataKeys {
+				want.Metadata[key] = ""
+			}
 			if got := ledger.row(); !reflect.DeepEqual(got, want) {
 				t.Fatalf("raw row = %+v, want %+v", got, want)
 			}
-			if len(ledger.updates) != 1 || hasBdFlag(ledger.updates[0], "--status") || hasBdFlag(ledger.updates[0], "--set-metadata") {
-				t.Fatalf("not assignee-only: %v", ledger.updates)
+			if len(ledger.updates) != 1 || hasBdFlag(ledger.updates[0], "--status") || !hasBdFlag(ledger.updates[0], "--set-metadata") {
+				t.Fatalf("not one status-preserving release: %v", ledger.updates)
 			}
 			if got := testFlagValue(ledger.updates[0], "--if-status"); got != "blocked" {
 				t.Fatalf("raw status guard = %q", got)
 			}
 		})
+	}
+}
+
+func TestReleaseListedBlockedRouteAndLifecycle(t *testing.T) {
+	for _, why := range []releaseWhy{releaseCloseCascade, releaseRetired} {
+		for _, routeKey := range []string{"", beadmeta.RoutedToMetadataKey, beadmeta.RunTargetMetadataKey} {
+			t.Run(string(rune('a'+why))+routeKey, func(t *testing.T) {
+				ledger := newBdGuardLedger("blocked", "dead-session", nil)
+				delete(ledger.bead.Metadata, beadmeta.RoutedToMetadataKey)
+				if routeKey != "" {
+					ledger.bead.Metadata[routeKey] = "repo/worker"
+				}
+				for _, key := range beadmeta.SessionAffinityMetadataKeys {
+					ledger.bead.Metadata[key] = "obsolete-session"
+				}
+				ledger.bead.Metadata["hold_reason"] = "needs human input"
+				ledger.bead.Metadata["work_result"] = "retained"
+				ledger.bead.Labels = []string{"hold:external"}
+				ledger.bead.Description = "retained description"
+				backing := beads.NewBdStoreWithPrefix(t.TempDir(), ledger.run, "bd")
+				cache := beads.NewCachingStore(backing, nil)
+				snapshot, err := cache.Get(ledger.bead.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				out := releaseListed([]seatWorkHit{{store: cache, bead: snapshot}}, why, releaseSeat{fallback: "repo/worker"}, &config.City{Agents: []config.Agent{persistentWorker()}}, ReleaseOpts{})
+				if len(out.Released) != 1 || len(out.Kept) != 0 || len(out.Failed) != 0 || len(ledger.updates) != 1 {
+					t.Fatalf("release = %+v, updates %v", out, ledger.updates)
+				}
+				row := ledger.row()
+				if row.Status != "blocked" || row.Assignee != "" || row.Metadata["hold_reason"] != "needs human input" || row.Metadata["work_result"] != "retained" || !reflect.DeepEqual(row.Labels, []string{"hold:external"}) || row.Description != "retained description" {
+					t.Fatalf("hold or work changed: %+v", row)
+				}
+				wantTarget := "repo/worker"
+				if routeKey == beadmeta.RoutedToMetadataKey {
+					wantTarget = ""
+				}
+				if row.Metadata[beadmeta.RunTargetMetadataKey] != wantTarget || row.Metadata[beadmeta.RoutedToMetadataKey] != snapshot.Metadata[beadmeta.RoutedToMetadataKey] {
+					t.Fatalf("route = %v", row.Metadata)
+				}
+				cached, err := cache.Get(row.ID)
+				if err != nil || cached.Assignee != "" || cached.Metadata[beadmeta.RunTargetMetadataKey] != wantTarget {
+					t.Fatalf("cache did not absorb combined patch: %+v, %v", cached, err)
+				}
+				for _, key := range beadmeta.SessionAffinityMetadataKeys {
+					if row.Metadata[key] != "" || cached.Metadata[key] != "" {
+						t.Fatalf("stale %s: raw %v, cached %v", key, row.Metadata, cached.Metadata)
+					}
+				}
+			})
+		}
 	}
 }
 
@@ -58,7 +116,7 @@ func TestReleaseListedBlockedGuards(t *testing.T) {
 		{name: "unserved route", unserved: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ledger := newBdGuardLedger("blocked", "dead-session", map[string]string{beadmeta.RoutedToMetadataKey: "repo/worker"})
+			ledger := newBdGuardLedger("blocked", "dead-session", map[string]string{beadmeta.RoutedToMetadataKey: "repo/worker", beadmeta.ContinuationGroupMetadataKey: "group", "hold_reason": "needs input"})
 			store := beads.NewBdStoreWithPrefix(t.TempDir(), ledger.run, "bd")
 			snapshot, err := store.Get(ledger.bead.ID)
 			if err != nil {
@@ -66,6 +124,7 @@ func TestReleaseListedBlockedGuards(t *testing.T) {
 			}
 			ledger.beforeUpdate = tc.change
 			ledger.noGuards = tc.unsupported
+			beforeMetadata := ledger.row().Metadata
 			seat := releaseSeat{}
 			why := releaseCloseCascade
 			if tc.started {
@@ -81,6 +140,9 @@ func TestReleaseListedBlockedGuards(t *testing.T) {
 			}
 			if ledger.row().Assignee == "" {
 				t.Fatal("lost protected owner")
+			}
+			if !reflect.DeepEqual(ledger.row().Metadata, beforeMetadata) {
+				t.Fatalf("metadata changed on refusal: %v", ledger.row().Metadata)
 			}
 			if tc.unsupported && len(out.Failed) != 1 {
 				t.Fatalf("unsupported guard was not surfaced: %+v", out)
@@ -173,11 +235,18 @@ func TestReleaseListedKilledBlockedClaim(t *testing.T) {
 			}
 			want := before
 			want.Assignee = ""
+			want.Metadata = make(map[string]string, len(before.Metadata))
+			for key, value := range before.Metadata {
+				want.Metadata[key] = value
+			}
+			for _, key := range beadmeta.SessionAffinityMetadataKeys {
+				want.Metadata[key] = ""
+			}
 			if len(out.Released) != 1 || len(out.Kept) != 0 || len(out.Failed) != 0 || !reflect.DeepEqual(ledger.row(), want) {
 				t.Fatalf("unstarted killed seat still owns hold: %+v, row %+v", out, ledger.row())
 			}
-			if len(ledger.updates) != 1 || testFlagValue(ledger.updates[0], "--if-status") != "blocked" || hasBdFlag(ledger.updates[0], "--status") || hasBdFlag(ledger.updates[0], "--set-metadata") {
-				t.Fatalf("not an assignee-only blocked release: %v", ledger.updates)
+			if len(ledger.updates) != 1 || testFlagValue(ledger.updates[0], "--if-status") != "blocked" || hasBdFlag(ledger.updates[0], "--status") || !hasBdFlag(ledger.updates[0], "--set-metadata") {
+				t.Fatalf("not one guarded blocked release: %v", ledger.updates)
 			}
 		})
 	}

@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 	beadslib "github.com/steveyegge/beads"
 	"github.com/steveyegge/beads/issueops"
@@ -34,7 +35,13 @@ func TestNativeAssignmentGuardPreservesRawBlockedHoldThroughFacade(t *testing.T)
 				t.Fatal(err)
 			}
 			holder, status := "dead-session", "blocked"
-			if err := store.Update(b.ID, UpdateOpts{Assignee: &holder, Status: &status, Metadata: map[string]string{"gc.session_affinity": "require", "hold_reason": "needs input"}}); err != nil {
+			metadata := map[string]string{"hold_reason": "needs input", "work_result": "retained"}
+			patch := map[string]string{beadmeta.RunTargetMetadataKey: "repo/worker"}
+			for _, key := range beadmeta.SessionAffinityMetadataKeys {
+				metadata[key] = "obsolete-session"
+				patch[key] = ""
+			}
+			if err := store.Update(b.ID, UpdateOpts{Assignee: &holder, Status: &status, Metadata: metadata, Labels: []string{"hold:external"}}); err != nil {
 				t.Fatal(err)
 			}
 			func() {
@@ -68,13 +75,22 @@ func TestNativeAssignmentGuardPreservesRawBlockedHoldThroughFacade(t *testing.T)
 				return row
 			}
 			before := readRaw()
-			ok, handled, err := store.ReleaseBlockedIfCurrent(b.ID, holder)
+			ok, handled, err := store.ReleaseBlockedIfCurrent(b.ID, holder, patch)
 			if err != nil || !ok || !handled {
 				t.Fatalf("guard = %v, %v, %v", ok, handled, err)
 			}
 			after := readRaw()
-			if after.Status != beadslib.StatusBlocked || after.Assignee != "" || after.Notes != before.Notes || string(after.Metadata) != string(before.Metadata) {
+			if after.Status != beadslib.StatusBlocked || after.Assignee != "" || after.Notes != before.Notes {
 				t.Fatalf("hold changed: before %+v, after %+v", before, after)
+			}
+			got, err := store.Get(b.ID)
+			if err != nil || got.Metadata["hold_reason"] != "needs input" || got.Metadata["work_result"] != "retained" || got.Metadata[beadmeta.RunTargetMetadataKey] != "repo/worker" || len(got.Labels) != 1 || got.Labels[0] != "hold:external" {
+				t.Fatalf("release metadata/labels = %+v, %v", got, err)
+			}
+			for _, key := range beadmeta.SessionAffinityMetadataKeys {
+				if got.Metadata[key] != "" {
+					t.Fatalf("stale lifecycle key %s = %q", key, got.Metadata[key])
+				}
 			}
 			deps, err := store.DepList(b.ID, "down")
 			if err != nil || len(deps) != 1 || deps[0].DependsOnID != dep.ID {

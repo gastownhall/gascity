@@ -353,7 +353,7 @@ func releaseListedWithClock(claims []seatWorkHit, why releaseWhy, seat releaseSe
 		}
 		// A killed seat with started work already returned above. Every
 		// remaining path must probe a normalized-open row before releasing it.
-		if released, handled, err := releaseBlockedAssignment(c.store, c.bead); err != nil {
+		if released, handled, err := releaseBlockedAssignment(c.store, c.bead, fallback); err != nil {
 			out.Failed = append(out.Failed, c)
 			out.Why[c.bead.ID] = err.Error()
 			continue

@@ -7,10 +7,10 @@ import (
 
 var _ BlockedAssignmentReleaser = (*BdStore)(nil)
 
-// ReleaseBlockedIfCurrent preserves a raw blocked hold and clears only its
-// assignee under bd's native status/holder guards. A lost blocked guard owns
+// ReleaseBlockedIfCurrent preserves a raw blocked hold and clears its assignee
+// with the metadata patch under bd's native status/holder guards. A lost guard owns
 // the outcome; it cannot become permission for an ordinary open release.
-func (s *BdStore) ReleaseBlockedIfCurrent(id, expectedAssignee string) (released, handled bool, err error) {
+func (s *BdStore) ReleaseBlockedIfCurrent(id, expectedAssignee string, metadata map[string]string) (released, handled bool, err error) {
 	if strings.TrimSpace(id) == "" || strings.TrimSpace(expectedAssignee) == "" {
 		return false, true, fmt.Errorf("blocked release %q: full bead ID and holder required", id)
 	}
@@ -52,6 +52,6 @@ func (s *BdStore) ReleaseBlockedIfCurrent(id, expectedAssignee string) (released
 		return false, true, nil
 	}
 	empty := ""
-	released, err = s.UpdateIfAssignment(id, "blocked", expectedAssignee, UpdateOpts{Assignee: &empty})
+	released, err = s.UpdateIfAssignment(id, "blocked", expectedAssignee, UpdateOpts{Assignee: &empty, Metadata: metadata})
 	return released, true, err
 }

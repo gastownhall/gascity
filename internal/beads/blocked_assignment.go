@@ -1,12 +1,14 @@
 package beads
 
-// BlockedAssignmentReleaser clears only the assignee of raw blocked work,
-// guarded by its status and holder. handled is false only when an exact raw
+// BlockedAssignmentReleaser clears the assignee of raw blocked work and applies
+// the supplied metadata patch in the same update, guarded by status and holder.
+// Metadata keys merge; empty values clear lifecycle ties without deleting other
+// work metadata. handled is false only when an exact raw
 // read found open work still assigned to expectedAssignee, allowing its ordinary
 // release policy. A missing, moved or other-status row, a lost blocked guard,
 // and every refusal are handled: callers must never retry them as open work.
 type BlockedAssignmentReleaser interface {
-	ReleaseBlockedIfCurrent(id, expectedAssignee string) (released, handled bool, err error)
+	ReleaseBlockedIfCurrent(id, expectedAssignee string, metadata map[string]string) (released, handled bool, err error)
 }
 
 // BlockedAssignmentReleaserFor follows the same declared provider boundaries

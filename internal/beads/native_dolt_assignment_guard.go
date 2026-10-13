@@ -26,7 +26,9 @@ func (s *NativeDoltStore) UpdateIfAssignment(id, expectedStatus, expectedAssigne
 // ReleaseBlockedIfCurrent distinguishes an ordinary raw-open assignment from a
 // blocked release that lost its guard. A lost blocked guard is handled even
 // when another writer reopened the row, so the caller cannot release it again.
-func (s *NativeDoltStore) ReleaseBlockedIfCurrent(id, expectedAssignee string) (released, handled bool, err error) {
+// The assignee clear and metadata patch share the raw status, holder and detail
+// revision fence; the blocked status is never rewritten.
+func (s *NativeDoltStore) ReleaseBlockedIfCurrent(id, expectedAssignee string, metadata map[string]string) (released, handled bool, err error) {
 	if err := s.readOnlyGuard(); err != nil {
 		return false, true, err
 	}
@@ -34,7 +36,7 @@ func (s *NativeDoltStore) ReleaseBlockedIfCurrent(id, expectedAssignee string) (
 		return false, true, fmt.Errorf("native blocked release %q: a holder is required", id)
 	}
 	empty := ""
-	released, rawStatus, err := s.updateIfAssignmentRaw(id, "blocked", expectedAssignee, UpdateOpts{Assignee: &empty})
+	released, rawStatus, err := s.updateIfAssignmentRaw(id, "blocked", expectedAssignee, UpdateOpts{Assignee: &empty, Metadata: metadata})
 	return released, rawStatus != "open", err
 }
 

@@ -217,14 +217,14 @@ func TestBdStoreBlockedReleaseAcceptsChildID(t *testing.T) {
 		}
 		return []byte(`[{"id":"bd-42.1","status":"blocked","assignee":"dead-session"}]`), nil
 	}}
-	released, handled, err := beads.NewBdStore("/city", runner.run).ReleaseBlockedIfCurrent("bd-42.1", "dead-session")
+	released, handled, err := beads.NewBdStore("/city", runner.run).ReleaseBlockedIfCurrent("bd-42.1", "dead-session", map[string]string{"gc.continuation_group": "", "gc.run_target": "repo/worker", "gc.session_affinity": ""})
 	if err != nil || !released || !handled {
 		t.Fatalf("child release = %v, %v, %v", released, handled, err)
 	}
-	want := []string{"bd", "update", "--json", "bd-42.1", "--assignee", "", "--if-status", "blocked", "--if-assignee", "dead-session"}
+	want := []string{"bd", "update", "--json", "bd-42.1", "--assignee", "", "--set-metadata", "gc.continuation_group=", "--set-metadata", "gc.run_target=repo/worker", "--set-metadata", "gc.session_affinity=", "--if-status", "blocked", "--if-assignee", "dead-session"}
 	calls := runner.releaseVerbArgv()
 	if len(calls) != 1 || strings.Join(calls[0], "\x00") != strings.Join(want, "\x00") {
-		t.Fatalf("mutations = %q, want one assignee-only guarded update %q", calls, want)
+		t.Fatalf("mutations = %q, want one combined guarded update %q", calls, want)
 	}
 }
 
@@ -260,7 +260,7 @@ func TestBdStoreBlockedReleaseRefusesUnresolvedRows(t *testing.T) {
 				t.Fatalf("unexpected fallback or mutation: %v", args)
 				return nil, errors.New("unexpected command")
 			}}
-			released, handled, err := beads.NewBdStore("/city", runner.run).ReleaseBlockedIfCurrent(tc.id, tc.holder)
+			released, handled, err := beads.NewBdStore("/city", runner.run).ReleaseBlockedIfCurrent(tc.id, tc.holder, map[string]string{"gc.continuation_group": "", "gc.run_target": "repo/worker"})
 			if released || !handled || (err != nil) != tc.wantErr {
 				t.Fatalf("refusal = %v, %v, %v", released, handled, err)
 			}

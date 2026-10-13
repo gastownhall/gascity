@@ -206,10 +206,22 @@ func TestNativeBlockedReleaseLostGuardStaysHandled(t *testing.T) {
 			fixture.RowVersion = 17
 			store, rec := newRecordingNativeDoltStore(fixture)
 			rec.err = tc.writeErr
-			ok, handled, err := store.ReleaseBlockedIfCurrent("gc-1", "dead-session")
+			ok, handled, err := store.ReleaseBlockedIfCurrent("gc-1", "dead-session", map[string]string{"gc.continuation_group": "", "gc.run_target": "repo/worker"})
 			wantOK := tc.status == beadslib.StatusBlocked && tc.writeErr == nil
 			if err != nil || handled != tc.wantHandled || ok != wantOK {
 				t.Fatalf("release = %v, %v, %v", ok, handled, err)
+			}
+			if tc.status == beadslib.StatusBlocked {
+				if len(rec.updates) != 1 {
+					t.Fatalf("combined update count = %d", len(rec.updates))
+				}
+				req := rec.updates[0]
+				if req.ExpectedStatus == nil || *req.ExpectedStatus != issueops.Status("blocked") || req.ExpectedAssignee == nil || *req.ExpectedAssignee != "dead-session" || req.ExpectedVersion == nil || *req.ExpectedVersion != 17 || req.Patch.Status.Set || !req.Patch.Assignee.Set || req.Patch.Assignee.Value != "" || req.ForceAssigneeTransfer {
+					t.Fatalf("combined release lost fencing or changed hold: %+v", req)
+				}
+				if len(req.Patch.Metadata.Set) != 2 || string(req.Patch.Metadata.Set["gc.continuation_group"]) != `""` || string(req.Patch.Metadata.Set["gc.run_target"]) != `"repo/worker"` {
+					t.Fatalf("metadata patch = %+v", req.Patch.Metadata)
+				}
 			}
 			if tc.status != beadslib.StatusBlocked && len(rec.updates) != 0 {
 				t.Fatalf("wrote other raw status: %+v", rec.updates)
