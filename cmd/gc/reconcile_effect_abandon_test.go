@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -587,6 +588,54 @@ func TestRollbackEffectNeedsItsOccupant(t *testing.T) {
 				t.Fatalf("settlement %+v claim %q: want refused redecided, the pending create kept", s, b.Metadata["pending_create_claim"])
 			}
 		})
+	}
+}
+
+// Kills a rollback close that rests on section 0's occupant (STALE-READ
+// 7.3): on a name the row does not own, the Call leaves a Foreign occupant
+// alone; one that leaves after the Call, before the close section's own
+// read, inside the pending create's lease, refuses the close redecided and
+// keeps the pending create (F1, applied again). Past the lease the gone
+// occupant leaves nothing to wait for, and the row rolls back. On a name
+// the row owns, the Call stops the occupant itself (C8.2(a)), and the close
+// lands: its absence is the stop's.
+func TestRollbackCloseRereadsItsOccupant(t *testing.T) {
+	long := gatherNow.Add(-20 * time.Minute).Format(time.RFC3339)
+	leased := []string{"pending_create_claim", "true", "pending_create_started_at", gatherNow.Add(-time.Minute).Format(time.RFC3339)}
+	notOwned := []string{"session_name", "s-worker"} // no bead-scoped name: the row does not own it
+	for _, c := range []struct {
+		name   string
+		meta   []string
+		closed bool
+	}{
+		{"inside its lease", slices.Concat(leased, notOwned), false},
+		{"past its lease, started", slices.Concat([]string{"pending_create_claim", "true", "pending_create_started_at", long, "last_woke_at", long}, notOwned), true},
+		{"inside its lease, on a name it owns: the Call's own stop", leased, true},
+	} {
+		k := startKit(t, intentRollback, "creating", c.meta...)
+		k.it.Deadline = gatherNow.Add(time.Minute)
+		k.it.Reason, k.it.Occupant = decideRollback, true
+		name := "s-gc-1"
+		if slices.Contains(c.meta, "s-worker") {
+			name = "s-worker"
+		}
+		k.sp.mu.Lock()
+		k.sp.put(name, "gc-9", "3", "theirs") // a Foreign occupant under the row's name
+		k.sp.mu.Unlock()
+		k.p.World.Census = readCensus(t, gatherNow, censusLegs(rowLeg, k.cache))
+		k.on(seamAfterCall, func() { // the occupant leaves between sections
+			k.sp.mu.Lock()
+			k.sp.drop(name)
+			k.sp.mu.Unlock()
+		})
+		s := k.runKind()
+		b, _ := k.backing.Get("gc-1")
+		if closed := b.Status == "closed"; closed != c.closed || s.Closed != c.closed {
+			t.Errorf("%s: settlement %+v, row %s: closed %v, want %v", c.name, s, b.Status, closed, c.closed)
+		}
+		if !c.closed && (s.Cause != causeRedecided || b.Metadata["pending_create_claim"] != "true") {
+			t.Errorf("%s: settlement %+v claim %q: want refused redecided, the pending create kept", c.name, s, b.Metadata["pending_create_claim"])
+		}
 	}
 }
 
