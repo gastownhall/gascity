@@ -38,6 +38,7 @@ package storeref
 // than taken once at boot.
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 
@@ -173,13 +174,42 @@ func legacyResidentVerdict(store beads.Store, prefixes []string) (bool, error) {
 //
 // Sharing the census makes the two verdicts monotone together: proof implies
 // the pessimistic bit for every binding, in the field and in the decision
-// alike, rather than only for the ones a constructor happened to align.
+// alike, rather than only for the ones a constructor happened to align. It goes
+// through the same legacyResidentVerdict too, so a store with a one-statement
+// census answers the proof without hydrating the binding's history; a census
+// that errors proves nothing, exactly as a failed listing does.
 func ProvenLegacyResidents(b ClassBinding) bool {
-	relics, err := LegacyResidents(b.Leg.Store, b.Prefixes)
-	if err != nil {
-		return false
+	has, err := legacyResidentVerdict(b.Leg.Store, b.Prefixes)
+	return err == nil && has
+}
+
+// ErrBindingHasNoStore reports a per-id question asked of a binding that has
+// no store to ask. It decides nothing: it is neither a hit nor an absence.
+var ErrBindingHasNoStore = errors.New("storeref: the binding has no store to read")
+
+// BindingHoldsID is the per-id twin of the relic census: does this one binding
+// hold id right now. It is a point read of the binding's own leg, not an owner
+// resolution — the caller already knows which binding the question is about
+// (a refused city's binding, opened only to collect evidence) and wants that
+// binding's answer, not the first owner across a plan.
+//
+// held=true, err=nil is a hit. held=false, err=nil is an absence the binding
+// ANSWERED (its Get came back not-found). Any other read failure comes back as
+// the error, and so does ErrBindingHasNoStore for a binding with no store; the
+// caller decides what a failure to decide means for it.
+func BindingHoldsID(b ClassBinding, id string) (held bool, err error) {
+	if b.Leg.Store == nil {
+		return false, ErrBindingHasNoStore
 	}
-	return len(relics) > 0
+	_, err = b.Leg.Store.Get(id)
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, beads.ErrNotFound):
+		return false, nil
+	default:
+		return false, err
+	}
 }
 
 // idInAnyNamespace reports whether any prefix claims id's namespace. It is the

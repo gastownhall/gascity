@@ -22,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/tmux"
 	"github.com/gastownhall/gascity/internal/testutil"
 )
 
@@ -914,6 +915,46 @@ func TestZombieSessionsCheck_Fix(t *testing.T) {
 	}
 }
 
+// A zombie whose tmux server dies between Fix's observation and its Stop is
+// gone, which is all Fix is for; a stop that failed to remove the session is
+// still reported, even when a missing-server answer is joined beside it.
+func TestZombieSessionsCheck_FixTreatsDownedServerAsFixedButReportsStopFailures(t *testing.T) {
+	stopFailed := errors.New("terminate zombie: permission denied")
+	for _, tc := range []struct {
+		name    string
+		stopErr error
+		wantErr error
+	}{
+		{name: "downed server", stopErr: fmt.Errorf("killing session zombie: %w", tmux.ErrNoServer)},
+		{name: "stop failure", stopErr: stopFailed, wantErr: stopFailed},
+		{name: "stop failure beside downed server", stopErr: errors.Join(stopFailed, tmux.ErrNoServer), wantErr: stopFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sp := runtime.NewFake()
+			if err := sp.Start(context.Background(), "zombie", runtime.Config{}); err != nil {
+				t.Fatal(err)
+			}
+			sp.Zombies["zombie"] = true
+			sp.StopErrors["zombie"] = tc.stopErr
+
+			cfg := &config.City{
+				Agents: []config.Agent{{Name: "zombie", ProcessNames: []string{"claude"}}},
+			}
+			err := NewZombieSessionsCheck(cfg, "test", "", sp).Fix(&CheckContext{CityPath: t.TempDir()})
+			if tc.wantErr == nil {
+				if err != nil {
+					t.Fatalf("Fix() error = %v, want nil for a zombie already gone with its server", err)
+				}
+			} else if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("Fix() error = %v, want it to report %v", err, tc.wantErr)
+			}
+			if n := sp.CountCalls("Stop", "zombie"); n != 1 {
+				t.Errorf("Stop(%q) called %d times, want 1", "zombie", n)
+			}
+		})
+	}
+}
+
 // TestZombieSessionsCheck_FixSkipsWhenControllerRunning is required by
 // ga-bq9vdi (GH#5742): ZombieSessionsCheck.Fix() kills sessions via the raw
 // runtime.Provider with neither fence engdocs/design/session-store-fences.md
@@ -1093,6 +1134,43 @@ func TestOrphanSessionsCheck_Fix(t *testing.T) {
 	}
 	if !sp.IsRunning("mayor") {
 		t.Error("legitimate session was killed by fix")
+	}
+}
+
+// An orphan whose tmux server dies between Fix's listing and its Stop is gone,
+// which is all Fix is for; a stop that failed to remove the session is still
+// reported, even when a missing-server answer is joined beside it.
+func TestOrphanSessionsCheck_FixTreatsDownedServerAsFixedButReportsStopFailures(t *testing.T) {
+	stopFailed := errors.New("terminate orphan: permission denied")
+	for _, tc := range []struct {
+		name    string
+		stopErr error
+		wantErr error
+	}{
+		{name: "downed server", stopErr: fmt.Errorf("killing session stale-worker: %w", tmux.ErrNoServer)},
+		{name: "stop failure", stopErr: stopFailed, wantErr: stopFailed},
+		{name: "stop failure beside downed server", stopErr: errors.Join(stopFailed, tmux.ErrNoServer), wantErr: stopFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sp := runtime.NewFake()
+			if err := sp.Start(context.Background(), "stale-worker", runtime.Config{}); err != nil {
+				t.Fatal(err)
+			}
+			sp.StopErrors["stale-worker"] = tc.stopErr
+
+			cfg := &config.City{Agents: []config.Agent{{Name: "mayor"}}}
+			err := NewOrphanSessionsCheck(cfg, "test", "", sp).Fix(&CheckContext{CityPath: t.TempDir()})
+			if tc.wantErr == nil {
+				if err != nil {
+					t.Fatalf("Fix() error = %v, want nil for an orphan already gone with its server", err)
+				}
+			} else if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("Fix() error = %v, want it to report %v", err, tc.wantErr)
+			}
+			if n := sp.CountCalls("Stop", "stale-worker"); n != 1 {
+				t.Errorf("Stop(%q) called %d times, want 1", "stale-worker", n)
+			}
+		})
 	}
 }
 

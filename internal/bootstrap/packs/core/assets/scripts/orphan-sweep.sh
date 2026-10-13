@@ -39,7 +39,7 @@ trap 'rm -f "$TMP" "$SESSION_TMP"' EXIT
 RIG_NAMES=""
 RIG_LIST=$(gc rig list --json 2>/dev/null) || RIG_LIST=""
 if [ -n "$RIG_LIST" ]; then
-    RIG_NAMES=$(echo "$RIG_LIST" | jq -r '.rigs[] | select(.hq == false) | .name' 2>/dev/null) || RIG_NAMES=""
+    RIG_NAMES=$(echo "$RIG_LIST" | jq -r '.rigs[] | select(.hq == false and (.suspended // false) == false) | .name' 2>/dev/null) || RIG_NAMES=""
 fi
 
 append_session_list() {
@@ -161,32 +161,33 @@ LIVE_SESSION_IDS=$(jq -r -s '
       if has($snake) and .[$snake] != null then .[$snake]
       elif has($pascal) and .[$pascal] != null then .[$pascal]
       else $default end;
-    .[] | .sessions[]?
-    | select(
-        (pick("closed"; "Closed"; false) == false)
-        and ((pick("state"; "State"; "") | ascii_downcase) != "closed")
-      )
-    | [
-        pick("id"; "ID"; null),
-        pick("session_name"; "SessionName"; null),
-        pick("alias"; "Alias"; null),
-        pick("agent_name"; "AgentName"; null),
-        pick("template"; "Template"; null),
-        pick("name"; "Name"; null)
-      ]
-    | .[]
-    | select(. != null and . != "")
+    [ .[] | .sessions[]?
+      | select(
+          (pick("closed"; "Closed"; false) == false)
+          and ((pick("state"; "State"; "") | ascii_downcase) != "closed")
+        )
+      | [
+          pick("id"; "ID"; null),
+          pick("session_name"; "SessionName"; null),
+          pick("alias"; "Alias"; null),
+          pick("agent_name"; "AgentName"; null),
+          pick("template"; "Template"; null),
+          pick("name"; "Name"; null)
+        ]
+      | .[]
+      | select(. != null and . != "")
+    ] | unique | .[]
 ' "$SESSION_TMP" 2>/dev/null) || exit 0
 
 agent_exists() {
     local candidate="$1"
-    [ -n "$candidate" ] && printf '%s\n' "$AGENTS" | grep -Fxq -- "$candidate"
+    [ -n "$candidate" ] && grep -Fxq -- "$candidate" <<<"$AGENTS"
 }
 
 live_session_match() {
     local candidate="$1"
     [ -n "$candidate" ] && [ -n "$LIVE_SESSION_IDS" ] \
-        && printf '%s\n' "$LIVE_SESSION_IDS" | grep -Fxq -- "$candidate"
+        && grep -Fxq -- "$candidate" <<<"$LIVE_SESSION_IDS"
 }
 
 CURRENT_BEAD_JSON=""

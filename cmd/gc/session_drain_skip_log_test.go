@@ -19,7 +19,7 @@ import (
 // sees the session without the skip re-arms it so the next episode prints.
 func TestDrainSkipLineLogsOnTransition(t *testing.T) {
 	t.Setenv("GC_DEBUG", "")
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	// "worker" is neither desired nor configured-named, so a live runtime
 	// falls to the orphan drain, which a partial store query skips.
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "other"}}}
@@ -28,12 +28,18 @@ func TestDrainSkipLineLogsOnTransition(t *testing.T) {
 	}
 	session := env.createSessionBead("worker", "worker")
 	env.markSessionActive(&session)
+	// Past the INC-003 wake grace, so the healthy pass below drains rather than
+	// deferring a freshly woken orphan.
+	env.setSessionMetadata(&session, map[string]string{
+		"last_woke_at": env.clk.Now().Add(-wakeUndesiredGrace - time.Minute).UTC().Format(time.RFC3339),
+	})
 
 	tick := func(sessions []beads.Bead, partial bool) {
 		t.Helper()
-		reconcileSessionBeads(
-			context.Background(), sessions, env.desiredState, map[string]bool{}, env.cfg, env.sp, env.store,
-			nil, nil, nil, env.dt, nil, partial, nil, "", nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+		reconcileSessionBeadsAtPath(
+			context.Background(), env.city, sessions, env.desiredState, map[string]bool{}, env.cfg, env.sp, env.store,
+			nil, nil, nil, nil, env.dt, nil, partial, nil, "", nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+			withAsyncDrainAckStopTracker(env.stops),
 		)
 		env.clk.Advance(30 * time.Second)
 	}

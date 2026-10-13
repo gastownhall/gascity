@@ -169,6 +169,8 @@ export const getV0CityByCityNameBeadById = <ThrowOnError extends boolean = false
 
 /**
  * Patch v0 city by city name bead by ID
+ *
+ * Refused with 422, nothing written: a metadata key that is not a valid bead-metadata key, or a label that does not read back as itself from one CSV record (a comma, a quote, a newline or a carriage return); any change of whether the row is a startup-health episode (type startup-health-episode), which only the controller records; any change of whether the row is a session (its type, the gc:session label); and, on a session row, a key its disposition decodes (held_until, sleep_intent, wait_hold, quarantined_until, suspended_at, state, sleep_reason), which only the session verbs set. Each refusal names the offending field in errors[].
  */
 export const patchV0CityByCityNameBeadById = <ThrowOnError extends boolean = false>(options: Options<PatchV0CityByCityNameBeadByIdData, ThrowOnError>) => (options.client ?? client).patch<PatchV0CityByCityNameBeadByIdResponses, PatchV0CityByCityNameBeadByIdErrors, ThrowOnError>({
     url: '/v0/city/{cityName}/bead/{id}',
@@ -194,7 +196,14 @@ export const postV0CityByCityNameBeadByIdAssign = <ThrowOnError extends boolean 
 /**
  * Post v0 city by city name bead by ID close
  */
-export const postV0CityByCityNameBeadByIdClose = <ThrowOnError extends boolean = false>(options: Options<PostV0CityByCityNameBeadByIdCloseData, ThrowOnError>) => (options.client ?? client).post<PostV0CityByCityNameBeadByIdCloseResponses, PostV0CityByCityNameBeadByIdCloseErrors, ThrowOnError>({ url: '/v0/city/{cityName}/bead/{id}/close', ...options });
+export const postV0CityByCityNameBeadByIdClose = <ThrowOnError extends boolean = false>(options: Options<PostV0CityByCityNameBeadByIdCloseData, ThrowOnError>) => (options.client ?? client).post<PostV0CityByCityNameBeadByIdCloseResponses, PostV0CityByCityNameBeadByIdCloseErrors, ThrowOnError>({
+    url: '/v0/city/{cityName}/bead/{id}/close',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
 
 /**
  * Get v0 city by city name bead by ID deps
@@ -208,6 +217,8 @@ export const postV0CityByCityNameBeadByIdReopen = <ThrowOnError extends boolean 
 
 /**
  * Post v0 city by city name bead by ID update
+ *
+ * Refused with 422, nothing written: a metadata key that is not a valid bead-metadata key, or a label that does not read back as itself from one CSV record (a comma, a quote, a newline or a carriage return); any change of whether the row is a startup-health episode (type startup-health-episode), which only the controller records; any change of whether the row is a session (its type, the gc:session label); and, on a session row, a key its disposition decodes (held_until, sleep_intent, wait_hold, quarantined_until, suspended_at, state, sleep_reason), which only the session verbs set. Each refusal names the offending field in errors[].
  */
 export const postV0CityByCityNameBeadByIdUpdate = <ThrowOnError extends boolean = false>(options: Options<PostV0CityByCityNameBeadByIdUpdateData, ThrowOnError>) => (options.client ?? client).post<PostV0CityByCityNameBeadByIdUpdateResponses, PostV0CityByCityNameBeadByIdUpdateErrors, ThrowOnError>({
     url: '/v0/city/{cityName}/bead/{id}/update',
@@ -227,6 +238,8 @@ export const getV0CityByCityNameBeads = <ThrowOnError extends boolean = false>(o
 
 /**
  * Create a bead
+ *
+ * Refused with 422, nothing written: a metadata key that is not a valid bead-metadata key, or a label that does not read back as itself from one CSV record (a comma, a quote, a newline or a carriage return); any change of whether the row is a startup-health episode (type startup-health-episode), which only the controller records; any change of whether the row is a session (its type, the gc:session label); and, on a session row, a key its disposition decodes (held_until, sleep_intent, wait_hold, quarantined_until, suspended_at, state, sleep_reason), which only the session verbs set. Each refusal names the offending field in errors[].
  */
 export const createBead = <ThrowOnError extends boolean = false>(options: Options<CreateBeadData, ThrowOnError>) => (options.client ?? client).post<CreateBeadResponses, CreateBeadErrors, ThrowOnError>({
     url: '/v0/city/{cityName}/beads',
@@ -1102,6 +1115,8 @@ export const getV0CityByCityNameSessionByIdTranscript = <ThrowOnError extends bo
 
 /**
  * Post v0 city by city name session by ID wake
+ *
+ * Records an explicit wake and asks the controller to start the session; the API never starts the runtime itself. 409 wake-will-not-start means the wake is recorded but the controller will not act on it (no runnable template, a dependency-only or drained pool session, a suspended city, rig or agent, a demand-only singleton, an abandoned create, an open circuit breaker, a startup-health quarantine, or an idle latch); the detail names the remedy. `gc session wake` applies the same rules.
  */
 export const postV0CityByCityNameSessionByIdWake = <ThrowOnError extends boolean = false>(options: Options<PostV0CityByCityNameSessionByIdWakeData, ThrowOnError>) => (options.client ?? client).post<PostV0CityByCityNameSessionByIdWakeResponses, PostV0CityByCityNameSessionByIdWakeErrors, ThrowOnError>({ url: '/v0/city/{cityName}/session/{id}/wake', ...options });
 
@@ -1126,6 +1141,8 @@ export const createSession = <ThrowOnError extends boolean = false>(options: Opt
 
 /**
  * Post v0 city by city name sling
+ *
+ * A convoy bead is expanded and each open child is routed separately, as gc sling does; the response then carries batch counts and one children entry per child. When some children were routed and others failed, the sling has already changed state, so it answers 200 with status "partial" and the per-child outcomes (failed children carry a reason, and a conflict naming the blocking workflows when a live source workflow refused them) rather than an error; do not retry such a request as a whole. A convoy sling that routed no child and failed at least one is an error, as before.
  */
 export const postV0CityByCityNameSling = <ThrowOnError extends boolean = false>(options: Options<PostV0CityByCityNameSlingData, ThrowOnError>) => (options.client ?? client).post<PostV0CityByCityNameSlingResponses, PostV0CityByCityNameSlingErrors, ThrowOnError>({
     url: '/v0/city/{cityName}/sling',

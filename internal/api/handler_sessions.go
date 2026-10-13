@@ -11,8 +11,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -94,10 +96,16 @@ func sessionToResponse(info session.Info, cfg *config.City) sessionResponse {
 		provider, displayName = resolveProviderInfo(info.Provider, cfg)
 	}
 	rig, _ := config.ParseQualifiedName(info.Template)
+	state := string(info.State)
+	if info.Closed {
+		// session.Info blanks State on a closed bead and carries closure in
+		// Closed; the wire reports it as the closed lifecycle state.
+		state = string(session.BaseStateClosed)
+	}
 	r := sessionResponse{
 		ID:          info.ID,
 		Template:    info.Template,
-		State:       string(info.State),
+		State:       state,
 		Title:       info.Title,
 		Alias:       info.Alias,
 		Provider:    provider,
@@ -366,7 +374,7 @@ func (s *Server) handleSessionSuspend(w http.ResponseWriter, r *http.Request) {
 		writeSessionManagerError(w, err)
 		return
 	}
-	if err := handle.Stop(r.Context()); err != nil {
+	if err := handle.Stop(r.Context(), s.actor(session.ActorOperator)); err != nil {
 		writeSessionManagerError(w, err)
 		return
 	}
@@ -389,7 +397,7 @@ func (s *Server) handleSessionClose(w http.ResponseWriter, r *http.Request) {
 		writeSessionManagerError(w, err)
 		return
 	}
-	closeResult, err := handle.CloseDetailed(r.Context())
+	closeResult, err := handle.CloseDetailed(r.Context(), s.actor(session.ActorOperator))
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return
@@ -501,6 +509,13 @@ func (s *Server) handleSessionWake(w http.ResponseWriter, r *http.Request) {
 	sessionName := res.Info.SessionNameMetadata
 	if sessionName != "" {
 		s.state.ClearCrashHistory(sessionName)
+	}
+	// Recorded, but a demand-only singleton's pool session will not start
+	// from it (#6858); same enqueue, refusal and code as the Huma route.
+	if msg := demandOnlySingletonWakeRefusal(s.state.Config(), res.Info); msg != "" {
+		s.state.Enqueue(reconcilekey.Session(id))
+		writeError(w, apierr.DemandOnlySingleton.Status, apierr.DemandOnlySingleton.Code, msg)
+		return
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "id": id})

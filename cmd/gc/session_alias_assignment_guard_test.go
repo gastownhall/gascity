@@ -83,7 +83,7 @@ func TestDrainGuardsKeepPoolSessionClaimingUnderItsSessionName(t *testing.T) {
 	info := sessiontest.SeedBead(t, legacyAliasedPoolSessionBead("gcg-session-x", sessionName, "", ""))
 	mustCreateInProgressWork(t, store, sessionName)
 
-	has, err := sessionHasOpenAssignedWorkForConfigInfo("", aliasGuardConfig(), store, nil, info)
+	has, err := sessionHasOpenAssignedWorkForConfigInfo(testSeatWork("", aliasGuardConfig(), store, nil), info)
 	if err != nil {
 		t.Fatalf("sessionHasOpenAssignedWorkForConfigInfo: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestDrainGuardsKeepPoolSessionClaimingUnderItsSessionName(t *testing.T) {
 		t.Fatal("orphan-drain guard missed a session-name-form pool claim; the whole fix rests on this form being visible")
 	}
 
-	closeGate, err := sessionHasOpenAssignedWorkForReachableStoreForCloseGate("", aliasGuardConfig(), store, nil, info)
+	closeGate, err := sessionHasOpenAssignedWorkForReachableStoreForCloseGate(testSeatWork("", aliasGuardConfig(), store, nil), info)
 	if err != nil {
 		t.Fatalf("sessionHasOpenAssignedWorkForReachableStoreForCloseGate: %v", err)
 	}
@@ -113,7 +113,7 @@ func TestAssignmentGuardsIgnoreTransientPoolSlotAliases(t *testing.T) {
 		mustCreateInProgressWork(t, store, assignee)
 	}
 
-	has, err := sessionHasOpenAssignedWorkForConfigInfo("", aliasGuardConfig(), store, nil, info)
+	has, err := sessionHasOpenAssignedWorkForConfigInfo(testSeatWork("", aliasGuardConfig(), store, nil), info)
 	if err != nil {
 		t.Fatalf("sessionHasOpenAssignedWorkForConfigInfo: %v", err)
 	}
@@ -122,7 +122,7 @@ func TestAssignmentGuardsIgnoreTransientPoolSlotAliases(t *testing.T) {
 			"ownership must never keep a session alive")
 	}
 
-	closeGate, err := sessionHasOpenAssignedWorkForReachableStoreForCloseGate("", aliasGuardConfig(), store, nil, info)
+	closeGate, err := sessionHasOpenAssignedWorkForReachableStoreForCloseGate(testSeatWork("", aliasGuardConfig(), store, nil), info)
 	if err != nil {
 		t.Fatalf("sessionHasOpenAssignedWorkForReachableStoreForCloseGate: %v", err)
 	}

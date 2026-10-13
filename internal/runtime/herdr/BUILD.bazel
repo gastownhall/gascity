@@ -7,6 +7,7 @@ go_library(
         "agent_name_taken.go",
         "agentname.go",
         "capabilities.go",
+        "claude_text.go",
         "client.go",
         "events.go",
         "launchspec.go",
@@ -29,8 +30,10 @@ go_test(
     srcs = [
         "activity_live_test.go",
         "activity_test.go",
+        "agent_info_test.go",
         "agent_name_taken_test.go",
         "agentname_test.go",
+        "claude_text_test.go",
         "client_test.go",
         "conformance_test.go",
         "dial_bound_test.go",
@@ -78,6 +81,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

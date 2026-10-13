@@ -10,11 +10,12 @@ import (
 	"github.com/gastownhall/gascity/test/toolhome"
 )
 
-// The acceptance suite runs gc with the operator's real HOME (the platform
-// supervisor refuses an override; gc isolates through GC_HOME). bd and dolt
-// never see it: every Env carries a tool home, and each bd or dolt child is
-// re-homed under it — through ToolList or ToolCommand when the suite forks it,
-// through LinkBeadsTooling's wrapper when gc finds it on PATH or via BD_BIN.
+// The acceptance suite runs gc with an isolated HOME under GC_HOME (see
+// NewEnv); only the real-provider tiers hand it the operator's own
+// (WithHostHome). bd and dolt see neither: every Env carries a tool home, and
+// each bd or dolt child is re-homed under it — through ToolList or ToolCommand
+// when the suite forks it, through LinkBeadsTooling's wrapper when gc finds it
+// on PATH or via BD_BIN.
 // See package toolhome for what bd resolves from HOME and the incident this
 // guards against.
 
@@ -58,6 +59,11 @@ func ToolCommand(t *testing.T, bin string, args ...string) *exec.Cmd {
 	}
 	cmd := exec.Command(bin, args...) //nolint:gosec // resolved test binary
 	cmd.Env = toolhome.Environ(os.Environ(), home)
+	// bd walks up from its working directory looking for a .beads. The test
+	// process's cwd is its package directory, which on a developer box sits
+	// under the real home, so an inherited cwd reads ~/.beads/config.yaml
+	// whatever HOME says. A caller that needs a workspace sets Dir itself.
+	cmd.Dir = home
 	return cmd
 }
 

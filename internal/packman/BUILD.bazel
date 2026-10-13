@@ -10,6 +10,7 @@ go_library(
         "networkgit_group_unix.go",
         "networkgit_group_windows.go",
         "prune.go",
+        "registry_release.go",
         "resolve.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/packman",
@@ -20,6 +21,7 @@ go_library(
         "//internal/fsys",
         "//internal/git",
         "//internal/gitcred",
+        "//internal/packregistry",
         "//internal/remotesource",
         "@com_github_burntsushi_toml//:toml",
     ] + select({
@@ -86,17 +88,21 @@ go_test(
         "network_git_test.go",
         "network_git_timeout_test.go",
         "prune_test.go",
+        "registry_release_test.go",
         "resolve_test.go",
         "testenv_import_test.go",
     ],
+    data = glob(["testdata/**"]),
     embed = [":packman"],
     deps = [
         "//internal/builtinpacks",
         "//internal/config",
         "//internal/fsys",
         "//internal/gitcred",
+        "//internal/packregistry",
         "//internal/processgroup/processgrouptest",
         "//internal/testenv",
+        "//internal/testutil",
     ],
 )
 
@@ -108,6 +114,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

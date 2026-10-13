@@ -117,6 +117,12 @@ type RouteRequest struct {
 	WorkDir  string            // rig directory for command execution
 	Env      map[string]string // extra env vars (GC_SLING_TARGET, etc.)
 	Force    bool              // allow best-effort routing when the bead is absent
+	// Store is the store that holds BeadID and that built-in routing must
+	// stamp. Nil means the router's own default store (the work store the
+	// sling was configured with). A formula wisp root is minted in the graph
+	// store (SlingDeps.graphStore), which on a city whose graph class is
+	// relocated to a [storage] binding is not the work store (#6054).
+	Store beads.Store
 }
 
 // SlingDeps bundles infrastructure dependencies for sling operations.
@@ -218,8 +224,9 @@ type SlingResult struct {
 	ContainerType string // "convoy", "epic", etc. (batch only)
 	Routed        int
 	Failed        int
-	Skipped       int // total skipped (idempotent + non-open)
+	Skipped       int // total skipped (idempotent + not open at dispatch turn + not open at listing)
 	IdempotentCt  int // how many were skipped due to idempotency
+	NotOpenCt     int // how many were listed open but no longer open at their dispatch turn
 	Total         int
 	NudgeAgent    *config.Agent // non-nil if caller should nudge
 
@@ -238,6 +245,9 @@ type SlingChildResult struct {
 	WorkflowID  string // if graph workflow attached
 	WispRootID  string // if formula attached
 	FormulaName string // formula used
+	// Conflict is the live source workflow that refused the child's launch,
+	// when that is why it failed.
+	Conflict *sourceworkflow.ConflictError
 }
 
 // Sling provides intent-based work routing operations. Construct via New.
@@ -360,6 +370,35 @@ func (s *Sling) AttachFormula(_ context.Context, formulaName, beadID string, tar
 		ScopeKind:     opts.ScopeKind,
 		ScopeRef:      opts.ScopeRef,
 	}, s.deps, s.deps.Store)
+}
+
+// Dispatch is the one entry point `gc sling` and POST /v0/city/{c}/sling share
+// for an explicit target. It takes the caller's whole intent as SlingOpts (bead
+// or formula, --on, --no-formula, title, vars, scope and the routing flags)
+// and lets the domain decide what it means: a standalone formula launch, an
+// explicit or default-formula attachment, a plain route, or a convoy whose open
+// children are routed one by one. Keeping that decision here rather than in
+// each transport is what keeps the API from drifting from the CLI; the API
+// once skipped convoy expansion and dropped title and vars on the target's
+// default formula. querier is the store the bead or convoy is read from.
+func (s *Sling) Dispatch(ctx context.Context, opts SlingOpts, querier BeadChildQuerier) (SlingResult, error) {
+	if opts.IsFormula || opts.OnFormula != "" || (!opts.NoFormula && opts.Target.EffectiveDefaultSlingFormula() != "") {
+		// Formula paths attach per child (or treat a convoy as one graph.v2
+		// input), which DoSlingBatch handles directly.
+		return DoSlingBatch(opts, s.deps, querier)
+	}
+	return s.ExpandConvoy(ctx, opts.BeadOrFormula, opts.Target, RouteOpts{
+		Merge:      opts.Merge,
+		NoConvoy:   opts.NoConvoy,
+		Owned:      opts.Owned,
+		Reassign:   opts.Reassign,
+		Nudge:      opts.Nudge,
+		Force:      opts.Force,
+		SkipPoke:   opts.SkipPoke,
+		DryRun:     opts.DryRun,
+		InlineText: opts.InlineText,
+		NoFormula:  opts.NoFormula,
+	}, querier)
 }
 
 // ExpandConvoy expands a convoy and routes each open child.
@@ -1700,6 +1739,11 @@ func PromoteWorkflowLaunchBead(store beads.Store, beadID string) error {
 type BeadCheckResult struct {
 	Idempotent bool
 	Warnings   []string
+	// Status is the bead status the check read, empty when the bead could not
+	// be read. It is reported alongside the routing verdict, not folded into
+	// it: DoSlingBatch skips a child it listed as open whose status here is no
+	// longer open (#5927), and single-bead sling ignores it.
+	Status string
 }
 
 // BeadCheckOptions configures pre-flight bead state checks for a route.

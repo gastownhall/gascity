@@ -94,7 +94,7 @@ func TestPoolSessionCreate_SweptSlotReleasesItsNameForTheNextAttempt(t *testing.
 
 	retired := seedPoolSessionBead(t, store, identity, nil)
 	retiredName := strings.TrimSpace(retired.SessionNameMetadata)
-	if _, err := front.Close(retired.ID, "orphaned", time.Now().UTC()); err != nil {
+	if _, err := front.Close(retired, "orphaned", time.Now().UTC()); err != nil {
 		t.Fatalf("closing retired slot: %v", err)
 	}
 
@@ -126,7 +126,7 @@ func TestPoolSessionCreate_FailedCreateHolderReleasesItsName(t *testing.T) {
 
 	first := seedPoolSessionBead(t, store, identity, nil)
 	firstName := strings.TrimSpace(first.SessionNameMetadata)
-	if !closeFailedCreateBead(front, first.ID, now, discardWriter{}) {
+	if !closeFailedCreateBead(front, first, now, discardWriter{}) {
 		t.Fatalf("closeFailedCreateBead(%s) failed", first.ID)
 	}
 

@@ -241,7 +241,7 @@ func TestSingletonPendingCreateRetryPreservesOccupiedRuntimeWithoutBeadChurn(t *
 		}
 		if info.ID != "" {
 			// Model the old retry loop, which invalidates each new pending bead.
-			closeFailedCreateBead(sessionFrontDoor(store), info.ID, now, io.Discard)
+			closeFailedCreateBead(sessionFrontDoor(store), info, now, io.Discard)
 		}
 	}
 	all, err := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})

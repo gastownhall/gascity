@@ -2,8 +2,14 @@
 # Vite build and embedded into the gc binary. Treat it as generated output: skip
 # textual diffing and the whitespace lint (`git diff --check`) on the minified
 # assets, and collapse it in review UIs. Drift is still caught by the content-based
-# `git diff --quiet -- internal/api/dashboardspa/dist` gate in the Makefile.
+# //internal/api/dashboardspa:dist_in_sync_test, which compares it with the bundle
+# Bazel builds from the sources.
 internal/api/dashboardspa/dist/** -diff linguist-generated
+
+# pnpm-lock.yaml is `pnpm import`'s translation of the dashboard's package-lock.json
+# (make dashboard-lock); //internal/api/dashboardspa/web:lockfiles_in_sync_test
+# keeps the two equal.
+internal/api/dashboardspa/web/pnpm-lock.yaml linguist-generated
 
 # The typed Go API client under internal/api/genclient/client_gen.go is emitted by
 # oapi-codegen (its header says "DO NOT EDIT") from the OpenAPI spec. Treat it as

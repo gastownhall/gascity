@@ -15,6 +15,7 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/pricing"
@@ -667,6 +668,11 @@ type Rig struct {
 	// explicit --var override. Takes precedence over formula-level defaults
 	// but loses to --var flags.
 	FormulaVars map[string]string `toml:"formula_vars,omitempty"`
+	// BeadsProxiedIdleTimeout overrides [beads] proxied_idle_timeout for this
+	// rig's bd-owned proxied scope. Go duration; "0" means never. Ignored, with
+	// a warning, for a rig that shares the city's proxy root: one proxy serves
+	// every scope on that root and carries the city's value.
+	BeadsProxiedIdleTimeout *string `toml:"beads_proxied_idle_timeout,omitempty"`
 }
 
 // AgentOverride modifies a pack-stamped agent for a specific rig.
@@ -1438,6 +1444,40 @@ type BeadsConfig struct {
 	// "require" (guarded release or a typed refusal). Empty defaults to "off".
 	// Any other value fails config load.
 	GuardedRelease string `toml:"guarded_release,omitempty" jsonschema:"enum=off,enum=auto,enum=require"`
+	// AllowSchemaBehindMigrate opts this city in to letting the linked beads
+	// library migrate its database forward when the database's own schema
+	// cursor trails the library's ceiling. Without it, the native-store
+	// preflight schema check FAILs a behind schema (stays on BdStore) instead
+	// of risking a native open that would migrate a possibly-shared database;
+	// the direct native-open path withholds BD_ALLOW_REMOTE_MIGRATE from the
+	// linked library the same way. Default: false (nil). A break-glass
+	// GC_BEADS_ALLOW_SCHEMA_BEHIND_MIGRATE env override is registered in
+	// internal/rollout (beads.allow_schema_behind_migrate); read the effective
+	// value through internal/rollout.Flags.AllowSchemaBehindMigrate, never
+	// this field directly.
+	AllowSchemaBehindMigrate *bool `toml:"allow_schema_behind_migrate,omitempty" jsonschema:"default=false"`
+	// ProxiedIdleTimeout is how long a bd-owned proxied scope's proxy and Dolt
+	// child stay up with no connections before bd retires them; the next bd
+	// command restarts them. Go duration; "0" means never. A finite value
+	// must be at least 1m. Empty uses the default, 30m. It applies to scopes gc
+	// initializes (gc init, gc rig add, gc beads city migrate-proxied); bd
+	// cannot change an existing scope's value, and gc doctor reports drift.
+	// Overridden per rig by beads_proxied_idle_timeout and by the
+	// GC_BEADS_PROXIED_IDLE_TIMEOUT environment variable.
+	ProxiedIdleTimeout string `toml:"proxied_idle_timeout,omitempty" jsonschema:"default=30m"`
+
+	// NativeTransport selects whether this city's bead stores may open the
+	// native Dolt store at all: "off" (this city's stores never open
+	// natively; always BdStore, the bd CLI subprocess — logged once at boot)
+	// or "auto" (default: native when preflight-eligible, today's behavior).
+	// Empty defaults to "auto". Any other value (including "require", which
+	// belongs to conditional_writes/guarded_release, not this switch) fails
+	// config load. A running city keeps the stores it holds open on the value
+	// it read at boot until it restarts; every other open, by a gc command or
+	// for a single tick, reads the current value.
+	// GC_BEADS_FORCE_FALLBACK remains a deprecated process-wide alias for
+	// "off" that overrides every city's value for one release.
+	NativeTransport string `toml:"native_transport,omitempty" jsonschema:"default=auto,enum=auto,enum=off"`
 	// Policies defines per-bead-use storage and garbage-collection defaults.
 	// Policy names are interpreted by higher-level systems; unknown names are
 	// preserved so packs can stage future policy classes without breaking load.
@@ -1496,6 +1536,44 @@ func (b BeadsConfig) NormalizedGuardedRelease() string {
 		return "off"
 	}
 	return b.GuardedRelease
+}
+
+// NormalizedNativeTransport returns the configured native-transport value,
+// mapping ONLY the empty string to the built-in default "auto" — unlike
+// ConditionalWrites/GuardedRelease, whose unset default is "off", this
+// switch's unset default is "auto" (today's eligibility-gated behavior).
+// Like the other two, an unknown non-empty value passes through verbatim
+// rather than collapsing to the default, because a typo must never silently
+// pick a mode: it is rejected upstream by validateNativeTransport on load.
+//
+// Unlike ConditionalWrites/GuardedRelease — whose raw config string is always
+// re-parsed through gate.ParseMode (case- and space-tolerant) before any
+// consumer compares it — NativeTransport's only runtime consumer
+// (resolvedNativeTransportMode) compares this string against the
+// beads.NativeTransportOff constant with a literal, case-sensitive ==. So this
+// method, not a downstream parser, is the single place that must fold case and
+// whitespace: every consumer MUST call NormalizedNativeTransport rather than
+// read the NativeTransport field directly, or "OFF"/"Off"/" off " would pass
+// validateNativeTransport (which does use gate.ParseMode) but then fail the
+// literal comparison and silently resolve to native/auto. Trimming+lowercasing
+// here (rather than in validateNativeTransport) keeps that invariant true for
+// every caller, present and future, without relying on each call site to
+// remember to normalize.
+func (b BeadsConfig) NormalizedNativeTransport() string {
+	raw := strings.ToLower(strings.TrimSpace(b.NativeTransport))
+	if raw == "" {
+		return "auto"
+	}
+	return raw
+}
+
+// AllowSchemaBehindMigrateEnabled reports the configured value, defaulting to
+// false (no opt-in) when unset. This is the raw config-only view; callers
+// deciding whether to actually let a behind schema migrate must read the
+// resolved internal/rollout gate (beads.allow_schema_behind_migrate), which
+// also applies the registered env override — never this accessor directly.
+func (b BeadsConfig) AllowSchemaBehindMigrateEnabled() bool {
+	return b.AllowSchemaBehindMigrate != nil && *b.AllowSchemaBehindMigrate
 }
 
 // UsesBD105CLISemantics reports whether bd-backed code may rely on bd 1.0.5
@@ -1783,7 +1861,19 @@ type ACPSessionConfig struct {
 	// to the default. gc stop bounds each session at 30s, so keep stop_grace
 	// comfortably below that.
 	StopGrace string `toml:"stop_grace,omitempty" jsonschema:"default=5s"`
+	// CancelTimeout is how long interrupting an ACP session waits for the
+	// agent to end its turn after session/cancel before falling back to
+	// SIGINT. The interrupt never kills the agent. Duration string (e.g.,
+	// "10s", "30s"). Defaults to "10s"; non-positive or unparseable values
+	// fall back to the default.
+	CancelTimeout string `toml:"cancel_timeout,omitempty" jsonschema:"default=10s"`
 }
+
+// DefaultACPCancelTimeout is how long an ACP interrupt waits for
+// session/cancel to settle the turn when [session.acp] cancel_timeout is
+// unset or invalid. It matches acp.DefaultCancelTimeout, the provider's own
+// default for a Config without a CancelTimeout.
+const DefaultACPCancelTimeout = 10 * time.Second
 
 // DefaultACPStopGrace is the ACP SIGTERM-to-SIGKILL grace used when
 // [session.acp] stop_grace is unset or invalid. It matches the grace every
@@ -1809,6 +1899,16 @@ func (a *ACPSessionConfig) StopGraceDuration() time.Duration {
 		return d
 	}
 	return DefaultACPStopGrace
+}
+
+// CancelTimeoutDuration returns the ACP session/cancel settle bound as a
+// time.Duration. Defaults to DefaultACPCancelTimeout if empty, unparseable,
+// or non-positive.
+func (a *ACPSessionConfig) CancelTimeoutDuration() time.Duration {
+	if d := durationOr(a.CancelTimeout, DefaultACPCancelTimeout); d > 0 {
+		return d
+	}
+	return DefaultACPCancelTimeout
 }
 
 // OutputBufferLinesOrDefault returns the output buffer line count.
@@ -1853,6 +1953,10 @@ type MailConfig struct {
 	// purge. The sweep distinguishes the two: empty leaves it at its own
 	// 60-minute default, while "0" disables its mail-close phase.
 	RetentionTTL string `toml:"retention_ttl,omitempty"`
+	// UnreadRetentionTTL is how long a never-read mail bead stays open before
+	// the nudge-mail sweep closes it. Empty or "0" disables the unread-mail
+	// phase; it is opt-in so unread mail is never closed by default.
+	UnreadRetentionTTL string `toml:"unread_retention_ttl,omitempty"`
 }
 
 // RetentionTTLDuration parses RetentionTTL as a Go time.Duration. Empty or
@@ -1868,6 +1972,23 @@ func (m MailConfig) RetentionTTLDuration() (time.Duration, error) {
 	}
 	if d < 0 {
 		return 0, fmt.Errorf("[mail] retention_ttl must not be negative: got %q", raw)
+	}
+	return d, nil
+}
+
+// UnreadRetentionTTLDuration parses UnreadRetentionTTL as a Go
+// time.Duration. Empty or zero disables the unread-mail sweep phase.
+func (m MailConfig) UnreadRetentionTTLDuration() (time.Duration, error) {
+	raw := strings.TrimSpace(m.UnreadRetentionTTL)
+	if raw == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("[mail] unread_retention_ttl %q is not a valid Go duration: %w", raw, err)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("[mail] unread_retention_ttl must not be negative: got %q", raw)
 	}
 	return d, nil
 }
@@ -2619,8 +2740,9 @@ type DaemonConfig struct {
 	// stop/unregister path always honors the full grace.
 	DoltStopTimeout string `toml:"dolt_stop_timeout,omitempty" jsonschema:"default=30s"`
 	// DoltStartAddressInUseRetryWindow is how long the managed dolt start
-	// path waits on the originally requested port when bind fails with
-	// "address already in use" before falling back to a higher port. The
+	// path waits on the originally requested port when dolt reports it in
+	// use ("address already in use", or "Port N already in use." from dolt
+	// 2.3.3) before falling back to a higher port. The
 	// common cause is a TIME_WAIT socket left by an abrupt stop of a sibling
 	// dolt subprocess (external SIGTERM, supervisor restart, OOM kill); on
 	// Linux the listening-socket slot typically frees within ~30s. Falling
@@ -2820,9 +2942,12 @@ func (d *DaemonConfig) AutoPruneWorkerDirEnabled() bool {
 }
 
 // PatrolIntervalDuration returns the patrol interval as a time.Duration.
-// Defaults to 30s if empty or unparseable.
+// Defaults to 30s if empty or unparseable. A test-hooks gc run with
+// clock.BackstopSpeedupEnv set returns it already divided, so every duration
+// a caller derives from it is divided too. That constant's doc lists those
+// callers; a new caller is added to it.
 func (d *DaemonConfig) PatrolIntervalDuration() time.Duration {
-	return durationOr(d.PatrolInterval, 30*time.Second)
+	return clock.Backstop(durationOr(d.PatrolInterval, 30*time.Second))
 }
 
 // TickDebounceDuration returns the tick-debounce window as a
@@ -2964,7 +3089,8 @@ func (d *DaemonConfig) DoltStopTimeoutDuration() time.Duration {
 }
 
 // DefaultDoltStartAddressInUseRetryWindow is the per-port retry window used
-// when dolt's bind fails with "address already in use" before the start path
+// when dolt reports its port in use ("address already in use", or "Port N
+// already in use." from dolt 2.3.3) before the start path
 // falls back to the next available port. 30s is roughly half Linux's default
 // TCP TIME_WAIT — the listening-socket slot typically frees well before the
 // full TIME_WAIT elapses because there are no active half-open connections
@@ -3332,7 +3458,11 @@ type Agent struct {
 	// set -x or echoing secrets in setup commands.
 	PreStart []string `toml:"pre_start,omitempty"`
 	// PromptTemplate is the path to this agent's prompt template file.
-	// Relative paths resolve against the city directory.
+	// Relative paths resolve against the directory of the file that declares
+	// the agent: the city directory for city.toml, the fragment's directory
+	// for an included fragment, and the pack directory for an agent a pack
+	// declares — in pack.toml or in agents/<name>/agent.toml alike. Paths
+	// prefixed with "//" resolve against the city root.
 	PromptTemplate string `toml:"prompt_template,omitempty"`
 	// Nudge is text typed into the agent's session after startup.
 	// Used for CLI agents that don't accept command-line prompts. For a known
@@ -3441,6 +3571,11 @@ type Agent struct {
 	//   3. ready unassigned work with gc.routed_to=<qualified-name>
 	// When the controller probes for demand without session context, only the
 	// routed_to tier applies. Override to integrate with external task systems.
+	// A custom query that looks up assigned work should read $GC_ALIAS: under
+	// gc hook --claim, a single-slot pool session the supervisor collapsed onto
+	// the agent's canonical [[named_session]] identity runs the query with
+	// $GC_ALIAS set to that identity, while $GC_AGENT keeps the session's
+	// runtime value.
 	WorkQuery string `toml:"work_query,omitempty"`
 	// SlingQuery is the command template to route a bead to this session config.
 	// If it contains Go template placeholders, gc expands them using the same
@@ -4822,10 +4957,7 @@ func Parse(data []byte) (*City, error) {
 	for i := range cfg.Agents {
 		cfg.Agents[i].source = sourceInline
 	}
-	if err := validateConditionalWrites(cfg.Beads.ConditionalWrites); err != nil {
-		return nil, err
-	}
-	if err := validateGuardedRelease(cfg.Beads.GuardedRelease); err != nil {
+	if err := validateBeadsModes(cfg.Beads); err != nil {
 		return nil, err
 	}
 	// Parse sees one layer. Cross-layer storage invariants (six-class
@@ -4835,6 +4967,21 @@ func Parse(data []byte) (*City, error) {
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+// validateBeadsModes rejects an out-of-enum value in any [beads] mode field
+// (conditional_writes, guarded_release, native_transport). Parse runs it on
+// its single layer and LoadWithIncludesOptions runs it again on the composed
+// root, because a fragment may supply any of these fields; one shared list
+// keeps the two load paths from drifting when a field is added.
+func validateBeadsModes(b BeadsConfig) error {
+	if err := validateConditionalWrites(b.ConditionalWrites); err != nil {
+		return err
+	}
+	if err := validateGuardedRelease(b.GuardedRelease); err != nil {
+		return err
+	}
+	return validateNativeTransport(b.NativeTransport)
 }
 
 // validateConditionalWrites rejects an out-of-enum beads.conditional_writes
@@ -4864,6 +5011,31 @@ func validateGuardedRelease(raw string) error {
 	}
 	if _, err := gate.ParseMode(raw); err != nil {
 		return fmt.Errorf("beads.guarded_release: %w", err)
+	}
+	return nil
+}
+
+// validateNativeTransport rejects an out-of-enum beads.native_transport
+// value at load time. This switch selects between the bd CLI subprocess and
+// the native store, not a correctness discipline, but the same rule applies:
+// a typo must never silently pick a mode, so the config fails to load
+// instead. Unlike conditional_writes/guarded_release, the grammar here is
+// two-valued (off|auto) — gate.ParseMode's third spelling, "require", parses
+// cleanly as a Mode but does not belong to this field, so it is rejected
+// explicitly rather than let through. The empty string (unset) is valid and
+// defaults to auto.
+func validateNativeTransport(raw string) error {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	// Deliberately do not wrap gate.ParseMode's own error: it advertises all
+	// three gate.Mode spellings ("want one of off, auto, require"), but
+	// native_transport is a two-valued field, so every rejection here —
+	// whether the spelling isn't a gate.Mode at all, or it is but is
+	// "require" — must report the same, field-correct allowed set.
+	mode, err := gate.ParseMode(raw)
+	if err != nil || mode == gate.Require {
+		return fmt.Errorf("beads.native_transport: invalid mode %q: want one of off, auto", raw)
 	}
 	return nil
 }

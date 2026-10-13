@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,7 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -52,10 +50,18 @@ import (
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
 
-// cacheReconcileActor is the event actor the controller stamps on bead events
-// emitted by a CachingStore's reconciliation pass, distinguishing the cache's
-// own snapshots from foreign writes delivered by a bd hook.
-const cacheReconcileActor = "cache-reconcile"
+// The controller records a CachingStore's own notifications under one of two
+// actors, by source (beads.ChangeSource). Both carry the cache's post-absorb
+// snapshot, so both apply as snapshots (isCacheActor).
+const (
+	// cacheLocalActor stamps a write this process made through the cache. It
+	// is a fact: the backing accepted the write.
+	cacheLocalActor = "cache-local"
+	// cacheReconcileActor stamps a change the cache inferred from a read: the
+	// reconcile scan's diff or RefreshRow. A read can be stale, so its
+	// bead.closed is re-read live before any durable effect.
+	cacheReconcileActor = "cache-reconcile"
+)
 
 // controllerState implements api.State, api.StateMutator, and
 // api.ConfigWriteSerializer (as a config transaction).
@@ -63,9 +69,25 @@ const cacheReconcileActor = "cache-reconcile"
 // the controller loop takes Lock when updating cfg/sp/stores.
 type controllerState struct {
 	mu sync.RWMutex
-	// onDeathGate is the city runtime's on_death start interlock, set when
-	// its inventory lane starts; nil holds nothing.
-	onDeathGate atomic.Pointer[onDeathGate]
+	// beadsQuiescent is set by the city runtime while the city is suspended
+	// and has no running sessions: every cache this state owns then skips its
+	// periodic reconcile, so nothing touches a store whose pair was retired.
+	beadsQuiescent *atomic.Bool
+	// storeWork counts the controller's store work in flight off the tick:
+	// a committed close's completion fact and autoclose, a cache-inferred
+	// close's confirming read, and autoclose sweep passes. A quiescent city
+	// retires its bd pairs only once it is zero (enterBeadsQuiescenceIfDue):
+	// work that passed its quiescence check before the city went quiescent is
+	// still reading, and its next read would restart a pair retired under it.
+	storeWork atomic.Int64
+	// suspendedRigs is the set of rigs the city runtime last saw suspended,
+	// published every tick. A suspended rig's cache skips its periodic
+	// reconcile from the next tick on, with no reload: any bd read restarts
+	// the rig's retired proxy.
+	suspendedRigs atomic.Pointer[map[string]bool]
+	// pendingPoke pokes the city runtime's pending-interaction lane; nil
+	// when the lane is not running (pending_interaction_lane.go).
+	pendingPoke atomic.Pointer[func(sessionID string)]
 	cfg         *config.City
 	// rawCfg is the raw (pre-expansion, site-bound) config snapshot captured
 	// at the same generation as cfg. It is the basis the mutation gate uses
@@ -108,14 +130,28 @@ type controllerState struct {
 	adapterReg             *extmsg.AdapterRegistry
 	maintenanceLoop        *supervisor.StoreMaintenanceLoop // nil when [maintenance.dolt] enabled=false
 	updateMu               sync.Mutex                       // serializes rebuild+swap so stale reloads cannot overtake newer mutations
-	beadEventStartSeq      uint64
-	beadEventStartSeqOK    bool // false when LatestSeq errored at construction; 0+true = genuinely empty log
+	// publishMu makes deciding to publish a config snapshot atomic with
+	// publishing it: a runtime reload's staleness check plus swap, and an API
+	// mutation's refresh plus pending-revision mark. Without it a reload could
+	// pass its check, then swap its older config over a mutation that
+	// refreshed in between. Lock order: publishMu, then updateMu, then mu.
+	publishMu           sync.Mutex
+	beadEventStartSeq   uint64
+	beadEventStartSeqOK bool // false when LatestSeq errored at construction; 0+true = genuinely empty log
 
-	// completionsDeltaIndex is the tick delta pass's warm completion-fact
-	// idempotency record: loaded from the journal once, then kept current by the
-	// same journal feed that names the lane's roots. The off-tick convergence
+	// completionsDeltaIndex is the controller's warm completion-fact
+	// idempotency record, shared by the tick delta pass and the close path
+	// (emitCompletedFact: a bead.closed, a confirmed inferred close, the
+	// autoclose sweep), so one close is one fact whichever path records it.
+	// It is loaded from the journal once, then kept current by the same
+	// journal feed that names the lane's roots; the close path's own keys stay
+	// unconfirmed until that feed reads them back. The off-tick convergence
 	// sweep holds its own inside its CompletionBackstop.
 	completionsDeltaIndex executionevent.CompletedFactIndex
+
+	// autocloseSweep backstops close-triggered autoclose; see autoclose_sweep.go.
+	autocloseSweep     *autocloseSweep
+	autocloseSweepOnce sync.Once
 
 	// emergencyCh receives emergency.Record values from the gc emergency
 	// subsystem. startEmergencyEventRelay drains this channel and mirrors
@@ -144,6 +180,11 @@ type controllerState struct {
 	// corruption it gates — so a divergent on-disk change surfaces as a
 	// pending-restart notice via noteRolloutDrift rather than flipping mid-run.
 	rolloutFlags rollout.Flags
+	// nativeTransport is the boot-latched beads.native_transport snapshot:
+	// written once in newControllerState, never reassigned — mirroring
+	// rolloutFlags above. A mid-run city.toml edit changing this value takes
+	// effect only at the next restart; it does not flip an already-open store.
+	nativeTransport beads.NativeTransportMode
 	// rolloutDriftMu guards rolloutDrift and rolloutDriftSig.
 	rolloutDriftMu sync.Mutex
 	// rolloutDrift holds a NoticePendingRestart when a reloaded config's beads
@@ -168,8 +209,8 @@ var beadEventWatcherRetryDelay = time.Second
 // and skip spawning managed dolt (~12s per call). The store is long-lived —
 // the controller holds it for the process lifetime — so it keeps the beads
 // library's daemon-sized project pool rather than the one-shot CLI cap.
-var newControllerStateOpenCityStore = func(cityPath string, mode gate.Mode) (beads.StoreOpenResult, error) {
-	return openStoreResultAtForCityWithMode(cityPath, cityPath, mode, true, true)
+var newControllerStateOpenCityStore = func(cityPath string, mode gate.Mode, nativeTransport beads.NativeTransportMode) (beads.StoreOpenResult, error) {
+	return openStoreResultAtForCityWithMode(cityPath, cityPath, mode, true, true, &nativeTransport)
 }
 
 // controllerStateOpenRigStoreAtForCity routes controller rig stores through
@@ -239,7 +280,8 @@ func newControllerStateWithRoutes(
 	}
 	// A split city's binding gets the CachingStore its work ledger has, before
 	// the class-routed services below are built over it (class_store_cache.go).
-	routes = routes.withControllerCache(ctx, ep)
+	beadsQuiescent := new(atomic.Bool)
+	routes = routes.withControllerCache(ctx, ep, reconcileGateFor(beadsQuiescent))
 	// Latch the rollout-gate snapshot ONCE from the boot config. A resolve error
 	// (nil cfg or an out-of-enum config value) is warn-and-continue: the zero
 	// Flags is degraded-safe (legacy paths), and this constructor returns no
@@ -248,7 +290,11 @@ func newControllerStateWithRoutes(
 	if rolloutErr != nil {
 		fmt.Fprintf(os.Stderr, "api: rollout gates: %v (using zero Flags; legacy paths)\n", rolloutErr)
 	}
+	// Latch beads.native_transport ONCE from the boot config too, for the same
+	// reason: a later city.toml edit must not flip an already-open store.
+	nativeTransport := resolvedNativeTransportMode(cfg)
 	cs := &controllerState{
+		beadsQuiescent:      beadsQuiescent,
 		cfg:                 cfg,
 		sp:                  sp,
 		cacheCtx:            ctx,
@@ -264,6 +310,7 @@ func newControllerStateWithRoutes(
 		beadEventStartSeq:   beadEventStartSeq,
 		beadEventStartSeqOK: beadEventStartSeqOK,
 		rolloutFlags:        rolloutFlags,
+		nativeTransport:     nativeTransport,
 	}
 	// Boot-resolved rollout notices are retained on the Flags value; echo
 	// them once at startup so an env override contradicting explicit config
@@ -272,17 +319,24 @@ func newControllerStateWithRoutes(
 	for _, n := range cs.rolloutFlags.Notices() {
 		cs.rolloutWarnf("api: rollout: %s\n", n.Message)
 	}
+	cs.setSuspendedRigs(buildEffectiveSuspendedRigNames(cfg, loadSuspensionStateBestEffort(cityPath)))
+	// native_transport="off" is this city's stores never opening natively, for
+	// the life of the process; logged once at boot, matching the design's
+	// "logged once at boot" requirement for the per-city kill switch.
+	if cs.nativeTransport == beads.NativeTransportOff {
+		fmt.Fprintf(os.Stderr, "api: beads.native_transport=\"off\": city %q will never open a native bead store; always BdStore\n", cityName)
+	}
 	cs.beadStores = cs.buildStores(cfg)
 	// Capture the initial raw config snapshot so provenance reads before the
 	// first reload still use the gate's basis. nil is tolerated: RawConfig
 	// lazily retries on the first read.
 	cs.rawCfg = cs.loadRawSnapshot()
 	// Open city-level store for session beads and mail (best-effort).
-	if opened, err := newControllerStateOpenCityStore(cityPath, cs.rolloutFlags.BeadsConditionalWrites()); err != nil {
+	if opened, err := newControllerStateOpenCityStore(cityPath, cs.rolloutFlags.BeadsConditionalWrites(), cs.nativeTransport); err != nil {
 		fmt.Fprintf(os.Stderr, "api: city bead store: %v (session/mail endpoints disabled)\n", err)
 	} else {
 		store := opened.Store
-		cs.cityBeadStore = wrapWithCachingStore(ctx, store, ep, true)
+		cs.cityBeadStore = wrapWithCachingStore(ctx, store, ep, true, cs.reconcileGate())
 		cs.cityBeadsDiagnostic = diagnosticPtr(opened.Diagnostic)
 		cs.cityMailProv = newCityMailProvider(cs.storageRoutes, cs.cityBeadStore, cfg, cityPath, ep)
 		cs.extmsgSvc = newCityExtMsgServices(cs.storageRoutes, cs.cityBeadStore, cfg, cityPath, ep)
@@ -293,13 +347,13 @@ func newControllerStateWithRoutes(
 }
 
 // wrapWithCachingStore wraps store in an in-memory read cache. When
-// backgroundRefresh is true the cache fully primes and runs a continuous
-// reconcile loop (the steady-state cost: one bd subprocess per cycle per scope).
-// When false the cache only pre-primes active beads synchronously — enough for
-// on-demand reads — and skips both the async full prime and the reconcile loop.
-// Suspended rigs pass false: they spawn no agents, so nothing writes locally and
-// a continuously refreshed cache buys nothing; reconciling every suspended rig
-// every cycle is what pegs the supervisor (gastownhall/gascity #1978 follow-up).
+// backgroundRefresh is true the cache pre-primes active beads, fully primes
+// and runs a continuous reconcile loop (the steady-state cost: one bd
+// subprocess per cycle per scope). When false it does none of that: reads go
+// to bd on demand. Suspended rigs pass false: they spawn no agents, so nothing
+// writes locally, and gc must not touch a suspended scope at all — any bd read
+// restarts its retired proxy and Dolt (gastownhall/gascity #1978 follow-up,
+// #6561).
 func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Provider, backgroundRefresh bool, opts ...beads.CachingStoreOption) beads.Store {
 	baseStore, policyStore, policyWrapped := unwrapBeadPolicyStore(store)
 	if baseStore == nil {
@@ -312,27 +366,17 @@ func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Prov
 	if ep != nil {
 		recorder = ep
 	}
-	onChange := func(eventType, beadID, runID, sessionID, stepID string, dependsOnStepIDs *[]string, payload json.RawMessage) {
-		if recorder != nil {
-			recorder.Record(events.Event{
-				Type:             eventType,
-				Actor:            cacheReconcileActor,
-				Subject:          beadID,
-				RunID:            runID,
-				SessionID:        sessionID,
-				StepID:           stepID,
-				DependsOnStepIDs: dependsOnStepIDs,
-				Payload:          payload,
-			})
-		}
-	}
-	cs := beads.NewCachingStore(baseStore, onChange, opts...)
+	cs := beads.NewCachingStore(baseStore, cacheChangeRecorder(recorder), opts...)
 	// Pre-prime active beads synchronously (~1-2s, indexed queries).
 	// Loads open + in_progress beads — enough for the startup path
 	// (adoption, session snapshot, desired state) so the city can
-	// reach "ready" without waiting for the full prime.
-	if err := cs.PrimeActive(); err != nil {
-		log.Printf("caching-store: pre-prime failed: %v", err)
+	// reach "ready" without waiting for the full prime. A suspended rig
+	// (no background refresh) is not primed at all: it is left cold, and
+	// any read it does get goes to bd on demand.
+	if backgroundRefresh {
+		if err := cs.PrimeActive(); err != nil {
+			log.Printf("caching-store: pre-prime failed: %v", err)
+		}
 	}
 	// No cancellable ctx, or caller opted out of background refresh (suspended
 	// rig): serve from the synchronous pre-prime only, no async prime/reconcile.
@@ -392,6 +436,7 @@ func (cs *controllerState) buildStores(cfg *config.City) map[string]beads.Store 
 			CityPath:                    cs.cityPath,
 			Provider:                    "file",
 			ConditionalWrites:           cs.rolloutFlags.BeadsConditionalWrites(),
+			NativeTransport:             cs.nativeTransport,
 			OnConditionalWritesDegraded: conditionalWritesDegradedRecorder(cs.eventProv, cs.rolloutFlags, "city"),
 			OpenFileStore: func() (beads.Store, error) {
 				return openCompatibleFileStore(cs.cityPath, cs.cityPath)
@@ -420,13 +465,13 @@ func (cs *controllerState) buildStores(cfg *config.City) map[string]beads.Store 
 			// Legacy file mode aliases every rig to the same backing store, so
 			// the cache handle must be shared too for immediate cross-rig reads.
 			if sharedLegacyCachedStore == nil {
-				sharedLegacyCachedStore = wrapWithCachingStore(cs.cacheCtx, sharedLegacyFileStore, cs.eventProv, true)
+				sharedLegacyCachedStore = wrapWithCachingStore(cs.cacheCtx, sharedLegacyFileStore, cs.eventProv, true, cs.reconcileGate())
 			}
 			stores[rig.Name] = sharedLegacyCachedStore
 			continue
 		}
 		store = cs.openRigStore(scopeProvider, rig.Name, scopeRoot, rig.EffectivePrefix(), cfg)
-		stores[rig.Name] = wrapWithCachingStore(cs.cacheCtx, store, cs.eventProv, rigStoreBackgroundRefresh(suspState, rig))
+		stores[rig.Name] = wrapWithCachingStore(cs.cacheCtx, store, cs.eventProv, rigStoreBackgroundRefresh(suspState, rig), cs.rigReconcileGate(rig.Name))
 	}
 	return stores
 }
@@ -444,6 +489,84 @@ func (cs *controllerState) buildStores(cfg *config.City) map[string]beads.Store 
 // the skip at all.
 func rigStoreBackgroundRefresh(suspState suspensionstate.State, rig config.Rig) bool {
 	return !suspensionstate.EffectiveRigSuspended(suspState, rig.Name, rig.EffectiveSuspendedOnStart())
+}
+
+// reconcileGate is the CachingStoreOption every cache this state owns carries:
+// it pauses the cache's periodic reconcile while the city is quiescent.
+func (cs *controllerState) reconcileGate() beads.CachingStoreOption {
+	return reconcileGateFor(cs.beadsQuiescent)
+}
+
+// reconcileGateFor pauses a cache's periodic reconcile while quiescent is set.
+func reconcileGateFor(quiescent *atomic.Bool) beads.CachingStoreOption {
+	return beads.WithReconcileGate(func() bool { return quiescent == nil || !quiescent.Load() })
+}
+
+// rigReconcileGate is reconcileGate for one rig's cache: it also pauses while
+// that rig is suspended (suspendedRigs).
+func (cs *controllerState) rigReconcileGate(rigName string) beads.CachingStoreOption {
+	return beads.WithReconcileGate(func() bool {
+		if cs.beadsQuiescent != nil && cs.beadsQuiescent.Load() {
+			return false
+		}
+		return !cs.rigSuspended(rigName)
+	})
+}
+
+// rigSuspended reports whether the city runtime last saw rigName suspended.
+func (cs *controllerState) rigSuspended(rigName string) bool {
+	if cs == nil {
+		return false
+	}
+	rigs := cs.suspendedRigs.Load()
+	return rigs != nil && (*rigs)[rigName]
+}
+
+// setSuspendedRigs publishes the rigs the city runtime sees suspended.
+func (cs *controllerState) setSuspendedRigs(rigs map[string]bool) {
+	if cs == nil {
+		return
+	}
+	cs.suspendedRigs.Store(&rigs)
+}
+
+// beginStoreWork counts one piece of store work as in flight (see storeWork)
+// and returns the func that ends it.
+func (cs *controllerState) beginStoreWork() (end func()) {
+	cs.storeWork.Add(1)
+	var once sync.Once
+	return func() { once.Do(func() { cs.storeWork.Add(-1) }) }
+}
+
+// trackStoreWork wraps fn as store work counted from now, when it is
+// dispatched, until it returns: a run queued just before the city goes
+// quiescent holds the retire as much as one already reading.
+func (cs *controllerState) trackStoreWork(fn func()) func() {
+	end := cs.beginStoreWork()
+	return func() {
+		defer end()
+		fn()
+	}
+}
+
+// storeWorkInFlight reports whether any store work is in flight.
+func (cs *controllerState) storeWorkInFlight() bool {
+	return cs != nil && cs.storeWork.Load() > 0
+}
+
+// storesQuiescent reports whether the city is quiescent (see beadsQuiescent):
+// its stores take no read until it resumes.
+func (cs *controllerState) storesQuiescent() bool {
+	return cs != nil && cs.beadsQuiescent != nil && cs.beadsQuiescent.Load()
+}
+
+// setBeadsQuiescent records whether the city is quiescent (suspended, with no
+// running sessions). See beadsQuiescent.
+func (cs *controllerState) setBeadsQuiescent(quiescent bool) {
+	if cs == nil || cs.beadsQuiescent == nil {
+		return
+	}
+	cs.beadsQuiescent.Store(quiescent)
 }
 
 // openRigStore creates a bead store for a rig path using the given provider.
@@ -476,8 +599,9 @@ func (cs *controllerState) openRigStore(provider, rigName, rigPath, prefix strin
 		ScopeRoot:                   scopeRoot,
 		CityPath:                    cs.cityPath,
 		Provider:                    provider,
-		PreflightChecker:            newBeadsPreflightChecker(cs.cityPath, provider),
+		PreflightChecker:            newBeadsPreflightChecker(cs.cityPath, provider, cfg),
 		ConditionalWrites:           cs.rolloutFlags.BeadsConditionalWrites(),
+		NativeTransport:             cs.nativeTransport,
 		OnConditionalWritesDegraded: conditionalWritesDegradedRecorder(cs.eventProv, cs.rolloutFlags, "rig/"+rigName),
 		// The controller holds a rig store for the process lifetime, which is
 		// what decides both the project-pool shape and whether a finite-idle
@@ -713,8 +837,14 @@ func (cs *controllerState) completionReconcileInputs(plane storePlane) (events.P
 		resolveGraphStore(cs.storageRoutes, cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv),
 		cs.cityBeadStore,
 	}
+	// A suspended rig is not swept: it runs nothing, and a bd read restarts
+	// its retired proxy and Dolt.
+	suspendedRigs := buildEffectiveSuspendedRigNames(cs.cfg, loadSuspensionStateBestEffort(cs.cityPath))
 	rigStores := make(map[string]beads.Store, len(cs.beadStores))
 	for name, store := range cs.beadStores {
+		if suspendedRigs[name] {
+			continue
+		}
 		rigStores[name] = store
 	}
 	cs.mu.RUnlock()
@@ -850,17 +980,15 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 	if evt.Type == events.BeadClosed {
 		storeRef = cs.autocloseStoreRefLocked(evt.Subject)
 	}
-	// Only the v2 router asks whether the event landed in the sessions store.
-	appliedToSessions := wake.routes() && slices.Contains(stores, resolveSessionStore(cs.storageRoutes, cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv))
 	cs.mu.RUnlock()
 
-	// A cache-reconcile event carries a CachingStore's own post-absorb snapshot,
-	// dependencies included, rather than a bd hook patch. Saying so keeps the
-	// cache from reading its own emission as a coverage-unknown payload and
-	// discarding the dependency and is_blocked state it just installed, which
-	// fences the row out of the next reconcile pass and re-emits forever
-	// (ga-yoix1).
-	snapshot := evt.Actor == cacheReconcileActor
+	// A cache event (either actor) carries a CachingStore's own post-absorb
+	// snapshot, dependencies included, rather than a bd hook patch. Saying so
+	// keeps the cache from reading its own emission as a coverage-unknown
+	// payload and discarding the dependency and is_blocked state it just
+	// installed, which fences the row out of the next reconcile pass and
+	// re-emits forever (ga-yoix1).
+	snapshot := isCacheActor(evt.Actor)
 	for _, store := range stores {
 		if cached, ok := store.(*beads.CachingStore); ok {
 			// A class binding's out-of-process writers are one-shot CLIs, whose
@@ -875,17 +1003,99 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 			}
 		}
 	}
-	wake.OnBeadEvent(evt, snapshot, appliedToSessions)
+	wake.OnBeadEvent(evt, snapshot)
 	if evt.Type == events.BeadClosed && evt.Subject != "" && len(stores) > 0 {
-		rec := events.Discard
-		cs.mu.RLock()
-		if cs.eventProv != nil {
-			rec = cs.eventProv
+		if evt.Actor == cacheReconcileActor {
+			beadCloseAutocloseDispatch(cs.trackStoreWork(func() { cs.applyInferredClose(evt, stores, storeRef) }))
+			return
 		}
-		cs.mu.RUnlock()
-		executionevent.EmitCompletedFromClosedNotification(rec, cs.GraphBeadStore().Store, evt.Payload, evt.Actor)
-		cs.runBeadCloseAutoclose(evt.Subject, stores[0], storeRef)
+		cs.applyCommittedClose(evt, stores[0], storeRef)
 	}
+}
+
+// applyCommittedClose runs a committed bead.closed's durable effects: the
+// completion fact, then autoclose. A local close, or a writer's own
+// bead.closed, is a committed close. Both effects read (the fact reads the
+// run's root from the graph store), so a quiescent city runs neither yet: the
+// sweep confirms the close after resume and records the fact then. That fact
+// carries the actor of the pass that records it (autoclose-sweep, or
+// execution-reconcile when the completions lane reaches the row first), not
+// the writer's. A row that no longer reads closed by then, reopened or
+// deleted, gets none: both passes record facts only for rows that read closed.
+// The fact's read is store work (storeWork) from before the quiescence check,
+// so a city that goes quiescent while it reads keeps its pairs until it ends.
+func (cs *controllerState) applyCommittedClose(evt events.Event, store beads.Store, storeRef string) {
+	defer cs.beginStoreWork()()
+	if cs.deferIfQuiescent(evt.Subject) {
+		return
+	}
+	if step, ok := beads.DecodeBeadEventPayload(evt.Payload); ok {
+		cs.emitCompletedFact(step, evt.Actor)
+	}
+	cs.runBeadCloseAutoclose(evt.Subject, store, storeRef)
+}
+
+// applyInferredClose runs a cache-inferred bead.closed's durable effects only
+// if a live read returns the row closed: the scan can evict an open row and
+// synthesize its close (mc-zndi7.43, .56). The fact derives from that read,
+// not from the inferred payload. A row that is open or gone gets nothing. An
+// unreadable row gets nothing yet: the autoclose sweep re-reads it, and the
+// completions sweep backstops its fact.
+func (cs *controllerState) applyInferredClose(evt events.Event, stores []beads.Store, storeRef string) {
+	if cs.deferIfQuiescent(evt.Subject) {
+		return
+	}
+	store, live, err := liveReadOwner(stores, evt.Subject)
+	switch confirmInferredClose(live, err) {
+	case closeConfirmed:
+		cs.emitCompletedFact(live, evt.Actor)
+		finished := cs.beadCloseAutoclose(evt.Subject, store, storeRef)()
+		cs.autocloseSweepOf().settle(evt.Subject, finished, time.Now())
+	case closeUnconfirmed:
+		cs.autocloseSweepOf().settle(evt.Subject, false, time.Now())
+	}
+}
+
+// deferIfQuiescent owes id's close to the sweep, reading nothing, when the city
+// is quiescent, and reports whether it did. The close is settled unfinished, so
+// a handled mark left by an earlier close of id cannot make the sweep skip it.
+func (cs *controllerState) deferIfQuiescent(id string) bool {
+	if !cs.storesQuiescent() {
+		return false
+	}
+	cs.autocloseSweepOf().settle(id, false, time.Now())
+	return true
+}
+
+// liveReadOwner reads id live from the store that holds it. stores is
+// beadEventStoresLocked's answer: exactly the store whose configured prefix
+// owns id, or, on the unconfigured fallback, every store, where the first
+// that does not answer ErrNotFound holds the row. stores must be non-empty.
+func liveReadOwner(stores []beads.Store, id string) (beads.Store, beads.Bead, error) {
+	var err error
+	for _, store := range stores {
+		var b beads.Bead
+		if b, err = beads.HandlesFor(store).Live.Get(id); !errors.Is(err, beads.ErrNotFound) {
+			return store, b, err
+		}
+	}
+	return stores[0], beads.Bead{}, err
+}
+
+// emitCompletedFact records step's execution.step_completed once per fact,
+// through the delta pass's idempotency record, so a replayed or re-inferred
+// close is not a second fact.
+func (cs *controllerState) emitCompletedFact(step beads.Bead, actor string) {
+	cs.completionsDeltaIndex.EmitCompleted(cs.closeRecorder(), cs.GraphBeadStore().Store, step, actor)
+}
+
+func (cs *controllerState) closeRecorder() events.Recorder {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	if cs.eventProv != nil {
+		return cs.eventProv
+	}
+	return events.Discard
 }
 
 // autocloseStoreRefLocked returns the storeRef string for the store that owns
@@ -915,8 +1125,38 @@ func (cs *controllerState) autocloseStoreRefLocked(beadID string) string {
 
 // runBeadCloseAutoclose dispatches convoy/wisp/molecule autoclose for a closed
 // bead via the controller's store. Replaces the shell on_close hook chain that
-// spawned gc subprocesses per bead write (gastownhall/gascity#3248).
+// spawned gc subprocesses per bead write (gastownhall/gascity#3248). The bead
+// is marked handled only once the run has finished its reads (settle).
+//
+// A run the dispatcher starts once the city is quiescent reads nothing: a
+// close that lands as the city drains (a stopped session's wisp) is owed to
+// the sweep, which confirms it after resume. Read now, it would restart the
+// bd pair the quiescent city just retired. The check is not atomic with the
+// reads it guards: a suspend that lands after it still completes the run, as
+// it does the row a sweep pass has in flight. So the run is store work
+// (storeWork) from dispatch until it returns, and the quiescent city retires
+// its pairs only once no such run is in flight.
 func (cs *controllerState) runBeadCloseAutoclose(beadID string, store beads.Store, storeRef string) {
+	run := cs.beadCloseAutoclose(beadID, store, storeRef)
+	beadCloseAutocloseDispatch(cs.trackStoreWork(func() {
+		if cs.deferIfQuiescent(beadID) {
+			return
+		}
+		cs.autocloseSweepOf().settle(beadID, run(), time.Now())
+	}))
+}
+
+// autocloseRefusalAttempts bounds the runs one trigger makes while a fenced
+// close keeps being refused. Each refusal is a write that landed between the
+// re-read and the close; past the bound the trigger is left to the sweep.
+const autocloseRefusalAttempts = 3
+
+// beadCloseAutoclose returns the convoy/wisp/molecule autoclose for a closed
+// bead, for the caller to run or dispatch. The func reports whether the run
+// finished: every read answered and no fenced close stayed refused. A refused
+// close re-runs the whole decision (re-read, re-check, retry the conditional
+// close), since the write that refused it may have changed the answer.
+func (cs *controllerState) beadCloseAutoclose(beadID string, store beads.Store, storeRef string) func() bool {
 	rec := events.Discard
 	if cs.eventProv != nil {
 		rec = cs.eventProv
@@ -927,11 +1167,16 @@ func (cs *controllerState) runBeadCloseAutoclose(beadID string, store beads.Stor
 	// co-residence with the closed bead. On a single-store city GraphBeadStore()
 	// returns the same store, so this is identity today.
 	graphStore := cs.GraphBeadStore()
-	beadCloseAutocloseDispatch(func() {
-		doConvoyAutocloseWith(store, rec, beadID, os.Stderr, os.Stderr)
-		doWispAutocloseWith(store, beadID, os.Stderr, graphStore)
-		doMoleculeAutocloseWith(store, storeRef, rec, beadID, os.Stderr, graphStore)
-	})
+	return func() bool {
+		for attempt := 1; ; attempt++ {
+			run := doConvoyAutocloseWith(store, rec, beadID, os.Stderr, os.Stderr)
+			run.merge(doWispAutocloseWith(store, beadID, os.Stderr, graphStore))
+			run.merge(doMoleculeAutocloseWith(store, storeRef, rec, beadID, os.Stderr, graphStore))
+			if !run.refused || attempt >= autocloseRefusalAttempts {
+				return run.finished()
+			}
+		}
+	}
 }
 
 // beadEventStoresLocked returns the stores a bead event for id is applied to:
@@ -1031,7 +1276,7 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	// Reopen carries the BOOT-latched mode: re-resolving from the (possibly
 	// edited) on-disk config here would flip the city store's write
 	// discipline mid-process while rig stores keep the boot mode.
-	openedCityStore, err := newControllerStateOpenCityStore(cs.cityPath, cs.rolloutFlags.BeadsConditionalWrites())
+	openedCityStore, err := newControllerStateOpenCityStore(cs.cityPath, cs.rolloutFlags.BeadsConditionalWrites(), cs.nativeTransport)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "api: city bead store reload: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
@@ -1040,7 +1285,7 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	var cityMailProv mail.Provider
 	var extSvc *extmsg.Services
 	if cityStore != nil {
-		cityStore = wrapWithCachingStore(cs.cacheCtx, cityStore, cs.eventProv, true)
+		cityStore = wrapWithCachingStore(cs.cacheCtx, cityStore, cs.eventProv, true, cs.reconcileGate())
 		cityMailProv = newCityMailProvider(cs.storageRoutes, cityStore, cfg, cs.cityPath, cs.eventProv)
 		extSvc = newCityExtMsgServices(cs.storageRoutes, cityStore, cfg, cs.cityPath, cs.eventProv)
 	}
@@ -1095,7 +1340,11 @@ func closeBeadStoreHandle(store beads.Store) error {
 	if store == nil {
 		return nil
 	}
-	if base, _, ok := unwrapBeadPolicyStore(store); ok {
+	if base, policy, ok := unwrapBeadPolicyStore(store); ok {
+		if policy.borrowed {
+			// The invocation memo owns the store and closes it at exit.
+			return nil
+		}
 		return closeBeadStoreHandle(base)
 	}
 	if cached, ok := store.(*beads.CachingStore); ok {
@@ -1147,6 +1396,8 @@ func storePointerKey(store beads.Store) (uintptr, bool) {
 // or on-disk config won while the reload was preparing it) and leaves the
 // controller state untouched; the caller must then keep its own generation too.
 func (cs *controllerState) updateFromRuntime(cfg *config.City, sp runtime.Provider, revision string) bool {
+	cs.publishMu.Lock()
+	defer cs.publishMu.Unlock()
 	if cs.configMutationPending.Load() {
 		matchesPending, stale := cs.runtimeUpdateStatusForPendingMutation(revision)
 		if stale {
@@ -1663,14 +1914,6 @@ func (cs *controllerState) IsQuarantined(sessionName string) bool {
 	}
 	return ct.isQuarantined(sessionName, time.Now())
 }
-
-// OnDeathHookPending reports whether sessionName's on_death hook is queued
-// or running, so an API start must leave it to the reconciler.
-func (cs *controllerState) OnDeathHookPending(sessionName string) bool {
-	return cs.onDeathGate.Load().Pending(sessionName)
-}
-
-var _ api.OnDeathHookGate = (*controllerState)(nil)
 
 // ClearCrashHistory removes in-memory crash tracking for a session.
 func (cs *controllerState) ClearCrashHistory(sessionName string) {
@@ -3080,7 +3323,12 @@ func (cs *controllerState) mutateAndPoke(mutate func() error) error {
 	if err := mutate(); err != nil {
 		return err
 	}
+	cs.publishMu.Lock()
 	revision, err := cs.refreshConfigSnapshot()
+	if err == nil {
+		cs.markConfigMutationPending(revision)
+	}
+	cs.publishMu.Unlock()
 	if err != nil {
 		if snapshot != nil {
 			if restoreErr := snapshot.restore(); restoreErr != nil {
@@ -3090,7 +3338,6 @@ func (cs *controllerState) mutateAndPoke(mutate func() error) error {
 		}
 		return fmt.Errorf("refreshing updated city config: %w", err)
 	}
-	cs.markConfigMutationPending(revision)
 	if cs.configDirty != nil {
 		cs.configDirty.Store(true)
 	}

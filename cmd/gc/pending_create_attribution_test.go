@@ -304,12 +304,13 @@ func TestCommitAsyncStart_UnknownAttributionKeepsRateLimitAndCapacityArms(t *tes
 // synchronous twin: runPreparedStartCandidate defers instead of handing the
 // failure to the rollback.
 func TestExecutePreparedStartWave_StartErrorWithUnknownAttributionDefers(t *testing.T) {
+	city := t.TempDir()
 	sp := runtime.NewFake()
 	sp.StartErrors["worker"] = errors.New("launcher exited")
 	failIdentityReads(sp, "worker", "GC_SESSION_ID", "GC_INSTANCE_TOKEN")
 	item := unattributedWorkerStart()
 
-	results := executePreparedStartWave(context.Background(), []preparedStart{item}, sp, nil, 10*time.Second)
+	results := executePreparedStartWaveForCity(context.Background(), []preparedStart{item}, city, sp, nil, nil, 10*time.Second, 1)
 	if len(results) != 1 {
 		t.Fatalf("results = %d, want 1", len(results))
 	}
@@ -324,7 +325,7 @@ func TestExecutePreparedStartWave_StartErrorWithUnknownAttributionDefers(t *test
 	}
 
 	delete(sp.GetMetaErrors, "worker")
-	results = executePreparedStartWave(context.Background(), []preparedStart{item}, sp, nil, 10*time.Second)
+	results = executePreparedStartWaveForCity(context.Background(), []preparedStart{item}, city, sp, nil, nil, 10*time.Second, 1)
 	if r := results[0]; r.err == nil || !r.rollbackPending {
 		t.Fatalf("readable, unattributed runtime: err=%v rollbackPending=%v, want the rollback", r.err, r.rollbackPending)
 	}
@@ -351,7 +352,7 @@ func TestExecutePreparedStartWave_TimedOutStartWithUnknownAttributionDefers(t *t
 	sp.StartErrors["worker"] = fmt.Errorf("waiting for readiness: %w", context.DeadlineExceeded)
 	failIdentityReads(sp, "worker", "GC_SESSION_ID", "GC_INSTANCE_TOKEN")
 
-	results := executePreparedStartWave(context.Background(), []preparedStart{unattributedWorkerStart()}, sp, nil, time.Nanosecond)
+	results := executePreparedStartWaveForCity(context.Background(), []preparedStart{unattributedWorkerStart()}, t.TempDir(), sp, nil, nil, time.Nanosecond, 1)
 	if r := results[0]; r.err != nil || r.rollbackPending || r.outcome != TraceOutcomeDeferred {
 		t.Fatalf("result err=%v rollbackPending=%v outcome=%q, want a deferral", r.err, r.rollbackPending, r.outcome)
 	}
@@ -363,6 +364,7 @@ func TestExecutePreparedStartWave_TimedOutStartWithUnknownAttributionDefers(t *t
 // defaultMaxWakeAttempts, and the deferral logs the start error with the failed
 // identity reads.
 func TestCommitStartResult_UnattributedStartFailureAccruesStartupHealth(t *testing.T) {
+	city := t.TempDir()
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 8, 15, 0, 0, 1, 0, time.UTC)}
 	sp := runtime.NewFake()
@@ -377,7 +379,7 @@ func TestCommitStartResult_UnattributedStartFailureAccruesStartupHealth(t *testi
 	var stderr strings.Builder
 
 	for i := 0; i < defaultMaxWakeAttempts; i++ {
-		result := executePreparedStartWave(context.Background(), []preparedStart{item}, sp, nil, 10*time.Second)[0]
+		result := executePreparedStartWaveForCity(context.Background(), []preparedStart{item}, city, sp, nil, nil, 10*time.Second, 1)[0]
 		if result.outcome != TraceOutcomeDeferred {
 			t.Fatalf("attempt %d: outcome = %q, want deferred", i+1, result.outcome)
 		}
@@ -401,7 +403,7 @@ func TestCommitStartResult_UnattributedStartFailureAccruesStartupHealth(t *testi
 	collided.candidate.tp.SessionName = "other"
 	sp.StartErrors["other"] = fmt.Errorf("%w: session %q", runtime.ErrSessionExists, "other")
 	failIdentityReads(sp, "other", "GC_SESSION_ID", "GC_INSTANCE_TOKEN")
-	result := executePreparedStartWave(context.Background(), []preparedStart{collided}, sp, nil, 10*time.Second)[0]
+	result := executePreparedStartWaveForCity(context.Background(), []preparedStart{collided}, city, sp, nil, nil, 10*time.Second, 1)[0]
 	if result.outcome != TraceOutcomeDeferred {
 		t.Fatalf("collision outcome = %q, want deferred", result.outcome)
 	}
@@ -425,7 +427,7 @@ func TestExecutePreparedStartWave_LiveUnattributableRuntimeDefers(t *testing.T) 
 		tp:   TemplateParams{Command: "true", SessionName: "worker", TemplateName: "worker"},
 	}}
 
-	results := executePreparedStartWave(context.Background(), []preparedStart{item}, sp, nil, 10*time.Second)
+	results := executePreparedStartWaveForCity(context.Background(), []preparedStart{item}, t.TempDir(), sp, nil, nil, 10*time.Second, 1)
 	if r := results[0]; r.err != nil || r.rollbackPending || r.outcome != TraceOutcomeDeferred {
 		t.Fatalf("result err=%v rollbackPending=%v outcome=%q, want a deferral", r.err, r.rollbackPending, r.outcome)
 	}
@@ -456,7 +458,7 @@ func TestPendingCreateRuntimeClearedForRollback_UnknownBeadScopedRuntimeKept(t *
 // anything past the alive rollback branch treats it as stuck.
 func newAlivePendingCreateEnv(t *testing.T) (*reconcilerTestEnv, beads.Bead) {
 	t.Helper()
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	env.addDesired("worker", "worker", true)
 	session := env.createSessionBead("worker", "worker")
@@ -474,7 +476,7 @@ func newAlivePendingCreateEnv(t *testing.T) (*reconcilerTestEnv, beads.Bead) {
 func reconcileTraced(env *reconcilerTestEnv, sessions []beads.Bead, trace *sessionReconcilerTraceCycle) {
 	cfgNames := configuredSessionNames(env.cfg, "", env.store)
 	reconcileSessionBeadsTraced(
-		context.Background(), "", sessions, env.desiredState, cfgNames, env.cfg, env.sp,
+		context.Background(), env.city, sessions, env.desiredState, cfgNames, env.cfg, env.sp,
 		env.store, nil, nil, nil, nil, env.dt, map[string]int{"worker": 1}, false, nil, "",
 		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr, trace,
 		env.startOptions...,

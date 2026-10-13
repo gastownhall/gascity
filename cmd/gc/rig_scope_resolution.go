@@ -61,6 +61,14 @@ func rigFromRedirectedBeadsDir(cfg *config.City, cityPath, dir string) (config.R
 				return rig, true, nil
 			}
 		}
+		// The city's own HQ store is not a declared rig, but a redirect to it
+		// is city scope, not a foreign store: a city-scoped agent's worktree of
+		// the city repo (.gc/worktrees/<city>/<agent>) carries exactly this
+		// redirect. Report no rig so callers fall back to the city store.
+		cityBeadsDir := normalizePathForCompare(filepath.Join(resolveStoreScopeRoot(cityPath, cityPath), ".beads"))
+		if targetBeadsDir == cityBeadsDir {
+			return config.Rig{}, false, nil
+		}
 		return config.Rig{}, false, fmt.Errorf("cwd redirect %s points outside declared city rigs", redirectPath)
 	}
 	return config.Rig{}, false, nil

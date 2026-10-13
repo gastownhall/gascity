@@ -79,10 +79,8 @@ func TestBDVersionPins(t *testing.T) {
 	// the drift and the failure lands after merge, which is exactly how
 	// v1.3.0-rc.2 stayed stale there (tracker ga-rnwg5u). Assert it here,
 	// against the same go.mod pin the block above ties to deps.env. This test
-	// reaches PR-time CI through `make test-ci-policy` (preflight-static); the
-	// ./scripts unit-cover jobs are push-only, so that recipe line is what
-	// makes this fail before merge rather than after —
-	// TestMakeTestCIPolicyRunsVersionPinContracts pins it.
+	// reaches PR-time CI through //scripts:scripts_test in the required Bazel
+	// lane, so drift fails before merge rather than after.
 	const integrationPinFile = "test/integration/integration_test.go"
 	integrationPin := extractGoStringConst(t, root, integrationPinFile, "wantPinnedBeadsModuleVersion")
 	if integrationPin == "" {

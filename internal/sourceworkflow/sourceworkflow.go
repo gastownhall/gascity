@@ -28,6 +28,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/closeorder"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/pathutil"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // ConflictError is returned when a graph workflow launch is blocked by one
@@ -601,8 +602,9 @@ func closeRootWithMarker(store beads.Store, rootID string, rootMeta map[string]s
 		return store.CloseAll([]string{rootID}, rootMeta)
 	}
 	// Re-read as close to the write as possible and skip an already-closed root,
-	// so a concurrently finalized root is not re-stamped — the same guard CloseAll
-	// applies per id before it writes.
+	// so a concurrently finalized root is not re-stamped. CloseAll is no such
+	// guard: whether it stamps a closed id is store-specific (see the
+	// beads.Store CloseAll doc).
 	current, err := store.Get(rootID)
 	if err != nil {
 		return 0, err
@@ -673,7 +675,10 @@ func orderedOpenWorkflowSubtree(store beads.Store, rootID string, exclude func(b
 	})
 	ids := make([]string, 0, len(matched))
 	for _, bead := range matched {
-		if bead.ID == "" || bead.Status == "closed" {
+		// A session row is never a workflow member to close, whatever
+		// gc.root_bead_id or gc.kind it carries: the session close owns it
+		// (mc-dkblm).
+		if bead.ID == "" || bead.Status == "closed" || session.IsSessionBeadOrRepairable(bead) {
 			continue
 		}
 		if exclude != nil && exclude(bead) {
@@ -714,7 +719,7 @@ func CloseSpecSidecarsForRoot(store beads.Store, rootID, reason string) (int, er
 	}
 	ids := make([]string, 0, len(matched))
 	for _, bead := range matched {
-		if bead.ID == "" || bead.Status == "closed" || !IsGeneratedSpecSidecar(bead) {
+		if bead.ID == "" || bead.Status == "closed" || !IsGeneratedSpecSidecar(bead) || session.IsSessionBeadOrRepairable(bead) {
 			continue
 		}
 		ids = append(ids, bead.ID)

@@ -19,7 +19,9 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // drainOpsWithCountdown wraps fakeDrainOps and returns false for isRestartRequested
@@ -691,13 +693,14 @@ func TestDoRuntimeDrainCheckJSONNotDrainingWritesFalseResult(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoRuntimeDrainAck(t *testing.T) {
+	testCity := t.TempDir()
 	old := drainAckPokeController
 	drainAckPokeController = func(string, reconcilekey.Key) error { return nil }
 	t.Cleanup(func() { drainAckPokeController = old })
 
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, "", "worker", "worker", "", false, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, testCity, "worker", "worker", "", false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -710,10 +713,11 @@ func TestDoRuntimeDrainAck(t *testing.T) {
 }
 
 func TestDoRuntimeDrainAckError(t *testing.T) {
+	testCity := t.TempDir()
 	dops := newFakeDrainOps()
 	dops.err = errors.New("tmux borked")
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, "", "worker", "worker", "", false, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, testCity, "worker", "worker", "", false, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1", code)
 	}
@@ -733,13 +737,14 @@ func TestJoinDrainAckMutationErrorsMissingSessionBeadIsIdempotent(t *testing.T) 
 }
 
 func TestDoRuntimeDrainAckJSON(t *testing.T) {
+	testCity := t.TempDir()
 	old := drainAckPokeController
 	drainAckPokeController = func(string, reconcilekey.Key) error { return nil }
 	t.Cleanup(func() { drainAckPokeController = old })
 
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, "", "worker", "worker", "", true, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, testCity, "worker", "worker", "", true, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -1004,10 +1009,11 @@ func TestProviderDrainOpsSetDrainAckAttemptsAckAfterCleanupErrors(t *testing.T) 
 // ---------------------------------------------------------------------------
 
 func TestDoRuntimeRequestRestartError(t *testing.T) {
+	testCity := t.TempDir()
 	dops := newFakeDrainOps()
 	dops.err = errors.New("tmux borked")
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeRequestRestart(dops, nil, false, events.Discard, "worker", "worker", "", &stdout, &stderr)
+	code := doRuntimeRequestRestart(dops, nil, false, events.Discard, "worker", "worker", testCity, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1", code)
 	}
@@ -1022,6 +1028,7 @@ func TestDoRuntimeRequestRestartError(t *testing.T) {
 // reset is persisted, so persistRestart is mandatory rather than best-effort
 // when pinned is true. Mirrors TestDoHandoff_PinnedAlwaysSessionRequiresPersistRestart.
 func TestDoRuntimeRequestRestart_PinnedRequiresPersistRestart(t *testing.T) {
+	testCity := t.TempDir()
 	for _, tc := range []struct {
 		name           string
 		persistRestart func() error
@@ -1033,7 +1040,7 @@ func TestDoRuntimeRequestRestart_PinnedRequiresPersistRestart(t *testing.T) {
 			dops := newFakeDrainOps()
 			rec := events.NewFake()
 			var stdout, stderr bytes.Buffer
-			code := doRuntimeRequestRestart(dops, tc.persistRestart, true, rec, "mayor", "mayor", "", &stdout, &stderr)
+			code := doRuntimeRequestRestart(dops, tc.persistRestart, true, rec, "mayor", "mayor", testCity, &stdout, &stderr)
 			if code != 1 {
 				t.Fatalf("code = %d, want 1; stderr: %s", code, stderr.String())
 			}
@@ -1605,5 +1612,60 @@ func TestFindAgentByNameNoMatch(t *testing.T) {
 	_, ok := findAgentByName(cfg, "nobody")
 	if ok {
 		t.Error("expected no match for nonexistent agent")
+	}
+}
+
+// TestOperatorDrainRow (PAR-FLOORACK, CONTRACT v5.9p): in a v2 city `gc
+// runtime drain` marks the row with its generation in its own key
+// (operator_drain), whatever controller request the row carries, which it
+// never touches; `gc runtime undrain` clears the mark and leaves the
+// request.
+func TestOperatorDrainRow(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		meta    map[string]string
+		request string // the controller request, before and after
+	}{
+		{"a bare row", map[string]string{"generation": "3"}, ""},
+		{"a row a controller request holds", map[string]string{
+			"generation": "3", session.DrainIntentReasonKey: drainConfigDrift, session.DrainIntentAtKey: "2026-10-12T12:00:00Z", session.DrainIntentIncarnationKey: "3",
+		}, drainConfigDrift},
+		{"a mark of an older generation", map[string]string{"generation": "3", session.OperatorDrainKey: "2"}, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			store, id := stampedMem(t, gate.Require)
+			if err := store.SetMetadataBatch(id, c.meta); err != nil {
+				t.Fatal(err)
+			}
+			if err := writeOperatorDrainRow(store, id); err != nil {
+				t.Fatal(err)
+			}
+			b, _ := store.Get(id)
+			if b.Metadata[session.OperatorDrainKey] != "3" || b.Metadata[session.DrainIntentReasonKey] != c.request {
+				t.Fatalf("after drain: mark %q, request %q; want the mark at 3 and the request %q untouched", b.Metadata[session.OperatorDrainKey], b.Metadata[session.DrainIntentReasonKey], c.request)
+			}
+			if err := clearOperatorDrainRow(store, id); err != nil {
+				t.Fatal(err)
+			}
+			if b, _ := store.Get(id); b.Metadata[session.OperatorDrainKey] != "" || b.Metadata[session.DrainIntentReasonKey] != c.request {
+				t.Fatalf("after undrain: mark %q, request %q; want no mark and the request %q", b.Metadata[session.OperatorDrainKey], b.Metadata[session.DrainIntentReasonKey], c.request)
+			}
+		})
+	}
+}
+
+// TestDrainRuntimeRowWriteFailure (O9): a failed row mark in a v2 city
+// sets no env drain flag, records nothing and exits 1.
+func TestDrainRuntimeRowWriteFailure(t *testing.T) {
+	dops := newFakeDrainOps()
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "echo"}); err != nil {
+		t.Fatal(err)
+	}
+	rec := events.NewFake()
+	var stdout, stderr bytes.Buffer
+	code := drainRuntime(dops, func() error { return errors.New("store down") }, sp, rec, "worker", "worker", false, &stdout, &stderr)
+	if code != 1 || dops.draining["worker"] || len(rec.Events) != 0 || !strings.Contains(stderr.String(), "store down") {
+		t.Fatalf("drain = %d (draining %v, events %v, stderr %q), want 1 with nothing set", code, dops.draining["worker"], rec.Events, stderr.String())
 	}
 }

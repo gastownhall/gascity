@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
@@ -846,5 +847,16 @@ func TestCustomTypesCheck_RequiredTypesComplete(t *testing.T) {
 	}
 	for typ := range expected {
 		t.Errorf("missing required type: %q", typ)
+	}
+}
+
+// doctor's list is the beads vocabulary, held as a copy: editing it must not
+// reach the native store's list pushdown, which reads the beads list.
+func TestRequiredCustomTypesIsACopyOfTheBeadsVocabulary(t *testing.T) {
+	if !slices.Equal(RequiredCustomTypes, beads.RequiredCustomTypes) {
+		t.Fatalf("RequiredCustomTypes = %v, want beads.RequiredCustomTypes %v", RequiredCustomTypes, beads.RequiredCustomTypes)
+	}
+	if len(RequiredCustomTypes) > 0 && &RequiredCustomTypes[0] == &beads.RequiredCustomTypes[0] {
+		t.Fatal("RequiredCustomTypes aliases beads.RequiredCustomTypes")
 	}
 }
