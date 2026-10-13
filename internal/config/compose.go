@@ -1158,6 +1158,7 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 		allowSchemaBehindMigrate := base.Beads.AllowSchemaBehindMigrate
 		proxiedIdleTimeout := base.Beads.ProxiedIdleTimeout
 		nativeTransport := base.Beads.NativeTransport
+		ledgerFeed := base.Beads.LedgerFeed
 		base.Beads = fragment.Beads
 		if !fragMeta.IsDefined("beads", "conditional_writes") {
 			base.Beads.ConditionalWrites = conditionalWrites
@@ -1173,6 +1174,9 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 		}
 		if !fragMeta.IsDefined("beads", "native_transport") {
 			base.Beads.NativeTransport = nativeTransport
+		}
+		if !fragMeta.IsDefined("beads", "ledger_feed") {
+			base.Beads.LedgerFeed = ledgerFeed
 		}
 	}
 	if fragMeta.IsDefined("dolt") {
