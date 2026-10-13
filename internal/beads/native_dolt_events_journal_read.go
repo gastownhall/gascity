@@ -18,14 +18,26 @@ import (
 var ErrEventsJournalUnsupported = errors.New("events journal unsupported by the storage backend")
 
 // ErrEventsJournalUnavailable reports that a store which can carry a journal
-// read has no native read leaf to carry it right now: a ProxiedStore that has
-// stood its native leaf down reads through bd, which publishes no page read.
-// A caller keeps the scope on its scan path while it sees this error.
-var ErrEventsJournalUnavailable = errors.New("events journal unavailable: no native read leaf")
+// read has no usable native read leaf to carry it right now: a ProxiedStore
+// that has stood its native leaf down reads through bd, which publishes no
+// page read, and one that dropped the leaf a read started on — standing it
+// down or re-pinning it — refuses that read rather than answer for a closed
+// leaf. A caller keeps the scope on its scan path while it sees this error.
+var ErrEventsJournalUnavailable = errors.New("events journal unavailable: no usable native read leaf")
 
 // ErrEventsJournalInactive reports that the scope's writes are not being
 // journaled, so a page read would answer "caught up" while mutations went
 // unrecorded. bd serve refuses its events endpoint for the same reason.
+//
+// The refusal is not permanent: a scope can switch its journal back on, and
+// reads then succeed again. Writes made while it was off have no rows, so a
+// tail that saw this refusal resumes past a gap, not where it stopped
+// (ledgerfeed.Tailer.Lapse). A switch is noticed only when activation is
+// re-resolved — on a direct native store within nativeJournalActivationRecheck,
+// or once a native open in flight elsewhere in the process ends; on a proxied
+// one at the next guard tick (proxiedGuardInterval) — so a lapse shorter than
+// that is never refused and leaves no trace: a consumer that must not miss a
+// write still reconciles in full now and then.
 var ErrEventsJournalInactive = errors.New("events journal is not activated for this scope")
 
 var _ journalops.Journal = (*NativeDoltStore)(nil)
@@ -41,7 +53,9 @@ var _ journalops.Journal = (*NativeDoltStore)(nil)
 // The read goes through the read-retry chain, so it rides a managed-Dolt
 // rebind the way every other native read does, and the caller's ctx bounds
 // that whole chain: a cancellation ends a reconnect in progress and is
-// returned as the context error. A *journalops.TruncatedError comes back
+// returned as the context error — unless the handle had already refused the
+// read as inactive or unsupported, which answers for the scope rather than
+// the call and is returned instead. A *journalops.TruncatedError comes back
 // bare, as the journalops contract asks; every other error is wrapped.
 func (s *NativeDoltStore) ReadEventsJournalPage(ctx context.Context, since int64, limit int) (journalops.Page, error) {
 	return s.readEventsJournalPage(ctx, since, limit, true)
@@ -70,7 +84,15 @@ func (s *NativeDoltStore) readEventsJournalPage(ctx context.Context, since int64
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			// The caller gave up; whatever the chain was doing is not a
-			// verdict about the endpoint.
+			// verdict about the endpoint. A refusal the handle had already
+			// answered is one about the scope, so it outlasts the cancel. It
+			// is wrapped afresh: the chain carries a canceled read's error
+			// in a budget verdict, which would stand a proxied leaf down.
+			for _, refusal := range []error{ErrEventsJournalInactive, ErrEventsJournalUnsupported} {
+				if errors.Is(err, refusal) {
+					return journalops.Page{}, fmt.Errorf("reading events journal after seq %d: %w", since, refusal)
+				}
+			}
 			return journalops.Page{}, ctxErr
 		}
 		var truncated *journalops.TruncatedError
@@ -95,9 +117,11 @@ func (s *NativeDoltStore) readEventsJournalPage(ctx context.Context, since int64
 // writes at once while this handle, opened earlier, keeps journaling gc's
 // own. The store re-checks the scope's resolution at most every
 // nativeJournalActivationRecheck, so it stops answering "caught up" over
-// unrecorded writes within that interval. A scope that turns the journal on
-// after open does not make the handle tailable: its own writes are not
-// journaled until it reopens.
+// unrecorded writes within that interval — or, when a native open elsewhere in
+// the process holds the environment at the re-check, once that open ends: the
+// re-check keeps the last answer rather than wait for it under the store's
+// read lock. A scope that turns the journal on after open does not make the
+// handle tailable: its own writes are not journaled until it reopens.
 //
 // The library exposes the activation switch but no getter, so the open-time
 // answer is recorded where the switch is thrown (nativeEventsJournalActivations).
@@ -137,6 +161,10 @@ type nativeJournalActivationSet struct {
 	handles map[beadslib.Storage]*nativeJournalActivation
 	// now is the clock the recheck interval is measured on.
 	now func() time.Time
+	// resolve re-resolves a scope's activation; nil resolves it as bd does
+	// whenever no open holds the environment (resolveScope). A test swaps it
+	// to land a close or a re-record in a resolution.
+	resolve func(beadsDir string) bool
 }
 
 // nativeJournalActivation is one recorded handle's scope and the scope's last
@@ -164,7 +192,14 @@ func (a *nativeJournalActivationSet) record(storage beadslib.Storage, beadsDir s
 // active reports whether storage was activated at open and its scope still
 // resolves activation on, re-resolving the scope — outside mu, since it reads
 // the scope's config — once the last answer is older than the recheck
-// interval.
+// interval. A handle that closes, or is recorded anew, while its scope
+// resolves reports false.
+//
+// Its callers hold the store's read lock, so the re-resolution never waits
+// for nativeDoltOpenEnvMu: an open elsewhere in the process holds that for its
+// whole window, and the store's close, and every reader queued behind that
+// close, would wait as long. While an open holds it, active keeps the last
+// answer and leaves checkedAt alone, so the next question resolves again.
 func (a *nativeJournalActivationSet) active(storage beadslib.Storage) bool {
 	if !nativeStorageComparable(storage) {
 		return false
@@ -185,13 +220,29 @@ func (a *nativeJournalActivationSet) active(storage beadslib.Storage) bool {
 	beadsDir := entry.beadsDir
 	a.mu.Unlock()
 
-	enabled := nativeEventsJournalEnabledFor(beadsDir)
+	enabled, resolved := a.resolveScope(beadsDir)
 	a.mu.Lock()
-	if current, ok := a.handles[storage]; ok && current == entry {
-		entry.enabled, entry.checkedAt = enabled, now
+	defer a.mu.Unlock()
+	a.sweepLocked()
+	if current, ok := a.handles[storage]; !ok || current != entry {
+		// The handle closed, or was recorded anew, while its scope resolved:
+		// the answer is about a handle that is gone.
+		return false
 	}
-	a.mu.Unlock()
+	if !resolved {
+		return entry.enabled
+	}
+	entry.enabled, entry.checkedAt = enabled, now
 	return enabled
+}
+
+// resolveScope re-resolves beadsDir's activation, reporting resolved false
+// when an open holds the environment it reads.
+func (a *nativeJournalActivationSet) resolveScope(beadsDir string) (enabled, resolved bool) {
+	if a.resolve != nil {
+		return a.resolve(beadsDir), true
+	}
+	return tryAmbientEventsJournalEnabledFor(beadsDir)
 }
 
 func (a *nativeJournalActivationSet) clock() time.Time {

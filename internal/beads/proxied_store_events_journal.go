@@ -2,8 +2,10 @@ package beads
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	"github.com/steveyegge/beads/journalops"
 )
@@ -18,25 +20,61 @@ var _ journalops.Journal = (*ProxiedStore)(nil)
 // with ErrEventsJournalInactive. A read that fails with a proxied verdict
 // stands the native leaf down, exactly as every other native read does.
 //
-// The refusals are ordered permanent-first — ErrStoreClosed, then
+// The refusals are ordered longest-lasting first — ErrStoreClosed, then
 // ErrEventsJournalInactive, then the transient ErrEventsJournalUnavailable —
 // so a caller that retries on the last never spins on a store that is closed
-// or never journals.
+// or not journaling. Inactive means not tailable now: a scope can switch its
+// journal back on, and recovering from the refusal is a gap
+// (ErrEventsJournalInactive says why).
+//
+// One transient refusal comes ahead of inactive. Resolving the activation can
+// wait out another native open's whole window, and a stand-down or re-pin
+// inside that wait drops the leaf the read started from, so the leaf is read
+// again once the activation is resolved. A leaf that changed refuses with
+// ErrEventsJournalUnavailable whatever the activation said: that answer may be
+// the dropped leaf's pin's, and the next call answers for the current one.
+//
+// A stand-down or re-pin can also drop the leaf while the read is in flight on
+// it — one bd proxy restart both fails the read into a reconnect and stands
+// the leaf down — and the dropped leaf, latched closed, answers ErrStoreClosed
+// for a store that is still open. That read refuses with
+// ErrEventsJournalUnavailable too. Closing the store latches it closed before
+// it drops the leaf, so a read the close cuts short still answers
+// ErrStoreClosed.
 func (s *ProxiedStore) ReadEventsJournalPage(ctx context.Context, since int64, limit int) (journalops.Page, error) {
 	s.mu.RLock()
 	closed, native := s.closed, s.native
 	s.mu.RUnlock()
-	if closed {
+	// closed latches, so a store closed already resolves nothing and is
+	// refused below.
+	active := !closed && s.journalActive()
+	s.mu.RLock()
+	closed, current := s.closed, s.native
+	s.mu.RUnlock()
+	switch {
+	case closed:
 		return journalops.Page{}, fmt.Errorf("reading events journal after seq %d: proxied store: %w", since, ErrStoreClosed)
-	}
-	if !s.journalActive() {
+	case current != native:
+		return journalops.Page{}, fmt.Errorf("reading events journal after seq %d: proxied store changed its native leaf while resolving journal activation: %w", since, ErrEventsJournalUnavailable)
+	case !active:
 		return journalops.Page{}, fmt.Errorf("reading events journal after seq %d: %w", since, ErrEventsJournalInactive)
-	}
-	if native == nil {
+	case current == nil:
 		return journalops.Page{}, fmt.Errorf("reading events journal after seq %d: proxied store is demoted: %w", since, ErrEventsJournalUnavailable)
 	}
-	page, err := native.readEventsJournalPage(ctx, since, limit, false)
-	return page, s.classifyReadError(err)
+	page, err := current.readEventsJournalPage(ctx, since, limit, false)
+	err = s.classifyReadError(err)
+	if errors.Is(err, ErrStoreClosed) {
+		s.mu.RLock()
+		closed, dropped := s.closed, s.native != current
+		s.mu.RUnlock()
+		if !closed && dropped {
+			// The leaf's error is kept as text: wrapped, the refusal would
+			// still read as ErrStoreClosed.
+			leafErr := strings.TrimPrefix(err.Error(), fmt.Sprintf("reading events journal after seq %d: ", since))
+			return journalops.Page{}, fmt.Errorf("reading events journal after seq %d: proxied store dropped its native leaf during the read (%s): %w", since, leafErr, ErrEventsJournalUnavailable)
+		}
+	}
+	return page, err
 }
 
 // EventsJournalActive reports whether this scope's writes are journaled and a
@@ -72,7 +110,9 @@ func (a *proxiedJournalActivation) forget() {
 }
 
 // journalActive returns the cached activation, resolving it — outside mu,
-// since it reads the scope's config — when nothing is cached.
+// since it reads the scope's config — when nothing is cached. The resolution
+// is not bounded by a reader's ctx yet (ga-3gfh0h): it waits out any native
+// open's window that holds the environment it reads.
 func (s *ProxiedStore) journalActive() bool {
 	s.mu.RLock()
 	cached, pin := s.journal, s.pin
@@ -108,5 +148,5 @@ func proxiedEventsJournalActive(pin Pin) bool {
 	if root == "" {
 		return false
 	}
-	return nativeEventsJournalEnabledFor(filepath.Join(root, ".beads"))
+	return ambientEventsJournalEnabledFor(filepath.Join(root, ".beads"))
 }

@@ -41,6 +41,18 @@ func (f *fakeJournal) append(issueIDs ...string) {
 	}
 }
 
+// appendRaw appends rows as given, numbered on from the head, for a row
+// append cannot build.
+func (f *fakeJournal) appendRaw(rows ...journalops.Row) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, row := range rows {
+		f.head++
+		row.Seq = f.head
+		f.rows = append(f.rows, row)
+	}
+}
+
 // prune drops rows below floor, leaving the head untouched.
 func (f *fakeJournal) prune(floor int64) {
 	f.mu.Lock()
@@ -418,6 +430,81 @@ func TestABusyFeedDetectsAResetOnTheNextRead(t *testing.T) {
 	}
 }
 
+// A re-seeded counter can write the checkpoint's issue at the checkpoint's
+// seq with the same TS, which is a label rather than an identity. The rest of
+// the row still tells it from the original.
+func TestAReseedTheTimestampCannotTellIsStillAReset(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*journalops.Row)
+		reset  bool
+	}{
+		{name: "the same row", mutate: func(*journalops.Row) {}},
+		{name: "another op", mutate: func(r *journalops.Row) { r.Op = "close" }, reset: true},
+		{name: "another post-image", mutate: func(r *journalops.Row) { r.IssueJSON = `{"id":"c","status":"closed"}` }, reset: true},
+		{name: "another actor", mutate: func(r *journalops.Row) { r.Actor = "someone-else" }, reset: true},
+		{name: "a payload byte moved to the next field", mutate: func(r *journalops.Row) {
+			r.IssueJSON, r.DepJSON = `{"id":"c"`, `}`
+		}, reset: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			j := &fakeJournal{}
+			j.append("a", "b", "c")
+			first := newTailer(j, &recorder{})
+			mustStep(t, first)
+			mustStep(t, first)
+			saved := first.Checkpoint() // {3, c}
+
+			reseeded := journalops.Row{TS: "ts-3-c", Op: "update", IssueID: "c", IssueJSON: `{"id":"c"}`}
+			tc.mutate(&reseeded)
+			j.reseed(2)
+			j.appendRaw(reseeded, journalops.Row{TS: "ts-4-d", Op: "update", IssueID: "d"})
+
+			r := &recorder{}
+			tl := newTailer(j, r)
+			mustResume(t, tl, saved)
+			mustStep(t, tl)
+			gaps := r.gapList()
+			if !tc.reset {
+				if got, want := r.seqs(), []int64{4}; len(gaps) != 0 || !slices.Equal(got, want) {
+					t.Fatalf("gaps = %+v, applied %v; want no gap and %v: the row is the original", gaps, got, want)
+				}
+				return
+			}
+			if len(gaps) != 1 || gaps[0].Kind != GapReset {
+				t.Fatalf("gaps = %+v, want one reset", gaps)
+			}
+			if len(r.seqs()) != 0 {
+				t.Fatalf("applied %v across a reset", r.seqs())
+			}
+		})
+	}
+}
+
+// Apply may reuse the rows it is handed; the checkpoint's fingerprint is the
+// journal's row, not what Apply left of it.
+func TestAnApplyThatMutatesItsRowsDoesNotFakeAReset(t *testing.T) {
+	j := &fakeJournal{}
+	j.append("a", "b", "c")
+	r := &recorder{}
+	tl := newTailer(j, r)
+	tl.Apply = func(ctx context.Context, page journalops.Page) error {
+		err := r.apply(ctx, page)
+		for i := range page.Rows {
+			page.Rows[i] = journalops.Row{}
+		}
+		return err
+	}
+	mustStep(t, tl) // applies 1..2
+	mustStep(t, tl) // re-reads row 2 and applies 3
+	if gaps := r.gapList(); len(gaps) != 0 {
+		t.Fatalf("gaps = %+v: the row Apply rewrote was taken for the journal's", gaps)
+	}
+	if got, want := r.seqs(), []int64{1, 2, 3}; !slices.Equal(got, want) {
+		t.Fatalf("applied %v, want %v", got, want)
+	}
+}
+
 func TestResumeWithAMatchingFingerprintContinues(t *testing.T) {
 	j := &fakeJournal{}
 	j.append("a", "b")
@@ -477,7 +564,7 @@ func TestBaselineStartsAtTheHeadWithAFingerprint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Baseline: %v", err)
 	}
-	if cp.Seq != 3 || cp.Last != (Fingerprint{Seq: 3, IssueID: "c", TS: "ts-3-c"}) {
+	if cp.Seq != 3 || cp.Last.Seq != 3 || cp.Last != fingerprintOf(j.rows[2]) {
 		t.Fatalf("Baseline = %+v", cp)
 	}
 	j.append("d")
@@ -875,5 +962,123 @@ func TestStepReportsNoMoreWhenTheRebaselineReadFails(t *testing.T) {
 	}
 	if len(clock.delays) != clock.after {
 		t.Fatalf("sleeps = %v, want %d", clock.delays, clock.after)
+	}
+}
+
+// errOff stands in for a journal's refusal while it records nothing; a gc
+// consumer's Lapse matches beads.ErrEventsJournalInactive instead.
+var errOff = errors.New("journal is not recording")
+
+func lapseOn(err error) bool { return errors.Is(err, errOff) }
+
+// Writes made while the journal was off have no seq, so the rows after the
+// lapse continue the checkpoint and no other check can see the hole. The
+// refusal is the only evidence, and the read after it must be a gap.
+func TestAnActivationLapseIsAGap(t *testing.T) {
+	j := &fakeJournal{}
+	j.append("a", "b")
+	r := &recorder{}
+	tl := newTailer(j, r)
+	tl.Lapse = lapseOn
+	mustStep(t, tl) // applies 1..2
+
+	j.failErr = errors.New("connection reset")
+	if _, err := tl.Step(context.Background()); err == nil {
+		t.Fatal("Step succeeded through a failed read")
+	}
+	if cp := tl.Checkpoint(); cp.Lapsed {
+		t.Fatalf("checkpoint = %+v: an error Lapse does not match marked a lapse", cp)
+	}
+
+	j.failErr = fmt.Errorf("reading journal after seq 1: %w", errOff)
+	if more, err := tl.Step(context.Background()); !errors.Is(err, errOff) || more {
+		t.Fatalf("Step = (%v, %v), want the refusal and no re-read", more, err)
+	}
+	if cp := tl.Checkpoint(); !cp.Lapsed || cp.Seq != 2 {
+		t.Fatalf("checkpoint = %+v, want seq 2 marked lapsed", cp)
+	}
+
+	// The journal is back on; c and d are journaled, and whatever was written
+	// while it was off is not.
+	j.append("c", "d")
+	r.gapFailN = 1
+	if _, err := tl.Step(context.Background()); err == nil {
+		t.Fatal("Step succeeded though the resync failed")
+	}
+	if cp := tl.Checkpoint(); !cp.Lapsed || cp.Seq != 2 {
+		t.Fatalf("checkpoint = %+v after a failed resync, want the lapse kept", cp)
+	}
+	if !mustStep(t, tl) {
+		t.Fatal("a gap must ask for an immediate re-read")
+	}
+	gaps := r.gapList()
+	if len(gaps) != 1 || gaps[0].Kind != GapInactive || gaps[0].From.Seq != 2 || !gaps[0].From.Lapsed ||
+		gaps[0].Head != 4 || gaps[0].To.Seq != 4 || gaps[0].To.Lapsed {
+		t.Fatalf("gaps = %+v, want one inactive gap from lapsed seq 2 to head 4", gaps)
+	}
+	if got, want := r.seqs(), []int64{1, 2}; !slices.Equal(got, want) {
+		t.Fatalf("applied %v over the lapse, want %v: rows 3..4 are the consumer's resync", got, want)
+	}
+
+	j.append("e")
+	mustStep(t, tl)
+	if got, want := r.seqs(), []int64{1, 2, 5}; !slices.Equal(got, want) {
+		t.Fatalf("applied %v, want %v", got, want)
+	}
+	if stats := tl.Stats(); stats.Gaps[GapInactive] != 1 || len(stats.Gaps) != 1 {
+		t.Fatalf("stats gaps = %+v, want one inactive gap", stats.Gaps)
+	}
+}
+
+// The lapse travels with the checkpoint. A consumer that persisted it after
+// the refused Step and restarted still resyncs, even with no row journaled
+// since: the writes the lapse lost have no rows at all.
+func TestALapsedCheckpointResumesLapsed(t *testing.T) {
+	j := &fakeJournal{}
+	j.append("a", "b")
+	first := newTailer(j, &recorder{})
+	first.Lapse = lapseOn
+	mustStep(t, first)
+	j.failErr = errOff
+	if _, err := first.Step(context.Background()); !errors.Is(err, errOff) {
+		t.Fatalf("Step = %v, want the refusal", err)
+	}
+	saved := first.Checkpoint()
+
+	r := &recorder{}
+	tl := newTailer(j, r) // no Lapse: the persisted mark carries the lapse
+	mustResume(t, tl, saved)
+	mustStep(t, tl)
+	if gaps := r.gapList(); len(gaps) != 1 || gaps[0].Kind != GapInactive || gaps[0].From != saved || gaps[0].To.Seq != 2 {
+		t.Fatalf("gaps = %+v, want one inactive gap from %+v", gaps, saved)
+	}
+	if cp := tl.Checkpoint(); cp.Lapsed || cp.Last.Seq != 2 {
+		t.Fatalf("checkpoint = %+v, want seq 2 fingerprinted and the lapse cleared", cp)
+	}
+}
+
+// Every read can see a lapse, Baseline's included. A Baseline that succeeds
+// clears one: the consumer's scan after it covers what the lapse lost.
+func TestBaselineSeesAndClearsALapse(t *testing.T) {
+	j := &fakeJournal{}
+	j.append("a")
+	r := &recorder{}
+	tl := newTailer(j, r)
+	tl.Lapse = lapseOn
+	j.failErr = errOff
+	if _, err := tl.Baseline(context.Background()); !errors.Is(err, errOff) {
+		t.Fatalf("Baseline = %v, want the refusal", err)
+	}
+	if cp := tl.Checkpoint(); !cp.Lapsed {
+		t.Fatalf("checkpoint = %+v, want the refused Baseline read to mark a lapse", cp)
+	}
+	cp, err := tl.Baseline(context.Background())
+	if err != nil || cp.Lapsed || cp.Seq != 1 || tl.Checkpoint() != cp {
+		t.Fatalf("Baseline = (%+v, %v), want seq 1 with the lapse cleared", cp, err)
+	}
+	j.append("b")
+	mustStep(t, tl)
+	if gaps, got := r.gapList(), r.seqs(); len(gaps) != 0 || !slices.Equal(got, []int64{2}) {
+		t.Fatalf("gaps = %+v, applied %v; want no gap and row 2", gaps, got)
 	}
 }

@@ -14,6 +14,13 @@ func (s *emittingClassStore) ReadEventsJournalPage(ctx context.Context, since in
 }
 
 // EventsJournalActive forwards the inner store's journal activation.
+//
+// Neither journal method unwraps: the emitter carries a journal only while the
+// store directly inside it does, which holds because gc places it directly on
+// an engine (withMainStoreEmission, withCLIEmission). beads.ActiveEventsJournal
+// stops at the emitter, but cannot reach it through the bead-policy layer
+// rebuilt over it, which has no Backing; a consumer runs discovery beneath that
+// layer (unwrapBeadPolicyStore).
 func (s *emittingClassStore) EventsJournalActive() bool {
 	return beads.EventsJournalActiveThrough(s.Store)
 }

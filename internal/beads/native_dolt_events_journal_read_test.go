@@ -4,10 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
+	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	beadslib "github.com/steveyegge/beads"
@@ -97,6 +101,61 @@ func TestNativeDoltStoreReadEventsJournalPageHonorsCallerCancel(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Fatalf("read took %v after the caller canceled; it waited out the store's budget instead of the caller's ctx", elapsed)
 	}
+}
+
+// A caller that has given up by the time the read finds the journal off, or
+// missing, still gets that refusal rather than its own context error: the
+// refusal answers for the scope, and a tailer marks a lapse only on it. On the
+// proxied lane the refusal comes back without the budget verdict the chain
+// wraps it in, so a caller's cancel still demotes nothing.
+func TestNativeDoltStoreReadEventsJournalPageRefusalOutlivesTheCallerCancel(t *testing.T) {
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	inactive := func() *nativeJournalReaderSpy {
+		return &nativeJournalReaderSpy{read: func(context.Context, int64, int) (journalops.Page, error) {
+			return journalops.Page{}, nil
+		}}
+	}
+	t.Run("inactive", func(t *testing.T) {
+		if _, err := newNativeDoltStoreForTest(inactive()).ReadEventsJournalPage(canceled, 0, 0); !errors.Is(err, ErrEventsJournalInactive) {
+			t.Fatalf("error = %v, want ErrEventsJournalInactive", err)
+		}
+	})
+	t.Run("unsupported", func(t *testing.T) {
+		if _, err := newNativeDoltStoreForTest(&nativeDoltStorageSpy{}).ReadEventsJournalPage(canceled, 0, 0); !errors.Is(err, ErrEventsJournalUnsupported) {
+			t.Fatalf("error = %v, want ErrEventsJournalUnsupported", err)
+		}
+	})
+	t.Run("proxied, unsupported", func(t *testing.T) {
+		store, native, _ := newSplitFixture(t)
+		store.journal = proxiedJournalActivation{resolved: true, active: true}
+		native.proxiedReadVerdicts = true
+		native.storage = &nativeDoltStorageSpy{}
+		_, err := store.ReadEventsJournalPage(canceled, 0, 0)
+		if !errors.Is(err, ErrEventsJournalUnsupported) {
+			t.Fatalf("error = %v, want ErrEventsJournalUnsupported", err)
+		}
+		if _, typed := ProxiedVerdictOf(err); typed {
+			t.Fatalf("error = %v carries a proxied verdict for the caller's own cancel", err)
+		}
+		if store.Demoted() {
+			t.Fatal("the caller's cancel stood the native leaf down")
+		}
+	})
+	t.Run("through a tailer", func(t *testing.T) {
+		tailer := &ledgerfeed.Tailer{
+			Source: newNativeDoltStoreForTest(inactive()),
+			Lapse:  func(err error) bool { return errors.Is(err, ErrEventsJournalInactive) },
+			Apply:  func(context.Context, journalops.Page) error { return nil },
+			OnGap:  func(context.Context, ledgerfeed.Gap) error { return nil },
+		}
+		if _, err := tailer.Step(canceled); !errors.Is(err, ErrEventsJournalInactive) {
+			t.Fatalf("Step error = %v, want ErrEventsJournalInactive", err)
+		}
+		if cp := tailer.Checkpoint(); !cp.Lapsed {
+			t.Fatalf("checkpoint = %+v, want it marked Lapsed", cp)
+		}
+	})
 }
 
 func TestNativeDoltStoreReadEventsJournalPageRefusesAnInactiveJournal(t *testing.T) {
@@ -226,6 +285,85 @@ func TestNativeDoltStoreEventsJournalActiveFollowsTheScopeAfterOpen(t *testing.T
 	}
 }
 
+// A consumer recognizes the store's Inactive refusal as a lapse
+// (ledgerfeed.Tailer.Lapse), so the scope switching its journal off and back
+// on reaches it as one GapInactive gap. Otherwise the tail would resume as if
+// caught up over the writes bd made while the journal was off, which have no
+// rows.
+func TestNativeDoltStoreJournalLapseIsATailerGap(t *testing.T) {
+	t.Setenv("BD_EVENTS_JOURNAL", "")
+	ctx := context.Background()
+	beadsDir := t.TempDir()
+	writeConfig := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeConfig("events-journal: true\n")
+	now := time.Unix(1_000_000, 0)
+	oldNow := nativeEventsJournalActivations.now
+	t.Cleanup(func() { nativeEventsJournalActivations.now = oldNow })
+	nativeEventsJournalActivations.now = func() time.Time { return now }
+
+	// The handle journals its own writes throughout, so the seqs run on
+	// across the lapse with nothing missing between them.
+	head := int64(2)
+	spy := &nativeJournalReaderSpy{read: func(_ context.Context, since int64, _ int) (journalops.Page, error) {
+		page := journalops.Page{Head: head}
+		for seq := since + 1; seq <= head; seq++ {
+			page.Rows = append(page.Rows, journalops.Row{Seq: seq, Op: "update", IssueID: "gc-1"})
+		}
+		return page, nil
+	}}
+	t.Cleanup(func() { spy.closed = true })
+	oldOpen := nativeDoltOpenBestAvailable
+	t.Cleanup(func() { nativeDoltOpenBestAvailable = oldOpen })
+	nativeDoltOpenBestAvailable = func(context.Context, string) (beadslib.Storage, error) { return spy, nil }
+	storage, err := openNativeDoltStorage(ctx, beadsDir)
+	if err != nil {
+		t.Fatalf("openNativeDoltStorage: %v", err)
+	}
+
+	var applied []int64
+	var gaps []ledgerfeed.Gap
+	tailer := &ledgerfeed.Tailer{
+		Source: newNativeDoltStoreForTest(storage),
+		Lapse:  func(err error) bool { return errors.Is(err, ErrEventsJournalInactive) },
+		Apply: func(_ context.Context, page journalops.Page) error {
+			for _, row := range page.Rows {
+				applied = append(applied, row.Seq)
+			}
+			return nil
+		},
+		OnGap: func(_ context.Context, gap ledgerfeed.Gap) error {
+			gaps = append(gaps, gap)
+			return nil
+		},
+	}
+	drainTailer(ctx, t, tailer)
+
+	writeConfig("events-journal: false\n")
+	now = now.Add(nativeJournalActivationRecheck)
+	if _, err := tailer.Step(ctx); !errors.Is(err, ErrEventsJournalInactive) {
+		t.Fatalf("Step error = %v, want ErrEventsJournalInactive", err)
+	}
+	if cp := tailer.Checkpoint(); cp.Seq != 2 || !cp.Lapsed {
+		t.Fatalf("checkpoint = %+v, want seq 2 marked Lapsed", cp)
+	}
+
+	head = 4
+	writeConfig("events-journal: true\n")
+	now = now.Add(nativeJournalActivationRecheck)
+	drainTailer(ctx, t, tailer)
+	if len(gaps) != 1 || gaps[0].Kind != ledgerfeed.GapInactive || gaps[0].To.Seq != 4 {
+		t.Fatalf("gaps = %+v, want one GapInactive to seq 4", gaps)
+	}
+	if !slices.Equal(applied, []int64{1, 2}) {
+		t.Fatalf("applied = %v, want [1 2]: nothing applied over the lapse", applied)
+	}
+}
+
 // A handle opened with the journal off never journals gc's own writes, so
 // the scope turning the journal on later does not make it tailable.
 func TestNativeDoltStoreEventsJournalActiveNeedsTheOpenActivation(t *testing.T) {
@@ -263,6 +401,38 @@ func TestNativeJournalActivationSetDropsClosedHandles(t *testing.T) {
 	}
 	if !set.active(second) || len(set.handles) != 1 {
 		t.Fatalf("handles = %v, want only the live one", set.handles)
+	}
+}
+
+// active drops mu while it resolves the scope, so the handle can close, or be
+// recorded anew, before it re-locks. The answer it resolved is then about a
+// handle that is gone, and it reports false rather than that answer.
+func TestNativeJournalActivationSetRefusesAHandleThatChangedWhileResolving(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(set *nativeJournalActivationSet, spy *nativeJournalReaderSpy)
+		want   bool
+	}{
+		{name: "unchanged", change: func(*nativeJournalActivationSet, *nativeJournalReaderSpy) {}, want: true},
+		{name: "closed", change: func(_ *nativeJournalActivationSet, spy *nativeJournalReaderSpy) { spy.closed = true }},
+		{name: "recorded anew", change: func(set *nativeJournalActivationSet, spy *nativeJournalReaderSpy) {
+			set.record(spy, "/elsewhere/.beads")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Unix(1_000_000, 0)
+			set := &nativeJournalActivationSet{now: func() time.Time { return now }}
+			spy := &nativeJournalReaderSpy{}
+			set.resolve = func(string) bool {
+				tc.change(set, spy)
+				return true
+			}
+			set.record(spy, "/scope/.beads")
+			now = now.Add(nativeJournalActivationRecheck)
+			if got := set.active(spy); got != tc.want {
+				t.Fatalf("active = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -326,6 +496,190 @@ func TestProxiedEventsJournalActiveFollowsBdPrecedence(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A proxied native open withholds the whole BD_ namespace for its window. A
+// proxied activation resolution that ran inside it would read the scope's
+// config alone, over an ambient BD_EVENTS_JOURNAL=0, and cache the inverted
+// answer. It holds no store lock and has no earlier answer to give, so it
+// waits the window out instead.
+func TestProxiedEventsJournalResolutionWaitsOutAnOpenWindow(t *testing.T) {
+	t.Setenv("BD_EVENTS_JOURNAL", "0")
+	scopeRoot := t.TempDir()
+	writeScopeJournalConfig(t, scopeRoot, "events-journal: true\n")
+	endWindow := holdOpenWindow(t)
+	got := make(chan bool, 1)
+	go func() { got <- proxiedEventsJournalActive(PinForTest(scopeRoot, "", "beads")) }()
+	select {
+	case answer := <-got:
+		t.Fatalf("the resolution answered %v inside the window; it must wait on nativeDoltOpenEnvMu", answer)
+	case <-time.After(100 * time.Millisecond):
+	}
+	endWindow()
+	select {
+	case answer := <-got:
+		if answer {
+			t.Fatal("the resolution answered true over the ambient BD_EVENTS_JOURNAL=0")
+		}
+	case <-time.After(openWindowPatience):
+		t.Fatal("the resolution did not answer after the window closed")
+	}
+}
+
+// The native re-check runs under a store's read lock, so unlike the proxied
+// resolution it does not wait an open window out: inside one it keeps the
+// last answer and caches nothing, and the first question after the window
+// resolves the scope again.
+func TestNativeJournalRecheckKeepsTheLastAnswerThroughAnOpenWindow(t *testing.T) {
+	t.Setenv("BD_EVENTS_JOURNAL", "0")
+	scopeRoot := t.TempDir()
+	writeScopeJournalConfig(t, scopeRoot, "events-journal: true\n")
+	recorded := time.Unix(1_000_000, 0)
+	now := recorded
+	set := &nativeJournalActivationSet{now: func() time.Time { return now }}
+	spy := &nativeJournalReaderSpy{}
+	set.record(spy, filepath.Join(scopeRoot, ".beads"))
+	now = now.Add(nativeJournalActivationRecheck)
+
+	endWindow := holdOpenWindow(t)
+	got := make(chan bool, 1)
+	go func() { got <- set.active(spy) }()
+	select {
+	case answer := <-got:
+		if !answer {
+			t.Fatal("active = false inside the window; it must keep the last answer, true")
+		}
+	case <-time.After(openWindowPatience):
+		t.Fatalf("active is still waiting %v into the window; it must not wait on nativeDoltOpenEnvMu", openWindowPatience)
+	}
+	endWindow()
+	if checked := set.handles[spy].checkedAt; !checked.Equal(recorded) {
+		t.Fatalf("checkedAt = %v, want %v: an answer kept inside the window must not be cached", checked, recorded)
+	}
+	if set.active(spy) {
+		t.Fatal("active = true after the window over the ambient BD_EVENTS_JOURNAL=0; the scope was not resolved again")
+	}
+	if checked := set.handles[spy].checkedAt; !checked.Equal(now) {
+		t.Fatalf("checkedAt = %v, want %v after the scope resolved again", checked, now)
+	}
+}
+
+// A direct native store re-checks its scope's activation under its read lock.
+// Another scope's open holds nativeDoltOpenEnvMu for its whole window — up to
+// that open's full budget against a wedged proxy — so a re-check that waited
+// for it would hold the read lock as long: the journal read would outlive its
+// caller's ctx, and a CloseStore queued behind it would stall every reader of
+// the store. Each step below must finish while the window still stands.
+func TestNativeDoltStoreJournalRecheckDoesNotWaitOutAnOpenWindow(t *testing.T) {
+	t.Setenv("BD_EVENTS_JOURNAL", "")
+	beadsDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("events-journal: true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_000_000, 0)
+	oldNow := nativeEventsJournalActivations.now
+	t.Cleanup(func() { nativeEventsJournalActivations.now = oldNow })
+	nativeEventsJournalActivations.now = func() time.Time { return now }
+	spy := &nativeJournalReaderSpy{read: func(context.Context, int64, int) (journalops.Page, error) {
+		return journalops.Page{Head: 7}, nil
+	}}
+	t.Cleanup(func() { spy.closed = true })
+	oldOpen := nativeDoltOpenBestAvailable
+	t.Cleanup(func() { nativeDoltOpenBestAvailable = oldOpen })
+	nativeDoltOpenBestAvailable = func(context.Context, string) (beadslib.Storage, error) { return spy, nil }
+	storage, err := openNativeDoltStorage(context.Background(), beadsDir)
+	if err != nil {
+		t.Fatalf("openNativeDoltStorage: %v", err)
+	}
+	store := newNativeDoltStoreForTest(storage)
+	now = now.Add(nativeJournalActivationRecheck)
+
+	endWindow := holdOpenWindow(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	var blocked []chan error
+	for _, step := range []struct {
+		name string
+		run  func() error
+	}{
+		{name: "a journal read with a 50ms ctx", run: func() error {
+			page, err := store.ReadEventsJournalPage(ctx, 0, 0)
+			if err == nil && page.Head != 7 {
+				return fmt.Errorf("page = %+v, want the spy's head 7", page)
+			}
+			return err
+		}},
+		{name: "EventsJournalActive", run: func() error {
+			if !store.EventsJournalActive() {
+				return errors.New("false; the re-check keeps the last answer, true")
+			}
+			return nil
+		}},
+		{name: "CloseStore", run: store.CloseStore},
+		{name: "an ordinary reader", run: func() error {
+			_, release, err := store.acquireStorage()
+			if err == nil {
+				release()
+				return errors.New("acquired the storage of a closed store")
+			}
+			if !errors.Is(err, ErrStoreClosed) {
+				return err
+			}
+			return nil
+		}},
+	} {
+		// A step that is still blocked is reported and left running, so the
+		// steps after it show what queues behind it.
+		done := make(chan error, 1)
+		go func() { done <- step.run() }()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("%s inside the window: %v", step.name, err)
+			}
+		case <-time.After(openWindowPatience):
+			t.Errorf("%s is still blocked %v into another scope's open window", step.name, openWindowPatience)
+			blocked = append(blocked, done)
+		}
+	}
+	// The blocked steps finish once the window ends; wait for them before
+	// cleanup resets the clock and the spy they read.
+	endWindow()
+	for _, done := range blocked {
+		select {
+		case <-done:
+		case <-time.After(openWindowPatience):
+			t.Fatal("a blocked step did not finish after the window ended")
+		}
+	}
+}
+
+// openWindowPatience bounds a wait on an answer while a test holds an open
+// window. An answer that does not wait on the window comes back far sooner,
+// and one that does never comes back while the window stands.
+const openWindowPatience = 5 * time.Second
+
+// holdOpenWindow stands up a native open's window — nativeDoltOpenEnvMu held
+// and the BEADS_ and BD_ namespaces withheld, as openNativeStorageProxied
+// holds them — and returns the func that ends it. The test's cleanup ends it
+// too, so a test that fails inside it does not leave it standing.
+func holdOpenWindow(t *testing.T) (end func()) {
+	t.Helper()
+	nativeDoltOpenEnvMu.Lock()
+	restore, err := withWithheldPrefixesLocked(beadsEnvPrefix, bdEnvPrefix)
+	if err != nil {
+		nativeDoltOpenEnvMu.Unlock()
+		t.Fatalf("withholding the window's namespaces: %v", err)
+	}
+	var once sync.Once
+	end = func() {
+		once.Do(func() {
+			restore()
+			nativeDoltOpenEnvMu.Unlock()
+		})
+	}
+	t.Cleanup(end)
+	return end
 }
 
 // proxiedJournalFixture is newSplitFixture with the native leaf latched onto
@@ -402,9 +756,11 @@ func TestProxiedStoreEventsJournalUnavailableWhenDemoted(t *testing.T) {
 	}
 }
 
-// The refusals are ordered permanent-first, so a caller that retries on the
-// transient ErrEventsJournalUnavailable never spins on a store that is closed
-// or never journals.
+// The refusals are ordered longest-lasting first, so a caller that retries on
+// the transient ErrEventsJournalUnavailable never spins on a store that is
+// closed or not journaling. A leaf dropped while the activation resolved is
+// refused as unavailable ahead of inactive: that answer may be the dropped
+// leaf's pin's, and the next read answers for the current one.
 func TestProxiedStoreEventsJournalRefusalOrder(t *testing.T) {
 	t.Run("closed", func(t *testing.T) {
 		store, _, _ := newSplitFixture(t)
@@ -416,6 +772,49 @@ func TestProxiedStoreEventsJournalRefusalOrder(t *testing.T) {
 			t.Fatalf("error = %v, want ErrStoreClosed", err)
 		}
 	})
+	t.Run("closed, inside another open's window", func(t *testing.T) {
+		// A closed store resolves no activation, so it does not wait the
+		// window out for an answer it cannot use.
+		store, _, _ := newSplitFixture(t)
+		if err := store.CloseStore(); err != nil {
+			t.Fatalf("CloseStore: %v", err)
+		}
+		holdOpenWindow(t)
+		read := make(chan error, 1)
+		go func() {
+			_, err := store.ReadEventsJournalPage(context.Background(), 0, 0)
+			read <- err
+		}()
+		select {
+		case err := <-read:
+			if !errors.Is(err, ErrStoreClosed) {
+				t.Fatalf("error = %v, want ErrStoreClosed", err)
+			}
+		case <-time.After(openWindowPatience):
+			t.Fatalf("a read on a closed store is still waiting %v into another open's window", openWindowPatience)
+		}
+	})
+	t.Run("closed while resolving", func(t *testing.T) {
+		// Closing drops the leaf too, and closed is the longer-lasting answer.
+		store, leafClosed := resolvingJournalFixture(t, "events-journal: true\n")
+		err := readWhileTheLeafIsDropped(t, store, leafClosed, func() {
+			if err := store.CloseStore(); err != nil {
+				t.Fatalf("CloseStore: %v", err)
+			}
+		})
+		if !errors.Is(err, ErrStoreClosed) || errors.Is(err, ErrEventsJournalUnavailable) {
+			t.Fatalf("error = %v, want ErrStoreClosed alone", err)
+		}
+	})
+	t.Run("leaf dropped while resolving, and inactive", func(t *testing.T) {
+		store, leafClosed := resolvingJournalFixture(t, "events-journal: false\n")
+		err := readWhileTheLeafIsDropped(t, store, leafClosed, func() {
+			store.standDown(NewNonTerminalProxiedVerdictError(ProxiedVerdictProxyGone, "bd restarted its proxy", nil))
+		})
+		if !errors.Is(err, ErrEventsJournalUnavailable) || errors.Is(err, ErrEventsJournalInactive) {
+			t.Fatalf("error = %v, want ErrEventsJournalUnavailable alone", err)
+		}
+	})
 	t.Run("demoted and inactive", func(t *testing.T) {
 		store, _, _ := newSplitFixture(t)
 		store.standDown(NewNonTerminalProxiedVerdictError(ProxiedVerdictProxyGone, "bd restarted its proxy", nil))
@@ -424,6 +823,228 @@ func TestProxiedStoreEventsJournalRefusalOrder(t *testing.T) {
 			t.Fatalf("error = %v, want ErrEventsJournalInactive alone", err)
 		}
 	})
+}
+
+// Resolving the activation can wait out another native open's whole window
+// (TestProxiedEventsJournalResolutionWaitsOutAnOpenWindow), and a guard tick
+// that stands the leaf down or re-pins it inside that wait drops the leaf the
+// read started from. The read must not go on with the dropped leaf: closed by
+// then, it refuses with ErrStoreClosed, which tells the caller a store that is
+// open has closed. The read refuses as transiently unavailable instead, and
+// the next read answers for the leaf now serving. A leaf dropped while the
+// read is in flight on it is refused the same way
+// (TestProxiedStoreEventsJournalReadRefusesALeafDroppedDuringTheRead).
+func TestProxiedStoreEventsJournalReadRefusesALeafDroppedWhileResolving(t *testing.T) {
+	t.Run("stand-down", func(t *testing.T) {
+		store, leafClosed := resolvingJournalFixture(t, "events-journal: true\n")
+		err := readWhileTheLeafIsDropped(t, store, leafClosed, func() {
+			store.standDown(NewNonTerminalProxiedVerdictError(ProxiedVerdictProxyGone, "bd restarted its proxy", nil))
+		})
+		if !errors.Is(err, ErrEventsJournalUnavailable) || errors.Is(err, ErrStoreClosed) {
+			t.Fatalf("error = %v, want ErrEventsJournalUnavailable and not ErrStoreClosed", err)
+		}
+	})
+	t.Run("re-pin", func(t *testing.T) {
+		store, leafClosed := resolvingJournalFixture(t, "events-journal: true\n")
+		recovered := newNativeDoltStoreForTest(journalPageSpy("prx-recovered"))
+		err := readWhileTheLeafIsDropped(t, store, leafClosed, func() {
+			if !store.repin(recovered, store.Pin()) {
+				t.Fatal("repin refused an open store with no terminal verdict")
+			}
+		})
+		if !errors.Is(err, ErrEventsJournalUnavailable) || errors.Is(err, ErrStoreClosed) || errors.Is(err, ErrEventsJournalInactive) {
+			t.Fatalf("error = %v, want ErrEventsJournalUnavailable alone", err)
+		}
+		page, err := store.ReadEventsJournalPage(context.Background(), 0, 0)
+		if err != nil {
+			t.Fatalf("the read after the re-pin: %v", err)
+		}
+		if len(page.Rows) != 1 || page.Rows[0].IssueID != "prx-recovered" {
+			t.Fatalf("the read after the re-pin got page %+v, want the re-pinned leaf's", page)
+		}
+	})
+}
+
+// The leaf can also be dropped while the read is in flight on it, and one bd
+// proxy restart does both halves: the read meets the dead socket and waits in
+// the reconnect its reopen hook runs, and the guard tick or another reader's
+// verdict stands the leaf down, or re-pins it, meanwhile. The dropped leaf
+// latches closed, so the read comes back with the leaf's ErrStoreClosed from a
+// store that is still open. It refuses as transiently unavailable instead.
+// Closing the store itself latches it closed before it drops the leaf, so a
+// read the close cuts short still answers ErrStoreClosed.
+func TestProxiedStoreEventsJournalReadRefusesALeafDroppedDuringTheRead(t *testing.T) {
+	t.Run("stand-down", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			store, finish := readHeldInTheReconnect(t)
+			store.standDown(NewNonTerminalProxiedVerdictError(ProxiedVerdictProxyGone, "bd restarted its proxy", nil))
+			if err := finish(); !errors.Is(err, ErrEventsJournalUnavailable) || errors.Is(err, ErrStoreClosed) {
+				t.Fatalf("error = %v, want ErrEventsJournalUnavailable and not ErrStoreClosed", err)
+			}
+		})
+	})
+	t.Run("re-pin", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			store, finish := readHeldInTheReconnect(t)
+			if !store.repin(newNativeDoltStoreForTest(journalPageSpy("prx-recovered")), store.Pin()) {
+				t.Fatal("repin refused an open store with no terminal verdict")
+			}
+			if err := finish(); !errors.Is(err, ErrEventsJournalUnavailable) || errors.Is(err, ErrStoreClosed) {
+				t.Fatalf("error = %v, want ErrEventsJournalUnavailable and not ErrStoreClosed", err)
+			}
+			page, err := store.ReadEventsJournalPage(context.Background(), 0, 0)
+			if err != nil {
+				t.Fatalf("the read after the re-pin: %v", err)
+			}
+			if len(page.Rows) != 1 || page.Rows[0].IssueID != "prx-recovered" {
+				t.Fatalf("the read after the re-pin got page %+v, want the re-pinned leaf's", page)
+			}
+		})
+	})
+	t.Run("closed", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			store, finish := readHeldInTheReconnect(t)
+			// The store closes its leaf in line, and the leaf's close waits for
+			// the reconnect the read holds, so the close runs beside the read.
+			closed := make(chan error, 1)
+			go func() { closed <- store.CloseStore() }()
+			if err := finish(); !errors.Is(err, ErrStoreClosed) || errors.Is(err, ErrEventsJournalUnavailable) {
+				t.Fatalf("error = %v, want ErrStoreClosed alone", err)
+			}
+			select {
+			case err := <-closed:
+				if err != nil {
+					t.Fatalf("CloseStore: %v", err)
+				}
+			default:
+				t.Fatal("CloseStore did not return after the reconnect ended")
+			}
+		})
+	})
+}
+
+// readHeldInTheReconnect starts a journal read on a proxied store whose leaf
+// fails every page read on a dead socket, and returns once the read waits in
+// the reconnect that starts, as a reopen hook re-admitting against a
+// restarting bd proxy holds it. The caller, in a synctest bubble, then drops
+// the leaf; finish checks that the leaf latched closed, releases the
+// reconnect, and returns the read's error. A leaf's close latches it before it
+// waits for the reconnect the read holds, so the latch has landed once every
+// other goroutine in the bubble is blocked. The store is pinned to a scope
+// with the journal on, so a read after a re-pin answers for the new leaf.
+func readHeldInTheReconnect(t *testing.T) (store *ProxiedStore, finish func() error) {
+	t.Helper()
+	t.Setenv("BD_EVENTS_JOURNAL", "")
+	scopeRoot := t.TempDir()
+	writeScopeJournalConfig(t, scopeRoot, "events-journal: true\n")
+	store, leaf := proxiedJournalFixture(t, &nativeJournalReaderSpy{read: func(context.Context, int64, int) (journalops.Page, error) {
+		return journalops.Page{}, io.EOF
+	}})
+	store.pin = PinForTest(scopeRoot, "", "beads")
+	reconnecting, held := make(chan struct{}), make(chan struct{})
+	var reconnectOnce, releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(held) }) }
+	t.Cleanup(release)
+	leaf.reopen = func(context.Context) (NativeStorage, error) {
+		reconnectOnce.Do(func() { close(reconnecting) })
+		<-held
+		return journalPageSpy("prx-reopened"), nil
+	}
+	read := make(chan error, 1)
+	go func() {
+		_, err := store.ReadEventsJournalPage(context.Background(), 0, 0)
+		read <- err
+	}()
+	synctest.Wait()
+	select {
+	case <-reconnecting:
+	default:
+		t.Fatal("the read did not start a reconnect")
+	}
+	return store, func() error {
+		t.Helper()
+		synctest.Wait()
+		if !nativeDoltStoreClosedForTest(leaf) {
+			t.Fatal("the dropped leaf did not latch closed")
+		}
+		release()
+		synctest.Wait()
+		select {
+		case err := <-read:
+			return err
+		default:
+			t.Fatal("the read did not answer after the reconnect was released")
+			return nil
+		}
+	}
+}
+
+// journalPageSpy is a journal read whose every page is one row for issue.
+func journalPageSpy(issue string) *nativeJournalReaderSpy {
+	return &nativeJournalReaderSpy{read: func(context.Context, int64, int) (journalops.Page, error) {
+		return journalops.Page{Rows: []journalops.Row{{Seq: 1, IssueID: issue}}, Head: 1}, nil
+	}}
+}
+
+// resolvingJournalFixture is proxiedJournalFixture pinned to a scope whose bd
+// config is config, with the activation not resolved yet. The returned
+// channel closes when the native leaf is closed, which a stand-down or re-pin
+// does off the caller's path to the leaf it drops.
+func resolvingJournalFixture(t *testing.T, config string) (*ProxiedStore, <-chan struct{}) {
+	t.Helper()
+	t.Setenv("BD_EVENTS_JOURNAL", "")
+	scopeRoot := t.TempDir()
+	writeScopeJournalConfig(t, scopeRoot, config)
+	spy := journalPageSpy("prx-dropped")
+	leafClosed := make(chan struct{})
+	spy.close = func() error {
+		close(leafClosed)
+		return nil
+	}
+	store, _ := proxiedJournalFixture(t, spy)
+	store.pin = PinForTest(scopeRoot, "", "beads")
+	store.forgetJournalActivation()
+	return store, leafClosed
+}
+
+// readWhileTheLeafIsDropped reads store's journal while another open's window
+// stands, runs drop once the read is resolving the activation, waits for the
+// dropped leaf to close, and returns the read's error once the window ends.
+func readWhileTheLeafIsDropped(t *testing.T, store *ProxiedStore, leafClosed <-chan struct{}, drop func()) error {
+	t.Helper()
+	resolving := make(chan struct{})
+	var once sync.Once
+	oldResolve := proxiedJournalResolve
+	t.Cleanup(func() { proxiedJournalResolve = oldResolve })
+	proxiedJournalResolve = func(pin Pin) bool {
+		once.Do(func() { close(resolving) })
+		return oldResolve(pin)
+	}
+	endWindow := holdOpenWindow(t)
+	read := make(chan error, 1)
+	go func() {
+		_, err := store.ReadEventsJournalPage(context.Background(), 0, 0)
+		read <- err
+	}()
+	select {
+	case <-resolving:
+	case <-time.After(openWindowPatience):
+		t.Fatal("the read did not start resolving the activation")
+	}
+	drop()
+	select {
+	case <-leafClosed:
+	case <-time.After(openWindowPatience):
+		t.Fatal("the dropped leaf was not closed")
+	}
+	endWindow()
+	select {
+	case err := <-read:
+		return err
+	case <-time.After(openWindowPatience):
+		t.Fatal("the read did not answer after the window ended")
+		return nil
+	}
 }
 
 // writeScopeJournalConfig writes the scope's bd config with body.

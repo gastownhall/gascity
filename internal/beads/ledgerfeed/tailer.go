@@ -1,8 +1,8 @@
 // Package ledgerfeed tails a bead ledger's durable mutation journal
 // (journalops.Journal) from a checkpoint the caller can persist.
 //
-// It is the one read-side library every journal consumer shares: the
-// controller's cache-coherence feed, and later the relay and the shard owner.
+// It is the read-side library journal consumers are to share: first the
+// controller's cache-coherence feed, then the relay and the shard owner.
 // It moves pages and proves nothing was skipped; what a page MEANS is the
 // caller's Apply. It imports the journal's read role and nothing of gc's store
 // layer, so any journalops.Journal — a native store, a proxied store, an HTTP
@@ -35,6 +35,21 @@
 // committed after the new baseline's head was read are delivered again by the
 // next read, which an idempotent Apply absorbs.
 //
+// # What a lapse does
+//
+// A journal can stop recording and start again — bd's is switched per scope —
+// and the lapse leaves no hole in the seqs: writes made while it was off have
+// no rows, so the rows after it continue the checkpoint and no check above can
+// see what is missing. The journal's refusal while it is off is the only
+// evidence. A Tailer whose Lapse recognizes that refusal marks the checkpoint
+// Lapsed on any read that gets it, and the next read that succeeds is a
+// GapInactive gap, moved past like any other. A lapse no read saw leaves no
+// trace at all: one that began and ended between two reads, or while nothing
+// was reading, or before the Source noticed the switch (gc's stores re-check
+// it only every few seconds, or later while a store open is in flight;
+// beads.ErrEventsJournalInactive says when). So a consumer that must not miss
+// a write still reconciles in full now and then.
+//
 // # Where a tail starts
 //
 // A new Tailer's checkpoint is seq 0, and a Step from seq 0 reads from the
@@ -47,6 +62,8 @@ package ledgerfeed
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math"
@@ -63,21 +80,31 @@ const (
 	DefaultIdlePoll  = time.Second
 )
 
-// Fingerprint identifies the journal row at Seq. Seq is the identity; IssueID
-// and TS tell a re-seeded counter's row at the same seq from the original.
+// Fingerprint identifies the journal row at Seq. Seq is the identity; the
+// rest tells a re-seeded counter's row at the same seq from the original. TS
+// alone cannot: it is a label, and a re-seeded write can repeat it.
 type Fingerprint struct {
 	Seq     int64
 	IssueID string
 	TS      string
+	Op      string
+	// Digest is the hex SHA-256 of the row's actor and payloads.
+	Digest string
 }
 
 // Checkpoint is the tailer's resumable position: every row with a seq at or
 // below Seq has been applied. Last fingerprints the row at Seq; it is unknown
 // (and the row is not re-checked) when Last.Seq != Seq, which is the case at
 // seq 0 and after a re-baseline onto a row the journal no longer retains.
+//
+// Lapsed marks a checkpoint that a read since found the journal not recording
+// (Tailer.Lapse); the next read that succeeds is a GapInactive gap. A failed
+// Step sets it, so a caller that persists the checkpoint persists it after a
+// failed Step too.
 type Checkpoint struct {
-	Seq  int64
-	Last Fingerprint
+	Seq    int64
+	Last   Fingerprint
+	Lapsed bool
 }
 
 // verifiable reports whether the checkpoint names a row it can check.
@@ -103,6 +130,10 @@ const (
 	// way: the two cannot be told apart, and a needless resync is the safe
 	// answer.
 	GapReset GapKind = "reset"
+	// GapInactive: a read found the journal not recording (Tailer.Lapse), so
+	// writes made meanwhile have no rows. It is reported by the first read
+	// that succeeds after the lapse, whatever that read served.
+	GapInactive GapKind = "inactive"
 )
 
 // Gap describes one detected break and the baseline the tailer moves to.
@@ -118,7 +149,9 @@ type Gap struct {
 	// Floor is the lowest seq the read could serve after the break, for
 	// GapTruncated.
 	Floor int64
-	// Err is the journal's error, when the journal reported the break.
+	// Err is the journal's error, when the journal reported the break. A
+	// GapInactive gap has none: the refusal came on an earlier read, whose
+	// Step returned it.
 	Err error
 }
 
@@ -155,7 +188,8 @@ type Tailer struct {
 	Source journalops.Journal
 	// Apply receives each non-empty page in seq order. The checkpoint
 	// advances past a page only when Apply returns nil; an error retries the
-	// same page. Required.
+	// same page. Apply owns the page's rows: the tailer reads none of them
+	// after handing them over. Required.
 	Apply func(ctx context.Context, page journalops.Page) error
 	// OnGap is told about every gap before the checkpoint moves to gap.To.
 	// It resyncs the consumer from its source of truth; an error keeps the
@@ -168,6 +202,12 @@ type Tailer struct {
 	// the tail on a refusal it knows to be permanent. Optional; nil retries
 	// every error, and Stats keeps the last one (LastError) either way.
 	OnError func(err error) error
+	// Lapse reports whether a read error means the journal is not recording
+	// right now; see the package doc for what a lapse does. A read it matches
+	// marks the checkpoint Lapsed. A gc consumer sets it to match
+	// beads.ErrEventsJournalInactive. Optional; nil treats every read error as
+	// transient, which only a journal that is never switched off makes right.
+	Lapse func(err error) bool
 	// PageLimit caps rows applied per read. Zero is DefaultPageLimit.
 	PageLimit int
 	// Poll is the delay after an idle read. Zero is DefaultPoll.
@@ -192,7 +232,9 @@ type Tailer struct {
 // Resume sets the checkpoint to a previously persisted one. The next read
 // re-checks its fingerprint, so a journal reset while the caller was away
 // surfaces as a gap rather than as silently skipped rows. Persist the whole
-// Checkpoint, fingerprint included: a seq alone cannot detect that reset.
+// Checkpoint: a seq alone cannot detect that reset, and only the Lapsed mark
+// carries a lapse across a restart. A lapse that began and ended while nothing
+// was reading left no trace for Resume to find.
 //
 // It waits for a Step in flight, so that Step's commit cannot overwrite the
 // restored checkpoint, and refuses a negative seq, which no journal serves.
@@ -216,7 +258,8 @@ func (t *Tailer) Resume(cp Checkpoint) error {
 // Call it BEFORE reading the consumer's source of truth: a mutation that
 // commits between the head read and the scan is then both in the scan and
 // delivered by the tailer, which an idempotent Apply absorbs. Baselining
-// after the scan would lose a mutation committed in between.
+// after the scan would lose a mutation committed in between. For the same
+// reason a Baseline clears a lapse: the scan after it covers what was lost.
 func (t *Tailer) Baseline(ctx context.Context) (Checkpoint, error) {
 	if err := t.validate(); err != nil {
 		return Checkpoint{}, err
@@ -261,7 +304,8 @@ func (t *Tailer) Stats() Stats {
 // Step runs one read-and-apply. It reports more=true when the caller should
 // read again at once: the page was full, the head is still ahead, or a gap was
 // just moved past that did not follow another gap. An error reports more=false
-// and leaves the checkpoint where it was.
+// and leaves the checkpoint where it was, except that a read error Lapse
+// matches marks it Lapsed.
 //
 // From the zero checkpoint Step reads from the start of retained history; see
 // the package doc for where a tail starts.
@@ -280,21 +324,15 @@ func (t *Tailer) Step(ctx context.Context) (more bool, err error) {
 		since, limit = cp.Seq-1, limit+1
 	}
 
-	page, err := t.Source.ReadEventsJournalPage(ctx, since, limit)
+	page, err := t.read(ctx, since, limit)
 	if err != nil {
-		var truncated *journalops.TruncatedError
-		if !errors.As(err, &truncated) {
-			return false, t.fail(fmt.Errorf("ledgerfeed: reading journal after seq %d: %w", since, err))
+		if gap, ok := truncationGap(cp, err); ok {
+			return t.movepast(ctx, gap)
 		}
-		gap := Gap{Kind: GapTruncated, From: cp, Head: truncated.Head, Floor: truncated.Floor, Err: err}
-		switch {
-		case truncated.Head < cp.Seq:
-			gap.Kind = GapHeadRegressed
-		case verify && truncated.Since < cp.Seq && truncated.Floor <= cp.Seq+1:
-			// Only the checkpoint row is gone; every row after it survives.
-			gap.Kind = GapReset
-		}
-		return t.movepast(ctx, gap)
+		return false, t.fail(fmt.Errorf("ledgerfeed: reading journal after seq %d for the checkpoint at seq %d: %w", since, cp.Seq, err))
+	}
+	if cp.Lapsed {
+		return t.movepast(ctx, Gap{Kind: GapInactive, From: cp, Head: page.Head})
 	}
 	if page.Head < cp.Seq {
 		return t.movepast(ctx, Gap{Kind: GapHeadRegressed, From: cp, Head: page.Head})
@@ -328,13 +366,13 @@ func (t *Tailer) Step(ctx context.Context) (more bool, err error) {
 		return false, t.fail(fmt.Errorf("ledgerfeed: journal head %d is past checkpoint %d, but the read after it served no row past the checkpoint "+
 			"(the Source must serve the re-read checkpoint row and at least one more per read)", page.Head, cp.Seq))
 	}
+	// Apply owns the rows once it has them, so the checkpoint is taken first.
+	first, last := rows[0].Seq, rows[len(rows)-1]
+	next := Checkpoint{Seq: last.Seq, Last: fingerprintOf(last)}
 	page.Rows = rows
 	if err := t.Apply(ctx, page); err != nil {
-		return false, t.fail(fmt.Errorf("ledgerfeed: applying journal rows %d..%d: %w",
-			rows[0].Seq, rows[len(rows)-1].Seq, err))
+		return false, t.fail(fmt.Errorf("ledgerfeed: applying journal rows %d..%d: %w", first, next.Seq, err))
 	}
-	last := rows[len(rows)-1]
-	next := Checkpoint{Seq: last.Seq, Last: fingerprintOf(last)}
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -416,10 +454,40 @@ func (t *Tailer) movepast(ctx context.Context, gap Gap) (bool, error) {
 	return !consecutive, nil
 }
 
+// truncationGap classifies a read the journal refused as truncated; ok is
+// false for any other refusal.
+func truncationGap(cp Checkpoint, err error) (gap Gap, ok bool) {
+	var truncated *journalops.TruncatedError
+	if !errors.As(err, &truncated) {
+		return Gap{}, false
+	}
+	gap = Gap{Kind: GapTruncated, From: cp, Head: truncated.Head, Floor: truncated.Floor, Err: err}
+	switch {
+	case truncated.Head < cp.Seq:
+		gap.Kind = GapHeadRegressed
+	case cp.verifiable() && truncated.Since < cp.Seq && truncated.Floor <= cp.Seq+1:
+		// Only the checkpoint row is gone; every row after it survives.
+		gap.Kind = GapReset
+	}
+	return gap, true
+}
+
+// read reads a page from the Source, marking the checkpoint Lapsed when Lapse
+// matches the read's error. Callers hold stepMu, so no commit races the mark.
+func (t *Tailer) read(ctx context.Context, since int64, limit int) (journalops.Page, error) {
+	page, err := t.Source.ReadEventsJournalPage(ctx, since, limit)
+	if err != nil && t.Lapse != nil && t.Lapse(err) {
+		t.mu.Lock()
+		t.checkpoint.Lapsed = true
+		t.mu.Unlock()
+	}
+	return page, err
+}
+
 // readHead asks the journal for its head: a checkpoint at or above the head
 // is caught up and returns no rows, only the head.
 func (t *Tailer) readHead(ctx context.Context) (int64, error) {
-	page, err := t.Source.ReadEventsJournalPage(ctx, math.MaxInt64, 1)
+	page, err := t.read(ctx, math.MaxInt64, 1)
 	if err != nil {
 		return 0, fmt.Errorf("ledgerfeed: reading journal head: %w", err)
 	}
@@ -433,7 +501,7 @@ func (t *Tailer) checkpointAt(ctx context.Context, seq int64) (Checkpoint, error
 		return Checkpoint{}, nil
 	}
 	cp := Checkpoint{Seq: seq}
-	page, err := t.Source.ReadEventsJournalPage(ctx, seq-1, 1)
+	page, err := t.read(ctx, seq-1, 1)
 	if err != nil {
 		var truncated *journalops.TruncatedError
 		if errors.As(err, &truncated) {
@@ -452,6 +520,8 @@ func (t *Tailer) fail(err error) error {
 	t.mu.Lock()
 	t.stats.Errors++
 	t.stats.LastError = err
+	// The wall clock, not an injected one: only a reader of Stats sees it, and
+	// nothing the tailer decides depends on it.
 	t.stats.LastErrorAt = time.Now()
 	t.mu.Unlock()
 	return err
@@ -526,5 +596,13 @@ func (t *Tailer) idlePoll() time.Duration {
 }
 
 func fingerprintOf(row journalops.Row) Fingerprint {
-	return Fingerprint{Seq: row.Seq, IssueID: row.IssueID, TS: row.TS}
+	digest := sha256.New()
+	for _, field := range [...]string{row.Actor, row.IssueJSON, row.DepJSON, row.CommentJSON} {
+		// Length-prefixed, so a byte moved from one field to the next shows.
+		fmt.Fprintf(digest, "%d:%s", len(field), field) //nolint:errcheck // hash.Write never errors
+	}
+	return Fingerprint{
+		Seq: row.Seq, IssueID: row.IssueID, TS: row.TS, Op: row.Op,
+		Digest: hex.EncodeToString(digest.Sum(nil)),
+	}
 }
