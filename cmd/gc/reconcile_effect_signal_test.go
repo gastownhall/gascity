@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/session/sessiontest"
+
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -1138,5 +1140,84 @@ func TestSignalL5ReadsReadyWisps(t *testing.T) {
 	}
 	if s := runTx(context.Background(), p, it, effectSpecs[it.Kind], nil); s.Cause != causeHasWork {
 		t.Errorf("ready wisp: settlement %+v, want refused %s", s, causeHasWork)
+	}
+}
+
+// TestSeatAwakeReadyAcrossLegsAndIdentities (mc-m4fgc; the #7815 review).
+// Kills a seat read whose ready fan-out probes only its first (leg,
+// assignee) pair, or de-duplicates pairs by assignee alone, either of which
+// would stop a seat mid-work: ready work on another leg, under another of
+// the seat's identities, or a wisp there, beside a blocked open row that
+// alone holds nothing, keeps the seat, on the seat's read and the tick's.
+func TestSeatAwakeReadyAcrossLegsAndIdentities(t *testing.T) {
+	type place struct {
+		rig      bool
+		identity string // "id" or "name"
+		wisp     bool
+	}
+	for _, c := range []struct {
+		name    string
+		blocked place
+		ready   *place
+		want    bool
+	}{
+		{"blocked only", place{identity: "id"}, nil, false},
+		{"ready on the rig leg", place{identity: "id"}, &place{rig: true, identity: "id"}, true},
+		{"ready under session_name", place{identity: "id"}, &place{identity: "name"}, true},
+		{"ready wisp under session_name on the rig leg", place{identity: "id"}, &place{rig: true, identity: "name", wisp: true}, true},
+		{"ready on a leg with no other row", place{rig: true, identity: "id"}, &place{identity: "name"}, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			rigPath := t.TempDir()
+			cfg := &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Rigs:      []config.Rig{{Name: "riga", Path: rigPath}},
+				Agents:    []config.Agent{{Name: "auditor", Scope: "city"}},
+			}
+			cityStore := beads.NewMemStore()
+			rigStore := beads.NewMemStore()
+			rigs := map[string]beads.Store{"riga": rigStore}
+			sess := beads.Bead{ID: "session-1", Type: sessionBeadType, Status: "open", Metadata: map[string]string{"template": "auditor", "session_name": "auditor-session"}}
+			info := sessiontest.SeedBead(t, sess)
+			assignee := func(p place) string {
+				if p.identity == "name" {
+					return "auditor-session"
+				}
+				return sess.ID
+			}
+			storeOf := func(p place) beads.Store {
+				if p.rig {
+					return rigStore
+				}
+				return cityStore
+			}
+			bs := storeOf(c.blocked)
+			blocker, err := bs.Create(beads.Bead{Title: "blocker", Type: "task"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			w, err := bs.Create(beads.Bead{Title: "blocked", Type: "task", Assignee: assignee(c.blocked)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := bs.DepAdd(w.ID, blocker.ID, "blocks"); err != nil {
+				t.Fatal(err)
+			}
+			if c.ready != nil {
+				if _, err := storeOf(*c.ready).Create(beads.Bead{Title: "ready", Type: "task", Assignee: assignee(*c.ready), Ephemeral: c.ready.wisp}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			legs := testWorkLegs(cityPath, cfg, cityStore, rigs)
+			seat := seatWorkFor(legs, releaseScope(info, cfg))
+			got, err := sessionHasAwakeAssignedWorkForReachableStore(seat, info)
+			if err != nil || got != c.want {
+				t.Fatalf("seat read = %v (%v), want %v", got, err, c.want)
+			}
+			if tick, err := sessionHasAwakeAssignedWorkForReachableStore(newSeatWork(legs), info); err != nil || tick != c.want {
+				t.Fatalf("tick read = %v (%v), want %v, as the seat read", tick, err, c.want)
+			}
+		})
 	}
 }

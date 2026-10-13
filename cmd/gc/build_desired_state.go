@@ -294,7 +294,7 @@ func recoverLeg(dst *error, label string, stderr io.Writer) {
 	// they run (each fold prints after Wait), so serializing here is enough.
 	recoverLegMu.Lock()
 	defer recoverLegMu.Unlock()
-	fmt.Fprintf(stderr, "buildDesiredState: %s panicked: %v\n%s", label, r, debug.Stack()) //nolint:errcheck
+	fmt.Fprintf(stderr, "%s panicked: %v\n%s", label, r, debug.Stack()) //nolint:errcheck // the label names the leg: desired state, seat work, the ready fan-out
 }
 
 var recoverLegMu sync.Mutex
