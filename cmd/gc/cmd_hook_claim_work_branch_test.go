@@ -1246,6 +1246,41 @@ func TestHookClaimDirLooksLikeRepoRecognizesLinkedWorktreeAdminDir(t *testing.T)
 	})
 }
 
+// TestHookClaimDirLooksLikeRepoFollowsPhysicalAncestry pins that the climb follows the
+// parents of the directory a store resolves to, not only the parents of the name it
+// was given. git discovers from the physical directory, so a store named through a
+// symlink into a repository's subdirectory sits in that repository even though no
+// lexical ancestor of the link carries a marker.
+func TestHookClaimDirLooksLikeRepoFollowsPhysicalAncestry(t *testing.T) {
+	repo := filepath.Join(t.TempDir(), "repo")
+	hookClaimInitRepo(t, repo, "main")
+	sub := filepath.Join(repo, "sub")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatalf("creating %s: %v", sub, err)
+	}
+	link := filepath.Join(t.TempDir(), "store-link")
+	if err := os.Symlink(sub, link); err != nil {
+		t.Skipf("this filesystem does not support symlinks: %v", err)
+	}
+
+	if !hookClaimDirLooksLikeRepo(link) {
+		t.Errorf("%s read as no repository; it resolves into %s", link, repo)
+	}
+
+	t.Run("a store the claiming session cannot identify refuses an outside candidate", func(t *testing.T) {
+		// The store's probe is pinned to Absent, which is what a repository git
+		// declined to answer for -- dubious ownership, chiefly -- reports.
+		candidate := t.TempDir()
+		if _, probe := hookClaimHeadRepoDir(candidate); probe != hookClaimProbeAbsent {
+			t.Skipf("%s is not outside every repository here (probe %v)", candidate, probe)
+		}
+		store := hookClaimStoreHead{dir: link, probe: hookClaimProbeAbsent}
+		if !store.Covers(candidate) {
+			t.Errorf("%s was admitted against a store that resolves into the unidentified repository %s", candidate, repo)
+		}
+	})
+}
+
 // TestHookClaimPinnedBranchReadKeepsRelativeConfigSemantics pins that naming the
 // repository did not move where git resolves relative paths from.
 //

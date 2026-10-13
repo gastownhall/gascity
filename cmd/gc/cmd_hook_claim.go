@@ -2025,11 +2025,30 @@ func (s hookClaimStoreHead) Admit(candidate string) (hookClaimWorkTree, bool) {
 // reasons is not evidence of absence -- an unreadable entry is exactly the shape a
 // repository refused for dubious ownership would present, so it has to read the same
 // as a marker found, not the same as a marker missing.
+//
+// The climb follows both the lexical parents of dir and the physical parents of the
+// directory it resolves to, because git discovers from the latter and a store named
+// through a symlink would otherwise miss the repository its target sits in; it
+// deliberately ignores GIT_CEILING_DIRECTORIES and filesystem boundaries, which is
+// safe because a true result can only refuse.
 func hookClaimDirLooksLikeRepo(dir string) bool {
 	dir = strings.TrimSpace(dir)
 	if dir == "" {
 		return false
 	}
+	phys, err := filepath.EvalSymlinks(dir)
+	if err != nil && !os.IsNotExist(err) {
+		return true
+	}
+	if hookClaimClimbForRepoMarkers(dir) {
+		return true
+	}
+	return err == nil && phys != dir && hookClaimClimbForRepoMarkers(phys)
+}
+
+// hookClaimClimbForRepoMarkers reports whether dir or any of its lexical ancestors
+// carries a repository's own markers.
+func hookClaimClimbForRepoMarkers(dir string) bool {
 	for {
 		if hookClaimDirCarriesRepoMarkers(dir) {
 			return true
