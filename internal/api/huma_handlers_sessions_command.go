@@ -918,22 +918,38 @@ func (s *Server) acceptSessionMessage(ctx context.Context, input *SessionMessage
 
 // --- Session Stop ---
 
+// sessionControlNoBody is the request body fingerprinted for the body-less
+// session control endpoints (/stop, /wake): every request to one action on
+// one target has the same body, so the Idempotency-Key scope alone decides
+// replay.
+type sessionControlNoBody struct{}
+
 // humaHandleSessionStop is the Huma-typed handler for POST /v0/session/{id}/stop.
 
-func (s *Server) humaHandleSessionStop(_ context.Context, input *SessionIDInput) (*OKWithIDResponse, error) {
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
-		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
-	}
+func (s *Server) humaHandleSessionStop(_ context.Context, input *SessionControlInput) (*OKWithIDResponse, error) {
+	// Idempotency: stop the turn at most once per Idempotency-Key, so a
+	// retried stop cannot interrupt a turn that started after the first one.
+	// The cached value is the resolved session ID; a replay rebuilds the body.
+	id, err := withIdempotency(s.idem, sessionActionIdempotencyPath(input.ID, "stop"), input.IdempotencyKey, sessionControlNoBody{},
+		func() (string, error) {
+			store := s.state.SessionsBeadStore()
+			if store.Store == nil {
+				return "", apierr.ServiceUnavailable.Msg("no bead store configured")
+			}
 
-	id, err := s.resolveSessionIDWithConfig(store.Store, input.ID)
+			id, err := s.resolveSessionIDWithConfig(store.Store, input.ID)
+			if err != nil {
+				return "", humaResolveError(err)
+			}
+
+			mgr := s.sessionManager(store.Store)
+			if err := mgr.StopTurn(id); err != nil {
+				return "", humaSessionManagerError(err)
+			}
+			return id, nil
+		})
 	if err != nil {
-		return nil, humaResolveError(err)
-	}
-
-	mgr := s.sessionManager(store.Store)
-	if err := mgr.StopTurn(id); err != nil {
-		return nil, humaSessionManagerError(err)
+		return nil, err
 	}
 	out := &OKWithIDResponse{}
 	out.Body.Status = "ok"
@@ -1129,24 +1145,43 @@ func (s *Server) humaHandleSessionClose(ctx context.Context, input *SessionClose
 
 // humaHandleSessionWake is the Huma-typed handler for POST /v0/session/{id}/wake.
 
-func (s *Server) humaHandleSessionWake(ctx context.Context, input *SessionIDInput) (*OKWithIDResponse, error) {
+func (s *Server) humaHandleSessionWake(ctx context.Context, input *SessionControlInput) (*OKWithIDResponse, error) {
+	// Idempotency: record the wake at most once per Idempotency-Key. Only a
+	// 200 is cached; a refusal (including 409 wake-will-not-start, whose wake
+	// is already recorded) releases the key so a retry re-runs the wake.
+	id, err := withIdempotency(s.idem, sessionActionIdempotencyPath(input.ID, "wake"), input.IdempotencyKey, sessionControlNoBody{},
+		func() (string, error) {
+			return s.wakeSession(ctx, input.ID)
+		})
+	if err != nil {
+		return nil, err
+	}
+	out := &OKWithIDResponse{}
+	out.Body.Status = "ok"
+	out.Body.ID = id
+	return out, nil
+}
+
+// wakeSession records an explicit wake for target, hands the session to the
+// controller, and returns the resolved session ID.
+func (s *Server) wakeSession(ctx context.Context, target string) (string, error) {
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
-		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
+		return "", apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
 
-	id, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, store.Store, input.ID)
+	id, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, store.Store, target)
 	if err != nil {
-		return nil, humaResolveError(err)
+		return "", humaResolveError(err)
 	}
 
 	res, err := session.NewStore(store).WakeSession(id, time.Now().UTC(), session.WakeOpts{RejectClosed: true})
 	if err != nil {
 		if errors.Is(err, session.ErrNotSessionBead) {
-			return nil, apierr.InvalidRequest.Msg(id + " is not a session")
+			return "", apierr.InvalidRequest.Msg(id + " is not a session")
 		}
 		if state, conflict := session.WakeConflictState(err); conflict {
-			return nil, apierr.SessionConflict.Msg("session " + id + " is " + state)
+			return "", apierr.SessionConflict.Msg("session " + id + " is " + state)
 		}
 		// Route every remaining store error through humaStoreError: the fused
 		// Get error keeps its original 404 "not_found: "/500 "internal: " mapping,
@@ -1154,7 +1189,7 @@ func (s *Server) humaHandleSessionWake(ctx context.Context, input *SessionIDInpu
 		// pre-fusion handler: a mid-wake write ErrNotFound now maps 404 instead of
 		// 500 — a safe-direction, near-unreachable shift, mirrored in the REST
 		// handler's writeStoreError.)
-		return nil, humaStoreError(err)
+		return "", humaStoreError(err)
 	}
 	// Nudge withdrawal reads the nudges class, so it sources the typed
 	// NudgesBeadStore (identity to the work store until that class relocates).
@@ -1184,12 +1219,9 @@ func (s *Server) humaHandleSessionWake(ctx context.Context, input *SessionIDInpu
 		why, _ = refuser.WakeStartRefusal(woken)
 	}
 	if why != "" {
-		return nil, apierr.WakeWillNotStart.Msg("wake recorded for session " + id + ", but it will not start: " + strings.TrimPrefix(why, "wake recorded for session "+id+", but it will not start: "))
+		return "", apierr.WakeWillNotStart.Msg("wake recorded for session " + id + ", but it will not start: " + strings.TrimPrefix(why, "wake recorded for session "+id+", but it will not start: "))
 	}
-	out := &OKWithIDResponse{}
-	out.Body.Status = "ok"
-	out.Body.ID = id
-	return out, nil
+	return id, nil
 }
 
 // --- Session Rename ---

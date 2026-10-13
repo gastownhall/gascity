@@ -9901,7 +9901,8 @@ export const zRespondSessionPath = z.object({
 export const zRespondSessionResponse = zSessionRespondOutputBody;
 
 export const zPostV0CityByCityNameSessionByIdStopHeaders = z.object({
-    'X-GC-Request': z.string().min(1)
+    'X-GC-Request': z.string().min(1),
+    'Idempotency-Key': z.string().optional()
 });
 
 export const zPostV0CityByCityNameSessionByIdStopPath = z.object({
@@ -10051,7 +10052,8 @@ export const zPostV0CityByCityNameSessionByIdUnpinPath = z.object({
 export const zPostV0CityByCityNameSessionByIdUnpinResponse = zSessionResponse;
 
 export const zPostV0CityByCityNameSessionByIdWakeHeaders = z.object({
-    'X-GC-Request': z.string().min(1)
+    'X-GC-Request': z.string().min(1),
+    'Idempotency-Key': z.string().optional()
 });
 
 export const zPostV0CityByCityNameSessionByIdWakePath = z.object({
