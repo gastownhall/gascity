@@ -168,7 +168,7 @@ var beadWriteCases = []beadWriteCase{
 	{name: "close", method: http.MethodPost, path: "/close", body: `{"reason":"done"}`, session: true},
 	{name: "close without reason", method: http.MethodPost, path: "/close", body: `{}`, session: true},
 	{name: "reopen", method: http.MethodPost, path: "/reopen", body: `{}`, closed: true, session: true},
-	{name: "assign", method: http.MethodPost, path: "/assign", body: `{"assignee":"alice"}`},
+	{name: "assign", method: http.MethodPost, path: "/assign", body: `{"assignee":"alice"}`, session: true},
 	{name: "update", method: http.MethodPost, path: "/update", body: `{"title":"renamed"}`, session: true},
 	{name: "patch", method: http.MethodPatch, body: `{"title":"renamed"}`, session: true},
 	{name: "patch status=closed", method: http.MethodPatch, body: `{"status":"closed"}`, session: true},
