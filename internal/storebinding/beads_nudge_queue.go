@@ -48,9 +48,12 @@ package storebinding
 // Maintain, which the infrastructure owner runs on its own cadence.
 //
 // QUARANTINE. A record that does not decode is skipped by the keyed reads it
-// appears in and counted, so it can never fail a delivery to any target;
-// direct access by its nudge id still reports ErrBeadsNudgeQueueCorrupt, and
-// Maintain reports every corrupt record it saw.
+// appears in, so it can never fail a delivery to any target. The skip is still
+// reported: the read returns every record it could decode together with a
+// beads.PartialResultError naming the skipped records, so the caller delivers
+// what it got and reports the rest. Direct access by its nudge id still
+// reports ErrBeadsNudgeQueueCorrupt, and Maintain reports every corrupt record
+// it saw.
 //
 // The queue's beads are its own family (label "gc:nudge-queue"), disjoint from
 // the nudge SHADOW beads that internal/nudgequeue projects over the same store
@@ -72,7 +75,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -177,9 +179,6 @@ type beadsNudgeQueue struct {
 	claimer  beadsAssignmentClaimer
 	releaser beads.ConditionalAssignmentReleaser
 	writer   beads.ConditionalWriter
-	// quarantined counts the undecodable records keyed reads have skipped.
-	// Maintain names them; this count is the hot path's signal that it did.
-	quarantined atomic.Uint64
 }
 
 // NewBeadsNudgeQueue returns the durable nudge queue backed by store.
@@ -249,7 +248,7 @@ func (q *beadsNudgeQueue) ClaimDue(target ClaimTarget, now time.Time) ([]nudgequ
 	if len(target.QueueKeys) == 0 {
 		return nil, nil
 	}
-	entries, err := q.keyedEntries(target.QueueKeys, now)
+	entries, corrupt, err := q.keyedEntries(target.QueueKeys, now)
 	if err != nil {
 		return nil, err
 	}
@@ -311,12 +310,12 @@ func (q *beadsNudgeQueue) ClaimDue(target ClaimTarget, now time.Time) ([]nudgequ
 		item.LeaseUntil = lease.until
 		claimed = append(claimed, item)
 	}
-	return claimed, nil
+	return claimed, nudgeQueueQuarantined("ClaimDue", corrupt)
 }
 
 // ListForAgent returns the queue buckets addressed exactly to agentName.
 func (q *beadsNudgeQueue) ListForAgent(agentName string, now time.Time) (pending, inFlight, dead []nudgequeue.Item, err error) {
-	return q.buckets([]string{agentName}, now)
+	return q.buckets("ListForAgent", []string{agentName}, now)
 }
 
 // ListFor returns the queue buckets matching any of target's queue keys.
@@ -324,7 +323,7 @@ func (q *beadsNudgeQueue) ListFor(target ClaimTarget, now time.Time) (pending, i
 	if len(target.QueueKeys) == 0 {
 		return nil, nil, nil, nil
 	}
-	return q.buckets(target.QueueKeys, now)
+	return q.buckets("ListFor", target.QueueKeys, now)
 }
 
 // Snapshot returns every queued item in the canonical bucket order. Terminal
@@ -717,9 +716,11 @@ func (q *beadsNudgeQueue) stampMissingTerminalFields(nudgeID, reason string, now
 // supersede retires the queued entries the incoming item replaces.
 //
 // Supersession is scoped to one (agent, source, reference), so it reads only
-// the incoming item's own queue key.
+// the incoming item's own queue key. A corrupt record under that key does not
+// fail the submit: it cannot be superseded, and the delivery reads for the key
+// and Maintain are what report it.
 func (q *beadsNudgeQueue) supersede(item nudgequeue.Item, now time.Time) error {
-	entries, err := q.keyedEntries([]string{item.Agent}, now)
+	entries, _, err := q.keyedEntries([]string{item.Agent}, now)
 	if err != nil {
 		return err
 	}
@@ -899,21 +900,30 @@ func (q *beadsNudgeQueue) allLiveEntries(now time.Time) ([]nudgeQueueEntry, []er
 
 // keyedEntries reads the live records addressed to any of keys: one List per
 // distinct key, never the city-wide family. An undecodable queue record is
-// skipped and quarantined on its own instead of failing the read.
-func (q *beadsNudgeQueue) keyedEntries(keys []string, now time.Time) ([]nudgeQueueEntry, error) {
+// quarantined on its own instead of failing the read: it is returned as an
+// error beside the entries that did decode.
+func (q *beadsNudgeQueue) keyedEntries(keys []string, now time.Time) ([]nudgeQueueEntry, []error, error) {
 	var entries []nudgeQueueEntry
+	var corrupt []error
 	for _, key := range nudgeQueueUniqueIDs(keys) {
 		records, err := q.store.List(nudgeQueueKeyedQuery(key))
 		if err != nil {
-			return nil, fmt.Errorf("listing nudge queue for %q: %w", key, err)
+			return nil, nil, fmt.Errorf("listing nudge queue for %q: %w", key, err)
 		}
-		decoded, corrupt := decodeNudgeQueueRecords(records, now)
-		if len(corrupt) > 0 {
-			q.quarantined.Add(uint64(len(corrupt)))
-		}
+		decoded, skipped := decodeNudgeQueueRecords(records, now)
 		entries = append(entries, decoded...)
+		corrupt = append(corrupt, skipped...)
 	}
-	return entries, nil
+	return entries, corrupt, nil
+}
+
+// nudgeQueueQuarantined reports the records a delivery read skipped as a
+// partial result, or nil when it skipped none.
+func nudgeQueueQuarantined(verb string, corrupt []error) error {
+	if len(corrupt) == 0 {
+		return nil
+	}
+	return &beads.PartialResultError{Op: "nudge queue " + verb, Err: errors.Join(corrupt...)}
 }
 
 // nudgeQueueKeyedQuery is the one read a target-scoped verb issues per queue
@@ -948,13 +958,13 @@ func decodeNudgeQueueRecords(records []beads.Bead, now time.Time) ([]nudgeQueueE
 
 // buckets returns the three visible buckets for the records addressed to keys.
 // It is a pure read: nothing it sees is repaired.
-func (q *beadsNudgeQueue) buckets(keys []string, now time.Time) (pending, inFlight, dead []nudgequeue.Item, err error) {
-	entries, err := q.keyedEntries(keys, now)
+func (q *beadsNudgeQueue) buckets(verb string, keys []string, now time.Time) (pending, inFlight, dead []nudgequeue.Item, err error) {
+	entries, corrupt, err := q.keyedEntries(keys, now)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 	state := nudgeQueueBucketState(entries, now)
-	return state.Pending, state.InFlight, state.Dead, nil
+	return state.Pending, state.InFlight, state.Dead, nudgeQueueQuarantined(verb, corrupt)
 }
 
 // nudgeQueueBucketState projects entries onto the visible buckets in the

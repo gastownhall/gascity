@@ -375,6 +375,12 @@ var ErrNudgeSessionFenceMismatch = errors.New("queued nudge session fence mismat
 // whole-queue recovery work — revoking expired leases, dead-lettering expired
 // items, aging dead letters out, and sweeping retired records past retention —
 // is Maintain's alone, and the infrastructure owner runs it on its own cadence.
+//
+// A delivery read (ClaimDue, ListFor, ListForAgent) that meets a record it
+// cannot decode skips it rather than failing every delivery to that target:
+// it returns everything it could read together with an error for which
+// beads.IsPartialResult reports true. The caller delivers what it got and
+// reports the error.
 type NudgeQueue interface {
 	Enqueue(nudgequeue.Item) error
 	EnqueueDeferred(nudgequeue.Item) error

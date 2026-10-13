@@ -398,19 +398,44 @@ func TestBeadsNudgeQueueQuarantinesACorruptRecord(t *testing.T) {
 		}
 	}
 
-	pending, _, _, err := queue.ListFor(ClaimTarget{QueueKeys: []string{testNudgeAgent}}, now)
-	if err != nil {
-		t.Fatalf("ListFor beside a corrupt record: %v", err)
+	// The skip is reported on the hot path without failing the delivery: the
+	// good record is served, and the error says the answer is partial and
+	// names the record it left out.
+	corruptMine := nudgeQueueBeadID("n-corrupt-alpha-polly")
+	assertQuarantined := func(verb string, err error) {
+		t.Helper()
+		if !beads.IsPartialResult(err) || !errors.Is(err, ErrBeadsNudgeQueueCorrupt) {
+			t.Fatalf("%s error = %v, want a partial result wrapping ErrBeadsNudgeQueueCorrupt", verb, err)
+		}
+		if !strings.Contains(err.Error(), corruptMine) {
+			t.Errorf("%s error %q does not name the skipped record %s", verb, err, corruptMine)
+		}
+		if strings.Contains(err.Error(), nudgeQueueBeadID("n-corrupt-beta-broken")) {
+			t.Errorf("%s error %q names another target's record", verb, err)
+		}
 	}
+	pending, _, _, err := queue.ListFor(ClaimTarget{QueueKeys: []string{testNudgeAgent}}, now)
+	assertQuarantined("ListFor", err)
 	if len(pending) != 1 || pending[0].ID != "n-good" {
 		t.Fatalf("pending = %v, want the good nudge served and the corrupt one skipped", nudgeItemIDs(pending))
 	}
-	claimed := claimAll(t, queue, now)
+	_, _, _, err = queue.ListForAgent(testNudgeAgent, now)
+	assertQuarantined("ListForAgent", err)
+	claimed, err := queue.ClaimDue(ClaimTarget{QueueKeys: []string{testNudgeAgent}}, now)
+	assertQuarantined("ClaimDue", err)
 	if len(claimed) != 1 || claimed[0].ID != "n-good" {
 		t.Fatalf("ClaimDue = %v, want the good nudge claimed past the corrupt one", nudgeItemIDs(claimed))
 	}
-	if got := queue.(*beadsNudgeQueue).quarantined.Load(); got != 2 {
-		t.Fatalf("quarantined = %d, want each skip counted", got)
+	// A target with no corrupt record of its own reads clean.
+	if _, _, _, err := queue.ListForAgent("gamma/other", now); err != nil {
+		t.Fatalf("ListForAgent for an unaffected target: %v", err)
+	}
+	// Enqueue is not a read: a corrupt record under the same key does not
+	// fail a submit, and the reads above are what report it.
+	after := testNudgeItem("n-after", "", now)
+	after.Reference = &nudgequeue.Reference{Kind: "wait", ID: "w-after"}
+	if err := queue.Enqueue(after); err != nil {
+		t.Fatalf("Enqueue (with supersession) beside a corrupt record: %v", err)
 	}
 
 	if err := queue.Ack([]string{"n-corrupt-alpha-polly"}, "delivered", "", "commit"); !errors.Is(err, ErrBeadsNudgeQueueCorrupt) {
