@@ -494,6 +494,61 @@ func TestProxiedGuardRepinRefreshesJournalActivation(t *testing.T) {
 	}
 }
 
+// A non-terminal stand-down recovers through the tick's recoverNative, whose
+// re-pin ends the tick before the journal slot. The re-pin itself forgets the
+// cached activation, so a scope that changed its answer while the handle was
+// demoted is re-resolved on the recovered leaf. A reader that asked while the
+// store was demoted (and was refused as unavailable) cached the old answer,
+// which is what the re-pin must not keep.
+func TestProxiedGuardRecoveryRefreshesJournalActivation(t *testing.T) {
+	newRecoveredLeaf := func() *NativeDoltStore {
+		leaf := newNativeDoltStoreForTest(&nativeDoltMemStorage{store: &MemStore{storageOnly: true, IDPrefix: "prx", HonorExplicitIDs: true}})
+		leaf.idPrefix = "prx"
+		return leaf
+	}
+	demoteWithACachedAnswer := func(t *testing.T, f *guardFixture) {
+		t.Helper()
+		writeScopeJournalConfig(t, f.admitted.scopeRoot, "events-journal: true\n")
+		if !f.store.EventsJournalActive() {
+			t.Fatal("EventsJournalActive = false on a scope that enables the journal")
+		}
+		f.store.standDown(NewNonTerminalProxiedVerdictError(ProxiedVerdictProxyGone, "bd restarted its proxy", nil))
+		t.Setenv("BD_EVENTS_JOURNAL", "0")
+		if _, err := f.store.ReadEventsJournalPage(context.Background(), 0, 0); !errors.Is(err, ErrEventsJournalUnavailable) {
+			t.Fatalf("demoted read error = %v, want ErrEventsJournalUnavailable from the cached activation", err)
+		}
+	}
+
+	t.Run("the recovery tick", func(t *testing.T) {
+		t.Setenv("BD_EVENTS_JOURNAL", "")
+		f := newGuardFixture(t)
+		f.start()
+		f.recover = func(context.Context) (*NativeDoltStore, Pin, error) {
+			return newRecoveredLeaf(), f.store.Pin(), nil
+		}
+		demoteWithACachedAnswer(t, f)
+		if step := f.tick(); step != proxiedGuardRepinned {
+			t.Fatalf("tick = %s, want repinned", step)
+		}
+		if f.store.EventsJournalActive() {
+			t.Fatal("EventsJournalActive = true after recovering under BD_EVENTS_JOURNAL=0")
+		}
+	})
+
+	t.Run("the re-pin itself", func(t *testing.T) {
+		t.Setenv("BD_EVENTS_JOURNAL", "")
+		f := newGuardFixture(t)
+		t.Cleanup(func() { _ = f.store.CloseStore() })
+		demoteWithACachedAnswer(t, f)
+		if !f.store.repin(newRecoveredLeaf(), f.store.Pin()) {
+			t.Fatal("repin refused a non-terminally demoted store")
+		}
+		if f.store.EventsJournalActive() {
+			t.Fatal("EventsJournalActive = true after a re-pin under BD_EVENTS_JOURNAL=0")
+		}
+	})
+}
+
 // TestNativeDoltStoreLedgerfeedTailsRealWrites drives a real embedded store
 // opened through gc's production open with the journal on: the tailer sees
 // the store's own writes in commit order, each carrying the issue's
