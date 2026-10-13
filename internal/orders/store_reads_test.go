@@ -43,7 +43,7 @@ func TestLastRunCursorUnionAcrossDistinctStores(t *testing.T) {
 	root, err := graphLeg.Create(beads.Bead{
 		Title:  "wisp: digest",
 		Type:   "molecule",
-		Labels: []string{"order-run:digest", "order-tracking", "order:digest", "seq:7"},
+		Labels: []string{"order-run:digest", "order:digest", "seq:7"},
 	})
 	if err != nil {
 		t.Fatal(err)

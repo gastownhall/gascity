@@ -1130,12 +1130,55 @@ func controllerOnlyType(typ string) string {
 		return "makes a startup-health episode, which only the controller records"
 	case strings.EqualFold(t, convergenceStepType):
 		return "makes a convergence root, which only the convergence handler creates"
+	case strings.EqualFold(t, messageStepType):
+		return "makes a mail message, which only the mail routes create (POST /v0/city/{cityName}/mail, gc mail)"
 	}
 	return ""
 }
 
-// validateNoSessionSteps refuses a step typed session or
-// startup-health-episode, or tagged gc:session (mc-okw9n, mc-lp7zb):
+// The coordination rows' marks (coordclass.CoordinationOwned, mirrored as
+// the controller-owned marks are; a test pins the check against it).
+const (
+	messageStepType       = "message"
+	waitStepType          = "gate"
+	legacyWaitStepType    = "wait"
+	waitStepLabel         = "gc:wait"
+	nudgeStepLabel        = "gc:nudge"
+	nudgeQueueStepLabel   = "gc:nudge-queue"
+	orderTrackingLabel    = "order-tracking"
+	orderRunLabelPrefix   = "order-run:"
+	extmsgStepLabelPrefix = "gc:extmsg-"
+)
+
+// coordinationLabel is why a step's label l, on a step of type typ and
+// metadata meta, may not be compiled, or "": compile copies labels onto
+// the bead, so a formula would mint a coordination row its owner alone
+// writes, a wait that wakes its session, a nudge an agent is handed, an
+// order's run record that holds its cooldown and single-flight, or an
+// extmsg row (architecture B v2, the #7766 review).
+func coordinationLabel(l, typ string, meta map[string]string) string {
+	label := strings.ToLower(strings.TrimSpace(l))
+	t := strings.TrimSpace(typ)
+	switch {
+	case label == waitStepLabel:
+		return "marks a session wait, which only gc session wait and the controller's waits step create"
+	case (strings.EqualFold(t, waitStepType) || strings.EqualFold(t, legacyWaitStepType)) &&
+		strings.TrimSpace(meta["session_id"]) != "" && label == strings.ToLower("session:"+strings.TrimSpace(meta["session_id"])):
+		return "marks a session wait (a gate carrying its session_id), which only gc session wait and the controller's waits step create"
+	case label == nudgeStepLabel, label == nudgeQueueStepLabel:
+		return "marks a queued nudge, which only the nudge queue creates"
+	case label == orderTrackingLabel, strings.HasPrefix(label, orderRunLabelPrefix):
+		return "marks an order's run record, which only order dispatch creates"
+	case strings.HasPrefix(label, extmsgStepLabelPrefix):
+		return "marks an external-messaging row, which only the extmsg routes create"
+	}
+	return ""
+}
+
+// validateNoSessionSteps refuses a step that would make an owned row: one
+// typed session, startup-health-episode, convergence or message, tagged
+// gc:session, or tagged as a coordination row (coordinationLabel; mc-okw9n,
+// mc-lp7zb, architecture B):
 // compile copies a step's type, labels and metadata straight onto its bead,
 // so a formula would mint a session row with hand-written hold keys past
 // the session verbs, or an episode quarantining a session.
@@ -1151,6 +1194,8 @@ func validateNoSessionSteps(steps []*Step, errs *[]string, prefix string) {
 		for _, l := range step.Labels {
 			if strings.EqualFold(strings.TrimSpace(l), sessionStepLabel) {
 				*errs = append(*errs, fmt.Sprintf("%s: tag %q marks a session row, which only the session verbs create (%s)", stepPrefix, l, sessionVerbs))
+			} else if why := coordinationLabel(l, step.Type, step.Metadata); why != "" {
+				*errs = append(*errs, fmt.Sprintf("%s: tag %q %s", stepPrefix, l, why))
 			}
 		}
 		if step.Loop != nil {

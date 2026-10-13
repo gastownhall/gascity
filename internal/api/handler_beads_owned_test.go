@@ -365,3 +365,96 @@ func TestGenericAPINeverMakesAWaitBySessionID(t *testing.T) {
 		})
 	}
 }
+
+// TestGenericAPIClosesAnOrderRunRoot (v5.10f, the #7766 review): an order's
+// run root, a wisp or molecule root carrying its order-run label, takes the
+// generic close (POST /close, DELETE), as the dashboard's Beads page closes
+// it; every other generic write to it stays refused and points at bd or the
+// workflow's teardown. Its tracking bead, and a plain task carrying the run
+// label, take no close.
+func TestGenericAPIClosesAnOrderRunRoot(t *testing.T) {
+	for _, c := range []struct{ name, method, path, body string }{
+		{"POST /close", "POST", "/close", `{}`},
+		{"DELETE", "DELETE", "", ""},
+	} {
+		for _, root := range []struct {
+			typ  string
+			meta map[string]string
+		}{{"molecule", nil}, {"wisp", nil}, {"task", map[string]string{"gc.kind": "wisp"}}} {
+			state := newFakeState(t)
+			store := state.stores["myrig"]
+			h := newTestCityHandler(t, state)
+			b := ownedRow(t, store, root.typ, []string{"order-run:digest"}, root.meta)
+			if rec := beadRequest(t, h, c.method, cityURL(state, "/bead/")+b.ID+c.path, c.body); rec.Code >= 300 {
+				t.Fatalf("%s on a %s run root: %d %s, want it closed", c.name, root.typ, rec.Code, rec.Body.String())
+			}
+			if got, _ := store.Get(b.ID); got.Status != "closed" {
+				t.Fatalf("%s on a %s run root: status %s, want closed", c.name, root.typ, got.Status)
+			}
+		}
+		for _, other := range []struct {
+			name   string
+			typ    string
+			labels []string
+		}{{"tracking bead", "task", []string{"order-run:digest", "order-tracking"}}, {"plain task", "task", []string{"order-run:digest"}}, {"root that is also a queued nudge", "molecule", []string{"order-run:digest", "gc:nudge"}}} {
+			state := newFakeState(t)
+			store := state.stores["myrig"]
+			h := newTestCityHandler(t, state)
+			b := ownedRow(t, store, other.typ, other.labels, nil)
+			if rec := beadRequest(t, h, c.method, cityURL(state, "/bead/")+b.ID+c.path, c.body); rec.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("%s on a %s: %d %s, want 422", c.name, other.name, rec.Code, rec.Body.String())
+			}
+		}
+	}
+	for _, c := range []struct{ name, method, path, body string }{
+		{"PATCH status=closed", "PATCH", "", `{"status":"closed"}`},
+		{"PATCH a label", "PATCH", "", `{"labels":["note"]}`},
+		{"POST /assign", "POST", "/assign", `{"assignee":"someone"}`},
+		{"POST /reopen", "POST", "/reopen", `{}`},
+	} {
+		state := newFakeState(t)
+		store := state.stores["myrig"]
+		h := newTestCityHandler(t, state)
+		b := ownedRow(t, store, "molecule", []string{"order-run:digest"}, nil)
+		if c.name == "POST /reopen" {
+			if err := store.Close(b.ID); err != nil {
+				t.Fatal(err)
+			}
+		}
+		rec := beadRequest(t, h, c.method, cityURL(state, "/bead/")+b.ID+c.path, c.body)
+		if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "workflow's teardown") {
+			t.Fatalf("%s on a run root: %d %s, want 422 pointing at bd or the workflow's teardown", c.name, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+// TestGenericAPIRefusalNamesTheOwner (the #7766 review, M30-M31): each
+// coordination row's refusal names its kind and its owner, so a caller is
+// sent to the route that writes it.
+func TestGenericAPIRefusalNamesTheOwner(t *testing.T) {
+	for _, c := range []struct {
+		typ    string
+		labels []string
+		meta   map[string]string
+		kind   string
+		owner  string
+	}{
+		{"message", nil, nil, "a mail message", "/mail"},
+		{"gate", []string{"gc:wait"}, nil, "a session wait", "gc session wait"},
+		{"gate", []string{"session:s-1"}, map[string]string{"session_id": "s-1"}, "a session wait", "gc session wait"},
+		{"chore", []string{"gc:nudge"}, nil, "a queued nudge", "the nudge queue"},
+		{"task", []string{"gc:nudge-queue"}, nil, "a queued nudge", "the nudge queue"},
+		{"task", []string{"order-tracking", "order-run:digest"}, nil, "an order run record", "workflow's teardown"},
+		{"task", []string{"gc:extmsg-binding"}, nil, "an external-messaging row", "/extmsg/"},
+	} {
+		state := newFakeState(t)
+		store := state.stores["myrig"]
+		h := newTestCityHandler(t, state)
+		b := ownedRow(t, store, c.typ, c.labels, c.meta)
+		rec := beadRequest(t, h, "PATCH", cityURL(state, "/bead/")+b.ID, `{"title":"renamed"}`)
+		body := rec.Body.String()
+		if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(body, "is "+c.kind+",") || !strings.Contains(body, c.owner) {
+			t.Fatalf("%s %v: %d %s, want 422 naming %q and %q", c.typ, c.labels, rec.Code, body, c.kind, c.owner)
+		}
+	}
+}

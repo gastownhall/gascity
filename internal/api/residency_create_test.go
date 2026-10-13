@@ -268,8 +268,14 @@ func TestBeadCreateRefusesAnInfraClassWithAnExplicitRig(t *testing.T) {
 
 			rec := postBead(t, newTestCityHandler(t, fs), fs, body, "")
 
-			if rec.Code != http.StatusBadRequest {
-				t.Fatalf("status = %d, want 400 (body=%q)", rec.Code, rec.Body.String())
+			// A coordination-owned class is refused first, whatever rig it
+			// names (the #7766 review): 422, not the placement's 400.
+			want := http.StatusBadRequest
+			if refusedInfraClass(class) {
+				want = http.StatusUnprocessableEntity
+			}
+			if rec.Code != want {
+				t.Fatalf("status = %d, want %d (body=%q)", rec.Code, want, rec.Body.String())
 			}
 			if n := storeCount(t, binding); n != 0 {
 				t.Errorf("the refused create still wrote %d bead(s) to the binding", n)

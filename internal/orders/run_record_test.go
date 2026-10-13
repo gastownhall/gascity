@@ -104,4 +104,9 @@ func TestIsRunRecordTakesEveryWorkflowRoot(t *testing.T) {
 	if IsRunRecord(beads.Bead{Type: "task", Labels: []string{"order-run:x"}}) {
 		t.Error("a plain task is a run record")
 	}
+	for _, typ := range []string{"molecule", "wisp", " Wisp "} { // beads.IsMoleculeType's roots (M16)
+		if !IsRunRecord(beads.Bead{Type: typ, Labels: []string{"order-run:x"}}) {
+			t.Errorf("a %q root is no run record", typ)
+		}
+	}
 }

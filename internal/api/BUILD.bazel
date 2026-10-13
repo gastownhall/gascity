@@ -278,6 +278,7 @@ go_test(
         "component_versions_test.go",
         "convoy_event_stream_test.go",
         "convoy_sql_test.go",
+        "coordination_pour_test.go",
         "cors_test.go",
         "cursor_token_test.go",
         "decode_beads_test.go",

@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/coordclass"
+	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -740,16 +741,18 @@ func (s *Server) humaHandleBeadCreate(ctx context.Context, input *BeadCreateInpu
 				Metadata:    input.Body.Metadata,
 				DeferUntil:  input.Body.DeferUntil,
 			}
+			// Before anything is written, the assignee's materialized session
+			// included, and before the store is chosen: an owned row is a 422
+			// whatever rig it names, never the placement's 400 (the #7766
+			// review).
+			if err := refuseGenericWrite("(new)", nil, candidate, genericWrite{meta: candidate.Metadata, labels: candidate.Labels}); err != nil {
+				return beads.Bead{}, err
+			}
 			// The store follows from the bead, not from the request: an
 			// infrastructure-class body belongs in this city's class binding
 			// wherever the caller posted it from.
 			store, err := s.createStoreForBead(candidate, input.Body.Rig)
 			if err != nil {
-				return beads.Bead{}, err
-			}
-			// Before anything is written, the assignee's materialized session
-			// included.
-			if err := refuseGenericWrite("(new)", nil, candidate, genericWrite{meta: candidate.Metadata, labels: candidate.Labels}); err != nil {
 				return beads.Bead{}, err
 			}
 			candidate.Assignee, err = s.normalizeRawBeadAssignee(ctx, input.Body.Assignee)
@@ -791,7 +794,7 @@ func (s *Server) humaHandleBeadClose(ctx context.Context, input *BeadCloseInput)
 	if err != nil {
 		return nil, err
 	}
-	if err := refuseOwned(id, "closes", "path.id", current); err != nil {
+	if err := refuseOwnedClose(id, "closes", current); err != nil {
 		return nil, err
 	}
 	var submitted map[string]string
@@ -999,8 +1002,43 @@ func refuseOwned(id, verb, where string, b beads.Bead) error {
 	}
 	kind, owner := ownerOf(b)
 	return apierr.ValidationFailed.With(fmt.Sprintf(
-		"bead %s is a %s, which only %s writes: the generic bead API never %s one; nothing was written", id, kind, owner, verb),
+		"bead %s is %s, which only %s writes: the generic bead API never %s one; nothing was written", id, withArticle(kind), owner, verb),
 		&huma.ErrorDetail{Location: where, Message: "an owned " + kind, Value: id})
+}
+
+// refuseOwnedClose is refuseOwned for a generic close or delete (a soft
+// close), which one owned row takes: an order's run root, a wisp or
+// molecule root its run poured carrying the order-run label and nothing
+// else owned (v5.10f, the #7766 review). Closing it ends that run's work, as
+// an operator may; reopening, assigning, updating or relabeling it stays
+// the owner's.
+func refuseOwnedClose(id, verb string, b beads.Bead) error {
+	if orderRunRoot(b) {
+		return nil
+	}
+	return refuseOwned(id, verb, "path.id", b)
+}
+
+// orderRunRoot reports b, an owned row, as an order's run root: a run record
+// (orders.IsRunRecord) whose only owned mark is its order-run label, so no
+// tracking bead (its order-tracking label) and nothing else owned.
+func orderRunRoot(b beads.Bead) bool {
+	if !orders.IsRunRecord(b) || coordclass.ControllerOwned(b) {
+		return false
+	}
+	bare := b
+	bare.Labels = slices.DeleteFunc(slices.Clone(b.Labels), func(l string) bool {
+		return strings.HasPrefix(strings.ToLower(strings.TrimSpace(l)), "order-run:")
+	})
+	return !coordclass.CoordinationOwned(bare)
+}
+
+// withArticle is kind with its indefinite article.
+func withArticle(kind string) string {
+	if strings.ContainsRune("aeiou", rune(kind[0])) {
+		return "an " + kind
+	}
+	return "a " + kind
 }
 
 // ownerOf is an owned row's kind and who writes it. A typed work bead
@@ -1029,7 +1067,7 @@ func ownerOf(b beads.Bead) (kind, owner string) {
 	case strings.HasPrefix(label, "gc:nudge"):
 		return "queued nudge", "the nudge queue (gc nudge, the session message routes)"
 	case label == "order-tracking" || strings.HasPrefix(label, "order-run:"):
-		return "order run record", "order dispatch (POST /v0/city/{cityName}/order/{name}/run, gc order run)"
+		return "order run record", "order dispatch, and bd (bd update, bd close) or the workflow's teardown (DELETE /v0/city/{cityName}/workflow/{id}, POST /v0/city/{cityName}/runs/{id}/cancel) for an operator; a run's root alone also takes a generic close"
 	case strings.HasPrefix(label, "gc:extmsg-"):
 		return "external-messaging row", "the extmsg routes (/v0/city/{cityName}/extmsg/...)"
 	}
@@ -1090,7 +1128,7 @@ func refuseGenericWrite(id string, before *beads.Bead, after beads.Bead, w gener
 		}
 	}
 	return apierr.ValidationFailed.With(fmt.Sprintf(
-		"bead %s: the generic bead API never makes a %s, which only %s writes; nothing was written", id, kind, owner), detail)
+		"bead %s: the generic bead API never makes %s, which only %s writes; nothing was written", id, withArticle(kind), owner), detail)
 }
 
 // genericWrite is what a generic create or update asks to write: its
@@ -1183,7 +1221,7 @@ func (s *Server) humaHandleBeadDelete(_ context.Context, input *BeadDeleteInput)
 	if err != nil {
 		return nil, err
 	}
-	if err := refuseOwned(id, "deletes", "path.id", current); err != nil {
+	if err := refuseOwnedClose(id, "deletes", current); err != nil {
 		return nil, err
 	}
 	if err := store.Close(id); err != nil {

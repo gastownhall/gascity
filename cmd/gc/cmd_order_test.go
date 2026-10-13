@@ -3694,7 +3694,7 @@ func TestBdCursorUsesRowsFromPartialTierError(t *testing.T) {
 		Store: beads.NewMemStore(),
 		rows: []beads.Bead{{
 			ID:     "cursor-1",
-			Labels: []string{"order:digest", "seq:42"},
+			Labels: []string{"order:digest", "seq:42", "order-tracking"}, // a run record (the #7766 review)
 		}},
 		err: fmt.Errorf("wisps tier unavailable"),
 	}

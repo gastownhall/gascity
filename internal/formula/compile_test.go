@@ -2704,17 +2704,21 @@ func TestValidateRejectsSessionSteps(t *testing.T) {
 }
 
 // TestValidateRefusesWhatControllerOwnedNames pins formula.Validate's
-// literal check against coordclass.ControllerOwned (architecture B, the
-// #7742 review): a step is refused exactly when the bead it compiles to
-// would be controller-owned, for every owned type and the session label in
-// any case and spacing, and for none of the work or coordination types.
+// literal check against coordclass.ControllerOwned and CoordinationOwned
+// (architecture B, the #7742 and #7766 reviews): a step is refused exactly
+// when the bead it compiles to would be owned, for every owned type, the
+// session label and the coordination labels and wait shape in any case and
+// spacing, and for none of the work types or wisps.
 func TestValidateRefusesWhatControllerOwnedNames(t *testing.T) {
-	for _, typ := range []string{"session", " Session ", "startup-health-episode", "STARTUP-HEALTH-EPISODE", "convergence", " Convergence ", "task", "bug", "message", "convoy", "molecule", ""} {
-		for _, labels := range [][]string{nil, {"gc:session"}, {"note", " GC:Session "}, {"gc:wait"}, {"gc:session-x"}} {
-			f := &Formula{Formula: "f", Steps: []*Step{{ID: "s", Title: "S", Type: typ, Labels: labels}}}
-			refused := f.Validate() != nil
-			if owned := coordclass.ControllerOwned(beads.Bead{Type: typ, Labels: labels}); refused != owned {
-				t.Errorf("type %q labels %q: Validate refused %t, ControllerOwned %t", typ, labels, refused, owned)
+	for _, typ := range []string{"session", " Session ", "startup-health-episode", "STARTUP-HEALTH-EPISODE", "convergence", " Convergence ", "message", " Message ", "task", "bug", "convoy", "molecule", "gate", "Wait", ""} {
+		for _, labels := range [][]string{nil, {"gc:session"}, {"note", " GC:Session "}, {"gc:wait"}, {"GC:Nudge"}, {"gc:nudge-queue"}, {"order-tracking"}, {"note", "Order-Run:digest"}, {"gc:extmsg-binding"}, {"session:s-1"}, {"session:s-2"}, {"gc:wisp"}, {"gc:session-x"}, {"extmsg:binding:conv:v1:x"}} {
+			for _, meta := range []map[string]string{nil, {"session_id": "s-1"}} {
+				f := &Formula{Formula: "f", Steps: []*Step{{ID: "s", Title: "S", Type: typ, Labels: labels, Metadata: meta}}}
+				refused := f.Validate() != nil
+				b := beads.Bead{Type: typ, Labels: labels, Metadata: meta}
+				if owned := coordclass.ControllerOwned(b) || coordclass.CoordinationOwned(b); refused != owned {
+					t.Errorf("type %q labels %q meta %v: Validate refused %t, owned %t", typ, labels, meta, refused, owned)
+				}
 			}
 		}
 	}

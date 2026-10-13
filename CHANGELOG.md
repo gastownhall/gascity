@@ -34,14 +34,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   messages, session waits (the `gc:wait` label, or a `gate` carrying its
   `session:<id>`), queued nudges (`gc:nudge`, `gc:nudge-queue`), order run
   records (`order-tracking`, `order-run:*`) and external-messaging rows
-  (`gc:extmsg-*`) get the same 422; `POST /beads` no longer creates them. Use
-  their routes: `/mail`, `gc session wait`, `gc nudge`, `gc order run`,
-  `/extmsg/*`. Wisps stay generic. `POST /mail` and its reply now send only as
-  a configured identity: the operator (`human`, or the dashboard's
-  `DASHBOARD_OPERATOR_WIRE_ALIAS`), a configured agent, a named session or a
-  live session of a configured agent; any other `from` is a 422. And an
-  `order-run:` label counts toward an order's cooldown, event cursor and
-  single-flight only on its tracking bead or the root its run poured.
+  (`gc:extmsg-*`) get the same 422, on a class-split city too, whatever rig
+  the body names; `POST /beads` no longer creates them, and neither a formula
+  (`PUT /formulas`, its pour, `POST /sling`) nor a sling batch makes or routes
+  one. Use their routes: `/mail`, `gc session wait`, `gc nudge`,
+  `gc order run`, `/extmsg/*`. One generic write remains on an order's run
+  root (the wisp or molecule root a run poured): close (`POST
+  /bead/{id}/close`, `DELETE /bead/{id}`); for anything else use `bd` or the
+  workflow's teardown. Wisps stay generic. `POST /mail` and its reply now
+  send only as a configured identity: the operator (`human`, or the
+  dashboard's `DASHBOARD_OPERATOR_WIRE_ALIAS`), a configured agent, a named
+  session or a live session of a configured agent; any other `from`, or none,
+  is a 422. And an `order-run:` label, or an `order:` and `seq:` pair, counts
+  toward an order's cooldown, event cursor and single-flight (in dispatch,
+  `gc order check` and `GET /orders/check`) only on its tracking bead or the
+  root its run poured.
 
 - **`gc runtime drain-check` has a third exit code, 3 ("unknown").** It now
   reads the session row's state as well as the runtime's `GC_DRAIN`, and

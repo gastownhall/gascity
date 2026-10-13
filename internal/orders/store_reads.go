@@ -430,12 +430,10 @@ func (s *Store) LastRun(name string) (time.Time, error) {
 // record are this many read, so the ga-klv bound holds for a store with none.
 const runRecordScanBound = 64
 
-// lastRunRecords lists store's newest beads carrying label (newest first,
-// both tiers, closed included, live) that are run records (IsRunRecord), up
-// to n of them: the newest n, and when a newer non-record displaced one,
-// the run records among the newest runRecordScanBound.
+// lastRunRecords is NewestRunRecords over store's beads carrying label
+// (newest first, both tiers, closed included, live).
 func lastRunRecords(store beads.Store, label string, n int) ([]beads.Bead, error) {
-	list := func(limit int) ([]beads.Bead, error) {
+	return NewestRunRecords(func(limit int) ([]beads.Bead, error) {
 		// Live: over a CachingStore a hard backing failure of this
 		// closed-history read comes back as a partial result holding only the
 		// cached open rows, which would read as surviving rows and shorten the
@@ -451,7 +449,15 @@ func lastRunRecords(store beads.Store, label string, n int) ([]beads.Bead, error
 			// irrelevant; for Cursor see its own note.
 			AllowBackingCreatedLimit: n == 1,
 		})
-	}
+	}, n)
+}
+
+// NewestRunRecords is list's run records (IsRunRecord), up to n, newest
+// first: list(n), and when a newer bead that is no run record displaced
+// one, the run records among list(runRecordScanBound). list reads an
+// order's run-labeled beads newest first, limit at most. LastRun, Cursor and
+// the storebinding adapter share it (the #7766 review).
+func NewestRunRecords(list func(limit int) ([]beads.Bead, error), n int) ([]beads.Bead, error) {
 	results, err := list(n)
 	records := slices.DeleteFunc(slices.Clone(results), func(b beads.Bead) bool { return !IsRunRecord(b) })
 	if len(records) == len(results) {

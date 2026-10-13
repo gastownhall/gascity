@@ -129,14 +129,15 @@ func operatorMailIdentities() []string {
 // that is no configured identity (architecture B v2, mc-v8g4p): the API has
 // no caller identity to bind the sender to (mc-8e9ci), so a sender is the
 // operator, a configured agent, a configured named session or a live session
-// of a configured agent. An empty sender is the provider's default.
+// of a configured agent. An empty sender is no identity either (v5.10f): a
+// message names who sent it.
 func (s *Server) refuseUnconfiguredMailSender(ctx context.Context, from string) error {
 	from = strings.TrimSpace(from)
-	if from == "" || slices.Contains(operatorMailIdentities(), from) {
+	if slices.Contains(operatorMailIdentities(), from) {
 		return nil
 	}
 	cfg := s.state.Config()
-	if _, err := mail.ResolveRecipient(from, agentEntries(cfg)); err == nil && from != "human" {
+	if _, err := mail.ResolveRecipient(from, agentEntries(cfg)); err == nil {
 		return nil
 	}
 	if store := s.state.SessionsBeadStore().Store; store != nil {
