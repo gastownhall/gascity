@@ -314,6 +314,7 @@ func (s lostWorkStore) ListByAssignee(assignee, status string, limit int) ([]bea
 // whose finalize work read panics or expires counts as holding work, so it
 // sleeps and is never closed; one whose finalize read is clean but whose
 // premise close's own read is lost refuses the close; a clean read closes.
+// A soft-suspended pool seat, which keeps no slot, is held the same way.
 func TestFinalizeLostWorkReadNeverCloses(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -339,13 +340,24 @@ func TestFinalizeLostWorkReadNeverCloses(t *testing.T) {
 			}
 		})
 	}
-	v := txView{It: intent{Kind: intentStop, Reason: decideStopVerb + drainOrphaned}, Row: fenceRow("a", "tok-a")}
-	for _, c := range []struct {
-		work finalizeWork
-		err  error
-	}{{finalizeWork{}, nil}, {finalizeWork{free: true}, errProbeExpired}} {
-		if stopChoice(v, c.work, c.err).CloseSeat {
-			t.Errorf("work %+v, probe error %v: the finalize closes, want it held as work", c.work, c.err)
+	// A soft-suspended pool seat keeps no slot (#7718, KeepsSlot), so only
+	// its work read stands between it and a close.
+	soft := censusRowOf(t, drainRow("state", "suspended", "pool_managed", "true", "suspended_at", rowAt(-time.Hour))).Info
+	if session.DispositionOfInfo(soft).KeepsSlot() {
+		t.Fatal("fixture: want a soft suspend, which keeps no slot")
+	}
+	for _, row := range []session.Info{fenceRow("a", "tok-a"), soft} {
+		v := txView{It: intent{Kind: intentStop, Reason: decideStopVerb + drainOrphaned}, Row: row, Now: gatherNow}
+		if !stopChoice(v, finalizeWork{free: true}, nil).CloseSeat {
+			t.Fatalf("%s: a clean read closes no seat; the cases below prove nothing", row.ID)
+		}
+		for _, c := range []struct {
+			work finalizeWork
+			err  error
+		}{{finalizeWork{}, nil}, {finalizeWork{free: true}, errProbeExpired}, {finalizeWork{}, errProbeExpired}} {
+			if stopChoice(v, c.work, c.err).CloseSeat {
+				t.Errorf("%s: work %+v, probe error %v: the finalize closes, want it held as work", row.ID, c.work, c.err)
+			}
 		}
 	}
 }
