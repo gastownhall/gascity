@@ -544,7 +544,9 @@ func drainAckStopPendingMetadata(meta map[string]string) bool {
 // ensureRunning starts or resumes session id's runtime for by, as by.Kind may
 // (queueFor). replacing is an interrupt's restart of the runtime it just
 // stopped: the hold was decided before that stop, so it is not re-read.
-func (m *Manager) ensureRunning(ctx context.Context, by Actor, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config, replacing bool) error {
+// startRefusal is ensureRunning's refusal of a row no actor may start or
+// deliver to now, read from b alone.
+func (m *Manager) startRefusal(by Actor, id string, b beads.Bead) error {
 	if err := by.CheckStarts(); err != nil {
 		return err
 	}
@@ -561,6 +563,13 @@ func (m *Manager) ensureRunning(ctx context.Context, by Actor, id string, b bead
 	// race that stop (CONTRACT v5.9a, as the kill fence). Every actor.
 	if drainAckStopPendingMetadata(b.Metadata) {
 		return fmt.Errorf("%w: %s", ErrSessionStopping, id)
+	}
+	return nil
+}
+
+func (m *Manager) ensureRunning(ctx context.Context, by Actor, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config, replacing bool) error {
+	if err := m.startRefusal(by, id, b); err != nil {
+		return err
 	}
 	// Only an operator's own resume consumes an operator's hold (CONTRACT
 	// v5.9 D8 rule 1); any other caller queues instead.
@@ -767,22 +776,42 @@ func (m *Manager) ensureRunning(ctx context.Context, by Actor, id string, b bead
 	return nil
 }
 
-// ensureDeliverable is ensureRunning for a delivery: a live, unsuspended
-// runtime whose agent is dead (the pane up, the agent gone, its process
-// names known) is ErrAgentDead, so the caller queues the text rather than
-// type it into the dead pane (mc-48az4, mc-wdjni). Start and Attach keep
-// ensureRunning's: an operator attaches to a crashed pane to read it.
+// ensureDeliverable is ensureRunning for a delivery. Past ensureRunning's
+// refusals (a kill-fenced or stopping row still refuses), it decides on a
+// fresh read of an unsuspended row's runtime: a live pane whose agent is
+// dead, or a runtime the read cannot vouch for, is ErrAgentDead, so the
+// caller queues the text rather than type it into a pane it would be lost
+// with (mc-48az4, mc-wdjni). The read refreshes a caching provider, so
+// ensureRunning's reads after it see a corpse as not running. Start and
+// Attach keep ensureRunning's: an operator attaches to a crashed pane to read
+// it.
 func (m *Manager) ensureDeliverable(ctx context.Context, by Actor, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config) error {
-	if State(b.Metadata["state"]) != StateSuspended && m.sp.IsRunning(sessName) && m.agentDead(sessName, hints.ProcessNames) {
-		return fmt.Errorf("%w: %s", ErrAgentDead, id)
+	if err := m.startRefusal(by, id, b); err != nil {
+		return err
+	}
+	if State(b.Metadata["state"]) != StateSuspended {
+		if live, err := m.freshLiveness(sessName, hints.ProcessNames); err != nil {
+			return fmt.Errorf("%w: %s: %w", ErrAgentDead, id, err)
+		} else if live.Running && !live.Alive {
+			return fmt.Errorf("%w: %s", ErrAgentDead, id)
+		}
 	}
 	return m.ensureRunning(ctx, by, id, b, sessName, resumeCommand, hints, false)
 }
 
-// agentDead reports sessName's agent dead by its process names; with none
-// to check it reads alive, as the runtime's liveness does.
-func (m *Manager) agentDead(sessName string, processNames []string) bool {
-	return len(processNames) > 0 && !m.sp.ProcessAlive(sessName, processNames)
+// freshLiveness reads sessName's runtime as of now, not from a provider's
+// cache: the tmux state cache can show a crashed agent alive for seconds,
+// and a crash never invalidates it (mc-48az4). Alive is by processNames;
+// with none (and none the runtime published) a running pane reads alive.
+func (m *Manager) freshLiveness(sessName string, processNames []string) (runtime.Liveness, error) {
+	return runtime.ObserveLivenessSince(m.sp, sessName, processNames, time.Now())
+}
+
+// liveAgent reports a fresh read of sessName that finds its pane up and its
+// agent alive, which a live-only send needs.
+func (m *Manager) liveAgent(sessName string, processNames []string) bool {
+	live, err := m.freshLiveness(sessName, processNames)
+	return err == nil && live.Running && live.Alive
 }
 
 func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config) error {
@@ -1033,7 +1062,7 @@ func (m *Manager) tryWaitIdleNudgeLocked(ctx context.Context, by Actor, id strin
 }
 
 func (m *Manager) tryWaitIdleNudgeLiveOnlyLocked(ctx context.Context, b beads.Bead, source, sessName, message string, processNames []string) (bool, error) {
-	if !m.sp.IsRunning(sessName) || m.agentDead(sessName, processNames) { // a dead agent's pane takes nothing (mc-wdjni)
+	if !m.liveAgent(sessName, processNames) { // a dead agent's pane takes nothing (mc-wdjni)
 		return false, nil
 	}
 	if transportFromMetadata(b) == "acp" {
@@ -1163,7 +1192,7 @@ func (m *Manager) sendLiveOnly(ctx context.Context, id, message string, immediat
 		if err != nil {
 			return err
 		}
-		if !m.sp.IsRunning(sessName) || m.agentDead(sessName, processNames) { // a dead agent's pane takes nothing (mc-wdjni)
+		if !m.liveAgent(sessName, processNames) { // a dead agent's pane takes nothing (mc-wdjni)
 			delivered = false
 			return nil
 		}

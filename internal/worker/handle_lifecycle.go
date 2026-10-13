@@ -465,10 +465,10 @@ func (h *SessionHandle) Nudge(ctx context.Context, by sessionpkg.Actor, req Nudg
 	}
 }
 
-// sentNudgeResult: a held session queued the nudge rather than taking it.
+// sentNudgeResult: a session that could not take the nudge now queued it.
 func sentNudgeResult(outcome sessionpkg.SubmitOutcome) NudgeResult {
 	if outcome.Queued {
-		return NudgeResult{Undelivered: NudgeQueuedHeld}
+		return NudgeResult{Undelivered: NudgeQueued}
 	}
 	return NudgeResult{Delivered: true}
 }

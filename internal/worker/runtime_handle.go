@@ -295,7 +295,15 @@ func (h *RuntimeHandle) Nudge(ctx context.Context, _ sessionpkg.Actor, req Nudge
 		err = fmt.Errorf("nudge text is required")
 		return NudgeResult{}, err
 	}
-	if !h.provider.IsRunning(h.sessionName) {
+	// Decided on a fresh read, not the provider's cache: the tmux state
+	// cache can show a crashed agent alive for seconds after the crash.
+	live, liveErr := runtime.ObserveLivenessSince(h.provider, h.sessionName, h.processNames, time.Now())
+	if liveErr != nil || live.Running && !live.Alive {
+		// A dead agent's pane takes nothing (mc-48az4): the caller queues it.
+		result = NudgeResult{Undelivered: NudgeUndeliveredAgentDead}
+		return result, nil
+	}
+	if !live.Running {
 		if normalizeNudgeWakePolicy(req.Wake) == NudgeWakeLiveOnly {
 			result = NudgeResult{Delivered: false}
 			return result, nil

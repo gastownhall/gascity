@@ -140,7 +140,9 @@ func (m *Manager) submit(ctx context.Context, by Actor, id, message, resumeComma
 					return err
 				}
 			}
-			return m.interruptAndSubmitLocked(ctx, by, id, b, sessName, message, resumeCommand, hints)
+			outcome.Queued, err = m.interruptAndSubmitLocked(ctx, by, id, b, sessName, message, resumeCommand, hints)
+			outcome.Deferred = outcome.Queued
+			return err
 		default:
 			running := m.sp.IsRunning(sessName)
 			if pendingConversationRestart(b) && !running {
@@ -188,76 +190,76 @@ func (m *Manager) supportsFollowUpLocked(b beads.Bead) bool {
 	).SupportsFollowUp
 }
 
-// interruptAndSubmitLocked runs after submit's actor check, so its sends
-// do not queue.
-func (m *Manager) interruptAndSubmitLocked(ctx context.Context, by Actor, id string, b beads.Bead, sessName, message, resumeCommand string, hints runtime.Config) error {
+// interruptAndSubmitLocked runs after submit's actor check. It reports
+// whether its send queued the message: a dead agent's (sendLocked, on
+// ensureDeliverable's fresh read) takes no interrupt keys and queues it for
+// the incarnation the controller's heal brings up.
+func (m *Manager) interruptAndSubmitLocked(ctx context.Context, by Actor, id string, b beads.Bead, sessName, message, resumeCommand string, hints runtime.Config) (bool, error) {
 	// A row whose drain-ack stop is pending belongs to the controller's stop:
 	// no interrupt keys, no hard-restart stop (as ensureRunning refuses it).
 	if drainAckStopPendingMetadata(b.Metadata) {
-		return fmt.Errorf("%w: %s", ErrSessionStopping, id)
+		return false, fmt.Errorf("%w: %s", ErrSessionStopping, id)
 	}
-	running := State(b.Metadata["state"]) != StateSuspended && m.sp.IsRunning(sessName)
+	running := State(b.Metadata["state"]) != StateSuspended && m.liveAgent(sessName, hints.ProcessNames)
 	if !running {
-		_, err := m.sendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints, true)
-		return err
+		return m.sendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints, true)
 	}
 	// Every interrupt may end in a stop and a restart: take the runtime lease
 	// before sending anything, and carry it to the restart (D8D-5).
 	by, release, err := m.leaseForRestartLocked(ctx, by, id, sessName)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer release()
 	if requiresHardRestartInterrupt(b) {
 		piTranscriptPath, err := piPendingTurnPath(b, hints)
 		if err != nil {
-			return err
+			return false, err
 		}
 		// Replacement only needs the outgoing incarnation gone, so a session
 		// that is already gone — including one whose tmux server died — is
 		// cleared to restart rather than reported as a failed stop.
 		if err := runtime.StopForCleanup(m.sp, sessName); err != nil {
-			return fmt.Errorf("stopping session for interrupt replacement: %w", err)
+			return false, fmt.Errorf("stopping session for interrupt replacement: %w", err)
 		}
 		if err := discardPiPendingTurn(piTranscriptPath, hints); err != nil {
 			// Pi must be stopped before transcript truncation so it cannot race the
 			// write. If truncation fails, restart on the dirty transcript; the
 			// caller's retry will repeat this stop-and-discard sequence.
 			if restartErr := m.restoreAfterHardRestartFailureLocked(ctx, by, id, b, sessName, resumeCommand, hints); restartErr != nil {
-				return fmt.Errorf("%w; additionally failed to restore session: %w", err, restartErr)
+				return false, fmt.Errorf("%w; additionally failed to restore session: %w", err, restartErr)
 			}
-			return err
+			return false, err
 		}
-		return m.restartAndSendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints)
+		return false, m.restartAndSendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints)
 	}
 	interruptStartedAt := time.Now()
 	if err := m.stopTurnLocked(b, sessName); err != nil {
-		return err
+		return false, err
 	}
 	if err := m.waitForInterruptIdleLocked(ctx, b, sessName); err != nil {
 		// Idle wait failed (e.g. timeout). Fall back to hard
 		// restart so the session isn't left in limbo.
 		if stopErr := runtime.StopForCleanup(m.sp, sessName); stopErr != nil {
-			return fmt.Errorf("stopping session after idle timeout: %w", stopErr)
+			return false, fmt.Errorf("stopping session after idle timeout: %w", stopErr)
 		}
-		return m.restartAndSendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints)
+		return false, m.restartAndSendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints)
 	}
 	if err := m.waitForInterruptBoundaryLocked(ctx, b, sessName, interruptStartedAt); err != nil {
 		if stopErr := runtime.StopForCleanup(m.sp, sessName); stopErr != nil {
-			return fmt.Errorf("stopping session after interrupt boundary timeout: %w", stopErr)
+			return false, fmt.Errorf("stopping session after interrupt boundary timeout: %w", stopErr)
 		}
-		return m.restartAndSendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints)
+		return false, m.restartAndSendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints)
 	}
 	if err := m.resetInterruptedTurnLocked(ctx, b, sessName); err != nil {
-		return err
+		return false, err
 	}
 	if shouldClearInterruptedInputBeforeSubmit(b) {
 		if err := m.clearInterruptedInputLocked(ctx, b, sessName); err != nil {
-			return err
+			return false, err
 		}
 	}
-	_, err = m.sendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints, true)
-	return err
+	return m.sendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints, true)
 }
 
 // restartAndSendLocked replaces the runtime the interrupt just stopped. The

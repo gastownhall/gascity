@@ -2477,3 +2477,166 @@ func TestSendWithoutProcessNamesReadsAlive(t *testing.T) {
 		t.Fatalf("SendLiveOnly = %t, %v; want delivered", delivered, err)
 	}
 }
+
+// staleCacheFake is a caching provider caught between a crash and its next
+// refresh, as the tmux state cache is for up to its TTL (and longer on a
+// failed refresh): IsRunning and ProcessAlive answer from the snapshot taken
+// before the crash (the agent alive), while a fresh read (ObserveLivenessSince)
+// sees the truth, or fails with freshErr.
+type staleCacheFake struct {
+	*runtime.Fake
+	freshErr error
+}
+
+func (f staleCacheFake) ProcessAlive(name string, _ []string) bool { return f.IsRunning(name) }
+
+func (f staleCacheFake) ObserveLivenessSince(name string, processNames []string, _ time.Time) (runtime.Liveness, error) {
+	if f.freshErr != nil {
+		return runtime.Liveness{}, f.freshErr
+	}
+	running := f.IsRunning(name)
+	return runtime.Liveness{Running: running, Alive: running && f.Fake.ProcessAlive(name, processNames)}, nil
+}
+
+// crashedBehindStaleCache is a claude row whose agent crashed in a pane
+// still up, behind a provider cache that still shows it alive.
+func crashedBehindStaleCache(t *testing.T, provider string, freshErr error) (*Manager, *runtime.Fake, Info, string, runtime.Config) {
+	t.Helper()
+	store := beads.NewMemStore()
+	fake := runtime.NewFake()
+	cityPath := t.TempDir()
+	mgr := NewManagerWithOptions(store, staleCacheFake{Fake: fake, freshErr: freshErr}, WithCityPath(cityPath))
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: provider, WorkDir: t.TempDir(), Provider: provider, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	origPoller := startSessionSubmitPoller
+	startSessionSubmitPoller = func(string, string, string) error { return nil }
+	t.Cleanup(func() { startSessionSubmitPoller = origPoller })
+	fake.Zombies[info.SessionName] = true
+	return mgr, fake, info, cityPath, runtime.Config{WorkDir: info.WorkDir, ProcessNames: []string{provider}}
+}
+
+// touchedPane reports a call after before that typed into, interrupted,
+// stopped or started name.
+func touchedPane(sp *runtime.Fake, name string, before int) []string {
+	var out []string
+	for _, c := range sp.Calls[before:] {
+		switch c.Method {
+		case "Nudge", "NudgeNow", "SendKeys", "Interrupt", "Stop", "Start":
+			if c.Name == name {
+				out = append(out, c.Method)
+			}
+		}
+	}
+	return out
+}
+
+// TestDeliveryDecidesOnAFreshRead (J26 C2, mc-48az4): delivery decides on a
+// fresh read of the runtime, not the provider's cache, which a crash does
+// not invalidate. With the cache still showing the crashed agent alive, a
+// send of every kind is queued (queued and deferred, so the controller is
+// poked) or reported undelivered, and nothing touches the pane; a fresh read
+// that fails queues too.
+func TestDeliveryDecidesOnAFreshRead(t *testing.T) {
+	for name, freshErr := range map[string]error{"agent dead": nil, "fresh read fails": errors.New("tmux state refresh failed")} {
+		t.Run(name, func(t *testing.T) {
+			for kind, send := range map[string]func(*Manager, Info, runtime.Config) (SubmitOutcome, error){
+				"Submit default, background": func(m *Manager, i Info, h runtime.Config) (SubmitOutcome, error) {
+					return m.Submit(context.Background(), testActor(m, ActorBackground), i.ID, "after the crash", BuildResumeCommand(i), h, SubmitIntentDefault)
+				},
+				"Submit default, operator": func(m *Manager, i Info, h runtime.Config) (SubmitOutcome, error) {
+					return m.Submit(context.Background(), testActor(m, ActorOperator), i.ID, "after the crash", BuildResumeCommand(i), h, SubmitIntentDefault)
+				},
+				"Submit interrupt_now": func(m *Manager, i Info, h runtime.Config) (SubmitOutcome, error) {
+					return m.Submit(context.Background(), testActor(m, ActorBackground), i.ID, "after the crash", BuildResumeCommand(i), h, SubmitIntentInterruptNow)
+				},
+				"SendImmediate": func(m *Manager, i Info, h runtime.Config) (SubmitOutcome, error) {
+					return m.SendImmediate(context.Background(), testActor(m, ActorBackground), i.ID, "after the crash", BuildResumeCommand(i), h)
+				},
+			} {
+				t.Run(kind, func(t *testing.T) {
+					mgr, sp, info, cityPath, hints := crashedBehindStaleCache(t, "claude", freshErr)
+					before := len(sp.Calls)
+					out, err := send(mgr, info, hints)
+					if err != nil || !out.Queued || !out.Deferred {
+						t.Fatalf("outcome %+v (%v), want queued and deferred", out, err)
+					}
+					if touched := touchedPane(sp, info.SessionName, before); len(touched) != 0 {
+						t.Fatalf("calls %v on the crashed pane, want none", touched)
+					}
+					if state, err := nudgequeue.LoadState(cityPath); err != nil || len(state.Pending) != 1 {
+						t.Fatalf("pending %+v (%v), want the message queued", state.Pending, err)
+					}
+				})
+			}
+			t.Run("live-only", func(t *testing.T) {
+				mgr, sp, info, _, hints := crashedBehindStaleCache(t, "claude", freshErr)
+				before := len(sp.Calls)
+				if delivered, err := mgr.SendLiveOnly(context.Background(), info.ID, "x", hints.ProcessNames); err != nil || delivered {
+					t.Fatalf("SendLiveOnly = %t, %v; want undelivered", delivered, err)
+				}
+				if delivered, err := mgr.TryWaitIdleNudgeLiveOnly(context.Background(), info.ID, "session", "x", hints.ProcessNames); err != nil || delivered {
+					t.Fatalf("TryWaitIdleNudgeLiveOnly = %t, %v; want undelivered", delivered, err)
+				}
+				if touched := touchedPane(sp, info.SessionName, before); len(touched) != 0 {
+					t.Fatalf("calls %v on the crashed pane, want none", touched)
+				}
+			})
+		})
+	}
+}
+
+// TestInterruptNowOverACrashedAgentReportsQueued (mc-wdjni): interrupt_now
+// over a crashed agent sends no interrupt keys and queues the message, and
+// says so (queued and deferred), for every provider family's interrupt.
+func TestInterruptNowOverACrashedAgentReportsQueued(t *testing.T) {
+	for _, provider := range []string{"claude", "codex", "gemini", "pi"} {
+		t.Run(provider, func(t *testing.T) {
+			mgr, sp, info, cityPath, hints := crashedBehindStaleCache(t, provider, nil)
+			before := len(sp.Calls)
+			out, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "after the crash", BuildResumeCommand(info), hints, SubmitIntentInterruptNow)
+			if err != nil || !out.Queued || !out.Deferred {
+				t.Fatalf("outcome %+v (%v), want queued and deferred", out, err)
+			}
+			if touched := touchedPane(sp, info.SessionName, before); len(touched) != 0 {
+				t.Fatalf("calls %v on the crashed pane, want none", touched)
+			}
+			if state, err := nudgequeue.LoadState(cityPath); err != nil || len(state.Pending) != 1 {
+				t.Fatalf("pending %+v (%v), want the message queued", state.Pending, err)
+			}
+		})
+	}
+}
+
+// TestCrashedAgentStopAndKillFencesStillRefuse (mc-wdjni): the dead-agent
+// check runs after ensureRunning's refusals, so a send to a row whose
+// drain-ack stop or kill is pending is still refused (the API's 409), not
+// queued for a session that is going away.
+func TestCrashedAgentStopAndKillFencesStillRefuse(t *testing.T) {
+	for name, c := range map[string]struct {
+		meta map[string]string
+		want error
+	}{
+		"drain-ack stop pending": {map[string]string{"state": string(StateDraining), "state_reason": DrainAckStopPendingReason}, ErrSessionStopping},
+		"kill pending":           {map[string]string{"state": string(StateAsleep), "state_reason": KillPendingReason, "sleep_reason": string(SleepReasonKilled), "slept_at": time.Now().UTC().Format(time.RFC3339)}, ErrSessionKillPending},
+	} {
+		t.Run(name, func(t *testing.T) {
+			mgr, sp, info, cityPath, hints := crashedBehindStaleCache(t, "claude", nil)
+			if err := mgr.store.SetMetadataBatch(info.ID, c.meta); err != nil {
+				t.Fatal(err)
+			}
+			before := len(sp.Calls)
+			out, err := mgr.Send(context.Background(), testActor(mgr, ActorBackground), info.ID, "x", BuildResumeCommand(info), hints)
+			if !errors.Is(err, c.want) || out.Queued {
+				t.Fatalf("Send = %+v, %v; want %v, nothing queued", out, err, c.want)
+			}
+			if touched := touchedPane(sp, info.SessionName, before); len(touched) != 0 {
+				t.Fatalf("calls %v on the crashed pane, want none", touched)
+			}
+			if state, _ := nudgequeue.LoadState(cityPath); len(state.Pending) != 0 {
+				t.Fatalf("pending %+v, want nothing queued", state.Pending)
+			}
+		})
+	}
+}

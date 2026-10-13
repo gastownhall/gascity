@@ -7162,3 +7162,87 @@ func TestCrashQueuedMessageSurvivesEpochRotation(t *testing.T) {
 		t.Fatalf("after the heal: delivered=%v err=%v, want the queued message delivered to the epoch-4 incarnation", ok, err)
 	}
 }
+
+// TestNudgeOverACrashedAgentQueues (mc-48az4, mc-wdjni): gc session nudge
+// (immediate or wait-idle), mail notify and sling's nudge to a running pane
+// whose agent crashed go through the runtime handle with the target's
+// process names: nothing is typed into the dead pane, the nudge is queued
+// for the healed agent, and the CLI says queued (agent down), not "Nudged".
+func TestNudgeOverACrashedAgentQueues(t *testing.T) {
+	crashed := func(t *testing.T) (string, beads.NudgesStore, *runtime.Fake, nudgeTarget, session.Info) {
+		t.Helper()
+		t.Setenv("GC_BEADS", "file")
+		dir := t.TempDir()
+		store := openNudgeBeadStore(dir)
+		fake := runtime.NewFake()
+		mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+		info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "claude", WorkDir: dir, Provider: "claude", Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		if err := mgr.Start(context.Background(), testOperatorIn(t, dir), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		fake.Zombies[info.SessionName] = true
+		target := nudgeTarget{
+			cityPath:    dir,
+			cfg:         &config.City{Agents: []config.Agent{{Name: "worker", Provider: "claude"}}},
+			sessionID:   info.ID,
+			sessionName: info.SessionName,
+			identity:    "worker",
+			agent:       config.Agent{Name: "worker", Provider: "claude"},
+			resolved:    &config.ResolvedProvider{Name: "claude", ProcessNames: []string{"claude"}},
+		}
+		return dir, store, fake, target, info
+	}
+	typed := func(fake *runtime.Fake, name string, before int) int {
+		n := 0
+		for _, c := range fake.Calls[before:] {
+			if c.Name == name && (c.Method == "Nudge" || c.Method == "NudgeNow") {
+				n++
+			}
+		}
+		return n
+	}
+	queued := func(t *testing.T, dir string, target nudgeTarget) int {
+		t.Helper()
+		pending, _, _, err := listQueuedNudgesForTarget(dir, target, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(pending)
+	}
+	for _, mode := range []nudgeDeliveryMode{nudgeDeliveryImmediate, nudgeDeliveryWaitIdle} {
+		t.Run("gc session nudge "+string(mode), func(t *testing.T) {
+			dir, store, fake, target, info := crashed(t)
+			before := len(fake.Calls)
+			var stdout, stderr bytes.Buffer
+			code := deliverSessionNudgeWithWorker(target, store.Store, fake, "check deploy status", mode, false, &stdout, &stderr)
+			if code != 0 || typed(fake, info.SessionName, before) != 0 || queued(t, dir, target) != 1 {
+				t.Fatalf("code %d, typed %d, queued %d; want 0, none typed, one queued; stderr=%q", code, typed(fake, info.SessionName, before), queued(t, dir, target), stderr.String())
+			}
+			if out := stdout.String(); !strings.Contains(out, "Queued nudge") || !strings.Contains(out, "agent is down") || strings.Contains(out, "Nudged") {
+				t.Fatalf("stdout %q, want it queued because the agent is down", out)
+			}
+		})
+	}
+	t.Run("mail notify", func(t *testing.T) {
+		dir, store, fake, target, info := crashed(t)
+		before := len(fake.Calls)
+		if err := sendMailNotifyWithWorker(target, store.Store, fake, "human", ""); err != nil {
+			t.Fatal(err)
+		}
+		if typed(fake, info.SessionName, before) != 0 || queued(t, dir, target) != 1 {
+			t.Fatalf("typed %d, queued %d; want none typed, one queued", typed(fake, info.SessionName, before), queued(t, dir, target))
+		}
+	})
+	t.Run("sling", func(t *testing.T) {
+		dir, store, fake, target, info := crashed(t)
+		before := len(fake.Calls)
+		var stdout, stderr bytes.Buffer
+		deliverSlingNudge(target, fake, store.Store, dir, &stdout, &stderr)
+		if typed(fake, info.SessionName, before) != 0 || queued(t, dir, target) != 1 || strings.Contains(stdout.String(), "Nudged") {
+			t.Fatalf("typed %d, queued %d, stdout %q; want none typed, one queued", typed(fake, info.SessionName, before), queued(t, dir, target), stdout.String())
+		}
+	})
+}

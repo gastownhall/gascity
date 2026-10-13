@@ -234,9 +234,18 @@ const (
 	// resume (CONTRACT v5.9 D8), and nothing queued the nudge: the caller
 	// must queue it (a wait-idle nudge).
 	NudgeUndeliveredHeld NudgeUndeliveredReason = "session_held"
-	// NudgeQueuedHeld means the session is held, or (ActorBackground) not
-	// running, and queued the nudge itself; the caller must not queue it again.
+	// NudgeQueuedHeld means the session is held and the nudge was queued for
+	// it; the caller must not queue it again.
 	NudgeQueuedHeld NudgeUndeliveredReason = "session_held_queued"
+	// NudgeQueued means the session could not take the nudge now (it is held,
+	// (ActorBackground) not running, or its agent is dead in a pane still up)
+	// and queued it itself; the caller must not queue it again.
+	NudgeQueued NudgeUndeliveredReason = "queued"
+	// NudgeUndeliveredAgentDead means the pane is up but its agent is dead (a
+	// crash the controller has not healed), or a fresh read could not vouch
+	// for it: text typed now would be lost with the pane, and nothing queued
+	// the nudge, so the caller queues it (mc-48az4).
+	NudgeUndeliveredAgentDead NudgeUndeliveredReason = "agent_dead"
 )
 
 // NudgeWakePolicy controls whether a nudge may wake a stopped session.
