@@ -22,6 +22,7 @@ const (
 	idleClaimNudgeTriggerKey = "idle_claim_nudge_trigger" // trigger bead id last acted on
 	idleClaimNudgeCountKey   = "idle_claim_nudge_count"   // delivery attempts reserved for that trigger
 	idleClaimNudgeAtKey      = "idle_claim_nudge_at"      // RFC3339 of last attempt / first observation
+	idleClaimNudgeTokenKey   = "idle_claim_nudge_token"   // the incarnation (instance_token) the marker paces
 	// The terminal drain's latch (exhausted): when it was requested and for
 	// which incarnation, so it is requested once per incarnation.
 	idleClaimNudgeStalledKey      = "idle_claim_nudge_stalled"
@@ -128,11 +129,11 @@ func nudgeStalledPoolClaims(
 }
 
 // poolClaimDrain is what the claim backstop's terminal drain needs from its
-// caller (mc-zndi7.80): readTrigger, the slot's trigger read live through the
-// store its ref names (found false when none of the caller's legs is that
-// store); and request, the drain request. Either nil disables the drain.
+// caller (mc-zndi7.80): readTrigger, the slot's trigger read live from the
+// store that owns it by residency (found false on a clean miss); and request,
+// the drain request. Either nil disables the drain.
 type poolClaimDrain struct {
-	readTrigger func(id, storeRef string) (bead beads.Bead, found bool, err error)
+	readTrigger func(id string) (bead beads.Bead, found bool, err error)
 	request     func(sessionBead beads.Bead) error
 }
 
@@ -455,18 +456,23 @@ func (p poolClaimBackstop) resolve(s beads.Bead, _ map[string]beads.Bead, _ stri
 		return backstopTarget{}, backstopResolutionClear
 	}
 	w, ok := p.work.lookup(triggerID, s.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey])
-	if !ok || !isUnclaimedTrigger(w) {
+	if !ok || !isUnclaimedTrigger(p.cfg, w) {
 		return backstopTarget{}, backstopResolutionClear
 	}
 	return backstopTarget{ID: triggerID}, backstopResolutionOutstanding
 }
 
-// state's pacing is the current incarnation's: a latch another incarnation
-// left (its drain requested) reads as a new assignment, so each incarnation
-// gets its own grace and nudges before its own drain, and a slot re-woken for
-// the same trigger is not drained on sight.
+// state's pacing is the current incarnation's: a marker or a latch another
+// incarnation left reads as a new assignment, so each incarnation gets its
+// own grace and nudges before its own drain, and a slot re-woken for the same
+// trigger is not drained on sight, whether or not its predecessor's drain
+// was latched.
 func (p poolClaimBackstop) state(s beads.Bead, target backstopTarget) (same bool, attempts int, last time.Time) {
-	if tok := strings.TrimSpace(s.Metadata[idleClaimNudgeStalledTokenKey]); tok != "" && tok != strings.TrimSpace(s.Metadata["instance_token"]) {
+	token := strings.TrimSpace(s.Metadata["instance_token"])
+	if strings.TrimSpace(s.Metadata[idleClaimNudgeTokenKey]) != token {
+		return false, 0, time.Time{}
+	}
+	if tok := strings.TrimSpace(s.Metadata[idleClaimNudgeStalledTokenKey]); tok != "" && tok != token {
 		return false, 0, time.Time{}
 	}
 	marked := strings.TrimSpace(s.Metadata[idleClaimNudgeTriggerKey])
@@ -516,8 +522,8 @@ func (p poolClaimBackstop) exhausted(store beads.Store, s *beads.Bead, stdout io
 	if sessionQuietHold(p.sp, *s, sessName, p.now) != "" {
 		return // not proven quiet: hold, the next tick looks again
 	}
-	trigger, found, err := p.drain.readTrigger(s.Metadata[idleClaimNudgeTriggerKey], s.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey])
-	if err != nil || !found || !isUnclaimedTrigger(trigger) {
+	trigger, found, err := p.drain.readTrigger(s.Metadata[idleClaimNudgeTriggerKey])
+	if err != nil || !found || !isUnclaimedTrigger(p.cfg, trigger) {
 		return // claimed since the snapshot, or unreadable: never drain on stale evidence
 	}
 	if !writeSessionMetadata(store, s, map[string]string{
@@ -601,15 +607,19 @@ func normalizeIdleClaimStoreRef(storeRef string) string {
 }
 
 // isUnclaimedTrigger reports whether the pool slot's trigger bead is still
-// waiting to be claimed: open and assigned to no one. Any assignee claims it:
-// this slot under any of its identities (session name, bead ID, alias: the
-// claim mid-flight, or a continuation pin), or another session, whose work
-// is no reason to nudge or drain this slot.
-func isUnclaimedTrigger(w beads.Bead) bool {
+// waiting to be claimed: open, and assigned to no session. An assignee that
+// is a session claims it: this slot under any of its identities (session
+// name, bead ID, alias: the claim mid-flight, or a continuation pin), or
+// another session, whose work is no reason to nudge or drain this slot. An
+// assignee that is a pool template of cfg (template-assigned pool demand,
+// isKnownPoolTemplate) claims nothing: it is any of the pool's slots' to
+// take.
+func isUnclaimedTrigger(cfg *config.City, w beads.Bead) bool {
 	if !strings.EqualFold(strings.TrimSpace(w.Status), "open") {
 		return false // in_progress / closed / blocked → not ours to nudge
 	}
-	return strings.TrimSpace(w.Assignee) == ""
+	assignee := strings.TrimSpace(w.Assignee)
+	return assignee == "" || isKnownPoolTemplate(assignee, cfg)
 }
 
 // claimNudgeFor resolves the slot's configured startup nudge (the worker's
@@ -650,6 +660,7 @@ func writeIdleClaimMarker(store beads.Store, s *beads.Bead, triggerID string, at
 		idleClaimNudgeTriggerKey: triggerID,
 		idleClaimNudgeCountKey:   strconv.Itoa(attempts),
 		idleClaimNudgeAtKey:      now.UTC().Format(time.RFC3339),
+		idleClaimNudgeTokenKey:   strings.TrimSpace(s.Metadata["instance_token"]),
 	}
 	if err := store.SetMetadataBatch(s.ID, kvs); err != nil {
 		fmt.Fprintf(stdout, "idle-claim-nudge: marking %s failed: %v\n", s.ID, err) //nolint:errcheck // best-effort
@@ -664,9 +675,6 @@ func writeIdleClaimMarker(store beads.Store, s *beads.Bead, triggerID string, at
 	return true
 }
 
-// clearIdleClaimMarker wipes the marker once the slot no longer has unclaimed
-// work, so the next assignment starts its grace clock fresh. No-op (no store
-// write) when there is nothing to clear, so steady-state ticks stay silent.
 // clearIdleClaimLatch clears the terminal drain's latch from s, when set.
 func clearIdleClaimLatch(store beads.Store, s *beads.Bead, stdout io.Writer) {
 	if s.Metadata[idleClaimNudgeStalledKey] == "" && s.Metadata[idleClaimNudgeStalledTokenKey] == "" {
@@ -675,10 +683,14 @@ func clearIdleClaimLatch(store beads.Store, s *beads.Bead, stdout io.Writer) {
 	writeSessionMetadata(store, s, map[string]string{idleClaimNudgeStalledKey: "", idleClaimNudgeStalledTokenKey: ""}, "idle-claim-nudge", stdout)
 }
 
+// clearIdleClaimMarker wipes the marker once the slot no longer has unclaimed
+// work, so the next assignment starts its grace clock fresh. No-op (no store
+// write) when there is nothing to clear, so steady-state ticks stay silent.
 func clearIdleClaimMarker(store beads.Store, s *beads.Bead, stdout io.Writer) {
 	if s.Metadata[idleClaimNudgeTriggerKey] == "" &&
 		s.Metadata[idleClaimNudgeCountKey] == "" &&
 		s.Metadata[idleClaimNudgeAtKey] == "" &&
+		s.Metadata[idleClaimNudgeTokenKey] == "" &&
 		s.Metadata[idleClaimNudgeStalledKey] == "" &&
 		s.Metadata[idleClaimNudgeStalledTokenKey] == "" {
 		return
@@ -687,6 +699,7 @@ func clearIdleClaimMarker(store beads.Store, s *beads.Bead, stdout io.Writer) {
 		idleClaimNudgeTriggerKey:      "",
 		idleClaimNudgeCountKey:        "",
 		idleClaimNudgeAtKey:           "",
+		idleClaimNudgeTokenKey:        "",
 		idleClaimNudgeStalledKey:      "",
 		idleClaimNudgeStalledTokenKey: "",
 	}

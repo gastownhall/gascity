@@ -328,7 +328,7 @@ func (d *drainRecorder) request(b beads.Bead) error {
 // requests through request.
 func liveClaimDrain(store beads.Store, request func(beads.Bead) error) poolClaimDrain {
 	return poolClaimDrain{
-		readTrigger: func(id, _ string) (beads.Bead, bool, error) {
+		readTrigger: func(id string) (beads.Bead, bool, error) {
 			b, err := store.Get(id)
 			if err != nil {
 				return beads.Bead{}, false, err
@@ -355,6 +355,7 @@ func atCapSession(base time.Time, token string) beads.Bead {
 	s.Metadata[idleClaimNudgeTriggerKey] = "work-a"
 	s.Metadata[idleClaimNudgeCountKey] = strconv.Itoa(idleClaimNudgeMaxAttempts)
 	s.Metadata[idleClaimNudgeAtKey] = base.Format(time.RFC3339)
+	s.Metadata[idleClaimNudgeTokenKey] = token
 	s.Metadata["instance_token"] = token
 	return s
 }
@@ -659,7 +660,7 @@ func TestBeadReconcileTickDrainsAWedgedPoolSlot(t *testing.T) {
 		"session_name": "worker-1", "template": "worker", "agent_name": "worker-1", "pool_managed": "true", "pool_slot": "1", "state": "awake",
 		"instance_token": "tok-1", "generation": "1", testTriggerBeadIDKey: work.ID,
 		idleClaimNudgeTriggerKey: work.ID, idleClaimNudgeCountKey: strconv.Itoa(idleClaimNudgeMaxAttempts),
-		idleClaimNudgeAtKey: time.Now().Add(-time.Hour).UTC().Format(time.RFC3339),
+		idleClaimNudgeAtKey: time.Now().Add(-time.Hour).UTC().Format(time.RFC3339), idleClaimNudgeTokenKey: "tok-1",
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -686,28 +687,107 @@ func TestBeadReconcileTickDrainsAWedgedPoolSlot(t *testing.T) {
 	}
 }
 
-// Kills readLive reading the wrong leg: a city ref reads the city work store,
-// a rig ref (rig:<name> or the bare name) that rig's store, and a ref no leg
-// serves finds nothing.
-func TestWorkLegsReadLive(t *testing.T) {
-	rigDir := t.TempDir()
-	cfg := &config.City{Workspace: config.Workspace{Name: "c"}, Rigs: []config.Rig{{Name: "beads", Path: rigDir}}}
-	city := beads.NewMemStoreFrom(0, []beads.Bead{{ID: "w-1", Status: "open", Title: "city"}}, nil)
-	rig := beads.NewMemStoreFrom(0, []beads.Bead{{ID: "w-1", Status: "in_progress", Title: "rig"}}, nil)
-	legs := workLegsFromCensus(t.TempDir(), cfg, cityWorkLegOf(beads.WorkStore{Store: city}), map[string]beads.Store{"beads": rig})
-	for _, c := range []struct {
-		ref, title string
-		found      bool
-	}{
-		{"city:c", "city", true},
-		{"", "city", true},
-		{"rig:beads", "rig", true},
-		{"beads", "rig", true},
-		{"rig:other", "", false},
-	} {
-		b, found, err := legs.readLive("w-1", c.ref)
-		if err != nil || found != c.found || b.Title != c.title {
-			t.Errorf("ref %q: %q found %v err %v, want %q found %v", c.ref, b.Title, found, err, c.title, c.found)
+// Kills the claim drain's live re-read missing the trigger by residency
+// (#7752 review r2, ga-bmfmt; reviewer probe R6): on a single-store and a split
+// city alike (maintainer-city's graph = "infra"), a routed graph step, which
+// a split city keeps in the class binding, is found; on the split city the
+// binding's copy wins over a stale pre-migration copy co-resident in the work
+// ledger; and an unknown id is a clean miss.
+func TestWorkLegsReadLiveFindsTheTriggerByResidency(t *testing.T) {
+	forEachTopology(t, func(t *testing.T, e splitEnv) {
+		step := mintDurableGraphBead(t, e, "routed step", "executor")
+		if e.split {
+			// The binding's copy has moved on; the ledger keeps the copy
+			// `gc storage migrate` left behind.
+			if err := e.class.Update(step.ID, beads.UpdateOpts{Status: ptrString("in_progress"), Assignee: ptrString("worker-1")}); err != nil {
+				t.Fatal(err)
+			}
+			ledger := e.work
+			if policy, wrapped := ledger.(*beadPolicyStore); wrapped {
+				ledger = policy.Store // the forced create sits below the policy fence, as gc storage migrate's does
+			}
+			forcer, ok := ledger.(beads.ForeignIDCreator)
+			if !ok {
+				t.Fatalf("the work store %T cannot model a retained pre-migration copy", e.work)
+			}
+			if _, err := forcer.CreateWithForeignID(beads.Bead{ID: step.ID, Title: "stale copy", Type: "task"}); err != nil {
+				t.Fatalf("seeding the stale ledger copy: %v", err)
+			}
 		}
+		legs := workLegsFromCensus(e.cityPath, e.cfg, cityWorkLegOf(beads.WorkStore{Store: e.work}), nil)
+		b, found, err := legs.readLive(step.ID)
+		if err != nil || !found || b.ID != step.ID {
+			t.Fatalf("split=%v: readLive(%s) = %q found %v err %v, want the routed step", e.split, step.ID, b.ID, found, err)
+		}
+		if e.split && (b.Status != "in_progress" || b.Assignee != "worker-1") {
+			t.Fatalf("readLive read %+v, want the binding's in_progress copy, not the stale ledger copy", b)
+		}
+		if _, found, err := legs.readLive("gcg-nope"); found || err != nil {
+			t.Fatalf("split=%v: an unknown id: found %v err %v, want a clean miss", e.split, found, err)
+		}
+	})
+}
+
+// Kills a new incarnation that inherits its predecessor's spent budget
+// without a latch (#7752 review r2 nit): a marker at the cap written for
+// another incarnation reads as a new assignment, so the slot is observed and
+// nudged, not drained.
+func TestNudgeStalledPoolClaims_AnotherIncarnationsMarkerIsANewAssignment(t *testing.T) {
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	s := atCapSession(base, "tok-2")
+	s.Metadata[idleClaimNudgeTokenKey] = "tok-1" // the cap the previous incarnation spent; no drain latched
+	store := beads.NewMemStoreFrom(0, []beads.Bead{s, {ID: "work-a", Status: "open"}}, nil)
+	now := base.Add(time.Hour)
+	sp := quietClaimFake(t, now)
+	drains := &drainRecorder{}
+	var out bytes.Buffer
+	nudgeStalledPoolClaims(sp, idleClaimTestCfg(), store, []beads.Bead{s}, []beads.Bead{{ID: "work-a", Status: "open"}}, nil, now, liveClaimDrain(store, drains.request), &out)
+	got := mustGetTestBead(t, store, s.ID)
+	if len(drains.ids) != 0 || got.Metadata[idleClaimNudgeCountKey] != "0" || got.Metadata[idleClaimNudgeTokenKey] != "tok-2" {
+		t.Fatalf("drains %v metadata %v, want a fresh observation for tok-2 and no drain", drains.ids, got.Metadata)
+	}
+}
+
+// Kills silencing template-assigned pool demand (#7752 review r2): a trigger
+// assigned to a pool template identity, not a session, is still unclaimed, so
+// the backstop nudges the slot bound to it.
+func TestNudgeStalledPoolClaims_TemplateAssignedTriggerIsUnclaimed(t *testing.T) {
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	cfg := idleClaimTestCfg()
+	cfg.Agents[0].MaxActiveSessions = intPtr(3) // agent-a is a pool
+	s := idleClaimPoolSession()
+	work := []beads.Bead{{ID: "work-a", Status: "open", Assignee: "agent-a"}}
+	store := beads.NewMemStoreFrom(0, []beads.Bead{s}, nil)
+	sp := runningIdleClaimFake(t, "session-a")
+	var out bytes.Buffer
+	nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{s}, work, nil, base, poolClaimDrain{}, &out)
+	nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{mustGetTestBead(t, store, s.ID)}, work, nil, base.Add(idleClaimNudgeGrace+time.Second), poolClaimDrain{}, &out)
+	if got := sp.CountCalls("Nudge", "session-a"); got != 1 {
+		t.Fatalf("nudges = %d, want the template-assigned trigger treated as unclaimed", got)
+	}
+}
+
+// Kills readLive answering from a cache (#7752 review r2): the trigger is
+// read through the owner's Live handle, so a claim the cache has not seen
+// yet is still read.
+func TestWorkLegsReadLiveReadsPastTheCache(t *testing.T) {
+	backing := beads.NewMemStoreFrom(0, []beads.Bead{{ID: "hq-1", Status: "open", Title: "step"}}, nil)
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := cache.Get("hq-1"); err != nil || b.Status != "open" {
+		t.Fatalf("cache read %+v %v, want the primed open row", b, err)
+	}
+	if err := backing.Update("hq-1", beads.UpdateOpts{Status: ptrString("in_progress"), Assignee: ptrString("worker-1")}); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := cache.Get("hq-1"); b.Status != "open" {
+		t.Skipf("the cache already serves the backing write (%q); nothing to prove past it", b.Status)
+	}
+	legs := workLegsFromCensus(t.TempDir(), &config.City{Workspace: config.Workspace{Name: "c"}}, cityWorkLegOf(beads.WorkStore{Store: cache}), nil)
+	b, found, err := legs.readLive("hq-1")
+	if err != nil || !found || b.Status != "in_progress" {
+		t.Fatalf("readLive = %+v found %v err %v, want the live in_progress row", b, found, err)
 	}
 }

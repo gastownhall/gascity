@@ -223,7 +223,7 @@ func TestSessionFieldsFlowsWriteTheirKeys(t *testing.T) {
 			cb.RecordRestart("worker", now)
 			must(t, persistSessionCircuitBreakerMetadata(front, id, cb, "worker", now))
 		}},
-		{"v2 nudges step", "idle_claim_nudge_at idle_claim_nudge_count idle_claim_nudge_trigger", []string{"cmd/gc/reconcile_steps_nudges.go:externalReadsLane.nudges"}, func(t *testing.T, rec *sessionKeyRecorder) {
+		{"v2 nudges step", "idle_claim_nudge_at idle_claim_nudge_count idle_claim_nudge_token idle_claim_nudge_trigger", []string{"cmd/gc/reconcile_steps_nudges.go:externalReadsLane.nudges"}, func(t *testing.T, rec *sessionKeyRecorder) {
 			env, _ := nudgeStepsFixture(t)
 			sess := idleClaimPoolSession()
 			sess.Labels = []string{sessionBeadLabel}

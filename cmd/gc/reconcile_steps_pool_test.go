@@ -282,7 +282,7 @@ func TestNudgeStepsDrainAWedgedSlot(t *testing.T) {
 		env.SP.(*runtime.Fake).SetActivity("session-a", stepsTestNow.Add(-time.Hour)) // quiet
 		if err := store.SetMetadataBatch("session-bead-a", map[string]string{
 			idleClaimNudgeTriggerKey: "work-a", idleClaimNudgeCountKey: strconv.Itoa(idleClaimNudgeMaxAttempts),
-			idleClaimNudgeAtKey: stepsTestNow.Add(-time.Hour).Format(time.RFC3339), "generation": "7", "instance_token": "tok-7",
+			idleClaimNudgeAtKey: stepsTestNow.Add(-time.Hour).Format(time.RFC3339), idleClaimNudgeTokenKey: "tok-7", "generation": "7", "instance_token": "tok-7",
 		}); err != nil {
 			t.Fatal(err)
 		}
