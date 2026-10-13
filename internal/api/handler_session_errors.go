@@ -7,6 +7,20 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 )
 
+// turnInterruptUnsupportedCode is the error code for
+// session.ErrTurnInterruptUnsupported on every wire path: the 501 from /stop
+// and the async request.failed result of an interrupt_now submit.
+const turnInterruptUnsupportedCode = "turn_interrupt_unsupported"
+
+// sessionSubmitFailureCode is the request.failed error code for an async
+// submit that failed with err.
+func sessionSubmitFailureCode(err error) string {
+	if errors.Is(err, session.ErrTurnInterruptUnsupported) {
+		return turnInterruptUnsupportedCode
+	}
+	return "submit_failed"
+}
+
 func writeSessionManagerError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, session.ErrInvalidSessionName):
@@ -22,7 +36,7 @@ func writeSessionManagerError(w http.ResponseWriter, err error) {
 	case errors.Is(err, session.ErrInteractionUnsupported):
 		writeError(w, http.StatusNotImplemented, "unsupported", err.Error())
 	case errors.Is(err, session.ErrTurnInterruptUnsupported):
-		writeError(w, http.StatusNotImplemented, "turn_interrupt_unsupported", err.Error())
+		writeError(w, http.StatusNotImplemented, turnInterruptUnsupportedCode, err.Error())
 	case errors.Is(err, session.ErrPendingInteraction):
 		writeError(w, http.StatusConflict, "pending_interaction", err.Error())
 	case errors.Is(err, session.ErrNoPendingInteraction):

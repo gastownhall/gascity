@@ -50,7 +50,7 @@ func humaSessionManagerError(err error) error {
 	case errors.Is(err, session.ErrInteractionUnsupported):
 		return apierr.NotImplemented.Msg("unsupported: " + err.Error())
 	case errors.Is(err, session.ErrTurnInterruptUnsupported):
-		return apierr.NotImplemented.Msg("turn_interrupt_unsupported: " + err.Error())
+		return apierr.NotImplemented.Msg(turnInterruptUnsupportedCode + ": " + err.Error())
 	case errors.Is(err, session.ErrPendingInteraction):
 		return apierr.SessionConflict.Msg("pending_interaction: " + err.Error())
 	case errors.Is(err, session.ErrNoPendingInteraction):

@@ -781,7 +781,7 @@ func (s *Server) acceptSessionSubmit(ctx context.Context, input *SessionSubmitIn
 		}
 		outcome, submitErr := s.submitMessageToSession(context.Background(), store.Store, id, message, intent, resume)
 		if submitErr != nil {
-			s.emitSessionSubmitFailed(reqID, "submit_failed", submitErr.Error())
+			s.emitSessionSubmitFailed(reqID, sessionSubmitFailureCode(submitErr), submitErr.Error())
 		} else {
 			s.emitSessionSubmitSucceeded(reqID, id, outcome, string(intent))
 		}

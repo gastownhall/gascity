@@ -251,6 +251,38 @@ func TestSessionReadsWithdrawInterruptNowOnUnsupportedRuntime(t *testing.T) {
 	}
 }
 
+// TestSessionSubmitInterruptNowUnsupportedReportsTypedFailureCode kills an
+// async interrupt_now refusal that reaches the wire as the generic
+// submit_failed: a client must be able to tell "this runtime cannot
+// interrupt the turn" apart, as /stop's 501 turn_interrupt_unsupported does.
+func TestSessionSubmitInterruptNowUnsupportedReportsTypedFailureCode(t *testing.T) {
+	fs := newSessionFakeState(t)
+	fs.sp.TurnInterruptModeValue = runtime.TurnInterruptUnsupported
+	h := newTestCityHandler(t, fs)
+
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "helper", Title: "Codex", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newPostRequest(cityURL(fs, "/session/")+info.ID+"/submit", strings.NewReader(`{"message":"now","intent":"interrupt_now"}`)))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("submit status = %d, want 202; body: %s", rec.Code, rec.Body.String())
+	}
+	accepted := decodeAsyncAccepted(t, rec.Body)
+	failure := waitForRequestFailed(t, fs.eventProv, accepted.RequestID)
+	if failure.ErrorCode != "turn_interrupt_unsupported" {
+		t.Fatalf("error_code = %q, want turn_interrupt_unsupported (message %q)", failure.ErrorCode, failure.ErrorMessage)
+	}
+	for _, call := range fs.sp.Calls {
+		if call.Method == "Interrupt" || call.Method == "SendKeys" || call.Method == "Nudge" || call.Method == "NudgeNow" {
+			t.Fatalf("calls = %#v, want nothing sent", fs.sp.Calls)
+		}
+	}
+}
+
 func TestHandleSessionStopUsesSoftEscapeForCodex(t *testing.T) {
 	fs := newSessionFakeState(t)
 	h := newTestCityHandler(t, fs)

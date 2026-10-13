@@ -195,10 +195,11 @@ func requestIDMatches(got, want string) bool {
 	return got == want
 }
 
-// waitForRequestFailed polls for a request.failed event with the given request_id.
-func waitForRequestFailed(t *testing.T, prov events.Provider, requestID string, timeout time.Duration) *RequestFailedPayload {
+// waitForRequestFailed polls for a request.failed event with the given
+// request_id, for up to testEventTimeout.
+func waitForRequestFailed(t *testing.T, prov events.Provider, requestID string) *RequestFailedPayload {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
+	deadline := time.Now().Add(testEventTimeout)
 	for time.Now().Before(deadline) {
 		failedEvents, _ := prov.List(events.Filter{Type: events.RequestFailed})
 		for _, e := range failedEvents {
@@ -3044,7 +3045,7 @@ func TestHandleSessionCreateAsync_PoolTemplateCanonicalizesAliasCollisions(t *te
 	}
 	accepted2 := decodeAsyncAccepted(t, rec.Body)
 	// The second create should fail asynchronously due to alias collision.
-	failure2 := waitForRequestFailed(t, fs.eventProv, accepted2.RequestID, 5*time.Second)
+	failure2 := waitForRequestFailed(t, fs.eventProv, accepted2.RequestID)
 	if failure2 == nil {
 		t.Fatal("expected second create to fail due to alias collision")
 	}
@@ -3822,7 +3823,7 @@ func TestHandleSessionCreateRejectsDuplicateAlias(t *testing.T) {
 	if err := json.NewDecoder(secondW.Body).Decode(&accepted2); err != nil {
 		t.Fatalf("decode second 202: %v", err)
 	}
-	failure2 := waitForRequestFailed(t, fs.eventProv, accepted2.RequestID, 5*time.Second)
+	failure2 := waitForRequestFailed(t, fs.eventProv, accepted2.RequestID)
 	if failure2 == nil {
 		t.Fatal("expected second create to fail due to duplicate alias")
 	}
