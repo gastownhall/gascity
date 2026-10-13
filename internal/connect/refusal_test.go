@@ -3,6 +3,7 @@ package connect
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -20,6 +21,45 @@ func TestCodesAreUniqueAndPrefixed(t *testing.T) {
 	}
 	if len(seen) != 25 {
 		t.Errorf("Codes() has %d codes, want the 25 §3.8 publishes", len(seen))
+	}
+}
+
+// TestCodesGolden pins the published §3.8 code strings, in Codes() order.
+// A published code is never renamed or reused, so this list only grows.
+func TestCodesGolden(t *testing.T) {
+	want := []string{
+		"connect_bundle_invalid",
+		"connect_bundle_version",
+		"connect_contract_unsupported",
+		"connect_bundle_insecure_file",
+		"connect_no_city",
+		"connect_city_mismatch",
+		"connect_controller_host",
+		"connect_competing_selector",
+		"connect_identity_incomplete",
+		"connect_identity_mismatch",
+		"connect_session_conflict",
+		"connect_generation_stale",
+		"connect_cohosted_session",
+		"connect_workspace_unexpected",
+		"connect_workspace_unproven",
+		"connect_workspace_project_mismatch",
+		"connect_ledger_unreachable",
+		"connect_ledger_unauthorized",
+		"connect_ledger_project_mismatch",
+		"connect_wire_incompatible",
+		"connect_journal_required",
+		"connect_journal_neutralize_failed",
+		"connect_bd_tooling",
+		"connect_self_verify_failed",
+		"connect_not_connected",
+	}
+	got := make([]string, len(Codes()))
+	for i, c := range Codes() {
+		got[i] = string(c)
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("Codes() = %q\nwant %q", got, want)
 	}
 }
 
