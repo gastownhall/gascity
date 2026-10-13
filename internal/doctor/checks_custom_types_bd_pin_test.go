@@ -170,3 +170,34 @@ func TestCustomTypesCheckFixRefusesWithoutTheTable(t *testing.T) {
 		t.Fatalf("Fix wrote types.custom without reading custom_types; calls:\n%s", calls)
 	}
 }
+
+// TestCustomTypesCheckMissingTypeHintNamesTheExactFix: a store an older gc
+// registered lacks a newer required type (startup-health-episode), and no boot
+// path registers it on a store gc does not provision (an external Dolt server
+// or an HTTP binding). doctor is the repair, so its failure must name the exact
+// one-shot command, scoped to this check, and say it only adds types: an
+// operator about to run --fix against a production store needs to know it
+// touches nothing else.
+func TestCustomTypesCheckMissingTypeHintNamesTheExactFix(t *testing.T) {
+	dir := guardedTempDir(t)
+	if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	older := RequiredCustomTypes[:len(RequiredCustomTypes)-1]
+	recorded := filepath.Join(dir, "bd-calls")
+	pinned := writeCustomTypesStateBdStub(t, dir, recorded, strings.Join(older, ","), older)
+
+	c := NewCustomTypesCheck(dir, "city", pinned)
+	r := c.Run(&CheckContext{CityPath: dir})
+	if r.Status != StatusError {
+		t.Fatalf("Run = %v %q, want an error", r.Status, r.Message)
+	}
+	for _, want := range []string{"gc doctor --fix --check custom-types:city", "additive"} {
+		if !strings.Contains(r.FixHint, want) {
+			t.Errorf("FixHint = %q, want it to contain %q", r.FixHint, want)
+		}
+	}
+	if calls := readRecordedBdCalls(t, recorded); strings.Contains(calls, "config set") {
+		t.Fatalf("Run wrote types.custom; calls:\n%s", calls)
+	}
+}

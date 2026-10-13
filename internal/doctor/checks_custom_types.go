@@ -148,7 +148,13 @@ func (c *CustomTypesCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 	r.Status = StatusError
 	r.Message = strings.Join(parts, "; ")
-	r.FixHint = "run gc doctor --fix to register missing types"
+	// Name the exact one-shot repair. No boot path registers types on a store
+	// gc does not provision (an external Dolt server, an HTTP binding), so a
+	// store an older gc registered stays short of a newer required type until
+	// an operator runs this, and an operator about to write a production store
+	// needs to know the write only adds types (Fix merges row ∪ table ∪
+	// required through `bd config set types.custom`).
+	r.FixHint = fmt.Sprintf("run `gc doctor --fix --check %s` (additive: merges the missing types into types.custom with `bd config set`, never removes one)", c.Name())
 	return r
 }
 
