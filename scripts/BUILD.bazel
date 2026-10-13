@@ -86,6 +86,7 @@ go_test(
         "bazel_go_repository_tools_test.go",
         "bazel_hermetic_cc_test.go",
         "bazel_hermetic_tags_test.go",
+        "bazel_integration_packages_budget_test.go",
         "bazel_integration_smoke_test.go",
         "bazel_integration_suite_test.go",
         "bazel_key_parity_test.go",
