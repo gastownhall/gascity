@@ -1065,7 +1065,7 @@ func TestOrderCheckWithStoresResolverFailsWhenLegacyEventCursorReadFails(t *test
 	rigStore := beads.NewMemStore()
 	legacyStore := labelFailListStore{
 		Store:     beads.NewMemStore(),
-		failLabel: "order:watch:rig:frontend",
+		failLabel: "order-run:watch:rig:frontend",
 	}
 	eventLog := events.NewFake()
 	eventLog.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
@@ -3694,7 +3694,7 @@ func TestBdCursorUsesRowsFromPartialTierError(t *testing.T) {
 		Store: beads.NewMemStore(),
 		rows: []beads.Bead{{
 			ID:     "cursor-1",
-			Labels: []string{"order:digest", "seq:42", "order-tracking"}, // a run record (the #7766 review)
+			Labels: []string{"order-run:digest", "order:digest", "seq:42", "order-tracking"}, // a run record (the #7766 review)
 		}},
 		err: fmt.Errorf("wisps tier unavailable"),
 	}

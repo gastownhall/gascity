@@ -221,16 +221,14 @@ func newestRunRecord(history []orderHistoryStoreBead) []orderHistoryStoreBead {
 }
 
 func checkOrderTriggerForAPI(a orders.Order, now time.Time, history []orderHistoryStoreBead, infos []workflowStoreInfo, ep events.Provider, fresh bool) orders.TriggerResult {
-	// Only an order's run records count (orders.IsRunRecord), as in the
-	// dispatcher's cooldown and cursor: a plain bead carrying its labels
-	// moves neither (the #7766 review). history is newest first.
+	// history is the order's newest run record (newestRunRecord), or
+	// nothing: as in the dispatcher's cooldown and cursor, a plain bead
+	// carrying its labels moves neither (the #7766 review).
 	lastRunFn := func(string) (time.Time, error) {
-		for _, row := range history {
-			if orders.IsRunRecord(row.bead) {
-				return row.bead.CreatedAt, nil
-			}
+		if len(history) == 0 {
+			return time.Time{}, nil
 		}
-		return time.Time{}, nil
+		return history[0].bead.CreatedAt, nil
 	}
 	var cursorFn orders.CursorFunc
 	if a.Trigger == "event" {
@@ -239,9 +237,7 @@ func checkOrderTriggerForAPI(a orders.Order, now time.Time, history []orderHisto
 		} else {
 			labelSets := make([][]string, 0, len(history))
 			for _, row := range history {
-				if orders.IsRunRecord(row.bead) {
-					labelSets = append(labelSets, row.bead.Labels)
-				}
+				labelSets = append(labelSets, row.bead.Labels)
 			}
 			cursor := orders.MaxSeqFromLabels(labelSets)
 			cursorFn = func(string) uint64 { return cursor }

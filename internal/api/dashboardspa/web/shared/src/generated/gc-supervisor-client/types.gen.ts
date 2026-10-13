@@ -1868,7 +1868,7 @@ export type MailReplyInputBody = {
      */
     body?: string;
     /**
-     * Sender name.
+     * Sender: the operator (human), a configured agent or a named session. Optional in the schema, but an empty or unconfigured sender is refused (422 at body.from).
      */
     from?: string;
     /**
@@ -1883,7 +1883,7 @@ export type MailSendInputBody = {
      */
     body?: string;
     /**
-     * Sender name.
+     * Sender: the operator (human), a configured agent or a named session. Optional in the schema, but an empty or unconfigured sender is refused (422 at body.from).
      */
     from?: string;
     /**

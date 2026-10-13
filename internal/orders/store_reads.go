@@ -454,7 +454,8 @@ func lastRunRecords(store beads.Store, label string, n int) ([]beads.Bead, error
 
 // NewestRunRecords is list's run records (IsRunRecord), up to n, newest
 // first: list(n), and when a newer bead that is no run record displaced
-// one, the run records among list(runRecordScanBound). list reads an
+// one, the run records among list(max(n, runRecordScanBound)), so the second
+// read never asks for fewer rows than the first. list reads an
 // order's run-labeled beads newest first, limit at most. LastRun, Cursor and
 // the storebinding adapter share it (the #7766 review).
 func NewestRunRecords(list func(limit int) ([]beads.Bead, error), n int) ([]beads.Bead, error) {
@@ -463,7 +464,7 @@ func NewestRunRecords(list func(limit int) ([]beads.Bead, error), n int) ([]bead
 	if len(records) == len(results) {
 		return records, err
 	}
-	results, err = list(runRecordScanBound)
+	results, err = list(max(n, runRecordScanBound))
 	records = slices.DeleteFunc(results, func(b beads.Bead) bool { return !IsRunRecord(b) })
 	if len(records) > n {
 		records = records[:n]

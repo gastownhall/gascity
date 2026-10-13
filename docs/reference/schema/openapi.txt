@@ -4797,7 +4797,7 @@
             "type": "string"
           },
           "from": {
-            "description": "Sender name.",
+            "description": "Sender: the operator (human), a configured agent or a named session. Optional in the schema, but an empty or unconfigured sender is refused (422 at body.from).",
             "type": "string"
           },
           "subject": {
@@ -4815,7 +4815,7 @@
             "type": "string"
           },
           "from": {
-            "description": "Sender name.",
+            "description": "Sender: the operator (human), a configured agent or a named session. Optional in the schema, but an empty or unconfigured sender is refused (422 at body.from).",
             "type": "string"
           },
           "rig": {

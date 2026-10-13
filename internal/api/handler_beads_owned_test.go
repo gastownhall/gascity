@@ -370,8 +370,9 @@ func TestGenericAPINeverMakesAWaitBySessionID(t *testing.T) {
 // run root, a wisp or molecule root carrying its order-run label, takes the
 // generic close (POST /close, DELETE), as the dashboard's Beads page closes
 // it; every other generic write to it stays refused and points at bd or the
-// workflow's teardown. Its tracking bead, and a plain task carrying the run
-// label, take no close.
+// workflow's teardown. Its tracking bead, a plain task carrying the run
+// label, and a root also carrying another owned mark (a queued nudge's, the
+// session label) take no close.
 func TestGenericAPIClosesAnOrderRunRoot(t *testing.T) {
 	for _, c := range []struct{ name, method, path, body string }{
 		{"POST /close", "POST", "/close", `{}`},
@@ -380,7 +381,7 @@ func TestGenericAPIClosesAnOrderRunRoot(t *testing.T) {
 		for _, root := range []struct {
 			typ  string
 			meta map[string]string
-		}{{"molecule", nil}, {"wisp", nil}, {"task", map[string]string{"gc.kind": "wisp"}}} {
+		}{{"molecule", nil}, {"wisp", nil}, {"task", map[string]string{"gc.kind": "wisp"}}, {"task", map[string]string{"gc.kind": "workflow"}}} {
 			state := newFakeState(t)
 			store := state.stores["myrig"]
 			h := newTestCityHandler(t, state)
@@ -396,7 +397,7 @@ func TestGenericAPIClosesAnOrderRunRoot(t *testing.T) {
 			name   string
 			typ    string
 			labels []string
-		}{{"tracking bead", "task", []string{"order-run:digest", "order-tracking"}}, {"plain task", "task", []string{"order-run:digest"}}, {"root that is also a queued nudge", "molecule", []string{"order-run:digest", "gc:nudge"}}} {
+		}{{"tracking bead", "task", []string{"order-run:digest", "order-tracking"}}, {"plain task", "task", []string{"order-run:digest"}}, {"root that is also a queued nudge", "molecule", []string{"order-run:digest", "gc:nudge"}}, {"root carrying the session label", "molecule", []string{"order-run:digest", "gc:session"}}} {
 			state := newFakeState(t)
 			store := state.stores["myrig"]
 			h := newTestCityHandler(t, state)

@@ -2045,7 +2045,10 @@ const bdCursorRecentRunsLimit = 256
 
 func bdCursor(store beads.Store, orderName string) (uint64, error) {
 	beadList, err := store.List(beads.ListQuery{
-		Label:         "order:" + orderName,
+		// Keyed on the owned order-run:<name> label (coordclass.CoordinationOwned):
+		// only order dispatch writes it, so no plain bead can crowd the run
+		// records out of this bounded window (the #7766 review).
+		Label:         orders.RunLabel(orderName),
 		IncludeClosed: true,
 		Limit:         bdCursorRecentRunsLimit,
 		Sort:          beads.SortCreatedDesc,
