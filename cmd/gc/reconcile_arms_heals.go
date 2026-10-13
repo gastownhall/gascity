@@ -190,16 +190,18 @@ func armDeadRuntimeHeal(r *rowFacts) (intent, bool) {
 	return it, ok
 }
 
-// ackedRequest reports a row whose stop request is acked and carries a
-// request, a controller reason or the operator's drain (CONTRACT v5.10k,
-// §12.2 row 68): the dead-runtime heal does not take it, nor the squatter
-// heal under a name it does not own, so its runtime's death or squatter is
-// no restart. A11 signals it at once (D2's ack row) and A4's verb
-// finalizes it by D3's gone or Foreign path, a drain's exit, as legacy
-// finalizes an ack read off a dead pane. A bare ack is row 66's.
+// ackedRequest reports a row whose stop request is acked and that A11
+// signals: one carrying a request, a controller reason or the operator's
+// drain (CONTRACT v5.10k, §12.2 row 68), or a bare ack off the floor
+// (v5.10k-1). The dead-runtime heal does not take it, nor the squatter heal
+// under a name it does not own, so its runtime's death or squatter is no
+// restart. A11 signals it at once (D2's ack row) and A4's verb finalizes it
+// by D3's gone or Foreign path, a drain's exit, as legacy finalizes an ack
+// read off a dead pane. A floor member's bare ack is row 66's.
 func (r *rowFacts) ackedRequest() bool {
 	req, ok := activeStop(r.row)
-	return ok && req.Phase == stopAcked && (req.Reason != "" || req.Operator)
+	floor := r.entry != nil && r.entry.Floor != nil
+	return ok && req.Phase == stopAcked && (req.Reason != "" || req.Operator || !floor)
 }
 
 // armSquatterHeal is A6 item 4's occupied case (CONTRACT v5.10c, §12.2 #23,

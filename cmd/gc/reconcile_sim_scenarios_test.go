@@ -377,25 +377,38 @@ func deadRuntimeHealAcrossTime(t *testing.T, held bool) {
 
 // Kills an acked drain request's dead runtime restarted (CONTRACT v5.10k,
 // §12.2 row 68; mc-7zlhz, J40 C): an operator's or a controller's drain
-// that the agent acked, whose runtime is gone, a dead pane, or a squatter's
-// under a name the row does not own before the stop, is finalized as a
-// drain's exit, the row closed with no work, and nothing is started under
-// its name. A squatter under its bead-scoped name, which D3 reads as the
-// row's own, is the squatter heal's still: the row parks asleep, never
-// stuck stop-pending on a stop that only refuses.
+// that the agent acked on a floor member, the floor wanting it awake, whose
+// runtime is gone, a dead pane, or a squatter's under a name the row does
+// not own before the stop, is finalized as a drain's exit, the row closed
+// with no work, and nothing is started under its name; so is a bare ack
+// off the floor (v5.10k-1; the sim wants an off-floor row awake only for
+// work, so its squatter is the case a heal would take, and the planner's
+// table covers the rest). A squatter under its bead-scoped name, which D3
+// reads as the row's own, is the squatter heal's still: the row parks
+// asleep, never stuck stop-pending on a stop that only refuses. A floor
+// member's bare ack is row 66's: its seat restarts in place.
 func TestSimAckedRequestWithADeadRuntimeIsFinalized(t *testing.T) {
-	for _, operator := range []bool{true, false} {
+	for _, request := range []string{"operator", "controller", "bare", "bare on the floor"} {
 		for _, death := range []string{"gone", "dead pane", "squatter", "squatter, bead-scoped name"} {
-			t.Run(fmt.Sprintf("operator %t, %s", operator, death), func(t *testing.T) {
+			if request == "bare on the floor" && death != "gone" && death != "dead pane" {
+				continue
+			}
+			t.Run(request+", "+death, func(t *testing.T) {
 				name := "s-slot-1" // a name the row does not own
 				if death == "squatter, bead-scoped name" {
 					name = "s-gc-1"
 				}
 				s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-1", "session_name", name))
+				if request != "bare" {
+					s.cfg.Agents[0].MinActiveSessions = intPtr(1) // gc-1 the floor's member
+				}
 				now := s.clk.Now().Format(time.RFC3339)
-				req := []string{session.DrainIntentReasonKey, drainConfigDrift, session.DrainIntentAtKey, now, session.DrainIntentIncarnationKey, "1"}
-				if operator {
+				var req []string
+				switch request {
+				case "operator":
 					req = []string{session.OperatorDrainKey, "1"}
+				case "controller":
+					req = []string{session.DrainIntentReasonKey, drainConfigDrift, session.DrainIntentAtKey, now, session.DrainIntentIncarnationKey, "1"}
 				}
 				s.operator("gc-1", append(req, session.DrainAckIncarnationKey, "1", session.DrainAckAtKey, now)...)
 				s.sp.mu.Lock()
@@ -410,7 +423,7 @@ func TestSimAckedRequestWithADeadRuntimeIsFinalized(t *testing.T) {
 					s.sp.put(name, "gc-other", "1", "tok-squatter")
 				}
 				s.sp.mu.Unlock()
-				for range 4 {
+				for range 8 {
 					s.settle()
 					s.advance(simPatrol)
 				}
@@ -418,12 +431,14 @@ func TestSimAckedRequestWithADeadRuntimeIsFinalized(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				for _, st := range s.sp.starts {
-					if st.Name == name {
-						t.Errorf("started %+v; want nothing started under the acked row's name", st)
-					}
-				}
+				started := slices.ContainsFunc(s.sp.starts, func(st simStart) bool { return st.Name == name })
 				switch {
+				case request == "bare on the floor":
+					if !started || b.Status != "open" {
+						t.Errorf("row %s %v, started %t; want row 66's restart in place", b.Status, b.Metadata, started)
+					}
+				case started:
+					t.Errorf("starts %+v; want nothing started under the acked row's name", s.sp.starts)
 				case death == "squatter, bead-scoped name" && (b.Status != "open" || b.Metadata["state"] != "asleep"):
 					t.Errorf("row %s %v; want the squatter heal's park", b.Status, b.Metadata)
 				case death != "squatter, bead-scoped name" && b.Status != "closed":

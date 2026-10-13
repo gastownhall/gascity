@@ -958,8 +958,8 @@ func TestNoArmActsOnACensusOnlyRow(t *testing.T) {
 // operator's or controller's drain the agent acked, its runtime gone, a
 // classified dead pane, or a squatter's under a name it does not own, is
 // A11's ack signal, which D3 then finalizes; neither heal takes it, so A18
-// does not restart it. A bare ack, off the floor or on it (row 66), is
-// healed and restarted as before.
+// does not restart it; so is a bare ack off the floor (v5.10k-1). A floor
+// member's bare ack (row 66) is healed and restarted in place as before.
 func TestAckedRequestIsNotHealedIntoARestart(t *testing.T) {
 	ack := []string{session.DrainAckIncarnationKey, "3", session.DrainAckAtKey, rowAt(-time.Minute)}
 	deaths := map[string]func(t *testing.T, desired desire, meta ...string) *healCase{
@@ -985,7 +985,7 @@ func TestAckedRequestIsNotHealedIntoARestart(t *testing.T) {
 	}{
 		{"an operator's drain, acked", append(slices.Clone(ack), session.OperatorDrainKey, "3"), false, decideDrainSignal + drainOperator},
 		{"a controller's drain, acked", append(slices.Clone(ack), intentBegunAt(drainConfigDrift, time.Minute)...), false, decideDrainSignal + drainConfigDrift},
-		{"a bare ack", ack, false, ""},
+		{"a bare ack off the floor", ack, false, decideDrainSignal},
 		{"a bare ack on the floor", ack, true, ""},
 	} {
 		for death, newCase := range deaths {
