@@ -344,6 +344,19 @@ func TestResumeFailedResetIsRecordedOnEveryDeathPath(t *testing.T) {
 	})
 }
 
+// Kills a death accounted over a runtime the death section reads (STALE-READ
+// E1): a runtime back under the name after the dead one is removed refuses
+// runtime-present, and the death accrues nothing.
+func TestStartRecycleAccountsTheDeathOnlyOverAGoneName(t *testing.T) {
+	recent := gatherNow.Add(-10 * time.Second).Format(time.RFC3339)
+	k, _, _ := deadKit(t, false, "gc-1", "tok", "", "state", "awake", "last_woke_at", recent, "wake_attempts", "1")
+	k.on(seamAfterCall, func() { k.runtimeAs("gc-1", "tok", nil) })
+	s := k.runKind()
+	if s.Outcome != settledRefused || s.Cause != causeRuntimePresent || k.meta("wake_attempts") != "1" || len(k.starts()) != 0 {
+		t.Fatalf("a runtime back after the kill: settlement %+v attempts %q starts %d; want refused %q, nothing accrued or started", s, k.meta("wake_attempts"), len(k.starts()), causeRuntimePresent)
+	}
+}
+
 // Kills a parked row re-proposed every pass (its recycle peeks it again and
 // settles a no-op, resetting its backoff): A18 holds a row an operator must
 // clear of a terminal provider error.

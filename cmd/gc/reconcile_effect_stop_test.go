@@ -61,6 +61,38 @@ func eventTypes(s settlement) []string {
 	return out
 }
 
+// TestStopFinalizeAndCloseRestOnTheirOwnRead (STALE-READ M1, E1). Kills a
+// finalize or premise close that rests on section 0's relayed C8.8: a
+// runtime back under the name after the confirmed stop, which the finalize
+// section's (or the close section's) own read finds, refuses
+// runtime-present, writing no drained finalize and closing nothing.
+func TestStopFinalizeAndCloseRestOnTheirOwnRead(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		meta    []string
+		entry   func(*selectionEntry)
+		section int // the section after whose Call the runtime comes back
+	}{
+		{"the finalize", signaled(drainOrphaned, "operator_drain", "3"), wanted, 0},
+		{"the premise close", signaled(drainOrphaned, "pool_managed", "true"), undesired(drainOrphaned), 1},
+	} {
+		s, got, leaf := stopRun(t, c.meta, c.entry, func(p *effectPass, leaf *fenceLeaf, _ beads.Store, id string) {
+			p.seam = func(_ context.Context, at txSeam, _ intent, section, _ int) error {
+				if at == seamAfterCall && section == c.section {
+					startRuntime(t, leaf.Fake, "s-gc-1", map[string]string{"GC_SESSION_ID": id, "GC_INSTANCE_TOKEN": "tok-3"})
+				}
+				return nil
+			}
+		})
+		if !leaf.IsRunning("s-gc-1") {
+			t.Fatalf("%s: the runtime did not come back", c.name)
+		}
+		if s.Outcome != settledRefused || s.Cause != causeRuntimePresent || got.Status == "closed" || got.Metadata["state"] == string(session.StateDrained) {
+			t.Errorf("%s: settled %+v, row %s state %q; want refused %q, nothing finalized or closed", c.name, s, got.Status, got.Metadata["state"], causeRuntimePresent)
+		}
+	}
+}
+
 // TestStopVerbStopsConfirmsAndFinalizes (D3, D4; SESS-035, DRAIN-054).
 // Kills a stop that never finalizes, a finalize that keeps the request or
 // writes asleep where legacy writes drained, and a silent finalize: a

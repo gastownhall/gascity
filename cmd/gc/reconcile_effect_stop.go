@@ -133,7 +133,7 @@ func stopDecide(v txView) txStep {
 	}
 	// A bead-scoped pool name embeds this row's ID, so it is never Foreign
 	// (C8.2(a), ownsName); L2 still passes only on Current (I3).
-	if !ownsName(v.Row, name) && v.RT.Same && v.RT.Identity.Known && compareIdentity(v.Row, v.RT.Identity) == identityForeign {
+	if foreignUnowned(v) {
 		plan.foreign = true
 		return txStep{Pass: plan}
 	}
@@ -304,10 +304,14 @@ func idleFinish(f finalizeFacts) finalizeChoice {
 
 // stopCloseStep is the premise close of a confirmed stop whose finalize
 // closes; one that no longer closes (work assigned since) refuses, and the
-// next pass finalizes it again.
+// next pass finalizes it again, as does one whose own runtime read finds a
+// runtime under the name again (goneNow).
 func stopCloseStep(v txView, work finalizeWork, probeErr error) txStep {
 	out, _ := callResult[stopped](v)
-	if !stopChoice(v, work, probeErr).CloseSeat {
+	switch {
+	case !goneNow(v):
+		return txStep{Refuse: causeRuntimePresent}
+	case !stopChoice(v, work, probeErr).CloseSeat:
 		return txStep{Refuse: causeRedecided}
 	}
 	terminal := session.ClosePatch(v.Now, "drained")
@@ -320,7 +324,9 @@ func passStopped(_ context.Context, _ txCaps, out stopped) (stopped, error) { re
 
 // stopFinalizeStep, on a confirmed stop, writes the finalize's patch and
 // clears the stop request in one CAS, or, for a finalize that closes, hands
-// the stop's outcome to the premise close.
+// the stop's outcome to the premise close. The Call's C8.8 confirms its own
+// stop; the finalize rests on this section's own read too (goneNow), so a
+// runtime under the name since is never finalized drained.
 func stopFinalizeStep(v txView, work finalizeWork, probeErr error) txStep {
 	out, err := callResult[stopped](v)
 	switch {
@@ -328,6 +334,8 @@ func stopFinalizeStep(v txView, work finalizeWork, probeErr error) txStep {
 		return txStep{Fail: causeCallError, Err: err}
 	case !out.Confirmed:
 		return txStep{Refuse: out.Reason}
+	case !goneNow(v):
+		return txStep{Refuse: causeRuntimePresent}
 	}
 	choice := stopChoice(v, work, probeErr)
 	if choice.CloseSeat {
@@ -353,6 +361,30 @@ func stopFinalizeStep(v txView, work finalizeWork, probeErr error) txStep {
 		class, kept = to.Changed(), work.anomaly // the tx mints the cell's move into this write
 	}
 	return txStep{Write: patch, Class: class, Facts: stopFacts(v, out, kept), Done: true}
+}
+
+// goneNow is a gone-proof from the current attempt's own runtime read
+// (STALE-READ M1, E1), never one a Call relays from an earlier section:
+// nothing under the name, a corpse, or a Foreign runtime under a name the
+// row does not own (foreignUnowned), which the stop leaves alone.
+func goneNow(v txView) bool {
+	if v.RT == nil {
+		return false
+	}
+	switch v.RT.Class {
+	case rtAbsent, rtCorpse:
+		return true
+	case rtAlive, rtZombie:
+		return foreignUnowned(v)
+	}
+	return false
+}
+
+// foreignUnowned reports the read's runtime as another row's, read on one
+// object, under a name this row does not own: a bead-scoped pool name
+// embeds this row's ID, so it is never Foreign (C8.2(a), ownsName).
+func foreignUnowned(v txView) bool {
+	return !ownsName(v.Row, strings.TrimSpace(v.Row.SessionName)) && v.RT.Same && v.RT.Identity.Known && compareIdentity(v.Row, v.RT.Identity) == identityForeign
 }
 
 // stopFacts are legacy's events for a finalized stop (SESS-033/034,
