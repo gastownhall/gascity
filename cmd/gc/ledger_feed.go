@@ -469,13 +469,17 @@ func (f *ledgerFeed) lateBaseline(ctx context.Context) bool {
 }
 
 // onError classifies a failed step for the tailer (its OnError contract):
-// a backend that cannot journal and a closed store stop the tail; every
-// other failure is retried. An inactive journal owes a re-scan at the first
-// good read after it, since unjournaled writes leave no seq gap.
+// only a backend that cannot journal stops the tail; every other failure is
+// retried. A closed store is retried too: the feed ends with its cache
+// (closeBeadStoreHandle stops the cache before closing the store), and a
+// proxied store's read can surface a replaced leaf's ErrStoreClosed while
+// the store itself stays open and re-pins. An inactive journal owes a
+// re-scan at the first good read after it, since unjournaled writes leave no
+// seq gap.
 func (f *ledgerFeed) onError(err error) error {
 	f.miss.noteUnhealthy(f.now())
 	switch {
-	case errors.Is(err, beads.ErrEventsJournalUnsupported), errors.Is(err, beads.ErrStoreClosed):
+	case errors.Is(err, beads.ErrEventsJournalUnsupported):
 		return err
 	case errors.Is(err, beads.ErrEventsJournalInactive):
 		f.src.needResync.Store(true)

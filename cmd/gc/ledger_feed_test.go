@@ -681,7 +681,10 @@ func TestLedgerFeedOnError(t *testing.T) {
 		state string
 	}{
 		{beads.ErrEventsJournalUnsupported, true, ""},
-		{beads.ErrStoreClosed, true, ""},
+		// A proxied store's journal read can surface its replaced leaf's
+		// ErrStoreClosed while the store itself is open; the feed ends with
+		// its cache (StopReconciler), never on this error.
+		{beads.ErrStoreClosed, false, ledgerFeedStateRetrying},
 		{beads.ErrEventsJournalInactive, false, ledgerFeedStateInactive},
 		{beads.ErrEventsJournalUnavailable, false, ledgerFeedStateUnavailable},
 		{fmt.Errorf("applying: %w", errLedgerFeedGated), false, ledgerFeedStateGated},
