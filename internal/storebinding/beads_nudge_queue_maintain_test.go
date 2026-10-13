@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -146,5 +147,85 @@ func TestBeadsNudgeQueueSweepIsBoundedOldestFirst(t *testing.T) {
 	}
 	if got := queueRecordIDs(t, backing); len(got) != 0 {
 		t.Fatalf("records after the second pass = %v, want none", got)
+	}
+}
+
+// TestBeadsNudgeQueueStaleLeaseReclaimHasExactlyOneWinner races the
+// revoke-before-claim path: every item carries a lease that has run out,
+// several claimants revoke and reclaim at once, and Maintain revokes the same
+// stale leases alongside them. Each round, every item must go to exactly one
+// claimant.
+func TestBeadsNudgeQueueStaleLeaseReclaimHasExactlyOneWinner(t *testing.T) {
+	store := openNudgeQueueStore(t, t.TempDir())
+	queue := newNudgeQueue(t, store)
+	now := time.Now().UTC()
+
+	const items = 24
+	for i := 0; i < items; i++ {
+		if err := queue.Enqueue(testNudgeItem(fmt.Sprintf("n-%02d", i), "", now)); err != nil {
+			t.Fatalf("Enqueue: %v", err)
+		}
+	}
+	if claimed := claimAll(t, queue, now); len(claimed) != items {
+		t.Fatalf("initial ClaimDue = %d items, want %d", len(claimed), items)
+	}
+
+	const (
+		rounds      = 5
+		claimants   = 8
+		maintainers = 2
+	)
+	at := now
+	for round := 0; round < rounds; round++ {
+		// Every lease from the previous round has run out by now.
+		at = at.Add(nudgeQueueClaimLease + time.Minute)
+		var (
+			mu      sync.Mutex
+			winners = map[string][]int{}
+			start   = make(chan struct{})
+			wg      sync.WaitGroup
+		)
+		errs := make([]error, claimants+maintainers)
+		for claimant := 0; claimant < claimants; claimant++ {
+			wg.Add(1)
+			go func(claimant int) {
+				defer wg.Done()
+				<-start
+				claimed, err := queue.ClaimDue(ClaimTarget{QueueKeys: []string{testNudgeAgent}}, at)
+				if err != nil {
+					errs[claimant] = err
+					return
+				}
+				mu.Lock()
+				defer mu.Unlock()
+				for _, item := range claimed {
+					winners[item.ID] = append(winners[item.ID], claimant)
+				}
+			}(claimant)
+		}
+		for maintainer := 0; maintainer < maintainers; maintainer++ {
+			wg.Add(1)
+			go func(slot int) {
+				defer wg.Done()
+				<-start
+				_, errs[slot] = queue.Maintain(context.Background(), at)
+			}(claimants + maintainer)
+		}
+		close(start)
+		wg.Wait()
+
+		for slot, err := range errs {
+			if err != nil {
+				t.Fatalf("round %d: participant %d: %v", round, slot, err)
+			}
+		}
+		if len(winners) != items {
+			t.Fatalf("round %d: reclaimed %d distinct nudges, want all %d", round, len(winners), items)
+		}
+		for id, who := range winners {
+			if len(who) != 1 {
+				t.Fatalf("round %d: nudge %s was reclaimed by %d claimants %v; revoke-before-claim is not single-winner", round, id, len(who), who)
+			}
+		}
 	}
 }
