@@ -980,15 +980,19 @@ func refuseOwned(id, verb, where string, b beads.Bead) error {
 		&huma.ErrorDetail{Location: where, Message: "a controller-owned " + kind, Value: id})
 }
 
-// ownerOf is a controller-owned row's kind and who writes it.
+// ownerOf is a controller-owned row's kind and who writes it. A typed work
+// bead carrying the session label is no session any verb owns, so bd is its
+// only writer (the #7742 review).
 func ownerOf(b beads.Bead) (kind, owner string) {
-	switch strings.ToLower(strings.TrimSpace(b.Type)) {
+	switch t := strings.ToLower(strings.TrimSpace(b.Type)); t {
 	case session.StartupHealthEpisodeType:
 		return "startup-health episode", "the controller's startup health"
 	case "convergence":
 		return "convergence root", "the convergence handler (gc converge, the convergence routes)"
+	case session.BeadType, "":
+		return "session row", "the session verbs (POST /v0/city/{cityName}/sessions and /session/{id}/..., /pin, /unpin, gc session)"
 	}
-	return "session row", "the session verbs (POST /v0/city/{cityName}/sessions and /session/{id}/..., gc session)"
+	return "bead carrying the " + session.LabelSession + " label", "bd (bd update, bd close)"
 }
 
 // refuseGenericWrite refuses, before anything is written (an assignee's

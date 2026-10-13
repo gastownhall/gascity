@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
+- **The generic bead API no longer writes session rows, startup-health
+  episodes or convergence roots.** `POST /beads`, `PATCH /bead/{id}`,
+  `POST /bead/{id}/update`, `/close`, `/reopen`, `/assign`, `DELETE
+  /bead/{id}`, `POST /sling` naming one, and convoy create, add and remove
+  tracking one return 422, writing nothing. Workflow delete, graph convoy
+  delete, run cancel, sling `force` and wisp autoclose leave one alone
+  whatever links it to the workflow. Type and label match in any case and
+  spacing. A row is a session row by type `session` or by the `gc:session`
+  label. Use the owner's routes instead:
+  - client metadata: the new `metadata` map (`real_world_app_*` keys only)
+    on `POST /v0/city/{cityName}/sessions` and `PATCH /session/{id}`;
+  - pinning: the new `POST /session/{id}/pin` and `/unpin` (`gc session
+    pin|unpin`);
+  - title and alias: `PATCH /session/{id}`; lifecycle: the session verbs.
+
+  **Deliberately removed, with no replacement route:** setting a session
+  row's labels, description, priority, assignee or parent, or any other
+  metadata key, over HTTP. A typed work bead carrying the `gc:session`
+  label is written only by `bd`. `bd update` stays the operator escape
+  hatch for all of these. The coordination classes (`message`,
+  `gc:wait`, `gc:nudge`, `order-tracking`, `gc:wisp`, `gc:extmsg-*`)
+  are unchanged.
+
 - **New proxied scopes retire their proxy and Dolt child after 30 minutes
   idle.** Before this release every scope gc created was pinned to never, so a
   pair started by a stray read after `gc stop`, by `gc init --no-start`, or by

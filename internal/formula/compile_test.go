@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/session"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -2701,10 +2703,27 @@ func TestValidateRejectsSessionSteps(t *testing.T) {
 	}
 }
 
+// TestValidateRefusesWhatControllerOwnedNames pins formula.Validate's
+// literal check against coordclass.ControllerOwned (architecture B, the
+// #7742 review): a step is refused exactly when the bead it compiles to
+// would be controller-owned, for every owned type and the session label in
+// any case and spacing, and for none of the work or coordination types.
+func TestValidateRefusesWhatControllerOwnedNames(t *testing.T) {
+	for _, typ := range []string{"session", " Session ", "startup-health-episode", "STARTUP-HEALTH-EPISODE", "convergence", " Convergence ", "task", "bug", "message", "convoy", "molecule", ""} {
+		for _, labels := range [][]string{nil, {"gc:session"}, {"note", " GC:Session "}, {"gc:wait"}, {"gc:session-x"}} {
+			f := &Formula{Formula: "f", Steps: []*Step{{ID: "s", Title: "S", Type: typ, Labels: labels}}}
+			refused := f.Validate() != nil
+			if owned := coordclass.ControllerOwned(beads.Bead{Type: typ, Labels: labels}); refused != owned {
+				t.Errorf("type %q labels %q: Validate refused %t, ControllerOwned %t", typ, labels, refused, owned)
+			}
+		}
+	}
+}
+
 // TestSessionStepMarksAreTheSessionPackages pins sessionStepType,
 // sessionStepLabel and startupHealthStepType to the session package's.
 func TestSessionStepMarksAreTheSessionPackages(t *testing.T) {
-	if sessionStepType != session.BeadType || sessionStepLabel != session.LabelSession || startupHealthStepType != session.StartupHealthEpisodeType {
+	if sessionStepType != session.BeadType || sessionStepLabel != session.LabelSession || startupHealthStepType != session.StartupHealthEpisodeType || convergenceStepType != "convergence" {
 		t.Fatalf("marks %q %q %q, want session's %q %q %q", sessionStepType, sessionStepLabel, startupHealthStepType, session.BeadType, session.LabelSession, session.StartupHealthEpisodeType)
 	}
 }

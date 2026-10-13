@@ -1954,6 +1954,7 @@ go_test(
         "v2_session_migration_test.go",
         "wake_reprojection_repro_test.go",
         "warm_bind_nudge_test.go",
+        "wisp_autoclose_owned_test.go",
         "wisp_autoclose_test.go",
         "wisp_gc_batch_test.go",
         "wisp_gc_fenced_delete_test.go",

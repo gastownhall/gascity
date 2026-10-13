@@ -122,6 +122,8 @@ func TestGenericAPINeverWritesAControllerOwnedRow(t *testing.T) {
 				switch {
 				case rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "the generic bead API never"):
 					t.Fatalf("status %d (%s), want 422 naming the owner", rec.Code, rec.Body.String())
+				case row.typ == "task" && !strings.Contains(rec.Body.String(), "which only bd (bd update, bd close) writes"):
+					t.Fatalf("body %s: a typed work bead carrying the session label names bd as its only writer", rec.Body.String())
 				case strings.Join(problemLocations(t, rec), ",") != r.where:
 					t.Fatalf("errors %v, want %s", problemLocations(t, rec), r.where)
 				case !reflect.DeepEqual(got, before) || len(after) != len(all) || stillTracked != tracked:
