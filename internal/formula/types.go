@@ -1102,36 +1102,86 @@ func validateEngineMintedKindMetadata(steps []*Step, errs *[]string, prefix stri
 	}
 }
 
-// sessionStepType and sessionStepLabel are session.BeadType and
-// session.LabelSession (a test pins them): the marks of a session row,
-// which only the session verbs mint.
+// sessionStepType, sessionStepLabel and startupHealthStepType are
+// session.BeadType, session.LabelSession and session.StartupHealthEpisodeType
+// (a test pins them): the marks of a session row, which only the session
+// verbs mint, and the type of a startup-health episode, which only the
+// controller records.
 const (
-	sessionStepType  = "session"
-	sessionStepLabel = "gc:session"
+	sessionStepType       = "session"
+	sessionStepLabel      = "gc:session"
+	startupHealthStepType = "startup-health-episode"
 )
 
-// validateNoSessionSteps refuses a step typed session or tagged gc:session
-// (mc-okw9n): compile copies a step's type, labels and metadata straight
-// onto its bead, so a formula would mint a session row with hand-written
-// hold keys past the session verbs.
+// sessionVerbs names the session verbs that create a session row.
+const sessionVerbs = "gc session new, POST /v0/city/{cityName}/sessions"
+
+// controllerOnlyType is why a step of type typ may not be compiled, or "":
+// compile copies a step's type onto its bead, so a formula would mint a
+// session row (mc-okw9n) or a startup-health episode, which holds its
+// session down (mc-lp7zb).
+func controllerOnlyType(typ string) string {
+	switch t := strings.TrimSpace(typ); {
+	case strings.EqualFold(t, sessionStepType):
+		return "makes a session row, which only the session verbs create (" + sessionVerbs + ")"
+	case strings.EqualFold(t, startupHealthStepType):
+		return "makes a startup-health episode, which only the controller records"
+	}
+	return ""
+}
+
+// validateNoSessionSteps refuses a step typed session or
+// startup-health-episode, or tagged gc:session (mc-okw9n, mc-lp7zb):
+// compile copies a step's type, labels and metadata straight onto its bead,
+// so a formula would mint a session row with hand-written hold keys past
+// the session verbs, or an episode quarantining a session.
 func validateNoSessionSteps(steps []*Step, errs *[]string, prefix string) {
 	for i, step := range steps {
 		if step == nil {
 			continue
 		}
 		stepPrefix := fmt.Sprintf("%s[%d] (%s)", prefix, i, step.ID)
-		if strings.EqualFold(strings.TrimSpace(step.Type), sessionStepType) {
-			*errs = append(*errs, fmt.Sprintf("%s: type %q makes a session row, which only the session verbs create (gc session new, POST /sessions)", stepPrefix, step.Type))
+		if why := controllerOnlyType(step.Type); why != "" {
+			*errs = append(*errs, fmt.Sprintf("%s: type %q %s", stepPrefix, step.Type, why))
 		}
 		for _, l := range step.Labels {
 			if strings.TrimSpace(l) == sessionStepLabel {
-				*errs = append(*errs, fmt.Sprintf("%s: tag %q marks a session row, which only the session verbs create (gc session new, POST /sessions)", stepPrefix, l))
+				*errs = append(*errs, fmt.Sprintf("%s: tag %q marks a session row, which only the session verbs create (%s)", stepPrefix, l, sessionVerbs))
 			}
 		}
 		if step.Loop != nil {
 			validateNoSessionSteps(step.Loop.Body, errs, stepPrefix+".loop.body")
 		}
 		validateNoSessionSteps(step.Children, errs, stepPrefix+".children")
+	}
+}
+
+// validateNoSessionAdvice is validateNoSessionSteps over an aspect's advice
+// steps, which compile inserts with their own type.
+func validateNoSessionAdvice(rules []*AdviceRule, errs *[]string) {
+	for i, rule := range rules {
+		if rule == nil {
+			continue
+		}
+		prefix := fmt.Sprintf("advice[%d] (%s)", i, rule.Target)
+		check := func(where string, step *AdviceStep) {
+			if step == nil {
+				return
+			}
+			if why := controllerOnlyType(step.Type); why != "" {
+				*errs = append(*errs, fmt.Sprintf("%s.%s (%s): type %q %s", prefix, where, step.ID, step.Type, why))
+			}
+		}
+		check("before", rule.Before)
+		check("after", rule.After)
+		if rule.Around != nil {
+			for j, step := range rule.Around.Before {
+				check(fmt.Sprintf("around.before[%d]", j), step)
+			}
+			for j, step := range rule.Around.After {
+				check(fmt.Sprintf("around.after[%d]", j), step)
+			}
+		}
 	}
 }
 
@@ -1155,6 +1205,7 @@ func (f *Formula) Validate() error {
 	validateEngineMintedKindMetadata(f.Template, &errs, "template")
 	validateNoSessionSteps(f.Steps, &errs, "steps")
 	validateNoSessionSteps(f.Template, &errs, "template")
+	validateNoSessionAdvice(f.Advice, &errs)
 
 	if f.Type != "" && !f.Type.IsValid() {
 		errs = append(errs, fmt.Sprintf("type: invalid value %q (must be workflow, expansion, or aspect)", f.Type))

@@ -612,3 +612,59 @@ func TestBeadAPINeverSetsASessionRowsStatus(t *testing.T) {
 		}
 	}
 }
+
+// TestBeadAPINeverMakesAStartupHealthEpisode (mc-lp7zb): the reconciler,
+// /wake and gc doctor read a session's startup-health quarantine from its
+// episode bead, which only the controller records. A generic create of one,
+// or an update that retypes a row into or out of one, is refused with 422 at
+// body.type and writes nothing; a task carrying the episode's keys is
+// created, and holds no session down.
+func TestBeadAPINeverMakesAStartupHealthEpisode(t *testing.T) {
+	const name = "myrig--worker"
+	forged := `"metadata":{"` + session.StartupHealthSessionNameMetadataKey + `":"` + name + `","startup_health_quarantined_until":"9999-01-01T00:00:00Z"}`
+	for _, c := range []struct {
+		name, method, path, body string
+		episode                  bool // the row updated is an episode
+		want                     int
+	}{
+		{"a created episode", "POST", "/beads", `{"title":"e","type":"` + session.StartupHealthEpisodeType + `",` + forged + `}`, false, http.StatusUnprocessableEntity},
+		{"a task retyped an episode", "PATCH", "", `{"type":"` + session.StartupHealthEpisodeType + `"}`, false, http.StatusUnprocessableEntity},
+		{"an episode retyped a task", "PATCH", "", `{"type":"task"}`, true, http.StatusUnprocessableEntity},
+		{"a task carrying the episode's keys", "POST", "/beads", `{"title":"w","type":"task",` + forged + `}`, false, http.StatusCreated},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			state := newFakeState(t)
+			store := state.stores["myrig"]
+			h := newTestCityHandler(t, state)
+			typ := "task"
+			if c.episode {
+				typ = session.StartupHealthEpisodeType
+			}
+			row, err := store.Create(beads.Bead{Title: "r", Type: typ})
+			if err != nil {
+				t.Fatal(err)
+			}
+			url := cityURL(state, "/bead/") + row.ID
+			if c.path != "" {
+				url = cityURL(state, c.path)
+			}
+			before, _ := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+			rec := beadRequest(t, h, c.method, url, c.body)
+			after, _ := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+			got, _ := store.Get(row.ID)
+			if rec.Code != c.want {
+				t.Fatalf("status %d (%s), want %d", rec.Code, rec.Body.String(), c.want)
+			}
+			if c.want == http.StatusUnprocessableEntity {
+				if loc := strings.Join(problemLocations(t, rec), ","); loc != "body.type" || len(after) != len(before) || got.Type != typ {
+					t.Fatalf("errors %v, type %q, beads %d -> %d: want body.type and nothing written", loc, got.Type, len(before), len(after))
+				}
+				return
+			}
+			ep, err := session.NewStore(beads.SessionStore{Store: store}).LoadStartupHealthEpisode(name)
+			if err != nil || !ep.QuarantinedUntil.IsZero() {
+				t.Fatalf("episode %+v (%v): a task's keys hold no session down", ep, err)
+			}
+		})
+	}
+}

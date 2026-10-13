@@ -1403,14 +1403,18 @@ func preservesGraphActionTypes(recipe *formula.Recipe) bool {
 
 // refuseSessionSteps refuses a recipe a step of which would make a session
 // row (type session, or the gc:session label, a substituted variable's
-// included), before anything is written: only the session verbs mint a
-// session row (mc-okw9n). The compile refuses the literal marks
-// (formula.Validate).
+// included) or a startup-health episode, before anything is written: only
+// the session verbs mint a session row (mc-okw9n), and only the controller
+// records an episode, which holds its session down (mc-lp7zb). The compile
+// refuses the literal marks (formula.Validate).
 func refuseSessionSteps(steps []formula.RecipeStep, vars map[string]string) error {
 	for _, step := range steps {
 		b := stepToBead(step, vars, nil)
 		if strings.EqualFold(strings.TrimSpace(b.Type), "session") || slices.ContainsFunc(b.Labels, func(l string) bool { return strings.TrimSpace(l) == "gc:session" }) {
 			return fmt.Errorf("formula step %q would make a session row (type session or the gc:session label), which only the session verbs create", step.ID)
+		}
+		if strings.EqualFold(strings.TrimSpace(b.Type), "startup-health-episode") {
+			return fmt.Errorf("formula step %q would make a startup-health episode, which only the controller records", step.ID)
 		}
 	}
 	return nil

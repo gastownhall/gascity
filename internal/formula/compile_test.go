@@ -2667,6 +2667,9 @@ func TestApplyDrainControlMetadata(t *testing.T) {
 func TestValidateRejectsSessionSteps(t *testing.T) {
 	session := func(s *Step) *Step { s.Type = " Session "; return s }
 	tagged := func(s *Step) *Step { s.Labels = []string{"note", "gc:session"}; return s }
+	aspect := func(r *AdviceRule) *Formula {
+		return &Formula{Formula: "f", Type: TypeAspect, Advice: []*AdviceRule{r}}
+	}
 	for _, c := range []struct {
 		name    string
 		formula *Formula
@@ -2677,6 +2680,12 @@ func TestValidateRejectsSessionSteps(t *testing.T) {
 		{"in a child", &Formula{Formula: "f", Steps: []*Step{{ID: "p", Title: "P", Children: []*Step{session(&Step{ID: "c", Title: "C"})}}}}, `steps[0] (p).children[0] (c): type`},
 		{"in a loop body", &Formula{Formula: "f", Steps: []*Step{{ID: "l", Title: "L", Loop: &LoopSpec{Count: 2, Body: []*Step{tagged(&Step{ID: "b", Title: "B"})}}}}}, `steps[0] (l).loop.body[0] (b): tag`},
 		{"in a template", &Formula{Formula: "f", Type: TypeExpansion, Template: []*Step{session(&Step{ID: "t", Title: "T"})}}, `template[0] (t): type`},
+		{"the session verbs' route", &Formula{Formula: "f", Steps: []*Step{session(&Step{ID: "s", Title: "S"})}}, `(gc session new, POST /v0/city/{cityName}/sessions)`},
+		{"a startup-health episode step (mc-lp7zb)", &Formula{Formula: "f", Steps: []*Step{{ID: "e", Title: "E", Type: " Startup-Health-Episode "}}}, `steps[0] (e): type " Startup-Health-Episode " makes a startup-health episode`},
+		{"an advice step before", aspect(&AdviceRule{Target: "*", Before: &AdviceStep{ID: "b", Type: "session"}}), `advice[0] (*).before (b): type "session" makes a session row`},
+		{"an advice step after", aspect(&AdviceRule{Target: "*", After: &AdviceStep{ID: "a", Type: "startup-health-episode"}}), `advice[0] (*).after (a): type "startup-health-episode" makes a startup-health episode`},
+		{"an advice step around, before", aspect(&AdviceRule{Target: "*", Around: &AroundAdvice{Before: []*AdviceStep{{ID: "ok"}, {ID: "rb", Type: "session"}}}}), `advice[0] (*).around.before[1] (rb): type`},
+		{"an advice step around, after", aspect(&AdviceRule{Target: "*", Around: &AroundAdvice{After: []*AdviceStep{{ID: "ra", Type: "session"}}}}), `advice[0] (*).around.after[0] (ra): type`},
 	} {
 		err := c.formula.Validate()
 		if err == nil || !strings.Contains(err.Error(), c.want) {
@@ -2687,12 +2696,15 @@ func TestValidateRejectsSessionSteps(t *testing.T) {
 	if err := ok.Validate(); err != nil {
 		t.Fatalf("an ordinary step: Validate = %v", err)
 	}
+	if err := aspect(&AdviceRule{Target: "*", Before: &AdviceStep{ID: "b", Type: "task"}, Around: &AroundAdvice{After: []*AdviceStep{{ID: "a"}}}}).Validate(); err != nil {
+		t.Fatalf("ordinary advice: Validate = %v", err)
+	}
 }
 
-// TestSessionStepMarksAreTheSessionPackages pins sessionStepType and
-// sessionStepLabel to the session package's marks.
+// TestSessionStepMarksAreTheSessionPackages pins sessionStepType,
+// sessionStepLabel and startupHealthStepType to the session package's.
 func TestSessionStepMarksAreTheSessionPackages(t *testing.T) {
-	if sessionStepType != session.BeadType || sessionStepLabel != session.LabelSession {
-		t.Fatalf("marks %q %q, want session's %q %q", sessionStepType, sessionStepLabel, session.BeadType, session.LabelSession)
+	if sessionStepType != session.BeadType || sessionStepLabel != session.LabelSession || startupHealthStepType != session.StartupHealthEpisodeType {
+		t.Fatalf("marks %q %q %q, want session's %q %q %q", sessionStepType, sessionStepLabel, startupHealthStepType, session.BeadType, session.LabelSession, session.StartupHealthEpisodeType)
 	}
 }

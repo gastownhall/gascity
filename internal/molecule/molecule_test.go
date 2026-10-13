@@ -3824,23 +3824,33 @@ func TestInstantiate_DeferredStepsStayGate(t *testing.T) {
 // literal marks.
 func TestInstantiateRefusesASessionStep(t *testing.T) {
 	for _, graph := range []bool{false, true} {
-		for name, step := range map[string]formula.RecipeStep{
-			"type session":                   {ID: "f.s", Title: "S", Type: "session"},
-			"a substituted gc:session label": {ID: "f.s", Title: "S", Type: "task", Labels: []string{"{{lbl}}"}},
+		gcSession := "gc:session"
+		for _, c := range []struct {
+			name string
+			step formula.RecipeStep
+			vars map[string]string          // runtime vars
+			defs map[string]*formula.VarDef // the formula's, with defaults
+			want string
+		}{
+			{"type session", formula.RecipeStep{ID: "f.s", Title: "S", Type: "session"}, nil, nil, "session row"},
+			{"a substituted gc:session label", formula.RecipeStep{ID: "f.s", Title: "S", Type: "task", Labels: []string{"{{lbl}}"}}, map[string]string{"lbl": "gc:session"}, nil, "session row"},
+			{"a gc:session label by a var's default (M05)", formula.RecipeStep{ID: "f.s", Title: "S", Type: "task", Labels: []string{"{{lbl}}"}}, nil, map[string]*formula.VarDef{"lbl": {Default: &gcSession}}, "session row"},
+			{"type startup-health-episode (mc-lp7zb)", formula.RecipeStep{ID: "f.s", Title: "S", Type: "startup-health-episode"}, nil, nil, "startup-health episode"},
 		} {
 			prev := IsGraphApplyEnabled()
 			SetGraphApplyEnabled(graph)
 			store := &graphApplySpyStore{MemStore: beads.NewMemStore()}
 			recipe := &formula.Recipe{
 				Name:  "f",
-				Steps: []formula.RecipeStep{{ID: "f", Title: "F", Type: "task", IsRoot: true}, step},
+				Steps: []formula.RecipeStep{{ID: "f", Title: "F", Type: "task", IsRoot: true}, c.step},
 				Deps:  []formula.RecipeDep{{StepID: "f.s", DependsOnID: "f", Type: "parent-child"}},
+				Vars:  c.defs,
 			}
-			_, err := Instantiate(context.Background(), store, recipe, Options{Vars: map[string]string{"lbl": "gc:session"}})
+			_, err := Instantiate(context.Background(), store, recipe, Options{Vars: c.vars})
 			SetGraphApplyEnabled(prev)
 			all, _ := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
-			if err == nil || !strings.Contains(err.Error(), "session row") || len(all) != 0 {
-				t.Fatalf("graph %v, %s: Instantiate = %v, beads %d; want refused with nothing created", graph, name, err, len(all))
+			if err == nil || !strings.Contains(err.Error(), c.want) || len(all) != 0 {
+				t.Fatalf("graph %v, %s: Instantiate = %v, beads %d; want refused (%s) with nothing created", graph, c.name, err, len(all), c.want)
 			}
 		}
 	}

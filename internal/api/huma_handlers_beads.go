@@ -995,6 +995,9 @@ func refuseGenericSessionLifecycle(id, verb, where string, current beads.Bead) e
 //     split "wait_hold=true" into a disposition key; and a label that fails
 //     beadmeta.ValidLabel, which bd reads as a CSV record ("x,gc:session" or
 //     "gc:session\n" would add the session label);
+//   - a change of whether the row is a startup-health episode (its type):
+//     only the controller records one, and the reconciler, /wake and gc
+//     doctor read a session's quarantine from it (mc-lp7zb);
 //   - a change of whether the row is a session row
 //     (session.IsSessionBeadOrRepairable), or of either session marker (the
 //     session type, the gc:session label): the session verbs own session
@@ -1026,6 +1029,11 @@ func refuseGenericSessionWrite(id string, before *beads.Bead, after beads.Bead, 
 	if len(invalid) > 0 {
 		slices.SortFunc(invalid, func(a, b *huma.ErrorDetail) int { return strings.Compare(a.Location, b.Location) })
 		return apierr.ValidationFailed.With("bead "+id+": invalid metadata key or label; nothing was written", invalid...)
+	}
+	if wasEpisode := before != nil && before.Type == session.StartupHealthEpisodeType; wasEpisode != (after.Type == session.StartupHealthEpisodeType) {
+		return apierr.ValidationFailed.With(fmt.Sprintf(
+			"bead %s: the generic bead API never makes a row a startup-health episode or stops it being one (type %s); only the controller records a session's startup health; nothing was written",
+			id, session.StartupHealthEpisodeType), &huma.ErrorDetail{Location: "body.type", Message: "changes whether the row is a startup-health episode", Value: after.Type})
 	}
 	wasSession := before != nil && session.IsSessionBeadOrRepairable(*before)
 	if isSession := session.IsSessionBeadOrRepairable(after); isSession != wasSession || sessionMarkChanged(before, after) {
