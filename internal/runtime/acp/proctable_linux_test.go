@@ -68,34 +68,38 @@ func scanSnapshot(t *testing.T, fn func(), pids ...int) {
 // orphaningACPCommand wraps the fake ACP agent so that, before it execs, it
 // starts a tool child in its own session (setsid) — the shape of an agent tool
 // subprocess that escapes the agent's process group and outlives it. The tool
-// child's pid is written to pidFile. Its stdio is detached so it cannot hold
-// the agent's pipes open. Its duration differs from the proctable package's
-// setsid repro, which finds its own child with pgrep -f 'sleep 300' and would
-// pick up this one when the packages' tests run concurrently.
-func orphaningACPCommand(pidFile string) string {
-	return fmt.Sprintf("setsid sleep 600 </dev/null >/dev/null 2>&1 & echo $! > %q; %s", pidFile, fakeACPShellCommand())
-}
-
-func readPIDFile(t *testing.T, path string) int {
-	t.Helper()
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read pid file: %v", err)
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil || pid <= 1 {
-		t.Fatalf("pid file %q holds %q: %v", path, data, err)
-	}
-	return pid
+// child writes its own pid to pidFIFO from inside its new session, so the pid
+// arrives only after setsid has taken it out of the agent's process group: the
+// agent shell's $! is known right after fork, before the child has escaped,
+// and a test that signals the agent's group in that window kills the child
+// with it. The tool child stays a shell rather than exec'ing sleep, so the
+// reported pid keeps a stable identity (an exec in flight can hide the process
+// from a scan); its sleep child is never a root. Its stdio is detached so it
+// cannot hold the agent's pipes open. Its duration differs from the proctable
+// package's setsid repro, which finds its own child with pgrep -f 'sleep 300'
+// and would pick up this one when the packages' tests run concurrently.
+func orphaningACPCommand(pidFIFO string) string {
+	return fmt.Sprintf("setsid sh -c 'echo $$ > %q; sleep 600; :' </dev/null >/dev/null 2>&1 & %s", pidFIFO, fakeACPShellCommand())
 }
 
 // startOrphaningSession starts a fake ACP agent carrying sessionID on p and
-// returns the agent root pid and its setsid'd tool child's pid.
+// returns the agent root pid and its setsid'd tool child's pid. It returns
+// only once the tool child has left the agent's process group.
 func startOrphaningSession(t *testing.T, p *Provider, name, sessionID, city string) (agentPID, toolPID int) {
 	t.Helper()
-	pidFile := filepath.Join(t.TempDir(), "tool.pid")
+	pidFIFO := filepath.Join(t.TempDir(), "tool.pid")
+	if err := syscall.Mkfifo(pidFIFO, 0o600); err != nil {
+		t.Fatalf("mkfifo: %v", err)
+	}
+	// The tool child's write blocks until a reader opens the fifo, so read it
+	// in the background while Start runs the handshake.
+	pidData := make(chan []byte, 1)
+	go func() {
+		data, _ := os.ReadFile(pidFIFO)
+		pidData <- data
+	}()
 	err := p.Start(context.Background(), name, runtime.Config{
-		Command: orphaningACPCommand(pidFile),
+		Command: orphaningACPCommand(pidFIFO),
 		WorkDir: t.TempDir(),
 		Env: map[string]string{
 			"GC_SESSION_ID": sessionID,
@@ -114,10 +118,19 @@ func startOrphaningSession(t *testing.T, p *Provider, name, sessionID, city stri
 		t.Fatalf("no live conn tracked for %q", name)
 	}
 	agentPID = sc.cmd.Process.Pid
-	// The pid file is written before the shell execs the agent, and Start
-	// returns only after the agent answered the handshake, so it exists now.
-	toolPID = readPIDFile(t, pidFile)
-	t.Cleanup(func() { _ = syscall.Kill(toolPID, syscall.SIGKILL) })
+	select {
+	case data := <-pidData:
+		pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+		if err != nil || pid <= 1 {
+			t.Fatalf("tool child reported pid %q: %v", data, err)
+		}
+		toolPID = pid
+	case <-time.After(10 * time.Second):
+		t.Fatal("tool child never reported its pid from its own session")
+	}
+	// The tool child leads its own process group; kill the group so its sleep
+	// child goes with it.
+	t.Cleanup(func() { _ = syscall.Kill(-toolPID, syscall.SIGKILL) })
 	return agentPID, toolPID
 }
 

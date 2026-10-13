@@ -255,6 +255,25 @@ func preE3DoRuntimeDrainAck(dops drainOps, cityPath, targetName, sn, sessionID s
 // required, holding the awake session row "worker" (generation 3, token
 // tok-a). reconciler is its [daemon] session_reconciler; admitV2 sets the
 // developer override drainAckCityMode latches with.
+// freshDrainAckRow reads row id of drainAckCity's city through a freshly
+// opened store handle.
+func freshDrainAckRow(t *testing.T, city, id string) beads.Bead {
+	t.Helper()
+	cfg, err := loadCityConfigWithoutBuiltinPackRefresh(city, io.Discard)
+	if err != nil {
+		t.Fatalf("load city: %v", err)
+	}
+	store, err := openCityStoreAtWithConfig(city, cfg)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	b, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("get %s: %v", id, err)
+	}
+	return b
+}
+
 func drainAckCity(t *testing.T, reconciler string, admitV2 bool) (string, beads.Store, string) {
 	t.Helper()
 	city := t.TempDir()
@@ -597,9 +616,69 @@ func TestRuntimeDrainAckV2RealReleaseBeforeRowCAS(t *testing.T) {
 	}
 }
 
+// TestRuntimeDrainAckReleasesARoutelessClaimInBothModes (mc-sca8r, J29 Z):
+// the agent's drain-ack, in a legacy city and in a v2 city, gives back an
+// unexecuted claim with no route into the seat's own lane (run_target = its
+// template) and a routed one as it is; only a claim routed to a lane nothing
+// serves stays assigned. Kills: drain-ack without the seat's route (the
+// routeless claim kept, the seat asleep holding it).
+func TestRuntimeDrainAckReleasesARoutelessClaimInBothModes(t *testing.T) {
+	for _, v2 := range []bool{false, true} {
+		t.Run(map[bool]string{false: "legacy", true: "v2"}[v2], func(t *testing.T) {
+			reconciler := ""
+			if v2 {
+				reconciler = "v2"
+			}
+			cityPath, store, id := drainAckCity(t, reconciler, v2)
+			if err := store.SetMetadata(id, "template", "worker"); err != nil {
+				t.Fatal(err)
+			}
+			claim := func(title string, meta map[string]string) beads.Bead {
+				return mustCreateDrainAckBead(t, store, beads.Bead{Title: title, Type: "task", Metadata: meta}, "in_progress", id)
+			}
+			plain := claim("plain, never executed", nil)
+			routed := claim("routed, never executed", map[string]string{beadmeta.RoutedToMetadataKey: "worker"})
+			ghost := claim("routed to no configured agent", map[string]string{beadmeta.RoutedToMetadataKey: "ghost"})
+			original := drainAckPokeController
+			t.Cleanup(func() { drainAckPokeController = original })
+			drainAckPokeController = func(string, reconcilekey.Key) error { return nil }
+
+			target := sessionRuntimeTarget{cityPath: cityPath, display: "worker", sessionName: "worker"}
+			var stdout, stderr bytes.Buffer
+			if code := runtimeDrainAck(newDrainOps(runtime.NewFake()), target, false, "tok-a", false, &stdout, &stderr); code != 0 {
+				t.Fatalf("drain-ack = %d, want 0; stderr=%s", code, stderr.String())
+			}
+			// A fresh handle: the file store opened above may not see the
+			// CLI's writes.
+			cfg, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fresh, err := openCityStoreAtWithConfig(cityPath, cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, c := range []struct {
+				bead                        beads.Bead
+				status, assignee, runTarget string
+			}{
+				{plain, "open", "", "worker"},
+				{routed, "open", "", ""},
+				{ghost, "in_progress", id, ""},
+			} {
+				got := mustGetBead(t, fresh, c.bead.ID)
+				if got.Status != c.status || got.Assignee != c.assignee || got.Metadata[beadmeta.RunTargetMetadataKey] != c.runTarget {
+					t.Errorf("%s: status=%q assignee=%q run_target=%q, want %q %q %q; stderr=%s", c.bead.Title,
+						got.Status, got.Assignee, got.Metadata[beadmeta.RunTargetMetadataKey], c.status, c.assignee, c.runTarget, stderr.String())
+				}
+			}
+		})
+	}
+}
+
 // TestRuntimeUndrainModeSwitch drives runtimeUndrain over temp cities: a
-// legacy city is doRuntimeUndrain and leaves the row untouched; a v2 city
-// also clears the row ack. Kills: mode mutants on undrain, and a v2 undrain
+// legacy city is doRuntimeUndrain's output and also clears the row ack (a
+// v2 run's leftover, PAR-FLOORACK round 3); a v2 city clears it too. Kills: mode mutants on undrain, and a v2 undrain
 // that leaves the row ack behind.
 func TestRuntimeUndrainModeSwitch(t *testing.T) {
 	for _, city := range []struct {
@@ -608,7 +687,7 @@ func TestRuntimeUndrainModeSwitch(t *testing.T) {
 		admitV2    bool
 		wantAck    bool
 	}{
-		{name: "legacy", wantAck: true},
+		{name: "legacy"},
 		{name: "v2", reconciler: "v2", admitV2: true},
 	} {
 		t.Run(city.name, func(t *testing.T) {
@@ -640,8 +719,51 @@ func TestRuntimeUndrainModeSwitch(t *testing.T) {
 			if code != wantCode || out != wantOut || errOut != wantErr || len(evs) != len(wantEvents) {
 				t.Errorf("undrain = (%d, %q, %q, %d events), want doRuntimeUndrain's (%d, %q, %q, %d)", code, out, errOut, len(evs), wantCode, wantOut, wantErr, len(wantEvents))
 			}
-			if got := rowAck(t, store, id) != noRowAck; got != city.wantAck {
+			if got := freshDrainAckRow(t, cityPath, id).Metadata[sessionpkg.DrainAckIncarnationKey] != ""; got != city.wantAck {
 				t.Errorf("row ack present = %v, want %v", got, city.wantAck)
+			}
+		})
+	}
+}
+
+// TestRuntimeDrainModeSwitch drives runtimeDrain over temp cities: a legacy
+// city is doRuntimeDrain and writes no row key; a v2 city also writes the
+// operator's drain mark on the row (CONTRACT v5.9p), which a v2 undrain
+// clears. Kills: a v2 drain that leaves the row bare (A11 would
+// cancel the agent's ack on a floor seat), a legacy drain that writes it,
+// and an undrain that leaves it.
+func TestRuntimeDrainModeSwitch(t *testing.T) {
+	for _, city := range []struct {
+		name       string
+		reconciler string
+		admitV2    bool
+		want       string
+	}{
+		{name: "legacy"},
+		{name: "v2", reconciler: "v2", admitV2: true, want: "3"},
+	} {
+		t.Run(city.name, func(t *testing.T) {
+			cityPath, store, id := drainAckCity(t, city.reconciler, city.admitV2)
+			sp := runtime.NewFake()
+			if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "echo"}); err != nil {
+				t.Fatal(err)
+			}
+			dops := newFakeDrainOps()
+			target := sessionRuntimeTarget{cityPath: cityPath, display: "worker", sessionName: "worker"}
+			var stdout, stderr bytes.Buffer
+			if code := runtimeDrain(dops, sp, events.NewFake(), target, false, &stdout, &stderr); code != 0 || !dops.draining["worker"] {
+				t.Fatalf("drain = %d (draining %v), want 0 with the env flag; stderr=%s", code, dops.draining["worker"], stderr.String())
+			}
+			_ = store // the long-lived handle can miss the CLI's write (FileStore skips a reload on an unchanged size and mtime)
+			b := freshDrainAckRow(t, cityPath, id)
+			if got := b.Metadata[sessionpkg.OperatorDrainKey]; got != city.want || b.Metadata[sessionpkg.DrainIntentReasonKey] != "" {
+				t.Fatalf("row mark = %q (request %q), want %q and no request", got, b.Metadata[sessionpkg.DrainIntentReasonKey], city.want)
+			}
+			if code := runtimeUndrain(dops, sp, events.NewFake(), target, false, &stdout, &stderr); code != 0 {
+				t.Fatalf("undrain = %d; stderr=%s", code, stderr.String())
+			}
+			if b := freshDrainAckRow(t, cityPath, id); b.Metadata[sessionpkg.OperatorDrainKey] != "" {
+				t.Fatalf("after undrain: row mark %q, want none", b.Metadata[sessionpkg.OperatorDrainKey])
 			}
 		})
 	}
@@ -695,6 +817,36 @@ func TestDrainAckStrictConfig(t *testing.T) {
 	}
 	if _, strict := drainAckCityMode(t.TempDir()); strict {
 		t.Error("a directory without city.toml is strict")
+	}
+}
+
+// TestDrainAckModeReadsTheProcessOverride (mc-t9wb5): the CLI's default
+// lookup is the process environment, as the controller's is, and through it
+// a v2 config latches as the controller latches it: the override "1" is v2,
+// an unset or any other value is legacy. The environment is a map, not the
+// process's. Kills: a nil default (the override ignored) and an override
+// read as set-at-all.
+func TestDrainAckModeReadsTheProcessOverride(t *testing.T) {
+	if reflect.ValueOf(drainAckModeLookupEnv).Pointer() != reflect.ValueOf(os.LookupEnv).Pointer() {
+		t.Fatal("drainAckModeLookupEnv's default is not os.LookupEnv: the CLI ignores the process's override")
+	}
+	original := drainAckModeLookupEnv
+	t.Cleanup(func() { drainAckModeLookupEnv = original })
+	cfg := &config.City{}
+	cfg.Daemon.SessionReconciler = "v2"
+	for _, tc := range []struct {
+		name string
+		env  map[string]string
+		want bool
+	}{
+		{name: "the override", env: map[string]string{v2SkeletonEnv: "1"}, want: true},
+		{name: "unset", env: map[string]string{}},
+		{name: "another value", env: map[string]string{v2SkeletonEnv: "true"}},
+	} {
+		drainAckModeLookupEnv = func(key string) (string, bool) { v, ok := tc.env[key]; return v, ok }
+		if got := drainAckStrictConfig(cfg); got != tc.want {
+			t.Errorf("drainAckStrictConfig(v2) with %s: %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }
 

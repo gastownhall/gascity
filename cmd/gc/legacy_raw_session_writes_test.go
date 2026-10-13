@@ -51,7 +51,7 @@ var rawWriteFenced = map[string]string{
 	"internal/session/store.go:commitIf":                    "Store.Commit's and ApplyPatchIfLifecycleUnchanged's loop",
 	"internal/session/store.go:CommitStartedIfCurrentUnder": "the start commit (v5 S2)",
 	"internal/session/store.go:applyPatchIfClosed":          "writes only a row still closed",
-	"internal/session/store.go:CloseWithTerminalPatchUnder": "the terminal close: guarded on its read (closePremiseHolds), atomic where the store can close conditionally (R8b's CommitClose)",
+	"internal/session/store.go:CommitClose":                 "the terminal close: guarded on every read by its decision's site, atomic where the store can close conditionally",
 }
 
 // rawWriteNotSession are writes the scan's name match counts that do not

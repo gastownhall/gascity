@@ -54,6 +54,14 @@ func bazelTransportFlag(flag string) bool {
 	switch name {
 	case "--remote_default_exec_properties", "--remote_default_platform_properties":
 		return false // platform properties are part of the action
+	case "--modify_execution_info":
+		// Only no-cache on the simulator corpus's GoTestRun actions
+		// (go_test_run.bzl): it stops their results being read or written,
+		// so --config=fresh re-executes them as --nocache_test_results does
+		// a test; what each action is stays the same. Any other execution
+		// info may change how or where an action runs.
+		_, value, _ := strings.Cut(flag, "=")
+		return value == "GoTestRun=+no-cache"
 	case "--jobs", "--experimental_circuit_breaker_strategy", "--disk_cache", "--keep_going", "--nokeep_going",
 		"--flaky_test_attempts", "--cache_test_results", "--nocache_test_results", "--profile",
 		"--execution_log_compact_file", "--experimental_build_event_upload_strategy",
@@ -210,35 +218,37 @@ func TestBazelKeyParity(t *testing.T) {
 		"test:ci --experimental_remote_cache_eviction_retries=0\n" +
 		"test:ci --experimental_use_validation_aspect\n" +
 		"test:fresh --nocache_test_results\n" +
+		"test:fresh --modify_execution_info=GoTestRun=+no-cache\n" +
 		"build:other --define=gotags=x\n" +
 		"try-import %workspace%/.bazelrc.local\n"
 	if errs := checkBazelKeyParity(good); len(errs) != 0 {
 		t.Errorf("good fixture: %v", errs)
 	}
 	for name, rc := range map[string]string{
-		"bare PATH":            strings.Replace(good, "PATH="+bazelPinnedTestPath, "PATH", 1),
-		"other PATH":           strings.Replace(good, bazelPinnedTestPath, "/opt/go/bin:/usr/bin", 1),
-		"no PATH":              strings.Replace(good, "test --test_env=PATH="+bazelPinnedTestPath+"\n", "", 1),
-		"PATH re-forwarded":    good + "test --test_env=PATH\n",
-		"PATH only in config":  strings.Replace(good, "test --test_env=PATH=", "test:ci --test_env=PATH=", 1),
-		"client action env":    good + "build --action_env=HOME\n",
-		"client test env":      good + "test --test_env=USER\n",
-		"remote-exec test env": good + "test:remote-exec --test_env=PATH=" + bazelPinnedTestPath + "\n",
-		"fork-cache define":    good + "build:fork-cache --define=gotags=x\n",
-		"remote-exec platform": good + "build:remote-exec --extra_execution_platforms=//:rbe\n",
-		"exec properties":      good + "build:remote-exec --remote_default_exec_properties=OSFamily=linux\n",
-		"remote-exec config":   good + "build:remote-exec --config=other\n",
-		"strict env off":       good + "build:fork-cache --noincompatible_strict_action_env\n",
-		"no remote-exec":       strings.ReplaceAll(good, "build:remote-exec", "build:gone"),
-		"no fork-cache":        strings.ReplaceAll(good, "build:fork-cache", "build:gone"),
-		"no ci":                strings.ReplaceAll(good, "test:ci", "test:gone"),
-		"ci PATH copy":         good + "test:ci --test_env=PATH=" + bazelPinnedTestPath + "\n",
-		"ci define":            good + "test:ci --define=gotags=x\n",
-		"ci test timeout":      good + "test:ci --test_timeout=1100\n",
-		"ci action env":        good + "build:ci --action_env=GOFLAGS=-mod=mod\n",
-		"no fresh":             strings.ReplaceAll(good, "test:fresh", "test:gone"),
-		"fresh define":         good + "test:fresh --define=gotags=x\n",
-		"fresh action env":     good + "build:fresh --action_env=GOFLAGS=-mod=mod\n",
+		"bare PATH":             strings.Replace(good, "PATH="+bazelPinnedTestPath, "PATH", 1),
+		"other PATH":            strings.Replace(good, bazelPinnedTestPath, "/opt/go/bin:/usr/bin", 1),
+		"no PATH":               strings.Replace(good, "test --test_env=PATH="+bazelPinnedTestPath+"\n", "", 1),
+		"PATH re-forwarded":     good + "test --test_env=PATH\n",
+		"PATH only in config":   strings.Replace(good, "test --test_env=PATH=", "test:ci --test_env=PATH=", 1),
+		"client action env":     good + "build --action_env=HOME\n",
+		"client test env":       good + "test --test_env=USER\n",
+		"remote-exec test env":  good + "test:remote-exec --test_env=PATH=" + bazelPinnedTestPath + "\n",
+		"fork-cache define":     good + "build:fork-cache --define=gotags=x\n",
+		"remote-exec platform":  good + "build:remote-exec --extra_execution_platforms=//:rbe\n",
+		"exec properties":       good + "build:remote-exec --remote_default_exec_properties=OSFamily=linux\n",
+		"remote-exec config":    good + "build:remote-exec --config=other\n",
+		"strict env off":        good + "build:fork-cache --noincompatible_strict_action_env\n",
+		"no remote-exec":        strings.ReplaceAll(good, "build:remote-exec", "build:gone"),
+		"no fork-cache":         strings.ReplaceAll(good, "build:fork-cache", "build:gone"),
+		"no ci":                 strings.ReplaceAll(good, "test:ci", "test:gone"),
+		"ci PATH copy":          good + "test:ci --test_env=PATH=" + bazelPinnedTestPath + "\n",
+		"ci define":             good + "test:ci --define=gotags=x\n",
+		"ci test timeout":       good + "test:ci --test_timeout=1100\n",
+		"ci action env":         good + "build:ci --action_env=GOFLAGS=-mod=mod\n",
+		"no fresh":              strings.ReplaceAll(good, "test:fresh", "test:gone"),
+		"fresh define":          good + "test:fresh --define=gotags=x\n",
+		"fresh action env":      good + "build:fresh --action_env=GOFLAGS=-mod=mod\n",
+		"fresh other exec info": good + "test:fresh --modify_execution_info=GoLink=+no-remote\n",
 	} {
 		if len(checkBazelKeyParity(rc)) == 0 {
 			t.Errorf("%s: expected an error for .bazelrc fixture:\n%s", name, rc)

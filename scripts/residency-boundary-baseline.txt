@@ -178,7 +178,6 @@ cmd/gc/cmd_beads.go	doBeadsListFallback	a:openAllConvoyStoresAt	1
 cmd/gc/cmd_beads.go	doBeadsShowFallback	a:openAllConvoyStoresAt	1
 cmd/gc/cmd_convoy.go	convoyStoreCandidates	a:convoyStoreCandidates	1
 cmd/gc/cmd_convoy.go	convoyStoreViewsWithBinding	b:cliSoleClassBinding	1
-cmd/gc/cmd_convoy.go	doConvoyCheckFallback	a:openAllConvoyStoresAt	1
 cmd/gc/cmd_convoy.go	doConvoyListFallback	a:openAllConvoyStoresAt	1
 cmd/gc/cmd_convoy.go	doConvoyStrandedFallback	a:openAllConvoyStoresAt	1
 cmd/gc/cmd_convoy.go	openAllConvoyStoresAt	a:openAllConvoyStoresAt	1

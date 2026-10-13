@@ -53,7 +53,7 @@ func readRuntime(ctx context.Context, sp runtime.Provider, processNames []string
 	if sp == nil || name == "" || !known || leaf == nil {
 		return nil, causeRouteUnknown
 	}
-	if !freshReadable(leaf) {
+	if !runtime.FreshReadable(leaf) {
 		return &txRuntime{Class: rtUnsupported}, ""
 	}
 	rt := &txRuntime{Class: rtUnknown, leaf: leaf}
@@ -118,19 +118,6 @@ func processNamesFor(w *World, row session.Info) []string {
 	return nil
 }
 
-// freshReadable reports a leaf whose liveness read reports errors and is
-// fresh: it implements the fresh read, or reads fresh by construction (acp,
-// subprocess). Any other leaf (a bool-only one: herdr, k8s, exec) proves
-// neither presence nor absence.
-func freshReadable(leaf runtime.Provider) bool {
-	if _, ok := leaf.(runtime.LivenessObserverWithError); !ok {
-		return false
-	}
-	_, fresh := leaf.(runtime.FreshLivenessObserver)
-	m, byConstruction := leaf.(runtime.FreshByConstruction)
-	return fresh || byConstruction && m.LivenessReadsFresh()
-}
-
 // unlistedElsewhere reports whether every backend hop falls through to that
 // cannot read fresh itself (a bool-only or caching herdr, k8s or exec
 // default, or a hybrid, whose read is its leaves' cached one) proves name
@@ -151,7 +138,7 @@ func unlistedElsewhere(ctx context.Context, hop runtime.Provider, name string) b
 		err   error
 	}
 	for _, backend := range b.Backends() {
-		if backend.Label == routed || freshReadable(backend.Provider) {
+		if backend.Label == routed || runtime.FreshReadable(backend.Provider) {
 			continue
 		}
 		l, ok := boundedProbe(ctx, func() listing { n, err := backend.Provider.ListRunning(name); return listing{n, err} })

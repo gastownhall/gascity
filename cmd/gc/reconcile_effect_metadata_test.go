@@ -9,6 +9,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // The row-metadata verb's effect tests (CONTRACT v5 M1; C7d).
@@ -134,7 +135,7 @@ func TestSimRowMetadataSyncsRuntimeAliasOnCurrentOnly(t *testing.T) {
 			if m := s.gc1(); m["alias"] != "boss" || synced() != 0 || underLock != 0 {
 				t.Fatalf("after the write: gc-1 %v, %d syncs, %d provider calls under the alias lock; want the alias, no sync yet, none", m, synced(), underLock)
 			}
-			for range 2 {
+			for range 3 { // the work_dir A7 writes once the agent name is concrete, then the sync
 				s.settle()
 			}
 			if got := synced(); got != map[bool]int{true: 1, false: 0}[tc.want] {
@@ -237,4 +238,68 @@ func TestSimRowMetadataRefusesALockTheFreshRowDoesNotTake(t *testing.T) {
 		t.Fatalf("gc-1 %v: want the verb refused, none of its keys written", m)
 	}
 	s.noViolations(t)
+}
+
+// Kills a session key minted over one another writer set (v5 M1, R1's
+// set-once; SESS-714): the verb mints a key for a row whose provider takes
+// one and that has none; a key landing between the pass and its CAS moves
+// the premise (session_key is a premise fact), so the verb refuses and the
+// key stands.
+func TestRowMetadataMintsTheSessionKeyOnce(t *testing.T) {
+	for _, raced := range []bool{false, true} {
+		c, _ := baselineCase(t, livenessAlive, desireKeep, nil, "state", "active")
+		c.w.Env = &reconcileEnv{Cfg: workerCity(3)}
+		tp := TemplateParams{TemplateName: "worker", InstanceName: "worker-2", PoolSlot: 2, ResolvedProvider: &config.ResolvedProvider{Name: "claude", SessionIDFlag: "--session-id"}}
+		c.w.Templates.entries = map[templateMemoKey]templateResolution{templateMemoKeyOf(c.w.Census.Rows[c.k].Info): {TP: tp}}
+		c.a.Snapshot.Entries[c.k].InDesired = true
+		if raced {
+			c.before = func() {
+				if err := c.store.SetMetadataBatch(c.k.ID, map[string]string{"session_key": "operator-key"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		it, s := c.run(t, nil, nil)
+		key := c.meta(t)["session_key"]
+		switch {
+		case it.Kind != intentRowMetadata:
+			t.Fatalf("decideRow = %q, want the verb", it.Kind)
+		case raced && (s.Outcome != settledRefused || key != "operator-key"):
+			t.Fatalf("raced: settled %+v, session_key %q; want the landed key kept and the verb refused (a premise fact)", s, key)
+		case !raced && (s.Outcome != settledLanded || key == ""):
+			t.Fatalf("settled %+v, session_key %q; want a key minted", s, key)
+		}
+	}
+}
+
+// Kills an empty session type left unrepaired, or repaired by a write apart
+// from the row's (SESS-701; CONTRACT v5.8 M1): a typeless session row's
+// verb repairs its type in its CAS, a type-only write with no synced_at.
+func TestRowMetadataRepairsAnEmptyType(t *testing.T) {
+	c, _ := baselineCase(t, livenessAlive, desireKeep, nil, "state", "active")
+	c.w.Env = &reconcileEnv{Cfg: workerCity(3)}
+	tp := TemplateParams{TemplateName: "worker"}
+	reread := func() {
+		c.w.Census = readCensus(t, gatherNow, censusLegs(rowLeg, c.store))
+		c.w.Templates.entries = map[templateMemoKey]templateResolution{templateMemoKeyOf(c.w.Census.Rows[c.k].Info): {TP: tp}}
+		c.a.Snapshot.Entries[c.k].InDesired = true
+	}
+	reread()
+	if _, s := c.run(t, nil, nil); s.Outcome != settledLanded { // the identity, converged first
+		t.Fatalf("the identity settled %+v", s)
+	}
+	empty := ""
+	if err := c.store.Update(c.k.ID, beads.UpdateOpts{Type: &empty}); err != nil {
+		t.Fatal(err)
+	}
+	reread()
+	rec := newSessionKeyRecorder(c.store)
+	it, s := c.run(t, nil, rec)
+	b, err := c.store.Get(c.k.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if it.Kind != intentRowMetadata || s.Outcome != settledLanded || b.Type != session.BeadType || len(rec.keys) != 0 {
+		t.Fatalf("%s settled %+v, type %q, keys written %v: want the type repaired alone", it.Kind, s, b.Type, recordedKeys(rec.keys))
+	}
 }

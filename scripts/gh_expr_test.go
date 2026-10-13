@@ -372,6 +372,7 @@ func TestGHExprEvaluator(t *testing.T) {
 		"${{ github.event.pull_request.number || 0 }}":                                                    "0",
 		"always() && github.event_name == 'push'":                                                         "false",
 		"!cancelled() && (github.event_name == 'MERGE_GROUP')":                                            "true", //nolint:misspell // GitHub Actions status function
+
 		"${{ true == 'true' }}":                    "false",
 		"${{ github.event.merge_group.base_sha }}": "",
 	} {

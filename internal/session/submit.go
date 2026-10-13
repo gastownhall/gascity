@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -132,9 +133,28 @@ func (m *Manager) submit(ctx context.Context, by Actor, id, message, resumeComma
 			if !supportsInterruptNowForMetadata(b.Metadata) {
 				return ErrInteractionUnsupported
 			}
+			// The interrupt keystroke would dismiss a pending permission
+			// prompt as a side effect; make the caller answer it explicitly.
+			if State(b.Metadata["state"]) != StateSuspended && m.sp.IsRunning(sessName) {
+				if err := m.pendingInteractionLocked(sessName); err != nil {
+					return err
+				}
+			}
 			return m.interruptAndSubmitLocked(ctx, by, id, b, sessName, message, resumeCommand, hints)
 		default:
 			running := m.sp.IsRunning(sessName)
+			if running && State(b.Metadata["state"]) != StateSuspended && len(hints.ProcessNames) > 0 && !m.sp.ProcessAlive(sessName, hints.ProcessNames) {
+				// The pane is up but its agent is dead: a crash the controller
+				// has not healed yet. Text typed into that pane is lost with
+				// it, so queue it for the incarnation the heal brings up, and
+				// fenced by the session alone: the crash heal may reset the
+				// conversation and rotate its epoch (mc-48az4).
+				if err := m.enqueueDeferredSubmitEpochLocked(b, sessName, message, ""); err != nil {
+					return err
+				}
+				outcome.Queued, outcome.Deferred = true, true
+				return nil
+			}
 			if pendingConversationRestart(b) && !running {
 				// A reset or restart is recorded but the replacement runtime is
 				// not up yet. Delivering now would start the pane just to carry
@@ -244,7 +264,7 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, by Actor, id str
 		return err
 	}
 	if shouldClearInterruptedInputBeforeSubmit(b) {
-		if err := m.clearInterruptedInputLocked(ctx, sessName); err != nil {
+		if err := m.clearInterruptedInputLocked(ctx, b, sessName); err != nil {
 			return err
 		}
 	}
@@ -469,7 +489,51 @@ func (m *Manager) resetInterruptedTurnLocked(ctx context.Context, b beads.Bead, 
 	return nil
 }
 
-func (m *Manager) clearInterruptedInputLocked(ctx context.Context, sessName string) error {
+// claudeInputRestoreWindow is how long StopTurn and interrupt_now give Claude
+// Code to put an interrupted prompt back into its input box before clearing
+// it. In the lost-turn repro (Claude Code 2.1.288) the prompt reappeared
+// within about 0.3 s of the idle prompt.
+const claudeInputRestoreWindow = 2 * time.Second
+
+// restoresInterruptedInput reports whether the provider puts a prompt that was
+// interrupted before its first response chunk back into its input box. Claude
+// Code does: the next message is appended to it unless the input box is
+// cleared first.
+func restoresInterruptedInput(b beads.Bead) bool {
+	return transportFromMetadata(b) != "acp" && providerKind(b) == "claude"
+}
+
+// clearRestoredInputLocked waits briefly for Claude to restore an interrupted
+// prompt, then clears the input box and verifies it is empty. handled is false
+// when the runtime cannot do a verified clear. When a client is attached the
+// runtime leaves the input box alone (a human may be typing in it, #5192);
+// that is logged and handled, so no caller falls back to a raw Ctrl-U.
+func (m *Manager) clearRestoredInputLocked(ctx context.Context, sessName string) (handled bool, err error) {
+	clearer, ok := m.sp.(runtime.InputClearProvider)
+	if !ok {
+		return false, nil
+	}
+	err = clearer.ClearInput(ctx, sessName, claudeInputRestoreWindow)
+	if errors.Is(err, runtime.ErrInteractionUnsupported) {
+		return false, nil
+	}
+	if errors.Is(err, runtime.ErrInputClearSkipped) {
+		log.Printf("session: left the input box of %q as it is after an interrupt: %v", sessName, err)
+		return true, nil
+	}
+	if err != nil {
+		return true, fmt.Errorf("clearing the interrupted prompt from the input box: %w", err)
+	}
+	return true, nil
+}
+
+func (m *Manager) clearInterruptedInputLocked(ctx context.Context, b beads.Bead, sessName string) error {
+	if restoresInterruptedInput(b) {
+		handled, err := m.clearRestoredInputLocked(ctx, sessName)
+		if err != nil || handled {
+			return err
+		}
+	}
 	if err := m.sp.SendKeys(sessName, "C-u"); err != nil {
 		return fmt.Errorf("clearing interrupted input: %w", err)
 	}
@@ -605,6 +669,12 @@ func needsDeferredStartupDialogVerification(b beads.Bead) bool {
 }
 
 func (m *Manager) enqueueDeferredSubmitLocked(b beads.Bead, sessName, message string) error {
+	return m.enqueueDeferredSubmitEpochLocked(b, sessName, message, deferredSubmitEpoch(b))
+}
+
+// enqueueDeferredSubmitEpochLocked is enqueueDeferredSubmitLocked fenced to
+// epoch ("" fences by the session alone).
+func (m *Manager) enqueueDeferredSubmitEpochLocked(b beads.Bead, sessName, message, epoch string) error {
 	if strings.TrimSpace(m.cityPath) == "" {
 		return errors.New("deferred submit is unavailable without a city path")
 	}
@@ -613,7 +683,7 @@ func (m *Manager) enqueueDeferredSubmitLocked(b beads.Bead, sessName, message st
 		ID:                "nudge-" + NewInstanceToken()[:12],
 		Agent:             deferredSubmitAgentKey(b),
 		SessionID:         b.ID,
-		ContinuationEpoch: deferredSubmitEpoch(b),
+		ContinuationEpoch: epoch,
 		Source:            "session",
 		Message:           message,
 		CreatedAt:         now,

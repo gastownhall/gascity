@@ -92,7 +92,7 @@ in_conflict() {
 
 # has_markers <repo>: 0 if any tracked file still has conflict markers.
 has_markers() {
-    git -C "$1" -c core.pager=cat grep -lE '^(<<<<<<< |=======$|>>>>>>> )' -- . 2>/dev/null | grep -q .
+    [[ -n "$(git -C "$1" -c core.pager=cat grep -lE '^(<<<<<<< |=======$|>>>>>>> )' -- . 2>/dev/null)" ]]
 }
 
 # write_conflict_file <path> <ours_block> <theirs_block>

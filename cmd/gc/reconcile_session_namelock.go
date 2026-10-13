@@ -47,12 +47,26 @@ func waitRuntimeLease(ctx context.Context, store beads.Store, cityPath, name, id
 // holder is starting. What cannot be probed (no store, a city path that is
 // not absolute, a failed read) reads as held.
 func startHolderLive(store beads.Store, cityPath string, info session.Info) bool {
+	held, _ := startHolderLiveErr(store, cityPath, info)
+	return held
+}
+
+// startHolderLiveErr is startHolderLive with the reason a probe could not be
+// made or read: no store, no session name, a city path that is not absolute,
+// or a failed read. Each reads as held (fail closed) and returns its error,
+// for a caller that holds on it and must say so.
+func startHolderLiveErr(store beads.Store, cityPath string, info session.Info) (bool, error) {
 	name := strings.TrimSpace(info.SessionName)
-	if store == nil || name == "" || !filepath.IsAbs(cityPath) {
-		return true
+	switch {
+	case store == nil:
+		return true, errors.New("no session store to read the runtime lease from")
+	case name == "":
+		return true, errors.New("the row has no session name to lease")
+	case !filepath.IsAbs(cityPath):
+		return true, fmt.Errorf("city path %q is not absolute", cityPath)
 	}
 	held, err := session.RuntimeLeaseHeld(sessionFrontDoor(store), session.RuntimeLeaseRequest{City: cityPath, Name: name, ID: info.ID})
-	return err != nil || held
+	return err != nil || held, err
 }
 
 // startAbandoned reports whether the start whose in-flight marker (state
@@ -132,22 +146,27 @@ func lockRuntimeName(w *World, row session.Info, front *session.Store, ttl time.
 	if front != nil {
 		req.ID, req.TTL = row.ID, ttl
 	}
-	lease, err = session.TryRuntimeLease(front, req)
-	switch {
-	case err == nil:
-		return name, lease, "", nil
-	case errors.Is(err, session.ErrRuntimeLeaseBusy):
-		return name, nil, causeNameBusy, err
-	case errors.Is(err, session.ErrRuntimeLeaseNoCAS):
-		return name, nil, causeLeaseNoCAS, err
-	case errors.Is(err, session.ErrRuntimeLeaseRowClosed):
-		return name, nil, causeLeaseRowClosed, err
-	case errors.Is(err, session.ErrRuntimeLeaseContention):
-		return name, nil, causeLeaseContended, err
-	case errors.Is(err, session.ErrRuntimeLeaseRenamed):
-		return name, nil, causeLeaseRenamed, err
-	case errors.Is(err, session.ErrRuntimeLeaseLocalFS):
-		return name, nil, causeLeaseLocalFS, err
+	if lease, err = session.TryRuntimeLease(front, req); err != nil {
+		return name, nil, leaseRefusal(err), err
 	}
-	return name, nil, causeLeaseStore, err
+	return name, lease, "", nil
+}
+
+// leaseRefusal is a lease error's refusal cause.
+func leaseRefusal(err error) string {
+	switch {
+	case errors.Is(err, session.ErrRuntimeLeaseBusy):
+		return causeNameBusy
+	case errors.Is(err, session.ErrRuntimeLeaseNoCAS):
+		return causeLeaseNoCAS
+	case errors.Is(err, session.ErrRuntimeLeaseRowClosed):
+		return causeLeaseRowClosed
+	case errors.Is(err, session.ErrRuntimeLeaseContention):
+		return causeLeaseContended
+	case errors.Is(err, session.ErrRuntimeLeaseRenamed):
+		return causeLeaseRenamed
+	case errors.Is(err, session.ErrRuntimeLeaseLocalFS):
+		return causeLeaseLocalFS
+	}
+	return causeLeaseStore
 }

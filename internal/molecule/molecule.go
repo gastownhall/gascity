@@ -18,6 +18,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/formula"
 )
 
@@ -831,6 +832,9 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 	if len(recipe.Steps) == 0 {
 		return nil, fmt.Errorf("recipe %q has no steps", recipe.Name)
 	}
+	if err := refuseSessionSteps(recipe.Steps, applyVarDefaults(opts.Vars, recipe.Vars)); err != nil {
+		return nil, err // before any write: a refused recipe creates nothing
+	}
 	if !opts.nativeStepTopologyPrepared {
 		recipe = recipeWithNativeStepDependencies(recipe)
 		opts.nativeStepTopologyPrepared = true
@@ -1144,6 +1148,9 @@ func InstantiateFragment(ctx context.Context, store beads.Store, recipe *formula
 	if len(recipe.Steps) == 0 {
 		return &FragmentResult{IDMapping: map[string]string{}}, nil
 	}
+	if err := refuseSessionSteps(recipe.Steps, applyVarDefaults(opts.Vars, recipe.Vars)); err != nil {
+		return nil, err // before any write
+	}
 	recipe = fragmentRecipeWithNativeStepDependencies(recipe)
 	if err := applyExternalNativeStepDependencies(store, opts.RootID, recipe.Steps, opts.ExternalDeps); err != nil {
 		return nil, err
@@ -1392,6 +1399,21 @@ func preservesGraphActionTypes(recipe *formula.Recipe) bool {
 		return true
 	}
 	return root.Metadata[beadmeta.AttemptMetadataKey] != "" && root.Metadata[beadmeta.StepRefMetadataKey] != ""
+}
+
+// refuseSessionSteps refuses a recipe a step of which would make a
+// controller-owned row (coordclass.ControllerOwned: a session row by type or
+// the gc:session label, a substituted variable's included, a startup-health
+// episode or a convergence root), before anything is written: only its
+// owner mints one (mc-okw9n, mc-lp7zb, architecture B). The compile refuses
+// the literal marks (formula.Validate).
+func refuseSessionSteps(steps []formula.RecipeStep, vars map[string]string) error {
+	for _, step := range steps {
+		if b := stepToBead(step, vars, nil); coordclass.ControllerOwned(b) {
+			return fmt.Errorf("formula step %q would make a controller-owned row (type %q, labels %v: a session row, a startup-health episode or a convergence root), which only its owner creates", step.ID, b.Type, b.Labels)
+		}
+	}
+	return nil
 }
 
 // stepToBead converts a RecipeStep to a Bead with variable substitution.

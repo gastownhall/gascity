@@ -482,8 +482,12 @@ var (
 		"retry/pass@cleanup-worktree":      {reads: 2, writes: 1},
 		// DepList + one exact batch for the blockers, one subtree read
 		// (Get(root), ListByMetadata, one batched children read per level),
-		// one batched close-order read.
-		"workflow-finalize/workflow-pass@call-budget.workflow-finalize": {reads: 11, writes: 3},
+		// one batched close-order read. Plus the Get(root) closeWorkflowRoot
+		// makes just before a pass close: a control quarantine that lands
+		// after the outcome resolved must not be overwritten with pass
+		// (ga-3wlbcj). Only the finalizer closes a root, so no other control
+		// pays the read.
+		"workflow-finalize/workflow-pass@call-budget.workflow-finalize": {reads: 12, writes: 3},
 	}
 	controlCallBudgetsFail = map[string]callBudget{
 		"retry/hard-fail@setup":                                         {reads: 8, writes: 5},
@@ -503,7 +507,7 @@ var (
 		"retry/pass@report":                                             {reads: 2, writes: 1},
 		"retry/retry@cleanup-worktree":                                  {reads: 8, writes: 5},
 		"retry/pass@cleanup-worktree":                                   {reads: 2, writes: 1},
-		"workflow-finalize/workflow-pass@call-budget.workflow-finalize": {reads: 11, writes: 3},
+		"workflow-finalize/workflow-pass@call-budget.workflow-finalize": {reads: 12, writes: 3}, // see controlCallBudgetsPass
 	}
 )
 

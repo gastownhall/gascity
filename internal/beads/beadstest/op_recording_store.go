@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -55,6 +58,9 @@ type RecordedOp struct {
 	Method string
 	// Err is the error the delegate returned, if any.
 	Err error
+	// Caller is the gascity call chain that issued the op, innermost first,
+	// as short "func@file:line" frames outside the beads packages.
+	Caller []string
 }
 
 // NotFound reports whether the op failed because its bead does not exist.
@@ -117,9 +123,43 @@ func (r *OpRecordingStore) record(op RecordedOp) {
 		op.Query.IDs = cloneStrings(op.Query.IDs)
 		op.Query.ParentIDs = cloneStrings(op.Query.ParentIDs)
 	}
+	op.Caller = callerChain()
 	r.mu.Lock()
 	r.ops = append(r.ops, op)
 	r.mu.Unlock()
+}
+
+// callerChainDepth bounds the frames callerChain keeps.
+const callerChainDepth = 6
+
+// callerChain returns the gascity frames that led to the recorded op,
+// innermost first, skipping the recorder and the store wrappers in
+// internal/beads (and the CLI's bead-policy wrapper) so the first frame is the
+// caller that asked.
+func callerChain() []string {
+	pcs := make([]uintptr, 48)
+	n := runtime.Callers(3, pcs)
+	frames := runtime.CallersFrames(pcs[:n])
+	var chain []string
+	for len(chain) < callerChainDepth {
+		frame, more := frames.Next()
+		if strings.Contains(frame.Function, "/internal/beads.") ||
+			strings.Contains(frame.Function, "/internal/beads/") ||
+			strings.Contains(frame.Function, "beadPolicyStore") {
+			if !more {
+				break
+			}
+			continue
+		}
+		if strings.Contains(frame.Function, "gastownhall/gascity/") {
+			name := frame.Function[strings.LastIndex(frame.Function, "/")+1:]
+			chain = append(chain, fmt.Sprintf("%s@%s:%d", name, filepath.Base(frame.File), frame.Line))
+		}
+		if !more {
+			break
+		}
+	}
+	return chain
 }
 
 func (r *OpRecordingStore) recordList(method string, query beads.ListQuery, err error) {

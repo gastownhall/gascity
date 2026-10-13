@@ -569,7 +569,7 @@ func TestCrossStoreCloseGateSeesABindingResidentClaim(t *testing.T) {
 		t.Fatalf("claim it: %v", err)
 	}
 
-	has, err := sessionHasOpenAssignedWorkForConfig(testSeatWork(cityPath, cfg, beads.NewMemStore(), nil), sessionBead)
+	has, err := sessionHasOpenAssignedWorkForConfigInfo(testSeatWork(cityPath, cfg, beads.NewMemStore(), nil), sessionInfoFromBead(sessionBead))
 	if err != nil {
 		t.Fatalf("cross-store close gate: %v", err)
 	}

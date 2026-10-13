@@ -31,11 +31,11 @@ available in the local repository. For independent work, this might be a
 selected commit from the project's default branch. For dependent work, it
 should be the result of integrating the accepted prerequisite outputs.
 
-Prefer a commit SHA when the input must stay fixed across retries. A branch
-or tag supplied as `--base` is resolved when the worktree is created, and that
-commit is recorded. `--base-sha` lets a caller check the recorded SHA when
-reusing the workspace. The worktree commands do not fetch or integrate
-prerequisite outputs for you.
+For a fixed input with later cleanup after merge, supply the merge branch ref
+as `--base` and the selected input SHA as `--base-sha`. At creation, the ref
+must resolve to that SHA; the commit is recorded for later reuse checks.
+Keep the original ref and SHA when verifying or reusing the workspace. The
+worktree commands do not fetch or integrate prerequisite outputs for you.
 
 ## Prepare A Managed Workspace
 
@@ -50,7 +50,7 @@ selected by your pack:
 gc worktree ensure \
   --repo /path/to/project --root /path/to/workspaces \
   --path /path/to/workspaces/task-c --branch work/task-c \
-  --base REPLACE_WITH_INPUT_COMMIT_SHA \
+  --base refs/heads/integration --base-sha REPLACE_WITH_INPUT_COMMIT_SHA \
   --bead task-c --store-ref city:my-city \
   --creator do-work --owner workspace-provisioner \
   --generation attempt-1 --json
@@ -68,7 +68,7 @@ the resulting workspace path only after the command succeeds.
 | Option | Use it to |
 |---|---|
 | `--base` | Select the required starting commit or a locally resolvable ref. |
-| `--base-sha` | Check that a reused workspace records the expected input SHA. |
+| `--base-sha` | Require the expected input SHA at creation and check it on reuse. |
 | `--dry-run` | Plan creation or reuse without changing the repository or filesystem. The same input checks apply. |
 | `--json` | Return a structured report for the pack's next step. |
 
@@ -116,3 +116,9 @@ For removal, use [gc worktree cleanup](/reference/cli#gc-worktree-cleanup) with
 the attempt ID returned during creation. Cleanup also checks ownership and Git
 safety. It refuses dirty workspaces, commits reachable from no branch, tag or
 remote-tracking ref, and HEADs not merged into `--base`.
+
+Use the same base ref and input SHA supplied at creation. Cleanup checks the
+current tip of that ref for the merge. A fixed SHA supplied as `--base` remains
+the original commit, so cleanup refuses later commits even if they were merged
+elsewhere. Choose the merge branch ref at creation when post-merge cleanup is
+needed.

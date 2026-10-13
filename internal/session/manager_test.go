@@ -383,7 +383,6 @@ func TestCreate(t *testing.T) {
 // retirement path that stranded canonical identity after the S19 stage-2 fix.
 func TestRetireConfiguredNamedSessionIdentifiersFreesCanonicalIdentity(t *testing.T) {
 	store := beads.NewMemStore()
-	mgr := newTestManager(t, store, runtime.NewFake())
 
 	b, err := store.Create(beads.Bead{
 		Type: BeadType,
@@ -400,14 +399,8 @@ func TestRetireConfiguredNamedSessionIdentifiersFreesCanonicalIdentity(t *testin
 		t.Fatalf("Create: %v", err)
 	}
 
-	if err := mgr.retireConfiguredNamedSessionIdentifiers(b.ID, b); err != nil {
-		t.Fatalf("retireConfiguredNamedSessionIdentifiers: %v", err)
-	}
-
-	got, err := store.Get(b.ID)
-	if err != nil {
-		t.Fatalf("store.Get: %v", err)
-	}
+	got := b
+	got.Metadata = retiredIdentifiersPatch(b).Apply(b.Metadata)
 	if v := got.Metadata[CanonicalInstanceNameMetadata]; v != "" {
 		t.Errorf("%s = %q, want cleared", CanonicalInstanceNameMetadata, v)
 	}
@@ -4978,7 +4971,7 @@ func TestKill_AwakeState(t *testing.T) {
 
 func TestKill_StoppedState_NotRunning(t *testing.T) {
 	store := beads.NewMemStore()
-	sp := runtime.NewFake()
+	sp := runtime.FullFake{Fake: runtime.NewFake()}
 	mgr := newTestManager(t, store, sp)
 
 	b, err := store.Create(beads.Bead{
@@ -5948,6 +5941,120 @@ func TestObserveRuntimeForInfoCarriesAttachError(t *testing.T) {
 	}
 }
 
+func TestTranscriptPathWaitsForKnownClaudeKey(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp)
+
+	workDir := t.TempDir()
+	resume := ProviderResume{
+		ResumeFlag:    "--resume",
+		ResumeStyle:   "flag",
+		SessionIDFlag: "--session-id",
+	}
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "claude", WorkDir: workDir, Provider: "claude", Env: nil, Resume: resume, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	searchBase := t.TempDir()
+	slugDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
+	if err := os.MkdirAll(slugDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	latestPath := filepath.Join(slugDir, "latest.jsonl")
+	if err := os.WriteFile(latestPath, []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(latest): %v", err)
+	}
+
+	path, lookup, err := mgr.TranscriptPathClassified(info.ID, []string{searchBase})
+	if err != nil {
+		t.Fatalf("TranscriptPathClassified: %v", err)
+	}
+	if path != "" || lookup != TranscriptAbsent {
+		t.Fatalf("new keyed session read another conversation: path=%q classification=%v; want absent", path, lookup)
+	}
+
+	keyPath := filepath.Join(slugDir, info.SessionKey+".jsonl")
+	if err := os.WriteFile(keyPath, []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(key): %v", err)
+	}
+	path, lookup, err = mgr.TranscriptPathClassified(info.ID, []string{searchBase})
+	if err != nil {
+		t.Fatalf("TranscriptPathClassified(after write): %v", err)
+	}
+	if path != keyPath || lookup != TranscriptFound {
+		t.Fatalf("path=%q classification=%v, want exact keyed transcript", path, lookup)
+	}
+}
+
+// A start commits the new continuation epoch, and on a fresh wake clears
+// session_key, before it writes the key a session-id-flag provider launches
+// under. In that window the newest work-dir transcript is the conversation the
+// start replaces, so the lookup withholds it, as absent even beside another
+// session in the work directory. Outside a start, or for a provider without a
+// session-id flag, the work-dir fallback still serves it, and another session
+// in the work directory makes it ambiguous.
+func TestTranscriptPathWithholdsWorkDirFallbackWhileStartHasNoKey(t *testing.T) {
+	keyed := ProviderResume{ResumeFlag: "--resume", ResumeStyle: "flag", SessionIDFlag: "--session-id"}
+	keyless := ProviderResume{ResumeFlag: "--resume", ResumeStyle: "flag"}
+	cases := []struct {
+		name    string
+		resume  ProviderResume
+		state   State
+		sibling bool
+		want    TranscriptLookup
+	}{
+		{name: "keyed start before its key is minted", resume: keyed, state: StateCreating, want: TranscriptAbsent},
+		{name: "keyed start beside another session in its work dir", resume: keyed, state: StateCreating, sibling: true, want: TranscriptAbsent},
+		{name: "keyed session asleep with its key cleared", resume: keyed, state: StateAsleep, want: TranscriptFound},
+		{name: "keyed session asleep beside another session in its work dir", resume: keyed, state: StateAsleep, sibling: true, want: TranscriptAmbiguous},
+		{name: "start of a provider without a session-id flag", resume: keyless, state: StateCreating, want: TranscriptFound},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			mgr := NewManagerWithOptions(store, runtime.NewFake())
+			workDir := t.TempDir()
+			opts := CreateOptions{Template: "helper", Title: "", Command: "claude", WorkDir: workDir, Provider: "claude", Env: nil, Resume: tc.resume, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}}
+			info, err := mgr.CreateSession(context.Background(), opts)
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			if tc.sibling {
+				if _, err := mgr.CreateSession(context.Background(), opts); err != nil {
+					t.Fatalf("Create(sibling): %v", err)
+				}
+			}
+			if err := store.SetMetadataBatch(info.ID, map[string]string{"session_key": "", "state": string(tc.state)}); err != nil {
+				t.Fatalf("SetMetadataBatch: %v", err)
+			}
+
+			searchBase := t.TempDir()
+			slugDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
+			if err := os.MkdirAll(slugDir, 0o755); err != nil {
+				t.Fatalf("MkdirAll: %v", err)
+			}
+			previousPath := filepath.Join(slugDir, "previous.jsonl")
+			if err := os.WriteFile(previousPath, []byte("{}\n"), 0o644); err != nil {
+				t.Fatalf("WriteFile(previous): %v", err)
+			}
+
+			path, lookup, err := mgr.TranscriptPathClassified(info.ID, []string{searchBase})
+			if err != nil {
+				t.Fatalf("TranscriptPathClassified: %v", err)
+			}
+			wantPath := ""
+			if tc.want == TranscriptFound {
+				wantPath = previousPath
+			}
+			if path != wantPath || lookup != tc.want {
+				t.Fatalf("path=%q classification=%v, want %q/%v", path, lookup, wantPath, tc.want)
+			}
+		})
+	}
+}
+
 // testActor is an Actor of kind on m's city, the city its Manager leased in
 // before R10; a city path that names no directory gives no City.
 func testActor(m *Manager, kind ActorKind) Actor {
@@ -5982,4 +6089,101 @@ func runtimeOnlyActor(t testing.TB, m *Manager, id string) Actor {
 	t.Cleanup(l.Release)
 	by.Lease = l
 	return by
+}
+
+// TestCloseIsOneTerminalClose: an operator's close lands the Retire cell's
+// clears and the wake pin with the closed status (op.close).
+func TestCloseIsOneTerminalClose(t *testing.T) {
+	store := beads.NewMemStore()
+	mgr := newTestManager(t, store, runtime.NewFake())
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: "/tmp", Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.SetMetadataBatch(info.ID, map[string]string{"pin_awake": "true", "wait_hold": "true", "sleep_intent": "wait-hold"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Close(context.Background(), testActor(mgr, ActorOperator), info.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	b, _ := store.Get(info.ID)
+	if b.Status != "closed" || b.Metadata["pin_awake"] != "" || b.Metadata["wait_hold"] != "" || b.Metadata["sleep_intent"] != "" {
+		t.Fatalf("row = %s %v, want closed with its pin and holds cleared", b.Status, b.Metadata)
+	}
+}
+
+// stopHookFake runs onStop as a runtime stops.
+type stopHookFake struct {
+	*runtime.Fake
+	onStop func()
+}
+
+func (f stopHookFake) Stop(name string) error {
+	f.onStop()
+	return f.Fake.Stop(name)
+}
+
+// TestCloseRefusesANewIncarnation: an operator's close that a new
+// incarnation overtook after its read closes nothing and says so (op.close).
+func TestCloseRefusesANewIncarnation(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := stopHookFake{Fake: runtime.NewFake()}
+	mgr := newTestManager(t, store, sp)
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: "/tmp", Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sp.onStop = func() { _ = store.SetMetadata(info.ID, "instance_token", "a-new-one") }
+	mgr = newTestManager(t, store, sp)
+	if err := mgr.Close(context.Background(), testActor(mgr, ActorOperator), info.ID); !errors.Is(err, ErrSessionCloseSuperseded) {
+		t.Fatalf("Close = %v, want ErrSessionCloseSuperseded", err)
+	}
+	if b, _ := store.Get(info.ID); b.Status != "open" {
+		t.Fatalf("status = %s, want the new incarnation's row open", b.Status)
+	}
+}
+
+// TestCloseLandsPastAKillFence: an operator's close of a row a fresh `gc
+// session kill` fence holds (a kill CLI that died mid-kill, or one racing the
+// close) closes it, on both store kinds, as it did before CommitClose.
+func TestCloseLandsPastAKillFence(t *testing.T) {
+	for name, store := range map[string]beads.Store{"memstore": beads.NewMemStore(), "atomic": beads.NewAtomicCloseMemStore()} {
+		mgr := newTestManager(t, store, runtime.NewFake())
+		info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: "/tmp", Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.SetMetadataBatch(info.ID, map[string]string{"state": "asleep", "state_reason": KillPendingReason, "sleep_reason": "killed", "slept_at": time.Now().UTC().Format(time.RFC3339)}); err != nil {
+			t.Fatal(err)
+		}
+		if err := mgr.Close(context.Background(), testActor(mgr, ActorOperator), info.ID); err != nil {
+			t.Fatalf("%s: Close under a kill fence = %v", name, err)
+		}
+		if b, _ := store.Get(info.ID); b.Status != "closed" {
+			t.Fatalf("%s: status %s, want closed", name, b.Status)
+		}
+	}
+}
+
+// TestCloseRidesALifecycleWrite: an operator's close rests on the incarnation
+// alone (op.close), so a heartbeat's held_until or a wake request written
+// while it stops the runtime does not refuse it.
+func TestCloseRidesALifecycleWrite(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := stopHookFake{Fake: runtime.NewFake()}
+	mgr := newTestManager(t, store, sp)
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: "/tmp", Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sp.onStop = func() {
+		_ = store.SetMetadataBatch(info.ID, map[string]string{"held_until": time.Now().Add(time.Hour).UTC().Format(time.RFC3339), "wake_request": "explicit"})
+	}
+	mgr = newTestManager(t, store, sp)
+	if err := mgr.Close(context.Background(), testActor(mgr, ActorOperator), info.ID); err != nil {
+		t.Fatalf("Close over a lifecycle write = %v, want it to land", err)
+	}
+	if b, _ := store.Get(info.ID); b.Status != "closed" {
+		t.Fatalf("status %s, want closed", b.Status)
+	}
 }

@@ -4,13 +4,27 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
+	"maps"
+	"slices"
 	"strings"
 	"time"
 
+	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/api/apierr"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/session"
 )
+
+const beadParentProjectionWaitTimeout = 10 * time.Second
+
+// beadUpdateDescription documents the reparent read-after-write contract
+// shared by POST /bead/{id}/update and PATCH /bead/{id}.
+var beadUpdateDescription = fmt.Sprintf("Applies the update. When it changes the parent of a bead that is not being closed (moving it to a new parent or clearing its parent), the request waits up to %d seconds until the parent-child listings reflect the change, so an immediate read of the old and new parents' children shows it (subject to those listings' usual status filters). "+
+	"A 409 (the bead was reparented or deleted concurrently), 503 (the request was canceled while waiting), or 504 (the move was not confirmed in time) can arrive after the update was applied: read the bead's current state before retrying.",
+	int(beadParentProjectionWaitTimeout/time.Second))
 
 // humaHandleBeadList is the Huma-typed handler for GET /v0/beads.
 //
@@ -727,6 +741,11 @@ func (s *Server) humaHandleBeadCreate(ctx context.Context, input *BeadCreateInpu
 			if err != nil {
 				return beads.Bead{}, err
 			}
+			// Before anything is written, the assignee's materialized session
+			// included.
+			if err := refuseGenericWrite("(new)", nil, candidate, genericWrite{meta: candidate.Metadata, labels: candidate.Labels}); err != nil {
+				return beads.Bead{}, err
+			}
 			candidate.Assignee, err = s.normalizeRawBeadAssignee(ctx, input.Body.Assignee)
 			if err != nil {
 				return beads.Bead{}, apierr.InvalidRequest.Msg(err.Error())
@@ -763,6 +782,9 @@ func (s *Server) humaHandleBeadClose(ctx context.Context, input *BeadCloseInput)
 	id := input.ID
 	store, current, err := s.resolveBeadOwner(id)
 	if err != nil {
+		return nil, err
+	}
+	if err := refuseOwned(id, "closes", "path.id", current); err != nil {
 		return nil, err
 	}
 	var submitted map[string]string
@@ -818,11 +840,11 @@ func (s *Server) humaHandleBeadReopen(_ context.Context, input *BeadReopenInput)
 	if err != nil {
 		return nil, err
 	}
+	if err := refuseOwned(id, "reopens", "path.id", b); err != nil {
+		return nil, err
+	}
 	if b.Status != "closed" {
 		return nil, apierr.ConflictWrongState.Msg("conflict: bead " + id + " is not closed (status: " + b.Status + ")")
-	}
-	if err := session.ClearRuntimeLeaseForReopen(store, id); err != nil {
-		return nil, apierr.Internal.Msg(err.Error())
 	}
 	if err := store.Reopen(id); err != nil {
 		return nil, apierr.Internal.Msg(err.Error())
@@ -835,8 +857,12 @@ func (s *Server) humaHandleBeadReopen(_ context.Context, input *BeadReopenInput)
 // humaHandleBeadAssign is the Huma-typed handler for POST /v0/bead/{id}/assign.
 func (s *Server) humaHandleBeadAssign(ctx context.Context, input *BeadAssignInput) (*IndexOutput[map[string]string], error) {
 	id := input.ID
-	store, _, err := s.resolveBeadOwner(id)
+	store, current, err := s.resolveBeadOwner(id)
 	if err != nil {
+		return nil, err
+	}
+	// Before the assignee's normalization, which may materialize a session.
+	if err := refuseOwned(id, "assigns", "path.id", current); err != nil {
 		return nil, err
 	}
 	assignee, err := s.normalizeRawBeadAssignee(ctx, input.Body.Assignee)
@@ -896,16 +922,17 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 	if err != nil {
 		return nil, err
 	}
+	// Before the assignee's normalization, which may materialize a named
+	// session: a refused write creates nothing.
+	if err := refuseGenericWrite(id, &current, afterUpdate(current, body), genericWrite{meta: body.Metadata, labels: body.Labels, removeLabels: body.RemoveLabels}); err != nil {
+		return nil, err
+	}
 	if body.Assignee != nil {
 		assignee, err := s.normalizeRawBeadAssignee(ctx, *body.Assignee)
 		if err != nil {
 			return nil, apierr.InvalidRequest.Msg(err.Error())
 		}
 		opts.Assignee = &assignee
-	}
-	waitStatus := current.Status
-	if opts.Status != nil {
-		waitStatus = *opts.Status
 	}
 	if closesStatus(opts.Status) {
 		// This spelling closes the bead, so it answers to the same contract as
@@ -925,19 +952,149 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 		}
 		return nil, apierr.Internal.Msg(err.Error())
 	}
-	if opts.ParentID != nil && current.ParentID != *opts.ParentID && waitStatus != "closed" {
+	if opts.ParentID != nil && current.ParentID != *opts.ParentID && !closesStatus(opts.Status) {
 		if waiter, ok := store.(beads.ParentProjectionWaiter); ok {
-			if err := waiter.WaitForParentProjection(ctx, id, current.ParentID, *opts.ParentID); err != nil {
-				if errors.Is(err, beads.ErrParentProjectionSuperseded) {
-					return nil, apierr.ConflictConcurrentModify.Msg("conflict: bead " + id + " was reparented concurrently")
-				}
-				return nil, apierr.Internal.Msg(err.Error())
+			if err := awaitBeadParentProjection(ctx, waiter, id, current.ParentID, *opts.ParentID); err != nil {
+				return nil, err
 			}
 		}
 	}
 	resp := &OKResponse{}
 	resp.Body.Status = "updated"
 	return resp, nil
+}
+
+// refuseOwned refuses a generic write to b, a controller-owned row
+// (coordclass.ControllerOwned; architecture B): the generic bead API never
+// writes one, whatever the write (create, update of any field, close,
+// delete, reopen, assign, sling, convoy membership). The owner's verbs do,
+// and bd is the escape hatch. verb names the write, where is the refused
+// field's errors[] location.
+func refuseOwned(id, verb, where string, b beads.Bead) error {
+	if !coordclass.ControllerOwned(b) {
+		return nil
+	}
+	kind, owner := ownerOf(b)
+	return apierr.ValidationFailed.With(fmt.Sprintf(
+		"bead %s is a %s, which only %s writes: the generic bead API never %s one; nothing was written", id, kind, owner, verb),
+		&huma.ErrorDetail{Location: where, Message: "a controller-owned " + kind, Value: id})
+}
+
+// ownerOf is a controller-owned row's kind and who writes it. A typed work
+// bead carrying the session label is no session any verb owns, so bd is its
+// only writer (the #7742 review).
+func ownerOf(b beads.Bead) (kind, owner string) {
+	switch t := strings.ToLower(strings.TrimSpace(b.Type)); t {
+	case session.StartupHealthEpisodeType:
+		return "startup-health episode", "the controller's startup health"
+	case "convergence":
+		return "convergence root", "the convergence handler (gc converge, the convergence routes)"
+	case session.BeadType, "":
+		return "session row", "the session verbs (POST /v0/city/{cityName}/sessions and /session/{id}/..., /pin, /unpin, gc session)"
+	}
+	return "bead carrying the " + session.LabelSession + " label", "bd (bd update, bd close)"
+}
+
+// refuseGenericWrite refuses, before anything is written (an assignee's
+// materialized session included), a generic bead create or update
+// (architecture B; ARCH-RESTRUCTURE-2 R7):
+//   - on any bead, a metadata key that fails beadmeta.ValidKey: a bd-backed
+//     store would split "wait_hold=true" into another key; and a label that
+//     fails beadmeta.ValidLabel, which bd reads as a CSV record
+//     ("x,gc:session" or "gc:session\n" would add the session label);
+//   - any write to a controller-owned row (refuseOwned), and any that would
+//     make one, at the type or label that does.
+//
+// before is the row as read, nil for a create; after is the row with the
+// request's type and labels applied. Each refusal is 422 with an errors[]
+// entry per offending field.
+func refuseGenericWrite(id string, before *beads.Bead, after beads.Bead, w genericWrite) error {
+	var invalid []*huma.ErrorDetail
+	for _, k := range slices.Sorted(maps.Keys(w.meta)) {
+		if !beadmeta.ValidKey(k) {
+			invalid = append(invalid, &huma.ErrorDetail{Location: "body.metadata." + k, Message: "invalid metadata key: must match " + beadmeta.ValidKeyPattern, Value: k})
+		}
+	}
+	for field, labels := range map[string][]string{"labels": w.labels, "remove_labels": w.removeLabels} {
+		for i, l := range labels {
+			if !beadmeta.ValidLabel(l) {
+				invalid = append(invalid, &huma.ErrorDetail{Location: fmt.Sprintf("body.%s[%d]", field, i), Message: "a label must read back as itself from one CSV record: no comma, quote, newline or carriage return (bd reads labels as a CSV list)", Value: l})
+			}
+		}
+	}
+	if len(invalid) > 0 {
+		slices.SortFunc(invalid, func(a, b *huma.ErrorDetail) int { return strings.Compare(a.Location, b.Location) })
+		return apierr.ValidationFailed.With("bead "+id+": invalid metadata key or label; nothing was written", invalid...)
+	}
+	if before != nil {
+		if err := refuseOwned(id, "writes", "path.id", *before); err != nil {
+			return err
+		}
+	}
+	if !coordclass.ControllerOwned(after) {
+		return nil
+	}
+	kind, owner := ownerOf(after)
+	detail := &huma.ErrorDetail{Location: "body.type", Message: "makes the row a controller-owned " + kind, Value: after.Type}
+	if i := coordclass.ControllerOwnedLabel(w.labels); i >= 0 {
+		detail = &huma.ErrorDetail{Location: fmt.Sprintf("body.labels[%d]", i), Message: "makes the row a controller-owned " + kind, Value: w.labels[i]}
+	}
+	return apierr.ValidationFailed.With(fmt.Sprintf(
+		"bead %s: the generic bead API never makes a %s, which only %s writes; nothing was written", id, kind, owner), detail)
+}
+
+// genericWrite is what a generic create or update asks to write: its
+// metadata, and the labels it adds and removes.
+type genericWrite struct {
+	meta                 map[string]string
+	labels, removeLabels []string
+}
+
+// afterUpdate is current with the update's type and label changes applied:
+// the row the update would leave, as far as whether it is controller-owned.
+func afterUpdate(current beads.Bead, body beadUpdateBody) beads.Bead {
+	after := current
+	if body.Type != nil {
+		after.Type = *body.Type
+	}
+	labels := slices.Clone(current.Labels)
+	labels = append(labels, body.Labels...)
+	after.Labels = slices.DeleteFunc(labels, func(l string) bool { return slices.Contains(body.RemoveLabels, l) })
+	return after
+}
+
+// awaitBeadParentProjection waits, for at most
+// beadParentProjectionWaitTimeout, until the parent-child listings reflect a
+// reparent of bead id that the store has already applied, and maps a failed
+// wait to its HTTP error.
+func awaitBeadParentProjection(ctx context.Context, waiter beads.ParentProjectionWaiter, id, oldParentID, newParentID string) error {
+	waitCtx, cancel := context.WithTimeout(ctx, beadParentProjectionWaitTimeout)
+	defer cancel()
+	err := waiter.WaitForParentProjection(waitCtx, id, oldParentID, newParentID)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, beads.ErrParentProjectionSuperseded):
+		return apierr.ConflictConcurrentModify.Msg("conflict: bead " + id + " was reparented concurrently")
+	case errors.Is(err, beads.ErrNotFound):
+		return apierr.ConflictConcurrentDelete.Msg("conflict: bead " + id + " was deleted concurrently")
+	}
+	log.Printf("api: bead %s parent projection confirmation failed after update: %v", id, err)
+	// Classify by why this wait stopped: its own context says so directly,
+	// whereas err may also carry an earlier backend timeout from inside the
+	// wait. Reading it before cancel runs keeps that answer.
+	stopped := waitCtx.Err()
+	if stopped == nil {
+		stopped = err
+	}
+	switch {
+	case errors.Is(stopped, context.DeadlineExceeded):
+		return apierr.GatewayTimeout.Msg("bead " + id + " was updated, but its parent projection was not confirmed before the timeout")
+	case errors.Is(stopped, context.Canceled):
+		return apierr.ServiceUnavailable.Msg("bead " + id + " was updated, but parent projection confirmation was canceled")
+	default:
+		return apierr.Internal.Msg(err.Error())
+	}
 }
 
 // humaHandleBeadDelete is the Huma-typed handler for DELETE /v0/bead/{id}.
@@ -965,8 +1122,11 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 // refused per-bead close: each tears down an entire subtree rather than one bead.
 func (s *Server) humaHandleBeadDelete(_ context.Context, input *BeadDeleteInput) (*OKResponse, error) {
 	id := input.ID
-	store, _, err := s.resolveBeadOwner(id)
+	store, current, err := s.resolveBeadOwner(id)
 	if err != nil {
+		return nil, err
+	}
+	if err := refuseOwned(id, "deletes", "path.id", current); err != nil {
 		return nil, err
 	}
 	if err := store.Close(id); err != nil {

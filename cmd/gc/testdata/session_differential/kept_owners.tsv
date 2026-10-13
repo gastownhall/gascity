@@ -1,4 +1,4 @@
-# The KEPT rows of reconciler-review p0/BEHAVIORS.md (sha256 e7b0f491705b, 2026-10-08), by owner cell:
+# The KEPT rows of reconciler-review p0/BEHAVIORS.md (sha256 e7b0f491705b, 2026-10-08; DRAIN-010 and SESS-069 flipped to KEPT under A11, 2026-10-12, #7642), by owner cell:
 # <the text after "→ **v5:** KEPT: ">\t<row IDs, comma-separated>. Regenerate when BEHAVIORS.md changes:
 #   for each table row, take the Owner cell's text after "KEPT:" up to the next "|", and group the IDs by it.
 pass record (R6)	SESS-001
@@ -9,6 +9,7 @@ AL1 named-duplicate verdict	SESS-011,SESS-012
 S1 template resolution	SESS-026
 AL1 allocate	SESS-027,SESS-028,SESS-583,SESS-604,POOL-001,POOL-002,POOL-003,POOL-004,POOL-006,POOL-007,POOL-008,POOL-009,POOL-010,POOL-011,POOL-012,POOL-016,POOL-017,POOL-018,POOL-021,POOL-022,POOL-023,POOL-024,POOL-025,POOL-026,POOL-027,POOL-029,POOL-030,POOL-031,POOL-032,POOL-033,POOL-034,POOL-035,POOL-036,POOL-037,POOL-038,POOL-039,POOL-040,POOL-041,POOL-042,POOL-043,POOL-044,POOL-045,POOL-047,POOL-048,POOL-049,POOL-050,POOL-054,POOL-055,POOL-057,POOL-059,POOL-061,POOL-063,POOL-068,POOL-069,POOL-070,POOL-073,POOL-074,POOL-082,SESS-706,SESS-707,SESS-708,SESS-712,GUAR-009,GUAR-030,GUAR-031,GUAR-033,GUAR-044,INC-004,INC-011,INC-013,INC-017,INC-019,INC-036
 A4 + D3 stop verb, D4 finalizePatch	SESS-033,SESS-034,SESS-035,SESS-036,DRAIN-051,DRAIN-053,DRAIN-054,DRAIN-055,GUAR-005
+A11 floor-ack cancel (PAR-FLOORACK, #7642)	SESS-069,DRAIN-010
 AL1 Keep on partial + P2 boot gate	SESS-037,SESS-073,SESS-079
 A5 unknown state	SESS-044,SESS-047
 A5 unknown state: the planner records `session.unknown_state` on first sight (OBS1 follow-up); no `unknown_state_*` markers (§12.2 row 32)	SESS-045

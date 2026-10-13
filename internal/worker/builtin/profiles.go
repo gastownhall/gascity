@@ -325,7 +325,7 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		PrintArgs:         []string{"exec"},
 		TitleModel:        "o4-mini",
 		PermissionModes: map[string]string{
-			"suggest":      "--ask-for-approval untrusted --sandbox read-only",
+			"suggest":      "--ask-for-approval on-request --sandbox read-only",
 			"auto-edit":    "--sandbox workspace-write --ask-for-approval never",
 			"unrestricted": "--dangerously-bypass-approvals-and-sandbox",
 		},
@@ -336,7 +336,28 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 				Type:    "select",
 				Default: "unrestricted",
 				Choices: []BuiltinOptionChoice{
-					{Value: "suggest", Label: "Suggest (ask for approval)", FlagArgs: []string{"--ask-for-approval", "untrusted", "--sandbox", "read-only"}},
+					// The first two aliases are the retired "untrusted"
+					// spelling (codex-cli 0.149.0), with and without
+					// suggest's sandbox, so provider or agent args written for
+					// it migrate to suggest instead of reaching codex, which
+					// rejects it. The third makes a lone on-request select
+					// suggest too. Provider-layer normalization and the launch
+					// builder strip a lone policy either way, and without a
+					// choice to infer the session would fall back to the
+					// unrestricted default. Paired with --sandbox
+					// workspace-write, either policy narrows to suggest's
+					// read-only sandbox, which fails safe. Resume completion
+					// matches a one-group alias with any approval value, so a
+					// resume_command that names an --ask-for-approval policy
+					// keeps it and gets no permission flags added.
+					{
+						Value: "suggest", Label: "Suggest (ask for approval)", FlagArgs: []string{"--ask-for-approval", "on-request", "--sandbox", "read-only"},
+						FlagAliases: [][]string{
+							{"--ask-for-approval", "untrusted", "--sandbox", "read-only"},
+							{"--ask-for-approval", "untrusted"},
+							{"--ask-for-approval", "on-request"},
+						},
+					},
 					{Value: "auto-edit", Label: "Full auto (sandboxed)", FlagArgs: []string{"--sandbox", "workspace-write", "--ask-for-approval", "never"}},
 					{Value: "unrestricted", Label: "Bypass all (no sandbox)", FlagArgs: []string{"--dangerously-bypass-approvals-and-sandbox"}},
 				},

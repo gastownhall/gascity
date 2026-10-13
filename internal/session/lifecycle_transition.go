@@ -61,6 +61,19 @@ func clearPrimingMarkers(patch MetadataPatch) {
 	}
 }
 
+// resumeRunKeys are the resume backstop's run (mc-bm1af): its count of
+// resume-shaped failures, and whether the last committed launch resumed.
+// They belong to one conversation, so every conversation reset clears them
+// (ClearResumeRun): a new conversation must not inherit the old one's run.
+var resumeRunKeys = []string{"resume_failures", "resume_launch"}
+
+// ClearResumeRun adds the resume backstop's run to patch, cleared.
+func ClearResumeRun(patch MetadataPatch) {
+	for _, k := range resumeRunKeys {
+		patch[k] = ""
+	}
+}
+
 // PromptHash returns the sha256 hex digest of the exact rendered startup
 // prompt. The empty prompt hashes to "" (not the sha256 of the empty string),
 // so it is one of the two independent gates — alongside promptDelivery("")
@@ -93,6 +106,9 @@ var freshWakeConversationResetKeys = []string{
 	PrimedAtMetadataKey,
 	PrimingAttemptedAtMetadataKey,
 	PromptHashMetadataKey,
+	// The resume backstop's run belongs to the conversation (ClearResumeRun).
+	"resume_failures",
+	"resume_launch",
 }
 
 // ResetCommittedAtKey records when a restart handoff durably committed.
@@ -132,6 +148,7 @@ func applyFreshWakeConversationReset(patch MetadataPatch) {
 	patch["live_hash"] = ""
 	patch[startupDialogVerifiedKey] = ""
 	clearPrimingMarkers(patch)
+	ClearResumeRun(patch)
 }
 
 func pendingCreateStartedAt(now time.Time) string {
@@ -456,6 +473,23 @@ func SleepPatch(now time.Time, reason string) MetadataPatch {
 	}
 }
 
+// KeepQuarantineReason drops patch's sleep_reason while the row's quarantine
+// is in force at now and its reason is the quarantine's (quarantine,
+// rate_limit, context-churn): a finalize landing after a late quarantine
+// never overwrites its reason, as the quarantine dominates (mc-slkxd), nor
+// does a crash or churn accrual during it (ExitAccrual.Over, v5.9z). It
+// returns patch, edited in place.
+func KeepQuarantineReason(patch MetadataPatch, d Disposition, reason string, now time.Time) MetadataPatch {
+	if _, ok := patch["sleep_reason"]; !ok || !d.Quarantine.After(now) {
+		return patch
+	}
+	switch SleepReason(strings.TrimSpace(reason)) {
+	case SleepReasonQuarantine, SleepReasonRateLimit, SleepReasonContextChurn:
+		delete(patch, "sleep_reason")
+	}
+	return patch
+}
+
 // AcknowledgeDrainPatch records an agent-acknowledged drain. Drained is a
 // compatibility state distinct from ordinary asleep: demand alone does not
 // reselect it, but explicit attach or work can. Like SleepPatch, it stamps
@@ -514,8 +548,10 @@ func RestartRequestPatch(sessionKey string, now time.Time) MetadataPatch {
 	// A restart handoff clears started_config_hash to force the next wake onto a
 	// first-start path, so the priming markers share that clear (S19 Stage 2
 	// priming-key lifetime rule): the fresh conversation must re-prime rather
-	// than inherit the previous incarnation's confirmation pair.
+	// than inherit the previous incarnation's confirmation pair. The fresh
+	// conversation starts the resume backstop's run anew too.
 	clearPrimingMarkers(patch)
+	ClearResumeRun(patch)
 	if sessionKey != "" {
 		patch["session_key"] = sessionKey
 	}
@@ -526,6 +562,33 @@ func RestartRequestPatch(sessionKey string, now time.Time) MetadataPatch {
 // config drift. Creating claims a new runtime start; asleep stays dormant
 // until the next normal wake reason.
 func ConfigDriftResetPatch(nextState State, sessionKey string, now time.Time) MetadataPatch {
+	patch := configDriftReset(nextState, sessionKey)
+	if nextState == StateCreating || nextState == StateStartPending {
+		patch["pending_create_claim"] = "true"
+		patch["pending_create_started_at"] = pendingCreateStartedAt(now)
+	}
+	return patch
+}
+
+// ConfigDriftAsleepResetPatch is ConfigDriftResetPatch(StateAsleep, ...),
+// which reads no clock: the v2 asleep named repair's (SESS-568).
+func ConfigDriftAsleepResetPatch(sessionKey string) MetadataPatch {
+	return configDriftReset(StateAsleep, sessionKey)
+}
+
+// ConfigDriftRestartPatch is ConfigDriftResetPatch(StateStartPending, ...)
+// at now, which it reads from its caller: the v2 named restart in place's
+// (SESS-557), written after its stop.
+func ConfigDriftRestartPatch(sessionKey string, now time.Time) MetadataPatch {
+	patch := configDriftReset(StateStartPending, sessionKey)
+	patch["pending_create_claim"] = "true"
+	patch["pending_create_started_at"] = now.UTC().Format(time.RFC3339)
+	return patch
+}
+
+// configDriftReset is a config-drift reset into nextState, its pending
+// create claim (a start's) aside.
+func configDriftReset(nextState State, sessionKey string) MetadataPatch {
 	patch := MetadataPatch{
 		"state":                      string(nextState),
 		"last_woke_at":               "",
@@ -535,10 +598,6 @@ func ConfigDriftResetPatch(nextState State, sessionKey string, now time.Time) Me
 		"pending_create_started_at":  "",
 	}
 	applyFreshWakeConversationReset(patch)
-	if nextState == StateCreating || nextState == StateStartPending {
-		patch["pending_create_claim"] = "true"
-		patch["pending_create_started_at"] = pendingCreateStartedAt(now)
-	}
 	if sessionKey != "" {
 		patch["session_key"] = sessionKey
 	}

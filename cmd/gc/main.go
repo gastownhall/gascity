@@ -239,13 +239,17 @@ func runWithRootCommandOptionsAndLifecycle(args []string, stdout, stderr io.Writ
 			return code
 		}
 	}
+	if target, _, findErr := root.Find(args); findErr == nil && invocationStoreMemoEligible(target) {
+		endStoreMemo := beginInvocationStoreMemo()
+		defer endInvocationStoreMemoLogged(endStoreMemo, stderr)
+	}
 	executedCommand, executeErr := root.ExecuteC()
 	lifecycle.attemptFinalOutcome(resolveProductMetricsFinalOutcome(executedCommand, classification))
 	if executeErr != nil {
 		code := commandExitCode(executeErr)
 		if bufferJSONExecution {
 			if len(bytes.TrimSpace(jsonStdout.Bytes())) > 0 {
-				if _, copyErr := io.Copy(stdout, &jsonStdout); copyErr != nil {
+				if copyErr := flushBufferedJSON(stdout, stderr, &jsonStdout); copyErr != nil {
 					return 1
 				}
 			} else {
@@ -257,11 +261,22 @@ func runWithRootCommandOptionsAndLifecycle(args []string, stdout, stderr io.Writ
 		return code
 	}
 	if bufferJSONExecution {
-		if _, err := io.Copy(stdout, &jsonStdout); err != nil {
+		if err := flushBufferedJSON(stdout, stderr, &jsonStdout); err != nil {
 			return 1
 		}
 	}
 	return 0
+}
+
+// flushBufferedJSON copies a buffered --json result to stdout. The copy is the
+// only write a full disk or closed descriptor can fail, so a failure is named
+// on stderr rather than leaving the caller an empty file and a bare exit 1.
+func flushBufferedJSON(stdout, stderr io.Writer, buffered *bytes.Buffer) error {
+	if _, err := io.Copy(stdout, buffered); err != nil {
+		fmt.Fprintf(stderr, "gc: writing JSON output: %v\n", err) //nolint:errcheck // best-effort stderr
+		return err
+	}
+	return nil
 }
 
 func commandFailureMessage(err error) string {
@@ -1725,6 +1740,26 @@ func openStoreResultAtForCityScoped(storePath, cityPath string, cfg *config.City
 	if authoritative {
 		provider = authoritativeBeadsProviderForScope(scopeRoot, runtimeCityPath)
 	}
+	// A one-shot invocation with the memo active opens each scope once; see
+	// invocation_store_memo.go. Long-lived opens never take the memo.
+	var memoEntry *invocationStoreEntry
+	if memo := activeInvocationStoreMemo(); memo != nil && !longLived {
+		memoEntry = memo.entry(invocationStoreKey{scopeRoot: scopeRoot, cityPath: runtimeCityPath, provider: provider, authoritative: authoritative})
+		memoEntry.mu.Lock()
+		defer memoEntry.mu.Unlock()
+		if memoEntry.opened {
+			if cfg == nil {
+				cfg = memoEntry.cfg
+			}
+			mode, nativeTransport := storeOpenModes(cfg, modeOverride, haveMode, nativeOverride)
+			if mode == memoEntry.mode && nativeTransport == memoEntry.nativeTransport {
+				return memoEntry.borrow(cfg), nil
+			}
+			// The same scope asked for under a different write discipline is a
+			// different store: open it unmemoized, as without the memo.
+			memoEntry = nil
+		}
+	}
 	if cfg == nil {
 		loaded, err := loadCityConfigForStoreOpen(runtimeCityPath, provider, nativeOverride)
 		if err != nil {
@@ -1744,14 +1779,7 @@ func openStoreResultAtForCityScoped(storePath, cityPath string, cfg *config.City
 				"update provider in city.toml to a supported value such as %q, or remove the setting to use the default",
 			provider, "doltlite")
 	}
-	mode := resolvedConditionalWritesMode(cfg)
-	if haveMode {
-		mode = modeOverride
-	}
-	nativeTransport := resolvedNativeTransportMode(cfg)
-	if nativeOverride != nil {
-		nativeTransport = *nativeOverride
-	}
+	mode, nativeTransport := storeOpenModes(cfg, modeOverride, haveMode, nativeOverride)
 	// One bd opener, used twice: as the factory's fallback store and as the
 	// WRITE leaf of the proxied split store. They must be the same store, or a
 	// demotion would silently change which store is doing the writing.
@@ -1843,8 +1871,31 @@ func openStoreResultAtForCityScoped(storePath, cityPath string, cfg *config.City
 	if observeOpenedStore != nil {
 		result.Store = observeOpenedStore(scopeRoot, result.Store)
 	}
+	if memoEntry != nil {
+		memoEntry.opened = true
+		memoEntry.result = result
+		memoEntry.cfg = cfg
+		memoEntry.mode = mode
+		memoEntry.nativeTransport = nativeTransport
+		return memoEntry.borrow(cfg), nil
+	}
 	result.Store = wrapStoreWithBeadPolicies(result.Store, cfg)
 	return result, nil
+}
+
+// storeOpenModes resolves the conditional-writes mode and the native transport
+// a store open runs under: the caller's boot-latched values when it carries
+// them, otherwise cfg's.
+func storeOpenModes(cfg *config.City, modeOverride gate.Mode, haveMode bool, nativeOverride *beads.NativeTransportMode) (gate.Mode, beads.NativeTransportMode) {
+	mode := resolvedConditionalWritesMode(cfg)
+	if haveMode {
+		mode = modeOverride
+	}
+	nativeTransport := resolvedNativeTransportMode(cfg)
+	if nativeOverride != nil {
+		nativeTransport = *nativeOverride
+	}
+	return mode, nativeTransport
 }
 
 // observeOpenedStore is a test seam at the single store-open point. When set,

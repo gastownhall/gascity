@@ -92,7 +92,8 @@ func (s *Server) handleSessionKill(w http.ResponseWriter, r *http.Request) {
 		writeSessionManagerError(w, err)
 		return
 	}
-	if err := handle.Kill(r.Context(), s.actor(session.ActorOperator)); err != nil {
+	// Under the kill fence, as `gc session kill` (see Manager.KillFenced).
+	if err := s.sessionManager(store.Store).KillFenced(r.Context(), s.actor(session.ActorOperator), id, handle.Kill); err != nil {
 		writeSessionManagerError(w, err)
 		return
 	}

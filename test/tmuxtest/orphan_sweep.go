@@ -260,10 +260,13 @@ func SweepOrphanPIDPrefixedDirs(root, prefix string, diagnostics io.Writer) {
 			}
 			reason = "pid dead, no sentinel"
 		}
+		if !killTmuxServersUnder(path, diagnostics) {
+			_, _ = fmt.Fprintf(diagnostics, "tmuxtest: retaining orphaned socket parent %s (server cleanup unresolved)\n", path)
+			continue
+		}
 		// Name each removal so a recurrence of ga-djbcqt is attributable
 		// from run logs instead of gate-log forensics.
 		_, _ = fmt.Fprintf(diagnostics, "tmuxtest: removing orphaned socket parent %s (%s)\n", path, reason)
-		killTmuxServersUnder(path, diagnostics)
 		_ = os.RemoveAll(path)
 	}
 }
@@ -282,10 +285,8 @@ const killTmuxServerWait = 2 * time.Second
 // the reaper waits out killTmuxServerWait.
 const killTmuxServerPollInterval = 20 * time.Millisecond
 
-// errNoTmuxServerAtSocket reports that nothing answered the PID query at a
-// socket -- a stale socket file left by an already-dead server, which is the
-// common case and worth no diagnostics. It is distinct from a query that
-// timed out, which means a peer is holding the socket and did not answer.
+// errNoTmuxServerAtSocket reports an unsuccessful PID query. A stale socket
+// is a common cause, but a nonzero client exit does not prove the peer is gone.
 var errNoTmuxServerAtSocket = errors.New("no tmux server answering at socket")
 
 // isTmuxArgv reports whether argv belongs to a tmux process, matching on the
@@ -352,32 +353,39 @@ var liveTmuxServerReaper = tmuxServerReaper{
 }
 
 // killTmuxServersUnder reaps the tmux server behind every Unix domain socket
-// file found under dir, best-effort, and waits for each server process to
-// actually exit before returning. A tmux server whose creator died before
-// reaping it is still listening on that socket; os.RemoveAll only unlinks the
+// file found under dir and reports whether every peer was confirmed gone.
+// A tmux server whose creator died before reaping it is still listening on
+// that socket; os.RemoveAll only unlinks the
 // socket file and never touches the server process itself, which is exactly
 // what left it running and orphaned, reparented to init (ga-t33q83).
-func killTmuxServersUnder(dir string, diagnostics io.Writer) {
-	liveTmuxServerReaper.killServersUnder(dir, diagnostics)
+func killTmuxServersUnder(dir string, diagnostics io.Writer) bool {
+	return liveTmuxServerReaper.killServersUnder(dir, diagnostics)
 }
 
-// killServersUnder walks dir and reaps the server behind each socket file.
-func (r tmuxServerReaper) killServersUnder(dir string, diagnostics io.Writer) {
+// killServersUnder reports false if any socket's peer or part of dir could
+// not be checked, so the caller retains the directory for later diagnosis.
+func (r tmuxServerReaper) killServersUnder(dir string, diagnostics io.Writer) bool {
+	allReaped := true
 	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
+			allReaped = false
 			return nil
 		}
 		info, err := d.Info()
-		if err != nil || info.Mode()&os.ModeSocket == 0 {
+		if err != nil {
+			allReaped = false
 			return nil
 		}
-		r.reapServerAtSocket(path, diagnostics)
+		if info.Mode()&os.ModeSocket != 0 && !r.reapServerAtSocket(path, diagnostics) {
+			allReaped = false
+		}
 		return nil
 	})
+	return allReaped
 }
 
-// reapServerAtSocket kills the tmux server bound to socketPath and does not
-// return until that server is gone or has resisted every escalation.
+// reapServerAtSocket kills the tmux server bound to socketPath and reports
+// true only after confirming that the identified server is gone.
 //
 // The server's own PID is queried before the kill, since the socket -- and
 // any session target on it -- may already be gone by the time teardown
@@ -387,8 +395,8 @@ func (r tmuxServerReaper) killServersUnder(dir string, diagnostics io.Writer) {
 // wedged-but-accepting peer would hang whole suites with no output.
 //
 // A failed or timed-out kill-server never ends the reap: the process is
-// polled and SIGKILLed anyway, because the caller unlinks the socket either
-// way and a survivor would be left running, socketless, and undiscoverable.
+// polled and SIGKILLed anyway. An unresolved reap retains the socket parent
+// so a survivor remains discoverable.
 // Every outcome, including failure, is named on diagnostics so such a
 // survivor stays attributable from run logs.
 //
@@ -409,17 +417,17 @@ func (r tmuxServerReaper) killServersUnder(dir string, diagnostics io.Writer) {
 // reason about, so the token is one of two independent gates; the other --
 // pidutil.AliveWithCmdline, which must still see argv[0] basename "tmux" --
 // keeps narrowing the target when the token is missing.
-func (r tmuxServerReaper) reapServerAtSocket(socketPath string, diagnostics io.Writer) {
+func (r tmuxServerReaper) reapServerAtSocket(socketPath string, diagnostics io.Writer) bool {
 	pid, startTime, err := r.serverIdentity(socketPath)
 	if err != nil {
 		if !errors.Is(err, errNoTmuxServerAtSocket) {
 			_, _ = fmt.Fprintf(diagnostics, "tmuxtest: leaving socket %s unreaped: %v\n", socketPath, err)
 		}
-		return
+		return false
 	}
 	if pid == os.Getpid() {
 		_, _ = fmt.Fprintf(diagnostics, "tmuxtest: socket %s reported this process (pid %d) as its tmux server; not signaling\n", socketPath, pid)
-		return
+		return false
 	}
 	if killErr := r.killServer(socketPath); killErr != nil {
 		_, _ = fmt.Fprintf(diagnostics, "tmuxtest: kill-server failed for orphaned tmux server at socket %s (pid %d): %v\n", socketPath, pid, killErr)
@@ -430,15 +438,15 @@ func (r tmuxServerReaper) reapServerAtSocket(socketPath string, diagnostics io.W
 	}
 	if !r.sameProcess(pid, startTime) {
 		_, _ = fmt.Fprintf(diagnostics, "tmuxtest: killed orphaned tmux server at socket %s (pid %d)\n", socketPath, pid)
-		return
+		return true
 	}
 	if !r.isTmuxProcess(pid) {
 		_, _ = fmt.Fprintf(diagnostics, "tmuxtest: orphaned tmux server at socket %s (pid %d) outlived kill-server and no longer looks like tmux; not signaling\n", socketPath, pid)
-		return
+		return false
 	}
 	if sigErr := r.signal(pid, syscall.SIGKILL); sigErr != nil {
 		_, _ = fmt.Fprintf(diagnostics, "tmuxtest: SIGKILL failed for orphaned tmux server at socket %s (pid %d): %v\n", socketPath, pid, sigErr)
-		return
+		return false
 	}
 	sigDeadline := time.Now().Add(r.exitWait)
 	for r.sameProcess(pid, startTime) && time.Now().Before(sigDeadline) {
@@ -446,9 +454,10 @@ func (r tmuxServerReaper) reapServerAtSocket(socketPath string, diagnostics io.W
 	}
 	if r.sameProcess(pid, startTime) {
 		_, _ = fmt.Fprintf(diagnostics, "tmuxtest: orphaned tmux server at socket %s (pid %d) survived kill-server and SIGKILL\n", socketPath, pid)
-		return
+		return false
 	}
 	_, _ = fmt.Fprintf(diagnostics, "tmuxtest: SIGKILLed orphaned tmux server at socket %s (pid %d) after it outlived kill-server by %s\n", socketPath, pid, r.exitWait)
+	return true
 }
 
 // NewSocketParentDir sweeps orphaned sibling socket parent directories

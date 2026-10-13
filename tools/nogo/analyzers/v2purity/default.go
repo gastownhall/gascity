@@ -24,7 +24,7 @@ var Default = Config{
 	Roots: []string{
 		"github.com/gastownhall/gascity/cmd/gc.decideAllocation", "github.com/gastownhall/gascity/cmd/gc.admit", "github.com/gastownhall/gascity/cmd/gc.decideRow",
 		"github.com/gastownhall/gascity/cmd/gc.newRelevantSet", "github.com/gastownhall/gascity/cmd/gc.beadEventRelevant", "github.com/gastownhall/gascity/cmd/gc.inventoryChanged", "github.com/gastownhall/gascity/cmd/gc.healthChanged",
-		"section.Decide", "probed(decide)",
+		"section.Decide", "section.Moved", "probed(decide)",
 	},
 	Exempt: map[string]Exemption{
 		"(*github.com/gastownhall/gascity/cmd/gc.SessionReconcilerTraceCycle).RecordDecision":   {Class: "dead", Bead: "mc-zndi7.91", Via: []string{"(*github.com/gastownhall/gascity/cmd/gc.decidePass).computePoolDesired"}, Reason: "dead: computePoolDesired passes a nil trace (cmd/gc/allocator_plan.go:170), and RecordDecision returns on a nil receiver (cmd/gc/session_reconciler_trace_collector.go:686). It covers the trace recorder under it"},

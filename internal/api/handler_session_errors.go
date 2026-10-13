@@ -29,6 +29,8 @@ func writeSessionManagerError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, "invalid_interaction", err.Error())
 	case errors.Is(err, session.ErrSessionClosed), errors.Is(err, session.ErrResumeRequired), errors.Is(err, session.ErrSessionKillPending):
 		writeError(w, http.StatusConflict, "conflict", err.Error())
+	case errors.Is(err, session.ErrSessionInactive):
+		writeError(w, http.StatusConflict, "conflict", err.Error())
 	case errors.Is(err, session.ErrSessionStarting):
 		// Retryable: another holder (usually the controller) has the runtime lease.
 		writeError(w, http.StatusConflict, "session_starting", err.Error())

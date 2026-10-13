@@ -25,6 +25,7 @@ var (
 	_ runtime.IdleSnapshotProvider          = (*Provider)(nil)
 	_ runtime.InterruptBoundaryWaitProvider = (*Provider)(nil)
 	_ runtime.InterruptedTurnResetProvider  = (*Provider)(nil)
+	_ runtime.InputClearProvider            = (*Provider)(nil)
 	_ runtime.RelaunchProvider              = (*Provider)(nil)
 	_ runtime.LivenessObserver              = (*Provider)(nil)
 	_ runtime.UnattendedSessionStopper      = (*Provider)(nil)
@@ -41,6 +42,7 @@ var (
 	_ runtime.ServerLifecycleProvider       = (*Provider)(nil)
 	_ runtime.SessionRosterProvider         = (*Provider)(nil)
 	_ runtime.SessionObjectKiller           = (*Provider)(nil)
+	_ runtime.TurnEventProvider             = (*Provider)(nil)
 )
 
 // New creates a hybrid provider. isRemote returns true for sessions
@@ -204,6 +206,15 @@ func (p *Provider) NudgeNow(name string, content []runtime.ContentBlock) error {
 func (p *Provider) ResetInterruptedTurn(ctx context.Context, name string) error {
 	if rp, ok := p.route(name).(runtime.InterruptedTurnResetProvider); ok {
 		return rp.ResetInterruptedTurn(ctx, name)
+	}
+	return runtime.ErrInteractionUnsupported
+}
+
+// ClearInput delegates to the routed backend when it can empty a session's
+// input box and confirm it is empty.
+func (p *Provider) ClearInput(ctx context.Context, name string, restoreWindow time.Duration) error {
+	if cp, ok := p.route(name).(runtime.InputClearProvider); ok {
+		return cp.ClearInput(ctx, name, restoreWindow)
 	}
 	return runtime.ErrInteractionUnsupported
 }
@@ -406,4 +417,15 @@ func (p *Provider) SubscribeSessionEvents(ctx context.Context) (<-chan runtime.S
 	return runtime.SubscribeSessionEventSources(ctx,
 		runtime.SessionEventSource{Name: "local", Provider: p.local},
 		runtime.SessionEventSource{Name: "remote", Provider: p.remote})
+}
+
+// SubscribeTurnEvents forwards the turn-event streams of the backends that
+// implement runtime.TurnEventProvider, merging them when both do, the same
+// way SubscribeSessionEvents does. A nested composite without a turn-event
+// backend is skipped, so ACP turns behind an inner composite still arrive.
+// See runtime.SubscribeTurnEventSources.
+func (p *Provider) SubscribeTurnEvents(ctx context.Context) (<-chan runtime.TurnEvent, error) {
+	return runtime.SubscribeTurnEventSources(ctx,
+		runtime.TurnEventSource{Name: "local", Provider: p.local},
+		runtime.TurnEventSource{Name: "remote", Provider: p.remote})
 }

@@ -17,7 +17,7 @@ type finalizeFacts struct {
 	// (sessionHasOpenAssignedWorkForReachableStoreForCloseGate); an error
 	// counts as work.
 	HasWork bool
-	// OperatorHeld is an operator's hold (HoldUser): the seat is kept.
+	// OperatorHeld is an operator's hold (Disposition.KeepsSlot): the seat is kept.
 	OperatorHeld bool
 	// HonoredWake is a pending explicit wake AL1 honors (D7 rule 4): no
 	// close lands over it. Legacy has none.
@@ -25,6 +25,9 @@ type finalizeFacts struct {
 	FreshWake        bool // wake_mode=fresh
 	RestartRequested bool
 }
+
+// stopFinish builds a stopped row's finalize from its facts.
+type stopFinish func(finalizeFacts) finalizeChoice
 
 // finalizeChoice is a finalize's write: the premise close, or Patch.
 type finalizeChoice struct {

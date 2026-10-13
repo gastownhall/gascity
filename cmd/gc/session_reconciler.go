@@ -804,7 +804,7 @@ func drainAckClaimableAnomalyBead(
 // so applyTo returns the snapshot Info unchanged.
 type drainAckFinalizeResult struct {
 	// batch is the metadata patch for the Path-A close (ClosePatch), whose persist
-	// happens inside closeSessionBeadIfReachableStoreUnassigned (a helper); the
+	// happens inside closeSeat (a helper); the
 	// caller folds it onto the snapshot via ApplyPatch. nil when the call took no
 	// close/metadata path.
 	batch sessionpkg.MetadataPatch
@@ -869,7 +869,7 @@ func finalizeDrainAckStoppedSession(
 	}
 	// Every decision read comes off the typed Info; the whole-bead raw-by-design
 	// helpers (sessionHasOpenAssignedWorkForReachableStore,
-	// closeSessionBeadIfReachableStoreUnassigned, recordDrainAckAssignedWorkEvent)
+	// closeSeat, recordDrainAckAssignedWorkEvent)
 	// take Info too, and the one genuine post-mutation re-read is the front-door
 	// Get NDI witness below. Callers pass the coherent infoByID[id].
 	name := strings.TrimSpace(info.SessionNameMetadata)
@@ -911,12 +911,12 @@ func finalizeDrainAckStoppedSession(
 	// A row an operator holds keeps its seat: never closed as drained.
 	facts := finalizeFacts{
 		Now: clk.Now().UTC(), CloseIfUnassigned: closeIfUnassigned, HasWork: hasAssignedWork,
-		OperatorHeld: sessionpkg.HoldsInfo(info, clk.Now()).In&sessionpkg.HoldUser != 0,
+		OperatorHeld: sessionpkg.DispositionOfInfo(info).KeepsSlot(),
 		FreshWake:    info.WakeMode == "fresh", RestartRequested: info.RestartRequested == "true",
 	}
 	choice := finalizePatch(facts)
 	if choice.CloseSeat {
-		if closeSessionBeadIfReachableStoreUnassigned(store, sw, info, "drained", clk.Now().UTC(), stderr, true) {
+		if closeSeat(store, sw, info, closeWhy{reason: "drained", gate: closeGated, keep: notOwnDrainStep}, clk.Now().UTC(), stderr) {
 			closePatch := sessionpkg.ClosePatch(clk.Now().UTC(), "drained")
 			if dops != nil {
 				_ = dops.clearDrain(name)
@@ -1293,7 +1293,11 @@ func pendingCreateSessionStillLeasedInfo(i sessionpkg.Info, cfg *config.City, cl
 	if cfg != nil {
 		startupTimeout = cfg.Session.StartupTimeoutDuration()
 	}
-	return pendingCreateSessionStillLeased(i, cfg, pendingCreateLeaseActiveInfo(i, clk, startupTimeout), sessionStartRequestedInfo(i, clk))
+	now := time.Now()
+	if clk != nil {
+		now = clk.Now()
+	}
+	return pendingCreateSessionStillLeased(i, cfg, pendingCreateLeaseActiveInfo(i, clk, startupTimeout), sessionStartRequestedInfo(i, clk), manualCreateStartInFlightAt(i, now, startupTimeout))
 }
 
 // pendingCreateSessionStillLeasedAt is pendingCreateSessionStillLeasedInfo at
@@ -1303,14 +1307,36 @@ func pendingCreateSessionStillLeasedAt(i sessionpkg.Info, cfg *config.City, now 
 	if cfg != nil {
 		startupTimeout = cfg.Session.StartupTimeoutDuration()
 	}
-	return pendingCreateSessionStillLeased(i, cfg, pendingCreateLeaseActiveAt(i, now, startupTimeout), sessionStartRequestedAt(i, now))
+	return pendingCreateSessionStillLeased(i, cfg, pendingCreateLeaseActiveAt(i, now, startupTimeout), sessionStartRequestedAt(i, now), manualCreateStartInFlightAt(i, now, startupTimeout))
+}
+
+// manualCreateStartInFlightAt reports whether i is a client-created session
+// whose create may still be starting its runtime. Manager.CreateSession writes
+// the bead (state=active, session_origin=manual, no pending-create claim)
+// before it starts the runtime, and stamps creation_complete_at only once the
+// start succeeds. Until then the bead has no live runtime and may be missing
+// from a desired-state snapshot taken before it existed, so the orphan close
+// would reap it mid-start. The window matches the pending-create in-flight
+// lease; a create that is still unconfirmed after it is treated as dead.
+func manualCreateStartInFlightAt(i sessionpkg.Info, now time.Time, startupTimeout time.Duration) bool {
+	if i.PendingCreateClaim || i.CreatedAt.IsZero() ||
+		strings.TrimSpace(i.SessionOrigin) != "manual" ||
+		strings.TrimSpace(i.CreationCompleteAt) != "" {
+		return false
+	}
+	if startupTimeout <= 0 {
+		startupTimeout = time.Minute
+	}
+	return now.Before(i.CreatedAt.Add(startupTimeout + staleKeyDetectDelay + 5*time.Second))
 }
 
 // pendingCreateSessionStillLeased composes the lease answers. Template
 // resolution uses normalizedSessionTemplateInfo with an Info.Template fallback
 // (Info.Template is the raw metadata["template"] mirror), and
-// findAgentByTemplate keys off the resolved template.
-func pendingCreateSessionStillLeased(i sessionpkg.Info, cfg *config.City, leaseActive, startRequested bool) bool {
+// findAgentByTemplate keys off the resolved template. A manual create still
+// starting (manualCreateStartInFlight) holds the same lease as a requested
+// start, under the same rule: its template's agent must still be configured.
+func pendingCreateSessionStillLeased(i sessionpkg.Info, cfg *config.City, leaseActive, startRequested, manualCreateStartInFlight bool) bool {
 	if i.PendingCreateClaim {
 		if !leaseActive {
 			return false
@@ -1325,7 +1351,7 @@ func pendingCreateSessionStillLeased(i sessionpkg.Info, cfg *config.City, leaseA
 		}
 		return true
 	}
-	if !startRequested {
+	if !startRequested && !manualCreateStartInFlight {
 		return false
 	}
 	template := normalizedSessionTemplateInfo(i, cfg)
@@ -1428,6 +1454,41 @@ func operatorSuspendCause(cfg *config.City, cityPath string, info sessionpkg.Inf
 		return "session"
 	}
 	return ""
+}
+
+// ownStartLive is why pendingCreateOwnStartLive holds a pending create's
+// rollback, as its trace records it in the lease field.
+type ownStartLive string
+
+const (
+	ownStartNotLive           ownStartLive = ""
+	ownStartInWindow          ownStartLive = "not_read"     // inside the in-flight window; the lease is not read
+	ownStartLeaseHeld         ownStartLive = "held"         // a live holder has the row's runtime lease
+	ownStartLeaseUnverifiable ownStartLive = "unverifiable" // the lease could not be read: held, fail closed
+)
+
+// pendingCreateOwnStartLive reports whether, and why, a pending create's own
+// start may still be creating its runtime, so a live runtime with no identity
+// is not rolled back from under it: the start is inside its in-flight window,
+// or a live holder has the row's runtime lease (startHolderLiveErr), which
+// covers a start that outlives the window. A last_woke_at pendingCreateFutureSkew
+// or more in the future holds no window, so only the lease can hold the row
+// then. A lease that cannot be verified holds it (fail closed), and its error
+// is returned for the caller to report.
+func pendingCreateOwnStartLive(store beads.Store, cityPath string, info sessionpkg.Info, now time.Time, startupTimeout time.Duration) (ownStartLive, error) {
+	if pendingCreateStartInFlightAt(info, now, startupTimeout) {
+		if wokeAt, ok := parseRFC3339Metadata(info.LastWokeAt); ok && wokeAt.Sub(now) < pendingCreateFutureSkew {
+			return ownStartInWindow, nil
+		}
+	}
+	held, err := startHolderLiveErr(store, cityPath, info)
+	switch {
+	case err != nil:
+		return ownStartLeaseUnverifiable, err
+	case held:
+		return ownStartLeaseHeld, nil
+	}
+	return ownStartNotLive, nil
 }
 
 // wakeGracePreservesUndesiredRow reports whether an undesired live row was woken
@@ -1612,19 +1673,27 @@ func explicitWakePendingInfo(info sessionpkg.Info) bool {
 	return true
 }
 
-// explicitSleepIntentInfo reports a sleep intent the idle latch's demand
-// override must honor: any but a wait's own wait-hold. A wait hold already
-// suppresses every demand wake but pending-create, an explicit wake and its
-// wait turning ready (computeAwakeSet), and a sleeping waiter keeps its
-// intent (D-J 3), so counting it here would refuse the wait-ready wake of a
-// waiter holding work under an idle policy and strand its claim.
-func explicitSleepIntentInfo(info sessionpkg.Info) bool {
-	return info.SleepIntent != "" && strings.TrimSpace(info.SleepIntent) != string(sessionpkg.SleepReasonWaitHold)
+// explicitSleepIntentInfo returns the trimmed sleep intent the idle latch's
+// demand override must honor, or "" when there is none: any but a wait's own
+// wait-hold. A wait hold already suppresses every demand wake but
+// pending-create, an explicit wake and its wait turning ready
+// (computeAwakeSet), and a sleeping waiter keeps its intent (D-J 3), so
+// counting it here would refuse the wait-ready wake of a waiter holding work
+// under an idle policy and strand its claim.
+func explicitSleepIntentInfo(info sessionpkg.Info) string {
+	intent := strings.TrimSpace(info.SleepIntent)
+	if intent == string(sessionpkg.SleepReasonWaitHold) {
+		return ""
+	}
+	return intent
 }
 
 // wakeDemandOverridesSleepSuppression reports whether a wake the awake set
 // wants survives the session's config sleep suppression (the idle latch:
 // asleep with sleep_reason=idle under an unchanged sleep-policy fingerprint).
+//
+// sleepIntent is the session's trimmed explicit sleep intent
+// (explicitSleepIntentInfo), "" when it has none.
 //
 // explicitWake is the session's durable, still-pending wake_request=explicit
 // (`gc session wake`, the wake API, a peer's wake; see explicitWakePendingInfo):
@@ -1638,11 +1707,31 @@ func wakeDemandOverridesSleepSuppression(
 	policy resolvedSessionSleepPolicy,
 	poolDesired map[string]int,
 	template string,
-	hasExplicitSleepIntent bool,
+	sleepIntent string,
 	explicitWake bool,
 ) bool {
-	if hasExplicitSleepIntent {
+	// A terminal attached to the session holds it awake for every sleep
+	// class: the pane's last activity says nothing about a human reading it.
+	// An attach probe that could not tell never reaches here as attached:
+	// legacy defers the row, and v2 clears it (configSleepSuppressed).
+	// Without this, the config suppression computed from that activity
+	// overrode the attached wake and drained the session under its user.
+	// ComputeAwakeSet already keeps attached sessions out of its own
+	// idle-sleep; this is the same rule for the sleep-policy suppression
+	// layered on top of it. It reads decision.Attached, not the reason
+	// label: a ready wait relabels an attached wake to "wait-ready".
+	attached := decision.Attached
+	// The reconciler's own idle-stop-pending marker is not a sleep request
+	// from anyone: it records an idle verdict that an attach since (or a
+	// single false "not attached" read at the window's edge) has overtaken.
+	// Let the attachment win over it, so the awake path cancels the idle
+	// drain and clears the marker. Any other sleep intent (user-hold, a
+	// session's own request) still wins over the attachment.
+	if sleepIntent != "" && (!attached || sleepIntent != sleepIntentIdle) {
 		return false
+	}
+	if attached {
+		return true
 	}
 	if eval.HasAssignedWork || explicitWake {
 		return true
@@ -2269,7 +2358,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						continue
 					}
 					closedFailedCreate := releaseBeadScopedPoolRuntimeLeased(cityPath, infoByID[id], sp, stderr) &&
-						closeSessionBeadIfReachableStoreUnassigned(store, sw, infoByID[id], string(sessionpkg.StateFailedCreate), clk.Now().UTC(), stderr, false)
+						closeSeat(store, sw, infoByID[id], closeWhy{reason: string(sessionpkg.StateFailedCreate), gate: closeGated}, clk.Now().UTC(), stderr)
 					if closedFailedCreate {
 						// Reflect the in-memory close on the snapshot: the cross-session
 						// min-floor scan (below) reads Info.Closed off infoByID, so a
@@ -2293,6 +2382,27 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					}
 					continue
 				}
+			}
+			// A client's create still starting its runtime keeps the row as the
+			// create wrote it. The heal below would read the not-yet-started runtime
+			// as missing and reset the continuation (session_key,
+			// started_config_hash, continuation_reset_pending), which the create's
+			// start confirmation does not restore. A preserved named session keeps
+			// its own precedence below.
+			if !preserveNamed && manualCreateStartInFlightAt(infoByID[id], clk.Now(), startupTimeout) && pendingCreateSessionStillLeasedInfo(infoByID[id], cfg, clk) {
+				template := normalizedSessionTemplateInfo(infoByID[id], cfg)
+				if template == "" {
+					template = infoByID[id].Template
+				}
+				if trace != nil {
+					trace.RecordDecision(TraceSiteReconcilerPendingCreatePreserved, TraceReasonPendingCreate, TraceOutcomeKeptOpen, template, name, traceRecordPayload{
+						"pending_create_claim":    strings.TrimSpace(infoByID[id].PendingCreateClaimMetadata),
+						"manual_create_in_flight": true,
+						"provider_alive":          providerAlive,
+						"state":                   infoByID[id].MetadataState,
+					})
+				}
+				continue
 			}
 			// Heal state using provider liveness, not agent membership.
 			// rollbackAvailable mirrors the rollback gate at line ~639: when
@@ -2702,7 +2812,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						if rn := config.NamedSessionRuntimeName(cityName, cfg.Workspace, identity); rn != "" && rn != identity {
 							preserve = append(preserve, rn)
 						}
-						if closeBeadPreservingAssignees(store, sw, infoByID[id], reason, preserve, clk.Now().UTC(), stderr) {
+						if closeSeat(store, sw, infoByID[id], closeWhy{reason: reason, gate: closeReleasing, preserve: preserve}, clk.Now().UTC(), stderr) {
 							tick.markClosed(id)
 							fmt.Fprintf(stdout, "Recycled dead named-session phantom '%s' (squats configured identity %q; process gone)\n", name, identity) //nolint:errcheck
 							if trace != nil {
@@ -2713,8 +2823,16 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						}
 						continue
 					}
-					closed := closeSessionBeadIfReachableStoreUnassigned(store, sw, infoByID[id], reason, clk.Now().UTC(), stderr, false)
-					if !closed && reason == "orphaned" {
+					// An undesired pool row's close keeps an operator's suspend
+					// (closeFreeSlot, §12.2 #27); any other row's closes as legacy's.
+					gate := closeGated
+					if isPoolManagedSessionInfo(infoByID[id]) {
+						gate = closeFreeSlot
+					}
+					closed, cause := closeSeatFor(store, sw, infoByID[id], closeWhy{reason: reason, gate: gate}, clk.Now().UTC(), stderr)
+					// An operator's suspend keeps the seat whole: its claims are
+					// not released, nor is it closed through the releasing gate.
+					if !closed && reason == "orphaned" && cause != causeKeepsSlot {
 						// The guard refused because the seat still holds work. Nothing
 						// else can resolve that: the wake path is blocked on the orphaned
 						// base state and releaseOrphanedPoolAssignments skips work whose
@@ -2728,13 +2846,13 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						if released := releaseConfirmedOrphanSessionWork(cfg, sw.Legs().workStore(), sw.Legs().rigs, assignedWorkBeads, orphanReleaseStores, infoByID[id]); len(released) > 0 {
 							emitDeadAssigneeReopenedEvents(rec, assignedWorkBeads, released, clk.Now().UTC())
 						}
-						closed = closeSessionBeadIfReachableStoreUnassigned(store, sw, infoByID[id], reason, clk.Now().UTC(), stderr, false)
+						closed = closeSeat(store, sw, infoByID[id], closeWhy{reason: reason, gate: gate}, clk.Now().UTC(), stderr)
 						// What the release kept for want of a lane does not keep the
 						// seat (O5, revised): its agent is gone, the claims stay on the
 						// closed row, and the cascade alerts. A claim a lane serves (one
 						// moved, or detached and alive) still blocks.
 						if !closed && onlyStrandedWork(sw, infoByID[id]) {
-							closed = closeBead(store, sw, infoByID[id], reason, clk.Now().UTC(), stderr)
+							closed = closeSeat(store, sw, infoByID[id], closeWhy{reason: reason, gate: closeReleasing}, clk.Now().UTC(), stderr)
 						}
 					}
 					if closed {
@@ -2857,8 +2975,51 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// TestReconcileSessionBeads_ZombieTerminalErrorReflectedOnSnapshot.
 		infoPostZombie := infoByID[id]
 		if alive && shouldRollbackPendingCreateInfo(infoPostZombie) {
-			switch attributePendingCreateRuntime(infoPostZombie, name, sp) {
+			identity := readPendingCreateIdentity(infoPostZombie, name, sp)
+			switch identity.attribution() {
 			case pendingCreateRuntimeForeign:
+				live, leaseErr := ownStartNotLive, error(nil)
+				if identity.unstamped() {
+					live, leaseErr = pendingCreateOwnStartLive(store, cityPath, infoPostZombie, clk.Now(), startupTimeout)
+				}
+				if leaseErr != nil {
+					// Fail closed: a lease that cannot be verified may be a
+					// live start's, so the row is held, and the hold is said
+					// once per row per episode.
+					logStandingCondition(dt, stderr, id, "lease_unverifiable.pending_create_rollback", fmt.Sprintf(
+						"session reconciler: WARNING: holding pending create %s open: its runtime lease cannot be verified (%v); the rollback waits until the lease reads free", name, leaseErr), clk.Now())
+				}
+				if live != ownStartNotLive {
+					// A runtime with no identity at all reads foreign, but
+					// while this row's own start is live it is most likely
+					// that start's box: a remote runtime lists the name before
+					// Start returns, and one without a metadata store never
+					// carries identity. Rolling back here frees the name
+					// without a stop, and the late start then finds its row
+					// closed and cannot attribute the box either, so the box
+					// runs with no row. The start's commit settles the row.
+					// The deferral is recorded under the wake pair, not the
+					// rollback reason, so a normal start arms no auto-trace.
+					// The line names why, one standing condition per reason,
+					// so a hold that moves from the window to the lease says so.
+					// An unverifiable lease has said it already, in the WARNING.
+					kind, why := "start_in_flight.pending_create_rollback", "its start is in flight"
+					if live == ownStartLeaseHeld {
+						kind, why = "start_lease_held.pending_create_rollback", "its start holds the runtime lease"
+					}
+					if live != ownStartLeaseUnverifiable {
+						logStandingCondition(dt, stderr, id, kind, fmt.Sprintf(
+							"session reconciler: pending-create rollback of %s deferred: %s and the live runtime carries no identity yet", name, why), clk.Now())
+					}
+					if trace != nil {
+						trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonWake, TraceOutcomeStartInFlight, tp.TemplateName, name, traceRecordPayload{
+							"session_bead_id": id,
+							"attribution":     "start_in_flight",
+							"lease":           string(live),
+						})
+					}
+					continue
+				}
 				// Fold the rollback's mirrored metadata onto the snapshot (Step 6d;
 				// no Closed change — store-only close). STEP6-PREPASS-AUDIT group 2.
 				tick.apply(id, attemptRollbackPendingCreate(infoByID[id], tp.TemplateName, name, "pending_create_rollback", "live runtime belongs to another session", false))
@@ -2946,7 +3107,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					// A user-hold ack whose row no longer carries the hold is
 					// stale: an operator's resume consumed the hold after the
 					// drain began. Clear it and leave the runtime up.
-					if reconcilerOwnedAck && userHoldDrainReleased(ackReason, infoByID[id], clk.Now()) {
+					if reconcilerOwnedAck && userHoldDrainReleased(ackReason, infoByID[id]) {
 						_ = clearReconcilerDrainAckMetadata(sp, name)
 						_ = dops.clearDrain(name)
 						if dt != nil {
@@ -3466,7 +3627,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// checkStability returns the write-returns-Info result (Step 6d); the input
 		// Info unchanged when no stability event was recorded, so the assignment on the
 		// true branch is the only snapshot advance. Pre-pass-masked (STEP6-PREPASS-AUDIT group 2).
-		if stabInfo, stab := checkStability(infoByID[id], cfg, alive, dt, sessFront, clk, nil); stab {
+		if stabInfo, stab := checkStability(infoByID[id], cfg, alive, dt, sessFront, clk, nil, launchTranscriptRoots(cfg, tp), rec); stab {
 			tick.set(id, stabInfo)
 			continue // rapid exit recorded, skip further processing
 		}
@@ -4268,15 +4429,16 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// from before gc stop must not cancel the post-start guarantee.
 			// Interactive sessions honor their idle window against
 			// pool-scale demand — an idle chat session should still sleep
-			// to release resources. Two wakes override for every class: a
-			// durable explicit wake request, and routed demand on the
-			// canonical alias holder (the only session that can serve it).
-			// Explicit sleep_intent always wins — if the session has
-			// signaled it wants to sleep, honor that regardless of demand.
+			// to release resources. Three wakes override for every class:
+			// an attached terminal, a durable explicit wake request, and
+			// routed demand on the canonical alias holder (the only session
+			// that can serve it). An explicit sleep_intent (a user hold, the
+			// session's own request) wins over all demand, the attachment
+			// included. The reconciler's own idle-stop-pending marker is the
+			// exception: it yields to an attachment.
 			template := normalizedSessionTemplateInfo(info, cfg)
-			hasExplicitSleepIntent := explicitSleepIntentInfo(info)
 			explicitWake := explicitWakePendingInfo(info)
-			demandOverrides := wakeDemandOverridesSleepSuppression(decision, eval, policy, poolDesired, template, hasExplicitSleepIntent, explicitWake)
+			demandOverrides := wakeDemandOverridesSleepSuppression(decision, eval, policy, poolDesired, template, explicitSleepIntentInfo(info), explicitWake)
 			if !demandOverrides {
 				eval.ConfigSuppressed = true
 				eval.Reasons = nil // Clear reasons so Phase 2 does not cancel the drain.
@@ -4779,11 +4941,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			}
 		}
 		if poolFreeable && !hasAssignedWork {
-			// Close directly rather than via closeSessionBeadIfUnassigned.
-			// That helper also runs a live sessionHasOpenAssignedWork query
-			// and would redundantly re-query a store we just hit — skip the
-			// duplicate I/O and pass through the preserved sleep_reason as
-			// the close_reason below.
+			// Close through closeSeat, work-gated: its gate reads the tick's
+			// SeatWork (no I/O) and the close-time re-read, and the preserved
+			// sleep_reason passes through as the close_reason below.
 			//
 			// Preserve the original sleep_reason (idle / idle-timeout / drained)
 			// on the closed bead for forensic fidelity; fall back to "drained"
@@ -4793,7 +4953,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			if closeReason == "" {
 				closeReason = "drained"
 			}
-			if closeBeadUnlessLateWork(store, sw, infoByID[target.info.ID], closeReason, clk.Now().UTC(), stderr, nil) {
+			if closeSeat(store, sw, infoByID[target.info.ID], closeWhy{reason: closeReason, gate: closeGated}, clk.Now().UTC(), stderr) {
 				// Store-only close family: mirror the close onto the snapshot
 				// (write-returns-Info) so a later reader sees Closed=true.
 				tick.markClosed(target.info.ID)
@@ -4971,7 +5131,7 @@ func resolveConfiguredNamedSessionTemplate(bp *agentBuildParams, spec namedSessi
 	return tp, nil
 }
 
-// sessionHasOpenAssignedWorkForConfig uses the same configured-named-session
+// sessionHasOpenAssignedWorkForConfigInfo uses the same configured-named-session
 // fallback identity strategy as sessionAssigneeMatches, but queries every store
 // the city serves instead of a single configured reachable store. Use this
 // cross-store query for cleanup-of-record paths that must not orphan work in any
@@ -4985,14 +5145,6 @@ func resolveConfiguredNamedSessionTemplate(bp *agentBuildParams, spec namedSessi
 // live worker. On a work-led plane the relocated binding was exactly such a leg
 // (ga-j4ob9), and this gate was invisible to the boundary census too, because it
 // ranged a map rather than calling a named enumerator.
-func sessionHasOpenAssignedWorkForConfig(sw *SeatWork, session beads.Bead) (bool, error) {
-	return sessionHasOpenAssignedWorkInStores(sw, releaseScopeOfBead(session, sw.Legs().cfg))
-}
-
-// sessionHasOpenAssignedWorkForConfigInfo is the session.Info form of
-// sessionHasOpenAssignedWorkForConfig for the reconciler forward pass (the raw
-// form stays for the repair/cleanup lanes that hold a raw bead). The work-store
-// probe stays bead-shaped; only the assignment-identifier derivation reads Info.
 func sessionHasOpenAssignedWorkForConfigInfo(sw *SeatWork, info sessionpkg.Info) (bool, error) {
 	return sessionHasOpenAssignedWorkInStores(sw, releaseScope(info, sw.Legs().cfg))
 }
@@ -5065,7 +5217,7 @@ func sessionHasOpenAssignedWorkForReachableStore(sw *SeatWork, info sessionpkg.I
 // unrelated decisions (config-drift drain deferral, the max-session-age timer,
 // the pool-slot-freeable check, wake-on-assigned-work), and none of those
 // should start ignoring a session's own drain step. Use this function
-// (and closeSessionBeadIfReachableStoreUnassigned's excludeOwnDrainStep=true form)
+// (and closeSeat's notOwnDrainStep keep)
 // ONLY from the drain-ack finalize path.
 // The identifier set here stays NARROW deliberately: {ID, session_name,
 // configured_named_identity} plus the session's stable alias
@@ -7322,6 +7474,10 @@ func relaunchAgentForLaunchDrift(
 		return false, relaunchAbortResidueFold(preparedInfo, sessFront, hadResumeKeyBeforePrepare)
 	}
 	fmt.Fprintf(stdout, "Launch-only config change for '%s', relaunched agent in warm box\n", tp.DisplayName()) //nolint:errcheck
+	// The relaunch started a committed manual conversation fresh.
+	if prepared.conversationReset {
+		rec.Record(staleKeyConversationResetEvent(info, tp))
+	}
 	// Rebaseline the Core baseline (started_config_hash) and the partition
 	// sub-hashes so the next tick sees no Core drift. The hashes come from
 	// buildPreparedStart's PRE-rewrite fingerprints (prepared.coreHash etc.), NOT
@@ -7458,6 +7614,19 @@ func resolveSessionCommand(command, sessionKey, parentSID string, rp *config.Res
 		return command + " " + rp.SessionIDFlag + " " + sessionKey
 	}
 	return resolveResumeCommand(command, sessionKey, rp)
+}
+
+// sessionCommandResumes reports whether resolveSessionCommand, given the same
+// inputs, launches a resume of the session's own conversation: not a fresh
+// start with its own id, and not a fork, which resumes its parent (mc-bm1af).
+func sessionCommandResumes(parentSID string, rp *config.ResolvedProvider, firstStart, forceFresh bool) bool {
+	switch {
+	case firstStart && !forceFresh && parentSID != "" && rp.ForkFlag != "" && rp.SessionIDFlag != "":
+		return false
+	case (firstStart || forceFresh) && rp.SessionIDFlag != "":
+		return false
+	}
+	return rp.ResumeCommand != "" || rp.ResumeFlag != ""
 }
 
 // resolveResumeCommand returns the command to use when resuming a session.

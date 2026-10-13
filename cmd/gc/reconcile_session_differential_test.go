@@ -90,9 +90,16 @@ type parityFixture struct {
 	// fixture and answers WaitForIdle idle: legacy's idle probe and v2's
 	// activity fact (I3) and fresh idle proof read the same provider.
 	Idle []string
+	// Acks names the rows whose agent acked its own drain at generation
+	// 1: legacy's runtime env ack (GC_DRAIN_ACK, source agent, the
+	// incarnation stamp) and v2's row ack (drain_ack_*, E3), each copy
+	// reading its own.
+	Acks []string
 	// StartErr fails each copy's first provider Start (S3's abandon).
 	StartErr error
-	Explain  map[string]string
+	// Panes is each row's pane output, by row ID, as a peek reads it.
+	Panes   map[string]string
+	Explain map[string]string
 }
 
 // parityRow is a bead; a type alias keeps fixtures short.
@@ -110,7 +117,11 @@ type parityEntry struct {
 var parityAccepted = map[string]parityEntry{
 	"§12.2#51 a7-lag": {
 		"CONTRACT v5 §12.2 #51 (A7; C7d)", "legacy refreshes a row's identity every tick, beside its heals and under a live kill fence; v2's A7 writes it when it decides the row, a pass later when an earlier arm (an A6 heal) takes the row's first pass, or once A2's kill fence lets the row through, so its write, the synced_at it stamps and its runtime alias sync land later",
-		[]string{"synced_at", "alias", "alias_history", "labels", "pool_slot", "agent_name"},
+		[]string{"synced_at", "alias", "alias_history", "labels", "pool_slot", "agent_name", "work_dir", "wake_mode", "session_key", "continuation_epoch", "command", "provider", "provider_kind", "builtin_ancestor", "resume_flag", "resume_style", "resume_command", "session_id_flag"},
+	},
+	"§12.2#62 a7-undesired-row": {
+		"CONTRACT v5 §12.2 #62 (A7, C7d; mc-q64l4)", "legacy's session-bead sync stamps the row metadata (here work_dir) of every visited row, an orphaned named row's included; v2's A7 writes only a row the allocation holds desired, so an undesired row's metadata stays as it was: cosmetic",
+		[]string{"work_dir"},
 	},
 	"§12.2#17 orphan-close-reason": {
 		"CONTRACT v5 §12.2 #17 (A21, C5c1 review)", "an unwanted dead row closes with its drain reason (orphaned, or suspended for an agent-suspended seat that legacy closes as orphaned), not MAINT-051's gc_swept (v2 does not run the sweep) nor the suspended legacy writes for a row squatting a configured name",
@@ -128,12 +139,19 @@ var parityAccepted = map[string]parityEntry{
 	"§12.2#39 commit-writes-awake": {"CONTRACT v5 §12.2 #39 (C5b)", "v2's start and adopt commits write awake, the state legacy's next tick heals its committed active row to; for that one tick legacy reads active", []string{"state"}},
 	"§12.2#38 start-meta-clears":   {"CONTRACT v5 §12.2 #38 (A18, C5a1)", "legacy's start clears stale runtime metadata (RemoveMeta) on the runtime it starts; v2's FreshOnly start creates a runtime without any and removes nothing", nil},
 	"§12.2#27 held-slot-kept": {
-		"CONTRACT v5 §12.2 #27 (A10 v5.7, A21; C5c1 review ruling)", "an undesired pool row parked by a deliberate hold (user-hold, wait-hold, a future held_until or quarantined_until) keeps its slot until the hold ends; legacy's MAINT-051 sweep closes it held or not",
+		"CONTRACT v5 §12.2 #27 (A10 v5.7, A21; C5c1 review ruling)", "an undesired pool row parked by a deliberate hold (user-hold, wait-hold, a future held_until or quarantined_until) keeps its slot until the hold ends; legacy's MAINT-051 sweep keeps an operator's suspend (closeAllowed's KeepsSlot, R9-C) and closes it under any other hold",
 		[]string{"status", "state", "close_reason", "closed_at", "synced_at"},
 	},
 	"§12.2#43 close-after-hold-heal": {
 		"CONTRACT v5 §12.2 #43 (A6, A21)", "v2 heals an unwanted workless pool row's expired hold one pass before A21 closes it; legacy's MAINT-051 sweep closes it first and leaves the expired held_until and sleep_reason on the closed row",
 		[]string{"held_until", "sleep_reason"},
+	},
+	"§12.2#19 screen-parks": {
+		"CONTRACT v5 §12.2 #19 (S5; C5a3)", "a wanted seat whose own dead runtime shows a terminal provider error is parked (no kill, no launch); legacy's start recycles and relaunches it in the same tick, recording a crash",
+		append([]string{"sleep_reason", "provider_terminal_error", "provider_terminal_error_at", "health_state", "health_reason", "drainable", "currently_processing_bead_id"}, parityStartKeys...),
+	},
+	"§12.2#14 reset-stalled-not-emitted": {
+		"CONTRACT v5 §12.2 #14 (owner ruling 2, 2026-10-06)", "legacy evicts a reset-pending row's stalled runtime by name past its startup timeout and records session.reset_stalled; the ruling gives the eviction to the start recycle, and v2 does not emit session.reset_stalled", nil,
 	},
 	"§12.2#41 close-removes-corpse": {"CONTRACT v5 §12.2 #41 (C3 step 1, M1; C5c1)", "A21's close removes the corpse it counts as stopped, by exact session object; legacy's sweep closes the row and leaves the dead pane listed", nil},
 	"§12.2#42 orphan-claim-release-unconfigured": {
@@ -143,6 +161,10 @@ var parityAccepted = map[string]parityEntry{
 	"§12.2#3 R16": {
 		"CONTRACT v5 §12.2 #3 (ruling 4)", "a resume voids a suspended drain; legacy signals, stops and restarts the row",
 		append([]string{"slept_at"}, parityStartKeys...),
+	},
+	"§12.2#58 wait-nudge-bead": {
+		"CONTRACT v5 §12.2 #58 (owner ruling at the #7612 review; C8)", "legacy delivers a ready wait's nudge with the waiter's restart; v2's waits step queues it as a nudge bead for the waiter and stamps its nudge_id on the wait",
+		nil,
 	},
 }
 
@@ -164,19 +186,13 @@ var parityFindings = map[string]parityEntry{
 		"CONTRACT v5 A5; ORCH-NOTES C2c1 (sync SESS-045/046)", "legacy stamps the unknown_state_* markers and emits session.unknown_state (escalating at 30 minutes); v2 writes no marker and records reconciler.alert instead. Not a §12.2 item, and against the plan's event-parity rule (§2.3)",
 		[]string{"unknown_state_first_seen", "unknown_state_value", "unknown_state_escalated_at"},
 	},
-	"empty-type-repair":   {"C7d, BEHAVIORS SESS-701 (KEPT: A7 row-metadata verb, CONTRACT v5.8 M1)", "legacy repairs a session row's empty type to session; v2's A7 row-metadata verb takes it with RowPatch.Type, which C7d adds", []string{"type"}},
 	"named-trigger-clear": {"POOL-056 follow-up (ORCH-NOTES C5d ruling)", "legacy clears a preserved named row's stale trigger stamp; v2's A6 does not yet", []string{"gc.trigger_bead_id", "gc.trigger_bead_store_ref", "brain_parent_sid"}},
 	"drain-cancel-on-probe-error": {
 		"CONTRACT v5 O3, BEHAVIORS DRAIN-042", "legacy skips a drain whose running probe errors; v2's inventory still classifies the row, so A19's wake lens cancels the drain. No completion either way, but §12.2 does not list the cancel",
 		[]string{session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey},
 	},
-	"idle-respawn-void": {
-		"C6d, BEHAVIORS DRAIN-044", "legacy cancels an idle-respawn drain no longer eligible; A19 holds it until C6d completes its policy row",
-		[]string{session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey},
-	},
-	"suspended-row-heal":   {"mc-92clf (ruled: v2 matches legacy; R7 Disposition owns the v2 side), BEHAVIORS SESS-531", "once an operator's suspend (the hold, #7417) has stopped a row's runtime, legacy's state heal turns the suspended row asleep under its hold; v2 keeps it suspended until R7 matches legacy, so its later restart replaces the suspend stamp", []string{"state", "suspended_at", "slept_at"}},
-	"suspended-named-heal": {"mc-92clf (ruled: v2 matches legacy; R7 Disposition owns the v2 side), BEHAVIORS SESS-009, SESS-531", "in a suspended city, legacy heals a suspended named row's expired hold from a fresh snapshot (SESS-009), then its state heal (SESS-531) turns the row asleep; v2 heals the hold and keeps it suspended until R7 matches legacy", []string{"state"}},
-	"episode-mirror":       {"C5b follow-up PR (owner; SESS-607 mirror, the gate is A18's)", "legacy mirrors a quarantined startup-health episode's count and kind onto the row every pass; v2's A18 holds the row on the episode but does not mirror it yet (the keys are not on session.Info)", []string{startupHealthActiveCountMetadataKey, startupHealthActiveKindMetadataKey}},
+	"suspended-row-heal": {"mc-92clf (ruled: v2 matches legacy; R7 Disposition owns the v2 side), BEHAVIORS SESS-531", "once an operator's suspend (the hold, #7417) has stopped a row's runtime, legacy's state heal turns the suspended row asleep under its hold; v2 keeps it suspended until R7 matches legacy, so its later restart replaces the suspend stamp", []string{"state", "suspended_at", "slept_at"}},
+	"episode-mirror":     {"C5b follow-up PR (owner; SESS-607 mirror, the gate is A18's)", "legacy mirrors a quarantined startup-health episode's count and kind onto the row every pass; v2's A18 holds the row on the episode but does not mirror it yet (the keys are not on session.Info)", []string{startupHealthActiveCountMetadataKey, startupHealthActiveKindMetadataKey}},
 
 	"pending-create-swept": {
 		"CONTRACT v5 A10, C3; BEHAVIORS MAINT-051, SESS-050..052", "an undesired pool pending create past its never-started deadline: legacy's MAINT-051 sweep closes it first as gc_swept, its claim keys left on the closed row, so its rollback never runs; v2 does not run the sweep, and A10 rolls it back (failed-create, the claim cleared). §12.2 #17 covers only the orphan close's reason",
@@ -191,26 +207,40 @@ var parityFindings = map[string]parityEntry{
 		"v5.9b §12.5 (runtime lease); BEHAVIORS START-033", "legacy's failed start rolls its pending create back while it still holds the row's runtime lease record, which stays on the closed row; v2's effect releases its lease record with the close. §12.2 does not list it",
 		[]string{session.RuntimeLeaseExpiresKey, session.RuntimeLeaseFlockKey, session.RuntimeLeaseHolderKey, session.RuntimeLeaseTTLKey},
 	},
-	"dead-corpse-close": {
-		"C5c2 (MAINT-031; CONTRACT v5 A21, C3)", "legacy closes an unwanted row that claims a live runtime once its runtime is a corpse (here MAINT-051's sweep reaches it first); A21 never closes a row that claims a live runtime, and C5c2's dead-runtime close is not built",
-		[]string{"status", "state", "close_reason", "closed_at", "synced_at"},
+	"undesired-dead-drain": {
+		"CONTRACT v5 A20, A21 (C5c2 ruling 1)", "legacy reaches an unwanted row's zombie through its drain: its stop by name with the drain's runtime metadata (drain_at, state_reason drain-ack-stop-pending); v2's A20 never begins a drain on a dead runtime, and A21 removes it by exact object, records the same session.stopped, and closes the row. §12.2 does not list it",
+		[]string{"drain_at", "state_reason"},
 	},
+
 	"drift-deferral-skips": {"C7b1 (A14 runs after A6's heals and the allocation's writes, CONTRACT v5 §4)", "legacy's config-drift deferral (SESS-553/558/559) continues past the row, so that tick it skips the row's later writes, its current-bead stamp (SESS-613) and sleep-policy keys among them; v2's A6 and the allocation write them before A14 decides", []string{"currently_processing_bead_id"}},
-	"mislabelled-close":    {"CONTRACT v5 AL1, A1", "legacy closes a row with no template and no session name as orphaned; v2's A1 leaves it open as None, which §12.2 does not list", []string{"status", "state", "close_reason", "closed_at"}},
+	"idle-rewake-lag": {
+		"BEHAVIORS SESS-576/577 (A15 idle-timeout; C7a-1, §12.2 #60, v5.9s)", "legacy re-wakes an idle-killed row its demand still wants in the same tick (the kill falls through to the wake pass); v2's stop verb finalizes it asleep (SleepPatch(idle-timeout)) and A18 starts it the next pass, so the restart lands a pass later",
+		append([]string{"sleep_reason", "slept_at"}, parityStartKeys...),
+	},
+	"recycle-by-object":  {"CONTRACT v5 S5, F2 (C5a3)", "v2's start recycle removes the row's own dead runtime by exact session object (KillZombieObject, KillCorpseObject) after re-checking it; legacy's start recycle stops it by name, and a death that accrues legacy leaves listed until its next start. §12.2 does not list it", nil},
+	"mislabelled-close":  {"CONTRACT v5 AL1, A1", "legacy closes a row with no template and no session name as orphaned; v2's A1 leaves it open as None, which §12.2 does not list", []string{"status", "state", "close_reason", "closed_at"}},
+	"idle-respawn-drain": {"C6d (D2's idle-respawn row; v5 D2: the finalize sleeps, never closes; §12.2 #63), BEHAVIORS SESS-614", "legacy drains a pool row awake only for ready, unclaimed assigned work, idle past its sleep time, stops it in the tick, retires its slot and starts a fresh seat for the work; v2's A20 begins the idle-respawn drain with its attempt, signals it a patrol later after revalidating claim and activity, and its stop verb finalizes the row asleep, never closed, so resume-on-ready restarts the same row", []string{"sleep_intent", "drain_at", "state", "state_reason", "status", "close_reason", "closed_at", "synced_at", session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey}},
+	"drain-stop-lag":     {"C6b1, C6b2 (A20, A4; D1-D4; owner to add a §12.2 row)", "legacy signals a drain through the runtime's drain env the tick after its begin, then stops and finalizes it; v2's begin (A20), its signal a patrol later (C6b1) and the stop verb (A4) each take a pass, so the stop, its events and the finalize land a pass or more after legacy's, with legacy's outcome", []string{session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey, "drain_at", "sleep_intent", "slept_at", "state_reason"}},
+	"idle-sleep-lag":     {"C6b1, C6b2 (A20, A4 with D4's idle builder; owner to add a §12.2 row)", "legacy idle-sleeps a row in the tick its probe answers idle (begin, signal, stop and SleepPatch(idle) with the latch); v2's begin (A20), signal (C6b1) and stop verb (A4, finalizing with SleepPatch(idle)) reach the same sleep a pass or more later. An always-named session's idle sleep waits for C6a2b's activity fact (#7586), so v2 leaves its runtime up", append([]string{"sleep_intent", "sleep_reason", "slept_at", "drain_at", "detached_at", session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey}, parityStartKeys...)},
+
+	"floor-ack-row-void": {
+		"PAR-FLOORACK (A11, DRAIN-010; E3's row ack is v2's alone, CONTRACT v5 D5)", "both cancel a floor member's own ack and keep the seat warm; legacy clears its runtime env ack and never reads or clears the row ack E3 writes in a v2 city, while v2 voids that row ack (stopAckVoidPatch)",
+		[]string{session.DrainAckIncarnationKey, session.DrainAckAtKey},
+	},
+	"drain-env-clears": {
+		"C6b2 (A4, v5 D5; owner to add a §12.2 row)", "legacy signals and finalizes a drain through the runtime's drain env (SetMeta GC_DRAIN_ACK, then RemoveMeta GC_DRAIN and GC_DRAIN_ACK, also on a runtime already gone); v2's acks and signal are row-bound (D1, D5), so its stop verb writes and removes no drain env",
+		nil,
+	},
+
+	"wait-sleep-lag": {
+		"C6b1, C6b2 (A20, A4; owner to add a §12.2 row)", "legacy drains a waiter to a sleep on its wait hold and, once the wait turns ready, starts it again through the idle latch and delivers the wait's nudge with the start; v2 drains and restarts it the same way, a pass or more later (drain-stop-lag)",
+		append([]string{"sleep_intent", "sleep_reason", "slept_at", "drain_at", "detached_at", "stranded_event_emitted_at", session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey}, parityStartKeys...),
+	},
 }
 
 // parityUnported is legacy behavior that belongs to an arm or effect kind
 // not yet registered. The key's arm ("A18") or kind must stay unregistered.
 var parityUnported = map[string]parityEntry{
-	"C7b2 drift-restart": {
-		"C7b2 (A14's named restart in place, SESS-557)", "legacy kills a drifted named row's runtime and restarts it in place in the tick (ConfigDriftResetPatch, the start and its commit); v2's A14 leaves the row alone until C7b2 brings the restart with its effect",
-		append([]string{"continuation_epoch", "generation", "state_reason", "creation_complete_at", "awake_started_at", "last_woke_at", "primed_at", "prompt_hash", "started_config_hash"}, parityStartKeys...),
-	},
-	"C7b2 live-apply": {"C7b2 (A14's live RunLive, SESS-565)", "legacy runs a live drift's session_live again (RunLive) and records the live hashes and session.updated; v2's A14 leaves the row alone until C7b2 brings RunLive with its effect", []string{"started_live_hash", "live_hash"}},
-	"C7b2 drift-repair": {
-		"C7b2 (A14's asleep named repair, SESS-566/568)", "legacy repairs an asleep named row's drift (resetConfiguredNamedSessionForConfigDriftInfo: the baseline cleared, the key rotated or cleared, the continuation reset); v2's A14 leaves the row alone until C7b2 brings the repair with its effect",
-		[]string{"started_config_hash", "started_live_hash", "live_hash", "session_key", "continuation_reset_pending", "restart_requested"},
-	},
 	// Unported with no fixture, since neither twin reads a provider-health
 	// registry (legacy's gate is nil there): legacy's ADR-0013 episode
 	// bookkeeping around A18's red skip, recordRedSkip, recordGreenTick and
@@ -218,18 +248,6 @@ var parityUnported = map[string]parityEntry{
 	// provider.health_gate_alert). v2's A18 skips a red provider's start
 	// (TestDecideRowStartGates) but keeps no episode and records no alert.
 	// Owner: the C5b follow-up PR, with episode-mirror.
-	"A4 idle-sleep": {"C6b1, C6b2 (A4 + D4)", "legacy signals an idle drain in the tick it begins it and finishes the sleep: SleepPatch(idle) with the drain's sleep-policy fingerprint, the idle latch's input, and starts it again when its policy changes; v2's begin (A20) writes the stop request and the fingerprint, and registers no signal or finalize yet, so its runtime stays up", append([]string{"sleep_intent", "sleep_reason", "slept_at", "drain_at", "detached_at", session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey}, parityStartKeys...)},
-	"A4 managed-suspend": {
-		"C6b1, C6b2 (A4 + D3, D4)", "legacy drains a managed suspend (the operator hold on a live runtime) to a stop, so a later wake restarts the row and its start consumes the request (D7); v2's A20 writes the stop request and registers no signal or stop verb yet, so the runtime stays up and the wake neither restarts the row nor is consumed",
-		append([]string{"state", "wake_request", "wake_requested_at", session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey}, parityStartKeys...),
-	},
-	"A4 drain-stop":             {"C6b1, C6b2 (A4 + D3, D4)", "legacy signals and stops a drain in the tick it begins it (its drain-ack mark, the provider's meta and Stop); v2's begin (A20) writes only the stop request (D1), which legacy never writes, and registers no signal or stop verb yet", []string{session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey, "drain_at", "sleep_intent", "slept_at", "state_reason"}},
-	"signal-fresh idle-respawn": {"C6d (D2's idle-respawn row: its begin and the claim-revalidating signal, signal-fresh), BEHAVIORS SESS-614", "legacy drains a pool row awake only for ready, unclaimed assigned work, idle past its sleep time, and retires its slot so a fresh seat takes the work; v2's A20 begins a plain idle drain there (its stop request), and registers no idle-respawn begin or signal yet", []string{"sleep_intent", "drain_at", "state", "state_reason", "status", "close_reason", "closed_at", "synced_at", session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey}},
-	"A4 wait-sleep": {
-		"C6b1, C6b2 (A4 + D3, D4)", "legacy drains a waiter to a sleep on its wait hold and, once the wait turns ready, starts it again through the idle latch (a wait's own intent is no explicit sleep intent) and delivers the wait's nudge with the start; v2's begin (A20) writes the stop request and registers no signal or stop verb yet, so the waiter's runtime stays up and its waits step queues the nudge to it live",
-		append([]string{"sleep_intent", "sleep_reason", "slept_at", "drain_at", "detached_at", "stranded_event_emitted_at", session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey}, parityStartKeys...),
-	},
-	"C7d-2 row-metadata": {"C7d", "legacy's session-bead sync stamps the row metadata of a row created or changed this tick; v2 registers no row-metadata arm yet", []string{"synced_at", "command", "work_dir"}},
 }
 
 // parityPinned are KEPT rows a registered arm implements whose owner cell
@@ -253,9 +271,22 @@ var parityKindOwners = map[string]*regexp.Regexp{
 	// and the D2 policy table it shares with A19.
 	intentDrainBegin:      regexp.MustCompile(`\bA20\b`),
 	intentDrainBeginFresh: regexp.MustCompile(`\bA20\b`),
+	// A20's signal half (C6b1) owns the same rows: the D2 table's
+	// authorization and grace columns.
+	intentSignal: regexp.MustCompile(`\bA20\b`),
+	// A4's stop verb owns its rows: the verb, its finalize and the D3/D4
+	// table rows.
+	intentStop:        regexp.MustCompile(`\bA4\b`),
+	intentSignalFresh: regexp.MustCompile(`\bA20\b`),
+	// A11's ack signal (C6c2) owns the D5 ack rows.
+	intentSignalAck: regexp.MustCompile(`\bA11\b`),
 	// S4 rekeys a StaleSelf row; A3, the arm proposing it, is gated
 	// through parityArmRef.
-	intentRekey: regexp.MustCompile(`\bS4\b`),
+	intentRekey:         regexp.MustCompile(`\bS4\b`),
+	intentLiveApply:     regexp.MustCompile(`\bA14 config drift\b`), // SESS-565's RunLive
+	intentDriftRepair:   regexp.MustCompile(`\bA14 config drift\b`), // SESS-566/568's repair
+	intentDriftRestart:  regexp.MustCompile(`\bA14 config drift\b`), // SESS-557's restart in place
+	intentDriftRelaunch: regexp.MustCompile(`\bA14 config drift\b`), // SESS-556/560's relaunch
 	// S1's start (C5a1's effect, A17/A18's kind) owns its Launch and
 	// PreWake rows; S1's adopt owns no row yet.
 	intentStart: regexp.MustCompile(`\bS1 start\b|\bS1 PreWake\b`),
@@ -265,6 +296,8 @@ var parityKindOwners = map[string]*regexp.Regexp{
 	intentRuntimeAlias: regexp.MustCompile(`\bM1 row-metadata verb \(A7\)`), // SESS-716's runtime alias sync
 	// A8's baseline (C7c) owns the M2 builder's rows.
 	intentBaseline: regexp.MustCompile(`\bM2 baseline builder \(A8\)`),
+	// A12's zombie effect (C5c2) owns the classification rows.
+	intentZombie: regexp.MustCompile(`\bA12 / S5 classification\b`),
 	// A10's rollback (C5a2) owns its C3 rows.
 	intentRollback: regexp.MustCompile(`\bA10 \+ C3 rollback\b`),
 	// A21's closes own their C3 rows: the failed-create, pool-slot and
@@ -309,15 +342,6 @@ func (p twinProvider) GetMeta(name, key string) (string, error) {
 	return p.Fake.GetMeta(name, key)
 }
 
-func (p twinProvider) IsAttachedWithError(name string) (bool, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if rt := p.rts[name]; rt != nil && rt.probeErr {
-		return false, fmt.Errorf("sim: attach probe of %s: %w", name, runtime.ErrRuntimeUnavailable)
-	}
-	return p.rts[name] != nil && p.rts[name].attached, nil
-}
-
 // parityMutators are runtime.Fake's recorded calls that change a runtime;
 // Start and the destructive calls are the simulator's own records.
 var parityMutators = map[string]bool{
@@ -347,6 +371,11 @@ func (p twinProvider) actions() map[string]int {
 // place puts f's runtimes on p, each under its row's session name.
 func (f parityFixture) place(p *simProvider) {
 	p.nextStart = f.StartErr
+	for _, b := range f.Rows {
+		if pane, ok := f.Panes[b.ID]; ok {
+			p.SetPeekOutput(b.Metadata["session_name"], pane)
+		}
+	}
 	for _, rt := range f.Runtimes {
 		for _, b := range append(slices.Clone(f.Rows), f.Rig...) {
 			if b.ID == rt.id {
@@ -356,6 +385,12 @@ func (f parityFixture) place(p *simProvider) {
 				*p.rts[b.Metadata["session_name"]] = placed
 				if slices.Contains(f.Pending, rt.id) {
 					p.SetPendingInteraction(b.Metadata["session_name"], &runtime.PendingInteraction{RequestID: "req-1", Kind: "approval"})
+				}
+				if slices.Contains(f.Acks, rt.id) {
+					name := b.Metadata["session_name"]
+					_ = p.SetMeta(name, drainAckRequesterInstanceTokenKey, drainAckInstanceTokenDigest(rt.token))
+					_ = p.SetMeta(name, reconcilerDrainAckSourceKey, drainAckSourceAgentValue)
+					_ = p.SetMeta(name, "GC_DRAIN_ACK", "1")
 				}
 				if slices.Contains(f.Idle, rt.id) {
 					p.SetActivity(b.Metadata["session_name"], parityNow.Add(-time.Hour))
@@ -482,6 +517,17 @@ type legacyWorld struct {
 	dops     drainOps
 	stops    asyncStartTracker // the drain-ack's async stops, as the controller's asyncStops
 	pokes    *atomic.Int64     // the async stops' completion pokes, when the timeline counts them
+	// it and adt are the controller's idle and assigned-work defer
+	// trackers (buildIdleTracker, buildAssignedWorkDeferTracker), kept across
+	// ticks and rebuilt on a reload, as city_runtime does.
+	it  idleTracker
+	adt assignedWorkDeferTracker
+}
+
+// trackers builds the controller's lifecycle trackers for cfg.
+func (w *legacyWorld) trackers(cfg *config.City) {
+	w.it = buildIdleTracker(cfg, cfg.Workspace.Name, w.cityPath, w.sp)
+	w.adt = buildAssignedWorkDeferTracker(cfg, cfg.Workspace.Name, w.sp)
 }
 
 func newLegacyWorld(t testing.TB, f parityFixture, cityPath string, rows []beads.Bead) *legacyWorld {
@@ -494,6 +540,7 @@ func newLegacyWorld(t testing.TB, f parityFixture, cityPath string, rows []beads
 		clk: clk, rec: &memRecorder{}, dt: newDrainTracker(),
 	}
 	w.dops = newDrainOps(w.sp)
+	w.trackers(w.cfg)
 	for id, reason := range f.Drains {
 		// The drain's basis is the seeded row, as beginSessionDrainInfo records it.
 		var basis session.Decided
@@ -606,10 +653,10 @@ func (w *legacyWorld) tick(t *testing.T, reconcile bool) {
 	awake, awakeRefs, awakeStores := filterAssignedWorkBeadsForSessionWakeWithStores(cfg, w.cityPath, w.store, open, assigned, refs, stores)
 	reconcileSessionBeadsAtPathWithNamedDemand(context.Background(), w.cityPath, updated.OpenForReconcile(), updated, result.State, cfgNames, cfg, w.sp, w.store, sw,
 		w.dops, awake, w.rigs, readyWaits, w.dt, nil, poolDesired, result.NamedSessionDemand, result.NamedSessionRoutedDemand,
-		result.snapshotQueryPartial(), map[string]bool{}, cfg.Workspace.Name, nil, w.clk, w.rec, cfg.Session.StartupTimeoutDuration(), cfg.Daemon.DriftDrainTimeoutDuration(),
+		result.snapshotQueryPartial(), map[string]bool{}, cfg.Workspace.Name, w.it, w.clk, w.rec, cfg.Session.StartupTimeoutDuration(), cfg.Daemon.DriftDrainTimeoutDuration(),
 		io.Discard, io.Discard,
 		withReadyAssignedFlags(readyAssignedFlagsForBeads(result.ReadyAssigned, awake, awakeRefs)), withAssignedWorkStores(awakeStores),
-		withAsyncDrainAckStopTracker(&w.stops),
+		withAsyncDrainAckStopTracker(&w.stops), withAssignedWorkDeferTracker(w.adt),
 		withStartStabilityWaiter(immediateStartStabilityWaiter), withSessionStaleKeyDetectionWaiter(immediateSessionStaleKeyDetectionWaiter))
 	for _, gate := range gates {
 		close(gate)
@@ -852,6 +899,11 @@ func (w *v2World) once(t *testing.T) bool {
 	for len(s.parked) > 0 {
 		s.release(0)
 	}
+	for _, st := range s.p.settlements.drain() { // the facts the next pass records first, recorded at their tick
+		s.p.applyFacts(st.Facts, s.clk.Now())
+		st.Facts = effectFacts{}
+		s.p.settlements.post(st)
+	}
 	if env, err = s.env.externalReadsEnv(); err != nil {
 		t.Fatalf("v2 lane env: %v", err)
 	}
@@ -944,6 +996,11 @@ func checkParity(t *testing.T, f parityFixture) {
 	}
 }
 
+// stopPendingMeta is legacy's stop-pending projection, signaled at.
+func stopPendingMeta(at string) []string {
+	return []string{"state", "draining", "state_reason", session.DrainAckStopPendingReason, "drain_at", at}
+}
+
 // parityFixtures are the fixtures, one or more per KEPT row of a registered
 // arm or effect kind.
 func parityFixtures() []parityFixture {
@@ -976,19 +1033,27 @@ func parityFixtures() []parityFixture {
 		cfg.Agents[1].SleepAfterIdle = "5m"
 		return cfg
 	}
+	// chatDemand is chat's city with its named session on demand and no
+	// idle sleep: AL1 keeps it asleep without demand.
+	chatDemand := func() *config.City {
+		cfg := workerCity(3)
+		cfg.Agents = append(cfg.Agents, config.Agent{Name: "chat", StartCommand: "true"})
+		cfg.NamedSessions = []config.NamedSession{{Template: "chat", Mode: "on_demand"}}
+		return cfg
+	}
 	// onDemand is chat's on-demand named row, awake, with meta; chatLive its
 	// runtime; chatStanding its standing findings.
 	onDemand := func(meta ...string) parityRow {
 		return chatRow("gc-c", "1", append([]string{"state", "awake", "session_name", "chat", "configured_named_mode", "on_demand", "instance_token", "tok-gc-c"}, meta...)...)
 	}
 	chatLive := simRuntime{id: "gc-c", epoch: "1", token: "tok-gc-c"}
-	chatStanding := map[string]string{"row:gc-c:*policy": "sleep-policy-keys", "row:gc-c:*sync": "C7d-2 row-metadata"}
+	chatStanding := map[string]string{"row:gc-c:*policy": "sleep-policy-keys"}
 	// stopsInTick is legacy's same-tick signal, stop and sleep of the named
 	// session after its begin, which v2 leaves to A4 (C6b1, C6b2); v2's begin
 	// writes the stop request.
 	stopsInTick := func(entry string) map[string]string {
 		return map[string]string{
-			"row:gc-c:*policy": "sleep-policy-keys", "row:gc-c:*sync": "C7d-2 row-metadata", "row:gc-c:*stop": entry,
+			"row:gc-c:*policy": "sleep-policy-keys", "row:gc-c:*stop": entry,
 			"row:gc-c:state": entry, "row:gc-c:last_woke_at": entry, "row:gc-c:detached_at": entry,
 			"provider:SetMeta chat": entry, "provider:RemoveMeta chat": entry, "provider:Stop chat": entry,
 			"event:session.stopped chat [reason session_id template]": entry,
@@ -1029,14 +1094,15 @@ func parityFixtures() []parityFixture {
 	drifted := runtime.FingerprintVersion + ":drifted"
 	// driftDrained is legacy finishing the drift drain in its ticks (the
 	// signal, the stop, the drained seat's retirement and its replacement),
-	// where v2's A14 writes the stop request and has no signal or stop yet.
-	driftDrained := map[string]string{"row:gc-1:*stop": "A4 drain-stop", "row:gc-2": "A4 drain-stop"}
+	// where v2's A14 writes the stop request, and its signal (C6b1) and stop
+	// verb (A4) land a pass or more later.
+	driftDrained := map[string]string{"row:gc-1:*stop": "drain-stop-lag", "row:gc-2": "drain-stop-lag"}
 	for _, k := range []string{
 		"row:gc-1:state", "row:gc-1:status", "row:gc-1:closed_at", "row:gc-1:close_reason",
 		"provider:SetMeta s-gc-1", "provider:RemoveMeta s-gc-1", "provider:Stop s-gc-1", "provider:Start worker-gc-2", "provider:RemoveMeta worker-gc-2",
 		"event:session.stopped worker [reason session_id template]", "event:session.woke worker-1 []",
 	} {
-		driftDrained[k] = "A4 drain-stop"
+		driftDrained[k] = "drain-stop-lag"
 	}
 	// explain merges the alive wanted row gc-1's standing findings with more.
 	explain := func(more map[string]string) map[string]string {
@@ -1050,10 +1116,6 @@ func parityFixtures() []parityFixture {
 		out := map[string]string{"row:" + id + ":*policy": "sleep-policy-keys", "provider:RemoveMeta " + name: "§12.2#38 start-meta-clears"}
 		maps.Copy(out, more)
 		return out
-	}
-	// created is a row v2's create wrote, which legacy's sync then stamps.
-	created := func(id string) map[string]string {
-		return map[string]string{"row:" + id + ":*sync": "C7d-2 row-metadata"}
 	}
 	return []parityFixture{
 		{
@@ -1088,10 +1150,11 @@ func parityFixtures() []parityFixture {
 		{
 			// In a suspended city: legacy heals the expired hold from a fresh
 			// snapshot (SESS-009), then its state heal (SESS-531) turns the
-			// row asleep; v2 heals the hold and keeps the suspend.
+			// row asleep; v2 heals the hold, and then the soft suspend left
+			// (CONTRACT v5.9u).
 			Name: "a suspended named row's expired hold heals, and legacy turns it asleep", Behaviors: []string{"SESS-009", "SESS-531"}, City: chat(true),
 			Rows:    []parityRow{chatRow("gc-c", "1", "session_name", "chat", "state", "suspended", "held_until", at(-time.Minute), "sleep_reason", "user-hold", "suspended_at", at(-time.Hour))},
-			Explain: map[string]string{"row:gc-c:*policy": "sleep-policy-keys", "row:gc-c:state": "suspended-named-heal"},
+			Explain: map[string]string{"row:gc-c:*policy": "sleep-policy-keys"},
 		},
 		{
 			Name: "an unknown state is skipped", Behaviors: []string{"SESS-044", "SESS-045"},
@@ -1116,6 +1179,13 @@ func parityFixtures() []parityFixture {
 		{
 			Name: "an awake row whose runtime is gone", Behaviors: []string{"SESS-531", "SESS-624"},
 			Rows: []parityRow{awake("last_woke_at", at(-2*time.Hour), "quarantined_until", at(time.Hour), "session_key", "conversation-1", "started_config_hash", "v6:abc")}, Work: assigned,
+			Explain: map[string]string{"row:gc-1:*policy": "sleep-policy-keys"},
+		},
+		{
+			// A committed manual conversation (key and hash, #7470): both
+			// copies heal it asleep and keep its conversation.
+			Name: "an awake manual conversation whose runtime is gone", Behaviors: []string{"SESS-531", "SESS-725"},
+			Rows: []parityRow{awake("last_woke_at", at(-2*time.Hour), "quarantined_until", at(time.Hour), "session_key", "conversation-1", "started_config_hash", "v6:abc", "session_origin", "manual")}, Work: assigned,
 			Explain: map[string]string{"row:gc-1:*policy": "sleep-policy-keys"},
 		},
 		{
@@ -1163,8 +1233,8 @@ func parityFixtures() []parityFixture {
 		},
 		{
 			Name: "an undesired pool row under a live user hold keeps its slot", Behaviors: []string{"MAINT-051"},
-			Rows:    []parityRow{poolRow("gc-1", "worker", 1, "asleep", "sleep_intent", "user-hold", "sleep_reason", "user-hold", "held_until", at(time.Hour), "slept_at", at(-time.Hour))},
-			Explain: map[string]string{"row:gc-1:*kept": "§12.2#27 held-slot-kept"},
+			// Legacy keeps it too since closeAllowed (R9-C): its KeepsSlot.
+			Rows: []parityRow{poolRow("gc-1", "worker", 1, "asleep", "sleep_intent", "user-hold", "sleep_reason", "user-hold", "held_until", at(time.Hour), "slept_at", at(-time.Hour))},
 		},
 		{
 			Name: "an undesired pool row in quarantine keeps its slot", Behaviors: []string{"MAINT-051"},
@@ -1175,19 +1245,31 @@ func parityFixtures() []parityFixture {
 			Name: "a desired floor seat asleep with no wake reason stays open", Behaviors: []string{"SESS-626"},
 			City:    func() *config.City { cfg := workerCity(3); cfg.Agents[0].MinActiveSessions = intPtr(1); return cfg },
 			Rows:    []parityRow{poolRow("gc-1", "worker", 1, "asleep", "sleep_reason", "no-wake-reason", "slept_at", at(-time.Hour))},
-			Explain: started("gc-2", "worker-gc-2", "worker-2", map[string]string{"row:gc-1:*policy": "sleep-policy-keys", "row:gc-2:*sync": "C7d-2 row-metadata"}),
+			Explain: started("gc-2", "worker-gc-2", "worker-2", map[string]string{"row:gc-1:*policy": "sleep-policy-keys"}),
 		},
 		{
 			Name: "a desired floor seat asleep on config drift stays open", Behaviors: []string{"SESS-626"},
 			City:    func() *config.City { cfg := workerCity(3); cfg.Agents[0].MinActiveSessions = intPtr(1); return cfg },
 			Rows:    []parityRow{poolRow("gc-1", "worker", 1, "asleep", "sleep_reason", "config-drift", "slept_at", at(-time.Hour))},
-			Explain: started("gc-2", "worker-gc-2", "worker-2", map[string]string{"row:gc-1:*policy": "sleep-policy-keys", "row:gc-2:*sync": "C7d-2 row-metadata"}),
+			Explain: started("gc-2", "worker-gc-2", "worker-2", map[string]string{"row:gc-1:*policy": "sleep-policy-keys"}),
 		},
 		{
 			Name: "a dead phantom of a configured name closes and keeps the identity's work", Behaviors: []string{"SESS-080"}, City: chat(false),
 			Rows:    []parityRow{sessionRow("gc-p", "template", "keeper", "session_name", "chat", "configured_named_session", "true", "state", "asleep", "generation", "1")},
 			Work:    []parityRow{{ID: "gw-1", Title: "gw-1", Type: "task", Status: "open", Assignee: "chat", Metadata: map[string]string{}}},
 			Explain: started("gc-1", "chat", "chat", map[string]string{"row:gc-p:*reason": "§12.2#17 orphan-close-reason"}),
+		},
+		{
+			// DRAIN-010 / SESS-069 (PAR-FLOORACK): the sole member of a
+			// min_active_sessions = 1 pool acks its own idle drain; both
+			// modes cancel the ack and keep the seat warm. Legacy clears its
+			// runtime env ack; v2 voids its row ack.
+			Name: "a floor member's own ack is canceled and the seat stays warm", Behaviors: []string{"DRAIN-010", "SESS-069"},
+			City: func() *config.City { cfg := workerCity(3); cfg.Agents[0].MinActiveSessions = intPtr(1); return cfg },
+			Rows: []parityRow{poolRow("gc-1", "worker", 1, "awake", "instance_token", "tok-gc-1", "last_woke_at", at(-time.Hour),
+				session.DrainAckIncarnationKey, "1", session.DrainAckAtKey, at(-time.Minute))},
+			Runtimes: []simRuntime{{id: "gc-1", epoch: "1", token: "tok-gc-1"}}, Acks: []string{"gc-1"},
+			Explain: map[string]string{"provider:RemoveMeta s-gc-1": "drain-env-clears", "row:gc-1:*policy": "sleep-policy-keys", "row:gc-1:*ack": "floor-ack-row-void"},
 		},
 		{
 			Name: "an idle killed pool seat closes", Behaviors: []string{"SESS-623"},
@@ -1199,12 +1281,60 @@ func parityFixtures() []parityFixture {
 			// runtime (C3), so the corpse stays and the row with it.
 			Name: "a corpse on an unwanted row that claims a live runtime", Behaviors: []string{"MAINT-031"},
 			Rows: []parityRow{poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-gc-1", "last_woke_at", at(-time.Hour))}, Runtimes: []simRuntime{{id: "gc-1", epoch: "1", token: "tok-gc-1", corpse: true}},
-			Explain: map[string]string{"row:gc-1:*close": "dead-corpse-close"},
+			Explain: map[string]string{"provider:KillCorpseObject s-gc-1": "§12.2#41 close-removes-corpse", "row:gc-1:*reason": "§12.2#17 orphan-close-reason"},
 		},
 		{
 			Name: "a corpse on an unwanted row is removed, and the row closes", Behaviors: []string{"GUAR-022", "INC-025"},
 			Rows: []parityRow{poolRow("gc-1", "worker", 1, "asleep", "instance_token", "tok-gc-1", "slept_at", at(-time.Hour))}, Runtimes: []simRuntime{{id: "gc-1", epoch: "1", token: "tok-gc-1", corpse: true}},
 			Explain: map[string]string{"row:gc-1:*reason": "§12.2#17 orphan-close-reason", "provider:KillCorpseObject s-gc-1": "§12.2#41 close-removes-corpse"},
+		},
+		{
+			// A stop-pending pool seat whose runtime is gone and holds no work:
+			// C8.8 confirms, and the finalize closes it as drained. The close
+			// section is the guarded close: it reads the work in the
+			// close-gate form under the close's lock, and a row another
+			// writer closed first ends as a no-op (the NDI witness).
+			Name: "a stop-pending pool seat with no runtime and no work closes as drained", Behaviors: []string{"DRAIN-051", "SESS-033", "SESS-034", "GUAR-005"},
+			Rows:    []parityRow{awake(stopPendingMeta(at(-time.Minute))...)},
+			Explain: map[string]string{"provider:RemoveMeta s-gc-1": "drain-env-clears"},
+		},
+		{
+			// The same seat with in-progress work: no close (the re-queried
+			// work refuses it), and the drain completes as an idle sleep,
+			// with legacy's drain_acked_with_assigned_work for the claimable
+			// bead.
+			Name: "a stop-pending pool seat with work sleeps idle", Behaviors: []string{"DRAIN-050", "DRAIN-053", "DRAIN-054", "DRAIN-055", "SESS-035", "SESS-036"},
+			Rows: []parityRow{awake(stopPendingMeta(at(-time.Minute))...)}, Work: assigned,
+			Explain: map[string]string{"provider:RemoveMeta s-gc-1": "drain-env-clears", "row:gc-1:*policy": "sleep-policy-keys"},
+		},
+		{
+			// A stop-pending named row with no work ends drained, and its
+			// restart request is consumed (#2574).
+			Name: "a stop-pending named row ends drained", Behaviors: []string{"SESS-035"}, City: chat(false),
+			Rows:    []parityRow{chatRow("gc-c", "1", append([]string{"session_name", "chat", "instance_token", "tok-gc-c", "restart_requested", "true"}, stopPendingMeta(at(-time.Minute))...)...)},
+			Explain: map[string]string{"provider:RemoveMeta chat": "drain-env-clears", "row:gc-c:*policy": "sleep-policy-keys"},
+		},
+		{
+			// A stop-pending seat whose name now carries another row's
+			// runtime: the Foreign verdict proves this row's runtime gone,
+			// so the verb finalizes without a stop (D3, R52, §12.2 #11);
+			// legacy skips the kill on the token mismatch.
+			Name: "a stop-pending seat whose name holds another row's runtime finalizes without a stop", Behaviors: []string{"DRAIN-036"},
+			Rows:     []parityRow{awake(stopPendingMeta(at(-time.Minute))...)},
+			Runtimes: []simRuntime{{id: "gc-9", epoch: "1", token: "tok-gc-9"}},
+			Explain:  map[string]string{"provider:RemoveMeta s-gc-1": "drain-env-clears"},
+		},
+		{
+			// gc session suspend under a controller (the operator hold on a
+			// live runtime) of a seat holding work: A4's direct stop stops the
+			// runtime with the full fence but L5, and its finalize writes
+			// nothing, so the hold sticks (C6a ruling 2, J42 B/C).
+			Name: "an operator's suspend stops a seat that holds work, and the hold sticks", Behaviors: []string{"SESS-035"},
+			Rows: []parityRow{awake("state", "suspended", "sleep_intent", "user-hold", "held_until", at(100*365*24*time.Hour), "suspended_at", at(-time.Second))}, Work: assigned,
+			Runtimes: []simRuntime{live},
+			Explain: map[string]string{
+				"provider:RemoveMeta s-gc-1": "drain-env-clears", "provider:SetMeta s-gc-1": "drain-env-clears", "row:gc-1:*policy": "sleep-policy-keys",
+			},
 		},
 		{
 			Name: "detached_at clears when idle sleep is off", Behaviors: []string{"SESS-533"},
@@ -1255,7 +1385,7 @@ func parityFixtures() []parityFixture {
 		{
 			Name: "an idle-respawn drain no longer eligible", Behaviors: []string{"DRAIN-044"},
 			Rows: []parityRow{awake()}, Work: assigned, Runtimes: []simRuntime{live}, Drains: map[string]string{"gc-1": "idle-respawn"},
-			Explain: explain(map[string]string{"row:gc-1:*drain": "idle-respawn-void"}),
+			Explain: explain(nil),
 		},
 		{
 			Name: "a resume voids a suspended drain (R16)",
@@ -1286,7 +1416,7 @@ func parityFixtures() []parityFixture {
 			Name: "an idle drain begin writes the sleep policy fingerprint", Behaviors: []string{"SESS-601"}, City: chatNapping,
 			Rows:     []parityRow{chatRow("gc-c", "1", "state", "awake", "session_name", "chat", "instance_token", "tok-gc-c", "last_woke_at", at(-time.Hour), "detached_at", at(-time.Hour))},
 			Runtimes: []simRuntime{chatLive}, Idle: []string{"gc-c"},
-			Explain: tlMerged(latchCompared(stopsInTick("A4 idle-sleep")), map[string]string{"row:gc-c:config_wake_suppressed": "sleep-policy-keys"}),
+			Explain: tlMerged(latchCompared(stopsInTick("idle-sleep-lag")), map[string]string{"row:gc-c:config_wake_suppressed": "sleep-policy-keys"}),
 		},
 		{
 			// A pool row awake only for ready, unclaimed assigned work, idle
@@ -1295,10 +1425,10 @@ func parityFixtures() []parityFixture {
 			Rows: []parityRow{awake("last_woke_at", at(-time.Hour), "detached_at", at(-time.Hour))}, Work: []parityRow{routedDemandBead("gw-1")}, Runtimes: []simRuntime{live}, Idle: []string{"gc-1"},
 			// Legacy also creates and starts the replacement seat gc-2.
 			Explain: explain(map[string]string{
-				"row:gc-1:*respawn": "signal-fresh idle-respawn", "provider:SetMeta s-gc-1": "signal-fresh idle-respawn", "provider:RemoveMeta s-gc-1": "signal-fresh idle-respawn",
-				"provider:Stop s-gc-1": "signal-fresh idle-respawn", "event:session.stopped worker [reason session_id template]": "signal-fresh idle-respawn",
-				"row:gc-2": "signal-fresh idle-respawn", "provider:Start worker-gc-2": "signal-fresh idle-respawn", "provider:RemoveMeta worker-gc-2": "signal-fresh idle-respawn",
-				"event:session.woke worker-1 []": "signal-fresh idle-respawn",
+				"row:gc-1:*respawn": "idle-respawn-drain", "provider:SetMeta s-gc-1": "idle-respawn-drain", "provider:RemoveMeta s-gc-1": "idle-respawn-drain",
+				"provider:Stop s-gc-1": "idle-respawn-drain", "event:session.stopped worker [reason session_id template]": "idle-respawn-drain",
+				"row:gc-2": "idle-respawn-drain", "provider:Start worker-gc-2": "idle-respawn-drain", "provider:RemoveMeta worker-gc-2": "idle-respawn-drain",
+				"event:session.woke worker-1 []": "idle-respawn-drain",
 			}),
 		},
 		{
@@ -1321,7 +1451,7 @@ func parityFixtures() []parityFixture {
 			Name: "a live quarantined row drains for no wake reason", Behaviors: []string{"SESS-618", "DRAIN-022", "DRAIN-501"}, City: chatOnDemand,
 			Rows:     []parityRow{onDemand("last_woke_at", at(-10*time.Second), "quarantined_until", at(time.Hour), "sleep_reason", "quarantine")},
 			Runtimes: []simRuntime{chatLive},
-			Explain:  stopsInTick("A4 drain-stop"),
+			Explain:  stopsInTick("drain-stop-lag"),
 		},
 		{
 			// An idle on-demand named session holding a live claim (its
@@ -1341,20 +1471,22 @@ func parityFixtures() []parityFixture {
 			Name: "an idle on-demand session proved idle begins its idle drain", Behaviors: []string{"SESS-621", "SESS-601"}, City: chatOnDemand,
 			Rows:     []parityRow{onDemand("last_woke_at", at(-time.Hour), "detached_at", at(-time.Hour))},
 			Runtimes: []simRuntime{chatLive}, Idle: []string{"gc-c"},
-			Explain: latchCompared(stopsInTick("A4 idle-sleep")),
+			Explain: latchCompared(stopsInTick("idle-sleep-lag")),
 		},
 		{
 			// An idle stop pending whose runtime is gone finishes the sleep
 			// (legacy's SleepPatch(idle), keeping the latch): A6's
 			// dead-runtime heal writes it (C6a2 review 1c).
 			Name: "an idle stop pending with its runtime gone finishes the sleep", Behaviors: []string{"SESS-532"}, City: chatOnDemand,
-			Rows:    []parityRow{onDemand("last_woke_at", at(-time.Hour), "sleep_intent", "idle-stop-pending", "sleep_policy_fingerprint", "pre-drain")},
+			// A keyed conversation woken 10s ago: a continuation reset or a
+			// rapid-crash accrual would show.
+			Rows:    []parityRow{onDemand("last_woke_at", at(-10*time.Second), "session_key", "k-1", "sleep_intent", "idle-stop-pending", "sleep_policy_fingerprint", "pre-drain")},
 			Explain: latchCompared(chatStanding),
 		},
 		{
 			Name: "an empty row type is repaired", Behaviors: []string{"SESS-701"},
 			Rows: []parityRow{func() parityRow { b := awake(); b.Type = ""; return b }()}, Work: assigned, Runtimes: []simRuntime{live},
-			Explain: explain(map[string]string{"row:gc-1:*type": "empty-type-repair"}),
+			Explain: explain(nil),
 		},
 		{
 			Name: "a preserved named row's closed trigger is cleared", Behaviors: []string{"POOL-056"}, City: chat(true),
@@ -1364,7 +1496,7 @@ func parityFixtures() []parityFixture {
 		},
 		{
 			Name: "routed demand creates a pool row", Behaviors: []string{"POOL-051", "GUAR-042", "INC-018", "SESS-711"},
-			Work: []parityRow{routedDemandBead("gw-1")}, Explain: started("gc-1", "worker-gc-1", "worker-1", created("gc-1")),
+			Work: []parityRow{routedDemandBead("gw-1")}, Explain: started("gc-1", "worker-gc-1", "worker-1", nil),
 		},
 		{
 			Name: "no second create beside an unconfirmed create", Behaviors: []string{"SESS-710"},
@@ -1379,13 +1511,13 @@ func parityFixtures() []parityFixture {
 		},
 		{
 			Name: "a mislabelled row is left alone", Rows: []parityRow{sessionRow("gc-1", "state", "asleep")},
-			Explain: map[string]string{"row:gc-1:*close": "mislabelled-close", "row:gc-1:*sync": "C7d-2 row-metadata"},
+			Explain: map[string]string{"row:gc-1:*close": "mislabelled-close", "row:gc-1:*a7": "§12.2#51 a7-lag"},
 		},
 		{Name: "a kill fence holds its row while demand creates another", Rows: []parityRow{func() parityRow {
 			b := poolRow("gc-1", "worker", 1, "asleep", "instance_token", "tok-gc-1")
 			maps.Copy(b.Metadata, session.KillPendingPatch(parityNow.Add(-time.Minute)))
 			return b
-		}()}, Work: []parityRow{routedDemandBead("gw-1")}, Explain: started("gc-2", "worker-gc-2", "worker-2", created("gc-2"))},
+		}()}, Work: []parityRow{routedDemandBead("gw-1")}, Explain: started("gc-2", "worker-gc-2", "worker-2", nil)},
 		// A18's gates (C5b). The twin has no provider-health registry, so
 		// health reads unknown and fails open in both copies; the red skip
 		// is TestDecideRowStartGates', and the episode and its alert are
@@ -1425,7 +1557,7 @@ func parityFixtures() []parityFixture {
 				eps, _ := m.List(beads.ListQuery{Type: session.StartupHealthEpisodeType})
 				return append([]parityRow{row}, eps...)
 			}(), Work: assigned,
-			Explain: explain(map[string]string{"row:gc-1:*sync": "C7d-2 row-metadata", "row:gc-1:*bind": "§12.2#40 held-start-bind", "row:gc-1:*mirror": "episode-mirror"}),
+			Explain: explain(map[string]string{"row:gc-1:*a7": "§12.2#51 a7-lag", "row:gc-1:*bind": "§12.2#40 held-start-bind", "row:gc-1:*mirror": "episode-mirror"}),
 		},
 		{
 			Name: "a heartbeat-held seat whose runtime died respawns for its work", Behaviors: []string{"SESS-602"},
@@ -1489,20 +1621,30 @@ func parityFixtures() []parityFixture {
 		// A14 leaves alone until then.
 		{
 			Name: "a pinned named row's drift is deferred", Behaviors: []string{"SESS-555"}, City: chat(false),
-			Rows: []parityRow{onDemand("configured_named_mode", "always", "started_config_hash", drifted, "pin_awake", "true")}, Runtimes: []simRuntime{chatLive}, Explain: map[string]string{"row:gc-c:*sync": "C7d-2 row-metadata"},
+			Rows: []parityRow{onDemand("configured_named_mode", "always", "started_config_hash", drifted, "pin_awake", "true")}, Runtimes: []simRuntime{chatLive}, Explain: map[string]string{},
 		},
 		{
 			Name: "a named row's drift restarts it in place", Behaviors: []string{"SESS-557"}, City: chat(false),
 			Rows: []parityRow{onDemand("configured_named_mode", "always", "started_config_hash", drifted)}, Runtimes: []simRuntime{chatLive},
-			Explain: tlMerged(chatStanding, map[string]string{
-				"row:gc-c:*restart": "C7b2 drift-restart", "provider:Stop chat": "C7b2 drift-restart", "provider:Start chat": "C7b2 drift-restart", "provider:RemoveMeta chat": "C7b2 drift-restart",
-				"event:session.draining chat []": "C7b2 drift-restart", "event:session.woke chat []": "C7b2 drift-restart",
-			}),
+			Explain: tlMerged(chatStanding, map[string]string{"provider:RemoveMeta chat": "§12.2#38 start-meta-clears"}),
 		},
 		{
 			Name: "an asleep named row's drift is repaired", Behaviors: []string{"SESS-566", "SESS-568"}, City: chatOnDemand,
 			Rows:    []parityRow{onDemand("state", "asleep", "started_config_hash", drifted, "session_key", "conversation-1")},
-			Explain: map[string]string{"row:gc-c:*policy": "sleep-policy-keys", "row:gc-c:*repair": "C7b2 drift-repair"},
+			Explain: map[string]string{"row:gc-c:*policy": "sleep-policy-keys"},
+		},
+		// A wanted one (always): legacy repairs it, its key rotated, then
+		// starts it on a fresh conversation; v2's start carries the repair in
+		// its PreWake (C7b2-1). A v5 hash is only rebaselined (SESS-567).
+		{
+			Name: "a wanted asleep named row's drift is repaired and started", Behaviors: []string{"SESS-566", "SESS-568"}, City: chat(false),
+			Rows:    []parityRow{onDemand("configured_named_mode", "always", "state", "asleep", "started_config_hash", drifted, "session_key", "conversation-1")},
+			Explain: map[string]string{"row:gc-c:*policy": "sleep-policy-keys", "provider:RemoveMeta chat": "§12.2#38 start-meta-clears"},
+		},
+		{
+			Name: "a wanted asleep named row's v5 hash is rebaselined and started", Behaviors: []string{"SESS-567"}, City: chat(false),
+			Rows:    []parityRow{onDemand("configured_named_mode", "always", "state", "asleep", "started_config_hash", "v5:core")}, // a keyed start waits out a stale-key window the twin's clock never reaches
+			Explain: map[string]string{"row:gc-c:*policy": "sleep-policy-keys", "provider:RemoveMeta chat": "§12.2#38 start-meta-clears"},
 		},
 		// A16 (C7b1): C8's execution-stalled request, a drain no lens cancels.
 		// The twin runs no execution backstop: TestDecideRowExecutionStalled.
@@ -1520,12 +1662,157 @@ func parityFixtures() []parityFixture {
 		// failure retries the next legacy tick but backs off in v2 (P4), so
 		// its classes are pinned against legacy's writers instead
 		// (TestAbandonStepClasses, TestComposedUndoMatchesLegacyRestore).
+		// The dead row of S1 (C5a3): a wanted seat's own dead runtime is
+		// classified, removed by exact object, and the seat restarts.
+		{
+			Name: "a wanted seat's own crashed zombie is recycled once", Behaviors: []string{"SESS-089"},
+			Rows: []parityRow{awake("last_woke_at", at(-time.Hour))}, Work: assigned, Runtimes: []simRuntime{{id: "gc-1", epoch: "1", token: "tok-gc-1", zombie: true}},
+			Panes:   map[string]string{"gc-1": "panic: boom"},
+			Explain: explain(map[string]string{"provider:RemoveMeta s-gc-1": "§12.2#38 start-meta-clears", "provider:Stop s-gc-1": "recycle-by-object", "provider:KillZombieObject s-gc-1": "recycle-by-object"}),
+		},
+		// A rapid crash left as a corpse (tmux remain-on-exit) or a zombie:
+		// the death accrues its fifth wake failure, quarantining, as A6
+		// accrues a gone runtime's (the C5a3 review's twin).
+		{
+			Name: "a wanted seat's rapid crash left as a corpse accrues and quarantines", Behaviors: []string{"SESS-537"},
+			Rows: []parityRow{poolRow("gc-1", "worker", 1, "awake", "instance_token", "tok-gc-1", "last_woke_at", at(-10*time.Second), "started_config_hash", "h-1", "wake_attempts", "4")},
+			Work: assigned, Runtimes: []simRuntime{{id: "gc-1", epoch: "1", token: "tok-gc-1", corpse: true}}, Panes: map[string]string{"gc-1": "panic: boom"},
+			Explain: explain(map[string]string{"provider:KillCorpseObject s-gc-1": "recycle-by-object"}),
+		},
+		{
+			Name: "a wanted seat's rapid crash left as a zombie accrues and quarantines", Behaviors: []string{"SESS-537", "SESS-089"},
+			Rows: []parityRow{poolRow("gc-1", "worker", 1, "awake", "instance_token", "tok-gc-1", "last_woke_at", at(-10*time.Second), "started_config_hash", "h-1", "wake_attempts", "4")},
+			Work: assigned, Runtimes: []simRuntime{{id: "gc-1", epoch: "1", token: "tok-gc-1", zombie: true}}, Panes: map[string]string{"gc-1": "panic: boom"},
+			Explain: explain(map[string]string{"provider:KillZombieObject s-gc-1": "recycle-by-object"}),
+		},
+		// The reset stall (SESS-086/087) is the start recycle's (plan
+		// ruling 2): a reset-pending row whose agent died past the startup
+		// timeout reads dead, so the recycle replaces it.
+		{
+			Name: "a reset-pending seat whose agent stalled past its startup timeout is replaced", Behaviors: []string{"SESS-086", "SESS-087"},
+			Rows:     []parityRow{awake("last_woke_at", at(-time.Hour), "continuation_reset_pending", "true", session.ResetCommittedAtKey, at(-time.Hour))},
+			Work:     assigned,
+			Runtimes: []simRuntime{{id: "gc-1", epoch: "1", token: "tok-gc-1", zombie: true}},
+			Explain: explain(map[string]string{
+				"event:session.reset_stalled s-gc-1 [elapsed_s reset_committed_at session_name template]": "§12.2#14 reset-stalled-not-emitted",
+				"provider:Stop s-gc-1": "recycle-by-object", "provider:KillZombieObject s-gc-1": "recycle-by-object", "provider:RemoveMeta s-gc-1": "§12.2#38 start-meta-clears",
+			}),
+		},
+		// SESS-056: a preserved named row whose liveness probe errors is
+		// left alone.
+		{
+			Name: "a preserved named row whose liveness is uncertain is left alone", Behaviors: []string{"SESS-056"}, City: chat(false),
+			Rows:     []parityRow{chatRow("gc-c", "1", "state", "awake", "session_name", "chat", "configured_named_mode", "always", "instance_token", "tok-gc-c")},
+			Runtimes: []simRuntime{{id: "gc-c", epoch: "1", token: "tok-gc-c", probeErr: true}},
+			Explain:  nil,
+		},
+		// A12 on a row it classifies (a Sleep named on_demand row, which A21
+		// never closes): a crash, a terminal error, a rate-limit screen.
+		{
+			Name: "a Sleep named row's crashed zombie is classified, then healed", Behaviors: []string{"SESS-085", "SESS-089"}, City: chatDemand,
+			Rows: []parityRow{onDemand("last_woke_at", at(-10*time.Second))}, Runtimes: []simRuntime{{id: "gc-c", epoch: "1", token: "tok-gc-c", zombie: true}},
+			Panes:   map[string]string{"gc-c": "panic: boom"},
+			Explain: map[string]string{"row:gc-c:*policy": "sleep-policy-keys"},
+		},
+		{
+			Name: "a Sleep named row's zombie on a terminal error is parked", Behaviors: []string{"SESS-057", "SESS-088"}, City: chatDemand,
+			Rows: []parityRow{onDemand("last_woke_at", at(-time.Hour))}, Runtimes: []simRuntime{{id: "gc-c", epoch: "1", token: "tok-gc-c", zombie: true}},
+			Panes:   map[string]string{"gc-c": "Error: model_not_found"},
+			Explain: map[string]string{"row:gc-c:*policy": "sleep-policy-keys"},
+		},
+		{
+			Name: "a Sleep named row's zombie on a rate-limit screen is quarantined", Behaviors: []string{"SESS-530"}, City: chatDemand,
+			Rows: []parityRow{onDemand("last_woke_at", at(-10*time.Second))}, Runtimes: []simRuntime{{id: "gc-c", epoch: "1", token: "tok-gc-c", zombie: true}},
+			Panes:   map[string]string{"gc-c": "Usage limit reached"},
+			Explain: map[string]string{"row:gc-c:*policy": "sleep-policy-keys"},
+		},
+		// C5c2 ruling 1: an unwanted row's dead runtime is A21's, closed
+		// unclassified as legacy closes it, once INC-003's grace ends.
+		{
+			Name: "an unwanted row's crashed zombie is closed unclassified", Behaviors: []string{"SESS-085", "SESS-090"},
+			Rows: []parityRow{poolRow("gc-1", "gone", 1, "awake", "instance_token", "tok-gc-1", "last_woke_at", at(-time.Hour))}, Runtimes: []simRuntime{{id: "gc-1", epoch: "1", token: "tok-gc-1", zombie: true}},
+			Panes: map[string]string{"gc-1": "panic: boom"},
+			Explain: map[string]string{
+				"row:gc-1:*drain": "undesired-dead-drain", "row:gc-1:*reason": "§12.2#17 orphan-close-reason", "provider:KillZombieObject s-gc-1": "undesired-dead-drain", "provider:Stop s-gc-1": "undesired-dead-drain",
+				"provider:SetMeta s-gc-1": "undesired-dead-drain", "provider:RemoveMeta s-gc-1": "undesired-dead-drain",
+			},
+		},
+		{
+			Name: "an unwanted row's zombie on a terminal error is closed unparked", Behaviors: []string{"SESS-057"},
+			Rows: []parityRow{poolRow("gc-1", "gone", 1, "awake", "instance_token", "tok-gc-1", "last_woke_at", at(-time.Hour))}, Runtimes: []simRuntime{{id: "gc-1", epoch: "1", token: "tok-gc-1", zombie: true}},
+			Panes: map[string]string{"gc-1": "Error: model_not_found"},
+			Explain: map[string]string{
+				"row:gc-1:*drain": "undesired-dead-drain", "row:gc-1:*reason": "§12.2#17 orphan-close-reason", "provider:KillZombieObject s-gc-1": "undesired-dead-drain", "provider:Stop s-gc-1": "undesired-dead-drain",
+				"provider:SetMeta s-gc-1": "undesired-dead-drain", "provider:RemoveMeta s-gc-1": "undesired-dead-drain",
+			},
+		},
+		{
+			Name: "an unwanted row's zombie woken inside its grace is left alone", Behaviors: []string{"SESS-530"},
+			Rows: []parityRow{poolRow("gc-1", "gone", 1, "awake", "instance_token", "tok-gc-1", "last_woke_at", at(-10*time.Second))}, Runtimes: []simRuntime{{id: "gc-1", epoch: "1", token: "tok-gc-1", zombie: true}},
+			Panes: map[string]string{"gc-1": "Usage limit reached"},
+		},
+		{
+			Name: "a wanted seat whose zombie shows a terminal provider error is parked", Behaviors: []string{"SESS-088"},
+			Rows: []parityRow{awake("last_woke_at", at(-time.Hour))}, Work: assigned, Runtimes: []simRuntime{{id: "gc-1", epoch: "1", token: "tok-gc-1", zombie: true}},
+			Panes:   map[string]string{"gc-1": "Error: model_not_found"},
+			Explain: explain(map[string]string{"row:gc-1:*parked": "§12.2#19 screen-parks", "event:session.crashed worker-1 [reason session_id template]": "§12.2#19 screen-parks", "provider:Stop s-gc-1": "§12.2#19 screen-parks", "provider:RemoveMeta s-gc-1": "§12.2#19 screen-parks", "provider:Start s-gc-1": "§12.2#19 screen-parks", "event:session.woke worker-1 []": "§12.2#19 screen-parks"}),
+		},
+		// The park's exits (the C5a3 delta review): an operator's wake starts
+		// a parked row; a stale provider_terminal_error mark, which nothing
+		// clears and legacy restarts past, parks nothing.
+		{
+			Name: "an explicit wake starts a parked named row", Behaviors: []string{"SESS-088"}, City: chat(false),
+			Rows: []parityRow{chatRow("gc-c", "1", "session_name", "chat", "state", "asleep", "sleep_reason", "provider-terminal-error",
+				"provider_terminal_error", "model_not_found", "provider_terminal_error_at", at(-time.Hour), "session_health", "unhealthy", "session_health_reason", "model_not_found",
+				"session_drainable", "true", "wake_request", "explicit", "wake_requested_at", at(-time.Minute))},
+			Explain: map[string]string{"provider:RemoveMeta chat": "§12.2#38 start-meta-clears", "row:gc-c:*policy": "sleep-policy-keys"},
+		},
+		{
+			Name: "a stale terminal mark does not park a named row", Behaviors: []string{"SESS-088"}, City: chat(false),
+			Rows: []parityRow{chatRow("gc-c", "1", "session_name", "chat", "state", "asleep", "provider_terminal_error", "model_not_found", "provider_terminal_error_at", at(-7*24*time.Hour),
+				"session_health", "unhealthy", "session_health_reason", "model_not_found", "session_drainable", "true")},
+			Explain: map[string]string{"provider:RemoveMeta chat": "§12.2#38 start-meta-clears", "row:gc-c:*policy": "sleep-policy-keys"},
+		},
+		// mc-q64l4: an orphaned named row over its own zombie drains, as
+		// legacy drains it and stops it by name.
+		{
+			Name: "an orphaned named row's zombie is drained and stopped", Behaviors: []string{"SESS-085"},
+			City: func() *config.City {
+				cfg := workerCity(3)
+				cfg.Agents = append(cfg.Agents, config.Agent{Name: "chat", StartCommand: "true"})
+				return cfg
+			},
+			Rows:     []parityRow{chatRow("gc-c", "1", "session_name", "chat", "state", "awake", "instance_token", "tok-gc-c", "last_woke_at", at(-time.Hour), "configured_named_mode", "always")},
+			Runtimes: []simRuntime{{id: "gc-c", epoch: "1", token: "tok-gc-c", zombie: true}},
+			Panes:    map[string]string{"gc-c": "panic: boom"},
+			Explain:  map[string]string{"row:gc-c:*policy": "sleep-policy-keys", "row:gc-c:*meta": "§12.2#62 a7-undesired-row"},
+		},
+		{
+			Name: "an orphaned named row whose identity is apart from its template drains, its crash named by the identity", Behaviors: []string{"SESS-085"},
+			City: func() *config.City {
+				cfg := workerCity(3)
+				cfg.Agents = append(cfg.Agents, config.Agent{Name: "chat", StartCommand: "true"})
+				return cfg
+			},
+			Rows:     []parityRow{chatRow("gc-c", "1", "session_name", "chat", "state", "awake", "instance_token", "tok-gc-c", "last_woke_at", at(-time.Hour), "configured_named_mode", "always", "configured_named_identity", "other-chat")},
+			Runtimes: []simRuntime{{id: "gc-c", epoch: "1", token: "tok-gc-c", zombie: true}},
+			Panes:    map[string]string{"gc-c": "panic: boom"},
+			Explain:  map[string]string{"row:gc-c:*policy": "sleep-policy-keys", "row:gc-c:*meta": "§12.2#62 a7-undesired-row"},
+		},
+		{
+			Name: "a stale terminal mark does not hold a named row's crashed zombie", Behaviors: []string{"SESS-089"}, City: chat(false),
+			Rows: []parityRow{chatRow("gc-c", "1", "session_name", "chat", "state", "awake", "instance_token", "tok-gc-c", "last_woke_at", at(-time.Hour),
+				"provider_terminal_error", "quota_exceeded", "provider_terminal_error_at", at(-7*24*time.Hour), "session_health", "unhealthy", "session_health_reason", "quota_exceeded", "session_drainable", "true")},
+			Runtimes: []simRuntime{{id: "gc-c", epoch: "1", token: "tok-gc-c", zombie: true}},
+			Panes:    map[string]string{"gc-c": "panic: boom"},
+			Explain:  map[string]string{"provider:RemoveMeta chat": "§12.2#38 start-meta-clears", "provider:Stop chat": "recycle-by-object", "provider:KillZombieObject chat": "recycle-by-object", "row:gc-c:*policy": "sleep-policy-keys"},
+		},
 		{
 			Name: "a pending create whose start fails rolls back", Behaviors: []string{"START-031", "START-033"},
 			City: floor, StartErr: errors.New("boom"),
 			Rows: []parityRow{poolRow("gc-1", "worker", 1, "creating", "instance_token", "tok-gc-1", "pending_create_claim", "true", "pending_create_started_at", at(-time.Minute))},
 			Explain: started("gc-3", "worker-gc-3", "", map[string]string{
-				"row:gc-1:*policy": "sleep-policy-keys", "row:gc-1:*lease": "rollback-leaves-lease", "provider:Stop s-gc-1": "rollback-stops-nothing", "row:gc-3:*sync": "C7d-2 row-metadata",
+				"row:gc-1:*policy": "sleep-policy-keys", "row:gc-1:*lease": "rollback-leaves-lease", "provider:Stop s-gc-1": "rollback-stops-nothing",
 			}),
 		},
 		// A desired one (a floor seat), which no sweep reaches: both roll
@@ -1535,7 +1822,7 @@ func parityFixtures() []parityFixture {
 			City: floor,
 			Rows: []parityRow{poolRow("gc-1", "worker", 1, "creating", "instance_token", "tok-gc-1", "pending_create_claim", "true", "pending_create_started_at", at(-11*time.Minute))},
 			Explain: started("gc-2", "worker-gc-2", "", map[string]string{
-				"row:gc-2:*sync": "C7d-2 row-metadata", "row:gc-2:*slot": "rollback-replacement-slot", "provider:Stop s-gc-1": "rollback-stops-nothing",
+				"row:gc-2:*slot": "rollback-replacement-slot", "provider:Stop s-gc-1": "rollback-stops-nothing",
 				"event:session.woke worker-1 []": "rollback-replacement-slot", "event:session.woke worker-2 []": "rollback-replacement-slot",
 			}),
 		},
@@ -1927,12 +2214,12 @@ func TestFreshDrainBeginsReachAdmission(t *testing.T) {
 	}{
 		{"idle", intentDrainBeginFresh + ":gc-c", parityFixture{
 			City:     chatNapping,
-			Rows:     []parityRow{chatRow("gc-c", "1", "state", "awake", "session_name", "chat", "configured_named_mode", "on_demand", "instance_token", "tok-gc-c", "last_woke_at", at(-time.Hour), "detached_at", at(-time.Hour))},
+			Rows:     []parityRow{chatRow("gc-c", "1", "state", "awake", "session_name", "chat", "configured_named_mode", "on_demand", "instance_token", "tok-gc-c", "last_woke_at", at(-time.Hour), "detached_at", at(-time.Hour), "alias", "chat", "agent_name", "chat", "session_origin", "named", "command", "true", "continuation_epoch", "1")}, // its identity converged but its work_dir: one A7 pass
 			Runtimes: []simRuntime{{id: "gc-c", epoch: "1", token: "tok-gc-c"}},
 		}},
 		{"no-wake-reason", intentDrainBeginFresh + ":gc-c", parityFixture{
 			City:     chatNapping,
-			Rows:     []parityRow{chatRow("gc-c", "1", "state", "awake", "session_name", "chat", "configured_named_mode", "on_demand", "instance_token", "tok-gc-c", "last_woke_at", at(-10*time.Second), "quarantined_until", at(time.Hour), "sleep_reason", "quarantine", "alias", "chat", "agent_name", "chat", "session_origin", "named")}, // its identity converged: A7 takes no pass
+			Rows:     []parityRow{chatRow("gc-c", "1", "state", "awake", "session_name", "chat", "configured_named_mode", "on_demand", "instance_token", "tok-gc-c", "last_woke_at", at(-10*time.Second), "quarantined_until", at(time.Hour), "sleep_reason", "quarantine", "alias", "chat", "agent_name", "chat", "session_origin", "named", "command", "true", "continuation_epoch", "1")}, // its identity converged: A7 takes no pass
 			Runtimes: []simRuntime{{id: "gc-c", epoch: "1", token: "tok-gc-c"}},
 		}},
 	} {
@@ -1968,6 +2255,7 @@ func TestFreshDrainBeginsReachAdmission(t *testing.T) {
 // begin before admission (idle-paced), and the first pass a patrol later
 // probes again. A new incarnation is not paced.
 func TestIdleProbesPaceAPatrolApart(t *testing.T) {
+	dir := t.TempDir()
 	at := func(d time.Duration) string { return parityNow.Add(d).UTC().Format(time.RFC3339) }
 	cfg := func() *config.City {
 		cfg := workerCity(3)
@@ -1977,10 +2265,10 @@ func TestIdleProbesPaceAPatrolApart(t *testing.T) {
 	}
 	f := parityFixture{
 		City:     cfg,
-		Rows:     []parityRow{chatRow("gc-c", "1", "state", "awake", "session_name", "chat", "configured_named_mode", "on_demand", "instance_token", "tok-gc-c", "last_woke_at", at(-time.Hour), "detached_at", at(-time.Hour), "alias", "chat", "agent_name", "chat", "session_origin", "named")}, // its identity converged: A7 has nothing to write
+		Rows:     []parityRow{chatRow("gc-c", "1", "state", "awake", "session_name", "chat", "configured_named_mode", "on_demand", "instance_token", "tok-gc-c", "last_woke_at", at(-time.Hour), "detached_at", at(-time.Hour), "alias", "chat", "agent_name", "chat", "session_origin", "named", "command", "true", "continuation_epoch", "1", "work_dir", dir)}, // its identity converged: A7 has nothing to write
 		Runtimes: []simRuntime{{id: "gc-c", epoch: "1", token: "tok-gc-c"}},
 	}
-	w := newV2World(t, f, t.TempDir(), f.beads(), nil, "", nil)
+	w := newV2World(t, f, dir, f.beads(), nil, "", nil)
 	w.s.sp.WaitForIdleErrors["chat"] = errors.New("busy")
 	begin := intentDrainBeginFresh + ":gc-c"
 	pass := func() (admitted bool, cause string) {
@@ -2025,6 +2313,7 @@ func TestIdleProbesPaceAPatrolApart(t *testing.T) {
 // idle (a no-wake-reason begin), its begin passes, though the row's last
 // idle probe is inside the patrol.
 func TestIdlePaceHoldsOnlyIdleProbes(t *testing.T) {
+	dir := t.TempDir()
 	at := func(d time.Duration) string { return parityNow.Add(d).UTC().Format(time.RFC3339) }
 	cfg := func() *config.City {
 		cfg := workerCity(3)
@@ -2034,10 +2323,10 @@ func TestIdlePaceHoldsOnlyIdleProbes(t *testing.T) {
 	}
 	f := parityFixture{
 		City:     cfg,
-		Rows:     []parityRow{chatRow("gc-c", "1", "state", "awake", "session_name", "chat", "configured_named_mode", "on_demand", "instance_token", "tok-gc-c", "last_woke_at", at(-10*time.Second), "quarantined_until", at(time.Hour), "sleep_reason", "quarantine", "alias", "chat", "agent_name", "chat", "session_origin", "named")}, // its identity converged: A7 has nothing to write
+		Rows:     []parityRow{chatRow("gc-c", "1", "state", "awake", "session_name", "chat", "configured_named_mode", "on_demand", "instance_token", "tok-gc-c", "last_woke_at", at(-10*time.Second), "quarantined_until", at(time.Hour), "sleep_reason", "quarantine", "alias", "chat", "agent_name", "chat", "session_origin", "named", "command", "true", "continuation_epoch", "1", "work_dir", dir)}, // its identity converged: A7 has nothing to write
 		Runtimes: []simRuntime{{id: "gc-c", epoch: "1", token: "tok-gc-c"}},
 	}
-	w := newV2World(t, f, t.TempDir(), f.beads(), nil, "", nil)
+	w := newV2World(t, f, dir, f.beads(), nil, "", nil)
 	k := rowKeyOf("gc-c")
 	var admitted []string
 	for pass := 0; pass < 3; pass++ {

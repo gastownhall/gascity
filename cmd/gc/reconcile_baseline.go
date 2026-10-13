@@ -36,12 +36,16 @@ const (
 	// changes (SESS-717), all six keys, as legacy's
 	// queueAliasChangeDriftRebaseline: the alias rerenders GC_ALIAS.
 	baselineAliasRerender baselineReason = "alias-rerender"
+	// baselineRelaunch moves a relaunched row's core baseline (SESS-556/560)
+	// to the config it runs, not the live pair, which a relaunch does not
+	// reliably re-apply: legacy's rebaselineLaunchDriftHashesWithBatch.
+	baselineRelaunch baselineReason = "relaunch"
 )
 
 // baselinePatch is cfg's baseline for reason.
 func baselinePatch(cfg runtime.Config, reason baselineReason) session.MetadataPatch {
 	patch := session.MetadataPatch{}
-	if reason != baselineSoftReload {
+	if reason != baselineSoftReload && reason != baselineRelaunch {
 		live := runtime.LiveFingerprint(cfg)
 		patch["started_live_hash"], patch["live_hash"] = live, live
 	}

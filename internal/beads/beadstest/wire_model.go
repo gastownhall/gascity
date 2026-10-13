@@ -116,7 +116,7 @@ func (m WireModel) Price(opens int, ops []RecordedOp) WireCost {
 				walked = true
 			}
 			if walked {
-				cost.UnkeyedQueries = append(cost.UnkeyedQueries, fmt.Sprintf("%s(%s)", op.Method, describeListQuery(op.Query)))
+				cost.UnkeyedQueries = append(cost.UnkeyedQueries, fmt.Sprintf("%s(%s)", op.Method, DescribeListQuery(op.Query)))
 			}
 		case OpClose:
 			cost.Writes++
@@ -135,8 +135,9 @@ func (m WireModel) Price(opens int, ops []RecordedOp) WireCost {
 	return cost
 }
 
-// describeListQuery renders the populated selectors of q compactly.
-func describeListQuery(q beads.ListQuery) string {
+// DescribeListQuery renders the populated selectors of q compactly, for
+// test logs and failure messages.
+func DescribeListQuery(q beads.ListQuery) string {
 	var parts []string
 	add := func(k, v string) {
 		if v != "" {
@@ -164,6 +165,12 @@ func describeListQuery(q beads.ListQuery) string {
 	}
 	if q.IncludeClosed {
 		parts = append(parts, "include_closed")
+	}
+	if q.Limit > 0 {
+		parts = append(parts, fmt.Sprintf("limit=%d", q.Limit))
+	}
+	if q.TierMode != beads.TierIssues {
+		parts = append(parts, fmt.Sprintf("tier=%d", q.TierMode))
 	}
 	return strings.Join(parts, " ")
 }

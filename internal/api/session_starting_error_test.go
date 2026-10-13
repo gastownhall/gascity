@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -26,6 +27,26 @@ func TestSessionStartingIsARetryableConflict(t *testing.T) {
 	var se huma.StatusError
 	if got := humaSessionManagerError(err); !errors.As(got, &se) || se.GetStatus() != http.StatusConflict || !strings.Contains(got.Error(), "session_starting") {
 		t.Errorf("humaSessionManagerError = %v, want 409 session_starting", got)
+	}
+}
+
+// TestSessionInactiveIsAConflict: an operation that needs a live runtime on a
+// session that has none answers 409 conflict in both error mappers, not the
+// 500 the store-error fallback gives an unrecognized error.
+func TestSessionInactiveIsAConflict(t *testing.T) {
+	err := fmt.Errorf("session gc-1: %w", session.ErrSessionInactive)
+	rec := httptest.NewRecorder()
+	writeSessionManagerError(rec, err)
+	var problem problemDetails
+	if decodeErr := json.Unmarshal(rec.Body.Bytes(), &problem); decodeErr != nil {
+		t.Fatalf("decode writeSessionManagerError body %q: %v", rec.Body.String(), decodeErr)
+	}
+	if rec.Code != http.StatusConflict || !strings.HasPrefix(problem.Detail, "conflict: ") {
+		t.Errorf("writeSessionManagerError = %d %q, want 409 with a conflict: detail", rec.Code, problem.Detail)
+	}
+	var se huma.StatusError
+	if got := humaSessionManagerError(err); !errors.As(got, &se) || se.GetStatus() != http.StatusConflict || !strings.HasPrefix(got.Error(), "conflict: ") {
+		t.Errorf("humaSessionManagerError = %v, want 409 with a conflict: detail", got)
 	}
 }
 

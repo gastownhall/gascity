@@ -125,8 +125,8 @@ func TestOperatorSuspendSkipsINC003Grace(t *testing.T) {
 // still suspended; the void clears the controller half alone.
 func TestResumeVoidsSuspendedDrain(t *testing.T) {
 	meta := intentAt(drainSuspended, "3")
-	if it, _ := decideDrain(t, meta, undesired(drainSuspended)); it.Kind != "" || it.Reason != decideStopActive {
-		t.Fatalf("still suspended: %+v, want the request held", it)
+	if it, _ := decideDrain(t, meta, undesired(drainSuspended)); it.Kind != intentSignal {
+		t.Fatalf("still suspended: %+v, want the request kept and signaled", it)
 	}
 	store, _ := stampedMem(t, gate.Require)
 	b, err := store.Create(drainRow(meta...))
@@ -192,7 +192,7 @@ func TestConfigDriftResolvedCancels(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			meta := slices.Concat(intentAt(drainConfigDrift, "3"), []string{"started_config_hash", c.hash, "started_live_hash", live}, c.extra)
 			it, _ := decideDrain(t, meta, c.entry, c.world...)
-			if got := it.Kind == intentDrainCancel; got != c.cancel || (!c.cancel && it.Reason != decideStopActive) {
+			if got := it.Kind == intentDrainCancel; got != c.cancel || (!c.cancel && it.Kind != intentSignal) {
 				t.Fatalf("%+v, want cancel=%v", it, c.cancel)
 			}
 		})
@@ -224,7 +224,7 @@ func TestDrainCancelLensesMatchLegacy(t *testing.T) {
 				case lens:
 					want = intentDrainCancel
 				case reason == drainConfigDrift || reason == executionStalledDrainReason:
-					want = "" // still authorized
+					want = intentSignal // still authorized, past its grace
 				}
 				if it, _ := decideDrain(t, intentAt(reason, "3"), entry); it.Kind != want {
 					t.Errorf("%s, %s lens, keep=%v: %+v, want kind %q", reason, name, keep, it, want)
@@ -302,7 +302,6 @@ func TestNoDrainOnKeepOrUnknownLiveness(t *testing.T) {
 		// own runtime the inventory reads alive.
 		{name: "asleep", meta: []string{"state", "asleep"}, entry: undesired(drainOrphaned), want: decideNoAction, world: func(w *World) { w.Obs = nil }},
 		{name: "heartbeat hold (SESS-617)", meta: []string{"held_until", rowAt(time.Minute)}, entry: func(e *selectionEntry) { e.Desired = desireSleep }, want: decideNoAction},
-		{name: "user-hold intent (C6b2's)", meta: []string{"sleep_intent", "user-hold"}, entry: undesired(drainOrphaned), want: decideNoAction},
 	} {
 		var world []func(*World)
 		if c.world != nil {
@@ -312,6 +311,11 @@ func TestNoDrainOnKeepOrUnknownLiveness(t *testing.T) {
 		if it.Kind != "" || it.Reason != c.want {
 			t.Errorf("%s: %+v, want hold %q", c.name, it, c.want)
 		}
+	}
+	// A user-hold intent on a live own runtime is A4's direct stop (C6b2),
+	// never a drain begin.
+	if it, _ := decideDrain(t, []string{"sleep_intent", "user-hold"}, undesired(drainOrphaned)); it.Kind != intentStop || it.Reason != decideDormantStop {
+		t.Errorf("user-hold intent: %+v, want A4's direct stop", it)
 	}
 }
 
@@ -330,7 +334,7 @@ func TestINC003IsDrainOnly(t *testing.T) {
 func TestWokenRowClearsIdleStopPending(t *testing.T) {
 	wake := func(e *selectionEntry) { e.Desired = desireWake }
 	it, _ := decideDrain(t, []string{"sleep_intent", sleepIntentIdle}, wake)
-	if it.Kind != intentRowHeal || it.Reason != decideIdleStopClear || len(it.Patch) != 1 || it.Patch["sleep_intent"] != "" {
+	if w := it.folded(); it.Kind != intentRowHeal || it.Reason != decideIdleStopClear || len(w) != 1 || w["sleep_intent"] != "" || !it.Class.Has("sleep_intent") {
 		t.Fatalf("%+v, want the sleep_intent clear alone", it)
 	}
 }
@@ -500,7 +504,8 @@ func TestNoWakeRequestCancelsOnAssignedWork(t *testing.T) {
 		{"blocked in-progress work", sleep, []func(*World){blockedClaim}, true},
 	} {
 		it, _ := decideDrain(t, quarantined, c.entry, c.world...)
-		if got := it.Kind == intentDrainCancel; got != c.cancel || (!c.cancel && it.Kind != "") {
+		// A request no work cancels stands, and is signaled past its grace.
+		if got := it.Kind == intentDrainCancel; got != c.cancel || (!c.cancel && it.Kind != intentSignalFresh) {
 			t.Errorf("%s: %+v, want cancel=%v", c.name, it, c.cancel)
 		}
 	}
@@ -527,15 +532,15 @@ func TestIdleBeginWritesTheIdleLatch(t *testing.T) {
 }
 
 // TestSignaledStopIsNotA20s. Kills A20 holding a signaled stop: a requested
-// or acked drain holds for its signal there, but a signaled one (legacy's
+// or acked drain is signaled there, but a signaled one (legacy's
 // stop-pending projection) falls through to A4's stop verb (C6b2).
 func TestSignaledStopIsNotA20s(t *testing.T) {
 	stopPending := []string{"state", "draining", "state_reason", session.DrainAckStopPendingReason, "drain_at", rowAt(-time.Minute)}
 	if it, _ := decideDrain(t, stopPending, undesired(drainOrphaned)); it.Reason == decideStopActive {
 		t.Fatalf("signaled stop: %+v, want A20 to yield to A4", it)
 	}
-	if it, _ := decideDrain(t, intentAt(drainOrphaned, "3"), undesired(drainOrphaned)); it.Kind != "" || it.Reason != decideStopActive {
-		t.Fatalf("requested stop: %+v, want A20 holding it for the signal", it)
+	if it, _ := decideDrain(t, intentAt(drainOrphaned, "3"), undesired(drainOrphaned)); it.Kind != intentSignal {
+		t.Fatalf("requested stop: %+v, want A20 signaling it", it)
 	}
 }
 
@@ -580,5 +585,81 @@ func TestIdleStopPendingIsTheIdleProof(t *testing.T) {
 	}
 	if allowed, _ := idleProof(w, session.Info{ID: "gc-1"}, drainIdle); allowed {
 		t.Fatal("an unmarked interactive row without Full capability is allowed")
+	}
+}
+
+// Kills an orphaned named row stuck over its own zombie (mc-q64l4): A21
+// never closes a named row's dead runtime and A12 classifies it once, so
+// A20 begins its orphan drain (D2's orphaned row: Drain, after INC-003's
+// grace), whose stop A4 runs on any liveness but gone, as legacy drains it
+// and stops it by name. Unclassified, the zombie is A12's first.
+func TestOrphanedNamedZombieDrains(t *testing.T) {
+	for _, classified := range []bool{true, false} {
+		c := newCloseCase(t, livenessDead, desireDrain, "state", "active", "last_woke_at", gatherNow.Add(-time.Hour).Format(time.RFC3339),
+			"configured_named_session", "true", "configured_named_identity", "gone-chat", "pool_managed", "")
+		c.entry().DrainReason = drainOrphaned
+		id := runtimeIdentity{Known: true, SessionID: c.k.ID, Epoch: "3", Token: "tok-3"}
+		c.w.Observed = map[rowKey]rowObservation{c.k: {Liveness: livenessDead, Identity: id}}
+		if classified {
+			c.w.Classified = map[rowKey]classifiedRuntime{c.k: {Token: deadToken(id)}}
+		}
+		it := c.decide()
+		want := intentZombie
+		if classified {
+			want = intentDrainBegin
+		}
+		if it.Kind != want {
+			t.Fatalf("classified %v: decideRow = (%q, %q), want %q", classified, it.Kind, it.Reason, want)
+		}
+	}
+	// A Sleep named row's classified zombie is A6's heal, never a drain.
+	c0 := newCloseCase(t, livenessDead, desireSleep, "state", "active", "last_woke_at", gatherNow.Add(-time.Hour).Format(time.RFC3339),
+		"configured_named_session", "true", "configured_named_identity", "chat", "pool_managed", "")
+	id0 := runtimeIdentity{Known: true, SessionID: c0.k.ID, Epoch: "3", Token: "tok-3"}
+	c0.w.Observed = map[rowKey]rowObservation{c0.k: {Liveness: livenessDead, Identity: id0}}
+	c0.w.Classified = map[rowKey]classifiedRuntime{c0.k: {Token: deadToken(id0)}}
+	if it := c0.decide(); it.Reason != decideDeadRuntimeHeal {
+		t.Fatalf("Sleep named: decideRow = (%q, %q), want A6's dead-runtime heal", it.Kind, it.Reason)
+	}
+	// An unnamed orphan's dead runtime is A21's close, never a drain.
+	c := newCloseCase(t, livenessDead, desireDrain, "state", "active", "last_woke_at", gatherNow.Add(-time.Hour).Format(time.RFC3339))
+	c.entry().DrainReason = drainOrphaned
+	id := runtimeIdentity{Known: true, SessionID: c.k.ID, Epoch: "3", Token: "tok-3"}
+	c.w.Observed = map[rowKey]rowObservation{c.k: {Liveness: livenessDead, Identity: id}}
+	c.w.Classified = map[rowKey]classifiedRuntime{c.k: {Token: deadToken(id)}}
+	if it := c.decide(); it.Kind != intentClose {
+		t.Fatalf("unnamed: decideRow = (%q, %q), want A21's close", it.Kind, it.Reason)
+	}
+}
+
+// Kills the dead-runtime drain reaching past named rows or Drain rows (the
+// #7693 review): a held pool orphan's classified dead runtime (a
+// quarantine, an agent heartbeat, a wait hold) is left alone, its slot kept
+// (§12.2 #27); a named pending create AL1 wants asleep with a suspended
+// reason (Q1) gets no drain begin.
+func TestDeadRuntimeDrainOnlyNamedDrainRows(t *testing.T) {
+	future := gatherNow.Add(30 * time.Minute).Format(time.RFC3339)
+	woke := gatherNow.Add(-time.Hour).Format(time.RFC3339)
+	named := []string{"configured_named_session", "true", "configured_named_identity", "chat", "pool_managed", ""}
+	for _, c := range []struct {
+		name    string
+		desired desire
+		reason  string
+		meta    []string
+	}{
+		{"a quarantined pool orphan", desireDrain, drainOrphaned, []string{"state", "active", "last_woke_at", woke, "quarantined_until", future, "sleep_reason", "quarantine"}},
+		{"a heartbeat-held pool orphan", desireDrain, drainOrphaned, []string{"state", "active", "last_woke_at", woke, "held_until", future}},
+		{"a wait-held pool orphan", desireDrain, drainOrphaned, []string{"state", "active", "last_woke_at", woke, "wait_hold", "true"}},
+		{"a named pending create AL1 wants asleep (Q1)", desireSleep, drainSuspended, append([]string{"state", "creating", "pending_create_claim", "true", "pending_create_started_at", gatherNow.Add(-time.Minute).Format(time.RFC3339)}, named...)},
+	} {
+		cc := newCloseCase(t, livenessDead, c.desired, c.meta...)
+		cc.entry().DrainReason = c.reason
+		cc.w.Env = &reconcileEnv{Cfg: cc.cfg}
+		id := runtimeIdentity{Known: true, SessionID: cc.k.ID, Epoch: "3", Token: "tok-3"}
+		cc.w.Observed = map[rowKey]rowObservation{cc.k: {Liveness: livenessDead, Identity: id}}
+		cc.w.Classified = map[rowKey]classifiedRuntime{cc.k: {Token: deadToken(id)}}
+		if it := cc.decide(); it.Kind != "" || it.Reason != decideNoAction {
+			t.Fatalf("%s: decideRow = (%q, %q), want no-action", c.name, it.Kind, it.Reason)
+		}
 	}
 }
