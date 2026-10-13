@@ -2857,18 +2857,14 @@ func listBothTiersForControllerDemand(store beads.Store, query beads.ListQuery) 
 // City's "open", so a blocked bead is indistinguishable from ready work and
 // would count as controller demand, re-entering dispatch (EB-42o8/gc-nz5i). Only
 // a Live read reaches the backing store's server-side --status=open filter
-// (BdStore passes it to bd; DoltliteReadStore matches WHERE status=?), which
+// (BdStore passes it to bd; DoltliteReadStore matches WHERE status=?;
+// NativeDoltStore pushes the raw status, nativeListPushesRawOpen), which
 // excludes the raw blocked status. This extends the fix gc-4zb/#4395 applied to
 // restoreCarriedWorkRoutes and the workflow projection to the controller-demand
 // List reads. AllowScan opts into the intentional open-status population read;
 // handles.Live unions the wisp step-bead tier (TierBoth). Correctness outranks
 // latency on the demand path (see readyDemandCache): this pays one live
 // backing-store read rather than over-counting blocked work as demand.
-//
-// Known gap: NativeDoltStore maps Status:"open" to
-// ExcludeStatus=[closed,in_progress] (see nativeIssueFilterFromListQuery), so it
-// still returns raw blocked/deferred rows regardless of Live — this gate is
-// inert on that backend, tracked separately.
 func listOpenForControllerDemandLive(store beads.Store) ([]beads.Bead, error) {
 	return beads.HandlesFor(store).Live.List(beads.ListQuery{Status: "open", AllowScan: true})
 }
