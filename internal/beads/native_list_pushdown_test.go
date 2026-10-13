@@ -91,6 +91,14 @@ func TestNativeListPlanPushesEveryExactFilter(t *testing.T) {
 			want:  []planShape{{}},
 		},
 		{
+			// sr-i54yd: a Live read is owed the backing's raw answer, as BdStore's
+			// --status=open gives it, so a parked (blocked/deferred) bead is not
+			// live work to a lifecycle gate.
+			name:  "a Live open is bd's raw open, pushed",
+			query: ListQuery{Status: "open", Assignee: "worker", Live: true},
+			want:  []planShape{{assignee: "worker", status: "open"}},
+		},
+		{
 			name:  "a registered non-infra type is pushed",
 			query: ListQuery{Type: "session", Status: "open"},
 			want:  []planShape{{issueType: "session"}},
@@ -688,6 +696,7 @@ func randomPushdownQuery(rng *rand.Rand) ListQuery {
 		IncludeClosed: rng.Intn(2) == 0,
 		TierMode:      TierMode(rng.Intn(3)),
 		AllowScan:     true,
+		Live:          rng.Intn(2) == 0,
 	}
 	switch rng.Intn(4) {
 	case 0:
@@ -716,7 +725,8 @@ func randomPushdownQuery(rng *rand.Rand) ListQuery {
 // THE PROPERTY: for any query, the pushed-down store answers exactly what
 // ApplyListQuery answers over every row, including the pinned rows the request
 // must keep lifting and the durable infra-typed rows a pushed infra type would
-// lose.
+// lose. A Live "open" is answered over the rows whose RAW status is open
+// (nativeListPushesRawOpen).
 func TestNativeDoltStoreListPushdownAnswersTheUnpushedQuery(t *testing.T) {
 	rng := rand.New(rand.NewSource(20261010))
 	for round := 0; round < 40; round++ {
@@ -725,6 +735,7 @@ func TestNativeDoltStoreListPushdownAnswersTheUnpushedQuery(t *testing.T) {
 		store := newNativeDoltStoreForTest(&nativeDoltReaderSpy{list: reader.list})
 
 		all := make([]Bead, 0, len(rows))
+		rawOpen := make(map[string]bool, len(rows))
 		for _, issue := range rows {
 			bead, err := beadFromNativeIssue(cloneNativeIssueForTest(issue))
 			if err != nil {
@@ -732,6 +743,7 @@ func TestNativeDoltStoreListPushdownAnswersTheUnpushedQuery(t *testing.T) {
 			}
 			bead.Revision = 0
 			all = append(all, bead)
+			rawOpen[issue.ID] = issue.Status == beadslib.StatusOpen
 		}
 		// The unpushed answer is one unfiltered request's rows, in the order
 		// that request answers in, through ApplyListQuery.
@@ -745,7 +757,16 @@ func TestNativeDoltStoreListPushdownAnswersTheUnpushedQuery(t *testing.T) {
 			if err != nil {
 				t.Fatalf("List(%+v): %v", query, err)
 			}
-			want := ApplyListQuery(all, query)
+			candidates := all
+			if nativeListPushesRawOpen(query) {
+				candidates = nil
+				for _, b := range all {
+					if rawOpen[b.ID] {
+						candidates = append(candidates, b)
+					}
+				}
+			}
+			want := ApplyListQuery(candidates, query)
 			if gotIDs, wantIDs := beadIDsInOrder(got), beadIDsInOrder(want); !slices.Equal(gotIDs, wantIDs) {
 				t.Fatalf("List(%+v)\n got  %v\n want %v", query, gotIDs, wantIDs)
 			}
@@ -767,6 +788,37 @@ func beadIDsInOrder(items []Bead) []string {
 		ids = append(ids, b.ID)
 	}
 	return ids
+}
+
+// sr-i54yd: a seat whose only assigned beads are parked (blocked, deferred)
+// holds no live work. The Live read every seat-work gate issues must not
+// answer them as "open", or the seat never drains and never takes a config
+// change; the cached (non-Live) read keeps gc's folded "open".
+func TestNativeDoltStoreLiveOpenExcludesRawParkedStatuses(t *testing.T) {
+	reader := filteringReader{rows: []*beadslib.Issue{
+		{ID: "gc-open", Title: "open", Status: beadslib.StatusOpen, IssueType: "task", Assignee: "worker"},
+		{ID: "gc-blocked", Title: "blocked", Status: beadslib.StatusBlocked, IssueType: "task", Assignee: "worker"},
+		{ID: "gc-deferred", Title: "deferred", Status: beadslib.StatusDeferred, IssueType: "task", Assignee: "worker"},
+	}}
+	store := newNativeDoltStoreForTest(&nativeDoltReaderSpy{list: reader.list})
+
+	live, err := store.List(ListQuery{Assignee: "worker", Status: "open", TierMode: TierBoth, Live: true})
+	if err != nil {
+		t.Fatalf("Live List: %v", err)
+	}
+	if got := sortedBeadIDs(live); !slices.Equal(got, []string{"gc-open"}) {
+		t.Fatalf("Live List(open) = %v, want only the raw-open row", got)
+	}
+
+	folded, err := store.List(ListQuery{Assignee: "worker", Status: "open", TierMode: TierBoth})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	got := sortedBeadIDs(folded)
+	slices.Sort(got)
+	if want := []string{"gc-blocked", "gc-deferred", "gc-open"}; !slices.Equal(got, want) {
+		t.Fatalf("List(open) = %v, want gc's folded open %v", got, want)
+	}
 }
 
 func TestNativeDoltStoreListKeepsAPinnedInProgressRow(t *testing.T) {

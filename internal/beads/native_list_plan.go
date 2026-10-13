@@ -17,7 +17,8 @@ import (
 // is unset. The store unions their rows by id and ApplyListQuery then applies
 // the whole query exactly, so a plan only decides how many rows cross from the
 // backend, never which rows the caller receives: every predicate it pushes is
-// exact or a superset of the query's.
+// exact or a superset of the query's. The one exception is a Live "open", which
+// is pushed as bd's raw status (nativeListPushesRawOpen).
 //
 // A plural Assignees set fans out into one request per distinct assignee, each
 // with that assignee pushed, however many there are: a keyed request reads one
@@ -85,6 +86,32 @@ func nativeListFanOutAssignees(query ListQuery) []string {
 // bd status. mapBdStatus folds every other bd status into gc's "open".
 func nativeListPushableStatus(status string) bool {
 	return status == "in_progress" || status == "closed"
+}
+
+// nativeListPushesRawOpen reports whether query's "open" is pushed to the
+// backing as bd's raw status rather than answered as gc's folded "open".
+//
+// A Live read is a lifecycle gate asking for the backing's own answer, and
+// every other backing gives the RAW status for Live Status:"open": BdStore
+// passes --status=open to bd, while SQLiteStore, DoltliteReadStore and MemStore
+// match the stored status exactly. The callers are written against that
+// answer: the controller's demand reads; the seat-work gates (config-drift
+// deferral, max session age, slot-freeable, the drain-ack close gate); route
+// recovery; and the orphan sweep. To them a blocked or deferred bead is
+// parked, not work (gc-4zb/#4395, EB-42o8/gc-nz5i). Before this, only native
+// cities answered with the folded "open", so every one of those gates counted
+// parked beads as live work. A seat holding only a blocked bead never drained,
+// never took a config change, and was re-offered the bead on every wake.
+//
+// A cached read keeps the folded answer: PrimeActive lists without Live, so
+// the cache still holds blocked rows as "open". So does Count, which renders
+// its own filter (nativeIssueFilterFromListQuery).
+//
+// This is the one plan predicate that is not a superset of the query: it
+// leaves out rows that ApplyListQuery's folded "open" would keep. That is
+// deliberate, and it applies only under Live.
+func nativeListPushesRawOpen(query ListQuery) bool {
+	return query.Live && query.Status == "open"
 }
 
 // nativeTypesInfraConfigKey is the workspace setting naming the types bd treats
