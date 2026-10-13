@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -426,5 +427,83 @@ func TestZombieOnABoolOnlyLeafIsNotProposedAgain(t *testing.T) {
 	c.w.Classified = map[rowKey]classifiedRuntime{c.k: *got}
 	if it := c.decide(); it.Kind == intentZombie {
 		t.Fatalf("decideRow = (%q, %q) again on the same dead read, want A12 settled", it.Kind, it.Reason)
+	}
+}
+
+// TestAbsenceNoteRules (CONTRACT v5.10g; the #7799 review's n1, n2, n4) pins
+// the transaction's absence note: it is stamped at the absent read's issue
+// time, not at settlement (n4); a start whose Call launched notes nothing,
+// though the effect ends before its next read (n1); and a later read that
+// finds a runtime under the name clears it (n2).
+func TestAbsenceNoteRules(t *testing.T) {
+	t.Run("stamped at the read", func(t *testing.T) {
+		k, _ := zombieKit(t, true, "gc-1", "tok", "")
+		k.mutate(nil)
+		clk := k.p.Clock.(*fakePlannerClock)
+		read := clk.Now()
+		k.on(seamAfterReads, func() { clk.Advance(time.Minute) })
+		s := k.runKind()
+		if n := s.Facts.Noted; n == nil || !n.Gone || !n.At.Equal(read) {
+			t.Fatalf("noted %+v, want gone at the read's issue time %v (now %v)", n, read, clk.Now())
+		}
+	})
+	t.Run("a launch clears it", func(t *testing.T) {
+		k, _ := launchKit(t, "asleep", "wake_attempts", "1")
+		k.on(seamAfterCall, func() {})                                                        // the prepare's Call
+		k.on(seamAfterCall, func() { k.fail = map[txSeam]error{seamAfterCall: errInjected} }) // the launch's: the effect ends there
+		s := k.runKind()
+		if len(k.starts()) != 1 {
+			t.Fatalf("starts %d, want the launch to run (settlement %+v)", len(k.starts()), s)
+		}
+		if n := s.Facts.Noted; n != nil && n.Gone {
+			t.Fatalf("noted %+v after the effect launched a runtime, want no absence", n)
+		}
+	})
+	t.Run("a later read that finds a runtime clears it", func(t *testing.T) {
+		k, _ := launchKit(t, "asleep", "wake_attempts", "1")
+		k.on(seamAfterReads, func() { k.runtimeAs("gc-9", "theirs", nil) }) // after the verb's absent read
+		s := k.runKind()
+		if len(k.starts()) != 0 {
+			t.Fatalf("starts %d, want none over the runtime that appeared (settlement %+v)", len(k.starts()), s)
+		}
+		if n := s.Facts.Noted; n != nil && n.Gone {
+			t.Fatalf("noted %+v over a runtime a later read found, want no absence", n)
+		}
+	})
+}
+
+// TestAliveNoteFromAnyEffect (CONTRACT O4's other half, v5.10g; the #7799
+// review's note). Kills alive notes from starts alone, and an alive note a
+// stop leaves behind: any effect whose fresh read finds the row's runtime
+// alive and Current notes it alive at the read (clearing a gone note over a
+// runtime that came back at the next effect read, not the next inventory);
+// another row's runtime notes nothing; a stop that stopped the runtime
+// notes no alive.
+func TestAliveNoteFromAnyEffect(t *testing.T) {
+	k, _ := zombieKit(t, true, "gc-1", "tok", "")
+	k.mutate(func(r *simRuntime) { r.zombie = false })
+	read := k.p.Clock.Now()
+	if n := k.runKind().Facts.Noted; n == nil || n.Gone || n.Name != "s-gc-1" || !n.At.Equal(read) {
+		t.Fatalf("noted %+v over the row's own runtime alive, want it noted alive at %v", n, read)
+	}
+	k, _ = zombieKit(t, true, "gc-9", "theirs", "")
+	k.mutate(func(r *simRuntime) { r.zombie = false })
+	if n := k.runKind().Facts.Noted; n != nil {
+		t.Fatalf("noted %+v over another row's runtime, want nothing", n)
+	}
+	// The effect ends right after its stop Call, before any later read.
+	s, _, leaf := stopRun(t, killedMeta, killedWoken, func(p *effectPass, _ *fenceLeaf, _ beads.Store, _ string) {
+		p.seam = func(_ context.Context, at txSeam, _ intent, _, _ int) error {
+			if at == seamAfterCall {
+				return errInjected
+			}
+			return nil
+		}
+	})
+	if stops(leaf) == 0 {
+		t.Fatalf("settlement %+v: premise, the dormant stop stopped nothing", s)
+	}
+	if n := s.Facts.Noted; n != nil && !n.Gone {
+		t.Fatalf("noted %+v after the stop, want no alive note", n)
 	}
 }

@@ -728,8 +728,7 @@ func (s *sim) observed() (*sessionCensus, map[rowKey]rowObservation) {
 }
 
 // checkDead is I23 (I-dead): where the latest fresh inventory pass listed a
-// row's runtime after its last change (by the provider's version), and no
-// effect's note since stands over that pass's facts, the census and a fresh read agree on
+// row's runtime after its last change (by the provider's version), the census and a fresh read agree on
 // a corpse or a zombie: the census reads it dead (or unknown, its identity
 // unread), never alive, gone or occupied; and reads nothing else dead, an
 // agent whose probe errored included.
@@ -743,20 +742,12 @@ func (s *sim) checkDead() {
 		return
 	}
 	listed := pass.listedOn()
-	snap := s.lane.cache.Snapshot()
 	s.sp.mu.Lock()
 	defer s.sp.mu.Unlock()
 	for _, row := range c.Canonical() {
 		name := row.Info.SessionName
 		rt := s.sp.rts[name]
 		if _, ok := listed[name]; !ok || rt == nil || rt.id != row.Key.ID || s.sp.changed[name] > s.listed {
-			continue
-		}
-		if f := snap.ByName[name].ProcessAlive; f.Source == SourceProbe && !f.ObservedAt.Before(pass.StartedAt) {
-			// An effect's note at or after the pass's start (O4, v5.10g)
-			// that the pass did not override (its merged listing failed, or
-			// the sim's clock tied them): the census reads the note's
-			// runtime, not the pass's.
 			continue
 		}
 		fresh := runtimeLiveness(rt)
@@ -850,6 +841,11 @@ func TestSimChecksBite(t *testing.T) {
 			s.prev = map[string]beads.Bead{}
 			s.closedInStep = map[string]beads.Bead{"s-x": x}
 			s.sp.kills = append(s.sp.kills, simKill{Method: "Stop", Name: "s-x", Hit: &simRuntime{id: "y", epoch: "2", token: "tok-9"}})
+		}},
+		{"I4 ", func(s *sim) { // a just-closed row's rollback kill of its runtime at another generation (v5.10e (3) excuses only its own generation; the #7799 review's s5)
+			s.prev = map[string]beads.Bead{}
+			s.closedInStep = map[string]beads.Bead{"s-x": row("x")}
+			s.sp.kills = append(s.sp.kills, simKill{Method: "Stop", Name: "s-x", Effect: intentRollback, Hit: &simRuntime{id: "x", epoch: "1", token: "tok-1-stale"}})
 		}},
 		{"I4 ", func(s *sim) { // a row closed in an earlier step excuses nothing (v5.9n)
 			s.prev = map[string]beads.Bead{}
@@ -1289,6 +1285,53 @@ func TestNamedPaneCountsAnOwnerlessRuntime(t *testing.T) {
 		s.sp.mu.Unlock()
 		if got := s.namedPane(b); got != c.want {
 			t.Errorf("%s: namedPane %t, want %t", c.name, got, c.want)
+		}
+	}
+}
+
+// TestSimI23CatchesAWrongGoneNote (the #7799 review's P1). Kills an I23 that
+// excuses any effect's note: a gone note over a zombie the latest pass
+// listed, unchanged since, makes the census read it gone, which I23
+// reports. (Ties of a note and a pass go to the pass in Note itself, so I23
+// needs no exemption for them.)
+func TestSimI23CatchesAWrongGoneNote(t *testing.T) {
+	s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-gc-1", "last_woke_at", rowAt(-time.Hour),
+		"quarantined_until", rowAt(time.Hour), "sleep_reason", "quarantine"))
+	s.sp.mu.Lock()
+	s.sp.rts["s-gc-1"].zombie = true
+	s.sp.touch("s-gc-1")
+	s.sp.mu.Unlock()
+	s.inventory()
+	s.advance(time.Second)
+	now := s.clk.Now()
+	s.p.applyFacts(effectFacts{Noted: &notedRuntime{Name: "s-gc-1", At: now, Gone: true}}, now)
+	s.failures = nil
+	s.check()
+	if !slices.ContainsFunc(s.failures, func(f string) bool { return strings.HasPrefix(f, "I23 ") }) {
+		t.Errorf("a gone note over a listed, unchanged zombie: violations %q, want I23", s.failures)
+	}
+}
+
+// TestSimI4JustClosedRollbackVerdict (v5.10e (3); the #7799 review's s5):
+// a just-closed row's rollback kill of its runtime at another generation is
+// judged by the just-closed rule, not passed on to the generic token rule:
+// only the row's own generation is excused. Kills the excuse widened to
+// every rollback (which the generic rule happens to catch for this kill).
+func TestSimI4JustClosedRollbackVerdict(t *testing.T) {
+	x := sessionRow("x", "session_name", "s-x", "generation", "2", "instance_token", "tok-2")
+	x.Status = "open"
+	for _, c := range []struct {
+		epoch string
+		want  bool // a just-closed I4 verdict
+	}{{"1", true}, {"2", false}} {
+		s := newSim(t, 3, simOpts{})
+		s.prev, s.closedInStep = map[string]beads.Bead{}, map[string]beads.Bead{"s-x": x}
+		s.sp.kills = append(s.sp.kills, simKill{Method: "Stop", Name: "s-x", Effect: intentRollback, Hit: &simRuntime{id: "x", epoch: c.epoch, token: "tok-stale"}})
+		s.failures = nil
+		s.checkDestructive()
+		got := slices.ContainsFunc(s.failures, func(f string) bool { return strings.Contains(f, "not the just-closed row x's") })
+		if got != c.want {
+			t.Errorf("rollback kill at generation %s: failures %q, want a just-closed verdict %t", c.epoch, s.failures, c.want)
 		}
 	}
 }

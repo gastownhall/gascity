@@ -1518,6 +1518,7 @@ func TestSimZombieOverAGoneRuntimeRunsOnce(t *testing.T) {
 	s.sp.mu.Lock()
 	s.sp.drop("s-gc-1")
 	s.sp.mu.Unlock()
+	s.advance(time.Second) // the effects read after the pass started: a tie is the pass's (Note)
 	for range 6 {
 		s.pass()
 		for len(s.parked) > 0 {

@@ -191,9 +191,10 @@ func TestObserveDeadPaneIsAStartCandidateNotUncertain(t *testing.T) {
 	c := observeRows(t, map[string]string{"gc-1": "s1"})
 	cache := newObserveCache()
 	cache.publish(censusNow, map[string]InventoryAttrs{"s1": {DeadKnown: true, AttachedKnown: true, Attached: true, Identity: readIdentity("gc-1")}}, completeBackend("tmux", "s1"))
-	cache.Note("s1", FactProcessAlive, ObsNo, censusNow, SourceProbe, "")
-	cache.Note("s1", FactPending, ObsYes, censusNow, SourceProbe, "")
-	if got := observed(t, cache.Snapshot(), c, censusNow, "gc-1"); got.Liveness != livenessDead || got.Uncertain || got.Attached || got.Pending {
+	probed := censusNow.Add(time.Millisecond) // after the pass: a tie is the pass's (Note)
+	cache.Note("s1", FactProcessAlive, ObsNo, probed, SourceProbe, "")
+	cache.Note("s1", FactPending, ObsYes, probed, SourceProbe, "")
+	if got := observed(t, cache.Snapshot(), c, probed, "gc-1"); got.Liveness != livenessDead || got.Uncertain || got.Attached || got.Pending {
 		t.Fatalf("process dead in a live pane: %+v, want dead, certain, neither attached nor pending", got)
 	}
 }
@@ -481,6 +482,27 @@ func TestObserveUnlistedAfterPassStartIsGone(t *testing.T) {
 	cache.publish(later, alive, completeBackend("tmux", "s1"))
 	if got := observed(t, cache.Snapshot(), c, later, "gc-1"); got.Liveness != livenessAlive {
 		t.Fatalf("listed by a pass that started after the note: %+v, want alive", got)
+	}
+}
+
+// TestNoteLosesATieToTheInventory (the #7799 review). Kills a note that
+// wins a tie with an inventory pass: a probe noted at the pass's own start
+// leaves the pass's fact, as PublishInventory leaves a pass's over a note at
+// its start; a note strictly after it, or a second note at the same
+// instant as a first, is written.
+func TestNoteLosesATieToTheInventory(t *testing.T) {
+	cache := newObserveCache()
+	alive := map[string]InventoryAttrs{"s1": {DeadKnown: true, Identity: readIdentity("gc-1")}}
+	cache.publish(censusNow, alive, completeBackend("tmux", "s1"))
+	cache.Note("s1", FactListed, ObsNo, censusNow, SourceProbe, "")
+	if f := cache.Snapshot().ByName["s1"].Listed; f.Value != ObsYes || f.Source != SourcePoller {
+		t.Fatalf("a note tied with the pass: %+v, want the pass's listing", f)
+	}
+	later := censusNow.Add(time.Second)
+	cache.Note("s1", FactListed, ObsNo, later, SourceProbe, "")
+	cache.Note("s1", FactListed, ObsYes, later, SourceProbe, "")
+	if f := cache.Snapshot().ByName["s1"].Listed; f.Value != ObsYes || f.Source != SourceProbe {
+		t.Fatalf("two notes at one instant after the pass: %+v, want the second note", f)
 	}
 }
 

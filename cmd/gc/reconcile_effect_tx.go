@@ -742,11 +742,11 @@ type tx struct {
 	facts       effectFacts
 	pass        any // the concluded step's Pass, to its section's Call
 	view        txView
-	// absent is the issue time of the latest fresh read, when it found
-	// nothing under the name on every hop (rtAbsent); zero once a later read
-	// finds anything or a Call starts a runtime. The settlement notes it
-	// (CONTRACT v5.10g: effects publish a fresh absence).
-	absent time.Time
+	// fresh is the latest fresh read, when it found the name absent on
+	// every hop (rtAbsent) or the row's runtime alive and Current; zero once
+	// a later read finds anything else or a Call starts or stops a runtime.
+	// The settlement publishes it (CONTRACT O4, v5.10g).
+	fresh notedRuntime
 }
 
 // run runs the sections, each under the row's mutation lock.
@@ -795,9 +795,9 @@ func (t *tx) run(ctx context.Context, sections []section) settlement {
 		}
 		switch sec.callKind {
 		case callStart:
-			t.started, t.absent = true, time.Time{}
+			t.started, t.fresh = true, notedRuntime{}
 		case callStop:
-			t.started, t.stopped = false, true // a stopped runtime writes nothing more
+			t.started, t.stopped, t.fresh = false, true, notedRuntime{} // a stopped runtime writes nothing more
 		}
 		if err := t.c.at(ctx, seamAfterCall); err != nil {
 			s = injected(err)
@@ -810,21 +810,23 @@ func (t *tx) run(ctx context.Context, sections []section) settlement {
 			break
 		}
 	}
-	t.noteAbsence()
+	t.noteFresh()
 	s.Facts = t.facts
 	return s
 }
 
-// noteAbsence publishes the latest fresh read's absence (CONTRACT v5.10g,
-// O4 amended): the planner notes the name gone at the read's issue time,
-// so the next pass reads it gone (unlistedSincePass) rather than deciding
-// again on an inventory that still lists it. A newer alive note (a start's
-// commit) wins; a later inventory pass overrides either.
-func (t *tx) noteAbsence() {
-	if t.absent.IsZero() || t.name == "" || t.facts.Noted != nil && !t.facts.Noted.At.Before(t.absent) {
+// noteFresh publishes the latest fresh read (CONTRACT O4, amended in
+// v5.10g): the planner notes the name gone, or the row's runtime alive and
+// Current, at the read's issue time, so the next pass reads what this
+// effect read rather than deciding again on an inventory that lags it. A
+// note the effect made itself at or after the read (a start's commit)
+// stands; a later inventory pass overrides either.
+func (t *tx) noteFresh() {
+	f := t.fresh
+	if f.At.IsZero() || f.Name == "" || t.facts.Noted != nil && !t.facts.Noted.At.Before(f.At) {
 		return
 	}
-	t.facts.Noted = &notedRuntime{Name: t.name, At: t.absent, Gone: true}
+	t.facts.Noted = &f
 }
 
 // section runs sec's attempts; end ends the effect with the settlement.
@@ -966,9 +968,13 @@ func (t *tx) read(ctx context.Context, sec section) (settlement, bool) {
 			return refused(cause), false
 		}
 		t.view.RT = rt
-		t.absent = time.Time{}
-		if rt.Class == rtAbsent {
-			t.absent = t.view.Now
+		switch {
+		case rt.Class == rtAbsent:
+			t.fresh = notedRuntime{Name: t.name, At: t.view.Now, Gone: true}
+		case rt.Alive() && compareIdentity(t.expect, rt.Identity) == identityCurrent:
+			t.fresh = notedRuntime{Name: t.name, At: t.view.Now}
+		default:
+			t.fresh = notedRuntime{}
 		}
 	}
 	if t.needs.Legs != 0 || t.needs.Idle {
