@@ -87,17 +87,20 @@ var (
 
 // Call records a single method invocation on [Fake].
 type Call struct {
-	Method    string         // method name (e.g. "Start", "Stop", "SetMeta")
-	Name      string         // session name argument
-	Config    Config         // only set for Start calls
-	Message   string         // only set for Nudge/SendKeys calls (flattened text)
-	Content   []ContentBlock // only set for Nudge calls (structured content)
-	Key       string         // only set for meta calls
-	Value     string         // only set for SetMeta calls
-	Src       string         // only set for CopyTo calls
-	Dst       string         // only set for CopyTo calls
-	RequestID string         // only set for Respond calls
-	Action    string         // only set for Respond calls
+	Method  string         // method name (e.g. "Start", "Stop", "SetMeta")
+	Name    string         // session name argument
+	Config  Config         // only set for Start calls
+	Message string         // only set for Nudge/SendKeys calls (flattened text)
+	Content []ContentBlock // only set for Nudge calls (structured content)
+	// DeliveryKey is set for a Nudge delivered through
+	// [KeyedNudgeProvider.NudgeKeyed] (a [FullFake]'s).
+	DeliveryKey string
+	Key         string // only set for meta calls
+	Value       string // only set for SetMeta calls
+	Src         string // only set for CopyTo calls
+	Dst         string // only set for CopyTo calls
+	RequestID   string // only set for Respond calls
+	Action      string // only set for Respond calls
 }
 
 // FakeExecResult configures one [Fake.Exec] outcome.

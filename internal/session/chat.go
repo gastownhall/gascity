@@ -1076,7 +1076,7 @@ func formatWaitIdleReminder(source, message string) string {
 
 func (m *Manager) nudgeSession(ctx context.Context, sessName, message string, immediate bool) error {
 	content := runtime.TextContent(message)
-	err := m.nudgeContent(sessName, content, immediate)
+	err := m.nudgeContent(ctx, sessName, content, immediate)
 	if errors.Is(err, runtime.ErrNudgeDeliveredUnobserved) {
 		// The provider proved delivery and only missed the turn start, so
 		// this nudge is delivered: a caller that retried it would deliver
@@ -1098,13 +1098,16 @@ func (m *Manager) nudgeSession(ctx context.Context, sessName, message string, im
 	return nil
 }
 
-func (m *Manager) nudgeContent(sessName string, content []runtime.ContentBlock, immediate bool) error {
+// nudgeContent delivers content, passing the delivery key ctx carries (see
+// runtime.WithNudgeDeliveryKey) to a provider that deduplicates keyed
+// deliveries.
+func (m *Manager) nudgeContent(ctx context.Context, sessName string, content []runtime.ContentBlock, immediate bool) error {
 	if immediate {
 		if np, ok := m.sp.(runtime.ImmediateNudgeProvider); ok {
 			return np.NudgeNow(sessName, content)
 		}
 	}
-	return m.sp.Nudge(sessName, content)
+	return runtime.NudgeWithDeliveryKey(ctx, m.sp, sessName, content)
 }
 
 func normalizeWaitIdleNudgeSource(source string) string {

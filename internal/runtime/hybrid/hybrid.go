@@ -172,6 +172,15 @@ func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 	return p.route(name).Nudge(name, content)
 }
 
+// NudgeKeyed delegates to the routed backend with its delivery key when that
+// backend deduplicates keyed deliveries, and to its Nudge otherwise.
+func (p *Provider) NudgeKeyed(name string, content []runtime.ContentBlock, key string) error {
+	if kp, ok := p.route(name).(runtime.KeyedNudgeProvider); ok {
+		return kp.NudgeKeyed(name, content, key)
+	}
+	return p.route(name).Nudge(name, content)
+}
+
 // WaitForIdle delegates to the routed backend when it supports explicit
 // idle-boundary waiting.
 func (p *Provider) WaitForIdle(ctx context.Context, name string, timeout time.Duration) error {

@@ -321,7 +321,7 @@ func (h *RuntimeHandle) Nudge(ctx context.Context, _ sessionpkg.Actor, req Nudge
 	}
 	switch req.Delivery {
 	case "", NudgeDeliveryDefault:
-		if err := h.provider.Nudge(h.sessionName, runtime.TextContent(req.Text)); err != nil {
+		if err := runtime.NudgeWithDeliveryKey(ctx, h.provider, h.sessionName, runtime.TextContent(req.Text)); err != nil {
 			return NudgeResult{}, runtimeInteractionError(err)
 		}
 		result = NudgeResult{Delivered: true}

@@ -42,11 +42,16 @@ type Item struct {
 	DeliverAfter      time.Time  `json:"deliver_after"`
 	ExpiresAt         time.Time  `json:"expires_at"`
 	Attempts          int        `json:"attempts,omitempty"`
-	LastAttemptAt     time.Time  `json:"last_attempt_at,omitempty"`
-	LastError         string     `json:"last_error,omitempty"`
-	ClaimedAt         time.Time  `json:"claimed_at,omitempty"`
-	LeaseUntil        time.Time  `json:"lease_until,omitempty"`
-	DeadAt            time.Time  `json:"dead_at,omitempty"`
+	// DeliveryGeneration counts the runtime's definitive rejections of this
+	// item. It is part of the delivery key a batch is redelivered under, so a
+	// rejected delivery is retried as a new one while a delivery whose outcome
+	// was unknown is retried as the same one.
+	DeliveryGeneration int       `json:"delivery_generation,omitempty"`
+	LastAttemptAt      time.Time `json:"last_attempt_at,omitempty"`
+	LastError          string    `json:"last_error,omitempty"`
+	ClaimedAt          time.Time `json:"claimed_at,omitempty"`
+	LeaseUntil         time.Time `json:"lease_until,omitempty"`
+	DeadAt             time.Time `json:"dead_at,omitempty"`
 }
 
 // State is the persisted nudge queue snapshot.

@@ -53,6 +53,7 @@ type ProfileBackend interface {
 	InterruptBoundaryWaitProvider
 	InterruptedTurnResetProvider
 	InventoryProvider
+	KeyedNudgeProvider
 	ListingAttestation
 	LivenessObserver
 	LivenessObserverWithError
@@ -88,7 +89,7 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 	case ProfileSSH:
 		return sshProfile{core, b, timed}
 	case ProfileT3Bridge:
-		return t3bridgeProfile{core, b, timed, turnInterruptTrait{TurnInterruptProtocol}}
+		return t3bridgeProfile{core, b, b, timed, turnInterruptTrait{TurnInterruptProtocol}}
 	}
 	panic(fmt.Sprintf("runtime: unknown profile %d", p))
 }
@@ -218,6 +219,7 @@ type (
 	}
 	t3bridgeProfile struct {
 		Provider
+		KeyedNudgeProvider
 		LivenessObserverWithError
 		sleepTrait
 		turnInterruptTrait
@@ -241,6 +243,27 @@ func (f FullFake) liveness(method, name string) (Liveness, error) {
 	}
 	_, running := f.sessions[name]
 	return Liveness{Running: running, Alive: running && !f.Zombies[name]}, nil
+}
+
+// NudgeKeyed implements [KeyedNudgeProvider]: it records a Nudge call
+// carrying key and answers as [Fake.Nudge] does.
+func (f FullFake) NudgeKeyed(name string, content []ContentBlock, key string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, Call{
+		Method:      "Nudge",
+		Name:        name,
+		Message:     FlattenText(content),
+		Content:     content,
+		DeliveryKey: key,
+	})
+	if f.broken {
+		return fmt.Errorf("session unavailable")
+	}
+	if err, ok := f.NudgeErrors[name]; ok {
+		return err
+	}
+	return nil
 }
 
 // ObserveLiveness implements [LivenessObserver].

@@ -19,6 +19,7 @@ go_test(
         "conformance_test.go",
         "corpse_fallthrough_test.go",
         "liveness_forwarding_test.go",
+        "nudge_keyed_test.go",
         "proctable_forwarding_test.go",
         "router_test.go",
         "session_events_test.go",

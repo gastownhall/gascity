@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -2049,7 +2050,8 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 		relErr := releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(items))
 		return false, errors.Join(bookkeepErr, err, relErr)
 	}
-	result, err := handle.Nudge(context.Background(), sessionActor(session.ActorAgent, target.cityPath), worker.NudgeRequest{
+	deliveryCtx := runtime.WithNudgeDeliveryKey(context.Background(), queuedNudgeDeliveryKey(items))
+	result, err := handle.Nudge(deliveryCtx, sessionActor(session.ActorAgent, target.cityPath), worker.NudgeRequest{
 		Text:     msg,
 		Delivery: worker.NudgeDeliveryDefault,
 		Source:   "queue",
@@ -2562,6 +2564,22 @@ func newQueuedNudgeID() string {
 		return fmt.Sprintf("nudge-%d", time.Now().UnixNano())
 	}
 	return "nudge-" + hex.EncodeToString(buf[:])
+}
+
+// queuedNudgeDeliveryKey is the delivery key of the batch items: a digest of
+// its item ids and their delivery generations, independent of order. A batch
+// claimed again after a timeout or a lapsed lease gets the same key, so a
+// runtime that deduplicates keyed deliveries replays the first delivery
+// instead of delivering the batch twice; a rejection bumps an item's
+// generation, and with it the key.
+func queuedNudgeDeliveryKey(items []queuedNudge) string {
+	parts := make([]string, 0, len(items))
+	for _, item := range items {
+		parts = append(parts, fmt.Sprintf("%s@%d", item.ID, item.DeliveryGeneration))
+	}
+	sort.Strings(parts)
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\n")))
+	return "nudge-batch-" + hex.EncodeToString(sum[:16])
 }
 
 func queuedNudgeIDs(items []queuedNudge) []string {
@@ -3383,6 +3401,9 @@ func failedQueuedNudge(item queuedNudge, cause error, now time.Time) (queuedNudg
 	if errors.Is(cause, errNudgeSessionFenceMismatch) {
 		item.DeadAt = now.UTC()
 		return item, true
+	}
+	if errors.Is(cause, runtime.ErrNudgeRejected) {
+		item.DeliveryGeneration++
 	}
 	if item.Attempts >= defaultQueuedNudgeMaxAttempts || (!item.ExpiresAt.IsZero() && !item.ExpiresAt.After(now)) {
 		item.DeadAt = now.UTC()

@@ -6,6 +6,8 @@ package t3bridge
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -438,6 +440,28 @@ func softenBridgeStartupError(err error) error {
 		return fmt.Errorf("%w: %w", runtime.ErrSessionInitializing, err)
 	}
 	return err
+}
+
+// t3RPCRejectedError is T3's own answer to an RPC: an Exit Failure or a
+// Defect. Unlike a transport failure, the outcome is known: T3 did not do it.
+type t3RPCRejectedError struct {
+	method string
+	cause  string
+	defect bool
+}
+
+func (e *t3RPCRejectedError) Error() string {
+	if e.defect {
+		return fmt.Sprintf("t3bridge rpc defect: %s", e.cause)
+	}
+	return fmt.Sprintf("t3 rpc %s: %s", e.method, e.cause)
+}
+
+// isT3Rejection reports whether err is T3's definitive refusal rather than
+// a transport failure whose outcome is unknown.
+func isT3Rejection(err error) bool {
+	var rejected *t3RPCRejectedError
+	return errors.As(err, &rejected)
 }
 
 func isSoftBridgeUnavailable(err error) bool {
@@ -1095,7 +1119,7 @@ func (p *Provider) rpcCallOnce(method string, params map[string]interface{}, req
 				continue
 			}
 			if resp.Tag == "Defect" {
-				return nil, fmt.Errorf("t3bridge rpc defect: %s", resp.Defect)
+				return nil, &t3RPCRejectedError{method: method, cause: resp.Defect, defect: true}
 			}
 			if resp.Tag != "Exit" || resp.RequestID != fmt.Sprintf("%d", reqID) {
 				continue
@@ -1104,7 +1128,7 @@ func (p *Provider) rpcCallOnce(method string, params map[string]interface{}, req
 				return nil, fmt.Errorf("t3 rpc %s: nil exit", method)
 			}
 			if resp.Exit.Tag == "Failure" {
-				return nil, fmt.Errorf("t3 rpc %s: %s", method, string(resp.Exit.Cause))
+				return nil, &t3RPCRejectedError{method: method, cause: string(resp.Exit.Cause)}
 			}
 			return resp.Exit.Value, nil
 		}
@@ -1465,14 +1489,59 @@ func (p *Provider) dispatchActivity(threadID, kind, summary string, payload map[
 	})
 }
 
-func (p *Provider) dispatchTurnStart(threadID, text, provider, model string) error {
+// turnStartIDs are the idempotency ids of one thread.turn.start: T3 dedupes a
+// command by commandId (replaying its receipt), and keys the user message by
+// messageId.
+type turnStartIDs struct {
+	commandID string
+	messageID string
+}
+
+// freshTurnStartIDs mints ids for a turn no one will redeliver.
+func (p *Provider) freshTurnStartIDs() turnStartIDs {
+	return turnStartIDs{commandID: p.nextCommandID("t3bridge-turn"), messageID: uuid.NewString()}
+}
+
+// deriveDeliveryIDs derives a turn start's ids from a caller's delivery key,
+// so a redelivery of the same delivery replays T3's receipt instead of
+// starting a second turn. T3's receipt replay compares only the command id
+// and thread, and message ids are global, so both ids carry the command type
+// and the city, and the digest covers the thread: the same key in another
+// city, or on a thread that replaced this one, is another delivery.
+func deriveDeliveryIDs(city, threadID, key string) turnStartIDs {
+	namespace := deliveryIDNamespace(city)
+	sum := sha256.Sum256([]byte(city + "\x00" + threadID + "\x00" + key))
+	digest := hex.EncodeToString(sum[:16])
+	return turnStartIDs{
+		commandID: fmt.Sprintf("gc:%s:thread.turn.start:%s", namespace, digest),
+		messageID: fmt.Sprintf("gc:%s:message:%s", namespace, digest),
+	}
+}
+
+// deliveryIDNamespace is city reduced to id-safe characters.
+func deliveryIDNamespace(city string) string {
+	namespace := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':
+			return r
+		default:
+			return '-'
+		}
+	}, strings.TrimSpace(city))
+	if namespace == "" {
+		return "city"
+	}
+	return namespace
+}
+
+func (p *Provider) dispatchTurnStart(threadID, text, provider, model string, ids turnStartIDs) error {
 	now := time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
 	return p.rpcDispatchCommand(map[string]interface{}{
 		"type":      "thread.turn.start",
-		"commandId": p.nextCommandID("t3bridge-turn"),
+		"commandId": ids.commandID,
 		"threadId":  threadID,
 		"message": map[string]interface{}{
-			"messageId":   uuid.NewString(),
+			"messageId":   ids.messageID,
 			"role":        "user",
 			"text":        text,
 			"attachments": []interface{}{},
@@ -2622,7 +2691,7 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 
 	if prompt := strings.TrimSpace(envelope.Startup.StartupPrompt); prompt != "" {
 		fmt.Fprintf(os.Stderr, "t3bridge: Start(%s) sending startup prompt thread=%s len=%d\n", name, threadID, len(prompt)) //nolint:errcheck
-		if err := p.dispatchTurnStart(threadID, prompt, providerName, modelName); err != nil {
+		if err := p.dispatchTurnStart(threadID, prompt, providerName, modelName, p.freshTurnStartIDs()); err != nil {
 			return fail(err)
 		}
 		_ = p.dispatchActivity(threadID, "gc.prompt.sent", "GC startup prompt sent", map[string]interface{}{
@@ -2635,7 +2704,7 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 	}
 	if nudgeText != "" {
 		fmt.Fprintf(os.Stderr, "t3bridge: Start(%s) sending nudge thread=%s len=%d\n", name, threadID, len(nudgeText)) //nolint:errcheck
-		if err := p.dispatchTurnStart(threadID, nudgeText, providerName, modelName); err != nil {
+		if err := p.dispatchTurnStart(threadID, nudgeText, providerName, modelName, p.freshTurnStartIDs()); err != nil {
 			return fail(err)
 		}
 		_ = p.dispatchActivity(threadID, "gc.nudge.sent", "GC nudge sent", map[string]interface{}{
@@ -2792,6 +2861,19 @@ func (p *Provider) liveThread(name string) (map[string]interface{}, *threadBindi
 // [runtime.ErrSessionNotFound] when no live thread is bound to name, so a
 // caller never mistakes an undelivered nudge for a delivered one.
 func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
+	return p.nudge(name, content, "")
+}
+
+// NudgeKeyed implements [runtime.KeyedNudgeProvider]: it delivers like Nudge,
+// deriving the turn's T3 command and message ids from key, so a redelivery
+// under the same key replays T3's receipt instead of starting a second turn.
+// A definitive T3 refusal is reported as [runtime.ErrNudgeRejected]; the
+// caller then redelivers under a new key.
+func (p *Provider) NudgeKeyed(name string, content []runtime.ContentBlock, key string) error {
+	return p.nudge(name, content, key)
+}
+
+func (p *Provider) nudge(name string, content []runtime.ContentBlock, key string) error {
 	thread, binding, err := p.liveThread(name)
 	if err != nil {
 		return err
@@ -2809,7 +2891,17 @@ func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 	if model == "" {
 		model = binding.Model
 	}
-	return p.dispatchTurnStart(binding.ThreadID, text, provider, model)
+	ids := p.freshTurnStartIDs()
+	if key != "" {
+		ids = deriveDeliveryIDs(meta["gc.city"], binding.ThreadID, key)
+	}
+	if err := p.dispatchTurnStart(binding.ThreadID, text, provider, model, ids); err != nil {
+		if isT3Rejection(err) {
+			return fmt.Errorf("%w: t3 refused the turn for %q: %w", runtime.ErrNudgeRejected, name, err)
+		}
+		return err
+	}
+	return nil
 }
 
 // SetMeta persists a session metadata value and reflects drain transitions onto

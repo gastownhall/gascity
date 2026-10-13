@@ -20,6 +20,7 @@ var (
 	_ runtime.SleepCapabilityProvider         = (*seamBackedProvider)(nil)
 	_ runtime.LivenessObserverWithError       = (*seamBackedProvider)(nil)
 	_ runtime.TurnInterruptCapabilityProvider = (*seamBackedProvider)(nil)
+	_ runtime.KeyedNudgeProvider              = (*seamBackedProvider)(nil)
 )
 
 // NewSeamBacked constructs a t3bridge provider served through the seams.
@@ -66,4 +67,10 @@ func (s *seamBackedProvider) Nudge(name string, content []runtime.ContentBlock) 
 // adapter's silent nil for a session it cannot attach to.
 func (s *seamBackedProvider) Interrupt(name string) error {
 	return s.raw.Interrupt(name)
+}
+
+// NudgeKeyed passes the caller's delivery key through to the raw bridge,
+// which derives T3's idempotency ids from it.
+func (s *seamBackedProvider) NudgeKeyed(name string, content []runtime.ContentBlock, key string) error {
+	return s.raw.NudgeKeyed(name, content, key)
 }

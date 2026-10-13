@@ -155,6 +155,7 @@ go_test(
         "names_alias_conflict_test.go",
         "names_test.go",
         "nocity_guard_test.go",
+        "nudge_delivery_key_test.go",
         "orphan_auto_test.go",
         "orphan_infrastructure_fence_linux_test.go",
         "overlay_test.go",

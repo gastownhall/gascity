@@ -11,7 +11,10 @@ import (
 // snapshot read fails with a soft (transient) bridge error.
 const unreachableBridgeURL = "ws://127.0.0.1:1/ws"
 
-func boundThreadSnapshot(name, status string) map[string]interface{} {
+// boundThreadSnapshot is a T3 snapshot binding session "agent-a" to a thread
+// whose session has status.
+func boundThreadSnapshot(status string) map[string]interface{} {
+	const name = "agent-a"
 	return map[string]interface{}{
 		"threads": []interface{}{
 			map[string]interface{}{
@@ -58,7 +61,7 @@ func TestSeamBackedNudgeAndInterruptWithoutLiveThreadAreSessionNotFound(t *testi
 		snapshot map[string]interface{}
 	}{
 		{name: "no thread", snapshot: map[string]interface{}{"threads": []interface{}{}}},
-		{name: "stopped thread", snapshot: boundThreadSnapshot("agent-a", "stopped")},
+		{name: "stopped thread", snapshot: boundThreadSnapshot("stopped")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			server := newT3BridgeTestServer(t, tc.snapshot)
@@ -79,7 +82,7 @@ func TestSeamBackedNudgeAndInterruptWithoutLiveThreadAreSessionNotFound(t *testi
 }
 
 func TestSeamBackedNudgeAndInterruptLiveThreadDispatch(t *testing.T) {
-	server := newT3BridgeTestServer(t, boundThreadSnapshot("agent-a", "ready"))
+	server := newT3BridgeTestServer(t, boundThreadSnapshot("ready"))
 	t.Cleanup(server.Close)
 	_, sp := newSeamBackedSnapshotTestProvider(t, server.wsURL())
 
@@ -119,7 +122,7 @@ func TestSeamBackedStopSoftUnavailableIsRuntimeUnavailable(t *testing.T) {
 }
 
 func TestSeamBackedStopPropagatesSessionStopRejection(t *testing.T) {
-	server := newT3BridgeTestServer(t, boundThreadSnapshot("agent-a", "ready"))
+	server := newT3BridgeTestServer(t, boundThreadSnapshot("ready"))
 	t.Cleanup(server.Close)
 	server.rejectCommand("thread.session.stop", "thread is locked")
 	_, sp := newSeamBackedSnapshotTestProvider(t, server.wsURL())
