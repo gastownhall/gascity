@@ -16,8 +16,8 @@ import (
 // leaf (C7b2-2 review; the reviewer's repros).
 
 // driftOn decides a drifted row, named or ordinary, with a full or a
-// launch-only drift, on admittedBeginOn's leaf.
-func driftOn(t *testing.T, named, launchOnly bool) (*effectPass, intent, beads.Store, *fenceLeaf) {
+// launch-only drift, on admittedBeginOn's leaf, the row carrying extra.
+func driftOn(t *testing.T, named, launchOnly bool, extra ...string) (*effectPass, intent, beads.Store, *fenceLeaf) {
 	t.Helper()
 	withoutA7(t)
 	tp := TemplateParams{TemplateName: "worker", Command: "run"}
@@ -30,6 +30,7 @@ func driftOn(t *testing.T, named, launchOnly bool) (*effectPass, intent, beads.S
 	if launchOnly {
 		meta = append(meta, "started_provision_hash", runtime.ProvisionFingerprint(cfg), "started_launch_hash", runtime.FingerprintVersion+":old-launch")
 	}
+	meta = append(meta, extra...)
 	p, it, store, leaf := admittedBeginOn(t, meta, func(e *selectionEntry) { e.InDesired, e.Desired = true, desireKeep }, func(w *World) {
 		w.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{}}
 		for _, row := range w.Census.Rows { // every row resolves (the store seeds one beside the drifted row)
@@ -205,6 +206,52 @@ func TestRelaunchRedecidesAndRereadsAttach(t *testing.T) {
 	s := runTx(context.Background(), p, it, effectSpecs[it.Kind], nil)
 	if got, _ := store.Get(it.Key.ID); s.Outcome != settledRefused || leaf.CountCalls("Relaunch", "s-gc-1")+stops(leaf) != 0 || got.Metadata["drain_intent_reason"] != "" {
 		t.Fatalf("attached before Relaunch: settled %+v, relaunches %d, stops %d, stop request %q; want refused, nothing done", s, leaf.CountCalls("Relaunch", "s-gc-1"), stops(leaf), got.Metadata["drain_intent_reason"])
+	}
+}
+
+// Kills a relaunch that decides L3, L4 and L5 only before the lease record
+// (v5.9g; STALE-READ 7.2): a pending interaction, an attach, or (on an
+// ordinary seat) work that lands after the deferral's reads is read again
+// by the relaunch section under the record, and refuses the Relaunch. A
+// pending interaction under legacy's exemption (a wait hold) does not, as
+// the deferral reads it.
+func TestRelaunchRefusesWhatItsSectionReadsUnderTheRecord(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		land  func(store beads.Store, id string, leaf *fenceLeaf)
+		cause string
+	}{
+		{"a pending interaction", func(_ beads.Store, _ string, leaf *fenceLeaf) { approval(leaf) }, causeDriftDeferred + "pending"},
+		{"an attach", func(_ beads.Store, _ string, leaf *fenceLeaf) { leaf.SetAttached("s-gc-1", true) }, causeDriftDeferred + fenceAttached},
+		{"work", func(store beads.Store, id string, _ *fenceLeaf) { assignWork(t, store, id) }, causeDriftDeferred + fenceHasWork},
+	} {
+		p, it, store, leaf := driftOn(t, false, true)
+		if it.Kind != intentDriftRelaunch {
+			t.Fatalf("%s: decided %+v, want the relaunch", c.name, it)
+		}
+		p.seam = func(_ context.Context, s txSeam, _ intent, section, _ int) error {
+			if s == seamAfterReads && section == 0 {
+				c.land(store, it.Key.ID, leaf)
+			}
+			return nil
+		}
+		s := runTx(context.Background(), p, it, effectSpecs[it.Kind], nil)
+		if s.Outcome != settledRefused || s.Cause != c.cause || leaf.CountCalls("Relaunch", "s-gc-1") != 0 {
+			t.Errorf("%s after the deferral's reads: settled %+v, relaunches %d; want refused %q, none", c.name, s, leaf.CountCalls("Relaunch", "s-gc-1"), c.cause)
+		}
+	}
+	p, it, _, leaf := driftOn(t, false, true, "wait_hold", "true")
+	if it.Kind != intentDriftRelaunch {
+		t.Fatalf("wait-held: decided %+v, want the relaunch", it)
+	}
+	p.seam = func(_ context.Context, s txSeam, _ intent, section, _ int) error {
+		if s == seamAfterReads && section == 0 {
+			approval(leaf)
+		}
+		return nil
+	}
+	if s := runTx(context.Background(), p, it, effectSpecs[it.Kind], nil); s.Outcome != settledLanded || leaf.CountCalls("Relaunch", "s-gc-1") != 1 {
+		t.Errorf("a pending interaction under a wait hold: settled %+v, relaunches %d; want the relaunch, as the deferral exempts it", s, leaf.CountCalls("Relaunch", "s-gc-1"))
 	}
 }
 
