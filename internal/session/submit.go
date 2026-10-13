@@ -211,7 +211,9 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, by Actor, id str
 		return false, err
 	}
 	defer release()
-	if requiresHardRestartInterrupt(b) {
+	// A protocol runtime cancels the turn itself; its Stop may leave the
+	// runtime running, so the hard restart would interrupt nothing.
+	if requiresHardRestartInterrupt(b) && runtime.TurnInterruptModeFor(m.sp, sessName) != runtime.TurnInterruptProtocol {
 		piTranscriptPath, err := piPendingTurnPath(b, hints)
 		if err != nil {
 			return false, err

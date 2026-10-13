@@ -142,8 +142,9 @@ func TestProtocolTurnInterruptUsesInterruptForEveryFamily(t *testing.T) {
 		},
 		"pi": {
 			stop: "IsRunning IsRunning IsRunning Interrupt",
-			// pi replaces the turn by restarting the runtime, which needs no keys.
-			now: "IsRunning IsRunning IsRunning Pending IsRunning Stop IsRunning IsRunning FindRuntimesBySessionID Start IsRunning NudgeNow(msg)",
+			// A protocol runtime cancels pi's turn itself: no hard restart,
+			// whose Stop may leave a protocol-hosted runtime running.
+			now: "IsRunning IsRunning IsRunning Pending IsRunning IsRunning Interrupt IsRunning IsRunning IsRunning Pending NudgeNow(msg)",
 		},
 		"opencode": {
 			stop: "IsRunning IsRunning IsRunning Interrupt",
