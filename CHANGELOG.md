@@ -281,6 +281,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Codex `suggest` sessions start on current codex-cli and ask before
+  acting.** `permission_mode = "suggest"` passed `--ask-for-approval
+  untrusted`, a policy codex-cli 0.149.0 retired, so suggest sessions exited
+  at launch. Suggest now passes `--ask-for-approval on-request --sandbox
+  read-only`. Provider or agent `args` that spell the retired `untrusted`
+  policy, or name `--ask-for-approval on-request` alone or beside `--sandbox
+  workspace-write`, select suggest. Before, depending on the shape and the
+  start path, they launched with the unrestricted
+  `--dangerously-bypass-approvals-and-sandbox` default or failed to start.
+  Agent `args` are now normalized like provider `args` when every
+  schema-managed flag in them belongs to an option the `args` select: the
+  options they select beat the agent's own `option_defaults` for those keys.
+  Before, `gc session new` and API-created sessions dropped such flags and
+  launched the provider's default mode, so an agent that asked for approvals
+  through `args` could run with the bypass flag. Agent `args` with a flag that
+  belongs to no option they select, such as a lone `--ask-for-approval never`
+  or `--sandbox workspace-write`, are kept as written, as before, and are
+  still stripped by `gc session new` and API-created sessions, which then
+  launch the default mode: for codex, the bypass flag unless `option_defaults`
+  choose another mode (ga-kg2mqb). A provider `resume_command` that names an
+  `--ask-for-approval` policy no longer gets the bypass flag added beside it,
+  which codex rejected. Suggest sessions, and sessions of agents whose `args`
+  are now normalized, restart once after the upgrade because their launch
+  command changes (#7671).
+
 - **The OpenCode and MiMo Code plugins keep the stable prime at the head of
   the system prompt and drain queued nudges once per turn, per session.**
   `experimental.chat.system.transform` fires once per model generation, and

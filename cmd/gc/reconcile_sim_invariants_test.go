@@ -140,19 +140,25 @@ func (s *sim) checkDestructive() {
 		if k.External || k.Hit == nil {
 			continue
 		}
-		if k.Hit.attached {
-			s.failf("I5 I-attached", "v2 %s on %s while attached", k.Method, k.Name)
-		}
 		row, closed := s.rowNamed(k.Name)
 		own := k.Hit.id == row.ID && k.Hit.token == row.Metadata["instance_token"]
+		// The own-runtime exception takes O2's own-runtime test: Current, or
+		// StaleSelf at the row's generation (S7's exit stops that one;
+		// seeds 23, 38, 153, 519, 1007).
+		ownForException := own || k.Hit.id == row.ID && k.Hit.epoch == row.Metadata["generation"]
+		if k.Hit.attached && !s.ownRuntimeException(k, row, ownForException) {
+			s.failf("I5 I-attached", "v2 %s on %s while attached", k.Method, k.Name)
+		}
 		switch {
 		case k.Method == "KillCorpseObject" && k.Hit.corpse: // the corpse exception, whoever it was
 		case k.Method == "KillZombieObject" && k.Hit.zombie && k.Hit.id != "" && k.Hit.id == s.rowNamedEver(k.Name).ID:
 			// The row's own zombie: the start recycle's and the close's, the
 			// row closed meanwhile included (its zombie stays its own).
-		case k.Method == "Stop" && row.Metadata["pending_create_claim"] == "true" && ownsName(sessionInfoFromBead(row), k.Name) && (!closed || own):
+		case k.Method == "Stop" && row.Metadata["pending_create_claim"] == "true" && ownsName(sessionInfoFromBead(row), k.Name) && (!closed || own || k.Effect == intentRollback):
 			// C8.2(a): a pending create's rollback stops its bead-scoped name
-			// whoever runs under it (C3, S1's Foreign row), as legacy does.
+			// whoever runs under it (C3, S1's Foreign row), as legacy does;
+			// the name embeds the row's bead ID, so it stays the row's when
+			// an outside writer closes the row inside the rollback (v5.9q).
 		case row.ID == "" || k.Hit.id != row.ID:
 			s.failf("I4 I-fence", "v2 %s on %s hit row %q's runtime, not its own", k.Method, k.Name, k.Hit.id)
 		case closed && !own:
@@ -249,7 +255,7 @@ func (s *sim) checkWrite(w simWrite) {
 			}
 		}
 	}
-	if k := dormantChange(w.Before, a, w.At, s.stable[w.After.ID]); k != "" && (!closes || !closeEndsSuspend(w.Before, k, w.At)) && !s.quarantinedCommit(id, w, k) {
+	if k := dormantChange(w.Before, a, w.At, s.stable[w.After.ID]); k != "" && (!closes || !closeEndsSuspend(w.Before, k, w.At)) && (!closes || !pendingCreateRollback(w)) && !pendingCreateAdopt(w, k) && !s.quarantinedCommit(id, w, k) {
 		s.failf("I15 I-STOP-3/4", "v2 rewrote %s %q -> %q on %s, which an operator holds dormant at %s", k, b[k], a[k], id, w.At.Format(time.RFC3339))
 	}
 	terminal := (w.After.Status == "closed" && w.Before.Status != "closed") ||
@@ -283,9 +289,9 @@ func (s *sim) quarantinedCommit(id string, w simWrite, k string) bool {
 		return false // the quarantine was there at the PreWake, which must have refused
 	}
 	if s.quarantinedCommits == nil {
-		s.quarantinedCommits = map[string]time.Time{}
+		s.quarantinedCommits = map[string]*quarantinedClock{}
 	}
-	s.quarantinedCommits[id] = w.At
+	s.quarantinedCommits[id] = &quarantinedClock{start: w.At, checked: w.At, moves: len(s.basisMoves)}
 	return true
 }
 
@@ -298,18 +304,41 @@ func quarantineAlone(meta map[string]string, now time.Time) bool {
 		strings.TrimSpace(meta["sleep_intent"]) != string(session.SleepReasonUserHold) && (err != nil || !held.After(now))
 }
 
+// quarantinedClock is a quarantined commit's bound clock (CONTRACT v5.9x):
+// start moves on while v2 cannot act on the row, from the last check
+// (checked), and restarts at an outside write that moved its drain basis
+// past basisMoves[moves].
+type quarantinedClock struct {
+	start, checked time.Time
+	moves          int
+}
+
 // checkQuarantinedCommits is I15's bound on §12.2 #57: a row whose commit
-// kept a late quarantine is, within quarantineDrainBound, closed, stopped,
-// asked to stop (A20's begin; A4 stops it), out of its quarantine, or kept
-// by its assigned work, as legacy's assigned-work lens keeps it (DRAIN-046).
+// kept a late quarantine is, within quarantineDrainBound of v2's own time,
+// closed, stopped, asked to stop (A20's begin; A4 stops it), out of its
+// quarantine, or kept by its assigned work, as legacy's assigned-work lens
+// keeps it (DRAIN-046). The bound pauses while the row's liveness reads
+// unknown (A9 holds every arm, GUAR-053) and restarts at an outside write
+// that moves its incarnation or drain basis, whose refusal and backoff are
+// not v2's delay (CONTRACT v5.9x).
 func (s *sim) checkQuarantinedCommits() {
 	if len(s.quarantinedCommits) == 0 {
 		return
 	}
 	now := s.clk.Now()
 	rows := s.snapshot()
-	for id, at := range s.quarantinedCommits {
+	_, obs := s.observed()
+	for id, c := range s.quarantinedCommits {
 		b := rows[id]
+		leg, _, _ := strings.Cut(id, "/")
+		switch {
+		case s.basisMovedOutside(leg, b.ID, c.moves):
+			c.start, c.moves = now, len(s.basisMoves)
+		case obs == nil || obs[rowKey{Leg: rowLeg, ID: b.ID}].Liveness == livenessUnknown:
+			c.start = c.start.Add(now.Sub(c.checked))
+		}
+		c.checked = now
+		at := c.start
 		worked := slices.ContainsFunc(slices.Collect(maps.Values(rows)), func(w beads.Bead) bool {
 			return w.Assignee == b.ID && (w.Status == "open" || w.Status == "in_progress")
 		})
@@ -366,8 +395,10 @@ func closeEndsSuspend(b beads.Bead, k string, t time.Time) bool {
 // timer and sleep reason, though A6's stability clear may clear the
 // quarantine's timer, and with it its own quarantine or rate_limit reason
 // (§12.2 #57, mc-bwvzv), on a row its pass read stable (v5.8, SESS-539;
-// stable, sim.stable). No such row is woken. Only an operator-dormant row (D1 rule
-// 2: killed, suspended under a hold, or sleep_intent=user-hold) is never given a stop
+// stable, sim.stable), and a crash, churn or rate-limit quarantine may
+// extend the timer, never shorten it (quarantineExtension). No such row is
+// woken. Only an operator-dormant row (D1 rule 2: killed, suspended under a
+// hold, or sleep_intent=user-hold) is never given a stop
 // request, though one it holds may be cleared; a hold or quarantine alone
 // is not dormant, and legacy drains under one (owner ruling at C6a2).
 func dormantChange(b beads.Bead, a map[string]string, t time.Time, stable bool) string {
@@ -398,7 +429,7 @@ func dormantChange(b beads.Bead, a map[string]string, t time.Time, stable bool) 
 	quarantined := until("quarantined_until")
 	if quarantined {
 		ended := stable && a["quarantined_until"] == "" // A6's stability clear ends it (SESS-539)
-		if !ended {
+		if !ended && !quarantineExtension(m, a, t) {
 			owned = append(owned, "quarantined_until")
 		}
 		// The clear ends a quarantine's own reason with it (§12.2 #57,
@@ -431,6 +462,31 @@ func dormantChange(b beads.Bead, a map[string]string, t time.Time, stable bool) 
 		return "state"
 	}
 	return ""
+}
+
+// quarantineExtension reports a write's extension of b's live quarantine
+// to a that I15 accepts (the #7706 and #7726 reviews): a later deadline, no
+// later than the write's time t plus the longest quarantine the controller
+// writes, on a write carrying an accrual's or a rate-limit quarantine's
+// signature: its counter advanced, a quarantine reason the write itself
+// sets, or last_woke_at cleared. A quarantine reason the row already
+// carries signs nothing, and nothing shortens one.
+func quarantineExtension(b, a map[string]string, t time.Time) bool {
+	was, _ := time.Parse(time.RFC3339, b["quarantined_until"])
+	later, err := time.Parse(time.RFC3339, a["quarantined_until"])
+	if err != nil || !later.After(was) || later.After(t.Add(max(defaultQuarantineDuration, defaultRateLimitQuarantineDuration))) {
+		return false
+	}
+	advanced := func(k string) bool {
+		n, _ := strconv.Atoi(b[k])
+		m, err := strconv.Atoi(a[k])
+		return err == nil && m > n
+	}
+	reason := session.SleepReason(a["sleep_reason"])
+	setsReason := a["sleep_reason"] != b["sleep_reason"] &&
+		(reason == session.SleepReasonQuarantine || reason == session.SleepReasonContextChurn || reason == session.SleepReasonRateLimit)
+	clearsWake := b["last_woke_at"] != "" && a["last_woke_at"] == ""
+	return advanced("wake_attempts") || advanced("churn_count") || setsReason || clearsWake
 }
 
 // checkStranded is I16 (I-STOP-5) at quiescence: no row is still signaled
@@ -505,8 +561,11 @@ func (s *sim) checkFinalized(e *simEffect) func(settlement) {
 	window := len(s.basisMoves)
 	return func(res settlement) {
 		b, err := l.backing.Get(e.it.Key.ID)
-		if res.Cause == causePremise && s.basisMovedOutside(l.name, e.it.Key.ID, window) {
+		if res.Cause == causePremise && (s.basisMovedOutside(l.name, e.it.Key.ID, window) || s.stopBasisMovedSinceRead(l.name, e.it.Key)) {
 			return
+		}
+		if res.Cause == fenceLivenessUnknown && s.probeErring(b) {
+			return // an erroring probe proves no absence (O3), as I17 rules it not stoppable (v5.9n; seed 606 of the floored-pending corpus)
 		}
 		if !paneBefore && res.Cause != "name-busy" && err == nil && signaledRow(b) && !s.namedPane(b) {
 			s.failf("I16 I-STOP-5", "the stop effect on %v confirmed no live pane and left the request signaled", e.it.Key)
@@ -713,7 +772,7 @@ func TestSimChecksBite(t *testing.T) {
 		}},
 		{"I15 ", func(s *sim) { // §12.2 #57: a late-quarantined commit left up undrained past the bound
 			s.setMeta(s.legs[0], "gc-1", "quarantined_until", s.rel(time.Hour), "sleep_reason", "quarantine", "instance_token", "tok-gc-1-1", "generation", "1")
-			s.quarantinedCommits = map[string]time.Time{"city/gc-1": s.clk.Now().Add(-quarantineDrainBound - time.Second)}
+			s.quarantinedCommits = map[string]*quarantinedClock{"city/gc-1": {start: s.clk.Now().Add(-quarantineDrainBound - time.Second), checked: s.clk.Now(), moves: len(s.basisMoves)}}
 		}},
 		{"I16 ", func(s *sim) {
 			s.setMeta(s.legs[0], "gc-1", signaled...)

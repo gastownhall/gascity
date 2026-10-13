@@ -137,6 +137,16 @@ func sessionToResponse(info session.Info, cfg *config.City) sessionResponse {
 	return r
 }
 
+// asProviderSession marks r as a provider session. A provider session is a
+// conversation with a provider, not a member of an agent's pool, so it carries
+// no pool or agent_kind even when its template names the provider's implicit
+// agent (which sessionToResponse classifies as a pool).
+func asProviderSession(r *sessionResponse) {
+	r.Kind = "provider"
+	r.Pool = ""
+	r.AgentKind = ""
+}
+
 // sessionResponseWithReason builds a session response from session.Info plus the
 // persisted-response projection (status + metadata). It is the keystone of the
 // session-response path: scalar fields come from Info, and the
@@ -161,7 +171,7 @@ func sessionResponseWithReason(info session.Info, pr session.PersistedResponse, 
 			r.Kind = "agent"
 			agentTemplateOK = agentFound
 		} else {
-			r.Kind = "provider"
+			asProviderSession(&r)
 		}
 		if agentTemplateOK {
 			rp, _ := resolveProviderForSessionOptions(info, pr.Metadata, cfg)

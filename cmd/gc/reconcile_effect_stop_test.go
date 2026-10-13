@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -284,6 +286,108 @@ func TestFinalizeWorkReadErrorKeepsOpen(t *testing.T) {
 		closed := got.Status == "closed"
 		if s.Outcome != settledLanded || closed == failed || (failed && got.Metadata["sleep_reason"] != "idle") {
 			t.Errorf("read failed=%v: settlement %+v, closed %v, row %v; want closed only on a clean read", failed, s, closed, got.Metadata)
+		}
+	}
+}
+
+// blockingWork is a work leg whose seat-scoped live lists block while
+// armed, until release closes: the finalize's bounded probe expires at
+// fenceProbeTimeout and hands the decide a zero finalizeWork. (A panicking
+// list would not do: seat_work recovers it per store as a read error.)
+type blockingWork struct {
+	beads.Store
+	armed   *atomic.Bool
+	release <-chan struct{}
+}
+
+func (s blockingWork) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if q.Assignee != "" && q.Live && s.armed.Load() {
+		<-s.release
+	}
+	return s.Store.List(q)
+}
+
+// claimFor gives the row id an in-progress work bead and returns its ID.
+func claimFor(t *testing.T, store beads.Store, id string) string {
+	t.Helper()
+	b, err := store.Create(beads.Bead{Title: "w", Type: "task", Assignee: id})
+	if err == nil {
+		err = store.Update(b.ID, beads.UpdateOpts{Status: stringPtr("in_progress")})
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b.ID
+}
+
+// Kills a close over a lost work read (STALE-READ-ARCH §7.1, PR 1), under
+// synctest so the expiries cost no real time: a pool seat holding
+// in-progress work whose finalize work read expires is not closed, its
+// work kept; a seat whose clean finalize read found none, assigned work
+// after it, whose premise close's own read expires, is not closed either;
+// a clean read with no work closes. The zero value or a probe error holds
+// an ordinary row and a soft-suspended pool seat alike in stopChoice.
+func TestFinalizeLostWorkReadNeverCloses(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		lose   int // the section whose probe expires: 1 the finalize's, 2 the close's; 0 none
+		closed bool
+	}{{"a clean read", 0, true}, {"the finalize's read expires over work", 1, false}, {"the close's read expires after a late claim", 2, false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				release := make(chan struct{})
+				defer close(release)
+				armed := &atomic.Bool{}
+				var workID string
+				var work beads.Store
+				s, got, _ := stopRun(t, signaled(drainOrphaned, "pool_managed", "true"), undesired(drainOrphaned), func(p *effectPass, _ *fenceLeaf, store beads.Store, id string) {
+					work = store
+					if tc.lose == 1 {
+						workID = claimFor(t, store, id)
+						armed.Store(true)
+					}
+					p.reads.legs = testWorkLegs(p.World.CityPath, p.World.Env.Cfg, blockingWork{Store: store, armed: armed, release: release}, nil).readOnly()
+					p.seam = func(_ context.Context, at txSeam, _ intent, section, _ int) error {
+						if tc.lose == 2 && at == seamAfterCall && section == 1 { // after the finalize's clean read, before the close's
+							workID = claimFor(t, store, id)
+							armed.Store(true)
+						}
+						return nil
+					}
+				})
+				if tc.lose != 0 && workID == "" {
+					t.Fatal("the run never reached the section whose read it loses")
+				}
+				closed := got.Status == "closed"
+				if closed != tc.closed {
+					t.Fatalf("settlement %+v, status %s, row %v; want closed %v", s, got.Status, got.Metadata, tc.closed)
+				}
+				if workID != "" {
+					if wb, _ := work.Get(workID); wb.Status != "in_progress" || wb.Assignee != got.ID {
+						t.Fatalf("work %s %q assignee %q; want kept on the seat", workID, wb.Status, wb.Assignee)
+					}
+				}
+			})
+		})
+	}
+	// A soft-suspended pool seat keeps no slot (#7718, KeepsSlot), so only
+	// its work read stands between it and a close.
+	soft := censusRowOf(t, drainRow("state", "suspended", "pool_managed", "true", "suspended_at", rowAt(-time.Hour))).Info
+	if session.DispositionOfInfo(soft).KeepsSlot() {
+		t.Fatal("fixture: want a soft suspend, which keeps no slot")
+	}
+	for _, row := range []session.Info{fenceRow("a", "tok-a"), soft} {
+		v := txView{It: intent{Kind: intentStop, Reason: decideStopVerb + drainOrphaned}, Row: row, Now: gatherNow}
+		if !stopChoice(v, finalizeWork{free: true}, nil).CloseSeat {
+			t.Fatalf("%s: a clean read closes no seat; the cases below prove nothing", row.ID)
+		}
+		for _, c := range []struct {
+			work finalizeWork
+			err  error
+		}{{finalizeWork{}, nil}, {finalizeWork{free: true}, errProbeExpired}, {finalizeWork{}, errProbeExpired}} {
+			if stopChoice(v, c.work, c.err).CloseSeat {
+				t.Errorf("%s: work %+v, probe error %v: the finalize closes, want it held as work", row.ID, c.work, c.err)
+			}
 		}
 	}
 }

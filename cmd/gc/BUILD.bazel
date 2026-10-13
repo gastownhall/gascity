@@ -935,6 +935,7 @@ go_test(
         "bead_policy_store_conditional_test.go",
         "bead_policy_store_conformance_test.go",
         "bead_policy_store_graph_ready_test.go",
+        "bead_policy_store_parent_projection_test.go",
         "bead_policy_store_test.go",
         "bead_worktree_liveness_discovery_test.go",
         "bead_worktree_liveness_fallback_test.go",
@@ -1076,6 +1077,7 @@ go_test(
         "cmd_dashboard_test.go",
         "cmd_doctor_drift_test.go",
         "cmd_doctor_extract_test.go",
+        "cmd_doctor_json_ok_test.go",
         "cmd_doctor_local_test.go",
         "cmd_doctor_order_firing_test.go",
         "cmd_doctor_order_outcome_test.go",
@@ -1125,6 +1127,7 @@ go_test(
         "cmd_hook_stdin_drain_test.go",
         "cmd_hook_test.go",
         "cmd_hook_timeout_test.go",
+        "cmd_hook_unavailable_test.go",
         "cmd_hook_visibility_test.go",
         "cmd_import_credential_test.go",
         "cmd_import_hint_test.go",
@@ -1179,6 +1182,7 @@ go_test(
         "cmd_session_attach_resume_test.go",
         "cmd_session_close_release_test.go",
         "cmd_session_kill_fence_test.go",
+        "cmd_session_kill_fresh_read_test.go",
         "cmd_session_kill_frontdoor_test.go",
         "cmd_session_kill_poke_test.go",
         "cmd_session_logs_test.go",
@@ -1658,9 +1662,11 @@ go_test(
         "reconcile_session_timeline_test.go",
         "reconcile_settle_test.go",
         "reconcile_sim_invariants_test.go",
+        "reconcile_sim_pending_test.go",
         "reconcile_sim_respawn_test.go",
         "reconcile_sim_scenarios_test.go",
         "reconcile_sim_test.go",
+        "reconcile_sim_v59x_test.go",
         "reconcile_steps_pool_test.go",
         "reconcile_steps_test.go",
         "reconcile_stop_keys_test.go",
@@ -1728,6 +1734,7 @@ go_test(
         "session_beads_current_claim_clear_test.go",
         "session_beads_handoff_orphan_test.go",
         "session_beads_mail_release_test.go",
+        "session_beads_provider_chat_test.go",
         "session_beads_retire_rows_canonical_test.go",
         "session_beads_test.go",
         "session_circuit_breaker_test.go",
@@ -2187,20 +2194,33 @@ go_variant_test(
 )
 
 # The full 1024-seed v2 simulator corpus, a CI gate (CONTRACT v5.9n): gc_test
-# runs the first simCISeeds; these run all 1024 in eight ranges of 128, each
+# runs the first simCISeeds; these run all 1024 in sixteen ranges of 64, each
 # a target of its own (the same binary, no extra compile), so they run in
-# parallel beside gc_test's shards. A range ran in 19-29 s on RBE
-# (2026-10-12); medium's timeout fails a hang fast.
+# parallel beside gc_test's shards; medium's timeout fails a hang fast. The
+# pending creates (mc-cjtkj) grew a range's run, so the ranges halved.
 [go_variant_test(
     name = "gc_sim_corpus_%d_test" % i,
     size = "medium",
     args = ["-test.run=^TestSimCorpus$$"],
     env = {
-        "GC_V2_SIM_SEEDS": "128",
-        "GC_V2_SIM_SEED_FIRST": str(1 + 128 * i),
+        "GC_V2_SIM_SEEDS": "64",
+        "GC_V2_SIM_SEED_FIRST": str(1 + 64 * i),
     },
     test = ":gc_test",
-) for i in range(8)]
+) for i in range(16)]
+
+# The floored corpus with pending creates seeded, all 1024 seeds in sixteen
+# ranges of 64, the same way (TestSimCorpusFlooredPending, mc-cjtkj).
+[go_variant_test(
+    name = "gc_sim_corpus_floored_pending_%d_test" % i,
+    size = "medium",
+    args = ["-test.run=^TestSimCorpusFlooredPending$$"],
+    env = {
+        "GC_V2_SIM_SEEDS": "64",
+        "GC_V2_SIM_SEED_FIRST": str(1 + 64 * i),
+    },
+    test = ":gc_test",
+) for i in range(16)]
 
 # INTEGRATION_SOLO_TESTS, each alone, and INTEGRATION_SOLO_SPLIT_TESTS, by
 # subtest, in gc_test's integration build.

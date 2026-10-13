@@ -2028,7 +2028,16 @@ Without --inject: prints normalized ready-only output, exits 0 if work exists, 1
 With --inject: silent legacy Stop-hook compatibility; skips the work query and always exits 0.
 With --claim: runs the standard startup claim protocol for one work item.
 
-		The agent is determined from $GC_AGENT or a positional argument.
+Without --inject or --claim, a work query that gets no answer from the bead
+store (a connection error, a timeout, a killed query, a locked database, or
+bd's circuit breaker failing fast) exits 2 and prints GC_HOOK_STORE_UNAVAILABLE
+on stderr: the store could not be read, which is not the same as no work. Any
+other work-query failure exits 1. The generated default work query discards
+bd's errors in its single-store tiers, so there a store that fails fast still
+reads as no work; only a deadline overrun exits 2. With --claim, a failed work
+query exits 1 and writes no drain record.
+
+The agent is determined from $GC_AGENT or a positional argument.
 
 ```
 gc hook [agent] [flags]

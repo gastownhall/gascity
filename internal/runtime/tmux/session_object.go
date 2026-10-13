@@ -195,22 +195,24 @@ func (p *Provider) ObserveLivenessSince(name string, processNames []string, sinc
 }
 
 // KillCorpseObject implements [runtime.SessionObjectKiller]: it kills
-// objectID only while that session was created at created, is named name and
-// has one window with one pane, and that pane is dead, checked by tmux in the
-// same command as the kill. #{pane_dead} reads only the active pane, so a
-// second pane, which may be live, refuses.
+// objectID only while that session was created at created, is named name,
+// has no client attached and has one window with one pane, and that pane is
+// dead, checked by tmux in the same command as the kill. #{pane_dead} reads
+// only the active pane, so a second pane, which may be live, refuses.
 func (p *Provider) KillCorpseObject(name, objectID, created string) (runtime.SessionObjectKillResult, error) {
 	if err := validateSessionObject(name, objectID, created); err != nil {
 		return runtime.SessionObjectNotKilled, err
 	}
-	cond := fmt.Sprintf("#{&&:#{==:#{session_created},%s},#{&&:#{==:#{session_name},%s},#{&&:#{==:#{session_windows},1},#{&&:#{==:#{window_panes},1},#{pane_dead}}}}}", created, name)
+	cond := fmt.Sprintf("#{&&:#{==:#{session_created},%s},#{&&:#{==:#{session_name},%s},#{&&:#{==:#{session_attached},0},#{&&:#{==:#{session_windows},1},#{&&:#{==:#{window_panes},1},#{pane_dead}}}}}}", created, name)
 	return p.killSessionObject(name, objectID, created, cond, runtime.SessionObjectLive)
 }
 
 // KillZombieObject implements [runtime.SessionObjectKiller]: it kills
-// objectID only while that session was created at created, is named name and
-// has one window with one live pane whose pid is panePID, checked by tmux in
-// the same command as the kill.
+// objectID only while that session was created at created, is named name,
+// has no client attached and has one window with one live pane whose pid is
+// panePID, checked by tmux in the same command as the kill. The caller's
+// attach check is an earlier read: a human who attaches after it must still
+// keep the session (J17).
 func (p *Provider) KillZombieObject(name, objectID, created, panePID string) (runtime.SessionObjectKillResult, error) {
 	if err := validateSessionObject(name, objectID, created); err != nil {
 		return runtime.SessionObjectNotKilled, err
@@ -218,7 +220,7 @@ func (p *Provider) KillZombieObject(name, objectID, created, panePID string) (ru
 	if !decimalRe.MatchString(panePID) {
 		return runtime.SessionObjectNotKilled, fmt.Errorf("%w: pane pid %q must be decimal", runtime.ErrInvalidSessionObject, panePID)
 	}
-	cond := fmt.Sprintf("#{&&:#{==:#{session_created},%s},#{&&:#{==:#{session_name},%s},#{&&:#{==:#{session_windows},1},#{&&:#{==:#{window_panes},1},#{&&:#{!=:#{pane_dead},1},#{==:#{pane_pid},%s}}}}}}", created, name, panePID)
+	cond := fmt.Sprintf("#{&&:#{==:#{session_created},%s},#{&&:#{==:#{session_name},%s},#{&&:#{==:#{session_attached},0},#{&&:#{==:#{session_windows},1},#{&&:#{==:#{window_panes},1},#{&&:#{!=:#{pane_dead},1},#{==:#{pane_pid},%s}}}}}}}", created, name, panePID)
 	return p.killSessionObject(name, objectID, created, cond, runtime.SessionObjectChanged)
 }
 

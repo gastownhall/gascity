@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"maps"
+	"strings"
 	"testing"
 	"time"
 
@@ -280,6 +281,67 @@ func TestStartRecycleAccountsTheDeath(t *testing.T) {
 	if s := k.runKind(); s.Outcome != settledLanded || len(k.starts()) != 1 || k.meta("churn_count") != "0" || k.meta("state") != "awake" {
 		t.Fatalf("a productive death: settlement %+v starts %d churn %q state %q, want healed and restarted", s, len(k.starts()), k.meta("churn_count"), k.meta("state"))
 	}
+}
+
+// Kills a resume-failed reset the v2 paths that write a death's accrual drop
+// (mc-bm1af): A6's dead-runtime heal intent, a stranded seat's start that
+// carries its death alone into its PreWake, and the start recycle's death
+// step each record session.conversation_reset{reason:resume-failed} for a
+// committed manual conversation's third resume launch in a row to crash.
+// Until #7470, a manual row's heal resets its conversation before the
+// accrual, so the heal and recycle rows here are also named mode=always,
+// whose heal keeps it.
+func TestResumeFailedResetIsRecordedOnEveryDeathPath(t *testing.T) {
+	recent := gatherNow.Add(-10 * time.Second).Format(time.RFC3339)
+	run := []string{"provider", "claude", "session_key", "k-1", "started_config_hash", "h-1", "resume_launch", "true", "resume_failures", "2", "last_woke_at", recent}
+	named := append([]string{"manual_session", "true", "configured_named_session", "true", "configured_named_identity", "worker", "configured_named_mode", "always"}, run...)
+	resumeFailed := func(evs []events.Event) bool {
+		for _, e := range evs {
+			if e.Type == events.SessionConversationReset && strings.Contains(string(e.Payload), `"reason":"resume-failed"`) {
+				return true
+			}
+		}
+		return false
+	}
+
+	t.Run("A6's heal", func(t *testing.T) {
+		c := newHealCase(t, livenessGone, desireSleep, append([]string{"state", "awake"}, named...)...)
+		if it := c.decide(); it.Reason != decideDeadRuntimeHeal || it.Event == nil || !resumeFailed([]events.Event{*it.Event}) {
+			t.Fatalf("decideRow = (%q, %q) event %+v, want the heal recording the reset", it.Kind, it.Reason, it.Event)
+		}
+		if _, s := c.run(t, gone().tmux(), nil); s.Outcome != settledLanded || !resumeFailed(s.Facts.Events) {
+			t.Fatalf("settlement %+v, want the heal landed with its record", s)
+		}
+	})
+
+	t.Run("a stranded seat's start", func(t *testing.T) {
+		// A stranded seat is never configured-named, and records its death
+		// without the heal, so a plain manual row.
+		k, _ := launchKit(t, "active", append([]string{"session_origin", "manual"}, run...)...)
+		k.p.Clock.(*fakePlannerClock).auto = true // the stale-key wait
+		row := k.p.World.Census.Rows[k.it.Key]
+		r := &rowFacts{w: k.p.World, k: k.it.Key, row: row, found: true, entry: &selectionEntry{Key: k.it.Key, Liveness: livenessGone, Desired: desireWake, Template: "worker"}}
+		if !r.asleepStranded() {
+			t.Fatal("the seat is not stranded: the case is vacuous")
+		}
+		heal, class, _, ev := deadRuntimePatch(r, true)
+		it := r.startHealed(intent{Kind: intentRowHealFresh, Reason: decideDeadRuntimeHeal, Key: k.it.Key, Patch: heal, Class: class, Event: ev})
+		if it.Kind != intentStart || it.Heal == nil || it.Heal.Event == nil {
+			t.Fatalf("startHealed = %+v, want a start whose heal records the reset", it)
+		}
+		it.Deadline = k.it.Deadline
+		k.it = it
+		if s := k.runKind(); !resumeFailed(s.Facts.Events) {
+			t.Fatalf("settlement %+v, want the PreWake landed with the death's record", s)
+		}
+	})
+
+	t.Run("the start recycle", func(t *testing.T) {
+		k, _, _ := deadKit(t, false, "gc-1", "tok", "", append([]string{"state", "awake"}, named...)...)
+		if s := k.runKind(); !resumeFailed(s.Facts.Events) || k.meta("session_key") != "" {
+			t.Fatalf("settlement %+v key %q, want the death accrued with the reset recorded", s, k.meta("session_key"))
+		}
+	})
 }
 
 // Kills a parked row re-proposed every pass (its recycle peeks it again and

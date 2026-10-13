@@ -430,11 +430,11 @@ func choiceFlagSequences(choice OptionChoice) [][]string {
 // splitFlagArgs splits a FlagArgs slice into independent flag groups at
 // "--" prefix boundaries. For example:
 //
-//	["--ask-for-approval", "untrusted", "--sandbox", "read-only"]
+//	["--ask-for-approval", "on-request", "--sandbox", "read-only"]
 //
 // becomes:
 //
-//	[["--ask-for-approval", "untrusted"], ["--sandbox", "read-only"]]
+//	[["--ask-for-approval", "on-request"], ["--sandbox", "read-only"]]
 //
 // A single-flag sequence like ["--full-auto"] returns [["--full-auto"]].
 func splitFlagArgs(args []string) [][]string {

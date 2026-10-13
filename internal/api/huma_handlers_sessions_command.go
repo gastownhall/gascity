@@ -364,7 +364,7 @@ func (s *Server) humaCreateProviderSession(_ context.Context, store beads.Sessio
 			}
 		}
 		resp := sessionToResponse(info, s.state.Config())
-		resp.Kind = "provider"
+		asProviderSession(&resp)
 		s.emitSessionCreateSucceeded(reqID, resp)
 		s.persistSessionMeta(store, info.ID, body.ProjectID, optMeta)
 		titleProvider := s.resolveTitleProvider()

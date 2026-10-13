@@ -173,6 +173,37 @@ func TestClaimQueryFailureIsRetriedThenReportedNotDrained(t *testing.T) {
 	}
 }
 
+// The claim door keeps that contract for a read plain `gc hook` would report as
+// store-unavailable: exit 1, no drain, and no GC_HOOK_STORE_UNAVAILABLE token.
+// The token and exit 2 belong to the discovery door (reportWorkQueryFailure);
+// claimHookWorkWithRunner reports its own failed reads, and this row keeps a
+// refactor from routing them through the discovery reporter.
+func TestClaimQueryStoreUnavailableExitsOneWithoutTheToken(t *testing.T) {
+	withFastClaimRetries(t)
+	h := newFailureHookHarness()
+	readErr := errors.New("bd ready: dial tcp 127.0.0.1:3307: connect: connection refused")
+	if !workQueryStoreUnavailable(readErr) {
+		t.Fatalf("precondition: %q must classify as store-unavailable, or this row pins nothing", readErr)
+	}
+	h.script("/rig", hookRunnerAnswer{err: readErr})
+	stores := []hookStore{{dir: "/rig", env: []string{"BEADS_DIR=/rig"}}}
+
+	result, code, stderr := runFailureClaim(t, h, stores)
+
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1: the claim door never exits 2, even for an unreachable store", code)
+	}
+	if strings.Contains(stderr, hookStoreUnavailableToken) {
+		t.Fatalf("stderr = %q, want no %s token on the claim door", stderr, hookStoreUnavailableToken)
+	}
+	if result.Action != "" || h.drained {
+		t.Fatalf("result = %+v, drained = %v; want no drain result and no drain-ack for a failed read", result, h.drained)
+	}
+	if !strings.Contains(stderr, "connection refused") {
+		t.Fatalf("stderr = %q, want the underlying failure named", stderr)
+	}
+}
+
 // The retry earns its keep: a read that recovers mid-retry claims, so a
 // transient store fault costs seconds instead of a parked seat.
 func TestClaimQueryFailureRecoveredMidRetryClaims(t *testing.T) {

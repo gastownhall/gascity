@@ -65,10 +65,7 @@ listed.`,
   gc doctor --check controller,events-log --json`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if doDoctor(opts, stdout, stderr) != 0 {
-				return errExit
-			}
-			return nil
+			return exitForCode(doDoctor(opts, stdout, stderr))
 		},
 	}
 	cmd.Flags().BoolVar(&opts.Fix, "fix", false, "attempt automatic repairs and safe mechanical migrations")
@@ -711,10 +708,15 @@ func doDoctor(opts doctorOpts, stdout, stderr io.Writer) int {
 	}
 
 	if report.BlockingFailed > 0 {
-		return 1
+		return doctorBlockingFailureExitCode
 	}
 	return 0
 }
+
+// doctorBlockingFailureExitCode is the exit code gc doctor returns when any
+// blocking check fails. The --json failure record carries it as
+// error.exit_code, so the record and the process agree.
+const doctorBlockingFailureExitCode = 1
 
 // maxDoctorCheckSuggestions bounds the "did you mean" list so one typo cannot
 // print most of the registry inline. The full list still follows in text mode.
@@ -1072,7 +1074,7 @@ func writeDoctorJSON(w io.Writer, report *doctor.Report) error {
 				Error: jsonSchemaErrorDetail{
 					Code:     doctorBlockingFailedErrorCode,
 					Message:  fmt.Sprintf("%d blocking check(s) failed", report.BlockingFailed),
-					ExitCode: 1,
+					ExitCode: doctorBlockingFailureExitCode,
 				},
 			},
 			doctorJSONReport: out,

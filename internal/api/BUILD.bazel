@@ -437,6 +437,7 @@ go_test(
         "session_model_phase0_lifecycle_spec_test.go",
         "session_model_phase0_resolution_spec_test.go",
         "session_model_phase0_spec_test.go",
+        "session_provider_kind_test.go",
         "session_resolution_live_query_test.go",
         "session_resolution_path_alias_test.go",
         "session_resolution_precedence_test.go",

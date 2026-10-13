@@ -170,6 +170,8 @@ export const getV0CityByCityNameBeadById = <ThrowOnError extends boolean = false
 /**
  * Patch v0 city by city name bead by ID
  *
+ * Applies the update. When it changes the parent of a bead that is not being closed (moving it to a new parent or clearing its parent), the request waits up to 10 seconds until the parent-child listings reflect the change, so an immediate read of the old and new parents' children shows it (subject to those listings' usual status filters). A 409 (the bead was reparented or deleted concurrently), 503 (the request was canceled while waiting), or 504 (the move was not confirmed in time) can arrive after the update was applied: read the bead's current state before retrying.
+ *
  * Refused with 422, nothing written: a metadata key that is not a valid bead-metadata key, or a label that does not read back as itself from one CSV record (a comma, a quote, a newline or a carriage return); any change of whether the row is a startup-health episode (type startup-health-episode), which only the controller records; any change of whether the row is a session (its type, the gc:session label); and, on a session row, a key its disposition decodes (held_until, sleep_intent, wait_hold, quarantined_until, suspended_at, state, sleep_reason), which only the session verbs set. Each refusal names the offending field in errors[].
  */
 export const patchV0CityByCityNameBeadById = <ThrowOnError extends boolean = false>(options: Options<PatchV0CityByCityNameBeadByIdData, ThrowOnError>) => (options.client ?? client).patch<PatchV0CityByCityNameBeadByIdResponses, PatchV0CityByCityNameBeadByIdErrors, ThrowOnError>({
@@ -217,6 +219,8 @@ export const postV0CityByCityNameBeadByIdReopen = <ThrowOnError extends boolean 
 
 /**
  * Post v0 city by city name bead by ID update
+ *
+ * Applies the update. When it changes the parent of a bead that is not being closed (moving it to a new parent or clearing its parent), the request waits up to 10 seconds until the parent-child listings reflect the change, so an immediate read of the old and new parents' children shows it (subject to those listings' usual status filters). A 409 (the bead was reparented or deleted concurrently), 503 (the request was canceled while waiting), or 504 (the move was not confirmed in time) can arrive after the update was applied: read the bead's current state before retrying.
  *
  * Refused with 422, nothing written: a metadata key that is not a valid bead-metadata key, or a label that does not read back as itself from one CSV record (a comma, a quote, a newline or a carriage return); any change of whether the row is a startup-health episode (type startup-health-episode), which only the controller records; any change of whether the row is a session (its type, the gc:session label); and, on a session row, a key its disposition decodes (held_until, sleep_intent, wait_hold, quarantined_until, suspended_at, state, sleep_reason), which only the session verbs set. Each refusal names the offending field in errors[].
  */

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -185,7 +186,7 @@ func TestSessionFieldsFlowsWriteTheirKeys(t *testing.T) {
 			}
 			rec.keys = a7Rec.keys
 		}},
-		{"v2 A14 drift repair", "attached_config_drift_deferred_at attached_config_drift_deferred_key config_drift_deferred_at config_drift_deferred_key continuation_reset_pending last_woke_at live_hash pending_create_claim pending_create_started_at primed_at priming_attempted_at prompt_hash restart_requested session_key started_config_hash started_live_hash startup_dialog_verified state", []string{"internal/session/lifecycle_transition.go:ConfigDriftAsleepResetPatch", "cmd/gc/reconcile_arms_drift.go:rowFacts.driftRepair"}, func(t *testing.T, rec *sessionKeyRecorder) {
+		{"v2 A14 drift repair", "attached_config_drift_deferred_at attached_config_drift_deferred_key config_drift_deferred_at config_drift_deferred_key continuation_reset_pending last_woke_at live_hash pending_create_claim pending_create_started_at primed_at priming_attempted_at prompt_hash restart_requested resume_failures resume_launch session_key started_config_hash started_live_hash startup_dialog_verified state", []string{"internal/session/lifecycle_transition.go:ConfigDriftAsleepResetPatch", "cmd/gc/reconcile_arms_drift.go:rowFacts.driftRepair"}, func(t *testing.T, rec *sessionKeyRecorder) {
 			withoutA7(t)
 			named := []string{"configured_named_session", "true", "configured_named_identity", "worker", "configured_named_mode", "always"}
 			c, _ := baselineCase(t, livenessGone, desireKeep, nil, append([]string{
@@ -267,10 +268,10 @@ func TestSessionFieldsFlowsWriteTheirKeys(t *testing.T) {
 		{"operator set state", "state state_reason", []string{"internal/session/store.go:Store.SetState"}, func(t *testing.T, rec *sessionKeyRecorder) {
 			must(t, sessionFrontDoor(rec).SetState(id, session.StateAsleep, "test"))
 		}},
-		{"operator restart request (the legacy patch)", "continuation_reset_pending last_woke_at pending_create_claim pending_create_started_at primed_at priming_attempted_at prompt_hash reset_committed_at restart_requested session_key started_config_hash", []string{"internal/session/lifecycle_transition.go:RestartRequestPatch"}, func(t *testing.T, rec *sessionKeyRecorder) {
+		{"operator restart request (the legacy patch)", "continuation_reset_pending last_woke_at pending_create_claim pending_create_started_at primed_at priming_attempted_at prompt_hash reset_committed_at restart_requested resume_failures resume_launch session_key started_config_hash", []string{"internal/session/lifecycle_transition.go:RestartRequestPatch"}, func(t *testing.T, rec *sessionKeyRecorder) {
 			must(t, sessionFrontDoor(rec).ApplyPatch(id, session.RestartRequestPatch("key-3", now)))
 		}},
-		{"operator config-drift reset (the legacy patch)", "continuation_reset_pending last_woke_at live_hash pending_create_claim pending_create_started_at primed_at priming_attempted_at prompt_hash restart_requested session_key started_config_hash started_live_hash startup_dialog_verified state", []string{"internal/session/lifecycle_transition.go:ConfigDriftResetPatch"}, func(t *testing.T, rec *sessionKeyRecorder) {
+		{"operator config-drift reset (the legacy patch)", "continuation_reset_pending last_woke_at live_hash pending_create_claim pending_create_started_at primed_at priming_attempted_at prompt_hash restart_requested resume_failures resume_launch session_key started_config_hash started_live_hash startup_dialog_verified state", []string{"internal/session/lifecycle_transition.go:ConfigDriftResetPatch"}, func(t *testing.T, rec *sessionKeyRecorder) {
 			must(t, sessionFrontDoor(rec).ApplyPatch(id, session.ConfigDriftResetPatch(session.StateAsleep, "key-4", now)))
 		}},
 	}...)
@@ -362,7 +363,7 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 		"internal/session/lifecycle_transition.go:PreWakePatch": {
 			[]string{
 				"wake_request", "explicit", "wake_requested_at", ago(time.Minute), "detached_at", ago(time.Hour), "sleep_intent", "idle-stop-pending",
-				"started_config_hash", "v6:core", "started_live_hash", "v6:live", "live_hash", "v6:live",
+				"started_config_hash", "v6:core", "started_live_hash", "v6:live", "live_hash", "v6:live", "resume_failures", "2", "resume_launch", "true",
 			},
 			patchSite(func(session.Info) session.MetadataPatch { // a fresh wake, which clears the baseline too
 				return session.PreWakePatch(session.PreWakePatchInput{Generation: 4, InstanceToken: "tok-4", Now: now, FreshWake: true})
@@ -402,13 +403,13 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 			},
 		},
 		"internal/session/lifecycle_transition.go:ConfigDriftResetPatch": {
-			[]string{"restart_requested", "true"},
+			[]string{"restart_requested", "true", "resume_failures", "2", "resume_launch", "true"},
 			patchSite(func(session.Info) session.MetadataPatch {
 				return session.ConfigDriftResetPatch(session.StateAsleep, "key", now)
 			}),
 		},
 		"internal/session/lifecycle_transition.go:ConfigDriftAsleepResetPatch": {
-			[]string{"restart_requested", "true"},
+			[]string{"restart_requested", "true", "resume_failures", "2", "resume_launch", "true"},
 			patchSite(func(session.Info) session.MetadataPatch {
 				return session.ConfigDriftAsleepResetPatch("key")
 			}),
@@ -482,7 +483,7 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 			},
 		},
 		"internal/session/lifecycle_transition.go:RestartRequestPatch": {
-			[]string{"restart_requested", "true"},
+			[]string{"restart_requested", "true", "resume_failures", "2", "resume_launch", "true"},
 			patchSite(func(session.Info) session.MetadataPatch { return session.RestartRequestPatch("key", now) }),
 		},
 		"cmd/gc/reconcile_arms_heals.go:armClaimClear": {
@@ -511,7 +512,7 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 			[]string{"state", "active", "sleep_intent", "idle-stop-pending"},
 			func(t *testing.T, meta []string) map[string]string {
 				c := newHealCase(t, livenessGone, desireSleep, meta...)
-				patch, class, _ := deadRuntimePatch(&rowFacts{w: c.w, k: c.k, row: c.w.Census.Rows[c.k], entry: c.a.Snapshot.Entries[c.k]}, true)
+				patch, class, _, _ := deadRuntimePatch(&rowFacts{w: c.w, k: c.k, row: c.w.Census.Rows[c.k], entry: c.a.Snapshot.Entries[c.k]}, true)
 				if err := c.store.SetMetadataBatch(c.k.ID, class.Into(c.k.ID, maps.Clone(patch))); err != nil {
 					t.Fatal(err)
 				}
@@ -540,8 +541,25 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 			[]string{
 				"state", "active", "session_key", "k", "started_config_hash", "h",
 				session.PrimedAtMetadataKey, ago(time.Hour), session.PrimingAttemptedAtMetadataKey, ago(time.Hour), session.PromptHashMetadataKey, "p",
+				"resume_failures", "2", "resume_launch", "true",
 			},
 			patchSite(asleepHealPatch),
+		},
+		"internal/session/lifecycle_exits.go:ConversationResetPatch": {
+			[]string{"session_key", "k", "resume_failures", "2", "resume_launch", "true"},
+			patchSite(func(session.Info) session.MetadataPatch { return session.ConversationResetPatch(false) }),
+		},
+		"cmd/gc/session_lifecycle_parallel.go:clearStaleResumeKeyMetadata": {
+			[]string{"session_key", "k", "started_config_hash", "h", "resume_failures", "2", "resume_launch", "true"},
+			patchSite(func(session.Info) session.MetadataPatch {
+				return session.MetadataPatch(clearStaleResumeKeyMetadata("", nil))
+			}),
+		},
+		"cmd/gc/session_reconcile.go:healStatePatchWithRollbackInfo": {
+			[]string{"state", "active", "session_key", "k", "started_config_hash", "h", "resume_failures", "2", "resume_launch", "true"},
+			patchSite(func(info session.Info) session.MetadataPatch {
+				return session.MetadataPatch(healStatePatchWithRollbackInfo(info, false, true, &clock.Fake{Time: now}, 0, true))
+			}),
 		},
 		"cmd/gc/reconcile_session_decide.go:timerHealPatch": {
 			[]string{"state", "active", unknownStateFirstSeenKey, ago(time.Hour), unknownStateValueKey, "weird", unknownStateEscalatedKey, ago(time.Minute)},

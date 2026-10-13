@@ -373,7 +373,8 @@ func deadRuntimeHealAcrossTime(t *testing.T, held bool) {
 // stability clear may clear quarantined_until only on a row its deciding pass
 // read committed, its own runtime alive and 30s past its wake. A clear inside
 // the 30s, on a dead runtime or on an uncommitted row is reported, and so is,
-// on a stable row, a rewrite of the quarantine or a stop request.
+// on a stable row, a shortening of the quarantine or a stop request; an
+// extension is not (an accrual's, the #7706 review).
 func TestSimI15StabilityCarveOut(t *testing.T) {
 	quarantined := func(state string, woke time.Duration, meta ...string) beads.Bead {
 		return poolRow("gc-1", "worker", 1, state, append([]string{"instance_token", "tok-1", "last_woke_at", rowAt(woke), "quarantined_until", rowAt(time.Hour)}, meta...)...)
@@ -388,7 +389,7 @@ func TestSimI15StabilityCarveOut(t *testing.T) {
 		{"inside 30s", quarantined("active", -10*time.Second), false, clearQ},
 		{"dead runtime", quarantined("active", -time.Hour), true, clearQ},
 		{"uncommitted", quarantined("creating", -time.Hour), false, clearQ},
-		{"stable, the quarantine rewritten", quarantined("active", -time.Hour), false, session.MetadataPatch{"quarantined_until": rowAt(2 * time.Hour)}},
+		{"stable, the quarantine shortened", quarantined("active", -time.Hour), false, session.MetadataPatch{"quarantined_until": rowAt(30 * time.Minute)}},
 		{"stable, a stop request on a user-hold row", quarantined("active", -time.Hour, "sleep_intent", "user-hold"), false, session.MetadataPatch{"quarantined_until": "", session.DrainIntentReasonKey: "idle"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -435,9 +436,43 @@ func TestSimI15StabilityCarveOut(t *testing.T) {
 		}
 		s.noViolations(t)
 	}
+	// An accrual's or a rate-limit quarantine's extension of a live
+	// quarantine is no violation; a shortening is, as are an unsigned
+	// extension (no counter advanced, no quarantine reason set, last_woke_at
+	// kept: a quarantine reason the row already carries signs nothing) and
+	// one past the longest quarantine the controller writes (the #7726
+	// review).
+	b := quarantined("active", -time.Hour, "sleep_reason", "idle", "wake_attempts", "4")
+	short := quarantined("active", -time.Hour, "quarantined_until", rowAt(time.Minute), "sleep_reason", "idle", "wake_attempts", "4")
+	shortQ := quarantined("active", -time.Hour, "quarantined_until", rowAt(time.Minute), "sleep_reason", "rate_limit")
+	for _, c := range []struct {
+		name string
+		row  beads.Bead
+		to   time.Duration
+		meta []string
+		want string
+	}{
+		{"an accrual's extension", short, defaultQuarantineDuration, []string{"wake_attempts", "5", "sleep_reason", "quarantine"}, ""},
+		{"a churn accrual's extension", short, defaultQuarantineDuration, []string{"churn_count", "3"}, ""},
+		{"a rate-limit quarantine's extension", short, defaultRateLimitQuarantineDuration, []string{"sleep_reason", "rate_limit"}, ""},
+		{"an unsigned extension", short, defaultQuarantineDuration, nil, "quarantined_until"},
+		{"an unsigned re-extension of a quarantined row", shortQ, defaultQuarantineDuration, nil, "quarantined_until"},
+		{"a re-extension clearing last_woke_at", shortQ, defaultRateLimitQuarantineDuration, []string{"last_woke_at", ""}, ""},
+		{"a signed extension past the longest quarantine", b, 2 * time.Hour, []string{"wake_attempts", "5", "sleep_reason", "quarantine"}, "quarantined_until"},
+		{"a shortening", b, 30 * time.Minute, []string{"wake_attempts", "5", "sleep_reason", "quarantine"}, "quarantined_until"},
+	} {
+		a := maps.Clone(c.row.Metadata)
+		a["quarantined_until"] = rowAt(c.to)
+		for i := 0; i+1 < len(c.meta); i += 2 {
+			a[c.meta[i]] = c.meta[i+1]
+		}
+		if k := dormantChange(c.row, a, gatherNow, false); k != c.want {
+			t.Fatalf("%s: dormantChange = %q, want %q", c.name, k, c.want)
+		}
+	}
+	b = quarantined("active", -time.Hour, "sleep_reason", "quarantine")
 	// A quarantine's reason cleared while the quarantine stands is still
 	// the quarantine's to keep.
-	b := quarantined("active", -time.Hour, "sleep_reason", "quarantine")
 	a := maps.Clone(b.Metadata)
 	a["sleep_reason"] = ""
 	if k := dormantChange(b, a, plannerT0, true); k != "sleep_reason" {
@@ -1141,10 +1176,17 @@ func TestSimOperatorDrainSurvivesACanceledControllerRequest(t *testing.T) {
 
 // lostCommitRun drives seed's simulation to its first start and lands op on
 // the start's row after its launch Call (S2's lost commit): the outcome of
-// that start, and the runtime under its name once it settled.
-func lostCommitRun(t *testing.T, seed uint64, op func(s *sim, l *simLeg, b beads.Bead)) (s *sim, outcome string, up bool) {
+// that start, the runtime under its name once it settled, and whether op
+// fired at all (a start that ended before the seam never runs it).
+func lostCommitRun(t *testing.T, seed uint64, op func(s *sim, l *simLeg, b beads.Bead)) (s *sim, outcome string, up, fired bool) {
 	t.Helper()
-	s = newSim(t, seed, simOpts{})
+	return lostCommitRunWith(t, seed, simOpts{}, op)
+}
+
+// lostCommitRunWith is lostCommitRun over a sim with o's faults.
+func lostCommitRunWith(t *testing.T, seed uint64, o simOpts, op func(s *sim, l *simLeg, b beads.Bead)) (s *sim, outcome string, up, fired bool) {
+	t.Helper()
+	s = newSim(t, seed, o)
 	s.inventory()
 	for step := 0; step < 400 && len(s.failures) == 0; step++ {
 		idx := slices.IndexFunc(s.parked, func(e *simEffect) bool { return e.it.Kind == intentStart && !e.settled })
@@ -1160,6 +1202,7 @@ func lostCommitRun(t *testing.T, seed uint64, op func(s *sim, l *simLeg, b beads
 		fire := func() {
 			l := s.legOf(e.it.Key.Leg)
 			if b, err := l.backing.Get(e.it.Key.ID); err == nil {
+				fired = true
 				s.outside("lost commit of "+e.it.Key.ID, l, b, func(l *simLeg, b beads.Bead) { op(s, l, b) })
 			}
 		}
@@ -1176,9 +1219,9 @@ func lostCommitRun(t *testing.T, seed uint64, op func(s *sim, l *simLeg, b beads
 				break
 			}
 		}
-		return s, outcome, up
+		return s, outcome, up, fired
 	}
-	return s, "", false
+	return s, "", false, false
 }
 
 // Kills a lost commit left running (v5 S2; the #7650 review): an operator
@@ -1192,7 +1235,7 @@ func TestSimLostCommit(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			for seed := uint64(1); seed <= 32; seed++ {
-				s, outcome, up := lostCommitRun(t, seed, op)
+				s, outcome, up, _ := lostCommitRun(t, seed, op)
 				if !strings.Contains(outcome, "commit-lost") {
 					continue
 				}
@@ -1246,9 +1289,9 @@ func TestSimLostCommitSparesASecondControllersRuntime(t *testing.T) {
 		}
 	}
 	for seed := uint64(1); seed <= 32; seed++ {
-		s, outcome, up := lostCommitRun(t, seed, op)
-		if outcome == "" || strings.Contains(outcome, "outcome 1 ") {
-			continue // never reached, or committed ahead of the write
+		s, outcome, up, fired := lostCommitRun(t, seed, op)
+		if outcome == "" || !fired || strings.Contains(outcome, "outcome 1 ") {
+			continue // never reached, the op never fired (the start ended first), or committed ahead of the write
 		}
 		if !up {
 			t.Fatalf("seed %d: %q stopped the second controller's runtime", seed, outcome)
