@@ -115,7 +115,7 @@ func readStartFailure(ctx context.Context, c txCaps, f startFailure) startFailur
 		_ = c.episode.fail(f.episode, f.err, c.start.clock.Now())
 	default:
 		r.keeps = wakeFailureKeepsConversation(f.row, launchTranscriptRoots(f.cfg, f.launch))
-		r.resume = startResumeFailure(f.resumed, f.died, f.err, pane)
+		r.resume = startResumeFailure(f.resumed, f.died, f.row.SessionKey, f.err, pane)
 	}
 	return r
 }

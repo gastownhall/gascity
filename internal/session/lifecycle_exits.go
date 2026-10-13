@@ -211,6 +211,7 @@ func ConversationResetPatch(clearStartedConfigHash bool) MetadataPatch {
 		"session_key":                "",
 		"continuation_reset_pending": "true",
 	}
+	ClearResumeRun(patch) // a new conversation's run starts anew (mc-bm1af)
 	if clearStartedConfigHash {
 		patch["started_config_hash"] = ""
 		// Priming markers share started_config_hash's lifetime (S19 Stage 2): a

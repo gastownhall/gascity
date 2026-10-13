@@ -112,6 +112,7 @@ func TestResumeBackstopOnAFailedStart(t *testing.T) {
 		count    string // resume_failures after it
 	}{
 		{"a refusal, the first failure", true, refusal, "", true, ""},
+		{"another key's refusal in the history, a startup death", true, fmt.Errorf("%w; last pane output: > it said No conversation found with session ID: k-0\nkilled: out of memory", runtime.ErrSessionDiedDuringStartup), "", false, "1"},
 		{"a startup death, the first", true, died, "", false, "1"},
 		{"a startup death, the second", true, died, "1", false, "2"},
 		{"a startup death, the third", true, died, "2", true, ""},
@@ -128,7 +129,7 @@ func TestResumeBackstopOnAFailedStart(t *testing.T) {
 				meta = append(meta, "session_origin", "manual")
 			}
 			row := poolRow("gc-1", "worker", 1, "creating", meta...)
-			rf := startResumeFailure(c.resumed, false, c.err, "")
+			rf := startResumeFailure(c.resumed, false, "k-1", c.err, "")
 
 			rec := events.NewFake()
 			m := beads.NewMemStoreFrom(0, []beads.Bead{withMeta(row)}, nil)
@@ -160,6 +161,57 @@ func TestResumeBackstopOnAFailedStart(t *testing.T) {
 	}
 }
 
+// Kills a resume backstop run a conversation reset leaves behind (#7729
+// review): after `gc session reset` (RestartRequestPatch) or any other reset
+// (the wake-failure and churn resets, the stale-key clear, the fresh-wake
+// reset, legacy's dead-runtime heal) with the count at 2, the new
+// conversation's first resume death counts 1 and resets nothing, in both
+// modes.
+func TestConversationResetsEndTheResumeRun(t *testing.T) {
+	prev := staleResumeKeyProbe
+	staleResumeKeyProbe = func([]string, string, string, string) (bool, bool) { return true, true }
+	t.Cleanup(func() { staleResumeKeyProbe = prev })
+	run := map[string]string{"resume_failures": "2", "resume_launch": "true", "session_key": "k-old", "started_config_hash": "h-old"}
+	stale := session.MetadataPatch(clearStaleResumeKeyMetadata("", nil))
+	healInfo := session.Info{ID: "gc-1", MetadataState: "awake", SessionKey: "k-old", StartedConfigHash: "h-old", CreatedAt: gatherNow.Add(-time.Hour)}
+	freshWake := session.MetadataPatch{}
+	for _, k := range session.FreshWakeConversationResetKeys() {
+		freshWake[k] = ""
+	}
+	for name, reset := range map[string]session.MetadataPatch{
+		"gc session reset":           session.RestartRequestPatch("", gatherNow),
+		"a wake failure's reset":     session.ConversationResetPatch(true),
+		"a churn reset":              session.ConversationResetPatch(false),
+		"the stale-key clear":        stale,
+		"the fresh-wake reset":       freshWake,
+		"legacy's dead-runtime heal": legacyHeal(healInfo),
+	} {
+		meta := reset.Apply(run)
+		if meta["resume_failures"] != "" || meta["resume_launch"] != "" {
+			t.Fatalf("%s: run %q/%q left behind", name, meta["resume_failures"], meta["resume_launch"])
+		}
+		// The new conversation: committed, then its first resume dies while
+		// creating (the heal's asleep state is the old incarnation's).
+		meta["session_key"], meta["started_config_hash"] = "k-new", "h-new"
+		delete(meta, "state")
+		row := poolRow("gc-1", "worker", 1, "creating", append([]string{"generation", "4", "instance_token", "tok-4", "provider", "claude", "work_dir", "/work", "wake_attempts", "0"}, flatten(meta)...)...)
+		rf := startResumeFailure(true, true, "k-new", errors.New("boom"), "")
+
+		m := beads.NewMemStoreFrom(0, []beads.Bead{withMeta(row)}, nil)
+		recordWakeFailure(sessionInfoFromBead(row), sessionTranscriptSearchPaths(nil), sessionFrontDoor(m), &clock.Fake{Time: gatherNow}, "worker", rf, nil)
+		legacy, _ := m.Get(row.ID)
+		if legacy.Metadata["session_key"] != "k-new" || legacy.Metadata["resume_failures"] != "1" {
+			t.Fatalf("%s: legacy key %q resume_failures %q, want the new conversation kept and counted 1", name, legacy.Metadata["session_key"], legacy.Metadata["resume_failures"])
+		}
+		k := startKit(t, intentStart, "creating")
+		read := startFailureRead{startFailure: startFailure{cause: causeStartError, err: errors.New("boom"), display: "worker", relaunched: true}, keeps: true, resume: rf}
+		step := abandonStep(abandonView(k, row, txRuntime{Class: rtAbsent}, read))
+		if hasAny(step.Write, "session_key") || step.Write["resume_failures"] != "1" {
+			t.Fatalf("%s: v2 write %v, want the new conversation kept and counted 1", name, step.Write)
+		}
+	}
+}
+
 // Kills the failure Call blind to the dead pane: v2 classifies a refusal on
 // the peeked screen as well as in the error, and a launch's resume flag
 // rides from its prepare into the failure.
@@ -172,13 +224,13 @@ func TestFailureCallClassifiesTheResume(t *testing.T) {
 	if !f.resumed || !f.died {
 		t.Fatalf("failure %+v, want a resume launch that died", f)
 	}
-	if rf := startResumeFailure(f.resumed, f.died, f.err, "No conversation found with session ID: k-1"); !rf.refused || !rf.counted {
+	if rf := startResumeFailure(f.resumed, f.died, "k-1", f.err, "No conversation found with session ID: k-1"); !rf.refused || !rf.counted {
 		t.Fatalf("a refusal on the pane: %+v, want refused and counted", rf)
 	}
-	if rf := startResumeFailure(f.resumed, f.died, f.err, ""); rf.refused || !rf.counted {
+	if rf := startResumeFailure(f.resumed, f.died, "k-1", f.err, ""); rf.refused || !rf.counted {
 		t.Fatalf("a death with a blank pane: %+v, want counted alone", rf)
 	}
-	refused := failStart(v, out, causeStartError, fmt.Errorf("%w; last pane output: No conversation found", runtime.ErrSessionDiedDuringStartup)).Pass.(startEnd).failed
+	refused := failStart(v, out, causeStartError, fmt.Errorf("%w; last pane output: No conversation found with session ID: k-1", runtime.ErrSessionDiedDuringStartup)).Pass.(startEnd).failed
 	if r := readStartFailure(context.Background(), txCaps{}, *refused); !r.resume.refused || !r.resume.counted {
 		t.Fatalf("the failure Call's read %+v, want the refusal classified", r.resume)
 	}

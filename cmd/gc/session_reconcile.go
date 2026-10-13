@@ -736,15 +736,15 @@ type resumeFailure struct {
 }
 
 // startResumeFailure classifies a start that did not commit: resumed, its
-// launch was a resume; died, its provider process died during startup; err,
-// its error, which a startup death's last pane output rides in; pane, the
-// dead pane's screen when one was read.
-func startResumeFailure(resumed, died bool, err error, pane string) resumeFailure {
+// launch was a resume of sessionKey; died, its provider process died during
+// startup; err, its error, which a startup death's last pane output rides
+// in; pane, the dead pane's screen when one was read.
+func startResumeFailure(resumed, died bool, sessionKey string, err error, pane string) resumeFailure {
 	if !resumed || err == nil || runtime.IsProviderCapacity(err) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, runtime.ErrSessionExists) {
 		return resumeFailure{}
 	}
 	return resumeFailure{
-		refused: runtime.ProviderResumeRefusalReason(err.Error()) != "" || runtime.ProviderResumeRefusalReason(pane) != "",
+		refused: runtime.ProviderResumeRefusalReason(err.Error(), sessionKey) != "" || runtime.ProviderResumeRefusalReason(pane, sessionKey) != "",
 		counted: died || errors.Is(err, runtime.ErrSessionDiedDuringStartup),
 	}
 }
@@ -1153,6 +1153,7 @@ func healStatePatchWithRollbackInfo(info sessionpkg.Info, alive bool, observed b
 				batch[sessionpkg.PrimedAtMetadataKey] = ""
 				batch[sessionpkg.PrimingAttemptedAtMetadataKey] = ""
 				batch[sessionpkg.PromptHashMetadataKey] = ""
+				sessionpkg.ClearResumeRun(batch) // the next conversation's run starts anew (mc-bm1af)
 			}
 		}
 	}

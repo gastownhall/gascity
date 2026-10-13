@@ -2801,6 +2801,7 @@ func clearStaleResumeKeyMetadata(handle string, sessFront *sessionpkg.Store) map
 		sessionpkg.PrimingAttemptedAtMetadataKey: "",
 		sessionpkg.PromptHashMetadataKey:         "",
 	}
+	sessionpkg.ClearResumeRun(patch) // the fresh conversation's run starts anew (mc-bm1af)
 	if sessFront != nil && strings.TrimSpace(handle) != "" {
 		_ = sessFront.ApplyPatch(handle, patch)
 	}
@@ -3360,7 +3361,7 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 	// not carry it. Terminal failure arm; discard the fold (never assign back into
 	// infoByID — this is the async start goroutine). The persist lands via
 	// recordWakeFailure's ApplyPatchInfo/SetMarker writes.
-	rf := startResumeFailure(result.prepared.resumed, result.diedDuringStartup, result.err, "")
+	rf := startResumeFailure(result.prepared.resumed, result.diedDuringStartup, result.prepared.candidate.info.SessionKey, result.err, "")
 	_ = recordWakeFailure(result.prepared.candidate.info, result.prepared.transcriptRoots, sessFront, clk, tp.DisplayName(), rf, rec)
 	if trace != nil {
 		trace.RecordOperation(TraceSiteLifecycleStartFailed, TraceReasonStart, result.outcome, "", tp.TemplateName, name, 0, traceRecordPayload{

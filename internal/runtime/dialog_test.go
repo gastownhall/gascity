@@ -1708,22 +1708,28 @@ func TestContainsProviderRateLimitScreen(t *testing.T) {
 	}
 }
 
-// Kills a resume-refusal classifier that misses claude's refusal, in an
-// error's last pane output or a dead pane's screen, or that fires on other
-// startup deaths (mc-bm1af).
+// Kills a resume-refusal classifier that misses claude's refusal of the
+// resumed key, in an error's last pane output or a dead pane's screen, or
+// that fires on anything else: the picker's "No conversations found", the
+// refusal of another key, the phrase split from the key, the phrase in the
+// conversation's history, other startup deaths, and no key (mc-bm1af).
 func TestProviderResumeRefusalReason(t *testing.T) {
+	const key = "0f9c2a1e-77aa-4b1d-9e0f-1a2b3c4d5e6f"
 	for _, c := range []struct {
-		content, want string
+		name, content, key, want string
 	}{
-		{"session \"s\" died during startup; last pane output: No conversation found with session ID: 0f9c", "conversation_not_found"},
-		{"No conversation found with session ID: abc\n", "conversation_not_found"},
-		{"no conversation found", "conversation_not_found"},
-		{"Error: model not found", ""},
-		{"session died during startup", ""},
-		{"", ""},
+		{"the refusal in the last pane output", "session \"s\" died during startup; last pane output:\nNo conversation found with session ID: " + key, key, "conversation_not_found"},
+		{"the refusal, any case", "no conversation found with session id: " + strings.ToUpper(key) + "\n", key, "conversation_not_found"},
+		{"the picker", "No conversations found", key, ""},
+		{"the picker beside the key", "No conversations found matching " + key, key, ""},
+		{"another key's refusal", "No conversation found with session ID: 11111111-2222-3333-4444-555555555555", key, ""},
+		{"the phrase and the key on different lines", "No conversation found with session ID:\n" + key, key, ""},
+		{"the phrase in history", "> why does it say No conversation found?\nkilled: out of memory", key, ""},
+		{"another death", "Error: model not found", key, ""},
+		{"no key", "No conversation found with session ID: " + key, "", ""},
 	} {
-		if got := ProviderResumeRefusalReason(c.content); got != c.want {
-			t.Errorf("ProviderResumeRefusalReason(%q) = %q, want %q", c.content, got, c.want)
+		if got := ProviderResumeRefusalReason(c.content, c.key); got != c.want {
+			t.Errorf("%s: ProviderResumeRefusalReason = %q, want %q", c.name, got, c.want)
 		}
 	}
 }

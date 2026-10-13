@@ -2571,6 +2571,8 @@ func TestHealStatePatchProjectsRuntimeLiveness(t *testing.T) {
 				sessionpkg.PrimedAtMetadataKey:           "",
 				sessionpkg.PrimingAttemptedAtMetadataKey: "",
 				sessionpkg.PromptHashMetadataKey:         "",
+				"resume_failures":                        "",
+				"resume_launch":                          "",
 			},
 		},
 		{
@@ -2657,6 +2659,8 @@ func TestHealStatePatchProjectsRuntimeLiveness(t *testing.T) {
 				sessionpkg.PrimedAtMetadataKey:           "",
 				sessionpkg.PrimingAttemptedAtMetadataKey: "",
 				sessionpkg.PromptHashMetadataKey:         "",
+				"resume_failures":                        "",
+				"resume_launch":                          "",
 			},
 		},
 	}
