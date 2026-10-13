@@ -183,6 +183,8 @@ func (sc *sessionConn) readLoop(r io.Reader) {
 // agent exits, exec.Cmd.Wait closes the stdout read end, and a Read that is
 // in flight (or starts) after that fails with os.ErrClosed instead of
 // returning EOF. Either way the connection closed, so both map to nil.
+// isPipeWriteError is the write-side twin for stdin; it also accepts EPIPE,
+// which only a write returns.
 func readLoopCause(err error) error {
 	if errors.Is(err, os.ErrClosed) || errors.Is(err, io.ErrClosedPipe) {
 		return nil
