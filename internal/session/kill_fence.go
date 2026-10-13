@@ -276,7 +276,7 @@ func (m *Manager) KillFencedReport(ctx context.Context, by Actor, id string, kil
 	if err := m.checkActor(by); err != nil {
 		return report, err
 	}
-	b, sessName, err := m.sessionBead(id)
+	_, sessName, err := m.sessionBead(id)
 	if err != nil {
 		return report, err
 	}
@@ -299,10 +299,11 @@ func (m *Manager) KillFencedReport(ctx context.Context, by Actor, id string, kil
 	}
 	// Decided under the lease: a start that finished while the kill waited
 	// for it has left a live runtime, which takes the fenced path.
-	if b, _, err = m.sessionBead(id); err != nil {
+	b, _, err := m.sessionBead(id)
+	if err != nil {
 		return report, err
 	}
-	report.RuntimeWasGone = !killRuntimeLive(State(b.Metadata["state"])) && m.runtimeConfirmedGone(ctx, sessName)
+	report.RuntimeWasGone = m.killRuntimeGone(ctx, b, sessName)
 	if report.RuntimeWasGone {
 		killErr := kill(ctx, by)
 		if killErr == nil || NamedSessionIdentityInfo(m.infoFromBead(b)) != "" {
@@ -367,21 +368,42 @@ const killLivenessTimeout = 5 * time.Second
 // The read is the routed leaf's (runtime.ResolveBackend), as v2's runtime
 // read takes it: a composite (auto, hybrid) routes by name, and hybrid
 // deliberately offers no fresh read of its own (its read is its leaves'
-// cached one), so asking it would fall back to the cache.
+// cached one), so asking it would fall back to the cache. The route comes
+// from the bead (loadSessionBead registers an ACP session's route), so call
+// this after reading the row. A route that is only a guess confirms nothing,
+// and the composite's own read must agree with the leaf's: auto falls through
+// to its other backend, which can hold a runtime the route table missed.
 func (m *Manager) runtimeConfirmedGone(ctx context.Context, name string) bool {
-	return RuntimeConfirmedGone(ctx, m.sp, name)
-}
-
-// RuntimeConfirmedGone is Manager.runtimeConfirmedGone over sp: a fresh,
-// bounded liveness read of name's routed leaf that completes and finds no
-// live pane.
-func RuntimeConfirmedGone(ctx context.Context, sp runtime.Provider, name string) bool {
-	if sp == nil || strings.TrimSpace(name) == "" {
+	if m.sp == nil || strings.TrimSpace(name) == "" {
 		return false
 	}
-	leaf, _, _ := runtime.ResolveBackend(sp, name)
-	live, status, err := runtime.ObserveLivenessBoundedSince(ctx, leaf, name, nil, time.Now(), killLivenessTimeout)
-	return status == runtime.ObservationComplete && err == nil && !live.Running
+	leaf, _, known := runtime.ResolveBackend(m.sp, name)
+	if !known || leaf == nil {
+		return false
+	}
+	gone := func(sp runtime.Provider) bool {
+		live, status, err := runtime.ObserveLivenessBoundedSince(ctx, sp, name, nil, time.Now(), killLivenessTimeout)
+		return status == runtime.ObservationComplete && err == nil && !live.Running
+	}
+	return gone(leaf) && (leaf == m.sp || gone(m.sp))
+}
+
+// killRuntimeGone is KillFencedReport's "runtime already gone" verdict on row
+// b: the row does not read live and a fresh read finds no runtime.
+func (m *Manager) killRuntimeGone(ctx context.Context, b beads.Bead, sessName string) bool {
+	return !killRuntimeLive(State(b.Metadata["state"])) && m.runtimeConfirmedGone(ctx, sessName)
+}
+
+// KillRuntimeGone takes KillFencedReport's "runtime already gone" verdict
+// now, without the lease, reading the runtime routed from the bead as the
+// kill does. `gc session kill` uses it before the lease only to gate its
+// live-subagent refusal; the kill decides again under the lease.
+func (m *Manager) KillRuntimeGone(ctx context.Context, id string) (bool, error) {
+	b, sessName, err := m.loadSessionBead(id, true)
+	if err != nil {
+		return false, err
+	}
+	return m.killRuntimeGone(ctx, b, sessName), nil
 }
 
 // killRuntimeLive reports the states Manager.Kill treats as holding a live

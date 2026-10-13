@@ -201,6 +201,16 @@ func (h *SessionHandle) KillFenced(ctx context.Context, by sessionpkg.Actor, war
 	return report, err
 }
 
+// KillRuntimeGone reports KillFenced's "runtime already gone" verdict taken
+// now, without the lease (session.Manager.KillRuntimeGone).
+func (h *SessionHandle) KillRuntimeGone(ctx context.Context) (bool, error) {
+	id := h.currentSessionID()
+	if id == "" {
+		return false, nil
+	}
+	return h.manager.KillRuntimeGone(ctx, id)
+}
+
 // Close permanently ends the worker session.
 func (h *SessionHandle) Close(ctx context.Context, by sessionpkg.Actor) (err error) {
 	_, err = h.CloseDetailed(ctx, by)

@@ -2,7 +2,10 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"maps"
+	"strings"
 	"testing"
 	"time"
 
@@ -10,24 +13,32 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 // staleKillProvider is the fixture provider with an IsRunning that answers
 // cached (tmux's state cache, up to 2s old) and a fresh liveness read that
-// sees the runtime as it is, failing with readErr when set. stop, when set,
-// runs in place of the inner Stop; atStop runs first.
+// sees the runtime as it is, failing with readErr when set; afterRead runs
+// after the nth fresh read (from 1). stop, when set, runs in place of the
+// inner Stop; atStop runs first.
 type staleKillProvider struct {
 	runtime.Provider
-	cached  bool
-	readErr error
-	stop    func(name string) error
-	atStop  func()
+	cached    bool
+	readErr   error
+	reads     int
+	afterRead func(n int)
+	stop      func(name string) error
+	atStop    func()
 }
 
 func (p *staleKillProvider) IsRunning(string) bool { return p.cached }
 
 func (p *staleKillProvider) ObserveLivenessSince(name string, _ []string, _ time.Time) (runtime.Liveness, error) {
 	running := p.Provider.IsRunning(name)
+	p.reads++
+	if p.afterRead != nil {
+		defer p.afterRead(p.reads)
+	}
 	return runtime.Liveness{Running: running, Alive: running}, p.readErr
 }
 
@@ -138,5 +149,123 @@ func TestCmdSessionKill_StopErrorOverUnreadableRuntimeFails(t *testing.T) {
 	}
 	if got := mustGetBead(t, store, bead.ID).Metadata["state_reason"]; got == sessionpkg.KillPendingReason {
 		t.Errorf("state_reason = %q, want the fence rolled back after a failed kill", got)
+	}
+}
+
+// unfencedHandle is a worker handle without KillFenced.
+type unfencedHandle struct{ worker.Handle }
+
+// A handle that cannot fence the kill fails it: exit 1, and the runtime is
+// not stopped unfenced.
+func TestCmdSessionKill_HandleThatCannotFenceDoesNotStop(t *testing.T) {
+	const sessionName = "s-gc-kill-unfenced-handle"
+	store, bead, _ := newKillPokeSession(t, sessionName)
+	stubKillPoke(t)
+	stopped := false
+	p := &staleKillProvider{cached: true}
+	p.atStop = func() { stopped = true }
+	fake := installStaleKillProvider(t, p)
+	old := sessionKillHandle
+	sessionKillHandle = func(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, id string) (worker.Handle, error) {
+		h, err := old(cityPath, store, sp, cfg, id)
+		return unfencedHandle{h}, err
+	}
+	t.Cleanup(func() { sessionKillHandle = old })
+	before := mustGetBead(t, store, bead.ID)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionKill([]string{killPokeSessionIdentity}, &stdout, &stderr); code != 1 {
+		t.Fatalf("cmdSessionKill = %d, want 1; stderr=%s", code, stderr.String())
+	}
+	if stopped || !fake.IsRunning(sessionName) {
+		t.Error("the runtime was stopped by a handle that cannot fence the kill")
+	}
+	if after := mustGetBead(t, store, bead.ID); !maps.Equal(after.Metadata, before.Metadata) {
+		t.Errorf("row = %v, want it untouched (was %v)", after.Metadata, before.Metadata)
+	}
+}
+
+// A closed row has no lifecycle left to sync: killing a closed named
+// session whose runtime is gone (the "already inactive" exit) writes nothing
+// onto the closed bead.
+func TestCmdSessionKill_ClosedRowIsNotSyncedAsleep(t *testing.T) {
+	const sessionName = "s-gc-kill-closed"
+	store, bead, _ := newKillPokeSession(t, sessionName)
+	stubKillPoke(t)
+	p := &staleKillProvider{cached: true}
+	fake := installStaleKillProvider(t, p)
+	_ = fake.Stop(sessionName)
+	setKillFixtureMetadata(t, store, bead.ID, map[string]string{"state": "asleep", "wake_request": "explicit"})
+	if err := store.Close(bead.ID); err != nil {
+		t.Fatalf("closing the session bead: %v", err)
+	}
+	before := mustGetBead(t, store, bead.ID)
+
+	var stdout, stderr bytes.Buffer
+	code := cmdSessionKill([]string{bead.ID}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdSessionKill = %d, want 0 (already inactive); stderr=%s", code, stderr.String())
+	}
+	after := mustGetBead(t, store, bead.ID)
+	for k := range sessionpkg.KillSleepPatch(before.ID, before.Metadata, time.Now().UTC()) {
+		if after.Metadata[k] != before.Metadata[k] {
+			t.Errorf("closed row %s = %q, want %q: the asleep/killed sync wrote onto a closed bead", k, after.Metadata[k], before.Metadata[k])
+		}
+	}
+}
+
+// "Already inactive" is the verdict the kill reached under the lease, not
+// the one read before it (#7709). Each case moves the runtime between the
+// two reads and fails the stop.
+func TestCmdSessionKill_AlreadyInactiveIsTheUnderLeaseVerdict(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		startUp  bool // the runtime comes up after the pre-lease read; else it exits
+		wantCode int
+	}{
+		// Read gone, then a start lands: the kill is fenced, its stop fails,
+		// and the live runtime is not reported "already inactive".
+		{"start lands while the kill waits", true, 1},
+		// Read live, then the runtime exits: the stop of a runtime already
+		// gone is the "already inactive" exit of a named session.
+		{"runtime exits while the kill waits", false, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const sessionName = "s-gc-kill-verdict"
+			store, bead, _ := newKillPokeSession(t, sessionName)
+			stubKillPoke(t)
+			setKillFixtureMetadata(t, store, bead.ID, map[string]string{"state": "asleep"})
+			p := &staleKillProvider{cached: !tc.startUp}
+			fake := installStaleKillProvider(t, p)
+			if tc.startUp {
+				_ = fake.Stop(sessionName)
+			}
+			p.afterRead = func(n int) {
+				if n != 1 {
+					return
+				}
+				if tc.startUp {
+					if err := fake.Start(context.Background(), sessionName, runtime.Config{Command: "claude"}); err != nil {
+						t.Errorf("starting the runtime: %v", err)
+					}
+					return
+				}
+				_ = fake.Stop(sessionName)
+			}
+			p.stop = func(string) error { return errors.New("tmux: kill-session failed") }
+
+			var stdout, stderr bytes.Buffer
+			code := cmdSessionKill([]string{killPokeSessionIdentity}, &stdout, &stderr)
+			if p.reads < 2 {
+				t.Fatalf("premise: %d fresh reads, want the pre-lease one and the one under the lease", p.reads)
+			}
+			if code != tc.wantCode {
+				t.Errorf("cmdSessionKill = %d, want %d; stderr=%s", code, tc.wantCode, stderr.String())
+			}
+			inactive := strings.Contains(stderr.String(), "was already inactive")
+			if inactive != (tc.wantCode == 0) {
+				t.Errorf("stderr reports already inactive = %v, want %v; stderr=%s", inactive, tc.wantCode == 0, stderr.String())
+			}
+		})
 	}
 }

@@ -2450,19 +2450,29 @@ func cmdSessionKillWithForce(args []string, stdout, stderr io.Writer, asJSON, fo
 	// runtime treated as active, proceed to handle.Kill) that beadErr != nil used.
 	info, infoErr := sessionFrontDoor(sessStore).Get(sessionID)
 	identity := ""
-	// runtimeAlreadyInactive here, before the lease, gates only the
-	// live-subagent refusal; the kill decides it again on a fresh read under
-	// the lease (KillFencedReport), and that decision is the one acted on.
-	runtimeAlreadyInactive := false
 	if infoErr == nil {
 		identity = namedSessionIdentityInfo(info)
-		runtimeAlreadyInactive = sessionKillRuntimeAlreadyInactive(info, sp)
 	}
 
-	handle, err := workerHandleForSessionWithConfig(cityPath, sessStore, sp, cfg, sessionID)
+	handle, err := sessionKillHandle(cityPath, sessStore, sp, cfg, sessionID)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session kill: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+	// An open row is killed under the kill fence (KillFenced below). A handle
+	// that cannot fence the kill fails it rather than stopping unfenced.
+	fenced, canFence := handle.(worker.FencedKillHandle)
+	if infoErr == nil && !info.Closed && !canFence {
+		fmt.Fprintf(stderr, "gc session kill: session %s: handle %T cannot fence the kill\n", sessionID, handle) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	// runtimeAlreadyInactive here, before the lease, gates only the
+	// live-subagent refusal; the kill decides it again on a fresh read under
+	// the lease (KillFencedReport), and that decision is the one acted on.
+	// Both read the runtime the bead routes to.
+	runtimeAlreadyInactive := false
+	if infoErr == nil && canFence {
+		runtimeAlreadyInactive, _ = fenced.KillRuntimeGone(context.Background())
 	}
 	if !force && !runtimeAlreadyInactive && refuseKillForLiveSubagents("gc session kill", workerHandleForSessionTargetWithConfig, cityPath, sessStore, sp, cfg, sessionID, stderr) {
 		return 1
@@ -2504,15 +2514,10 @@ func cmdSessionKillWithForce(args []string, stdout, stderr io.Writer, asJSON, fo
 	// fence before the stop and lifts it after (or rolls it back when the
 	// runtime survived). A fence that cannot be written does not hold the
 	// kill hostage to the store: it falls back to the stop and the post-kill
-	// sync. Its warnings are this command's. A handle that cannot fence the
-	// kill fails it rather than stopping unfenced.
+	// sync. Its warnings are this command's. A closed row has no fence and no
+	// lifecycle to sync: the kill only stops whatever runtime it left behind.
 	var killErr error
 	if infoErr == nil && !info.Closed {
-		fenced, ok := handle.(worker.FencedKillHandle)
-		if !ok {
-			fmt.Fprintf(stderr, "gc session kill: session %s: handle %T cannot fence the kill\n", sessionID, handle) //nolint:errcheck // best-effort stderr
-			return 1
-		}
 		warn := func(msg string) { fmt.Fprintf(stderr, "gc session kill: warning: %s\n", msg) } //nolint:errcheck // best-effort stderr
 		report, err := fenced.KillFenced(killCtx, killBy, warn)
 		killErr, runtimeAlreadyInactive = err, report.RuntimeWasGone
@@ -2537,22 +2542,6 @@ func cmdSessionKillWithForce(args []string, stdout, stderr io.Writer, asJSON, fo
 	}
 	if killErr != nil {
 		fmt.Fprintf(stderr, "gc session kill: warning: session %s runtime was already inactive; cleared named-session circuit breaker\n", sessionID) //nolint:errcheck // best-effort stderr
-	}
-
-	// The bead must end up asleep so a later `gc session wake` / reconcile
-	// starts a fresh runtime instead of short-circuiting on the stale live state
-	// the kill leaves behind (#3629). KillFencedReport did it for an open row;
-	// a closed row still gets the post-kill sync here. Written at this layer
-	// rather than in Manager.Kill so the drain-ack async-stop path
-	// (verifiedStop -> handle.Kill -> Manager.Kill) keeps owning its own
-	// lifecycle state.
-	if infoErr == nil && info.Closed {
-		now := time.Now().UTC()
-		if err := session.ApplyKillFencePatch(sessStore, sessionID, func(b beads.Bead) (map[string]string, bool) {
-			return session.KillSleepPatch(b.ID, b.Metadata, now), true
-		}); err != nil {
-			fmt.Fprintf(stderr, "gc session kill: warning: syncing session %s to asleep: %v\n", sessionID, err) //nolint:errcheck // best-effort stderr
-		}
 	}
 
 	// Poke the controller after the asleep sync so the reconciler observes the
@@ -2633,20 +2622,9 @@ func killRuntimeLease(ctx context.Context, front *session.Store, req session.Run
 	return lease, overridden, err
 }
 
-// sessionKillRuntimeGone reports whether the provider positively observes no
-// runtime under the session's name. A row without a session name observes
-// nothing and is never reported gone.
-func sessionKillRuntimeGone(info session.Info, sp runtime.Provider) bool {
-	return session.RuntimeConfirmedGone(context.Background(), sp, info.SessionNameMetadata)
-}
-
-func sessionKillRuntimeAlreadyInactive(info session.Info, sp runtime.Provider) bool {
-	switch session.State(strings.TrimSpace(info.MetadataState)) {
-	case session.StateActive, session.StateStartPending, session.StateCreating, session.StateDraining, session.StateAwake:
-		return false
-	}
-	return sessionKillRuntimeGone(info, sp)
-}
+// sessionKillHandle builds the worker handle `gc session kill` stops through.
+// A var so a test can hand the command a handle that cannot fence the kill.
+var sessionKillHandle = workerHandleForSessionWithConfig
 
 // newSessionNudgeCmd creates the "gc session nudge <id-or-alias> <message>" command.
 func newSessionNudgeCmd(stdout, stderr io.Writer) *cobra.Command {

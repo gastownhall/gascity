@@ -56,6 +56,9 @@ type LifecycleHandle interface {
 // row to fence.
 type FencedKillHandle interface {
 	KillFenced(context.Context, sessionpkg.Actor, func(string)) (sessionpkg.KillReport, error)
+	// KillRuntimeGone is KillFenced's "runtime already gone" verdict taken
+	// without the lease (session.Manager.KillRuntimeGone).
+	KillRuntimeGone(context.Context) (bool, error)
 }
 
 // MessagingHandle exposes live input delivery operations.
