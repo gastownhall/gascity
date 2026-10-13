@@ -331,6 +331,37 @@ func TestApplySleepKeepsALateQuarantinesReason(t *testing.T) {
 	}
 }
 
+// TestApplySleepQuarantineBoundary (mc-slkxd's q4): a quarantine ending at
+// the finalize's slept_at is over, so the finalize's reason wins; one second
+// later it is in force and keeps its reason. A patch with no slept_at is
+// judged now, never at zero time (which would keep an expired quarantine's
+// reason).
+func TestApplySleepQuarantineBoundary(t *testing.T) {
+	now := time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
+	for _, c := range []struct {
+		name  string
+		until time.Time
+		patch MetadataPatch
+		want  string
+	}{
+		{"until == slept_at", now, SleepPatch(now, "idle"), "idle"},
+		{"until one second after slept_at", now.Add(time.Second), SleepPatch(now, "idle"), "quarantine"},
+		{"no slept_at, an expired quarantine", time.Now().Add(-time.Hour), MetadataPatch{"state": string(StateAsleep), "sleep_reason": "idle"}, "idle"},
+	} {
+		store := beads.NewMemStore()
+		b := wakeRow(t, store)
+		if err := store.SetMetadataBatch(b.ID, map[string]string{"sleep_reason": "quarantine", "quarantined_until": c.until.UTC().Format(time.RFC3339)}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := NewStore(beads.SessionStore{Store: store}).ApplySleep(b.ID, c.patch); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := store.Get(b.ID); got.Metadata["sleep_reason"] != c.want {
+			t.Errorf("%s: sleep_reason %q, want %q", c.name, got.Metadata["sleep_reason"], c.want)
+		}
+	}
+}
+
 // TestKeepQuarantineReason pins the helper's cases.
 func TestKeepQuarantineReason(t *testing.T) {
 	now := time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)

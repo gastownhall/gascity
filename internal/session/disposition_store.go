@@ -177,10 +177,13 @@ func (s *Store) ApplyLifecycle(id string, patch MetadataPatch) (MetadataPatch, e
 // attempt lost.
 func (s *Store) ApplySleep(id string, patch MetadataPatch) (MetadataPatch, error) {
 	life := LifecycleOnly(patch)
-	// The finalize's own time (its slept_at) judges a late quarantine on the
-	// fresh row, whose reason it keeps (mc-slkxd); the Sleep cell reads no
-	// clock.
-	at, _ := time.Parse(time.RFC3339, strings.TrimSpace(life["slept_at"]))
+	// The finalize's own time (its slept_at, else now) judges a late
+	// quarantine on the fresh row, whose reason it keeps (mc-slkxd); the
+	// Sleep cell reads no clock.
+	at, err := time.Parse(time.RFC3339, strings.TrimSpace(life["slept_at"]))
+	if err != nil { // a caller's patch with no slept_at is judged now, never at zero time
+		at = time.Now()
+	}
 	w, err := s.ApplyDispositionFresh(id, ActorController, DispEvent{Kind: EvSleep}, func(from, _ Disposition, info Info) MetadataPatch {
 		return KeepQuarantineReason(maps.Clone(life), from, info.SleepReason, at)
 	}, time.Time{})
