@@ -26,26 +26,42 @@ func shardScriptTests(t *testing.T, script, name string) []string {
 	return tests
 }
 
+// integrationSmokeTestArgs returns the "-test.run=..." value of
+// test/integration:integration_smoke_test's args attribute.
+func integrationSmokeTestArgs(t *testing.T, root string) string {
+	t.Helper()
+	build := readFile(t, root, "test/integration/BUILD.bazel")
+	m := regexp.MustCompile(`(?s)name = "integration_smoke_test",\n\s*args = \["-test\.run=(.*?)"\],`).FindStringSubmatch(build)
+	if m == nil {
+		t.Fatalf("test/integration/BUILD.bazel integration_smoke_test has no args = [\"-test.run=...\"]")
+	}
+	return m[1]
+}
+
 // TestIntegrationSmokeLaneMatchesShardScript: bazel.yml's gating
-// integration-smoke lane (.bazelrc test:integration-smoke over
-// //test/integration:integration_test) runs exactly the tests
-// scripts/test-integration-shard names as its bdstore and rest-smoke shards
-// (bdstore_tests, rest_smoke_tests), so a test added to or dropped from
-// either list cannot silently leave the gating set.
+// integration-smoke lane (test/integration/BUILD.bazel
+// integration_smoke_test, a go_variant_test over integration_test whose
+// args filters) runs exactly the tests scripts/test-integration-shard names
+// as its bdstore and rest-smoke shards (bdstore_tests, rest_smoke_tests), so
+// a test added to or dropped from either list cannot silently leave the
+// gating set.
 func TestIntegrationSmokeLaneMatchesShardScript(t *testing.T) {
 	root := repoRoot(t)
 	script := readFile(t, root, "scripts/test-integration-shard")
 	tests := append(shardScriptTests(t, script, "bdstore_tests"), shardScriptTests(t, script, "rest_smoke_tests")...)
-	want := "^(" + strings.Join(tests, "|") + ")$"
-	if got := bazelRCFlagValue(readFile(t, root, ".bazelrc"), "test:integration-smoke --test_filter"); got != want {
-		t.Errorf(".bazelrc test:integration-smoke --test_filter\n  %s\nwant (from scripts/test-integration-shard)\n  %s", got, want)
+	// $$-escaped in the BUILD file (go_variant_test's args is a plain
+	// Starlark string, not a %-format, but this repo writes its go_variant_test
+	// end anchors as $$ for consistency with the generated ones elsewhere).
+	want := "^(" + strings.Join(tests, "|") + ")$$"
+	if got := integrationSmokeTestArgs(t, root); got != want {
+		t.Errorf("test/integration/BUILD.bazel integration_smoke_test args\n  %s\nwant (from scripts/test-integration-shard)\n  %s", got, want)
 	}
-	if got, want := multiLaneCommands["integration-smoke"], "test --config=ci --config=integration-smoke --keep_going //test/integration:integration_test"; got != want {
+	if got, want := multiLaneCommands["integration-smoke"], "test --config=ci --config=integration --keep_going //test/integration:integration_smoke_test"; got != want {
 		t.Errorf("integration-smoke lane command %q, want %q", got, want)
 	}
 	for _, name := range tests {
 		if !regexp.MustCompile(`^Test\w+$`).MatchString(name) {
-			t.Errorf("shard test name %q is not a plain top-level test name (it goes into a --test_filter regexp)", name)
+			t.Errorf("shard test name %q is not a plain top-level test name (it goes into a -test.run regexp)", name)
 		}
 	}
 }

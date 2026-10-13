@@ -422,7 +422,7 @@ func TestSetupBazelRCCarriesOnlyTransport(t *testing.T) {
 // bazelSuiteConfigs select a tagged suite, keyed apart on purpose (--define,
 // --test_timeout); pre-push never runs them (bazel_multilane_test.go).
 // integration-packages is integration plus --jobs, a transport flag.
-var bazelSuiteConfigs = map[string]bool{"acceptance": true, "integration": true, "integration-packages": true, "integration-smoke": true}
+var bazelSuiteConfigs = map[string]bool{"acceptance": true, "integration": true, "integration-packages": true}
 
 // TestBazelMultiLaneLanesHashLikePrePush: bazel.yml's unit lane runs what
 // pre-push runs (`bazel test //...`) with only non-key configs and flags, so
