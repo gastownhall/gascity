@@ -1478,6 +1478,15 @@ type BeadsConfig struct {
 	// GC_BEADS_FORCE_FALLBACK remains a deprecated process-wide alias for
 	// "off" that overrides every city's value for one release.
 	NativeTransport string `toml:"native_transport,omitempty" jsonschema:"default=auto,enum=auto,enum=off"`
+	// LedgerFeed selects whether the controller tails each bead scope's
+	// durable mutation journal to bring writes made outside gc (agents running
+	// bd, humans) into its caches within about a second instead of at the
+	// next re-scan: "off" (default) or "auto" (tail the scopes whose native or
+	// proxied store has the journal active; gc never turns the journal on).
+	// Scopes that cannot be tailed stay on the re-scan, and gc doctor reports
+	// which. Any other value fails config load. A reload that changes it
+	// rebuilds the controller's stores.
+	LedgerFeed string `toml:"ledger_feed,omitempty" jsonschema:"default=off,enum=off,enum=auto"`
 	// Policies defines per-bead-use storage and garbage-collection defaults.
 	// Policy names are interpreted by higher-level systems; unknown names are
 	// preserved so packs can stage future policy classes without breaking load.
@@ -1536,6 +1545,26 @@ func (b BeadsConfig) NormalizedGuardedRelease() string {
 		return "off"
 	}
 	return b.GuardedRelease
+}
+
+// The beads.ledger_feed values.
+const (
+	// BeadsLedgerFeedOff keeps every scope on the controller's re-scan.
+	BeadsLedgerFeedOff = "off"
+	// BeadsLedgerFeedAuto tails every scope whose journal is active.
+	BeadsLedgerFeedAuto = "auto"
+)
+
+// NormalizedLedgerFeed returns the configured ledger-feed value, trimmed and
+// lowercased, with the empty string mapped to the default "off". An unknown
+// value passes through and is rejected on load by validateLedgerFeed; every
+// consumer compares this, never the raw field.
+func (b BeadsConfig) NormalizedLedgerFeed() string {
+	raw := strings.ToLower(strings.TrimSpace(b.LedgerFeed))
+	if raw == "" {
+		return BeadsLedgerFeedOff
+	}
+	return raw
 }
 
 // NormalizedNativeTransport returns the configured native-transport value,
@@ -4970,7 +4999,7 @@ func Parse(data []byte) (*City, error) {
 }
 
 // validateBeadsModes rejects an out-of-enum value in any [beads] mode field
-// (conditional_writes, guarded_release, native_transport). Parse runs it on
+// (conditional_writes, guarded_release, native_transport, ledger_feed). Parse runs it on
 // its single layer and LoadWithIncludesOptions runs it again on the composed
 // root, because a fragment may supply any of these fields; one shared list
 // keeps the two load paths from drifting when a field is added.
@@ -4981,7 +5010,10 @@ func validateBeadsModes(b BeadsConfig) error {
 	if err := validateGuardedRelease(b.GuardedRelease); err != nil {
 		return err
 	}
-	return validateNativeTransport(b.NativeTransport)
+	if err := validateNativeTransport(b.NativeTransport); err != nil {
+		return err
+	}
+	return validateLedgerFeed(b.LedgerFeed)
 }
 
 // validateConditionalWrites rejects an out-of-enum beads.conditional_writes
@@ -5036,6 +5068,21 @@ func validateNativeTransport(raw string) error {
 	mode, err := gate.ParseMode(raw)
 	if err != nil || mode == gate.Require {
 		return fmt.Errorf("beads.native_transport: invalid mode %q: want one of off, auto", raw)
+	}
+	return nil
+}
+
+// validateLedgerFeed rejects an out-of-enum beads.ledger_feed value at load
+// time, as validateNativeTransport does for its two-valued switch: a typo
+// must not silently pick a mode, and gate.ParseMode's "require" does not
+// belong to this field. The empty string (unset) is valid and means off.
+func validateLedgerFeed(raw string) error {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	mode, err := gate.ParseMode(raw)
+	if err != nil || mode == gate.Require {
+		return fmt.Errorf("beads.ledger_feed: invalid mode %q: want one of off, auto", raw)
 	}
 	return nil
 }
