@@ -1012,7 +1012,7 @@ func doSlingBatchWithJSON(opts slingOpts, deps slingDeps, querier BeadChildQueri
 		// so printing it verbatim duplicates every child line. Summarize
 		// instead when we have per-child detail.
 		if len(result.Children) > 0 {
-			fmt.Fprintf(stderr, "%d/%d children failed\n", result.Failed, result.Failed+result.Routed+result.IdempotentCt) //nolint:errcheck
+			fmt.Fprintf(stderr, "%d/%d children failed\n", result.Failed, result.Failed+result.Routed+result.IdempotentCt+result.NotOpenCt) //nolint:errcheck
 		} else {
 			fmt.Fprintln(stderr, err) //nolint:errcheck
 		}

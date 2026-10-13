@@ -249,6 +249,13 @@ const (
 	// Emitted by the session reconciler's start-result commit path; the
 	// envelope's Subject carries the session name.
 	SessionColdStartTimeout = "session.cold_start_timeout"
+	// SessionConversationReset fires when the reconciler resets a committed
+	// manual conversation, so that its next start is a fresh conversation
+	// rather than a resume. The payload's reason names the cause: stale-key,
+	// the keyed transcript a resume needs is gone. Emitted once per reset by
+	// the start path (legacy prepare, v2 PreWake); the envelope's Subject is
+	// the agent and SessionID the session bead.
+	SessionConversationReset = "session.conversation_reset"
 	// SessionPending fires when a session gains a pending interaction (an
 	// approval prompt or question the session is blocked on) and
 	// SessionPendingCleared fires when that interaction goes away — answered,
@@ -518,6 +525,7 @@ var KnownEventTypes = []string{
 	SessionDrainFenceUnavailable,
 	SessionDemandClaimDivergence,
 	SessionColdStartTimeout,
+	SessionConversationReset,
 	SessionPending, SessionPendingCleared,
 	BeadCreated, BeadClosed, BeadDeleted, BeadUpdated,
 	BeadWorktreeReaped, BeadWorktreeReapSkipped,

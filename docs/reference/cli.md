@@ -1141,6 +1141,15 @@ Scan open convoys and auto-close any where all child issues are resolved.
 Evaluates each open convoy's children. If all children have status
 "closed", the convoy is automatically closed and an event is recorded.
 
+The check skips a suspended rig's store, naming the rig on stderr, and
+checks its convoys once the rig resumes. A store it cannot open or list,
+or a convoy it cannot read or close, is named on stderr and the check
+goes on with the rest, then exits 1. The exception is a city whose
+convoys moved to a class binding: if the binding cannot be read, the
+check closes nothing and exits 1. A convoy that changed or disappeared
+after the check listed it is left for the next run and does not fail
+the check.
+
 ```
 gc convoy check [flags]
 ```
@@ -1913,6 +1922,7 @@ gc github pr backfill [monitor-name] [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--all` | bool |  | include clean and pending-only PRs |
+| `--author` | stringArray |  | restrict to PRs by this GitHub author login (repeatable); fail-closed and unions with each monitor's configured authors |
 | `--create-repair-beads` | bool |  | create deduped repair beads for actionable PRs |
 | `--json` | bool |  | emit JSON |
 | `--timeout` | duration | `45s` | GitHub query timeout |
@@ -3495,7 +3505,8 @@ class it reads the one store, unchanged.
 The flags mirror the "bd ready" contract the default work_query builds:
   gc ready --metadata-field "gc.routed_to=$target" --unassigned \
            --exclude-type=epic --exclude-label "hold:mayor" \
-           --sort oldest --limit 20 --json
+           --exclude-label "hold:external" --exclude-label "human" \
+           --json --limit=20
 
 Rows are emitted in canonical ready order (priority, created_at, id) unless
 --sort selects a created_at order, and --limit is applied last, so a bounded
@@ -3795,7 +3806,9 @@ will no longer track the managed city Dolt.
 
 This command owns the rig's canonical .beads/config.yaml topology state. It
 refuses a rig whose store the beads provider owns: that rig's endpoint lives in
-bd's own files and is bd's to change.
+bd's own files and is bd's to change. It also refuses a rig whose
+.beads/metadata.json records embedded Dolt storage: that rig serves its own
+store and has no server endpoint.
 
 ```
 gc rig set-endpoint <rig> [flags]
@@ -3864,8 +3877,10 @@ These commands read and write session metadata to coordinate lifecycle
 events (drain, restart) between agents and the controller. They are
 designed to be called from within running agent sessions, not by humans.
 
-The exception is "gc runtime check", which validates a Runtime Provider
-Protocol executable — run by humans and runtime-pack CIs.
+The exceptions are "gc runtime check" and "gc runtime conformance", which
+validate a Runtime Provider Protocol executable — run by humans and
+runtime-pack CIs — and "gc runtime workdir-export", which runtime packs call
+to list the work-dir entries they may copy off the orchestrator host.
 
 ```
 gc runtime
@@ -3881,6 +3896,7 @@ gc runtime
 | [gc runtime heartbeat](#gc-runtime-heartbeat) | Extend idle-timeout window during a long operation |
 | [gc runtime request-restart](#gc-runtime-request-restart) | Request controller restart this session (returns immediately) |
 | [gc runtime undrain](#gc-runtime-undrain) | Cancel drain on a session |
+| [gc runtime workdir-export](#gc-runtime-workdir-export) | List the work-dir entries a runtime may copy off the orchestrator host |
 
 ## gc runtime check
 
@@ -3949,7 +3965,9 @@ Signal a session to drain — wind down its current work gracefully.
 Sets a GC_DRAIN metadata flag on the session. The agent should check
 for drain status periodically (via "gc runtime drain-check") and finish
 its current task before exiting. Pass a session alias or ID. Use
-"gc runtime undrain" to cancel.
+"gc runtime undrain" to cancel. Under session_reconciler = "v2" it also
+marks the session row, so the agent's drain-ack stops the session even on a
+min_active_sessions floor.
 
 ```
 gc runtime drain <name> [flags]
@@ -4055,7 +4073,8 @@ Cancel a pending drain signal on a session.
 
 Clears the GC_DRAIN and GC_DRAIN_ACK metadata flags, allowing the
 session to continue normal operation. Pass a session alias or ID. Under
-session_reconciler = "v2" it also clears the session row's drain-ack.
+session_reconciler = "v2" it also clears the session row's drain-ack and
+its operator drain mark.
 
 ```
 gc runtime undrain <name> [flags]
@@ -4064,6 +4083,57 @@ gc runtime undrain <name> [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | Output as JSON |
+
+## gc runtime workdir-export
+
+List the entries of a session work dir that a runtime may copy into another
+filesystem (a remote sandbox, a container image).
+
+Orchestrator-local state named by the work_dir_exclude start-config field
+(secrets, the event log, the nudge queue, ledger stores, sockets, other
+sessions' worktrees) is left out; an excluded directory is pruned with
+everything below it. Paths are relative to &lt;work_dir&gt; and slash-separated,
+in depth-first walk order with each directory's entries sorted by name.
+
+Every surviving file and symlink is listed, plus every surviving directory
+that is empty on disk. A non-empty directory is never listed, so a consumer
+that recurses into listed entries still copies nothing excluded. Symlinks
+are listed, never followed; copy them as links.
+
+Scripts must use --null, which terminates entries with NUL. The default
+newline-terminated output is for humans only: no byte filter makes it safe
+for a consumer that splits on blanks or quotes, such as xargs. As a backstop
+it fails, printing nothing, when an entry contains a newline, a carriage
+return, or a backslash (GNU tar -T reads "\057" as "/"), or starts with "-".
+Run the gc that produced the start config (its env.GC_BIN) and check its
+exit status, for example:
+
+  set -o pipefail
+  "$GC_BIN" runtime workdir-export --null "$WORK_DIR" |
+    tar -C "$WORK_DIR" --null --no-recursion -T - -czf -
+
+GNU tar reads a --null list verbatim only from 1.30; bsdtar always does.
+Older GNU tar unquotes backslash escapes even with --null, so a crafted
+file name can make it archive .gc/controller.token or a file above the
+work dir. Where GNU tar may predate 1.30, use the form below: 1.29 reads
+the list verbatim with it, and older releases reject its options, which
+fails the pipeline. bsdtar rejects those options, so keep the form above
+there.
+
+  set -o pipefail
+  "$GC_BIN" runtime workdir-export --null "$WORK_DIR" |
+    tar -C "$WORK_DIR" --null --verbatim-files-from --no-unquote \
+      --no-recursion -T - -czf -
+
+The protocol contract is docs/reference/exec-session-provider.md.
+
+```
+gc runtime workdir-export <work_dir> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `-0`, `--null` | bool |  | terminate entries with NUL instead of newline (required for scripts) |
 
 ## gc service
 

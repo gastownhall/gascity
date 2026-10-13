@@ -39,12 +39,14 @@ import (
 // every seam checks the transaction's lock scope.
 
 const (
-	simPatrol  = 10 * time.Second
-	simSteps   = 500
-	simCISeeds = 64
-	simGuard   = 10 * time.Second // real time: turns a hang into a failure
-	simCityLeg = "city"
-	simRigLeg  = "rig-a"
+	simPatrol = 10 * time.Second
+	simSteps  = 500
+	// simMaxPacedRounds bounds I10's paced re-issues at quiescence (v5.9n).
+	simMaxPacedRounds = 8
+	simCISeeds        = 64
+	simGuard          = 10 * time.Second // real time: turns a hang into a failure
+	simCityLeg        = "city"
+	simRigLeg         = "rig-a"
 )
 
 // simStaleEvents lets a step deliver an event older than its row's backing:
@@ -233,10 +235,16 @@ func (p *simProvider) IsAttached(name string) bool {
 	return p.rts[name] != nil && p.rts[name].attached
 }
 
-// IsAttachedWithError is IsAttached, error-free: the fence's L3 probe reads
-// it, never the embedded Fake's own attach map.
-func (p *simProvider) IsAttachedWithError(name string) (bool, error) { //nolint:unparam // runtime.AttachmentObserverWithError's signature
-	return p.IsAttached(name), nil
+// IsAttachedWithError is the attach fact a fence's L3 reads, the
+// simulator's own rather than runtime.Fake's; a runtime whose probes err
+// cannot answer it.
+func (p *simProvider) IsAttachedWithError(name string) (bool, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if rt := p.rts[name]; rt != nil && rt.probeErr {
+		return false, fmt.Errorf("sim: attach probe of %s: %w", name, runtime.ErrRuntimeUnavailable)
+	}
+	return p.rts[name] != nil && p.rts[name].attached, nil
 }
 
 // Start creates a runtime carrying cfg's identity env, unless a scripted
@@ -252,6 +260,9 @@ func (p *simProvider) Start(_ context.Context, name string, cfg runtime.Config) 
 	}
 	if s.Created = err == nil; s.Created {
 		p.put(name, s.ID, cfg.Env["GC_RUNTIME_EPOCH"], s.Token)
+		if _, tracked := p.Activity[name]; tracked {
+			p.SetActivity(name, p.now()) // a new session's activity is its creation, as tmux's window_activity
+		}
 	}
 	p.starts = append(p.starts, s)
 	return err
@@ -354,18 +365,38 @@ type sim struct {
 	parked   []*simEffect
 	lastSeq  uint64
 	prev     map[string]beads.Bead // "leg/id" → row, after the last step
+	// respawnBegun are the (row, bead) pairs with an idle-respawn begin
+	// (I25).
+	respawnBegun map[string]bool
 	// killsChecked is how many of the provider's kills I4 and I5 judged.
 	killsChecked int
-	writes       []simWrite
-	admitted     []time.Time // admitted starts (I9)
+	// closedInStep is, by session name, each row an outside writer closed
+	// since the last v2 audit, as it stood before the close (I4, v5.9n).
+	closedInStep map[string]beads.Bead
+	// preOutside is the store an outside write found, while it runs, by
+	// which closedInStep holds a row as its close found it.
+	preOutside map[string]beads.Bead
+	// basisMoves are the outside writes that moved a row's drain basis, as
+	// "leg/id", in order (I16, v5.9n); writes is cleared every step.
+	basisMoves []string
+	// round is the effects quiescence's current round released, with
+	// their settlements (I10's paced retries, v5.9n).
+	round    []simResult
+	writes   []simWrite
+	admitted []time.Time // admitted starts (I9)
 	// stable is, by row ID, whether the pass that last admitted an effect
 	// for the row read it committed, its own runtime alive, and 30s past its
 	// wake: I15's view of A6's stability clear.
-	stable   map[string]bool
-	failures []string
-	locks    *lockObserver // the sections holding each row's mutation lock
-	runMu    sync.Mutex
-	running  map[effectKey]*simEffect // released, by key, for their seams
+	stable map[string]bool
+	// preWakeQuarantine is each row's quarantined_until at v2's last PreWake
+	// of it; quarantinedCommits the rows whose commit kept a quarantine that
+	// landed after it (§12.2 #57), by the time the commit landed.
+	preWakeQuarantine  map[string]string
+	quarantinedCommits map[string]time.Time
+	failures           []string
+	locks              *lockObserver // the sections holding each row's mutation lock
+	runMu              sync.Mutex
+	running            map[effectKey]*simEffect // released, by key, for their seams
 }
 
 // simOpts scripts a run: rows replaces the seeded rows, and the other fields
@@ -569,7 +600,7 @@ func (s *sim) atSeam(_ context.Context, at txSeam, it intent, _, _ int) error {
 	if k := it.Key; k.ID != "" {
 		needs := effectSpecs[it.Kind].needs // a kind's per-intent needs only add to these
 		row := s.prev[s.legOf(k.Leg).name+"/"+k.ID]
-		switch named := nameHeld(s.t, s.env.CityPath, strings.TrimSpace(row.Metadata["session_name"])); {
+		switch named := nameHeld(s.t, s.env.CityPath, strings.TrimSpace(sessionInfoFromBead(row).SessionName)); {
 		case s.locks.holds(k.ID) != (at != seamBeforeCall && at != seamAfterCall):
 			s.failf("LOCK tx-scope", "%s effect on %s at seam %d: row mutation lock held %t", it.Kind, k.ID, at, s.locks.holds(k.ID))
 		case (needs.locksName(effectSpecs[it.Kind]) || at == seamBeforeCall || at == seamAfterCall) && !named:
@@ -608,6 +639,9 @@ func (s *sim) pass() {
 		}
 		if it.Kind == intentDrainBegin || it.Kind == intentDrainBeginFresh {
 			simDrainBegins.Add(1)
+		}
+		if it.Kind == intentSignalAck && it.Reason == decideFloorAckCancel {
+			simFloorCancels.Add(1)
 		}
 		if census != nil {
 			info := census.Rows[it.Key].Info
@@ -654,6 +688,7 @@ func (s *sim) release(i int) {
 		s.t.Fatalf("seed %d: effect %s %v never returned", s.seed, e.it.Kind, e.it.Key)
 	}
 	s.logf("effect %s %s: outcome %d %s (late %t)", e.it.Kind, e.it.Key.ID, res.Outcome, res.Cause, e.settled)
+	s.round = append(s.round, simResult{it: e.it, res: res})
 	if res.Outcome == settledNoop && res.Cause == causeNotIdle {
 		s.notIdle = append(s.notIdle, intentKeys([]intent{e.it})...)
 	}
@@ -668,16 +703,26 @@ func (s *sim) release(i int) {
 }
 
 // releaseInside releases parked effect i with an outside writer, picked at
-// random, run on its row at a random seam inside its section.
+// random, run on its row at a random seam inside its section; for a start,
+// also after its launch Call, between the Start and the commit (S2's lost
+// commit).
 func (s *sim) releaseInside(i int) {
 	e := s.parked[i]
-	e.seam = []txSeam{seamAfterRowRead, seamBeforeCAS}[s.rng.IntN(2)]
+	seams := []txSeam{seamAfterRowRead, seamBeforeCAS}
+	if e.it.Kind == intentStart {
+		seams = append(seams, seamAfterCall)
+	}
+	e.seam = seams[s.rng.IntN(len(seams))]
 	op := externalOps[s.rng.IntN(len(externalOps))]
-	e.outside = func() {
+	fire := func() {
 		l := s.legOf(e.it.Key.Leg)
 		if b, err := l.backing.Get(e.it.Key.ID); err == nil {
 			s.outside(op.name+" inside "+e.it.Kind, l, b, func(l *simLeg, b beads.Bead) { op.fn(s, l, b) })
 		}
+	}
+	e.outside = fire
+	if e.seam == seamAfterCall { // the next Call's seam (the admit ticket's, or a recycle's kill) comes first: re-arm for the one after it
+		e.outside = func() { e.seam, e.outside = seamAfterCall, fire }
 	}
 	s.release(i)
 }
@@ -755,6 +800,8 @@ func (s *sim) external(name string, fn func(l *simLeg, b beads.Bead)) {
 
 // outside runs fn on row b of leg l as an outside writer, and audits it.
 func (s *sim) outside(name string, l *simLeg, b beads.Bead, fn func(l *simLeg, b beads.Bead)) {
+	s.preOutside = s.snapshot() // the store as the outside write found it (v5.9n amended)
+	defer func() { s.preOutside = nil }()
 	s.sp.external = true // no effect calls the provider while it runs
 	fn(l, b)
 	s.sp.external = false
@@ -791,7 +838,7 @@ var externalOps = []struct {
 		s.setMeta(l, b.ID, "quarantined_until", s.rel(time.Duration(1+s.rng.IntN(120))*time.Second), "sleep_reason", "quarantine")
 	}},
 	{"kill", func(s *sim, l *simLeg, b beads.Bead) { // gc session kill: the fence, then the stop
-		if _, err := writeSessionKillFence(l.backing, b.ID, s.clk.Now()); err != nil && !errors.Is(err, errSessionKillFenceSuperseded) {
+		if _, err := session.WriteKillFence(l.backing, b.ID, s.clk.Now()); err != nil && !errors.Is(err, session.ErrKillFenceSuperseded) {
 			s.t.Fatal(err)
 		}
 		_ = s.sp.Stop(b.Metadata["session_name"])
@@ -811,7 +858,7 @@ var externalOps = []struct {
 		}
 	}},
 	{"close", func(_ *sim, l *simLeg, b beads.Bead) { _ = l.backing.Close(b.ID) }},
-	{"suspend", func(s *sim, l *simLeg, b beads.Bead) { // gc session suspend: the stop, then the state
+	{"suspend", func(s *sim, l *simLeg, b beads.Bead) { // the stop and rig-restart sweeps' soft suspend (v5.9u): the stop, then the state
 		_ = s.sp.Stop(b.Metadata["session_name"])
 		s.setMeta(l, b.ID, "state", string(session.StateSuspended), "suspended_at", s.rel(0), "slept_at", "", "sleep_reason", "")
 	}},
@@ -898,6 +945,7 @@ func (s *sim) stale(l *simLeg, ev json.RawMessage) bool {
 
 // step runs one step the RNG picks, then audits it.
 func (s *sim) step() {
+	s.beginStep()
 	switch r := s.rng.IntN(100); {
 	case r < 22:
 		s.pass()
@@ -931,6 +979,10 @@ func (s *sim) step() {
 	s.audit("v2")
 }
 
+// beginStep starts a step: an outside close of an earlier step excuses no
+// kill in this one (I4's rowNamed, v5.9n).
+func (s *sim) beginStep() { clear(s.closedInStep) }
+
 // audit attributes every row change since the last step to actor, queues an
 // outside writer's events, and checks the invariants.
 func (s *sim) audit(actor string) {
@@ -944,6 +996,23 @@ func (s *sim) audit(actor string) {
 		s.writes = append(s.writes, simWrite{Leg: leg, Actor: actor, Before: before, After: after, At: s.clk.Now()})
 		if actor == "v2" {
 			continue
+		}
+		if before.ID != "" && len(session.FactsDrainBasis.Moved(session.FactsOf(after.Metadata), session.FactsOf(before.Metadata))) > 0 {
+			s.basisMoves = append(s.basisMoves, k)
+		}
+		if before.ID != "" && before.Status != "closed" && after.Status == "closed" {
+			if s.closedInStep == nil {
+				s.closedInStep = map[string]beads.Bead{}
+			}
+			// The closed row as the store held it immediately before its
+			// closing write, the step's own earlier writes (a PreWake's
+			// token mint) included, not the step-start snapshot (v5.9n
+			// amended).
+			held := before
+			if p, ok := s.preOutside[k]; ok && p.Status != "closed" {
+				held = p
+			}
+			s.closedInStep[held.Metadata["session_name"]] = held
 		}
 		payload, err := json.Marshal(after)
 		if err != nil {
@@ -978,10 +1047,10 @@ func (s *sim) snapshot() map[string]beads.Bead {
 	return out
 }
 
-// run runs steps until a violation, then quiesces.
-func (s *sim) run(steps int) {
+// run runs simSteps steps until a violation, then quiesces.
+func (s *sim) run() {
 	s.inventory()
-	for range steps {
+	for range simSteps {
 		if s.step(); len(s.failures) > 0 {
 			return
 		}
@@ -1081,10 +1150,13 @@ func (s *sim) checkInflight() {
 
 // quiesce holds the inputs stable: every held event and listing is
 // delivered, then a pass runs each patrol, every effect released at once,
-// until 2 × patrol + startup_timeout past the last pending timer. From
+// until 2 × patrol + startup_timeout past the last pending timer, as read
+// after the first such pass (which records the settlements still pending).
+// From
 // there, two passes in a row must admit nothing and change nothing (I10),
 // and the in-flight map must then be empty (I8).
 func (s *sim) quiesce() {
+	s.beginStep() // quiescence is a step of its own: an earlier close excuses no kill in it
 	s.logf("quiesce")
 	for _, l := range s.legs {
 		for _, ev := range l.events {
@@ -1105,8 +1177,10 @@ func (s *sim) quiesce() {
 	s.audit("v2")
 	slack := 2*simPatrol + s.cfg.Session.StartupTimeoutDuration()
 	bound := s.lastTimer().Add(slack)
-	for quiet := 0; quiet < 2 && len(s.failures) == 0; {
-		before := s.snapshot()
+	rounds := quiesceRounds{}
+	for first, done := true, false; !done && len(s.failures) == 0; first = false {
+		before, backoff, at := s.snapshot(), s.p.backoff.Snapshot(), s.clk.Now()
+		s.round = nil
 		s.inventory()
 		s.pass()
 		admitted := intentKeys(s.p.out.record.Load().Admitted)
@@ -1114,13 +1188,28 @@ func (s *sim) quiesce() {
 			s.release(0)
 		}
 		s.audit("v2")
-		changed := !maps.EqualFunc(before, s.snapshot(), sameBead)
+		if b := s.lastTimer().Add(slack); first && b.After(bound) {
+			// Once, after the first pass: it records the settlements still
+			// pending at quiescence, so the backoff of the last refusal
+			// before it is in the table, and the bound covers it.
+			bound = b
+		}
+		after := s.snapshot()
+		changed := !maps.EqualFunc(before, after, sameBead)
 		switch {
 		case s.clk.Now().Before(bound):
+		case (len(admitted) > 0 || changed) && s.pacedRetries(backoff, at, before, after):
+			var keys []rowKey
+			for _, r := range s.round {
+				keys = append(keys, r.it.Key)
+			}
+			if k, loop := rounds.paced(keys); loop {
+				s.failf("I10 I-bounded", "%d paced re-issues past the bound for %v: admitted %v, a retry loop", rounds.count[k], k, admitted)
+			}
 		case len(admitted) > 0 || changed:
 			s.failf("I10 I-bounded", "no fixed point %s after the last timer: admitted %v, store changed %t", s.clk.Now().Sub(bound)+slack, admitted, changed)
 		default:
-			quiet++
+			done = rounds.quiet()
 		}
 		s.advance(simPatrol)
 		for _, l := range s.legs {
@@ -1170,8 +1259,92 @@ func (s *sim) checkConverged() {
 	}
 }
 
+// quiesceRounds counts I10's rounds past the bound (v5.9n, amended): two
+// quiet rounds in a row end quiescence; a paced re-issue round is neither
+// quiet nor a failure, and resets the quiet run; more than
+// simMaxPacedRounds paced re-issues of one row is a retry loop (a backoff
+// that never grows), counted per row, so correctly paced rows never add up.
+type quiesceRounds struct {
+	quiets int
+	count  map[rowKey]int
+}
+
+// quiet records a quiet round and reports whether quiescence is reached.
+func (q *quiesceRounds) quiet() bool {
+	q.quiets++
+	return q.quiets >= 2
+}
+
+// paced records a round of paced re-issues of keys, and returns a row whose
+// count passed the cap.
+func (q *quiesceRounds) paced(keys []rowKey) (rowKey, bool) {
+	q.quiets = 0
+	if q.count == nil {
+		q.count = map[rowKey]int{}
+	}
+	for _, k := range keys {
+		if q.count[k]++; q.count[k] > simMaxPacedRounds {
+			return k, true
+		}
+	}
+	return rowKey{}, false
+}
+
+// simResult is a released effect and its settlement.
+type simResult struct {
+	it  intent
+	res settlement
+}
+
+// pacedRetries is I10's paced retry (v5.9n): a quiescence round whose
+// effects all refused a re-issue the contract holds, each no earlier than
+// its row's backoff expiry (a paced retry, not a loop), and whose only store
+// change is the runtime lease record each attempt writes. The holds: a stop
+// a human's attach holds (§12.2 #10), and a stop refused liveness-unknown
+// while its runtime's probe keeps erroring (I17).
+func (s *sim) pacedRetries(backoff map[string]backoffRecord, at time.Time, before, after map[string]beads.Bead) bool {
+	for k, b := range after {
+		a, ok := before[k]
+		if !ok || a.Status != b.Status || !maps.EqualFunc(withoutLeaseKeys(a.Metadata), withoutLeaseKeys(b.Metadata), func(x, y string) bool { return x == y }) {
+			return false
+		}
+	}
+	if len(before) != len(after) || len(s.round) == 0 {
+		return false
+	}
+	for _, r := range s.round {
+		var row beads.Bead // the sim's row IDs are unique across its legs
+		for _, b := range after {
+			if b.ID == r.it.Key.ID {
+				row = b
+			}
+		}
+		held := r.it.Kind == intentStop && r.res.Cause == fenceAttached ||
+			// A probe that keeps erroring holds the stop, as I17 rules it
+			// not stoppable (v5.9n).
+			r.it.Kind == intentStop && r.res.Cause == fenceLivenessUnknown && s.probeErring(row)
+		rec, backedOff := backoff[rowBackoffKey(r.it.Key)]
+		if r.res.Outcome != settledRefused || !held || !backedOff || rec.Until.After(at) {
+			return false
+		}
+	}
+	return true
+}
+
+// withoutLeaseKeys is meta without the runtime lease record's keys.
+func withoutLeaseKeys(meta map[string]string) map[string]string {
+	out := maps.Clone(meta)
+	for k := range out {
+		if strings.HasPrefix(k, "runtime_lease_") {
+			delete(out, k)
+		}
+	}
+	return out
+}
+
 // lastTimer is the latest pending timer: a row's hold, quarantine or kill
-// fence, or a backoff's expiry.
+// fence, A6's churn clear past an open committed row's wake (SESS-540), or
+// a backoff's expiry.
 func (s *sim) lastTimer() time.Time {
 	last := s.clk.Now()
 	later := func(t time.Time) {
@@ -1188,6 +1361,14 @@ func (s *sim) lastTimer() time.Time {
 				later(at.Add(grace))
 			}
 		}
+		// The churn clear is A6's at its threshold on an open committed row
+		// (SESS-540), which a patrol reaches.
+		up := b.Status != "closed" && slices.Contains([]string{"active", "awake"}, b.Metadata["state"])
+		if woke, err := time.Parse(time.RFC3339, b.Metadata["last_woke_at"]); err == nil && up {
+			if n := b.Metadata["churn_count"]; n != "" && n != "0" {
+				later(woke.Add(churnProductivityThreshold))
+			}
+		}
 	}
 	for _, r := range s.p.backoff.Snapshot() {
 		later(r.Until)
@@ -1196,14 +1377,15 @@ func (s *sim) lastTimer() time.Time {
 }
 
 // simSeeds is the corpus: GC_V2_SIM_SEED replays one seed, GC_V2_SIM_SEEDS
-// runs seeds 1..N (nightly), and CI runs simCISeeds.
+// runs N seeds from GC_V2_SIM_SEED_FIRST (1 by default; the CI corpus
+// targets run the 1024 in ranges, v5.9n), and CI's gc_test runs simCISeeds.
 func simSeeds(t *testing.T) []uint64 {
 	first, n := uint64(1), uint64(simCISeeds)
-	for env, v := range map[string]*uint64{"GC_V2_SIM_SEED": &first, "GC_V2_SIM_SEEDS": &n} {
+	for env, v := range map[string]*uint64{"GC_V2_SIM_SEED": &first, "GC_V2_SIM_SEED_FIRST": &first, "GC_V2_SIM_SEEDS": &n} {
 		var err error
 		if raw := os.Getenv(env); raw != "" {
-			if *v, err = strconv.ParseUint(raw, 10, 64); err != nil || env == "GC_V2_SIM_SEED" && os.Getenv("GC_V2_SIM_SEEDS") != "" {
-				t.Fatalf("%s=%q: want a number, and only one of GC_V2_SIM_SEED and GC_V2_SIM_SEEDS (%v)", env, raw, err)
+			if *v, err = strconv.ParseUint(raw, 10, 64); err != nil || env == "GC_V2_SIM_SEED" && (os.Getenv("GC_V2_SIM_SEEDS") != "" || os.Getenv("GC_V2_SIM_SEED_FIRST") != "") {
+				t.Fatalf("%s=%q: want a number, and GC_V2_SIM_SEED alone, without GC_V2_SIM_SEEDS or GC_V2_SIM_SEED_FIRST (%v)", env, raw, err)
 			}
 		}
 	}
@@ -1234,7 +1416,47 @@ func TestSimCorpus(t *testing.T) {
 	for _, seed := range simSeeds(t) {
 		t.Run(fmt.Sprint(seed), func(t *testing.T) {
 			s := newSim(t, seed, simOpts{})
-			s.run(simSteps)
+			s.run()
+			s.report(t)
+		})
+	}
+}
+
+// simFloorCancels counts the floor-ack cancels (DRAIN-010) the sims
+// admitted.
+var simFloorCancels atomic.Int64
+
+// TestSimCorpusFloored is the corpus with a min_active_sessions floor of 1
+// or 2 (by seed), so floor members' own acks are canceled (PAR-FLOORACK)
+// beside every other path: no invariant may break.
+func TestSimCorpusFloored(t *testing.T) {
+	before := simFloorCancels.Load()
+	t.Cleanup(func() {
+		if !t.Failed() && simFloorCancels.Load() == before {
+			t.Error("the floored sim corpus admitted no floor-ack cancel")
+		}
+	})
+	for _, seed := range simSeeds(t) {
+		t.Run(fmt.Sprint(seed), func(t *testing.T) {
+			s := newSim(t, seed, simOpts{})
+			s.cfg.Agents[0].MinActiveSessions = intPtr(1 + int(seed%2))
+			s.run()
+			s.report(t)
+		})
+	}
+}
+
+// TestSimCorpusPinnedSeeds (CONTRACT v5.9n). Kills a regression of the
+// invariant models v5.9n fixed: the 1024-seed corpus's seeds that failed on
+// main at e11c512e1c (I4: a just-closed row's own runtime; I16: an outside
+// drain-basis write mid-finalize; I17: a probe-erroring runtime; I10: paced
+// re-issues held by an attach) each run as a
+// regression.
+func TestSimCorpusPinnedSeeds(t *testing.T) {
+	for _, seed := range []uint64{107, 337, 338, 427, 452, 465, 553, 657} {
+		t.Run(fmt.Sprint(seed), func(t *testing.T) {
+			s := newSim(t, seed, simOpts{})
+			s.run()
 			s.report(t)
 		})
 	}
@@ -1269,7 +1491,8 @@ var simMutants = []struct {
 				return f, err
 			}
 			s := specs[intentStart]
-			s.sections = []section{startSections[0], called(callStart, probed(reuse, preWakeStep), startLaunch), startSections[2]}
+			s.sections = slices.Clone(startSections)
+			s.sections[slices.IndexFunc(s.sections, func(sec section) bool { return sec.callKind == callStart })] = called(callStart, probed(reuse, preWakeStep), startLaunch)
 			specs[intentStart] = s
 		},
 	}},
@@ -1287,7 +1510,7 @@ func TestSimInvariantsCatchSeededMutants(t *testing.T) {
 				var s *sim
 				t.Run(fmt.Sprint(seed), func(t *testing.T) {
 					s = newSim(t, seed, m.opts)
-					s.run(simSteps)
+					s.run()
 				})
 				if slices.ContainsFunc(s.failures, func(f string) bool { return strings.HasPrefix(f, m.inv) }) {
 					return

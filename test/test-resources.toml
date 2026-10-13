@@ -10,8 +10,8 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 747
-baseline_files = 225
+baseline_calls = 748
+baseline_files = 226
 reported_calls = 495
 reported_files = 135
 owner_bead = "ga-cp3hwi"
@@ -23,7 +23,7 @@ expires = "2026-10-31"
 [[audit_baseline]]
 scope = "all"
 resource = "fixed_sleep"
-baseline_calls = 497
+baseline_calls = 495
 baseline_files = 184
 reported_calls = 447
 reported_files = 157
@@ -51,8 +51,8 @@ expires = "2026-10-31"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 499
-baseline_files = 151
+baseline_calls = 500
+baseline_files = 152
 reported_calls = 380
 reported_files = 98
 owner_bead = "ga-cp3hwi"
@@ -64,7 +64,7 @@ expires = "2026-10-31"
 [[debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 319
+baseline_calls = 318
 baseline_files = 123
 reported_calls = 295
 reported_files = 114
@@ -483,6 +483,17 @@ resource_owner = "the loopback TLS HTTP/2 servers are confined to TestCacheProbe
 migration_target = "P0.4b"
 expires = "2026-10-31"
 
+[[medium]]
+package_dir = "internal/hooks"
+package_name = "hooks"
+owner = "TestProviderPluginNodeSuite"
+resources = ["subprocess"]
+owner_bead = "ga-cp3hwi"
+invariant = "the embedded provider-plugin behavior proof is a checked Medium subprocess owner"
+resource_owner = "the one node subprocess is confined to TestProviderPluginNodeSuite, which exists to run the embedded OpenCode and MiMo Code plugins under node against a GC_BIN fake gc: the plugins are JavaScript the provider loads, so only a real node run can prove the system-prompt shape and the once-per-turn drain they produce"
+migration_target = "P0.4b"
+expires = "2026-10-31"
+
 # A reviewed-hermetic-body row is narrower than a Small test declaration. It
 # proves that the exact untagged test body and statically reachable
 # receiverless same-package helpers contain none of the cataloged resources.
@@ -533,7 +544,7 @@ expires = "2026-10-31"
 [[small_debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 319
+baseline_calls = 318
 baseline_files = 123
 reported_calls = 287
 reported_files = 113

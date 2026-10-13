@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -424,13 +425,43 @@ func TestSimI15StabilityCarveOut(t *testing.T) {
 			}
 		})
 	}
-	// The real clear, on a stable row, is not.
-	s := scripted(t, []string{"gc-1"}, quarantined("active", -time.Hour))
-	s.settle()
-	if s.gc1()["quarantined_until"] != "" {
-		t.Fatalf("quarantined_until %q, want A6's stability clear", s.gc1()["quarantined_until"])
+	// The real clear, on a stable row, is not, its quarantine's own reason
+	// ended with it (mc-bwvzv).
+	for _, reason := range []string{"", "quarantine", "rate_limit"} {
+		s := scripted(t, []string{"gc-1"}, quarantined("active", -time.Hour, "sleep_reason", reason))
+		s.settle()
+		if m := s.gc1(); m["quarantined_until"] != "" || m["sleep_reason"] != "" {
+			t.Fatalf("reason %q: row %v, want A6's stability clear, the reason ended", reason, m)
+		}
+		s.noViolations(t)
 	}
-	s.noViolations(t)
+	// A quarantine's reason cleared while the quarantine stands is still
+	// the quarantine's to keep.
+	b := quarantined("active", -time.Hour, "sleep_reason", "quarantine")
+	a := maps.Clone(b.Metadata)
+	a["sleep_reason"] = ""
+	if k := dormantChange(b, a, plannerT0, true); k != "sleep_reason" {
+		t.Fatalf("dormantChange = %q, want sleep_reason: the quarantine stands", k)
+	}
+	// The clear that ends the quarantine may only clear its reason, never
+	// rewrite it; and a context_churn sleep's reason stays the row's, the
+	// clear ending only the quarantine (the #7696 review's nits).
+	for _, c := range []struct {
+		reason, to string
+		want       string
+	}{
+		{"quarantine", "idle", "sleep_reason"},
+		{"rate_limit", "idle", "sleep_reason"},
+		{"context-churn", "", "sleep_reason"},
+		{"quarantine", "", ""},
+	} {
+		b := quarantined("active", -time.Hour, "sleep_reason", c.reason)
+		a := maps.Clone(b.Metadata)
+		a["quarantined_until"], a["sleep_reason"] = "", c.to
+		if k := dormantChange(b, a, plannerT0, true); k != c.want {
+			t.Fatalf("%s -> %q on the clear: dormantChange = %q, want %q", c.reason, c.to, k, c.want)
+		}
+	}
 }
 
 // Kills the dead-runtime heal (v5.8e A6 item 4) reaching past the sessions
@@ -750,4 +781,546 @@ func TestSimConfigDriftWaitsForTheHumanThenDrains(t *testing.T) {
 		t.Fatalf("kills %v, want none", s.sp.kills)
 	}
 	s.noViolations(t)
+}
+
+// Scenario J27 B (C6a ruling 3, v5.9g; D1, D5): an agent acks its drain,
+// its runtime dies, and Manager.ensureRunning restarts it at the same
+// generation and token before the controller's next pass. The restarted
+// runtime is never stopped for its predecessor's ack: the ack signal's
+// fresh read finds a runtime created after the ack, and voids the ack half.
+// With no restart the ack stops the acked runtime.
+func TestSimJ27StaleAckAcrossSameGenerationRestart(t *testing.T) {
+	for _, restarted := range []bool{false, true} {
+		s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-1"), gc1Work())
+		s.settle()
+		commit, err := checkDrainAckRow(s.legs[0].backing, "gc-1", false, "tok-1", s.clk.Now())
+		if err == nil {
+			err = commit()
+		}
+		if err != nil {
+			t.Fatalf("restarted %t: the agent's ack: %v", restarted, err)
+		}
+		s.audit("drain-ack")
+		s.legs[0].cache.ApplyEvent("bead.updated", s.legs[0].events[len(s.legs[0].events)-1]) // the census sees the CLI's write
+		s.advance(5 * time.Second)
+		s.sp.mu.Lock()
+		acked := s.sp.rts["s-gc-1"].object
+		if restarted {
+			s.sp.drop("s-gc-1")
+			s.sp.put("s-gc-1", "gc-1", s.gc1()["generation"], "tok-1")
+		}
+		s.sp.mu.Unlock()
+		for range 3 {
+			s.settle()
+			s.advance(time.Minute)
+		}
+		var stopped []int64
+		for _, k := range s.sp.kills {
+			if k.Name == "s-gc-1" && k.Hit != nil {
+				stopped = append(stopped, k.Hit.object)
+			}
+		}
+		m := s.gc1()
+		switch {
+		case restarted && (len(stopped) != 0 || m[session.DrainAckIncarnationKey] != "" || m["state_reason"] == session.DrainAckStopPendingReason):
+			t.Errorf("restarted: stopped objects %v, row %v; want none stopped and the ack voided", stopped, m)
+		case !restarted && !slices.Contains(stopped, acked):
+			t.Errorf("not restarted: stopped objects %v, want the acked runtime $%d stopped", stopped, acked)
+		}
+		s.noViolations(t)
+	}
+}
+
+// Kills a commit that drops a quarantine landed after its PreWake, and a
+// row left up under it (§12.2 #57): S2 adopts the row's own live runtime and
+// keeps the quarantine's keys; A6's stability clear then ends the quarantine
+// of the row alive past its wake, inside I15's bound, which the run passes
+// with no violation.
+func TestSimLateQuarantineCommitsThenClears(t *testing.T) {
+	until := rowAt(time.Hour)
+	s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "creating", "instance_token", "tok-1", "last_woke_at", rowAt(time.Second),
+		"quarantined_until", until, "sleep_reason", "quarantine"))
+	s.settle()
+	if m := s.gc1(); m["state"] != "awake" || m["quarantined_until"] != until || m["sleep_reason"] != "quarantine" {
+		t.Fatalf("row %v: want adopted awake with its quarantine kept", m)
+	}
+	for range quarantineDrainBound/simPatrol + 1 { // past I15's bound
+		s.advance(simPatrol)
+		s.settle()
+	}
+	s.noViolations(t)
+	if m := s.gc1(); m["quarantined_until"] != "" || m["sleep_reason"] != "" || m["state"] != "awake" {
+		t.Fatalf("row %v: want the quarantine ended with its sleep reason, the row awake (mc-bwvzv)", m)
+	}
+}
+
+// Kills I15's §12.2 #57 exception excusing a commit under more than its
+// late quarantine (E07 of the C5a3 delta review): the quarantine must hold
+// alone; a held_until timer, a wait hold, a user hold or an operator
+// suspend beside it, or a quarantine already ended, excuses nothing.
+func TestQuarantineAloneIsTheOnlyHold(t *testing.T) {
+	q := map[string]string{"state": "creating", "quarantined_until": rowAt(time.Hour)}
+	with := func(k, v string) map[string]string { m := maps.Clone(q); m[k] = v; return m }
+	for name, c := range map[string]struct {
+		meta map[string]string
+		want bool
+	}{
+		"alone":            {q, true},
+		"held_until":       {with("held_until", rowAt(time.Hour)), false},
+		"held_until ended": {with("held_until", rowAt(-time.Hour)), true},
+		"wait hold":        {with("wait_hold", "w-1"), false},
+		"user hold":        {with("sleep_intent", "user-hold"), false},
+		"suspended":        {with("state", "suspended"), false},
+		"ended":            {with("quarantined_until", rowAt(-time.Minute)), false},
+	} {
+		if got := quarantineAlone(c.meta, plannerT0); got != c.want {
+			t.Errorf("%s: quarantineAlone = %v, want %v", name, got, c.want)
+		}
+	}
+}
+
+// simAck is the agent of row id (its pane's token tok) acking its own drain
+// through the CLI's row ack (E3), with the census told of the write. It
+// reports whether the ack landed.
+func (s *sim) simAck(id, tok string) bool {
+	commit, err := checkDrainAckRow(s.legs[0].backing, id, false, tok, s.clk.Now())
+	if err == nil {
+		err = commit()
+	}
+	if err != nil {
+		return false
+	}
+	s.audit("drain-ack")
+	s.legs[0].cache.ApplyEvent("bead.updated", s.legs[0].events[len(s.legs[0].events)-1])
+	return true
+}
+
+// simOperatorDrain is `gc runtime drain` (drain true) or `undrain` on row
+// gc-1 in a v2 city, with the census told of the write.
+func (s *sim) simOperatorDrain(drain bool) {
+	var err error
+	if drain {
+		err = writeOperatorDrainRow(s.legs[0].backing, "gc-1")
+	} else {
+		err = clearOperatorDrainRow(s.legs[0].backing, "gc-1")
+	}
+	if err != nil {
+		s.t.Fatal(err)
+	}
+	s.audit("operator-drain")
+	s.legs[0].cache.ApplyEvent("bead.updated", s.legs[0].events[len(s.legs[0].events)-1])
+}
+
+// floorRun settles s for patrols patrols, reporting whether row id was ever
+// stop-pending.
+func (s *sim) floorRun(id string, patrols int) (pending bool) {
+	for range patrols {
+		s.advance(simPatrol)
+		s.settle()
+		b, _ := s.legs[0].backing.Get(id)
+		pending = pending || b.Metadata["state_reason"] == session.DrainAckStopPendingReason
+	}
+	return pending
+}
+
+// stoppedRow reports whether the sim ever stopped row id's runtime.
+func (s *sim) stoppedRow(name string) bool {
+	for _, k := range s.sp.kills {
+		if k.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// Scenario sc-j27j0d (DRAIN-010, PAR-FLOORACK): a floor member that acks its
+// own idle drain, again and again as an idle agent does, is never marked
+// stop-pending, never stopped and never recreated (its runtime object
+// stands), its ack voided each time, while an elastic seat above the floor
+// retires on its own ack; with the floor at 0 the ack stops the seat. An
+// operator's `gc runtime drain` (legacy's GC_DRAIN) explains the ack, which
+// then stops the floor seat; undrained, the ack is canceled again.
+func TestSimFloorAckKeepsTheSeatWarm(t *testing.T) {
+	seat := func(id string, slot int) beads.Bead {
+		return poolRow(id, "worker", slot, "active", "instance_token", "tok-"+id, "last_woke_at", rowAt(-time.Hour))
+	}
+	for _, c := range []struct {
+		name     string
+		floor    int
+		seats    []string
+		operator string // "drain", "undrain" (drain, then undrain) before the acks
+		warm     []string
+		stopped  []string
+	}{
+		{"one seat at floor 1", 1, []string{"gc-1"}, "", []string{"gc-1"}, nil},
+		{"one seat at floor 0", 0, []string{"gc-1"}, "", nil, []string{"gc-1"}},
+		{"three seats at floor 2", 2, []string{"gc-1", "gc-2", "gc-3"}, "", []string{"gc-1", "gc-2"}, []string{"gc-3"}},
+		{"an operator's drain on the floor seat", 1, []string{"gc-1"}, "drain", nil, []string{"gc-1"}},
+		{"an operator's drain, undrained", 1, []string{"gc-1"}, "undrain", []string{"gc-1"}, nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var rows []beads.Bead
+			for i, id := range c.seats {
+				rows = append(rows, seat(id, i+1))
+			}
+			s := scripted(t, c.seats, rows...)
+			s.cfg.Agents[0].MinActiveSessions = intPtr(c.floor)
+			s.settle()
+			objects := map[string]int64{}
+			s.sp.mu.Lock()
+			for _, id := range c.seats {
+				objects[id] = s.sp.rts["s-"+id].object
+			}
+			s.sp.mu.Unlock()
+			switch c.operator {
+			case "drain":
+				s.simOperatorDrain(true)
+				s.floorRun("gc-1", 3) // the request stands un-acked: nothing voids it
+			case "undrain":
+				s.simOperatorDrain(true)
+				s.floorRun("gc-1", 3)
+				s.simOperatorDrain(false)
+			}
+			pending := map[string]bool{}
+			for range 3 {
+				for _, id := range c.seats {
+					s.simAck(id, "tok-"+id)
+				}
+				for _, id := range c.seats {
+					pending[id] = s.floorRun(id, 3) || pending[id]
+				}
+			}
+			for _, id := range c.warm {
+				s.sp.mu.Lock()
+				rt, live := s.sp.rts["s-"+id]
+				s.sp.mu.Unlock()
+				if b, _ := s.legs[0].backing.Get(id); s.stoppedRow("s-"+id) || pending[id] || !live || rt.object != objects[id] || b.Metadata[session.DrainAckIncarnationKey] != "" {
+					t.Errorf("%s: stopped %v, ever stop-pending %v, live %v, row %v; want it warm and its ack canceled", id, s.stoppedRow("s-"+id), pending[id], live, b.Metadata)
+				}
+			}
+			for _, id := range c.stopped {
+				if !s.stoppedRow("s-"+id) && !pending[id] {
+					t.Errorf("%s: kills %v; want its ack to stop it", id, s.sp.kills)
+				}
+			}
+			s.noViolations(t)
+		})
+	}
+}
+
+// Scenario M12 (PAR-FLOORACK, CONTRACT v5.9p): a floor member acks and its
+// pane then dies before the controller's pass, the normal exit after a
+// drain (remain-on-exit keeps the dead pane listed). Legacy cancels only a
+// live runtime's ack, and so does v2 until A12 restarts a dead pane in
+// place: the ack signals, the seat is stopped and its row closes, and the
+// floor's create replaces it, as on main.
+// TODO(#7626, mc-7is1r): when A12 lands, lift A11's liveness gate and
+// assert the seat runs again in place.
+func TestSimFloorAckOnADeadPaneStopsTheSeat(t *testing.T) {
+	s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-gc-1", "last_woke_at", rowAt(-time.Hour)))
+	s.cfg.Agents[0].MinActiveSessions = intPtr(1)
+	s.settle()
+	if !s.simAck("gc-1", "tok-gc-1") {
+		t.Fatal("the agent's ack did not land")
+	}
+	s.sp.mu.Lock()
+	s.sp.rts["s-gc-1"].corpse = true
+	s.sp.touch("s-gc-1")
+	s.sp.mu.Unlock()
+	pending := s.floorRun("gc-1", 6)
+	if b, _ := s.legs[0].backing.Get("gc-1"); !pending || !s.stoppedRow("s-gc-1") || b.Status != "closed" {
+		t.Errorf("ever stop-pending %v, stopped %v, row %s; want the dead seat's ack to signal, the seat stopped and its row closed", pending, s.stoppedRow("s-gc-1"), b.Status)
+	}
+	s.noViolations(t)
+}
+
+// Scenario (PAR-FLOORACK review, CONTRACT v5.9p): an operator's `gc runtime
+// drain` the agent never acks (an idle agent never polls drain-check) blocks
+// no controller drain or close: with the agent suspended in config, removed,
+// or the city suspended, the floor seat is still stopped, and removed with
+// its runtime gone, the row still closes as an orphan.
+func TestSimUnackedOperatorDrainBlocksNoControllerDrain(t *testing.T) {
+	for _, follow := range []string{"agent-suspended", "agent-removed", "city-suspended", "removed-then-gone"} {
+		t.Run(follow, func(t *testing.T) {
+			s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-gc-1", "last_woke_at", rowAt(-time.Hour)))
+			s.cfg.Agents[0].MinActiveSessions = intPtr(1)
+			s.settle()
+			if err := newDrainOps(s.sp).setDrain("s-gc-1"); err != nil {
+				t.Fatal(err)
+			}
+			s.simOperatorDrain(true)
+			s.floorRun("gc-1", 2)
+			switch follow {
+			case "agent-suspended":
+				s.cfg.Agents[0].Suspended = true
+			case "agent-removed":
+				s.cfg.Agents[0].Name = "other"
+			case "city-suspended":
+				t.Setenv("GC_SUSPENDED", "1")
+			case "removed-then-gone":
+				s.cfg.Agents[0].Name = "other"
+				s.sp.mu.Lock()
+				s.sp.drop("s-gc-1")
+				s.sp.mu.Unlock()
+			}
+			s.floorRun("gc-1", 60) // 10 minutes: past INC-003's grace
+			b, _ := s.legs[0].backing.Get("gc-1")
+			switch {
+			case follow == "removed-then-gone" && b.Status != "closed":
+				t.Errorf("row %s %v, want it closed as an orphan", b.Status, b.Metadata)
+			case follow != "removed-then-gone" && !s.stoppedRow("s-gc-1"):
+				t.Errorf("row %s %v, kills %v; want the seat stopped", b.Status, b.Metadata, s.sp.kills)
+			}
+			s.noViolations(t)
+		})
+	}
+}
+
+// Scenario O11 (PAR-FLOORACK review): the pass decides a floor seat's ack
+// canceled; the operator's drain lands on the row before the effect runs;
+// the effect re-decides on the fresh row into the signal, the seat stops,
+// and no "min-floor cancel" drain transition is recorded (the transition
+// comes from the fresh decision).
+func TestSimOperatorDrainBetweenPassAndEffect(t *testing.T) {
+	var transitions []string
+	saved := recordDrainTransition
+	recordDrainTransition = func(_ context.Context, name, reason, transition string) {
+		transitions = append(transitions, name+":"+reason+"/"+transition)
+	}
+	t.Cleanup(func() { recordDrainTransition = saved })
+	s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-gc-1", "last_woke_at", rowAt(-time.Hour)))
+	s.cfg.Agents[0].MinActiveSessions = intPtr(1)
+	s.settle()
+	if !s.simAck("gc-1", "tok-gc-1") {
+		t.Fatal("the agent's ack did not land")
+	}
+	s.advance(simPatrol)
+	s.inventory()
+	s.pass()
+	var decided []string
+	for _, e := range s.parked {
+		decided = append(decided, e.it.Reason)
+	}
+	if !slices.Contains(decided, decideFloorAckCancel) {
+		t.Fatalf("the pass decided %v, want the floor cancel", decided)
+	}
+	s.simOperatorDrain(true) // lands between the decision and its effect
+	for len(s.parked) > 0 {
+		s.release(0)
+	}
+	s.audit("v2")
+	pending := s.floorRun("gc-1", 6)
+	if slices.ContainsFunc(transitions, func(tr string) bool { return strings.Contains(tr, ":min-floor/") }) || !pending {
+		t.Errorf("transitions %v, ever stop-pending %v; want no min-floor cancel and the ack signaled", transitions, pending)
+	}
+	s.noViolations(t)
+}
+
+// Scenario (PAR-FLOORACK review, finding 3): a controller request stands on
+// the floor seat when the operator drains; a lens then cancels the
+// controller's request; the agent acks. The operator's mark is its own key,
+// so it survives the cancel, explains the ack, and the seat stops.
+func TestSimOperatorDrainSurvivesACanceledControllerRequest(t *testing.T) {
+	s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-gc-1", "last_woke_at", rowAt(-time.Hour),
+		session.DrainIntentReasonKey, drainIdle, session.DrainIntentAtKey, rowAt(-time.Second), session.DrainIntentIncarnationKey, "1"))
+	s.cfg.Agents[0].MinActiveSessions = intPtr(1)
+	s.simOperatorDrain(true)
+	s.settle()
+	s.floorRun("gc-1", 2)
+	if b, _ := s.legs[0].backing.Get("gc-1"); b.Metadata[session.DrainIntentReasonKey] != "" || b.Metadata[session.OperatorDrainKey] == "" {
+		t.Fatalf("row %v, want the controller's request canceled and the operator's mark kept", b.Metadata)
+	}
+	if !s.simAck("gc-1", "tok-gc-1") {
+		t.Fatal("the agent's ack did not land")
+	}
+	if pending := s.floorRun("gc-1", 6); !pending && !s.stoppedRow("s-gc-1") {
+		t.Errorf("kills %v; want the explained ack to stop the seat", s.sp.kills)
+	}
+	s.noViolations(t)
+}
+
+// lostCommitRun drives seed's simulation to its first start and lands op on
+// the start's row after its launch Call (S2's lost commit): the outcome of
+// that start, and the runtime under its name once it settled.
+func lostCommitRun(t *testing.T, seed uint64, op func(s *sim, l *simLeg, b beads.Bead)) (s *sim, outcome string, up bool) {
+	t.Helper()
+	s = newSim(t, seed, simOpts{})
+	s.inventory()
+	for step := 0; step < 400 && len(s.failures) == 0; step++ {
+		idx := slices.IndexFunc(s.parked, func(e *simEffect) bool { return e.it.Kind == intentStart && !e.settled })
+		if idx < 0 {
+			s.step()
+			continue
+		}
+		e := s.parked[idx]
+		name := ""
+		if b, err := s.legOf(e.it.Key.Leg).backing.Get(e.it.Key.ID); err == nil {
+			name = b.Metadata["session_name"]
+		}
+		fire := func() {
+			l := s.legOf(e.it.Key.Leg)
+			if b, err := l.backing.Get(e.it.Key.ID); err == nil {
+				s.outside("lost commit of "+e.it.Key.ID, l, b, func(l *simLeg, b beads.Bead) { op(s, l, b) })
+			}
+		}
+		e.seam = seamAfterCall
+		e.outside = func() { e.seam, e.outside = seamAfterCall, fire } // the first Call's seam (the admit ticket's here: no dead runtime to recycle) comes first
+		s.release(idx)
+		s.audit("v2")
+		s.sp.mu.Lock()
+		_, up = s.sp.rts[name]
+		s.sp.mu.Unlock()
+		for i := len(s.schedule) - 1; i >= 0; i-- {
+			if strings.Contains(s.schedule[i], "effect start "+e.it.Key.ID) {
+				outcome = s.schedule[i]
+				break
+			}
+		}
+		return s, outcome, up
+	}
+	return s, "", false
+}
+
+// Kills a lost commit left running (v5 S2; the #7650 review): an operator
+// puts the row asleep, or closes it, after the start's launch and before its
+// commit; the start commits nothing, stops the runtime it launched under its
+// own token, and settles commit-lost, leaving no orphan.
+func TestSimLostCommit(t *testing.T) {
+	for name, op := range map[string]func(s *sim, l *simLeg, b beads.Bead){
+		"asleep": func(s *sim, l *simLeg, b beads.Bead) { s.setMeta(l, b.ID, "state", "asleep", "state_reason", "") },
+		"close":  func(_ *sim, l *simLeg, b beads.Bead) { _ = l.backing.Close(b.ID) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			for seed := uint64(1); seed <= 32; seed++ {
+				s, outcome, up := lostCommitRun(t, seed, op)
+				if !strings.Contains(outcome, "commit-lost") {
+					continue
+				}
+				if up {
+					t.Fatalf("seed %d: %q left the start's runtime running", seed, outcome)
+				}
+				s.noViolations(t) // a close's stop: I4's "closed within the step" (#7648)
+				return
+			}
+			t.Fatal("no seed reached the lost commit")
+		})
+	}
+}
+
+// Kills the S7 exit lost in the running controller (the #7650 review's
+// reach): a pool pending create whose live runtime reads StaleSelf at its
+// generation (its own, under an older token) is rolled back, its runtime
+// stopped first (CONTRACT v5.9q), with no violation and no orphan.
+func TestSimPendingCreateStaleSelfExit(t *testing.T) {
+	started := plannerT0.Add(-time.Minute).Format(time.RFC3339)
+	row := poolRow("gc-1", "worker", 1, "creating", "generation", "3", "instance_token", "tok-new", "pending_create_claim", "true", "pending_create_started_at", started)
+	s := newSim(t, 1, simOpts{rows: func(s *sim) ([]beads.Bead, []beads.Bead) {
+		s.sp.put(row.Metadata["session_name"], "gc-1", "3", "tok-old")
+		return []beads.Bead{row}, nil
+	}})
+	s.lag = false
+	for range 3 {
+		s.advance(simPatrol)
+		s.settle()
+	}
+	s.noViolations(t)
+	b, _ := s.legs[0].backing.Get("gc-1")
+	s.sp.mu.Lock()
+	_, up := s.sp.rts[row.Metadata["session_name"]]
+	s.sp.mu.Unlock()
+	if b.Status != "closed" || up || !slices.ContainsFunc(s.schedule, func(l string) bool { return strings.Contains(l, "effect rollback gc-1") }) {
+		t.Fatalf("row %s, runtime up %v, want the StaleSelf pending create rolled back with its runtime stopped", b.Status, up)
+	}
+}
+
+// Kills a lost commit that stops another controller's runtime (the #7690
+// review's A4; v5 S2, I3): a second controller re-PreWakes the row after the
+// start's launch, stopping the start's runtime and launching its own under
+// its token; the start's commit is lost, and the other controller's
+// runtime, which carries no token of the start's, survives.
+func TestSimLostCommitSparesASecondControllersRuntime(t *testing.T) {
+	var op func(s *sim, l *simLeg, b beads.Bead)
+	for _, o := range externalOps {
+		if o.name == "second-controller-prewake" {
+			op = o.fn
+		}
+	}
+	for seed := uint64(1); seed <= 32; seed++ {
+		s, outcome, up := lostCommitRun(t, seed, op)
+		if outcome == "" || strings.Contains(outcome, "outcome 1 ") {
+			continue // never reached, or committed ahead of the write
+		}
+		if !up {
+			t.Fatalf("seed %d: %q stopped the second controller's runtime", seed, outcome)
+		}
+		s.noViolations(t)
+		return
+	}
+	t.Fatal("no seed reached the second controller's PreWake after the launch")
+}
+
+// Scenario v5.9u (the mc-yxjzl reversal; I15, I10): a soft suspend, the
+// stop and rig-restart sweeps', is no hold, and a managed suspend is one.
+// Over ten patrols a soft-suspended seat with work keeps its live runtime
+// running, as legacy's state heal reads it awake, and one the sweep stopped
+// (`gc rig restart`) is restarted. A managed suspend stops its seat's
+// runtime and keeps its hold through the dormant finalize, and with no work
+// through A21 as well. No start is ever refused `held`: A18 holds what the
+// PreWake would refuse, so its admit-and-refuse loop cannot recur.
+func TestSimSoftSuspendIsNoHold(t *testing.T) {
+	soft := []string{"instance_token", "tok-1", "suspended_at", rowAt(-time.Minute)}
+	managed := slices.Concat(soft, []string{"sleep_intent", "user-hold", "held_until", rowAt(1000 * time.Hour)})
+	for _, c := range []struct {
+		name       string
+		meta       []string
+		live, work bool
+		up, same   bool // the seat runs at the end; on its first runtime
+	}{
+		{"soft, live, with work: kept running", soft, true, true, true, true},
+		{"soft, stopped by the rig-restart sweep, with work: restarted", soft, false, true, true, false},
+		{"managed, live, with work: stopped and held", managed, true, true, false, false},
+		{"managed, stopped, with work: held", managed, false, true, false, false},
+		{"managed, live, no work: stopped and held", managed, true, false, false, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			rows := []beads.Bead{poolRow("gc-1", "worker", 1, "suspended", c.meta...)}
+			if c.work {
+				rows = append(rows, gc1Work())
+			}
+			var live []string
+			if c.live {
+				live = []string{"gc-1"}
+			}
+			s := scripted(t, live, rows...)
+			first := s.object("s-gc-1")
+			for range 10 {
+				s.settle()
+				s.advance(simPatrol)
+			}
+			for _, l := range s.schedule {
+				if strings.Contains(l, "effect start gc-1:") && strings.Contains(l, causeHeld) {
+					t.Fatalf("a start was admitted and refused held: %s", l)
+				}
+			}
+			b, _ := s.legs[0].backing.Get("gc-1")
+			m, obj := b.Metadata, s.object("s-gc-1")
+			if up := obj != 0 && (m["state"] == "awake" || m["state"] == "active"); up != c.up || c.same && obj != first {
+				t.Fatalf("runtime object %d (first %d), state %q; want up %t on its first runtime %t", obj, first, m["state"], c.up, c.same)
+			}
+			if !c.up && (b.Status != "open" || m["sleep_intent"] != "user-hold" || m["held_until"] != managed[7] || m["suspended_at"] != soft[3]) {
+				t.Fatalf("row %s %v: want the managed suspend kept", b.Status, m)
+			}
+			s.noViolations(t)
+		})
+	}
+}
+
+// object is the tmux object of the live runtime under name, else 0.
+func (s *sim) object(name string) int64 {
+	s.sp.mu.Lock()
+	defer s.sp.mu.Unlock()
+	if rt := s.sp.rts[name]; rt != nil && !rt.corpse {
+		return rt.object
+	}
+	return 0
 }

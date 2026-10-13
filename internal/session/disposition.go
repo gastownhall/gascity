@@ -22,7 +22,8 @@ const (
 	// until Until; it outlives a drain and keeps the row's slot.
 	OperatorSuspended
 	// OperatorSuspendedSoft is state=suspended with no operator hold (the chat
-	// idle auto-suspend, the city stop sweep). Any wake brings it back.
+	// idle auto-suspend, the stop and rig-restart sweeps). Any wake brings it
+	// back, and the controller never holds it (CONTRACT v5.9u).
 	OperatorSuspendedSoft
 )
 
@@ -54,6 +55,20 @@ const unreadableTimers = UnknownHeldUntil | UnknownQuarantine
 // dispositionKeys are the class's five keys, in the order Disposition.raw
 // keeps their text.
 var dispositionKeys = [...]string{"held_until", "sleep_intent", "wait_hold", "quarantined_until", "suspended_at"}
+
+// DispositionInputKeysIn is the keys meta carries that DecodeDisposition
+// reads, in order: the class's five, then state and sleep_reason. A generic
+// metadata write must set none of them on a session row: only the session
+// verbs move a row's disposition and lifecycle.
+func DispositionInputKeysIn(meta map[string]string) []string {
+	var out []string
+	for _, k := range append(dispositionKeys[:], "state", "sleep_reason") {
+		if _, ok := meta[k]; ok {
+			out = append(out, k)
+		}
+	}
+	return out
+}
 
 // Disposition is a row's holds as one value.
 type Disposition struct {
@@ -244,34 +259,39 @@ func (d Disposition) rawMeta() map[string]string {
 }
 
 // SuppressesWake reports a hold that keeps the row out of the wake and
-// awake sets. An unknown timer does not, as legacy reads it (O6). It is
-// HoldSet.SuppressesWake over the same row.
+// awake sets. An unknown timer does not, as legacy reads it (O6).
 func (d Disposition) SuppressesWake(now time.Time) bool {
 	return d.Operator != OperatorNone || d.Wait || d.Until.After(now) || d.Heartbeat.After(now) || d.Quarantine.After(now)
 }
 
 // BlocksConsume reports a hold that stops anything consuming one: a resume,
 // a background send's queue-or-start, a wake request. An unknown timer
-// blocks, since an unreadable hold may be an operator's (O6). It is
-// HoldSet.BlocksConsume over the same row.
+// blocks, since an unreadable hold may be an operator's (O6).
 func (d Disposition) BlocksConsume(now time.Time) bool {
 	return d.SuppressesWake(now) || d.Unknown&unreadableTimers != 0
 }
 
 // RefusesPreWake reports a hold that refuses the controller's PreWake (C5a1,
-// S1): an operator suspend, soft or not, or a live timer. A wait does not:
-// wait-ready launches it (POOL-077/080). Nor does an unreadable timer, which
-// would never heal. It is C5a1's HoldSet mask (preWakeHolds: HoldTimer,
-// HoldQuarantine, HoldUser, HoldSuspended) over the same row. CONTRACT v5.9i
-// adds A17's agent-heartbeat exemption on top; that is A17's, not this.
+// S1): an operator's suspend or a live timer. A soft suspend does not
+// (CONTRACT v5.9u): it is no hold, and legacy's state heal and assigned-work
+// wake bring it back. A wait does not: wait-ready launches it (POOL-077/080).
+// Nor does an unreadable timer, which would never heal. CONTRACT v5.9i adds
+// A17's agent-heartbeat exemption on top; that is A17's, not this.
 func (d Disposition) RefusesPreWake(now time.Time) bool {
-	return d.Operator != OperatorNone || d.Until.After(now) || d.Heartbeat.After(now) || d.Quarantine.After(now)
+	return d.Operator == OperatorSuspended || d.Until.After(now) || d.Heartbeat.After(now) || d.Quarantine.After(now)
+}
+
+// RefusesHeartbeatRespawn is RefusesPreWake for A17's respawn through an
+// agent heartbeat (v5.9i), which no live timer refuses: an operator's
+// suspend, or a live quarantine.
+func (d Disposition) RefusesHeartbeatRespawn(now time.Time) bool {
+	return d.Operator == OperatorSuspended || d.Quarantine.After(now)
 }
 
 // OperatorDormant reports a row its disposition holds dormant: an operator's
 // suspend, kill or city stop, a wait, or a live timer. A6's awake heal skips
-// it and D3 stops its runtime; the kill fence (IsKillPendingInfo) is the
-// lifecycle's half. It is v2's operatorDormant without that half.
+// it and D3 stops its runtime. A kill fence (IsKillPendingInfo) is one too:
+// its sleep_reason is killed.
 func (d Disposition) OperatorDormant(now time.Time) bool {
 	return d.Reason != "" || d.Operator == OperatorSuspended || d.Wait || d.Heartbeat.After(now) ||
 		d.Until.After(now) || d.Quarantine.After(now)
@@ -290,10 +310,27 @@ func (d Disposition) HeartbeatHeld(now time.Time) bool {
 	return d.Heartbeat.After(now) && !d.Heartbeat.After(now.Add(MaxHeartbeatDuration+time.Hour)) && strings.TrimSpace(d.Encode().Get("sleep_intent")) == ""
 }
 
+// HoldsConsume is CONTRACT v5.9 D8 7(a)'s one hold predicate (HoldVerdict),
+// for resume, wake requests, controller-routed sends and queued delivery: a
+// hold that blocks a consume, unless the row is not suspended (life) and its
+// runtime is running (a working session; a heartbeat keeps it up, not
+// queued).
+func (d Disposition) HoldsConsume(running bool, life State, now time.Time) bool {
+	return d.BlocksConsume(now) && (life == StateSuspended || d.Operator == OperatorSuspendedSoft || !running)
+}
+
 // KeepsSlot reports a row whose slot no free or close may take: an
-// operator's suspend (the freeable, finalize, MAINT-051 and A21 hold
-// exception, §12.2 row 27).
+// operator's suspend (the freeable, finalize and MAINT-051 hold exception,
+// §12.2 row 27). A21 reads the stricter HoldsDeliberately.
 func (d Disposition) KeepsSlot() bool { return d.Operator == OperatorSuspended }
+
+// HoldsDeliberately reports a deliberate hold: an operator's suspend (not a
+// soft one), a wait, or a live or unreadable timer. A21 keeps an undesired
+// pool row's slot under one, stricter than KeepsSlot (§12.2 #27, v5.7 A10).
+func (d Disposition) HoldsDeliberately(now time.Time) bool {
+	return d.Operator == OperatorSuspended || d.Wait || d.Until.After(now) || d.Heartbeat.After(now) ||
+		d.Quarantine.After(now) || d.Unknown&unreadableTimers != 0
+}
 
 // DispEventKind is what moves a disposition.
 type DispEventKind uint8
@@ -492,7 +529,7 @@ func (d Disposition) Apply(by ActorKind, ev DispEvent, life State, now time.Time
 // runtime is not running or that is suspended, a background caller's also
 // on any row whose runtime is not running (HoldVerdict, queueFor).
 func (d Disposition) queues(by ActorKind, running bool, life State, now time.Time) bool {
-	held := d.BlocksConsume(now) && (life == StateSuspended || d.Operator == OperatorSuspendedSoft || !running)
+	held := d.HoldsConsume(running, life, now)
 	if by == ActorBackground {
 		return !running || held
 	}

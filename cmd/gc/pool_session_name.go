@@ -115,7 +115,7 @@ func boundSessionNameLength(name string) string {
 
 // gcSweepSessionBeadsAt closes open session beads that have no remaining
 // open/in-progress work beads on sw's legs, stamping its closes at now. The
-// guard (closeSessionInfoIfUnassigned) reads sw, never a pre-close tick
+// guard (closeSeat's closeAllowed) reads sw, never a pre-close tick
 // snapshot of the caller's. Candidates arrive as the typed session.Info
 // projection; the close is a session-class op routed through the session
 // front door. Returns the IDs of session beads that were closed.
@@ -125,7 +125,7 @@ func gcSweepSessionBeadsAt(store beads.Store, sw *SeatWork, sessionInfos []sessi
 		if info.Closed {
 			continue
 		}
-		if !closeSessionInfoIfUnassigned(store, sw, info, "gc_swept", now.UTC(), nil) {
+		if !closeSeat(store, sw, info, closeWhy{reason: "gc_swept", gate: closeFreeSlot}, now.UTC(), nil) {
 			continue
 		}
 		closed = append(closed, info.ID)

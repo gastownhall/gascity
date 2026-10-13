@@ -3,7 +3,6 @@ package main
 import (
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/session"
@@ -158,24 +157,6 @@ func (s freshRowStore) Get(id string) (beads.Bead, error) {
 		return s.cache.Backing().Get(id)
 	}
 	return b, err
-}
-
-// closePremise is session.Store.Close: the premise close.
-func (w fencedWriter) closePremise(expected session.Info, stateCode string, now time.Time) (bool, error) {
-	front, err := w.closeFront()
-	if err != nil {
-		return false, err
-	}
-	return front.Close(expected, stateCode, now)
-}
-
-// closeWithTerminalPatch is session.Store.CloseWithTerminalPatch.
-func (w fencedWriter) closeWithTerminalPatch(expected session.Info, patch session.MetadataPatch, commitMsg string, now time.Time) (bool, error) {
-	front, err := w.closeFront()
-	if err != nil {
-		return false, err
-	}
-	return front.CloseWithTerminalPatch(expected, patch, commitMsg, now)
 }
 
 // rollbackPendingCreate is session.Store.RollbackPendingCreateAtomically.

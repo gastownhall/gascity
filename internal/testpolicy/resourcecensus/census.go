@@ -125,8 +125,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   747,
-			BaselineFiles:   225,
+			BaselineCalls:   748,
+			BaselineFiles:   226,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
 			OwnerBead:       "ga-cp3hwi",
@@ -138,7 +138,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   497,
+			BaselineCalls:   495,
 			BaselineFiles:   184,
 			ReportedCalls:   447,
 			ReportedFiles:   157,
@@ -166,8 +166,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   499,
-			BaselineFiles:   151,
+			BaselineCalls:   500,
+			BaselineFiles:   152,
 			ReportedCalls:   380,
 			ReportedFiles:   98,
 			OwnerBead:       "ga-cp3hwi",
@@ -179,7 +179,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   319,
+			BaselineCalls:   318,
 			BaselineFiles:   123,
 			ReportedCalls:   295,
 			ReportedFiles:   114,
@@ -596,6 +596,17 @@ var bootstrapPolicy = Ledger{
 			MigrationTarget: "P0.4b",
 			Expires:         "2026-10-31",
 		},
+		{
+			PackageDir:      "internal/hooks",
+			PackageName:     "hooks",
+			Owner:           "TestProviderPluginNodeSuite",
+			Resources:       []Resource{ResourceSubprocess},
+			OwnerBead:       "ga-cp3hwi",
+			Invariant:       "the embedded provider-plugin behavior proof is a checked Medium subprocess owner",
+			ResourceOwner:   "the one node subprocess is confined to TestProviderPluginNodeSuite, which exists to run the embedded OpenCode and MiMo Code plugins under node against a GC_BIN fake gc: the plugins are JavaScript the provider loads, so only a real node run can prove the system-prompt shape and the once-per-turn drain they produce",
+			MigrationTarget: "P0.4b",
+			Expires:         "2026-10-31",
+		},
 	},
 	ReviewedHermeticBody: []ReviewedHermeticBody{
 		{
@@ -644,7 +655,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   319,
+			BaselineCalls:   318,
 			BaselineFiles:   123,
 			ReportedCalls:   287,
 			ReportedFiles:   113,

@@ -456,6 +456,22 @@ func SleepPatch(now time.Time, reason string) MetadataPatch {
 	}
 }
 
+// KeepQuarantineReason drops patch's sleep_reason while the row's quarantine
+// is in force at now and its reason is the quarantine's (quarantine,
+// rate_limit, context-churn): a finalize landing after a late quarantine
+// never overwrites its reason, as the quarantine dominates (mc-slkxd). It
+// returns patch, edited in place.
+func KeepQuarantineReason(patch MetadataPatch, d Disposition, reason string, now time.Time) MetadataPatch {
+	if _, ok := patch["sleep_reason"]; !ok || !d.Quarantine.After(now) {
+		return patch
+	}
+	switch SleepReason(strings.TrimSpace(reason)) {
+	case SleepReasonQuarantine, SleepReasonRateLimit, SleepReasonContextChurn:
+		delete(patch, "sleep_reason")
+	}
+	return patch
+}
+
 // AcknowledgeDrainPatch records an agent-acknowledged drain. Drained is a
 // compatibility state distinct from ordinary asleep: demand alone does not
 // reselect it, but explicit attach or work can. Like SleepPatch, it stamps
@@ -538,6 +554,16 @@ func ConfigDriftResetPatch(nextState State, sessionKey string, now time.Time) Me
 // which reads no clock: the v2 asleep named repair's (SESS-568).
 func ConfigDriftAsleepResetPatch(sessionKey string) MetadataPatch {
 	return configDriftReset(StateAsleep, sessionKey)
+}
+
+// ConfigDriftRestartPatch is ConfigDriftResetPatch(StateStartPending, ...)
+// at now, which it reads from its caller: the v2 named restart in place's
+// (SESS-557), written after its stop.
+func ConfigDriftRestartPatch(sessionKey string, now time.Time) MetadataPatch {
+	patch := configDriftReset(StateStartPending, sessionKey)
+	patch["pending_create_claim"] = "true"
+	patch["pending_create_started_at"] = now.UTC().Format(time.RFC3339)
+	return patch
 }
 
 // configDriftReset is a config-drift reset into nextState, its pending

@@ -94,6 +94,10 @@ type World struct {
 	Paused     bool            // starts paused for a provider swap (P7)
 	SoftReload *softReloadView // the open soft reload this pass read, for A8 (M2)
 	AliasOwed  map[rowKey]bool // rows whose runtime is owed their written alias, for A7 (M1)
+	// Idle is A15's view of the pass, from planner memory (idleMemory):
+	// the defer streaks (SESS-575), the content clock's fires (ga-07mi8),
+	// and the rows' lifecycle settings.
+	Idle *idlePass
 
 	CitySuspended     bool
 	SuspendedRigPaths map[string]bool
@@ -106,6 +110,10 @@ type World struct {
 	// ExecutionStalled are the execution backstop's drain requests by row
 	// ID, for arm A16 (C7b1).
 	ExecutionStalled map[string]executionStalledRequest
+	// Classified are the rows whose dead runtime a classification completed
+	// (A12, the start's recycle), by its runtime token: the planner's
+	// memory.
+	Classified map[rowKey]classifiedRuntime
 	// LegStores holds the sessions leg's store by its ref, which effects
 	// reach only as a fenced writer (newEffectPass). No other leg's store is
 	// here: a census-only row has no writer (AL1, armCensusOnly).
@@ -175,7 +183,9 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 	if w.Census, err = readSessionCensus(now, legs); err != nil {
 		return World{}, fmt.Errorf("gather: %w", err)
 	}
-	w.ExecutionStalled = p.executionStalled(w.Census)
+	w.Patrol = env.patrol()
+	w.ObsMaxAge = 2 * w.Patrol
+	w.ExecutionStalled = p.executionStalled(w.Census, w.Obs, now, w.ObsMaxAge)
 	w.AliasOwed = p.aliasOwedFor(w.Census)
 	w.Phantoms = censusPhantoms(w.Census, cfg, e.CityName)
 	if e.ReadyWaits != nil {
@@ -209,9 +219,8 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 	}
 	w.ScaleCheck = rec.scaleCheck(now)
 
-	w.Patrol = env.patrol()
-	w.ObsMaxAge = 2 * w.Patrol
 	w.Observed = observeCensus(w.Obs, w.Census, now, w.ObsMaxAge)
+	w.Classified = p.classifiedOf(w.Census, w.Observed)
 	var guard *endpointCapacityGuard
 	if e.Capacity != nil {
 		guard = e.Capacity()

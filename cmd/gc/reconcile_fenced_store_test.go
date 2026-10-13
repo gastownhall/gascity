@@ -65,11 +65,6 @@ func TestFencedWriterRefusesWhenWriterStopsResolving(t *testing.T) {
 			})
 			return err
 		},
-		"closePremise": func() error { _, err := w.closePremise(row, "orphaned", gatherNow); return err },
-		"closeWithTerminalPatch": func() error {
-			_, err := w.closeWithTerminalPatch(row, session.MetadataPatch{txKeyA: "2"}, "close", gatherNow)
-			return err
-		},
 		"rollbackPendingCreate": func() error {
 			_, _, err := w.rollbackPendingCreate(row, session.MetadataPatch{txKeyA: "2"}, nil)
 			return err
@@ -224,12 +219,6 @@ func TestFencedWriterClosesRequireTheAtomicCloser(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if closed, err := w.closePremise(row, "orphaned", gatherNow); closed || !errors.Is(err, errNoConditionalWriter) {
-		t.Errorf("closePremise = (%v, %v), want errNoConditionalWriter", closed, err)
-	}
-	if closed, err := w.closeWithTerminalPatch(row, session.MetadataPatch{txKeyA: "2"}, "close", gatherNow); closed || !errors.Is(err, errNoConditionalWriter) {
-		t.Errorf("closeWithTerminalPatch = (%v, %v), want errNoConditionalWriter", closed, err)
-	}
 	if closed, post, err := w.rollbackPendingCreate(row, session.MetadataPatch{txKeyA: "2"}, nil); closed || post || !errors.Is(err, errNoConditionalWriter) {
 		t.Errorf("rollbackPendingCreate = (%v, %v, %v), want errNoConditionalWriter", closed, post, err)
 	}
@@ -273,7 +262,9 @@ func TestFencedWriterRefusesACloserThatRefusesAtCallTime(t *testing.T) {
 		if raw {
 			closed, err = sessionFrontDoor(store).Close(row, "orphaned", gatherNow)
 		} else {
-			closed, err = fencedWriter{store: store}.closePremise(row, "orphaned", gatherNow)
+			closed, err = fencedWriter{store: store}.closeRow(row.ID, func(session.Info, session.PersistedResponse) (session.MetadataPatch, bool) {
+				return session.ClosePatch(gatherNow, "orphaned"), true
+			})
 		}
 		b, _ := m.Get(id)
 		switch {

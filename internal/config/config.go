@@ -1861,7 +1861,19 @@ type ACPSessionConfig struct {
 	// to the default. gc stop bounds each session at 30s, so keep stop_grace
 	// comfortably below that.
 	StopGrace string `toml:"stop_grace,omitempty" jsonschema:"default=5s"`
+	// CancelTimeout is how long interrupting an ACP session waits for the
+	// agent to end its turn after session/cancel before falling back to
+	// SIGINT. The interrupt never kills the agent. Duration string (e.g.,
+	// "10s", "30s"). Defaults to "10s"; non-positive or unparseable values
+	// fall back to the default.
+	CancelTimeout string `toml:"cancel_timeout,omitempty" jsonschema:"default=10s"`
 }
+
+// DefaultACPCancelTimeout is how long an ACP interrupt waits for
+// session/cancel to settle the turn when [session.acp] cancel_timeout is
+// unset or invalid. It matches acp.DefaultCancelTimeout, the provider's own
+// default for a Config without a CancelTimeout.
+const DefaultACPCancelTimeout = 10 * time.Second
 
 // DefaultACPStopGrace is the ACP SIGTERM-to-SIGKILL grace used when
 // [session.acp] stop_grace is unset or invalid. It matches the grace every
@@ -1887,6 +1899,16 @@ func (a *ACPSessionConfig) StopGraceDuration() time.Duration {
 		return d
 	}
 	return DefaultACPStopGrace
+}
+
+// CancelTimeoutDuration returns the ACP session/cancel settle bound as a
+// time.Duration. Defaults to DefaultACPCancelTimeout if empty, unparseable,
+// or non-positive.
+func (a *ACPSessionConfig) CancelTimeoutDuration() time.Duration {
+	if d := durationOr(a.CancelTimeout, DefaultACPCancelTimeout); d > 0 {
+		return d
+	}
+	return DefaultACPCancelTimeout
 }
 
 // OutputBufferLinesOrDefault returns the output buffer line count.
@@ -2718,8 +2740,9 @@ type DaemonConfig struct {
 	// stop/unregister path always honors the full grace.
 	DoltStopTimeout string `toml:"dolt_stop_timeout,omitempty" jsonschema:"default=30s"`
 	// DoltStartAddressInUseRetryWindow is how long the managed dolt start
-	// path waits on the originally requested port when bind fails with
-	// "address already in use" before falling back to a higher port. The
+	// path waits on the originally requested port when dolt reports it in
+	// use ("address already in use", or "Port N already in use." from dolt
+	// 2.3.3) before falling back to a higher port. The
 	// common cause is a TIME_WAIT socket left by an abrupt stop of a sibling
 	// dolt subprocess (external SIGTERM, supervisor restart, OOM kill); on
 	// Linux the listening-socket slot typically frees within ~30s. Falling
@@ -3066,7 +3089,8 @@ func (d *DaemonConfig) DoltStopTimeoutDuration() time.Duration {
 }
 
 // DefaultDoltStartAddressInUseRetryWindow is the per-port retry window used
-// when dolt's bind fails with "address already in use" before the start path
+// when dolt reports its port in use ("address already in use", or "Port N
+// already in use." from dolt 2.3.3) before the start path
 // falls back to the next available port. 30s is roughly half Linux's default
 // TCP TIME_WAIT — the listening-socket slot typically frees well before the
 // full TIME_WAIT elapses because there are no active half-open connections

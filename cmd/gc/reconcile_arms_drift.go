@@ -17,8 +17,8 @@ import (
 // version-mismatched stored hash is A8's to rebaseline, never A14's to
 // repair or drain. A live drift's RunLive (SESS-565) and an asleep named
 // row's repair (SESS-566/568) are C7b2-1's; a named row's restart in place
-// and relaunch (SESS-556/557) and a launch-only relaunch (SESS-560) come
-// with the stop verb (C7b2-2), and until then A14 leaves those rows alone.
+// (SESS-557) on the stop verb, with its deferrals (SESS-555), and a
+// launch-only relaunch (SESS-556/560) with its fallback are C7b2-2's.
 
 // Drift decide reasons.
 const (
@@ -27,6 +27,8 @@ const (
 	decideDriftPinned   = "drift-deferred:pinned"   // SESS-555
 	decideDriftRepair   = "drift-repair"            // SESS-566/568
 	decideLiveApply     = "live-apply"              // SESS-565
+	decideDriftRestart  = "drift-restart"           // SESS-557
+	decideDriftRelaunch = "drift-relaunch"          // SESS-556/560
 )
 
 // armConfigDrift is A14 on an alive desired row whose stored config hash
@@ -35,10 +37,13 @@ const (
 //     deferral stamp, throttled; A19 cancels a config-drift request;
 //   - attached-deferred under 5 minutes for this drift (SESS-554): defer;
 //   - a pinned named row (SESS-555): the deferral stamp, and never a
-//     restart; another named row is C7b2's (its restart or relaunch);
+//     restart; another named row is restarted in place (SESS-557), or
+//     relaunched for a launch-only drift its provider can relaunch
+//     (SESS-556), each effect deferring on the row's use (SESS-555);
 //   - a pending interaction (SESS-558) or open assigned work (SESS-559):
 //     defer, A19's lenses canceling a cancelable drain;
-//   - a launch-only drift its provider can relaunch is C7b2's (SESS-560);
+//   - a launch-only drift its provider can relaunch is relaunched (SESS-560),
+//     falling back to the drain;
 //   - otherwise the config-drift drain (SESS-561), unless a stop request is
 //     active already.
 //
@@ -68,12 +73,8 @@ func armConfigDrift(r *rowFacts) (intent, bool) {
 		return r.liveApply(cfg)
 	}
 	key, now, obs := stored+":"+core, r.w.Now, r.w.Observed[r.k]
-	var sp runtime.Provider
-	if r.w.Env != nil {
-		sp = r.w.Env.SP
-	}
-	_, relaunchable := sp.(runtime.RelaunchProvider) // a conjoined runtime takes the full path
-	launchOnly := relaunchable && info.StartedProvisionHash != "" && info.StartedLaunchHash != "" &&
+	_, active := activeStop(r.row)
+	launchOnly := r.w.Env.relaunches() && info.StartedProvisionHash != "" && info.StartedLaunchHash != "" && // a conjoined runtime takes the full path
 		info.StartedProvisionHash == runtime.ProvisionFingerprint(cfg) && info.StartedLaunchHash != runtime.LaunchFingerprint(cfg)
 	switch {
 	case obs.Attached || obs.Uncertain:
@@ -88,16 +89,32 @@ func armConfigDrift(r *rowFacts) (intent, bool) {
 			return intent{}, false
 		}
 		return r.heal(intentRowHeal, decideDriftPinned, driftStamp(namedSessionConfigDriftDeferredAtMetadata, namedSessionConfigDriftDeferredKeyMetadata, key, now))
-	case isNamedSessionInfo(info), launchOnly: // C7b2's restart or relaunch
+	case isNamedSessionInfo(info):
+		return r.driftRestart(launchOnly)
+	case containsWakeReason(e.WakeReasons, WakePending) || e.AssignedWork != nil || active:
 		return intent{}, false
-	case containsWakeReason(e.WakeReasons, WakePending) || e.AssignedWork != nil:
-		return intent{}, false
+	case launchOnly:
+		return r.driftRestart(true)
 	}
-	if _, active := activeStop(r.row); active || !r.freshOwnAlive() { // the begin reads the runtime fresh
+	if !r.freshOwnAlive() { // the begin reads the runtime fresh
 		return intent{}, false
 	}
 	res, _ := r.w.Templates.lookup(info)
 	return r.drainBegin(drainConfigDrift, &events.Event{Type: events.SessionDraining, Actor: "gc", Subject: res.TP.DisplayName(), Message: "config drift detected", SessionID: info.ID})
+}
+
+// driftRestart is a drifted row's restart in place (SESS-557), or its
+// relaunch for a launch-only drift (SESS-556/560), on its own runtime,
+// which the effect reads fresh and stops through its fence; a named row's
+// effect first defers on its use (SESS-555).
+func (r *rowFacts) driftRestart(relaunch bool) (intent, bool) {
+	if !r.freshOwnAlive() {
+		return intent{}, false
+	}
+	if relaunch {
+		return r.heal(intentDriftRelaunch, decideDriftRelaunch, nil)
+	}
+	return r.heal(intentDriftRestart, decideDriftRestart, nil)
 }
 
 // liveApply is SESS-565: a live hash of this binary's version that differs

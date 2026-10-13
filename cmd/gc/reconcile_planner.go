@@ -6,6 +6,8 @@ import (
 	"io"
 	"maps"
 	"runtime/debug"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -126,9 +128,13 @@ type planner struct {
 	creates     *createEffects           // runs create effects on effects; nil defers creates (no-effect)
 	rec         events.Recorder          // settlements' events; nil records none
 	stranded    *strandedClaimAlerts     // the controller's session.stranded_claims alerter
-	stderr      io.Writer
-	metrics     *passMetrics
-	emitRecord  func(fields map[string]any) // the reconcile.pass record; nil emits none
+	// classified is each row's last classified dead runtime, by its token
+	// (A12, the start's recycle; v5 S5, X10): in memory, so a restart
+	// classifies once more.
+	classified map[rowKey]classifiedRuntime
+	stderr     io.Writer
+	metrics    *passMetrics
+	emitRecord func(fields map[string]any) // the reconcile.pass record; nil emits none
 
 	// observations is the cache a fresh read's Noted fact is written to; nil
 	// notes none. capacity is the endpoint breaker a start admits its ticket
@@ -147,6 +153,9 @@ type planner struct {
 	// not yet synced (A7's runtime-alias sync): set by the write's fact,
 	// cleared when the sync settles.
 	aliasOwed map[rowKey]bool
+	// idle is A15's memory (idleState), lost on restart as legacy's
+	// trackers are.
+	idle idleMemory
 	// idleProbes are the idle begins submitted to prove an agent idle, by
 	// row, which paceIdleProbes holds a patrol apart.
 	idleProbes map[rowKey]idleProbe
@@ -155,7 +164,11 @@ type planner struct {
 	obs        passObserver
 
 	// stalled holds the execution-stalled requests by row ID for arm A16
-	// (C7b1); C8's step posts them to stalledPosted under stalledMu.
+	// (C7b1); C8's step posts them to stalledPosted under stalledMu. A
+	// request is one-shot: it goes once its drain begin lands, so an
+	// operator who resumes the row is not drained again from it. A
+	// re-trigger is the backstop's new request, which its latch holds to
+	// one per instance token per 30 minutes (stalledLatchHolds), as legacy's.
 	softReload    atomic.Pointer[softReloadRequest] // the open soft reload (M2)
 	stalled       map[string]executionStalledRequest
 	stalledMu     sync.Mutex
@@ -206,8 +219,16 @@ func (p *planner) postExecutionStalled(r executionStalledRequest) {
 }
 
 // executionStalled folds the posted requests into the planner's, newest per
-// row, forgets rows a complete c holds closed, and returns the pass's copy.
-func (p *planner) executionStalled(c *sessionCensus) map[string]executionStalledRequest {
+// row, forgets the spent ones, and returns the pass's copy. A request is
+// spent (C7b1 one-shot, mc-uinl0 ruling) when a complete c holds its row
+// closed; when the pass reads its row, at the request's generation, with the
+// execution-stalled stop request on it (its begin landed, whatever its
+// settlement said), dormant, or with its runtime gone or a corpse (obs at
+// now within maxAge, on a pass started after the post), which is where
+// legacy's tracked drain completes; or 30
+// minutes after it was posted, the backstop latch's re-post cadence
+// (executionStalledLatchRetryAfter). A stall that persists is posted again.
+func (p *planner) executionStalled(c *sessionCensus, obs *ObservationSnapshot, now time.Time, maxAge time.Duration) map[string]executionStalledRequest {
 	p.stalledMu.Lock()
 	posted := p.stalledPosted
 	p.stalledPosted = nil
@@ -221,16 +242,52 @@ func (p *planner) executionStalled(c *sessionCensus) map[string]executionStalled
 	if len(p.stalled) == 0 {
 		return nil
 	}
+	rows := make(map[string]censusRow, len(p.stalled))
+	for _, row := range c.Canonical() {
+		if _, ok := p.stalled[row.Info.ID]; ok {
+			rows[row.Info.ID] = row
+		}
+	}
 	complete, ok := c.complete()
 	out := make(map[string]executionStalledRequest, len(p.stalled))
 	for id, r := range p.stalled {
-		if ok && complete.ClosedID(id) {
+		row, found := rows[id]
+		switch {
+		case ok && complete.ClosedID(id),
+			!r.At.IsZero() && now.Sub(r.At) >= executionStalledLatchRetryAfter,
+			found && stallRequestSpentOn(r, row, obs, now, maxAge):
 			delete(p.stalled, id)
 			continue
 		}
 		out[id] = r
 	}
 	return out
+}
+
+// stallRequestSpentOn reports whether row, read by this pass at r's
+// generation, has spent r: the execution-stalled stop request is on it, it
+// is dormant, or its runtime is gone or a corpse.
+func stallRequestSpentOn(r executionStalledRequest, row censusRow, obs *ObservationSnapshot, now time.Time, maxAge time.Duration) bool {
+	gen, _ := strconv.ParseInt(strings.TrimSpace(r.Generation), 10, 64) // an empty generation reads 0, as A16's
+	if gen != row.Incarnation {
+		return false
+	}
+	if req, active := activeStop(row); active && req.Reason == executionStalledDrainReason { // at the row's generation, gen
+		return true
+	}
+	if !sessionBeadClaimsLiveRuntime(row.Info) {
+		return true
+	}
+	// Absence or a corpse spends it only on a pass that started after the
+	// post: an older listing may predate the runtime the backstop judged.
+	if obs == nil || !obs.Inventory.StartedAt.After(r.At) {
+		return false
+	}
+	switch readRuntimeName(obs, row.Info.SessionName, now, maxAge).state {
+	case nameAbsent, nameCorpse:
+		return true
+	}
+	return false
 }
 
 // aliasOwedFor forgets the owed runtime-alias syncs of rows a complete c
@@ -360,6 +417,9 @@ func (p *planner) drainSettlements(now time.Time) {
 				delete(p.aliasOwed, s.Key)
 			}
 		}
+		if s.Kind == intentDrainBegin && s.Reason == decideDrainBegin+executionStalledDrainReason && s.Outcome == settledLanded {
+			delete(p.stalled, s.Key.ID) // its drain begin landed: the request is spent
+		}
 	}
 	for _, s := range items {
 		p.applyFacts(s.Facts, s.At)
@@ -383,6 +443,9 @@ func (p *planner) applyFacts(f effectFacts, at time.Time) {
 	if f.Quarantined != "" {
 		recordAgentQuarantine(context.Background(), f.Quarantined)
 	}
+	if f.IdleKilled != "" {
+		recordAgentIdleKill(context.Background(), f.IdleKilled)
+	}
 	if f.AliasOwed != nil {
 		p.aliasOwed[*f.AliasOwed] = true
 	}
@@ -396,6 +459,12 @@ func (p *planner) applyFacts(f effectFacts, at time.Time) {
 	default:
 		p.backoff.Succeed(workBackoffKey(f.Work.BeadID))
 	}
+	if c := f.Classified; c != nil {
+		if p.classified == nil {
+			p.classified = make(map[rowKey]classifiedRuntime)
+		}
+		p.classified[c.Key] = *c
+	}
 	if n := f.Noted; n != nil && p.observations != nil {
 		if cache := p.observations(); cache != nil {
 			// Listed, running and the agent alive, at the read's issue time,
@@ -407,12 +476,15 @@ func (p *planner) applyFacts(f effectFacts, at time.Time) {
 	}
 }
 
-// recordDrainTransition, recordAgentQuarantine and recordAgentStop are
-// legacy's drain, quarantine and stop telemetry; a test reads them.
+// recordDrainTransition, recordAgentQuarantine, recordAgentIdleKill and
+// recordAgentStop are legacy's drain, quarantine, idle-kill and stop
+// telemetry; a test reads them.
 var (
 	recordDrainTransition = telemetry.RecordDrainTransition
 	recordAgentQuarantine = telemetry.RecordAgentQuarantine
+	recordAgentIdleKill   = telemetry.RecordAgentIdleKill
 	recordAgentStop       = telemetry.RecordAgentStop
+	recordAgentCrash      = telemetry.RecordAgentCrash // the recycle's and A12's crash metric
 )
 
 // record records ev, counting the stop-outstanding alerts (v5 D6) for the
@@ -433,15 +505,21 @@ func (p *planner) record(ev events.Event) {
 // resets its record; a refusal (a landing with a cause, a heal written in a
 // refusal's stead, included), failure or ambiguous outcome (an abandoned
 // write) backs it off with its cause, except a swap pause and an endpoint-gate
-// refusal, deferrals the gate itself paces.
+// refusal, deferrals the gate itself paces. A drift's landing, its restart
+// or its bounded deferral's stamp (whose bound paces what follows), and a
+// row's plain start each end the drift's episode: its record resets.
 func (p *planner) backoffSettled(s settlement) {
 	key := s.BackoffKey
 	if key == "" && s.Key.ID != "" {
-		key = rowBackoffKey(s.Key)
+		key = settledBackoffKey(s.Kind, s.Reason, s.Key)
+	}
+	drift := s.Key.ID != "" && key == driftBackoffKey(s.Key)
+	if s.Kind == intentStart && s.Outcome == settledLanded && s.Cause == "" && s.Key.ID != "" {
+		p.backoff.Succeed(driftBackoffKey(s.Key))
 	}
 	switch {
 	case key == "":
-	case s.Outcome == settledLanded && s.Cause == "" || s.Outcome == settledNoop:
+	case s.Outcome == settledLanded && (s.Cause == "" || drift) || s.Outcome == settledNoop:
 		p.backoff.Succeed(key)
 	case (s.Outcome == settledRefused || s.Outcome == settledLanded || s.Outcome == settledFailed || s.Outcome == settledAmbiguous) && s.Cause != causeSwapPause && s.Cause != causeEndpointGate && s.Cause != causeCapacity:
 		p.backoff.Refuse(key, s.At, time.Time{}, s.Cause, s.Fingerprint)
@@ -531,3 +609,17 @@ type realPlannerTimer struct{ t *time.Timer }
 func (r realPlannerTimer) C() <-chan time.Time   { return r.t.C }
 func (r realPlannerTimer) Reset(d time.Duration) { r.t.Reset(d) }
 func (r realPlannerTimer) Stop()                 { r.t.Stop() }
+
+// classifiedOf is the planner's classified memory for the census's rows,
+// forgetting a row that left the census or whose runtime the pass reads
+// alive or gone (SESS-090: a runtime that recovers and dies again is
+// classified again).
+func (p *planner) classifiedOf(c *sessionCensus, observed map[rowKey]rowObservation) map[rowKey]classifiedRuntime {
+	for k := range p.classified {
+		_, ok := c.Rows[k]
+		if l := observed[k].Liveness; !ok || l == livenessAlive || l == livenessGone {
+			delete(p.classified, k)
+		}
+	}
+	return maps.Clone(p.classified)
+}

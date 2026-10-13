@@ -69,7 +69,7 @@ const BeadType = "session"
 const LabelSession = "gc:session"
 
 // MetadataLastNudgeDeliveredAt is the session-bead metadata key that records
-// the wall-clock time of the most recent successful queued-nudge delivery.
+// the wall-clock time of the most recent successful nudge delivery.
 const MetadataLastNudgeDeliveredAt = "last_nudge_delivered_at"
 
 // Info holds the user-facing details of a chat session.
@@ -1595,15 +1595,24 @@ func (m *Manager) CloseDetailed(ctx context.Context, by Actor, id string) (Close
 			log.Printf("session %s: closing after capped wait cancellation lookup", id)
 		}
 		result.WaitNudgeIDs = append(result.WaitNudgeIDs, nudgeIDs...)
-		if err := m.clearWakeAndHoldOverrides(id, b.Metadata); err != nil {
-			return err
-		}
-		if err := m.retireConfiguredNamedSessionIdentifiers(id, b); err != nil {
-			return err
-		}
-
-		if err := m.store.Close(id); err != nil {
-			return err
+		// One terminal close (op.close): the holds go as a retired row's (the
+		// disposition's Retire cell), with the wake pin and a configured
+		// named session's identifiers, on the incarnation this close stopped.
+		terminal := retiredIdentifiersPatch(b)
+		terminal["pin_awake"] = ""
+		terminal = CellInto(id, b.Metadata, ActorController, DispEvent{Kind: EvRetire}, m.now(), terminal)
+		// Past a kill fence: the operator's close ends the session a kill was
+		// tearing down, as it did before CommitClose.
+		res, err := NewStore(beads.SessionStore{Store: m.store}).CommitClose(Decide(infoFromPersistedBead(b), FactsOpClose), terminal, m.now(), CommitPastKillFence())
+		switch {
+		case err != nil:
+			return fmt.Errorf("closing session %s: %w", id, err)
+		case res == CommitMoved:
+			return fmt.Errorf("closing session %s: %w", id, ErrSessionCloseSuperseded)
+		case res == CommitContended:
+			return fmt.Errorf("closing session %s: lost the revision fence %d times", id, terminalCloseMaxAttempts)
+		case res != CommitLanded && res != CommitClosed:
+			return fmt.Errorf("closing session %s: refused (%s)", id, res)
 		}
 		_ = clearRuntimeMCPServersSnapshot(m.cityPath, id)
 		return nil
@@ -1611,48 +1620,34 @@ func (m *Manager) CloseDetailed(ctx context.Context, by Actor, id string) (Close
 	return result, err
 }
 
-func (m *Manager) clearWakeAndHoldOverrides(id string, meta map[string]string) error {
-	// The holds go as a retired row's (the disposition's Retire cell).
-	update := CellInto(id, meta, ActorController, DispEvent{Kind: EvRetire}, m.now(), MetadataPatch{"pin_awake": ""})
-	if err := m.store.SetMetadataBatch(id, update); err != nil {
-		return fmt.Errorf("clearing wake and hold overrides: %w", err)
-	}
-	return nil
-}
-
-func (m *Manager) retireConfiguredNamedSessionIdentifiers(id string, b beads.Bead) error {
-	// Recognize configured named sessions by flag OR identity so a
-	// partially-tagged bead (identity recorded, boolean flag absent) still
-	// releases its reserved runtime name on close instead of stranding the
-	// name and blocking respawn (ga-841).
+// retiredIdentifiersPatch frees a configured named session's identifiers on
+// its close: its aliases, runtime name and canonical identity record, as
+// RetireNamedSessionPatch does. Recognized by flag OR identity, so a
+// partially-tagged bead (identity recorded, boolean flag absent) still
+// releases its reserved runtime name instead of stranding it and blocking
+// respawn (ga-841). Any other row's is empty.
+func retiredIdentifiersPatch(b beads.Bead) MetadataPatch {
 	if !wasConfiguredNamedSession(b) {
-		return nil
+		return MetadataPatch{}
 	}
-	update := beads.UpdateOpts{
-		Metadata: UpdatedAliasMetadata(b.Metadata, ""),
-	}
-	update.Metadata["session_name"] = ""
-	update.Metadata["session_name_explicit"] = ""
-	update.Metadata["pending_create_claim"] = ""
-	update.Metadata["pending_create_started_at"] = ""
-	// Free the durable canonical-identity record on this close path too, matching
-	// RetireNamedSessionPatch. Without it a configured named session closed via
-	// Manager.Close keeps a stale canonical instance name / pool slot — the same
-	// strand class the S19 retirement fix removed for the duplicate/removed/API
-	// paths, which this hand-rolled path is not one of.
-	freeCanonicalIdentityMetadata(update.Metadata)
-	if err := m.store.Update(id, update); err != nil {
-		return fmt.Errorf("retiring configured named session identifiers: %w", err)
-	}
-	return nil
+	patch := MetadataPatch(UpdatedAliasMetadata(b.Metadata, ""))
+	patch["session_name"] = ""
+	patch["session_name_explicit"] = ""
+	patch["pending_create_claim"] = ""
+	patch["pending_create_started_at"] = ""
+	freeCanonicalIdentityMetadata(patch)
+	return patch
 }
 
 // Kill force-kills the runtime process for a session without changing bead
 // state. This is intended for manual intervention; the reconciler will detect
 // the dead process and restart it according to the session's lifecycle rules.
-// Like Close, it is a cleanup path: a session that is already gone is the
-// outcome Kill was asked for, so it reports success rather than surfacing the
-// provider's "nothing to stop" answer to the operator.
+// Like Close, it is a cleanup path: a runtime that is already gone when Kill
+// stops it is the outcome Kill was asked for, so it reports success rather
+// than surfacing the provider's "nothing to stop" answer to the operator. A
+// session whose state is not live and whose runtime is not running is
+// refused before the stop with ErrSessionInactive, wrapped; each caller
+// decides whether that already satisfies its request.
 //
 // It runs under the session's runtime lease: by.Lease, or one taken in by's
 // mode, an operator's waited for up to RuntimeLeaseOperatorWait.
@@ -1673,7 +1668,7 @@ func (m *Manager) Kill(ctx context.Context, by Actor, id string) error {
 		// Known live states — proceed.
 	default:
 		if !m.sp.IsRunning(sessName) {
-			return fmt.Errorf("session %s is not active", id)
+			return fmt.Errorf("session %s: %w", id, ErrSessionInactive)
 		}
 	}
 	release, err := m.leaseForStop(ctx, by, id, sessName, operatorLeaseWait)

@@ -130,25 +130,40 @@ func bdReadyIncludeEphemeralArg(includeEphemeralReady bool) string {
 	return ""
 }
 
-// holdLabelMatchCondsJQ renders the jq boolean expression that tests whether
-// the label currently in scope (`.`) is one of the beadmeta.DispatchHoldLabels
-// values, e.g. `. == "hold:mayor" or . == "hold:external"`. Shared by every
-// jq-based hold filter so the label set is spelled exactly once.
-func holdLabelMatchCondsJQ() string {
-	conds := make([]string, len(beadmeta.DispatchHoldLabels))
-	for i, label := range beadmeta.DispatchHoldLabels {
+// labelMatchCondsJQ renders the jq boolean expression that tests whether the
+// label currently in scope (`.`) is one of labels, e.g.
+// `. == "hold:mayor" or . == "human"`.
+func labelMatchCondsJQ(labels []string) string {
+	conds := make([]string, len(labels))
+	for i, label := range labels {
 		conds[i] = `. == "` + label + `"`
 	}
 	return strings.Join(conds, " or ")
 }
 
-// excludeHoldLabelsJQClause returns a jq select(...) clause dropping beads
-// that carry any beadmeta.DispatchHoldLabels value, for jq-based pool-demand
-// filters that have no bd-side --exclude-label flag to lean on. Mirrors the
-// bracketed-count style of the dependency-blocking select above it so both
-// clauses read the same way (ga-x9kptu / ga-5736js).
+// holdLabelMatchCondsJQ is labelMatchCondsJQ over the
+// beadmeta.DispatchHoldLabels values, e.g.
+// `. == "hold:mayor" or . == "hold:external"`. Shared by every jq-based hold
+// filter so the label set is spelled exactly once.
+func holdLabelMatchCondsJQ() string {
+	return labelMatchCondsJQ(beadmeta.DispatchHoldLabels)
+}
+
+// excludeLabelsJQClause returns a jq select(...) clause dropping beads that
+// carry any of labels, for jq-based filters that have no bd-side
+// --exclude-label flag to lean on. Mirrors the bracketed-count style of the
+// dependency-blocking select above it so both clauses read the same way
+// (ga-x9kptu / ga-5736js).
+func excludeLabelsJQClause(labels []string) string {
+	return ` | select(([ (.labels // [])[] | select(` + labelMatchCondsJQ(labels) + `) ] | length) == 0)`
+}
+
+// excludeHoldLabelsJQClause is excludeLabelsJQClause over the
+// beadmeta.DispatchHoldLabels values alone, for the assignee-scoped in_progress
+// probes: they must drop a held bead and nothing else, so they never take the
+// pool-demand serve rules' wider label set.
 func excludeHoldLabelsJQClause() string {
-	return ` | select(([ (.labels // [])[] | select(` + holdLabelMatchCondsJQ() + `) ] | length) == 0)`
+	return excludeLabelsJQClause(beadmeta.DispatchHoldLabels)
 }
 
 // heldLabelCountJQ counts how many beadmeta.DispatchHoldLabels values the FIRST
@@ -190,7 +205,8 @@ type PoolDemandServeRules struct {
 	// ExcludeTypes mirrors --exclude-type: issue types the tier never serves.
 	ExcludeTypes []string
 	// ExcludeLabels mirrors the repeated --exclude-label flags: the dispatch
-	// holds a worker is deliberately forbidden to claim through.
+	// holds, and bd's native human label, that a worker is deliberately
+	// forbidden to claim through.
 	ExcludeLabels []string
 }
 
@@ -201,7 +217,7 @@ func PoolDemandServeRulesForQuery() PoolDemandServeRules {
 	return PoolDemandServeRules{
 		RequireUnassigned: true,
 		ExcludeTypes:      []string{"epic"},
-		ExcludeLabels:     append([]string(nil), beadmeta.DispatchHoldLabels...),
+		ExcludeLabels:     append(append([]string(nil), beadmeta.DispatchHoldLabels...), beadmeta.HumanLabel),
 	}
 }
 
@@ -288,15 +304,17 @@ func ephemeralStatusSnapshotShell(shellVar, status string) string {
 
 // ephemeralReadyBaseSelectorJQ composes the selector clauses shared by every
 // ephemeral ready-tier filter: the caller's own assignee/routing selector,
-// plus the epic exclusion and optional hold-label exclusion every variant
-// applies alike. Dependency gating is layered on top by each caller, since
-// `bd query --json` exposes only a `dependency_count` scalar — never a
-// `dependencies` array — which is precise enough to prove "definitely no
-// dependencies" but not to resolve whether a nonzero count is still open.
-func ephemeralReadyBaseSelectorJQ(selector string, excludeHoldLabels bool) string {
+// plus the epic exclusion and, when excludeServeLabels is set, the exclusion of
+// every label the routed pool-demand tier refuses
+// (PoolDemandServeRules.ExcludeLabels). Only the route-scoped tier sets it.
+// Dependency gating is layered on top by each caller, since `bd query --json`
+// exposes only a `dependency_count` scalar — never a `dependencies` array —
+// which is precise enough to prove "definitely no dependencies" but not to
+// resolve whether a nonzero count is still open.
+func ephemeralReadyBaseSelectorJQ(selector string, excludeServeLabels bool) string {
 	body := selector + ` | select(((.issue_type // .type // "") != "epic"))`
-	if excludeHoldLabels {
-		body += excludeHoldLabelsJQClause()
+	if excludeServeLabels {
+		body += excludeLabelsJQClause(PoolDemandServeRulesForQuery().ExcludeLabels)
 	}
 	return body
 }
@@ -308,8 +326,8 @@ func ephemeralReadyBaseSelectorJQ(selector string, excludeHoldLabels bool) strin
 // pairs it with ephemeralReadyDependencyCandidateFilterJQ's real bd show
 // enrichment for the dependency_count > 0 case, so a step whose dependencies
 // have since all closed is still reachable instead of withheld forever.
-func legacyEphemeralReadyFilterJQ(selector string, limit int, excludeHoldLabels bool) string {
-	body := ephemeralReadyBaseSelectorJQ(selector, excludeHoldLabels) +
+func legacyEphemeralReadyFilterJQ(selector string, limit int, excludeServeLabels bool) string {
+	body := ephemeralReadyBaseSelectorJQ(selector, excludeServeLabels) +
 		` | select(((.dependency_count // 0) == 0))`
 	filter := `[.[] | ` + body + `]` + ` | sort_by(.created_at // "", .id // "")`
 	if limit > 0 {
@@ -323,8 +341,8 @@ func legacyEphemeralReadyFilterJQ(selector string, limit int, excludeHoldLabels 
 // withheld (dependency_count > 0) so the caller can enrich them with a real
 // bd show --json call via inProgressBlockedByEnrichmentScript and decide
 // readiness precisely, instead of leaving them permanently unservable.
-func ephemeralReadyDependencyCandidateFilterJQ(selector string, limit int, excludeHoldLabels bool) string {
-	body := ephemeralReadyBaseSelectorJQ(selector, excludeHoldLabels) +
+func ephemeralReadyDependencyCandidateFilterJQ(selector string, limit int, excludeServeLabels bool) string {
+	body := ephemeralReadyBaseSelectorJQ(selector, excludeServeLabels) +
 		` | select(((.dependency_count // 0) > 0))`
 	filter := `[.[] | ` + body + `]` + ` | sort_by(.created_at // "", .id // "")`
 	if limit > 0 {

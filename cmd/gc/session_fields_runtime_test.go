@@ -260,8 +260,8 @@ func TestSessionFieldsFlowsWriteTheirKeys(t *testing.T) {
 		{"operator suspend", "held_until runtime_lease_epoch runtime_lease_expires_at runtime_lease_flock runtime_lease_holder runtime_lease_ttl sleep_intent sleep_reason slept_at state suspended_at wake_request wake_requested_at", []string{"internal/session/manager.go:Manager.Suspend", "internal/session/runtime_lease.go:RuntimeLease.acquireRecord"}, func(t *testing.T, _ *sessionKeyRecorder) {
 			must(t, m.Suspend(context.Background(), testActorIn(t, session.ActorOperator, opCity), id, false))
 		}},
-		{"operator kill fence", "held_until last_woke_at pending_create_claim pending_create_started_at sleep_intent sleep_reason slept_at state state_reason suspended_at synced_at wake_request wake_requested_at", []string{"internal/session/kill_fence.go:KillPendingPatch", "cmd/gc/cmd_session_kill_fence.go:writeSessionKillFence"}, func(t *testing.T, rec *sessionKeyRecorder) {
-			_, err := writeSessionKillFence(rec, id, now)
+		{"operator kill fence", "held_until last_woke_at pending_create_claim pending_create_started_at sleep_intent sleep_reason slept_at state state_reason suspended_at synced_at wake_request wake_requested_at", []string{"internal/session/kill_fence.go:KillPendingPatch", "internal/session/kill_fence.go:WriteKillFence"}, func(t *testing.T, rec *sessionKeyRecorder) {
+			_, err := session.WriteKillFence(rec, id, now)
 			must(t, err)
 		}},
 		{"operator set state", "state state_reason", []string{"internal/session/store.go:Store.SetState"}, func(t *testing.T, rec *sessionKeyRecorder) {
@@ -413,12 +413,18 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 				return session.ConfigDriftAsleepResetPatch("key")
 			}),
 		},
+		"internal/session/lifecycle_transition.go:ConfigDriftRestartPatch": {
+			[]string{"restart_requested", "true"},
+			patchSite(func(session.Info) session.MetadataPatch {
+				return session.ConfigDriftRestartPatch("key", now)
+			}),
+		},
 		"internal/session/kill_fence.go:KillPendingPatch": {
 			[]string{"wake_request", "explicit", "wake_requested_at", ago(time.Minute)},
 			patchSite(func(session.Info) session.MetadataPatch { return session.KillPendingPatch(now) }),
 		},
 		"internal/session/resume_user_hold.go:Manager.consumeUserHold": {
-			[]string{"state", "suspended", "sleep_intent", "user-hold", "held_until", ago(-time.Hour), "suspended_at", ago(time.Minute), "provider", "claude"},
+			append([]string{"state", "suspended", "sleep_intent", "user-hold", "held_until", ago(-time.Hour), "suspended_at", ago(time.Minute), "provider", "claude"}, staleStopRequest()...),
 			func(t *testing.T, meta []string) map[string]string {
 				m, _ := stampedMem(t, gate.Require)
 				id := fieldRow(t, m, meta...)
@@ -429,23 +435,35 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 				return fieldBead(t, m, id).Metadata
 			},
 		},
-		"cmd/gc/cmd_session_kill_fence.go:writeSessionKillFence": {
-			[]string{"state", "active", "sleep_intent", "user-hold", "held_until", ago(-time.Hour), "suspended_at", ago(time.Minute)},
+		"internal/session/chat.go:Manager.confirmLiveSessionState": { // an operator's attach starts the runtime
+			append([]string{"state", "asleep", "provider", "claude"}, staleStopRequest()...),
 			func(t *testing.T, meta []string) map[string]string {
 				m, _ := stampedMem(t, gate.Require)
 				id := fieldRow(t, m, meta...)
-				if _, err := writeSessionKillFence(m, id, now); err != nil {
+				city := t.TempDir()
+				if err := session.NewManagerWithOptions(m, runtime.NewFake(), session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), id, "claude", runtime.Config{}); err != nil {
 					t.Fatal(err)
 				}
 				return fieldBead(t, m, id).Metadata
 			},
 		},
-		"cmd/gc/cmd_session_kill_fence.go:killSleepPatch": {
+		"internal/session/kill_fence.go:WriteKillFence": {
+			[]string{"state", "active", "sleep_intent", "user-hold", "held_until", ago(-time.Hour), "suspended_at", ago(time.Minute)},
+			func(t *testing.T, meta []string) map[string]string {
+				m, _ := stampedMem(t, gate.Require)
+				id := fieldRow(t, m, meta...)
+				if _, err := session.WriteKillFence(m, id, now); err != nil {
+					t.Fatal(err)
+				}
+				return fieldBead(t, m, id).Metadata
+			},
+		},
+		"internal/session/kill_fence.go:KillSleepPatch": {
 			[]string{"state", "suspended", "sleep_intent", "user-hold", "held_until", ago(-time.Hour)},
 			func(t *testing.T, meta []string) map[string]string {
 				m, _ := stampedMem(t, gate.Require)
 				id := fieldRow(t, m, meta...)
-				if err := m.SetMetadataBatch(id, killSleepPatch(id, fieldBead(t, m, id).Metadata, now)); err != nil {
+				if err := m.SetMetadataBatch(id, session.KillSleepPatch(id, fieldBead(t, m, id).Metadata, now)); err != nil {
 					t.Fatal(err)
 				}
 				return fieldBead(t, m, id).Metadata
@@ -552,6 +570,25 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 			[]string{session.DrainAckIncarnationKey, "3", session.DrainAckAtKey, ago(time.Minute)},
 			patchSite(func(session.Info) session.MetadataPatch { return stopVoidResiduePatch() }),
 		},
+		"cmd/gc/reconcile_stop_request.go:stopEndPatch": {
+			[]string{session.DrainAckIncarnationKey, "3", session.DrainAckAtKey, ago(time.Minute), session.OperatorDrainKey, "3"},
+			patchSite(func(session.Info) session.MetadataPatch { return stopEndPatch() }),
+		},
+		"cmd/gc/reconcile_stop_request.go:operatorUndrainPatch": {
+			[]string{session.OperatorDrainKey, "3"},
+			func(t *testing.T, meta []string) map[string]string {
+				m, _ := stampedMem(t, gate.Require)
+				id := fieldRow(t, m, meta...)
+				if err := clearOperatorDrainRow(m, id); err != nil {
+					t.Fatal(err)
+				}
+				return fieldBead(t, m, id).Metadata
+			},
+		},
+		"cmd/gc/reconcile_stop_request.go:stopAckVoidPatch": {
+			[]string{session.DrainAckIncarnationKey, "3", session.DrainAckAtKey, ago(time.Minute)},
+			patchSite(func(session.Info) session.MetadataPatch { return stopAckVoidPatch() }),
+		},
 	}
 	declared := map[string][]string{} // a built clear site -> the keys it must clear
 	pending := map[string]bool{}      // a built site whose clear is still pending
@@ -638,4 +675,60 @@ func wholeDispositionClass(keys map[string]string) bool {
 		}
 	}
 	return true
+}
+
+// staleStopRequest is both halves of a stop request on a row, as a runtime
+// that acked before its row was restarted left it.
+func staleStopRequest() []string {
+	return []string{
+		session.DrainIntentReasonKey, "idle", session.DrainIntentAtKey, rowAt(-time.Hour), session.DrainIntentIncarnationKey, "3",
+		session.DrainAckIncarnationKey, "3", session.DrainAckAtKey, rowAt(-time.Hour),
+		session.OperatorDrainKey, "3",
+	}
+}
+
+// TestRestartClearWritesOnlyHeldStopKeys (#7635 review S5, S4). Kills a
+// restart clear that writes the stop request's keys on every start, or one
+// that runs on an attach that starts nothing: an operator's attach that
+// starts a row holding no stop request writes none of its five keys; an
+// operator's resume of a live row it holds (the user-hold consume, no
+// start) keeps a stop request the running runtime owns.
+func TestRestartClearWritesOnlyHeldStopKeys(t *testing.T) {
+	stopKeys := []string{session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey, session.DrainAckIncarnationKey, session.DrainAckAtKey}
+	t.Run("S5 a start with no request", func(t *testing.T) {
+		m, _ := stampedMem(t, gate.Require)
+		rec := newSessionKeyRecorder(m)
+		id := fieldRow(t, rec, "state", "asleep", "provider", "claude")
+		rec.reset()
+		city := t.TempDir()
+		if err := session.NewManagerWithOptions(rec, runtime.NewFake(), session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), id, "claude", runtime.Config{}); err != nil {
+			t.Fatal(err)
+		}
+		for _, k := range stopKeys {
+			if how, ok := rec.keys[k]; ok {
+				t.Errorf("the start wrote %s (%s), want no stop-request key written", k, how)
+			}
+		}
+	})
+	t.Run("S4 a held live row's resume", func(t *testing.T) {
+		m, _ := stampedMem(t, gate.Require)
+		id := fieldRow(t, m, append([]string{"state", "active", "sleep_intent", "user-hold", "held_until", rowAt(time.Hour), "provider", "claude"}, staleStopRequest()...)...)
+		sp := runtime.NewFake()
+		if err := sp.Start(context.Background(), "s-row", runtime.Config{}); err != nil {
+			t.Fatal(err)
+		}
+		city := t.TempDir()
+		if err := session.NewManagerWithOptions(m, sp, session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), id, "claude", runtime.Config{}); err != nil {
+			t.Fatal(err)
+		}
+		got := fieldBead(t, m, id).Metadata
+		if got["sleep_intent"] != "" {
+			t.Fatalf("row %v: the resume did not consume the hold, so this case proves nothing", got)
+		}
+		for _, k := range stopKeys {
+			if got[k] == "" {
+				t.Errorf("the resume of a running row cleared %s, want the running runtime's request kept", k)
+			}
+		}
+	})
 }

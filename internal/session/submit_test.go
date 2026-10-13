@@ -431,6 +431,57 @@ func TestSubmitDefaultToRunningGeminiSessionWaitsForIdleNudge(t *testing.T) {
 	}
 }
 
+// TestSubmitDefaultTreatsDeliveredUnobservedNudgeAsDelivered: a provider that
+// proved delivery but never observed the turn start reports
+// runtime.ErrNudgeDeliveredUnobserved. tmux does so when a Claude turn outlasts
+// its idle wait and Claude queues the message. Submit must succeed: an error
+// fails the CLI and the API, rolls back create-with-message, and a retry
+// delivers the message twice. An unconfirmed submit stays a failure.
+func TestSubmitDefaultTreatsDeliveredUnobservedNudgeAsDelivered(t *testing.T) {
+	tests := []struct {
+		name     string
+		nudgeErr error
+		wantErr  error
+	}{
+		{"runtime sentinel", runtime.ErrNudgeDeliveredUnobserved, nil},
+		{"tmux delivered-unobserved", fmt.Errorf("%w: session %q", tmux.ErrNudgeSubmitDeliveredUnobserved, "helper"), nil},
+		{"tmux unconfirmed stays a failure", fmt.Errorf("%w: session %q", tmux.ErrNudgeSubmitUnconfirmed, "helper"), tmux.ErrNudgeSubmitUnconfirmed},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			sp := runtime.NewFake()
+			mgr := newTestManager(t, store, sp)
+
+			info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			sp.NudgeErrors = map[string]error{info.SessionName: tt.nudgeErr}
+
+			outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault)
+			switch {
+			case tt.wantErr == nil && err != nil:
+				t.Fatalf("Submit(default) = %v, want nil (delivery was proven)", err)
+			case tt.wantErr != nil && !errors.Is(err, tt.wantErr):
+				t.Fatalf("Submit(default) = %v, want %v", err, tt.wantErr)
+			}
+			if outcome.Queued {
+				t.Fatal("Submit(default) unexpectedly queued")
+			}
+			nudges := 0
+			for _, call := range sp.Calls {
+				if (call.Method == "Nudge" || call.Method == "NudgeNow") && call.Name == info.SessionName {
+					nudges++
+				}
+			}
+			if nudges != 1 {
+				t.Fatalf("nudges = %d, want 1; calls = %#v", nudges, sp.Calls)
+			}
+		})
+	}
+}
+
 func TestSubmitDefaultConfirmsLiveCreatingSession(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()

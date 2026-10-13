@@ -28,11 +28,14 @@ const (
 	intentRekey           = "rekey"             // S4
 	intentLiveApply       = "live-apply"        // A14's RunLive (SESS-565)
 	intentDriftRepair     = "drift-repair"      // A14's asleep named repair (SESS-566/568): a fresh heal of its own kind
+	intentDriftRestart    = "drift-restart"     // A14's named restart in place (SESS-557), on the stop verb
+	intentDriftRelaunch   = "drift-relaunch"    // A14's launch-only relaunch (SESS-556/560), falling back to the restart or the drain
 	intentZombie          = "zombie"            // A12's classification (S5)
 	intentDrainBegin      = "drain-begin"       // D1, D2
 	intentDrainBeginFresh = "drain-begin-fresh" // a begin that reads fresh legs (F4) or re-proves idleness
 	intentSignal          = "signal"            // D2
 	intentSignalFresh     = "signal-fresh"      // a signal that reads fresh legs or revalidates claims
+	intentSignalAck       = "signal-ack"        // A11's: reads the runtime, to void an ack older than it
 	intentDrainCancel     = "drain-cancel"      // A19
 	intentDrainVoid       = "drain-void"        // A19
 	intentStop            = "stop"              // the stop verb with its finalize (D3, D4)
@@ -156,6 +159,14 @@ type intent struct {
 	Kept session.MetadataPatch
 	// Closing is a close's kind and kept assignees (A21).
 	Closing closeSpec
+	// Relaunch marks A10's StaleSelf exit for a configured named row (v5
+	// S7): the rollback stops its own runtime and keeps the row, which A18
+	// relaunches on the same bead.
+	Relaunch bool
+	// Occupant marks an A10 rollback that rests on another runtime under
+	// the row's name: Occupied (another row's) or S7's StaleSelf. The
+	// effect rolls back only while its fresh read still finds one (F1).
+	Occupant bool
 	// Rests are the fresh facts the decision rests on, which only a fresh
 	// kind's arm records: its effect reads them and decides again on them.
 	Rests rests
@@ -355,13 +366,16 @@ func (a *admission) admitOne(it *intent) string {
 		a.seen[it.Key] = true
 	}
 	spec, ok := effectSpecs[it.Kind]
-	backoff := a.in.Backoff[rowBackoffKey(it.Key)]
+	backoff, own := a.in.Backoff[rowBackoffKey(it.Key)], backoffRecord{}
+	if k := settledBackoffKey(it.Kind, it.Reason, it.Key); k != rowBackoffKey(it.Key) {
+		own = a.in.Backoff[k] // a drift kind's or an idle stop's own key holds it alone
+	}
 	switch {
 	case !ok:
 		return causeUnknownKind
 	case spec.bootGated && !a.in.BootOpen:
 		return causeBootGate
-	case it.Key.ID != "" && !it.finalizesOnly(backoff) && backoff.live(a.in.Now):
+	case it.Key.ID != "" && (!it.finalizesOnly(backoff) && backoff.live(a.in.Now) || own.live(a.in.Now)):
 		return causeRowBackoff
 	case a.in.Paused && (spec.class == capStarts || spec.class == capCreates):
 		return causeSwapPause

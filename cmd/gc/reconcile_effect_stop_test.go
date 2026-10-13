@@ -66,13 +66,13 @@ func eventTypes(s settlement) []string {
 // row ends drained in one CAS that clears the request, with session.stopped
 // and the stop metric.
 func TestStopVerbStopsConfirmsAndFinalizes(t *testing.T) {
-	s, got, leaf := stopRun(t, signaled(drainOrphaned), wanted, nil)
+	s, got, leaf := stopRun(t, signaled(drainOrphaned, session.OperatorDrainKey, "3"), wanted, nil)
 	m := got.Metadata
 	switch {
 	case s.Outcome != settledLanded || stops(leaf) != 1:
 		t.Fatalf("settlement %+v with %d stops, want landed after one", s, stops(leaf))
-	case m["state"] != string(session.StateDrained) || m[session.DrainIntentReasonKey] != "" || m["state_reason"] != "":
-		t.Fatalf("row %v, want drained with the request cleared", m)
+	case m["state"] != string(session.StateDrained) || m[session.DrainIntentReasonKey] != "" || m["state_reason"] != "" || m[session.OperatorDrainKey] != "":
+		t.Fatalf("row %v, want drained with the request and the operator's mark cleared", m)
 	case s.Facts.Stopped == nil || len(s.Facts.Events) != 1 || s.Facts.Events[0].Type != events.SessionStopped:
 		t.Fatalf("facts %+v, want session.stopped and the stop metric", s.Facts)
 	}
@@ -229,6 +229,32 @@ func TestIdleDrainFinalizesAsAnIdleSleep(t *testing.T) {
 	}
 }
 
+// TestFinalizeKeepsALateQuarantinesReason (mc-slkxd). Kills a finalize
+// that overwrites the reason of a quarantine that landed after the signal:
+// while quarantined_until is ahead the quarantine dominates, so the idle
+// sleep keeps quarantine, rate_limit or context-churn and its deadline; an
+// expired quarantine's reason is the finalize's.
+func TestFinalizeKeepsALateQuarantinesReason(t *testing.T) {
+	sleep := func(e *selectionEntry) { e.Desired, e.Reason = desireSleep, reasonIdleSleep }
+	for _, c := range []struct {
+		reason string
+		until  time.Duration
+		want   string
+	}{
+		{"quarantine", time.Hour, "quarantine"},
+		{"rate_limit", time.Hour, "rate_limit"},
+		{"context-churn", time.Hour, "context-churn"},
+		{"quarantine", -time.Minute, "idle"},
+	} {
+		until := time.Now().Add(c.until).Format(time.RFC3339) // the effect's clock is the wall's
+		s, got, _ := stopRun(t, signaled(drainIdle, "sleep_intent", "idle-stop-pending", "sleep_reason", c.reason, "quarantined_until", until), sleep, nil)
+		m := got.Metadata
+		if s.Outcome != settledLanded || m["state"] != "asleep" || m["sleep_reason"] != c.want || m["quarantined_until"] != until {
+			t.Fatalf("%s until %s: settlement %+v, row %v; want asleep with sleep_reason %q, the quarantine kept", c.reason, c.until, s, m, c.want)
+		}
+	}
+}
+
 // TestStopVerbReissuedOnlyAtBackoffExpiry (I17). Kills a stop on every
 // pass: a refused stop's backoff defers the next while it is live, but
 // never a finalize-only stop (admission's finalizesOnly).
@@ -363,9 +389,14 @@ func TestUndesiredNonPoolRowClosesAsLegacy(t *testing.T) {
 // drained, as legacy's does.
 func TestWantedPoolSeatWithoutWorkClosesAsLegacy(t *testing.T) {
 	for _, reason := range []string{drainConfigDrift, executionStalledDrainReason} {
-		s, got, _ := stopRun(t, signaled(reason, "pool_managed", "true"), wanted, nil)
+		s, got, _ := stopRun(t, signaled(reason, "pool_managed", "true", session.OperatorDrainKey, "3"), wanted, nil)
 		if s.Outcome != settledLanded || got.Status != "closed" || got.Metadata["state"] != "drained" || got.Metadata["close_reason"] != session.CanonicalCloseReason("drained") {
 			t.Errorf("%s: settlement %+v, status %s, row %v; want legacy's drained close", reason, s, got.Status, got.Metadata)
+		}
+		for _, k := range []string{session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey, session.OperatorDrainKey} {
+			if got.Metadata[k] != "" {
+				t.Errorf("%s: the closed row keeps %s=%q, want the stop request cleared", reason, k, got.Metadata[k])
+			}
 		}
 	}
 }
@@ -482,5 +513,27 @@ func TestSameObjectGuardsForeignAndCorpse(t *testing.T) {
 	stopRun(t, signaled(drainOrphaned), undesired(drainOrphaned), func(p *effectPass, _ *fenceLeaf, _ beads.Store, _ string) { p.Runtime = corpse.tmux() })
 	if n := corpse.Fake.CountCalls("KillCorpseObject", "s-gc-1"); n != 0 {
 		t.Fatalf("a corpse read across a replaced object was removed (%d kills)", n)
+	}
+}
+
+// TestDormantFinalizeClearsALeftoverRequest (v5.9n; the C7 builder's lead;
+// #7648 review 7). Kills a finalize that reads the stop request off a row
+// rebuilt without its stop keys, or that clears only an active request: an
+// operator-dormant stop of a row carrying a current ack clears it in its
+// finalize, as D4 does always; on a suspended row the ack is residue
+// (activeStop's rule 2), cleared just the same. A soft suspend is no
+// dormant row (v5.9u): the awake heal takes it.
+func TestDormantFinalizeClearsALeftoverRequest(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		meta []string
+	}{
+		{"user-hold", []string{"sleep_intent", "user-hold"}},
+		{"suspended", []string{"state", string(session.StateSuspended), "sleep_intent", "user-hold", "suspended_at", rowAt(-time.Minute)}},
+	} {
+		s, got, leaf := stopRun(t, append(c.meta, session.DrainAckIncarnationKey, "3", session.DrainAckAtKey, rowAt(-time.Minute)), undesired(drainOrphaned), nil)
+		if s.Outcome != settledLanded || stops(leaf) != 1 || got.Metadata[session.DrainAckIncarnationKey] != "" || got.Metadata[session.DrainAckAtKey] != "" {
+			t.Errorf("%s: settlement %+v, %d stops, row %v; want the dormant stop finalized with its request cleared", c.name, s, stops(leaf), got.Metadata)
+		}
 	}
 }

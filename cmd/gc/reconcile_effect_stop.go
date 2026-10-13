@@ -51,15 +51,26 @@ var stopSections = []section{
 }
 
 // stopNeeds are the stop verb's fresh reads: the runtime under its lease,
-// and L3 and L4 for an operator-dormant stop's full fence.
-func stopNeeds(_ *World, it intent) needs {
-	return needs{Runtime: true, Lease: true, Legs: stopLegs(it) &^ (legLiveness | legToken)}
+// L3 and L4 for an operator-dormant stop's full fence, and an idle stop's
+// proof, its fresh activity or, for a content-clock fire, its pane.
+func stopNeeds(w *World, it intent) needs {
+	n := needs{Runtime: true, Lease: true, Legs: stopLegs(it) &^ (legLiveness | legToken)}
+	if isIdleReason(it.Reason) {
+		n.Content = w.idleView().fired[it.Key]
+		n.Activity = !n.Content
+	}
+	return n
 }
 
 // stopLegs are the fence legs the stop's origin keeps (v5 F1, F2).
 func stopLegs(it intent) fenceLegs {
-	if it.Reason == decideDormantStop {
+	switch {
+	case it.Reason == decideDormantStop || it.Kind == intentDriftRestart || it.Kind == intentDriftRelaunch: // A14's restart: the Full fence (D3)
 		return legsFull
+	case it.Reason == decideIdleTimeout: // a pending interaction or a claim since the pass defers it (SESS-574/576)
+		return legToken | legAttach | legPending | legWork
+	case it.Reason == decideIdleExhausted: // stopped over its work (SESS-575)
+		return legToken | legAttach | legPending
 	}
 	return legToken | legAttach
 }
@@ -78,6 +89,7 @@ type stopPlan struct {
 	foreign bool // a fresh Foreign verdict: finalize without a stop
 	corpse  *corpseObject
 	now     time.Time
+	idle    bool // an idle-timeout stop clears the pane's scrollback after it (SESS-576)
 }
 
 // corpseObject is the corpse a confirmed stop removes: its leaf and the
@@ -99,11 +111,14 @@ type stopped struct {
 // fence. It refuses a stop A4 no longer decides, or one the fence holds.
 func stopDecide(v txView) txStep {
 	w := v.World.withRow(v.It.Key, v.Row, v.Meta).withRuntime(v.It.Key, v.RT)
-	if fresh, _ := decideRow(&w, v.Alloc, v.It.Key); fresh.Kind != intentStop {
+	// The stop's, or A14's restart that runs it; an idle stop's reason, and
+	// only an idle stop's, must hold too, so the idle finalize never applies
+	// to another stop (a stop request's verb turns finalize on its own).
+	if fresh, _ := decideRow(&w, v.Alloc, v.It.Key); fresh.Kind != v.It.Kind || (isIdleReason(fresh.Reason) || isIdleReason(v.It.Reason)) && fresh.Reason != v.It.Reason {
 		return txStep{Refuse: causeRedecided}
 	}
 	name := strings.TrimSpace(v.Row.SessionName)
-	plan := stopPlan{name: name, names: processNamesFor(v.World, v.Row), now: v.Now}
+	plan := stopPlan{name: name, names: processNamesFor(v.World, v.Row), now: v.Now, idle: isIdleReason(v.It.Reason)}
 	switch rt := v.RT; rt.Class {
 	case rtAbsent:
 		return txStep{Pass: plan}
@@ -122,9 +137,16 @@ func stopDecide(v txView) txStep {
 		plan.foreign = true
 		return txStep{Pass: plan}
 	}
-	fv := fenceDestructive(v.RT, v.Fence, fenceRequest{Row: v.Row, Legs: stopLegs(v.It)})
+	legs := stopLegs(v.It)
+	if plan.idle && pendingExempt(v.Row, v.Now) { // the ladder's wait-hold exemption, legacy's pendingInteractionHoldInfo
+		legs &^= legPending
+	}
+	fv := fenceDestructive(v.RT, v.Fence, fenceRequest{Row: v.Row, Legs: legs})
 	if !fv.Proceed {
 		return txStep{Refuse: fv.Reason}
+	}
+	if plan.idle && !idleReproved(v) {
+		return txStep{Refuse: causeIdleUnproven}
 	}
 	plan.verdict = fv
 	return txStep{Pass: plan}
@@ -139,6 +161,9 @@ func stopCall(ctx context.Context, c txCaps, p stopPlan) (stopped, error) {
 		return stopped{Confirmed: true}, nil
 	case p.verdict.Proceed:
 		v, ok := stopFenced(ctx, sp, p.verdict, p.names, now)
+		if ok && v.Proceed && p.idle {
+			_ = sp.ClearScrollback(p.name) // legacy's, best effort
+		}
 		return stopped{Confirmed: ok, Performed: v.Proceed, Reason: v.Reason}, nil
 	}
 	if p.name == "" || !confirmStopped(ctx, sp, p.names, p.name, p.now) {
@@ -196,7 +221,7 @@ func finalizeWorkProbe(_ context.Context, r effectReads, v txView) (finalizeWork
 func stopChoice(v txView, work finalizeWork) finalizeChoice {
 	f := finalizeFacts{
 		Now: v.Now, CloseIfUnassigned: closeIfUnassigned(v), HasWork: work.has || work.err != nil,
-		OperatorHeld: session.HoldsInfo(v.Row, v.Now).In&session.HoldUser != 0,
+		OperatorHeld: session.DispositionOfInfo(v.Row).KeepsSlot(),
 		HonoredWake:  honoredWake(v),
 		FreshWake:    v.Row.WakeMode == "fresh", RestartRequested: v.Row.RestartRequested == "true",
 	}
@@ -207,6 +232,8 @@ func stopChoice(v txView, work finalizeWork) finalizeChoice {
 		return dormantChoice(v.Row, f)
 	case stopReason(v.It) == drainIdle:
 		return idleFinish(f)
+	case stopReason(v.It) == idleRespawnDrainReason:
+		return idleRespawnFinish(f)
 	}
 	return finalizePatch(f)
 }
@@ -255,6 +282,17 @@ func stopReason(it intent) string {
 	return strings.TrimPrefix(it.Reason, decideStopVerb)
 }
 
+// idleRespawnFinish is an idle-respawn drain's finalize (v5 D2, C6d): the
+// row sleeps and is never closed, so resume-on-ready starts it fresh for the
+// bead it was awake for. It is legacy's completion of a drain that keeps
+// work (finalizePatch with work: CompleteDrainPatch(idle), through the Sleep
+// cell), whatever the live work read finds; a row that keeps work never
+// closes.
+func idleRespawnFinish(f finalizeFacts) finalizeChoice {
+	f.HasWork = true
+	return finalizePatch(f)
+}
+
 // idleFinish is an idle drain's finalize (D4's idle builder): legacy's idle
 // sleep, SleepPatch(idle), which keeps the sleep_policy_fingerprint the
 // begin wrote (the idle latch, D2); never a close.
@@ -270,7 +308,9 @@ func stopCloseStep(v txView, work finalizeWork, _ error) txStep {
 	if !stopChoice(v, work).CloseSeat {
 		return txStep{Refuse: causeRedecided}
 	}
-	return txStep{Terminal: session.ClosePatch(v.Now, "drained"), Facts: stopFacts(v, out, nil), Done: true}
+	terminal := session.ClosePatch(v.Now, "drained")
+	maps.Copy(terminal, stopEndPatch()) // a closed row keeps no stop request
+	return txStep{Terminal: terminal, Facts: stopFacts(v, out, nil), Done: true}
 }
 
 // passStopped hands the stop's outcome to the premise close.
@@ -295,14 +335,16 @@ func stopFinalizeStep(v txView, work finalizeWork, _ error) txStep {
 	// the fresh row in the same CAS, as legacy's ApplySleep splits it: the
 	// cell keeps an operator's hold, a wait's intent and an intent it cannot
 	// read, and clears the idle stop's transient.
-	patch := choice.Patch
-	if _, ok := activeStop(newCensusRow(v.It.Key, v.Row)); ok {
-		maps.Copy(patch, stopVoidResiduePatch())
+	patch := maps.Clone(choice.Patch)                                                             // a builder may hand back a shared map
+	if req, ok := activeStop(v.World.Census.reread(v.It.Key, v.Row, v.Meta)); ok || req.Residue { // the fresh row's stop keys, a residue's too (D4)
+		maps.Copy(patch, stopEndPatch())
 	}
 	var kept *beads.Bead
 	var class session.DispositionPatch
+	from := session.DecodeDisposition(v.Meta)
+	session.KeepQuarantineReason(patch, from, v.Row.SleepReason, v.Now) // a late quarantine's reason dominates (mc-slkxd)
 	if choice.AsSleep {
-		to, err := session.DecodeDisposition(v.Meta).Apply(session.ActorController, session.DispEvent{Kind: session.EvSleep}, session.State(v.Row.MetadataState), v.Now)
+		to, err := from.Apply(session.ActorController, session.DispEvent{Kind: session.EvSleep}, session.State(v.Row.MetadataState), v.Now)
 		if err != nil {
 			return txStep{Refuse: causeDispositionRefused, Err: err}
 		}
@@ -314,6 +356,11 @@ func stopFinalizeStep(v txView, work finalizeWork, _ error) txStep {
 // stopFacts are legacy's events for a finalized stop (SESS-033/034,
 // DRAIN-051/054).
 func stopFacts(v txView, out stopped, kept *beads.Bead) effectFacts {
+	if isIdleReason(v.It.Reason) { // legacy's idle kill: session.idle_killed and its metric (SESS-576)
+		res, _ := v.World.Templates.lookup(v.Row)
+		name := res.TP.DisplayName()
+		return effectFacts{IdleKilled: name, Events: []events.Event{{Type: events.SessionIdleKilled, Actor: "gc", Subject: name}}}
+	}
 	template := cmp.Or(normalizedSessionTemplateInfo(v.Row, v.World.Env.Cfg), v.Row.Template)
 	f := effectFacts{}
 	if out.Performed {

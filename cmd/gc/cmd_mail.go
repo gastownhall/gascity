@@ -2134,6 +2134,7 @@ func doMailSendJSON(mp mail.Provider, rec events.Recorder, validRecipients map[s
 		Message: to,
 		Payload: mailEventPayload(&m),
 	})
+	// escalate.sh's send timeout reads this line as proof the mail was written, so it precedes the nudge.
 	if !jsonOut {
 		fmt.Fprintf(stdout, "Sent message %s to %s\n", m.ID, to) //nolint:errcheck // best-effort stdout
 	}

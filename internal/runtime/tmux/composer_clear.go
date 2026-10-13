@@ -337,9 +337,9 @@ func (t *Tmux) ClearInput(ctx context.Context, session string, restoreWindow tim
 	}
 	defer releaseNudgeLock(session)
 
-	target := session
-	if agentPane, err := t.FindAgentPane(session); err == nil && agentPane != "" {
-		target = agentPane
+	target, err := t.agentInputTarget(session)
+	if err != nil {
+		return err
 	}
 	if !t.isClaudeTarget(target) {
 		return runtime.ErrInteractionUnsupported

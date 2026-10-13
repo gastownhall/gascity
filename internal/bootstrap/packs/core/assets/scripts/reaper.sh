@@ -1421,11 +1421,19 @@ if [ "$TOTAL_SCOPES" -eq 0 ]; then
 fi
 order_outcome_write
 
-# Report.
+# Report. Only a measured age (age=<seconds>s) is normalized out of the
+# fingerprint, so a stale backup that merely grows older stays one incident
+# while a change of state (age=absent, age=unparseable) notifies at once. A
+# clean run resolves the incident so its next occurrence notifies at once.
 if [ -n "$ANOMALIES" ]; then
+    ANOMALY_FINGERPRINT=$(printf '%s' "$ANOMALIES" | sed -E 's/age=[0-9]+s/age=<dynamic>/g')
     "$ESCALATE_SCRIPT" \
         --subject "ESCALATION: Reaper anomalies detected [MEDIUM]" \
-        --message "$ANOMALIES" 2>/dev/null || true
+        --message "$ANOMALIES" \
+        --incident-key "reaper:anomalies" \
+        --fingerprint "$ANOMALY_FINGERPRINT" 2>/dev/null || true
+else
+    "$ESCALATE_SCRIPT" --resolve-incident "reaper:anomalies" >/dev/null || true
 fi
 
 SUMMARY="reaper — scopes:$TOTAL_SCOPES, stale_wisps:$TOTAL_STALE_WISPS, closed_wisps:$TOTAL_CLOSED_WISPS, held_wisps:$TOTAL_HELD_WISPS, workflow_roots:$TOTAL_WORKFLOW_ROOTS_CLOSED, workflow_root_census:$TOTAL_WORKFLOW_ROOTS_CHECKED/$TOTAL_WORKFLOW_ROOT_CANDIDATES, skipped_cross_store_workflow_roots:$TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED, skipped_non_city_workflow_issue_roots:$TOTAL_WORKFLOW_ISSUE_ROOTS_SKIPPED, purged:$TOTAL_PURGED, sessions-pruned:$TOTAL_SESSIONS_PRUNED, closed:$TOTAL_ISSUES_CLOSED, expired:$TOTAL_EXPIRED_ISSUES_CLOSED, expired_skipped:$TOTAL_EXPIRED_ISSUES_SKIPPED, skipped_non_city_issues:$TOTAL_STALE_ISSUES_SKIPPED, mail_wisps:$TOTAL_MAIL_WISPS"

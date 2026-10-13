@@ -282,6 +282,7 @@ func computeAwakeSetPreRefactor(input AwakeInput) map[string]AwakeDecision {
 		if input.AttachedSessions[name] && !bead.WaitHold {
 			decision.ShouldWake = true
 			decision.Reason = "attached"
+			decision.Attached = true
 		}
 
 		if input.PendingSessions[name] && !bead.WaitHold {

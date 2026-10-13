@@ -72,9 +72,8 @@ type Field struct {
 	Writers []Site
 	Readers []Site // the consumers a Request needs; others list the decisive ones
 	Clears  []Site
-	// NoWriter is the ruling for a key with no production writer, NoV2Writer
-	// for a premise key v2 reads and only legacy writes.
-	NoWriter, NoV2Writer string
+	// NoWriter is the ruling for a key with no production writer.
+	NoWriter string
 	// NewKey is CONTRACT R1's rollback rule: legacy ignores it and never
 	// writes it.
 	NewKey bool
@@ -172,6 +171,10 @@ var (
 	// opConsumeHold is an operator's resume consuming a user hold (#7424's
 	// interim D8 consume; D8 B's lease-fenced consume replaces it).
 	opConsumeHold = op("internal/session/resume_user_hold.go", "Manager.consumeUserHold")
+	// opRestartConfirm is Manager.ensureRunning's confirm of a runtime it
+	// started, which clears the stop request as PreWake does
+	// (restartStopRequestClears); opConsumeHold's consume does too.
+	opRestartConfirm = op("internal/session/chat.go", "Manager.confirmLiveSessionState")
 	// opEncode is the disposition class's one encoder (R7).
 	opEncode     = op("internal/session/disposition.go", "Disposition.Encode")
 	legacyCreate = legacy(srcBeads, "syncCreateMetadata")
@@ -250,6 +253,8 @@ var observed = []struct {
 	{legacy(srcTransition, "ConfigDriftResetPatch"), true, []string{"restart_requested"}},
 	{v2(srcTransition, "ConfigDriftAsleepResetPatch"), false, []string{"continuation_reset_pending", "last_woke_at", "live_hash", "pending_create_claim", "pending_create_started_at", "primed_at", "priming_attempted_at", "prompt_hash", "started_config_hash", "started_live_hash", "startup_dialog_verified", "state"}},
 	{v2(srcTransition, "ConfigDriftAsleepResetPatch"), true, []string{"restart_requested"}},
+	{v2(srcTransition, "ConfigDriftRestartPatch"), false, []string{"continuation_reset_pending", "last_woke_at", "live_hash", "pending_create_claim", "pending_create_started_at", "primed_at", "priming_attempted_at", "prompt_hash", "session_key", "started_config_hash", "started_live_hash", "startup_dialog_verified", "state"}},
+	{v2(srcTransition, "ConfigDriftRestartPatch"), true, []string{"restart_requested"}},
 	{legacy(srcTransition, "PreWakePatch"), false, []string{"sleep_reason"}},
 	// A fresh wake's conversation reset (applyFreshWakeConversationReset),
 	// which v2's PreWake reuses: the baseline cleared for its commit.
@@ -279,13 +284,13 @@ var registry = slices.Concat([]Field{
 		v2("cmd/gc/reconcile_arms_identity.go", "armIdentity"), v2("cmd/gc/allocator_create_named.go", "recordRowToken"))},
 
 	// Lifecycle.
-	{Key: "state", Class: ClassLifecycle, Writers: sites(legacyPreWake, v2(srcHeals, "armAwakeHeal"), v2(srcHeals, "asleepHealPatch"))},
+	{Key: "state", Class: ClassLifecycle, Writers: sites(legacyPreWake, v2(srcHeals, "armAwakeHeal"), v2(srcHeals, "armSoftSuspendHeal"), v2(srcHeals, "asleepHealPatch"))},
 	{Key: "state_reason", Class: ClassLifecycle, Writers: sites(legacyCommit, op("internal/session/kill_fence.go", "KillPendingPatch"))},
 	{Key: "sleep_reason", Class: ClassLifecycle, Writers: sites(legacy(srcTransition, "SleepPatch"), v2(srcHeals, "asleepHealPatch"), v2Accrual), Clears: sites(waitHold)},
 	{Key: "slept_at", Class: ClassLifecycle, Writers: sites(legacy(srcTransition, "SleepPatch"),
 		op("internal/session/kill_fence.go", "KillPendingPatch"))},
 	{Key: "last_woke_at", Class: ClassLifecycle, Writers: sites(legacyPreWake, v2PreWake)},
-	{Key: "drain_at", Class: ClassLifecycle, Writers: sites(legacy(srcReconciler, "markDrainAckStopPending")), NoV2Writer: "v2 reads legacy residue: its stop request (D1) replaces drain_at"},
+	{Key: "drain_at", Class: ClassLifecycle, Writers: sites(legacy(srcReconciler, "markDrainAckStopPending"), v2("cmd/gc/reconcile_effect_stop.go", "dormantChoice"))},
 	{Key: "pending_create_claim", Class: ClassLifecycle, Writers: sites(legacy(srcPoolNames, "createPoolSessionBeadWithIdentifiers")), Clears: sites(v2(srcHeals, "armClaimClear"))},
 	{Key: "pending_create_started_at", Class: ClassLifecycle, Writers: sites(legacyPreWake), Clears: sites(v2(srcHeals, "armClaimClear"))},
 	{Key: "creation_complete_at", Class: ClassLifecycle, Writers: sites(legacyCommit)},
@@ -295,11 +300,11 @@ var registry = slices.Concat([]Field{
 	{Key: "closed_at", Class: ClassLifecycle, Writers: sites(legacy(srcTransition, "ClosePatch"))},
 
 	// Operator intent.
-	{Key: "held_until", Class: ClassOperatorIntent, Writers: sites(opEncode), Clears: sites(opConsumeHold, op("cmd/gc/cmd_session_kill_fence.go", "writeSessionKillFence"), op("cmd/gc/cmd_session_kill_fence.go", "killSleepPatch"))},
+	{Key: "held_until", Class: ClassOperatorIntent, Writers: sites(opEncode), Clears: sites(opConsumeHold, op("internal/session/kill_fence.go", "WriteKillFence"), op("internal/session/kill_fence.go", "KillSleepPatch"))},
 	{Key: "quarantined_until", Class: ClassOperatorIntent, Writers: sites(opEncode, legacy(srcReconcile, "recordRateLimitQuarantine"), v2Accrual, v2StartAccrual), Clears: sites(v2(srcHeals, "armStabilityClear"))},
-	{Key: "sleep_intent", Class: ClassOperatorIntent, Writers: sites(opEncode, legacy(srcSleep, "markIdleSleepPendingInfo")), Clears: sites(waitHold, opConsumeHold, op("cmd/gc/cmd_session_kill_fence.go", "writeSessionKillFence"), v2SleepIntentClear, v2Accrual)},
+	{Key: "sleep_intent", Class: ClassOperatorIntent, Writers: sites(opEncode, legacy(srcSleep, "markIdleSleepPendingInfo")), Clears: sites(waitHold, opConsumeHold, op("internal/session/kill_fence.go", "WriteKillFence"), v2SleepIntentClear, v2Accrual)},
 	{Key: "wait_hold", Class: ClassOperatorIntent, Writers: sites(opEncode, op("cmd/gc/cmd_wait.go", "doSessionWait")), Clears: sites(waitHold)},
-	{Key: "suspended_at", Class: ClassOperatorIntent, Writers: sites(opEncode, op(srcManager, "Manager.Suspend")), Clears: sites(opConsumeHold, op("cmd/gc/cmd_session_kill_fence.go", "writeSessionKillFence"))},
+	{Key: "suspended_at", Class: ClassOperatorIntent, Writers: sites(opEncode, op(srcManager, "Manager.Suspend")), Clears: sites(opConsumeHold, op("internal/session/kill_fence.go", "WriteKillFence"))},
 	{Key: "pin_awake", Class: ClassOperatorIntent, Writers: sites(op("cmd/gc/cmd_session_pin.go", "cmdSessionSetPin")), Readers: sites(v2("cmd/gc/allocator_decide.go", "decidePass.awake"))},
 	// template_overrides is a per-session setting the start reads and nothing
 	// clears, so it is operator intent, not a request.
@@ -313,18 +318,21 @@ var registry = slices.Concat([]Field{
 
 	// The stop request: the controller half, then the CLI's ack (E3), which
 	// writes only in a v2 city.
-	{Key: DrainIntentReasonKey, Class: ClassStopRequest, NewKey: true, Writers: sites(v2(srcStopKeys, "stopBeginPatch")), Readers: sites(v2(srcStopKeys, "readStopKeys")), Clears: sites(v2(srcStopKeys, "stopCancelPatch"))},
-	{Key: DrainIntentAtKey, Class: ClassStopRequest, NewKey: true, Writers: sites(v2(srcStopKeys, "stopBeginPatch")), Readers: sites(v2(srcStopKeys, "readStopKeys")), Clears: sites(v2(srcStopKeys, "stopCancelPatch"))},
-	{Key: DrainIntentIncarnationKey, Class: ClassStopRequest, NewKey: true, Writers: sites(v2(srcStopKeys, "stopBeginPatch")), Readers: sites(v2(srcStopKeys, "readStopKeys")), Clears: sites(v2(srcStopKeys, "stopCancelPatch"))},
-	{Key: DrainAckIncarnationKey, Class: ClassStopRequest, NewKey: true, Writers: sites(op("cmd/gc/cmd_runtime_drain.go", "drainAckRowPatch")), Readers: sites(v2(srcStopKeys, "readStopKeys")), Clears: sites(v2(srcStopKeys, "stopVoidResiduePatch"))},
-	{Key: DrainAckAtKey, Class: ClassStopRequest, NewKey: true, Writers: sites(op("cmd/gc/cmd_runtime_drain.go", "drainAckRowPatch")), Readers: sites(v2(srcStopKeys, "readStopKeys")), Clears: sites(v2(srcStopKeys, "stopVoidResiduePatch"))},
+	{Key: DrainIntentReasonKey, Class: ClassStopRequest, NewKey: true, Writers: sites(v2(srcStopKeys, "stopBeginPatch")), Readers: sites(v2(srcStopKeys, "readStopKeys")), Clears: sites(v2(srcStopKeys, "stopCancelPatch"), opRestartConfirm, opConsumeHold)},
+	{Key: DrainIntentAtKey, Class: ClassStopRequest, NewKey: true, Writers: sites(v2(srcStopKeys, "stopBeginPatch")), Readers: sites(v2(srcStopKeys, "readStopKeys")), Clears: sites(v2(srcStopKeys, "stopCancelPatch"), opRestartConfirm, opConsumeHold)},
+	{Key: DrainIntentIncarnationKey, Class: ClassStopRequest, NewKey: true, Writers: sites(v2(srcStopKeys, "stopBeginPatch")), Readers: sites(v2(srcStopKeys, "readStopKeys")), Clears: sites(v2(srcStopKeys, "stopCancelPatch"), opRestartConfirm, opConsumeHold)},
+	{Key: DrainAckIncarnationKey, Class: ClassStopRequest, NewKey: true, Writers: sites(op("cmd/gc/cmd_runtime_drain.go", "drainAckRowPatch")), Readers: sites(v2(srcStopKeys, "readStopKeys")), Clears: sites(v2(srcStopKeys, "stopVoidResiduePatch"), v2(srcStopKeys, "stopAckVoidPatch"), opRestartConfirm, opConsumeHold)},
+	{Key: DrainAckAtKey, Class: ClassStopRequest, NewKey: true, Writers: sites(op("cmd/gc/cmd_runtime_drain.go", "drainAckRowPatch")), Readers: sites(v2(srcStopKeys, "readStopKeys")), Clears: sites(v2(srcStopKeys, "stopVoidResiduePatch"), v2(srcStopKeys, "stopAckVoidPatch"), opRestartConfirm, opConsumeHold)},
+	// The operator's drain (`gc runtime drain` in a v2 city, PAR-FLOORACK):
+	// it explains an agent's ack (A11) and nothing else reads it.
+	{Key: OperatorDrainKey, Class: ClassStopRequest, NewKey: true, Writers: sites(op(srcStopKeys, "operatorDrainPatch")), Readers: sites(v2(srcStopKeys, "readStopKeys")), Clears: sites(op(srcStopKeys, "operatorUndrainPatch"), v2(srcStopKeys, "stopEndPatch"), opRestartConfirm)},
 
 	// Counters.
 	{Key: "wake_attempts", Class: ClassCounter, Writers: sites(legacy(srcReconcile, "recordWakeFailure"), v2(srcHeals, "armStabilityClear"), v2Accrual, v2StartAccrual)},
 	{Key: "churn_count", Class: ClassCounter, Writers: sites(legacy(srcReconcile, "recordChurn"), v2(srcHeals, "armStabilityClear"), v2Accrual, v2StartAccrual)},
 	{Key: "crash_count", Class: ClassCounter, NoWriter: "dead: only ReactivatePatch writes it, and nothing calls that"},
 	{Key: "quarantine_cycle", Class: ClassCounter, NoWriter: "dead: only QuarantinePatch writes it, and nothing calls that"},
-	{Key: "idle_respawn_attempts", Class: ClassCounter, Writers: sites(legacy(srcReconciler, "beginIdleRespawnDrainIfIdle"))},
+	{Key: "idle_respawn_attempts", Class: ClassCounter, Writers: sites(legacy(srcReconciler, "beginIdleRespawnDrainIfIdle"), v2("cmd/gc/reconcile_arms_drain.go", "rowFacts.idleRespawnBegin"))},
 
 	// Markers.
 	{Key: "detached_at", Class: ClassMarker, Writers: sites(legacy(srcSleep, "reconcileDetachedAtInfo"), v2(srcHeals, "armDetachedAt")), Clears: sites(legacyPreWake)},
@@ -407,7 +415,7 @@ var registry = slices.Concat([]Field{
 	same(ClassMarker, false, sites(legacy(srcReconcile, "providerTerminalErrorPatch")), "provider_terminal_error",
 		"provider_terminal_error_at", "session_health", "session_health_reason", "session_drainable"),
 	same(ClassMarker, false, sites(legacy(srcReconciler, "emitSessionWakeRefused")), "wake_refused_event_at"),
-	same(ClassMarker, false, sites(legacy(srcReconciler, "beginIdleRespawnDrainIfIdle")), "idle_respawn_bead_id"),
+	same(ClassMarker, false, sites(legacy(srcReconciler, "beginIdleRespawnDrainIfIdle"), v2("cmd/gc/reconcile_arms_drain.go", "rowFacts.idleRespawnBegin")), "idle_respawn_bead_id"),
 
 	// Advisory: diagnostics, pacing and usage stamps. The execution backstop's
 	// are written every pass, under either controller.
@@ -446,7 +454,7 @@ var registry = slices.Concat([]Field{
 	same(ClassAdvisory, false, sites(legacy(srcReconciler, "mirrorStartupHealthEpisodeMetadata")), "startup_health_active_count", "startup_health_active_kind"),
 	same(ClassAdvisory, false, sites(legacy("cmd/gc/warm_bind_nudge.go", "deliverWarmBindClaimNudge")), "warm_bind_nudged_for_trigger"),
 	// The runtime lease (L1). Legacy writes it too, so no key is new.
-	same(ClassLease, false, sites(leaseAcquire, v2("cmd/gc/reconcile_fenced_store.go", "fencedWriter.closeWithTerminalPatch")),
+	same(ClassLease, false, sites(leaseAcquire, v2("cmd/gc/reconcile_fenced_store.go", "fencedWriter.closeRow")),
 		RuntimeLeaseHolderKey, RuntimeLeaseExpiresKey, RuntimeLeaseTTLKey, RuntimeLeaseFlockKey),
 	same(ClassLease, false, sites(leaseAcquire), RuntimeLeaseEpochKey),
 )

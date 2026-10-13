@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"strconv"
 	"strings"
 	"sync"
@@ -590,9 +591,9 @@ func (m *Manager) ensureRunning(ctx context.Context, by Actor, id string, b bead
 				return err
 			}
 			defer release()
-			return m.consumeUserHold(consume, m.now())
+			return m.consumeUserHold(consume, m.now(), nil)
 		}
-		if err := m.confirmLiveSessionState(id, &b); err != nil {
+		if err := m.confirmLiveSessionState(id, &b, false); err != nil {
 			return err
 		}
 		return nil
@@ -618,6 +619,28 @@ func (m *Manager) ensureRunning(ctx context.Context, by Actor, id string, b bead
 		}
 		defer cancel()
 	}
+	// The start decides on the row as of the lease, not the read before it
+	// (#7638 review): every writer of the kill fence or of drain-ack
+	// stop-pending holds the runtime name's flock, which the lease holds
+	// now, so a stop the controller signaled in between is seen here, before
+	// anything starts, and the restart clear and the hold consume below read
+	// this row.
+	fresh, err := m.PersistedStore().freshBead(id)
+	switch {
+	case err != nil:
+		err = fmt.Errorf("reading session %s under its lease: %w", id, err) // nothing started: no state sync to report
+	case KillPendingMetadata(fresh.Metadata["state"], fresh.Metadata["state_reason"], fresh.Metadata["sleep_reason"], fresh.Metadata["slept_at"], m.now()):
+		err = fmt.Errorf("%w: %s", ErrSessionKillPending, id)
+	case drainAckStopPendingMetadata(fresh.Metadata):
+		err = fmt.Errorf("%w: %s", ErrSessionStopping, id)
+	}
+	if err != nil {
+		if unroute != nil {
+			unroute()
+		}
+		return err
+	}
+	b = fresh
 
 	cfg := hints
 	cfg.Command = resumeCommand
@@ -737,9 +760,13 @@ func (m *Manager) ensureRunning(ctx context.Context, by Actor, id string, b bead
 		return fmt.Errorf("%w: %w", ErrStateSync, err)
 	}
 	if consumes {
-		return m.consumeUserHold(consume, m.now())
+		var clears MetadataPatch
+		if started {
+			clears = restartStopRequestClears(b.Metadata)
+		}
+		return m.consumeUserHold(consume, m.now(), clears)
 	}
-	if err := m.confirmLiveSessionState(id, &b); err != nil {
+	if err := m.confirmLiveSessionState(id, &b, started); err != nil {
 		if started && !errors.Is(err, ErrStateSync) {
 			_ = m.sp.Stop(sessName)
 		}
@@ -859,11 +886,14 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 	return nil
 }
 
-func (m *Manager) confirmLiveSessionState(id string, b *beads.Bead) error {
+func (m *Manager) confirmLiveSessionState(id string, b *beads.Bead, started bool) error {
 	if b == nil {
 		return nil
 	}
 	batch := make(map[string]string)
+	if started {
+		maps.Copy(batch, restartStopRequestClears(b.Metadata))
+	}
 	switch State(b.Metadata["state"]) {
 	case "", StateStartPending, StateCreating, StateAsleep, StateSuspended:
 		batch["state"] = string(StateActive)
@@ -926,6 +956,13 @@ func formatWaitIdleReminder(source, message string) string {
 func (m *Manager) nudgeSession(ctx context.Context, sessName, message string, immediate bool) error {
 	content := runtime.TextContent(message)
 	err := m.nudgeContent(sessName, content, immediate)
+	if errors.Is(err, runtime.ErrNudgeDeliveredUnobserved) {
+		// The provider proved delivery and only missed the turn start, so
+		// this nudge is delivered: a caller that retried it would deliver
+		// the message twice.
+		log.Printf("session: %q: %v", sessName, err)
+		err = nil
+	}
 	recordCtx := ctx
 	if recordCtx == nil || recordCtx.Err() != nil {
 		recordCtx = context.Background()
@@ -1239,6 +1276,11 @@ func (m *Manager) StopTurn(id string) error {
 			return err
 		}
 		running := State(b.Metadata["state"]) != StateSuspended && m.sp.IsRunning(sessName)
+		if !running {
+			// No runtime means no turn to interrupt: stopTurnLocked sends
+			// nothing, so there is nothing to wait for either.
+			return nil
+		}
 		interruptStartedAt := time.Now()
 		if err := m.stopTurnLocked(b, sessName); err != nil {
 			return err
@@ -1249,7 +1291,7 @@ func (m *Manager) StopTurn(id string) error {
 		if err := m.waitForInterruptBoundaryLocked(context.Background(), b, sessName, interruptStartedAt); err != nil {
 			return fmt.Errorf("waiting for stopped session interrupt boundary: %w", err)
 		}
-		if running && restoresInterruptedInput(b) {
+		if restoresInterruptedInput(b) {
 			// The stop already succeeded. A draft that will not clear is
 			// logged, not returned: the next submit clears the input box
 			// again before it pastes.

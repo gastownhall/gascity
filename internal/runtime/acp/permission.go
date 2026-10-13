@@ -366,13 +366,14 @@ func (sc *sessionConn) resolvePermission(resp runtime.InteractionResponse) (pend
 	return pp, data, nil
 }
 
-// cancelOutstandingPermissions answers every unanswered permission request
-// with the canceled outcome and forgets them.
-func (sc *sessionConn) cancelOutstandingPermissions() {
+// takeCanceledPermissionReplies forgets every unanswered permission request
+// and returns the encoded canceled-outcome reply for each, oldest first. The
+// caller writes them with writePermissionReplies.
+func (sc *sessionConn) takeCanceledPermissionReplies() [][]byte {
 	sc.mu.Lock()
 	outstanding := sc.takePermissionsLocked()
 	sc.mu.Unlock()
-	sc.replyCanceled(outstanding)
+	return encodeCanceledReplies(outstanding)
 }
 
 // takePermissionsLocked forgets every unanswered permission request and
@@ -389,8 +390,18 @@ func (sc *sessionConn) takePermissionsLocked() []pendingPermission {
 // written asynchronously so callers on the read loop never wait on the
 // agent's stdin.
 func (sc *sessionConn) replyCanceled(outstanding []pendingPermission) {
-	if len(outstanding) == 0 {
+	replies := encodeCanceledReplies(outstanding)
+	if len(replies) == 0 {
 		return
+	}
+	go sc.writePermissionReplies(replies)
+}
+
+// encodeCanceledReplies encodes the canceled-outcome reply for each request,
+// in order. A request whose reply cannot be encoded is logged and skipped.
+func encodeCanceledReplies(outstanding []pendingPermission) [][]byte {
+	if len(outstanding) == 0 {
+		return nil
 	}
 	replies := make([][]byte, 0, len(outstanding))
 	for _, pp := range outstanding {
@@ -401,17 +412,22 @@ func (sc *sessionConn) replyCanceled(outstanding []pendingPermission) {
 		}
 		replies = append(replies, data)
 	}
-	go func() {
-		for _, data := range replies {
-			if err := sc.writeMessage(data); err != nil {
-				// An exited agent cannot read the reply; that is expected.
-				if !isPipeWriteError(err) {
-					fmt.Fprintf(os.Stderr, "acp: canceling permission request: %v\n", err)
-				}
-				return
+	return replies
+}
+
+// writePermissionReplies writes encoded permission replies in order and
+// reports whether all of them were written. An exited agent cannot read them;
+// that failure is expected and not logged.
+func (sc *sessionConn) writePermissionReplies(replies [][]byte) bool {
+	for _, data := range replies {
+		if err := sc.writeMessage(data); err != nil {
+			if !isPipeWriteError(err) {
+				fmt.Fprintf(os.Stderr, "acp: canceling permission request: %v\n", err)
 			}
+			return false
 		}
-	}()
+	}
+	return true
 }
 
 // cancelRequestedPermission handles a $/cancel_request notification naming an

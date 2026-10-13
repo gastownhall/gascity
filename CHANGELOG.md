@@ -141,6 +141,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   other agent-to-client request, such as `fs/read_text_file`, now gets
   JSON-RPC `-32601` instead of hanging the turn (#6598).
 
+- **The core pack now runs `gc convoy check` every hour.** The new
+  `convoy-autoclose-backstop` order closes any open convoy whose members are
+  all closed and that is not labeled `owned`, catching closes the controller
+  never acted on (made while it was down, before its autoclose sweep
+  shipped, or in a store it does not cache). Its first run in an existing
+  city can close many old convoys at once, each with a `convoy.closed`
+  event. Label a convoy `owned` to keep it open, or turn the order off with
+  `[orders] skip = ["convoy-autoclose-backstop"]` or an
+  `[[orders.overrides]]` entry for it with `enabled = false`; the same
+  entry's `interval` and `timeout` retune it (keep the timeout shorter than
+  the interval). `gc convoy check` itself now skips suspended rigs (naming
+  them on stderr), re-reads each convoy before closing it, goes on past a
+  store it cannot open or list and a convoy it cannot read or close, and
+  exits 1 when any convoy or store went unchecked; a convoy that changed or
+  disappeared after the list is left for the next run and does not fail the
+  check. Before, it stopped at the first error and skipped a store it could
+  not open without saying so (#6614).
+
 ### Added
 
 - **`[beads] proxied_idle_timeout` sets how long a bd-owned proxied scope's
@@ -263,6 +281,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The OpenCode and MiMo Code plugins keep the stable prime at the head of
+  the system prompt and drain queued nudges once per turn, per session.**
+  `experimental.chat.system.transform` fires once per model generation, and
+  on every generation of every session in the directory it ran the
+  consumptive `gc nudge drain --inject` and `gc mail check --inject` and
+  prepended their output, with the cached `gc prime --hook` output, to
+  `system[0]` as one block. The drain emits a `Current time: ...` line on
+  every call, even with an empty queue, so the bytes right after the prime
+  changed every generation and the provider's prompt-cache prefix ended at
+  the prime; everything after it, including OpenCode's own system text, was
+  re-prefilled each time (#5732). Every tool call in a turn also emptied the
+  queue again, into whichever generation won the race (#5552). The plugins
+  now prepend only the prime to `system[0]` and append the per-turn text as
+  a trailing system entry, after every stable entry, and they stop injecting
+  from `chat.message`: OpenCode persists that hook's `output.message.system`
+  on the user message and joins it into the tail of `system[0]` on every
+  generation of the turn, which put the prime and the clock line back into
+  the header. They run the two commands once per turn per session and repeat
+  the drained text verbatim for every later generation of that turn, so a
+  turn's system messages are identical across generations; with no known
+  session or turn they drain every time as before. A turn opens on a user
+  message the session has not reported before (its `message.updated`, which
+  OpenCode publishes before the turn's first generation), so the background
+  diff-summary update to an earlier user message, which can land several
+  turns later, does not rewind the turn. Message ids are not compared: their
+  encoded creation time wrapped on 2026-08-14 and follows the wall clock, so
+  a newer message can sort below an older one. Each session remembers its
+  last 64 user-message ids, so an update that arrives after its id has aged
+  out of that window opens a turn and costs at most one extra drain. Child
+  sessions no longer refresh the shared prime on `session.created` /
+  `session.compacted`, which re-baked the beacon time into the parent's
+  `system[0]` mid-turn and handed the child id to `gc prime --hook` as a
+  candidate resume key. The MiMo Code plugin now also closes the `gc`
+  child's stdin, as the OpenCode plugin already did (#5562); without that,
+  `gc nudge drain --inject` waited for input until the 30-second timeout and
+  the drain returned nothing. Turn state is per session, but the nudge queue
+  is not: a child or human session in the same directory still drains the
+  agent's queue, once per its own turn. OpenCode hook version 8, MiMo Code
+  hook version 4; `gc` upgrades installed plugins below those or without the
+  new transform and turn handling. (#5552, #5732, #6629)
+
+- **An attached session is no longer idle-slept.** Under a `[session_sleep]`
+  policy or an agent's `sleep_after_idle`, interactive sessions on local tmux
+  and on exec runtimes that declare `report-activity`, `report-attachment` and
+  `proc.exec` were drained "idle" once their pane had been quiet for the
+  window, while someone was reading them in a terminal. On any runtime that
+  reports attachment (tmux, k8s, ssh, exec with `report-attachment`), so were
+  non-interactive sessions someone had attached to. An attached session now
+  stays awake, and an attach overrides an idle drain the reconciler had
+  already begun. For the interactive sessions above, the idle window starts at
+  detach; a non-interactive session's window still runs from its pane's last
+  activity, so a quiet one can sleep as soon as it is detached. A user hold or
+  another explicit sleep request still wins over the attachment. Both the
+  legacy reconciler and the v2 allocator apply the rule (#7594, follow-up to
+  #7533).
+
 - **Text sent to a Claude session no longer answers its permission prompt,
   and approvals are detected and answered on current Claude Code.** On
   Claude Code 2.1.28x the tmux pane scraper missed the permission dialog
@@ -330,6 +404,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   clears the `is_blocked` flags migration 0059 set across relates-to,
   discovered-from and other non-blocking edges on any store that crossed it
   (beads#7037).
+- **Unchanged Dolt backup sync failures and reaper anomalies no longer mail
+  on every run.** `escalate.sh` takes `--incident-key` and `--fingerprint`:
+  an alert whose fingerprint matches its last delivered one stays quiet for
+  `GC_ESCALATE_REMINDER_SECONDS` (default one day), a changed fingerprint
+  alerts at once, and both orders pass `--resolve-incident` on a clean run so
+  the next failure alerts at once too. Deduplication is best-effort: when the
+  state under `.gc/incidents/` cannot be read or written the alert is sent
+  anyway, and a failed send is retried on the next run. The reaper's
+  fingerprint ignores only a measured backup age, so a backup that goes
+  missing alerts at once. The backup order's escalation reports each
+  database's first failed attempt instead of its last, with common credential
+  shapes redacted from every diagnostic. When `GC_ESCALATE_SEND_TIMEOUT_SECS`
+  cuts a send off before `gc mail send` reports the mail written,
+  `escalate.sh` now exits non-zero so callers that check the exit status can
+  retry it; keyed incidents also retry, because a failed send records no
+  incident state. A send cut off only after that report still counts as
+  delivered. The backup order's missing-`flock` and offsite-publication
+  alerts still mail on every run, and an `escalate.sh` override must accept
+  or ignore the new flags.
+
 - **`passthroughEnv` now honors `GC_SUPERVISOR_ENV` when deciding which
   non-`GC_`-prefixed variables reach a spawned agent session, not only which
   ones survive into the persisted service file.** The two allowlists used to

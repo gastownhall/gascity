@@ -1358,6 +1358,9 @@ func (s *BdStore) Create(b Bead) (Bead, error) {
 // CreateWithStorage persists a new bead via bd create using a storage tier
 // selected by policy middleware.
 func (s *BdStore) CreateWithStorage(b Bead, storage StorageClass) (Bead, error) {
+	if err := bdSplitSafeLabels(b.Labels); err != nil {
+		return Bead{}, fmt.Errorf("bd create: %w", err)
+	}
 	effectiveEphemeral, effectiveNoHistory, err := effectiveStorageFlags(b, storage)
 	if err != nil {
 		return Bead{}, fmt.Errorf("bd create: %w", err)
@@ -1568,12 +1571,54 @@ func (s *BdStore) bdShowMissError(id string, showErr error) error {
 	return fmt.Errorf("getting bead %q: %w (bd show: %w)", id, ErrNotFound, showErr)
 }
 
+// ErrBdSplitMetadataKey refuses a metadata key containing "=": bd's
+// --set-metadata splits key=value on the first "=", so "wait_hold=true"
+// would write key wait_hold, and any "a=b" would overwrite key a.
+var ErrBdSplitMetadataKey = errors.New(`bd metadata key contains "="`)
+
+// bdSplitSafeKeys refuses, before any bd call, a metadata key bd would
+// split (ErrBdSplitMetadataKey). bd create takes metadata as JSON, which
+// does not split.
+func bdSplitSafeKeys(meta map[string]string) error {
+	for k := range meta {
+		if strings.Contains(k, "=") {
+			return fmt.Errorf("%w: %q", ErrBdSplitMetadataKey, k)
+		}
+	}
+	return nil
+}
+
+// ErrBdSplitLabel refuses a label that fails beadmeta.ValidLabel: bd reads
+// --add-label, --remove-label and create's --labels as CSV records, so
+// "note,gc:session" would add gc:session, and '"gc:session"' or
+// "gc:session\n" would match it.
+var ErrBdSplitLabel = errors.New("bd label does not read back as itself from one CSV record")
+
+// bdSplitSafeLabels refuses, before any bd call, a label bd would split,
+// unquote or trim (ErrBdSplitLabel).
+func bdSplitSafeLabels(lists ...[]string) error {
+	for _, labels := range lists {
+		for _, l := range labels {
+			if !beadmeta.ValidLabel(l) {
+				return fmt.Errorf("%w: %q", ErrBdSplitLabel, l)
+			}
+		}
+	}
+	return nil
+}
+
+// bdSplitSafeUpdate is bdSplitSafeKeys and bdSplitSafeLabels for opts.
+func bdSplitSafeUpdate(opts UpdateOpts) error {
+	return errors.Join(bdSplitSafeKeys(opts.Metadata), bdSplitSafeLabels(opts.Labels, opts.RemoveLabels))
+}
+
 // bdUpdateArgs builds the `bd update` argv for opts, fanning each set field to
 // its flag. The result always begins with the three-element prefix
 // {"update","--json",id}; a return of exactly that prefix means no fields were
 // set (the empty-update no-op that bd itself rejects). It is shared by the
 // unconditional Update and the fenced UpdateIfMatch so a new UpdateOpts field is
 // wired into both paths from one place.
+// Its callers refuse a split metadata key first (bdSplitSafeKeys).
 func bdUpdateArgs(id string, opts UpdateOpts) []string {
 	args := []string{"update", "--json", id}
 	if opts.Title != nil {
@@ -1619,6 +1664,9 @@ func bdUpdateArgs(id string, opts UpdateOpts) []string {
 // Update modifies fields of an existing bead via bd update.
 func (s *BdStore) Update(id string, opts UpdateOpts) error {
 	noteSessionKeysByID(s.Get, id, opts.Metadata)
+	if err := bdSplitSafeUpdate(opts); err != nil {
+		return err
+	}
 	args := bdUpdateArgs(id, opts)
 	// No fields to update — no-op (bd errors on empty update).
 	if len(args) == 3 {
@@ -2010,6 +2058,9 @@ func (s *BdStore) UpdateAll(ids []string, opts UpdateOpts) (int, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
+	if err := bdSplitSafeUpdate(opts); err != nil {
+		return 0, err
+	}
 	args := append([]string{"update", "--json"}, ids...)
 	baseLen := len(args)
 	if opts.Title != nil {
@@ -2134,6 +2185,9 @@ func beadSliceContains(items []Bead, id string) bool {
 
 // SetMetadata sets a key-value metadata pair on a bead via bd update.
 func (s *BdStore) SetMetadata(id, key, value string) error {
+	if err := bdSplitSafeKeys(map[string]string{key: value}); err != nil {
+		return err
+	}
 	noteSessionKeysByID(s.Get, id, map[string]string{key: value})
 	err := s.runBDTransientWrite("update", "--json", id,
 		"--set-metadata", key+"="+value)
@@ -2153,6 +2207,9 @@ func (s *BdStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	noteSessionKeysByID(s.Get, id, kvs)
 	if len(kvs) == 0 {
 		return nil
+	}
+	if err := bdSplitSafeKeys(kvs); err != nil {
+		return err
 	}
 	args := []string{"update", "--json", id}
 	keys := make([]string, 0, len(kvs))
@@ -2709,6 +2766,9 @@ func (s *BdStore) CloseAll(ids []string, metadata map[string]string) (int, error
 func (s *BdStore) setMetadataBatchAll(ids []string, kvs map[string]string) error {
 	if len(ids) == 0 || len(kvs) == 0 {
 		return nil
+	}
+	if err := bdSplitSafeKeys(kvs); err != nil {
+		return err
 	}
 	args := []string{"update", "--json"}
 	args = append(args, ids...)

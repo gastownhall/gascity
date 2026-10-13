@@ -106,7 +106,7 @@ func decideRow(w *World, a *allocDecision, k rowKey) (it intent, next time.Time)
 			it.Key = k
 			if arm.name == "A6" && it.Kind != "" {
 				it.Patch, it.Class = r.fold(it.Patch, it.Class, rowArms[i+1:])
-				if it.Kind == intentRowHeal || it.Reason == decideDeadRuntimeHeal {
+				if it.Kind == intentRowHeal || it.Reason == decideDeadRuntimeHeal || it.Reason == decideSuspendHeal {
 					it = r.startHealed(it)
 				}
 			}
@@ -204,6 +204,7 @@ var rowArms = []rowArm{
 	{"A6", armClaimClear},
 	{"A6", armCreatingHeal},
 	{"A6", armDeadRuntimeHeal},
+	{"A6", armSoftSuspendHeal},
 	{"A6", armAwakeHeal},
 	{"A6", armStabilityClear},
 	{"A6", armDetachedAt},
@@ -214,7 +215,10 @@ var rowArms = []rowArm{
 	{"A9", armLivenessUnknown},
 	{"A10", armAdopt},
 	{"A10", armRollback},
+	{"A11", armAck},
+	{"A12", armZombie},
 	{"A14", armConfigDrift},
+	{"A15", armIdleTimeout},
 	{"A16", armExecutionStalled},
 	{"A17", armHeartbeatRespawn},
 	{"A18", armStart},

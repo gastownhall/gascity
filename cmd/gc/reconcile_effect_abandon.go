@@ -46,23 +46,27 @@ type startFailure struct {
 	peek            bool // a rate-limit screen may show: the pane is listed (START-022)
 	relaunched      bool // PreWake found the row creating (#7570): its marker stays
 	undo            preWakeUndo
-	row             session.Info // the fresh row, for the conversation probe
-	name, display   string       // the runtime name; the agent, for the quarantine metric
-	episode         string       // the #46 episode key
+	row             session.Info   // the fresh row, for the conversation probe
+	cfg             *config.City   // the city and the launch, for the probe's transcript roots (launchTranscriptRoots)
+	launch          TemplateParams // its template
+	name, display   string         // the runtime name; the agent, for the quarantine metric
+	episode         string         // the #46 episode key
 }
 
 // startFailureRead is what the failure Call read, past what it accrued.
 type startFailureRead struct {
 	startFailure
-	rateLimit bool // the pane shows a provider rate-limit screen
-	keeps     bool // the conversation's transcript is on disk (wakeFailureKeepsConversation)
+	rateLimit bool  // the pane shows a provider rate-limit screen
+	keeps     bool  // the conversation's transcript is on disk (wakeFailureKeepsConversation)
+	lost      *bool // a lost commit's stop (lostCommit): whether it was confirmed
 }
 
-// startEnd is what the commit hands its Call: the landed commit, or the
-// start that failed.
+// startEnd is what the commit hands its Call: the landed commit, the start
+// that failed, or the lost commit's own-runtime stop.
 type startEnd struct {
 	landed *landedCommit
 	failed *startFailure
+	lost   *teardown
 }
 
 // failStart is the start that did not commit with cause, handed to the
@@ -74,13 +78,14 @@ func failStart(v txView, out startOutcome, cause string, err error) txStep {
 	}
 	f := startFailure{
 		cause: cause, err: err, pending: v.Row.PendingCreateClaim, died: cause == causeDiedDuringStartup, relaunched: out.relaunched, undo: out.undo,
-		row: v.Row, name: name, display: out.tp.DisplayName(), episode: startupHealthEpisodeKey(v.Row, name),
+		row: v.Row, name: name, display: out.tp.DisplayName(), episode: startupHealthEpisodeKey(v.Row, name), launch: out.tp,
 	}
 	started := cause != causePrepare && cause != causeAttribution // a Start's own failure, which the provider screens
 	if started {
 		f.terminal = runtime.ProviderTerminalErrorReason(err.Error())
 	}
 	if env := v.World.Env; env != nil && env.Cfg != nil {
+		f.cfg = env.Cfg
 		f.configured = configuredNamedSessionBeadHasSpecInfo(v.Row, env.Cfg, config.EffectiveCityName(env.Cfg, ""))
 		f.peek = started && f.terminal == "" && env.Cfg.Session.Provider != "subprocess" && v.RT.Class != rtAbsent
 	}
@@ -93,14 +98,19 @@ func failStart(v txView, out startOutcome, cause string, err error) txStep {
 func readStartFailure(ctx context.Context, c txCaps, f startFailure) startFailureRead {
 	r := startFailureRead{startFailure: f}
 	if f.peek {
-		r.rateLimit = runtime.ContainsProviderRateLimitScreen(peekPane(ctx, c.start.sp, f.name))
+		// The dead pane's own screen (§12.2 #19, C5a3): a terminal provider
+		// error parks the row, as the zombie capture does; a rate-limit
+		// screen quarantines it (START-022/029).
+		pane := peekPane(ctx, c.start.sp, f.name)
+		r.terminal = runtime.ProviderTerminalErrorReason(pane)
+		r.rateLimit = r.terminal == "" && runtime.ContainsProviderRateLimitScreen(pane)
 	}
 	switch {
-	case r.rateLimit, f.terminal != "", f.cause == causeAttribution && errors.Is(f.err, runtime.ErrSessionExists):
+	case r.rateLimit, r.terminal != "", f.cause == causeAttribution && errors.Is(f.err, runtime.ErrSessionExists):
 	case f.pending, f.cause == causePrepare, f.cause == causeAttribution:
 		_ = c.episode.fail(f.episode, f.err, c.start.clock.Now())
 	default:
-		r.keeps = wakeFailureKeepsConversation(f.row)
+		r.keeps = wakeFailureKeepsConversation(f.row, launchTranscriptRoots(f.cfg, f.launch))
 	}
 	return r
 }
@@ -127,8 +137,11 @@ func peekPane(ctx context.Context, sp runtime.Provider, name string) string {
 // pending create's rollback goes on to its teardown and close.
 func abandonStep(v txView) txStep {
 	f, err := callResult[startFailureRead](v)
-	if err != nil {
+	switch {
+	case err != nil:
 		return txStep{Fail: causeCallError, Err: err}
+	case f.lost != nil: // the row moved back between the sections: still lost
+		return lostCommitStep(f)
 	}
 	abandon := func(patch session.MetadataPatch, class session.DispositionPatch, facts effectFacts) txStep {
 		return txStep{Write: patch, Class: class, Fail: f.cause, Err: f.err, Facts: facts}
@@ -206,19 +219,25 @@ func restorePatch(u preWakeUndo, meta map[string]string) (session.MetadataPatch,
 // teardown is a rollback's own-runtime stop, when it has one, and what its
 // close settles with.
 type teardown struct {
-	stop  *fenceVerdict // L1 alone on the own runtime (the rollback exception, F2); nil: nothing to stop
-	names []string      // its template's process names, for C8.8
-	fail  string        // the start's failure the close settles with; "" for A10's rollback
-	err   error
-	more  session.MetadataPatch // folded under the failed-create close: a terminal mark (START-028)
+	stop   *fenceVerdict // L1 alone on the own runtime (the rollback exception, F2); nil: nothing to stop
+	corpse corpseKill    // a corpse under the name, removed by exact object (the corpse exception)
+	names  []string      // its template's process names, for C8.8
+	fail   string        // the start's failure the close settles with; "" for A10's rollback
+	err    error
+	more   session.MetadataPatch // folded under the failed-create close: a terminal mark (START-028)
 }
 
 // ownTeardown is the teardown of v's pending create on its fresh read, or
 // the cause that holds the rollback (rollbackRuntime).
 func ownTeardown(v txView) (teardown, string) {
 	stop, cause := rollbackRuntime(v.Row, v.RT)
-	if cause != "" || !stop {
+	switch {
+	case cause != "":
 		return teardown{}, cause
+	case v.RT.Class == rtCorpse && v.RT.Same: // counted stopped (C8.8), and removed
+		return teardown{corpse: corpseKill{leaf: v.RT.leaf, name: strings.TrimSpace(v.Row.SessionName), live: v.RT.Again, now: v.Now}}, ""
+	case !stop:
+		return teardown{}, ""
 	}
 	verdict := ownRuntimeFence(v.RT, v.Row)
 	return teardown{stop: &verdict, names: processNamesFor(v.World, v.Row)}, ""
@@ -229,10 +248,8 @@ func ownTeardown(v txView) (teardown, string) {
 // stopped whatever its identity, SESS-091); neither for nothing running, a
 // corpse (C8.8 counts it stopped) or another row's runtime (F3: rolled back
 // without a stop, a stale epoch included, S7); else the cause that holds.
-//
-// TODO(C5a3): the corpse a rollback counts stopped stays listed (legacy
-// stops the name); C5a3's corpse removal takes it, so a crash-looping pool
-// create's corpses do not pile up (§12.2 #45 does not cover them).
+// A corpse counts stopped; the teardown removes it (ownTeardown), so a
+// crash-looping pool create's corpses do not pile up.
 func rollbackRuntime(row session.Info, rt *txRuntime) (stop bool, cause string) {
 	switch rt.Class {
 	case rtUnsupported:
@@ -258,15 +275,18 @@ func rollbackRuntime(row session.Info, rt *txRuntime) (stop bool, cause string) 
 // confirmed (C8.8), when the teardown has one. The close reads the runtime
 // fresh again, and holds the row open while its own runtime stays (ga-vcjr9).
 func stopOwnRuntime(ctx context.Context, c txCaps, in teardown) (teardown, error) {
-	if in.stop != nil {
+	switch {
+	case in.stop != nil:
 		stopFenced(ctx, c.start.sp, *in.stop, in.names, c.start.clock.Now)
+	case in.corpse.found():
+		_, _ = killCorpse(ctx, c, in.corpse) // a refused kill leaves it, counted stopped all the same
 	}
 	return in, nil
 }
 
 // rollbackClose is C3's rollback, the failed-create close, while the fresh
 // row may still roll back (CanRollback) and its fresh read finds no runtime
-// of its own.
+// of its own; S7's relaunch keeps the row once its runtime is stopped.
 func rollbackClose(v txView) txStep {
 	td, err := callResult[teardown](v)
 	stop, cause := rollbackRuntime(v.Row, v.RT)
@@ -279,6 +299,8 @@ func rollbackClose(v txView) txStep {
 		return txStep{Refuse: cause}
 	case stop:
 		return txStep{Refuse: causeRuntimePresent}
+	case v.It.Relaunch: // S7: the configured named row stays for A18's relaunch
+		return txStep{Done: true, Cause: decideStaleCreate}
 	}
 	patch, class := rollbackPatch(v.Row, v.Now, td.more)
 	return txStep{Terminal: patch, Class: class, Fail: td.fail, Err: td.err}
@@ -352,6 +374,55 @@ func paneScreen(ctx context.Context, _ effectReads, v txView) (screenWrite, erro
 	return screenWrite{}, nil
 }
 
+// staleSelfOwn reports the effect's own read finding the row's runtime alive
+// and StaleSelf at the row's generation (S7): not one an operator re-attached
+// on the row's token since the pass, which reads Current.
+func staleSelfOwn(v txView) bool {
+	verdict := compareIdentity(v.Row, v.RT.Identity)
+	return v.RT.Alive() && verdict == identityStaleSelf && ownRuntime(verdict, v.Row, v.RT.Identity)
+}
+
+// occupantStays reports whether the rollback's fresh read still finds
+// another runtime under the row's name, the one an occupant rollback (A10's
+// Occupied or S7 row, intent.Occupant) rested on: Foreign or StaleSelf, alive
+// or a zombie. Gone, a corpse, the row's own Current runtime, or an
+// unattributable one is no occupant: the pass read a runtime that has since
+// left, and rolling back a pending create inside its lease would orphan
+// nothing but close a create legacy keeps, deciding on one live read (F1).
+// rollbackStep refuses on it only inside the lease or over a live
+// non-occupant (occupantLeaseHolds, liveNonOccupant).
+func occupantStays(v txView) bool {
+	if v.RT == nil || v.RT.Class != rtAlive && v.RT.Class != rtZombie {
+		return false
+	}
+	switch compareIdentity(v.Row, v.RT.Identity) {
+	case identityForeign, identityStaleSelf:
+		return true
+	}
+	return false
+}
+
+// occupantLeaseHolds reports whether a pending create whose occupant left
+// is still inside its lease (legacy's pendingCreateSessionStillLeasedAt,
+// with no lease anchor past the skew bound), which keeps it as legacy does.
+// Past the lease, a gone or dead occupant leaves nothing to wait for: the
+// rollback proceeds, as main and legacy roll it back, so a started create
+// whose name a corpse holds is never stranded.
+func occupantLeaseHolds(v txView) bool {
+	var cfg *config.City
+	if v.World != nil && v.World.Env != nil {
+		cfg = v.World.Env.Cfg
+	}
+	return !pendingCreateAnchorAhead(v.Row, v.Now) && pendingCreateSessionStillLeasedAt(v.Row, cfg, v.Now)
+}
+
+// liveNonOccupant reports a runtime present under the name, alive or a
+// zombie, that is no occupant: the row's own Current runtime or an
+// unattributable one, which a rollback must not close over at any lease.
+func liveNonOccupant(v txView) bool {
+	return v.RT != nil && (v.RT.Class == rtAlive || v.RT.Class == rtZombie) && !occupantStays(v)
+}
+
 // rollbackStep is the rollback's first Decide: a screen's patch, or the
 // teardown of the fresh read's own runtime for the Call.
 func rollbackStep(v txView, screen screenWrite, _ error) txStep {
@@ -359,6 +430,14 @@ func rollbackStep(v txView, screen screenWrite, _ error) txStep {
 	switch {
 	case !rollbackable(v.Row):
 		return txStep{Refuse: causeRedecided}
+	case v.It.Reason == decideStaleCreate && v.RT.Alive() && compareIdentity(v.Row, v.RT.Identity) == identityCurrent:
+		return txStep{Refuse: causeRedecided} // S7: a runtime Current since the pass is A10's adopt's, next pass
+	case v.It.Relaunch && v.RT.Class == rtAbsent:
+		return txStep{Done: true, Cause: decideStaleCreate} // gone already: A18 relaunches it, no backoff between
+	case v.It.Relaunch && !staleSelfOwn(v):
+		return txStep{Refuse: causeRedecided} // S7's relaunch stops only a runtime its own read still finds StaleSelf, its own
+	case v.It.Occupant && !occupantStays(v) && (occupantLeaseHolds(v) || liveNonOccupant(v)):
+		return txStep{Refuse: causeRedecided} // F1: the occupant the arm rested on is gone; the lease, or the live runtime, decides next pass
 	case len(screen.patch) > 0 || screen.class.Len() > 0:
 		return txStep{Write: screen.patch, Class: screen.class, Done: true}
 	case cause != "":

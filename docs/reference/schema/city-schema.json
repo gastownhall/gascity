@@ -24,6 +24,11 @@
           "type": "string",
           "description": "StopGrace is how long stopping an ACP session waits after SIGTERM\nbefore escalating to SIGKILL. Raise it for agents that need longer to\ndrain in-flight tool calls on shutdown. Duration string (e.g., \"5s\",\n\"20s\"). Defaults to \"5s\"; non-positive or unparseable values fall back\nto the default. gc stop bounds each session at 30s, so keep stop_grace\ncomfortably below that.",
           "default": "5s"
+        },
+        "cancel_timeout": {
+          "type": "string",
+          "description": "CancelTimeout is how long interrupting an ACP session waits for the\nagent to end its turn after session/cancel before falling back to\nSIGINT. The interrupt never kills the agent. Duration string (e.g.,\n\"10s\", \"30s\"). Defaults to \"10s\"; non-positive or unparseable values\nfall back to the default.",
+          "default": "10s"
         }
       },
       "additionalProperties": false,
@@ -1420,7 +1425,7 @@
         },
         "dolt_start_address_in_use_retry_window": {
           "type": "string",
-          "description": "DoltStartAddressInUseRetryWindow is how long the managed dolt start\npath waits on the originally requested port when bind fails with\n\"address already in use\" before falling back to a higher port. The\ncommon cause is a TIME_WAIT socket left by an abrupt stop of a sibling\ndolt subprocess (external SIGTERM, supervisor restart, OOM kill); on\nLinux the listening-socket slot typically frees within ~30s. Falling\nback immediately publishes the rebound port to provider state, after\nwhich `recoverManagedDoltShouldReuseExisting` keeps accepting the\nrebound instance as canonical and consumers hardcoded to the original\nport stay broken until the orphan is killed. Duration string (e.g.,\n\"30s\", \"1m\"). Set to \"0s\" to disable the retry (legacy fall-back-\nimmediately behavior). Defaults to \"30s\". Each port is waited on at\nmost once per startManagedDoltProcessWithOptions invocation, so the\nworst-case wall time per startup is bounded by\n(DoltStartAddressInUseRetryWindow + per-attempt-startup) × min(5,\ndistinct-ports-tried) rather than DoltStartAddressInUseRetryWindow × 5.\nNegative values are rejected at config load.",
+          "description": "DoltStartAddressInUseRetryWindow is how long the managed dolt start\npath waits on the originally requested port when dolt reports it in\nuse (\"address already in use\", or \"Port N already in use.\" from dolt\n2.3.3) before falling back to a higher port. The\ncommon cause is a TIME_WAIT socket left by an abrupt stop of a sibling\ndolt subprocess (external SIGTERM, supervisor restart, OOM kill); on\nLinux the listening-socket slot typically frees within ~30s. Falling\nback immediately publishes the rebound port to provider state, after\nwhich `recoverManagedDoltShouldReuseExisting` keeps accepting the\nrebound instance as canonical and consumers hardcoded to the original\nport stay broken until the orphan is killed. Duration string (e.g.,\n\"30s\", \"1m\"). Set to \"0s\" to disable the retry (legacy fall-back-\nimmediately behavior). Defaults to \"30s\". Each port is waited on at\nmost once per startManagedDoltProcessWithOptions invocation, so the\nworst-case wall time per startup is bounded by\n(DoltStartAddressInUseRetryWindow + per-attempt-startup) × min(5,\ndistinct-ports-tried) rather than DoltStartAddressInUseRetryWindow × 5.\nNegative values are rejected at config load.",
           "default": "30s"
         },
         "wisp_gc_interval": {
@@ -1746,6 +1751,13 @@
         "rig": {
           "type": "string",
           "description": "Rig is the Gas City rig that owns repair work for this repository."
+        },
+        "authors": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Authors is an optional fail-closed allow-list of GitHub author logins.\nWhen empty, the monitor acts on every open PR against the monitored\nrepo/base branches (the historical behavior). When non-empty, the monitor\nacts ONLY on PRs whose author login exactly (case-sensitively) matches an\nallowed value; a PR with an unresolved or empty author is skipped. This\nlets an operator scope the native monitor to their own PRs so it cannot\nmint repair beads for other contributors' pull requests."
         },
         "notify": {
           "items": {
