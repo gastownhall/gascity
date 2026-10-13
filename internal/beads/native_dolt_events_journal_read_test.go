@@ -37,7 +37,12 @@ func (s *nativeJournalReaderSpy) IsClosed() bool { return s.closed }
 // retires it when the test ends.
 func activatedJournalSpy(t *testing.T, spy *nativeJournalReaderSpy) *nativeJournalReaderSpy {
 	t.Helper()
-	nativeEventsJournalActivations.record(spy)
+	t.Setenv("BD_EVENTS_JOURNAL", "")
+	beadsDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("events-journal: true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	nativeEventsJournalActivations.record(spy, beadsDir)
 	t.Cleanup(func() { spy.closed = true })
 	return spy
 }
@@ -159,16 +164,100 @@ func TestNativeDoltStoreEventsJournalActiveReportsTheOpenActivation(t *testing.T
 	}
 }
 
+// bd's CLI re-resolves activation on every invocation, so a direct scope
+// that turns the journal off stops journaling agents' writes at once. The
+// store re-checks the scope's resolution within nativeJournalActivationRecheck,
+// so it stops answering "caught up" over writes nobody recorded; turning the
+// journal back on restores the handle it was opened with.
+func TestNativeDoltStoreEventsJournalActiveFollowsTheScopeAfterOpen(t *testing.T) {
+	t.Setenv("BD_EVENTS_JOURNAL", "")
+	beadsDir := t.TempDir()
+	cfg := filepath.Join(beadsDir, "config.yaml")
+	writeConfig := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(cfg, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeConfig("events-journal: true\n")
+	now := time.Unix(1_000_000, 0)
+	oldNow := nativeEventsJournalActivations.now
+	t.Cleanup(func() { nativeEventsJournalActivations.now = oldNow })
+	nativeEventsJournalActivations.now = func() time.Time { return now }
+
+	spy := &nativeJournalReaderSpy{read: func(context.Context, int64, int) (journalops.Page, error) {
+		return journalops.Page{Head: 7}, nil
+	}}
+	t.Cleanup(func() { spy.closed = true })
+	oldOpen := nativeDoltOpenBestAvailable
+	t.Cleanup(func() { nativeDoltOpenBestAvailable = oldOpen })
+	nativeDoltOpenBestAvailable = func(context.Context, string) (beadslib.Storage, error) { return spy, nil }
+	storage, err := openNativeDoltStorage(context.Background(), beadsDir)
+	if err != nil {
+		t.Fatalf("openNativeDoltStorage: %v", err)
+	}
+	store := newNativeDoltStoreForTest(storage)
+	if !store.EventsJournalActive() {
+		t.Fatal("EventsJournalActive = false on a handle opened with the journal on")
+	}
+
+	writeConfig("events-journal: false\n")
+	if !store.EventsJournalActive() {
+		t.Fatal("EventsJournalActive re-read the scope's config before the recheck interval passed")
+	}
+	now = now.Add(nativeJournalActivationRecheck)
+	if store.EventsJournalActive() {
+		t.Fatal("EventsJournalActive = true after the scope turned the journal off")
+	}
+	if _, err := store.ReadEventsJournalPage(context.Background(), 0, 0); !errors.Is(err, ErrEventsJournalInactive) {
+		t.Fatalf("error = %v, want ErrEventsJournalInactive", err)
+	}
+	if _, ok := ActiveEventsJournal(store); ok {
+		t.Fatal("ActiveEventsJournal offered a journal the scope turned off")
+	}
+
+	writeConfig("events-journal: true\n")
+	now = now.Add(nativeJournalActivationRecheck)
+	if !store.EventsJournalActive() {
+		t.Fatal("EventsJournalActive = false after the scope turned the journal back on")
+	}
+	if _, err := store.ReadEventsJournalPage(context.Background(), 0, 0); err != nil {
+		t.Fatalf("ReadEventsJournalPage after the journal came back: %v", err)
+	}
+}
+
+// A handle opened with the journal off never journals gc's own writes, so
+// the scope turning the journal on later does not make it tailable.
+func TestNativeDoltStoreEventsJournalActiveNeedsTheOpenActivation(t *testing.T) {
+	t.Setenv("BD_EVENTS_JOURNAL", "")
+	beadsDir := t.TempDir()
+	spy := &nativeJournalReaderSpy{}
+	t.Cleanup(func() { spy.closed = true })
+	oldOpen := nativeDoltOpenBestAvailable
+	t.Cleanup(func() { nativeDoltOpenBestAvailable = oldOpen })
+	nativeDoltOpenBestAvailable = func(context.Context, string) (beadslib.Storage, error) { return spy, nil }
+	storage, err := openNativeDoltStorage(context.Background(), beadsDir)
+	if err != nil {
+		t.Fatalf("openNativeDoltStorage: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("events-journal: true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if newNativeDoltStoreForTest(storage).EventsJournalActive() {
+		t.Fatal("EventsJournalActive = true on a handle opened with the journal off")
+	}
+}
+
 func TestNativeJournalActivationSetDropsClosedHandles(t *testing.T) {
 	set := &nativeJournalActivationSet{}
 	first := &nativeJournalReaderSpy{}
 	second := &nativeJournalReaderSpy{}
-	set.record(first)
+	set.record(first, "")
 	if !set.active(first) || set.active(second) {
 		t.Fatal("the set does not track handles by identity")
 	}
 	first.closed = true
-	set.record(second)
+	set.record(second, "")
 	if set.active(first) {
 		t.Fatal("a closed handle survived the next record")
 	}

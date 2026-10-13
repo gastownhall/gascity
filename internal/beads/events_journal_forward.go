@@ -26,7 +26,9 @@ const maxJournalUnwrap = 16
 // A caller that gets false keeps the scope on its scan path. A caller that
 // gets a journal can still be refused by a later read
 // (ErrEventsJournalUnavailable after a demotion, ErrEventsJournalInactive
-// after the scope turned the journal off), and handles that the same way.
+// after the scope turned the journal off — noticed by the next guard tick on
+// a proxied store, and within nativeJournalActivationRecheck on a direct
+// native one), and handles that the same way.
 func ActiveEventsJournal(store Store) (journalops.Journal, bool) {
 	for range maxJournalUnwrap {
 		if store == nil {

@@ -19,8 +19,10 @@ import (
 // native writes are missing from a journal the workspace asked for while
 // every bd CLI write to the same database is in it.
 //
-// Activation is per store instance and read once, at open: a long-lived
-// handle keeps the answer it opened with. A workspace that enables the journal
+// Activation is per store instance and applied once, at open: a long-lived
+// handle keeps journaling its own writes as it opened. Whether the handle can
+// be TAILED also follows the scope's later answer; see
+// NativeDoltStore.EventsJournalActive. A workspace that enables the journal
 // on a backend that cannot record it fails the open, closing the store, rather
 // than returning a handle whose writes would silently go unrecorded.
 func openNativeDoltStorage(ctx context.Context, beadsDir string) (beadslib.Storage, error) {
@@ -34,7 +36,7 @@ func openNativeDoltStorage(ctx context.Context, beadsDir string) (beadslib.Stora
 		return nil, fmt.Errorf("%s enables the events journal, but its storage backend does not support it", beadsDir)
 	}
 	configurer.SetEventsJournalEnabled(true)
-	nativeEventsJournalActivations.record(storage)
+	nativeEventsJournalActivations.record(storage, beadsDir)
 	return storage, nil
 }
 

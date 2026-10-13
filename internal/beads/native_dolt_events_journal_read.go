@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"sync"
+	"time"
 
 	beadslib "github.com/steveyegge/beads"
 	"github.com/steveyegge/beads/journalops"
@@ -33,7 +34,8 @@ var _ journalops.Journal = (*NativeDoltStore)(nil)
 // caller's exclusive checkpoint, on the terms journalops.Journal states.
 //
 // It refuses with ErrEventsJournalInactive when the handle it reads through
-// was not opened with the journal activated (EventsJournalActive), and with
+// was not opened with the journal activated, or its scope has since turned
+// the journal off (EventsJournalActive), and with
 // ErrEventsJournalUnsupported when the backend cannot journal at all.
 //
 // The read goes through the read-retry chain, so it rides a managed-Dolt
@@ -83,14 +85,24 @@ func (s *NativeDoltStore) readEventsJournalPage(ctx context.Context, since int64
 }
 
 // EventsJournalActive reports whether the storage this store currently reads
-// through was opened with the events journal activated — the answer
-// openNativeDoltStorage resolved from the workspace's config (and
-// BD_EVENTS_JOURNAL) when it opened that handle.
+// through can be tailed: it was opened with the events journal activated
+// (openNativeDoltStorage resolved the workspace's config and
+// BD_EVENTS_JOURNAL when it opened that handle), AND the scope still resolves
+// activation on.
 //
-// The library exposes the activation switch but no getter, so the answer is
-// recorded where the switch is thrown (nativeEventsJournalActivations). A store
-// built directly over a storage value, which never passed that open, reports
-// false. A closed store reports false.
+// The second half matters because bd's CLI resolves activation on every
+// invocation: a scope that turns the journal off stops journaling agents'
+// writes at once while this handle, opened earlier, keeps journaling gc's
+// own. The store re-checks the scope's resolution at most every
+// nativeJournalActivationRecheck, so it stops answering "caught up" over
+// unrecorded writes within that interval. A scope that turns the journal on
+// after open does not make the handle tailable: its own writes are not
+// journaled until it reopens.
+//
+// The library exposes the activation switch but no getter, so the open-time
+// answer is recorded where the switch is thrown (nativeEventsJournalActivations).
+// A store built directly over a storage value, which never passed that open,
+// reports false. A closed store reports false.
 func (s *NativeDoltStore) EventsJournalActive() bool {
 	storage, release, err := s.acquireStorage()
 	if err != nil {
@@ -100,11 +112,18 @@ func (s *NativeDoltStore) EventsJournalActive() bool {
 	return nativeEventsJournalActivations.active(storage)
 }
 
-// nativeEventsJournalActivations records which opened storage handles
-// openNativeDoltStorage activated the journal on.
-var nativeEventsJournalActivations = &nativeJournalActivationSet{}
+// nativeJournalActivationRecheck bounds how long a recorded handle trusts its
+// scope's last activation answer before resolving it again. Resolving reads
+// the scope's config.yaml, so a tailer polling several times a second does not
+// re-read it on every page.
+const nativeJournalActivationRecheck = 5 * time.Second
 
-// nativeJournalActivationSet is a set of storage handles keyed by identity.
+// nativeEventsJournalActivations records which opened storage handles
+// openNativeDoltStorage activated the journal on, and for which scope.
+var nativeEventsJournalActivations = &nativeJournalActivationSet{now: time.Now}
+
+// nativeJournalActivationSet is a set of activated storage handles keyed by
+// identity, each with the beads directory whose activation it follows.
 //
 // It exists because the library exposes the activation setter and no getter,
 // and openNativeDoltStorage's callers (the open paths and the reconnect hook)
@@ -115,10 +134,20 @@ var nativeEventsJournalActivations = &nativeJournalActivationSet{}
 // and is not recorded; every library backend is a pointer.
 type nativeJournalActivationSet struct {
 	mu      sync.Mutex
-	handles map[beadslib.Storage]struct{}
+	handles map[beadslib.Storage]*nativeJournalActivation
+	// now is the clock the recheck interval is measured on.
+	now func() time.Time
 }
 
-func (a *nativeJournalActivationSet) record(storage beadslib.Storage) {
+// nativeJournalActivation is one recorded handle's scope and the scope's last
+// resolved activation.
+type nativeJournalActivation struct {
+	beadsDir  string
+	enabled   bool
+	checkedAt time.Time
+}
+
+func (a *nativeJournalActivationSet) record(storage beadslib.Storage, beadsDir string) {
 	if !nativeStorageComparable(storage) {
 		return
 	}
@@ -126,20 +155,50 @@ func (a *nativeJournalActivationSet) record(storage beadslib.Storage) {
 	defer a.mu.Unlock()
 	a.sweepLocked()
 	if a.handles == nil {
-		a.handles = make(map[beadslib.Storage]struct{})
+		a.handles = make(map[beadslib.Storage]*nativeJournalActivation)
 	}
-	a.handles[storage] = struct{}{}
+	// The open resolved activation on the moment before recording.
+	a.handles[storage] = &nativeJournalActivation{beadsDir: beadsDir, enabled: true, checkedAt: a.clock()}
 }
 
+// active reports whether storage was activated at open and its scope still
+// resolves activation on, re-resolving the scope — outside mu, since it reads
+// the scope's config — once the last answer is older than the recheck
+// interval.
 func (a *nativeJournalActivationSet) active(storage beadslib.Storage) bool {
 	if !nativeStorageComparable(storage) {
 		return false
 	}
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	a.sweepLocked()
-	_, ok := a.handles[storage]
-	return ok
+	entry, ok := a.handles[storage]
+	if !ok {
+		a.mu.Unlock()
+		return false
+	}
+	now := a.clock()
+	if now.Sub(entry.checkedAt) < nativeJournalActivationRecheck {
+		enabled := entry.enabled
+		a.mu.Unlock()
+		return enabled
+	}
+	beadsDir := entry.beadsDir
+	a.mu.Unlock()
+
+	enabled := nativeEventsJournalEnabledFor(beadsDir)
+	a.mu.Lock()
+	if current, ok := a.handles[storage]; ok && current == entry {
+		entry.enabled, entry.checkedAt = enabled, now
+	}
+	a.mu.Unlock()
+	return enabled
+}
+
+func (a *nativeJournalActivationSet) clock() time.Time {
+	if a.now != nil {
+		return a.now()
+	}
+	return time.Now()
 }
 
 // sweepLocked drops the handles that report themselves closed.
