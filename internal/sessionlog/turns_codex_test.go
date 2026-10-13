@@ -109,7 +109,7 @@ func TestScanTurnsCodexStartBeyondBudget(t *testing.T) {
 
 	ended := writeTurnLines(t, "rollout.jsonl",
 		`{"timestamp":"2026-10-08T02:22:22.191Z","type":"event_msg","payload":{"type":"task_started","turn_id":"t1","started_at":1791426142}}`,
-		`{"timestamp":"2026-10-08T02:22:23.000Z","type":"response_item","payload":{"type":"function_call_output","output":"`+string(make([]byte, 0))+`padding padding padding padding padding padding padding padding padding padding"}}`,
+		`{"timestamp":"2026-10-08T02:22:23.000Z","type":"response_item","payload":{"type":"function_call_output","output":"padding padding padding padding padding padding padding padding padding padding"}}`,
 		`{"timestamp":"2026-10-08T02:22:30.500Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"t1","error":null}}`,
 	)
 	got, err = scanTurnsWithBudget(t, "codex", ended, 300)
