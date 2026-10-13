@@ -1542,10 +1542,21 @@ gc event
 
 Record a custom event to the city event log.
 
-Best-effort: always exits 0 so bead hooks never fail. Supports
-attaching arbitrary JSON payloads. JSON summaries report whether submission to
-the configured provider was attempted; the event bus does not acknowledge
-durable persistence.
+Recording is best-effort: once an event is accepted, a provider or payload
+error is reported on stderr and the command still exits 0, so bead hooks never
+fail on it. JSON summaries report whether submission to the configured provider
+was attempted; the event bus does not acknowledge durable persistence.
+
+Two requests are refused with exit 1 and nothing is recorded. In --json mode
+the failure object carries the code.
+
+- reserved_actor: --actor starts with "cache-", or the default actor is one
+  of the controller cache's own actors (cache-local, cache-reconcile).
+- bead_payload_refused: --payload on bead.created, bead.updated, bead.closed
+  or bead.deleted. Their payload is the bead row; use --bead-payload &lt;id&gt; so
+  gc reads it from the store.
+
+--payload attaches arbitrary JSON to any other event type.
 
 ```
 gc event emit <type> [flags]
@@ -1554,7 +1565,7 @@ gc event emit <type> [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--actor` | string |  | Actor name (default: $GC_ALIAS, else $GC_AGENT, else $GC_SESSION_ID, else "human") |
-| `--bead-payload` | string |  | Best-effort bead ID fallback for hook payloads |
+| `--bead-payload` | string |  | Bead ID whose stored row becomes the payload (the only payload source for bead.created/updated/closed/deleted) |
 | `--json` | bool |  | emit JSON summary |
 | `--message` | string |  | Event message |
 | `--payload` | string |  | JSON payload to attach to the event |
