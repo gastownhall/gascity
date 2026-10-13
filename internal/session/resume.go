@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/beads"
 )
 
 var (
@@ -65,6 +67,31 @@ func ExplicitWakeUnserved(info Info) bool {
 	return reqErr != nil || sleptErr != nil || !requestedAt.Before(sleptAt)
 }
 
+// wakeVerdict is RequestWakeUnlessHeld's decision on one read of a row: a
+// lifecycle conflict, or an outcome plus whether the request coalesces onto an
+// already pending wake (nothing to write).
+type wakeVerdict struct {
+	conflict  error
+	outcome   WakeRequestOutcome
+	coalesces bool
+}
+
+func decideWakeRequest(id string, info Info, persisted PersistedResponse, runtimeRunning bool, now time.Time) wakeVerdict {
+	input := LifecycleInputFromMetadata(persisted.Status, persisted.Metadata)
+	input.Now = now
+	if conflictState, refused := lifecycleWakeConflictState(ProjectLifecycle(input)); refused {
+		return wakeVerdict{conflict: &WakeConflictError{SessionID: id, State: conflictState}}
+	}
+	state := State(strings.TrimSpace(persisted.Metadata["state"]))
+	switch {
+	case HoldVerdict(persisted.Metadata, runtimeRunning, now):
+		return wakeVerdict{outcome: WakeHeld}
+	case info.Closed || (state != StateAsleep && state != StateDrained):
+		return wakeVerdict{outcome: WakeNotDormant}
+	}
+	return wakeVerdict{outcome: WakeRecorded, coalesces: ExplicitWakeUnserved(info)}
+}
+
 // RequestWakeUnlessHeld records an explicit wake by CAS on an open asleep or
 // drained row that nothing holds (D8 rule 1). A row that already carries an
 // unserved explicit wake (ExplicitWakeUnserved) is not written again: the
@@ -72,29 +99,28 @@ func ExplicitWakeUnserved(info Info) bool {
 // senders waking one session do not contend on its row. A row whose lifecycle
 // refuses a wake returns *WakeConflictError, as WakeSession does; a CAS lost
 // on every attempt returns ErrWakeRequestContended.
+//
+// Coalescing is the one verdict that skips the CAS, so it is never taken on
+// the front door's read alone: a cached store can lag another process's write
+// (an operator suspend, or the owner consuming the wake and sleeping again).
+// The verdict is confirmed on a live read of the row; when the live row
+// decides otherwise that decision stands, and a write it needs goes through
+// the CAS at the stale revision, which fails, refreshes the cache and retries.
 func (s *Store) RequestWakeUnlessHeld(id string, runtimeRunning bool, now time.Time) (WakeRequestOutcome, error) {
-	var outcome WakeRequestOutcome
-	var conflict error
-	var coalesced bool
+	var verdict wakeVerdict
+	var liveErr error
 	ok, err := s.UpdateMetadataFenced(id, 3, func(info Info, persisted PersistedResponse) MetadataPatch {
-		input := LifecycleInputFromMetadata(persisted.Status, persisted.Metadata)
-		input.Now = now
-		conflict, outcome, coalesced = nil, WakeNotDormant, false
-		state := State(strings.TrimSpace(persisted.Metadata["state"]))
-		if conflictState, refused := lifecycleWakeConflictState(ProjectLifecycle(input)); refused {
-			conflict = &WakeConflictError{SessionID: id, State: conflictState}
-			return nil
+		liveErr = nil
+		verdict = decideWakeRequest(id, info, persisted, runtimeRunning, now)
+		if verdict.coalesces {
+			live, err := beads.HandlesFor(s.store.Store).Live.Get(id)
+			if err != nil {
+				liveErr = fmt.Errorf("confirming wake request on session %q: %w", id, err)
+				return nil
+			}
+			verdict = decideWakeRequest(id, infoFromPersistedBead(live), PersistedResponseFromBead(live), runtimeRunning, now)
 		}
-		switch {
-		case HoldVerdict(persisted.Metadata, runtimeRunning, now):
-			outcome = WakeHeld
-			return nil
-		case info.Closed || (state != StateAsleep && state != StateDrained):
-			return nil
-		}
-		outcome = WakeRecorded
-		if ExplicitWakeUnserved(info) {
-			coalesced = true
+		if verdict.conflict != nil || verdict.outcome != WakeRecorded || verdict.coalesces {
 			return nil
 		}
 		return RequestExplicitWakePatch(string(WakeCauseExplicit), now)
@@ -102,10 +128,12 @@ func (s *Store) RequestWakeUnlessHeld(id string, runtimeRunning bool, now time.T
 	switch {
 	case err != nil:
 		return 0, err
-	case conflict != nil:
-		return 0, conflict
-	case outcome == WakeRecorded && !ok && !coalesced:
+	case liveErr != nil:
+		return 0, liveErr
+	case verdict.conflict != nil:
+		return 0, verdict.conflict
+	case verdict.outcome == WakeRecorded && !ok && !verdict.coalesces:
 		return 0, fmt.Errorf("%w: %s", ErrWakeRequestContended, id)
 	}
-	return outcome, nil
+	return verdict.outcome, nil
 }

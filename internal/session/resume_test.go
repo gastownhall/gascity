@@ -475,3 +475,86 @@ func TestInterruptRestartKeepsHeartbeatHold(t *testing.T) {
 		}
 	}
 }
+
+// cachedCoalesceRow creates meta as a session row behind a primed CachingStore
+// over a revision-stamped store, and returns the cache and its backing. A write
+// to the backing is another process's write the cache has not seen yet.
+func cachedCoalesceRow(t *testing.T, meta map[string]string) (cache, backing beads.Store, id string) {
+	t.Helper()
+	backing = stampedMemStore(t, gate.Auto, beads.NewMemStore())
+	b, err := backing.Create(beads.Bead{Title: "w", Type: BeadType, Labels: []string{LabelSession}, Metadata: meta})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := beads.NewCachingStoreForTest(backing, nil)
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	return cs, backing, b.ID
+}
+
+// TestRequestWakeCoalesceConfirmsAgainstTheLiveRow: the coalesce verdict is
+// the one decision that skips the CAS, so it must not rest on a cached read
+// that lags another process's write. Kills (a) an operator suspend written out
+// of process reported as WakeRecorded on the held row, (b) a wake consumed and
+// slept again out of process swallowed by the stale unserved request, and
+// (c) a fresh cache paying for a write it does not need.
+func TestRequestWakeCoalesceConfirmsAgainstTheLiveRow(t *testing.T) {
+	pending := policyRow(map[string]string{
+		"wake_request":      string(WakeCauseExplicit),
+		"wake_requested_at": "2026-10-08T11:00:00Z",
+	})
+
+	t.Run("suspended out of process", func(t *testing.T) {
+		cache, backing, id := cachedCoalesceRow(t, pending)
+		if err := backing.SetMetadataBatch(id, map[string]string{
+			"state":             string(StateSuspended),
+			"held_until":        "2099-01-01T00:00:00Z",
+			"sleep_intent":      "user-hold",
+			"wake_request":      "",
+			"wake_requested_at": "",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		rev0, _ := rowRevision(t, backing, id)
+		got, err := NewStore(beads.SessionStore{Store: cache}).RequestWakeUnlessHeld(id, false, resumeNow)
+		if err != nil || got != WakeHeld {
+			t.Fatalf("RequestWakeUnlessHeld = %v, %v; want WakeHeld", got, err)
+		}
+		if rev1, meta := rowRevision(t, backing, id); rev1 != rev0 || meta["wake_request"] != "" {
+			t.Fatalf("live row revision %d -> %d, wake_request %q; want no write", rev0, rev1, meta["wake_request"])
+		}
+	})
+
+	t.Run("served out of process", func(t *testing.T) {
+		cache, backing, id := cachedCoalesceRow(t, pending)
+		// The owner consumed the wake, ran the session and slept it again.
+		if err := backing.SetMetadataBatch(id, map[string]string{
+			"wake_request":      "",
+			"wake_requested_at": "",
+			"slept_at":          "2026-10-08T11:30:00Z",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		got, err := NewStore(beads.SessionStore{Store: cache}).RequestWakeUnlessHeld(id, false, resumeNow)
+		if err != nil || got != WakeRecorded {
+			t.Fatalf("RequestWakeUnlessHeld = %v, %v; want WakeRecorded", got, err)
+		}
+		_, meta := rowRevision(t, backing, id)
+		if meta["wake_request"] != string(WakeCauseExplicit) || meta["wake_requested_at"] != resumeNow.Format(time.RFC3339) {
+			t.Fatalf("live row wake_request %q wake_requested_at %q; want a fresh explicit wake", meta["wake_request"], meta["wake_requested_at"])
+		}
+	})
+
+	t.Run("fresh cache coalesces", func(t *testing.T) {
+		cache, backing, id := cachedCoalesceRow(t, pending)
+		rev0, _ := rowRevision(t, backing, id)
+		got, err := NewStore(beads.SessionStore{Store: cache}).RequestWakeUnlessHeld(id, false, resumeNow)
+		if err != nil || got != WakeRecorded {
+			t.Fatalf("RequestWakeUnlessHeld = %v, %v; want WakeRecorded", got, err)
+		}
+		if rev1, meta := rowRevision(t, backing, id); rev1 != rev0 || meta["wake_requested_at"] != "2026-10-08T11:00:00Z" {
+			t.Fatalf("live row revision %d -> %d, wake_requested_at %q; want no write", rev0, rev1, meta["wake_requested_at"])
+		}
+	})
+}
