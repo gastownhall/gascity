@@ -3,6 +3,7 @@ package main
 import (
 	"maps"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
@@ -69,7 +70,8 @@ func armRollback(r *rowFacts) (intent, bool) {
 	case e.Desired == desireNone && e.Reason == reasonRollbackCandidate:
 	case e.Desired == desireDrain && e.Liveness.startCandidate():
 	case e.Liveness == livenessOccupied && r.occupantCorpseInLease():
-		return intent{Reason: decideRollbackHeld}, true // the effect would find the occupant gone and the lease holding it (F1)
+		r.after(requeueUntil(r.w.Now, r.pendingCreateLeaseEnd())) // a pass when the lease lapses
+		return intent{Reason: decideRollbackHeld}, true           // the effect would find the occupant gone and the lease holding it (F1)
 	case e.Liveness == livenessOccupied:
 		occupant = true
 	case e.Liveness == livenessAlive && compareIdentity(info, r.w.Observed[r.k].Identity) == identityStaleSelf:
@@ -98,6 +100,34 @@ func (r *rowFacts) occupantCorpseInLease() bool {
 		cfg = r.w.Env.Cfg
 	}
 	return !pendingCreateAnchorAhead(info, r.w.Now) && pendingCreateSessionStillLeasedAt(info, cfg, r.w.Now)
+}
+
+// pendingCreateLeaseEnd is when the row's pending-create lease lapses, as
+// pendingCreateLeaseActive decides it: a started create's lease runs while
+// its start is in flight (last_woke_at plus the startup timeout and the
+// stale-key and settle allowances) or its attempt is fresh (the anchor,
+// pending_create_started_at or the row's creation, plus
+// staleCreatingStateTimeout), whichever ends later; a never-started one's
+// runs pendingCreateNeverStartedTimeout past its anchor.
+func (r *rowFacts) pendingCreateLeaseEnd() time.Time {
+	info := r.row.Info
+	anchor := info.CreatedAt
+	if started, ok := parseRFC3339Metadata(info.PendingCreateStartedAt); ok {
+		anchor = started
+	}
+	woke, ok := parseRFC3339Metadata(strings.TrimSpace(info.LastWokeAt))
+	if !ok {
+		return anchor.Add(pendingCreateNeverStartedTimeout).Add(time.Second) // expired only strictly after
+	}
+	startup := time.Minute
+	if r.w.Env != nil && r.w.Env.Cfg != nil && r.w.Env.Cfg.Session.StartupTimeoutDuration() > 0 {
+		startup = r.w.Env.Cfg.Session.StartupTimeoutDuration()
+	}
+	inFlight := woke.Add(startup + staleKeyDetectDelay + 5*time.Second)
+	if fresh := anchor.Add(staleCreatingStateTimeout); fresh.After(inFlight) {
+		return fresh
+	}
+	return inFlight
 }
 
 // configuredNamed reports a configured named row with its spec, which a
