@@ -2922,7 +2922,17 @@ func commitStartResultTraced(
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, "runtime_mcp_snapshot_failed", result.started, result.finished, err, result.phases)
 		return startCommitFailed
 	}
-	applied, err := sessFront.CommitStartedIfCurrentUnder(info, metadata, result.prepared.candidate.lease)
+	applied, err := sessFront.CommitStartedIfCurrentUnder(info, metadata, result.prepared.candidate.lease, sessionpkg.StartCommitRefusingHolds())
+	if errors.Is(err, sessionpkg.ErrStartCommitHeld) {
+		// An operator's suspend landed while the start ran (CONTRACT S1
+		// v5.6, §12.2 row 65): nothing commits, the in-flight lease is still
+		// this start's to release, and the caller stops the runtime it
+		// spawned as a stale start's.
+		clearPendingStartInFlightLease(info.ID, sessFront, stderr)
+		fmt.Fprintf(stderr, "session reconciler: discarding the start of %s: %v\n", name, err) //nolint:errcheck
+		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, "user_held", result.started, result.finished, nil, result.phases)
+		return startCommitStale
+	}
 	if err != nil {
 		clearPendingStartInFlightLease(info.ID, sessFront, stderr)
 		fmt.Fprintf(stderr, "session reconciler: storing hashes for %s: %v\n", name, err) //nolint:errcheck

@@ -602,6 +602,8 @@ func TestLaunchCommitPremise(t *testing.T) {
 		{"an outside close", []string{"closed"}, false, false, causeCommitLost, true},
 		{"an outside close over a zombie", []string{"closed", "zombie"}, false, false, causeCommitLost, true},
 		{"a kill fence over a zombie", []string{"state", "asleep", "sleep_reason", "killed", "zombie", ""}, false, false, causeCommitLost, true},
+		// An operator's suspend during the Start, the row healed awake (mc-z1v39, §12.2 row 65: legacy too).
+		{"an operator's suspend, healed awake", []string{"sleep_intent", "user-hold", "held_until", gatherNow.Add(24 * time.Hour).Format(time.RFC3339), "suspended_at", gatherNow.Format(time.RFC3339), "state", "suspended"}, false, false, causeCommitLost, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			k, leaf := launchKit(t, "asleep", "wake_attempts", "1")
