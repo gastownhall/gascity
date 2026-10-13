@@ -63,6 +63,11 @@ type CachingStore struct {
 	retainedAt  map[string]time.Time
 	state       cacheState
 	lastFreshAt time.Time
+	// lastScanAt is when a Prime or PrimeActive last merged its listing of
+	// the scope. Until the first reconcile it, not lastFreshAt, dates the
+	// reconcile backstop, so writes, events and refreshes that keep the
+	// cache fresh do not postpone the first re-scan.
+	lastScanAt  time.Time
 	mutationSeq uint64
 	// fenceFloor is the highest fence the cache dropped: the mutationSeq at
 	// the last full Prime replace, which drops beadSeq and deletedSeq, or a
@@ -1474,6 +1479,7 @@ func (c *CachingStore) PrimeActive() error {
 	c.primePartialErr = partialErr
 	c.advanceObservationLocked()
 	c.markFreshLocked(now)
+	c.lastScanAt = now
 	c.updateStatsLocked()
 	return nil
 }
@@ -1670,6 +1676,7 @@ func (c *CachingStore) prime(ctx context.Context) error {
 	c.primePartialErr = partialErr
 	c.advanceObservationLocked()
 	c.markFreshLocked(now)
+	c.lastScanAt = now
 	c.updateStatsLocked()
 	return nil
 }
@@ -1872,8 +1879,9 @@ func (c *CachingStore) StopReconciler() {
 	c.lifecycleWG.Wait()
 }
 
-// Stopped returns a channel closed once StopReconciler has stopped the
-// cache's background work. A consumer that runs alongside the cache (the
+// Stopped returns a channel closed when StopReconciler is first called, as
+// it begins stopping the cache's background work and before it waits for
+// that work to finish. A consumer that runs alongside the cache (the
 // controller's journal feed) ends with it.
 func (c *CachingStore) Stopped() <-chan struct{} {
 	return c.stopCh

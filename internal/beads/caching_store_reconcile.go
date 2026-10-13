@@ -301,6 +301,9 @@ func (c *CachingStore) nextReconcileDelay(now time.Time) time.Duration {
 
 	lastFullScanAt := c.stats.LastReconcileAt
 	if lastFullScanAt.IsZero() {
+		lastFullScanAt = c.lastScanAt
+	}
+	if lastFullScanAt.IsZero() {
 		lastFullScanAt = c.lastFreshAt
 	}
 	dueAt := lastFullScanAt.Add(clock.Backstop(c.adaptiveIntervalLocked()))
