@@ -420,22 +420,7 @@ func TestBeadsNudgeQueueQuarantinesACorruptRecord(t *testing.T) {
 	now := time.Now().UTC()
 
 	for _, owner := range []string{testNudgeAgent, "beta/broken"} {
-		nudgeID := "n-corrupt-" + strings.ReplaceAll(owner, "/", "-")
-		if _, err := store.Create(beads.Bead{
-			ID:     nudgeQueueBeadID(nudgeID),
-			Title:  "nudge-queue:" + nudgeID,
-			Type:   nudgeQueueBeadType,
-			Labels: []string{nudgeQueueLabel, nudgeQueueAgentLabelPrefix + owner},
-			Metadata: map[string]string{
-				nudgeMetaNudgeID:      nudgeID,
-				nudgeMetaAgent:        owner,
-				nudgeMetaQueueKey:     owner,
-				nudgeMetaQueueState:   nudgeQueueStateLive,
-				nudgeMetaDeliverAfter: "not-a-time",
-			},
-		}); err != nil {
-			t.Fatalf("seeding a corrupt record for %s: %v", owner, err)
-		}
+		seedCorruptNudgeRecord(t, store, "n-corrupt-"+strings.ReplaceAll(owner, "/", "-"), owner)
 	}
 	expiring := testNudgeItem("n-expiring", "", now)
 	expiring.Agent = "gamma/other"
@@ -515,6 +500,75 @@ func TestBeadsNudgeQueueQuarantinesACorruptRecord(t *testing.T) {
 	}
 	if record.Metadata[nudgeMetaQueueState] != nudgeQueueStateDead {
 		t.Fatalf("expiring record queue_state = %q, want Maintain to finish its pass past the corrupt records", record.Metadata[nudgeMetaQueueState])
+	}
+}
+
+// seedCorruptNudgeRecord writes a live queue record addressed to owner that no
+// reader can decode: its deliver-after time is not a time.
+func seedCorruptNudgeRecord(t *testing.T, store beads.Store, nudgeID, owner string) {
+	t.Helper()
+	if _, err := store.Create(beads.Bead{
+		ID:     nudgeQueueBeadID(nudgeID),
+		Title:  "nudge-queue:" + nudgeID,
+		Type:   nudgeQueueBeadType,
+		Labels: []string{nudgeQueueLabel, nudgeQueueAgentLabelPrefix + owner},
+		Metadata: map[string]string{
+			nudgeMetaNudgeID:      nudgeID,
+			nudgeMetaAgent:        owner,
+			nudgeMetaQueueKey:     owner,
+			nudgeMetaQueueState:   nudgeQueueStateLive,
+			nudgeMetaDeliverAfter: "not-a-time",
+		},
+	}); err != nil {
+		t.Fatalf("seeding a corrupt record for %s: %v", owner, err)
+	}
+}
+
+// TestWrappedClaimDueReportsAQuarantineAsDelivered pins the event a claim past
+// a corrupt record emits through the production wrapper. The claim answered
+// for every record it could read, so the event is ok, and the partial-result
+// error still crosses the wrapper verbatim for the caller to report. Once the
+// good item is claimed, the corrupt record alone leaves an idle target, which
+// is ok too: reporting either claim as failed would paint the target as an
+// outage for as long as the record stays.
+func TestWrappedClaimDueReportsAQuarantineAsDelivered(t *testing.T) {
+	store := openNudgeQueueStore(t, t.TempDir())
+	queue := newNudgeQueue(t, store)
+	now := time.Now().UTC()
+	seedCorruptNudgeRecord(t, store, "n-corrupt", testNudgeAgent)
+	if err := queue.Enqueue(testNudgeItem("n-good", "", now)); err != nil {
+		t.Fatalf("Enqueue(n-good): %v", err)
+	}
+	adapters, err := NewBeadsAdapters(store, testBeadsAdapterIdentity(), queue)
+	if err != nil {
+		t.Fatalf("projecting the beads binding: %v", err)
+	}
+	var outcomes []ClassOutcome
+	wrapped, err := WrapNudges(adapters.Nudges, ClassWrapping{
+		Binding:    "work",
+		Capability: ClassCapability{Available: true},
+		Observer: ClassObserverFunc(func(event ClassEvent) {
+			if event.Kind == ClassEventClaim && event.Operation == "ClaimDue" {
+				outcomes = append(outcomes, event.Outcome)
+			}
+		}),
+	})
+	if err != nil {
+		t.Fatalf("wrapping the Nudges front doors: %v", err)
+	}
+
+	target := ClaimTarget{QueueKeys: []string{testNudgeAgent}}
+	for _, want := range [][]string{{"n-good"}, {}} {
+		claimed, err := wrapped.Queue.ClaimDue(target, now)
+		if !beads.IsPartialResult(err) || !errors.Is(err, ErrBeadsNudgeQueueCorrupt) {
+			t.Fatalf("ClaimDue error = %v, want the queue's partial result wrapping ErrBeadsNudgeQueueCorrupt", err)
+		}
+		if got := nudgeItemIDs(claimed); fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Fatalf("ClaimDue = %v, want %v claimed past the corrupt record", got, want)
+		}
+	}
+	if len(outcomes) != 2 || outcomes[0] != ClassOutcomeOK || outcomes[1] != ClassOutcomeOK {
+		t.Fatalf("ClaimDue outcomes = %v, want [ok ok]: a claim past a quarantined record is not a failed claim", outcomes)
 	}
 }
 

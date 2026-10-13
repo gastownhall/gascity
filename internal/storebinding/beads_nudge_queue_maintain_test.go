@@ -49,6 +49,38 @@ func (s *failingDeleteStore) DeleteIfMatch(id string, expectedRevision int64) er
 	return s.SQLiteStore.DeleteIfMatch(id, expectedRevision)
 }
 
+// cancelingUpdateStore is the SQLite store that ends a pass's context once
+// a write lands, so the live pass can be shown to stop between transitions
+// and not only before the first. It is disarmed while cancel is nil.
+type cancelingUpdateStore struct {
+	*beads.SQLiteStore
+	cancel context.CancelFunc
+}
+
+func (s *cancelingUpdateStore) UpdateIfMatch(id string, expectedRevision int64, opts beads.UpdateOpts) error {
+	err := s.SQLiteStore.UpdateIfMatch(id, expectedRevision, opts)
+	if err == nil && s.cancel != nil {
+		s.cancel()
+	}
+	return err
+}
+
+// cancelingDeleteStore is the SQLite store that ends a pass's context once a
+// delete lands, so the sweep can be shown to stop between deletes. It is
+// disarmed while cancel is nil.
+type cancelingDeleteStore struct {
+	*beads.SQLiteStore
+	cancel context.CancelFunc
+}
+
+func (s *cancelingDeleteStore) DeleteIfMatch(id string, expectedRevision int64) error {
+	err := s.SQLiteStore.DeleteIfMatch(id, expectedRevision)
+	if err == nil && s.cancel != nil {
+		s.cancel()
+	}
+	return err
+}
+
 func openSQLiteNudgeQueueStore(t *testing.T) *beads.SQLiteStore {
 	t.Helper()
 	store, ok := openNudgeQueueStore(t, t.TempDir()).(*beads.SQLiteStore)
@@ -111,6 +143,51 @@ func TestBeadsNudgeQueueMaintainStopsWhenItsContextEnds(t *testing.T) {
 	}
 	if record.Metadata[nudgeMetaQueueState] != nudgeQueueStateLive {
 		t.Fatalf("queue_state = %q, want a pass whose context ended to do nothing", record.Metadata[nudgeMetaQueueState])
+	}
+}
+
+// TestBeadsNudgeQueueMaintainStopsBetweenTransitions pins the bound inside
+// the live pass: a context that ends once the first transition lands stops the
+// pass before the next one, so an owner's deadline cuts a long pass short
+// rather than only refusing to start it.
+func TestBeadsNudgeQueueMaintainStopsBetweenTransitions(t *testing.T) {
+	store := &cancelingUpdateStore{SQLiteStore: openSQLiteNudgeQueueStore(t)}
+	queue := newNudgeQueue(t, store)
+	now := time.Now().UTC()
+
+	ids := []string{"n-expiring-0", "n-expiring-1"}
+	for _, id := range ids {
+		item := testNudgeItem(id, "", now)
+		item.ExpiresAt = now.Add(time.Minute)
+		if err := queue.Enqueue(item); err != nil {
+			t.Fatalf("Enqueue(%s): %v", id, err)
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store.cancel = cancel
+	if _, err := queue.Maintain(ctx, now.Add(2*time.Minute)); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Maintain whose context ended mid-pass = %v, want context.Canceled", err)
+	}
+	states := map[string]string{}
+	for _, id := range ids {
+		record, err := store.Get(nudgeQueueBeadID(id))
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		states[id] = record.Metadata[nudgeMetaQueueState]
+	}
+	dead, live := 0, 0
+	for _, state := range states {
+		switch state {
+		case nudgeQueueStateDead:
+			dead++
+		case nudgeQueueStateLive:
+			live++
+		}
+	}
+	if dead != 1 || live != 1 {
+		t.Fatalf("queue_state after a pass canceled at its first transition = %v, want one record dead-lettered and the other still live", states)
 	}
 }
 
@@ -187,6 +264,40 @@ func TestBeadsNudgeQueueSweepContinuesPastAFailedDelete(t *testing.T) {
 	}
 	if got := queueRecordIDs(t, backing); len(got) != 1 || got[0] != "n-retired-1" {
 		t.Fatalf("records after the sweep = %v, want only the undeletable n-retired-1 left", got)
+	}
+}
+
+// TestBeadsNudgeQueueSweepStopsBetweenDeletes pins the bound inside the sweep:
+// a context that ends once the first delete lands stops the sweep before the
+// next one, and the pass reports the rest as remaining although it never
+// filled its batch.
+func TestBeadsNudgeQueueSweepStopsBetweenDeletes(t *testing.T) {
+	backing := openSQLiteNudgeQueueStore(t)
+	store := &cancelingDeleteStore{SQLiteStore: backing}
+	queue := newNudgeQueue(t, store)
+	// A batch the three records cannot fill, so only a sweep cut short can
+	// report remaining work.
+	queue.(*beadsNudgeQueue).sweepBatch = 8
+	now := time.Now().UTC()
+
+	for i := 0; i < 3; i++ {
+		id := fmt.Sprintf("n-retired-%d", i)
+		if err := queue.Rollback(nudgequeue.Item{ID: id, Agent: testNudgeAgent, Source: "test", CreatedAt: now}, "never landed"); err != nil {
+			t.Fatalf("Rollback(%s): %v", id, err)
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store.cancel = cancel
+	report, err := queue.Maintain(ctx, now.Add(nudgeQueueTerminalRetention).Add(time.Minute))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Maintain whose context ended mid-sweep = %v, want context.Canceled", err)
+	}
+	if !report.Remaining {
+		t.Fatalf("a sweep cut short reported no remaining work")
+	}
+	if got := queueRecordIDs(t, backing); len(got) != 2 {
+		t.Fatalf("records after a sweep canceled at its first delete = %v, want exactly one of the three deleted", got)
 	}
 }
 

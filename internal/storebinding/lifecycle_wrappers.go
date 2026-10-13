@@ -501,9 +501,14 @@ func (q *wrappedNudgeQueue) EnqueueDeferred(item nudgequeue.Item) error {
 // queue lost nothing — reporting it as a conflict would make an idle fleet
 // indistinguishable from a contended one on every dashboard that counts them,
 // which is exactly the confusion the conflict outcome exists to prevent.
+//
+// A claim that skipped an undecodable record is OK for the same reason: it
+// delivered the good items beside a partial-result error, which crosses the
+// wrapper verbatim. Reporting it as failed would paint every later claim for
+// that target as an outage for as long as the record stays.
 func (q *wrappedNudgeQueue) ClaimDue(target ClaimTarget, now time.Time) ([]nudgequeue.Item, error) {
 	items, err := q.NudgeQueue.ClaimDue(target, now)
-	q.emitter.observe(ClassEventClaim, "ClaimDue", err)
+	q.emitter.emit(ClassEventClaim, "ClaimDue", partialOutcomeFor(err))
 	return items, err
 }
 

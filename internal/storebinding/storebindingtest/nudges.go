@@ -140,6 +140,43 @@ func RunNudgeFrontDoorTests(r Runner, suite NudgesSuite) {
 		}
 	})
 
+	// Nothing runs Maintain before a claim, so an item can expire while its
+	// record still says live; ClaimDue's own check is all that keeps it from a
+	// deliverer. The bystander, due at the same instant, shows the claim ran.
+	r.Run("ClaimDueNeverClaimsAnExpiredItem", func(r Runner) {
+		queue := mustQueue(r, suite)
+		now := time.Now().UTC()
+		expiring := nudgeItem("n-expiring", "", now)
+		expiring.ExpiresAt = now.Add(time.Minute)
+		bystander := nudgeItem("n-bystander", "", now)
+		for _, item := range []nudgequeue.Item{expiring, bystander} {
+			if err := queue.Enqueue(item); err != nil {
+				r.Fatalf("Enqueue(%s): %v", item.ID, err)
+			}
+		}
+		afterExpiry := now.Add(2 * time.Minute)
+		claimed, err := queue.ClaimDue(storebinding.ClaimTarget{QueueKeys: []string{ConformanceNudgeAgent}}, afterExpiry)
+		if err != nil {
+			r.Fatalf("ClaimDue: %v", err)
+		}
+		if len(claimed) != 1 || claimed[0].ID != "n-bystander" {
+			r.Fatalf("ClaimDue = %v, want only the unexpired nudge", nudgeIDs(claimed))
+		}
+		pending, inFlight, dead, err := queue.ListForAgent(ConformanceNudgeAgent, afterExpiry)
+		if err != nil {
+			r.Fatalf("ListForAgent after ClaimDue: %v", err)
+		}
+		if len(dead) != 1 || dead[0].ID != "n-expiring" {
+			r.Fatalf("dead = %v, want the expired nudge", nudgeIDs(dead))
+		}
+		if dead[0].LastError != "expired" {
+			r.Errorf("dead LastError = %q, want %q", dead[0].LastError, "expired")
+		}
+		if len(pending) != 0 || len(inFlight) != 1 || inFlight[0].ID != "n-bystander" {
+			r.Errorf("pending=%v in-flight=%v, want only the bystander in flight", nudgeIDs(pending), nudgeIDs(inFlight))
+		}
+	})
+
 	r.Run("AckRetiresTheClaimedNudge", func(r Runner) {
 		queue := mustQueue(r, suite)
 		now := time.Now().UTC()
