@@ -1112,6 +1112,38 @@ func TestLedgerFeedMissDetector(t *testing.T) {
 	}
 }
 
+// A healthy feed that is behind has not read the journal row of a scan
+// change yet: the change is not judged until the feed's checkpoint passes
+// the head it had seen when the scan reported it.
+func TestLedgerFeedMissDetectorWaitsForALaggingFeed(t *testing.T) {
+	t0 := time.Unix(1_000_000, 0)
+	d := newLedgerFeedMissDetector(func() time.Time { return t0 })
+	var seq, head atomic.Int64
+	seq.Store(10)
+	head.Store(5000)
+	d.progress = func() (int64, int64) { return seq.Load(), head.Load() }
+
+	d.noteScan("gc-behind", t0)
+	if m, _, _ := d.report(t0.Add(time.Minute)); m != 0 {
+		t.Fatalf("misses = %d while the feed is behind the head it had seen, want 0", m)
+	}
+	// The feed catches up and reads the row.
+	seq.Store(4000)
+	d.noteJournal([]string{"gc-behind"}, nil, t0.Add(time.Minute))
+	seq.Store(5000)
+	if m, _, _ := d.report(t0.Add(2 * time.Minute)); m != 0 {
+		t.Fatalf("misses = %d after the lagging feed read the row, want 0", m)
+	}
+
+	// Caught up past the head, a change with no journal row is a miss.
+	d.noteScan("gc-miss", t0.Add(3*time.Minute))
+	seq.Store(5001)
+	head.Store(5001)
+	if m, _, recent := d.report(t0.Add(4 * time.Minute)); m != 1 || !slices.Equal(recent, []string{"gc-miss"}) {
+		t.Fatalf("misses = %d %v, want gc-miss", m, recent)
+	}
+}
+
 func TestLedgerFeedStatusOverTheControllerSocket(t *testing.T) {
 	h := newFeedHarness(t, newJournalingStore())
 	registerLedgerFeedSet(context.Background(), h.set)
