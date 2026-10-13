@@ -704,7 +704,9 @@ func (c *CachingStore) rowReadDisagreesLocked(id string, fresh Bead, found bool)
 //     was evicted;
 //   - ErrRowRefreshFenced: a write, deletion or event newer than the read
 //     owns the row (refetchFencedLocked), or a reconcile, full Prime or
-//     PrimeActive merged since the read began (scanGen); retry;
+//     PrimeActive merged since the read began (scanGen), or, with
+//     RowRefreshOptions.YieldToLocalWrites, a local write that may touch
+//     the row is in flight; retry;
 //   - ErrCacheUnavailable: the cache is neither live nor partial, or id is
 //     outside the namespaces this cache owns (ownsBeadID);
 //   - any other error: the backing read of the row or its edges failed.
@@ -744,6 +746,15 @@ type RowRefreshOptions struct {
 	// recently: a re-scan holds no closed rows, so without it a long-closed
 	// row would be announced again every time a read installed it.
 	AnnounceUnheldClose bool
+	// YieldToLocalWrites refuses with ErrRowRefreshFenced, installing and
+	// notifying nothing, while a local write of this cache that may touch
+	// the row is in flight: one naming id, or one whose rows its backing
+	// call decides (Create, Tx, a graph apply). Between that write's backing
+	// commit and its absorb the backing read would see the write before the
+	// cache holds it, and the refresh would announce the cache's own write.
+	// The write absorbs and announces it; a refresh after it returns finds
+	// nothing new. A caller that passes it must retry a fenced row later.
+	YieldToLocalWrites bool
 }
 
 // RowRefresh reports what one RefreshRowReport did.
@@ -800,6 +811,10 @@ func (c *CachingStore) RefreshRowReport(id string, opts RowRefreshOptions) (RowR
 	if c.refetchFencedLocked(id, startSeq) || c.scanGen != startScan {
 		c.mu.Unlock()
 		return RowRefresh{}, fmt.Errorf("refresh %s: %w", id, ErrRowRefreshFenced)
+	}
+	if opts.YieldToLocalWrites && c.localWrites.mayTouch(id) {
+		c.mu.Unlock()
+		return RowRefresh{}, fmt.Errorf("refresh %s: a local write is in flight: %w", id, ErrRowRefreshFenced)
 	}
 	cached, held := c.beads[id]
 	cachedDeps := c.deps[id]
