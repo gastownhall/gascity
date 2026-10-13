@@ -673,6 +673,9 @@ func (s *sim) pass() {
 		if it.Kind == intentSignalAck && it.Reason == decideFloorAckCancel {
 			simFloorCancels.Add(1)
 		}
+		if it.Reason == decideSquatterHeal {
+			simSquatterHeals.Add(1)
+		}
 		if census != nil {
 			info := census.Rows[it.Key].Info
 			woke, err := time.Parse(time.RFC3339, info.LastWokeAt)
@@ -1455,14 +1458,23 @@ func simSeeds(t *testing.T) []uint64 {
 // simDrainBegins counts the A20 begins the sims admitted.
 var simDrainBegins atomic.Int64
 
+// simSquatterHeals counts the squatter heals (CONTRACT v5.10c) the sims
+// admitted.
+var simSquatterHeals atomic.Int64
+
 func TestSimCorpus(t *testing.T) {
 	t.Cleanup(func() { writeSimCoverage(t) })
-	before := simDrainBegins.Load()
+	before, squatters := simDrainBegins.Load(), simSquatterHeals.Load()
 	t.Cleanup(func() {
 		// Kills a corpus that never exercises A20 (C6a2 review): every
 		// undesired row inside the grace, or already requested.
 		if !t.Failed() && simDrainBegins.Load() == before {
 			t.Error("the sim corpus admitted no A20 drain begin")
+		}
+		// Kills a corpus whose occupant faults never land on a committed
+		// row, which would leave v5.10c's heal unchecked by every invariant.
+		if !t.Failed() && simSquatterHeals.Load() == squatters {
+			t.Error("the sim corpus admitted no squatter heal")
 		}
 	})
 	for _, seed := range simSeeds(t) {

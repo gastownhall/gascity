@@ -34,6 +34,7 @@ const (
 	decideClaimClear      = "claim-clear"
 	decideCreatingHeal    = "creating-heal"
 	decideDeadRuntimeHeal = "dead-runtime-heal"
+	decideSquatterHeal    = "squatter-heal"
 	decideAwakeHeal       = "awake-heal"
 	decideSuspendHeal     = "soft-suspend-heal"
 	decideStabilityClear  = "stability-clear"
@@ -186,6 +187,55 @@ func armDeadRuntimeHeal(r *rowFacts) (intent, bool) {
 	it, ok := r.healClass(intentRowHealFresh, decideDeadRuntimeHeal, patch, class)
 	it.Event = ev
 	return it, ok
+}
+
+// armSquatterHeal is A6 item 4's occupied case (CONTRACT v5.10c, §12.2 #23,
+// J40 A/B): a committed row whose name a runtime that is not its own holds
+// (squatted) goes asleep with runtime-missing, for every sessions-leg row AL1
+// does not Drain, so the row is not credited with the squatter. It is not a
+// crash: no death accrues and the conversation is kept, so a squatter can
+// neither quarantine the seat nor wipe its conversation. It stops nothing.
+// The row stays down while the name is held (AL1's name-occupied, S1's
+// refusals) and A18 starts it once the name frees.
+func armSquatterHeal(r *rowFacts) (intent, bool) {
+	info := r.row.Info
+	if r.entry == nil || !committed(info) || r.entry.Desired == desireDrain || !r.freshSquatted() {
+		return intent{}, false
+	}
+	patch := session.MetadataPatch{"state": string(session.StateAsleep)}
+	if strings.TrimSpace(info.SleepReason) == "" {
+		patch["sleep_reason"] = string(session.SleepReasonRuntimeMissing)
+	}
+	return r.heal(intentRowHealFresh, decideSquatterHeal, patch)
+}
+
+// freshSquatted reports the row's name held by a runtime that is not its own
+// (squatter), for a fresh kind's arm: on the pass's facts, a name the
+// inventory reads occupied or Ownerless; on the effect's fresh read, the
+// identity read on one present object across its brackets.
+func (r *rowFacts) freshSquatted() bool {
+	r.rests |= restRuntime
+	info := r.row.Info
+	if r.fresh != nil {
+		return r.fresh.Same && squatter(info, r.fresh.Identity)
+	}
+	o := r.w.Observed[r.k]
+	return r.entry != nil && (r.entry.Liveness == livenessOccupied || o.Reason == observeReasonOwnerless) && squatter(info, o.Identity)
+}
+
+// squatter reports a runtime identity that proves the row's own runtime gone
+// (CONTRACT v5.10c): Foreign, as A4/D3 read it; or Ownerless while the row
+// carries a token, since every admitted runtime is started with RuntimeEnv
+// and only a leaf that writes it atomically with liveness reads Ownerless
+// (O2, X3; any other leaf's identity is never Known, so Unknown).
+func squatter(row session.Info, rt runtimeIdentity) bool {
+	switch compareIdentity(row, rt) {
+	case identityForeign:
+		return true
+	case identityOwnerless:
+		return strings.TrimSpace(row.InstanceToken) != ""
+	}
+	return false
 }
 
 // deadRuntimePatch is legacy's write for a committed row whose runtime is
