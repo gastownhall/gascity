@@ -239,6 +239,8 @@ func deadRuntimePatch(r *rowFacts, heal bool) (patch session.MetadataPatch, clas
 		// probes a keyed one; nothing can probe the others, so their reset is
 		// written here. A kept one meets the resume backstop (resumeBackstop):
 		// a rapid crash of a resume launch counts, and the bound resets it here.
+		// recordWakeFailure and failureKeepsConversation keep by the same
+		// rule; change the three together.
 		attempts, _ := strconv.Atoi(info.WakeAttemptsMetadata)
 		if folded := foldInfo(info, patch); strings.TrimSpace(folded.SessionKey) != "" || strings.TrimSpace(folded.StartedConfigHash) != "" {
 			manual := session.HasStartedManualConversation(folded)

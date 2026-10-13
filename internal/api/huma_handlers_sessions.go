@@ -55,6 +55,10 @@ func humaSessionManagerError(err error) error {
 		return apierr.SessionConflict.Msg("no_pending: " + err.Error())
 	case errors.Is(err, session.ErrInteractionMismatch):
 		return apierr.SessionConflict.Msg("invalid_interaction: " + err.Error())
+	case errors.Is(err, session.ErrConversationRetained):
+		// Not retryable as is: the kept conversation's resume failed, and the
+		// message names the explicit reset that starts the session fresh.
+		return apierr.SessionConflict.Msg("conversation_retained: " + err.Error())
 	case errors.Is(err, session.ErrSessionClosed), errors.Is(err, session.ErrResumeRequired), errors.Is(err, session.ErrSessionKillPending):
 		return apierr.SessionConflict.Msg("conflict: " + err.Error())
 	case errors.Is(err, session.ErrSessionActive), errors.Is(err, session.ErrSessionInactive):

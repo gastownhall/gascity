@@ -64,3 +64,24 @@ func TestSessionStoppingIsARetryableConflict(t *testing.T) {
 		t.Errorf("humaSessionManagerError = %v, want 409 session_stopping", got)
 	}
 }
+
+// TestConversationRetainedIsAConflict: a resume of a committed conversation
+// that failed and was kept answers 409 conversation_retained in both error
+// mappers, the failed start and its reset remedy intact, not the 500 the
+// store-error fallback gives an unrecognized error.
+func TestConversationRetainedIsAConflict(t *testing.T) {
+	err := fmt.Errorf("session gc-1: %w after failed resume; run `gc session reset gc-1` to start fresh: %w", session.ErrConversationRetained, errors.New("session died during startup"))
+	rec := httptest.NewRecorder()
+	writeSessionManagerError(rec, err)
+	var problem problemDetails
+	if decodeErr := json.Unmarshal(rec.Body.Bytes(), &problem); decodeErr != nil {
+		t.Fatalf("decode writeSessionManagerError body %q: %v", rec.Body.String(), decodeErr)
+	}
+	if rec.Code != http.StatusConflict || problem.Detail != "conversation_retained: "+err.Error() {
+		t.Errorf("writeSessionManagerError = %d %q, want 409 conversation_retained: %s", rec.Code, problem.Detail, err)
+	}
+	var se huma.StatusError
+	if got := humaSessionManagerError(err); !errors.As(got, &se) || se.GetStatus() != http.StatusConflict || got.Error() != "conversation_retained: "+err.Error() {
+		t.Errorf("humaSessionManagerError = %v, want 409 conversation_retained: %s", got, err)
+	}
+}

@@ -27,6 +27,10 @@ func writeSessionManagerError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, "no_pending", err.Error())
 	case errors.Is(err, session.ErrInteractionMismatch):
 		writeError(w, http.StatusConflict, "invalid_interaction", err.Error())
+	case errors.Is(err, session.ErrConversationRetained):
+		// Not retryable as is: the kept conversation's resume failed, and the
+		// message names the explicit reset that starts the session fresh.
+		writeError(w, http.StatusConflict, "conversation_retained", err.Error())
 	case errors.Is(err, session.ErrSessionClosed), errors.Is(err, session.ErrResumeRequired), errors.Is(err, session.ErrSessionKillPending):
 		writeError(w, http.StatusConflict, "conflict", err.Error())
 	case errors.Is(err, session.ErrSessionInactive):

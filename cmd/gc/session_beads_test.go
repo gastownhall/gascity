@@ -7958,6 +7958,71 @@ func TestCleanupDeadRuntimeSessionCorpsesClosesRowsClaimingALiveRuntime(t *testi
 	}
 }
 
+// TestCleanupDeadRuntimeSessionCorpsesKeepsACommittedManualConversation is
+// SESSION-LIFE-MANUAL-LOSS on the corpse pass. With the runtime server up and
+// the row's own pane visible and dead, a committed manual conversation loses
+// only the pane: the row stays open in its state with its provider key and
+// start configuration, so the heal and the next wake resume it. A manual row
+// that never committed a start is still closed like any other.
+func TestCleanupDeadRuntimeSessionCorpsesKeepsACommittedManualConversation(t *testing.T) {
+	testCity := t.TempDir()
+	cases := []struct {
+		name  string
+		hash  string
+		state session.State
+		kept  bool
+	}{
+		{name: "committed-active", hash: "hash-committed", state: session.StateActive, kept: true},
+		{name: "committed-awake", hash: "hash-committed", state: session.StateAwake, kept: true},
+		{name: "committed-draining", hash: "hash-committed", state: session.StateDraining, kept: true},
+		{name: "never-started-awake", state: session.StateAwake, kept: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			const name = "worker-adhoc-7f3a"
+			store, bead, snapshot := newDeadRuntimeCorpseRow(t, map[string]string{
+				"session_name":        name,
+				"template":            "worker",
+				"state":               string(tc.state),
+				"session_origin":      "manual",
+				"session_key":         "key-committed",
+				"started_config_hash": tc.hash,
+				"instance_token":      "token-current",
+			})
+			sp := newDeadRuntimeArtifactProvider()
+			sp.visible[name] = true
+			sp.dead[name] = true
+			if err := sp.SetMeta(name, "GC_INSTANCE_TOKEN", "token-current"); err != nil {
+				t.Fatalf("stamp corpse instance token: %v", err)
+			}
+
+			var stderr bytes.Buffer
+			got := cleanupDeadRuntimeSessionCorpses(testCity, store, testSeatWork(testCity, nil, store, nil), snapshot, nil, sp, nil, nil, &stderr)
+			if got != 1 || sp.stopCalls[name] != 1 {
+				t.Fatalf("cleanup = %d (Stop calls = %d), want the dead pane reaped once; stderr=%q", got, sp.stopCalls[name], stderr.String())
+			}
+			after, err := store.Get(bead.ID)
+			if err != nil {
+				t.Fatalf("re-fetch bead: %v", err)
+			}
+			if !tc.kept {
+				if after.Status != "closed" || after.Metadata["state"] != "dead-runtime" {
+					t.Fatalf("uncommitted manual row after corpse cleanup = status %q state %q, want a dead-runtime close", after.Status, after.Metadata["state"])
+				}
+				return
+			}
+			if after.Status != "open" || after.Metadata["state"] != string(tc.state) {
+				t.Fatalf("committed manual row after corpse cleanup = status %q state %q close_reason %q, want an open %q row",
+					after.Status, after.Metadata["state"], after.Metadata["close_reason"], tc.state)
+			}
+			if after.Metadata["session_key"] != "key-committed" || after.Metadata["started_config_hash"] != tc.hash {
+				t.Fatalf("committed manual row identity = key %q hash %q, want key-committed/%s",
+					after.Metadata["session_key"], after.Metadata["started_config_hash"], tc.hash)
+			}
+		})
+	}
+}
+
 // TestCleanupDeadRuntimeSessionCorpsesLeavesAMidRestartRowAlone pins the
 // incarnation fence. preWakeCommit rotates the row's instance_token and moves
 // it to creating before the provider start runs, so for that window the row

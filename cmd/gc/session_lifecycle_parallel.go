@@ -329,6 +329,11 @@ type startResult struct {
 	// configured named session's pending-create should be preserved for a
 	// retry instead of destructively closed" (ga-pmafyc rounds 4 and 5).
 	diedDuringStartup bool
+	// diedPane is the last pane output of a resume launch the post-start
+	// liveness check found dead, redacted (postStartDeathPane). That check's
+	// error carries no pane, so this is where the resume backstop
+	// (startResumeFailure) reads a provider's refusal of the resume.
+	diedPane string
 	// provider is the runtime provider the start ran against. commitStartFailure
 	// uses it to tear down a bead-scoped pool runtime before rolling its row
 	// back (releaseBeadScopedPoolRuntime). Nil on test-built results, which
@@ -1883,8 +1888,11 @@ func runPreparedStartCandidate(
 	// Stale session key detection: if the session was started
 	// with a resume flag but dies immediately, the session key
 	// likely references a conversation that no longer exists
-	// (e.g., "No conversation found"). Report as a failure so
-	// recordWakeFailure clears the key for the next attempt.
+	// (e.g., "No conversation found"). Report as a failure, with
+	// the dead resume's pane for the resume backstop to read that
+	// refusal from, so recordWakeFailure clears the key for the
+	// next attempt.
+	var diedPane string
 	if startedFresh && err == nil && strings.TrimSpace(item.candidate.info.ID) != "" && item.candidate.info.SessionKey != "" {
 		postStartBegin := time.Now()
 		if stabilityWaiter(startCtx, item.candidate.name()) {
@@ -1903,6 +1911,7 @@ func runPreparedStartCandidate(
 			} else if !running || !alive {
 				err = fmt.Errorf("session %q died during startup", item.candidate.name())
 				diedDuringStartup = true
+				diedPane = postStartDeathPane(ctx, item, cityPath, sp, store, cfg)
 			}
 		}
 		phases.PostStartObserve = time.Since(postStartBegin)
@@ -2002,6 +2011,7 @@ func runPreparedStartCandidate(
 		rateLimitScreen:     rateLimitScreen,
 		providerStartCalled: startedFresh,
 		diedDuringStartup:   diedDuringStartup,
+		diedPane:            diedPane,
 		unattributedErr:     unattributedErr,
 		provider:            sp,
 		phases:              phases,
@@ -2063,6 +2073,33 @@ func startupRateLimitScreenDetected(
 		)
 	})
 	return err == nil && runtime.ContainsProviderRateLimitScreen(content)
+}
+
+// postStartDeathPane is the last pane output of a resume launch the post-start
+// liveness check found dead, redacted against the launch's secrets as the
+// runtime's own startup-failure capture is. A provider that refused the resume
+// says so there. The peek is held to postStartObservationBound; one that fails
+// or does not answer reads empty, so the death counts instead of resetting.
+func postStartDeathPane(
+	ctx context.Context,
+	item preparedStart,
+	cityPath string,
+	sp runtime.Provider,
+	store beads.Store,
+	cfg *config.City,
+) string {
+	if !item.resumed {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(ctx, postStartObservationBound)
+	defer cancel()
+	pane, err := observeSessionBounded(ctx, cityPath, item.candidate.name(), func() (string, error) {
+		return workerSessionTargetPeekWithConfig(cityPath, store, sp, cfg, item.candidate.name(), rateLimitPeekLines, item.cfg.ProcessNames)
+	})
+	if err != nil {
+		return ""
+	}
+	return runtime.RedactSecrets(pane, runtime.SetupCommandSecrets(item.cfg.Env))
 }
 
 func enqueuePreparedStartWaveForCity(
@@ -3361,7 +3398,7 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 	// not carry it. Terminal failure arm; discard the fold (never assign back into
 	// infoByID — this is the async start goroutine). The persist lands via
 	// recordWakeFailure's ApplyPatchInfo/SetMarker writes.
-	rf := startResumeFailure(result.prepared.resumed, result.diedDuringStartup, result.prepared.candidate.info.SessionKey, result.err, "")
+	rf := startResumeFailure(result.prepared.resumed, result.diedDuringStartup, result.prepared.candidate.info.SessionKey, result.err, result.diedPane)
 	_ = recordWakeFailure(result.prepared.candidate.info, result.prepared.transcriptRoots, sessFront, clk, tp.DisplayName(), rf, rec)
 	if trace != nil {
 		trace.RecordOperation(TraceSiteLifecycleStartFailed, TraceReasonStart, result.outcome, "", tp.TemplateName, name, 0, traceRecordPayload{

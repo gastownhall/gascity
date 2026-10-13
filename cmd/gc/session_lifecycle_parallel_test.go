@@ -8852,6 +8852,160 @@ func TestCommitStartFailureFeedsTheResumeBackstop(t *testing.T) {
 	}
 }
 
+// Kills a retained conversation that hides its refusal from legacy's resume
+// backstop (SESSION-LIFE-MANUAL-LOSS composed with mc-bm1af): the session
+// layer keeps a committed manual conversation whose resume launch died, as a
+// failed Start or an exit right after it, and legacy's failed start, which
+// classifies from that error alone, still resets a refused resume on its
+// first failure and records the reset, and counts any other death once and
+// keeps the conversation.
+func TestLegacyFailedStartClassifiesARetainedConversation(t *testing.T) {
+	prev := staleResumeKeyProbe
+	staleResumeKeyProbe = func([]string, string, string, string) (bool, bool) { return true, true }
+	t.Cleanup(func() { staleResumeKeyProbe = prev })
+	tp := TemplateParams{Command: "claude", SessionName: "worker", TemplateName: "worker", ResolvedProvider: &config.ResolvedProvider{
+		Name: "claude", Command: "claude", ResumeFlag: "--resume", ResumeStyle: "flag", SessionIDFlag: "--session-id",
+	}}
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	for _, exitsAfterStart := range []bool{false, true} {
+		for _, c := range []struct {
+			name  string
+			pane  string
+			reset bool
+			count string // resume_failures after it
+		}{
+			{"a refused resume", "> claude --resume k-1\nNo conversation found with session ID: k-1", true, ""},
+			{"another death", "> claude --resume k-1\nkilled: out of memory", false, "1"},
+		} {
+			t.Run(fmt.Sprintf("%s, exits after start %v", c.name, exitsAfterStart), func(t *testing.T) {
+				env := newReconcilerTestEnv(t)
+				session := env.createSessionBead("worker", "worker")
+				env.setSessionMetadata(&session, map[string]string{
+					"session_origin": "manual", "session_key": "k-1", "started_config_hash": "h-1", "resume_flag": "--resume", "resume_style": "flag",
+				})
+				waiter := immediateSessionStaleKeyDetectionWaiter
+				if exitsAfterStart {
+					env.sp.SetPeekOutput("worker", c.pane)
+					waiter = func(_ context.Context, name string) error { return env.sp.Stop(name) }
+				} else {
+					env.sp.StartErrors["worker"] = fmt.Errorf("%w: session %q; last pane output:\n%s", runtime.ErrSessionDiedDuringStartup, "worker", c.pane)
+				}
+				prepared, err := prepareStartCandidateForCity(startCandidate{info: env.sessionInfo(session.ID), tp: tp}, "", "", cfg, env.sp, env.store, env.clk, io.Discard, nil, dispatchOptionSources{})
+				if err != nil {
+					t.Fatalf("prepareStartCandidateForCity: %v", err)
+				}
+				leased, release := leasedStart(t, env.city, *prepared)
+				result := runPreparedStartCandidate(context.Background(), leased, env.city, env.sp, env.store, cfg, 0, immediateStartStabilityWaiter, waiter, nil)
+				release()
+				if !result.prepared.resumed || !errors.Is(result.err, sessionpkg.ErrConversationRetained) {
+					t.Fatalf("resumed %v, err %v; want a resume launch whose conversation the session layer retained", result.prepared.resumed, result.err)
+				}
+
+				rec := events.NewFake()
+				commitStartFailure(result, sessionFrontDoor(env.store), env.clk, rec, 0, io.Discard, nil)
+				got, err := env.store.Get(session.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if reset := got.Metadata["session_key"] == ""; reset != c.reset || got.Metadata["resume_failures"] != c.count {
+					t.Fatalf("key %q resume_failures %q, want reset %v and resume_failures %q", got.Metadata["session_key"], got.Metadata["resume_failures"], c.reset, c.count)
+				}
+				want := 0
+				if c.reset {
+					want = 1
+				}
+				if n := resumeFailedEvents(t, rec.Events); n != want {
+					t.Fatalf("recorded %d resume-failed resets, want %d", n, want)
+				}
+			})
+		}
+	}
+}
+
+// Kills a refusal that legacy's own post-start probe hides from the resume
+// backstop (SESSION-LIFE-MANUAL-LOSS composed with mc-bm1af): the session
+// layer saw a committed manual conversation's resume launch running, and the
+// reconciler's probe then found its pane gone or its agent process dead.
+// Legacy's failed start reads that launch's last pane output, redacted, so a
+// refused resume still resets on its first failure and records the reset, and
+// any other death counts once and keeps the conversation.
+func TestLegacyPostStartDeathClassifiesARefusedResume(t *testing.T) {
+	prev := staleResumeKeyProbe
+	staleResumeKeyProbe = func([]string, string, string, string) (bool, bool) { return true, true }
+	t.Cleanup(func() { staleResumeKeyProbe = prev })
+	cfg := &config.City{
+		Providers: map[string]config.ProviderSpec{"agent-cli": {Command: "claude", ProcessNames: []string{"claude"}}},
+		Agents:    []config.Agent{{Name: "worker", Provider: "agent-cli"}},
+	}
+	for _, agentProcessDies := range []bool{false, true} {
+		for _, c := range []struct {
+			name  string
+			pane  string
+			reset bool
+			count string // resume_failures after it
+		}{
+			{"a refused resume", "> claude --resume k-1\nNo conversation found with session ID: k-1", true, ""},
+			{"another death", "> claude --resume k-1\nkilled: out of memory", false, "1"},
+		} {
+			t.Run(fmt.Sprintf("%s, agent process dies %v", c.name, agentProcessDies), func(t *testing.T) {
+				env := newReconcilerTestEnv(t)
+				session := env.createSessionBead("worker", "worker")
+				env.setSessionMetadata(&session, map[string]string{
+					"session_origin": "manual", "session_key": "k-1", "started_config_hash": "h-1", "resume_flag": "--resume", "resume_style": "flag",
+				})
+				const secret = "s3cr3t-worker-service-token"
+				tp := TemplateParams{Command: "claude", SessionName: "worker", TemplateName: "worker", Env: map[string]string{"WORKER_SERVICE_TOKEN": secret}, ResolvedProvider: &config.ResolvedProvider{
+					Name: "claude", Command: "claude", ResumeFlag: "--resume", ResumeStyle: "flag", SessionIDFlag: "--session-id",
+				}}
+				// The launch echoed its own credential before it died.
+				env.sp.SetPeekOutput("worker", "export WORKER_SERVICE_TOKEN="+secret+"\n"+c.pane)
+				var sp runtime.Provider = env.sp
+				// The pane is gone by the probe, its last screen still readable
+				// (a remain-on-exit corpse).
+				stability := func(_ context.Context, name string) bool { return env.sp.Stop(name) == nil }
+				if agentProcessDies {
+					// The pane outlives the agent process it ran.
+					sp = &zombieAfterStartProvider{Fake: env.sp}
+					stability = immediateStartStabilityWaiter
+				}
+				prepared, err := prepareStartCandidateForCity(startCandidate{info: env.sessionInfo(session.ID), tp: tp}, "", "", cfg, sp, env.store, env.clk, io.Discard, nil, dispatchOptionSources{})
+				if err != nil {
+					t.Fatalf("prepareStartCandidateForCity: %v", err)
+				}
+				leased, release := leasedStart(t, env.city, *prepared)
+				result := runPreparedStartCandidate(context.Background(), leased, env.city, sp, env.store, cfg, 0, stability, immediateSessionStaleKeyDetectionWaiter, nil)
+				release()
+				if !result.prepared.resumed || !result.diedDuringStartup || errors.Is(result.err, sessionpkg.ErrConversationRetained) {
+					t.Fatalf("resumed %v, died %v, err %v; want a resume launch the session layer saw start and the post-start probe found dead", result.prepared.resumed, result.diedDuringStartup, result.err)
+				}
+				if result.prepared.cfg.Env["WORKER_SERVICE_TOKEN"] != secret {
+					t.Fatalf("launch env %v, want it to carry the credential its pane echoed", result.prepared.cfg.Env)
+				}
+				if strings.Contains(result.diedPane, secret) || !strings.Contains(result.diedPane, c.pane) {
+					t.Fatalf("dead pane %q, want its last output with the launch's credential redacted", result.diedPane)
+				}
+
+				rec := events.NewFake()
+				commitStartFailure(result, sessionFrontDoor(env.store), env.clk, rec, 0, io.Discard, nil)
+				got, err := env.store.Get(session.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if reset := got.Metadata["session_key"] == ""; reset != c.reset || got.Metadata["resume_failures"] != c.count {
+					t.Fatalf("key %q resume_failures %q, want reset %v and resume_failures %q", got.Metadata["session_key"], got.Metadata["resume_failures"], c.reset, c.count)
+				}
+				want := 0
+				if c.reset {
+					want = 1
+				}
+				if n := resumeFailedEvents(t, rec.Events); n != want {
+					t.Fatalf("recorded %d resume-failed resets, want %d", n, want)
+				}
+			})
+		}
+	}
+}
+
 // TestPrepareStartCandidateForCity_ClearsStaleNamedTriggerEnv is the
 // launch-layer assertion for gascity#4373. resolvePreservedConfiguredNamedSessionTemplate
 // clearing the stamp is not enough on its own: buildPreparedStartWithWorkDirResolver

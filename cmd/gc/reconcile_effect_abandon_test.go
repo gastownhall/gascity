@@ -95,15 +95,26 @@ func TestAbandonKeepsConversationUnderObservePaths(t *testing.T) {
 // resume launch counts and resets at the third in a row, and a capacity
 // refusal (a CapacityError wrapping the startup death included), a deadline,
 // a name collision, a spawn error, or any failure of a fresh launch neither
-// resets nor counts. v2's abandon matches legacy's recordWakeFailure on every
+// resets nor counts. A committed manual conversation is kept and bounded so
+// whatever its transcript reads; an always-named one, like a pool one, is
+// kept only while its transcript reads present, and with it absent any
+// failure resets it. v2's abandon matches legacy's recordWakeFailure on every
 // key, and a committed manual conversation's reset alone records
 // session.conversation_reset{reason:resume-failed}.
 func TestResumeBackstopOnAFailedStart(t *testing.T) {
 	prev := staleResumeKeyProbe
-	staleResumeKeyProbe = func([]string, string, string, string) (bool, bool) { return true, true }
 	t.Cleanup(func() { staleResumeKeyProbe = prev })
 	died := fmt.Errorf("session %q: %w", "s-gc-1", runtime.ErrSessionDiedDuringStartup)
 	refusal := fmt.Errorf("%w; last pane output: No conversation found with session ID: k-1", runtime.ErrSessionDiedDuringStartup)
+	owners := []struct {
+		name   string
+		meta   []string
+		manual bool // a committed manual conversation: kept whatever its transcript reads
+	}{
+		{"manual", []string{"session_origin", "manual"}, true},
+		{"always-named", []string{session.NamedSessionMetadataKey, "true", session.NamedSessionModeMetadata, "always"}, false},
+		{"pool", nil, false},
+	}
 	for _, c := range []struct {
 		name     string
 		resumed  bool
@@ -123,40 +134,49 @@ func TestResumeBackstopOnAFailedStart(t *testing.T) {
 		{"a spawn error", true, errors.New("tmux: exec failed"), "2", false, "2"},
 		{"a fresh launch's startup death", false, refusal, "2", false, "2"},
 	} {
-		for _, manual := range []bool{true, false} {
-			name := fmt.Sprintf("%s, manual %v", c.name, manual)
-			meta := []string{"generation", "4", "instance_token", "tok-4", "provider", "claude", "work_dir", "/work", "session_key", "k-1", "started_config_hash", "h-1", "wake_attempts", "0", "resume_failures", c.failures}
-			if manual {
-				meta = append(meta, "session_origin", "manual")
-			}
-			row := poolRow("gc-1", "worker", 1, "creating", meta...)
-			rf := startResumeFailure(c.resumed, false, "k-1", c.err, "")
-
-			rec := events.NewFake()
-			m := beads.NewMemStoreFrom(0, []beads.Bead{withMeta(row)}, nil)
-			recordWakeFailure(sessionInfoFromBead(row), sessionTranscriptSearchPaths(nil), sessionFrontDoor(m), &clock.Fake{Time: gatherNow}, "worker", rf, rec)
-			legacy, _ := m.Get(row.ID)
-			if reset := legacy.Metadata["session_key"] == ""; reset != c.reset || legacy.Metadata["resume_failures"] != c.count {
-				t.Fatalf("%s: legacy reset %v resume_failures %q, want reset %v and %q", name, reset, legacy.Metadata["resume_failures"], c.reset, c.count)
-			}
-			want := 0
-			if c.reset && manual {
-				want = 1
-			}
-			if got := resumeFailedEvents(t, rec.Events, "worker"); got != want {
-				t.Fatalf("%s: legacy recorded %d resume-failed resets, want %d", name, got, want)
-			}
-
-			k := startKit(t, intentStart, "creating")
-			read := startFailureRead{startFailure: startFailure{cause: causeStartError, err: c.err, display: "worker", relaunched: true}, keeps: true, resume: rf}
-			step := abandonStep(abandonView(k, row, txRuntime{Class: rtAbsent}, read))
-			for key, v := range legacy.Metadata {
-				if v != row.Metadata[key] && step.Write[key] != v {
-					t.Errorf("%s: v2 writes %s = %q, legacy writes %q", name, key, step.Write[key], v)
+		for _, owner := range owners {
+			for _, present := range []bool{true, false} {
+				staleResumeKeyProbe = func([]string, string, string, string) (bool, bool) { return present, true }
+				name := fmt.Sprintf("%s, %s, transcript present %v", c.name, owner.name, present)
+				meta := []string{"generation", "4", "instance_token", "tok-4", "provider", "claude", "work_dir", "/work", "session_key", "k-1", "started_config_hash", "h-1", "wake_attempts", "0", "resume_failures", c.failures}
+				row := poolRow("gc-1", "worker", 1, "creating", append(meta, owner.meta...)...)
+				rf := startResumeFailure(c.resumed, false, "k-1", c.err, "")
+				reset, count := c.reset, c.count
+				if !owner.manual && !present {
+					reset, count = true, ""
 				}
-			}
-			if got := resumeFailedEvents(t, step.Facts.Events, "worker"); got != want {
-				t.Fatalf("%s: v2 recorded %d resume-failed resets, want %d", name, got, want)
+
+				rec := events.NewFake()
+				m := beads.NewMemStoreFrom(0, []beads.Bead{withMeta(row)}, nil)
+				recordWakeFailure(sessionInfoFromBead(row), sessionTranscriptSearchPaths(nil), sessionFrontDoor(m), &clock.Fake{Time: gatherNow}, "worker", rf, rec)
+				legacy, _ := m.Get(row.ID)
+				if got := legacy.Metadata["session_key"] == ""; got != reset || legacy.Metadata["resume_failures"] != count {
+					t.Fatalf("%s: legacy reset %v resume_failures %q, want reset %v and %q", name, got, legacy.Metadata["resume_failures"], reset, count)
+				}
+				want := 0
+				if reset && owner.manual {
+					want = 1
+				}
+				if got := resumeFailedEvents(t, rec.Events); got != want {
+					t.Fatalf("%s: legacy recorded %d resume-failed resets, want %d", name, got, want)
+				}
+
+				k := startKit(t, intentStart, "creating")
+				read := startFailureRead{startFailure: startFailure{cause: causeStartError, err: c.err, display: "worker", relaunched: true}, keeps: present, resume: rf}
+				step := abandonStep(abandonView(k, row, txRuntime{Class: rtAbsent}, read))
+				for key, v := range legacy.Metadata {
+					if v != row.Metadata[key] && step.Write[key] != v {
+						t.Errorf("%s: v2 writes %s = %q, legacy writes %q", name, key, step.Write[key], v)
+					}
+				}
+				for _, key := range []string{"session_key", "started_config_hash", "resume_failures"} {
+					if v, ok := step.Write[key]; ok && v != legacy.Metadata[key] {
+						t.Errorf("%s: v2 writes %s = %q, legacy leaves %q", name, key, v, legacy.Metadata[key])
+					}
+				}
+				if got := resumeFailedEvents(t, step.Facts.Events); got != want {
+					t.Fatalf("%s: v2 recorded %d resume-failed resets, want %d", name, got, want)
+				}
 			}
 		}
 	}
@@ -238,9 +258,9 @@ func TestFailureCallClassifiesTheResume(t *testing.T) {
 }
 
 // resumeFailedEvents counts evs' session.conversation_reset events, each
-// checked for gc-1, subject, the template worker and the resume-failed
+// checked for gc-1, the subject and template worker and the resume-failed
 // reason.
-func resumeFailedEvents(t *testing.T, evs []events.Event, subject string) int {
+func resumeFailedEvents(t *testing.T, evs []events.Event) int {
 	t.Helper()
 	n := 0
 	for _, e := range evs {
@@ -248,8 +268,8 @@ func resumeFailedEvents(t *testing.T, evs []events.Event, subject string) int {
 			continue
 		}
 		var p api.SessionLifecyclePayload
-		if err := json.Unmarshal(e.Payload, &p); err != nil || e.SessionID != "gc-1" || e.Subject != subject || p.Template != "worker" || p.Reason != "resume-failed" {
-			t.Fatalf("event %+v (payload %+v, err %v), want gc-1, subject %q, template worker, reason resume-failed", e, p, err, subject)
+		if err := json.Unmarshal(e.Payload, &p); err != nil || e.SessionID != "gc-1" || e.Subject != "worker" || p.Template != "worker" || p.Reason != "resume-failed" {
+			t.Fatalf("event %+v (payload %+v, err %v), want gc-1, subject and template worker, reason resume-failed", e, p, err)
 		}
 		n++
 	}

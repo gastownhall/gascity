@@ -221,6 +221,8 @@ func otherFailurePatch(row session.Info, meta map[string]string, f startFailureR
 // row's conversation in place, as legacy's recordWakeFailure does: a
 // committed manual conversation (SESSION-LIFE-MANUAL-LOSS) or one whose
 // transcript is on disk. The resume backstop still bounds either.
+// recordWakeFailure and deadRuntimePatch's rapid crash keep by the same rule;
+// change the three together.
 func failureKeepsConversation(row session.Info, f startFailureRead) bool {
 	return f.keeps || session.HasStartedManualConversation(row)
 }

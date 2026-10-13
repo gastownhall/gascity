@@ -3201,6 +3201,9 @@ func reapPreBootSessionBeads(
 		}
 		// Manual sessions are operator-owned; drain/archive states have their
 		// own lifecycle paths that must not be short-circuited here.
+		// ManualSession, the retired legacy marker, keeps a marked row whether
+		// or not it ever started; HasStartedManualConversation is the committed
+		// manual conversation the sibling reapers keep too.
 		if info.ManualSession || session.HasStartedManualConversation(info) || !reapableStateForPreBoot(info) {
 			continue
 		}
@@ -3459,7 +3462,12 @@ func cleanDeadRuntimeCorpse(store beads.Store, sw *SeatWork, info session.Info, 
 	// the dead pane is that sleep's leftover. Closing it would make the
 	// session impossible to wake. Reaping the pane above is still right: it
 	// frees the name for that wake.
-	if claimsLive {
+	//
+	// A committed manual conversation is never closed here either
+	// (SESSION-LIFE-MANUAL-LOSS): its provider key, not the pane, holds the
+	// conversation, so losing the pane leaves the row for the heal and the
+	// next wake to resume.
+	if claimsLive && !session.HasStartedManualConversation(info) {
 		fmt.Fprintf(stderr, "session reconciler: closing session bead %s as dead-runtime (session %s, state %q)\n", info.ID, name, strings.TrimSpace(info.MetadataState)) //nolint:errcheck
 		closeSeat(store, sw, info, closeWhy{reason: "dead-runtime", gate: closeReleasing}, clk.Now().UTC(), stderr)
 	}

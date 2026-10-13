@@ -272,6 +272,59 @@ func (m *Manager) clearStaleResumeMetadata(id string, b *beads.Bead) error {
 	return nil
 }
 
+// retainsCommittedConversation reports whether a failed resume must keep the
+// conversation rather than start fresh: PreserveConversationOnRuntimeLoss
+// retains the row, and its conversation is committed (a provider key and the
+// configuration it started under). A first start whose key was only
+// preallocated, an always-named one included, has nothing to keep and takes
+// the stale-key recovery.
+func retainsCommittedConversation(info Info) bool {
+	return PreserveConversationOnRuntimeLoss(info) &&
+		strings.TrimSpace(info.SessionKey) != "" && strings.TrimSpace(info.StartedConfigHash) != ""
+}
+
+// exitedSessionPeekLines bounds the last pane output reported for a session
+// that started and then exited.
+const exitedSessionPeekLines = 80
+
+// exitedAfterStart is the startup death of a session that started and then
+// exited, with its last pane output redacted against env, the launch's
+// environment, as the runtime's own startup-failure capture is. A failed read
+// is reported, not wrapped: the session still exited, whatever the read ran
+// into.
+func (m *Manager) exitedAfterStart(sessName string, env map[string]string) error {
+	pane, err := m.sp.Peek(sessName, exitedSessionPeekLines)
+	pane = strings.TrimSpace(runtime.RedactSecrets(pane, runtime.SetupCommandSecrets(env)))
+	switch {
+	case err != nil:
+		return fmt.Errorf("%w: session %q exited after it started; reading its last pane output: %s", runtime.ErrSessionDiedDuringStartup, sessName, err.Error())
+	case pane == "":
+		return fmt.Errorf("%w: session %q exited after it started", runtime.ErrSessionDiedDuringStartup, sessName)
+	}
+	return fmt.Errorf("%w: session %q exited after it started; last pane output:\n%s", runtime.ErrSessionDiedDuringStartup, sessName, pane)
+}
+
+// retainFailedResume keeps a committed conversation whose resume launch died,
+// because a dead runtime is not consent to reset it; the same policy fences
+// advisory healing. The error wraps the failed start's own error, its last pane
+// output included, so the caller can still tell a refused resume from any other
+// death, and names the explicit reset that starts the session fresh. startErr
+// is nil when the launch started and then exited; the pane is read before the
+// route is released, and env is the launch's environment it is redacted
+// against.
+func (m *Manager) retainFailedResume(id, sessName string, env map[string]string, startErr error, unroute func()) error {
+	if startErr == nil {
+		startErr = m.exitedAfterStart(sessName, env)
+	}
+	if unroute != nil {
+		unroute()
+	}
+	return fmt.Errorf("session %s: %w after failed resume; run `gc session reset %s` to start fresh: %w", id, ErrConversationRetained, id, startErr)
+}
+
+// retryFreshStartAfterStaleKey recovers a resume that died during startup by
+// relaunching the session fresh. startErr is the failed Start's error, nil
+// when the launch started and then exited.
 func (m *Manager) retryFreshStartAfterStaleKey(
 	ctx context.Context,
 	id string,
@@ -279,15 +332,11 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 	sessName,
 	resumeCommand string,
 	cfg runtime.Config,
+	startErr error,
 	unroute func(),
 ) (bool, error) {
-	// A dead runtime is not consent to reset a committed conversation. The same
-	// policy fences advisory healing and this lower-level startup retry.
-	if PreserveConversationOnRuntimeLoss(infoFromPersistedBead(*b)) {
-		if unroute != nil {
-			unroute()
-		}
-		return false, fmt.Errorf("retaining committed conversation after failed resume: %w: %w", ErrResumeRequired, runtime.ErrSessionDiedDuringStartup)
+	if retainsCommittedConversation(infoFromPersistedBead(*b)) {
+		return false, m.retainFailedResume(id, sessName, cfg.Env, startErr, unroute)
 	}
 	// An empty session_key does not mean there is nothing to recover. The
 	// command can still carry a generated resume shape, because it was built
@@ -317,9 +366,10 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 		freshCmd = stripSessionIDFlagArg(freshCmd, sessionIDFlag)
 	}
 	// An empty resume_flag means the command was never resume-capable
-	// (e.g. a named-always session whose start command carries no
-	// --resume-style flag). stripResumeFlag is intentionally a no-op in
-	// that case, and the command is already a valid fresh start.
+	// (e.g. a never-committed always-named session whose start command
+	// carries no --resume-style flag; a committed one is retained above).
+	// stripResumeFlag is intentionally a no-op in that case, and the command
+	// is already a valid fresh start.
 	//
 	// A non-empty resume_flag whose keyed strip was a no-op means the
 	// session_key embedded in resumeCommand diverged from the bead's
@@ -398,6 +448,12 @@ var (
 	// ErrResumeRequired reports that the session cannot be resumed without an
 	// explicit resume command.
 	ErrResumeRequired = errors.New("session requires resume command")
+	// ErrConversationRetained reports that a resume of a committed
+	// conversation failed and the conversation was kept rather than replaced
+	// by a fresh start (SESSION-LIFE-MANUAL-LOSS). The error also carries the
+	// failed start's own error and names the explicit reset that starts the
+	// session fresh.
+	ErrConversationRetained = errors.New("retaining committed conversation")
 	// ErrNoPendingInteraction reports that a session has nothing awaiting
 	// user input or approval resolution.
 	ErrNoPendingInteraction = errors.New("session has no pending interaction")
@@ -701,7 +757,7 @@ func (m *Manager) ensureRunning(ctx context.Context, by Actor, id string, b bead
 		// the launch: that says nothing about the resume key, so it falls
 		// through to the plain failure below instead of the stale-key recovery.
 		if errors.Is(err, runtime.ErrSessionDiedDuringStartup) && !runtime.IsProviderCapacity(err) {
-			retried, retryErr := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, unroute)
+			retried, retryErr := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, err, unroute)
 			if retryErr != nil {
 				return retryErr
 			}
@@ -746,7 +802,7 @@ func (m *Manager) ensureRunning(ctx context.Context, by Actor, id string, b bead
 			return err
 		}
 		if !m.sp.IsRunning(sessName) {
-			retried, err := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, unroute)
+			retried, err := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, nil, unroute)
 			if err != nil {
 				return err
 			}
@@ -846,7 +902,7 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 		// A capacity refusal says nothing about the resume key; it takes the
 		// plain failure path, not the stale-key recovery (see ensureRunning).
 		case errors.Is(err, runtime.ErrSessionDiedDuringStartup) && !runtime.IsProviderCapacity(err):
-			retried, retryErr := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, unroute)
+			retried, retryErr := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, err, unroute)
 			if retryErr != nil {
 				return retryErr
 			}
@@ -878,7 +934,7 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 			return err
 		}
 		if !m.sp.IsRunning(sessName) {
-			if _, err := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, unroute); err != nil {
+			if _, err := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, nil, unroute); err != nil {
 				return err
 			}
 		}

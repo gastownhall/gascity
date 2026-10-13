@@ -694,7 +694,7 @@ func sessionHasProviderTerminalErrorInfo(info sessionpkg.Info) bool {
 // recordWakeFailure increments wake_attempts and quarantines if threshold
 // exceeded. It returns the snapshot Info advanced by every write it made
 // (front-door migration Step 6d, write-returns-Info):
-//   - the ConversationResetPatch if session_key or started_config_hash was set
+//   - the ConversationResetPatch when the failure resets the conversation
 //   - the WakeFailureAccrualPatch (quarantine or single-counter increment)
 //
 // A quarantined accrual whose persist failed leaves the snapshot un-advanced for
@@ -705,8 +705,9 @@ func sessionHasProviderTerminalErrorInfo(info sessionpkg.Info) bool {
 // session_key / started_config_hash alone because the conversation the key
 // points at is provably still on disk. Only a probeable provider with a present
 // keyed transcript qualifies; everything else (no key, no work dir, provider we
-// cannot probe, transcript gone) returns false and keeps the unconditional
-// reset that recovery depends on. searchPaths is sessionTranscriptSearchPaths.
+// cannot probe, transcript gone) returns false, and the wake failure resets
+// the conversation unless recordWakeFailure retains a committed manual one
+// (SESSION-LIFE-MANUAL-LOSS). searchPaths is sessionTranscriptSearchPaths.
 func wakeFailureKeepsConversation(info sessionpkg.Info, searchPaths []string) bool {
 	sessionKey := strings.TrimSpace(info.SessionKey)
 	workDir := strings.TrimSpace(info.WorkDir)
@@ -808,7 +809,10 @@ func recordWakeFailure(info sessionpkg.Info, transcriptRoots []string, sessFront
 	// skip the clear when the transcript is there; any other conversation (an
 	// unprobeable provider's, an absent transcript's) resets. Attempt accrual
 	// and quarantine below are untouched either way, so a genuinely broken
-	// session still escalates.
+	// session still escalates. An always-named conversation is not a manual
+	// one here: it is kept only while the probe finds it. v2 keeps by the same
+	// rule (failureKeepsConversation, deadRuntimePatch's rapid crash); change
+	// the three together.
 	//
 	// Either keep has a backstop (resumeBackstop): a resume the provider refused
 	// resets at once, and the maxResumeFailuresBeforeReset-th resume-shaped
@@ -937,10 +941,10 @@ func recordChurn(info sessionpkg.Info, sessFront *sessionpkg.Store, clk clock.Cl
 
 	// Clear automatic-session keys on churn — context exhaustion means the
 	// conversation itself is the problem. A fresh conversation avoids
-	// re-hitting the same wall. Manual conversations retain identity and use
-	// the same retry/quarantine accounting; replacing one requires explicit reset.
-	// Best-effort store write (error ignored, as
-	// before) with an unconditional Info fold.
+	// re-hitting the same wall. A committed manual conversation keeps its
+	// identity under the same retry/quarantine accounting; replacing it takes
+	// an explicit reset. Best-effort store write (error ignored, as before)
+	// with an unconditional Info fold.
 	if info.SessionKey != "" && !sessionpkg.HasStartedManualConversation(info) {
 		reset := sessionpkg.ConversationResetPatch(false)
 		_ = sessFront.ApplyPatch(info.ID, reset)
