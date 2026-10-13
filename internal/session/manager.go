@@ -1667,13 +1667,16 @@ func (m *Manager) Kill(ctx context.Context, by Actor, id string) error {
 	}
 	// Accept any state where a runtime process could plausibly exist.
 	// The reconciler uses "awake" as equivalent to "active", and metadata
-	// state can lag behind reality, so also check provider liveness.
+	// state can lag behind reality, so also check provider liveness, on a
+	// fresh read: a cached IsRunning (tmux's state cache) can read a runtime
+	// that just came up gone, and a kill-fenced row (asleep) would then be
+	// refused while its runtime runs.
 	state := State(b.Metadata["state"])
 	switch state {
 	case StateActive, StateStartPending, StateCreating, StateDraining, StateAwake:
 		// Known live states — proceed.
 	default:
-		if !m.sp.IsRunning(sessName) {
+		if m.runtimeConfirmedGone(ctx, sessName) {
 			return fmt.Errorf("session %s: %w", id, ErrSessionInactive)
 		}
 	}

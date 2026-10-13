@@ -1181,6 +1181,7 @@ go_test(
         "cmd_session_attach_resume_test.go",
         "cmd_session_close_release_test.go",
         "cmd_session_kill_fence_test.go",
+        "cmd_session_kill_fresh_read_test.go",
         "cmd_session_kill_frontdoor_test.go",
         "cmd_session_kill_poke_test.go",
         "cmd_session_logs_test.go",
