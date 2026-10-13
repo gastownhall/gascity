@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -252,8 +253,62 @@ func TestSessionWakeRefusalReleasesKey(t *testing.T) {
 	}
 }
 
+// blockingWakeState holds the controller's will-not-start check open until
+// release is closed so a concurrent same-key wake observes the in-flight claim.
+type blockingWakeState struct {
+	*fakeState
+	enterOnce sync.Once
+	entered   chan struct{}
+	release   chan struct{}
+}
+
+func (s *blockingWakeState) WakeStartRefusal(session.Info) (string, bool) {
+	s.enterOnce.Do(func() { close(s.entered) })
+	<-s.release
+	return "", true
+}
+
+func TestSessionWakeInFlightReturnsConflict(t *testing.T) {
+	fs := newSessionFakeState(t)
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Wake In Flight")
+	suspendForWakeTest(t, fs, info.ID)
+	state := &blockingWakeState{fakeState: fs, entered: make(chan struct{}), release: make(chan struct{})}
+	h := newTestCityHandlerWith(t, state, New(state))
+	url := cityURL(fs, "/session/") + info.ID + "/wake"
+
+	firstDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() { firstDone <- postSessionAction(t, h, url, "wake-1", "") }()
+	<-state.entered
+
+	inFlightDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() { inFlightDone <- postSessionAction(t, h, url, "wake-1", "") }()
+	var inFlight *httptest.ResponseRecorder
+	select {
+	case inFlight = <-inFlightDone:
+	case <-time.After(30 * time.Second):
+		close(state.release)
+		t.Fatal("same-key wake blocked behind the in-flight wake instead of returning 409")
+	}
+	if inFlight.Code != http.StatusConflict || !strings.Contains(inFlight.Body.String(), "idempotency-in-flight") {
+		t.Fatalf("in-flight repeat: status = %d body = %s, want 409 idempotency-in-flight", inFlight.Code, inFlight.Body.String())
+	}
+
+	close(state.release)
+	first := <-firstDone
+	if first.Code != http.StatusOK {
+		t.Fatalf("first wake: status = %d, want 200; body = %s", first.Code, first.Body.String())
+	}
+	replay := postSessionAction(t, h, url, "wake-1", "")
+	if replay.Code != http.StatusOK || replay.Body.String() != first.Body.String() {
+		t.Fatalf("replay after completion: status = %d body = %s, want 200 %s", replay.Code, replay.Body.String(), first.Body.String())
+	}
+	if got := countSessionEnqueues(fs, info.ID); got != 1 {
+		t.Fatalf("session enqueues = %d, want 1", got)
+	}
+}
+
 // TestSessionStopAndWakeKeepSeparateScopes pins that one Idempotency-Key used
-// on /stop and /wake of the same session, or on /stop of two sessions, never
+// on /stop and /wake of the same session, or on one action of two sessions, never
 // replays another action's or another target's response.
 func TestSessionStopAndWakeKeepSeparateScopes(t *testing.T) {
 	fs := newSessionFakeState(t)
@@ -275,12 +330,17 @@ func TestSessionStopAndWakeKeepSeparateScopes(t *testing.T) {
 		}
 	}
 
-	suspendForWakeTest(t, fs, a.ID)
-	wake := postSessionAction(t, h, base+a.ID+"/wake", "shared-key", "")
-	if wake.Code != http.StatusOK {
-		t.Fatalf("wake: status = %d, want 200; body = %s", wake.Code, wake.Body.String())
-	}
-	if got := countSessionEnqueues(fs, a.ID); got != 1 {
-		t.Fatalf("session enqueues = %d, want 1 (wake replayed stop's response)", got)
+	for _, info := range []session.Info{a, b} {
+		suspendForWakeTest(t, fs, info.ID)
+		rec := postSessionAction(t, h, base+info.ID+"/wake", "shared-key", "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("wake %s: status = %d, want 200; body = %s", info.ID, rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), info.ID) {
+			t.Fatalf("wake %s body = %s, want its own id (replayed another action or target)", info.ID, rec.Body.String())
+		}
+		if got := countSessionEnqueues(fs, info.ID); got != 1 {
+			t.Fatalf("session enqueues for %s = %d, want 1 (wake replayed another action's or target's response)", info.ID, got)
+		}
 	}
 }
