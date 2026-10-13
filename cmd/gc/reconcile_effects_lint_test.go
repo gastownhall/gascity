@@ -35,7 +35,7 @@ import (
 //   - the runtime stops that skip the destructive fence (v5 O2).
 var effectBannedMethods = []string{
 	"ApplyPatch", "ApplyPatchInfo", "UpdateMetadataInfo", "SetMetadata", "SetMetadataBatch", "SetMarker", "SetState",
-	"Sleep", "SetWaitHold", "RecordCurrentBead",
+	"Sleep", "SetWaitHold", "SetPinAwake", "RecordCurrentBead",
 	"SetCurrentClaim", "SetStatusOpen", "RepairType", "RepairTypeBestEffort", "SetLocalString", "CloseWithoutReason",
 	"UpdateMetadataFenced", "ApplyPatchIfLifecycleUnchanged", "WithPendingCreateRollback", "CommitClose",
 	"RollbackPendingCreateAtomically", "CloseWithMetadataIfMatch", "ApplyPatchIfLifecycleUnchangedUnder",

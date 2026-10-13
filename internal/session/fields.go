@@ -317,7 +317,7 @@ var registry = slices.Concat([]Field{
 	{Key: "sleep_intent", Class: ClassOperatorIntent, Writers: sites(opEncode, legacy(srcSleep, "markIdleSleepPendingInfo")), Clears: sites(waitHold, opConsumeHold, op("internal/session/kill_fence.go", "WriteKillFence"), v2SleepIntentClear, v2Accrual)},
 	{Key: "wait_hold", Class: ClassOperatorIntent, Writers: sites(opEncode, op("cmd/gc/cmd_wait.go", "doSessionWait")), Clears: sites(waitHold)},
 	{Key: "suspended_at", Class: ClassOperatorIntent, Writers: sites(opEncode, op(srcManager, "Manager.Suspend")), Clears: sites(opConsumeHold, op("internal/session/kill_fence.go", "WriteKillFence"))},
-	{Key: "pin_awake", Class: ClassOperatorIntent, Writers: sites(op("cmd/gc/cmd_session_pin.go", "cmdSessionSetPin")), Readers: sites(v2("cmd/gc/allocator_decide.go", "decidePass.awake"))},
+	{Key: "pin_awake", Class: ClassOperatorIntent, Writers: sites(op("internal/session/store.go", "Store.SetPinAwake")), Readers: sites(v2("cmd/gc/allocator_decide.go", "decidePass.awake"))},
 	// template_overrides is a per-session setting the start reads and nothing
 	// clears, so it is operator intent, not a request.
 	{Key: "template_overrides", Class: ClassOperatorIntent, Writers: sites(op(srcManager, "Manager.UpdateTemplateOverrides"))},

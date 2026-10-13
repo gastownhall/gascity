@@ -1268,11 +1268,7 @@ func (s *Server) setSessionPin(ctx context.Context, idRef string, pinned bool) (
 	if info.Type == "" {
 		sessFront.RepairTypeBestEffort(id)
 	}
-	value := ""
-	if pinned {
-		value = "true"
-	}
-	if err := sessFront.SetMarker(id, "pin_awake", value); err != nil {
+	if err := sessFront.SetPinAwake(id, pinned); err != nil {
 		return nil, humaStoreError(err)
 	}
 	s.state.Enqueue(reconcilekey.Session(id))
