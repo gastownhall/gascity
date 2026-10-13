@@ -129,6 +129,9 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 	command := launchCommand.Command
 	extraMeta := sessionTemplateOverridesMetadata(body.Options, body.Message)
 	extraMeta = agentSessionCreateMetadata(extraMeta, workDirQualifiedName)
+	// The client's keys land with the create, before the controller can see
+	// the row.
+	extraMeta = withClientMetadata(extraMeta, body.Metadata)
 	mcpServers, err := s.sessionMCPServers(template, resolved.Name, workDirQualifiedName, workDir, transport, kind, nil)
 	if err != nil {
 		return nil, apierr.Internal.Msg(err.Error())
@@ -221,7 +224,7 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 		resp := sessionToResponse(info, s.state.Config())
 		resp.Kind = "agent"
 		s.emitSessionCreateSucceeded(reqID, resp)
-		s.persistSessionMeta(store, info.ID, body.ProjectID, body.Metadata)
+		s.persistSessionMeta(store, info.ID, body.ProjectID, nil)
 		if !waitForCommandable {
 			s.state.Enqueue(reconcilekey.Session(info.ID))
 		}
@@ -318,6 +321,8 @@ func (s *Server) humaCreateProviderSession(_ context.Context, store beads.Sessio
 		extraMeta = make(map[string]string)
 	}
 	extraMeta["session_origin"] = "manual"
+	// The client's keys land with the create.
+	extraMeta = withClientMetadata(extraMeta, body.Metadata)
 	if transport == "acp" {
 		extraMeta, err = session.WithStoredMCPMetadata(extraMeta, mcpIdentity, mcpServers)
 		if err != nil {
@@ -372,7 +377,7 @@ func (s *Server) humaCreateProviderSession(_ context.Context, store beads.Sessio
 		resp := sessionToResponse(info, s.state.Config())
 		asProviderSession(&resp)
 		s.emitSessionCreateSucceeded(reqID, resp)
-		s.persistSessionMeta(store, info.ID, body.ProjectID, withClientMetadata(optMeta, body.Metadata))
+		s.persistSessionMeta(store, info.ID, body.ProjectID, optMeta)
 		titleProvider := s.resolveTitleProvider()
 		MaybeGenerateTitleAsync(store, info.ID, body.Title, body.Message, titleProvider, info.WorkDir, func(format string, args ...any) {
 			fmt.Fprintf(os.Stderr, "session %s: "+format+"\n", append([]any{info.ID}, args...)...)
@@ -1212,7 +1217,7 @@ func refuseNonClientSessionMetadata(meta map[string]string) error {
 	return apierr.ValidationFailed.With("session metadata: only "+clientSessionMetadataPrefix+"* keys are a client's; nothing was written", bad...)
 }
 
-// withClientMetadata is optMeta with the client's keys added.
+// withClientMetadata is meta with the client's keys added.
 func withClientMetadata(optMeta, client map[string]string) map[string]string {
 	if len(client) == 0 {
 		return optMeta
@@ -1244,13 +1249,14 @@ func (s *Server) setSessionPin(ctx context.Context, idRef string, pinned bool) (
 	if store.Store == nil {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
-	resolve := s.resolveSessionIDWithConfig
-	if pinned {
-		resolve = func(st beads.Store, ref string) (string, error) {
-			return s.resolveSessionIDMaterializingNamedWithContext(ctx, st, ref)
-		}
+	// A pin materializes a configured named session not yet created, as gc
+	// session pin does; that row is the pin's to keep.
+	id, err := s.resolveSessionIDWithConfig(store.Store, idRef)
+	materialized := false
+	if err != nil && pinned {
+		id, err = s.resolveSessionIDMaterializingNamedWithContext(ctx, store.Store, idRef)
+		materialized = err == nil
 	}
-	id, err := resolve(store.Store, idRef)
 	if err != nil {
 		return nil, humaResolveError(err)
 	}
@@ -1264,6 +1270,14 @@ func (s *Server) setSessionPin(ctx context.Context, idRef string, pinned bool) (
 	}
 	if info.Closed {
 		return nil, apierr.SessionConflict.Msg("session " + id + " is closed")
+	}
+	// Pool demand alone starts and keeps a demand-only singleton's session;
+	// the reconciler never reads pin_awake for it, so refuse a pin that would
+	// do nothing, as gc session pin does (#6858).
+	if cfg := s.state.Config(); pinned && !materialized && cfg != nil {
+		if agentCfg, ok := findAgentByQualifiedTemplate(cfg, info.Template); ok && session.IsDemandOnlySingletonSession(cfg, &agentCfg, info) {
+			return nil, apierr.DemandOnlySingleton.Msg("cannot pin session " + id + ": " + session.DemandOnlySingletonExplanation(agentCfg.QualifiedName()))
+		}
 	}
 	if info.Type == "" {
 		sessFront.RepairTypeBestEffort(id)

@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/beads"
 )
 
 // TestSessionPatchWritesClientMetadata (architecture B, the #7742 review's
@@ -76,31 +78,70 @@ func TestSessionCreateRefusesNonClientMetadata(t *testing.T) {
 	}
 }
 
-// TestSessionCreateWritesClientMetadata: POST /sessions, agent and provider,
-// writes the client's real_world_app_* keys on the session it creates.
+// TestSessionCreateWritesClientMetadata (the #7742 review): POST /sessions,
+// agent and provider, writes the client's real_world_app_* keys with the
+// create itself, so the row carries them before the controller can see it
+// and before success is emitted: a later write of them is held here, and the
+// row already carries them at success.
 func TestSessionCreateWritesClientMetadata(t *testing.T) {
 	for _, body := range []string{
 		`{"kind":"provider","name":"test-agent","title":"t","metadata":{"real_world_app_session_kind":"provider"}}`,
 		`{"kind":"agent","name":"myrig/worker","async":true,"metadata":{"real_world_app_session_kind":"provider"}}`,
 	} {
 		fs := newSessionFakeState(t)
+		blocking := &blockingSetMetadataBatchStore{
+			Store:       fs.cityBeadStore,
+			shouldBlock: func(kvs map[string]string) bool { _, ok := kvs["real_world_app_session_kind"]; return ok },
+			entered:     make(chan struct{}),
+			release:     make(chan struct{}),
+		}
+		fs.cityBeadStore = blocking
 		h := newTestCityHandlerWith(t, fs, New(fs))
 		rec := beadRequest(t, h, "POST", cityURL(fs, "/sessions"), body)
 		if rec.Code != http.StatusAccepted {
+			close(blocking.release)
 			t.Fatalf("%s: status %d (%s), want 202", body, rec.Code, rec.Body.String())
 		}
 		var resp struct {
 			RequestID string `json:"request_id"`
 		}
 		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			close(blocking.release)
 			t.Fatal(err)
 		}
 		success, failure := waitForSessionCreateResult(t, fs.eventProv, resp.RequestID)
+		got := beads.Bead{}
+		if success != nil {
+			got, _ = blocking.Get(success.Session.ID)
+		}
+		close(blocking.release)
 		if success == nil {
 			t.Fatalf("%s: create failed: %+v", body, failure)
 		}
-		if got, _ := fs.cityBeadStore.Get(success.Session.ID); got.Metadata["real_world_app_session_kind"] != "provider" {
-			t.Fatalf("%s: metadata %v, want the client's key", body, got.Metadata)
+		if got.Metadata["real_world_app_session_kind"] != "provider" {
+			t.Fatalf("%s: metadata at success %v, want the client's key written with the create", body, got.Metadata)
 		}
+	}
+}
+
+// TestSessionRoutesRefuseAnInvalidClientKey (R05): a real_world_app_* key
+// that is not a valid bead-metadata key (bd would split "x=y") is refused
+// with 422 at its location by PATCH /session/{id} and POST /sessions,
+// writing nothing.
+func TestSessionRoutesRefuseAnInvalidClientKey(t *testing.T) {
+	fs := newSessionFakeState(t)
+	h := newTestCityHandlerWith(t, fs, New(fs))
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "S")
+	before, _ := fs.cityBeadStore.Get(info.ID)
+	rec := beadRequest(t, h, "PATCH", cityURL(fs, "/session/")+info.ID, `{"metadata":{"real_world_app_x=held_until":"1"}}`)
+	got, _ := fs.cityBeadStore.Get(info.ID)
+	if rec.Code != http.StatusUnprocessableEntity || strings.Join(problemLocations(t, rec), ",") != "body.metadata.real_world_app_x=held_until" || len(got.Metadata) != len(before.Metadata) {
+		t.Fatalf("patch: status %d (%s), metadata %v: want 422 at the key, nothing written", rec.Code, rec.Body.String(), got.Metadata)
+	}
+	all, _ := fs.cityBeadStore.ListOpen()
+	rec = beadRequest(t, h, "POST", cityURL(fs, "/sessions"), `{"kind":"agent","name":"myrig/worker","metadata":{"real_world_app_x=y":"1"}}`)
+	after, _ := fs.cityBeadStore.ListOpen()
+	if rec.Code != http.StatusUnprocessableEntity || strings.Join(problemLocations(t, rec), ",") != "body.metadata.real_world_app_x=y" || len(after) != len(all) {
+		t.Fatalf("create: status %d (%s), beads %d -> %d: want 422 at the key, nothing created", rec.Code, rec.Body.String(), len(all), len(after))
 	}
 }
