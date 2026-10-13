@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"maps"
 	"testing"
@@ -82,6 +83,30 @@ func TestLaunchCommitsTheRuntimeBinding(t *testing.T) {
 	}
 	if k.meta(sessionpkg.MetadataRuntimeThreadID) != "thread-1" || k.meta(sessionpkg.MetadataRuntimeProjectID) != "project-1" {
 		t.Fatalf("row thread %q project %q, want thread-1 project-1", k.meta(sessionpkg.MetadataRuntimeThreadID), k.meta(sessionpkg.MetadataRuntimeProjectID))
+	}
+}
+
+// A v2 launch commits a runtime alive with its PreWake token whatever the
+// Start returned, so it reads the binding whatever the Start returned: a
+// commit after an erroring Start records the thread too, rather than leaving
+// the previous incarnation's on the row.
+func TestLaunchCommitsTheRuntimeBindingWhateverTheStartReturned(t *testing.T) {
+	for _, startErr := range []error{runtime.ErrSessionInitializing, runtime.ErrSessionExists, fmt.Errorf("quota: %w", runtime.ErrProviderCapacity)} {
+		k, leaf := launchKit(t, "asleep", sessionpkg.MetadataRuntimeThreadID, "thread-old", sessionpkg.MetadataRuntimeProjectID, "project-old")
+		k.p.Runtime = &boundLaunchLeaf{startHookLeaf: leaf, binding: runtime.SessionBinding{ThreadID: "thread-1", ProjectID: "project-1"}}
+		k.sp.nextStart = startErr
+		leaf.onStart = func(context.Context) {
+			token := k.meta("instance_token")
+			k.sp.mu.Lock()
+			k.sp.put("s-gc-1", "gc-1", "4", token)
+			k.sp.mu.Unlock()
+		}
+		if s := k.runKind(); s.Outcome != settledLanded {
+			t.Fatalf("%v: settlement %+v, want landed", startErr, s)
+		}
+		if k.meta(sessionpkg.MetadataRuntimeThreadID) != "thread-1" || k.meta(sessionpkg.MetadataRuntimeProjectID) != "project-1" {
+			t.Fatalf("%v: row thread %q project %q, want thread-1 project-1", startErr, k.meta(sessionpkg.MetadataRuntimeThreadID), k.meta(sessionpkg.MetadataRuntimeProjectID))
+		}
 	}
 }
 
