@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"slices"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -628,4 +629,103 @@ func TestIdleStopReadsTheLateClaim(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Kills a stop record legacy emits and v2 drops (mc-ensxp), or one emitted
+// every pass: a decided idle stop is recorded at the idle-timeout site with
+// legacy's codes, idle_timeout/stop or assigned_work_exhausted/stop, again
+// only a patrol later or on another reason; any other stop is not.
+func TestIdleMemoryTracesStops(t *testing.T) {
+	const patrol = 15 * time.Second
+	var m idleMemory
+	c := idleCase(t, idleCity(), time.Hour, contentUnread)
+	m.update(c.w, c.a, patrol, io.Discard)
+	idle, exhausted := intent{Key: c.k, Kind: intentStop, Reason: decideIdleTimeout}, intent{Key: c.k, Kind: intentStop, Reason: decideIdleExhausted}
+	for i, step := range []struct {
+		at   time.Duration
+		it   intent
+		want string
+	}{
+		{0, idle, "idle_timeout/stop"},
+		{time.Second, idle, ""},
+		{2 * time.Second, exhausted, "assigned_work_exhausted/stop"},
+		{2*time.Second + patrol, exhausted, "assigned_work_exhausted/stop"},
+		{time.Minute, intent{Key: c.k, Kind: intentStop, Reason: decideDormantStop}, ""},
+		{2 * time.Minute, intent{Key: c.k, Kind: intentStart, Reason: decideIdleTimeout}, ""},
+	} {
+		c.w.Now = censusNow.Add(step.at)
+		var got string
+		for _, tr := range m.stopTraces(c.w, []intent{step.it}, patrol) {
+			if tr.Site != TraceSiteReconcilerIdleTimeout || tr.Template != "worker" || tr.SessionName != "s-heal" || tr.Key != c.k {
+				t.Fatalf("step %d: trace %+v, want the idle-timeout site for worker/s-heal", i, tr)
+			}
+			got = tr.Reason + "/" + tr.Outcome
+		}
+		if got != step.want {
+			t.Fatalf("step %d: traced %q, want %q", i, got, step.want)
+		}
+	}
+}
+
+// openListCounter is a work store that counts the lists of open beads, the
+// finalize's close-gate read (the fence's late claim lists in_progress only).
+type openListCounter struct {
+	beads.Store
+	open *atomic.Int64
+}
+
+func (s openListCounter) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if q.Status == "open" {
+		s.open.Add(1)
+	}
+	return s.Store.List(q)
+}
+
+// Kills an idle stop's finalize that reads work it never uses (mc-ensxp):
+// the idle stop and the forced stop land with no close-gate work read, and
+// another stop's finalize still reads it.
+func TestIdleStopFinalizeReadsNoWork(t *testing.T) {
+	for _, exhausted := range []bool{false, true} {
+		p, it, store, _ := idleOn(t, exhausted)
+		var open atomic.Int64
+		p.reads.legs = testWorkLegs(p.World.CityPath, p.World.Env.Cfg, openListCounter{store, &open}, nil).readOnly()
+		if s := runTx(context.Background(), p, it, effectSpecs[it.Kind], nil); s.Outcome != settledLanded || open.Load() != 0 {
+			t.Fatalf("%s: settled %+v with %d open-work lists, want landed with none", it.Reason, s, open.Load())
+		}
+	}
+	var open atomic.Int64
+	r := effectReads{legs: testWorkLegs(t.TempDir(), idleCity(), openListCounter{beads.NewMemStore(), &open}, nil).readOnly()}
+	c := idleCase(t, idleCity(), time.Hour, contentUnread)
+	v := txView{It: intent{Key: c.k, Kind: intentStop, Reason: decideStopVerb + drainOrphaned}, World: c.w, Row: c.w.Census.Rows[c.k].Info, Now: censusNow}
+	if _, err := finalizeWorkProbe(context.Background(), r, v); err != nil || open.Load() == 0 {
+		t.Fatalf("an orphaned stop's finalize: err %v, %d open-work lists; want its close-gate read", err, open.Load())
+	}
+}
+
+// Kills a pass that drops A15's stop records (mc-ensxp): a simulated seat
+// idle past its idle_timeout is stopped, and the pass that decides the
+// stop records it at the idle-timeout site with outcome stop.
+func TestPassRecordsTheIdleStop(t *testing.T) {
+	s := respawnSim(t)
+	s.cfg.Agents[0].IdleTimeout = "30s"
+	s.sp.mu.Lock()
+	s.sp.SetActivity("s-gc-1", s.clk.Now().Add(-10*time.Minute))
+	s.sp.mu.Unlock()
+	var stops []rowTrace
+	pass := s.p.pass
+	s.p.pass = func(now time.Time) passResult {
+		res := pass(now)
+		for _, tr := range s.p.out.record.Load().IdleTraces {
+			if tr.Outcome == string(TraceOutcomeStop) {
+				stops = append(stops, tr)
+			}
+		}
+		return res
+	}
+	s.tickUntil(t, 20, "recorded an idle stop", func() bool { return len(stops) > 0 })
+	if tr := stops[0]; tr.Site != TraceSiteReconcilerIdleTimeout || tr.SessionName != "s-gc-1" ||
+		(tr.Reason != string(TraceReasonIdleTimeout) && tr.Reason != string(TraceReasonAssignedWorkExhausted)) {
+		t.Fatalf("stop record %+v, want the idle-timeout site's stop for s-gc-1", tr)
+	}
+	s.noViolations(t)
 }

@@ -32,7 +32,7 @@ import (
 //     the Call removes it under the corpse exception, by exact session
 //     object, when L3 passes; an attached corpse stays.
 //  3. The finalize (D4): the intent's builder (Finish), else finalizePatch,
-//     on the close-gate work read live. A close lands as the premise close
+//     on the close-gate work read live (none for an idle stop). A close lands as the premise close
 //     (closeSection); any other finalize is one CAS that writes its patch
 //     and clears the stop request (D3 step 5). The events are legacy's:
 //     session.stopped with the stop metric when a stop was performed, and
@@ -200,8 +200,14 @@ type finalizeWork struct {
 	anomaly *beads.Bead
 }
 
-// finalizeWorkProbe reads the row's work in the close-gate form.
+// finalizeWorkProbe reads the row's work in the close-gate form. An idle
+// stop's finalize reads none (mc-ensxp): A15's builders sleep the row
+// whatever its work and never close it, and the idle kill's events name no
+// kept bead; its claim check is the fence's L5, read before the stop.
 func finalizeWorkProbe(_ context.Context, r effectReads, v txView) (finalizeWork, error) {
+	if isIdleReason(v.It.Reason) {
+		return finalizeWork{}, nil
+	}
 	if r.legs.unusable() != nil || v.World.Env == nil {
 		return finalizeWork{}, errNoReadStore
 	}

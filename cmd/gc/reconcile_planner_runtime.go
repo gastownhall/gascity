@@ -257,7 +257,7 @@ func (rt *plannerRuntime) pass(now time.Time) passResult {
 	if rt.planner.boot.open() {
 		rt.readyOnce.Do(func() { close(rt.ready) })
 	}
-	rt.traceRows(append(slices.Clone(rec.Rows), rec.IdleDefers...))
+	rt.traceRows(append(slices.Clone(rec.Rows), rec.IdleTraces...))
 	return res
 }
 

@@ -35,7 +35,7 @@ type passTrace struct {
 	Err                string
 	Admitted, Deferred []intent
 	Rows               []rowTrace
-	IdleDefers         []rowTrace // A15's ladder deferrals, legacy's idle-timeout trace
+	IdleTraces         []rowTrace // A15's ladder deferrals and decided stops, legacy's idle-timeout trace
 	Alerts             []string
 }
 
@@ -100,7 +100,7 @@ func (p *planner) tracePass(e gatherEnv, now time.Time) passResult {
 		return passResult{}
 	}
 	rec.Alerts = a.Alerts
-	rec.IdleDefers = p.idleWants(&w, &a)
+	rec.IdleTraces = p.idleWants(&w, &a)
 
 	running := make(map[rowKey]bool)
 	for _, f := range w.InFlight.Entries {
@@ -122,6 +122,7 @@ func (p *planner) tracePass(e gatherEnv, now time.Time) passResult {
 			intents = append(intents, it)
 		}
 	}
+	rec.IdleTraces = append(rec.IdleTraces, p.idle.stopTraces(&w, intents, p.patrol())...)
 	for _, ap := range a.Plans {
 		intents = append(intents, createIntent(cfg, w.Env.ConfigRev, ap))
 	}
