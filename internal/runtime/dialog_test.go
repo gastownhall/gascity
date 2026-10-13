@@ -1732,6 +1732,85 @@ func TestProviderTerminalErrorReason(t *testing.T) {
 	}
 }
 
+// TestProviderTerminalErrorReasonCreditBalanceTooLow pins that an exhausted
+// API credit balance is a terminal provider error: retrying cannot help until
+// an operator adds credit or fixes the key, exactly like insufficient_quota.
+func TestProviderTerminalErrorReasonCreditBalanceTooLow(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		content string
+	}{
+		{name: "claude code pane line", content: "> hello\n  ⎿  Credit balance is too low\n"},
+		{name: "api error sentence", content: `API Error: 400 {"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."}}`},
+		{name: "api error sentence after pane marker", content: "> hello\n  ⎿  API Error: 400 {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.\"}}\n"},
+		{name: "api error sentence wrapped at 80 columns", content: "> hello\n" +
+			"  ⎿  API Error: 400 {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"me\n" +
+			"     ssage\":\"Your credit balance is too low to access the Anthropic API. Please\n" +
+			"     go to Plans & Billing to upgrade or purchase credits.\"}}\n"},
+		{name: "api error sentence wrapped mid-phrase", content: "  ⎿  API Error: 400 {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"Your credit balance is too\n" +
+			"     low to access the Anthropic API.\"}}\n"},
+		{name: "upper case", content: "CREDIT BALANCE IS TOO LOW"},
+		{name: "claude code displayed stop after prompt", content: "❯ PROBE keep going\n  ⎿ \u00a0Credit balance too low · Add funds: https://platform.claude.com/settings/billing\n\n✻ Crunched for 23s · done 11:22 AM\n"},
+		{name: "claude code displayed stop alone", content: "  ⎿ \u00a0Credit balance too low\n"},
+		{name: "claude code displayed stop", content: "⏺ Reading the bead list.\n\n  Ran 1 shell command\n  ⎿  Credit balance too low · Add funds: https://platform.claude.com/settings/billing\n\n✻ Brewed for 30s · done 11:05 AM\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ProviderTerminalErrorReason(tt.content); got != "quota_exceeded" {
+				t.Errorf("ProviderTerminalErrorReason(%q) = %q, want %q", tt.content, got, "quota_exceeded")
+			}
+		})
+	}
+}
+
+// TestProviderTerminalErrorReasonCreditBalanceMentionIsNotTerminal pins that
+// the phrase quoted mid-line in ordinary output (a log scrape, a grep, a chat
+// message) is not a provider error: a session that printed it and then crashed
+// for another reason must count as a crash, not be marked terminal for good.
+func TestProviderTerminalErrorReasonCreditBalanceMentionIsNotTerminal(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		content string
+	}{
+		{name: "grep command", content: `$ grep -c "Credit balance is too low" session.log` + "\n0\n"},
+		{name: "scrape report", content: "watch: matched 'credit balance is too low' in worker-2\n"},
+		{name: "prose", content: "  ⎿  The other session failed because its credit balance is too low.\n"},
+		{name: "prose without is", content: "  ⎿  The other session stopped with its credit balance too low.\n"},
+		{name: "wrapped prose without is", content: "⏺ The worker stopped and the pane showed its\n  credit balance too low, so I moved on to the next bead.\n"},
+		{name: "grep command without is", content: `$ grep -c "Credit balance too low" session.log` + "\n0\n"},
+		{name: "api error followed by unindented prose", content: "  ⎿  API Error: 429 {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\"}}\n" +
+			"⏺ Another worker failed because its credit balance is too low to access the API.\n"},
+		{name: "api error followed by a blank line and indented prose", content: "  ⎿  API Error: 400 {\"type\":\"error\"}\n" +
+			"\n" +
+			"     its credit balance is too low to access the API\n"},
+		{name: "grep hit on the api sentence", content: `$ grep -rn "too low to access" internal/runtime` + "\n" + `internal/runtime/dialog_test.go:1745:		{name: "api error sentence", content: ` + "`API Error: 400 {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"Your credit balance is too low to access the Anthropic API.\"}}`},\n"},
+		{name: "api sentence quoted in prose", content: "  The worker's log said: Your credit balance is too low to access the Anthropic API.\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ProviderTerminalErrorReason(tt.content); got != "" {
+				t.Errorf("ProviderTerminalErrorReason(%q) = %q, want empty", tt.content, got)
+			}
+		})
+	}
+}
+
+// TestProviderTerminalErrorReasonSpendLimitModalIsNotTerminal pins that
+// Claude's spend-limit modal, which also mentions a credit balance, stays a
+// rate-limit screen with a reset rather than a terminal provider error.
+func TestProviderTerminalErrorReasonSpendLimitModalIsNotTerminal(t *testing.T) {
+	t.Parallel()
+	modal := "What do you want to do?\nUsage credit balance: $573.37\n❯ Adjust monthly spend limit: $1503.19\n  Wait for limit to reset      Resets Jul 12 at 11pm (America/Los_Angeles)\nEnter to confirm · Esc to cancel"
+	if got := ProviderTerminalErrorReason(modal); got != "" {
+		t.Errorf("ProviderTerminalErrorReason(spend-limit modal) = %q, want empty", got)
+	}
+	if !ContainsProviderRateLimitScreen(modal) {
+		t.Error("ContainsProviderRateLimitScreen(spend-limit modal) = false, want true")
+	}
+}
+
 func TestContainsCustomAPIKeyDialog(t *testing.T) {
 	t.Parallel()
 
