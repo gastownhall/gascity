@@ -504,7 +504,11 @@ func newSim(t *testing.T, seed uint64, o simOpts) *sim {
 	}
 	// The executor in step mode: its goroutines are joined at teardown, and
 	// every effect parks (gated) until a step releases it.
-	s.x = newEffectExecutor(func(st settlement) { s.p.settlements.post(st); s.postCh <- st }, io.Discard)
+	s.x = newEffectExecutor(func(st settlement) {
+		countPost(st) // reconcile_sim_coverage_test.go: the census counts what the planner is told
+		s.p.settlements.post(st)
+		s.postCh <- st
+	}, io.Discard)
 	s.x.clock = s.clk
 	s.x.spawn = func(f func()) {
 		s.spawned.Add(1)
@@ -692,6 +696,7 @@ func (s *sim) pass() {
 		if it.Kind == intentDrainBegin || it.Kind == intentDrainBeginFresh {
 			simDrainBegins.Add(1)
 		}
+		countReason(it) // reconcile_sim_coverage_test.go: the floor-ack cancel the gate requires
 		if it.Reason == decideSquatterHeal {
 			simSquatterHeals.Add(1)
 		}
