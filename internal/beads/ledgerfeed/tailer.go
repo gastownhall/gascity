@@ -168,7 +168,10 @@ type Tailer struct {
 	mu         sync.Mutex
 	checkpoint Checkpoint
 	delay      time.Duration
-	stats      Stats
+	// afterGap is set while the last completed Step moved past a gap, so a
+	// gap that follows another one backs off instead of re-reading at once.
+	afterGap bool
+	stats    Stats
 }
 
 // Resume sets the checkpoint to a previously persisted one. The next read
@@ -232,7 +235,7 @@ func (t *Tailer) Stats() Stats {
 
 // Step runs one read-and-apply. It reports more=true when the caller should
 // read again at once: the page was full, the head is still ahead, or a gap was
-// just moved past. An error reports more=false and leaves the checkpoint
+// just moved past that did not follow another gap. An error reports more=false and leaves the checkpoint
 // where it was.
 func (t *Tailer) Step(ctx context.Context) (more bool, err error) {
 	if err := t.validate(); err != nil {
@@ -282,6 +285,7 @@ func (t *Tailer) Step(ctx context.Context) (more bool, err error) {
 	}
 	if len(rows) == 0 {
 		t.mu.Lock()
+		t.afterGap = false
 		t.observeHead(page.Head)
 		t.mu.Unlock()
 		return false, nil
@@ -298,6 +302,7 @@ func (t *Tailer) Step(ctx context.Context) (more bool, err error) {
 	defer t.mu.Unlock()
 	t.checkpoint = next
 	t.delay = 0
+	t.afterGap = false
 	t.stats.RowsApplied += int64(len(rows))
 	t.stats.Pages++
 	t.stats.Seq = next.Seq
@@ -338,6 +343,11 @@ func (t *Tailer) Run(ctx context.Context) error {
 
 // movepast re-baselines at the head the gap observed, hands the gap to OnGap,
 // and commits the new checkpoint only when OnGap accepts it.
+//
+// It asks for an immediate re-read only when the Step before it was not a gap
+// too. A Source that keeps re-triggering gaps (replicas that disagree behind
+// one address) would otherwise drive an unbounded loop of reads and consumer
+// resyncs; a gap that follows a gap instead leaves the backoff growing.
 func (t *Tailer) movepast(ctx context.Context, gap Gap) (bool, error) {
 	to, err := t.checkpointAt(ctx, gap.Head)
 	if err != nil {
@@ -349,15 +359,19 @@ func (t *Tailer) movepast(ctx context.Context, gap Gap) (bool, error) {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	consecutive := t.afterGap
+	t.afterGap = true
 	t.checkpoint = to
-	t.delay = 0
+	if !consecutive {
+		t.delay = 0
+	}
 	t.stats.Seq = to.Seq
 	t.observeHead(gap.Head)
 	if t.stats.Gaps == nil {
 		t.stats.Gaps = make(map[GapKind]int64)
 	}
 	t.stats.Gaps[gap.Kind]++
-	return true, nil
+	return !consecutive, nil
 }
 
 // readHead asks the journal for its head: a checkpoint at or above the head
@@ -400,7 +414,8 @@ func (t *Tailer) fail(err error) error {
 }
 
 // nextDelay returns the wait before the next read and doubles it for the one
-// after, from Poll up to IdlePoll. Rows applied or a gap moved past reset it.
+// after, from Poll up to IdlePoll. Rows applied, or a gap moved past that did
+// not follow another gap, reset it.
 func (t *Tailer) nextDelay() time.Duration {
 	t.mu.Lock()
 	defer t.mu.Unlock()

@@ -620,3 +620,63 @@ func TestRunStopsOnCancel(t *testing.T) {
 		t.Fatal("Run did not stop after cancel")
 	}
 }
+
+// flappingJournal renders every row's TS differently on alternate reads, as
+// replicas with different normalization behind one address would. Every
+// verification read then sees a different fingerprint and reports a reset.
+type flappingJournal struct {
+	mu     sync.Mutex
+	rows   []journalops.Row
+	reads  int
+	cap    int
+	cancel context.CancelFunc
+}
+
+func (f *flappingJournal) ReadEventsJournalPage(_ context.Context, since int64, limit int) (journalops.Page, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reads++
+	if f.reads >= f.cap {
+		// A hot loop never sleeps, so the clock never stops it; this does.
+		f.cancel()
+	}
+	head := f.rows[len(f.rows)-1].Seq
+	var out []journalops.Row
+	for _, r := range f.rows {
+		if r.Seq > since && (limit == 0 || len(out) < limit) {
+			r.TS = fmt.Sprintf("%s-%d", r.TS, f.reads%2)
+			out = append(out, r)
+		}
+	}
+	return journalops.Page{Rows: out, Head: head}, nil
+}
+
+func TestRunBacksOffAcrossConsecutiveGaps(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	src := &flappingJournal{
+		rows:   []journalops.Row{{Seq: 1, IssueID: "a", TS: "t1"}, {Seq: 2, IssueID: "b", TS: "t2"}},
+		cap:    1000,
+		cancel: cancel,
+	}
+	r := &recorder{}
+	clock := &scriptedSleep{after: 5, cancel: cancel}
+	tl := &Tailer{Source: src, Apply: r.apply, OnGap: r.onGap, Sleep: clock.sleep}
+
+	_ = tl.Run(ctx)
+	if src.reads >= src.cap {
+		t.Fatalf("Run read %d times with %d sleeps: consecutive gaps re-read at once without backing off", src.reads, len(clock.delays))
+	}
+	if len(clock.delays) != clock.after {
+		t.Fatalf("sleeps = %v, want %d", clock.delays, clock.after)
+	}
+	// At most one immediate re-read per sleep: a gap re-reads at once only
+	// when the read before it was not a gap too.
+	if gaps := len(r.gapList()); gaps == 0 || gaps > len(clock.delays)+1 {
+		t.Fatalf("OnGap ran %d times across %d sleeps, want between 1 and %d", gaps, len(clock.delays), len(clock.delays)+1)
+	}
+	// The backoff keeps growing across the run of gaps instead of restarting.
+	if last := clock.delays[len(clock.delays)-1]; last != DefaultIdlePoll {
+		t.Fatalf("delays = %v, want the backoff to reach %v", clock.delays, DefaultIdlePoll)
+	}
+}
