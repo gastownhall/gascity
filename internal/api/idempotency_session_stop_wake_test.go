@@ -117,12 +117,13 @@ func TestSessionStopFailureReleasesKey(t *testing.T) {
 // concurrent same-key stop observes the in-flight claim.
 type blockingInterruptProvider struct {
 	*runtime.Fake
-	entered chan struct{}
-	release chan struct{}
+	enterOnce sync.Once
+	entered   chan struct{}
+	release   chan struct{}
 }
 
 func (p *blockingInterruptProvider) Interrupt(name string) error {
-	close(p.entered)
+	p.enterOnce.Do(func() { close(p.entered) })
 	<-p.release
 	return p.Fake.Interrupt(name)
 }
@@ -185,11 +186,11 @@ func TestSessionWakeIdempotentReplay(t *testing.T) {
 	if first.Code != http.StatusOK {
 		t.Fatalf("first wake: status = %d, want 200; body = %s", first.Code, first.Body.String())
 	}
-	b, err := fs.cityBeadStore.Get(info.ID)
-	if err != nil {
-		t.Fatalf("Get: %v", err)
+	// Consume the recorded wake as the controller would, so a replay that
+	// records a second wake is visible on the bead.
+	if err := fs.cityBeadStore.SetMetadataBatch(info.ID, session.ClearWakeRequestPatch()); err != nil {
+		t.Fatalf("clearing wake request: %v", err)
 	}
-	firstWake := b.Metadata["wake_request"]
 
 	replay := postSessionAction(t, h, url, "wake-1", "")
 	if replay.Code != http.StatusOK {
@@ -201,12 +202,12 @@ func TestSessionWakeIdempotentReplay(t *testing.T) {
 	if got := countSessionEnqueues(fs, info.ID); got != 1 {
 		t.Fatalf("session enqueues = %d, want 1 (replay recorded a second wake)", got)
 	}
-	b, err = fs.cityBeadStore.Get(info.ID)
+	b, err := fs.cityBeadStore.Get(info.ID)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if b.Metadata["wake_request"] != firstWake {
-		t.Fatalf("wake_request = %q, want unchanged %q after replay", b.Metadata["wake_request"], firstWake)
+	if b.Metadata["wake_request"] != "" || b.Metadata["wake_requested_at"] != "" {
+		t.Fatalf("wake_request = %q wake_requested_at = %q after replay, want both empty (replay recorded a second wake)", b.Metadata["wake_request"], b.Metadata["wake_requested_at"])
 	}
 }
 
