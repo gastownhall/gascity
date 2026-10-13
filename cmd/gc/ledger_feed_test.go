@@ -111,6 +111,9 @@ type journalingStore struct {
 	readsAtFirst atomic.Int64
 	// afterCreate runs after a create is journaled, before it returns.
 	afterCreate func(id string)
+	// afterWrite runs after an update, metadata write or close is
+	// journaled, before it returns.
+	afterWrite func(id string)
 	// getHook runs before each Get.
 	getHook func(id string) error
 }
@@ -167,14 +170,22 @@ func (s *journalingStore) Update(id string, opts beads.UpdateOpts) error {
 	err := s.Store.Update(id, opts)
 	if err == nil {
 		s.j.add("update", id, "gascity", s.image(id))
+		s.wrote(id)
 	}
 	return err
+}
+
+func (s *journalingStore) wrote(id string) {
+	if s.afterWrite != nil {
+		s.afterWrite(id)
+	}
 }
 
 func (s *journalingStore) Close(id string) error {
 	err := s.Store.Close(id)
 	if err == nil {
 		s.j.add(journalOpClose, id, "gascity", s.image(id))
+		s.wrote(id)
 	}
 	return err
 }
@@ -183,6 +194,7 @@ func (s *journalingStore) SetMetadata(id, key, value string) error {
 	err := s.Store.SetMetadata(id, key, value)
 	if err == nil {
 		s.j.add("update", id, "gascity", s.image(id))
+		s.wrote(id)
 	}
 	return err
 }
@@ -426,9 +438,71 @@ func TestLedgerFeedEchoesOfOwnWritesWakeNothing(t *testing.T) {
 	}
 }
 
+// The cache's own close, evicted by a re-scan before the feed reads its
+// journal row, is not announced again, woken on, or deferred to the sweep.
+func TestLedgerFeedEchoOfAnEvictedOwnCloseIsSilent(t *testing.T) {
+	h := newFeedHarness(t, newJournalingStore())
+	h.step()
+	b, err := h.cache.Create(beads.Bead{Title: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.cache.Close(b.ID); err != nil {
+		t.Fatal(err)
+	}
+	h.cache.ReconcileNowForTest()
+	h.pokes()
+	before := len(h.ep.Events)
+	h.step()
+	if poke, dispatch := h.pokes(); poke+dispatch != 0 || len(h.ep.Events) != before || len(h.deferred) != 0 {
+		t.Fatalf("the echo of an evicted own close recorded %v, woke %d/%d and deferred %v; want nothing",
+			h.ep.Events[before:], poke, dispatch, h.deferred)
+	}
+}
+
+// A feed step that lands between a cache write's backing commit and its
+// absorb yields to the write: no event, no wake, and a retry once the write
+// returned finds nothing new (ga-yoix1).
+func TestLedgerFeedYieldsToAnInFlightOwnWrite(t *testing.T) {
+	store := newJournalingStore()
+	h := newFeedHarness(t, store)
+	b, err := h.cache.Create(beads.Bead{Title: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.step()
+	h.pokes()
+	before := len(h.ep.Events)
+	store.afterWrite = func(string) { h.step() }
+	if err := h.cache.SetMetadata(b.ID, "k", "v"); err != nil {
+		t.Fatal(err)
+	}
+	title := "renamed"
+	if err := h.cache.Update(b.ID, beads.UpdateOpts{Title: &title}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.cache.Close(b.ID); err != nil {
+		t.Fatal(err)
+	}
+	store.afterWrite = nil
+	if st := h.feed.status(time.Now()); st.Fenced == 0 || st.PendingRetries == 0 {
+		t.Fatalf("status fenced=%d pending=%d, want the in-flight refreshes fenced and kept for a retry", st.Fenced, st.PendingRetries)
+	}
+	h.feed.retryPending()
+	h.step()
+	if poke, dispatch := h.pokes(); poke+dispatch != 0 {
+		t.Fatalf("own writes raced by the feed woke %d/%d, want nothing", poke, dispatch)
+	}
+	if got := h.ep.Events[before:]; h.reconcileEvents() != 0 {
+		t.Fatalf("own writes raced by the feed recorded %v, want no cache-reconcile event", got)
+	}
+	if st := h.feed.status(time.Now()); st.PendingRetries != 0 {
+		t.Fatalf("pending retries = %d after the retry, want 0", st.PendingRetries)
+	}
+}
+
 // A refresh that lands between the backing create and the cache's absorb
-// records at most one created event and wakes once, and the feed is quiet
-// afterwards.
+// yields to the create: one created event, the create's own, and no wake.
 func TestLedgerFeedRaceWithALocalCreateRecordsOneCreate(t *testing.T) {
 	store := newJournalingStore()
 	h := newFeedHarness(t, store)
@@ -447,9 +521,9 @@ func TestLedgerFeedRaceWithALocalCreateRecordsOneCreate(t *testing.T) {
 		ids = append(ids, b.ID)
 	}
 	store.afterCreate = nil
-	poke, _ := h.pokes()
-	if poke > len(ids) {
-		t.Fatalf("raced creates poked %d times, want at most one per create", poke)
+	h.feed.retryPending()
+	if poke, _ := h.pokes(); poke != 0 || h.reconcileEvents() != 0 {
+		t.Fatalf("raced creates poked %d times and recorded %d cache-reconcile events, want none", poke, h.reconcileEvents())
 	}
 	for _, id := range ids {
 		created := 0
@@ -556,6 +630,137 @@ func TestLedgerFeedAnnouncesANeverHeldCloseOnce(t *testing.T) {
 	if got := h.eventsFor(old.ID); len(got) != 0 {
 		t.Fatalf("update of a long-closed row recorded %v, want nothing", got)
 	}
+}
+
+// closedOutOfBand creates and closes a row behind the cache's back, both
+// journaled.
+func closedOutOfBand(t *testing.T, store *journalingStore) string {
+	t.Helper()
+	row, err := store.Create(beads.Bead{Title: "agent work"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(row.ID); err != nil {
+		t.Fatal(err)
+	}
+	return row.ID
+}
+
+// countFeedEvents counts the events whose type/actor is want.
+func countFeedEvents(got []string, want string) int {
+	n := 0
+	for _, e := range got {
+		if e == want {
+			n++
+		}
+	}
+	return n
+}
+
+// A never-held close whose refresh the feed had to drop (a read error, a
+// fence, a cache that is not live) is handed to the autoclose sweep at once
+// and kept for a retry, which announces it once (critic A3): the re-scan
+// lists active rows only and would never see it.
+func TestLedgerFeedKeepsADroppedNeverHeldClose(t *testing.T) {
+	closedEvent := events.BeadClosed + "/" + cacheReconcileActor
+	t.Run("refresh_error", func(t *testing.T) {
+		h := newFeedHarness(t, newJournalingStore())
+		h.step()
+		id := closedOutOfBand(t, h.store)
+		var fails atomic.Int32
+		fails.Store(1)
+		h.store.getHook = func(got string) error {
+			if got == id && fails.Add(-1) >= 0 {
+				return errors.New("transient read failure")
+			}
+			return nil
+		}
+		h.step()
+		if !slices.Contains(h.deferred, id) || len(h.eventsFor(id)) != 0 {
+			t.Fatalf("after the dropped refresh: deferred %v events %v, want the id deferred and no event yet", h.deferred, h.eventsFor(id))
+		}
+		if st := h.feed.status(time.Now()); st.PendingRetries != 1 || st.RefreshErrors != 1 {
+			t.Fatalf("status pending=%d errors=%d, want one row kept for a retry", st.PendingRetries, st.RefreshErrors)
+		}
+		h.cache.ReconcileNowForTest() // the requested re-scan: active rows only
+		h.feed.retryPending()
+		if got := h.eventsFor(id); countFeedEvents(got, closedEvent) != 1 {
+			t.Fatalf("events = %v, want one %s from the retry", got, closedEvent)
+		}
+		if st := h.feed.status(time.Now()); st.PendingRetries != 0 || st.UnheldCloses != 1 {
+			t.Fatalf("status pending=%d unheld=%d, want the retry done and the close counted", st.PendingRetries, st.UnheldCloses)
+		}
+	})
+	t.Run("fenced", func(t *testing.T) {
+		store := newJournalingStore()
+		h := newFeedHarness(t, store)
+		h.step()
+		id := closedOutOfBand(t, store)
+		// A local create in flight fences every yielding refresh.
+		store.afterCreate = func(string) { h.step() }
+		if _, err := h.cache.Create(beads.Bead{Title: "local"}); err != nil {
+			t.Fatal(err)
+		}
+		store.afterCreate = nil
+		if !slices.Contains(h.deferred, id) || len(h.eventsFor(id)) != 0 {
+			t.Fatalf("after the fenced refresh: deferred %v events %v, want the id deferred and no event yet", h.deferred, h.eventsFor(id))
+		}
+		h.feed.retryPending()
+		if got := h.eventsFor(id); countFeedEvents(got, closedEvent) != 1 {
+			t.Fatalf("events = %v, want one %s from the retry", got, closedEvent)
+		}
+	})
+	t.Run("cache_unavailable", func(t *testing.T) {
+		store := newJournalingStore()
+		var deferred []string
+		set := newLedgerFeedSet(t.TempDir(), ledgerFeedHooks{deferClose: func(id string) { deferred = append(deferred, id) }})
+		req := &ledgerFeedRequest{set: set, scope: ledgerFeedCityScope, mode: config.BeadsLedgerFeedAuto}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		ep := events.NewFake()
+		att := attachLedgerFeed(ctx, req, store, true)
+		cache := beads.NewCachingStore(store, att.observe(cacheChangeRecorder(ep)))
+		att.bind(ctx, set, cache)
+		f := att.entry.feed
+		id := closedOutOfBand(t, store)
+		if _, err := f.tailer.Step(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(deferred, []string{id}) || len(beadEventsFor(ep, id)) != 0 {
+			t.Fatalf("cold cache: deferred %v events %v, want the id deferred and no event yet", deferred, beadEventsFor(ep, id))
+		}
+		if err := cache.Prime(ctx); err != nil {
+			t.Fatal(err)
+		}
+		f.retryPending()
+		if got := beadEventsFor(ep, id); countFeedEvents(got, closedEvent) != 1 {
+			t.Fatalf("events = %v, want one %s from the retry", got, closedEvent)
+		}
+	})
+	t.Run("gives_up", func(t *testing.T) {
+		h := newFeedHarness(t, newJournalingStore())
+		h.step()
+		id := closedOutOfBand(t, h.store)
+		h.store.getHook = func(got string) error {
+			if got == id {
+				return errors.New("unreadable")
+			}
+			return nil
+		}
+		h.step()
+		requests := h.cache.Stats().ReconcileRequests
+		for range ledgerFeedRetryLimit {
+			h.feed.retryPending()
+		}
+		st := h.feed.status(time.Now())
+		if st.PendingRetries != 0 || st.RetryGiveUps != 1 || h.cache.Stats().ReconcileRequests <= requests {
+			t.Fatalf("status pending=%d give-ups=%d requests %d->%d, want the row given up to a re-scan",
+				st.PendingRetries, st.RetryGiveUps, requests, h.cache.Stats().ReconcileRequests)
+		}
+		if !slices.Contains(h.deferred, id) {
+			t.Fatalf("deferred = %v, want the given-up close with the sweep", h.deferred)
+		}
+	})
 }
 
 // A truncation gap requests one re-scan, is counted, and the feed continues
@@ -1032,8 +1237,8 @@ func waitForLedgerFeed(t *testing.T, timeout time.Duration, cond func() bool, wh
 // TestLedgerFeedOverEmbeddedDolt tails a real native store with the journal
 // on: a Create and then a Close made through the backing, behind the cache,
 // reach the cache and the legacy wake within 2s, long before any re-scan
-// (the first is at least 30s out). Writes through the cache wake at most
-// once each, in the race between their commit and the cache's absorb.
+// (the first is at least 30s out). Writes through the cache neither notify
+// as cache-reconcile nor wake.
 func TestLedgerFeedOverEmbeddedDolt(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("BD_EVENTS_JOURNAL", "")
@@ -1087,22 +1292,42 @@ func TestLedgerFeedOverEmbeddedDolt(t *testing.T) {
 		}
 	}
 
-	local, err := cache.Create(beads.Bead{Title: "local"})
-	if err != nil {
-		t.Fatalf("cache Create: %v", err)
-	}
-	if err := cache.Close(local.ID); err != nil {
-		t.Fatalf("cache Close: %v", err)
-	}
-	// A refresh that lands between a write's commit and the cache's absorb
-	// can wake once for that write (the bounded race); nothing more.
+	// A burst of writes through the cache: the feed reads every one back,
+	// racing their absorbs, and yields to each in flight, so none notifies
+	// as cache-reconcile or wakes the reconciler (ga-yoix1).
 	feed := entries[0].feed
-	waitForLedgerFeed(t, 5*time.Second, func() bool {
+	head0 := feed.status(time.Now()).Head
+	var own []string
+	for i := range 5 {
+		b, err := cache.Create(beads.Bead{Title: fmt.Sprintf("local %d", i)})
+		if err != nil {
+			t.Fatalf("cache Create: %v", err)
+		}
+		own = append(own, b.ID)
+		if err := cache.SetMetadata(b.ID, "k", "v"); err != nil {
+			t.Fatalf("cache SetMetadata: %v", err)
+		}
+		status := "in_progress"
+		if err := cache.Update(b.ID, beads.UpdateOpts{Status: &status}); err != nil {
+			t.Fatalf("cache Update: %v", err)
+		}
+		if err := cache.Close(b.ID); err != nil {
+			t.Fatalf("cache Close: %v", err)
+		}
+	}
+	waitForLedgerFeed(t, 20*time.Second, func() bool {
 		st := feed.status(time.Now())
-		return st.Head >= 2 && st.Seq == st.Head
+		return st.Head >= head0+20 && st.Seq == st.Head && st.PendingRetries == 0
 	}, "the feed to read back the cache's own writes")
-	if n := drain(); n > 2 {
-		t.Fatalf("two writes through the cache woke the reconciler %d time(s), want at most one each", n)
+	if n := drain(); n != 0 {
+		t.Fatalf("20 writes through the cache woke the reconciler %d time(s), want none", n)
+	}
+	for _, id := range own {
+		for _, e := range lockedBeadEventsFor(t, ep, id) {
+			if strings.HasSuffix(e, "/"+cacheReconcileActor) {
+				t.Fatalf("%s: events %v, want no cache-reconcile echo of the cache's own writes", id, lockedBeadEventsFor(t, ep, id))
+			}
+		}
 	}
 
 	row, err := native.Create(beads.Bead{Title: "out of band"})
