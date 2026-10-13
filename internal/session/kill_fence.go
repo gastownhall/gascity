@@ -260,7 +260,6 @@ func (m *Manager) KillFenced(ctx context.Context, by Actor, id string, kill func
 	if err != nil {
 		return err
 	}
-	runtimeGone := !killRuntimeLive(State(b.Metadata["state"])) && !m.sp.IsRunning(sessName)
 	lease, release, err := m.leaseRuntime(ctx, by, id, sessName, operatorLeaseWait)
 	if err != nil && !errors.Is(err, ErrSessionStarting) && !errors.Is(err, ErrRuntimeLeaseBusy) && !by.City.IsZero() {
 		// As leaseForStop: a lease failure other than busy stops under the
@@ -278,6 +277,12 @@ func (m *Manager) KillFenced(ctx context.Context, by Actor, id string, kill func
 	if lease != nil {
 		by.Lease = lease
 	}
+	// Decided under the lease: a start that finished while the kill waited
+	// for it has left a live runtime, which takes the fenced path.
+	if b, _, err = m.sessionBead(id); err != nil {
+		return err
+	}
+	runtimeGone := !killRuntimeLive(State(b.Metadata["state"])) && !m.sp.IsRunning(sessName)
 	if runtimeGone {
 		killErr := kill(ctx, by)
 		if NamedSessionIdentityInfo(m.infoFromBead(b)) != "" {
