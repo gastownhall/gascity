@@ -61,6 +61,12 @@ func TestZombieClassifiesTheRowsOwnDeadRuntime(t *testing.T) {
 			if s.Facts.Classified == nil || s.Facts.Classified.Key != k.it.Key || s.Facts.Classified.Token != c.classed {
 				t.Fatalf("classified %+v, want %s", s.Facts.Classified, c.classed)
 			}
+			if s.Facts.Noted != nil {
+				// A dead runtime is present: only an absence on every hop is
+				// noted gone (v5.10g), so its Running and ProcessAlive No stay
+				// the inventory's, read through a present name.
+				t.Fatalf("noted %+v over a present dead runtime, want nothing noted", s.Facts.Noted)
+			}
 			if k.meta("sleep_reason") != "" {
 				t.Fatalf("sleep_reason %q, want nothing written", k.meta("sleep_reason"))
 			}
@@ -371,33 +377,23 @@ func TestZombieCrashNamesAnUnresolvedRowsTemplate(t *testing.T) {
 	}
 }
 
-// Kills A12 proposed again every pass over a runtime that is already gone
-// (mc-98agx): the census, not yet refreshed, still reads the row's runtime
-// dead, so A12 decides; the effect's fresh read finds nothing under the
-// name. It records the pair as the decision's token, so the next pass does
-// not decide A12 again on the same stale read (each A12 takes and drops the
-// row's lease record); a runtime still listed but alive under a new token
-// records that token, as before.
-func TestZombieOverAGoneRuntimeIsNotProposedAgain(t *testing.T) {
-	c := newHealCase(t, livenessDead, desireSleep, "state", "asleep", "sleep_reason", "runtime-missing")
-	id := runtimeIdentity{Known: true, SessionID: c.k.ID, Epoch: "3", Token: "tok-3"}
-	c.w.Observed = map[rowKey]rowObservation{c.k: {Liveness: livenessDead, Identity: id}}
-	if it := c.decide(); it.Kind != intentZombie {
-		t.Fatalf("decideRow = (%q, %q), want A12 on the stale dead read", it.Kind, it.Reason)
+// TestZombieOverAGoneRuntimeNotesItGone (mc-98agx, v5.10g): A12 decided on
+// an inventory that still lists the dead runtime finds it gone on every hop;
+// the settlement notes the name gone at the read's issue time, so the next
+// pass reads the row gone (unlistedSincePass) and A12, which wants a dead
+// row, is not proposed again. A runtime gone records no pair. Kills: an
+// absent read left unnoted.
+func TestZombieOverAGoneRuntimeNotesItGone(t *testing.T) {
+	k, _ := zombieKit(t, true, "gc-1", "tok", "panic: boom")
+	k.mutate(nil)
+	s := k.runKind()
+	if n := s.Facts.Noted; n == nil || !n.Gone || n.Name != "s-gc-1" || n.At.IsZero() || crashFacts(s) != 0 || len(k.sp.kills) != 0 {
+		t.Fatalf("settlement %+v (noted %+v), want the name noted gone, nothing else", s, s.Facts.Noted)
 	}
-	step := zombieStep(txView{It: intent{Key: c.k}, World: c.w, Row: c.w.Census.Rows[c.k].Info, RT: &txRuntime{Class: rtAbsent}, Now: gatherNow}, deadPeek{}, nil)
-	got := step.Facts.Classified
-	if !step.Done || got == nil || !got.classifies(id) || len(step.Write) != 0 {
-		t.Fatalf("step %+v, want Done with the decision's pair classified and nothing written", step)
-	}
-	c.w.Classified = map[rowKey]classifiedRuntime{c.k: *got}
+	c := newHealCase(t, livenessGone, desireSleep, "state", "asleep", "sleep_reason", "runtime-missing")
+	c.w.Observed = map[rowKey]rowObservation{c.k: {Liveness: livenessGone}}
 	if it := c.decide(); it.Kind == intentZombie {
-		t.Fatalf("decideRow = (%q, %q) again on the same stale read, want A12 settled", it.Kind, it.Reason)
-	}
-	fresh := runtimeIdentity{Known: true, SessionID: c.k.ID, Epoch: "4", Token: "tok-4"}
-	alive := zombieStep(txView{It: intent{Key: c.k}, World: c.w, Row: c.w.Census.Rows[c.k].Info, RT: &txRuntime{Class: rtAlive, Same: true, Identity: fresh}, Now: gatherNow}, deadPeek{}, nil)
-	if alive.Facts.Classified == nil || !alive.Facts.Classified.classifies(fresh) {
-		t.Fatalf("alive step %+v, want the fresh runtime's token recorded", alive)
+		t.Fatalf("decideRow = (%q, %q) over a row read gone, want no A12", it.Kind, it.Reason)
 	}
 }
 

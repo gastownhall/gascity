@@ -484,6 +484,20 @@ func TestDeadScreenUnderADrain(t *testing.T) {
 	if patch, ok := deadScreen(v, "Usage limit reached"); ok {
 		t.Fatalf("deadScreen = %v, want no quarantine under a drain", patch)
 	}
+	// An operator's drain (`gc runtime drain`) the agent acked at the
+	// row's generation is a requested drain too: no quarantine (#7772
+	// review's H4).
+	k, _, _ = deadKit(t, true, "gc-1", "tok", "", append([]string{"state", "awake", "last_woke_at", gatherNow.Add(-5 * time.Second).Format(time.RFC3339), session.OperatorDrainKey, "3"}, ackMeta("3")...)...)
+	v = txView{It: k.it, Row: k.p.World.Census.Rows[k.it.Key].Info, World: k.p.World, Now: gatherNow}
+	if patch, ok := deadScreen(v, "Usage limit reached"); ok {
+		t.Fatalf("deadScreen = %v, want no quarantine under an operator's acked drain", patch)
+	}
+	// A bare ack, the agent's own, quarantines (§12.2 row 66).
+	k, _, _ = deadKit(t, true, "gc-1", "tok", "", append([]string{"state", "awake", "last_woke_at", gatherNow.Add(-5 * time.Second).Format(time.RFC3339)}, ackMeta("3")...)...)
+	v = txView{It: k.it, Row: k.p.World.Census.Rows[k.it.Key].Info, World: k.p.World, Now: gatherNow}
+	if _, ok := deadScreen(v, "Usage limit reached"); !ok {
+		t.Fatal("a bare ack: want the crash candidate quarantined")
+	}
 	// E05: a drain requested since the pass, on the fresh row alone.
 	k, _, _ = deadKit(t, true, "gc-1", "tok", "", "state", "awake", "last_woke_at", gatherNow.Add(-5*time.Second).Format(time.RFC3339))
 	b, err := k.backing.Get(k.it.Key.ID)

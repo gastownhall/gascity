@@ -517,6 +517,10 @@ func newSim(t *testing.T, seed uint64, o simOpts) *sim {
 		return res
 	}
 	s.p.effects = s.x
+	// The planner notes effects' fresh observations in the lane's cache, as
+	// production wires it (plannerRuntime.bindHost): a start's alive read
+	// and any effect's absent one (CONTRACT O4, v5.10g).
+	s.p.observations = func() *ObservationCache { return s.lane.cache }
 	if simPristineSpecs == nil {
 		simPristineSpecs = effectSpecs
 		t.Cleanup(func() { simPristineSpecs = nil })

@@ -1489,3 +1489,90 @@ func TestSimR46AckedRowOverATokenlessCorpseFinalizes(t *testing.T) {
 		})
 	}
 }
+
+// zombieAdmissions counts the zombie effects s's schedule admitted.
+func (s *sim) zombieAdmissions() int {
+	n := 0
+	for _, l := range s.schedule {
+		n += strings.Count(l, "zombie:gc-1")
+	}
+	return n
+}
+
+// Scenario mc-98agx / mc-nxpo8 (CONTRACT v5.10g): the inventory lists a
+// quarantined seat's zombie; the runtime then vanishes before the next
+// inventory. A12, decided on the stale dead read, runs once: its fresh read
+// finds the name gone on every hop, the settlement notes the absence, and
+// every later pass before the next inventory reads the row gone, so A12 is
+// not proposed again (before, it ran every pass, taking and dropping the
+// row's lease record). Kills: an absent read left unnoted, and a sim whose
+// planner drops notes.
+func TestSimZombieOverAGoneRuntimeRunsOnce(t *testing.T) {
+	s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-gc-1", "last_woke_at", rowAt(-time.Hour),
+		"quarantined_until", rowAt(time.Hour), "sleep_reason", "quarantine"))
+	s.sp.mu.Lock()
+	s.sp.rts["s-gc-1"].zombie = true
+	s.sp.touch("s-gc-1")
+	s.sp.mu.Unlock()
+	s.inventory() // lists the zombie: the census reads gc-1 dead
+	s.sp.mu.Lock()
+	s.sp.drop("s-gc-1")
+	s.sp.mu.Unlock()
+	for range 6 {
+		s.pass()
+		for len(s.parked) > 0 {
+			s.release(0)
+		}
+	}
+	if n := s.zombieAdmissions(); n != 1 {
+		t.Errorf("A12 admitted %d times before the next inventory, want once; schedule:\n%s", n, strings.Join(s.schedule, "\n"))
+	}
+	s.noViolations(t)
+}
+
+// Scenario v5.10g, the note's window: an effect's fresh read finds a wanted
+// seat's runtime gone and notes it, and a runtime then comes back under the
+// row's own identity (a start without the controller's PreWake, `gc session
+// attach`'s shape) before the next inventory. The next pass reads the row
+// gone and proposes the start, whose own fresh read finds the runtime alive
+// and the row's: it adopts it, launching nothing and stopping nothing.
+// Kills: a start that trusts the note over its own fresh read.
+func TestSimRuntimeBackAfterAnAbsenceNoteIsAdopted(t *testing.T) {
+	s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-1", "session_key", "k-1"), gc1Work())
+	s.settle()
+	m := s.gc1()
+	s.sp.mu.Lock()
+	s.sp.drop("s-gc-1")
+	s.sp.mu.Unlock()
+	s.advance(time.Second) // the read comes after the inventory pass started
+	now := s.clk.Now()
+	s.p.applyFacts(effectFacts{Noted: &notedRuntime{Name: "s-gc-1", At: now, Gone: true}}, now) // an effect's absent read
+	s.sp.mu.Lock()
+	s.sp.put("s-gc-1", "gc-1", m["generation"], m["instance_token"])
+	back := s.sp.rts["s-gc-1"].object
+	starts, kills := len(s.sp.starts), len(s.sp.kills)
+	s.sp.mu.Unlock()
+	if got := s.liveness("gc-1"); got != livenessGone {
+		t.Fatalf("liveness %v after the note, want gone (the next inventory has not run)", got)
+	}
+	s.advance(time.Second)
+	s.pass()
+	for len(s.parked) > 0 {
+		s.release(0)
+	}
+	s.sp.mu.Lock()
+	rt := s.sp.rts["s-gc-1"]
+	gotStarts, gotKills := len(s.sp.starts), len(s.sp.kills)
+	s.sp.mu.Unlock()
+	if rt == nil || rt.object != back || gotStarts != starts || gotKills != kills {
+		t.Errorf("runtime %+v (back as object %d), starts %d -> %d, kills %d -> %d; want the runtime adopted, nothing launched or stopped; schedule:\n%s",
+			rt, back, starts, gotStarts, kills, gotKills, strings.Join(s.schedule, "\n"))
+	}
+	if !slices.ContainsFunc(s.schedule, func(l string) bool { return strings.Contains(l, "admitted [start:gc-1") }) {
+		t.Errorf("no start admitted on the gone read; schedule:\n%s", strings.Join(s.schedule, "\n"))
+	}
+	if b := s.gc1(); b["instance_token"] != m["instance_token"] {
+		t.Errorf("row token %q, want %q kept", b["instance_token"], m["instance_token"])
+	}
+	s.noViolations(t)
+}

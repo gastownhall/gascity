@@ -725,7 +725,8 @@ func (s *sim) observed() (*sessionCensus, map[rowKey]rowObservation) {
 }
 
 // checkDead is I23 (I-dead): where the latest fresh inventory pass listed a
-// row's runtime after its last change (by the provider's version), the census and a fresh read agree on
+// row's runtime after its last change (by the provider's version), and no
+// effect's note since stands over that pass's facts, the census and a fresh read agree on
 // a corpse or a zombie: the census reads it dead (or unknown, its identity
 // unread), never alive, gone or occupied; and reads nothing else dead, an
 // agent whose probe errored included.
@@ -739,12 +740,20 @@ func (s *sim) checkDead() {
 		return
 	}
 	listed := pass.listedOn()
+	snap := s.lane.cache.Snapshot()
 	s.sp.mu.Lock()
 	defer s.sp.mu.Unlock()
 	for _, row := range c.Canonical() {
 		name := row.Info.SessionName
 		rt := s.sp.rts[name]
 		if _, ok := listed[name]; !ok || rt == nil || rt.id != row.Key.ID || s.sp.changed[name] > s.listed {
+			continue
+		}
+		if f := snap.ByName[name].ProcessAlive; f.Source == SourceProbe && !f.ObservedAt.Before(pass.StartedAt) {
+			// An effect's note at or after the pass's start (O4, v5.10g)
+			// that the pass did not override (its merged listing failed, or
+			// the sim's clock tied them): the census reads the note's
+			// runtime, not the pass's.
 			continue
 		}
 		fresh := runtimeLiveness(rt)

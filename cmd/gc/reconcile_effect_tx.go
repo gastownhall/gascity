@@ -742,6 +742,11 @@ type tx struct {
 	facts       effectFacts
 	pass        any // the concluded step's Pass, to its section's Call
 	view        txView
+	// absent is the issue time of the latest fresh read, when it found
+	// nothing under the name on every hop (rtAbsent); zero once a later read
+	// finds anything or a Call starts a runtime. The settlement notes it
+	// (CONTRACT v5.10g: effects publish a fresh absence).
+	absent time.Time
 }
 
 // run runs the sections, each under the row's mutation lock.
@@ -790,7 +795,7 @@ func (t *tx) run(ctx context.Context, sections []section) settlement {
 		}
 		switch sec.callKind {
 		case callStart:
-			t.started = true
+			t.started, t.absent = true, time.Time{}
 		case callStop:
 			t.started, t.stopped = false, true // a stopped runtime writes nothing more
 		}
@@ -805,8 +810,21 @@ func (t *tx) run(ctx context.Context, sections []section) settlement {
 			break
 		}
 	}
+	t.noteAbsence()
 	s.Facts = t.facts
 	return s
+}
+
+// noteAbsence publishes the latest fresh read's absence (CONTRACT v5.10g,
+// O4 amended): the planner notes the name gone at the read's issue time,
+// so the next pass reads it gone (unlistedSincePass) rather than deciding
+// again on an inventory that still lists it. A newer alive note (a start's
+// commit) wins; a later inventory pass overrides either.
+func (t *tx) noteAbsence() {
+	if t.absent.IsZero() || t.name == "" || t.facts.Noted != nil && !t.facts.Noted.At.Before(t.absent) {
+		return
+	}
+	t.facts.Noted = &notedRuntime{Name: t.name, At: t.absent, Gone: true}
 }
 
 // section runs sec's attempts; end ends the effect with the settlement.
@@ -948,6 +966,10 @@ func (t *tx) read(ctx context.Context, sec section) (settlement, bool) {
 			return refused(cause), false
 		}
 		t.view.RT = rt
+		t.absent = time.Time{}
+		if rt.Class == rtAbsent {
+			t.absent = t.view.Now
+		}
 	}
 	if t.needs.Legs != 0 || t.needs.Idle {
 		if cause := t.readFence(ctx); cause != "" {

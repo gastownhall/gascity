@@ -120,7 +120,7 @@ func stopDecide(v txView) txStep {
 	// to another stop (a stop request's verb turns finalize on its own).
 	if fresh, _ := decideRow(&w, v.Alloc, v.It.Key); fresh.Kind != v.It.Kind || (isIdleReason(fresh.Reason) || isIdleReason(v.It.Reason)) && fresh.Reason != v.It.Reason {
 		if dormantGone(v) {
-			return txStep{Done: true, Cause: causeAlreadyGone, Facts: effectFacts{Noted: &notedRuntime{Name: strings.TrimSpace(v.Row.SessionName), At: v.Now, Gone: true}}}
+			return txStep{Done: true, Cause: causeAlreadyGone} // the transaction notes the absence (noteAbsence)
 		}
 		return txStep{Refuse: causeRedecided}
 	}
@@ -162,8 +162,9 @@ func stopDecide(v txView) txStep {
 // dormantGone reports an operator-dormant stop whose fresh read finds
 // nothing under the name: the runtime is already gone (a kill's own stop
 // finished after the pass read it alive). It settles as a no-op, with no row
-// backoff, and notes the absence, so the next pass decides the row on it
-// (CONTRACT v5.10d (a)). Any other redecided stop keeps its backoff.
+// backoff; the transaction notes the absence, as for every effect's absent
+// read, so the next pass decides the row on it (CONTRACT v5.10d (a),
+// v5.10g). Any other redecided stop keeps its backoff.
 func dormantGone(v txView) bool {
 	return v.It.Reason == decideDormantStop && v.RT != nil && v.RT.Class == rtAbsent
 }

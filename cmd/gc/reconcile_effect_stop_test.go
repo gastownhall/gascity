@@ -661,9 +661,10 @@ func TestDormantStopRedecidedOverALiveRuntimeBacksOff(t *testing.T) {
 
 // TestOnlyTheDormantStopOfAGoneRuntimeIsANoop (CONTRACT v5.10d (a),
 // scoped). Kills the already-gone no-op taken by any stop the fresh read
-// redecides: on the same killed row and the same absent runtime, the
-// operator-dormant stop settles as the no-op, and an idle stop refuses
-// redecided, keeping its backoff.
+// redecides, or over a corpse: on the same killed row and the same absent
+// runtime, the operator-dormant stop settles as the no-op, and an idle stop
+// refuses redecided, keeping its backoff; over a corpse the dormant stop
+// refuses redecided too.
 func TestOnlyTheDormantStopOfAGoneRuntimeIsANoop(t *testing.T) {
 	p, it, store, _ := admittedBeginOn(t, killedMeta, killedWoken)
 	b, err := store.Get(it.Key.ID)
@@ -672,17 +673,21 @@ func TestOnlyTheDormantStopOfAGoneRuntimeIsANoop(t *testing.T) {
 	}
 	for _, c := range []struct {
 		reason string
+		class  runtimeClass
 		want   txStep
 	}{
-		{decideDormantStop, txStep{Done: true, Cause: causeAlreadyGone}},
-		{decideIdleTimeout, txStep{Refuse: causeRedecided}},
+		{decideDormantStop, rtAbsent, txStep{Done: true, Cause: causeAlreadyGone}},
+		{decideIdleTimeout, rtAbsent, txStep{Refuse: causeRedecided}},
+		// A corpse is no runtime gone: still listed, its dead pane the
+		// recycle's or the close's to remove (the #7775 review's a4).
+		{decideDormantStop, rtCorpse, txStep{Refuse: causeRedecided}},
 	} {
 		v := txView{
 			It: intent{Key: it.Key, Kind: intentStop, Reason: c.reason, Basis: it.Basis}, World: p.World, Alloc: p.Alloc,
-			Row: sessionInfoFromBead(b), Meta: b.Metadata, RT: &txRuntime{Class: rtAbsent}, Now: gatherNow,
+			Row: sessionInfoFromBead(b), Meta: b.Metadata, RT: &txRuntime{Class: c.class}, Now: gatherNow,
 		}
 		if got := stopDecide(v); got.Done != c.want.Done || got.Cause != c.want.Cause || got.Refuse != c.want.Refuse {
-			t.Errorf("%s over an absent runtime: %+v, want %+v", c.reason, got, c.want)
+			t.Errorf("%s over runtime class %d: %+v, want %+v", c.reason, c.class, got, c.want)
 		}
 	}
 }
