@@ -64,6 +64,7 @@ func (s *Server) humaHandleConvoyList(ctx context.Context, input *ConvoyListInpu
 	if bp.isBlocking() {
 		waitForChange(ctx, s.state.EventProvider(), bp)
 	}
+	index := s.latestIndex()
 
 	cityStore := s.state.CityBeadStore()
 	if err := cacheLiveOr503(cityStore); err != nil {
@@ -112,7 +113,6 @@ func (s *Server) humaHandleConvoyList(ctx context.Context, input *ConvoyListInpu
 	beadKey := func(b beads.Bead) keysetKey { return keysetKey{CreatedAt: b.CreatedAt, ID: b.ID} }
 	sortKeysetDesc(convoys, beadKey)
 
-	index := s.latestIndex()
 	cacheAge := cacheAgeSeconds(cityStore)
 	// A truncated response always carries next_cursor — cursor-less requests
 	// previously truncated silently, making the remainder unfetchable (the
@@ -137,6 +137,7 @@ func (s *Server) humaHandleConvoyList(ctx context.Context, input *ConvoyListInpu
 
 // humaHandleConvoyGet is the Huma-typed handler for GET /v0/convoy/{id}.
 func (s *Server) humaHandleConvoyGet(_ context.Context, input *ConvoyGetInput) (*IndexOutput[convoyGetResponse], error) {
+	index := s.latestIndex()
 	id := input.ID
 
 	cityStore := s.state.CityBeadStore()
@@ -146,7 +147,6 @@ func (s *Server) humaHandleConvoyGet(_ context.Context, input *ConvoyGetInput) (
 
 	// Formula-compiled convoy (graph workflow): build the full DAG snapshot.
 	if isGraphConvoyID(s, id) {
-		index := s.latestIndex()
 		snapshot, err := s.buildWorkflowSnapshot(id, "", "", index)
 		if err != nil {
 			if errors.Is(err, errWorkflowNotFound) {
@@ -192,7 +192,7 @@ func (s *Server) humaHandleConvoyGet(_ context.Context, input *ConvoyGetInput) (
 		}
 
 		return &IndexOutput[convoyGetResponse]{
-			Index:     s.latestIndex(),
+			Index:     index,
 			CacheAgeS: cacheAgeSeconds(cityStore),
 			Body: convoyGetResponse{
 				Convoy:   &b,
@@ -207,10 +207,12 @@ func (s *Server) humaHandleConvoyGet(_ context.Context, input *ConvoyGetInput) (
 // humaHandleConvoyCreate is the Huma-typed handler for POST /v0/convoys.
 // Title required via struct tag on ConvoyCreateInput.
 func (s *Server) humaHandleConvoyCreate(_ context.Context, input *ConvoyCreateInput) (*IndexOutput[beads.Bead], error) {
+	index := s.latestIndex()
 	// Idempotency: create at most once per Idempotency-Key. Item validation,
 	// the convoy bead create, and the link loop (with its rollback) all live in
-	// the closure so a failed create releases the reservation for retry.
-	convoy, err := withIdempotency(s.idem, "/v0/convoys", input.IdempotencyKey, input.Body,
+	// the closure so a failed create releases the reservation for retry. A
+	// replay returns the index cached with the body, not the current head.
+	res, err := withIndexedIdempotency(s.idem, "/v0/convoys", input.IdempotencyKey, input.Body, index,
 		func() (beads.Bead, error) {
 			store := s.findStore(input.Body.Rig)
 			if store == nil {
@@ -257,8 +259,8 @@ func (s *Server) humaHandleConvoyCreate(_ context.Context, input *ConvoyCreateIn
 	}
 
 	return &IndexOutput[beads.Bead]{
-		Index: s.latestIndex(),
-		Body:  convoy,
+		Index: res.Index,
+		Body:  res.Body,
 	}, nil
 }
 
@@ -413,6 +415,7 @@ func rollbackConvoyMembershipRemoval(store beads.Store, convoyID string, applied
 
 // humaHandleConvoyCheck is the Huma-typed handler for GET /v0/convoy/{id}/check.
 func (s *Server) humaHandleConvoyCheck(_ context.Context, input *ConvoyCheckInput) (*IndexOutput[convoyCheckResponse], error) {
+	index := s.latestIndex()
 	id := input.ID
 
 	cityStore := s.state.CityBeadStore()
@@ -450,7 +453,7 @@ func (s *Server) humaHandleConvoyCheck(_ context.Context, input *ConvoyCheckInpu
 
 		complete := total > 0 && closed == total
 		return &IndexOutput[convoyCheckResponse]{
-			Index:     s.latestIndex(),
+			Index:     index,
 			CacheAgeS: cacheAgeSeconds(cityStore),
 			Body: convoyCheckResponse{
 				ConvoyID: id,
@@ -624,6 +627,7 @@ func storeError(err error) error {
 // humaHandleWorkflowGet is the Huma-typed handler for GET /v0/workflow/{workflow_id}.
 // Backward-compatible alias for the convoy/workflow snapshot endpoint.
 func (s *Server) humaHandleWorkflowGet(_ context.Context, input *WorkflowGetInput) (*IndexOutput[workflowSnapshotResponse], error) {
+	index := s.latestIndex()
 	workflowID := strings.TrimSpace(input.WorkflowID)
 	if workflowID == "" {
 		return nil, apierr.InvalidRequest.Msg("convoy id is required")
@@ -633,7 +637,6 @@ func (s *Server) humaHandleWorkflowGet(_ context.Context, input *WorkflowGetInpu
 	if scopeErr != "" {
 		return nil, apierr.InvalidRequest.Msg(scopeErr)
 	}
-	index := s.latestIndex()
 
 	snapshot, err := s.buildWorkflowSnapshot(workflowID, scopeKind, scopeRef, index)
 	if err != nil {

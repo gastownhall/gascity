@@ -28,6 +28,18 @@ hook that beads manages means adding its `.githooks` counterpart too —
 `TestGitHooksCoverEveryBeadsManagedHook` in `scripts/` fails otherwise. Hook
 ownership is explained in `CONTRIBUTING.md` ("Git hook ownership").
 
+The pre-push Go-change scan must consume the complete diff and fail if the
+comparison cannot be read. An early-exiting `grep -q` under `pipefail` can make
+a large diff look empty when Git receives SIGPIPE, silently skipping the suite.
+A remote tip missing from the local object store is refused first with a
+`git fetch <remote> <ref>` remedy: Git still runs the hook for a non-forced push
+over an unfetched tip and prints its own "fetch first" hint only if the hook
+passes. A forced push over an unfetched tip is refused too, until that fetch.
+The remedy names the ref because a plain `git fetch <remote>` can skip the tip
+(a single-branch clone, a URL push, a moved tag), and it strips credentials
+from a push URL. `githooks_pre_push_stdin_test.go` covers large diffs,
+unfetched remote tips, credentialed push URLs and unreadable comparisons.
+
 ## Make targets run Bazel; `-go` twins are the escape hatch
 
 `make test`, `check`, `check-all`, `check-docs`, `test-acceptance` and

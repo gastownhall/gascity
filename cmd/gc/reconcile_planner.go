@@ -468,10 +468,15 @@ func (p *planner) applyFacts(f effectFacts, at time.Time) {
 	}
 	if n := f.Noted; n != nil && p.observations != nil {
 		if cache := p.observations(); cache != nil {
-			// Listed, running and the agent alive, at the read's issue time,
-			// so a later inventory pass overrides it either way (v5 O4).
+			// Listed, running and the agent alive (or none of them, for a
+			// runtime gone), at the read's issue time, so a later inventory
+			// pass overrides it either way (v5 O4).
+			v := ObsYes
+			if n.Gone {
+				v = ObsNo
+			}
 			for _, kind := range [...]FactKind{FactListed, FactRunning, FactProcessAlive} {
-				cache.Note(n.Name, kind, ObsYes, n.At, SourceProbe, "")
+				cache.Note(n.Name, kind, v, n.At, SourceProbe, "")
 			}
 		}
 	}

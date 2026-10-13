@@ -1350,3 +1350,94 @@ func TestComposedStartTimerHealDrift(t *testing.T) {
 		}
 	})
 }
+
+// Kills A10 proposing the occupant rollback over another session's corpse
+// inside the pending create's lease (CONTRACT v5.10i; the A14 generator's
+// seed 533 of the floored corpus, mc-i7efm): the effect takes a corpse for
+// an occupant that left and refuses redecided while the lease holds, every
+// pass. Inside the lease the row holds, asking for a pass when it lapses;
+// past it, under an anchor stamped ahead (the skew guard), or under a
+// foreign runtime alive or a zombie, the rollback is proposed.
+func TestArmRollbackHoldsOverAForeignCorpseInsideTheLease(t *testing.T) {
+	foreign := runtimeIdentity{Known: true, SessionID: "gc-other", Epoch: "1", Token: "tok-other"}
+	for _, c := range []struct {
+		name    string
+		runtime func(f *allocFixture, name string)
+		started time.Duration // pending_create_started_at, before now
+		held    bool
+	}{
+		{"a corpse inside the lease", func(f *allocFixture, name string) { f.corpse(name); delete(f.own, name) }, time.Minute, true},
+		// The skew guard (pendingCreateAnchorAhead): an anchor stamped ahead
+		// of now by a stepped clock holds no lease, so no hold.
+		{"a corpse under an anchor 2h ahead", func(f *allocFixture, name string) { f.corpse(name); delete(f.own, name) }, -2 * time.Hour, false},
+		{"a corpse past the lease", func(f *allocFixture, name string) { f.corpse(name); delete(f.own, name) }, 11 * time.Minute, false},
+		{"alive inside the lease", func(f *allocFixture, name string) { f.alive(name, InventoryAttrs{Identity: foreign}) }, time.Minute, false},
+		{"a zombie inside the lease", func(f *allocFixture, name string) {
+			f.alive(name, InventoryAttrs{Identity: foreign}).fact(name, FactProcessAlive, ObsNo)
+		}, time.Minute, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			row := poolRow("gc-1", "worker", 1, "creating", "instance_token", "tok", "pending_create_claim", "true",
+				"pending_create_started_at", allocNow.Add(-c.started).UTC().Format(time.RFC3339))
+			k := rowKeyOf(row.ID)
+			info := sessionInfoFromBead(row)
+			f := newAllocFixture(t, workerCity(3))
+			c.runtime(f, info.SessionName)
+			w := &World{
+				Now: allocNow, Obs: f.observation(), ObsMaxAge: observeMaxAge, Env: &reconcileEnv{Cfg: workerCity(3)},
+				Observed: map[rowKey]rowObservation{k: {Liveness: livenessOccupied, Identity: foreign}},
+			}
+			r := &rowFacts{w: w, k: k, row: newCensusRow(k, info), found: true, entry: &selectionEntry{Key: k, Desired: desireNone, Reason: reasonNameOccupied, Liveness: livenessOccupied}}
+			it, ok := armRollback(r)
+			switch {
+			case !ok:
+				t.Fatalf("armRollback declined, want a decision")
+			case c.held && (it.Kind != "" || it.Reason != decideRollbackHeld):
+				t.Fatalf("armRollback = (%q, %q), want held %q", it.Kind, it.Reason, decideRollbackHeld)
+			case c.held && !r.next.Equal(allocNow.Add(-c.started).Add(pendingCreateNeverStartedTimeout+time.Second)):
+				t.Fatalf("held with next pass %v, want the never-started lease's end %v", r.next, allocNow.Add(-c.started).Add(pendingCreateNeverStartedTimeout+time.Second))
+			case !c.held && (it.Kind != intentRollback || !it.Occupant):
+				t.Fatalf("armRollback = (%q, %q), want the occupant rollback", it.Kind, it.Reason)
+			}
+		})
+	}
+}
+
+// Kills the corpse hold's deadline (v5.10i, the #7782 review) drifting from
+// the lease pendingCreateLeaseActive decides: a never-started create's lease
+// ends a second past pendingCreateNeverStartedTimeout from its anchor; a
+// started one's at the later of its start in flight (last_woke_at plus the
+// startup timeout and the stale-key and settle allowances) and its fresh
+// attempt (the anchor plus staleCreatingStateTimeout). At each end the lease
+// has lapsed, a second before it holds.
+func TestPendingCreateLeaseEnd(t *testing.T) {
+	cfg := workerCity(3)
+	startup := cfg.Session.StartupTimeoutDuration()
+	if startup <= 0 {
+		startup = time.Minute
+	}
+	ts := func(d time.Duration) string { return allocNow.Add(d).UTC().Format(time.RFC3339) }
+	for _, c := range []struct {
+		name string
+		meta []string
+		want time.Time
+	}{
+		{"never started", []string{"pending_create_started_at", ts(-time.Minute)}, allocNow.Add(-time.Minute + pendingCreateNeverStartedTimeout + time.Second)},
+		{"started, in flight ends later", []string{"pending_create_started_at", ts(-30 * time.Second), "last_woke_at", ts(-10 * time.Second)}, allocNow.Add(-10*time.Second + startup + staleKeyDetectDelay + 5*time.Second)},
+		{"started, the fresh attempt ends later", []string{"pending_create_started_at", ts(time.Minute), "last_woke_at", ts(-time.Hour)}, allocNow.Add(time.Minute + staleCreatingStateTimeout)},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			row := poolRow("gc-1", "worker", 1, "creating", append([]string{"instance_token", "tok", "pending_create_claim", "true"}, c.meta...)...)
+			k := rowKeyOf(row.ID)
+			info := sessionInfoFromBead(row)
+			r := &rowFacts{w: &World{Now: allocNow, Env: &reconcileEnv{Cfg: cfg}}, k: k, row: newCensusRow(k, info), found: true}
+			end := r.pendingCreateLeaseEnd()
+			if !end.Equal(c.want) {
+				t.Fatalf("lease end %v, want %v", end, c.want)
+			}
+			if pendingCreateLeaseActiveAt(info, end, startup) || !pendingCreateLeaseActiveAt(info, end.Add(-time.Second), startup) {
+				t.Fatalf("at %v the lease is active %t, a second before %t; want lapsed, then held", end, pendingCreateLeaseActiveAt(info, end, startup), pendingCreateLeaseActiveAt(info, end.Add(-time.Second), startup))
+			}
+		})
+	}
+}

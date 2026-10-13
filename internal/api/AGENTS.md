@@ -41,6 +41,24 @@ Violating any fails the build; full rationale is in the architecture docs.
   capture the semantics. Enforced by
   `TestEveryKnownEventTypeHasRegisteredPayload`.
 
+## Configuration publication
+
+API config edits, validation, snapshot publication and city-config rollback
+share the controller's publication transaction with runtime reloads. A rejected
+edit must remain absent from both disk and the API's cached raw config. Preserve
+that boundary when changing `mutateAndPoke` or runtime config publication.
+
+The controller's config locks have one order: the config transaction fence
+(`configTransactionMu`), then the publication lock (`publishMu`), then the
+`configedit.Editor` lock, then `updateMu`, then `mu`. A multi-file config
+transaction (pack import, rig provisioning) takes the publication lock before
+the Editor lock and publishes through `mutateAndPokeLocked`; taking the Editor
+lock first deadlocks against a plain edit, which holds the publication lock
+when it takes the Editor lock. The publication lock stays held across a
+transaction's pack fetch or rig provisioning, and across an API city or rig
+suspend or resume while it waits on the suspension fence; reload publication
+and other API edits wait out those bounded stalls.
+
 ## Worker boundary exception
 
 `session_manager.go` constructs `session.Manager` values for API handlers —
@@ -61,3 +79,13 @@ a sanctioned bypass of the worker boundary. Do not add others; see
   changes (a manual step, not a CI gate); use
   `npm run preview -- --host 127.0.0.1 --port <port>` from
   `internal/api/dashboardspa/web/frontend` after `make dashboard-build-npm`
+
+## Fresh active-work lookup
+
+Batch a session's assignee aliases into one live `List` call per bead store,
+not one per alias. That bounds the calls, not the backend work: how far a store
+narrows the call varies by store (see `findLiveActiveBeadInStores`). Preserve
+assignee priority across stores and newest-first order within a store, so a
+concrete session's work wins over a template fallback. Stop reading stores once
+the first identity (the session id, when known) has a match, and keep a store's
+partial rows instead of dropping the store.

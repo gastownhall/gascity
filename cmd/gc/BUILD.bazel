@@ -1566,6 +1566,7 @@ go_test(
         "prepared_start_oversized_prompt_test.go",
         "prepared_start_priming_test.go",
         "prime_inbox_test.go",
+        "prime_manual_provider_session_test.go",
         "prime_prompt_budget_test.go",
         "prime_session_key_capture_test.go",
         "prime_unmanaged_hook_guard_test.go",
@@ -1630,6 +1631,7 @@ go_test(
         "reconcile_effect_signal_test.go",
         "reconcile_effect_start_test.go",
         "reconcile_effect_stop_test.go",
+        "reconcile_effect_stop_tmux_integration_test.go",
         "reconcile_effect_tx_test.go",
         "reconcile_effect_write_test.go",
         "reconcile_effect_zombie_test.go",
@@ -2261,6 +2263,22 @@ go_variant_test(
     name = "gc_sim_corpus_shifted_%d_test" % i,
     size = "medium",
     args = ["-test.run=^TestSimCorpusShiftedRNG$$"],
+    env = {
+        "GC_V2_SIM_SEEDS": "64",
+        "GC_V2_SIM_SEED_FIRST": str(1 + 64 * i),
+    },
+    test = ":gc_test",
+) for i in range(16)]
+
+# The floored corpus (TestSimCorpusFloored: a min_active_sessions floor, no
+# pending creates), all 1024 seeds in sixteen ranges of 64 (CONTRACT v5.10l,
+# mc-su7hv); gc_test runs only its first 64. Ordinary test targets outside
+# SIM_CORPORA, as the shifted ranges are. Replay one seed with
+#   GC_V2_SIM_SEED=<seed> go test -run '^TestSimCorpusFloored$' ./cmd/gc/
+[go_variant_test(
+    name = "gc_sim_corpus_floored_%d_test" % i,
+    size = "medium",
+    args = ["-test.run=^TestSimCorpusFloored$$"],
     env = {
         "GC_V2_SIM_SEEDS": "64",
         "GC_V2_SIM_SEED_FIRST": str(1 + 64 * i),

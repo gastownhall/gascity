@@ -2432,7 +2432,11 @@ var errConfigTransactionInProgress = errors.New("config mutation in progress; re
 // loadReloadCandidate reads one candidate config generation. With a
 // controller state it reads only while no config transaction is in flight, so
 // a multi-file write is never observed half-done; it does not wait, so a slow
-// import cannot stall the reconciler.
+// import cannot stall the reconciler at the read. A candidate read before a
+// transaction began still waits for it at publication (updateFromRuntime takes
+// the publication lock the transaction holds). That stall is accepted: it ends
+// with the transaction, and publication then rejects the candidate if the
+// transaction's generation superseded it.
 func (cr *CityRuntime) loadReloadCandidate(configName, cityRoot string) (*reloadResult, error) {
 	if cr.cs == nil {
 		return tryReloadConfig(cr.tomlPath, configName, cityRoot)

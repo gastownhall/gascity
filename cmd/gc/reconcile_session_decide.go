@@ -296,15 +296,32 @@ func armTimerHeals(r *rowFacts) (intent, bool) {
 
 // armLivenessUnknown is A9: every arm below reads liveness and desire, so
 // the row holds while its liveness is unknown (GUAR-053), or while the
-// allocation has no entry for it.
+// allocation has no entry for it. An acked row over a corpse does not hold
+// (ackedOverCorpse).
 func armLivenessUnknown(r *rowFacts) (intent, bool) {
 	switch {
 	case r.entry == nil:
 		return intent{Reason: decideUnranked}, true
-	case r.entry.Liveness == livenessUnknown:
+	case r.entry.Liveness == livenessUnknown && !r.ackedOverCorpse():
 		return intent{Reason: decideLivenessUnknown}, true
 	}
 	return intent{}, false
+}
+
+// ackedOverCorpse reports an acked stop request (A11's) on a row whose name
+// the inventory lists as a corpse, its identity read but not the row's
+// (CONTRACT R46, I23, M1): a remain-on-exit corpse whose GC_INSTANCE_TOKEN
+// is unset reads Unknown, so liveness-unknown would hold the row before A11
+// signals it, and the stop would never finalize. A corpse counts as stopped,
+// so the row falls through to A11's signal, and the stop verb's C8.8
+// confirms it on the fresh read and finalizes (removing the corpse under the
+// corpse exception when L3 passes). An unread identity still holds (O1).
+func (r *rowFacts) ackedOverCorpse() bool {
+	if req, ok := activeStop(r.row); !ok || req.Phase != stopAcked || r.w.Obs == nil || !r.w.Observed[r.k].Identity.Known {
+		return false
+	}
+	name := strings.TrimSpace(r.row.Info.SessionName)
+	return r.w.Obs.Fact(name, FactRunning, r.w.Now, r.w.ObsMaxAge).Value == ObsNo
 }
 
 // drainKind is a drain begin's or signal's kind by CONTRACT v5 D2's fresh-legs

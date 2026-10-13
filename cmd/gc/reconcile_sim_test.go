@@ -917,9 +917,12 @@ func (s *sim) ensureRunningAllows(b beads.Bead) bool {
 
 // ensureRunningConfirms is Manager.ensureRunning's write once the runtime
 // is up, started by this attach or found running (started false):
-//   - on a row an operator holds (KeepsSlot), the hold's consume
-//     (consumeUserHold): the operator's Resume cell, and the row active with
-//     its wake request, sleep reason, slept_at and claim cleared;
+//   - on a row an operator holds (KeepsSlot) whose runtime it started, or
+//     that is suspended, active or awake (liveUserHoldDecision for a running
+//     one), the hold's consume (consumeUserHold): the operator's Resume
+//     cell, and the row active with its wake request, sleep reason, slept_at
+//     and claim cleared; nothing at all when the cell refuses (a draining
+//     row);
 //   - otherwise confirmLiveSessionState: the row active from a dormant or
 //     uncommitted state, its claim cleared.
 //
@@ -940,16 +943,23 @@ func (s *sim) ensureRunningConfirms(l *simLeg, b beads.Bead, started bool) {
 			patch[session.OperatorDrainKey] = ""
 		}
 	}
-	if d := session.DecodeDisposition(m); d.KeepsSlot() {
-		if to, err := d.Apply(session.ActorOperator, session.DispEvent{Kind: session.EvResume}, session.State(m["state"]), now); err == nil {
-			maps.Copy(patch, to.Changed().Fold())
+	state := session.State(strings.TrimSpace(m["state"]))
+	d := session.DecodeDisposition(m)
+	// ensureRunning consumes the hold where it starts the runtime (a dead
+	// one, or a suspended row's), or over a running one only on an active or
+	// awake row (liveUserHoldDecision); every other held row it confirms.
+	if consumes := started || state == session.StateSuspended || state == session.StateActive || state == session.StateAwake; d.KeepsSlot() && consumes {
+		to, err := d.Apply(session.ActorOperator, session.DispEvent{Kind: session.EvResume}, state, now)
+		if err != nil {
+			return // the Resume cell refused (a draining row): consumeUserHold writes nothing
 		}
+		maps.Copy(patch, to.Changed().Fold())
 		maps.Copy(patch, session.ClearWakeRequestPatch())
 		for k, v := range map[string]string{"state": string(session.StateActive), "state_reason": "creation_complete", "sleep_reason": "", "slept_at": "", "pending_create_claim": "", "pending_create_started_at": ""} {
 			patch[k] = v
 		}
 	} else {
-		switch session.State(m["state"]) {
+		switch state {
 		case "", session.StateStartPending, session.StateCreating, session.StateAsleep, session.StateSuspended:
 			patch["state"], patch["state_reason"] = string(session.StateActive), "creation_complete"
 		}
@@ -1446,8 +1456,9 @@ type simResult struct {
 // effects all refused a re-issue the contract holds, each no earlier than
 // its row's backoff expiry (a paced retry, not a loop), and whose only store
 // change is the runtime lease record each attempt writes. The holds: a stop
-// a human's attach holds (§12.2 #10), and a stop refused liveness-unknown
-// while its runtime's probe keeps erroring (I17).
+// a human's attach holds (§12.2 #10), and a stop, rollback or fresh heal
+// refused liveness-unknown while its runtime's probe keeps erroring (I17,
+// v5.10l).
 func (s *sim) pacedRetries(backoff map[string]backoffRecord, at time.Time, before, after map[string]beads.Bead) bool {
 	for k, b := range after {
 		a, ok := before[k]
@@ -1473,6 +1484,10 @@ func (s *sim) pacedRetries(backoff map[string]backoffRecord, at time.Time, befor
 			// leaves its fresh read unknown, and C3 refuses on it
 			// (mc-cjtkj; seed 290).
 			r.it.Kind == intentRollback && r.res.Cause == causeLivenessUnknown && s.probeErring(row) ||
+			// Likewise a fresh heal (A6): the squatter heal over a Foreign
+			// occupant whose probe keeps erroring cannot re-prove it, and
+			// refuses (v5.10l; seeds 621, 780).
+			r.it.Kind == intentRowHealFresh && r.res.Cause == causeLivenessUnknown && s.probeErring(row) ||
 			// A start AL1 proposes for a row an operator holds (a pending
 			// create's claim, a manual session) that its PreWake refuses
 			// (RefusesPreWake), or whose recycle an attached pane refuses,
@@ -1677,6 +1692,21 @@ func TestSimCorpusPinnedSeeds(t *testing.T) {
 	}
 }
 
+// TestSimCorpusFlooredPinnedSeeds (CONTRACT v5.10l). Kills an I10 model
+// that calls a paced fresh heal a loop: in floored seeds 621 and 780 the
+// squatter heal over a Foreign occupant whose probe keeps erroring refuses
+// liveness-unknown on its backoff through quiescence (mc-su7hv).
+func TestSimCorpusFlooredPinnedSeeds(t *testing.T) {
+	for _, seed := range []uint64{621, 780} {
+		t.Run(fmt.Sprint(seed), func(t *testing.T) {
+			s := newSim(t, seed, simOpts{noPendingCreates: true}) // TestSimCorpusFloored's scenario
+			s.cfg.Agents[0].MinActiveSessions = intPtr(1 + int(seed%2))
+			s.run()
+			s.report(t)
+		})
+	}
+}
+
 // droppingInflight loses every settlement.
 type droppingInflight struct{ *inflightMap }
 
@@ -1797,8 +1827,9 @@ func TestSimAttachModelsEnsureRunning(t *testing.T) {
 		"kill-fenced":            poolRow("gc-1", "worker", 1, "asleep", "instance_token", "tok-1", "state_reason", session.KillPendingReason, "sleep_reason", "killed", "slept_at", now),
 		"drain-ack stop pending": poolRow("gc-1", "worker", 1, string(session.StateDraining), "instance_token", "tok-1", "state_reason", session.DrainAckStopPendingReason),
 	} {
+		want := maps.Clone(row.Metadata) // the store shares row's map: compare with a copy
 		after, starts := attach(t, false, row)
-		if !maps.Equal(after.Metadata, row.Metadata) || starts != 0 {
+		if !maps.Equal(after.Metadata, want) || starts != 0 {
 			t.Errorf("%s: row %v, %d starts; want no write and no start", name, after.Metadata, starts)
 		}
 	}
@@ -1828,5 +1859,31 @@ func TestSimAttachModelsEnsureRunning(t *testing.T) {
 	}
 	if m["state"] != string(session.StateActive) {
 		t.Errorf("an operator-held row: state %q, want active", m["state"])
+	}
+
+	// A held row ensureRunning only confirms (mc-37xy0): asleep with its
+	// runtime running (liveUserHoldDecision consumes only an active or awake
+	// one), so the row reads active and the hold stands; drained and running,
+	// a state the confirm leaves alone, gets no write. A held draining row
+	// whose runtime is gone is started, and the Resume cell refuses (the
+	// drain's stop owns the runtime), so consumeUserHold writes nothing.
+	hold := []string{"instance_token", "tok-1", "sleep_intent", "user-hold", "held_until", rowAt(1000 * time.Hour), "suspended_at", rowAt(-time.Minute)}
+	after, _ = attach(t, true, poolRow("gc-1", "worker", 1, "asleep", hold...))
+	if m := after.Metadata; m["state"] != string(session.StateActive) || m["sleep_intent"] != "user-hold" || m["held_until"] == "" || m["suspended_at"] == "" {
+		t.Errorf("a held asleep row with its runtime running: row %v, want active with the hold kept", m)
+	}
+	for _, c := range []struct {
+		name  string
+		live  bool
+		state string
+	}{
+		{"a held drained row with its runtime running", true, string(session.StateDrained)},
+		{"a held draining row with its runtime gone", false, string(session.StateDraining)},
+	} {
+		row := poolRow("gc-1", "worker", 1, c.state, hold...)
+		want := maps.Clone(row.Metadata)
+		if after, _ = attach(t, c.live, row); !maps.Equal(after.Metadata, want) {
+			t.Errorf("%s: row %v, want no write", c.name, after.Metadata)
+		}
 	}
 }

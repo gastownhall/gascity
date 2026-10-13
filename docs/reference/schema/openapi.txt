@@ -6831,6 +6831,10 @@
           "request_id": {
             "description": "Correlation ID from the 202 response.",
             "type": "string"
+          },
+          "session_id": {
+            "description": "Session a failed session.create had already written, when the server could identify it, so the client can inspect or clean it up instead of retrying into a duplicate. Absence does not prove that no session was written. The event subject does not carry this ID; match the event to its request by request_id.",
+            "type": "string"
           }
         },
         "required": [
@@ -28229,7 +28233,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -29150,7 +29154,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -29969,7 +29973,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -30439,7 +30443,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -30787,7 +30791,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -31111,7 +31115,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -31665,7 +31669,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -31821,7 +31825,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -31988,7 +31992,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -32105,7 +32109,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -32217,7 +32221,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -32314,7 +32318,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -32411,7 +32415,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -32746,7 +32750,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -33026,7 +33030,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -33504,7 +33508,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -33659,7 +33663,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -33891,7 +33895,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -34597,7 +34601,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -35067,7 +35071,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -36188,7 +36192,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -38318,7 +38322,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -38473,7 +38477,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -38774,7 +38778,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -39047,7 +39051,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -39638,7 +39642,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -41849,7 +41853,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -42137,7 +42141,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -42234,7 +42238,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -42663,7 +42667,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -42760,7 +42764,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -43189,7 +43193,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -43286,7 +43290,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -43544,7 +43548,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -43959,7 +43963,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -44242,7 +44246,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -44517,7 +44521,7 @@
             "headers": {
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -44912,7 +44916,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -45373,7 +45377,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -46135,7 +46139,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -46365,7 +46369,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -46505,7 +46509,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -46661,7 +46665,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -46843,7 +46847,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -46990,7 +46994,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -47660,7 +47664,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -47818,7 +47822,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -48027,7 +48031,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -48230,7 +48234,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -48760,6 +48764,15 @@
             "required": true,
             "schema": {
               "description": "Session ID, alias, or runtime session_name.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Idempotency key for safe retries.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "schema": {
+              "description": "Idempotency key for safe retries.",
               "type": "string"
             }
           }
@@ -49646,7 +49659,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -49795,7 +49808,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -49965,6 +49978,15 @@
             "required": true,
             "schema": {
               "description": "Session ID, alias, or runtime session_name.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Idempotency key for safe retries.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "schema": {
+              "description": "Idempotency key for safe retries.",
               "type": "string"
             }
           }
@@ -50201,7 +50223,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -50689,7 +50711,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
@@ -51413,7 +51435,7 @@
               },
               "X-GC-Index": {
                 "schema": {
-                  "description": "Latest event sequence number.",
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
                   "format": "int64",
                   "minimum": 0,
                   "type": "integer"
