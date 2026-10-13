@@ -414,6 +414,10 @@ func newLedgerFeed(req *ledgerFeedRequest, journal journalops.Journal, lane stri
 	}
 	f.stateSince = f.started
 	f.miss = newLedgerFeedMissDetector(f.now)
+	f.miss.progress = func() (int64, int64) {
+		st := f.tailer.Stats()
+		return st.Seq, st.Head
+	}
 	f.src = &gatedJournal{
 		inner:  journal,
 		admit:  admit,
@@ -1158,9 +1162,14 @@ const (
 // visibility suspect. Updates are not watched: ready-projection churn makes
 // them noisy. While the feed is unhealthy (a late baseline, a gap, a read
 // error, a closed gate, a dropped refresh, a requested re-scan) its silence
-// proves nothing, so a scan change within the window of one is voided.
+// proves nothing, so a scan change within the window of one is voided. A
+// feed that is behind has simply not read the row yet, so a change waits
+// for the checkpoint to pass the head the feed had seen when it was found.
 type ledgerFeedMissDetector struct {
 	now func() time.Time
+	// progress reports the feed's checkpoint seq and the journal head it
+	// last saw; nil reads as caught up.
+	progress func() (seq, head int64)
 
 	mu          sync.Mutex
 	seen        map[string]ledgerFeedJournalSeen
@@ -1184,6 +1193,9 @@ type ledgerFeedJournalSeen struct {
 type ledgerFeedScanChange struct {
 	id string
 	at time.Time
+	// head is the journal head the feed had seen when the scan reported the
+	// change; the change is judged only once the checkpoint has passed it.
+	head int64
 }
 
 func newLedgerFeedMissDetector(now func() time.Time) *ledgerFeedMissDetector {
@@ -1202,6 +1214,7 @@ func (d *ledgerFeedMissDetector) observe(onChange cacheOnChange) cacheOnChange {
 
 // noteScan records a scan change of id at at.
 func (d *ledgerFeedMissDetector) noteScan(id string, at time.Time) {
+	_, head := d.readProgress()
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.disabled {
@@ -1217,13 +1230,23 @@ func (d *ledgerFeedMissDetector) noteScan(id string, at time.Time) {
 		d.unhealthyAt = at
 		return
 	}
-	d.pending = append(d.pending, ledgerFeedScanChange{id: id, at: at})
+	d.pending = append(d.pending, ledgerFeedScanChange{id: id, at: at, head: head})
+}
+
+// readProgress reads the feed's checkpoint and last seen head. It is called
+// without d.mu held.
+func (d *ledgerFeedMissDetector) readProgress() (seq, head int64) {
+	if d.progress == nil {
+		return 0, 0
+	}
+	return d.progress()
 }
 
 // noteJournal records the ids one page named, and which of them a refresh
 // changed (an id absent from changed was not refreshed, and counts as
 // changed), then settles what is due.
 func (d *ledgerFeedMissDetector) noteJournal(ids []string, changed map[string]bool, at time.Time) {
+	seq, _ := d.readProgress()
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if len(d.seen)+len(ids) > ledgerFeedMissCap {
@@ -1240,7 +1263,7 @@ func (d *ledgerFeedMissDetector) noteJournal(ids []string, changed map[string]bo
 		_, ok := resolved[p.id]
 		return ok
 	})
-	d.settleLocked(at)
+	d.settleLocked(at, seq)
 }
 
 // disable stops judging and drops what is pending: the feed has stopped.
@@ -1262,17 +1285,19 @@ func (d *ledgerFeedMissDetector) noteUnhealthy(at time.Time) {
 
 // report settles what is due at now and returns the counters.
 func (d *ledgerFeedMissDetector) report(now time.Time) (misses, scanAfterRefresh int64, recent []string) {
+	seq, _ := d.readProgress()
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.settleLocked(now)
+	d.settleLocked(now, seq)
 	return d.misses, d.scanAfter, slices.Clone(d.recent)
 }
 
-// settleLocked decides every scan change whose grace has passed and expires
-// journal sightings older than the window.
-func (d *ledgerFeedMissDetector) settleLocked(now time.Time) {
+// settleLocked decides every scan change whose grace has passed and whose
+// head the checkpoint seq has passed, and expires journal sightings older
+// than the window. A feed that is behind has simply not read the row yet.
+func (d *ledgerFeedMissDetector) settleLocked(now time.Time, seq int64) {
 	d.pending = slices.DeleteFunc(d.pending, func(p ledgerFeedScanChange) bool {
-		if now.Sub(p.at) < ledgerFeedMissGrace {
+		if now.Sub(p.at) < ledgerFeedMissGrace || seq < p.head {
 			return false
 		}
 		if d.unhealthyAt.IsZero() || d.unhealthyAt.Before(p.at.Add(-ledgerFeedMissWindow)) {
