@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -309,6 +310,62 @@ func TestAPIBeadUpdateWakesWhenParentProjectionWaitFails(t *testing.T) {
 	assertEnqueued(t, state, reconcilekey.Allocator(), reconcilekey.ControlDispatch())
 	if got := state.enqueueCalls(); got != 1 {
 		t.Fatalf("enqueue calls = %d, want 1", got)
+	}
+}
+
+// projectionWaitObserverStore records how many wakes had been enqueued when
+// the parent-projection wait ran, then returns err.
+type projectionWaitObserverStore struct {
+	beads.Store
+	state             *fakeState
+	err               error
+	enqueuedAtWaiting int
+}
+
+func (s *projectionWaitObserverStore) WaitForParentProjection(context.Context, string, string, string) error {
+	s.enqueuedAtWaiting = s.state.enqueueCalls()
+	return s.err
+}
+
+// TestAPIBeadUpdateWakesAfterParentProjectionWait: parent-keyed listings
+// bypass the CachingStore, so a pass woken before bd's projection reflects
+// a reparent can read the old parent-child edges. The wake must fire after
+// the wait, whether the wait succeeds or fails.
+func TestAPIBeadUpdateWakesAfterParentProjectionWait(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		err      error
+		wantCode int
+	}{
+		{name: "wait succeeds", wantCode: http.StatusOK},
+		{name: "wait fails", err: beads.ErrParentProjectionSuperseded, wantCode: http.StatusConflict},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := newFakeState(t)
+			store := &projectionWaitObserverStore{Store: beads.NewMemStore(), state: state, err: tc.err, enqueuedAtWaiting: -1}
+			state.stores["myrig"] = store
+			parent, err := store.Create(beads.Bead{Title: "Parent"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			child, err := store.Create(beads.Bead{Title: "Child"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			h := newTestCityHandler(t, state)
+
+			rec := beadRequest(t, h, http.MethodPost, cityURL(state, "/bead/")+child.ID+"/update", `{"parent":"`+parent.ID+`"}`)
+			if rec.Code != tc.wantCode {
+				t.Fatalf("status %d, want %d; body: %s", rec.Code, tc.wantCode, rec.Body.String())
+			}
+			if store.enqueuedAtWaiting != 0 {
+				t.Fatalf("enqueue calls when the projection wait ran = %d, want 0 (wake must follow the wait)", store.enqueuedAtWaiting)
+			}
+			assertEnqueued(t, state, reconcilekey.Allocator(), reconcilekey.ControlDispatch())
+			if got := state.enqueueCalls(); got != 1 {
+				t.Fatalf("enqueue calls = %d, want 1", got)
+			}
+		})
 	}
 }
 

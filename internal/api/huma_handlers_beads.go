@@ -957,8 +957,10 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 		}
 		return nil, apierr.Internal.Msg(err.Error())
 	}
-	// The write landed, so it wakes even if the parent projection wait fails.
-	s.wakeAfterBeadWrite()
+	// The write landed, so it wakes even if the parent projection wait fails;
+	// deferred so a woken pass's parent-keyed listings, which bypass the
+	// CachingStore, read bd only after the wait.
+	defer s.wakeAfterBeadWrite()
 	if opts.ParentID != nil && current.ParentID != *opts.ParentID && !closesStatus(opts.Status) {
 		if waiter, ok := store.(beads.ParentProjectionWaiter); ok {
 			if err := awaitBeadParentProjection(ctx, waiter, id, current.ParentID, *opts.ParentID); err != nil {
