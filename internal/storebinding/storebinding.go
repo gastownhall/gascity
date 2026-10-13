@@ -369,7 +369,9 @@ var ErrNudgeSessionFenceMismatch = errors.New("queued nudge session fence mismat
 // The delivery verbs (Enqueue, ClaimDue, ListFor, ListForAgent, Ack,
 // ReleaseClaims, RecordFailure) are target-scoped: they read only the records
 // addressed to the queue keys they are given and repair only the records they
-// touch, so their cost does not grow with the rest of the queue. The
+// touch, so the requests they issue and the records they read do not grow with
+// the rest of the queue. (What one keyed read costs inside the store is the
+// store's index plan; see each implementation.) The
 // whole-queue recovery work — revoking expired leases, dead-lettering expired
 // items, aging dead letters out, and sweeping retired records past retention —
 // is Maintain's alone, and the infrastructure owner runs it on its own cadence.

@@ -1,10 +1,13 @@
 package storebinding
 
 // The queue's cost model: a target's delivery verbs read only that target's
-// records, so their request count is a property of the target, not of the
-// queue. These tests count requests through a recording store rather than
-// timing anything, and they pin the quarantine that keeps one undecodable
-// record from failing deliveries to everyone else.
+// records, so their request count and the rows the store hands back are a
+// property of the target, not of the queue or of the rest of the store. These
+// tests count requests and returned rows through a recording store rather than
+// timing anything; the index those keyed reads plan through on SQLite is
+// pinned in internal/beads (TestSQLiteListMetadataQueriesDriveOffMetadataIndex).
+// They also pin the quarantine that keeps one undecodable record from failing
+// deliveries to everyone else.
 
 import (
 	"errors"
@@ -26,11 +29,26 @@ type claimingOpRecorder struct {
 	*beadstest.OpRecordingStore
 	claimer beadsAssignmentClaimer
 	claims  atomic.Int64
+	// rows counts the beads every List handed back: the part of a read's
+	// cost a remote store charges for.
+	rows atomic.Int64
 }
 
 func (s *claimingOpRecorder) Claim(id, assignee string) (beads.Bead, bool, error) {
 	s.claims.Add(1)
 	return s.claimer.Claim(id, assignee)
+}
+
+func (s *claimingOpRecorder) List(query beads.ListQuery) ([]beads.Bead, error) {
+	records, err := s.OpRecordingStore.List(query)
+	s.rows.Add(int64(len(records)))
+	return records, err
+}
+
+func (s *claimingOpRecorder) reset() {
+	s.Reset()
+	s.claims.Store(0)
+	s.rows.Store(0)
 }
 
 // newRecordedNudgeQueue opens a SQLite-backed queue behind a recorder.
@@ -59,31 +77,42 @@ func seedUnrelatedNudges(t *testing.T, store beads.Store, n int, now time.Time) 
 }
 
 // nudgeQueueRequestProfile is the shape of what one target's delivery verbs
-// asked the store: op kinds in order, with each List's label.
+// asked the store: op kinds in order, with each List's label and metadata key.
 func nudgeQueueRequestProfile(ops []beadstest.RecordedOp) []string {
 	profile := make([]string, 0, len(ops))
 	for _, op := range ops {
 		entry := op.Kind
 		if op.Kind == beadstest.OpList {
-			entry += "(" + op.Query.Label + ")"
+			entry += fmt.Sprintf("(%s %v)", op.Query.Label, op.Query.Metadata)
 		}
 		profile = append(profile, entry)
 	}
 	return profile
 }
 
+// targetVerbCost is what one target's ListFor and ClaimDue asked the store.
+type targetVerbCost struct {
+	listForOps, claimOps   []beadstest.RecordedOp
+	listForRows, claimRows int64
+	claims                 int64
+}
+
+// targetQueueKeys is the deployed shape of a target's key set: the current
+// queue key plus an alias the same agent was addressed by before.
+var targetQueueKeys = []string{testNudgeAgent, "alpha/former"}
+
 // runTargetDeliveryVerbs enqueues two nudges for the target, then lists and
-// claims for it; it returns the requests the list and claim issued.
-func runTargetDeliveryVerbs(t *testing.T, queue NudgeQueue, recorder *claimingOpRecorder, now time.Time) ([]beadstest.RecordedOp, int64) {
+// claims for it; it returns what the list and the claim each cost.
+func runTargetDeliveryVerbs(t *testing.T, queue NudgeQueue, recorder *claimingOpRecorder, now time.Time) targetVerbCost {
 	t.Helper()
 	for _, item := range []nudgequeue.Item{testNudgeItem("n-mine", "", now), testNudgeItem("n-pinned", "session-live", now)} {
 		if err := queue.Enqueue(item); err != nil {
 			t.Fatalf("Enqueue(%s): %v", item.ID, err)
 		}
 	}
-	recorder.Reset()
-	recorder.claims.Store(0)
-	target := ClaimTarget{QueueKeys: []string{testNudgeAgent, "alpha/former"}, SessionID: "session-live"}
+	var cost targetVerbCost
+	target := ClaimTarget{QueueKeys: targetQueueKeys, SessionID: "session-live"}
+	recorder.reset()
 	pending, _, _, err := queue.ListFor(target, now)
 	if err != nil {
 		t.Fatalf("ListFor: %v", err)
@@ -91,6 +120,8 @@ func runTargetDeliveryVerbs(t *testing.T, queue NudgeQueue, recorder *claimingOp
 	if len(pending) != 2 {
 		t.Fatalf("ListFor pending = %v, want the target's two nudges", nudgeItemIDs(pending))
 	}
+	cost.listForOps, cost.listForRows = recorder.Ops(), recorder.rows.Load()
+	recorder.reset()
 	claimed, err := queue.ClaimDue(target, now)
 	if err != nil {
 		t.Fatalf("ClaimDue: %v", err)
@@ -98,50 +129,101 @@ func runTargetDeliveryVerbs(t *testing.T, queue NudgeQueue, recorder *claimingOp
 	if len(claimed) != 2 {
 		t.Fatalf("ClaimDue = %v, want the target's two nudges", nudgeItemIDs(claimed))
 	}
-	return recorder.Ops(), recorder.claims.Load()
+	cost.claimOps, cost.claimRows, cost.claims = recorder.Ops(), recorder.rows.Load(), recorder.claims.Load()
+	return cost
+}
+
+// seedSameKeyNeighbors writes the beads another family keeps under the same
+// "agent:<key>" label as the target's queue records: a session bead and an
+// open nudge shadow, both carrying the target's agent identity.
+func seedSameKeyNeighbors(t *testing.T, store beads.Store, n int) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		if _, err := store.Create(beads.Bead{
+			Title:    fmt.Sprintf("session %d", i),
+			Type:     "session",
+			Labels:   []string{"gc:session", nudgeQueueAgentLabelPrefix + testNudgeAgent},
+			Metadata: map[string]string{nudgeMetaAgent: testNudgeAgent},
+		}); err != nil {
+			t.Fatalf("seeding a same-key session bead: %v", err)
+		}
+		if _, err := store.Create(beads.Bead{
+			Title:    fmt.Sprintf("nudge:shadow-%d", i),
+			Type:     nudgeQueueBeadType,
+			Labels:   []string{"gc:nudge", nudgeQueueAgentLabelPrefix + testNudgeAgent},
+			Metadata: map[string]string{nudgeMetaAgent: testNudgeAgent, nudgeMetaNudgeID: fmt.Sprintf("shadow-%d", i)},
+		}); err != nil {
+			t.Fatalf("seeding a same-key shadow bead: %v", err)
+		}
+	}
+}
+
+// assertKeyedTargetReads requires every List in ops to be one keyed read —
+// the queue family, the queue's bead type, and exactly one queue key in
+// metadata — and at most one such read per distinct key.
+func assertKeyedTargetReads(t *testing.T, verb string, ops []beadstest.RecordedOp) {
+	t.Helper()
+	seen := map[string]int{}
+	for _, op := range ops {
+		if op.Kind != beadstest.OpList {
+			continue
+		}
+		query := op.Query
+		key, keyed := query.Metadata[nudgeMetaAgent]
+		if query.Label != nudgeQueueLabel || query.Type != nudgeQueueBeadType || !keyed || len(query.Metadata) != 1 {
+			t.Errorf("%s listed %+v; want the queue family keyed by %q metadata (caller %v)", verb, query, nudgeMetaAgent, op.Caller)
+			continue
+		}
+		if query.IncludeClosed || query.Status == "closed" {
+			t.Errorf("%s listed retired records: %+v", verb, query)
+		}
+		seen[key]++
+	}
+	for key, count := range seen {
+		if count > 1 {
+			t.Errorf("%s read queue key %q %d times, want at most once", verb, key, count)
+		}
+		if !containsNudgeID(targetQueueKeys, key) {
+			t.Errorf("%s read queue key %q, which the target does not carry", verb, key)
+		}
+	}
 }
 
 // TestBeadsNudgeQueueTargetReadsAreKeyed pins the cost model: ListFor and
-// ClaimDue for one target issue one keyed List per queue key and never the
-// family-wide list, and the request count is the same with a thousand
-// unrelated records in the queue as with none.
+// ClaimDue for one target issue at most one keyed List per queue key and never
+// the family-wide list, and neither the requests nor the rows the store hands
+// back change with a thousand unrelated queue records, or with the session
+// beads and nudge shadows that share the target's "agent:<key>" label.
 func TestBeadsNudgeQueueTargetReadsAreKeyed(t *testing.T) {
 	now := time.Now().UTC()
 
 	quietQueue, quietRecorder, _ := newRecordedNudgeQueue(t)
-	quietOps, quietClaims := runTargetDeliveryVerbs(t, quietQueue, quietRecorder, now)
+	quiet := runTargetDeliveryVerbs(t, quietQueue, quietRecorder, now)
 
 	busyQueue, busyRecorder, busyBacking := newRecordedNudgeQueue(t)
 	seedUnrelatedNudges(t, busyBacking, 1000, now)
-	busyOps, busyClaims := runTargetDeliveryVerbs(t, busyQueue, busyRecorder, now)
+	seedSameKeyNeighbors(t, busyBacking, 25)
+	busy := runTargetDeliveryVerbs(t, busyQueue, busyRecorder, now)
 
-	for _, op := range busyOps {
-		if op.Kind != beadstest.OpList {
-			continue
-		}
-		if !strings.HasPrefix(op.Query.Label, nudgeQueueAgentLabelPrefix) {
-			t.Errorf("a target read listed %+v; want only keyed %q lists (caller %v)", op.Query, nudgeQueueAgentLabelPrefix+"<key>", op.Caller)
-		}
-		if op.Query.IncludeClosed || op.Query.Status == "closed" {
-			t.Errorf("a target read listed retired records: %+v", op.Query)
-		}
-	}
-	quiet, busy := nudgeQueueRequestProfile(quietOps), nudgeQueueRequestProfile(busyOps)
-	if strings.Join(quiet, ",") != strings.Join(busy, ",") {
-		t.Fatalf("requests with 1000 unrelated records = %v, want the same as with none = %v", busy, quiet)
-	}
-	if quietClaims != busyClaims {
-		t.Fatalf("claims with 1000 unrelated records = %d, want %d", busyClaims, quietClaims)
-	}
-	lists := 0
-	for _, entry := range busy {
-		if strings.HasPrefix(entry, beadstest.OpList) {
-			lists++
+	assertKeyedTargetReads(t, "ListFor", busy.listForOps)
+	assertKeyedTargetReads(t, "ClaimDue", busy.claimOps)
+	for _, pair := range []struct {
+		verb        string
+		quiet, busy []beadstest.RecordedOp
+	}{{"ListFor", quiet.listForOps, busy.listForOps}, {"ClaimDue", quiet.claimOps, busy.claimOps}} {
+		q, b := nudgeQueueRequestProfile(pair.quiet), nudgeQueueRequestProfile(pair.busy)
+		if strings.Join(q, ",") != strings.Join(b, ",") {
+			t.Errorf("%s requests in a busy store = %v, want the same as in a quiet one = %v", pair.verb, b, q)
 		}
 	}
-	// ListFor and ClaimDue each read the two queue keys once.
-	if lists != 4 {
-		t.Fatalf("lists = %d (%v), want one per queue key per verb", lists, busy)
+	if quiet.claims != busy.claims {
+		t.Errorf("claims in a busy store = %d, want %d", busy.claims, quiet.claims)
+	}
+	// The target owns two records, so each verb's keyed reads return exactly
+	// those two rows however crowded the store is.
+	if busy.listForRows != 2 || busy.claimRows != 2 {
+		t.Errorf("rows returned in a busy store: ListFor=%d ClaimDue=%d, want 2 each (quiet: %d, %d)",
+			busy.listForRows, busy.claimRows, quiet.listForRows, quiet.claimRows)
 	}
 }
 
@@ -185,7 +267,10 @@ func TestBeadsNudgeQueueHotVerbsNeverScanTheQueue(t *testing.T) {
 		t.Fatalf("Rollback: %v", err)
 	}
 	for _, op := range recorder.Ops() {
-		if op.Kind == beadstest.OpList && (op.Query.Label == nudgeQueueLabel || op.Query.IncludeClosed || op.Query.Status == "closed") {
+		if op.Kind != beadstest.OpList {
+			continue
+		}
+		if op.Query.Metadata[nudgeMetaAgent] == "" || op.Query.IncludeClosed || op.Query.Status == "closed" {
 			t.Errorf("a delivery verb scanned the queue: %+v (caller %v)", op.Query, op.Caller)
 		}
 	}
@@ -255,23 +340,18 @@ func TestBeadsNudgeQueueRecordsCarryTheTargetLabel(t *testing.T) {
 }
 
 // TestBeadsNudgeQueueKeyedReadsIgnoreOtherFamilies pins the family filter: the
-// queue-key label is shared with the nudge shadow beads in the same store, and
-// a keyed read must not mistake one for a corrupt queue record.
+// target's identity is shared with session beads and nudge shadows in the same
+// store, and a keyed read must neither mistake one for a corrupt queue record
+// nor have the store hand it back at all.
 func TestBeadsNudgeQueueKeyedReadsIgnoreOtherFamilies(t *testing.T) {
-	store := openNudgeQueueStore(t, t.TempDir())
-	queue := newNudgeQueue(t, store)
+	queue, recorder, backing := newRecordedNudgeQueue(t)
 	now := time.Now().UTC()
 
-	if _, err := store.Create(beads.Bead{
-		Title:  "nudge:n-shadow",
-		Type:   "chore",
-		Labels: []string{"gc:nudge", nudgeQueueAgentLabelPrefix + testNudgeAgent},
-	}); err != nil {
-		t.Fatalf("seeding a shadow-shaped bead: %v", err)
-	}
+	seedSameKeyNeighbors(t, backing, 3)
 	if err := queue.Enqueue(testNudgeItem("n-real", "", now)); err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
+	recorder.reset()
 	pending, _, _, err := queue.ListForAgent(testNudgeAgent, now)
 	if err != nil {
 		t.Fatalf("ListForAgent: %v", err)
@@ -279,8 +359,8 @@ func TestBeadsNudgeQueueKeyedReadsIgnoreOtherFamilies(t *testing.T) {
 	if len(pending) != 1 || pending[0].ID != "n-real" {
 		t.Fatalf("pending = %v, want only the queue record", nudgeItemIDs(pending))
 	}
-	if got := queue.(*beadsNudgeQueue).quarantined.Load(); got != 0 {
-		t.Fatalf("quarantined = %d, want a bead outside the queue family not counted as corrupt", got)
+	if got := recorder.rows.Load(); got != 1 {
+		t.Fatalf("the keyed read returned %d rows, want only the queue record; the family filter is not pushed to the store", got)
 	}
 }
 
@@ -444,6 +524,15 @@ func TestBeadsNudgeQueueSupersedeIsScopedToItsQueueKey(t *testing.T) {
 	if len(pending) != 1 || pending[0].ID != "n-neighbor" {
 		t.Fatalf("neighbor pending = %v, want another agent's item untouched", nudgeItemIDs(pending))
 	}
+}
+
+func nudgeQueueHasLabel(record beads.Bead, label string) bool {
+	for _, have := range record.Labels {
+		if have == label {
+			return true
+		}
+	}
+	return false
 }
 
 func containsNudgeID(ids []string, want string) bool {

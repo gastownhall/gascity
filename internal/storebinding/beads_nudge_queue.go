@@ -33,9 +33,14 @@ package storebinding
 // that follows only rejects an item that raced into the dead bucket.
 //
 // KEYED READS, OWNER-RUN MAINTENANCE. Every delivery verb reads only the
-// records addressed to its queue keys (label "agent:<key>"; a session-pinned
-// record also carries "target:<session id>"), so one target's claim costs the
-// same whether the queue holds ten records or a hundred thousand. The verbs
+// records addressed to its queue keys: one List per key, on the queue family
+// label and bead type, keyed by the record's "agent" metadata. The key is
+// metadata rather than the "agent:<key>" label because the label is shared
+// with session beads and nudge shadows, and because a metadata equality is what
+// the engines index (on SQLite, idx_metadata_key_value; the label probe is a
+// residual check on the rows it finds). So one target's claim issues the same
+// requests and gets back the same rows however many other records the queue or
+// the store holds. The verbs
 // repair only what they touch: an expired lease already reads as pending, a
 // candidate claim revokes the stale lease it is about to replace, and an
 // expired candidate is dead-lettered instead of claimed. The whole-queue pass —
@@ -101,8 +106,10 @@ const (
 const (
 	nudgeQueueLabel    = "gc:nudge-queue"
 	nudgeQueueBeadType = "chore"
-	// nudgeQueueAgentLabelPrefix keys a record by the queue key it is
-	// addressed to; every target-scoped read is one List on this label.
+	// nudgeQueueAgentLabelPrefix labels a record with the queue key it is
+	// addressed to, in the vocabulary other bead families use for the same
+	// identity. Reads key on the "agent" metadata instead: the label is not
+	// specific to the queue.
 	nudgeQueueAgentLabelPrefix = "agent:"
 	// nudgeQueueTargetLabelPrefix keys a session-pinned record by the exact
 	// session it is fenced to. Records written before it existed lack it, so
@@ -891,35 +898,36 @@ func (q *beadsNudgeQueue) allLiveEntries(now time.Time) ([]nudgeQueueEntry, []er
 }
 
 // keyedEntries reads the live records addressed to any of keys: one List per
-// distinct key on its "agent:<key>" label, never the city-wide family label.
-// The key label is shared with other bead families in the same store (the
-// nudge shadows carry it too), so records outside the queue family are
-// dropped. An undecodable queue record is skipped and counted: it is
-// quarantined on its own instead of failing the read.
+// distinct key, never the city-wide family. An undecodable queue record is
+// skipped and quarantined on its own instead of failing the read.
 func (q *beadsNudgeQueue) keyedEntries(keys []string, now time.Time) ([]nudgeQueueEntry, error) {
 	var entries []nudgeQueueEntry
 	for _, key := range nudgeQueueUniqueIDs(keys) {
-		records, err := q.store.List(beads.ListQuery{
-			Label:    nudgeQueueAgentLabelPrefix + key,
-			Sort:     beads.SortCreatedAsc,
-			TierMode: beads.TierBoth,
-		})
+		records, err := q.store.List(nudgeQueueKeyedQuery(key))
 		if err != nil {
 			return nil, fmt.Errorf("listing nudge queue for %q: %w", key, err)
 		}
-		family := records[:0]
-		for _, record := range records {
-			if nudgeQueueHasLabel(record, nudgeQueueLabel) {
-				family = append(family, record)
-			}
-		}
-		decoded, corrupt := decodeNudgeQueueRecords(family, now)
+		decoded, corrupt := decodeNudgeQueueRecords(records, now)
 		if len(corrupt) > 0 {
 			q.quarantined.Add(uint64(len(corrupt)))
 		}
 		entries = append(entries, decoded...)
 	}
 	return entries, nil
+}
+
+// nudgeQueueKeyedQuery is the one read a target-scoped verb issues per queue
+// key. Every predicate is pushed to the store: the family label and bead type
+// drop the session beads and nudge shadows that share the key's identity, and
+// the metadata equality is the indexed predicate that drives the lookup.
+func nudgeQueueKeyedQuery(key string) beads.ListQuery {
+	return beads.ListQuery{
+		Label:    nudgeQueueLabel,
+		Type:     nudgeQueueBeadType,
+		Metadata: map[string]string{nudgeMetaAgent: key},
+		Sort:     beads.SortCreatedAsc,
+		TierMode: beads.TierBoth,
+	}
 }
 
 // decodeNudgeQueueRecords decodes records, separating the ones that do not
@@ -1117,15 +1125,6 @@ func nudgeQueuePassesFence(item nudgequeue.Item, target ClaimTarget) bool {
 		return target.SessionID != "" && item.SessionID == target.SessionID
 	}
 	return item.ContinuationEpoch == "" || target.ContinuationEpoch != ""
-}
-
-func nudgeQueueHasLabel(record beads.Bead, label string) bool {
-	for _, have := range record.Labels {
-		if have == label {
-			return true
-		}
-	}
-	return false
 }
 
 // nudgeQueueItemExpired reports whether item's deliver-by deadline has passed.
