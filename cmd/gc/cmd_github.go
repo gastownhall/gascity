@@ -178,6 +178,12 @@ func doGitHubPRBackfill(opts githubPRBackfillOptions, stdout, stderr io.Writer) 
 		fmt.Fprintf(stderr, "gc github pr backfill: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	for _, login := range opts.authors {
+		if strings.TrimSpace(login) == "" {
+			fmt.Fprintln(stderr, "gc github pr backfill: --author must not be empty") //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), opts.timeout)
 	defer cancel()
 
