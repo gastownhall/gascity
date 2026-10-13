@@ -179,7 +179,7 @@ func TestNativeJournalActivationSetDropsClosedHandles(t *testing.T) {
 
 func TestProxiedStoreEventsJournalReadsThroughTheNativeLeaf(t *testing.T) {
 	store, native, _ := newSplitFixture(t)
-	store.journalActive = true
+	store.journal = proxiedJournalActivation{resolved: true, active: true}
 	want := journalops.Page{Rows: []journalops.Row{{Seq: 1, IssueID: "prx-1"}}, Head: 1}
 	// The leaf's own activation is not consulted: bd does the writes.
 	native.storage = &nativeJournalReaderSpy{read: func(context.Context, int64, int) (journalops.Page, error) {
@@ -245,7 +245,7 @@ func TestProxiedEventsJournalActiveFollowsBdPrecedence(t *testing.T) {
 func proxiedJournalFixture(t *testing.T, spy *nativeJournalReaderSpy) (*ProxiedStore, *NativeDoltStore) {
 	t.Helper()
 	store, native, _ := newSplitFixture(t)
-	store.journalActive = true
+	store.journal = proxiedJournalActivation{resolved: true, active: true}
 	native.proxiedReadVerdicts = true
 	native.storage = spy
 	return store, native
@@ -302,7 +302,7 @@ func TestProxiedStoreEventsJournalTerminalVerdictDemotes(t *testing.T) {
 
 func TestProxiedStoreEventsJournalUnavailableWhenDemoted(t *testing.T) {
 	store, _, _ := newSplitFixture(t)
-	store.journalActive = true
+	store.journal = proxiedJournalActivation{resolved: true, active: true}
 	store.standDown(NewNonTerminalProxiedVerdictError(ProxiedVerdictProxyGone, "bd restarted its proxy", nil))
 
 	if _, err := store.ReadEventsJournalPage(context.Background(), 0, 0); !errors.Is(err, ErrEventsJournalUnavailable) {
@@ -319,7 +319,7 @@ func TestProxiedStoreEventsJournalUnavailableWhenDemoted(t *testing.T) {
 func TestProxiedStoreEventsJournalRefusalOrder(t *testing.T) {
 	t.Run("closed", func(t *testing.T) {
 		store, _, _ := newSplitFixture(t)
-		store.journalActive = true
+		store.journal = proxiedJournalActivation{resolved: true, active: true}
 		if err := store.CloseStore(); err != nil {
 			t.Fatalf("CloseStore: %v", err)
 		}
@@ -335,6 +335,74 @@ func TestProxiedStoreEventsJournalRefusalOrder(t *testing.T) {
 			t.Fatalf("error = %v, want ErrEventsJournalInactive alone", err)
 		}
 	})
+}
+
+// writeScopeJournalConfig writes the scope's bd config with body.
+func writeScopeJournalConfig(t *testing.T, scopeRoot, body string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(scopeRoot, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(scopeRoot, ".beads", "config.yaml"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Opening a proxied store reads no journal config: activation is resolved on
+// the first journal question, so a scope nobody tails pays nothing for it.
+func TestProxiedStoreResolvesJournalActivationOnFirstUse(t *testing.T) {
+	t.Setenv("BD_EVENTS_JOURNAL", "")
+	f := newGuardFixture(t)
+	t.Cleanup(func() { _ = f.store.CloseStore() })
+	writeScopeJournalConfig(t, f.admitted.scopeRoot, "events-journal: true\n")
+	if !f.store.EventsJournalActive() {
+		t.Fatal("EventsJournalActive = false: activation was resolved at open, before the scope enabled the journal")
+	}
+}
+
+// bd's CLI re-resolves activation on every invocation, so a scope that turns
+// the journal off stops journaling at once. The guard tick re-resolves it, so
+// the store stops answering "caught up" over writes nobody recorded.
+func TestProxiedGuardTickRefreshesJournalActivation(t *testing.T) {
+	t.Setenv("BD_EVENTS_JOURNAL", "")
+	f := newGuardFixture(t)
+	f.start()
+	writeScopeJournalConfig(t, f.admitted.scopeRoot, "events-journal: true\n")
+	if !f.store.EventsJournalActive() {
+		t.Fatal("EventsJournalActive = false on a scope that enables the journal")
+	}
+
+	writeScopeJournalConfig(t, f.admitted.scopeRoot, "events-journal: false\n")
+	if step := f.tick(); step != proxiedGuardHeld {
+		t.Fatalf("tick = %s, want held", step)
+	}
+	if f.store.EventsJournalActive() {
+		t.Fatal("EventsJournalActive = true after a tick on a scope that turned the journal off")
+	}
+	if _, err := f.store.ReadEventsJournalPage(context.Background(), 0, 0); !errors.Is(err, ErrEventsJournalInactive) {
+		t.Fatalf("error = %v, want ErrEventsJournalInactive", err)
+	}
+}
+
+// A re-pin ends its tick before the journal slot, so the re-pin re-resolves
+// activation itself.
+func TestProxiedGuardRepinRefreshesJournalActivation(t *testing.T) {
+	t.Setenv("BD_EVENTS_JOURNAL", "")
+	f := newGuardFixture(t)
+	f.start()
+	writeScopeJournalConfig(t, f.admitted.scopeRoot, "events-journal: true\n")
+	if !f.store.EventsJournalActive() {
+		t.Fatal("EventsJournalActive = false on a scope that enables the journal")
+	}
+
+	t.Setenv("BD_EVENTS_JOURNAL", "0")
+	f.admitted.writeRecord(6002, "99887766")
+	if step := f.tick(); step != proxiedGuardRepinned {
+		t.Fatalf("tick = %s, want repinned", step)
+	}
+	if f.store.EventsJournalActive() {
+		t.Fatal("EventsJournalActive = true after a re-pin under BD_EVENTS_JOURNAL=0")
+	}
 }
 
 // TestNativeDoltStoreLedgerfeedTailsRealWrites drives a real embedded store

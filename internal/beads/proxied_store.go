@@ -172,9 +172,10 @@ type ProxiedStore struct {
 	// reopenNative is the ONLY recovery path a non-terminally demoted handle
 	// has. See NativeLeafReopener.
 	reopenNative NativeLeafReopener
-	// journalActive is whether the scope's writes are journaled, resolved at
-	// construction; see EventsJournalActive.
-	journalActive bool
+	// journal caches whether the scope's writes are journaled. It is resolved
+	// on first use and forgotten by every guard tick and re-pin; see
+	// EventsJournalActive.
+	journal proxiedJournalActivation
 }
 
 // NativeLeafReopener re-runs admission and opens a FRESH native read leaf.
@@ -253,7 +254,6 @@ func NewProxiedStore(native *NativeDoltStore, bd Store, pin Pin, opts ...Proxied
 		root:     pin.Root(),
 		database: pin.Database(),
 	}
-	store.journalActive = proxiedEventsJournalActive(pin)
 	// H2. The bd leaf owns the sidecar because it is the leaf that WRITES
 	// local strings, and because it is the leaf that survives a demotion.
 	if carrier, ok := bd.(localSidecarCarrier); ok {
@@ -447,6 +447,7 @@ func (s *ProxiedStore) repin(native *NativeDoltStore, pin Pin) bool {
 	s.root = pin.Root()
 	s.database = pin.Database()
 	s.verdict = nil
+	s.journal.forget()
 	if s.sidecar != nil {
 		native.localStrings = s.sidecar
 	}

@@ -29,7 +29,7 @@ func (s *ProxiedStore) ReadEventsJournalPage(ctx context.Context, since int64, l
 	if closed {
 		return journalops.Page{}, fmt.Errorf("reading events journal after seq %d: proxied store: %w", since, ErrStoreClosed)
 	}
-	if !s.journalActive {
+	if !s.journalActive() {
 		return journalops.Page{}, fmt.Errorf("reading events journal after seq %d: %w", since, ErrEventsJournalInactive)
 	}
 	if native == nil {
@@ -46,9 +46,55 @@ func (s *ProxiedStore) ReadEventsJournalPage(ctx context.Context, since int64, l
 // and opened with the BD_ namespace withheld, so its activation reflects the
 // workspace config alone. Every write goes through bd, which inherits this
 // process's environment and resolves activation with BD_EVENTS_JOURNAL first;
-// the store resolves it the same way, once, when it is constructed.
+// the store resolves it the same way.
+//
+// bd's CLI resolves activation on every invocation (only bd serve resolves it
+// once, at listen), so the store's answer is a cache: resolved on the first
+// journal question, and forgotten by every guard tick and re-pin. A store with
+// no guard (a one-shot open) keeps its first answer for its short life.
 func (s *ProxiedStore) EventsJournalActive() bool {
-	return s.journalActive && s.nativeLeaf() != nil
+	return s.nativeLeaf() != nil && s.journalActive()
+}
+
+// proxiedJournalActivation is ProxiedStore's cached journal activation,
+// guarded by the store's mu. epoch advances on every forget, so a resolution
+// that raced a forget is not cached over it.
+type proxiedJournalActivation struct {
+	resolved bool
+	active   bool
+	epoch    uint64
+}
+
+// forget drops the cached answer. The caller holds the store's mu.
+func (a *proxiedJournalActivation) forget() {
+	a.resolved = false
+	a.epoch++
+}
+
+// journalActive returns the cached activation, resolving it — outside mu,
+// since it reads the scope's config — when nothing is cached.
+func (s *ProxiedStore) journalActive() bool {
+	s.mu.RLock()
+	cached, pin := s.journal, s.pin
+	s.mu.RUnlock()
+	if cached.resolved {
+		return cached.active
+	}
+	active := proxiedEventsJournalActive(pin)
+	s.mu.Lock()
+	if s.journal.epoch == cached.epoch {
+		s.journal.resolved, s.journal.active = true, active
+	}
+	s.mu.Unlock()
+	return active
+}
+
+// forgetJournalActivation drops the cached activation so the next journal
+// question re-resolves it.
+func (s *ProxiedStore) forgetJournalActivation() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.journal.forget()
 }
 
 // proxiedEventsJournalActive resolves the activation bd's writes to the
