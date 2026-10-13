@@ -438,18 +438,26 @@ func (p poolExecutionBackstop) clearHold(store beads.Store, s *beads.Bead, stdou
 // executionStalledLatchRetryAfter. An unparseable latch time holds, so a
 // corrupt value can never turn the latch into a per-tick drain.
 func (p poolExecutionBackstop) stalledLatchHolds(s *beads.Bead) bool {
-	latchedAt := strings.TrimSpace(s.Metadata[executionClaimNudgeStalledKey])
+	return stalledLatchHolds(s, executionClaimNudgeStalledKey, executionClaimNudgeStalledTokenKey, p.now)
+}
+
+// stalledLatchHolds reports whether a backstop's terminal-drain latch on s
+// (atKey when, tokenKey for which incarnation) still holds at now: written for
+// the current incarnation within executionStalledLatchRetryAfter. An
+// unreadable time holds, so a corrupt latch never re-arms the drain.
+func stalledLatchHolds(s *beads.Bead, atKey, tokenKey string, now time.Time) bool {
+	latchedAt := strings.TrimSpace(s.Metadata[atKey])
 	if latchedAt == "" {
 		return false
 	}
-	if strings.TrimSpace(s.Metadata[executionClaimNudgeStalledTokenKey]) != strings.TrimSpace(s.Metadata["instance_token"]) {
+	if strings.TrimSpace(s.Metadata[tokenKey]) != strings.TrimSpace(s.Metadata["instance_token"]) {
 		return false
 	}
 	ts, err := time.Parse(time.RFC3339, latchedAt)
 	if err != nil {
 		return true
 	}
-	return p.now.Sub(ts) < executionStalledLatchRetryAfter
+	return now.Sub(ts) < executionStalledLatchRetryAfter
 }
 
 // exhausted turns a spent attempt budget into one observable fact and one drain
