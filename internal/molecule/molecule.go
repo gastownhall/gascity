@@ -756,6 +756,10 @@ func advanceAttachEpochFence(store beads.Store, writer beads.ConditionalWriter, 
 	return ErrEpochConflict
 }
 
+// existingAttachIDMapping maps each recipe step to its bead in the existing
+// attach rooted at root, matching step refs among the beads whose
+// AttachRootIDMetadataKey names root when any do (two for one step is an
+// error), else among the unstamped open beads a pre-stamp attach left.
 func existingAttachIDMapping(store beads.Store, recipe *formula.Recipe, rootBeadID string, root beads.Bead) (map[string]string, error) {
 	idMapping := map[string]string{}
 	if recipe == nil {
