@@ -212,7 +212,7 @@ func otherFailurePatch(row session.Info, meta map[string]string, f startFailureR
 	}
 	attempts, _ := strconv.Atoi(row.WakeAttemptsMetadata)
 	accrual := session.WakeFailureAccrualPatch(attempts, defaultMaxWakeAttempts, now.Add(defaultQuarantineDuration))
-	maps.Copy(patch, accrual.Patch)
+	maps.Copy(patch, accrual.Over(row, now)) // a live quarantine keeps its reason (v5.9z)
 	return patch, class.With(accrual.Class(row, now)), accrual.Quarantined
 }
 

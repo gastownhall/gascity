@@ -269,7 +269,7 @@ func deadRuntimePatch(r *rowFacts, heal bool) (patch session.MetadataPatch, clas
 	default:
 		return patch, class, false, nil
 	}
-	maps.Copy(patch, accrual.Patch)
+	maps.Copy(patch, accrual.Over(info, r.w.Now)) // a live quarantine keeps its reason (v5.9z)
 	class = accrual.Class(info, r.w.Now)
 	patch["last_woke_at"] = ""
 	return patch, class, true, ev

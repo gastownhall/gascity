@@ -43,6 +43,9 @@ const (
 	simSteps  = 500
 	// simMaxPacedRounds bounds I10's paced re-issues at quiescence (v5.9n).
 	simMaxPacedRounds = 8
+	// simQuietExtension caps how far row timers armed during quiescence
+	// move I10's bound (quietBound).
+	simQuietExtension = 15 * time.Minute
 	simCISeeds        = 64
 	simGuard          = 10 * time.Second // real time: turns a hang into a failure
 	simCityLeg        = "city"
@@ -396,6 +399,12 @@ type sim struct {
 	// basisMoves are the outside writes that moved a row's drain basis, as
 	// "leg/id", in order (I16, v5.9n); writes is cleared every step.
 	basisMoves []string
+	// lastWriter is, by "leg/id" and key, the actor whose write last changed
+	// the key; premiseRefusals are the rows, as "leg/id", whose own effect
+	// refused on its premise over a key an outside writer last changed, in
+	// order (I15's #57 clock, v5.9x).
+	lastWriter      map[string]map[string]string
+	premiseRefusals []string
 	// round is the effects quiescence's current round released, with
 	// their settlements (I10's paced retries, v5.9n).
 	round    []simResult
@@ -894,6 +903,47 @@ var externalOps = []struct {
 	}},
 }
 
+// ensureRunningAllows is Manager.ensureRunning's refusal before any start: a
+// kill-fenced row, or one whose drain-ack stop is pending (the controller's
+// stop owns its runtime), starts nothing.
+func (s *sim) ensureRunningAllows(b beads.Bead) bool {
+	m := b.Metadata
+	return !session.KillPendingMetadata(m["state"], m["state_reason"], m["sleep_reason"], m["slept_at"], s.clk.Now()) &&
+		(m["state"] != string(session.StateDraining) || m["state_reason"] != session.DrainAckStopPendingReason)
+}
+
+// ensureRunningConfirms is Manager.ensureRunning's confirm of a runtime it
+// started (confirmLiveSessionState): the row active from a dormant or
+// uncommitted state, its pending-create claim and any stop request cleared
+// (#7635), so the controller never adopts an operator's attach (mc-946b6
+// seed 848's sim gap).
+func (s *sim) ensureRunningConfirms(l *simLeg, b beads.Bead) {
+	m := b.Metadata
+	var kv []string
+	for k := range session.ClearStopRequestPatch() {
+		if m[k] != "" {
+			kv = append(kv, k, "")
+		}
+	}
+	switch session.State(m["state"]) {
+	case "", session.StateStartPending, session.StateCreating, session.StateAsleep, session.StateSuspended:
+		kv = append(kv, "state", string(session.StateActive), "state_reason", "creation_complete")
+	}
+	if strings.TrimSpace(m["pending_create_claim"]) != "" {
+		kv = append(kv, "pending_create_claim", "", "pending_create_started_at", "")
+	}
+	if len(kv) > 0 {
+		s.setMeta(l, b.ID, kv...)
+	}
+}
+
+// runtimeOpStarts are the outside starts among runtimeOps, by name, with
+// the row write each makes once its runtime is up; each runs only when
+// ensureRunning would start at all.
+var runtimeOpStarts = map[string]func(s *sim, l *simLeg, b beads.Bead){
+	"attach-recreates": (*sim).ensureRunningConfirms, // gc session attach
+}
+
 // runtimeOps change the runtime under a row's name, under the provider's mu.
 var runtimeOps = []struct {
 	name string
@@ -999,10 +1049,17 @@ func (s *sim) step() {
 		return
 	default:
 		op := s.pickRuntimeOp()
-		s.external("runtime "+op.name, func(_ *simLeg, b beads.Bead) {
+		s.external("runtime "+op.name, func(l *simLeg, b beads.Bead) {
+			started := runtimeOpStarts[op.name]
+			if started != nil && !s.ensureRunningAllows(b) {
+				return
+			}
 			s.sp.mu.Lock()
-			defer s.sp.mu.Unlock()
 			op.fn(s.sp, b.Metadata["session_name"], b)
+			s.sp.mu.Unlock()
+			if started != nil {
+				started(s, l, b)
+			}
 		})
 		return
 	}
@@ -1024,6 +1081,7 @@ func (s *sim) audit(actor string) {
 		}
 		leg, _, _ := strings.Cut(k, "/")
 		s.writes = append(s.writes, simWrite{Leg: leg, Actor: actor, Before: before, After: after, At: s.clk.Now()})
+		s.noteWriter(k, actor, before, after)
 		if actor == "v2" {
 			continue
 		}
@@ -1081,6 +1139,20 @@ func (s *sim) snapshot() map[string]beads.Bead {
 func (s *sim) run() {
 	s.inventory()
 	for range simSteps {
+		if s.step(); len(s.failures) > 0 {
+			return
+		}
+	}
+	s.quiesce()
+}
+
+// runShifted is run with one extra RNG draw before every step: the same
+// operations on a schedule the corpus never takes, so a model gap that fits
+// only main's stream shows here (mc-946b6).
+func (s *sim) runShifted() {
+	s.inventory()
+	for range simSteps {
+		_ = s.rng.IntN(100)
 		if s.step(); len(s.failures) > 0 {
 			return
 		}
@@ -1207,6 +1279,7 @@ func (s *sim) quiesce() {
 	s.audit("v2")
 	slack := 2*simPatrol + s.cfg.Session.StartupTimeoutDuration()
 	bound := s.lastTimer().Add(slack)
+	ceiling := bound.Add(simQuietExtension)
 	rounds := quiesceRounds{}
 	for first, done := true, false; !done && len(s.failures) == 0; first = false {
 		before, backoff, at := s.snapshot(), s.p.backoff.Snapshot(), s.clk.Now()
@@ -1224,6 +1297,7 @@ func (s *sim) quiesce() {
 			// before it is in the table, and the bound covers it.
 			bound = b
 		}
+		bound = quietBound(bound, s.rowTimers(), s.clk.Now(), slack, ceiling)
 		after := s.snapshot()
 		changed := !maps.EqualFunc(before, after, sameBead)
 		switch {
@@ -1381,6 +1455,25 @@ func withoutLeaseKeys(meta map[string]string) map[string]string {
 	return out
 }
 
+// quietBound is I10's bound past a row timer armed during quiescence (a
+// start's churn clear, a heal's quarantine): one still ahead of now moves
+// the bound out to it plus slack, never past ceiling (simQuietExtension past
+// the bound read at quiescence), and never earlier than it was. The
+// backoff table does not move it: its paced re-issues re-arm it.
+func quietBound(bound, timer, now time.Time, slack time.Duration, ceiling time.Time) time.Time {
+	if !timer.After(now) {
+		return bound
+	}
+	b := timer.Add(slack)
+	if b.After(ceiling) {
+		b = ceiling
+	}
+	if b.After(bound) {
+		return b
+	}
+	return bound
+}
+
 // lastTimer is the latest pending timer: a row's hold, quarantine or kill
 // fence, A6's churn clear past an open committed row's wake (SESS-540), or
 // a backoff's expiry.
@@ -1448,6 +1541,19 @@ func simSeeds(t *testing.T) []uint64 {
 		seeds = append(seeds, first+i)
 	}
 	return seeds
+}
+
+// TestSimCorpusShiftedRNG is the corpus on the shifted stream (runShifted),
+// a CI gate beside it (mc-946b6): every seed's schedule differs from main's,
+// so the invariants are checked on 1024 schedules more.
+func TestSimCorpusShiftedRNG(t *testing.T) {
+	for _, seed := range simSeeds(t) {
+		t.Run(fmt.Sprint(seed), func(t *testing.T) {
+			s := newSim(t, seed, simOpts{})
+			s.runShifted()
+			s.report(t)
+		})
+	}
 }
 
 // Kills any merged path that breaks an invariant a run can observe: every
@@ -1570,5 +1676,28 @@ func TestSimInvariantsCatchSeededMutants(t *testing.T) {
 			}
 			t.Errorf("no seed of %d caught the mutant on %s", simCISeeds, m.inv)
 		})
+	}
+}
+
+// Kills I10's bound left behind a row timer armed during quiescence (shifted
+// seeds 99, 668: a start's churn clear), or moved by one it should not
+// follow: a timer ahead of now extends the bound to it plus slack, one not
+// ahead does not, the ceiling caps it, and the bound never moves earlier.
+func TestQuietBoundFollowsRowTimersArmedInQuiescence(t *testing.T) {
+	now, slack := plannerT0, time.Minute
+	bound, ceiling := now.Add(2*time.Minute), now.Add(17*time.Minute)
+	for _, c := range []struct {
+		name         string
+		bound, timer time.Time
+		want         time.Time
+	}{
+		{"a churn clear five minutes out", bound, now.Add(5 * time.Minute), now.Add(6 * time.Minute)},
+		{"a timer not ahead of now, the bound already passed", now.Add(-time.Minute), now, now.Add(-time.Minute)},
+		{"a timer past the ceiling", bound, now.Add(time.Hour), ceiling},
+		{"a timer whose bound would be earlier", bound, now.Add(30 * time.Second), bound},
+	} {
+		if got := quietBound(c.bound, c.timer, now, slack, ceiling); !got.Equal(c.want) {
+			t.Errorf("%s: bound %s, want %s", c.name, got.Sub(now), c.want.Sub(now))
+		}
 	}
 }

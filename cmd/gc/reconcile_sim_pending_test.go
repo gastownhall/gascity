@@ -368,12 +368,15 @@ func (s *sim) checkStaleCreates() {
 }
 
 // pendingCreateRollback reports a v2 close as failed-create of a row
-// holding its pending create's claim: a rollback (A10, S3) or A21's
-// failed-create close, which end the row and its holds with the Retire
-// cell, as legacy's failedCreateClosePatch does whatever holds the row
-// (SESS-061). I15 leaves the holds to it; PC1 judges when it may land.
+// holding its pending create's claim, or of a row already failed-create
+// whose claim a partial rollback or an attach's confirm cleared: a rollback
+// (A10, S3) or A21's failed-create close, which end the row and its holds
+// with the Retire cell, as legacy's failedCreateClosePatch does whatever
+// holds the row (SESS-061). I15 leaves the holds to it; PC1 judges when it
+// may land.
 func pendingCreateRollback(w simWrite) bool {
-	return w.Before.Metadata["pending_create_claim"] == "true" && w.After.Metadata["state"] == string(session.StateFailedCreate)
+	failed := string(session.StateFailedCreate)
+	return w.After.Metadata["state"] == failed && (w.Before.Metadata["pending_create_claim"] == "true" || w.Before.Metadata["state"] == failed)
 }
 
 // pendingCreateAdopt reports v2's adopt (A10, S2) of a pending create whose
@@ -865,4 +868,38 @@ func TestSimPC3CatchesALostCommitLeftRunning(t *testing.T) {
 		return
 	}
 	t.Fatal("no seed reached the lost commit")
+}
+
+// Kills I15's failed-create exception narrowed to a held claim (shifted
+// seeds 329, 665; SESS-061): A21's close of a row already failed-create,
+// its claim cleared, retires a heartbeat's hold as legacy's
+// failedCreateClosePatch does; the same close of a committed row still
+// fails I15, and so does a hold rewritten without a close.
+func TestFailedCreateCloseRetiresHolds(t *testing.T) {
+	held := rowAt(time.Hour)
+	closed := func(state string, closes bool, meta ...string) simWrite {
+		before := poolRow("gc-1", "worker", 1, state, append([]string{"held_until", held}, meta...)...)
+		after := poolRow("gc-1", "worker", 1, string(session.StateFailedCreate), "held_until", "")
+		if closes {
+			after.Status = "closed"
+		}
+		return simWrite{Leg: simCityLeg, Before: before, After: after, At: plannerT0}
+	}
+	for _, c := range []struct {
+		name  string
+		w     simWrite
+		fails bool
+	}{
+		{"a held claim", closed("creating", true, "pending_create_claim", "true"), false},
+		{"already failed-create, its claim cleared", closed(string(session.StateFailedCreate), true), false},
+		{"a committed row", closed("awake", true), true},
+		{"already failed-create, no close", closed(string(session.StateFailedCreate), false), true},
+	} {
+		s := scripted(t, nil, poolRow("gc-1", "worker", 1, "asleep"))
+		s.checkWrite(c.w)
+		failed := slices.ContainsFunc(s.failures, func(f string) bool { return strings.HasPrefix(f, "I15 ") })
+		if failed != c.fails {
+			t.Errorf("%s: failures %q, want an I15 failure %t", c.name, s.failures, c.fails)
+		}
+	}
 }

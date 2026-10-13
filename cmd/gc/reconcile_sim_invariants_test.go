@@ -24,7 +24,7 @@ import (
 func init() {
 	simStepChecks = append(simStepChecks, (*sim).checkCaps, (*sim).checkStarts, (*sim).checkDestructive, (*sim).checkTokens, (*sim).checkDead, (*sim).checkQuarantinedCommits)
 	simWriteChecks = append(simWriteChecks, (*sim).checkWrite)
-	simEffectChecks = append(simEffectChecks, (*sim).checkFinalized, (*sim).checkCensusOnly)
+	simEffectChecks = append(simEffectChecks, (*sim).checkFinalized, (*sim).checkCensusOnly, (*sim).checkPremiseRefusal)
 	simQuietChecks = append(simQuietChecks, (*sim).checkDwell, (*sim).checkStranded)
 	simMutants = append(simMutants, []struct {
 		name, inv string
@@ -291,7 +291,7 @@ func (s *sim) quarantinedCommit(id string, w simWrite, k string) bool {
 	if s.quarantinedCommits == nil {
 		s.quarantinedCommits = map[string]*quarantinedClock{}
 	}
-	s.quarantinedCommits[id] = &quarantinedClock{start: w.At, checked: w.At, moves: len(s.basisMoves)}
+	s.quarantinedCommits[id] = &quarantinedClock{start: w.At, checked: w.At, moves: len(s.basisMoves), refusals: len(s.premiseRefusals)}
 	return true
 }
 
@@ -309,8 +309,80 @@ func quarantineAlone(meta map[string]string, now time.Time) bool {
 // (checked), and restarts at an outside write that moved its drain basis
 // past basisMoves[moves].
 type quarantinedClock struct {
-	start, checked time.Time
-	moves          int
+	start, checked  time.Time
+	moves, refusals int
+}
+
+// noteWriter records actor as the last writer of every key the write from
+// before to after changed on row k (the status as "status").
+func (s *sim) noteWriter(k, actor string, before, after beads.Bead) {
+	if s.lastWriter == nil {
+		s.lastWriter = map[string]map[string]string{}
+	}
+	keys := s.lastWriter[k]
+	if keys == nil {
+		keys = map[string]string{}
+		s.lastWriter[k] = keys
+	}
+	if before.Status != after.Status {
+		keys["status"] = actor
+	}
+	for key := range metaKeys(before.Metadata, after.Metadata) {
+		if before.Metadata[key] != after.Metadata[key] {
+			keys[key] = actor
+		}
+	}
+}
+
+// metaKeys is the union of a's and b's keys.
+func metaKeys(a, b map[string]string) map[string]bool {
+	out := make(map[string]bool, len(a)+len(b))
+	for k := range a {
+		out[k] = true
+	}
+	for k := range b {
+		out[k] = true
+	}
+	return out
+}
+
+// checkPremiseRefusal records, for I15's #57 clock (v5.9x), a row whose own
+// effect an outside write refused on its premise: it settled refused
+// premise, and a key that differs between the row the cache held at its
+// release (what the pass read) and the store at its settlement was last
+// changed by an outside writer. v2 could not act on the row then.
+func (s *sim) checkPremiseRefusal(e *simEffect) func(settlement) {
+	l := s.legOf(e.it.Key.Leg)
+	if l == nil {
+		return func(settlement) {}
+	}
+	cached, err := l.cache.Get(e.it.Key.ID)
+	if err != nil {
+		return func(settlement) {}
+	}
+	cached.Metadata = maps.Clone(cached.Metadata)
+	return func(res settlement) {
+		if res.Cause != causePremise {
+			return
+		}
+		fresh, err := l.backing.Get(e.it.Key.ID)
+		if err != nil {
+			return
+		}
+		k := l.name + "/" + e.it.Key.ID
+		writers := s.lastWriter[k]
+		outside := func(key string) bool { return writers[key] != "" && writers[key] != "v2" }
+		if cached.Status != fresh.Status && outside("status") {
+			s.premiseRefusals = append(s.premiseRefusals, k)
+			return
+		}
+		for key := range metaKeys(cached.Metadata, fresh.Metadata) {
+			if cached.Metadata[key] != fresh.Metadata[key] && outside(key) {
+				s.premiseRefusals = append(s.premiseRefusals, k)
+				return
+			}
+		}
+	}
 }
 
 // checkQuarantinedCommits is I15's bound on §12.2 #57: a row whose commit
@@ -319,8 +391,9 @@ type quarantinedClock struct {
 // quarantine, or kept by its assigned work, as legacy's assigned-work lens
 // keeps it (DRAIN-046). The bound pauses while the row's liveness reads
 // unknown (A9 holds every arm, GUAR-053) and restarts at an outside write
-// that moves its incarnation or drain basis, whose refusal and backoff are
-// not v2's delay (CONTRACT v5.9x).
+// that moves its incarnation or drain basis, or that refuses the row's own
+// pending effect on its premise (checkPremiseRefusal), whose refusal and
+// backoff are not v2's delay (CONTRACT v5.9x).
 func (s *sim) checkQuarantinedCommits() {
 	if len(s.quarantinedCommits) == 0 {
 		return
@@ -332,8 +405,8 @@ func (s *sim) checkQuarantinedCommits() {
 		b := rows[id]
 		leg, _, _ := strings.Cut(id, "/")
 		switch {
-		case s.basisMovedOutside(leg, b.ID, c.moves):
-			c.start, c.moves = now, len(s.basisMoves)
+		case s.basisMovedOutside(leg, b.ID, c.moves), slices.Contains(s.premiseRefusals[min(c.refusals, len(s.premiseRefusals)):], leg+"/"+b.ID):
+			c.start, c.moves, c.refusals = now, len(s.basisMoves), len(s.premiseRefusals)
 		case obs == nil || obs[rowKey{Leg: rowLeg, ID: b.ID}].Liveness == livenessUnknown:
 			c.start = c.start.Add(now.Sub(c.checked))
 		}
@@ -520,17 +593,18 @@ func (s *sim) livePane(b beads.Bead) bool {
 }
 
 // namedPane reports whether b's name holds a live pane the stop verb must
-// not finalize over: b's own runtime, whatever its token, or, under b's
-// bead-scoped pool name, any runtime (never Foreign there, v5.2 D3; L2
-// refuses it). Another row's runtime under any other name is the Foreign
-// verdict, which proves b's gone.
+// not finalize over: b's own runtime, whatever its token, an ownerless one
+// (no identity: C8.3 defers and escalates on it, as livePane counts it), or,
+// under b's bead-scoped pool name, any runtime (never Foreign there, v5.2
+// D3; L2 refuses it). Another row's runtime under any other name is the
+// Foreign verdict, which proves b's gone.
 func (s *sim) namedPane(b beads.Bead) bool {
 	s.sp.mu.Lock()
 	defer s.sp.mu.Unlock()
 	name := b.Metadata["session_name"]
 	rt := s.sp.rts[name]
 	beadScoped := b.Metadata["pool_managed"] == "true" && strings.HasSuffix(name, "-"+b.ID)
-	return rt != nil && !rt.corpse && (rt.id == b.ID || beadScoped)
+	return rt != nil && !rt.corpse && (rt.id == b.ID || rt.id == "" || beadScoped)
 }
 
 // basisMovedOutside reports an outside write since basisMoves[from] that
@@ -1151,5 +1225,30 @@ func TestSimI4ClosedRowAsTheCloseFoundIt(t *testing.T) {
 				t.Fatalf("failures %q, want an I4 violation %v", s.failures, c.fails)
 			}
 		})
+	}
+}
+
+// Kills I16's live-pane test missing an ownerless runtime (shifted seed 824):
+// under a name the row does not own, its own runtime and an ownerless one
+// (no identity, which C8.3 defers on, as livePane counts it) are live panes
+// the stop may not finalize over; another row's (Foreign) is not.
+func TestNamedPaneCountsAnOwnerlessRuntime(t *testing.T) {
+	b := poolRow("gc-1", "worker", 1, "draining", "session_name", "s-worker", "pool_managed", "")
+	for _, c := range []struct {
+		name string
+		id   string
+		want bool
+	}{
+		{"its own runtime", "gc-1", true},
+		{"an ownerless runtime", "", true},
+		{"another row's runtime", "gc-9", false},
+	} {
+		s := scripted(t, nil, b)
+		s.sp.mu.Lock()
+		s.sp.put("s-worker", c.id, "1", "tok")
+		s.sp.mu.Unlock()
+		if got := s.namedPane(b); got != c.want {
+			t.Errorf("%s: namedPane %t, want %t", c.name, got, c.want)
+		}
 	}
 }

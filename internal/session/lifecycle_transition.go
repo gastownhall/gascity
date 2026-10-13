@@ -476,7 +476,8 @@ func SleepPatch(now time.Time, reason string) MetadataPatch {
 // KeepQuarantineReason drops patch's sleep_reason while the row's quarantine
 // is in force at now and its reason is the quarantine's (quarantine,
 // rate_limit, context-churn): a finalize landing after a late quarantine
-// never overwrites its reason, as the quarantine dominates (mc-slkxd). It
+// never overwrites its reason, as the quarantine dominates (mc-slkxd), nor
+// does a crash or churn accrual during it (ExitAccrual.Over, v5.9z). It
 // returns patch, edited in place.
 func KeepQuarantineReason(patch MetadataPatch, d Disposition, reason string, now time.Time) MetadataPatch {
 	if _, ok := patch["sleep_reason"]; !ok || !d.Quarantine.After(now) {

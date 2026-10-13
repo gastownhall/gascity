@@ -2251,6 +2251,22 @@ go_variant_test(
     test = ":gc_test",
 )
 
+# The corpus on the shifted stream (TestSimCorpusShiftedRNG, mc-946b6): one
+# extra RNG draw per step, so 1024 schedules main's stream never takes, in
+# sixteen ranges of 64. Ordinary test targets, outside SIM_CORPORA (the #7765
+# review): a failure is never cached, a retry reruns it, and --runs_per_test
+# and --test_env reach it.
+[go_variant_test(
+    name = "gc_sim_corpus_shifted_%d_test" % i,
+    size = "medium",
+    args = ["-test.run=^TestSimCorpusShiftedRNG$$"],
+    env = {
+        "GC_V2_SIM_SEEDS": "64",
+        "GC_V2_SIM_SEED_FIRST": str(1 + 64 * i),
+    },
+    test = ":gc_test",
+) for i in range(16)]
+
 # INTEGRATION_SOLO_TESTS, each alone, and INTEGRATION_SOLO_SPLIT_TESTS, by
 # subtest, in gc_test's integration build.
 # Manual: the unit lane's //... does not run them (gc_test runs them there);

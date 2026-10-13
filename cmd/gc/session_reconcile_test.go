@@ -3537,7 +3537,7 @@ func TestRecordChurn_Quarantine(t *testing.T) {
 // quarantining wake-failure and churn accruals and its rate-limit
 // quarantine write the later of their deadline and the row's unexpired
 // quarantined_until, extending a shorter one and keeping an operator's
-// longer one.
+// longer one; the accruals keep the live quarantine's reason (v5.9z).
 func TestRecordAccrualNeverShortensAQuarantine(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	at := func(d time.Duration) string { return now.Add(d).Format(time.RFC3339) }
@@ -3564,6 +3564,10 @@ func TestRecordAccrualNeverShortensAQuarantine(t *testing.T) {
 			syncBeadFromStore(&session, store)
 			if got := session.Metadata["quarantined_until"]; got != want {
 				t.Errorf("%s over quarantined_until %s: it is %s, want %s", name, existing, got, want)
+			}
+			// v5.9z: a crash or churn accrual keeps the live quarantine's reason.
+			if got := session.Metadata["sleep_reason"]; name != "rate limit" && got != "quarantine" {
+				t.Errorf("%s over a live quarantine: sleep_reason %q, want the quarantine's kept", name, got)
 			}
 		}
 	}
