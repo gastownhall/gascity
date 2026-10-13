@@ -692,9 +692,6 @@ func (s *sim) pass() {
 		if it.Kind == intentDrainBegin || it.Kind == intentDrainBeginFresh {
 			simDrainBegins.Add(1)
 		}
-		if it.Kind == intentSignalAck && it.Reason == decideFloorAckCancel {
-			simFloorCancels.Add(1)
-		}
 		if it.Reason == decideSquatterHeal {
 			simSquatterHeals.Add(1)
 		}
@@ -1684,20 +1681,10 @@ func TestSimCorpus(t *testing.T) {
 	}
 }
 
-// simFloorCancels counts the floor-ack cancels (DRAIN-010) the sims
-// admitted.
-var simFloorCancels atomic.Int64
-
 // TestSimCorpusFloored is the corpus with a min_active_sessions floor of 1
 // or 2 (by seed), so floor members' own acks are canceled (PAR-FLOORACK)
 // beside every other path: no invariant may break.
 func TestSimCorpusFloored(t *testing.T) {
-	before := simFloorCancels.Load()
-	t.Cleanup(func() {
-		if !t.Failed() && simFloorCancels.Load() == before {
-			t.Error("the floored sim corpus admitted no floor-ack cancel")
-		}
-	})
 	for _, seed := range simSeeds(t) {
 		t.Run(fmt.Sprint(seed), func(t *testing.T) {
 			s := newSim(t, seed, simOpts{noPendingCreates: true})

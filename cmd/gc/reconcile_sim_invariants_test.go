@@ -398,12 +398,21 @@ func premiseMovedKeys(err error) []string {
 	return strings.Split(list, ", ")
 }
 
+// unknownState reports b in a state A5 holds (the census's UnknownState:
+// one main does not know, but drain-ack stop-pending), on which no arm may
+// drain it (CONTRACT v5.10i; seed 437 of the floored-pending corpus).
+func (s *sim) unknownState(b beads.Bead) bool {
+	info := sessionInfoFromBead(b)
+	return !isKnownStateInfo(info) && !isDrainAckStopPendingInfo(info)
+}
+
 // checkQuarantinedCommits is I15's bound on §12.2 #57: a row whose commit
 // kept a late quarantine is, within quarantineDrainBound of v2's own time,
 // closed, stopped, asked to stop (A20's begin; A4 stops it), out of its
 // quarantine, or kept by its assigned work, as legacy's assigned-work lens
 // keeps it (DRAIN-046). The bound pauses while the row's liveness reads
-// unknown (A9 holds every arm, GUAR-053) and restarts at an outside write
+// unknown (A9 holds every arm, GUAR-053) or its state is one A5 holds
+// (v5.10i), and restarts at an outside write
 // that moves its incarnation or drain basis, or that refuses the row's own
 // pending effect on its premise (checkPremiseRefusal), whose refusal and
 // backoff are not v2's delay (CONTRACT v5.9x).
@@ -420,7 +429,7 @@ func (s *sim) checkQuarantinedCommits() {
 		switch {
 		case s.basisMovedOutside(leg, b.ID, c.moves), slices.Contains(s.premiseRefusals[min(c.refusals, len(s.premiseRefusals)):], leg+"/"+b.ID):
 			c.start, c.moves, c.refusals = now, len(s.basisMoves), len(s.premiseRefusals)
-		case obs == nil || obs[rowKey{Leg: rowLeg, ID: b.ID}].Liveness == livenessUnknown:
+		case obs == nil || obs[rowKey{Leg: rowLeg, ID: b.ID}].Liveness == livenessUnknown, s.unknownState(b):
 			c.start = c.start.Add(now.Sub(c.checked))
 		}
 		c.checked = now

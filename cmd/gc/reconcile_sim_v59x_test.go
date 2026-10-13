@@ -12,7 +12,8 @@ import (
 // bound that excuses v2's own delay, or that charges v2 for time it cannot
 // act: a row committed under a late quarantine, its liveness known and no
 // outside write, still up undrained past six patrols fails I15; the same
-// delay while its liveness reads unknown (A9's hold) does not, nor one an
+// delay while its liveness reads unknown (A9's hold) or its state is one A5
+// holds (v5.10i) does not, nor one an
 // outside write to its drain basis restarted, nor one an outside write
 // restarted by refusing the row's own effect on its premise (any premise
 // key the refusal names: a heartbeat's held_until, shifted seed 607;
@@ -26,6 +27,8 @@ func TestQuarantinedCommitBoundCountsOnlyV2sTime(t *testing.T) {
 	}{
 		{"v2's own delay", func(*sim) {}, true},
 		{"liveness unknown", func(s *sim) { s.sp.listing = 2 }, false},
+		// v5.10i (seed 437 of the floored-pending corpus): a state A5 holds.
+		{"state unknown", func(s *sim) { s.setMeta(s.legs[0], "gc-1", "state", "archived-v9") }, false},
 		{"an outside write moved the basis", func(s *sim) { s.operator("gc-1", "wake_request", "operator") }, false},
 		{"an outside write refused its own effect on the premise", func(s *sim) {
 			refuse(s, func() { s.operator("gc-1", "held_until", rowAt(2*time.Hour)) }, causePremise, "held_until")
