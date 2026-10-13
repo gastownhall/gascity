@@ -135,11 +135,24 @@ func runTargetDeliveryVerbs(t *testing.T, queue NudgeQueue, recorder *claimingOp
 }
 
 // seedSameKeyNeighbors writes the beads another family keeps under the same
-// "agent:<key>" label as the target's queue records: a session bead and an
-// open nudge shadow, both carrying the target's agent identity.
+// "agent:<key>" label and "agent" metadata as the target's queue records: a
+// session bead, an open nudge shadow, and a closed one — shadow history is
+// closed but never deleted, so a heavily nudged target accumulates it.
 func seedSameKeyNeighbors(t *testing.T, store beads.Store, n int) {
 	t.Helper()
 	for i := 0; i < n; i++ {
+		closedShadow, err := store.Create(beads.Bead{
+			Title:    fmt.Sprintf("nudge:closed-shadow-%d", i),
+			Type:     nudgeQueueBeadType,
+			Labels:   []string{"gc:nudge", nudgeQueueAgentLabelPrefix + testNudgeAgent},
+			Metadata: map[string]string{nudgeMetaAgent: testNudgeAgent, nudgeMetaNudgeID: fmt.Sprintf("closed-shadow-%d", i)},
+		})
+		if err != nil {
+			t.Fatalf("seeding a closed same-key shadow bead: %v", err)
+		}
+		if err := store.Close(closedShadow.ID); err != nil {
+			t.Fatalf("closing a same-key shadow bead: %v", err)
+		}
 		if _, err := store.Create(beads.Bead{
 			Title:    fmt.Sprintf("session %d", i),
 			Type:     "session",
@@ -170,9 +183,9 @@ func assertKeyedTargetReads(t *testing.T, verb string, ops []beadstest.RecordedO
 			continue
 		}
 		query := op.Query
-		key, keyed := query.Metadata[nudgeMetaAgent]
+		key, keyed := query.Metadata[nudgeMetaQueueKey]
 		if query.Label != nudgeQueueLabel || query.Type != nudgeQueueBeadType || !keyed || len(query.Metadata) != 1 {
-			t.Errorf("%s listed %+v; want the queue family keyed by %q metadata (caller %v)", verb, query, nudgeMetaAgent, op.Caller)
+			t.Errorf("%s listed %+v; want the queue family keyed by %q metadata (caller %v)", verb, query, nudgeMetaQueueKey, op.Caller)
 			continue
 		}
 		if query.IncludeClosed || query.Status == "closed" {
@@ -194,7 +207,7 @@ func assertKeyedTargetReads(t *testing.T, verb string, ops []beadstest.RecordedO
 // ClaimDue for one target issue at most one keyed List per queue key and never
 // the family-wide list, and neither the requests nor the rows the store hands
 // back change with a thousand unrelated queue records, or with the session
-// beads and nudge shadows that share the target's "agent:<key>" label.
+// beads and open or closed nudge shadows that share the target's identity.
 func TestBeadsNudgeQueueTargetReadsAreKeyed(t *testing.T) {
 	now := time.Now().UTC()
 
@@ -225,6 +238,39 @@ func TestBeadsNudgeQueueTargetReadsAreKeyed(t *testing.T) {
 	if busy.listForRows != 2 || busy.claimRows != 2 {
 		t.Errorf("rows returned in a busy store: ListFor=%d ClaimDue=%d, want 2 each (quiet: %d, %d)",
 			busy.listForRows, busy.claimRows, quiet.listForRows, quiet.claimRows)
+	}
+}
+
+// TestBeadsNudgeQueueReadKeyIsQueueOnly pins what drives a keyed read on the
+// engine's metadata index. The rows a target's read visits are the index
+// entries for its key, so the key must be one only queue records carry: nudge
+// shadows live in the same store, are closed but never deleted, and would
+// otherwise put the target's whole shadow history under every read.
+func TestBeadsNudgeQueueReadKeyIsQueueOnly(t *testing.T) {
+	store := openNudgeQueueStore(t, t.TempDir())
+	now := time.Now().UTC()
+	item := testNudgeItem("n-shadowed", "session-live", now)
+	item.Reference = &nudgequeue.Reference{Kind: "wait", ID: "w-1"}
+	shadowID, _, err := nudgequeue.NewStore(beads.NudgesStore{Store: store}).Save(item)
+	if err != nil {
+		t.Fatalf("saving the nudge shadow: %v", err)
+	}
+	shadow, err := store.Get(shadowID)
+	if err != nil {
+		t.Fatalf("Get shadow: %v", err)
+	}
+	record := nudgeQueueRecord(item, nudgeQueueStateLive, nil)
+	query := nudgeQueueKeyedQuery(item.Agent)
+	if len(query.Metadata) == 0 {
+		t.Fatalf("keyed query %+v carries no metadata key to drive the lookup", query)
+	}
+	for key, value := range query.Metadata {
+		if _, shared := shadow.Metadata[key]; shared {
+			t.Errorf("keyed reads look up metadata %q, which nudge shadows also write; a target's read would visit its whole shadow history", key)
+		}
+		if record.Metadata[key] != value {
+			t.Errorf("queue record metadata %q = %q, want %q so the keyed read finds it", key, record.Metadata[key], value)
+		}
 	}
 }
 
@@ -271,7 +317,7 @@ func TestBeadsNudgeQueueHotVerbsNeverScanTheQueue(t *testing.T) {
 		if op.Kind != beadstest.OpList {
 			continue
 		}
-		if op.Query.Metadata[nudgeMetaAgent] == "" || op.Query.IncludeClosed || op.Query.Status == "closed" {
+		if op.Query.Metadata[nudgeMetaQueueKey] == "" || op.Query.IncludeClosed || op.Query.Status == "closed" {
 			t.Errorf("a delivery verb scanned the queue: %+v (caller %v)", op.Query, op.Caller)
 		}
 	}
@@ -383,6 +429,7 @@ func TestBeadsNudgeQueueQuarantinesACorruptRecord(t *testing.T) {
 			Metadata: map[string]string{
 				nudgeMetaNudgeID:      nudgeID,
 				nudgeMetaAgent:        owner,
+				nudgeMetaQueueKey:     owner,
 				nudgeMetaQueueState:   nudgeQueueStateLive,
 				nudgeMetaDeliverAfter: "not-a-time",
 			},

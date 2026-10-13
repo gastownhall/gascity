@@ -34,13 +34,16 @@ package storebinding
 //
 // KEYED READS, OWNER-RUN MAINTENANCE. Every delivery verb reads only the
 // records addressed to its queue keys: one List per key, on the queue family
-// label and bead type, keyed by the record's "agent" metadata. The key is
-// metadata rather than the "agent:<key>" label because the label is shared
-// with session beads and nudge shadows, and because a metadata equality is what
-// the engines index (on SQLite, idx_metadata_key_value; the label probe is a
-// residual check on the rows it finds). So one target's claim issues the same
-// requests and gets back the same rows however many other records the queue or
-// the store holds. The verbs
+// label and bead type, keyed by the record's "nudge_queue_key" metadata. A
+// metadata equality is what the engines index (on SQLite,
+// idx_metadata_key_value; the label, type and status are residual checks on
+// the rows it finds), so the indexed key decides which rows a read visits. It
+// must therefore be one only queue records write. The "agent:<key>" label and
+// the "agent" metadata both fail that: session beads carry them, and so does
+// every nudge shadow in the same store, which is closed but never deleted, so
+// keying on them would make a target's read visit its whole nudge history. So
+// one target's claim visits, and gets back, its own queue records however many
+// other records the queue or the store holds. The verbs
 // repair only what they touch: an expired lease already reads as pending, a
 // candidate claim revokes the stale lease it is about to replace, and an
 // expired candidate is dead-lettered instead of claimed. The whole-queue pass —
@@ -115,7 +118,7 @@ const (
 	nudgeQueueBeadType = "chore"
 	// nudgeQueueAgentLabelPrefix labels a record with the queue key it is
 	// addressed to, in the vocabulary other bead families use for the same
-	// identity. Reads key on the "agent" metadata instead: the label is not
+	// identity. Reads key on the "nudge_queue_key" metadata instead: the label is not
 	// specific to the queue.
 	nudgeQueueAgentLabelPrefix = "agent:"
 	// nudgeQueueTargetLabelPrefix keys a session-pinned record by the exact
@@ -171,6 +174,12 @@ const (
 	nudgeMetaTerminalReason = "terminal_reason"
 	nudgeMetaCommitBoundary = "commit_boundary"
 	nudgeMetaTerminalAt     = "terminal_at"
+	// nudgeMetaQueueKey is the queue key a record is addressed to: the same
+	// value as "agent", under a name only queue records carry. It is what
+	// keyed reads look up, so the engine's metadata index hands a target's
+	// read its queue records alone — "agent" is also written by every nudge
+	// shadow in the same store, and shadows are closed, never deleted.
+	nudgeMetaQueueKey = "nudge_queue_key"
 )
 
 // ErrBeadsNudgeQueueCorrupt reports a queue bead that cannot be projected back
@@ -1010,14 +1019,14 @@ func nudgeQueueQuarantined(verb string, corrupt []error) error {
 }
 
 // nudgeQueueKeyedQuery is the one read a target-scoped verb issues per queue
-// key. Every predicate is pushed to the store: the family label and bead type
-// drop the session beads and nudge shadows that share the key's identity, and
-// the metadata equality is the indexed predicate that drives the lookup.
+// key. Every predicate is pushed to the store. The queue-only metadata key is
+// the indexed predicate that drives the lookup, so the rows visited are the
+// key's queue records; the family label and bead type are residual checks.
 func nudgeQueueKeyedQuery(key string) beads.ListQuery {
 	return beads.ListQuery{
 		Label:    nudgeQueueLabel,
 		Type:     nudgeQueueBeadType,
-		Metadata: map[string]string{nudgeMetaAgent: key},
+		Metadata: map[string]string{nudgeMetaQueueKey: key},
 		Sort:     beads.SortCreatedAsc,
 		TierMode: beads.TierBoth,
 	}
@@ -1147,6 +1156,7 @@ func encodeNudgeItem(item nudgequeue.Item, state string, extra map[string]string
 	metadata := map[string]string{
 		nudgeMetaNudgeID:    item.ID,
 		nudgeMetaAgent:      item.Agent,
+		nudgeMetaQueueKey:   item.Agent,
 		nudgeMetaSource:     item.Source,
 		nudgeMetaQueueState: state,
 	}
