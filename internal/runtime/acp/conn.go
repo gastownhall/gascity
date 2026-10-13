@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -167,14 +168,28 @@ func (sc *sessionConn) readLoop(r io.Reader) {
 		sc.dispatch(msg)
 	}
 
-	// readLoop exited (EOF, scanner error, or oversized frame). Log the
-	// scanner error if present, then clear busy state and drain pending
-	// channels so callers don't hang.
-	err := scanner.Err()
+	// readLoop exited (EOF, closed pipe, scanner error, or oversized frame).
+	// Log a genuine read error if present, then clear busy state and drain
+	// pending channels so callers don't hang.
+	err := readLoopCause(scanner.Err())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "acp: readLoop exit: %v\n", err)
 	}
 	sc.drainPending(err)
+}
+
+// readLoopCause maps the read loop's terminal scanner error to the cause
+// drainPending records. A closed pipe means the same thing as EOF: once the
+// agent exits, exec.Cmd.Wait closes the stdout read end, and a Read that is
+// in flight (or starts) after that fails with os.ErrClosed instead of
+// returning EOF. Either way the connection closed, so both map to nil.
+// isPipeWriteError is the write-side twin for stdin; it also accepts EPIPE,
+// which only a write returns.
+func readLoopCause(err error) error {
+	if errors.Is(err, os.ErrClosed) || errors.Is(err, io.ErrClosedPipe) {
+		return nil
+	}
+	return err
 }
 
 // dispatch routes a decoded JSON-RPC message.
@@ -426,9 +441,9 @@ func (sc *sessionConn) setActivePrompt(id int64) bool {
 
 // drainPending cancels outstanding permission requests, fails the running
 // turn, clears busy state, and closes all pending response channels. cause is
-// the stdout read error, or nil for EOF and for the process-exit path. Safe to
-// call multiple times — the first call settles the turn and closed channels
-// are deleted from the map.
+// the stdout read error, or nil for EOF, a closed stdout pipe, and the
+// process-exit path. Safe to call multiple times — the first call settles the
+// turn and closed channels are deleted from the map.
 func (sc *sessionConn) drainPending(cause error) {
 	sc.mu.Lock()
 	sc.drained = true

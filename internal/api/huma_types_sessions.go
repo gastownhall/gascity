@@ -55,6 +55,7 @@ type sessionCreateBody struct {
 	Options           map[string]string `json:"options,omitempty" doc:"Provider/agent option overrides."`
 	ProjectID         string            `json:"project_id,omitempty" doc:"Opaque project context identifier."`
 	Title             string            `json:"title,omitempty" doc:"Session title."`
+	Metadata          map[string]string `json:"metadata,omitempty" doc:"External client metadata: real_world_app_* keys only (any other key is refused with 422). The generic bead API never writes a session row."`
 }
 
 // SessionCreateInput is the Huma input for POST /v0/city/{cityName}/sessions.
@@ -120,6 +121,9 @@ type SessionPatchBody struct {
 	_     struct{} `json:"-" additionalProperties:"false"`
 	Title *string  `json:"title,omitempty" minLength:"1" doc:"Session title. If provided, must be non-empty."`
 	Alias *string  `json:"alias,omitempty" doc:"Session alias. Empty string clears the alias."`
+	// Metadata is the external client's real_world_app_* keys, the only
+	// session metadata a client writes (architecture B).
+	Metadata map[string]string `json:"metadata,omitempty" doc:"External client metadata: real_world_app_* keys only (any other key is refused with 422); an empty value clears the key."`
 }
 
 // SessionPatchInput is the Huma input for PATCH /v0/city/{cityName}/session/{id}.

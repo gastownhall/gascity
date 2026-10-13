@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // SleepReasonKilled is the sleep_reason `gc session kill` records. The string
@@ -251,14 +252,33 @@ func (f *KillFence) Wrote() map[string]string { return maps.Clone(f.wrote) }
 // named session's row is synced asleep/killed after it all the same, as `gc
 // session kill` does, so the kill supersedes a pending wake. A fence that
 // cannot be written does not hold the kill hostage: it falls back to the stop
-// and the best-effort asleep sync after it.
+// and the best-effort asleep sync after it. Warnings (a write that did not
+// land) go to the log; KillFencedReport takes a warning sink and reports
+// what the kill found.
 func (m *Manager) KillFenced(ctx context.Context, by Actor, id string, kill func(context.Context, Actor) error) error {
+	_, err := m.KillFencedReport(ctx, by, id, kill, func(msg string) { log.Printf("session kill: %s", msg) })
+	return err
+}
+
+// KillReport is what KillFencedReport found.
+type KillReport struct {
+	// RuntimeWasGone reports that the fresh read under the lease found no
+	// live runtime, so the kill ran alone, unfenced.
+	RuntimeWasGone bool
+}
+
+// KillFencedReport is KillFenced with a warning sink, for a caller that
+// reports to its own operator (`gc session kill`'s stderr). A caller that
+// holds the runtime lease already (`gc session kill --force` past a hung
+// holder) lends it in by.Lease.
+func (m *Manager) KillFencedReport(ctx context.Context, by Actor, id string, kill func(context.Context, Actor) error, warn func(string)) (KillReport, error) {
+	var report KillReport
 	if err := m.checkActor(by); err != nil {
-		return err
+		return report, err
 	}
-	b, sessName, err := m.sessionBead(id)
+	_, sessName, err := m.sessionBead(id)
 	if err != nil {
-		return err
+		return report, err
 	}
 	lease, release, err := m.leaseRuntime(ctx, by, id, sessName, operatorLeaseWait)
 	if err != nil && !errors.Is(err, ErrSessionStarting) && !errors.Is(err, ErrRuntimeLeaseBusy) && !by.City.IsZero() {
@@ -271,7 +291,7 @@ func (m *Manager) KillFenced(ctx context.Context, by Actor, id string, kill func
 		}
 	}
 	if err != nil {
-		return err
+		return report, err
 	}
 	defer release()
 	if lease != nil {
@@ -279,25 +299,26 @@ func (m *Manager) KillFenced(ctx context.Context, by Actor, id string, kill func
 	}
 	// Decided under the lease: a start that finished while the kill waited
 	// for it has left a live runtime, which takes the fenced path.
-	if b, _, err = m.sessionBead(id); err != nil {
-		return err
+	b, _, err := m.sessionBead(id)
+	if err != nil {
+		return report, err
 	}
-	runtimeGone := !killRuntimeLive(State(b.Metadata["state"])) && !m.sp.IsRunning(sessName)
-	if runtimeGone {
+	report.RuntimeWasGone = m.killRuntimeGone(ctx, b, sessName)
+	if report.RuntimeWasGone {
 		killErr := kill(ctx, by)
-		if NamedSessionIdentityInfo(m.infoFromBead(b)) != "" {
-			m.syncKilledAsleep(id)
+		if killErr == nil || NamedSessionIdentityInfo(m.infoFromBead(b)) != "" {
+			m.syncKilledAsleep(id, warn)
 		}
-		return killErr
+		return report, killErr
 	}
 
 	fence, ferr := WriteKillFence(m.store, id, m.now().UTC())
 	if ferr != nil {
-		log.Printf("session kill: recording kill intent for session %s before stopping it: %v", id, ferr)
+		warn(fmt.Sprintf("recording kill intent for session %s before stopping it: %v", id, ferr))
 		fence = nil
 	}
 	killErr := kill(ctx, by)
-	if killErr != nil && fence != nil && !m.sp.IsRunning(sessName) {
+	if killErr != nil && fence != nil && m.runtimeConfirmedGone(ctx, sessName) {
 		// The fenced row reads asleep, so Manager.Kill checks the provider
 		// and reports "not active" for a runtime already gone: the runtime
 		// is down, which is what the kill is for.
@@ -308,30 +329,83 @@ func (m *Manager) KillFenced(ctx context.Context, by Actor, id string, kill func
 			// The runtime survived the stop: the fence would claim a
 			// teardown that did not happen.
 			if err := fence.Rollback(m.store); err != nil {
-				log.Printf("session kill: restoring session %s after the failed kill: %v", id, err)
+				warn(fmt.Sprintf("restoring session %s after the failed kill: %v", id, err))
 			}
 		}
-		return killErr
+		return report, killErr
 	}
 	if fence != nil {
 		if err := fence.Clear(m.store); err != nil {
-			log.Printf("session kill: releasing the kill fence on session %s: %v", id, err)
+			warn(fmt.Sprintf("releasing kill fence on session %s: %v", id, err))
 		}
-		return nil
+		return report, nil
 	}
-	m.syncKilledAsleep(id)
-	return nil
+	m.syncKilledAsleep(id, warn)
+	return report, nil
 }
 
 // syncKilledAsleep is the kill's best-effort asleep sync without a fence
 // (KillSleepPatch on the row's fresh metadata).
-func (m *Manager) syncKilledAsleep(id string) {
+func (m *Manager) syncKilledAsleep(id string, warn func(string)) {
 	now := m.now().UTC()
 	if err := ApplyKillFencePatch(m.store, id, func(b beads.Bead) (map[string]string, bool) {
 		return KillSleepPatch(b.ID, b.Metadata, now), true
 	}); err != nil {
-		log.Printf("session kill: syncing session %s to asleep: %v", id, err)
+		warn(fmt.Sprintf("syncing session %s to asleep: %v", id, err))
 	}
+}
+
+// killLivenessTimeout bounds KillFenced's fresh liveness reads, as the v2
+// effects bound theirs (fenceProbeTimeout).
+const killLivenessTimeout = 5 * time.Second
+
+// runtimeConfirmedGone reports a fresh, bounded liveness read that finds no
+// live pane under name. Provider.IsRunning may answer from a cache (tmux's
+// state cache is up to 2s old), which can read a just-started runtime gone
+// and so kill it without its fence; an incomplete or failed read is not
+// gone either, so the kill keeps the fence.
+//
+// The read is the routed leaf's (runtime.ResolveBackend), as v2's runtime
+// read takes it: a composite (auto, hybrid) routes by name, and hybrid
+// deliberately offers no fresh read of its own (its read is its leaves'
+// cached one), so asking it would fall back to the cache. The route comes
+// from the bead (loadSessionBead registers an ACP session's route), so call
+// this after reading the row. A route that is only a guess confirms nothing,
+// nor does a leaf that cannot read fresh (runtime.FreshReadable: herdr, k8s,
+// exec answer from IsRunning, which proves no absence), and the composite's
+// own read must agree with the leaf's: auto falls through to its other
+// backend, which can hold a runtime the route table missed.
+func (m *Manager) runtimeConfirmedGone(ctx context.Context, name string) bool {
+	if m.sp == nil || strings.TrimSpace(name) == "" {
+		return false
+	}
+	leaf, _, known := runtime.ResolveBackend(m.sp, name)
+	if !known || leaf == nil || !runtime.FreshReadable(leaf) {
+		return false
+	}
+	gone := func(sp runtime.Provider) bool {
+		live, status, err := runtime.ObserveLivenessBoundedSince(ctx, sp, name, nil, time.Now(), killLivenessTimeout)
+		return status == runtime.ObservationComplete && err == nil && !live.Running
+	}
+	return gone(leaf) && (leaf == m.sp || gone(m.sp))
+}
+
+// killRuntimeGone is KillFencedReport's "runtime already gone" verdict on row
+// b: the row does not read live and a fresh read finds no runtime.
+func (m *Manager) killRuntimeGone(ctx context.Context, b beads.Bead, sessName string) bool {
+	return !killRuntimeLive(State(b.Metadata["state"])) && m.runtimeConfirmedGone(ctx, sessName)
+}
+
+// KillRuntimeGone takes KillFencedReport's "runtime already gone" verdict
+// now, without the lease, reading the runtime routed from the bead as the
+// kill does. `gc session kill` uses it before the lease only to gate its
+// live-subagent refusal; the kill decides again under the lease.
+func (m *Manager) KillRuntimeGone(ctx context.Context, id string) (bool, error) {
+	b, sessName, err := m.loadSessionBead(id, true)
+	if err != nil {
+		return false, err
+	}
+	return m.killRuntimeGone(ctx, b, sessName), nil
 }
 
 // killRuntimeLive reports the states Manager.Kill treats as holding a live

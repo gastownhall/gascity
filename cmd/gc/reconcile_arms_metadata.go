@@ -161,7 +161,7 @@ func desiredRowIdentity(cfg *config.City, tp TemplateParams, info session.Info, 
 	}
 	existing := strings.TrimSpace(info.AgentName)
 	legacyTemplate := agentName != "" && agentName != tp.TemplateName && (existing == tp.TemplateName || existing == targetBasename(tp.TemplateName))
-	if (existing == "" || legacyTemplate) && agentName != "" {
+	if (existing == "" || legacyTemplate) && agentName != "" && !clientProviderChat(origin, cfgAgent) {
 		id.Guarded["agent_name"] = agentName
 	}
 	if tp.WorkDir != "" { // a legacy identity's running session keeps its work_dir until it stops

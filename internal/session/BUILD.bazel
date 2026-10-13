@@ -240,6 +240,7 @@ go_test(
         "//internal/runtime",
         "//internal/runtime/acp",
         "//internal/runtime/auto",
+        "//internal/runtime/hybrid",
         "//internal/runtime/proctable",
         "//internal/runtime/tmux",
         "//internal/sessionlog",

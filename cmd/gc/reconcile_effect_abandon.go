@@ -43,21 +43,24 @@ type startFailure struct {
 	pending         bool // a pending create
 	configured      bool // a configured named row with its spec
 	died            bool // died during startup
+	resumed         bool // the launch resumed the row's own conversation (preparedStart.resumed)
 	peek            bool // a rate-limit screen may show: the pane is listed (START-022)
 	relaunched      bool // PreWake found the row creating (#7570): its marker stays
 	undo            preWakeUndo
-	row             session.Info // the fresh row, for the conversation probe
-	cfg             *config.City // the city, for the probe's transcript roots (sessionTranscriptSearchPaths)
-	name, display   string       // the runtime name; the agent, for the quarantine metric
-	episode         string       // the #46 episode key
+	row             session.Info   // the fresh row, for the conversation probe
+	cfg             *config.City   // the city and the launch, for the probe's transcript roots (launchTranscriptRoots)
+	launch          TemplateParams // its template
+	name, display   string         // the runtime name; the agent, for the quarantine metric
+	episode         string         // the #46 episode key
 }
 
 // startFailureRead is what the failure Call read, past what it accrued.
 type startFailureRead struct {
 	startFailure
-	rateLimit bool  // the pane shows a provider rate-limit screen
-	keeps     bool  // the conversation's transcript is on disk (wakeFailureKeepsConversation)
-	lost      *bool // a lost commit's stop (lostCommit): whether it was confirmed
+	rateLimit bool          // the pane shows a provider rate-limit screen
+	keeps     bool          // the conversation's transcript is on disk (wakeFailureKeepsConversation)
+	resume    resumeFailure // what the failure tells the resume backstop (startResumeFailure)
+	lost      *bool         // a lost commit's stop (lostCommit): whether it was confirmed
 }
 
 // startEnd is what the commit hands its Call: the landed commit, the start
@@ -77,7 +80,8 @@ func failStart(v txView, out startOutcome, cause string, err error) txStep {
 	}
 	f := startFailure{
 		cause: cause, err: err, pending: v.Row.PendingCreateClaim, died: cause == causeDiedDuringStartup, relaunched: out.relaunched, undo: out.undo,
-		row: v.Row, name: name, display: out.tp.DisplayName(), episode: startupHealthEpisodeKey(v.Row, name),
+		row: v.Row, name: name, display: out.tp.DisplayName(), episode: startupHealthEpisodeKey(v.Row, name), launch: out.tp,
+		resumed: out.prepared != nil && out.prepared.resumed,
 	}
 	started := cause != causePrepare && cause != causeAttribution // a Start's own failure, which the provider screens
 	if started {
@@ -96,11 +100,12 @@ func failStart(v txView, out startOutcome, cause string, err error) txStep {
 // classes that accrue a wake failure the transcript probe.
 func readStartFailure(ctx context.Context, c txCaps, f startFailure) startFailureRead {
 	r := startFailureRead{startFailure: f}
+	var pane string
 	if f.peek {
 		// The dead pane's own screen (§12.2 #19, C5a3): a terminal provider
 		// error parks the row, as the zombie capture does; a rate-limit
 		// screen quarantines it (START-022/029).
-		pane := peekPane(ctx, c.start.sp, f.name)
+		pane = peekPane(ctx, c.start.sp, f.name)
 		r.terminal = runtime.ProviderTerminalErrorReason(pane)
 		r.rateLimit = r.terminal == "" && runtime.ContainsProviderRateLimitScreen(pane)
 	}
@@ -109,7 +114,8 @@ func readStartFailure(ctx context.Context, c txCaps, f startFailure) startFailur
 	case f.pending, f.cause == causePrepare, f.cause == causeAttribution:
 		_ = c.episode.fail(f.episode, f.err, c.start.clock.Now())
 	default:
-		r.keeps = wakeFailureKeepsConversation(f.row, sessionTranscriptSearchPaths(f.cfg))
+		r.keeps = wakeFailureKeepsConversation(f.row, launchTranscriptRoots(f.cfg, f.launch))
+		r.resume = startResumeFailure(f.resumed, f.died, f.row.SessionKey, f.err, pane)
 	}
 	return r
 }
@@ -174,6 +180,9 @@ func abandonStep(v txView) txStep {
 	if quarantined {
 		facts.Quarantined = f.display
 	}
+	if resumeFailedReset(v.Row, f) && session.HasStartedManualConversation(v.Row) {
+		facts.Events = append(facts.Events, resumeFailedConversationResetEvent(v.Row, f.display))
+	}
 	return abandon(patch, class, facts)
 }
 
@@ -192,13 +201,28 @@ func otherFailurePatch(row session.Info, meta map[string]string, f startFailureR
 	if !creating(row) {
 		return patch, class, false
 	}
-	if (row.SessionKey != "" || row.StartedConfigHash != "") && !f.keeps {
-		maps.Copy(patch, session.ConversationResetPatch(true))
+	if row.SessionKey != "" || row.StartedConfigHash != "" {
+		failures, _ := strconv.Atoi(row.ResumeFailures)
+		backstop, count := resumeBackstop(failures, f.keeps, f.resume)
+		if !f.keeps || backstop {
+			maps.Copy(patch, session.ConversationResetPatch(true))
+			count = 0
+		}
+		maps.Copy(patch, resumeFailuresPatch(row, count))
 	}
 	attempts, _ := strconv.Atoi(row.WakeAttemptsMetadata)
 	accrual := session.WakeFailureAccrualPatch(attempts, defaultMaxWakeAttempts, now.Add(defaultQuarantineDuration))
 	maps.Copy(patch, accrual.Patch)
 	return patch, class.With(accrual.Class(row, now)), accrual.Quarantined
+}
+
+// resumeFailedReset reports that the any-other failure f of row resets a
+// conversation whose transcript is present, by the resume backstop
+// (resumeBackstop), as legacy's recordWakeFailure does.
+func resumeFailedReset(row session.Info, f startFailureRead) bool {
+	failures, _ := strconv.Atoi(row.ResumeFailures)
+	backstop, _ := resumeBackstop(failures, f.keeps, f.resume)
+	return creating(row) && (row.SessionKey != "" || row.StartedConfigHash != "") && backstop
 }
 
 // restorePatch is restorePreWakeState's decide on the fresh row's
@@ -285,7 +309,10 @@ func stopOwnRuntime(ctx context.Context, c txCaps, in teardown) (teardown, error
 
 // rollbackClose is C3's rollback, the failed-create close, while the fresh
 // row may still roll back (CanRollback) and its fresh read finds no runtime
-// of its own; S7's relaunch keeps the row once its runtime is stopped.
+// of its own; S7's relaunch keeps the row once its runtime is stopped. An
+// occupant the Call left alone (no stop, no corpse kill: a name the row does
+// not own) is F1's again on this read (occupantLeft, STALE-READ 7.3); one
+// the Call stopped is gone by design.
 func rollbackClose(v txView) txStep {
 	td, err := callResult[teardown](v)
 	stop, cause := rollbackRuntime(v.Row, v.RT)
@@ -294,6 +321,8 @@ func rollbackClose(v txView) txStep {
 		return txStep{Fail: causeCallError, Err: err}
 	case !rollbackable(v.Row):
 		return txStep{Refuse: causeRedecided}
+	case td.stop == nil && !td.corpse.found() && occupantLeft(v):
+		return txStep{Refuse: causeRedecided} // F1 again: an occupant the Call left alone may have left since
 	case cause != "":
 		return txStep{Refuse: cause}
 	case stop:
@@ -313,10 +342,10 @@ func rollbackable(row session.Info) bool {
 }
 
 // rateLimitQuarantine is legacy's recordRateLimitQuarantine for row at now: its
-// lifecycle and the Quarantine cell's quarantined_until (class, minted by the
-// write).
+// lifecycle and the Quarantine cell's quarantined_until, never shortening one
+// in force (class, minted by the write).
 func rateLimitQuarantine(row session.Info, now time.Time) (session.MetadataPatch, session.DispositionPatch) {
-	return session.RateLimitQuarantinePatch(), session.CellInfo(row, session.ActorController, session.DispEvent{Kind: session.EvQuarantine, Until: now.Add(defaultRateLimitQuarantineDuration)}, now)
+	return session.RateLimitQuarantinePatch(), session.ExtendQuarantine(row, now.Add(defaultRateLimitQuarantineDuration), now)
 }
 
 // rollbackPatch is legacy's rollbackPendingCreateClears as one atomic close:
@@ -422,6 +451,16 @@ func liveNonOccupant(v txView) bool {
 	return v.RT != nil && (v.RT.Class == rtAlive || v.RT.Class == rtZombie) && !occupantStays(v)
 }
 
+// occupantLeft is F1 on the current attempt's fresh read: a rollback the
+// arm rested on an occupant (intent.Occupant) whose occupant is gone, inside
+// the pending create's lease or over a live runtime that is no occupant.
+// The close decides it again on its own read when its Call left the
+// occupant alone (STALE-READ 7.3), as the occupant can leave between
+// sections.
+func occupantLeft(v txView) bool {
+	return v.It.Occupant && !occupantStays(v) && (occupantLeaseHolds(v) || liveNonOccupant(v))
+}
+
 // rollbackStep is the rollback's first Decide: a screen's patch, or the
 // teardown of the fresh read's own runtime for the Call.
 func rollbackStep(v txView, screen screenWrite, _ error) txStep {
@@ -435,7 +474,7 @@ func rollbackStep(v txView, screen screenWrite, _ error) txStep {
 		return txStep{Done: true, Cause: decideStaleCreate} // gone already: A18 relaunches it, no backoff between
 	case v.It.Relaunch && !staleSelfOwn(v):
 		return txStep{Refuse: causeRedecided} // S7's relaunch stops only a runtime its own read still finds StaleSelf, its own
-	case v.It.Occupant && !occupantStays(v) && (occupantLeaseHolds(v) || liveNonOccupant(v)):
+	case occupantLeft(v):
 		return txStep{Refuse: causeRedecided} // F1: the occupant the arm rested on is gone; the lease, or the live runtime, decides next pass
 	case len(screen.patch) > 0 || screen.class.Len() > 0:
 		return txStep{Write: screen.patch, Class: screen.class, Done: true}

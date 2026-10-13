@@ -160,11 +160,23 @@ func ClearStartupHealthEpisode(sessionName string) StartupHealthEpisode {
 	return StartupHealthEpisode{SessionName: sessionName}
 }
 
+// startupHealthEpisodeBeads lists sessionName's startup-health episode bead,
+// if any. Only a bead of StartupHealthEpisodeType is one: another bead
+// carrying the episode's keys (a task's) holds no session down (mc-lp7zb).
+func (s *Store) startupHealthEpisodeBeads(sessionName string) ([]beads.Bead, error) {
+	return s.store.List(beads.ListQuery{
+		Type:     StartupHealthEpisodeType,
+		Metadata: map[string]string{StartupHealthSessionNameMetadataKey: sessionName},
+		Limit:    1,
+		Sort:     beads.SortCreatedDesc,
+	})
+}
+
 // LoadStartupHealthEpisode loads the startup-health episode for sessionName,
 // returning the zero value if none is recorded. Read-only: it issues a single
-// metadata query and no mutating store call.
+// typed metadata query and no mutating store call.
 func (s *Store) LoadStartupHealthEpisode(sessionName string) (StartupHealthEpisode, error) {
-	matches, err := s.store.ListByMetadata(map[string]string{StartupHealthSessionNameMetadataKey: sessionName}, 1)
+	matches, err := s.startupHealthEpisodeBeads(sessionName)
 	if err != nil {
 		return StartupHealthEpisode{}, fmt.Errorf("loading startup-health episode for %q: %w", sessionName, err)
 	}
@@ -182,7 +194,7 @@ func (s *Store) LoadStartupHealthEpisode(sessionName string) (StartupHealthEpiso
 // readyExcludeTypes.
 func (s *Store) SaveStartupHealthEpisode(ep StartupHealthEpisode) error {
 	meta := startupHealthEpisodeToMetadata(ep)
-	matches, err := s.store.ListByMetadata(map[string]string{StartupHealthSessionNameMetadataKey: ep.SessionName}, 1)
+	matches, err := s.startupHealthEpisodeBeads(ep.SessionName)
 	if err != nil {
 		return fmt.Errorf("looking up startup-health episode for %q: %w", ep.SessionName, err)
 	}

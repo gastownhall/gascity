@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -22,6 +23,9 @@ var (
 	// Give streamed startup snapshots a short chance to surface a follow-on
 	// dialog after an initial shell prompt appears.
 	startupDialogStreamReadyGrace = 100 * time.Millisecond
+	// dialogLogf reports startup-dialog waits that end without the signal they
+	// wait for. Tests swap it to capture the message.
+	dialogLogf = log.Printf
 )
 
 // StartupDialogTimeout returns the current timeout budget used by the shared
@@ -178,7 +182,10 @@ func AcceptStartupDialogsFromStream(
 // It also reports false when a workspace-trust dialog needs its selection
 // moved: the stream cannot re-read the screen to confirm the move, so it
 // sends nothing and the caller should fall back to AcceptStartupDialogs with
-// synchronous peeks.
+// synchronous peeks. The stream also ends at the first snapshot of a Codex
+// composer that is still starting: Codex can replace it with a startup dialog
+// seconds later, and only the peek watch in AcceptStartupDialogs waits for
+// that. A stream that observed no readiness before then reports false.
 func AcceptStartupDialogsFromStreamWithStatus(
 	ctx context.Context,
 	timeout time.Duration,
@@ -319,11 +326,131 @@ func AcceptStartupDialogsFromStreamWithStatus(
 	return observed, nil
 }
 
+func codexStartupPending(content string) bool {
+	// A Codex composer drawn without its status line can still be replaced by
+	// a startup dialog (see watchCodexStartup).
+	return containsCodexBanner(content) && !containsStartupDialog(content) && !codexStartupSettled(content)
+}
+
 // AcceptStartupDialogsWithTimeout dismisses known startup dialogs within the
-// provided timeout budget. The budget covers the sequence as a whole and is
+// provided timeout budget. The budget covers the ordered pass as a whole and is
 // refreshed every time a phase recognizes the pane, so a pane that never renders
 // costs one timeout rather than one per dialog class (see startupDialogBudget).
+// A Codex composer still starting after the pass is then watched for up to one
+// more timeout for a dialog drawn after it (see watchCodexStartup), and each
+// such dialog gets a fresh pass: a Codex pane can add up to
+// maxCodexStartupDialogRounds watches and passes. A short timeout shortens each
+// watch, so a 2s one, such as the session layer's deferred Codex check, can end
+// before a dialog Codex draws up to 3.0s after its composer.
 func AcceptStartupDialogsWithTimeout(
+	ctx context.Context,
+	timeout time.Duration,
+	peek func(lines int) (string, error),
+	sendKeys func(keys ...string) error,
+	opts ...StartupDialogOption,
+) error {
+	for round := 0; ; round++ {
+		if err := acceptStartupDialogsOnce(ctx, timeout, peek, sendKeys, opts...); err != nil {
+			return err
+		}
+		if round == maxCodexStartupDialogRounds {
+			return nil
+		}
+		late, err := watchCodexStartup(ctx, timeout, peek)
+		if err != nil || !late {
+			return err
+		}
+	}
+}
+
+// maxCodexStartupDialogRounds bounds how many dialogs a Codex pane can draw
+// after the initial pass and still have answered: each costs another watch and
+// pass, so one call runs at most maxCodexStartupDialogRounds+1 passes.
+const maxCodexStartupDialogRounds = 3
+
+// watchCodexStartup waits for a Codex pane to finish starting and reports
+// whether a startup dialog appeared instead. Codex 0.156+ draws its composer
+// before configuring the session, then can replace it with a dialog such as
+// "Hooks need review" seconds later (1.6-3.0s measured on 0.162.1). The
+// composer's "› " is the same signal the ordered handlers read as "no dialog is
+// coming", so without this watch a late dialog parks the session (#6464).
+// Startup is finished once Codex draws its status line under the composer.
+// Only a starting Codex composer is watched (see codexStartupPending), and only
+// a dialog that newly replaces it triggers another pass. That pass answers only
+// the dialogs the ordered pass recognizes: a late trust prompt is answered once
+// containsWorkspaceTrustDialog matches the 0.156+ wording (#6734). The watch is
+// bounded by timeout and logs when it expires, because a Codex build or config
+// that never draws the status line waits that long on every start.
+func watchCodexStartup(
+	ctx context.Context,
+	timeout time.Duration,
+	peek func(lines int) (string, error),
+) (bool, error) {
+	content, err := peek(startupDialogPeekLines)
+	if err != nil {
+		return false, err
+	}
+	// Watch only a Codex composer that is still starting. Whatever else the
+	// ordered pass left on screen, including a dialog it already answered, is
+	// not re-answered here.
+	if !codexStartupPending(content) {
+		return false, nil
+	}
+	deadline := dialogClock.Now().Add(timeout)
+	for dialogClock.Now().Before(deadline) {
+		sleep(ctx, dialogPollInterval)
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		content, err = peek(startupDialogPeekLines)
+		if err != nil {
+			return false, err
+		}
+		// A late dialog may replace the whole screen, banner included.
+		if containsStartupDialog(content) {
+			return true, nil
+		}
+		if !containsCodexBanner(content) || codexStartupSettled(content) {
+			return false, nil
+		}
+	}
+	dialogLogf("startup dialogs: Codex drew no status line (\"<model> · <dir>\") under its composer within %v; "+
+		"stopped watching for a late startup dialog", timeout)
+	return false, nil
+}
+
+func containsStartupDialog(content string) bool {
+	return containsThemeSelectionDialog(content) || containsPostThemeStartupDialog(content)
+}
+
+func containsCodexBanner(content string) bool {
+	return strings.Contains(content, "OpenAI Codex")
+}
+
+// codexStartupSettled reports whether Codex has drawn its status line
+// ("<model> · <dir>") under the composer, which it does only after startup,
+// including any trust or hook-review dialog, has finished. A dialog footer such
+// as "enter confirm · esc skip" has " · " too, so callers check for a startup
+// dialog first. A dialog's "› 1." cursor row is a numbered menu row, not a
+// prompt (see isNumberedMenuRow), so it does not anchor the search.
+func codexStartupSettled(content string) bool {
+	lines := strings.Split(content, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if !containsPromptIndicator(lines[i]) {
+			continue
+		}
+		for _, below := range lines[i+1:] {
+			if strings.Contains(below, " · ") {
+				return true
+			}
+		}
+		return false
+	}
+	return false
+}
+
+// acceptStartupDialogsOnce answers each known startup dialog in order.
+func acceptStartupDialogsOnce(
 	ctx context.Context,
 	timeout time.Duration,
 	peek func(lines int) (string, error),
@@ -1478,18 +1605,32 @@ type replayableSnapshotCursor struct {
 	carry  []string
 }
 
+// newReplayableSnapshotCursor reads startup snapshots from src until the first
+// one of a Codex composer that is still starting (see
+// AcceptStartupDialogsFromStreamWithStatus).
 func newReplayableSnapshotCursor(src <-chan string) *replayableSnapshotCursor {
-	return newReplayableSnapshotCursorFromStream(newReplayableSnapshotStream(src))
+	return newReplayableSnapshotCursorFromStream(newReplayableSnapshotStream(src, codexStartupPending))
 }
 
 func newReplayableSnapshotCursorFromStream(stream *replayableSnapshotStream) *replayableSnapshotCursor {
 	return &replayableSnapshotCursor{stream: stream}
 }
 
-func newReplayableSnapshotStream(src <-chan string) *replayableSnapshotStream {
+// newReplayableSnapshotStream publishes the snapshots from src until one
+// matches end, then finishes and discards the rest so the sender never blocks.
+func newReplayableSnapshotStream(src <-chan string, end func(string) bool) *replayableSnapshotStream {
 	stream := &replayableSnapshotStream{update: make(chan struct{})}
 	go func() {
+		ended := false
 		for content := range src {
+			if ended {
+				continue
+			}
+			if end(content) {
+				ended = true
+				stream.finish()
+				continue
+			}
 			stream.publish(content)
 		}
 		stream.finish()
@@ -1702,8 +1843,13 @@ func sendDialogKeys(
 // ContainsRateLimitDialog reports whether pane content shows a provider
 // rate-limit or usage-limit startup dialog. It is intentionally permissive for
 // startup compatibility; use ContainsProviderRateLimitScreen when classifying
-// arbitrary post-crash scrollback.
+// arbitrary post-crash scrollback. A Codex pane that has finished starting
+// shows no startup dialog, so its text, such as a first prompt that mentions
+// rate limits, does not match.
 func ContainsRateLimitDialog(content string) bool {
+	if containsCodexBanner(content) && codexStartupSettled(content) {
+		return false
+	}
 	return strings.Contains(content, "Usage limit reached") ||
 		strings.Contains(content, "You've hit your limit") ||
 		strings.Contains(content, "/rate-limit-options") ||
@@ -1808,6 +1954,30 @@ func ProviderTerminalErrorReason(content string) string {
 	default:
 		return ""
 	}
+}
+
+// ProviderResumeRefusalReason classifies content, a startup death's error
+// (which carries its last pane output) or a dead pane's screen, as the
+// provider's own refusal to resume sessionKey, the conversation it was
+// handed, "" when it is not: claude's "No conversation found with session
+// ID: <key>", the phrase and that key on one line. A refused resume cannot
+// succeed from that launch, so its caller starts the conversation fresh
+// instead of retrying the same resume (mc-bm1af).
+//
+// The key anchors it: a resumed claude draws its history before it can die,
+// so the phrase about another conversation (or the resume picker's "No
+// conversations found") in that history is no refusal.
+func ProviderResumeRefusalReason(content, sessionKey string) string {
+	key := strings.ToLower(strings.TrimSpace(sessionKey))
+	if key == "" {
+		return ""
+	}
+	for _, line := range strings.Split(strings.ToLower(content), "\n") {
+		if strings.Contains(line, "no conversation found with session id") && strings.Contains(line, key) {
+			return "conversation_not_found"
+		}
+	}
+	return ""
 }
 
 // lineContainsAll reports whether any single line of content contains every

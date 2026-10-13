@@ -431,6 +431,8 @@ func TestPreWakeCommit_FreshModeTraceLogsClearedProviderMetadata(t *testing.T) {
 			"primed_at":            "2026-03-08T11:00:00Z",
 			"priming_attempted_at": "2026-03-08T11:00:00Z",
 			"prompt_hash":          "abc123",
+			"resume_failures":      "2",
+			"resume_launch":        "true",
 		},
 	})
 	if err != nil {

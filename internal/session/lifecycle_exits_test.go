@@ -269,6 +269,45 @@ func TestWakeFailureAccrualPatchAtThreshold(t *testing.T) {
 	}
 }
 
+// TestAccrualNeverShortensALiveQuarantine (the #7706 review): a
+// quarantining accrual, as a rate-limit quarantine (ExtendQuarantine),
+// writes the later of its deadline and a quarantine already in force, so it
+// extends a shorter one and never shortens an operator's longer one; an
+// expired one is replaced.
+func TestAccrualNeverShortensALiveQuarantine(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	until := now.Add(time.Hour)
+	check := func(t *testing.T, name string, info Info, patch MetadataPatch, want time.Time) {
+		t.Helper()
+		got, written := patch["quarantined_until"]
+		if !written { // an unchanged cell writes nothing
+			got = info.QuarantinedUntil
+		}
+		if got != want.Format(time.RFC3339) {
+			t.Errorf("%s: quarantined_until %q, want %q", name, got, want.Format(time.RFC3339))
+		}
+	}
+	for _, c := range []struct {
+		name     string
+		existing time.Time
+		want     time.Time
+	}{
+		{"none", time.Time{}, until},
+		{"a shorter live one is extended", now.Add(time.Minute), until},
+		{"a longer live one is kept", now.Add(24 * time.Hour), now.Add(24 * time.Hour)},
+		{"an expired one is replaced", now.Add(-time.Minute), until},
+	} {
+		info := Info{ID: "s-1"}
+		if !c.existing.IsZero() {
+			info.QuarantinedUntil = c.existing.Format(time.RFC3339)
+		}
+		for name, acc := range map[string]ExitAccrual{"wake failure": WakeFailureAccrualPatch(4, 5, until), "churn": ChurnAccrualPatch(2, 3, until)} {
+			check(t, c.name+", "+name, info, acc.PatchFor(info, now), c.want)
+		}
+		check(t, c.name+", rate limit", info, ExtendQuarantine(info, until, now).Into(info.ID, nil), c.want)
+	}
+}
+
 func TestChurnAccrualPatch(t *testing.T) {
 	until := time.Date(2026, 3, 8, 13, 0, 0, 0, time.UTC)
 
@@ -297,6 +336,8 @@ func TestConversationResetPatch(t *testing.T) {
 	// start; churn clears only the conversation binding.
 	assertPatch(t, ConversationResetPatch(true), MetadataPatch{
 		"session_key":                "",
+		"resume_failures":            "",
+		"resume_launch":              "",
 		"started_config_hash":        "",
 		"continuation_reset_pending": "true",
 		// Priming markers share started_config_hash's lifetime (S19 Stage 2).
@@ -306,6 +347,8 @@ func TestConversationResetPatch(t *testing.T) {
 	})
 	assertPatch(t, ConversationResetPatch(false), MetadataPatch{
 		"session_key":                "",
+		"resume_failures":            "",
+		"resume_launch":              "",
 		"continuation_reset_pending": "true",
 	})
 }

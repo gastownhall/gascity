@@ -512,6 +512,16 @@ func (s *Store) SetMarker(id, key, value string) error {
 	return s.setMetadataValue(id, key, value)
 }
 
+// SetPinAwake writes an operator's pin (pin_awake "true", or cleared): the
+// one writer gc session pin|unpin and POST /session/{id}/pin|unpin share.
+func (s *Store) SetPinAwake(id string, pinned bool) error {
+	value := ""
+	if pinned {
+		value = "true"
+	}
+	return s.setMetadataValue(id, "pin_awake", value)
+}
+
 // RecordCurrentBead stamps the work bead a session is currently processing.
 // Replaces recordCurrentBeadIDOnWake (session_bead_cycle.go), which uses a
 // single-key SetMetadata write — so this emits SetMetadata, not a batch.

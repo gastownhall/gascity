@@ -224,8 +224,9 @@ func relaunchResultStep(v txView) txStep {
 // causeStopActive: a stop request stands; the fallback drain begins none.
 const causeStopActive = "stop-active"
 
-// driftRestartStep, on a confirmed stop, resets the row to start-pending
-// for its restart, with legacy's session.draining.
+// driftRestartStep, on a confirmed stop that its own runtime read still
+// finds gone (goneNow), resets the row to start-pending for its restart,
+// with legacy's session.draining.
 func driftRestartStep(v txView) txStep {
 	out, err := callResult[stopped](v)
 	switch {
@@ -233,6 +234,8 @@ func driftRestartStep(v txView) txStep {
 		return txStep{Fail: causeCallError, Err: err}
 	case !out.Confirmed:
 		return txStep{Refuse: out.Reason}
+	case !goneNow(v):
+		return txStep{Refuse: causeRuntimePresent}
 	}
 	res, _ := v.World.Templates.lookup(v.Row)
 	step := txStep{Write: driftRestartPatch(res.TP, v.Row, v.Now), Done: true} // legacy's drift kill records no stop metric
