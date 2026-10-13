@@ -160,7 +160,7 @@ func TestSessionFieldsFlowsWriteTheirKeys(t *testing.T) {
 			plan := namedPlan(t, cfg, "c1", "mayor")
 			plan.Named.BoundStepID = "gc-step"
 			rec.reset()
-			h.runAll(t, &createPass{cfg: cfg, store: rec}, plan)
+			h.runAll(t, &createPass{cfg: cfg, sp: newSimProvider(), store: rec}, plan)
 		}},
 		{"v2 heal effect", "stranded_event_emitted_at", []string{"cmd/gc/reconcile_arms_heals.go:armStrandedClear"}, func(t *testing.T, rec *sessionKeyRecorder) {
 			heal := newHealCase(t, livenessAlive, desireKeep, "state", "active", strandedEventEmittedKey, now.Format(time.RFC3339))
@@ -223,7 +223,7 @@ func TestSessionFieldsFlowsWriteTheirKeys(t *testing.T) {
 			cb.RecordRestart("worker", now)
 			must(t, persistSessionCircuitBreakerMetadata(front, id, cb, "worker", now))
 		}},
-		{"v2 nudges step", "idle_claim_nudge_at idle_claim_nudge_count idle_claim_nudge_trigger", []string{"cmd/gc/reconcile_steps_nudges.go:externalReadsLane.nudges"}, func(t *testing.T, rec *sessionKeyRecorder) {
+		{"v2 nudges step", "idle_claim_nudge_at idle_claim_nudge_count idle_claim_nudge_token idle_claim_nudge_trigger", []string{"cmd/gc/reconcile_steps_nudges.go:externalReadsLane.nudges"}, func(t *testing.T, rec *sessionKeyRecorder) {
 			env, _ := nudgeStepsFixture(t)
 			sess := idleClaimPoolSession()
 			sess.Labels = []string{sessionBeadLabel}
@@ -383,7 +383,7 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 				closed := seedClosedNamedRow(t, store, cfg, pairs(meta))
 				h := newNamedHarness(t, t.TempDir(), nil)
 				h.reserve(t, "c1")
-				h.runAll(t, &createPass{cfg: cfg, store: store}, namedPlan(t, cfg, "c1", "mayor"))
+				h.runAll(t, &createPass{cfg: cfg, sp: newSimProvider(), store: store}, namedPlan(t, cfg, "c1", "mayor"))
 				return fieldBead(t, store, closed.ID).Metadata
 			},
 		},

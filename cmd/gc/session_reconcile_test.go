@@ -3554,7 +3554,7 @@ func TestRecordChurn_Quarantine(t *testing.T) {
 // quarantining wake-failure and churn accruals and its rate-limit
 // quarantine write the later of their deadline and the row's unexpired
 // quarantined_until, extending a shorter one and keeping an operator's
-// longer one.
+// longer one; the accruals keep the live quarantine's reason (v5.9z).
 func TestRecordAccrualNeverShortensAQuarantine(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	at := func(d time.Duration) string { return now.Add(d).Format(time.RFC3339) }
@@ -3576,11 +3576,16 @@ func TestRecordAccrualNeverShortensAQuarantine(t *testing.T) {
 		}
 		for existing, want := range map[string]string{at(time.Minute): accrued, at(24 * time.Hour): at(24 * time.Hour)} {
 			store := newTestStore()
-			session := makeBead("b1", map[string]string{"wake_attempts": "4", "churn_count": "2", "quarantined_until": existing, "sleep_reason": "quarantine"})
+			session := makeBead("b1", map[string]string{"wake_attempts": "4", "churn_count": "2", "quarantined_until": existing, "sleep_reason": "rate_limit"})
 			record(seedSessionInfo(session), sessionFrontDoor(store), &clock.Fake{Time: now})
 			syncBeadFromStore(&session, store)
 			if got := session.Metadata["quarantined_until"]; got != want {
 				t.Errorf("%s over quarantined_until %s: it is %s, want %s", name, existing, got, want)
+			}
+			// v5.9z: a crash or churn accrual keeps the live quarantine's
+			// reason, here rate_limit, which neither accrual writes.
+			if got := session.Metadata["sleep_reason"]; got != "rate_limit" {
+				t.Errorf("%s over a live rate-limit quarantine: sleep_reason %q, want rate_limit kept", name, got)
 			}
 		}
 	}

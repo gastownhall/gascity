@@ -4933,3 +4933,415 @@ func TestControllerStateMutationNotOverwrittenByConcurrentRuntimePublish(t *test
 		}
 	}
 }
+
+// A reload of the previous accepted mutation may still be publishing while
+// the next patch is written. A rejected patch must never become the cached
+// raw config, even transiently between its write and rollback.
+func TestControllerStateRejectedPatchCannotPoisonRawSnapshotDuringReload(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	cityDir := t.TempDir()
+	original := []byte("[workspace]\nname = \"city1\"\n\n[beads]\nprovider = \"file\"\n")
+	tomlPath := filepath.Join(cityDir, "city.toml")
+	if err := os.WriteFile(tomlPath, original, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sp := runtime.NewFake()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cs := newControllerState(ctx, &config.City{Workspace: config.Workspace{Name: "city1"}}, sp, events.NewFake(), "city1", cityDir)
+	cfg, revision, err := cs.loadCurrentConfigSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs.update(cfg, sp)
+	cs.markConfigMutationPending(revision)
+
+	written := make(chan error, 1)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	defer unblock()
+	mutationDone := make(chan error, 1)
+	go func() {
+		mutationDone <- cs.mutateAndPoke(func() error {
+			err := cs.editor.SetAgentPatch(config.AgentPatch{Dir: "alpha", Name: "missing", Env: map[string]string{"REJECTED": "1"}})
+			written <- err
+			if err != nil {
+				return err
+			}
+			<-release
+			return nil
+		})
+	}()
+	select {
+	case err := <-written:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(hangBudget):
+		t.Fatal("mutation did not reach its disk write")
+	}
+	// The mutation is paused after its disk write. Assert the publication
+	// fence directly; elapsed time cannot prove another goroutine is blocked.
+	if cs.publishMu.TryLock() {
+		cs.publishMu.Unlock()
+		t.Error("unvalidated disk mutation does not hold the publication fence")
+	}
+	reloadDone := make(chan bool, 1)
+	go func() { reloadDone <- cs.updateFromRuntime(cfg, sp, revision) }()
+	var published bool
+	unblock()
+	select {
+	case err := <-mutationDone:
+		if err == nil {
+			t.Fatal("patch to a missing target was accepted")
+		}
+	case <-time.After(hangBudget):
+		t.Fatal("rejected mutation did not finish its rollback")
+	}
+	select {
+	case published = <-reloadDone:
+	case <-time.After(hangBudget):
+		t.Fatal("reload did not finish after rollback")
+	}
+	if !published {
+		t.Fatal("the prior accepted config was not published")
+	}
+	if got, err := os.ReadFile(tomlPath); err != nil || string(got) != string(original) {
+		t.Fatalf("rollback disk config = %q, err=%v", got, err)
+	}
+	raw := cs.RawConfig()
+	if raw == nil {
+		t.Fatal("raw config missing after rollback")
+	}
+	if len(raw.Patches.Agents) != 0 {
+		t.Fatalf("rejected patch leaked into the API raw snapshot: %+v", raw.Patches.Agents)
+	}
+}
+
+// A config transaction (pack import, rig provisioning) and a plain API edit
+// both take the publication lock and the configedit.Editor lock. In opposite
+// orders they deadlock: the edit holds the publication lock and waits for the
+// Editor lock while the transaction holds the Editor lock and waits for the
+// publication lock. So while another goroutine holds the Editor lock, a
+// transaction must already hold the publication lock as it waits.
+func TestControllerStateConfigTransactionTakesPublicationLockBeforeEditorLock(t *testing.T) {
+	cases := []struct {
+		name    string
+		run     func(cs *controllerState) error
+		wantErr error
+	}{
+		{
+			name: "pack import",
+			run: func(cs *controllerState) error {
+				return cs.SerializeConfigWrite(func() error { return nil })
+			},
+		},
+		{
+			// The rig already exists, so provisioning stops at its duplicate-name
+			// check, after the transaction has taken its locks.
+			name: "rig provisioning",
+			run: func(cs *controllerState) error {
+				_, err := cs.provisionRigLocked(config.Rig{Name: "rig1", Path: filepath.Join(cs.cityPath, "rig1")}, nil)
+				return err
+			},
+			wantErr: configedit.ErrAlreadyExists,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cs, _ := newControllerStateMutationHarness(t)
+			editorHeld := make(chan struct{})
+			releaseEditor := make(chan struct{})
+			var releaseOnce sync.Once
+			release := func() { releaseOnce.Do(func() { close(releaseEditor) }) }
+			defer release()
+			editorDone := make(chan error, 1)
+			go func() {
+				editorDone <- cs.editor.Do(func() error {
+					close(editorHeld)
+					<-releaseEditor
+					return nil
+				})
+			}()
+			awaitClose(t, editorHeld, "Editor lock holder")
+
+			txDone := make(chan error, 1)
+			go func() { txDone <- tc.run(cs) }()
+			awaitCond(t, func() bool {
+				if cs.publishMu.TryLock() {
+					cs.publishMu.Unlock()
+					return false
+				}
+				return true
+			}, "config transaction holding the publication lock while it waits for the Editor lock")
+
+			release()
+			select {
+			case err := <-editorDone:
+				if err != nil {
+					t.Fatalf("Editor lock holder: %v", err)
+				}
+			case <-time.After(hangBudget):
+				t.Fatal("Editor lock holder did not finish")
+			}
+			select {
+			case err := <-txDone:
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("config transaction error = %v, want %v", err, tc.wantErr)
+				}
+			case <-time.After(hangBudget):
+				t.Fatal("config transaction did not finish after the Editor lock was released")
+			}
+		})
+	}
+}
+
+// The reviewer's reproduction of that deadlock through the write paths: a
+// plain edit pauses while it holds the publication lock, a pack import enters
+// its config transaction, and then the edit goes on to take the Editor lock.
+func TestControllerStatePlainEditFinishesBesideConfigTransaction(t *testing.T) {
+	cs, tomlPath := newControllerStateMutationHarness(t)
+	editEntered := make(chan struct{})
+	releaseEdit := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseEdit) }) }
+	defer release()
+	editDone := make(chan error, 1)
+	go func() {
+		editDone <- cs.mutateAndPoke(func() error {
+			close(editEntered)
+			<-releaseEdit
+			return cs.editor.SuspendAgent("rig1/worker")
+		})
+	}()
+	awaitClose(t, editEntered, "plain edit holding the publication lock")
+
+	txDone := make(chan error, 1)
+	go func() { txDone <- cs.SerializeConfigWrite(func() error { return nil }) }()
+	awaitCond(t, func() bool {
+		if cs.configTransactionMu.TryLock() {
+			cs.configTransactionMu.Unlock()
+			return false
+		}
+		return true
+	}, "pack import entering its config transaction")
+
+	release()
+	for _, w := range []struct {
+		name string
+		done <-chan error
+	}{{"plain edit", editDone}, {"pack import", txDone}} {
+		select {
+		case err := <-w.done:
+			if err != nil {
+				t.Fatalf("%s: %v", w.name, err)
+			}
+		case <-time.After(hangBudget):
+			t.Fatalf("%s did not finish: the plain edit and the config transaction take the publication and Editor locks in opposite orders", w.name)
+		}
+	}
+	cfg, err := config.Load(fsys.OSFS{}, tomlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Agents) != 1 || !cfg.Agents[0].Suspended {
+		t.Fatalf("agents after the edit = %+v, want rig1/worker suspended", cfg.Agents)
+	}
+}
+
+// A config transaction holds the publication lock for its whole body,
+// including a pack fetch or rig provisioning, so a runtime reload whose
+// candidate was read before the transaction began waits at publication until
+// the transaction ends. That stall is accepted: it ends with the transaction,
+// and the reload then sees that its candidate is older than the transaction's
+// generation instead of publishing over it.
+func TestControllerStateReloadPublicationWaitsOutConfigTransaction(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	cityDir := t.TempDir()
+	tomlPath := filepath.Join(cityDir, "city.toml")
+	cityToml := "[workspace]\nname = \"city1\"\n\n[beads]\nprovider = \"file\"\n\n[providers.bash]\ncommand = \"bash\"\n\n[[agent]]\nname = \"worker\"\nprovider = \"bash\"\n"
+	if err := os.WriteFile(tomlPath, []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sp := runtime.NewFake()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cs := newControllerState(ctx, &config.City{Workspace: config.Workspace{Name: "city1"}}, sp, events.NewFake(), "city1", cityDir)
+	staleCfg, staleRev, err := cs.loadCurrentConfigSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs.update(staleCfg, sp)
+
+	bodyEntered := make(chan struct{})
+	releaseBody := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseBody) }) }
+	defer release()
+	txDone := make(chan error, 1)
+	go func() {
+		txDone <- cs.SerializeConfigWrite(func() error {
+			close(bodyEntered)
+			<-releaseBody
+			return os.WriteFile(tomlPath, []byte(cityToml+"\n[[agent]]\nname = \"added\"\nprovider = \"bash\"\n"), 0o644)
+		})
+	}()
+	awaitClose(t, bodyEntered, "config transaction body")
+	if cs.publishMu.TryLock() {
+		cs.publishMu.Unlock()
+		t.Fatal("config transaction body runs without the publication lock")
+	}
+	reloadDone := make(chan bool, 1)
+	go func() { reloadDone <- cs.updateFromRuntime(staleCfg, sp, staleRev) }()
+
+	release()
+	select {
+	case err := <-txDone:
+		if err != nil {
+			t.Fatalf("config transaction: %v", err)
+		}
+	case <-time.After(hangBudget):
+		t.Fatal("config transaction did not finish")
+	}
+	select {
+	case published := <-reloadDone:
+		if published {
+			t.Fatal("reload published a candidate read before the config transaction over the transaction's generation")
+		}
+	case <-time.After(hangBudget):
+		t.Fatal("reload publication did not finish after the config transaction")
+	}
+	var added bool
+	for _, a := range cs.Config().Agents {
+		added = added || a.Name == "added"
+	}
+	if !added {
+		t.Fatalf("published agents = %+v, want the transaction's agent \"added\"", cs.Config().Agents)
+	}
+}
+
+// An API suspend or resume holds the publication lock while its state write
+// waits on the suspension fence, which the controller holds while it stops a
+// suspended scope's store. Other API config edits and reload publication wait
+// behind it. That stall is accepted: the fence holder never waits for the
+// publication lock, so the stall ends when the fence is released.
+func TestControllerStateSuspensionFenceWaitHoldsPublicationUntilFenceRelease(t *testing.T) {
+	cs, tomlPath := newControllerStateMutationHarness(t)
+	releaseFence, err := suspensionstate.Fence(cs.cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer releaseFence()
+
+	suspendDone := make(chan error, 1)
+	go func() { suspendDone <- cs.SuspendCity() }()
+	awaitCond(t, func() bool {
+		if cs.publishMu.TryLock() {
+			cs.publishMu.Unlock()
+			return false
+		}
+		return true
+	}, "API suspend holding the publication lock while it waits on the suspension fence")
+	editDone := make(chan error, 1)
+	go func() { editDone <- cs.SuspendAgent("rig1/worker") }()
+
+	releaseFence()
+	for _, w := range []struct {
+		name string
+		done <-chan error
+	}{{"city suspend", suspendDone}, {"agent suspend", editDone}} {
+		select {
+		case err := <-w.done:
+			if err != nil {
+				t.Fatalf("%s: %v", w.name, err)
+			}
+		case <-time.After(hangBudget):
+			t.Fatalf("%s did not finish after the suspension fence was released", w.name)
+		}
+	}
+	st, err := suspensionstate.Load(fsys.OSFS{}, cs.cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !suspensionstate.IsCitySuspended(st) {
+		t.Fatal("city suspend did not land after the fence was released")
+	}
+	cfg, err := config.Load(fsys.OSFS{}, tomlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Agents) != 1 || !cfg.Agents[0].Suspended {
+		t.Fatalf("agents after the edit = %+v, want rig1/worker suspended", cfg.Agents)
+	}
+}
+
+// Before any generation has been captured, RawConfig loads the raw config
+// itself. That load must wait out an in-flight mutation as publication does,
+// or it would cache a rejected edit's write as the API's raw config.
+func TestControllerStateRawConfigFallbackCannotCacheRejectedEdit(t *testing.T) {
+	cs, tomlPath := newControllerStateMutationHarness(t)
+	// A published generation, so the mutation's refresh validates (and
+	// rejects) the patch, but no raw snapshot captured yet.
+	cfg, _, err := cs.loadCurrentConfigSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs.cfg = cfg
+	original, err := os.ReadFile(tomlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	written := make(chan struct{})
+	releaseWrite := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseWrite) }) }
+	defer release()
+	mutationDone := make(chan error, 1)
+	go func() {
+		mutationDone <- cs.mutateAndPoke(func() error {
+			if err := cs.editor.SetAgentPatch(config.AgentPatch{Dir: "rig1", Name: "missing", Env: map[string]string{"REJECTED": "1"}}); err != nil {
+				return err
+			}
+			close(written)
+			<-releaseWrite
+			return nil
+		})
+	}()
+	awaitClose(t, written, "rejected patch's disk write")
+
+	rawDone := make(chan *config.City, 1)
+	go func() { rawDone <- cs.RawConfig() }()
+	// Negative assertion: the window IS the assertion ("RawConfig must not
+	// return while the rejected write is on disk"), so it stays a short literal
+	// rather than the hang budget (cmd/gc/hangbudget_test.go).
+	select {
+	case <-rawDone:
+		t.Fatal("RawConfig read the city config while a rejected edit was on disk")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	release()
+	select {
+	case err := <-mutationDone:
+		if err == nil {
+			t.Fatal("patch to a missing agent was accepted")
+		}
+	case <-time.After(hangBudget):
+		t.Fatal("rejected mutation did not finish its rollback")
+	}
+	select {
+	case raw := <-rawDone:
+		if raw == nil {
+			t.Fatal("RawConfig returned nil after the rollback")
+		}
+		if len(raw.Patches.Agents) != 0 {
+			t.Fatalf("rejected patch was cached as the API raw config: %+v", raw.Patches.Agents)
+		}
+	case <-time.After(hangBudget):
+		t.Fatal("RawConfig did not return after the rollback")
+	}
+	if got, err := os.ReadFile(tomlPath); err != nil || string(got) != string(original) {
+		t.Fatalf("city.toml after rollback = %q, err=%v", got, err)
+	}
+}

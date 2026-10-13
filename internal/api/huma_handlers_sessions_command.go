@@ -5,17 +5,20 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"reflect"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/api/apierr"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
@@ -47,6 +50,9 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 	body := input.Body
 	if body.LegacySessionName != nil {
 		return nil, apierr.InvalidRequest.Msg("session_name is no longer accepted; use alias")
+	}
+	if err := refuseNonClientSessionMetadata(body.Metadata); err != nil {
+		return nil, err
 	}
 
 	kind := body.Kind
@@ -123,6 +129,9 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 	command := launchCommand.Command
 	extraMeta := sessionTemplateOverridesMetadata(body.Options, body.Message)
 	extraMeta = agentSessionCreateMetadata(extraMeta, workDirQualifiedName)
+	// The client's keys land with the create, before the controller can see
+	// the row.
+	extraMeta = withClientMetadata(extraMeta, body.Metadata)
 	mcpServers, err := s.sessionMCPServers(template, resolved.Name, workDirQualifiedName, workDir, transport, kind, nil)
 	if err != nil {
 		return nil, apierr.Internal.Msg(err.Error())
@@ -204,10 +213,11 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 		if waitForCommandable {
 			s.state.Enqueue(reconcilekey.Session(info.ID))
 			waitCtx, cancel := context.WithTimeout(context.Background(), sessionCreateCommandableTimeout)
-			info, createErr = waiter.WaitForSessionCommandable(waitCtx, info.ID)
+			createdID := info.ID
+			info, createErr = waiter.WaitForSessionCommandable(waitCtx, createdID)
 			cancel()
 			if createErr != nil {
-				s.emitSessionCreateFailed(reqID, "create_failed", createErr.Error())
+				s.emitSessionCreateFailedFor(reqID, createdID, "create_failed", createErr.Error())
 				return
 			}
 		}
@@ -312,6 +322,8 @@ func (s *Server) humaCreateProviderSession(_ context.Context, store beads.Sessio
 		extraMeta = make(map[string]string)
 	}
 	extraMeta["session_origin"] = "manual"
+	// The client's keys land with the create.
+	extraMeta = withClientMetadata(extraMeta, body.Metadata)
 	if transport == "acp" {
 		extraMeta, err = session.WithStoredMCPMetadata(extraMeta, mcpIdentity, mcpServers)
 		if err != nil {
@@ -355,7 +367,7 @@ func (s *Server) humaCreateProviderSession(_ context.Context, store beads.Sessio
 		if msg := strings.TrimSpace(body.Message); msg != "" {
 			if _, sendErr := s.submitMessageToSession(context.Background(), store.Store, info.ID, msg, session.SubmitIntentDefault, false); sendErr != nil {
 				if rollbackErr := s.rollbackCreatedSession(store, info.ID); rollbackErr != nil {
-					s.emitSessionCreateFailed(reqID, "message_delivery_failed",
+					s.emitSessionCreateFailedFor(reqID, info.ID, "message_delivery_failed",
 						fmt.Sprintf("initial message delivery failed: %v (rollback failed: %v)", sendErr, rollbackErr))
 					return
 				}
@@ -515,6 +527,7 @@ func (sessionTranscriptGetResponse) Schema(r huma.Registry) *huma.Schema {
 // humaHandleSessionTranscript is the Huma-typed handler for GET /v0/session/{id}/transcript.
 
 func (s *Server) humaHandleSessionPatch(_ context.Context, input *SessionPatchInput) (*IndexOutput[sessionResponse], error) {
+	index := s.latestIndex()
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
@@ -534,8 +547,11 @@ func (s *Server) humaHandleSessionPatch(_ context.Context, input *SessionPatchIn
 	titlePtr := input.Body.Title
 	aliasPtr := input.Body.Alias
 
-	if titlePtr == nil && aliasPtr == nil {
-		return nil, apierr.ValidationFailed.Msg("at least one of 'title' or 'alias' is required")
+	if titlePtr == nil && aliasPtr == nil && len(input.Body.Metadata) == 0 {
+		return nil, apierr.ValidationFailed.Msg("at least one of 'title', 'alias' or 'metadata' is required")
+	}
+	if err := refuseNonClientSessionMetadata(input.Body.Metadata); err != nil {
+		return nil, err
 	}
 
 	// Validate through the session front door: the codec stays confined inside
@@ -557,7 +573,15 @@ func (s *Server) humaHandleSessionPatch(_ context.Context, input *SessionPatchIn
 
 	mgr := s.sessionManager(store.Store)
 	updateFn := func() error {
-		return mgr.UpdatePresentation(id, titlePtr, aliasPtr)
+		if titlePtr != nil || aliasPtr != nil {
+			if err := mgr.UpdatePresentation(id, titlePtr, aliasPtr); err != nil {
+				return err
+			}
+		}
+		if len(input.Body.Metadata) > 0 {
+			return store.SetMetadataBatch(id, input.Body.Metadata)
+		}
+		return nil
 	}
 	if aliasPtr != nil {
 		// agent_name off the persisted Info from the front door — the
@@ -584,7 +608,7 @@ func (s *Server) humaHandleSessionPatch(_ context.Context, input *SessionPatchIn
 	}
 	presp := sessionResponseWithReason(info, presponse, s.state.Config(), s.state.SessionProvider(), strings.TrimSpace(s.state.CityPath()) != "")
 	return &IndexOutput[sessionResponse]{
-		Index: s.latestIndex(),
+		Index: index,
 		Body:  presp,
 	}, nil
 }
@@ -596,6 +620,7 @@ func (s *Server) humaHandleSessionPermissionMode(_ context.Context, input *Sessi
 }
 
 func (s *Server) updateSessionPermissionMode(idRef string, body SessionPermissionModeBody) (*IndexOutput[sessionResponse], error) {
+	index := s.latestIndex()
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
@@ -669,7 +694,7 @@ func (s *Server) updateSessionPermissionMode(idRef string, body SessionPermissio
 	}
 	resp := sessionResponseWithReason(info, presponse, s.state.Config(), s.state.SessionProvider(), strings.TrimSpace(s.state.CityPath()) != "")
 	return &IndexOutput[sessionResponse]{
-		Index: s.latestIndex(),
+		Index: index,
 		Body:  resp,
 	}, nil
 }
@@ -895,22 +920,41 @@ func (s *Server) acceptSessionMessage(ctx context.Context, input *SessionMessage
 
 // --- Session Stop ---
 
+// sessionControlNoBody is the request body fingerprinted for the body-less
+// session control endpoints (/stop, /wake): every request to one action on
+// one target has the same body, so the Idempotency-Key scope alone decides
+// replay.
+type sessionControlNoBody struct{}
+
 // humaHandleSessionStop is the Huma-typed handler for POST /v0/session/{id}/stop.
 
-func (s *Server) humaHandleSessionStop(_ context.Context, input *SessionIDInput) (*OKWithIDResponse, error) {
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
-		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
-	}
+func (s *Server) humaHandleSessionStop(_ context.Context, input *SessionControlInput) (*OKWithIDResponse, error) {
+	// Idempotency: a completed stop is replayed and a concurrent same-key
+	// stop gets 409, so a retry after a successful stop cannot interrupt a
+	// later turn. Any error releases the key, even one returned after the
+	// interrupt was sent (e.g. StopTurn's idle wait timing out), so such a
+	// retry interrupts again. The cached value is the resolved session ID; a
+	// replay rebuilds the body.
+	id, err := withIdempotency(s.idem, sessionActionIdempotencyPath(input.ID, "stop"), input.IdempotencyKey, sessionControlNoBody{},
+		func() (string, error) {
+			store := s.state.SessionsBeadStore()
+			if store.Store == nil {
+				return "", apierr.ServiceUnavailable.Msg("no bead store configured")
+			}
 
-	id, err := s.resolveSessionIDWithConfig(store.Store, input.ID)
+			id, err := s.resolveSessionIDWithConfig(store.Store, input.ID)
+			if err != nil {
+				return "", humaResolveError(err)
+			}
+
+			mgr := s.sessionManager(store.Store)
+			if err := mgr.StopTurn(id); err != nil {
+				return "", humaSessionManagerError(err)
+			}
+			return id, nil
+		})
 	if err != nil {
-		return nil, humaResolveError(err)
-	}
-
-	mgr := s.sessionManager(store.Store)
-	if err := mgr.StopTurn(id); err != nil {
-		return nil, humaSessionManagerError(err)
+		return nil, err
 	}
 	out := &OKWithIDResponse{}
 	out.Body.Status = "ok"
@@ -1106,24 +1150,43 @@ func (s *Server) humaHandleSessionClose(ctx context.Context, input *SessionClose
 
 // humaHandleSessionWake is the Huma-typed handler for POST /v0/session/{id}/wake.
 
-func (s *Server) humaHandleSessionWake(ctx context.Context, input *SessionIDInput) (*OKWithIDResponse, error) {
+func (s *Server) humaHandleSessionWake(ctx context.Context, input *SessionControlInput) (*OKWithIDResponse, error) {
+	// Idempotency: record the wake at most once per Idempotency-Key. Only a
+	// 200 is cached; a refusal (including 409 wake-will-not-start, whose wake
+	// is already recorded) releases the key so a retry re-runs the wake.
+	id, err := withIdempotency(s.idem, sessionActionIdempotencyPath(input.ID, "wake"), input.IdempotencyKey, sessionControlNoBody{},
+		func() (string, error) {
+			return s.wakeSession(ctx, input.ID)
+		})
+	if err != nil {
+		return nil, err
+	}
+	out := &OKWithIDResponse{}
+	out.Body.Status = "ok"
+	out.Body.ID = id
+	return out, nil
+}
+
+// wakeSession records an explicit wake for target, hands the session to the
+// controller, and returns the resolved session ID.
+func (s *Server) wakeSession(ctx context.Context, target string) (string, error) {
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
-		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
+		return "", apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
 
-	id, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, store.Store, input.ID)
+	id, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, store.Store, target)
 	if err != nil {
-		return nil, humaResolveError(err)
+		return "", humaResolveError(err)
 	}
 
 	res, err := session.NewStore(store).WakeSession(id, time.Now().UTC(), session.WakeOpts{RejectClosed: true})
 	if err != nil {
 		if errors.Is(err, session.ErrNotSessionBead) {
-			return nil, apierr.InvalidRequest.Msg(id + " is not a session")
+			return "", apierr.InvalidRequest.Msg(id + " is not a session")
 		}
 		if state, conflict := session.WakeConflictState(err); conflict {
-			return nil, apierr.SessionConflict.Msg("session " + id + " is " + state)
+			return "", apierr.SessionConflict.Msg("session " + id + " is " + state)
 		}
 		// Route every remaining store error through humaStoreError: the fused
 		// Get error keeps its original 404 "not_found: "/500 "internal: " mapping,
@@ -1131,7 +1194,7 @@ func (s *Server) humaHandleSessionWake(ctx context.Context, input *SessionIDInpu
 		// pre-fusion handler: a mid-wake write ErrNotFound now maps 404 instead of
 		// 500 — a safe-direction, near-unreachable shift, mirrored in the REST
 		// handler's writeStoreError.)
-		return nil, humaStoreError(err)
+		return "", humaStoreError(err)
 	}
 	// Nudge withdrawal reads the nudges class, so it sources the typed
 	// NudgesBeadStore (identity to the work store until that class relocates).
@@ -1161,19 +1224,120 @@ func (s *Server) humaHandleSessionWake(ctx context.Context, input *SessionIDInpu
 		why, _ = refuser.WakeStartRefusal(woken)
 	}
 	if why != "" {
-		return nil, apierr.WakeWillNotStart.Msg("wake recorded for session " + id + ", but it will not start: " + strings.TrimPrefix(why, "wake recorded for session "+id+", but it will not start: "))
+		return "", apierr.WakeWillNotStart.Msg("wake recorded for session " + id + ", but it will not start: " + strings.TrimPrefix(why, "wake recorded for session "+id+", but it will not start: "))
 	}
-	out := &OKWithIDResponse{}
-	out.Body.Status = "ok"
-	out.Body.ID = id
-	return out, nil
+	return id, nil
 }
 
 // --- Session Rename ---
 
 // humaHandleSessionRename is the Huma-typed handler for POST /v0/session/{id}/rename.
 
+// clientSessionMetadataPrefix is the session metadata family external
+// clients own (session.fields: real_world_app_ is NoWriter in gc): the only
+// keys POST /sessions and PATCH /session/{id} write for a client, since the
+// generic bead API never writes a session row (architecture B).
+const clientSessionMetadataPrefix = "real_world_app_"
+
+// refuseNonClientSessionMetadata refuses, with 422 and an errors[] entry per
+// key, a session metadata key outside the client family or one that is not a
+// valid bead-metadata key.
+func refuseNonClientSessionMetadata(meta map[string]string) error {
+	var bad []*huma.ErrorDetail
+	for _, k := range slices.Sorted(maps.Keys(meta)) {
+		if !strings.HasPrefix(k, clientSessionMetadataPrefix) || !beadmeta.ValidKey(k) {
+			bad = append(bad, &huma.ErrorDetail{Location: "body.metadata." + k, Message: "a client writes only valid " + clientSessionMetadataPrefix + "* keys on a session", Value: k})
+		}
+	}
+	if len(bad) == 0 {
+		return nil
+	}
+	return apierr.ValidationFailed.With("session metadata: only "+clientSessionMetadataPrefix+"* keys are a client's; nothing was written", bad...)
+}
+
+// withClientMetadata is meta with the client's keys added.
+func withClientMetadata(optMeta, client map[string]string) map[string]string {
+	if len(client) == 0 {
+		return optMeta
+	}
+	out := maps.Clone(optMeta)
+	if out == nil {
+		out = make(map[string]string, len(client))
+	}
+	maps.Copy(out, client)
+	return out
+}
+
+// humaHandleSessionPin is the Huma-typed handler for POST
+// /v0/city/{cityName}/session/{id}/pin: gc session pin's write (pin_awake),
+// which the generic bead API no longer makes (architecture B). A configured
+// named session not yet materialized is, as the CLI's pin does.
+func (s *Server) humaHandleSessionPin(ctx context.Context, input *SessionIDInput) (*IndexOutput[sessionResponse], error) {
+	return s.setSessionPin(ctx, input.ID, true)
+}
+
+// humaHandleSessionUnpin is the Huma-typed handler for POST
+// /v0/city/{cityName}/session/{id}/unpin: gc session unpin's write.
+func (s *Server) humaHandleSessionUnpin(ctx context.Context, input *SessionIDInput) (*IndexOutput[sessionResponse], error) {
+	return s.setSessionPin(ctx, input.ID, false)
+}
+
+func (s *Server) setSessionPin(ctx context.Context, idRef string, pinned bool) (*IndexOutput[sessionResponse], error) {
+	index := s.latestIndex()
+	store := s.state.SessionsBeadStore()
+	if store.Store == nil {
+		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
+	}
+	// A pin materializes a configured named session not yet created, as gc
+	// session pin does; that row is the pin's to keep.
+	id, err := s.resolveSessionIDWithConfig(store.Store, idRef)
+	materialized := false
+	if err != nil && pinned {
+		id, err = s.resolveSessionIDMaterializingNamedWithContext(ctx, store.Store, idRef)
+		materialized = err == nil
+	}
+	if err != nil {
+		return nil, humaResolveError(err)
+	}
+	sessFront := session.NewStore(store)
+	info, err := sessFront.Get(id)
+	if err != nil {
+		if errors.Is(err, session.ErrSessionNotFound) {
+			return nil, apierr.InvalidRequest.Msg(id + " is not a session")
+		}
+		return nil, humaStoreError(err)
+	}
+	if info.Closed {
+		return nil, apierr.SessionConflict.Msg("session " + id + " is closed")
+	}
+	// Pool demand alone starts and keeps a demand-only singleton's session;
+	// the reconciler never reads pin_awake for it, so refuse a pin that would
+	// do nothing, as gc session pin does (#6858).
+	if cfg := s.state.Config(); pinned && !materialized && cfg != nil {
+		if agentCfg, ok := findAgentByQualifiedTemplate(cfg, info.Template); ok && session.IsDemandOnlySingletonSession(cfg, &agentCfg, info) {
+			return nil, apierr.DemandOnlySingleton.Msg("cannot pin session " + id + ": " + session.DemandOnlySingletonExplanation(agentCfg.QualifiedName()))
+		}
+	}
+	if info.Type == "" {
+		sessFront.RepairTypeBestEffort(id)
+	}
+	if err := sessFront.SetPinAwake(id, pinned); err != nil {
+		return nil, humaStoreError(err)
+	}
+	s.state.Enqueue(reconcilekey.Session(id))
+	mgr := s.sessionManager(store.Store)
+	info, pr, err := sessionGetEnriched(session.NewStore(store), mgr, id)
+	if err != nil {
+		return nil, humaSessionManagerError(err)
+	}
+	return &IndexOutput[sessionResponse]{
+		Index: index,
+		Body:  sessionResponseWithReason(info, pr, s.state.Config(), s.state.SessionProvider(), strings.TrimSpace(s.state.CityPath()) != ""),
+	}, nil
+}
+
 func (s *Server) humaHandleSessionRename(_ context.Context, input *SessionRenameInput) (*IndexOutput[sessionResponse], error) {
+	index := s.latestIndex()
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
@@ -1213,7 +1377,7 @@ func (s *Server) humaHandleSessionRename(_ context.Context, input *SessionRename
 	}
 	rresp := sessionResponseWithReason(info, pr, s.state.Config(), s.state.SessionProvider(), strings.TrimSpace(s.state.CityPath()) != "")
 	return &IndexOutput[sessionResponse]{
-		Index: s.latestIndex(),
+		Index: index,
 		Body:  rresp,
 	}, nil
 }

@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/graphv2"
@@ -1916,11 +1917,17 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 		return SlingResult{}, fmt.Errorf("listing children of %s: %w", b.ID, err)
 	}
 
-	var open, skipped []beads.Bead
+	// A controller-owned child (a session row, a startup-health episode, a
+	// convergence root) is never slung: each is refused on its own, before
+	// any attachment check or formula touches it (architecture B).
+	var open, skipped, owned []beads.Bead
 	for _, c := range children {
-		if c.Status == "open" {
+		switch {
+		case coordclass.ControllerOwned(c):
+			owned = append(owned, c)
+		case c.Status == "open":
 			open = append(open, c)
-		} else {
+		default:
 			skipped = append(skipped, c)
 		}
 	}
@@ -1952,6 +1959,7 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 		batchResult.Total = len(children)
 		batchResult.Routed = len(open)
 		batchResult.Skipped = len(skipped)
+		batchResult.Failed = len(owned)
 		return batchResult, nil
 	}
 
@@ -2002,6 +2010,14 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 	// child and map it to exit code 3 + the cleanup hint. Stringifying into
 	// childResult.FailReason alone loses the type.
 	var childErrors []error
+	for _, child := range owned {
+		err := &OwnedChildError{BeadID: child.ID, Type: child.Type}
+		childResult := SlingChildResult{BeadID: child.ID}
+		childResult.fail(err)
+		batchResult.Children = append(batchResult.Children, childResult)
+		childErrors = append(childErrors, err)
+		failed++
+	}
 	for _, child := range open {
 		childResult := SlingChildResult{BeadID: child.ID}
 
@@ -2129,6 +2145,17 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 		return batchResult, errors.Join(joined...)
 	}
 	return batchResult, nil
+}
+
+// OwnedChildError refuses a container's controller-owned child (a session
+// row, a startup-health episode, a convergence root): no sling routes,
+// assigns or attaches a formula to one; its owner writes it (architecture B).
+type OwnedChildError struct {
+	BeadID, Type string
+}
+
+func (e *OwnedChildError) Error() string {
+	return fmt.Sprintf("bead %s (type %q) is controller-owned (a session row, a startup-health episode or a convergence root): sling never routes one", e.BeadID, e.Type)
 }
 
 // batchSkips counts the open children DoSlingBatch skips on their fresh

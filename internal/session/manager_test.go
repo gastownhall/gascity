@@ -5941,6 +5941,120 @@ func TestObserveRuntimeForInfoCarriesAttachError(t *testing.T) {
 	}
 }
 
+func TestTranscriptPathWaitsForKnownClaudeKey(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp)
+
+	workDir := t.TempDir()
+	resume := ProviderResume{
+		ResumeFlag:    "--resume",
+		ResumeStyle:   "flag",
+		SessionIDFlag: "--session-id",
+	}
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "claude", WorkDir: workDir, Provider: "claude", Env: nil, Resume: resume, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	searchBase := t.TempDir()
+	slugDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
+	if err := os.MkdirAll(slugDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	latestPath := filepath.Join(slugDir, "latest.jsonl")
+	if err := os.WriteFile(latestPath, []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(latest): %v", err)
+	}
+
+	path, lookup, err := mgr.TranscriptPathClassified(info.ID, []string{searchBase})
+	if err != nil {
+		t.Fatalf("TranscriptPathClassified: %v", err)
+	}
+	if path != "" || lookup != TranscriptAbsent {
+		t.Fatalf("new keyed session read another conversation: path=%q classification=%v; want absent", path, lookup)
+	}
+
+	keyPath := filepath.Join(slugDir, info.SessionKey+".jsonl")
+	if err := os.WriteFile(keyPath, []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(key): %v", err)
+	}
+	path, lookup, err = mgr.TranscriptPathClassified(info.ID, []string{searchBase})
+	if err != nil {
+		t.Fatalf("TranscriptPathClassified(after write): %v", err)
+	}
+	if path != keyPath || lookup != TranscriptFound {
+		t.Fatalf("path=%q classification=%v, want exact keyed transcript", path, lookup)
+	}
+}
+
+// A start commits the new continuation epoch, and on a fresh wake clears
+// session_key, before it writes the key a session-id-flag provider launches
+// under. In that window the newest work-dir transcript is the conversation the
+// start replaces, so the lookup withholds it, as absent even beside another
+// session in the work directory. Outside a start, or for a provider without a
+// session-id flag, the work-dir fallback still serves it, and another session
+// in the work directory makes it ambiguous.
+func TestTranscriptPathWithholdsWorkDirFallbackWhileStartHasNoKey(t *testing.T) {
+	keyed := ProviderResume{ResumeFlag: "--resume", ResumeStyle: "flag", SessionIDFlag: "--session-id"}
+	keyless := ProviderResume{ResumeFlag: "--resume", ResumeStyle: "flag"}
+	cases := []struct {
+		name    string
+		resume  ProviderResume
+		state   State
+		sibling bool
+		want    TranscriptLookup
+	}{
+		{name: "keyed start before its key is minted", resume: keyed, state: StateCreating, want: TranscriptAbsent},
+		{name: "keyed start beside another session in its work dir", resume: keyed, state: StateCreating, sibling: true, want: TranscriptAbsent},
+		{name: "keyed session asleep with its key cleared", resume: keyed, state: StateAsleep, want: TranscriptFound},
+		{name: "keyed session asleep beside another session in its work dir", resume: keyed, state: StateAsleep, sibling: true, want: TranscriptAmbiguous},
+		{name: "start of a provider without a session-id flag", resume: keyless, state: StateCreating, want: TranscriptFound},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			mgr := NewManagerWithOptions(store, runtime.NewFake())
+			workDir := t.TempDir()
+			opts := CreateOptions{Template: "helper", Title: "", Command: "claude", WorkDir: workDir, Provider: "claude", Env: nil, Resume: tc.resume, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}}
+			info, err := mgr.CreateSession(context.Background(), opts)
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			if tc.sibling {
+				if _, err := mgr.CreateSession(context.Background(), opts); err != nil {
+					t.Fatalf("Create(sibling): %v", err)
+				}
+			}
+			if err := store.SetMetadataBatch(info.ID, map[string]string{"session_key": "", "state": string(tc.state)}); err != nil {
+				t.Fatalf("SetMetadataBatch: %v", err)
+			}
+
+			searchBase := t.TempDir()
+			slugDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
+			if err := os.MkdirAll(slugDir, 0o755); err != nil {
+				t.Fatalf("MkdirAll: %v", err)
+			}
+			previousPath := filepath.Join(slugDir, "previous.jsonl")
+			if err := os.WriteFile(previousPath, []byte("{}\n"), 0o644); err != nil {
+				t.Fatalf("WriteFile(previous): %v", err)
+			}
+
+			path, lookup, err := mgr.TranscriptPathClassified(info.ID, []string{searchBase})
+			if err != nil {
+				t.Fatalf("TranscriptPathClassified: %v", err)
+			}
+			wantPath := ""
+			if tc.want == TranscriptFound {
+				wantPath = previousPath
+			}
+			if path != wantPath || lookup != tc.want {
+				t.Fatalf("path=%q classification=%v, want %q/%v", path, lookup, wantPath, tc.want)
+			}
+		})
+	}
+}
+
 // testActor is an Actor of kind on m's city, the city its Manager leased in
 // before R10; a city path that names no directory gives no City.
 func testActor(m *Manager, kind ActorKind) Actor {

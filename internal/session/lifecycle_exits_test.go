@@ -308,6 +308,42 @@ func TestAccrualNeverShortensALiveQuarantine(t *testing.T) {
 	}
 }
 
+// TestAccrualKeepsALiveQuarantinesReason (CONTRACT v5.9z; seed 499). Kills
+// an accrual that overwrites a live quarantine's reason: a crash or churn
+// accrual reaching its threshold during a live quarantine, on a row whose
+// reason is the quarantine's, keeps that reason (Over, and PatchFor, which
+// legacy's recordWakeFailure and recordChurn write); with no live
+// quarantine, or an expired one, it writes its own.
+func TestAccrualKeepsALiveQuarantinesReason(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	until := now.Add(time.Hour)
+	for _, c := range []struct {
+		name, reason string
+		quarantine   time.Time
+		keep         bool
+	}{
+		{"a live quarantine's own reason", string(SleepReasonQuarantine), now.Add(time.Minute), true},
+		{"a live rate-limit quarantine", string(SleepReasonRateLimit), now.Add(time.Minute), true},
+		{"no quarantine", "", time.Time{}, false},
+		{"an expired quarantine", string(SleepReasonQuarantine), now.Add(-time.Minute), false},
+		{"a live quarantine, the row idle", string(SleepReasonIdle), now.Add(time.Minute), false},
+		{"a live quarantine, no reason", "", now.Add(time.Minute), false},
+	} {
+		info := Info{ID: "s-1", SleepReason: c.reason}
+		if !c.quarantine.IsZero() {
+			info.QuarantinedUntil = c.quarantine.Format(time.RFC3339)
+		}
+		for name, acc := range map[string]ExitAccrual{"wake failure": WakeFailureAccrualPatch(4, 5, until), "churn": ChurnAccrualPatch(2, 3, until)} {
+			for via, patch := range map[string]MetadataPatch{"Over": acc.Over(info, now), "PatchFor": acc.PatchFor(info, now)} {
+				_, writes := patch["sleep_reason"]
+				if writes == c.keep {
+					t.Errorf("%s, %s, %s: sleep_reason written %t (%q), want the live reason kept %t", c.name, name, via, writes, patch["sleep_reason"], c.keep)
+				}
+			}
+		}
+	}
+}
+
 func TestChurnAccrualPatch(t *testing.T) {
 	until := time.Date(2026, 3, 8, 13, 0, 0, 0, time.UTC)
 

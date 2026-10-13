@@ -5076,7 +5076,7 @@ func TestRecoverRunningPendingCreate_StampsCreationCompleteAtForAlreadyActive(t 
 	tp := TemplateParams{SessionName: "sky", TemplateName: "helper"}
 	clkTime := time.Date(2026, 3, 18, 12, 0, 1, 0, time.UTC)
 
-	if ok, _ := recoverRunningPendingCreate(testCity, sessiontest.SeedBead(t, bead), tp, cfg, store, &clock.Fake{Time: clkTime}, nil); !ok {
+	if ok, _ := recoverRunningPendingCreate(testCity, sessiontest.SeedBead(t, bead), tp, cfg, store, nil, &clock.Fake{Time: clkTime}, io.Discard, nil); !ok {
 		t.Fatal("recoverRunningPendingCreate returned false, want true")
 	}
 
@@ -5122,7 +5122,7 @@ func TestRecoverRunningPendingCreate_ReturnsMintedInstanceTokenForSnapshotFold(t
 	tp := TemplateParams{SessionName: "sky", TemplateName: "helper"}
 	clkTime := time.Date(2026, 3, 18, 12, 0, 1, 0, time.UTC)
 
-	ok, batch := recoverRunningPendingCreate(testCity, sessiontest.SeedBead(t, bead), tp, cfg, store, &clock.Fake{Time: clkTime}, nil)
+	ok, batch := recoverRunningPendingCreate(testCity, sessiontest.SeedBead(t, bead), tp, cfg, store, nil, &clock.Fake{Time: clkTime}, io.Discard, nil)
 	if !ok {
 		t.Fatal("recoverRunningPendingCreate returned false, want true")
 	}
@@ -5177,7 +5177,7 @@ func TestRecoverRunningPendingCreate_StampsPrimingPairWhenDelivered(t *testing.T
 		store := beads.NewMemStore()
 		bead := newRecoveryBead(store)
 		tp := TemplateParams{SessionName: "sky", TemplateName: "helper", Command: "claude", Prompt: prompt}
-		if ok, _ := recoverRunningPendingCreate(testCity, sessiontest.SeedBead(t, bead), tp, cfg, store, &clock.Fake{Time: clkTime}, nil); !ok {
+		if ok, _ := recoverRunningPendingCreate(testCity, sessiontest.SeedBead(t, bead), tp, cfg, store, nil, &clock.Fake{Time: clkTime}, io.Discard, nil); !ok {
 			t.Fatal("recoverRunningPendingCreate returned false, want true")
 		}
 		got, err := store.Get(bead.ID)
@@ -5196,7 +5196,7 @@ func TestRecoverRunningPendingCreate_StampsPrimingPairWhenDelivered(t *testing.T
 		store := beads.NewMemStore()
 		bead := newRecoveryBead(store)
 		tp := TemplateParams{SessionName: "sky", TemplateName: "helper", Command: "claude", Prompt: ""}
-		if ok, _ := recoverRunningPendingCreate(testCity, sessiontest.SeedBead(t, bead), tp, cfg, store, &clock.Fake{Time: clkTime}, nil); !ok {
+		if ok, _ := recoverRunningPendingCreate(testCity, sessiontest.SeedBead(t, bead), tp, cfg, store, nil, &clock.Fake{Time: clkTime}, io.Discard, nil); !ok {
 			t.Fatal("recoverRunningPendingCreate returned false, want true")
 		}
 		got, err := store.Get(bead.ID)

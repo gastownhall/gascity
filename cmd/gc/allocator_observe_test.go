@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"io"
 	"testing"
 	"time"
 
@@ -453,6 +454,33 @@ func TestObserveListedAfterPassStartIsNotGone(t *testing.T) {
 	cache.Note("s1", FactListed, ObsYes, censusNow.Add(time.Second), SourceProbe, "")
 	if got := observed(t, cache.Snapshot(), c, censusNow.Add(time.Second), "gc-1"); got.Liveness == livenessGone || got.Liveness.startCandidate() {
 		t.Fatalf("listed after the pass: %+v, want present, not gone", got)
+	}
+}
+
+// Kills a dormant stop's gone note the next pass reads past (CONTRACT
+// v5.10d (a)): a name the latest pass listed alive, which the stop's fresh
+// read since found absent (the planner's applyFacts), reads gone, a start
+// candidate, in observeRow and readRuntimeName alike; a pass that started
+// after the read overrides it.
+func TestObserveUnlistedAfterPassStartIsGone(t *testing.T) {
+	c := observeRows(t, map[string]string{"gc-1": "s1"})
+	cache := newObserveCache()
+	alive := map[string]InventoryAttrs{"s1": {DeadKnown: true, Identity: readIdentity("gc-1")}}
+	cache.publish(censusNow, alive, completeBackend("tmux", "s1"))
+	p := newPlanner(newFakePlannerClock(plannerT0), func() time.Duration { return time.Minute }, nil, newInflightMap(), nil, io.Discard)
+	p.observations = func() *ObservationCache { return cache.ObservationCache }
+	read := censusNow.Add(time.Second)
+	p.applyFacts(effectFacts{Noted: &notedRuntime{Name: "s1", At: read, Gone: true}}, read)
+	if got := observed(t, cache.Snapshot(), c, read, "gc-1"); got.Liveness != livenessGone {
+		t.Fatalf("noted gone after the pass: %+v, want gone", got)
+	}
+	if got := readRuntimeName(cache.Snapshot(), "s1", read, observeMaxAge).state; got != nameAbsent {
+		t.Fatalf("noted gone after the pass: readRuntimeName state %d, want absent", got)
+	}
+	later := read.Add(time.Second)
+	cache.publish(later, alive, completeBackend("tmux", "s1"))
+	if got := observed(t, cache.Snapshot(), c, later, "gc-1"); got.Liveness != livenessAlive {
+		t.Fatalf("listed by a pass that started after the note: %+v, want alive", got)
 	}
 }
 

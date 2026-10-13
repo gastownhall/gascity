@@ -2296,3 +2296,56 @@ func TestRespondReportsUnavailableActionAsMismatch(t *testing.T) {
 		t.Fatalf("Respond error = %v, want ErrInteractionMismatch", err)
 	}
 }
+
+// TestSubmitDefaultQueuesOverACrashedAgent (mc-48az4): a message submitted
+// right after the agent crashed, its pane still up but the agent dead and
+// the controller's heal not yet run, is queued for the incarnation the heal
+// brings up (queued, deferred: the controller is poked) rather than typed
+// into the dead pane and lost; it is fenced by the session alone, so the
+// crash heal's conversation reset (an epoch rotation) does not dead-letter
+// it. A live agent's message is delivered as before.
+func TestSubmitDefaultQueuesOverACrashedAgent(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	cityPath := t.TempDir()
+	mgr := NewManagerWithOptions(store, sp, WithCityPath(cityPath))
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.SetMetadata(info.ID, "continuation_epoch", "3"); err != nil {
+		t.Fatal(err)
+	}
+	origPoller := startSessionSubmitPoller
+	startSessionSubmitPoller = func(string, string, string) error { return nil }
+	defer func() { startSessionSubmitPoller = origPoller }()
+	hints := runtime.Config{WorkDir: info.WorkDir, ProcessNames: []string{"claude"}}
+
+	sp.Zombies[info.SessionName] = true
+	before := len(sp.Calls)
+	outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorBackground), info.ID, "after the crash", BuildResumeCommand(info), hints, SubmitIntentDefault)
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	if !outcome.Queued || !outcome.Deferred {
+		t.Fatalf("outcome %+v, want queued and deferred", outcome)
+	}
+	for _, call := range sp.Calls[before:] {
+		if call.Name == info.SessionName && (call.Method == "Nudge" || call.Method == "NudgeNow" || call.Method == "SendKeys" || call.Method == "Start") {
+			t.Fatalf("call %+v on the crashed pane, want the message queued untouched", call)
+		}
+	}
+	state, err := nudgequeue.LoadState(cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Pending) != 1 || state.Pending[0].SessionID != info.ID || state.Pending[0].Message != "after the crash" || state.Pending[0].ContinuationEpoch != "" {
+		t.Fatalf("pending %+v, want the message queued for the session with no epoch fence", state.Pending)
+	}
+
+	delete(sp.Zombies, info.SessionName)
+	outcome, err = mgr.Submit(context.Background(), testActor(mgr, ActorBackground), info.ID, "to a live agent", BuildResumeCommand(info), hints, SubmitIntentDefault)
+	if err != nil || outcome.Queued {
+		t.Fatalf("live: outcome %+v (%v), want delivered", outcome, err)
+	}
+}

@@ -1926,6 +1926,13 @@ func parseNudgeDeliveryMode(raw string) (nudgeDeliveryMode, error) {
 }
 
 func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.Store, sp runtime.Provider, quiescence time.Duration, obs worker.LiveObservation) (bool, error) {
+	// A pane whose agent is dead (a crash the controller has not healed)
+	// takes no queued delivery: the text would be lost with the pane. The
+	// incarnation the heal brings up claims it (mc-48az4). Alive is Running
+	// for a provider with no process names to check.
+	if !obs.Alive {
+		return false, nil
+	}
 	matches, err := nudgeTargetLiveGenerationMatches(target, obs, sp)
 	if err != nil || !matches {
 		return false, err

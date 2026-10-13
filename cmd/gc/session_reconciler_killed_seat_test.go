@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -752,22 +753,33 @@ func TestDrainAckReleaseBudgetLogTextIsUnchanged(t *testing.T) {
 	}
 }
 
-// D5's drain-ack release still passes no fallback route: a released bead keeps
-// whatever routing it carried (none here), unlike the killed seat's release.
-func TestDrainAckReleaseStampsNoFallbackRoute(t *testing.T) {
+// D5's drain-ack release stamps the seat's route on a routeless claim and
+// gives it back into that lane, as the killed seat's release does (mc-sca8r):
+// kept, the claim would leave the acked seat asleep holding it. A claim
+// routed to a lane nothing serves is still kept (O5).
+func TestDrainAckReleaseStampsTheSeatRoute(t *testing.T) {
 	work := beads.NewMemStore()
-	held := mustCreateDrainAckBead(t, work, beads.Bead{Title: "claim with no route", Type: "task"}, "in_progress", "worker-1")
+	plain := mustCreateDrainAckBead(t, work, beads.Bead{Title: "claim with no route", Type: "task"}, "in_progress", "worker-1")
+	ghost := mustCreateDrainAckBead(t, work, beads.Bead{
+		Title: "claim routed to no configured agent", Type: "task", Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "ghost"},
+	}, "in_progress", "worker-1")
 
-	releaseUnexecutedClaimsOnDrainAck(testWorkLegs("", servingCity("worker"), work, nil), drainAckSessionBead(), time.Minute, io.Discard)
+	var stderr bytes.Buffer
+	releaseUnexecutedClaimsOnDrainAck(testWorkLegs("", servingCity("worker"), work, nil), drainAckSessionBead(), time.Minute, &stderr)
 
-	got, err := work.Get(held.ID)
+	got, err := work.Get(plain.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// With no route of its own and none stamped, no lane would serve it: it
-	// stays assigned (work_release.go) rather than taking the seat's route.
-	if got.Assignee != "worker-1" || got.Metadata[beadmeta.RunTargetMetadataKey] != "" {
-		t.Fatalf("drain-ack release: assignee=%q %s=%q, want kept with no route stamped", got.Assignee, beadmeta.RunTargetMetadataKey, got.Metadata[beadmeta.RunTargetMetadataKey])
+	if got.Status != "open" || got.Assignee != "" || got.Metadata[beadmeta.RunTargetMetadataKey] != "worker" {
+		t.Fatalf("routeless claim: status=%q assignee=%q %s=%q, want open, unassigned, the seat's route worker; stderr=%s",
+			got.Status, got.Assignee, beadmeta.RunTargetMetadataKey, got.Metadata[beadmeta.RunTargetMetadataKey], stderr.String())
+	}
+	if status, assignee := drainAckBeadStatus(t, work, ghost.ID); status != "in_progress" || assignee != "worker-1" {
+		t.Fatalf("unserved claim: status=%q assignee=%q, want kept", status, assignee)
+	}
+	if want := `keeps claim ` + ghost.ID + `: no lane serves route "ghost"`; !strings.Contains(stderr.String(), want) {
+		t.Fatalf("stderr = %q, want %q", stderr.String(), want)
 	}
 }
 

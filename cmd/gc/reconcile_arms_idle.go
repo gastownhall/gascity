@@ -315,7 +315,7 @@ func (p *idlePass) sessionInfos(c *sessionCensus) map[string]session.Info {
 // defer streak on one anchor bead (legacy's assignedWorkDeferTracker),
 // counted at most once a patrol; each runtime's content-clock anchor, the
 // pass since its pane last read idle (legacy's idleTracker.idleSince); and
-// each row's last deferral trace.
+// each row's last idle-timeout trace (a deferral or a stop).
 type idleMemory struct {
 	defers map[rowKey]idleDeferStreak
 	since  map[idleIncarnation]time.Time
@@ -434,10 +434,48 @@ func (m *idleMemory) updateRow(w *World, a *allocDecision, row censusRow, patrol
 		return rowTrace{}, false
 	}
 	reason, outcome := timerTraceCodes(dec)
-	line := string(reason) + "/" + string(outcome)
-	if t := m.traced[row.Key]; t.line == line && w.Now.Sub(t.at) < patrol {
+	return m.trace(row, s.Template, string(reason), string(outcome), w.Now, patrol)
+}
+
+// trace is row's legacy idle-timeout record (reconciler.session.idle_timeout)
+// with reason and outcome, unless the row was traced so within patrol.
+func (m *idleMemory) trace(row censusRow, template, reason, outcome string, now time.Time, patrol time.Duration) (rowTrace, bool) {
+	line := reason + "/" + outcome
+	if t := m.traced[row.Key]; t.line == line && now.Sub(t.at) < patrol {
 		return rowTrace{}, false
 	}
-	m.traced[row.Key] = idleTraced{line: line, at: w.Now}
-	return rowTrace{Key: row.Key, Site: TraceSiteReconcilerIdleTimeout, Template: s.Template, SessionName: strings.TrimSpace(row.Info.SessionName), Reason: string(reason), Outcome: string(outcome)}, true
+	m.traced[row.Key] = idleTraced{line: line, at: now}
+	return rowTrace{Key: row.Key, Site: TraceSiteReconcilerIdleTimeout, Template: template, SessionName: strings.TrimSpace(row.Info.SessionName), Reason: reason, Outcome: outcome}, true
+}
+
+// stopTraces are legacy's records of the idle stops the pass decided
+// (reconciler.session.idle_timeout; mc-ensxp), with the codes legacy takes
+// from the stop's decision through timerTraceCodes: idle_timeout/stop, or
+// assigned_work_exhausted/stop_defer_exhausted for the forced stop
+// (DecideAssignedWorkExhausted). The decision is the row's ladder on the
+// pass's facts (idleLadder), the one armIdleTimeout stopped on. As legacy
+// records them when it decides the kill, at most one a patrol per row and
+// reason.
+func (m *idleMemory) stopTraces(w *World, a *allocDecision, intents []intent, patrol time.Duration) []rowTrace {
+	var out []rowTrace
+	for _, it := range intents {
+		if it.Kind != intentStop || !isIdleReason(it.Reason) {
+			continue
+		}
+		row, ok := w.Census.Rows[it.Key]
+		if !ok {
+			continue
+		}
+		r := &rowFacts{w: w, k: it.Key, entry: a.Snapshot.Entries[it.Key], row: row}
+		dec, ok := r.idleLadder()
+		if !ok || dec.Action != session.TimerActionStop {
+			continue
+		}
+		s, _ := w.idleSettingOf(it.Key, row.Info)
+		reason, outcome := timerTraceCodes(dec)
+		if t, ok := m.trace(row, s.Template, string(reason), string(outcome), w.Now, patrol); ok {
+			out = append(out, t)
+		}
+	}
+	return out
 }

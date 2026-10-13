@@ -1102,15 +1102,17 @@ func validateEngineMintedKindMetadata(steps []*Step, errs *[]string, prefix stri
 	}
 }
 
-// sessionStepType, sessionStepLabel and startupHealthStepType are
-// session.BeadType, session.LabelSession and session.StartupHealthEpisodeType
-// (a test pins them): the marks of a session row, which only the session
-// verbs mint, and the type of a startup-health episode, which only the
-// controller records.
+// sessionStepType, sessionStepLabel, startupHealthStepType and
+// convergenceStepType are the marks of a controller-owned row (a test pins
+// the check against coordclass.ControllerOwned): a session row, which only
+// the session verbs mint, a startup-health episode, which only the
+// controller records, and a convergence root, which only the convergence
+// handler creates.
 const (
 	sessionStepType       = "session"
 	sessionStepLabel      = "gc:session"
 	startupHealthStepType = "startup-health-episode"
+	convergenceStepType   = "convergence"
 )
 
 // sessionVerbs names the session verbs that create a session row.
@@ -1118,14 +1120,16 @@ const sessionVerbs = "gc session new, POST /v0/city/{cityName}/sessions"
 
 // controllerOnlyType is why a step of type typ may not be compiled, or "":
 // compile copies a step's type onto its bead, so a formula would mint a
-// session row (mc-okw9n) or a startup-health episode, which holds its
-// session down (mc-lp7zb).
+// session row (mc-okw9n), a startup-health episode, which holds its session
+// down (mc-lp7zb), or a convergence root (architecture B).
 func controllerOnlyType(typ string) string {
 	switch t := strings.TrimSpace(typ); {
 	case strings.EqualFold(t, sessionStepType):
 		return "makes a session row, which only the session verbs create (" + sessionVerbs + ")"
 	case strings.EqualFold(t, startupHealthStepType):
 		return "makes a startup-health episode, which only the controller records"
+	case strings.EqualFold(t, convergenceStepType):
+		return "makes a convergence root, which only the convergence handler creates"
 	}
 	return ""
 }
@@ -1145,7 +1149,7 @@ func validateNoSessionSteps(steps []*Step, errs *[]string, prefix string) {
 			*errs = append(*errs, fmt.Sprintf("%s: type %q %s", stepPrefix, step.Type, why))
 		}
 		for _, l := range step.Labels {
-			if strings.TrimSpace(l) == sessionStepLabel {
+			if strings.EqualFold(strings.TrimSpace(l), sessionStepLabel) {
 				*errs = append(*errs, fmt.Sprintf("%s: tag %q marks a session row, which only the session verbs create (%s)", stepPrefix, l, sessionVerbs))
 			}
 		}

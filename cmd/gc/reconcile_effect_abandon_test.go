@@ -1282,3 +1282,182 @@ func TestStrandedComposedStartStaysCommitted(t *testing.T) {
 		t.Fatalf("state %q, want the stranded seat still committed", got)
 	}
 }
+
+// strandedTimerStart is a committed pool seat whose runtime is gone and whose
+// late quarantine expired at the pass (A6's timer heal), composed into its
+// start (startHealed); a stranded one has no work.
+func strandedTimerStart(t *testing.T, stranded bool, woke time.Duration) (*txKit, intent) {
+	t.Helper()
+	k, _ := launchKit(t, "active", "session_key", "k-1", "started_config_hash", "h",
+		"last_woke_at", gatherNow.Add(-woke).Format(time.RFC3339),
+		"quarantined_until", gatherNow.Add(-time.Minute).Format(time.RFC3339),
+		"sleep_reason", "quarantine", "wake_attempts", "3", "churn_count", "2")
+	row := k.p.World.Census.Rows[k.it.Key]
+	healPatch, healClass, _ := timerHealPatch(row.Info, gatherNow)
+	heal := intent{Kind: intentRowHeal, Reason: decideTimerHeal, Key: k.it.Key, Patch: healPatch, Class: healClass}
+	e := &selectionEntry{Key: k.it.Key, Liveness: livenessGone, Desired: desireWake, Template: "worker"}
+	if !stranded {
+		e.AssignedWork = &assignedWorkView{BeadID: "gw-1"}
+	}
+	it := (&rowFacts{w: k.p.World, k: k.it.Key, row: row, found: true, entry: e}).startHealed(heal)
+	if it.Kind != intentStart {
+		t.Fatalf("startHealed = %+v, want a start", it)
+	}
+	it.Deadline = k.it.Deadline
+	return k, it
+}
+
+// rearmedTimerStart is a start composed over an expired hold's timer heal on
+// a dead runtime, whose hold an agent's heartbeat re-arms after the first
+// section's read: the recycle section writes first, and the PreWake reads
+// the re-armed hold.
+func rearmedTimerStart(t *testing.T) (*txKit, time.Time) {
+	t.Helper()
+	k, _, _ := deadKit(t, false, "gc-1", "tok", "", "held_until", gatherNow.Add(-time.Minute).Format(time.RFC3339))
+	healPatch, healClass, _ := timerHealPatch(k.p.World.Census.Rows[k.it.Key].Info, gatherNow)
+	heal := intent{Kind: intentRowHeal, Reason: decideTimerHeal, Key: k.it.Key, Patch: healPatch, Class: healClass}
+	r := &rowFacts{w: k.p.World, k: k.it.Key, row: k.p.World.Census.Rows[k.it.Key], found: true, entry: &selectionEntry{Key: k.it.Key, Liveness: livenessGone, Desired: desireWake, Template: "worker"}}
+	it := r.startHealed(heal)
+	if it.Kind != intentStart || !it.Class.Has("held_until") {
+		t.Fatalf("startHealed = %+v, want a start carrying the hold's clear", it)
+	}
+	it.Deadline = k.it.Deadline
+	k.it = it
+	beat := gatherNow.Add(time.Minute)
+	k.on(seamAfterRowRead, func() {
+		if _, err := session.NewStore(beads.SessionStore{Store: k.backing}).ApplyDispositionFresh("gc-1", session.ActorAgent, session.DispEvent{Kind: session.EvHeartbeat, Until: beat}, nil, gatherNow); err != nil {
+			t.Error(err)
+		}
+	})
+	return k, beat
+}
+
+// Kills a start's carried timer heal applied stale over a re-armed hold (the
+// creates generator's seed 613 of the floored corpus, mc-i7efm), and a
+// re-derivation that rewrites the start's own cells when nothing raced (the
+// #7760 review): a heartbeat re-arming the hold the pass read expired
+// refuses the start held, a refusal that backs the row off, writing no heal
+// at the PreWake nor at the verb section's refusal after the recycle's
+// stop; with no race, a stranded seat's crash accrual and a failed launch's
+// restore are the composed start's own.
+func TestComposedStartTimerHealDrift(t *testing.T) {
+	t.Run("re-armed: refused held, no heal", func(t *testing.T) {
+		k, beat := rearmedTimerStart(t)
+		if s := k.runKind(); s.Outcome != settledRefused || s.Cause != causeHeld || len(k.starts()) != 0 || k.meta("held_until") != beat.Format(time.RFC3339) {
+			t.Fatalf("settlement %+v starts %d held_until %q, want refused held, the heartbeat's hold kept and no start", s, len(k.starts()), k.meta("held_until"))
+		}
+	})
+	t.Run("re-armed: the verb section's refusal writes no heal", func(t *testing.T) {
+		k, beat := rearmedTimerStart(t)
+		k.p.World.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{}} // the verb section refuses template-unresolved
+		if s := k.runKind(); s.Outcome != settledRefused || k.meta("held_until") != beat.Format(time.RFC3339) {
+			t.Fatalf("settlement %+v held_until %q, want refused with the heartbeat's hold kept", s, k.meta("held_until"))
+		}
+	})
+	t.Run("no race: a stranded seat's crash accrual rides the PreWake", func(t *testing.T) {
+		k, it := strandedTimerStart(t, true, 10*time.Second)
+		k.it = it
+		if s := k.runKind(); s.Outcome != settledLanded || k.meta("wake_attempts") != "1" || len(k.starts()) != 1 {
+			t.Fatalf("settlement %+v starts %d wake_attempts %q, want landed with the death's accrual 1", s, len(k.starts()), k.meta("wake_attempts"))
+		}
+	})
+	t.Run("no race: a failed launch restores the healed row", func(t *testing.T) {
+		k, it := strandedTimerStart(t, false, time.Hour)
+		k.it = it
+		k.sp.nextStart = errors.New("boom")
+		if s := k.runKind(); k.meta("sleep_reason") != "runtime-missing" {
+			t.Fatalf("settlement %+v sleep_reason %q, want the healed row's runtime-missing restored", s, k.meta("sleep_reason"))
+		}
+	})
+}
+
+// Kills A10 proposing the occupant rollback over another session's corpse
+// inside the pending create's lease (CONTRACT v5.10i; the A14 generator's
+// seed 533 of the floored corpus, mc-i7efm): the effect takes a corpse for
+// an occupant that left and refuses redecided while the lease holds, every
+// pass. Inside the lease the row holds, asking for a pass when it lapses;
+// past it, under an anchor stamped ahead (the skew guard), or under a
+// foreign runtime alive or a zombie, the rollback is proposed.
+func TestArmRollbackHoldsOverAForeignCorpseInsideTheLease(t *testing.T) {
+	foreign := runtimeIdentity{Known: true, SessionID: "gc-other", Epoch: "1", Token: "tok-other"}
+	for _, c := range []struct {
+		name    string
+		runtime func(f *allocFixture, name string)
+		started time.Duration // pending_create_started_at, before now
+		held    bool
+	}{
+		{"a corpse inside the lease", func(f *allocFixture, name string) { f.corpse(name); delete(f.own, name) }, time.Minute, true},
+		// The skew guard (pendingCreateAnchorAhead): an anchor stamped ahead
+		// of now by a stepped clock holds no lease, so no hold.
+		{"a corpse under an anchor 2h ahead", func(f *allocFixture, name string) { f.corpse(name); delete(f.own, name) }, -2 * time.Hour, false},
+		{"a corpse past the lease", func(f *allocFixture, name string) { f.corpse(name); delete(f.own, name) }, 11 * time.Minute, false},
+		{"alive inside the lease", func(f *allocFixture, name string) { f.alive(name, InventoryAttrs{Identity: foreign}) }, time.Minute, false},
+		{"a zombie inside the lease", func(f *allocFixture, name string) {
+			f.alive(name, InventoryAttrs{Identity: foreign}).fact(name, FactProcessAlive, ObsNo)
+		}, time.Minute, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			row := poolRow("gc-1", "worker", 1, "creating", "instance_token", "tok", "pending_create_claim", "true",
+				"pending_create_started_at", allocNow.Add(-c.started).UTC().Format(time.RFC3339))
+			k := rowKeyOf(row.ID)
+			info := sessionInfoFromBead(row)
+			f := newAllocFixture(t, workerCity(3))
+			c.runtime(f, info.SessionName)
+			w := &World{
+				Now: allocNow, Obs: f.observation(), ObsMaxAge: observeMaxAge, Env: &reconcileEnv{Cfg: workerCity(3)},
+				Observed: map[rowKey]rowObservation{k: {Liveness: livenessOccupied, Identity: foreign}},
+			}
+			r := &rowFacts{w: w, k: k, row: newCensusRow(k, info), found: true, entry: &selectionEntry{Key: k, Desired: desireNone, Reason: reasonNameOccupied, Liveness: livenessOccupied}}
+			it, ok := armRollback(r)
+			switch {
+			case !ok:
+				t.Fatalf("armRollback declined, want a decision")
+			case c.held && (it.Kind != "" || it.Reason != decideRollbackHeld):
+				t.Fatalf("armRollback = (%q, %q), want held %q", it.Kind, it.Reason, decideRollbackHeld)
+			case c.held && !r.next.Equal(allocNow.Add(-c.started).Add(pendingCreateNeverStartedTimeout+time.Second)):
+				t.Fatalf("held with next pass %v, want the never-started lease's end %v", r.next, allocNow.Add(-c.started).Add(pendingCreateNeverStartedTimeout+time.Second))
+			case !c.held && (it.Kind != intentRollback || !it.Occupant):
+				t.Fatalf("armRollback = (%q, %q), want the occupant rollback", it.Kind, it.Reason)
+			}
+		})
+	}
+}
+
+// Kills the corpse hold's deadline (v5.10i, the #7782 review) drifting from
+// the lease pendingCreateLeaseActive decides: a never-started create's lease
+// ends a second past pendingCreateNeverStartedTimeout from its anchor; a
+// started one's at the later of its start in flight (last_woke_at plus the
+// startup timeout and the stale-key and settle allowances) and its fresh
+// attempt (the anchor plus staleCreatingStateTimeout). At each end the lease
+// has lapsed, a second before it holds.
+func TestPendingCreateLeaseEnd(t *testing.T) {
+	cfg := workerCity(3)
+	startup := cfg.Session.StartupTimeoutDuration()
+	if startup <= 0 {
+		startup = time.Minute
+	}
+	ts := func(d time.Duration) string { return allocNow.Add(d).UTC().Format(time.RFC3339) }
+	for _, c := range []struct {
+		name string
+		meta []string
+		want time.Time
+	}{
+		{"never started", []string{"pending_create_started_at", ts(-time.Minute)}, allocNow.Add(-time.Minute + pendingCreateNeverStartedTimeout + time.Second)},
+		{"started, in flight ends later", []string{"pending_create_started_at", ts(-30 * time.Second), "last_woke_at", ts(-10 * time.Second)}, allocNow.Add(-10*time.Second + startup + staleKeyDetectDelay + 5*time.Second)},
+		{"started, the fresh attempt ends later", []string{"pending_create_started_at", ts(time.Minute), "last_woke_at", ts(-time.Hour)}, allocNow.Add(time.Minute + staleCreatingStateTimeout)},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			row := poolRow("gc-1", "worker", 1, "creating", append([]string{"instance_token", "tok", "pending_create_claim", "true"}, c.meta...)...)
+			k := rowKeyOf(row.ID)
+			info := sessionInfoFromBead(row)
+			r := &rowFacts{w: &World{Now: allocNow, Env: &reconcileEnv{Cfg: cfg}}, k: k, row: newCensusRow(k, info), found: true}
+			end := r.pendingCreateLeaseEnd()
+			if !end.Equal(c.want) {
+				t.Fatalf("lease end %v, want %v", end, c.want)
+			}
+			if pendingCreateLeaseActiveAt(info, end, startup) || !pendingCreateLeaseActiveAt(info, end.Add(-time.Second), startup) {
+				t.Fatalf("at %v the lease is active %t, a second before %t; want lapsed, then held", end, pendingCreateLeaseActiveAt(info, end, startup), pendingCreateLeaseActiveAt(info, end.Add(-time.Second), startup))
+			}
+		})
+	}
+}
