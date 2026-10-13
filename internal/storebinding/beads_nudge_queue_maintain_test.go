@@ -34,6 +34,21 @@ func (s *failingUpdateStore) UpdateIfMatch(id string, expectedRevision int64, op
 	return s.SQLiteStore.UpdateIfMatch(id, expectedRevision, opts)
 }
 
+// failingDeleteStore is the SQLite store with DeleteIfMatch failing for one
+// bead, so the sweep can be shown to carry on past a record it cannot delete.
+type failingDeleteStore struct {
+	*beads.SQLiteStore
+	failID string
+	err    error
+}
+
+func (s *failingDeleteStore) DeleteIfMatch(id string, expectedRevision int64) error {
+	if id == s.failID {
+		return s.err
+	}
+	return s.SQLiteStore.DeleteIfMatch(id, expectedRevision)
+}
+
 func openSQLiteNudgeQueueStore(t *testing.T) *beads.SQLiteStore {
 	t.Helper()
 	store, ok := openNudgeQueueStore(t, t.TempDir()).(*beads.SQLiteStore)
@@ -147,6 +162,31 @@ func TestBeadsNudgeQueueSweepIsBoundedOldestFirst(t *testing.T) {
 	}
 	if got := queueRecordIDs(t, backing); len(got) != 0 {
 		t.Fatalf("records after the second pass = %v, want none", got)
+	}
+}
+
+// TestBeadsNudgeQueueSweepContinuesPastAFailedDelete pins that one retired
+// record the sweep cannot delete fails only that record: every other due
+// record is still deleted, and the failure is returned naming the record.
+func TestBeadsNudgeQueueSweepContinuesPastAFailedDelete(t *testing.T) {
+	backing := openSQLiteNudgeQueueStore(t)
+	failure := errors.New("disk said no")
+	store := &failingDeleteStore{SQLiteStore: backing, failID: nudgeQueueBeadID("n-retired-1"), err: failure}
+	queue := newNudgeQueue(t, store)
+	now := time.Now().UTC()
+
+	for i := 0; i < 3; i++ {
+		id := fmt.Sprintf("n-retired-%d", i)
+		if err := queue.Rollback(nudgequeue.Item{ID: id, Agent: testNudgeAgent, Source: "test", CreatedAt: now}, "never landed"); err != nil {
+			t.Fatalf("Rollback(%s): %v", id, err)
+		}
+	}
+	_, err := queue.Maintain(context.Background(), now.Add(nudgeQueueTerminalRetention).Add(time.Minute))
+	if !errors.Is(err, failure) || !strings.Contains(err.Error(), nudgeQueueBeadID("n-retired-1")) {
+		t.Fatalf("Maintain = %v, want the failed delete reported with its record", err)
+	}
+	if got := queueRecordIDs(t, backing); len(got) != 1 || got[0] != "n-retired-1" {
+		t.Fatalf("records after the sweep = %v, want only the undeletable n-retired-1 left", got)
 	}
 }
 
