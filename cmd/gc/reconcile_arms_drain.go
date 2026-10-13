@@ -95,7 +95,8 @@ func authorizedByRank(r *rowFacts, reason string) bool {
 // DrainReason; for a Sleep entry the row's sleep intent, then idle, then
 // suspended (a configured named row of a suspended city), else
 // no-wake-reason. A heartbeat hold (held_until with no intent, SESS-617)
-// has none. Legacy's live-claim veto is not ported (PAR-LIVECLAIM).
+// has none. Legacy's live-claim veto is read at the orphaned signal (L5,
+// v5.10a B), not here.
 // drainableLiveness reports a runtime A20 may begin a drain over: alive, or
 // for a named Drain row a dead runtime, which A21 never closes
 // (deadRuntimeCloses excludes named rows; mc-q64l4)

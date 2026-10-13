@@ -39,7 +39,8 @@ type effectReads struct {
 	legs WorkLegs
 	// city and rigs are the sessions store and the rig stores, read-only,
 	// which the start effect's prepare reads (template overrides, the task
-	// work dir, the claimed-work probe); the live work read uses legs.
+	// work dir, the claimed-work probe); the live work read uses legs, and
+	// the orphaned signal's live-claim veto reads the row from city.
 	city beads.Store
 	rigs map[string]beads.Store
 	// cityPath keys the city's identifier locks (A7's alias lock).

@@ -11,12 +11,15 @@ import (
 
 // The transaction's fence legs (CONTRACT v5 F1, F4, C8.9): L3 and L4 read
 // fresh on the routed leaf, the leaf the runtime read used; L5 read live
-// through the pass's read-only stores; the idle proof on the routed leaf.
-// Each is bounded, and an unknown answer holds.
+// through the pass's read-only stores, past their caches (live lists, and
+// liveReads for a by-ID read); the idle proof on the routed leaf. Each is
+// bounded, and an unknown answer holds.
 
-// txWork is L5 read live: the row's open or in-progress assigned work over
-// every store its agent can reach. Only a clean read proves Free; a failed
-// or expired read, and the zero value, count as work.
+// txWork is L5 read live: the row's assigned work over every store its agent
+// can reach, in the form the effect asks for (readWork: open or in-progress;
+// an idle stop's late claim; a signal's awake work and live-claim veto).
+// Only a clean read proves Free; a failed or expired read, and the zero
+// value, count as work.
 type txWork struct {
 	Free bool // proven: no open or in-progress assigned work
 	Err  error

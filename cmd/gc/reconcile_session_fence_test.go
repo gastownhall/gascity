@@ -66,9 +66,10 @@ type fenceLeaf struct {
 	*runtime.Fake
 	LivenessErrors map[string]error
 	P              runtime.Provider
-	// OnAttachRead, when set, runs at each attach error probe (L3), before
-	// it answers: an outside write landing while the fence reads L3.
-	OnAttachRead func(name string)
+	// OnAttachRead and OnPendingRead, when set, run at each attach error
+	// probe (L3) or pending read (L4), before it answers: an outside write
+	// landing while the fence reads that leg.
+	OnAttachRead, OnPendingRead func(name string)
 }
 
 // newFenceLeaf is a hardened leaf as tmux (a reporter: its attachment probe
@@ -98,6 +99,13 @@ func (r leafReads) IsAttachedWithError(name string) (bool, error) {
 		r.l.OnAttachRead(name)
 	}
 	return r.FullFake.IsAttachedWithError(name)
+}
+
+func (r leafReads) Pending(name string) (*runtime.PendingInteraction, error) {
+	if r.l.OnPendingRead != nil {
+		r.l.OnPendingRead(name)
+	}
+	return r.FullFake.Pending(name)
 }
 
 func (r leafReads) ObserveLivenessSince(name string, pn []string, _ time.Time) (runtime.Liveness, error) {
