@@ -64,8 +64,8 @@ var allowed = map[string]Allowance{
 	cmdGC + ":stopProviderSwapRuntimes":       {Reason: "a provider swap: stops the old backend's runtimes after waiting out launched starts (the allowlist)"},
 	cmdGC + ":startPreparedStartCandidate":    {Reason: "the legacy start, under the candidate's lease", Callers: []string{"runPreparedStartCandidate"}},
 	cmdGC + ":stopStaleAsyncStartRuntime": {
-		Reason:  "a stale start's cleanup, identity-checked, under the start's lease",
-		Callers: []string{"commitAsyncStartResultWithContext", "executePlannedStartsTraced", "settleUncommittedAsyncStart"},
+		Reason:  "a stale start's cleanup, identity-checked, under the start's lease (recoverRunningPendingCreate's own, from tryRuntimeLease)",
+		Callers: []string{"commitAsyncStartResultWithContext", "executePlannedStartsTraced", "recoverRunningPendingCreate", "settleUncommittedAsyncStart"},
 	},
 	cmdGC + ":pendingCreateRuntimeClearedForRollback": {Reason: "an async start's rollback, under the start's lease", Callers: []string{"settleUncommittedAsyncStart"}},
 	cmdGC + ":releaseBeadScopedPoolRuntime": {
