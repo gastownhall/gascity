@@ -1236,3 +1236,31 @@ func TestCloseWorkflowSubtreeNeverClosesASessionRow(t *testing.T) {
 		}
 	}
 }
+
+// TestCloseSpecSidecarsNeverClosesASessionRow (mc-dkblm, S02): a session row
+// carrying a root's gc.root_bead_id and the spec kind (written past the
+// API) is no sidecar the root's sidecar close closes; a real sidecar is.
+func TestCloseSpecSidecarsNeverClosesASessionRow(t *testing.T) {
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{Title: "root", Type: "task", Metadata: map[string]string{"gc.kind": "workflow"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sidecar, err := store.Create(beads.Bead{Title: "spec", Type: "task", Metadata: map[string]string{"gc.root_bead_id": root.ID, "gc.kind": "spec"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	row, err := store.Create(beads.Bead{Title: "s", Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: map[string]string{"gc.root_bead_id": root.ID, "gc.kind": "spec"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CloseSpecSidecarsForRoot(store, root.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := store.Get(sidecar.ID); b.Status != "closed" {
+		t.Fatalf("sidecar %s, want closed", b.Status)
+	}
+	if b, _ := store.Get(row.ID); b.Status == "closed" {
+		t.Fatal("the session row was closed as a spec sidecar")
+	}
+}

@@ -576,3 +576,39 @@ func TestWorkflowTeardownNeverClosesASessionRow(t *testing.T) {
 		}
 	})
 }
+
+// TestBeadAPINeverSetsASessionRowsStatus (mc-dkblm, round 3): any status in
+// a generic update of a session row is refused (the session store lists
+// only open rows, so deferred, blocked, pinned, hooked or in_progress would
+// drop it out of the reconciler, the census and resolution), on an open row
+// and on a closed one, with errors[] at body.status and the status kept.
+func TestBeadAPINeverSetsASessionRowsStatus(t *testing.T) {
+	for _, c := range []struct {
+		status string
+		closed bool
+	}{
+		{"deferred", false},
+		{"blocked", false},
+		{"pinned", false},
+		{"hooked", false},
+		{"in_progress", false},
+		{"open", false},
+		{"in_progress", true},
+	} {
+		state := newFakeState(t)
+		store := state.stores["myrig"]
+		h := newTestCityHandler(t, state)
+		row := sessionRow(t, store)
+		if c.closed {
+			if err := store.Close(row.ID); err != nil {
+				t.Fatal(err)
+			}
+		}
+		before, _ := store.Get(row.ID)
+		rec := beadUpdate(t, h, state, "PATCH", row.ID, `{"status":"`+c.status+`"}`)
+		got, _ := store.Get(row.ID)
+		if rec.Code != http.StatusUnprocessableEntity || strings.Join(problemLocations(t, rec), ",") != "body.status" || got.Status != before.Status {
+			t.Fatalf("status %q on a session row (closed %v): %d (%s), row %s; want 422 at body.status, the status kept", c.status, c.closed, rec.Code, rec.Body.String(), got.Status)
+		}
+	}
+}

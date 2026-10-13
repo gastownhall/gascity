@@ -774,7 +774,7 @@ func (s *Server) humaHandleBeadClose(ctx context.Context, input *BeadCloseInput)
 	if err != nil {
 		return nil, err
 	}
-	if err := refuseGenericSessionLifecycle(id, "close", "path.id", current); err != nil {
+	if err := refuseGenericSessionLifecycle(id, "closes", "path.id", current); err != nil {
 		return nil, err
 	}
 	var submitted map[string]string
@@ -830,7 +830,7 @@ func (s *Server) humaHandleBeadReopen(_ context.Context, input *BeadReopenInput)
 	if err != nil {
 		return nil, err
 	}
-	if err := refuseGenericSessionLifecycle(id, "reopen", "path.id", b); err != nil {
+	if err := refuseGenericSessionLifecycle(id, "reopens", "path.id", b); err != nil {
 		return nil, err
 	}
 	if b.Status != "closed" {
@@ -912,14 +912,19 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 		return nil, err
 	}
 	// Before the assignee's normalization, which may materialize a named
-	// session: a refused close or reopen creates nothing.
-	switch {
-	case closesStatus(body.Status):
-		if err := refuseGenericSessionLifecycle(id, "close", "body.status", current); err != nil {
-			return nil, err
+	// session: a refused status change creates nothing. Any status on a
+	// session row is the session verbs': a close or reopen past them, and
+	// any other drops the row out of the session store's open listing, so
+	// the reconciler, the census and resolution lose it (mc-dkblm).
+	if body.Status != nil {
+		verb := "sets the status of"
+		switch {
+		case closesStatus(body.Status):
+			verb = "closes"
+		case current.Status == "closed":
+			verb = "reopens"
 		}
-	case body.Status != nil && current.Status == "closed":
-		if err := refuseGenericSessionLifecycle(id, "reopen", "body.status", current); err != nil {
+		if err := refuseGenericSessionLifecycle(id, verb, "body.status", current); err != nil {
 			return nil, err
 		}
 	}
@@ -967,9 +972,9 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 	return resp, nil
 }
 
-// refuseGenericSessionLifecycle refuses a generic bead close, delete or
-// reopen of a session row (PATCH or POST /update with status=closed or open,
-// POST /bead/{id}/close or /reopen, DELETE): a close bypasses the session
+// refuseGenericSessionLifecycle refuses a generic bead close, delete,
+// reopen or status change of a session row (PATCH or POST /update with any
+// status, POST /bead/{id}/close or /reopen, DELETE): a close bypasses the session
 // close (its closeAllowed gate, closeSeat and the decided CommitClose), so
 // the runtime stays up and its claims unreleased, and a reopen resurrects a
 // row no session verb opened (mc-dkblm). The session verbs own both. where
@@ -979,8 +984,8 @@ func refuseGenericSessionLifecycle(id, verb, where string, current beads.Bead) e
 		return nil
 	}
 	return apierr.ValidationFailed.With(fmt.Sprintf(
-		"bead %s is a session row: the generic bead API never %ss one; close it with gc session close|kill or POST /v0/city/{cityName}/session/{id}/close (or /kill), which stop its runtime and release its claims, and reopen a named session with gc session wake; nothing was written", id, verb),
-		&huma.ErrorDetail{Location: where, Message: "a session row's " + verb + " is the session verbs'", Value: id})
+		"bead %s is a session row: the generic bead API never %s one; close it with gc session close|kill or POST /v0/city/{cityName}/session/{id}/close (or /kill), which stop its runtime and release its claims, and reopen a named session with gc session wake; nothing was written", id, verb),
+		&huma.ErrorDetail{Location: where, Message: "the session verbs own a session row's lifecycle", Value: id})
 }
 
 // refuseGenericSessionWrite refuses, before anything is written (an
@@ -1130,7 +1135,7 @@ func (s *Server) humaHandleBeadDelete(_ context.Context, input *BeadDeleteInput)
 	if err != nil {
 		return nil, err
 	}
-	if err := refuseGenericSessionLifecycle(id, "delete", "path.id", current); err != nil {
+	if err := refuseGenericSessionLifecycle(id, "deletes", "path.id", current); err != nil {
 		return nil, err
 	}
 	if err := store.Close(id); err != nil {
