@@ -128,6 +128,22 @@ func (r *Registry) lookup(name string) Factory {
 	return r.fallback
 }
 
+// Resolves reports whether name resolves to an exact or prefix registration,
+// that is, to something other than the fallback.
+func (r *Registry) Resolves(name string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if _, ok := r.exact[name]; ok {
+		return true
+	}
+	for prefix := range r.prefixes {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // Clone returns a registry with the receiver's registrations that shares
 // no mutable state with it. City composition clones the builtin registry
 // and registers pack-declared runtimes on the copy, so concurrent cities
@@ -153,6 +169,18 @@ func (r *Registry) Has(name string) bool {
 	defer r.mu.RUnlock()
 	_, ok := r.exact[name]
 	return ok
+}
+
+// Prefixes returns the registered prefix selections, sorted.
+func (r *Registry) Prefixes() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	prefixes := make([]string, 0, len(r.prefixes))
+	for prefix := range r.prefixes {
+		prefixes = append(prefixes, prefix)
+	}
+	sort.Strings(prefixes)
+	return prefixes
 }
 
 // Names returns the registered exact selection names, sorted.

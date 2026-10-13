@@ -165,6 +165,19 @@ func TestValidateDurationsBadMailRetentionTTL(t *testing.T) {
 	}
 }
 
+func TestValidateDurationsBadMailUnreadRetentionTTL(t *testing.T) {
+	cfg := &City{
+		Mail: MailConfig{UnreadRetentionTTL: "7d"},
+	}
+	warnings := ValidateDurations(cfg, "city.toml")
+	if len(warnings) != 1 {
+		t.Fatalf("expected 1 warning, got %d: %v", len(warnings), warnings)
+	}
+	if !strings.Contains(warnings[0], "unread_retention_ttl") || !strings.Contains(warnings[0], "7d") {
+		t.Errorf("warning should mention field and bad value: %s", warnings[0])
+	}
+}
+
 func TestValidateDurationsBadDaemonFields(t *testing.T) {
 	cfg := &City{
 		Daemon: DaemonConfig{

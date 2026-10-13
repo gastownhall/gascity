@@ -327,7 +327,7 @@ func TestPhase0APIMailQuery_BareNamedSessionUsesTargetedRecipientLookup(t *testi
 	fs.cityBeadStore = noBroadAPISessionListStore{Store: baseStore, t: t}
 	srv := New(fs)
 
-	recipients := srv.resolveMailQueryRecipientsWithContext(t.Context(), "worker")
+	recipients := srv.resolveMailQueryWithContext(t.Context(), "worker").recipients
 	want := []string{live.ID, closed.ID, "live-worker", "myrig/worker", "s-gc-test-city-worker", "s-gc-test-city-worker-old", "worker"}
 	if strings.Join(recipients, ",") != strings.Join(want, ",") {
 		t.Fatalf("recipients = %#v, want %#v", recipients, want)

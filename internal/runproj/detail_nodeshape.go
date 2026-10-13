@@ -41,6 +41,11 @@ func iterationFor(b runSnapshotBead) (int, bool) {
 
 // attemptFor resolves a bead's attempt number. Port of TS attemptFor.
 func attemptFor(b runSnapshotBead) (int, bool) {
+	// A retry attempt's own counter; inside a ralph body gc.attempt is the
+	// iteration, which iterationFor already reports.
+	if v, ok := numericMeta(b, beadmeta.RetryAttemptMetadataKey); ok {
+		return v, true
+	}
 	if v, ok := numericMeta(b, beadmeta.AttemptMetadataKey); ok {
 		return v, true
 	}

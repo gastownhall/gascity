@@ -44,6 +44,16 @@ func (h *SessionHandle) Transcript(ctx context.Context, req TranscriptRequest) (
 	return h.adapter.ReadTranscript(readReq)
 }
 
+// TranscriptRecords returns the worker's raw transcript records in file order,
+// including records the active-branch walk prunes.
+func (h *SessionHandle) TranscriptRecords(ctx context.Context) ([]json.RawMessage, error) {
+	path, err := h.TranscriptPath(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return h.adapter.TranscriptRecords(path)
+}
+
 // AgentMappings returns subagent mappings discovered from the worker's
 // transcript stream.
 func (h *SessionHandle) AgentMappings(ctx context.Context) ([]AgentMapping, error) {

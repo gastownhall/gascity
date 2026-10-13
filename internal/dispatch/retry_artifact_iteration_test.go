@@ -8,10 +8,8 @@ import (
 )
 
 // The required-artifact gate resolves {attempt} from the subject's own
-// gc.attempt — the same key ga-v7pu5 showed is carrying the ralph iteration
-// index rather than the step's retry counter. That makes the gate structurally
-// incapable of catching the artifact-directory mismatch: it computes the same
-// wrong directory the failing step computed, agrees with it, and passes.
+// gc.attempt, which inside a ralph body is the iteration (the v1.4.2 contract),
+// and the retry counter from gc.retry_attempt via {retry_attempt}.
 //
 // Worse, the gate is live rather than inert. A census of the maintainer-city
 // graph store found 471 of 542 beads carrying a required-artifact template do
@@ -35,42 +33,57 @@ func TestResolveRequiredArtifactPathResolvesIterationSeparatelyFromAttempt(t *te
 		},
 	})
 
-	// The shape that breaks today: quality-scorecard is on retry attempt 3 of
-	// itself, inside review-loop iteration 2. Its sibling reviewers never
-	// retried, so they wrote attempt-2/ and the scorecard must read from there.
+	// quality-scorecard is on retry attempt 3 of itself, inside review-loop
+	// iteration 2. Its sibling reviewers never retried, so they wrote
+	// attempt-2/ and the scorecard must read from there. gc.attempt carries the
+	// iteration (the v1.4.2 contract); the retry counter is gc.retry_attempt.
 	subject := beads.Bead{
 		Metadata: map[string]string{
-			"gc.outcome":      "pass",
-			"gc.root_bead_id": root.ID,
-			"gc.attempt":      "3",
-			"gc.iteration":    "2",
+			"gc.outcome":       "pass",
+			"gc.root_bead_id":  root.ID,
+			"gc.attempt":       "2",
+			"gc.retry_attempt": "3",
+			"gc.iteration":     "2",
 		},
 	}
-
-	got, _, reason, err := resolveRequiredArtifactPath(store, subject,
-		".gc/reviews/{root}/attempt-{iteration}/synthesis.md", ProcessOptions{})
-	if err != nil {
-		t.Fatalf("resolveRequiredArtifactPath error = %v, want nil", err)
-	}
-	if reason != "" {
-		t.Fatalf("resolveRequiredArtifactPath reason = %q, want none", reason)
-	}
-	want := filepath.Join(worktree, ".gc/reviews", root.ID, "attempt-2", "synthesis.md")
-	if got != want {
-		t.Errorf("resolved %q, want %q — {iteration} must read gc.iteration, not gc.attempt", got, want)
-	}
-
-	t.Run("{attempt} still resolves the step's own retry counter", func(t *testing.T) {
-		// The two placeholders must genuinely diverge; a template that asks for
-		// the retry attempt still gets it.
-		got, _, reason, err := resolveRequiredArtifactPath(store, subject,
-			".gc/reviews/{root}/attempt-{attempt}/synthesis.md", ProcessOptions{})
+	resolve := func(t *testing.T, subject beads.Bead, template string) string {
+		t.Helper()
+		got, _, reason, err := resolveRequiredArtifactPath(store, subject, template, ProcessOptions{})
 		if err != nil || reason != "" {
-			t.Fatalf("resolveRequiredArtifactPath = (%v, %q), want success", err, reason)
+			t.Fatalf("resolveRequiredArtifactPath(%q) = (%v, %q), want success", template, err, reason)
 		}
-		want := filepath.Join(worktree, ".gc/reviews", root.ID, "attempt-3", "synthesis.md")
-		if got != want {
-			t.Errorf("resolved %q, want %q", got, want)
+		return got
+	}
+	dir := func(segment string) string {
+		return filepath.Join(worktree, ".gc/reviews", root.ID, segment, "synthesis.md")
+	}
+
+	if got := resolve(t, subject, ".gc/reviews/{root}/attempt-{iteration}/synthesis.md"); got != dir("attempt-2") {
+		t.Errorf("{iteration} resolved %q, want %q", got, dir("attempt-2"))
+	}
+
+	t.Run("{attempt} keeps its v1.4.2 meaning inside a loop: the iteration", func(t *testing.T) {
+		// Packs written for v1.4.2 name the iteration's shared directory with
+		// {attempt}; a retried step must still land in it.
+		if got := resolve(t, subject, ".gc/reviews/{root}/attempt-{attempt}/synthesis.md"); got != dir("attempt-2") {
+			t.Errorf("resolved %q, want %q", got, dir("attempt-2"))
+		}
+	})
+
+	t.Run("{retry_attempt} resolves the step's own retry counter", func(t *testing.T) {
+		if got := resolve(t, subject, ".gc/reviews/{root}/retry-{retry_attempt}/synthesis.md"); got != dir("retry-3") {
+			t.Errorf("resolved %q, want %q", got, dir("retry-3"))
+		}
+	})
+
+	t.Run("{retry_attempt} falls back to gc.attempt on a bead minted before the key", func(t *testing.T) {
+		legacy := beads.Bead{Metadata: map[string]string{
+			"gc.outcome":      "pass",
+			"gc.root_bead_id": root.ID,
+			"gc.attempt":      "2",
+		}}
+		if got := resolve(t, legacy, ".gc/reviews/{root}/retry-{retry_attempt}/synthesis.md"); got != dir("retry-2") {
+			t.Errorf("resolved %q, want %q", got, dir("retry-2"))
 		}
 	})
 }

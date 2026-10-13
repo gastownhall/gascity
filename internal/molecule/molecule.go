@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -306,6 +307,20 @@ func Attach(ctx context.Context, store beads.Store, recipe *formula.Recipe, atta
 	// with no run chain still self-roots via its own id (ResolveRunID's
 	// selfID fallback).
 	rootBeadID := beadmeta.ResolveRunID(parentBead.Metadata, attachBeadID, "")
+
+	// A resolved run-chain root may point at a molecule that has since fully
+	// closed (e.g. re-attaching a content bead to a fresh formula after its
+	// prior review round-trip closed cleanly) -- a dead pointer, not a live
+	// upstream workflow to honor. Only a still-open chain root is trusted;
+	// anything else (closed, or no longer resolvable) falls back to self-root,
+	// exactly like the no-chain case (ga-yov1rr). A live chain
+	// (gcg-wisp-y785sz) is unaffected: its root bead is never closed.
+	if rootBeadID != attachBeadID {
+		if rootBead, err := store.Get(rootBeadID); err != nil || rootBead.Status == "closed" {
+			rootBeadID = attachBeadID
+		}
+	}
+
 	rootStoreRef := parentBead.Metadata[beadmeta.RootStoreRefMetadataKey]
 
 	// Idempotency: check for existing sub-DAG with the same key.
@@ -817,6 +832,9 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 	if len(recipe.Steps) == 0 {
 		return nil, fmt.Errorf("recipe %q has no steps", recipe.Name)
 	}
+	if err := refuseSessionSteps(recipe.Steps, applyVarDefaults(opts.Vars, recipe.Vars)); err != nil {
+		return nil, err // before any write: a refused recipe creates nothing
+	}
 	if !opts.nativeStepTopologyPrepared {
 		recipe = recipeWithNativeStepDependencies(recipe)
 		opts.nativeStepTopologyPrepared = true
@@ -929,6 +947,9 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 			}
 			if opts.IdempotencyKey != "" {
 				b.Metadata["idempotency_key"] = opts.IdempotencyKey
+			}
+			if graphWorkflow && !recipe.RootOnly {
+				b.Metadata[beadmeta.WorkflowExpandedMetadataKey] = "true"
 			}
 			stampFormulaVars(vars, &b)
 		} else {
@@ -1126,6 +1147,9 @@ func InstantiateFragment(ctx context.Context, store beads.Store, recipe *formula
 	}
 	if len(recipe.Steps) == 0 {
 		return &FragmentResult{IDMapping: map[string]string{}}, nil
+	}
+	if err := refuseSessionSteps(recipe.Steps, applyVarDefaults(opts.Vars, recipe.Vars)); err != nil {
+		return nil, err // before any write
 	}
 	recipe = fragmentRecipeWithNativeStepDependencies(recipe)
 	if err := applyExternalNativeStepDependencies(store, opts.RootID, recipe.Steps, opts.ExternalDeps); err != nil {
@@ -1375,6 +1399,25 @@ func preservesGraphActionTypes(recipe *formula.Recipe) bool {
 		return true
 	}
 	return root.Metadata[beadmeta.AttemptMetadataKey] != "" && root.Metadata[beadmeta.StepRefMetadataKey] != ""
+}
+
+// refuseSessionSteps refuses a recipe a step of which would make a session
+// row (type session, or the gc:session label, a substituted variable's
+// included) or a startup-health episode, before anything is written: only
+// the session verbs mint a session row (mc-okw9n), and only the controller
+// records an episode, which holds its session down (mc-lp7zb). The compile
+// refuses the literal marks (formula.Validate).
+func refuseSessionSteps(steps []formula.RecipeStep, vars map[string]string) error {
+	for _, step := range steps {
+		b := stepToBead(step, vars, nil)
+		if strings.EqualFold(strings.TrimSpace(b.Type), "session") || slices.ContainsFunc(b.Labels, func(l string) bool { return strings.TrimSpace(l) == "gc:session" }) {
+			return fmt.Errorf("formula step %q would make a session row (type session or the gc:session label), which only the session verbs create", step.ID)
+		}
+		if strings.EqualFold(strings.TrimSpace(b.Type), "startup-health-episode") {
+			return fmt.Errorf("formula step %q would make a startup-health episode, which only the controller records", step.ID)
+		}
+	}
+	return nil
 }
 
 // stepToBead converts a RecipeStep to a Bead with variable substitution.
@@ -1765,18 +1808,20 @@ func logicalRecipeStepID(step formula.RecipeStep) (string, bool) {
 				return trimmed, true
 			}
 		case "retry-run":
-			if trimmed, ok := trimAttemptSuffix(step.ID, ".run."+attempt); ok {
+			if trimmed, ok := trimAttemptSuffix(step.ID, ".run."+beadmeta.RetryAttemptValue(step.Metadata)); ok {
 				return trimmed, true
 			}
 		case "retry-eval":
-			if trimmed, ok := trimAttemptSuffix(step.ID, ".eval."+attempt); ok {
+			if trimmed, ok := trimAttemptSuffix(step.ID, ".eval."+beadmeta.RetryAttemptValue(step.Metadata)); ok {
 				return trimmed, true
 			}
 		}
 
 		// v2 patterns: attempt/iteration suffix stripping.
-		// v2 beads keep their original kind but have gc.attempt set.
-		if trimmed, ok := trimAttemptSuffix(step.ID, ".attempt."+attempt); ok {
+		// v2 beads keep their original kind but have gc.attempt set. A retry
+		// attempt's ".attempt.<n>" suffix names its retry counter, which inside
+		// a ralph body differs from gc.attempt (the iteration).
+		if trimmed, ok := trimAttemptSuffix(step.ID, ".attempt."+beadmeta.RetryAttemptValue(step.Metadata)); ok {
 			return trimmed, true
 		}
 		if trimmed, ok := trimAttemptSuffix(step.ID, ".iteration."+attempt); ok {

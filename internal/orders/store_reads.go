@@ -98,6 +98,15 @@ func (s *Store) RecentRunsAll(limit int) ([]OrderRun, error) {
 		Limit:         limit,
 		IncludeClosed: true,
 		Sort:          beads.SortCreatedDesc,
+		// Both tiers, stated rather than inherited. A policy-wrapped store
+		// rewrites TierIssues to TierBoth on the way in (cmd/gc
+		// expandPolicyReadTier), so production already reads both — but the
+		// backing limit only rides down when the backing set IS the query set,
+		// and TierIssues is one of the three predicates that disqualify it
+		// (internal/beads nativeListLimitPushdown). Left unstated, this read's
+		// whole reason for opting into the bounded limit silently evaporates the
+		// moment it runs over an unwrapped store.
+		TierMode: beads.TierBoth,
 		// Aggregate read: the rows fold into entries[order] = max(CreatedAt), so
 		// the backing's created-desc tie-break at the limit boundary is
 		// irrelevant. Opt into the bounded backing limit to keep the fetch off
@@ -397,7 +406,10 @@ func (s *Store) LastRun(name string) (time.Time, error) {
 	label := labelOrderRunPrefix + name
 	var latest time.Time
 	for _, store := range s.mixedLegStores() {
-		results, err := store.List(beads.ListQuery{
+		// Live: over a CachingStore a hard backing failure of this closed-history
+		// read comes back as a partial result holding only the cached open rows,
+		// which would read as surviving rows and shorten the cooldown.
+		results, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
 			Label:         label,
 			Limit:         1,
 			IncludeClosed: true,
@@ -432,7 +444,9 @@ func (s *Store) Cursor(name string) EventCursor {
 	label := labelOrderRunPrefix + name
 	var latest uint64
 	for _, store := range s.mixedLegStores() {
-		results, err := store.List(beads.ListQuery{
+		// Live, for LastRun's reason: a cached partial answer would regress the
+		// cursor to the open rows' seqs and replay consumed events.
+		results, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
 			Label:         label,
 			Limit:         10,
 			IncludeClosed: true,

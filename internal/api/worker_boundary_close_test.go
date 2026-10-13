@@ -6,6 +6,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/bazeltest"
 )
 
 // TestAPINonTestFilesCloseSessionsViaWorkerBoundary guards the session close
@@ -19,11 +21,16 @@ import (
 // is the session-create rollback in handler_session_create.go, which closes a
 // half-created session before any worker handle exists for it.
 func TestAPINonTestFilesCloseSessionsViaWorkerBoundary(t *testing.T) {
-	_, currentFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
+	dir := ""
+	if root := bazeltest.OverrideRoot(); root != "" {
+		dir = filepath.Join(root, "internal", "api")
+	} else {
+		_, currentFile, _, ok := runtime.Caller(0)
+		if !ok {
+			t.Fatal("runtime.Caller failed")
+		}
+		dir = filepath.Dir(currentFile)
 	}
-	dir := filepath.Dir(currentFile)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatalf("ReadDir(%q): %v", dir, err)

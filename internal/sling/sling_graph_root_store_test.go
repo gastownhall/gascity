@@ -113,7 +113,7 @@ func TestPendingGraphWorkflowLaunchRollbackClosesTheGraphSubtree(t *testing.T) {
 	deps, _, graph := splitSlingDeps(t, &config.City{Workspace: config.Workspace{Name: "test"}})
 	root, member := newGraphResidentWorkflowRoot(t, graph, "gc-source", "city:test-city")
 
-	launch := pendingGraphWorkflowLaunch(root.ID, "", config.Agent{Name: "mayor"}, "formula", "graph-work", deps)
+	launch := pendingGraphWorkflowLaunch(root.ID, "", "", "", config.Agent{Name: "mayor"}, "formula", "graph-work", deps)
 	if err := launch.rollback(); err != nil {
 		t.Fatalf("rollback: %v", err)
 	}

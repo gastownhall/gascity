@@ -94,9 +94,40 @@ func TestOpenGraphAdoptsExistingRowsInPlace(t *testing.T) {
 	if got.Title != "kept" || len(got.Labels) != 1 || got.Labels[0] != "keep" {
 		t.Fatalf("adopted row changed: %+v", got)
 	}
+	// The first open reserved a whole block of ids (its persisted floor leads
+	// its allocator), so the reopen resumes past that block, never inside it.
 	next := mustCreateGraphBead(t, second.Graph(), beads.Bead{Title: "after reopen"})
-	if next.ID != "gcg-2" {
-		t.Fatalf("id after reopen = %q, want gcg-2 — the allocator must not restart", next.ID)
+	if next.ID != "gcg-1025" {
+		t.Fatalf("id after reopen = %q, want gcg-1025 — the allocator must not restart or reissue the first open's block", next.ID)
+	}
+}
+
+// TestOpenGraphOpensTheHotfixNegativeFloor pins that the deployed Graph path
+// opens a store whose graph.seqfloor holds the exact negative floor the hotfix
+// build (562924baa4) wrote to a live graph store, and mints right above it.
+// Before this change the open failed with "invalid nonnegative floor".
+func TestOpenGraphOpensTheHotfixNegativeFloor(t *testing.T) {
+	root := t.TempDir()
+	first := openGraphComponent(t, root)
+	seeded := mustCreateGraphBead(t, first.Graph(), beads.Bead{Title: "before the hotfix floor"})
+	dir := filepath.Dir(first.Path())
+	if err := first.Close(); err != nil {
+		t.Fatalf("closing first Graph component: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, graphSequenceFloorFilename), []byte("-9223372036850990241\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	second := openGraphComponent(t, root)
+	if floor, err := second.SequenceFloor(); err != nil || floor != -9223372036850990241 {
+		t.Fatalf("SequenceFloor = %d, %v; want -9223372036850990241", floor, err)
+	}
+	if _, err := second.Graph().Get(seeded.ID); err != nil {
+		t.Fatalf("existing row %s: %v", seeded.ID, err)
+	}
+	next := mustCreateGraphBead(t, second.Graph(), beads.Bead{Title: "after the hotfix floor"})
+	if next.ID != "gcg--9223372036850990240" {
+		t.Fatalf("id over the hotfix floor = %q, want gcg--9223372036850990240", next.ID)
 	}
 }
 
@@ -866,8 +897,10 @@ func TestApplyGenesisSequenceFloorSurvivesRollbackToTheDeployedBinary(t *testing
 	for i := 0; i < 3; i++ {
 		mustCreateGraphBead(t, component.Graph(), beads.Bead{Title: "graph row", Type: "task"})
 	}
-	if err := component.ApplyGenesisSequenceFloor(750); err != nil {
-		t.Fatalf("ApplyGenesisSequenceFloor(750): %v", err)
+	// 5000 lies past the block the three mints above reserved, so the applied
+	// value is what graph.seqfloor must hold.
+	if err := component.ApplyGenesisSequenceFloor(5000); err != nil {
+		t.Fatalf("ApplyGenesisSequenceFloor(5000): %v", err)
 	}
 	dir := filepath.Dir(component.Path())
 	if err := component.Close(); err != nil {
@@ -878,8 +911,8 @@ func TestApplyGenesisSequenceFloorSurvivesRollbackToTheDeployedBinary(t *testing
 	if err != nil {
 		t.Fatalf("reading %s: %v", graphSequenceFloorFilename, err)
 	}
-	if string(floorBytes) != "750\n" {
-		t.Fatalf("%s = %q, want the applied 750\\n", graphSequenceFloorFilename, floorBytes)
+	if string(floorBytes) != "5000\n" {
+		t.Fatalf("%s = %q, want the applied 5000\\n", graphSequenceFloorFilename, floorBytes)
 	}
 
 	rolledBack, err := beads.OpenSQLiteStore(dir, beads.WithSQLiteStoreIDPrefix(graphIDPrefix))
@@ -897,8 +930,8 @@ func TestApplyGenesisSequenceFloorSurvivesRollbackToTheDeployedBinary(t *testing
 	if err != nil {
 		t.Fatalf("Create after rollback: %v", err)
 	}
-	if minted.ID != "gcg-751" {
-		t.Fatalf("post-rollback mint = %q, want gcg-751", minted.ID)
+	if minted.ID != "gcg-5001" {
+		t.Fatalf("post-rollback mint = %q, want gcg-5001", minted.ID)
 	}
 }
 

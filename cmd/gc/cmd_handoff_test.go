@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -143,8 +144,8 @@ func TestWaitForControllerRestartHandoffFlagCleared(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	code := waitForControllerRestart(context.Background(), dops, runtime.NewFake(), "worker", "gc handoff",
-		10*time.Millisecond, 5*time.Second, &stderr)
+	code := waitForControllerRestart(context.Background(), dops, runtime.NewFake(), "worker",
+		5*time.Second, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0 when flag cleared; stderr: %s", code, stderr.String())
 	}
@@ -173,8 +174,8 @@ func TestWaitForControllerRestartHandoffFlagClearedButSessionStillRunning(t *tes
 	}
 
 	var stderr bytes.Buffer
-	code := waitForControllerRestart(context.Background(), dops, sp, "worker", "gc handoff",
-		10*time.Millisecond, 50*time.Millisecond, &stderr)
+	code := waitForControllerRestart(context.Background(), dops, sp, "worker",
+		50*time.Millisecond, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1 (flag cleared but session still running is not success); stderr: %s", code, stderr.String())
 	}
@@ -190,8 +191,8 @@ func TestWaitForControllerRestartHandoffTimeout(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	code := waitForControllerRestart(context.Background(), dops, runtime.NewFake(), "worker", "gc handoff",
-		10*time.Millisecond, 25*time.Millisecond, &stderr)
+	code := waitForControllerRestart(context.Background(), dops, runtime.NewFake(), "worker",
+		25*time.Millisecond, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1 on timeout", code)
 	}
@@ -211,8 +212,8 @@ func TestWaitForControllerRestartHandoffTimeoutReportsLastPollError(t *testing.T
 	dops.restartReadErr = errors.New("metadata read failed")
 
 	var stderr bytes.Buffer
-	code := waitForControllerRestart(context.Background(), dops, runtime.NewFake(), "worker", "gc handoff",
-		10*time.Millisecond, 25*time.Millisecond, &stderr)
+	code := waitForControllerRestart(context.Background(), dops, runtime.NewFake(), "worker",
+		25*time.Millisecond, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1 on timeout", code)
 	}
@@ -232,8 +233,8 @@ func TestWaitForControllerRestartHandoffContextCancel(t *testing.T) {
 
 	done := make(chan int, 1)
 	go func() {
-		done <- waitForControllerRestart(ctx, dops, runtime.NewFake(), "worker", "gc handoff",
-			10*time.Millisecond, 30*time.Second, &stderr)
+		done <- waitForControllerRestart(ctx, dops, runtime.NewFake(), "worker",
+			30*time.Second, &stderr)
 	}()
 
 	time.Sleep(30 * time.Millisecond)
@@ -412,7 +413,7 @@ func (errWriter) Write([]byte) (int, error) {
 
 func TestCmdHandoffAutoRejectsTarget(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	if code := cmdHandoff([]string{"context cycle"}, "mayor", true, "", &stdout, &stderr); code == 0 {
+	if code := cmdHandoffWithForce([]string{"context cycle"}, "mayor", true, "", false, &stdout, &stderr); code == 0 {
 		t.Fatal("cmdHandoff returned 0 for --auto with --target")
 	}
 	if !strings.Contains(stderr.String(), "--auto cannot be used with --target") {
@@ -715,7 +716,7 @@ func TestCmdHandoff_Regression744_NamedSessionReturnsWithoutBlocking(t *testing.
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- cmdHandoff([]string{"HANDOFF: context full"}, "", false, "", &stdout, &stderr)
+		done <- cmdHandoffWithForce([]string{"HANDOFF: context full"}, "", false, "", false, &stdout, &stderr)
 	}()
 
 	select {
@@ -780,6 +781,7 @@ func TestHandoffNotInSessionContext(t *testing.T) {
 }
 
 func TestHandoffRemoteRunning(t *testing.T) {
+	city := t.TempDir()
 	store := beads.NewMemStore()
 	rec := events.NewFake()
 	sp := runtime.NewFake()
@@ -788,8 +790,8 @@ func TestHandoffRemoteRunning(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
-	code := doHandoffRemote(store, store, rec, sp, "deacon", "deacon", "mayor",
-		[]string{"Context refresh", "Check beads for current state"}, &stdout, &stderr)
+	code := doHandoffRemoteWithForce(city, store, store, rec, sp, "deacon", "deacon", "mayor",
+		[]string{"Context refresh", "Check beads for current state"}, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -866,8 +868,8 @@ func TestHandoffRemoteNamedOnDemandSkipsKill(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doHandoffRemote(store, store, rec, sp, "mayor", "mayor", "deacon",
-		[]string{"Context refresh", "Please pick this up manually"}, &stdout, &stderr)
+	code := doHandoffRemoteWithForce(t.TempDir(), store, store, rec, sp, "mayor", "mayor", "deacon",
+		[]string{"Context refresh", "Please pick this up manually"}, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -906,8 +908,8 @@ func TestHandoffRemoteNotRunning(t *testing.T) {
 	rec := events.NewFake()
 	sp := runtime.NewFake()
 	var stdout, stderr bytes.Buffer
-	code := doHandoffRemote(store, store, rec, sp, "deacon", "deacon", "human",
-		[]string{"Please check on PR #42"}, &stdout, &stderr)
+	code := doHandoffRemoteWithForce(t.TempDir(), store, store, rec, sp, "deacon", "deacon", "human",
+		[]string{"Please check on PR #42"}, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -1022,7 +1024,7 @@ func TestHandoffMailWritesTheBindingOnAMigratedCity(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	// --auto: the send without the restart request, so the assertion is about
 	// the message bead and nothing else.
-	if code := cmdHandoff([]string{"context cycle"}, "", true, "", &stdout, &stderr); code != 0 {
+	if code := cmdHandoffWithForce([]string{"context cycle"}, "", true, "", false, &stdout, &stderr); code != 0 {
 		t.Fatalf("gc handoff --auto exited %d: %s", code, stderr.String())
 	}
 	match := handoffMailIDPattern.FindStringSubmatch(stdout.String())
@@ -1068,7 +1070,7 @@ func TestHandoffLocalArmMailLandsInTheBindingOnAMigratedCity(t *testing.T) {
 	seedNamedOnDemandSession(t, cityPath, cfg, "mayor")
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdHandoff([]string{"context cycle"}, "", false, "", &stdout, &stderr); code != 0 {
+	if code := cmdHandoffWithForce([]string{"context cycle"}, "", false, "", false, &stdout, &stderr); code != 0 {
 		t.Fatalf("gc handoff exited %d: %s", code, stderr.String())
 	}
 	id := handoffMailIDFromOutput(t, stdout.String(), "sent mail ")
@@ -1181,7 +1183,7 @@ func handoffMailIDFromOutput(t *testing.T, out, marker string) string {
 var handoffMessagingForbidden = []string{
 	"doHandoffAuto(store,",
 	"doHandoffWithOutcome(store,",
-	"doHandoffRemote(store,",
+	"doHandoffRemoteWithForce(cityPath, store,",
 	"beadmail.NewWithStores(store,",
 }
 
@@ -1239,6 +1241,9 @@ func TestHandoffMessagingScanDetectsTheDefectItGuards(t *testing.T) {
 		// produce.
 		routed := strings.Replace(needle, "(store,", "(msgStore,", 1)
 		if routed == needle {
+			routed = strings.Replace(needle, ", store,", ", msgStore,", 1) // a store after the city path
+		}
+		if routed == needle {
 			t.Errorf("forbidden needle %q does not name a store argument, so it cannot be the unrouted spelling of anything", needle)
 			continue
 		}
@@ -1258,7 +1263,13 @@ func handoffCommandSource(t *testing.T) string {
 	if !ok {
 		t.Fatal("runtime.Caller failed")
 	}
-	path := filepath.Join(filepath.Dir(currentFile), "cmd_handoff.go")
+	srcDir := ""
+	if root := bazeltest.OverrideRoot(); root != "" {
+		srcDir = filepath.Join(root, "cmd", "gc")
+	} else {
+		srcDir = filepath.Dir(currentFile)
+	}
+	path := filepath.Join(srcDir, "cmd_handoff.go")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("ReadFile(%q): %v", path, err)

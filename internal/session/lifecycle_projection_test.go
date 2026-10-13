@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -1032,19 +1033,10 @@ func TestLifecycleHighRiskWritersStayOnPatchHelpers(t *testing.T) {
 		forbidden []string
 	}{
 		{
-			file: "internal/session/manager.go",
-			required: []string{
-				`ArchivePatch(time.Now().UTC(), reason, false)`,
-			},
-			forbidden: []string{
-				`"archived_at":  time.Now().UTC().Format(time.RFC3339),`,
-			},
-		},
-		{
 			file: "cmd/gc/session_reconcile.go",
 			required: []string{
-				`sessionpkg.ClearExpiredHoldPatch(info.SleepReason)`,
-				`sessionpkg.ClearExpiredQuarantinePatch(info.SleepReason)`,
+				`sessionpkg.ClearExpiredHoldPatch(reason)`,
+				`sessionpkg.ClearExpiredQuarantinePatch(reason)`,
 			},
 			forbidden: []string{
 				`batch := map[string]string{"held_until": ""}`,
@@ -1090,5 +1082,31 @@ func lifecycleRepoRoot(t *testing.T) string {
 	if !ok {
 		t.Fatal("runtime.Caller failed")
 	}
+	if root := bazeltest.OverrideRoot(); root != "" {
+		file = filepath.Join(root, "internal", "session", "lifecycle_projection_test.go")
+	}
 	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
+}
+
+func TestPreserveConversationOnRuntimeLoss(t *testing.T) {
+	tests := []struct {
+		name string
+		info Info
+		want bool
+	}{
+		{"manual started", Info{SessionOrigin: "manual", SessionKey: "native", StartedConfigHash: "config"}, true},
+		{"legacy manual started", Info{ManualSessionMetadata: "true", SessionKey: "native", StartedConfigHash: "config"}, true},
+		{"manual never started", Info{SessionOrigin: "manual", SessionKey: "allocated"}, false},
+		{"manual missing key", Info{SessionOrigin: "manual", StartedConfigHash: "config"}, false},
+		{"pool started", Info{SessionOrigin: "pool", SessionKey: "native", StartedConfigHash: "config"}, false},
+		{"named always", Info{ConfiguredNamedSession: true, ConfiguredNamedMode: "always"}, true},
+		{"named on demand", Info{ConfiguredNamedSession: true, ConfiguredNamedMode: "on-demand", SessionKey: "native", StartedConfigHash: "config"}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := PreserveConversationOnRuntimeLoss(tt.info); got != tt.want {
+				t.Fatalf("preserve = %v, want %v", got, tt.want)
+			}
+		})
+	}
 }

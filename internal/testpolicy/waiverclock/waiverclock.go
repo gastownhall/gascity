@@ -1,9 +1,12 @@
 // Package waiverclock defines the one fleet-wide policy for how dated
 // test-policy waivers are enforced against the wall clock.
 //
-// Two ledgers carry dated waivers: the runtime provider ledger
-// (internal/testutil/providerledger) and the resource census
-// (internal/testpolicy/resourcecensus). Both are untagged, both run in the
+// Three ledgers carry dated waivers: the runtime provider ledger
+// (internal/testutil/providerledger), the resource census
+// (internal/testpolicy/resourcecensus), and the beads conformance skips
+// (internal/beads/beadstest). Each exports its dates as Expiry values, and the
+// never-cached internal/testpolicy/waiverexpiry check is the only caller that
+// passes them to Check with today's date. That check is untagged, runs in the
 // unit-core job, and that job runs in .githooks/pre-push. So an expiry date
 // passing turns every Go-touching push in the fleet red with no code change
 // involved. That happened on 2026-08-12 and again on 2026-08-26, and each time
@@ -16,7 +19,7 @@
 // a lapse gets a bounded grace period during which it warns and names its owner,
 // and a strict mode that the owner's own lanes run.
 //
-// Both ledgers share these semantics so they cannot drift apart the way a shared
+// All ledgers share these semantics so they cannot drift apart the way a shared
 // date already did.
 package waiverclock
 
@@ -86,6 +89,10 @@ type Expiry struct {
 	Label   string
 	Owner   string
 	Expires time.Time
+	// Horizon, when non-zero, is the furthest past now that Expires may sit.
+	// A date beyond it is fatal in every mode: parking a waiver years out is a
+	// defect only a code change can introduce, so grace does not apply.
+	Horizon time.Duration
 }
 
 // Report separates what must fail the caller from what must only be seen.
@@ -119,6 +126,12 @@ func Check(items []Expiry, now time.Time, mode Mode) Report {
 	var report Report
 	for _, item := range items {
 		if item.Expires.IsZero() {
+			continue
+		}
+		if item.Horizon > 0 && item.Expires.After(now.Add(item.Horizon)) {
+			report.Fatal = append(report.Fatal, fmt.Sprintf(
+				"%s: waiver owned by %s expires %s, beyond the %s horizon; dated waivers must stay short-lived",
+				item.Label, item.Owner, item.Expires.UTC().Format("2006-01-02"), item.Horizon))
 			continue
 		}
 		switch {

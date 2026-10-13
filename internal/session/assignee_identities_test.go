@@ -159,6 +159,21 @@ func TestAssigneeIdentifier(t *testing.T) {
 			info: Info{ID: "s1", Alias: "  al  ", SessionNameMetadata: "  sn  "},
 			want: "al",
 		},
+		{
+			name: "unaliased pool-managed session (pool_managed) claims under its bead id, not the reusable session name",
+			info: Info{ID: "s1", SessionNameMetadata: "sn", PoolManaged: true},
+			want: "s1",
+		},
+		{
+			name: "unaliased pool-managed session (pool_slot) claims under its bead id",
+			info: Info{ID: "s1", SessionNameMetadata: "sn", PoolSlot: "3"},
+			want: "s1",
+		},
+		{
+			name: "unaliased pool-managed session (session_origin=ephemeral) claims under its bead id",
+			info: Info{ID: "s1", SessionNameMetadata: "sn", SessionOrigin: "ephemeral"},
+			want: "s1",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

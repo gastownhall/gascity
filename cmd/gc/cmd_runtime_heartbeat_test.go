@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 )
 
 // makeSessionBead creates a minimal session bead for heartbeat tests.
@@ -172,5 +173,93 @@ func TestDoRuntimeHeartbeatSessionNotFound(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "resolving session") {
 		t.Errorf("expected error about resolving session, got: %s", stderr.String())
+	}
+}
+
+// TestDoRuntimeHeartbeatReplacesTheHold: a heartbeat replaces held_until,
+// as legacy's did: a shorter one shortens it, so a heartbeat-shaped
+// indefinite hold (the max review's H2) heals.
+func TestDoRuntimeHeartbeatReplacesTheHold(t *testing.T) {
+	const sessionName = "testpack__beater"
+	const beadID = "bead-789"
+	store := beads.NewMemStoreFrom(0, []beads.Bead{makeSessionBead(beadID, sessionName)}, nil)
+	inf := time.Now().Add(100 * 365 * 24 * time.Hour).UTC().Format(time.RFC3339)
+	if err := store.SetMetadata(beadID, "held_until", inf); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	before := time.Now()
+	if code := doRuntimeHeartbeat(store, 45*time.Minute, sessionName, sessionName, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("heartbeat: exit %d; %s", code, stderr.String())
+	}
+	b, err := store.Get(beadID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at, err := time.Parse(time.RFC3339, b.Metadata["held_until"])
+	if err != nil || at.After(before.Add(46*time.Minute)) || at.Before(before.Add(44*time.Minute)) {
+		t.Fatalf("held_until after a 45m heartbeat over an indefinite one = %q, want about 45m from now", b.Metadata["held_until"])
+	}
+}
+
+// closeOnLiveGet closes the row when the heartbeat reads it live to write
+// (the write's fresh read): a row closed between its resolution and its
+// write.
+type closeOnLiveGet struct {
+	*beads.MemStore
+}
+
+func (c closeOnLiveGet) Handles() beads.StoreHandles {
+	h := beads.HandlesFor(c.MemStore)
+	h.Live = closingLiveReader{LiveReader: h.Live, store: c.MemStore}
+	return h
+}
+
+type closingLiveReader struct {
+	beads.LiveReader
+	store *beads.MemStore
+}
+
+func (r closingLiveReader) Get(id string) (beads.Bead, error) {
+	_ = r.store.Close(id)
+	return r.LiveReader.Get(id)
+}
+
+// TestDoRuntimeHeartbeatOnAClosedRow: a heartbeat on a session closed since
+// it resolved says it is closed and exits 1, never "retry", and writes
+// nothing.
+func TestDoRuntimeHeartbeatOnAClosedRow(t *testing.T) {
+	const sessionName = "testpack__closed"
+	store := closeOnLiveGet{MemStore: beads.NewMemStoreFrom(0, []beads.Bead{makeSessionBead("bead-c", sessionName)}, nil)}
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeHeartbeat(store, time.Hour, sessionName, sessionName, false, &stdout, &stderr)
+	if code != 1 || !strings.Contains(stderr.String(), "is closed") || strings.Contains(stderr.String(), "retry") {
+		t.Fatalf("heartbeat on a closed session = %d, stderr %q; want 1, closed, no retry", code, stderr.String())
+	}
+	if b, _ := store.Get("bead-c"); b.Metadata["held_until"] != "" {
+		t.Fatalf("the heartbeat wrote a closed row: %v", b.Metadata)
+	}
+}
+
+// casLoser loses every conditional write to a newer revision.
+type casLoser struct{ *beads.MemStore }
+
+func (c casLoser) UpdateIfMatch(id string, rev int64, _ beads.UpdateOpts) error {
+	return &beads.PreconditionFailedError{ID: id, Expected: rev, Current: rev + 1}
+}
+
+// TestDoRuntimeHeartbeatReportsALostWrite: a heartbeat whose fenced write
+// loses every attempt says so and exits 1, never a silent success.
+func TestDoRuntimeHeartbeatReportsALostWrite(t *testing.T) {
+	m, id := stampedMem(t, gate.Require)
+	if err := m.SetMetadata(id, "session_name", "testpack__lost"); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := doRuntimeHeartbeat(casLoser{m}, time.Hour, "testpack__lost", "testpack__lost", false, &stdout, &stderr); code != 1 || !strings.Contains(stderr.String(), "lost to concurrent writes") {
+		t.Fatalf("heartbeat under a CAS that always loses = %d, stderr %q; want 1, lost", code, stderr.String())
+	}
+	if b, _ := m.Get(id); b.Metadata["held_until"] != "" {
+		t.Fatalf("the lost heartbeat wrote held_until %q", b.Metadata["held_until"])
 	}
 }

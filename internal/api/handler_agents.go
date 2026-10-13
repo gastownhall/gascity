@@ -42,7 +42,8 @@ type agentResponse struct {
 	Running     bool         `json:"running"`
 	Suspended   bool         `json:"suspended"`
 	Rig         string       `json:"rig,omitempty"`
-	Pool        string       `json:"pool,omitempty"`
+	Pool        string       `json:"pool,omitempty" doc:"Qualified name of the configured pool this row belongs to. Equals name on the row for an on-demand pool that has no live session."`
+	PoolLimits  *poolLimits  `json:"pool_limits,omitempty" doc:"Configured session limits of the agent (or of its pool)."`
 	Session     *sessionInfo `json:"session,omitempty"`
 	ActiveBead  string       `json:"active_bead,omitempty"`
 
@@ -76,6 +77,14 @@ type agentResponse struct {
 	ContextWindow *int   `json:"context_window,omitempty"`
 }
 
+// poolLimits is the configured concurrent-session range of an agent: the
+// effective min_active_sessions and max_active_sessions, with -1 meaning
+// unlimited. It mirrors the "pool" object of `gc agent list --json`.
+type poolLimits struct {
+	Min int `json:"min" doc:"Minimum concurrent sessions kept running."`
+	Max int `json:"max" doc:"Maximum concurrent sessions; -1 means unlimited."`
+}
+
 type sessionInfo struct {
 	Name         string     `json:"name"`
 	LastActivity *time.Time `json:"last_activity,omitempty"`
@@ -96,7 +105,20 @@ type expandedAgent struct {
 // For bounded pool agents, this generates pool-1..pool-max members.
 // For unlimited pools (max < 0), it discovers running instances via session
 // provider prefix matching — the same approach as discoverPoolInstances.
-func expandAgent(a config.Agent, cityName, sessTmpl string, sp sessionLister) []expandedAgent {
+// That prefix never matches a named session running under the template's
+// bare name, so a template that leaves max_active_sessions unset (the shape
+// gc lint accepts for one) lists its own named session from config instead.
+func expandAgent(a config.Agent, cityName, sessTmpl string, sp sessionLister, named []config.NamedSession) []expandedAgent {
+	expanded, _ := expandAgentChecked(a, cityName, sessTmpl, sp, named)
+	return expanded
+}
+
+// expandAgentChecked is expandAgent that also returns the session-listing
+// error that left an unlimited pool without its running instances, so a
+// caller can report "could not list sessions" instead of mistaking it for
+// "no sessions". A template's own named session comes from config, so its
+// row is returned even alongside that error.
+func expandAgentChecked(a config.Agent, cityName, sessTmpl string, sp sessionLister, named []config.NamedSession) ([]expandedAgent, error) {
 	maxSess := a.EffectiveMaxActiveSessions()
 
 	if !isMultiSessionAgent(a) {
@@ -106,7 +128,7 @@ func expandAgent(a config.Agent, cityName, sessTmpl string, sp sessionLister) []
 			suspended:     a.Suspended,
 			provider:      a.Provider,
 			description:   a.Description,
-		}}
+		}}, nil
 	}
 
 	poolName := a.QualifiedName()
@@ -114,7 +136,11 @@ func expandAgent(a config.Agent, cityName, sessTmpl string, sp sessionLister) []
 	// Unlimited: discover running instances via session prefix.
 	isUnlimited := maxSess == nil || *maxSess < 0
 	if isUnlimited && sp != nil {
-		return discoverUnlimitedPool(a, poolName, cityName, sessTmpl, sp)
+		instances, err := discoverUnlimitedPoolChecked(a, poolName, cityName, sessTmpl, sp)
+		if maxSess == nil && isOwnNamedSession(a, named) {
+			instances = append([]expandedAgent{configuredPoolRow(a)}, instances...)
+		}
+		return instances, err
 	}
 
 	// Bounded: static enumeration.
@@ -136,7 +162,45 @@ func expandAgent(a config.Agent, cityName, sessTmpl string, sp sessionLister) []
 			description:   a.Description,
 		})
 	}
-	return result
+	return result, nil
+}
+
+// configuredPoolRow is the identity of a multi-session agent itself: its
+// qualified name is both the row name and the pool name. It lists an
+// on-demand pool that has no live session, and a template's own named
+// session beside the instances discovered for it.
+func configuredPoolRow(a config.Agent) expandedAgent {
+	qn := a.QualifiedName()
+	return expandedAgent{
+		qualifiedName: qn,
+		rig:           a.Dir,
+		pool:          qn,
+		suspended:     a.Suspended,
+		provider:      a.Provider,
+		description:   a.Description,
+	}
+}
+
+// agentPoolLimits reports an agent's configured session range the way
+// `gc agent list --json` does: effective min, and max with -1 for unlimited.
+func agentPoolLimits(a config.Agent) *poolLimits {
+	limits := poolLimits{Min: a.EffectiveMinActiveSessions(), Max: -1}
+	if maxSess := a.EffectiveMaxActiveSessions(); maxSess != nil {
+		limits.Max = *maxSess
+	}
+	return &limits
+}
+
+// isOwnNamedSession reports whether a configured named session is backed by
+// the agent and uses the agent's own qualified name as its identity.
+func isOwnNamedSession(a config.Agent, named []config.NamedSession) bool {
+	qn := a.QualifiedName()
+	for i := range named {
+		if named[i].QualifiedName() == qn && named[i].TemplateQualifiedName() == qn {
+			return true
+		}
+	}
+	return false
 }
 
 // sessionLister is the subset of session.Provider needed for pool discovery.
@@ -148,13 +212,23 @@ type sessionLister interface {
 // listing sessions with a matching prefix, then reverse-mapping session
 // names back to qualified agent names.
 func discoverUnlimitedPool(a config.Agent, poolName, cityName, sessTmpl string, sp sessionLister) []expandedAgent {
+	discovered, _ := discoverUnlimitedPoolChecked(a, poolName, cityName, sessTmpl, sp)
+	return discovered
+}
+
+// discoverUnlimitedPoolChecked is discoverUnlimitedPool that also returns the
+// listing error. A partial listing still fails closed to no instances.
+func discoverUnlimitedPoolChecked(a config.Agent, poolName, cityName, sessTmpl string, sp sessionLister) ([]expandedAgent, error) {
 	// Build session name prefix: e.g. "city--myrig--polecat-"
 	qnPrefix := a.QualifiedName() + "-"
 	snPrefix := agent.SessionNameFor(cityName, qnPrefix, sessTmpl)
 
 	running, err := sp.ListRunning(snPrefix)
-	if err != nil || len(running) == 0 {
-		return nil
+	if err != nil {
+		return nil, err
+	}
+	if len(running) == 0 {
+		return nil, nil
 	}
 
 	// Reverse session names back to qualified agent names.
@@ -175,7 +249,7 @@ func discoverUnlimitedPool(a config.Agent, poolName, cityName, sessTmpl string, 
 			description:   a.Description,
 		})
 	}
-	return result
+	return result, nil
 }
 
 // agentSessionName converts a qualified agent name to a tmux session name
@@ -280,6 +354,29 @@ func findAgent(cfg *config.City, name string) (config.Agent, bool) {
 		return a, true
 	}
 	return config.Agent{}, false
+}
+
+// rigTemplateInstance reports whether name is a rig-qualified identity that
+// only resolves through a generic scope="rig" template ("myrig/rigbot" served
+// by template "rigbot", see agentutil.ResolveQualifiedRigScopedTemplate). Such
+// an instance has no config of its own: the template it reads through serves
+// every rig. It returns the template's identity and the instance's rig.
+func rigTemplateInstance(cfg *config.City, name string) (template, rig string, ok bool) {
+	if cfg == nil {
+		return "", "", false
+	}
+	for i := range cfg.Agents {
+		if config.AgentMatchesIdentity(&cfg.Agents[i], name) {
+			return "", "", false
+		}
+	}
+	instance, ok := agentutil.ResolveQualifiedRigScopedTemplate(cfg, name)
+	if !ok {
+		return "", "", false
+	}
+	rig = instance.Dir
+	instance.Dir = ""
+	return instance.QualifiedName(), rig, true
 }
 
 // findActiveBeadForAssignees returns the ID of the first in_progress bead
