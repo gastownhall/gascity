@@ -4,7 +4,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"maps"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -532,19 +531,5 @@ func TestDispositionHeartbeatHeld(t *testing.T) {
 		if got := DecodeDisposition(c.meta).HeartbeatHeld(dispT0); got != c.held {
 			t.Errorf("%v: HeartbeatHeld = %v, want %v", c.meta, got, c.held)
 		}
-	}
-}
-
-// Without takes back only the keys the earlier cell still holds as it moved
-// them: a later cell's move of the same key stays.
-func TestDispositionPatchWithout(t *testing.T) {
-	heal := DispositionPatch{MetadataPatch{"held_until": "", "sleep_intent": ""}}
-	start := DispositionPatch{MetadataPatch{"sleep_intent": "wait-hold"}}
-	got := heal.With(start).Without(heal)
-	if want := (MetadataPatch{"sleep_intent": "wait-hold"}); !maps.Equal(got.kv, want) {
-		t.Errorf("Without = %v, want %v", got.kv, want)
-	}
-	if got := heal.Without(DispositionPatch{}); !maps.Equal(got.kv, heal.kv) {
-		t.Errorf("Without(empty) = %v, want %v", got.kv, heal.kv)
 	}
 }

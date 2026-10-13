@@ -1077,31 +1077,6 @@ func TestComposedStartFailureRestoresTheHealedRow(t *testing.T) {
 			t.Fatalf("sleep_reason %q held_until %q, want the expired hold kept cleared", k.meta("sleep_reason"), k.meta("held_until"))
 		}
 	})
-	// Kills the carried timer heal applied stale at the PreWake (seed 613
-	// of the floored corpus, mc-i7efm): an agent's heartbeat re-arms the
-	// hold the pass read expired, and the start must refuse it, not clear it
-	// and wake the row.
-	t.Run("timer heal re-armed", func(t *testing.T) {
-		k, _, _ := deadKit(t, false, "gc-1", "tok", "", "held_until", gatherNow.Add(-time.Minute).Format(time.RFC3339)) // the recycle section writes first
-		healPatch, healClass, _ := timerHealPatch(k.p.World.Census.Rows[k.it.Key].Info, gatherNow)
-		heal := intent{Kind: intentRowHeal, Reason: decideTimerHeal, Key: k.it.Key, Patch: healPatch, Class: healClass}
-		r := &rowFacts{w: k.p.World, k: k.it.Key, row: k.p.World.Census.Rows[k.it.Key], found: true, entry: &selectionEntry{Key: k.it.Key, Liveness: livenessGone, Desired: desireWake, Template: "worker"}}
-		it := r.startHealed(heal)
-		if it.Kind != intentStart || !it.Class.Has("held_until") {
-			t.Fatalf("startHealed = %+v, want a start carrying the hold's clear", it)
-		}
-		it.Deadline = k.it.Deadline
-		k.it = it
-		beat := gatherNow.Add(time.Minute)
-		k.on(seamAfterRowRead, func() { // the heartbeat lands after the first section's read
-			if _, err := session.NewStore(beads.SessionStore{Store: k.backing}).ApplyDispositionFresh("gc-1", session.ActorAgent, session.DispEvent{Kind: session.EvHeartbeat, Until: beat}, nil, gatherNow); err != nil {
-				t.Error(err)
-			}
-		})
-		if s := k.runKind(); s.Cause != causeHeld || len(k.starts()) != 0 || k.meta("held_until") != beat.Format(time.RFC3339) {
-			t.Fatalf("settlement %+v starts %d held_until %q, want refused held, the heartbeat's hold kept and no start", s, len(k.starts()), k.meta("held_until"))
-		}
-	})
 }
 
 // Kills a pending create's rate-limit screen rolled back instead of
@@ -1286,4 +1261,92 @@ func TestStrandedComposedStartStaysCommitted(t *testing.T) {
 	if got := k.meta("state"); got != "active" {
 		t.Fatalf("state %q, want the stranded seat still committed", got)
 	}
+}
+
+// strandedTimerStart is a committed pool seat whose runtime is gone and whose
+// late quarantine expired at the pass (A6's timer heal), composed into its
+// start (startHealed); a stranded one has no work.
+func strandedTimerStart(t *testing.T, stranded bool, woke time.Duration) (*txKit, intent) {
+	t.Helper()
+	k, _ := launchKit(t, "active", "session_key", "k-1", "started_config_hash", "h",
+		"last_woke_at", gatherNow.Add(-woke).Format(time.RFC3339),
+		"quarantined_until", gatherNow.Add(-time.Minute).Format(time.RFC3339),
+		"sleep_reason", "quarantine", "wake_attempts", "3", "churn_count", "2")
+	row := k.p.World.Census.Rows[k.it.Key]
+	healPatch, healClass, _ := timerHealPatch(row.Info, gatherNow)
+	heal := intent{Kind: intentRowHeal, Reason: decideTimerHeal, Key: k.it.Key, Patch: healPatch, Class: healClass}
+	e := &selectionEntry{Key: k.it.Key, Liveness: livenessGone, Desired: desireWake, Template: "worker"}
+	if !stranded {
+		e.AssignedWork = &assignedWorkView{BeadID: "gw-1"}
+	}
+	it := (&rowFacts{w: k.p.World, k: k.it.Key, row: row, found: true, entry: e}).startHealed(heal)
+	if it.Kind != intentStart {
+		t.Fatalf("startHealed = %+v, want a start", it)
+	}
+	it.Deadline = k.it.Deadline
+	return k, it
+}
+
+// rearmedTimerStart is a start composed over an expired hold's timer heal on
+// a dead runtime, whose hold an agent's heartbeat re-arms after the first
+// section's read: the recycle section writes first, and the PreWake reads
+// the re-armed hold.
+func rearmedTimerStart(t *testing.T) (*txKit, time.Time) {
+	t.Helper()
+	k, _, _ := deadKit(t, false, "gc-1", "tok", "", "held_until", gatherNow.Add(-time.Minute).Format(time.RFC3339))
+	healPatch, healClass, _ := timerHealPatch(k.p.World.Census.Rows[k.it.Key].Info, gatherNow)
+	heal := intent{Kind: intentRowHeal, Reason: decideTimerHeal, Key: k.it.Key, Patch: healPatch, Class: healClass}
+	r := &rowFacts{w: k.p.World, k: k.it.Key, row: k.p.World.Census.Rows[k.it.Key], found: true, entry: &selectionEntry{Key: k.it.Key, Liveness: livenessGone, Desired: desireWake, Template: "worker"}}
+	it := r.startHealed(heal)
+	if it.Kind != intentStart || !it.Class.Has("held_until") {
+		t.Fatalf("startHealed = %+v, want a start carrying the hold's clear", it)
+	}
+	it.Deadline = k.it.Deadline
+	k.it = it
+	beat := gatherNow.Add(time.Minute)
+	k.on(seamAfterRowRead, func() {
+		if _, err := session.NewStore(beads.SessionStore{Store: k.backing}).ApplyDispositionFresh("gc-1", session.ActorAgent, session.DispEvent{Kind: session.EvHeartbeat, Until: beat}, nil, gatherNow); err != nil {
+			t.Error(err)
+		}
+	})
+	return k, beat
+}
+
+// Kills a start's carried timer heal applied stale over a re-armed hold (the
+// creates generator's seed 613 of the floored corpus, mc-i7efm), and a
+// re-derivation that rewrites the start's own cells when nothing raced (the
+// #7760 review): a heartbeat re-arming the hold the pass read expired
+// refuses the start held, a refusal that backs the row off, writing no heal
+// at the PreWake nor at the verb section's refusal after the recycle's
+// stop; with no race, a stranded seat's crash accrual and a failed launch's
+// restore are the composed start's own.
+func TestComposedStartTimerHealDrift(t *testing.T) {
+	t.Run("re-armed: refused held, no heal", func(t *testing.T) {
+		k, beat := rearmedTimerStart(t)
+		if s := k.runKind(); s.Outcome != settledRefused || s.Cause != causeHeld || len(k.starts()) != 0 || k.meta("held_until") != beat.Format(time.RFC3339) {
+			t.Fatalf("settlement %+v starts %d held_until %q, want refused held, the heartbeat's hold kept and no start", s, len(k.starts()), k.meta("held_until"))
+		}
+	})
+	t.Run("re-armed: the verb section's refusal writes no heal", func(t *testing.T) {
+		k, beat := rearmedTimerStart(t)
+		k.p.World.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{}} // the verb section refuses template-unresolved
+		if s := k.runKind(); s.Outcome != settledRefused || k.meta("held_until") != beat.Format(time.RFC3339) {
+			t.Fatalf("settlement %+v held_until %q, want refused with the heartbeat's hold kept", s, k.meta("held_until"))
+		}
+	})
+	t.Run("no race: a stranded seat's crash accrual rides the PreWake", func(t *testing.T) {
+		k, it := strandedTimerStart(t, true, 10*time.Second)
+		k.it = it
+		if s := k.runKind(); s.Outcome != settledLanded || k.meta("wake_attempts") != "1" || len(k.starts()) != 1 {
+			t.Fatalf("settlement %+v starts %d wake_attempts %q, want landed with the death's accrual 1", s, len(k.starts()), k.meta("wake_attempts"))
+		}
+	})
+	t.Run("no race: a failed launch restores the healed row", func(t *testing.T) {
+		k, it := strandedTimerStart(t, false, time.Hour)
+		k.it = it
+		k.sp.nextStart = errors.New("boom")
+		if s := k.runKind(); k.meta("sleep_reason") != "runtime-missing" {
+			t.Fatalf("settlement %+v sleep_reason %q, want the healed row's runtime-missing restored", s, k.meta("sleep_reason"))
+		}
+	})
 }

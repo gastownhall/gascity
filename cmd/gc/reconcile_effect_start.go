@@ -170,8 +170,8 @@ func verbStep(adopt bool) func(txView, *preparedStart, error) txStep {
 // heal the start carries (intent.Heal) written alone while its fresh read
 // still finds the runtime absent, on which every such heal rests.
 func healInstead(v txView, refuse txStep) txStep {
-	heal := freshHeal(v).It.Heal
-	if heal == nil || v.RT == nil || v.RT.Class != rtAbsent {
+	heal := v.It.Heal
+	if heal == nil || v.RT == nil || v.RT.Class != rtAbsent || healDrifted(v) {
 		return refuse
 	}
 	patch := heal.Patch
@@ -185,54 +185,20 @@ func healInstead(v txView, refuse txStep) txStep {
 	return step
 }
 
-// freshHeal is v with the A6 timer heal its start carries re-derived on
-// v.Row, the fresh read (STALE-READ-ARCH): the heal cleared the timers that
-// had expired on the pass's read, and an outside write since (an agent's
-// heartbeat) may have re-armed one. The pass's timer heal is taken back out
-// of the start's patch, cells and kept part, and the fresh row's put in, so
-// the PreWake judges, writes and keeps the hold the row holds now, and a
-// re-armed timer's cell is dropped. Applying it twice is applying it once.
-func freshHeal(v txView) txView {
+// healDrifted reports that the A6 timer heal v's start carries no longer
+// re-derives on v.Row, the fresh read (STALE-READ-ARCH): the timers the pass
+// read expired are not what the row holds now (an agent's heartbeat
+// re-armed its hold). The pass's derivation may only veto (C-lite): the
+// start refuses held and writes no heal, and the next pass decides. Both
+// derivations are at the pass's time, so only the row's move counts.
+func healDrifted(v txView) bool {
 	heal := v.It.Heal
 	if heal == nil || heal.Reason != decideTimerHeal {
-		return v
+		return false
 	}
 	stalePatch, staleClass, _ := timerHealPatch(v.World.Census.Rows[v.It.Key].Info, v.World.Now)
-	freshPatch, freshClass, _ := timerHealPatch(v.Row, v.Now)
-	rederive := func(patch session.MetadataPatch) session.MetadataPatch {
-		out := maps.Clone(patch)
-		for k, val := range stalePatch {
-			if cur, ok := out[k]; ok && cur == val {
-				delete(out, k)
-			}
-		}
-		if out == nil && len(freshPatch) > 0 {
-			out = session.MetadataPatch{}
-		}
-		maps.Copy(out, freshPatch)
-		return out
-	}
-	rederiveKept := func(kept session.MetadataPatch) session.MetadataPatch {
-		out := rederive(kept)
-		for k, val := range staleClass.Fold() {
-			if cur, ok := out[k]; ok && cur == val {
-				delete(out, k)
-			}
-		}
-		if out == nil && freshClass.Len() > 0 {
-			out = session.MetadataPatch{}
-		}
-		maps.Copy(out, freshClass.Fold())
-		return out
-	}
-	h := *heal
-	h.Patch, h.Class = rederive(heal.Patch), freshClass.With(heal.Class.Without(staleClass))
-	v.It.Heal = &h
-	v.It.Patch, v.It.Class = rederive(v.It.Patch), freshClass.With(v.It.Class.Without(staleClass))
-	if v.It.Kept != nil {
-		v.It.Kept = rederiveKept(v.It.Kept)
-	}
-	return v
+	freshPatch, freshClass, _ := timerHealPatch(v.Row, v.World.Now)
+	return !maps.Equal(stalePatch, freshPatch) || !maps.Equal(staleClass.Fold(), freshClass.Fold())
 }
 
 // runtimeCause is S1's table's refusal for row's fresh runtime read rt, ""
