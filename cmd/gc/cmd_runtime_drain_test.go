@@ -801,6 +801,13 @@ func TestDoRuntimeDrainCheckUntypedRuntimeErrorsAreUnknown(t *testing.T) {
 			dops.err = fmt.Errorf("reading GC_DRAIN: %w", fmt.Errorf("reading %s from session %q: %w: %w", "GC_DRAIN", "worker", runtime.ErrRuntimeUnavailable, sessiontmux.ErrNoServer))
 			return dops
 		}},
+		// A session-not-found that also says the runtime could not be
+		// observed is not an answer of absence.
+		{name: "not found joined with unavailable", dops: func(*testing.T) drainOps {
+			dops := newFakeDrainOps()
+			dops.err = fmt.Errorf("reading GC_DRAIN: %w", fmt.Errorf("reading %s from session %q: %w: %w", "GC_DRAIN", "worker", runtime.ErrSessionNotFound, runtime.ErrRuntimeUnavailable))
+			return dops
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var stderr bytes.Buffer
@@ -991,6 +998,35 @@ func TestDrainCheckRowDrainingMissingRowIsAnError(t *testing.T) {
 	}
 	if _, err := drainCheckRowDraining(front, "worker", "gc-missing"); err == nil {
 		t.Fatal("drainCheckRowDraining for an unknown id returned no error")
+	}
+}
+
+// A city config that will not load leaves the session row unread: the row
+// source reports the failure, so drain-check answers unknown instead of
+// reading the row without the config's session-class routing.
+func TestDrainCheckRowReaderConfigLoadFailureIsUnknown(t *testing.T) {
+	store, _ := newDrainCheckRowStore(t, "worker", session.StateActive)
+	swapDrainCheckSessionLeg(t, store)
+	original := drainCheckOpenSessionLeg
+	legOpened := false
+	drainCheckOpenSessionLeg = func(path string, cfg *config.City) (beads.Store, error) {
+		legOpened = true
+		return original(path, cfg)
+	}
+	readRow := drainCheckRowReader(t.TempDir(), func() (*config.City, error) {
+		return nil, errors.New("city.toml: parse error")
+	}, "worker", "")
+
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeDrainCheck(newFakeDrainOps(), readRow, "worker", "worker", false, &stdout, &stderr)
+	if code != drainCheckUnknownExit {
+		t.Fatalf("code = %d, want %d (unknown); stderr: %s", code, drainCheckUnknownExit, stderr.String())
+	}
+	if legOpened {
+		t.Error("session leg opened although the city config did not load")
+	}
+	if got := stderr.String(); strings.Count(got, "\n") != 1 || !strings.Contains(got, drainCheckSourceRow+":") || !strings.Contains(got, "city.toml: parse error") {
+		t.Errorf("stderr = %q, want one line naming %s and the config error", got, drainCheckSourceRow)
 	}
 }
 
