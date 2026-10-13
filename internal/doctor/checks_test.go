@@ -4443,3 +4443,53 @@ func TestDoltVersionCheck_CanFixFalse(t *testing.T) {
 		t.Error("CanFix() = true, want false")
 	}
 }
+
+// nonDoltScopeMetadata is the metadata.json a non-Dolt scope carries: a
+// backend selection only (for a remote backend, `bd connect` pins the server in
+// a per-user sidecar). The name is deliberately not any real backend: the
+// dolt-server checks must decide "not Dolt" without knowing which engine it is.
+const nonDoltScopeMetadata = `{"database":"beads.db","backend":"example-non-dolt"}`
+
+func writeNonDoltScopeMetadata(t *testing.T, scopeRoot string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(scopeRoot, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(scopeRoot, ".beads", "metadata.json"), []byte(nonDoltScopeMetadata), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestDoltServerCheck_NonDoltCityIsNotApplicable pins the MC shadow finding F3:
+// a city whose scope is bound to a non-Dolt backend has no Dolt server and no
+// dolt-state.json, so the dolt-server check must answer N/A rather than FAIL
+// with "read dolt runtime state".
+func TestDoltServerCheck_NonDoltCityIsNotApplicable(t *testing.T) {
+	dir := setupCity(t, "[workspace]\nname = \"test\"\n\n[beads]\nprovider = \"bd\"\n")
+	writeNonDoltScopeMetadata(t, dir)
+
+	r := NewDoltServerCheck(dir, false).Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want OK (not applicable); msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "not applicable") || !strings.Contains(r.Message, "example-non-dolt") {
+		t.Fatalf("message = %q, want a not-applicable answer naming the scope's backend", r.Message)
+	}
+}
+
+// TestRigDoltServerCheck_NonDoltRigIsNotApplicable is the rig twin: a rig
+// bound to the same non-Dolt backend has no Dolt endpoint to dial.
+func TestRigDoltServerCheck_NonDoltRigIsNotApplicable(t *testing.T) {
+	cityDir := setupCity(t, "[workspace]\nname = \"test\"\n\n[beads]\nprovider = \"bd\"\n")
+	writeNonDoltScopeMetadata(t, cityDir)
+	rigDir := filepath.Join(cityDir, "rigs", "demo")
+	writeNonDoltScopeMetadata(t, rigDir)
+
+	r := NewRigDoltServerCheck(cityDir, config.Rig{Name: "demo", Path: rigDir}, false).Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want OK (not applicable); msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "not applicable") {
+		t.Fatalf("message = %q, want a not-applicable answer", r.Message)
+	}
+}
