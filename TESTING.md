@@ -119,6 +119,10 @@ worker toolchain, exactly as beads' nightly does
 (`gastownhall/beads` `.bazelrc`'s `test:fresh`). It still writes the shared
 remote cache: `--nocache_test_results` only skips reading a cached result,
 and rbe-west's workers upload their own results regardless of this flag.
+The v2 simulator corpus ranges are build actions, not test actions
+(`go_test_run`, `cmd/gc/BUILD.bazel`), so `--nocache_test_results` does not
+reach them; `--config=fresh` also passes
+`--modify_execution_info=GoTestRun=+no-cache`, which re-executes them.
 Run the same thing locally with:
 
 ```bash

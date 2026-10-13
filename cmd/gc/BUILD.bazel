@@ -2202,11 +2202,16 @@ go_variant_test(
 # ranges of 64, the plain corpus and the floored one with pending creates
 # seeded (TestSimCorpusFlooredPending, mc-cjtkj). Each range runs once as an
 # action (go_test_run: the same binary, no extra compile), in parallel beside
-# gc_test's shards, writing its coverage census beside its log and status;
-# its test replays the run, and gc_sim_coverage_gate_test sums the censuses
-# (architecture item C). A run is cached as an action, so
-# --cache_test_results=no does not rerun it (the sim is deterministic); a
-# hang past its timeout fails the build.
+# gc_test's shards, writing its coverage census beside its log; its test
+# replays the log, and gc_sim_coverage_gate_test sums the censuses
+# (architecture item C). A failing or hung range fails the build with its
+# log's tail and is never cached; a passing one is cached as an action, so
+# --cache_test_results=no does not rerun it (--config=fresh does), and the
+# corpus's lines no longer reach bazel coverage's lcov (gc_test's shards still
+# cover its first 64 seeds). --test_filter, --test_arg and --test_env do not
+# reach a range; replay one seed with
+#   GC_V2_SIM_SEED=<seed> go test -run '^TestSimCorpus$' ./cmd/gc/
+# (TestSimCorpusFlooredPending for the floored ranges).
 SIM_CORPORA = {
     "gc_sim_corpus": "TestSimCorpus",
     "gc_sim_corpus_floored_pending": "TestSimCorpusFlooredPending",
@@ -2217,12 +2222,12 @@ SIM_RANGES = ["%s_%d" % (name, i) for name in SIM_CORPORA for i in range(16)]
 [go_test_run(
     name = "%s_%d_run" % (name, i),
     testonly = True,
+    outs = {"GC_V2_SIM_COVERAGE": "%s_%d.census.json" % (name, i)},
     args = ["-test.run=^%s$" % test],
     env = {
         "GC_V2_SIM_SEEDS": "64",
         "GC_V2_SIM_SEED_FIRST": str(1 + 64 * i),
     },
-    outs = {"GC_V2_SIM_COVERAGE": "%s_%d.census.json" % (name, i)},
     test = ":gc_test",
 ) for name, test in SIM_CORPORA.items() for i in range(16)]
 
@@ -2233,13 +2238,17 @@ SIM_RANGES = ["%s_%d" % (name, i) for name in SIM_CORPORA for i in range(16)]
 ) for r in SIM_RANGES]
 
 # Fails on a registered arm, effect kind or settle outcome no range reaches,
-# unless simCoverageAllowlist names its generator bead (mc-i7efm).
+# unless simCoverageAllowlist names its generator bead (mc-i7efm), or when a
+# range's census is missing.
 go_variant_test(
     name = "gc_sim_coverage_gate_test",
     size = "small",
     args = ["-test.run=^TestSimCoverageGate$$"],
     data = [":%s_run" % r for r in SIM_RANGES],
-    env = {"GC_V2_SIM_COVERAGE_FILES": " ".join(["$(rootpath :%s_run)" % r for r in SIM_RANGES])},
+    env = {
+        "GC_V2_SIM_COVERAGE_FILES": " ".join(["$(rootpath :%s_run)" % r for r in SIM_RANGES]),
+        "GC_V2_SIM_COVERAGE_RANGES": str(len(SIM_RANGES)),
+    },
     test = ":gc_test",
 )
 
@@ -2349,4 +2358,3 @@ filegroup(
     ),
     visibility = ["//visibility:public"],
 )
-

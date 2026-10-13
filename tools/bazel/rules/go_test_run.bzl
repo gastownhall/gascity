@@ -4,15 +4,18 @@ A test whose run leaves an output another target reads (the v2 simulator
 corpus's coverage census, which a gate sums across all its ranges) cannot be
 a test target: a test cannot read another test's outputs. go_test_run runs
 the go_test's binary (the same binary, in the same configuration, so no extra
-compile) as an action instead, with its runfiles, and records the run's log,
-its exit status and the outputs it was asked to write. The run's status is
-recorded, not raised: a failing run is still a built target, and its
-go_test_replay_test fails with the run's log as its own. A run that outlives
-timeout is killed and fails the build (a hang never stalls it).
+compile) as an action instead, with its runfiles, and records the run's log
+and the outputs it was asked to write; its go_test_replay_test prints the
+log.
 
-The run is an action, so it caches as one: `--cache_test_results=no` does not
-rerun it, and a recorded failure replays until an input changes. That fits
-only a deterministic test (the simulator's seeds are).
+A failing run fails the action (FAILED TO BUILD, with the log's tail), so no
+failure is ever cached: a flake replayed from the cache would fail every
+later run on the same inputs. A run that outlives timeout fails it too, its
+Go test timeout's panic (which names the running test) printed. A passing
+run is cached as an action: --cache_test_results=no and --runs_per_test do
+not rerun it (--config=fresh does: GoTestRun=+no-cache, .bazelrc). Seeds fix
+a simulator run's inputs, not its goroutines' interleavings, so a rerun may
+take another path (mc-gfdi5).
 
   go_test_run:
     test     the go_test to run;
@@ -21,42 +24,50 @@ only a deterministic test (the simulator's seeds are).
     outs     env var -> file name: the run gets the file's absolute path in
              the variable, and the target's files are these outputs (an
              output the run did not write is left empty);
-    timeout  seconds before the run is killed.
+    timeout  seconds before the run is killed; the test binary's own
+             -test.timeout fires 20s before it.
 
   go_test_replay_test:
-    run      the go_test_run to replay: it prints the run's log and exits
-             with the run's status.
+    run      the go_test_run to replay: it prints the run's log.
 """
 
 GoTestRunInfo = provider(
-    doc = "A go_test_run's log and exit status.",
-    fields = {"log": "the run's combined output", "status": "the run's exit status, a decimal line"},
+    doc = "A go_test_run's log.",
+    fields = {"log": "the run's combined output"},
 )
 
-# The run: a killed run (timeout's 124, or the KILL's 137) fails the action
-# with its log's tail; any other exit is recorded in the status file.
+# The run. A Go test timeout (its panic names the running test, and the
+# goroutines) or a kill fails the action with that block; any other failing
+# exit fails it with the log's tail, the simulator cache's reconcile lines
+# left out.
 _RUN = """\
 set -u
-exe=$1 log=$2 status=$3 timeout=$4
-shift 4
+exe=$1 log=$2 timeout=$3
+shift 3
 export TEST_SRCDIR="$PWD/$exe.runfiles" TEST_TMPDIR="$PWD/$log.tmp"
 export HOME="$TEST_TMPDIR" TMPDIR="$TEST_TMPDIR"
 mkdir -p "$TEST_TMPDIR"
-for out in $OUTS; do
+outs=$OUTS
+unset OUTS
+for out in $outs; do
   export "${out%%=*}=$PWD/${out#*=}"
 done
 rc=0
 timeout -k 10 "$timeout" "$exe" "$@" >"$log" 2>&1 || rc=$?
 rm -rf "$TEST_TMPDIR"
-if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
-  tail -n 200 "$log" >&2
-  echo "go_test_run: $exe $* outlived ${timeout}s" >&2
+if grep -q '^panic: test timed out' "$log" || [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+  sed -n '/^panic: test timed out/,$p' "$log" | head -n 120 >&2
+  echo "go_test_run: $exe $* outlived its timeout (${timeout}s)" >&2
   exit 1
 fi
-for out in $OUTS; do
+if [ "$rc" -ne 0 ]; then
+  grep -v 'beads cache: reconciled' "$log" | tail -n 400 >&2
+  echo "go_test_run: $exe $* failed (exit $rc)" >&2
+  exit 1
+fi
+for out in $outs; do
   [ -e "${out#*=}" ] || : >"${out#*=}"
 done
-echo "$rc" >"$status"
 """
 
 def _go_test_run_impl(ctx):
@@ -64,8 +75,9 @@ def _go_test_run_impl(ctx):
     exe = test[DefaultInfo].files_to_run
     if exe.executable == None:
         fail("%s is not executable" % test.label)
+    if ctx.attr.timeout <= 30:
+        fail("timeout must leave the test binary's own -test.timeout (20s earlier) room")
     log = ctx.actions.declare_file(ctx.label.name + ".log")
-    status = ctx.actions.declare_file(ctx.label.name + ".status")
     outs, pairs = [], []
     for var, name in sorted(ctx.attr.outs.items()):
         out = ctx.actions.declare_file(name)
@@ -79,23 +91,24 @@ def _go_test_run_impl(ctx):
     env["TEST_WORKSPACE"] = ctx.workspace_name
     env["OUTS"] = " ".join(pairs)
 
+    flags = ["-test.timeout=%ds" % (ctx.attr.timeout - 20)] + ctx.attr.args
     ctx.actions.run_shell(
         command = _RUN,
-        arguments = [exe.executable.path, log.path, status.path, str(ctx.attr.timeout)] + ctx.attr.args,
+        arguments = [exe.executable.path, log.path, str(ctx.attr.timeout)] + flags,
         tools = [exe],
-        outputs = [log, status] + outs,
+        outputs = [log] + outs,
         env = env,
         mnemonic = "GoTestRun",
         progress_message = "Running %s once for %%{label}" % test.label,
     )
     return [
         DefaultInfo(files = depset(outs)),
-        GoTestRunInfo(log = log, status = status),
+        GoTestRunInfo(log = log),
     ]
 
 go_test_run = rule(
     implementation = _go_test_run_impl,
-    doc = "Runs an existing go_test once as an action, recording its log, status and outputs.",
+    doc = "Runs an existing go_test once as an action, recording its log and outputs; a failing run fails the action.",
     attrs = {
         "test": attr.label(mandatory = True, executable = True, cfg = "target", doc = "The go_test to run."),
         "args": attr.string_list(doc = "The test binary's flags."),
@@ -111,13 +124,13 @@ def _go_test_replay_test_impl(ctx):
     ctx.actions.write(
         output = exe,
         is_executable = True,
-        content = "#!/bin/sh\ncat '%s'\nexit \"$(cat '%s')\"\n" % (run.log.short_path, run.status.short_path),
+        content = "#!/bin/sh\ncat '%s'\n" % run.log.short_path,
     )
-    return [DefaultInfo(executable = exe, runfiles = ctx.runfiles(files = [run.log, run.status]))]
+    return [DefaultInfo(executable = exe, runfiles = ctx.runfiles(files = [run.log]))]
 
 go_test_replay_test = rule(
     implementation = _go_test_replay_test_impl,
     test = True,
-    doc = "Replays a go_test_run: prints its log and exits with its status.",
+    doc = "Replays a go_test_run: prints its log (a failing run failed the build).",
     attrs = {"run": attr.label(mandatory = True, providers = [GoTestRunInfo], doc = "The go_test_run to replay.")},
 )

@@ -414,6 +414,7 @@ type sim struct {
 	locks              *lockObserver // the sections holding each row's mutation lock
 	runMu              sync.Mutex
 	running            map[effectKey]*simEffect // released, by key, for their seams
+	credit             decisionCredit           // the arm decisions the census credits (reconcile_sim_coverage_test.go)
 }
 
 // simOpts scripts a run: rows replaces the seeded rows, and the other fields
@@ -502,7 +503,10 @@ func newSim(t *testing.T, seed uint64, o simOpts) *sim {
 		}()
 	}
 	s.p = newPlanner(s.clk, func() time.Duration { return simPatrol }, nil, inflight, nil, io.Discard)
-	s.p.pass = func(now time.Time) passResult { return s.p.tracePass(s.env, now) }
+	s.p.pass = func(now time.Time) (res passResult) {
+		s.credit.planning(func() { res = s.p.tracePass(s.env, now) }) // the census credits its decisions
+		return res
+	}
 	s.p.effects = s.x
 	if simPristineSpecs == nil {
 		simPristineSpecs = effectSpecs
@@ -526,7 +530,7 @@ func newSim(t *testing.T, seed uint64, o simOpts) *sim {
 	if o.arms != nil {
 		arms = o.arms(arms)
 	}
-	rowArms = countArms(arms) // reconcile_sim_coverage_test.go
+	rowArms = countArms(arms, &s.credit) // reconcile_sim_coverage_test.go
 	t.Cleanup(func() { rowArms = savedArms })
 	t.Cleanup(s.teardown)
 	s.prev = s.snapshot()
@@ -1478,7 +1482,6 @@ var simFloorCancels atomic.Int64
 // or 2 (by seed), so floor members' own acks are canceled (PAR-FLOORACK)
 // beside every other path: no invariant may break.
 func TestSimCorpusFloored(t *testing.T) {
-	t.Cleanup(func() { writeSimCoverage(t) })
 	before := simFloorCancels.Load()
 	t.Cleanup(func() {
 		if !t.Failed() && simFloorCancels.Load() == before {

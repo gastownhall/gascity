@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -57,15 +58,49 @@ func registeredEffects() []string {
 	return out
 }
 
-// countArms wraps the table's arms so each decision is counted under the
-// arm's key (a mutant's arm counts under its own name).
-func countArms(arms []rowArm) []rowArm {
+// decisionCredit is which arm decisions the census credits: a planning
+// pass's, the first arm that decides each row. A6's fold probing the later
+// arms on the same row, and an effect re-deciding a fresh row (decideRow
+// outside the pass), are evaluations, not decisions.
+type decisionCredit struct {
+	mu       sync.Mutex
+	credited map[*rowFacts]bool // the pass's rows decided so far; nil outside a pass
+}
+
+// planning runs pass as a planning pass whose decisions are credited.
+func (c *decisionCredit) planning(pass func()) {
+	c.mu.Lock()
+	c.credited = map[*rowFacts]bool{}
+	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		c.credited = nil
+		c.mu.Unlock()
+	}()
+	pass()
+}
+
+// take reports whether r's decision is credited: inside a planning pass,
+// and r's first.
+func (c *decisionCredit) take(r *rowFacts) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.credited == nil || c.credited[r] {
+		return false
+	}
+	c.credited[r] = true
+	return true
+}
+
+// countArms wraps the table's arms so each credited decision is counted
+// under the arm's key (a mutant's arm counts under its own name).
+func countArms(arms []rowArm, credit *decisionCredit) []rowArm {
 	out := make([]rowArm, len(arms))
 	for i, a := range arms {
 		key, decide := armKey(a), a.decide
 		out[i] = rowArm{name: a.name, decide: func(r *rowFacts) (intent, bool) {
 			it, ok := decide(r)
-			if ok {
+			if ok && credit.take(r) {
 				simCoverage.Lock()
 				h := simCoverage.arms[key]
 				if h == nil {
@@ -152,8 +187,16 @@ func writeSimCoverage(t *testing.T) {
 	}
 }
 
-// settleOutcomes are the outcome classes the corpus must reach, across kinds.
-var settleOutcomes = []string{"landed", "failed", "refused", "ambiguous", "noop"}
+// settleOutcomes are the outcome classes the corpus must reach, across
+// kinds: every settleOutcome (one outcomeName does not name is gated as
+// outcome-N, which no effect reaches until it is named).
+func settleOutcomes() []string {
+	var out []string
+	for o := settledLanded; o < settleOutcomeEnd; o++ {
+		out = append(out, outcomeName(o))
+	}
+	return out
+}
 
 // simCoverageAllowlist are the census keys the corpus is let not reach, each
 // for want of a generator (mc-i7efm). The gate fails on a listed key that
@@ -206,7 +249,7 @@ func simCoverageGaps(reports []simCoverageReport, arms, effects []string, allow 
 		}
 	}
 	registered := map[string]bool{}
-	for _, keys := range [][]string{prefixed("arm:", arms), prefixed("effect:", effects), prefixed("outcome:", settleOutcomes)} {
+	for _, keys := range [][]string{prefixed("arm:", arms), prefixed("effect:", effects), prefixed("outcome:", settleOutcomes())} {
 		for _, k := range keys {
 			registered[k] = true
 			if _, ok := allow[k]; hits[k] == 0 && !ok {
@@ -235,11 +278,15 @@ func prefixed(p string, keys []string) []string {
 // TestSimCoverageGate fails on a registered arm, effect kind or outcome
 // class the corpora never reach, over the censuses GC_V2_SIM_COVERAGE_FILES
 // names (one per corpus range, space-separated; relative paths are runfiles,
-// BUILD.bazel's gc_sim_coverage_gate_test); unset, it skips.
+// BUILD.bazel's gc_sim_coverage_gate_test), which must be the
+// GC_V2_SIM_COVERAGE_RANGES it expects; both unset, it skips.
 func TestSimCoverageGate(t *testing.T) {
-	paths := strings.Fields(os.Getenv("GC_V2_SIM_COVERAGE_FILES"))
-	if len(paths) == 0 {
+	paths, ranges := strings.Fields(os.Getenv("GC_V2_SIM_COVERAGE_FILES")), os.Getenv("GC_V2_SIM_COVERAGE_RANGES")
+	switch want, err := strconv.Atoi(ranges); {
+	case len(paths) == 0 && ranges == "":
 		t.Skip("GC_V2_SIM_COVERAGE_FILES unset")
+	case err != nil || len(paths) != want:
+		t.Fatalf("%d censuses in GC_V2_SIM_COVERAGE_FILES, want GC_V2_SIM_COVERAGE_RANGES=%q: a range's census is missing", len(paths), ranges)
 	}
 	var reports []simCoverageReport
 	for _, p := range paths {
@@ -308,5 +355,24 @@ func TestSimCoverageGaps(t *testing.T) {
 				t.Errorf("gaps = %q, %q; want %q, %q", zero, stale, c.zero, c.stale)
 			}
 		})
+	}
+}
+
+// The census credits a planning pass's first decision per row only: not a
+// fold's probe of a later arm on the same row, nor a decision outside the
+// pass (an effect re-deciding its fresh row).
+func TestSimCoverageCreditsPassDecisions(t *testing.T) {
+	var c decisionCredit
+	r1, r2 := &rowFacts{}, &rowFacts{}
+	if c.take(r1) {
+		t.Error("a decision outside a planning pass was credited")
+	}
+	var got []bool
+	c.planning(func() { got = []bool{c.take(r1), c.take(r1), c.take(r2)} })
+	if want := []bool{true, false, true}; !slices.Equal(got, want) {
+		t.Errorf("credits in the pass = %v, want %v (the row's second decision is a probe)", got, want)
+	}
+	if c.take(r2) {
+		t.Error("a decision after the pass was credited")
 	}
 }
