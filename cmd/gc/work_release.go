@@ -255,9 +255,15 @@ func (o ReleaseOutcome) Unserved() []strandedClaim {
 // whose gate needs the whole seat; elsewhere what was read is released.
 func ReleaseClaims(sw *SeatWork, scope ReleaseScope, seat releaseSeat, why releaseWhy, opts ReleaseOpts) (ReleaseOutcome, error) {
 	p := releasePolicies[why]
-	claims, err := sw.snapshot(seatWorkQuery{scope: scope, statuses: p.statuses}, false)
+	statuses := p.statuses
+	if why == releaseDrainAck {
+		// A normalized-open row may be raw blocked. Probe that hold, while
+		// keeping ordinary open continuation preassignments under D5.
+		statuses = openOrStarted
+	}
+	claims, err := sw.snapshot(seatWorkQuery{scope: scope, statuses: statuses}, false)
 	if opts.Late {
-		late, lateErr := lateSeatWork(sw.Legs(), scope, p.statuses, nil)
+		late, lateErr := lateSeatWork(sw.Legs(), scope, statuses, nil)
 		claims, err = appendUniqueSeatWork(claims, late), errors.Join(err, lateErr)
 	}
 	// The refusal needs no config: it releases nothing, so a seat whose
@@ -290,7 +296,7 @@ func releaseListed(claims []seatWorkHit, why releaseWhy, seat releaseSeat, cfg *
 	keep := func(c seatWorkHit, why string) { out.Kept = append(out.Kept, c); out.Why[c.bead.ID] = why }
 	var mine []seatWorkHit
 	for _, c := range claims {
-		if slices.Contains(p.statuses, c.bead.Status) {
+		if slices.Contains(p.statuses, c.bead.Status) || c.bead.Status == "open" || c.bead.Status == "blocked" {
 			mine = append(mine, c)
 		}
 	}
@@ -319,25 +325,50 @@ func releaseListed(claims []seatWorkHit, why releaseWhy, seat releaseSeat, cfg *
 			out.Why[c.bead.ID] = failedBudget
 			continue
 		}
+		clearDetached := false
+		if p.pool {
+			var allowed bool
+			allowed, clearDetached = detachedProbeAllowsOrphanRelease(c.bead)
+			if !allowed {
+				keep(c, keptDetachedAlive)
+				continue
+			}
+		}
+		if !p.startedKeeps {
+			// A killed seat is resumable, unlike a closed/retired holder or a
+			// confirmed orphan. Keep its existing release and cost policy.
+			if released, handled, err := releaseBlockedAssignment(c.store, c.bead); err != nil {
+				out.Failed = append(out.Failed, c)
+				out.Why[c.bead.ID] = err.Error()
+				continue
+			} else if released {
+				out.Released = append(out.Released, c)
+				continue
+			} else if handled {
+				keep(c, keptMoved)
+				continue
+			}
+		}
+		if !slices.Contains(p.statuses, c.bead.Status) {
+			keep(c, keptMoved)
+			continue
+		}
 		if p.pool {
 			assignee := strings.TrimSpace(c.bead.Assignee)
 			if !liveWorkAssignmentStillReleasable(c.store, c.bead.ID, c.bead.Status, assignee) {
 				keep(c, keptMoved)
 				continue
 			}
-			allowed, clearDetached := detachedProbeAllowsOrphanRelease(c.bead)
-			if !allowed {
-				keep(c, keptDetachedAlive)
-				continue
-			}
 			if !releaseOrphanedPoolAssignment(c.store, c.bead, clearDetached) {
 				keep(c, keptMoved)
 				continue
 			}
-		} else if err := workAssignmentForStore(beads.WorkStore{Store: c.store}).ReleaseWorkBead(c.bead, fallback); err != nil {
-			out.Failed = append(out.Failed, c)
-			out.Why[c.bead.ID] = err.Error()
-			continue
+		} else {
+			if err := workAssignmentForStore(beads.WorkStore{Store: c.store}).ReleaseWorkBead(c.bead, fallback); err != nil {
+				out.Failed = append(out.Failed, c)
+				out.Why[c.bead.ID] = err.Error()
+				continue
+			}
 		}
 		out.Released = append(out.Released, c)
 	}
