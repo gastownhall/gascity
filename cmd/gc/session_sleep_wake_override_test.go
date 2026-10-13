@@ -81,7 +81,7 @@ func TestExplicitWakePendingInfo(t *testing.T) {
 // already treats as served, and lose it.
 func TestExplicitWakePendingInfoMatchesSessionRule(t *testing.T) {
 	requests := []string{"", "explicit", " explicit ", "work", "pending-create"}
-	stamps := []string{"", "2026-09-22T20:00:00Z", " 2026-09-22T22:00:00Z ", "2026-09-22T22:00:00Z", "yesterday"}
+	stamps := []string{"", "2026-09-22T20:00:00Z", " 2026-09-22T20:00:00Z ", "2026-09-22T22:00:00Z", " 2026-09-22T22:00:00Z ", "yesterday"}
 	states := []string{"", "asleep", "drained", "suspended", "creating", "active", "awake"}
 	for _, state := range states {
 		for _, request := range requests {
@@ -93,7 +93,8 @@ func TestExplicitWakePendingInfoMatchesSessionRule(t *testing.T) {
 						want = false
 					}
 					if got := explicitWakePendingInfo(info); got != want {
-						t.Fatalf("explicitWakePendingInfo(%+v) = %v, want %v (session.ExplicitWakeUnserved and the active/awake clause)", info, got, want)
+						t.Fatalf("explicitWakePendingInfo(state=%q wake_request=%q wake_requested_at=%q slept_at=%q) = %v, want %v (session.ExplicitWakeUnserved and the active/awake clause)",
+							state, request, requestedAt, sleptAt, got, want)
 					}
 				}
 			}
