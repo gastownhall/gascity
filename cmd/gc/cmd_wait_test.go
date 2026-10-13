@@ -27,8 +27,10 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/overlay"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/tmux"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/storeref"
+	"github.com/gastownhall/gascity/internal/worker"
 	"github.com/gastownhall/gascity/test/toolhome"
 	"golang.org/x/mod/semver"
 )
@@ -1269,72 +1271,94 @@ func TestPrepareWaitWakeState_FailsMissingDependencyWait(t *testing.T) {
 }
 
 func TestPrepareWaitWakeState_FinalizesFromNudge(t *testing.T) {
-	store := beads.NewMemStore()
-	sessionBead, err := store.Create(beads.Bead{
-		Type:   sessionBeadType,
-		Labels: []string{sessionBeadLabel},
-		Metadata: map[string]string{
-			"session_name":       "worker",
-			"agent_name":         "worker",
-			"continuation_epoch": "1",
-		},
-	})
-	if err != nil {
-		t.Fatalf("create session bead: %v", err)
-	}
-	waitBead, err := store.Create(beads.Bead{
-		Type:   waitBeadType,
-		Labels: []string{waitBeadLabel, "session:" + sessionBead.ID},
-		Metadata: map[string]string{
-			"session_id":       sessionBead.ID,
-			"session_name":     "worker",
-			"kind":             "deps",
-			"state":            waitStateReady,
-			"dep_ids":          "gc-1",
-			"dep_mode":         "all",
-			"registered_epoch": "1",
-			"delivery_attempt": "1",
-		},
-	})
-	if err != nil {
-		t.Fatalf("create wait bead: %v", err)
-	}
-	nudgeID := waitNudgeID(sessionpkg.WaitInfoFromBead(waitBead))
-	nudge, err := store.Create(beads.Bead{
-		Type:   nudgeBeadType,
-		Title:  "nudge:" + nudgeID,
-		Labels: []string{nudgeBeadLabel, "nudge:" + nudgeID},
-		Metadata: map[string]string{
-			"nudge_id":           nudgeID,
-			"state":              "injected",
-			"commit_boundary":    "provider-nudge-return",
-			"terminal_reason":    "",
-			"continuation_epoch": "1",
-		},
-	})
-	if err != nil {
-		t.Fatalf("create nudge bead: %v", err)
-	}
-	if err := store.Close(nudge.ID); err != nil {
-		t.Fatalf("close nudge bead: %v", err)
-	}
+	// injected_unobserved is the ack a delivered-but-unobserved submit records
+	// (tmux.ErrNudgeSubmitDeliveredUnobserved): delivery is proven, so the wait
+	// must close exactly as it does for injected, or the next dispatch pass
+	// re-enqueues the same reminder forever.
+	for _, state := range []string{"injected", "accepted_for_injection", "injected_unobserved"} {
+		t.Run(state, func(t *testing.T) {
+			setWaitTestFileBeads(t)
+			dir := t.TempDir()
+			store := beads.NewMemStore()
+			sessionBead, err := store.Create(beads.Bead{
+				Type:   sessionBeadType,
+				Labels: []string{sessionBeadLabel},
+				Metadata: map[string]string{
+					"session_name":       "worker",
+					"agent_name":         "worker",
+					"continuation_epoch": "1",
+				},
+			})
+			if err != nil {
+				t.Fatalf("create session bead: %v", err)
+			}
+			waitBead, err := store.Create(beads.Bead{
+				Type:   waitBeadType,
+				Labels: []string{waitBeadLabel, "session:" + sessionBead.ID},
+				Metadata: map[string]string{
+					"session_id":       sessionBead.ID,
+					"session_name":     "worker",
+					"kind":             "deps",
+					"state":            waitStateReady,
+					"dep_ids":          "gc-1",
+					"dep_mode":         "all",
+					"registered_epoch": "1",
+					"delivery_attempt": "1",
+				},
+			})
+			if err != nil {
+				t.Fatalf("create wait bead: %v", err)
+			}
+			nudgeID := waitNudgeID(sessionpkg.WaitInfoFromBead(waitBead))
+			nudge, err := store.Create(beads.Bead{
+				Type:   nudgeBeadType,
+				Title:  "nudge:" + nudgeID,
+				Labels: []string{nudgeBeadLabel, "nudge:" + nudgeID},
+				Metadata: map[string]string{
+					"nudge_id":           nudgeID,
+					"state":              state,
+					"commit_boundary":    "provider-nudge-return",
+					"terminal_reason":    "",
+					"continuation_epoch": "1",
+				},
+			})
+			if err != nil {
+				t.Fatalf("create nudge bead: %v", err)
+			}
+			if err := store.Close(nudge.ID); err != nil {
+				t.Fatalf("close nudge bead: %v", err)
+			}
 
-	readyWaitSet, err := prepareWaitWakeState(store, time.Now().UTC())
-	if err != nil {
-		t.Fatalf("prepareWaitWakeState: %v", err)
-	}
-	if readyWaitSet[sessionBead.ID] {
-		t.Fatalf("session %s should not remain in ready set after terminal nudge", sessionBead.ID)
-	}
-	updated, err := store.Get(waitBead.ID)
-	if err != nil {
-		t.Fatalf("store.Get(wait): %v", err)
-	}
-	if got := updated.Metadata["state"]; got != waitStateClosed {
-		t.Fatalf("wait state = %q, want %q", got, waitStateClosed)
-	}
-	if updated.Status != "closed" {
-		t.Fatalf("wait status = %q, want closed", updated.Status)
+			readyWaitSet, err := prepareWaitWakeState(store, time.Now().UTC())
+			if err != nil {
+				t.Fatalf("prepareWaitWakeState: %v", err)
+			}
+			if readyWaitSet[sessionBead.ID] {
+				t.Fatalf("session %s should not remain in ready set after terminal nudge", sessionBead.ID)
+			}
+			updated, err := store.Get(waitBead.ID)
+			if err != nil {
+				t.Fatalf("store.Get(wait): %v", err)
+			}
+			if got := updated.Metadata["state"]; got != waitStateClosed {
+				t.Fatalf("wait state = %q, want %q", got, waitStateClosed)
+			}
+			if updated.Status != "closed" {
+				t.Fatalf("wait status = %q, want closed", updated.Status)
+			}
+
+			sp := runtime.NewFake()
+			if err := dispatchReadyWaitNudges(dir, store, sp, time.Now().UTC()); err != nil {
+				t.Fatalf("dispatchReadyWaitNudges: %v", err)
+			}
+			shadows, err := store.List(beads.ListQuery{Label: "nudge:" + nudgeID, IncludeClosed: true})
+			if err != nil {
+				t.Fatalf("list nudge shadows: %v", err)
+			}
+			if len(shadows) != 1 {
+				t.Fatalf("nudge shadows for %s = %d, want 1: a finalized wait must not re-enqueue its nudge", nudgeID, len(shadows))
+			}
+		})
 	}
 }
 
@@ -1756,12 +1780,84 @@ func TestDepsWaitReady_IgnoresEmptyDependencyEntries(t *testing.T) {
 }
 
 func TestNextWaitDeliveryAttempt_IncrementsAfterTerminalNudge(t *testing.T) {
-	store := beads.NewMemStore()
-	wait, err := store.Create(beads.Bead{
-		Type:   waitBeadType,
-		Labels: []string{waitBeadLabel},
+	// A re-armed wait whose previous nudge was acked injected_unobserved must
+	// advance the attempt like any other terminal shadow, or the re-arm reuses
+	// the delivered nudge id and the new reminder is never queued.
+	for _, state := range []string{"failed", "injected_unobserved"} {
+		t.Run(state, func(t *testing.T) {
+			store := beads.NewMemStore()
+			wait, err := store.Create(beads.Bead{
+				Type:   waitBeadType,
+				Labels: []string{waitBeadLabel},
+				Metadata: map[string]string{
+					"state":            waitStateFailed,
+					"registered_epoch": "1",
+					"delivery_attempt": "1",
+				},
+			})
+			if err != nil {
+				t.Fatalf("create wait bead: %v", err)
+			}
+			nudgeID := waitNudgeID(sessionpkg.WaitInfoFromBead(wait))
+			nudge, err := store.Create(beads.Bead{
+				Type:   nudgeBeadType,
+				Title:  "nudge:" + nudgeID,
+				Labels: []string{nudgeBeadLabel, "nudge:" + nudgeID},
+				Metadata: map[string]string{
+					"nudge_id": nudgeID,
+					"state":    state,
+				},
+			})
+			if err != nil {
+				t.Fatalf("create nudge bead: %v", err)
+			}
+			if err := store.Close(nudge.ID); err != nil {
+				t.Fatalf("close nudge bead: %v", err)
+			}
+
+			next, err := nextWaitDeliveryAttempt(nudgeFrontDoor(beads.NudgesStore{Store: store}), sessionpkg.WaitInfoFromBead(wait))
+			if err != nil {
+				t.Fatalf("nextWaitDeliveryAttempt: %v", err)
+			}
+			if next != "2" {
+				t.Fatalf("nextWaitDeliveryAttempt = %q, want 2", next)
+			}
+		})
+	}
+}
+
+// TestReadyWaitClosesAfterDeliveredUnobservedNudge drives the whole loop: a
+// ready wait's nudge is delivered, the provider reports the submit drained but
+// unobserved, and the queue acks it injected_unobserved. The next wait pass must
+// close the wait, and a further dispatch pass must queue nothing new.
+func TestReadyWaitClosesAfterDeliveredUnobservedNudge(t *testing.T) {
+	setWaitTestFileBeads(t)
+	dir := t.TempDir()
+	prevPoller := startNudgePoller
+	startNudgePoller = func(string, string, string) error { return nil }
+	t.Cleanup(func() { startNudgePoller = prevPoller })
+
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+	info, err := mgr.CreateSession(context.Background(), sessionpkg.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if err := mgr.Start(context.Background(), testOperatorIn(t, dir), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitBead, err := store.Create(beads.Bead{
+		Type:        waitBeadType,
+		Labels:      []string{waitBeadLabel, "session:" + info.ID},
+		Description: "Continue after review closes.",
 		Metadata: map[string]string{
-			"state":            waitStateFailed,
+			"session_id":       info.ID,
+			"session_name":     info.SessionName,
+			"kind":             "deps",
+			"state":            waitStateReady,
+			"dep_ids":          "gc-1",
+			"dep_mode":         "all",
 			"registered_epoch": "1",
 			"delivery_attempt": "1",
 		},
@@ -1769,30 +1865,75 @@ func TestNextWaitDeliveryAttempt_IncrementsAfterTerminalNudge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create wait bead: %v", err)
 	}
-	nudgeID := waitNudgeID(sessionpkg.WaitInfoFromBead(wait))
-	nudge, err := store.Create(beads.Bead{
-		Type:   nudgeBeadType,
-		Title:  "nudge:" + nudgeID,
-		Labels: []string{nudgeBeadLabel, "nudge:" + nudgeID},
-		Metadata: map[string]string{
-			"nudge_id": nudgeID,
-			"state":    "failed",
-		},
-	})
-	if err != nil {
-		t.Fatalf("create nudge bead: %v", err)
+	nudgeID := waitNudgeID(sessionpkg.WaitInfoFromBead(waitBead))
+
+	enqueueAt := time.Now().Add(-1 * time.Minute).UTC()
+	if err := dispatchReadyWaitNudges(dir, store.Store, fake, enqueueAt); err != nil {
+		t.Fatalf("dispatchReadyWaitNudges: %v", err)
 	}
-	if err := store.Close(nudge.ID); err != nil {
-		t.Fatalf("close nudge bead: %v", err)
+	if shadows := waitNudgeShadowCount(t, store.Store, nudgeID); shadows != 1 {
+		t.Fatalf("nudge shadows after first dispatch = %d, want 1", shadows)
 	}
 
-	next, err := nextWaitDeliveryAttempt(nudgeFrontDoor(beads.NudgesStore{Store: store}), sessionpkg.WaitInfoFromBead(wait))
+	idleSince := time.Now().Add(-10 * time.Second)
+	fake.Activity = map[string]time.Time{info.SessionName: idleSince}
+	fake.NudgeErrors = map[string]error{info.SessionName: tmux.ErrNudgeSubmitDeliveredUnobserved}
+	target := nudgeTarget{
+		cityPath:    dir,
+		agent:       config.Agent{Name: "worker"},
+		sessionID:   info.ID,
+		resolved:    &config.ResolvedProvider{Name: "codex"},
+		sessionName: info.SessionName,
+	}
+	obs := worker.LiveObservation{Running: true, Alive: true, LastActivity: &idleSince}
+	delivered, err := tryDeliverQueuedNudgesByPoller(target, store.Store, store.Store, fake, 3*time.Second, obs)
 	if err != nil {
-		t.Fatalf("nextWaitDeliveryAttempt: %v", err)
+		t.Fatalf("tryDeliverQueuedNudgesByPoller: %v", err)
 	}
-	if next != "2" {
-		t.Fatalf("nextWaitDeliveryAttempt = %q, want 2", next)
+	if !delivered {
+		t.Fatal("delivered = false, want true for a drained-but-unobserved submit")
 	}
+	shadow, ok, err := nudgeFrontDoor(store).FindIncludingTerminal(nudgeID)
+	if err != nil || !ok {
+		t.Fatalf("FindIncludingTerminal(%s) = (%+v,%v,%v)", nudgeID, shadow, ok, err)
+	}
+	if shadow.State != "injected_unobserved" {
+		t.Fatalf("nudge shadow state = %q, want injected_unobserved", shadow.State)
+	}
+
+	if _, err := prepareWaitWakeState(store.Store, time.Now().UTC()); err != nil {
+		t.Fatalf("prepareWaitWakeState: %v", err)
+	}
+	updated, err := store.Get(waitBead.ID)
+	if err != nil {
+		t.Fatalf("store.Get(wait): %v", err)
+	}
+	if got := updated.Metadata["state"]; got != waitStateClosed || updated.Status != "closed" {
+		t.Fatalf("wait state/status = %q/%q, want %q/closed", got, updated.Status, waitStateClosed)
+	}
+
+	if err := dispatchReadyWaitNudges(dir, store.Store, fake, time.Now().UTC()); err != nil {
+		t.Fatalf("dispatchReadyWaitNudges(second pass): %v", err)
+	}
+	pending, inFlight, dead, err := listQueuedNudges(dir, "worker", time.Now().UTC())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 0 || len(inFlight) != 0 || len(dead) != 0 {
+		t.Fatalf("pending=%d inFlight=%d dead=%d after second dispatch, want 0/0/0", len(pending), len(inFlight), len(dead))
+	}
+	if shadows := waitNudgeShadowCount(t, store.Store, nudgeID); shadows != 1 {
+		t.Fatalf("nudge shadows after second dispatch = %d, want 1: the delivered reminder must not be re-queued", shadows)
+	}
+}
+
+func waitNudgeShadowCount(t *testing.T, store beads.Store, nudgeID string) int {
+	t.Helper()
+	items, err := store.List(beads.ListQuery{Label: "nudge:" + nudgeID, IncludeClosed: true})
+	if err != nil {
+		t.Fatalf("list nudge shadows for %s: %v", nudgeID, err)
+	}
+	return len(items)
 }
 
 func TestDispatchReadyWaitNudges_EnqueuesDeterministicNudge(t *testing.T) {

@@ -1426,7 +1426,7 @@ func finalizeReadyWaitFromNudge(sessFront *sessionpkg.Store, nudges beads.Nudges
 		return false, err
 	}
 	switch nudge.State {
-	case "injected", "accepted_for_injection":
+	case "injected", "injected_unobserved", "accepted_for_injection":
 		return true, sessFront.CloseWaitFromNudge(wait.ID, now, nudgeID, nudge.CommitBoundary)
 	case "expired", "failed":
 		return true, sessFront.FailWaitFromNudge(wait.ID, now, nudgeID, nudge.TerminalReason, nudge.CommitBoundary)

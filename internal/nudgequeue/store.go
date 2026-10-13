@@ -478,7 +478,7 @@ func CanonicalCloseReason(stateCode string) string { return canonicalCloseReason
 
 func isTerminalNudgeState(state string) bool {
 	switch state {
-	case "accepted_for_injection", "injected", "expired", "failed", "superseded":
+	case "accepted_for_injection", "injected", "injected_unobserved", "expired", "failed", "superseded":
 		return true
 	default:
 		return false
