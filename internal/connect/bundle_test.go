@@ -148,7 +148,7 @@ func TestBundleValidateRefusals(t *testing.T) {
 		{"non-hex digest", func(b *Bundle) { b.Session.InstanceTokenSHA256 = "g" + testDigest[1:] }, CodeBundleInvalid},
 		{"empty bearer", func(b *Bundle) { b.Bearer = "" }, CodeBundleInvalid},
 		{"malformed bearer", func(b *Bundle) { b.Bearer = "gcb1.mc-abc12.7.short" }, CodeBundleInvalid},
-		{"sentinel as bearer", func(b *Bundle) { b.Bearer = Sentinel(testKey(), "maintainer-city") }, CodeBundleInvalid},
+		{"sentinel as bearer", func(b *Bundle) { b.Bearer = mustSentinel(t, testKey(), "maintainer-city") }, CodeBundleInvalid},
 		{"bearer for another session", func(b *Bundle) { b.Bearer = mustMint(t, "maintainer-city", "mc-other", 7) }, CodeBundleInvalid},
 		{"bearer for another generation", func(b *Bundle) { b.Bearer = mustMint(t, "maintainer-city", "mc-abc12", 8) }, CodeBundleInvalid},
 		{"no ledgers", func(b *Bundle) { b.Ledgers = nil }, CodeBundleInvalid},

@@ -45,13 +45,22 @@ func TestMintBearerGoldenVectors(t *testing.T) {
 	}
 }
 
+func mustSentinel(t *testing.T, key []byte, city string) string {
+	t.Helper()
+	s, err := Sentinel(key, city)
+	if err != nil {
+		t.Fatalf("Sentinel(%q): %v", city, err)
+	}
+	return s
+}
+
 func TestSentinelGoldenVectors(t *testing.T) {
 	cases := []struct{ city, want string }{
 		{"maintainer-city", "gcs1.x5f4iebvW3fmymjWGE5g9uG-H6FDn7W7LdrsnfWCTGU"},
 		{strings.Repeat("x", 200), "gcs1.ccqAi4oJqzACqcmnyq6MFI1lMAhxIR2hWcoOcxsiBZ8"},
 	}
 	for _, tc := range cases {
-		if got := Sentinel(testKey(), tc.city); got != tc.want {
+		if got := mustSentinel(t, testKey(), tc.city); got != tc.want {
 			t.Errorf("Sentinel(%q) = %q, want %q", tc.city, got, tc.want)
 		}
 	}
@@ -86,15 +95,15 @@ func TestBearerSeparatorAmbiguityPairsDiffer(t *testing.T) {
 }
 
 func TestSentinelIsCityScopedAndDisjointFromBearers(t *testing.T) {
-	if Sentinel(testKey(), "a") == Sentinel(testKey(), "b") {
+	if mustSentinel(t, testKey(), "a") == mustSentinel(t, testKey(), "b") {
 		t.Fatal("sentinels for different cities collide")
 	}
 	other := testKey()
 	other[0] ^= 1
-	if Sentinel(testKey(), "a") == Sentinel(other, "a") {
+	if mustSentinel(t, testKey(), "a") == mustSentinel(t, other, "a") {
 		t.Fatal("sentinels under different keys collide")
 	}
-	s := Sentinel(testKey(), "a")
+	s := mustSentinel(t, testKey(), "a")
 	if !strings.HasPrefix(s, SentinelPrefix) || len(s) != len(SentinelPrefix)+macLen {
 		t.Fatalf("sentinel %q has the wrong shape", s)
 	}
@@ -107,7 +116,7 @@ func TestBearerAndSentinelHaveNoWhitespaceOrHash(t *testing.T) {
 	values := []string{
 		mustMint(t, "maintainer-city", "mc-abc12", 7),
 		mustMint(t, "city with spaces # and hash", "A.b_c-9", 1<<40),
-		Sentinel(testKey(), "city with spaces # and hash"),
+		mustSentinel(t, testKey(), "city with spaces # and hash"),
 	}
 	for _, v := range values {
 		if strings.ContainsAny(v, " \t\r\n#") {
@@ -133,6 +142,8 @@ func TestMintBearerRefusals(t *testing.T) {
 		gen     int
 	}{
 		{"empty key", nil, "c", "s", 1},
+		{"one-byte key", []byte{1}, "c", "s", 1},
+		{"31-byte key", testKey()[:MinKeyLen-1], "c", "s", 1},
 		{"empty city", testKey(), "", "s", 1},
 		{"empty session", testKey(), "c", "", 1},
 		{"zero generation", testKey(), "c", "s", 0},
@@ -208,5 +219,32 @@ func TestParseBearerRefusals(t *testing.T) {
 		if id, gen, ok := ParseBearer(input); ok {
 			t.Errorf("%s: ParseBearer(%q) = (%q, %d, true), want refusal", name, input, id, gen)
 		}
+	}
+}
+
+func TestSentinelRefusesWeakKeyAndEmptyCity(t *testing.T) {
+	cases := []struct {
+		name string
+		key  []byte
+		city string
+	}{
+		{"nil key", nil, "c"},
+		{"empty key", []byte{}, "c"},
+		{"31-byte key", testKey()[:MinKeyLen-1], "c"},
+		{"empty city", testKey(), ""},
+	}
+	for _, tc := range cases {
+		if got, err := Sentinel(tc.key, tc.city); err == nil {
+			t.Errorf("%s: Sentinel = %q, want an error", tc.name, got)
+		}
+	}
+}
+
+func TestMinKeyLenIsD7Minimum(t *testing.T) {
+	if MinKeyLen != 32 {
+		t.Fatalf("MinKeyLen = %d, want D7's 32 bytes", MinKeyLen)
+	}
+	if _, err := MintBearer(testKey()[:MinKeyLen], "c", "s", 1); err != nil {
+		t.Fatalf("MintBearer refused a %d-byte key: %v", MinKeyLen, err)
 	}
 }

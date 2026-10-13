@@ -25,6 +25,11 @@ const (
 	sentinelTag = "gc.connect.sentinel.v1"
 )
 
+// MinKeyLen is the shortest key K (DES-CN D7) MintBearer and Sentinel accept.
+// The sentinel is itself a live bd serve token, so a short key would make it
+// a guessable credential.
+const MinKeyLen = 32
+
 // macLen is the encoded length of a 32-byte HMAC-SHA256 in unpadded base64url.
 const macLen = 43
 
@@ -57,13 +62,13 @@ func mac(key, msg []byte) string {
 //	gcb1.<session id>.<generation>.<b64url(mac)>
 //	mac = HMAC-SHA256(key, "gc.connect.bearer.v1" ‖ lp(city) ‖ lp(session id) ‖ lp(generation))
 //
-// The generation is MACed as its decimal string. The key and city are
-// required, the session id must satisfy ValidSessionID, and the generation
+// The generation is MACed as its decimal string. The key must be at least
+// MinKeyLen bytes, the city is required, the session id must satisfy ValidSessionID, and the generation
 // must be at least 1.
 func MintBearer(key []byte, city, sessionID string, generation int) (string, error) {
 	switch {
-	case len(key) == 0:
-		return "", errors.New("minting bearer: key is empty")
+	case len(key) < MinKeyLen:
+		return "", fmt.Errorf("minting bearer: key is %d bytes, below %d", len(key), MinKeyLen)
 	case city == "":
 		return "", errors.New("minting bearer: city is empty")
 	case !ValidSessionID(sessionID):
@@ -112,9 +117,17 @@ func ParseBearer(s string) (sessionID string, generation int, ok bool) {
 //	gcs1.<b64url(HMAC-SHA256(key, "gc.connect.sentinel.v1" ‖ lp(city)))>
 //
 // It is never handed to a box; it keeps the rendered token file non-empty
-// and serves as the doctor's canary.
-func Sentinel(key []byte, city string) string {
-	return SentinelPrefix + mac(key, lp([]byte(sentinelTag), city))
+// and serves as the doctor's canary. Because every non-empty token-file line
+// is a live bd serve credential, the key must be at least MinKeyLen bytes and
+// the city is required.
+func Sentinel(key []byte, city string) (string, error) {
+	switch {
+	case len(key) < MinKeyLen:
+		return "", fmt.Errorf("deriving sentinel: key is %d bytes, below %d", len(key), MinKeyLen)
+	case city == "":
+		return "", errors.New("deriving sentinel: city is empty")
+	}
+	return SentinelPrefix + mac(key, lp([]byte(sentinelTag), city)), nil
 }
 
 // validMAC accepts exactly the canonical unpadded base64url of 32 bytes.
