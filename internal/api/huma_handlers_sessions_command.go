@@ -116,14 +116,10 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 	workDirQualifiedName := createCtx.Identity
 	workDir = createCtx.WorkDir
 
-	// Match the controller template baseline before deferred creation; a bare
-	// command would look like config drift if startup wins the metadata refresh.
-	// Explicit per-session options remain in template_overrides.
-	launchCommand, err := config.BuildProviderLaunchCommand(s.state.CityPath(), resolved, nil, transport)
+	command, err := s.agentTemplateLaunchCommand(agentCfg, resolved, transport)
 	if err != nil {
 		return nil, apierr.Internal.Msg(err.Error())
 	}
-	command := launchCommand.Command
 	extraMeta := sessionTemplateOverridesMetadata(body.Options, body.Message)
 	extraMeta = agentSessionCreateMetadata(extraMeta, workDirQualifiedName)
 	mcpServers, err := s.sessionMCPServers(template, resolved.Name, workDirQualifiedName, workDir, transport, kind, nil)

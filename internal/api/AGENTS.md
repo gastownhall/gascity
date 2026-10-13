@@ -64,7 +64,12 @@ a sanctioned bypass of the worker boundary. Do not add others; see
 
 ## Deferred creation baseline
 
-Persist the resolved provider defaults as the template command baseline before
-scheduling an agent session. Keep explicit per-session options in
-`template_overrides`; otherwise startup can mistake its own baseline for config
-drift or compare one session's overrides against the template.
+Before scheduling an agent session, persist the command the controller resolves
+for that agent's template as the session's command baseline. Build it with
+`config.BuildProviderTemplateLaunchCommand`, the composition the controller's
+`resolveTemplate` shares, not with the strict `BuildProviderLaunchCommand`:
+the controller omits an `option_defaults` pin it cannot render and logs a
+warning, so the create must do the same instead of failing. Keep explicit
+per-session options, validated at create time, in `template_overrides`;
+otherwise startup can mistake its own baseline for config drift or compare one
+session's overrides against the template.

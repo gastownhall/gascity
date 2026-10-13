@@ -157,13 +157,12 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	launchCommand, err := config.BuildProviderLaunchCommand(s.state.CityPath(), resolved, nil, transport)
+	command, err := s.agentTemplateLaunchCommand(createCtx.Agent, resolved, transport)
 	if err != nil {
 		s.idem.unreserve(idemKey)
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
-	command := launchCommand.Command
 
 	// Build template_overrides metadata. Includes schema overrides AND
 	// the initial message (as "initial_message" key). The reconciler
