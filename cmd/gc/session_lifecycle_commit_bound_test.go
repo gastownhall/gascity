@@ -296,12 +296,12 @@ func TestControllerShutdownDoesNotAbandonTheCommitWait(t *testing.T) {
 		begin := time.Now()
 
 		run := enqueueCommitPhaseStart(ctx, t, testCity, item, sp, store, clk, immediateStartStabilityWaiter)
-		time.Sleep(5 * time.Second)
+		<-time.After(5 * time.Second)
 		if store.hanging.Load() != 1 {
 			t.Fatalf("%d store Gets hung 5s in, want the commit's refresh read", store.hanging.Load())
 		}
 		cancel()
-		time.Sleep(time.Second)
+		<-time.After(time.Second)
 		select {
 		case <-run.finishedC:
 			t.Fatalf("the async start finished %v in, 1s after shutdown began with its commit still waiting on the store: the wait was abandoned", time.Since(begin))
