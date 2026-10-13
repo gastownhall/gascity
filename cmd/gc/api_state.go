@@ -155,6 +155,11 @@ type controllerState struct {
 	// sweep holds its own inside its CompletionBackstop.
 	completionsDeltaIndex executionevent.CompletedFactIndex
 
+	// ledgerFeeds holds the journal feeds of this state's caches and the
+	// scopes left on the re-scan (ledger_feed.go). Nil on a directly built
+	// state, which tails nothing.
+	ledgerFeeds *ledgerFeedSet
+
 	// autocloseSweep backstops close-triggered autoclose; see autoclose_sweep.go.
 	autocloseSweep     *autocloseSweep
 	autocloseSweepOnce sync.Once
@@ -332,6 +337,14 @@ func newControllerStateWithRoutes(
 		rolloutFlags:        rolloutFlags,
 		nativeTransport:     nativeTransport,
 	}
+	cs.ledgerFeeds = newLedgerFeedSet(cityPath, ledgerFeedHooks{
+		work: cs.beginStoreWork,
+		deferClose: func(id string) {
+			sweep := cs.autocloseSweepOf()
+			sweep.deferID(id, time.Now().Add(sweep.grace))
+		},
+	})
+	registerLedgerFeedSet(ctx, cs.ledgerFeeds)
 	// Boot-resolved rollout notices are retained on the Flags value; echo
 	// them once at startup so an env override contradicting explicit config
 	// (or an ignored invalid env value) is visible in the boot log, not only
@@ -356,7 +369,7 @@ func newControllerStateWithRoutes(
 		fmt.Fprintf(os.Stderr, "api: city bead store: %v (session/mail endpoints disabled)\n", err)
 	} else {
 		store := opened.Store
-		cs.cityBeadStore = wrapWithCachingStore(ctx, store, ep, true, cs.reconcileGate())
+		cs.cityBeadStore = wrapWithCachingStoreFeed(ctx, store, ep, true, cs.ledgerFeedRequest(cfg, ledgerFeedCityScope, cs.cityScopeGate()), cs.reconcileGate())
 		cs.cityBeadsDiagnostic = diagnosticPtr(opened.Diagnostic)
 		cs.cityMailProv = newCityMailProvider(cs.storageRoutes, cs.cityBeadStore, cfg, cityPath, ep)
 		cs.extmsgSvc = newCityExtMsgServices(cs.storageRoutes, cs.cityBeadStore, cfg, cityPath, ep)
@@ -375,6 +388,15 @@ func newControllerStateWithRoutes(
 // restarts its retired proxy and Dolt (gastownhall/gascity #1978 follow-up,
 // #6561).
 func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Provider, backgroundRefresh bool, opts ...beads.CachingStoreOption) beads.Store {
+	return wrapWithCachingStoreFeed(ctx, store, ep, backgroundRefresh, nil, opts...)
+}
+
+// wrapWithCachingStoreFeed is wrapWithCachingStore that also tails the
+// scope's journal when feed asks for it and the scope can be tailed
+// (attachLedgerFeed). The journal head is read before PrimeActive, so a
+// mutation committed between the two is both primed and delivered, and the
+// feed runs until the cache is stopped.
+func wrapWithCachingStoreFeed(ctx context.Context, store beads.Store, ep events.Provider, backgroundRefresh bool, feed *ledgerFeedRequest, opts ...beads.CachingStoreOption) beads.Store {
 	baseStore, policyStore, policyWrapped := unwrapBeadPolicyStore(store)
 	if baseStore == nil {
 		return nil
@@ -386,7 +408,11 @@ func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Prov
 	if ep != nil {
 		recorder = ep
 	}
-	cs := beads.NewCachingStore(baseStore, cacheChangeRecorder(recorder), opts...)
+	attached := attachLedgerFeed(ctx, feed, baseStore, backgroundRefresh)
+	cs := beads.NewCachingStore(baseStore, attached.observe(cacheChangeRecorder(recorder)), opts...)
+	if attached != nil {
+		attached.bind(ctx, feed.set, cs)
+	}
 	// Pre-prime active beads synchronously (~1-2s, indexed queries).
 	// Loads open + in_progress beads — enough for the startup path
 	// (adoption, session snapshot, desired state) so the city can
@@ -409,6 +435,7 @@ func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Prov
 	// Full prime runs async — backfills remaining beads for List()
 	// callers (convergence reconcile, sweep, API handlers).
 	go primeThenStartReconciler(ctx, cs, os.Getenv("GC_AGENT"))
+	attached.start(ctx)
 	if policyWrapped {
 		return wrapStoreWithBeadPolicies(cs, policyStore.cfg)
 	}
@@ -491,7 +518,8 @@ func (cs *controllerState) buildStores(cfg *config.City) map[string]beads.Store 
 			continue
 		}
 		store = cs.openRigStore(scopeProvider, rig.Name, scopeRoot, rig.EffectivePrefix(), cfg)
-		stores[rig.Name] = wrapWithCachingStore(cs.cacheCtx, store, cs.eventProv, rigStoreBackgroundRefresh(suspState, rig), cs.rigReconcileGate(rig.Name))
+		feed := cs.ledgerFeedRequest(cfg, ledgerFeedRigScope(rig.Name), cs.rigScopeGate(rig.Name))
+		stores[rig.Name] = wrapWithCachingStoreFeed(cs.cacheCtx, store, cs.eventProv, rigStoreBackgroundRefresh(suspState, rig), feed, cs.rigReconcileGate(rig.Name))
 	}
 	return stores
 }
@@ -514,7 +542,21 @@ func rigStoreBackgroundRefresh(suspState suspensionstate.State, rig config.Rig) 
 // reconcileGate is the CachingStoreOption every cache this state owns carries:
 // it pauses the cache's periodic reconcile while the city is quiescent.
 func (cs *controllerState) reconcileGate() beads.CachingStoreOption {
-	return reconcileGateFor(cs.beadsQuiescent)
+	return beads.WithReconcileGate(cs.cityScopeGate())
+}
+
+// cityScopeGate admits store reads of the city scope: false while the city
+// is quiescent. The city cache's reconcile and its journal feed share it.
+func (cs *controllerState) cityScopeGate() func() bool {
+	quiescent := cs.beadsQuiescent
+	return func() bool { return quiescent == nil || !quiescent.Load() }
+}
+
+// rigScopeGate is cityScopeGate for one rig's scope: also false while that
+// rig is suspended (suspendedRigs).
+func (cs *controllerState) rigScopeGate(rigName string) func() bool {
+	city := cs.cityScopeGate()
+	return func() bool { return city() && !cs.rigSuspended(rigName) }
 }
 
 // reconcileGateFor pauses a cache's periodic reconcile while quiescent is set.
@@ -525,12 +567,7 @@ func reconcileGateFor(quiescent *atomic.Bool) beads.CachingStoreOption {
 // rigReconcileGate is reconcileGate for one rig's cache: it also pauses while
 // that rig is suspended (suspendedRigs).
 func (cs *controllerState) rigReconcileGate(rigName string) beads.CachingStoreOption {
-	return beads.WithReconcileGate(func() bool {
-		if cs.beadsQuiescent != nil && cs.beadsQuiescent.Load() {
-			return false
-		}
-		return !cs.rigSuspended(rigName)
-	})
+	return beads.WithReconcileGate(cs.rigScopeGate(rigName))
 }
 
 // rigSuspended reports whether the city runtime last saw rigName suspended.
@@ -664,8 +701,10 @@ func (cs *controllerState) openRigStore(provider, rigName, rigPath, prefix strin
 }
 
 // startBeadEventWatcher subscribes to the event bus and feeds bead events
-// to all CachingStore instances for sub-second cache freshness on agent-
-// initiated bd mutations (bd hooks → gc event emit → this watcher → ApplyEvent).
+// to all CachingStore instances: the caches' own notifications and the
+// events other gc processes record. The bd hooks that once forwarded agents'
+// raw bd writes are gone; those writes reach the caches through the journal
+// feed ([beads] ledger_feed, ledger_feed.go) or the reconcile re-scan.
 // A failed Watch and a sequence that goes backwards are reported to the
 // controller wake as event gaps: events may be missing. A broken tail is
 // not: the watcher re-watches from the last seq it read, and the provider
@@ -687,6 +726,9 @@ func (cs *controllerState) openRigStore(provider, rigName, rigPath, prefix strin
 // patrol-cadence resync for a feedless city or refuses one. The legacy
 // reconciler ignores the gap.
 func (cs *controllerState) startBeadEventWatcher(ctx context.Context) {
+	// The entry point has wired the wake by now; the journal feeds wake
+	// through it from here on.
+	cs.ledgerFeeds.setWake(cs.wakeOf())
 	ep := cs.EventProvider()
 	if ep == nil {
 		cs.wakeOf().OnEventGap() // no feed
@@ -1312,7 +1354,7 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	var cityMailProv mail.Provider
 	var extSvc *extmsg.Services
 	if cityStore != nil {
-		cityStore = wrapWithCachingStore(cs.cacheCtx, cityStore, cs.eventProv, true, cs.reconcileGate())
+		cityStore = wrapWithCachingStoreFeed(cs.cacheCtx, cityStore, cs.eventProv, true, cs.ledgerFeedRequest(cfg, ledgerFeedCityScope, cs.cityScopeGate()), cs.reconcileGate())
 		cityMailProv = newCityMailProvider(cs.storageRoutes, cityStore, cfg, cs.cityPath, cs.eventProv)
 		extSvc = newCityExtMsgServices(cs.storageRoutes, cityStore, cfg, cs.cityPath, cs.eventProv)
 	}
@@ -1668,6 +1710,9 @@ func storeMetadataSignature(cityPath string, cfg *config.City) string {
 	if cfg == nil {
 		return b.String()
 	}
+	// The ledger feed mode is part of the signature, so flipping it rebuilds
+	// the stores, and their feeds, at the next reload.
+	fmt.Fprintf(&b, "ledger_feed=%s\n", cfg.Beads.NormalizedLedgerFeed())
 	// The per-rig refresh gate is part of the signature: the captured
 	// signature is compared against a recomputed one on reload
 	// (runtimeUpdateCanReuseCurrentStores), so a runtime suspend/resume

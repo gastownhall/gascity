@@ -297,6 +297,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		register(doctor.NewLegacySuspendedFieldCheck(cfg))
 		reconcilerCheck = newSessionReconcilerDoctorCheck(cfg, reconcilerModeLookupEnv)
 		register(reconcilerCheck)
+		register(newLedgerFeedDoctorCheck(cfg, queryLedgerFeedStatus))
 		// Rollout gates section: one advisory line per registered gate (value +
 		// origin + notices). Never blocks the exit code.
 		for _, c := range rolloutGateChecks(opts.RolloutFlags, opts.RolloutResolveErr) {
