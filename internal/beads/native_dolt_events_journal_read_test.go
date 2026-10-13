@@ -66,9 +66,11 @@ func TestNativeDoltStoreReadEventsJournalPageKeepsTruncationTyped(t *testing.T) 
 		return journalops.Page{}, &journalops.TruncatedError{Since: 1, Floor: 10, Head: 20}
 	}})
 	_, err := newNativeDoltStoreForTest(spy).ReadEventsJournalPage(context.Background(), 1, 0)
-	var truncated *journalops.TruncatedError
-	if !errors.As(err, &truncated) || truncated.Floor != 10 || truncated.Head != 20 {
-		t.Fatalf("error = %v, want a *journalops.TruncatedError carrying its window", err)
+	// journalops asks implementations to return the error itself rather than
+	// wrap it, so a type assertion recovers it, not only errors.As.
+	truncated, ok := err.(*journalops.TruncatedError) //nolint:errorlint // the contract is the bare pointer
+	if !ok || truncated.Floor != 10 || truncated.Head != 20 {
+		t.Fatalf("error = %v (%T), want the bare *journalops.TruncatedError carrying its window", err, err)
 	}
 }
 

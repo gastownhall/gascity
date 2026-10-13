@@ -40,7 +40,7 @@ var _ journalops.Journal = (*NativeDoltStore)(nil)
 // rebind the way every other native read does, and the caller's ctx bounds
 // that whole chain: a cancellation ends a reconnect in progress and is
 // returned as the context error. A *journalops.TruncatedError comes back
-// wrapped with %w, so errors.As recovers it.
+// bare, as the journalops contract asks; every other error is wrapped.
 func (s *NativeDoltStore) ReadEventsJournalPage(ctx context.Context, since int64, limit int) (journalops.Page, error) {
 	return s.readEventsJournalPage(ctx, since, limit, true)
 }
@@ -70,6 +70,12 @@ func (s *NativeDoltStore) readEventsJournalPage(ctx context.Context, since int64
 			// The caller gave up; whatever the chain was doing is not a
 			// verdict about the endpoint.
 			return journalops.Page{}, ctxErr
+		}
+		var truncated *journalops.TruncatedError
+		if errors.As(err, &truncated) {
+			// The journalops contract: hand the typed window back bare, so a
+			// type assertion recovers it as well as errors.As does.
+			return journalops.Page{}, truncated
 		}
 		return journalops.Page{}, fmt.Errorf("reading events journal after seq %d: %w", since, err)
 	}
