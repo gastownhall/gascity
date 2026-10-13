@@ -1,0 +1,255 @@
+package sessionlog
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// claudeTurnLines returns n Claude turns ending in turn: interrupted (the
+// marker stamped with the next promptId), completed, failed, or left open
+// until the next turn starts, by turn number modulo 4.
+func claudeTurnLines(n int) []string {
+	var lines []string
+	for i := 1; i <= n; i++ {
+		id := fmt.Sprintf("p%02d", i)
+		ts := func(sec int) string { return fmt.Sprintf("2026-10-13T05:%02d:%02d.%03dZ", i, sec, i) }
+		lines = append(lines,
+			`{"type":"user","timestamp":"`+ts(0)+`","promptId":"`+id+`","message":{"role":"user","content":"prompt"}}`,
+			`{"type":"assistant","timestamp":"`+ts(1)+`","message":{"role":"assistant","content":[{"type":"tool_use","id":"t"}],"stop_reason":"tool_use"}}`,
+			`{"type":"user","timestamp":"`+ts(2)+`","promptId":"`+id+`","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":"out"}]}}`,
+		)
+		switch i % 4 {
+		case 0:
+			lines = append(lines, `{"type":"user","timestamp":"`+ts(3)+`","promptId":"`+fmt.Sprintf("p%02d", i+1)+`","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]}}`)
+		case 1:
+			lines = append(lines, `{"type":"system","subtype":"turn_duration","timestamp":"`+ts(4)+`"}`)
+		case 2:
+			lines = append(lines, `{"type":"assistant","timestamp":"`+ts(4)+`","isApiErrorMessage":true,"message":{"role":"assistant","content":[{"type":"text","text":"API Error"}]}}`)
+		}
+	}
+	return lines
+}
+
+// codexTurnLines returns n Codex turns ending aborted, completed, failed, or
+// left open until the next turn starts, by turn number modulo 4.
+func codexTurnLines(n int) []string {
+	var lines []string
+	for i := 1; i <= n; i++ {
+		id := fmt.Sprintf("t%02d", i)
+		ts := func(sec int) string { return fmt.Sprintf("2026-10-08T02:%02d:%02d.%03dZ", i, sec, i) }
+		lines = append(lines,
+			`{"timestamp":"`+ts(0)+`","type":"event_msg","payload":{"type":"task_started","turn_id":"`+id+`","started_at":1791426142}}`,
+			`{"timestamp":"`+ts(1)+`","type":"turn_context","payload":{"turn_id":"`+id+`","model":"m"}}`,
+			`{"timestamp":"`+ts(2)+`","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"prompt"}]}}`,
+		)
+		switch i % 4 {
+		case 0:
+			lines = append(lines, `{"timestamp":"`+ts(3)+`","type":"event_msg","payload":{"type":"turn_aborted","turn_id":"`+id+`"}}`)
+		case 1:
+			lines = append(lines, `{"timestamp":"`+ts(3)+`","type":"event_msg","payload":{"type":"task_complete","turn_id":"`+id+`","error":null}}`)
+		case 2:
+			lines = append(lines, `{"timestamp":"`+ts(3)+`","type":"event_msg","payload":{"type":"task_complete","turn_id":"`+id+`","error":{"message":"boom"}}}`)
+		}
+	}
+	return lines
+}
+
+// geminiTurnLines returns a Gemini JSONL stream of n turns with a snapshot
+// halfway.
+func geminiTurnLines(n int) []string {
+	lines := []string{`{"sessionId":"s","kind":"main"}`}
+	var all []string
+	for i := 1; i <= n; i++ {
+		msg := fmt.Sprintf(`{"id":"u%02d","timestamp":"2026-06-21T17:%02d:00.%03dZ","type":"user","content":"prompt"}`, i, i, i)
+		reply := fmt.Sprintf(`{"id":"a%02d","timestamp":"2026-06-21T17:%02d:05Z","type":"gemini","content":"reply"}`, i, i)
+		all = append(all, msg, reply)
+		if i == n/2 {
+			// A snapshot replaces the whole list with every message so far.
+			lines = append(lines, `{"$set":{"messages":[`+strings.Join(all, ",")+`]}}`)
+			continue
+		}
+		lines = append(lines, msg, reply)
+	}
+	return lines
+}
+
+// TestScanTurnsKeepsEightRecentNewestFirst covers the stop-by-count path:
+// the scan reads back only as far as the oldest turn it reports.
+func TestScanTurnsKeepsEightRecentNewestFirst(t *testing.T) {
+	cases := []struct {
+		provider string
+		lines    []string
+		first    string
+	}{
+		{"claude", claudeTurnLines(11), "p"},
+		{"codex", codexTurnLines(11), "t"},
+		{"gemini", geminiTurnLines(11), "u"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.provider, func(t *testing.T) {
+			got, err := ScanTurns(tc.provider, writeTurnLines(t, "transcript.jsonl", tc.lines...))
+			if err != nil {
+				t.Fatalf("ScanTurns: %v", err)
+			}
+			if len(got.Recent) != MaxRecentTurns {
+				t.Fatalf("Recent = %d turns, want %d: %+v", len(got.Recent), MaxRecentTurns, got.Recent)
+			}
+			for i, turn := range got.Recent {
+				if want := fmt.Sprintf("%s%02d", tc.first, 10-i); turn.ID != want {
+					t.Fatalf("Recent[%d].ID = %q, want %q", i, turn.ID, want)
+				}
+				if turn.StartedAt.IsZero() {
+					t.Fatalf("Recent[%d] has no start: the scan stopped inside it", i)
+				}
+			}
+			if !got.Open || got.Current.ID != tc.first+"11" {
+				t.Fatalf("Current = %+v (open %v), want turn 11 open", got.Current, got.Open)
+			}
+		})
+	}
+}
+
+// assertFollowerMatchesScan reads f and a fresh ScanTurns of the same file
+// and requires the same result, or errors of the same kind.
+func assertFollowerMatchesScan(t *testing.T, step string, f *TurnFollower, provider, path string) {
+	t.Helper()
+	got, gotErr := f.Read()
+	want, wantErr := ScanTurns(provider, path)
+	if (gotErr == nil) != (wantErr == nil) || errors.Is(gotErr, ErrTornTurnRecord) != errors.Is(wantErr, ErrTornTurnRecord) {
+		t.Fatalf("%s: follower error = %v, scan error = %v", step, gotErr, wantErr)
+	}
+	if wantErr == nil && !equalTurnScans(got, want) {
+		t.Fatalf("%s: follower differs from a full scan\nfollower: %+v\n    scan: %+v", step, got, want)
+	}
+}
+
+func equalTurnScans(a, b TurnScan) bool {
+	return fmt.Sprintf("%+v", a) == fmt.Sprintf("%+v", b)
+}
+
+func appendTurnBytes(t *testing.T, path, data string) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(data); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestTurnFollowerEqualsRescan: after every append (including a torn one),
+// a truncation and a rotation, the follower reports what a full rescan does.
+func TestTurnFollowerEqualsRescan(t *testing.T) {
+	cases := []struct {
+		provider string
+		lines    []string
+	}{
+		{"claude", claudeTurnLines(11)},
+		{"codex", codexTurnLines(11)},
+		{"gemini", geminiTurnLines(11)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.provider, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "transcript.jsonl")
+			if err := os.WriteFile(path, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			f, err := NewTurnFollower(tc.provider, path)
+			if err != nil {
+				t.Fatalf("NewTurnFollower: %v", err)
+			}
+			assertFollowerMatchesScan(t, "empty", f, tc.provider, path)
+			for i, line := range tc.lines {
+				half := len(line) / 2
+				appendTurnBytes(t, path, line[:half])
+				if _, err := f.Read(); !errors.Is(err, ErrTornTurnRecord) {
+					t.Fatalf("line %d torn: follower error = %v, want ErrTornTurnRecord", i, err)
+				}
+				appendTurnBytes(t, path, line[half:]+"\n")
+				assertFollowerMatchesScan(t, fmt.Sprintf("line %d", i), f, tc.provider, path)
+			}
+
+			truncated := strings.Join(tc.lines[:len(tc.lines)/3], "\n") + "\n"
+			if err := os.WriteFile(path, []byte(truncated), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			assertFollowerMatchesScan(t, "truncated", f, tc.provider, path)
+
+			rotated := filepath.Join(filepath.Dir(path), "next.jsonl")
+			if err := os.WriteFile(rotated, []byte(strings.Join(tc.lines[:len(tc.lines)/2], "\n")+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(rotated, path); err != nil {
+				t.Fatal(err)
+			}
+			assertFollowerMatchesScan(t, "rotated", f, tc.provider, path)
+
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.Read(); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("removed: follower error = %v, want ErrNotExist", err)
+			}
+		})
+	}
+}
+
+// TestTurnFollowerFoldsOnlyAppendedBytes: bytes already folded are not read
+// again while the file only grows.
+func TestTurnFollowerFoldsOnlyAppendedBytes(t *testing.T) {
+	first := `{"type":"user","timestamp":"2026-10-13T05:00:00.100Z","promptId":"pa","message":{"role":"user","content":"prompt"}}`
+	path := writeTurnLines(t, "claude.jsonl", first)
+	f, err := NewTurnFollower("claude", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Read(); err != nil {
+		t.Fatal(err)
+	}
+	// Rewrite the folded record in place, same length, then append.
+	if err := os.WriteFile(path, []byte(strings.Replace(first, `"pa"`, `"pb"`, 1)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	appendTurnBytes(t, path, `{"type":"system","subtype":"turn_duration","timestamp":"2026-10-13T05:00:01.000Z"}`+"\n")
+	got, err := f.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Recent) != 1 || got.Recent[0].ID != "pa" {
+		t.Fatalf("follower = %+v, want the folded turn pa ended", got)
+	}
+}
+
+// TestTurnFollowerFollowsGeminiJSONByRescan: a whole-document chat file is
+// rewritten, so every read rescans it.
+func TestTurnFollowerFollowsGeminiJSONByRescan(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.json")
+	write := func(ids ...string) {
+		t.Helper()
+		var msgs []string
+		for _, id := range ids {
+			msgs = append(msgs, `{"id":"`+id+`","timestamp":"2026-06-21T17:08:00.694Z","type":"user","content":"prompt"}`)
+		}
+		if err := os.WriteFile(path, []byte(`{"messages":[`+strings.Join(msgs, ",")+`]}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("ua")
+	f, err := NewTurnFollower("gemini", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertFollowerMatchesScan(t, "first", f, "gemini", path)
+	write("ub")
+	assertFollowerMatchesScan(t, "same size rewrite", f, "gemini", path)
+	write("ub", "uc")
+	assertFollowerMatchesScan(t, "grown", f, "gemini", path)
+}

@@ -1,0 +1,223 @@
+package sessionlog
+
+import (
+	"encoding/json"
+	"io"
+	"slices"
+	"strings"
+	"time"
+)
+
+// Claude Code transcripts (X11 §2.2). Every main-chain user entry of a turn
+// carries the turn's promptId: the prompt, its tool results, and the entries
+// a self-started turn opens with. A system turn_duration entry closes the open
+// turn by position. An API error is an assistant entry flagged
+// isApiErrorMessage. An interrupt is a user entry holding only Claude's
+// interrupt marker; it is often written just before the next prompt and
+// stamped with that prompt's promptId, so the marker closes the open turn and
+// its promptId is never read.
+
+// claudeInterruptMarker starts the text Claude Code writes as the whole of a
+// user entry when the user interrupts a turn ("[Request interrupted by
+// user]", "[Request interrupted by user for tool use]").
+const claudeInterruptMarker = "[Request interrupted by user"
+
+type claudeTurnFormat struct{}
+
+type claudeRecordKind int
+
+const (
+	claudeRecordUser claudeRecordKind = iota + 1
+	claudeRecordInterrupt
+	claudeRecordTurnEnd
+	claudeRecordAPIError
+)
+
+// claudeTurnRecord is one transcript entry that bears on turns.
+type claudeTurnRecord struct {
+	kind  claudeRecordKind
+	rawID string
+	at    time.Time
+}
+
+// claudeTurnLine is the subset of a Claude transcript entry the scan reads.
+type claudeTurnLine struct {
+	Type             string          `json:"type"`
+	Subtype          string          `json:"subtype"`
+	IsSidechain      bool            `json:"isSidechain"`
+	IsCompactSummary bool            `json:"isCompactSummary"`
+	IsAPIError       bool            `json:"isApiErrorMessage"`
+	PromptID         string          `json:"promptId"`
+	Timestamp        string          `json:"timestamp"`
+	Message          json.RawMessage `json:"message"`
+}
+
+// parseClaudeTurnRecord reads line as a turn record. Sidechain entries,
+// compaction summaries and entries that do not bear on turns are not
+// records.
+func parseClaudeTurnRecord(line []byte) (claudeTurnRecord, bool) {
+	var e claudeTurnLine
+	if json.Unmarshal(line, &e) != nil || e.IsSidechain {
+		return claudeTurnRecord{}, false
+	}
+	rec := claudeTurnRecord{rawID: e.PromptID, at: parseTurnTime(e.Timestamp)}
+	switch {
+	case e.Type == "user" && e.IsCompactSummary:
+		return claudeTurnRecord{}, false
+	case e.Type == "user" && claudeInterruptEntry(e.Message):
+		rec.kind = claudeRecordInterrupt
+	case e.Type == "user":
+		rec.kind = claudeRecordUser
+	case e.Type == "system" && e.Subtype == "turn_duration":
+		rec.kind = claudeRecordTurnEnd
+	case e.Type == "assistant" && e.IsAPIError:
+		rec.kind = claudeRecordAPIError
+	default:
+		return claudeTurnRecord{}, false
+	}
+	return rec, true
+}
+
+// claudeInterruptEntry reports whether a user message holds nothing but
+// Claude's interrupt marker. A prompt that merely mentions the marker is not
+// one.
+func claudeInterruptEntry(message json.RawMessage) bool {
+	var msg struct {
+		Content json.RawMessage `json:"content"`
+	}
+	if json.Unmarshal(unwrapJSONString(message), &msg) != nil || len(msg.Content) == 0 {
+		return false
+	}
+	var text string
+	if json.Unmarshal(msg.Content, &text) != nil {
+		var blocks []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}
+		if json.Unmarshal(msg.Content, &blocks) != nil || len(blocks) != 1 || blocks[0].Type != "text" {
+			return false
+		}
+		text = blocks[0].Text
+	}
+	text = strings.TrimSpace(text)
+	return strings.HasPrefix(text, claudeInterruptMarker) && strings.HasSuffix(text, "]") && !strings.Contains(text, "\n")
+}
+
+// scan collects records backward until it has passed the first entry of
+// the oldest turn it reports, then folds them oldest first.
+func (claudeTurnFormat) scan(_ string, r io.ReaderAt, size, budget int64) (turnFold, error) {
+	var records []claudeTurnRecord // newest first
+	ids := make(map[string]bool)
+	truncated, err := collectTurnLines(r, size, budget, func(line []byte) bool {
+		rec, ok := parseClaudeTurnRecord(line)
+		if !ok {
+			return false
+		}
+		if id, ok := validTurnID(rec.rawID); ok && rec.kind == claudeRecordUser && !ids[id] {
+			if len(ids) == MaxRecentTurns+1 {
+				return true
+			}
+			ids[id] = true
+		}
+		records = append(records, rec)
+		return false
+	})
+	if err != nil {
+		return nil, err
+	}
+	if truncated && !slices.ContainsFunc(records, func(rec claudeTurnRecord) bool { return rec.kind != claudeRecordAPIError }) {
+		return nil, ErrTurnStartBeyondBudget
+	}
+	fold := &claudeTurnFold{startUnseen: truncated}
+	for _, rec := range slices.Backward(records) {
+		fold.addRecord(rec)
+	}
+	return fold, nil
+}
+
+// claudeTurnFold folds Claude turn records, oldest first.
+type claudeTurnFold struct {
+	ledger turnLedger
+	// startUnseen: the window may begin inside a turn, so the first turn
+	// opened before any boundary has an unknown start.
+	startUnseen bool
+	// failedAt is set while the open turn's latest entry is an API error.
+	failedAt time.Time
+	failed   bool
+}
+
+func (f *claudeTurnFold) add(line []byte) {
+	if rec, ok := parseClaudeTurnRecord(line); ok {
+		f.addRecord(rec)
+	}
+}
+
+func (f *claudeTurnFold) appendable() bool { return true }
+
+func (f *claudeTurnFold) addRecord(rec claudeTurnRecord) {
+	switch rec.kind {
+	case claudeRecordUser:
+		f.addUser(rec)
+	case claudeRecordInterrupt:
+		f.end(rec.at, TurnStatusCancelled)
+	case claudeRecordTurnEnd:
+		status := TurnStatusCompleted
+		if f.failed {
+			status = TurnStatusFailed
+		}
+		f.end(rec.at, status)
+	case claudeRecordAPIError:
+		if f.ledger.open {
+			f.failed, f.failedAt = true, rec.at
+		}
+	}
+}
+
+func (f *claudeTurnFold) addUser(rec claudeTurnRecord) {
+	l := &f.ledger
+	id, ok := validTurnID(rec.rawID)
+	switch {
+	case !ok:
+		// Boundary only: an entry without an id continues the open turn
+		// or opens an anonymous one.
+		l.missingIDs = true
+		if l.open {
+			f.failed = false
+			return
+		}
+	case l.isCurrent(id):
+		f.failed = false
+		return
+	case l.endedIndex(id) >= 0:
+		// A late entry of a turn already ended opens nothing.
+		return
+	}
+	if f.failed {
+		l.close(f.failedAt, TurnStatusFailed)
+		f.failed = false
+	}
+	at := rec.at
+	if f.startUnseen {
+		at = time.Time{}
+	}
+	f.startUnseen = false
+	l.begin(id, at)
+}
+
+func (f *claudeTurnFold) end(at time.Time, status TurnStatus) {
+	f.startUnseen = false
+	f.failed = false
+	f.ledger.close(at, status)
+}
+
+// scan reports the fold. An open turn whose latest entry is an API error has
+// ended failed: Claude writes nothing more until the next prompt.
+func (f *claudeTurnFold) scan() TurnScan {
+	if !f.failed {
+		return f.ledger.snapshot()
+	}
+	l := f.ledger
+	l.recent = slices.Clone(l.recent)
+	l.close(f.failedAt, TurnStatusFailed)
+	return l.snapshot()
+}

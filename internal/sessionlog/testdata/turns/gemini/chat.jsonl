@@ -1,0 +1,6 @@
+{"sessionId":"f0323691-2967-4d1e-a6f4-6266077f42c6","projectHash":"project","startTime":"2026-06-21T17:08:00.693Z","kind":"main"}
+{"$set":{"messages":[{"id":"9d1e0000-aaaa-4000-8000-000000000001","timestamp":"2026-06-21T17:08:00.694Z","type":"user","content":[{"text":"prompt one"}]},{"id":"a1","timestamp":"2026-06-21T17:08:10.000Z","type":"gemini","content":"reply text","thoughts":[{"subject":"Plan","description":"think"}],"model":"gemini-model"},{"id":"i1","timestamp":"2026-06-21T17:08:11.000Z","type":"info","content":"info text"}],"lastUpdated":"2026-06-21T17:08:11Z"}}
+{"id":"9d1e0000-bbbb-4000-8000-000000000002","timestamp":"2026-06-21T17:09:00.123Z","type":"user","content":[{"text":"prompt two"}]}
+{"id":"a2","timestamp":"2026-06-21T17:09:05.000Z","type":"gemini","content":"reply text","toolCalls":[{"id":"tool-1","name":"run_shell_command","args":{"command":"true"},"result":[{"functionResponse":{"id":"tool-1","response":{"output":"ok"}}}],"status":"success"}]}
+{"id":"9d1e0000-bbbb-4000-8000-000000000002","timestamp":"2026-06-21T17:09:00.123Z","type":"user","content":[{"text":"prompt two (edited)"}]}
+{"$set":{"lastUpdated":"2026-06-21T17:09:05Z"}}
