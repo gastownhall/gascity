@@ -74,8 +74,8 @@ type controllerState struct {
 	// periodic reconcile, so nothing touches a store whose pair was retired.
 	beadsQuiescent *atomic.Bool
 	// storeWork counts the controller's store work in flight off the tick:
-	// a committed close's completion fact and autoclose, a cache-inferred
-	// close's confirming read, and autoclose sweep passes. A quiescent city
+	// a committed close's completion fact and autoclose, the confirming read
+	// of every other bead.closed, and autoclose sweep passes. A quiescent city
 	// retires its bd pairs only once it is zero (enterBeadsQuiescenceIfDue):
 	// work that passed its quiescence check before the city went quiescent is
 	// still reading, and its next read would restart a pair retired under it.
@@ -1016,13 +1016,15 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 // applyCommittedClose runs a committed bead.closed's durable effects: the
 // completion fact, then autoclose. Only the controller's own cache write
 // (actor cacheLocalActor) is a committed close: the backing accepted it, so
-// its payload is trusted. Every other bead.closed takes applyInferredClose.
-// Both effects read (the fact reads the run's root from the graph store), so
-// a quiescent city runs neither yet: the sweep confirms the close after
-// resume and records the fact then. That fact
-// carries the actor of the pass that records it (autoclose-sweep, or
-// execution-reconcile when the completions lane reaches the row first), not
-// the writer's. A row that no longer reads closed by then, reopened or
+// its payload is trusted. The actor string itself is not authenticated: a
+// writer that can append to the event log under that actor is trusted too,
+// so this is hygiene against honest mistakes, not a trust boundary. Every
+// other bead.closed takes applyInferredClose. Both effects read (the fact
+// reads the run's root from the graph store), so a quiescent city runs
+// neither yet: the sweep confirms the close after resume and records the
+// fact then. That fact carries the actor of the pass that records it
+// (autoclose-sweep, or execution-reconcile when the completions lane reaches
+// the row first), not the writer's. A row that no longer reads closed by then, reopened or
 // deleted, gets none: both passes record facts only for rows that read closed.
 // The fact's read is store work (storeWork) from before the quiescence check,
 // so a city that goes quiescent while it reads keeps its pairs until it ends.
@@ -1041,8 +1043,8 @@ func (cs *controllerState) applyCommittedClose(evt events.Event, store beads.Sto
 // returns the row closed. It serves every actor but cacheLocalActor: a
 // cache-reconcile close is inferred from a read that can be stale (the scan
 // can evict an open row and synthesize its close, mc-zndi7.43, .56), and any
-// other actor's close (a one-shot CLI emitter, an API or `gc event emit`
-// writer) is a claim anyone who can append to the event log could make. The
+// other actor's close (a one-shot CLI emitter, a bd hook's `gc event emit`)
+// is a claim anyone who can append to the event log could make. The
 // fact derives from the live read, never from the payload. A row that is open
 // or gone gets nothing. An unreadable row gets nothing yet: the autoclose
 // sweep re-reads it, and the completions sweep backstops its fact.

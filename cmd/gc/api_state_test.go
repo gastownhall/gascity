@@ -4982,7 +4982,7 @@ func TestForgedBeadClosedOfAnOpenRowRecordsNothing(t *testing.T) {
 	rec := events.NewFake()
 	cs := &controllerState{cityBeadStore: mem, eventProv: rec}
 
-	cs.applyBeadEventToStores(events.Event{Type: events.BeadClosed, Actor: "mayor", Subject: step.ID, Payload: forgedClosePayload(t, step)})
+	cs.applyBeadEventToStores(events.Event{Type: events.BeadClosed, Actor: "worker-3", Subject: step.ID, Payload: forgedClosePayload(t, step)})
 
 	if got := completedFor(rec, step.ID); got != 0 {
 		t.Fatalf("completion facts = %d for a forged close of an open row, want 0", got)
@@ -5012,7 +5012,7 @@ func TestForeignBeadClosedTakesTheFactFromTheLiveRead(t *testing.T) {
 	rec := events.NewFake()
 	cs := &controllerState{cityBeadStore: mem, eventProv: rec}
 
-	cs.applyBeadEventToStores(events.Event{Type: events.BeadClosed, Actor: "mayor", Subject: step.ID, Payload: forgedClosePayload(t, step)})
+	cs.applyBeadEventToStores(events.Event{Type: events.BeadClosed, Actor: "worker-3", Subject: step.ID, Payload: forgedClosePayload(t, step)})
 
 	if got := fmt.Sprint(completedSessionsFor(rec, step.ID)); got != "[gcs-session]" {
 		t.Fatalf("completion facts carry sessions %s, want [gcs-session] from the live read", got)
@@ -5096,7 +5096,7 @@ func TestSplitCityOneShotCloseRecordsItsFactThroughTheLiveRead(t *testing.T) {
 // the cache-local nor the live-read path reads or records anything; both owe
 // the close to the sweep.
 func TestQuiescentCityDefersEveryCloseToTheSweep(t *testing.T) {
-	for _, actor := range []string{cacheLocalActor, "mayor"} {
+	for _, actor := range []string{cacheLocalActor, "worker-3"} {
 		t.Run(actor, func(t *testing.T) {
 			prev := beadCloseAutocloseDispatch
 			beadCloseAutocloseDispatch = func(fn func()) { fn() }

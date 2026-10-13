@@ -281,7 +281,8 @@ func statusOf(t *testing.T, store beads.Store, id string) string {
 
 // TestApplyBeadEventToStoresRevalidatesInferredCloses pins I”: a scan-derived
 // or foreign bead.closed drives the completion fact and autoclose only when a
-// live read agrees the row is closed (or gone). Only a local close is acted on
+// live read agrees the row is closed; an open or gone row gets nothing. Only a
+// local close is acted on
 // with no re-read: a store that reads back stale (open) does not gate it.
 func TestApplyBeadEventToStoresRevalidatesInferredCloses(t *testing.T) {
 	for _, tc := range []struct {
