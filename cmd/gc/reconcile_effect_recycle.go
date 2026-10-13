@@ -218,6 +218,10 @@ func deathStep(v txView) txStep {
 	}
 	w := *v.World
 	w.Now = v.Now
-	patch, class, accrued := deadRuntimePatch(&rowFacts{w: &w, k: v.It.Key, row: v.World.Census.reread(v.It.Key, v.Row, v.Meta), found: true}, true) // the fresh row's stop keys: a drain's death is no crash
-	return txStep{Write: patch, Class: class, Done: accrued}
+	patch, class, accrued, ev := deadRuntimePatch(&rowFacts{w: &w, k: v.It.Key, row: v.World.Census.reread(v.It.Key, v.Row, v.Meta), found: true}, true) // the fresh row's stop keys: a drain's death is no crash
+	step := txStep{Write: patch, Class: class, Done: accrued}
+	if ev != nil { // recorded once the write lands
+		step.Facts.Events = append(step.Facts.Events, *ev)
+	}
+	return step
 }

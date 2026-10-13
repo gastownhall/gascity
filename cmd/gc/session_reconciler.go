@@ -3580,7 +3580,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// checkStability returns the write-returns-Info result (Step 6d); the input
 		// Info unchanged when no stability event was recorded, so the assignment on the
 		// true branch is the only snapshot advance. Pre-pass-masked (STEP6-PREPASS-AUDIT group 2).
-		if stabInfo, stab := checkStability(infoByID[id], cfg, alive, dt, sessFront, clk, nil, launchTranscriptRoots(cfg, tp)); stab {
+		if stabInfo, stab := checkStability(infoByID[id], cfg, alive, dt, sessFront, clk, nil, launchTranscriptRoots(cfg, tp), rec); stab {
 			tick.set(id, stabInfo)
 			continue // rapid exit recorded, skip further processing
 		}
@@ -7567,6 +7567,19 @@ func resolveSessionCommand(command, sessionKey, parentSID string, rp *config.Res
 		return command + " " + rp.SessionIDFlag + " " + sessionKey
 	}
 	return resolveResumeCommand(command, sessionKey, rp)
+}
+
+// sessionCommandResumes reports whether resolveSessionCommand, given the same
+// inputs, launches a resume of the session's own conversation: not a fresh
+// start with its own id, and not a fork, which resumes its parent (mc-bm1af).
+func sessionCommandResumes(parentSID string, rp *config.ResolvedProvider, firstStart, forceFresh bool) bool {
+	switch {
+	case firstStart && !forceFresh && parentSID != "" && rp.ForkFlag != "" && rp.SessionIDFlag != "":
+		return false
+	case (firstStart || forceFresh) && rp.SessionIDFlag != "":
+		return false
+	}
+	return rp.ResumeCommand != "" || rp.ResumeFlag != ""
 }
 
 // resolveResumeCommand returns the command to use when resuming a session.

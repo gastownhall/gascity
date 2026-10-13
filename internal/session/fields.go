@@ -143,6 +143,8 @@ const (
 	srcBeads      = "cmd/gc/session_beads.go"
 	srcSleep      = "cmd/gc/session_sleep.go"
 	srcPoolNames  = "cmd/gc/session_name_lookup.go"
+	srcLifecycle  = "cmd/gc/session_lifecycle_parallel.go"
+	srcAbandon    = "cmd/gc/reconcile_effect_abandon.go"
 )
 
 // Shared sites. The pending ones' beads: mc-cfmtd (S1's PreWake, the C5a1
@@ -332,9 +334,16 @@ var registry = slices.Concat([]Field{
 	{Key: "churn_count", Class: ClassCounter, Writers: sites(legacy(srcReconcile, "recordChurn"), v2(srcHeals, "armStabilityClear"), v2Accrual, v2StartAccrual)},
 	{Key: "crash_count", Class: ClassCounter, NoWriter: "dead: only ReactivatePatch writes it, and nothing calls that"},
 	{Key: "quarantine_cycle", Class: ClassCounter, NoWriter: "dead: only QuarantinePatch writes it, and nothing calls that"},
+	// The resume backstop's count (mc-bm1af, CONTRACT v5.9w): resume-shaped
+	// wake failures in a row; a reset, a fresh launch's commit and the
+	// stability clear end the run.
+	{Key: "resume_failures", Class: ClassCounter, Writers: sites(legacy(srcReconcile, "recordWakeFailure"), legacy(srcReconcile, "clearWakeFailures"), legacy(srcLifecycle, "startCommitPatch"), v2(srcHeals, "armStabilityClear"), v2Accrual, v2(srcAbandon, "otherFailurePatch"))},
 	{Key: "idle_respawn_attempts", Class: ClassCounter, Writers: sites(legacy(srcReconciler, "beginIdleRespawnDrainIfIdle"), v2("cmd/gc/reconcile_arms_drain.go", "rowFacts.idleRespawnBegin"))},
 
 	// Markers.
+	// Whether the incarnation that last committed was launched as a resume,
+	// for a later rapid crash's resume backstop (mc-bm1af).
+	{Key: "resume_launch", Class: ClassMarker, Writers: sites(legacy(srcLifecycle, "startCommitPatch"), v2(srcLifecycle, "startCommitPatch")), Readers: sites(legacy(srcReconcile, "checkStability"), v2Accrual)},
 	{Key: "detached_at", Class: ClassMarker, Writers: sites(legacy(srcSleep, "reconcileDetachedAtInfo"), v2(srcHeals, "armDetachedAt")), Clears: sites(legacyPreWake)},
 	{Key: "stranded_event_emitted_at", Class: ClassMarker, Writers: sites(legacy(srcReconciler, "emitSessionStrandedDiagnostic")), Clears: sites(v2(srcHeals, "armStrandedClear"))},
 	// D2's idle latch: A20's idle begin writes it in its CAS (C6a2); v2

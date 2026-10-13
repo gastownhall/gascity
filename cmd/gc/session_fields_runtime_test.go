@@ -511,7 +511,7 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 			[]string{"state", "active", "sleep_intent", "idle-stop-pending"},
 			func(t *testing.T, meta []string) map[string]string {
 				c := newHealCase(t, livenessGone, desireSleep, meta...)
-				patch, class, _ := deadRuntimePatch(&rowFacts{w: c.w, k: c.k, row: c.w.Census.Rows[c.k], entry: c.a.Snapshot.Entries[c.k]}, true)
+				patch, class, _, _ := deadRuntimePatch(&rowFacts{w: c.w, k: c.k, row: c.w.Census.Rows[c.k], entry: c.a.Snapshot.Entries[c.k]}, true)
 				if err := c.store.SetMetadataBatch(c.k.ID, class.Into(c.k.ID, maps.Clone(patch))); err != nil {
 					t.Fatal(err)
 				}

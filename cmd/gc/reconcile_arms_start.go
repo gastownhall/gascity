@@ -143,12 +143,12 @@ func (r *rowFacts) startIntent(reason string) (intent, bool) {
 	var class session.DispositionPatch
 	if committed(info) && r.gone() {
 		var accrued bool
-		if patch, class, accrued = deadRuntimePatch(r, true); accrued && !r.asleepStranded() {
+		if patch, class, accrued, _ = deadRuntimePatch(r, true); accrued && !r.asleepStranded() {
 			return intent{Reason: decideStartAccrued}, true // A6 records the death first
 		}
 		info, kept = foldInfo(foldInfo(info, patch), class.Fold()), foldClass(patch, class)
 		if r.asleepStranded() {
-			strandedPatch, strandedClass, _ := deadRuntimePatch(r, false)
+			strandedPatch, strandedClass, _, _ := deadRuntimePatch(r, false)
 			kept = foldClass(strandedPatch, strandedClass)
 		}
 	}
@@ -213,9 +213,9 @@ func (r *rowFacts) startHealed(heal intent) intent {
 	case heal.Reason != decideDeadRuntimeHeal || !r.asleepStranded():
 		it.Heal = &heal
 	default: // a stranded seat records its death alone and stays committed, so it is recorded once
-		if accrual, class, accrued := deadRuntimePatch(r, false); accrued {
+		if accrual, class, accrued, ev := deadRuntimePatch(r, false); accrued {
 			recorded := heal
-			recorded.Patch, recorded.Class = accrual, class
+			recorded.Patch, recorded.Class, recorded.Event = accrual, class, ev
 			it.Heal = &recorded
 		}
 	}

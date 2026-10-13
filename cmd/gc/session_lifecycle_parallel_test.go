@@ -8783,6 +8783,75 @@ func TestLaunchDriftRelaunchRecordsConversationReset(t *testing.T) {
 	}
 }
 
+// Kills a prepare that misreports whether its launch resumes: a committed
+// key whose transcript is present resumes; an allocated key, a committed one
+// whose transcript is gone (cleared, a fresh start), and wake_mode=fresh do
+// not.
+func TestBuildPreparedStartRecordsAResume(t *testing.T) {
+	for _, c := range []struct {
+		name             string
+		meta             map[string]string
+		present, resumed bool
+	}{
+		{"a committed key, transcript present", map[string]string{"started_config_hash": "h-1"}, true, true},
+		{"a committed key, transcript gone", map[string]string{"started_config_hash": "h-1"}, false, false},
+		{"an allocated key", nil, false, false},
+		{"wake_mode fresh", map[string]string{"started_config_hash": "h-1", "wake_mode": "fresh"}, true, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			prev := staleResumeKeyProbe
+			staleResumeKeyProbe = func([]string, string, string, string) (bool, bool) { return c.present, true }
+			t.Cleanup(func() { staleResumeKeyProbe = prev })
+			workDir := t.TempDir()
+			meta := map[string]string{"session_name": "worker", "template": "worker", "state": "asleep", "provider": "claude", "work_dir": workDir, "session_key": "k-1"}
+			maps.Copy(meta, c.meta)
+			store := beads.NewMemStore()
+			row, err := store.Create(beads.Bead{Title: "worker", Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: meta})
+			if err != nil {
+				t.Fatal(err)
+			}
+			prepared, _, err := buildPreparedStart(startCandidate{info: sessiontest.SeedBead(t, row), tp: TemplateParams{
+				TemplateName: "worker", SessionName: "worker", Command: "claude", WorkDir: workDir, ResolvedProvider: claudeResumeProvider(),
+			}}, &config.City{}, store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if prepared.resumed != c.resumed {
+				t.Fatalf("resumed %v (command %q), want %v", prepared.resumed, prepared.cfg.Command, c.resumed)
+			}
+		})
+	}
+}
+
+// Kills legacy's failed start bypassing the resume backstop (mc-bm1af):
+// commitStartFailure classifies its error, so a resume launch the provider
+// refused resets the conversation on its first failure and records the reset.
+func TestCommitStartFailureFeedsTheResumeBackstop(t *testing.T) {
+	prev := staleResumeKeyProbe
+	staleResumeKeyProbe = func([]string, string, string, string) (bool, bool) { return true, true }
+	t.Cleanup(func() { staleResumeKeyProbe = prev })
+	for _, resumed := range []bool{true, false} {
+		store := beads.NewMemStore()
+		row, err := store.Create(beads.Bead{Title: "worker", Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: map[string]string{
+			"session_name": "worker", "template": "worker", "state": "asleep", "session_origin": "manual", "provider": "claude", "work_dir": "/work",
+			"session_key": "k-1", "started_config_hash": "h-1",
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec := events.NewFake()
+		commitStartFailure(startResult{
+			prepared: preparedStart{candidate: startCandidate{info: sessiontest.SeedBead(t, row), tp: TemplateParams{SessionName: "worker", TemplateName: "worker"}}, resumed: resumed},
+			err:      fmt.Errorf("%w; last pane output: No conversation found with session ID: k-1", runtime.ErrSessionDiedDuringStartup),
+			outcome:  TraceOutcomeProviderError,
+		}, sessionFrontDoor(store), &clock.Fake{Time: time.Now()}, rec, 0, io.Discard, nil)
+		got, _ := store.Get(row.ID)
+		if reset := got.Metadata["session_key"] == ""; reset != resumed || (len(rec.Events) == 1) != resumed {
+			t.Fatalf("resumed %v: key %q events %+v; want the refusal to reset and record it only for a resume launch", resumed, got.Metadata["session_key"], rec.Events)
+		}
+	}
+}
+
 // TestPrepareStartCandidateForCity_ClearsStaleNamedTriggerEnv is the
 // launch-layer assertion for gascity#4373. resolvePreservedConfiguredNamedSessionTemplate
 // clearing the stamp is not enough on its own: buildPreparedStartWithWorkDirResolver

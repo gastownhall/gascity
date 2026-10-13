@@ -1222,7 +1222,7 @@ func TestRefusedStartStillHeals(t *testing.T) {
 				tc.arrange(k)
 			}
 			k.it.Reason = decideStart
-			heal, class, _ := deadRuntimePatch(&rowFacts{w: k.p.World, row: row, entry: &selectionEntry{Liveness: livenessGone, Desired: desireWake}}, true)
+			heal, class, _, _ := deadRuntimePatch(&rowFacts{w: k.p.World, row: row, entry: &selectionEntry{Liveness: livenessGone, Desired: desireWake}}, true)
 			if until, err := time.Parse(time.RFC3339, tc.patch["quarantined_until"]); err == nil { // a quarantine is the Quarantine cell's
 				class = class.With(session.CellInfo(row.Info, session.ActorController, session.DispEvent{Kind: session.EvQuarantine, Until: until}, gatherNow))
 			}

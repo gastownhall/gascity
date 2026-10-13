@@ -214,6 +214,9 @@ func preWakeStep(v txView, f preWakeFold, probeErr error) txStep {
 	pass := launchPass{launchRow: launch, bound: foldInfo(base, f.bind), transcript: transcript, ticket: ticket, undo: preWakeUndoOf(v, foldClass(patch, class), len(f.reset) > 0)}
 	pass.undo.token, pass.relaunched = f.token, creating(v.Row)
 	facts := effectFacts{Work: f.work}
+	if heal := v.It.Heal; heal != nil && heal.Reason == decideDeadRuntimeHeal && heal.Event != nil { // the death's record, its write folded into this one
+		facts.Events = append(facts.Events, *heal.Event)
+	}
 	if len(f.reset) > 0 && session.HasStartedManualConversation(base) { // recorded once the PreWake lands
 		facts.Events = append(facts.Events, staleKeyConversationResetEvent(base, tp))
 	}

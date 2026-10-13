@@ -43,6 +43,7 @@ type startFailure struct {
 	pending         bool // a pending create
 	configured      bool // a configured named row with its spec
 	died            bool // died during startup
+	resumed         bool // the launch resumed the row's own conversation (preparedStart.resumed)
 	peek            bool // a rate-limit screen may show: the pane is listed (START-022)
 	relaunched      bool // PreWake found the row creating (#7570): its marker stays
 	undo            preWakeUndo
@@ -56,9 +57,10 @@ type startFailure struct {
 // startFailureRead is what the failure Call read, past what it accrued.
 type startFailureRead struct {
 	startFailure
-	rateLimit bool  // the pane shows a provider rate-limit screen
-	keeps     bool  // the conversation's transcript is on disk (wakeFailureKeepsConversation)
-	lost      *bool // a lost commit's stop (lostCommit): whether it was confirmed
+	rateLimit bool          // the pane shows a provider rate-limit screen
+	keeps     bool          // the conversation's transcript is on disk (wakeFailureKeepsConversation)
+	resume    resumeFailure // what the failure tells the resume backstop (startResumeFailure)
+	lost      *bool         // a lost commit's stop (lostCommit): whether it was confirmed
 }
 
 // startEnd is what the commit hands its Call: the landed commit, the start
@@ -79,6 +81,7 @@ func failStart(v txView, out startOutcome, cause string, err error) txStep {
 	f := startFailure{
 		cause: cause, err: err, pending: v.Row.PendingCreateClaim, died: cause == causeDiedDuringStartup, relaunched: out.relaunched, undo: out.undo,
 		row: v.Row, name: name, display: out.tp.DisplayName(), episode: startupHealthEpisodeKey(v.Row, name), launch: out.tp,
+		resumed: out.prepared != nil && out.prepared.resumed,
 	}
 	started := cause != causePrepare && cause != causeAttribution // a Start's own failure, which the provider screens
 	if started {
@@ -97,11 +100,12 @@ func failStart(v txView, out startOutcome, cause string, err error) txStep {
 // classes that accrue a wake failure the transcript probe.
 func readStartFailure(ctx context.Context, c txCaps, f startFailure) startFailureRead {
 	r := startFailureRead{startFailure: f}
+	var pane string
 	if f.peek {
 		// The dead pane's own screen (§12.2 #19, C5a3): a terminal provider
 		// error parks the row, as the zombie capture does; a rate-limit
 		// screen quarantines it (START-022/029).
-		pane := peekPane(ctx, c.start.sp, f.name)
+		pane = peekPane(ctx, c.start.sp, f.name)
 		r.terminal = runtime.ProviderTerminalErrorReason(pane)
 		r.rateLimit = r.terminal == "" && runtime.ContainsProviderRateLimitScreen(pane)
 	}
@@ -111,6 +115,7 @@ func readStartFailure(ctx context.Context, c txCaps, f startFailure) startFailur
 		_ = c.episode.fail(f.episode, f.err, c.start.clock.Now())
 	default:
 		r.keeps = wakeFailureKeepsConversation(f.row, launchTranscriptRoots(f.cfg, f.launch))
+		r.resume = startResumeFailure(f.resumed, f.died, f.err, pane)
 	}
 	return r
 }
@@ -175,6 +180,9 @@ func abandonStep(v txView) txStep {
 	if quarantined {
 		facts.Quarantined = f.display
 	}
+	if resumeFailedReset(v.Row, f) && session.HasStartedManualConversation(v.Row) {
+		facts.Events = append(facts.Events, resumeFailedConversationResetEvent(v.Row, f.display))
+	}
 	return abandon(patch, class, facts)
 }
 
@@ -193,13 +201,28 @@ func otherFailurePatch(row session.Info, meta map[string]string, f startFailureR
 	if !creating(row) {
 		return patch, class, false
 	}
-	if (row.SessionKey != "" || row.StartedConfigHash != "") && !f.keeps {
-		maps.Copy(patch, session.ConversationResetPatch(true))
+	if row.SessionKey != "" || row.StartedConfigHash != "" {
+		failures, _ := strconv.Atoi(row.ResumeFailures)
+		backstop, count := resumeBackstop(failures, f.keeps, f.resume)
+		if !f.keeps || backstop {
+			maps.Copy(patch, session.ConversationResetPatch(true))
+			count = 0
+		}
+		maps.Copy(patch, resumeFailuresPatch(row, count))
 	}
 	attempts, _ := strconv.Atoi(row.WakeAttemptsMetadata)
 	accrual := session.WakeFailureAccrualPatch(attempts, defaultMaxWakeAttempts, now.Add(defaultQuarantineDuration))
 	maps.Copy(patch, accrual.Patch)
 	return patch, class.With(accrual.Class(row, now)), accrual.Quarantined
+}
+
+// resumeFailedReset reports that the any-other failure f of row resets a
+// conversation whose transcript is present, by the resume backstop
+// (resumeBackstop), as legacy's recordWakeFailure does.
+func resumeFailedReset(row session.Info, f startFailureRead) bool {
+	failures, _ := strconv.Atoi(row.ResumeFailures)
+	backstop, _ := resumeBackstop(failures, f.keeps, f.resume)
+	return creating(row) && (row.SessionKey != "" || row.StartedConfigHash != "") && backstop
 }
 
 // restorePatch is restorePreWakeState's decide on the fresh row's

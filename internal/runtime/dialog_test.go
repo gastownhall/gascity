@@ -1708,6 +1708,26 @@ func TestContainsProviderRateLimitScreen(t *testing.T) {
 	}
 }
 
+// Kills a resume-refusal classifier that misses claude's refusal, in an
+// error's last pane output or a dead pane's screen, or that fires on other
+// startup deaths (mc-bm1af).
+func TestProviderResumeRefusalReason(t *testing.T) {
+	for _, c := range []struct {
+		content, want string
+	}{
+		{"session \"s\" died during startup; last pane output: No conversation found with session ID: 0f9c", "conversation_not_found"},
+		{"No conversation found with session ID: abc\n", "conversation_not_found"},
+		{"no conversation found", "conversation_not_found"},
+		{"Error: model not found", ""},
+		{"session died during startup", ""},
+		{"", ""},
+	} {
+		if got := ProviderResumeRefusalReason(c.content); got != c.want {
+			t.Errorf("ProviderResumeRefusalReason(%q) = %q, want %q", c.content, got, c.want)
+		}
+	}
+}
+
 func TestProviderTerminalErrorReason(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
