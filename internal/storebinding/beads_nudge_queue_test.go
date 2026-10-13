@@ -645,10 +645,22 @@ func TestBeadsNudgeQueueExpiresAndAgesDeadLetters(t *testing.T) {
 		t.Fatalf("ClaimDue = %v, want an expired nudge to stay out of delivery", nudgeItemIDs(claimed))
 	}
 
+	// Aging a dead letter out is maintenance: a read past the retention
+	// window still serves it, and only Maintain retires it.
 	afterRetention := afterExpiry.Add(nudgeQueueDeadRetention).Add(time.Minute)
 	_, _, dead, err = queue.ListForAgent(testNudgeAgent, afterRetention)
 	if err != nil {
 		t.Fatalf("ListForAgent after retention: %v", err)
+	}
+	if len(dead) != 1 {
+		t.Fatalf("dead = %v before Maintain, want a read to leave the dead letter alone", nudgeItemIDs(dead))
+	}
+	if err := queue.Maintain(afterRetention); err != nil {
+		t.Fatalf("Maintain: %v", err)
+	}
+	_, _, dead, err = queue.ListForAgent(testNudgeAgent, afterRetention)
+	if err != nil {
+		t.Fatalf("ListForAgent after Maintain: %v", err)
 	}
 	if len(dead) != 0 {
 		t.Fatalf("dead = %v, want the dead letter aged into the terminal record", nudgeItemIDs(dead))
@@ -786,17 +798,24 @@ func TestBeadsNudgeQueueSweepsTerminalRecordsPastRetention(t *testing.T) {
 	// on a shorter window than it claims is a failure and not a coincidence of
 	// wall-clock timing.
 	justInside := now.Add(nudgeQueueTerminalRetention).Add(-time.Minute)
-	if _, _, _, err := queue.ListForAgent(testNudgeAgent, justInside); err != nil {
-		t.Fatalf("ListForAgent inside retention: %v", err)
+	if err := queue.Maintain(justInside); err != nil {
+		t.Fatalf("Maintain inside retention: %v", err)
 	}
 	if ids := queueRecordIDs(t, store); len(ids) != 1 || ids[0] != "n-delivered" {
 		t.Fatalf("records inside retention = %v, want the terminal record kept", ids)
 	}
 
-	// Past it the maintenance pass every operation runs removes it.
+	// A delivery read past it sweeps nothing: the sweep is maintenance.
 	afterRetention := now.Add(nudgeQueueTerminalRetention).Add(time.Minute)
 	if _, _, _, err := queue.ListForAgent(testNudgeAgent, afterRetention); err != nil {
 		t.Fatalf("ListForAgent past retention: %v", err)
+	}
+	if ids := queueRecordIDs(t, store); len(ids) != 1 {
+		t.Fatalf("records after a read past retention = %v, want the sweep left to Maintain", ids)
+	}
+	// Past it the Maintain pass removes it.
+	if err := queue.Maintain(afterRetention); err != nil {
+		t.Fatalf("Maintain past retention: %v", err)
 	}
 	if ids := queueRecordIDs(t, store); len(ids) != 0 {
 		t.Fatalf("records past retention = %v, want the terminal record swept; it would live as long as the city", ids)
@@ -841,6 +860,9 @@ func TestBeadsNudgeQueueSweepKeepsLiveAndDeadRecords(t *testing.T) {
 		t.Fatalf("Enqueue: %v", err)
 	}
 	afterExpiry := late.Add(2 * time.Minute)
+	if err := queue.Maintain(afterExpiry); err != nil {
+		t.Fatalf("Maintain: %v", err)
+	}
 	pending, _, dead, err := queue.ListForAgent(testNudgeAgent, afterExpiry)
 	if err != nil {
 		t.Fatalf("ListForAgent: %v", err)

@@ -365,6 +365,14 @@ type ClaimTarget struct {
 var ErrNudgeSessionFenceMismatch = errors.New("queued nudge session fence mismatch")
 
 // NudgeQueue is the closed durable nudge queue contract.
+//
+// The delivery verbs (Enqueue, ClaimDue, ListFor, ListForAgent, Ack,
+// ReleaseClaims, RecordFailure) are target-scoped: they read only the records
+// addressed to the queue keys they are given and repair only the records they
+// touch, so their cost does not grow with the rest of the queue. The
+// whole-queue recovery work — revoking expired leases, dead-lettering expired
+// items, aging dead letters out, and sweeping retired records past retention —
+// is Maintain's alone, and the infrastructure owner runs it on its own cadence.
 type NudgeQueue interface {
 	Enqueue(nudgequeue.Item) error
 	EnqueueDeferred(nudgequeue.Item) error
@@ -377,6 +385,10 @@ type NudgeQueue interface {
 	RecordFailure([]string, error, time.Time) ([]nudgequeue.Item, error)
 	Rollback(nudgequeue.Item, string) error
 	WithdrawQueuedWaitNudges([]string) error
+	// Maintain runs the whole-queue recovery pass as of now. It reports every
+	// record it could not decode (wrapping ErrBeadsNudgeQueueCorrupt for the
+	// beads queue) after finishing the work it could do.
+	Maintain(time.Time) error
 }
 
 // NudgeShadows is the closed nudge shadow projection contract.

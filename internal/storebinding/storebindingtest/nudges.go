@@ -312,6 +312,120 @@ func RunNudgeFrontDoorTests(r Runner, suite NudgesSuite) {
 		}
 	})
 
+	// Maintain is the whole-queue recovery pass the delivery verbs no longer
+	// run. The three cases below are its observable effects through the
+	// contract: an expired item leaves delivery for the dead bucket, a dead
+	// letter ages out, and a retired record is eventually swept so its id can
+	// be enqueued again. Retention windows are provider policy, so each case
+	// runs Maintain at maintainHorizon, past any window a conforming queue may
+	// choose.
+	r.Run("MaintainDeadLettersExpiredItems", func(r Runner) {
+		queue := mustQueue(r, suite)
+		now := time.Now().UTC()
+		expiring := nudgeItem("n-expiring", "", now)
+		expiring.ExpiresAt = now.Add(time.Minute)
+		bystander := nudgeItem("n-bystander", "", now)
+		for _, item := range []nudgequeue.Item{expiring, bystander} {
+			if err := queue.Enqueue(item); err != nil {
+				r.Fatalf("Enqueue(%s): %v", item.ID, err)
+			}
+		}
+		afterExpiry := now.Add(2 * time.Minute)
+		if err := queue.Maintain(afterExpiry); err != nil {
+			r.Fatalf("Maintain: %v", err)
+		}
+		pending, inFlight, dead, err := queue.ListForAgent(ConformanceNudgeAgent, afterExpiry)
+		if err != nil {
+			r.Fatalf("ListForAgent after Maintain: %v", err)
+		}
+		if len(dead) != 1 || dead[0].ID != "n-expiring" {
+			r.Fatalf("dead = %v, want the expired nudge dead-lettered by Maintain", nudgeIDs(dead))
+		}
+		if len(inFlight) != 0 || len(pending) != 1 || pending[0].ID != "n-bystander" {
+			r.Errorf("pending=%v in-flight=%v, want only the unexpired nudge still queued", nudgeIDs(pending), nudgeIDs(inFlight))
+		}
+		claimed, err := queue.ClaimDue(storebinding.ClaimTarget{QueueKeys: []string{ConformanceNudgeAgent}}, afterExpiry)
+		if err != nil {
+			r.Fatalf("ClaimDue after Maintain: %v", err)
+		}
+		if containsID(nudgeIDs(claimed), "n-expiring") {
+			r.Fatalf("ClaimDue = %v, want an expired nudge never delivered", nudgeIDs(claimed))
+		}
+	})
+
+	r.Run("MaintainAgesDeadLettersOut", func(r Runner) {
+		queue := mustQueue(r, suite)
+		now := time.Now().UTC()
+		item := nudgeItem("n-rolled-back", "", now)
+		if err := queue.Enqueue(item); err != nil {
+			r.Fatalf("Enqueue: %v", err)
+		}
+		if err := queue.Rollback(item, "conformance rollback"); err != nil {
+			r.Fatalf("Rollback: %v", err)
+		}
+		_, _, dead, err := queue.ListForAgent(ConformanceNudgeAgent, now)
+		if err != nil {
+			r.Fatalf("ListForAgent: %v", err)
+		}
+		if len(dead) != 1 || dead[0].ID != "n-rolled-back" {
+			r.Fatalf("dead = %v, want the rolled-back nudge", nudgeIDs(dead))
+		}
+		later := now.Add(maintainHorizon)
+		if err := queue.Maintain(later); err != nil {
+			r.Fatalf("Maintain: %v", err)
+		}
+		pending, inFlight, dead, err := queue.ListForAgent(ConformanceNudgeAgent, later)
+		if err != nil {
+			r.Fatalf("ListForAgent after Maintain: %v", err)
+		}
+		if len(pending)+len(inFlight)+len(dead) != 0 {
+			r.Fatalf("after Maintain past retention pending=%v in-flight=%v dead=%v, want the dead letter aged out",
+				nudgeIDs(pending), nudgeIDs(inFlight), nudgeIDs(dead))
+		}
+	})
+
+	r.Run("MaintainSweepsRetiredRecords", func(r Runner) {
+		queue := mustQueue(r, suite)
+		now := time.Now().UTC()
+		item := nudgeItem("n-delivered", "", now)
+		if err := queue.Enqueue(item); err != nil {
+			r.Fatalf("Enqueue: %v", err)
+		}
+		if _, err := queue.ClaimDue(storebinding.ClaimTarget{QueueKeys: []string{ConformanceNudgeAgent}}, now); err != nil {
+			r.Fatalf("ClaimDue: %v", err)
+		}
+		if err := queue.Ack([]string{"n-delivered"}, "delivered", "", "commit"); err != nil {
+			r.Fatalf("Ack: %v", err)
+		}
+		// Until the sweep the retired record still answers for its id, which
+		// is what makes a retried submit of a delivered nudge a no-op.
+		if err := queue.Enqueue(item); err != nil {
+			r.Fatalf("re-Enqueue before the sweep: %v", err)
+		}
+		pending, _, _, err := queue.ListForAgent(ConformanceNudgeAgent, now)
+		if err != nil {
+			r.Fatalf("ListForAgent: %v", err)
+		}
+		if len(pending) != 0 {
+			r.Fatalf("pending = %v, want a retried submit of a delivered nudge to stay retired", nudgeIDs(pending))
+		}
+		later := now.Add(maintainHorizon)
+		if err := queue.Maintain(later); err != nil {
+			r.Fatalf("Maintain: %v", err)
+		}
+		fresh := nudgeItem("n-delivered", "", later)
+		if err := queue.Enqueue(fresh); err != nil {
+			r.Fatalf("Enqueue after the sweep: %v", err)
+		}
+		pending, _, _, err = queue.ListForAgent(ConformanceNudgeAgent, later)
+		if err != nil {
+			r.Fatalf("ListForAgent after the sweep: %v", err)
+		}
+		if len(pending) != 1 || pending[0].ID != "n-delivered" {
+			r.Fatalf("pending = %v, want the swept id free to be enqueued again", nudgeIDs(pending))
+		}
+	})
+
 	r.Run("ShadowsProjectTheQueuedNudge", func(r Runner) {
 		fronts := mustFrontDoors(r, suite)
 		if fronts.Shadows == nil {
@@ -337,6 +451,11 @@ func RunNudgeFrontDoorTests(r Runner, suite NudgesSuite) {
 		}
 	})
 }
+
+// maintainHorizon is how far past an item's life the Maintain cases run. It is
+// longer than any dead-letter or retired-record retention a conforming queue
+// may choose.
+const maintainHorizon = 30 * 24 * time.Hour
 
 func mustFrontDoors(r Runner, suite NudgesSuite) storebinding.NudgeFrontDoors {
 	r.Helper()

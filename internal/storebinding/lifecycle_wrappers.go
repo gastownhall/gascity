@@ -531,6 +531,14 @@ func (q *wrappedNudgeQueue) Rollback(item nudgequeue.Item, reason string) error 
 	return err
 }
 
+// Maintain is the queue's whole-queue recovery pass, reported as maintenance so
+// a dashboard can tell the owner's sweep apart from delivery traffic.
+func (q *wrappedNudgeQueue) Maintain(now time.Time) error {
+	err := q.NudgeQueue.Maintain(now)
+	q.emitter.observe(ClassEventMaintenance, "Maintain", err)
+	return err
+}
+
 func (q *wrappedNudgeQueue) Snapshot() (nudgequeue.State, error) {
 	state, err := q.NudgeQueue.Snapshot()
 	q.emitter.observe(ClassEventRead, "Snapshot", err)

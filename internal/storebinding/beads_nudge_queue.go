@@ -32,6 +32,21 @@ package storebinding
 // cannot hand the same item to both. The CAS is the gate; the metadata read
 // that follows only rejects an item that raced into the dead bucket.
 //
+// KEYED READS, OWNER-RUN MAINTENANCE. Every delivery verb reads only the
+// records addressed to its queue keys (label "agent:<key>"; a session-pinned
+// record also carries "target:<session id>"), so one target's claim costs the
+// same whether the queue holds ten records or a hundred thousand. The verbs
+// repair only what they touch: an expired lease already reads as pending, a
+// candidate claim revokes the stale lease it is about to replace, and an
+// expired candidate is dead-lettered instead of claimed. The whole-queue pass —
+// lease recovery, expiry, dead-letter aging and the terminal sweep — is
+// Maintain, which the infrastructure owner runs on its own cadence.
+//
+// QUARANTINE. A record that does not decode is skipped by the keyed reads it
+// appears in and counted, so it can never fail a delivery to any target;
+// direct access by its nudge id still reports ErrBeadsNudgeQueueCorrupt, and
+// Maintain reports every corrupt record it saw.
+//
 // The queue's beads are its own family (label "gc:nudge-queue"), disjoint from
 // the nudge SHADOW beads that internal/nudgequeue projects over the same store
 // (label "gc:nudge"). Queue and shadow stay separate records here, unlike the
@@ -52,6 +67,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -85,6 +101,13 @@ const (
 const (
 	nudgeQueueLabel    = "gc:nudge-queue"
 	nudgeQueueBeadType = "chore"
+	// nudgeQueueAgentLabelPrefix keys a record by the queue key it is
+	// addressed to; every target-scoped read is one List on this label.
+	nudgeQueueAgentLabelPrefix = "agent:"
+	// nudgeQueueTargetLabelPrefix keys a session-pinned record by the exact
+	// session it is fenced to. Records written before it existed lack it, so
+	// no read depends on it being present.
+	nudgeQueueTargetLabelPrefix = "target:"
 	// nudgeQueueIDPrefix is derived from config's reserved-prefix table rather
 	// than spelled again here. The two have to agree — that table is what routes
 	// an id minted below into the nudges binding — and a second literal would let
@@ -147,6 +170,9 @@ type beadsNudgeQueue struct {
 	claimer  beadsAssignmentClaimer
 	releaser beads.ConditionalAssignmentReleaser
 	writer   beads.ConditionalWriter
+	// quarantined counts the undecodable records keyed reads have skipped.
+	// Maintain names them; this count is the hot path's signal that it did.
+	quarantined atomic.Uint64
 }
 
 // NewBeadsNudgeQueue returns the durable nudge queue backed by store.
@@ -184,9 +210,6 @@ func (q *beadsNudgeQueue) Enqueue(item nudgequeue.Item) error {
 		return errors.New("enqueueing nudge: empty nudge id")
 	}
 	now := time.Now().UTC()
-	if err := q.maintain(now); err != nil {
-		return err
-	}
 	exists, err := q.exists(item.ID)
 	if err != nil {
 		return err
@@ -219,10 +242,7 @@ func (q *beadsNudgeQueue) ClaimDue(target ClaimTarget, now time.Time) ([]nudgequ
 	if len(target.QueueKeys) == 0 {
 		return nil, nil
 	}
-	if err := q.maintain(now); err != nil {
-		return nil, err
-	}
-	entries, err := q.liveEntries(now)
+	entries, err := q.keyedEntries(target.QueueKeys, now)
 	if err != nil {
 		return nil, err
 	}
@@ -231,7 +251,12 @@ func (q *beadsNudgeQueue) ClaimDue(target ClaimTarget, now time.Time) ([]nudgequ
 		if entry.state != nudgeQueueStateLive {
 			continue
 		}
-		if !nudgeQueueMatchesKeys(entry.item.Agent, target.QueueKeys) {
+		if nudgeQueueItemExpired(entry.item, now) {
+			// Touched, so repaired: an expired item is dead-lettered here
+			// rather than left for the next maintenance pass.
+			if err := q.markDead(entry.item.ID, nudgeQueueExpiryReason(entry.item), "expired", now); err != nil {
+				return nil, err
+			}
 			continue
 		}
 		if entry.item.DeliverAfter.After(now) {
@@ -246,6 +271,14 @@ func (q *beadsNudgeQueue) ClaimDue(target ClaimTarget, now time.Time) ([]nudgequ
 
 	var claimed []nudgequeue.Item
 	for _, candidate := range candidates {
+		// A live candidate that still carries an assignee holds a lease that
+		// has run out. Claim refuses a bead another owner holds, so the stale
+		// lease is revoked first — the one targeted repair a claim needs.
+		if candidate.bead.Assignee != "" {
+			if err := q.revokeLease(candidate, now); err != nil {
+				return claimed, err
+			}
+		}
 		lease, err := newNudgeLease(now, nudgeQueueClaimLease)
 		if err != nil {
 			return claimed, err
@@ -276,7 +309,7 @@ func (q *beadsNudgeQueue) ClaimDue(target ClaimTarget, now time.Time) ([]nudgequ
 
 // ListForAgent returns the queue buckets addressed exactly to agentName.
 func (q *beadsNudgeQueue) ListForAgent(agentName string, now time.Time) (pending, inFlight, dead []nudgequeue.Item, err error) {
-	return q.buckets(now, func(item nudgequeue.Item) bool { return item.Agent == agentName })
+	return q.buckets([]string{agentName}, now)
 }
 
 // ListFor returns the queue buckets matching any of target's queue keys.
@@ -284,20 +317,25 @@ func (q *beadsNudgeQueue) ListFor(target ClaimTarget, now time.Time) (pending, i
 	if len(target.QueueKeys) == 0 {
 		return nil, nil, nil, nil
 	}
-	return q.buckets(now, func(item nudgequeue.Item) bool {
-		return nudgeQueueMatchesKeys(item.Agent, target.QueueKeys)
-	})
+	return q.buckets(target.QueueKeys, now)
 }
 
 // Snapshot returns every queued item in the canonical bucket order. Terminal
 // records are history and stay invisible, matching the queue the file backend
 // served where an acked item simply left.
+//
+// Snapshot is a whole-queue diagnostic, not a delivery read: it lists every
+// live record and fails on an undecodable one rather than hiding it.
 func (q *beadsNudgeQueue) Snapshot() (nudgequeue.State, error) {
-	state, err := q.bucketState(time.Now().UTC(), func(nudgequeue.Item) bool { return true })
+	now := time.Now().UTC()
+	entries, corrupt, err := q.allLiveEntries(now)
 	if err != nil {
 		return nudgequeue.State{}, err
 	}
-	return state, nil
+	if len(corrupt) > 0 {
+		return nudgequeue.State{}, corrupt[0]
+	}
+	return nudgeQueueBucketState(entries, now), nil
 }
 
 // Ack terminalizes delivered ids with the outcome vocabulary the shadow bead
@@ -307,9 +345,6 @@ func (q *beadsNudgeQueue) Ack(ids []string, outcome, reason, commitBoundary stri
 		return nil
 	}
 	now := time.Now().UTC()
-	if err := q.maintain(now); err != nil {
-		return err
-	}
 	for _, id := range nudgeQueueUniqueIDs(ids) {
 		if err := q.terminalize(id, outcome, reason, commitBoundary, now); err != nil {
 			return err
@@ -326,9 +361,6 @@ func (q *beadsNudgeQueue) ReleaseClaims(ids []string) error {
 		return nil
 	}
 	now := time.Now().UTC()
-	if err := q.maintain(now); err != nil {
-		return err
-	}
 	for _, id := range nudgeQueueUniqueIDs(ids) {
 		entry, found, err := q.entry(id, now)
 		if err != nil {
@@ -355,9 +387,6 @@ func (q *beadsNudgeQueue) RecordFailure(ids []string, cause error, now time.Time
 	if len(ids) == 0 {
 		return nil, nil
 	}
-	if err := q.maintain(now); err != nil {
-		return nil, err
-	}
 	permanent := errors.Is(cause, ErrNudgeSessionFenceMismatch)
 	var deadLettered []nudgequeue.Item
 	for _, id := range nudgeQueueUniqueIDs(ids) {
@@ -376,7 +405,7 @@ func (q *beadsNudgeQueue) RecordFailure(ids []string, cause error, now time.Time
 			}
 			item.ClaimedAt = time.Time{}
 			item.LeaseUntil = time.Time{}
-			expired := !item.ExpiresAt.IsZero() && !item.ExpiresAt.After(now)
+			expired := nudgeQueueItemExpired(item, now)
 			update := map[string]string{
 				nudgeMetaAttempts:      strconv.Itoa(item.Attempts),
 				nudgeMetaLastAttemptAt: formatNudgeTime(item.LastAttemptAt),
@@ -450,51 +479,54 @@ func (q *beadsNudgeQueue) WithdrawQueuedWaitNudges(ids []string) error {
 	return nil
 }
 
-// maintain applies the recovery transitions the deployed queue applies inside
-// its transaction: expiry, lease recovery, dead-letter aging, and the repair
-// of a terminal record whose bead close did not land. Each transition is
-// individually fenced and idempotent, so running them as a sequence rather
-// than as one transaction converges on the same state.
-func (q *beadsNudgeQueue) maintain(now time.Time) error {
-	entries, err := q.liveEntries(now)
+// Maintain applies the recovery transitions the deployed queue applies inside
+// its transaction — expiry, lease recovery, dead-letter aging, the repair of a
+// terminal record whose bead close did not land — and then sweeps retired
+// records past retention. Each transition is individually fenced and
+// idempotent, so running them as a sequence rather than as one transaction
+// converges on the same state.
+//
+// It is the only whole-queue pass. A record it cannot decode does not stop it:
+// the pass finishes the work it can do and then reports every corrupt record
+// it saw, each wrapping ErrBeadsNudgeQueueCorrupt.
+func (q *beadsNudgeQueue) Maintain(now time.Time) error {
+	entries, corrupt, err := q.allLiveEntries(now)
 	if err != nil {
 		return err
 	}
 	for _, entry := range entries {
-		switch entry.state {
-		case nudgeQueueStateLive, nudgeQueueInFlight:
-			expired := !entry.item.ExpiresAt.IsZero() && !entry.item.ExpiresAt.After(now)
-			if expired {
-				reason := entry.item.LastError
-				if reason == "" {
-					reason = "expired"
-				}
-				if err := q.markDead(entry.item.ID, reason, "expired", now); err != nil {
-					return err
-				}
-				continue
-			}
-			if entry.state == nudgeQueueStateLive && entry.bead.Assignee != "" {
-				if err := q.revokeLease(entry, now); err != nil {
-					return err
-				}
-			}
-		case nudgeQueueStateDead:
-			if entry.item.DeadAt.IsZero() || !entry.item.DeadAt.Before(now.Add(-nudgeQueueDeadRetention)) {
-				continue
-			}
-			if err := q.retireDeadLetter(entry, now); err != nil {
-				return err
-			}
-		case nudgeQueueStateTerminal:
-			// A terminal record whose bead is still open is a torn Ack: the
-			// lifecycle write committed and the close did not.
-			if err := q.closeRecord(entry.bead.ID); err != nil {
-				return err
-			}
+		if err := q.maintainEntry(entry, now); err != nil {
+			return err
 		}
 	}
-	return q.sweepTerminalRecords(now)
+	sweepCorrupt, err := q.sweepTerminalRecords(now)
+	if err != nil {
+		return err
+	}
+	return errors.Join(append(corrupt, sweepCorrupt...)...)
+}
+
+// maintainEntry applies the recovery transition one live record needs, if any.
+func (q *beadsNudgeQueue) maintainEntry(entry nudgeQueueEntry, now time.Time) error {
+	switch entry.state {
+	case nudgeQueueStateLive, nudgeQueueInFlight:
+		if nudgeQueueItemExpired(entry.item, now) {
+			return q.markDead(entry.item.ID, nudgeQueueExpiryReason(entry.item), "expired", now)
+		}
+		if entry.state == nudgeQueueStateLive && entry.bead.Assignee != "" {
+			return q.revokeLease(entry, now)
+		}
+	case nudgeQueueStateDead:
+		if entry.item.DeadAt.IsZero() || !entry.item.DeadAt.Before(now.Add(-nudgeQueueDeadRetention)) {
+			return nil
+		}
+		return q.retireDeadLetter(entry, now)
+	case nudgeQueueStateTerminal:
+		// A terminal record whose bead is still open is a torn Ack: the
+		// lifecycle write committed and the close did not.
+		return q.closeRecord(entry.bead.ID)
+	}
+	return nil
 }
 
 // sweepTerminalRecords deletes terminal queue records past
@@ -502,11 +534,8 @@ func (q *beadsNudgeQueue) maintain(now time.Time) error {
 // retirement closes the bead and nothing ever removes it, so a long-lived
 // city accumulates one dead row per nudge it has ever delivered, forever.
 //
-// The deployed queue solves this with a periodic SweepRetention the caller
-// tickers. This queue has no ticker and the closed NudgeQueue contract has no
-// sweep verb, so the sweep rides the maintenance pass every queue operation
-// already runs. That makes it self-bounding with no lifecycle plumbing: the
-// scan it adds is over exactly the records it is there to remove.
+// The sweep is part of Maintain, the owner-run pass, so its scan of closed
+// records never rides a delivery verb.
 //
 // Deleting a queue bead destroys no history. The queue's beads are its own
 // family (label "gc:nudge-queue"); the nudge SHADOW beads the audit trail is
@@ -514,8 +543,9 @@ func (q *beadsNudgeQueue) maintain(now time.Time) error {
 //
 // Each delete is revision-fenced, so a record another writer has just moved is
 // left alone and collected on the next pass rather than removed out from under
-// it.
-func (q *beadsNudgeQueue) sweepTerminalRecords(now time.Time) error {
+// it. A record whose terminal time does not parse is left in place and
+// returned as corrupt rather than stopping the sweep.
+func (q *beadsNudgeQueue) sweepTerminalRecords(now time.Time) ([]error, error) {
 	cutoff := now.Add(-nudgeQueueTerminalRetention)
 	records, err := q.store.List(beads.ListQuery{
 		Label:    nudgeQueueLabel,
@@ -524,12 +554,14 @@ func (q *beadsNudgeQueue) sweepTerminalRecords(now time.Time) error {
 		TierMode: beads.TierBoth,
 	})
 	if err != nil {
-		return fmt.Errorf("listing retired nudge queue records: %w", err)
+		return nil, fmt.Errorf("listing retired nudge queue records: %w", err)
 	}
+	var corrupt []error
 	for _, record := range records {
 		terminalAt, err := parseNudgeTime(record.Metadata[nudgeMetaTerminalAt])
 		if err != nil {
-			return fmt.Errorf("%w: bead %q field %s: %w", ErrBeadsNudgeQueueCorrupt, record.ID, nudgeMetaTerminalAt, err)
+			corrupt = append(corrupt, fmt.Errorf("%w: bead %q field %s: %w", ErrBeadsNudgeQueueCorrupt, record.ID, nudgeMetaTerminalAt, err))
+			continue
 		}
 		if terminalAt.IsZero() || !terminalAt.Before(cutoff) {
 			continue
@@ -542,9 +574,9 @@ func (q *beadsNudgeQueue) sweepTerminalRecords(now time.Time) error {
 		if errors.Is(err, beads.ErrNotFound) || errors.As(err, &stale) {
 			continue
 		}
-		return fmt.Errorf("deleting retired nudge record %q: %w", record.ID, err)
+		return nil, fmt.Errorf("deleting retired nudge record %q: %w", record.ID, err)
 	}
-	return nil
+	return corrupt, nil
 }
 
 // revokeLease clears a lease that has run out. ReleaseIfCurrent is the precise
@@ -676,8 +708,11 @@ func (q *beadsNudgeQueue) stampMissingTerminalFields(nudgeID, reason string, now
 }
 
 // supersede retires the queued entries the incoming item replaces.
+//
+// Supersession is scoped to one (agent, source, reference), so it reads only
+// the incoming item's own queue key.
 func (q *beadsNudgeQueue) supersede(item nudgequeue.Item, now time.Time) error {
-	entries, err := q.liveEntries(now)
+	entries, err := q.keyedEntries([]string{item.Agent}, now)
 	if err != nil {
 		return err
 	}
@@ -728,13 +763,23 @@ func nudgeQueueRecord(item nudgequeue.Item, state string, extra map[string]strin
 		ID:       nudgeQueueBeadID(item.ID),
 		Title:    "nudge-queue:" + item.ID,
 		Type:     nudgeQueueBeadType,
-		Labels:   []string{nudgeQueueLabel, "agent:" + item.Agent},
+		Labels:   nudgeQueueLabels(item),
 		Metadata: encodeNudgeItem(item, state, extra),
 	}
 	if state == nudgeQueueStateTerminal {
 		record.Status = "closed"
 	}
 	return record
+}
+
+// nudgeQueueLabels is a record's label set: the family label, the queue key it
+// is addressed to, and — for a session-pinned item — the exact session.
+func nudgeQueueLabels(item nudgequeue.Item) []string {
+	labels := []string{nudgeQueueLabel, nudgeQueueAgentLabelPrefix + item.Agent}
+	if item.SessionID != "" {
+		labels = append(labels, nudgeQueueTargetLabelPrefix+item.SessionID)
+	}
+	return labels
 }
 
 // mutate applies one revision-fenced transition to a queue bead, retrying the
@@ -828,61 +873,102 @@ func (q *beadsNudgeQueue) entry(nudgeID string, now time.Time) (nudgeQueueEntry,
 	return entry, true, nil
 }
 
-// liveEntries reads every record the queue still serves. Terminal records are
-// closed beads and are excluded by the read itself.
-func (q *beadsNudgeQueue) liveEntries(now time.Time) ([]nudgeQueueEntry, error) {
+// allLiveEntries reads every record the queue still serves, for the
+// whole-queue diagnostics and Maintain. Terminal records are closed beads and
+// are excluded by the read itself. Undecodable records are returned as errors
+// beside the entries that did decode.
+func (q *beadsNudgeQueue) allLiveEntries(now time.Time) ([]nudgeQueueEntry, []error, error) {
 	records, err := q.store.List(beads.ListQuery{
 		Label:    nudgeQueueLabel,
 		Sort:     beads.SortCreatedAsc,
 		TierMode: beads.TierBoth,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("listing nudge queue: %w", err)
+		return nil, nil, fmt.Errorf("listing nudge queue: %w", err)
 	}
-	entries := make([]nudgeQueueEntry, 0, len(records))
-	for _, record := range records {
-		entry, err := decodeNudgeQueueBead(record, now)
+	entries, corrupt := decodeNudgeQueueRecords(records, now)
+	return entries, corrupt, nil
+}
+
+// keyedEntries reads the live records addressed to any of keys: one List per
+// distinct key on its "agent:<key>" label, never the city-wide family label.
+// The key label is shared with other bead families in the same store (the
+// nudge shadows carry it too), so records outside the queue family are
+// dropped. An undecodable queue record is skipped and counted: it is
+// quarantined on its own instead of failing the read.
+func (q *beadsNudgeQueue) keyedEntries(keys []string, now time.Time) ([]nudgeQueueEntry, error) {
+	var entries []nudgeQueueEntry
+	for _, key := range nudgeQueueUniqueIDs(keys) {
+		records, err := q.store.List(beads.ListQuery{
+			Label:    nudgeQueueAgentLabelPrefix + key,
+			Sort:     beads.SortCreatedAsc,
+			TierMode: beads.TierBoth,
+		})
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("listing nudge queue for %q: %w", key, err)
 		}
-		entries = append(entries, entry)
+		family := records[:0]
+		for _, record := range records {
+			if nudgeQueueHasLabel(record, nudgeQueueLabel) {
+				family = append(family, record)
+			}
+		}
+		decoded, corrupt := decodeNudgeQueueRecords(family, now)
+		if len(corrupt) > 0 {
+			q.quarantined.Add(uint64(len(corrupt)))
+		}
+		entries = append(entries, decoded...)
 	}
 	return entries, nil
 }
 
-// buckets returns the three visible buckets for the matching items.
-func (q *beadsNudgeQueue) buckets(now time.Time, match func(nudgequeue.Item) bool) (pending, inFlight, dead []nudgequeue.Item, err error) {
-	if err := q.maintain(now); err != nil {
-		return nil, nil, nil, err
+// decodeNudgeQueueRecords decodes records, separating the ones that do not
+// decode instead of failing on the first.
+func decodeNudgeQueueRecords(records []beads.Bead, now time.Time) ([]nudgeQueueEntry, []error) {
+	entries := make([]nudgeQueueEntry, 0, len(records))
+	var corrupt []error
+	for _, record := range records {
+		entry, err := decodeNudgeQueueBead(record, now)
+		if err != nil {
+			corrupt = append(corrupt, err)
+			continue
+		}
+		entries = append(entries, entry)
 	}
-	state, err := q.bucketState(now, match)
+	return entries, corrupt
+}
+
+// buckets returns the three visible buckets for the records addressed to keys.
+// It is a pure read: nothing it sees is repaired.
+func (q *beadsNudgeQueue) buckets(keys []string, now time.Time) (pending, inFlight, dead []nudgequeue.Item, err error) {
+	entries, err := q.keyedEntries(keys, now)
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	state := nudgeQueueBucketState(entries, now)
 	return state.Pending, state.InFlight, state.Dead, nil
 }
 
-func (q *beadsNudgeQueue) bucketState(now time.Time, match func(nudgequeue.Item) bool) (nudgequeue.State, error) {
-	entries, err := q.liveEntries(now)
-	if err != nil {
-		return nudgequeue.State{}, err
-	}
+// nudgeQueueBucketState projects entries onto the visible buckets in the
+// canonical order. A live item past its deliver-by deadline reads as dead by
+// arithmetic, exactly as an expired lease reads as pending: the projection
+// does not wait for Maintain to record what the clock already decided.
+func nudgeQueueBucketState(entries []nudgeQueueEntry, now time.Time) nudgequeue.State {
 	var state nudgequeue.State
 	for _, entry := range entries {
-		if !match(entry.item) {
-			continue
-		}
-		switch entry.state {
-		case nudgeQueueStateLive:
-			state.Pending = append(state.Pending, entry.item)
-		case nudgeQueueInFlight:
-			state.InFlight = append(state.InFlight, entry.item)
-		case nudgeQueueStateDead:
+		switch {
+		case entry.state == nudgeQueueStateDead:
 			state.Dead = append(state.Dead, entry.item)
+		case (entry.state == nudgeQueueStateLive || entry.state == nudgeQueueInFlight) && nudgeQueueItemExpired(entry.item, now):
+			state.Dead = append(state.Dead, nudgeQueueExpiredView(entry.item))
+		case entry.state == nudgeQueueStateLive:
+			state.Pending = append(state.Pending, entry.item)
+		case entry.state == nudgeQueueInFlight:
+			state.InFlight = append(state.InFlight, entry.item)
 		}
 	}
 	nudgequeue.SortState(&state)
-	return state, nil
+	return state
 }
 
 // nudgeQueueEntry is one decoded queue record and its derived state.
@@ -1033,13 +1119,37 @@ func nudgeQueuePassesFence(item nudgequeue.Item, target ClaimTarget) bool {
 	return item.ContinuationEpoch == "" || target.ContinuationEpoch != ""
 }
 
-func nudgeQueueMatchesKeys(agent string, keys []string) bool {
-	for _, key := range keys {
-		if key == agent {
+func nudgeQueueHasLabel(record beads.Bead, label string) bool {
+	for _, have := range record.Labels {
+		if have == label {
 			return true
 		}
 	}
 	return false
+}
+
+// nudgeQueueItemExpired reports whether item's deliver-by deadline has passed.
+func nudgeQueueItemExpired(item nudgequeue.Item, now time.Time) bool {
+	return !item.ExpiresAt.IsZero() && !item.ExpiresAt.After(now)
+}
+
+// nudgeQueueExpiryReason is the last error an expired item is dead-lettered
+// with: the failure that preceded the expiry, if there was one.
+func nudgeQueueExpiryReason(item nudgequeue.Item) string {
+	if item.LastError != "" {
+		return item.LastError
+	}
+	return "expired"
+}
+
+// nudgeQueueExpiredView is how an expired item that Maintain has not yet
+// dead-lettered reads: dead since its deadline, with no claim.
+func nudgeQueueExpiredView(item nudgequeue.Item) nudgequeue.Item {
+	item.LastError = nudgeQueueExpiryReason(item)
+	item.DeadAt = item.ExpiresAt
+	item.ClaimedAt = time.Time{}
+	item.LeaseUntil = time.Time{}
+	return item
 }
 
 func nudgeQueueSortPending(entries []nudgeQueueEntry) {

@@ -330,5 +330,6 @@ func (nudgeQueueFake) RecordFailure([]string, error, time.Time) ([]nudgequeue.It
 }
 func (nudgeQueueFake) Rollback(nudgequeue.Item, string) error  { return nil }
 func (nudgeQueueFake) WithdrawQueuedWaitNudges([]string) error { return nil }
+func (nudgeQueueFake) Maintain(time.Time) error                { return nil }
 
 var _ NudgeQueue = nudgeQueueFake{}
