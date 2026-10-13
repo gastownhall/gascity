@@ -7116,3 +7116,49 @@ func TestTryDeliverQueuedNudgesByPollerSkipsADeadAgent(t *testing.T) {
 		t.Fatalf("pending %d (%v), want the message kept for the next incarnation", len(pending), err)
 	}
 }
+
+// TestCrashQueuedMessageSurvivesEpochRotation (mc-48az4, mc-wdjni): a
+// message submitted over a crashed agent is queued with the current epoch's
+// stamp, held off the dead pane, and delivered to the healed incarnation
+// even after the heal rotated the continuation epoch: delivery re-stamps the
+// live epoch (#5775), so no empty-epoch fence is needed.
+func TestCrashQueuedMessageSurvivesEpochRotation(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Start(context.Background(), testOperatorIn(t, dir), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := store.SetMetadata(info.ID, "continuation_epoch", "3"); err != nil {
+		t.Fatal(err)
+	}
+	hints := runtime.Config{WorkDir: dir, ProcessNames: []string{"codex"}}
+	fake.Zombies[info.SessionName] = true
+	out, err := mgr.Submit(context.Background(), session.Actor{Kind: session.ActorBackground}, info.ID, "after the crash", "", hints, session.SubmitIntentDefault)
+	if err != nil || !out.Queued {
+		t.Fatalf("submit over the crash: %+v %v, want queued", out, err)
+	}
+	idleSince := time.Now().Add(-10 * time.Second)
+	fake.Activity = map[string]time.Time{info.SessionName: idleSince}
+	target := nudgeTarget{cityPath: dir, agent: config.Agent{Name: "worker"}, sessionID: info.ID, continuationEpoch: "3", resolved: &config.ResolvedProvider{Name: "codex"}, sessionName: info.SessionName, alias: info.Alias}
+	if ok, err := tryDeliverQueuedNudgesByPoller(target, store.Store, store.Store, fake, 3*time.Second, worker.LiveObservation{Running: true, Alive: false, LastActivity: &idleSince}); ok || err != nil {
+		t.Fatalf("delivered into the dead pane: %v %v", ok, err)
+	}
+	// The heal: a new incarnation with a rotated epoch (conversation reset).
+	delete(fake.Zombies, info.SessionName)
+	if err := store.SetMetadata(info.ID, "continuation_epoch", "4"); err != nil {
+		t.Fatal(err)
+	}
+	target.continuationEpoch = "4"
+	nudgesBefore := fake.CountCalls("Nudge", info.SessionName)
+	ok, err := tryDeliverQueuedNudgesByPoller(target, store.Store, store.Store, fake, 3*time.Second, worker.LiveObservation{Running: true, Alive: true, LastActivity: &idleSince})
+	if !ok || err != nil || fake.CountCalls("Nudge", info.SessionName) == nudgesBefore {
+		t.Fatalf("after the heal: delivered=%v err=%v, want the queued message delivered to the epoch-4 incarnation", ok, err)
+	}
+}

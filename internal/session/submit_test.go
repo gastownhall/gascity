@@ -2301,9 +2301,10 @@ func TestRespondReportsUnavailableActionAsMismatch(t *testing.T) {
 // right after the agent crashed, its pane still up but the agent dead and
 // the controller's heal not yet run, is queued for the incarnation the heal
 // brings up (queued, deferred: the controller is poked) rather than typed
-// into the dead pane and lost; it is fenced by the session alone, so the
-// crash heal's conversation reset (an epoch rotation) does not dead-letter
-// it. A live agent's message is delivered as before.
+// into the dead pane and lost. It keeps the current epoch's stamp: delivery
+// re-stamps the live epoch, so a heal's rotation does not lose it
+// (TestCrashQueuedMessageSurvivesEpochRotation in cmd/gc). A live agent's
+// message is delivered as before.
 func TestSubmitDefaultQueuesOverACrashedAgent(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
@@ -2339,13 +2340,140 @@ func TestSubmitDefaultQueuesOverACrashedAgent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(state.Pending) != 1 || state.Pending[0].SessionID != info.ID || state.Pending[0].Message != "after the crash" || state.Pending[0].ContinuationEpoch != "" {
-		t.Fatalf("pending %+v, want the message queued for the session with no epoch fence", state.Pending)
+	if len(state.Pending) != 1 || state.Pending[0].SessionID != info.ID || state.Pending[0].Message != "after the crash" {
+		t.Fatalf("pending %+v, want the message queued for the session", state.Pending)
 	}
 
 	delete(sp.Zombies, info.SessionName)
 	outcome, err = mgr.Submit(context.Background(), testActor(mgr, ActorBackground), info.ID, "to a live agent", BuildResumeCommand(info), hints, SubmitIntentDefault)
 	if err != nil || outcome.Queued {
 		t.Fatalf("live: outcome %+v (%v), want delivered", outcome, err)
+	}
+}
+
+// TestSendPathsQueueOverACrashedAgent (mc-wdjni): every send path, not only
+// Submit's default, holds text off a pane whose agent is dead: Send and
+// SendImmediate queue it (queued, deferred), the live-only sends and the
+// wait-idle nudges report it undelivered for their caller to queue, and
+// nothing is typed into the pane. A suspended row with its pane up is no
+// such pane: an operator's resume resumes it (the suspended exclusion).
+func TestSendPathsQueueOverACrashedAgent(t *testing.T) {
+	setup := func(t *testing.T) (*Manager, *runtime.Fake, Info, string, runtime.Config) {
+		store := beads.NewMemStore()
+		sp := runtime.NewFake()
+		cityPath := t.TempDir()
+		mgr := NewManagerWithOptions(store, sp, WithCityPath(cityPath))
+		info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		origPoller := startSessionSubmitPoller
+		startSessionSubmitPoller = func(string, string, string) error { return nil }
+		t.Cleanup(func() { startSessionSubmitPoller = origPoller })
+		sp.Zombies[info.SessionName] = true
+		return mgr, sp, info, cityPath, runtime.Config{WorkDir: info.WorkDir, ProcessNames: []string{"claude"}}
+	}
+	nudged := func(sp *runtime.Fake, name string, before int) bool {
+		for _, call := range sp.Calls[before:] {
+			if call.Name == name && (call.Method == "Nudge" || call.Method == "NudgeNow") {
+				return true
+			}
+		}
+		return false
+	}
+	for name, send := range map[string]func(*Manager, Info, runtime.Config) (SubmitOutcome, error){
+		"Send": func(m *Manager, i Info, h runtime.Config) (SubmitOutcome, error) {
+			return m.Send(context.Background(), testActor(m, ActorBackground), i.ID, "after the crash", BuildResumeCommand(i), h)
+		},
+		"SendImmediate": func(m *Manager, i Info, h runtime.Config) (SubmitOutcome, error) {
+			return m.SendImmediate(context.Background(), testActor(m, ActorBackground), i.ID, "after the crash", BuildResumeCommand(i), h)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			mgr, sp, info, cityPath, hints := setup(t)
+			before := len(sp.Calls)
+			out, err := send(mgr, info, hints)
+			if err != nil || !out.Queued || !out.Deferred || nudged(sp, info.SessionName, before) {
+				t.Fatalf("outcome %+v (%v), nudged %t: want queued and deferred, nothing typed", out, err, nudged(sp, info.SessionName, before))
+			}
+			if state, err := nudgequeue.LoadState(cityPath); err != nil || len(state.Pending) != 1 {
+				t.Fatalf("pending %+v (%v), want the message queued", state.Pending, err)
+			}
+		})
+	}
+	t.Run("live-only and wait-idle", func(t *testing.T) {
+		mgr, sp, info, _, hints := setup(t)
+		before := len(sp.Calls)
+		for name, deliver := range map[string]func() (bool, error){
+			"SendLiveOnly": func() (bool, error) { return mgr.SendLiveOnly(context.Background(), info.ID, "x", hints.ProcessNames) },
+			"SendImmediateLiveOnly": func() (bool, error) {
+				return mgr.SendImmediateLiveOnly(context.Background(), info.ID, "x", hints.ProcessNames)
+			},
+			"TryWaitIdleNudgeLiveOnly": func() (bool, error) {
+				return mgr.TryWaitIdleNudgeLiveOnly(context.Background(), info.ID, "session", "x", hints.ProcessNames)
+			},
+			"TryWaitIdleNudge": func() (bool, error) {
+				return mgr.TryWaitIdleNudge(context.Background(), testActor(mgr, ActorBackground), info.ID, "session", "x", BuildResumeCommand(info), hints)
+			},
+		} {
+			if delivered, err := deliver(); err != nil || delivered {
+				t.Errorf("%s = %t, %v; want undelivered over the dead agent", name, delivered, err)
+			}
+		}
+		// An ACP session's wait-idle nudge goes straight to the pane: held
+		// off a dead agent too.
+		if err := mgr.store.SetMetadata(info.ID, "transport", "acp"); err != nil {
+			t.Fatal(err)
+		}
+		if delivered, err := mgr.TryWaitIdleNudgeLiveOnly(context.Background(), info.ID, "session", "x", hints.ProcessNames); err != nil || delivered {
+			t.Errorf("ACP TryWaitIdleNudgeLiveOnly = %t, %v; want undelivered over the dead agent", delivered, err)
+		}
+		if nudged(sp, info.SessionName, before) {
+			t.Fatal("a send typed into the dead pane")
+		}
+	})
+	t.Run("suspended exclusion", func(t *testing.T) {
+		mgr, _, info, cityPath, hints := setup(t)
+		if err := mgr.store.SetMetadata(info.ID, "state", string(StateSuspended)); err != nil {
+			t.Fatal(err)
+		}
+		out, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "resume me", BuildResumeCommand(info), hints, SubmitIntentDefault)
+		if err != nil || out.Queued {
+			t.Fatalf("outcome %+v (%v), want the operator's resume to resume the suspended row, not queue", out, err)
+		}
+		if state, _ := nudgequeue.LoadState(cityPath); len(state.Pending) != 0 {
+			t.Fatalf("pending %+v, want nothing queued", state.Pending)
+		}
+	})
+}
+
+// emptyNamesDeadFake answers ProcessAlive false for an empty process-name
+// list, as a provider that cannot check may.
+type emptyNamesDeadFake struct{ *runtime.Fake }
+
+func (f emptyNamesDeadFake) ProcessAlive(name string, processNames []string) bool {
+	if len(processNames) == 0 {
+		return false
+	}
+	return f.Fake.ProcessAlive(name, processNames)
+}
+
+// TestSendWithoutProcessNamesReadsAlive (mc-wdjni): with no process names to
+// check, the agent reads alive whatever the provider answers for an empty
+// list, as the runtime's liveness does, so the text is delivered.
+func TestSendWithoutProcessNamesReadsAlive(t *testing.T) {
+	store := beads.NewMemStore()
+	fake := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, emptyNamesDeadFake{fake}, WithCityPath(t.TempDir()))
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	out, err := mgr.Send(context.Background(), testActor(mgr, ActorBackground), info.ID, "hello", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir})
+	if err != nil || out.Queued {
+		t.Fatalf("outcome %+v (%v), want delivered", out, err)
+	}
+	if delivered, err := mgr.SendLiveOnly(context.Background(), info.ID, "hello", nil); err != nil || !delivered {
+		t.Fatalf("SendLiveOnly = %t, %v; want delivered", delivered, err)
 	}
 }

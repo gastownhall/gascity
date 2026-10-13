@@ -143,18 +143,6 @@ func (m *Manager) submit(ctx context.Context, by Actor, id, message, resumeComma
 			return m.interruptAndSubmitLocked(ctx, by, id, b, sessName, message, resumeCommand, hints)
 		default:
 			running := m.sp.IsRunning(sessName)
-			if running && State(b.Metadata["state"]) != StateSuspended && len(hints.ProcessNames) > 0 && !m.sp.ProcessAlive(sessName, hints.ProcessNames) {
-				// The pane is up but its agent is dead: a crash the controller
-				// has not healed yet. Text typed into that pane is lost with
-				// it, so queue it for the incarnation the heal brings up, and
-				// fenced by the session alone: the crash heal may reset the
-				// conversation and rotate its epoch (mc-48az4).
-				if err := m.enqueueDeferredSubmitEpochLocked(b, sessName, message, ""); err != nil {
-					return err
-				}
-				outcome.Queued, outcome.Deferred = true, true
-				return nil
-			}
 			if pendingConversationRestart(b) && !running {
 				// A reset or restart is recorded but the replacement runtime is
 				// not up yet. Delivering now would start the pane just to carry
@@ -669,12 +657,6 @@ func needsDeferredStartupDialogVerification(b beads.Bead) bool {
 }
 
 func (m *Manager) enqueueDeferredSubmitLocked(b beads.Bead, sessName, message string) error {
-	return m.enqueueDeferredSubmitEpochLocked(b, sessName, message, deferredSubmitEpoch(b))
-}
-
-// enqueueDeferredSubmitEpochLocked is enqueueDeferredSubmitLocked fenced to
-// epoch ("" fences by the session alone).
-func (m *Manager) enqueueDeferredSubmitEpochLocked(b beads.Bead, sessName, message, epoch string) error {
 	if strings.TrimSpace(m.cityPath) == "" {
 		return errors.New("deferred submit is unavailable without a city path")
 	}
@@ -683,7 +665,7 @@ func (m *Manager) enqueueDeferredSubmitEpochLocked(b beads.Bead, sessName, messa
 		ID:                "nudge-" + NewInstanceToken()[:12],
 		Agent:             deferredSubmitAgentKey(b),
 		SessionID:         b.ID,
-		ContinuationEpoch: epoch,
+		ContinuationEpoch: deferredSubmitEpoch(b),
 		Source:            "session",
 		Message:           message,
 		CreatedAt:         now,
@@ -706,18 +688,14 @@ func (m *Manager) enqueueDeferredSubmitEpochLocked(b beads.Bead, sessName, messa
 // deferredSubmitEpoch returns the continuation epoch a deferred submit is
 // fenced against.
 //
-// A submit deferred while a conversation reset is pending must survive the
-// reset's epoch rotation: commitPendingContinuationReset advances
-// continuation_epoch N->N+1 when the replacement incarnation starts, which
-// happens after this item is queued. A fixed epoch-N stamp would then fail the
-// queued-nudge fence (queuedNudgeMatchesTargetFence) and be dead-lettered,
-// silently dropping the message. Returning an empty epoch leaves the item
-// fenced by SessionID alone, so the post-reset incarnation — same session
-// bead, epoch N+1 — still claims and delivers it.
-//
-// A plain restart (restart_requested without a reset) does not rotate the
-// epoch, so those defers keep the current-epoch stamp and stay fenced to the
-// resumed conversation.
+// A submit deferred while a conversation reset is pending is fenced by its
+// session alone (an empty epoch): commitPendingContinuationReset advances
+// continuation_epoch N->N+1 when the replacement incarnation starts, after
+// this item is queued. Any other defer keeps the current epoch's stamp. An
+// epoch rotated since (a reset, or a crash heal's) does not lose the item:
+// since #5775 delivery re-stamps an item for the same session with the live
+// epoch (splitQueuedNudgesForTarget) and delivers it, so the stamp records
+// the conversation the message was written for, not a gate on delivery.
 func deferredSubmitEpoch(b beads.Bead) string {
 	if strings.TrimSpace(b.Metadata["continuation_reset_pending"]) != "" {
 		return ""

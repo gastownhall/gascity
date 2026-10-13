@@ -11,6 +11,11 @@ var (
 	// ErrResumeHeld reports that the actor may not resume a held session
 	// (CONTRACT v5.9 D8 rule 1). Nothing was started or written.
 	ErrResumeHeld = errors.New("session is held; not resumed")
+	// ErrAgentDead reports a runtime whose pane is up but whose agent is
+	// dead: a crash the controller has not healed yet. Text delivered into
+	// it would be lost with the pane, so a send queues it for the
+	// incarnation the heal brings up (mc-48az4, mc-wdjni).
+	ErrAgentDead = errors.New("session's agent is dead; its pane is up until the controller heals it")
 	// ErrWakeRequestContended reports a wake request whose CAS lost on every
 	// attempt; nothing was written. Retry.
 	ErrWakeRequestContended = errors.New("wake request lost to concurrent writes; retry")
