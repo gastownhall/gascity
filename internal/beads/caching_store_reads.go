@@ -722,20 +722,62 @@ func (c *CachingStore) rowReadDisagreesLocked(id string, fresh Bead, found bool)
 // It is on *CachingStore only, with no optional interface: the caller needs
 // the leg's cache itself, as it does for ObservedList, and unwraps a policy
 // layer to reach it.
+//
+// RefreshRow never announces the close of a row the cache did not hold; see
+// RefreshRowReport for the caller that has evidence such a close is recent.
 func (c *CachingStore) RefreshRow(id string) (Bead, error) {
+	rep, err := c.RefreshRowReport(id, RowRefreshOptions{})
+	if err != nil {
+		return Bead{}, err
+	}
+	return rep.Bead, nil
+}
+
+// RowRefreshOptions adjusts RefreshRowReport.
+type RowRefreshOptions struct {
+	// AnnounceUnheldClose announces, as bead.closed (ChangeRefresh), a closed
+	// row the refresh installs that the cache did not hold, unless a closing
+	// write of this cache is in flight for it (that write announces it). Pass
+	// it only with evidence the row closed recently: a re-scan holds no
+	// closed rows, so without it a long-closed row would be announced again
+	// every time a read installed it.
+	AnnounceUnheldClose bool
+}
+
+// RowRefresh reports what one RefreshRowReport did.
+type RowRefresh struct {
+	// Bead is the installed row. On ErrNotFound it is the evicted copy,
+	// marked closed as its notification was, or the zero Bead when the cache
+	// held none.
+	Bead Bead
+	// Found reports whether the backing has the row.
+	Found bool
+	// Held reports whether the cache held the row before the refresh.
+	Held bool
+	// Event is the notification the refresh emitted: "", "bead.created",
+	// "bead.updated" or "bead.closed".
+	Event string
+}
+
+// RefreshRowReport is RefreshRow, reporting what the refresh found and what
+// it notified, for a caller that acts on whether anything changed (the
+// controller's journal feed). Errors are RefreshRow's; on ErrNotFound the
+// report is filled in too. opts.AnnounceUnheldClose is the one difference in
+// behavior (RowRefreshOptions).
+func (c *CachingStore) RefreshRowReport(id string, opts RowRefreshOptions) (RowRefresh, error) {
 	if !c.ownsBeadID(id) {
-		return Bead{}, fmt.Errorf("refresh %s: not this cache's id: %w", id, ErrCacheUnavailable)
+		return RowRefresh{}, fmt.Errorf("refresh %s: not this cache's id: %w", id, ErrCacheUnavailable)
 	}
 	c.mu.RLock()
 	live := c.state == cacheLive || c.state == cachePartial
 	startSeq, startScan := c.mutationSeq, c.scanGen
 	c.mu.RUnlock()
 	if !live {
-		return Bead{}, fmt.Errorf("refresh %s: %w", id, ErrCacheUnavailable)
+		return RowRefresh{}, fmt.Errorf("refresh %s: %w", id, ErrCacheUnavailable)
 	}
 	fresh, readErr := c.backing.Get(id)
 	if readErr != nil && !errors.Is(readErr, ErrNotFound) {
-		return Bead{}, readErr
+		return RowRefresh{}, readErr
 	}
 	found := readErr == nil
 	var freshDeps []Dep
@@ -743,7 +785,7 @@ func (c *CachingStore) RefreshRow(id string) (Bead, error) {
 	if found && !c.rowAnswersEdges(fresh) {
 		deps, err := c.backing.DepList(id, "down")
 		if err != nil {
-			return Bead{}, fmt.Errorf("refresh %s deps: %w", id, err)
+			return RowRefresh{}, fmt.Errorf("refresh %s deps: %w", id, err)
 		}
 		freshDeps, depsFromBacking = deps, true
 	}
@@ -751,31 +793,36 @@ func (c *CachingStore) RefreshRow(id string) (Bead, error) {
 	c.mu.Lock()
 	if c.state != cacheLive && c.state != cachePartial {
 		c.mu.Unlock()
-		return Bead{}, fmt.Errorf("refresh %s: %w", id, ErrCacheUnavailable)
+		return RowRefresh{}, fmt.Errorf("refresh %s: %w", id, ErrCacheUnavailable)
 	}
 	if c.refetchFencedLocked(id, startSeq) || c.scanGen != startScan {
 		c.mu.Unlock()
-		return Bead{}, fmt.Errorf("refresh %s: %w", id, ErrRowRefreshFenced)
+		return RowRefresh{}, fmt.Errorf("refresh %s: %w", id, ErrRowRefreshFenced)
 	}
 	cached, held := c.beads[id]
 	cachedDeps := c.deps[id]
+	announceUnheld := opts.AnnounceUnheldClose && found && !held && fresh.Status == "closed" && c.closeIntents[id] == nil
 	var installed Bead
 	evicted := false
 	if found {
-		opts := absorbOpts{depsMode: depsFromFieldsIfCarried, seqMode: seqKeep, clearDirty: true}
-		// RefreshRow announces the close of a row it held open itself
-		// (rowRefreshChange), so that close is not queued as well.
-		opts.closeAnnounced = held && cached.Status != "closed" && fresh.Status == "closed"
+		absorb := absorbOpts{depsMode: depsFromFieldsIfCarried, seqMode: seqKeep, clearDirty: true}
+		// RefreshRowReport announces the close of a row it held open itself
+		// (rowRefreshChange), and of an unheld row when asked to, so neither
+		// close is queued as well.
+		absorb.closeAnnounced = (held && cached.Status != "closed" && fresh.Status == "closed") || announceUnheld
 		if depsFromBacking {
-			opts.depsMode, opts.deps = depsExplicit, freshDeps
+			absorb.depsMode, absorb.deps = depsExplicit, freshDeps
 		}
-		c.absorbFreshLocked(id, fresh, c.clockNow(), opts)
+		c.absorbFreshLocked(id, fresh, c.clockNow(), absorb)
 		installed = cloneBead(c.beads[id])
 	} else if _, dirty := c.dirty[id]; held || dirty {
 		c.evictLocked(id)
 		evicted = true
 	}
 	eventType, changed := rowRefreshChange(held, cached, cachedDeps, found, installed, c.deps[id])
+	if announceUnheld {
+		eventType = "bead.closed"
+	}
 	if eventType == "bead.closed" {
 		c.noteCloseAnnouncedLocked(id)
 	}
@@ -791,18 +838,22 @@ func (c *CachingStore) RefreshRow(id string) (Bead, error) {
 	}
 	c.mu.Unlock()
 
+	rep := RowRefresh{Found: found, Held: held, Event: eventType}
 	if !found {
-		if eventType != "" {
-			gone := cloneBead(cached)
-			setBeadStatus(&gone, "closed")
-			c.notifyChange(ChangeRefresh, eventType, gone)
+		if held {
+			rep.Bead = cloneBead(cached)
+			if eventType != "" {
+				setBeadStatus(&rep.Bead, "closed")
+				c.notifyChange(ChangeRefresh, eventType, rep.Bead)
+			}
 		}
-		return Bead{}, readErr
+		return rep, readErr
 	}
+	rep.Bead = installed
 	if eventType != "" {
 		c.notifyChange(ChangeRefresh, eventType, installed)
 	}
-	return installed, nil
+	return rep, nil
 }
 
 // rowRefreshChange decides whether RefreshRow changed id's cached state and
