@@ -146,7 +146,7 @@ func (r *recordingLeaf) localSidecarHandle() *localSidecar {
 // opener latches it.
 func newSplitFixture(t *testing.T) (*ProxiedStore, *NativeDoltStore, *recordingLeaf) {
 	t.Helper()
-	storage := &nativeDoltMemStorage{store: &MemStore{IDPrefix: "prx", HonorExplicitIDs: true}}
+	storage := &nativeDoltMemStorage{store: &MemStore{storageOnly: true, IDPrefix: "prx", HonorExplicitIDs: true}}
 
 	native := newNativeDoltStoreForTest(storage, WithProxiedReadOnly())
 	native.idPrefix = "prx"
@@ -667,7 +667,7 @@ func TestProxiedStoreMutationRepinsAcrossProxyRestart(t *testing.T) {
 
 	t.Run("a generation change across a write stands the native leaf down", func(t *testing.T) {
 		writeRecord(t, 4001, 45123, proxyendpoint.BirthToken("boot", "111"))
-		storage := &nativeDoltMemStorage{store: &MemStore{IDPrefix: "prx", HonorExplicitIDs: true}}
+		storage := &nativeDoltMemStorage{store: &MemStore{storageOnly: true, IDPrefix: "prx", HonorExplicitIDs: true}}
 		native := newNativeDoltStoreForTest(storage, WithProxiedReadOnly())
 		restarting := &restartingLeaf{Store: newNativeDoltStoreForTest(storage), onWrite: func() {
 			// bd's child restarted the proxy while the write was in flight.
@@ -695,7 +695,7 @@ func TestProxiedStoreMutationRepinsAcrossProxyRestart(t *testing.T) {
 
 	t.Run("a steady generation leaves the native leaf alone", func(t *testing.T) {
 		writeRecord(t, 4001, 45123, proxyendpoint.BirthToken("boot", "111"))
-		storage := &nativeDoltMemStorage{store: &MemStore{IDPrefix: "prx", HonorExplicitIDs: true}}
+		storage := &nativeDoltMemStorage{store: &MemStore{storageOnly: true, IDPrefix: "prx", HonorExplicitIDs: true}}
 		native := newNativeDoltStoreForTest(storage, WithProxiedReadOnly())
 		store, err := NewProxiedStore(native, newNativeDoltStoreForTest(storage), PinForTest("/scope", root, "beads"))
 		if err != nil {
@@ -711,7 +711,7 @@ func TestProxiedStoreMutationRepinsAcrossProxyRestart(t *testing.T) {
 
 	t.Run("an unreadable record is not treated as a change", func(t *testing.T) {
 		writeRecord(t, 4001, 45123, proxyendpoint.BirthToken("boot", "111"))
-		storage := &nativeDoltMemStorage{store: &MemStore{IDPrefix: "prx", HonorExplicitIDs: true}}
+		storage := &nativeDoltMemStorage{store: &MemStore{storageOnly: true, IDPrefix: "prx", HonorExplicitIDs: true}}
 		native := newNativeDoltStoreForTest(storage, WithProxiedReadOnly())
 		removing := &restartingLeaf{Store: newNativeDoltStoreForTest(storage), onWrite: func() {
 			// bd removes the record on an orderly stop and rewrites it on start,
@@ -953,7 +953,7 @@ func TestProxiedStoreBracketsTheConditionalWriteHandles(t *testing.T) {
 	newSplit := func(t *testing.T, restart bool) *ProxiedStore {
 		t.Helper()
 		writeRecord(t, 4001, 45123, proxyendpoint.BirthToken("boot", "111"))
-		storage := &nativeDoltMemStorage{store: &MemStore{IDPrefix: "prx", HonorExplicitIDs: true}}
+		storage := &nativeDoltMemStorage{store: &MemStore{storageOnly: true, IDPrefix: "prx", HonorExplicitIDs: true}}
 		native := newNativeDoltStoreForTest(storage, WithProxiedReadOnly())
 		leaf := &conditionalRestartLeaf{Store: newNativeDoltStoreForTest(storage), onWrite: func() {
 			if restart {
@@ -1110,7 +1110,7 @@ func TestProxiedStoreBracketsEveryInsideWriteMethod(t *testing.T) {
 	newSplit := func(t *testing.T, restart bool) *ProxiedStore {
 		t.Helper()
 		writeRecord(t, 4001, 45123, proxyendpoint.BirthToken("boot", "111"))
-		storage := &nativeDoltMemStorage{store: &MemStore{IDPrefix: "prx", HonorExplicitIDs: true}}
+		storage := &nativeDoltMemStorage{store: &MemStore{storageOnly: true, IDPrefix: "prx", HonorExplicitIDs: true}}
 		native := newNativeDoltStoreForTest(storage, WithProxiedReadOnly())
 		leaf := &bracketLeaf{Store: newNativeDoltStoreForTest(storage), onWrite: func() {
 			if restart {
@@ -1207,7 +1207,7 @@ func TestProxiedStoreBracketsEveryInsideWriteMethod(t *testing.T) {
 // or that hands out some third object, fails here and the register has to be
 // rewritten with it.
 func TestProxiedStoreConditionalResolveTargetIsTheDocumentedGap(t *testing.T) {
-	storage := &nativeDoltMemStorage{store: &MemStore{IDPrefix: "prx", HonorExplicitIDs: true}}
+	storage := &nativeDoltMemStorage{store: &MemStore{storageOnly: true, IDPrefix: "prx", HonorExplicitIDs: true}}
 	native := newNativeDoltStoreForTest(storage, WithProxiedReadOnly())
 	bd := &conditionalRestartLeaf{Store: newNativeDoltStoreForTest(storage), onWrite: func() {}}
 	store, err := NewProxiedStore(native, bd, PinForTest("/scope", "", "beads"))

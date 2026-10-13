@@ -35,6 +35,7 @@ type passTrace struct {
 	Err                string
 	Admitted, Deferred []intent
 	Rows               []rowTrace
+	IdleDefers         []rowTrace // A15's ladder deferrals, legacy's idle-timeout trace
 	Alerts             []string
 }
 
@@ -43,6 +44,7 @@ type passTrace struct {
 // name, which the trace sink files it under.
 type rowTrace struct {
 	Key                   rowKey
+	Site                  TraceSiteCode // the trace site; zero is the v2 session decision
 	Template, SessionName string
 	Reason, Outcome       string
 }
@@ -98,6 +100,7 @@ func (p *planner) tracePass(e gatherEnv, now time.Time) passResult {
 		return passResult{}
 	}
 	rec.Alerts = a.Alerts
+	rec.IdleDefers = p.idleWants(&w, &a)
 
 	running := make(map[rowKey]bool)
 	for _, f := range w.InFlight.Entries {
@@ -122,10 +125,13 @@ func (p *planner) tracePass(e gatherEnv, now time.Time) passResult {
 	for _, ap := range a.Plans {
 		intents = append(intents, createIntent(cfg, w.Env.ConfigRev, ap))
 	}
+	closeSoftReload(&w, &a)
 	var unregistered []intent
 	if p.effects != nil {
 		intents, unregistered = splitRegistered(&w, intents, p.creates != nil)
 	}
+	intents, paced := p.paceIdleProbes(&w, intents, now)
+	unregistered = append(unregistered, paced...)
 	res := admit(admitInput{
 		Now: now, Cfg: cfg, Bucket: p.bucket, FairSeed: p.fairSeed, InFlight: w.InFlight, BringUp: w.Census.BringUp(cfg),
 		Endpoints: w.Gates, Backoff: w.Backoff, Paused: w.Paused,
@@ -223,6 +229,9 @@ func (p *planner) submit(w *World, a *allocDecision, admitted []intent) {
 	}
 	for _, it := range admitted {
 		e := inflightEntry{Kind: it.Kind, Key: it.Key, Endpoint: it.Endpoint}
+		if it.Kind == intentClose && pass.held.release == nil {
+			pass.held.release = newCloseReleases(w, p.stranded, p.stderr)
+		}
 		if it.Kind == intentCreate {
 			if pass.held.create == nil {
 				pass.held.create = newCreatePass(w)
@@ -237,8 +246,64 @@ func (p *planner) submit(w *World, a *allocDecision, admitted []intent) {
 		it.CreatePlan.Seq = seq
 		if err := p.effects.submitIntent(pass, it, seq); err != nil {
 			p.inflight.settle(settlement{Key: it.Key, Kind: it.Kind, Seq: seq, Token: e.Token})
+			continue
+		}
+		if it.Kind == intentDrainBeginFresh && drainBeginNeeds(w, it).Idle {
+			if p.idleProbes == nil {
+				p.idleProbes = make(map[rowKey]idleProbe)
+			}
+			p.idleProbes[it.Key] = idleProbe{Basis: it.Basis, At: w.Now}
 		}
 	}
+}
+
+// causeIdlePaced defers, before admission like causeNoEffect, an idle begin
+// whose agent was probed for the same incarnation within the last patrol.
+const causeIdlePaced = "idle-paced"
+
+// idleProbe is a submitted idle begin's probe: the incarnation it probed,
+// and the pass that submitted it.
+type idleProbe struct {
+	Basis rowBasis
+	At    time.Time
+}
+
+// paceIdleProbes splits off the idle begins that would probe a row's agent
+// (SESS-621) again within a patrol of the last probe of the same
+// incarnation. A busy agent's probe is a no-op, never a backoff, so without
+// the pace every settlement's pass would probe it again, 4x the pass
+// duration apart, and the probes would take the probe cap from other rows'
+// heals and stops (C6a2 review 1a). Legacy probes once a tick. The pace
+// sets no deadline: the probe after it waits for the next pass. Probes a
+// patrol old are forgotten.
+func (p *planner) paceIdleProbes(w *World, intents []intent, now time.Time) (kept, paced []intent) {
+	patrol := p.patrol()
+	for k, probe := range p.idleProbes {
+		if now.Sub(probe.At) >= patrol {
+			delete(p.idleProbes, k)
+		}
+	}
+	for _, it := range intents {
+		probe, ok := p.idleProbes[it.Key]
+		if ok && it.Kind == intentDrainBeginFresh && probe.Basis == it.Basis && drainBeginNeeds(w, it).Idle {
+			it.Cause = causeIdlePaced
+			paced = append(paced, it)
+			continue
+		}
+		kept = append(kept, it)
+	}
+	return kept, paced
+}
+
+// idleWants advances A15's memory on the pass (setting its view on w),
+// asks the lane for the content clock's panes, and returns the ladder's
+// deferral traces.
+func (p *planner) idleWants(w *World, a *allocDecision) []rowTrace {
+	want, traces := p.idle.update(w, a, p.patrol(), p.stderr)
+	if p.observations != nil {
+		p.observations().WantContent(want)
+	}
+	return traces
 }
 
 // createInflightEntry is an admitted create's in-flight entry: its token, identity

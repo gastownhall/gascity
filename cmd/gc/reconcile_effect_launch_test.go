@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -33,12 +35,22 @@ import (
 // record, and the ACP routes.
 type startHookLeaf struct {
 	*recordingLeaf
-	onStart func(ctx context.Context)
-	routed  []string
-	cfgs    []runtime.Config // each Start's config
+	onStart   func(ctx context.Context)
+	stopKeeps bool // Stop leaves the runtime running
+	routed    []string
+	cfgs      []runtime.Config // each Start's config
 }
 
 func (l *startHookLeaf) RouteACP(name string) { l.routed = append(l.routed, name) }
+
+// Stop stops name, unless stopKeeps holds: the stop then leaves it
+// running, which no fresh read confirms (C8.8).
+func (l *startHookLeaf) Stop(name string) error {
+	if l.stopKeeps {
+		return nil
+	}
+	return l.recordingLeaf.Stop(name)
+}
 
 func (l *startHookLeaf) Start(ctx context.Context, name string, cfg runtime.Config) error {
 	if l.onStart != nil {
@@ -81,16 +93,27 @@ func (k *txKit) mutate(mark func(*simRuntime)) {
 // Kills a launch that commits a token the runtime does not carry, a commit
 // without legacy's session.woke, a Start without FreshOnly (I24), and a
 // reused incarnation: a gone runtime launches under generation 4 and a new
-// token, which the started runtime carries and the commit writes.
+// token, which the started runtime carries and the commit writes;
+// session.woke is recorded by the effect once the commit lands, not when its
+// settlement drains, and a refused launch records none.
 func TestLaunchCommitsThePreWakeToken(t *testing.T) {
 	k, _ := launchKit(t, "asleep")
+	rec := events.NewFake()
+	k.p.held.start.rec = rec
 	s := k.runKind()
 	want := events.Event{Type: events.SessionWoke, Actor: "gc", Subject: (TemplateParams{TemplateName: "worker"}).DisplayName(), SessionID: "gc-1"}
-	if s.Outcome != settledLanded || len(s.Facts.Events) != 1 || !reflect.DeepEqual(s.Facts.Events[0], want) || s.Facts.Noted == nil {
-		t.Fatalf("settlement %+v, want landed, noted, with %+v", s, want)
+	if s.Outcome != settledLanded || len(s.Facts.Events) != 0 || len(rec.Events) != 1 || rec.Events[0].Type != want.Type || rec.Events[0].Subject != want.Subject || rec.Events[0].SessionID != want.SessionID || s.Facts.Noted == nil {
+		t.Fatalf("settlement %+v, recorded %+v; want landed, noted, with %+v recorded by the effect", s, rec.Events, want)
+	}
+	refused, leaf := launchKit(t, "asleep")
+	refusedRec := events.NewFake()
+	refused.p.held.start.rec = refusedRec
+	leaf.onStart = func(context.Context) { refused.runtimeAs("gc-2", "theirs", nil) }
+	if s := refused.runKind(); s.Outcome == settledLanded || len(refusedRec.Events) != 0 {
+		t.Fatalf("a refused commit: settlement %+v, recorded %+v; want no session.woke", s, refusedRec.Events)
 	}
 	token := k.meta("instance_token")
-	if k.meta("generation") != "4" || token == "tok" || k.meta("state") != "active" || k.meta("started_config_hash") == "" {
+	if k.meta("generation") != "4" || token == "tok" || k.meta("state") != "awake" || k.meta("started_config_hash") == "" {
 		t.Fatalf("row: generation %q token %q state %q", k.meta("generation"), token, k.meta("state"))
 	}
 	if st := k.starts(); len(st) != 1 || !st[0].FreshOnly || st[0].Token != token || !st[0].Created {
@@ -112,17 +135,18 @@ func TestLaunchOverATakenNameRefuses(t *testing.T) {
 	}
 }
 
-// Kills a stop request that survives a v2 PreWake (I15; v5 D1).
+// Kills a stop request, or an operator's drain mark, that survives a v2
+// PreWake (I15; v5 D1, v5.9p).
 func TestPreWakeClearsStopRequest(t *testing.T) {
 	var meta []string
-	for k := range stopVoidResiduePatch() {
+	for k := range stopEndPatch() {
 		meta = append(meta, k, "set")
 	}
 	k, _ := launchKit(t, "asleep", meta...)
 	if s := k.runKind(); s.Outcome != settledLanded {
 		t.Fatalf("settlement %+v, want landed", s)
 	}
-	for key := range stopVoidResiduePatch() {
+	for key := range stopEndPatch() {
 		if v := k.meta(key); v != "" {
 			t.Errorf("%s = %q after PreWake, want cleared", key, v)
 		}
@@ -261,7 +285,7 @@ func TestLaunchDeadlines(t *testing.T) {
 	k, leaf := launchKit(t, "asleep")
 	clk := k.p.Clock.(*fakePlannerClock)
 	leaf.onStart = func(ctx context.Context) {
-		clk.Advance(70*time.Second - startDeadlineSlack)
+		clk.Advance(70*time.Second - startDeadlineSlack - startFailureSlack)
 		select {
 		case <-ctx.Done():
 			if !errors.Is(context.Cause(ctx), context.DeadlineExceeded) {
@@ -289,13 +313,23 @@ func TestLaunchDeadlines(t *testing.T) {
 	}
 }
 
-// Kills legacy's blind clear and re-mint (S-1): PreWake fills an empty key
-// once and replaces a key whose transcript is gone, in its CAS, and the
-// launch runs that key.
+// Kills legacy's blind clear and re-mint (S-1), and a clear of an allocated
+// key (mc-keie0): PreWake fills an empty key once and replaces a committed
+// key (a started_config_hash beside it) whose transcript is gone, in its
+// CAS; an allocated key no start committed keeps, with no continuation
+// reset; the launch runs the row's key.
 func TestStartEffectFreshKeyNotClearedOrReminted(t *testing.T) {
-	for _, meta := range [][]string{nil, {"session_key", "stale"}} {
+	for _, c := range []struct {
+		name  string
+		meta  []string
+		fresh bool // a fresh key, not the row's
+	}{
+		{"no key", nil, true},
+		{"a committed key whose transcript is gone", []string{"session_key", "stale", "started_config_hash", "h-1"}, true},
+		{"an allocated key", []string{"session_key", "allocated", "continuation_epoch", "5"}, false},
+	} {
 		stubTranscript(t, false)
-		k, _ := launchKit(t, "asleep", meta...)
+		k, _ := launchKit(t, "asleep", c.meta...)
 		k.p.Clock.(*fakePlannerClock).auto = true // the stale-key wait
 		row := k.p.World.Census.Rows[k.it.Key]
 		tp := TemplateParams{TemplateName: "worker", Command: "agent", WorkDir: t.TempDir(), ResolvedProvider: &config.ResolvedProvider{Name: "claude", SessionIDFlag: "--session-id"}}
@@ -303,15 +337,36 @@ func TestStartEffectFreshKeyNotClearedOrReminted(t *testing.T) {
 		var cmd string
 		k.p.Runtime.(*startHookLeaf).onStart = func(context.Context) {}
 		if s := k.runKind(); s.Outcome != settledLanded {
-			t.Fatalf("settlement %+v, want landed", s)
+			t.Fatalf("%s: settlement %+v, want landed", c.name, s)
 		}
 		key := k.meta("session_key")
 		if cfgs := k.p.Runtime.(*startHookLeaf).cfgs; len(cfgs) > 0 {
 			cmd = cfgs[0].Command
 		}
-		if key == "" || key == "stale" || !strings.HasSuffix(cmd, "--session-id "+key) {
-			t.Fatalf("row key %q, command %q; want a fresh key launched with --session-id", key, cmd)
+		if key == "" || (key == "stale" || key == "allocated") == c.fresh || !strings.HasSuffix(cmd, "--session-id "+key) {
+			t.Fatalf("%s: row key %q, command %q; want a fresh key %v, launched with --session-id", c.name, key, cmd, c.fresh)
 		}
+		if !c.fresh && (k.meta("continuation_reset_pending") != "" || k.meta("continuation_epoch") != "5") {
+			t.Fatalf("%s: continuation reset %q epoch %q; want none for an allocated key", c.name, k.meta("continuation_reset_pending"), k.meta("continuation_epoch"))
+		}
+	}
+}
+
+// Kills an allocated key kept for a provider with no session_id_flag
+// (mc-keie0 ruling): it would resume any key it is handed, so PreWake still
+// resets a key whose transcript is gone and launches with none.
+func TestStartEffectClearsAResumeOnlyProvidersAllocatedKey(t *testing.T) {
+	stubTranscript(t, false)
+	k, leaf := launchKit(t, "asleep", "session_key", "allocated", "continuation_epoch", "5")
+	k.p.Clock.(*fakePlannerClock).auto = true // the stale-key wait
+	row := k.p.World.Census.Rows[k.it.Key]
+	tp := TemplateParams{TemplateName: "worker", Command: "agent", WorkDir: t.TempDir(), ResolvedProvider: &config.ResolvedProvider{Name: "claude", ResumeFlag: "--resume", ResumeStyle: "flag"}}
+	k.p.World.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(row.Info): {TP: tp}}}
+	if s := k.runKind(); s.Outcome != settledLanded || len(leaf.cfgs) != 1 {
+		t.Fatalf("settlement %+v, want landed", s)
+	}
+	if k.meta("session_key") != "" || k.meta("continuation_epoch") != "6" || strings.Contains(leaf.cfgs[0].Command, "allocated") {
+		t.Fatalf("key %q epoch %q command %q; want the key reset and a bare launch", k.meta("session_key"), k.meta("continuation_epoch"), leaf.cfgs[0].Command)
 	}
 }
 
@@ -412,7 +467,7 @@ func TestLaunchUsesAssignedTaskWorkDir(t *testing.T) {
 		k.p.World.Demand = demandView{StorePartial: partial, AssignedWork: []beads.Bead{{ID: "w-1", Status: "in_progress", Assignee: "gc-1", Metadata: map[string]string{"work_dir": taskDir}}}}
 		var probed string
 		old := staleResumeKeyProbe
-		staleResumeKeyProbe = func(_, dir, _ string) (bool, bool) { probed = dir; return true, true }
+		staleResumeKeyProbe = func(_ []string, _, dir, _ string) (bool, bool) { probed = dir; return true, true }
 		s := k.runKind()
 		staleResumeKeyProbe = old
 		want := taskDir
@@ -492,25 +547,68 @@ func TestLaunchCommitCarriesMCPAndClearsStartupHealth(t *testing.T) {
 	}
 }
 
-// Kills S2's premise read as the default rule after the Start: a row the CLI
-// confirmed active with the same token still commits, and `gc session
-// kill`'s fence (asleep, the same token) landed during the Start refuses
-// with the premise, committing nothing.
+// Kills S2's premise read as the default rule after the Start, and a lost
+// commit that leaves its runtime up or is retried: a row the CLI confirmed
+// active with the same token still commits; `gc session kill`'s fence
+// (asleep, the same token), or another writer's token, landed during the
+// Start commits nothing, and the start's own runtime, alive under the token
+// PreWake set, is stopped and confirmed, settling failed commit-lost with
+// nothing accrued. A runtime that is not the start's own stays, and the
+// premise refuses.
 func TestLaunchCommitPremise(t *testing.T) {
 	for _, c := range []struct {
-		name   string
-		write  []string
-		landed bool
+		name    string
+		write   []string
+		swap    bool // the name holds another row's runtime by the commit
+		landed  bool
+		cause   string
+		stopped bool
 	}{
-		{"CLI confirmed active", []string{"state", "active", "state_reason", "creation_complete"}, true},
-		{"kill fence", []string{"state", "asleep", "sleep_reason", "killed"}, false},
+		{"CLI confirmed active", []string{"state", "active", "state_reason", "creation_complete"}, false, true, "", false},
+		{"kill fence", []string{"state", "asleep", "sleep_reason", "killed"}, false, false, causeCommitLost, true},
+		{"retokened", []string{"instance_token", "other"}, false, false, causeCommitLost, true},
+		{"kill fence, another row's runtime", []string{"state", "asleep", "sleep_reason", "killed"}, true, false, causePremise, false},
+		{"an outside close", []string{"closed"}, false, false, causeCommitLost, true},
+		{"an outside close over a zombie", []string{"closed", "zombie"}, false, false, causeCommitLost, true},
+		{"a kill fence over a zombie", []string{"state", "asleep", "sleep_reason", "killed", "zombie", ""}, false, false, causeCommitLost, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			k, leaf := launchKit(t, "asleep")
-			leaf.onStart = func(context.Context) { k.outside(c.write...) }
+			k, leaf := launchKit(t, "asleep", "wake_attempts", "1")
+			write := func() {
+				switch {
+				case c.write[0] == "closed":
+					if err := k.backing.Close("gc-1"); err != nil {
+						t.Fatal(err)
+					}
+				case len(c.write)%2 == 0:
+					k.outside(c.write...)
+				}
+			}
+			if slices.Contains(c.write, "zombie") { // its agent dies once started
+				if c.write[0] != "closed" {
+					c.write = c.write[:len(c.write)-2]
+				}
+				k.on(seamAfterCall, func() {})
+				k.on(seamAfterCall, func() { k.mutate(func(r *simRuntime) { r.zombie = true }) })
+			}
+			leaf.onStart = func(context.Context) { write() }
+			if c.swap {
+				leaf.onStart = func(context.Context) { write(); k.runtimeAs("gc-2", "theirs", nil) }
+			}
 			s := k.runKind()
-			if got := k.meta("started_config_hash") != ""; got != c.landed || (!got && s.Cause != causePremise) {
-				t.Fatalf("settlement %+v: committed=%v, want %v (else the premise)", s, got, c.landed)
+			if b, _ := k.backing.Get("gc-1"); b.Status == "closed" && s.Cause != c.cause {
+				t.Fatalf("settlement %+v, want %s", s, c.cause)
+			} else if got := b.Status != "closed" && k.meta("started_config_hash") != ""; got != c.landed || (!got && s.Cause != c.cause) {
+				t.Fatalf("settlement %+v: committed=%v, want %v (else %s)", s, got, c.landed, c.cause)
+			}
+			k.sp.mu.Lock()
+			_, up := k.sp.rts["s-gc-1"]
+			k.sp.mu.Unlock()
+			if slices.Contains(c.write, "zombie") && c.stopped && (len(k.sp.kills) == 0 || k.sp.kills[len(k.sp.kills)-1].Hit == nil || !k.sp.kills[len(k.sp.kills)-1].Hit.zombie) {
+				t.Fatalf("kills %+v, want the zombie stopped", k.sp.kills)
+			}
+			if up == c.stopped || c.stopped && (s.Outcome != settledFailed || s.Err != nil || k.meta("wake_attempts") != "1") {
+				t.Fatalf("settlement %+v: runtime up %v attempts %q, want stopped %v, confirmed, nothing accrued", s, up, k.meta("wake_attempts"), c.stopped)
 			}
 		})
 	}
@@ -530,6 +628,9 @@ func TestEndpointGateRefusalDoesNotBackOffRow(t *testing.T) {
 		{settlement{Outcome: settledRefused, Cause: causeEndpointGate}, false},
 		{settlement{Outcome: settledFailed, Cause: causeCapacity}, false},
 		{settlement{Outcome: settledFailed, Cause: causeStartError}, true},
+		{settlement{Outcome: settledLanded}, false},
+		{settlement{Outcome: settledLanded, Cause: causeEndpointGate}, false}, // a heal written in an endpoint refusal's stead
+		{settlement{Outcome: settledLanded, Cause: causeSessionName}, true},   // and in another refusal's: backed off as the refusal
 	} {
 		p := newPlanner(newFakePlannerClock(plannerT0), func() time.Duration { return time.Minute }, nil, newInflightMap(), nil, nil)
 		k := rowKey{Leg: rowLeg, ID: "a"}
@@ -642,7 +743,12 @@ func TestLaunchInstallsAgentSideEffectsBeforeStart(t *testing.T) {
 	}{
 		{"launch", intentStart, "asleep", nil, []string{"install@generation=4", "start"}},
 		{"no-op over a committed runtime", intentStart, "active", func(k *txKit) { k.runtimeAs("gc-1", "tok", nil) }, nil},
-		{"adopt", intentAdopt, "creating", func(k *txKit) { k.runtimeAs("gc-1", "tok", nil) }, nil},
+		{"adopt: once, on its commit", intentAdopt, "creating", func(k *txKit) { k.runtimeAs("gc-1", "tok", nil) }, []string{"install@generation=3"}},
+		{"adopt refused", intentAdopt, "creating", func(k *txKit) { k.runtimeAs("gc-9", "theirs", nil) }, nil},
+		{"adopt whose commit lost", intentAdopt, "creating", func(k *txKit) {
+			k.runtimeAs("gc-1", "tok", nil)
+			k.on(seamAfterRowRead, func() { k.outside("state", "asleep", "sleep_reason", "killed") })
+		}, nil},
 		{"PreWake refused", intentStart, "asleep", func(k *txKit) {
 			k.on(seamAfterReads, func() {})
 			k.on(seamAfterReads, func() { k.outside("held_until", gatherNow.Add(time.Hour).Format(time.RFC3339)) })
@@ -723,6 +829,10 @@ func TestPreWakeLaunchesWaitHeldAndUnparseableTimerRows(t *testing.T) {
 		k, _ := launchKit(t, "asleep", meta...)
 		if s := k.runKind(); s.Outcome != settledLanded || len(k.starts()) != 1 {
 			t.Errorf("%v: settlement %+v, starts %d; want one launch", meta, s, len(k.starts()))
+		}
+		// The PreWake cell clears the wait's intent and keeps its hold.
+		if meta[0] == "wait_hold" && (k.meta("sleep_intent") != "" || k.meta("wait_hold") != "true") {
+			t.Errorf("%v: after the PreWake sleep_intent=%q wait_hold=%q, want the intent cleared and the wait kept", meta, k.meta("sleep_intent"), k.meta("wait_hold"))
 		}
 	}
 }
@@ -823,7 +933,7 @@ func TestLaunchCommitLandedThenContextEnds(t *testing.T) {
 	k.on(seamAfterWrite, func() {})                                   // PreWake's write
 	k.on(seamAfterWrite, func() { cancel(context.DeadlineExceeded) }) // the commit's write
 	s := k.run(ctx, effectSpecs[intentStart])
-	if s.Outcome != settledLanded || k.meta("state") != "active" || guard.breaker(k0).Status().State != resilience.StateClosed {
+	if s.Outcome != settledLanded || k.meta("state") != "awake" || guard.breaker(k0).Status().State != resilience.StateClosed {
 		t.Fatalf("settlement %+v, state %q, breaker %v; want landed, active, closed", s, k.meta("state"), guard.breaker(k0).Status().State)
 	}
 }
@@ -871,7 +981,7 @@ func TestLaunchPersistsTheMCPSnapshotOnSuccessOnly(t *testing.T) {
 // from the transcript layer the key stays, unrotated.
 func TestUnprobeableTranscriptKeepsTheKey(t *testing.T) {
 	old := staleResumeKeyProbe
-	staleResumeKeyProbe = func(string, string, string) (bool, bool) { return false, false }
+	staleResumeKeyProbe = func([]string, string, string, string) (bool, bool) { return false, false }
 	t.Cleanup(func() { staleResumeKeyProbe = old })
 	k, _ := launchKit(t, "asleep", "session_key", "k-1", "continuation_epoch", "5")
 	k.p.Clock.(*fakePlannerClock).auto = true
@@ -901,13 +1011,14 @@ func TestStaleKeyResetRotatesTheContinuation(t *testing.T) {
 	if env := leaf.cfgs[0].Env["GC_CONTINUATION_EPOCH"]; env != "6" || k.meta("continuation_epoch") != "6" || k.meta("continuation_reset_pending") != "" {
 		t.Fatalf("runtime epoch %q, row epoch %q, reset pending %q; want 6, 6 and cleared", env, k.meta("continuation_epoch"), k.meta("continuation_reset_pending"))
 	}
-	// A failed launch leaves the PreWake's write alone: rotated and cleared,
-	// with no commit to clear the mark for it.
+	// A failed launch is S3's any-other class (#7570): the PreWake's
+	// rotation is restored, and the wake failure resets the conversation
+	// again (legacy's restorePreWakeState, then recordWakeFailure).
 	failed, _ := launchKit(t, "asleep", "session_key", "stale", "continuation_epoch", "5", "started_config_hash", "h0")
 	failed.p.World.Templates = k.p.World.Templates
 	failed.sp.nextStart = errors.New("boom")
-	if s := failed.runKind(); s.Cause != causeStartError || failed.meta("continuation_epoch") != "6" || failed.meta("continuation_reset_pending") != "" {
-		t.Fatalf("a failed launch: settlement %+v, row epoch %q, reset pending %q; want start-error, 6 and cleared", s, failed.meta("continuation_epoch"), failed.meta("continuation_reset_pending"))
+	if s := failed.runKind(); s.Cause != causeStartError || failed.meta("continuation_epoch") != "5" || failed.meta("continuation_reset_pending") != "true" || failed.meta("wake_attempts") != "1" {
+		t.Fatalf("a failed launch: settlement %+v, row epoch %q, reset pending %q, attempts %q; want start-error, 5, reset again, 1", s, failed.meta("continuation_epoch"), failed.meta("continuation_reset_pending"), failed.meta("wake_attempts"))
 	}
 }
 
@@ -917,12 +1028,14 @@ func TestStaleKeyResetRotatesTheContinuation(t *testing.T) {
 // during the Start still refuses occupied.
 func TestLaunchKeysOnTheVerbSectionsTemplate(t *testing.T) {
 	k, _ := launchKit(t, "asleep")
+	rec := events.NewFake()
+	k.p.held.start.rec = rec
 	k.p.Alloc.Snapshot.Entries[k.it.Key] = &selectionEntry{Binding: &bindingTarget{Patch: session.MetadataPatch{"gc.trigger_bead_id": "w-1"}}}
 	s := k.runKind()
 	k.leaf.mu.Lock()
 	names := slices.Clone(k.leaf.names)
 	k.leaf.mu.Unlock()
-	if s.Outcome != settledLanded || len(s.Facts.Events) != 1 || s.Facts.Events[0].Subject != "worker" || len(names[len(names)-1]) == 0 {
+	if s.Outcome != settledLanded || len(rec.Events) != 1 || rec.Events[0].Subject != "worker" || len(names[len(names)-1]) == 0 {
 		t.Fatalf("settlement %+v, process names per read %v; want landed, session.woke for worker, the commit read with process names", s, names)
 	}
 	k, leaf := launchKit(t, "asleep")
@@ -998,5 +1111,479 @@ func TestPlannerHandsItsGuardToTheStartAndFlushes(t *testing.T) {
 	rt.planner.submit(w, &allocDecision{}, []intent{{Kind: intentStart, Key: rowKeyOf("gc-1")}})
 	if handed != guard {
 		t.Fatalf("the pass's start caps carry guard %p, want the host's %p", handed, guard)
+	}
+}
+
+// Kills the heartbeat-hold exemption widened or lost (v5.9i): A17's respawn
+// launches through an agent heartbeat's hold; an A18 start over the same row,
+// and A17 over an operator's hold, are refused held.
+func TestPreWakeExemptsTheHeartbeatHoldForA17Only(t *testing.T) {
+	soon := gatherNow.Add(time.Hour).Format(time.RFC3339)
+	for _, c := range []struct {
+		name, reason string
+		meta         []string
+		landed       bool
+	}{
+		{"A17 through a heartbeat hold", decideHeartbeatRespawn, []string{"held_until", soon}, true},
+		{"A18 over a heartbeat hold", decideStart, []string{"held_until", soon}, false},
+		{"A17 over an operator's hold", decideHeartbeatRespawn, []string{"held_until", soon, "sleep_intent", "user-hold"}, false},
+		{"A17 over a live quarantine", decideHeartbeatRespawn, []string{"held_until", soon, "quarantined_until", soon}, false},
+		{"A17 over a soft suspend", decideHeartbeatRespawn, []string{"held_until", soon, "state", "suspended"}, false},
+	} {
+		k, _ := launchKit(t, "asleep", c.meta...)
+		k.it.Reason = c.reason
+		s := k.runKind()
+		if landed := s.Outcome == settledLanded; landed != c.landed || (!landed && s.Cause != causeHeld) {
+			t.Errorf("%s: settlement %+v, want landed %v (else refused held)", c.name, s, c.landed)
+		}
+	}
+}
+
+// Kills a heal lost behind its start: a start carrying its A6 heal that
+// refuses before its PreWake (the endpoint's breaker open, no template, an
+// invalid name, a hold, refused worktree evidence) writes the heal alone,
+// settling with the refusal's cause, but only while its fresh read still
+// finds the runtime absent, on which the heal rests. A hold the intent's own
+// patch writes (a quarantining accrual) refuses it too.
+func TestRefusedStartStillHeals(t *testing.T) {
+	woke := gatherNow.Add(-time.Hour).Format(time.RFC3339)
+	open := func(k *txKit) {
+		guard := newEndpointCapacityGuard(func() time.Time { return gatherNow })
+		k.it.Endpoint = endpointKey("provider:test-agent")
+		trip, _ := guard.Admit(k.it.Endpoint, "outside", "outside")
+		trip.Resolve(verdictCapacity)
+		k.p.held.start.capacity = guard
+	}
+	refusedWork := func(k *txKit) {
+		k.p.Alloc.Snapshot.Entries[k.it.Key] = &selectionEntry{Binding: &bindingTarget{WorktreeSpec: &worktree.Spec{BeadID: "w-1"}}}
+		old := verifyWorktree
+		verifyWorktree = func(worktree.Spec) (worktree.Report, error) { return worktree.Report{}, errors.New("not owned") }
+		k.t.Cleanup(func() { verifyWorktree = old })
+	}
+	for _, tc := range []struct {
+		name      string
+		meta      []string
+		tmpl      bool
+		arrange   func(*txKit)
+		patch     session.MetadataPatch // more in the intent's own patch
+		cause     string
+		wantState string
+	}{
+		{"endpoint gate", nil, true, open, nil, causeEndpointGate, "asleep"},
+		{"no template", nil, false, nil, nil, causeTemplate, "asleep"},
+		{"no template over a live runtime", nil, false, func(k *txKit) { k.runtimeAs("gc-1", "tok", nil) }, nil, causeTemplate, "active"},
+		{"an invalid session name", []string{"session_name", ""}, true, nil, nil, causeSessionName, "asleep"},
+		{"an operator's hold", []string{"sleep_intent", "user-hold"}, true, nil, nil, causeHeld, "asleep"},
+		{"a quarantine its own patch writes", nil, true, nil, session.MetadataPatch{"quarantined_until": gatherNow.Add(time.Hour).Format(time.RFC3339)}, causeHeld, "asleep"},
+		{"refused worktree evidence", nil, true, refusedWork, nil, causeWorktree, "asleep"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			k, _ := launchKit(t, "active", append([]string{"session_key", "k-1", "started_config_hash", "h", "last_woke_at", woke}, tc.meta...)...)
+			row := k.p.World.Census.Rows[k.it.Key]
+			k.p.World.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{}}
+			if tc.tmpl {
+				tp := TemplateParams{TemplateName: "worker", ResolvedProvider: &config.ResolvedProvider{Name: "test-agent"}}
+				k.p.World.Templates.entries[templateMemoKeyOf(row.Info)] = templateResolution{TP: tp}
+			}
+			if tc.arrange != nil {
+				tc.arrange(k)
+			}
+			k.it.Reason = decideStart
+			heal, class, _ := deadRuntimePatch(&rowFacts{w: k.p.World, row: row, entry: &selectionEntry{Liveness: livenessGone, Desired: desireWake}}, true)
+			if until, err := time.Parse(time.RFC3339, tc.patch["quarantined_until"]); err == nil { // a quarantine is the Quarantine cell's
+				class = class.With(session.CellInfo(row.Info, session.ActorController, session.DispEvent{Kind: session.EvQuarantine, Until: until}, gatherNow))
+			}
+			k.it.Patch, k.it.Class, k.it.Heal = heal, class, &intent{Kind: intentRowHealFresh, Key: k.it.Key, Reason: decideDeadRuntimeHeal, Patch: heal, Class: class}
+			s := k.runKind()
+			if got := k.meta("state"); got != tc.wantState || len(k.starts()) != 0 {
+				t.Fatalf("settlement %+v: state %q, %d starts; want %q and no start", s, got, len(k.starts()), tc.wantState)
+			}
+			if healed := tc.wantState == "asleep"; healed != (s.Outcome == settledLanded) || s.Cause != tc.cause {
+				t.Fatalf("settlement %+v, want landed %v with cause %q", s, healed, tc.cause)
+			}
+			if q := tc.patch["quarantined_until"]; q != "" && k.meta("quarantined_until") != q {
+				t.Fatalf("quarantined_until %q after the heal written alone, want its cell's %q", k.meta("quarantined_until"), q)
+			}
+		})
+	}
+}
+
+// Kills a launch that resolves its template on the woken row (should-fix
+// 4): realize defers a pool seat's unassigned alias on a creating row, so
+// the launch resolves on the row as legacy does at the tick, bound but not
+// yet woken, and starts with that resolution; a resolution that fails is
+// logged and the pass's template launches.
+func TestLaunchResolvesOnTheRowBeforeItsWake(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		k, leaf := launchKit(t, "asleep")
+		row := k.p.World.Census.Rows[k.it.Key]
+		var seen []string
+		pass := TemplateParams{TemplateName: "worker", Env: map[string]string{"GC_TEST_RESOLVED": "pass"}}
+		k.p.World.Templates = &templateMemo{
+			entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(row.Info): {TP: pass}},
+			resolveAt: func(info session.Info, _ time.Time) templateResolution {
+				seen = append(seen, info.MetadataState)
+				if fail {
+					return templateResolution{Err: errors.New("catalog unreadable")}
+				}
+				return templateResolution{TP: TemplateParams{TemplateName: "worker", Env: map[string]string{"GC_TEST_RESOLVED": "solo"}}}
+			},
+		}
+		var stderr bytes.Buffer
+		k.p.held.start.stderr = &stderr
+		want := map[bool]string{false: "solo", true: "pass"}[fail]
+		if s := k.runKind(); s.Outcome != settledLanded || len(leaf.cfgs) != 1 || leaf.cfgs[0].Env["GC_TEST_RESOLVED"] != want {
+			t.Fatalf("fail=%v: settlement %+v, %d starts; want the resolution %q", fail, s, len(leaf.cfgs), want)
+		}
+		if !slices.Equal(seen, []string{"asleep"}) {
+			t.Fatalf("fail=%v: resolved on states %v, want the row before its wake (asleep)", fail, seen)
+		}
+		if logged := strings.Contains(stderr.String(), "catalog unreadable"); logged != fail {
+			t.Fatalf("fail=%v: stderr %q", fail, stderr.String())
+		}
+	}
+}
+
+// Kills a heal written in a refusal's stead that clears the row's backoff
+// (the C5b-3 review's F06, F07): a landing with a cause backs off as the
+// refusal would, a plain landing resets the record, and an endpoint-gate
+// cause, which the gate paces, records none.
+func TestLandedWithCauseBacksOff(t *testing.T) {
+	p := newPlanner(realPlannerClock{}, func() time.Duration { return time.Minute }, nil, newInflightMap(), nil, io.Discard)
+	k := rowKey{Leg: rowLeg, ID: "gc-1"}
+	now := gatherNow
+	p.backoffSettled(settlement{Key: k, Kind: intentStart, Outcome: settledLanded, Cause: causeSessionName, At: now})
+	if r := p.backoff.Record(rowBackoffKey(k)); r.Consecutive != 1 || !r.live(now) {
+		t.Fatalf("landed with %q: record %+v, want a live backoff", causeSessionName, r)
+	}
+	p.backoffSettled(settlement{Key: k, Kind: intentStart, Outcome: settledLanded, At: now})
+	if r := p.backoff.Record(rowBackoffKey(k)); r.Consecutive != 0 {
+		t.Fatalf("plain landing: record %+v, want reset", r)
+	}
+	p.backoffSettled(settlement{Key: k, Kind: intentStart, Outcome: settledLanded, Cause: causeEndpointGate, At: now})
+	if r := p.backoff.Record(rowBackoffKey(k)); r.Consecutive != 0 {
+		t.Fatalf("landed with endpoint-gate: record %+v, want none (the gate paces)", r)
+	}
+}
+
+// TestLaunchStartOutlivesTheShutdownCancel (staging J35 A/B, §12.2 #4,
+// START-024). Kills a start the shutdown cancels mid-launch: tmux's failed
+// start kills the runtime it launched (cleanupFailedStart), so the next boot
+// relaunched it under a new token instead of adopting it. The executor's
+// shutdown cancel never reaches the provider's Start; a lost lease still
+// ends it, with its cause.
+func TestLaunchStartOutlivesTheShutdownCancel(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		cause error
+		ends  bool
+	}{
+		{"shutdown", errEffectShutdown, false},
+		{"lease lost", session.ErrRuntimeLeaseLost, true},
+		{"provider swap", errSwapCanceled, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				k, leaf := launchKit(t, "asleep")
+				ctx, cancel := context.WithCancelCause(context.Background())
+				leaf.onStart = func(startCtx context.Context) {
+					cancel(c.cause)
+					synctest.Wait() // the cancel's relay, if any, has run
+					switch err := startCtx.Err(); {
+					case err != nil && !c.ends:
+						t.Errorf("the Start's context ended with %v at the shutdown cancel; the runtime it launched would be killed", context.Cause(startCtx))
+					case err == nil && c.ends:
+						t.Errorf("the Start's context outlived %v", c.cause)
+					case c.ends && !errors.Is(context.Cause(startCtx), c.cause):
+						t.Errorf("the Start's context ended with %v, want %v", context.Cause(startCtx), c.cause)
+					}
+				}
+				k.run(ctx, effectSpecs[intentStart])
+			})
+		})
+	}
+}
+
+// TestOutlivesShutdownKeepsValuesAndOtherCauses. Kills a detached context
+// that drops the effect's values (its lease), ignores a shutdown that came
+// before the Start began, or drops a cause other than a preserve-sessions
+// shutdown's.
+func TestOutlivesShutdownKeepsValuesAndOtherCauses(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		type key struct{}
+		parent, cancel := context.WithCancelCause(context.WithValue(context.Background(), key{}, "lease"))
+		detached, release := outlivesShutdown(parent)
+		defer release()
+		if detached.Value(key{}) != "lease" {
+			t.Fatal("the detached context dropped its parent's values")
+		}
+		if !beginStart(detached) {
+			t.Fatal("a live start may not begin")
+		}
+		cancel(errEffectShutdown)
+		synctest.Wait()
+		if detached.Err() != nil {
+			t.Fatalf("a preserve-sessions shutdown after the Start began ended it: %v", context.Cause(detached))
+		}
+		for _, cause := range []error{context.DeadlineExceeded, errEffectStopped} {
+			parent2, cancel2 := context.WithCancelCause(context.Background())
+			detached2, release2 := outlivesShutdown(parent2)
+			defer release2()
+			beginStart(detached2)
+			cancel2(cause)
+			synctest.Wait()
+			if !errors.Is(context.Cause(detached2), cause) {
+				t.Fatalf("ended with %v, want the parent's %v", context.Cause(detached2), cause)
+			}
+		}
+	})
+}
+
+// TestNoStartBeginsAfterTheShutdown (#7592 review). Kills a Start begun
+// after the shutdown deadline passed in the launch's pre-start steps: a
+// shutdown before beginStart, even one that preserves sessions, ends the
+// start, and beginStart refuses.
+func TestNoStartBeginsAfterTheShutdown(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		for _, early := range []bool{true, false} {
+			effect, shutdown := context.WithCancelCause(context.Background())
+			if early {
+				shutdown(errEffectShutdown)
+			}
+			detached, release := outlivesShutdown(effect)
+			if !early {
+				shutdown(errEffectShutdown) // before its relay has run
+			}
+			if beginStart(detached) {
+				t.Errorf("early=%v: a start began after the shutdown", early)
+			}
+			synctest.Wait()
+			if !errors.Is(context.Cause(detached), errEffectShutdown) {
+				t.Errorf("early=%v: the start's context ended with %v, want the shutdown", early, context.Cause(detached))
+			}
+			// Before any Start began, the steps ahead of it see the shutdown.
+			effect2, shutdown2 := context.WithCancelCause(context.Background())
+			pre, release2 := outlivesShutdown(effect2)
+			shutdown2(errEffectShutdown)
+			synctest.Wait()
+			if !errors.Is(context.Cause(pre), errEffectShutdown) {
+				t.Errorf("early=%v: the pre-start steps' context ended with %v, want the shutdown", early, context.Cause(pre))
+			}
+			release2()
+			release()
+			shutdown(nil)
+		}
+	})
+}
+
+// TestStartOutlivesTheShutdownButNotALostLease (#7592 review). Kills a start
+// detached after its lease watch (whose goroutine ends at the shutdown
+// cancel): a start Call that began, then saw a preserve-sessions shutdown,
+// still ends when another holder takes its lease.
+func TestStartOutlivesTheShutdownButNotALostLease(t *testing.T) {
+	defer func(every time.Duration) { leaseWatchEvery = every }(leaseWatchEvery)
+	leaseWatchEvery = 10 * time.Millisecond
+	k := newTxKit(t)
+	ctx, shutdown := context.WithCancelCause(context.Background())
+	defer shutdown(nil)
+	var cause error
+	call := called(callStart, section{Decide: func(txView) txStep { return txStep{} }}, func(ctx context.Context, _ txCaps, _ any) (any, error) {
+		if !beginStart(ctx) {
+			return nil, errors.New("the start did not begin")
+		}
+		shutdown(errEffectShutdown)
+		k.outside(session.RuntimeLeaseHolderKey, "other-host", session.RuntimeLeaseEpochKey, "9")
+		select {
+		case <-ctx.Done():
+			cause = context.Cause(ctx)
+		case <-time.After(5 * time.Second):
+		}
+		return nil, cause
+	})
+	k.run(ctx, effectSpec{needs: needs{Lease: true}, sections: []section{call}})
+	if !errors.Is(cause, session.ErrRuntimeLeaseLost) {
+		t.Fatalf("the started Call's context ended with %v, want the lease lost after the shutdown", cause)
+	}
+}
+
+// TestNonPreserveStopEndsALateStart (#7592 review). Kills a start that
+// outlives a stop that does not preserve sessions (gc stop): the executor
+// cancels with errEffectStopped, which ends a start already in its provider
+// Start, so nothing it launches outlives the stop-all sweep.
+func TestNonPreserveStopEndsALateStart(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		rt := newDefaultPlanner(io.Discard)
+		cfg := &config.City{}
+		cfg.Daemon.ShutdownTimeout = "1s"
+		sp := &interruptStopsProvider{Fake: runtime.NewFake()}
+		preStart := make(chan struct{})
+		created := make(chan error, 1)
+		if err := rt.exec.submit(rowKey{Leg: routerTestLeg, ID: "a"}, sessionEffect{
+			Kind: intentStart, Deadline: time.Now().Add(time.Hour),
+			Run: func(ctx context.Context) settlement {
+				detached, release := outlivesShutdown(ctx) // callWatched's
+				defer release()
+				if !beginStart(detached) { // startLaunch's
+					created <- context.Cause(detached)
+					return settlement{Outcome: settledFailed}
+				}
+				<-preStart // pre_start still running at the shutdown deadline
+				if err := detached.Err(); err != nil {
+					created <- err
+					return settlement{Outcome: settledFailed, Err: err}
+				}
+				created <- sp.Start(detached, "late", runtime.Config{})
+				return settlement{Outcome: settledLanded}
+			},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		var stdout bytes.Buffer
+		cr := &CityRuntime{cfg: cfg, sp: sp, v2: rt, rec: events.Discard, logPrefix: "gc stop", stdout: &stdout, stderr: io.Discard}
+		rt.stop()       // the executor's deadline
+		synctest.Wait() // its cancel's relay has run
+		cr.shutdown()   // not preserve: the stop-all sweep
+		close(preStart) // pre_start finishes after the sweep
+		<-created
+		if running, _ := sp.ListRunning(""); slices.Contains(running, "late") {
+			t.Errorf("a start created its runtime after the non-preserve stop-all sweep: %v", running)
+		}
+	})
+}
+
+// TestExecutorStopCancelsWithTheShutdownCause. Kills a stop whose cause
+// ignores the shutdown mode: at stop's deadline every effect's context ends
+// with errEffectShutdown when the shutdown preserves sessions, else with
+// errEffectStopped.
+func TestExecutorStopCancelsWithTheShutdownCause(t *testing.T) {
+	for _, c := range []struct {
+		preserve bool
+		want     error
+	}{{true, errEffectShutdown}, {false, errEffectStopped}} {
+		clk := newFakePlannerClock(plannerT0)
+		x, _ := fakeClockExecutor(clk)
+		x.preserve = func() bool { return c.preserve }
+		causes := make(chan error, 1)
+		started := make(chan struct{})
+		if err := x.submit(rowKey{Leg: rowLeg, ID: "gc-1"}, sessionEffect{Kind: intentRowHeal, Deadline: plannerT0.Add(time.Hour), Run: func(ctx context.Context) settlement {
+			close(started)
+			<-ctx.Done()
+			causes <- context.Cause(ctx)
+			return settlement{Outcome: settledRefused}
+		}}); err != nil {
+			t.Fatal(err)
+		}
+		<-started
+		go x.stop(plannerT0)
+		if cause := <-causes; !errors.Is(cause, c.want) {
+			t.Fatalf("preserve=%v: an effect's context ended at shutdown with %v, want %v", c.preserve, cause, c.want)
+		}
+	}
+}
+
+// TestLaunchRefusesAStartTheShutdownOvertook (#7592 delta review). Kills a
+// launch that ignores beginStart: a preserve-sessions shutdown that lands in
+// the launch's pre-start steps (here its template resolution) leaves the
+// provider's Start uncalled.
+func TestLaunchRefusesAStartTheShutdownOvertook(t *testing.T) {
+	k, leaf := launchKit(t, "asleep")
+	ctx, shutdown := context.WithCancelCause(context.Background())
+	defer shutdown(nil)
+	row := k.p.World.Census.Rows[k.it.Key]
+	k.p.World.Templates = &templateMemo{
+		entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(row.Info): {TP: TemplateParams{TemplateName: "worker"}}},
+		resolveAt: func(session.Info, time.Time) templateResolution {
+			shutdown(errEffectShutdown) // past the tx's pre-Call check
+			return templateResolution{TP: TemplateParams{TemplateName: "worker"}}
+		},
+	}
+	s := k.run(ctx, effectSpecs[intentStart])
+	if len(leaf.cfgs) != 0 || s.Outcome == settledLanded {
+		t.Fatalf("settlement %+v, %d provider Starts; want none after the shutdown", s, len(leaf.cfgs))
+	}
+}
+
+// TestOutlivingStartStillEndsAtTheEffectsDeadline (#7592 delta review).
+// Kills a deadline the detached context only reports: after a
+// preserve-sessions shutdown spent the relay on a begun start, the effect's
+// deadline still ends it, and a later child deadline (the lease watch's
+// SafeUntil) ends with it.
+func TestOutlivingStartStillEndsAtTheEffectsDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		effect, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		ctx, shutdown := context.WithCancelCause(effect)
+		defer shutdown(nil)
+		detached, release := outlivesShutdown(ctx)
+		defer release()
+		if !beginStart(detached) {
+			t.Fatal("the start did not begin")
+		}
+		shutdown(errEffectShutdown)
+		synctest.Wait()
+		safeUntil, stop := context.WithDeadline(detached, time.Now().Add(110*time.Second))
+		defer stop()
+		start := time.Now()
+		<-safeUntil.Done()
+		if waited := time.Since(start); waited != time.Minute || !errors.Is(detached.Err(), context.DeadlineExceeded) {
+			t.Fatalf("ended after %v with %v, want the effect's deadline at 1m", waited, detached.Err())
+		}
+	})
+}
+
+// Kills a lost commit that stops a runtime another start holds, or that
+// reports an unconfirmed stop as clean: a moved runtime name or lease is
+// the premise's refusal; an unconfirmed stop settles commit-lost with its
+// error.
+func TestLostCommitGuards(t *testing.T) {
+	k, _ := launchKit(t, "creating")
+	row := k.p.World.Census.Rows[k.it.Key].Info
+	rt := &txRuntime{Class: rtAlive, Same: true, Identity: runtimeIdentity{Known: true, SessionID: "gc-1", Epoch: "3", Token: "tok"}}
+	v := txView{It: k.it, World: k.p.World, Row: row, RT: rt, Now: gatherNow}
+	if _, ok := lostCommit(v, row, []string{"runtime lease"}); ok {
+		t.Fatal("a moved lease: lostCommit took it, want the premise's refusal")
+	}
+	// The runtime under the locked name carries the start's own token, so a
+	// moved session_name, a close, or a kill stops it; alive or a zombie,
+	// read on one object. A corpse counts stopped, and an object that moved
+	// across the read, or another token, is left.
+	for _, c := range []struct {
+		name  string
+		rt    txRuntime
+		moved string
+		stops bool
+	}{
+		{"alive, a kill", txRuntime{Class: rtAlive, Same: true, Identity: rt.Identity}, "state", true},
+		{"alive, a moved name", txRuntime{Class: rtAlive, Same: true, Identity: rt.Identity}, "session_name", true},
+		{"a zombie, a close", txRuntime{Class: rtZombie, Same: true, Identity: rt.Identity}, "closed", true},
+		{"a zombie moving across the read", txRuntime{Class: rtZombie, Identity: rt.Identity}, "closed", false},
+		{"a corpse", txRuntime{Class: rtCorpse, Same: true, Identity: rt.Identity}, "closed", false},
+		{"another token", txRuntime{Class: rtAlive, Same: true, Identity: runtimeIdentity{Known: true, SessionID: "gc-1", Epoch: "3", Token: "theirs"}}, "closed", false},
+	} {
+		v.RT = &c.rt
+		if step, ok := lostCommit(v, row, []string{c.moved}); ok != c.stops || ok && step.Pass == nil {
+			t.Fatalf("%s: lostCommit = (%+v, %v), want the stop %v", c.name, step, ok, c.stops)
+		}
+	}
+	for _, confirmed := range []bool{true, false} {
+		step := lostCommitStep(startFailureRead{lost: &confirmed})
+		if step.Fail != causeCommitLost || (step.Err == nil) == !confirmed {
+			t.Fatalf("confirmed %v: step %+v, want commit-lost with an error only when unconfirmed", confirmed, step)
+		}
+	}
+	// The row moved back between the sections: still lost, never abandoned.
+	if step := abandonStep(txView{prev: startFailureRead{lost: new(bool)}}); step.Fail != causeCommitLost || len(step.Write) != 0 {
+		t.Fatalf("abandonStep = %+v, want commit-lost with no write", step)
+	}
+}
+
+// Kills a lost commit whose unconfirmed stop settles clean (M07): a stop
+// the fresh read does not confirm settles commit-lost with its error.
+func TestLostCommitUnconfirmedStop(t *testing.T) {
+	k, leaf := launchKit(t, "asleep")
+	leaf.stopKeeps = true
+	leaf.onStart = func(context.Context) { k.outside("state", "asleep", "sleep_reason", "killed") }
+	if s := k.runKind(); s.Cause != causeCommitLost || !errors.Is(s.Err, errLostCommitUnconfirmed) {
+		t.Fatalf("settlement %+v, want commit-lost with the unconfirmed stop's error", s)
 	}
 }

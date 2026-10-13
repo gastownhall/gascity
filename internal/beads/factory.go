@@ -3,6 +3,7 @@ package beads
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -26,6 +27,10 @@ const (
 	BeadsStoreNameExecStore = "ExecStore"
 	// BeadsStoreNameNativeDoltStore is the diagnostic store name for native Dolt stores.
 	BeadsStoreNameNativeDoltStore = "NativeDoltStore"
+	// BeadsStoreNameLibraryBackendStore is the diagnostic store name for a
+	// store the linked beads library opened through a backend it registered as
+	// an extension (contract.IsLibraryExtensionBackend), such as http.
+	BeadsStoreNameLibraryBackendStore = "LibraryBackendStore"
 
 	// BeadsGateProxiedProvider is the preflight gate recorded when a scope
 	// falls back to the bd CLI front door because its persisted dolt_mode is
@@ -42,13 +47,16 @@ const (
 	nativeForceFallbackEnv   = "GC_BEADS_FORCE_FALLBACK"
 	nativeForceFallbackGate  = "force_fallback"
 	nativeHooksGate          = "bd_hooks"
+	nativeHooksReason        = "bd hooks are installed and the native store would not run them; remove .beads/hooks/on_create,on_update,on_close once nothing depends on them firing for every write"
 	proxiedProviderGate      = BeadsGateProxiedProvider
 	nativeUnavailableMessage = "native_store_unavailable"
 
-	// nativeTransportOffGate is the preflight gate recorded when a city's
-	// beads.native_transport is "off": the per-city kill switch, distinct
-	// from the deprecated process-wide nativeForceFallbackGate even though
-	// both end in the same BdStore fallback.
+	// nativeTransportOffGate is the preflight gate recorded when an open's
+	// NativeTransport is "off": the city set beads.native_transport = "off"
+	// (the per-city kill switch), or the caller pinned the bd store, as the
+	// control plane does on every open. It is distinct from the deprecated
+	// process-wide nativeForceFallbackGate even though both end in the same
+	// BdStore fallback, and it logs at Debug (see logNativeUnavailable).
 	nativeTransportOffGate = "native_transport_off"
 
 	// gcHookStampPrefix is the comment prefix gc embeds in every hook script
@@ -162,9 +170,9 @@ const (
 	// unthreaded open path behaves exactly like today's default and can never
 	// newly refuse native.
 	NativeTransportUnset NativeTransportMode = ""
-	// NativeTransportAuto is the default: native when preflight-eligible
-	// (today's behavior). For a remote backend this will become "native is
-	// required" once G6 extends decideNativeTransport.
+	// NativeTransportAuto is the default: native when preflight-eligible. A
+	// library-extension scope (libraryExtensionBackend) skips preflight, and
+	// its failed native open is an error, not a BdStore fallback.
 	NativeTransportAuto NativeTransportMode = "auto"
 	// NativeTransportOff is the per-city kill switch: this city's stores
 	// never open natively, always BdStore (the bd CLI subprocess).
@@ -181,11 +189,12 @@ type nativeTransportVerdict struct {
 
 // decideNativeTransport is the ONE seam that decides whether a store open for
 // this city may attempt native storage at all, evaluated before preflight
-// runs. It is where G6 adds the remote-backend rule: for a remote backend,
-// "auto" REQUIRES native, and a failed native open becomes a terminal typed
-// error (HTTPNativeOpenRequiredError) naming beads.native_transport="off" as
-// the escape hatch, rather than a silent BdStore fallback. Today it
-// implements only the off|auto switch; the remote branch does not exist yet.
+// runs. It implements only the off|auto switch. A remote backend the linked
+// beads library opens on its own is not decided here: under "auto" a scope
+// libraryExtensionBackend recognizes takes the library-extension arm in
+// OpenStoreAtForCity, which skips preflight and returns a failed open as an
+// error rather than a silent BdStore fallback. That arm runs after this
+// switch, so beads.native_transport="off" is its escape hatch.
 //
 // Precedence: the caller checks the deprecated process-wide
 // GC_BEADS_FORCE_FALLBACK alias (forceNativeFallback) BEFORE calling this
@@ -240,11 +249,11 @@ type metadataBackendVerdict struct {
 //	backend in the native set        preflight (probes decide eligibility)
 //	any other backend                BdStore, gate metadata_backend, no probes
 //
-// G6 seam: a remote (HTTP) backend is to be served natively through its own
-// opener and must NOT reach the BdStore arm — under native_transport=auto it
-// will require native. When G6 lands, a remote backend gets its own route and
-// arm here, ahead of the default, together with the matching rule in
-// decideNativeTransport; today it does not exist.
+// A scope libraryExtensionBackend recognizes (a remote backend the linked
+// beads library registered and opens on its own, such as http, with no
+// storage fields) never reaches this table: OpenStoreAtForCity routes it to
+// the library-extension arm ahead of persistedDoltModeRefusal, and under
+// native_transport=off the transport gate has already sent it to BdStore.
 func decideMetadataBackend(scopeRoot string) metadataBackendVerdict {
 	metadataPath := filepath.Join(scopeRoot, ".beads", "metadata.json")
 	backend, named, err := contract.ReadMetadataBackend(fsys.OSFS{}, metadataPath)
@@ -431,6 +440,10 @@ func OpenStoreAtForCity(ctx context.Context, opts StoreOpenOptions) (StoreOpenRe
 		return opts.openBdFallback(provider, diag)
 	}
 
+	if backend, ok := libraryExtensionBackend(opts.ScopeRoot); ok {
+		return opts.openLibraryExtensionStore(ctx, provider, backend)
+	}
+
 	// The persisted topology is checked before preflight runs. A proxied-server
 	// scope has no library open in beads at all, so no preflight verdict can
 	// change the outcome — and preflight's bd-context probe does not survive
@@ -494,7 +507,7 @@ func OpenStoreAtForCity(ctx context.Context, opts StoreOpenOptions) (StoreOpenRe
 			Store:               storeNameBdStore,
 			NativeStoreEligible: false,
 			PreflightGate:       nativeHooksGate,
-			PreflightReason:     "bd hooks are installed and the native store would not run them; remove .beads/hooks/on_create,on_update,on_close once nothing depends on them firing for every write",
+			PreflightReason:     nativeHooksReason,
 		}
 		logNativeUnavailable(opts.Logger, opts.ScopeRoot, diag.PreflightGate, diag.PreflightReason)
 		return opts.openBdFallback(provider, diag)
@@ -514,6 +527,83 @@ func OpenStoreAtForCity(ctx context.Context, opts StoreOpenOptions) (StoreOpenRe
 		Store: native,
 		Diagnostic: BeadsDiagnostic{
 			Store:               storeNameNativeDoltStore,
+			NativeStoreEligible: true,
+		},
+	}, nil)
+}
+
+// libraryExtensionBackend reports the backend a scope's metadata names when
+// the linked beads library registered it as a self-sufficient extension
+// backend (contract.IsLibraryExtensionBackend) and the metadata carries no
+// storage fields — the workspace `bd connect <url> --convert-workspace`
+// leaves, whose target lives beside metadata.json. A scope that carries
+// storage_endpoint or storage_database is a complete storage binding whatever
+// it names, and keeps the preflight verdict and the bd front-door fallback.
+//
+// Only the scope's own metadata.json is read. A rig that inherits a
+// library-backend city's endpoint carries none of its own, so it is not
+// recognized here: it keeps the preflight verdict (which reports the missing
+// metadata) and the bd front door, although cmd/gc treats it as externally
+// bound.
+func libraryExtensionBackend(scopeRoot string) (string, bool) {
+	data, err := fsys.OSFS{}.ReadFile(filepath.Join(scopeRoot, ".beads", "metadata.json"))
+	if err != nil {
+		return "", false
+	}
+	var meta struct {
+		Backend         string          `json:"backend"`
+		StorageEndpoint json.RawMessage `json:"storage_endpoint"`
+		StorageDatabase json.RawMessage `json:"storage_database"`
+	}
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return "", false
+	}
+	if len(meta.StorageEndpoint) != 0 || len(meta.StorageDatabase) != 0 {
+		return "", false
+	}
+	backend := strings.TrimSpace(meta.Backend)
+	if !contract.IsLibraryExtensionBackend(backend) {
+		return "", false
+	}
+	return backend, true
+}
+
+// openLibraryExtensionStore is the library-extension arm. The Dolt preflight
+// is skipped whole: its bd-context fork and SQL ping describe a local Dolt
+// server this scope does not have, and cost seconds per open. The library's
+// own open dispatches to the registered backend, which reads the workspace and
+// its credentials itself. A failed open is returned rather than answered with
+// the bd front door, because nothing vetted that fallback for this scope and
+// the operator needs the backend's own reason. Executable bd hooks still route
+// to the bd front door exactly as they do for a Dolt scope.
+//
+// The open runs in a direct native open's env window, not the proxied lane's
+// hermetic one, and that is deliberate parity with the bd CLI door for the
+// same workspace. The caller's env decides the BEADS_ credential and Dolt
+// keys and BD_ALLOW_REMOTE_MIGRATE (gc sets it only for a city that opted in),
+// while the other BD_ switches (BD_EVENTS_JOURNAL, BD_IGNORE_SCHEMA_SKEW,
+// BD_SMART_GATE) reach the library as they reach bd. A backend that cannot
+// record a journal the env or workspace enables fails the open rather than
+// return a handle whose writes would go unrecorded.
+func (opts StoreOpenOptions) openLibraryExtensionStore(ctx context.Context, provider, backend string) (StoreOpenResult, error) {
+	if scopeHasExecutableBdHooks(opts.ScopeRoot) {
+		diag := BeadsDiagnostic{
+			Store:               storeNameBdStore,
+			NativeStoreEligible: false,
+			PreflightGate:       nativeHooksGate,
+			PreflightReason:     nativeHooksReason,
+		}
+		logNativeUnavailable(opts.Logger, opts.ScopeRoot, diag.PreflightGate, diag.PreflightReason)
+		return opts.openBdFallback(provider, diag)
+	}
+	native, err := opts.openNativeStore(ctx)
+	if err != nil {
+		return StoreOpenResult{}, fmt.Errorf("opening beads backend %q for scope %s through the linked beads library: %w", backend, opts.ScopeRoot, err)
+	}
+	return opts.stampedResult(StoreOpenResult{
+		Store: native,
+		Diagnostic: BeadsDiagnostic{
+			Store:               BeadsStoreNameLibraryBackendStore,
 			NativeStoreEligible: true,
 		},
 	}, nil)
@@ -833,6 +923,16 @@ func logNativeUnavailable(logger *slog.Logger, scope, gateName, reason string) {
 		// store-open, spamming WARN on routine commands like `gc session attach`.
 		// Log at DEBUG instead (still visible with -v); genuine backend
 		// disagreements remain surfaced by `gc doctor`'s preflight diagnostic.
+		logger.Debug(nativeUnavailableMessage, args...)
+		return
+	}
+	if gateName == nativeTransportOffGate {
+		// A chosen fallback, not a degraded store: the city turned native
+		// transport off (logged once at boot), or the caller pinned the bd
+		// store, as the control plane does on every open. It fires on every
+		// store open, so a WARN would read as a degraded store every few
+		// seconds and name a setting the city may never have set. gc doctor
+		// still reports the gate for a city that set "off".
 		logger.Debug(nativeUnavailableMessage, args...)
 		return
 	}

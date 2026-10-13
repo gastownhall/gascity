@@ -26,9 +26,11 @@ const historyTailCtxCheckLines = 4096
 // (active log, in-flight rotation segments and archives) while holding at most
 // limit events, and that stop reading when ctx is done.
 //
-// With count false, matched is len(events); with count true, the whole history
-// is read (still holding at most limit events) and matched is the number of
-// all matching events, as a full scan would count them.
+// With count false, matched is len(events); with count true, matched is the
+// number of all matching events, as a full scan would count them, still
+// holding at most limit events. An implementation may stop reading once it can
+// prove that no older event matches, as the file-backed log does for a Since
+// filter (see ReadFilteredHistoryTail).
 type HistoryTailProvider interface {
 	ListHistoryTail(ctx context.Context, filter Filter, limit int, count bool) (events []Event, matched int, err error)
 }
@@ -55,6 +57,14 @@ func (r *FileRecorder) ListHistoryTail(ctx context.Context, filter Filter, limit
 // the open nor add a later one. When the opened file holds no event, every
 // listed segment is read.
 //
+// A Since filter is answered from the active log alone when its backward walk
+// closes the window (see sinceWalk), which proves that no older event, in the
+// active log or in a segment, matches, or, without count, when the walk holds
+// limit events first; matched counts the matches the walk passed. The answer
+// is the full read's unless the log breaks the invariant sinceScanSkew
+// describes. When the walk cannot close the window or does not, the read
+// proceeds as below.
+//
 // Without count, the active log is scanned backward and the segments
 // newest-first, and the read stops once limit events are held. With count,
 // the segments in seq order and then the active log are read through a ring
@@ -72,6 +82,9 @@ func ReadFilteredHistoryTail(ctx context.Context, path string, filter Filter, li
 		return nil, 0, err
 	}
 	defer active.close()
+	if evts, matched, answered, err := active.sinceTail(ctx, filter, limit, count); err != nil || answered {
+		return evts, matched, err
+	}
 	if count {
 		return countHistory(ctx, path, active, filter, limit)
 	}
@@ -180,6 +193,38 @@ func (a activeLog) close() {
 	if a.f != nil {
 		_ = a.f.Close()
 	}
+}
+
+// sinceTail answers a Since filter from the opened file alone when it can,
+// walking it backward from its size at the open (see sinceWalk) and holding
+// the newest limit matches. answered reports that the walk closed the window,
+// so no older event matches, or, without count, that it holds limit events;
+// matched counts the matches it passed. It reports false when the filter has
+// no Since, the file's first record is too recent for the window to close, or
+// the walk reaches the first byte still open, and the caller reads the whole
+// history.
+func (a activeLog) sinceTail(ctx context.Context, filter Filter, limit int, count bool) (evts []Event, matched int, answered bool, err error) {
+	if a.f == nil {
+		return nil, 0, false, nil
+	}
+	var newestFirst []Event
+	answered, err = sinceWalk(ctx, a.f, a.size, filter, func(e Event) bool {
+		matched++
+		if len(newestFirst) < limit {
+			newestFirst = append(newestFirst, e)
+		}
+		return !count && len(newestFirst) >= limit
+	})
+	if err != nil {
+		if ctx.Err() == nil {
+			err = fmt.Errorf("reading events tail: %w", err)
+		}
+		return nil, 0, false, err
+	}
+	if !answered {
+		return nil, 0, false, nil
+	}
+	return reverseEvents(newestFirst), matched, true, nil
 }
 
 // reader reads the opened file forward, up to its size at the open.

@@ -12,7 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 )
@@ -174,8 +176,14 @@ func TestNudgeStepsReadImmutableSummary(t *testing.T) {
 // gather carries it in World.ExecutionStalled; a row the census dropped is
 // forgotten, and a row that cannot be read posts nothing.
 func TestExecutionStalledRequestReachesPlanner(t *testing.T) {
-	row := routerSessionBead("s1", map[string]string{"session_name": "s-s1", "state": "asleep", "template": "worker", "generation": "3"})
+	row := routerSessionBead("s1", map[string]string{"session_name": "s-s1", "state": "active", "template": "worker", "generation": "3"})
 	f := newGatherFixture(t, row)
+	// A live seat: a dormant one, or one whose runtime is gone, spends its
+	// request (mc-uinl0).
+	clk := &clock.Fake{Time: gatherNow}
+	obs := NewObservationCache(clk, time.Minute, "e1")
+	obs.PublishInventory(obsPass(clk, 1, 1, completeBackend("", "s-s1")), nil)
+	f.env.Observations = func() *ObservationCache { return obs }
 	env := externalReadsEnv{CityStore: f.cache}
 	lane, _ := newPoolStepsTestLane(env, nil, f.p.postExecutionStalled)
 	request := lane.requestExecutionStalled(env)
@@ -228,5 +236,31 @@ func TestAllocSummaryCarriesCensusSnapshot(t *testing.T) {
 				t.Errorf("summary = partial %t at %v open %v, want partial %t at %v open [gc-1]", s.Partial, s.At, s.OpenSessions, tc.want, gatherNow)
 			}
 		})
+	}
+}
+
+// The orphan-release step runs the stranded-work detector: a claim no lane
+// serves on a closed session raises session.stranded_claims.
+func TestOrphanReleaseDetectsStrandedClaims(t *testing.T) {
+	store := beads.NewMemStore()
+	seat, err := store.Create(beads.Bead{Title: "seat", Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: map[string]string{"session_name": "worker-dead", "template": "worker", "state": "drained"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(seat.ID); err != nil {
+		t.Fatal(err)
+	}
+	work, err := store.Create(beads.Bead{Title: "stranded", Assignee: "worker-dead", Metadata: map[string]string{"gc.routed_to": "nowhere", beadmeta.StrandedMetadataKey: "true", beadmeta.StrandedSessionMetadataKey: seat.ID, beadmeta.StrandedAssigneeMetadataKey: "worker-dead"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := &allocSummary{At: stepsTestNow, AssignedWork: []beads.Bead{mustGetTestBead(t, store, work.ID)}, AssignedStoreRefs: []string{""}}
+	rec := events.NewFake()
+	env := externalReadsEnv{Cfg: orphanCfg(), CityStore: store, WorkLegs: testWorkLegs("", orphanCfg(), store, nil)}
+	lane, _ := newPoolStepsTestLane(env, func() *allocSummary { return sum }, nil)
+	lane.stranded = &strandedClaimAlerts{rec: rec, scanned: stepsTestNow.Add(-time.Hour)}
+	lane.orphanRelease(context.Background(), env)
+	if evts, _ := rec.List(events.Filter{Type: events.SessionStrandedClaims}); len(evts) != 1 || evts[0].Subject != seat.ID {
+		t.Fatalf("session.stranded_claims = %+v, want one for %s", evts, seat.ID)
 	}
 }

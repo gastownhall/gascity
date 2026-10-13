@@ -22,8 +22,8 @@ type txWork struct {
 	Err  error
 }
 
-// errNoReadStore: the pass holds no city store to read L5 through.
-var errNoReadStore = errors.New("v2 effect: no read-only city store for the live work read")
+// errNoReadStore: the pass holds no city work legs to read L5 through.
+var errNoReadStore = errors.New("v2 effect: no city work legs for the live work read")
 
 // readFence reads the legs and the idle proof the transaction needs, for the
 // expected row, or refuses with a cause when no backend resolves the name.
@@ -32,13 +32,13 @@ func (t *tx) readFence(ctx context.Context) string {
 	if t.view.RT != nil {
 		leaf = t.view.RT.leaf // the leaf the runtime read used
 	}
-	if leaf == nil && (t.needs.Legs&(legAttach|legPending) != 0 || t.needs.Idle) { // L5 alone needs no route
+	if leaf == nil && (t.needs.Legs&(legAttach|legPending) != 0 || t.needs.Idle || t.needs.Activity || t.needs.Content) { // L5 alone needs no route
 		var known bool
 		if leaf, _, known = runtime.ResolveBackend(t.p.Runtime, t.name); t.p.Runtime == nil || !known || leaf == nil {
 			return causeRouteUnknown
 		}
 	}
-	t.view.Fence = readLegs(ctx, leaf, t.name, t.needs, t.view.Now, t.view.World.Now, func() *txWork { return t.p.readWork(t.expect) })
+	t.view.Fence = readLegs(ctx, leaf, t.name, t.needs, t.view.Now, t.view.World.Now, func() *txWork { return t.p.readWork(t.expect, t.view.It) })
 	return ""
 }
 
@@ -68,14 +68,56 @@ func readLegs(ctx context.Context, leaf runtime.Provider, name string, n needs, 
 	if n.Idle {
 		f.Idle = provedIdle(ctx, leaf, name, passNow)
 	}
+	if n.Activity {
+		a := activityRead{Reportable: sessionActivityReportable(leaf, name)}
+		if a.Reportable {
+			last, ok := boundedProbe(ctx, func() activityRead {
+				at, err := leaf.GetLastActivity(name)
+				return activityRead{Last: at, Err: err}
+			})
+			a.Last, a.Err = last.Last, last.Err
+			if !ok {
+				a.Err = errProbeExpired
+			}
+		}
+		f.Activity = &a
+	}
+	if n.Content {
+		if snap, ok := leaf.(runtime.IdleSnapshotProvider); ok {
+			f.Content = boundedContent(ctx, snap, name)
+		}
+	}
 	return f
 }
 
-func (p *effectPass) readWork(row session.Info) *txWork {
-	if p.reads.city == nil || p.World.Env == nil {
+// boundedContent is a pane snapshot read within ctx: idle, busy,
+// indeterminate, an error, or unread past the bound.
+func boundedContent(ctx context.Context, snap runtime.IdleSnapshotProvider, name string) contentState {
+	got, ok := boundedProbe(ctx, func() contentState { return snapshotContent(snap, name) })
+	if !ok {
+		return contentUnread
+	}
+	return got
+}
+
+func (p *effectPass) readWork(row session.Info, it intent) *txWork {
+	if p.reads.legs.unusable() != nil || p.World.Env == nil {
 		return &txWork{Err: errNoReadStore}
 	}
-	has, err := sessionHasOpenAssignedWorkForReachableStore(p.World.CityPath, p.World.Env.Cfg, p.reads.city, p.reads.rigs, row)
+	// One seat's read, live, over the pass's city work legs (NEW2-1: never
+	// the sessions store standing in for the work store). A close ends a
+	// dead seat, which the narrow ReleaseScope gates, as legacy's close gate
+	// does; every other effect that reads L5 ends a live runtime (a drain
+	// begin), which the seat's RefuseScope gates (O4).
+	var scope workScope = releaseScope(row, p.World.Env.Cfg)
+	if it.Reason == decideIdleTimeout { // legacy's late claim: in-progress work under the narrow scope (SESS-574)
+		late, err := lateSeatWork(p.reads.legs, scope, []string{"in_progress"}, nil)
+		return &txWork{Free: len(late) == 0 && err == nil, Err: err}
+	}
+	if it.Kind != intentClose {
+		scope = refuseScope(row, p.World.Env.Cfg)
+	}
+	has, err := sessionHasOpenAssignedWorkInStores(seatWorkFor(p.reads.legs, scope), scope)
 	return &txWork{Free: !has && err == nil, Err: err}
 }
 
@@ -95,4 +137,11 @@ func provedIdle(ctx context.Context, leaf runtime.Provider, name string, passNow
 		return err
 	})
 	return ok && last == nil
+}
+
+// ownRuntimeFence is the rollback exception's fence (v5 F2, C3): L1 alone
+// on rt, the row's own runtime, which the caller has attributed
+// (rollbackRuntime); L3 is waived.
+func ownRuntimeFence(rt *txRuntime, row session.Info) fenceVerdict {
+	return fenceDestructive(rt, txFence{Read: legLiveness}, fenceRequest{Row: row, Legs: legLiveness})
 }

@@ -3213,7 +3213,7 @@ func TestTmuxStartOpsRunSetupCommandUsesGC_DIRAsWorkingDirectory(t *testing.T) {
 
 func TestPaneDeadInfoParsesStatusAndSignal(t *testing.T) {
 	tm := NewTmux()
-	exec := &fakeExecutor{out: "139|SIGSEGV\n"}
+	exec := &fakeExecutor{out: "pane\t139|SIGSEGV\n"}
 	tm.exec = exec
 
 	status, signal := tm.PaneDeadInfo("mayor")
@@ -3465,6 +3465,9 @@ type partialPasteExecutor struct {
 func (f *partialPasteExecutor) execute(args []string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if row, ok := fakeAgentPaneRow(args); ok {
+		return row, nil
+	}
 	// tmux invocations carry leading flags (-u, socket selection), so match the
 	// subcommand anywhere in the argument list rather than at a fixed index.
 	switch {

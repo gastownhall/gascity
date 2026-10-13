@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -33,9 +34,17 @@ type Config struct {
 	HandshakeTimeout  time.Duration // default 30s
 	NudgeBusyTimeout  time.Duration // default 60s
 	OutputBufferLines int           // default 1000
+	// TranscriptRoot is the directory receiving JSON-RPC capture transcripts
+	// (citylayout.ACPTranscriptsDir for a city). Empty disables capture. See
+	// capture.go for the file layout and format.
+	TranscriptRoot string
 	// StopGrace is how long Stop waits after SIGTERM before escalating to
 	// SIGKILL. Default runtime.ManagedProcessStopGrace.
 	StopGrace time.Duration
+	// CancelTimeout is how long Interrupt waits for session/cancel to end
+	// the in-flight turn before falling back to SIGINT. Default
+	// DefaultCancelTimeout.
+	CancelTimeout time.Duration
 }
 
 func (c *Config) handshakeTimeout() time.Duration {
@@ -84,6 +93,7 @@ type Provider struct {
 	workDirs      map[string]string       // session name → workDir (for CopyTo)
 	cfg           Config
 	events        *sessionEventHub
+	turnEvents    turnEventHub
 	activityWrite func(path string, data []byte) error                                         // test seam
 	handshakeFunc func(context.Context, *sessionConn, string, []runtime.MCPServerConfig) error // test seam
 	dial          func(network, addr string, timeout time.Duration) (net.Conn, error)          // test seam
@@ -316,9 +326,11 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	// Close the write end — child inherits it; we only read.
 	stderrW.Close() //nolint:errcheck
 
-	// Create control socket for cross-process discovery.
+	// Create control socket for cross-process discovery. Its interrupt
+	// command runs the owner's Interrupt logic once the connection exists.
 	processDone := make(chan struct{})
-	lis, err := p.startControlSocket(name, cmd, processDone)
+	var owned atomic.Pointer[sessionConn]
+	lis, err := p.startControlSocket(name, cmd, processDone, p.ownedInterrupt(name, &owned))
 	if err != nil {
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		_ = cmd.Wait()
@@ -328,6 +340,8 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 
 	sc := newSessionConn(cmd, stdinPipe, lis, p.cfg.outputBufferLines(), processDone)
 	sc.token = seedMeta["GC_INSTANCE_TOKEN"]
+	sc.capture = p.openCapture(name, cfg.Env, cmd.Process.Pid)
+	owned.Store(sc)
 
 	// Start readLoop before handshake so we can receive responses.
 	go sc.readLoop(stdoutPipe)
@@ -347,6 +361,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		// the stdout read end itself, so bytes still unread at that point are
 		// not guaranteed to be dispatched.
 		<-sc.readDone
+		sc.capture.close(captureCloseTimeout)
 		sc.drainPending(nil)
 		sc.closeActivityPublisher()
 		_ = os.Remove(p.sockNamePath(name))
@@ -451,6 +466,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	// Attach before publishing the connection so Stop, which finds it only
 	// through p.conns, always reports closed after the attached exit.
 	p.attachSessionEvents(name, sc)
+	p.attachTurnEvents(name, cfg.Env, sc)
 	p.conns[name] = sc
 	p.mu.Unlock()
 	// Stop must be able to close stdin even if initial delivery blocks. Failed
@@ -480,6 +496,34 @@ func acpHandshakeStartError(name string, hsErr error, exitCode int, stderr strin
 		return &runtime.CapacityError{ExitCode: exitCode, Source: runtime.CapacitySourceExitStatus, Err: err}
 	}
 	return err
+}
+
+// openCapture opens the JSON-RPC capture transcript for one agent start, or
+// returns nil (capture disabled) when no transcript root is configured, the
+// session environment lacks GC_SESSION_ID or GC_CONTINUATION_EPOCH, or the file
+// cannot be opened. Capture problems are reported on stderr and never fail
+// the session.
+func (p *Provider) openCapture(name string, env map[string]string, pid int) *transcriptCapture {
+	if p.cfg.TranscriptRoot == "" {
+		return nil
+	}
+	id := captureIdentity{
+		SessionID:         env["GC_SESSION_ID"],
+		SessionName:       name,
+		ContinuationEpoch: env["GC_CONTINUATION_EPOCH"],
+		RuntimeEpoch:      env["GC_RUNTIME_EPOCH"],
+		PID:               pid,
+	}
+	if id.SessionID == "" || id.ContinuationEpoch == "" {
+		fmt.Fprintf(os.Stderr, "acp: transcript capture for %q disabled: session env lacks GC_SESSION_ID or GC_CONTINUATION_EPOCH\n", name)
+		return nil
+	}
+	c, err := openTranscriptCapture(p.cfg.TranscriptRoot, id)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "acp: transcript capture for %q disabled: %v\n", name, err)
+		return nil
+	}
+	return c
 }
 
 func envWithoutKey(env []string, key string) []string {
@@ -522,7 +566,13 @@ func (p *Provider) handshake(ctx context.Context, sc *sessionConn, workDir strin
 
 	// Step 3: Send "session/new" request.
 	newReq, _ := newSessionNewRequest(workDir, mcpServers)
-	ch, err = sc.sendRequest(newReq)
+	// session/new carries MCP server env, headers and URLs; the capture
+	// transcript gets a redacted copy.
+	redactedParams, err := redactedSessionNewParams(workDir, mcpServers)
+	if err != nil {
+		return fmt.Errorf("sending session/new: %w", err)
+	}
+	ch, err = sc.sendRequestRedacted(newReq, redactedParams)
 	if err != nil {
 		return fmt.Errorf("sending session/new: %w", err)
 	}
@@ -630,18 +680,27 @@ func (p *Provider) Stop(name string) error {
 	return err
 }
 
-// Interrupt sends SIGINT to the named session's process.
-// Best-effort: returns nil if the session doesn't exist.
+// Interrupt cancels the session's in-flight prompt turn with ACP session/cancel
+// and waits for it to settle: outstanding permission requests are answered
+// canceled first, then session/cancel is sent, and the turn gets
+// Config.CancelTimeout to end. A turn still open after that gets SIGINT to its
+// process group, twice at most, a short wait each; if it is still open,
+// Interrupt returns an error wrapping runtime.ErrInterruptNotSettled and the
+// agent keeps running. Interrupt never kills the agent. With no turn in
+// flight it sends nothing and returns nil. An agent that exits during the
+// wait counts as settled.
+//
+// Best-effort for sessions this provider does not own: it returns nil if the
+// session doesn't exist. A session owned by another process is interrupted
+// there, through the control socket. The owner acknowledges the command at
+// once and runs the cancel and settle itself, so this call does not wait for
+// the turn to end, does not learn whether it did, and returns nil.
 func (p *Provider) Interrupt(name string) error {
 	p.mu.Lock()
 	sc, ok := p.conns[name]
 	p.mu.Unlock()
 	if ok {
-		// Guard against sentinel sessionConn (nil cmd during handshake).
-		if sc.cmd == nil {
-			return nil
-		}
-		return syscall.Kill(-sc.cmd.Process.Pid, syscall.SIGINT)
+		return sc.interrupt(name, p.cfg.cancelTimeout())
 	}
 
 	// Fall back to socket (cross-process case).
@@ -721,9 +780,15 @@ func (p *Provider) nudgeConn(name string, sc *sessionConn, content []runtime.Con
 		return nil
 	}
 
-	// Wait for agent to become idle.
-	if !sc.waitIdle(p.cfg.nudgeBusyTimeout()) {
-		return fmt.Errorf("agent %q busy, timed out waiting for idle", name)
+	// Wait for agent to become idle. A turn held open by a permission
+	// request refuses instead, so the answer is not stuck behind this wait.
+	// The next turn starts only after the last one's idle channel has
+	// closed; interrupt's guards depend on that (see markBusyLocked).
+	if err := sc.waitNudgeable(p.cfg.nudgeBusyTimeout()); err != nil {
+		if errors.Is(err, runtime.ErrNudgeRefusedPendingInteraction) {
+			return fmt.Errorf("%w: %s", err, name)
+		}
+		return fmt.Errorf("agent %q busy, %w", name, err)
 	}
 
 	sc.mu.Lock()
@@ -799,20 +864,6 @@ func (p *Provider) nudgeConn(name string, sc *sessionConn, content []runtime.Con
 	}()
 
 	return nil
-}
-
-// Pending reports structured pending interactions. ACP only tracks whether an
-// outbound prompt is in flight; that busy state is not a user-facing blocking
-// interaction, so the provider intentionally reports this capability as
-// unsupported.
-func (p *Provider) Pending(_ string) (*runtime.PendingInteraction, error) {
-	return nil, runtime.ErrInteractionUnsupported
-}
-
-// Respond resolves a pending structured interaction. ACP does not currently
-// expose those interactions over the protocol, so responses are unsupported.
-func (p *Provider) Respond(_ string, _ runtime.InteractionResponse) error {
-	return runtime.ErrInteractionUnsupported
 }
 
 // SendKeys is a no-op for ACP sessions (no terminal).
@@ -1084,8 +1135,22 @@ func (p *Provider) socketNameForEntry(key string) string {
 	return name
 }
 
+// ownedInterrupt returns the control socket's interrupt command for session
+// name. The socket starts before the connection exists, so the command runs
+// the owner's interrupt on the connection Start later stores in owned, and
+// does nothing until then: no turn can be in flight before that.
+func (p *Provider) ownedInterrupt(name string, owned *atomic.Pointer[sessionConn]) func() error {
+	return func() error {
+		if sc := owned.Load(); sc != nil {
+			return sc.interrupt(name, p.cfg.cancelTimeout())
+		}
+		return nil
+	}
+}
+
 // startControlSocket creates a unix socket for cross-process commands.
-func (p *Provider) startControlSocket(name string, cmd *exec.Cmd, done <-chan struct{}) (net.Listener, error) {
+// interrupt runs the owner's Interrupt logic for the "interrupt" command.
+func (p *Provider) startControlSocket(name string, cmd *exec.Cmd, done <-chan struct{}, interrupt func() error) (net.Listener, error) {
 	sp := p.sockPath(name)
 	namePath := p.sockNamePath(name)
 	os.Remove(sp) //nolint:errcheck
@@ -1104,15 +1169,17 @@ func (p *Provider) startControlSocket(name string, cmd *exec.Cmd, done <-chan st
 			if err != nil {
 				return
 			}
-			go handleControlConn(conn, cmd, done, p.cfg.stopGrace())
+			go handleControlConn(conn, cmd, done, p.cfg.stopGrace(), interrupt)
 		}
 	}()
 	return lis, nil
 }
 
 // handleControlConn reads a command from the connection and acts on the process.
-// A "stop" escalates from SIGTERM to SIGKILL after stopGrace.
-func handleControlConn(conn net.Conn, cmd *exec.Cmd, done <-chan struct{}, stopGrace time.Duration) {
+// A "stop" escalates from SIGTERM to SIGKILL after stopGrace. An "interrupt"
+// is fire-and-forget: it replies at once and runs interrupt, the owner's
+// session/cancel-and-settle logic, in the background.
+func handleControlConn(conn net.Conn, cmd *exec.Cmd, done <-chan struct{}, stopGrace time.Duration, interrupt func() error) {
 	defer conn.Close()                                     //nolint:errcheck
 	conn.SetReadDeadline(time.Now().Add(10 * time.Second)) //nolint:errcheck
 	scanner := bufio.NewScanner(conn)
@@ -1124,7 +1191,15 @@ func handleControlConn(conn net.Conn, cmd *exec.Cmd, done <-chan struct{}, stopG
 		_ = runtime.TerminateManagedProcess(cmd, done, stopGrace)
 		conn.Write([]byte("ok\n")) //nolint:errcheck
 	case "interrupt":
-		_ = runtime.SignalProcessGroup(cmd, syscall.SIGINT)
+		// The settle can take the whole cancel_timeout plus the SIGINT
+		// retries, far longer than the caller's socket deadline, and the
+		// caller does not wait for it. Nobody reads a result, so a turn
+		// that does not settle is only logged here.
+		go func() {
+			if err := interrupt(); err != nil {
+				fmt.Fprintf(os.Stderr, "acp: interrupt via control socket: %v\n", err)
+			}
+		}()
 		conn.Write([]byte("ok\n")) //nolint:errcheck
 	case "ping":
 		conn.Write([]byte("ok\n")) //nolint:errcheck

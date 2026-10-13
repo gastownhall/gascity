@@ -36,6 +36,7 @@ var (
 	_ runtime.IdleSnapshotProvider          = (*Provider)(nil)
 	_ runtime.InterruptBoundaryWaitProvider = (*Provider)(nil)
 	_ runtime.InterruptedTurnResetProvider  = (*Provider)(nil)
+	_ runtime.InputClearProvider            = (*Provider)(nil)
 	_ runtime.TransportCapabilityProvider   = (*Provider)(nil)
 	_ runtime.RelaunchProvider              = (*Provider)(nil)
 	_ runtime.LivenessObserver              = (*Provider)(nil)
@@ -54,6 +55,7 @@ var (
 	_ runtime.EnvironmentBatchProvider      = (*Provider)(nil)
 	_ runtime.ServerLifecycleProvider       = (*Provider)(nil)
 	_ runtime.SessionRosterProvider         = (*Provider)(nil)
+	_ runtime.TurnEventProvider             = (*Provider)(nil)
 )
 
 // New creates a composite provider. defaultSP handles sessions not
@@ -475,6 +477,15 @@ func (p *Provider) ResetInterruptedTurn(ctx context.Context, name string) error 
 	return runtime.ErrInteractionUnsupported
 }
 
+// ClearInput delegates to the routed backend when it can empty a session's
+// input box and confirm it is empty.
+func (p *Provider) ClearInput(ctx context.Context, name string, restoreWindow time.Duration) error {
+	if cp, ok := p.route(name).(runtime.InputClearProvider); ok {
+		return cp.ClearInput(ctx, name, restoreWindow)
+	}
+	return runtime.ErrInteractionUnsupported
+}
+
 // Relaunch forwards a warm-box agent relaunch to the routed backend when it
 // supports one, so the reconciler's RelaunchProvider type-assert is not masked
 // by the auto router.
@@ -653,4 +664,15 @@ func (p *Provider) SubscribeSessionEvents(ctx context.Context) (<-chan runtime.S
 	return runtime.SubscribeSessionEventSources(ctx,
 		runtime.SessionEventSource{Name: "default", Provider: p.defaultSP},
 		runtime.SessionEventSource{Name: "ACP", Provider: p.acpSP})
+}
+
+// SubscribeTurnEvents forwards the turn-event streams of the backends that
+// implement runtime.TurnEventProvider, merging them when both do, the same
+// way SubscribeSessionEvents does. A nested composite without a turn-event
+// backend is skipped, so ACP turns behind an inner composite still arrive.
+// See runtime.SubscribeTurnEventSources.
+func (p *Provider) SubscribeTurnEvents(ctx context.Context) (<-chan runtime.TurnEvent, error) {
+	return runtime.SubscribeTurnEventSources(ctx,
+		runtime.TurnEventSource{Name: "default", Provider: p.defaultSP},
+		runtime.TurnEventSource{Name: "ACP", Provider: p.acpSP})
 }

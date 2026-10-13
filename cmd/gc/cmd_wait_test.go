@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime/debug"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -2519,7 +2520,11 @@ func TestClearSessionWaitHoldReportsContention(t *testing.T) {
 			if err != nil {
 				return false, err
 			}
-			decide(info, sessionpkg.PersistedResponse{})
+			row, err := store.Get(id)
+			if err != nil {
+				return false, err
+			}
+			decide(info, sessionpkg.PersistedResponse{Status: row.Status, Metadata: row.Metadata})
 			return false, nil
 		}
 		err = clearSessionWaitHoldWith(sessFront, b.ID, lose)
@@ -4283,5 +4288,34 @@ func TestWaitReadiesOnADependencyTheMigrationRelocated(t *testing.T) {
 	}
 	if !ready {
 		t.Errorf("wait on relocated dependency %s is not ready; its only dependency is closed in the binding that owns it", depID)
+	}
+}
+
+// TestClearOrphanedWaitHoldsRederivesEachPass (mc-q6x43): every pass clears
+// the wait hold of each open row with no non-terminal wait left, whether or
+// not that pass ended the wait, so a clear that lost its CAS or failed is
+// owed again next pass, and one row's failure spends no other's clear. A
+// live wait, an operator's hold and a closed row are left alone.
+func TestClearOrphanedWaitHoldsRederivesEachPass(t *testing.T) {
+	snap := newSessionBeadSnapshotFromInfos([]sessionpkg.Info{
+		{ID: "orphan", WaitHold: "true", SleepIntent: "wait-hold"},
+		{ID: "intent-only", SleepIntent: "wait-hold"},
+		{ID: "ended", WaitHold: "true", SleepIntent: "wait-hold"},
+		{ID: "waiting", WaitHold: "true", SleepIntent: "wait-hold"},
+		{ID: "user-hold", SleepIntent: "user-hold"},
+		{ID: "unheld"},
+		{ID: "closed", WaitHold: "true", SleepIntent: "wait-hold", Closed: true},
+	})
+	waits := []sessionpkg.WaitInfo{{SessionID: "ended", State: waitStateClosed}, {SessionID: "waiting", State: waitStatePending}}
+	for pass, fail := range []error{fmt.Errorf("%w: lost", errWaitHoldClearContended), errors.New("store down")} {
+		var cleared []string
+		clearOrphanedWaitHolds(nil, snap, waits, func(_ *sessionpkg.Store, id string) error {
+			cleared = append(cleared, id)
+			return fail // every clear fails
+		})
+		slices.Sort(cleared)
+		if !slices.Equal(cleared, []string{"ended", "intent-only", "orphan"}) {
+			t.Fatalf("pass %d (%v): cleared %v; want ended, intent-only and orphan, each tried", pass, fail, cleared)
+		}
 	}
 }

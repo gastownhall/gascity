@@ -244,7 +244,7 @@ func TestRuntimeLeaseCLIVsLegacyStart(t *testing.T) {
 
 			clk := &clock.Fake{Time: prewake.Add(c.bootAt)}
 			sp, dt := runtime.NewFake(), newDrainTracker()
-			if n := reapStaleSessionBeads(f.city, f.store, sp, dt, nil, clk, &f.log); n != 0 {
+			if n := reapStaleSessionBeads(f.city, f.store, testSeatWork(f.city, nil, f.store, nil), sp, dt, nil, clk, &f.log); n != 0 {
 				t.Fatalf("the boot's stuck-creating reap closed %d row(s), want the abandoned start kept for its relaunch; log %q", n, f.log.String())
 			}
 			cfgNames := configuredSessionNames(f.cfg, "", f.store)
