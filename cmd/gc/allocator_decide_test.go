@@ -377,9 +377,10 @@ func TestAllocator_CitySuspended_KeepsWhatLegacySuspendSpares(t *testing.T) {
 	}
 }
 
-// Kills: the suspended city's keeps leaking into a normal pass: there an
-// undesired row with assigned work, or a pending create within its lease,
-// drains; the session key's drain gates hold it (CONTRACT §2.2).
+// Kills: the suspended city's assigned-work keep leaking into a normal
+// pass: there an undesired row with assigned work drains; the session key's
+// drain gates hold it (CONTRACT §2.2). An undesired pending create within its
+// lease keeps in a normal pass too (v5.9r, SESS-065), pool rows included.
 func TestAllocator_NormalPassDrainsUndesiredRowsWithWork(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 3)}}
 	f := newAllocFixture(t, cfg).sessions(
@@ -389,10 +390,11 @@ func TestAllocator_NormalPassDrainsUndesiredRowsWithWork(t *testing.T) {
 	f.in.Demand.AssignedWork = []beads.Bead{{ID: "w-1", Status: "in_progress", Assignee: "gc-1"}}
 	f.in.Demand.AssignedStoreRefs = []string{""}
 	d := f.decideSelecting()
-	for _, id := range []string{"gc-1", "gc-2"} {
-		if e := entryOf(t, d, id); e.Desired != desireDrain {
-			t.Errorf("%s = %s/%s, want drain", id, e.Desired, e.Reason)
-		}
+	if e := entryOf(t, d, "gc-1"); e.Desired != desireDrain {
+		t.Errorf("gc-1 = %s/%s, want drain", e.Desired, e.Reason)
+	}
+	if e := entryOf(t, d, "gc-2"); e.Desired != desireKeep || e.Reason != reasonPendingCreate {
+		t.Errorf("gc-2 = %s/%s, want keep/%s", e.Desired, e.Reason, reasonPendingCreate)
 	}
 	if e := entryOf(t, d, "gc-1"); e.AssignedWork == nil || e.AssignedWork.BeadID != "w-1" {
 		t.Errorf("undesired row's assigned work = %+v, want w-1 carried for the session key's gate", e.AssignedWork)
@@ -708,6 +710,10 @@ func TestAllocator_FloorsLowestBeadIDWarmOnly(t *testing.T) {
 		sessionRow("gc-00", "template", "worker", "state", "active", "session_name", "manual-0", "manual_session", "true"),
 		poolRow("gc-000", "worker", 6, "active", "session_name", "shared"),
 		poolRow("gc-9", "worker", 7, "active", "session_name", "shared"),
+		// Named rows sort below gc-2 and never take a rank (PAR-FLOORACK
+		// reads the floor: a ranked named row would drop a pool seat out).
+		poolRow("gc-11", "worker", 8, "active", "configured_named_session", "true"),
+		poolRow("gc-12", "worker", 9, "active", "configured_named_identity", "worker"),
 	).alive("shared", InventoryAttrs{OwnerState: OwnerSession, OwnerID: "gc-9"}).decide()
 	got := d.Snapshot.Floors["worker"]
 	if fmt.Sprint(got) != fmt.Sprint([]rowKey{{allocSessionsLeg, "gc-2"}, {allocSessionsLeg, "gc-3"}}) {
@@ -716,7 +722,7 @@ func TestAllocator_FloorsLowestBeadIDWarmOnly(t *testing.T) {
 	if e := entryOf(t, d, "gc-2"); e.Floor == nil || e.Floor.Rank != 0 || e.Floor.MinActive != 2 {
 		t.Fatalf("gc-2 floor view = %+v", e.Floor)
 	}
-	for _, id := range []string{"gc-4", "gc-1", "gc-0", "gc-00", "gc-000"} {
+	for _, id := range []string{"gc-4", "gc-1", "gc-0", "gc-00", "gc-000", "gc-11", "gc-12"} {
 		if entryOf(t, d, id).Floor != nil {
 			t.Errorf("%s holds a floor rank", id)
 		}

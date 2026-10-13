@@ -45,7 +45,7 @@ func TestExitAccrualDecidesOnAFreshRead(t *testing.T) {
 			snapshot := mustGetBead(t, env.store, row.ID) // the tick's read
 
 			if c.killed {
-				fence, err := writeSessionKillFence(env.store, row.ID, env.clk.Now())
+				fence, err := sessionpkg.WriteKillFence(env.store, row.ID, env.clk.Now())
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -53,7 +53,7 @@ func TestExitAccrualDecidesOnAFreshRead(t *testing.T) {
 				if err := mgr.Kill(context.Background(), testActorIn(t, sessionpkg.ActorOperator, env.city), row.ID); err != nil {
 					t.Fatal(err)
 				}
-				if err := fence.clear(env.store); err != nil {
+				if err := fence.Clear(env.store); err != nil {
 					t.Fatal(err)
 				}
 			} else if err := env.sp.Stop("worker"); err != nil {

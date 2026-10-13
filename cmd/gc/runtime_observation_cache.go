@@ -166,6 +166,9 @@ type RuntimeObservation struct {
 	PendingInteraction RuntimeFact
 	LastActivity       time.Time
 	LastActivityKnown  bool
+	// Content is the pass's read of the pane's content, for a name the
+	// planner asked the lane to read (WantContent): A15's content clock.
+	Content contentState
 	// FirstListedAt is the first pass in this epoch that listed this
 	// incarnation; LastListedAt the latest.
 	FirstListedAt time.Time
@@ -317,7 +320,20 @@ type InventoryAttrs struct {
 	// LastActivity is then that time. Anything else leaves it unknown.
 	ActivityKnown bool
 	LastActivity  time.Time
+	Content       contentState
 }
+
+// contentState is a pane content read (runtime.IdleSnapshotProvider), a
+// digest of legacy's checkIdleByContent's observation.
+type contentState uint8
+
+const (
+	contentUnread        contentState = iota // not asked for, not read, or past the bound
+	contentIdle                              // a ready prompt
+	contentBusy                              // an active-processing indicator
+	contentIndeterminate                     // neither (runtime.ErrIdleIndeterminate)
+	contentError                             // any other error: the anchor stands
+)
 
 // runtimeIdentity is one read of a runtime's identity env (v5 O2, O3):
 // GC_SESSION_ID, GC_RUNTIME_EPOCH, GC_INSTANCE_TOKEN and GT_PROCESS_NAMES.
@@ -470,6 +486,28 @@ type ObservationCache struct {
 	unlisted map[string]int
 	// everListed records backends that listed a name this epoch, for health.
 	everListed map[string]bool
+	// wantContent are the names whose pane content the lane reads, as the
+	// planner last asked (WantContent).
+	wantContent atomic.Pointer[map[string]bool]
+}
+
+// WantContent sets the names whose pane content the lane reads each pass:
+// the planner's rows on A15's content clock.
+func (c *ObservationCache) WantContent(names map[string]bool) {
+	if c != nil {
+		c.wantContent.Store(&names)
+	}
+}
+
+// contentWanted is the names the planner last asked the lane to read.
+func (c *ObservationCache) contentWanted() map[string]bool {
+	if c == nil {
+		return nil
+	}
+	if p := c.wantContent.Load(); p != nil {
+		return *p
+	}
+	return nil
 }
 
 // NewObservationCache returns an empty cache whose reads treat facts older
@@ -507,7 +545,7 @@ func (c *ObservationCache) PublishInventory(pass InventoryPass, attrs map[string
 	// look idle.
 	byName := make(map[string]RuntimeObservation, len(prev.ByName))
 	for name, obs := range prev.ByName {
-		obs.LastActivity, obs.LastActivityKnown = time.Time{}, false
+		obs.LastActivity, obs.LastActivityKnown, obs.Content = time.Time{}, false, contentUnread
 		byName[name] = obs
 	}
 
@@ -656,6 +694,7 @@ func applyInventoryAttrs(obs *RuntimeObservation, a InventoryAttrs, at time.Time
 	if a.ActivityKnown {
 		obs.LastActivity, obs.LastActivityKnown = a.LastActivity, true
 	}
+	obs.Content = a.Content
 	obs.OwnerState, obs.Owner, obs.InstanceToken, obs.Identity = a.OwnerState, reconcilekey.Key{}, a.InstanceToken, a.Identity
 	if a.OwnerState == OwnerSession {
 		obs.Owner = reconcilekey.SessionRef(a.OwnerID, obs.SessionName)

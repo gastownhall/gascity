@@ -269,7 +269,8 @@ type needs struct {
 	Runtime   bool      // the runtime read fresh each attempt
 	Legs      fenceLegs // legAttach (L3), legPending (L4) on the routed leaf; legWork (L5) live
 	Idle      bool      // the agent proved idle on the routed leaf
-	Activity  bool      // the agent's activity read on the routed leaf (a named drift restart's deferral)
+	Activity  bool      // the agent's activity read on the routed leaf (a named drift restart's deferral, the idle stop's proof)
+	Content   bool      // the agent's pane read idle or not on the routed leaf (the content-clock idle stop's proof)
 	Escalates bool      // a C8.5 escalation class: L3 escalates on a terminal-no-report leaf
 	Attempts  int       // CAS rounds per section, each deciding again; 0 is 3
 	// Lease takes the row's runtime lease record, not the name's flock
@@ -335,8 +336,15 @@ type section struct {
 	//
 	//gc:pure
 	Decide func(v txView) txStep
-	probe  func(ctx context.Context, r effectReads, v txView) (any, error)
-	call   func(ctx context.Context, c txCaps, in any) (any, error)
+	// Moved, when set, decides an attempt whose premise moved, which
+	// otherwise refuses: v5 S2's lost commit. It sees the expected row and
+	// what moved; ok false is the premise's refusal. It never writes: a step
+	// that does fails the effect.
+	//
+	//gc:pure
+	Moved func(v txView, expect session.Info, moved []string) (_ txStep, ok bool)
+	probe func(ctx context.Context, r effectReads, v txView) (any, error)
+	call  func(ctx context.Context, c txCaps, in any) (any, error)
 	// callKind is the Call's kind (called), when it has one.
 	callKind callKind
 	// The kind's own Probe, Decide and Call as given to probed and called,
@@ -460,6 +468,7 @@ type txFence struct {
 	Work            *txWork
 	Idle            bool // proved idle: WaitForIdle, then no activity since the pass
 	Activity        *activityRead
+	Content         contentState // the pane's fresh snapshot (needs.Content)
 }
 
 // workHeld reports L5 holding: work read on the seat, or a read that failed
@@ -505,6 +514,12 @@ type txStep struct {
 	Pass                    any
 }
 
+// writes reports a step that writes the row: metadata, the disposition's
+// cells, a terminal close, its title, type or labels.
+func (s txStep) writes() bool {
+	return len(s.Write) > 0 || s.Class.Len() > 0 || len(s.Terminal) > 0 || s.Title != nil || s.Type != nil || len(s.AddLabels) > 0 || len(s.RemoveLabels) > 0
+}
+
 // effectFacts are what an effect learned or did besides its outcome, merged
 // into every settlement it builds and applied on time or late (applyFacts).
 type effectFacts struct {
@@ -517,21 +532,30 @@ type effectFacts struct {
 	// Quarantined is the agent a landed death accrual quarantined, for
 	// legacy's RecordAgentQuarantine.
 	Quarantined string
+	// IdleKilled is the agent an idle-timeout stop stopped, for legacy's
+	// RecordAgentIdleKill.
+	IdleKilled string
 	// AliasOwed is the row whose landed alias write owes its runtime the
 	// alias (A7's runtime-alias sync, M1).
 	AliasOwed *rowKey
 	// Stopped is a stop the stop verb performed, for legacy's stop metric.
 	Stopped *agentStop
-	// Classified is the (row, runtime token) a zombie classification
-	// completed, which the planner remembers so A12 fires once per pair
-	// (v5 S5, X10).
+	// Classified is the (row, runtime token) a classification completed,
+	// which the planner remembers so neither A12 nor the start's recycle
+	// classifies a pair twice (v5 S5, X10).
 	Classified *classifiedRuntime
 }
 
-// classifiedRuntime is a row's dead runtime, by its runtime token.
+// classifiedRuntime is a row's dead runtime, by its runtime token, and the
+// crash its classification found, which the recycle records once its kill
+// lands (a refused kill keeps it for the next attempt, which peeks no more).
 type classifiedRuntime struct {
 	Key   rowKey
-	Token string
+	Token string // deadToken
+	Crash *events.Event
+	// Recycle marks the start's recycle's classification, which A6's
+	// heals do not take (A12's alone, CONTRACT A6).
+	Recycle bool
 }
 
 // notedRuntime is a runtime name a fresh read issued at At found alive.
@@ -541,7 +565,7 @@ type notedRuntime struct {
 }
 
 func (f effectFacts) empty() bool {
-	return len(f.Events) == 0 && f.Transition == nil && f.Work == nil && f.Noted == nil && f.Quarantined == "" && f.AliasOwed == nil && f.Stopped == nil && f.Classified == nil
+	return len(f.Events) == 0 && f.Transition == nil && f.Work == nil && f.Noted == nil && f.Quarantined == "" && f.AliasOwed == nil && f.Stopped == nil && f.Classified == nil && f.IdleKilled == ""
 }
 
 func (f *effectFacts) merge(g effectFacts) {
@@ -553,6 +577,7 @@ func (f *effectFacts) merge(g effectFacts) {
 	f.AliasOwed = cmp.Or(g.AliasOwed, f.AliasOwed)
 	f.Stopped = cmp.Or(g.Stopped, f.Stopped)
 	f.Classified = cmp.Or(g.Classified, f.Classified)
+	f.IdleKilled = cmp.Or(g.IdleKilled, f.IdleKilled)
 }
 
 // Transaction causes. A refusal backs the row off (P4).
@@ -960,12 +985,24 @@ func (t *tx) decide(ctx context.Context, sec section, row session.Info, meta map
 		s := injected(err)
 		return txStep{}, &s
 	}
+	var step txStep
 	if moved := t.premise(sec.Premise, row, meta); len(moved) > 0 {
-		s := refused(causePremise)
-		s.Err = fmt.Errorf("%w: %s", errPremiseMoved, strings.Join(moved, ", "))
-		return txStep{}, &s
+		var ok bool
+		if sec.Moved != nil {
+			step, ok = sec.Moved(v, t.expect, moved)
+		}
+		if !ok {
+			s := refused(causePremise)
+			s.Err = fmt.Errorf("%w: %s", errPremiseMoved, strings.Join(moved, ", "))
+			return txStep{}, &s
+		}
+		if step.writes() || step.Done || step.Last { // nothing lands, nor ends the effect landed, on a row that moved
+			s := settlement{Outcome: settledFailed, Cause: causeStep}
+			return txStep{}, &s
+		}
+	} else {
+		step = sec.Decide(v)
 	}
-	step := sec.Decide(v)
 	var s settlement
 	switch {
 	case step.Refuse != "":

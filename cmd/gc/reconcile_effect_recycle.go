@@ -30,8 +30,10 @@ import (
 //     kill landed, so a recycle that keeps being refused records none twice;
 //   - no output: the recycle alone.
 //
-// A peek that fails classifies nothing and refuses (peek-error). The kill
-// keeps L3 (an attached pane refuses, and the start waits for the detach)
+// Each completed classification is recorded in the planner's classified set
+// (v5 S5, X10), with the crash it found, so a recycle refused again does not
+// peek again. A peek that fails classifies nothing and refuses
+// (peek-error). The kill keeps L3 (an attached pane refuses, and the start waits for the detach)
 // and re-checks the object server-side (KillCorpseObject, KillZombieObject);
 // a refused kill leaves the runtime, and the verb section's read refuses
 // dead with a row backoff.
@@ -53,17 +55,22 @@ var recycleSections = []section{
 	{Decide: deathStep},
 }
 
-// deadPeek is what the recycle's Probe read of the row's own dead pane.
+// deadPeek is what the recycle's Probe read of the row's own dead pane, or
+// the classification the planner remembers for it.
 type deadPeek struct {
 	read    bool // the row's own: classified
 	content string
+	known   *classifiedRuntime // classified before (World.Classified): not peeked again
 }
 
-// peekDead peeks the dead runtime's pane when it is the row's own; nothing
-// otherwise.
+// peekDead peeks the dead runtime's pane when it is the row's own and not
+// classified yet; nothing otherwise.
 func peekDead(ctx context.Context, _ effectReads, v txView) (deadPeek, error) {
 	if v.RT == nil || v.RT.Class != rtCorpse && v.RT.Class != rtZombie || !ownRuntime(compareIdentity(v.Row, v.RT.Identity), v.Row, v.RT.Identity) {
 		return deadPeek{}, nil
+	}
+	if c, ok := v.World.Classified[v.It.Key]; ok && c.classifies(v.RT.Identity) {
+		return deadPeek{read: true, known: &c}, nil
 	}
 	content, err := v.RT.leaf.Peek(strings.TrimSpace(v.Row.SessionName), rateLimitPeekLines)
 	if err != nil {
@@ -109,23 +116,29 @@ func recycleStep(v txView, peek deadPeek, peekErr error) txStep {
 		return txStep{Refuse: causePeekError, Err: peekErr}
 	}
 	k := deadKill{leaf: v.RT.leaf, name: strings.TrimSpace(v.Row.SessionName), zombie: v.RT.Class == rtZombie, live: v.RT.Again, now: v.Now, account: own}
-	if !peek.read || strings.TrimSpace(peek.content) == "" {
+	switch {
+	case peek.known != nil: // classified on an earlier attempt: its crash, if any, still waits on the kill
+		k.crash = peek.known.Crash
 		return txStep{Pass: k}
+	case !peek.read:
+		return txStep{Pass: k}
+	}
+	classified := &classifiedRuntime{Key: v.It.Key, Token: deadToken(v.RT.Identity), Recycle: true}
+	facts := effectFacts{Classified: classified}
+	if strings.TrimSpace(peek.content) == "" {
+		return txStep{Pass: k, Facts: facts}
 	}
 	if screen, ok := deadScreen(v, peek.content); ok {
 		if parkedTerminal(v.Row) && screen.patch["sleep_reason"] == string(session.SleepReasonProviderTerminalError) {
 			if strings.TrimSpace(v.Row.WakeRequest) == string(session.WakeCauseExplicit) {
-				return txStep{Pass: k} // a wake request: the screen it was parked on is recycled for its one launch
+				return txStep{Pass: k, Facts: facts} // a wake request: the screen it was parked on is recycled for its one launch
 			}
-			return txStep{Done: true, Cause: causeDead} // already parked
+			return txStep{Done: true, Cause: causeDead, Facts: facts} // already parked
 		}
-		return txStep{Write: screen.patch, Class: screen.class, Done: true}
+		return txStep{Write: screen.patch, Class: screen.class, Done: true, Facts: facts}
 	}
 	if !k.zombie || runtime.ContainsProviderRateLimitScreen(peek.content) {
-		return txStep{Pass: k} // legacy records a crash for a zombie alone, and never a rate-limit screen's
-	}
-	if v.World.Classified[v.It.Key] == deadToken(v.RT.Identity) {
-		return txStep{Pass: k} // A12 recorded this death's crash (SESS-089: once per episode)
+		return txStep{Pass: k, Facts: facts} // legacy records a crash for a zombie alone, and never a rate-limit screen's
 	}
 	res, _ := v.World.Templates.lookup(v.Row)
 	k.crash = &events.Event{
@@ -133,7 +146,8 @@ func recycleStep(v txView, peek deadPeek, peekErr error) txStep {
 		Message: truncateCrashPaneOutput(peek.content, crashEventPaneOutputMaxLines),
 		Payload: api.SessionLifecyclePayloadJSON(v.Row.ID, res.TP.TemplateName, "zombie process"),
 	}
-	return txStep{Pass: k}
+	classified.Crash = k.crash
+	return txStep{Pass: k, Facts: facts}
 }
 
 // deadScreen classifies the row's own dead pane as legacy's zombie capture

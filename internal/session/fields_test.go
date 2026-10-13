@@ -190,18 +190,18 @@ func TestSessionFieldRegistryCatches(t *testing.T) {
 
 // premiseGolden is every key F2's premise compares. A change here is a
 // change to what every v2 fence refuses on.
-var premiseGolden = strings.Fields(`
-	archived_at churn_count close_reason closed_at configured_named_identity continuation_reset_pending
+var premiseGolden = strings.Fields(`archived_at churn_count close_reason closed_at configured_named_identity continuation_reset_pending
 	continuity_eligible crash_count creation_complete_at current_claim_bead_id currently_processing_bead_id
-	detached_at drain_ack_at drain_ack_incarnation drain_at drain_finalize drain_intent_at drain_intent_incarnation
-	drain_intent_reason generation held_until idle_respawn_attempts idle_respawn_bead_id instance_token last_woke_at
-	pending_create_claim pending_create_started_at pin_awake provider_terminal_error provider_terminal_error_at
-	quarantine_cycle quarantined_until reset_committed_at restart_requested session_circuit_open_restart_count
-	session_circuit_opened_at session_circuit_reset_generation session_circuit_restarts session_circuit_state
-	session_drainable session_health session_health_reason session_key sleep_intent sleep_policy_fingerprint
-	sleep_reason slept_at started_config_hash startup_dialog_verified state state_reason stranded_event_emitted_at
-	suspended_at template_overrides unknown_state_escalated_at unknown_state_first_seen unknown_state_value
-	wait_hold wake_attempts wake_refused_event_at wake_request wake_requested_at`)
+	detached_at drain_ack_at drain_ack_incarnation drain_at drain_finalize drain_intent_at
+	drain_intent_incarnation drain_intent_reason generation held_until idle_respawn_attempts idle_respawn_bead_id
+	instance_token last_woke_at operator_drain pending_create_claim pending_create_started_at pin_awake
+	provider_terminal_error provider_terminal_error_at quarantine_cycle quarantined_until reset_committed_at
+	restart_requested session_circuit_open_restart_count session_circuit_opened_at
+	session_circuit_reset_generation session_circuit_restarts session_circuit_state session_drainable
+	session_health session_health_reason session_key sleep_intent sleep_policy_fingerprint sleep_reason slept_at
+	started_config_hash startup_dialog_verified state state_reason stranded_event_emitted_at suspended_at
+	template_overrides unknown_state_escalated_at unknown_state_first_seen unknown_state_value wait_hold
+	wake_attempts wake_refused_event_at wake_request wake_requested_at`)
 
 // TestSessionFieldPremise pins F2's premise to the golden set and checks it
 // covers today's fence (LifecycleInputFromInfo's keys) and the keys K2 found

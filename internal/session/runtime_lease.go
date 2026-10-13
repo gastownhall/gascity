@@ -537,7 +537,8 @@ func (l *RuntimeLease) holdsRow(bead beads.Bead) bool {
 }
 
 // ClearRuntimeLeaseForReopen clears the runtime lease record on session bead
-// id before a generic reopen (the bead API, the bd bridge) flips it open, as
+// id before a generic reopen (the bd bridge; the bead API refuses a session
+// row's reopen, mc-dkblm) flips it open, as
 // SetStatusOpen's own clear does: a reopened row holds no lease. A bead that is
 // not a session, or holds no record, is left alone.
 func ClearRuntimeLeaseForReopen(store beads.Store, id string) error {

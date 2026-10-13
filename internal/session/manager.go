@@ -1642,9 +1642,12 @@ func retiredIdentifiersPatch(b beads.Bead) MetadataPatch {
 // Kill force-kills the runtime process for a session without changing bead
 // state. This is intended for manual intervention; the reconciler will detect
 // the dead process and restart it according to the session's lifecycle rules.
-// Like Close, it is a cleanup path: a session that is already gone is the
-// outcome Kill was asked for, so it reports success rather than surfacing the
-// provider's "nothing to stop" answer to the operator.
+// Like Close, it is a cleanup path: a runtime that is already gone when Kill
+// stops it is the outcome Kill was asked for, so it reports success rather
+// than surfacing the provider's "nothing to stop" answer to the operator. A
+// session whose state is not live and whose runtime is not running is
+// refused before the stop with ErrSessionInactive, wrapped; each caller
+// decides whether that already satisfies its request.
 //
 // It runs under the session's runtime lease: by.Lease, or one taken in by's
 // mode, an operator's waited for up to RuntimeLeaseOperatorWait.
@@ -1665,7 +1668,7 @@ func (m *Manager) Kill(ctx context.Context, by Actor, id string) error {
 		// Known live states — proceed.
 	default:
 		if !m.sp.IsRunning(sessName) {
-			return fmt.Errorf("session %s is not active", id)
+			return fmt.Errorf("session %s: %w", id, ErrSessionInactive)
 		}
 	}
 	release, err := m.leaseForStop(ctx, by, id, sessName, operatorLeaseWait)

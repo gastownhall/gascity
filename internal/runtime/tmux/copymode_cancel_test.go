@@ -46,7 +46,7 @@ func callIndexWithTokens(calls [][]string, tokens ...string) int {
 func TestSendKeysCancelsCopyModeBeforeDelivery(t *testing.T) {
 	t.Run("parked pane cancels copy-mode before the literal send", func(t *testing.T) {
 		// First tmux call is the #{pane_in_mode} probe -> report parked.
-		fe := &fakeExecutor{outs: []string{"1"}}
+		fe := &fakeExecutor{agentPane: true, outs: []string{"1"}}
 		tm := &Tmux{cfg: Config{SocketName: "x"}, exec: fe}
 
 		if err := tm.SendKeysDebounced("sess", "hello", 0); err != nil {
@@ -73,7 +73,7 @@ func TestSendKeysCancelsCopyModeBeforeDelivery(t *testing.T) {
 
 	t.Run("unparked pane issues no cancel and delivers normally", func(t *testing.T) {
 		// Probe reports not-in-mode -> no cancel, happy path unchanged.
-		fe := &fakeExecutor{outs: []string{"0"}}
+		fe := &fakeExecutor{agentPane: true, outs: []string{"0"}}
 		tm := &Tmux{cfg: Config{SocketName: "x"}, exec: fe}
 
 		if err := tm.SendKeysDebounced("sess", "hello", 0); err != nil {
@@ -96,6 +96,7 @@ func TestSendKeysCancelsCopyModeBeforeDelivery(t *testing.T) {
 func TestRespondCancelsCopyModeBeforeDelivery(t *testing.T) {
 	t.Run("parked pane cancels copy-mode before the approval key", func(t *testing.T) {
 		fe := &fakeExecutor{
+			agentPane: true,
 			outs: []string{
 				approvalPromptPane(), // pre-verify capture: approval prompt present
 				"1",                  // #{pane_in_mode} probe -> parked
@@ -129,6 +130,7 @@ func TestRespondCancelsCopyModeBeforeDelivery(t *testing.T) {
 
 	t.Run("unparked pane issues no cancel and delivers normally", func(t *testing.T) {
 		fe := &fakeExecutor{
+			agentPane: true,
 			outs: []string{
 				approvalPromptPane(),
 				"0", // not parked
@@ -163,6 +165,9 @@ type copyModeNudgeExecutor struct {
 
 func (e *copyModeNudgeExecutor) execute(args []string) (string, error) {
 	e.calls = append(e.calls, slices.Clone(args))
+	if row, ok := fakeAgentPaneRow(args); ok {
+		return row, nil
+	}
 	if slices.Contains(args, "#{pane_in_mode}") {
 		return e.inMode, nil
 	}

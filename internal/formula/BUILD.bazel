@@ -74,6 +74,7 @@ go_test(
     embed = [":formula"],
     deps = [
         "//internal/beadmeta",
+        "//internal/session",
         "//internal/testenv",
         "//internal/testfixtures/reviewworkflows",
         "//internal/testutil",
