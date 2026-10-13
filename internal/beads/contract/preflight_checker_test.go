@@ -453,6 +453,11 @@ func TestPreflightDeferredScopeNeverDialsTheDatabaseProbe(t *testing.T) {
 		return "database-id", true, nil
 	}
 	checker.DeferIdentityToNativeOpen = func(string) bool { return true }
+	schemaCalled := false
+	checker.DatabaseSchemaCursors = func(string) (PreflightSchemaCursors, bool, error) {
+		schemaCalled = true
+		return PreflightSchemaCursors{}, false, nil
+	}
 	checker.SkipIdentityProbe = func(string) bool { return true }
 
 	result, err := checker.Check(scope)
@@ -463,8 +468,12 @@ func TestPreflightDeferredScopeNeverDialsTheDatabaseProbe(t *testing.T) {
 	if called {
 		t.Fatalf("DatabaseProjectID was called for a scope where SkipIdentityProbe returned true; the dial must be skipped entirely")
 	}
+	if schemaCalled {
+		t.Fatalf("DatabaseSchemaCursors was called for a scope where SkipIdentityProbe returned true; the dial must be skipped entirely")
+	}
 	assertPreflightVerdict(t, result, PreflightVerdictEligible, true)
 	assertCheckState(t, result, PreflightCheckIdentityMatch, PreflightCheckPass)
+	assertCheckState(t, result, PreflightCheckVersionCompat, PreflightCheckPass)
 }
 
 func TestPreflightUnreadableScopeReturnsError(t *testing.T) {

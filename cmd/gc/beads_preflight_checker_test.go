@@ -33,6 +33,9 @@ func TestNewBeadsPreflightCheckerWiresDatabaseSchemaCursors(t *testing.T) {
 	if checker.DeferIdentityToNativeOpen == nil {
 		t.Fatal("newBeadsPreflightChecker left DeferIdentityToNativeOpen nil")
 	}
+	if checker.SkipIdentityProbe == nil {
+		t.Fatal("newBeadsPreflightChecker left SkipIdentityProbe nil")
+	}
 	if checker.AllowSchemaBehindMigrate == nil {
 		t.Fatal("newBeadsPreflightChecker left AllowSchemaBehindMigrate nil")
 	}

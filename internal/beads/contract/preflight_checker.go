@@ -84,9 +84,10 @@ type PreflightChecker struct {
 	DeferIdentityToNativeOpen func(scope string) bool
 	// SkipIdentityProbe reports whether the scope is known in advance to be
 	// unable to authenticate the direct root/plaintext probe (a remote hosted
-	// beads-gateway or hub). When it returns true, DatabaseProjectID is never
-	// dialed and the identity check defers to native-open verification. Nil
-	// means never skip.
+	// beads-gateway or hub). It gates both direct probes: when it returns
+	// true, neither DatabaseProjectID (identity) nor DatabaseSchemaCursors
+	// (schema) is dialed, and both checks defer to native-open verification.
+	// Nil means never skip.
 	SkipIdentityProbe func(scope string) bool
 	// BeadsLibraryVersion is the linked github.com/steveyegge/beads module
 	// version. Empty means infer it from build info.
@@ -491,6 +492,9 @@ func (c PreflightChecker) checkSchemaCompat(scope string) PreflightCheckResult {
 	details := PreflightDetails{}
 	if c.DatabaseSchemaCursors == nil {
 		return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckWarn, "database schema cursor reader is not configured", details)
+	}
+	if c.SkipIdentityProbe != nil && c.SkipIdentityProbe(scope) {
+		return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckPass, "database schema deferred to native-open verification (external endpoint, probe skipped)", details)
 	}
 	cursors, ok, err := c.DatabaseSchemaCursors(scope)
 	if err != nil || !ok {
