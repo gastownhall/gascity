@@ -507,7 +507,7 @@ func TestAdoptProbesTheRepairedWorkDir(t *testing.T) {
 	k.runtimeAs("gc-1", "tok", nil)
 	var probed []string
 	old := staleResumeKeyProbe
-	staleResumeKeyProbe = func(_, dir, _ string) (bool, bool) { probed = append(probed, dir); return true, true }
+	staleResumeKeyProbe = func(_ []string, _, dir, _ string) (bool, bool) { probed = append(probed, dir); return true, true }
 	t.Cleanup(func() { staleResumeKeyProbe = old })
 	k.runKind()
 	if len(probed) == 0 || probed[0] != concreteDir {
@@ -530,10 +530,38 @@ func TestAdoptPrepareWritesNothing(t *testing.T) {
 	}
 }
 
+// Kills a v2 PreWake blind to [daemon] observe_paths (mc-zmg7h): a claude
+// conversation kept only under a configured root launches with --resume, its
+// key, hash and epoch untouched; without the root PreWake resets it.
+func TestTranscriptOfReadsObservePaths(t *testing.T) {
+	workDir := t.TempDir()
+	root := observedTranscript(t, workDir)
+	for _, observed := range []bool{true, false} {
+		k, leaf := launchKit(t, "asleep", "session_key", "k-1", "started_config_hash", "h-1", "continuation_epoch", "5")
+		k.p.Clock.(*fakePlannerClock).auto = true // the stale-key wait
+		if observed {
+			k.p.World.Env.Cfg.Daemon.ObservePaths = []string{root}
+		}
+		row := k.p.World.Census.Rows[k.it.Key]
+		tp := TemplateParams{TemplateName: "worker", Command: "claude", WorkDir: workDir, ResolvedProvider: claudeResumeProvider()}
+		k.p.World.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(row.Info): {TP: tp}}}
+		if got := transcriptOf(effectReads{}, k.p.World, row.Info, tp); (got == sessTranscriptPresent) != observed {
+			t.Fatalf("observed %v: transcriptOf = %v", observed, got)
+		}
+		if s := k.runKind(); s.Outcome != settledLanded || len(leaf.cfgs) != 1 {
+			t.Fatalf("observed %v: settlement %+v, want landed", observed, s)
+		}
+		kept := k.meta("session_key") == "k-1" && k.meta("continuation_epoch") == "5" && strings.Contains(leaf.cfgs[0].Command, "--resume k-1")
+		if kept != observed {
+			t.Fatalf("observed %v: session_key %q epoch %q command %q; want the conversation kept=%v", observed, k.meta("session_key"), k.meta("continuation_epoch"), leaf.cfgs[0].Command, observed)
+		}
+	}
+}
+
 // stubTranscript makes every keyed transcript present or absent.
 func stubTranscript(t *testing.T, present bool) {
 	t.Helper()
 	old := staleResumeKeyProbe
-	staleResumeKeyProbe = func(string, string, string) (bool, bool) { return present, true }
+	staleResumeKeyProbe = func([]string, string, string, string) (bool, bool) { return present, true }
 	t.Cleanup(func() { staleResumeKeyProbe = old })
 }

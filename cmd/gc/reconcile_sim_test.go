@@ -718,7 +718,7 @@ func (s *sim) releaseInside(i int) {
 		}
 	}
 	e.outside = fire
-	if e.seam == seamAfterCall { // the admit-ticket Call's seam comes first: re-arm for the launch Call's
+	if e.seam == seamAfterCall { // the next Call's seam (the admit ticket's, or a recycle's kill) comes first: re-arm for the one after it
 		e.outside = func() { e.seam, e.outside = seamAfterCall, fire }
 	}
 	s.release(i)
@@ -835,7 +835,7 @@ var externalOps = []struct {
 		s.setMeta(l, b.ID, "quarantined_until", s.rel(time.Duration(1+s.rng.IntN(120))*time.Second), "sleep_reason", "quarantine")
 	}},
 	{"kill", func(s *sim, l *simLeg, b beads.Bead) { // gc session kill: the fence, then the stop
-		if _, err := writeSessionKillFence(l.backing, b.ID, s.clk.Now()); err != nil && !errors.Is(err, errSessionKillFenceSuperseded) {
+		if _, err := session.WriteKillFence(l.backing, b.ID, s.clk.Now()); err != nil && !errors.Is(err, session.ErrKillFenceSuperseded) {
 			s.t.Fatal(err)
 		}
 		_ = s.sp.Stop(b.Metadata["session_name"])

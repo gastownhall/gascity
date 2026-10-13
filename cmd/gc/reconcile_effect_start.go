@@ -92,7 +92,7 @@ func transcriptOf(r effectReads, w *World, row session.Info, tp TemplateParams) 
 	if dir == "" {
 		return sessTranscriptUnknown
 	}
-	switch present, probeable := staleResumeKeyProbe(sessionTranscriptProvider(tp.ResolvedProvider, row), dir, sk); {
+	switch present, probeable := staleResumeKeyProbe(sessionTranscriptSearchPaths(w.Env.Cfg), sessionTranscriptProvider(tp.ResolvedProvider, row), dir, sk); {
 	case !probeable:
 		return sessTranscriptUnknown
 	case present:

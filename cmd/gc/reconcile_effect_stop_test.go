@@ -229,6 +229,32 @@ func TestIdleDrainFinalizesAsAnIdleSleep(t *testing.T) {
 	}
 }
 
+// TestFinalizeKeepsALateQuarantinesReason (mc-slkxd). Kills a finalize
+// that overwrites the reason of a quarantine that landed after the signal:
+// while quarantined_until is ahead the quarantine dominates, so the idle
+// sleep keeps quarantine, rate_limit or context-churn and its deadline; an
+// expired quarantine's reason is the finalize's.
+func TestFinalizeKeepsALateQuarantinesReason(t *testing.T) {
+	sleep := func(e *selectionEntry) { e.Desired, e.Reason = desireSleep, reasonIdleSleep }
+	for _, c := range []struct {
+		reason string
+		until  time.Duration
+		want   string
+	}{
+		{"quarantine", time.Hour, "quarantine"},
+		{"rate_limit", time.Hour, "rate_limit"},
+		{"context-churn", time.Hour, "context-churn"},
+		{"quarantine", -time.Minute, "idle"},
+	} {
+		until := time.Now().Add(c.until).Format(time.RFC3339) // the effect's clock is the wall's
+		s, got, _ := stopRun(t, signaled(drainIdle, "sleep_intent", "idle-stop-pending", "sleep_reason", c.reason, "quarantined_until", until), sleep, nil)
+		m := got.Metadata
+		if s.Outcome != settledLanded || m["state"] != "asleep" || m["sleep_reason"] != c.want || m["quarantined_until"] != until {
+			t.Fatalf("%s until %s: settlement %+v, row %v; want asleep with sleep_reason %q, the quarantine kept", c.reason, c.until, s, m, c.want)
+		}
+	}
+}
+
 // TestStopVerbReissuedOnlyAtBackoffExpiry (I17). Kills a stop on every
 // pass: a refused stop's backoff defers the next while it is live, but
 // never a finalize-only stop (admission's finalizesOnly).

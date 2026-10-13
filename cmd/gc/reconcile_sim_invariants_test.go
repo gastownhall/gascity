@@ -397,7 +397,7 @@ func dormantChange(b beads.Bead, a map[string]string, t time.Time, stable bool) 
 		}
 		// The clear ends a quarantine's own reason with it (§12.2 #57,
 		// mc-bwvzv); a churn sleep's stays the quarantine's to keep.
-		ownReason := reason == session.SleepReasonQuarantine || reason == session.SleepReasonRateLimit
+		ownReason := (reason == session.SleepReasonQuarantine || reason == session.SleepReasonRateLimit) && a["sleep_reason"] == "" // cleared, never rewritten
 		if slices.Contains([]session.SleepReason{session.SleepReasonQuarantine, session.SleepReasonContextChurn, session.SleepReasonRateLimit}, reason) && (!ended || !ownReason) {
 			owned = append(owned, "sleep_reason")
 		}

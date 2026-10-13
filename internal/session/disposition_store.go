@@ -3,6 +3,7 @@ package session
 import (
 	"fmt"
 	"maps"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -176,7 +177,13 @@ func (s *Store) ApplyLifecycle(id string, patch MetadataPatch) (MetadataPatch, e
 // attempt lost.
 func (s *Store) ApplySleep(id string, patch MetadataPatch) (MetadataPatch, error) {
 	life := LifecycleOnly(patch)
-	w, err := s.ApplyDispositionFresh(id, ActorController, DispEvent{Kind: EvSleep}, func(Disposition, Disposition, Info) MetadataPatch { return life }, time.Time{}) // the Sleep cell reads no clock
+	// The finalize's own time (its slept_at) judges a late quarantine on the
+	// fresh row, whose reason it keeps (mc-slkxd); the Sleep cell reads no
+	// clock.
+	at, _ := time.Parse(time.RFC3339, strings.TrimSpace(life["slept_at"]))
+	w, err := s.ApplyDispositionFresh(id, ActorController, DispEvent{Kind: EvSleep}, func(from, _ Disposition, info Info) MetadataPatch {
+		return KeepQuarantineReason(maps.Clone(life), from, info.SleepReason, at)
+	}, time.Time{})
 	switch {
 	case err != nil:
 		return nil, err

@@ -1605,6 +1605,29 @@ func TestCompleteDrain_ClearsLastWokeAt(t *testing.T) {
 	}
 }
 
+// TestCompleteDrain_KeepsALateQuarantinesReason (mc-slkxd): legacy's drain
+// completion over a quarantine that landed after the signal keeps its
+// reason while the quarantine is in force.
+func TestCompleteDrain_KeepsALateQuarantinesReason(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	store := beads.NewMemStore()
+	until := now.Add(time.Hour).UTC().Format(time.RFC3339)
+	b, _ := store.Create(beads.Bead{
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Title:  "test",
+		Metadata: map[string]string{
+			"session_name": "test-session", "state": "awake", "sleep_reason": "quarantine", "quarantined_until": until,
+		},
+	})
+	completeDrain(wakeInfo(t, b), sessionFrontDoor(store), &drainState{reason: "idle"}, clk)
+	got, _ := store.Get(b.ID)
+	if got.Metadata["state"] != "asleep" || got.Metadata["sleep_reason"] != "quarantine" || got.Metadata["quarantined_until"] != until {
+		t.Fatalf("row %v, want asleep with the quarantine and its reason kept", got.Metadata)
+	}
+}
+
 func TestCompleteDrain_FreshModeClearsIdentity(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}

@@ -78,7 +78,7 @@ func TestOperatorStartRefusesAKillFenceWrittenBeforeItsLease(t *testing.T) {
 		t.Fatal(err)
 	}
 	sp := &attachRaceSP{Fake: runtime.NewFake(), onIsRunning: func() {
-		if _, err := writeSessionKillFence(store, b.ID, time.Now().UTC()); err != nil {
+		if _, err := session.WriteKillFence(store, b.ID, time.Now().UTC()); err != nil {
 			t.Fatal(err)
 		}
 	}}
@@ -104,7 +104,7 @@ func TestInterruptRestartRereadsTheRowUnderTheLentLease(t *testing.T) {
 		t.Fatal(err)
 	}
 	sp.onIsRunning = func() {
-		if _, err := writeSessionKillFence(store, b.ID, time.Now().UTC()); err != nil {
+		if _, err := session.WriteKillFence(store, b.ID, time.Now().UTC()); err != nil {
 			t.Fatal(err)
 		}
 	}

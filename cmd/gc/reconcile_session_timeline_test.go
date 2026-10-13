@@ -585,6 +585,8 @@ var timelineGoldenRulings = []goldenRuling{
 	{"a crash 29s after wake", timelineGoldenBaseline, "55c4df6af9c5"},
 	{"a crash 31s after wake", timelineGoldenBaseline, "b799cd2aa091"},
 	{"a crash 5m0s after wake", timelineGoldenBaseline, "21983abfeb7d"},
+	{"a manual conversation crashes 29s after wake", timelineGoldenBaseline, "5d9d5e446127"},
+	{"a manual conversation crashes 31s after wake", timelineGoldenBaseline, "3fa7f34371d2"},
 	{"a live quarantined row 29s after wake", timelineGoldenBaseline, "f559e3fcf255"},
 	{"a live quarantined row 31s after wake", timelineGoldenBaseline, "25811fbce399"},
 	{"a managed suspend drains, then wake", timelineGoldenBaseline, "48df08bf8396"},
@@ -974,15 +976,34 @@ func stabilityTimeline() []timelineFixture {
 		return b
 	}
 	standing := tlMerged(tlPol("gc-1"), tlIdent())
+	crash := func(tw twin) { tw.runtime("gc-1", func(simRuntime) *simRuntime { return nil }) }
 	// crashAfter is a crash d after the wake of a row with prior wake
 	// failures and churn: inside the 30s stability threshold legacy counts a
 	// wake failure and restarts; past it a death before the productivity
 	// threshold is churn.
 	crashAfter := func(d time.Duration, crashed map[string]string) timelineFixture {
-		crash := func(tw twin) { tw.runtime("gc-1", func(simRuntime) *simRuntime { return nil }) }
 		return tlFixture(fmt.Sprintf("a crash %s after wake", d), stable,
 			[]parityRow{row("wake_attempts", "2", "churn_count", "2")}, tlClaim("in_progress", "worker"), []simRuntime{tlLive("gc-1")},
 			[]parityStep{{Name: "crash", At: d, Op: crash, Ticks: 6}}, standing, map[string]map[string]string{"crash": crashed})
+	}
+	// manualCrashAfter is a committed manual conversation (#7470), a manual
+	// session of the worker template kept awake as manual with no work,
+	// crashing d after its wake at its last wake failure and churn, so the
+	// accrual quarantines it: its key and hash survive the wake failure and
+	// the churn in both copies. Its hashes are the previous fingerprint
+	// version's, which both copies rebaseline in place (SESS-551) rather
+	// than drain as drift. Its restart would be keyed, a stale-key wait the
+	// twin's clock never reaches, so the fixture stops at the quarantine.
+	manualCrashAfter := func(d time.Duration) timelineFixture {
+		manual := sessionRow("gc-1", "template", "worker", "agent_name", "worker", "alias", "worker", "state", "awake",
+			"session_origin", "manual", "command", "true", "generation", "1", "continuation_epoch", "1", "instance_token", "tok-gc-1",
+			"session_name", "s-gc-1", "last_woke_at", tlAt(0), "session_key", "conversation-1", "wake_attempts", "4", "churn_count", "2",
+			"started_config_hash", "v5:core", "started_provision_hash", "v5:prov", "started_launch_hash", "v5:launch", "started_live_hash", "v5:live", "live_hash", "v5:live", "core_hash_breakdown", "{}")
+		f := tlFixture(fmt.Sprintf("a manual conversation crashes %s after wake", d), stable,
+			[]parityRow{manual}, nil, []simRuntime{tlLive("gc-1")},
+			[]parityStep{{Name: "crash", At: d, Op: crash, Ticks: 6}}, tlPol("gc-1"), nil)
+		f.Setup = func(tw twin) { tw.set("gc-1", "work_dir", tw.city) }
+		return f
 	}
 	// quarantinedAt is a live, quarantined row ticked through to d after its
 	// wake, then seen a tick past it: past the 30s stability threshold both
@@ -1003,6 +1024,8 @@ func stabilityTimeline() []timelineFixture {
 		crashAfter(29*time.Second, tlRestarted()),
 		crashAfter(31*time.Second, nil),
 		crashAfter(5*time.Minute, tlRestarted()),
+		manualCrashAfter(29 * time.Second),
+		manualCrashAfter(31 * time.Second),
 		quarantinedAt(29*time.Second, map[string]map[string]string{
 			"seed": drained, "alive": drained, "settled": tlMerged(drained, lagged),
 		}),

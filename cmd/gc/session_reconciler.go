@@ -2955,15 +2955,15 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					// rollback reason, so a normal start arms no auto-trace.
 					// The line names why, one standing condition per reason,
 					// so a hold that moves from the window to the lease says so.
+					// An unverifiable lease has said it already, in the WARNING.
 					kind, why := "start_in_flight.pending_create_rollback", "its start is in flight"
-					switch live {
-					case ownStartLeaseHeld:
+					if live == ownStartLeaseHeld {
 						kind, why = "start_lease_held.pending_create_rollback", "its start holds the runtime lease"
-					case ownStartLeaseUnverifiable:
-						kind, why = "start_lease_unverifiable.pending_create_rollback", "its runtime lease cannot be verified"
 					}
-					logStandingCondition(dt, stderr, id, kind, fmt.Sprintf(
-						"session reconciler: pending-create rollback of %s deferred: %s and the live runtime carries no identity yet", name, why), clk.Now())
+					if live != ownStartLeaseUnverifiable {
+						logStandingCondition(dt, stderr, id, kind, fmt.Sprintf(
+							"session reconciler: pending-create rollback of %s deferred: %s and the live runtime carries no identity yet", name, why), clk.Now())
+					}
 					if trace != nil {
 						trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonWake, TraceOutcomeStartInFlight, tp.TemplateName, name, traceRecordPayload{
 							"session_bead_id": id,

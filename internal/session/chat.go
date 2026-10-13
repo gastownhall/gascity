@@ -1268,6 +1268,11 @@ func (m *Manager) StopTurn(id string) error {
 			return err
 		}
 		running := State(b.Metadata["state"]) != StateSuspended && m.sp.IsRunning(sessName)
+		if !running {
+			// No runtime means no turn to interrupt: stopTurnLocked sends
+			// nothing, so there is nothing to wait for either.
+			return nil
+		}
 		interruptStartedAt := time.Now()
 		if err := m.stopTurnLocked(b, sessName); err != nil {
 			return err
@@ -1278,7 +1283,7 @@ func (m *Manager) StopTurn(id string) error {
 		if err := m.waitForInterruptBoundaryLocked(context.Background(), b, sessName, interruptStartedAt); err != nil {
 			return fmt.Errorf("waiting for stopped session interrupt boundary: %w", err)
 		}
-		if running && restoresInterruptedInput(b) {
+		if restoresInterruptedInput(b) {
 			// The stop already succeeded. A draft that will not clear is
 			// logged, not returned: the next submit clears the input box
 			// again before it pastes.

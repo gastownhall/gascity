@@ -61,20 +61,21 @@ func armRollback(r *rowFacts) (intent, bool) {
 	if !info.PendingCreateClaim || e == nil {
 		return intent{}, false
 	}
-	reason, relaunch := decideRollback, false
+	reason, relaunch, occupant := decideRollback, false, false
 	switch {
 	case e.Desired == desireNone && e.Reason == reasonRollbackCandidate:
 	case e.Desired == desireDrain && e.Liveness.startCandidate():
 	case e.Liveness == livenessOccupied:
+		occupant = true
 	case e.Liveness == livenessAlive && compareIdentity(info, r.w.Observed[r.k].Identity) == identityStaleSelf:
-		reason = decideStaleCreate
+		reason, occupant = decideStaleCreate, true
 		relaunch = ownRuntime(identityStaleSelf, info, r.w.Observed[r.k].Identity) && e.Desired == desireWake && r.configuredNamed()
 	default:
 		return intent{}, false
 	}
 	r.rests |= restRuntime
 	basis := rowBasis{Incarnation: r.row.Incarnation, InstanceToken: r.row.InstanceToken}
-	return intent{Kind: intentRollback, Reason: reason, Basis: basis, Relaunch: relaunch}, true
+	return intent{Kind: intentRollback, Reason: reason, Basis: basis, Relaunch: relaunch, Occupant: occupant}, true
 }
 
 // configuredNamed reports a configured named row with its spec, which a

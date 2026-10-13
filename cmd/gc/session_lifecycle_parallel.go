@@ -274,6 +274,9 @@ type preparedStart struct {
 	// preWakeUndo is what a capacity refusal needs to undo this attempt's
 	// PreWake (restorePreWakeState). Zero when the start had no persisted row.
 	preWakeUndo preWakeUndo
+	// transcriptRoots is sessionTranscriptSearchPaths of the city the start
+	// was prepared for, for commitStartFailure's conversation probe.
+	transcriptRoots []string
 }
 
 type startResult struct {
@@ -1240,11 +1243,12 @@ func buildPreparedStartWithTranscript(
 	// transcriptState carries the same probe result forward to the firstStart
 	// classification below, so the disk is read once per launch.
 	transcriptState := sessTranscriptUnknown
+	transcriptRoots := sessionTranscriptSearchPaths(cfg)
 	if transcript != nil {
 		transcriptState = *transcript
 	} else if sk := strings.TrimSpace(candidate.info.SessionKey); sk != "" && agentCfg.WorkDir != "" {
 		provider := sessionTranscriptProvider(tp.ResolvedProvider, candidate.info)
-		present, probeable := staleResumeKeyProbe(provider, agentCfg.WorkDir, sk)
+		present, probeable := staleResumeKeyProbe(transcriptRoots, provider, agentCfg.WorkDir, sk)
 		if probeable {
 			if present {
 				transcriptState = sessTranscriptPresent
@@ -1252,7 +1256,14 @@ func buildPreparedStartWithTranscript(
 				transcriptState = sessTranscriptAbsent
 			}
 		}
-		if probeable && !present {
+		// Only a committed key is stale: a key with no started_config_hash
+		// was allocated for a start that has not committed yet (CreateSession,
+		// or a first start that failed) and has no transcript until that start
+		// writes one, so it is kept and launched with --session-id. The probe
+		// still runs for it, since firstStart reads its result. A provider with
+		// no session_id_flag would resume any key it is handed, so its key is
+		// still cleared (staleResumeKeyClears).
+		if probeable && !present && staleResumeKeyClears(candidate.info, tp.ResolvedProvider) {
 			var sessFront *sessionpkg.Store
 			if store != nil {
 				sessFront = sessionFrontDoor(store)
@@ -1312,7 +1323,7 @@ func buildPreparedStartWithTranscript(
 		parentStale := false
 		if firstStart && !forceFresh && tp.ResolvedProvider != nil && agentCfg.WorkDir != "" {
 			provider := sessionTranscriptProvider(tp.ResolvedProvider, candidate.info)
-			if present, probeable := staleResumeKeyProbe(provider, agentCfg.WorkDir, parentSID); probeable && !present {
+			if present, probeable := staleResumeKeyProbe(transcriptRoots, provider, agentCfg.WorkDir, parentSID); probeable && !present {
 				parentStale = true
 			}
 		}
@@ -1421,6 +1432,7 @@ func buildPreparedStartWithTranscript(
 		launchHash:      launchHash,
 		promptDelivered: promptDelivered,
 		promptHash:      promptHash,
+		transcriptRoots: transcriptRoots,
 	}, candidate.info, nil
 }
 
@@ -2565,16 +2577,50 @@ func observeRuntimeProviderLiveness(sp runtime.Provider, name string, processNam
 	return obs.Running, obs.Alive, err
 }
 
+// staleResumeKeyClears reports whether the stale-resume clear resets info's
+// key once its keyed transcript reads absent: a committed key (a
+// started_config_hash beside it), or any key of a provider with no
+// session_id_flag, which resolveSessionCommand would hand to a resume even
+// on a first start. An allocated key of a provider that can name a new
+// conversation is kept and launched with that flag.
+func staleResumeKeyClears(info sessionpkg.Info, rp *config.ResolvedProvider) bool {
+	return strings.TrimSpace(info.StartedConfigHash) != "" || rp == nil || rp.SessionIDFlag == ""
+}
+
 // staleResumeKeyProbe reports whether the keyed transcript a resume would
 // reattach to is present (present), and whether the provider exposes a keyed
 // transcript that can be probed on disk at all (probeable). It is a package var
 // so tests can model a present or absent transcript without materializing
 // provider-specific transcript trees. Production delegates to the transcript
-// discovery layer, which knows each provider's on-disk layout and merges each
-// provider's own default roots on top of the supplied claude default, so
-// claude/kimi/pi each probe their real location.
-var staleResumeKeyProbe = func(provider, workDir, sessionKey string) (present, probeable bool) {
-	return workertranscript.HasKeyedTranscript(worker.DefaultSearchPaths(), provider, workDir, sessionKey)
+// discovery layer, which knows each provider's on-disk layout, over
+// keyedProbeRoots(searchPaths, provider).
+var staleResumeKeyProbe = func(searchPaths []string, provider, workDir, sessionKey string) (present, probeable bool) {
+	return workertranscript.HasKeyedTranscript(keyedProbeRoots(searchPaths, provider), provider, workDir, sessionKey)
+}
+
+// keyedProbeRoots is the roots a keyed probe of provider searches. A
+// claude-family probe searches the roots exactly as given, adding no default
+// of its own, so an empty list means the defaults rather than nothing. Every
+// other family probes the defaults alone, on top of which its reader adds
+// its own default roots: [daemon] observe_paths are Claude roots, and pi
+// walks every root it is given recursively.
+func keyedProbeRoots(searchPaths []string, provider string) []string {
+	if len(searchPaths) == 0 || !strings.Contains(strings.ToLower(strings.TrimSpace(provider)), "claude") {
+		return worker.DefaultSearchPaths()
+	}
+	return searchPaths
+}
+
+// sessionTranscriptSearchPaths is the transcript roots the stale-resume probe
+// searches for a claude-family provider (keyedProbeRoots): the defaults plus
+// [daemon] observe_paths, the same roots history discovery reads
+// (newWorkerFactory). Probing the defaults alone reads a conversation kept
+// under a configured root as gone and resets it.
+func sessionTranscriptSearchPaths(cfg *config.City) []string {
+	if cfg == nil {
+		return worker.DefaultSearchPaths()
+	}
+	return worker.MergeSearchPaths(cfg.Daemon.ObservePaths)
 }
 
 // validateForkLaunch enforces fork-launch invariants before command resolution.
@@ -3232,7 +3278,7 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 	// not carry it. Terminal failure arm; discard the fold (never assign back into
 	// infoByID — this is the async start goroutine). The persist lands via
 	// recordWakeFailure's ApplyPatchInfo/SetMarker writes.
-	_ = recordWakeFailure(result.prepared.candidate.info, sessFront, clk, tp.DisplayName())
+	_ = recordWakeFailure(result.prepared.candidate.info, result.prepared.transcriptRoots, sessFront, clk, tp.DisplayName())
 	if trace != nil {
 		trace.RecordOperation(TraceSiteLifecycleStartFailed, TraceReasonStart, result.outcome, "", tp.TemplateName, name, 0, traceRecordPayload{
 			"error": formatLifecycleError(result.err),

@@ -119,6 +119,10 @@ var parityAccepted = map[string]parityEntry{
 		"CONTRACT v5 §12.2 #51 (A7; C7d)", "legacy refreshes a row's identity every tick, beside its heals and under a live kill fence; v2's A7 writes it when it decides the row, a pass later when an earlier arm (an A6 heal) takes the row's first pass, or once A2's kill fence lets the row through, so its write, the synced_at it stamps and its runtime alias sync land later",
 		[]string{"synced_at", "alias", "alias_history", "labels", "pool_slot", "agent_name", "work_dir", "wake_mode", "session_key", "continuation_epoch", "command", "provider", "provider_kind", "builtin_ancestor", "resume_flag", "resume_style", "resume_command", "session_id_flag"},
 	},
+	"§12.2#62 a7-undesired-row": {
+		"CONTRACT v5 §12.2 #62 (A7, C7d; mc-q64l4)", "legacy's session-bead sync stamps the row metadata (here work_dir) of every visited row, an orphaned named row's included; v2's A7 writes only a row the allocation holds desired, so an undesired row's metadata stays as it was: cosmetic",
+		[]string{"work_dir"},
+	},
 	"§12.2#17 orphan-close-reason": {
 		"CONTRACT v5 §12.2 #17 (A21, C5c1 review)", "an unwanted dead row closes with its drain reason (orphaned, or suspended for an agent-suspended seat that legacy closes as orphaned), not MAINT-051's gc_swept (v2 does not run the sweep) nor the suspended legacy writes for a row squatting a configured name",
 		[]string{"state", "close_reason"},
@@ -1182,6 +1186,13 @@ func parityFixtures() []parityFixture {
 			Explain: map[string]string{"row:gc-1:*policy": "sleep-policy-keys"},
 		},
 		{
+			// A committed manual conversation (key and hash, #7470): both
+			// copies heal it asleep and keep its conversation.
+			Name: "an awake manual conversation whose runtime is gone", Behaviors: []string{"SESS-531", "SESS-725"},
+			Rows: []parityRow{awake("last_woke_at", at(-2*time.Hour), "quarantined_until", at(time.Hour), "session_key", "conversation-1", "started_config_hash", "v6:abc", "session_origin", "manual")}, Work: assigned,
+			Explain: map[string]string{"row:gc-1:*policy": "sleep-policy-keys"},
+		},
+		{
 			Name: "a stranded row past its confirmation window is repaired", Behaviors: []string{"SESS-625"},
 			Rows: []parityRow{awake("last_woke_at", at(-2*time.Hour), "quarantined_until", at(time.Hour), "stranded_event_emitted_at", at(-time.Hour))}, Work: assigned,
 			Explain: map[string]string{"row:gc-1:*policy": "sleep-policy-keys"},
@@ -1765,6 +1776,32 @@ func parityFixtures() []parityFixture {
 			Rows: []parityRow{chatRow("gc-c", "1", "session_name", "chat", "state", "asleep", "provider_terminal_error", "model_not_found", "provider_terminal_error_at", at(-7*24*time.Hour),
 				"session_health", "unhealthy", "session_health_reason", "model_not_found", "session_drainable", "true")},
 			Explain: map[string]string{"provider:RemoveMeta chat": "§12.2#38 start-meta-clears", "row:gc-c:*policy": "sleep-policy-keys"},
+		},
+		// mc-q64l4: an orphaned named row over its own zombie drains, as
+		// legacy drains it and stops it by name.
+		{
+			Name: "an orphaned named row's zombie is drained and stopped", Behaviors: []string{"SESS-085"},
+			City: func() *config.City {
+				cfg := workerCity(3)
+				cfg.Agents = append(cfg.Agents, config.Agent{Name: "chat", StartCommand: "true"})
+				return cfg
+			},
+			Rows:     []parityRow{chatRow("gc-c", "1", "session_name", "chat", "state", "awake", "instance_token", "tok-gc-c", "last_woke_at", at(-time.Hour), "configured_named_mode", "always")},
+			Runtimes: []simRuntime{{id: "gc-c", epoch: "1", token: "tok-gc-c", zombie: true}},
+			Panes:    map[string]string{"gc-c": "panic: boom"},
+			Explain:  map[string]string{"row:gc-c:*policy": "sleep-policy-keys", "row:gc-c:*meta": "§12.2#62 a7-undesired-row"},
+		},
+		{
+			Name: "an orphaned named row whose identity is apart from its template drains, its crash named by the identity", Behaviors: []string{"SESS-085"},
+			City: func() *config.City {
+				cfg := workerCity(3)
+				cfg.Agents = append(cfg.Agents, config.Agent{Name: "chat", StartCommand: "true"})
+				return cfg
+			},
+			Rows:     []parityRow{chatRow("gc-c", "1", "session_name", "chat", "state", "awake", "instance_token", "tok-gc-c", "last_woke_at", at(-time.Hour), "configured_named_mode", "always", "configured_named_identity", "other-chat")},
+			Runtimes: []simRuntime{{id: "gc-c", epoch: "1", token: "tok-gc-c", zombie: true}},
+			Panes:    map[string]string{"gc-c": "panic: boom"},
+			Explain:  map[string]string{"row:gc-c:*policy": "sleep-policy-keys", "row:gc-c:*meta": "§12.2#62 a7-undesired-row"},
 		},
 		{
 			Name: "a stale terminal mark does not hold a named row's crashed zombie", Behaviors: []string{"SESS-089"}, City: chat(false),

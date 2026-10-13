@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"strings"
 
@@ -99,10 +100,18 @@ func zombieStep(v txView, peek deadPeek, peekErr error) txStep {
 		return step // legacy records a crash for a zombie alone, and never a rate-limit screen's
 	}
 	res, _ := v.World.Templates.lookup(v.Row)
+	// A row whose template the pass no longer resolves (an orphaned named
+	// row) names its own, as legacy's preserved-template read does: its
+	// identity as the subject, its template in the payload.
+	template, subject := res.TP.TemplateName, res.TP.DisplayName()
+	if template == "" {
+		template = strings.TrimSpace(v.Row.Template)
+		subject = cmp.Or(subject, namedSessionIdentityInfo(v.Row), template)
+	}
 	crash := events.Event{
-		Type: events.SessionCrashed, Actor: "gc", Subject: res.TP.DisplayName(),
+		Type: events.SessionCrashed, Actor: "gc", Subject: subject,
 		Message: truncateCrashPaneOutput(peek.content, crashEventPaneOutputMaxLines),
-		Payload: api.SessionLifecyclePayloadJSON(v.Row.ID, res.TP.TemplateName, "zombie process"),
+		Payload: api.SessionLifecyclePayloadJSON(v.Row.ID, template, "zombie process"),
 	}
 	step.Facts.Events = []events.Event{crash}
 	step.Done, step.Last, step.Pass = false, true, zombieCrash{agent: crash.Subject, output: crash.Message}
