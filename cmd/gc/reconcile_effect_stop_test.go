@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -289,55 +290,84 @@ func TestFinalizeWorkReadErrorKeepsOpen(t *testing.T) {
 	}
 }
 
-// lostWorkStore is a work leg whose reads panic once armed: the bounded
-// probe recovers, and the read is lost.
-type lostWorkStore struct {
+// blockingWork is a work leg whose seat-scoped live lists block while
+// armed, until release closes: the finalize's bounded probe expires at
+// fenceProbeTimeout and hands the decide a zero finalizeWork. (A panicking
+// list would not do: seat_work recovers it per store as a read error.)
+type blockingWork struct {
 	beads.Store
-	armed *atomic.Bool
+	armed   *atomic.Bool
+	release <-chan struct{}
 }
 
-func (s lostWorkStore) List(q beads.ListQuery) ([]beads.Bead, error) {
-	if s.armed.Load() {
-		panic("work leg lost")
+func (s blockingWork) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if q.Assignee != "" && q.Live && s.armed.Load() {
+		<-s.release
 	}
 	return s.Store.List(q)
 }
 
-func (s lostWorkStore) ListByAssignee(assignee, status string, limit int) ([]beads.Bead, error) {
-	if s.armed.Load() {
-		panic("work leg lost")
+// claimFor gives the row id an in-progress work bead and returns its ID.
+func claimFor(t *testing.T, store beads.Store, id string) string {
+	t.Helper()
+	b, err := store.Create(beads.Bead{Title: "w", Type: "task", Assignee: id})
+	if err == nil {
+		err = store.Update(b.ID, beads.UpdateOpts{Status: stringPtr("in_progress")})
 	}
-	return s.Store.ListByAssignee(assignee, status, limit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b.ID
 }
 
-// Kills a close over a lost work read (STALE-READ-ARCH §7.1, PR 1): a seat
-// whose finalize work read panics or expires counts as holding work, so it
-// sleeps and is never closed; one whose finalize read is clean but whose
-// premise close's own read is lost refuses the close; a clean read closes.
-// A soft-suspended pool seat, which keeps no slot, is held the same way.
+// Kills a close over a lost work read (STALE-READ-ARCH §7.1, PR 1), under
+// synctest so the expiries cost no real time: a pool seat holding
+// in-progress work whose finalize work read expires is not closed, its
+// work kept; a seat whose clean finalize read found none, assigned work
+// after it, whose premise close's own read expires, is not closed either;
+// a clean read with no work closes. The zero value or a probe error holds
+// an ordinary row and a soft-suspended pool seat alike in stopChoice.
 func TestFinalizeLostWorkReadNeverCloses(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		section int // the section whose probe the leg loses; -1 for none
-		closed  bool
-	}{{"a clean read", -1, true}, {"the finalize's read lost", 1, false}, {"the close's read lost", 2, false}} {
+		name   string
+		lose   int // the section whose probe expires: 1 the finalize's, 2 the close's; 0 none
+		closed bool
+	}{{"a clean read", 0, true}, {"the finalize's read expires over work", 1, false}, {"the close's read expires after a late claim", 2, false}} {
 		t.Run(tc.name, func(t *testing.T) {
-			armed := &atomic.Bool{}
-			s, got, _ := stopRun(t, signaled(drainOrphaned, "pool_managed", "true"), undesired(drainOrphaned), func(p *effectPass, _ *fenceLeaf, store beads.Store, _ string) {
-				p.reads.legs = testWorkLegs(p.World.CityPath, p.World.Env.Cfg, lostWorkStore{Store: store, armed: armed}, nil)
-				p.seam = func(_ context.Context, seam txSeam, _ intent, section, _ int) error {
-					switch {
-					case seam == seamAfterCall && section == 0:
-						armed.Store(tc.section == 1)
-					case seam == seamAfterReads && section == 1:
-						armed.Store(tc.section == 2)
+			synctest.Test(t, func(t *testing.T) {
+				release := make(chan struct{})
+				defer close(release)
+				armed := &atomic.Bool{}
+				var workID string
+				var work beads.Store
+				s, got, _ := stopRun(t, signaled(drainOrphaned, "pool_managed", "true"), undesired(drainOrphaned), func(p *effectPass, _ *fenceLeaf, store beads.Store, id string) {
+					work = store
+					if tc.lose == 1 {
+						workID = claimFor(t, store, id)
+						armed.Store(true)
 					}
-					return nil
+					p.reads.legs = testWorkLegs(p.World.CityPath, p.World.Env.Cfg, blockingWork{Store: store, armed: armed, release: release}, nil).readOnly()
+					p.seam = func(_ context.Context, at txSeam, _ intent, section, _ int) error {
+						if tc.lose == 2 && at == seamAfterCall && section == 1 { // after the finalize's clean read, before the close's
+							workID = claimFor(t, store, id)
+							armed.Store(true)
+						}
+						return nil
+					}
+				})
+				if tc.lose != 0 && workID == "" {
+					t.Fatal("the run never reached the section whose read it loses")
+				}
+				closed := got.Status == "closed"
+				if closed != tc.closed {
+					t.Fatalf("settlement %+v, status %s, row %v; want closed %v", s, got.Status, got.Metadata, tc.closed)
+				}
+				if workID != "" {
+					if wb, _ := work.Get(workID); wb.Status != "in_progress" || wb.Assignee != got.ID {
+						t.Fatalf("work %s %q assignee %q; want kept on the seat", workID, wb.Status, wb.Assignee)
+					}
 				}
 			})
-			if closed := got.Status == "closed"; closed != tc.closed {
-				t.Fatalf("settlement %+v, status %s, row %v; want closed %v", s, got.Status, got.Metadata, tc.closed)
-			}
 		})
 	}
 	// A soft-suspended pool seat keeps no slot (#7718, KeepsSlot), so only
