@@ -183,6 +183,74 @@ func TestHandleSessionGetIncludesSubmissionCapabilities(t *testing.T) {
 	}
 }
 
+// TestSessionReadsWithdrawInterruptNowOnUnsupportedRuntime kills a read
+// model that advertises "deliver now" for a runtime that cannot interrupt the
+// session's turn: GET /session/{id} and GET /sessions must agree with
+// Manager.SubmissionCapabilities, so a polling client never offers an intent
+// that would only fail asynchronously. pi keeps it: it replaces the turn by
+// restarting the runtime.
+func TestSessionReadsWithdrawInterruptNowOnUnsupportedRuntime(t *testing.T) {
+	for _, tc := range []struct {
+		provider string
+		mode     runtime.TurnInterruptMode
+		want     bool
+	}{
+		{provider: "codex", mode: runtime.TurnInterruptUnsupported, want: false},
+		{provider: "codex", mode: runtime.TurnInterruptProtocol, want: true},
+		{provider: "pi", mode: runtime.TurnInterruptUnsupported, want: true},
+	} {
+		t.Run(tc.provider+"/"+string(tc.mode), func(t *testing.T) {
+			fs := newSessionFakeState(t)
+			fs.sp.TurnInterruptModeValue = tc.mode
+			h := newTestCityHandler(t, fs)
+
+			mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+			info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "helper", Title: tc.provider, Command: tc.provider, WorkDir: t.TempDir(), Provider: tc.provider, ExtraMeta: map[string]string{"session_origin": "manual"}})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID, nil))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("get status = %d; body: %s", rec.Code, rec.Body.String())
+			}
+			var got sessionResponse
+			if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+				t.Fatalf("decode get: %v", err)
+			}
+			if got.SubmissionCapabilities.SupportsInterruptNow != tc.want {
+				t.Fatalf("GET supports_interrupt_now = %v, want %v", got.SubmissionCapabilities.SupportsInterruptNow, tc.want)
+			}
+
+			rec = httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(fs, "/sessions"), nil))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("list status = %d; body: %s", rec.Code, rec.Body.String())
+			}
+			var list struct {
+				Items []sessionResponse `json:"items"`
+			}
+			if err := json.NewDecoder(rec.Body).Decode(&list); err != nil {
+				t.Fatalf("decode list: %v", err)
+			}
+			var found bool
+			for _, item := range list.Items {
+				if item.ID != info.ID {
+					continue
+				}
+				found = true
+				if item.SubmissionCapabilities.SupportsInterruptNow != tc.want {
+					t.Fatalf("list supports_interrupt_now = %v, want %v", item.SubmissionCapabilities.SupportsInterruptNow, tc.want)
+				}
+			}
+			if !found {
+				t.Fatalf("list items = %+v, want session %s", list.Items, info.ID)
+			}
+		})
+	}
+}
+
 func TestHandleSessionStopUsesSoftEscapeForCodex(t *testing.T) {
 	fs := newSessionFakeState(t)
 	h := newTestCityHandler(t, fs)

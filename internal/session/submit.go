@@ -71,6 +71,18 @@ func SubmissionCapabilitiesForMetadata(metadata map[string]string, hasDeferredQu
 	}
 }
 
+// SubmissionCapabilitiesForRuntime is [SubmissionCapabilitiesForMetadata] for
+// a session whose runtime cancels turns in mode, the session's
+// [runtime.TurnInterruptModeFor]: a runtime that cannot interrupt the
+// session's turn withdraws interrupt_now.
+func SubmissionCapabilitiesForRuntime(metadata map[string]string, hasDeferredQueue bool, mode runtime.TurnInterruptMode) SubmissionCapabilities {
+	caps := SubmissionCapabilitiesForMetadata(metadata, hasDeferredQueue)
+	if refusesTurnInterrupt(beads.Bead{Metadata: metadata}, mode) {
+		caps.SupportsInterruptNow = false
+	}
+	return caps
+}
+
 func supportsInterruptNowForMetadata(metadata map[string]string) bool {
 	return ProviderFamilyFromMetadata(metadata, "") != "antigravity"
 }
@@ -83,11 +95,7 @@ func (m *Manager) SubmissionCapabilities(id string) (SubmissionCapabilities, err
 	if err != nil {
 		return SubmissionCapabilities{}, err
 	}
-	caps := SubmissionCapabilitiesForMetadata(b.Metadata, strings.TrimSpace(m.cityPath) != "")
-	if refusesTurnInterrupt(b, runtime.TurnInterruptModeFor(m.sp, sessName)) {
-		caps.SupportsInterruptNow = false
-	}
-	return caps, nil
+	return SubmissionCapabilitiesForRuntime(b.Metadata, strings.TrimSpace(m.cityPath) != "", runtime.TurnInterruptModeFor(m.sp, sessName)), nil
 }
 
 // refusesTurnInterrupt reports whether a runtime with mode cannot replace the
