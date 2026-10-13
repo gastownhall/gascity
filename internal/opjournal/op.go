@@ -90,6 +90,8 @@ const (
 	ScopeSession      ScopeKind = "session"
 )
 
+var scopeKinds = []ScopeKind{ScopeConversation, ScopeContext, ScopeSession}
+
 // When is a message's delivery mode.
 type When string
 
@@ -103,6 +105,8 @@ const (
 	WhenSteer     When = "steer"
 )
 
+var whens = []When{WhenBoundary, WhenAfterTurn, WhenInterrupt, WhenIfIdle, WhenNow, WhenSteer}
+
 // Wake says whether a message may wake its conversation.
 type Wake string
 
@@ -111,6 +115,8 @@ const (
 	WakeIfNeeded Wake = "if_needed"
 	WakeLiveOnly Wake = "live_only"
 )
+
+var wakes = []Wake{WakeIfNeeded, WakeLiveOnly}
 
 // Role says how a message is presented to the agent.
 type Role string
@@ -121,6 +127,8 @@ const (
 	RoleNotice Role = "notice"
 )
 
+var roles = []Role{RolePrompt, RoleNotice}
+
 // Fallback is what a steer message does on a runtime that cannot steer.
 type Fallback string
 
@@ -129,6 +137,8 @@ const (
 	FallbackBoundary Fallback = "boundary"
 	FallbackFail     Fallback = "fail"
 )
+
+var fallbacks = []Fallback{FallbackBoundary, FallbackFail}
 
 // OnFailure is what an interrupt does when no boundary is observed.
 type OnFailure string
@@ -139,6 +149,8 @@ const (
 	OnFailureRestart OnFailure = "restart"
 )
 
+var onFailures = []OnFailure{OnFailureFail, OnFailureRestart}
+
 // RestartMode is a restart's mode.
 type RestartMode string
 
@@ -148,6 +160,8 @@ const (
 	RestartFresh    RestartMode = "fresh"
 )
 
+var restartModes = []RestartMode{RestartContinue, RestartFresh}
+
 // Guarantee is a conversation-lane op's execution guarantee.
 type Guarantee string
 
@@ -156,6 +170,8 @@ const (
 	GuaranteeAtLeastOnce Guarantee = "at_least_once"
 	GuaranteeAtMostOnce  Guarantee = "at_most_once"
 )
+
+var guarantees = []Guarantee{GuaranteeAtLeastOnce, GuaranteeAtMostOnce}
 
 // Actor values gc's own producers use. Actor is an open token; other
 // producers may send their own.

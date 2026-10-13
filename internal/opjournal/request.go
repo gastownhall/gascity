@@ -184,7 +184,7 @@ func validatePolicy(p Policy, spec Spec) error {
 	rest := p
 	rest.Guarantee = ""
 	if spec.Lane == LaneConversation {
-		if !slices.Contains([]Guarantee{GuaranteeAtLeastOnce, GuaranteeAtMostOnce}, p.Guarantee) {
+		if !slices.Contains(guarantees, p.Guarantee) {
 			return invalidf("guarantee %q is not at_least_once or at_most_once", p.Guarantee)
 		}
 	} else if p.Guarantee != "" {
@@ -196,23 +196,23 @@ func validatePolicy(p Policy, spec Spec) error {
 		if !slices.Contains(spec.When, m.When) {
 			return invalidf("message when %q is not one of %v", m.When, spec.When)
 		}
-		if !slices.Contains([]Wake{WakeIfNeeded, WakeLiveOnly}, m.Wake) {
+		if !slices.Contains(wakes, m.Wake) {
 			return invalidf("message wake %q is not if_needed or live_only", m.Wake)
 		}
-		if !slices.Contains([]Role{RolePrompt, RoleNotice}, m.Role) {
+		if !slices.Contains(roles, m.Role) {
 			return invalidf("message role %q is not prompt or notice", m.Role)
 		}
-		if !slices.Contains([]Fallback{FallbackBoundary, FallbackFail}, m.OnUnsupported) {
+		if !slices.Contains(fallbacks, m.OnUnsupported) {
 			return invalidf("message on_unsupported %q is not boundary or fail", m.OnUnsupported)
 		}
 		rest.Message = MessagePolicy{}
 	case KindInterrupt:
-		if !slices.Contains([]OnFailure{OnFailureFail, OnFailureRestart}, p.Interrupt.OnFailure) {
+		if !slices.Contains(onFailures, p.Interrupt.OnFailure) {
 			return invalidf("interrupt on_failure %q is not fail or restart", p.Interrupt.OnFailure)
 		}
 		rest.Interrupt = InterruptPolicy{}
 	case KindRestart:
-		if !slices.Contains([]RestartMode{RestartContinue, RestartFresh}, p.Restart.Mode) {
+		if !slices.Contains(restartModes, p.Restart.Mode) {
 			return invalidf("restart mode %q is not continue or fresh", p.Restart.Mode)
 		}
 		rest.Restart = RestartPolicy{}

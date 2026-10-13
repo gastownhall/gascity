@@ -236,7 +236,8 @@ func checkOpID(op Op) error {
 }
 
 // DecodeOp reads an op row. It fails loudly — ErrUnsupportedKind for a kind
-// this build does not know, ErrUnsupportedSchema for a newer schema, and
+// this build does not know, ErrUnsupportedSchema for a newer schema,
+// ErrUnsupportedValue for a vocabulary value it does not know, and
 // ErrCorruptOp for anything malformed — and never skips a row silently.
 //
 // Two projections reconcile the bead status with gc.op.status, which is
@@ -330,6 +331,9 @@ func DecodeOp(b beads.Bead) (Op, error) {
 		}
 		op.Lease = lease
 	}
+	if err := checkVocabulary(b.ID, op); err != nil {
+		return Op{}, err
+	}
 	if !slices.Contains(b.Labels, ConversationLabel(op.Conversation)) {
 		return Op{}, corruptf(b.ID, "missing label %s", ConversationLabel(op.Conversation))
 	}
@@ -350,6 +354,31 @@ func DecodeOp(b beads.Bead) (Op, error) {
 		op.Outcome = Outcome{Arm: ArmFailed, Reason: ReasonClosedExternally}
 	}
 	return op, nil
+}
+
+// checkVocabulary reports a policy or scope value outside this build's
+// vocabulary as ErrUnsupportedValue. Whether a known value suits the op's
+// kind is validateRequestShape's question, and a misfit is corruption.
+func checkVocabulary(id string, op Op) error {
+	p := op.Policy
+	for _, f := range []struct {
+		key, value string
+		known      bool
+	}{
+		{keyWhen, string(p.Message.When), slices.Contains(whens, p.Message.When)},
+		{keyWake, string(p.Message.Wake), slices.Contains(wakes, p.Message.Wake)},
+		{keyRole, string(p.Message.Role), slices.Contains(roles, p.Message.Role)},
+		{keyOnUnsupported, string(p.Message.OnUnsupported), slices.Contains(fallbacks, p.Message.OnUnsupported)},
+		{keyOnFailure, string(p.Interrupt.OnFailure), slices.Contains(onFailures, p.Interrupt.OnFailure)},
+		{keyRestartMode, string(p.Restart.Mode), slices.Contains(restartModes, p.Restart.Mode)},
+		{keyGuarantee, string(p.Guarantee), slices.Contains(guarantees, p.Guarantee)},
+		{keyScope, string(op.Scope.Kind), slices.Contains(scopeKinds, op.Scope.Kind)},
+	} {
+		if f.value != "" && !f.known {
+			return fmt.Errorf("%w: row %s has %s %q", ErrUnsupportedValue, id, f.key, f.value)
+		}
+	}
+	return nil
 }
 
 func encodeTransitions(ts []Transition) (string, error) {

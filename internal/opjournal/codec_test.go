@@ -173,6 +173,55 @@ func TestDecodeRefusals(t *testing.T) {
 	}
 }
 
+// A vocabulary value this build does not know is a row written by a newer
+// build, not a damaged one: it reads ErrUnsupportedValue, never ErrCorruptOp.
+func TestDecodeUnknownVocabularyIsUnsupported(t *testing.T) {
+	for _, key := range []string{keyWhen, keyWake, keyRole, keyOnUnsupported, keyGuarantee, keyScope} {
+		b := encode(t, sampleOp(t))
+		b.Metadata = maps.Clone(b.Metadata)
+		b.Metadata[key] = "from_the_future"
+		_, err := DecodeOp(b)
+		if !errors.Is(err, ErrUnsupportedValue) || errors.Is(err, ErrCorruptOp) {
+			t.Errorf("%s from_the_future: DecodeOp = %v, want ErrUnsupportedValue and not ErrCorruptOp", key, err)
+		}
+	}
+	interrupt := encode(t, interruptSample(t))
+	for key, v := range map[string]string{keyOnFailure: "from_the_future"} {
+		b := interrupt
+		b.Metadata = maps.Clone(b.Metadata)
+		b.Metadata[key] = v
+		if _, err := DecodeOp(b); !errors.Is(err, ErrUnsupportedValue) {
+			t.Errorf("%s: DecodeOp = %v, want ErrUnsupportedValue", key, err)
+		}
+	}
+	// A known value on the wrong kind is still damage.
+	b := encode(t, sampleOp(t))
+	b.Metadata = maps.Clone(b.Metadata)
+	b.Metadata[keyOnFailure] = string(OnFailureRestart)
+	if _, err := DecodeOp(b); !errors.Is(err, ErrCorruptOp) {
+		t.Errorf("known on_failure on a message: DecodeOp = %v, want ErrCorruptOp", err)
+	}
+}
+
+func interruptSample(t *testing.T) Op {
+	t.Helper()
+	spec, _ := Lookup(KindInterrupt)
+	req := Request{
+		Conversation: "gc-1", Kind: KindInterrupt, ClientKey: "stop:3:t1",
+		Producer: Producer{Principal: "operator:alice", Actor: ActorOperator},
+		Scope:    Scope{Kind: ScopeSession, Generation: 3, Turn: "t1"},
+	}
+	op, err := normalizeRequest(req, spec, time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	op.ID, _ = DeriveID("gc", op.Conversation, op.Producer.Principal, op.ClientKey)
+	op.PayloadDigest = RequestDigest(op)
+	op.Status = StatusSubmitted
+	op.Transitions = []Transition{{Status: StatusSubmitted, At: op.CreatedAt, By: "operator:alice"}}
+	return op
+}
+
 func TestDecodeIgnoresUnknownKeys(t *testing.T) {
 	b := encode(t, sampleOp(t))
 	b.Metadata["gc.op.future_field"] = "x"

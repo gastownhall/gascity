@@ -16,6 +16,11 @@ var (
 	// ErrUnsupportedSchema reports a stored row written under a schema
 	// revision this build does not read.
 	ErrUnsupportedSchema = errors.New("opjournal: unsupported op schema revision")
+	// ErrUnsupportedValue reports a stored row carrying a vocabulary value
+	// (a delivery mode, wake, role, fallback, failure policy, restart mode,
+	// guarantee or scope kind) this build does not know: a row written by a
+	// newer build, which a reader must not mistake for a damaged one.
+	ErrUnsupportedValue = errors.New("opjournal: unsupported op vocabulary value")
 	// ErrInvalidRequest reports a request or outcome refused at the front door.
 	// Nothing is written.
 	ErrInvalidRequest = errors.New("opjournal: invalid request")
