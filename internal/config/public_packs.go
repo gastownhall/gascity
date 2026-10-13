@@ -48,7 +48,7 @@ const (
 	// trees; bump the pin (and append the old value to
 	// SupersededBundledPackImportVersions) when cutting a release whose
 	// bundled core/bd/dolt content changed.
-	BundledPackImportVersion = "sha:3dcfe0969e26aac651c5c65c0a5d73f2d8cc16c5"
+	BundledPackImportVersion = "sha:505dcdcbce087c7b29c6a6eeb4ca37fe646b5e42"
 )
 
 // SupersededBundledPackImportVersions lists previous canonical pins for the
@@ -69,6 +69,8 @@ var SupersededBundledPackImportVersions = []string{
 	// predates the content those binaries embedded, so it is served from
 	// embedded content and never fetched (isSupersededEmbeddedOnlyPin).
 	"sha:f895c0ff47d6ee9334ed282a416387eb5b084d24",
+	// The hotfix/1.5.1 pin before #7498 changed the bundled core reaper.
+	"sha:3dcfe0969e26aac651c5c65c0a5d73f2d8cc16c5",
 }
 
 // SupersededPublicGastownPackVersions lists previous canonical pins for the

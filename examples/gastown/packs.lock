@@ -6,9 +6,9 @@ version = "sha:33d3a430a67d1782ad364556cb566bdb01d0afe3"
 commit = "33d3a430a67d1782ad364556cb566bdb01d0afe3"
 
 [packs."https://github.com/gastownhall/gascity.git//internal/bootstrap/packs/core"]
-version = "sha:3dcfe0969e26aac651c5c65c0a5d73f2d8cc16c5"
-commit = "3dcfe0969e26aac651c5c65c0a5d73f2d8cc16c5"
+version = "sha:505dcdcbce087c7b29c6a6eeb4ca37fe646b5e42"
+commit = "505dcdcbce087c7b29c6a6eeb4ca37fe646b5e42"
 
 [packs."https://github.com/gastownhall/gascity.git//examples/bd"]
-version = "sha:3dcfe0969e26aac651c5c65c0a5d73f2d8cc16c5"
-commit = "3dcfe0969e26aac651c5c65c0a5d73f2d8cc16c5"
+version = "sha:505dcdcbce087c7b29c6a6eeb4ca37fe646b5e42"
+commit = "505dcdcbce087c7b29c6a6eeb4ca37fe646b5e42"
