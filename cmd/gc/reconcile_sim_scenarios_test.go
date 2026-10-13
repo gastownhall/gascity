@@ -1442,3 +1442,50 @@ func (s *sim) object(name string) int64 {
 	}
 	return 0
 }
+
+// Scenario R46 (CONTRACT R46, I23, M1; mc-phuxq, J14 E): an operator drains
+// a seat, its agent acks and exits, and its remain-on-exit corpse lost its
+// GC_INSTANCE_TOKEN (or all its identity). The corpse counts as stopped:
+// A11 signals the acked row though the census reads the identity Unknown,
+// and the stop verb finalizes it drained and removes the corpse, as it does
+// a corpse carrying the row's token. A token-less runtime still live is no
+// corpse and holds.
+func TestSimR46AckedRowOverATokenlessCorpseFinalizes(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		id, token string
+		corpse    bool
+		finalized bool
+	}{
+		{"the row's token", "gc-1", "tok-gc-1", true, true},
+		{"no token", "gc-1", "", true, true},
+		{"no identity at all", "", "", true, true},
+		{"no token, still live", "gc-1", "", false, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			row := poolRow("gc-1", "worker", 1, "awake", "instance_token", "tok-gc-1", "last_woke_at", rowAt(-10*time.Minute),
+				session.OperatorDrainKey, "1", session.DrainAckIncarnationKey, "1")
+			s := scripted(t, []string{"gc-1"}, row)
+			s.advance(time.Second)
+			s.operator("gc-1", session.DrainAckAtKey, s.rel(0)) // the ack lands after the runtime started
+			name := row.Metadata["session_name"]
+			rt := s.sp.rts[name]
+			rt.id, rt.token, rt.corpse = c.id, c.token, c.corpse
+			s.sp.touch(name)
+			for range 6 {
+				s.settle()
+				s.advance(simPatrol)
+			}
+			s.quiesce()
+			b, err := s.legs[0].backing.Get("gc-1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			finalized := b.Metadata["state"] == string(session.StateDrained)
+			if finalized != c.finalized || c.finalized && s.object(name) != 0 {
+				t.Fatalf("row %s/%s, corpse object %d; want finalized %v and the corpse removed", b.Status, b.Metadata["state"], s.object(name), c.finalized)
+			}
+			s.noViolations(t)
+		})
+	}
+}
