@@ -71,6 +71,41 @@ type rawLedger struct {
 	Workspaces     *[]string `toml:"workspaces"`
 }
 
+// descriptorTopKeys and descriptorLedgerKeys are the exact-case keys a
+// descriptor may carry. They are checked against md.Keys() because the TOML
+// decoder matches struct fields case-insensitively and md.Undecoded() does
+// not report a key it matched that way.
+var (
+	descriptorTopKeys = map[string]bool{
+		"schema": true, "plane": true, "city": true, "session_id": true,
+		"generation": true, "contract": true, "credential": true, descriptorLedgerTable: true,
+	}
+	descriptorLedgerKeys = map[string]bool{
+		"scope": true, "url": true, "project_id": true, "ca_file": true,
+		"allow_plaintext": true, "workspaces": true,
+	}
+)
+
+const descriptorLedgerTable = "ledger"
+
+// checkDescriptorKeys refuses any key path that is not an exact-case member
+// of the descriptor schema.
+func checkDescriptorKeys(keys []toml.Key) error {
+	for _, k := range keys {
+		ok := false
+		switch len(k) {
+		case 1:
+			ok = descriptorTopKeys[k[0]]
+		case 2:
+			ok = k[0] == descriptorLedgerTable && descriptorLedgerKeys[k[1]]
+		}
+		if !ok {
+			return descriptorErr("unknown key or table %q", k.String())
+		}
+	}
+	return nil
+}
+
 func descriptorErr(format string, args ...any) error {
 	return fmt.Errorf("%w: %s", ErrDescriptorInvalid, fmt.Sprintf(format, args...))
 }
@@ -84,6 +119,9 @@ func DecodeDescriptor(data []byte) (Descriptor, error) {
 	md, err := toml.NewDecoder(bytes.NewReader(data)).Decode(&raw)
 	if err != nil {
 		return Descriptor{}, fmt.Errorf("%w: %w", ErrDescriptorInvalid, err)
+	}
+	if err := checkDescriptorKeys(md.Keys()); err != nil {
+		return Descriptor{}, err
 	}
 	if undecoded := md.Undecoded(); len(undecoded) > 0 {
 		keys := make([]string, len(undecoded))

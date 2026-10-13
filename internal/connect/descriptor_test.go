@@ -164,6 +164,13 @@ func TestDecodeDescriptorStrictRefusals(t *testing.T) {
 		"unclean workspace":        replace(`"/data/cities/mc/rigs/app"`, `"/data/cities/mc/rigs/../rigs/app"`),
 		"duplicate workspace":      replace(`"/data/cities/mc/rigs/app"`, `"/data/cities/mc"`),
 		"two ledgers":              golden + "\n" + golden[ledgerAt:],
+		"case-variant key":         replace(`plane = "worker"`, `PLANE = "worker"`),
+		"case-variant schema":      replace("schema = 1", "Schema = 1"),
+		"case-variant ledger key":  replace(`ca_file = "/home`, `CA_FILE = "/home`),
+		"case-variant table":       replace("[[ledger]]", "[[Ledger]]"),
+		"case-variant beside key":  replace("generation = 7", "generation = 7\nGeneration = 9"),
+		"case-variant session id":  replace(`session_id = "mc-abc12"`, `session_id = "mc-abc12"`+"\n"+`Session_ID = "mc-other"`),
+		"case-variant ledger pair": golden + "\n" + strings.Replace(golden[ledgerAt:], "[[ledger]]", "[[Ledger]]", 1),
 	}
 	for name, input := range cases {
 		t.Run(name, func(t *testing.T) {
