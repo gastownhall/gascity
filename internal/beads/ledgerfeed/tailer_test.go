@@ -680,3 +680,55 @@ func TestRunBacksOffAcrossConsecutiveGaps(t *testing.T) {
 		t.Fatalf("delays = %v, want the backoff to reach %v", clock.delays, DefaultIdlePoll)
 	}
 }
+
+// cappedJournal serves at most cap rows per read whatever limit asks for, as
+// a server with its own page ceiling does.
+type cappedJournal struct {
+	*fakeJournal
+	cap int
+}
+
+func (c *cappedJournal) ReadEventsJournalPage(ctx context.Context, since int64, limit int) (journalops.Page, error) {
+	if limit == 0 || limit > c.cap {
+		limit = c.cap
+	}
+	return c.fakeJournal.ReadEventsJournalPage(ctx, since, limit)
+}
+
+// A Source that caps pages below PageLimit still leaves the head ahead, so
+// Step must ask for an immediate re-read rather than sleep between pages.
+func TestStepReportsMoreWhileTheHeadIsAheadOfACappedPage(t *testing.T) {
+	j := &fakeJournal{}
+	j.append("a", "b", "c", "d")
+	r := &recorder{}
+	tl := &Tailer{Source: &cappedJournal{fakeJournal: j, cap: 2}, Apply: r.apply, OnGap: r.onGap, PageLimit: 10}
+
+	if !mustStep(t, tl) {
+		t.Fatal("a capped page short of the head did not ask for an immediate re-read")
+	}
+	if got, want := r.seqs(), []int64{1, 2}; !slices.Equal(got, want) {
+		t.Fatalf("applied %v, want %v", got, want)
+	}
+}
+
+// A Source capped at one row spends every verified read on the checkpoint
+// row. That must surface as an error, not as an idle tailer that never moves
+// while the head runs away.
+func TestStepReportsASourceTooNarrowToVerify(t *testing.T) {
+	j := &fakeJournal{}
+	j.append("a", "b", "c")
+	r := &recorder{}
+	tl := &Tailer{Source: &cappedJournal{fakeJournal: j, cap: 1}, Apply: r.apply, OnGap: r.onGap}
+
+	mustStep(t, tl) // applies row 1; the checkpoint is now verifiable
+	more, err := tl.Step(context.Background())
+	if err == nil {
+		t.Fatalf("Step = (%v, nil) with the head at 3 and the checkpoint stuck at %d", more, tl.Checkpoint().Seq)
+	}
+	if more {
+		t.Fatal("a failed Step asked for an immediate re-read")
+	}
+	if stats := tl.Stats(); stats.Errors != 1 || stats.Head != 3 {
+		t.Fatalf("stats = %+v, want one error and the head observed", stats)
+	}
+}

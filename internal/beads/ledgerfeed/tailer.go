@@ -285,10 +285,20 @@ func (t *Tailer) Step(ctx context.Context) (more bool, err error) {
 	}
 	if len(rows) == 0 {
 		t.mu.Lock()
-		t.afterGap = false
 		t.observeHead(page.Head)
+		caughtUp := page.Head <= cp.Seq
+		if caughtUp {
+			t.afterGap = false
+		}
 		t.mu.Unlock()
-		return false, nil
+		if caughtUp {
+			return false, nil
+		}
+		// The head is ahead and the read served nothing past the checkpoint:
+		// a Source capped at one row spends it on the verification row. Idling
+		// here would stall for good while only the lag grew.
+		return false, t.fail(fmt.Errorf("ledgerfeed: journal head %d is past checkpoint %d, but the read after it served no row past the checkpoint "+
+			"(the Source must serve the re-read checkpoint row and at least one more per read)", page.Head, cp.Seq))
 	}
 	page.Rows = rows
 	if err := t.Apply(ctx, page); err != nil {
