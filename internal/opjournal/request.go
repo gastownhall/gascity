@@ -331,6 +331,12 @@ func validateState(op Op, spec Spec) error {
 		if err := op.Lease.validate(); err != nil {
 			return err
 		}
+		if spec.Lane == LaneLifecycle {
+			return invalidf("lifecycle ops are never leased")
+		}
+		if op.Lease.Lane != string(spec.Lane) || op.Lease.Conversation != op.Conversation {
+			return invalidf("lease %s is not the %s lane's lease on conversation %s", op.Lease, spec.Lane, op.Conversation)
+		}
 	}
 	if op.Attempt < 0 {
 		return invalidf("attempt %d is negative", op.Attempt)

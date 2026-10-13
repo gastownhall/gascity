@@ -133,7 +133,7 @@ func (g *opGen) op() Op {
 	op.ArrivalSeq = r.Uint64N(1 << 50)
 	op.LaneSeq = r.Uint64N(1 << 50)
 	op.Attempt = r.IntN(6)
-	if op.Status != StatusClosed && r.IntN(2) == 0 {
+	if spec.Lane == LaneConversation && op.Status != StatusClosed && r.IntN(2) == 0 {
 		op.Lease = Lease{
 			Lane: string(spec.Lane), Conversation: op.Conversation,
 			Generation: 1 + r.Int64N(50), Nonce: "n" + fmt.Sprint(r.IntN(1e9)), Deadline: g.time(),

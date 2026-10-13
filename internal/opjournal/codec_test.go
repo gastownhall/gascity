@@ -159,6 +159,12 @@ func TestDecodeRefusals(t *testing.T) {
 		{"wrong type", mutate(func(b *beads.Bead) { b.Type = "task" }), ErrCorruptOp},
 		{"no op label", mutate(func(b *beads.Bead) { b.Labels = b.Labels[1:] }), ErrCorruptOp},
 		{"no conversation label", mutate(func(b *beads.Bead) { b.Labels = b.Labels[:1] }), ErrCorruptOp},
+		{"lease of another conversation", mutate(func(b *beads.Bead) {
+			b.Assignee = Lease{Lane: "conversation", Conversation: "gc-2", Generation: 1, Nonce: "n", Deadline: t0}.String()
+		}), ErrCorruptOp},
+		{"lease of another lane", mutate(func(b *beads.Bead) {
+			b.Assignee = Lease{Lane: "lifecycle", Conversation: "gc-1", Generation: 1, Nonce: "n", Deadline: t0}.String()
+		}), ErrCorruptOp},
 	}
 	for _, c := range cases {
 		if _, err := DecodeOp(c.bead); !errors.Is(err, c.want) {
@@ -222,6 +228,13 @@ func TestEncodeRefusals(t *testing.T) {
 			op.Status = StatusClosed
 			op.Outcome = Outcome{Arm: ArmSkipped, Reason: ReasonCoalescedInto}
 		},
+		"lease of another conversation": func(op *Op) {
+			op.Lease = Lease{Lane: "conversation", Conversation: "gc-2", Generation: 1, Nonce: "n", Deadline: t0}
+		},
+		"lease of another lane": func(op *Op) {
+			op.Lease = Lease{Lane: "other", Conversation: op.Conversation, Generation: 1, Nonce: "n", Deadline: t0}
+		},
+		"leased lifecycle op": func(_ *Op) {},
 		"too many transitions": func(op *Op) {
 			for range maxTransitions {
 				op.Transitions = append(op.Transitions, op.Transitions[0])
@@ -233,6 +246,11 @@ func TestEncodeRefusals(t *testing.T) {
 		if name == "lifecycle executing" {
 			op = lifecycleSample(t)
 			op.Status = StatusExecuting
+		}
+		if name == "leased lifecycle op" {
+			op = lifecycleSample(t)
+			op.Status = StatusAccepted
+			op.Lease = Lease{Lane: string(LaneLifecycle), Conversation: op.Conversation, Generation: 1, Nonce: "n", Deadline: t0}
 		}
 		change(&op)
 		if _, err := EncodeOp(op); err == nil {
