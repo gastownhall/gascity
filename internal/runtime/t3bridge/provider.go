@@ -2881,9 +2881,16 @@ func (p *Provider) Stop(name string) error {
 
 // Interrupt cancels the in-flight turn for the named session, if any.
 // It reports [runtime.ErrRuntimeUnavailable] when T3 cannot be read and
-// [runtime.ErrSessionNotFound] when no live thread is bound to name.
+// [runtime.ErrSessionNotFound] when no live thread is bound to name. Inside
+// the startup grace it sends nothing and reports success instead of
+// ErrSessionNotFound: [Provider.IsRunning] counts a just-started session as
+// running before T3 shows its thread, so a caller that checked IsRunning
+// first is not told the session is gone.
 func (p *Provider) Interrupt(name string) error {
 	_, binding, err := p.liveThread(name)
+	if errors.Is(err, runtime.ErrSessionNotFound) && p.withinRecentStart(name) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
@@ -2996,7 +3003,9 @@ func (p *Provider) SessionBinding(name string) (runtime.SessionBinding, error) {
 // [runtime.ErrSessionNotFound] when no thread is bound to name, so a caller
 // never mistakes an undelivered nudge for a delivered one. A bound thread
 // whose T3 session is stopped takes the turn: T3 relaunches the provider on
-// thread.turn.start, which is how a reused or idle-reaped thread wakes.
+// thread.turn.start. That wakes a reused or idle-reaped thread only for a
+// caller that delivers without first checking IsRunning, which reports such a
+// thread as not running.
 func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 	return p.nudge(name, content, "")
 }

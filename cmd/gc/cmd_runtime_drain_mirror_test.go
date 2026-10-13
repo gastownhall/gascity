@@ -14,11 +14,13 @@ import (
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
-// mirrorFailingProvider stores metadata like the fake, then reports that the
-// runtime's own view could not be updated: the value is in force regardless.
-// The error has t3bridge's shape during an outage: a mirror failure whose cause
-// itself wraps runtime.ErrRuntimeUnavailable and the transport error. When
-// hardFailKey is set, SetMeta of that key fails outright instead.
+// mirrorFailingProvider stores metadata like the fake, then, for the drain
+// writes t3bridge reflects onto the thread (GC_DRAIN, and GC_DRAIN_ACK set to
+// 1), reports that the runtime's own view could not be updated: the value is in
+// force regardless. The error has t3bridge's shape during an outage: a mirror
+// failure whose cause itself wraps runtime.ErrRuntimeUnavailable and the
+// transport error. When hardFailKey is set, SetMeta of that key fails outright
+// instead.
 type mirrorFailingProvider struct {
 	*runtime.Fake
 	hardFailKey string
@@ -30,6 +32,9 @@ func (p mirrorFailingProvider) SetMeta(name, key, value string) error {
 	}
 	if err := p.Fake.SetMeta(name, key, value); err != nil {
 		return err
+	}
+	if key != "GC_DRAIN" && (key != "GC_DRAIN_ACK" || value != "1") {
+		return nil
 	}
 	return t3OutageMirrorFailure(name, key)
 }
@@ -175,5 +180,39 @@ func TestClearSoftReloadConfigDriftDrainAckToleratesMirrorFailure(t *testing.T) 
 	}
 	if dt.get("s-a").ackSet {
 		t.Fatal("ackSet still true after the ack was cleared")
+	}
+}
+
+// The reconciler's deferred ack is an ack once GC_DRAIN_ACK landed, even when
+// the runtime's view of it lags: rolling it back would flap the ack, and record
+// a failure, on every tick of a T3 outage.
+func TestSetReconcilerDrainAckMetadataToleratesMirrorFailure(t *testing.T) {
+	sp := mirrorFailingProvider{Fake: runtime.NewFake()}
+	if err := setReconcilerDrainAckMetadata(sp, "worker", &drainState{reason: "orphaned", generation: 3}); err != nil {
+		t.Fatalf("setReconcilerDrainAckMetadata = %v, want nil", err)
+	}
+	for key, want := range map[string]string{
+		"GC_DRAIN_ACK":                  "1",
+		reconcilerDrainAckSourceKey:     reconcilerDrainAckSourceValue,
+		reconcilerDrainAckReasonKey:     "orphaned",
+		reconcilerDrainAckGenerationKey: "3",
+	} {
+		if got, _ := sp.GetMeta("worker", key); got != want {
+			t.Errorf("%s = %q, want %q", key, got, want)
+		}
+	}
+}
+
+// An ack write that failed outright is no ack: the setter rolls back the keys
+// it wrote and reports the failure.
+func TestSetReconcilerDrainAckMetadataRollsBackWhenTheAckWriteFailed(t *testing.T) {
+	sp := mirrorFailingProvider{Fake: runtime.NewFake(), hardFailKey: "GC_DRAIN_ACK"}
+	if err := setReconcilerDrainAckMetadata(sp, "worker", &drainState{reason: "orphaned", generation: 3}); err == nil || runtime.OnlyMetadataNotMirrored(err) {
+		t.Fatalf("setReconcilerDrainAckMetadata = %v, want the write failure", err)
+	}
+	for _, key := range []string{"GC_DRAIN_ACK", reconcilerDrainAckSourceKey, reconcilerDrainAckReasonKey, reconcilerDrainAckGenerationKey} {
+		if got, _ := sp.GetMeta("worker", key); got != "" {
+			t.Errorf("%s = %q, want it rolled back", key, got)
+		}
 	}
 }

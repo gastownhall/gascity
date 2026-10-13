@@ -79,6 +79,9 @@ func humaSessionManagerError(err error) error {
 	case errors.Is(err, runtime.ErrRuntimeUnavailable):
 		// Retryable: the runtime could not be observed, so nothing was done.
 		return apierr.ServiceUnavailable.Msg("runtime_unavailable: " + err.Error())
+	case errors.Is(err, runtime.ErrNudgeRejected):
+		// The runtime refused the turn in its current state: nothing was delivered.
+		return apierr.SessionConflict.Msg("nudge_rejected: " + err.Error())
 	default:
 		return humaStoreError(err)
 	}

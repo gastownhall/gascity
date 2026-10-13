@@ -29,3 +29,20 @@ func TestRuntimeUnavailableIsServiceUnavailable(t *testing.T) {
 		t.Errorf("humaSessionManagerError = %v, want 503 runtime_unavailable", got)
 	}
 }
+
+// TestNudgeRejectedIsConflict: a nudge the runtime definitively refused (its
+// state forbids the turn) delivered nothing and is no server fault, so both
+// error mappers answer 409 nudge_rejected rather than the 500 the store-error
+// fallback gives an unrecognized error.
+func TestNudgeRejectedIsConflict(t *testing.T) {
+	err := fmt.Errorf("nudging gc-1: %w: t3 refused the turn for %q: %w", runtime.ErrNudgeRejected, "gc-1", errors.New("Orchestration command invariant failed (thread.turn.start)"))
+	rec := httptest.NewRecorder()
+	writeSessionManagerError(rec, err)
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "nudge_rejected") {
+		t.Errorf("writeSessionManagerError = %d %s, want 409 nudge_rejected", rec.Code, rec.Body.String())
+	}
+	var se huma.StatusError
+	if got := humaSessionManagerError(err); !errors.As(got, &se) || se.GetStatus() != http.StatusConflict || !strings.HasPrefix(got.Error(), "nudge_rejected: ") {
+		t.Errorf("humaSessionManagerError = %v, want 409 nudge_rejected", got)
+	}
+}

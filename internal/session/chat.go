@@ -755,6 +755,7 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 	cfg.Env = git.ApplySSHKeepaliveEnv(cfg.Env)
 	cfg = runtime.SyncWorkDirEnv(cfg)
 	started := false
+	converged := false
 	// An operator's resume of a row the operator holds consumes the hold, but
 	// only once the runtime is up (resume_user_hold.go).
 	var consume Decided
@@ -774,10 +775,11 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 		return fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
 	}
 	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
+		switch {
 		// A capacity refusal is also a startup death, but the endpoint refused
 		// the launch: that says nothing about the resume key, so it falls
 		// through to the plain failure below instead of the stale-key recovery.
-		if errors.Is(err, runtime.ErrSessionDiedDuringStartup) && !runtime.IsProviderCapacity(err) {
+		case errors.Is(err, runtime.ErrSessionDiedDuringStartup) && !runtime.IsProviderCapacity(err):
 			retried, retryErr := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, err, unroute)
 			if retryErr != nil {
 				return retryErr
@@ -793,10 +795,14 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 				return fmt.Errorf("resuming session: %w", err)
 			}
 			started = retried
-		} else if !errors.Is(err, runtime.ErrSessionExists) || !m.sp.IsRunning(sessName) {
+		case errors.Is(err, runtime.ErrSessionExists) && m.sp.IsRunning(sessName):
 			// Another caller may have resumed the same session after we loaded the
-			// bead but before we reached Start. If the runtime is already up, treat
-			// the resume as converged and only persist active state below.
+			// bead but before we reached Start, or a resume of ours came up but
+			// returned before confirming it (the canceled stale-key wait below).
+			// The runtime is already up, so the resume converged: persist active
+			// state below, with the binding of the runtime it converged on.
+			converged = true
+		default:
 			if unroute != nil {
 				unroute()
 			}
@@ -816,7 +822,8 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 			// may already be running but we skip setting state="active".
 			// This is self-healing via NDI — the next ensureRunning call
 			// sees the suspended-state bead, attempts sp.Start, gets
-			// ErrSessionExists (IsRunning=true), and persists "active".
+			// ErrSessionExists (IsRunning=true), and persists "active"
+			// with the runtime's binding.
 			if unroute != nil {
 				unroute()
 			}
@@ -837,15 +844,15 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 		return fmt.Errorf("%w: %w", ErrStateSync, err)
 	}
 	var binding MetadataPatch
-	if started {
+	if started || converged {
 		binding = m.startedRuntimeBindingPatch(sessName)
 	}
 	if consumes {
-		var clears MetadataPatch
+		clears := MetadataPatch{}
 		if started {
 			clears = restartStopRequestClears(b.Metadata)
-			maps.Copy(clears, binding)
 		}
+		maps.Copy(clears, binding)
 		return m.consumeUserHold(consume, m.now(), clears)
 	}
 	if err := m.confirmLiveSessionState(id, &b, started, binding); err != nil {
@@ -1013,7 +1020,8 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 }
 
 // confirmLiveSessionState marks the row of a session found or brought live as
-// active. extra rides the same write (the runtime binding of a start).
+// active. extra rides the same write (the runtime binding of a start, or of a
+// resume that converged on a runtime already up).
 func (m *Manager) confirmLiveSessionState(id string, b *beads.Bead, started bool, extra MetadataPatch) error {
 	if b == nil {
 		return nil
@@ -1108,7 +1116,8 @@ func (m *Manager) nudgeSession(ctx context.Context, sessName, message string, im
 
 // nudgeContent delivers content, passing the delivery key ctx carries (see
 // runtime.WithNudgeDeliveryKey) to a provider that deduplicates keyed
-// deliveries.
+// deliveries. Immediate delivery through an ImmediateNudgeProvider goes out
+// unkeyed: NudgeNow takes no key.
 func (m *Manager) nudgeContent(ctx context.Context, sessName string, content []runtime.ContentBlock, immediate bool) error {
 	if immediate {
 		if np, ok := m.sp.(runtime.ImmediateNudgeProvider); ok {

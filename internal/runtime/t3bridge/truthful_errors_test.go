@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -46,11 +47,26 @@ func TestSeamBackedNudgeSoftUnavailableIsRuntimeUnavailable(t *testing.T) {
 	}
 }
 
+// The startup grace answers only for a session T3 shows no thread for, not
+// for one T3 could not be read about: an outage is reported inside it too.
 func TestSeamBackedInterruptSoftUnavailableIsRuntimeUnavailable(t *testing.T) {
-	_, sp := newSeamBackedSnapshotTestProvider(t, unreachableBridgeURL)
-	err := sp.Interrupt("agent-a")
-	if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
-		t.Fatalf("Interrupt during bridge outage = %v, want errors.Is(runtime.ErrRuntimeUnavailable)", err)
+	for _, tc := range []struct {
+		name            string
+		startedRecently bool
+	}{
+		{name: "no recent start"},
+		{name: "inside the startup grace", startedRecently: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			backed, sp := newSeamBackedSnapshotTestProvider(t, unreachableBridgeURL)
+			if tc.startedRecently {
+				backed.raw.setRecentStart("agent-a", time.Now())
+			}
+			err := sp.Interrupt("agent-a")
+			if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+				t.Fatalf("Interrupt during bridge outage = %v, want errors.Is(runtime.ErrRuntimeUnavailable)", err)
+			}
+		})
 	}
 }
 
@@ -94,6 +110,44 @@ func TestSeamBackedNudgeWakesBoundThreadWithoutLiveSession(t *testing.T) {
 			}
 			if containsString(server.commandTypes(), "thread.turn.interrupt") {
 				t.Fatalf("dispatched commands = %v, want no interrupt for a %s thread", server.commandTypes(), status)
+			}
+		})
+	}
+}
+
+// IsRunning counts a just-started session as running before T3 shows its
+// thread, and StopTurn interrupts only a running session. Inside that startup
+// grace, Interrupt has no thread to send the cancel to: it sends nothing and
+// reports success, not a not-found for a session IsRunning just reported
+// running. Once the grace has passed, a session T3 does not show is not found.
+func TestSeamBackedInterruptWithoutThreadDuringStartupGrace(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		startedAgo  time.Duration
+		wantRunning bool
+		wantErr     error
+	}{
+		{name: "inside the grace", wantRunning: true},
+		{name: "after the grace", startedAgo: recentStartGracePeriod + time.Second, wantErr: runtime.ErrSessionNotFound},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := newT3BridgeTestServer(t, map[string]interface{}{"threads": []interface{}{}})
+			t.Cleanup(server.Close)
+			backed, sp := newSeamBackedSnapshotTestProvider(t, server.wsURL())
+			backed.raw.setRecentStart("agent-a", time.Now().Add(-tc.startedAgo))
+
+			if got := sp.IsRunning("agent-a"); got != tc.wantRunning {
+				t.Fatalf("IsRunning = %v, want %v", got, tc.wantRunning)
+			}
+			err := sp.Interrupt("agent-a")
+			if tc.wantErr == nil && err != nil {
+				t.Fatalf("Interrupt = %v, want nil", err)
+			}
+			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+				t.Fatalf("Interrupt = %v, want errors.Is(%v)", err, tc.wantErr)
+			}
+			if got := server.commandTypes(); len(got) != 0 {
+				t.Fatalf("dispatched commands = %v, want none for a session T3 shows no thread for", got)
 			}
 		})
 	}

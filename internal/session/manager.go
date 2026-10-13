@@ -1120,9 +1120,10 @@ func (m *Manager) confirmStartedRuntimeMetadata(id, sessName string, b *beads.Be
 }
 
 // startedRuntimeBindingPatch is the patch recording the thread the runtime
-// hosts the just-started session sessName in (RuntimeBindingPatch). The
-// binding is advisory: a read that fails is logged and records nothing, and
-// the start it describes stands without it.
+// hosts session sessName in (RuntimeBindingPatch), read once a start, or a
+// resume that converged on a runtime already up, has it live. The binding is
+// advisory: a read that fails is logged and records nothing, and the start or
+// resume it describes stands without it.
 func (m *Manager) startedRuntimeBindingPatch(sessName string) MetadataPatch {
 	patch, err := RuntimeBindingPatch(m.sp, sessName)
 	if err != nil {

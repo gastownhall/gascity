@@ -205,7 +205,9 @@ type NudgeRequest struct {
 	// passes the same key, so a runtime that deduplicates keyed deliveries
 	// ([runtime.KeyedNudgeProvider]) replays the first delivery instead of
 	// delivering twice. Distinct content needs a distinct key. Empty
-	// delivers unkeyed.
+	// delivers unkeyed. Only default delivery is sure to carry the key:
+	// immediate and wait-idle delivery can go out unkeyed, as through
+	// [runtime.ImmediateNudgeProvider], whose NudgeNow takes no key.
 	DeliveryKey string `json:"delivery_key,omitempty"`
 }
 

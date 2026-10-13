@@ -455,12 +455,17 @@ type Provider interface {
 
 	// Interrupt sends a soft interrupt signal (e.g., Ctrl-C / SIGINT) to
 	// the named session. Best-effort: returns nil if the session doesn't
-	// exist. Used for graceful shutdown before Stop. A provider with a
-	// protocol-level cancel may instead wait a bounded time for the
-	// interrupted turn to end and return [ErrInterruptNotSettled] if it
-	// does not. That wait blocks the caller for up to the provider's whole
-	// bound (ACP: cancel_timeout plus two 1s SIGINT waits, 12s by default),
-	// and any lock the caller holds across the call is held that long too.
+	// exist and the provider can safely treat that as a no-op. Providers
+	// that interrupt through a runtime they observe rather than own return
+	// [ErrSessionNotFound] when it shows no live session and
+	// [ErrRuntimeUnavailable] when they cannot read it, so callers do not
+	// mistake a no-op for an interrupt. Used for graceful shutdown before
+	// Stop. A provider with a protocol-level cancel may instead wait a
+	// bounded time for the interrupted turn to end and return
+	// [ErrInterruptNotSettled] if it does not. That wait blocks the caller
+	// for up to the provider's whole bound (ACP: cancel_timeout plus two 1s
+	// SIGINT waits, 12s by default), and any lock the caller holds across
+	// the call is held that long too.
 	Interrupt(name string) error
 
 	// IsRunning reports whether the named provider runtime exists. It does not

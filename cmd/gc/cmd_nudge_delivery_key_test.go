@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -177,6 +178,19 @@ func (h *keyedPollerHarness) makeDue() {
 	}
 }
 
+// expireLeases lapses every in-flight claim, as when its claimer died.
+func (h *keyedPollerHarness) expireLeases() {
+	h.t.Helper()
+	if err := withNudgeQueueState(h.dir, func(state *nudgeQueueState) error {
+		for i := range state.InFlight {
+			state.InFlight[i].LeaseUntil = time.Now().Add(-time.Second)
+		}
+		return nil
+	}); err != nil {
+		h.t.Fatalf("withNudgeQueueState: %v", err)
+	}
+}
+
 // deliveries returns each Nudge the runtime received: its key and its text.
 func (h *keyedPollerHarness) deliveries() [][2]string {
 	var out [][2]string
@@ -186,6 +200,62 @@ func (h *keyedPollerHarness) deliveries() [][2]string {
 		}
 	}
 	return out
+}
+
+// enqueueWaitNudge queues a nudge announcing a new wait bead in state, and
+// returns the nudge's id and the wait's.
+func (h *keyedPollerHarness) enqueueWaitNudge(store beads.Store, message, state string) (nudgeID, waitID string) {
+	h.t.Helper()
+	wait, err := store.Create(beads.Bead{
+		Type:     waitBeadType,
+		Status:   "open",
+		Labels:   []string{waitBeadLabel, "session:s-1"},
+		Metadata: map[string]string{"session_id": "s-1", "state": state},
+	})
+	if err != nil {
+		h.t.Fatalf("create wait: %v", err)
+	}
+	item := newQueuedNudgeWithOptions("worker", message, "wait", time.Now().Add(-time.Minute), queuedNudgeOptions{
+		Reference: &nudgeReference{Kind: "bead", ID: wait.ID},
+	})
+	if err := enqueueQueuedNudge(h.dir, item); err != nil {
+		h.t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+	return item.ID, wait.ID
+}
+
+// failBeadWritesOf makes every metadata write to the bead behind queued nudge
+// nudgeID fail, as a store outage fails its withdraw, until restore is called.
+func (h *keyedPollerHarness) failBeadWritesOf(store beads.Store, nudgeID string) (restore func()) {
+	h.t.Helper()
+	item, ok, err := nudgeFrontDoor(beads.NudgesStore{Store: store}).Find(nudgeID)
+	if err != nil || !ok {
+		h.t.Fatalf("finding the bead of %s: ok=%v err=%v", nudgeID, ok, err)
+	}
+	prev := openOwnedNudgeBeadStore
+	openOwnedNudgeBeadStore = func(cityPath string) (beads.NudgesStore, beads.Store) {
+		nudges, opened := prev(cityPath)
+		if nudges.Store != nil {
+			nudges.Store = metadataFailingStore{Store: nudges.Store, failID: item.BeadID}
+		}
+		return nudges, opened
+	}
+	restore = func() { openOwnedNudgeBeadStore = prev }
+	h.t.Cleanup(restore)
+	return restore
+}
+
+// metadataFailingStore fails every metadata batch write to one bead.
+type metadataFailingStore struct {
+	beads.Store
+	failID string
+}
+
+func (s metadataFailingStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if id == s.failID {
+		return fmt.Errorf("setting metadata on %q: connection refused", id)
+	}
+	return s.Store.SetMetadataBatch(id, kvs)
 }
 
 // A batch whose delivery had an unknown outcome is redelivered under its
@@ -230,14 +300,7 @@ func TestTryDeliverQueuedNudgesByPollerKeepsTheBatchAcrossLeaseExpiry(t *testing
 		t.Fatal("claimed item carries no delivery batch")
 	}
 	// The claimer died: its lease lapses with the batch undelivered.
-	if err := withNudgeQueueState(h.dir, func(state *nudgeQueueState) error {
-		for i := range state.InFlight {
-			state.InFlight[i].LeaseUntil = time.Now().Add(-time.Second)
-		}
-		return nil
-	}); err != nil {
-		t.Fatalf("withNudgeQueueState: %v", err)
-	}
+	h.expireLeases()
 	h.enqueue("nudge B")
 	h.pass(nil)
 
@@ -275,9 +338,13 @@ func TestTryDeliverQueuedNudgesByPollerNeverSplitsAPinnedBatch(t *testing.T) {
 	h.enqueue("nudge B")
 
 	h.pass(errors.New("read tcp: i/o timeout")) // {A,B} under K: unknown outcome
-	census = nil                                // the census read fails transiently
+	// S3 replaces S2 before the redelivery. The claim moved A onto S2's fence,
+	// so S3 may claim the batch only while the census vouches that S3 is live
+	// and S2 is not.
+	h.target.sessionID = "S3"
+	census = nil // the census read fails transiently
 	h.pass(nil)
-	census = map[string]struct{}{"S2": {}}
+	census = map[string]struct{}{"S3": {}}
 	h.pass(nil)
 
 	got := h.deliveries()
@@ -299,6 +366,86 @@ func TestTryDeliverQueuedNudgesByPollerNeverSplitsAPinnedBatch(t *testing.T) {
 	pending, inFlight, dead, err := listQueuedNudges(h.dir, "worker", time.Now())
 	if err != nil || len(pending)+len(inFlight)+len(dead) != 0 {
 		t.Fatalf("queue after delivery: pending=%v inFlight=%v dead=%v err=%v, want empty", pending, inFlight, dead, err)
+	}
+}
+
+// A nudge that successor S2 claimed from its drained predecessor S1's fence
+// moves onto S2's fence in the queue. When S1 wakes again before the
+// redelivery, the batch is still S2's to redeliver whole under its key, and S1
+// claims none of it. Left on S1's fence, that nudge would split the batch for
+// both sessions, each holding an item the other may not claim, until both
+// items expired undelivered.
+func TestTryDeliverQueuedNudgesByPollerKeepsTheBatchWhenAFencedPredecessorWakes(t *testing.T) {
+	h := newKeyedPollerHarness(t)
+	h.target.sessionID = "S2"
+	census := map[string]struct{}{"S2": {}}
+	old := liveNudgeFenceSessionIDs
+	liveNudgeFenceSessionIDs = func(string) map[string]struct{} { return census }
+	t.Cleanup(func() { liveNudgeFenceSessionIDs = old })
+
+	for _, n := range []struct{ message, sessionID string }{{"nudge A", "S1"}, {"nudge B", "S2"}} {
+		item := newQueuedNudgeWithOptions("worker", n.message, "session", time.Now().Add(-time.Minute), queuedNudgeOptions{SessionID: n.sessionID})
+		if err := enqueueQueuedNudge(h.dir, item); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	h.pass(errors.New("read tcp: i/o timeout"))      // {A,B} under K to S2: unknown outcome
+	census = map[string]struct{}{"S1": {}, "S2": {}} // S1 wakes again
+	predecessor := h.target
+	predecessor.sessionID = "S1"
+	claimed, err := claimDueQueuedNudgeBatchForTarget(h.dir, predecessor, time.Now())
+	if err != nil || len(claimed) != 0 {
+		t.Fatalf("woken predecessor S1 claimed %+v (err %v), want nothing: the batch is S2's", claimed, err)
+	}
+	h.pass(nil)
+
+	got := h.deliveries()
+	if len(got) != 2 {
+		t.Fatalf("deliveries = %d (%v), want the ambiguous attempt and one whole redelivery", len(got), got)
+	}
+	if got[0][0] == "" || got[1][0] != got[0][0] {
+		t.Fatalf("redelivery key = %q, want the batch key %q", got[1][0], got[0][0])
+	}
+	if !strings.Contains(got[1][1], "nudge A") || !strings.Contains(got[1][1], "nudge B") {
+		t.Fatalf("redelivery text = %q, want the whole batch", got[1][1])
+	}
+	pending, inFlight, dead, err := listQueuedNudges(h.dir, "worker", time.Now())
+	if err != nil || len(pending)+len(inFlight)+len(dead) != 0 {
+		t.Fatalf("queue after delivery: pending=%v inFlight=%v dead=%v err=%v, want empty", pending, inFlight, dead, err)
+	}
+}
+
+// A claim for delivery under a key moves each nudge it takes onto the claiming
+// session's fence in the queue, both when it pins a new batch and when it
+// reclaims a pinned one: the batch carries the fence of the session that last
+// tried to deliver it.
+func TestClaimDueQueuedNudgeBatchMovesItsNudgesOntoTheClaimingFence(t *testing.T) {
+	h := newKeyedPollerHarness(t)
+	var census map[string]struct{}
+	old := liveNudgeFenceSessionIDs
+	liveNudgeFenceSessionIDs = func(string) map[string]struct{} { return census }
+	t.Cleanup(func() { liveNudgeFenceSessionIDs = old })
+	a := newQueuedNudgeWithOptions("worker", "nudge A", "session", time.Now().Add(-time.Minute), queuedNudgeOptions{SessionID: "S1"})
+	if err := enqueueQueuedNudge(h.dir, a); err != nil {
+		t.Fatal(err)
+	}
+
+	// S2 replaces S1 and pins A in a new batch; S3 then replaces S2 and
+	// reclaims that batch after S2's claim lapsed.
+	for _, successor := range []string{"S2", "S3"} {
+		census = map[string]struct{}{successor: {}}
+		target := h.target
+		target.sessionID = successor
+		claimed, err := claimDueQueuedNudgeBatchForTarget(h.dir, target, time.Now())
+		if err != nil || len(claimed) != 1 {
+			t.Fatalf("claim for %s = %+v, %v; want nudge A", successor, claimed, err)
+		}
+		_, inFlight, _, err := listQueuedNudges(h.dir, "worker", time.Now())
+		if err != nil || len(inFlight) != 1 || inFlight[0].SessionID != successor {
+			t.Fatalf("in flight after the claim for %s = %+v (err %v), want nudge A on %s's fence", successor, inFlight, err, successor)
+		}
+		h.expireLeases()
 	}
 }
 
@@ -330,5 +477,152 @@ func TestClaimDueQueuedNudgeBatchSkipsAPinnedBatchPartlyInFlight(t *testing.T) {
 	}
 	if len(claimed) != 1 || claimed[0].Message != "nudge C" || claimed[0].DeliveryBatch == "batch-k" || claimed[0].DeliveryBatch == "" {
 		t.Fatalf("claimed = %+v, want nudge C alone under a new batch", claimed)
+	}
+}
+
+// A nudge withheld from a pinned batch whose withdraw write failed stays in
+// flight on the batch key, and lease expiry returns it to pending still pinned
+// there. The rest of the batch therefore goes out under a new key: once the
+// withheld nudge's wait fires it goes out alone under the old key, and T3 must
+// not answer it with the receipt of a delivery that never contained it.
+func TestTryDeliverQueuedNudgesByPollerRekeysTheBatchWhenAWithdrawFails(t *testing.T) {
+	h := newKeyedPollerHarness(t)
+	store := openNudgeBeadStore(h.dir).Store
+	h.enqueue("nudge A")
+	nudgeB, waitB := h.enqueueWaitNudge(store, "nudge B", waitStatePending)
+	restore := h.failBeadWritesOf(store, nudgeB)
+
+	// {A,B} is claimed under one key. B's wait has not fired, so B is
+	// withheld, and its withdraw fails: B stays in flight while A goes out.
+	if _, err := tryDeliverQueuedNudgesByPoller(h.target, store, store, h.sp, 3*time.Second, h.obs); err == nil || !strings.Contains(err.Error(), "withdrawing blocked nudges") {
+		t.Fatalf("first pass error = %v, want the failed withdraw reported", err)
+	}
+	restore()
+	h.expireLeases()
+	if err := store.SetMetadata(waitB, "state", waitStateReady); err != nil {
+		t.Fatalf("SetMetadata: %v", err)
+	}
+	h.pass(nil)
+
+	got := h.deliveries()
+	if len(got) != 2 {
+		t.Fatalf("deliveries = %d (%v), want nudge A, then nudge B once its wait fired", len(got), got)
+	}
+	if !strings.Contains(got[0][1], "nudge A") || strings.Contains(got[0][1], "nudge B") {
+		t.Fatalf("first delivery = %q, want nudge A alone", got[0][1])
+	}
+	if !strings.Contains(got[1][1], "nudge B") || strings.Contains(got[1][1], "nudge A") {
+		t.Fatalf("second delivery = %q, want nudge B alone", got[1][1])
+	}
+	if got[0][0] == "" || got[1][0] == "" || got[0][0] == got[1][0] {
+		t.Fatalf("delivery keys = %q then %q, want two distinct keys: T3 would answer nudge B with the receipt of the delivery without it", got[0][0], got[1][0])
+	}
+	pending, inFlight, dead, err := listQueuedNudges(h.dir, "worker", time.Now())
+	if err != nil || len(pending)+len(inFlight)+len(dead) != 0 {
+		t.Fatalf("queue after delivery: pending=%v inFlight=%v dead=%v err=%v, want empty", pending, inFlight, dead, err)
+	}
+}
+
+// A withheld nudge whose withdraw succeeded is terminal, so the rest of its
+// batch is still the batch's delivery and keeps the key: a redelivery after an
+// unknown outcome replays the first attempt instead of starting a second turn.
+func TestTryDeliverQueuedNudgesByPollerKeepsTheKeyWhenAWithheldNudgeIsWithdrawn(t *testing.T) {
+	h := newKeyedPollerHarness(t)
+	store := openNudgeBeadStore(h.dir).Store
+	h.enqueue("nudge A")
+	_, waitB := h.enqueueWaitNudge(store, "nudge B", waitStateReady)
+
+	h.pass(errors.New("read tcp: i/o timeout")) // {A,B} under K: unknown outcome
+	if err := store.SetMetadata(waitB, "state", waitStateCanceled); err != nil {
+		t.Fatalf("SetMetadata: %v", err)
+	}
+	h.pass(nil)
+
+	got := h.deliveries()
+	if len(got) != 2 {
+		t.Fatalf("deliveries = %d (%v), want the ambiguous attempt and one redelivery", len(got), got)
+	}
+	if !strings.Contains(got[0][1], "nudge A") || !strings.Contains(got[0][1], "nudge B") {
+		t.Fatalf("first delivery = %q, want the whole batch", got[0][1])
+	}
+	if !strings.Contains(got[1][1], "nudge A") || strings.Contains(got[1][1], "nudge B") {
+		t.Fatalf("redelivery = %q, want nudge A without the withdrawn nudge B", got[1][1])
+	}
+	if got[0][0] == "" || got[1][0] != got[0][0] {
+		t.Fatalf("redelivery key = %q, want the batch key %q", got[1][0], got[0][0])
+	}
+	pending, inFlight, dead, err := listQueuedNudges(h.dir, "worker", time.Now())
+	if err != nil || len(pending)+len(inFlight)+len(dead) != 0 {
+		t.Fatalf("queue after delivery: pending=%v inFlight=%v dead=%v err=%v, want empty", pending, inFlight, dead, err)
+	}
+}
+
+// The new key is persisted before delivery: when the re-keyed delivery has an
+// unknown outcome, its redelivery reuses the new key so that T3 replays it,
+// while the nudge whose withdraw failed keeps the old one.
+func TestTryDeliverQueuedNudgesByPollerRedeliversARekeyedBatchUnderItsNewKey(t *testing.T) {
+	h := newKeyedPollerHarness(t)
+	store := openNudgeBeadStore(h.dir).Store
+	h.enqueue("nudge A")
+	nudgeB, _ := h.enqueueWaitNudge(store, "nudge B", waitStatePending)
+	restore := h.failBeadWritesOf(store, nudgeB)
+	h.fake.NudgeErrors = map[string]error{"sess-worker": errors.New("read tcp: i/o timeout")}
+
+	if _, err := tryDeliverQueuedNudgesByPoller(h.target, store, store, h.sp, 3*time.Second, h.obs); err == nil || !strings.Contains(err.Error(), "withdrawing blocked nudges") {
+		t.Fatalf("first pass error = %v, want the failed withdraw reported", err)
+	}
+	restore()
+	h.makeDue()
+	h.pass(nil)
+
+	got := h.deliveries()
+	if len(got) != 2 {
+		t.Fatalf("deliveries = %d (%v), want the ambiguous attempt and one redelivery", len(got), got)
+	}
+	for i, delivery := range got {
+		if !strings.Contains(delivery[1], "nudge A") || strings.Contains(delivery[1], "nudge B") {
+			t.Fatalf("delivery %d = %q, want nudge A alone", i, delivery[1])
+		}
+	}
+	if got[0][0] == "" || got[1][0] != got[0][0] {
+		t.Fatalf("redelivery key = %q, want the key of the first attempt %q", got[1][0], got[0][0])
+	}
+	_, inFlight, _, err := listQueuedNudges(h.dir, "worker", time.Now())
+	if err != nil || len(inFlight) != 1 || inFlight[0].ID != nudgeB || inFlight[0].DeliveryBatch == "" || inFlight[0].DeliveryBatch == got[0][0] {
+		t.Fatalf("in flight = %+v (err %v), want nudge B alone on the old key", inFlight, err)
+	}
+}
+
+// A re-key that cannot pin every item it would deliver writes nothing and
+// delivers nothing: the claims go back to pending on their old key.
+func TestRekeyQueuedNudgesAfterFailedBookkeepingReleasesWhenAClaimIsGone(t *testing.T) {
+	h := newKeyedPollerHarness(t)
+	h.enqueue("nudge A")
+	h.enqueue("nudge B")
+	claimed, err := claimDueQueuedNudgeBatchForTarget(h.dir, h.target, time.Now())
+	if err != nil || len(claimed) != 2 || claimed[0].DeliveryBatch == "" {
+		t.Fatalf("claimed = %+v (err %v), want nudges A and B under one key", claimed, err)
+	}
+	key := claimed[0].DeliveryBatch
+	gone := ""
+	for _, item := range claimed {
+		if item.Message == "nudge B" {
+			gone = item.ID
+		}
+	}
+	if gone == "" {
+		t.Fatalf("claimed = %+v, want nudge B among them", claimed)
+	}
+	if err := ackQueuedNudges(h.dir, []string{gone}); err != nil {
+		t.Fatalf("ackQueuedNudges: %v", err)
+	}
+
+	items, err := rekeyQueuedNudgesAfterFailedBookkeeping(h.dir, claimed, errors.New("withdrawing blocked nudges: connection refused"))
+	if len(items) != 0 || err == nil || !strings.Contains(err.Error(), "withdrawing blocked nudges") || !strings.Contains(err.Error(), "no longer in flight") {
+		t.Fatalf("rekey = %+v, %v; want nothing to deliver, and the bookkeeping and re-key failures", items, err)
+	}
+	pending, inFlight, _, err := listQueuedNudges(h.dir, "worker", time.Now())
+	if err != nil || len(inFlight) != 0 || len(pending) != 1 || pending[0].Message != "nudge A" || pending[0].DeliveryBatch != key {
+		t.Fatalf("queue: pending=%+v inFlight=%+v err=%v, want nudge A back in pending on key %q", pending, inFlight, err, key)
 	}
 }

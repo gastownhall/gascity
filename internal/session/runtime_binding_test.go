@@ -139,6 +139,49 @@ func TestResumeRecordsTheRuntimeBinding(t *testing.T) {
 	}
 }
 
+// A resume whose start finds the runtime already up (another caller's resume,
+// or its own canceled one) converges on that runtime, so it records the thread
+// that runtime hosts the session in, both where it confirms the row and where
+// it consumes the operator's hold on it.
+func TestResumeConvergedOnALiveRuntimeRecordsItsBinding(t *testing.T) {
+	for name, suspend := range map[string]func(*Manager, string) error{
+		"no hold":       sweepSuspend,
+		"operator hold": operatorSuspend,
+	} {
+		t.Run(name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			sp := &boundProvider{Provider: runtime.NewFake(), binding: runtime.SessionBinding{ThreadID: "thread-1", ProjectID: "project-1"}}
+			mgr := newTestManager(t, store, sp)
+			info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "codex", WorkDir: "/tmp", Provider: "codex", ExtraMeta: map[string]string{"session_origin": "manual"}})
+			if err != nil {
+				t.Fatalf("CreateSession: %v", err)
+			}
+			if err := suspend(mgr, info.ID); err != nil {
+				t.Fatalf("suspend: %v", err)
+			}
+			// The runtime is up again, in a new thread the row does not record yet.
+			sp.binding = runtime.SessionBinding{ThreadID: "thread-2", ProjectID: "project-2"}
+			if err := sp.Start(context.Background(), info.SessionName, runtime.Config{WorkDir: "/tmp"}); err != nil {
+				t.Fatalf("concurrent Start: %v", err)
+			}
+
+			if err := mgr.Start(context.Background(), testActor(mgr, ActorOperator), info.ID, "codex", runtime.Config{WorkDir: "/tmp"}); err != nil {
+				t.Fatalf("Start(resume): %v", err)
+			}
+			b, err := store.Get(info.ID)
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			if got := State(b.Metadata["state"]); got != StateActive {
+				t.Fatalf("state = %q, want %q", got, StateActive)
+			}
+			if thread, project := b.Metadata[MetadataRuntimeThreadID], b.Metadata[MetadataRuntimeProjectID]; thread != "thread-2" || project != "project-2" {
+				t.Fatalf("row binding after a converged resume = %q, %q; want thread-2, project-2", thread, project)
+			}
+		})
+	}
+}
+
 // A session the Manager starts records the thread its runtime hosts it in.
 func TestCreateSessionRecordsTheRuntimeBinding(t *testing.T) {
 	store := beads.NewMemStore()
