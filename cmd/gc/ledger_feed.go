@@ -8,8 +8,13 @@ package main
 // the cache owns through the cache (RefreshRowReport), so bead.* events keep
 // exactly one author, the cache's onChange, and a refresh notifies only a
 // real change, which is the re-scan's rule. A write the controller made
-// itself comes back as a journal row whose refresh finds nothing new, so it
-// neither notifies nor wakes anything (ga-yoix1).
+// through the cache comes back as a journal row whose refresh finds nothing
+// new, so it neither notifies nor wakes anything (ga-yoix1): a refresh that
+// lands while such a write is in flight yields to it
+// (RowRefreshOptions.YieldToLocalWrites) and is retried, and the cache's own
+// close is not announced again after a re-scan evicted it. A write the
+// controller makes around the cache (straight to the backing) is out of band
+// to the cache and is refreshed like any other.
 //
 // Under the legacy reconciler the feed wakes the reconciler once per page
 // with at least one changed row (critic A2: the allocator always, plus the
@@ -17,13 +22,17 @@ package main
 // it never calls Enqueue (critic D7): the planner learns of the changes from
 // the cache-reconcile events the refreshes record (controllerWake.OnBeadEvent).
 //
-// A gap in the journal, a refresh the feed had to drop, and the first good
-// read after the journal was inactive each request a forced re-scan
-// (CachingStore.RequestReconcile), so every row after the checkpoint is
-// either refreshed or covered by a scan whose list read comes after it
-// committed. The close of a row the cache never held is announced once by
-// the refresh (critic A3), which sends it down the live-confirmed close path
-// (applyInferredClose), and handed to the autoclose sweep as a backstop.
+// A gap in the journal, a refresh that failed or found the cache not live,
+// and the first good read after the journal was inactive each request a
+// forced re-scan (CachingStore.RequestReconcile), whose list read comes
+// after the rows committed. The re-scan lists active rows only, so it covers
+// every create and update but not the close of a row the cache never held.
+// That close is announced once by the refresh (critic A3), which sends it
+// down the live-confirmed close path (applyInferredClose), and handed to the
+// autoclose sweep as a backstop. A row whose refresh was dropped (an error, a
+// fence, a cache not live) is kept for a bounded retry, so its close is
+// still announced once the refresh succeeds; a closing row is handed to the
+// sweep at once, and a row whose retries run out falls back to a re-scan.
 //
 // The feed reads nothing while its scope's gate is closed (a quiescent city
 // or a suspended rig), and every read and Apply counts as store work, so the
@@ -37,6 +46,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"slices"
 	"sort"
 	"sync"
@@ -82,6 +92,11 @@ const (
 	ledgerFeedSampleCap = 1024
 	// ledgerFeedRefreshErrorLogEvery rate-limits the refresh-error log line.
 	ledgerFeedRefreshErrorLogEvery = time.Minute
+	// ledgerFeedRetryCap bounds the dropped rows kept for a retry, and
+	// ledgerFeedRetryLimit the drops one row may take, before the feed gives
+	// the row up to a re-scan (and, for a close, the autoclose sweep).
+	ledgerFeedRetryCap   = 4096
+	ledgerFeedRetryLimit = 8
 )
 
 // The journal ops the feed reads, from beads' frozen issueops vocabulary
@@ -353,18 +368,31 @@ type ledgerFeed struct {
 	late    bool
 	started time.Time
 
+	// refreshMu serializes the page applies and the retry passes.
+	refreshMu sync.Mutex
+
 	mu                 sync.Mutex
 	state              string
 	stateSince         time.Time
 	reason             string
 	stats              ledgerFeedCounters
 	lastRefreshErrorAt time.Time
+	// retries are the dropped rows awaiting a retry, by id.
+	retries map[string]ledgerFeedRetry
+}
+
+// ledgerFeedRetry is one dropped row awaiting a retry.
+type ledgerFeedRetry struct {
+	// closing carries the page's evidence of a recent close or open state.
+	closing bool
+	// drops counts the refreshes of the row the feed dropped.
+	drops int
 }
 
 // ledgerFeedCounters are a feed's own counters; the tailer keeps the rest.
 type ledgerFeedCounters struct {
 	ids, refreshed, fenced, unavailable, refreshErrors, unowned int64
-	unheldCloses, wakes                                         int64
+	unheldCloses, wakes, retryGiveUps                           int64
 	wakeTimes                                                   []time.Time
 	actorRows                                                   map[string]int64
 	ages, applies                                               []time.Duration
@@ -436,11 +464,62 @@ func (f *ledgerFeed) run(parent context.Context) {
 		f.cache.RequestReconcile()
 		f.setState(ledgerFeedStateTailing, nil)
 	}
+	go f.retryLoop(ctx)
 	err := f.tailer.Run(ctx)
 	if ctx.Err() != nil {
 		return
 	}
 	f.stop(err)
+}
+
+// retryLoop retries the dropped rows every poll until ctx ends, so a retry
+// does not wait for the next journal row.
+func (f *ledgerFeed) retryLoop(ctx context.Context) {
+	tick := time.NewTicker(ledgerFeedPoll)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			if f.pendingRetries() > 0 {
+				f.retryPending()
+			}
+		}
+	}
+}
+
+func (f *ledgerFeed) pendingRetries() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.retries)
+}
+
+// retryPending refreshes the rows kept for a retry, while the gate admits it.
+func (f *ledgerFeed) retryPending() {
+	end := f.set.hooks.beginWork()
+	defer end()
+	if !f.admit() {
+		return
+	}
+	f.refreshMu.Lock()
+	defer f.refreshMu.Unlock()
+	f.mu.Lock()
+	ids := make([]string, 0, len(f.retries))
+	closing := make(map[string]bool, len(f.retries))
+	for id, r := range f.retries {
+		ids = append(ids, id)
+		closing[id] = r.closing
+	}
+	f.mu.Unlock()
+	if len(ids) == 0 {
+		return
+	}
+	sort.Strings(ids)
+	counts := f.refreshRows(ids, closing, f.now())
+	f.mu.Lock()
+	f.foldCountsLocked(counts)
+	f.mu.Unlock()
 }
 
 // stop records a tail the journal ended for good. The miss detector stops
@@ -504,30 +583,82 @@ func (f *ledgerFeed) onGap(_ context.Context, gap ledgerfeed.Gap) error {
 	return nil
 }
 
-// apply refreshes every distinct id a page names that the cache owns. A row
-// whose refresh fails is dropped and covered by a forced re-scan, so one
-// unreadable row cannot stall the feed; only a closed gate fails the page.
+// apply refreshes every distinct id a page names that the cache owns, and
+// the rows kept for a retry. A row whose refresh is dropped is kept for a
+// retry rather than stalling the feed; only a closed gate fails the page.
 func (f *ledgerFeed) apply(_ context.Context, page journalops.Page) error {
 	end := f.set.hooks.beginWork()
 	defer end()
 	if !f.admit() {
 		return errLedgerFeedGated
 	}
+	f.refreshMu.Lock()
+	defer f.refreshMu.Unlock()
 	start := f.now()
 	plan := planLedgerFeedPage(page.Rows)
+	ids, closing := f.withRetries(plan)
+	counts := f.refreshRows(ids, closing, start)
+	now := f.now()
+	f.notePage(plan, page.Rows, counts, now, now.Sub(start))
+	return nil
+}
+
+// withRetries adds the rows kept for a retry to a page's ids, carrying their
+// close evidence.
+func (f *ledgerFeed) withRetries(plan ledgerFeedPagePlan) ([]string, map[string]bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.retries) == 0 {
+		return plan.ids, plan.closing
+	}
+	ids := slices.Clone(plan.ids)
+	closing := maps.Clone(plan.closing)
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		seen[id] = struct{}{}
+	}
+	extra := make([]string, 0, len(f.retries))
+	for id, r := range f.retries {
+		if r.closing {
+			closing[id] = true
+		}
+		if _, ok := seen[id]; !ok {
+			extra = append(extra, id)
+		}
+	}
+	sort.Strings(extra)
+	return append(ids, extra...), closing
+}
+
+// refreshRows refreshes ids through the cache, keeps the dropped ones for a
+// retry, and wakes the legacy reconciler once when a refresh changed a row.
+// The caller holds refreshMu and counts the work.
+func (f *ledgerFeed) refreshRows(ids []string, closing map[string]bool, now time.Time) ledgerFeedCounters {
 	var (
 		changed   []beads.Bead
 		reconcile bool
 		counts    ledgerFeedCounters
 		deferred  []string
 	)
-	refreshChanged := make(map[string]bool, len(plan.ids))
-	for _, id := range plan.ids {
+	refreshChanged := make(map[string]bool, len(ids))
+	drop := func(id string) {
+		if closing[id] {
+			// The sweep reads the row live whatever the retry finds.
+			deferred = append(deferred, id)
+		}
+		if f.keepForRetry(id, closing[id]) {
+			return
+		}
+		counts.retryGiveUps++
+		reconcile = true
+	}
+	for _, id := range ids {
 		if !f.cache.OwnsBeadID(id) {
 			counts.unowned++
+			f.forgetRetry(id)
 			continue
 		}
-		opts := beads.RowRefreshOptions{AnnounceUnheldClose: plan.closing[id]}
+		opts := beads.RowRefreshOptions{AnnounceUnheldClose: closing[id], YieldToLocalWrites: true}
 		rep, err := f.cache.RefreshRowReport(id, opts)
 		if errors.Is(err, beads.ErrRowRefreshFenced) {
 			rep, err = f.cache.RefreshRowReport(id, opts)
@@ -535,18 +666,23 @@ func (f *ledgerFeed) apply(_ context.Context, page journalops.Page) error {
 		switch {
 		case err == nil || errors.Is(err, beads.ErrNotFound):
 			counts.refreshed++
+			f.forgetRetry(id)
 		case errors.Is(err, beads.ErrRowRefreshFenced):
-			// The newer local write, event or scan owns the row.
+			// A newer local write, event or scan owns the row, or a local
+			// write that may touch it is in flight; the retry finds which.
 			counts.fenced++
+			drop(id)
 			continue
 		case errors.Is(err, beads.ErrCacheUnavailable):
 			counts.unavailable++
 			reconcile = true
+			drop(id)
 			continue
 		default:
 			counts.refreshErrors++
 			reconcile = true
 			f.logRefreshError(id, err)
+			drop(id)
 			continue
 		}
 		refreshChanged[id] = rep.Event != ""
@@ -558,10 +694,9 @@ func (f *ledgerFeed) apply(_ context.Context, page journalops.Page) error {
 			deferred = append(deferred, id)
 		}
 	}
-	now := f.now()
-	f.miss.noteJournal(plan.ids, refreshChanged, now)
-	for _, id := range deferred {
-		if f.set.hooks.deferClose != nil {
+	f.miss.noteJournal(ids, refreshChanged, now)
+	if f.set.hooks.deferClose != nil {
+		for _, id := range deferred {
 			f.set.hooks.deferClose(id)
 		}
 	}
@@ -569,34 +704,48 @@ func (f *ledgerFeed) apply(_ context.Context, page journalops.Page) error {
 		f.miss.noteUnhealthy(now)
 		f.cache.RequestReconcile()
 	}
-	woke := false
 	if w := legacyWakeOf(f.set.wake.Load()); w != nil && len(changed) > 0 {
 		w.Enqueue(wakeReasonLedgerFeed, ledgerFeedWakeKeys(changed)...)
-		woke = true
+		counts.wakes++
 	}
-	f.notePage(plan, page.Rows, counts, woke, now, now.Sub(start))
-	return nil
+	return counts
+}
+
+// keepForRetry keeps a dropped row for a retry, reporting false when its
+// retries ran out or the retry set is full: the caller gives it up.
+func (f *ledgerFeed) keepForRetry(id string, closing bool) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	r, kept := f.retries[id]
+	if !kept && len(f.retries) >= ledgerFeedRetryCap {
+		return false
+	}
+	r.closing = r.closing || closing
+	r.drops++
+	if r.drops >= ledgerFeedRetryLimit {
+		delete(f.retries, id)
+		return false
+	}
+	if f.retries == nil {
+		f.retries = make(map[string]ledgerFeedRetry)
+	}
+	f.retries[id] = r
+	return true
+}
+
+func (f *ledgerFeed) forgetRetry(id string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.retries, id)
 }
 
 // notePage folds one applied page into the counters.
-func (f *ledgerFeed) notePage(plan ledgerFeedPagePlan, rows []journalops.Row, counts ledgerFeedCounters, woke bool, now time.Time, took time.Duration) {
+func (f *ledgerFeed) notePage(plan ledgerFeedPagePlan, rows []journalops.Row, counts ledgerFeedCounters, now time.Time, took time.Duration) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	s := &f.stats
 	s.ids += int64(len(plan.ids))
-	s.refreshed += counts.refreshed
-	s.fenced += counts.fenced
-	s.unavailable += counts.unavailable
-	s.refreshErrors += counts.refreshErrors
-	s.unowned += counts.unowned
-	s.unheldCloses += counts.unheldCloses
-	if woke {
-		s.wakes++
-		s.wakeTimes = append(pruneBefore(s.wakeTimes, now.Add(-time.Minute)), now)
-		if len(s.wakeTimes) > ledgerFeedSampleCap {
-			s.wakeTimes = s.wakeTimes[len(s.wakeTimes)-ledgerFeedSampleCap:]
-		}
-	}
+	f.foldCountsLocked(counts)
 	if s.actorRows == nil {
 		s.actorRows = make(map[string]int64)
 	}
@@ -617,6 +766,26 @@ func (f *ledgerFeed) notePage(plan ledgerFeedPagePlan, rows []journalops.Row, co
 	}
 }
 
+// foldCountsLocked adds one refresh pass's counters. Caller holds f.mu.
+func (f *ledgerFeed) foldCountsLocked(counts ledgerFeedCounters) {
+	s := &f.stats
+	s.refreshed += counts.refreshed
+	s.fenced += counts.fenced
+	s.unavailable += counts.unavailable
+	s.refreshErrors += counts.refreshErrors
+	s.unowned += counts.unowned
+	s.unheldCloses += counts.unheldCloses
+	s.retryGiveUps += counts.retryGiveUps
+	if counts.wakes > 0 {
+		now := f.now()
+		s.wakes += counts.wakes
+		s.wakeTimes = append(pruneBefore(s.wakeTimes, now.Add(-time.Minute)), now)
+		if len(s.wakeTimes) > ledgerFeedSampleCap {
+			s.wakeTimes = s.wakeTimes[len(s.wakeTimes)-ledgerFeedSampleCap:]
+		}
+	}
+}
+
 func (f *ledgerFeed) logRefreshError(id string, err error) {
 	f.mu.Lock()
 	now := f.now()
@@ -626,7 +795,7 @@ func (f *ledgerFeed) logRefreshError(id string, err error) {
 	}
 	f.mu.Unlock()
 	if due {
-		log.Printf("ledger-feed: %s: refreshing %s: %v (dropped; a re-scan covers it)", f.scope, id, err)
+		log.Printf("ledger-feed: %s: refreshing %s: %v (kept for a retry; a re-scan is requested)", f.scope, id, err)
 	}
 }
 
@@ -860,6 +1029,8 @@ type ledgerFeedScopeStatus struct {
 	RefreshErrors     int64            `json:"refresh_errors"`
 	Unowned           int64            `json:"unowned"`
 	UnheldCloses      int64            `json:"unheld_closes"`
+	PendingRetries    int64            `json:"pending_retries"`
+	RetryGiveUps      int64            `json:"retry_give_ups"`
 	Wakes             int64            `json:"wakes"`
 	WakesLastMinute   int64            `json:"wakes_last_minute"`
 	ReconcileRequests int64            `json:"reconcile_requests"`
@@ -938,6 +1109,7 @@ func (f *ledgerFeed) status(now time.Time) ledgerFeedScopeStatus {
 	st.IDs, st.Refreshed, st.Fenced = s.ids, s.refreshed, s.fenced
 	st.Unavailable, st.RefreshErrors, st.Unowned = s.unavailable, s.refreshErrors, s.unowned
 	st.UnheldCloses, st.Wakes = s.unheldCloses, s.wakes
+	st.PendingRetries, st.RetryGiveUps = int64(len(f.retries)), s.retryGiveUps
 	st.WakesLastMinute = int64(len(pruneBefore(s.wakeTimes, now.Add(-time.Minute))))
 	if len(s.actorRows) > 0 {
 		st.ActorRows = make(map[string]int64, len(s.actorRows))
