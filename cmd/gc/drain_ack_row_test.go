@@ -760,6 +760,36 @@ func TestDrainAckStrictConfig(t *testing.T) {
 	}
 }
 
+// TestDrainAckModeReadsTheProcessOverride (mc-t9wb5): the CLI's default
+// lookup is the process environment, as the controller's is, and through it
+// a v2 config latches as the controller latches it: the override "1" is v2,
+// an unset or any other value is legacy. The environment is a map, not the
+// process's. Kills: a nil default (the override ignored) and an override
+// read as set-at-all.
+func TestDrainAckModeReadsTheProcessOverride(t *testing.T) {
+	if reflect.ValueOf(drainAckModeLookupEnv).Pointer() != reflect.ValueOf(os.LookupEnv).Pointer() {
+		t.Fatal("drainAckModeLookupEnv's default is not os.LookupEnv: the CLI ignores the process's override")
+	}
+	original := drainAckModeLookupEnv
+	t.Cleanup(func() { drainAckModeLookupEnv = original })
+	cfg := &config.City{}
+	cfg.Daemon.SessionReconciler = "v2"
+	for _, tc := range []struct {
+		name string
+		env  map[string]string
+		want bool
+	}{
+		{name: "the override", env: map[string]string{v2SkeletonEnv: "1"}, want: true},
+		{name: "unset", env: map[string]string{}},
+		{name: "another value", env: map[string]string{v2SkeletonEnv: "true"}},
+	} {
+		drainAckModeLookupEnv = func(key string) (string, bool) { v, ok := tc.env[key]; return v, ok }
+		if got := drainAckStrictConfig(cfg); got != tc.want {
+			t.Errorf("drainAckStrictConfig(v2) with %s: %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
 // TestHookDrainAckToleranceCallSites pins which hook drains tolerate a v2
 // refusal: stale-session, missing-registration and drain-pending complete the
 // drain without drain_acknowledged and exit 0; the suspension and no-work
