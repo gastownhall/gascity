@@ -670,7 +670,7 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 			defer release()
 			return m.consumeUserHold(consume, m.now(), nil)
 		}
-		if err := m.confirmLiveSessionState(id, &b, false); err != nil {
+		if err := m.confirmLiveSessionState(id, &b, false, nil); err != nil {
 			return err
 		}
 		return nil
@@ -836,14 +836,19 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 	if err := m.syncStoredMCPServers(id, &b, cfg.MCPServers); err != nil {
 		return fmt.Errorf("%w: %w", ErrStateSync, err)
 	}
+	var binding MetadataPatch
+	if started {
+		binding = m.startedRuntimeBindingPatch(sessName)
+	}
 	if consumes {
 		var clears MetadataPatch
 		if started {
 			clears = restartStopRequestClears(b.Metadata)
+			maps.Copy(clears, binding)
 		}
 		return m.consumeUserHold(consume, m.now(), clears)
 	}
-	if err := m.confirmLiveSessionState(id, &b, started); err != nil {
+	if err := m.confirmLiveSessionState(id, &b, started, binding); err != nil {
 		if started && !errors.Is(err, ErrStateSync) {
 			_ = m.sp.Stop(sessName)
 		}
@@ -1007,7 +1012,9 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 	return nil
 }
 
-func (m *Manager) confirmLiveSessionState(id string, b *beads.Bead, started bool) error {
+// confirmLiveSessionState marks the row of a session found or brought live as
+// active. extra rides the same write (the runtime binding of a start).
+func (m *Manager) confirmLiveSessionState(id string, b *beads.Bead, started bool, extra MetadataPatch) error {
 	if b == nil {
 		return nil
 	}
@@ -1015,6 +1022,7 @@ func (m *Manager) confirmLiveSessionState(id string, b *beads.Bead, started bool
 	if started {
 		maps.Copy(batch, restartStopRequestClears(b.Metadata))
 	}
+	maps.Copy(batch, extra)
 	switch State(b.Metadata["state"]) {
 	case "", StateStartPending, StateCreating, StateAsleep, StateSuspended:
 		batch["state"] = string(StateActive)

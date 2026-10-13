@@ -39,7 +39,7 @@ func TestSessionBindingForwardsToTheRoutedBackend(t *testing.T) {
 	if got, err := p.SessionBinding("bound"); err != nil || got != keyedLeaf.Bindings["bound"] {
 		t.Fatalf("SessionBinding(bound) = %+v, %v; want %+v", got, err, keyedLeaf.Bindings["bound"])
 	}
-	if got, err := p.SessionBinding("plain"); err != nil || !got.IsZero() {
+	if got, err := p.SessionBinding("plain"); err != nil || got != (runtime.SessionBinding{}) {
 		t.Fatalf("SessionBinding(plain) = %+v, %v; want none", got, err)
 	}
 }

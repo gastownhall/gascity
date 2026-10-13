@@ -286,10 +286,10 @@ type preparedStart struct {
 	// manual conversation, which the caller records as
 	// session.conversation_reset (staleKeyConversationResetEvent).
 	conversationReset bool
-	// runtimeBinding is the thread the runtime hosts the session in, read
-	// once the start succeeded (startedRuntimeBinding); the start commit
-	// records it.
-	runtimeBinding runtime.SessionBinding
+	// runtimeBinding is the patch recording the thread the runtime hosts
+	// the session in, read once the start succeeded (startedRuntimeBinding);
+	// the start commit applies it.
+	runtimeBinding sessionpkg.MetadataPatch
 }
 
 type startResult struct {
@@ -3560,6 +3560,9 @@ func recoverRunningPendingCreate(
 		Now:                 now,
 		PrimedAt:            primedAt,
 		PromptHash:          promptHash,
+		// The runtime is already live: record the thread it hosts the
+		// session in, as every confirmed start does.
+		RuntimeBinding: startedRuntimeBinding(context.Background(), cityPath, sp, prepared.candidate.name()),
 	})
 	applied, err := sessionFrontDoor(store).CommitStartedIfCurrentUnder(prepared.candidate.info, metadata, lease, sessionpkg.StartCommitRefusingHolds())
 	if errors.Is(err, sessionpkg.ErrStartCommitHeld) {

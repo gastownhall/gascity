@@ -8,13 +8,13 @@ type SessionBinding struct {
 	ProjectID string
 }
 
-// IsZero reports whether b names no thread.
-func (b SessionBinding) IsZero() bool { return b.ThreadID == "" && b.ProjectID == "" }
-
 // SessionBindingProvider is an optional extension for runtimes that host a
 // session in a thread of their own. SessionBinding reports the thread bound
 // to name, so gc can record it on the session row: [ErrSessionNotFound] when
-// no thread is bound, [ErrRuntimeUnavailable] when the runtime cannot be read.
+// no thread is bound, [ErrRuntimeUnavailable] when the runtime cannot be read,
+// and a binding with no ThreadID (and a nil error) when the runtime does not
+// host name in a thread at all, as a composite routing name to a backend
+// without threads.
 type SessionBindingProvider interface {
 	SessionBinding(name string) (SessionBinding, error)
 }

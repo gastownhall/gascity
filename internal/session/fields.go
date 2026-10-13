@@ -460,8 +460,9 @@ var registry = slices.Concat([]Field{
 		"wait_lookup_capped_at", "wait_lookup_capped_label", "wait_lookup_capped_limit", "wait_lookup_capped_source"),
 	same(ClassAdvisory, false, sites(legacyCommit), "awake_started_at", PrimedAtMetadataKey, PromptHashMetadataKey),
 	// The thread a runtime hosts the session in (runtime.SessionBinding):
-	// recorded at each confirmed start, read by no decision.
-	same(ClassAdvisory, false, sites(legacyCommit, op(srcManager, "Manager.confirmStartedRuntimeMetadata")),
+	// recorded at each confirmed start (create, resume, pending-create
+	// recovery), read by no decision.
+	same(ClassAdvisory, false, sites(legacyCommit, op(srcManager, "Manager.confirmStartedRuntimeMetadata"), opRestartConfirm, op("internal/session/resume_user_hold.go", "Manager.consumeUserHold")),
 		MetadataRuntimeThreadID, MetadataRuntimeProjectID),
 	same(ClassAdvisory, false, sites(legacy("cmd/gc/session_wake.go", "freshWakeResetPriorValues")), PrimingAttemptedAtMetadataKey),
 	same(ClassAdvisory, false, sites(legacyCreate), "synced_at", "startup_kickoff_state", "startup_kickoff_started_at", "startup_kickoff_attempts"),

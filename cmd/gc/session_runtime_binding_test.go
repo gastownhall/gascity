@@ -2,15 +2,25 @@ package main
 
 import (
 	"context"
+	"io"
+	"maps"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/session/sessiontest"
 )
 
+func bindingPatch(thread, project string) sessionpkg.MetadataPatch {
+	return sessionpkg.MetadataPatch{sessionpkg.MetadataRuntimeThreadID: thread, sessionpkg.MetadataRuntimeProjectID: project}
+}
+
 func TestStartCommitPatchRecordsTheRuntimeBinding(t *testing.T) {
-	prepared := preparedStart{runtimeBinding: runtime.SessionBinding{ThreadID: "thread-1", ProjectID: "project-1"}}
+	prepared := preparedStart{runtimeBinding: bindingPatch("thread-1", "project-1")}
 	patch := startCommitPatch(&prepared, sessionpkg.Info{}, time.Now())
 	if patch[sessionpkg.MetadataRuntimeThreadID] != "thread-1" || patch[sessionpkg.MetadataRuntimeProjectID] != "project-1" {
 		t.Fatalf("start commit patch = %v, want the runtime thread and project", patch)
@@ -22,15 +32,15 @@ func TestStartedRuntimeBinding(t *testing.T) {
 	fake.Bindings = map[string]runtime.SessionBinding{"worker": {ThreadID: "thread-1", ProjectID: "project-1"}}
 	sp := runtime.NewFakeProfile(runtime.ProfileT3Bridge, runtime.FullFake{Fake: fake})
 	city := t.TempDir()
-	if got := startedRuntimeBinding(context.Background(), city, sp, "worker"); got != fake.Bindings["worker"] {
-		t.Fatalf("startedRuntimeBinding = %+v, want %+v", got, fake.Bindings["worker"])
+	if got := startedRuntimeBinding(context.Background(), city, sp, "worker"); !maps.Equal(got, bindingPatch("thread-1", "project-1")) {
+		t.Fatalf("startedRuntimeBinding = %v, want thread-1/project-1", got)
 	}
-	// No thread bound: the start stands, and records no binding.
-	if got := startedRuntimeBinding(context.Background(), city, sp, "other"); !got.IsZero() {
-		t.Fatalf("startedRuntimeBinding(unbound) = %+v, want none", got)
+	// No thread bound: the start stands, and clears any previous thread.
+	if got := startedRuntimeBinding(context.Background(), city, sp, "other"); !maps.Equal(got, bindingPatch("", "")) {
+		t.Fatalf("startedRuntimeBinding(unbound) = %v, want both keys cleared", got)
 	}
-	if got := startedRuntimeBinding(context.Background(), city, runtime.NewFake(), "worker"); !got.IsZero() {
-		t.Fatalf("startedRuntimeBinding(provider without bindings) = %+v, want none", got)
+	if got := startedRuntimeBinding(context.Background(), city, runtime.NewFake(), "worker"); len(got) != 0 {
+		t.Fatalf("startedRuntimeBinding(provider without bindings) = %v, want nothing", got)
 	}
 }
 
@@ -45,8 +55,8 @@ func TestRunPreparedStartCandidateReadsTheRuntimeBinding(t *testing.T) {
 	if result.err != nil {
 		t.Fatalf("start: %v", result.err)
 	}
-	if got := result.prepared.runtimeBinding; got != fake.Bindings["worker"] {
-		t.Fatalf("prepared runtime binding = %+v, want %+v", got, fake.Bindings["worker"])
+	if got := result.prepared.runtimeBinding; !maps.Equal(got, bindingPatch("thread-1", "project-1")) {
+		t.Fatalf("prepared runtime binding = %v, want thread-1/project-1", got)
 	}
 }
 
@@ -84,5 +94,42 @@ func TestLaunchLandsWithoutAReadableRuntimeBinding(t *testing.T) {
 	}
 	if got := k.meta(sessionpkg.MetadataRuntimeThreadID); got != "" {
 		t.Fatalf("row thread %q, want none", got)
+	}
+}
+
+// Recovering a pending create whose runtime is already live is a confirmed
+// start too: its commit records the thread the runtime hosts the session in.
+func TestRecoverRunningPendingCreateRecordsTheRuntimeBinding(t *testing.T) {
+	testCity := t.TempDir()
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title:  "helper",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":         "sky",
+			"pending_create_claim": "true",
+			"state":                "active",
+			"state_reason":         "creation_complete",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := runtime.NewFake()
+	fake.Bindings = map[string]runtime.SessionBinding{"sky": {ThreadID: "thread-1", ProjectID: "project-1"}}
+	sp := runtime.NewFakeProfile(runtime.ProfileT3Bridge, runtime.FullFake{Fake: fake})
+	cfg := &config.City{Agents: []config.Agent{{Name: "helper"}}}
+	tp := TemplateParams{SessionName: "sky", TemplateName: "helper"}
+
+	if ok, _ := recoverRunningPendingCreate(testCity, sessiontest.SeedBead(t, bead), tp, cfg, store, sp, &clock.Fake{Time: time.Now()}, io.Discard, nil); !ok {
+		t.Fatal("recoverRunningPendingCreate returned false, want true")
+	}
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata[sessionpkg.MetadataRuntimeThreadID] != "thread-1" || got.Metadata[sessionpkg.MetadataRuntimeProjectID] != "project-1" {
+		t.Fatalf("row binding = %q, %q; want thread-1, project-1", got.Metadata[sessionpkg.MetadataRuntimeThreadID], got.Metadata[sessionpkg.MetadataRuntimeProjectID])
 	}
 }

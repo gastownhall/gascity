@@ -75,8 +75,8 @@ const MetadataLastNudgeDeliveredAt = "last_nudge_delivered_at"
 
 // MetadataRuntimeThreadID and MetadataRuntimeProjectID record, for a runtime
 // that hosts the session in a thread of its own ([runtime.SessionBinding]),
-// the thread and the project that scopes it, as of the session's last
-// confirmed start.
+// the thread and the project that scopes it, as of the last confirmed start
+// whose binding read succeeded. Empty values mean no thread was bound.
 const (
 	MetadataRuntimeThreadID  = "runtime_thread_id"
 	MetadataRuntimeProjectID = "runtime_project_id"
@@ -1104,12 +1104,7 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 
 func (m *Manager) confirmStartedRuntimeMetadata(id, sessName string, b *beads.Bead) error {
 	metadata := ConfirmStartedPatch(time.Now().UTC())
-	binding, err := ReadRuntimeBinding(m.sp, sessName)
-	if err != nil {
-		// The binding is advisory: the start it describes stands without it.
-		log.Printf("session: %q started; reading its runtime binding: %v", sessName, err)
-	}
-	maps.Copy(metadata, runtimeBindingPatch(binding))
+	maps.Copy(metadata, m.startedRuntimeBindingPatch(sessName))
 	if err := m.store.SetMetadataBatch(id, metadata); err != nil {
 		return fmt.Errorf("storing started runtime metadata: %w", err)
 	}
@@ -1122,6 +1117,18 @@ func (m *Manager) confirmStartedRuntimeMetadata(id, sessName string, b *beads.Be
 		}
 	}
 	return nil
+}
+
+// startedRuntimeBindingPatch is the patch recording the thread the runtime
+// hosts the just-started session sessName in (RuntimeBindingPatch). The
+// binding is advisory: a read that fails is logged and records nothing, and
+// the start it describes stands without it.
+func (m *Manager) startedRuntimeBindingPatch(sessName string) MetadataPatch {
+	patch, err := RuntimeBindingPatch(m.sp, sessName)
+	if err != nil {
+		log.Printf("session: %q started; not recording its runtime binding: %v", sessName, err)
+	}
+	return patch
 }
 
 func runtimeSessionMatchesBead(sp runtime.Provider, sessionName, beadID, instanceToken string) bool {
