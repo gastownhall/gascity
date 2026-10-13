@@ -3050,7 +3050,9 @@ func (p *Provider) GetMeta(name, key string) (string, error) {
 // RemoveMeta deletes a session metadata key and reflects drain-clearing onto the
 // T3 thread. Like SetMeta, the local state changes first: clearing a drain
 // ack clears the drained marker Stop archives on whether or not T3 can be
-// told.
+// told. It reads T3 only for GC_DRAIN and GC_DRAIN_ACK, and reports a
+// [runtime.MetadataNotMirroredError] when it cannot reflect them (wrapping
+// [runtime.ErrRuntimeUnavailable] when T3 is unreachable).
 func (p *Provider) RemoveMeta(name, key string) error {
 	err := removeMetaValue(name, key)
 	if err != nil {
@@ -3061,12 +3063,15 @@ func (p *Provider) RemoveMeta(name, key string) error {
 			return err
 		}
 	}
+	if key != "GC_DRAIN" && key != "GC_DRAIN_ACK" {
+		return nil
+	}
 	snapshot, loadErr := p.rpcSnapshot()
 	if loadErr != nil {
 		if isSoftBridgeUnavailable(loadErr) {
-			return nil
+			loadErr = fmt.Errorf("%w: %w", runtime.ErrRuntimeUnavailable, loadErr)
 		}
-		return loadErr
+		return &runtime.MetadataNotMirroredError{Session: name, Key: key, Cause: fmt.Errorf("reflecting onto its t3 thread: %w", loadErr)}
 	}
 	binding := snapshotThreadBinding(snapshotThreadBySessionName(snapshot, name))
 	if binding == nil {

@@ -504,8 +504,12 @@ func undrainRuntime(dops drainOps, clearRow func() error, sp runtime.Provider, r
 		return 1
 	}
 	if err := dops.clearDrain(sn); err != nil {
-		fmt.Fprintf(stderr, "gc runtime undrain: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+		if !runtime.OnlyMetadataNotMirrored(err) {
+			fmt.Fprintf(stderr, "gc runtime undrain: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		// The drain is cleared; only the runtime's view of it lags.
+		fmt.Fprintf(stderr, "gc runtime undrain: warning: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
 	rec.Record(events.Event{
 		Type:    events.SessionUndrained,

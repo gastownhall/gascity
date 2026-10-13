@@ -3,6 +3,7 @@ package t3bridge
 import (
 	"context"
 	"errors"
+	"net/http"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -343,4 +344,65 @@ func TestStopKeepsEventWatcherUntilTheStopSucceeds(t *testing.T) {
 			t.Fatal("successful Stop left the event watcher running")
 		}
 	})
+}
+
+// RemoveMeta mirrors only drain transitions, so clearing any other key needs no
+// T3 round trip and cannot fail on one.
+func TestRemoveMetaUnreflectedKeySkipsTheBridge(t *testing.T) {
+	server := newT3BridgeTestServer(t, map[string]interface{}{"threads": []interface{}{}})
+	t.Cleanup(server.Close)
+	server.snapshotFailStatus = http.StatusUnauthorized
+	server.snapshotFailBody = "bad token"
+	backed, sp := newSeamBackedSnapshotTestProvider(t, server.wsURL())
+	if err := writeMetaValue("agent-a", "GC_DRAIN_ACK_SOURCE", "agent"); err != nil {
+		t.Fatal(err)
+	}
+	if err := sp.RemoveMeta("agent-a", "GC_DRAIN_ACK_SOURCE"); err != nil {
+		t.Fatalf("RemoveMeta(unreflected key) with a failing snapshot = %v, want nil", err)
+	}
+	if got, _ := backed.raw.GetMeta("agent-a", "GC_DRAIN_ACK_SOURCE"); got != "" {
+		t.Fatalf("GC_DRAIN_ACK_SOURCE = %q, want it removed", got)
+	}
+	server.mu.Lock()
+	requests := server.snapshotRequests
+	server.mu.Unlock()
+	if requests != 0 {
+		t.Fatalf("snapshot requests = %d, want 0 for a key T3 does not mirror", requests)
+	}
+}
+
+// A drain clear that landed locally but could not be reflected onto the T3
+// thread is a mirror failure, whether T3 is unreachable or refuses the read.
+func TestRemoveMetaDrainKeysReportOnlyAMirrorFailure(t *testing.T) {
+	failing := newT3BridgeTestServer(t, map[string]interface{}{"threads": []interface{}{}})
+	t.Cleanup(failing.Close)
+	failing.snapshotFailStatus = http.StatusUnauthorized
+	failing.snapshotFailBody = "bad token"
+	for _, tc := range []struct {
+		name            string
+		url             string
+		wantUnavailable bool
+	}{
+		{"unreachable", unreachableBridgeURL, true},
+		{"snapshot refused", failing.wsURL(), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			backed, sp := newSeamBackedSnapshotTestProvider(t, tc.url)
+			for _, key := range []string{"GC_DRAIN", "GC_DRAIN_ACK"} {
+				if err := writeMetaValue("agent-a", key, "1"); err != nil {
+					t.Fatal(err)
+				}
+				err := sp.RemoveMeta("agent-a", key)
+				if !runtime.OnlyMetadataNotMirrored(err) {
+					t.Fatalf("RemoveMeta(%s) = %v (%T), want runtime.OnlyMetadataNotMirrored", key, err, err)
+				}
+				if got := errors.Is(err, runtime.ErrRuntimeUnavailable); got != tc.wantUnavailable {
+					t.Fatalf("RemoveMeta(%s) = %v, errors.Is(ErrRuntimeUnavailable) = %v, want %v", key, err, got, tc.wantUnavailable)
+				}
+				if got, _ := backed.raw.GetMeta("agent-a", key); got != "" {
+					t.Fatalf("%s = %q, want the local value removed", key, got)
+				}
+			}
+		})
+	}
 }

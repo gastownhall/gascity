@@ -337,8 +337,12 @@ func cancelSelfInitiatedDrainAckAtMinFloor(
 		return false
 	}
 	if err := dops.clearDrain(name); err != nil {
-		fmt.Fprintf(stderr, "session reconciler: clearing min-floor drain-ack for '%s': %v\n", name, err) //nolint:errcheck
-		return false
+		if !runtime.OnlyMetadataNotMirrored(err) {
+			fmt.Fprintf(stderr, "session reconciler: clearing min-floor drain-ack for '%s': %v\n", name, err) //nolint:errcheck
+			return false
+		}
+		// The ack is cleared; only the runtime's view of it lags.
+		fmt.Fprintf(stderr, "session reconciler: clearing min-floor drain-ack for '%s': warning: %v\n", name, err) //nolint:errcheck
 	}
 	telemetry.RecordDrainTransition(context.Background(), name, "min-floor", "cancel")
 	return true

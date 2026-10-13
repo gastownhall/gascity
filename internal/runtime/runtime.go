@@ -166,11 +166,12 @@ var ErrStopUnsupported = fmt.Errorf("%w: stop not implemented", ErrStopRefused)
 // "absent by construction", never "unverifiable".
 var ErrMetaUnsupported = errors.New("runtime does not implement session metadata")
 
-// ErrMetadataNotMirrored reports that SetMeta stored the value, which is in
-// force, but the runtime could not reflect it onto its own view of the
-// session (a UI projection). A caller that needs only the value in force
-// may treat the write as done and report the error as a warning.
-var ErrMetadataNotMirrored = errors.New("session metadata stored but not mirrored by the runtime")
+// ErrMetadataNotMirrored reports that SetMeta or RemoveMeta changed the stored
+// value, which is in force, but the runtime could not reflect the change onto
+// its own view of the session (a UI projection). A caller that needs only the
+// value in force may treat the change as done and report the error as a
+// warning.
+var ErrMetadataNotMirrored = errors.New("session metadata changed but not mirrored by the runtime")
 
 // MetadataNotMirroredError is the error a runtime returns when SetMeta or
 // RemoveMeta changed the stored value but could not reflect the change onto its
@@ -185,7 +186,7 @@ type MetadataNotMirroredError struct {
 
 // Error implements error.
 func (e *MetadataNotMirroredError) Error() string {
-	msg := fmt.Sprintf("%s: %s changed for %q", ErrMetadataNotMirrored, e.Key, e.Session)
+	msg := fmt.Sprintf("%s: %s for %q", ErrMetadataNotMirrored, e.Key, e.Session)
 	if e.Cause != nil {
 		msg += ": " + e.Cause.Error()
 	}

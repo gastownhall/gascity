@@ -416,7 +416,11 @@ func clearReconcilerDrainAckMetadata(sp runtime.Provider, name string) error {
 	} {
 		if err := sp.RemoveMeta(name, key); err != nil {
 			log.Printf("session wake: clearing reconciler drain ack metadata %s for %s: %v", key, name, err)
-			errs = append(errs, fmt.Errorf("removing %s: %w", key, err))
+			// A removal that landed is a removal; only the runtime's view of it
+			// lags, and the log above reports that.
+			if !runtime.OnlyMetadataNotMirrored(err) {
+				errs = append(errs, fmt.Errorf("removing %s: %w", key, err))
+			}
 		}
 	}
 	return errors.Join(errs...)

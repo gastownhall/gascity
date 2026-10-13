@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 // mirrorFailingProvider stores metadata like the fake, then reports that the
@@ -30,8 +31,24 @@ func (p mirrorFailingProvider) SetMeta(name, key, value string) error {
 	if err := p.Fake.SetMeta(name, key, value); err != nil {
 		return err
 	}
+	return t3OutageMirrorFailure(name, key)
+}
+
+// RemoveMeta removes like the fake, then reports t3bridge's mirror failure for
+// the drain keys it reflects onto the thread.
+func (p mirrorFailingProvider) RemoveMeta(name, key string) error {
+	if err := p.Fake.RemoveMeta(name, key); err != nil {
+		return err
+	}
+	if key != "GC_DRAIN" && key != "GC_DRAIN_ACK" {
+		return nil
+	}
+	return t3OutageMirrorFailure(name, key)
+}
+
+func t3OutageMirrorFailure(name, key string) error {
 	cause := fmt.Errorf("%w: %w", runtime.ErrRuntimeUnavailable, errors.New("dial tcp 127.0.0.1:1: connect: connection refused"))
-	return &runtime.MetadataNotMirroredError{Session: name, Key: key, Cause: cause}
+	return &runtime.MetadataNotMirroredError{Session: name, Key: key, Cause: fmt.Errorf("reflecting onto its t3 thread: %w", cause)}
 }
 
 // A drain whose flag landed but whose runtime mirror failed is a drain: it
@@ -99,5 +116,64 @@ func TestFinishRuntimeDrainAckFailsWhenAnotherAckWriteFailed(t *testing.T) {
 	}
 	if poked {
 		t.Fatal("controller poked although the ack failed")
+	}
+}
+
+// An undrain whose keys were removed but whose runtime mirror failed is an
+// undrain: it exits 0, records the undrained event, and warns.
+func TestDoRuntimeUndrainWarnsWhenOnlyTheMirrorFailed(t *testing.T) {
+	sp := mirrorFailingProvider{Fake: runtime.NewFake()}
+	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "echo"}); err != nil {
+		t.Fatal(err)
+	}
+	_ = sp.Fake.SetMeta("worker", "GC_DRAIN", "123")
+	_ = sp.Fake.SetMeta("worker", "GC_DRAIN_ACK", "1")
+	rec := events.NewFake()
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeUndrain(&providerDrainOps{sp: sp}, sp, rec, "worker", "worker", false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	for _, key := range []string{"GC_DRAIN", "GC_DRAIN_ACK"} {
+		if got, _ := sp.GetMeta("worker", key); got != "" {
+			t.Fatalf("%s = %q, want it removed", key, got)
+		}
+	}
+	if len(rec.Events) != 1 || rec.Events[0].Type != events.SessionUndrained {
+		t.Fatalf("events = %v, want one SessionUndrained event", rec.Events)
+	}
+	if !strings.Contains(stderr.String(), "warning") {
+		t.Fatalf("stderr = %q, want a warning about the mirror", stderr.String())
+	}
+}
+
+// The min-floor cancel keeps its seat when the ack was cleared and only the
+// runtime's view of the clear lags: falling through to the ordinary stop would
+// retire a floor session whose ack is already gone.
+func TestCancelSelfInitiatedDrainAckAtMinFloorKeepsSeatWhenOnlyTheMirrorFailed(t *testing.T) {
+	infoByID, fake, _ := minFloorAckFixture()
+	sp := mirrorFailingProvider{Fake: fake}
+	var stderr bytes.Buffer
+	if !cancelSelfInitiatedDrainAckAtMinFloor(infoByID, floorCfg(1), &providerDrainOps{sp: sp}, sp, newDrainTracker(), "worker", "worker-1", "s-a", &stderr) {
+		t.Fatalf("cancel = false, want the floor seat kept; stderr: %s", stderr.String())
+	}
+	if got, _ := sp.GetMeta("worker-1", "GC_DRAIN_ACK"); got != "" {
+		t.Fatalf("GC_DRAIN_ACK = %q, want it cleared", got)
+	}
+}
+
+// A config-drift ack whose keys were cleared counts as cleared even when the
+// runtime's view of the clear lags, so the tracker stops claiming the ack.
+func TestClearSoftReloadConfigDriftDrainAckToleratesMirrorFailure(t *testing.T) {
+	sp := mirrorFailingProvider{Fake: runtime.NewFake()}
+	_ = sp.Fake.SetMeta("worker", "GC_DRAIN_ACK", "1")
+	dt := newDrainTracker()
+	dt.set("s-a", &drainState{reason: "config-drift", ackSet: true})
+	info := sessionpkg.Info{ID: "s-a", SessionNameMetadata: "worker"}
+	if err := clearSoftReloadConfigDriftDrainAckInfo(info, sp, dt); err != nil {
+		t.Fatalf("clearSoftReloadConfigDriftDrainAckInfo = %v, want nil", err)
+	}
+	if dt.get("s-a").ackSet {
+		t.Fatal("ackSet still true after the ack was cleared")
 	}
 }
