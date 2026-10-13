@@ -120,7 +120,9 @@ const (
 )
 
 // beadSnapshotEventTypes are the bead lifecycle types whose payload is a row
-// snapshot the controller may read as the row's state.
+// snapshot the controller may read as the row's state. The BeadEventPayload
+// registrations in internal/api/event_payloads.go are the source of truth;
+// TestBeadSnapshotEventTypesMatchBeadEventPayloadRegistrations pins the match.
 var beadSnapshotEventTypes = map[string]bool{
 	events.BeadCreated: true,
 	events.BeadUpdated: true,

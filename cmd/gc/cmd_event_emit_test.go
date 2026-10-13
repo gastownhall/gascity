@@ -5,11 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 )
@@ -605,5 +609,25 @@ func TestEventEmitAllowsNonBeadPayloadsAndBeadPayloadFromTheStore(t *testing.T) 
 	}
 	if got[1].Type != "deploy.started" || string(got[1].Payload) != `{"version":"2.1"}` {
 		t.Fatalf("deploy.started event = %+v, want its payload", got[1])
+	}
+}
+
+// TestBeadSnapshotEventTypesMatchBeadEventPayloadRegistrations: the --payload
+// refusal set is exactly the event types registered with BeadEventPayload, so
+// registering a new row-snapshot type cannot leave its --payload open.
+func TestBeadSnapshotEventTypesMatchBeadEventPayloadRegistrations(t *testing.T) {
+	snapshotType := reflect.TypeOf(api.BeadEventPayload{})
+	want := map[string]bool{}
+	for eventType, sample := range events.RegisteredPayloadTypes() {
+		if reflect.TypeOf(sample) == snapshotType {
+			want[eventType] = true
+		}
+	}
+	if len(want) == 0 {
+		t.Fatal("no event type is registered with api.BeadEventPayload")
+	}
+	if !maps.Equal(beadSnapshotEventTypes, want) {
+		t.Fatalf("beadSnapshotEventTypes = %v, want the BeadEventPayload registrations %v",
+			slices.Sorted(maps.Keys(beadSnapshotEventTypes)), slices.Sorted(maps.Keys(want)))
 	}
 }
