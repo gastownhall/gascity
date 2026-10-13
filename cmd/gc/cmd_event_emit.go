@@ -61,6 +61,10 @@ durable persistence.`,
 			if effectiveActor == "" {
 				effectiveActor = eventActor()
 			}
+			if err := eventEmitRefusal(args[0], effectiveActor, payload); err != nil {
+				fmt.Fprintf(stderr, "gc event emit: %v\n", err) //nolint:errcheck // best-effort stderr
+				return errExit
+			}
 			finalPayload := eventPayloadForEmit(payload, beadPayload, stderr)
 			submitted := false
 			if jsonOut {
@@ -89,6 +93,27 @@ durable persistence.`,
 	cmd.Flags().StringVar(&beadPayload, "bead-payload", "", "Best-effort bead ID fallback for hook payloads")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSON summary")
 	return cmd
+}
+
+// cacheActorPrefix names the actor class the controller stamps on its own
+// cache's notifications (cacheLocalActor, cacheReconcileActor).
+const cacheActorPrefix = "cache-"
+
+// beadEventTypePrefix prefixes every bead lifecycle event type.
+const beadEventTypePrefix = "bead."
+
+// eventEmitRefusal reports why gc event emit must not record an event, or nil.
+// The cache-* actors belong to the controller's cache, whose notifications the
+// controller trusts; a bead.* event's payload is a row snapshot, which the
+// emitter must read from the store (--bead-payload) rather than supply.
+func eventEmitRefusal(eventType, actor, payload string) error {
+	if strings.HasPrefix(actor, cacheActorPrefix) {
+		return fmt.Errorf("actor %q: the %s* actor class is reserved for the controller's cache", actor, cacheActorPrefix)
+	}
+	if payload != "" && strings.HasPrefix(eventType, beadEventTypePrefix) {
+		return fmt.Errorf("--payload is not accepted for %s events; use --bead-payload <id> to attach the bead as the store holds it", eventType)
+	}
+	return nil
 }
 
 func eventPayloadForEmit(payload, beadID string, stderr io.Writer) string {

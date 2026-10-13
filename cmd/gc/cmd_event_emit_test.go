@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -411,5 +413,136 @@ func TestEventBeadPayloadScopeRoot(t *testing.T) {
 				t.Fatalf("eventBeadPayloadScopeRoot() with env %v = %q, want %q", tc.env, got, tc.want)
 			}
 		})
+	}
+}
+
+// eventEmitTestCity makes a file-store city, enters it, and returns its path
+// with one created bead.
+func eventEmitTestCity(t *testing.T) (string, beads.Bead) {
+	t.Helper()
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_SESSION", "fake")
+	configureIsolatedRuntimeEnv(t)
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n\n[beads]\nprovider = \"file\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	if err := ensureScopedFileStoreLayout(dir); err != nil {
+		t.Fatalf("ensureScopedFileStoreLayout: %v", err)
+	}
+	if err := ensurePersistedScopeLocalFileStore(dir); err != nil {
+		t.Fatalf("ensurePersistedScopeLocalFileStore: %v", err)
+	}
+	store, err := openStoreAtForCity(dir, dir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity: %v", err)
+	}
+	created, err := store.Create(beads.Bead{Title: "step", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	t.Chdir(dir)
+	t.Setenv("GC_CITY_PATH", dir)
+	return dir, created
+}
+
+func recordedEvents(t *testing.T, dir string) []events.Event {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(dir, ".gc", "events.jsonl"))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		t.Fatalf("reading events.jsonl: %v", err)
+	}
+	var out []events.Event
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line == "" {
+			continue
+		}
+		var evt events.Event
+		if err := json.Unmarshal([]byte(line), &evt); err != nil {
+			t.Fatalf("unmarshal %q: %v", line, err)
+		}
+		out = append(out, evt)
+	}
+	return out
+}
+
+// TestEventEmitRefusesCacheActorsAndBeadPayloads: the cache-* actor class is
+// the controller's own, and a bead.* payload is a claim about a row the
+// emitter could have read instead. Both refusals exit 1 and record nothing,
+// in the plain and the --json paths.
+func TestEventEmitRefusesCacheActorsAndBeadPayloads(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "cache-local actor", args: []string{"bead.closed", "--subject", "gc-1", "--actor", cacheLocalActor}, want: "reserved for the controller's cache"},
+		{name: "cache-reconcile actor", args: []string{"bead.updated", "--actor", cacheReconcileActor}, want: "reserved for the controller's cache"},
+		{name: "other cache actor on a non-bead event", args: []string{"deploy.started", "--actor", "cache-anything"}, want: "reserved for the controller's cache"},
+		{name: "bead payload", args: []string{"bead.closed", "--subject", "gc-1", "--payload", `{"id":"gc-1","status":"closed"}`}, want: "--bead-payload"},
+		{name: "bead payload with bead-payload too", args: []string{"bead.updated", "--subject", "gc-1", "--payload", `{"id":"gc-1"}`, "--bead-payload", "gc-1"}, want: "--bead-payload"},
+	} {
+		for _, jsonOut := range []bool{false, true} {
+			name := tc.name
+			args := append([]string(nil), tc.args...)
+			if jsonOut {
+				name += " json"
+				args = append(args, "--json")
+			}
+			t.Run(name, func(t *testing.T) {
+				dir, _ := eventEmitTestCity(t)
+				var stdout, stderr bytes.Buffer
+				cmd := newEventEmitCmd(&stdout, &stderr)
+				cmd.SetArgs(args)
+				cmd.SetOut(io.Discard)
+				cmd.SetErr(io.Discard)
+				if err := cmd.Execute(); !errors.Is(err, errExit) {
+					t.Fatalf("Execute = %v, want errExit", err)
+				}
+				if !strings.Contains(stderr.String(), tc.want) {
+					t.Fatalf("stderr = %q, want it to mention %q", stderr.String(), tc.want)
+				}
+				if stdout.Len() != 0 {
+					t.Fatalf("stdout = %q, want nothing for a refused emit", stdout.String())
+				}
+				if got := recordedEvents(t, dir); len(got) != 0 {
+					t.Fatalf("recorded %+v, want nothing", got)
+				}
+			})
+		}
+	}
+}
+
+// TestEventEmitAllowsNonBeadPayloadsAndBeadPayloadFromTheStore: a bead.*
+// event still carries a payload when gc reads it from the store
+// (--bead-payload), and a non-bead event keeps --payload.
+func TestEventEmitAllowsNonBeadPayloadsAndBeadPayloadFromTheStore(t *testing.T) {
+	dir, created := eventEmitTestCity(t)
+	for _, args := range [][]string{
+		{"bead.closed", "--subject", created.ID, "--actor", "worker-1", "--bead-payload", created.ID},
+		{"deploy.started", "--payload", `{"version":"2.1"}`, "--json"},
+	} {
+		var stdout, stderr bytes.Buffer
+		cmd := newEventEmitCmd(&stdout, &stderr)
+		cmd.SetArgs(args)
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("Execute(%v) = %v; stderr: %s", args, err, stderr.String())
+		}
+	}
+	got := recordedEvents(t, dir)
+	if len(got) != 2 {
+		t.Fatalf("recorded %d events, want 2: %+v", len(got), got)
+	}
+	decoded, ok := beads.DecodeBeadEventPayload(got[0].Payload)
+	if got[0].Type != events.BeadClosed || got[0].Actor != "worker-1" || !ok || decoded.ID != created.ID || decoded.Title != "step" {
+		t.Fatalf("bead.closed event = %+v (payload %s), want the store's row for %s", got[0], got[0].Payload, created.ID)
+	}
+	if got[1].Type != "deploy.started" || string(got[1].Payload) != `{"version":"2.1"}` {
+		t.Fatalf("deploy.started event = %+v, want its payload", got[1])
 	}
 }

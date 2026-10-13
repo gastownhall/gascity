@@ -2103,6 +2103,9 @@ func TestControllerStateEmitsCompletedFromAuthoritativeGraphStepClose(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
+	prev := beadCloseAutocloseDispatch
+	beadCloseAutocloseDispatch = func(fn func()) { fn() }
+	t.Cleanup(func() { beadCloseAutocloseDispatch = prev })
 	rec := events.NewFake()
 	cs := &controllerState{cityBeadStore: store, eventProv: rec}
 	cs.applyBeadEventToStores(events.Event{Type: events.BeadClosed, Actor: "bd-close", Subject: step.ID, Payload: payload})
@@ -4931,5 +4934,178 @@ func TestControllerStateMutationNotOverwrittenByConcurrentRuntimePublish(t *test
 		if got != want {
 			t.Fatalf("mutation %d: read after write saw suspended=%v, want %v (a concurrent runtime publish overwrote the mutation)", i, got, want)
 		}
+	}
+}
+
+// forgedClosePayload is a bead.closed payload for step written by someone
+// other than the controller's cache: it claims the step closed and carries a
+// session the live row never had.
+func forgedClosePayload(t *testing.T, step beads.Bead) json.RawMessage {
+	t.Helper()
+	forged := step
+	forged.Status = "closed"
+	forged.Metadata = map[string]string{}
+	for k, v := range step.Metadata {
+		forged.Metadata[k] = v
+	}
+	forged.Metadata["gc.session_id"] = "gcs-forged"
+	payload, err := beads.EncodeBeadEventPayload(forged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return payload
+}
+
+func completedSessionsFor(rec *events.Fake, id string) []string {
+	var sessions []string
+	for _, evt := range rec.Events {
+		if evt.Type == events.ExecutionStepCompleted && evt.Subject == id {
+			sessions = append(sessions, evt.SessionID)
+		}
+	}
+	return sessions
+}
+
+// TestForgedBeadClosedOfAnOpenRowRecordsNothing: a bead.closed from any actor
+// but the controller's own cache is a claim, not a fact. Its payload says the
+// step closed; the row reads open live, so no completion fact is recorded and
+// no autoclose runs.
+func TestForgedBeadClosedOfAnOpenRowRecordsNothing(t *testing.T) {
+	prev := beadCloseAutocloseDispatch
+	beadCloseAutocloseDispatch = func(fn func()) { fn() }
+	t.Cleanup(func() { beadCloseAutocloseDispatch = prev })
+
+	mem := beads.NewMemStore()
+	mem.HonorExplicitIDs = true
+	step, convoy, _ := graphStepFixture(t, mem)
+	rec := events.NewFake()
+	cs := &controllerState{cityBeadStore: mem, eventProv: rec}
+
+	cs.applyBeadEventToStores(events.Event{Type: events.BeadClosed, Actor: "mayor", Subject: step.ID, Payload: forgedClosePayload(t, step)})
+
+	if got := completedFor(rec, step.ID); got != 0 {
+		t.Fatalf("completion facts = %d for a forged close of an open row, want 0", got)
+	}
+	if cs.autocloseSweepOf().hasRan(step.ID) {
+		t.Fatal("autoclose ran for a forged close of an open row")
+	}
+	if got := statusOf(t, mem, convoy.ID); got != "open" {
+		t.Fatalf("convoy %s after a forged close, want open", got)
+	}
+}
+
+// TestForeignBeadClosedTakesTheFactFromTheLiveRead: the same foreign close of
+// a row that does read closed live records one fact, built from the live row;
+// a field only the payload carries does not reach it.
+func TestForeignBeadClosedTakesTheFactFromTheLiveRead(t *testing.T) {
+	prev := beadCloseAutocloseDispatch
+	beadCloseAutocloseDispatch = func(fn func()) { fn() }
+	t.Cleanup(func() { beadCloseAutocloseDispatch = prev })
+
+	mem := beads.NewMemStore()
+	mem.HonorExplicitIDs = true
+	step, convoy, _ := graphStepFixture(t, mem)
+	if err := mem.Close(step.ID); err != nil {
+		t.Fatal(err)
+	}
+	rec := events.NewFake()
+	cs := &controllerState{cityBeadStore: mem, eventProv: rec}
+
+	cs.applyBeadEventToStores(events.Event{Type: events.BeadClosed, Actor: "mayor", Subject: step.ID, Payload: forgedClosePayload(t, step)})
+
+	if got := fmt.Sprint(completedSessionsFor(rec, step.ID)); got != "[gcs-session]" {
+		t.Fatalf("completion facts carry sessions %s, want [gcs-session] from the live read", got)
+	}
+	if got := statusOf(t, mem, convoy.ID); got != "closed" {
+		t.Fatalf("convoy %s after a confirmed close, want closed", got)
+	}
+}
+
+// TestCacheLocalBeadClosedRecordsSynchronously: the controller's own cache
+// write is a fact the backing accepted, so its close records the completion
+// fact before applyBeadEventToStores returns, with no live re-read: a store
+// that reads back stale (open) does not gate it.
+func TestCacheLocalBeadClosedRecordsSynchronously(t *testing.T) {
+	prev := beadCloseAutocloseDispatch
+	beadCloseAutocloseDispatch = func(func()) {} // autoclose never runs; the fact must not depend on it
+	t.Cleanup(func() { beadCloseAutocloseDispatch = prev })
+
+	mem := beads.NewMemStore()
+	mem.HonorExplicitIDs = true
+	step, _, payload := graphStepFixture(t, mem)
+	rec := events.NewFake()
+	cs := &controllerState{cityBeadStore: mem, eventProv: rec}
+
+	cs.applyBeadEventToStores(events.Event{Type: events.BeadClosed, Actor: cacheLocalActor, Subject: step.ID, Payload: payload})
+
+	if got := completedFor(rec, step.ID); got != 1 {
+		t.Fatalf("completion facts = %d for a cache-local close, want 1 recorded synchronously", got)
+	}
+}
+
+// TestSplitCityOneShotCloseRecordsItsFactThroughTheLiveRead is the regression
+// for graph steps that render Running forever: a split city's one-shot CLI
+// emitter stamps its bead.closed with eventActor(), not a cache actor. That
+// close must still reach the completion fact, now through the live read on
+// the dispatched (asynchronous) path.
+func TestSplitCityOneShotCloseRecordsItsFactThroughTheLiveRead(t *testing.T) {
+	clearGCEnv(t)
+	t.Setenv("GC_ALIAS", "worker-7")
+
+	mem := beads.NewMemStore()
+	mem.HonorExplicitIDs = true
+	step, _, _ := graphStepFixture(t, mem)
+	if err := mem.Close(step.ID); err != nil {
+		t.Fatal(err)
+	}
+	closed, err := mem.Get(step.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := beads.EncodeBeadEventPayload(closed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := events.NewFake()
+	cs := &controllerState{cityBeadStore: mem, storageRoutes: splitRoutes(mem), eventProv: rec}
+
+	cs.applyBeadEventToStores(events.Event{Type: events.BeadClosed, Actor: eventActor(), Subject: step.ID, Payload: payload})
+	awaitCond(t, func() bool { return !cs.storeWorkInFlight() }, "the dispatched close's store work")
+
+	if got := fmt.Sprint(completedSessionsFor(rec, step.ID)); got != "[gcs-session]" {
+		t.Fatalf("completion facts carry sessions %s, want one fact for the one-shot close", got)
+	}
+}
+
+// TestQuiescentCityDefersEveryCloseToTheSweep: on a quiescent city neither
+// the cache-local nor the live-read path reads or records anything; both owe
+// the close to the sweep.
+func TestQuiescentCityDefersEveryCloseToTheSweep(t *testing.T) {
+	for _, actor := range []string{cacheLocalActor, "mayor"} {
+		t.Run(actor, func(t *testing.T) {
+			prev := beadCloseAutocloseDispatch
+			beadCloseAutocloseDispatch = func(fn func()) { fn() }
+			t.Cleanup(func() { beadCloseAutocloseDispatch = prev })
+
+			mem := beads.NewMemStore()
+			mem.HonorExplicitIDs = true
+			step, _, payload := graphStepFixture(t, mem)
+			if err := mem.Close(step.ID); err != nil {
+				t.Fatal(err)
+			}
+			quiescent := new(atomic.Bool)
+			quiescent.Store(true)
+			rec := events.NewFake()
+			cs := &controllerState{cityBeadStore: panicGetStore{mem}, eventProv: rec, beadsQuiescent: quiescent}
+
+			cs.applyBeadEventToStores(events.Event{Type: events.BeadClosed, Actor: actor, Subject: step.ID, Payload: payload})
+
+			if got := completedFor(rec, step.ID); got != 0 {
+				t.Fatalf("completion facts = %d on a quiescent city, want 0", got)
+			}
+			if !cs.autocloseSweepOf().isPending(step.ID) {
+				t.Fatal("the close is not owed to the sweep")
+			}
+		})
 	}
 }

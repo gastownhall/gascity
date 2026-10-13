@@ -1005,19 +1005,21 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 	}
 	wake.OnBeadEvent(evt, snapshot)
 	if evt.Type == events.BeadClosed && evt.Subject != "" && len(stores) > 0 {
-		if evt.Actor == cacheReconcileActor {
-			beadCloseAutocloseDispatch(cs.trackStoreWork(func() { cs.applyInferredClose(evt, stores, storeRef) }))
+		if evt.Actor == cacheLocalActor {
+			cs.applyCommittedClose(evt, stores[0], storeRef)
 			return
 		}
-		cs.applyCommittedClose(evt, stores[0], storeRef)
+		beadCloseAutocloseDispatch(cs.trackStoreWork(func() { cs.applyInferredClose(evt, stores, storeRef) }))
 	}
 }
 
 // applyCommittedClose runs a committed bead.closed's durable effects: the
-// completion fact, then autoclose. A local close, or a writer's own
-// bead.closed, is a committed close. Both effects read (the fact reads the
-// run's root from the graph store), so a quiescent city runs neither yet: the
-// sweep confirms the close after resume and records the fact then. That fact
+// completion fact, then autoclose. Only the controller's own cache write
+// (actor cacheLocalActor) is a committed close: the backing accepted it, so
+// its payload is trusted. Every other bead.closed takes applyInferredClose.
+// Both effects read (the fact reads the run's root from the graph store), so
+// a quiescent city runs neither yet: the sweep confirms the close after
+// resume and records the fact then. That fact
 // carries the actor of the pass that records it (autoclose-sweep, or
 // execution-reconcile when the completions lane reaches the row first), not
 // the writer's. A row that no longer reads closed by then, reopened or
@@ -1035,12 +1037,15 @@ func (cs *controllerState) applyCommittedClose(evt events.Event, store beads.Sto
 	cs.runBeadCloseAutoclose(evt.Subject, store, storeRef)
 }
 
-// applyInferredClose runs a cache-inferred bead.closed's durable effects only
-// if a live read returns the row closed: the scan can evict an open row and
-// synthesize its close (mc-zndi7.43, .56). The fact derives from that read,
-// not from the inferred payload. A row that is open or gone gets nothing. An
-// unreadable row gets nothing yet: the autoclose sweep re-reads it, and the
-// completions sweep backstops its fact.
+// applyInferredClose runs a bead.closed's durable effects only if a live read
+// returns the row closed. It serves every actor but cacheLocalActor: a
+// cache-reconcile close is inferred from a read that can be stale (the scan
+// can evict an open row and synthesize its close, mc-zndi7.43, .56), and any
+// other actor's close (a one-shot CLI emitter, an API or `gc event emit`
+// writer) is a claim anyone who can append to the event log could make. The
+// fact derives from the live read, never from the payload. A row that is open
+// or gone gets nothing. An unreadable row gets nothing yet: the autoclose
+// sweep re-reads it, and the completions sweep backstops its fact.
 func (cs *controllerState) applyInferredClose(evt events.Event, stores []beads.Store, storeRef string) {
 	if cs.deferIfQuiescent(evt.Subject) {
 		return
