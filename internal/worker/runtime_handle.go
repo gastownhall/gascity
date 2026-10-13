@@ -272,11 +272,18 @@ func (h *RuntimeHandle) Message(ctx context.Context, _ sessionpkg.Actor, req Mes
 	return result, nil
 }
 
-// Interrupt asks the provider to interrupt the live runtime session.
+// Interrupt asks the provider to interrupt the live runtime session. With no
+// session bead to pick provider-specific keys, keystroke and protocol
+// runtimes both get Interrupt; a runtime that cannot interrupt the turn is
+// sent nothing and reported with [sessionpkg.ErrTurnInterruptUnsupported].
 func (h *RuntimeHandle) Interrupt(ctx context.Context, _ InterruptRequest) (err error) {
 	event := h.beginOperationEvent(ctx, workerOperationInterrupt)
 	defer func() { event.finish(err) }()
 
+	if runtime.TurnInterruptModeFor(h.provider, h.sessionName) == runtime.TurnInterruptUnsupported {
+		err = fmt.Errorf("%w: %s", sessionpkg.ErrTurnInterruptUnsupported, h.sessionName)
+		return err
+	}
 	err = h.provider.Interrupt(h.sessionName)
 	return err
 }

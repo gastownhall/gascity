@@ -78,6 +78,7 @@ go_test(
         "operation_events_1a_test.go",
         "operation_events_test.go",
         "provider_resume_test.go",
+        "runtime_handle_interrupt_test.go",
         "runtime_handle_lease_test.go",
         "runtime_handle_reminder_test.go",
         "session_key_guard_test.go",
