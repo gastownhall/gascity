@@ -1402,15 +1402,12 @@ func ensureDrainItemRoot(store beads.Store, control, unit, member beads.Bead, co
 	if err := closeFailedDrainItemRoots(store, control.ID, row.ItemRootKey); err != nil {
 		return "", false, err
 	}
-	existing, err := store.ListByMetadata(map[string]string{beadmeta.ItemRootKeyMetadataKey: row.ItemRootKey}, 0, beads.IncludeClosed, beads.WithBothTiers)
+	rootID, found, err := findExistingDrainItemRoot(store, control.ID, row.ItemRootKey)
 	if err != nil {
-		return "", false, fmt.Errorf("%s: looking up item root %s: %w", control.ID, row.ItemRootKey, err)
+		return "", false, err
 	}
-	for _, candidate := range existing {
-		if candidate.Metadata[beadmeta.MoleculeFailedMetadataKey] == "true" {
-			continue
-		}
-		return candidate.ID, false, nil
+	if found {
+		return rootID, false, nil
 	}
 	vars := make(map[string]string, len(parentVars))
 	for key, value := range parentVars {
@@ -1508,6 +1505,35 @@ func drainItemRuntimeVars(recipe *formula.Recipe, vars map[string]string) map[st
 		return map[string]string{}
 	}
 	return out
+}
+
+// findExistingDrainItemRoot looks up a non-failed item root by key, querying
+// live (non-closed) beads first. The closed-inclusive fallback runs only when
+// no live candidate exists — on a store with many closed issues the live-only
+// query is O(active) while the fallback is O(all).
+func findExistingDrainItemRoot(store beads.Store, controlID, itemRootKey string) (string, bool, error) {
+	filters := map[string]string{beadmeta.ItemRootKeyMetadataKey: itemRootKey}
+	live, err := store.ListByMetadata(filters, 0, beads.WithBothTiers)
+	if err != nil {
+		return "", false, fmt.Errorf("%s: looking up item root %s: %w", controlID, itemRootKey, err)
+	}
+	for _, candidate := range live {
+		if candidate.Metadata[beadmeta.MoleculeFailedMetadataKey] == "true" {
+			continue
+		}
+		return candidate.ID, true, nil
+	}
+	closed, err := store.ListByMetadata(filters, 0, beads.IncludeClosed, beads.WithBothTiers)
+	if err != nil {
+		return "", false, fmt.Errorf("%s: looking up closed item root %s: %w", controlID, itemRootKey, err)
+	}
+	for _, candidate := range closed {
+		if candidate.Metadata[beadmeta.MoleculeFailedMetadataKey] == "true" {
+			continue
+		}
+		return candidate.ID, true, nil
+	}
+	return "", false, nil
 }
 
 func closeFailedDrainItemRoots(store beads.Store, controlID, itemRootKey string) error {
