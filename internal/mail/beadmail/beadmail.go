@@ -244,6 +244,9 @@ func (p *Provider) findLiveDuplicate(to, key string) (mail.Message, bool, error)
 	if err != nil {
 		return mail.Message{}, false, err
 	}
+	if len(existing) == 0 {
+		return mail.Message{}, false, nil
+	}
 	routes := p.recipientRoutes(to)
 	for _, b := range existing {
 		if matchesRecipientRoute(routes, b.Assignee) {
