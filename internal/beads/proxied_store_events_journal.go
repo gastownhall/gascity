@@ -80,7 +80,7 @@ func (s *ProxiedStore) journalActive() bool {
 	if cached.resolved {
 		return cached.active
 	}
-	active := proxiedEventsJournalActive(pin)
+	active := proxiedJournalResolve(pin)
 	s.mu.Lock()
 	if s.journal.epoch == cached.epoch {
 		s.journal.resolved, s.journal.active = true, active
@@ -96,6 +96,10 @@ func (s *ProxiedStore) forgetJournalActivation() {
 	defer s.mu.Unlock()
 	s.journal.forget()
 }
+
+// proxiedJournalResolve is the resolution journalActive runs; a test swaps it
+// to land a forget in the middle of a resolution.
+var proxiedJournalResolve = proxiedEventsJournalActive
 
 // proxiedEventsJournalActive resolves the activation bd's writes to the
 // pinned scope run with.

@@ -495,6 +495,38 @@ func TestProxiedGuardUndecidedTickRefreshesJournalActivation(t *testing.T) {
 	}
 }
 
+// A forget that lands while a resolution is reading the scope's config wins:
+// the raced answer is returned to its own caller but not cached, so the next
+// question resolves again.
+func TestProxiedStoreDoesNotCacheAResolutionThatRacedAForget(t *testing.T) {
+	f := newGuardFixture(t)
+	t.Cleanup(func() { _ = f.store.CloseStore() })
+	var calls int
+	oldResolve := proxiedJournalResolve
+	t.Cleanup(func() { proxiedJournalResolve = oldResolve })
+	proxiedJournalResolve = func(Pin) bool {
+		calls++
+		if calls == 1 {
+			// A guard tick lands mid-resolution.
+			f.store.forgetJournalActivation()
+			return true
+		}
+		return false
+	}
+	if !f.store.EventsJournalActive() {
+		t.Fatal("the first question did not get its own resolution")
+	}
+	if f.store.EventsJournalActive() {
+		t.Fatal("EventsJournalActive = true: a resolution that raced a forget was cached over it")
+	}
+	if calls != 2 {
+		t.Fatalf("resolved %d time(s), want 2", calls)
+	}
+	if f.store.EventsJournalActive() || calls != 2 {
+		t.Fatalf("an unraced resolution was not cached (calls = %d)", calls)
+	}
+}
+
 // A re-pin installs a new pin and leaf, so the re-pin forgets activation
 // itself rather than relying on the tick that ran it.
 func TestProxiedGuardRepinRefreshesJournalActivation(t *testing.T) {
