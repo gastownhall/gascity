@@ -1661,6 +1661,7 @@ go_test(
         "reconcile_session_namelock_test.go",
         "reconcile_session_timeline_test.go",
         "reconcile_settle_test.go",
+        "reconcile_sim_coverage_test.go",
         "reconcile_sim_invariants_test.go",
         "reconcile_sim_pending_test.go",
         "reconcile_sim_respawn_test.go",

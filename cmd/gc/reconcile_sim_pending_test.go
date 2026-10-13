@@ -714,6 +714,7 @@ func simHeld(b beads.Bead, now time.Time) bool {
 // gates the invariants over floors and pending creates together. CI runs all
 // 1024 seeds in ranges (BUILD.bazel).
 func TestSimCorpusFlooredPending(t *testing.T) {
+	t.Cleanup(func() { writeSimCoverage(t) })
 	for _, seed := range simSeeds(t) {
 		t.Run(fmt.Sprint(seed), func(t *testing.T) {
 			s := newSim(t, seed, simOpts{})

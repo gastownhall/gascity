@@ -522,11 +522,12 @@ func newSim(t *testing.T, seed uint64, o simOpts) *sim {
 		withRowMutationLock = o.rowLock
 		t.Cleanup(func() { withRowMutationLock = saved })
 	}
+	savedArms, arms := rowArms, slices.Clone(rowArms)
 	if o.arms != nil {
-		saved := rowArms
-		rowArms = o.arms(slices.Clone(saved))
-		t.Cleanup(func() { rowArms = saved })
+		arms = o.arms(arms)
 	}
+	rowArms = countArms(arms) // reconcile_sim_coverage_test.go
+	t.Cleanup(func() { rowArms = savedArms })
 	t.Cleanup(s.teardown)
 	s.prev = s.snapshot()
 	return s
@@ -1451,6 +1452,7 @@ func simSeeds(t *testing.T) []uint64 {
 var simDrainBegins atomic.Int64
 
 func TestSimCorpus(t *testing.T) {
+	t.Cleanup(func() { writeSimCoverage(t) })
 	before := simDrainBegins.Load()
 	t.Cleanup(func() {
 		// Kills a corpus that never exercises A20 (C6a2 review): every
@@ -1476,6 +1478,7 @@ var simFloorCancels atomic.Int64
 // or 2 (by seed), so floor members' own acks are canceled (PAR-FLOORACK)
 // beside every other path: no invariant may break.
 func TestSimCorpusFloored(t *testing.T) {
+	t.Cleanup(func() { writeSimCoverage(t) })
 	before := simFloorCancels.Load()
 	t.Cleanup(func() {
 		if !t.Failed() && simFloorCancels.Load() == before {
