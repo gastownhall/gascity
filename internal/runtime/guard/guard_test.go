@@ -7,7 +7,9 @@ package guard
 // ledger marks NewFailFake "not applicable". The guard has no production
 // construction path yet, and the ledger binds an entry to one (a registry
 // key or a source function), so its ledger row lands with the slice that
-// wires guard.New into cmd/gc's resolveWorkerSpec (DES-CN CN-1b). The test
+// wires guard.New into cmd/gc's resolveWorkerSpec (DES-CN CN-1b).
+// providerledger's TestRuntimeGuardIsLedgeredOnceWired fails as soon as a
+// production cmd/gc file imports this package without that row. The test
 // below is the guard's contract: every Provider method, by reflection, so a
 // method added to runtime.Provider fails here until the guard covers it.
 
