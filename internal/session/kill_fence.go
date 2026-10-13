@@ -344,8 +344,14 @@ const killLivenessTimeout = 5 * time.Second
 // state cache is up to 2s old), which can read a just-started runtime gone
 // and so kill it without its fence; an incomplete or failed read is not
 // gone either, so the kill keeps the fence.
+//
+// The read is the routed leaf's (runtime.ResolveBackend), as v2's runtime
+// read takes it: a composite (auto, hybrid) routes by name, and hybrid
+// deliberately offers no fresh read of its own (its read is its leaves'
+// cached one), so asking it would fall back to the cache.
 func (m *Manager) runtimeConfirmedGone(ctx context.Context, name string) bool {
-	live, status, err := runtime.ObserveLivenessBoundedSince(ctx, m.sp, name, nil, time.Now(), killLivenessTimeout)
+	leaf, _, _ := runtime.ResolveBackend(m.sp, name)
+	live, status, err := runtime.ObserveLivenessBoundedSince(ctx, leaf, name, nil, time.Now(), killLivenessTimeout)
 	return status == runtime.ObservationComplete && err == nil && !live.Running
 }
 

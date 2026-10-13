@@ -9,6 +9,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/hybrid"
 )
 
 // stopErrGoneProvider stops the runtime but reports an error, as a provider
@@ -311,21 +312,38 @@ func TestKillFencedFailedStopReadsLivenessFresh(t *testing.T) {
 	}
 }
 
-// unreadableLivenessProvider's fresh liveness read fails (the runtime server
-// did not answer), and its cached IsRunning reads the name gone.
-type unreadableLivenessProvider struct{ *runtime.Fake }
+// unreadableLivenessProvider's fresh liveness read fails with err, and its
+// cached IsRunning reads the name gone.
+type unreadableLivenessProvider struct {
+	*runtime.Fake
+	err error
+}
 
 func (p unreadableLivenessProvider) IsRunning(string) bool { return false }
 
 func (p unreadableLivenessProvider) ObserveLivenessSince(string, []string, time.Time) (runtime.Liveness, error) {
-	return runtime.Liveness{}, fmt.Errorf("probe: %w", runtime.ErrRuntimeUnavailable)
+	return runtime.Liveness{}, p.err
 }
 
 // A liveness read that cannot answer is not proof the runtime is gone: the
-// kill keeps its fence.
+// kill keeps its fence. That holds for an incomplete read (the runtime
+// server did not answer, ErrRuntimeUnavailable) and for a read that
+// completed carrying any other error.
 func TestKillFencedUnreadableLivenessKeepsTheFence(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"incomplete read", fmt.Errorf("probe: %w", runtime.ErrRuntimeUnavailable)},
+		{"complete read with an error", errors.New("probe: unexpected answer")},
+	} {
+		t.Run(tc.name, func(t *testing.T) { killFencedKeepsFenceOnUnreadableLiveness(t, tc.err) })
+	}
+}
+
+func killFencedKeepsFenceOnUnreadableLiveness(t *testing.T, readErr error) {
 	fake := runtime.NewFake()
-	mgr, store, info := newKillFencedSession(t, unreadableLivenessProvider{fake}, fake)
+	mgr, store, info := newKillFencedSession(t, unreadableLivenessProvider{fake, readErr}, fake)
 	if err := store.SetMetadataBatch(info.ID, map[string]string{"state": string(StateAsleep)}); err != nil {
 		t.Fatal(err)
 	}
@@ -340,5 +358,35 @@ func TestKillFencedUnreadableLivenessKeepsTheFence(t *testing.T) {
 	}
 	if !fenced {
 		t.Error("an unreadable liveness read sent the kill down the unfenced dead path")
+	}
+}
+
+// In a hybrid city the fresh read is the routed leaf's: hybrid offers no
+// fresh read of its own (its read is its leaves' cached one), so KillFenced
+// resolves the leaf and reads it, and a cached IsRunning on the way that
+// reads the live runtime gone must not send the kill down the unfenced dead
+// path.
+func TestKillFencedReadsTheRoutedLeafFresh(t *testing.T) {
+	fake := runtime.NewFake()
+	remote := runtime.NewFake()
+	sp := hybrid.New(staleRunningProvider{fake}, remote, func(string) bool { return false })
+	mgr, store, info := newKillFencedSession(t, sp, fake)
+	if err := store.SetMetadataBatch(info.ID, map[string]string{"state": string(StateAsleep)}); err != nil {
+		t.Fatal(err)
+	}
+	if sp.IsRunning(info.SessionName) || !fake.IsRunning(info.SessionName) {
+		t.Fatal("premise: hybrid's IsRunning reads the live runtime gone")
+	}
+	fenced := false
+	kill := func(context.Context, Actor) error {
+		b, _ := store.Get(info.ID)
+		fenced = b.Metadata["state_reason"] == KillPendingReason
+		return fake.Stop(info.SessionName)
+	}
+	if err := mgr.KillFenced(context.Background(), testActor(mgr, ActorOperator), info.ID, kill); err != nil {
+		t.Fatalf("KillFenced: %v", err)
+	}
+	if !fenced {
+		t.Error("a live runtime in a hybrid city was killed without its kill fence: the read fell back to the cache")
 	}
 }
