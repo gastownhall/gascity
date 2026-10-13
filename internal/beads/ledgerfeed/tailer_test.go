@@ -275,7 +275,7 @@ func TestTruncatedBaselineRowGetsAnUnverifiableCheckpoint(t *testing.T) {
 	j.prune(4) // everything pruned; head stays 3
 	r := &recorder{}
 	tl := newTailer(j, r)
-	tl.Resume(Checkpoint{Seq: 1}) // unverifiable: no fingerprint
+	mustResume(t, tl, Checkpoint{Seq: 1}) // unverifiable: no fingerprint
 
 	mustStep(t, tl)
 	if gaps := r.gapList(); len(gaps) != 1 || gaps[0].Kind != GapTruncated {
@@ -356,7 +356,7 @@ func TestResumeDetectsACounterReseededBelowTheHighWaterMark(t *testing.T) {
 
 	r := &recorder{}
 	tl := newTailer(j, r)
-	tl.Resume(saved)
+	mustResume(t, tl, saved)
 	if !mustStep(t, tl) {
 		t.Fatal("a gap must ask for an immediate re-read")
 	}
@@ -387,7 +387,7 @@ func TestReseedAtTheCheckpointIsAReset(t *testing.T) {
 
 	r := &recorder{}
 	tl := newTailer(j, r)
-	tl.Resume(saved)
+	mustResume(t, tl, saved)
 	mustStep(t, tl)
 	if gaps := r.gapList(); len(gaps) != 1 || gaps[0].Kind != GapReset {
 		t.Fatalf("gaps = %+v, want one reset", gaps)
@@ -427,7 +427,7 @@ func TestResumeWithAMatchingFingerprintContinues(t *testing.T) {
 
 	r := &recorder{}
 	tl := &Tailer{Source: j, Apply: r.apply, OnGap: r.onGap}
-	tl.Resume(first.Checkpoint())
+	mustResume(t, tl, first.Checkpoint())
 	mustStep(t, tl)
 	if gaps := r.gapList(); len(gaps) != 0 {
 		t.Fatalf("gaps = %+v on a healthy resume", gaps)
@@ -730,5 +730,61 @@ func TestStepReportsASourceTooNarrowToVerify(t *testing.T) {
 	}
 	if stats := tl.Stats(); stats.Errors != 1 || stats.Head != 3 {
 		t.Fatalf("stats = %+v, want one error and the head observed", stats)
+	}
+}
+
+func mustResume(t *testing.T, tl *Tailer, cp Checkpoint) {
+	t.Helper()
+	if err := tl.Resume(cp); err != nil {
+		t.Fatalf("Resume(%+v): %v", cp, err)
+	}
+}
+
+func TestResumeRefusesANegativeSeq(t *testing.T) {
+	r := &recorder{}
+	tl := &Tailer{Source: &fakeJournal{}, Apply: r.apply, OnGap: r.onGap}
+	if err := tl.Resume(Checkpoint{Seq: -1}); err == nil {
+		t.Fatal("Resume accepted seq -1, which no journal serves")
+	}
+	if got := tl.Checkpoint(); got != (Checkpoint{}) {
+		t.Fatalf("checkpoint = %+v after a refused Resume", got)
+	}
+}
+
+// Resume waits for an in-flight Step, so the Step's commit cannot overwrite
+// the checkpoint the caller just restored.
+func TestResumeIsNotOverwrittenByAnInFlightStep(t *testing.T) {
+	j := &fakeJournal{}
+	j.append("a", "b")
+	entered, release := make(chan struct{}), make(chan struct{})
+	tl := &Tailer{Source: j, OnGap: (&recorder{}).onGap, Apply: func(context.Context, journalops.Page) error {
+		close(entered)
+		<-release
+		return nil
+	}}
+
+	stepped := make(chan error, 1)
+	go func() {
+		_, err := tl.Step(context.Background())
+		stepped <- err
+	}()
+	<-entered
+	restored := Checkpoint{Seq: 1, Last: Fingerprint{Seq: 1, IssueID: "a", TS: "ts-1-a"}}
+	resumed := make(chan error, 1)
+	go func() { resumed <- tl.Resume(restored) }()
+	select {
+	case err := <-resumed:
+		t.Fatalf("Resume returned (%v) while a Step was applying", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	if err := <-stepped; err != nil {
+		t.Fatalf("Step: %v", err)
+	}
+	if err := <-resumed; err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	if got := tl.Checkpoint(); got != restored {
+		t.Fatalf("checkpoint = %+v, want the resumed %+v", got, restored)
 	}
 }

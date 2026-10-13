@@ -30,10 +30,19 @@
 //
 // On any gap the tailer reads the journal's current head, hands the Gap —
 // with the baseline it will move to — to OnGap, and moves the checkpoint only
-// when OnGap returns nil. It never replays from seq 0: a consumer that saw a
-// gap resyncs from its source of truth (a full scan) inside OnGap, and rows
+// when OnGap returns nil. A gap never replays from seq 0: a consumer that saw
+// a gap resyncs from its source of truth (a full scan) inside OnGap, and rows
 // committed after the new baseline's head was read are delivered again by the
 // next read, which an idempotent Apply absorbs.
+//
+// # Where a tail starts
+//
+// A new Tailer's checkpoint is seq 0, and a Step from seq 0 reads from the
+// start of the journal's retained history — every retained row, which under
+// default retention is a hundred thousand or more. That is right for a
+// consumer that wants the history. A consumer that resyncs from its own source
+// of truth instead (the cache-coherence feed) calls Baseline before its scan,
+// or Resume with a persisted checkpoint, before the first Step.
 package ledgerfeed
 
 import (
@@ -131,10 +140,10 @@ type Stats struct {
 // Tailer pages a journal from a checkpoint and hands each page to Apply.
 //
 // Configure the exported fields before the first call and leave them alone
-// afterwards. Step, Run and Baseline serialize on one lock, and Apply and
-// OnGap run while it is held, so a callback must not call Step, Run or
-// Baseline. Checkpoint and Stats may be called from anywhere, callbacks
-// included.
+// afterwards. Step, Run, Baseline and Resume serialize on one lock, and Apply
+// and OnGap run while it is held, so a callback must not call Step, Run,
+// Baseline or Resume. Checkpoint and Stats may be called from anywhere,
+// callbacks included.
 type Tailer struct {
 	// Source is the journal read. Required.
 	Source journalops.Journal
@@ -176,13 +185,23 @@ type Tailer struct {
 
 // Resume sets the checkpoint to a previously persisted one. The next read
 // re-checks its fingerprint, so a journal reset while the caller was away
-// surfaces as a gap rather than as silently skipped rows.
-func (t *Tailer) Resume(cp Checkpoint) {
+// surfaces as a gap rather than as silently skipped rows. Persist the whole
+// Checkpoint, fingerprint included: a seq alone cannot detect that reset.
+//
+// It waits for a Step in flight, so that Step's commit cannot overwrite the
+// restored checkpoint, and refuses a negative seq, which no journal serves.
+func (t *Tailer) Resume(cp Checkpoint) error {
+	if cp.Seq < 0 {
+		return fmt.Errorf("ledgerfeed: resuming at seq %d: a checkpoint seq is never negative", cp.Seq)
+	}
+	t.stepMu.Lock()
+	defer t.stepMu.Unlock()
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.checkpoint = cp
 	t.stats.Seq = cp.Seq
 	t.observeHead(t.stats.Head)
+	return nil
 }
 
 // Baseline moves the checkpoint to the journal's current head without
@@ -235,8 +254,11 @@ func (t *Tailer) Stats() Stats {
 
 // Step runs one read-and-apply. It reports more=true when the caller should
 // read again at once: the page was full, the head is still ahead, or a gap was
-// just moved past that did not follow another gap. An error reports more=false and leaves the checkpoint
-// where it was.
+// just moved past that did not follow another gap. An error reports more=false
+// and leaves the checkpoint where it was.
+//
+// From the zero checkpoint Step reads from the start of retained history; see
+// the package doc for where a tail starts.
 func (t *Tailer) Step(ctx context.Context) (more bool, err error) {
 	if err := t.validate(); err != nil {
 		return false, err
@@ -323,6 +345,9 @@ func (t *Tailer) Step(ctx context.Context) (more bool, err error) {
 // Run steps until ctx is done or OnError stops it, re-reading at once while
 // more is reported and waiting Poll (doubling to IdlePoll) after an idle read
 // or a failure. It returns the context's error or OnError's.
+//
+// Like Step, Run from the zero checkpoint replays retained history; call
+// Baseline or Resume first to start elsewhere.
 func (t *Tailer) Run(ctx context.Context) error {
 	if err := t.validate(); err != nil {
 		return err
