@@ -28,9 +28,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   row's labels, description, priority, assignee or parent, or any other
   metadata key, over HTTP. A typed work bead carrying the `gc:session`
   label is written only by `bd`. `bd update` stays the operator escape
-  hatch for all of these. The coordination classes (`message`,
-  `gc:wait`, `gc:nudge`, `order-tracking`, `gc:wisp`, `gc:extmsg-*`)
-  are unchanged.
+  hatch for all of these.
+
+- **The generic bead API no longer writes coordination beads either.** Mail
+  messages, session waits (the `gc:wait` label, or a `gate` carrying its
+  `session:<id>`), queued nudges (`gc:nudge`, `gc:nudge-queue`), order run
+  records (`order-tracking`, `order-run:*`) and external-messaging rows
+  (`gc:extmsg-*`) get the same 422; `POST /beads` no longer creates them. Use
+  their routes: `/mail`, `gc session wait`, `gc nudge`, `gc order run`,
+  `/extmsg/*`. Wisps stay generic. `POST /mail` and its reply now send only as
+  a configured identity: the operator (`human`, or the dashboard's
+  `DASHBOARD_OPERATOR_WIRE_ALIAS`), a configured agent, a named session or a
+  live session of a configured agent; any other `from` is a 422. And an
+  `order-run:` label counts toward an order's cooldown, event cursor and
+  single-flight only on its tracking bead or the root its run poured.
 
 - **`gc runtime drain-check` has a third exit code, 3 ("unknown").** It now
   reads the session row's state as well as the runtime's `GC_DRAIN`, and

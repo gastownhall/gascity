@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -29,6 +30,29 @@ var ownedRows = []struct {
 	{"startup-health episode", session.StartupHealthEpisodeType, nil, map[string]string{session.StartupHealthSessionNameMetadataKey: "myrig--worker", session.StartupHealthQuarantinedUntilMetadataKey: "9999-01-01T00:00:00Z"}},
 	{"episode spelled 'Startup-Health-Episode'", "Startup-Health-Episode", nil, nil},
 	{"convergence root", "convergence", nil, nil},
+}
+
+// coordinationRows are the coordination-owned rows (coordclass.
+// CoordinationOwned; architecture B v2, mc-v8g4p) in each spelling the
+// generic API must take for one: a mail message, a wait by gc:wait and by its
+// typed session:<id> shape, a nudge shadow and a queued nudge, an order's
+// tracking and run labels, and an extmsg row. Teardowns do not skip them (an
+// order's wisp root carries its run label), so only the write tables do.
+var coordinationRows = []struct {
+	name   string
+	typ    string
+	labels []string
+	meta   map[string]string
+}{
+	{"mail message", "message", nil, map[string]string{"from": "mayor"}},
+	{"message spelled ' Message '", " Message ", nil, nil},
+	{"wait by gc:wait", "gate", []string{"gc:wait", "session:s-1"}, map[string]string{"session_id": "s-1", "state": "pending"}},
+	{"wait by its session label", "gate", []string{"session:s-1"}, map[string]string{"session_id": "s-1"}},
+	{"nudge shadow", "chore", []string{"gc:nudge"}, nil},
+	{"queued nudge", "task", []string{"GC:Nudge-Queue", "agent:myrig/worker"}, nil},
+	{"order tracking", "task", []string{"order-tracking", "order-run:digest"}, nil},
+	{"order run label alone", "task", []string{"order-run:digest"}, nil},
+	{"extmsg binding", "task", []string{"gc:extmsg-binding"}, nil},
 }
 
 // ownedRow creates row on store past the API (production installs no write
@@ -88,7 +112,7 @@ func (r ownedRoute) fill(s, id, convoy string) string {
 // named it, and writes nothing: the row, its convoy membership and the
 // store's bead count are as they were.
 func TestGenericAPINeverWritesAControllerOwnedRow(t *testing.T) {
-	for _, row := range ownedRows {
+	for _, row := range append(slices.Clone(ownedRows), coordinationRows...) {
 		for _, r := range ownedRoutes {
 			t.Run(row.name+"/"+r.name, func(t *testing.T) {
 				withoutSessionWriteHooks(t)
@@ -122,7 +146,7 @@ func TestGenericAPINeverWritesAControllerOwnedRow(t *testing.T) {
 				switch {
 				case rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "the generic bead API never"):
 					t.Fatalf("status %d (%s), want 422 naming the owner", rec.Code, rec.Body.String())
-				case row.typ == "task" && !strings.Contains(rec.Body.String(), "which only bd (bd update, bd close) writes"):
+				case row.typ == "task" && slices.Contains(row.labels, session.LabelSession) && !strings.Contains(rec.Body.String(), "which only bd (bd update, bd close) writes"):
 					t.Fatalf("body %s: a typed work bead carrying the session label names bd as its only writer", rec.Body.String())
 				case strings.Join(problemLocations(t, rec), ",") != r.where:
 					t.Fatalf("errors %v, want %s", problemLocations(t, rec), r.where)
@@ -155,6 +179,18 @@ func TestGenericAPINeverMakesAControllerOwnedRow(t *testing.T) {
 		{"retype a task to an episode", "PATCH", `{"type":"startup-health-episode"}`, "body.type"},
 		{"retype a task to ' convergence '", "PATCH", `{"type":" convergence "}`, "body.type"},
 		{"label a task a session", "PATCH", `{"labels":["note","gc:session"]}`, "body.labels[1]"},
+		{"create a mail message", "POST", `{"title":"m","type":"message","metadata":{"from":"mayor"}}`, "body.type"},
+		{"create a ' MESSAGE '", "POST", `{"title":"m","type":" MESSAGE "}`, "body.type"},
+		{"create a wait by gc:wait", "POST", `{"title":"w","type":"task","labels":["gc:wait"]}`, "body.labels[0]"},
+		{"create a wait by its session label", "POST", `{"title":"w","type":"gate","labels":["note","session:s-1"],"metadata":{"session_id":"s-1"}}`, "body.labels[1]"},
+		{"create a nudge shadow", "POST", `{"title":"n","type":"chore","labels":["gc:nudge"]}`, "body.labels[0]"},
+		{"create a queued nudge", "POST", `{"title":"n","type":"task","labels":["agent:myrig/worker"," gc:nudge-queue "]}`, "body.labels[1]"},
+		{"create an order run record", "POST", `{"title":"o","type":"task","labels":["Order-Run:digest"]}`, "body.labels[0]"},
+		{"create order tracking", "POST", `{"title":"o","type":"task","labels":["order-tracking"]}`, "body.labels[0]"},
+		{"create an extmsg row", "POST", `{"title":"x","type":"task","labels":["gc:extmsg-delivery"]}`, "body.labels[0]"},
+		{"retype a task to a message", "PATCH", `{"type":"message"}`, "body.type"},
+		{"label a task an order run", "PATCH", `{"labels":["order-run:digest"]}`, "body.labels[0]"},
+		{"label a task a wait", "PATCH", `{"labels":["gc:wait"]}`, "body.labels[0]"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			state := newFakeState(t)
@@ -293,5 +329,39 @@ func TestWorkflowTeardownNeverClosesAControllerOwnedRow(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestGenericAPINeverMakesAWaitBySessionID (architecture B v2): a gate
+// carrying a session:<id> label becomes a wait when its session_id is set
+// (session.IsWaitBead), so that update is refused at body.metadata.session_id
+// and writes nothing; a gate step, a task with a session label and a gate
+// naming another session take the generic API.
+func TestGenericAPINeverMakesAWaitBySessionID(t *testing.T) {
+	for _, c := range []struct {
+		name, typ string
+		labels    []string
+		body      string
+		want      int
+	}{
+		{"a gate given its session_id", "gate", []string{"session:s-1"}, `{"metadata":{"session_id":"s-1"}}`, http.StatusUnprocessableEntity},
+		{"a gate step", "gate", nil, `{"metadata":{"note":"x"}}`, http.StatusOK},
+		{"a task with a session label given a session_id", "task", []string{"session:s-1"}, `{"metadata":{"session_id":"s-1"}}`, http.StatusOK},
+		{"a gate given another session's id", "gate", []string{"session:s-2"}, `{"metadata":{"session_id":"s-1"}}`, http.StatusOK},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			state := newFakeState(t)
+			store := state.stores["myrig"]
+			h := newTestCityHandler(t, state)
+			b := ownedRow(t, store, c.typ, c.labels, nil)
+			rec := beadRequest(t, h, "PATCH", cityURL(state, "/bead/")+b.ID, c.body)
+			got, _ := store.Get(b.ID)
+			if rec.Code != c.want {
+				t.Fatalf("status %d (%s), want %d", rec.Code, rec.Body.String(), c.want)
+			}
+			if c.want == http.StatusUnprocessableEntity && (strings.Join(problemLocations(t, rec), ",") != "body.metadata.session_id" || got.Metadata["session_id"] != "") {
+				t.Fatalf("errors %v, metadata %v: want body.metadata.session_id and nothing written", problemLocations(t, rec), got.Metadata)
+			}
+		})
 	}
 }

@@ -337,6 +337,7 @@ go_test(
         "handler_formulas_test.go",
         "handler_index_snapshot_test.go",
         "handler_lists_keyset_test.go",
+        "handler_mail_sender_test.go",
         "handler_mail_test.go",
         "handler_maintenance_test.go",
         "handler_order_check_cache_test.go",

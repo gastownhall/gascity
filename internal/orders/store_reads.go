@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -406,19 +407,7 @@ func (s *Store) LastRun(name string) (time.Time, error) {
 	label := labelOrderRunPrefix + name
 	var latest time.Time
 	for _, store := range s.mixedLegStores() {
-		// Live: over a CachingStore a hard backing failure of this closed-history
-		// read comes back as a partial result holding only the cached open rows,
-		// which would read as surviving rows and shorten the cooldown.
-		results, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
-			Label:         label,
-			Limit:         1,
-			IncludeClosed: true,
-			Sort:          beads.SortCreatedDesc,
-			TierMode:      beads.TierBoth,
-			// Aggregate read: reduces to max(CreatedAt), so the backing tie-break
-			// at the boundary is irrelevant. Opt into the bounded backing limit.
-			AllowBackingCreatedLimit: true,
-		})
+		results, err := lastRunRecords(store, label, 1)
 		if err != nil {
 			if len(results) == 0 {
 				return time.Time{}, err
@@ -435,6 +424,47 @@ func (s *Store) LastRun(name string) (time.Time, error) {
 	return latest, nil
 }
 
+// runRecordScanBound is how far back an order's run reads look past beads
+// that carry its order-run label without being one of its run records
+// (IsRunRecord): the newest bead is read first, and only when it is no run
+// record are this many read, so the ga-klv bound holds for a store with none.
+const runRecordScanBound = 64
+
+// lastRunRecords lists store's newest beads carrying label (newest first,
+// both tiers, closed included, live) that are run records (IsRunRecord), up
+// to n of them: the newest n, and when a newer non-record displaced one,
+// the run records among the newest runRecordScanBound.
+func lastRunRecords(store beads.Store, label string, n int) ([]beads.Bead, error) {
+	list := func(limit int) ([]beads.Bead, error) {
+		// Live: over a CachingStore a hard backing failure of this
+		// closed-history read comes back as a partial result holding only the
+		// cached open rows, which would read as surviving rows and shorten the
+		// cooldown or regress the cursor.
+		return beads.HandlesFor(store).Live.List(beads.ListQuery{
+			Label:         label,
+			Limit:         limit,
+			IncludeClosed: true,
+			Sort:          beads.SortCreatedDesc,
+			TierMode:      beads.TierBoth,
+			// Aggregate read over the newest rows. For LastRun it reduces to
+			// max(CreatedAt), so the backing tie-break at the boundary is
+			// irrelevant; for Cursor see its own note.
+			AllowBackingCreatedLimit: n == 1,
+		})
+	}
+	results, err := list(n)
+	records := slices.DeleteFunc(slices.Clone(results), func(b beads.Bead) bool { return !IsRunRecord(b) })
+	if len(records) == len(results) {
+		return records, err
+	}
+	results, err = list(runRecordScanBound)
+	records = slices.DeleteFunc(results, func(b beads.Bead) bool { return !IsRunRecord(b) })
+	if len(records) > n {
+		records = records[:n]
+	}
+	return records, err
+}
+
 // Cursor reports the max event seq (the order's event-bus high-water mark) for
 // the named order, unioning across the orders leg and the graph leg. Like
 // LastRun it is a MIXED orders+graph read (the seq labels ride both tracking
@@ -445,24 +475,21 @@ func (s *Store) Cursor(name string) EventCursor {
 	var latest uint64
 	for _, store := range s.mixedLegStores() {
 		// Live, for LastRun's reason: a cached partial answer would regress the
-		// cursor to the open rows' seqs and replay consumed events.
-		results, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
-			Label:         label,
-			Limit:         10,
-			IncludeClosed: true,
-			Sort:          beads.SortCreatedDesc,
-			TierMode:      beads.TierBoth,
-			// Deliberately NOT an AllowBackingCreatedLimit caller. This read reduces
-			// to MaxSeqFromLabels — a max over seq, a DIFFERENT column than the
-			// created_at sort key. The backing breaks created_at ties by id ASC, so a
-			// bounded backing created-desc read keeps the smaller-id members of the
-			// newest second and drops the larger ids; because seq is forward-only the
-			// max-seq run is exactly that newest largest-id row, so a bounded backing
-			// read could omit it and regress the event cursor into replaying consumed
-			// events. Fetch the full candidate set so ApplyListQuery cuts the canonical
-			// (created_at DESC, id DESC) prefix, which keeps the max-seq run at the
-			// front (the Limit above is an exact client-side cap).
-		})
+		// cursor to the open rows' seqs and replay consumed events. Only run
+		// records count (IsRunRecord).
+		//
+		// Deliberately NOT an AllowBackingCreatedLimit caller (lastRunRecords
+		// sets it only for a one-row read). This read reduces to
+		// MaxSeqFromLabels — a max over seq, a DIFFERENT column than the
+		// created_at sort key. The backing breaks created_at ties by id ASC, so a
+		// bounded backing created-desc read keeps the smaller-id members of the
+		// newest second and drops the larger ids; because seq is forward-only the
+		// max-seq run is exactly that newest largest-id row, so a bounded backing
+		// read could omit it and regress the event cursor into replaying consumed
+		// events. Fetch the full candidate set so ApplyListQuery cuts the canonical
+		// (created_at DESC, id DESC) prefix, which keeps the max-seq run at the
+		// front (the Limit is an exact client-side cap).
+		results, err := lastRunRecords(store, label, 10)
 		if err != nil {
 			if len(results) == 0 {
 				runtimeHelpersLogf("orders: cursor lookup failed for %s: %v", name, err)
@@ -505,7 +532,7 @@ func (s *Store) HasOpenWork(scoped string, wispHasOpenWork func(store beads.Stor
 			return false, fmt.Errorf("listing order work beads: %w", err)
 		}
 		for _, b := range results {
-			if b.Status == "closed" {
+			if b.Status == "closed" || !IsRunRecord(b) { // a plain bead carrying the label is no run (mc-v8g4p)
 				continue
 			}
 			if beadLabelsContain(b.Labels, labelOrderTracking) {
