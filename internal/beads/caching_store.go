@@ -819,6 +819,15 @@ func (c *CachingStore) recentWriteLocked(id string, now time.Time) bool {
 	return ok && now.Sub(at) <= recentWriteVerifyWindow
 }
 
+// retainsWriteFenceLocked reports whether the cache still carries a local
+// write or deletion fence for id: it wrote or deleted the row within the
+// fence retention (pruneRetainedFencesLocked). Caller must hold c.mu.
+func (c *CachingStore) retainsWriteFenceLocked(id string) bool {
+	_, wrote := c.writeSeq[id]
+	_, deleted := c.deletedSeq[id]
+	return wrote || deleted
+}
+
 // absorbDepsMode selects how absorbFreshLocked sources the deps row for a bead.
 type absorbDepsMode int
 
