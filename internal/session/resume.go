@@ -47,17 +47,37 @@ func (m *Manager) queueFor(meta map[string]string, sessName string, by Actor) bo
 	return HoldVerdict(meta, running, m.now())
 }
 
+// ExplicitWakeUnserved is the single statement of when a row's explicit wake
+// request is still pending: wake_request is explicit and the request was not
+// served by a later sleep. A request is served only when wake_requested_at and
+// slept_at both parse as RFC3339 and the request is strictly before the
+// sleep; a missing or unparseable timestamp, or equal ones, leave it
+// unserved. It does not look at the row's state; callers that care whether
+// the row is already awake check that themselves.
+func ExplicitWakeUnserved(meta map[string]string) bool {
+	if strings.TrimSpace(meta["wake_request"]) != string(WakeCauseExplicit) {
+		return false
+	}
+	requestedAt, reqErr := time.Parse(time.RFC3339, strings.TrimSpace(meta["wake_requested_at"]))
+	sleptAt, sleptErr := time.Parse(time.RFC3339, strings.TrimSpace(meta["slept_at"]))
+	return reqErr != nil || sleptErr != nil || !requestedAt.Before(sleptAt)
+}
+
 // RequestWakeUnlessHeld records an explicit wake by CAS on an open asleep or
-// drained row that nothing holds (D8 rule 1). A row whose lifecycle refuses a
-// wake returns *WakeConflictError, as WakeSession does; a CAS lost on every
-// attempt returns ErrWakeRequestContended.
+// drained row that nothing holds (D8 rule 1). A row that already carries an
+// unserved explicit wake (ExplicitWakeUnserved) is not written again: the
+// request coalesces onto the pending one and reports WakeRecorded, so many
+// senders waking one session do not contend on its row. A row whose lifecycle
+// refuses a wake returns *WakeConflictError, as WakeSession does; a CAS lost
+// on every attempt returns ErrWakeRequestContended.
 func (s *Store) RequestWakeUnlessHeld(id string, runtimeRunning bool, now time.Time) (WakeRequestOutcome, error) {
 	var outcome WakeRequestOutcome
 	var conflict error
+	var coalesced bool
 	ok, err := s.UpdateMetadataFenced(id, 3, func(info Info, persisted PersistedResponse) MetadataPatch {
 		input := LifecycleInputFromMetadata(persisted.Status, persisted.Metadata)
 		input.Now = now
-		conflict, outcome = nil, WakeNotDormant
+		conflict, outcome, coalesced = nil, WakeNotDormant, false
 		state := State(strings.TrimSpace(persisted.Metadata["state"]))
 		if conflictState, refused := lifecycleWakeConflictState(ProjectLifecycle(input)); refused {
 			conflict = &WakeConflictError{SessionID: id, State: conflictState}
@@ -71,6 +91,10 @@ func (s *Store) RequestWakeUnlessHeld(id string, runtimeRunning bool, now time.T
 			return nil
 		}
 		outcome = WakeRecorded
+		if ExplicitWakeUnserved(persisted.Metadata) {
+			coalesced = true
+			return nil
+		}
 		return RequestExplicitWakePatch(string(WakeCauseExplicit), now)
 	})
 	switch {
@@ -78,7 +102,7 @@ func (s *Store) RequestWakeUnlessHeld(id string, runtimeRunning bool, now time.T
 		return 0, err
 	case conflict != nil:
 		return 0, conflict
-	case outcome == WakeRecorded && !ok:
+	case outcome == WakeRecorded && !ok && !coalesced:
 		return 0, fmt.Errorf("%w: %s", ErrWakeRequestContended, id)
 	}
 	return outcome, nil
