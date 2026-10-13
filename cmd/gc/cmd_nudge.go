@@ -2049,12 +2049,12 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 		relErr := releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(items))
 		return false, errors.Join(bookkeepErr, err, relErr)
 	}
-	deliveryCtx := runtime.WithNudgeDeliveryKey(context.Background(), queuedNudgeDeliveryKey(items))
-	result, err := handle.Nudge(deliveryCtx, sessionActor(session.ActorAgent, target.cityPath), worker.NudgeRequest{
-		Text:     msg,
-		Delivery: worker.NudgeDeliveryDefault,
-		Source:   "queue",
-		Wake:     worker.NudgeWakeLiveOnly,
+	result, err := handle.Nudge(context.Background(), sessionActor(session.ActorAgent, target.cityPath), worker.NudgeRequest{
+		Text:        msg,
+		Delivery:    worker.NudgeDeliveryDefault,
+		Source:      "queue",
+		Wake:        worker.NudgeWakeLiveOnly,
+		DeliveryKey: queuedNudgeDeliveryKey(items),
 	})
 	if err != nil {
 		telemetry.RecordNudge(context.Background(), target.agentKey(), err)

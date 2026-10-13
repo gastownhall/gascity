@@ -292,6 +292,7 @@ func (h *RuntimeHandle) Interrupt(ctx context.Context, _ InterruptRequest) (err 
 // Like Message, it is permanently excluded from invocation telemetry;
 // see SessionHandle.recordInvocationTelemetry.
 func (h *RuntimeHandle) Nudge(ctx context.Context, _ sessionpkg.Actor, req NudgeRequest) (result NudgeResult, err error) {
+	ctx = nudgeDeliveryContext(ctx, req)
 	event := h.beginOperationEvent(ctx, workerOperationNudge)
 	defer func() {
 		event.payload.Delivered = boolPointer(result.Delivered)

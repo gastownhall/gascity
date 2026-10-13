@@ -27,6 +27,12 @@ type nudgeDeliveryKeyContextKey struct{}
 // WithNudgeDeliveryKey returns ctx carrying key, the caller's stable identity
 // for one delivery. A caller that redelivers the same content passes the same
 // key; [NudgeWithDeliveryKey] hands it to a [KeyedNudgeProvider].
+//
+// The returned context must carry exactly one delivery: a deduplicating
+// runtime drops a second, different nudge sent under a context derived from
+// it as a replay of the first. Callers outside the worker boundary set
+// worker.NudgeRequest.DeliveryKey instead, which scopes the key to one
+// request.
 func WithNudgeDeliveryKey(ctx context.Context, key string) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
