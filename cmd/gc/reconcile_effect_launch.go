@@ -110,6 +110,7 @@ var verifyWorktree = worktree.Verify
 // the concrete-pool repair, the key's transcript probed in the launch's work
 // dir (S-1), and a fresh token and key.
 func foldPreWake(_ context.Context, r effectReads, v txView) (preWakeFold, error) {
+	v = freshHeal(v) // the carried timer heal on the fresh row
 	ticket, err := callResult[*startTicket](v)
 	if err != nil {
 		return preWakeFold{}, nil // Decide refuses on the ticket
@@ -171,6 +172,7 @@ type launchPass struct {
 // (R1). The Launch runs the verb section's template with its trigger env
 // taken from the bound row.
 func preWakeStep(v txView, f preWakeFold, probeErr error) txStep {
+	v = freshHeal(v) // the carried timer heal on the fresh row: a re-armed timer's hold refuses
 	ticket, err := callResult[*startTicket](v)
 	switch {
 	case errors.Is(err, errEndpointGate):

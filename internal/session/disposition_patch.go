@@ -85,6 +85,19 @@ func (p DispositionPatch) With(q DispositionPatch) DispositionPatch {
 	return DispositionPatch{out}
 }
 
+// Without is p less the keys q carries with the value p still carries: a
+// cell decided on an earlier read taken back out, a later cell's move of
+// the same key kept.
+func (p DispositionPatch) Without(q DispositionPatch) DispositionPatch {
+	out := maps.Clone(p.kv)
+	for k, v := range q.kv {
+		if cur, ok := out[k]; ok && cur == v {
+			delete(out, k)
+		}
+	}
+	return DispositionPatch{out}
+}
+
 // UndoDisposition is the undo of a cell's write: for each class key written
 // (the write's patch) that current (the row now) still holds as written,
 // the value before held (the row the write was decided on). An undo restores
