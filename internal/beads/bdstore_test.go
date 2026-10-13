@@ -5443,29 +5443,34 @@ func TestBdStoreListWispAwareTiersTolerateAdaptersWithoutBdQuery(t *testing.T) {
 	}
 }
 
-// TestBdStoreListWispsFallsBackToClientFilteringForUnsafeQueryValues pins the
-// bd list storage-tier contract: bd list has no ephemeral-only flag, so wisp
-// reads use normal list flags and then filter the storage tier client-side.
-func TestBdStoreListWispsFallsBackToClientFilteringForUnsafeQueryValues(t *testing.T) {
+// TestBdStoreListWispsQuotesNonBareQueryValues pins two contracts. The bd list
+// leg has no ephemeral-only flag, so wisp reads filter the storage tier
+// client-side. The bd query leg sends a value outside the bare-token set as a
+// quoted predicate; dropping it would scan every row of that type.
+func TestBdStoreListWispsQuotesNonBareQueryValues(t *testing.T) {
 	cases := []struct {
-		name  string
-		query beads.ListQuery
-		want  string
+		name       string
+		query      beads.ListQuery
+		want       string
+		wantClause string
 	}{
 		{
-			name:  "slash assignee",
-			query: beads.ListQuery{Assignee: "gascity/workflows.codex-max", Type: "message", Status: "open", TierMode: beads.TierWisps},
-			want:  "bd-match-assignee",
+			name:       "slash assignee",
+			query:      beads.ListQuery{Assignee: "gascity/workflows.codex-max", Type: "message", Status: "open", TierMode: beads.TierWisps},
+			want:       "bd-match-assignee",
+			wantClause: `assignee="gascity/workflows.codex-max"`,
 		},
 		{
-			name:  "label with space",
-			query: beads.ListQuery{Label: "order tracking", TierMode: beads.TierWisps},
-			want:  "bd-match-label",
+			name:       "label with space",
+			query:      beads.ListQuery{Label: "order tracking", TierMode: beads.TierWisps},
+			want:       "bd-match-label",
+			wantClause: `label="order tracking"`,
 		},
 		{
-			name:  "type reserved token",
-			query: beads.ListQuery{Type: "or", TierMode: beads.TierWisps},
-			want:  "bd-match-type",
+			name:       "type reserved token",
+			query:      beads.ListQuery{Type: "or", TierMode: beads.TierWisps},
+			want:       "bd-match-type",
+			wantClause: `type="or"`,
 		},
 	}
 	for _, tc := range cases {
@@ -5497,19 +5502,8 @@ func TestBdStoreListWispsFallsBackToClientFilteringForUnsafeQueryValues(t *testi
 				t.Fatalf("cmd = %q, want --include-templates for wisp-aware list", gotCmd)
 			}
 			queryCmd := firstCommandWithPrefix(calls, "bd query ")
-			switch tc.name {
-			case "slash assignee":
-				if strings.Contains(queryCmd, "gascity/workflows.codex-max") {
-					t.Fatalf("query cmd = %q, unsafe slash assignee must be client-filtered", queryCmd)
-				}
-			case "label with space":
-				if strings.Contains(queryCmd, "order tracking") {
-					t.Fatalf("query cmd = %q, unsafe label must be client-filtered", queryCmd)
-				}
-			case "type reserved token":
-				if strings.Contains(queryCmd, "type=or") {
-					t.Fatalf("query cmd = %q, reserved type token must be client-filtered", queryCmd)
-				}
+			if !strings.Contains(queryCmd, tc.wantClause) {
+				t.Fatalf("query cmd = %q, want quoted predicate %s", queryCmd, tc.wantClause)
 			}
 			if len(got) != 1 || got[0].ID != tc.want {
 				t.Fatalf("List() = %+v, want only %s after client filtering", got, tc.want)
