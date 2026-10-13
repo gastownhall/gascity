@@ -959,3 +959,251 @@ func mustSetBacking(t *testing.T, backing *casBackingStore, id string) {
 		t.Errorf("backing SetMetadata: %v", err)
 	}
 }
+
+// sourcedRecorder collects notifications with the source each carried.
+type sourcedRecorder struct {
+	mu     sync.Mutex
+	events []string
+}
+
+func (r *sourcedRecorder) record(source ChangeSource, eventType, beadID, _, _, _ string, _ *[]string, _ json.RawMessage) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, source.String()+" "+eventType+" "+beadID)
+}
+
+func (r *sourcedRecorder) take() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := r.events
+	r.events = nil
+	return out
+}
+
+func newReportCacheForTest(t *testing.T, backing Store) (*CachingStore, *sourcedRecorder) {
+	t.Helper()
+	rec := &sourcedRecorder{}
+	cache := NewCachingStore(backing, rec.record)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	return cache, rec
+}
+
+// TestCachingStoreRefreshRowReport pins what RefreshRowReport says it did:
+// the row, whether the backing has it, whether the cache held it, and the one
+// notification it emitted, which is RefreshRow's except for a closed row the
+// cache never held, announced only with AnnounceUnheldClose.
+func TestCachingStoreRefreshRowReport(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		// setup returns the id to refresh, after shaping cache and backing.
+		setup     func(t *testing.T, cache *CachingStore, backing Store) string
+		opts      RowRefreshOptions
+		wantErr   error
+		wantFound bool
+		wantHeld  bool
+		wantEvent string
+		// wantStatus is the reported row's status ("" skips the check).
+		wantStatus string
+	}{
+		{
+			name: "new_open_row",
+			setup: func(t *testing.T, _ *CachingStore, backing Store) string {
+				row, err := backing.Create(Bead{Title: "out of process"})
+				if err != nil {
+					t.Fatalf("backing Create: %v", err)
+				}
+				return row.ID
+			},
+			wantFound: true, wantEvent: "bead.created", wantStatus: "open",
+		},
+		{
+			name: "changed_open_row",
+			setup: func(t *testing.T, cache *CachingStore, backing Store) string {
+				id := mustCreateCached(t, cache).ID
+				if err := backing.SetMetadata(id, "k", "v"); err != nil {
+					t.Fatalf("backing SetMetadata: %v", err)
+				}
+				return id
+			},
+			wantFound: true, wantHeld: true, wantEvent: "bead.updated", wantStatus: "open",
+		},
+		{
+			name: "held_open_closed",
+			setup: func(t *testing.T, cache *CachingStore, backing Store) string {
+				id := mustCreateCached(t, cache).ID
+				if err := backing.Close(id); err != nil {
+					t.Fatalf("backing Close: %v", err)
+				}
+				return id
+			},
+			wantFound: true, wantHeld: true, wantEvent: "bead.closed", wantStatus: "closed",
+		},
+		{
+			name: "held_gone",
+			setup: func(t *testing.T, cache *CachingStore, backing Store) string {
+				id := mustCreateCached(t, cache).ID
+				if err := backing.Delete(id); err != nil {
+					t.Fatalf("backing Delete: %v", err)
+				}
+				return id
+			},
+			wantErr: ErrNotFound, wantHeld: true, wantEvent: "bead.closed", wantStatus: "closed",
+		},
+		{
+			name: "unchanged",
+			setup: func(t *testing.T, cache *CachingStore, _ Store) string {
+				return mustCreateCached(t, cache).ID
+			},
+			wantFound: true, wantHeld: true, wantStatus: "open",
+		},
+		{
+			name:      "unheld_closed_without_option",
+			setup:     unheldClosedRow,
+			wantFound: true, wantStatus: "closed",
+		},
+		{
+			name:      "unheld_closed_with_option",
+			setup:     unheldClosedRow,
+			opts:      RowRefreshOptions{AnnounceUnheldClose: true},
+			wantFound: true, wantEvent: "bead.closed", wantStatus: "closed",
+		},
+		{
+			name: "held_closed_with_option",
+			setup: func(t *testing.T, cache *CachingStore, backing Store) string {
+				id := unheldClosedRow(t, cache, backing)
+				if _, err := cache.RefreshRow(id); err != nil {
+					t.Fatalf("RefreshRow: %v", err)
+				}
+				return id
+			},
+			opts:      RowRefreshOptions{AnnounceUnheldClose: true},
+			wantFound: true, wantHeld: true, wantStatus: "closed",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			backing := &casBackingStore{Store: NewMemStore()}
+			cache, rec := newReportCacheForTest(t, backing)
+			id := tc.setup(t, cache, backing)
+			rec.take()
+
+			rep, err := cache.RefreshRowReport(id, tc.opts)
+			if tc.wantErr != nil {
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("RefreshRowReport err = %v, want %v", err, tc.wantErr)
+				}
+			} else if err != nil {
+				t.Fatalf("RefreshRowReport: %v", err)
+			}
+			if rep.Found != tc.wantFound || rep.Held != tc.wantHeld || rep.Event != tc.wantEvent {
+				t.Fatalf("report found=%v held=%v event=%q, want found=%v held=%v event=%q",
+					rep.Found, rep.Held, rep.Event, tc.wantFound, tc.wantHeld, tc.wantEvent)
+			}
+			if rep.Bead.ID != id {
+				t.Fatalf("report bead id = %q, want %q", rep.Bead.ID, id)
+			}
+			if tc.wantStatus != "" && rep.Bead.Status != tc.wantStatus {
+				t.Fatalf("report bead status = %q, want %q", rep.Bead.Status, tc.wantStatus)
+			}
+			var want []string
+			if tc.wantEvent != "" {
+				want = append(want, "refresh "+tc.wantEvent+" "+id)
+			}
+			assertEvents(t, rec.take(), want...)
+			// A second refresh of the same state announces nothing.
+			again, _ := cache.RefreshRowReport(id, tc.opts)
+			if again.Event != "" {
+				t.Fatalf("a repeat refresh reported %q, want nothing", again.Event)
+			}
+			assertEvents(t, rec.take())
+		})
+	}
+}
+
+// unheldClosedRow creates and closes a row behind the cache's back.
+func unheldClosedRow(t *testing.T, _ *CachingStore, backing Store) string {
+	t.Helper()
+	row, err := backing.Create(Bead{Title: "out of process"})
+	if err != nil {
+		t.Fatalf("backing Create: %v", err)
+	}
+	if err := backing.Close(row.ID); err != nil {
+		t.Fatalf("backing Close: %v", err)
+	}
+	return row.ID
+}
+
+// closeHookStore runs onClose after the backing close commits, before the
+// closing write returns to the cache.
+type closeHookStore struct {
+	Store
+	onClose func(id string)
+}
+
+func (s *closeHookStore) Close(id string) error {
+	if err := s.Store.Close(id); err != nil {
+		return err
+	}
+	if s.onClose != nil {
+		s.onClose(id)
+	}
+	return nil
+}
+
+// TestCachingStoreRefreshRowReportLeavesAnInFlightCloseToItsWrite refreshes,
+// with AnnounceUnheldClose, a row this cache is closing but never held: the
+// write announces the close, once, and the refresh reports none.
+func TestCachingStoreRefreshRowReportLeavesAnInFlightCloseToItsWrite(t *testing.T) {
+	t.Parallel()
+
+	backing := &closeHookStore{Store: NewMemStore()}
+	cache, rec := newReportCacheForTest(t, backing)
+	row, err := backing.Create(Bead{Title: "out of process"})
+	if err != nil {
+		t.Fatalf("backing Create: %v", err)
+	}
+	var rep RowRefresh
+	var repErr error
+	backing.onClose = func(id string) {
+		rep, repErr = cache.RefreshRowReport(id, RowRefreshOptions{AnnounceUnheldClose: true})
+	}
+	if err := cache.Close(row.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if repErr != nil {
+		t.Fatalf("RefreshRowReport: %v", repErr)
+	}
+	if rep.Event != "" || rep.Held {
+		t.Fatalf("in-flight refresh reported event=%q held=%v, want no announcement of an unheld row", rep.Event, rep.Held)
+	}
+	got := rec.take()
+	closes := 0
+	for _, e := range got {
+		if strings.Contains(e, "bead.closed "+row.ID) {
+			closes++
+		}
+	}
+	if closes != 1 {
+		t.Fatalf("notifications = %q, want exactly one bead.closed for %s", got, row.ID)
+	}
+}
+
+// TestCachingStoreRefreshRowNeverAnnouncesUnheldCloses pins RefreshRow, which
+// v2's lag repair calls: a closed row the cache never held installs silently.
+func TestCachingStoreRefreshRowNeverAnnouncesUnheldCloses(t *testing.T) {
+	t.Parallel()
+
+	backing := &casBackingStore{Store: NewMemStore()}
+	cache, rec := newReportCacheForTest(t, backing)
+	id := unheldClosedRow(t, cache, backing)
+	rec.take()
+	got, err := cache.RefreshRow(id)
+	if err != nil || got.Status != "closed" {
+		t.Fatalf("RefreshRow = %q, %v; want the closed row", got.Status, err)
+	}
+	assertEvents(t, rec.take())
+}
