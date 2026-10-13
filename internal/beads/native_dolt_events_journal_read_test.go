@@ -529,32 +529,64 @@ func postImage(t *testing.T, row journalops.Row) journalPostImage {
 	return image
 }
 
-func TestCachingStoreForwardsTheEventsJournalToItsBacking(t *testing.T) {
+// The cache carries no journal methods of its own — carrying them would
+// advertise a journal over every cached backing, bd and memory included — so
+// a consumer discovers the journal through ActiveEventsJournal, which unwraps
+// the cache and applies the activation predicate.
+func TestActiveEventsJournalFindsTheJournalBehindACache(t *testing.T) {
 	want := journalops.Page{Rows: []journalops.Row{{Seq: 2, IssueID: "gc-2"}}, Head: 2}
-	spy := &nativeJournalReaderSpy{read: func(_ context.Context, since int64, _ int) (journalops.Page, error) {
+	spy := activatedJournalSpy(t, &nativeJournalReaderSpy{read: func(_ context.Context, since int64, _ int) (journalops.Page, error) {
 		if since != 1 {
 			t.Errorf("since = %d, want 1", since)
 		}
 		return want, nil
-	}}
-	activatedJournalSpy(t, spy)
-	cache := NewCachingStoreForTest(newNativeDoltStoreForTest(spy), nil)
+	}})
+	var cache Store = NewCachingStoreForTest(newNativeDoltStoreForTest(spy), nil)
+	if _, ok := cache.(journalops.Journal); ok {
+		t.Fatal("the cache carries the journal read itself; it would advertise one over every backing")
+	}
 
-	page, err := cache.ReadEventsJournalPage(context.Background(), 1, 10)
+	journal, ok := ActiveEventsJournal(cache)
+	if !ok {
+		t.Fatal("ActiveEventsJournal missed the active journal behind the cache")
+	}
+	page, err := journal.ReadEventsJournalPage(context.Background(), 1, 10)
 	if err != nil || page.Head != 2 || len(page.Rows) != 1 {
 		t.Fatalf("ReadEventsJournalPage = (%+v, %v)", page, err)
 	}
-	if !cache.EventsJournalActive() {
-		t.Fatal("the cache hides its backing's activation")
+}
+
+func TestActiveEventsJournalRefusesWhatCannotBeTailed(t *testing.T) {
+	inactive := &nativeJournalReaderSpy{}
+	for name, store := range map[string]Store{
+		"a cached store with no journal": NewCachingStoreForTest(NewMemStore(), nil),
+		"a store with no journal":        NewMemStore(),
+		"an inactive native journal":     NewCachingStoreForTest(newNativeDoltStoreForTest(inactive), nil),
+		"nil":                            nil,
+	} {
+		if journal, ok := ActiveEventsJournal(store); ok || journal != nil {
+			t.Errorf("%s: ActiveEventsJournal = (%v, %v), want (nil, false)", name, journal, ok)
+		}
 	}
 }
 
-func TestCachingStoreOverAStoreWithoutAJournalRefuses(t *testing.T) {
-	cache := NewCachingStoreForTest(NewMemStore(), nil)
-	if _, err := cache.ReadEventsJournalPage(context.Background(), 0, 0); !errors.Is(err, ErrEventsJournalUnsupported) {
-		t.Fatalf("error = %v, want ErrEventsJournalUnsupported", err)
+// The outermost store that carries the journal answers for activation: a
+// ProxiedStore's Backing is its native leaf, whose own activation is not the
+// scope's, so discovery must not unwrap past the proxied answer.
+func TestActiveEventsJournalTakesTheProxiedAnswerOverItsLeaf(t *testing.T) {
+	store, native, _ := newSplitFixture(t)
+	native.storage = activatedJournalSpy(t, &nativeJournalReaderSpy{read: func(context.Context, int64, int) (journalops.Page, error) {
+		return journalops.Page{}, nil
+	}})
+	cache := NewCachingStoreForTest(store, nil)
+
+	store.journal = proxiedJournalActivation{resolved: true, active: false}
+	if _, ok := ActiveEventsJournal(cache); ok {
+		t.Fatal("discovery unwrapped past an inactive proxied store to its activated native leaf")
 	}
-	if cache.EventsJournalActive() {
-		t.Fatal("a cache over a store with no journal reports one active")
+	store.journal = proxiedJournalActivation{resolved: true, active: true}
+	journal, ok := ActiveEventsJournal(cache)
+	if !ok || journal != journalops.Journal(store) {
+		t.Fatalf("ActiveEventsJournal = (%T, %v), want the proxied store itself", journal, ok)
 	}
 }

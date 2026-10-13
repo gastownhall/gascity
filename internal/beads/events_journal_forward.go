@@ -7,13 +7,45 @@ import (
 	"github.com/steveyegge/beads/journalops"
 )
 
-// A store that wraps another forwards the journal read so a caller's
-// journalops.Journal assertion survives the wrap, the way every other engine
-// capability does. Forwarding is structural: the wrapper always carries the
-// methods, and EventsJournalActive is the predicate that says whether a read
-// can succeed.
+// maxJournalUnwrap bounds ActiveEventsJournal's walk down Backing chains. Real
+// chains are two or three deep; the bound only keeps a store whose Backing
+// cycles from looping forever.
+const maxJournalUnwrap = 16
 
-var _ journalops.Journal = (*CachingStore)(nil)
+// ActiveEventsJournal finds the journal read a consumer can tail through
+// store, and reports false when there is none it can trust to be complete.
+//
+// The outermost store in the Backing chain that carries journalops.Journal
+// answers: it is returned when its EventsJournalActive reports true, and
+// nothing is returned otherwise. Discovery never unwraps past a store that
+// carries the journal, because a wrapper's answer can differ from its
+// backing's — a ProxiedStore's Backing is its native read leaf, whose own
+// activation is not the scope's. A store that does not carry the journal (a
+// CachingStore holds none of its own) is unwrapped through Backing.
+//
+// A caller that gets false keeps the scope on its scan path. A caller that
+// gets a journal can still be refused by a later read
+// (ErrEventsJournalUnavailable after a demotion, ErrEventsJournalInactive
+// after the scope turned the journal off), and handles that the same way.
+func ActiveEventsJournal(store Store) (journalops.Journal, bool) {
+	for range maxJournalUnwrap {
+		if store == nil {
+			return nil, false
+		}
+		if journal, ok := store.(journalops.Journal); ok {
+			if !EventsJournalActiveThrough(store) {
+				return nil, false
+			}
+			return journal, true
+		}
+		wrapper, ok := store.(interface{ Backing() Store })
+		if !ok {
+			return nil, false
+		}
+		store = wrapper.Backing()
+	}
+	return nil, false
+}
 
 // ReadEventsJournalPageThrough pages inner's journal, refusing with
 // ErrEventsJournalUnsupported when inner has no journal read. It is the
@@ -32,15 +64,4 @@ func ReadEventsJournalPageThrough(ctx context.Context, inner Store, since int64,
 func EventsJournalActiveThrough(inner Store) bool {
 	reporter, ok := inner.(interface{ EventsJournalActive() bool })
 	return ok && reporter.EventsJournalActive()
-}
-
-// ReadEventsJournalPage pages the backing store's journal. The cache holds
-// no journal of its own; the read always reaches the backing.
-func (c *CachingStore) ReadEventsJournalPage(ctx context.Context, since int64, limit int) (journalops.Page, error) {
-	return ReadEventsJournalPageThrough(ctx, c.backing, since, limit)
-}
-
-// EventsJournalActive reports the backing store's journal activation.
-func (c *CachingStore) EventsJournalActive() bool {
-	return EventsJournalActiveThrough(c.backing)
 }
