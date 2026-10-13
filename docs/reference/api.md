@@ -34,7 +34,21 @@ The spec is the full reference. A brief summary of the surfaces:
   `GET/PATCH/DELETE` on `/v0/city/{cityName}/agent/{base}` and SSE
   `/v0/city/{cityName}/agent/{base}/output/stream`.
 - **Beads (work units).** CRUD under `/v0/city/{cityName}/beads`,
-  query + hook operations, dependencies, labels.
+  query + hook operations, dependencies, labels. A generic bead create
+  (`POST /v0/city/{cityName}/beads`) or update (`PATCH
+  /v0/city/{cityName}/bead/{id}` or `POST .../bead/{id}/update`) is
+  refused with 422 and nothing written when it carries a metadata key
+  that is not a valid bead-metadata key or a label that does not read
+  back as itself from one CSV record (a comma, a quote, a newline or a
+  carriage return; bd reads labels as CSV), when it would make a row a
+  session or stop it being one (its type or the `gc:session` label), or
+  when it sets, on a session row, a key the session's disposition decodes
+  (`held_until`, `sleep_intent`, `wait_hold`, `quarantined_until`,
+  `suspended_at`, `state`, `sleep_reason`): only the session verbs
+  (`suspend`, `wake`, `kill`, `gc runtime heartbeat`, `gc session wait`)
+  set those. Each refusal names the offending field in `errors[]`.
+  `gc bd update --set-metadata` on a session bead is an operator escape
+  hatch: it bypasses the disposition and nothing checks it.
 - **Sessions.** CRUD under `/v0/city/{cityName}/sessions`, submit,
   prompt, resume, interaction response, transcript, SSE stream.
 - **External messaging.** `POST /v0/city/{cityName}/extmsg/adapters`

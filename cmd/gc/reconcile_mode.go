@@ -173,15 +173,14 @@ func (*sessionReconcilerDoctorCheck) Fix(_ *doctor.CheckContext) error { return 
 // admissible v2, OK for legacy or unset. Admissibility comes from the latch
 // itself, the developer override included, so doctor and controller start never
 // disagree. Under every mode it also lists, as Details, the v2 refusals the
-// config would hit, a dry run of the switch, and the floors outside the
-// control dispatcher (v2FloorWarnings), a warning under v2 and a note
-// otherwise; under v2, the last pass's age when the controller answers; and
+// config would hit, a dry run of the switch; under v2, the last pass's age
+// when the controller answers; and
 // each class store's C0.7 capabilities. Only C0.7 changes the status: an
 // error for a latched v2 whose boot it would refuse.
 func (c *sessionReconcilerDoctorCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
 	r := &doctor.CheckResult{Name: c.Name()}
 	raw := c.cfg.Daemon.SessionReconciler
-	configured, alias, _ := c.cfg.Daemon.SessionReconcilerMode()
+	_, alias, _ := c.cfg.Daemon.SessionReconcilerMode()
 	mode, err := latchReconcilerMode(c.cfg, c.lookupEnv)
 	switch {
 	case err != nil:
@@ -202,13 +201,6 @@ func (c *sessionReconcilerDoctorCheck) Run(ctx *doctor.CheckContext) *doctor.Che
 	}
 	for _, refusal := range v2LatchRefusals(c.cfg, c.lookupEnv) {
 		r.Details = append(r.Details, "v2 would refuse: "+refusal.String())
-	}
-	floor := "v2 note: "
-	if configured == config.SessionReconcilerV2 {
-		floor = "v2 warning: "
-	}
-	for _, w := range v2FloorWarnings(c.cfg) {
-		r.Details = append(r.Details, floor+w)
 	}
 	if mode == reconcilerV2 && ctx != nil && ctx.CityPath != "" && c.queryPass != nil {
 		if st, qerr := c.queryPass(ctx.CityPath); qerr == nil && st.Passes > 0 {

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -20,10 +21,11 @@ import (
 
 // A21's reasons.
 const (
-	decideCloseFailedCreate = "close-failed-create"
-	decideClosePoolSlot     = "close-pool-slot"
-	decideStrandedHold      = "stranded-hold"
-	decideCloseOrphan       = "close-orphan"
+	decideCloseFailedCreate  = "close-failed-create"
+	decideFailedCreateLeased = "close-held:pending-create-leased" // SESS-058
+	decideClosePoolSlot      = "close-pool-slot"
+	decideStrandedHold       = "stranded-hold"
+	decideCloseOrphan        = "close-orphan"
 )
 
 // closeKind is which A21 close an intent is: its terminal patch, its
@@ -63,6 +65,12 @@ func armClose(r *rowFacts) (intent, bool) {
 	info, e, now := r.row.Info, r.entry, r.w.Now
 	it := intent{Kind: intentClose, Basis: rowBasis{Incarnation: r.row.Incarnation, InstanceToken: r.row.InstanceToken}}
 	switch {
+	case e.Desired == desireNone && e.Reason == reasonFailedCreate && r.failedCreateLeased():
+		// SESS-058 (mc-mcud0): a failed create whose pending-create claim is
+		// still leased stays open until the lease expires, as legacy keeps
+		// it: a start may still hold it, and closing under it orphans its
+		// runtime. A patrol reads the lease again.
+		return intent{Reason: decideFailedCreateLeased}, true
 	case e.Desired == desireNone && e.Reason == reasonFailedCreate:
 		// The row ends: failedCreateClosePatch's lifecycle with the Retire
 		// cell (the decider cannot mint; the close mints it).
@@ -156,6 +164,19 @@ func (r *rowFacts) inWakeGrace() bool {
 	woke, _ := parseRFC3339Metadata(info.LastWokeAt)
 	r.after(requeueUntil(r.w.Now, woke.Add(wakeUndesiredGrace)))
 	return true
+}
+
+// failedCreateLeased is legacy's pendingCreateSessionStillLeased on the row
+// at the pass time (SESS-058): its claim's lease, or its start request, still
+// active for an agent that is not suspended; never on a lease anchor skewed
+// ahead of the clock (pendingCreateAnchorAhead, v5.9r), which would hold the
+// row open for as long as the skew lasts.
+func (r *rowFacts) failedCreateLeased() bool {
+	var cfg *config.City
+	if r.w.Env != nil {
+		cfg = r.w.Env.Cfg
+	}
+	return pendingCreateSessionStillLeasedAt(r.row.Info, cfg, r.w.Now) && !pendingCreateAnchorAhead(r.row.Info, r.w.Now)
 }
 
 // deliberatelyHeldPoolRow is an undesired pool row a deliberate hold parks:

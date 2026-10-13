@@ -2494,9 +2494,9 @@ func cmdSessionKillWithForce(args []string, stdout, stderr io.Writer, asJSON, fo
 		defer releaseLease()
 		killBy.Lease = lease
 	}
-	var fence *sessionKillFence
+	var fence *session.KillFence
 	if infoErr == nil && !info.Closed && !runtimeAlreadyInactive {
-		fence, err = writeSessionKillFence(sessStore, sessionID, time.Now().UTC())
+		fence, err = session.WriteKillFence(sessStore, sessionID, time.Now().UTC())
 		if err != nil {
 			// Refusing the kill because the store is unavailable would hold an
 			// operator's force-kill hostage to the bead store, so fall back to
@@ -2518,7 +2518,7 @@ func cmdSessionKillWithForce(args []string, stdout, stderr io.Writer, asJSON, fo
 		if fence != nil {
 			// The runtime survived the stop, so the fence would claim a
 			// teardown that did not happen. Put the row back the way it was.
-			if err := fence.rollback(sessStore); err != nil {
+			if err := fence.Rollback(sessStore); err != nil {
 				fmt.Fprintf(stderr, "gc session kill: warning: restoring session %s after the failed kill: %v\n", sessionID, err) //nolint:errcheck // best-effort stderr
 			}
 		}
@@ -2550,13 +2550,13 @@ func cmdSessionKillWithForce(args []string, stdout, stderr io.Writer, asJSON, fo
 	// marker is lifted, handing the session back to its lifecycle rules.
 	switch {
 	case fence != nil:
-		if err := fence.clear(sessStore); err != nil {
+		if err := fence.Clear(sessStore); err != nil {
 			fmt.Fprintf(stderr, "gc session kill: warning: releasing kill fence on session %s: %v\n", sessionID, err) //nolint:errcheck // best-effort stderr
 		}
 	case infoErr == nil:
 		now := time.Now().UTC()
-		if err := applySessionKillFencePatch(sessStore, sessionID, func(b beads.Bead) (map[string]string, bool) {
-			return killSleepPatch(b.ID, b.Metadata, now), true
+		if err := session.ApplyKillFencePatch(sessStore, sessionID, func(b beads.Bead) (map[string]string, bool) {
+			return session.KillSleepPatch(b.ID, b.Metadata, now), true
 		}); err != nil {
 			fmt.Fprintf(stderr, "gc session kill: warning: syncing session %s to asleep: %v\n", sessionID, err) //nolint:errcheck // best-effort stderr
 		}

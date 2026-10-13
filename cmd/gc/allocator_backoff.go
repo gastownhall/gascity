@@ -35,7 +35,8 @@ func vetoBackoff(n int) time.Duration {
 
 // Backoff keys (C5.11): "row:<leg>/<id>" for a session key's refusal;
 // "drift:<leg>/<id>" for its drift kinds' (D3 amendment: a drift deferral
-// paces only the drift, not the row's other intents);
+// paces only the drift, not the row's other intents); "idle:<leg>/<id>"
+// for its idle stops' (v5.9s, likewise);
 // "create:<template>/<instance>" or "named:<identity>" for a create that
 // failed without writing (AM-N8), fingerprinted by its ConfigRev; and
 // "work:<bead>" for worktree evidence that failed verification (C6.5(a)),
@@ -46,10 +47,17 @@ func rowBackoffKey(k rowKey) string { return "row:" + k.Leg + "/" + k.ID }
 // driftBackoffKey is the key A14's drift kinds settle on.
 func driftBackoffKey(k rowKey) string { return "drift:" + k.Leg + "/" + k.ID }
 
-// settledBackoffKey is the key a row's settlement of kind backs off.
-func settledBackoffKey(kind string, k rowKey) string {
-	if kind == intentDriftRestart || kind == intentDriftRelaunch {
+// idleBackoffKey is the key A15's idle stops settle on.
+func idleBackoffKey(k rowKey) string { return "idle:" + k.Leg + "/" + k.ID }
+
+// settledBackoffKey is the key a row's settlement of kind, for reason,
+// backs off.
+func settledBackoffKey(kind, reason string, k rowKey) string {
+	switch {
+	case kind == intentDriftRestart || kind == intentDriftRelaunch:
 		return driftBackoffKey(k)
+	case kind == intentStop && isIdleReason(reason):
+		return idleBackoffKey(k)
 	}
 	return rowBackoffKey(k)
 }
@@ -137,7 +145,7 @@ func (t *backoffTable) Prune(configRev string, census *sessionCensus, demand map
 	for k, r := range t.recs {
 		var drop bool
 		switch kind, rest, _ := strings.Cut(k, ":"); kind {
-		case "row", "drift":
+		case "row", "drift", "idle":
 			i := strings.LastIndex(rest, "/")
 			drop = complete.Closed(rowKey{Leg: rest[:max(i, 0)], ID: rest[i+1:]})
 		case "work":

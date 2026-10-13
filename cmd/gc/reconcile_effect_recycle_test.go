@@ -21,9 +21,11 @@ type recycleLeaf struct {
 	peekErr   error
 	attached  bool
 	attachErr error
+	peeks     int
 }
 
 func (l *recycleLeaf) Peek(name string, lines int) (string, error) {
+	l.peeks++
 	if l.peekErr != nil {
 		return "", l.peekErr
 	}
@@ -413,9 +415,39 @@ func TestStartRecycleSkipsACrashA12Recorded(t *testing.T) {
 		crashed int
 	}{{"gc-1/tok", 0}, {"gc-1/old", 1}} {
 		k, _, rec := deadKit(t, true, "gc-1", "tok", "panic: boom")
-		k.p.World.Classified = map[rowKey]string{k.it.Key: c.token}
+		k.p.World.Classified = map[rowKey]classifiedRuntime{k.it.Key: {Token: c.token}}
 		if s := k.runKind(); s.Outcome != settledLanded || crashes(rec) != c.crashed || k.killsBy("KillZombieObject") != 1 {
 			t.Fatalf("classified %s: settlement %+v crashes %d, want recycled with %d crash", c.token, s, crashes(rec), c.crashed)
+		}
+	}
+}
+
+// Kills a classification repeated per attempt (v5 S5, X10; mc-g6g1o): a
+// recycle refused attached records its (row, token) with the crash it
+// found; the next attempt, the planner's memory in its World, peeks no more
+// and records that crash once its kill lands. Another token is peeked.
+func TestStartRecycleRemembersItsClassification(t *testing.T) {
+	k, leaf, rec := deadKit(t, true, "gc-1", "tok", "panic: boom")
+	leaf.attached = true
+	s := k.runKind()
+	c := s.Facts.Classified
+	if s.Cause != causeAttached || c == nil || c.Token != "gc-1/tok" || c.Crash == nil || !c.Recycle || crashes(rec) != 0 {
+		t.Fatalf("refused: settlement %+v classified %+v crashes %d, want refused attached with the crash remembered, not recorded", s, c, crashes(rec))
+	}
+	for _, tc := range []struct {
+		name           string
+		token          string
+		peeks, crashed int
+	}{
+		{"the same token", "gc-1/tok", 0, 1},
+		{"another token", "gc-1/old", 1, 1},
+	} {
+		k, leaf, rec := deadKit(t, true, "gc-1", "tok", "panic: boom")
+		known := *c
+		known.Token = tc.token
+		k.p.World.Classified = map[rowKey]classifiedRuntime{k.it.Key: known}
+		if s := k.runKind(); s.Outcome != settledLanded || leaf.peeks != tc.peeks || crashes(rec) != tc.crashed || k.killsBy("KillZombieObject") != 1 {
+			t.Fatalf("%s: settlement %+v peeks %d crashes %d kills %d, want landed, %d peeks, %d crash", tc.name, s, leaf.peeks, crashes(rec), k.killsBy("KillZombieObject"), tc.peeks, tc.crashed)
 		}
 	}
 }

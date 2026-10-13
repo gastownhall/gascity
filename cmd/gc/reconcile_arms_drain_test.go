@@ -587,3 +587,79 @@ func TestIdleStopPendingIsTheIdleProof(t *testing.T) {
 		t.Fatal("an unmarked interactive row without Full capability is allowed")
 	}
 }
+
+// Kills an orphaned named row stuck over its own zombie (mc-q64l4): A21
+// never closes a named row's dead runtime and A12 classifies it once, so
+// A20 begins its orphan drain (D2's orphaned row: Drain, after INC-003's
+// grace), whose stop A4 runs on any liveness but gone, as legacy drains it
+// and stops it by name. Unclassified, the zombie is A12's first.
+func TestOrphanedNamedZombieDrains(t *testing.T) {
+	for _, classified := range []bool{true, false} {
+		c := newCloseCase(t, livenessDead, desireDrain, "state", "active", "last_woke_at", gatherNow.Add(-time.Hour).Format(time.RFC3339),
+			"configured_named_session", "true", "configured_named_identity", "gone-chat", "pool_managed", "")
+		c.entry().DrainReason = drainOrphaned
+		id := runtimeIdentity{Known: true, SessionID: c.k.ID, Epoch: "3", Token: "tok-3"}
+		c.w.Observed = map[rowKey]rowObservation{c.k: {Liveness: livenessDead, Identity: id}}
+		if classified {
+			c.w.Classified = map[rowKey]classifiedRuntime{c.k: {Token: deadToken(id)}}
+		}
+		it := c.decide()
+		want := intentZombie
+		if classified {
+			want = intentDrainBegin
+		}
+		if it.Kind != want {
+			t.Fatalf("classified %v: decideRow = (%q, %q), want %q", classified, it.Kind, it.Reason, want)
+		}
+	}
+	// A Sleep named row's classified zombie is A6's heal, never a drain.
+	c0 := newCloseCase(t, livenessDead, desireSleep, "state", "active", "last_woke_at", gatherNow.Add(-time.Hour).Format(time.RFC3339),
+		"configured_named_session", "true", "configured_named_identity", "chat", "pool_managed", "")
+	id0 := runtimeIdentity{Known: true, SessionID: c0.k.ID, Epoch: "3", Token: "tok-3"}
+	c0.w.Observed = map[rowKey]rowObservation{c0.k: {Liveness: livenessDead, Identity: id0}}
+	c0.w.Classified = map[rowKey]classifiedRuntime{c0.k: {Token: deadToken(id0)}}
+	if it := c0.decide(); it.Reason != decideDeadRuntimeHeal {
+		t.Fatalf("Sleep named: decideRow = (%q, %q), want A6's dead-runtime heal", it.Kind, it.Reason)
+	}
+	// An unnamed orphan's dead runtime is A21's close, never a drain.
+	c := newCloseCase(t, livenessDead, desireDrain, "state", "active", "last_woke_at", gatherNow.Add(-time.Hour).Format(time.RFC3339))
+	c.entry().DrainReason = drainOrphaned
+	id := runtimeIdentity{Known: true, SessionID: c.k.ID, Epoch: "3", Token: "tok-3"}
+	c.w.Observed = map[rowKey]rowObservation{c.k: {Liveness: livenessDead, Identity: id}}
+	c.w.Classified = map[rowKey]classifiedRuntime{c.k: {Token: deadToken(id)}}
+	if it := c.decide(); it.Kind != intentClose {
+		t.Fatalf("unnamed: decideRow = (%q, %q), want A21's close", it.Kind, it.Reason)
+	}
+}
+
+// Kills the dead-runtime drain reaching past named rows or Drain rows (the
+// #7693 review): a held pool orphan's classified dead runtime (a
+// quarantine, an agent heartbeat, a wait hold) is left alone, its slot kept
+// (§12.2 #27); a named pending create AL1 wants asleep with a suspended
+// reason (Q1) gets no drain begin.
+func TestDeadRuntimeDrainOnlyNamedDrainRows(t *testing.T) {
+	future := gatherNow.Add(30 * time.Minute).Format(time.RFC3339)
+	woke := gatherNow.Add(-time.Hour).Format(time.RFC3339)
+	named := []string{"configured_named_session", "true", "configured_named_identity", "chat", "pool_managed", ""}
+	for _, c := range []struct {
+		name    string
+		desired desire
+		reason  string
+		meta    []string
+	}{
+		{"a quarantined pool orphan", desireDrain, drainOrphaned, []string{"state", "active", "last_woke_at", woke, "quarantined_until", future, "sleep_reason", "quarantine"}},
+		{"a heartbeat-held pool orphan", desireDrain, drainOrphaned, []string{"state", "active", "last_woke_at", woke, "held_until", future}},
+		{"a wait-held pool orphan", desireDrain, drainOrphaned, []string{"state", "active", "last_woke_at", woke, "wait_hold", "true"}},
+		{"a named pending create AL1 wants asleep (Q1)", desireSleep, drainSuspended, append([]string{"state", "creating", "pending_create_claim", "true", "pending_create_started_at", gatherNow.Add(-time.Minute).Format(time.RFC3339)}, named...)},
+	} {
+		cc := newCloseCase(t, livenessDead, c.desired, c.meta...)
+		cc.entry().DrainReason = c.reason
+		cc.w.Env = &reconcileEnv{Cfg: cc.cfg}
+		id := runtimeIdentity{Known: true, SessionID: cc.k.ID, Epoch: "3", Token: "tok-3"}
+		cc.w.Observed = map[rowKey]rowObservation{cc.k: {Liveness: livenessDead, Identity: id}}
+		cc.w.Classified = map[rowKey]classifiedRuntime{cc.k: {Token: deadToken(id)}}
+		if it := cc.decide(); it.Kind != "" || it.Reason != decideNoAction {
+			t.Fatalf("%s: decideRow = (%q, %q), want no-action", c.name, it.Kind, it.Reason)
+		}
+	}
+}

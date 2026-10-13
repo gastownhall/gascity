@@ -3504,7 +3504,8 @@ class it reads the one store, unchanged.
 The flags mirror the "bd ready" contract the default work_query builds:
   gc ready --metadata-field "gc.routed_to=$target" --unassigned \
            --exclude-type=epic --exclude-label "hold:mayor" \
-           --sort oldest --limit 20 --json
+           --exclude-label "hold:external" --exclude-label "human" \
+           --json --limit=20
 
 Rows are emitted in canonical ready order (priority, created_at, id) unless
 --sort selects a created_at order, and --limit is applied last, so a bounded
@@ -3963,7 +3964,9 @@ Signal a session to drain — wind down its current work gracefully.
 Sets a GC_DRAIN metadata flag on the session. The agent should check
 for drain status periodically (via "gc runtime drain-check") and finish
 its current task before exiting. Pass a session alias or ID. Use
-"gc runtime undrain" to cancel.
+"gc runtime undrain" to cancel. Under session_reconciler = "v2" it also
+marks the session row, so the agent's drain-ack stops the session even on a
+min_active_sessions floor.
 
 ```
 gc runtime drain <name> [flags]
@@ -4069,7 +4072,8 @@ Cancel a pending drain signal on a session.
 
 Clears the GC_DRAIN and GC_DRAIN_ACK metadata flags, allowing the
 session to continue normal operation. Pass a session alias or ID. Under
-session_reconciler = "v2" it also clears the session row's drain-ack.
+session_reconciler = "v2" it also clears the session row's drain-ack and
+its operator drain mark.
 
 ```
 gc runtime undrain <name> [flags]
