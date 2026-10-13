@@ -386,6 +386,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without a revision (a row not rewritten since its store began recording
   revisions) keeps the legacy status-and-assignee fence (#7384, backported in
   #7581).
+- **The pool orphan sweep treats a claim it cannot observe as unobservable,
+  not dead.** On a shared store, an assignee in `<rig>/<name>` form that this
+  city's config does not mint — another city's identity, a binding this city
+  imports only on another rig, or an agent, binding or namepool name since
+  REMOVED from local config — used to be judged by local session evidence
+  alone and silently stripped (`in_progress` → `open`, assignee cleared).
+  The dead-assignee sweep now keeps such a claim unless one of this city's
+  own session beads, open or closed, answers to the identity under its alias,
+  its configured named identity or its sole alias-history entry (looked up per
+  identity, at most once per pass), and logs one
+  `protected N foreign/unknown identities` summary per pass naming each
+  identity it kept and its claims. A namepool seat whose name was trimmed
+  therefore stays reapable after it closes; claims under the earlier aliases
+  of a seat renamed more than once are kept and named. The orphan-close
+  release of a confirmed orphaned session is unchanged. Only this Go sweep is
+  guarded: the core pack's `orphan-sweep.sh` order still releases a foreign
+  `<rig>/<name>` claim (#5955). Migration notes: a `<rig>/<name>` identity
+  moved to another city on the shared rig store keeps being released here
+  until this city's closed session records for it are purged or re-aliased.
+  The session record of a removed agent, binding or namepool name lasts until
+  closed session beads are purged, which happens only after
+  `GC_INFRA_SESSION_PURGE_AGE` (default 72h) on a relocated SQLite sessions
+  ledger with `wisp_ttl` set, or after `GC_REAPER_SESSION_PURGE_AGE` (default
+  720h) in the city store when the reaper's `GC_REAPER_SESSION_BEAD_PATTERN`
+  (default `gm-*`) matches the city's session bead IDs or is set to `""`.
+  Anywhere else closed session beads are kept indefinitely. Once the record is
+  purged, the sweep protects the identity's outstanding claims, so release them
+  explicitly (`gc bd release-if-current <id> <assignee>`/reassign) when
+  retiring one, and watch the summary line for claims held back (#5959,
+  #7763).
 - **Closed session rows no longer read as live.** On file-backed and SQLite
   stores, closing a session wrote its terminal metadata and its closed status
   as two writes, so a concurrent wake could leave a row `status=closed
@@ -573,10 +603,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not a failure. Under `GC_REAPER_DRY_RUN`, the summary reports the prune
   preview as `sessions-pruned:N`, although nothing was pruned. Planned for
   1.5.2.
-- **Two cities sharing one rig store can release each other's live claims.**
-  Each city's pool orphan sweep judges a `<rig>/<name>` assignee by its own
-  sessions only, so it can reopen work the other city holds (#5959). The fix
-  is not in 1.5.1.
+- **Two cities sharing one rig store can still release each other's live
+  claims through the core `orphan-sweep` order.** The controller's pool
+  orphan sweep no longer does (#5959; see Fixed), but the order judges a
+  claimant by this city's own roster and sessions only, so it can reopen work
+  the other city holds (#5955). On a city that shares a rig store with
+  another city, skip the order (`[orders] skip = ["orphan-sweep"]`). Two
+  cities that import the same agent pack share one identity space, so neither
+  sweep protects a foreign claim whose assignee matches a local identity
+  byte for byte (ga-dk24ao).
 
 ## [1.5.0] - 2026-10-05
 
