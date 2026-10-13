@@ -435,7 +435,11 @@ func TestCreateEffect_NamedReopensClosedCanonicalAndMatchesLegacyMetadata(t *tes
 			h.reserve(t, "c1")
 			plan := namedPlan(t, cfg, "c1", "mayor")
 			plan.Named.AdoptLive, plan.Named.BoundStepID = tc.adopt, tc.bound
-			h.runAll(t, &createPass{cfg: cfg, store: effectStore}, plan)
+			pass := &createPass{cfg: cfg, store: effectStore}
+			if !tc.adopt {
+				pass.sp = runtime.NewFake() // the reopen's fresh read finds the name free
+			}
+			h.runAll(t, pass, plan)
 
 			state := "stopped"
 			if tc.adopt {
@@ -538,6 +542,45 @@ func (s *namedHookStore) Update(id string, opts beads.UpdateOpts) error {
 	return s.Store.Update(id, opts)
 }
 
+// Kills a named reopen written over a live runtime (the creates generator's
+// seed 335, mc-i7efm): the plan read the name free from an inventory the
+// lag left behind a runtime started since, and the reopen's fresh read under
+// the identifier locks must find it and refuse redecided, writing nothing,
+// so the next pass adopts it or decides again. A name confirmed free reopens.
+func TestCreateEffect_NamedReopenRefusesALiveRuntimeTheLaggedPlanMissed(t *testing.T) {
+	for _, live := range []bool{true, false} {
+		t.Run(map[bool]string{true: "live", false: "free"}[live], func(t *testing.T) {
+			cfg := mayorCity()
+			store := fencedMemStore(t)
+			closed := seedClosedNamedRow(t, store, cfg, nil)
+			sp := runtime.NewFake()
+			if live {
+				if err := sp.Start(context.Background(), "test-city-mayor", runtime.Config{}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			h := newNamedHarness(t, t.TempDir(), nil)
+			h.reserve(t, "c1")
+			plan := namedPlan(t, cfg, "c1", "mayor") // AdoptLive unset: the lagged inventory read the name absent
+			h.runAll(t, &createPass{cfg: cfg, sp: sp, store: store}, plan)
+
+			row, err := store.Get(closed.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			e := h.entry(t)
+			switch {
+			case live && (row.Status != "closed" || e.Landed || e.Ambiguous):
+				t.Fatalf("row %s settlement %+v, want the row left closed and no write", row.Status, e)
+			case live:
+				h.assertRefused(t, plan, createStageRedecided)
+			case row.Status != "open" || !e.Landed:
+				t.Fatalf("row %s settlement %+v, want the free name's row reopened", row.Status, e)
+			}
+		})
+	}
+}
+
 // Kills: a reopen's settlement that loses the row it reopened (P3-6b T5,
 // AM-N2), and a reopen held in flight after it settled: the row keeps its own
 // token, which no census would show for the plan's (CONTRACT v5 P5).
@@ -547,7 +590,7 @@ func TestCreateEffect_NamedReopenSettlesRetargetAndClears(t *testing.T) {
 	closed := seedClosedNamedRow(t, store, cfg, nil)
 	h := newNamedHarness(t, t.TempDir(), nil)
 	token := h.reserve(t, "c1")
-	h.runAll(t, &createPass{cfg: cfg, store: store}, namedPlan(t, cfg, "c1", "mayor"))
+	h.runAll(t, &createPass{cfg: cfg, sp: runtime.NewFake(), store: store}, namedPlan(t, cfg, "c1", "mayor"))
 
 	e := h.entry(t)
 	if !e.Landed || e.RetargetRowID != closed.ID || e.Token != token {
@@ -569,7 +612,7 @@ func TestCreateEffect_NamedAmbiguousReopenClearsAtSettlement(t *testing.T) {
 	store.err = errors.New("connection reset during reopen")
 	h := newNamedHarness(t, t.TempDir(), nil)
 	h.reserve(t, "c1")
-	h.runAll(t, &createPass{cfg: cfg, store: store}, namedPlan(t, cfg, "c1", "mayor"))
+	h.runAll(t, &createPass{cfg: cfg, sp: runtime.NewFake(), store: store}, namedPlan(t, cfg, "c1", "mayor"))
 
 	e := h.entry(t)
 	if !e.Ambiguous || e.RowID != closed.ID || e.RetargetRowID != closed.ID {
@@ -622,7 +665,7 @@ func TestNamedReopenConcurrentWriterLosesFence(t *testing.T) {
 		h := newNamedHarness(t, t.TempDir(), nil)
 		h.reserve(t, "c1")
 		plan := namedPlan(t, cfg, "c1", "mayor")
-		h.runAll(t, &createPass{cfg: cfg, store: store}, plan)
+		h.runAll(t, &createPass{cfg: cfg, sp: runtime.NewFake(), store: store}, plan)
 
 		after, err := mem.Get(closed.ID)
 		if err != nil {
@@ -641,7 +684,7 @@ func TestNamedReopenConcurrentWriterLosesFence(t *testing.T) {
 		h := newNamedHarness(t, t.TempDir(), nil)
 		h.reserve(t, "c1")
 		plan := namedPlan(t, cfg, "c1", "mayor")
-		h.runAll(t, &createPass{cfg: cfg, store: writes}, plan)
+		h.runAll(t, &createPass{cfg: cfg, sp: runtime.NewFake(), store: writes}, plan)
 		after, err := mem.Get(closed.ID)
 		if err != nil {
 			t.Fatal(err)
@@ -680,7 +723,7 @@ func TestCreateEffect_NamedReopenFencesOnTheLiveReReadOfTheRow(t *testing.T) {
 	h := newNamedHarness(t, t.TempDir(), nil)
 	h.reserve(t, "c1")
 	plan := namedPlan(t, cfg, "c1", "mayor")
-	h.runAll(t, &createPass{cfg: cfg, store: revisionlessListStore{Store: mem}}, plan)
+	h.runAll(t, &createPass{cfg: cfg, sp: runtime.NewFake(), store: revisionlessListStore{Store: mem}}, plan)
 
 	row, err := mem.Get(closed.ID)
 	if err != nil {
@@ -706,7 +749,7 @@ func TestCreateEffect_NamedReopenReReadsTheRowLive(t *testing.T) {
 	h := newNamedHarness(t, t.TempDir(), nil)
 	h.reserve(t, "c1")
 	plan := namedPlan(t, cfg, "c1", "mayor")
-	h.runAll(t, &createPass{cfg: cfg, store: namedStaleCacheStore{mem}}, plan)
+	h.runAll(t, &createPass{cfg: cfg, sp: runtime.NewFake(), store: namedStaleCacheStore{mem}}, plan)
 
 	row, err := mem.Get(closed.ID)
 	if err != nil {
@@ -738,7 +781,7 @@ func TestCreateEffect_NamedReopenWritesNothingWhenTheReReadRowMovedOn(t *testing
 	h := newNamedHarness(t, t.TempDir(), nil)
 	h.reserve(t, "c1")
 	plan := namedPlan(t, cfg, "c1", "mayor")
-	h.runAll(t, &createPass{cfg: cfg, store: store}, plan)
+	h.runAll(t, &createPass{cfg: cfg, sp: runtime.NewFake(), store: store}, plan)
 
 	if got := inner.recorded(); len(got) != 0 {
 		t.Fatalf("writes = %v, want none for a row that is no longer closed", got)
@@ -779,7 +822,7 @@ func TestCreateEffect_NamedLocksIdentityAndSessionNameOnce(t *testing.T) {
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
-			h.runAll(t, &createPass{cfg: cfg, store: store}, namedPlan(t, cfg, "c1", "mayor"))
+			h.runAll(t, &createPass{cfg: cfg, sp: runtime.NewFake(), store: store}, namedPlan(t, cfg, "c1", "mayor"))
 		}()
 		awaitClose(t, done, "named create under real city flocks")
 		if len(calls) != 1 {
@@ -862,7 +905,7 @@ func TestCreateEffect_NamedFenceReadsLiveInsideLock(t *testing.T) {
 			})
 			h.reserve(t, "c1")
 			plan := namedPlan(t, cfg, "c1", "mayor")
-			h.runAll(t, &createPass{cfg: cfg, store: namedFenceProbeStore{Store: cache, locked: &locked, t: t}}, plan)
+			h.runAll(t, &createPass{cfg: cfg, sp: runtime.NewFake(), store: namedFenceProbeStore{Store: cache, locked: &locked, t: t}}, plan)
 
 			assertFailedNoWrite(t, h)
 			h.assertRefused(t, plan, createStageFence)
@@ -1157,7 +1200,7 @@ func TestCreateEffect_NamedSettlementNamesTheRow(t *testing.T) {
 		t.Helper()
 		h := newNamedHarness(t, t.TempDir(), nil)
 		h.reserve(t, "c1")
-		h.runAll(t, &createPass{cfg: cfg, store: store}, namedPlan(t, cfg, "c1", "mayor"))
+		h.runAll(t, &createPass{cfg: cfg, sp: runtime.NewFake(), store: store}, namedPlan(t, cfg, "c1", "mayor"))
 		return h.entry(t)
 	}
 	t.Run("create", func(t *testing.T) {
@@ -1558,7 +1601,7 @@ func TestCreateEffect_NamedConditionalReopenWritesOnceAndOpensTheRow(t *testing.
 	h.reserve(t, "c1")
 	plan := namedPlan(t, cfg, "c1", "mayor")
 	plan.Named.BoundStepID = "gc-step"
-	h.runAll(t, &createPass{cfg: cfg, store: store}, plan)
+	h.runAll(t, &createPass{cfg: cfg, sp: runtime.NewFake(), store: store}, plan)
 
 	if got, want := store.recorded(), []string{"update-if-match " + closed.ID}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("writes = %v, want %v", got, want)
@@ -1608,7 +1651,7 @@ func TestCreateEffect_NamedRefusedWriteIsNoWriteAndPanicIsAmbiguous(t *testing.T
 			h := newNamedHarness(t, t.TempDir(), nil)
 			h.reserve(t, "c1")
 			plan := namedPlan(t, cfg, "c1", "mayor")
-			h.runAll(t, &createPass{cfg: cfg, store: store}, plan)
+			h.runAll(t, &createPass{cfg: cfg, sp: runtime.NewFake(), store: store}, plan)
 			if got := store.recorded(); len(got) != 1 {
 				t.Fatalf("writes = %v, want the one attempted write", got)
 			}
@@ -2114,7 +2157,7 @@ func TestCreateEffect_NamedReopenWritesNothingOnceItsEntryIsSettled(t *testing.T
 	h.reserve(t, "c1")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	h.submit(ctx, &createPass{cfg: cfg, store: &namedCASStore{Store: inner, bump: cancel}}, namedPlan(t, cfg, "c1", "mayor"))
+	h.submit(ctx, &createPass{cfg: cfg, sp: runtime.NewFake(), store: &namedCASStore{Store: inner, bump: cancel}}, namedPlan(t, cfg, "c1", "mayor"))
 	h.wg.Wait()
 
 	if got := inner.recorded(); len(got) != 0 {

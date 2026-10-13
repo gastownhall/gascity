@@ -264,6 +264,11 @@ func (x *createEffects) writeNamed(ctx context.Context, pass *createPass, p crea
 		return session.Info{}, err
 	}
 	if closed, ok := session.ClosedNamedSessionBeadIn(rows, plan.SessionName); ok {
+		if !plan.AdoptLive {
+			if err := nameConfirmedFree(ctx, pass.sp, plan.SessionName, prog); err != nil {
+				return session.Info{}, err
+			}
+		}
 		return reopenNamed(ctx, store, live, cfg, p, closed, now, prog)
 	}
 	if err := session.EnsureAliasAvailableWithConfigForOwner(live, cfg, plan.Identity, "", plan.Identity); err != nil {
@@ -287,6 +292,39 @@ func (x *createEffects) writeNamed(ctx context.Context, pass *createPass, p crea
 		return session.Info{}, poolCreateWriteError{err: fmt.Errorf("creating named session %q: %w", plan.Identity, err)}
 	}
 	return info, prog.afterWrite(ctx, info.ID)
+}
+
+// nameConfirmedFree is a reopen's fresh runtime read of name, under the
+// identifier locks the reopen holds: a plan read the name free from an
+// observation the inventory's lag can leave behind a runtime started since,
+// and a reopen writes the row stopped. Only a complete read that finds no
+// live agent under the name (absent, or dead as the plan's corpse and zombie
+// are) lets it write; a live runtime, or a read that cannot tell, refuses
+// redecided, and the next pass adopts it or decides again.
+func nameConfirmedFree(ctx context.Context, sp runtime.Provider, name string, prog *createProgress) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("%w: %w", errCreateAbandoned, err) // nothing written, as at the write's begin
+	}
+	stage := prog.stage
+	prog.stage = createStageRedecided
+	if sp == nil {
+		return fmt.Errorf("named session %q: no runtime provider to confirm the name free", name)
+	}
+	leaf, _, known := runtime.ResolveBackend(sp, name)
+	if !known {
+		return fmt.Errorf("named session %q: the runtime's backend is unknown", name)
+	}
+	live, status, err := runtime.ObserveLivenessBoundedSince(ctx, leaf, name, nil, time.Now(), fenceProbeTimeout)
+	switch {
+	case err != nil:
+		return fmt.Errorf("named session %q: reading the name's runtime: %w", name, err)
+	case status != runtime.ObservationComplete:
+		return fmt.Errorf("named session %q: the name's runtime read is incomplete", name)
+	case live.Running && live.Alive:
+		return fmt.Errorf("named session %q: a live runtime holds the name", name)
+	}
+	prog.stage = stage
+	return nil
 }
 
 // reopenNamed reopens closed, the identity's closed canonical row, with
