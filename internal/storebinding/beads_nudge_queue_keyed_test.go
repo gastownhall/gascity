@@ -10,6 +10,7 @@ package storebinding
 // deliveries to everyone else.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -445,14 +446,20 @@ func TestBeadsNudgeQueueQuarantinesACorruptRecord(t *testing.T) {
 		t.Fatalf("Snapshot = %v, want the whole-queue diagnostic to surface the corrupt record", err)
 	}
 
+	// Finding corrupt records is not a failed pass: the error stays nil and
+	// the report names each one, so a caller can tell the two apart.
 	afterExpiry := now.Add(2 * time.Minute)
-	err = queue.Maintain(afterExpiry)
-	if !errors.Is(err, ErrBeadsNudgeQueueCorrupt) {
-		t.Fatalf("Maintain = %v, want the corrupt records reported", err)
+	report, err := queue.Maintain(context.Background(), afterExpiry)
+	if err != nil {
+		t.Fatalf("Maintain = %v, want a pass that only found corrupt records to succeed", err)
+	}
+	reported := errors.Join(report.Corrupt...)
+	if len(report.Corrupt) != 2 || !errors.Is(reported, ErrBeadsNudgeQueueCorrupt) {
+		t.Fatalf("Maintain report Corrupt = %v, want both corrupt records", report.Corrupt)
 	}
 	for _, nudgeID := range []string{"n-corrupt-alpha-polly", "n-corrupt-beta-broken"} {
-		if !strings.Contains(err.Error(), nudgeQueueBeadID(nudgeID)) {
-			t.Errorf("Maintain error %q does not name corrupt record %s", err, nudgeQueueBeadID(nudgeID))
+		if !strings.Contains(reported.Error(), nudgeQueueBeadID(nudgeID)) {
+			t.Errorf("Maintain report %q does not name corrupt record %s", reported, nudgeQueueBeadID(nudgeID))
 		}
 	}
 	record, getErr := store.Get(nudgeQueueBeadID("n-expiring"))

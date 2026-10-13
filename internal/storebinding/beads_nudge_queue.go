@@ -67,6 +67,7 @@ package storebinding
 // two may meet.
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -98,6 +99,10 @@ const (
 	// retention sweeper runs with (cmd/gc's defaultQueuedNudgeTTL, also a
 	// queued nudge's deliver-by deadline).
 	nudgeQueueTerminalRetention = 24 * time.Hour
+	// nudgeQueueSweepBatch bounds how many retired records one Maintain pass
+	// deletes. The oldest go first; a pass that fills the batch says so, and
+	// the owner's next pass takes the rest.
+	nudgeQueueSweepBatch = 256
 	// nudgeQueueCASAttempts bounds one contended state transition. A caller
 	// that loses this many revision races is contending with a writer that is
 	// not this queue, which is a fault rather than a retry.
@@ -179,9 +184,16 @@ type beadsNudgeQueue struct {
 	claimer  beadsAssignmentClaimer
 	releaser beads.ConditionalAssignmentReleaser
 	writer   beads.ConditionalWriter
+	// sweepBatch is nudgeQueueSweepBatch; tests lower it to reach the bound.
+	sweepBatch int
 }
 
 // NewBeadsNudgeQueue returns the durable nudge queue backed by store.
+//
+// The delivery verbs do not maintain the queue. Whoever owns the queue must run
+// [NudgeQueue.Maintain] on a schedule: without it expired leases are only
+// revoked when their target claims again, dead letters never age out, and
+// retired records are never deleted, so the queue grows without bound.
 //
 // The store must carry the compare-and-swap primitives the queue's
 // single-winner claim is built on: Claim, ReleaseIfCurrent, and the
@@ -204,7 +216,13 @@ func NewBeadsNudgeQueue(store beads.NudgesStore) (NudgeQueue, error) {
 	if !ok {
 		return nil, fmt.Errorf("opening beads nudge queue: %w", unsupportedBeadsCapability("conditional update"))
 	}
-	return &beadsNudgeQueue{store: store, claimer: claimer, releaser: releaser, writer: writer}, nil
+	return &beadsNudgeQueue{
+		store:      store,
+		claimer:    claimer,
+		releaser:   releaser,
+		writer:     writer,
+		sweepBatch: nudgeQueueSweepBatch,
+	}, nil
 }
 
 // Enqueue inserts item as pending, superseding the queued items that carry the
@@ -492,24 +510,40 @@ func (q *beadsNudgeQueue) WithdrawQueuedWaitNudges(ids []string) error {
 // idempotent, so running them as a sequence rather than as one transaction
 // converges on the same state.
 //
-// It is the only whole-queue pass. A record it cannot decode does not stop it:
-// the pass finishes the work it can do and then reports every corrupt record
-// it saw, each wrapping ErrBeadsNudgeQueueCorrupt.
-func (q *beadsNudgeQueue) Maintain(now time.Time) error {
+// It is the only whole-queue pass, and it is bounded: it stops when ctx ends,
+// and one pass deletes at most sweepBatch retired records, oldest first. A
+// failed transition does not stop it; every failure is joined into the
+// returned error. An undecodable record is not a failure either: it is named
+// in the report's Corrupt list, each entry wrapping ErrBeadsNudgeQueueCorrupt.
+//
+// On SQLite the live pass lists the queue family by label, which the engine
+// answers by scanning the store; the bound is ctx.
+func (q *beadsNudgeQueue) Maintain(ctx context.Context, now time.Time) (NudgeMaintenance, error) {
+	var report NudgeMaintenance
+	if err := ctx.Err(); err != nil {
+		return report, err
+	}
 	entries, corrupt, err := q.allLiveEntries(now)
 	if err != nil {
-		return err
+		return report, err
 	}
+	report.Corrupt = corrupt
+	var failures []error
 	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return report, errors.Join(append(failures, err)...)
+		}
 		if err := q.maintainEntry(entry, now); err != nil {
-			return err
+			failures = append(failures, err)
 		}
 	}
-	sweepCorrupt, err := q.sweepTerminalRecords(now)
+	remaining, sweepFailures, err := q.sweepTerminalRecords(ctx, now)
+	report.Remaining = remaining
+	failures = append(failures, sweepFailures...)
 	if err != nil {
-		return err
+		failures = append(failures, err)
 	}
-	return errors.Join(append(corrupt, sweepCorrupt...)...)
+	return report, errors.Join(failures...)
 }
 
 // maintainEntry applies the recovery transition one live record needs, if any.
@@ -535,44 +569,48 @@ func (q *beadsNudgeQueue) maintainEntry(entry nudgeQueueEntry, now time.Time) er
 	return nil
 }
 
-// sweepTerminalRecords deletes terminal queue records past
-// nudgeQueueTerminalRetention. Without it a terminal record is immortal:
-// retirement closes the bead and nothing ever removes it, so a long-lived
-// city accumulates one dead row per nudge it has ever delivered, forever.
+// sweepTerminalRecords deletes up to sweepBatch retired queue records whose
+// last write — their retirement — is older than nudgeQueueTerminalRetention,
+// oldest first. Without it a terminal record is immortal: retirement closes
+// the bead and nothing ever removes it, so a long-lived city accumulates one
+// dead row per nudge it has ever delivered, forever. It reports whether the
+// batch filled, which means more may be due.
 //
-// The sweep is part of Maintain, the owner-run pass, so its scan of closed
-// records never rides a delivery verb.
+// Every predicate is pushed to the store — the family label, the terminal
+// lifecycle (the indexed key), closed status, the retention cutoff and the
+// batch limit — so every record the sweep lists is due and the read is bounded
+// by the batch, not by the queue or the store.
 //
 // Deleting a queue bead destroys no history. The queue's beads are its own
 // family (label "gc:nudge-queue"); the nudge SHADOW beads the audit trail is
 // read from carry "gc:nudge" and are untouched.
 //
 // Each delete is revision-fenced, so a record another writer has just moved is
-// left alone and collected on the next pass rather than removed out from under
-// it. A record whose terminal time does not parse is left in place and
-// returned as corrupt rather than stopping the sweep.
-func (q *beadsNudgeQueue) sweepTerminalRecords(now time.Time) ([]error, error) {
-	cutoff := now.Add(-nudgeQueueTerminalRetention)
+// left alone and collected on a later pass rather than removed out from under
+// it. A delete that fails does not stop the sweep; the failures are returned.
+func (q *beadsNudgeQueue) sweepTerminalRecords(ctx context.Context, now time.Time) (bool, []error, error) {
+	if err := ctx.Err(); err != nil {
+		return false, nil, err
+	}
 	records, err := q.store.List(beads.ListQuery{
-		Label:    nudgeQueueLabel,
-		Status:   "closed",
-		Sort:     beads.SortCreatedAsc,
-		TierMode: beads.TierBoth,
+		Label:         nudgeQueueLabel,
+		Metadata:      map[string]string{nudgeMetaQueueState: nudgeQueueStateTerminal},
+		Status:        "closed",
+		UpdatedBefore: now.Add(-nudgeQueueTerminalRetention),
+		Limit:         q.sweepBatch,
+		Sort:          beads.SortCreatedAsc,
+		TierMode:      beads.TierBoth,
+		Live:          true,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("listing retired nudge queue records: %w", err)
+		return false, nil, fmt.Errorf("listing retired nudge queue records: %w", err)
 	}
-	var corrupt []error
+	var failures []error
 	for _, record := range records {
-		terminalAt, err := parseNudgeTime(record.Metadata[nudgeMetaTerminalAt])
-		if err != nil {
-			corrupt = append(corrupt, fmt.Errorf("%w: bead %q field %s: %w", ErrBeadsNudgeQueueCorrupt, record.ID, nudgeMetaTerminalAt, err))
-			continue
+		if err := ctx.Err(); err != nil {
+			return true, failures, err
 		}
-		if terminalAt.IsZero() || !terminalAt.Before(cutoff) {
-			continue
-		}
-		err = q.writer.DeleteIfMatch(record.ID, record.Revision)
+		err := q.writer.DeleteIfMatch(record.ID, record.Revision)
 		if err == nil {
 			continue
 		}
@@ -580,9 +618,9 @@ func (q *beadsNudgeQueue) sweepTerminalRecords(now time.Time) ([]error, error) {
 		if errors.Is(err, beads.ErrNotFound) || errors.As(err, &stale) {
 			continue
 		}
-		return nil, fmt.Errorf("deleting retired nudge record %q: %w", record.ID, err)
+		failures = append(failures, fmt.Errorf("deleting retired nudge record %q: %w", record.ID, err))
 	}
-	return corrupt, nil
+	return len(records) >= q.sweepBatch, failures, nil
 }
 
 // revokeLease clears a lease that has run out. ReleaseIfCurrent is the precise

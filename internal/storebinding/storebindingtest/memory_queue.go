@@ -17,6 +17,7 @@ package storebindingtest
 // without forking the contract.
 
 import (
+	"context"
 	"errors"
 	"sort"
 	"sync"
@@ -279,7 +280,12 @@ func (q *MemoryNudgeQueue) WithdrawQueuedWaitNudges(ids []string) error {
 // Maintain runs the whole-queue recovery pass: expired leases return to
 // pending, expired items dead-letter, dead letters past their retention retire,
 // and retired entries past theirs are forgotten so their ids can be reused.
-func (q *MemoryNudgeQueue) Maintain(now time.Time) error {
+// The pass is in-memory and holds the lock throughout, so ctx is only checked
+// before it starts and it never reports Remaining work.
+func (q *MemoryNudgeQueue) Maintain(ctx context.Context, now time.Time) (storebinding.NudgeMaintenance, error) {
+	if err := ctx.Err(); err != nil {
+		return storebinding.NudgeMaintenance{}, err
+	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.expireLeases(now)
@@ -308,7 +314,7 @@ func (q *MemoryNudgeQueue) Maintain(now time.Time) error {
 		kept = append(kept, id)
 	}
 	q.order = kept
-	return nil
+	return storebinding.NudgeMaintenance{}, nil
 }
 
 func (q *MemoryNudgeQueue) insert(item nudgequeue.Item, state memoryQueueState) {

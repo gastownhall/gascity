@@ -14,6 +14,7 @@ package storebindingtest
 // gone.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
@@ -331,7 +332,7 @@ func RunNudgeFrontDoorTests(r Runner, suite NudgesSuite) {
 			}
 		}
 		afterExpiry := now.Add(2 * time.Minute)
-		if err := queue.Maintain(afterExpiry); err != nil {
+		if _, err := queue.Maintain(context.Background(), afterExpiry); err != nil {
 			r.Fatalf("Maintain: %v", err)
 		}
 		pending, inFlight, dead, err := queue.ListForAgent(ConformanceNudgeAgent, afterExpiry)
@@ -371,7 +372,7 @@ func RunNudgeFrontDoorTests(r Runner, suite NudgesSuite) {
 			r.Fatalf("dead = %v, want the rolled-back nudge", nudgeIDs(dead))
 		}
 		later := now.Add(maintainHorizon)
-		if err := queue.Maintain(later); err != nil {
+		if _, err := queue.Maintain(context.Background(), later); err != nil {
 			r.Fatalf("Maintain: %v", err)
 		}
 		pending, inFlight, dead, err := queue.ListForAgent(ConformanceNudgeAgent, later)
@@ -410,7 +411,7 @@ func RunNudgeFrontDoorTests(r Runner, suite NudgesSuite) {
 			r.Fatalf("pending = %v, want a retried submit of a delivered nudge to stay retired", nudgeIDs(pending))
 		}
 		later := now.Add(maintainHorizon)
-		if err := queue.Maintain(later); err != nil {
+		if _, err := queue.Maintain(context.Background(), later); err != nil {
 			r.Fatalf("Maintain: %v", err)
 		}
 		fresh := nudgeItem("n-delivered", "", later)

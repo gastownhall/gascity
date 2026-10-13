@@ -393,10 +393,24 @@ type NudgeQueue interface {
 	RecordFailure([]string, error, time.Time) ([]nudgequeue.Item, error)
 	Rollback(nudgequeue.Item, string) error
 	WithdrawQueuedWaitNudges([]string) error
-	// Maintain runs the whole-queue recovery pass as of now. It reports every
-	// record it could not decode (wrapping ErrBeadsNudgeQueueCorrupt for the
-	// beads queue) after finishing the work it could do.
-	Maintain(time.Time) error
+	// Maintain runs one bounded whole-queue recovery pass as of now. It stops
+	// when ctx ends. A failed transition does not stop the pass: every failure
+	// is joined into the returned error. Records it could not decode are not a
+	// failure; they are listed in the report.
+	Maintain(context.Context, time.Time) (NudgeMaintenance, error)
+}
+
+// NudgeMaintenance is what one [NudgeQueue.Maintain] pass found that is not a
+// failure of the pass.
+type NudgeMaintenance struct {
+	// Corrupt holds one error per queue record the pass could not decode
+	// (wrapping ErrBeadsNudgeQueueCorrupt for the beads queue). The pass did
+	// everything else it could.
+	Corrupt []error
+	// Remaining reports that the pass stopped at its per-call bound with
+	// retired records possibly still due for the sweep; the next pass
+	// continues.
+	Remaining bool
 }
 
 // NudgeShadows is the closed nudge shadow projection contract.
