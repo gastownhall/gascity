@@ -491,28 +491,45 @@ func TestRollbackCancelsRetiredWaits(t *testing.T) {
 // another runtime under its name (Occupied) or its own StaleSelf one (S7).
 // When the effect's fresh read finds that runtime gone, a corpse, or the
 // row's own Current runtime, the occupant is gone and the effect refuses
-// redecided, closing nothing (legacy decides on one live read); a Foreign or
-// StaleSelf runtime still there rolls the row back as before.
+// redecided while its lease holds, closing nothing (legacy decides on one
+// live read); a Foreign or StaleSelf runtime still there rolls the row back
+// as before, and so does a gone or dead occupant past the lease.
 func TestRollbackEffectNeedsItsOccupant(t *testing.T) {
-	pending := []string{"pending_create_claim", "true", "pending_create_started_at", gatherNow.Add(-time.Minute).Format(time.RFC3339)}
+	leased := []string{"pending_create_claim", "true", "pending_create_started_at", gatherNow.Add(-time.Minute).Format(time.RFC3339)}
+	long := gatherNow.Add(-20 * time.Minute).Format(time.RFC3339)
+	expired := []string{"pending_create_claim", "true", "pending_create_started_at", long, "last_woke_at", long} // started: no never-started deadline
 	for _, c := range []struct {
 		name   string
+		meta   []string
 		reason string
 		rt     func(k *txKit)
 		closed bool
 	}{
-		{"Occupied, its occupant gone", decideRollback, func(*txKit) {}, false},
-		{"Occupied, its occupant now a corpse", decideRollback, func(k *txKit) {
+		{"Occupied, its occupant gone", leased, decideRollback, func(*txKit) {}, false},
+		{"Occupied, its occupant now a corpse", leased, decideRollback, func(k *txKit) {
 			k.runtimeAs("gc-9", "theirs", func(r *simRuntime) { r.corpse = true })
 		}, false},
-		{"Occupied, the row's own Current runtime in its place", decideRollback, func(k *txKit) { k.runtimeAs("gc-1", "tok", nil) }, false},
-		{"Occupied, an unstamped runtime in its place", decideRollback, func(k *txKit) { k.runtimeAs("", "", nil) }, false},
-		{"Occupied, its Foreign occupant still there", decideRollback, func(k *txKit) { k.runtimeAs("gc-9", "theirs", nil) }, true},
-		{"S7, its StaleSelf runtime gone", decideStaleCreate, func(*txKit) {}, false},
-		{"S7, its StaleSelf runtime still there", decideStaleCreate, func(k *txKit) { k.runtimeAs("gc-1", "old", nil) }, true},
+		{"Occupied, the row's own Current runtime in its place", leased, decideRollback, func(k *txKit) { k.runtimeAs("gc-1", "tok", nil) }, false},
+		{"Occupied, an unstamped runtime in its place", leased, decideRollback, func(k *txKit) { k.runtimeAs("", "", nil) }, false},
+		{"Occupied, its Foreign occupant still there", leased, decideRollback, func(k *txKit) { k.runtimeAs("gc-9", "theirs", nil) }, true},
+		{"Occupied, its Foreign occupant still there as a zombie", leased, decideRollback, func(k *txKit) {
+			k.runtimeAs("gc-9", "theirs", func(r *simRuntime) { r.zombie = true })
+		}, true},
+		{"S7, its StaleSelf runtime gone", leased, decideStaleCreate, func(*txKit) {}, false},
+		{"S7, its StaleSelf runtime still there", leased, decideStaleCreate, func(k *txKit) { k.runtimeAs("gc-1", "old", nil) }, true},
+		// Past the lease a gone or dead occupant leaves nothing to wait for:
+		// the row rolls back, as main and legacy roll it back, so a started
+		// create whose name another row's corpse holds is never stranded.
+		// A live non-occupant still holds it at any lease.
+		{"past its lease, started, another row's corpse under its name", expired, decideRollback, func(k *txKit) {
+			k.runtimeAs("gc-9", "theirs", func(r *simRuntime) { r.corpse = true })
+		}, true},
+		{"past its lease, started, its occupant gone", expired, decideRollback, func(*txKit) {}, true},
+		{"past its lease, the row's own Current runtime in its place", expired, decideRollback, func(k *txKit) { k.runtimeAs("gc-1", "tok", nil) }, false},
+		{"a lease anchor two hours ahead (a clock stepped back), its occupant gone", []string{"pending_create_claim", "true", "pending_create_started_at", gatherNow.Add(2 * time.Hour).Format(time.RFC3339)}, decideRollback, func(*txKit) {}, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			k := startKit(t, intentRollback, "creating", pending...)
+			k := startKit(t, intentRollback, "creating", c.meta...)
 			k.it.Deadline = gatherNow.Add(time.Minute)
 			k.it.Reason, k.it.Occupant = c.reason, true
 			c.rt(k)

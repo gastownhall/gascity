@@ -386,6 +386,8 @@ func staleSelfOwn(v txView) bool {
 // unattributable one is no occupant: the pass read a runtime that has since
 // left, and rolling back a pending create inside its lease would orphan
 // nothing but close a create legacy keeps, deciding on one live read (F1).
+// rollbackStep refuses on it only inside the lease or over a live
+// non-occupant (occupantLeaseHolds, liveNonOccupant).
 func occupantStays(v txView) bool {
 	if v.RT == nil || v.RT.Class != rtAlive && v.RT.Class != rtZombie {
 		return false
@@ -395,6 +397,27 @@ func occupantStays(v txView) bool {
 		return true
 	}
 	return false
+}
+
+// occupantLeaseHolds reports whether a pending create whose occupant left
+// is still inside its lease (legacy's pendingCreateSessionStillLeasedAt,
+// with no lease anchor past the skew bound), which keeps it as legacy does.
+// Past the lease, a gone or dead occupant leaves nothing to wait for: the
+// rollback proceeds, as main and legacy roll it back, so a started create
+// whose name a corpse holds is never stranded.
+func occupantLeaseHolds(v txView) bool {
+	var cfg *config.City
+	if v.World != nil && v.World.Env != nil {
+		cfg = v.World.Env.Cfg
+	}
+	return !pendingCreateAnchorAhead(v.Row, v.Now) && pendingCreateSessionStillLeasedAt(v.Row, cfg, v.Now)
+}
+
+// liveNonOccupant reports a runtime present under the name, alive or a
+// zombie, that is no occupant: the row's own Current runtime or an
+// unattributable one, which a rollback must not close over at any lease.
+func liveNonOccupant(v txView) bool {
+	return v.RT != nil && (v.RT.Class == rtAlive || v.RT.Class == rtZombie) && !occupantStays(v)
 }
 
 // rollbackStep is the rollback's first Decide: a screen's patch, or the
@@ -410,8 +433,8 @@ func rollbackStep(v txView, screen screenWrite, _ error) txStep {
 		return txStep{Done: true, Cause: decideStaleCreate} // gone already: A18 relaunches it, no backoff between
 	case v.It.Relaunch && !staleSelfOwn(v):
 		return txStep{Refuse: causeRedecided} // S7's relaunch stops only a runtime its own read still finds StaleSelf, its own
-	case v.It.Occupant && !occupantStays(v):
-		return txStep{Refuse: causeRedecided} // F1: the occupant the arm rested on is gone; the lease decides next pass
+	case v.It.Occupant && !occupantStays(v) && (occupantLeaseHolds(v) || liveNonOccupant(v)):
+		return txStep{Refuse: causeRedecided} // F1: the occupant the arm rested on is gone; the lease, or the live runtime, decides next pass
 	case len(screen.patch) > 0 || screen.class.Len() > 0:
 		return txStep{Write: screen.patch, Class: screen.class, Done: true}
 	case cause != "":
