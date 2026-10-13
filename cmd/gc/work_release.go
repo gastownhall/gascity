@@ -86,14 +86,14 @@ var (
 // (TestReleasePoliciesTable pins it):
 //   - a killed seat keeps everything when anything is started (owner ruling
 //     B1): only the seat that started work may resume it;
-//   - drain-ack gives back only in_progress claims (D5): the agent said it
-//     holds nothing, and open claims are its continuation preassignments; a
-//     routeless claim takes the seat's route, as on the paths below, since
-//     kept it would leave the acked seat asleep holding it (mc-sca8r). A
-//     claim the seat's work_started cell or execution_claim_started stamp
-//     names is kept (PHASE1-2 §6.5), unless it is on a dispatch hold: the ack
-//     is no proof it never ran, and giving it back lost started work
-//     (mc-ilr3b);
+//   - drain-ack releases in_progress claims before probing normalized-open
+//     rows for raw blocked holds; ordinary open continuation preassignments
+//     stay assigned (D5). A routeless claim takes the seat's route, as on the
+//     paths below, since kept it would leave the acked seat asleep holding
+//     it (mc-sca8r). A claim the seat's work_started cell or
+//     execution_claim_started stamp names is kept (PHASE1-2 §6.5), unless
+//     it is on a dispatch hold: the ack is no proof it never ran, and giving
+//     it back lost started work (mc-ilr3b);
 //   - the cascade, the stranded repair, both orphan releases and the
 //     retired-session sweep (`gc session close`, a removed named session)
 //     give back started work too: the seat is gone;
@@ -291,6 +291,10 @@ func ReleaseClaims(sw *SeatWork, scope ReleaseScope, seat releaseSeat, why relea
 // releaseListed is ReleaseClaims' body for claims a caller already listed
 // (the orphan releases list them from the tick's census).
 func releaseListed(claims []seatWorkHit, why releaseWhy, seat releaseSeat, cfg *config.City, opts ReleaseOpts) ReleaseOutcome {
+	return releaseListedWithClock(claims, why, seat, cfg, opts, time.Now)
+}
+
+func releaseListedWithClock(claims []seatWorkHit, why releaseWhy, seat releaseSeat, cfg *config.City, opts ReleaseOpts, now func() time.Time) ReleaseOutcome {
 	p := releasePolicies[why]
 	out := ReleaseOutcome{Why: map[string]string{}, Route: map[string]string{}}
 	keep := func(c seatWorkHit, why string) { out.Kept = append(out.Kept, c); out.Why[c.bead.ID] = why }
@@ -299,6 +303,19 @@ func releaseListed(claims []seatWorkHit, why releaseWhy, seat releaseSeat, cfg *
 		if slices.Contains(p.statuses, c.bead.Status) || c.bead.Status == "open" || c.bead.Status == "blocked" {
 			mine = append(mine, c)
 		}
+	}
+	if why == releaseDrainAck {
+		// Raw reads for open preassignments must not spend the bounded drain
+		// budget before started claims. Preserve order within both groups.
+		slices.SortStableFunc(mine, func(a, b seatWorkHit) int {
+			if a.bead.Status == "in_progress" && b.bead.Status != "in_progress" {
+				return -1
+			}
+			if a.bead.Status != "in_progress" && b.bead.Status == "in_progress" {
+				return 1
+			}
+			return 0
+		})
 	}
 	if p.startedKeeps && slices.ContainsFunc(mine, func(c seatWorkHit) bool { return c.bead.Status == "in_progress" || seat.started[c.bead.ID] }) {
 		for _, c := range mine {
@@ -320,7 +337,7 @@ func releaseListed(claims []seatWorkHit, why releaseWhy, seat releaseSeat, cfg *
 			out.Route[c.bead.ID] = route
 			continue
 		}
-		if !opts.Deadline.IsZero() && time.Now().After(opts.Deadline) {
+		if !opts.Deadline.IsZero() && now().After(opts.Deadline) {
 			out.Failed = append(out.Failed, c)
 			out.Why[c.bead.ID] = failedBudget
 			continue

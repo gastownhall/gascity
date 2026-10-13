@@ -4,6 +4,7 @@ import (
 	"errors"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -101,6 +102,98 @@ func TestReleaseListedDrainKeepsOrdinaryOpenPreassignment(t *testing.T) {
 	out := releaseListed([]seatWorkHit{{store: store, bead: snapshot}}, releaseDrainAck, releaseSeat{}, &config.City{Agents: []config.Agent{persistentWorker()}}, ReleaseOpts{})
 	if len(out.Released) != 0 || ledger.row().Assignee != "dead-session" {
 		t.Fatalf("drain released continuation preassignment: %+v", out)
+	}
+}
+
+// An open-row read consumes the remaining budget without sleeping. Started
+// claims must already be released, in their original relative order.
+func TestReleaseListedDrainPrioritizesStartedClaimsWithinBudget(t *testing.T) {
+	now := time.Unix(100, 0)
+	deadline := now.Add(time.Second)
+	var visits []string
+	var ledgers []*bdGuardLedger
+	var claims []seatWorkHit
+	for i, status := range []string{"open", "in_progress", "open", "in_progress"} {
+		ledger := newBdGuardLedger(status, "dead-session", map[string]string{
+			beadmeta.RoutedToMetadataKey:          "repo/worker",
+			beadmeta.ContinuationGroupMetadataKey: "group",
+		})
+		ledger.bead.ID = []string{"bd-open1", "bd-started1", "bd-open2", "bd-started2"}[i]
+		run := func(dir, name string, args ...string) ([]byte, error) {
+			if len(args) > 0 && args[0] == "show" {
+				visits = append(visits, ledger.bead.ID)
+				if status == "open" {
+					now = deadline.Add(time.Second)
+				}
+			}
+			return ledger.run(dir, name, args...)
+		}
+		store := beads.NewBdStoreWithPrefix(t.TempDir(), run, "bd")
+		ledgers = append(ledgers, ledger)
+		claims = append(claims, seatWorkHit{store: store, bead: ledger.row()})
+	}
+	out := releaseListedWithClock(claims, releaseDrainAck, releaseSeat{}, &config.City{Agents: []config.Agent{persistentWorker()}}, ReleaseOpts{Deadline: deadline}, func() time.Time { return now })
+	if got, want := visits, []string{"bd-started1", "bd-started2", "bd-open1"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("store reads = %v, want %v", got, want)
+	}
+	if len(out.Released) != 2 || out.Released[0].bead.ID != "bd-started1" || out.Released[1].bead.ID != "bd-started2" || len(out.Kept) != 1 || len(out.Failed) != 1 || out.Why["bd-open2"] != failedBudget {
+		t.Fatalf("release = %+v", out)
+	}
+	for i, ledger := range ledgers {
+		want := "dead-session"
+		if i == 1 || i == 3 {
+			want = ""
+		}
+		if got := ledger.row().Assignee; got != want {
+			t.Fatalf("claim %s owner = %q, want %q", ledger.bead.ID, got, want)
+		}
+	}
+}
+
+func TestReleaseListedOtherModesPreserveSnapshotOrder(t *testing.T) {
+	for _, why := range []releaseWhy{releaseKilledSeat, releaseCloseCascade, releaseStrandedRepair, releaseOrphan, releaseRetired} {
+		t.Run(string(rune('a'+why)), func(t *testing.T) {
+			store := beads.NewMemStore()
+			var claims []seatWorkHit
+			for _, status := range []string{"open", "in_progress", "open", "in_progress"} {
+				b, err := store.Create(beads.Bead{Status: status, Assignee: "dead-session", Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "repo/worker"}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				claims = append(claims, seatWorkHit{store: store, bead: b})
+			}
+			out := releaseListed(claims, why, releaseSeat{}, &config.City{Agents: []config.Agent{persistentWorker()}}, ReleaseOpts{})
+			got := out.Released
+			if why == releaseKilledSeat {
+				got = out.Kept
+			}
+			if len(got) != len(claims) {
+				t.Fatalf("release = %+v", out)
+			}
+			for i := range claims {
+				if got[i].bead.ID != claims[i].bead.ID {
+					t.Fatalf("claim %d = %s, want %s", i, got[i].bead.ID, claims[i].bead.ID)
+				}
+			}
+		})
+	}
+}
+
+func TestReleaseListedPreservesOtherNormalizedOpenHolds(t *testing.T) {
+	for _, status := range []string{"review", "testing", "deferred", "custom"} {
+		t.Run(status, func(t *testing.T) {
+			ledger := newBdGuardLedger(status, "dead-session", map[string]string{beadmeta.RoutedToMetadataKey: "repo/worker"})
+			store := beads.NewBdStoreWithPrefix(t.TempDir(), ledger.run, "bd")
+			snapshot, err := store.Get(ledger.bead.ID)
+			if err != nil || snapshot.Status != "open" {
+				t.Fatalf("snapshot = %+v, %v", snapshot, err)
+			}
+			before := ledger.row()
+			out := releaseListed([]seatWorkHit{{store: store, bead: snapshot}}, releaseCloseCascade, releaseSeat{}, &config.City{Agents: []config.Agent{persistentWorker()}}, ReleaseOpts{})
+			if len(out.Kept) != 1 || out.Why[snapshot.ID] != keptMoved || len(out.Released) != 0 || len(out.Failed) != 0 || len(ledger.updates) != 0 || !reflect.DeepEqual(ledger.row(), before) {
+				t.Fatalf("changed %s hold: %+v, row %+v, updates %v", status, out, ledger.row(), ledger.updates)
+			}
+		})
 	}
 }
 

@@ -194,7 +194,10 @@ func TestNativeBlockedReleaseLostGuardStaysHandled(t *testing.T) {
 		{name: "reopened after raw read", status: beadslib.StatusBlocked, writeErr: issueops.ErrStatusMismatch, wantHandled: true},
 		{name: "owner changed after raw read", status: beadslib.StatusBlocked, writeErr: issueops.ErrAssigneeMismatch, wantHandled: true},
 		{name: "version changed after raw read", status: beadslib.StatusBlocked, writeErr: issueops.ErrVersionMismatch, wantHandled: true},
-		{name: "other raw hold", status: beadslib.Status("review"), wantHandled: true},
+		{name: "review hold", status: beadslib.Status("review"), wantHandled: true},
+		{name: "testing hold", status: beadslib.Status("testing"), wantHandled: true},
+		{name: "deferred hold", status: beadslib.Status("deferred"), wantHandled: true},
+		{name: "custom hold", status: beadslib.Status("custom"), wantHandled: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fixture := openIssueForConditionalTest()
