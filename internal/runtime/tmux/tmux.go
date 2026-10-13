@@ -5276,12 +5276,13 @@ func codexTranscriptTailContainsTurnAborted(tail string) bool {
 
 // claudeBusySpinnerRe matches Claude Code's live "working" spinner footer: an
 // elapsed timer with a token-stream / interrupt suffix in parentheses, e.g.
-// "(2m 28s · ↓ 10.9k tokens)" or "(28m 11s • esc to interrupt)". Current Claude
-// Code (notably bypass-permissions mode) shows this spinner instead of a bare
-// "esc to interrupt" string while busy. Anchored on "(<digits><m|s>" before the
+// "(2m 28s · ↓ 10.9k tokens)", "(28m 11s • esc to interrupt)", or, once a turn
+// passes an hour, "(1h 2m 3s · ↓ 18.5k tokens)". Current Claude Code (notably
+// bypass-permissions mode) shows this spinner instead of a bare "esc to
+// interrupt" string while busy. Anchored on "(<digits><h|m|s>" before the
 // "·"/"•" separator so it does NOT match idle chrome — "(ctrl+o to expand)",
 // "(main)", "⏱️ Jun 4 02:57:04", or the "✻ Worked for 3m 38s" done marker.
-var claudeBusySpinnerRe = regexp.MustCompile(`\([0-9]+[ms][^)]*[·•]`)
+var claudeBusySpinnerRe = regexp.MustCompile(`\([0-9]+[hms][^)]*[·•]`)
 
 // claudeBareGerundSpinnerRe matches Claude Code's spinner row before it has
 // gained the elapsed-timer suffix claudeBusySpinnerRe matches -- e.g.

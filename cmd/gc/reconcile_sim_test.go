@@ -365,6 +365,9 @@ type sim struct {
 	parked   []*simEffect
 	lastSeq  uint64
 	prev     map[string]beads.Bead // "leg/id" → row, after the last step
+	// respawnBegun are the (row, bead) pairs with an idle-respawn begin
+	// (I25).
+	respawnBegun map[string]bool
 	// killsChecked is how many of the provider's kills I4 and I5 judged.
 	killsChecked int
 	// closedInStep is, by session name, each row an outside writer closed
@@ -718,7 +721,7 @@ func (s *sim) releaseInside(i int) {
 		}
 	}
 	e.outside = fire
-	if e.seam == seamAfterCall { // the admit-ticket Call's seam comes first: re-arm for the launch Call's
+	if e.seam == seamAfterCall { // the next Call's seam (the admit ticket's, or a recycle's kill) comes first: re-arm for the one after it
 		e.outside = func() { e.seam, e.outside = seamAfterCall, fire }
 	}
 	s.release(i)
@@ -835,7 +838,7 @@ var externalOps = []struct {
 		s.setMeta(l, b.ID, "quarantined_until", s.rel(time.Duration(1+s.rng.IntN(120))*time.Second), "sleep_reason", "quarantine")
 	}},
 	{"kill", func(s *sim, l *simLeg, b beads.Bead) { // gc session kill: the fence, then the stop
-		if _, err := writeSessionKillFence(l.backing, b.ID, s.clk.Now()); err != nil && !errors.Is(err, errSessionKillFenceSuperseded) {
+		if _, err := session.WriteKillFence(l.backing, b.ID, s.clk.Now()); err != nil && !errors.Is(err, session.ErrKillFenceSuperseded) {
 			s.t.Fatal(err)
 		}
 		_ = s.sp.Stop(b.Metadata["session_name"])
@@ -855,7 +858,7 @@ var externalOps = []struct {
 		}
 	}},
 	{"close", func(_ *sim, l *simLeg, b beads.Bead) { _ = l.backing.Close(b.ID) }},
-	{"suspend", func(s *sim, l *simLeg, b beads.Bead) { // gc session suspend: the stop, then the state
+	{"suspend", func(s *sim, l *simLeg, b beads.Bead) { // the stop and rig-restart sweeps' soft suspend (v5.9u): the stop, then the state
 		_ = s.sp.Stop(b.Metadata["session_name"])
 		s.setMeta(l, b.ID, "state", string(session.StateSuspended), "suspended_at", s.rel(0), "slept_at", "", "sleep_reason", "")
 	}},
@@ -1147,7 +1150,9 @@ func (s *sim) checkInflight() {
 
 // quiesce holds the inputs stable: every held event and listing is
 // delivered, then a pass runs each patrol, every effect released at once,
-// until 2 × patrol + startup_timeout past the last pending timer. From
+// until 2 × patrol + startup_timeout past the last pending timer, as read
+// after the first such pass (which records the settlements still pending).
+// From
 // there, two passes in a row must admit nothing and change nothing (I10),
 // and the in-flight map must then be empty (I8).
 func (s *sim) quiesce() {
@@ -1173,7 +1178,7 @@ func (s *sim) quiesce() {
 	slack := 2*simPatrol + s.cfg.Session.StartupTimeoutDuration()
 	bound := s.lastTimer().Add(slack)
 	rounds := quiesceRounds{}
-	for done := false; !done && len(s.failures) == 0; {
+	for first, done := true, false; !done && len(s.failures) == 0; first = false {
 		before, backoff, at := s.snapshot(), s.p.backoff.Snapshot(), s.clk.Now()
 		s.round = nil
 		s.inventory()
@@ -1183,6 +1188,12 @@ func (s *sim) quiesce() {
 			s.release(0)
 		}
 		s.audit("v2")
+		if b := s.lastTimer().Add(slack); first && b.After(bound) {
+			// Once, after the first pass: it records the settlements still
+			// pending at quiescence, so the backoff of the last refusal
+			// before it is in the table, and the bound covers it.
+			bound = b
+		}
 		after := s.snapshot()
 		changed := !maps.EqualFunc(before, after, sameBead)
 		switch {

@@ -168,7 +168,7 @@ func TestPreWakeRefusesWhatHoldsOrMovedSinceThePass(t *testing.T) {
 		{"held at the pass", []string{"held_until", future}, nil, causeHeld},
 		{"user-hold at the pass", []string{"sleep_intent", "user-hold"}, nil, causeHeld},
 		{"quarantined at the pass", []string{"quarantined_until", future}, nil, causeHeld},
-		{"suspended at the pass", []string{"state", "suspended"}, nil, causeHeld},
+		{"managed suspend at the pass", []string{"state", "suspended", "sleep_intent", "user-hold", "held_until", future}, nil, causeHeld},
 		{"held since", nil, []string{"held_until", future}, causePremise},
 		{"quarantined since", nil, []string{"quarantined_until", future}, causePremise},
 		{"kill fence since", nil, []string{"state", "asleep", "state_reason", session.KillPendingReason, "sleep_reason", string(session.SleepReasonKilled), "slept_at", gatherNow.Format(time.RFC3339)}, causePremise},
@@ -313,13 +313,23 @@ func TestLaunchDeadlines(t *testing.T) {
 	}
 }
 
-// Kills legacy's blind clear and re-mint (S-1): PreWake fills an empty key
-// once and replaces a key whose transcript is gone, in its CAS, and the
-// launch runs that key.
+// Kills legacy's blind clear and re-mint (S-1), and a clear of an allocated
+// key (mc-keie0): PreWake fills an empty key once and replaces a committed
+// key (a started_config_hash beside it) whose transcript is gone, in its
+// CAS; an allocated key no start committed keeps, with no continuation
+// reset; the launch runs the row's key.
 func TestStartEffectFreshKeyNotClearedOrReminted(t *testing.T) {
-	for _, meta := range [][]string{nil, {"session_key", "stale"}} {
+	for _, c := range []struct {
+		name  string
+		meta  []string
+		fresh bool // a fresh key, not the row's
+	}{
+		{"no key", nil, true},
+		{"a committed key whose transcript is gone", []string{"session_key", "stale", "started_config_hash", "h-1"}, true},
+		{"an allocated key", []string{"session_key", "allocated", "continuation_epoch", "5"}, false},
+	} {
 		stubTranscript(t, false)
-		k, _ := launchKit(t, "asleep", meta...)
+		k, _ := launchKit(t, "asleep", c.meta...)
 		k.p.Clock.(*fakePlannerClock).auto = true // the stale-key wait
 		row := k.p.World.Census.Rows[k.it.Key]
 		tp := TemplateParams{TemplateName: "worker", Command: "agent", WorkDir: t.TempDir(), ResolvedProvider: &config.ResolvedProvider{Name: "claude", SessionIDFlag: "--session-id"}}
@@ -327,14 +337,66 @@ func TestStartEffectFreshKeyNotClearedOrReminted(t *testing.T) {
 		var cmd string
 		k.p.Runtime.(*startHookLeaf).onStart = func(context.Context) {}
 		if s := k.runKind(); s.Outcome != settledLanded {
-			t.Fatalf("settlement %+v, want landed", s)
+			t.Fatalf("%s: settlement %+v, want landed", c.name, s)
 		}
 		key := k.meta("session_key")
 		if cfgs := k.p.Runtime.(*startHookLeaf).cfgs; len(cfgs) > 0 {
 			cmd = cfgs[0].Command
 		}
-		if key == "" || key == "stale" || !strings.HasSuffix(cmd, "--session-id "+key) {
-			t.Fatalf("row key %q, command %q; want a fresh key launched with --session-id", key, cmd)
+		if key == "" || (key == "stale" || key == "allocated") == c.fresh || !strings.HasSuffix(cmd, "--session-id "+key) {
+			t.Fatalf("%s: row key %q, command %q; want a fresh key %v, launched with --session-id", c.name, key, cmd, c.fresh)
+		}
+		if !c.fresh && (k.meta("continuation_reset_pending") != "" || k.meta("continuation_epoch") != "5") {
+			t.Fatalf("%s: continuation reset %q epoch %q; want none for an allocated key", c.name, k.meta("continuation_reset_pending"), k.meta("continuation_epoch"))
+		}
+	}
+}
+
+// Kills an allocated key kept for a provider with no session_id_flag
+// (mc-keie0 ruling): it would resume any key it is handed, so PreWake still
+// resets a key whose transcript is gone and launches with none.
+func TestStartEffectClearsAResumeOnlyProvidersAllocatedKey(t *testing.T) {
+	stubTranscript(t, false)
+	k, leaf := launchKit(t, "asleep", "session_key", "allocated", "continuation_epoch", "5")
+	k.p.Clock.(*fakePlannerClock).auto = true // the stale-key wait
+	row := k.p.World.Census.Rows[k.it.Key]
+	tp := TemplateParams{TemplateName: "worker", Command: "agent", WorkDir: t.TempDir(), ResolvedProvider: &config.ResolvedProvider{Name: "claude", ResumeFlag: "--resume", ResumeStyle: "flag"}}
+	k.p.World.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(row.Info): {TP: tp}}}
+	if s := k.runKind(); s.Outcome != settledLanded || len(leaf.cfgs) != 1 {
+		t.Fatalf("settlement %+v, want landed", s)
+	}
+	if k.meta("session_key") != "" || k.meta("continuation_epoch") != "6" || strings.Contains(leaf.cfgs[0].Command, "allocated") {
+		t.Fatalf("key %q epoch %q command %q; want the key reset and a bare launch", k.meta("session_key"), k.meta("continuation_epoch"), leaf.cfgs[0].Command)
+	}
+}
+
+// Kills a v2 PreWake that starts a committed manual conversation fresh
+// silently (mc-v9xzh): its landed stale-key reset carries one
+// session.conversation_reset{reason:stale-key}; a committed row that is not
+// manual, and an allocated manual key, carry none.
+func TestStaleKeyResetRecordsConversationReset(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		meta []string
+		want int
+	}{
+		{"a committed manual conversation", []string{"session_origin", "manual", "session_key", "k-1", "started_config_hash", "h-1"}, 1},
+		{"the legacy manual marker", []string{"manual_session", "true", "session_key", "k-1", "started_config_hash", "h-1"}, 1},
+		{"a committed row that is not manual", []string{"session_key", "k-1", "started_config_hash", "h-1"}, 0},
+		{"an allocated manual key", []string{"session_origin", "manual", "session_key", "k-1"}, 0},
+	} {
+		stubTranscript(t, false)
+		k, _ := launchKit(t, "asleep", c.meta...)
+		k.p.Clock.(*fakePlannerClock).auto = true // the stale-key wait
+		row := k.p.World.Census.Rows[k.it.Key]
+		tp := TemplateParams{TemplateName: "worker", Command: "agent", WorkDir: t.TempDir(), ResolvedProvider: &config.ResolvedProvider{Name: "claude", SessionIDFlag: "--session-id"}}
+		k.p.World.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(row.Info): {TP: tp}}}
+		s := k.runKind()
+		if s.Outcome != settledLanded {
+			t.Fatalf("%s: settlement %+v, want landed", c.name, s)
+		}
+		if got := conversationResets(t, s.Facts.Events, "gc-1", tp); got != c.want {
+			t.Errorf("%s: %d session.conversation_reset events, want %d", c.name, got, c.want)
 		}
 	}
 }
@@ -436,7 +498,7 @@ func TestLaunchUsesAssignedTaskWorkDir(t *testing.T) {
 		k.p.World.Demand = demandView{StorePartial: partial, AssignedWork: []beads.Bead{{ID: "w-1", Status: "in_progress", Assignee: "gc-1", Metadata: map[string]string{"work_dir": taskDir}}}}
 		var probed string
 		old := staleResumeKeyProbe
-		staleResumeKeyProbe = func(_, dir, _ string) (bool, bool) { probed = dir; return true, true }
+		staleResumeKeyProbe = func(_ []string, _, dir, _ string) (bool, bool) { probed = dir; return true, true }
 		s := k.runKind()
 		staleResumeKeyProbe = old
 		want := taskDir
@@ -950,7 +1012,7 @@ func TestLaunchPersistsTheMCPSnapshotOnSuccessOnly(t *testing.T) {
 // from the transcript layer the key stays, unrotated.
 func TestUnprobeableTranscriptKeepsTheKey(t *testing.T) {
 	old := staleResumeKeyProbe
-	staleResumeKeyProbe = func(string, string, string) (bool, bool) { return false, false }
+	staleResumeKeyProbe = func([]string, string, string, string) (bool, bool) { return false, false }
 	t.Cleanup(func() { staleResumeKeyProbe = old })
 	k, _ := launchKit(t, "asleep", "session_key", "k-1", "continuation_epoch", "5")
 	k.p.Clock.(*fakePlannerClock).auto = true
@@ -1085,7 +1147,8 @@ func TestPlannerHandsItsGuardToTheStartAndFlushes(t *testing.T) {
 
 // Kills the heartbeat-hold exemption widened or lost (v5.9i): A17's respawn
 // launches through an agent heartbeat's hold; an A18 start over the same row,
-// and A17 over an operator's hold, are refused held.
+// and A17 over an operator's hold, are refused held. A soft suspend holds
+// neither (v5.9u).
 func TestPreWakeExemptsTheHeartbeatHoldForA17Only(t *testing.T) {
 	soon := gatherNow.Add(time.Hour).Format(time.RFC3339)
 	for _, c := range []struct {
@@ -1097,7 +1160,8 @@ func TestPreWakeExemptsTheHeartbeatHoldForA17Only(t *testing.T) {
 		{"A18 over a heartbeat hold", decideStart, []string{"held_until", soon}, false},
 		{"A17 over an operator's hold", decideHeartbeatRespawn, []string{"held_until", soon, "sleep_intent", "user-hold"}, false},
 		{"A17 over a live quarantine", decideHeartbeatRespawn, []string{"held_until", soon, "quarantined_until", soon}, false},
-		{"A17 over a soft suspend", decideHeartbeatRespawn, []string{"held_until", soon, "state", "suspended"}, false},
+		{"A17 over a soft suspend", decideHeartbeatRespawn, []string{"held_until", soon, "state", "suspended"}, true},
+		{"A18 over a soft suspend", decideStart, []string{"state", "suspended", "suspended_at", gatherNow.Add(-time.Hour).Format(time.RFC3339)}, true},
 	} {
 		k, _ := launchKit(t, "asleep", c.meta...)
 		k.it.Reason = c.reason

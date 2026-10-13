@@ -100,7 +100,7 @@ func (p *planner) observeSettlement(s settlement) {
 	}
 	p.metrics.count(&p.metrics.settled, settledKey(s))
 	p.observeRekeySettlement(s)
-	if phase := idleRespawnPhases[s.Kind]; phase != "" && s.Outcome == settledLanded && s.Reason == idleRespawnDrainReason {
+	if phase := idleRespawnPhase(s); phase != "" {
 		p.metrics.count(&p.metrics.series, phase)
 	}
 	if (s.Kind == intentRowHeal || s.Kind == intentRowHealFresh || s.Kind == intentDriftRepair) && (s.Outcome == settledRefused || s.Outcome == settledFailed) &&
@@ -126,11 +126,28 @@ var settleOutcomeNames = map[settleOutcome]string{
 }
 
 // idleRespawnPhases are the idle-respawn series (C6d, Gate S) a landed
-// settlement counts in by kind, when it carries the legacy drain reason
-// C6d's begin, void and stop intents carry.
+// settlement counts in by kind, when its intent's reason names the
+// idle-respawn drain after its arm's prefix (drain-begin:, drain-void:,
+// drain-cancel:, stop:, stop-finalize:). Ends the series do not count, so
+// begun less voided and completed is not what is outstanding: the residue
+// void of a request an operator ended (reason residue), A15's stop
+// pre-empting a requested respawn (its own reason), and a PreWake clearing
+// the request of a row its runtime left.
 var idleRespawnPhases = map[string]string{
 	intentDrainBegin: "idle_respawn_begun", intentDrainBeginFresh: "idle_respawn_begun",
-	intentDrainVoid: "idle_respawn_voided", intentStop: "idle_respawn_completed",
+	intentDrainVoid: "idle_respawn_voided", intentDrainCancel: "idle_respawn_voided", intentStop: "idle_respawn_completed",
+}
+
+// idleRespawnPhase is the series a landed settlement counts in: by kind, or
+// voided for a signal whose revalidation voided the drain instead.
+func idleRespawnPhase(s settlement) string {
+	if _, reason, _ := strings.Cut(s.Reason, ":"); s.Outcome != settledLanded || reason != idleRespawnDrainReason {
+		return ""
+	}
+	if s.Kind == intentSignalFresh && strings.HasPrefix(s.Cause, causeIdleRespawnVoid) {
+		return "idle_respawn_voided"
+	}
+	return idleRespawnPhases[s.Kind]
 }
 
 // soakSeries are passMetrics.series' counters, always in the record.

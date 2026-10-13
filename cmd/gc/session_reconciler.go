@@ -2955,15 +2955,15 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					// rollback reason, so a normal start arms no auto-trace.
 					// The line names why, one standing condition per reason,
 					// so a hold that moves from the window to the lease says so.
+					// An unverifiable lease has said it already, in the WARNING.
 					kind, why := "start_in_flight.pending_create_rollback", "its start is in flight"
-					switch live {
-					case ownStartLeaseHeld:
+					if live == ownStartLeaseHeld {
 						kind, why = "start_lease_held.pending_create_rollback", "its start holds the runtime lease"
-					case ownStartLeaseUnverifiable:
-						kind, why = "start_lease_unverifiable.pending_create_rollback", "its runtime lease cannot be verified"
 					}
-					logStandingCondition(dt, stderr, id, kind, fmt.Sprintf(
-						"session reconciler: pending-create rollback of %s deferred: %s and the live runtime carries no identity yet", name, why), clk.Now())
+					if live != ownStartLeaseUnverifiable {
+						logStandingCondition(dt, stderr, id, kind, fmt.Sprintf(
+							"session reconciler: pending-create rollback of %s deferred: %s and the live runtime carries no identity yet", name, why), clk.Now())
+					}
 					if trace != nil {
 						trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonWake, TraceOutcomeStartInFlight, tp.TemplateName, name, traceRecordPayload{
 							"session_bead_id": id,
@@ -3580,7 +3580,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// checkStability returns the write-returns-Info result (Step 6d); the input
 		// Info unchanged when no stability event was recorded, so the assignment on the
 		// true branch is the only snapshot advance. Pre-pass-masked (STEP6-PREPASS-AUDIT group 2).
-		if stabInfo, stab := checkStability(infoByID[id], cfg, alive, dt, sessFront, clk, nil); stab {
+		if stabInfo, stab := checkStability(infoByID[id], cfg, alive, dt, sessFront, clk, nil, launchTranscriptRoots(cfg, tp)); stab {
 			tick.set(id, stabInfo)
 			continue // rapid exit recorded, skip further processing
 		}
@@ -7427,6 +7427,10 @@ func relaunchAgentForLaunchDrift(
 		return false, relaunchAbortResidueFold(preparedInfo, sessFront, hadResumeKeyBeforePrepare)
 	}
 	fmt.Fprintf(stdout, "Launch-only config change for '%s', relaunched agent in warm box\n", tp.DisplayName()) //nolint:errcheck
+	// The relaunch started a committed manual conversation fresh.
+	if prepared.conversationReset {
+		rec.Record(staleKeyConversationResetEvent(info, tp))
+	}
 	// Rebaseline the Core baseline (started_config_hash) and the partition
 	// sub-hashes so the next tick sees no Core drift. The hashes come from
 	// buildPreparedStart's PRE-rewrite fingerprints (prepared.coreHash etc.), NOT

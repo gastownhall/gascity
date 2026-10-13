@@ -10,6 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
@@ -527,7 +528,7 @@ func (s *Server) humaDeleteWorkflow(workflowID string) (*OKResponse, error) {
 		rootIDs := make([]string, 0, 2)
 		rootSeen := make(map[string]struct{}, 2)
 		addBead := func(b beads.Bead) {
-			if b.ID == "" {
+			if b.ID == "" || session.IsSessionBeadOrRepairable(b) { // never a session row (mc-dkblm)
 				return
 			}
 			if _, ok := seen[b.ID]; ok {
@@ -677,7 +678,7 @@ func (s *Server) humaHandleWorkflowDelete(_ context.Context, input *WorkflowDele
 		rootIDs := make([]string, 0, 2)
 		rootSeen := make(map[string]struct{}, 2)
 		addBead := func(b beads.Bead) {
-			if b.ID == "" {
+			if b.ID == "" || session.IsSessionBeadOrRepairable(b) { // never a session row (mc-dkblm)
 				return
 			}
 			if _, ok := seen[b.ID]; ok {

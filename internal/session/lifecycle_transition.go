@@ -456,6 +456,22 @@ func SleepPatch(now time.Time, reason string) MetadataPatch {
 	}
 }
 
+// KeepQuarantineReason drops patch's sleep_reason while the row's quarantine
+// is in force at now and its reason is the quarantine's (quarantine,
+// rate_limit, context-churn): a finalize landing after a late quarantine
+// never overwrites its reason, as the quarantine dominates (mc-slkxd). It
+// returns patch, edited in place.
+func KeepQuarantineReason(patch MetadataPatch, d Disposition, reason string, now time.Time) MetadataPatch {
+	if _, ok := patch["sleep_reason"]; !ok || !d.Quarantine.After(now) {
+		return patch
+	}
+	switch SleepReason(strings.TrimSpace(reason)) {
+	case SleepReasonQuarantine, SleepReasonRateLimit, SleepReasonContextChurn:
+		delete(patch, "sleep_reason")
+	}
+	return patch
+}
+
 // AcknowledgeDrainPatch records an agent-acknowledged drain. Drained is a
 // compatibility state distinct from ordinary asleep: demand alone does not
 // reselect it, but explicit attach or work can. Like SleepPatch, it stamps

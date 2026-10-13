@@ -942,3 +942,64 @@ func TestPaneContainsBusyIndicatorBareSpinnerRow(t *testing.T) {
 		}
 	}
 }
+
+// TestPaneContainsBusyIndicatorHourTimer pins the busy reading of Claude Code's
+// spinner once a turn passes one hour and the timer gains an hour group. The
+// timer alone must read busy, not only the leading glyph and verb: a frame
+// whose glyph is outside the shipped set still carries the timer. Hour-form
+// idle chrome must keep reading idle, since a false busy holds WaitForIdle.
+func TestPaneContainsBusyIndicatorHourTimer(t *testing.T) {
+	tests := []struct {
+		line string
+		want bool
+	}{
+		// Live pane lines from long turns.
+		{"✽ Canoodling… (5h 52m 12s · ↓ 39.5k tokens)", true},
+		{"· Flibbertigibbeting… (2h 12m 40s · thinking with max effort)", true},
+		{"* Orbiting… (6h 16m 34s · ↓ 443 tokens · thought for 1s)", true},
+		{"* Orbiting… (6h 16m 27s)", true}, // bare frame, no separator yet
+		// The timer is what makes these busy: no known glyph leads the line.
+		{"⚡ Puttering… (1h 21m 34s · ↓ 45.3k tokens)", true},
+		{"  (1h 2m 3s · ↓ 18.5k tokens)", true},
+		{"• Waiting for background terminal (1h 05m 07s • esc to interrupt)", true},
+		{"✻ Worked for 1h 2m 3s", false}, // done marker, hour form
+		{"  edited (2h ago)", false},
+		{"  Retrying in (5s)", false},
+		{"🧠 Sonnet 4.6 | 📁 witness | ⏱️  Jun 3 20:10:09", false},
+		{"  … +9 lines (ctrl+o to expand)", false},
+	}
+	for _, tt := range tests {
+		if got := paneContainsBusyIndicator([]string{tt.line}); got != tt.want {
+			t.Errorf("paneContainsBusyIndicator(%q) = %v, want %v", tt.line, got, tt.want)
+		}
+	}
+}
+
+// TestSnapshotPaneIdleWithPrefixHourSpinner pins the pane-level verdict for a
+// Claude Code seat more than an hour into a turn: the "❯" prompt stays visible
+// beside the spinner, so the scan must answer busy from the spinner alone and
+// idle only once the done marker replaces it.
+func TestSnapshotPaneIdleWithPrefixHourSpinner(t *testing.T) {
+	tests := []struct {
+		name string
+		pane string
+		want bool
+	}{
+		{"hour spinner above the prompt", "✽ Puttering… (1h 21m 34s · ↓ 45.3k tokens · thinking with max effort)\n\n❯ \n", false},
+		{"hour spinner without a known glyph", "⚡ Puttering… (1h 21m 34s · ↓ 45.3k tokens)\n\n❯ \n", false},
+		{"hour done marker above the prompt", "✻ Worked for 1h 2m 3s\n\n❯ \n", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tm := NewTmux()
+			tm.exec = &fakeExecutor{agentPane: true, out: tt.pane}
+			got, err := tm.snapshotPaneIdleWithPrefix("gc-test", "❯")
+			if err != nil {
+				t.Fatalf("snapshotPaneIdleWithPrefix error = %v, want nil", err)
+			}
+			if got != tt.want {
+				t.Errorf("snapshotPaneIdleWithPrefix idle = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
