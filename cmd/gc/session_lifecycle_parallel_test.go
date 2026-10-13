@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
@@ -8599,6 +8600,107 @@ func TestBuildPreparedStartKeepsAnAllocatedKey(t *testing.T) {
 				t.Fatalf("key %q (stored %q, reset pending %q), command %q; want kept=%v and a command with %q", info.SessionKey, got.Metadata["session_key"], got.Metadata["continuation_reset_pending"], prepared.cfg.Command, c.kept, c.want)
 			}
 		})
+	}
+}
+
+// conversationResets counts evs' session.conversation_reset events for id,
+// each checked for the agent as Subject and template and the stale-key reason
+// in its payload.
+func conversationResets(t *testing.T, evs []events.Event, id string, tp TemplateParams) int {
+	t.Helper()
+	n := 0
+	for _, e := range evs {
+		if e.Type != events.SessionConversationReset {
+			continue
+		}
+		var p api.SessionLifecyclePayload
+		if err := json.Unmarshal(e.Payload, &p); err != nil || e.SessionID != id || e.Subject != tp.DisplayName() || p.SessionID != id || p.Template != tp.TemplateName || p.Reason != "stale-key" {
+			t.Fatalf("event %+v (payload %+v, err %v), want session %s, subject %q, template %q, reason stale-key", e, p, err, id, tp.DisplayName(), tp.TemplateName)
+		}
+		n++
+	}
+	return n
+}
+
+// Kills a legacy stale-resume clear that starts a committed manual
+// conversation fresh silently (mc-v9xzh): it records one
+// session.conversation_reset{reason:stale-key}; a committed pool row's
+// clear and an allocated manual key's start record none.
+func TestLegacyStaleKeyClearRecordsConversationReset(t *testing.T) {
+	prev := staleResumeKeyProbe
+	staleResumeKeyProbe = func([]string, string, string, string) (bool, bool) { return false, true }
+	t.Cleanup(func() { staleResumeKeyProbe = prev })
+	for _, c := range []struct {
+		name string
+		meta map[string]string
+		want int
+	}{
+		{"a committed manual conversation", map[string]string{"session_origin": "manual", "session_key": "k-1", "started_config_hash": "h-1"}, 1},
+		{"the legacy manual marker", map[string]string{"manual_session": "true", "session_key": "k-1", "started_config_hash": "h-1"}, 1},
+		{"a committed row that is not manual", map[string]string{"session_key": "k-1", "started_config_hash": "h-1"}, 0},
+		{"an allocated manual key", map[string]string{"session_origin": "manual", "session_key": "k-1"}, 0},
+	} {
+		env := newReconcilerTestEnv(t)
+		session := env.createSessionBead("mayor", "mayor")
+		c.meta["work_dir"] = t.TempDir()
+		env.setSessionMetadata(&session, c.meta)
+		tp := driftResumeSessionIDCapableTemplateParams()
+		tp.WorkDir = c.meta["work_dir"]
+		rec := events.NewFake()
+		executePlannedStartsTraced(context.Background(), []startCandidate{{info: env.sessionInfo(session.ID), tp: tp}},
+			&config.City{Agents: []config.Agent{{Name: "mayor"}}}, map[string]TemplateParams{"mayor": tp}, env.sp, env.store, "test-city", env.city,
+			&clock.Fake{Time: time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC)}, rec, 10*time.Second, &env.stdout, &env.stderr, nil,
+			withStartStabilityWaiter(immediateStartStabilityWaiter), withSessionStaleKeyDetectionWaiter(immediateSessionStaleKeyDetectionWaiter))
+		if got := conversationResets(t, rec.Events, session.ID, tp); got != c.want {
+			t.Errorf("%s: %d session.conversation_reset events, want %d (stderr %s)", c.name, got, c.want, env.stderr.String())
+		}
+	}
+}
+
+// Kills a launch-drift relaunch that starts a committed manual conversation
+// fresh silently (mc-v9xzh): once the warm relaunch succeeds it records one
+// session.conversation_reset{reason:stale-key}; a row that is not manual
+// records none.
+func TestLaunchDriftRelaunchRecordsConversationReset(t *testing.T) {
+	prev := staleResumeKeyProbe
+	staleResumeKeyProbe = func([]string, string, string, string) (bool, bool) { return false, true }
+	t.Cleanup(func() { staleResumeKeyProbe = prev })
+	for _, manual := range []bool{true, false} {
+		env := newReconcilerTestEnv(t)
+		env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+		rec := events.NewFake()
+		tp := TemplateParams{Command: "claude", SessionName: "worker", TemplateName: "worker"}
+		if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "claude"}); err != nil {
+			t.Fatal(err)
+		}
+		b := env.createSessionBead("worker", "worker")
+		env.markSessionActive(&b)
+		meta := map[string]string{"provider": "claude", "work_dir": t.TempDir(), "session_key": "k-1"}
+		if manual {
+			meta["session_origin"] = "manual"
+		}
+		env.setSessionMetadata(&b, meta)
+		agentCfg := sessionCoreConfigForHashInfo(tp, env.sessionInfo(b.ID))
+		oldCfg := agentCfg
+		oldCfg.Command = "stale-" + agentCfg.Command
+		env.setSessionMetadata(&b, map[string]string{
+			"started_config_hash":    runtime.CoreFingerprint(agentCfg),
+			"started_provision_hash": runtime.ProvisionFingerprint(oldCfg),
+			"started_launch_hash":    runtime.LaunchFingerprint(oldCfg),
+		})
+		ok, _ := relaunchAgentForLaunchDrift(context.Background(), env.sp, sessionFrontDoor(env.store), env.sessionInfo(b.ID), "worker",
+			tp, t.TempDir(), env.cfg, env.store, dispatchOptionSources{}, runtime.CoreFingerprint(agentCfg), runtime.CoreFingerprint(agentCfg),
+			runtime.ProvisionFingerprint(oldCfg), runtime.LaunchFingerprint(oldCfg), []string{"Command"}, rec, nil, &env.stdout, &env.stderr)
+		if !ok || env.sp.CountCalls("Relaunch", "worker") != 1 {
+			t.Fatalf("manual %v: relaunch = %v, relaunches %d; stderr %q", manual, ok, env.sp.CountCalls("Relaunch", "worker"), env.stderr.String())
+		}
+		want := 0
+		if manual {
+			want = 1
+		}
+		if got := conversationResets(t, rec.Events, b.ID, tp); got != want {
+			t.Errorf("manual %v: %d session.conversation_reset events, want %d", manual, got, want)
+		}
 	}
 }
 

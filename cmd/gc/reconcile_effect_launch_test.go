@@ -370,6 +370,37 @@ func TestStartEffectClearsAResumeOnlyProvidersAllocatedKey(t *testing.T) {
 	}
 }
 
+// Kills a v2 PreWake that starts a committed manual conversation fresh
+// silently (mc-v9xzh): its landed stale-key reset carries one
+// session.conversation_reset{reason:stale-key}; a committed row that is not
+// manual, and an allocated manual key, carry none.
+func TestStaleKeyResetRecordsConversationReset(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		meta []string
+		want int
+	}{
+		{"a committed manual conversation", []string{"session_origin", "manual", "session_key", "k-1", "started_config_hash", "h-1"}, 1},
+		{"the legacy manual marker", []string{"manual_session", "true", "session_key", "k-1", "started_config_hash", "h-1"}, 1},
+		{"a committed row that is not manual", []string{"session_key", "k-1", "started_config_hash", "h-1"}, 0},
+		{"an allocated manual key", []string{"session_origin", "manual", "session_key", "k-1"}, 0},
+	} {
+		stubTranscript(t, false)
+		k, _ := launchKit(t, "asleep", c.meta...)
+		k.p.Clock.(*fakePlannerClock).auto = true // the stale-key wait
+		row := k.p.World.Census.Rows[k.it.Key]
+		tp := TemplateParams{TemplateName: "worker", Command: "agent", WorkDir: t.TempDir(), ResolvedProvider: &config.ResolvedProvider{Name: "claude", SessionIDFlag: "--session-id"}}
+		k.p.World.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(row.Info): {TP: tp}}}
+		s := k.runKind()
+		if s.Outcome != settledLanded {
+			t.Fatalf("%s: settlement %+v, want landed", c.name, s)
+		}
+		if got := conversationResets(t, s.Facts.Events, "gc-1", tp); got != c.want {
+			t.Errorf("%s: %d session.conversation_reset events, want %d", c.name, got, c.want)
+		}
+	}
+}
+
 // Kills a Noop that takes a half-open endpoint's single probe, and a launch
 // without the ticket (SC N1): only the launch admits, and holds it through
 // the Start; its success closes the breaker.

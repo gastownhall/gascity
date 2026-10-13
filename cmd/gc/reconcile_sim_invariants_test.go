@@ -667,9 +667,14 @@ func TestSimChecksBite(t *testing.T) {
 			s.closedInStep = map[string]beads.Bead{"s-x": row("x")}
 			s.sp.kills = append(s.sp.kills, simKill{Method: "Stop", Name: "s-x", Hit: &simRuntime{id: "x", epoch: "2", token: "tok-1"}})
 		}},
-		{"I4 ", func(s *sim) { // a just-closed pending create's name, another row's runtime (v5.9n)
+		{"I4 ", func(s *sim) { // a just-closed pending create's own name, another row's runtime (v5.9n)
+			x := poolRow("x", "worker", 1, "creating", "session_name", "s-x", "instance_token", "tok-2", "generation", "2", "pending_create_claim", "true")
+			x.Status = "open"
+			if !ownsName(sessionInfoFromBead(x), "s-x") {
+				s.t.Fatal("the row does not own s-x: the case would not reach the C8.2(a) exception")
+			}
 			s.prev = map[string]beads.Bead{}
-			s.closedInStep = map[string]beads.Bead{"s-x": row("x", "pending_create_claim", "true")}
+			s.closedInStep = map[string]beads.Bead{"s-x": x}
 			s.sp.kills = append(s.sp.kills, simKill{Method: "Stop", Name: "s-x", Hit: &simRuntime{id: "y", epoch: "2", token: "tok-9"}})
 		}},
 		{"I4 ", func(s *sim) { // a row closed in an earlier step excuses nothing (v5.9n)

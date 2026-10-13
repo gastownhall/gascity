@@ -232,6 +232,8 @@ func stopChoice(v txView, work finalizeWork) finalizeChoice {
 		return dormantChoice(v.Row, f)
 	case stopReason(v.It) == drainIdle:
 		return idleFinish(f)
+	case stopReason(v.It) == idleRespawnDrainReason:
+		return idleRespawnFinish(f)
 	}
 	return finalizePatch(f)
 }
@@ -278,6 +280,17 @@ func stopReason(it intent) string {
 		return r
 	}
 	return strings.TrimPrefix(it.Reason, decideStopVerb)
+}
+
+// idleRespawnFinish is an idle-respawn drain's finalize (v5 D2, C6d): the
+// row sleeps and is never closed, so resume-on-ready starts it fresh for the
+// bead it was awake for. It is legacy's completion of a drain that keeps
+// work (finalizePatch with work: CompleteDrainPatch(idle), through the Sleep
+// cell), whatever the live work read finds; a row that keeps work never
+// closes.
+func idleRespawnFinish(f finalizeFacts) finalizeChoice {
+	f.HasWork = true
+	return finalizePatch(f)
 }
 
 // idleFinish is an idle drain's finalize (D4's idle builder): legacy's idle

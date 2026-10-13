@@ -10,8 +10,8 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 747
-baseline_files = 225
+baseline_calls = 748
+baseline_files = 226
 reported_calls = 495
 reported_files = 135
 owner_bead = "ga-cp3hwi"
@@ -51,8 +51,8 @@ expires = "2026-10-31"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 499
-baseline_files = 151
+baseline_calls = 500
+baseline_files = 152
 reported_calls = 380
 reported_files = 98
 owner_bead = "ga-cp3hwi"
@@ -480,6 +480,17 @@ resources = ["http_test_server"]
 owner_bead = "ga-cp3hwi"
 invariant = "the anonymous-cache probes' behavior proof is a checked Medium HTTP test server owner"
 resource_owner = "the loopback TLS HTTP/2 servers are confined to TestCacheProbes, whose one stand-in rbe-cache runs tools/rbe/cache-zstd-probe.sh (zstd advertised or not) and tools/rbe/cache-rrc-probe.sh (an answer or none, the action cache's and the CAS's NOT_FOUND or not, the kill switch off) through gRPC and HTTP errors, malformed answers and timeouts: the probes are curl's HTTP/2 and gRPC trailers, so only a real server can prove when fork-cache asks for zstd and when fork-cache lanes read the remote repo contents cache"
+migration_target = "P0.4b"
+expires = "2026-10-31"
+
+[[medium]]
+package_dir = "internal/hooks"
+package_name = "hooks"
+owner = "TestProviderPluginNodeSuite"
+resources = ["subprocess"]
+owner_bead = "ga-cp3hwi"
+invariant = "the embedded provider-plugin behavior proof is a checked Medium subprocess owner"
+resource_owner = "the one node subprocess is confined to TestProviderPluginNodeSuite, which exists to run the embedded OpenCode and MiMo Code plugins under node against a GC_BIN fake gc: the plugins are JavaScript the provider loads, so only a real node run can prove the system-prompt shape and the once-per-turn drain they produce"
 migration_target = "P0.4b"
 expires = "2026-10-31"
 

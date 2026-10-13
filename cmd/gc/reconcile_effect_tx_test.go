@@ -910,6 +910,7 @@ var effectCapGrants = map[string]caps{
 	intentClose:       capReadStores | capRelease,
 	intentRowMetadata: capReadStores, intentRuntimeAlias: capProviderStart, // the alias probe's store; the runtime alias sync
 	intentStop:         capReadStores | capProviderStop,
+	intentSignalFresh:  capReadStores,                                                                                            // an idle-respawn signal's claim revalidation (C6d)
 	intentDriftRestart: capReadStores | capProviderStop, intentDriftRelaunch: capReadStores | capProviderStart | capProviderStop, // the prepare's stores; the relaunch; the stop
 }
 

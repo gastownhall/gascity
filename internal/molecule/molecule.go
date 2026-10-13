@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -831,6 +832,9 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 	if len(recipe.Steps) == 0 {
 		return nil, fmt.Errorf("recipe %q has no steps", recipe.Name)
 	}
+	if err := refuseSessionSteps(recipe.Steps, applyVarDefaults(opts.Vars, recipe.Vars)); err != nil {
+		return nil, err // before any write: a refused recipe creates nothing
+	}
 	if !opts.nativeStepTopologyPrepared {
 		recipe = recipeWithNativeStepDependencies(recipe)
 		opts.nativeStepTopologyPrepared = true
@@ -1144,6 +1148,9 @@ func InstantiateFragment(ctx context.Context, store beads.Store, recipe *formula
 	if len(recipe.Steps) == 0 {
 		return &FragmentResult{IDMapping: map[string]string{}}, nil
 	}
+	if err := refuseSessionSteps(recipe.Steps, applyVarDefaults(opts.Vars, recipe.Vars)); err != nil {
+		return nil, err // before any write
+	}
 	recipe = fragmentRecipeWithNativeStepDependencies(recipe)
 	if err := applyExternalNativeStepDependencies(store, opts.RootID, recipe.Steps, opts.ExternalDeps); err != nil {
 		return nil, err
@@ -1392,6 +1399,21 @@ func preservesGraphActionTypes(recipe *formula.Recipe) bool {
 		return true
 	}
 	return root.Metadata[beadmeta.AttemptMetadataKey] != "" && root.Metadata[beadmeta.StepRefMetadataKey] != ""
+}
+
+// refuseSessionSteps refuses a recipe a step of which would make a session
+// row (type session, or the gc:session label, a substituted variable's
+// included), before anything is written: only the session verbs mint a
+// session row (mc-okw9n). The compile refuses the literal marks
+// (formula.Validate).
+func refuseSessionSteps(steps []formula.RecipeStep, vars map[string]string) error {
+	for _, step := range steps {
+		b := stepToBead(step, vars, nil)
+		if strings.EqualFold(strings.TrimSpace(b.Type), "session") || slices.ContainsFunc(b.Labels, func(l string) bool { return strings.TrimSpace(l) == "gc:session" }) {
+			return fmt.Errorf("formula step %q would make a session row (type session or the gc:session label), which only the session verbs create", step.ID)
+		}
+	}
+	return nil
 }
 
 // stepToBead converts a RecipeStep to a Bead with variable substitution.

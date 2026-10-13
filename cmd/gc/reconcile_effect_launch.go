@@ -212,7 +212,11 @@ func preWakeStep(v txView, f preWakeFold, probeErr error) txStep {
 	launch := launchRow{w: v.World, row: next, tp: boundTemplate(tp, next), agent: ticket.launch.agent}
 	pass := launchPass{launchRow: launch, bound: foldInfo(base, f.bind), transcript: transcript, ticket: ticket, undo: preWakeUndoOf(v, foldClass(patch, class), len(f.reset) > 0)}
 	pass.undo.token, pass.relaunched = f.token, creating(v.Row)
-	return txStep{Write: patch, Class: class, Facts: effectFacts{Work: f.work}, Pass: pass}
+	facts := effectFacts{Work: f.work}
+	if len(f.reset) > 0 && session.HasStartedManualConversation(base) { // recorded once the PreWake lands
+		facts.Events = append(facts.Events, staleKeyConversationResetEvent(base, tp))
+	}
+	return txStep{Write: patch, Class: class, Facts: facts, Pass: pass}
 }
 
 // preWakeUndoOf is what a failed launch restores (S3) of the PreWake

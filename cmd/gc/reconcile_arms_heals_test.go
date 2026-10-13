@@ -29,6 +29,8 @@ type freshObserver struct {
 	env  map[string]string
 	// runLive is RunLive's error, nil to pass through to the fake.
 	runLive error
+	// activityErr is GetLastActivity's error, nil to pass through to the fake.
+	activityErr error
 }
 
 func (f *freshObserver) tmux() runtime.Provider {
@@ -44,6 +46,13 @@ func (f *freshObserver) acp() runtime.Provider {
 type observerReads struct {
 	runtime.FullFake
 	o *freshObserver
+}
+
+func (r observerReads) GetLastActivity(name string) (time.Time, error) {
+	if r.o.activityErr != nil {
+		return time.Time{}, r.o.activityErr
+	}
+	return r.FullFake.GetLastActivity(name)
 }
 
 func (r observerReads) ObserveLivenessWithError(string, []string) (runtime.Liveness, error) {
