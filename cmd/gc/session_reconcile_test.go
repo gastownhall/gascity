@@ -3543,7 +3543,7 @@ func TestRecordAccrualNeverShortensAQuarantine(t *testing.T) {
 	at := func(d time.Duration) string { return now.Add(d).Format(time.RFC3339) }
 	for name, record := range map[string]func(sessionpkg.Info, *sessionpkg.Store, clock.Clock) sessionpkg.Info{
 		"wake failure": func(info sessionpkg.Info, s *sessionpkg.Store, clk clock.Clock) sessionpkg.Info {
-			return recordWakeFailure(info, nil, s, clk, "worker")
+			return recordWakeFailure(info, nil, s, clk, "worker", resumeFailure{}, nil)
 		},
 		"churn": func(info sessionpkg.Info, s *sessionpkg.Store, clk clock.Clock) sessionpkg.Info {
 			return recordChurn(info, s, clk, "worker")

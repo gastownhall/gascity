@@ -438,10 +438,13 @@ func TestSimI15StabilityCarveOut(t *testing.T) {
 	}
 	// An accrual's or a rate-limit quarantine's extension of a live
 	// quarantine is no violation; a shortening is, as are an unsigned
-	// extension (no counter advanced, no quarantine reason) and one past the
-	// longest quarantine the controller writes (the #7726 review).
+	// extension (no counter advanced, no quarantine reason set, last_woke_at
+	// kept: a quarantine reason the row already carries signs nothing) and
+	// one past the longest quarantine the controller writes (the #7726
+	// review).
 	b := quarantined("active", -time.Hour, "sleep_reason", "idle", "wake_attempts", "4")
 	short := quarantined("active", -time.Hour, "quarantined_until", rowAt(time.Minute), "sleep_reason", "idle", "wake_attempts", "4")
+	shortQ := quarantined("active", -time.Hour, "quarantined_until", rowAt(time.Minute), "sleep_reason", "rate_limit")
 	for _, c := range []struct {
 		name string
 		row  beads.Bead
@@ -453,6 +456,8 @@ func TestSimI15StabilityCarveOut(t *testing.T) {
 		{"a churn accrual's extension", short, defaultQuarantineDuration, []string{"churn_count", "3"}, ""},
 		{"a rate-limit quarantine's extension", short, defaultRateLimitQuarantineDuration, []string{"sleep_reason", "rate_limit"}, ""},
 		{"an unsigned extension", short, defaultQuarantineDuration, nil, "quarantined_until"},
+		{"an unsigned re-extension of a quarantined row", shortQ, defaultQuarantineDuration, nil, "quarantined_until"},
+		{"a re-extension clearing last_woke_at", shortQ, defaultRateLimitQuarantineDuration, []string{"last_woke_at", ""}, ""},
 		{"a signed extension past the longest quarantine", b, 2 * time.Hour, []string{"wake_attempts", "5", "sleep_reason", "quarantine"}, "quarantined_until"},
 		{"a shortening", b, 30 * time.Minute, []string{"wake_attempts", "5", "sleep_reason", "quarantine"}, "quarantined_until"},
 	} {

@@ -439,8 +439,9 @@ func dormantChange(b beads.Bead, a map[string]string, t time.Time, stable bool) 
 // to a that I15 accepts (the #7706 and #7726 reviews): a later deadline, no
 // later than the write's time t plus the longest quarantine the controller
 // writes, on a write carrying an accrual's or a rate-limit quarantine's
-// signature, its counter advanced or a quarantine reason. Nothing shortens
-// one.
+// signature: its counter advanced, a quarantine reason the write itself
+// sets, or last_woke_at cleared. A quarantine reason the row already
+// carries signs nothing, and nothing shortens one.
 func quarantineExtension(b, a map[string]string, t time.Time) bool {
 	was, _ := time.Parse(time.RFC3339, b["quarantined_until"])
 	later, err := time.Parse(time.RFC3339, a["quarantined_until"])
@@ -453,8 +454,10 @@ func quarantineExtension(b, a map[string]string, t time.Time) bool {
 		return err == nil && m > n
 	}
 	reason := session.SleepReason(a["sleep_reason"])
-	return advanced("wake_attempts") || advanced("churn_count") ||
-		reason == session.SleepReasonQuarantine || reason == session.SleepReasonContextChurn || reason == session.SleepReasonRateLimit
+	setsReason := a["sleep_reason"] != b["sleep_reason"] &&
+		(reason == session.SleepReasonQuarantine || reason == session.SleepReasonContextChurn || reason == session.SleepReasonRateLimit)
+	clearsWake := b["last_woke_at"] != "" && a["last_woke_at"] == ""
+	return advanced("wake_attempts") || advanced("churn_count") || setsReason || clearsWake
 }
 
 // checkStranded is I16 (I-STOP-5) at quiescence: no row is still signaled
