@@ -1144,7 +1144,7 @@ func TestSimOperatorDrainSurvivesACanceledControllerRequest(t *testing.T) {
 // that start, and the runtime under its name once it settled.
 func lostCommitRun(t *testing.T, seed uint64, op func(s *sim, l *simLeg, b beads.Bead)) (s *sim, outcome string, up bool) {
 	t.Helper()
-	s = newSim(t, seed, simOpts{})
+	s = newSim(t, seed, simOpts{noPendingCreates: true}) // main's scenarios: the seeds these tests pin reach the lost commit there
 	s.inventory()
 	for step := 0; step < 400 && len(s.failures) == 0; step++ {
 		idx := slices.IndexFunc(s.parked, func(e *simEffect) bool { return e.it.Kind == intentStart && !e.settled })

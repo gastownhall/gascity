@@ -570,6 +570,9 @@ func TestRollbackEffectNeedsItsOccupant(t *testing.T) {
 		}, true},
 		{"past its lease, started, its occupant gone", expired, decideRollback, func(*txKit) {}, true},
 		{"past its lease, the row's own Current runtime in its place", expired, decideRollback, func(k *txKit) { k.runtimeAs("gc-1", "tok", nil) }, false},
+		{"past its lease, the row's own Current zombie in its place", expired, decideRollback, func(k *txKit) {
+			k.runtimeAs("gc-1", "tok", func(r *simRuntime) { r.zombie = true })
+		}, false},
 		{"a lease anchor two hours ahead (a clock stepped back), its occupant gone", []string{"pending_create_claim", "true", "pending_create_started_at", gatherNow.Add(2 * time.Hour).Format(time.RFC3339)}, decideRollback, func(*txKit) {}, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
