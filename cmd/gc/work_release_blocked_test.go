@@ -105,6 +105,84 @@ func TestReleaseListedDrainKeepsOrdinaryOpenPreassignment(t *testing.T) {
 	}
 }
 
+func TestReleaseListedOrdinaryOpenChildClaim(t *testing.T) {
+	ledger := newBdGuardLedger("open", "dead-session", map[string]string{beadmeta.RoutedToMetadataKey: "repo/worker"})
+	ledger.bead.ID = "bd-7.1"
+	store := beads.NewBdStoreWithPrefix(t.TempDir(), ledger.run, "bd")
+	snapshot, err := store.Get(ledger.bead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := releaseListed([]seatWorkHit{{store: store, bead: snapshot}}, releaseCloseCascade, releaseSeat{}, &config.City{Agents: []config.Agent{persistentWorker()}}, ReleaseOpts{})
+	if len(out.Released) != 1 || len(out.Kept) != 0 || len(out.Failed) != 0 || ledger.row().Assignee != "" || ledger.row().Status != "open" {
+		t.Fatalf("ordinary open child not released: %+v, row %+v", out, ledger.row())
+	}
+	if len(ledger.updates) != 1 || testFlagValue(ledger.updates[0], "--if-status") != "open" {
+		t.Fatalf("ordinary release lost its guard: %v", ledger.updates)
+	}
+}
+
+func TestReleaseListedKilledBlockedClaim(t *testing.T) {
+	for _, tc := range []struct {
+		name, otherStatus      string
+		seatStarted, guardMiss bool
+	}{
+		{name: "no started evidence"},
+		{name: "other claim named started", otherStatus: "open", seatStarted: true},
+		{name: "other claim in progress", otherStatus: "in_progress"},
+		{name: "blocked guard lost", guardMiss: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ledger := newBdGuardLedger("blocked", "dead-session", map[string]string{beadmeta.RoutedToMetadataKey: "repo/worker", "hold_reason": "needs input"})
+			store := beads.NewBdStoreWithPrefix(t.TempDir(), ledger.run, "bd")
+			snapshot, err := store.Get(ledger.bead.ID)
+			if err != nil || snapshot.Status != "open" {
+				t.Fatalf("snapshot = %+v, %v", snapshot, err)
+			}
+			before := ledger.row()
+			claims := []seatWorkHit{{store: store, bead: snapshot}}
+			seat := releaseSeat{}
+			if tc.otherStatus != "" {
+				other := snapshot
+				other.ID, other.Status = "bd-8", tc.otherStatus
+				claims = append(claims, seatWorkHit{store: store, bead: other})
+				if tc.seatStarted {
+					seat.started = map[string]bool{other.ID: true}
+				}
+			}
+			if tc.guardMiss {
+				ledger.beforeUpdate = func(b *beads.Bead) { b.Assignee = "live-session" }
+			}
+			out := releaseListed(claims, releaseKilledSeat, seat, &config.City{Agents: []config.Agent{persistentWorker()}}, ReleaseOpts{})
+			if tc.otherStatus != "" {
+				if len(out.Released) != 0 || len(out.Failed) != 0 || len(out.Kept) != len(claims) || len(ledger.updates) != 0 || !reflect.DeepEqual(ledger.row(), before) {
+					t.Fatalf("started seat lost a claim: %+v, row %+v", out, ledger.row())
+				}
+				for _, claim := range claims {
+					if out.Why[claim.bead.ID] != keptStarted {
+						t.Fatalf("keep reason = %v", out.Why)
+					}
+				}
+				return
+			}
+			if tc.guardMiss {
+				if len(out.Released) != 0 || len(out.Failed) != 0 || len(out.Kept) != 1 || out.Why[snapshot.ID] != keptMoved || ledger.row().Assignee != "live-session" {
+					t.Fatalf("lost guard counted as release: %+v, row %+v", out, ledger.row())
+				}
+				return
+			}
+			want := before
+			want.Assignee = ""
+			if len(out.Released) != 1 || len(out.Kept) != 0 || len(out.Failed) != 0 || !reflect.DeepEqual(ledger.row(), want) {
+				t.Fatalf("unstarted killed seat still owns hold: %+v, row %+v", out, ledger.row())
+			}
+			if len(ledger.updates) != 1 || testFlagValue(ledger.updates[0], "--if-status") != "blocked" || hasBdFlag(ledger.updates[0], "--status") || hasBdFlag(ledger.updates[0], "--set-metadata") {
+				t.Fatalf("not an assignee-only blocked release: %v", ledger.updates)
+			}
+		})
+	}
+}
+
 // An open-row read consumes the remaining budget without sleeping. Started
 // claims must already be released, in their original relative order.
 func TestReleaseListedDrainPrioritizesStartedClaimsWithinBudget(t *testing.T) {

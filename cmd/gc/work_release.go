@@ -351,20 +351,18 @@ func releaseListedWithClock(claims []seatWorkHit, why releaseWhy, seat releaseSe
 				continue
 			}
 		}
-		if !p.startedKeeps {
-			// A killed seat is resumable, unlike a closed/retired holder or a
-			// confirmed orphan. Keep its existing release and cost policy.
-			if released, handled, err := releaseBlockedAssignment(c.store, c.bead); err != nil {
-				out.Failed = append(out.Failed, c)
-				out.Why[c.bead.ID] = err.Error()
-				continue
-			} else if released {
-				out.Released = append(out.Released, c)
-				continue
-			} else if handled {
-				keep(c, keptMoved)
-				continue
-			}
+		// A killed seat with started work already returned above. Every
+		// remaining path must probe a normalized-open row before releasing it.
+		if released, handled, err := releaseBlockedAssignment(c.store, c.bead); err != nil {
+			out.Failed = append(out.Failed, c)
+			out.Why[c.bead.ID] = err.Error()
+			continue
+		} else if released {
+			out.Released = append(out.Released, c)
+			continue
+		} else if handled {
+			keep(c, keptMoved)
+			continue
 		}
 		if !slices.Contains(p.statuses, c.bead.Status) {
 			keep(c, keptMoved)

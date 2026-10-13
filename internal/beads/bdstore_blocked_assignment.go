@@ -11,7 +11,7 @@ var _ BlockedAssignmentReleaser = (*BdStore)(nil)
 // assignee under bd's native status/holder guards. A lost blocked guard owns
 // the outcome; it cannot become permission for an ordinary open release.
 func (s *BdStore) ReleaseBlockedIfCurrent(id, expectedAssignee string) (released, handled bool, err error) {
-	if !isWispQueryableID(id) || strings.TrimSpace(expectedAssignee) == "" {
+	if strings.TrimSpace(id) == "" || strings.TrimSpace(expectedAssignee) == "" {
 		return false, true, fmt.Errorf("blocked release %q: full bead ID and holder required", id)
 	}
 	if err := s.guardRelocatedClassIDs("blocked release "+id, id); err != nil {
@@ -20,6 +20,9 @@ func (s *BdStore) ReleaseBlockedIfCurrent(id, expectedAssignee string) (released
 	out, err := s.runBDTransientRead("show", "--json", id)
 	if err != nil {
 		if !isBdBeadNotFound(err) && !isBdNotFoundEnvelope(out) {
+			return false, true, fmt.Errorf("blocked release %q: %w", id, err)
+		}
+		if !isWispQueryableID(id) {
 			return false, true, fmt.Errorf("blocked release %q: %w", id, err)
 		}
 		// The existing Get fallback for the wisp plane, retaining the raw row.
