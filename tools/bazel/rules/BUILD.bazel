@@ -1,4 +1,4 @@
-# Starlark helpers for the repo's BUILD files (go_variant_test.bzl,
+# Starlark helpers for the repo's BUILD files (go_variant_test.bzl, go_test_run.bzl,
 # pnpm_lock.bzl) and the scripts they run.
 
 exports_files([

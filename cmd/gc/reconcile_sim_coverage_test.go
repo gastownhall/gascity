@@ -233,22 +233,25 @@ func prefixed(p string, keys []string) []string {
 }
 
 // TestSimCoverageGate fails on a registered arm, effect kind or outcome
-// class the corpora never reach, over the censuses in GC_V2_SIM_COVERAGE_DIR
-// (one per corpus range); unset, it skips.
+// class the corpora never reach, over the censuses GC_V2_SIM_COVERAGE_FILES
+// names (one per corpus range, space-separated; relative paths are runfiles,
+// BUILD.bazel's gc_sim_coverage_gate_test); unset, it skips.
 func TestSimCoverageGate(t *testing.T) {
-	dir := os.Getenv("GC_V2_SIM_COVERAGE_DIR")
-	if dir == "" {
-		t.Skip("GC_V2_SIM_COVERAGE_DIR unset")
-	}
-	paths, err := filepath.Glob(filepath.Join(dir, "*.json"))
-	if err != nil || len(paths) == 0 {
-		t.Fatalf("no censuses in %s: %v", dir, err)
+	paths := strings.Fields(os.Getenv("GC_V2_SIM_COVERAGE_FILES"))
+	if len(paths) == 0 {
+		t.Skip("GC_V2_SIM_COVERAGE_FILES unset")
 	}
 	var reports []simCoverageReport
 	for _, p := range paths {
+		if !filepath.IsAbs(p) {
+			p = filepath.Join(os.Getenv("TEST_SRCDIR"), os.Getenv("TEST_WORKSPACE"), p)
+		}
 		b, err := os.ReadFile(p)
 		if err != nil {
 			t.Fatal(err)
+		}
+		if len(b) == 0 {
+			t.Fatalf("%s: empty: its range wrote no census (did the range fail?)", p)
 		}
 		var r simCoverageReport
 		if err := json.Unmarshal(b, &r); err != nil {
