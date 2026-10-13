@@ -179,15 +179,23 @@ func (r *rowFacts) failedCreateLeased() bool {
 	return pendingCreateSessionStillLeasedAt(r.row.Info, cfg, r.w.Now) && !pendingCreateAnchorAhead(r.row.Info, r.w.Now)
 }
 
-// deliberatelyHeldRow is an undesired row a deliberate hold parks: a user
-// hold, a wait hold, or a future or unreadable held_until or
-// quarantined_until. A21 keeps it until the hold ends, stricter than legacy,
-// whose MAINT-051 sweep closes a pool row whatever holds it (§12.2 #27, v5.7
-// A10) and whose orphan close closes any other row whatever holds it:
-// operator dormancy is never destroyed by an orphan close (the A14
-// generator's seed 660, mc-i7efm): Disposition.HoldsDeliberately.
+// deliberatelyHeldRow is an undesired row a deliberate hold parks, which
+// A21 keeps until the hold ends.
+//   - A pool row: a user hold, a wait hold, or a future or unreadable
+//     held_until or quarantined_until (Disposition.HoldsDeliberately),
+//     stricter than legacy's MAINT-051 sweep, which closes it whatever holds
+//     it (§12.2 #27, v5.7 A10).
+//   - Any other row: an operator's suspend (sleep_intent=user-hold) or a
+//     live, readable held_until alone, so an orphan close never destroys an
+//     operator's dormancy (the A14 generator's seed 660, mc-i7efm); a wait
+//     hold, a quarantine or an unreadable timer keeps no such row, which
+//     closes and releases as legacy's orphan close does (CONTRACT v5.10s).
 func deliberatelyHeldRow(info session.Info, now time.Time) bool {
-	return session.DispositionOfInfo(info).HoldsDeliberately(now)
+	d := session.DispositionOfInfo(info)
+	if isPoolManagedSessionInfo(info) {
+		return d.HoldsDeliberately(now)
+	}
+	return d.Operator == session.OperatorSuspended || d.Until.After(now) || d.Heartbeat.After(now)
 }
 
 // strandedMarker reads the stranded marker (SESS-624). held: it is still
