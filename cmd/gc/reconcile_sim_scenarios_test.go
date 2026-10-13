@@ -373,7 +373,8 @@ func deadRuntimeHealAcrossTime(t *testing.T, held bool) {
 // stability clear may clear quarantined_until only on a row its deciding pass
 // read committed, its own runtime alive and 30s past its wake. A clear inside
 // the 30s, on a dead runtime or on an uncommitted row is reported, and so is,
-// on a stable row, a rewrite of the quarantine or a stop request.
+// on a stable row, a shortening of the quarantine or a stop request; an
+// extension is not (an accrual's, the #7706 review).
 func TestSimI15StabilityCarveOut(t *testing.T) {
 	quarantined := func(state string, woke time.Duration, meta ...string) beads.Bead {
 		return poolRow("gc-1", "worker", 1, state, append([]string{"instance_token", "tok-1", "last_woke_at", rowAt(woke), "quarantined_until", rowAt(time.Hour)}, meta...)...)
@@ -388,7 +389,7 @@ func TestSimI15StabilityCarveOut(t *testing.T) {
 		{"inside 30s", quarantined("active", -10*time.Second), false, clearQ},
 		{"dead runtime", quarantined("active", -time.Hour), true, clearQ},
 		{"uncommitted", quarantined("creating", -time.Hour), false, clearQ},
-		{"stable, the quarantine rewritten", quarantined("active", -time.Hour), false, session.MetadataPatch{"quarantined_until": rowAt(2 * time.Hour)}},
+		{"stable, the quarantine shortened", quarantined("active", -time.Hour), false, session.MetadataPatch{"quarantined_until": rowAt(30 * time.Minute)}},
 		{"stable, a stop request on a user-hold row", quarantined("active", -time.Hour, "sleep_intent", "user-hold"), false, session.MetadataPatch{"quarantined_until": "", session.DrainIntentReasonKey: "idle"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -435,9 +436,18 @@ func TestSimI15StabilityCarveOut(t *testing.T) {
 		}
 		s.noViolations(t)
 	}
+	// An accrual's extension of a live quarantine is no violation; its
+	// shortening is.
+	b := quarantined("active", -time.Hour, "sleep_reason", "quarantine")
+	for at, want := range map[time.Duration]string{2 * time.Hour: "", 30 * time.Minute: "quarantined_until"} {
+		a := maps.Clone(b.Metadata)
+		a["quarantined_until"] = rowAt(at)
+		if k := dormantChange(b, a, plannerT0, false); k != want {
+			t.Fatalf("quarantine to %s: dormantChange = %q, want %q", at, k, want)
+		}
+	}
 	// A quarantine's reason cleared while the quarantine stands is still
 	// the quarantine's to keep.
-	b := quarantined("active", -time.Hour, "sleep_reason", "quarantine")
 	a := maps.Clone(b.Metadata)
 	a["sleep_reason"] = ""
 	if k := dormantChange(b, a, plannerT0, true); k != "sleep_reason" {

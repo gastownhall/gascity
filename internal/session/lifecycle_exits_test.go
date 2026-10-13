@@ -269,6 +269,39 @@ func TestWakeFailureAccrualPatchAtThreshold(t *testing.T) {
 	}
 }
 
+// TestAccrualNeverShortensALiveQuarantine (the #7706 review): a
+// quarantining accrual writes the later of its deadline and a quarantine
+// already in force, so it extends a shorter one and never shortens an
+// operator's longer one; an expired one is replaced.
+func TestAccrualNeverShortensALiveQuarantine(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	until := now.Add(time.Hour)
+	for _, c := range []struct {
+		name     string
+		existing time.Time
+		want     time.Time
+	}{
+		{"none", time.Time{}, until},
+		{"a shorter live one is extended", now.Add(time.Minute), until},
+		{"a longer live one is kept", now.Add(24 * time.Hour), now.Add(24 * time.Hour)},
+		{"an expired one is replaced", now.Add(-time.Minute), until},
+	} {
+		info := Info{ID: "s-1"}
+		if !c.existing.IsZero() {
+			info.QuarantinedUntil = c.existing.Format(time.RFC3339)
+		}
+		for name, acc := range map[string]ExitAccrual{"wake failure": WakeFailureAccrualPatch(4, 5, until), "churn": ChurnAccrualPatch(2, 3, until)} {
+			got, written := acc.PatchFor(info, now)["quarantined_until"]
+			if !written { // an unchanged cell writes nothing
+				got = info.QuarantinedUntil
+			}
+			if got != c.want.Format(time.RFC3339) {
+				t.Errorf("%s, %s: quarantined_until %q, want %q", c.name, name, got, c.want.Format(time.RFC3339))
+			}
+		}
+	}
+}
+
 func TestChurnAccrualPatch(t *testing.T) {
 	until := time.Date(2026, 3, 8, 13, 0, 0, 0, time.UTC)
 

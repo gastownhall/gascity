@@ -200,6 +200,34 @@ func TestDeadRuntimeAccrualMatchesLegacy(t *testing.T) {
 	}
 }
 
+// Kills a dead seat's quarantining accrual that shortens a live quarantine
+// (the #7706 review): A6's crash or churn accrual at the limit writes the
+// later of its deadline and the row's unexpired quarantined_until, so it
+// extends a shorter one and keeps an operator's longer one, as legacy's.
+func TestDeadRuntimeAccrualNeverShortensAQuarantine(t *testing.T) {
+	at := func(d time.Duration) string { return gatherNow.Add(d).Format(time.RFC3339) }
+	accrued := at(defaultQuarantineDuration)
+	for _, death := range []struct {
+		name string
+		meta []string
+	}{
+		{"a rapid crash", []string{"last_woke_at", at(-10 * time.Second), "wake_attempts", "4"}},
+		{"churn", []string{"last_woke_at", at(-2 * time.Minute), "churn_count", "2"}},
+	} {
+		for existing, want := range map[string]string{at(time.Minute): accrued, at(24 * time.Hour): at(24 * time.Hour)} {
+			c := newHealCase(t, livenessGone, desireWake, append([]string{"state", "active", "session_key", "k-1", "quarantined_until", existing}, death.meta...)...)
+			it := c.decide()
+			got, wrote := it.folded()["quarantined_until"]
+			if !wrote {
+				got = existing
+			}
+			if got != want {
+				t.Errorf("%s over quarantined_until %s: it is %s (patch %v), want %s", death.name, existing, got, it.folded(), want)
+			}
+		}
+	}
+}
+
 // Kills a heal that pre-empts a wanted row's start by a pass: an expired
 // hold on a wanted row whose runtime is gone heals in its start's PreWake,
 // in the same pass, as legacy heals and wakes in one tick.

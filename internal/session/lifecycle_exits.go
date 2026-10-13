@@ -159,12 +159,18 @@ type ExitAccrual struct {
 }
 
 // Class is a's class keys over row info: for a quarantining accrual the
-// Quarantine cell's quarantined_until, else none. It mints nothing.
+// Quarantine cell's quarantined_until, else none. It mints nothing. An
+// accrual never shortens a quarantine already in force (an operator's
+// longer one): it writes the later of the two deadlines.
 func (a ExitAccrual) Class(info Info, now time.Time) DispositionPatch {
 	if !a.Quarantined {
 		return DispositionPatch{}
 	}
-	return CellInfo(info, ActorController, DispEvent{Kind: EvQuarantine, Until: a.Until}, now)
+	until := a.Until
+	if live := DispositionOfInfo(info).Quarantine; live.After(now) && live.After(until) {
+		until = live
+	}
+	return CellInfo(info, ActorController, DispEvent{Kind: EvQuarantine, Until: until}, now)
 }
 
 // PatchFor is a's write to row info: its patch with its Class.
