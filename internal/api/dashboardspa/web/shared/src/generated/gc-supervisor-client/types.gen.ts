@@ -18774,6 +18774,10 @@ export type PostV0CityByCityNameSessionByIdStopErrors = {
      */
     500: ErrorModel;
     /**
+     * Not Implemented
+     */
+    501: ErrorModel;
+    /**
      * Service Unavailable
      */
     503: ErrorModel;

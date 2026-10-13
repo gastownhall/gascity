@@ -254,7 +254,7 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, by Actor, id str
 	if err := m.resetInterruptedTurnLocked(ctx, b, sessName); err != nil {
 		return false, err
 	}
-	if shouldClearInterruptedInputBeforeSubmit(b) {
+	if shouldClearInterruptedInputBeforeSubmit(b) && m.interruptsByKeystroke(sessName) {
 		if err := m.clearInterruptedInputLocked(ctx, b, sessName); err != nil {
 			return false, err
 		}
@@ -300,9 +300,26 @@ func (m *Manager) waitUntilRunningLocked(ctx context.Context, id, sessName strin
 	}
 }
 
+// interruptsByKeystroke reports whether the session's runtime drives the
+// agent's terminal, so the provider-specific keystroke interrupt applies. A
+// runtime that interrupts turns by protocol drops keys, so for it every
+// keystroke step (soft Escape, Ctrl-C fallback, input clear) is skipped.
+func (m *Manager) interruptsByKeystroke(sessName string) bool {
+	return runtime.TurnInterruptModeFor(m.sp, sessName) == runtime.TurnInterruptKeystroke
+}
+
 func (m *Manager) stopTurnLocked(b beads.Bead, sessName string) error {
 	if State(b.Metadata["state"]) == StateSuspended || !m.sp.IsRunning(sessName) {
 		return nil
+	}
+	switch runtime.TurnInterruptModeFor(m.sp, sessName) {
+	case runtime.TurnInterruptProtocol:
+		if err := m.sp.Interrupt(sessName); err != nil {
+			return fmt.Errorf("interrupting session: %w", err)
+		}
+		return nil
+	case runtime.TurnInterruptUnsupported:
+		return fmt.Errorf("%w: %s", ErrTurnInterruptUnsupported, sessName)
 	}
 	if usesSoftEscapeInterrupt(b) {
 		if err := m.sp.SendKeys(sessName, "Escape"); err != nil {
@@ -331,7 +348,7 @@ func (m *Manager) waitForInterruptIdleLocked(ctx context.Context, b beads.Bead, 
 		}
 		return err
 	}
-	if usesSoftEscapeInterrupt(b) {
+	if usesSoftEscapeInterrupt(b) && m.interruptsByKeystroke(sessName) {
 		if requiresImmediateInterruptConfirm(b) {
 			if err := m.sp.Interrupt(sessName); err != nil {
 				return fmt.Errorf("confirming interrupt after soft escape: %w", err)

@@ -222,6 +222,51 @@ func TestHandleSessionStopUsesSoftEscapeForCodex(t *testing.T) {
 	}
 }
 
+// TestHandleSessionStopFollowsRuntimeTurnInterruptMode kills a /stop that
+// answers 200 having sent nothing: a runtime that interrupts turns by
+// protocol gets Interrupt (not a dropped Escape) for codex, and a runtime that
+// can interrupt neither way is refused with 501, not reported as stopped.
+func TestHandleSessionStopFollowsRuntimeTurnInterruptMode(t *testing.T) {
+	for _, tc := range []struct {
+		mode          runtime.TurnInterruptMode
+		wantStatus    int
+		wantInterrupt bool
+	}{
+		{mode: runtime.TurnInterruptProtocol, wantStatus: http.StatusOK, wantInterrupt: true},
+		{mode: runtime.TurnInterruptUnsupported, wantStatus: http.StatusNotImplemented},
+	} {
+		t.Run(string(tc.mode), func(t *testing.T) {
+			fs := newSessionFakeState(t)
+			fs.sp.TurnInterruptModeValue = tc.mode
+			h := newTestCityHandler(t, fs)
+
+			mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+			info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "helper", Title: "Codex", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", ExtraMeta: map[string]string{"session_origin": "manual"}})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, newPostRequest(cityURL(fs, "/session/")+info.ID+"/stop", nil))
+
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("stop status = %d, want %d; body: %s", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+			if tc.wantStatus != http.StatusOK && !strings.Contains(rec.Body.String(), "turn_interrupt_unsupported") {
+				t.Fatalf("stop body = %s, want a turn_interrupt_unsupported error", rec.Body.String())
+			}
+			var sawKeys, sawInterrupt bool
+			for _, call := range fs.sp.Calls {
+				sawKeys = sawKeys || call.Method == "SendKeys"
+				sawInterrupt = sawInterrupt || call.Method == "Interrupt" && call.Name == info.SessionName
+			}
+			if sawKeys || sawInterrupt != tc.wantInterrupt {
+				t.Fatalf("calls = %#v, want Interrupt=%v and no SendKeys", fs.sp.Calls, tc.wantInterrupt)
+			}
+		})
+	}
+}
+
 // TestSessionSubmitAndMessageRejectPendingInteractionWith409 pins the #2892
 // guard at the API: while the session is showing a permission prompt, a
 // submit or message is refused synchronously with 409 pending_interaction

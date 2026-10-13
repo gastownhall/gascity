@@ -199,6 +199,7 @@ go_test(
         "transcript_acp_test.go",
         "transcript_lookup_test.go",
         "transcript_meta_legacy_test.go",
+        "turn_interrupt_mode_test.go",
         "tx_test.go",
         "wait_idle_reminder_test.go",
         "wait_store_partial_test.go",

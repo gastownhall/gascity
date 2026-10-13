@@ -89,6 +89,7 @@ go_test(
         "staging_test.go",
         "testenv_import_test.go",
         "turn_events_merge_test.go",
+        "turn_interrupt_test.go",
     ],
     data = glob(
         ["**"],

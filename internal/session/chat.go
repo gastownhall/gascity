@@ -477,6 +477,10 @@ var (
 	// session's runtime (a drain-ack stop pending). The caller should retry
 	// once the stop completes.
 	ErrSessionStopping = errors.New("session is stopping, retry")
+	// ErrTurnInterruptUnsupported reports that the session's runtime can
+	// neither deliver interrupt keys nor interrupt the turn by protocol
+	// (runtime.TurnInterruptUnsupported), so nothing was sent to stop it.
+	ErrTurnInterruptUnsupported = errors.New("session runtime cannot interrupt the running turn")
 )
 
 type sessionMutationLockEntry struct {
@@ -1373,6 +1377,10 @@ func (m *Manager) TryWaitIdleNudgeLiveOnly(ctx context.Context, id, source, mess
 // Claude Code puts a prompt interrupted before its first response chunk back
 // into its input box, so for Claude StopTurn also clears the input box when
 // the runtime can do a verified clear (see clearRestoredInputLocked).
+// A runtime that interrupts turns by protocol (runtime.TurnInterruptProtocol)
+// gets its Interrupt for every provider and no keys. A runtime that can
+// interrupt neither way gets nothing sent and StopTurn returns
+// ErrTurnInterruptUnsupported.
 func (m *Manager) StopTurn(id string) error {
 	return withSessionMutationLock(id, func() error {
 		b, sessName, err := m.sessionBead(id)
@@ -1395,7 +1403,7 @@ func (m *Manager) StopTurn(id string) error {
 		if err := m.waitForInterruptBoundaryLocked(context.Background(), b, sessName, interruptStartedAt); err != nil {
 			return fmt.Errorf("waiting for stopped session interrupt boundary: %w", err)
 		}
-		if restoresInterruptedInput(b) {
+		if restoresInterruptedInput(b) && m.interruptsByKeystroke(sessName) {
 			// The stop already succeeded. A draft that will not clear is
 			// logged, not returned: the next submit clears the input box
 			// again before it pastes.

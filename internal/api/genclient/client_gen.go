@@ -39098,6 +39098,7 @@ type PostV0CityByCityNameSessionByIdStopResponse struct {
 	ApplicationproblemJSON409 *ErrorModel
 	ApplicationproblemJSON422 *ErrorModel
 	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON501 *ErrorModel
 	ApplicationproblemJSON503 *ErrorModel
 }
 
@@ -50716,6 +50717,13 @@ func ParsePostV0CityByCityNameSessionByIdStopResponse(rsp *http.Response) (*Post
 			return nil, err
 		}
 		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 501:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON501 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
 		var dest ErrorModel

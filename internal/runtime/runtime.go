@@ -773,6 +773,45 @@ type InterruptBoundaryWaitProvider interface {
 	WaitForInterruptBoundary(ctx context.Context, name string, since time.Time, timeout time.Duration) error
 }
 
+// TurnInterruptMode describes how a runtime cancels a session's in-flight
+// agent turn.
+type TurnInterruptMode string
+
+const (
+	// TurnInterruptKeystroke means the runtime drives the agent's terminal:
+	// [Provider.SendKeys] delivers keys and [Provider.Interrupt] sends Ctrl-C,
+	// so the caller picks the keys the agent provider understands. A runtime
+	// that does not implement [TurnInterruptCapabilityProvider] has this mode.
+	TurnInterruptKeystroke TurnInterruptMode = "keystroke"
+	// TurnInterruptProtocol means the runtime drives turns through a protocol:
+	// [Provider.Interrupt] cancels the in-flight turn for every agent provider,
+	// and [Provider.SendKeys] delivers nothing.
+	TurnInterruptProtocol TurnInterruptMode = "protocol"
+	// TurnInterruptUnsupported means neither keys nor a protocol interrupt
+	// reach the session's turn: the runtime cannot interrupt it.
+	TurnInterruptUnsupported TurnInterruptMode = "unsupported"
+)
+
+// TurnInterruptCapabilityProvider is an optional extension for runtimes that
+// report how they cancel the in-flight turn of the routed backend of a
+// specific session. Without it a runtime is taken to be
+// [TurnInterruptKeystroke].
+type TurnInterruptCapabilityProvider interface {
+	TurnInterruptMode(name string) TurnInterruptMode
+}
+
+// TurnInterruptModeFor reports how p cancels the in-flight turn of session
+// name: the mode p reports, or [TurnInterruptKeystroke] when p does not
+// implement [TurnInterruptCapabilityProvider] or reports no mode.
+func TurnInterruptModeFor(p Provider, name string) TurnInterruptMode {
+	if tp, ok := p.(TurnInterruptCapabilityProvider); ok {
+		if mode := tp.TurnInterruptMode(name); mode != "" {
+			return mode
+		}
+	}
+	return TurnInterruptKeystroke
+}
+
 // RelaunchProvider is an optional extension for runtimes that can re-launch the
 // agent inside an already-provisioned (warm) box WITHOUT re-provisioning it — the
 // runtime/transport un-weld payoff. The reconciler calls Relaunch on a launch-only

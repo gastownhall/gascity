@@ -49,6 +49,8 @@ func humaSessionManagerError(err error) error {
 		return apierr.InvalidRequest.Msg("invalid: " + err.Error())
 	case errors.Is(err, session.ErrInteractionUnsupported):
 		return apierr.NotImplemented.Msg("unsupported: " + err.Error())
+	case errors.Is(err, session.ErrTurnInterruptUnsupported):
+		return apierr.NotImplemented.Msg("turn_interrupt_unsupported: " + err.Error())
 	case errors.Is(err, session.ErrPendingInteraction):
 		return apierr.SessionConflict.Msg("pending_interaction: " + err.Error())
 	case errors.Is(err, session.ErrNoPendingInteraction):
