@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -1972,7 +1971,7 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 	if !pollerSessionIdleEnough(target, sp, quiescence, obs) {
 		return false, nil
 	}
-	items, err := claimDueQueuedNudgesForTarget(target.cityPath, target, time.Now())
+	items, err := claimDueQueuedNudgeBatchForTarget(target.cityPath, target, time.Now())
 	if err != nil || len(items) == 0 {
 		return false, err
 	}
@@ -2566,20 +2565,30 @@ func newQueuedNudgeID() string {
 	return "nudge-" + hex.EncodeToString(buf[:])
 }
 
-// queuedNudgeDeliveryKey is the delivery key of the batch items: a digest of
-// its item ids and their delivery generations, independent of order. A batch
-// claimed again after a timeout or a lapsed lease gets the same key, so a
-// runtime that deduplicates keyed deliveries replays the first delivery
-// instead of delivering the batch twice; a rejection bumps an item's
-// generation, and with it the key.
+// queuedNudgeDeliveryKey is the delivery key of the claimed batch items: the
+// batch id pinned on them at claim time (claimDueQueuedNudgeBatchForTarget),
+// or "" when they carry no common pin and the delivery goes unkeyed.
 func queuedNudgeDeliveryKey(items []queuedNudge) string {
-	parts := make([]string, 0, len(items))
-	for _, item := range items {
-		parts = append(parts, fmt.Sprintf("%s@%d", item.ID, item.DeliveryGeneration))
+	if len(items) == 0 {
+		return ""
 	}
-	sort.Strings(parts)
-	sum := sha256.Sum256([]byte(strings.Join(parts, "\n")))
-	return "nudge-batch-" + hex.EncodeToString(sum[:16])
+	key := items[0].DeliveryBatch
+	for _, item := range items[1:] {
+		if item.DeliveryBatch != key {
+			return ""
+		}
+	}
+	return key
+}
+
+// newQueuedNudgeBatchID mints the delivery key a newly claimed batch is
+// pinned to.
+func newQueuedNudgeBatchID() string {
+	var buf [8]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return fmt.Sprintf("nudge-batch-%d", time.Now().UnixNano())
+	}
+	return "nudge-batch-" + hex.EncodeToString(buf[:])
 }
 
 func queuedNudgeIDs(items []queuedNudge) []string {
@@ -2788,6 +2797,23 @@ func nudgeDrainExplicitCityPath() (string, bool) {
 }
 
 func claimDueQueuedNudgesForTarget(cityPath string, target nudgeTarget, now time.Time) ([]queuedNudge, error) {
+	return claimDueQueuedNudgesMatching(cityPath, now, queuedNudgeTargetMatcher(cityPath, target))
+}
+
+func claimDueQueuedNudgesMatching(cityPath string, now time.Time, match func(queuedNudge) bool) ([]queuedNudge, error) {
+	return claimDueQueuedNudges(cityPath, now, match, false)
+}
+
+// claimDueQueuedNudgeBatchForTarget claims target's next delivery batch and
+// pins it to a delivery key (queuedNudgeDeliveryKey). When a due item already
+// carries a pin, the batch is that pinned batch, all of its pending items and
+// nothing else: a redelivery after an unknown outcome must be the same
+// delivery. Otherwise it is every due unpinned item, pinned to a new key.
+func claimDueQueuedNudgeBatchForTarget(cityPath string, target nudgeTarget, now time.Time) ([]queuedNudge, error) {
+	return claimDueQueuedNudges(cityPath, now, queuedNudgeTargetMatcher(cityPath, target), true)
+}
+
+func queuedNudgeTargetMatcher(cityPath string, target nudgeTarget) func(queuedNudge) bool {
 	var (
 		liveOnce sync.Once
 		liveIDs  map[string]struct{}
@@ -2798,12 +2824,12 @@ func claimDueQueuedNudgesForTarget(cityPath string, target nudgeTarget, now time
 		})
 		return liveIDs
 	}
-	return claimDueQueuedNudgesMatching(cityPath, now, func(item queuedNudge) bool {
+	return func(item queuedNudge) bool {
 		return queuedNudgeClaimableForTarget(target, item, liveSessions)
-	})
+	}
 }
 
-func claimDueQueuedNudgesMatching(cityPath string, now time.Time, match func(queuedNudge) bool) ([]queuedNudge, error) {
+func claimDueQueuedNudges(cityPath string, now time.Time, match func(queuedNudge) bool, pinBatch bool) ([]queuedNudge, error) {
 	maint := nudgeMaintenanceStore{cityPath: cityPath}
 	defer maint.close() //nolint:errcheck // best-effort
 	var claimed []queuedNudge
@@ -2819,15 +2845,34 @@ func claimDueQueuedNudgesMatching(cityPath string, now time.Time, match func(que
 		if err := pruneDeadQueuedNudges(state, front, now, deadline); err != nil {
 			return err
 		}
+		due := func(item queuedNudge) bool {
+			return item.DeliverAfter.IsZero() || !item.DeliverAfter.After(now)
+		}
+		claim := func(item queuedNudge) bool { return match(item) && due(item) }
+		newBatch := ""
+		if pinBatch {
+			pinned := ""
+			for _, item := range state.Pending {
+				if item.DeliveryBatch != "" && claim(item) {
+					pinned = item.DeliveryBatch
+					break
+				}
+			}
+			if pinned != "" {
+				claim = func(item queuedNudge) bool { return item.DeliveryBatch == pinned && match(item) }
+			} else {
+				newBatch = newQueuedNudgeBatchID()
+				claim = func(item queuedNudge) bool { return item.DeliveryBatch == "" && match(item) && due(item) }
+			}
+		}
 		pending := state.Pending[:0]
 		for _, item := range state.Pending {
-			if !match(item) {
+			if !claim(item) {
 				pending = append(pending, item)
 				continue
 			}
-			if !item.DeliverAfter.IsZero() && item.DeliverAfter.After(now) {
-				pending = append(pending, item)
-				continue
+			if newBatch != "" {
+				item.DeliveryBatch = newBatch
 			}
 			item.ClaimedAt = now.UTC()
 			item.LeaseUntil = now.Add(defaultQueuedNudgeClaimTTL).UTC()
@@ -3403,7 +3448,9 @@ func failedQueuedNudge(item queuedNudge, cause error, now time.Time) (queuedNudg
 		return item, true
 	}
 	if errors.Is(cause, runtime.ErrNudgeRejected) {
-		item.DeliveryGeneration++
+		// The runtime refused the batch, so nothing was delivered: unpin it,
+		// so the next claim delivers it as a new batch under a new key.
+		item.DeliveryBatch = ""
 	}
 	if item.Attempts >= defaultQueuedNudgeMaxAttempts || (!item.ExpiresAt.IsZero() && !item.ExpiresAt.After(now)) {
 		item.DeadAt = now.UTC()
