@@ -166,6 +166,7 @@ type beadWriteCase struct {
 var beadWriteCases = []beadWriteCase{
 	{name: "create", method: http.MethodPost, body: `{"title":"t","rig":"myrig"}`, session: true},
 	{name: "close", method: http.MethodPost, path: "/close", body: `{"reason":"done"}`, session: true},
+	{name: "close without reason", method: http.MethodPost, path: "/close", body: `{}`, session: true},
 	{name: "reopen", method: http.MethodPost, path: "/reopen", body: `{}`, closed: true, session: true},
 	{name: "assign", method: http.MethodPost, path: "/assign", body: `{"assignee":"alice"}`},
 	{name: "update", method: http.MethodPost, path: "/update", body: `{"title":"renamed"}`, session: true},
@@ -269,14 +270,45 @@ func TestAPIBeadWriteStoreErrorEnqueuesNothing(t *testing.T) {
 			h := newTestCityHandler(t, state)
 
 			rec := beadRequest(t, h, c.method, c.url(state, b.ID), c.body)
-			if rec.Code < 400 {
-				t.Fatalf("%s on a failing store: status %d, want an error; body: %s", c.name, rec.Code, rec.Body.String())
+			if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), errWriteRefused.Error()) {
+				t.Fatalf("%s on a failing store: status %d, want 500 carrying %q; body: %s", c.name, rec.Code, errWriteRefused, rec.Body.String())
 			}
 			assertEnqueued(t, state)
 			if got := state.enqueueCalls(); got != 0 {
 				t.Fatalf("%s: enqueue calls = %d, want 0", c.name, got)
 			}
 		})
+	}
+}
+
+// TestAPIBeadUpdateWakesWhenParentProjectionWaitFails pins the one wake on
+// a failing response: the reparent write landed (and the CachingStore
+// already absorbed it) before WaitForParentProjection reports a concurrent
+// reparent, so the request returns 409 yet the reconciler must still wake.
+func TestAPIBeadUpdateWakesWhenParentProjectionWaitFails(t *testing.T) {
+	state := newFakeState(t)
+	store := &projectionConflictStore{Store: beads.NewMemStore()}
+	state.stores["myrig"] = store
+	parent, err := store.Create(beads.Bead{Title: "Parent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := store.Create(beads.Bead{Title: "Child"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newTestCityHandler(t, state)
+
+	rec := beadRequest(t, h, http.MethodPost, cityURL(state, "/bead/")+child.ID+"/update", `{"parent":"`+parent.ID+`"}`)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status %d, want 409; body: %s", rec.Code, rec.Body.String())
+	}
+	if store.waitCalls != 1 {
+		t.Fatalf("waitCalls = %d, want 1", store.waitCalls)
+	}
+	assertEnqueued(t, state, reconcilekey.Allocator(), reconcilekey.ControlDispatch())
+	if got := state.enqueueCalls(); got != 1 {
+		t.Fatalf("enqueue calls = %d, want 1", got)
 	}
 }
 
