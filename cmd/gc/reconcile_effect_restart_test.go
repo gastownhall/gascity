@@ -196,11 +196,12 @@ func TestRelaunchResultStep(t *testing.T) {
 }
 
 // Kills a relaunch past its gates (SESS-556/560, legacy's
-// relaunchAgentForLaunchDrift): a launch-only drift relaunches in the warm
-// box; a provider that cannot relaunch, a prepared config no longer
-// launch-only (skew), a preparation that would mint a speculative resume
-// key, and a refused Relaunch each fail into the fallback, the last two
-// after preparing.
+// relaunchAgentForLaunchDrift), or through a provider other than the leaf
+// its section fenced (C8.7): a launch-only drift relaunches in the warm box,
+// on the fenced leaf, never through the composite; a leaf that cannot
+// relaunch, a prepared config no longer launch-only (skew), a preparation
+// that would mint a speculative resume key, and a refused Relaunch each fail
+// into the fallback, the last two after preparing.
 func TestRelaunchCall(t *testing.T) {
 	tp := TemplateParams{TemplateName: "worker", Command: "run"}
 	probe, _ := baselineCase(t, livenessAlive, desireKeep, nil, "state", "active")
@@ -211,14 +212,14 @@ func TestRelaunchCall(t *testing.T) {
 		name     string
 		meta     []string
 		minting  bool
-		sp       func(*runtime.Fake) runtime.Provider
-		relaunch bool // the provider's Relaunch ran and landed
+		leaf     func(*runtime.Fake) runtime.Provider
+		relaunch bool // the fenced leaf's Relaunch ran and landed
 	}{
 		{name: "launch-only", meta: append([]string{"session_key", "k-1"}, launchOnly...), relaunch: true},
-		{name: "no relaunch provider", meta: append([]string{"session_key", "k-1"}, launchOnly...), sp: func(f *runtime.Fake) runtime.Provider { return struct{ runtime.Provider }{f} }},
+		{name: "a leaf that cannot relaunch", meta: append([]string{"session_key", "k-1"}, launchOnly...), leaf: func(f *runtime.Fake) runtime.Provider { return struct{ runtime.Provider }{f} }},
 		{name: "skew", meta: []string{"session_key", "k-1", "started_config_hash", stale, "started_provision_hash", runtime.FingerprintVersion + ":other-box", "started_launch_hash", runtime.FingerprintVersion + ":old-launch"}},
 		{name: "a speculative key", meta: launchOnly, minting: true},
-		{name: "a refused relaunch", meta: append([]string{"session_key", "k-1"}, launchOnly...), sp: func(f *runtime.Fake) runtime.Provider {
+		{name: "a refused relaunch", meta: append([]string{"session_key", "k-1"}, launchOnly...), leaf: func(f *runtime.Fake) runtime.Provider {
 			f.RelaunchErrors = map[string]error{"s-heal": errors.New("box gone")}
 			return f
 		}},
@@ -234,15 +235,22 @@ func TestRelaunchCall(t *testing.T) {
 			if err := fake.Start(t.Context(), "s-heal", runtime.Config{}); err != nil {
 				t.Fatal(err)
 			}
-			var sp runtime.Provider = fake
-			if tc.sp != nil {
-				sp = tc.sp(fake)
+			var leaf runtime.Provider = fake
+			if tc.leaf != nil {
+				leaf = tc.leaf(fake)
+			}
+			composite := runtime.NewFake() // the start caps' provider, which can relaunch too: the Call must not route through it
+			if err := composite.Start(t.Context(), "s-heal", runtime.Config{}); err != nil {
+				t.Fatal(err)
 			}
 			c.w.Env = &reconcileEnv{Cfg: workerCity(1)}
-			caps := txCaps{start: startCaps{sp: sp}, reads: effectReads{city: c.store}}
-			out, err := relaunchCall(t.Context(), caps, relaunchPlan{w: c.w, row: row, tp: p, hash: sessionCoreConfigForHashInfo(p, row), name: "s-heal", leaf: fake, now: gatherNow})
+			caps := txCaps{start: startCaps{sp: composite}, reads: effectReads{city: c.store}}
+			out, err := relaunchCall(t.Context(), caps, relaunchPlan{w: c.w, row: row, tp: p, hash: sessionCoreConfigForHashInfo(p, row), name: "s-heal", leaf: leaf, now: gatherNow})
 			if err != nil || out.OK != tc.relaunch || tc.relaunch != (fake.CountCalls("Relaunch", "s-heal") > 0 && out.Err == nil) {
 				t.Fatalf("relaunch %+v (%v), Relaunch calls %d; want landed %v", out, err, fake.CountCalls("Relaunch", "s-heal"), tc.relaunch)
+			}
+			if n := composite.CountCalls("Relaunch", "s-heal"); n != 0 {
+				t.Fatalf("%d Relaunch call(s) through the composite: the relaunch must go to the leaf it fenced (C8.7)", n)
 			}
 		})
 	}

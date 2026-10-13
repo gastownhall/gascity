@@ -181,7 +181,7 @@ type relaunched struct {
 // Relaunch. An attach holds it; any failure is the fallback's.
 func relaunchCall(ctx context.Context, c txCaps, p relaunchPlan) (relaunched, error) {
 	out := relaunched{Named: p.named, Hash: p.hash}
-	r, ok := c.start.sp.(runtime.RelaunchProvider)
+	r, ok := p.leaf.(runtime.RelaunchProvider) // the leaf the section fenced, never the composite, whose router re-routes by name (C8.7)
 	if !ok {
 		out.Err = runtime.ErrRelaunchUnsupported
 		return out, nil
