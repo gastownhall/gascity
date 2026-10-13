@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
@@ -55,6 +56,12 @@ func CollectAttachedBeads(parent beads.Bead, store beads.Store, childQuerier Bea
 			return
 		}
 		seen[id] = struct{}{}
+		// A controller-owned row is never an attachment, whatever a
+		// molecule_id or workflow_id names: no autoclose, force or GC tears
+		// it down (mc-dkblm, architecture B).
+		if coordclass.ControllerOwned(attached) {
+			return
+		}
 		attachments = append(attachments, attached)
 	}
 
@@ -72,7 +79,7 @@ func CollectAttachedBeads(parent beads.Bead, store beads.Store, childQuerier Bea
 			}
 		} else {
 			for _, child := range children {
-				if !IsAttachedRoot(child) {
+				if !IsAttachedRoot(child) || coordclass.ControllerOwned(child) {
 					continue
 				}
 				if _, ok := seen[child.ID]; ok {

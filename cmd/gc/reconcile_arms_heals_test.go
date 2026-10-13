@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"slices"
 	"testing"
 	"time"
 
@@ -611,6 +612,76 @@ func TestAwakeHealNeverRevivesAnOperatorDormantRow(t *testing.T) {
 	}
 	if _, s := c.run(t, sp.tmux(), nil); s.Outcome != settledRefused || c.meta(t)["state"] != "asleep" {
 		t.Fatalf("settlement %+v, state %q, want a kill after the pass to refuse the heal", s, c.meta(t)["state"])
+	}
+}
+
+// Kills a soft suspend held as a hold, or a hold lost with it (CONTRACT
+// v5.9u). Legacy's state heal reads a soft-suspended row awake when its own
+// runtime is alive and asleep when it is gone, its suspended_at kept; v2's
+// heals write the same, and a Wake row restarts in the same pass, the heal
+// in its start, a city stop's sleep_reason beside it included, as legacy's
+// heal reads the runtime alone. A managed suspend gets the dormant stop
+// while alive, and A18 holds the start of a held Wake row rather than admit
+// one its PreWake refuses.
+func TestSoftSuspendIsNoHold(t *testing.T) {
+	soft := []string{"state", "suspended", "suspended_at", rowAt(-time.Hour)}
+	managed := slices.Concat(soft, []string{"sleep_intent", "user-hold", "held_until", rowAt(1000 * time.Hour)})
+	cityStop := slices.Concat(soft, []string{"sleep_reason", "city-stop"})
+	for name, tc := range map[string]struct {
+		meta []string
+		want string
+	}{
+		"soft":      {soft, decideAwakeHeal},
+		"managed":   {managed, decideDormantStop},
+		"city stop": {cityStop, decideAwakeHeal},
+	} {
+		c := ownRuntimeCase(t, "tok-3", tc.meta...)
+		it := c.decide()
+		if it.Reason != tc.want {
+			t.Fatalf("%s, alive: decideRow = (%q, %q), want %q", name, it.Kind, it.Reason, tc.want)
+		}
+		if info := c.w.Census.Rows[c.k].Info; tc.want == decideAwakeHeal {
+			want := session.MetadataPatch(healStatePatchWithRollbackInfo(info, true, true, &clock.Fake{Time: gatherNow}, 0, true))
+			if !maps.Equal(it.folded(), want) {
+				t.Fatalf("%s, alive: heal %v, want legacy's %v", name, it.folded(), want)
+			}
+		}
+	}
+
+	for _, tc := range []struct {
+		name    string
+		desired desire
+		meta    []string
+		want    string
+		kind    string
+	}{
+		{"soft, not wanted: healed asleep", desireNone, soft, decideSuspendHeal, intentRowHealFresh},
+		{"soft, wanted: restarted, the heal in its start", desireWake, soft, decideStart, intentStart},
+		{"managed, wanted: held at A18", desireWake, managed, decideStartHeld, ""},
+		{"city stop, not wanted: healed asleep", desireNone, cityStop, decideSuspendHeal, intentRowHealFresh},
+		{"city stop, wanted: restarted, the heal in its start", desireWake, cityStop, decideStart, intentStart},
+		{"heartbeat-held, wanted: held at A18", desireWake, []string{"state", "asleep", "held_until", rowAt(time.Hour)}, decideStartHeld, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newHealCase(t, livenessGone, tc.desired, tc.meta...)
+			it := c.decide()
+			if it.Reason != tc.want || it.Kind != tc.kind {
+				t.Fatalf("decideRow = (%q, %q), want (%q, %q)", it.Kind, it.Reason, tc.kind, tc.want)
+			}
+			if tc.kind == "" {
+				return
+			}
+			if want := legacyHeal(c.w.Census.Rows[c.k].Info); !maps.Equal(it.folded(), want) {
+				t.Fatalf("intent %v, want legacy's heal %v", it.folded(), want)
+			}
+			if tc.kind != intentRowHealFresh {
+				return
+			}
+			_, s := c.run(t, gone().tmux(), nil)
+			if m := c.meta(t); s.Outcome != settledLanded || m["state"] != "asleep" || m["suspended_at"] != soft[3] {
+				t.Fatalf("settlement %+v, row %v, want the row healed asleep, its suspended_at kept", s, m)
+			}
+		})
 	}
 }
 

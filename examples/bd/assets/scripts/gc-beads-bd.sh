@@ -162,6 +162,36 @@ trace_bd_argv() {
         >>"$GC_BD_TRACE" 2>/dev/null || true
 }
 
+# require_executable_gc_bin fails closed when GC_BIN names a gc that can no
+# longer be executed. GC_BIN is the executable of the gc process that spawned
+# this script, usually the long-running supervisor. When that binary is removed
+# from disk (package upgrade, `brew unlink`), the supervisor keeps running the
+# old build and keeps exporting the dead path. A set GC_BIN is authoritative
+# for every gc helper call, so the script stops here, before any side effect,
+# instead of failing partway through an operation on its first helper call.
+# The restart command depends on how the supervisor is deployed, so the
+# message defers to 'gc doctor', which names the right one.
+#
+# Teardown ($1 is stop or shutdown) warns instead, clears GC_BIN, and runs on
+# the shell-native fallbacks an unset GC_BIN selects: refusing would leave the
+# Dolt server running when a stale supervisor stops the city.
+require_executable_gc_bin() {
+    local stale
+    [ -n "${GC_BIN:-}" ] || return 0
+    if [ -f "$GC_BIN" ] && [ -x "$GC_BIN" ]; then
+        return 0
+    fi
+    stale="gc-beads-bd: GC_BIN=$GC_BIN is not an executable file. The gc process that launched this helper (usually the supervisor) was started from a gc binary that has since been removed or replaced, so it is still running an old build. Restart the supervisor from the current gc binary; 'gc doctor' (check supervisor-binary) names the restart command for this deployment."
+    case "${1:-}" in
+        stop|shutdown)
+            printf '%s Stopping without it.\n' "$stale" >&2
+            GC_BIN=
+            return 0
+            ;;
+    esac
+    die "$stale"
+}
+
 resolve_gc_helper_bin() {
     if [ -n "${GC_BIN:-}" ]; then
         printf '%s\n' "$GC_BIN"
@@ -4943,6 +4973,7 @@ fi
 # historical GC-managed Dolt lifecycle below. The adapter supplies this marker
 # for every operation; init additionally carries the ephemeral selector.
 if [ "${GC_BEADS_PROVIDER_OWNED:-}" = "1" ]; then
+    require_executable_gc_bin "$op"
     case "$op" in
         init) op_provider_owned_init "$@" ;;
         start|ensure-ready|health|probe|recover|stop|shutdown) op_provider_owned_lifecycle "$op" ;;
@@ -4961,6 +4992,7 @@ if scope_is_proxied "$GC_CITY_PATH"; then
             exit 2
             ;;
     esac
+    require_executable_gc_bin "$op"
     # Proxied store bridge operations are handled by bd through the GC bridge;
     # no managed listener exists from which to derive a port.
     DOLT_PORT=0
@@ -4971,6 +5003,11 @@ if scope_is_proxied "$GC_CITY_PATH"; then
             op_store_bridge "$op" "$@"; exit $? ;;
     esac
 fi
+
+# Refuse a stale GC_BIN before any helper call can fall back to legacy
+# behavior or touch city state. Every branch above that can reach a helper
+# call or city state runs the same check first.
+require_executable_gc_bin "$op"
 
 # Prefer GC-owned runtime layout derivation when the current gc binary is
 # available. Fall back to the legacy shell derivation for compatibility.

@@ -429,7 +429,7 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 	}
 
 	resp := sessionToResponse(info, s.state.Config())
-	resp.Kind = "provider"
+	asProviderSession(&resp)
 	if catalog, catErr := s.workerSessionCatalog(store.Store); catErr == nil {
 		if caps, capErr := catalog.SubmissionCapabilities(info.ID); capErr == nil {
 			resp.SubmissionCapabilities = caps

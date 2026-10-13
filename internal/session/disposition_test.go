@@ -424,6 +424,35 @@ func TestDispositionOperatorDormant(t *testing.T) {
 	}
 }
 
+// TestDispositionRefusesPreWake (CONTRACT v5.9u): an operator's suspend
+// refuses the controller's PreWake and A17's heartbeat respawn; a soft
+// suspend (the stop and rig-restart sweeps') refuses neither. A live timer
+// refuses the PreWake alone; a wait and an unreadable timer refuse neither.
+func TestDispositionRefusesPreWake(t *testing.T) {
+	future := dispT0.Add(time.Hour).Format(time.RFC3339)
+	for _, c := range []struct {
+		meta             map[string]string
+		preWake, respawn bool
+	}{
+		{map[string]string{}, false, false},
+		{map[string]string{"state": string(StateSuspended), "suspended_at": future}, false, false},
+		{map[string]string{"state": string(StateSuspended), "sleep_intent": string(SleepReasonUserHold), "held_until": future}, true, true},
+		{map[string]string{"sleep_intent": string(SleepReasonUserHold)}, true, true},
+		{map[string]string{"held_until": future}, true, false},
+		{map[string]string{"quarantined_until": future}, true, true},
+		{map[string]string{"wait_hold": "true"}, false, false},
+		{map[string]string{"held_until": "soon"}, false, false},
+	} {
+		d := DecodeDisposition(c.meta)
+		if got := d.RefusesPreWake(dispT0); got != c.preWake {
+			t.Errorf("%v: RefusesPreWake = %v, want %v", c.meta, got, c.preWake)
+		}
+		if got := d.RefusesHeartbeatRespawn(dispT0); got != c.respawn {
+			t.Errorf("%v: RefusesHeartbeatRespawn = %v, want %v", c.meta, got, c.respawn)
+		}
+	}
+}
+
 // TestDispositionKeepsSlot: over the decoder's grid, only an operator's
 // suspend (sleep_intent=user-hold) keeps a slot; a soft suspend (the chat
 // idle auto-suspend, the city stop sweep), a wait, a timer and a kill do not.

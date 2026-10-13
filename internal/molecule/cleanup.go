@@ -8,6 +8,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/closeorder"
+	"github.com/gastownhall/gascity/internal/coordclass"
 )
 
 // SubtreeClosedReason is the canonical close_reason stamped on every
@@ -241,7 +242,11 @@ func CloseMembersWithMetadataExcept(store beads.Store, members []beads.Bead, met
 
 	ids := make([]string, 0, len(matched))
 	for _, bead := range matched {
-		if bead.ID == "" || bead.Status == "closed" {
+		// A controller-owned row (a session row, a startup-health episode, a
+		// convergence root) is never a molecule member to close, whatever
+		// links it to the subtree: its owner closes it (mc-dkblm,
+		// architecture B).
+		if bead.ID == "" || bead.Status == "closed" || coordclass.ControllerOwned(bead) {
 			continue
 		}
 		if exclude != nil && exclude(bead) {

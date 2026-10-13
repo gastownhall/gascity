@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"strings"
 
@@ -10,7 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
-	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
@@ -216,10 +217,15 @@ func (s *Server) humaHandleConvoyCreate(_ context.Context, input *ConvoyCreateIn
 				return beads.Bead{}, apierr.InvalidRequest.Msg("rig is required when multiple rigs are configured")
 			}
 
-			// Pre-validate all items exist before creating the convoy.
-			for _, itemID := range input.Body.Items {
-				if _, err := store.Get(itemID); err != nil {
+			// Pre-validate all items exist, and none is controller-owned,
+			// before creating the convoy.
+			for i, itemID := range input.Body.Items {
+				item, err := store.Get(itemID)
+				if err != nil {
 					return beads.Bead{}, storeError(err)
+				}
+				if err := refuseOwned(itemID, "tracks in a convoy", fmt.Sprintf("body.items[%d]", i), item); err != nil {
+					return beads.Bead{}, err
 				}
 			}
 
@@ -274,10 +280,15 @@ func (s *Server) humaHandleConvoyAdd(_ context.Context, input *ConvoyAddInput) (
 		if b.Type != "convoy" {
 			return nil, apierr.InvalidRequest.Msg("bead " + id + " is not a convoy")
 		}
-		// Pre-validate all items exist before linking.
-		for _, itemID := range input.Body.Items {
-			if _, err := store.Get(itemID); err != nil {
+		// Pre-validate all items exist, and none is controller-owned, before
+		// linking.
+		for i, itemID := range input.Body.Items {
+			item, err := store.Get(itemID)
+			if err != nil {
 				return nil, storeError(err)
+			}
+			if err := refuseOwned(itemID, "tracks in a convoy", fmt.Sprintf("body.items[%d]", i), item); err != nil {
+				return nil, err
 			}
 		}
 		applied := make([]string, 0, len(input.Body.Items))
@@ -314,13 +325,16 @@ func (s *Server) humaHandleConvoyRemove(_ context.Context, input *ConvoyRemoveIn
 		// Pre-validate all items exist and belong to this convoy via either
 		// legacy parent-child membership or the current tracks dependency.
 		snapshots := make(map[string]convoyMembershipSnapshot, len(input.Body.Items))
-		for _, itemID := range input.Body.Items {
+		for i, itemID := range input.Body.Items {
 			item, gerr := store.Get(itemID)
 			if gerr != nil {
 				if errors.Is(gerr, beads.ErrNotFound) {
 					return nil, apierr.BeadNotFound.Msg("item " + itemID + " not found")
 				}
 				return nil, apierr.Internal.Msg(gerr.Error())
+			}
+			if err := refuseOwned(itemID, "untracks from a convoy", fmt.Sprintf("body.items[%d]", i), item); err != nil {
+				return nil, err
 			}
 			hadTrack, terr := convoycore.HasTrack(store, id, itemID)
 			if terr != nil {
@@ -528,7 +542,7 @@ func (s *Server) humaDeleteWorkflow(workflowID string) (*OKResponse, error) {
 		rootIDs := make([]string, 0, 2)
 		rootSeen := make(map[string]struct{}, 2)
 		addBead := func(b beads.Bead) {
-			if b.ID == "" || session.IsSessionBeadOrRepairable(b) { // never a session row (mc-dkblm)
+			if b.ID == "" || coordclass.ControllerOwned(b) { // never a controller-owned row (mc-dkblm, architecture B)
 				return
 			}
 			if _, ok := seen[b.ID]; ok {
@@ -678,7 +692,7 @@ func (s *Server) humaHandleWorkflowDelete(_ context.Context, input *WorkflowDele
 		rootIDs := make([]string, 0, 2)
 		rootSeen := make(map[string]struct{}, 2)
 		addBead := func(b beads.Bead) {
-			if b.ID == "" || session.IsSessionBeadOrRepairable(b) { // never a session row (mc-dkblm)
+			if b.ID == "" || coordclass.ControllerOwned(b) { // never a controller-owned row (mc-dkblm, architecture B)
 				return
 			}
 			if _, ok := seen[b.ID]; ok {
