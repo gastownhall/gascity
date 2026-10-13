@@ -8,6 +8,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/auto"
 )
 
 // turnInterruptFamily is one provider family as the session bead records it.
@@ -15,21 +16,27 @@ type turnInterruptFamily struct {
 	name     string
 	provider string
 	meta     map[string]string
+	// refusesInterruptNow marks a family that cannot take "deliver now" in
+	// any runtime mode: Submit refuses it with ErrInteractionUnsupported.
+	refusesInterruptNow bool
 }
 
 // turnInterruptFamilies covers every interrupt shape internal/session picks
 // by family: Interrupt + input clear (claude), soft Escape + boundary wait
-// (codex), soft Escape (kimi), Interrupt + turn reset (gemini), soft Escape
-// without idle wait (a wrapped gemini), hard restart (pi), and plain
-// Interrupt (any other family).
+// (codex), soft Escape + boundary wait without idle wait (a wrapped codex),
+// soft Escape (kimi), Interrupt + turn reset (gemini), soft Escape without
+// idle wait (a wrapped gemini), hard restart (pi), plain Interrupt (any other
+// family), and no "deliver now" at all (antigravity).
 var turnInterruptFamilies = []turnInterruptFamily{
 	{name: "claude", provider: "claude"},
 	{name: "codex", provider: "codex"},
+	{name: "wrapped-codex", provider: "my-codex", meta: map[string]string{"builtin_ancestor": "codex"}},
 	{name: "kimi", provider: "kimi"},
 	{name: "gemini", provider: "gemini"},
 	{name: "wrapped-gemini", provider: "my-gemini", meta: map[string]string{"builtin_ancestor": "gemini"}},
 	{name: "pi", provider: "pi"},
 	{name: "opencode", provider: "opencode"},
+	{name: "antigravity", provider: "antigravity", refusesInterruptNow: true},
 }
 
 func newTurnInterruptSession(t *testing.T, fam turnInterruptFamily, mode runtime.TurnInterruptMode) (*Manager, *runtime.Fake, Info) {
@@ -55,6 +62,27 @@ func submitInterruptNow(mgr *Manager, info Info) error {
 	return err
 }
 
+// checkInterruptNow submits "deliver now" and compares the runtime calls with
+// want; a family that refuses "deliver now" must refuse it without sending
+// anything.
+func checkInterruptNow(t *testing.T, fam turnInterruptFamily, mgr *Manager, sp *runtime.Fake, info Info, want string) {
+	t.Helper()
+	err := submitInterruptNow(mgr, info)
+	if fam.refusesInterruptNow {
+		if !errors.Is(err, ErrInteractionUnsupported) {
+			t.Fatalf("Submit(interrupt_now) error = %v, want ErrInteractionUnsupported", err)
+		}
+		assertNoInterruptSent(t, sp)
+		return
+	}
+	if err != nil {
+		t.Fatalf("Submit(interrupt_now): %v", err)
+	}
+	if got := strings.Join(callMethods(sp.Calls), " "); got != want {
+		t.Fatalf("calls\n got: %s\nwant: %s", got, want)
+	}
+}
+
 // A runtime that drives a terminal keeps the exact provider keystroke
 // sequence it had before turn-interrupt modes existed: these call sequences
 // were recorded from the code before the change.
@@ -67,6 +95,10 @@ func TestKeystrokeTurnInterruptKeepsProviderSequences(t *testing.T) {
 		"codex": {
 			stop: "IsRunning IsRunning IsRunning SendKeys(Escape) WaitForIdle WaitForInterruptBoundary",
 			now:  "IsRunning IsRunning IsRunning Pending IsRunning IsRunning SendKeys(Escape) WaitForIdle WaitForInterruptBoundary IsRunning IsRunning IsRunning DismissKnownDialogs Pending NudgeNow(msg) DismissKnownDialogs",
+		},
+		"wrapped-codex": {
+			stop: "IsRunning IsRunning IsRunning SendKeys(Escape) WaitForInterruptBoundary",
+			now:  "IsRunning IsRunning IsRunning Pending IsRunning IsRunning SendKeys(Escape) WaitForInterruptBoundary IsRunning IsRunning IsRunning DismissKnownDialogs Pending NudgeNow(msg) DismissKnownDialogs",
 		},
 		"kimi": {
 			stop: "IsRunning IsRunning IsRunning SendKeys(Escape) WaitForIdle",
@@ -88,6 +120,9 @@ func TestKeystrokeTurnInterruptKeepsProviderSequences(t *testing.T) {
 			stop: "IsRunning IsRunning IsRunning Interrupt",
 			now:  "IsRunning IsRunning IsRunning Pending IsRunning IsRunning Interrupt IsRunning IsRunning IsRunning Pending NudgeNow(msg)",
 		},
+		"antigravity": {
+			stop: "IsRunning IsRunning IsRunning Interrupt",
+		},
 	}
 	// The empty mode is what a runtime without the capability reports.
 	for _, mode := range []runtime.TurnInterruptMode{"", runtime.TurnInterruptKeystroke} {
@@ -104,12 +139,7 @@ func TestKeystrokeTurnInterruptKeepsProviderSequences(t *testing.T) {
 			})
 			t.Run(string(mode)+"/"+fam.name+"/interrupt_now", func(t *testing.T) {
 				mgr, sp, info := newTurnInterruptSession(t, fam, mode)
-				if err := submitInterruptNow(mgr, info); err != nil {
-					t.Fatalf("Submit(interrupt_now): %v", err)
-				}
-				if got := strings.Join(callMethods(sp.Calls), " "); got != want.now {
-					t.Fatalf("calls\n got: %s\nwant: %s", got, want.now)
-				}
+				checkInterruptNow(t, fam, mgr, sp, info, want.now)
 			})
 		}
 	}
@@ -127,6 +157,10 @@ func TestProtocolTurnInterruptUsesInterruptForEveryFamily(t *testing.T) {
 		"codex": {
 			stop: "IsRunning IsRunning IsRunning Interrupt WaitForIdle WaitForInterruptBoundary",
 			now:  "IsRunning IsRunning IsRunning Pending IsRunning IsRunning Interrupt WaitForIdle WaitForInterruptBoundary IsRunning IsRunning IsRunning DismissKnownDialogs Pending NudgeNow(msg) DismissKnownDialogs",
+		},
+		"wrapped-codex": {
+			stop: "IsRunning IsRunning IsRunning Interrupt WaitForInterruptBoundary",
+			now:  "IsRunning IsRunning IsRunning Pending IsRunning IsRunning Interrupt WaitForInterruptBoundary IsRunning IsRunning IsRunning DismissKnownDialogs Pending NudgeNow(msg) DismissKnownDialogs",
 		},
 		"kimi": {
 			stop: "IsRunning IsRunning IsRunning Interrupt WaitForIdle",
@@ -150,6 +184,9 @@ func TestProtocolTurnInterruptUsesInterruptForEveryFamily(t *testing.T) {
 			stop: "IsRunning IsRunning IsRunning Interrupt",
 			now:  "IsRunning IsRunning IsRunning Pending IsRunning IsRunning Interrupt IsRunning IsRunning IsRunning Pending NudgeNow(msg)",
 		},
+		"antigravity": {
+			stop: "IsRunning IsRunning IsRunning Interrupt",
+		},
 	}
 	for _, fam := range turnInterruptFamilies {
 		want := golden[fam.name]
@@ -164,12 +201,7 @@ func TestProtocolTurnInterruptUsesInterruptForEveryFamily(t *testing.T) {
 		})
 		t.Run(fam.name+"/interrupt_now", func(t *testing.T) {
 			mgr, sp, info := newTurnInterruptSession(t, fam, runtime.TurnInterruptProtocol)
-			if err := submitInterruptNow(mgr, info); err != nil {
-				t.Fatalf("Submit(interrupt_now): %v", err)
-			}
-			if got := strings.Join(callMethods(sp.Calls), " "); got != want.now {
-				t.Fatalf("calls\n got: %s\nwant: %s", got, want.now)
-			}
+			checkInterruptNow(t, fam, mgr, sp, info, want.now)
 		})
 	}
 }
@@ -190,6 +222,13 @@ func TestUnsupportedTurnInterruptReturnsTypedError(t *testing.T) {
 		t.Run(fam.name+"/interrupt_now", func(t *testing.T) {
 			mgr, sp, info := newTurnInterruptSession(t, fam, runtime.TurnInterruptUnsupported)
 			err := submitInterruptNow(mgr, info)
+			if fam.refusesInterruptNow {
+				if !errors.Is(err, ErrInteractionUnsupported) {
+					t.Fatalf("Submit(interrupt_now) error = %v, want ErrInteractionUnsupported", err)
+				}
+				assertNoInterruptSent(t, sp)
+				return
+			}
 			if fam.name == "pi" {
 				// pi replaces the turn by a runtime restart, which needs
 				// neither keys nor a protocol interrupt.
@@ -229,4 +268,111 @@ func assertNoInterruptSent(t *testing.T, sp *runtime.Fake) {
 			t.Fatalf("calls = %v, want no interrupt, keys or input clear", callMethods(sp.Calls))
 		}
 	}
+}
+
+// A protocol interrupt is sent once: when the turn does not go idle, there is
+// no keystroke Ctrl-C fallback to retry with, and a second protocol interrupt
+// could cancel a turn that started in between. StopTurn reports the idle wait
+// failure; interrupt_now falls back to the hard restart.
+func TestProtocolTurnInterruptSendsOneInterruptWhenIdleWaitFails(t *testing.T) {
+	for _, fam := range turnInterruptFamilies {
+		if fam.name != "codex" && fam.name != "kimi" {
+			continue
+		}
+		t.Run(fam.name+"/stop", func(t *testing.T) {
+			mgr, sp, info := newTurnInterruptSession(t, fam, runtime.TurnInterruptProtocol)
+			sp.WaitForIdleSequence[info.SessionName] = []error{errors.New("not idle"), nil}
+			err := mgr.StopTurn(info.ID)
+			if err == nil || !strings.Contains(err.Error(), "waiting for stopped session to become idle") {
+				t.Fatalf("StopTurn error = %v, want the idle wait failure", err)
+			}
+			if got := countMethod(sp.Calls, "Interrupt"); got != 1 {
+				t.Fatalf("Interrupt calls = %d, want 1; calls = %v", got, callMethods(sp.Calls))
+			}
+		})
+		t.Run(fam.name+"/interrupt_now", func(t *testing.T) {
+			mgr, sp, info := newTurnInterruptSession(t, fam, runtime.TurnInterruptProtocol)
+			sp.WaitForIdleSequence[info.SessionName] = []error{errors.New("not idle"), nil}
+			if err := submitInterruptNow(mgr, info); err != nil {
+				t.Fatalf("Submit(interrupt_now): %v", err)
+			}
+			if got := countMethod(sp.Calls, "Interrupt"); got != 1 {
+				t.Fatalf("Interrupt calls = %d, want 1; calls = %v", got, callMethods(sp.Calls))
+			}
+			stop := callIndex(sp.Calls, "Stop", info.SessionName)
+			start := callIndex(sp.Calls, "Start", info.SessionName)
+			nudge := callIndex(sp.Calls, "NudgeNow", info.SessionName)
+			if stop < 0 || start < stop || nudge < start {
+				t.Fatalf("calls = %v, want the Stop, Start, NudgeNow restart", callMethods(sp.Calls))
+			}
+		})
+	}
+}
+
+func countMethod(calls []runtime.Call, method string) int {
+	n := 0
+	for _, call := range calls {
+		if call.Method == method {
+			n++
+		}
+	}
+	return n
+}
+
+// The production t3bridge runtime, bare and behind auto as cmd/gc wires it,
+// interrupts every family that takes "deliver now" with one Interrupt and
+// then delivers the message: no keys, no waits it does not implement, no
+// hard restart.
+func TestT3BridgeProfileTurnInterruptSequence(t *testing.T) {
+	providers := map[string]func(*runtime.Fake) runtime.Provider{
+		"t3bridge": func(f *runtime.Fake) runtime.Provider {
+			return runtime.NewFakeProfile(runtime.ProfileT3Bridge, runtime.FullFake{Fake: f})
+		},
+		"auto": func(f *runtime.Fake) runtime.Provider {
+			return auto.New(
+				runtime.NewFakeProfile(runtime.ProfileT3Bridge, runtime.FullFake{Fake: f}),
+				runtime.NewFakeProfile(runtime.ProfileACP, runtime.FullFake{Fake: runtime.NewFake()}),
+			)
+		},
+	}
+	for pname, wrap := range providers {
+		for _, fam := range turnInterruptFamilies {
+			if fam.refusesInterruptNow {
+				continue
+			}
+			t.Run(pname+"/"+fam.name, func(t *testing.T) {
+				f := runtime.NewFake()
+				mgr := newTestManager(t, beads.NewMemStore(), wrap(f))
+				meta := map[string]string{"session_origin": "manual"}
+				for k, v := range fam.meta {
+					meta[k] = v
+				}
+				info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: fam.provider, WorkDir: t.TempDir(), Provider: fam.provider, ExtraMeta: meta})
+				if err != nil {
+					t.Fatalf("Create: %v", err)
+				}
+				f.Calls = nil
+				if err := submitInterruptNow(mgr, info); err != nil {
+					t.Fatalf("Submit(interrupt_now): %v", err)
+				}
+				if got := strings.Join(turnEffectCalls(f.Calls), " "); got != "Interrupt Nudge(msg)" {
+					t.Fatalf("turn-affecting calls = %q, want %q; all calls = %v", got, "Interrupt Nudge(msg)", callMethods(f.Calls))
+				}
+			})
+		}
+	}
+}
+
+// turnEffectCalls keeps the calls that act on the agent's turn or runtime,
+// dropping read-only probes.
+func turnEffectCalls(calls []runtime.Call) []string {
+	var out []string
+	for i, m := range callMethods(calls) {
+		switch calls[i].Method {
+		case "IsRunning", "Pending", "ProcessAlive", "GetMeta", "SetMeta", "ObserveLivenessWithError", "Capabilities", "DismissKnownDialogs":
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
 }
