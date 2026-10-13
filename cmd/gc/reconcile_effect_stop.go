@@ -296,7 +296,7 @@ func honoredWake(v txView) bool {
 		return false
 	}
 	e := v.Alloc.Snapshot.Entries[v.It.Key]
-	return e != nil && e.Desired == desireWake
+	return e != nil && e.WakeHonored
 }
 
 // stopReason is a stop intent's drain reason.

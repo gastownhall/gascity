@@ -452,16 +452,21 @@ func TestNothingLiveStillConfirms(t *testing.T) {
 	}
 }
 
-// TestFinalizeNeverClosesOverAnHonoredWake (D7 rule 4). Kills a premise
-// close over a pending explicit wake AL1 honors: the stopped pool seat is
-// drained, not closed, and the wake is left to the next pass's start.
+// TestFinalizeNeverClosesOverAnHonoredWake (D7 rule 4, v5.10n). Kills a
+// premise close over a pending explicit wake AL1 honors, whatever the
+// allocation's desire (a row out of its template's desired set kept at the
+// max included), and a finalize that stamps the wake served: the stopped
+// pool seat is drained, not closed, its slept_at left, and the wake left to
+// the next pass's start.
 func TestFinalizeNeverClosesOverAnHonoredWake(t *testing.T) {
 	wake := []string{"pool_managed", "true", "wake_request", "explicit", "wake_requested_at", rowAt(-time.Second)}
-	s, got, _ := stopRun(t, signaled(drainOrphaned, wake...), func(e *selectionEntry) { e.Desired = desireWake }, func(p *effectPass, _ *fenceLeaf, store beads.Store, _ string) {
-		p.Writers[rowLeg] = fencedWriter{store: atomicClosing{store.(*beads.MemStore)}}
-	})
-	if s.Outcome != settledLanded || got.Status == "closed" || got.Metadata["state"] != string(session.StateDrained) || got.Metadata["wake_request"] != "explicit" {
-		t.Fatalf("settlement %+v, status %s, row %v; want drained, open, the wake kept", s, got.Status, got.Metadata)
+	for _, d := range []desire{desireWake, desireKeep} {
+		s, got, _ := stopRun(t, signaled(drainOrphaned, wake...), func(e *selectionEntry) { e.Desired, e.WakeHonored = d, true }, func(p *effectPass, _ *fenceLeaf, store beads.Store, _ string) {
+			p.Writers[rowLeg] = fencedWriter{store: atomicClosing{store.(*beads.MemStore)}}
+		})
+		if s.Outcome != settledLanded || got.Status == "closed" || got.Metadata["state"] != string(session.StateDrained) || got.Metadata["wake_request"] != "explicit" || got.Metadata["slept_at"] != "" {
+			t.Fatalf("%s: settlement %+v, status %s, row %v; want drained, open, no slept_at, the wake kept", d, s, got.Status, got.Metadata)
+		}
 	}
 }
 

@@ -46,13 +46,18 @@ type finalizeChoice struct {
 // that may close, holds no work and no operator hold, and has no honored
 // wake closes; otherwise AcknowledgeDrainPatch (state=drained) with no work,
 // or CompleteDrainPatch(idle) with work. Either clears restart_requested
-// (#2574). The stop request's keys are the stop verb's to clear, in the same
-// CAS (D3 step 5).
+// (#2574). Over an honored wake it leaves slept_at as it was: a sleep stamped
+// after the request reads it served (explicitWakePendingInfo), and D7 rule 4
+// leaves the request to the next pass's start (v5.10n). The stop request's
+// keys are the stop verb's to clear, in the same CAS (D3 step 5).
 func finalizePatch(f finalizeFacts) finalizeChoice {
 	c := finalizeChoice{CloseSeat: f.CloseIfUnassigned && !f.HasWork && !f.OperatorHeld && !f.HonoredWake, AsSleep: f.HasWork}
 	c.Patch = session.AcknowledgeDrainPatch(f.Now, f.FreshWake)
 	if f.HasWork {
 		c.Patch = session.CompleteDrainPatch(f.Now, string(session.SleepReasonIdle), f.FreshWake)
+	}
+	if f.HonoredWake {
+		delete(c.Patch, "slept_at")
 	}
 	if f.RestartRequested {
 		c.Patch["restart_requested"] = ""

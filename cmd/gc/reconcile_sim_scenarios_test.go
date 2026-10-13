@@ -1658,3 +1658,68 @@ func TestSimRuntimeBackAfterAnAbsenceNoteIsAdopted(t *testing.T) {
 	}
 	s.noViolations(t)
 }
+
+// Scenario J26 D/E (mc-kgl4v; CONTRACT D7 rule 4, v5.10n, §12.2 row 26): an
+// operator drains a pool seat, its agent acks and lingers, and an explicit
+// wake lands while the stop's kill runs. The finalize never closes the row
+// over the wake; the next passes start it again (the seat runs, the row
+// reads awake) and its start consumes the wake.
+func TestSimWakeDuringAStopKillRunsTheSeatAgain(t *testing.T) {
+	s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-gc-1", "last_woke_at", rowAt(-time.Hour)))
+	s.settle()
+	if err := newDrainOps(s.sp).setDrain("s-gc-1"); err != nil {
+		t.Fatal(err)
+	}
+	s.simOperatorDrain(true)
+	if !s.simAck("gc-1", "tok-gc-1") {
+		t.Fatal("the agent's ack did not land")
+	}
+	woke := false
+	for i := 0; i < 20 && !woke; i++ {
+		s.advance(simPatrol)
+		s.inventory()
+		s.pass()
+		for len(s.parked) > 0 {
+			if e := s.parked[0]; e.it.Kind == intentStop && e.it.Key.ID == "gc-1" && !woke {
+				woke, e.seam = true, seamAfterCall // the wake lands while the kill runs
+				e.outside = func() {
+					l := s.legs[0]
+					b, _ := l.backing.Get("gc-1")
+					s.outside("wake", l, b, func(l *simLeg, b beads.Bead) {
+						s.setMeta(l, b.ID, "wake_request", "explicit", "wake_requested_at", s.clk.Now().UTC().Format(time.RFC3339))
+					})
+				}
+			}
+			s.release(0)
+		}
+		s.audit("v2")
+	}
+	if !woke {
+		t.Fatal("the seat was never stopped")
+	}
+	row := func() beads.Bead {
+		b, err := s.legs[0].backing.Get("gc-1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	runs := func() bool {
+		b := row()
+		s.sp.mu.Lock()
+		rt := s.sp.rts["s-gc-1"]
+		s.sp.mu.Unlock()
+		return b.Status != "closed" && rt != nil && b.Metadata["state"] == string(session.StateAwake) && b.Metadata["wake_request"] == ""
+	}
+	for i := 0; i < 12 && !runs(); i++ {
+		if b := row(); b.Status == "closed" {
+			t.Fatalf("the row closed over the wake: %v", b.Metadata)
+		}
+		s.advance(simPatrol)
+		s.settle()
+	}
+	if !runs() {
+		t.Fatalf("the woken seat never ran again: %v", row().Metadata)
+	}
+	s.noViolations(t)
+}
