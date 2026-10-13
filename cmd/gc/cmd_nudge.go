@@ -2806,9 +2806,10 @@ func claimDueQueuedNudgesMatching(cityPath string, now time.Time, match func(que
 
 // claimDueQueuedNudgeBatchForTarget claims target's next delivery batch and
 // pins it to a delivery key (queuedNudgeDeliveryKey). When a due item already
-// carries a pin, the batch is that pinned batch, all of its pending items and
-// nothing else: a redelivery after an unknown outcome must be the same
-// delivery. Otherwise it is every due unpinned item, pinned to a new key.
+// carries a pin and its batch can be claimed whole (wholePinnedBatch), the
+// batch is that pinned batch, all of its pending items and nothing else: a
+// redelivery after an unknown outcome must be the same delivery. Otherwise it
+// is every due unpinned item, pinned to a new key.
 func claimDueQueuedNudgeBatchForTarget(cityPath string, target nudgeTarget, now time.Time) ([]queuedNudge, error) {
 	return claimDueQueuedNudges(cityPath, now, queuedNudgeTargetMatcher(cityPath, target), true)
 }
@@ -2851,13 +2852,7 @@ func claimDueQueuedNudges(cityPath string, now time.Time, match func(queuedNudge
 		claim := func(item queuedNudge) bool { return match(item) && due(item) }
 		newBatch := ""
 		if pinBatch {
-			pinned := ""
-			for _, item := range state.Pending {
-				if item.DeliveryBatch != "" && claim(item) {
-					pinned = item.DeliveryBatch
-					break
-				}
-			}
+			pinned := wholePinnedBatch(state, claim, match)
 			if pinned != "" {
 				claim = func(item queuedNudge) bool { return item.DeliveryBatch == pinned && match(item) }
 			} else {
@@ -2884,6 +2879,36 @@ func claimDueQueuedNudges(cityPath string, now time.Time, match func(queuedNudge
 		return nil
 	})
 	return claimed, err
+}
+
+// wholePinnedBatch returns the first pinned delivery batch that has a due,
+// claimable item and can be claimed whole: every pending item carrying its pin
+// matches, and none of its items is in flight. A batch is only ever delivered
+// whole under its key; a strict subset would let the runtime commit the
+// partial text and later replay that receipt for the missing items, acking
+// them unseen. A batch that cannot be claimed whole waits this pass, to be
+// reassembled or retired by expiry or dead-letter.
+func wholePinnedBatch(state *nudgeQueueState, claimable, match func(queuedNudge) bool) string {
+	inFlight := make(map[string]bool, len(state.InFlight))
+	for _, item := range state.InFlight {
+		if item.DeliveryBatch != "" {
+			inFlight[item.DeliveryBatch] = true
+		}
+	}
+	split := map[string]bool{}
+	for _, item := range state.Pending {
+		if item.DeliveryBatch != "" && !match(item) {
+			split[item.DeliveryBatch] = true
+		}
+	}
+	for _, item := range state.Pending {
+		batch := item.DeliveryBatch
+		if batch == "" || inFlight[batch] || split[batch] || !claimable(item) {
+			continue
+		}
+		return batch
+	}
+	return ""
 }
 
 func listQueuedNudges(cityPath, agentName string, now time.Time) ([]queuedNudge, []queuedNudge, []queuedNudge, error) {

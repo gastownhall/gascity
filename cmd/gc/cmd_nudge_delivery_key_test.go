@@ -252,3 +252,83 @@ func TestTryDeliverQueuedNudgesByPollerKeepsTheBatchAcrossLeaseExpiry(t *testing
 		t.Fatalf("redelivery text = %q, want nudge A alone", got[0][1])
 	}
 }
+
+// A pinned batch is only ever delivered whole. When the live-session census
+// stops vouching for one of its items between passes, the batch waits rather
+// than going out without that item: T3 would commit the partial text under the
+// batch key and later replay that receipt for the missing item, which would
+// then be acked without ever reaching the agent.
+func TestTryDeliverQueuedNudgesByPollerNeverSplitsAPinnedBatch(t *testing.T) {
+	h := newKeyedPollerHarness(t)
+	h.target.sessionID = "S2"
+	census := map[string]struct{}{"S2": {}}
+	old := liveNudgeFenceSessionIDs
+	liveNudgeFenceSessionIDs = func(string) map[string]struct{} { return census }
+	t.Cleanup(func() { liveNudgeFenceSessionIDs = old })
+
+	// A is addressed to the predecessor S1; successor S2 may claim it only
+	// while the census vouches that S2 is live and S1 is not.
+	a := newQueuedNudgeWithOptions("worker", "nudge A", "session", time.Now().Add(-time.Minute), queuedNudgeOptions{SessionID: "S1"})
+	if err := enqueueQueuedNudge(h.dir, a); err != nil {
+		t.Fatal(err)
+	}
+	h.enqueue("nudge B")
+
+	h.pass(errors.New("read tcp: i/o timeout")) // {A,B} under K: unknown outcome
+	census = nil                                // the census read fails transiently
+	h.pass(nil)
+	census = map[string]struct{}{"S2": {}}
+	h.pass(nil)
+
+	got := h.deliveries()
+	if len(got) == 0 {
+		t.Fatal("no deliveries")
+	}
+	key := got[0][0]
+	for i, d := range got {
+		if d[0] != key {
+			t.Fatalf("delivery %d key = %q, want the batch key %q (deliveries %v)", i, d[0], key, got)
+		}
+		if !strings.Contains(d[1], "nudge A") || !strings.Contains(d[1], "nudge B") {
+			t.Fatalf("delivery %d under the batch key = %q, want the whole batch (deliveries %v)", i, d[1], got)
+		}
+	}
+	if len(got) != 2 {
+		t.Fatalf("deliveries = %d (%v), want the ambiguous attempt and one whole redelivery", len(got), got)
+	}
+	pending, inFlight, dead, err := listQueuedNudges(h.dir, "worker", time.Now())
+	if err != nil || len(pending)+len(inFlight)+len(dead) != 0 {
+		t.Fatalf("queue after delivery: pending=%v inFlight=%v dead=%v err=%v, want empty", pending, inFlight, dead, err)
+	}
+}
+
+// While part of a pinned batch is still in flight under a live lease, the rest
+// of it is not claimed: that would be a second, partial delivery under the key.
+// Unpinned items still go out as a batch of their own.
+func TestClaimDueQueuedNudgeBatchSkipsAPinnedBatchPartlyInFlight(t *testing.T) {
+	h := newKeyedPollerHarness(t)
+	h.enqueue("nudge A")
+	h.enqueue("nudge B")
+	if err := withNudgeQueueState(h.dir, func(state *nudgeQueueState) error {
+		for i := range state.Pending {
+			state.Pending[i].DeliveryBatch = "batch-k"
+		}
+		first := state.Pending[0]
+		first.ClaimedAt = time.Now().UTC()
+		first.LeaseUntil = time.Now().Add(time.Hour).UTC()
+		state.InFlight = append(state.InFlight, first)
+		state.Pending = state.Pending[1:]
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h.enqueue("nudge C")
+
+	claimed, err := claimDueQueuedNudgeBatchForTarget(h.dir, h.target, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claimed) != 1 || claimed[0].Message != "nudge C" || claimed[0].DeliveryBatch == "batch-k" || claimed[0].DeliveryBatch == "" {
+		t.Fatalf("claimed = %+v, want nudge C alone under a new batch", claimed)
+	}
+}
