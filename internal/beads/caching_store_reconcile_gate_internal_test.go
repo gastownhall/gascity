@@ -132,6 +132,77 @@ func TestRequestReconcileDuringARunGetsAnotherRun(t *testing.T) {
 	}
 }
 
+// fullScanHookStore runs onList inside each full-scan List, after its read.
+type fullScanHookStore struct {
+	*MemStore
+	onList func()
+}
+
+func (s *fullScanHookStore) List(q ListQuery) ([]Bead, error) {
+	out, err := s.MemStore.List(q)
+	if q.AllowScan && q.SkipLabels && !q.IncludeClosed && q.Status == "" && s.onList != nil {
+		s.onList()
+	}
+	return out, err
+}
+
+// A requested run that discards its merge, because a full Prime that listed
+// before the request merged first, re-arms the request: the run whose list
+// read comes after the request is still owed.
+func TestRequestReconcileSurvivesARunThatDiscardsItsMerge(t *testing.T) {
+	backing := &fullScanHookStore{MemStore: NewMemStore()}
+	cs := NewCachingStoreForTest(backing, nil)
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	var calls atomic.Int32
+	primeListed := make(chan struct{})
+	reconcileListed := make(chan struct{})
+	primeDone := make(chan struct{})
+	backing.onList = func() {
+		switch calls.Add(1) {
+		case 1: // the full Prime's list
+			close(primeListed)
+			<-reconcileListed
+		case 2: // the requested reconcile's list
+			close(reconcileListed)
+			<-primeDone
+		}
+	}
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := cs.Prime(context.Background()); err != nil {
+			t.Errorf("second Prime: %v", err)
+		}
+	}()
+	<-primeListed
+	// A write the Prime's list missed, committed before the request.
+	row, err := backing.Create(Bead{Title: "committed before the request"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs.RequestReconcile()
+	done := make(chan struct{})
+	go func() {
+		cs.reconcileIfDue(time.Now())
+		close(done)
+	}()
+	<-reconcileListed
+	wg.Wait() // the Prime merged first
+	close(primeDone)
+	<-done
+	backing.onList = nil
+	if d := cs.nextReconcileDelay(time.Now()); d != 0 {
+		t.Fatalf("delay after a requested run discarded its merge = %v, want the request still due", d)
+	}
+	cs.reconcileIfDue(time.Now())
+	if _, err := cs.Get(row.ID); err != nil {
+		t.Fatalf("the re-armed run did not cache the row: %v", err)
+	}
+}
+
 // A request never bypasses the failure backoff of a failing backing.
 func TestRequestReconcileKeepsTheFailureBackoff(t *testing.T) {
 	backing := &hookedListStore{MemStore: NewMemStore()}

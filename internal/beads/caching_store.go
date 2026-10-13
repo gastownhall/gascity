@@ -131,8 +131,9 @@ type CachingStore struct {
 	localWrites localWritesInFlight
 
 	reconciling atomic.Bool
-	// reconcileRequested is set by RequestReconcile and cleared when a
-	// reconcile run starts; while set the cache is due (nextReconcileDelay).
+	// reconcileRequested is set by RequestReconcile, cleared when a
+	// reconcile run starts, and set again when that run discards its merge;
+	// while set the cache is due (nextReconcileDelay).
 	reconcileRequested atomic.Bool
 	// reconcileKick wakes the reconcile loop on a request (capacity 1).
 	reconcileKick  chan struct{}
