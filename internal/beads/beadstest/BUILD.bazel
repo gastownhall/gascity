@@ -20,6 +20,7 @@ go_library(
         "fence_conformance.go",
         "metadata_cas_conformance.go",
         "op_recording_store.go",
+        "pinned_id_duplicate_conformance.go",
         "pinned_id_fence_conformance.go",
         "pinned_module.go",
         "ready_parity_conformance.go",
