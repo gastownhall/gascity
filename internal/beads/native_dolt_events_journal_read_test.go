@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
+	"time"
 
 	beadslib "github.com/steveyegge/beads"
 	"github.com/steveyegge/beads/journalops"
@@ -76,11 +77,18 @@ func TestNativeDoltStoreReadEventsJournalPageHonorsCallerCancel(t *testing.T) {
 		<-ctx.Done()
 		return journalops.Page{}, errors.New("read aborted")
 	}})
+	// The store's own budget is far longer than the caller's patience, so a
+	// read that ignored the caller's ctx would sit out the budget instead.
+	store := newNativeDoltStoreForTest(spy, WithNativeReadRetryBudget(10*time.Second))
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := newNativeDoltStoreForTest(spy).ReadEventsJournalPage(ctx, 0, 0)
+	start := time.Now()
+	_, err := store.ReadEventsJournalPage(ctx, 0, 0)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("read took %v after the caller canceled; it waited out the store's budget instead of the caller's ctx", elapsed)
 	}
 }
 
@@ -226,6 +234,67 @@ func TestProxiedEventsJournalActiveFollowsBdPrecedence(t *testing.T) {
 				t.Fatalf("proxiedEventsJournalActive = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// proxiedJournalFixture is newSplitFixture with the native leaf latched onto
+// the proxied verdict lane, as OpenNativeDoltStoreAtProxied latches every
+// production proxied leaf, reading through spy.
+func proxiedJournalFixture(t *testing.T, spy *nativeJournalReaderSpy) (*ProxiedStore, *NativeDoltStore) {
+	t.Helper()
+	store, native, _ := newSplitFixture(t)
+	store.journalActive = true
+	native.proxiedReadVerdicts = true
+	native.storage = spy
+	return store, native
+}
+
+// A caller that gives up mid-reconnect is not a verdict about the endpoint: on
+// the proxied lane the exhausted chain would otherwise surface as a
+// budget_exhausted verdict, and the wrapper would stand the leaf down.
+func TestProxiedStoreEventsJournalCallerDeadlineDoesNotDemote(t *testing.T) {
+	store, native := proxiedJournalFixture(t, &nativeJournalReaderSpy{read: func(context.Context, int64, int) (journalops.Page, error) {
+		return journalops.Page{}, errors.New("begin read tx: dial tcp 127.0.0.1:3307: i/o timeout")
+	}})
+	native.readRetryBudgetOverride = 10 * time.Second
+	native.reopen = func(ctx context.Context) (NativeStorage, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	_, err := store.ReadEventsJournalPage(ctx, 0, 0)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error = %v, want the caller's context.DeadlineExceeded", err)
+	}
+	if _, typed := ProxiedVerdictOf(err); typed {
+		t.Fatalf("error = %v carries a proxied verdict for the caller's own deadline", err)
+	}
+	if store.Demoted() {
+		t.Fatal("the caller's deadline stood the native leaf down")
+	}
+}
+
+// A terminal endpoint answer read through the journal demotes the store the
+// way every other native read does, and the journal is then unavailable.
+func TestProxiedStoreEventsJournalTerminalVerdictDemotes(t *testing.T) {
+	store, _ := proxiedJournalFixture(t, &nativeJournalReaderSpy{read: func(context.Context, int64, int) (journalops.Page, error) {
+		return journalops.Page{}, errors.New("begin read tx: Error 1049 (42000): Unknown database 'beads'")
+	}})
+
+	_, err := store.ReadEventsJournalPage(context.Background(), 0, 0)
+	if verdict, typed := ProxiedVerdictOf(err); !typed || !verdict.Terminal() {
+		t.Fatalf("error = %v, want a terminal proxied verdict", err)
+	}
+	if !store.Demoted() {
+		t.Fatal("a terminal verdict on the journal read left the native leaf serving")
+	}
+	if _, err := store.ReadEventsJournalPage(context.Background(), 0, 0); !errors.Is(err, ErrEventsJournalUnavailable) {
+		t.Fatalf("read after the demotion = %v, want ErrEventsJournalUnavailable", err)
+	}
+	if store.EventsJournalActive() {
+		t.Fatal("a demoted store reports an active journal")
 	}
 }
 
