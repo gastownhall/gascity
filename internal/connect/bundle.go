@@ -120,6 +120,9 @@ func (b Bundle) Validate() error {
 	if b.City == "" {
 		return refuse(CodeBundleInvalid, "city is empty")
 	}
+	if !ValidCityName(b.City) {
+		return refuse(CodeBundleInvalid, "city is not [a-zA-Z0-9][a-zA-Z0-9._-]*")
+	}
 	if b.Session.ID == "" {
 		return refuse(CodeBundleInvalid, "session.id is empty")
 	}

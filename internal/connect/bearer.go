@@ -35,6 +35,7 @@ const macLen = 43
 
 var (
 	sessionIDRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+	cityNameRe  = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
 	macEncoding = base64.RawURLEncoding
 )
 
@@ -42,6 +43,15 @@ var (
 // [A-Za-z0-9][A-Za-z0-9._-]{0,127}.
 func ValidSessionID(id string) bool {
 	return sessionIDRe.MatchString(id)
+}
+
+// ValidCityName reports whether name is a city name a bundle or descriptor
+// can carry: [a-zA-Z0-9][a-zA-Z0-9._-]*, the supervisor's registry rule
+// (internal/supervisor/registry.go). The city becomes a path component of the
+// box's connect directory (§3.7) and of the default key path (D7), so it can
+// never be empty, ".", "..", or hold a separator or control character.
+func ValidCityName(name string) bool {
+	return cityNameRe.MatchString(name)
 }
 
 // lp appends s to buf with a uvarint length prefix, so no two field lists

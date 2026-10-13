@@ -154,6 +154,9 @@ func TestDecodeDescriptorStrictRefusals(t *testing.T) {
 		"zero generation":          replace("generation = 7", "generation = 0"),
 		"bad session id":           replace(`session_id = "mc-abc12"`, `session_id = "mc abc"`),
 		"empty city":               replace(`city = "maintainer-city"`, `city = ""`),
+		"traversal city":           replace(`city = "maintainer-city"`, `city = "../../etc"`),
+		"slash city":               replace(`city = "maintainer-city"`, `city = "/"`),
+		"control-character city":   replace(`city = "maintainer-city"`, `city = "mc\u0007"`),
 		"rig scope":                replace(`scope = "city"`, `scope = "rig"`),
 		"empty project":            replace(`project_id = "proj-7d2e"`, `project_id = ""`),
 		"plaintext url":            replace(`url = "https://`, `url = "http://`),
@@ -190,5 +193,18 @@ func TestEncodeDescriptorRefusesInvalid(t *testing.T) {
 	d.Credential = "env:GC_BEARER"
 	if _, err := EncodeDescriptor(d); !errors.Is(err, ErrDescriptorInvalid) {
 		t.Fatalf("EncodeDescriptor(env credential) = %v, want ErrDescriptorInvalid", err)
+	}
+}
+
+func TestValidCityName(t *testing.T) {
+	for _, name := range []string{"maintainer-city", "mc", "A.b_c-9", "9city", "a.."} {
+		if !ValidCityName(name) {
+			t.Errorf("ValidCityName(%q) = false, want true", name)
+		}
+	}
+	for _, name := range []string{"", ".", "..", "../../etc", "/", "a/b", "a\\b", ".hidden", "-x", "_x", "a b", "mc\n", "mc\x00", "cité"} {
+		if ValidCityName(name) {
+			t.Errorf("ValidCityName(%q) = true, want false", name)
+		}
 	}
 }

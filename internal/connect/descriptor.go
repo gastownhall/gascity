@@ -225,6 +225,8 @@ func (d Descriptor) Validate() error {
 		return descriptorErr("contract %d is unknown; this gc implements %d", d.Contract, Contract)
 	case d.City == "":
 		return descriptorErr("city is empty")
+	case !ValidCityName(d.City):
+		return descriptorErr("city is not [a-zA-Z0-9][a-zA-Z0-9._-]*")
 	case !ValidSessionID(d.SessionID):
 		return descriptorErr("session_id is not [A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 	case d.Generation < 1:
