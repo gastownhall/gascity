@@ -383,6 +383,12 @@ type Info struct {
 	// InstanceToken is the RAW instance_token metadata. The wake path compares it
 	// against the live instance token to detect a superseded session.
 	InstanceToken string // instance_token (raw)
+	// IdleClaimNudgeLapsedToken is the RAW idle_claim_nudge_lapsed_token
+	// metadata: the instance token of the incarnation whose claim window lapsed
+	// (the pool-claim backstop nudged it to its cap on its trigger and it never
+	// claimed). Pool accounting compares it with InstanceToken to tell whether
+	// the latch names the current incarnation.
+	IdleClaimNudgeLapsedToken string // idle_claim_nudge_lapsed_token (raw)
 	// DetachedAt is the RAW detached_at metadata (RFC3339 or empty). The detach
 	// gate reads it as != "" and parses it via time.Parse, so the mirror keeps the
 	// raw bytes.

@@ -285,12 +285,14 @@ func reusablePoolSessionInfos(bp *agentBuildParams, cfgAgent *config.Agent, temp
 
 // reusablePoolSessionInfosForRequest narrows ordinary reuse for anonymous
 // generic demand. A currently held/quarantined session cannot satisfy that
-// demand because the awake evaluator will suppress it. Dependency-only slots
-// remain reusable: real demand promotes them and session sync clears the marker
-// before awake evaluation. Concrete requests and pending creates retain their
-// existing reuse semantics: the former preserve resume identity, while the
-// latter must finish the create already counted as in-flight demand even if a
-// hold lands mid-create.
+// demand because the awake evaluator will suppress it. Nor can a seat whose
+// claim window lapsed (poolSeatClaimLapsedInfo): it was handed ready work and
+// did not pull it, so it is not the capacity that serves the next unit of
+// demand. Dependency-only slots remain reusable: real demand promotes them and
+// session sync clears the marker before awake evaluation. Concrete requests and
+// pending creates retain their existing reuse semantics: the former preserve
+// resume identity, while the latter must finish the create already counted as
+// in-flight demand even if a hold lands mid-create.
 func reusablePoolSessionInfosForRequest(
 	bp *agentBuildParams,
 	cfgAgent *config.Agent,
@@ -310,7 +312,8 @@ func reusablePoolSessionInfosForRequest(
 		keep := poolSessionConsumesNewDemandInfo(info) ||
 			(strings.TrimSpace(info.WaitHold) == "" &&
 				!metadataTimeInFuture(info.HeldUntil, decisionTime) &&
-				!metadataTimeInFuture(info.QuarantinedUntil, decisionTime))
+				!metadataTimeInFuture(info.QuarantinedUntil, decisionTime) &&
+				!poolSeatClaimLapsedInfo(info))
 		switch {
 		case filtered != nil && keep:
 			filtered = append(filtered, info)

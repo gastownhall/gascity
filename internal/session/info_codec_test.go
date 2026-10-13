@@ -130,6 +130,7 @@ func infoFromPersistedBeadFrozen(b beads.Bead) Info {
 		DrainAt:                        b.Metadata["drain_at"],
 		SleepIntent:                    b.Metadata["sleep_intent"],
 		InstanceToken:                  b.Metadata["instance_token"],
+		IdleClaimNudgeLapsedToken:      b.Metadata["idle_claim_nudge_lapsed_token"],
 		DetachedAt:                     b.Metadata["detached_at"],
 		CurrentlyProcessingBeadID:      b.Metadata[CurrentBeadIDKey],
 		CurrentClaimBeadID:             b.Metadata[beadmeta.CurrentClaimBeadIDMetadataKey],

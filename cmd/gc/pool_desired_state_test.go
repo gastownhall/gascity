@@ -1847,6 +1847,55 @@ func TestReusablePoolSessionInfosForRequestPreservesPromotionAndPendingCreate(t 
 	}
 }
 
+// TestReusablePoolSessionInfosForRequestSkipsClaimLapsedSeat pins ga-2m9dwp's
+// accounting at its owner: a seat whose current incarnation let its claim window
+// lapse (the claim backstop latched its instance token) is not generic capacity,
+// so anonymous new demand is not satisfied by it. A concrete request for the same
+// row keeps today's resume semantics, and a later incarnation counts again.
+func TestReusablePoolSessionInfosForRequestSkipsClaimLapsedSeat(t *testing.T) {
+	now := time.Date(2026, 7, 28, 21, 0, 0, 0, time.UTC)
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(10), 0)},
+	}
+	idle := func(id, token, lapsed string) beads.Bead {
+		session := poolSessionBeadWithState(id, "awake", "")
+		session.CreatedAt = now.Add(-time.Hour)
+		session.Metadata["instance_token"] = token
+		session.Metadata[idleClaimNudgeLapsedTokenKey] = lapsed
+		return session
+	}
+	lapsed := idle("sess-lapsed", "tok-lapsed", "tok-lapsed")
+	recycled := idle("sess-recycled", "tok-new", "tok-old")
+	ready := idle("sess-ready", "tok-ready", "")
+	bp := &agentBuildParams{
+		city:         cfg,
+		agents:       cfg.Agents,
+		sessionBeads: newSessionBeadSnapshot([]beads.Bead{lapsed, recycled, ready}),
+	}
+
+	reusable := func(request SessionRequest) map[string]bool {
+		got := map[string]bool{}
+		for _, info := range reusablePoolSessionInfosForRequest(bp, &cfg.Agents[0], "claude", request, now, nil) {
+			got[info.ID] = true
+		}
+		return got
+	}
+
+	anonymous := reusable(SessionRequest{Tier: "new"})
+	if anonymous[lapsed.ID] {
+		t.Fatal("a seat whose claim window lapsed still satisfies anonymous new demand")
+	}
+	if !anonymous[recycled.ID] {
+		t.Fatal("a later incarnation was held to the previous incarnation's lapse")
+	}
+	if !anonymous[ready.ID] {
+		t.Fatal("an idle seat inside its claim window lost its reuse")
+	}
+	if concrete := reusable(SessionRequest{Tier: "new", SessionBeadID: lapsed.ID}); !concrete[lapsed.ID] {
+		t.Fatal("a concrete request lost the lapsed row from its candidates")
+	}
+}
+
 func TestComputePoolDesiredStates_PostCreateProtectionReusesProtectedBeforePending(t *testing.T) {
 	now := time.Date(2026, 7, 28, 21, 0, 0, 0, time.UTC)
 	cfg := &config.City{

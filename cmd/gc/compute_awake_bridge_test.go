@@ -135,6 +135,65 @@ func TestBuildAwakeInputFromReconcilerPrefersFreshCompletedPoolSession(t *testin
 	assertAwake(t, decisions, "polecat-fresh")
 }
 
+// TestBuildAwakeInputFromReconcilerClaimLapsedSeatIsNotScaledCapacity pins the
+// awake half of ga-2m9dwp: pool demand keeps a seat awake only while it can take
+// work. A seat whose current incarnation let its claim window lapse gets no
+// scaled:demand reason, even listed first, so the demand lands on a seat that
+// can claim and the lapsed one has no wake reason left to keep it.
+func TestBuildAwakeInputFromReconcilerClaimLapsedSeatIsNotScaledCapacity(t *testing.T) {
+	decisionTime := time.Date(2026, 7, 28, 21, 0, 0, 0, time.UTC)
+	const template = "hello-world/polecat"
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "polecat", Dir: "hello-world"}},
+	}
+	sessionInfo := func(id, name, lapsedToken string) session.Info {
+		return sessiontest.SeedBead(t, beads.Bead{
+			ID:        id,
+			Status:    "open",
+			Type:      sessionBeadType,
+			CreatedAt: decisionTime.Add(-time.Hour),
+			Labels:    []string{sessionBeadLabel, "template:" + template},
+			Metadata: map[string]string{
+				"state":                      "awake",
+				"session_name":               name,
+				"template":                   template,
+				"session_origin":             "ephemeral",
+				"instance_token":             "tok-" + id,
+				idleClaimNudgeLapsedTokenKey: lapsedToken,
+				poolManagedMetadataKey:       boolMetadata(true),
+			},
+		})
+	}
+	lapsedInfo := sessionInfo("mc-lapsed", "polecat-lapsed", "tok-mc-lapsed")
+	readyInfo := sessionInfo("mc-ready", "polecat-ready", "")
+
+	input := buildAwakeInputFromReconciler(
+		cfg,
+		"",
+		[]session.Info{lapsedInfo, readyInfo},
+		map[string]int{template: 1},
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		runtime.NewFake(),
+		decisionTime,
+	)
+	if !input.SessionBeads[0].ClaimLapsed {
+		t.Fatal("lapsed seat was not marked ClaimLapsed")
+	}
+	if input.SessionBeads[1].ClaimLapsed {
+		t.Fatal("seat inside its claim window was marked ClaimLapsed")
+	}
+
+	decisions := ComputeAwakeSet(input)
+	assertAsleep(t, decisions, "polecat-lapsed")
+	assertAwake(t, decisions, "polecat-ready")
+}
+
 // TestBuildAwakeInputFromReconcilerCanonicalizesLegacyBoundTemplate pins the
 // bridge-side identity normalization for adopted legacy-bound session beads.
 // A bead persisted under a removed binding ("gascity-packs/gc.implementation-worker")

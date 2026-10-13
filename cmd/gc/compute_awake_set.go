@@ -130,6 +130,7 @@ type AwakeSessionBead struct {
 	ContinuationResetPending  bool      // continuation_reset_pending metadata is set
 	CurrentlyProcessingBeadID string    // work bead the session is currently processing
 	PostCreateProtected       bool      // fresh successful pool create; preferred for scaled slots during grace
+	ClaimLapsed               bool      // this incarnation let its claim window lapse (poolSeatClaimLapsedInfo)
 }
 
 // AwakeWorkBead represents a work bead with an assignee.
@@ -881,10 +882,15 @@ func collectActiveBeads(beads []AwakeSessionBead, template string, now time.Time
 		// Treating them as generic pool candidates would re-introduce the
 		// #1493 failure mode in a different shape: a configured named
 		// session getting woken by generic template scale_check demand.
+		//
+		// A seat whose claim window lapsed is not scale capacity either: it
+		// was handed ready work and did not pull it (poolSeatClaimLapsedInfo),
+		// so demand keeping it awake would leave that work with no seat that
+		// takes it (ga-2m9dwp).
 		if b.Template == template && b.State == "active" &&
 			b.NamedIdentity == "" && !b.ConfiguredNamedSession &&
 			!b.ManualSession && !b.Drained && !b.DependencyOnly &&
-			!minActiveHardBlocked(b, now) {
+			!b.ClaimLapsed && !minActiveHardBlocked(b, now) {
 			result = append(result, b)
 		}
 	}

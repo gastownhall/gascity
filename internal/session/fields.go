@@ -220,7 +220,7 @@ var fields = withObserved(with(with(with(with(with(with(with(registry, false, v2
 	"pool_alias_conflict_at", "synced_at", "work_dir", "wake_mode", "session_key", "continuation_epoch", "command", "provider", "provider_kind",
 	"builtin_ancestor", "resume_flag", "resume_style", "resume_command", "session_id_flag", "close_reason", "closed_at"), false, v2("cmd/gc/reconcile_baseline.go", "baselinePatch"),
 	"started_config_hash", "started_provision_hash", "started_launch_hash", "core_hash_breakdown", "started_live_hash", "live_hash"), false, v2("cmd/gc/reconcile_steps_nudges.go", "externalReadsLane.nudges"),
-	"idle_claim_nudge_trigger", "idle_claim_nudge_count", "idle_claim_nudge_at", "continuation_claim_nudge_work",
+	"idle_claim_nudge_trigger", "idle_claim_nudge_count", "idle_claim_nudge_at", "idle_claim_nudge_lapsed_token", "continuation_claim_nudge_work",
 	"continuation_claim_nudge_root", "continuation_claim_nudge_store_ref", "continuation_claim_nudge_generation",
 	"continuation_claim_nudge_count", "continuation_claim_nudge_at", "execution_claim_nudge_work", "execution_claim_nudge_root",
 	"execution_claim_nudge_store_ref", "execution_claim_nudge_count", "execution_claim_nudge_at", "execution_claim_nudge_stalled",
@@ -450,6 +450,10 @@ var registry = slices.Concat([]Field{
 		"drain_escalation_count", "drain_escalation_drain"),
 	same(ClassAdvisory, false, sites(legacy("cmd/gc/idle_nudge.go", "writeIdleClaimMarker")), "idle_claim_nudge_trigger", "idle_claim_nudge_count",
 		"idle_claim_nudge_at"),
+	// The pool-claim backstop's lapse latch: the incarnation (instance token)
+	// that let its claim window lapse. Pool accounting reads it, so a lapsed
+	// seat stops counting as new-demand capacity (ga-2m9dwp).
+	same(ClassAdvisory, false, sites(legacy("cmd/gc/idle_nudge.go", "poolClaimBackstop.exhausted")), "idle_claim_nudge_lapsed_token"),
 	same(ClassAdvisory, false, sites(legacy("cmd/gc/idle_nudge.go", "writeContinuationClaimMarker")), "continuation_claim_nudge_work",
 		"continuation_claim_nudge_root", "continuation_claim_nudge_store_ref", "continuation_claim_nudge_generation",
 		"continuation_claim_nudge_count", "continuation_claim_nudge_at"),

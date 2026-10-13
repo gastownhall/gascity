@@ -1499,6 +1499,32 @@ func parityFixtures() []parityFixture {
 			Work: []parityRow{routedDemandBead("gw-1")}, Explain: started("gc-1", "worker-gc-1", "worker-1", nil),
 		},
 		{
+			// ga-2m9dwp: a live seat that let its claim window lapse on gw-1
+			// (the claim backstop nudged it to its cap and latched the
+			// incarnation) is not the capacity that serves gw-1. Both modes
+			// mint a fresh seat for the ready work at once, and the lapsed
+			// seat, left with no wake reason, drains: legacy finishes the drain
+			// in its ticks, v2's stop lands passes later (drain-stop-lag).
+			Name: "a seat whose claim window lapsed drains while a fresh seat takes its ready work",
+			Rows: []parityRow{awake(
+				"gc.trigger_bead_id", "gw-1", idleClaimNudgeTriggerKey, "gw-1",
+				idleClaimNudgeCountKey, strconv.Itoa(idleClaimNudgeMaxAttempts), idleClaimNudgeAtKey, at(-time.Hour),
+				idleClaimNudgeLapsedTokenKey, "tok-gc-1",
+			)},
+			Work: []parityRow{routedDemandBead("gw-1")}, Runtimes: []simRuntime{live},
+			Explain: func() map[string]string {
+				out := started("gc-2", "worker-gc-2", "worker-2", explain(map[string]string{"row:gc-1:*stop": "drain-stop-lag"}))
+				for _, k := range []string{
+					"row:gc-1:state", "row:gc-1:status", "row:gc-1:closed_at", "row:gc-1:close_reason",
+					"provider:SetMeta s-gc-1", "provider:RemoveMeta s-gc-1", "provider:Stop s-gc-1",
+					"event:session.stopped worker [reason session_id template]",
+				} {
+					out[k] = "drain-stop-lag"
+				}
+				return out
+			}(),
+		},
+		{
 			Name: "no second create beside an unconfirmed create", Behaviors: []string{"SESS-710"},
 			Rows: []parityRow{poolRow("gc-1", "worker", 1, "creating", "pending_create_claim", "true", "pending_create_started_at", at(-10*time.Second))},
 			Work: []parityRow{routedDemandBead("gw-1")}, Explain: started("gc-1", "s-gc-1", "worker-1", nil),

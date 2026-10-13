@@ -6481,6 +6481,105 @@ func TestBuildDesiredState_GH1654PoolReadyWorkGrowsPastMinActiveSessions(t *test
 	}
 }
 
+// TestBuildDesiredState_ClaimLapsedSeatsDoNotStarveReadyWork reproduces
+// ga-2m9dwp through the desired-state build: ready routed work beside awake pool
+// seats that hold no work and let their claim window lapse (the claim backstop
+// nudged each to its cap on its own trigger and latched the incarnation). The
+// pool must mint fresh seats for that work instead of counting the lapsed seats
+// as the capacity that serves it, which starved the queue for hours.
+func TestBuildDesiredState_ClaimLapsedSeatsDoNotStarveReadyWork(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	const template = "worker"
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              template,
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(10),
+		}},
+	}
+	cfgAgent := &cfg.Agents[0]
+
+	var work []string
+	for i := 0; i < 3; i++ {
+		bead, err := store.Create(beads.Bead{
+			Title:    fmt.Sprintf("queued work %d", i+1),
+			Type:     "task",
+			Status:   "open",
+			Metadata: map[string]string{"gc.routed_to": template},
+		})
+		if err != nil {
+			t.Fatalf("create queued work: %v", err)
+		}
+		work = append(work, bead.ID)
+	}
+
+	now := time.Date(2026, 10, 12, 9, 25, 0, 0, time.UTC)
+	lapsedAt := now.Add(-time.Hour).Format(time.RFC3339)
+	lapsedSessions := make(map[string]bool)
+	for slot := 1; slot <= 3; slot++ {
+		_, qualifiedInstance := poolInstanceIdentity(cfgAgent, slot, io.Discard)
+		session, err := createPoolSessionBead(sessionFrontDoor(store), cfgAgent.QualifiedName(), now.Add(-2*time.Hour), poolSessionCreateIdentity{
+			AgentName: qualifiedInstance,
+			Alias:     qualifiedInstance,
+			Slot:      slot,
+		})
+		if err != nil {
+			t.Fatalf("create pool session: %v", err)
+		}
+		token := fmt.Sprintf("tok-%d", slot)
+		if err := store.SetMetadataBatch(session.ID, map[string]string{
+			"state":                      "active",
+			"pending_create_claim":       "",
+			"pending_create_started_at":  "",
+			"instance_token":             token,
+			"gc.trigger_bead_id":         work[slot-1],
+			idleClaimNudgeTriggerKey:     work[slot-1],
+			idleClaimNudgeCountKey:       strconv.Itoa(idleClaimNudgeMaxAttempts),
+			idleClaimNudgeAtKey:          lapsedAt,
+			idleClaimNudgeLapsedTokenKey: token,
+		}); err != nil {
+			t.Fatalf("mark lapsed pool session: %v", err)
+		}
+		lapsedSessions[session.ID] = true
+	}
+
+	sessionSnapshot, err := loadSessionBeadSnapshot(store)
+	if err != nil {
+		t.Fatalf("load session snapshot: %v", err)
+	}
+	var stderr strings.Builder
+	dsResult := buildDesiredStateWithSessionBeads(
+		"test-city", cityPath, now, cfg, runtime.NewFake(),
+		store, nil, sessionSnapshot, nil, &stderr,
+	)
+	if got := dsResult.ScaleCheckCounts[template]; got != 3 {
+		t.Fatalf("ScaleCheckCounts[%s] = %d, want 3 ready routed beads", template, got)
+	}
+
+	sessions, err := store.ListByLabel(sessionBeadLabel, 0)
+	if err != nil {
+		t.Fatalf("list session beads: %v", err)
+	}
+	fresh := map[string]bool{}
+	for _, s := range sessions {
+		if lapsedSessions[s.ID] {
+			if got := s.Metadata["gc.trigger_bead_id"]; got == "" {
+				t.Fatalf("lapsed session %s lost its trigger binding; the fresh seat, not the lapsed one, is rebound", s.ID)
+			}
+			continue
+		}
+		fresh[s.Metadata["gc.trigger_bead_id"]] = true
+	}
+	for _, id := range work {
+		if !fresh[id] {
+			t.Fatalf("ready bead %s has no fresh seat; lapsed seats still satisfied its demand (fresh triggers %v); stderr:\n%s", id, fresh, stderr.String())
+		}
+	}
+}
+
 func TestBuildDesiredState_MinZeroDefaultScaleCheckNoWorkDropsPendingPoolCreate(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()

@@ -174,6 +174,7 @@ var infoKeyCodec = []infoKeySpec{
 	{"drain_at", func(i *Info, v string) { i.DrainAt = v }},
 	{"sleep_intent", func(i *Info, v string) { i.SleepIntent = v }},
 	{"instance_token", func(i *Info, v string) { i.InstanceToken = v }},
+	{"idle_claim_nudge_lapsed_token", func(i *Info, v string) { i.IdleClaimNudgeLapsedToken = v }},
 	{"detached_at", func(i *Info, v string) { i.DetachedAt = v }},
 	{CurrentBeadIDKey, func(i *Info, v string) { i.CurrentlyProcessingBeadID = v }},
 	{beadmeta.CurrentClaimBeadIDMetadataKey, func(i *Info, v string) { i.CurrentClaimBeadID = v }},

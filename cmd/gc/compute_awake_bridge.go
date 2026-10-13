@@ -246,6 +246,7 @@ func newAwakeInputFromSnapshot(
 				strings.TrimSpace(info.ResetCommittedAt) != "",
 			CurrentlyProcessingBeadID: strings.TrimSpace(info.CurrentlyProcessingBeadID),
 			PostCreateProtected:       poolSessionWithinPostCreateProtection(info, clk),
+			ClaimLapsed:               poolSeatClaimLapsedInfo(info),
 		}
 		bead.HeldUntil = lifecycle.HeldUntil
 		bead.QuarantinedUntil = lifecycle.QuarantinedUntil

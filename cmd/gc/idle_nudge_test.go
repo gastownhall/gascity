@@ -226,6 +226,134 @@ func TestNudgeStalledPoolClaims_GivesUpAtCap(t *testing.T) {
 	}
 }
 
+// A seat that let its claim window lapse is latched by incarnation: once the
+// last nudge has had its full backoff and the trigger is still unclaimed, the
+// backstop records the incarnation's instance token, which pool accounting reads
+// to stop counting the seat as capacity for new demand (ga-2m9dwp).
+func TestNudgeStalledPoolClaims_LatchesTheIncarnationThatNeverClaimed(t *testing.T) {
+	sp := runningIdleClaimFake(t, "session-a")
+	cfg := idleClaimTestCfg()
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	session := idleClaimPoolSession()
+	session.Metadata["instance_token"] = "tok-1"
+	session.Metadata["creation_complete_at"] = base.Add(-time.Hour).Format(time.RFC3339)
+	session.Metadata[idleClaimNudgeTriggerKey] = "work-a"
+	session.Metadata[idleClaimNudgeCountKey] = strconv.Itoa(idleClaimNudgeMaxAttempts)
+	session.Metadata[idleClaimNudgeAtKey] = base.Format(time.RFC3339)
+	work := []beads.Bead{{ID: "work-a", Status: "open"}}
+	store := beads.NewMemStoreFrom(0, []beads.Bead{session}, nil)
+	var out bytes.Buffer
+
+	// The last nudge is still inside its backoff: it may yet land.
+	nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{session}, work, nil, base.Add(idleClaimNudgeBackoff-time.Second), &out)
+	session = mustGetTestBead(t, store, session.ID)
+	if got := session.Metadata[idleClaimNudgeLapsedTokenKey]; got != "" {
+		t.Fatalf("lapsed latch inside the last backoff = %q, want empty", got)
+	}
+
+	nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{session}, work, nil, base.Add(idleClaimNudgeBackoff), &out)
+	session = mustGetTestBead(t, store, session.ID)
+	if got := session.Metadata[idleClaimNudgeLapsedTokenKey]; got != "tok-1" {
+		t.Fatalf("lapsed latch = %q, want the incarnation's instance token tok-1", got)
+	}
+	if got := sp.CountCalls("Nudge", "session-a"); got != 0 {
+		t.Fatalf("Nudge calls past the cap = %d, want 0", got)
+	}
+	if !poolSeatClaimLapsedInfo(sessionInfosFromBeads([]beads.Bead{session})[0]) {
+		t.Fatal("latched incarnation does not read as a lapsed seat")
+	}
+
+	// A later incarnation of the same seat starts with a clean slate: the
+	// latch names a token it does not hold.
+	session.Metadata["instance_token"] = "tok-2"
+	if poolSeatClaimLapsedInfo(sessionInfosFromBeads([]beads.Bead{session})[0]) {
+		t.Fatal("a new incarnation inherited the previous incarnation's lapse")
+	}
+}
+
+// The latch is evidence against one incarnation nudged to the cap: a seat with
+// no instance token or start stamp has no incarnation to latch, and a seat the
+// engine gave up on without nudging (no nudge text for its template) was never
+// handed the claim. Either keeps counting as capacity, today's behavior.
+func TestNudgeStalledPoolClaims_LapseNeedsAnIncarnationNudgedToTheCap(t *testing.T) {
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	started := base.Add(-time.Hour).Format(time.RFC3339)
+	for _, tc := range []struct {
+		name     string
+		template string
+		count    int
+		meta     map[string]string
+	}{
+		{name: "no instance token", template: "agent-a", count: idleClaimNudgeMaxAttempts, meta: map[string]string{"creation_complete_at": started}},
+		{name: "no start stamp", template: "agent-a", count: idleClaimNudgeMaxAttempts, meta: map[string]string{"instance_token": "tok-1"}},
+		{name: "never nudged", template: "agent-unknown", count: 0, meta: map[string]string{"instance_token": "tok-1", "creation_complete_at": started}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sp := runningIdleClaimFake(t, "session-a")
+			cfg := idleClaimTestCfg()
+			session := idleClaimPoolSession()
+			session.Metadata["template"] = tc.template
+			session.Metadata[idleClaimNudgeTriggerKey] = "work-a"
+			session.Metadata[idleClaimNudgeCountKey] = strconv.Itoa(tc.count)
+			session.Metadata[idleClaimNudgeAtKey] = base.Format(time.RFC3339)
+			for k, v := range tc.meta {
+				session.Metadata[k] = v
+			}
+			work := []beads.Bead{{ID: "work-a", Status: "open"}}
+			store := beads.NewMemStoreFrom(0, []beads.Bead{session}, nil)
+			var out bytes.Buffer
+
+			nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{session}, work, nil, base.Add(time.Hour), &out)
+			session = mustGetTestBead(t, store, session.ID)
+			if got := session.Metadata[idleClaimNudgeLapsedTokenKey]; got != "" {
+				t.Fatalf("lapsed latch = %q, want empty", got)
+			}
+		})
+	}
+}
+
+// The attempt markers outlive a restart. A seat restarted onto the same
+// unclaimed trigger is observed afresh, before its start even commits (the wake
+// stamps last_woke_at with the new token; creation_complete_at still names the
+// predecessor's start): it is neither latched by its predecessor's spent cap nor
+// left without nudges, and it gets its own grace, nudges and give-up.
+func TestNudgeStalledPoolClaims_RestartedSeatGetsItsOwnClaimWindow(t *testing.T) {
+	sp := runningIdleClaimFake(t, "session-a")
+	cfg := idleClaimTestCfg()
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	session := idleClaimPoolSession()
+	session.Metadata[idleClaimNudgeTriggerKey] = "work-a"
+	session.Metadata[idleClaimNudgeCountKey] = strconv.Itoa(idleClaimNudgeMaxAttempts)
+	session.Metadata[idleClaimNudgeAtKey] = base.Format(time.RFC3339)
+	session.Metadata["creation_complete_at"] = base.Add(-time.Hour).Format(time.RFC3339)
+	session.Metadata["instance_token"] = "tok-2"
+	session.Metadata["last_woke_at"] = base.Add(5 * time.Minute).Format(time.RFC3339)
+	work := []beads.Bead{{ID: "work-a", Status: "open"}}
+	store := beads.NewMemStoreFrom(0, []beads.Bead{session}, nil)
+	var out bytes.Buffer
+
+	observed := base.Add(10 * time.Minute)
+	nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{session}, work, nil, observed, &out)
+	session = mustGetTestBead(t, store, session.ID)
+	if got := session.Metadata[idleClaimNudgeLapsedTokenKey]; got != "" {
+		t.Fatalf("restarted seat latched by its predecessor's attempts: %q", got)
+	}
+	if got := session.Metadata[idleClaimNudgeCountKey]; got != "0" {
+		t.Fatalf("restarted seat attempt count = %q, want the cycle re-observed at 0", got)
+	}
+	if got := session.Metadata[idleClaimNudgeAtKey]; got != observed.Format(time.RFC3339) {
+		t.Fatalf("restarted seat observed at %q, want %q", got, observed.Format(time.RFC3339))
+	}
+	if got := sp.CountCalls("Nudge", "session-a"); got != 0 {
+		t.Fatalf("Nudge calls inside the restarted seat's grace = %d, want 0", got)
+	}
+
+	nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{session}, work, nil, observed.Add(idleClaimNudgeGrace+time.Second), &out)
+	if got := sp.CountCalls("Nudge", "session-a"); got != 1 {
+		t.Fatalf("Nudge calls after the restarted seat's grace = %d, want 1", got)
+	}
+}
+
 // The attempt is reserved on the session bead BEFORE delivery, so a nudge the
 // provider fails to deliver still consumes one of the bounded attempts. That is
 // what stops a slot whose provider is wedged from being re-nudged on every tick

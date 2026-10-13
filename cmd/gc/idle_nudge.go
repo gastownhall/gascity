@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
 
@@ -22,7 +23,24 @@ const (
 	idleClaimNudgeTriggerKey = "idle_claim_nudge_trigger" // trigger bead id last acted on
 	idleClaimNudgeCountKey   = "idle_claim_nudge_count"   // delivery attempts reserved for that trigger
 	idleClaimNudgeAtKey      = "idle_claim_nudge_at"      // RFC3339 of last attempt / first observation
+	// idleClaimNudgeLapsedTokenKey latches the incarnation (its instance_token)
+	// that let its claim window lapse; see poolSeatClaimLapsedInfo.
+	idleClaimNudgeLapsedTokenKey = "idle_claim_nudge_lapsed_token"
 )
+
+// poolSeatClaimLapsedInfo reports whether a pool seat's current incarnation let
+// its claim window lapse: the pool-claim backstop offered it unclaimed ready
+// work (its trigger bead), nudged it to the attempt cap, waited out the last
+// nudge's backoff, and latched the incarnation's instance token because the
+// trigger was still unclaimed (poolClaimBackstop.exhausted). Such a seat is not
+// capacity for new pool demand: it was handed ready work and did not pull it,
+// so counting it as the seat that serves the next unit of demand starves that
+// demand (ga-2m9dwp). The latch names one incarnation: a restarted seat (a new
+// instance token) counts again, with a claim window of its own.
+func poolSeatClaimLapsedInfo(info sessionpkg.Info) bool {
+	token := strings.TrimSpace(info.IdleClaimNudgeLapsedToken)
+	return token != "" && token == strings.TrimSpace(info.InstanceToken)
+}
 
 // Session-bead metadata keys for the post-step continuation-claim backstop.
 // Work, root, store, and pool generation are persisted separately so a
@@ -110,6 +128,7 @@ func nudgeStalledPoolClaims(
 	runNudgeBackstop(sp, store, sessionBeads, nil, now, stdout, "idle-claim-nudge", poolClaimBackstop{
 		cfg:  cfg,
 		work: newIdleClaimWorkSnapshot(claimWork, claimWorkStoreRefs),
+		now:  now,
 	})
 }
 
@@ -163,6 +182,7 @@ func nudgeStalledPoolContinuations(
 type poolClaimBackstop struct {
 	cfg  *config.City
 	work idleClaimWorkSnapshot
+	now  time.Time // the tick's clock; exhausted latches a lapse against it
 }
 
 // poolContinuationBackstop is the backstopPredicate for a graph-v2 successor
@@ -429,9 +449,29 @@ func (p poolClaimBackstop) resolve(s beads.Bead, _ map[string]beads.Bead, sessNa
 	return backstopTarget{ID: triggerID}, backstopResolutionOutstanding
 }
 
+// state matches the markers to the target by trigger and by incarnation. The
+// markers outlive a restart, so markers written before the seat's current
+// incarnation began pace its predecessor: a seat restarted onto the same
+// unclaimed trigger is observed afresh and gets its own grace, nudges and
+// give-up, instead of inheriting a spent cap (and with it a lapse it never had
+// the chance to avoid).
 func (p poolClaimBackstop) state(s beads.Bead, target backstopTarget) (same bool, attempts int, last time.Time) {
 	marked := strings.TrimSpace(s.Metadata[idleClaimNudgeTriggerKey])
-	return marked == target.ID, atoiOr0(s.Metadata[idleClaimNudgeCountKey]), parseRFC3339OrZero(s.Metadata[idleClaimNudgeAtKey])
+	last = parseRFC3339OrZero(s.Metadata[idleClaimNudgeAtKey])
+	same = marked == target.ID && !last.Before(poolClaimIncarnationStart(s))
+	return same, atoiOr0(s.Metadata[idleClaimNudgeCountKey]), last
+}
+
+// poolClaimIncarnationStart is when the seat's current incarnation began: the
+// later of its wake stamp (last_woke_at, written with the incarnation's
+// instance token before the runtime starts) and its confirmed start
+// (creation_complete_at). Zero when the seat carries neither.
+func poolClaimIncarnationStart(s beads.Bead) time.Time {
+	start := parseRFC3339OrZero(s.Metadata["last_woke_at"])
+	if committed := parseRFC3339OrZero(s.Metadata["creation_complete_at"]); committed.After(start) {
+		start = committed
+	}
+	return start
 }
 
 func (p poolClaimBackstop) content(s beads.Bead) string {
@@ -450,10 +490,37 @@ func (p poolClaimBackstop) reserve(store beads.Store, s *beads.Bead, target back
 	return writeIdleClaimMarker(store, s, target.ID, attempts, now, stdout)
 }
 
-// exhausted is a deliberate no-op: manual re-nudge remains the pool escape
-// hatch, and leaving the marker untouched at the cap (rather than clearing or
-// rewriting it) is what keeps this predicate silent on every subsequent tick.
-func (p poolClaimBackstop) exhausted(_ beads.Store, _ *beads.Bead, _ io.Writer) {
+// exhausted latches the incarnation whose claim window lapsed, once the last
+// nudge has had its full backoff to land and the trigger is still unclaimed:
+// the seat was handed ready work, nudged to the cap, and did not pull it. Pool
+// accounting reads the latch (poolSeatClaimLapsedInfo) and stops counting the
+// seat as capacity for new demand, so desired state mints a fresh seat for the
+// work and the lapsed one, left with no wake reason, drains like any idle seat
+// (ga-2m9dwp). Nothing is nudged or stopped here, and leaving the attempt
+// marker untouched at the cap keeps this predicate silent on every later tick.
+// The latch outlives the trigger: a manual re-nudge can still get the work
+// claimed, but the incarnation is retired once it holds no work.
+//
+// state scopes the markers to the current incarnation, so these attempts were
+// all made on it. Only a seat nudged to the cap lapses: the engine also gives
+// up, after grace alone, on a seat it has no nudge text for. A seat with no
+// instance token or start stamp has no incarnation to latch and keeps counting.
+func (p poolClaimBackstop) exhausted(store beads.Store, s *beads.Bead, stdout io.Writer) {
+	token := strings.TrimSpace(s.Metadata["instance_token"])
+	if token == "" || strings.TrimSpace(s.Metadata[idleClaimNudgeLapsedTokenKey]) == token ||
+		poolClaimIncarnationStart(*s).IsZero() || atoiOr0(s.Metadata[idleClaimNudgeCountKey]) < idleClaimNudgeMaxAttempts {
+		return
+	}
+	if last := parseRFC3339OrZero(s.Metadata[idleClaimNudgeAtKey]); last.IsZero() || p.now.Sub(last) < idleClaimNudgeBackoff {
+		return // the last nudge may still land
+	}
+	if err := store.SetMetadataBatch(s.ID, map[string]string{idleClaimNudgeLapsedTokenKey: token}); err != nil {
+		fmt.Fprintf(stdout, "idle-claim-nudge: latching the lapsed claim window of %s failed: %v\n", s.ID, err) //nolint:errcheck // best-effort
+		return
+	}
+	s.Metadata[idleClaimNudgeLapsedTokenKey] = token
+	fmt.Fprintf(stdout, "idle-claim-nudge: %s did not claim %s after %s nudge(s); it no longer counts as pool capacity\n", //nolint:errcheck // best-effort
+		strings.TrimSpace(s.Metadata["session_name"]), strings.TrimSpace(s.Metadata[idleClaimNudgeTriggerKey]), strings.TrimSpace(s.Metadata[idleClaimNudgeCountKey]))
 }
 
 func (p poolClaimBackstop) clear(store beads.Store, s *beads.Bead, stdout io.Writer) {
