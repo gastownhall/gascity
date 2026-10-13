@@ -698,6 +698,18 @@ func drainCheckRowDraining(front *session.Store, sessionName, sessionID string) 
 	return !closed && state == session.StateDraining, nil
 }
 
+// drainCheckRuntimeAbsent reports whether a GC_DRAIN read failed because the
+// runtime has no such session, or keeps no metadata: definitive answers of "no
+// GC_DRAIN". Only the typed sentinels count; an error that merely reads like
+// absence (an adapter's "command not found") or that also says the runtime
+// could not be observed is a failure to answer.
+func drainCheckRuntimeAbsent(err error) bool {
+	if errors.Is(err, runtime.ErrMetaUnsupported) {
+		return true
+	}
+	return errors.Is(err, runtime.ErrSessionNotFound) && !errors.Is(err, runtime.ErrRuntimeUnavailable)
+}
+
 // doRuntimeDrainCheck reads the runtime's GC_DRAIN through dops and, unless
 // that already says draining, the session row through readRow. It returns 0
 // if a source that answered says draining, 1 if both answered and neither
@@ -705,8 +717,7 @@ func drainCheckRowDraining(front *session.Store, sessionName, sessionID string) 
 // --json — designed for `if gc runtime drain-check; then ...`.
 func doRuntimeDrainCheck(dops drainOps, readRow func() (bool, error), targetName, sn string, jsonOutput bool, stdout, stderr io.Writer) int {
 	metaDraining, metaErr := dops.isDraining(sn)
-	if runtime.IsSessionGone(metaErr) || errors.Is(metaErr, runtime.ErrMetaUnsupported) {
-		// An absent runtime, or one with no metadata store, has no GC_DRAIN.
+	if drainCheckRuntimeAbsent(metaErr) {
 		metaDraining, metaErr = false, nil
 	}
 	return reportRuntimeDrainCheck(metaDraining, metaErr, readRow, targetName, sn, jsonOutput, stdout, stderr)
@@ -744,9 +755,12 @@ func drainCheckFailure(source string, err error) string {
 }
 
 // writeRuntimeDrainCheckUnknown writes the unknown result for the failed
-// sources: one line on stderr, or the JSON error envelope under --json.
+// sources as one line: on stderr, or as the JSON error envelope under --json.
+// Embedded errors (an adapter's stderr, a multi-line store error) are
+// collapsed onto that line.
 func writeRuntimeDrainCheckUnknown(targetName string, failed []string, jsonOutput bool, stdout, stderr io.Writer) int {
 	msg := fmt.Sprintf("gc runtime drain-check: drain state of %q unknown: %s", targetName, strings.Join(failed, "; "))
+	msg = strings.Join(strings.Fields(msg), " ")
 	if jsonOutput {
 		return writeJSONError(stdout, stderr, drainCheckUnknownCode, msg, drainCheckUnknownExit)
 	}

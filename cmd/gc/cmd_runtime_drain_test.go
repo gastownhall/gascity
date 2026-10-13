@@ -21,6 +21,8 @@ import (
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionexec "github.com/gastownhall/gascity/internal/runtime/exec"
+	sessiontmux "github.com/gastownhall/gascity/internal/runtime/tmux"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -747,7 +749,8 @@ func TestDoRuntimeDrainCheckRuntimeAbsentIsAnAnswer(t *testing.T) {
 		err  error
 	}{
 		{name: "session not found", err: fmt.Errorf("reading GC_DRAIN: %w", runtime.ErrSessionNotFound)},
-		{name: "not running", err: errors.New("reading GC_DRAIN: session worker not running")},
+		// The tmux adapter's GetMeta shape for a missing session.
+		{name: "tmux session gone", err: fmt.Errorf("reading GC_DRAIN: %w", fmt.Errorf("reading %s from session %q: %w: %w", "GC_DRAIN", "worker", runtime.ErrSessionNotFound, sessiontmux.ErrSessionNotFound))},
 		{name: "meta unsupported", err: fmt.Errorf("reading GC_DRAIN: %w", runtime.ErrMetaUnsupported)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -761,6 +764,52 @@ func TestDoRuntimeDrainCheckRuntimeAbsentIsAnAnswer(t *testing.T) {
 			}
 			if stderr.Len() != 0 {
 				t.Fatalf("stderr = %q, want empty", stderr.String())
+			}
+		})
+	}
+}
+
+// Only typed absence is an answer. An error that merely reads like absence —
+// an exec adapter's stderr — or a runtime that could not be observed at all is
+// a failure to answer, whatever its text says.
+func TestDoRuntimeDrainCheckUntypedRuntimeErrorsAreUnknown(t *testing.T) {
+	writeAdapter := func(t *testing.T, stderrLine string) runtime.Provider {
+		t.Helper()
+		script := filepath.Join(t.TempDir(), "adapter")
+		body := fmt.Sprintf("#!/bin/sh\necho %q >&2\necho 'second line' >&2\nexit 1\n", stderrLine)
+		if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+			t.Fatalf("write adapter: %v", err)
+		}
+		return sessionexec.NewProvider(script)
+	}
+	for _, tc := range []struct {
+		name string
+		dops func(t *testing.T) drainOps
+	}{
+		{name: "exec command not found", dops: func(t *testing.T) drainOps {
+			return newDrainOps(writeAdapter(t, "boxctl: command not found"))
+		}},
+		{name: "exec endpoint not found", dops: func(t *testing.T) drainOps {
+			return newDrainOps(writeAdapter(t, "HTTP 404: endpoint not found"))
+		}},
+		{name: "exec daemon not running", dops: func(t *testing.T) drainOps {
+			return newDrainOps(writeAdapter(t, "box daemon not running"))
+		}},
+		{name: "tmux no server", dops: func(*testing.T) drainOps {
+			dops := newFakeDrainOps()
+			// The tmux adapter's GetMeta shape when no server is running.
+			dops.err = fmt.Errorf("reading GC_DRAIN: %w", fmt.Errorf("reading %s from session %q: %w: %w", "GC_DRAIN", "worker", runtime.ErrRuntimeUnavailable, sessiontmux.ErrNoServer))
+			return dops
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			code := doRuntimeDrainCheck(tc.dops(t), drainCheckRow(false, nil), "worker", "worker", false, &bytes.Buffer{}, &stderr)
+			if code != drainCheckUnknownExit {
+				t.Fatalf("code = %d, want %d (unknown); stderr: %s", code, drainCheckUnknownExit, stderr.String())
+			}
+			if got := stderr.String(); strings.Count(got, "\n") != 1 || !strings.HasSuffix(got, "\n") || !strings.Contains(got, drainCheckSourceRuntime+":") {
+				t.Fatalf("stderr = %q, want exactly one line naming %s", got, drainCheckSourceRuntime)
 			}
 		})
 	}
