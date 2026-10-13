@@ -313,10 +313,11 @@ func (c *CachingStore) nextReconcileDelay(now time.Time) time.Duration {
 // RequestReconcile asks for a full re-scan as soon as the reconcile gate
 // (WithReconcileGate) and the failure backoff allow, instead of at the next
 // cadence tick. It returns at once, and requests coalesce: any number made
-// before a run starts are honored by that run. A request made while a run is
-// in flight gets a run of its own, whose list read comes after the request,
-// so a caller that asks after a write committed is covered by a scan that
-// sees it. A closed gate keeps the request pending until it opens. The cache
+// before a run starts are honored by that run, unless that run discards its
+// merge to a full Prime that merged first, which re-arms them. A request
+// made while a run is in flight gets a run of its own, whose list read comes
+// after the request, so a caller that asks after a write committed is
+// covered by a scan that sees it. A closed gate keeps the request pending until it opens. The cache
 // must be reconciling (StartReconciler) for the request to be acted on.
 func (c *CachingStore) RequestReconcile() {
 	c.reconcileRequested.Store(true)
@@ -329,10 +330,20 @@ func (c *CachingStore) RequestReconcile() {
 	}
 }
 
+// rearmReconcileRequest restores a request a run took but did not serve,
+// without counting it again.
+func (c *CachingStore) rearmReconcileRequest() {
+	c.reconcileRequested.Store(true)
+	select {
+	case c.reconcileKick <- struct{}{}:
+	default: // a kick is already pending
+	}
+}
+
 func (c *CachingStore) runReconciliation() {
 	// Cleared before the list read, so a request made from here on gets
 	// another run (RequestReconcile).
-	c.reconcileRequested.Store(false)
+	requested := c.reconcileRequested.Swap(false)
 	start := time.Now()
 
 	c.mu.RLock()
@@ -400,9 +411,14 @@ func (c *CachingStore) runReconciliation() {
 		// rows newer than this scan's (reconciles do not overlap). The Prime
 		// is at least as complete, so the pass merges nothing, including the
 		// shared tail's store-wide flags; only its latency still counts.
+		// The Prime may have listed before a request this run took, so the
+		// request is re-armed: its run must list after it.
 		c.recordReconcileLatencyLocked(bdLatency)
 		c.recomputeCadenceLocked()
 		c.mu.Unlock()
+		if requested {
+			c.rearmReconcileRequest()
+		}
 		return
 	}
 	now := c.clockNow()
