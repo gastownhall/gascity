@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // SleepReasonKilled is the sleep_reason `gc session kill` records. The string
@@ -282,7 +283,7 @@ func (m *Manager) KillFenced(ctx context.Context, by Actor, id string, kill func
 	if b, _, err = m.sessionBead(id); err != nil {
 		return err
 	}
-	runtimeGone := !killRuntimeLive(State(b.Metadata["state"])) && !m.sp.IsRunning(sessName)
+	runtimeGone := !killRuntimeLive(State(b.Metadata["state"])) && m.runtimeConfirmedGone(ctx, sessName)
 	if runtimeGone {
 		killErr := kill(ctx, by)
 		if NamedSessionIdentityInfo(m.infoFromBead(b)) != "" {
@@ -297,7 +298,7 @@ func (m *Manager) KillFenced(ctx context.Context, by Actor, id string, kill func
 		fence = nil
 	}
 	killErr := kill(ctx, by)
-	if killErr != nil && fence != nil && !m.sp.IsRunning(sessName) {
+	if killErr != nil && fence != nil && m.runtimeConfirmedGone(ctx, sessName) {
 		// The fenced row reads asleep, so Manager.Kill checks the provider
 		// and reports "not active" for a runtime already gone: the runtime
 		// is down, which is what the kill is for.
@@ -332,6 +333,20 @@ func (m *Manager) syncKilledAsleep(id string) {
 	}); err != nil {
 		log.Printf("session kill: syncing session %s to asleep: %v", id, err)
 	}
+}
+
+// killLivenessTimeout bounds KillFenced's fresh liveness reads, as the v2
+// effects bound theirs (fenceProbeTimeout).
+const killLivenessTimeout = 5 * time.Second
+
+// runtimeConfirmedGone reports a fresh, bounded liveness read that finds no
+// live pane under name. Provider.IsRunning may answer from a cache (tmux's
+// state cache is up to 2s old), which can read a just-started runtime gone
+// and so kill it without its fence; an incomplete or failed read is not
+// gone either, so the kill keeps the fence.
+func (m *Manager) runtimeConfirmedGone(ctx context.Context, name string) bool {
+	live, status, err := runtime.ObserveLivenessBoundedSince(ctx, m.sp, name, nil, time.Now(), killLivenessTimeout)
+	return status == runtime.ObservationComplete && err == nil && !live.Running
 }
 
 // killRuntimeLive reports the states Manager.Kill treats as holding a live
