@@ -27,13 +27,6 @@ func sessionCurrentClaimFrontDoor() (*session.Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	return sessionFrontDoorAt(cityPath)
-}
-
-// sessionFrontDoorAt opens the routed session-class front door for the city at
-// cityPath. It is sessionCurrentClaimFrontDoor for a caller that already knows
-// its city, such as `gc runtime drain-check <name>`.
-func sessionFrontDoorAt(cityPath string) (*session.Store, error) {
 	store, err := openCityStoreAt(cityPath)
 	if err != nil {
 		return nil, err

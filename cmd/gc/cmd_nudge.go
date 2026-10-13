@@ -1769,7 +1769,15 @@ func resolveNudgeTargetPreferringHookIdentity(identifier string, preferHookIdent
 	if err != nil {
 		return nudgeTarget{}, err
 	}
-	store := openNudgeBeadStore(cityPath)
+	return resolveNudgeTargetInStore(cityPath, cfg, openNudgeBeadStore(cityPath), identifier, preferHookIdentity)
+}
+
+// resolveNudgeTargetInStore is resolveNudgeTargetPreferringHookIdentity over a
+// city, config and nudges store the caller already holds. A zero store resolves
+// nothing and reports identifier as not found, so a caller that must tell an
+// unopened store from a missing session opens the store itself and checks the
+// open error first.
+func resolveNudgeTargetInStore(cityPath string, cfg *config.City, store beads.NudgesStore, identifier string, preferHookIdentity bool) (nudgeTarget, error) {
 	if store.Store != nil {
 		// Named-session materialization is a session WRITE, and the follow-up Get
 		// reads the session bead; both route through the session-class store

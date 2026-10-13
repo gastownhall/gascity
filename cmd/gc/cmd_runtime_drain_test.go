@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -865,9 +864,9 @@ func TestDoRuntimeDrainCheckJSONUnknownWritesErrorEnvelope(t *testing.T) {
 	}
 }
 
-// newDrainCheckFrontDoor returns a session front door over an in-memory
-// store holding one session row in state.
-func newDrainCheckFrontDoor(t *testing.T, sessionName string, state session.State) (*session.Store, string) {
+// newDrainCheckRowStore returns an in-memory store holding one session row
+// in state, and the row's id.
+func newDrainCheckRowStore(t *testing.T, sessionName string, state session.State) (beads.Store, string) {
 	t.Helper()
 	store := beads.NewMemStore()
 	b, err := store.Create(beads.Bead{
@@ -883,7 +882,7 @@ func newDrainCheckFrontDoor(t *testing.T, sessionName string, state session.Stat
 	if err != nil {
 		t.Fatalf("create session bead: %v", err)
 	}
-	return sessionFrontDoor(store), b.ID
+	return store, b.ID
 }
 
 func TestDrainCheckRowDrainingReadsRowState(t *testing.T) {
@@ -896,7 +895,8 @@ func TestDrainCheckRowDrainingReadsRowState(t *testing.T) {
 		{name: "active", state: session.StateActive, want: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			front, id := newDrainCheckFrontDoor(t, "worker", tc.state)
+			store, id := newDrainCheckRowStore(t, "worker", tc.state)
+			front := sessionFrontDoor(store)
 			for _, form := range []struct {
 				name, sessionID string
 			}{
@@ -915,8 +915,28 @@ func TestDrainCheckRowDrainingReadsRowState(t *testing.T) {
 	}
 }
 
+// A closed row is not draining, read by id or by name, even when its last
+// state said draining.
+func TestDrainCheckRowDrainingClosedRowIsNotDraining(t *testing.T) {
+	store, id := newDrainCheckRowStore(t, "worker", session.StateDraining)
+	if err := store.Close(id); err != nil {
+		t.Fatalf("close row: %v", err)
+	}
+	front := sessionFrontDoor(store)
+	for _, sessionID := range []string{id, ""} {
+		got, err := drainCheckRowDraining(front, "worker", sessionID)
+		if err != nil {
+			t.Fatalf("sessionID %q: drainCheckRowDraining: %v", sessionID, err)
+		}
+		if got {
+			t.Fatalf("sessionID %q: closed row reads as draining", sessionID)
+		}
+	}
+}
+
 func TestDrainCheckRowDrainingMissingRowIsAnError(t *testing.T) {
-	front, _ := newDrainCheckFrontDoor(t, "worker", session.StateActive)
+	store, _ := newDrainCheckRowStore(t, "worker", session.StateActive)
+	front := sessionFrontDoor(store)
 	if _, err := drainCheckRowDraining(front, "someone-else", ""); err == nil {
 		t.Fatal("drainCheckRowDraining for an unknown session returned no error")
 	}
@@ -930,28 +950,22 @@ func TestCmdRuntimeDrainCheckSelfReadsRowByEnvSessionID(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"drain-check\"\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
-	front, id := newDrainCheckFrontDoor(t, "worker-pane", session.StateDraining)
-	original := drainCheckSessionFrontDoor
-	t.Cleanup(func() { drainCheckSessionFrontDoor = original })
-	var gotCity string
-	drainCheckSessionFrontDoor = func(path string) (*session.Store, error) {
-		gotCity = path
-		return front, nil
-	}
+	front, id := newDrainCheckRowStore(t, "worker-pane", session.StateDraining)
+	gotCity := swapDrainCheckSessionLeg(t, front)
 	t.Setenv("GC_CITY", cityPath)
 	t.Setenv("GC_ALIAS", "worker")
 	t.Setenv("GC_SESSION_ID", id)
 	t.Setenv("GC_SESSION_NAME", "not-the-row-name")
 	t.Setenv("GC_TMUX_SESSION", "")
 
-	target, err := drainCheckTarget(nil, io.Discard)
+	target, rowName, err := currentDrainCheckTarget()
 	if err != nil {
-		t.Fatalf("drainCheckTarget: %v", err)
+		t.Fatalf("currentDrainCheckTarget: %v", err)
 	}
 	if target.sessionID != id {
 		t.Fatalf("target.sessionID = %q, want %q", target.sessionID, id)
 	}
-	draining, err := drainCheckRowReader(target)()
+	draining, err := drainCheckRowReader(target.cityPath, func() (*config.City, error) { return nil, nil }, rowName, target.sessionID)()
 	if err != nil {
 		t.Fatalf("row reader: %v", err)
 	}
@@ -962,8 +976,208 @@ func TestCmdRuntimeDrainCheckSelfReadsRowByEnvSessionID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EvalSymlinks: %v", err)
 	}
-	if resolved, err := filepath.EvalSymlinks(gotCity); err != nil || resolved != wantCity {
-		t.Fatalf("front door opened at %q, want %q", gotCity, cityPath)
+	if resolved, err := filepath.EvalSymlinks(*gotCity); err != nil || resolved != wantCity {
+		t.Fatalf("session leg opened at %q, want %q", *gotCity, cityPath)
+	}
+}
+
+// In a container GC_TMUX_SESSION names the tmux session inside it ("main"),
+// not the row; without GC_SESSION_ID the row is found by GC_SESSION_NAME.
+func TestCurrentDrainCheckTargetRowNameIgnoresTmuxSession(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"drain-check\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	t.Setenv("GC_CITY", cityPath)
+	t.Setenv("GC_ALIAS", "worker")
+	t.Setenv("GC_SESSION_ID", "")
+	t.Setenv("GC_TMUX_SESSION", "main")
+
+	t.Setenv("GC_SESSION_NAME", "city--worker")
+	target, rowName, err := currentDrainCheckTarget()
+	if err != nil {
+		t.Fatalf("currentDrainCheckTarget: %v", err)
+	}
+	if target.sessionName != "main" || rowName != "city--worker" {
+		t.Fatalf("meta name = %q, row name = %q; want meta %q, row %q", target.sessionName, rowName, "main", "city--worker")
+	}
+
+	t.Setenv("GC_SESSION_NAME", "")
+	if _, rowName, err = currentDrainCheckTarget(); err != nil || rowName != "worker" {
+		t.Fatalf("row name = %q, err = %v; want the display identity %q", rowName, err, "worker")
+	}
+}
+
+func TestDrainCheckNoContextExitsOne(t *testing.T) {
+	t.Setenv("GC_ALIAS", "")
+	t.Setenv("GC_SESSION_ID", "")
+	t.Setenv("GC_AGENT", "")
+	t.Setenv("GC_CITY", "")
+	for _, jsonOutput := range []bool{false, true} {
+		var stdout, stderr bytes.Buffer
+		if code := cmdRuntimeDrainCheck(nil, jsonOutput, &stdout, &stderr); code != 1 {
+			t.Fatalf("json=%v: code = %d, want 1 (no session context)", jsonOutput, code)
+		}
+		if stdout.Len() != 0 || stderr.Len() != 0 {
+			t.Fatalf("json=%v: stdout=%q stderr=%q, want both empty", jsonOutput, stdout.String(), stderr.String())
+		}
+	}
+}
+
+// swapDrainCheckSessionLeg makes drain-check's session leg store and returns
+// where the city path it was opened at is recorded.
+func swapDrainCheckSessionLeg(t *testing.T, store beads.Store) *string {
+	t.Helper()
+	original := drainCheckOpenSessionLeg
+	t.Cleanup(func() { drainCheckOpenSessionLeg = original })
+	var gotCity string
+	drainCheckOpenSessionLeg = func(path string, _ *config.City) (beads.Store, error) {
+		gotCity = path
+		return store, nil
+	}
+	return &gotCity
+}
+
+// drainCheckNamedCity writes a file-store city holding the E2b2 session row
+// "worker" and points the process at it with no session context and the
+// fake session provider.
+func drainCheckNamedCity(t *testing.T) (string, string) {
+	t.Helper()
+	cityPath, sessionID := writeE2b2ProviderFailureCity(t)
+	t.Setenv("GC_CITY", cityPath)
+	t.Setenv("GC_CITY_PATH", cityPath)
+	t.Setenv("GC_CEILING_DIRECTORIES", filepath.Dir(cityPath))
+	t.Setenv("GC_SESSION", "fake")
+	for _, key := range []string{"GC_ALIAS", "GC_AGENT", "GC_SESSION_ID", "GC_SESSION_NAME", "GC_TMUX_SESSION"} {
+		t.Setenv(key, "")
+	}
+	return cityPath, sessionID
+}
+
+// listFailingStore fails every List, as a ledger that drops mid-query does.
+type listFailingStore struct{ beads.Store }
+
+func (s listFailingStore) List(beads.ListQuery) ([]beads.Bead, error) {
+	return nil, errors.New("ledger unreachable: connection refused")
+}
+
+// A [name] drain-check that cannot resolve its target because the ledger
+// failed has not learned the session is absent: that is unknown, not 1.
+func TestCmdRuntimeDrainCheckNamedResolutionFailureIsUnknown(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		open func(t *testing.T, original func(string, string) (beads.Store, error)) func(string, string) (beads.Store, error)
+		want string
+	}{
+		{
+			name: "store open failure",
+			open: func(*testing.T, func(string, string) (beads.Store, error)) func(string, string) (beads.Store, error) {
+				return func(string, string) (beads.Store, error) {
+					return nil, errors.New("ledger unreachable: connection refused")
+				}
+			},
+			want: "ledger unreachable",
+		},
+		{
+			name: "list failure",
+			open: func(t *testing.T, original func(string, string) (beads.Store, error)) func(string, string) (beads.Store, error) {
+				return func(scope, city string) (beads.Store, error) {
+					store, err := original(scope, city)
+					if err != nil {
+						t.Fatalf("open city store: %v", err)
+					}
+					return listFailingStore{Store: store}, nil
+				}
+			},
+			want: "ledger unreachable",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			drainCheckNamedCity(t)
+			original := openNudgeWorkStore
+			t.Cleanup(func() { openNudgeWorkStore = original })
+			openNudgeWorkStore = tc.open(t, original)
+
+			var stdout, stderr bytes.Buffer
+			if code := cmdRuntimeDrainCheck([]string{"worker"}, false, &stdout, &stderr); code != drainCheckUnknownExit {
+				t.Fatalf("text: code = %d, want %d; stderr=%q", code, drainCheckUnknownExit, stderr.String())
+			}
+			lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
+			if len(lines) != 1 || !strings.Contains(lines[0], drainCheckSourceRow+":") || !strings.Contains(lines[0], tc.want) {
+				t.Fatalf("text: stderr = %q, want one line naming %s and %q", stderr.String(), drainCheckSourceRow, tc.want)
+			}
+
+			stdout.Reset()
+			stderr.Reset()
+			code := cmdRuntimeDrainCheck([]string{"worker"}, true, &stdout, &stderr)
+			if code != drainCheckUnknownExit {
+				t.Fatalf("json: code = %d, want %d; stderr=%q", code, drainCheckUnknownExit, stderr.String())
+			}
+			var result cliJSONErrorOutput
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+				t.Fatalf("json: stdout is not JSON: %v\nraw: %s", err, stdout.String())
+			}
+			if result.OK || result.Error.Code != drainCheckUnknownCode || result.Error.ExitCode != drainCheckUnknownExit ||
+				!strings.Contains(result.Error.Message, drainCheckSourceRow+":") {
+				t.Fatalf("json: unexpected error envelope: %+v", result)
+			}
+		})
+	}
+}
+
+func TestCmdRuntimeDrainCheckNamedUnknownSessionExitsOne(t *testing.T) {
+	drainCheckNamedCity(t)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdRuntimeDrainCheck([]string{"nobody-by-this-name"}, false, &stdout, &stderr); code != 1 {
+		t.Fatalf("code = %d, want 1 (no such session); stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "not found") {
+		t.Fatalf("stderr = %q, want a not-found diagnostic", stderr.String())
+	}
+}
+
+// The [name] form reads the row the target resolved to, by its id: a by-name
+// lookup of the shared session_name would land on the other row.
+func TestCmdRuntimeDrainCheckNamedReadsRowByResolvedID(t *testing.T) {
+	cityPath, workerID := drainCheckNamedCity(t)
+	store, err := openScopeLocalFileStore(cityPath)
+	if err != nil {
+		t.Fatalf("open city store: %v", err)
+	}
+	draining, err := store.Create(beads.Bead{
+		Title:  "draining row",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"agent_name":   "frontend/worker",
+			"template":     "frontend/worker",
+			"session_name": "test-city--frontend--worker",
+			"state":        string(session.StateDraining),
+		},
+	})
+	if err != nil {
+		t.Fatalf("create draining row: %v", err)
+	}
+	if draining.ID == workerID {
+		t.Fatal("rows share an id")
+	}
+
+	for _, tc := range []struct {
+		id   string
+		want int
+	}{
+		{id: draining.ID, want: 0},
+		{id: workerID, want: 1},
+	} {
+		var stdout, stderr bytes.Buffer
+		if code := cmdRuntimeDrainCheck([]string{tc.id}, true, &stdout, &stderr); code != tc.want {
+			t.Fatalf("drain-check %s: code = %d, want %d; stdout=%q stderr=%q", tc.id, code, tc.want, stdout.String(), stderr.String())
+		}
+		result := decodeDrainCheckJSON(t, stdout.Bytes())
+		if tc.want == 0 && result.Source != drainCheckSourceRow {
+			t.Fatalf("drain-check %s: source = %q, want %q", tc.id, result.Source, drainCheckSourceRow)
+		}
 	}
 }
 
@@ -1523,8 +1737,8 @@ func TestDrainCheckNoArgsStillWorks(t *testing.T) {
 	t.Setenv("GC_CITY", "")
 	cmd.SetArgs([]string{})
 	err := cmd.Execute()
-	if err == nil {
-		t.Error("drain-check with no args and no env should return non-zero")
+	if code := commandExitCode(err); code != 1 {
+		t.Errorf("drain-check with no args and no env exit = %d, want 1 (not draining)", code)
 	}
 	// Should be silent — no error message on stderr.
 	if stderr.Len() > 0 {

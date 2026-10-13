@@ -586,14 +586,32 @@ error envelope with code "drain_state_unknown" and exit code 3.`,
 }
 
 func cmdRuntimeDrainCheck(args []string, jsonOutput bool, stdout, stderr io.Writer) int {
-	target, err := drainCheckTarget(args, stderr)
-	if err != nil {
-		if len(args) > 0 {
+	var (
+		target  sessionRuntimeTarget
+		readRow func() (bool, error)
+	)
+	if len(args) > 0 {
+		named, cfg, err := resolveDrainCheckNamedTarget(args[0], stderr)
+		switch {
+		case errors.Is(err, session.ErrSessionNotFound):
+			// Only a store that opened can say a session does not exist.
 			fmt.Fprintf(stderr, "gc runtime drain-check: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		case err != nil:
+			return writeRuntimeDrainCheckUnknown(args[0], []string{drainCheckFailure(drainCheckSourceRow, err)}, jsonOutput, stdout, stderr)
 		}
-		return 1 // no session to check; silent without context, as before
+		target = named
+		readRow = drainCheckRowReader(target.cityPath, func() (*config.City, error) { return cfg, nil }, target.sessionName, target.sessionID)
+	} else {
+		current, rowName, err := currentDrainCheckTarget()
+		if err != nil {
+			return 1 // no session to check; silent without context, as before
+		}
+		target = current
+		readRow = drainCheckRowReader(target.cityPath, func() (*config.City, error) {
+			return loadCityConfigWithoutBuiltinPackRefresh(current.cityPath, io.Discard)
+		}, rowName, target.sessionID)
 	}
-	readRow := drainCheckRowReader(target)
 	sp, err := newSessionProvider()
 	if err != nil {
 		return reportRuntimeDrainCheck(false, fmt.Errorf("opening the session provider: %w", err),
@@ -602,55 +620,82 @@ func cmdRuntimeDrainCheck(args []string, jsonOutput bool, stdout, stderr io.Writ
 	return doRuntimeDrainCheck(newDrainOps(sp), readRow, target.display, target.sessionName, jsonOutput, stdout, stderr)
 }
 
-// drainCheckTarget resolves drain-check's session: the named one, or the
-// current session context. The current session's row id comes from
-// GC_SESSION_ID when set; otherwise the row is resolved by session name.
-func drainCheckTarget(args []string, stderr io.Writer) (sessionRuntimeTarget, error) {
-	if len(args) > 0 {
-		return resolveSessionRuntimeTarget(args[0], stderr)
-	}
-	target, err := currentSessionRuntimeTarget()
+// resolveDrainCheckNamedTarget resolves drain-check's named session and
+// returns the city config it loaded. session.ErrSessionNotFound means a store
+// that opened has no such session; any other error means drain-check could not
+// find out.
+func resolveDrainCheckNamedTarget(identifier string, stderr io.Writer) (sessionRuntimeTarget, *config.City, error) {
+	cityPath, err := resolveCity()
 	if err != nil {
-		return sessionRuntimeTarget{}, err
+		return sessionRuntimeTarget{}, nil, fmt.Errorf("resolving the city: %w", err)
 	}
-	target.sessionID = strings.TrimSpace(os.Getenv("GC_SESSION_ID"))
-	return target, nil
+	cfg, err := loadCityConfig(cityPath, stderr)
+	if err != nil {
+		return sessionRuntimeTarget{}, nil, fmt.Errorf("loading the city config: %w", err)
+	}
+	target, err := resolveSessionRuntimeTargetInCity(cityPath, cfg, identifier)
+	if err != nil {
+		return sessionRuntimeTarget{}, nil, err
+	}
+	return target, cfg, nil
 }
 
-// drainCheckSessionFrontDoor is a mutable global test seam over
-// sessionFrontDoorAt. Tests that swap it MUST NOT call t.Parallel().
-var drainCheckSessionFrontDoor = sessionFrontDoorAt
+// currentDrainCheckTarget resolves drain-check's current session context and
+// the name its session row is looked up by when GC_SESSION_ID is unset. That
+// name is GC_SESSION_NAME, else the display identity; never GC_TMUX_SESSION,
+// which in a container names the tmux session inside it ("main"), not the row.
+func currentDrainCheckTarget() (sessionRuntimeTarget, string, error) {
+	target, err := currentSessionRuntimeTarget()
+	if err != nil {
+		return sessionRuntimeTarget{}, "", err
+	}
+	target.sessionID = strings.TrimSpace(os.Getenv("GC_SESSION_ID"))
+	rowName := strings.TrimSpace(os.Getenv("GC_SESSION_NAME"))
+	if rowName == "" {
+		rowName = target.display
+	}
+	return target, rowName, nil
+}
 
-// drainCheckRowReader returns the session-row source for target: it opens the
-// routed session front door of target's city and reads the row's state.
-func drainCheckRowReader(target sessionRuntimeTarget) func() (bool, error) {
+// drainCheckOpenSessionLeg is a mutable global test seam over
+// openCitySessionLeg. Tests that swap it MUST NOT call t.Parallel().
+var drainCheckOpenSessionLeg = openCitySessionLeg
+
+// drainCheckRowReader returns the session-row source: it loads the city
+// config through loadCfg, opens the city's routed session leg and reads the
+// row by sessionID, or by rowName when sessionID is empty.
+func drainCheckRowReader(cityPath string, loadCfg func() (*config.City, error), rowName, sessionID string) func() (bool, error) {
 	return func() (bool, error) {
-		front, err := drainCheckSessionFrontDoor(target.cityPath)
+		cfg, err := loadCfg()
 		if err != nil {
-			return false, fmt.Errorf("opening the session store: %w", err)
+			return false, fmt.Errorf("loading the city config: %w", err)
 		}
-		return drainCheckRowDraining(front, target.sessionName, target.sessionID)
+		sessStore, err := drainCheckOpenSessionLeg(cityPath, cfg)
+		if err != nil {
+			return false, err
+		}
+		return drainCheckRowDraining(sessionFrontDoor(sessStore), rowName, sessionID)
 	}
 }
 
 // drainCheckRowDraining reports whether the session row is in state draining.
-// An empty sessionID resolves the row by sessionName. A closed row reports no
-// runtime state and so is not draining; a row that cannot be found or read is
-// an error.
+// An empty sessionID resolves the row by sessionName, live rows first and then
+// closed ones, so a closed row reads the same by name as by id: it is not
+// draining. A row that cannot be found or read is an error.
 func drainCheckRowDraining(front *session.Store, sessionName, sessionID string) (bool, error) {
 	id := strings.TrimSpace(sessionID)
 	if id == "" {
-		resolved, err := front.ResolveID(sessionName)
+		resolved, err := front.ResolveIDAllowClosed(sessionName)
 		if err != nil {
 			return false, fmt.Errorf("resolving session %q: %w", sessionName, err)
 		}
 		id = resolved
 	}
-	state, _, err := front.GetState(id)
+	state, closed, err := front.GetState(id)
 	if err != nil {
 		return false, fmt.Errorf("reading session %q: %w", id, err)
 	}
-	return state == session.StateDraining, nil
+	return !closed && state == session.StateDraining, nil
 }
 
 // doRuntimeDrainCheck reads the runtime's GC_DRAIN through dops and, unless
@@ -685,11 +730,22 @@ func reportRuntimeDrainCheck(metaDraining bool, metaErr error, readRow func() (b
 	}
 	var failed []string
 	if rowErr != nil {
-		failed = append(failed, fmt.Sprintf("%s: %v", drainCheckSourceRow, rowErr))
+		failed = append(failed, drainCheckFailure(drainCheckSourceRow, rowErr))
 	}
 	if metaErr != nil {
-		failed = append(failed, fmt.Sprintf("%s: %v", drainCheckSourceRuntime, metaErr))
+		failed = append(failed, drainCheckFailure(drainCheckSourceRuntime, metaErr))
 	}
+	return writeRuntimeDrainCheckUnknown(targetName, failed, jsonOutput, stdout, stderr)
+}
+
+// drainCheckFailure names a source that could not answer and why.
+func drainCheckFailure(source string, err error) string {
+	return fmt.Sprintf("%s: %v", source, err)
+}
+
+// writeRuntimeDrainCheckUnknown writes the unknown result for the failed
+// sources: one line on stderr, or the JSON error envelope under --json.
+func writeRuntimeDrainCheckUnknown(targetName string, failed []string, jsonOutput bool, stdout, stderr io.Writer) int {
 	msg := fmt.Sprintf("gc runtime drain-check: drain state of %q unknown: %s", targetName, strings.Join(failed, "; "))
 	if jsonOutput {
 		return writeJSONError(stdout, stderr, drainCheckUnknownCode, msg, drainCheckUnknownExit)
@@ -1230,20 +1286,30 @@ var drainAckOpenSessionRow = drainAckSessionRow
 // drainAckSessionRow opens the session leg of the city and resolves the
 // target's row. An empty sessionID resolves by name.
 func drainAckSessionRow(cityPath string, cfg *config.City, sessionName, sessionID string) (beads.Store, string, error) {
-	store, err := openCityStoreAtWithConfig(cityPath, cfg)
+	sessStore, err := openCitySessionLeg(cityPath, cfg)
 	if err != nil {
-		return nil, "", fmt.Errorf("opening the session store: %w", err)
+		return nil, "", err
 	}
-	if store == nil {
-		return nil, "", errors.New("opening the session store: no store")
-	}
-	sessStore := cliSessionStore(store, cfg, cityPath)
 	if sessionID == "" {
 		if sessionID, err = resolveSessionID(sessStore, sessionName); err != nil {
 			return nil, "", fmt.Errorf("resolving session %q: %w", sessionName, err)
 		}
 	}
 	return sessStore, sessionID, nil
+}
+
+// openCitySessionLeg opens the store of the city at cityPath with cfg and
+// routes it to the session class, so a [beads.classes.sessions] relocation is
+// honored.
+func openCitySessionLeg(cityPath string, cfg *config.City) (beads.Store, error) {
+	store, err := openCityStoreAtWithConfig(cityPath, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("opening the session store: %w", err)
+	}
+	if store == nil {
+		return nil, errors.New("opening the session store: no store")
+	}
+	return cliSessionStore(store, cfg, cityPath), nil
 }
 
 // errDrainAckRowUnfenced reports a matching ack on a store with no
