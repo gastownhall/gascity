@@ -3108,6 +3108,13 @@ func (cr *CityRuntime) stopConfigWatcher() {
 // fault. That is accepted because the line is the only outside evidence the nudge
 // was declined at all. If the noise ever outweighs that evidence, hand this caller
 // servingRigStores as readyDemandSnapshotFingerprint does and delete this section.
+// warmClaimTriggerProbe is the warm-bind probe over resolve, judging a
+// trigger against this controller's config (isUnclaimedTrigger: a pool
+// template assignee is demand, not a claim).
+func (cr *CityRuntime) warmClaimTriggerProbe(resolve warmClaimTriggerResolver) warmClaimTriggerProbe {
+	return buildWarmClaimTriggerProbe(cr.cfg, resolve, cr.stderr)
+}
+
 func (cr *CityRuntime) newWarmClaimTriggerResolver(servingRigs map[string]beads.Store) warmClaimTriggerResolver {
 	topo := cr.residencyTopology(servingRigs)
 	return func(triggerID string) (beads.Bead, error) {
@@ -3337,7 +3344,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, sw *SeatWork, resu
 		// warm-bind gap; on tmux it is the fast primary nudge ahead of the
 		// idle-timeout relaunch backstop, deduped by the marker + the
 		// unclaimed-trigger gate.
-		withWarmClaimProbe(buildWarmClaimTriggerProbe(triggerResolver, cr.stderr)),
+		withWarmClaimProbe(cr.warmClaimTriggerProbe(triggerResolver)),
 		// The launch-time opt_* lookup reads a pool slot's trigger bead through the same residency reader.
 		withTriggerBeadResolver(triggerResolver),
 	}
@@ -3424,7 +3431,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, sw *SeatWork, resu
 		claimWorkStoreRefs := make([]string, len(claimWork))
 		copy(claimWorkStoreRefs, assignedWorkStoreRefs)
 		copy(claimWorkStoreRefs[len(assignedWorkBeads):], result.ReadyUnassignedRoutedWorkStoreRefs)
-		nudgeStalledPoolClaims(cr.sp, cr.cfg, sessStore, stalledPoolBeads, claimWork, claimWorkStoreRefs, time.Now(), cr.stdout)
+		nudgeStalledPoolClaims(cr.sp, cr.cfg, sessStore, stalledPoolBeads, claimWork, claimWorkStoreRefs, time.Now(), poolClaimDrainOver(cr.workLegs(), cr.requestExecutionStalledDrain), cr.stdout)
 		nudgeStalledPoolContinuations(
 			cr.sp,
 			cr.cfg,

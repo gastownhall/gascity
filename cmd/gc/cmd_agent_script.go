@@ -805,6 +805,11 @@ func agentScriptHookExitIsNoWork(output, stderr string) bool {
 	if workQueryHasReadyWork(output) {
 		return false
 	}
+	// The store could not be read, which is not the same as no work, even
+	// when bd's own message is warning-shaped.
+	if strings.Contains(stderr, hookStoreUnavailableToken) {
+		return false
+	}
 	for _, line := range strings.Split(stderr, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {

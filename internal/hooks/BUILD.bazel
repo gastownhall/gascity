@@ -27,8 +27,14 @@ go_test(
         "hooks_family_test.go",
         "hooks_test.go",
         "overlay_provider_hook_path_shape_test.go",
+        "plugin_node_test.go",
         "preserve_test.go",
         "testenv_import_test.go",
+    ],
+    data = [
+        "opencode_plugin.test.mjs",
+        "//internal/bootstrap/packs/core:overlay/per-provider/mimocode/.mimocode/plugin/gascity.js",
+        "//internal/bootstrap/packs/core:overlay/per-provider/opencode/.opencode/plugins/gascity.js",
     ],
     embed = [":hooks"],
     deps = [

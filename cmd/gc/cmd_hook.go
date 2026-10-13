@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -37,7 +38,16 @@ Without --inject: prints normalized ready-only output, exits 0 if work exists, 1
 With --inject: silent legacy Stop-hook compatibility; skips the work query and always exits 0.
 With --claim: runs the standard startup claim protocol for one work item.
 
-		The agent is determined from $GC_AGENT or a positional argument.`,
+Without --inject or --claim, a work query that gets no answer from the bead
+store (a connection error, a timeout, a killed query, a locked database, or
+bd's circuit breaker failing fast) exits 2 and prints GC_HOOK_STORE_UNAVAILABLE
+on stderr: the store could not be read, which is not the same as no work. Any
+other work-query failure exits 1. The generated default work query discards
+bd's errors in its single-store tiers, so there a store that fails fast still
+reads as no work; only a deadline overrun exits 2. With --claim, a failed work
+query exits 1 and writes no drain record.
+
+The agent is determined from $GC_AGENT or a positional argument.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			opts := hookCommandOptions{
@@ -47,10 +57,11 @@ With --claim: runs the standard startup claim protocol for one work item.
 				DrainAck:   drainAck,
 				JSON:       jsonOut,
 			}
-			if cmdHookWithOptions(args, opts, stdout, stderr) != 0 {
-				return errExit
-			}
-			return nil
+			// exitForCode, not `!= 0 → errExit`: the store-unavailable
+			// contract is exit 2 (reportWorkQueryFailure), and folding it
+			// into errExit renders it as the no-work exit 1 at the process
+			// boundary — the idle-agents-with-work-waiting dead-drop.
+			return exitForCode(cmdHookWithOptions(args, opts, stdout, stderr))
 		},
 	}
 	cmd.Flags().BoolVar(&inject, "inject", false, "silent legacy Stop-hook compatibility; skip work query and exit 0")
@@ -871,6 +882,28 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 	return writeHookClaimNoWork(claimOpts, ops, claimsErrored, workDir, stdout, stderr)
 }
 
+// workQueryStoreUnavailable reports whether err, after classification, means
+// the store could not be read (an unknown answer, not an empty queue).
+func workQueryStoreUnavailable(err error) bool {
+	return errors.Is(classifyWorkQueryStoreUnavailable(err), beads.ErrStoreUnavailable)
+}
+
+// reportWorkQueryFailure renders a failed work query for the discovery door
+// (plain `gc hook`): a store-unavailable failure prints "<prefix>: <token>:
+// <err>" and exits 2; anything else prints "<prefix>: <err>" and exits 1. The
+// token and the exit code come from one classification, so they cannot
+// disagree. The --claim door reports its failed reads itself (exit 1, no drain
+// record, no token); see claimHookWorkWithRunner.
+func reportWorkQueryFailure(prefix string, err error, stderr io.Writer) int {
+	classified := classifyWorkQueryStoreUnavailable(err)
+	if errors.Is(classified, beads.ErrStoreUnavailable) {
+		fmt.Fprintf(stderr, "%s: %s: %v\n", prefix, hookStoreUnavailableToken, classified) //nolint:errcheck // best-effort stderr
+		return 2
+	}
+	fmt.Fprintf(stderr, "%s: %v\n", prefix, err) //nolint:errcheck // best-effort stderr
+	return 1
+}
+
 // Claim-read retry pacing. A work-query ERROR is a failed read, and the failures
 // this bounds are transport-shaped: a contended SQLite leg, a store mid-write, a
 // binding whose engine is briefly refusing. Those clear in seconds, and the
@@ -1139,10 +1172,81 @@ type hookVisibility struct {
 	RouteTargets []string
 }
 
-// doHook is the pure logic for gc hook. Runs the work query and outputs
-// results based on mode. Without inject: prints normalized ready-only output,
-// returns 0 if work exists, 1 if empty. With inject: skips the work query and
-// returns 0.
+// hookStoreUnavailableToken is the stderr token plain `gc hook` prints, with
+// exit code 2, when its work query got no answer from the store
+// (classifyWorkQueryStoreUnavailable). It is a published contract: a consumer
+// of `gc hook` stderr matches it to tell "store down" from the exit-1 no-work
+// answer, as agentScriptHookExitIsNoWork does. Rendering an unreachable store
+// as no work is the chronic idle-agents-with-work-waiting dead-drop. The
+// generated single-store work query discards bd's stderr and falls through to
+// "[]", so there a store that fails fast still reads as no work; only the
+// deadline, which bounds every query, surfaces it.
+const hookStoreUnavailableToken = "GC_HOOK_STORE_UNAVAILABLE"
+
+// bdConnectionErrorMarkers mirrors the messages bd's Dolt store counts as the
+// server being down: the connection-error test its circuit breaker trips on
+// (isConnectionError, beads v1.3.1 internal/storage/dolt/circuit.go). Several
+// strike after a query is under way ("Error 2013: Lost connection to MySQL
+// server during query"), past every connect-time marker in
+// bdTransportRetryableMarkers, and they stay out of that table on purpose:
+// the managed retry reads it and re-runs any bd command, writes included.
+// The table is not exhaustive. No marker here, in bdTransportRetryableMarkers
+// or in dispatch's availability needles matches a read- or write-phase "no
+// route to host" or "connection timed out" (only a dial-phase one, through
+// "dial tcp"), so those still exit 1; such a phrase belongs here, with a row
+// in TestClassifyWorkQueryStoreUnavailable.
+var bdConnectionErrorMarkers = []string{
+	"connection refused",
+	"connection reset",
+	"broken pipe",
+	"i/o timeout",
+	"bad connection",
+	"invalid connection",
+	"lost connection",
+	"gone away",
+}
+
+// messageHasMarker reports whether a lowercased error message contains any of
+// markers.
+func messageHasMarker(lowerMsg string, markers []string) bool {
+	for _, marker := range markers {
+		if strings.Contains(lowerMsg, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// classifyWorkQueryStoreUnavailable wraps work-query failures that got no
+// answer from the store as beads.ErrStoreUnavailable so doHook can report them
+// as exit 2 rather than letting a dead store masquerade as a drained queue.
+// Errors that already carry the sentinel pass through unchanged; anything else
+// is returned as-is and stays an ordinary exit-1 error.
+func classifyWorkQueryStoreUnavailable(err error) error {
+	if err == nil || errors.Is(err, beads.ErrStoreUnavailable) {
+		return err
+	}
+	// The control dispatcher's availability tier is the shared "the store did
+	// not answer" vocabulary. It covers the typed deadline shellWorkQueryWithEnv
+	// wraps for exactly this (a wedged-but-listening backend, with hung
+	// connections and context-deadline floods, is the dominant outage shape,
+	// not "connection refused"), bd's own timeouts, a killed work query, lock
+	// contention and bd's circuit breaker failing fast. Its semantic tier is a
+	// refusal the store answered with, so it stays exit 1.
+	if dispatch.ClassifyControllerError(err) == dispatch.TierAvailability {
+		return fmt.Errorf("%w: %w", beads.ErrStoreUnavailable, err)
+	}
+	// bdTransportRetryableMarkers is shared with the bd managed-retry path, so
+	// a marker added there classifies here too. bdConnectionErrorMarkers
+	// supplies bd's own connection-error vocabulary, including read-phase
+	// disconnects ("lost connection") that neither of the others lists.
+	lowerMsg := strings.ToLower(err.Error())
+	if messageHasMarker(lowerMsg, bdTransportRetryableMarkers) || messageHasMarker(lowerMsg, bdConnectionErrorMarkers) {
+		return fmt.Errorf("%w: %w", beads.ErrStoreUnavailable, err)
+	}
+	return err
+}
+
 // doHookDiscovery is the drain-fenced entry point for plain `gc hook`, the
 // DISCOVERY door. doHook itself stays a pure query-and-print function; this
 // wrapper is where the F-D fence lives for the non-claim path.
@@ -1182,6 +1286,13 @@ func doHookDiscovery(workQuery, dir string, inject bool, opts hookClaimOptions, 
 	return doHook(workQuery, dir, inject, runner, stdout, stderr, visibility)
 }
 
+// doHook is the pure logic for gc hook. Runs the work query and outputs
+// results based on mode. Without inject: prints normalized ready-only output,
+// returns 0 if work exists, 1 if empty. A work query that fails because the
+// store could not be read (classifyWorkQueryStoreUnavailable) returns 2,
+// prints nothing on stdout, and puts GC_HOOK_STORE_UNAVAILABLE on stderr; any
+// other failure returns 1 (reportWorkQueryFailure). With inject: skips the
+// work query and returns 0.
 func doHook(workQuery, dir string, inject bool, runner WorkQueryRunner, stdout, stderr io.Writer, visibility hookVisibility) int {
 	if inject {
 		return 0
@@ -1189,11 +1300,16 @@ func doHook(workQuery, dir string, inject bool, runner WorkQueryRunner, stdout, 
 
 	output, err := runner(workQuery, dir)
 	if err != nil {
-		if normalized := normalizeWorkQueryOutput(strings.TrimSpace(output)); normalized != "" {
-			fmt.Fprint(stdout, normalized) //nolint:errcheck // best-effort stdout
+		// A store that could not be read is not an empty queue: no partial
+		// stdout, token + exit 2 (reportWorkQueryFailure). Any other failure
+		// first surfaces whatever partial output the query produced, then
+		// reports exit 1.
+		if !workQueryStoreUnavailable(err) {
+			if normalized := normalizeWorkQueryOutput(strings.TrimSpace(output)); normalized != "" {
+				fmt.Fprint(stdout, normalized) //nolint:errcheck // best-effort stdout
+			}
 		}
-		fmt.Fprintf(stderr, "gc hook: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+		return reportWorkQueryFailure("gc hook", err, stderr)
 	}
 
 	trimmed := strings.TrimSpace(output)

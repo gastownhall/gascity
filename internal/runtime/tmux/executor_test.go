@@ -742,8 +742,8 @@ func (e *markedAgentPaneExecutor) execute(args []string) (string, error) {
 		if !ok {
 			return "", nil
 		}
-		human := strings.NewReplacer("#{window_id}", "@1", "#{pane_id}", "%1", "#{pane_pid}", "111", "#{pane_current_command}", "vim", "#{pane_dead}", "0").Replace(fields)
-		agent := strings.NewReplacer("#{window_id}", "@2", "#{pane_id}", "%5", "#{pane_pid}", "222", "#{pane_current_command}", "claude", "#{pane_dead}", "0").Replace(fields)
+		human := strings.NewReplacer("#{window_id}", "@1", "#{pane_id}", "%1", "#{pane_pid}", "111", "#{pane_current_command}", "vim", "#{pane_dead}", "0", "#{pane_height}", "30").Replace(fields)
+		agent := strings.NewReplacer("#{window_id}", "@2", "#{pane_id}", "%5", "#{pane_pid}", "222", "#{pane_current_command}", "claude", "#{pane_dead}", "0", "#{pane_height}", "20").Replace(fields)
 		return "orphan\t" + human + "\nagent\t" + agent, nil
 	case "capture-pane":
 		return e.capture, nil

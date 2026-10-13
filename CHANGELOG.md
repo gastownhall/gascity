@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
+- **The generic bead API no longer writes session rows, startup-health
+  episodes or convergence roots.** `POST /beads`, `PATCH /bead/{id}`,
+  `POST /bead/{id}/update`, `/close`, `/reopen`, `/assign`, `DELETE
+  /bead/{id}`, `POST /sling` naming one, and convoy create, add and remove
+  tracking one return 422, writing nothing. Workflow delete, graph convoy
+  delete, run cancel, sling `force` and wisp autoclose leave one alone
+  whatever links it to the workflow. Type and label match in any case and
+  spacing. A row is a session row by type `session` or by the `gc:session`
+  label. Use the owner's routes instead:
+  - client metadata: the new `metadata` map (`real_world_app_*` keys only)
+    on `POST /v0/city/{cityName}/sessions` and `PATCH /session/{id}`;
+  - pinning: the new `POST /session/{id}/pin` and `/unpin` (`gc session
+    pin|unpin`);
+  - title and alias: `PATCH /session/{id}`; lifecycle: the session verbs.
+
+  **Deliberately removed, with no replacement route:** setting a session
+  row's labels, description, priority, assignee or parent, or any other
+  metadata key, over HTTP. A typed work bead carrying the `gc:session`
+  label is written only by `bd`. `bd update` stays the operator escape
+  hatch for all of these. The coordination classes (`message`,
+  `gc:wait`, `gc:nudge`, `order-tracking`, `gc:wisp`, `gc:extmsg-*`)
+  are unchanged.
+
 - **New proxied scopes retire their proxy and Dolt child after 30 minutes
   idle.** Before this release every scope gc created was pinned to never, so a
   pair started by a stray read after `gc stop`, by `gc init --no-start`, or by
@@ -280,6 +303,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same way. Pass `--version` to choose another constraint.
 
 ### Fixed
+
+- **Codex `suggest` sessions start on current codex-cli and ask before
+  acting.** `permission_mode = "suggest"` passed `--ask-for-approval
+  untrusted`, a policy codex-cli 0.149.0 retired, so suggest sessions exited
+  at launch. Suggest now passes `--ask-for-approval on-request --sandbox
+  read-only`. Provider or agent `args` that spell the retired `untrusted`
+  policy, or name `--ask-for-approval on-request` alone or beside `--sandbox
+  workspace-write`, select suggest. Before, depending on the shape and the
+  start path, they launched with the unrestricted
+  `--dangerously-bypass-approvals-and-sandbox` default or failed to start.
+  Agent `args` are now normalized like provider `args` when every
+  schema-managed flag in them belongs to an option the `args` select: the
+  options they select beat the agent's own `option_defaults` for those keys.
+  Before, `gc session new` and API-created sessions dropped such flags and
+  launched the provider's default mode, so an agent that asked for approvals
+  through `args` could run with the bypass flag. Agent `args` with a flag that
+  belongs to no option they select, such as a lone `--ask-for-approval never`
+  or `--sandbox workspace-write`, are kept as written, as before, and are
+  still stripped by `gc session new` and API-created sessions, which then
+  launch the default mode: for codex, the bypass flag unless `option_defaults`
+  choose another mode (ga-kg2mqb). A provider `resume_command` that names an
+  `--ask-for-approval` policy no longer gets the bypass flag added beside it,
+  which codex rejected. Suggest sessions, and sessions of agents whose `args`
+  are now normalized, restart once after the upgrade because their launch
+  command changes (#7671).
+
+- **The OpenCode and MiMo Code plugins keep the stable prime at the head of
+  the system prompt and drain queued nudges once per turn, per session.**
+  `experimental.chat.system.transform` fires once per model generation, and
+  on every generation of every session in the directory it ran the
+  consumptive `gc nudge drain --inject` and `gc mail check --inject` and
+  prepended their output, with the cached `gc prime --hook` output, to
+  `system[0]` as one block. The drain emits a `Current time: ...` line on
+  every call, even with an empty queue, so the bytes right after the prime
+  changed every generation and the provider's prompt-cache prefix ended at
+  the prime; everything after it, including OpenCode's own system text, was
+  re-prefilled each time (#5732). Every tool call in a turn also emptied the
+  queue again, into whichever generation won the race (#5552). The plugins
+  now prepend only the prime to `system[0]` and append the per-turn text as
+  a trailing system entry, after every stable entry, and they stop injecting
+  from `chat.message`: OpenCode persists that hook's `output.message.system`
+  on the user message and joins it into the tail of `system[0]` on every
+  generation of the turn, which put the prime and the clock line back into
+  the header. They run the two commands once per turn per session and repeat
+  the drained text verbatim for every later generation of that turn, so a
+  turn's system messages are identical across generations; with no known
+  session or turn they drain every time as before. A turn opens on a user
+  message the session has not reported before (its `message.updated`, which
+  OpenCode publishes before the turn's first generation), so the background
+  diff-summary update to an earlier user message, which can land several
+  turns later, does not rewind the turn. Message ids are not compared: their
+  encoded creation time wrapped on 2026-08-14 and follows the wall clock, so
+  a newer message can sort below an older one. Each session remembers its
+  last 64 user-message ids, so an update that arrives after its id has aged
+  out of that window opens a turn and costs at most one extra drain. Child
+  sessions no longer refresh the shared prime on `session.created` /
+  `session.compacted`, which re-baked the beacon time into the parent's
+  `system[0]` mid-turn and handed the child id to `gc prime --hook` as a
+  candidate resume key. The MiMo Code plugin now also closes the `gc`
+  child's stdin, as the OpenCode plugin already did (#5562); without that,
+  `gc nudge drain --inject` waited for input until the 30-second timeout and
+  the drain returned nothing. Turn state is per session, but the nudge queue
+  is not: a child or human session in the same directory still drains the
+  agent's queue, once per its own turn. OpenCode hook version 8, MiMo Code
+  hook version 4; `gc` upgrades installed plugins below those or without the
+  new transform and turn handling. (#5552, #5732, #6629)
 
 - **An attached session is no longer idle-slept.** Under a `[session_sleep]`
   policy or an agent's `sleep_after_idle`, interactive sessions on local tmux

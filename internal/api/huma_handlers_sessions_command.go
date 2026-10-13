@@ -5,17 +5,20 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"reflect"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/api/apierr"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
@@ -47,6 +50,9 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 	body := input.Body
 	if body.LegacySessionName != nil {
 		return nil, apierr.InvalidRequest.Msg("session_name is no longer accepted; use alias")
+	}
+	if err := refuseNonClientSessionMetadata(body.Metadata); err != nil {
+		return nil, err
 	}
 
 	kind := body.Kind
@@ -123,6 +129,9 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 	command := launchCommand.Command
 	extraMeta := sessionTemplateOverridesMetadata(body.Options, body.Message)
 	extraMeta = agentSessionCreateMetadata(extraMeta, workDirQualifiedName)
+	// The client's keys land with the create, before the controller can see
+	// the row.
+	extraMeta = withClientMetadata(extraMeta, body.Metadata)
 	mcpServers, err := s.sessionMCPServers(template, resolved.Name, workDirQualifiedName, workDir, transport, kind, nil)
 	if err != nil {
 		return nil, apierr.Internal.Msg(err.Error())
@@ -312,6 +321,8 @@ func (s *Server) humaCreateProviderSession(_ context.Context, store beads.Sessio
 		extraMeta = make(map[string]string)
 	}
 	extraMeta["session_origin"] = "manual"
+	// The client's keys land with the create.
+	extraMeta = withClientMetadata(extraMeta, body.Metadata)
 	if transport == "acp" {
 		extraMeta, err = session.WithStoredMCPMetadata(extraMeta, mcpIdentity, mcpServers)
 		if err != nil {
@@ -364,7 +375,7 @@ func (s *Server) humaCreateProviderSession(_ context.Context, store beads.Sessio
 			}
 		}
 		resp := sessionToResponse(info, s.state.Config())
-		resp.Kind = "provider"
+		asProviderSession(&resp)
 		s.emitSessionCreateSucceeded(reqID, resp)
 		s.persistSessionMeta(store, info.ID, body.ProjectID, optMeta)
 		titleProvider := s.resolveTitleProvider()
@@ -534,8 +545,11 @@ func (s *Server) humaHandleSessionPatch(_ context.Context, input *SessionPatchIn
 	titlePtr := input.Body.Title
 	aliasPtr := input.Body.Alias
 
-	if titlePtr == nil && aliasPtr == nil {
-		return nil, apierr.ValidationFailed.Msg("at least one of 'title' or 'alias' is required")
+	if titlePtr == nil && aliasPtr == nil && len(input.Body.Metadata) == 0 {
+		return nil, apierr.ValidationFailed.Msg("at least one of 'title', 'alias' or 'metadata' is required")
+	}
+	if err := refuseNonClientSessionMetadata(input.Body.Metadata); err != nil {
+		return nil, err
 	}
 
 	// Validate through the session front door: the codec stays confined inside
@@ -557,7 +571,15 @@ func (s *Server) humaHandleSessionPatch(_ context.Context, input *SessionPatchIn
 
 	mgr := s.sessionManager(store.Store)
 	updateFn := func() error {
-		return mgr.UpdatePresentation(id, titlePtr, aliasPtr)
+		if titlePtr != nil || aliasPtr != nil {
+			if err := mgr.UpdatePresentation(id, titlePtr, aliasPtr); err != nil {
+				return err
+			}
+		}
+		if len(input.Body.Metadata) > 0 {
+			return store.SetMetadataBatch(id, input.Body.Metadata)
+		}
+		return nil
 	}
 	if aliasPtr != nil {
 		// agent_name off the persisted Info from the front door — the
@@ -1172,6 +1194,108 @@ func (s *Server) humaHandleSessionWake(ctx context.Context, input *SessionIDInpu
 // --- Session Rename ---
 
 // humaHandleSessionRename is the Huma-typed handler for POST /v0/session/{id}/rename.
+
+// clientSessionMetadataPrefix is the session metadata family external
+// clients own (session.fields: real_world_app_ is NoWriter in gc): the only
+// keys POST /sessions and PATCH /session/{id} write for a client, since the
+// generic bead API never writes a session row (architecture B).
+const clientSessionMetadataPrefix = "real_world_app_"
+
+// refuseNonClientSessionMetadata refuses, with 422 and an errors[] entry per
+// key, a session metadata key outside the client family or one that is not a
+// valid bead-metadata key.
+func refuseNonClientSessionMetadata(meta map[string]string) error {
+	var bad []*huma.ErrorDetail
+	for _, k := range slices.Sorted(maps.Keys(meta)) {
+		if !strings.HasPrefix(k, clientSessionMetadataPrefix) || !beadmeta.ValidKey(k) {
+			bad = append(bad, &huma.ErrorDetail{Location: "body.metadata." + k, Message: "a client writes only valid " + clientSessionMetadataPrefix + "* keys on a session", Value: k})
+		}
+	}
+	if len(bad) == 0 {
+		return nil
+	}
+	return apierr.ValidationFailed.With("session metadata: only "+clientSessionMetadataPrefix+"* keys are a client's; nothing was written", bad...)
+}
+
+// withClientMetadata is meta with the client's keys added.
+func withClientMetadata(optMeta, client map[string]string) map[string]string {
+	if len(client) == 0 {
+		return optMeta
+	}
+	out := maps.Clone(optMeta)
+	if out == nil {
+		out = make(map[string]string, len(client))
+	}
+	maps.Copy(out, client)
+	return out
+}
+
+// humaHandleSessionPin is the Huma-typed handler for POST
+// /v0/city/{cityName}/session/{id}/pin: gc session pin's write (pin_awake),
+// which the generic bead API no longer makes (architecture B). A configured
+// named session not yet materialized is, as the CLI's pin does.
+func (s *Server) humaHandleSessionPin(ctx context.Context, input *SessionIDInput) (*IndexOutput[sessionResponse], error) {
+	return s.setSessionPin(ctx, input.ID, true)
+}
+
+// humaHandleSessionUnpin is the Huma-typed handler for POST
+// /v0/city/{cityName}/session/{id}/unpin: gc session unpin's write.
+func (s *Server) humaHandleSessionUnpin(ctx context.Context, input *SessionIDInput) (*IndexOutput[sessionResponse], error) {
+	return s.setSessionPin(ctx, input.ID, false)
+}
+
+func (s *Server) setSessionPin(ctx context.Context, idRef string, pinned bool) (*IndexOutput[sessionResponse], error) {
+	store := s.state.SessionsBeadStore()
+	if store.Store == nil {
+		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
+	}
+	// A pin materializes a configured named session not yet created, as gc
+	// session pin does; that row is the pin's to keep.
+	id, err := s.resolveSessionIDWithConfig(store.Store, idRef)
+	materialized := false
+	if err != nil && pinned {
+		id, err = s.resolveSessionIDMaterializingNamedWithContext(ctx, store.Store, idRef)
+		materialized = err == nil
+	}
+	if err != nil {
+		return nil, humaResolveError(err)
+	}
+	sessFront := session.NewStore(store)
+	info, err := sessFront.Get(id)
+	if err != nil {
+		if errors.Is(err, session.ErrSessionNotFound) {
+			return nil, apierr.InvalidRequest.Msg(id + " is not a session")
+		}
+		return nil, humaStoreError(err)
+	}
+	if info.Closed {
+		return nil, apierr.SessionConflict.Msg("session " + id + " is closed")
+	}
+	// Pool demand alone starts and keeps a demand-only singleton's session;
+	// the reconciler never reads pin_awake for it, so refuse a pin that would
+	// do nothing, as gc session pin does (#6858).
+	if cfg := s.state.Config(); pinned && !materialized && cfg != nil {
+		if agentCfg, ok := findAgentByQualifiedTemplate(cfg, info.Template); ok && session.IsDemandOnlySingletonSession(cfg, &agentCfg, info) {
+			return nil, apierr.DemandOnlySingleton.Msg("cannot pin session " + id + ": " + session.DemandOnlySingletonExplanation(agentCfg.QualifiedName()))
+		}
+	}
+	if info.Type == "" {
+		sessFront.RepairTypeBestEffort(id)
+	}
+	if err := sessFront.SetPinAwake(id, pinned); err != nil {
+		return nil, humaStoreError(err)
+	}
+	s.state.Enqueue(reconcilekey.Session(id))
+	mgr := s.sessionManager(store.Store)
+	info, pr, err := sessionGetEnriched(session.NewStore(store), mgr, id)
+	if err != nil {
+		return nil, humaSessionManagerError(err)
+	}
+	return &IndexOutput[sessionResponse]{
+		Index: s.latestIndex(),
+		Body:  sessionResponseWithReason(info, pr, s.state.Config(), s.state.SessionProvider(), strings.TrimSpace(s.state.CityPath()) != ""),
+	}, nil
+}
 
 func (s *Server) humaHandleSessionRename(_ context.Context, input *SessionRenameInput) (*IndexOutput[sessionResponse], error) {
 	store := s.state.SessionsBeadStore()

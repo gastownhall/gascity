@@ -124,6 +124,7 @@ func (opts ProcessOptions) routeConfig() (*config.City, error) {
 var (
 	errFinalizePending  = errors.New("workflow finalize pending")
 	errScopeBodyMissing = errors.New("scope body missing")
+	errRootQuarantined  = errors.New("workflow root is control-quarantined")
 )
 
 const (
@@ -1151,14 +1152,12 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 	// next serve cycle will retry. Source-chain propagation is preflighted first
 	// so retryable scan failures keep the root live for singleton scans, but
 	// source beads are not mutated until the root is durably closed.
-	if err := setOutcomeAndClose(store, rootID, outcome); err != nil {
-		if errors.Is(err, beads.ErrNotFound) {
-			if closeErr := setOutcomeAndClose(store, bead.ID, beadmeta.OutcomeMissingRoot); closeErr != nil {
-				return ControlResult{}, recordWorkflowFinalizeError(store, bead, fmt.Errorf("%s: closing orphaned finalizer (root %s missing): %w", bead.ID, rootID, closeErr))
-			}
-			return ControlResult{Processed: true, Action: "workflow-missing_root"}, nil
-		}
-		return ControlResult{}, recordWorkflowFinalizeError(store, bead, fmt.Errorf("%s: completing workflow head: %w", rootID, err))
+	outcome, err = completeWorkflowRoot(store, bead, rootID, outcome, opts)
+	if err != nil {
+		return ControlResult{}, recordWorkflowFinalizeError(store, bead, err)
+	}
+	if outcome == beadmeta.OutcomeMissingRoot {
+		return ControlResult{Processed: true, Action: "workflow-missing_root"}, nil
 	}
 	// Generated spec sidecars are topology records rather than executable
 	// members; preserve their established successful cleanup outcome before the
@@ -1213,6 +1212,35 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 	}
 
 	return ControlResult{Processed: true, Action: "workflow-" + outcome}, nil
+}
+
+// completeWorkflowRoot closes the workflow root with outcome ahead of its
+// finalizer and returns the outcome the workflow finalized with. A missing
+// root closes the finalizer as orphaned and returns missing_root. A root the
+// control dispatcher quarantined after resolveFinalizeOutcome read it refuses
+// a pass (errRootQuarantined): the workflow finalizes failed instead, and the
+// root's diagnosis is stamped on its still-open source here. The finalizer
+// closes last, so a stamp that fails leaves it open, and the retry reads the
+// quarantine up front and takes the fail branch.
+func completeWorkflowRoot(store beads.Store, finalizer beads.Bead, rootID, outcome string, opts ProcessOptions) (string, error) {
+	err := closeWorkflowRoot(store, rootID, outcome)
+	switch {
+	case err == nil:
+		return outcome, nil
+	case errors.Is(err, beads.ErrNotFound):
+		if closeErr := setOutcomeAndClose(store, finalizer.ID, beadmeta.OutcomeMissingRoot); closeErr != nil {
+			return "", fmt.Errorf("%s: closing orphaned finalizer (root %s missing): %w", finalizer.ID, rootID, closeErr)
+		}
+		return beadmeta.OutcomeMissingRoot, nil
+	case errors.Is(err, errRootQuarantined):
+		opts.tracef("workflow-finalize bead=%s root=%s pass_refused reason=control_quarantined", finalizer.ID, rootID)
+		if err := annotateSourceBeadFailure(store, rootID, resolveFinalizeFailureDiagnostics(store, finalizer, opts), opts); err != nil {
+			return "", fmt.Errorf("%s: marking failed source bead: %w", rootID, err)
+		}
+		return beadmeta.OutcomeFail, nil
+	default:
+		return "", fmt.Errorf("%s: completing workflow head: %w", rootID, err)
+	}
 }
 
 func preflightSourceBeadChain(rootStore beads.Store, rootID string, opts ProcessOptions) error {
@@ -1922,6 +1950,31 @@ func setOutcomeAndClose(store beads.Store, beadID, outcome string) error {
 	return updateMetadataAndClose(store, beadID, map[string]string{beadmeta.OutcomeMetadataKey: outcome})
 }
 
+// closeWorkflowRoot is setOutcomeAndClose for the workflow root a finalizer
+// settles: it never merges pass over a control-quarantined root, which is
+// already closed and whose fail is the record (ga-3wlbcj). It re-reads the root
+// because a quarantine can land after resolveFinalizeOutcome looked, and tests
+// it with that read's predicate (isControlQuarantined, no gc.kind check), so
+// the two cannot disagree about one root. The refusal is an error
+// (errRootQuarantined), not a silent no-op, so a caller holding a stale pass
+// learns the workflow failed; a read that cannot rule the quarantine out fails
+// the close too. Only the finalizer closes a root, so the guard lives here
+// rather than in setOutcomeAndClose, where it would cost every control and spec
+// close a read (call_budget_test.go) and reach retry and ralph logical beads,
+// which keep their own terminal semantics.
+func closeWorkflowRoot(store beads.Store, rootID, outcome string) error {
+	if outcome == beadmeta.OutcomePass {
+		current, err := store.Get(rootID)
+		if err != nil && !errors.Is(err, beads.ErrNotFound) {
+			return fmt.Errorf("checking %s for control quarantine: %w", rootID, err)
+		}
+		if err == nil && isControlQuarantined(current) {
+			return fmt.Errorf("%w: refusing pass on %s", errRootQuarantined, rootID)
+		}
+	}
+	return setOutcomeAndClose(store, rootID, outcome)
+}
+
 // ReconcileClosedScopeMember re-reads a just-closed bead and delegates to
 // scope reconciliation. Callers invoke it immediately after
 // setOutcomeAndClose, so this relies on the store being read-after-write
@@ -1972,22 +2025,47 @@ func resolveFinalizeOutcome(store beads.Store, finalizer beads.Bead, opts Proces
 			outcome = beadmeta.OutcomeFail
 		}
 	}
+	if outcome == beadmeta.OutcomePass && rootID != "" {
+		// A root the control dispatcher already quarantined is a failed
+		// workflow whatever its blockers say. Without this the finalizer
+		// merged pass onto a closed root that still carried every
+		// quarantine key, and watchers keyed on gc.outcome read "fine"
+		// (ga-3wlbcj: 61 roots quarantined for `unsupported control bead
+		// kind "workflow"` on 2026-09-25). A missing root falls through to
+		// the caller's missing-root path.
+		root, err := getRootInView(store, rootID, opts)
+		if err != nil && !errors.Is(err, beads.ErrNotFound) {
+			return "", err
+		}
+		if err == nil && isControlQuarantined(root) {
+			outcome = beadmeta.OutcomeFail
+		}
+	}
 	return outcome, nil
 }
 
+// isControlQuarantined reports whether the control dispatcher closed b as a
+// hard failure it could not process.
+func isControlQuarantined(b beads.Bead) bool {
+	return b.Status == "closed" &&
+		(b.Metadata[beadmeta.FinalDispositionMetadataKey] == beadmeta.DispositionControlQuarantine ||
+			b.Metadata[beadmeta.ControlQuarantinedMetadataKey] == "true")
+}
+
 // resolveFinalizeFailureDiagnostics returns the failure metadata to stamp on
-// the domain parent when a workflow finalizes FAILED. Two routes reach a
+// the domain parent when a workflow finalizes FAILED. Three routes reach a
 // failed finalize and each names its own culprit:
 //
 //   - a failed direct blocker (resolveBlockedOutcome) — the root itself only
 //     carries gc.outcome=fail, the reason lives on the blocker;
 //   - a terminal abort-scope member (terminalAbortScopeFailureMember) — every
-//     blocker passed, and the failing member is elsewhere in the DAG.
+//     blocker passed, and the failing member is elsewhere in the DAG;
+//   - a control-quarantined root (isControlQuarantined) — every blocker
+//     passed, and the root carries the dispatcher's own reason and class.
 //
 // Best-effort: a read error, or a fail with no identifiable culprit, still
 // yields the generic workflow_failed reason so the parent always carries a
-// marker. Additive over the shared resolveBlockedOutcome/resolveFinalizeOutcome,
-// which stay as they are.
+// marker.
 //
 // The returned map always carries all three failure-stamp keys — see
 // failureStamp for why.
@@ -1999,6 +2077,13 @@ func resolveFinalizeFailureDiagnostics(store beads.Store, finalizer beads.Bead, 
 	if rootID != "" {
 		if member, ok, err := terminalAbortScopeFailureMember(store, rootID, finalizer.ID, opts); err == nil && ok {
 			return failureStampFor(member)
+		}
+		// A root the dispatcher quarantined is the culprit when no blocker
+		// failed: carry its reason and class to the parent, not a generic one.
+		// Read live, not from the root view: when closeWorkflowRoot refused a
+		// pass, the quarantine landed after the view was read.
+		if root, err := store.Get(rootID); err == nil && isControlQuarantined(root) {
+			return failureStampFor(root)
 		}
 	}
 	return failureStamp(workflowFailedReason, "", "")

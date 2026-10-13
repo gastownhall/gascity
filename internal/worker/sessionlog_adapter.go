@@ -172,7 +172,7 @@ func (a SessionLogAdapter) TailActivityForProvider(provider, path string) (TailA
 	if sessionlog.IsACPCapturePath(path) {
 		return a.TailActivity(path)
 	}
-	if sessionlog.ProviderFamily(provider) == "kimi" {
+	if family := sessionlog.ProviderFamily(provider); family == "kimi" || family == "codex" {
 		meta, err := a.TailMetaForProvider(provider, path)
 		return tailActivity(meta), err
 	}
@@ -355,7 +355,7 @@ func (a SessionLogAdapter) LoadHistory(req LoadRequest) (*HistorySnapshot, error
 	}
 	compactionCount, lastEntryID, pendingIDs := transcriptGlobalFacts(fullSession.Messages)
 
-	tailMeta, err := sessionlog.ExtractTailMeta(path)
+	tailMeta, err := historyTailMeta(req.Provider, path)
 	if err != nil {
 		return nil, err
 	}
@@ -987,6 +987,19 @@ func wholeFileJSONActivity(entries []HistoryEntry) TailActivity {
 		}
 	}
 	return TailActivityUnknown
+}
+
+// historyTailMeta reads the tail metadata LoadHistory reports. LoadHistory
+// reads whatever transcript path it is handed, with no search-root check, so
+// this calls the sessionlog parsers directly: TailMetaForProvider would fence
+// the path to the adapter's search roots. A gc-captured ACP transcript has its
+// own format whatever the provider family, so only a native Codex rollout uses
+// the Codex tail parser.
+func historyTailMeta(provider, path string) (*sessionlog.TailMeta, error) {
+	if sessionlog.ProviderFamily(provider) == "codex" && !sessionlog.IsACPCapturePath(path) {
+		return sessionlog.ExtractCodexTailMeta(path)
+	}
+	return sessionlog.ExtractTailMeta(path)
 }
 
 func tailActivity(meta *sessionlog.TailMeta) TailActivity {

@@ -8626,6 +8626,34 @@ func TestReconcileSessionBeads_CrashDetection(t *testing.T) {
 	}
 }
 
+// Kills a rapid crash whose conversation probe ignores the launch's config
+// dir (mc-bm1af): legacy's tick probes launchTranscriptRoots of the row's
+// template, so a conversation kept under the operator's CLAUDE_CONFIG_DIR,
+// a dir not among the observed roots, survives an unrelated rapid crash.
+func TestReconcileSessionBeads_RapidCrashProbesTheLaunchConfigDir(t *testing.T) {
+	env := newReconcilerTestEnv(t)
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", false)
+	workDir := t.TempDir()
+	root := observedTranscript(t, workDir) // k-1's transcript, under <dir>/projects
+	tp := env.desiredState["worker"]
+	tp.OperatorEnv = map[string]string{"CLAUDE_CONFIG_DIR": filepath.Dir(root)}
+	env.desiredState["worker"] = tp
+	session := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		"configured_named_session": "true", "configured_named_identity": "worker", "configured_named_mode": "always", // its heal keeps the conversation
+		"provider": "claude", "work_dir": workDir, "session_key": "k-1", "started_config_hash": "h-1",
+		"last_woke_at": env.clk.Now().Add(-5 * time.Second).UTC().Format(time.RFC3339),
+	})
+
+	env.reconcile([]beads.Bead{session})
+
+	b, _ := env.store.Get(session.ID)
+	if b.Metadata["wake_attempts"] != "1" || b.Metadata["session_key"] != "k-1" {
+		t.Fatalf("wake_attempts %q session_key %q; want the crash recorded and the conversation kept (stderr %s)", b.Metadata["wake_attempts"], b.Metadata["session_key"], env.stderr.String())
+	}
+}
+
 func TestReconcileSessionBeads_StableClearsFailures(t *testing.T) {
 	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}

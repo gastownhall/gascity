@@ -96,6 +96,46 @@ func TestDesiredRowIdentity(t *testing.T) {
 	}
 }
 
+// Kills an identity refresh that drops legacy's guard on a client's provider
+// chat: a manual row of the provider's implicit agent gets no agent_name,
+// which would resolve it as an agent session; a manual row of a configured
+// agent and a pool seat of the implicit agent still get theirs.
+func TestDesiredRowIdentityClientProviderChat(t *testing.T) {
+	cfg := identityCity()
+	cfg.Agents = append(cfg.Agents, config.Agent{Name: "claude", Provider: "claude", Implicit: true}, config.Agent{Name: "helper", StartCommand: "true"})
+	for _, tc := range []struct {
+		name string
+		tp   TemplateParams
+		info session.Info
+		want string
+	}{
+		{
+			name: "a client's provider chat",
+			tp:   TemplateParams{TemplateName: "claude", InstanceName: "my-chat", Alias: "my-chat", ManualSession: true},
+			info: session.Info{Template: "claude", SessionOrigin: "manual", Alias: "my-chat"},
+		},
+		{
+			name: "a manual session of a configured agent",
+			tp:   TemplateParams{TemplateName: "helper", InstanceName: "my-chat", Alias: "my-chat", ManualSession: true},
+			info: session.Info{Template: "helper", SessionOrigin: "manual", Alias: "my-chat"},
+			want: "my-chat",
+		},
+		{
+			name: "a pool seat of the implicit agent",
+			tp:   TemplateParams{TemplateName: "claude", InstanceName: "claude-2", PoolSlot: 2},
+			info: session.Info{Template: "claude", SessionOrigin: "ephemeral", PoolManaged: true, PoolSlot: "2"},
+			want: "claude-2",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			id := desiredRowIdentity(cfg, tc.tp, tc.info, rowRefreshKeys{"continuation_epoch": "1"})
+			if got, ok := id.Guarded["agent_name"]; got != tc.want || ok != (tc.want != "") {
+				t.Fatalf("guarded %v, want agent_name %q", id.Guarded, tc.want)
+			}
+		})
+	}
+}
+
 // Kills an alias write without its history, conflict clear, rebaseline or
 // guarded keys, a conflict recorded every pass, and a guarded key written
 // past a conflict (SESS-717/718): a free alias writes all of them; a

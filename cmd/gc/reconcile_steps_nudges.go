@@ -76,7 +76,7 @@ func (l *externalReadsLane) nudges(ctx context.Context, env externalReadsEnv) {
 	refs := make([]string, len(claim))
 	copy(refs, s.AssignedStoreRefs)
 	copy(refs[len(s.AssignedWork):], s.ReadyRoutedRefs)
-	nudgeStalledPoolClaims(env.SP, env.Cfg, sessStore, raw, claim, refs, now, l.stderr)
+	nudgeStalledPoolClaims(env.SP, env.Cfg, sessStore, raw, claim, refs, now, poolClaimDrainOver(env.WorkLegs, l.requestExecutionStalled(env)), l.stderr)
 	if ctx.Err() != nil {
 		return
 	}

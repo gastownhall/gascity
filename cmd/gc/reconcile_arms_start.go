@@ -28,6 +28,7 @@ const (
 	decideStartQuarantine   = "start-held:quarantine"              // SESS-606
 	decideStartEpisode      = "start-held:startup-health"          // SESS-607, #46
 	decideStartProviderRed  = "start-held:provider-red"            // SESS-610, GUAR-034
+	decideStartHeld         = "start-held:hold"                    // v5.9u: a hold S1's PreWake refuses
 )
 
 // armAdopt is A10's adopt: an uncommitted intent (a creating row) whose own
@@ -127,7 +128,9 @@ func (r *rowFacts) restart() (intent, bool) {
 // startIntent is a bringUp for the row, ranked oldest wake first
 // (START-009), unless a gate holds it, in legacy's order: failed-create, a
 // quarantine, the startup-health episode's quarantine (#46), a red provider
-// (unknown health fails open). A timed hold asks for a pass at its end. The
+// (unknown health fails open), and any hold the PreWake would refuse
+// (preWakeRefuses, CONTRACT v5.9u), so no start is admitted only to be
+// refused `held` pass after pass. A timed hold asks for a pass at its end. The
 // endpoint breaker is admission's (the intent's Endpoint). A committed row
 // whose runtime is gone carries A6's dead-runtime patch, so a productive
 // death restarts in the same pass, as legacy's does; one that accrues a
@@ -140,12 +143,12 @@ func (r *rowFacts) startIntent(reason string) (intent, bool) {
 	var class session.DispositionPatch
 	if committed(info) && r.gone() {
 		var accrued bool
-		if patch, class, accrued = deadRuntimePatch(r, true); accrued && !r.asleepStranded() {
+		if patch, class, accrued, _ = deadRuntimePatch(r, true); accrued && !r.asleepStranded() {
 			return intent{Reason: decideStartAccrued}, true // A6 records the death first
 		}
 		info, kept = foldInfo(foldInfo(info, patch), class.Fold()), foldClass(patch, class)
 		if r.asleepStranded() {
-			strandedPatch, strandedClass, _ := deadRuntimePatch(r, false)
+			strandedPatch, strandedClass, _, _ := deadRuntimePatch(r, false)
 			kept = foldClass(strandedPatch, strandedClass)
 		}
 	}
@@ -170,6 +173,9 @@ func (r *rowFacts) startIntent(reason string) (intent, bool) {
 		if healthy, present := r.w.ProviderHealth.check(p.Name); present && !healthy {
 			return intent{Reason: decideStartProviderRed}, true
 		}
+	}
+	if preWakeRefuses(session.DispositionOfInfo(info), reason, now) {
+		return intent{Reason: decideStartHeld}, true // A6's timer heals ask for a pass when a timed hold ends
 	}
 	r.rests |= restRuntime // bringUp reads the runtime fresh and decides on it (S1)
 	basis := rowBasis{Incarnation: r.row.Incarnation, InstanceToken: r.row.InstanceToken}
@@ -207,9 +213,9 @@ func (r *rowFacts) startHealed(heal intent) intent {
 	case heal.Reason != decideDeadRuntimeHeal || !r.asleepStranded():
 		it.Heal = &heal
 	default: // a stranded seat records its death alone and stays committed, so it is recorded once
-		if accrual, class, accrued := deadRuntimePatch(r, false); accrued {
+		if accrual, class, accrued, ev := deadRuntimePatch(r, false); accrued {
 			recorded := heal
-			recorded.Patch, recorded.Class = accrual, class
+			recorded.Patch, recorded.Class, recorded.Event = accrual, class, ev
 			it.Heal = &recorded
 		}
 	}

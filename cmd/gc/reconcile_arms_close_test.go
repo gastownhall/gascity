@@ -196,7 +196,8 @@ func TestArmCloseDecides(t *testing.T) {
 		{name: "an undesired pool row under a wait hold keeps its slot", liveness: livenessGone, desired: desireDrain, drain: drainOrphaned, meta: []string{"state", "asleep", "wait_hold", "w-1"}},
 		{name: "an undesired pool row under a quarantine keeps its slot", liveness: livenessGone, desired: desireDrain, drain: drainOrphaned, meta: []string{"state", "asleep", "quarantined_until", at(time.Hour)}},
 		{name: "an undesired pool row under a hold timer keeps its slot", liveness: livenessGone, desired: desireDrain, drain: drainOrphaned, meta: []string{"state", "suspended", "held_until", at(time.Hour)}},
-		{name: "an undesired suspended pool row with no hold closes", liveness: livenessGone, desired: desireDrain, drain: drainOrphaned, meta: []string{"state", "suspended"}, want: decideCloseOrphan},
+		{name: "an undesired soft-suspended pool row heals asleep first (v5.9u)", liveness: livenessGone, desired: desireDrain, drain: drainOrphaned, meta: []string{"state", "suspended", "suspended_at", at(-time.Minute)}, want: decideSuspendHeal},
+		{name: "and once healed, with its suspended_at left, closes", liveness: livenessGone, desired: desireDrain, drain: drainOrphaned, meta: []string{"state", "asleep", "suspended_at", at(-time.Minute)}, want: decideCloseOrphan},
 		{
 			name: "a future-dated marker counts as aged (§12.2 #24)", liveness: livenessGone, desired: desireSleep, meta: []string{"state", "asleep", "sleep_reason", "idle", "slept_at", at(-time.Hour), strandedEventEmittedKey, at(time.Hour)},
 			want: decideClosePoolSlot, check: func(t *testing.T, it intent) {

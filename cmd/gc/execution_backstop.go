@@ -301,17 +301,24 @@ func (p poolExecutionBackstop) resolve(s beads.Bead, _ map[string]beads.Bead, se
 // storms. The snapshot is taken only once activity is stale, so a session still
 // producing output costs no pane capture.
 func (p poolExecutionBackstop) quietHold(s beads.Bead, sessName string) string {
-	last, err := p.sp.GetLastActivity(sessName)
-	if err != nil || last.IsZero() || p.now.Sub(last) < idleClaimNudgeGrace {
+	return sessionQuietHold(p.sp, s, sessName, p.now)
+}
+
+// sessionQuietHold is quietHold for any backstop: the hold that keeps sp's
+// session sessName (its row s) from being treated as quiet at now, "" when it
+// is quiet. The pool-claim backstop reads it before its terminal drain.
+func sessionQuietHold(sp runtime.Provider, s beads.Bead, sessName string, now time.Time) string {
+	last, err := sp.GetLastActivity(sessName)
+	if err != nil || last.IsZero() || now.Sub(last) < idleClaimNudgeGrace {
 		return executionHoldNotQuiet
 	}
 	if !executionSnapshotVetoApplies(s.Metadata) {
 		return ""
 	}
-	return p.snapshotHold(sessName)
+	return snapshotHoldFor(sp, sessName)
 }
 
-// snapshotHold asks the runtime whether a session whose activity clock is
+// snapshotHoldFor asks the runtime sp whether a session whose activity clock is
 // already stale still shows its provider's busy indicator. Tmux activity
 // measures pane output, not whether an agent turn is still running, so a long
 // model turn or a quiet tool call can age past the grace while the indicator
@@ -324,8 +331,8 @@ func (p poolExecutionBackstop) quietHold(s beads.Bead, sessName string) string {
 // was displaced reports indefinitely), and a runtime that cannot take the
 // observation, whether it lacks IdleSnapshotProvider or is a composite (auto,
 // hybrid) whose routed backend reports ErrInteractionUnsupported.
-func (p poolExecutionBackstop) snapshotHold(sessName string) string {
-	snap, ok := p.sp.(runtime.IdleSnapshotProvider)
+func snapshotHoldFor(sp runtime.Provider, sessName string) string {
+	snap, ok := sp.(runtime.IdleSnapshotProvider)
 	if !ok {
 		return ""
 	}
@@ -438,18 +445,26 @@ func (p poolExecutionBackstop) clearHold(store beads.Store, s *beads.Bead, stdou
 // executionStalledLatchRetryAfter. An unparseable latch time holds, so a
 // corrupt value can never turn the latch into a per-tick drain.
 func (p poolExecutionBackstop) stalledLatchHolds(s *beads.Bead) bool {
-	latchedAt := strings.TrimSpace(s.Metadata[executionClaimNudgeStalledKey])
+	return stalledLatchHolds(s, executionClaimNudgeStalledKey, executionClaimNudgeStalledTokenKey, p.now)
+}
+
+// stalledLatchHolds reports whether a backstop's terminal-drain latch on s
+// (atKey when, tokenKey for which incarnation) still holds at now: written for
+// the current incarnation within executionStalledLatchRetryAfter. An
+// unreadable time holds, so a corrupt latch never re-arms the drain.
+func stalledLatchHolds(s *beads.Bead, atKey, tokenKey string, now time.Time) bool {
+	latchedAt := strings.TrimSpace(s.Metadata[atKey])
 	if latchedAt == "" {
 		return false
 	}
-	if strings.TrimSpace(s.Metadata[executionClaimNudgeStalledTokenKey]) != strings.TrimSpace(s.Metadata["instance_token"]) {
+	if strings.TrimSpace(s.Metadata[tokenKey]) != strings.TrimSpace(s.Metadata["instance_token"]) {
 		return false
 	}
 	ts, err := time.Parse(time.RFC3339, latchedAt)
 	if err != nil {
 		return true
 	}
-	return p.now.Sub(ts) < executionStalledLatchRetryAfter
+	return now.Sub(ts) < executionStalledLatchRetryAfter
 }
 
 // exhausted turns a spent attempt budget into one observable fact and one drain

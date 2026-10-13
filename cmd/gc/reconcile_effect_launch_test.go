@@ -168,7 +168,7 @@ func TestPreWakeRefusesWhatHoldsOrMovedSinceThePass(t *testing.T) {
 		{"held at the pass", []string{"held_until", future}, nil, causeHeld},
 		{"user-hold at the pass", []string{"sleep_intent", "user-hold"}, nil, causeHeld},
 		{"quarantined at the pass", []string{"quarantined_until", future}, nil, causeHeld},
-		{"suspended at the pass", []string{"state", "suspended"}, nil, causeHeld},
+		{"managed suspend at the pass", []string{"state", "suspended", "sleep_intent", "user-hold", "held_until", future}, nil, causeHeld},
 		{"held since", nil, []string{"held_until", future}, causePremise},
 		{"quarantined since", nil, []string{"quarantined_until", future}, causePremise},
 		{"kill fence since", nil, []string{"state", "asleep", "state_reason", session.KillPendingReason, "sleep_reason", string(session.SleepReasonKilled), "slept_at", gatherNow.Format(time.RFC3339)}, causePremise},
@@ -367,6 +367,37 @@ func TestStartEffectClearsAResumeOnlyProvidersAllocatedKey(t *testing.T) {
 	}
 	if k.meta("session_key") != "" || k.meta("continuation_epoch") != "6" || strings.Contains(leaf.cfgs[0].Command, "allocated") {
 		t.Fatalf("key %q epoch %q command %q; want the key reset and a bare launch", k.meta("session_key"), k.meta("continuation_epoch"), leaf.cfgs[0].Command)
+	}
+}
+
+// Kills a v2 PreWake that starts a committed manual conversation fresh
+// silently (mc-v9xzh): its landed stale-key reset carries one
+// session.conversation_reset{reason:stale-key}; a committed row that is not
+// manual, and an allocated manual key, carry none.
+func TestStaleKeyResetRecordsConversationReset(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		meta []string
+		want int
+	}{
+		{"a committed manual conversation", []string{"session_origin", "manual", "session_key", "k-1", "started_config_hash", "h-1"}, 1},
+		{"the legacy manual marker", []string{"manual_session", "true", "session_key", "k-1", "started_config_hash", "h-1"}, 1},
+		{"a committed row that is not manual", []string{"session_key", "k-1", "started_config_hash", "h-1"}, 0},
+		{"an allocated manual key", []string{"session_origin", "manual", "session_key", "k-1"}, 0},
+	} {
+		stubTranscript(t, false)
+		k, _ := launchKit(t, "asleep", c.meta...)
+		k.p.Clock.(*fakePlannerClock).auto = true // the stale-key wait
+		row := k.p.World.Census.Rows[k.it.Key]
+		tp := TemplateParams{TemplateName: "worker", Command: "agent", WorkDir: t.TempDir(), ResolvedProvider: &config.ResolvedProvider{Name: "claude", SessionIDFlag: "--session-id"}}
+		k.p.World.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(row.Info): {TP: tp}}}
+		s := k.runKind()
+		if s.Outcome != settledLanded {
+			t.Fatalf("%s: settlement %+v, want landed", c.name, s)
+		}
+		if got := conversationResets(t, s.Facts.Events, "gc-1", tp); got != c.want {
+			t.Errorf("%s: %d session.conversation_reset events, want %d", c.name, got, c.want)
+		}
 	}
 }
 
@@ -1116,7 +1147,8 @@ func TestPlannerHandsItsGuardToTheStartAndFlushes(t *testing.T) {
 
 // Kills the heartbeat-hold exemption widened or lost (v5.9i): A17's respawn
 // launches through an agent heartbeat's hold; an A18 start over the same row,
-// and A17 over an operator's hold, are refused held.
+// and A17 over an operator's hold, are refused held. A soft suspend holds
+// neither (v5.9u).
 func TestPreWakeExemptsTheHeartbeatHoldForA17Only(t *testing.T) {
 	soon := gatherNow.Add(time.Hour).Format(time.RFC3339)
 	for _, c := range []struct {
@@ -1128,7 +1160,8 @@ func TestPreWakeExemptsTheHeartbeatHoldForA17Only(t *testing.T) {
 		{"A18 over a heartbeat hold", decideStart, []string{"held_until", soon}, false},
 		{"A17 over an operator's hold", decideHeartbeatRespawn, []string{"held_until", soon, "sleep_intent", "user-hold"}, false},
 		{"A17 over a live quarantine", decideHeartbeatRespawn, []string{"held_until", soon, "quarantined_until", soon}, false},
-		{"A17 over a soft suspend", decideHeartbeatRespawn, []string{"held_until", soon, "state", "suspended"}, false},
+		{"A17 over a soft suspend", decideHeartbeatRespawn, []string{"held_until", soon, "state", "suspended"}, true},
+		{"A18 over a soft suspend", decideStart, []string{"state", "suspended", "suspended_at", gatherNow.Add(-time.Hour).Format(time.RFC3339)}, true},
 	} {
 		k, _ := launchKit(t, "asleep", c.meta...)
 		k.it.Reason = c.reason
@@ -1189,7 +1222,7 @@ func TestRefusedStartStillHeals(t *testing.T) {
 				tc.arrange(k)
 			}
 			k.it.Reason = decideStart
-			heal, class, _ := deadRuntimePatch(&rowFacts{w: k.p.World, row: row, entry: &selectionEntry{Liveness: livenessGone, Desired: desireWake}}, true)
+			heal, class, _, _ := deadRuntimePatch(&rowFacts{w: k.p.World, row: row, entry: &selectionEntry{Liveness: livenessGone, Desired: desireWake}}, true)
 			if until, err := time.Parse(time.RFC3339, tc.patch["quarantined_until"]); err == nil { // a quarantine is the Quarantine cell's
 				class = class.With(session.CellInfo(row.Info, session.ActorController, session.DispEvent{Kind: session.EvQuarantine, Until: until}, gatherNow))
 			}
