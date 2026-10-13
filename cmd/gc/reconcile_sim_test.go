@@ -432,6 +432,8 @@ type sim struct {
 	runMu              sync.Mutex
 	running            map[effectKey]*simEffect // released, by key, for their seams
 	credit             decisionCredit           // the arm decisions the census credits (reconcile_sim_coverage_test.go)
+	envNow             *reconcileEnv            // the environment the next gather reads; a config drift replaces it
+	baseCfg            *config.City             // the seed's config, which a drift's revert restores
 }
 
 // simOpts scripts a run: rows replaces the seeded rows, and the other fields
@@ -483,10 +485,10 @@ func newSim(t *testing.T, seed uint64, o simOpts) *sim {
 
 	s.lane = newRuntimeInventoryLane(simPatrol, io.Discard, "sim")
 	s.lane.clock, s.lane.cache = s.obsClk, NewObservationCache(s.obsClk, 2*simPatrol, "sim")
-	env := &reconcileEnv{Gen: 1, Cfg: s.cfg, SP: s.sp}
+	s.envNow = &reconcileEnv{Gen: 1, Cfg: s.cfg, SP: s.sp}
 	s.env = gatherEnv{
 		CityPath: t.TempDir(), CityName: "test-city",
-		Env:          func() *reconcileEnv { return env },
+		Env:          func() *reconcileEnv { return s.envNow }, // a config drift swaps it (reconcile_sim_drift_test.go)
 		Sessions:     func() beads.Store { return s.legs[0].cache },
 		WorkStore:    func() beads.Store { return s.legs[0].cache }, // the city's work and sessions share a store
 		RigStores:    func() map[string]beads.Store { return map[string]beads.Store{simRigLeg: s.legs[1].cache} },

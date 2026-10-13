@@ -185,17 +185,17 @@ var pendingRuntimeOps = []struct {
 	}},
 }
 
-// pickExternalOp is a step's outside move: externalOps, plus the pending
-// creates' when the sim seeds them. A sim that seeds none (the floored
-// corpus) draws from externalOps alone, so its RNG stream, and the
-// scenarios it reaches, are main's.
+// pickExternalOp is a step's outside move: externalOps and the config
+// drifts (reconcile_sim_drift_test.go), plus the pending creates' when the
+// sim seeds them. A sim that seeds none (the floored corpus) draws no
+// pending create.
 func (s *sim) pickExternalOp() struct {
 	name string
 	fn   func(s *sim, l *simLeg, b beads.Bead)
 } {
-	ops := externalOps
+	ops := slices.Concat(externalOps, driftOps) // reconcile_sim_drift_test.go
 	if !s.noPendingCreates {
-		ops = slices.Concat(externalOps, pendingCreateOps)
+		ops = slices.Concat(ops, pendingCreateOps)
 	}
 	return ops[s.rng.IntN(len(ops))]
 }
@@ -602,6 +602,14 @@ func TestSimPendingRelaxationsBite(t *testing.T) {
 		{"I4: a rollback kills an older incarnation under a named row's name", "I4 ", func(s *sim) {
 			s.prev = map[string]beads.Bead{"city/x": row("x", "session_name", "chat", "pending_create_claim", "true")}
 			s.sp.kills = append(s.sp.kills, simKill{Method: "Stop", Name: "chat", Effect: intentRollback, Hit: &simRuntime{id: "x", epoch: "1", token: "tok-1"}})
+		}},
+		// I4's just-closed own-teardown exception (v5.10e): only a rollback's
+		// or a start's stop of the row's own StaleSelf at its generation; at
+		// another generation it still fails.
+		{"I4: a rollback kills a just-closed row's StaleSelf runtime at another generation", "I4 ", func(s *sim) {
+			s.prev = map[string]beads.Bead{}
+			s.closedInStep = map[string]beads.Bead{"s-x": row("x")}
+			s.sp.kills = append(s.sp.kills, simKill{Method: "Stop", Name: "s-x", Effect: intentRollback, Hit: &simRuntime{id: "x", epoch: "1", token: "tok-old"}})
 		}},
 		{"I4: a stop verb kills another row's runtime under a just-closed pending create's name", "I4 ", func(s *sim) {
 			s.prev = map[string]beads.Bead{}
