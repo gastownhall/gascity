@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -253,6 +254,9 @@ func runE2b2ProviderFailureHelper(t *testing.T, cityPath, sessionID, markerPath 
 	defer func() { buildSessionProviderByName = oldBuild }()
 
 	const constructionFailure = "constructing session provider: injected provider failure"
+	// drain-check answers unknown (exit 3) rather than failing: the provider is
+	// one of its two sources, and the session row still answered.
+	const drainCheckUnknown = `gc runtime drain-check: drain state of "worker" unknown: runtime_meta: opening the session provider: ` + constructionFailure
 	tests := []struct {
 		name             string
 		args             []string
@@ -260,15 +264,17 @@ func runE2b2ProviderFailureHelper(t *testing.T, cityPath, sessionID, markerPath 
 		wantJSONCode     string
 		wantJSONMessage  string
 		wantJSONDiagCode string
+		wantExit         int    // 0 means 1
+		wantMessage      string // "" means wantCommand + ": " + constructionFailure
 	}{
 		{name: "runtime drain text", args: []string{"--city", cityPath, "runtime", "drain", sessionID}, wantCommand: "gc runtime drain"},
 		{name: "runtime drain json", args: []string{"--city", cityPath, "runtime", "drain", sessionID, "--json"}, wantCommand: "gc runtime drain", wantJSONCode: "command_failed", wantJSONMessage: "command failed; see stderr for diagnostics"},
 		{name: "runtime undrain text", args: []string{"--city", cityPath, "runtime", "undrain", sessionID}, wantCommand: "gc runtime undrain"},
 		{name: "runtime undrain json", args: []string{"--city", cityPath, "runtime", "undrain", sessionID, "--json"}, wantCommand: "gc runtime undrain", wantJSONCode: "command_failed", wantJSONMessage: "command failed; see stderr for diagnostics"},
-		{name: "runtime drain-check explicit text", args: []string{"--city", cityPath, "runtime", "drain-check", sessionID}, wantCommand: "gc runtime drain-check"},
-		{name: "runtime drain-check explicit json", args: []string{"--city", cityPath, "runtime", "drain-check", sessionID, "--json"}, wantCommand: "gc runtime drain-check", wantJSONCode: "command_failed", wantJSONMessage: "command failed; see stderr for diagnostics"},
-		{name: "runtime drain-check context text", args: []string{"--city", cityPath, "runtime", "drain-check"}, wantCommand: "gc runtime drain-check"},
-		{name: "runtime drain-check context json", args: []string{"--city", cityPath, "runtime", "drain-check", "--json"}, wantCommand: "gc runtime drain-check", wantJSONCode: "command_failed", wantJSONMessage: "command failed; see stderr for diagnostics"},
+		{name: "runtime drain-check explicit text", args: []string{"--city", cityPath, "runtime", "drain-check", sessionID}, wantCommand: "gc runtime drain-check", wantExit: drainCheckUnknownExit, wantMessage: drainCheckUnknown},
+		{name: "runtime drain-check explicit json", args: []string{"--city", cityPath, "runtime", "drain-check", sessionID, "--json"}, wantCommand: "gc runtime drain-check", wantJSONCode: drainCheckUnknownCode, wantJSONMessage: drainCheckUnknown, wantJSONDiagCode: drainCheckUnknownCode, wantExit: drainCheckUnknownExit},
+		{name: "runtime drain-check context text", args: []string{"--city", cityPath, "runtime", "drain-check"}, wantCommand: "gc runtime drain-check", wantExit: drainCheckUnknownExit, wantMessage: drainCheckUnknown},
+		{name: "runtime drain-check context json", args: []string{"--city", cityPath, "runtime", "drain-check", "--json"}, wantCommand: "gc runtime drain-check", wantJSONCode: drainCheckUnknownCode, wantJSONMessage: drainCheckUnknown, wantJSONDiagCode: drainCheckUnknownCode, wantExit: drainCheckUnknownExit},
 		{name: "runtime drain-ack explicit text", args: []string{"--city", cityPath, "runtime", "drain-ack", sessionID}, wantCommand: "gc runtime drain-ack"},
 		{name: "runtime drain-ack explicit json", args: []string{"--city", cityPath, "runtime", "drain-ack", sessionID, "--json"}, wantCommand: "gc runtime drain-ack", wantJSONCode: "command_failed", wantJSONMessage: "command failed; see stderr for diagnostics"},
 		{name: "runtime drain-ack context text", args: []string{"--city", cityPath, "runtime", "drain-ack"}, wantCommand: "gc runtime drain-ack"},
@@ -283,12 +289,19 @@ func runE2b2ProviderFailureHelper(t *testing.T, cityPath, sessionID, markerPath 
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			wantExit := tc.wantExit
+			if wantExit == 0 {
+				wantExit = 1
+			}
 			var stdout, stderr bytes.Buffer
-			if code := run(tc.args, &stdout, &stderr); code != 1 {
-				t.Fatalf("run(%v) = %d, want 1; stdout=%q stderr=%q", tc.args, code, stdout.String(), stderr.String())
+			if code := run(tc.args, &stdout, &stderr); code != wantExit {
+				t.Fatalf("run(%v) = %d, want %d; stdout=%q stderr=%q", tc.args, code, wantExit, stdout.String(), stderr.String())
 			}
 
-			wantMessage := tc.wantCommand + ": " + constructionFailure
+			wantMessage := tc.wantMessage
+			if wantMessage == "" {
+				wantMessage = tc.wantCommand + ": " + constructionFailure
+			}
 			if tc.wantJSONCode == "" {
 				if got := stdout.String(); got != "" {
 					t.Fatalf("stdout = %q, want empty", got)
@@ -303,8 +316,8 @@ func runE2b2ProviderFailureHelper(t *testing.T, cityPath, sessionID, markerPath 
 			if err := json.Unmarshal(stdout.Bytes(), &output); err != nil {
 				t.Fatalf("stdout is not a structured JSON failure: %v; stdout=%q", err, stdout.String())
 			}
-			if output.OK || output.Error.Code != tc.wantJSONCode || output.Error.ExitCode != 1 || output.Error.Message != tc.wantJSONMessage {
-				t.Fatalf("JSON failure = %#v, want code=%q message=%q exit_code=1", output, tc.wantJSONCode, tc.wantJSONMessage)
+			if output.OK || output.Error.Code != tc.wantJSONCode || output.Error.ExitCode != wantExit || output.Error.Message != tc.wantJSONMessage {
+				t.Fatalf("JSON failure = %#v, want code=%q message=%q exit_code=%d", output, tc.wantJSONCode, tc.wantJSONMessage, wantExit)
 			}
 			if tc.wantJSONDiagCode == "" {
 				if got, want := stderr.String(), wantMessage+"\n"; got != want {
@@ -316,8 +329,8 @@ func runE2b2ProviderFailureHelper(t *testing.T, cityPath, sessionID, markerPath 
 			if err := json.Unmarshal(stderr.Bytes(), &diagnostic); err != nil {
 				t.Fatalf("stderr is not a structured JSON diagnostic: %v; stderr=%q", err, stderr.String())
 			}
-			if diagnostic.Code != tc.wantJSONDiagCode || diagnostic.Message != tc.wantJSONMessage || diagnostic.ExitCode != 1 {
-				t.Fatalf("JSON diagnostic = %#v, want code=%q message=%q exit_code=1", diagnostic, tc.wantJSONDiagCode, tc.wantJSONMessage)
+			if diagnostic.Code != tc.wantJSONDiagCode || diagnostic.Message != tc.wantJSONMessage || diagnostic.ExitCode != wantExit {
+				t.Fatalf("JSON diagnostic = %#v, want code=%q message=%q exit_code=%d", diagnostic, tc.wantJSONDiagCode, tc.wantJSONMessage, wantExit)
 			}
 		})
 	}
@@ -608,84 +621,350 @@ func TestDoRuntimeUndrainJSON(t *testing.T) {
 // doRuntimeDrainCheck tests
 // ---------------------------------------------------------------------------
 
-func TestDoRuntimeDrainCheck(t *testing.T) {
+// drainCheckRow returns a row-reader seam answering draining or err.
+func drainCheckRow(draining bool, err error) func() (bool, error) {
+	return func() (bool, error) { return draining, err }
+}
+
+// drainCheckRowMustNotRun fails the test if the row is read.
+func drainCheckRowMustNotRun(t *testing.T) func() (bool, error) {
+	t.Helper()
+	return func() (bool, error) {
+		t.Fatal("session row read after the runtime already answered draining")
+		return false, nil
+	}
+}
+
+func TestDoRuntimeDrainCheckMetaDraining(t *testing.T) {
 	dops := newFakeDrainOps()
 	dops.draining["worker"] = true
 
-	code := doRuntimeDrainCheck(dops, "worker", "worker", false, &bytes.Buffer{}, &bytes.Buffer{})
+	code := doRuntimeDrainCheck(dops, drainCheckRowMustNotRun(t), "worker", "worker", false, &bytes.Buffer{}, &bytes.Buffer{})
 	if code != 0 {
 		t.Errorf("code = %d, want 0 (draining)", code)
+	}
+}
+
+// The reconciler drains through the session row and never sets GC_DRAIN; a
+// drain-check that reads only provider meta misses every such drain.
+func TestDoRuntimeDrainCheckRowDrainingWithMetaClear(t *testing.T) {
+	dops := newFakeDrainOps()
+
+	var stderr bytes.Buffer
+	code := doRuntimeDrainCheck(dops, drainCheckRow(true, nil), "worker", "worker", false, &bytes.Buffer{}, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0 (row draining); stderr: %s", code, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestDoRuntimeDrainCheckMetaDrainingDespiteRowError(t *testing.T) {
+	dops := newFakeDrainOps()
+	dops.draining["worker"] = true
+
+	code := doRuntimeDrainCheck(dops, drainCheckRow(false, errors.New("ledger unreachable")), "worker", "worker", false, &bytes.Buffer{}, &bytes.Buffer{})
+	if code != 0 {
+		t.Errorf("code = %d, want 0 (meta draining)", code)
+	}
+}
+
+func TestDoRuntimeDrainCheckRowDrainingDespiteMetaError(t *testing.T) {
+	dops := newFakeDrainOps()
+	dops.err = errors.New("provider transport: connection refused")
+
+	code := doRuntimeDrainCheck(dops, drainCheckRow(true, nil), "worker", "worker", false, &bytes.Buffer{}, &bytes.Buffer{})
+	if code != 0 {
+		t.Errorf("code = %d, want 0 (row draining)", code)
 	}
 }
 
 func TestDoRuntimeDrainCheckNotDraining(t *testing.T) {
 	dops := newFakeDrainOps()
 
-	code := doRuntimeDrainCheck(dops, "worker", "worker", false, &bytes.Buffer{}, &bytes.Buffer{})
+	var stderr bytes.Buffer
+	code := doRuntimeDrainCheck(dops, drainCheckRow(false, nil), "worker", "worker", false, &bytes.Buffer{}, &stderr)
 	if code != 1 {
 		t.Errorf("code = %d, want 1 (not draining)", code)
 	}
+	if stderr.Len() != 0 {
+		t.Errorf("stderr = %q, want empty", stderr.String())
+	}
 }
 
-func TestDoRuntimeDrainCheckError(t *testing.T) {
+func TestDoRuntimeDrainCheckRowErrorIsUnknown(t *testing.T) {
 	dops := newFakeDrainOps()
-	dops.err = errors.New("tmux gone")
 
-	code := doRuntimeDrainCheck(dops, "worker", "worker", false, &bytes.Buffer{}, &bytes.Buffer{})
-	if code != 1 {
-		t.Errorf("code = %d, want 1 (error → not draining)", code)
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeDrainCheck(dops, drainCheckRow(false, errors.New("ledger unreachable")), "worker", "worker", false, &stdout, &stderr)
+	if code != drainCheckUnknownExit {
+		t.Fatalf("code = %d, want %d (unknown)", code, drainCheckUnknownExit)
 	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want empty", stdout.String())
+	}
+	lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
+	if len(lines) != 1 || !strings.Contains(lines[0], drainCheckSourceRow) || !strings.Contains(lines[0], "ledger unreachable") {
+		t.Errorf("stderr = %q, want one line naming %s and its error", stderr.String(), drainCheckSourceRow)
+	}
+}
+
+func TestDoRuntimeDrainCheckMetaTransportErrorIsUnknown(t *testing.T) {
+	dops := newFakeDrainOps()
+	dops.err = errors.New("provider transport: connection refused")
+
+	var stderr bytes.Buffer
+	code := doRuntimeDrainCheck(dops, drainCheckRow(false, nil), "worker", "worker", false, &bytes.Buffer{}, &stderr)
+	if code != drainCheckUnknownExit {
+		t.Fatalf("code = %d, want %d (unknown)", code, drainCheckUnknownExit)
+	}
+	lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
+	if len(lines) != 1 || !strings.Contains(lines[0], drainCheckSourceRuntime) || strings.Contains(lines[0], drainCheckSourceRow+":") {
+		t.Errorf("stderr = %q, want one line naming only %s", stderr.String(), drainCheckSourceRuntime)
+	}
+}
+
+func TestDoRuntimeDrainCheckBothErrorsIsUnknown(t *testing.T) {
+	dops := newFakeDrainOps()
+	dops.err = errors.New("provider transport: connection refused")
+
+	var stderr bytes.Buffer
+	code := doRuntimeDrainCheck(dops, drainCheckRow(false, errors.New("ledger unreachable")), "worker", "worker", false, &bytes.Buffer{}, &stderr)
+	if code != drainCheckUnknownExit {
+		t.Fatalf("code = %d, want %d (unknown)", code, drainCheckUnknownExit)
+	}
+	lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
+	if len(lines) != 1 || !strings.Contains(lines[0], drainCheckSourceRow) || !strings.Contains(lines[0], drainCheckSourceRuntime) {
+		t.Errorf("stderr = %q, want one line naming both sources", stderr.String())
+	}
+}
+
+// A runtime that is absent, or that keeps no metadata, has definitively no
+// GC_DRAIN: that is an answer, not an error.
+func TestDoRuntimeDrainCheckRuntimeAbsentIsAnAnswer(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{name: "session not found", err: fmt.Errorf("reading GC_DRAIN: %w", runtime.ErrSessionNotFound)},
+		{name: "not running", err: errors.New("reading GC_DRAIN: session worker not running")},
+		{name: "meta unsupported", err: fmt.Errorf("reading GC_DRAIN: %w", runtime.ErrMetaUnsupported)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dops := newFakeDrainOps()
+			dops.err = tc.err
+
+			var stderr bytes.Buffer
+			code := doRuntimeDrainCheck(dops, drainCheckRow(false, nil), "worker", "worker", false, &bytes.Buffer{}, &stderr)
+			if code != 1 {
+				t.Fatalf("code = %d, want 1 (not draining); stderr: %s", code, stderr.String())
+			}
+			if stderr.Len() != 0 {
+				t.Fatalf("stderr = %q, want empty", stderr.String())
+			}
+		})
+	}
+}
+
+func TestDoRuntimeDrainCheckRuntimeAbsentRowDraining(t *testing.T) {
+	dops := newFakeDrainOps()
+	dops.err = runtime.ErrSessionNotFound
+
+	code := doRuntimeDrainCheck(dops, drainCheckRow(true, nil), "worker", "worker", false, &bytes.Buffer{}, &bytes.Buffer{})
+	if code != 0 {
+		t.Errorf("code = %d, want 0 (row draining)", code)
+	}
+}
+
+func decodeDrainCheckJSON(t *testing.T, data []byte) runtimeDrainCheckJSON {
+	t.Helper()
+	var result runtimeDrainCheckJSON
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, string(data))
+	}
+	validateJSONAgainstResultSchema(t, []string{"runtime", "drain-check"}, data)
+	return result
 }
 
 func TestDoRuntimeDrainCheckJSON(t *testing.T) {
-	dops := newFakeDrainOps()
-	dops.draining["worker"] = true
+	for _, tc := range []struct {
+		name       string
+		meta, row  bool
+		wantSource string
+	}{
+		{name: "meta", meta: true, wantSource: drainCheckSourceRuntime},
+		{name: "row", row: true, wantSource: drainCheckSourceRow},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dops := newFakeDrainOps()
+			dops.draining["worker"] = tc.meta
 
-	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainCheck(dops, "worker", "worker", true, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+			var stdout, stderr bytes.Buffer
+			code := doRuntimeDrainCheck(dops, drainCheckRow(tc.row, nil), "worker-alias", "worker", true, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+			}
+			if stderr.Len() != 0 {
+				t.Fatalf("stderr = %q, want empty", stderr.String())
+			}
+			result := decodeDrainCheckJSON(t, stdout.Bytes())
+			if result.SchemaVersion != "1" ||
+				!result.OK ||
+				result.Command != "runtime drain-check" ||
+				!result.Draining ||
+				result.Session != "worker" ||
+				result.Target != "worker-alias" ||
+				result.Source != tc.wantSource {
+				t.Fatalf("unexpected JSON result: %+v", result)
+			}
+		})
 	}
-	if stderr.Len() != 0 {
-		t.Fatalf("stderr = %q, want empty", stderr.String())
-	}
-	var result runtimeDrainCheckJSON
-	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
-		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
-	}
-	if result.SchemaVersion != "1" ||
-		!result.OK ||
-		result.Command != "runtime drain-check" ||
-		!result.Draining ||
-		result.Session != "worker" {
-		t.Fatalf("unexpected JSON result: %+v", result)
-	}
-	validateJSONAgainstResultSchema(t, []string{"runtime", "drain-check"}, stdout.Bytes())
 }
 
 func TestDoRuntimeDrainCheckJSONNotDrainingWritesFalseResult(t *testing.T) {
 	dops := newFakeDrainOps()
 
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainCheck(dops, "worker", "worker", true, &stdout, &stderr)
+	code := doRuntimeDrainCheck(dops, drainCheckRow(false, nil), "worker", "worker", true, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1 for shell-condition false; stderr: %s", code, stderr.String())
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("stderr = %q, want empty", stderr.String())
 	}
-	var result runtimeDrainCheckJSON
-	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
-		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
-	}
+	result := decodeDrainCheckJSON(t, stdout.Bytes())
 	if result.SchemaVersion != "1" ||
 		!result.OK ||
 		result.Command != "runtime drain-check" ||
 		result.Draining ||
-		result.Session != "worker" {
+		result.Session != "worker" ||
+		result.Source != drainCheckSourceBoth {
 		t.Fatalf("unexpected JSON result: %+v", result)
 	}
-	validateJSONAgainstResultSchema(t, []string{"runtime", "drain-check"}, stdout.Bytes())
+}
+
+func TestDoRuntimeDrainCheckJSONUnknownWritesErrorEnvelope(t *testing.T) {
+	dops := newFakeDrainOps()
+
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeDrainCheck(dops, drainCheckRow(false, errors.New("ledger unreachable")), "worker", "worker", true, &stdout, &stderr)
+	if code != drainCheckUnknownExit {
+		t.Fatalf("code = %d, want %d", code, drainCheckUnknownExit)
+	}
+	var result cliJSONErrorOutput
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.SchemaVersion != "1" ||
+		result.OK ||
+		result.Error.Code != drainCheckUnknownCode ||
+		result.Error.ExitCode != drainCheckUnknownExit ||
+		!strings.Contains(result.Error.Message, drainCheckSourceRow) {
+		t.Fatalf("unexpected JSON error: %+v", result)
+	}
+}
+
+// newDrainCheckFrontDoor returns a session front door over an in-memory
+// store holding one session row in state.
+func newDrainCheckFrontDoor(t *testing.T, sessionName string, state session.State) (*session.Store, string) {
+	t.Helper()
+	store := beads.NewMemStore()
+	b, err := store.Create(beads.Bead{
+		Title:  "session",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": sessionName,
+			"template":     "worker",
+			"state":        string(state),
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	return sessionFrontDoor(store), b.ID
+}
+
+func TestDrainCheckRowDrainingReadsRowState(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		state session.State
+		want  bool
+	}{
+		{name: "draining", state: session.StateDraining, want: true},
+		{name: "active", state: session.StateActive, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			front, id := newDrainCheckFrontDoor(t, "worker", tc.state)
+			for _, form := range []struct {
+				name, sessionID string
+			}{
+				{name: "by id", sessionID: id},
+				{name: "by session name", sessionID: ""},
+			} {
+				got, err := drainCheckRowDraining(front, "worker", form.sessionID)
+				if err != nil {
+					t.Fatalf("%s: drainCheckRowDraining: %v", form.name, err)
+				}
+				if got != tc.want {
+					t.Fatalf("%s: draining = %v, want %v", form.name, got, tc.want)
+				}
+			}
+		})
+	}
+}
+
+func TestDrainCheckRowDrainingMissingRowIsAnError(t *testing.T) {
+	front, _ := newDrainCheckFrontDoor(t, "worker", session.StateActive)
+	if _, err := drainCheckRowDraining(front, "someone-else", ""); err == nil {
+		t.Fatal("drainCheckRowDraining for an unknown session returned no error")
+	}
+	if _, err := drainCheckRowDraining(front, "worker", "gc-missing"); err == nil {
+		t.Fatal("drainCheckRowDraining for an unknown id returned no error")
+	}
+}
+
+func TestCmdRuntimeDrainCheckSelfReadsRowByEnvSessionID(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"drain-check\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	front, id := newDrainCheckFrontDoor(t, "worker-pane", session.StateDraining)
+	original := drainCheckSessionFrontDoor
+	t.Cleanup(func() { drainCheckSessionFrontDoor = original })
+	var gotCity string
+	drainCheckSessionFrontDoor = func(path string) (*session.Store, error) {
+		gotCity = path
+		return front, nil
+	}
+	t.Setenv("GC_CITY", cityPath)
+	t.Setenv("GC_ALIAS", "worker")
+	t.Setenv("GC_SESSION_ID", id)
+	t.Setenv("GC_SESSION_NAME", "not-the-row-name")
+	t.Setenv("GC_TMUX_SESSION", "")
+
+	target, err := drainCheckTarget(nil, io.Discard)
+	if err != nil {
+		t.Fatalf("drainCheckTarget: %v", err)
+	}
+	if target.sessionID != id {
+		t.Fatalf("target.sessionID = %q, want %q", target.sessionID, id)
+	}
+	draining, err := drainCheckRowReader(target)()
+	if err != nil {
+		t.Fatalf("row reader: %v", err)
+	}
+	if !draining {
+		t.Fatal("row reader = not draining, want draining")
+	}
+	wantCity, err := filepath.EvalSymlinks(cityPath)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	if resolved, err := filepath.EvalSymlinks(gotCity); err != nil || resolved != wantCity {
+		t.Fatalf("front door opened at %q, want %q", gotCity, cityPath)
+	}
 }
 
 // ---------------------------------------------------------------------------

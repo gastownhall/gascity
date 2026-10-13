@@ -50,6 +50,9 @@ type runtimeDrainCheckJSON struct {
 	Session       string `json:"session"`
 	Target        string `json:"target,omitempty"`
 	Draining      bool   `json:"draining"`
+	// Source names the deciding source: drainCheckSourceRow,
+	// drainCheckSourceRuntime, or drainCheckSourceBoth when neither drains.
+	Source string `json:"source"`
 }
 
 type runtimeActionJSON struct {
@@ -534,6 +537,21 @@ func undrainRuntime(dops drainOps, clearRow func() error, sp runtime.Provider, r
 // gc runtime drain-check
 // ---------------------------------------------------------------------------
 
+// Sources drain-check consults, as named in its JSON "source" field and in
+// its unknown diagnostics.
+const (
+	drainCheckSourceRow     = "session_row"
+	drainCheckSourceRuntime = "runtime_meta"
+	drainCheckSourceBoth    = drainCheckSourceRow + "+" + drainCheckSourceRuntime
+)
+
+// drainCheckUnknownExit is drain-check's exit code when no source that
+// answered says draining and at least one source could not answer.
+const drainCheckUnknownExit = 3
+
+// drainCheckUnknownCode is the JSON error code for drainCheckUnknownExit.
+const drainCheckUnknownCode = "drain_state_unknown"
+
 func newRuntimeDrainCheckCmd(stdout, stderr io.Writer) *cobra.Command {
 	var jsonOutput bool
 	cmd := &cobra.Command{
@@ -541,15 +559,26 @@ func newRuntimeDrainCheckCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "Check if a session is draining (exit 0 = draining)",
 		Long: `Check if a session is currently draining.
 
-Returns exit code 0 if draining, 1 if not. Designed for use in
-conditionals: "if gc runtime drain-check; then finish-up; fi". Without
-arguments, uses the current session context.`,
+Consults two sources: the session row's state, where the controller
+records a drain, and the runtime's GC_DRAIN metadata flag, which
+"gc runtime drain" sets. Designed for use in conditionals:
+"if gc runtime drain-check; then finish-up; fi". Without arguments,
+uses the current session context.
+
+Exit codes:
+  0  draining: a source that answered says draining
+  1  not draining: both sources answered and neither says draining,
+     or there is no current session context
+  3  unknown: a source could not be read and none says draining; one
+     stderr line names the source that failed
+
+A runtime that is absent or keeps no metadata counts as an answer of
+"no GC_DRAIN", not as a failure. With --json, the result carries a
+"source" field naming the deciding source; an unknown result is the JSON
+error envelope with code "drain_state_unknown" and exit code 3.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdRuntimeDrainCheck(args, jsonOutput, stdout, stderr) != 0 {
-				return errExit
-			}
-			return nil
+			return exitForCode(cmdRuntimeDrainCheck(args, jsonOutput, stdout, stderr))
 		},
 	}
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output as JSON")
@@ -557,71 +586,141 @@ arguments, uses the current session context.`,
 }
 
 func cmdRuntimeDrainCheck(args []string, jsonOutput bool, stdout, stderr io.Writer) int {
-	if len(args) > 0 {
-		target, err := resolveSessionRuntimeTarget(args[0], stderr)
-		if err != nil {
-			fmt.Fprintf(stderr, "gc runtime drain-check: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1                                                 // silent — same as current "not draining" behavior
-		}
-		sp, err := newSessionProvider()
-		if err != nil {
-			fmt.Fprintf(stderr, "gc runtime drain-check: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		dops := newDrainOps(sp)
-		return doRuntimeDrainCheck(dops, target.display, target.sessionName, jsonOutput, stdout, stderr)
-	}
-
-	current, err := currentSessionRuntimeTarget()
+	target, err := drainCheckTarget(args, stderr)
 	if err != nil {
-		return 1 // not in agent context → not draining
+		if len(args) > 0 {
+			fmt.Fprintf(stderr, "gc runtime drain-check: %v\n", err) //nolint:errcheck // best-effort stderr
+		}
+		return 1 // no session to check; silent without context, as before
 	}
+	readRow := drainCheckRowReader(target)
 	sp, err := newSessionProvider()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc runtime drain-check: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+		return reportRuntimeDrainCheck(false, fmt.Errorf("opening the session provider: %w", err),
+			readRow, target.display, target.sessionName, jsonOutput, stdout, stderr)
 	}
-	dops := newDrainOps(sp)
-	return doRuntimeDrainCheck(dops, current.display, current.sessionName, jsonOutput, stdout, stderr)
+	return doRuntimeDrainCheck(newDrainOps(sp), readRow, target.display, target.sessionName, jsonOutput, stdout, stderr)
 }
 
-// doRuntimeDrainCheck returns 0 if the session is draining, 1 otherwise.
-// Silent on stdout — designed for `if gc runtime drain-check; then ...`.
-func doRuntimeDrainCheck(dops drainOps, targetName, sn string, jsonOutput bool, stdout, stderr io.Writer) int {
-	draining, err := dops.isDraining(sn)
+// drainCheckTarget resolves drain-check's session: the named one, or the
+// current session context. The current session's row id comes from
+// GC_SESSION_ID when set; otherwise the row is resolved by session name.
+func drainCheckTarget(args []string, stderr io.Writer) (sessionRuntimeTarget, error) {
+	if len(args) > 0 {
+		return resolveSessionRuntimeTarget(args[0], stderr)
+	}
+	target, err := currentSessionRuntimeTarget()
 	if err != nil {
-		return 1
+		return sessionRuntimeTarget{}, err
 	}
-	if !draining {
-		if jsonOutput {
-			if err := writeCLIJSONLine(stdout, runtimeDrainCheckJSON{
-				SchemaVersion: "1",
-				OK:            true,
-				Command:       "runtime drain-check",
-				Session:       sn,
-				Target:        targetName,
-				Draining:      false,
-			}); err != nil {
-				fmt.Fprintf(stderr, "gc runtime drain-check: writing JSON: %v\n", err) //nolint:errcheck // best-effort stderr
-				return 1
-			}
+	target.sessionID = strings.TrimSpace(os.Getenv("GC_SESSION_ID"))
+	return target, nil
+}
+
+// drainCheckSessionFrontDoor is a mutable global test seam over
+// sessionFrontDoorAt. Tests that swap it MUST NOT call t.Parallel().
+var drainCheckSessionFrontDoor = sessionFrontDoorAt
+
+// drainCheckRowReader returns the session-row source for target: it opens the
+// routed session front door of target's city and reads the row's state.
+func drainCheckRowReader(target sessionRuntimeTarget) func() (bool, error) {
+	return func() (bool, error) {
+		front, err := drainCheckSessionFrontDoor(target.cityPath)
+		if err != nil {
+			return false, fmt.Errorf("opening the session store: %w", err)
 		}
-		return 1
+		return drainCheckRowDraining(front, target.sessionName, target.sessionID)
 	}
+}
+
+// drainCheckRowDraining reports whether the session row is in state draining.
+// An empty sessionID resolves the row by sessionName. A closed row reports no
+// runtime state and so is not draining; a row that cannot be found or read is
+// an error.
+func drainCheckRowDraining(front *session.Store, sessionName, sessionID string) (bool, error) {
+	id := strings.TrimSpace(sessionID)
+	if id == "" {
+		resolved, err := front.ResolveID(sessionName)
+		if err != nil {
+			return false, fmt.Errorf("resolving session %q: %w", sessionName, err)
+		}
+		id = resolved
+	}
+	state, _, err := front.GetState(id)
+	if err != nil {
+		return false, fmt.Errorf("reading session %q: %w", id, err)
+	}
+	return state == session.StateDraining, nil
+}
+
+// doRuntimeDrainCheck reads the runtime's GC_DRAIN through dops and, unless
+// that already says draining, the session row through readRow. It returns 0
+// if a source that answered says draining, 1 if both answered and neither
+// does, and drainCheckUnknownExit otherwise. Silent on stdout without
+// --json — designed for `if gc runtime drain-check; then ...`.
+func doRuntimeDrainCheck(dops drainOps, readRow func() (bool, error), targetName, sn string, jsonOutput bool, stdout, stderr io.Writer) int {
+	metaDraining, metaErr := dops.isDraining(sn)
+	if runtime.IsSessionGone(metaErr) || errors.Is(metaErr, runtime.ErrMetaUnsupported) {
+		// An absent runtime, or one with no metadata store, has no GC_DRAIN.
+		metaDraining, metaErr = false, nil
+	}
+	return reportRuntimeDrainCheck(metaDraining, metaErr, readRow, targetName, sn, jsonOutput, stdout, stderr)
+}
+
+// reportRuntimeDrainCheck combines the runtime answer with the session row's
+// and writes the result. The row is not read when the runtime already says
+// draining.
+func reportRuntimeDrainCheck(metaDraining bool, metaErr error, readRow func() (bool, error),
+	targetName, sn string, jsonOutput bool, stdout, stderr io.Writer,
+) int {
+	if metaErr == nil && metaDraining {
+		return writeRuntimeDrainCheck(true, drainCheckSourceRuntime, targetName, sn, jsonOutput, stdout, stderr)
+	}
+	rowDraining, rowErr := readRow()
+	switch {
+	case rowErr == nil && rowDraining:
+		return writeRuntimeDrainCheck(true, drainCheckSourceRow, targetName, sn, jsonOutput, stdout, stderr)
+	case rowErr == nil && metaErr == nil:
+		return writeRuntimeDrainCheck(false, drainCheckSourceBoth, targetName, sn, jsonOutput, stdout, stderr)
+	}
+	var failed []string
+	if rowErr != nil {
+		failed = append(failed, fmt.Sprintf("%s: %v", drainCheckSourceRow, rowErr))
+	}
+	if metaErr != nil {
+		failed = append(failed, fmt.Sprintf("%s: %v", drainCheckSourceRuntime, metaErr))
+	}
+	msg := fmt.Sprintf("gc runtime drain-check: drain state of %q unknown: %s", targetName, strings.Join(failed, "; "))
 	if jsonOutput {
-		if err := writeCLIJSONLine(stdout, runtimeDrainCheckJSON{
-			SchemaVersion: "1",
-			OK:            true,
-			Command:       "runtime drain-check",
-			Session:       sn,
-			Target:        targetName,
-			Draining:      true,
-		}); err != nil {
-			fmt.Fprintf(stderr, "gc runtime drain-check: writing JSON: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
+		return writeJSONError(stdout, stderr, drainCheckUnknownCode, msg, drainCheckUnknownExit)
 	}
-	return 0
+	fmt.Fprintln(stderr, msg) //nolint:errcheck // best-effort stderr
+	return drainCheckUnknownExit
+}
+
+// writeRuntimeDrainCheck writes a definitive drain-check answer and returns
+// its exit code: 0 when draining, 1 when not.
+func writeRuntimeDrainCheck(draining bool, source, targetName, sn string, jsonOutput bool, stdout, stderr io.Writer) int {
+	code := 1
+	if draining {
+		code = 0
+	}
+	if !jsonOutput {
+		return code
+	}
+	if err := writeCLIJSONLine(stdout, runtimeDrainCheckJSON{
+		SchemaVersion: "1",
+		OK:            true,
+		Command:       "runtime drain-check",
+		Session:       sn,
+		Target:        targetName,
+		Draining:      draining,
+		Source:        source,
+	}); err != nil {
+		fmt.Fprintf(stderr, "gc runtime drain-check: writing JSON: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	return code
 }
 
 // ---------------------------------------------------------------------------

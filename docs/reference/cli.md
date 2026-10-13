@@ -4016,9 +4016,23 @@ gc runtime drain-ack [name] [flags]
 
 Check if a session is currently draining.
 
-Returns exit code 0 if draining, 1 if not. Designed for use in
-conditionals: "if gc runtime drain-check; then finish-up; fi". Without
-arguments, uses the current session context.
+Consults two sources: the session row's state, where the controller
+records a drain, and the runtime's GC_DRAIN metadata flag, which
+"gc runtime drain" sets. Designed for use in conditionals:
+"if gc runtime drain-check; then finish-up; fi". Without arguments,
+uses the current session context.
+
+Exit codes:
+  0  draining: a source that answered says draining
+  1  not draining: both sources answered and neither says draining,
+     or there is no current session context
+  3  unknown: a source could not be read and none says draining; one
+     stderr line names the source that failed
+
+A runtime that is absent or keeps no metadata counts as an answer of
+"no GC_DRAIN", not as a failure. With --json, the result carries a
+"source" field naming the deciding source; an unknown result is the JSON
+error envelope with code "drain_state_unknown" and exit code 3.
 
 ```
 gc runtime drain-check [name] [flags]
