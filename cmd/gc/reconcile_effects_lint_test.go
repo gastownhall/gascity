@@ -365,4 +365,7 @@ func TestSealedZeroValuesProveNothing(t *testing.T) {
 	if (completeCensus{}).Closed(rowKey{Leg: "sessions", ID: "gc-1"}) {
 		t.Error("zero census closed a row")
 	}
+	if (finalizeWork{}).free {
+		t.Error("zero finalizeWork proved the seat free")
+	}
 }

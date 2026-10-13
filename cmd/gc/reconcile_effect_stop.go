@@ -190,37 +190,39 @@ func removeCorpse(ctx context.Context, k corpseObject, now time.Time) {
 }
 
 // finalizeWork is the finalize's live work read: the close-gate form (v5.7
-// A9), which excludes the seat's own drain step; an error counts as work.
-// anomaly is the work bead legacy's drain_acked_with_assigned_work names
+// A9), which excludes the seat's own drain step. free is proven by a clean
+// read only: an error, a read that expired or panicked (the zero value),
+// counts as work, so a lost read never closes the seat. anomaly is the
+// work bead legacy's drain_acked_with_assigned_work names
 // (drainAckClaimableAnomalyBead), when the row keeps work.
 type finalizeWork struct {
-	has     bool
-	err     error
+	free    bool
 	anomaly *beads.Bead
 }
 
 // finalizeWorkProbe reads the row's work in the close-gate form.
 func finalizeWorkProbe(_ context.Context, r effectReads, v txView) (finalizeWork, error) {
 	if r.legs.unusable() != nil || v.World.Env == nil {
-		return finalizeWork{err: errNoReadStore}, nil
+		return finalizeWork{}, errNoReadStore
 	}
 	// One seat's read, live, over the pass's city work legs.
 	sw := seatWorkFor(r.legs, releaseScope(v.Row, v.World.Env.Cfg))
-	w := finalizeWork{}
-	w.has, w.err = sessionHasOpenAssignedWorkForReachableStoreForCloseGate(sw, v.Row)
-	if w.has {
+	has, err := sessionHasOpenAssignedWorkForReachableStoreForCloseGate(sw, v.Row)
+	w := finalizeWork{free: !has && err == nil}
+	if has {
 		if b, found, _ := drainAckClaimableAnomalyBead(sw, v.Row, v.Now); found {
 			w.anomaly = &b
 		}
 	}
-	return w, nil
+	return w, err
 }
 
 // stopChoice is the finalize's choice on the fresh row: the intent's
-// builder, else finalizePatch.
-func stopChoice(v txView, work finalizeWork) finalizeChoice {
+// builder, else finalizePatch. A work read that erred, expired or panicked
+// (probeErr, or the zero value) is work.
+func stopChoice(v txView, work finalizeWork, probeErr error) finalizeChoice {
 	f := finalizeFacts{
-		Now: v.Now, CloseIfUnassigned: closeIfUnassigned(v), HasWork: work.has || work.err != nil,
+		Now: v.Now, CloseIfUnassigned: closeIfUnassigned(v), HasWork: !work.free || probeErr != nil,
 		OperatorHeld: session.DispositionOfInfo(v.Row).KeepsSlot(),
 		HonoredWake:  honoredWake(v),
 		FreshWake:    v.Row.WakeMode == "fresh", RestartRequested: v.Row.RestartRequested == "true",
@@ -303,9 +305,9 @@ func idleFinish(f finalizeFacts) finalizeChoice {
 // stopCloseStep is the premise close of a confirmed stop whose finalize
 // closes; one that no longer closes (work assigned since) refuses, and the
 // next pass finalizes it again.
-func stopCloseStep(v txView, work finalizeWork, _ error) txStep {
+func stopCloseStep(v txView, work finalizeWork, probeErr error) txStep {
 	out, _ := callResult[stopped](v)
-	if !stopChoice(v, work).CloseSeat {
+	if !stopChoice(v, work, probeErr).CloseSeat {
 		return txStep{Refuse: causeRedecided}
 	}
 	terminal := session.ClosePatch(v.Now, "drained")
@@ -319,7 +321,7 @@ func passStopped(_ context.Context, _ txCaps, out stopped) (stopped, error) { re
 // stopFinalizeStep, on a confirmed stop, writes the finalize's patch and
 // clears the stop request in one CAS, or, for a finalize that closes, hands
 // the stop's outcome to the premise close.
-func stopFinalizeStep(v txView, work finalizeWork, _ error) txStep {
+func stopFinalizeStep(v txView, work finalizeWork, probeErr error) txStep {
 	out, err := callResult[stopped](v)
 	switch {
 	case err != nil:
@@ -327,7 +329,7 @@ func stopFinalizeStep(v txView, work finalizeWork, _ error) txStep {
 	case !out.Confirmed:
 		return txStep{Refuse: out.Reason}
 	}
-	choice := stopChoice(v, work)
+	choice := stopChoice(v, work, probeErr)
 	if choice.CloseSeat {
 		return txStep{Pass: out}
 	}

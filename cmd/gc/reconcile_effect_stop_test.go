@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -284,6 +285,67 @@ func TestFinalizeWorkReadErrorKeepsOpen(t *testing.T) {
 		closed := got.Status == "closed"
 		if s.Outcome != settledLanded || closed == failed || (failed && got.Metadata["sleep_reason"] != "idle") {
 			t.Errorf("read failed=%v: settlement %+v, closed %v, row %v; want closed only on a clean read", failed, s, closed, got.Metadata)
+		}
+	}
+}
+
+// lostWorkStore is a work leg whose reads panic once armed: the bounded
+// probe recovers, and the read is lost.
+type lostWorkStore struct {
+	beads.Store
+	armed *atomic.Bool
+}
+
+func (s lostWorkStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if s.armed.Load() {
+		panic("work leg lost")
+	}
+	return s.Store.List(q)
+}
+
+func (s lostWorkStore) ListByAssignee(assignee, status string, limit int) ([]beads.Bead, error) {
+	if s.armed.Load() {
+		panic("work leg lost")
+	}
+	return s.Store.ListByAssignee(assignee, status, limit)
+}
+
+// Kills a close over a lost work read (STALE-READ-ARCH §7.1, PR 1): a seat
+// whose finalize work read panics or expires counts as holding work, so it
+// sleeps and is never closed; one whose finalize read is clean but whose
+// premise close's own read is lost refuses the close; a clean read closes.
+func TestFinalizeLostWorkReadNeverCloses(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		section int // the section whose probe the leg loses; -1 for none
+		closed  bool
+	}{{"a clean read", -1, true}, {"the finalize's read lost", 1, false}, {"the close's read lost", 2, false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			armed := &atomic.Bool{}
+			s, got, _ := stopRun(t, signaled(drainOrphaned, "pool_managed", "true"), undesired(drainOrphaned), func(p *effectPass, _ *fenceLeaf, store beads.Store, _ string) {
+				p.reads.legs = testWorkLegs(p.World.CityPath, p.World.Env.Cfg, lostWorkStore{Store: store, armed: armed}, nil)
+				p.seam = func(_ context.Context, seam txSeam, _ intent, section, _ int) error {
+					switch {
+					case seam == seamAfterCall && section == 0:
+						armed.Store(tc.section == 1)
+					case seam == seamAfterReads && section == 1:
+						armed.Store(tc.section == 2)
+					}
+					return nil
+				}
+			})
+			if closed := got.Status == "closed"; closed != tc.closed {
+				t.Fatalf("settlement %+v, status %s, row %v; want closed %v", s, got.Status, got.Metadata, tc.closed)
+			}
+		})
+	}
+	v := txView{It: intent{Kind: intentStop, Reason: decideStopVerb + drainOrphaned}, Row: fenceRow("a", "tok-a")}
+	for _, c := range []struct {
+		work finalizeWork
+		err  error
+	}{{finalizeWork{}, nil}, {finalizeWork{free: true}, errProbeExpired}} {
+		if stopChoice(v, c.work, c.err).CloseSeat {
+			t.Errorf("work %+v, probe error %v: the finalize closes, want it held as work", c.work, c.err)
 		}
 	}
 }
