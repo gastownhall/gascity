@@ -318,6 +318,7 @@ go_test(
         "handler_beads_infra_federation_fanout_test.go",
         "handler_beads_infra_federation_test.go",
         "handler_beads_keyset_test.go",
+        "handler_beads_owned_test.go",
         "handler_beads_partial_prime_test.go",
         "handler_beads_partial_test.go",
         "handler_beads_test.go",

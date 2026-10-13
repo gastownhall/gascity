@@ -206,14 +206,14 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		Summary:       "Create a bead",
 		DefaultStatus: http.StatusCreated,
 		Errors:        []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict},
-		Description:   sessionRowGuardDescription,
+		Description:   ownedRowGuardDescription,
 	}, (*Server).humaHandleBeadCreate)
 	cityGet(sm, "/bead/{id}", (*Server).humaHandleBeadGet, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
 	cityGet(sm, "/bead/{id}/deps", (*Server).humaHandleBeadDeps, errorStatuses(http.StatusNotFound))
 	cityPost(sm, "/bead/{id}/close", (*Server).humaHandleBeadClose, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict))
 	cityPost(sm, "/bead/{id}/reopen", (*Server).humaHandleBeadReopen, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict))
-	cityPost(sm, "/bead/{id}/update", (*Server).humaHandleBeadUpdate, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable, http.StatusGatewayTimeout), describes(beadUpdateDescription), describes(sessionRowGuardDescription))
-	cityPatch(sm, "/bead/{id}", (*Server).humaHandleBeadUpdate, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable, http.StatusGatewayTimeout), describes(beadUpdateDescription), describes(sessionRowGuardDescription))
+	cityPost(sm, "/bead/{id}/update", (*Server).humaHandleBeadUpdate, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable, http.StatusGatewayTimeout), describes(beadUpdateDescription), describes(ownedRowGuardDescription))
+	cityPatch(sm, "/bead/{id}", (*Server).humaHandleBeadUpdate, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable, http.StatusGatewayTimeout), describes(beadUpdateDescription), describes(ownedRowGuardDescription))
 	cityPost(sm, "/bead/{id}/assign", (*Server).humaHandleBeadAssign, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict))
 	cityDelete(sm, "/bead/{id}", (*Server).humaHandleBeadDelete, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict),
 		describes("Closes the bead. This is a soft delete: the bead remains readable and retains its history, with status \"closed\". The API exposes no hard delete, so a caller that needs the record actually removed must not rely on this endpoint."))
@@ -490,6 +490,6 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityDelete(sm, "/extmsg/adapters", (*Server).humaHandleExtMsgAdapterUnregister, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable))
 }
 
-// sessionRowGuardDescription documents the generic bead write guard
-// (refuseGenericSessionWrite) on create and update.
-const sessionRowGuardDescription = "Refused with 422, nothing written: a metadata key that is not a valid bead-metadata key, or a label that does not read back as itself from one CSV record (a comma, a quote, a newline or a carriage return); any change of whether the row is a startup-health episode (type startup-health-episode), which only the controller records; any change of whether the row is a session (its type, the gc:session label); and, on a session row, a key its disposition decodes (held_until, sleep_intent, wait_hold, quarantined_until, suspended_at, state, sleep_reason), which only the session verbs set. Each refusal names the offending field in errors[]."
+// ownedRowGuardDescription documents the generic bead write guard
+// (refuseGenericWrite, architecture B) on create and update.
+const ownedRowGuardDescription = "Refused with 422, nothing written: on any bead, a metadata key that is not a valid bead-metadata key, or a label that does not read back as itself from one CSV record (a comma, a quote, a newline or a carriage return); and any write to a controller-owned row, or one that would make a row controller-owned: a session row (type session, or the gc:session label), a startup-health episode or a convergence root, its type and label matched in any case and spacing. Only their owners write them (the session verbs, the controller, the convergence handler). Each refusal names the offending field in errors[]."

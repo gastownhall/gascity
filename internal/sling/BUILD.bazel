@@ -51,6 +51,7 @@ go_test(
         "sling_launch_status_test.go",
         "sling_merge_strategy_test.go",
         "sling_on_idempotency_test.go",
+        "sling_owned_test.go",
         "sling_reassign_reopen_test.go",
         "sling_rootonly_hint_test.go",
         "sling_sweep_test.go",
