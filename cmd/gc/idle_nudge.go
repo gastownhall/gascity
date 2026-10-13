@@ -406,7 +406,59 @@ func currentSessionAssigneeIdentities(sessionBead beads.Bead) []string {
 }
 
 func (p poolClaimBackstop) governs(s beads.Bead) bool {
-	return strings.TrimSpace(s.Metadata["pool_managed"]) == "true"
+	if strings.TrimSpace(s.Metadata["pool_managed"]) == "true" {
+		return true
+	}
+	return isCollapsedCanonicalSingletonPoolBead(p.cfg, s)
+}
+
+// isCollapsedCanonicalSingletonPoolBead reports whether this session bead is a
+// canonical-singleton pool slot that buildDesiredState has COLLAPSED onto its
+// named identity ("collapsing phantom pool identity for bead <id>"). The
+// collapse clears pool_managed and flips session_origin to "named", but the
+// bead keeps the runtime name the pool path minted for it — the deliberate
+// "<name>-pool" step-aside poolRuntimeSessionName takes so the slot does not
+// land on the name a configured named session reserves.
+//
+// gascity#6933 made that shape legal: the reconfigured-named scan no longer
+// reads the step-aside name as configuration drift, so such a seat now SURVIVES
+// instead of being killed and recreated every reconcile. That removed the
+// accidental claim-retry the kill loop was providing — every rebirth was a cold
+// Provider.Start, which delivers the claim nudge as a side effect — and left
+// this backstop, which is the deliberate retry, gated off by a raw
+// pool_managed=="true" test the collapse had already falsified. A seat in this
+// shape could then sit awake and unclaimed indefinitely with routed work in
+// front of it (measured: 16 consecutive routed steps over four days).
+//
+// Matching on the step-aside name rather than on session_origin is what keeps
+// this from widening to ordinary named sessions: a named session that was never
+// a pool slot wears the reserved name, so poolRuntimeSessionName's stepped-aside
+// form cannot equal it, and the comparison below fails for it by construction.
+func isCollapsedCanonicalSingletonPoolBead(cfg *config.City, s beads.Bead) bool {
+	if cfg == nil {
+		return false
+	}
+	sessionName := strings.TrimSpace(s.Metadata["session_name"])
+	if sessionName == "" {
+		return false
+	}
+	template := normalizedSessionTemplate(s, cfg)
+	if template == "" {
+		return false
+	}
+	cfgAgent := findAgentByTemplate(cfg, template)
+	if cfgAgent == nil || !cfgAgent.UsesCanonicalSingletonPoolIdentity() {
+		return false
+	}
+	identity := cfgAgent.QualifiedName()
+	bare := poolIdentitySessionName(identity, template)
+	steppedAside := poolRuntimeSessionName(cfg, identity, template, false)
+	// No step-aside means no configured named session reserves this slot's bare
+	// name, so there is no collapse to recognize and nothing to carve out.
+	if steppedAside == bare {
+		return false
+	}
+	return sessionName == steppedAside
 }
 
 // outstandingID acts only while the trigger bead is genuinely unclaimed. A
