@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/session"
+
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/testfixtures/reviewworkflows"
 )
@@ -2656,4 +2658,41 @@ func TestApplyDrainControlMetadata(t *testing.T) {
 			t.Errorf("metadata = %v, want unchanged", metadata)
 		}
 	})
+}
+
+// TestValidateRejectsSessionSteps (mc-okw9n): a step typed session or
+// tagged gc:session, at the top level, in a child, in a loop body or in a
+// template, is refused at compile, since compile copies the type and tags
+// onto its bead and would mint a session row; an ordinary step passes.
+func TestValidateRejectsSessionSteps(t *testing.T) {
+	session := func(s *Step) *Step { s.Type = " Session "; return s }
+	tagged := func(s *Step) *Step { s.Labels = []string{"note", "gc:session"}; return s }
+	for _, c := range []struct {
+		name    string
+		formula *Formula
+		want    string
+	}{
+		{"a session step", &Formula{Formula: "f", Steps: []*Step{session(&Step{ID: "s", Title: "S"})}}, `steps[0] (s): type " Session " makes a session row`},
+		{"a gc:session tag", &Formula{Formula: "f", Steps: []*Step{tagged(&Step{ID: "s", Title: "S"})}}, `steps[0] (s): tag "gc:session" marks a session row`},
+		{"in a child", &Formula{Formula: "f", Steps: []*Step{{ID: "p", Title: "P", Children: []*Step{session(&Step{ID: "c", Title: "C"})}}}}, `steps[0] (p).children[0] (c): type`},
+		{"in a loop body", &Formula{Formula: "f", Steps: []*Step{{ID: "l", Title: "L", Loop: &LoopSpec{Count: 2, Body: []*Step{tagged(&Step{ID: "b", Title: "B"})}}}}}, `steps[0] (l).loop.body[0] (b): tag`},
+		{"in a template", &Formula{Formula: "f", Type: TypeExpansion, Template: []*Step{session(&Step{ID: "t", Title: "T"})}}, `template[0] (t): type`},
+	} {
+		err := c.formula.Validate()
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Fatalf("%s: Validate = %v, want %q", c.name, err, c.want)
+		}
+	}
+	ok := &Formula{Formula: "f", Steps: []*Step{{ID: "s", Title: "S", Type: "task", Labels: []string{"note"}}}}
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("an ordinary step: Validate = %v", err)
+	}
+}
+
+// TestSessionStepMarksAreTheSessionPackages pins sessionStepType and
+// sessionStepLabel to the session package's marks.
+func TestSessionStepMarksAreTheSessionPackages(t *testing.T) {
+	if sessionStepType != session.BeadType || sessionStepLabel != session.LabelSession {
+		t.Fatalf("marks %q %q, want session's %q %q", sessionStepType, sessionStepLabel, session.BeadType, session.LabelSession)
+	}
 }
