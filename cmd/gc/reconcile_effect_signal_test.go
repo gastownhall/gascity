@@ -5,9 +5,11 @@ import (
 	"errors"
 	"slices"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
@@ -619,5 +621,209 @@ func TestFloorAckCancelKeepsTheSeatWarm(t *testing.T) {
 		case !floor && s.Facts.Transition != nil:
 			t.Errorf("off the floor: transition %+v, want none", s.Facts.Transition)
 		}
+	}
+}
+
+// signalWorkCases are the reasons whose signal reads L5 (v5.10a B), each with
+// its entry and kind.
+var signalWorkCases = []struct {
+	reason string
+	entry  func(*selectionEntry)
+	kind   string
+}{
+	{reasonNoWake, func(e *selectionEntry) { e.Desired = desireSleep }, intentSignalFresh},
+	{drainOrphaned, undesired(drainOrphaned), intentSignal},
+}
+
+// claimAfterPass is `gc hook --claim` landing after the pass's demand read:
+// a work bead in progress, assigned to the row, stamped on it.
+func claimAfterPass(t *testing.T) func(beads.Store, intent) {
+	return func(store beads.Store, it intent) {
+		t.Helper()
+		w, err := store.Create(beads.Bead{Title: "w", Type: "task", Status: "in_progress", Assignee: it.Key.ID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.SetMetadata(it.Key.ID, beadmeta.CurrentClaimBeadIDMetadataKey, w.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// TestSignalReReadsWorkLive (v5.10a B, DRAIN-005). Kills a no-wake-reason or
+// orphaned signal that trusts the pass's demand read: a claim landing after
+// the pass refuses has-work and writes nothing, so A4 never sees a signaled
+// request; with no work the signal lands.
+func TestSignalReReadsWorkLive(t *testing.T) {
+	for _, c := range signalWorkCases {
+		s, got := runSignal(t, intentBegunAt(c.reason, time.Minute), c.entry, c.kind, claimAfterPass(t))
+		row := censusRowOf(t, got)
+		if s.Outcome != settledRefused || s.Cause != causeHasWork || isDrainAckStopPendingInfo(row.Info) {
+			t.Fatalf("%s, claimed after the pass: %+v, want refused %q and no signal", c.reason, s, causeHasWork)
+		}
+		if req, ok := activeStop(row); !ok || req.Phase != stopRequested {
+			t.Fatalf("%s: activeStop after the refusal = %+v, %v; want still requested (A4 takes no stop)", c.reason, req, ok)
+		}
+		if s, got := runSignal(t, intentBegunAt(c.reason, time.Minute), c.entry, c.kind, nil); s.Outcome != settledLanded || !isDrainAckStopPendingInfo(censusRowOf(t, got).Info) {
+			t.Fatalf("%s, no work: %+v, want the signal landed", c.reason, s)
+		}
+	}
+}
+
+// TestNoWakeSignalCountsOnlyAwakeWork (v5.10a B: DRAIN-005's awake work).
+// Kills a signal L5 that counts open work the seat cannot be served
+// (blocked), which legacy's read and A19's lens (workKeepsNoWakeRow) both
+// ignore, so the request would stand refused forever: the signal lands.
+func TestNoWakeSignalCountsOnlyAwakeWork(t *testing.T) {
+	blocked := func(store beads.Store, it intent) {
+		blocker, err := store.Create(beads.Bead{Title: "blocker", Type: "task", Status: "open"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		w, err := store.Create(beads.Bead{Title: "w", Type: "task", Status: "open", Assignee: it.Key.ID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.DepAdd(w.ID, blocker.ID, "blocks"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s, got := runSignal(t, intentBegunAt(reasonNoWake, time.Minute), signalWorkCases[0].entry, intentSignalFresh, blocked)
+	if s.Outcome != settledLanded || !isDrainAckStopPendingInfo(censusRowOf(t, got).Info) {
+		t.Fatalf("blocked open work only: %+v, want the signal landed", s)
+	}
+}
+
+// TestNoWakeSignalReadsWorkAfterAttach (v5.10a B: L5 last, after L3 and
+// L4; staging J47). Kills a no-wake-reason signal that reads L5 before its
+// fresh L3: a claim landing while L3 is read refuses has-work.
+func TestNoWakeSignalReadsWorkAfterAttach(t *testing.T) {
+	p, it, store, leaf := admittedBeginOn(t, intentBegunAt(reasonNoWake, time.Minute), signalWorkCases[0].entry)
+	if it.Kind != intentSignalFresh {
+		t.Fatalf("decided %+v, want the fresh signal", it)
+	}
+	var once sync.Once
+	leaf.OnAttachRead = func(string) { once.Do(func() { claimAfterPass(t)(store, it) }) }
+	s := runTx(context.Background(), p, it, effectSpecs[it.Kind], nil)
+	got, _ := store.Get(it.Key.ID)
+	if s.Outcome != settledRefused || s.Cause != causeHasWork || isDrainAckStopPendingInfo(censusRowOf(t, got).Info) {
+		t.Fatalf("claimed during the L3 read: %+v, want refused %q and no signal", s, causeHasWork)
+	}
+}
+
+// TestSignalWorkReadErrorCountsAsWork (v5.10a B, F1 L5). Kills a signal that
+// reads a failed work read as no work: it refuses has-work.
+func TestSignalWorkReadErrorCountsAsWork(t *testing.T) {
+	for _, c := range signalWorkCases {
+		p, it, store, _ := admittedBeginOn(t, intentBegunAt(c.reason, time.Minute), c.entry)
+		if it.Kind != c.kind {
+			t.Fatalf("%s: decided %+v, want %s", c.reason, it, c.kind)
+		}
+		p.reads.legs = testWorkLegs(p.World.CityPath, p.World.Env.Cfg, failingReads{store}, nil)
+		s := runTx(context.Background(), p, it, effectSpecs[it.Kind], nil)
+		got, _ := store.Get(it.Key.ID)
+		if s.Outcome != settledRefused || s.Cause != causeHasWork || isDrainAckStopPendingInfo(censusRowOf(t, got).Info) {
+			t.Fatalf("%s, work read failed: %+v, want refused %q and no signal", c.reason, s, causeHasWork)
+		}
+	}
+}
+
+// TestSignalIdleAndAckReadNoWork (v5.10a B: idle unchanged; D2's ack row).
+// Kills an L5 read on an idle signal or an ack's: a claim after the pass
+// leaves both to land, and neither kind's needs read L5; nor does A4's stop
+// of a signaled no-wake-reason or orphaned request.
+func TestSignalIdleAndAckReadNoWork(t *testing.T) {
+	sleep := func(e *selectionEntry) { e.Desired, e.Reason = desireSleep, reasonIdleSleep }
+	if s, got := runSignal(t, intentBegunAt(drainIdle, time.Minute), sleep, intentSignalFresh, claimAfterPass(t)); s.Outcome != settledLanded || !isDrainAckStopPendingInfo(censusRowOf(t, got).Info) {
+		t.Fatalf("idle, claimed after the pass: %+v, want the signal landed", s)
+	}
+	ack := append(intentBegunAt(drainOrphaned, time.Minute), session.DrainAckIncarnationKey, "3", session.DrainAckAtKey, rowAt(time.Second))
+	if s, got := runSignal(t, ack, undesired(drainOrphaned), intentSignalAck, claimAfterPass(t)); s.Outcome != settledLanded || !isDrainAckStopPendingInfo(censusRowOf(t, got).Info) {
+		t.Fatalf("an orphaned drain's ack, claimed after the pass: %+v, want the signal landed", s)
+	}
+	for _, it := range []intent{
+		{Kind: intentSignalFresh, Reason: decideDrainSignal + drainIdle},
+		{Kind: intentSignalFresh, Reason: decideDrainSignal + idleRespawnDrainReason},
+		{Kind: intentSignalAck, Reason: decideDrainSignal + drainOrphaned},
+		{Kind: intentSignalAck, Reason: decideDrainSignal + reasonNoWake},
+		{Kind: intentSignal, Reason: decideDrainSignal + drainSuspended},
+		{Kind: intentStop, Reason: decideDrainSignal + drainOrphaned},
+		{Kind: intentStop, Reason: decideDrainSignal + reasonNoWake},
+	} {
+		if n := effectSpecs[it.Kind].needsOf(&World{}, it); n.Legs&legWork != 0 {
+			t.Errorf("%s %s reads L5: %+v", it.Kind, it.Reason, n)
+		}
+	}
+	for _, c := range signalWorkCases {
+		it := intent{Kind: c.kind, Reason: decideDrainSignal + c.reason}
+		if n := effectSpecs[it.Kind].needsOf(&World{}, it); n.Legs&legWork == 0 {
+			t.Errorf("%s %s reads no L5: %+v", it.Kind, it.Reason, n)
+		}
+	}
+}
+
+// TestOrphanedSignalConsultsTheLiveClaimVeto (v5.10a B, DRAIN-005's veto).
+// Kills an orphaned signal that skips the live-claim veto: a pool seat's
+// stamped claim on a bead its assignee spelling hides from the assigned-work
+// read refuses has-work; a claim the bead no longer holds, or a seat the veto
+// does not cover (not pool-managed), lands.
+func TestOrphanedSignalConsultsTheLiveClaimVeto(t *testing.T) {
+	stamp := func(status string) func(beads.Store, intent) {
+		return func(store beads.Store, it intent) {
+			w, err := store.Create(beads.Bead{Title: "w", Type: "task", Status: "in_progress", Assignee: "worker-elsewhere"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if status == "closed" {
+				if err := store.Close(w.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := store.SetMetadata(it.Key.ID, beadmeta.CurrentClaimBeadIDMetadataKey, w.ID); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	pool := append(intentBegunAt(drainOrphaned, time.Minute), "pool_managed", "true")
+	for _, c := range []struct {
+		name   string
+		meta   []string
+		status string
+		want   string
+	}{
+		{"pool seat, claim held", pool, "in_progress", causeHasWork},
+		{"pool seat, claim closed", pool, "closed", ""},
+		{"not pool-managed, claim held", intentBegunAt(drainOrphaned, time.Minute), "in_progress", ""},
+	} {
+		s, _ := runSignal(t, c.meta, undesired(drainOrphaned), intentSignal, stamp(c.status))
+		if s.Cause != c.want || (c.want == "") != (s.Outcome == settledLanded) {
+			t.Errorf("%s: %+v, want cause %q", c.name, s, c.want)
+		}
+	}
+}
+
+// liveHandleStore answers Get from its own store and its Live handle from
+// live, as a caching store does.
+type liveHandleStore struct {
+	beads.Store
+	live beads.Store
+}
+
+func (s liveHandleStore) Handles() beads.StoreHandles {
+	return beads.StoreHandles{Live: beads.HandlesFor(s.live).Live}
+}
+
+// TestLiveBeadReadPeelsTheEffectWrappers (v5.10a B; the veto reads live).
+// Kills a live read through a v2 effect's read-only store that falls back to
+// the cache: the read reaches the wrapped store's Live handle.
+func TestLiveBeadReadPeelsTheEffectWrappers(t *testing.T) {
+	live := beads.NewMemStore()
+	b, err := live.Create(beads.Bead{Title: "claimed", Type: "task", Status: "in_progress"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapped := readOnlyStore{blindWriteRefusingStore{inner: beads.WorkStore{Store: liveHandleStore{Store: beads.NewMemStore(), live: live}}}}
+	if got, err := liveBeadRead(wrapped, b.ID); err != nil || got.ID != b.ID {
+		t.Fatalf("liveBeadRead through the effect wrappers = %+v, %v; want the live bead %s", got, err, b.ID)
 	}
 }

@@ -14,7 +14,11 @@ import (
 // (DrainAckStopPendingPatch), which legacy reads as its own
 // (isDrainAckStopPendingInfo); never the blind Store.BeginDrainAckStopPending.
 // The fresh kind first reads L3 and L4 on the routed leaf (C8.9): attached
-// or pending refuses with its cause, and the row backs off.
+// or pending refuses with its cause, and the row backs off. A no-wake-reason
+// or orphaned signal then reads L5 live (v5.10a B, legacy DRAIN-005): the
+// row reads awake while requested, so `gc hook --claim` may hand the seat
+// work after the pass's demand read; work, or a read that fails, refuses
+// has-work, and A19's assigned-work lens cancels the request.
 
 // signalSections are a signal's one section, behind the drain basis
 // (premiseDrainBasis), so an agent's heartbeat cannot starve it. Every
@@ -109,19 +113,44 @@ func respawnClaimMoved(v txView) bool {
 // L4 (C8.9).
 var signalFreshNeeds = needs{Runtime: true, Legs: legAttach | legPending}
 
+// signalNeeds are a signal's reads by D2's fresh-legs column (v5.10a B):
+// the fresh kind's, the plain kind's name lock, and L5 where
+// signalReadsWork.
+func signalNeeds(_ *World, it intent) needs {
+	n := needs{NameLock: true}
+	if it.Kind == intentSignalFresh {
+		n = signalFreshNeeds
+	}
+	if signalReadsWork(it) {
+		n.Legs |= legWork
+	}
+	return n
+}
+
+// signalReadsWork reports a controller signal that reads L5: no-wake-reason
+// and orphaned (v5.10a B). An ack's signal (A11) reads none.
+func signalReadsWork(it intent) bool {
+	return (it.Kind == intentSignal || it.Kind == intentSignalFresh) &&
+		(it.Reason == decideDrainSignal+reasonNoWake || it.Reason == decideDrainSignal+drainOrphaned)
+}
+
 // redecideSignal is redecideRow, then, for the fresh kind, an idle-respawn
 // drain's revalidation, which voids the drain in the signal's stead (its
 // attempt kept, so the bead gets no second one), as does a claim recorded on
-// the fresh row since the pass (respawnClaimMoved), then L3 and L4. A floor
-// member's canceled ack (DRAIN-010) carries legacy's "min-floor cancel"
-// drain transition, a fact only once its write lands.
+// the fresh row since the pass (respawnClaimMoved), then L3 and L4, then L5
+// where signalReadsWork, for either kind. A floor member's canceled ack
+// (DRAIN-010) carries legacy's "min-floor cancel" drain transition, a fact
+// only once its write lands.
 func redecideSignal(v txView, chk respawnRecheck, _ error) txStep {
 	step, fresh := redecideRowIntent(v)
 	if len(step.Write) > 0 && fresh.Reason == decideFloorAckCancel {
 		step.Facts.Transition = &drainTransition{Name: v.Row.SessionNameMetadata, Reason: "min-floor", Transition: "cancel"}
 	}
-	if len(step.Write) == 0 || v.It.Kind != intentSignalFresh {
+	if len(step.Write) == 0 {
 		return step
+	}
+	if v.It.Kind != intentSignalFresh {
+		return signalWorkStep(v, step)
 	}
 	if respawnSignal(v.It) && chk.unsafe == "" && respawnClaimMoved(v) {
 		chk.unsafe = "claim-moved"
@@ -133,6 +162,16 @@ func redecideSignal(v txView, chk respawnRecheck, _ error) txStep {
 	}
 	if fv := fenceDestructive(v.RT, v.Fence, fenceRequest{Row: v.Row, Legs: legAttach | legPending}); !fv.Proceed {
 		return txStep{Refuse: fv.Reason}
+	}
+	return signalWorkStep(v, step)
+}
+
+// signalWorkStep is step, or a has-work refusal when the signal reads L5
+// and L5 holds (txFence.workHeld: work, or a read that failed or was not
+// made).
+func signalWorkStep(v txView, step txStep) txStep {
+	if signalReadsWork(v.It) && v.Fence.workHeld() {
+		return txStep{Refuse: causeHasWork}
 	}
 	return step
 }

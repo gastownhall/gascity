@@ -138,16 +138,28 @@ func claimedWorkStillHeldBy(work beads.Bead, sessionID string) bool {
 
 // liveBeadRead reads one bead through the store's authoritative live handle,
 // bypassing a caching layer. The typed class wrappers (beads.SessionStore,
-// beads.WorkStore) do not promote the Handles capability, so they are peeled
-// first; without that the read would silently fall back to the cache.
+// beads.WorkStore) and v2's read-only wrappers (readOnlyStore,
+// blindWriteRefusingStore: a v2 effect's stores) do not promote the Handles
+// capability, so they are peeled first; without that the read would silently
+// fall back to the cache. Only the live Get is taken from the peeled store.
 func liveBeadRead(store beads.Store, id string) (beads.Bead, error) {
-	switch v := store.(type) {
-	case beads.SessionStore:
-		store = v.Store
-	case beads.WorkStore:
-		store = v.Store
+	for {
+		switch v := store.(type) {
+		case beads.SessionStore:
+			store = v.Store
+			continue
+		case beads.WorkStore:
+			store = v.Store
+			continue
+		case readOnlyStore:
+			store = v.Store
+			continue
+		case blindWriteRefusingStore:
+			store = v.inner
+			continue
+		}
+		return beads.HandlesFor(store).Live.Get(id)
 	}
-	return beads.HandlesFor(store).Live.Get(id)
 }
 
 // liveClaimVeto runs the ownership check for a demand-class drain decider and
