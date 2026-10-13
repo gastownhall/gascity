@@ -31,7 +31,10 @@ func isCacheActor(actor string) bool {
 // cacheChangeRecorder returns the onChange a controller CachingStore records
 // its notifications through. It drops a bead.updated identical to the last
 // notification recorded for the bead: on bd cities 98.9-99.8% of them were
-// (mc-zndi7.12), and each one woke the allocator.
+// (mc-zndi7.12), and each one woke the allocator. It drops an identical
+// bead.created too: a refresh that installs a new row between the backing
+// create and the cache's absorb announces it, and the create announces it
+// again with the same row.
 func cacheChangeRecorder(recorder events.Recorder) func(source beads.ChangeSource, eventType, beadID, runID, sessionID, stepID string, dependsOnStepIDs *[]string, payload json.RawMessage) {
 	dedup := newBeadUpdateDedup(beadUpdateDedupCap)
 	return func(source beads.ChangeSource, eventType, beadID, runID, sessionID, stepID string, dependsOnStepIDs *[]string, payload json.RawMessage) {
@@ -86,9 +89,9 @@ func newBeadUpdateDedup(capacity int) *beadUpdateDedup {
 	return &beadUpdateDedup{last: map[string]dedupEntry{}, cap: capacity, ttl: beadUpdateDedupTTL, now: time.Now}
 }
 
-// record records e unless it is a bead.updated repeating the payload last
-// recorded for its bead within the TTL. Only bead.updated is ever suppressed;
-// a close or a delete forgets the id. A payload is remembered only once the
+// record records e unless it is a bead.created or bead.updated repeating the
+// payload last recorded for its bead within the TTL. Closes and deletes are
+// never suppressed, and forget the id, so a create after one is recorded. A payload is remembered only once the
 // recorder acknowledged it (events.AckRecorder): a recorder that cannot
 // acknowledge, or a dropped append, leaves nothing to suppress the next copy.
 // The check, the record and the remember share the lock, so one bead's
@@ -108,9 +111,9 @@ func (d *beadUpdateDedup) record(recorder events.Recorder, e events.Event) {
 	}
 	sum := sha256.Sum256(e.Payload)
 	now := d.now()
-	if prev, ok := d.last[e.Subject]; ok && prev.sum == sum && now.Sub(prev.at) < d.ttl && e.Type == events.BeadUpdated {
+	if prev, ok := d.last[e.Subject]; ok && prev.sum == sum && now.Sub(prev.at) < d.ttl {
 		if n := d.suppressed.Add(1); n == 1 || n%10000 == 0 {
-			log.Printf("caching-store: suppressed %d repeated bead.updated notification(s), latest %s", n, e.Subject)
+			log.Printf("caching-store: suppressed %d repeated bead.created/bead.updated notification(s), latest %s %s", n, e.Type, e.Subject)
 		}
 		return
 	}

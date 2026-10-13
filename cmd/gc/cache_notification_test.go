@@ -83,7 +83,10 @@ func TestCacheChangeRecorderSuppressesRepeatedUpdates(t *testing.T) {
 	send(events.BeadDeleted, "gc-2", `{"id":"gc-2","v":2}`)
 	send(events.BeadUpdated, "gc-2", `{"id":"gc-2","v":2}`)
 	send(events.BeadCreated, "gc-3", `{"id":"gc-3"}`)
-	send(events.BeadCreated, "gc-3", `{"id":"gc-3"}`) // only updates are suppressed
+	send(events.BeadCreated, "gc-3", `{"id":"gc-3"}`)       // an identical create repeats nothing
+	send(events.BeadCreated, "gc-3", `{"id":"gc-3","v":2}`) // a different one is recorded
+	send(events.BeadClosed, "gc-3", `{"id":"gc-3","v":2}`)
+	send(events.BeadCreated, "gc-3", `{"id":"gc-3","v":2}`) // the close forgot it
 
 	var got []string
 	for _, evt := range ep.Events {
@@ -99,10 +102,56 @@ func TestCacheChangeRecorderSuppressesRepeatedUpdates(t *testing.T) {
 		`bead.deleted gc-2 {"id":"gc-2","v":2}`,
 		`bead.updated gc-2 {"id":"gc-2","v":2}`,
 		`bead.created gc-3 {"id":"gc-3"}`,
-		`bead.created gc-3 {"id":"gc-3"}`,
+		`bead.created gc-3 {"id":"gc-3","v":2}`,
+		`bead.closed gc-3 {"id":"gc-3","v":2}`,
+		`bead.created gc-3 {"id":"gc-3","v":2}`,
 	}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("recorded:\n%v\nwant:\n%v", got, want)
+	}
+}
+
+// refreshingCreateStore refreshes the new row through the cache before its
+// Create returns: a journal feed's refresh landing between the backing create
+// and the cache's absorb.
+type refreshingCreateStore struct {
+	*beads.MemStore
+	cache *beads.CachingStore
+}
+
+func (s *refreshingCreateStore) Create(b beads.Bead) (beads.Bead, error) {
+	created, err := s.MemStore.Create(b)
+	if err == nil && s.cache != nil {
+		_, _ = s.cache.RefreshRow(created.ID)
+	}
+	return created, err
+}
+
+// TestCacheChangeRecorderRecordsOneCreateForARefreshRacingTheCreate is the
+// createWith race: a refresh installs the new row, and announces it, before
+// the create's absorb announces it again with the same payload. One
+// bead.created is recorded.
+func TestCacheChangeRecorderRecordsOneCreateForARefreshRacingTheCreate(t *testing.T) {
+	backing := &refreshingCreateStore{MemStore: beads.NewMemStore()}
+	ep := events.NewFake()
+	store := wrapWithCachingStore(context.Background(), backing, ep, true)
+	cache, ok := store.(*beads.CachingStore)
+	if !ok {
+		t.Fatalf("wrapWithCachingStore returned %T, want *beads.CachingStore", store)
+	}
+	backing.cache = cache
+	created, err := cache.Create(beads.Bead{Title: "raced"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	creates := 0
+	for _, evt := range ep.Events {
+		if evt.Type == events.BeadCreated && evt.Subject == created.ID {
+			creates++
+		}
+	}
+	if creates != 1 {
+		t.Fatalf("recorded %d bead.created for %s, want 1 (events %v)", creates, created.ID, beadEventsFor(ep, created.ID))
 	}
 }
 
