@@ -42,7 +42,9 @@ func WithIDPrefix(prefix string) Option {
 }
 
 // NewStore returns the op store over store. It refuses a store that cannot do
-// revision-fenced writes, and one whose mint prefix cannot be resolved.
+// revision-fenced writes — running the store's capability probe, so a bd
+// without --if-revision is refused here rather than on the first Transition —
+// and one whose mint prefix cannot be resolved.
 func NewStore(store beads.SessionStore, clk clock.Clock, opts ...Option) (*Store, error) {
 	if isNilStore(store.Store) {
 		return nil, errors.New("opening op store: store is required")
@@ -58,8 +60,8 @@ func NewStore(store beads.SessionStore, clk clock.Clock, opts ...Option) (*Store
 	if !ok {
 		return nil, fmt.Errorf("opening op store: %w", beads.ErrConditionalWriteUnsupported)
 	}
-	if insp := beads.InspectConditionalWrites(store); !insp.Capable {
-		return nil, fmt.Errorf("opening op store: %w: %s", beads.ErrConditionalWriteUnsupported, insp.Reason)
+	if capable, reason := beads.ProbeConditionalWrites(store); !capable {
+		return nil, fmt.Errorf("opening op store: %w: %s", beads.ErrConditionalWriteUnsupported, reason)
 	}
 	prefix := o.prefix
 	if prefix == "" {
@@ -108,11 +110,12 @@ func discoverPrefix(store beads.Store) string {
 // Prefix returns the namespace prefix of the ids this store pins.
 func (s *Store) Prefix() string { return s.prefix }
 
-// Propose writes the op req describes, create-if-absent at its pinned id. A
-// new op starts submitted with its first transition recorded and returns
-// created=true. Re-proposing the same request returns the stored op and
-// created=false; the same key with another request is *KeyReuseError.
-// Refused requests write nothing.
+// Propose writes the op req describes, create-if-absent at its pinned id. It
+// reads the id first, so a retry never reaches Create. A new op starts
+// submitted with its first transition recorded and returns created=true.
+// Re-proposing the same request returns the stored op and created=false; the
+// same key with another request is *KeyReuseError. Refused requests write
+// nothing.
 func (s *Store) Propose(req Request) (Op, bool, error) {
 	spec, err := Lookup(req.Kind)
 	if err != nil {
@@ -137,6 +140,17 @@ func (s *Store) Propose(req Request) (Op, bool, error) {
 	if err != nil {
 		return Op{}, false, err
 	}
+	// Read first: a retry then never reaches Create, so a store that
+	// overwrites a duplicate pinned id instead of refusing it cannot reset
+	// the stored op. The create below still loses cleanly to a concurrent
+	// proposer on every store that refuses duplicates.
+	existing, getErr := s.store.Get(op.ID)
+	switch {
+	case getErr == nil:
+		return s.resolveExisting(op, existing)
+	case !errors.Is(getErr, beads.ErrNotFound):
+		return Op{}, false, fmt.Errorf("reading op %s before creating it: %w", op.ID, getErr)
+	}
 	created, createErr := s.store.Create(b)
 	if createErr == nil {
 		if created.ID != op.ID {
@@ -146,7 +160,7 @@ func (s *Store) Propose(req Request) (Op, bool, error) {
 		}
 		return op, true, nil
 	}
-	existing, getErr := s.store.Get(op.ID)
+	existing, getErr = s.store.Get(op.ID)
 	switch {
 	case getErr == nil:
 		return s.resolveExisting(op, existing)

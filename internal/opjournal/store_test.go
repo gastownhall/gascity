@@ -140,6 +140,31 @@ func TestNewStoreRefusals(t *testing.T) {
 			t.Fatalf("NewStore(disabled) = %v, want ErrConditionalWriteUnsupported", err)
 		}
 	})
+	t.Run("bd without conditional writes", func(t *testing.T) {
+		calls := 0
+		bd := beads.NewBdStore(t.TempDir(), func(_, _ string, _ ...string) ([]byte, error) {
+			calls++
+			return []byte("Flags:\n      --json   JSON output\n"), nil
+		})
+		_, err := NewStore(beads.SessionStore{Store: bd}, clk, WithIDPrefix("gc"))
+		if !errors.Is(err, beads.ErrConditionalWriteUnsupported) || !strings.Contains(err.Error(), "--if-revision") {
+			t.Fatalf("NewStore(bd without --if-revision) = %v, want ErrConditionalWriteUnsupported naming the flag", err)
+		}
+		if calls == 0 {
+			t.Fatal("NewStore accepted a bd store without probing it")
+		}
+	})
+	t.Run("bd with conditional writes", func(t *testing.T) {
+		bd := beads.NewBdStore(t.TempDir(), func(_, _ string, args ...string) ([]byte, error) {
+			if len(args) == 2 && args[1] == "--help" {
+				return []byte("Flags:\n      --if-revision int   fence\n"), nil
+			}
+			return nil, fmt.Errorf("unexpected bd %v", args)
+		})
+		if _, err := NewStore(beads.SessionStore{Store: bd}, clk, WithIDPrefix("gc")); err != nil {
+			t.Fatalf("NewStore(capable bd) = %v", err)
+		}
+	})
 	t.Run("no prefix", func(t *testing.T) {
 		_, err := NewStore(beads.SessionStore{Store: beads.NewMemStore()}, clk)
 		if !errors.Is(err, ErrNoNamespace) {
@@ -927,5 +952,47 @@ func TestCloseBlanksTheLeaseAndOwnedKeysItDrops(t *testing.T) {
 		if v, ok := opts.Metadata[k]; !ok || v != "" {
 			t.Errorf("patch did not blank %s: %v", k, opts.Metadata)
 		}
+	}
+}
+
+// upsertingStore is a store whose create of an existing pinned id overwrites
+// the row, as bd before v1.3.0 does (INSERT ... ON DUPLICATE KEY UPDATE).
+type upsertingStore struct{ *beads.MemStore }
+
+func (s upsertingStore) Create(b beads.Bead) (beads.Bead, error) {
+	if b.ID != "" {
+		if _, err := s.Get(b.ID); err == nil {
+			status, assignee := "open", ""
+			if err := s.Update(b.ID, beads.UpdateOpts{Status: &status, Assignee: &assignee, Metadata: b.Metadata}); err != nil {
+				return beads.Bead{}, err
+			}
+			return s.Get(b.ID)
+		}
+	}
+	return s.MemStore.Create(b)
+}
+
+// A retried Propose reads before it creates, so a store that upserts a
+// duplicate pinned id never sees the second create.
+func TestProposeRetryNeverRecreates(t *testing.T) {
+	mem := &beads.MemStore{IDPrefix: "gc", HonorExplicitIDs: true}
+	h := newHarnessOver(t, mem, upsertingStore{mem})
+	op := h.propose(t, msgReq("k1", "hello"))
+	if _, err := h.store.Transition(op.ID, StatusSubmitted, StatusExecuting, "lane"); err != nil {
+		t.Fatal(err)
+	}
+	creates := h.countOps(beadstest.OpCreate)
+	again, created, err := h.store.Propose(msgReq("k1", "hello"))
+	if err != nil || created || again.Status != StatusExecuting {
+		t.Fatalf("re-Propose = %s created %v, %v; want the stored executing op", again.Status, created, err)
+	}
+	if _, _, err := h.store.Propose(msgReq("k1", "other")); !errors.Is(err, ErrKeyReuse) {
+		t.Fatalf("re-Propose with another payload = %v, want ErrKeyReuse", err)
+	}
+	if n := h.countOps(beadstest.OpCreate); n != creates {
+		t.Fatalf("a retried Propose issued %d creates", n-creates)
+	}
+	if got, _ := h.store.Get(op.ID); got.Status != StatusExecuting || got.Payload != "hello" {
+		t.Fatalf("stored op after retries: %s %q", got.Status, got.Payload)
 	}
 }
