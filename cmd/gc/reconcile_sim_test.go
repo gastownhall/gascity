@@ -912,25 +912,53 @@ func (s *sim) ensureRunningAllows(b beads.Bead) bool {
 		(m["state"] != string(session.StateDraining) || m["state_reason"] != session.DrainAckStopPendingReason)
 }
 
-// ensureRunningConfirms is Manager.ensureRunning's confirm of a runtime it
-// started (confirmLiveSessionState): the row active from a dormant or
-// uncommitted state, its pending-create claim and any stop request cleared
-// (#7635), so the controller never adopts an operator's attach (mc-946b6
-// seed 848's sim gap).
-func (s *sim) ensureRunningConfirms(l *simLeg, b beads.Bead) {
-	m := b.Metadata
-	var kv []string
-	for k := range session.ClearStopRequestPatch() {
-		if m[k] != "" {
-			kv = append(kv, k, "")
+// ensureRunningConfirms is Manager.ensureRunning's write once the runtime
+// is up, started by this attach or found running (started false):
+//   - on a row an operator holds (KeepsSlot), the hold's consume
+//     (consumeUserHold): the operator's Resume cell, and the row active with
+//     its wake request, sleep reason, slept_at and claim cleared;
+//   - otherwise confirmLiveSessionState: the row active from a dormant or
+//     uncommitted state, its claim cleared.
+//
+// Either clears the stop request, operator_drain included
+// (restartStopRequestClears), only for a runtime it started, as PreWake
+// does (#7635), so the controller never adopts an operator's attach
+// (mc-946b6 seed 848's sim gap; the #7765 review).
+func (s *sim) ensureRunningConfirms(l *simLeg, b beads.Bead, started bool) {
+	m, now := b.Metadata, s.clk.Now()
+	patch := session.MetadataPatch{}
+	if started {
+		for k := range session.ClearStopRequestPatch() {
+			if m[k] != "" {
+				patch[k] = ""
+			}
+		}
+		if m[session.OperatorDrainKey] != "" {
+			patch[session.OperatorDrainKey] = ""
 		}
 	}
-	switch session.State(m["state"]) {
-	case "", session.StateStartPending, session.StateCreating, session.StateAsleep, session.StateSuspended:
-		kv = append(kv, "state", string(session.StateActive), "state_reason", "creation_complete")
+	if d := session.DecodeDisposition(m); d.KeepsSlot() {
+		if to, err := d.Apply(session.ActorOperator, session.DispEvent{Kind: session.EvResume}, session.State(m["state"]), now); err == nil {
+			maps.Copy(patch, to.Changed().Fold())
+		}
+		maps.Copy(patch, session.ClearWakeRequestPatch())
+		for k, v := range map[string]string{"state": string(session.StateActive), "state_reason": "creation_complete", "sleep_reason": "", "slept_at": "", "pending_create_claim": "", "pending_create_started_at": ""} {
+			patch[k] = v
+		}
+	} else {
+		switch session.State(m["state"]) {
+		case "", session.StateStartPending, session.StateCreating, session.StateAsleep, session.StateSuspended:
+			patch["state"], patch["state_reason"] = string(session.StateActive), "creation_complete"
+		}
+		if strings.TrimSpace(m["pending_create_claim"]) != "" {
+			patch["pending_create_claim"], patch["pending_create_started_at"] = "", ""
+		}
 	}
-	if strings.TrimSpace(m["pending_create_claim"]) != "" {
-		kv = append(kv, "pending_create_claim", "", "pending_create_started_at", "")
+	var kv []string
+	for _, k := range slices.Sorted(maps.Keys(patch)) {
+		if m[k] != patch[k] {
+			kv = append(kv, k, patch[k])
+		}
 	}
 	if len(kv) > 0 {
 		s.setMeta(l, b.ID, kv...)
@@ -940,8 +968,30 @@ func (s *sim) ensureRunningConfirms(l *simLeg, b beads.Bead) {
 // runtimeOpStarts are the outside starts among runtimeOps, by name, with
 // the row write each makes once its runtime is up; each runs only when
 // ensureRunning would start at all.
-var runtimeOpStarts = map[string]func(s *sim, l *simLeg, b beads.Bead){
+var runtimeOpStarts = map[string]func(s *sim, l *simLeg, b beads.Bead, started bool){
 	"attach-recreates": (*sim).ensureRunningConfirms, // gc session attach
+}
+
+// runtimeOp runs the runtime op name (fn) on row b. An outside start
+// (runtimeOpStarts) runs only where ensureRunning would start at all
+// (ensureRunningAllows), starts nothing over a running session, and then
+// writes the row as ensureRunning does.
+func (s *sim) runtimeOp(name string, fn func(p *simProvider, name string, b beads.Bead), l *simLeg, b beads.Bead) {
+	confirm := runtimeOpStarts[name]
+	if confirm != nil && !s.ensureRunningAllows(b) {
+		return
+	}
+	sessName := b.Metadata["session_name"]
+	s.sp.mu.Lock()
+	rt := s.sp.rts[sessName]
+	running := rt != nil && !rt.corpse
+	if confirm == nil || !running {
+		fn(s.sp, sessName, b)
+	}
+	s.sp.mu.Unlock()
+	if confirm != nil {
+		confirm(s, l, b, !running)
+	}
 }
 
 // runtimeOps change the runtime under a row's name, under the provider's mu.
@@ -1049,18 +1099,7 @@ func (s *sim) step() {
 		return
 	default:
 		op := s.pickRuntimeOp()
-		s.external("runtime "+op.name, func(l *simLeg, b beads.Bead) {
-			started := runtimeOpStarts[op.name]
-			if started != nil && !s.ensureRunningAllows(b) {
-				return
-			}
-			s.sp.mu.Lock()
-			op.fn(s.sp, b.Metadata["session_name"], b)
-			s.sp.mu.Unlock()
-			if started != nil {
-				started(s, l, b)
-			}
-		})
+		s.external("runtime "+op.name, func(l *simLeg, b beads.Bead) { s.runtimeOp(op.name, op.fn, l, b) })
 		return
 	}
 	s.audit("v2")
@@ -1699,5 +1738,77 @@ func TestQuietBoundFollowsRowTimersArmedInQuiescence(t *testing.T) {
 		if got := quietBound(c.bound, c.timer, now, slack, ceiling); !got.Equal(c.want) {
 			t.Errorf("%s: bound %s, want %s", c.name, got.Sub(now), c.want.Sub(now))
 		}
+	}
+}
+
+// Kills a sim attach that writes where production's ensureRunning does not,
+// or leaves what it consumes (mc-946b6 seed 848; the #7765 review):
+//   - a kill-fenced row, or one whose drain-ack stop is pending, gets no
+//     row write and no start (ensureRunningAllows);
+//   - a claimed creating row with no runtime is started and made active,
+//     its claim cleared;
+//   - a running session is not restarted, and its stop request stays
+//     (started false); a dead one is started and its stop request cleared;
+//   - an operator's hold is consumed: its timer, intent and stamp, the sleep
+//     reason, slept_at and the wake request go, and the row reads active.
+func TestSimAttachModelsEnsureRunning(t *testing.T) {
+	var fn func(p *simProvider, name string, b beads.Bead)
+	for _, op := range runtimeOps {
+		if op.name == "attach-recreates" {
+			fn = op.fn
+		}
+	}
+	attach := func(t *testing.T, live bool, row beads.Bead) (beads.Bead, int) {
+		t.Helper()
+		var running []string
+		if live {
+			running = []string{row.ID}
+		}
+		s := scripted(t, running, row)
+		l := s.legs[0]
+		before, _ := l.backing.Get(row.ID)
+		starts := len(s.sp.starts)
+		s.runtimeOp("attach-recreates", fn, l, before)
+		after, _ := l.backing.Get(row.ID)
+		return after, len(s.sp.starts) - starts
+	}
+	now := rowAt(0)
+	stopReq := []string{session.DrainIntentReasonKey, "orphaned", session.DrainIntentAtKey, now, session.DrainIntentIncarnationKey, "1", session.OperatorDrainKey, "operator"}
+
+	for name, row := range map[string]beads.Bead{
+		"kill-fenced":            poolRow("gc-1", "worker", 1, "asleep", "instance_token", "tok-1", "state_reason", session.KillPendingReason, "sleep_reason", "killed", "slept_at", now),
+		"drain-ack stop pending": poolRow("gc-1", "worker", 1, string(session.StateDraining), "instance_token", "tok-1", "state_reason", session.DrainAckStopPendingReason),
+	} {
+		after, starts := attach(t, false, row)
+		if !maps.Equal(after.Metadata, row.Metadata) || starts != 0 {
+			t.Errorf("%s: row %v, %d starts; want no write and no start", name, after.Metadata, starts)
+		}
+	}
+
+	after, starts := attach(t, false, poolRow("gc-1", "worker", 1, "creating", "instance_token", "tok-1", "pending_create_claim", "true", "pending_create_started_at", now))
+	if m := after.Metadata; starts != 1 || m["state"] != string(session.StateActive) || m["pending_create_claim"] != "" || m["pending_create_started_at"] != "" {
+		t.Errorf("a claimed creating row: row %v, %d starts; want started, active, its claim cleared", m, starts)
+	}
+
+	after, starts = attach(t, true, poolRow("gc-1", "worker", 1, "active", append([]string{"instance_token", "tok-1"}, stopReq...)...))
+	if m := after.Metadata; starts != 0 || m[session.DrainIntentReasonKey] != "orphaned" || m[session.OperatorDrainKey] != "operator" {
+		t.Errorf("a running session: row %v, %d starts; want no restart and its stop request kept", m, starts)
+	}
+	after, starts = attach(t, false, poolRow("gc-1", "worker", 1, "asleep", append([]string{"instance_token", "tok-1"}, stopReq...)...))
+	if m := after.Metadata; starts != 1 || m[session.DrainIntentReasonKey] != "" || m[session.OperatorDrainKey] != "" {
+		t.Errorf("a dead session: row %v, %d starts; want started, its stop request and operator_drain cleared", m, starts)
+	}
+
+	held := poolRow("gc-1", "worker", 1, "suspended", "instance_token", "tok-1", "sleep_intent", "user-hold", "held_until", rowAt(1000*time.Hour),
+		"suspended_at", rowAt(-time.Minute), "sleep_reason", "user-hold", "slept_at", now, "wake_request", "operator", "wake_requested_at", now)
+	after, _ = attach(t, false, held)
+	m := after.Metadata
+	for _, k := range []string{"sleep_intent", "held_until", "suspended_at", "sleep_reason", "slept_at", "wake_request", "wake_requested_at"} {
+		if m[k] != "" {
+			t.Errorf("an operator-held row: %s = %q after the attach, want consumed", k, m[k])
+		}
+	}
+	if m["state"] != string(session.StateActive) {
+		t.Errorf("an operator-held row: state %q, want active", m["state"])
 	}
 }

@@ -346,10 +346,11 @@ func metaKeys(a, b map[string]string) map[string]bool {
 	return out
 }
 
-// checkPremiseRefusal records, for I15's #57 clock (v5.9x), a row whose own
-// effect an outside write refused on its premise: it settled refused
-// premise, and a key that differs between the row the cache held at its
-// release (what the pass read) and the store at its settlement was last
+// checkPremiseRefusal records, for I15's #57 clock (v5.9x, v5.9z-1), a row
+// whose own effect an outside write refused on its premise: it settled
+// refused premise, and a premise key the refusal names as moved
+// (errPremiseMoved's list) differs between the row the cache held at its
+// release (what the pass read) and the store at its settlement, last
 // changed by an outside writer. v2 could not act on the row then.
 func (s *sim) checkPremiseRefusal(e *simEffect) func(settlement) {
 	l := s.legOf(e.it.Key.Leg)
@@ -362,7 +363,7 @@ func (s *sim) checkPremiseRefusal(e *simEffect) func(settlement) {
 	}
 	cached.Metadata = maps.Clone(cached.Metadata)
 	return func(res settlement) {
-		if res.Cause != causePremise {
+		if res.Cause != causePremise || res.Err == nil {
 			return
 		}
 		fresh, err := l.backing.Get(e.it.Key.ID)
@@ -371,18 +372,27 @@ func (s *sim) checkPremiseRefusal(e *simEffect) func(settlement) {
 		}
 		k := l.name + "/" + e.it.Key.ID
 		writers := s.lastWriter[k]
-		outside := func(key string) bool { return writers[key] != "" && writers[key] != "v2" }
-		if cached.Status != fresh.Status && outside("status") {
-			s.premiseRefusals = append(s.premiseRefusals, k)
-			return
-		}
-		for key := range metaKeys(cached.Metadata, fresh.Metadata) {
-			if cached.Metadata[key] != fresh.Metadata[key] && outside(key) {
+		for _, key := range premiseMovedKeys(res.Err) {
+			before, after, writer := cached.Metadata[key], fresh.Metadata[key], writers[key]
+			if key == "closed" {
+				before, after, writer = cached.Status, fresh.Status, writers["status"]
+			}
+			if before != after && writer != "" && writer != "v2" {
 				s.premiseRefusals = append(s.premiseRefusals, k)
 				return
 			}
 		}
 	}
+}
+
+// premiseMovedKeys are the premise keys a premise refusal's error names as
+// moved (errPremiseMoved: "...: a, b, c").
+func premiseMovedKeys(err error) []string {
+	_, list, ok := strings.Cut(err.Error(), errPremiseMoved.Error()+": ")
+	if !ok {
+		return nil
+	}
+	return strings.Split(list, ", ")
 }
 
 // checkQuarantinedCommits is I15's bound on §12.2 #57: a row whose commit

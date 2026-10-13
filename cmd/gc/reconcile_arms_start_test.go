@@ -283,9 +283,23 @@ func TestAccrualKeepsALiveQuarantinesReason(t *testing.T) {
 			}
 		}
 	}
-	row := session.Info{ID: "gc-1", MetadataState: string(session.StateCreating), WakeAttemptsMetadata: "4", QuarantinedUntil: at(time.Minute), SleepReason: string(session.SleepReasonRateLimit)}
-	if patch, _, quarantined := otherFailurePatch(row, map[string]string{"quarantined_until": row.QuarantinedUntil, "sleep_reason": row.SleepReason}, startFailureRead{}, gatherNow); !quarantined || patch["sleep_reason"] != "" && patch["sleep_reason"] != row.SleepReason {
-		t.Errorf("start-failure abandon over a live rate-limit quarantine: patch %v, want rate_limit kept", patch)
+	for _, live := range []bool{true, false} {
+		row := session.Info{ID: "gc-1", MetadataState: string(session.StateCreating), WakeAttemptsMetadata: "4"}
+		meta := map[string]string{}
+		if live {
+			row.QuarantinedUntil, row.SleepReason = at(time.Minute), string(session.SleepReasonRateLimit)
+			meta = map[string]string{"quarantined_until": row.QuarantinedUntil, "sleep_reason": row.SleepReason}
+		}
+		patch, _, quarantined := otherFailurePatch(row, meta, startFailureRead{}, gatherNow)
+		got, wrote := patch["sleep_reason"]
+		switch {
+		case !quarantined:
+			t.Errorf("start-failure abandon (live %t): not quarantined, patch %v", live, patch)
+		case live && wrote:
+			t.Errorf("start-failure abandon over a live rate-limit quarantine: sleep_reason written %q, want rate_limit kept", got)
+		case !live && got != string(session.SleepReasonQuarantine):
+			t.Errorf("start-failure abandon with no quarantine: sleep_reason %q, want quarantine", got)
+		}
 	}
 }
 

@@ -326,6 +326,8 @@ func TestAccrualKeepsALiveQuarantinesReason(t *testing.T) {
 		{"a live rate-limit quarantine", string(SleepReasonRateLimit), now.Add(time.Minute), true},
 		{"no quarantine", "", time.Time{}, false},
 		{"an expired quarantine", string(SleepReasonQuarantine), now.Add(-time.Minute), false},
+		{"a live quarantine, the row idle", string(SleepReasonIdle), now.Add(time.Minute), false},
+		{"a live quarantine, no reason", "", now.Add(time.Minute), false},
 	} {
 		info := Info{ID: "s-1", SleepReason: c.reason}
 		if !c.quarantine.IsZero() {

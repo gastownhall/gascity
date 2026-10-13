@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -14,8 +15,9 @@ import (
 // delay while its liveness reads unknown (A9's hold) does not, nor one an
 // outside write to its drain basis restarted, nor one an outside write
 // restarted by refusing the row's own effect on its premise (any premise
-// key: a heartbeat's held_until, shifted seed 607). The row's own effect
-// refused over v2's own write, or for another cause, restarts nothing.
+// key the refusal names: a heartbeat's held_until, shifted seed 607;
+// v5.9z-1). The row's own effect refused over v2's own write, over an outside
+// write the refusal does not name, or for another cause, restarts nothing.
 func TestQuarantinedCommitBoundCountsOnlyV2sTime(t *testing.T) {
 	for _, c := range []struct {
 		name   string
@@ -26,13 +28,16 @@ func TestQuarantinedCommitBoundCountsOnlyV2sTime(t *testing.T) {
 		{"liveness unknown", func(s *sim) { s.sp.listing = 2 }, false},
 		{"an outside write moved the basis", func(s *sim) { s.operator("gc-1", "wake_request", "operator") }, false},
 		{"an outside write refused its own effect on the premise", func(s *sim) {
-			refuse(s, func() { s.operator("gc-1", "held_until", rowAt(2*time.Hour)) }, causePremise)
+			refuse(s, func() { s.operator("gc-1", "held_until", rowAt(2*time.Hour)) }, causePremise, "held_until")
 		}, false},
+		{"an outside write the refusal does not name", func(s *sim) {
+			refuse(s, func() { s.operator("gc-1", "held_until", rowAt(2*time.Hour)) }, causePremise, "state")
+		}, true},
 		{"v2's own write refused its own effect on the premise", func(s *sim) {
-			refuse(s, func() { s.setMeta(s.legs[0], "gc-1", "held_until", rowAt(2*time.Hour)); s.audit("v2") }, causePremise)
+			refuse(s, func() { s.setMeta(s.legs[0], "gc-1", "held_until", rowAt(2*time.Hour)); s.audit("v2") }, causePremise, "held_until")
 		}, true},
 		{"an outside write, the effect refused for another cause", func(s *sim) {
-			refuse(s, func() { s.operator("gc-1", "held_until", rowAt(2*time.Hour)) }, causeRedecided)
+			refuse(s, func() { s.operator("gc-1", "held_until", rowAt(2*time.Hour)) }, causeRedecided, "held_until")
 		}, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -59,9 +64,9 @@ func TestQuarantinedCommitBoundCountsOnlyV2sTime(t *testing.T) {
 
 // refuse runs gc-1's heal through checkPremiseRefusal: released on the
 // cache's row, then write lands on the store, then it settles refused with
-// cause.
-func refuse(s *sim, write func(), cause string) {
+// cause, the premise keys moved named as the refusal names them.
+func refuse(s *sim, write func(), cause, moved string) {
 	settle := s.checkPremiseRefusal(&simEffect{it: intent{Kind: intentRowHeal, Key: rowKey{Leg: rowLeg, ID: "gc-1"}}})
 	write()
-	settle(settlement{Outcome: settledRefused, Cause: cause})
+	settle(settlement{Outcome: settledRefused, Cause: cause, Err: fmt.Errorf("%w: %s", errPremiseMoved, moved)})
 }
