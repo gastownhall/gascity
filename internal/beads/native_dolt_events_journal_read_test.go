@@ -473,8 +473,30 @@ func TestProxiedGuardTickRefreshesJournalActivation(t *testing.T) {
 	}
 }
 
-// A re-pin ends its tick before the journal slot, so the re-pin re-resolves
-// activation itself.
+// A tick that decides nothing (here an unreadable record) still refreshes
+// activation: the forget is the first thing every tick does, not a step a
+// tick reaches only when the record and cursors hold.
+func TestProxiedGuardUndecidedTickRefreshesJournalActivation(t *testing.T) {
+	t.Setenv("BD_EVENTS_JOURNAL", "")
+	f := newGuardFixture(t)
+	f.start()
+	writeScopeJournalConfig(t, f.admitted.scopeRoot, "events-journal: true\n")
+	if !f.store.EventsJournalActive() {
+		t.Fatal("EventsJournalActive = false on a scope that enables the journal")
+	}
+
+	writeScopeJournalConfig(t, f.admitted.scopeRoot, "events-journal: false\n")
+	f.admitted.removeRecord()
+	if step := f.tick(); step != proxiedGuardUndecided {
+		t.Fatalf("tick = %s, want undecided", step)
+	}
+	if f.store.EventsJournalActive() {
+		t.Fatal("EventsJournalActive = true after an undecided tick on a scope that turned the journal off")
+	}
+}
+
+// A re-pin installs a new pin and leaf, so the re-pin forgets activation
+// itself rather than relying on the tick that ran it.
 func TestProxiedGuardRepinRefreshesJournalActivation(t *testing.T) {
 	t.Setenv("BD_EVENTS_JOURNAL", "")
 	f := newGuardFixture(t)
@@ -494,9 +516,9 @@ func TestProxiedGuardRepinRefreshesJournalActivation(t *testing.T) {
 	}
 }
 
-// A non-terminal stand-down recovers through the tick's recoverNative, whose
-// re-pin ends the tick before the journal slot. The re-pin itself forgets the
-// cached activation, so a scope that changed its answer while the handle was
+// A non-terminal stand-down recovers through the tick's recoverNative and its
+// re-pin. The re-pin itself forgets the cached activation (the second subtest
+// pins that without a tick), so a scope that changed its answer while the handle was
 // demoted is re-resolved on the recovered leaf. A reader that asked while the
 // store was demoted (and was refused as unavailable) cached the old answer,
 // which is what the re-pin must not keep.

@@ -289,6 +289,9 @@ func (g *proxiedGuard) tickSteps(ctx context.Context, n int) proxiedGuardStep {
 	if err := ctx.Err(); err != nil {
 		return proxiedGuardStopped
 	}
+	// Every tick that runs refreshes the events-journal activation, whichever
+	// step it ends at; see step 3.
+	g.store.forgetJournalActivation()
 	pin, native, terminal := g.store.guardState()
 	if native == nil {
 		if terminal {
@@ -329,10 +332,11 @@ func (g *proxiedGuard) tickSteps(ctx context.Context, n int) proxiedGuardStep {
 
 	// Step 3 — the events journal. Activation gates the journal read, and bd's
 	// CLI re-resolves it on every write, so a scope that turns the journal off
-	// stops journaling at once. Forget the cached answer; the next journal
-	// question re-resolves it. Forgetting costs no I/O, so a scope nobody tails
-	// reads no config here.
-	g.store.forgetJournalActivation()
+	// stops journaling at once. The tick forgets the cached answer before step
+	// 1, so a tick that ends early (an undecided record or cursors, a
+	// stand-down, a recovery) refreshes it too; the next journal question
+	// re-resolves it. Forgetting costs no I/O, so a scope nobody tails reads no
+	// config here.
 
 	// Step 4 — the socket-owner join, every ownerEvery-th tick.
 	if g.opts.ownerEvery > 0 && n%g.opts.ownerEvery == 0 {
