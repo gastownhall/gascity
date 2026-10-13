@@ -17,13 +17,23 @@ var _ journalops.Journal = (*ProxiedStore)(nil)
 // the scope on the scan path. A scope whose writes are not journaled refuses
 // with ErrEventsJournalInactive. A read that fails with a proxied verdict
 // stands the native leaf down, exactly as every other native read does.
+//
+// The refusals are ordered permanent-first — ErrStoreClosed, then
+// ErrEventsJournalInactive, then the transient ErrEventsJournalUnavailable —
+// so a caller that retries on the last never spins on a store that is closed
+// or never journals.
 func (s *ProxiedStore) ReadEventsJournalPage(ctx context.Context, since int64, limit int) (journalops.Page, error) {
-	native := s.nativeLeaf()
-	if native == nil {
-		return journalops.Page{}, fmt.Errorf("reading events journal after seq %d: proxied store is demoted: %w", since, ErrEventsJournalUnavailable)
+	s.mu.RLock()
+	closed, native := s.closed, s.native
+	s.mu.RUnlock()
+	if closed {
+		return journalops.Page{}, fmt.Errorf("reading events journal after seq %d: proxied store: %w", since, ErrStoreClosed)
 	}
 	if !s.journalActive {
 		return journalops.Page{}, fmt.Errorf("reading events journal after seq %d: %w", since, ErrEventsJournalInactive)
+	}
+	if native == nil {
+		return journalops.Page{}, fmt.Errorf("reading events journal after seq %d: proxied store is demoted: %w", since, ErrEventsJournalUnavailable)
 	}
 	page, err := native.readEventsJournalPage(ctx, since, limit, false)
 	return page, s.classifyReadError(err)

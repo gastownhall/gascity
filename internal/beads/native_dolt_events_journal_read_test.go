@@ -313,6 +313,30 @@ func TestProxiedStoreEventsJournalUnavailableWhenDemoted(t *testing.T) {
 	}
 }
 
+// The refusals are ordered permanent-first, so a caller that retries on the
+// transient ErrEventsJournalUnavailable never spins on a store that is closed
+// or never journals.
+func TestProxiedStoreEventsJournalRefusalOrder(t *testing.T) {
+	t.Run("closed", func(t *testing.T) {
+		store, _, _ := newSplitFixture(t)
+		store.journalActive = true
+		if err := store.CloseStore(); err != nil {
+			t.Fatalf("CloseStore: %v", err)
+		}
+		if _, err := store.ReadEventsJournalPage(context.Background(), 0, 0); !errors.Is(err, ErrStoreClosed) {
+			t.Fatalf("error = %v, want ErrStoreClosed", err)
+		}
+	})
+	t.Run("demoted and inactive", func(t *testing.T) {
+		store, _, _ := newSplitFixture(t)
+		store.standDown(NewNonTerminalProxiedVerdictError(ProxiedVerdictProxyGone, "bd restarted its proxy", nil))
+		_, err := store.ReadEventsJournalPage(context.Background(), 0, 0)
+		if !errors.Is(err, ErrEventsJournalInactive) || errors.Is(err, ErrEventsJournalUnavailable) {
+			t.Fatalf("error = %v, want ErrEventsJournalInactive alone", err)
+		}
+	})
+}
+
 // TestNativeDoltStoreLedgerfeedTailsRealWrites drives a real embedded store
 // opened through gc's production open with the journal on: the tailer sees
 // the store's own writes in commit order, each carrying the issue's
