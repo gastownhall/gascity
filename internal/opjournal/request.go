@@ -43,7 +43,15 @@ func normalizeRequest(req Request, spec Spec, now time.Time) (Op, error) {
 		base = op.NotBefore
 	}
 	if op.StartBy.IsZero() {
+		// A defaulted start_by never lands after an explicit finish_by, nor
+		// before not_before; a finish_by before not_before stays refused.
 		op.StartBy = base.Add(spec.StartWithin)
+		if !op.FinishBy.IsZero() && op.FinishBy.Before(op.StartBy) {
+			op.StartBy = op.FinishBy
+			if op.StartBy.Before(base) {
+				op.StartBy = base
+			}
+		}
 	}
 	if op.FinishBy.IsZero() {
 		op.FinishBy = base.Add(spec.FinishWithin)

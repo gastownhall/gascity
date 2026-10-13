@@ -1069,3 +1069,38 @@ func TestTornCloseIsRepairedByAnyTerminalCall(t *testing.T) {
 		}
 	})
 }
+
+// One explicit deadline bounds the defaulted other: a finish_by inside the
+// kind's start window pulls start_by in, and a start_by past the finish
+// window pushes finish_by out.
+func TestOneSidedDeadlines(t *testing.T) {
+	h := newHarness(t)
+	finishOnly := msgReq("finish", "x")
+	finishOnly.FinishBy = t0.Add(time.Hour)
+	op := h.propose(t, finishOnly)
+	if !op.StartBy.Equal(t0.Add(time.Hour)) || !op.FinishBy.Equal(t0.Add(time.Hour)) {
+		t.Fatalf("finish_by only: start %s finish %s, want both at +1h", op.StartBy, op.FinishBy)
+	}
+
+	deferred := msgReq("deferred", "x")
+	deferred.NotBefore = t0.Add(2 * time.Hour)
+	deferred.FinishBy = t0.Add(3 * time.Hour)
+	op = h.propose(t, deferred)
+	if !op.StartBy.Equal(t0.Add(3*time.Hour)) || !op.FinishBy.Equal(t0.Add(3*time.Hour)) {
+		t.Fatalf("not_before + finish_by: start %s finish %s, want both at +3h", op.StartBy, op.FinishBy)
+	}
+
+	early := msgReq("early", "x")
+	early.NotBefore = t0.Add(2 * time.Hour)
+	early.FinishBy = t0.Add(time.Hour)
+	if _, _, err := h.store.Propose(early); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("finish_by before not_before = %v, want ErrInvalidRequest", err)
+	}
+
+	startOnly := msgReq("start", "x")
+	startOnly.StartBy = t0.Add(48 * time.Hour)
+	op = h.propose(t, startOnly)
+	if !op.StartBy.Equal(t0.Add(48*time.Hour)) || !op.FinishBy.Equal(t0.Add(48*time.Hour)) {
+		t.Fatalf("start_by only: start %s finish %s, want both at +48h", op.StartBy, op.FinishBy)
+	}
+}
