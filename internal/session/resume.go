@@ -20,7 +20,8 @@ var (
 type WakeRequestOutcome int
 
 const (
-	// WakeRecorded means an explicit wake was written.
+	// WakeRecorded means an explicit wake is recorded on the row: written now,
+	// or already pending and unserved (coalesced) so nothing was written.
 	WakeRecorded WakeRequestOutcome = iota + 1
 	// WakeHeld means an operator holds the row (HoldVerdict); nothing was
 	// written.
@@ -47,19 +48,20 @@ func (m *Manager) queueFor(meta map[string]string, sessName string, by Actor) bo
 	return HoldVerdict(meta, running, m.now())
 }
 
-// ExplicitWakeUnserved is the single statement of when a row's explicit wake
-// request is still pending: wake_request is explicit and the request was not
+// ExplicitWakeUnserved reports whether a row's explicit wake request is still
+// pending by its timestamps: wake_request is explicit and the request was not
 // served by a later sleep. A request is served only when wake_requested_at and
 // slept_at both parse as RFC3339 and the request is strictly before the
 // sleep; a missing or unparseable timestamp, or equal ones, leave it
 // unserved. It does not look at the row's state; callers that care whether
-// the row is already awake check that themselves.
-func ExplicitWakeUnserved(meta map[string]string) bool {
-	if strings.TrimSpace(meta["wake_request"]) != string(WakeCauseExplicit) {
+// the row is already awake (an active or awake row's wake is served) check
+// that themselves.
+func ExplicitWakeUnserved(info Info) bool {
+	if strings.TrimSpace(info.WakeRequest) != string(WakeCauseExplicit) {
 		return false
 	}
-	requestedAt, reqErr := time.Parse(time.RFC3339, strings.TrimSpace(meta["wake_requested_at"]))
-	sleptAt, sleptErr := time.Parse(time.RFC3339, strings.TrimSpace(meta["slept_at"]))
+	requestedAt, reqErr := time.Parse(time.RFC3339, strings.TrimSpace(info.WakeRequestedAt))
+	sleptAt, sleptErr := time.Parse(time.RFC3339, strings.TrimSpace(info.SleptAt))
 	return reqErr != nil || sleptErr != nil || !requestedAt.Before(sleptAt)
 }
 
@@ -91,7 +93,7 @@ func (s *Store) RequestWakeUnlessHeld(id string, runtimeRunning bool, now time.T
 			return nil
 		}
 		outcome = WakeRecorded
-		if ExplicitWakeUnserved(persisted.Metadata) {
+		if ExplicitWakeUnserved(info) {
 			coalesced = true
 			return nil
 		}

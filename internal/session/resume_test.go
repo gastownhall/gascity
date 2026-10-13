@@ -256,7 +256,7 @@ func TestExplicitWakeUnserved(t *testing.T) {
 		"nil metadata":            {meta: nil, want: false},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if got := ExplicitWakeUnserved(tc.meta); got != tc.want {
+			if got := ExplicitWakeUnserved(infoFromPersistedBead(beads.Bead{Metadata: tc.meta})); got != tc.want {
 				t.Fatalf("ExplicitWakeUnserved(%v) = %v, want %v", tc.meta, got, tc.want)
 			}
 		})
