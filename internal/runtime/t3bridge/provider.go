@@ -2793,10 +2793,10 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 	return nil
 }
 
-// Stop tears down the session's event watcher and stops or archives its T3
-// thread; persistent agents are left running.
+// Stop stops or archives the session's T3 thread and tears down its event
+// watcher; persistent agents are left running. A Stop that fails leaves the
+// session, and its watcher, running.
 func (p *Provider) Stop(name string) error {
-	p.stopEventWatcher(name)
 	snapshot, err := p.rpcSnapshot()
 	if err != nil {
 		if isSoftBridgeUnavailable(err) {
@@ -2809,12 +2809,14 @@ func (p *Provider) Stop(name string) error {
 	thread := snapshotThreadBySessionName(snapshot, name)
 	binding := snapshotThreadBinding(thread)
 	if binding == nil {
+		p.stopEventWatcher(name)
 		p.clearRecentStart(name)
 		p.clearBridgeMeta(name)
 		return nil
 	}
 
 	if p.isPersistentAgent(thread) {
+		p.stopEventWatcher(name)
 		p.recordStateChange(binding.ThreadID, "persistent-alive", "GC stop skipped (persistent agent)", map[string]interface{}{
 			"reason": "persistent agent not killed",
 		})
@@ -2826,6 +2828,7 @@ func (p *Provider) Stop(name string) error {
 	if err := p.dispatchThreadSessionStop(binding.ThreadID); err != nil {
 		return fmt.Errorf("stopping t3 thread %s for %q: %w", binding.ThreadID, name, err)
 	}
+	p.stopEventWatcher(name)
 	p.recordStateChange(binding.ThreadID, "stopped", "GC session stopped", nil)
 
 	if drained == "1" {

@@ -277,3 +277,55 @@ func TestRemoveMetaDrainAckDuringOutageClearsDrainedMarker(t *testing.T) {
 		}
 	}
 }
+
+// A Stop that fails leaves the session running, so it must keep the session's
+// T3 state watcher; a Stop that succeeds tears it down.
+func TestStopKeepsEventWatcherUntilTheStopSucceeds(t *testing.T) {
+	watching := func(p *Provider) bool {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		_, ok := p.watchers["agent-a"]
+		return ok
+	}
+	install := func(p *Provider) {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		p.watchers["agent-a"] = func() {}
+	}
+
+	t.Run("outage", func(t *testing.T) {
+		backed, sp := newSeamBackedSnapshotTestProvider(t, unreachableBridgeURL)
+		install(backed.raw)
+		if err := sp.Stop("agent-a"); err == nil {
+			t.Fatal("Stop during outage = nil, want an error")
+		}
+		if !watching(backed.raw) {
+			t.Fatal("failed Stop tore down the event watcher")
+		}
+	})
+	t.Run("rejected session stop", func(t *testing.T) {
+		server := newT3BridgeTestServer(t, boundThreadSnapshot("ready"))
+		t.Cleanup(server.Close)
+		server.rejectCommand("thread.session.stop", "thread is locked")
+		backed, sp := newSeamBackedSnapshotTestProvider(t, server.wsURL())
+		install(backed.raw)
+		if err := sp.Stop("agent-a"); err == nil {
+			t.Fatal("Stop with a rejected thread.session.stop = nil, want an error")
+		}
+		if !watching(backed.raw) {
+			t.Fatal("failed Stop tore down the event watcher")
+		}
+	})
+	t.Run("success", func(t *testing.T) {
+		server := newT3BridgeTestServer(t, boundThreadSnapshot("ready"))
+		t.Cleanup(server.Close)
+		backed, sp := newSeamBackedSnapshotTestProvider(t, server.wsURL())
+		install(backed.raw)
+		if err := sp.Stop("agent-a"); err != nil {
+			t.Fatalf("Stop: %v", err)
+		}
+		if watching(backed.raw) {
+			t.Fatal("successful Stop left the event watcher running")
+		}
+	})
+}
