@@ -278,7 +278,7 @@ func (q *beadsNudgeQueue) ClaimDue(target ClaimTarget, now time.Time) ([]nudgequ
 		if nudgeQueueItemExpired(entry.item, now) {
 			// Touched, so repaired: an expired item is dead-lettered here
 			// rather than left for the next maintenance pass.
-			if err := q.markDead(entry.item.ID, nudgeQueueExpiryReason(entry.item), "expired", now); err != nil {
+			if err := q.expire(entry.item.ID, now); err != nil {
 				return nil, err
 			}
 			continue
@@ -379,7 +379,8 @@ func (q *beadsNudgeQueue) Ack(ids []string, outcome, reason, commitBoundary stri
 
 // ReleaseClaims returns undelivered in-flight ids to pending by revoking their
 // leases. The revocation is a compare-and-swap on the exact lease the caller
-// observed, so a claim that has already moved on is never disturbed.
+// observed, so a claim that has already moved on is never disturbed. An item
+// past its deliver-by deadline is dead-lettered as expired instead.
 func (q *beadsNudgeQueue) ReleaseClaims(ids []string) error {
 	if len(ids) == 0 {
 		return nil
@@ -391,6 +392,12 @@ func (q *beadsNudgeQueue) ReleaseClaims(ids []string) error {
 			return err
 		}
 		if !found || entry.state != nudgeQueueInFlight {
+			continue
+		}
+		if nudgeQueueItemExpired(entry.item, now) {
+			if err := q.expire(id, now); err != nil {
+				return err
+			}
 			continue
 		}
 		if _, err := q.releaser.ReleaseIfCurrent(entry.bead.ID, entry.bead.Assignee); err != nil {
@@ -405,8 +412,9 @@ func (q *beadsNudgeQueue) ReleaseClaims(ids []string) error {
 // handling must not fire for work that is about to be redelivered.
 //
 // A permanent cause ([ErrNudgeSessionFenceMismatch]) dead-letters on the first
-// failure; everything else retries until the attempt ceiling or the item's
-// deliver-by deadline.
+// failure; everything else retries until the attempt ceiling. An item already
+// past its deliver-by deadline expired rather than failed: it is
+// dead-lettered as expired, charged no attempt, and not reported.
 func (q *beadsNudgeQueue) RecordFailure(ids []string, cause error, now time.Time) ([]nudgequeue.Item, error) {
 	if len(ids) == 0 {
 		return nil, nil
@@ -421,6 +429,9 @@ func (q *beadsNudgeQueue) RecordFailure(ids []string, cause error, now time.Time
 			if entry.state != nudgeQueueStateLive && entry.state != nudgeQueueInFlight {
 				return beads.UpdateOpts{}, false, nil
 			}
+			if nudgeQueueItemExpired(entry.item, now) {
+				return nudgeQueueExpiryUpdate(entry.item), true, nil
+			}
 			item := entry.item
 			item.Attempts++
 			item.LastAttemptAt = now.UTC()
@@ -429,13 +440,12 @@ func (q *beadsNudgeQueue) RecordFailure(ids []string, cause error, now time.Time
 			}
 			item.ClaimedAt = time.Time{}
 			item.LeaseUntil = time.Time{}
-			expired := nudgeQueueItemExpired(item, now)
 			update := map[string]string{
 				nudgeMetaAttempts:      strconv.Itoa(item.Attempts),
 				nudgeMetaLastAttemptAt: formatNudgeTime(item.LastAttemptAt),
 				nudgeMetaLastError:     item.LastError,
 			}
-			if permanent || item.Attempts >= nudgeQueueMaxAttempts || expired {
+			if permanent || item.Attempts >= nudgeQueueMaxAttempts {
 				item.DeadAt = now.UTC()
 				update[nudgeMetaQueueState] = nudgeQueueStateDead
 				update[nudgeMetaDeadAt] = formatNudgeTime(item.DeadAt)
@@ -551,7 +561,7 @@ func (q *beadsNudgeQueue) maintainEntry(entry nudgeQueueEntry, now time.Time) er
 	switch entry.state {
 	case nudgeQueueStateLive, nudgeQueueInFlight:
 		if nudgeQueueItemExpired(entry.item, now) {
-			return q.markDead(entry.item.ID, nudgeQueueExpiryReason(entry.item), "expired", now)
+			return q.expire(entry.item.ID, now)
 		}
 		if entry.state == nudgeQueueStateLive && entry.bead.Assignee != "" {
 			return q.revokeLease(entry, now)
@@ -672,13 +682,18 @@ func (q *beadsNudgeQueue) retireDeadLetter(entry nudgeQueueEntry, now time.Time)
 	return q.closeRecord(entry.bead.ID)
 }
 
-// terminalize retires a delivered nudge.
+// terminalize retires a delivered nudge. An item past its deliver-by deadline
+// is dead-lettered as expired instead, as the deployed queue's expiry pass
+// does before it acks.
 func (q *beadsNudgeQueue) terminalize(nudgeID, outcome, reason, commitBoundary string, now time.Time) error {
 	moved := false
 	err := q.mutate(nudgeID, now, func(entry nudgeQueueEntry) (beads.UpdateOpts, bool, error) {
 		moved = false
 		if entry.state != nudgeQueueStateLive && entry.state != nudgeQueueInFlight {
 			return beads.UpdateOpts{}, false, nil
+		}
+		if nudgeQueueItemExpired(entry.item, now) {
+			return nudgeQueueExpiryUpdate(entry.item), true, nil
 		}
 		moved = true
 		return nudgeQueueUnclaim(map[string]string{
@@ -716,6 +731,36 @@ func (q *beadsNudgeQueue) withdraw(nudgeID string, now time.Time) error {
 		return err
 	}
 	return q.closeRecord(nudgeQueueBeadID(nudgeID))
+}
+
+// expire dead-letters a live item past its deliver-by deadline, recording it
+// exactly as the reads already project it.
+func (q *beadsNudgeQueue) expire(nudgeID string, now time.Time) error {
+	return q.mutate(nudgeID, now, func(entry nudgeQueueEntry) (beads.UpdateOpts, bool, error) {
+		if entry.state != nudgeQueueStateLive && entry.state != nudgeQueueInFlight {
+			return beads.UpdateOpts{}, false, nil
+		}
+		if !nudgeQueueItemExpired(entry.item, now) {
+			return beads.UpdateOpts{}, false, nil
+		}
+		return nudgeQueueExpiryUpdate(entry.item), true, nil
+	})
+}
+
+// nudgeQueueExpiryUpdate is the dead-letter write for an expired item: dead
+// since its deadline, as [nudgeQueueExpiredView] reads it before the write, so
+// recording the expiry never changes how the item reads.
+func nudgeQueueExpiryUpdate(item nudgequeue.Item) beads.UpdateOpts {
+	view := nudgeQueueExpiredView(item)
+	deadAt := formatNudgeTime(view.DeadAt)
+	return nudgeQueueUnclaim(map[string]string{
+		nudgeMetaQueueState:     nudgeQueueStateDead,
+		nudgeMetaDeadAt:         deadAt,
+		nudgeMetaLastError:      view.LastError,
+		nudgeMetaTerminalState:  "expired",
+		nudgeMetaTerminalReason: view.LastError,
+		nudgeMetaTerminalAt:     deadAt,
+	})
 }
 
 // markDead moves a queued item into the dead bucket and releases any claim on
@@ -1189,8 +1234,8 @@ func nudgeQueueExpiryReason(item nudgequeue.Item) string {
 	return "expired"
 }
 
-// nudgeQueueExpiredView is how an expired item that Maintain has not yet
-// dead-lettered reads: dead since its deadline, with no claim.
+// nudgeQueueExpiredView is how an expired item reads, before and after its
+// expiry is recorded: dead since its deadline, with no claim.
 func nudgeQueueExpiredView(item nudgequeue.Item) nudgequeue.Item {
 	item.LastError = nudgeQueueExpiryReason(item)
 	item.DeadAt = item.ExpiresAt
