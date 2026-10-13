@@ -204,6 +204,15 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, by Actor, id str
 	if !running {
 		return m.sendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints, true)
 	}
+	mode := runtime.TurnInterruptModeFor(m.sp, sessName)
+	// A protocol runtime cancels the turn itself; its Stop may leave the
+	// runtime running, so the hard restart would interrupt nothing.
+	hardRestart := requiresHardRestartInterrupt(b) && mode != runtime.TurnInterruptProtocol
+	if mode == runtime.TurnInterruptUnsupported && !hardRestart {
+		// Refuse before taking the lease: waiting on a busy lease would
+		// hide this reason behind ErrSessionStarting.
+		return false, fmt.Errorf("%w: %s", ErrTurnInterruptUnsupported, sessName)
+	}
 	// Every interrupt may end in a stop and a restart: take the runtime lease
 	// before sending anything, and carry it to the restart (D8D-5).
 	by, release, err := m.leaseForRestartLocked(ctx, by, id, sessName)
@@ -211,9 +220,7 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, by Actor, id str
 		return false, err
 	}
 	defer release()
-	// A protocol runtime cancels the turn itself; its Stop may leave the
-	// runtime running, so the hard restart would interrupt nothing.
-	if requiresHardRestartInterrupt(b) && runtime.TurnInterruptModeFor(m.sp, sessName) != runtime.TurnInterruptProtocol {
+	if hardRestart {
 		piTranscriptPath, err := piPendingTurnPath(b, hints)
 		if err != nil {
 			return false, err
@@ -236,10 +243,10 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, by Actor, id str
 		return false, m.restartAndSendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints)
 	}
 	interruptStartedAt := time.Now()
-	if err := m.stopTurnLocked(b, sessName); err != nil {
+	if err := m.stopTurnLocked(b, sessName, mode); err != nil {
 		return false, err
 	}
-	if err := m.waitForInterruptIdleLocked(ctx, b, sessName); err != nil {
+	if err := m.waitForInterruptIdleLocked(ctx, b, sessName, mode); err != nil {
 		// Idle wait failed (e.g. timeout). Fall back to hard
 		// restart so the session isn't left in limbo.
 		if stopErr := runtime.StopForCleanup(m.sp, sessName); stopErr != nil {
@@ -256,7 +263,7 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, by Actor, id str
 	if err := m.resetInterruptedTurnLocked(ctx, b, sessName); err != nil {
 		return false, err
 	}
-	if shouldClearInterruptedInputBeforeSubmit(b) && m.interruptsByKeystroke(sessName) {
+	if shouldClearInterruptedInputBeforeSubmit(b) && mode == runtime.TurnInterruptKeystroke {
 		if err := m.clearInterruptedInputLocked(ctx, b, sessName); err != nil {
 			return false, err
 		}
@@ -302,19 +309,15 @@ func (m *Manager) waitUntilRunningLocked(ctx context.Context, id, sessName strin
 	}
 }
 
-// interruptsByKeystroke reports whether the session's runtime drives the
-// agent's terminal, so the provider-specific keystroke interrupt applies. A
-// runtime that interrupts turns by protocol drops keys, so for it every
-// keystroke step (soft Escape, Ctrl-C fallback, input clear) is skipped.
-func (m *Manager) interruptsByKeystroke(sessName string) bool {
-	return runtime.TurnInterruptModeFor(m.sp, sessName) == runtime.TurnInterruptKeystroke
-}
-
-func (m *Manager) stopTurnLocked(b beads.Bead, sessName string) error {
+// stopTurnLocked sends the turn interrupt for mode, the session runtime's
+// [runtime.TurnInterruptModeFor]. Only keystroke mode sends the
+// provider-specific keys (soft Escape, Ctrl-C fallback, input clear): a
+// protocol runtime drops keys and is interrupted through Interrupt alone.
+func (m *Manager) stopTurnLocked(b beads.Bead, sessName string, mode runtime.TurnInterruptMode) error {
 	if State(b.Metadata["state"]) == StateSuspended || !m.sp.IsRunning(sessName) {
 		return nil
 	}
-	switch runtime.TurnInterruptModeFor(m.sp, sessName) {
+	switch mode {
 	case runtime.TurnInterruptProtocol:
 		if err := m.sp.Interrupt(sessName); err != nil {
 			return fmt.Errorf("interrupting session: %w", err)
@@ -335,7 +338,7 @@ func (m *Manager) stopTurnLocked(b beads.Bead, sessName string) error {
 	return nil
 }
 
-func (m *Manager) waitForInterruptIdleLocked(ctx context.Context, b beads.Bead, sessName string) error {
+func (m *Manager) waitForInterruptIdleLocked(ctx context.Context, b beads.Bead, sessName string, mode runtime.TurnInterruptMode) error {
 	if !waitsForIdleAfterInterrupt(b) {
 		return nil
 	}
@@ -350,7 +353,7 @@ func (m *Manager) waitForInterruptIdleLocked(ctx context.Context, b beads.Bead, 
 		}
 		return err
 	}
-	if usesSoftEscapeInterrupt(b) && m.interruptsByKeystroke(sessName) {
+	if usesSoftEscapeInterrupt(b) && mode == runtime.TurnInterruptKeystroke {
 		if requiresImmediateInterruptConfirm(b) {
 			if err := m.sp.Interrupt(sessName); err != nil {
 				return fmt.Errorf("confirming interrupt after soft escape: %w", err)

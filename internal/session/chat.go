@@ -1393,17 +1393,18 @@ func (m *Manager) StopTurn(id string) error {
 			// nothing, so there is nothing to wait for either.
 			return nil
 		}
+		mode := runtime.TurnInterruptModeFor(m.sp, sessName)
 		interruptStartedAt := time.Now()
-		if err := m.stopTurnLocked(b, sessName); err != nil {
+		if err := m.stopTurnLocked(b, sessName, mode); err != nil {
 			return err
 		}
-		if err := m.waitForInterruptIdleLocked(context.Background(), b, sessName); err != nil {
+		if err := m.waitForInterruptIdleLocked(context.Background(), b, sessName, mode); err != nil {
 			return fmt.Errorf("waiting for stopped session to become idle: %w", err)
 		}
 		if err := m.waitForInterruptBoundaryLocked(context.Background(), b, sessName, interruptStartedAt); err != nil {
 			return fmt.Errorf("waiting for stopped session interrupt boundary: %w", err)
 		}
-		if restoresInterruptedInput(b) && m.interruptsByKeystroke(sessName) {
+		if restoresInterruptedInput(b) && mode == runtime.TurnInterruptKeystroke {
 			// The stop already succeeded. A draft that will not clear is
 			// logged, not returned: the next submit clears the input box
 			// again before it pastes.

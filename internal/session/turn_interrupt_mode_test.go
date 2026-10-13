@@ -376,3 +376,19 @@ func turnEffectCalls(calls []runtime.Call) []string {
 	}
 	return out
 }
+
+// An unsupported runtime refuses "deliver now" before it takes the runtime
+// lease: a busy lease must not hide the real reason behind ErrSessionStarting.
+func TestUnsupportedTurnInterruptRefusesBeforeRuntimeLease(t *testing.T) {
+	mgr, sp, info := newTurnInterruptSession(t, turnInterruptFamilies[1], runtime.TurnInterruptUnsupported)
+	held, err := TryRuntimeLease(nil, RuntimeLeaseRequest{City: mgr.cityPath, Name: info.SessionName})
+	if err != nil {
+		t.Fatalf("holding the runtime lease: %v", err)
+	}
+	defer held.Release()
+	err = submitInterruptNow(mgr, info)
+	if !errors.Is(err, ErrTurnInterruptUnsupported) {
+		t.Fatalf("Submit(interrupt_now) under a held lease = %v, want ErrTurnInterruptUnsupported", err)
+	}
+	assertNoInterruptSent(t, sp)
+}
