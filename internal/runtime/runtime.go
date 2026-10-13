@@ -172,6 +172,65 @@ var ErrMetaUnsupported = errors.New("runtime does not implement session metadata
 // may treat the write as done and report the error as a warning.
 var ErrMetadataNotMirrored = errors.New("session metadata stored but not mirrored by the runtime")
 
+// MetadataNotMirroredError is the error a runtime returns when SetMeta or
+// RemoveMeta changed the stored value but could not reflect the change onto its
+// own view of the session. It matches [ErrMetadataNotMirrored] and unwraps to
+// Cause, so errors.Is still finds the reason (for example
+// [ErrRuntimeUnavailable]).
+type MetadataNotMirroredError struct {
+	Session string
+	Key     string
+	Cause   error
+}
+
+// Error implements error.
+func (e *MetadataNotMirroredError) Error() string {
+	msg := fmt.Sprintf("%s: %s changed for %q", ErrMetadataNotMirrored, e.Key, e.Session)
+	if e.Cause != nil {
+		msg += ": " + e.Cause.Error()
+	}
+	return msg
+}
+
+// Is reports whether target is [ErrMetadataNotMirrored].
+func (e *MetadataNotMirroredError) Is(target error) bool {
+	return target == ErrMetadataNotMirrored
+}
+
+// Unwrap returns the reason the change could not be mirrored.
+func (e *MetadataNotMirroredError) Unwrap() error {
+	return e.Cause
+}
+
+// OnlyMetadataNotMirrored reports whether err consists solely of mirror
+// failures: every value landed, and only the runtime's own view of it lags.
+// It descends errors.Join and single-error wraps. A [MetadataNotMirroredError]
+// anywhere on that path settles its branch regardless of its cause, and so
+// does [ErrMetadataNotMirrored] itself. Any other multi-error wrap must consist
+// solely of mirror failures in every member.
+func OnlyMetadataNotMirrored(err error) bool {
+	switch e := err.(type) { //nolint:errorlint // walks the error tree by hand: every member of a join must be a mirror failure, which errors.Is cannot express
+	case nil:
+		return false
+	case *MetadataNotMirroredError:
+		return true
+	case interface{ Unwrap() []error }:
+		members := e.Unwrap()
+		if len(members) == 0 {
+			return false
+		}
+		for _, member := range members {
+			if !OnlyMetadataNotMirrored(member) {
+				return false
+			}
+		}
+		return true
+	case interface{ Unwrap() error }:
+		return OnlyMetadataNotMirrored(e.Unwrap())
+	}
+	return err == ErrMetadataNotMirrored //nolint:errorlint // a leaf of the hand walk above; errors.Is would re-descend what the walk already split
+}
+
 // ErrListUnsupported reports that the runtime cannot enumerate sessions (exec
 // list-running answered exit 2). It is never a complete empty list.
 var ErrListUnsupported = errors.New("runtime does not implement session listing")

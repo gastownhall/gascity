@@ -237,6 +237,21 @@ func TestSetMetaDrainAckSoftUnavailableIsRuntimeUnavailable(t *testing.T) {
 	}
 }
 
+// The outage error a drain transition reports is a mirror failure and nothing
+// else, so callers that need only the stored value can treat it as a warning.
+func TestSetMetaDrainOutageIsOnlyAMirrorFailure(t *testing.T) {
+	_, sp := newSeamBackedSnapshotTestProvider(t, unreachableBridgeURL)
+	for _, key := range []string{"GC_DRAIN", "GC_DRAIN_ACK"} {
+		err := sp.SetMeta("agent-a", key, "1")
+		if !runtime.OnlyMetadataNotMirrored(err) {
+			t.Fatalf("SetMeta(%s) during outage = %v (%T), want runtime.OnlyMetadataNotMirrored", key, err, err)
+		}
+		if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+			t.Fatalf("SetMeta(%s) during outage = %v, want errors.Is(runtime.ErrRuntimeUnavailable)", key, err)
+		}
+	}
+}
+
 // A key T3 never mirrors needs no bridge round trip, so an outage cannot fail it.
 func TestSetMetaUnreflectedKeyIgnoresBridgeOutage(t *testing.T) {
 	backed, sp := newSeamBackedSnapshotTestProvider(t, unreachableBridgeURL)

@@ -65,24 +65,6 @@ type runtimeActionJSON struct {
 	Status        string `json:"status"`
 }
 
-// onlyMetadataNotMirrored reports whether every error err joins is
-// runtime.ErrMetadataNotMirrored: each value landed, and only the runtime's
-// own view of it lags.
-func onlyMetadataNotMirrored(err error) bool {
-	if err == nil {
-		return false
-	}
-	if joined, ok := err.(interface{ Unwrap() []error }); ok {
-		for _, e := range joined.Unwrap() {
-			if !onlyMetadataNotMirrored(e) {
-				return false
-			}
-		}
-		return true
-	}
-	return errors.Is(err, runtime.ErrMetadataNotMirrored)
-}
-
 func (o *providerDrainOps) setDrain(sessionName string) error {
 	return o.sp.SetMeta(sessionName, "GC_DRAIN", strconv.FormatInt(time.Now().Unix(), 10))
 }
@@ -391,7 +373,7 @@ func drainRuntime(dops drainOps, writeRow func() error, sp runtime.Provider, rec
 		}
 	}
 	if err := dops.setDrain(sn); err != nil {
-		if !onlyMetadataNotMirrored(err) {
+		if !runtime.OnlyMetadataNotMirrored(err) {
 			fmt.Fprintf(stderr, "gc runtime drain: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
@@ -1234,7 +1216,7 @@ func doRuntimeDrainAck(dops drainOps, cityPath, targetName, sn, sessionID string
 // and the report.
 func finishRuntimeDrainAck(dops drainOps, cityPath, targetName, sn, sessionID string, jsonOutput bool, stdout, stderr io.Writer) int {
 	if err := dops.setDrainAck(sn); err != nil {
-		if !onlyMetadataNotMirrored(err) {
+		if !runtime.OnlyMetadataNotMirrored(err) {
 			fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}

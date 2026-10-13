@@ -74,6 +74,7 @@ go_test(
         "liveness_present_test.go",
         "liveness_test.go",
         "mcp_redact_test.go",
+        "metadata_mirror_test.go",
         "nudge_delivery_test.go",
         "privatedir_test.go",
         "probe_test.go",
