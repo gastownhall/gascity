@@ -179,6 +179,22 @@ func TestStartRecycleRefusals(t *testing.T) {
 	if s := k.runKind(); s.Cause != causePeekError || len(k.sp.kills) != 0 || k.meta("sleep_reason") != "" {
 		t.Fatalf("an object replaced across the peek: settlement %+v kills %d reason %q, want refused peek-error, nothing classified", s, len(k.sp.kills), k.meta("sleep_reason"))
 	}
+	// The same object id under a new created time (tmux reuses ids after a
+	// server restart): another object, and the peek refuses (the #7762 r2
+	// review's R2-M5).
+	k, leaf, _ = deadKit(t, false, "gc-1", "tok", "Usage limit reached", "last_woke_at", gatherNow.Add(-5*time.Second).Format(time.RFC3339))
+	leaf.duringPeek = func() { k.mutate(func(r *simRuntime) { r.created++ }) }
+	if s := k.runKind(); s.Cause != causePeekError || len(k.sp.kills) != 0 || k.meta("sleep_reason") != "" {
+		t.Fatalf("a reused object id under a new created time: settlement %+v kills %d reason %q, want refused peek-error", s, len(k.sp.kills), k.meta("sleep_reason"))
+	}
+	// An own zombie whose agent pane is gone: its live pane may be an
+	// operator's split, so nothing is killed or started (the #7762 r2
+	// review's must-fix).
+	k, leaf, _ = deadKit(t, true, "gc-1", "tok", "")
+	leaf.peekErr = runtime.ErrTmuxAgentPaneGone
+	if s := k.runKind(); s.Cause != causePeekError || k.killsBy("KillZombieObject") != 0 || len(k.starts()) != 0 {
+		t.Fatalf("a zombie with no agent pane: settlement %+v zombie kills %d starts %d, want refused peek-error, nothing killed or started", s, k.killsBy("KillZombieObject"), len(k.starts()))
+	}
 }
 
 // Kills a corpse that blocks its start forever (the #7762 review): a

@@ -64,12 +64,16 @@ type deadPeek struct {
 }
 
 // peekDead peeks the dead runtime's pane when it is the row's own and not
-// classified yet; nothing otherwise. A session whose agent pane is gone (an
+// classified yet; nothing otherwise. A corpse whose agent pane is gone (an
 // operator's split left as its only, dead, pane) has no screen of the
 // agent's to classify: it reads empty, and the recycle removes it by exact
-// object as before (the #7762 review). The screen counts only when a fresh
-// read after the capture still finds the session object the classification
-// read; otherwise the peek refuses (errPeekObjectMoved).
+// object as before (the #7762 review). A zombie's never does: its live pane
+// may be an operator's, which KillZombieObject would kill, so the peek
+// refuses. The screen counts only when a fresh read after the capture, taken
+// at the wall clock (so no snapshot from before the capture answers it),
+// still finds the session object the classification read, its id and its
+// created time (tmux reuses ids after a server restart); otherwise the peek
+// refuses (errPeekObjectMoved).
 func peekDead(ctx context.Context, _ effectReads, v txView) (deadPeek, error) {
 	if v.RT == nil || v.RT.Class != rtCorpse && v.RT.Class != rtZombie || !ownRuntime(compareIdentity(v.Row, v.RT.Identity), v.Row, v.RT.Identity) {
 		return deadPeek{}, nil
@@ -80,12 +84,12 @@ func peekDead(ctx context.Context, _ effectReads, v txView) (deadPeek, error) {
 	name := strings.TrimSpace(v.Row.SessionName)
 	content, err := v.RT.leaf.Peek(name, rateLimitPeekLines)
 	switch {
-	case errors.Is(err, runtime.ErrTmuxAgentPaneGone):
+	case errors.Is(err, runtime.ErrTmuxAgentPaneGone) && v.RT.Class == rtCorpse:
 		return deadPeek{read: true}, ctx.Err()
 	case err != nil:
 		return deadPeek{}, err
 	}
-	if again, ok := freshRead(ctx, v.RT.leaf, name, processNamesFor(v.World, v.Row), v.Now); !ok || again.ObjectID != v.RT.Again.ObjectID || again.ObjectCreated != v.RT.Again.ObjectCreated {
+	if again, ok := freshRead(ctx, v.RT.leaf, name, nil, time.Now()); !ok || again.ObjectID != v.RT.Again.ObjectID || again.ObjectCreated != v.RT.Again.ObjectCreated {
 		return deadPeek{}, errPeekObjectMoved
 	}
 	return deadPeek{read: true, content: content}, ctx.Err()
