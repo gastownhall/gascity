@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -19,6 +20,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
@@ -8599,6 +8601,254 @@ func TestBuildPreparedStartKeepsAnAllocatedKey(t *testing.T) {
 				t.Fatalf("key %q (stored %q, reset pending %q), command %q; want kept=%v and a command with %q", info.SessionKey, got.Metadata["session_key"], got.Metadata["continuation_reset_pending"], prepared.cfg.Command, c.kept, c.want)
 			}
 		})
+	}
+}
+
+// Kills a probe that reads every observed root for a launch whose Claude
+// config dir the operator names (mc-bm1af, ruling A): with CLAUDE_CONFIG_DIR
+// in the operator env, only that dir's projects is searched, so after an
+// agent moves to a new config dir its old conversation, still under an
+// observed root, reads gone and the start runs fresh instead of a resume the
+// provider will refuse; the old dir named, or none, it resumes. An ambient
+// CLAUDE_CONFIG_DIR (passthrough, not the operator's) is not read.
+func TestBuildPreparedStartProbesTheLaunchConfigDir(t *testing.T) {
+	workDir := t.TempDir()
+	root := observedTranscript(t, workDir) // k-1's transcript, under an observed root
+	moved := t.TempDir()
+	for _, c := range []struct {
+		name     string
+		operator map[string]string
+		ambient  map[string]string
+		resumed  bool
+	}{
+		{"no config dir named: the observed roots", nil, nil, true},
+		{"the old config dir named", map[string]string{"CLAUDE_CONFIG_DIR": filepath.Dir(root)}, nil, true},
+		{"moved to a new config dir", map[string]string{"CLAUDE_CONFIG_DIR": moved}, nil, false},
+		{"an ambient config dir only", nil, map[string]string{"CLAUDE_CONFIG_DIR": moved}, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			row, err := store.Create(beads.Bead{Title: "worker", Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: map[string]string{
+				"session_name": "worker", "template": "worker", "state": "asleep", "provider": "claude", "work_dir": workDir,
+				"session_key": "k-1", "started_config_hash": "h-1",
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg := &config.City{}
+			cfg.Daemon.ObservePaths = []string{root}
+			env := maps.Clone(c.ambient)
+			if env == nil {
+				env = map[string]string{}
+			}
+			maps.Copy(env, c.operator)
+			candidate := startCandidate{info: sessiontest.SeedBead(t, row), tp: TemplateParams{
+				TemplateName: "worker", SessionName: "worker", Command: "claude", WorkDir: workDir, ResolvedProvider: claudeResumeProvider(),
+				Env: env, OperatorEnv: c.operator,
+			}}
+			prepared, _, err := buildPreparedStart(candidate, cfg, store)
+			if err != nil {
+				t.Fatalf("buildPreparedStart: %v", err)
+			}
+			got, _ := store.Get(row.ID)
+			if resumed := got.Metadata["session_key"] == "k-1" && strings.Contains(prepared.cfg.Command, "--resume k-1"); resumed != c.resumed {
+				t.Fatalf("stored key %q, command %q; want resumed=%v", got.Metadata["session_key"], prepared.cfg.Command, c.resumed)
+			}
+		})
+	}
+}
+
+// Kills launchTranscriptRoots pinning a value the probe cannot resolve as the
+// provider does: only an absolute CLAUDE_CONFIG_DIR pins it; a relative or ~
+// one, or none, falls back to the city roots.
+func TestLaunchTranscriptRoots(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", "")
+	observed := &config.City{}
+	observed.Daemon.ObservePaths = []string{"/observed"}
+	for _, c := range []struct {
+		dir  string
+		want []string
+	}{
+		{"", sessionTranscriptSearchPaths(observed)},
+		{"  ", sessionTranscriptSearchPaths(observed)},
+		{"/cfg/claude-b", []string{"/cfg/claude-b/projects"}},
+		{"~/.claude-b", sessionTranscriptSearchPaths(observed)}, // the provider resolves it, not the probe
+		{"cfg/claude-b", sessionTranscriptSearchPaths(observed)},
+	} {
+		if got := launchTranscriptRoots(observed, TemplateParams{OperatorEnv: map[string]string{"CLAUDE_CONFIG_DIR": c.dir}}); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("CLAUDE_CONFIG_DIR %q: roots %v, want %v", c.dir, got, c.want)
+		}
+	}
+}
+
+// conversationResets counts evs' session.conversation_reset events for id,
+// each checked for the agent as Subject and template and the stale-key reason
+// in its payload.
+func conversationResets(t *testing.T, evs []events.Event, id string, tp TemplateParams) int {
+	t.Helper()
+	n := 0
+	for _, e := range evs {
+		if e.Type != events.SessionConversationReset {
+			continue
+		}
+		var p api.SessionLifecyclePayload
+		if err := json.Unmarshal(e.Payload, &p); err != nil || e.SessionID != id || e.Subject != tp.DisplayName() || p.SessionID != id || p.Template != tp.TemplateName || p.Reason != "stale-key" {
+			t.Fatalf("event %+v (payload %+v, err %v), want session %s, subject %q, template %q, reason stale-key", e, p, err, id, tp.DisplayName(), tp.TemplateName)
+		}
+		n++
+	}
+	return n
+}
+
+// Kills a legacy stale-resume clear that starts a committed manual
+// conversation fresh silently (mc-v9xzh): it records one
+// session.conversation_reset{reason:stale-key}; a committed pool row's
+// clear and an allocated manual key's start record none.
+func TestLegacyStaleKeyClearRecordsConversationReset(t *testing.T) {
+	prev := staleResumeKeyProbe
+	staleResumeKeyProbe = func([]string, string, string, string) (bool, bool) { return false, true }
+	t.Cleanup(func() { staleResumeKeyProbe = prev })
+	for _, c := range []struct {
+		name string
+		meta map[string]string
+		want int
+	}{
+		{"a committed manual conversation", map[string]string{"session_origin": "manual", "session_key": "k-1", "started_config_hash": "h-1"}, 1},
+		{"the legacy manual marker", map[string]string{"manual_session": "true", "session_key": "k-1", "started_config_hash": "h-1"}, 1},
+		{"a committed row that is not manual", map[string]string{"session_key": "k-1", "started_config_hash": "h-1"}, 0},
+		{"an allocated manual key", map[string]string{"session_origin": "manual", "session_key": "k-1"}, 0},
+	} {
+		env := newReconcilerTestEnv(t)
+		session := env.createSessionBead("mayor", "mayor")
+		c.meta["work_dir"] = t.TempDir()
+		env.setSessionMetadata(&session, c.meta)
+		tp := driftResumeSessionIDCapableTemplateParams()
+		tp.WorkDir = c.meta["work_dir"]
+		rec := events.NewFake()
+		executePlannedStartsTraced(context.Background(), []startCandidate{{info: env.sessionInfo(session.ID), tp: tp}},
+			&config.City{Agents: []config.Agent{{Name: "mayor"}}}, map[string]TemplateParams{"mayor": tp}, env.sp, env.store, "test-city", env.city,
+			&clock.Fake{Time: time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC)}, rec, 10*time.Second, &env.stdout, &env.stderr, nil,
+			withStartStabilityWaiter(immediateStartStabilityWaiter), withSessionStaleKeyDetectionWaiter(immediateSessionStaleKeyDetectionWaiter))
+		if got := conversationResets(t, rec.Events, session.ID, tp); got != c.want {
+			t.Errorf("%s: %d session.conversation_reset events, want %d (stderr %s)", c.name, got, c.want, env.stderr.String())
+		}
+	}
+}
+
+// Kills a launch-drift relaunch that starts a committed manual conversation
+// fresh silently (mc-v9xzh): once the warm relaunch succeeds it records one
+// session.conversation_reset{reason:stale-key}; a row that is not manual
+// records none.
+func TestLaunchDriftRelaunchRecordsConversationReset(t *testing.T) {
+	prev := staleResumeKeyProbe
+	staleResumeKeyProbe = func([]string, string, string, string) (bool, bool) { return false, true }
+	t.Cleanup(func() { staleResumeKeyProbe = prev })
+	for _, manual := range []bool{true, false} {
+		env := newReconcilerTestEnv(t)
+		env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+		rec := events.NewFake()
+		tp := TemplateParams{Command: "claude", SessionName: "worker", TemplateName: "worker"}
+		if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "claude"}); err != nil {
+			t.Fatal(err)
+		}
+		b := env.createSessionBead("worker", "worker")
+		env.markSessionActive(&b)
+		meta := map[string]string{"provider": "claude", "work_dir": t.TempDir(), "session_key": "k-1"}
+		if manual {
+			meta["session_origin"] = "manual"
+		}
+		env.setSessionMetadata(&b, meta)
+		agentCfg := sessionCoreConfigForHashInfo(tp, env.sessionInfo(b.ID))
+		oldCfg := agentCfg
+		oldCfg.Command = "stale-" + agentCfg.Command
+		env.setSessionMetadata(&b, map[string]string{
+			"started_config_hash":    runtime.CoreFingerprint(agentCfg),
+			"started_provision_hash": runtime.ProvisionFingerprint(oldCfg),
+			"started_launch_hash":    runtime.LaunchFingerprint(oldCfg),
+		})
+		ok, _ := relaunchAgentForLaunchDrift(context.Background(), env.sp, sessionFrontDoor(env.store), env.sessionInfo(b.ID), "worker",
+			tp, t.TempDir(), env.cfg, env.store, dispatchOptionSources{}, runtime.CoreFingerprint(agentCfg), runtime.CoreFingerprint(agentCfg),
+			runtime.ProvisionFingerprint(oldCfg), runtime.LaunchFingerprint(oldCfg), []string{"Command"}, rec, nil, &env.stdout, &env.stderr)
+		if !ok || env.sp.CountCalls("Relaunch", "worker") != 1 {
+			t.Fatalf("manual %v: relaunch = %v, relaunches %d; stderr %q", manual, ok, env.sp.CountCalls("Relaunch", "worker"), env.stderr.String())
+		}
+		want := 0
+		if manual {
+			want = 1
+		}
+		if got := conversationResets(t, rec.Events, b.ID, tp); got != want {
+			t.Errorf("manual %v: %d session.conversation_reset events, want %d", manual, got, want)
+		}
+	}
+}
+
+// Kills a prepare that misreports whether its launch resumes: a committed
+// key whose transcript is present resumes; an allocated key, a committed one
+// whose transcript is gone (cleared, a fresh start), and wake_mode=fresh do
+// not.
+func TestBuildPreparedStartRecordsAResume(t *testing.T) {
+	for _, c := range []struct {
+		name             string
+		meta             map[string]string
+		present, resumed bool
+	}{
+		{"a committed key, transcript present", map[string]string{"started_config_hash": "h-1"}, true, true},
+		{"a committed key, transcript gone", map[string]string{"started_config_hash": "h-1"}, false, false},
+		{"an allocated key", nil, false, false},
+		{"wake_mode fresh", map[string]string{"started_config_hash": "h-1", "wake_mode": "fresh"}, true, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			prev := staleResumeKeyProbe
+			staleResumeKeyProbe = func([]string, string, string, string) (bool, bool) { return c.present, true }
+			t.Cleanup(func() { staleResumeKeyProbe = prev })
+			workDir := t.TempDir()
+			meta := map[string]string{"session_name": "worker", "template": "worker", "state": "asleep", "provider": "claude", "work_dir": workDir, "session_key": "k-1"}
+			maps.Copy(meta, c.meta)
+			store := beads.NewMemStore()
+			row, err := store.Create(beads.Bead{Title: "worker", Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: meta})
+			if err != nil {
+				t.Fatal(err)
+			}
+			prepared, _, err := buildPreparedStart(startCandidate{info: sessiontest.SeedBead(t, row), tp: TemplateParams{
+				TemplateName: "worker", SessionName: "worker", Command: "claude", WorkDir: workDir, ResolvedProvider: claudeResumeProvider(),
+			}}, &config.City{}, store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if prepared.resumed != c.resumed {
+				t.Fatalf("resumed %v (command %q), want %v", prepared.resumed, prepared.cfg.Command, c.resumed)
+			}
+		})
+	}
+}
+
+// Kills legacy's failed start bypassing the resume backstop (mc-bm1af):
+// commitStartFailure classifies its error, so a resume launch the provider
+// refused resets the conversation on its first failure and records the reset.
+func TestCommitStartFailureFeedsTheResumeBackstop(t *testing.T) {
+	prev := staleResumeKeyProbe
+	staleResumeKeyProbe = func([]string, string, string, string) (bool, bool) { return true, true }
+	t.Cleanup(func() { staleResumeKeyProbe = prev })
+	for _, resumed := range []bool{true, false} {
+		store := beads.NewMemStore()
+		row, err := store.Create(beads.Bead{Title: "worker", Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: map[string]string{
+			"session_name": "worker", "template": "worker", "state": "asleep", "session_origin": "manual", "provider": "claude", "work_dir": "/work",
+			"session_key": "k-1", "started_config_hash": "h-1",
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec := events.NewFake()
+		commitStartFailure(startResult{
+			prepared: preparedStart{candidate: startCandidate{info: sessiontest.SeedBead(t, row), tp: TemplateParams{SessionName: "worker", TemplateName: "worker"}}, resumed: resumed},
+			err:      fmt.Errorf("%w; last pane output: No conversation found with session ID: k-1", runtime.ErrSessionDiedDuringStartup),
+			outcome:  TraceOutcomeProviderError,
+		}, sessionFrontDoor(store), &clock.Fake{Time: time.Now()}, rec, 0, io.Discard, nil)
+		got, _ := store.Get(row.ID)
+		if reset := got.Metadata["session_key"] == ""; reset != resumed || (len(rec.Events) == 1) != resumed {
+			t.Fatalf("resumed %v: key %q events %+v; want the refusal to reset and record it only for a resume launch", resumed, got.Metadata["session_key"], rec.Events)
+		}
 	}
 }
 

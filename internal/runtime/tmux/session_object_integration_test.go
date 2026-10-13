@@ -350,3 +350,49 @@ func TestServerConfirmedDeadRealTmuxKilledServer(t *testing.T) {
 		t.Fatal("ServerConfirmedDead() = false for a server stopped by kill-server")
 	}
 }
+
+// attachAfterCheck reads name detached, as the recycle's attach check does,
+// then attaches a real client to it before the kill (J17).
+func attachAfterCheck(t *testing.T, p *Provider, name string) {
+	t.Helper()
+	if attached, err := p.tm.SessionAttachedWithError(name); err != nil || attached {
+		t.Fatalf("attach check = (%v, %v), want detached (precondition)", attached, err)
+	}
+	if err := p.tm.ensureHiddenAttachedClient(name); err != nil {
+		t.Fatalf("attach a client to %s: %v", name, err)
+	}
+	if attached, err := p.tm.SessionAttachedWithError(name); err != nil || !attached {
+		t.Fatalf("after the attach = (%v, %v), want attached (precondition)", attached, err)
+	}
+}
+
+// A human who attaches after the recycle's attach check keeps the session:
+// the no-client test runs in the same tmux command as the kill. Before the
+// fix the attached zombie was killed and replaced (J17: $23 killed for $24).
+func TestKillZombieObjectRealTmuxRefusesClientAttachedAfterCheck(t *testing.T) {
+	p := newObjectServer(t)
+	startObjectSession(t, p, "zombie", "sleep 300")
+	id, created := objectOf(t, p, "zombie")
+	pid := objectFormat(t, p, "zombie", "#{pane_pid}")
+	attachAfterCheck(t, p, "zombie")
+	if res, err := p.KillZombieObject("zombie", id, created, pid); err != nil || res != runtime.SessionObjectChanged {
+		t.Fatalf("KillZombieObject(attached) = %v, %v; want refused", res, err)
+	}
+	if got, _ := objectOf(t, p, "zombie"); got != id {
+		t.Fatalf("session object = %s, want the attached %s to survive", got, id)
+	}
+}
+
+// The corpse kill refuses an attached session the same way: a human looking
+// at the dead pane keeps it.
+func TestKillCorpseObjectRealTmuxRefusesClientAttachedAfterCheck(t *testing.T) {
+	p := newObjectServer(t)
+	id, created := makeCorpse(t, p, "corpse")
+	attachAfterCheck(t, p, "corpse")
+	if res, err := p.KillCorpseObject("corpse", id, created); err != nil || res != runtime.SessionObjectLive {
+		t.Fatalf("KillCorpseObject(attached) = %v, %v; want refused", res, err)
+	}
+	if got, _ := objectOf(t, p, "corpse"); got != id {
+		t.Fatalf("session object = %s, want the attached %s to survive", got, id)
+	}
+}

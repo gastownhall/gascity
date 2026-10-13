@@ -2020,37 +2020,57 @@ func (t *Tmux) isSessionAttachedForAttach(target string) bool {
 	return attached && err == nil
 }
 
-// WakePane tries to trigger a SIGWINCH in a pane with a resize dance, to wake
-// up Claude Code's event loop by simulating a terminal resize.
+// WakePane tries to trigger a SIGWINCH in target's agent pane with a resize
+// dance, to wake up Claude Code's event loop by simulating a terminal resize.
 //
 // When Claude runs in a detached tmux session, its TUI library may not process
 // stdin until a terminal event occurs. Attaching triggers SIGWINCH which wakes
-// the event loop. The resize dance does not deliver that yet: it sends no
-// SIGWINCH on a single-pane window (ga-vkm6pu) and leaves a split pane one row
-// tall (ga-bwyec7); see the comment inside.
+// the event loop. The dance shrinks the agent pane by one row and restores it:
+// tmux reads -y as an absolute height, so it reads the pane's height first.
+// In a split window both panes resize and get back their heights. A pane
+// that fills its window cannot change height, so a single-pane window gets no
+// SIGWINCH (ga-vkm6pu).
+//
+// The pane is the session's agent pane (see agentPaneTarget), fenced to the
+// session and window it was found in: a bare session target is prefix-matched
+// (worker-1 gone resolves worker-10) and names the window's active pane,
+// which may be a human's split. A pane it cannot name is not resized. A pane
+// id or other explicit target is resized as given.
 //
 // Note: This always attempts the resize. Use WakePaneIfDetached to skip
 // attached sessions where the wake is unnecessary.
 func (t *Tmux) WakePane(target string) {
-	// tmux reads -y as an absolute height, not a delta: "-y -1" always fails
-	// with "height too small", and "-y +1" sets the pane to one row. On a
-	// single-pane window neither call resizes anything, so no SIGWINCH is
-	// sent; on a split window the pane is left one row tall. Both errors are
-	// discarded because the wake is best-effort.
-	_, _ = t.run("resize-pane", "-t", target, "-y", "-1")
-	time.Sleep(50 * time.Millisecond)
-	_, _ = t.run("resize-pane", "-t", target, "-y", "+1")
-}
-
-// WakePaneIfDetached runs WakePane only if the session is detached, so it
-// carries WakePane's limits (ga-vkm6pu, ga-bwyec7). This avoids unnecessary
-// latency on attached sessions where Claude is already processing terminal
-// events.
-func (t *Tmux) WakePaneIfDetached(target string) {
-	if t.IsSessionAttached(target) {
+	out, err := t.readAgentPane(t.run, target, "#{window_id}.#{pane_id} #{pane_height}")
+	if err != nil {
 		return
 	}
-	t.WakePane(target)
+	pane, heightField, _ := strings.Cut(strings.TrimSpace(out), " ")
+	height, err := strconv.Atoi(heightField)
+	if err != nil || height < 2 {
+		return
+	}
+	if validSessionNameRe.MatchString(target) {
+		if !strings.HasPrefix(pane, "@") || !strings.Contains(pane, ".%") {
+			return
+		}
+		target = paneTarget(target) + pane
+	}
+	// Both errors are discarded because the wake is best-effort.
+	_, _ = t.run("resize-pane", "-t", target, "-y", strconv.Itoa(height-1))
+	time.Sleep(50 * time.Millisecond)
+	_, _ = t.run("resize-pane", "-t", target, "-y", strconv.Itoa(height))
+}
+
+// WakePaneIfDetached runs WakePane on pane only if session is detached, so
+// it carries WakePane's limit (ga-vkm6pu). This avoids unnecessary latency on
+// attached sessions where Claude is already processing terminal events. pane
+// is the agent pane the caller already resolved (agentInputTarget), so the
+// wake does not look it up again; a session name is resolved by WakePane.
+func (t *Tmux) WakePaneIfDetached(session, pane string) {
+	if t.IsSessionAttached(session) {
+		return
+	}
+	t.WakePane(pane)
 }
 
 func (t *Tmux) providerEnv(target string) string {
@@ -3124,7 +3144,7 @@ func (t *Tmux) nudgeSession(
 	// even though tmux delivers the bytes (no error). SIGWINCH kicks the
 	// render/input loop so the paste is actually consumed. The post-send wake
 	// below remains for the submit Enter.
-	t.WakePaneIfDetached(session)
+	t.WakePaneIfDetached(session, target)
 
 	// A permission prompt may have appeared since the caller last looked
 	// (the lock wait alone can take seconds): nothing may be typed into it.
@@ -3202,7 +3222,7 @@ func (t *Tmux) nudgeSession(
 
 	// 5. Wake detached panes before Enter. Some TUIs accept pasted input while
 	// detached but drop the submit key until a terminal resize wakes their loop.
-	t.WakePaneIfDetached(session)
+	t.WakePaneIfDetached(session, target)
 
 	// 6. Send the provider's declared submit key sequence (see
 	// nudgeSubmitKeySequences — default plain Enter) and, for providers with
@@ -3233,7 +3253,7 @@ func (t *Tmux) nudgeSession(
 	sendSubmit := func() error {
 		return prompt.submit(func() error { return t.sendNudgeSubmitSequence(target, submitKeys) })
 	}
-	wake := func() { t.WakePaneIfDetached(session) }
+	wake := func() { t.WakePaneIfDetached(session, target) }
 	if t.submitVerifyEligible(target) {
 		confirmed, sawIdle, err := submitEnterAndConfirm(sendSubmit, wake, func() (bool, error) { return t.paneBusy(target) }, time.Sleep)
 		if isLookRefusal(err) {
@@ -3381,7 +3401,7 @@ func (t *Tmux) NudgePane(pane, message string) error {
 
 	// 4. Wake detached panes before Enter. See NudgeSession for why this
 	// happens before and after submit.
-	t.WakePaneIfDetached(pane)
+	t.WakePaneIfDetached(pane, pane)
 
 	// 5. Send the provider's declared submit key sequence with retry
 	// (critical for message submission). See NudgeSession/nudgeSubmitKeySequences.
@@ -3396,7 +3416,7 @@ func (t *Tmux) NudgePane(pane, message string) error {
 			continue
 		}
 		// 6. Wake again so the submitted turn is processed promptly.
-		t.WakePaneIfDetached(pane)
+		t.WakePaneIfDetached(pane, pane)
 		delivered = true
 		return nil
 	}

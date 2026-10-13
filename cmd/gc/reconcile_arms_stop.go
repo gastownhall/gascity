@@ -2,6 +2,7 @@ package main
 
 import (
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -38,21 +39,36 @@ func armStop(r *rowFacts) (intent, bool) {
 		}
 		return it, true
 	}
-	if !operatorDormantStop(r.row.Info) || !r.freshOwnAlive() {
+	if !operatorDormantStop(r.row.Info, r.w.Now) || !r.freshOwnAlive() {
 		return intent{}, false
 	}
 	return intent{Kind: intentStop, Reason: decideDormantStop, Basis: basis}, true
 }
 
 // operatorDormantStop reports a row an operator made dormant whose runtime
-// the controller stops directly: suspended, killed (a kill whose own stop
-// did not finish), or holding the user-hold intent of a managed suspend.
-func operatorDormantStop(info session.Info) bool {
+// the controller stops directly: suspended under a hold, killed (a kill
+// whose own stop did not finish), or holding the user-hold intent of a
+// managed suspend. A soft suspend is no hold (CONTRACT v5.9u): A6's awake
+// heal reads its live row awake, as legacy's state heal does.
+func operatorDormantStop(info session.Info, now time.Time) bool {
 	switch {
 	case session.State(strings.TrimSpace(info.MetadataState)) == session.StateSuspended:
-		return true
+		return !softSuspended(info, now)
 	case session.SleepReason(strings.TrimSpace(info.SleepReason)) == session.SleepReasonKilled:
 		return true
 	}
 	return session.DispositionOfInfo(info).KeepsSlot()
+}
+
+// softSuspended reports state=suspended under no hold: a sweep's soft
+// suspend, with no operator suspend, kill, wait or live timer beside it
+// (Disposition.OperatorDormant). A city stop's sleep_reason is no hold
+// either, as RefusesPreWake reads it. CONTRACT v5.9u: it is no hold, and
+// legacy's state heal reads it awake or asleep by its runtime.
+func softSuspended(info session.Info, now time.Time) bool {
+	d := session.DispositionOfInfo(info)
+	if d.Reason == session.SleepReasonCityStop {
+		d.Reason = ""
+	}
+	return session.State(strings.TrimSpace(info.MetadataState)) == session.StateSuspended && !d.OperatorDormant(now)
 }

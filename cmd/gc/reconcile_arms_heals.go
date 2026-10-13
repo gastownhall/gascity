@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker/transcript"
@@ -34,6 +35,7 @@ const (
 	decideCreatingHeal    = "creating-heal"
 	decideDeadRuntimeHeal = "dead-runtime-heal"
 	decideAwakeHeal       = "awake-heal"
+	decideSuspendHeal     = "soft-suspend-heal"
 	decideStabilityClear  = "stability-clear"
 	decideDetachedAt      = "detached-at"
 	decideStrandedClear   = "stranded-clear"
@@ -180,8 +182,10 @@ func armDeadRuntimeHeal(r *rowFacts) (intent, bool) {
 	if r.entry == nil || !committed(info) || r.entry.Desired == desireDrain || !r.freshGoneOrClassified() {
 		return intent{}, false
 	}
-	patch, class, _ := deadRuntimePatch(r, true)
-	return r.healClass(intentRowHealFresh, decideDeadRuntimeHeal, patch, class)
+	patch, class, _, ev := deadRuntimePatch(r, true)
+	it, ok := r.healClass(intentRowHealFresh, decideDeadRuntimeHeal, patch, class)
+	it.Event = ev
+	return it, ok
 }
 
 // deadRuntimePatch is legacy's write for a committed row whose runtime is
@@ -200,7 +204,11 @@ func armDeadRuntimeHeal(r *rowFacts) (intent, bool) {
 // With heal false the patch is the death's accrual alone, the row left
 // committed: a stranded seat's record of its death while its restart
 // cannot run (startHealed).
-func deadRuntimePatch(r *rowFacts, heal bool) (patch session.MetadataPatch, class session.DispositionPatch, accrued bool) {
+//
+// ev is what the write records once it lands: a committed manual
+// conversation's session.conversation_reset{reason:resume-failed}, when a
+// rapid crash of a resume launch resets it by the resume backstop.
+func deadRuntimePatch(r *rowFacts, heal bool) (patch session.MetadataPatch, class session.DispositionPatch, accrued bool, ev *events.Event) {
 	info := r.row.Info
 	patch = session.MetadataPatch{}
 	if heal {
@@ -214,7 +222,7 @@ func deadRuntimePatch(r *rowFacts, heal bool) (patch session.MetadataPatch, clas
 		// disposition's Sleep cell.
 		maps.Copy(patch, session.SleepPatch(r.w.Now, drainIdle))
 		session.KeepQuarantineReason(patch, session.DispositionOfInfo(info), info.SleepReason, r.w.Now) // a quarantine's reason dominates (mc-slkxd)
-		return patch, session.CellInfo(info, session.ActorController, session.DispEvent{Kind: session.EvSleep}, r.w.Now), false
+		return patch, session.CellInfo(info, session.ActorController, session.DispEvent{Kind: session.EvSleep}, r.w.Now), false, nil
 	}
 	_, draining := activeStop(r.row)
 	until := r.w.Now.Add(defaultQuarantineDuration)
@@ -228,12 +236,24 @@ func deadRuntimePatch(r *rowFacts, heal bool) (patch session.MetadataPatch, clas
 	case session.ExitRapidCrash:
 		// Legacy resets the conversation unless a probe finds its transcript:
 		// the PreWake's stale-key clear probes a keyed one; nothing can probe
-		// the others, so their reset is written here.
-		if folded := foldInfo(info, patch); (strings.TrimSpace(folded.SessionKey) != "" || strings.TrimSpace(folded.StartedConfigHash) != "") &&
-			!transcript.ProviderHasKeyedTranscript(sessionTranscriptProvider(nil, info)) {
-			maps.Copy(patch, session.ConversationResetPatch(true, r.w.Now))
-		}
+		// the others, so their reset is written here. A keyed one, taken as
+		// kept, meets the resume backstop (resumeBackstop): a rapid crash of a
+		// resume launch counts, and the bound resets it here.
 		attempts, _ := strconv.Atoi(info.WakeAttemptsMetadata)
+		if folded := foldInfo(info, patch); strings.TrimSpace(folded.SessionKey) != "" || strings.TrimSpace(folded.StartedConfigHash) != "" {
+			keyed := transcript.ProviderHasKeyedTranscript(sessionTranscriptProvider(nil, info))
+			failures, _ := strconv.Atoi(folded.ResumeFailures)
+			backstop, count := resumeBackstop(failures, keyed, resumeFailure{counted: folded.ResumeLaunch == "true"})
+			if !keyed || backstop {
+				maps.Copy(patch, session.ConversationResetPatch(true, r.w.Now))
+				count = 0
+			}
+			maps.Copy(patch, resumeFailuresPatch(folded, count))
+			if backstop && session.HasStartedManualConversation(folded) {
+				e := resumeFailedConversationResetEvent(folded, sessionAgentMetricIdentityInfo(folded, worldCfg(r.w)))
+				ev = &e
+			}
+		}
 		accrual = session.WakeFailureAccrualPatch(attempts, defaultMaxWakeAttempts, until)
 	case session.ExitChurn:
 		if strings.TrimSpace(foldInfo(info, patch).SessionKey) != "" {
@@ -245,14 +265,22 @@ func deadRuntimePatch(r *rowFacts, heal bool) (patch session.MetadataPatch, clas
 		if info.ChurnCount != "" && info.ChurnCount != "0" {
 			patch["churn_count"] = "0"
 		}
-		return patch, class, false
+		return patch, class, false, nil
 	default:
-		return patch, class, false
+		return patch, class, false, nil
 	}
 	maps.Copy(patch, accrual.Patch)
 	class = accrual.Class(info, r.w.Now)
 	patch["last_woke_at"] = ""
-	return patch, class, true
+	return patch, class, true, ev
+}
+
+// worldCfg is w's city config, nil without one.
+func worldCfg(w *World) *config.City {
+	if w.Env == nil {
+		return nil
+	}
+	return w.Env.Cfg
 }
 
 // heartbeatHeld reports SESS-602's heartbeat hold (Disposition.HeartbeatHeld).
@@ -260,19 +288,33 @@ func heartbeatHeld(info session.Info, now time.Time) bool {
 	return session.DispositionOfInfo(info).HeartbeatHeld(now)
 }
 
-// armAwakeHeal is legacy's heal of an asleep row whose own runtime is alive
-// (ProjectLifecycle's alive projection): the row reads awake again. The
-// inventory's identity read must find the row's token (O2 Current); the
-// effect proves it again fresh. Without it a runtime started outside the
-// controller on an asleep row (`gc session attach`) stays orphaned, as S1
-// reads the shape as Noop. Unlike legacy, a row an operator holds dormant is
-// never woken (I15, I-STOP-3/4; Disposition.OperatorDormant): its runtime is the
-// operator-dormant stop path's (C5a3's lost-commit stop, C6b2). That covers a
-// `gc session kill` that lands between a PreWake and its provider Start,
-// before any runtime exists to fence.
+// armSoftSuspendHeal is legacy's state heal of a soft-suspended row whose
+// runtime is gone (CONTRACT v5.9u): the row reads asleep, its suspended_at
+// left as legacy leaves it, and decideRow composes the heal with the row's
+// restart (startHealed), so its assigned work wakes it in the same pass, as
+// legacy heals and wakes in one tick. A live one is armAwakeHeal's.
+func armSoftSuspendHeal(r *rowFacts) (intent, bool) {
+	if !softSuspended(r.row.Info, r.w.Now) || !r.freshGoneOrClassified() {
+		return intent{}, false
+	}
+	return r.heal(intentRowHealFresh, decideSuspendHeal, session.MetadataPatch{"state": string(session.StateAsleep)})
+}
+
+// armAwakeHeal is legacy's heal of an asleep or soft-suspended row whose own
+// runtime is alive (ProjectLifecycle's alive projection; CONTRACT v5.9u):
+// the row reads awake again. The inventory's identity read must find the
+// row's token (O2 Current); the effect proves it again fresh. Without it a
+// runtime started outside the controller on an asleep row (`gc session
+// attach`) stays orphaned, as S1 reads the shape as Noop. Unlike legacy, a
+// row an operator holds dormant is never woken (I15, I-STOP-3/4;
+// Disposition.OperatorDormant): its runtime is the operator-dormant stop
+// path's (C5a3's lost-commit stop, C6b2). That covers a `gc session kill`
+// that lands between a PreWake and its provider Start, before any runtime
+// exists to fence.
 func armAwakeHeal(r *rowFacts) (intent, bool) {
 	info := r.row.Info
-	if strings.TrimSpace(info.MetadataState) != string(session.StateAsleep) || session.DispositionOfInfo(info).OperatorDormant(r.w.Now) || !r.freshOwnAlive() {
+	asleep := strings.TrimSpace(info.MetadataState) == string(session.StateAsleep) && !session.DispositionOfInfo(info).OperatorDormant(r.w.Now)
+	if !asleep && !softSuspended(info, r.w.Now) || !r.freshOwnAlive() {
 		return intent{}, false
 	}
 	return r.heal(intentRowHealFresh, decideAwakeHeal, session.MetadataPatch{"state": string(session.StateAwake)})
@@ -293,6 +335,7 @@ func armStabilityClear(r *rowFacts) (intent, bool) {
 	if info.WakeAttemptsMetadata != "" && info.WakeAttemptsMetadata != "0" {
 		patch["wake_attempts"] = "0"
 	}
+	maps.Copy(patch, resumeFailuresPatch(info, 0)) // a stable run ends the resume backstop's run, as legacy's clearWakeFailures
 	var class session.DispositionPatch
 	if info.QuarantinedUntil != "" {
 		// The Quarantine cell with no deadline: the quarantine ends.

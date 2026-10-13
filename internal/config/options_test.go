@@ -858,7 +858,8 @@ func TestCompleteResumeCommandDefaultsDoesNotTreatBareMultiTokenFlagAsPresent(t 
 }
 
 func TestStripArgsSlice_PartialOverlap_CodexSuggest(t *testing.T) {
-	// Codex's "suggest" choice has a multi-flag FlagArgs:
+	// A legacy codex-shaped schema (the retired untrusted spelling, kept as
+	// mechanism test data) gives "suggest" a multi-flag FlagArgs:
 	//   ["--ask-for-approval", "untrusted", "--sandbox", "read-only"]
 	// After splitFlagArgs, this becomes two groups:
 	//   ["--ask-for-approval", "untrusted"] and ["--sandbox", "read-only"]

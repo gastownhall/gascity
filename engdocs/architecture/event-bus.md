@@ -180,7 +180,9 @@ are enforced by the conformance suite in
    because event recording failed.
 
 6. **Events are immutable once recorded.** There is no Update or Delete
-   operation. The append-only log only grows.
+   operation. In `FileRecorder`, rotation moves recorded events into
+   archives unchanged, and only the opt-in `archive_retain_age` removes
+   them (see Known Limitations).
 
 7. **List with empty Filter returns all events.** A zero-valued Filter
    matches everything.
@@ -422,17 +424,21 @@ suite against a stateful jq-based mock script.
   provider uses channel-based notification for zero-latency delivery
   in tests.
 
-- **No event retention or rotation.** The JSONL file grows without
-  bound. There is no built-in log rotation, retention policy, or
-  compaction. For long-running cities, manual truncation or external
-  log rotation is needed.
+- **Rotation and retention.** `[events.rotation]` rotates the active
+  `events.jsonl` into gzip archives once it passes `max_size_bytes`
+  (default 256 MiB; rotation is on by default). `Watch` backfills a
+  resume cursor across the archives, so rotation alone loses no
+  events. `archive_retain_age` prunes older archives; a cursor older
+  than the oldest retained event cannot be replayed in full, and the
+  streams do not yet signal that gap.
 
 - **ReadFiltered streams without indexes.** `ReadFiltered` scans the
-  JSONL file once, applies `Filter` as it reads, and stops early when a
-  positive direct-provider `Limit` is reached. There are still no
-  indexes, so broad time/type/actor/subject queries remain linear in the
-  event log until their limit is satisfied. `ReadFrom` with byte offsets
-  provides incremental reading for the Watch path.
+  archives that overlap the filter and then the active JSONL file,
+  applies `Filter` as it reads, and stops early when a positive
+  direct-provider `Limit` is reached. There are still no indexes, so
+  broad time/type/actor/subject queries remain linear in the event log
+  until their limit is satisfied. `ReadFrom` with byte offsets provides
+  incremental reading for the Watch path.
 
 - **No event schema validation.** Event types are string constants with
   no runtime validation. Recording an event with a misspelled type

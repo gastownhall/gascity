@@ -755,11 +755,13 @@ func AgentHasHooks(agent *Agent, ws *Workspace, providerName string, cityProvide
 
 // mergeAgentOverrides applies non-zero agent-level fields on top of the
 // resolved provider. Env merges additively (agent keys add to / override
-// base keys). All other fields replace when set.
+// base keys). All other fields replace when set. Agent args are the leaf
+// layer: normalizeAgentArgs keeps the options their schema-managed flags
+// select, which override the agent's own option_defaults for those keys.
 func mergeAgentOverrides(rp *ResolvedProvider, agent *Agent) {
+	agentDefaults := cloneStringMap(agent.OptionDefaults)
 	if len(agent.Args) > 0 {
-		rp.Args = make([]string, len(agent.Args))
-		copy(rp.Args, agent.Args)
+		rp.Args, agentDefaults = normalizeAgentArgs(rp.OptionsSchema, agent.Args, agentDefaults)
 	}
 	if agent.PromptMode != "" {
 		rp.PromptMode = agent.PromptMode
@@ -797,14 +799,62 @@ func mergeAgentOverrides(rp *ResolvedProvider, agent *Agent) {
 	}
 
 	// OptionDefaults: agent overrides merge on top of effective defaults.
-	if len(agent.OptionDefaults) > 0 {
+	if len(agentDefaults) > 0 {
 		if rp.EffectiveDefaults == nil {
 			rp.EffectiveDefaults = make(map[string]string)
 		}
-		for k, v := range agent.OptionDefaults {
+		for k, v := range agentDefaults {
 			rp.EffectiveDefaults[k] = v
 		}
 	}
+}
+
+// normalizeAgentArgs returns a copy of an agent's args with the
+// schema-managed flags stripped, plus defaults (the agent's own
+// option_defaults) with the options those flags select merged over them.
+// Unlike a provider layer, the args are kept as written, and defaults
+// returned unchanged, when any schema flag in them belongs to no option they
+// select, such as one group of a grouped choice: stripping it would silently
+// drop the flag and leave its option at the default, which can grant more
+// than the args asked for.
+func normalizeAgentArgs(schema []ProviderOption, args []string, defaults map[string]string) ([]string, map[string]string) {
+	kept := cloneStrings(args)
+	if len(schema) == 0 {
+		return kept, defaults
+	}
+	selected := make(map[string]string)
+	stripped := stripArgsSlice(kept, CollectAllSchemaFlags(schema), schema, selected)
+	if !schemaFlagsBelongToSelected(schema, kept, selected) {
+		return kept, defaults
+	}
+	if defaults == nil {
+		defaults = make(map[string]string, len(selected))
+	}
+	for key, value := range selected {
+		defaults[key] = value
+	}
+	return stripped, defaults
+}
+
+// schemaFlagsBelongToSelected reports whether every schema flag group that
+// appears in args belongs to a choice of an option whose key is in selected.
+func schemaFlagsBelongToSelected(schema []ProviderOption, args []string, selected map[string]string) bool {
+	var selectedSchema []ProviderOption
+	for _, opt := range schema {
+		if _, ok := selected[opt.Key]; ok {
+			selectedSchema = append(selectedSchema, opt)
+		}
+	}
+	owned := make(map[string]bool)
+	for _, group := range CollectAllSchemaFlags(selectedSchema) {
+		owned[strings.Join(group, "\x00")] = true
+	}
+	for _, group := range CollectAllSchemaFlags(schema) {
+		if _, found := findTokenSequenceInArgs(args, group, nil); found && !owned[strings.Join(group, "\x00")] {
+			return false
+		}
+	}
+	return true
 }
 
 // resolvedChainToSpec folds a chain-resolved ResolvedProvider back into
