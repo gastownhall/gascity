@@ -752,8 +752,8 @@ func (p *decidePass) retains(template string, info session.Info) bool {
 // honorWakes is D7 rule 4 (CONTRACT v5.10n): a row with a pending explicit
 // wake AL1 honors (WakeHonored) is wanted, in or out of its template's
 // desired set, so it is never Sleep or Drain and no drain or close takes it.
-// It wakes within its template's max_active_sessions, counting the rows
-// woken and the rows alive; past the max, or while a hold or quarantine
+// It wakes within its template's max_active_sessions (underMaxActive); past
+// the max, or while a hold or quarantine
 // suppresses the wake, it is Keep and the wake waits. Rows are taken in key
 // order, so the bound is deterministic.
 func (p *decidePass) honorWakes(decisions map[string]AwakeDecision) {
@@ -776,8 +776,11 @@ func (p *decidePass) honorWakes(decisions map[string]AwakeDecision) {
 }
 
 // underMaxActive reports room under template's max_active_sessions for row
-// k to wake: the template's other rows that are woken or alive number fewer
-// than the max. No max (nil) is unlimited.
+// k to wake: everything else of the template that runs or is about to
+// numbers fewer than the max. That is its other rows woken this pass, alive,
+// or of unknown liveness (the awake set reads unknown as running), the
+// creates this pass plans, and the creates in flight the census does not
+// show yet. No max (nil) is unlimited.
 func (p *decidePass) underMaxActive(k rowKey, template string) bool {
 	agent := p.agentByTemplate(template)
 	if agent == nil || agent.EffectiveMaxActiveSessions() == nil {
@@ -785,7 +788,17 @@ func (p *decidePass) underMaxActive(k rowKey, template string) bool {
 	}
 	active := 0
 	for other, e := range p.snap.Entries {
-		if other != k && e.Template == template && (e.Desired == desireWake || e.Liveness == livenessAlive) {
+		if other != k && e.Template == template && (e.Desired == desireWake || e.Liveness == livenessAlive || e.Liveness == livenessUnknown) {
+			active++
+		}
+	}
+	for _, plan := range p.plans {
+		if plan.Template == template {
+			active++
+		}
+	}
+	for _, r := range p.inFlight {
+		if r.Template == template {
 			active++
 		}
 	}
