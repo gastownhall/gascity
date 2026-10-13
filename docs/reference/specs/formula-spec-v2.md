@@ -759,6 +759,14 @@ The step `timeout` applies as a general bound on the check script; a
 `children` wraps each iteration in a scope bead whose members default to
 `gc.on_fail = "abort_scope"` (section 3.5).
 
+**A hard failure ends the loop.** When an iteration closes
+`gc.outcome = fail` with `gc.failure_class = hard` — the iteration's own work
+bead, or, for a check step with `children`, the member whose hard failure
+aborted the iteration scope — the orchestrator closes the check step failed in
+that iteration without running the check script: `gc.failure_class = hard`, the
+member's `gc.failure_reason`, and `gc.final_disposition = hard_fail`. A
+transient or missing class leaves the loop to iterate while attempts remain.
+
 `check` must not be combined with `loop`, `on_complete`, `gate`, `expand`,
 `assignee`, or `retry`.
 
@@ -992,7 +1000,10 @@ metadata = { "gc.kind" = "cleanup", "gc.scope_ref" = "body", "gc.scope_role" = "
 value of `gc.on_fail`. When a scoped member fails, the orchestrator skips
 all remaining open scope members, propagates non-`gc.*` member metadata
 onto the scope body (so diagnostics survive), and closes the body with
-`gc.outcome = fail`. The worker-result contract for `abort_scope` members
+`gc.outcome = fail`. When the failing member closed with
+`gc.failure_class = hard`, the body also keeps that failure record:
+`gc.failure_class = hard`, the member's `gc.failure_reason`, and
+`gc.failure_subject` naming the member. The worker-result contract for `abort_scope` members
 is **fail-closed**: a member that closes with `gc.outcome = fail` counts
 as failed, and so does a member that declared `abort_scope` and closed
 with a missing or unknown `gc.outcome` — only `pass` and `skipped` do not

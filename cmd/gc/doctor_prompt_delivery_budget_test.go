@@ -386,6 +386,76 @@ func TestPromptDeliveryBudgetCheck_RenderError(t *testing.T) {
 	if !strings.Contains(details, "render") {
 		t.Errorf("details missing render-warning wording: %v", res.Details)
 	}
+	if !strings.Contains(details, "fell back to raw text") {
+		t.Errorf("details missing raw-text fallback wording: %v", res.Details)
+	}
+}
+
+// TestPromptDeliveryBudgetCheck_MissingTemplate guards that a declared
+// prompt_template that does not exist is left to config-refs. renderPrompt
+// returns no prompt for it after a stderr warning; this check must neither
+// report that as a raw-text fallback nor report the path a second time.
+func TestPromptDeliveryBudgetCheck_MissingTemplate(t *testing.T) {
+	clearPromptDeliveryBudgetEnv(t)
+	cityPath := t.TempDir()
+	tmpl := "prompts/does-not-exist.template.md"
+	agent := promptFixtureAgent("missing-template-agent", tmpl, "subprocess", "arg")
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "demo"},
+		Agents:    []config.Agent{agent},
+	}
+
+	res := runPromptDeliveryBudgetCheck(t, cfg, cityPath)
+	if res.Status != doctor.StatusOK {
+		t.Fatalf("missing prompt_template: status = %v, want StatusOK (config-refs reports it); message=%q details=%v", res.Status, res.Message, res.Details)
+	}
+	if strings.Contains(joinedDetails(res), "fell back to raw text") {
+		t.Errorf("missing prompt_template reported as a raw-text fallback: %v", res.Details)
+	}
+
+	refs := doctor.NewConfigRefsCheck(cfg, cityPath).Run(&doctor.CheckContext{CityPath: cityPath})
+	if refs.Status != doctor.StatusWarning || !strings.Contains(joinedDetails(refs), filepath.Join(cityPath, tmpl)) {
+		t.Fatalf("config-refs must report the missing prompt_template this check skips: status = %v, message=%q details=%v", refs.Status, refs.Message, refs.Details)
+	}
+}
+
+// TestPromptDeliveryBudgetCheck_UnreadableTemplateReportsReadError guards
+// that a prompt_template path that stats but cannot be read, which
+// config-refs accepts, is reported with renderPrompt's read error rather
+// than as a raw-text fallback: the render produced no prompt at all.
+func TestPromptDeliveryBudgetCheck_UnreadableTemplateReportsReadError(t *testing.T) {
+	clearPromptDeliveryBudgetEnv(t)
+	cityPath := t.TempDir()
+	// A directory stats but cannot be read as a file. Unlike a mode-0
+	// file, it stays unreadable when the tests run as root.
+	tmpl := "prompts/dir.template.md"
+	tmplPath := filepath.Join(cityPath, tmpl)
+	if err := os.MkdirAll(tmplPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, readErr := os.ReadFile(tmplPath)
+	if readErr == nil {
+		t.Fatalf("fixture %q read as a file; it must fail to read", tmplPath)
+	}
+	agent := promptFixtureAgent("unreadable-template-agent", tmpl, "subprocess", "arg")
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "demo"},
+		Agents:    []config.Agent{agent},
+	}
+
+	res := runPromptDeliveryBudgetCheck(t, cfg, cityPath)
+	if res.Status != doctor.StatusWarning {
+		t.Fatalf("unreadable prompt_template: status = %v, want StatusWarning; message=%q details=%v", res.Status, res.Message, res.Details)
+	}
+	details := joinedDetails(res)
+	for _, want := range []string{agent.Name, readErr.Error()} {
+		if !strings.Contains(details, want) {
+			t.Errorf("details missing %q: %v", want, res.Details)
+		}
+	}
+	if strings.Contains(details, "fell back to raw text") {
+		t.Errorf("unreadable prompt_template reported as a raw-text fallback: %v", res.Details)
+	}
 }
 
 func TestPromptDeliveryBudgetCheck_MultipleAgents_WorstCaseWins(t *testing.T) {

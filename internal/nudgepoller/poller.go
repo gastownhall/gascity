@@ -16,14 +16,16 @@ const (
 )
 
 // ChildEnv returns a copy of environ for a poller child, without the
-// spawning session's GC_SESSION_ID and GC_RUNTIME_EPOCH. The poller names its
-// target in argv and outlives its spawner by design, so it must not read as
-// that session's leaked process to the process-table orphan sweep.
+// spawning session's GC_SESSION_ID and GC_RUNTIME_EPOCH, and without the
+// spawning hook's GC_HOOK_DEADLINE. The poller names its target in argv and
+// outlives its spawner by design, so it must not read as that session's leaked
+// process to the process-table orphan sweep, nor as bound by a hook deadline
+// that passes long before it exits.
 func ChildEnv(environ []string) []string {
 	out := make([]string, 0, len(environ))
 	for _, entry := range environ {
 		switch key, _, _ := strings.Cut(entry, "="); key {
-		case "GC_SESSION_ID", "GC_RUNTIME_EPOCH":
+		case "GC_SESSION_ID", "GC_RUNTIME_EPOCH", "GC_HOOK_DEADLINE":
 			continue
 		}
 		out = append(out, entry)

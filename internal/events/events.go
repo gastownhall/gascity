@@ -183,6 +183,14 @@ const (
 	// drain-ack defect is spreading while this bound quietly absorbs it.
 	// See ga-rxhu2.
 	SessionPoolSlotRetiredAtDrainDeadline = "session.pool_slot_retired_at_drain_deadline"
+	// SessionStrandedClaims fires when claims no lane serves (an unserved
+	// route, or an expanded workflow root with no route of its own) stay
+	// assigned to a closed or retired session: stranded work, which no sweep
+	// releases (owner ruling O5, revised). The close completed; the claims were
+	// kept rather than released into no lane. It fires when the operation
+	// completes and again every 15 minutes (D6's cadence) while they stay, at
+	// once when the set of claims changes.
+	SessionStrandedClaims = "session.stranded_claims"
 	// SessionUnknownState fires when the reconciler observes a session bead
 	// whose metadata state it does not recognize. The reconciler skips such
 	// beads (forward-compatible rollback: an older reconciler ignores a newer
@@ -241,17 +249,25 @@ const (
 	// Emitted by the session reconciler's start-result commit path; the
 	// envelope's Subject carries the session name.
 	SessionColdStartTimeout = "session.cold_start_timeout"
+	// SessionConversationReset fires when the reconciler resets a committed
+	// manual conversation, so that its next start is a fresh conversation
+	// rather than a resume. The payload's reason names the cause: stale-key,
+	// the keyed transcript a resume needs is gone. Emitted once per reset by
+	// the start path (legacy prepare, v2 PreWake); the envelope's Subject is
+	// the agent and SessionID the session bead.
+	SessionConversationReset = "session.conversation_reset"
 	// SessionPending fires when a session gains a pending interaction (an
 	// approval prompt or question the session is blocked on) and
 	// SessionPendingCleared fires when that interaction goes away — answered,
 	// withdrawn, replaced by a different interaction, or the session left the
 	// set GET /v0/city/{cityName}/pending probes. Both carry the same
-	// session_id and request_id, and each fires on a transition, never once per
-	// detection poll. The API server's pending monitor emits them while at
-	// least one event stream is open for the city; see
-	// internal/api/pending_monitor.go for the detection cadence, the
-	// restart/resume contract, and why delivery is not exactly once across a
-	// restart.
+	// session_id and request_id, and each fires once per transition, never once
+	// per detection pass. The city's controller emits them whether or not any
+	// client watches the stream; see internal/pendingwatch for the detection
+	// cadence and cmd/gc/pending_interaction_lane.go for the restart
+	// contract (the announced set is rebuilt from this event log). That
+	// contract can miss the clear of an interaction outstanding when a clean
+	// stop parked its session; pendingwatch.RebuildSince says when.
 	SessionPending        = "session.pending"
 	SessionPendingCleared = "session.pending_cleared"
 	ConvoyCreated         = "convoy.created"
@@ -501,6 +517,7 @@ var KnownEventTypes = []string{
 	SessionDrainStopEscalated,
 	SessionStranded,
 	SessionPoolSlotRetiredAtDrainDeadline,
+	SessionStrandedClaims,
 	SessionUnknownState,
 	SessionWakeRefused,
 	SessionResetStalled,
@@ -508,6 +525,7 @@ var KnownEventTypes = []string{
 	SessionDrainFenceUnavailable,
 	SessionDemandClaimDivergence,
 	SessionColdStartTimeout,
+	SessionConversationReset,
 	SessionPending, SessionPendingCleared,
 	BeadCreated, BeadClosed, BeadDeleted, BeadUpdated,
 	BeadWorktreeReaped, BeadWorktreeReapSkipped,

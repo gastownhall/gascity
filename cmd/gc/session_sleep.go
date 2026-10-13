@@ -25,7 +25,32 @@ type resolvedSessionSleepPolicy struct {
 	Duration         time.Duration
 }
 
+// idleSleepProbeTimeout is the default WaitForIdle timeout of one idle proof,
+// and the floor of idleSleepProbeTimeoutFor.
 const idleSleepProbeTimeout = time.Second
+
+// idleSleepProbeTimeoutFor returns the WaitForIdle timeout for one idle proof
+// of name on sp. It reads the routed leaf's runtime.IdleProbeBudgetProvider
+// budget, because a runtime whose pane observations are remote round trips
+// cannot fit two of them into the 1s default, and a probe that times out fails
+// closed on every tick, so the session never drains. The budget is clamped to
+// [idleSleepProbeTimeout, fenceProbeTimeout]: the cap is the bound every other
+// effect-fence probe already has, so no single idle wait exceeds the existing
+// per-probe fence bound. It is not a per-pass bound: a v2 pass that needs the
+// idle proof runs it after its other legs, so such a pass can take up to
+// fenceProbeTimeout - idleSleepProbeTimeout longer than before. A leaf without
+// a budget gets idleSleepProbeTimeout.
+func idleSleepProbeTimeoutFor(sp runtime.Provider, name string) time.Duration {
+	if sp == nil {
+		return idleSleepProbeTimeout
+	}
+	leaf, _, _ := runtime.ResolveBackend(sp, name)
+	bp, ok := leaf.(runtime.IdleProbeBudgetProvider)
+	if !ok {
+		return idleSleepProbeTimeout
+	}
+	return min(max(bp.IdleProbeBudget(), idleSleepProbeTimeout), fenceProbeTimeout)
+}
 
 func (p resolvedSessionSleepPolicy) enabled() bool {
 	return p.Effective != "" && p.Effective != config.SessionSleepOff
@@ -464,17 +489,20 @@ func markIdleSleepPendingInfo(info sessionpkg.Info, sessFront *sessionpkg.Store)
 	if sessFront == nil || info.SleepIntent == "idle-stop-pending" {
 		return nil
 	}
-	if err := sessFront.SetMarker(info.ID, "sleep_intent", "idle-stop-pending"); err != nil {
+	// The disposition's IdleStopBegin cell, on a fresh read: never over an
+	// operator's hold or a wait's intent (D8B-3: idle-stop-pending is no hold).
+	w, err := sessFront.ApplyDispositionFresh(info.ID, sessionpkg.ActorController, sessionpkg.DispEvent{Kind: sessionpkg.EvIdleStopBegin}, nil, time.Time{})
+	if err != nil || w.Result != sessionpkg.CommitLanded {
 		return nil
 	}
-	return sessionpkg.MetadataPatch{"sleep_intent": "idle-stop-pending"}
+	return w.Wrote
 }
 
 // recoverPendingIdleSleepInfo reads the idle-stop-pending intent and the
 // preserved fingerprint off Info (SleepIntent, SleepPolicyFingerprint), the
 // handle off Info.ID, and persists SleepPatch(now, "idle") via
-// sessFront.ApplyKeepingUserHold, so an operator's suspend that landed since
-// the snapshot keeps its intent. It returns the patch it wrote, the caller's
+// sessFront.ApplySleep (the disposition's Sleep cell, on a fresh read), so an
+// operator's suspend that landed since the snapshot keeps its intent. It returns the patch it wrote, the caller's
 // fold onto infoByID, or nil when it wrote nothing. No raw-bead mirror.
 func recoverPendingIdleSleepInfo(
 	info sessionpkg.Info,
@@ -489,7 +517,7 @@ func recoverPendingIdleSleepInfo(
 	if fingerprint := info.SleepPolicyFingerprint; fingerprint != "" {
 		batch["sleep_policy_fingerprint"] = fingerprint
 	}
-	written, err := sessFront.ApplyKeepingUserHold(info.ID, batch)
+	written, err := sessFront.ApplySleep(info.ID, batch)
 	if err != nil {
 		return nil
 	}

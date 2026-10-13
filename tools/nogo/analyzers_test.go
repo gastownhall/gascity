@@ -23,10 +23,12 @@ import (
 	"github.com/gastownhall/gascity/tools/nogo/analyzers/misspell"
 	"github.com/gastownhall/gascity/tools/nogo/analyzers/revive"
 	"github.com/gastownhall/gascity/tools/nogo/analyzers/runtimelease"
+	"github.com/gastownhall/gascity/tools/nogo/analyzers/testrelax"
 	"github.com/gastownhall/gascity/tools/nogo/analyzers/unconvert"
 	"github.com/gastownhall/gascity/tools/nogo/analyzers/unparam"
 	"github.com/gastownhall/gascity/tools/nogo/analyzers/unused"
 	"github.com/gastownhall/gascity/tools/nogo/analyzers/v2purity"
+	"github.com/gastownhall/gascity/tools/nogo/analyzers/worklegs"
 )
 
 // readFile reads a file of this package, from runfiles under Bazel or from the
@@ -95,6 +97,8 @@ func wrapped() []*analysis.Analyzer {
 		unused.Analyzer,
 		runtimelease.Analyzer,
 		v2purity.Analyzer,
+		testrelax.Analyzer,
+		worklegs.Analyzer,
 		errcheck.Analyzer,
 		ineffassign.Analyzer,
 	}
@@ -113,7 +117,7 @@ func TestAnalyzersValidate(t *testing.T) {
 		names = append(names, a.Name)
 	}
 	sort.Strings(names)
-	want := []string{"errcheck", "errorlint", "gocritic", "ineffassign", "misspell", "revive", "runtimelease", "unconvert", "unparam", "unused", "v2purity"}
+	want := []string{"errcheck", "errorlint", "gocritic", "ineffassign", "misspell", "revive", "runtimelease", "testrelax", "unconvert", "unparam", "unused", "v2purity", "worklegs"}
 	if !slices.Equal(names, want) {
 		t.Errorf("analyzer names = %v, want %v", names, want)
 	}

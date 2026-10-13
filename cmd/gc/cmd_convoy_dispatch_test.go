@@ -21,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
+	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/events"
@@ -2383,6 +2384,257 @@ func TestCmdWorkflowReopenSourcePreservesRouteWithoutRunTarget(t *testing.T) {
 	}
 	if updated.Assignee != "" {
 		t.Fatalf("assignee = %q, want empty", updated.Assignee)
+	}
+}
+
+// TestCmdWorkflowReopenSourceReopensTrackingConvoy is the regression test for
+// gascity#6045: autocloseConvoyIfComplete closes a convoy once every tracked
+// child reaches a terminal status, but nothing reversed that when a tracked
+// child was later reopened through `gc workflow reopen-source`. The convoy
+// then stayed closed — and invisible to `gc convoy check`, whose listing
+// query excludes closed convoys — across an entire second work cycle on a
+// child it no longer accurately described as done.
+func TestCmdWorkflowReopenSourceReopensTrackingConvoy(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	prevCityFlag := cityFlag
+	cityFlag = ""
+	t.Cleanup(func() { cityFlag = prevCityFlag })
+
+	store, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity: %v", err)
+	}
+	source, err := store.Create(beads.Bead{Title: "Source", Type: "task", Status: "closed"})
+	if err != nil {
+		t.Fatalf("Create(source): %v", err)
+	}
+	convoy, err := store.Create(beads.Bead{Title: "batch", Type: "convoy"})
+	if err != nil {
+		t.Fatalf("Create(convoy): %v", err)
+	}
+	requireNoError(t, store.DepAdd(convoy.ID, source.ID, convoycore.TrackingDepType))
+	// Simulate autoclose having already fired: the convoy closed while its
+	// only tracked child (source) was terminal.
+	requireNoError(t, closeConvoyWithReason(store, convoy.ID, convoyAutocloseReason))
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdWorkflowReopenSource(source.ID, sourceWorkflowStoreSelector{}, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdWorkflowReopenSource returned %d; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "result=reopened source_bead_id="+source.ID) {
+		t.Fatalf("stdout = %q, want reopened result for source", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "result=reopened_tracking_convoy convoy_id="+convoy.ID) {
+		t.Fatalf("stdout = %q, want reopened_tracking_convoy result for convoy %s", stdout.String(), convoy.ID)
+	}
+
+	reloaded, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(reload): %v", err)
+	}
+	updatedSource, err := reloaded.Get(source.ID)
+	if err != nil {
+		t.Fatalf("Get(source): %v", err)
+	}
+	if updatedSource.Status != "open" {
+		t.Fatalf("source status = %q, want open", updatedSource.Status)
+	}
+	updatedConvoy, err := reloaded.Get(convoy.ID)
+	if err != nil {
+		t.Fatalf("Get(convoy): %v", err)
+	}
+	if updatedConvoy.Status != "open" {
+		t.Fatalf("convoy status = %q, want open (tracking convoy should reopen alongside its child)", updatedConvoy.Status)
+	}
+	if got := updatedConvoy.Metadata["close_reason"]; got != "" {
+		t.Fatalf("convoy close_reason = %q, want cleared on reopen", got)
+	}
+}
+
+// TestCmdWorkflowReopenSourceLeavesOwnedTrackingConvoyClosed mirrors the
+// "owned" exemption autocloseConvoyIfComplete itself respects: an
+// owned-labeled convoy's lifecycle is managed manually, so reopening a
+// tracked child must not reopen it automatically.
+func TestCmdWorkflowReopenSourceLeavesOwnedTrackingConvoyClosed(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	prevCityFlag := cityFlag
+	cityFlag = ""
+	t.Cleanup(func() { cityFlag = prevCityFlag })
+
+	store, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity: %v", err)
+	}
+	source, err := store.Create(beads.Bead{Title: "Source", Type: "task", Status: "closed"})
+	if err != nil {
+		t.Fatalf("Create(source): %v", err)
+	}
+	convoy, err := store.Create(beads.Bead{Title: "owned batch", Type: "convoy", Labels: []string{"owned"}})
+	if err != nil {
+		t.Fatalf("Create(convoy): %v", err)
+	}
+	requireNoError(t, store.DepAdd(convoy.ID, source.ID, convoycore.TrackingDepType))
+	requireNoError(t, closeConvoyWithReason(store, convoy.ID, convoyAutocloseReason))
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdWorkflowReopenSource(source.ID, sourceWorkflowStoreSelector{}, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdWorkflowReopenSource returned %d; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), "result=reopened_tracking_convoy") {
+		t.Fatalf("stdout = %q, want no reopened_tracking_convoy line for an owned convoy", stdout.String())
+	}
+
+	reloaded, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(reload): %v", err)
+	}
+	updatedSource, err := reloaded.Get(source.ID)
+	if err != nil {
+		t.Fatalf("Get(source): %v", err)
+	}
+	if updatedSource.Status != "open" {
+		t.Fatalf("source status = %q, want open", updatedSource.Status)
+	}
+	updatedConvoy, err := reloaded.Get(convoy.ID)
+	if err != nil {
+		t.Fatalf("Get(convoy): %v", err)
+	}
+	if updatedConvoy.Status != "closed" {
+		t.Fatalf("convoy status = %q, want closed (owned convoy lifecycle is manual)", updatedConvoy.Status)
+	}
+}
+
+// setupReopenSourceTrackingConvoy creates a file-backed city with a closed
+// source bead tracked by a convoy, and returns the city dir, store, source,
+// and convoy.
+func setupReopenSourceTrackingConvoy(t *testing.T) (string, beads.Store, beads.Bead, beads.Bead) {
+	t.Helper()
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	prevCityFlag := cityFlag
+	cityFlag = ""
+	t.Cleanup(func() { cityFlag = prevCityFlag })
+
+	store, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity: %v", err)
+	}
+	source, err := store.Create(beads.Bead{Title: "Source", Type: "task", Status: "closed"})
+	if err != nil {
+		t.Fatalf("Create(source): %v", err)
+	}
+	convoy, err := store.Create(beads.Bead{Title: "batch", Type: "convoy"})
+	if err != nil {
+		t.Fatalf("Create(convoy): %v", err)
+	}
+	requireNoError(t, store.DepAdd(convoy.ID, source.ID, convoycore.TrackingDepType))
+	return cityDir, store, source, convoy
+}
+
+// runReopenSourceExpectNoConvoyReopen reopens source and asserts the command
+// succeeded without reporting a reopened tracking convoy, then returns the
+// convoy as persisted.
+func runReopenSourceExpectNoConvoyReopen(t *testing.T, cityDir string, source, convoy beads.Bead) beads.Bead {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	if code := cmdWorkflowReopenSource(source.ID, sourceWorkflowStoreSelector{}, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdWorkflowReopenSource returned %d; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), "result=reopened_tracking_convoy") {
+		t.Fatalf("stdout = %q, want no reopened_tracking_convoy line", stdout.String())
+	}
+	reloaded, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(reload): %v", err)
+	}
+	updatedSource, err := reloaded.Get(source.ID)
+	if err != nil {
+		t.Fatalf("Get(source): %v", err)
+	}
+	if updatedSource.Status != "open" {
+		t.Fatalf("source status = %q, want open", updatedSource.Status)
+	}
+	updatedConvoy, err := reloaded.Get(convoy.ID)
+	if err != nil {
+		t.Fatalf("Get(convoy): %v", err)
+	}
+	return updatedConvoy
+}
+
+// TestCmdWorkflowReopenSourceLeavesOperatorClosedTrackingConvoyClosed pins
+// that only autoclose is undone: a convoy an operator closed on purpose stays
+// closed when a tracked child is reopened.
+func TestCmdWorkflowReopenSourceLeavesOperatorClosedTrackingConvoyClosed(t *testing.T) {
+	cityDir, store, source, convoy := setupReopenSourceTrackingConvoy(t)
+	requireNoError(t, closeConvoyWithReason(store, convoy.ID, convoyManualCloseReason))
+
+	updatedConvoy := runReopenSourceExpectNoConvoyReopen(t, cityDir, source, convoy)
+	if updatedConvoy.Status != "closed" {
+		t.Fatalf("convoy status = %q, want closed (operator close is not autoclose)", updatedConvoy.Status)
+	}
+	if got := updatedConvoy.Metadata["close_reason"]; got != convoyManualCloseReason {
+		t.Fatalf("convoy close_reason = %q, want %q", got, convoyManualCloseReason)
+	}
+}
+
+// TestCmdWorkflowReopenSourceLeavesReasonlessClosedTrackingConvoyClosed pins
+// that a convoy closed without the autoclose reason (for example graphv2's
+// plain close of an invocation convoy) stays closed.
+func TestCmdWorkflowReopenSourceLeavesReasonlessClosedTrackingConvoyClosed(t *testing.T) {
+	cityDir, store, source, convoy := setupReopenSourceTrackingConvoy(t)
+	requireNoError(t, store.Close(convoy.ID))
+
+	updatedConvoy := runReopenSourceExpectNoConvoyReopen(t, cityDir, source, convoy)
+	if updatedConvoy.Status != "closed" {
+		t.Fatalf("convoy status = %q, want closed (plain close is not autoclose)", updatedConvoy.Status)
+	}
+}
+
+// TestCmdWorkflowReopenSourceIgnoresAlreadyOpenTrackingConvoy pins that an
+// open tracking convoy is left as is and not reported as reopened.
+func TestCmdWorkflowReopenSourceIgnoresAlreadyOpenTrackingConvoy(t *testing.T) {
+	cityDir, _, source, convoy := setupReopenSourceTrackingConvoy(t)
+
+	updatedConvoy := runReopenSourceExpectNoConvoyReopen(t, cityDir, source, convoy)
+	if updatedConvoy.Status != "open" {
+		t.Fatalf("convoy status = %q, want open", updatedConvoy.Status)
+	}
+}
+
+// TestCmdWorkflowReopenSourceLeavesTombstonedTrackingConvoy pins that a
+// soft-deleted convoy is not resurrected, even when it carries the autoclose
+// reason.
+func TestCmdWorkflowReopenSourceLeavesTombstonedTrackingConvoy(t *testing.T) {
+	cityDir, store, source, convoy := setupReopenSourceTrackingConvoy(t)
+	requireNoError(t, store.SetMetadata(convoy.ID, "close_reason", convoyAutocloseReason))
+	tombstone := "tombstone"
+	if err := store.Update(convoy.ID, beads.UpdateOpts{Status: &tombstone}); err != nil {
+		t.Skipf("file store cannot represent tombstone status: %v", err)
+	}
+	if got, err := store.Get(convoy.ID); err != nil || got.Status != tombstone {
+		t.Skipf("file store did not persist tombstone status: status=%q err=%v", got.Status, err)
+	}
+
+	updatedConvoy := runReopenSourceExpectNoConvoyReopen(t, cityDir, source, convoy)
+	if updatedConvoy.Status != tombstone {
+		t.Fatalf("convoy status = %q, want tombstone", updatedConvoy.Status)
 	}
 }
 
@@ -5089,8 +5341,8 @@ func TestWorkflowServeControlReadyQueryUsesControlTiers(t *testing.T) {
 	}
 	for _, want := range []string{
 		`bd --readonly --sandbox ready --assignee="$cand" --exclude-type=epic --json --limit=20`,
-		`bd --readonly --sandbox ready --metadata-field "gc.run_target=$route" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --json --sort oldest --limit=20`,
-		`bd --readonly --sandbox ready --metadata-field "gc.routed_to=$route" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --json --sort oldest --limit=20`,
+		`bd --readonly --sandbox ready --metadata-field "gc.run_target=$route" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --exclude-label "human" --json --sort oldest --limit=20`,
+		`bd --readonly --sandbox ready --metadata-field "gc.routed_to=$route" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --exclude-label "human" --json --sort oldest --limit=20`,
 		`routed_ready "$GC_CONTROL_TARGET"`,
 		`routed_ready "${GC_CONTROL_LEGACY_TARGET:-}"`,
 	} {
@@ -5284,8 +5536,8 @@ func TestWorkflowServeControlReadyQueryBD105IncludesEphemeral(t *testing.T) {
 	)
 	for _, want := range []string{
 		`bd --readonly --sandbox ready --include-ephemeral --assignee="$cand" --exclude-type=epic --json --limit=20`,
-		`bd --readonly --sandbox ready --include-ephemeral --metadata-field "gc.run_target=$route" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --json --sort oldest --limit=20`,
-		`bd --readonly --sandbox ready --include-ephemeral --metadata-field "gc.routed_to=$route" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --json --sort oldest --limit=20`,
+		`bd --readonly --sandbox ready --include-ephemeral --metadata-field "gc.run_target=$route" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --exclude-label "human" --json --sort oldest --limit=20`,
+		`bd --readonly --sandbox ready --include-ephemeral --metadata-field "gc.routed_to=$route" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --exclude-label "human" --json --sort oldest --limit=20`,
 	} {
 		if !strings.Contains(query, want) {
 			t.Fatalf("workflowServeControlReadyQueryForBeads(bd-1.0.5) missing %q in %q", want, query)
@@ -5346,7 +5598,7 @@ case "$*" in
   "--readonly --sandbox ready --assignee=gascity--control-dispatcher --exclude-type=epic --json --limit=20")
     printf '[{"id":"ga-ready"}]'
     ;;
-  "--readonly --sandbox ready --metadata-field gc.run_target=gascity/control-dispatcher --unassigned --exclude-type=epic --exclude-label hold:mayor --exclude-label hold:external --json --sort oldest --limit=20")
+  "--readonly --sandbox ready --metadata-field gc.run_target=gascity/control-dispatcher --unassigned --exclude-type=epic --exclude-label hold:mayor --exclude-label hold:external --exclude-label human --json --sort oldest --limit=20")
     printf '[{"id":"ga-routed"}]'
     ;;
   *)
@@ -5368,7 +5620,7 @@ case "$*" in
   "--readonly --sandbox ready --assignee=gascity--control-dispatcher --exclude-type=epic --json --limit=20")
     printf '[{"id":"ga-pending","metadata":{"gc.kind":"retry"}}]'
     ;;
-  "--readonly --sandbox ready --metadata-field gc.run_target=gascity/control-dispatcher --unassigned --exclude-type=epic --exclude-label hold:mayor --exclude-label hold:external --json --sort oldest --limit=20")
+  "--readonly --sandbox ready --metadata-field gc.run_target=gascity/control-dispatcher --unassigned --exclude-type=epic --exclude-label hold:mayor --exclude-label hold:external --exclude-label human --json --sort oldest --limit=20")
     printf '[{"id":"ga-ready","metadata":{"gc.kind":"scope-check"}}]'
     ;;
   *)
@@ -5387,7 +5639,7 @@ func TestWorkflowServeControlReadyQueryIncludesCanonicalRoutedControlWork(t *tes
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  "--readonly --sandbox ready --metadata-field gc.routed_to=gascity/control-dispatcher --unassigned --exclude-type=epic --exclude-label hold:mayor --exclude-label hold:external --json --sort oldest --limit=20")
+  "--readonly --sandbox ready --metadata-field gc.routed_to=gascity/control-dispatcher --unassigned --exclude-type=epic --exclude-label hold:mayor --exclude-label hold:external --exclude-label human --json --sort oldest --limit=20")
     printf '[{"id":"ga-control-routed","metadata":{"gc.routed_to":"gascity/control-dispatcher","gc.kind":"workflow-finalize"}}]'
     ;;
   *)
@@ -5409,7 +5661,7 @@ case "$*" in
   "--readonly --sandbox ready --assignee=gascity--control-dispatcher --exclude-type=epic --json --limit=20")
     printf '[{"id":"ga-instantiating-assigned","metadata":{"%s":"true"}},{"id":"ga-assigned","metadata":{"gc.kind":"retry"}}]'
     ;;
-  "--readonly --sandbox ready --metadata-field gc.run_target=gascity/control-dispatcher --unassigned --exclude-type=epic --exclude-label hold:mayor --exclude-label hold:external --json --sort oldest --limit=20")
+  "--readonly --sandbox ready --metadata-field gc.run_target=gascity/control-dispatcher --unassigned --exclude-type=epic --exclude-label hold:mayor --exclude-label hold:external --exclude-label human --json --sort oldest --limit=20")
     printf '[{"id":"ga-instantiating-routed","metadata":{"%s":"true"}},{"id":"ga-routed","metadata":{"gc.kind":"scope-check"}}]'
     ;;
   *)
@@ -5418,6 +5670,34 @@ case "$*" in
 esac
 `, beadmeta.InstantiatingMetadataKey, beadmeta.InstantiatingMetadataKey))
 	assertJSONEqual(t, out, `[{"id":"ga-assigned","metadata":{"gc.kind":"retry"}},{"id":"ga-routed","metadata":{"gc.kind":"scope-check"}}]`)
+}
+
+// TestWorkflowServeControlReadyQueryExcludesHumanLabeledBeads: routed_ready()
+// must hand bd's native human label to --exclude-label, so a bead parked for a
+// person is never served to the control dispatcher as ready work. The fake bd
+// plays the part of bd's own filter: it withholds the flagged row only when
+// the flag is present, and the clean row is returned either way, so a query
+// that stopped reaching the routed tier at all cannot pass this vacuously.
+func TestWorkflowServeControlReadyQueryExcludesHumanLabeledBeads(t *testing.T) {
+	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"})
+	out := runWorkflowServeShellQueryForTest(t, query, map[string]string{
+		"GC_SESSION_NAME": "gascity--control-dispatcher",
+		"GC_ALIAS":        "gascity/control-dispatcher",
+	}, `#!/bin/sh
+set -eu
+case "$*" in
+  *"--metadata-field gc.run_target=gascity/control-dispatcher"*"--exclude-label human"*)
+    printf '[{"id":"ga-routed","metadata":{"gc.kind":"scope-check"}}]'
+    ;;
+  *"--metadata-field gc.run_target=gascity/control-dispatcher"*"--unassigned"*)
+    printf '[{"id":"ga-human-flagged","labels":["human"],"metadata":{"gc.kind":"scope-check"}},{"id":"ga-routed","metadata":{"gc.kind":"scope-check"}}]'
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`)
+	assertJSONEqual(t, out, `[{"id":"ga-routed","metadata":{"gc.kind":"scope-check"}}]`)
 }
 
 func TestWorkflowServeControlReadyQueryPreservesQueryPriorityWhenMerging(t *testing.T) {
@@ -5431,10 +5711,10 @@ case "$*" in
   "--readonly --sandbox ready --assignee=gascity--control-dispatcher --exclude-type=epic --json --limit=20")
     printf '[{"id":"ga-z-assigned"},{"id":"ga-dup","source":"assigned"}]'
     ;;
-  "--readonly --sandbox ready --metadata-field gc.run_target=gascity/control-dispatcher --unassigned --exclude-type=epic --exclude-label hold:mayor --exclude-label hold:external --json --sort oldest --limit=20")
+  "--readonly --sandbox ready --metadata-field gc.run_target=gascity/control-dispatcher --unassigned --exclude-type=epic --exclude-label hold:mayor --exclude-label hold:external --exclude-label human --json --sort oldest --limit=20")
     printf '[{"id":"ga-a-routed"},{"id":"ga-route-dup","source":"run-target"}]'
     ;;
-  "--readonly --sandbox ready --metadata-field gc.routed_to=gascity/control-dispatcher --unassigned --exclude-type=epic --exclude-label hold:mayor --exclude-label hold:external --json --sort oldest --limit=20")
+  "--readonly --sandbox ready --metadata-field gc.routed_to=gascity/control-dispatcher --unassigned --exclude-type=epic --exclude-label hold:mayor --exclude-label hold:external --exclude-label human --json --sort oldest --limit=20")
     printf '[{"id":"ga-route-dup","source":"routed-to"}]'
     ;;
   *)
@@ -5676,7 +5956,7 @@ func TestWorkflowServeControlReadyQueryQuotesMetadataFallbackTarget(t *testing.T
 		"BD_MATCHED_ARGS": argsPath,
 	}, `#!/bin/sh
 set -eu
-if [ "$#" -eq 15 ] &&
+if [ "$#" -eq 17 ] &&
    [ "$1" = "--readonly" ] &&
    [ "$2" = "--sandbox" ] &&
    [ "$3" = "ready" ] &&
@@ -5688,10 +5968,12 @@ if [ "$#" -eq 15 ] &&
    [ "$9" = "hold:mayor" ] &&
    [ "${10}" = "--exclude-label" ] &&
    [ "${11}" = "hold:external" ] &&
-   [ "${12}" = "--json" ] &&
-   [ "${13}" = "--sort" ] &&
-   [ "${14}" = "oldest" ] &&
-   [ "${15}" = "--limit=20" ]; then
+   [ "${12}" = "--exclude-label" ] &&
+   [ "${13}" = "human" ] &&
+   [ "${14}" = "--json" ] &&
+   [ "${15}" = "--sort" ] &&
+   [ "${16}" = "oldest" ] &&
+   [ "${17}" = "--limit=20" ]; then
   printf '%s\n' "$@" > "$BD_MATCHED_ARGS"
   printf '[{"id":"ga-routed"}]'
   exit 0
@@ -5704,7 +5986,7 @@ printf '[]'
 		t.Fatalf("read matched args: %v", err)
 	}
 	gotArgs := strings.Split(strings.TrimSpace(string(argsData)), "\n")
-	wantArgs := []string{"--readonly", "--sandbox", "ready", "--metadata-field", "gc.run_target=my rig/control-dispatcher", "--unassigned", "--exclude-type=epic", "--exclude-label", "hold:mayor", "--exclude-label", "hold:external", "--json", "--sort", "oldest", "--limit=20"}
+	wantArgs := []string{"--readonly", "--sandbox", "ready", "--metadata-field", "gc.run_target=my rig/control-dispatcher", "--unassigned", "--exclude-type=epic", "--exclude-label", "hold:mayor", "--exclude-label", "hold:external", "--exclude-label", "human", "--json", "--sort", "oldest", "--limit=20"}
 	if !slices.Equal(gotArgs, wantArgs) {
 		t.Fatalf("matched bd args = %#v, want %#v", gotArgs, wantArgs)
 	}
@@ -5719,7 +6001,7 @@ func TestWorkflowServeControlReadyQueryUsesLegacyRouteForNamedSessions(t *testin
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  "--readonly --sandbox ready --metadata-field gc.run_target=gascity/workflow-control --unassigned --exclude-type=epic --exclude-label hold:mayor --exclude-label hold:external --json --sort oldest --limit=20")
+  "--readonly --sandbox ready --metadata-field gc.run_target=gascity/workflow-control --unassigned --exclude-type=epic --exclude-label hold:mayor --exclude-label hold:external --exclude-label human --json --sort oldest --limit=20")
     printf '[{"id":"ga-legacy-route"}]'
     ;;
   *)

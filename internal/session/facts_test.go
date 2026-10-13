@@ -71,6 +71,13 @@ func TestFactsCompare(t *testing.T) {
 		{FactsCommit, []string{"held_until", "x", "state", "active"}, true},
 		{FactsCommit, []string{"state", "suspended"}, false},
 		{FactsCommit, []string{"instance_token", "other"}, false},
+		// The drain basis: a heartbeat's held_until and the drain's own state
+		// do not move it; the incarnation and an operator's intent do.
+		{FactsDrainBasis, []string{"held_until", "x", "state", "draining", "wake_attempts", "2"}, true},
+		{FactsDrainBasis, []string{"sleep_intent", "user-hold"}, false},
+		{FactsDrainBasis, []string{"generation", "2"}, false},
+		{FactsDrainBasis, []string{"wake_request", "1"}, false},
+		{FactsDrainBasis, []string{"pin_awake", "true"}, false},
 	} {
 		if got := c.site.Match(with(c.kv...), base); got != c.match {
 			t.Errorf("%s with %v: match %t, want %t", c.site, c.kv, got, c.match)

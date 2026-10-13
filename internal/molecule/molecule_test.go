@@ -3816,3 +3816,49 @@ func TestInstantiate_DeferredStepsStayGate(t *testing.T) {
 		t.Errorf("deferred step.Type = %q, want %q", b.Type, "gate")
 	}
 }
+
+// TestInstantiateRefusesASessionStep (mc-okw9n): a step whose bead would be
+// a session row (type session, or the gc:session label a variable
+// substitutes in) is refused at instantiation, on the sequential path and
+// the graph-apply path, and nothing is created; compile refuses the
+// literal marks.
+func TestInstantiateRefusesASessionStep(t *testing.T) {
+	for _, graph := range []bool{false, true} {
+		for name, step := range map[string]formula.RecipeStep{
+			"type session":                   {ID: "f.s", Title: "S", Type: "session"},
+			"a substituted gc:session label": {ID: "f.s", Title: "S", Type: "task", Labels: []string{"{{lbl}}"}},
+		} {
+			prev := IsGraphApplyEnabled()
+			SetGraphApplyEnabled(graph)
+			store := &graphApplySpyStore{MemStore: beads.NewMemStore()}
+			recipe := &formula.Recipe{
+				Name:  "f",
+				Steps: []formula.RecipeStep{{ID: "f", Title: "F", Type: "task", IsRoot: true}, step},
+				Deps:  []formula.RecipeDep{{StepID: "f.s", DependsOnID: "f", Type: "parent-child"}},
+			}
+			_, err := Instantiate(context.Background(), store, recipe, Options{Vars: map[string]string{"lbl": "gc:session"}})
+			SetGraphApplyEnabled(prev)
+			all, _ := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+			if err == nil || !strings.Contains(err.Error(), "session row") || len(all) != 0 {
+				t.Fatalf("graph %v, %s: Instantiate = %v, beads %d; want refused with nothing created", graph, name, err, len(all))
+			}
+		}
+	}
+}
+
+// TestInstantiateFragmentRefusesASessionStep (mc-okw9n): a fragment whose
+// step would make a session row is refused before anything is written onto
+// its workflow.
+func TestInstantiateFragmentRefusesASessionStep(t *testing.T) {
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{Title: "wf", Type: "task", Metadata: map[string]string{"gc.kind": "workflow"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recipe := &formula.FragmentRecipe{Name: "frag", Steps: []formula.RecipeStep{{ID: "frag.s", Title: "S", Type: "task", Labels: []string{"gc:session"}}}, Entries: []string{"frag.s"}, Sinks: []string{"frag.s"}}
+	_, err = InstantiateFragment(context.Background(), store, recipe, FragmentOptions{RootID: root.ID})
+	all, _ := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+	if err == nil || !strings.Contains(err.Error(), "session row") || len(all) != 1 {
+		t.Fatalf("InstantiateFragment = %v, beads %d; want refused with only the root", err, len(all))
+	}
+}

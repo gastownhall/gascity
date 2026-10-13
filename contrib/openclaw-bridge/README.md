@@ -33,8 +33,8 @@ sandboxed under `/tmp/gc-openclaw-bridge-demo` and torn down on exit.
 
 ## What is openclaw's vs ours
 
-From the published `openclaw` npm package (pinned in `package-lock.json`), the
-bridge imports and runs as-is:
+From the published `@openclaw/imessage` npm package and its `openclaw` peer
+(both pinned in `package-lock.json`), the bridge imports and runs as-is:
 
 | openclaw export | role |
 |---|---|
@@ -75,6 +75,18 @@ exactly the split gc's external-messaging fabric design intends
 | `reply_to_message_id` | `replyToId` (native iMessage reply) |
 | receipt `message_id` | `IMessageSendResult.messageId` (+ `guid` in metadata) |
 
+**Reply limitation (openclaw >= 2026.8):** openclaw verifies every
+`replyToId` before sending it (`resolveAuthorizedIMessageReplyReference`) and
+fails closed when it cannot prove the referenced message belongs to the
+target conversation. On a single-account Mac it checks the Messages database
+(chat.db). Against the fake imsg CLI (or any host without chat.db) there is
+nothing to check against, so a publish carrying `reply_to_message_id` is
+rejected and reported as `delivered: false` (`transient`). Publishes without
+`reply_to_message_id` are unaffected. The bridge deliberately does not opt
+out of this check (openclaw's `conversationReadOrigin: 'direct-operator'`
+would bypass it): the verification guards against replying into a
+conversation the reference does not belong to.
+
 ## The fake imsg CLI
 
 openclaw's connector drives a local `imsg` binary (macOS, talks to
@@ -107,14 +119,18 @@ auto-detects remote-host wrappers) and start `bridge.mjs` with `GC_CITY`,
 
 What "import openclaw connectors" costs, learned by building this:
 
-1. **The published npm package is enough.** `dist/extensions/imessage` ships in
-   the tarball with clean entry-module exports for send/probe/id-model. No
-   monorepo checkout, pnpm, or build step needed.
+1. **The published npm packages are enough.** The iMessage connector ships as
+   its own package, `@openclaw/imessage` (split out of `openclaw` in
+   2026.8.x), with clean entry-module exports (`dist/runtime-api.js`,
+   `dist/api.js`) for send/probe/id-model; it imports `openclaw/plugin-sdk/*`
+   at runtime, so both are pinned to the same release. Telegram still ships
+   inside `openclaw` (`dist/extensions/telegram`). No monorepo checkout, pnpm,
+   or build step needed.
 2. **One seam is not exported:** `createIMessageRpcClient` (the watch/inbound
-   client) only exists in a hash-named dist chunk under a mangled alias.
-   `lib/openclaw.mjs` resolves it by scanning dist export statements. Upstream
-   ask: re-export the RPC client (and the notification parser) from the
-   extension's public API.
+   client) only exists in a hash-named chunk under `dist/.setup/` with a
+   mangled alias. `lib/openclaw.mjs` resolves it by scanning chunk export
+   statements. Upstream ask: re-export the RPC client (and the notification
+   parser) from the plugin's public API.
 3. **Don't host their monitor/dispatch layer.** `monitorIMessageProvider` is
    hard-wired into openclaw's own pairing/agent-reply pipeline (and its dm
    policy would fight gc's routing). The right seam is one level down: RPC
