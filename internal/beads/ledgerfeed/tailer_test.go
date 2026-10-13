@@ -788,3 +788,25 @@ func TestResumeIsNotOverwrittenByAnInFlightStep(t *testing.T) {
 		t.Fatalf("checkpoint = %+v, want the resumed %+v", got, restored)
 	}
 }
+
+// With no OnError, Run retries every failure; the cause must still be
+// visible, not only a count.
+func TestStatsKeepTheLastErrorAndWhenItHappened(t *testing.T) {
+	boom := errors.New("connection reset")
+	j := &fakeJournal{failErr: boom}
+	j.append("a")
+	r := &recorder{}
+	ctx, cancel := context.WithCancel(context.Background())
+	clock := &scriptedSleep{after: 1, cancel: cancel}
+	tl := &Tailer{Source: j, Apply: r.apply, OnGap: r.onGap, Sleep: clock.sleep}
+
+	before := time.Now()
+	_ = tl.Run(ctx)
+	stats := tl.Stats()
+	if stats.Errors != 1 || !errors.Is(stats.LastError, boom) {
+		t.Fatalf("stats = %+v, want one error whose cause is %v", stats, boom)
+	}
+	if stats.LastErrorAt.Before(before) {
+		t.Fatalf("LastErrorAt = %v, want it stamped when the error happened (after %v)", stats.LastErrorAt, before)
+	}
+}

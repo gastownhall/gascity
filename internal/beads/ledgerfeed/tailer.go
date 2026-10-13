@@ -133,6 +133,12 @@ type Stats struct {
 	Lag int64
 	// Errors counts failed reads, Apply calls and OnGap calls.
 	Errors int64
+	// LastError is the most recent of those failures and LastErrorAt when it
+	// happened; a later success does not clear them. They are how a caller
+	// that leaves OnError nil (or a doctor check) sees why the tail is
+	// failing, not only that it is.
+	LastError   error
+	LastErrorAt time.Time
 	// Gaps counts gaps the tailer moved past, by kind.
 	Gaps map[GapKind]int64
 }
@@ -160,7 +166,7 @@ type Tailer struct {
 	// OnError is told about every failed Step that Run would retry. Returning
 	// a non-nil error stops Run with that error, which is how a caller ends
 	// the tail on a refusal it knows to be permanent. Optional; nil retries
-	// every error.
+	// every error, and Stats keeps the last one (LastError) either way.
 	OnError func(err error) error
 	// PageLimit caps rows applied per read. Zero is DefaultPageLimit.
 	PageLimit int
@@ -440,10 +446,12 @@ func (t *Tailer) checkpointAt(ctx context.Context, seq int64) (Checkpoint, error
 	return cp, nil
 }
 
-// fail counts an error and returns it.
+// fail counts and records an error and returns it.
 func (t *Tailer) fail(err error) error {
 	t.mu.Lock()
 	t.stats.Errors++
+	t.stats.LastError = err
+	t.stats.LastErrorAt = time.Now()
 	t.mu.Unlock()
 	return err
 }
