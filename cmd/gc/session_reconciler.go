@@ -1037,6 +1037,9 @@ func reconcileDrainAckStopPending(
 		return false, drainAckFinalizeResult{}
 	}
 	name := strings.TrimSpace(info.SessionNameMetadata)
+	if v2SignaledStopHeldForAttach(store, sp, info, name, stderr) {
+		return true, drainAckFinalizeResult{}
+	}
 	obs, err := workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, info.ID, tp.Hints.ProcessNames)
 	if err != nil || obs.Running || obs.Alive {
 		// Async-stop: queueDrainAckAsyncStop takes the session ID and mutates only
@@ -1051,6 +1054,33 @@ func reconcileDrainAckStopPending(
 		!desired || isPoolManagedSessionInfo(info),
 		dops, dt, clk, rec, stderr,
 	)
+}
+
+// v2SignaledStopHeldForAttach reports, and logs, a stop-pending row that v2
+// signaled whose runtime a client is attached to (CONTRACT v5.10v). v2's
+// signal writes legacy's stop-pending projection, which legacy reads as an
+// agent's ack and stops on a token check alone; v2's stop verb holds while
+// a client is attached (L3). After a rollback to legacy (C9 rung 1) such a
+// row must not be stopped under the client. The row is v2's when it carries
+// the controller half of a stop request at its generation and no ack half
+// (v2SignaledUnacked): an agent's or an operator's ack keeps legacy's
+// behavior. The attach probe is fresh, and one that errors counts
+// as attached, as v2's L3 does; a session that is gone is not attached, so
+// a dead runtime still finalizes. A row the store cannot read keeps
+// legacy's behavior.
+func v2SignaledStopHeldForAttach(store beads.Store, sp runtime.Provider, info sessionpkg.Info, name string, stderr io.Writer) bool {
+	if store == nil || sp == nil || name == "" {
+		return false
+	}
+	b, err := store.Get(info.ID)
+	if err != nil || !v2SignaledUnacked(b.Metadata) {
+		return false
+	}
+	if !runtime.AttachProbeHolds(runtime.IsAttachedWithError(sp, name)) {
+		return false
+	}
+	fmt.Fprintf(stderr, "session reconciler: holding the v2-signaled stop of %s: a client is attached\n", name) //nolint:errcheck // best-effort stderr
+	return true
 }
 
 // drainAckStopPendingProcessNames resolves the configured agent process-name
@@ -1099,6 +1129,9 @@ func finalizeDrainAckStopPendingSessions(
 			continue
 		}
 		name := strings.TrimSpace(info.SessionNameMetadata)
+		if v2SignaledStopHeldForAttach(store, sp, info, name, stderr) {
+			continue
+		}
 		// Resolve the configured agent process-name hints for this persisted
 		// stop-pending session, exactly as the reset-driven path threads
 		// tp.Hints.ProcessNames (see reconcileDrainAckStopPending). Without them

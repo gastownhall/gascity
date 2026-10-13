@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/session"
@@ -175,5 +176,56 @@ func TestV2WrittenRowsConvergeUnderLegacy(t *testing.T) {
 func TestCutoverRoundTripV2LegacyV2(t *testing.T) {
 	for _, f := range parityFixtures() {
 		t.Run(f.Name, func(t *testing.T) { roundTrip(t, f, false) })
+	}
+}
+
+// TestRollbackHoldsAV2SignaledStopForAnAttachedClient (CONTRACT v5.10v; the
+// #7824 review probe). Kills a rollback that stops a runtime v2 holds for an
+// attached client: v2's signal writes legacy's stop-pending projection, and
+// legacy, restarted on the same rows and runtimes mid-flight, read it as an
+// agent's ack and stopped on a token check alone. A v2-signaled row (its
+// drain_intent_* half, no ack) whose runtime a client is attached to stays
+// up under legacy; an agent's ack keeps legacy's stop, and so does a
+// detached v2-signaled row.
+func TestRollbackHoldsAV2SignaledStopForAnAttachedClient(t *testing.T) {
+	at := func(d time.Duration) string { return parityNow.Add(d).UTC().Format(time.RFC3339) }
+	signaled := func(extra ...string) parityRow {
+		return poolRow("gc-1", "worker", 1, "draining", append([]string{
+			"state_reason", session.DrainAckStopPendingReason, "drain_at", at(-time.Minute),
+			session.DrainIntentReasonKey, "idle", session.DrainIntentAtKey, at(-2 * time.Minute), session.DrainIntentIncarnationKey, "1",
+			"instance_token", "tok-gc-1", "last_woke_at", at(-time.Hour),
+		}, extra...)...)
+	}
+	for _, c := range []struct {
+		name     string
+		row      parityRow
+		attached bool
+		up       bool // the runtime under legacy after the rollback
+	}{
+		{"v2-signaled, attached: held", signaled(), true, true},
+		{"v2-signaled, detached: stopped", signaled(), false, false},
+		{"an agent's ack, attached: stopped as legacy", signaled(session.DrainAckIncarnationKey, "1", session.DrainAckAtKey, at(-time.Minute)), true, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := parityFixture{Name: c.name, Rows: []parityRow{c.row}, Runtimes: []simRuntime{{id: "gc-1", epoch: "1", token: "tok-gc-1", attached: c.attached}}}
+			cityPath := t.TempDir()
+			// v2 holds the attached signaled stop (L3); legacy starts from the
+			// rows and runtimes it left, as a mid-flight rollback does.
+			v := newV2World(t, f, cityPath, f.converged(t, cityPath), nil, "", nil)
+			v.settle(t, c.name+" (v2)")
+			_, v2Up := liveRuntimes(v.s.sp)["s-gc-1"]
+			if c.attached && c.row.Metadata[session.DrainAckIncarnationKey] == "" && !v2Up {
+				t.Fatalf("v2 stopped the attached seat; the fixture needs v2 to hold it")
+			}
+			leg := newLegacyWorld(t, switched(f), cityPath, cloneDiffBeads(v2Beads(t, v)))
+			carryRuntimes(leg.sp.simProvider, v.s.sp)
+			if !v2Up { // nothing left to stop: the case is v2's own stop
+				return
+			}
+			leg.settle(t, c.name+" (legacy after v2)")
+			if _, up := liveRuntimes(leg.sp.simProvider)["s-gc-1"]; up != c.up {
+				t.Errorf("legacy after the rollback: runtime up %t, want %t", up, c.up)
+			}
+		})
 	}
 }
