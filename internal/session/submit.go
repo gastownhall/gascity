@@ -267,6 +267,11 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, by Actor, id str
 		return false, err
 	}
 	if err := m.waitForInterruptIdleLocked(ctx, b, sessName, mode); err != nil {
+		if mode == runtime.TurnInterruptProtocol {
+			// A protocol runtime's Stop may leave it running, so a restart
+			// would interrupt nothing and nudge the message into the turn.
+			return false, fmt.Errorf("waiting for interrupted session to become idle: %w", err)
+		}
 		// Idle wait failed (e.g. timeout). Fall back to hard
 		// restart so the session isn't left in limbo.
 		if stopErr := runtime.StopForCleanup(m.sp, sessName); stopErr != nil {
@@ -275,6 +280,9 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, by Actor, id str
 		return false, m.restartAndSendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints)
 	}
 	if err := m.waitForInterruptBoundaryLocked(ctx, b, sessName, interruptStartedAt); err != nil {
+		if mode == runtime.TurnInterruptProtocol {
+			return false, err
+		}
 		if stopErr := runtime.StopForCleanup(m.sp, sessName); stopErr != nil {
 			return false, fmt.Errorf("stopping session after interrupt boundary timeout: %w", stopErr)
 		}

@@ -293,19 +293,41 @@ func TestProtocolTurnInterruptSendsOneInterruptWhenIdleWaitFails(t *testing.T) {
 		t.Run(fam.name+"/interrupt_now", func(t *testing.T) {
 			mgr, sp, info := newTurnInterruptSession(t, fam, runtime.TurnInterruptProtocol)
 			sp.WaitForIdleSequence[info.SessionName] = []error{errors.New("not idle"), nil}
-			if err := submitInterruptNow(mgr, info); err != nil {
-				t.Fatalf("Submit(interrupt_now): %v", err)
+			err := submitInterruptNow(mgr, info)
+			if err == nil || !strings.Contains(err.Error(), "waiting for interrupted session to become idle") {
+				t.Fatalf("Submit(interrupt_now) error = %v, want the idle wait failure", err)
 			}
-			if got := countMethod(sp.Calls, "Interrupt"); got != 1 {
-				t.Fatalf("Interrupt calls = %d, want 1; calls = %v", got, callMethods(sp.Calls))
-			}
-			stop := callIndex(sp.Calls, "Stop", info.SessionName)
-			start := callIndex(sp.Calls, "Start", info.SessionName)
-			nudge := callIndex(sp.Calls, "NudgeNow", info.SessionName)
-			if stop < 0 || start < stop || nudge < start {
-				t.Fatalf("calls = %v, want the Stop, Start, NudgeNow restart", callMethods(sp.Calls))
-			}
+			assertProtocolInterruptOnly(t, sp)
 		})
+	}
+}
+
+// A protocol runtime's Stop may leave the runtime running (t3bridge
+// persistent threads), so when the turn does not settle after the protocol
+// Interrupt, "deliver now" reports it instead of a stop-and-restart that
+// would interrupt nothing and nudge the message into the running turn.
+func TestProtocolInterruptNowReportsUnsettledTurnWithoutRestart(t *testing.T) {
+	codex := turnInterruptFamilies[1]
+	mgr, sp, info := newTurnInterruptSession(t, codex, runtime.TurnInterruptProtocol)
+	sp.InterruptBoundaryErrors[info.SessionName] = errors.New("no boundary")
+	err := submitInterruptNow(mgr, info)
+	if err == nil || !strings.Contains(err.Error(), "waiting for interrupt boundary") {
+		t.Fatalf("Submit(interrupt_now) error = %v, want the boundary wait failure", err)
+	}
+	assertProtocolInterruptOnly(t, sp)
+}
+
+// assertProtocolInterruptOnly checks that exactly one Interrupt reached the
+// runtime and that it was neither stopped, restarted nor sent the message.
+func assertProtocolInterruptOnly(t *testing.T, sp *runtime.Fake) {
+	t.Helper()
+	if got := countMethod(sp.Calls, "Interrupt"); got != 1 {
+		t.Fatalf("Interrupt calls = %d, want 1; calls = %v", got, callMethods(sp.Calls))
+	}
+	for _, method := range []string{"Stop", "Start", "Nudge", "NudgeNow", "SendKeys"} {
+		if n := countMethod(sp.Calls, method); n != 0 {
+			t.Fatalf("calls = %v, want no %s", callMethods(sp.Calls), method)
+		}
 	}
 }
 
