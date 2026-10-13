@@ -442,26 +442,98 @@ func softenBridgeStartupError(err error) error {
 	return err
 }
 
-// t3RPCRejectedError is T3's own answer to an RPC: an Exit Failure or a
-// Defect. Unlike a transport failure, the outcome is known: T3 did not do it.
-type t3RPCRejectedError struct {
-	method string
-	cause  string
-	defect bool
+// t3RPCFailureError is T3's Exit Failure or Defect answer to an RPC. When
+// rejected is set, the cause is a definitive refusal: T3 did not do it. Any
+// other failure leaves the outcome unknown, because a handler that died or
+// was interrupted may already have committed the command.
+type t3RPCFailureError struct {
+	method   string
+	cause    string
+	defect   bool
+	rejected bool
 }
 
-func (e *t3RPCRejectedError) Error() string {
+func (e *t3RPCFailureError) Error() string {
 	if e.defect {
 		return fmt.Sprintf("t3bridge rpc defect: %s", e.cause)
 	}
 	return fmt.Sprintf("t3 rpc %s: %s", e.method, e.cause)
 }
 
-// isT3Rejection reports whether err is T3's definitive refusal rather than
-// a transport failure whose outcome is unknown.
+// isT3Rejection reports whether err is T3's definitive refusal rather than a
+// failure whose outcome is unknown.
 func isT3Rejection(err error) bool {
-	var rejected *t3RPCRejectedError
-	return errors.As(err, &rejected)
+	var failure *t3RPCFailureError
+	return errors.As(err, &failure) && failure.rejected
+}
+
+// t3CommandRejectionTags are the error tags of T3 command failures that
+// commit nothing and are recorded as rejection receipts, so replaying the
+// same commandId repeats the refusal. Any other error is treated as ambiguous.
+var t3CommandRejectionTags = map[string]bool{
+	"OrchestrationCommandInvariantError":          true,
+	"OrchestrationCommandPreviouslyRejectedError": true,
+}
+
+// t3ExitCauseIsRejection reports whether an Exit Failure cause is a
+// definitive refusal: every failure in it is a Fail carrying one of
+// [t3CommandRejectionTags]. A Die, an Interrupt, an unknown error or an
+// unparseable cause is ambiguous. It reads both Effect cause encodings: the
+// tagged tree (Fail, Die, Interrupt, Sequential, Parallel, Empty) and the
+// flattened list ({"failures": [...]}, {"reasons": [...]} or a bare list).
+func t3ExitCauseIsRejection(raw json.RawMessage) bool {
+	var decoded interface{}
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return false
+	}
+	leaves, ok := t3CauseLeaves(decoded)
+	if !ok || len(leaves) == 0 {
+		return false
+	}
+	for _, leaf := range leaves {
+		if leaf["_tag"] != "Fail" {
+			return false
+		}
+		failure, _ := leaf["error"].(map[string]interface{})
+		tag, _ := failure["_tag"].(string)
+		if !t3CommandRejectionTags[tag] {
+			return false
+		}
+	}
+	return true
+}
+
+// t3CauseLeaves flattens a decoded cause into its Fail, Die and Interrupt
+// entries. It reports false for a shape it does not recognize.
+func t3CauseLeaves(node interface{}) ([]map[string]interface{}, bool) {
+	switch v := node.(type) {
+	case []interface{}:
+		var leaves []map[string]interface{}
+		for _, item := range v {
+			sub, ok := t3CauseLeaves(item)
+			if !ok {
+				return nil, false
+			}
+			leaves = append(leaves, sub...)
+		}
+		return leaves, true
+	case map[string]interface{}:
+		switch v["_tag"] {
+		case "Fail", "Die", "Interrupt":
+			return []map[string]interface{}{v}, true
+		case "Empty":
+			return nil, true
+		case "Sequential", "Parallel":
+			return t3CauseLeaves([]interface{}{v["left"], v["right"]})
+		case nil:
+			for _, field := range []string{"failures", "reasons"} {
+				if list, ok := v[field].([]interface{}); ok {
+					return t3CauseLeaves(list)
+				}
+			}
+		}
+	}
+	return nil, false
 }
 
 func isSoftBridgeUnavailable(err error) bool {
@@ -1119,7 +1191,7 @@ func (p *Provider) rpcCallOnce(method string, params map[string]interface{}, req
 				continue
 			}
 			if resp.Tag == "Defect" {
-				return nil, &t3RPCRejectedError{method: method, cause: resp.Defect, defect: true}
+				return nil, &t3RPCFailureError{method: method, cause: resp.Defect, defect: true}
 			}
 			if resp.Tag != "Exit" || resp.RequestID != fmt.Sprintf("%d", reqID) {
 				continue
@@ -1128,7 +1200,7 @@ func (p *Provider) rpcCallOnce(method string, params map[string]interface{}, req
 				return nil, fmt.Errorf("t3 rpc %s: nil exit", method)
 			}
 			if resp.Exit.Tag == "Failure" {
-				return nil, &t3RPCRejectedError{method: method, cause: string(resp.Exit.Cause)}
+				return nil, &t3RPCFailureError{method: method, cause: string(resp.Exit.Cause), rejected: t3ExitCauseIsRejection(resp.Exit.Cause)}
 			}
 			return resp.Exit.Value, nil
 		}

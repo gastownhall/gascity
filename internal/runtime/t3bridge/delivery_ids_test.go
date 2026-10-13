@@ -1,6 +1,7 @@
 package t3bridge
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -105,7 +106,73 @@ func TestTransportFailureIsNotARejection(t *testing.T) {
 	if isT3Rejection(errors.New("ws://127.0.0.1:1/ws: read: connection reset by peer")) {
 		t.Fatal("a transport failure classified as a T3 rejection")
 	}
-	if !isT3Rejection(&t3RPCRejectedError{method: "orchestration.dispatchCommand", cause: "nope"}) {
-		t.Fatal("a T3 Failure exit not classified as a rejection")
+}
+
+// Only a Fail carrying one of T3's command errors is a definitive refusal.
+// An interrupted or dying handler may have committed the command, so those
+// causes, unknown errors and unparseable causes are ambiguous: the caller
+// redelivers under the same key and T3 replays whatever it decided. Both
+// Effect cause encodings (the v3 tagged tree and the flattened list) are read.
+func TestT3ExitCauseIsRejection(t *testing.T) {
+	fail := func(tag string) map[string]interface{} {
+		return map[string]interface{}{"_tag": "Fail", "error": map[string]interface{}{"_tag": tag, "message": "no"}}
+	}
+	invariant := fail("OrchestrationCommandInvariantError")
+	previously := fail("OrchestrationCommandPreviouslyRejectedError")
+	die := map[string]interface{}{"_tag": "Die", "defect": "boom"}
+	interrupt := map[string]interface{}{"_tag": "Interrupt", "fiberId": map[string]interface{}{"id": 3}}
+	for _, tc := range []struct {
+		name  string
+		cause interface{}
+		want  bool
+	}{
+		{name: "fail invariant", cause: invariant, want: true},
+		{name: "fail previously rejected", cause: previously, want: true},
+		{name: "fail unknown error", cause: fail("SqlError"), want: false},
+		{name: "fail without error tag", cause: map[string]interface{}{"_tag": "Fail", "error": "nope"}, want: false},
+		{name: "die", cause: die, want: false},
+		{name: "interrupt", cause: interrupt, want: false},
+		{name: "empty", cause: map[string]interface{}{"_tag": "Empty"}, want: false},
+		{name: "sequential fails", cause: map[string]interface{}{"_tag": "Sequential", "left": invariant, "right": previously}, want: true},
+		{name: "parallel fail and die", cause: map[string]interface{}{"_tag": "Parallel", "left": invariant, "right": die}, want: false},
+		{name: "flattened failures", cause: map[string]interface{}{"failures": []interface{}{invariant}}, want: true},
+		{name: "flattened reasons with interrupt", cause: map[string]interface{}{"reasons": []interface{}{invariant, interrupt}}, want: false},
+		{name: "bare list", cause: []interface{}{invariant}, want: true},
+		{name: "empty list", cause: []interface{}{}, want: false},
+		{name: "string", cause: "thread is archived", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, err := json.Marshal(tc.cause)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := t3ExitCauseIsRejection(raw); got != tc.want {
+				t.Fatalf("t3ExitCauseIsRejection(%s) = %v, want %v", raw, got, tc.want)
+			}
+		})
+	}
+}
+
+// A turn start whose handler died or was interrupted may still commit, so it
+// is not a rejection: redelivering under a new key could start a second turn.
+func TestNudgeKeyedAmbiguousFailureIsNotErrNudgeRejected(t *testing.T) {
+	for name, cause := range map[string]interface{}{
+		"die":       map[string]interface{}{"_tag": "Die", "defect": "boom"},
+		"interrupt": map[string]interface{}{"_tag": "Interrupt", "fiberId": 7},
+	} {
+		t.Run(name, func(t *testing.T) {
+			server := newT3BridgeTestServer(t, boundThreadSnapshot("ready"))
+			t.Cleanup(server.Close)
+			server.failCommand("thread.turn.start", cause)
+			_, sp := newSeamBackedSnapshotTestProvider(t, server.wsURL())
+
+			err := sp.(runtime.KeyedNudgeProvider).NudgeKeyed("agent-a", runtime.TextContent("hello"), "batch-1")
+			if err == nil {
+				t.Fatal("NudgeKeyed with a failed turn start = nil, want the failure")
+			}
+			if errors.Is(err, runtime.ErrNudgeRejected) {
+				t.Fatalf("NudgeKeyed with a %s cause = %v, want an ambiguous (non-rejection) error", name, err)
+			}
+		})
 	}
 }
