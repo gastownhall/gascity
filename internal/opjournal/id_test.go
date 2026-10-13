@@ -88,6 +88,19 @@ func TestDeriveIDRefusesNonCanonicalInput(t *testing.T) {
 }
 
 func TestTargetKeys(t *testing.T) {
+	// A key at the limit is one DeriveID accepts.
+	for _, fn := range []func() (string, error){
+		func() (string, error) { return InterruptKey(1, strings.Repeat("t", maxClientKeyLen-len("stop:1:"))) },
+		func() (string, error) { return RespondKey(1, strings.Repeat("r", maxClientKeyLen-len("respond:1:"))) },
+	} {
+		k, err := fn()
+		if err != nil {
+			t.Fatalf("key at the limit: %v", err)
+		}
+		if _, err := DeriveID("gc", "gc-1", "p", k); err != nil {
+			t.Fatalf("DeriveID refused a %d-byte key the helper returned: %v", len(k), err)
+		}
+	}
 	if k, err := InterruptKey(7, "run-9:2"); err != nil || k != "stop:7:run-9:2" {
 		t.Errorf("InterruptKey(7, run-9:2) = %q, %v", k, err)
 	}
@@ -102,6 +115,8 @@ func TestTargetKeys(t *testing.T) {
 		{"interrupt no turn", func() (string, error) { return InterruptKey(1, "") }},
 		{"respond gen -1", func() (string, error) { return RespondKey(-1, "r") }},
 		{"respond no request", func() (string, error) { return RespondKey(1, "") }},
+		{"interrupt key too long", func() (string, error) { return InterruptKey(1, strings.Repeat("t", maxClientKeyLen-len("stop:1:")+1)) }},
+		{"respond key too long", func() (string, error) { return RespondKey(1, strings.Repeat("r", maxClientKeyLen-len("respond:1:")+1)) }},
 	} {
 		if _, err := c.fn(); !errors.Is(err, ErrInvalidRequest) {
 			t.Errorf("%s: err = %v, want ErrInvalidRequest", c.name, err)

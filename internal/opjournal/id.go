@@ -96,7 +96,7 @@ func InterruptKey(gen int64, turn string) (string, error) {
 	if err := validateText("interrupt key turn", turn, maxClientKeyLen); err != nil {
 		return "", err
 	}
-	return "stop:" + strconv.FormatInt(gen, 10) + ":" + turn, nil
+	return composedKey("interrupt key", "stop:"+strconv.FormatInt(gen, 10)+":"+turn)
 }
 
 // RespondKey is the client key of a respond to one interaction of one
@@ -109,7 +109,16 @@ func RespondKey(gen int64, requestID string) (string, error) {
 	if err := validateText("respond key request id", requestID, maxClientKeyLen); err != nil {
 		return "", err
 	}
-	return "respond:" + strconv.FormatInt(gen, 10) + ":" + requestID, nil
+	return composedKey("respond key", "respond:"+strconv.FormatInt(gen, 10)+":"+requestID)
+}
+
+// composedKey returns key when it is a client key Propose accepts, so a
+// helper never hands out a key the store then refuses.
+func composedKey(what, key string) (string, error) {
+	if err := validateText(what, key, maxClientKeyLen); err != nil {
+		return "", err
+	}
+	return key, nil
 }
 
 // validatePrefix refuses an empty prefix or one that would make the id
