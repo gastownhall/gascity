@@ -3836,6 +3836,8 @@ func TestInstantiateRefusesASessionStep(t *testing.T) {
 			{"a substituted gc:session label", formula.RecipeStep{ID: "f.s", Title: "S", Type: "task", Labels: []string{"{{lbl}}"}}, map[string]string{"lbl": "gc:session"}, nil, "session row"},
 			{"a gc:session label by a var's default (M05)", formula.RecipeStep{ID: "f.s", Title: "S", Type: "task", Labels: []string{"{{lbl}}"}}, nil, map[string]*formula.VarDef{"lbl": {Default: &gcSession}}, "session row"},
 			{"type startup-health-episode (mc-lp7zb)", formula.RecipeStep{ID: "f.s", Title: "S", Type: "startup-health-episode"}, nil, nil, "startup-health episode"},
+			{"type convergence (architecture B)", formula.RecipeStep{ID: "f.s", Title: "S", Type: "Convergence"}, nil, nil, "controller-owned"},
+			{"a ' GC:Session ' label (architecture B)", formula.RecipeStep{ID: "f.s", Title: "S", Type: "task", Labels: []string{" GC:Session "}}, nil, nil, "controller-owned"},
 		} {
 			prev := IsGraphApplyEnabled()
 			SetGraphApplyEnabled(graph)

@@ -227,7 +227,7 @@ func unroute(sp runtime.Provider, name string) {
 func confirmStopped(ctx context.Context, sp runtime.Provider, processNames []string, name string, since time.Time) bool {
 	name = strings.TrimSpace(name)
 	leaf, _, known := runtime.ResolveBackend(sp, name)
-	if sp == nil || name == "" || !known || leaf == nil || !freshReadable(leaf) {
+	if sp == nil || name == "" || !known || leaf == nil || !runtime.FreshReadable(leaf) {
 		return false
 	}
 	live, ok := freshRead(ctx, leaf, name, processNames, since)

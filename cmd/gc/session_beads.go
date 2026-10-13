@@ -1648,8 +1648,25 @@ func (r retiredCleanup) cleanup(id string) {
 	cancelStateAssignedToRetiredSessionBead(r.store, id, r.clock.Now(), nil)
 }
 
-// syncSessionBeadsWithSnapshotAndRigStores ensures every desired session has a corresponding session
-// bead. Accepts desiredState (sessionName → TemplateParams) instead of
+// clientProviderChat reports whether a session with this origin, running
+// under agent, is a client's provider chat: a session projected as manual
+// (templateParamsSessionOrigin) whose template is a provider's implicit agent,
+// which it runs under only because that agent is named after the provider.
+// POST /sessions with kind=provider creates one; discovery also projects as
+// manual an ephemeral row of the agent with no pool, named or dependency-only
+// marker (isLegacyManualSessionInfoForAgent). The chat has no agent identity
+// of its own, so no agent_name is stamped on it; one would make every later
+// read resolve it as kind "agent" (a pool member of the implicit agent)
+// instead of the provider session its create reported. A chat that already
+// carries agent_name keeps it: gc session new and a template start stamp one
+// on the manual sessions they create for an implicit agent, which are agent
+// sessions, and the two cannot be told apart.
+func clientProviderChat(origin string, agent *config.Agent) bool {
+	return origin == "manual" && agent != nil && agent.Implicit
+}
+
+// syncSessionBeadsWithSnapshotAndRigStores materializes configured desired sessions and retains existing
+// manual sessions. Accepts desiredState (sessionName → TemplateParams) instead of
 // map[string]TemplateParams, and uses runtime.Provider for liveness checks.
 //
 // configuredNames is the set of ALL configured agent session names (including
@@ -1950,6 +1967,13 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 				openBeads = upsertOpenSessionBead(openBeads, indexBySessionName, recovered)
 			}
 		}
+		if !exists && tp.ManualSession {
+			// Manual entries retain sessions discovered during planning; they
+			// are not create requests. A close can win before this fresh store
+			// read. Never replace that terminal conversation with a new bead
+			// carrying its old alias and runtime name.
+			continue
+		}
 		state := syncSessionCachedState(sn, b, exists, sp)
 		if !exists && isConfiguredNamed {
 			extraMeta := startupKickoffReopenMetadata(tp.BoundStepID, now)
@@ -2207,7 +2231,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 				queueAliasGuardedMeta("work_dir", tp.WorkDir)
 			}
 		}
-		if legacyNeedsConcreteIdentity && agentName != "" {
+		if legacyNeedsConcreteIdentity && agentName != "" && !clientProviderChat(origin, findAgentByTemplate(cfg, tp.TemplateName)) {
 			queueAliasGuardedMeta("agent_name", agentName)
 		}
 		if b.Metadata["dependency_only"] != boolMetadata(tp.DependencyOnly) {

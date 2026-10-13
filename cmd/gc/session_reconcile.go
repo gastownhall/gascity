@@ -622,13 +622,14 @@ func clearLastWokeAt(info sessionpkg.Info, sessFront *sessionpkg.Store) sessionp
 
 // recordRateLimitQuarantine backs off a session that exited into a provider
 // rate-limit screen without treating the exit as a crash or resetting its
-// conversation metadata. Returns (folded Info, nil) on success so the caller
-// advances the typed snapshot with the quarantine write (front-door migration
+// conversation metadata, never shortening a quarantine in force. Returns
+// (folded Info, nil) on success so the caller advances the typed snapshot
+// with the quarantine write (front-door migration
 // Step 6d, write-returns-Info); returns (info unchanged, err) on persist failure
 // (ApplyPatchInfo leaves the snapshot pinned to the rejected write).
 func recordRateLimitQuarantine(info sessionpkg.Info, sessFront *sessionpkg.Store, clk clock.Clock) (sessionpkg.Info, error) {
 	now := clk.Now()
-	batch := sessionpkg.CellIntoInfo(info, sessionpkg.ActorController, sessionpkg.DispEvent{Kind: sessionpkg.EvQuarantine, Until: now.Add(defaultRateLimitQuarantineDuration)}, now, sessionpkg.RateLimitQuarantinePatch())
+	batch := sessionpkg.ExtendQuarantine(info, now.Add(defaultRateLimitQuarantineDuration), now).Into(info.ID, sessionpkg.RateLimitQuarantinePatch())
 	next, err := sessFront.ApplyPatchInfo(info, batch)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "recordRateLimitQuarantine: SetMetadataBatch %s: %v\n", info.ID, err) //nolint:errcheck

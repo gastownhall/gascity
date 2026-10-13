@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"io"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -57,6 +60,38 @@ func eventTypes(s settlement) []string {
 		out = append(out, ev.Type)
 	}
 	return out
+}
+
+// TestStopFinalizeAndCloseRestOnTheirOwnRead (STALE-READ M1, E1). Kills a
+// finalize or premise close that rests on section 0's relayed C8.8: a
+// runtime back under the name after the confirmed stop, which the finalize
+// section's (or the close section's) own read finds, refuses
+// runtime-present, writing no drained finalize and closing nothing.
+func TestStopFinalizeAndCloseRestOnTheirOwnRead(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		meta    []string
+		entry   func(*selectionEntry)
+		section int // the section after whose Call the runtime comes back
+	}{
+		{"the finalize", signaled(drainOrphaned, "operator_drain", "3"), wanted, 0},
+		{"the premise close", signaled(drainOrphaned, "pool_managed", "true"), undesired(drainOrphaned), 1},
+	} {
+		s, got, leaf := stopRun(t, c.meta, c.entry, func(p *effectPass, leaf *fenceLeaf, _ beads.Store, id string) {
+			p.seam = func(_ context.Context, at txSeam, _ intent, section, _ int) error {
+				if at == seamAfterCall && section == c.section {
+					startRuntime(t, leaf.Fake, "s-gc-1", map[string]string{"GC_SESSION_ID": id, "GC_INSTANCE_TOKEN": "tok-3"})
+				}
+				return nil
+			}
+		})
+		if !leaf.IsRunning("s-gc-1") {
+			t.Fatalf("%s: the runtime did not come back", c.name)
+		}
+		if s.Outcome != settledRefused || s.Cause != causeRuntimePresent || got.Status == "closed" || got.Metadata["state"] == string(session.StateDrained) {
+			t.Errorf("%s: settled %+v, row %s state %q; want refused %q, nothing finalized or closed", c.name, s, got.Status, got.Metadata["state"], causeRuntimePresent)
+		}
+	}
 }
 
 // TestStopVerbStopsConfirmsAndFinalizes (D3, D4; SESS-035, DRAIN-054).
@@ -288,6 +323,108 @@ func TestFinalizeWorkReadErrorKeepsOpen(t *testing.T) {
 	}
 }
 
+// blockingWork is a work leg whose seat-scoped live lists block while
+// armed, until release closes: the finalize's bounded probe expires at
+// fenceProbeTimeout and hands the decide a zero finalizeWork. (A panicking
+// list would not do: seat_work recovers it per store as a read error.)
+type blockingWork struct {
+	beads.Store
+	armed   *atomic.Bool
+	release <-chan struct{}
+}
+
+func (s blockingWork) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if q.Assignee != "" && q.Live && s.armed.Load() {
+		<-s.release
+	}
+	return s.Store.List(q)
+}
+
+// claimFor gives the row id an in-progress work bead and returns its ID.
+func claimFor(t *testing.T, store beads.Store, id string) string {
+	t.Helper()
+	b, err := store.Create(beads.Bead{Title: "w", Type: "task", Assignee: id})
+	if err == nil {
+		err = store.Update(b.ID, beads.UpdateOpts{Status: stringPtr("in_progress")})
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b.ID
+}
+
+// Kills a close over a lost work read (STALE-READ-ARCH §7.1, PR 1), under
+// synctest so the expiries cost no real time: a pool seat holding
+// in-progress work whose finalize work read expires is not closed, its
+// work kept; a seat whose clean finalize read found none, assigned work
+// after it, whose premise close's own read expires, is not closed either;
+// a clean read with no work closes. The zero value or a probe error holds
+// an ordinary row and a soft-suspended pool seat alike in stopChoice.
+func TestFinalizeLostWorkReadNeverCloses(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		lose   int // the section whose probe expires: 1 the finalize's, 2 the close's; 0 none
+		closed bool
+	}{{"a clean read", 0, true}, {"the finalize's read expires over work", 1, false}, {"the close's read expires after a late claim", 2, false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				release := make(chan struct{})
+				defer close(release)
+				armed := &atomic.Bool{}
+				var workID string
+				var work beads.Store
+				s, got, _ := stopRun(t, signaled(drainOrphaned, "pool_managed", "true"), undesired(drainOrphaned), func(p *effectPass, _ *fenceLeaf, store beads.Store, id string) {
+					work = store
+					if tc.lose == 1 {
+						workID = claimFor(t, store, id)
+						armed.Store(true)
+					}
+					p.reads.legs = testWorkLegs(p.World.CityPath, p.World.Env.Cfg, blockingWork{Store: store, armed: armed, release: release}, nil).readOnly()
+					p.seam = func(_ context.Context, at txSeam, _ intent, section, _ int) error {
+						if tc.lose == 2 && at == seamAfterCall && section == 1 { // after the finalize's clean read, before the close's
+							workID = claimFor(t, store, id)
+							armed.Store(true)
+						}
+						return nil
+					}
+				})
+				if tc.lose != 0 && workID == "" {
+					t.Fatal("the run never reached the section whose read it loses")
+				}
+				closed := got.Status == "closed"
+				if closed != tc.closed {
+					t.Fatalf("settlement %+v, status %s, row %v; want closed %v", s, got.Status, got.Metadata, tc.closed)
+				}
+				if workID != "" {
+					if wb, _ := work.Get(workID); wb.Status != "in_progress" || wb.Assignee != got.ID {
+						t.Fatalf("work %s %q assignee %q; want kept on the seat", workID, wb.Status, wb.Assignee)
+					}
+				}
+			})
+		})
+	}
+	// A soft-suspended pool seat keeps no slot (#7718, KeepsSlot), so only
+	// its work read stands between it and a close.
+	soft := censusRowOf(t, drainRow("state", "suspended", "pool_managed", "true", "suspended_at", rowAt(-time.Hour))).Info
+	if session.DispositionOfInfo(soft).KeepsSlot() {
+		t.Fatal("fixture: want a soft suspend, which keeps no slot")
+	}
+	for _, row := range []session.Info{fenceRow("a", "tok-a"), soft} {
+		v := txView{It: intent{Kind: intentStop, Reason: decideStopVerb + drainOrphaned}, Row: row, Now: gatherNow}
+		if !stopChoice(v, finalizeWork{free: true}, nil).CloseSeat {
+			t.Fatalf("%s: a clean read closes no seat; the cases below prove nothing", row.ID)
+		}
+		for _, c := range []struct {
+			work finalizeWork
+			err  error
+		}{{finalizeWork{}, nil}, {finalizeWork{free: true}, errProbeExpired}, {finalizeWork{}, errProbeExpired}} {
+			if stopChoice(v, c.work, c.err).CloseSeat {
+				t.Errorf("%s: work %+v, probe error %v: the finalize closes, want it held as work", row.ID, c.work, c.err)
+			}
+		}
+	}
+}
+
 // atomicClosing is a MemStore with the atomic terminal close the premise
 // close needs, as the city's SQLite sessions store has.
 type atomicClosing struct{ *beads.MemStore }
@@ -453,6 +590,99 @@ func TestDormantStopOrigins(t *testing.T) {
 		})
 		if s.Outcome != settledLanded || stops(leaf) != 1 || got.Status == "closed" || got.Metadata["sleep_reason"] != c.reason {
 			t.Errorf("%s: settlement %+v, %d stops, status %s, row %v; want stopped, open, sleep_reason %q", c.name, s, stops(leaf), got.Status, got.Metadata, c.reason)
+		}
+	}
+}
+
+// killedWoken is a killed row the allocation wants awake: a manual or
+// always-named seat after `gc session kill` (CONTRACT v5.10d).
+func killedWoken(e *selectionEntry) { e.Desired, e.InDesired = desireWake, true }
+
+// killedMeta is a killed row's metadata.
+var killedMeta = []string{"state", "asleep", "sleep_reason", "killed", "slept_at", rowAt(-time.Hour)}
+
+// dormantSettled applies a dormant stop's settlement s of row id to a fresh
+// planner's backoff table and returns the row's record.
+func dormantSettled(id string, s settlement) backoffRecord {
+	p := newPlanner(newFakePlannerClock(plannerT0), func() time.Duration { return time.Minute }, nil, newInflightMap(), nil, io.Discard)
+	k := rowKey{Leg: rowLeg, ID: id}
+	s.Key, s.Kind, s.Reason, s.At = k, intentStop, decideDormantStop, plannerT0
+	p.backoffSettled(s)
+	return p.backoff.Record(rowBackoffKey(k))
+}
+
+// TestDormantStopOfAGoneRuntimeSettlesNoop (CONTRACT v5.10d (a)). Kills a
+// killed seat's restart held by a row backoff: the pass read the runtime
+// alive before the kill's own stop ended it, so A4 proposed the dormant
+// stop; its fresh read finds nothing under the name, and the stop settles as
+// a no-op (no Stop, no write) that backs nothing off and notes the runtime
+// gone for the next pass.
+func TestDormantStopOfAGoneRuntimeSettlesNoop(t *testing.T) {
+	var before int
+	s, got, leaf := stopRun(t, killedMeta, killedWoken, func(_ *effectPass, l *fenceLeaf, _ beads.Store, _ string) {
+		if err := l.Stop("s-gc-1"); err != nil { // the kill's own stop, after the pass read
+			t.Fatal(err)
+		}
+		before = stops(l)
+	})
+	if s.Outcome != settledNoop || s.Cause != causeAlreadyGone || stops(leaf) != before || got.Metadata["state"] != "asleep" || got.Metadata["sleep_reason"] != "killed" {
+		t.Fatalf("settlement %+v, %d stops, row %v; want a no-op %q, no stop, the killed row untouched", s, stops(leaf)-before, got.Metadata, causeAlreadyGone)
+	}
+	if n := s.Facts.Noted; n == nil || !n.Gone || n.Name != "s-gc-1" {
+		t.Fatalf("noted %+v, want s-gc-1 gone", n)
+	}
+	if r := dormantSettled(got.ID, s); r.live(plannerT0) {
+		t.Fatalf("row backoff %+v after the gone runtime's no-op, want none", r)
+	}
+}
+
+// TestDormantStopRedecidedOverALiveRuntimeBacksOff (CONTRACT v5.10d (a),
+// scoped). Kills the already-gone no-op widened to every redecided stop: a
+// dormant stop whose fresh read finds a runtime still under the name, no
+// longer the row's own, refuses redecided and keeps its row backoff (the
+// lease churn the backoff paces).
+func TestDormantStopRedecidedOverALiveRuntimeBacksOff(t *testing.T) {
+	s, got, leaf := stopRun(t, killedMeta, killedWoken, func(_ *effectPass, l *fenceLeaf, _ beads.Store, _ string) {
+		if err := l.Stop("s-gc-1"); err != nil {
+			t.Fatal(err)
+		}
+		startRuntime(t, l.Fake, "s-gc-1", map[string]string{"GC_SESSION_ID": "gc-9", "GC_INSTANCE_TOKEN": "tok-9"})
+	})
+	if !leaf.IsRunning("s-gc-1") {
+		t.Fatal("premise: a runtime runs under the name")
+	}
+	if s.Outcome != settledRefused || s.Cause != causeRedecided || s.Facts.Noted != nil {
+		t.Fatalf("settlement %+v, want refused %q with nothing noted", s, causeRedecided)
+	}
+	if r := dormantSettled(got.ID, s); !r.live(plannerT0) || r.Cause != causeRedecided {
+		t.Fatalf("row backoff %+v, want a live redecided backoff", r)
+	}
+}
+
+// TestOnlyTheDormantStopOfAGoneRuntimeIsANoop (CONTRACT v5.10d (a),
+// scoped). Kills the already-gone no-op taken by any stop the fresh read
+// redecides: on the same killed row and the same absent runtime, the
+// operator-dormant stop settles as the no-op, and an idle stop refuses
+// redecided, keeping its backoff.
+func TestOnlyTheDormantStopOfAGoneRuntimeIsANoop(t *testing.T) {
+	p, it, store, _ := admittedBeginOn(t, killedMeta, killedWoken)
+	b, err := store.Get(it.Key.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		reason string
+		want   txStep
+	}{
+		{decideDormantStop, txStep{Done: true, Cause: causeAlreadyGone}},
+		{decideIdleTimeout, txStep{Refuse: causeRedecided}},
+	} {
+		v := txView{
+			It: intent{Key: it.Key, Kind: intentStop, Reason: c.reason, Basis: it.Basis}, World: p.World, Alloc: p.Alloc,
+			Row: sessionInfoFromBead(b), Meta: b.Metadata, RT: &txRuntime{Class: rtAbsent}, Now: gatherNow,
+		}
+		if got := stopDecide(v); got.Done != c.want.Done || got.Cause != c.want.Cause || got.Refuse != c.want.Refuse {
+			t.Errorf("%s over an absent runtime: %+v, want %+v", c.reason, got, c.want)
 		}
 	}
 }

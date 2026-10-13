@@ -62,6 +62,14 @@ var ErrStoreClosed = errors.New("bead store closed")
 // BUSY. The error's message stays the driver's.
 var ErrSQLiteBusyExhausted = errors.New("sqlite busy retries exhausted")
 
+// ErrStoreUnavailable reports that the backing bead store could not be read,
+// which is not the same as finding nothing. gc hook's work-query classifier
+// wraps a failure that got no answer from the store (a connection error, a
+// timeout, bd's breaker failing fast) with it and exits 2, distinct from the
+// exit-1 no-work answer. Treat it as "unknown", never as "empty". Check with
+// errors.Is.
+var ErrStoreUnavailable = errors.New("bead store unavailable")
+
 // ErrParentProjectionSuperseded reports that a parent update was overtaken by a
 // concurrent reparent before the caller's projection wait could converge.
 var ErrParentProjectionSuperseded = errors.New("parent projection superseded by concurrent update")
@@ -1170,6 +1178,11 @@ type StorageGraphApplyStore interface {
 type ParentProjectionWaiter interface {
 	// WaitForParentProjection blocks until the store's parent-child listing
 	// view reflects a reparent from oldParentID to newParentID for id, or
-	// returns an error if the projection does not converge.
+	// returns an error if the projection does not converge. The error wraps
+	// ErrParentProjectionSuperseded when another writer moved id to a
+	// different parent, and ErrNotFound when id was deleted. When the wait
+	// stops because ctx ended, the error's chain holds ctx.Err() and no other
+	// context error, so errors.Is reports why the wait stopped even if a
+	// backend read failed earlier with its own timeout.
 	WaitForParentProjection(ctx context.Context, id, oldParentID, newParentID string) error
 }

@@ -51,6 +51,16 @@ type LifecycleHandle interface {
 	StateHandle
 }
 
+// FencedKillHandle exposes the operator kill under the session kill fence. A
+// handle bound to a session bead implements it; a bare runtime handle has no
+// row to fence.
+type FencedKillHandle interface {
+	KillFenced(context.Context, sessionpkg.Actor, func(string)) (sessionpkg.KillReport, error)
+	// KillRuntimeGone is KillFenced's "runtime already gone" verdict taken
+	// without the lease (session.Manager.KillRuntimeGone).
+	KillRuntimeGone(context.Context) (bool, error)
+}
+
 // MessagingHandle exposes live input delivery operations.
 type MessagingHandle interface {
 	// Message and Nudge may start or resume the session as the Actor may
@@ -248,10 +258,14 @@ func normalizeNudgeWakePolicy(policy NudgeWakePolicy) NudgeWakePolicy {
 
 // HistoryRequest scopes transcript loading for a worker.
 type HistoryRequest struct {
-	TailCompactions int    `json:"tail_compactions,omitempty"`
-	LogicalID       string `json:"logical_conversation_id,omitempty"`
-	BeforeEntryID   string `json:"before_entry_id,omitempty"`
-	AfterEntryID    string `json:"after_entry_id,omitempty"`
+	TailCompactions int `json:"tail_compactions,omitempty"`
+	// LogicalID, when set, replaces the session's own logical conversation ID
+	// (session.Info.LogicalConversationID). The handle stitches snapshots that
+	// share it, so a caller-supplied value must change whenever the session
+	// starts a new conversation.
+	LogicalID     string `json:"logical_conversation_id,omitempty"`
+	BeforeEntryID string `json:"before_entry_id,omitempty"`
+	AfterEntryID  string `json:"after_entry_id,omitempty"`
 }
 
 // PendingInteraction is the worker-level view of a blocking interaction.

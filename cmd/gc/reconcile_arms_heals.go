@@ -34,6 +34,7 @@ const (
 	decideClaimClear      = "claim-clear"
 	decideCreatingHeal    = "creating-heal"
 	decideDeadRuntimeHeal = "dead-runtime-heal"
+	decideSquatterHeal    = "squatter-heal"
 	decideAwakeHeal       = "awake-heal"
 	decideSuspendHeal     = "soft-suspend-heal"
 	decideStabilityClear  = "stability-clear"
@@ -188,6 +189,80 @@ func armDeadRuntimeHeal(r *rowFacts) (intent, bool) {
 	return it, ok
 }
 
+// armSquatterHeal is A6 item 4's occupied case (CONTRACT v5.10c, §12.2 #23,
+// J40 A/B): a committed row whose name a runtime that is not its own holds
+// (squatted) goes asleep with runtime-missing, for every sessions-leg row AL1
+// does not Drain, so the row is not credited with the squatter. It is not a
+// crash: no death accrues and the conversation is kept, so a squatter can
+// neither quarantine the seat nor wipe its conversation. It stops nothing.
+// The row stays down while the name is held (AL1's name-occupied, S1's
+// refusals) and A18 starts it once the name frees.
+func armSquatterHeal(r *rowFacts) (intent, bool) {
+	info := r.row.Info
+	if r.entry == nil || !committed(info) || r.entry.Desired == desireDrain || !r.freshSquatted() {
+		return intent{}, false
+	}
+	patch := session.MetadataPatch{"state": string(session.StateAsleep)}
+	if strings.TrimSpace(info.SleepReason) == "" {
+		patch["sleep_reason"] = string(session.SleepReasonRuntimeMissing)
+	}
+	return r.heal(intentRowHealFresh, decideSquatterHeal, patch)
+}
+
+// freshSquatted reports the row's name held by a runtime that is not its own
+// (squatter), for a fresh kind's arm: on the pass's facts, a name the
+// inventory reads occupied or Ownerless; on the effect's fresh read, the
+// identity read on one present object across its brackets. An Ownerless one
+// must read alive (CONTRACT v5.10c-1): the row's own exiting runtime reads
+// Ownerless briefly on acp and subprocess, and its death is the dead-runtime
+// heal's to count.
+func (r *rowFacts) freshSquatted() bool {
+	r.rests |= restRuntime
+	info := r.row.Info
+	if r.fresh != nil {
+		return squatterProven(info, r.fresh)
+	}
+	o := r.w.Observed[r.k]
+	if r.entry == nil || r.entry.Liveness != livenessOccupied && o.Reason != observeReasonOwnerless {
+		return false
+	}
+	v, ok := squatter(info, o.Identity)
+	return ok && (v == identityForeign || r.inventoryAlive())
+}
+
+// squatterProven is the squatter heal's fresh proof (CONTRACT v5.10c,
+// v5.10c-1): one object across the read's brackets, Foreign, or Ownerless
+// under a tokened row and alive.
+func squatterProven(row session.Info, rt *txRuntime) bool {
+	v, ok := squatter(row, rt.Identity)
+	return rt.Same && ok && (v == identityForeign || rt.Alive())
+}
+
+// inventoryAlive reports the row's runtime running with its agent not read
+// dead on the pass's facts (O1's alive, whoever owns it).
+func (r *rowFacts) inventoryAlive() bool {
+	name := strings.TrimSpace(r.row.Info.SessionName)
+	return r.w.Obs.Fact(name, FactRunning, r.w.Now, r.w.ObsMaxAge).Value == ObsYes &&
+		r.w.Obs.Fact(name, FactProcessAlive, r.w.Now, r.w.ObsMaxAge).Value != ObsNo
+}
+
+// squatter reports a runtime identity that proves the row's own runtime gone
+// (CONTRACT v5.10c), with its verdict: Foreign, as A4/D3 read it; or
+// Ownerless while the row carries a token, since every admitted runtime is
+// started with RuntimeEnv and only a leaf that writes it atomically with
+// liveness reads Ownerless (O2, X3; any other leaf's identity is never
+// Known, so Unknown).
+func squatter(row session.Info, rt runtimeIdentity) (identityVerdict, bool) {
+	switch v := compareIdentity(row, rt); v {
+	case identityForeign:
+		return v, true
+	case identityOwnerless:
+		return v, strings.TrimSpace(row.InstanceToken) != ""
+	default:
+		return v, false
+	}
+}
+
 // deadRuntimePatch is legacy's write for a committed row whose runtime is
 // gone, in legacy's order: the state heal (SESS-531), then the death's
 // accrual (SESS-537 a wake failure inside the stability threshold, SESS-538
@@ -269,7 +344,7 @@ func deadRuntimePatch(r *rowFacts, heal bool) (patch session.MetadataPatch, clas
 	default:
 		return patch, class, false, nil
 	}
-	maps.Copy(patch, accrual.Patch)
+	maps.Copy(patch, accrual.Over(info, r.w.Now)) // a live quarantine keeps its reason (v5.9z)
 	class = accrual.Class(info, r.w.Now)
 	patch["last_woke_at"] = ""
 	return patch, class, true, ev

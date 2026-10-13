@@ -149,6 +149,10 @@ test:ci --experimental_use_validation_aspect
 # ran it (--noremote_upload_local_results, build:remote-exec above, is
 # unaffected: this flag only stops a read, never a write).
 test:fresh --nocache_test_results
+# The v2 simulator corpus ranges run as GoTestRun build actions
+# (tools/bazel/rules/go_test_run.bzl), which --nocache_test_results does not
+# reach: fresh re-executes them too (bazel_key_parity_test.go classifies it).
+test:fresh --modify_execution_info=GoTestRun=+no-cache
 
 # The tagged suites, as bazel.yml's lanes run them (byte-identical values:
 # --define and --test_timeout are key inputs). --test_timeout stays at or

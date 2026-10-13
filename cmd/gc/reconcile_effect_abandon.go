@@ -212,7 +212,7 @@ func otherFailurePatch(row session.Info, meta map[string]string, f startFailureR
 	}
 	attempts, _ := strconv.Atoi(row.WakeAttemptsMetadata)
 	accrual := session.WakeFailureAccrualPatch(attempts, defaultMaxWakeAttempts, now.Add(defaultQuarantineDuration))
-	maps.Copy(patch, accrual.Patch)
+	maps.Copy(patch, accrual.Over(row, now)) // a live quarantine keeps its reason (v5.9z)
 	return patch, class.With(accrual.Class(row, now)), accrual.Quarantined
 }
 
@@ -309,7 +309,10 @@ func stopOwnRuntime(ctx context.Context, c txCaps, in teardown) (teardown, error
 
 // rollbackClose is C3's rollback, the failed-create close, while the fresh
 // row may still roll back (CanRollback) and its fresh read finds no runtime
-// of its own; S7's relaunch keeps the row once its runtime is stopped.
+// of its own; S7's relaunch keeps the row once its runtime is stopped. An
+// occupant the Call left alone (no stop, no corpse kill: a name the row does
+// not own) is F1's again on this read (occupantLeft, STALE-READ 7.3); one
+// the Call stopped is gone by design.
 func rollbackClose(v txView) txStep {
 	td, err := callResult[teardown](v)
 	stop, cause := rollbackRuntime(v.Row, v.RT)
@@ -318,6 +321,8 @@ func rollbackClose(v txView) txStep {
 		return txStep{Fail: causeCallError, Err: err}
 	case !rollbackable(v.Row):
 		return txStep{Refuse: causeRedecided}
+	case td.stop == nil && !td.corpse.found() && occupantLeft(v):
+		return txStep{Refuse: causeRedecided} // F1 again: an occupant the Call left alone may have left since
 	case cause != "":
 		return txStep{Refuse: cause}
 	case stop:
@@ -337,10 +342,10 @@ func rollbackable(row session.Info) bool {
 }
 
 // rateLimitQuarantine is legacy's recordRateLimitQuarantine for row at now: its
-// lifecycle and the Quarantine cell's quarantined_until (class, minted by the
-// write).
+// lifecycle and the Quarantine cell's quarantined_until, never shortening one
+// in force (class, minted by the write).
 func rateLimitQuarantine(row session.Info, now time.Time) (session.MetadataPatch, session.DispositionPatch) {
-	return session.RateLimitQuarantinePatch(), session.CellInfo(row, session.ActorController, session.DispEvent{Kind: session.EvQuarantine, Until: now.Add(defaultRateLimitQuarantineDuration)}, now)
+	return session.RateLimitQuarantinePatch(), session.ExtendQuarantine(row, now.Add(defaultRateLimitQuarantineDuration), now)
 }
 
 // rollbackPatch is legacy's rollbackPendingCreateClears as one atomic close:
@@ -446,6 +451,16 @@ func liveNonOccupant(v txView) bool {
 	return v.RT != nil && (v.RT.Class == rtAlive || v.RT.Class == rtZombie) && !occupantStays(v)
 }
 
+// occupantLeft is F1 on the current attempt's fresh read: a rollback the
+// arm rested on an occupant (intent.Occupant) whose occupant is gone, inside
+// the pending create's lease or over a live runtime that is no occupant.
+// The close decides it again on its own read when its Call left the
+// occupant alone (STALE-READ 7.3), as the occupant can leave between
+// sections.
+func occupantLeft(v txView) bool {
+	return v.It.Occupant && !occupantStays(v) && (occupantLeaseHolds(v) || liveNonOccupant(v))
+}
+
 // rollbackStep is the rollback's first Decide: a screen's patch, or the
 // teardown of the fresh read's own runtime for the Call.
 func rollbackStep(v txView, screen screenWrite, _ error) txStep {
@@ -459,7 +474,7 @@ func rollbackStep(v txView, screen screenWrite, _ error) txStep {
 		return txStep{Done: true, Cause: decideStaleCreate} // gone already: A18 relaunches it, no backoff between
 	case v.It.Relaunch && !staleSelfOwn(v):
 		return txStep{Refuse: causeRedecided} // S7's relaunch stops only a runtime its own read still finds StaleSelf, its own
-	case v.It.Occupant && !occupantStays(v) && (occupantLeaseHolds(v) || liveNonOccupant(v)):
+	case occupantLeft(v):
 		return txStep{Refuse: causeRedecided} // F1: the occupant the arm rested on is gone; the lease, or the live runtime, decides next pass
 	case len(screen.patch) > 0 || screen.class.Len() > 0:
 		return txStep{Write: screen.patch, Class: screen.class, Done: true}

@@ -83,13 +83,15 @@ var (
 //   - a killed seat keeps everything when anything is started (owner ruling
 //     B1): only the seat that started work may resume it;
 //   - drain-ack gives back only in_progress claims (D5): the agent said it
-//     holds nothing, and open claims are its continuation preassignments;
+//     holds nothing, and open claims are its continuation preassignments; a
+//     routeless claim takes the seat's route, as on the paths below, since
+//     kept it would leave the acked seat asleep holding it (mc-sca8r);
 //   - the cascade, the stranded repair, both orphan releases and the
 //     retired-session sweep (`gc session close`, a removed named session)
 //     give back started work too: the seat is gone.
 var releasePolicies = map[releaseWhy]releasePolicy{
 	releaseKilledSeat:     {statuses: openOrStarted, startedKeeps: true, lane: laneDirect, seatRoute: true},
-	releaseDrainAck:       {statuses: startedOnly, lane: laneCarried},
+	releaseDrainAck:       {statuses: startedOnly, lane: laneCarried, seatRoute: true},
 	releaseCloseCascade:   {statuses: openOrStarted, lane: laneCarried, seatRoute: true},
 	releaseStrandedRepair: {statuses: openOrStarted, lane: laneCarried, seatRoute: true},
 	releaseOrphan:         {statuses: openOrStarted, lane: laneDirect, pool: true},

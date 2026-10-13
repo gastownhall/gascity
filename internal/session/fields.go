@@ -220,7 +220,7 @@ var fields = withObserved(with(with(with(with(with(with(with(registry, false, v2
 	"pool_alias_conflict_at", "synced_at", "work_dir", "wake_mode", "session_key", "continuation_epoch", "command", "provider", "provider_kind",
 	"builtin_ancestor", "resume_flag", "resume_style", "resume_command", "session_id_flag", "close_reason", "closed_at"), false, v2("cmd/gc/reconcile_baseline.go", "baselinePatch"),
 	"started_config_hash", "started_provision_hash", "started_launch_hash", "core_hash_breakdown", "started_live_hash", "live_hash"), false, v2("cmd/gc/reconcile_steps_nudges.go", "externalReadsLane.nudges"),
-	"idle_claim_nudge_trigger", "idle_claim_nudge_count", "idle_claim_nudge_at", "continuation_claim_nudge_work",
+	"idle_claim_nudge_trigger", "idle_claim_nudge_count", "idle_claim_nudge_at", "idle_claim_nudge_token", "idle_claim_nudge_stalled", "idle_claim_nudge_stalled_token", "continuation_claim_nudge_work",
 	"continuation_claim_nudge_root", "continuation_claim_nudge_store_ref", "continuation_claim_nudge_generation",
 	"continuation_claim_nudge_count", "continuation_claim_nudge_at", "execution_claim_nudge_work", "execution_claim_nudge_root",
 	"execution_claim_nudge_store_ref", "execution_claim_nudge_count", "execution_claim_nudge_at", "execution_claim_nudge_stalled",
@@ -317,7 +317,7 @@ var registry = slices.Concat([]Field{
 	{Key: "sleep_intent", Class: ClassOperatorIntent, Writers: sites(opEncode, legacy(srcSleep, "markIdleSleepPendingInfo")), Clears: sites(waitHold, opConsumeHold, op("internal/session/kill_fence.go", "WriteKillFence"), v2SleepIntentClear, v2Accrual)},
 	{Key: "wait_hold", Class: ClassOperatorIntent, Writers: sites(opEncode, op("cmd/gc/cmd_wait.go", "doSessionWait")), Clears: sites(waitHold)},
 	{Key: "suspended_at", Class: ClassOperatorIntent, Writers: sites(opEncode, op(srcManager, "Manager.Suspend")), Clears: sites(opConsumeHold, op("internal/session/kill_fence.go", "WriteKillFence"))},
-	{Key: "pin_awake", Class: ClassOperatorIntent, Writers: sites(op("cmd/gc/cmd_session_pin.go", "cmdSessionSetPin")), Readers: sites(v2("cmd/gc/allocator_decide.go", "decidePass.awake"))},
+	{Key: "pin_awake", Class: ClassOperatorIntent, Writers: sites(op("internal/session/store.go", "Store.SetPinAwake")), Readers: sites(v2("cmd/gc/allocator_decide.go", "decidePass.awake"))},
 	// template_overrides is a per-session setting the start reads and nothing
 	// clears, so it is operator intent, not a request.
 	{Key: "template_overrides", Class: ClassOperatorIntent, Writers: sites(op(srcManager, "Manager.UpdateTemplateOverrides"))},
@@ -449,7 +449,9 @@ var registry = slices.Concat([]Field{
 	same(ClassAdvisory, false, sites(legacy("cmd/gc/drain_ack_escalation.go", "recordDrainAckEscalationAttempt")), "drain_escalation_at",
 		"drain_escalation_count", "drain_escalation_drain"),
 	same(ClassAdvisory, false, sites(legacy("cmd/gc/idle_nudge.go", "writeIdleClaimMarker")), "idle_claim_nudge_trigger", "idle_claim_nudge_count",
-		"idle_claim_nudge_at"),
+		"idle_claim_nudge_at", "idle_claim_nudge_token"),
+	same(ClassAdvisory, true, sites(legacy("cmd/gc/idle_nudge.go", "poolClaimBackstop.exhausted")), "idle_claim_nudge_stalled",
+		"idle_claim_nudge_stalled_token"),
 	same(ClassAdvisory, false, sites(legacy("cmd/gc/idle_nudge.go", "writeContinuationClaimMarker")), "continuation_claim_nudge_work",
 		"continuation_claim_nudge_root", "continuation_claim_nudge_store_ref", "continuation_claim_nudge_generation",
 		"continuation_claim_nudge_count", "continuation_claim_nudge_at"),

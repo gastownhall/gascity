@@ -2922,7 +2922,17 @@ func commitStartResultTraced(
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, "runtime_mcp_snapshot_failed", result.started, result.finished, err, result.phases)
 		return startCommitFailed
 	}
-	applied, err := sessFront.CommitStartedIfCurrentUnder(info, metadata, result.prepared.candidate.lease)
+	applied, err := sessFront.CommitStartedIfCurrentUnder(info, metadata, result.prepared.candidate.lease, sessionpkg.StartCommitRefusingHolds())
+	if errors.Is(err, sessionpkg.ErrStartCommitHeld) {
+		// An operator's suspend landed while the start ran (CONTRACT S1
+		// v5.6, §12.2 row 65): nothing commits, the in-flight lease is still
+		// this start's to release, and the caller stops the runtime it
+		// spawned as a stale start's.
+		clearPendingStartInFlightLease(info.ID, sessFront, stderr)
+		fmt.Fprintf(stderr, "session reconciler: discarding the start of %s: %v\n", name, err) //nolint:errcheck
+		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, "user_held", result.started, result.finished, nil, result.phases)
+		return startCommitStale
+	}
 	if err != nil {
 		clearPendingStartInFlightLease(info.ID, sessFront, stderr)
 		fmt.Fprintf(stderr, "session reconciler: storing hashes for %s: %v\n", name, err) //nolint:errcheck
@@ -3401,14 +3411,19 @@ func recordStartupHealthFailure(info sessionpkg.Info, name string, err error, se
 //
 // The heal is a start's commit, so it runs under the runtime lease like one
 // (I-LEASE): taken without waiting before the rebuild's writes, and the
-// commit is refused once the lease was taken over.
+// commit is refused once the lease was taken over. Like the async commit, it
+// refuses a row an operator suspended (StartCommitRefusingHolds) and stops
+// the start's runtime through sp, as a stale start's (CONTRACT S1 v5.6,
+// §12.2 row 65).
 func recoverRunningPendingCreate(
 	cityPath string,
 	info sessionpkg.Info,
 	tp TemplateParams,
 	cfg *config.City,
 	store beads.Store,
+	sp runtime.Provider,
 	clk clock.Clock,
+	stderr io.Writer,
 	trace *sessionReconcilerTraceCycle,
 ) (bool, map[string]string) {
 	if strings.TrimSpace(info.ID) == "" || store == nil {
@@ -3500,7 +3515,20 @@ func recoverRunningPendingCreate(
 		PrimedAt:            primedAt,
 		PromptHash:          promptHash,
 	})
-	applied, err := sessionFrontDoor(store).CommitStartedIfCurrentUnder(prepared.candidate.info, metadata, lease)
+	applied, err := sessionFrontDoor(store).CommitStartedIfCurrentUnder(prepared.candidate.info, metadata, lease, sessionpkg.StartCommitRefusingHolds())
+	if errors.Is(err, sessionpkg.ErrStartCommitHeld) {
+		// An operator suspended the row before its start committed (CONTRACT
+		// S1 v5.6, §12.2 row 65): the heal never stamps the start over the
+		// hold, and the runtime the suspend did not stop is stopped as the
+		// start's own, under the lease still held.
+		stopStaleAsyncStartRuntime(startResult{prepared: *prepared}, sp, stderr)
+		if trace != nil {
+			trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonPendingCreateSuperseded, TraceOutcomeSkipped, tp.TemplateName, tp.SessionName, traceRecordPayload{
+				"user_held": true,
+			})
+		}
+		return true, pendingCreateResidueFold(prepared.candidate.info)
+	}
 	if err != nil {
 		if trace != nil {
 			trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonPendingCreateCommitFailed, TraceOutcomeFailed, tp.TemplateName, tp.SessionName, traceRecordPayload{

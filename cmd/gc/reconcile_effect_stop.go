@@ -38,8 +38,12 @@ import (
 //     session.stopped with the stop metric when a stop was performed, and
 //     session.drain_acked_with_assigned_work when a drained row keeps work.
 
-// causeDispositionRefused: the Sleep cell refused the finalize's move.
-const causeDispositionRefused = "disposition-refused"
+const (
+	// causeDispositionRefused: the Sleep cell refused the finalize's move.
+	causeDispositionRefused = "disposition-refused"
+	// causeAlreadyGone: an operator-dormant stop found its runtime gone.
+	causeAlreadyGone = "already-gone"
+)
 
 // stopSections are the fence and the Call, the finalize write, and the
 // premise close, which only a finalize that closes reaches: a store that
@@ -115,6 +119,9 @@ func stopDecide(v txView) txStep {
 	// only an idle stop's, must hold too, so the idle finalize never applies
 	// to another stop (a stop request's verb turns finalize on its own).
 	if fresh, _ := decideRow(&w, v.Alloc, v.It.Key); fresh.Kind != v.It.Kind || (isIdleReason(fresh.Reason) || isIdleReason(v.It.Reason)) && fresh.Reason != v.It.Reason {
+		if dormantGone(v) {
+			return txStep{Done: true, Cause: causeAlreadyGone, Facts: effectFacts{Noted: &notedRuntime{Name: strings.TrimSpace(v.Row.SessionName), At: v.Now, Gone: true}}}
+		}
 		return txStep{Refuse: causeRedecided}
 	}
 	name := strings.TrimSpace(v.Row.SessionName)
@@ -133,7 +140,7 @@ func stopDecide(v txView) txStep {
 	}
 	// A bead-scoped pool name embeds this row's ID, so it is never Foreign
 	// (C8.2(a), ownsName); L2 still passes only on Current (I3).
-	if !ownsName(v.Row, name) && v.RT.Same && v.RT.Identity.Known && compareIdentity(v.Row, v.RT.Identity) == identityForeign {
+	if foreignUnowned(v) {
 		plan.foreign = true
 		return txStep{Pass: plan}
 	}
@@ -150,6 +157,15 @@ func stopDecide(v txView) txStep {
 	}
 	plan.verdict = fv
 	return txStep{Pass: plan}
+}
+
+// dormantGone reports an operator-dormant stop whose fresh read finds
+// nothing under the name: the runtime is already gone (a kill's own stop
+// finished after the pass read it alive). It settles as a no-op, with no row
+// backoff, and notes the absence, so the next pass decides the row on it
+// (CONTRACT v5.10d (a)). Any other redecided stop keeps its backoff.
+func dormantGone(v txView) bool {
+	return v.It.Reason == decideDormantStop && v.RT != nil && v.RT.Class == rtAbsent
 }
 
 // stopCall stops a live runtime through its fence, or, with nothing live,
@@ -190,37 +206,39 @@ func removeCorpse(ctx context.Context, k corpseObject, now time.Time) {
 }
 
 // finalizeWork is the finalize's live work read: the close-gate form (v5.7
-// A9), which excludes the seat's own drain step; an error counts as work.
-// anomaly is the work bead legacy's drain_acked_with_assigned_work names
+// A9), which excludes the seat's own drain step. free is proven by a clean
+// read only: an error, a read that expired or panicked (the zero value),
+// counts as work, so a lost read never closes the seat. anomaly is the
+// work bead legacy's drain_acked_with_assigned_work names
 // (drainAckClaimableAnomalyBead), when the row keeps work.
 type finalizeWork struct {
-	has     bool
-	err     error
+	free    bool
 	anomaly *beads.Bead
 }
 
 // finalizeWorkProbe reads the row's work in the close-gate form.
 func finalizeWorkProbe(_ context.Context, r effectReads, v txView) (finalizeWork, error) {
 	if r.legs.unusable() != nil || v.World.Env == nil {
-		return finalizeWork{err: errNoReadStore}, nil
+		return finalizeWork{}, errNoReadStore
 	}
 	// One seat's read, live, over the pass's city work legs.
 	sw := seatWorkFor(r.legs, releaseScope(v.Row, v.World.Env.Cfg))
-	w := finalizeWork{}
-	w.has, w.err = sessionHasOpenAssignedWorkForReachableStoreForCloseGate(sw, v.Row)
-	if w.has {
+	has, err := sessionHasOpenAssignedWorkForReachableStoreForCloseGate(sw, v.Row)
+	w := finalizeWork{free: !has && err == nil}
+	if has {
 		if b, found, _ := drainAckClaimableAnomalyBead(sw, v.Row, v.Now); found {
 			w.anomaly = &b
 		}
 	}
-	return w, nil
+	return w, err
 }
 
 // stopChoice is the finalize's choice on the fresh row: the intent's
-// builder, else finalizePatch.
-func stopChoice(v txView, work finalizeWork) finalizeChoice {
+// builder, else finalizePatch. A work read that erred, expired or panicked
+// (probeErr, or the zero value) is work.
+func stopChoice(v txView, work finalizeWork, probeErr error) finalizeChoice {
 	f := finalizeFacts{
-		Now: v.Now, CloseIfUnassigned: closeIfUnassigned(v), HasWork: work.has || work.err != nil,
+		Now: v.Now, CloseIfUnassigned: closeIfUnassigned(v), HasWork: !work.free || probeErr != nil,
 		OperatorHeld: session.DispositionOfInfo(v.Row).KeepsSlot(),
 		HonoredWake:  honoredWake(v),
 		FreshWake:    v.Row.WakeMode == "fresh", RestartRequested: v.Row.RestartRequested == "true",
@@ -302,10 +320,14 @@ func idleFinish(f finalizeFacts) finalizeChoice {
 
 // stopCloseStep is the premise close of a confirmed stop whose finalize
 // closes; one that no longer closes (work assigned since) refuses, and the
-// next pass finalizes it again.
-func stopCloseStep(v txView, work finalizeWork, _ error) txStep {
+// next pass finalizes it again, as does one whose own runtime read finds a
+// runtime under the name again (goneNow).
+func stopCloseStep(v txView, work finalizeWork, probeErr error) txStep {
 	out, _ := callResult[stopped](v)
-	if !stopChoice(v, work).CloseSeat {
+	switch {
+	case !goneNow(v):
+		return txStep{Refuse: causeRuntimePresent}
+	case !stopChoice(v, work, probeErr).CloseSeat:
 		return txStep{Refuse: causeRedecided}
 	}
 	terminal := session.ClosePatch(v.Now, "drained")
@@ -318,16 +340,20 @@ func passStopped(_ context.Context, _ txCaps, out stopped) (stopped, error) { re
 
 // stopFinalizeStep, on a confirmed stop, writes the finalize's patch and
 // clears the stop request in one CAS, or, for a finalize that closes, hands
-// the stop's outcome to the premise close.
-func stopFinalizeStep(v txView, work finalizeWork, _ error) txStep {
+// the stop's outcome to the premise close. The Call's C8.8 confirms its own
+// stop; the finalize rests on this section's own read too (goneNow), so a
+// runtime under the name since is never finalized drained.
+func stopFinalizeStep(v txView, work finalizeWork, probeErr error) txStep {
 	out, err := callResult[stopped](v)
 	switch {
 	case err != nil:
 		return txStep{Fail: causeCallError, Err: err}
 	case !out.Confirmed:
 		return txStep{Refuse: out.Reason}
+	case !goneNow(v):
+		return txStep{Refuse: causeRuntimePresent}
 	}
-	choice := stopChoice(v, work)
+	choice := stopChoice(v, work, probeErr)
 	if choice.CloseSeat {
 		return txStep{Pass: out}
 	}
@@ -351,6 +377,30 @@ func stopFinalizeStep(v txView, work finalizeWork, _ error) txStep {
 		class, kept = to.Changed(), work.anomaly // the tx mints the cell's move into this write
 	}
 	return txStep{Write: patch, Class: class, Facts: stopFacts(v, out, kept), Done: true}
+}
+
+// goneNow is a gone-proof from the current attempt's own runtime read
+// (STALE-READ M1, E1), never one a Call relays from an earlier section:
+// nothing under the name, a corpse, or a Foreign runtime under a name the
+// row does not own (foreignUnowned), which the stop leaves alone.
+func goneNow(v txView) bool {
+	if v.RT == nil {
+		return false
+	}
+	switch v.RT.Class {
+	case rtAbsent, rtCorpse:
+		return true
+	case rtAlive, rtZombie:
+		return foreignUnowned(v)
+	}
+	return false
+}
+
+// foreignUnowned reports the read's runtime as another row's, read on one
+// object, under a name this row does not own: a bead-scoped pool name
+// embeds this row's ID, so it is never Foreign (C8.2(a), ownsName).
+func foreignUnowned(v txView) bool {
+	return !ownsName(v.Row, strings.TrimSpace(v.Row.SessionName)) && v.RT.Same && v.RT.Identity.Known && compareIdentity(v.Row, v.RT.Identity) == identityForeign
 }
 
 // stopFacts are legacy's events for a finalized stop (SESS-033/034,

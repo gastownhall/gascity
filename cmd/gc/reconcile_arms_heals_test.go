@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -1066,5 +1067,207 @@ func TestIdleStopHealKeepsAQuarantinesReason(t *testing.T) {
 		if it.Reason != decideDeadRuntimeHeal || c.want == "quarantine" && set || c.want == "idle" && got != "idle" {
 			t.Fatalf("until %s: decideRow = (%q, %v), want the heal with sleep_reason %q", c.until, it.Reason, it.folded(), c.want)
 		}
+	}
+}
+
+// squatterCase is a committed row holding a conversation and a fresh wake
+// failure, whose name the inventory lists held by a live runtime with
+// identity env, observed as observeCensus reads it (occupied when Foreign,
+// unknown otherwise).
+func squatterCase(t *testing.T, env map[string]string, desired desire, meta ...string) *healCase {
+	t.Helper()
+	return squatterCaseLive(t, env, true, desired, meta...)
+}
+
+// squatterCaseLive is squatterCase with the runtime's agent read alive, or
+// dead by a complete process probe.
+func squatterCaseLive(t *testing.T, env map[string]string, alive bool, desired desire, meta ...string) *healCase {
+	t.Helper()
+	base := []string{"state", "awake", "session_key", "k-1", "started_config_hash", "h", "wake_attempts", "1", "churn_count", "1", "last_woke_at", rowAt(-time.Second)}
+	c := newHealCase(t, livenessUnknown, desired, append(base, meta...)...)
+	c.w.Now, c.w.ObsMaxAge = censusNow, observeMaxAge
+	id := runtimeIdentity{Known: true, SessionID: env["GC_SESSION_ID"], Epoch: env["GC_RUNTIME_EPOCH"], Token: env["GC_INSTANCE_TOKEN"]}
+	attrs := InventoryAttrs{Identity: id, DeadKnown: true, ProcessProbed: true, ProcessKnown: true, ProcessAlive: alive}
+	c.w.Obs = newObserveCache().publish(censusNow, map[string]InventoryAttrs{"s-heal": attrs}, completeBackend("tmux", "s-heal"))
+	c.w.Observed = observeCensus(c.w.Obs, c.w.Census, c.w.Now, c.w.ObsMaxAge)
+	c.a.Snapshot.Entries[c.k].Liveness = c.w.Observed[c.k].Liveness
+	return c
+}
+
+var (
+	foreignEnv   = map[string]string{"GC_SESSION_ID": "gc-other", "GC_RUNTIME_EPOCH": "1", "GC_INSTANCE_TOKEN": "tok-squatter"}
+	ownerlessEnv = map[string]string{}
+)
+
+// Kills a committed row credited with a runtime that is not its own
+// (CONTRACT v5.10c, §12.2 #23, J40 A/B): a Foreign runtime under its name,
+// or an Ownerless one while the row carries a token, parks the row asleep
+// with runtime-missing by the fresh heal, re-proven fresh (tmux and acp
+// alike), and the heal is no crash: no wake failure, churn or quarantine
+// accrues, last_woke_at stays, and the conversation is kept. A row with no
+// token, its own runtime, an undecidable identity, a Drain row and an
+// uncommitted row are not healed.
+func TestSquatterHealParksACommittedRowNotAsACrash(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		env     map[string]string
+		desired desire
+		meta    []string
+		acp     bool
+		heal    bool
+	}{
+		{"A: another session's runtime", foreignEnv, desireNone, nil, false, true},
+		{"A: another session's runtime, wanted awake", foreignEnv, desireWake, nil, false, true},
+		{"A: on acp", foreignEnv, desireNone, nil, true, true},
+		{"A: a kept rate_limit reason stays", foreignEnv, desireNone, []string{"sleep_reason", string(session.SleepReasonRateLimit), "quarantined_until", rowAt(time.Hour)}, false, true},
+		{"B: an identity-less runtime", ownerlessEnv, desireWake, nil, false, true},
+		{"B: on acp", ownerlessEnv, desireNone, nil, true, true},
+		{"B: a row with no token holds", ownerlessEnv, desireWake, []string{"instance_token", ""}, false, false},
+		{"its own runtime", map[string]string{"GC_SESSION_ID": "", "GC_INSTANCE_TOKEN": "tok-3"}, desireWake, nil, false, false},
+		{"an undecidable identity holds", map[string]string{"GC_INSTANCE_TOKEN": "tok-9"}, desireWake, nil, false, false},
+		{"drain", foreignEnv, desireDrain, nil, false, false},
+		{"asleep", foreignEnv, desireNone, []string{"state", "asleep"}, false, false},
+		{"creating", foreignEnv, desireNone, []string{"state", "creating"}, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := squatterCase(t, tc.env, tc.desired, tc.meta...)
+			before := c.meta(t)
+			it := c.decide()
+			if got := it.Reason == decideSquatterHeal; got != tc.heal {
+				t.Fatalf("decideRow = (%q, %q), want the squatter heal %v", it.Kind, it.Reason, tc.heal)
+			}
+			if !tc.heal {
+				return
+			}
+			want := session.MetadataPatch{"state": "asleep", "sleep_reason": string(session.SleepReasonRuntimeMissing)}
+			if reason := before["sleep_reason"]; reason != "" {
+				want = session.MetadataPatch{"state": "asleep"} // a reason the row already carries is kept
+			}
+			if it.Kind != intentRowHealFresh || !maps.Equal(it.folded(), want) || it.Class.Len() != 0 {
+				t.Fatalf("intent (%q, %v, class %v), want a fresh heal of exactly %v", it.Kind, it.folded(), it.Class.Fold(), want)
+			}
+			sp := &freshObserver{Fake: runtime.NewFake(), l: runtime.Liveness{Running: true, Alive: true}, env: tc.env}
+			leaf := sp.tmux()
+			if tc.acp {
+				leaf = sp.acp()
+			}
+			_, s := c.run(t, leaf, nil)
+			m := c.meta(t)
+			wantReason := string(session.SleepReasonRuntimeMissing)
+			if before["sleep_reason"] != "" {
+				wantReason = before["sleep_reason"]
+			}
+			if s.Outcome != settledLanded || m["state"] != "asleep" || m["sleep_reason"] != wantReason {
+				t.Fatalf("settlement %+v, row %v, want the row parked asleep with %s", s, m, wantReason)
+			}
+			for _, key := range []string{"session_key", "started_config_hash", "wake_attempts", "churn_count", "last_woke_at", "quarantined_until", "continuation_epoch"} {
+				if m[key] != before[key] {
+					t.Errorf("%s = %q, was %q: a squatter is no crash", key, m[key], before[key])
+				}
+			}
+			if sp.Fake.CountCalls("Stop", "s-heal") != 0 {
+				t.Error("the heal stopped the squatter")
+			}
+		})
+	}
+}
+
+// Kills the squatter heal landing on a stale read (CONTRACT v5.10c: the
+// effect re-proves gone-or-Foreign under the name lock): when the row's own
+// runtime is back, the identity cannot be read, or the read fails, the
+// effect refuses and the row stays awake. A name freed since the pass
+// re-decides as the dead-runtime heal, which only its own pass proposes, so
+// the squatter heal refuses it too.
+func TestSquatterHealReprovesTheSquatterFresh(t *testing.T) {
+	alive := runtime.Liveness{Running: true, Alive: true}
+	for _, tc := range []struct {
+		name  string
+		pass  map[string]string
+		fresh *freshObserver
+		cause string
+	}{
+		{"the name freed", foreignEnv, gone(), causeRuntimeNotSquatter},
+		{"the read failed", foreignEnv, &freshObserver{Fake: runtime.NewFake(), err: errors.New("tmux: server busy")}, causeLivenessUnknown},
+		{"its own runtime is back", ownerlessEnv, &freshObserver{Fake: runtime.NewFake(), l: alive, env: map[string]string{"GC_SESSION_ID": "", "GC_INSTANCE_TOKEN": "tok-3"}}, causeRuntimeNotSquatter},
+		{"the identity unreadable", ownerlessEnv, &freshObserver{Fake: runtime.NewFake(), l: alive}, causeRuntimeNotSquatter},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := squatterCase(t, tc.pass, desireWake)
+			_, s := c.run(t, tc.fresh.tmux(), nil)
+			if s.Outcome != settledRefused || s.Cause != tc.cause || c.meta(t)["state"] != "awake" {
+				t.Fatalf("settlement %+v, state %q, want refused %q and the row awake", s, c.meta(t)["state"], tc.cause)
+			}
+		})
+	}
+	c := squatterCase(t, foreignEnv, desireNone)
+	it := c.decide()
+	v := txView{It: it, World: c.w, Alloc: c.a, Row: c.w.Census.Rows[c.k].Info, Meta: c.meta(t), RT: &txRuntime{Class: rtAbsent}}
+	if _, fresh := redecideRowIntent(v); it.Reason != decideSquatterHeal || fresh.Reason != decideDeadRuntimeHeal {
+		t.Fatalf("decided %q, a freed name re-decided %q, want the squatter heal, then the dead-runtime heal", it.Reason, fresh.Reason)
+	}
+	// An identity read across two session objects is neither one's.
+	v.RT = &txRuntime{Class: rtAlive, Identity: runtimeIdentity{Known: true, SessionID: "gc-other", Token: "tok-squatter"}}
+	if step := healSections[0].Decide(v); step.Refuse != causeRuntimeNotSquatter {
+		t.Fatalf("an identity read across two objects: step %+v, want refused %q", step, causeRuntimeNotSquatter)
+	}
+}
+
+// Kills Ownerless read as a squatter on a leaf without O2's atomic identity
+// write (CONTRACT v5.10c, X3): an exec leaf's identity is never read, so its
+// identity-less runtime is Unknown, never Ownerless, and the row holds (A9).
+func TestSquatterHealIgnoresOwnerlessOffAtomicLeaves(t *testing.T) {
+	leaf := runtime.NewFakeProfile(runtime.ProfileExec, runtime.FullFake{Fake: runtime.NewFake()})
+	id := readIdentityEnv(leaf, "s-heal")
+	c := squatterCase(t, ownerlessEnv, desireWake)
+	row := c.w.Census.Rows[c.k].Info
+	if _, ok := squatter(row, id); id.Known || ok {
+		t.Fatalf("exec leaf identity %+v reads a squatter, want Unknown", id)
+	}
+	c.w.Observed[c.k] = rowObservation{Identity: id, Reason: observeReasonIdentity}
+	if it := c.decide(); it.Reason == decideSquatterHeal {
+		t.Fatalf("decideRow = (%q, %q), want the row held", it.Kind, it.Reason)
+	}
+}
+
+// Kills a parked seat that never comes back (CONTRACT v5.10c): once the
+// name frees, the healed row reads gone and A18 starts it, its kept
+// conversation and unaccrued counters untouched by the heal.
+func TestSquatterHealedRowStartsOnceTheNameFrees(t *testing.T) {
+	c := squatterCase(t, foreignEnv, desireWake)
+	if _, s := c.run(t, (&freshObserver{Fake: runtime.NewFake(), l: runtime.Liveness{Running: true, Alive: true}, env: foreignEnv}).tmux(), nil); s.Outcome != settledLanded {
+		t.Fatalf("heal settled %+v, want landed", s)
+	}
+	freed := newHealCase(t, livenessGone, desireWake)
+	freed.store, freed.k = c.store, c.k
+	freed.w.Census = readCensus(t, gatherNow, censusLegs(rowLeg, c.store))
+	freed.w.LegStores = map[string]beads.Store{rowLeg: c.store}
+	freed.a = &allocDecision{Snapshot: &selectionSnapshot{Entries: map[rowKey]*selectionEntry{c.k: {Key: c.k, Liveness: livenessGone, Desired: desireWake}}}}
+	if it := freed.decide(); it.Kind != intentStart {
+		t.Fatalf("decideRow = (%q, %q), want A18's start of the freed seat", it.Kind, it.Reason)
+	}
+}
+
+// Kills an exiting own runtime parked as an Ownerless squatter (CONTRACT
+// v5.10c-1; review probe R8): the row's own acp or subprocess runtime reads
+// Ownerless briefly while it exits (compareIdentity), so case B needs the
+// runtime alive. On the pass's facts an Ownerless runtime whose agent reads
+// dead proposes no park; on the effect's fresh read, an agent dead or a
+// corpse refuses it, so the death stays the dead-runtime heal's to count.
+// A Foreign corpse still proves the row's runtime gone (case A).
+func TestSquatterHealNeedsAnOwnerlessRuntimeAlive(t *testing.T) {
+	if it := squatterCaseLive(t, ownerlessEnv, false, desireWake).decide(); it.Reason == decideSquatterHeal {
+		t.Fatalf("an Ownerless runtime whose agent reads dead proposed %q, want no park", it.Reason)
+	}
+	for name, l := range map[string]runtime.Liveness{"agent dead": {Running: true}, "corpse": {Corpse: true}} {
+		c := squatterCase(t, ownerlessEnv, desireWake)
+		before := c.meta(t)
+		_, s := c.run(t, (&freshObserver{Fake: runtime.NewFake(), l: l, env: map[string]string{}}).acp(), nil)
+		if m := c.meta(t); s.Outcome == settledLanded && m["wake_attempts"] == before["wake_attempts"] {
+			t.Errorf("%s: an exiting Ownerless runtime was parked as a non-crash squatter (%+v)", name, s)
+		}
+	}
+	c := squatterCase(t, foreignEnv, desireWake)
+	if _, s := c.run(t, (&freshObserver{Fake: runtime.NewFake(), l: runtime.Liveness{Corpse: true}, env: foreignEnv}).tmux(), nil); s.Outcome != settledLanded || c.meta(t)["state"] != "asleep" {
+		t.Fatalf("a Foreign corpse: settlement %+v, state %q, want the row parked", s, c.meta(t)["state"])
 	}
 }

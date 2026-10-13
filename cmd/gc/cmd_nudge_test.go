@@ -2615,7 +2615,7 @@ func TestTryDeliverQueuedNudgesByPollerSkipsHeldSession(t *testing.T) {
 	idleSince := time.Now().Add(-10 * time.Second)
 	fake.Activity = map[string]time.Time{info.SessionName: idleSince}
 	target := nudgeTarget{cityPath: dir, agent: config.Agent{Name: "worker"}, sessionID: info.ID, resolved: &config.ResolvedProvider{Name: "codex"}, sessionName: info.SessionName}
-	obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
+	obs := worker.LiveObservation{Running: true, Alive: true, LastActivity: &idleSince}
 
 	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 3*time.Second, obs)
 	if err != nil || delivered || fake.CountCalls("Nudge", info.SessionName) != 0 {
@@ -2651,7 +2651,7 @@ func TestTryDeliverQueuedNudgesByPollerDeliversAndAcks(t *testing.T) {
 		resolved:    &config.ResolvedProvider{Name: "codex"},
 		sessionName: info.SessionName,
 	}
-	obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
+	obs := worker.LiveObservation{Running: true, Alive: true, LastActivity: &idleSince}
 
 	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 3*time.Second, obs)
 	if err != nil {
@@ -2728,7 +2728,7 @@ func TestTryDeliverQueuedNudgesByPollerAcksDeliveredUnobservedInsteadOfRetrying(
 		resolved:    &config.ResolvedProvider{Name: "codex"},
 		sessionName: info.SessionName,
 	}
-	obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
+	obs := worker.LiveObservation{Running: true, Alive: true, LastActivity: &idleSince}
 
 	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 3*time.Second, obs)
 	if err != nil {
@@ -2796,7 +2796,7 @@ func TestTryDeliverQueuedNudgesByPollerDropsStaleMailReminder(t *testing.T) {
 		resolved:    &config.ResolvedProvider{Name: "codex"},
 		sessionName: info.SessionName,
 	}
-	obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
+	obs := worker.LiveObservation{Running: true, Alive: true, LastActivity: &idleSince}
 
 	// No mail sent -- the recipient has nothing unread, so the deferred
 	// reminder is already stale and must not be delivered.
@@ -2887,7 +2887,7 @@ func TestTryDeliverQueuedNudgesByPollerKeepsFreshMailReminder(t *testing.T) {
 		resolved:    &config.ResolvedProvider{Name: "codex"},
 		sessionName: info.SessionName,
 	}
-	obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
+	obs := worker.LiveObservation{Running: true, Alive: true, LastActivity: &idleSince}
 
 	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 3*time.Second, obs)
 	if err != nil {
@@ -2971,7 +2971,7 @@ func TestTryDeliverQueuedNudgesByPollerKeepsMailReminderWhenMailStoreRelocated(t
 		resolved:    &config.ResolvedProvider{Name: "codex"},
 		sessionName: info.SessionName,
 	}
-	obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
+	obs := worker.LiveObservation{Running: true, Alive: true, LastActivity: &idleSince}
 
 	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 3*time.Second, obs)
 	if err != nil {
@@ -3027,7 +3027,7 @@ func TestTryDeliverQueuedNudgesByPollerDeliversActivitylessTimedOnlySession(t *t
 		resolved:    &config.ResolvedProvider{Name: "codex"},
 		sessionName: info.SessionName,
 	}
-	obs := worker.LiveObservation{Running: true}
+	obs := worker.LiveObservation{Running: true, Alive: true}
 
 	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 3*time.Second, obs)
 	if err != nil {
@@ -3184,7 +3184,7 @@ func TestTryDeliverQueuedNudgesByPollerLeavesACPDeliveryUnwrapped(t *testing.T) 
 		resolved:    &config.ResolvedProvider{Name: "codex"},
 		sessionName: "sess-worker",
 	}
-	obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
+	obs := worker.LiveObservation{Running: true, Alive: true, LastActivity: &idleSince}
 
 	delivered, err := tryDeliverQueuedNudgesByPoller(target, openNudgeBeadStore(dir).Store, openNudgeBeadStore(dir).Store, fake, 3*time.Second, obs)
 	if err != nil {
@@ -3233,7 +3233,7 @@ func TestTryDeliverQueuedNudgesByPollerKeepsACPProviderMissRecoverable(t *testin
 		resolved:    &config.ResolvedProvider{Name: "codex"},
 		sessionName: "sess-worker",
 	}
-	obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
+	obs := worker.LiveObservation{Running: true, Alive: true, LastActivity: &idleSince}
 
 	for i := 0; i < defaultQueuedNudgeMaxAttempts; i++ {
 		delivered, err := tryDeliverQueuedNudgesByPoller(target, openNudgeBeadStore(dir).Store, openNudgeBeadStore(dir).Store, fake, 3*time.Second, obs)
@@ -3289,7 +3289,7 @@ func TestTryDeliverQueuedNudgesByPollerKeepsPendingInteractionRefusalRecoverable
 		resolved:    &config.ResolvedProvider{Name: "codex"},
 		sessionName: "sess-worker",
 	}
-	obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
+	obs := worker.LiveObservation{Running: true, Alive: true, LastActivity: &idleSince}
 
 	// One pass past the attempt cap: a refusal charged as a failed attempt
 	// would back the item off after the first pass and dead-letter it here.
@@ -3400,7 +3400,7 @@ func TestTryDeliverQueuedNudgesByPollerReleasesClaimsWhenDeliveryDeclined(t *tes
 		resolved:    &config.ResolvedProvider{Name: "codex"},
 		sessionName: info.SessionName,
 	}
-	obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
+	obs := worker.LiveObservation{Running: true, Alive: true, LastActivity: &idleSince}
 
 	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 3*time.Second, obs)
 	if err != nil {
@@ -3472,7 +3472,7 @@ func TestTryDeliverQueuedNudgesByPollerCoalescesStaleFenceOntoLiveIncarnation(t 
 		resolved:          &config.ResolvedProvider{Name: "codex"},
 		sessionName:       info.SessionName,
 	}
-	obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
+	obs := worker.LiveObservation{Running: true, Alive: true, LastActivity: &idleSince}
 
 	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 3*time.Second, obs)
 	if err != nil {
@@ -3685,7 +3685,7 @@ func TestCmdNudgePollRecordsDispatchSkipForBusyTarget(t *testing.T) {
 			// ever reaches claimDueQueuedNudgesForTarget -- the #5317 root
 			// cause.
 			last := time.Now()
-			return worker.LiveObservation{Running: true, LastActivity: &last}, nil
+			return worker.LiveObservation{Running: true, Alive: true, LastActivity: &last}, nil
 		}
 		// End the busy window under test and let the poller exit cleanly.
 		if err := ackQueuedNudges(cityDir, []string{item.ID}); err != nil {
@@ -3764,7 +3764,7 @@ func TestCmdNudgePollDoesNotRecordSkipWithoutQueuedWork(t *testing.T) {
 			// Same continuously busy shape as the positive test, but with
 			// nothing queued for this target.
 			last := time.Now()
-			return worker.LiveObservation{Running: true, LastActivity: &last}, nil
+			return worker.LiveObservation{Running: true, Alive: true, LastActivity: &last}, nil
 		}
 		// Empty queue, so shouldKeepNudgePollerAlive lets the poller exit.
 		return worker.LiveObservation{Running: false}, nil
@@ -6250,10 +6250,10 @@ func TestNudgeObservationBusy(t *testing.T) {
 		obs  worker.LiveObservation
 		want bool
 	}{
-		{"nil LastActivity is not busy", worker.LiveObservation{Running: true}, false},
-		{"zero LastActivity is not busy", worker.LiveObservation{Running: true, LastActivity: &zero}, false},
-		{"activity within quiescence is busy", worker.LiveObservation{Running: true, LastActivity: &recent}, true},
-		{"activity past quiescence is not busy", worker.LiveObservation{Running: true, LastActivity: &stale}, false},
+		{"nil LastActivity is not busy", worker.LiveObservation{Running: true, Alive: true}, false},
+		{"zero LastActivity is not busy", worker.LiveObservation{Running: true, Alive: true, LastActivity: &zero}, false},
+		{"activity within quiescence is busy", worker.LiveObservation{Running: true, Alive: true, LastActivity: &recent}, true},
+		{"activity past quiescence is not busy", worker.LiveObservation{Running: true, Alive: true, LastActivity: &stale}, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -6856,7 +6856,7 @@ func TestTryDeliverQueuedNudgesByPollerKeepsNudgeQueuedBehindPermissionPrompt(t 
 		resolved:    &config.ResolvedProvider{Name: "codex"},
 		sessionName: info.SessionName,
 	}
-	obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
+	obs := worker.LiveObservation{Running: true, Alive: true, LastActivity: &idleSince}
 
 	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 3*time.Second, obs)
 	if err != nil {
@@ -7080,5 +7080,39 @@ func TestDeliverSessionNudgeWithProviderWaitIdleQueuesBusyClaudeFamilyWithoutBlo
 				t.Errorf("stdout = %q, want the no-idle-boundary downgrade reason", stdout.String())
 			}
 		})
+	}
+}
+
+// TestTryDeliverQueuedNudgesByPollerSkipsADeadAgent (mc-48az4): a queued
+// message for a session whose pane is up but whose agent is dead (a crash
+// not yet healed) is not delivered into that pane, where it would be lost:
+// it stays pending for the incarnation the heal brings up.
+func TestTryDeliverQueuedNudgesByPollerSkipsADeadAgent(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "after the crash", time.Now().Add(-time.Minute))); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Start(context.Background(), testOperatorIn(t, dir), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	idleSince := time.Now().Add(-10 * time.Second)
+	fake.Activity = map[string]time.Time{info.SessionName: idleSince}
+	target := nudgeTarget{cityPath: dir, agent: config.Agent{Name: "worker"}, sessionID: info.ID, resolved: &config.ResolvedProvider{Name: "codex"}, sessionName: info.SessionName}
+
+	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 3*time.Second, worker.LiveObservation{Running: true, Alive: false, LastActivity: &idleSince})
+	if err != nil || delivered || fake.CountCalls("Nudge", info.SessionName) != 0 {
+		t.Fatalf("tryDeliverQueuedNudgesByPoller = %v, %v (nudges %d); want no delivery to a dead agent", delivered, err, fake.CountCalls("Nudge", info.SessionName))
+	}
+	pending, _, _, err := listQueuedNudges(dir, "worker", time.Now())
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("pending %d (%v), want the message kept for the next incarnation", len(pending), err)
 	}
 }
