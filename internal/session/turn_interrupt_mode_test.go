@@ -392,3 +392,30 @@ func TestUnsupportedTurnInterruptRefusesBeforeRuntimeLease(t *testing.T) {
 	}
 	assertNoInterruptSent(t, sp)
 }
+
+// A session advertises "deliver now" only when its runtime can carry it out:
+// an unsupported runtime would accept the intent and then fail it, except for
+// pi, which replaces the turn by restarting the runtime.
+func TestSubmissionCapabilitiesFollowTurnInterruptMode(t *testing.T) {
+	for _, tc := range []struct {
+		fam  turnInterruptFamily
+		mode runtime.TurnInterruptMode
+		want bool
+	}{
+		{turnInterruptFamilies[1], runtime.TurnInterruptKeystroke, true},
+		{turnInterruptFamilies[1], runtime.TurnInterruptProtocol, true},
+		{turnInterruptFamilies[1], runtime.TurnInterruptUnsupported, false},
+		{turnInterruptFamily{name: "pi", provider: "pi"}, runtime.TurnInterruptUnsupported, true},
+	} {
+		t.Run(tc.fam.name+"/"+string(tc.mode), func(t *testing.T) {
+			mgr, _, info := newTurnInterruptSession(t, tc.fam, tc.mode)
+			caps, err := mgr.SubmissionCapabilities(info.ID)
+			if err != nil {
+				t.Fatalf("SubmissionCapabilities: %v", err)
+			}
+			if caps.SupportsInterruptNow != tc.want {
+				t.Fatalf("SupportsInterruptNow = %v, want %v", caps.SupportsInterruptNow, tc.want)
+			}
+		})
+	}
+}

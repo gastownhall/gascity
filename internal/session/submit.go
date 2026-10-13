@@ -76,13 +76,25 @@ func supportsInterruptNowForMetadata(metadata map[string]string) bool {
 }
 
 // SubmissionCapabilities reports which semantic submit intents the session can
-// currently support.
+// currently support. A runtime that cannot interrupt the session's turn
+// withdraws interrupt_now.
 func (m *Manager) SubmissionCapabilities(id string) (SubmissionCapabilities, error) {
-	b, _, err := m.loadSessionBead(id, true)
+	b, sessName, err := m.loadSessionBead(id, true)
 	if err != nil {
 		return SubmissionCapabilities{}, err
 	}
-	return SubmissionCapabilitiesForMetadata(b.Metadata, strings.TrimSpace(m.cityPath) != ""), nil
+	caps := SubmissionCapabilitiesForMetadata(b.Metadata, strings.TrimSpace(m.cityPath) != "")
+	if refusesTurnInterrupt(b, runtime.TurnInterruptModeFor(m.sp, sessName)) {
+		caps.SupportsInterruptNow = false
+	}
+	return caps, nil
+}
+
+// refusesTurnInterrupt reports whether a runtime with mode cannot replace the
+// session's running turn: it can interrupt it neither by keys nor by
+// protocol, and the session's family does not replace turns by restarting.
+func refusesTurnInterrupt(b beads.Bead, mode runtime.TurnInterruptMode) bool {
+	return mode == runtime.TurnInterruptUnsupported && !requiresHardRestartInterrupt(b)
 }
 
 // Submit delivers a user message according to the requested semantic intent.
@@ -208,7 +220,7 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, by Actor, id str
 	// A protocol runtime cancels the turn itself; its Stop may leave the
 	// runtime running, so the hard restart would interrupt nothing.
 	hardRestart := requiresHardRestartInterrupt(b) && mode != runtime.TurnInterruptProtocol
-	if mode == runtime.TurnInterruptUnsupported && !hardRestart {
+	if refusesTurnInterrupt(b, mode) {
 		// Refuse before taking the lease: waiting on a busy lease would
 		// hide this reason behind ErrSessionStarting.
 		return false, fmt.Errorf("%w: %s", ErrTurnInterruptUnsupported, sessName)
