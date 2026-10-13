@@ -284,11 +284,16 @@ func armAck(r *rowFacts) (intent, bool) {
 // read counts: a runtime replaced between them is newer still. The pass
 // reads no creation, so there it records the rest and reports false; so it
 // does on a backend that does not report one, and for an ack without a
-// time, which armAck voids itself.
+// time, which armAck voids itself. A Foreign object, another row's runtime,
+// is never this row's same-generation replacement (CONTRACT v5.10k-2): an
+// acked drain under a later squatter goes on to its finalize.
 func (r *rowFacts) ackPredatesRuntime(at time.Time) bool {
 	r.rests |= restRuntime
 	if r.fresh == nil || at.IsZero() {
 		return false
+	}
+	if r.fresh.Same && compareIdentity(r.row.Info, r.fresh.Identity) == identityForeign {
+		return false // another row's runtime is no replacement of this row's (v5.10k-2)
 	}
 	for _, l := range []runtime.Liveness{r.fresh.Live, r.fresh.Again} {
 		created, err := strconv.ParseInt(l.ObjectCreated, 10, 64)

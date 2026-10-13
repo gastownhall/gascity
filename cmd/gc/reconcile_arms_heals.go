@@ -194,8 +194,9 @@ func armDeadRuntimeHeal(r *rowFacts) (intent, bool) {
 // signals: one carrying a request, a controller reason or the operator's
 // drain (CONTRACT v5.10k, §12.2 row 68), or a bare ack off the floor
 // (v5.10k-1). The dead-runtime heal does not take it, nor the squatter heal
-// under a name it does not own, so its runtime's death or squatter is no
-// restart. A11 signals it at once (D2's ack row) and A4's verb finalizes it
+// over a Foreign squatter under a name it does not own (v5.10k-2), nor does
+// any A6 heal carry A18's restart (decideRow), so its runtime's death or
+// squatter is no restart. A11 signals it at once (D2's ack row) and A4's verb finalizes it
 // by D3's gone or Foreign path, a drain's exit, as legacy finalizes an ack
 // read off a dead pane. A floor member's bare ack is row 66's.
 func (r *rowFacts) ackedRequest() bool {
@@ -212,12 +213,13 @@ func (r *rowFacts) ackedRequest() bool {
 // neither quarantine the seat nor wipe its conversation. It stops nothing.
 // The row stays down while the name is held (AL1's name-occupied, S1's
 // refusals) and A18 starts it once the name frees. A row with an acked
-// request is A11's (ackedRequest), under a name it does not own: D3
-// finalizes on the Foreign verdict there, where a bead-scoped name's
-// squatter reads as the row's own (C8.2(a)) and its stop would only refuse.
+// request is A11's (ackedRequest) where D3 finalizes over the squatter: a
+// Foreign one, under a name the row does not own (v5.10k-2). A bead-scoped
+// name's squatter reads as the row's own (C8.2(a)), and an Ownerless one
+// holds A9 and refuses L2, so either stop would only refuse: those park.
 func armSquatterHeal(r *rowFacts) (intent, bool) {
 	info := r.row.Info
-	acked := r.ackedRequest() && !ownsName(info, strings.TrimSpace(info.SessionName))
+	acked := r.ackedRequest() && !ownsName(info, strings.TrimSpace(info.SessionName)) && compareIdentity(info, r.freshIdentity()) == identityForeign
 	if r.entry == nil || !committed(info) || r.entry.Desired == desireDrain || acked || !r.freshSquatted() {
 		return intent{}, false
 	}

@@ -383,10 +383,15 @@ func deadRuntimeHealAcrossTime(t *testing.T, held bool) {
 // with no work, and nothing is started under its name; so is a bare ack
 // off the floor (v5.10k-1; the sim wants an off-floor row awake only for
 // work, so its squatter is the case a heal would take, and the planner's
-// table covers the rest). A squatter under its bead-scoped name, which D3
-// reads as the row's own, is the squatter heal's still: the row parks
-// asleep, never stuck stop-pending on a stop that only refuses. A floor
-// member's bare ack is row 66's: its seat restarts in place.
+// table covers the rest). The death comes seconds after the ack, so a
+// squatter is newer than it, as on tmux, and A11 does not void the ack for
+// it (v5.10k-2). The dead-pane cases check the finalize end to end, but no
+// heal would take them first: on a Wake row A12 never classifies the pane
+// before A11 signals, so the planner's classified pane is the heal's case.
+// A squatter under its bead-scoped name, which D3 reads as the row's own,
+// is the squatter heal's still: the row parks asleep, never stuck
+// stop-pending on a stop that only refuses. A floor member's bare ack is
+// row 66's: its seat restarts in place.
 func TestSimAckedRequestWithADeadRuntimeIsFinalized(t *testing.T) {
 	for _, request := range []string{"operator", "controller", "bare", "bare on the floor"} {
 		for _, death := range []string{"gone", "dead pane", "squatter", "squatter, bead-scoped name"} {
@@ -411,6 +416,7 @@ func TestSimAckedRequestWithADeadRuntimeIsFinalized(t *testing.T) {
 					req = []string{session.DrainIntentReasonKey, drainConfigDrift, session.DrainIntentAtKey, now, session.DrainIntentIncarnationKey, "1"}
 				}
 				s.operator("gc-1", append(req, session.DrainAckIncarnationKey, "1", session.DrainAckAtKey, now)...)
+				s.advance(2 * time.Second) // the agent exits after its ack
 				s.sp.mu.Lock()
 				switch death {
 				case "gone":

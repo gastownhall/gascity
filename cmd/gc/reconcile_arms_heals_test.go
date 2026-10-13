@@ -955,27 +955,41 @@ func TestNoArmActsOnACensusOnlyRow(t *testing.T) {
 
 // Kills an acked drain request's dead runtime healed into a restart
 // (CONTRACT v5.10k, §12.2 row 68; mc-7zlhz): a row wanted awake whose
-// operator's or controller's drain the agent acked, its runtime gone, a
-// classified dead pane, or a squatter's under a name it does not own, is
-// A11's ack signal, which D3 then finalizes; neither heal takes it, so A18
-// does not restart it; so is a bare ack off the floor (v5.10k-1). A floor
-// member's bare ack (row 66) is healed and restarted in place as before.
+// operator's or controller's drain the agent acked, its runtime gone (detached
+// at its death or not: no A6 heal carries the restart, v5.10k-2), a
+// classified dead pane, or a Foreign squatter's under a name it does not own,
+// is A11's ack signal, which D3 then finalizes; neither heal takes it, so A18
+// does not restart it; so is a bare ack off the floor (v5.10k-1). An
+// Ownerless squatter, which D3 cannot finalize over, keeps the squatter
+// heal's park (v5.10k-2); a drain requested but not acked, and a floor
+// member's bare ack (row 66), are healed and restarted as before.
 func TestAckedRequestIsNotHealedIntoARestart(t *testing.T) {
 	ack := []string{session.DrainAckIncarnationKey, "3", session.DrainAckAtKey, rowAt(-time.Minute)}
-	deaths := map[string]func(t *testing.T, desired desire, meta ...string) *healCase{
-		"gone": func(t *testing.T, desired desire, meta ...string) *healCase {
+	deaths := []struct {
+		name    string
+		parks   bool // the heal takes it whatever the request
+		plain   bool // a plain A6 heal may land first, carrying no restart
+		newCase func(t *testing.T, desired desire, meta ...string) *healCase
+	}{
+		{"gone", false, false, func(t *testing.T, desired desire, meta ...string) *healCase {
 			return newHealCase(t, livenessGone, desired, append([]string{"state", "active"}, meta...)...)
-		},
-		"a classified dead pane": func(t *testing.T, desired desire, meta ...string) *healCase {
+		}},
+		{"gone, detached at its death", false, true, func(t *testing.T, desired desire, meta ...string) *healCase {
+			return newHealCase(t, livenessGone, desired, append([]string{"state", "active", "detached_at", rowAt(-10 * time.Minute)}, meta...)...)
+		}},
+		{"a classified dead pane", false, false, func(t *testing.T, desired desire, meta ...string) *healCase {
 			c := newHealCase(t, livenessDead, desired, append([]string{"state", "active"}, meta...)...)
 			id := runtimeIdentity{Known: true, SessionID: c.k.ID, Epoch: "3", Token: "tok-3"}
 			c.w.Observed = map[rowKey]rowObservation{c.k: {Liveness: livenessDead, Identity: id}}
 			c.w.Classified = map[rowKey]classifiedRuntime{c.k: {Token: c.k.ID + "/tok-3"}}
 			return c
-		},
-		"a squatter": func(t *testing.T, desired desire, meta ...string) *healCase {
+		}},
+		{"a Foreign squatter", false, false, func(t *testing.T, desired desire, meta ...string) *healCase {
 			return squatterCase(t, foreignEnv, desired, meta...)
-		},
+		}},
+		{"an Ownerless squatter", true, false, func(t *testing.T, desired desire, meta ...string) *healCase {
+			return squatterCase(t, ownerlessEnv, desired, meta...)
+		}},
 	}
 	for _, rq := range []struct {
 		name   string
@@ -986,20 +1000,23 @@ func TestAckedRequestIsNotHealedIntoARestart(t *testing.T) {
 		{"an operator's drain, acked", append(slices.Clone(ack), session.OperatorDrainKey, "3"), false, decideDrainSignal + drainOperator},
 		{"a controller's drain, acked", append(slices.Clone(ack), intentBegunAt(drainConfigDrift, time.Minute)...), false, decideDrainSignal + drainConfigDrift},
 		{"a bare ack off the floor", ack, false, decideDrainSignal},
+		{"a controller's drain, requested, not acked", intentBegunAt(drainIdle, time.Minute), false, ""},
 		{"a bare ack on the floor", ack, true, ""},
 	} {
-		for death, newCase := range deaths {
-			t.Run(rq.name+", "+death, func(t *testing.T) {
-				c := newCase(t, desireWake, rq.meta...)
+		for _, death := range deaths {
+			t.Run(rq.name+", "+death.name, func(t *testing.T) {
+				c := death.newCase(t, desireWake, rq.meta...)
 				if rq.floor {
 					onFloor(c.a.Snapshot.Entries[c.k])
 				}
 				it := c.decide()
 				healed := it.Kind == intentStart || it.Reason == decideDeadRuntimeHeal || it.Reason == decideSquatterHeal
-				switch {
-				case rq.signal != "" && (it.Kind != intentSignalAck || it.Reason != rq.signal):
-					t.Fatalf("decideRow = (%q, %q), want A11's %q", it.Kind, it.Reason, rq.signal)
-				case rq.signal == "" && !healed:
+				switch signal := rq.signal; {
+				case death.parks && it.Reason != decideSquatterHeal:
+					t.Fatalf("decideRow = (%q, %q), want the squatter heal's park", it.Kind, it.Reason)
+				case !death.parks && signal != "" && (!death.plain || it.Kind != intentRowHeal) && (it.Kind != intentSignalAck || it.Reason != signal):
+					t.Fatalf("decideRow = (%q, %q), want A11's %q", it.Kind, it.Reason, signal)
+				case signal == "" && !healed:
 					t.Fatalf("decideRow = (%q, %q), want the heal or its restart", it.Kind, it.Reason)
 				}
 			})
