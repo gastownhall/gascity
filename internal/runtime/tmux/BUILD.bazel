@@ -117,6 +117,8 @@ go_test(
         "theme_test.go",
         "tmux_test.go",
         "tmux_unit_test.go",
+        "wake_pane_integration_test.go",
+        "wake_pane_test.go",
     ],
     data = glob(
         ["**"],
