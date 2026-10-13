@@ -399,8 +399,10 @@ func armSoftSuspendHeal(r *rowFacts) (intent, bool) {
 	return r.heal(intentRowHealFresh, decideSuspendHeal, session.MetadataPatch{"state": string(session.StateAsleep)})
 }
 
-// armAwakeHeal is legacy's heal of an asleep or soft-suspended row whose own
-// runtime is alive (ProjectLifecycle's alive projection; CONTRACT v5.9u):
+// armAwakeHeal is legacy's heal of an asleep, drained or soft-suspended row
+// whose own runtime is alive (ProjectLifecycle's alive projection, which
+// reconciles drained as it does asleep; CONTRACT v5.9u, A6 item 5; a drained
+// row the A14 generator's shifted seed 296 left alive, mc-i7efm):
 // the row reads awake again. The inventory's identity read must find the
 // row's token (O2 Current); the effect proves it again fresh. Without it a
 // runtime started outside the controller on an asleep row (`gc session
@@ -412,7 +414,8 @@ func armSoftSuspendHeal(r *rowFacts) (intent, bool) {
 // exists to fence.
 func armAwakeHeal(r *rowFacts) (intent, bool) {
 	info := r.row.Info
-	asleep := strings.TrimSpace(info.MetadataState) == string(session.StateAsleep) && !session.DispositionOfInfo(info).OperatorDormant(r.w.Now)
+	state := session.State(strings.TrimSpace(info.MetadataState))
+	asleep := (state == session.StateAsleep || state == session.StateDrained) && !session.DispositionOfInfo(info).OperatorDormant(r.w.Now)
 	if !asleep && !softSuspended(info, r.w.Now) || !r.freshOwnAlive() {
 		return intent{}, false
 	}

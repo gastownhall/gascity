@@ -520,6 +520,15 @@ func TestRowHealDecidesAgainOnTheFreshRow(t *testing.T) {
 // effect reads it alive and Current again fresh. Another token, in the
 // inventory or in the fresh read, or a runtime no longer alive, does not.
 func TestAwakeHealRestoresAnAsleepRowsOwnRuntime(t *testing.T) {
+	for _, state := range []string{"asleep", "drained"} {
+		t.Run(state, func(t *testing.T) { awakeHealCases(t, state) })
+	}
+}
+
+// awakeHealCases is TestAwakeHealRestoresAnAsleepRowsOwnRuntime on a row in
+// state: a drained row heals as an asleep one does (legacy's healState, whose
+// ProjectLifecycle reconciles drained+alive to awake).
+func awakeHealCases(t *testing.T, state string) {
 	for _, tc := range []struct {
 		name            string
 		inventory, read string // the runtime's token in the inventory and in the fresh read
@@ -533,7 +542,7 @@ func TestAwakeHealRestoresAnAsleepRowsOwnRuntime(t *testing.T) {
 		{"died since the pass", "tok-3", "tok-3", false, decideAwakeHeal, causeRuntimeNotOwn},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			c := ownRuntimeCase(t, tc.inventory, "state", "asleep", "sleep_reason", "idle")
+			c := ownRuntimeCase(t, tc.inventory, "state", state, "sleep_reason", "idle")
 			it := c.decide()
 			if it.Reason != tc.want {
 				t.Fatalf("decideRow = (%q, %q), want reason %q", it.Kind, it.Reason, tc.want)
@@ -551,8 +560,8 @@ func TestAwakeHealRestoresAnAsleepRowsOwnRuntime(t *testing.T) {
 			}
 			_, s := c.run(t, sp.tmux(), nil)
 			if tc.cause != "" {
-				if s.Outcome != settledRefused || s.Cause != tc.cause || c.meta(t)["state"] != "asleep" {
-					t.Fatalf("settlement %+v, state %q, want refused %q and the row asleep", s, c.meta(t)["state"], tc.cause)
+				if s.Outcome != settledRefused || s.Cause != tc.cause || c.meta(t)["state"] != state {
+					t.Fatalf("settlement %+v, state %q, want refused %q and the row %s", s, c.meta(t)["state"], tc.cause, state)
 				}
 				return
 			}
@@ -1340,5 +1349,22 @@ func TestSquatterHealNeedsAnOwnerlessRuntimeAlive(t *testing.T) {
 	c := squatterCase(t, foreignEnv, desireWake)
 	if _, s := c.run(t, (&freshObserver{Fake: runtime.NewFake(), l: runtime.Liveness{Corpse: true}, env: foreignEnv}).tmux(), nil); s.Outcome != settledLanded || c.meta(t)["state"] != "asleep" {
 		t.Fatalf("a Foreign corpse: settlement %+v, state %q, want the row parked", s, c.meta(t)["state"])
+	}
+}
+
+// Kills the drained-row livelock (the A14 generator's shifted seed 296,
+// mc-i7efm): a drained row whose own runtime came back alive, carrying its
+// incarnation's config-drift request (residue on a row that claims no live
+// runtime), is healed awake first, so the request stands active, rather than
+// A14 beginning and A19 voiding it every pass. An operator-dormant drained
+// row is never healed awake.
+func TestAwakeHealTakesADrainedRowsOwnRuntime(t *testing.T) {
+	c := ownRuntimeCase(t, "tok-3", append([]string{"state", "drained", "started_config_hash", "v6:stale"}, intentAt(drainConfigDrift, "3")...)...)
+	if it := c.decide(); it.Reason != decideAwakeHeal || it.folded()["state"] != "awake" {
+		t.Fatalf("decideRow = (%q, %q) %v, want the awake heal", it.Kind, it.Reason, it.folded())
+	}
+	held := ownRuntimeCase(t, "tok-3", "state", "drained", "sleep_intent", "user-hold")
+	if it := held.decide(); it.Reason == decideAwakeHeal {
+		t.Fatalf("decideRow = (%q, %q), want an operator-dormant drained row left alone", it.Kind, it.Reason)
 	}
 }
