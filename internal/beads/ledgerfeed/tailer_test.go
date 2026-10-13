@@ -810,3 +810,62 @@ func TestStatsKeepTheLastErrorAndWhenItHappened(t *testing.T) {
 		t.Fatalf("LastErrorAt = %v, want it stamped when the error happened (after %v)", stats.LastErrorAt, before)
 	}
 }
+
+// rebaselineFailJournal reports truncation on every page read and refuses
+// every fingerprint read (limit 1), so the re-baseline after each gap fails.
+type rebaselineFailJournal struct {
+	mu     sync.Mutex
+	reads  int
+	cap    int
+	cancel context.CancelFunc
+}
+
+func (j *rebaselineFailJournal) ReadEventsJournalPage(_ context.Context, since int64, limit int) (journalops.Page, error) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.reads++
+	if j.cap > 0 && j.reads >= j.cap {
+		// A hot loop never sleeps, so the clock never stops it; this does.
+		j.cancel()
+	}
+	if limit == 1 {
+		return journalops.Page{}, errRebaselineRefused
+	}
+	return journalops.Page{}, &journalops.TruncatedError{Since: since, Floor: 50, Head: 60}
+}
+
+var errRebaselineRefused = errors.New("fingerprint read refused")
+
+// A gap whose re-baseline read fails is a failed Step: it keeps the
+// checkpoint and reports more=false, so Run waits before the next attempt
+// instead of re-reading in a hot loop.
+func TestStepReportsNoMoreWhenTheRebaselineReadFails(t *testing.T) {
+	r := &recorder{}
+	tl := &Tailer{Source: &rebaselineFailJournal{}, Apply: r.apply, OnGap: r.onGap}
+	more, err := tl.Step(context.Background())
+	if !errors.Is(err, errRebaselineRefused) {
+		t.Fatalf("Step err = %v, want the refused re-baseline read", err)
+	}
+	if more {
+		t.Fatal("Step reported more=true after a failed re-baseline read")
+	}
+	if cp := tl.Checkpoint(); cp != (Checkpoint{}) {
+		t.Fatalf("checkpoint = %+v, want it unmoved", cp)
+	}
+	if gaps := r.gapList(); len(gaps) != 0 {
+		t.Fatalf("OnGap ran %d times, want none before a baseline exists", len(gaps))
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	src := &rebaselineFailJournal{cap: 1000, cancel: cancel}
+	clock := &scriptedSleep{after: 5, cancel: cancel}
+	tl = &Tailer{Source: src, Apply: r.apply, OnGap: r.onGap, Sleep: clock.sleep}
+	_ = tl.Run(ctx)
+	if src.reads >= src.cap {
+		t.Fatalf("Run read %d times with %d sleeps: a failed re-baseline re-read at once", src.reads, len(clock.delays))
+	}
+	if len(clock.delays) != clock.after {
+		t.Fatalf("sleeps = %v, want %d", clock.delays, clock.after)
+	}
+}

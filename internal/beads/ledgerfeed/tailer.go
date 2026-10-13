@@ -373,7 +373,8 @@ func (t *Tailer) Run(ctx context.Context) error {
 				}
 			}
 		}
-		if more {
+		// A failed Step never re-reads at once, whatever it reported.
+		if more && err == nil {
 			continue
 		}
 		if err := t.sleep(ctx, t.nextDelay()); err != nil {
