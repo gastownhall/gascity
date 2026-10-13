@@ -219,7 +219,7 @@ func (p *Provider) SendDeduped(from, to, subject, body, key string) (mail.Messag
 	if to == "" {
 		return mail.Message{}, false, fmt.Errorf("beadmail send: recipient is required")
 	}
-	existing, suppressed, err := p.findLiveDuplicate(to, key)
+	existing, suppressed, err := p.findLiveDuplicate(to, key, false)
 	if err != nil {
 		return mail.Message{}, false, fmt.Errorf("beadmail send: dedup probe for key %q: %w", key, err)
 	}
@@ -233,7 +233,7 @@ func (p *Provider) SendDeduped(from, to, subject, body, key string) (mail.Messag
 	return msg, false, nil
 }
 
-func (p *Provider) findLiveDuplicate(to, key string) (mail.Message, bool, error) {
+func (p *Provider) findLiveDuplicate(to, key string, pendingHandoffOnly bool) (mail.Message, bool, error) {
 	existing, err := p.store.List(beads.ListQuery{
 		Type:     messageBeadType,
 		Status:   "open",
@@ -249,6 +249,9 @@ func (p *Provider) findLiveDuplicate(to, key string) (mail.Message, bool, error)
 	}
 	routes := p.recipientRoutes(to)
 	for _, b := range existing {
+		if pendingHandoffOnly && !isUnreadInjectedAutoHandoff(b) {
+			continue
+		}
 		if matchesRecipientRoute(routes, b.Assignee) {
 			return beadToMessage(b), true, nil
 		}
@@ -267,7 +270,7 @@ func (p *Provider) SendHandoff(intent mail.HandoffIntent) (mail.Message, bool, e
 	}
 	dedupKey := strings.TrimSpace(intent.DedupKey)
 	if dedupKey != "" {
-		existing, suppressed, err := p.findLiveDuplicate(intent.To, dedupKey)
+		existing, suppressed, err := p.findLiveDuplicate(intent.To, dedupKey, true)
 		if err != nil {
 			return mail.Message{}, false, fmt.Errorf("beadmail handoff: dedup probe for key %q: %w", dedupKey, err)
 		}
@@ -629,6 +632,10 @@ func isInjectedAutoHandoff(b beads.Bead) bool {
 	return b.Type == messageBeadType &&
 		hasLabel(b.Labels, mail.AutoHandoffLabel) &&
 		hasLabel(b.Labels, mail.ArchiveAfterInjectLabel)
+}
+
+func isUnreadInjectedAutoHandoff(b beads.Bead) bool {
+	return !hasLabel(b.Labels, "read") && isInjectedAutoHandoff(b)
 }
 
 // archiveInjectedAutoHandoffs marks each injected handoff read and closes it,
