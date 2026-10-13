@@ -226,16 +226,26 @@ func isLoopbackHost(host string) bool {
 	return false
 }
 
+// pemBegin opens every PEM block.
+var pemBegin = []byte("-----BEGIN ")
+
 // validateCertificatesPEM requires one or more CERTIFICATE blocks that parse
-// as X.509 and nothing else but whitespace.
+// as X.509, separated and surrounded by nothing but whitespace. pem.Decode
+// skips text before a block, including a broken BEGIN line, so each block
+// must start right after the whitespace and consume exactly one BEGIN line.
 func validateCertificatesPEM(data []byte) error {
-	rest := data
+	rest := bytes.TrimLeft(data, pemWhitespace)
 	count := 0
-	for {
-		var block *pem.Block
-		block, rest = pem.Decode(rest)
+	for len(rest) > 0 {
+		if !bytes.HasPrefix(rest, pemBegin) {
+			return fmt.Errorf("non-PEM data before or after PEM certificate %d", count)
+		}
+		block, after := pem.Decode(rest)
 		if block == nil {
-			break
+			return fmt.Errorf("PEM block %d does not decode", count+1)
+		}
+		if consumed := rest[:len(rest)-len(after)]; bytes.Count(consumed, pemBegin) != 1 {
+			return fmt.Errorf("PEM block %d follows a broken BEGIN line", count+1)
 		}
 		if block.Type != "CERTIFICATE" {
 			return fmt.Errorf("PEM block %d is %q, not CERTIFICATE", count+1, block.Type)
@@ -244,12 +254,12 @@ func validateCertificatesPEM(data []byte) error {
 			return fmt.Errorf("PEM block %d: %w", count+1, err)
 		}
 		count++
+		rest = bytes.TrimLeft(after, pemWhitespace)
 	}
 	if count == 0 {
 		return fmt.Errorf("no PEM certificate")
 	}
-	if len(bytes.TrimSpace(rest)) != 0 {
-		return fmt.Errorf("trailing data after PEM certificate %d", count)
-	}
 	return nil
 }
+
+const pemWhitespace = " \t\r\n"

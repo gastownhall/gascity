@@ -167,6 +167,13 @@ func TestBundleValidateRefusals(t *testing.T) {
 			b.Ledgers[0].CAPEM = "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n"
 		}, CodeBundleInvalid},
 		{"PEM with trailing garbage", func(b *Bundle) { b.Ledgers[0].CAPEM += "garbage\n" }, CodeBundleInvalid},
+		{"PEM with leading garbage", func(b *Bundle) { b.Ledgers[0].CAPEM = "garbage\n" + b.Ledgers[0].CAPEM }, CodeBundleInvalid},
+		{"PEM with garbage between blocks", func(b *Bundle) {
+			b.Ledgers[0].CAPEM = b.Ledgers[0].CAPEM + "garbage\n" + b.Ledgers[0].CAPEM
+		}, CodeBundleInvalid},
+		{"PEM after a broken BEGIN line", func(b *Bundle) {
+			b.Ledgers[0].CAPEM = "-----BEGIN CERTIFICATE-----\n" + b.Ledgers[0].CAPEM
+		}, CodeBundleInvalid},
 		{"insecure URL", func(b *Bundle) { b.Ledgers[0].URL = "http://ctl.example.ts.net:7491" }, CodeBundleInvalid},
 	}
 	for _, tc := range cases {
@@ -188,6 +195,9 @@ func TestBundleValidateAccepts(t *testing.T) {
 	}{
 		{"no CA", func(b *Bundle) { b.Ledgers[0].CAPEM = "" }},
 		{"CA chain of two", func(b *Bundle) { b.Ledgers[0].CAPEM += b.Ledgers[0].CAPEM }},
+		{"CA with surrounding whitespace", func(b *Bundle) {
+			b.Ledgers[0].CAPEM = "\n \t\r\n" + b.Ledgers[0].CAPEM + "\n\n" + b.Ledgers[0].CAPEM + "  \n"
+		}},
 		{"dotted session id", func(b *Bundle) {
 			b.Session.ID = "mc.abc.12"
 			b.Bearer = mustMint(t, "maintainer-city", "mc.abc.12", 7)
