@@ -4,7 +4,6 @@
 cmd/gc/cmd_handoff.go 1
 cmd/gc/cmd_prime.go 1
 cmd/gc/cmd_session_wake.go 1
-cmd/gc/cmd_stop.go 1
 cmd/gc/cmd_wait.go 1
 cmd/gc/execution_backstop.go 1
 cmd/gc/session_bead_cycle.go 1

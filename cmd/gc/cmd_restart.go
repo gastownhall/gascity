@@ -183,9 +183,11 @@ func doRigRestart(
 ) int {
 	var targets []stopTarget
 	// floor is the pool seats of agents with a min_active_sessions floor. They
-	// are marked city-stop before the stop, as gc stop marks every session, so
-	// the floor revival (cityStopPoolBeads) restarts them with no work assigned:
-	// unmarked, a floor seat the sweep soft-suspends heals asleep with no
+	// are marked city-stop before the stop, as gc stop marks every session:
+	// the sweep then kills a marked seat and sleeps it asleep with reason
+	// city-stop (stopTargetThroughWorkerBoundary), which the floor revival
+	// (cityStopPoolBeads) wakes with no work assigned. An unmarked seat takes
+	// the shutdown stop, which soft-suspends it; it heals asleep with no
 	// reason, which nothing revives, and the pool sits at zero seats.
 	floor := map[string]bool{}
 	for _, a := range agents {

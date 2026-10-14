@@ -665,8 +665,8 @@ func TestDoRigRestartStopError(t *testing.T) {
 // Kills a rig restart that leaves a min_active_sessions floor unrevivable
 // (mc-ewptj): the restart marks the floor pool's live seats city-stop before
 // it stops them, as gc stop marks every session, so cityStopPoolBeads
-// revives them; a pool with no floor and a seat it does not target are not
-// marked.
+// revives them; a pool with no floor, a seat it does not target, and a seat
+// an operator suspended (only an active row is marked) are not marked.
 func TestDoRigRestart_MarksFloorPoolSeatsCityStop(t *testing.T) {
 	sp := runtime.NewFake()
 	store := beads.NewMemStore()
@@ -686,6 +686,10 @@ func TestDoRigRestart_MarksFloorPoolSeatsCityStop(t *testing.T) {
 		return b.ID
 	}
 	floored := seat("frontend/worker", "frontend/worker-1", "worker-1", "", true)
+	suspended := seat("frontend/worker", "frontend/worker-2", "worker-2", "", true)
+	if err := store.SetMetadataBatch(suspended, map[string]string{"state": "suspended", "sleep_intent": "user-hold", "suspended_at": time.Now().UTC().Format(time.RFC3339)}); err != nil {
+		t.Fatal(err)
+	}
 	idle := seat("frontend/worker", "frontend/worker-3", "worker-3", "", false)
 	unfloored := seat("frontend/helper", "frontend/helper-1", "helper-1", "", true)
 	agents := []config.Agent{
@@ -696,7 +700,7 @@ func TestDoRigRestart_MarksFloorPoolSeatsCityStop(t *testing.T) {
 	if code := doRigRestart(sp, events.NewFake(), store, nil, agents, "frontend", "city", "{{.Agent}}", &stdout, &stderr); code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
-	for id, want := range map[string]string{floored: "city-stop", idle: "", unfloored: ""} {
+	for id, want := range map[string]string{floored: "city-stop", suspended: "", idle: "", unfloored: ""} {
 		b, err := store.Get(id)
 		if err != nil {
 			t.Fatal(err)
@@ -707,18 +711,28 @@ func TestDoRigRestart_MarksFloorPoolSeatsCityStop(t *testing.T) {
 	}
 }
 
-// Kills a min_active_sessions seat a rig restart left soft-suspended with
-// its city-stop mark staying down under legacy (mc-ewptj; CONTRACT v5.9u:
-// a soft suspend is no hold): its runtime gone and no work assigned, the
-// floor revival restarts it.
+// Kills a min_active_sessions seat a rig restart leaves down under legacy
+// (mc-ewptj): the real doRigRestart stops a live floor seat with no work,
+// leaving it asleep with its city-stop mark, and legacy's floor revival
+// restarts it.
 func TestLegacyFloorRevivesARigRestartedSeat(t *testing.T) {
 	env := newReconcilerTestEnv(t)
-	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true", MinActiveSessions: intPtr(1)}}}
-	env.addDesired("worker", "worker", false)
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3)}}}
+	env.addDesired("worker", "worker", true)
 	session := env.createSessionBead("worker", "worker")
-	env.setSessionMetadata(&session, map[string]string{
-		"state": "suspended", "suspended_at": env.clk.Now().Add(-time.Minute).UTC().Format(time.RFC3339), "sleep_reason": "city-stop",
-	})
+	env.setSessionMetadata(&session, map[string]string{"state": "active", "pool_slot": "1"})
+	if !env.sp.IsRunning("worker") {
+		if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "true"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var stdout, stderr bytes.Buffer
+	if code := doRigRestart(env.sp, events.NewFake(), env.store, env.cfg, env.cfg.Agents, "", "city", "", &stdout, &stderr); code != 0 {
+		t.Fatalf("doRigRestart = %d: %s", code, stderr.String())
+	}
+	if after, _ := env.store.Get(session.ID); env.sp.IsRunning("worker") || after.Metadata["sleep_reason"] != "city-stop" {
+		t.Fatalf("after the restart: running %v, row %v; want the seat stopped and marked city-stop", env.sp.IsRunning("worker"), after.Metadata)
+	}
 	for range 3 {
 		cur, err := env.store.Get(session.ID)
 		if err != nil {
@@ -731,4 +745,46 @@ func TestLegacyFloorRevivesARigRestartedSeat(t *testing.T) {
 		got, _ := env.store.Get(session.ID)
 		t.Fatalf("the floor seat stays down: state=%q sleep_reason=%q", got.Metadata["state"], got.Metadata["sleep_reason"])
 	}
+}
+
+// Kills a city-stop mark written over an operator's suspend that lands
+// after the mark's listing (the #7787 review; gc stop's mark had the same
+// race): the mark is decided again on a fresh read, so the suspended row
+// keeps its hold and gets no city-stop reason, which the floor revival
+// would otherwise wake.
+func TestCityStopMarkSparesASuspendAfterTheListing(t *testing.T) {
+	store := &suspendAfterListStore{MemStore: beads.NewMemStore()}
+	b, err := store.Create(beads.Bead{Title: "worker-1", Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: map[string]string{
+		"template": "worker", "session_name": "worker-1", "state": "awake",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.target = b.ID
+	var stderr bytes.Buffer
+	markSessionsCityStop(sessionFrontDoor(store), map[string]bool{"worker-1": true}, "gc rig restart", &stderr)
+	got, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !store.suspended || got.Metadata["sleep_reason"] != "" || got.Metadata["state"] != "suspended" {
+		t.Fatalf("suspended after the listing %v: row %v (stderr %q); want the suspend kept and no city-stop mark", store.suspended, got.Metadata, stderr.String())
+	}
+}
+
+// suspendAfterListStore suspends its target row, as an operator would, right
+// after the first label listing returns.
+type suspendAfterListStore struct {
+	*beads.MemStore
+	target    string
+	suspended bool
+}
+
+func (s *suspendAfterListStore) ListByLabel(label string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+	out, err := s.MemStore.ListByLabel(label, limit, opts...)
+	if err == nil && !s.suspended && s.target != "" {
+		s.suspended = true
+		err = s.SetMetadataBatch(s.target, map[string]string{"state": "suspended", "sleep_intent": "user-hold"})
+	}
+	return out, err
 }

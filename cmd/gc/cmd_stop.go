@@ -869,6 +869,19 @@ func teardownServerForStop(sp runtime.Provider, stderr io.Writer, logPrefix stri
 	}
 }
 
+// cityStopMarkAttempts bounds a city-stop mark's fenced write against
+// concurrent writers to the row.
+const cityStopMarkAttempts = 3
+
+// cityStopMark is the city-stop mark decided on a fresh read of the row: only
+// a row still active with no sleep reason is marked.
+func cityStopMark(info session.Info, _ session.PersistedResponse) session.MetadataPatch {
+	if sessionMetadataStateInfo(info) != "active" || strings.TrimSpace(info.SleepReason) != "" {
+		return nil
+	}
+	return session.MetadataPatch{"sleep_reason": string(session.SleepReasonCityStop)}
+}
+
 func markCityStopSessionSleepReason(sessFront *session.Store, stderr io.Writer) {
 	markSessionsCityStop(sessFront, nil, "gc stop", stderr)
 }
@@ -877,7 +890,11 @@ func markCityStopSessionSleepReason(sessFront *session.Store, stderr io.Writer) 
 // that carry no sleep reason, or only on those named in names when names is
 // non-nil. min_active_sessions' floor revival (cityStopPoolBeads) wakes
 // exactly the asleep city-stop pool seats, so a stop that should hand its
-// floor back marks it. logPrefix opens the warning lines.
+// floor back marks it. Each mark is decided again on a fresh read of the
+// row and fenced on its revision (UpdateMetadataFenced), so an operator's
+// suspend or another sleep that lands after the listing is never written
+// over: the floor revival does not honor a user hold. logPrefix opens the
+// warning lines.
 func markSessionsCityStop(sessFront *session.Store, names map[string]bool, logPrefix string, stderr io.Writer) {
 	if !sessFront.Backed() || names != nil && len(names) == 0 {
 		return
@@ -899,7 +916,7 @@ func markSessionsCityStop(sessFront *session.Store, names map[string]bool, logPr
 		if strings.TrimSpace(info.SleepReason) != "" {
 			continue
 		}
-		if err := sessFront.SetMarker(info.ID, "sleep_reason", string(session.SleepReasonCityStop)); err != nil {
+		if _, err := sessFront.UpdateMetadataFenced(info.ID, cityStopMarkAttempts, cityStopMark); err != nil {
 			fmt.Fprintf(stderr, "%s: marking session %s: %v\n", logPrefix, info.ID, err) //nolint:errcheck // best-effort warning
 		}
 	}
