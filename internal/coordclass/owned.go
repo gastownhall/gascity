@@ -16,9 +16,9 @@ const typeStartupHealthEpisode = "startup-health-episode"
 // convergence root, or an operation-journal row (type op: op and fact rows).
 // The generic bead API never writes one, on either side of a write
 // (architecture B, mc-lp7zb): the session verbs, the controller's startup
-// health, the convergence handler and the op journal's producers and lanes do. Type and label are matched
-// whatever their case and surrounding space, as a formula's check matches
-// them, so no spelling of one passes for work.
+// health, the convergence handler and the op journal's producers and lanes
+// do. Type and label are matched whatever their case and surrounding space,
+// as a formula's check matches them, so no spelling of one passes for work.
 func ControllerOwned(b beads.Bead) bool {
 	return ControllerOwnedType(b.Type) || ControllerOwnedLabel(b.Labels) >= 0
 }
