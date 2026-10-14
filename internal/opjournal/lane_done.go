@@ -132,16 +132,39 @@ func (er effectResult) doneArm() DoneArm {
 }
 
 // settle validates the result against the executor contract and computes the
-// succeeded outcome of an accepted batch. A result that breaks the contract
-// becomes Unknown, with the breach in contractErr.
+// succeeded outcome of an accepted batch. A Delivered without a valid ack
+// becomes Unknown. Once the runtime acked, a defect in any other recording
+// field never makes the effect run again: the field is clamped or dropped,
+// the outcome records DegradationExecutorContract, and the breach is
+// reported in contractErr.
 func (l *ConversationLane) settle(tb *takenBatch, er effectResult, preCall time.Time) (effectResult, Outcome) {
 	spec := tb.spec
 	switch er.kind {
 	case resultDelivered:
 		d := er.delivered
+		if !slices.Contains(ackKinds, d.Record.Ack) {
+			return unknownResult(fmt.Errorf("executor delivery ack %q is not delivered, delivered_unobserved or in_band", d.Record.Ack)), Outcome{}
+		}
+		var breaches []error
+		breach := func(err error) { breaches = append(breaches, err) }
 		rec := d.Record
-		if err := validateDelivered(d, preCall); err != nil {
-			return unknownResult(err), Outcome{}
+		switch {
+		case rec.At.IsZero():
+			breach(errors.New("executor delivery record has no time"))
+			rec.At = preCall
+		case rec.At.Before(preCall):
+			breach(fmt.Errorf("executor delivery record time %s is before the call at %s", formatTime(rec.At), formatTime(preCall)))
+			rec.At = preCall
+		}
+		if rec.MessageID != "" {
+			if err := validateText("delivery message id", rec.MessageID, maxMessageIDLen); err != nil {
+				breach(err)
+				rec.MessageID = ""
+			}
+		}
+		if err := validateOptionalText("delivery turn id", rec.TurnID); err != nil {
+			breach(err)
+			rec.TurnID = ""
 		}
 		rec.Seq = tb.ops[0].LaneSeq
 		rec.Generation, rec.Epoch = spec.fence.Generation, spec.fence.Epoch
@@ -151,6 +174,10 @@ func (l *ConversationLane) settle(tb *takenBatch, er effectResult, preCall time.
 		ev.LiveTurn = spec.probe.Turn
 		ev.Known = slices.Clone(spec.probe.KnownTurns)
 		link, _ := CorrelateTurn(rec, ev)
+		if err := validateOptionalText("result turn", link.Turn); err != nil {
+			breach(err)
+			link = TurnLink{Confidence: LinkNone, Basis: link.Basis}
+		}
 		degradation := d.Degradation
 		if degradation == "" && (spec.probe.Caps.Input == FenceNone || spec.view.Token == "") {
 			degradation = DegradationUnfencedDelivery
@@ -166,19 +193,19 @@ func (l *ConversationLane) settle(tb *takenBatch, er effectResult, preCall time.
 			TurnLink:  link.Confidence,
 			TurnBasis: link.Basis,
 		}}
-		if err := validateOutcome(o, Cancel{}); err != nil {
-			return unknownResult(fmt.Errorf("executor delivery result: %w", err)), Outcome{}
-		}
-		return er, o
+		return acceptedWithin(er, o, breaches, "executor delivery result")
 	case resultSettled:
 		s := er.settled
-		o := Outcome{Arm: ArmSucceeded, Degradation: s.Degradation, Result: Result{
-			Generation: spec.fence.Generation, ContextEpoch: spec.fence.Epoch, Turn: s.Turn, Via: s.Via,
-		}}
-		if err := validateOutcome(o, Cancel{}); err != nil {
-			return unknownResult(fmt.Errorf("executor control result: %w", err)), Outcome{}
+		var breaches []error
+		turn := s.Turn
+		if err := validateOptionalText("result turn", turn); err != nil {
+			breaches = append(breaches, err)
+			turn = ""
 		}
-		return er, o
+		o := Outcome{Arm: ArmSucceeded, Degradation: s.Degradation, Result: Result{
+			Generation: spec.fence.Generation, ContextEpoch: spec.fence.Epoch, Turn: turn, Via: s.Via,
+		}}
+		return acceptedWithin(er, o, breaches, "executor control result")
 	case resultRejected:
 		r := er.rejected
 		if r.KeyRejected {
@@ -196,24 +223,30 @@ func (l *ConversationLane) settle(tb *takenBatch, er effectResult, preCall time.
 	return er, Outcome{}
 }
 
-// validateDelivered checks a Delivered result: a delivery time no earlier
-// than the call, a known ack, and a message id that fits the record.
-func validateDelivered(d Delivered, preCall time.Time) error {
-	rec := d.Record
-	switch {
-	case rec.At.IsZero():
-		return errors.New("executor delivery record has no time")
-	case rec.At.Before(preCall):
-		return fmt.Errorf("executor delivery record time %s is before the call at %s", formatTime(rec.At), formatTime(preCall))
-	case !slices.Contains(ackKinds, rec.Ack):
-		return fmt.Errorf("executor delivery ack %q is not delivered, delivered_unobserved or in_band", rec.Ack)
+// acceptedWithin finishes the succeeded outcome of an acked effect: a via or
+// degradation that breaks the contract is dropped or replaced, any breach
+// marks the outcome DegradationExecutorContract, and the breaches are
+// reported in contractErr. An outcome that is still invalid is a lane bug,
+// handled as Unknown.
+func acceptedWithin(er effectResult, o Outcome, breaches []error, what string) (effectResult, Outcome) {
+	if err := validateOptionalText("result via", o.Result.Via); err != nil {
+		breaches = append(breaches, err)
+		o.Result.Via = ""
 	}
-	if rec.MessageID != "" {
-		if err := validateText("delivery message id", rec.MessageID, maxMessageIDLen); err != nil {
-			return fmt.Errorf("executor delivery record: %w", err)
+	if o.Degradation != "" {
+		if err := validateToken("degradation", o.Degradation); err != nil {
+			breaches = append(breaches, err)
+			o.Degradation = ""
 		}
 	}
-	return nil
+	if len(breaches) > 0 {
+		o.Degradation = DegradationExecutorContract
+		er.contractErr = fmt.Errorf("%s: %w", what, errors.Join(breaches...))
+	}
+	if err := validateOutcome(o, Cancel{}); err != nil {
+		return unknownResult(errors.Join(er.contractErr, fmt.Errorf("%s: %w", what, err))), Outcome{}
+	}
+	return er, o
 }
 
 // doneNext is the op Done writes for cur, an op of this Take as it now

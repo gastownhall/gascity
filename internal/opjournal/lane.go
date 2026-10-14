@@ -45,6 +45,10 @@ const (
 	// DegradationUnfencedDelivery marks a delivery made without an
 	// incarnation fence.
 	DegradationUnfencedDelivery = "unfenced_delivery"
+	// DegradationExecutorContract marks an effect the runtime acked whose
+	// result broke the executor contract in a recording field; the lane
+	// recorded it with that field clamped or dropped.
+	DegradationExecutorContract = "executor_contract"
 )
 
 // Lane-only internal timings.

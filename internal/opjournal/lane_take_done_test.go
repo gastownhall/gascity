@@ -816,24 +816,131 @@ func TestLaneProbeFailureBurnsNothing(t *testing.T) {
 	}
 }
 
-func TestLaneInvalidDeliveredIsUnknown(t *testing.T) {
-	for name, rec := range map[string]DeliveryRecord{
-		"no time":     {Ack: AckDelivered},
-		"before call": {At: t0.Add(-time.Second), Ack: AckDelivered},
-		"unknown ack": {At: t0, Ack: "telepathy"},
+// An executor result without a valid ack is Unknown: nothing says the
+// runtime took the input.
+func TestLaneDeliveredWithoutAValidAckIsUnknown(t *testing.T) {
+	h := newLaneHarness(t)
+	op := h.propose(t, laneMsg("p", RolePrompt, "x"))
+	exec := newFakeExec(h.clk)
+	exec.deliver = func(Delivery) DeliveryResult {
+		return Delivered{Record: DeliveryRecord{At: h.clk.Now(), Ack: "telepathy"}}
+	}
+	if _, err := h.lane(t, "ctl").Pass(context.Background(), view(), exec); err == nil {
+		t.Fatal("contract breach not reported")
+	}
+	if got := h.get(t, op.ID); got.Status != StatusAccepted || got.MaybeDelivered != 1 || got.Failures != 1 {
+		t.Fatalf("op %+v", got)
+	}
+}
+
+// Once the runtime acked a delivery, a defect in another recording field is
+// reported but never turns the delivery into a repeat: the op succeeds with
+// the field clamped, dropped or replaced.
+func TestLaneDeliveredContractBreachStillRecordsTheDelivery(t *testing.T) {
+	for name, tc := range map[string]struct {
+		d     func(now time.Time) Delivered
+		check func(t *testing.T, o Outcome, preCall time.Time)
+	}{
+		"no time": {
+			d: func(time.Time) Delivered { return Delivered{Record: DeliveryRecord{Ack: AckDelivered}} },
+			check: func(t *testing.T, o Outcome, preCall time.Time) {
+				if !o.Result.Delivery.At.Equal(preCall) {
+					t.Fatalf("at %s, want the call time %s", o.Result.Delivery.At, preCall)
+				}
+			},
+		},
+		"before the call": {
+			d: func(now time.Time) Delivered {
+				return Delivered{Record: DeliveryRecord{At: now.Add(-time.Second), Ack: AckDelivered}}
+			},
+			check: func(t *testing.T, o Outcome, preCall time.Time) {
+				if !o.Result.Delivery.At.Equal(preCall) {
+					t.Fatalf("at %s, want the call time %s", o.Result.Delivery.At, preCall)
+				}
+			},
+		},
+		"degradation not a token": {
+			d: func(now time.Time) Delivered {
+				return Delivered{Record: DeliveryRecord{At: now, Ack: AckDelivered}, Degradation: "Turn Start Unobserved"}
+			},
+			check: func(t *testing.T, o Outcome, _ time.Time) {
+				if o.Degradation != DegradationExecutorContract {
+					t.Fatalf("degradation %q", o.Degradation)
+				}
+			},
+		},
+		"via with control characters": {
+			d: func(now time.Time) Delivered {
+				return Delivered{Record: DeliveryRecord{At: now, Ack: AckDelivered}, Via: "bridge\x00"}
+			},
+			check: func(t *testing.T, o Outcome, _ time.Time) {
+				if o.Result.Via != "" || o.Degradation != DegradationExecutorContract {
+					t.Fatalf("via %q degradation %q", o.Result.Via, o.Degradation)
+				}
+			},
+		},
+		"turn id with surrounding space": {
+			d: func(now time.Time) Delivered {
+				return Delivered{Record: DeliveryRecord{At: now, Ack: AckDelivered, TurnID: " t-1 "}}
+			},
+			check: func(t *testing.T, o Outcome, _ time.Time) {
+				if o.Result.Turn != "" || o.Result.TurnLink == LinkExact {
+					t.Fatalf("turn %q link %s", o.Result.Turn, o.Result.TurnLink)
+				}
+			},
+		},
+		"message id too long": {
+			d: func(now time.Time) Delivered {
+				return Delivered{Record: DeliveryRecord{At: now, Ack: AckDelivered, MessageID: strings.Repeat("m", maxMessageIDLen+1)}}
+			},
+			check: func(t *testing.T, o Outcome, _ time.Time) {
+				if o.Result.Delivery.MessageID != "" {
+					t.Fatalf("message id %q", o.Result.Delivery.MessageID)
+				}
+			},
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := newLaneHarness(t)
-			op := h.propose(t, laneMsg("p", RolePrompt, "x"))
+			op := h.propose(t, laneMsg("p", RolePrompt, "deploy now"))
 			exec := newFakeExec(h.clk)
-			exec.deliver = func(Delivery) DeliveryResult { return Delivered{Record: rec} }
-			if _, err := h.lane(t, "ctl").Pass(context.Background(), view(), exec); err == nil {
+			exec.deliver = func(Delivery) DeliveryResult { return tc.d(h.clk.Now()) }
+			preCall := h.clk.Now()
+			l := h.lane(t, "ctl")
+			res, err := l.Pass(context.Background(), view(), exec)
+			if err == nil {
 				t.Fatal("contract breach not reported")
 			}
-			if got := h.get(t, op.ID); got.Status != StatusAccepted || got.MaybeDelivered != 1 || got.Failures != 1 {
-				t.Fatalf("op %+v", got)
+			if res.Done != DoneAccepted {
+				t.Fatalf("pass %+v", res)
+			}
+			got := h.get(t, op.ID)
+			if got.Outcome.Arm != ArmSucceeded || got.MaybeDelivered != 0 || got.Failures != 0 {
+				t.Fatalf("op %s %+v maybe %d failures %d", got.Status, got.Outcome, got.MaybeDelivered, got.Failures)
+			}
+			tc.check(t, got.Outcome, preCall)
+			h.clk.Advance(ExecutorErrorBackoff + time.Second)
+			mustPass(t, l, view(), exec)
+			if n := len(exec.delivered()); n != 1 {
+				t.Fatalf("the runtime got the input %d times", n)
 			}
 		})
+	}
+}
+
+// The same holds for a control result: a settled interrupt is never sent
+// again for a cosmetic defect.
+func TestLaneSettledContractBreachStillSettles(t *testing.T) {
+	h := newLaneHarness(t)
+	op := h.propose(t, interruptReq())
+	exec := newFakeExec(h.clk)
+	exec.interrupt = func(InterruptCall) ControlResult { return Settled{Turn: " t ", Via: "x", Degradation: "Not A Token"} }
+	if _, err := h.lane(t, "ctl").Pass(context.Background(), view(), exec); err == nil {
+		t.Fatal("contract breach not reported")
+	}
+	got := h.get(t, op.ID)
+	if got.Outcome.Arm != ArmSucceeded || got.Outcome.Degradation != DegradationExecutorContract || got.Outcome.Result.Turn != "" {
+		t.Fatalf("op %+v", got.Outcome)
 	}
 }
 
