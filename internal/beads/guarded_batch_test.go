@@ -380,3 +380,111 @@ func TestNativeDoltStoreGuardedBatchDiscovery(t *testing.T) {
 		})
 	}
 }
+
+// committedThenFailingBatcher applies a batch to its store and then reports a
+// failure that does not say whether it committed, as a dropped connection
+// after the commit would.
+type committedThenFailingBatcher struct{ store *MemStore }
+
+func (b committedThenFailingBatcher) ApplyGuarded(ctx context.Context, batch GuardedBatch) (GuardedResult, error) {
+	if _, err := b.store.ApplyGuarded(ctx, batch); err != nil {
+		return GuardedResult{}, err
+	}
+	return GuardedResult{}, errors.New("connection reset after commit")
+}
+
+// ambiguousBatchStore is a store whose guarded batches commit and then fail.
+type ambiguousBatchStore struct{ *MemStore }
+
+func (s ambiguousBatchStore) GuardedBatcherHandle() (GuardedBatcher, bool) {
+	return committedThenFailingBatcher{store: s.MemStore}, true
+}
+
+// primedCacheForGuardedBatch returns a primed cache over backing.
+func primedCacheForGuardedBatch(t *testing.T, backing Store) *CachingStore {
+	t.Helper()
+	c := NewCachingStoreForTest(backing, nil)
+	if err := c.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	return c
+}
+
+// A guard the backing refuses means the cache's row is stale: the refused
+// batch evicts it, so the caller's re-read through the cache sees the
+// backing's revision and the next guard can land.
+func TestCachingStoreGuardedBatchMissEvictsTheStaleRow(t *testing.T) {
+	m := NewMemStore()
+	row, err := m.Create(Bead{Title: "row"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	c := primedCacheForGuardedBatch(t, m)
+	if err := m.SetMetadata(row.ID, "moved", "behind the cache"); err != nil {
+		t.Fatalf("SetMetadata: %v", err)
+	}
+	moved, err := m.Get(row.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if cached, _ := c.Get(row.ID); cached.Revision != row.Revision {
+		t.Fatalf("fixture: cache reads revision %d, want the stale %d", cached.Revision, row.Revision)
+	}
+	b, ok := GuardedBatcherFor(c)
+	if !ok {
+		t.Fatal("GuardedBatcherFor(cache) = false")
+	}
+	_, err = b.ApplyGuarded(context.Background(), GuardedBatch{Items: []GuardedItem{
+		{Update: &GuardedUpdate{ID: row.ID, ExpectedRevision: &row.Revision, Opts: UpdateOpts{Title: guardedTestPtr("stale")}}},
+	}})
+	if !IsPreconditionFailed(err) {
+		t.Fatalf("ApplyGuarded on the stale revision = %v, want a precondition failure", err)
+	}
+	got, err := c.Get(row.ID)
+	if err != nil {
+		t.Fatalf("Get through the cache: %v", err)
+	}
+	if got.Revision != moved.Revision {
+		t.Fatalf("cache reads revision %d after the refused batch, want the backing's %d", got.Revision, moved.Revision)
+	}
+}
+
+// A failure that may have committed leaves every row the batch named dirty, so
+// the cache reads each back from the backing rather than serving the
+// pre-batch row.
+func TestCachingStoreGuardedBatchAmbiguousFailureDirtiesEveryRow(t *testing.T) {
+	m := NewMemStore()
+	first, err := m.Create(Bead{Title: "first"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	second, err := m.Create(Bead{Title: "second"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	c := primedCacheForGuardedBatch(t, ambiguousBatchStore{MemStore: m})
+	b, ok := GuardedBatcherFor(c)
+	if !ok {
+		t.Fatal("GuardedBatcherFor(cache) = false")
+	}
+	_, err = b.ApplyGuarded(context.Background(), GuardedBatch{Items: []GuardedItem{
+		{Update: &GuardedUpdate{ID: first.ID, ExpectedRevision: &first.Revision, Opts: UpdateOpts{Title: guardedTestPtr("first after")}}},
+		{Update: &GuardedUpdate{ID: second.ID, ExpectedRevision: &second.Revision, Opts: UpdateOpts{Title: guardedTestPtr("second after")}}},
+	}})
+	if err == nil {
+		t.Fatal("ApplyGuarded = nil, want the backing's failure")
+	}
+	for _, id := range []string{first.ID, second.ID} {
+		want, err := m.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s) from the backing: %v", id, err)
+		}
+		got, err := c.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s) through the cache: %v", id, err)
+		}
+		if got.Revision != want.Revision || got.Title != want.Title {
+			t.Errorf("cache reads %s at revision %d (%q), want the backing's %d (%q)", id, got.Revision, got.Title, want.Revision, want.Title)
+		}
+	}
+}
