@@ -2,7 +2,6 @@ package opjournal
 
 import (
 	"errors"
-	"fmt"
 	"slices"
 	"strconv"
 	"strings"
@@ -100,8 +99,9 @@ var updateTextKeys = []string{
 	keyRTHost, keyRTHostProtocol, keyRTHostBuild,
 }
 
-// RuntimeState is the coarse runtime state (gc.rt.state). The set is closed;
-// empty means not observed.
+// RuntimeState is the coarse runtime state (gc.rt.state). This build writes
+// only the values below; a row may carry a newer build's value, which decodes
+// as read and reads as not observed. Empty means not observed.
 type RuntimeState string
 
 // Runtime states.
@@ -115,7 +115,9 @@ const (
 var runtimeStates = []RuntimeState{RuntimeStarting, RuntimeReady, RuntimeUnavailable, RuntimeExited}
 
 // Attachment says whether a terminal is attached to the runtime
-// (gc.rt.attached). The set is closed; empty means not observed.
+// (gc.rt.attached). This build writes only the values below; a row may carry
+// a newer build's value, which decodes as read and reads as not observed.
+// Empty means not observed.
 type Attachment string
 
 // Attachments.
@@ -291,6 +293,16 @@ func (r RuntimeRow) ownedFields() map[string]string {
 }
 
 func (r RuntimeRow) validate() error {
+	if err := r.validateShape(); err != nil {
+		return err
+	}
+	return r.validateVocabulary(func(string) bool { return true })
+}
+
+// validateShape checks everything but membership of the observation
+// vocabularies, which a newer build may extend: a value there need only be a
+// token. A decoded row passes it with a newer build's values in place.
+func (r RuntimeRow) validateShape() error {
 	if err := validateConversation(r.Conversation); err != nil {
 		return err
 	}
@@ -308,11 +320,11 @@ func (r RuntimeRow) validate() error {
 	if err := r.Turn.validate(); err != nil {
 		return err
 	}
-	if r.State != "" && !slices.Contains(runtimeStates, r.State) {
-		return invalidf("runtime state %q", r.State)
-	}
-	if r.Attached != "" && !slices.Contains(attachments, r.Attached) {
-		return invalidf("runtime attachment %q", r.Attached)
+	if err := errors.Join(
+		validateOptionalToken("runtime state", string(r.State)),
+		validateOptionalToken("runtime attachment", string(r.Attached)),
+	); err != nil {
+		return err
 	}
 	if err := errors.Join(
 		validateOptionalText("runtime observer", r.Observer),
@@ -343,6 +355,36 @@ func (r RuntimeRow) validate() error {
 	return nil
 }
 
+// validateVocabulary refuses an observation value this build does not know,
+// for the keys check selects.
+func (r RuntimeRow) validateVocabulary(check func(key string) bool) error {
+	switch {
+	case check(keyRTTurnState) && r.Turn.State != "" && !slices.Contains(turnStates, r.Turn.State):
+		return invalidf("turn state %q", r.Turn.State)
+	case check(keyRTState) && r.State != "" && !slices.Contains(runtimeStates, r.State):
+		return invalidf("runtime state %q", r.State)
+	case check(keyRTAttached) && r.Attached != "" && !slices.Contains(attachments, r.Attached):
+		return invalidf("runtime attachment %q", r.Attached)
+	}
+	if check(keyRTHostKinds) {
+		for _, k := range r.Host.Kinds {
+			if _, err := Lookup(k); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func validateOptionalToken(what, v string) error {
+	if v == "" {
+		return nil
+	}
+	return validateToken(what, v)
+}
+
+// validate checks the cells' shape. A turn state this build does not know
+// need only be a token, and may carry a turn id.
 func (c TurnCells) validate() error {
 	switch c.State {
 	case TurnStateRunning:
@@ -354,7 +396,14 @@ func (c TurnCells) validate() error {
 			return invalidf("turn id %q set while the turn state is %q", c.ID, c.State)
 		}
 	default:
-		return invalidf("turn state %q", c.State)
+		if err := validateToken("turn state", string(c.State)); err != nil {
+			return err
+		}
+		if c.ID != "" {
+			if err := validateText("turn id", c.ID, maxClientKeyLen); err != nil {
+				return err
+			}
+		}
 	}
 	if c.LastID != "" {
 		if err := validateText("last turn id", c.LastID, maxClientKeyLen); err != nil {
@@ -419,13 +468,15 @@ func ParseTurnCapsStamp(s string) (TurnCapsStamp, error) {
 	return out, nil
 }
 
+// validateHostKinds checks the kinds' shape: tokens, no repeats, and a kind
+// this build knows must be a conversation-lane kind. A kind it does not know
+// is left to validateVocabulary.
 func validateHostKinds(kinds []Kind) error {
 	for i, k := range kinds {
-		spec, err := Lookup(k)
-		if err != nil {
+		if err := validateToken("host kind", string(k)); err != nil {
 			return err
 		}
-		if spec.Lane != LaneConversation {
+		if spec, err := Lookup(k); err == nil && spec.Lane != LaneConversation {
 			return invalidf("host kind %s is not a conversation-lane kind", k)
 		}
 		if slices.Contains(kinds[:i], k) {
@@ -444,11 +495,13 @@ func joinKinds(kinds []Kind) string {
 }
 
 // DecodeRuntimeRow reads a runtime row. It fails loudly: ErrUnsupportedSchema
-// for a newer schema, ErrUnsupportedValue for a state or attachment this
-// build does not know, ErrUnsupportedKind for an unknown host kind, and
-// ErrCorruptOp for anything malformed or an id that is not
-// <prefix>-rt-<hash of its conversation> under a valid prefix. Keys it does
-// not own land in Extra.
+// for a newer schema, and ErrCorruptOp for anything malformed or an id that
+// is not <prefix>-rt-<hash of its conversation> under a valid prefix. Keys it
+// does not own land in Extra. An observation value a newer build added (a
+// turn or runtime state, an attachment, a host kind) is a hint, not a
+// failure: it is kept as read and reads as unknown, so one newer observer
+// never stops this build's lanes from writing the row's lane cells (DES-O1
+// §4.1). Only the codec's encode and RuntimeRowPatch refuse to write one.
 func DecodeRuntimeRow(b beads.Bead) (RuntimeRow, error) {
 	if b.Type != BeadType || !slices.Contains(b.Labels, LabelRuntime) {
 		return RuntimeRow{}, corruptf(b.ID, "not a runtime row (type %q, labels %v)", b.Type, b.Labels)
@@ -514,9 +567,6 @@ func DecodeRuntimeRow(b beads.Bead) (RuntimeRow, error) {
 			r.Host.Kinds = append(r.Host.Kinds, Kind(k))
 		}
 	}
-	if err := checkRuntimeVocabulary(b.ID, r); err != nil {
-		return RuntimeRow{}, err
-	}
 	for k, v := range b.Metadata {
 		if !slices.Contains(runtimeKeys, k) && v != "" {
 			if r.Extra == nil {
@@ -525,7 +575,7 @@ func DecodeRuntimeRow(b beads.Bead) (RuntimeRow, error) {
 			r.Extra[k] = v
 		}
 	}
-	if err := r.validate(); err != nil {
+	if err := r.validateShape(); err != nil {
 		return RuntimeRow{}, corruptf(b.ID, "%v", err)
 	}
 	if !slices.Contains(b.Labels, RuntimeConversationLabel(r.Conversation)) {
@@ -541,36 +591,16 @@ func DecodeRuntimeRow(b beads.Bead) (RuntimeRow, error) {
 	return r, nil
 }
 
-// checkRuntimeVocabulary reports a closed-set value written by a newer build
-// as unsupported rather than corrupt.
-func checkRuntimeVocabulary(id string, r RuntimeRow) error {
-	unsupported := func(what, v string) error {
-		return fmt.Errorf("%w: row %s has %s %q", ErrUnsupportedValue, id, what, v)
-	}
-	switch {
-	case r.Turn.State != "" && !slices.Contains(turnStates, r.Turn.State):
-		return unsupported("turn state", string(r.Turn.State))
-	case r.State != "" && !slices.Contains(runtimeStates, r.State):
-		return unsupported("runtime state", string(r.State))
-	case r.Attached != "" && !slices.Contains(attachments, r.Attached):
-		return unsupported("attachment", string(r.Attached))
-	}
-	for _, k := range r.Host.Kinds {
-		if _, err := Lookup(k); err != nil {
-			return fmt.Errorf("%w: row %s has host kind %q", ErrUnsupportedKind, id, k)
-		}
-	}
-	return nil
-}
-
 // RuntimeRowPatch is the update that turns row b into next's encoding: the
 // owned keys that changed, an owned key written empty where b has it and next
 // does not, and the bead status when next closes the row. It never writes a
 // key this build does not own, whatever next.Extra holds, so a newer build's
 // cells survive. A patch that moves the row to another conversation or
 // reopens it is refused, as is free text a fenced update would not store as a
-// string (bd types a value such as 42, true or null by its spelling). The
-// caller writes the patch under b's revision.
+// string (bd types a value such as 42, true or null by its spelling), and an
+// observation value this build does not know where the patch writes it; one
+// already stored and left unchanged is kept. The caller writes the patch
+// under b's revision.
 func RuntimeRowPatch(b beads.Bead, next RuntimeRow) (beads.UpdateOpts, error) {
 	cur, err := DecodeRuntimeRow(b)
 	if err != nil {
@@ -583,7 +613,7 @@ func RuntimeRowPatch(b beads.Bead, next RuntimeRow) (beads.UpdateOpts, error) {
 		return beads.UpdateOpts{}, invalidf("runtime row %s is closed and does not reopen", cur.ID)
 	}
 	next.Extra = nil
-	if err := next.validate(); err != nil {
+	if err := next.validateShape(); err != nil {
 		return beads.UpdateOpts{}, err
 	}
 	want := next.ownedFields()
@@ -592,6 +622,9 @@ func RuntimeRowPatch(b beads.Bead, next RuntimeRow) (beads.UpdateOpts, error) {
 		if b.Metadata[k] != want[k] {
 			meta[k] = want[k]
 		}
+	}
+	if err := next.validateVocabulary(func(k string) bool { _, ok := meta[k]; return ok }); err != nil {
+		return beads.UpdateOpts{}, err
 	}
 	for _, k := range updateTextKeys {
 		if v, ok := meta[k]; ok && v != "" {

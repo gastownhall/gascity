@@ -6,9 +6,10 @@ import (
 	"time"
 )
 
-// TurnState is the state of the turn cells (gc.rt.turn.state). The set is
-// closed. The empty value is a row whose observer has not yet written the
-// cells; readers treat it as TurnStateUnknown.
+// TurnState is the state of the turn cells (gc.rt.turn.state). This build
+// writes only the values below. The empty value is a row whose observer has
+// not yet written the cells, and a newer build's value decodes as read; readers
+// treat both as TurnStateUnknown.
 type TurnState string
 
 // Turn states.
@@ -91,7 +92,9 @@ type TurnCapsPair struct {
 // (gc.rt.turn.caps): the turn axes, then source, interrupt and replace, in the
 // observer's order, as k=v pairs joined by ",". Keys and values are tokens.
 // The observer writes it at the first observation of a generation and at
-// every downgrade; the codec does not interpret it. The typed capability axes
+// every downgrade; the codec does not interpret it. New keys and values are
+// additive and decode on every build; a change to the k=v syntax is a schema
+// change (gc.rt.schema), not a new value. The typed capability axes
 // the lane reads (DES-O1 §4.2's Caps.Turns) are parsed from it at that edge
 // and are not this type.
 type TurnCapsStamp []TurnCapsPair

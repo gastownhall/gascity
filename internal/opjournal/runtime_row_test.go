@@ -277,10 +277,11 @@ func TestDecodeRuntimeRowRefusals(t *testing.T) {
 	}{
 		{"schema 2", mutate(func(b *beads.Bead) { b.Metadata[keyRTSchema] = "2" }), ErrUnsupportedSchema},
 		{"no schema", mutate(func(b *beads.Bead) { delete(b.Metadata, keyRTSchema) }), ErrCorruptOp},
-		{"unknown turn state", mutate(func(b *beads.Bead) { b.Metadata[keyRTTurnState] = "paused" }), ErrUnsupportedValue},
-		{"unknown runtime state", mutate(func(b *beads.Bead) { b.Metadata[keyRTState] = "sleeping" }), ErrUnsupportedValue},
-		{"unknown attachment", mutate(func(b *beads.Bead) { b.Metadata[keyRTAttached] = "maybe" }), ErrUnsupportedValue},
-		{"unknown host kind", mutate(func(b *beads.Bead) { b.Metadata[keyRTHostKinds] = "message,poke" }), ErrUnsupportedKind},
+		{"turn state not a token", mutate(func(b *beads.Bead) { b.Metadata[keyRTTurnState] = "Paused now" }), ErrCorruptOp},
+		{"runtime state not a token", mutate(func(b *beads.Bead) { b.Metadata[keyRTState] = "Sleeping" }), ErrCorruptOp},
+		{"attachment not a token", mutate(func(b *beads.Bead) { b.Metadata[keyRTAttached] = "may be" }), ErrCorruptOp},
+		{"host kind not a token", mutate(func(b *beads.Bead) { b.Metadata[keyRTHostKinds] = "message,Poke" }), ErrCorruptOp},
+		{"host kind of another lane", mutate(func(b *beads.Bead) { b.Metadata[keyRTHostKinds] = "message,wake" }), ErrCorruptOp},
 		{"edited conversation", mutate(func(b *beads.Bead) { b.Metadata[keyRTConversation] = "gc-2" }), ErrCorruptOp},
 		{"missing conversation label", mutate(func(b *beads.Bead) { b.Labels = []string{LabelRuntime} }), ErrCorruptOp},
 		{"bad seq", mutate(func(b *beads.Bead) { b.Metadata[keyRTSeq] = "-1" }), ErrCorruptOp},
@@ -403,5 +404,79 @@ func TestRuntimeRowPatchRefusals(t *testing.T) {
 	bad.Metadata[keyRTSchema] = "2"
 	if _, err := RuntimeRowPatch(bad, cur); !errors.Is(err, ErrUnsupportedSchema) {
 		t.Errorf("patch over a newer row = %v, want ErrUnsupportedSchema", err)
+	}
+}
+
+// An observation value a newer build writes (a turn or runtime state, an
+// attachment, a host kind) decodes as read, so the lane cells on the same row
+// stay writable by this build; a patch never writes such a value itself.
+func TestRuntimeRowKeepsNewerObservationValues(t *testing.T) {
+	good, err := EncodeRuntimeRow("gc", fullRuntimeRow())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name, key, value string
+		read             func(RuntimeRow) string
+		write            func(*RuntimeRow, string)
+	}{
+		{
+			"turn state", keyRTTurnState, "paused",
+			func(r RuntimeRow) string { return string(r.Turn.State) },
+			func(r *RuntimeRow, v string) { r.Turn.State = TurnState(v) },
+		},
+		{
+			"runtime state", keyRTState, "sleeping",
+			func(r RuntimeRow) string { return string(r.State) },
+			func(r *RuntimeRow, v string) { r.State = RuntimeState(v) },
+		},
+		{
+			"attachment", keyRTAttached, "shared",
+			func(r RuntimeRow) string { return string(r.Attached) },
+			func(r *RuntimeRow, v string) { r.Attached = Attachment(v) },
+		},
+		{
+			"host kind", keyRTHostKinds, "message,poke",
+			func(r RuntimeRow) string { return joinKinds(r.Host.Kinds) },
+			func(r *RuntimeRow, v string) {
+				r.Host.Kinds = nil
+				for _, k := range strings.Split(v, ",") {
+					r.Host.Kinds = append(r.Host.Kinds, Kind(k))
+				}
+			},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			b := good
+			b.Metadata = maps.Clone(good.Metadata)
+			b.Metadata[c.key] = c.value
+			cur, err := DecodeRuntimeRow(b)
+			if err != nil {
+				t.Fatalf("DecodeRuntimeRow: %v", err)
+			}
+			if got := c.read(cur); got != c.value {
+				t.Fatalf("%s = %q, want %q kept as read", c.key, got, c.value)
+			}
+
+			next := cur
+			next.Seq++
+			opts, err := RuntimeRowPatch(b, next)
+			if err != nil {
+				t.Fatalf("a lane-cell patch over a newer value: %v", err)
+			}
+			if len(opts.Metadata) != 1 || opts.Metadata[keyRTSeq] != formatUint(next.Seq) {
+				t.Fatalf("patch = %v, want only %s", opts.Metadata, keyRTSeq)
+			}
+
+			other := cur
+			c.write(&other, "newer_still")
+			if _, err := RuntimeRowPatch(b, other); !errors.Is(err, ErrInvalidRequest) && !errors.Is(err, ErrUnknownKind) {
+				t.Fatalf("a patch writing a value this build does not know = %v, want a refusal", err)
+			}
+			if _, err := EncodeRuntimeRow("gc", cur); !errors.Is(err, ErrInvalidRequest) && !errors.Is(err, ErrUnknownKind) {
+				t.Fatalf("encoding a value this build does not know = %v, want a refusal", err)
+			}
+		})
 	}
 }
