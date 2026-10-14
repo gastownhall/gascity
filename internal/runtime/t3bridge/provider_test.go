@@ -1036,6 +1036,8 @@ type t3BridgeTestServer struct {
 	snapshot           map[string]interface{}
 	snapshots          []map[string]interface{}
 	commandHook        func(payload map[string]interface{})
+	commandDrops       int
+	commandDropClose   []byte
 	stalled            bool
 	authStalled        bool
 	upgradeStalled     bool
@@ -1199,9 +1201,22 @@ func newT3BridgeTestServer(t *testing.T, snapshot map[string]interface{}) *t3Bri
 			ts.recordPayload(payload)
 			ts.mu.Lock()
 			hook := ts.commandHook
+			dropped := ts.commandDrops > 0
+			if dropped {
+				ts.commandDrops--
+			}
+			dropClose := ts.commandDropClose
 			ts.mu.Unlock()
 			if hook != nil {
 				hook(payload)
+			}
+			if dropped {
+				if dropClose != nil {
+					if err := conn.WriteMessage(websocket.CloseMessage, dropClose); err != nil {
+						t.Errorf("write websocket close: %v", err)
+					}
+				}
+				return // taken, but the connection closes without an answer
 			}
 		}
 
@@ -1276,6 +1291,23 @@ func (ts *t3BridgeTestServer) setCommandHook(hook func(payload map[string]interf
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 	ts.commandHook = hook
+}
+
+// dropCommands makes the next n dispatched commands go unanswered: each is
+// recorded and its hook runs, then its connection closes, as when T3 took a
+// command and the answer was lost.
+func (ts *t3BridgeTestServer) dropCommands(n int) {
+	ts.closeCommands(n, nil)
+}
+
+// closeCommands is dropCommands whose connections send closeMessage, a close
+// frame's payload, before they close, as when T3 took a command and shut down
+// before answering. A nil closeMessage sends no close frame.
+func (ts *t3BridgeTestServer) closeCommands(n int, closeMessage []byte) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	ts.commandDrops = n
+	ts.commandDropClose = closeMessage
 }
 
 // nextSnapshot is the snapshot the next read answers; false for an outage.

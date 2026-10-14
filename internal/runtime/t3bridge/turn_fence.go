@@ -20,10 +20,10 @@ var (
 var _ runtime.TurnFenceProvider = (*Provider)(nil)
 
 // freshSessionThread reads the thread bound to name from an uncached
-// snapshot, bounded by ctx. It reports [runtime.ErrRuntimeUnavailable] when T3
-// cannot be read (wrapping ctx's error when ctx ended), or when no thread is
-// visible yet inside the start grace, and [runtime.ErrSessionNotFound] when no
-// thread is bound to name.
+// snapshot, bounded by ctx. It reports [runtime.ErrRuntimeUnavailable] when
+// the snapshot cannot be read, for any reason (wrapping ctx's error when ctx
+// ended), or when no thread is visible yet inside the start grace, and
+// [runtime.ErrSessionNotFound] when no thread is bound to name.
 func (p *Provider) freshSessionThread(ctx context.Context, name string) (map[string]interface{}, error) {
 	snapshot, err := p.rpcSnapshotFresh(ctx)
 	if err != nil {
@@ -32,10 +32,7 @@ func (p *Provider) freshSessionThread(ctx context.Context, name string) (map[str
 			// ctx's error is wrapped explicitly.
 			return nil, fmt.Errorf("%w: t3bridge snapshot unavailable for %q: %w: %w", runtime.ErrRuntimeUnavailable, name, ctxErr, err)
 		}
-		if isSoftBridgeUnavailable(err) {
-			return nil, fmt.Errorf("%w: t3bridge snapshot unavailable for %q: %w", runtime.ErrRuntimeUnavailable, name, err)
-		}
-		return nil, err
+		return nil, fmt.Errorf("%w: t3bridge snapshot unavailable for %q: %w", runtime.ErrRuntimeUnavailable, name, err)
 	}
 	thread := snapshotThreadBySessionName(snapshot, name)
 	if snapshotThreadBinding(thread) == nil {
@@ -52,7 +49,9 @@ func (p *Provider) freshSessionThread(ctx context.Context, name string) (map[str
 // provider session, a session of an absent status (even with a stale id), and
 // a live session with a null id have no turn. A running session with a null
 // id, an unknown status and a malformed id are indeterminate:
-// [runtime.ErrRuntimeUnavailable].
+// [runtime.ErrRuntimeUnavailable]. Unlike IsAlive and ListRunning, no start
+// grace applies: a legacy pre-session status ("none", "gone") inside the grace
+// is a session still starting, which has no turn in progress yet.
 func threadActiveTurn(thread map[string]interface{}) (threadID, turnID string, err error) {
 	threadID, _ = thread["id"].(string)
 	session, _ := thread["session"].(map[string]interface{})
@@ -83,7 +82,8 @@ func threadActiveTurn(thread map[string]interface{}) (threadID, turnID string, e
 // threadTurn is thread's turn as a [runtime.TurnState], with the thread id
 // and T3's raw turn id it is built from. The state's id is
 // "<threadId>/<activeTurnId>", so a thread recreated for the same session
-// never repeats an earlier thread's turn id.
+// never repeats an earlier thread's turn id. Turn events, if this provider
+// reports any, must use the same id, as [runtime.TurnState] requires.
 func threadTurn(thread map[string]interface{}) (threadID, rawTurnID string, st runtime.TurnState, err error) {
 	threadID, rawTurnID, err = threadActiveTurn(thread)
 	if err != nil || rawTurnID == "" {
@@ -117,7 +117,9 @@ func (p *Provider) ObserveTurn(ctx context.Context, name string) (runtime.TurnSt
 // still shows turnID in progress, which keeps the gap between the read and
 // the interrupt T3 handles at about one round trip. When the re-read fails or
 // shows another turn, the call fails with [runtime.ErrRuntimeUnavailable],
-// not a *TurnNotCurrentError: the failed attempt may have reached T3.
+// not a *TurnNotCurrentError: the failed attempt may have reached T3. An
+// interrupt a T3 address took without answering goes to no other address in
+// the same attempt, so only a retry that passed the re-read sends it again.
 func (p *Provider) InterruptTurn(ctx context.Context, name, turnID string) (runtime.TurnInterrupt, error) {
 	if turnID == "" {
 		return runtime.TurnInterrupt{}, fmt.Errorf("%w: interrupting a turn of %q", runtime.ErrTurnUnnamed, name)
@@ -148,6 +150,11 @@ func (p *Provider) InterruptTurn(ctx context.Context, name, turnID string) (runt
 		return nil
 	}
 	if err := p.dispatchTurnInterruptFor(ctx, threadID, rawTurnID, refence); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			// A failure over several candidates arrives flattened to text, so
+			// ctx's error is wrapped explicitly.
+			return runtime.TurnInterrupt{}, fmt.Errorf("interrupting turn %q of %q: %w: %w", turnID, name, ctxErr, err)
+		}
 		return runtime.TurnInterrupt{}, fmt.Errorf("interrupting turn %q of %q: %w", turnID, name, err)
 	}
 	p.clearSnapshotCache()
@@ -191,6 +198,12 @@ func (p *Provider) WaitTurnEnded(ctx context.Context, name, turnID string, timeo
 			return runtime.TurnState{}, nil
 		case err != nil:
 			lastErr = err
+			if waitCtx.Err() != nil && ctx.Err() == nil {
+				// The wait's own bound cut this read; its deadline is not
+				// the caller's, so only the read's text is kept.
+				detail := strings.TrimPrefix(err.Error(), runtime.ErrRuntimeUnavailable.Error()+": ")
+				lastErr = fmt.Errorf("%w: %s", runtime.ErrRuntimeUnavailable, detail)
+			}
 		case st.TurnID != turnID:
 			return st, nil
 		default:

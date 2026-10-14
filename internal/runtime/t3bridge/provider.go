@@ -1181,6 +1181,8 @@ func (p *Provider) rpcCallCtx(ctx context.Context, method string, params map[str
 
 // rpcCallCheckedCtx is rpcCallCtx that runs beforeRetry, when set, after each
 // transient-retry sleep and before the next attempt; its error ends the call.
+// With beforeRetry set, an attempt ends at the first candidate that takes the
+// request, so the request is never sent again without the check.
 func (p *Provider) rpcCallCheckedCtx(ctx context.Context, method string, params map[string]interface{}, beforeRetry func(context.Context) error) (map[string]interface{}, error) {
 	p.mu.Lock()
 	p.reqSeq++
@@ -1189,7 +1191,7 @@ func (p *Provider) rpcCallCheckedCtx(ctx context.Context, method string, params 
 
 	deadline := time.Now().Add(bridgeConnectRetryWindow)
 	for attempt := 1; ; attempt++ {
-		result, err := p.rpcCallOnceCtx(ctx, method, params, reqID)
+		result, err := p.rpcCallOnceCtx(ctx, method, params, reqID, beforeRetry != nil)
 		if err == nil {
 			return result, nil
 		}
@@ -1211,7 +1213,10 @@ func (p *Provider) rpcCallCheckedCtx(ctx context.Context, method string, params 
 	}
 }
 
-func (p *Provider) rpcCallOnceCtx(ctx context.Context, method string, params map[string]interface{}, reqID int) (map[string]interface{}, error) {
+// rpcCallOnceCtx sends the request to each WebSocket candidate in turn until
+// one answers. With stopAfterWrite set, a candidate that takes the request and
+// then fails before answering ends the walk: the request may have reached T3.
+func (p *Provider) rpcCallOnceCtx(ctx context.Context, method string, params map[string]interface{}, reqID int, stopAfterWrite bool) (map[string]interface{}, error) {
 	var lastErr error
 	var failures []string
 	for _, candidate := range resolveWsURLCandidates() {
@@ -1252,52 +1257,21 @@ func (p *Provider) rpcCallOnceCtx(ctx context.Context, method string, params map
 			"headers": []interface{}{},
 		}
 		if err := conn.WriteJSON(request); err != nil {
+			// A failed write left T3 at most part of the message, which it
+			// cannot dispatch, so the walk goes on even with stopAfterWrite.
 			lastErr = fmt.Errorf("%s: %w", candidate, err)
 			failures = append(failures, lastErr.Error())
 			continue
 		}
 
-		readDeadline := time.Now().Add(30 * time.Second)
-		if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(readDeadline) {
-			readDeadline = ctxDeadline
+		value, answered, err := readRPCAnswer(ctx, conn, method, reqID)
+		if answered {
+			return value, err
 		}
-		_ = conn.SetReadDeadline(readDeadline)
-		for {
-			_, msg, err := conn.ReadMessage()
-			if err != nil {
-				if ctxErr := ctx.Err(); ctxErr != nil {
-					err = fmt.Errorf("%w: %w", ctxErr, err)
-				}
-				lastErr = fmt.Errorf("%s: %w", candidate, err)
-				failures = append(failures, lastErr.Error())
-				break
-			}
-			var resp struct {
-				Tag       string `json:"_tag"`
-				RequestID string `json:"requestId"`
-				Exit      *struct {
-					Tag   string                 `json:"_tag"`
-					Value map[string]interface{} `json:"value"`
-					Cause json.RawMessage        `json:"cause"`
-				} `json:"exit"`
-				Defect string `json:"defect"`
-			}
-			if err := json.Unmarshal(msg, &resp); err != nil {
-				continue
-			}
-			if resp.Tag == "Defect" {
-				return nil, &t3RPCFailureError{method: method, cause: resp.Defect, defect: true}
-			}
-			if resp.Tag != "Exit" || resp.RequestID != fmt.Sprintf("%d", reqID) {
-				continue
-			}
-			if resp.Exit == nil {
-				return nil, fmt.Errorf("t3 rpc %s: nil exit", method)
-			}
-			if resp.Exit.Tag == "Failure" {
-				return nil, &t3RPCFailureError{method: method, cause: string(resp.Exit.Cause), rejected: t3ExitCauseIsRejection(resp.Exit.Cause)}
-			}
-			return resp.Exit.Value, nil
+		lastErr = fmt.Errorf("%s: %w", candidate, err)
+		failures = append(failures, lastErr.Error())
+		if stopAfterWrite {
+			break
 		}
 	}
 	if lastErr == nil {
@@ -1307,6 +1281,53 @@ func (p *Provider) rpcCallOnceCtx(ctx context.Context, method string, params map
 		return nil, fmt.Errorf("all T3 WebSocket candidates failed: %s", strings.Join(failures, "; "))
 	}
 	return nil, lastErr
+}
+
+// readRPCAnswer reads conn, for up to 30 s or until ctx's deadline, until T3
+// answers request reqID or reports a defect. answered is false when a read
+// fails first; the error is then the read failure, wrapping ctx's error when
+// ctx ended.
+func readRPCAnswer(ctx context.Context, conn *websocket.Conn, method string, reqID int) (map[string]interface{}, bool, error) {
+	readDeadline := time.Now().Add(30 * time.Second)
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(readDeadline) {
+		readDeadline = ctxDeadline
+	}
+	_ = conn.SetReadDeadline(readDeadline)
+	for {
+		_, msg, err := conn.ReadMessage()
+		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				err = fmt.Errorf("%w: %w", ctxErr, err)
+			}
+			return nil, false, err
+		}
+		var resp struct {
+			Tag       string `json:"_tag"`
+			RequestID string `json:"requestId"`
+			Exit      *struct {
+				Tag   string                 `json:"_tag"`
+				Value map[string]interface{} `json:"value"`
+				Cause json.RawMessage        `json:"cause"`
+			} `json:"exit"`
+			Defect string `json:"defect"`
+		}
+		if err := json.Unmarshal(msg, &resp); err != nil {
+			continue
+		}
+		if resp.Tag == "Defect" {
+			return nil, true, &t3RPCFailureError{method: method, cause: resp.Defect, defect: true}
+		}
+		if resp.Tag != "Exit" || resp.RequestID != fmt.Sprintf("%d", reqID) {
+			continue
+		}
+		if resp.Exit == nil {
+			return nil, true, fmt.Errorf("t3 rpc %s: nil exit", method)
+		}
+		if resp.Exit.Tag == "Failure" {
+			return nil, true, &t3RPCFailureError{method: method, cause: string(resp.Exit.Cause), rejected: t3ExitCauseIsRejection(resp.Exit.Cause)}
+		}
+		return resp.Exit.Value, true, nil
+	}
 }
 
 // threadSessionStatus returns the session status for a thread by checking

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gorilla/websocket"
 )
 
 const turnFenceSession = "agent-a"
@@ -272,8 +273,8 @@ func TestInterruptTurnRejectionIsNotTurnNotCurrent(t *testing.T) {
 }
 
 // Kills a wait that stops before the turn ends, misses a replacement turn,
-// ends on an outage, treats a removed thread as running, or outlives its
-// bound or its caller.
+// ends on an outage, treats a removed thread as running, outlives its bound
+// or its caller, or reports its own bound as the caller's deadline.
 func TestWaitTurnEnded(t *testing.T) {
 	const t1 = "thread-agent-a/t1"
 	empty := map[string]interface{}{"threads": []interface{}{}}
@@ -324,6 +325,22 @@ func TestWaitTurnEnded(t *testing.T) {
 		_, err := p.WaitTurnEnded(t.Context(), turnFenceSession, t1, 100*time.Millisecond)
 		if !errors.Is(err, runtime.ErrTurnNotEnded) || !errors.Is(err, runtime.ErrRuntimeUnavailable) {
 			t.Fatalf("WaitTurnEnded = %v; want ErrTurnNotEnded with the last read error", err)
+		}
+	})
+
+	t.Run("stalled read", func(t *testing.T) {
+		server := newTurnFenceServer(t, turnRunning("t1"))
+		server.setStalled()
+		p := newTurnFenceTestProvider(t, server)
+		_, err := p.WaitTurnEnded(t.Context(), turnFenceSession, t1, 100*time.Millisecond)
+		if !errors.Is(err, runtime.ErrTurnNotEnded) || !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+			t.Fatalf("WaitTurnEnded = %v; want ErrTurnNotEnded with the last read error", err)
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("WaitTurnEnded = %v: the wait's own bound cut the read, not the caller's deadline", err)
+		}
+		if n := strings.Count(err.Error(), runtime.ErrRuntimeUnavailable.Error()); n != 1 {
+			t.Fatalf("WaitTurnEnded = %v: names the outage %d times, want once", err, n)
 		}
 	})
 
@@ -440,7 +457,9 @@ func TestObserveTurnCanceledReadIsUnavailable(t *testing.T) {
 // would hold InterruptTurn for the HTTP or handshake timeout, and then the
 // transient-retry window, past its deadline. The ticket stalls on the
 // dispatch; the handshake stalls on the fence read, which is a WebSocket read
-// without a bearer token.
+// without a bearer token. The stalled ticket is reached through a second,
+// localhost candidate too, as production's flattened failures lose the
+// deadline unless it is wrapped again.
 func TestInterruptTurnDispatchStopsAtTheDeadline(t *testing.T) {
 	interrupt := func(t *testing.T, p *Provider) error {
 		t.Helper()
@@ -458,6 +477,7 @@ func TestInterruptTurnDispatchStopsAtTheDeadline(t *testing.T) {
 	t.Run("stalled ticket", func(t *testing.T) {
 		server := newTurnFenceServer(t, turnRunning("t1"))
 		p := newTurnFenceTestProvider(t, server)
+		defaultWSURLCandidates = []string{strings.Replace(server.wsURL(), "127.0.0.1", "localhost", 1)}
 		if _, err := p.ObserveTurn(t.Context(), turnFenceSession); err != nil {
 			t.Fatalf("fence read over HTTP: %v", err)
 		}
@@ -517,6 +537,138 @@ func TestInterruptTurnRefencesBeforeARetry(t *testing.T) {
 			t.Fatalf("interrupts = %+v, want one for t1", payloads)
 		}
 	})
+}
+
+// Kills a fenced dispatch that sends the interrupt on to the next T3 address
+// when the first took it and the answer was lost: that send skips the
+// re-read, so it can interrupt a turn that started since. The interrupt goes
+// out again only on a retry the re-read allows; a turn that changed fails the
+// call as unavailable, never as not-current.
+func TestInterruptTurnLostAnswerWaitsForTheRefence(t *testing.T) {
+	// lossy is a provider whose first address takes the first interrupt and
+	// loses its answer, and whose second address answers everything.
+	lossy := func(t *testing.T, seq ...map[string]interface{}) (server, other *t3BridgeTestServer, p *Provider) {
+		t.Helper()
+		server = newTurnFenceServer(t, seq...)
+		server.dropCommands(1)
+		p = newTurnFenceTestProvider(t, server)
+		other = newTurnFenceServer(t, turnRunning("t1"))
+		defaultWSURLCandidates = []string{other.wsURL()}
+		return server, other, p
+	}
+	t.Run("turn changed", func(t *testing.T) {
+		server, other, p := lossy(t, turnRunning("t1"), turnRunning("t2"))
+		_, err := p.InterruptTurn(t.Context(), turnFenceSession, "thread-agent-a/t1")
+		if !errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.Is(err, runtime.ErrTurnNotCurrent) {
+			t.Fatalf("InterruptTurn = %v, want only ErrRuntimeUnavailable", err)
+		}
+		if cmds := other.commandTypes(); len(cmds) != 0 {
+			t.Fatalf("second address commands = %q, want none", cmds)
+		}
+		if cmds := server.commandTypes(); len(cmds) != 1 {
+			t.Fatalf("first address commands = %q, want the one whose answer was lost", cmds)
+		}
+		if calls := server.snapshotCalls(); calls != 2 {
+			t.Fatalf("snapshot reads = %d, want the fence read and one re-read", calls)
+		}
+	})
+	t.Run("turn unchanged", func(t *testing.T) {
+		server, other, p := lossy(t, turnRunning("t1"))
+		var readsAtDispatch atomic.Int64
+		server.setCommandHook(func(map[string]interface{}) { readsAtDispatch.Store(int64(server.snapshotCalls())) })
+		if _, err := p.InterruptTurn(t.Context(), turnFenceSession, "thread-agent-a/t1"); err != nil {
+			t.Fatalf("InterruptTurn = %v, want the retry sent", err)
+		}
+		if got := readsAtDispatch.Load(); got != 2 {
+			t.Fatalf("snapshot reads before the resent dispatch = %d, want 2", got)
+		}
+		payloads := server.commandPayloads("thread.turn.interrupt")
+		if len(payloads) != 2 || payloads[0]["commandId"] != payloads[1]["commandId"] {
+			t.Fatalf("interrupts = %+v, want the lost one resent with its command id", payloads)
+		}
+		if cmds := other.commandTypes(); len(cmds) != 0 {
+			t.Fatalf("second address commands = %q, want none", cmds)
+		}
+	})
+}
+
+// Kills a fenced dispatch that goes on past the T3 address that took the
+// interrupt. Past a going-away close, which is not transient, it sends the
+// interrupt to the next address with no re-read. Past T3's refusal, it
+// flattens the refusal with an earlier unreachable address's failure, so the
+// refusal loses its type, reads as transient and is sent again until the
+// retry window ends.
+func TestInterruptTurnStopsAtTheAddressThatTookIt(t *testing.T) {
+	t.Run("closed going away", func(t *testing.T) {
+		// A retry's re-read shows t2, so the interrupt goes out once whether
+		// or not the close is retried.
+		server := newTurnFenceServer(t, turnRunning("t1"), turnRunning("t2"))
+		server.closeCommands(1, websocket.FormatCloseMessage(websocket.CloseGoingAway, "restarting"))
+		p := newTurnFenceTestProvider(t, server)
+		other := newTurnFenceServer(t, turnRunning("t1"))
+		defaultWSURLCandidates = []string{other.wsURL()}
+		_, err := p.InterruptTurn(t.Context(), turnFenceSession, "thread-agent-a/t1")
+		var closed *websocket.CloseError
+		if !errors.As(err, &closed) || closed.Code != websocket.CloseGoingAway || errors.Is(err, runtime.ErrTurnNotCurrent) {
+			t.Fatalf("InterruptTurn = %v, want the going-away close and not ErrTurnNotCurrent", err)
+		}
+		if cmds := other.commandTypes(); len(cmds) != 0 {
+			t.Fatalf("second address commands = %q, want none", cmds)
+		}
+		if cmds := server.commandTypes(); len(cmds) != 1 {
+			t.Fatalf("first address commands = %q, want the one it took before closing", cmds)
+		}
+	})
+	t.Run("rejected behind a dead address", func(t *testing.T) {
+		server := newTurnFenceServer(t, turnRunning("t1"))
+		server.rejectCommand("thread.turn.interrupt", "no active session")
+		p := newTurnFenceTestProvider(t, server)
+		dead := newTurnFenceServer(t)
+		dead.Close()
+		t.Setenv("T3_WS_URL", dead.wsURL())
+		defaultWSURLCandidates = []string{server.wsURL()}
+		_, err := p.InterruptTurn(t.Context(), turnFenceSession, "thread-agent-a/t1")
+		if !isT3Rejection(err) {
+			t.Fatalf("InterruptTurn = %v, want T3's rejection", err)
+		}
+		if payloads := server.commandPayloads("thread.turn.interrupt"); len(payloads) != 1 {
+			t.Fatalf("interrupts = %+v, want the one T3 refused", payloads)
+		}
+	})
+}
+
+// Kills a fix that ends every RPC at the first T3 address that took it: only
+// a call that re-reads before its retries stops there, and a snapshot read
+// whose answer is lost is read from the next address.
+func TestSnapshotReadTriesTheNextAddressAfterALostAnswer(t *testing.T) {
+	server := newTurnFenceServer(t, nil)
+	p := newTurnFenceTestProvider(t, server)
+	t.Setenv("T3_BEARER_TOKEN", "")
+	other := newTurnFenceServer(t, turnRunning("t1"))
+	defaultWSURLCandidates = []string{other.wsURL()}
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	if st, err := p.ObserveTurn(ctx, turnFenceSession); err != nil || st.TurnID != "thread-agent-a/t1" {
+		t.Fatalf("ObserveTurn = %+v, %v; want t1, read from the second address", st, err)
+	}
+}
+
+// Kills a turn read that reports a snapshot failure T3 answered (HTTP 500)
+// as anything but unavailable, and an InterruptTurn that sends after one.
+func TestTurnFenceSnapshotFailureIsUnavailable(t *testing.T) {
+	server := newTurnFenceServer(t, turnRunning("t1"))
+	server.setSnapshotFailure(http.StatusInternalServerError, "boom")
+	p := newTurnFenceTestProvider(t, server)
+	if _, err := p.ObserveTurn(t.Context(), turnFenceSession); !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		t.Fatalf("ObserveTurn = %v, want ErrRuntimeUnavailable", err)
+	}
+	_, err := p.InterruptTurn(t.Context(), turnFenceSession, "thread-agent-a/t1")
+	if !errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.Is(err, runtime.ErrTurnNotCurrent) {
+		t.Fatalf("InterruptTurn = %v, want only ErrRuntimeUnavailable", err)
+	}
+	if cmds := server.commandTypes(); len(cmds) != 0 {
+		t.Fatalf("commands = %q, want none", cmds)
+	}
 }
 
 // Kills a WaitTurnEnded whose bound elapses before its first read and then
