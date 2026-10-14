@@ -5311,7 +5311,9 @@ func TestPruneDeadQueuedNudges_RemovesOldDeadItems(t *testing.T) {
 
 func TestPruneDeadQueuedNudges_PrunesShadowlessItemsPastRetention(t *testing.T) {
 	// A dead letter with no BeadID has no terminal shadow to confirm, so it
-	// ages out on DeadAt alone; a zero DeadAt gives no age and is kept.
+	// ages out on DeadAt alone; a zero DeadAt gives no age and is kept. A
+	// shadow-backed item past retention is still kept when no store is
+	// available to confirm its terminal record.
 	dir := t.TempDir()
 	now := time.Now()
 
@@ -5320,6 +5322,7 @@ func TestPruneDeadQueuedNudges_PrunesShadowlessItemsPastRetention(t *testing.T) 
 			queuedNudge{ID: "n-old", Agent: "worker", Source: "session", Message: "old", DeadAt: now.Add(-3 * time.Hour)},
 			queuedNudge{ID: "n-recent", Agent: "worker", Source: "session", Message: "recent", DeadAt: now.Add(-30 * time.Minute)},
 			queuedNudge{ID: "n-undated", Agent: "worker", Source: "session", Message: "undated"},
+			queuedNudge{ID: "n-shadowed", BeadID: "gc-shadow", Agent: "worker", Source: "session", Message: "shadowed", DeadAt: now.Add(-3 * time.Hour)},
 		)
 		return nil
 	})
@@ -5343,7 +5346,7 @@ func TestPruneDeadQueuedNudges_PrunesShadowlessItemsPastRetention(t *testing.T) 
 		got = append(got, item.ID)
 	}
 	slices.Sort(got)
-	if want := []string{"n-recent", "n-undated"}; !slices.Equal(got, want) {
+	if want := []string{"n-recent", "n-shadowed", "n-undated"}; !slices.Equal(got, want) {
 		t.Fatalf("dead IDs = %v, want %v", got, want)
 	}
 }
