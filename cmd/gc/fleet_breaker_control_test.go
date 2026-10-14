@@ -1,14 +1,13 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -39,62 +38,32 @@ func fleetControlCity(t *testing.T, guard *fleetStartGuard) string {
 // controller socket the way the controller loop does.
 func serveFleetBreakerSocket(t *testing.T, cityDir string) {
 	t.Helper()
-	lis, err := net.Listen("unix", controllerSocketPath(cityDir))
-	if err != nil {
-		t.Fatalf("listen on controller socket: %v", err)
-	}
-	var wg sync.WaitGroup
-	t.Cleanup(func() {
-		lis.Close() //nolint:errcheck
-		wg.Wait()
-	})
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for {
-			conn, err := lis.Accept()
-			if err != nil {
-				return
-			}
-			line, _ := bufio.NewReader(conn).ReadString('\n')
-			line = strings.TrimSpace(line)
-			if strings.HasPrefix(line, fleetBreakerCommandPrefix) {
-				handleFleetBreakerSocketCmd(conn, cityDir, line[len(fleetBreakerCommandPrefix):])
-			}
-			conn.Close() //nolint:errcheck
+	startFakeUnixSocket(t, controllerSocketPath(cityDir), func(line string) string {
+		command, ok := strings.CutPrefix(line, fleetBreakerCommandPrefix)
+		if !ok {
+			return ""
 		}
-	}()
+		server, client := net.Pipe()
+		defer client.Close() //nolint:errcheck
+		go func() {
+			handleFleetBreakerSocketCmd(server, cityDir, command)
+			server.Close() //nolint:errcheck
+		}()
+		reply, _ := io.ReadAll(client)
+		return string(reply)
+	})
 }
 
 // silentController accepts controller connections and never answers, as a
 // wedged controller does.
 func silentController(t *testing.T, cityDir string) {
 	t.Helper()
-	lis, err := net.Listen("unix", controllerSocketPath(cityDir))
-	if err != nil {
-		t.Fatalf("listen on controller socket: %v", err)
-	}
-	var mu sync.Mutex
-	var held []net.Conn
-	go func() {
-		for {
-			conn, err := lis.Accept()
-			if err != nil {
-				return
-			}
-			mu.Lock()
-			held = append(held, conn)
-			mu.Unlock()
-		}
-	}()
-	t.Cleanup(func() {
-		lis.Close() //nolint:errcheck
-		mu.Lock()
-		defer mu.Unlock()
-		for _, c := range held {
-			c.Close() //nolint:errcheck
-		}
+	release := make(chan struct{})
+	startFakeUnixSocket(t, controllerSocketPath(cityDir), func(string) string {
+		<-release
+		return ""
 	})
+	t.Cleanup(func() { close(release) })
 }
 
 // openFleetGuard returns a guard whose breaker is open.
