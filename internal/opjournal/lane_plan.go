@@ -44,8 +44,10 @@ type entry struct {
 	urgent bool
 	// retake is an executing op whose lease expired, taken again.
 	retake bool
-	// maybe is the op's maybe_delivered as its Take will write it.
-	maybe  int
+	// cur is op with the expiry bookkeeping a re-take records (failures+1,
+	// maybe_delivered, last_error lease_expired); op otherwise. Every write
+	// for this entry starts from cur, guarded by op's revision.
+	cur    Op
 	wait   WaitReason
 	blocks bool
 }
@@ -189,7 +191,7 @@ func planRules(snap laneSnapshot, conv ConversationView, now time.Time, by strin
 		}
 		// An expired op that survived the rules above is a re-take
 		// candidate; it still passes the scope and state rules.
-		e := entry{op: op, urgent: isUrgent(op), retake: expired, maybe: cur.MaybeDelivered}
+		e := entry{op: op, urgent: isUrgent(op), retake: expired, cur: cur}
 		scope := scopeCmp(op.Scope, rp.inc)
 		switch {
 		case scope < 0:
@@ -468,8 +470,8 @@ func (tp *takePlan) wait(op Op, r WaitReason, detail string) {
 	tp.waits = append(tp.waits, OpWait{ID: op.ID, Reason: r, Detail: detail})
 }
 
-func (tp *takePlan) close(rp rulesPlan, op Op, o Outcome, now time.Time) {
-	tp.closes = append(tp.closes, ruleClose{cur: op, next: closedAt(op, o, rp.by, now)})
+func (tp *takePlan) close(rp rulesPlan, e entry, o Outcome, now time.Time) {
+	tp.closes = append(tp.closes, ruleClose{cur: e.op, next: closedAt(e.cur, o, rp.by, now)})
 }
 
 // planControl picks the first takeable control op (I10), closing a respond
@@ -492,7 +494,7 @@ func (tp *takePlan) planControl(rp rulesPlan, probe Probe, now time.Time) *entry
 		case !probe.Running:
 			tp.wait(e.op, WaitNotRunning, "")
 		case e.op.Kind == KindRespond && !probe.Caps.Respond:
-			tp.close(rp, e.op, Outcome{Arm: ArmFailed, Reason: ReasonUnsupported}, now)
+			tp.close(rp, e, Outcome{Arm: ArmFailed, Reason: ReasonUnsupported}, now)
 		case picked == nil:
 			picked = &e
 		default:
@@ -575,7 +577,7 @@ func (tp *takePlan) planContent(rp rulesPlan, probe Probe, now time.Time) *conte
 			if boundary == TriYes {
 				it.eligible, it.starter = true, true
 			} else {
-				tp.close(rp, op, Outcome{Arm: ArmSkipped, Reason: ReasonBusy}, now)
+				tp.close(rp, e, Outcome{Arm: ArmSkipped, Reason: ReasonBusy}, now)
 				it.closing = true
 			}
 		case m.When == WhenSteer:
@@ -585,7 +587,7 @@ func (tp *takePlan) planContent(rp rulesPlan, probe Probe, now time.Time) *conte
 			case caps.Steer:
 				it.eligible = true
 			case m.OnUnsupported == FallbackFail:
-				tp.close(rp, op, Outcome{Arm: ArmFailed, Reason: ReasonUnsupported}, now)
+				tp.close(rp, e, Outcome{Arm: ArmFailed, Reason: ReasonUnsupported}, now)
 				it.closing = true
 			default:
 				tp.wait(op, WaitBusy, "")
@@ -627,7 +629,7 @@ func (tp *takePlan) formBatch(items []contentItem, mode LinkMode, ridersFree boo
 		}
 		var picked []int
 		full := false
-		replay := items[head].e.maybe > 0
+		replay := items[head].e.cur.MaybeDelivered > 0
 		if replay {
 			var split bool
 			picked, full, split = pickReplay(items, head, whole)
@@ -683,7 +685,7 @@ func pickReplay(items []contentItem, head int, whole bool) (picked []int, full, 
 		if it.stop && i != head {
 			stopped = true
 		}
-		member := i == head || (key != "" && it.e.op.DeliveryKey == key && it.e.maybe > 0)
+		member := i == head || (key != "" && it.e.op.DeliveryKey == key && it.e.cur.MaybeDelivered > 0)
 		if !member || it.closing {
 			continue
 		}
@@ -714,7 +716,7 @@ func pickFresh(items []contentItem, head int) ([]int, bool) {
 		if !it.eligible {
 			continue
 		}
-		if it.e.maybe > 0 {
+		if it.e.cur.MaybeDelivered > 0 {
 			break
 		}
 		if !lim.admit(it.e.op) {

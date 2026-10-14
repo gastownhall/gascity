@@ -870,3 +870,56 @@ func TestNewLaneRefusals(t *testing.T) {
 		t.Error("NewLane accepted a nil clock")
 	}
 }
+
+// An expired op that planTake closes keeps the expiry bookkeeping every
+// planRules close of an expired op records: maybe_delivered, failures and
+// last_error.
+func TestLanePlanTakeClosesOfExpiredOpsKeepMaybeDelivered(t *testing.T) {
+	ifIdle := laneMsg("p", RolePrompt, "x", withWhen(WhenIfIdle))
+	steerFail := laneMsg("s", RolePrompt, "x", withWhen(WhenSteer), func(r *Request) {
+		r.Policy.Message.OnUnsupported = FallbackFail
+	})
+	respond := Request{
+		Conversation: "gc-1", Kind: KindRespond, Executor: ExecutorLane, ClientKey: "r1",
+		Producer: Producer{Principal: "operator", Actor: ActorOperator}, Payload: "allow",
+		Scope: Scope{Kind: ScopeSession, Generation: 1, Interaction: "perm-1"},
+	}
+	for name, tc := range map[string]struct {
+		req    Request
+		before func(*Probe)
+		after  func(*Probe)
+		want   string
+	}{
+		"if_idle busy":      {req: ifIdle, after: func(p *Probe) { p.Boundary = TriNo }, want: ReasonBusy},
+		"steer unsupported": {req: steerFail, after: func(p *Probe) { p.Boundary, p.Caps.Steer = TriNo, false }, want: ReasonUnsupported},
+		"respond unsupported": {
+			req: respond, before: func(p *Probe) { p.Caps.Respond = true },
+			after: func(p *Probe) { p.Caps.Respond = false }, want: ReasonUnsupported,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newLaneHarness(t)
+			op := h.propose(t, tc.req)
+			exec := newFakeExec(h.clk)
+			if tc.before != nil {
+				tc.before(&exec.probe)
+			}
+			a := h.lane(t, "ctl")
+			a.hooks.at = crashAt(stageAfterEffect)
+			if _, err := a.Pass(context.Background(), view(), exec); !errors.Is(err, errCrash) {
+				t.Fatalf("pass = %v", err)
+			}
+			h.clk.Advance(DefaultLeaseTTL + LeaseSkew + time.Second)
+			tc.after(&exec.probe)
+			mustPass(t, h.lane(t, "cli"), view(), exec)
+			got := h.get(t, op.ID)
+			if got.Status != StatusClosed || got.Outcome.Reason != tc.want {
+				t.Fatalf("op %s %+v", got.Status, got.Outcome)
+			}
+			if got.MaybeDelivered != got.Attempt || got.Failures != 1 || got.LastError != lastErrorLeaseExpired {
+				t.Fatalf("expiry bookkeeping lost: attempt %d maybe %d failures %d last_error %q",
+					got.Attempt, got.MaybeDelivered, got.Failures, got.LastError)
+			}
+		})
+	}
+}

@@ -159,7 +159,7 @@ func TestPlanRulesRows(t *testing.T) {
 						e = x
 					}
 				}
-				if e.retake != tc.retry || (tc.retry && e.maybe != 1) {
+				if e.retake != tc.retry || (tc.retry && e.cur.MaybeDelivered != 1) {
 					t.Fatalf("entry %+v", e)
 				}
 			}

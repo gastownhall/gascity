@@ -83,23 +83,18 @@ func (l *ConversationLane) take(ctx context.Context, snap laneSnapshot, spec *ta
 	ops := make([]Op, len(spec.ops))
 	by := "lane:" + lease.Nonce
 	for i, e := range spec.ops {
-		cur := e.op
-		next := cur
+		// e.cur carries a re-take's expiry bookkeeping; e.op guards.
+		next := e.cur
 		next.Status = StatusExecuting
 		next.Lease = lease
-		next.Attempt = cur.Attempt + 1
+		next.Attempt = e.op.Attempt + 1
 		next.LaneSeq = spec.baseSeq + uint64(i) + 1
 		next.RetryAt = time.Time{}
 		if spec.kind == TakeContent {
 			next.DeliveryKey = spec.key
 		}
-		if e.retake {
-			next.Failures = cur.Failures + 1
-			next.MaybeDelivered = cur.Attempt
-			next.LastError = lastErrorLeaseExpired
-		}
-		next.Transitions = appendTransition(cur.Transitions, Transition{Status: StatusExecuting, At: now, By: by})
-		item, err := opUpdateItem(cur, next)
+		next.Transitions = appendTransition(e.op.Transitions, Transition{Status: StatusExecuting, At: now, By: by})
+		item, err := opUpdateItem(e.op, next)
 		if err != nil {
 			return nil, takeFailed, err
 		}
