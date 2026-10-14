@@ -1533,6 +1533,48 @@ func TestListOpenLegacy(t *testing.T) {
 	}
 }
 
+// limit counts legacy ops returned, not rows read: a head of lane and
+// undecodable rows at least limit long does not starve the sweeper. Rows
+// read stay bounded by legacyScanPages pages of limit.
+func TestListOpenLegacyPagesPastUnsweepableRows(t *testing.T) {
+	h := newHarness(t)
+	for i := range 3 {
+		h.propose(t, legacyReq(ExecutorLane, fmt.Sprint("lane", i)))
+	}
+	if _, err := h.mem.Create(beads.Bead{
+		ID: "gc-op-bogus", Type: BeadType, Labels: []string{LabelOp, ConversationLabel("gc-1")},
+		Metadata: map[string]string{keySchema: "1", keyKind: "message", keyStatus: string(StatusSubmitted)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	a := h.propose(t, legacyReq(ExecutorLegacyAPI, "a"))
+	b := h.propose(t, legacyReq(ExecutorLegacyCLI, "b"))
+	h.propose(t, legacyReq(ExecutorLegacyCLI, "c"))
+	got, undecodable, err := h.store.ListOpenLegacy(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{a.ID, b.ID}; fmt.Sprint(ids(got)) != fmt.Sprint(want) {
+		t.Fatalf("ListOpenLegacy(2) = %v, want %v", ids(got), want)
+	}
+	if fmt.Sprint(undecodable) != "[gc-op-bogus]" {
+		t.Fatalf("undecodable = %v", undecodable)
+	}
+
+	capped := newHarness(t)
+	for i := range 2 * legacyScanPages {
+		capped.propose(t, legacyReq(ExecutorLane, fmt.Sprint("lane", i)))
+	}
+	capped.propose(t, legacyReq(ExecutorLegacyCLI, "late"))
+	capped.rec.Reset()
+	if got, _, err := capped.store.ListOpenLegacy(2); err != nil || len(got) != 0 {
+		t.Fatalf("ListOpenLegacy(2) past the scan cap = %v, %v", ids(got), err)
+	}
+	if n := capped.countOps(beadstest.OpList); n != legacyScanPages {
+		t.Fatalf("read %d pages, want the cap %d", n, legacyScanPages)
+	}
+}
+
 func TestCloseKnown(t *testing.T) {
 	out := Outcome{Arm: ArmSucceeded, Result: Result{Via: "legacy.delivered"}}
 	t.Run("fast path", func(t *testing.T) {

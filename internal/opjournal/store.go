@@ -278,40 +278,57 @@ func (s *Store) ListOpenTolerant(conversation string) ([]Op, []QuarantinedRow, e
 	return out, quarantined, nil
 }
 
+// legacyScanPages bounds ListOpenLegacy's read: at most this many pages of
+// limit rows.
+const legacyScanPages = 8
+
 // ListOpenLegacy returns up to limit open legacy ops (every executor but
-// lane), oldest first, for the sweeper. It issues one keyed read on
-// gc.op.status = submitted, because a legacy op never leaves submitted until
-// it closes; lane ops in that window are dropped after the read. Rows that do
-// not decode are returned by id in undecodable rather than failing the sweep.
-// A limit below 1 reads every match.
+// lane), oldest first, for the sweeper. It reads keyed on gc.op.status =
+// submitted, because a legacy op never leaves submitted until it closes, in
+// pages of limit rows (SeekAfter), dropping lane ops and setting aside rows
+// that do not decode, until it has limit legacy ops, the matches run out or
+// it has read legacyScanPages pages; so a head of unsweepable rows (a lane
+// backlog, a newer build's rows) shorter than that does not starve the
+// sweeper. Undecodable rows are returned by id rather than failing the sweep.
+// A limit below 1 reads every match in one read.
 func (s *Store) ListOpenLegacy(limit int) ([]Op, []string, error) {
 	if limit < 0 {
 		limit = 0
 	}
-	rows, err := s.store.List(beads.ListQuery{
+	q := beads.ListQuery{
 		Label:    LabelOp,
 		Metadata: map[string]string{keyStatus: string(StatusSubmitted)},
 		Sort:     beads.SortCreatedAsc,
 		Limit:    limit,
 		TierMode: beads.TierBoth,
-	})
-	if err != nil {
-		return nil, nil, fmt.Errorf("listing open legacy ops: %w", err)
 	}
 	var out []Op
 	var undecodable []string
-	for _, b := range rows {
-		op, err := DecodeOp(b)
+	for page := 1; ; page++ {
+		rows, err := s.store.List(q)
 		if err != nil {
-			undecodable = append(undecodable, b.ID)
-			continue
+			return nil, nil, fmt.Errorf("listing open legacy ops: %w", err)
 		}
-		if op.Status == StatusClosed || !op.Executor.Legacy() {
-			continue
+		for _, b := range rows {
+			if limit > 0 && len(out) == limit {
+				break
+			}
+			op, err := DecodeOp(b)
+			if err != nil {
+				undecodable = append(undecodable, b.ID)
+				continue
+			}
+			if op.Status == StatusClosed || !op.Executor.Legacy() {
+				continue
+			}
+			out = append(out, op)
 		}
-		out = append(out, op)
+		if limit == 0 || len(out) == limit || len(rows) < limit || page == legacyScanPages {
+			return out, undecodable, nil
+		}
+		last := rows[len(rows)-1]
+		q.SeekAfter = &beads.SeekBoundary{CreatedAt: last.CreatedAt, ID: last.ID}
 	}
-	return out, undecodable, nil
 }
 
 // Adopt hands an open legacy:api op to a new execution attempt: one revision

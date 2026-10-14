@@ -28,8 +28,8 @@ type SweepStats struct {
 }
 
 // Sweep closes open legacy ops whose finish_by has passed as
-// failed{deadline_in_flight}, by by, reading at most limit of them (oldest
-// first). It never touches a lane op nor an op before its finish_by: each
+// failed{deadline_in_flight}, by by, taking at most limit of them (oldest
+// first; Store.ListOpenLegacy pages past lane and undecodable rows). It never touches a lane op nor an op before its finish_by: each
 // close re-decides on the row it writes (Store.CloseExpired), so an op an
 // adopter moved after the read counts Pending and one a late executor closed
 // first counts Raced. A second pass over the same state closes nothing. The
