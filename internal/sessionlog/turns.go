@@ -174,6 +174,9 @@ const (
 	// turnScanBudget bounds how far back from the end ScanTurns reads: the
 	// Codex activity scan's budget.
 	turnScanBudget = codexLifecycleScanBudget
+	// turnRacyModWindow covers the coarsest modification-time granularity
+	// of the filesystems a transcript lives on.
+	turnRacyModWindow = 2 * time.Second
 )
 
 var (
@@ -400,6 +403,8 @@ type TurnFollower struct {
 	// invalidTail is set while the newest record folded is not valid JSON:
 	// a rescan reports that as a torn record, so the follower does too.
 	invalidTail bool
+	// readAt is when the last rescan began.
+	readAt time.Time
 }
 
 // NewTurnFollower returns a follower of provider's transcript at path. Its
@@ -444,19 +449,23 @@ func (f *TurnFollower) canFollow(info os.FileInfo) bool {
 
 // unchanged reports whether info's file is a whole-document transcript
 // already folded, with the same size and modification time. Such a file is
-// rewritten rather than appended to, so only a rewrite changes it.
+// rewritten rather than appended to, so only a rewrite changes it. A file
+// modified within turnRacyModWindow of the last read is never taken as
+// unchanged: a rewrite in the same clock tick keeps its modification time.
 func (f *TurnFollower) unchanged(info os.FileInfo) bool {
 	return f.fold != nil && !f.fold.appendable() && os.SameFile(f.info, info) &&
-		info.Size() == f.offset && info.ModTime().Equal(f.info.ModTime())
+		info.Size() == f.offset && info.ModTime().Equal(f.info.ModTime()) &&
+		info.ModTime().Before(f.readAt.Add(-turnRacyModWindow))
 }
 
 func (f *TurnFollower) rescan() (TurnScan, error) {
+	readAt := time.Now()
 	fold, info, size, err := scanTurnFile(f.format, f.path, f.budget)
 	if err != nil {
 		f.reset()
 		return TurnScan{}, err
 	}
-	f.fold, f.info, f.offset, f.invalidTail = fold, info, size, false
+	f.fold, f.info, f.offset, f.invalidTail, f.readAt = fold, info, size, false, readAt
 	return fold.scan(), nil
 }
 

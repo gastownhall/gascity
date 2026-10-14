@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 const (
@@ -79,45 +80,57 @@ func TestScanTurnsGeminiJSONBeyondBudgetIsAnError(t *testing.T) {
 }
 
 // TestTurnFollowerKeepsUnchangedGeminiJSON: a whole-document file whose
-// identity, size and modification time are unchanged is not read again.
+// identity, size and modification time are unchanged is not read again,
+// unless it was modified so close to the last read that a rewrite in the
+// same clock tick would leave its modification time unchanged.
 func TestTurnFollowerKeepsUnchangedGeminiJSON(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "session.json")
-	doc := func(id string) []byte {
-		return []byte(`{"messages":[{"id":"` + id + `","timestamp":"2026-06-21T17:08:00.694Z","type":"user","content":"prompt"}]}`)
-	}
-	if err := os.WriteFile(path, doc("ua"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	f, err := NewTurnFollower("gemini", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.Read(); err != nil {
-		t.Fatal(err)
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Rewrite in place, same size, and restore the modification time.
-	file, err := os.OpenFile(path, os.O_WRONLY, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := file.WriteAt(doc("ub"), 0); err != nil {
-		t.Fatal(err)
-	}
-	if err := file.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chtimes(path, info.ModTime(), info.ModTime()); err != nil {
-		t.Fatal(err)
-	}
-	got, err := f.Read()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !got.Open || got.Current.ID != "ua" {
-		t.Fatalf("follower = %+v, want the unchanged read of ua", got)
+	for _, tc := range []struct {
+		name    string
+		modTime time.Time
+		want    string
+	}{
+		{"modified long before the read", time.Now().Add(-time.Hour), "ua"},
+		{"modified just before the read", time.Now(), "ub"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "session.json")
+			doc := func(id string) []byte {
+				return []byte(`{"messages":[{"id":"` + id + `","timestamp":"2026-06-21T17:08:00.694Z","type":"user","content":"prompt"}]}`)
+			}
+			if err := os.WriteFile(path, doc("ua"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chtimes(path, tc.modTime, tc.modTime); err != nil {
+				t.Fatal(err)
+			}
+			f, err := NewTurnFollower("gemini", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.Read(); err != nil {
+				t.Fatal(err)
+			}
+			// Rewrite in place, same size, and restore the modification time.
+			file, err := os.OpenFile(path, os.O_WRONLY, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := file.WriteAt(doc("ub"), 0); err != nil {
+				t.Fatal(err)
+			}
+			if err := file.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chtimes(path, tc.modTime, tc.modTime); err != nil {
+				t.Fatal(err)
+			}
+			got, err := f.Read()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !got.Open || got.Current.ID != tc.want {
+				t.Fatalf("follower = %+v, want %s open", got, tc.want)
+			}
+		})
 	}
 }
