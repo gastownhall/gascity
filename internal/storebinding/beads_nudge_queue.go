@@ -765,7 +765,9 @@ func (q *beadsNudgeQueue) sweepTerminalRecords(ctx context.Context, now time.Tim
 // or a cache that served such a row, hands over no usable token, so a refused
 // delete is presented again at the revision of a fresh read — but only while
 // that read still shows a closed, terminal record last written before cutoff.
-// A record another writer moved is left for a later pass.
+// A record another writer moved is left for a later pass. Refusals that
+// outlast nudgeQueueCASAttempts while the record still qualifies are a fault
+// and are returned as an error.
 func (q *beadsNudgeQueue) deleteRetired(record beads.Bead, cutoff time.Time) error {
 	revision := record.Revision
 	for attempt := 0; attempt < nudgeQueueCASAttempts; attempt++ {
@@ -791,7 +793,7 @@ func (q *beadsNudgeQueue) deleteRetired(record beads.Bead, cutoff time.Time) err
 			return fmt.Errorf("deleting retired nudge record %q: %w", record.ID, err)
 		}
 	}
-	return nil
+	return fmt.Errorf("deleting retired nudge record %q: %d revision conflicts", record.ID, nudgeQueueCASAttempts)
 }
 
 // revokeLease clears a lease that has run out. ReleaseIfCurrent is the precise

@@ -767,3 +767,57 @@ func assertReleasedUntil(t *testing.T, store beads.Store, id string, notBefore t
 			id, record.Status, record.Assignee, record.Metadata[nudgeMetaDeliverAfter], formatNudgeTime(notBefore))
 	}
 }
+
+// refusingGuardedWriteStore refuses every revision-fenced write while leaving
+// the record itself unchanged, as a store whose revision token never matches
+// what its reads hand out would. Every retry sees the decided fields intact,
+// so only the attempt bound ends the loop.
+type refusingGuardedWriteStore struct {
+	*beads.SQLiteStore
+	refuseUpdates bool
+	refuseDeletes bool
+	refused       int
+}
+
+func (s *refusingGuardedWriteStore) UpdateIfMatch(id string, revision int64, opts beads.UpdateOpts) error {
+	if !s.refuseUpdates {
+		return s.SQLiteStore.UpdateIfMatch(id, revision, opts)
+	}
+	s.refused++
+	return &beads.PreconditionFailedError{ID: id, Expected: revision, Current: revision + 1}
+}
+
+func (s *refusingGuardedWriteStore) DeleteIfMatch(id string, revision int64) error {
+	if !s.refuseDeletes {
+		return s.SQLiteStore.DeleteIfMatch(id, revision)
+	}
+	s.refused++
+	return &beads.PreconditionFailedError{ID: id, Expected: revision, Current: revision + 1}
+}
+
+// A batch claim whose guarded write is refused on every attempt, while the
+// record never changes, is a fault: reporting it as an idle claim would leave
+// the dispatcher looking idle while the work sits stuck.
+func TestBeadsNudgeQueueClaimBatchReportsExhaustedRetries(t *testing.T) {
+	backing := &refusingGuardedWriteStore{SQLiteStore: openSQLiteNudgeQueueStore(t)}
+	queue := newNudgeQueue(t, backing)
+	now := time.Now().UTC()
+	if err := queue.Enqueue(testNudgeItem("n-a", "", now)); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	backing.refuseUpdates = true
+	claimed, err := queue.ClaimBatch(ClaimTarget{QueueKeys: []string{testNudgeAgent}}, now)
+	if err == nil {
+		t.Fatalf("ClaimBatch = %v, nil after %d refused guarded writes; want the exhausted retries reported", nudgeItemIDs(claimed), backing.refused)
+	}
+	if !strings.Contains(err.Error(), "revision conflicts") {
+		t.Fatalf("ClaimBatch error = %v, want it to name the revision conflicts", err)
+	}
+	if len(claimed) != 0 {
+		t.Fatalf("ClaimBatch claimed %v with every write refused", nudgeItemIDs(claimed))
+	}
+	if backing.refused != nudgeQueueCASAttempts {
+		t.Fatalf("ClaimBatch made %d guarded writes, want %d", backing.refused, nudgeQueueCASAttempts)
+	}
+}

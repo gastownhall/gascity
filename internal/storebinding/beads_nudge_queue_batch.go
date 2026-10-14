@@ -189,7 +189,9 @@ func (q *beadsNudgeQueue) claimNewBatch(candidates []nudgeQueueEntry, now time.T
 // the row's current one, while the fields the decision rested on are
 // unchanged, is presented again at the current revision: a store whose List
 // leaves revisions unstamped, or a cache that served such a row to the
-// re-read, hands over no usable token on the first attempt.
+// re-read, hands over no usable token on the first attempt. Refusals that
+// outlast nudgeQueueCASAttempts with the decided fields still unchanged are a
+// fault, not a lost race, and are returned as an error.
 func (q *beadsNudgeQueue) claimAndPin(entry nudgeQueueEntry, lease nudgeLease, key string) (bool, error) {
 	revision := entry.bead.Revision
 	for attempt := 0; attempt < nudgeQueueCASAttempts; attempt++ {
@@ -217,7 +219,7 @@ func (q *beadsNudgeQueue) claimAndPin(entry nudgeQueueEntry, lease nudgeLease, k
 			return false, fmt.Errorf("claiming nudge %q into batch %q: %w", entry.item.ID, key, err)
 		}
 	}
-	return false, nil
+	return false, fmt.Errorf("claiming nudge %q into batch %q: %d revision conflicts", entry.item.ID, key, nudgeQueueCASAttempts)
 }
 
 // decidedRecord reads entry's record again and reports its revision and
