@@ -135,7 +135,7 @@ func (c *ownerlessCase) owners() ownerLookup {
 // tick runs the closed-bead reap with the ownerless memory at now, a
 // minute's age grace.
 func (c *ownerlessCase) tick(now time.Time) int {
-	o := &ownerlessReap{sightings: c.sightings, owners: c.owners(), rec: c.rec, gap: c.gap, grace: time.Minute, now: now}
+	o := &ownerlessReap{sightings: c.sightings, owners: c.owners(), rec: c.rec, gap: c.gap, grace: time.Minute, now: now, clock: func() time.Time { return now }}
 	return reapRuntimesBoundToClosedBeadsWith(c.store, c.snapshot, nil, c.sp, nil, c.city, o, &c.stderr)
 }
 
@@ -522,5 +522,63 @@ func TestOwnerlessLookupPlannedOnDemand(t *testing.T) {
 	tick(ownerlessT0.Add(2 * ownerlessReapConfirmAfter))
 	if plans != 2 {
 		t.Fatalf("%d plans after a pass with no ownerless runtime, want none added", plans)
+	}
+}
+
+// ownerlessRigCity is a city with one rig, "r", its patrol and startup
+// timeout set, whose rig store holds session row gc-rig.
+func ownerlessRigCity(t *testing.T) (city string, cfg *config.City, sessions beads.Store, rigs map[string]beads.Store) {
+	t.Helper()
+	city = t.TempDir()
+	cfg = &config.City{Workspace: config.Workspace{Name: "c"}, Rigs: []config.Rig{{Name: "r", Path: t.TempDir()}}}
+	cfg.Daemon.PatrolInterval = "2m"
+	cfg.Session.StartupTimeout = "3m"
+	sessions = beads.NewMemStore()
+	rigs = map[string]beads.Store{"r": beads.NewMemStoreFrom(1, []beads.Bead{{ID: "gc-rig", Status: "open", Type: "session", Labels: []string{"gc:session"}}}, nil)}
+	return city, cfg, sessions, rigs
+}
+
+// TestNewOwnerlessReapIsTheTicks (the #7811 review r2): the tick's reap
+// looks the owner up in the rig stores too (a row in a rig is never
+// missing), waits a patrol between sightings, keeps the city's
+// startup_timeout as the age grace, and records its reaps.
+func TestNewOwnerlessReapIsTheTicks(t *testing.T) {
+	city, cfg, sessions, rigs := ownerlessRigCity(t)
+	rec := events.NewFake()
+	o := newOwnerlessReap(city, cfg, sessions, func() map[string]beads.Store { return rigs }, &ownerlessSightings{}, rec, ownerlessT0)
+	if o.gap != 2*time.Minute || o.grace != 3*time.Minute || o.rec != events.Recorder(rec) || o.clock == nil {
+		t.Fatalf("reap gap %v grace %v rec %v clock set %t; want the patrol, the startup timeout, the recorder and a clock", o.gap, o.grace, o.rec, o.clock != nil)
+	}
+	owners := o.lookup()
+	if owners.err != nil || owners.notFound("gc-rig") || !owners.notFound("gc-nowhere") {
+		t.Fatalf("lookup %+v: gc-rig missing %t, gc-nowhere missing %t; want the rig's row found and an absent one missing", owners, owners.notFound("gc-rig"), owners.notFound("gc-nowhere"))
+	}
+}
+
+// TestOwnerlessLookupNeedsEveryRigStore (the #7811 review r2): a configured
+// rig whose store is not open fails the lookup, so no owner is proven
+// missing without it.
+func TestOwnerlessLookupNeedsEveryRigStore(t *testing.T) {
+	city, cfg, sessions, _ := ownerlessRigCity(t)
+	owners := sessionOwnerLookup(city, cfg, sessions, map[string]beads.Store{})
+	if owners.err == nil || owners.notFound("gc-nowhere") {
+		t.Fatalf("lookup %+v, want it failed and proving nothing", owners)
+	}
+}
+
+// TestOwnerlessFinalCheckReadsNow (the #7811 review r2): the check under
+// the lease reads as of its own time, not the tick's: a runtime the tick
+// saw past the age grace that the check's clock reads young is left.
+func TestOwnerlessFinalCheckReadsNow(t *testing.T) {
+	c := newOwnerlessCase(t)
+	c.sp.created["named-1"] = ownerlessT0.Add(-2 * time.Minute)
+	c.tick(ownerlessT0)
+	at := ownerlessT0.Add(ownerlessReapConfirmAfter)
+	o := &ownerlessReap{
+		sightings: c.sightings, owners: c.owners(), rec: c.rec, gap: c.gap, grace: 2 * time.Minute, now: at,
+		clock: func() time.Time { return ownerlessT0.Add(-time.Minute) },
+	} // the check's clock reads the runtime a minute old
+	if n := reapRuntimesBoundToClosedBeadsWith(c.store, c.snapshot, nil, c.sp, nil, c.city, o, &c.stderr); n != 0 {
+		t.Fatalf("reaped %d, want the final check's own clock to hold it", n)
 	}
 }

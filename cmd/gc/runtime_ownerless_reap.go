@@ -51,6 +51,34 @@ func ownerlessAgeGrace(cfg *config.City) time.Duration {
 	return 60 * time.Second
 }
 
+// checkNow is the time of the final check under the lease.
+func (o *ownerlessReap) checkNow() time.Time {
+	if o.clock != nil {
+		return o.clock()
+	}
+	return time.Now()
+}
+
+// newOwnerlessReap is the tick's reap of runtimes whose owner row is
+// missing, for cityPath at now: the sessions store leads the owner lookup,
+// which rigs supplies on demand; the sightings are a patrol apart (at least
+// ownerlessReapConfirmAfter); the age grace is ownerlessAgeGrace.
+func newOwnerlessReap(cityPath string, cfg *config.City, sessions beads.Store, rigs func() map[string]beads.Store, sightings *ownerlessSightings, rec events.Recorder, now time.Time) *ownerlessReap {
+	var patrol time.Duration
+	if cfg != nil {
+		patrol = cfg.Daemon.PatrolIntervalDuration()
+	}
+	return &ownerlessReap{
+		sightings: sightings,
+		lookup:    func() ownerLookup { return sessionOwnerLookup(cityPath, cfg, sessions, rigs()) },
+		rec:       rec,
+		gap:       max(ownerlessReapConfirmAfter, patrol),
+		grace:     ownerlessAgeGrace(cfg),
+		now:       now,
+		clock:     time.Now,
+	}
+}
+
 // ownerlessReap is what the closed-bead reap needs to reap a runtime whose
 // owner row is missing (CONTRACT v5.10j): the controller's sightings, every
 // store a session row can live in, the event recorder, the least gap
@@ -59,6 +87,9 @@ func ownerlessAgeGrace(cfg *config.City) time.Duration {
 // runtime that young may be a start whose row is not readable yet), and
 // the tick's time.
 type ownerlessReap struct {
+	// clock is the time of the final check under the lease (time.Now; a
+	// test's own), so its fresh read is as of the check, not the tick.
+	clock     func() time.Time
 	sightings *ownerlessSightings
 	owners    ownerLookup
 	// lookup, when set, plans owners on the first ownerless runtime a pass
@@ -252,8 +283,17 @@ func (l ownerLookup) notFound(ownerID string) bool {
 
 // sessionOwnerLookup is the lookup over cityPath's session plan: sessions
 // leads, then the work store and every rig store (suspended ones too: a row
-// in a suspended rig still owns its runtime).
+// in a suspended rig still owns its runtime). A configured rig whose store
+// is not open fails the lookup, which then proves no owner missing.
 func sessionOwnerLookup(cityPath string, cfg *config.City, sessions beads.Store, rigs map[string]beads.Store) ownerLookup {
+	if cfg != nil {
+		for _, rig := range cfg.Rigs {
+			if strings.TrimSpace(rig.Path) != "" && rigs[rig.Name] == nil {
+				// A row in that rig cannot be ruled out: no owner is provable.
+				return ownerLookup{err: fmt.Errorf("rig %s's store is not open", rig.Name)}
+			}
+		}
+	}
 	legs, err := sessionCensusStoreCandidates(cityPath, cfg, sessions, rigs, nil)
 	if err != nil {
 		return ownerLookup{err: err}
@@ -311,7 +351,7 @@ func reapOwnerlessRuntime(store beads.Store, cityPath, name, ownerID, nameOwnerI
 	if again, err := sp.GetMeta(name, "GC_SESSION_ID"); err != nil || strings.TrimSpace(again) != ownerID {
 		return false
 	}
-	if !o.owners.notFound(ownerID) || classifyOwnerlessRuntime(sp, cityPath, name, ownerID, now, o.grace).reason != "" {
+	if !o.owners.notFound(ownerID) || classifyOwnerlessRuntime(sp, cityPath, name, ownerID, o.checkNow(), o.grace).reason != "" { // read as of now, under the lease
 		return false
 	}
 	if err := sp.Stop(name); err != nil {

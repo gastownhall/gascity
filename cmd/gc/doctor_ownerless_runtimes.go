@@ -55,7 +55,7 @@ func (c *ownerlessRuntimesCheck) ownerLookup(city beads.Store) ownerLookup {
 			rigs[rig.Name] = store
 		}
 	}
-	return sessionOwnerLookup(c.cityPath, c.cfg, cliSessionStore(city, c.cfg, c.cityPath), rigs)
+	return sessionOwnerLookup(c.cityPath, c.cfg, city, rigs)
 }
 
 func (c *ownerlessRuntimesCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
