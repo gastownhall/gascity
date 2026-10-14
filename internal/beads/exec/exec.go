@@ -211,7 +211,17 @@ func (w *beadWire) toBead() beads.Bead {
 		Ephemeral:   w.Ephemeral,
 		NoHistory:   w.NoHistory,
 		DeferUntil:  cloneTimePtr(w.DeferUntil),
+		CloseReason: closeReasonFor(status, w.CloseReason),
 	}
+}
+
+// closeReasonFor keeps a script's close_reason only on a closed bead: a bead
+// that is not closed has no close reason.
+func closeReasonFor(status, reason string) string {
+	if status != "closed" {
+		return ""
+	}
+	return reason
 }
 
 func cloneTimePtr(v *time.Time) *time.Time {
@@ -317,6 +327,13 @@ func (s *Store) Close(id string) error {
 
 // Reopen sets a bead's status to "open": script reopen <id>
 func (s *Store) Reopen(id string) error {
+	// metadata.close_reason is a closer's input; a reopened bead must not hand
+	// it to its next close, so it is cleared before the reopen, as BdStore does.
+	if b, err := s.Get(id); err == nil && b.Status != "open" && strings.TrimSpace(b.Metadata["close_reason"]) != "" {
+		if err := s.SetMetadata(id, "close_reason", ""); err != nil {
+			return fmt.Errorf("reopening bead %q: clearing close_reason: %w", id, err)
+		}
+	}
 	_, err := s.run(nil, "reopen", id)
 	if err != nil {
 		if isNotFoundError(err) {

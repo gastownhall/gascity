@@ -9,11 +9,11 @@ import (
 	"strings"
 )
 
-// snapshotProcesses walks /proc for a host-wide pid/ppid/comm table, plus
-// each process's GC_SESSION_ID (from /proc/<pid>/environ) captured in the
-// same walk — no liveScanGuard (that guard protects the orphan sweep in
-// ScanBySessionID, not this read-only liveness snapshot) and no root
-// filtering: every process gets its raw SessionID, if any.
+// snapshotProcesses walks /proc once for a host-wide process snapshot. PPID,
+// PGID, and start time come from the same /proc/<pid>/stat read, so teardown
+// selection never has to stitch identity together with per-node live probes.
+// There is no liveScanGuard (that guard protects the orphan sweep in
+// ScanBySessionID, not this read-only snapshot) and no root filtering.
 func snapshotProcesses() ([]ProcessRecord, error) {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
@@ -25,7 +25,7 @@ func snapshotProcesses() ([]ProcessRecord, error) {
 		if err != nil {
 			continue
 		}
-		ppid, ok, err := readParentPID(filepath.Join("/proc", e.Name(), "stat"))
+		ppid, pgid, startTime, ok, err := readProcStatIdentity(filepath.Join("/proc", e.Name(), "stat"))
 		if err != nil || !ok {
 			continue
 		}
@@ -33,7 +33,13 @@ func snapshotProcesses() ([]ProcessRecord, error) {
 		if err != nil {
 			continue
 		}
-		rec := ProcessRecord{PID: pid, PPID: ppid, Name: strings.TrimSpace(string(comm))}
+		rec := ProcessRecord{
+			PID:       pid,
+			PPID:      ppid,
+			PGID:      pgid,
+			StartTime: startTime,
+			Name:      strings.TrimSpace(string(comm)),
+		}
 		if env, err := parseEnvironFile(filepath.Join("/proc", e.Name(), "environ")); err == nil {
 			rec.SessionID = env["GC_SESSION_ID"]
 		}

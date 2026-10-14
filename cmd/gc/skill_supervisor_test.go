@@ -237,6 +237,57 @@ func TestRunStage1MixedProvidersCreateSiblingSinks(t *testing.T) {
 	}
 }
 
+// TestRunStage1PiMaterializesIntoAgentsSkills verifies that a pi agent
+// gets a real on-disk sink, not just a lookup-table entry: pi shares
+// codex's .agents/skills location, so a city-scoped pi agent must end up
+// with a symlink there resolving back to the shared catalog source.
+func TestRunStage1PiMaterializesIntoAgentsSkills(t *testing.T) {
+	clearGCEnv(t)
+	cityPath := t.TempDir()
+	t.Setenv("GC_HOME", t.TempDir())
+	source := filepath.Join(cityPath, "skills", "plan")
+	writeSkillSource(t, source)
+
+	cfg := &config.City{
+		PackSkillsDir: filepath.Join(cityPath, "skills"),
+		Session:       config.SessionConfig{Provider: "tmux"},
+		Agents: []config.Agent{
+			{Name: "mayor", Scope: "city", Provider: "pi"},
+		},
+	}
+
+	var stderr bytes.Buffer
+	if err := runStage1SkillMaterialization(cityPath, cfg, &stderr); err != nil {
+		t.Fatal(err)
+	}
+
+	sink := filepath.Join(cityPath, ".agents", "skills", "plan")
+	info, err := os.Lstat(sink)
+	if err != nil {
+		t.Fatalf(".agents/skills sink missing for pi agent: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf(".agents/skills sink is not a symlink")
+	}
+	got, err := filepath.EvalSymlinks(sink)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%s): %v", sink, err)
+	}
+	want, err := filepath.EvalSymlinks(source)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%s): %v", source, err)
+	}
+	if got != want {
+		t.Fatalf("pi sink resolves to %s, want %s", got, want)
+	}
+
+	// pi must not get its own .pi/skills sink — that would make pi scan
+	// the same skill twice and hit its name-collision path.
+	if _, err := os.Lstat(filepath.Join(cityPath, ".pi", "skills")); !os.IsNotExist(err) {
+		t.Fatalf(".pi/skills should not be created, Lstat err = %v", err)
+	}
+}
+
 func TestRunStage1UsesCachedCatalogAfterSharedCatalogFailureAcrossRepeatedFailures(t *testing.T) {
 	clearGCEnv(t)
 	resetSkillCatalogCache()

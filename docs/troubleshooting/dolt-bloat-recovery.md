@@ -96,10 +96,63 @@ gc dolt compact --gc-only --only-db <database> --dry-run
 
 `--gc-only` refuses any database under an integrity-quarantine marker; resolve
 the underlying reason (see **Compact Quarantine Reasons** below) before
-reclaiming. Unlike the full `dolt gc --archive-level=1` procedure above,
+reclaiming. Unlike the offline `dolt gc --archive-level=1` procedure above,
 `--gc-only` runs against the live managed server and does not require stopping
 the city — though quiescing writers still makes the GC faster and more
 thorough.
+
+### A full GC canceled at the read timeout
+
+Running against the live managed server has one ceiling of its own. The
+listener's `read_timeout_millis` bounds any statement that produces no rows for
+that long, and `CALL DOLT_GC('--full')` produces none until it finishes, so a
+reclaim that outruns the ceiling is killed by the server and reported as:
+
+```
+compact: db=<database> ... DOLT_GC failed rc=1 duration=21s
+compact: db=<database> error on line 1 for query CALL DOLT_GC('--full'): Error 1105 (HY000): Error in SaveHashes call: SaveHashes, error calling getManyCompressed: context canceled
+compact: db=<database> the managed sql-server ended DOLT_GC after 15s at its listener.read_timeout_millis=15000 ceiling in <runtime>/packs/dolt/dolt-config.yaml — ...
+```
+
+The same kill can also read `connection was closed` or `row read wait bigger
+than connection timeout`. Nothing is wrong with the store. The compactor blames
+the ceiling only when the GC itself ran that long. A GC canceled sooner gets a
+line saying the timeout did not end it; look in the server log for a stop or
+restart instead. Without a readable server config the compactor cannot compare
+the two, so it names the ceiling as the most likely cause. Only the full GC gets
+this line; a failed bare `CALL DOLT_GC()` prints the server error without it.
+
+A failed post-flatten GC leaves a pending-GC marker that retries
+`DOLT_GC('--full')` on every later run. When the compactor blamed the ceiling,
+every retry hits the same ceiling until the ceiling moves; when it said the
+timeout did not end the GC, the marker still retries, but moving
+`read_timeout_millis` is not the remedy. `--gc-only` writes no marker, so rerun
+it after raising the ceiling. Raise the value in `city.toml` past the longest GC
+you have seen; the GC's run time in the compactor's line is the floor. Releases
+through v1.4.2 ship `15000`, the value in the example above; v1.5.0 and later
+default to `120000`, so `120000` is the right first value for a city still on
+`15000`. A city already at `120000` needs a larger number.
+
+```toml
+[dolt]
+read_timeout_millis = 120000
+```
+
+then `gc dolt restart` and retry. Every connection shares this ceiling, and it
+is also the server's only idle-connection reaper, so keep it under half of
+`write_timeout_millis` (default `300000`). To go past `150000`, raise
+`write_timeout_millis` with it, or raise it only for the reclaim and put it
+back afterward. The compactor also caps each call at
+`GC_DOLT_COMPACT_CALL_TIMEOUT_SECS` (default `1800`); a GC that outruns that
+fails with `rc=124` and no server error. A reclaim that needs longer than the
+live server can give it belongs offline: follow the **Recovery Procedure** above
+with `dolt gc --full --archive-level=1` as step 3, which no listener timeout
+bounds and which also rewrites `oldgen`.
+
+The tell that you are looking at this and not a real disconnect is the server
+log: the `client connection went away` line that precedes the failure carries
+`i/o timeout`, not `EOF`, and lands exactly `read_timeout_millis` after the
+connection opened.
 
 ## Compacting a city whose Dolt remote is uncredentialed
 
@@ -156,6 +209,121 @@ Choose `.no-sync` over `--skip-fetch` when a database must never reach a
 remote. `--skip-fetch` defers the push and waits for the remote to become
 usable later; `.no-sync` states that it never will.
 
+## History protection
+
+`gc dolt compact` only squashes history that this city grew. Two rules
+enforce this.
+
+### Databases with remotes
+
+A database with **any** configured Dolt remote is never flattened by the
+scheduled compactor. The remote can be a team remote you cloned from, bd's
+`refs/dolt/data` sync remote, a federated city, or a DoltHub mirror.
+Flattening rewrites history, so the result would have to be force-pushed over
+every other clone. Instead, compact logs:
+
+```
+compact: db=<database> remote=<remote> remotes=<n> — history may be shared with other clones; skipping flatten and remote push ...
+```
+
+It then runs a bare `CALL DOLT_GC()`, which reclaims journal and working-set
+garbage without touching history. `.no-sync`, `--skip-fetch`, and `--dry-run`
+do not bypass this guard.
+
+Markers left by runs from before this guard existed:
+
+- **`compact-pending-gc/<database>`**: the local full GC still runs. Before
+  it runs, the log records the marker's `compacted_from_head`, which is the
+  HEAD from before the flatten. The deferred push is dropped, and the log
+  warns that the remote still holds the full history. `gc dolt sync` then
+  reports the database as diverged until you reconcile it. Either re-clone
+  from the remote, or push the flattened history during an announced window
+  (see below).
+- **`compact-pending-push/<database>`**: the marker is held untouched, and
+  nothing is force-pushed. Compact reports it on stderr, emits a
+  `dolt.compact.quarantine` event of type `compact-pending-push-held`, and
+  mails the compactor alert recipient (`GC_DOLT_COMPACT_ALERT_TO`, default
+  `mayor`). Reminders follow the same cadence as quarantine alerts. Reconcile
+  it the same way as a pending-GC marker.
+
+> **Warning:** re-cloning from the remote discards every commit made to the
+> local database since the flatten. Those writes exist only locally. Before
+> you re-clone, take a copy of `.dolt`. Then export the local changes with
+> `dolt diff <flatten-commit> HEAD`, where `<flatten-commit>` is the latest
+> `compaction: flatten history` commit, and re-apply them after the re-clone.
+> The `compacted_from_head` commit itself is gone after the full GC.
+
+To flatten a database that has a remote, first announce a compaction window to
+every clone of that history. Then run:
+
+```bash
+GC_DOLT_COMPACT_ALLOW_FEDERATED=1 gc dolt compact --only-db <database>
+```
+
+With this opt-in, compact flattens the database and **force-pushes** the
+rewritten branch, plus any `file://` backup remotes. Every other clone must
+then re-clone or hard-reset to the remote. Do not set the opt-in on the
+scheduled `mol-dog-compactor` order.
+
+### The `gc-compact-base` watermark
+
+The first time compact sees a database, it creates the Dolt tag
+`gc-compact-base` in it. The tag lives inside the database, so it survives
+runtime-state wipes and travels with `dolt backup`. Branch pushes do not carry
+it. Where the tag goes:
+
+- **Root commit**: when the commit after root is a
+  `compaction: flatten history` commit, meaning compact already manages the
+  database. Flattening continues to squash all history, as before.
+- **Root commit**: when the operator created
+  `<cityPath>/.beads/dolt/<database>/.compact-full-history` before compact
+  first saw the database.
+- **HEAD**: in every other case, such as `gc rig add --adopt` of an existing
+  `.beads/`, a `bd bootstrap` or `dolt clone`, or a database that was never
+  compacted before the upgrade. Everything up to that point is kept as it is.
+  HEAD also wins over both root cases above when more than one parentless
+  commit is reachable from HEAD (unrelated histories merged), because no
+  single root can then be trusted.
+
+A flatten soft-resets to the tag, not to root, so it squashes only the
+commits after the tag. The threshold counts only those commits too; the log
+shows them as `commits_since_base=`. An adopted database with 4,000 commits
+therefore keeps all 4,000 and gains one flatten commit each time it grows past
+the threshold.
+
+Inspect the tag with:
+
+```bash
+gc dolt sql -q "USE <database>; SELECT * FROM dolt_tags"
+```
+
+If the history is rolled back or restored to a point before the tag, the tag
+is no longer an ancestor of HEAD. Compact then refuses to flatten that
+database and fails the run until you act:
+
+```
+compact: db=<database> REFUSING flatten: gc-compact-base=<hash> is not an ancestor of HEAD=<hash> ...
+```
+
+- Delete the tag. The next run sets it again by the first-sight rule: at HEAD
+  (keeping the current history as it is), or at root if the commit after root
+  is a flatten commit or `.compact-full-history` exists:
+
+  ```bash
+  gc dolt sql -q "USE <database>; CALL DOLT_TAG('-d', 'gc-compact-base')"
+  ```
+
+- If the whole history was grown by this city and should be fully compactable,
+  run `touch <cityPath>/.beads/dolt/<database>/.compact-full-history` before
+  deleting the tag. The next run then sets the tag at root.
+
+A database adopted from **another** Gas City city whose compactor already
+flattened it has a flatten commit right after root. Compact treats that
+history as its own and squashes it on the next flatten. That history is
+limited to what the source city's compactor would have squashed anyway. To
+keep it, create the tag at HEAD before the first compact run:
+`CALL DOLT_TAG('gc-compact-base', 'HEAD')`.
+
 ## Expected Outcome
 
 DoltHub's archive format typically delivers ~30% compression on top of
@@ -174,14 +342,17 @@ If GC finishes but the size barely moves, the chunks are nearly all live
   managed-Dolt floor; newer releases ship improved auto-GC heuristics and
   default archive compression.
 - **Let the dolt pack's `mol-dog-compactor` order run continuously.**
-  It ships embedded in the dolt pack and runs `gc dolt compact` once a
-  managed database crosses the commit threshold. Compaction fetches the
-  configured remote, flattens live history, runs `CALL DOLT_GC('--full')`,
-  and pushes the rewritten main branch back upstream. Dolt 1.86.x does not
+  It ships embedded in the dolt pack and runs `gc dolt compact` every two
+  hours. A database without remotes is flattened once the commits after its
+  `gc-compact-base` watermark cross the threshold, and then gets
+  `CALL DOLT_GC('--full')`. A database with remotes gets a bare
+  `CALL DOLT_GC()` and is never flattened (see **History protection** above).
+  Under the `GC_DOLT_COMPACT_ALLOW_FEDERATED=1` opt-in, compaction fetches the
+  remote, flattens, and force-pushes the rewritten branch. Dolt does not
   support an atomic `DOLT_PUSH('--force-with-lease', ...)`, so the script
-  re-fetches and compares the remote head immediately before its force push.
-  That check prevents known drift but cannot eliminate a remote write in the
-  small fetch-to-push window.
+  fetches again and compares the remote head immediately before its force
+  push. That check catches known drift, but a remote write can still land in
+  the short window between fetch and push.
 - **Mind `orders.max_timeout` if you set one.** The compactor order asks
   for a 24-hour timeout to accommodate serialized full-GC runs on large
   stores. A city-level `orders.max_timeout` below 24h will cap the
@@ -206,20 +377,38 @@ should treat these strings as the current vocabulary:
 | `post-flatten row count decreased` | A table lost rows after flatten. |
 | `post-flatten row count probe failed` | The post-flatten row-count query failed or returned a non-number. |
 | `post-flatten table value hash probe failed` | A post-flatten table hash query failed or returned empty. |
-| `post-flatten table value hash changed with row-count increase` | A table gained rows and its value hash changed. |
-| `post-flatten table value hash changed without row-count increase` | A table's value hash changed without a row-count gain. |
+| `post-flatten table value hash changed with row-count increase` | A table gained rows and its value hash changed. *(auto-clearable — see below)* |
+| `post-flatten table value hash changed without row-count increase` | A table's value hash changed without a row-count gain. *(auto-clearable — see below)* |
 | `post-flatten table list changed` | A table appeared or an invalid table name was observed after preflight. |
 | `post-flatten table list probe failed` | The post-flatten `information_schema.tables` query failed. |
 | `post-flatten value hash probe failed` | The database hash query failed after flatten. |
 | `post-flatten value hash probe returned empty value` | The database hash query returned an empty value after flatten. |
-| `post-flatten value hash changed with row-count increase` | The database hash changed after at least one stable-table row-count gain. |
-| `post-flatten value hash changed without row-count increase` | The database hash changed without a row-count gain. |
+| `post-flatten value hash changed with row-count increase` | The database hash changed after at least one stable-table row-count gain. *(auto-clearable — see below)* |
+| `post-flatten value hash changed without row-count increase` | The database hash changed without a row-count gain. *(auto-clearable — see below)* |
+
+Four of these reasons are known writer-race false positives and are
+**auto-clearable**. On its next scheduled run, `gc dolt compact`'s flatten
+path re-proves content preservation with a fresh
+`DOLT_DIFF_STAT(<marker flatten_preflight_head>, <current HEAD>)`: every
+drifted table must report `rows_deleted=0` and `rows_modified=0`, and the
+drift must stay confined to that proved set. On success compact removes the
+marker, emits the usual alert and event, and continues through flatten and
+full GC in the same cycle. Any probe failure, deleted or modified row, drift
+outside the proved set, or any other reason keeps the marker and blocks GC.
+You do not need to clear these by hand — check the compactor log first.
 
 Quarantine markers also carry structured evidence. New markers include the
 database name, the preflight/flatten/post-verify HEADs, preflight and
 postflight database value hashes when available, `integrity_table_drift` for
 table-level row/hash mismatches, `database_value_hash_drift` for aggregate hash
 drift, and `decision=preserve_marker_manual_review_required`.
+
+Alert-cadence bookkeeping is deliberately separate from that evidence. The
+compactor stores `seen_count`, `notify_count`, and last-notified fields under
+`.gc/runtime/packs/dolt/compact-notify-state/<marker-kind>/<database>`; repeated
+checks must not rewrite the quarantine marker. The sidecar is operational
+state, not integrity evidence. A changed reason or a replacement marker alerts
+immediately, while an unchanged marker follows the bounded reminder cadence.
 
 Safe marker-clear procedure:
 
@@ -239,10 +428,12 @@ Safe marker-clear procedure:
    marker returns or health checks fail, preserve the marker and escalate with
    the marker contents and command output.
 
-`gc dolt compact` and `gc dolt compact --gc-only` refuse databases with
-quarantine markers. The refusal output repeats the marker path, reason, key
-evidence fields, and the clear/retry command so operators have the next action
-without opening this runbook first.
+`gc dolt compact --gc-only` and the bare-GC path refuse databases with
+quarantine markers unconditionally. The scheduled `gc dolt compact` flatten
+path also refuses, except for the four auto-clearable reasons above, which it
+may clear on its own after proving content preservation. The refusal output
+repeats the marker path, reason, key evidence fields, and the clear/retry
+command so operators have the next action without opening this runbook first.
 
 ## When to Escalate
 

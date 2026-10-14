@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
 // fakeRunner returns a CommandRunner that returns canned output for specific
@@ -419,6 +420,81 @@ func TestBdStoreGetEphemeralFallbackReturnsErrNotFoundWhenMissing(t *testing.T) 
 	}
 }
 
+// A failed wisp fallback leaves absence unproven: Get must return the query's
+// real error, not ErrNotFound, so callers that act on "confirmed absent" (the
+// process-table orphan sweep kills live runtimes on it) do not act on a
+// transient read failure.
+func TestBdStoreGetEphemeralFallbackErrorIsNotErrNotFound(t *testing.T) {
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd show --json gc-wisp-live`: {
+			err: fmt.Errorf("issue gc-wisp-live not found"),
+		},
+		`bd query --json ephemeral=true AND id=gc-wisp-live --all --limit 1`: {
+			err: fmt.Errorf("exit status 1: dolt: connection refused"),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+	_, err := s.Get("gc-wisp-live")
+	if err == nil {
+		t.Fatal("Get succeeded, want the wisp query error")
+	}
+	if errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("err = %v; a failed wisp fallback must not read as ErrNotFound", err)
+	}
+	if !strings.Contains(err.Error(), "connection refused") {
+		t.Fatalf("err = %v, want the underlying wisp query error", err)
+	}
+}
+
+// A wisp fallback that itself reports a bead-level miss is still a miss.
+func TestBdStoreGetEphemeralFallbackNotFoundErrorIsErrNotFound(t *testing.T) {
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd show --json gc-wisp-gone`: {
+			err: fmt.Errorf("issue gc-wisp-gone not found"),
+		},
+		`bd query --json ephemeral=true AND id=gc-wisp-gone --all --limit 1`: {
+			err: fmt.Errorf("exit status 1: no issues found"),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+	if _, err := s.Get("gc-wisp-gone"); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
+// Infrastructure failures whose text happens to say "not found" (a missing bd
+// binary, Dolt's "database not found" mid-restart) say nothing about the bead
+// and must not map to ErrNotFound.
+func TestBdStoreGetInfraNotFoundIsNotErrNotFound(t *testing.T) {
+	for _, msg := range []string{
+		`exec: "bd": executable file not found in $PATH`,
+		"exit status 1: Error: database not found: beads",
+		"exit status 1: Error 1146: table not found: wisps",
+		"exit status 1: beads workspace not found: /city/.beads",
+		"sh: 1: bd: command not found",
+	} {
+		t.Run(msg, func(t *testing.T) {
+			runner := func(_, _ string, _ ...string) ([]byte, error) {
+				return nil, errors.New(msg)
+			}
+			s := beads.NewBdStore("/city", runner)
+			_, err := s.Get("gc-wisp-abc")
+			if err == nil {
+				t.Fatal("Get succeeded, want an error")
+			}
+			if errors.Is(err, beads.ErrNotFound) {
+				t.Fatalf("err = %v; an infrastructure failure must not read as ErrNotFound", err)
+			}
+		})
+	}
+}
+
 func TestBdStoreListUsesDecodedUpdatedAtForUpdatedBefore(t *testing.T) {
 	cutoff := time.Date(2026, 1, 3, 0, 0, 0, 0, time.UTC)
 	runner := func(_, name string, args ...string) ([]byte, error) {
@@ -510,6 +586,106 @@ func TestBdStoreGetCLINotFound(t *testing.T) {
 	}
 	if !errors.Is(err, beads.ErrNotFound) {
 		t.Errorf("error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestBdStoreGetWispTierFailureIsNotNotFound(t *testing.T) {
+	// bd show misses (the bead may be a wisp), then the wisp-tier lookup
+	// itself fails. Absence is unproven, so Get must not report ErrNotFound.
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		if args[0] == "show" {
+			return nil, fmt.Errorf("exit status 1: Error fetching gc-1: no issue found matching \"gc-1\"")
+		}
+		return nil, fmt.Errorf("exit status 1: dial tcp 127.0.0.1:3307: connection refused")
+	}
+	s := beads.NewBdStore("/city", runner)
+	_, err := s.Get("gc-1")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if errors.Is(err, beads.ErrNotFound) {
+		t.Errorf("error = %v, want the wisp-tier failure, not ErrNotFound", err)
+	}
+	if !strings.Contains(err.Error(), "connection refused") {
+		t.Errorf("error = %v, want it to carry the wisp-tier failure", err)
+	}
+}
+
+func TestBdStoreGetWispTierSchemaErrorIsNotNotFound(t *testing.T) {
+	// "not found" in a failure message is not bd reporting a missing bead.
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		if args[0] == "show" {
+			return nil, fmt.Errorf("exit status 1: Error fetching gc-1: no issue found matching \"gc-1\"")
+		}
+		return nil, fmt.Errorf("exit status 1: Error 1146: table wisps not found")
+	}
+	_, err := beads.NewBdStore("/city", runner).Get("gc-1")
+	if err == nil || errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("Get with an unreadable wisp table = %v, want the query failure, not ErrNotFound", err)
+	}
+}
+
+func TestBdStoreGetMalformedWispTierOutputIsNotNotFound(t *testing.T) {
+	// Truncated output that happens to contain bd's no-match wording is a
+	// parse failure, not bd reporting a missing bead.
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		if args[0] == "show" {
+			return nil, fmt.Errorf("exit status 1: Error fetching gc-1: no issue found matching \"gc-1\"")
+		}
+		return []byte(`[{"id":"gc-1","title":"no issue found","status":"open"`), nil
+	}
+	_, err := beads.NewBdStore("/city", runner).Get("gc-1")
+	if err == nil || errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("Get with malformed wisp-tier output = %v, want the parse failure, not ErrNotFound", err)
+	}
+}
+
+func TestBdStoreGetRetriesTransientWispTierFailure(t *testing.T) {
+	queries := 0
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		if args[0] == "show" {
+			return nil, fmt.Errorf("exit status 1: Error fetching gc-1: no issue found matching \"gc-1\"")
+		}
+		queries++
+		if queries == 1 {
+			return nil, fmt.Errorf("exit status 1: invalid connection")
+		}
+		return []byte(`[{"id":"gc-1","title":"wisp","status":"open","issue_type":"task","ephemeral":true}]`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.Get("gc-1")
+	if err != nil {
+		t.Fatalf("Get after one transient wisp-tier failure: %v", err)
+	}
+	if got.ID != "gc-1" || queries != 2 {
+		t.Fatalf("Get = %+v after %d wisp queries, want gc-1 after a retry", got, queries)
+	}
+}
+
+func TestBdStoreGetWispTierFailureWithNoMatchTextIsNotNotFound(t *testing.T) {
+	// A failure can carry bd's no-match wording without bd having answered:
+	// a transport fault that outlasted the read retries, or an infrastructure
+	// failure. Nor does bd show's "issue X not found" wording count: bd query
+	// answers a miss with an empty list, so that text on its failure path came
+	// from somewhere other than a lookup. Absence is unproven, so Get must not
+	// report ErrNotFound.
+	for name, failure := range map[string]string{
+		"transport":      "exit status 1: connection reset by peer; no issues found in retry",
+		"infrastructure": "exit status 1: database not found; no issues found",
+		"show wording":   "exit status 1: issue gc-1 not found",
+	} {
+		t.Run(name, func(t *testing.T) {
+			runner := func(_, _ string, args ...string) ([]byte, error) {
+				if args[0] == "show" {
+					return nil, fmt.Errorf("exit status 1: Error fetching gc-1: no issue found matching \"gc-1\"")
+				}
+				return nil, errors.New(failure)
+			}
+			_, err := beads.NewBdStore("/city", runner).Get("gc-1")
+			if err == nil || errors.Is(err, beads.ErrNotFound) || !strings.Contains(err.Error(), failure) {
+				t.Fatalf("Get with wisp-tier failure %q = %v, want that failure, not ErrNotFound", failure, err)
+			}
+		})
 	}
 }
 
@@ -700,6 +876,38 @@ func TestBdStoreReopenUsesReopenCommand(t *testing.T) {
 	s := beads.NewBdStore("/city", runner)
 	if err := s.Reopen("bd-abc-123"); err != nil {
 		t.Fatalf("Reopen() error = %v", err)
+	}
+}
+
+// TestBdStoreReopenClearsStaleCloseReasonFirst pins that a reopen clears the
+// metadata.close_reason Close forwards as --reason, before bd reopen runs, so a
+// later close without a reason does not report the previous close's reason.
+func TestBdStoreReopenClearsStaleCloseReasonFirst(t *testing.T) {
+	var calls []string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if name != "bd" {
+			return nil, fmt.Errorf("unexpected command name: %s", name)
+		}
+		call := strings.Join(args, " ")
+		calls = append(calls, call)
+		switch call {
+		case "show --json bd-abc-123":
+			return []byte(`[{"id":"bd-abc-123","title":"test","status":"closed","issue_type":"task","created_at":"2025-01-15T10:30:00Z","close_reason":"duplicate of bd-1","metadata":{"close_reason":"duplicate of bd-1"}}]`), nil
+		case "update --json bd-abc-123 --set-metadata close_reason=":
+			return []byte(`[{"id":"bd-abc-123","status":"closed"}]`), nil
+		case "reopen --json bd-abc-123":
+			return []byte(`{"id":"bd-abc-123","status":"open"}`), nil
+		default:
+			return nil, fmt.Errorf("unexpected command: bd %s", call)
+		}
+	}
+	s := beads.NewBdStore("/city", runner)
+	if err := s.Reopen("bd-abc-123"); err != nil {
+		t.Fatalf("Reopen() error = %v", err)
+	}
+	want := []string{"show --json bd-abc-123", "update --json bd-abc-123 --set-metadata close_reason=", "reopen --json bd-abc-123"}
+	if fmt.Sprint(calls) != fmt.Sprint(want) {
+		t.Fatalf("bd calls = %q, want %q", calls, want)
 	}
 }
 
@@ -1276,7 +1484,7 @@ func TestBdStoreWaitForParentProjection(t *testing.T) {
 				return []byte(`[{"id":"bd-child","title":"child","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
 			}
 			return []byte(`[{"id":"bd-child","title":"child","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","parent":"bd-parent"}]`), nil
-		case "list --json --include-infra --include-gates --limit 0 --parent bd-parent":
+		case "list --json --all --include-infra --include-gates --limit 0 --parent bd-parent":
 			parentListCalls++
 			if parentListCalls == 1 {
 				return []byte(`[]`), nil
@@ -1314,7 +1522,7 @@ func TestBdStoreWaitForParentRemovalProjection(t *testing.T) {
 				return []byte(`[{"id":"bd-child","title":"child","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","parent":"bd-parent"}]`), nil
 			}
 			return []byte(`[{"id":"bd-child","title":"child","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
-		case "list --json --include-infra --include-gates --limit 0 --parent bd-parent":
+		case "list --json --all --include-infra --include-gates --limit 0 --parent bd-parent":
 			oldParentListCalls++
 			if oldParentListCalls == 1 {
 				return []byte(`[{"id":"bd-child","title":"child","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","parent":"bd-parent"}]`), nil
@@ -1338,9 +1546,9 @@ func TestBdStoreWaitForParentProjectionDetectsSupersededParent(t *testing.T) {
 	runner := func(_, _ string, args ...string) ([]byte, error) {
 		cmd := strings.Join(args, " ")
 		switch cmd {
-		case "list --json --include-infra --include-gates --limit 0 --parent bd-new":
+		case "list --json --all --include-infra --include-gates --limit 0 --parent bd-new":
 			return []byte(`[]`), nil
-		case "list --json --include-infra --include-gates --limit 0 --parent bd-old":
+		case "list --json --all --include-infra --include-gates --limit 0 --parent bd-old":
 			return []byte(`[]`), nil
 		case "show --json bd-child":
 			return []byte(`[{"id":"bd-child","title":"child","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","parent":"bd-other"}]`), nil
@@ -1374,12 +1582,12 @@ func TestBdStoreWaitForParentProjectionGetsBeforeListing(t *testing.T) {
 				return []byte(`[{"id":"bd-child","title":"child","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","parent":"bd-old"}]`), nil
 			}
 			return []byte(`[{"id":"bd-child","title":"child","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","parent":"bd-new"}]`), nil
-		case "list --json --include-infra --include-gates --limit 0 --parent bd-old":
+		case "list --json --all --include-infra --include-gates --limit 0 --parent bd-old":
 			if showCalls < 2 {
 				listedBeforeCurrentParentChanged = true
 			}
 			return []byte(`[]`), nil
-		case "list --json --include-infra --include-gates --limit 0 --parent bd-new":
+		case "list --json --all --include-infra --include-gates --limit 0 --parent bd-new":
 			if showCalls < 2 {
 				listedBeforeCurrentParentChanged = true
 			}
@@ -2612,6 +2820,40 @@ func TestBdStoreReadyKeepsDependentWhenBlockerClosedWithNoWorkOutcome(t *testing
 	}
 	if len(got) != 1 || got[0].ID != "bd-dependent" {
 		t.Fatalf("Ready() = %+v, want [bd-dependent]: a blocker closed with no gc.work_outcome must still satisfy the dependency", got)
+	}
+}
+
+// TestBdStoreReadyKeepsDependentWhenBlockerStepPassedDespiteWorkOutcomeBlocked
+// is the shape that stalled real builds: a graph.v2 step closed with the
+// control-plane result gc.outcome=pass, which dispatch advances on, while its
+// worker recorded gc.work_outcome=blocked (a plan review that found required
+// changes). Vetoing the dependent here leaves the workflow waiting on work the
+// controller never counts as demand.
+func TestBdStoreReadyKeepsDependentWhenBlockerStepPassedDespiteWorkOutcomeBlocked(t *testing.T) {
+	runner, _ := bdStoreWorkOutcomeReadyRunner(`,"metadata":{"gc.step_ref":"review","gc.outcome":"pass","gc.work_outcome":"blocked"}`)
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.Ready()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != "bd-dependent" {
+		t.Fatalf("Ready() = %+v, want [bd-dependent]: a blocker whose step passed must satisfy the dependency whatever its gc.work_outcome", got)
+	}
+}
+
+// TestBdStoreReadyExcludesDependentWhenWorkBeadPassedWithWorkOutcomeBlocked
+// pins the default worker path: core mol-do-work stamps gc.outcome=pass on the
+// work bead itself (no gc.step_ref) even when the work is blocked, so the pass
+// must not release the blocked work's dependents.
+func TestBdStoreReadyExcludesDependentWhenWorkBeadPassedWithWorkOutcomeBlocked(t *testing.T) {
+	runner, _ := bdStoreWorkOutcomeReadyRunner(`,"metadata":{"gc.outcome":"pass","gc.work_outcome":"blocked"}`)
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.Ready()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("Ready() = %+v, want empty: a non-step work bead closed with gc.outcome=pass and gc.work_outcome=blocked must not satisfy its dependent", got)
 	}
 }
 
@@ -4302,6 +4544,133 @@ func TestBdStoreDepAddError(t *testing.T) {
 	}
 }
 
+// TestBdStoreDepAddCrossStoreFailsLoudly proves a dep add across two
+// different bead-ID prefixes (i.e. two different stores) fails with a
+// non-zero error naming both bead ids and both store prefixes, and never
+// reaches the underlying bd write -- instead of the historical silent
+// exit-0 no-op (ga-q5dgaz).
+func TestBdStoreDepAddCrossStoreFailsLoudly(t *testing.T) {
+	called := false
+	runner := func(_, _ string, _ ...string) ([]byte, error) {
+		called = true
+		return nil, nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	err := s.DepAdd("ga-111111", "gm-222222", "blocks")
+	if err == nil {
+		t.Fatal("expected cross-store error, got nil")
+	}
+	for _, want := range []string{"ga-111111", "gm-222222", "ga", "gm"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to mention %q", err, want)
+		}
+	}
+	if called {
+		t.Error("underlying bd dep add write must not run when the dependency is cross-store")
+	}
+}
+
+// TestBdStoreDepAddSameStoreStillSucceeds guards against a regression: two
+// bead ids sharing the same prefix are NOT cross-store and must continue to
+// add the dependency exactly as before.
+func TestBdStoreDepAddSameStoreStillSucceeds(t *testing.T) {
+	var gotArgs []string
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		gotArgs = args
+		return nil, nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	if err := s.DepAdd("ga-111111", "ga-222222", "blocks"); err != nil {
+		t.Fatalf("DepAdd: %v", err)
+	}
+	wantArgs := "dep add ga-111111 ga-222222 --type blocks"
+	if strings.Join(gotArgs, " ") != wantArgs {
+		t.Errorf("args = %q, want %q", strings.Join(gotArgs, " "), wantArgs)
+	}
+}
+
+// TestBdStoreDepAddExternalTargetIsNotCrossStore proves an "external:"-
+// prefixed dependsOnID -- the established escape hatch for referencing
+// something outside the bead-ID scheme entirely -- is never misclassified
+// as cross-store, mirroring NativeDoltStore's shouldPrevalidateNativeDependency.
+func TestBdStoreDepAddExternalTargetIsNotCrossStore(t *testing.T) {
+	var gotArgs []string
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		gotArgs = args
+		return nil, nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	if err := s.DepAdd("ga-111111", "external:some-ticket", "blocks"); err != nil {
+		t.Fatalf("DepAdd: %v", err)
+	}
+	wantArgs := "dep add ga-111111 external:some-ticket --type blocks"
+	if strings.Join(gotArgs, " ") != wantArgs {
+		t.Errorf("args = %q, want %q", strings.Join(gotArgs, " "), wantArgs)
+	}
+}
+
+// TestBdStoreDepAddCrossStoreParentChildShortCircuits proves the parent-child
+// short-circuit in DepAdd stays AHEAD of the cross-store guard: a cross-store
+// parent-child whose child already records the foreign parent still no-ops
+// with a nil error and issues no write. Cross-store molecule attach rides on
+// exactly this ordering (internal/molecule/molecule.go sets ParentID at create
+// time so the attach never reaches the guard), so reordering the two blocks
+// would break it.
+func TestBdStoreDepAddCrossStoreParentChildShortCircuits(t *testing.T) {
+	calls := make([]string, 0, 1)
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		call := name + " " + strings.Join(args, " ")
+		calls = append(calls, call)
+		switch call {
+		case "bd show --json ga-111111":
+			return []byte(`[{"id":"ga-111111","title":"child","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","parent":"gm-222222"}]`), nil
+		default:
+			return nil, fmt.Errorf("unexpected command: %s", call)
+		}
+	}
+	s := beads.NewBdStore("/city", runner)
+
+	if err := s.DepAdd("ga-111111", "gm-222222", "parent-child"); err != nil {
+		t.Fatalf("DepAdd: %v", err)
+	}
+	if len(calls) != 1 {
+		t.Fatalf("calls = %v, want only the bd show lookup", calls)
+	}
+}
+
+// TestBdStoreDepAddCrossStoreParentChildWithoutMatchingParentErrors pins the
+// other half of that ordering: when the child does NOT already record the
+// foreign parent, the short-circuit declines and the cross-store guard fires.
+// The failure is intentional -- bd has no cross-store parent-child model --
+// and must stay visible rather than emergent.
+func TestBdStoreDepAddCrossStoreParentChildWithoutMatchingParentErrors(t *testing.T) {
+	wrote := false
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		call := name + " " + strings.Join(args, " ")
+		switch call {
+		case "bd show --json ga-111111":
+			return []byte(`[{"id":"ga-111111","title":"child","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","parent":"ga-999999"}]`), nil
+		default:
+			wrote = true
+			return nil, nil
+		}
+	}
+	s := beads.NewBdStore("/city", runner)
+
+	err := s.DepAdd("ga-111111", "gm-222222", "parent-child")
+	if err == nil {
+		t.Fatal("expected cross-store error, got nil")
+	}
+	for _, want := range []string{"ga-111111", "gm-222222", "ga", "gm"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to mention %q", err, want)
+		}
+	}
+	if wrote {
+		t.Error("underlying bd dep add write must not run when the dependency is cross-store")
+	}
+}
+
 // --- DepRemove ---
 
 func TestBdStoreDepRemove(t *testing.T) {
@@ -5188,4 +5557,157 @@ func TestBdStoreReadyRetryBoundedReturnsErrorAfterExhaustion(t *testing.T) {
 	if calls < 2 {
 		t.Fatalf("calls = %d, want >= 2 (retry must be attempted)", calls)
 	}
+}
+
+// TestIsTimeoutError pins the narrow timeout classifier used to distinguish a
+// store/bd query that ran out of time (a contention signal callers may safely
+// relax for idempotent work) from a genuine store-read failure or a plain
+// cancellation. Both must NOT be treated as timeouts: a connection failure is a
+// real error, and a cancellation is a shutdown signal, not contention.
+func TestIsTimeoutError(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"bd exec timeout", errors.New("timed out after 30s"), true},
+		{"bd list both tiers wisp timeout", fmt.Errorf("bd list both tiers: bd query: %w", errors.New("timed out after 30s")), true},
+		{"caller-deadline timeout", errors.New("timed out after 500ms (caller deadline)"), true},
+		{"context deadline sentinel", fmt.Errorf("gate: %w", context.DeadlineExceeded), true},
+		{"deadline exceeded text", errors.New("context deadline exceeded"), true},
+		{"partial result wrapping timeout", &beads.PartialResultError{Op: "bd list both tiers", Err: errors.New("bd query: timed out after 30s")}, true},
+		{"context canceled is NOT a timeout", fmt.Errorf("gate: %w", context.Canceled), false},
+		{"genuine store read failure", errors.New("dolt: read failed"), false},
+		{"connection reset is NOT a timeout", errors.New("connection reset by peer"), false},
+
+		// A chain mixing a timeout leaf with a hard-failure leaf reports TRUE.
+		// This is a deliberate, reviewed decision, not an accident of substring
+		// matching, and it is pinned here so a later "tightening" to
+		// all-leaves-must-be-timeout cannot silently reintroduce the vp-gprv
+		// starvation. The only join that reaches the gate carrying a timeout leaf
+		// is mergeListTierResults, which fires ONLY when both list tiers fail —
+		// i.e. worse store contention than the single-tier failure that starved
+		// code-review-gate in the first place. Failing CLOSED there would starve
+		// an idempotent order at exactly the moment relaxing it matters most, and
+		// would make this classifier stricter than isBdAmbiguousWriteError, which
+		// already groups "timed out after" and "connection reset" as one transient
+		// family. Both leaf orderings are pinned because errors.Join flattens to
+		// newline-joined text and the guarantee must not depend on leaf order.
+		{"join of timeout and hard failure is a contention timeout", errors.Join(errors.New("timed out after 30s"), errors.New("dolt: read failed")), true},
+		{"join with the hard failure first is still a contention timeout", errors.Join(errors.New("dolt: read failed"), errors.New("timed out after 30s")), true},
+		// Negative control: a join carrying NO timeout leaf must stay false, so
+		// the two cases above pin "a timeout leaf is present", not "any join".
+		{"join of two hard failures is NOT a timeout", errors.Join(errors.New("dolt: read failed"), errors.New("connection reset by peer")), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := beads.IsTimeoutError(tc.err); got != tc.want {
+				t.Errorf("IsTimeoutError(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestBdStoreReclaimStaleReturnsPreviousOwner covers ga-7rj87d FR2: the
+// reclaim call must be scoped to exactly the one candidate ID (bd reclaim
+// --id <id>), not a bare sweep, and must surface the previous owner so the
+// caller can report it on the hook.claim.reclaimed_stale event (FR5).
+func TestBdStoreReclaimStaleReturnsPreviousOwner(t *testing.T) {
+	var gotArgs []string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if name != "bd" {
+			t.Fatalf("name = %q, want bd", name)
+		}
+		gotArgs = append([]string(nil), args...)
+		return []byte(`{"reclaimed":[{"id":"bd-42","previous_owner":"worker-1"}],"count":1,"scoped":true}`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	reclaimed, previousOwner, err := s.ReclaimStale("bd-42")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reclaimed {
+		t.Fatal("ReclaimStale reclaimed = false, want true")
+	}
+	if previousOwner != "worker-1" {
+		t.Fatalf("previousOwner = %q, want worker-1", previousOwner)
+	}
+	if got := strings.Join(gotArgs, " "); got != "reclaim --id bd-42 --json" {
+		t.Fatalf("args = %q, want scoped single-id reclaim args", got)
+	}
+}
+
+// TestBdStoreReclaimStaleReportsNothingReclaimed covers ga-7rj87d FR4: when
+// bd reclaim reports nothing reclaimed for the scoped id, ReclaimStale must
+// report false without error so the caller leaves the candidate untouched.
+func TestBdStoreReclaimStaleReportsNothingReclaimed(t *testing.T) {
+	runner := func(_, _ string, _ ...string) ([]byte, error) {
+		return []byte(`{"reclaimed":[],"count":0,"scoped":true}`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	reclaimed, previousOwner, err := s.ReclaimStale("bd-42")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reclaimed {
+		t.Fatalf("ReclaimStale reclaimed = true, want false; previousOwner=%q", previousOwner)
+	}
+}
+
+// bd stores the reason given to `bd close --reason` in its close_reason column
+// and returns it from show and list; BdStore must carry it onto Bead
+// (gastownhall/gascity#2663).
+func TestBdStoreGetReadsCloseReason(t *testing.T) {
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd show --json bd-closed`: {
+			out: []byte(`[{"id":"bd-closed","title":"done","status":"closed","issue_type":"task","created_at":"2025-01-15T10:30:00Z","close_reason":"fixed in commit abc123; tests pass"}]`),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+	b, err := s.Get("bd-closed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.CloseReason != "fixed in commit abc123; tests pass" {
+		t.Errorf("CloseReason = %q, want %q", b.CloseReason, "fixed in commit abc123; tests pass")
+	}
+}
+
+func TestBdStoreListReadsCloseReason(t *testing.T) {
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd list --json --all --include-infra --include-gates --limit 0`: {
+			out: []byte(`[{"id":"bd-open","title":"open","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"},{"id":"bd-closed","title":"done","status":"closed","issue_type":"task","created_at":"2025-01-15T10:31:00Z","close_reason":"superseded by bd-open"}]`),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reasons := map[string]string{}
+	for _, b := range got {
+		reasons[b.ID] = b.CloseReason
+	}
+	if reasons["bd-closed"] != "superseded by bd-open" {
+		t.Errorf("bd-closed CloseReason = %q, want %q", reasons["bd-closed"], "superseded by bd-open")
+	}
+	if reasons["bd-open"] != "" {
+		t.Errorf("bd-open CloseReason = %q, want empty", reasons["bd-open"])
+	}
+}
+
+// TestBdStoreCloseNotificationConformance runs the close-notification contract
+// through a CachingStore over a BdStore driving a fake bd, so bd's row shapes
+// (JSON rows, show/list refreshes, close --reason forwarding) are covered.
+func TestBdStoreCloseNotificationConformance(t *testing.T) {
+	beadstest.RunCloseNotificationTests(t, func(*testing.T) beads.Store {
+		return beadstest.NewFakeBd().NewBdStore()
+	})
 }

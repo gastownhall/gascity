@@ -1,0 +1,15 @@
+{
+  "name": "mayor-chat",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test transport.test.mjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.101",
+    "ink": "^5.2.0",
+    "ink-text-input": "^6.0.0",
+    "ink-spinner": "^5.0.0",
+    "react": "^18.3.0"
+  }
+}

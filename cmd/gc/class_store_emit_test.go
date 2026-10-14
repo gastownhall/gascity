@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,12 +18,16 @@ import (
 	"testing"
 	"time"
 
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
+
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
 
@@ -229,7 +234,7 @@ func closeThroughClassResolver(resolve func(*storageRoutes, beads.Store, *config
 // emitting class-store wrapper carries CloseWithMetadataIfMatch structurally for
 // every engine — TestEmittingClassStoreKeepsEveryEngineCapability forces that,
 // because *NativeDoltStore has it — so a bare type assertion would advertise
-// atomic close even over a backing (the sqlite CLI engine) that cannot honor it.
+// atomic close even over a backing (a plain MemStore, or a bd CLI store) that cannot honor it.
 // The wrapper's AtomicConditionalCloserHandle keeps discovery honest: yes only
 // when the resolved backing truly provides atomic close, and the closer it hands
 // back is the emitting wrapper itself, so a DISCOVERED atomic close still appends
@@ -573,10 +578,7 @@ func TestEmittingClassStoreKeepsEveryEngineCapability(t *testing.T) {
 	wrapped := splitClassRoutes(beads.NewMemStore()).withCLIEmission(cityPath).stores[coordclass.ClassGraph]
 	wrapper := reflect.TypeOf(wrapped)
 
-	for _, engine := range []reflect.Type{
-		reflect.TypeOf(&beads.SQLiteStore{}),
-		reflect.TypeOf(&beads.NativeDoltStore{}),
-	} {
+	for _, engine := range bindingEngineTypes {
 		var missing []string
 		for i := 0; i < engine.NumMethod(); i++ {
 			method := engine.Method(i)
@@ -595,6 +597,16 @@ func TestEmittingClassStoreKeepsEveryEngineCapability(t *testing.T) {
 			t.Errorf("the emitting class store drops %v from %s; every one is a capability assertion that stops matching", missing, engine)
 		}
 	}
+}
+
+// bindingEngineTypes are the bead engines a relocated class binding can open.
+// Every layer the binding gets wrapped in — the one-shot CLI's emitter, the
+// controller's CachingStore — is held to their method sets, because optional
+// capabilities are discovered by type assertion and a dropped method silently
+// downgrades its caller.
+var bindingEngineTypes = []reflect.Type{
+	reflect.TypeOf(&beads.SQLiteStore{}),
+	reflect.TypeOf(&beads.NativeDoltStore{}),
 }
 
 // The relic census is the one capability where carrying the method is WORSE
@@ -965,6 +977,67 @@ func TestClassStoreEmissionCoversConditionalRelease(t *testing.T) {
 	}
 }
 
+// transferCapableMemStore adds TransferIfCurrent over a plain *beads.MemStore,
+// which never grew that capability (only BdStore and the role-backed
+// NativeDoltStore did). The emitting class store's forwarding path has
+// nothing real to delegate to without a double for this leaf.
+type transferCapableMemStore struct {
+	*beads.MemStore
+}
+
+func (s *transferCapableMemStore) TransferIfCurrent(id, fromAssignee, toAssignee string) (bool, error) {
+	current, err := s.Get(id)
+	if err != nil {
+		return false, nil
+	}
+	if current.Status != "in_progress" || current.Assignee != fromAssignee {
+		return false, nil
+	}
+	assignee := toAssignee
+	if err := s.Update(id, beads.UpdateOpts{Assignee: &assignee}); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// A landed conditional transfer is a state change a fold has to see: the
+// bead's assignee spelling changed under the emitting wrapper, matching
+// TestClassStoreEmissionCoversConditionalRelease immediately above for the
+// sibling ConditionalAssigneeTransferer capability.
+func TestClassStoreEmissionCoversConditionalTransfer(t *testing.T) {
+	cityPath := t.TempDir()
+	leaf := &transferCapableMemStore{MemStore: beads.NewMemStore()}
+	store := resolveGraphStore(splitClassRoutes(leaf).withCLIEmission(cityPath), beads.NewMemStore(), nil, cityPath, nil)
+
+	bead := seedClassBead(t, leaf, "transfer")
+	fromAssignee := "worker-1"
+	inProgress := "in_progress"
+	if err := leaf.Update(bead.ID, beads.UpdateOpts{Assignee: &fromAssignee, Status: &inProgress}); err != nil {
+		t.Fatalf("assigning the bead: %v", err)
+	}
+
+	mover, ok := store.(beads.ConditionalAssigneeTransferer)
+	if !ok {
+		t.Fatalf("the emitting class store dropped ConditionalAssigneeTransferer (%T)", store)
+	}
+	moved, err := mover.TransferIfCurrent(bead.ID, fromAssignee, "worker-2")
+	if err != nil || !moved {
+		t.Fatalf("transfer: moved=%v err=%v", moved, err)
+	}
+	got := beadEvents(readCityJournal(t, cityPath))
+	if len(got) != 1 || got[0].Type != events.BeadUpdated || got[0].Subject != bead.ID {
+		t.Fatalf("got %s, want one bead.updated for %s", eventSummary(got), bead.ID)
+	}
+
+	// A transfer that does not fire changes nothing, and must say nothing.
+	if _, err := mover.TransferIfCurrent(bead.ID, "someone-else", "worker-3"); err != nil {
+		t.Fatalf("no-op transfer: %v", err)
+	}
+	if got := beadEvents(readCityJournal(t, cityPath)); len(got) != 1 {
+		t.Fatalf("a transfer that did not fire appended a row: %s", eventSummary(got))
+	}
+}
+
 // A landed atomic fenced close — merge metadata and close in one revision-guarded
 // transaction — is a terminal transition a fold has to see. The capability is
 // discovered through AtomicConditionalCloserFor, and it must resolve to the
@@ -1244,7 +1317,7 @@ func TestControllerRoutesFromOpenStorageRoutesCarryNoEmitTarget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolving the storage plan: %v", err)
 	}
-	routes, err := openStorageRoutes(plan, mustResolveInfraTarget(t, cityPath, cfg))
+	routes, err := openStorageRoutes(plan, mustResolveInfraTarget(t, cityPath, cfg), cfg, cityPath, nil)
 	if err != nil {
 		t.Fatalf("opening the controller's storage routes: %v", err)
 	}
@@ -1275,5 +1348,430 @@ func TestControllerRoutesFromOpenStorageRoutesCarryNoEmitTarget(t *testing.T) {
 	}
 	if got := beadEvents(readCityJournal(t, cityPath)); len(got) != 0 {
 		t.Fatalf("the controller's class routes appended %d bead event(s), want 0: %s", len(got), eventSummary(got))
+	}
+}
+
+// fencedMigratedOneShotCLICity is migratedOneShotCLICity with the city's
+// beads.conditional_writes set to mode, so the binding engine the funnel opens
+// carries a stamp a fenced write can resolve by.
+func fencedMigratedOneShotCLICity(t *testing.T, mode string) (cityPath string, cfg *config.City) {
+	t.Helper()
+	cityPath, _ = migratedOneShotCLICity(t)
+	toml := filepath.Join(cityPath, "city.toml")
+	body, err := os.ReadFile(toml)
+	if err != nil {
+		t.Fatalf("reading city.toml: %v", err)
+	}
+	body = append(body, fmt.Sprintf("\n[beads]\nconditional_writes = %q\n", mode)...)
+	if err := os.WriteFile(toml, body, 0o644); err != nil {
+		t.Fatalf("writing city.toml: %v", err)
+	}
+	resetCLIStorageRoutes(t)
+	if cfg, err = loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard); err != nil {
+		t.Fatalf("reloading the split city config: %v", err)
+	}
+	return cityPath, cfg
+}
+
+// beadEventCount counts the city journal's rows of eventType for id.
+func beadEventCount(t *testing.T, cityPath, eventType, id string) int {
+	t.Helper()
+	n := 0
+	for _, evt := range beadEvents(readCityJournal(t, cityPath)) {
+		if evt.Subject == id && evt.Type == eventType {
+			n++
+		}
+	}
+	return n
+}
+
+// PRODUCTION SEAM: a one-shot command's fenced writes on a split city resolve
+// the conditional writer by the binding engine's stamp and write through the
+// EMITTING wrapper. The wrapper carries no stamp of its own, so before it named
+// the engine as its mode source every row here resolved unset→legacy and the
+// write landed unconditionally; had it named the engine as a resolve target
+// instead, the write would have been fenced and event-dark. Entered through the
+// real funnel, so only resolveCLIStorageRoutes can put the wrapper there.
+func TestOneShotCLIFencedWritesResolveTheEmittingStoreOnAMigratedCity(t *testing.T) {
+	t.Run("gc session kill fence", func(t *testing.T) {
+		cityPath, cfg := fencedMigratedOneShotCLICity(t, "auto")
+		captureCLIStorageStderr(t)
+		sessions := cliSessionStore(beads.NewMemStore(), cfg, cityPath)
+
+		writer, _, err := beads.ResolveConditionalWriter(sessions)
+		if _, emitting := writer.(*emittingClassStore); err != nil || !emitting {
+			t.Fatalf("ResolveConditionalWriter(session store) = (%T, %v), want the emitting class store", writer, err)
+		}
+		row, err := sessions.Create(beads.Bead{Title: "worker", Type: "session", Status: "open"})
+		if err != nil {
+			t.Fatalf("creating the session row: %v", err)
+		}
+		if _, err := sessionpkg.WriteKillFence(sessions, row.ID, time.Now().UTC()); err != nil {
+			t.Fatalf("writing the kill fence: %v", err)
+		}
+		if got := beadEventCount(t, cityPath, events.BeadUpdated, row.ID); got != 1 {
+			t.Fatalf("the kill fence appended %d bead.updated row(s) for %s, want exactly 1", got, row.ID)
+		}
+
+		// A write that lands between the fence's read and its write must lose
+		// the revision and be re-decided, never overwritten blind.
+		leaf := writer.(*emittingClassStore).Store
+		decisions := 0
+		err = sessionpkg.ApplyKillFencePatch(sessions, row.ID, func(beads.Bead) (map[string]string, bool) {
+			decisions++
+			if decisions == 1 {
+				if err := leaf.SetMetadata(row.ID, "test_racer", "won"); err != nil {
+					t.Fatalf("interleaving a write: %v", err)
+				}
+			}
+			return map[string]string{"state_reason": ""}, true
+		})
+		if err != nil || decisions != 2 {
+			t.Fatalf("fence over a raced row = (%v, %d decision(s)), want nil after 2: the first write must lose its revision", err, decisions)
+		}
+	})
+
+	t.Run("control dispatcher graph store", func(t *testing.T) {
+		cityPath, cfg := fencedMigratedOneShotCLICity(t, "require")
+		captureCLIStorageStderr(t)
+		graph := scopeGraphStore(cityPath, cityPath, cfg, beads.NewMemStore())
+
+		writer, _, err := beads.ResolveConditionalWriter(graph)
+		if _, emitting := writer.(*emittingClassStore); err != nil || !emitting {
+			t.Fatalf("ResolveConditionalWriter(graph store) = (%T, %v), want the emitting class store", writer, err)
+		}
+		control, err := graph.Create(beads.Bead{
+			Title:    "check",
+			Type:     "task",
+			Status:   "open",
+			Metadata: map[string]string{beadmeta.ControlEpochMetadataKey: "1"},
+		})
+		if err != nil {
+			t.Fatalf("creating the control bead: %v", err)
+		}
+		// The control epoch and the drain reservation are both a value-CAS on
+		// the writer this resolve returns.
+		if swapped, err := writer.CompareAndSetMetadataKey(control.ID, beadmeta.ControlEpochMetadataKey, "1", "2"); err != nil || !swapped {
+			t.Fatalf("advancing the control epoch = (%v, %v), want a swap", swapped, err)
+		}
+		if swapped, err := writer.CompareAndSetMetadataKey(control.ID, beadmeta.ControlEpochMetadataKey, "1", "3"); err != nil || swapped {
+			t.Fatalf("a stale epoch advance = (%v, %v), want a refused compare", swapped, err)
+		}
+		if got := beadEventCount(t, cityPath, events.BeadUpdated, control.ID); got != 1 {
+			t.Fatalf("one swap and one refused compare appended %d bead.updated row(s), want exactly 1", got)
+		}
+
+		// The capability-only lookups already stop at the wrapper, which
+		// forwards their methods with emission; pinned so they stay there.
+		if w, ok := beads.ConditionalWriterForTarget(graph); !ok || w != writer {
+			t.Errorf("ConditionalWriterForTarget = (%T, %v), want the emitting class store", w, ok)
+		}
+		if w, ok := beads.MetadataCASWriterFor(graph); !ok || w != beads.MetadataCASWriter(writer.(*emittingClassStore)) {
+			t.Errorf("MetadataCASWriterFor = (%T, %v), want the emitting class store", w, ok)
+		}
+		if c, ok := beads.AtomicConditionalCloserFor(graph); !ok || c != beads.AtomicConditionalCloser(writer.(*emittingClassStore)) {
+			t.Errorf("AtomicConditionalCloserFor = (%T, %v), want the emitting class store", c, ok)
+		}
+		_, leafGuarded := beads.AssignmentGuardedUpdaterFor(writer.(*emittingClassStore).Store)
+		if _, guarded := beads.AssignmentGuardedUpdaterFor(graph); guarded != leafGuarded {
+			t.Errorf("AssignmentGuardedUpdaterFor = %v over the wrapper, %v over the engine; the wrapper must not change it", guarded, leafGuarded)
+		}
+	})
+
+	t.Run("fenced molecule attach through the dispatcher's graph store", func(t *testing.T) {
+		cityPath, cfg := fencedMigratedOneShotCLICity(t, "auto")
+		captureCLIStorageStderr(t)
+		graph := scopeGraphStore(cityPath, cityPath, cfg, beads.NewMemStore())
+
+		root, err := graph.Create(beads.Bead{Title: "workflow", Type: "task", Status: "open", Metadata: map[string]string{
+			beadmeta.KindMetadataKey: "workflow", "gc.formula_contract": "graph.v2",
+		}})
+		if err != nil {
+			t.Fatalf("creating the workflow root: %v", err)
+		}
+		control, err := graph.Create(beads.Bead{Title: "control", Type: "task", Status: "open", ParentID: root.ID, Metadata: map[string]string{
+			beadmeta.RootBeadIDMetadataKey: root.ID, beadmeta.ControlEpochMetadataKey: "1",
+		}})
+		if err != nil {
+			t.Fatalf("creating the control bead: %v", err)
+		}
+		recipe := &formula.Recipe{
+			Name: "attempt",
+			Steps: []formula.RecipeStep{
+				{ID: "attempt", Title: "attempt", Type: "task", IsRoot: true, Metadata: map[string]string{
+					beadmeta.KindMetadataKey: "workflow", "gc.formula_contract": "graph.v2",
+				}},
+				{ID: "attempt.run", Title: "run", Type: "task", Assignee: "worker"},
+			},
+			Deps: []formula.RecipeDep{{StepID: "attempt.run", DependsOnID: "attempt", Type: "parent-child"}},
+		}
+		result, err := molecule.Attach(context.Background(), graph, recipe, control.ID, molecule.AttachOptions{
+			IdempotencyKey: control.ID + ":attempt:2",
+			ExpectedEpoch:  1,
+		})
+		if err != nil || result.Duplicate {
+			t.Fatalf("fenced attach = (%+v, %v), want a fresh sub-DAG", result, err)
+		}
+
+		attempt := beadByID(t, graph, result.RootID)
+		if marker := attempt.Metadata[beadmeta.AttachFencePendingMetadataKey]; marker != "" {
+			t.Errorf("sub-DAG root %s still carries %s=%q, want the fence settled", attempt.ID, beadmeta.AttachFencePendingMetadataKey, marker)
+		}
+		step := beadByID(t, graph, result.IDMapping["attempt.run"])
+		if step.Assignee != "worker" || step.Metadata[beadmeta.DeferredAssigneeMetadataKey] != "" {
+			t.Errorf("step %s = assignee %q deferred %q, want the candidate activated onto worker",
+				step.ID, step.Assignee, step.Metadata[beadmeta.DeferredAssigneeMetadataKey])
+		}
+		if epoch := beadByID(t, graph, control.ID).Metadata[beadmeta.ControlEpochMetadataKey]; epoch != "2" {
+			t.Errorf("control epoch = %q, want the fence to advance it to 2", epoch)
+		}
+		// The fenced path creates the candidate deferred and activates it after
+		// the fence; the legacy path creates it live and never updates it.
+		for _, id := range []string{control.ID, attempt.ID, step.ID} {
+			if got := beadEventCount(t, cityPath, events.BeadUpdated, id); got == 0 {
+				t.Errorf("no bead.updated row for %s: the fenced attach's epoch advance and activation must reach the journal", id)
+			}
+		}
+	})
+
+	t.Run("the controller's routes resolve the bare engine", func(t *testing.T) {
+		cityPath, cfg := fencedMigratedOneShotCLICity(t, "auto")
+		captureCLIStorageStderr(t)
+		plan, err := resolveCityStoragePlan(cityPath, cfg)
+		if err != nil {
+			t.Fatalf("resolving the storage plan: %v", err)
+		}
+		routes, err := openStorageRoutes(plan, mustResolveInfraTarget(t, cityPath, cfg), cfg, cityPath, nil)
+		if err != nil {
+			t.Fatalf("opening the controller's storage routes: %v", err)
+		}
+		defer routes.close() //nolint:errcheck // the test asserts on the routes, not on the close
+
+		writer, _, err := beads.ResolveConditionalWriter(resolveGraphStore(routes, beads.NewMemStore(), cfg, cityPath, nil))
+		if _, engine := writer.(*beads.SQLiteStore); err != nil || !engine {
+			t.Fatalf("ResolveConditionalWriter(controller graph store) = (%T, %v), want the stamped engine itself", writer, err)
+		}
+	})
+}
+
+// mc-03yxh. On a single-store city `gc session new` writes the session bead
+// from its own process into the city's engine, and nothing told the
+// controller's cache: no bd hooks, and the one-shot emission covered only
+// relocated classes. The cache-served session census (the legacy patrol tick,
+// and v2's census, which is cache-only by contract) then missed the session
+// until a poke's live read happened to run. The CLI's session store now
+// announces the create the way a split city's already does, and the
+// controller's event watcher puts the row in the cache, so the patrol's cached
+// snapshot lists it with no poke and no store read.
+//
+// The store is built the way production builds it: every store open returns
+// the engine inside the bead-policy layer (openStoreResultAtForCityScoped), so
+// that is what cliSessionStore is handed.
+func TestOneShotSessionCreateOnASingleStoreCityReachesTheControllerCache(t *testing.T) {
+	cityPath := t.TempDir()
+	writeOneShotCityTOML(t, cityPath, "")
+	captureCLIStorageStderr(t)
+	cfg := &config.City{}
+	engine, err := beads.OpenSQLiteStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("opening the city engine: %v", err)
+	}
+	backing := &listCountingStore{Store: engine}
+	cr := newPokeSnapshotRuntime(t, backing)
+	cache := cr.standaloneCityStore.(*beads.CachingStore)
+	cs := &controllerState{cityBeadStore: cache}
+
+	// gc session new, in its own process: the CLI opened the city store itself.
+	sess := cliSessionStore(wrapStoreWithBeadPolicies(engine, cfg), cfg, cityPath)
+	if _, _, underPolicy := unwrapBeadPolicyStore(sess); !underPolicy {
+		t.Fatalf("cliSessionStore returned %T, want the bead-policy layer outermost", sess)
+	}
+	created, err := sess.Create(beads.Bead{
+		Title:    "adhoc",
+		Type:     sessionBeadType,
+		Labels:   []string{sessionBeadLabel},
+		Metadata: map[string]string{"template": "worker", "session_name": "worker-adhoc", "state": "creating"},
+	})
+	if err != nil {
+		t.Fatalf("creating the session bead through the CLI session store: %v", err)
+	}
+
+	// The controller's bead event watcher.
+	announced := 0
+	for _, evt := range beadEvents(readCityJournal(t, cityPath)) {
+		if evt.Subject == created.ID && evt.Type == events.BeadCreated {
+			announced++
+		}
+		cs.applyBeadEventToStores(evt)
+	}
+	if announced != 1 {
+		t.Fatalf("the CLI session create appended %d bead.created row(s) for %s, want exactly 1", announced, created.ID)
+	}
+	backing.takeLists()
+	if !snapshotHasSession(cr.loadTickSessionBeadSnapshot("patrol"), created.ID) {
+		t.Fatalf("the patrol tick's cached session snapshot is missing %s, which the CLI created and announced", created.ID)
+	}
+	if n := backing.takeLists(); n != 0 {
+		t.Fatalf("the patrol snapshot issued %d store lists, want 0: the cache must know the session from the event alone", n)
+	}
+}
+
+// withMainStoreEmission puts the emitter directly on a pinned engine and keeps
+// the bead-policy layer outermost. Everything else passes through untouched: a
+// bd subprocess store may run hooks that already emit and carries capabilities
+// the wrapper does not forward, a CachingStore emits through its own
+// notifyChange, a relocated class store the funnel wrapped already emits, and a
+// city path that names no city has no journal. The native Dolt engine is the
+// only main-store engine production can open (the SQLite main-store provider is
+// gone), and it needs a server, so its row is a typed nil: the decision reads
+// only the type.
+func TestMainStoreEmissionWrapsOnlyPinnedEngines(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{}
+	sqliteEngine, err := beads.OpenSQLiteStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("opening the engine: %v", err)
+	}
+	for name, engine := range map[string]beads.Store{
+		"native dolt engine": (*beads.NativeDoltStore)(nil),
+		"sqlite engine":      sqliteEngine,
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := withMainStoreEmission(wrapStoreWithBeadPolicies(engine, cfg), cityPath)
+			inner, policy, underPolicy := unwrapBeadPolicyStore(got)
+			if !underPolicy || policy.cfg != cfg {
+				t.Fatalf("withMainStoreEmission(policy over %s) = %T, want the policy layer outermost with the same config", name, got)
+			}
+			emitting, ok := inner.(*emittingClassStore)
+			if !ok || emitting.Store != engine || emitting.cityPath != cityPath {
+				t.Fatalf("under the policy layer: %T, want the emitting wrapper directly over the engine, for %s", inner, cityPath)
+			}
+			if bare, ok := withMainStoreEmission(engine, cityPath).(*emittingClassStore); !ok || bare.Store != engine {
+				t.Fatalf("withMainStoreEmission(bare %s) did not wrap it in the emitter", name)
+			}
+			if storeEngine(got) != engine {
+				t.Fatalf("storeEngine did not look through the policy and emitting layers to the %s", name)
+			}
+		})
+	}
+
+	policyOverSQLite := wrapStoreWithBeadPolicies(sqliteEngine, cfg)
+	for name, store := range map[string]beads.Store{
+		"no city path":        nil, // the policy store over a pinned engine, with a blank path
+		"bd subprocess store": wrapStoreWithBeadPolicies(beads.NewBdStore(t.TempDir(), nil), cfg),
+		"mem store":           wrapStoreWithBeadPolicies(beads.NewMemStore(), cfg),
+		"caching store":       beads.NewCachingStoreForTest(sqliteEngine, nil),
+		"already emitting":    &emittingClassStore{Store: sqliteEngine, cityPath: cityPath},
+	} {
+		path := cityPath
+		if store == nil {
+			store, path = policyOverSQLite, " "
+		}
+		if got := withMainStoreEmission(store, path); got != store {
+			t.Errorf("withMainStoreEmission(%s) = %T, want the store untouched", name, got)
+		}
+	}
+}
+
+// plainCreateEngine is a bead engine with only the required store surface: no
+// storage-class create, which is the native Dolt engine's shape.
+type plainCreateEngine struct{ beads.Store }
+
+// mc-03yxh regression. On a single-store native Dolt city the session store is
+// the policy layer over the emitter over the engine (withMainStoreEmission).
+// The policy creates a session bead with its storage class, and finds
+// CreateWithStorage on the emitter, which carries it for every engine; the
+// native engine has none, and the emitter refused, so `gc session new` failed
+// with "creating with a storage class: *beads.NativeDoltStore does not
+// support it". It must take the plain create, carry the storage class on the
+// bead's flags as the policy does for such a store, and still announce it.
+func TestMainStoreSessionCreateOverAnEngineWithoutStorageCreate(t *testing.T) {
+	if reflect.TypeOf(&beads.NativeDoltStore{}).Implements(reflect.TypeOf((*beads.StorageCreateStore)(nil)).Elem()) {
+		t.Fatal("*beads.NativeDoltStore now has a storage-class create; this test models an engine without one, so point it at the shape that lacks it")
+	}
+	cityPath := t.TempDir()
+	cfg := &config.City{}
+	if storage := effectiveBeadStorage(cfg, beadPolicySession); storage != "no_history" {
+		t.Fatalf("the session policy resolved storage %q, want \"no_history\": the create must reach CreateWithStorage with a class the landed row can show", storage)
+	}
+	engine := plainCreateEngine{Store: beads.NewMemStore()}
+	// withMainStoreEmission's result over a native Dolt engine (pinned for the
+	// engine type by TestMainStoreEmissionWrapsOnlyPinnedEngines).
+	sess := wrapStoreWithBeadPolicies(&emittingClassStore{Store: engine, cityPath: cityPath}, cfg)
+
+	created, err := sess.Create(beads.Bead{
+		Title:    "adhoc",
+		Type:     sessionBeadType,
+		Labels:   []string{sessionBeadLabel},
+		Metadata: map[string]string{"template": "worker", "session_name": "worker-adhoc", "state": "creating"},
+	})
+	if err != nil {
+		t.Fatalf("gc session new's create over an engine without a storage-class create: %v", err)
+	}
+	row, err := engine.Get(created.ID)
+	if err != nil {
+		t.Fatalf("the session bead did not land in the engine: %v", err)
+	}
+	if !row.NoHistory || row.Ephemeral {
+		t.Fatalf("landed with no_history=%v ephemeral=%v, want no_history=true ephemeral=false (the session policy's no_history class)", row.NoHistory, row.Ephemeral)
+	}
+	announced := 0
+	for _, evt := range beadEvents(readCityJournal(t, cityPath)) {
+		if evt.Subject == created.ID && evt.Type == events.BeadCreated {
+			announced++
+		}
+	}
+	if announced != 1 {
+		t.Fatalf("the create appended %d bead.created row(s) for %s, want exactly 1", announced, created.ID)
+	}
+}
+
+// The emitter carries every method either engine declares
+// (TestEmittingClassStoreKeepsEveryEngineCapability), so it claims some
+// capabilities an engine it wraps does not have. Each such claim must answer
+// for that engine exactly as the bare engine's absence would — a sentinel, a
+// zero, or the fallback its callers take — or a caller's type assertion that
+// used to fail now matches and takes a path the engine cannot serve. That is
+// how #7611 broke `gc session new` on native Dolt (CreateWithStorage refused;
+// fixed in #7623). The sets are pinned so a new over-claim fails here and
+// whoever adds it checks its answer over each engine that lacks it.
+func TestEmittingClassStoreOverClaimsArePinnedPerEngine(t *testing.T) {
+	wrapper := reflect.TypeOf(&emittingClassStore{})
+	want := map[reflect.Type][]string{
+		reflect.TypeOf(&beads.NativeDoltStore{}): {
+			"AdvanceSequenceFloor", "AtomicConditionalCloserHandle", "CachedReadExact",
+			"ConditionalWritesModeSource", "CreateWithStorage", "DepAddWithMetadata",
+			"HasResidentOutside", "NamespaceCensusHandle", "ReadyContext",
+			"SequenceFloor", "SetSequenceFloor", "StoreHealthPath",
+		},
+		reflect.TypeOf(&beads.SQLiteStore{}): {
+			"ConditionalWritesModeSource", "Count", "DepListBatch",
+			"EventsJournalActive", "NamespaceCensusHandle", "ReadEventsJournalPage",
+			"ReadOnly", "SawRows",
+			"SupportsEphemeralGraphApply", "TransferIfCurrent", "WaitForParentProjection",
+		},
+	}
+	if len(want) != len(bindingEngineTypes) {
+		t.Fatalf("pinned %d engines, bindingEngineTypes lists %d: pin the over-claims for every engine the emitter wraps", len(want), len(bindingEngineTypes))
+	}
+	for _, engine := range bindingEngineTypes {
+		pinned, ok := want[engine]
+		if !ok {
+			t.Errorf("no over-claim pin for %s", engine)
+			continue
+		}
+		var got []string
+		for i := 0; i < wrapper.NumMethod(); i++ {
+			name := wrapper.Method(i).Name
+			if _, has := engine.MethodByName(name); !has {
+				got = append(got, name)
+			}
+		}
+		sort.Strings(got)
+		sorted := slices.Clone(pinned)
+		sort.Strings(sorted)
+		if !slices.Equal(got, sorted) {
+			t.Errorf("the emitter claims %v that %s lacks, pinned %v: check each new claim answers over %s as its absence would, then update the pin", got, engine, sorted, engine)
+		}
 	}
 }

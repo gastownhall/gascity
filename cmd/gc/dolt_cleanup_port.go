@@ -1,14 +1,9 @@
 package main
 
 import (
-	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
-
-	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 // LegacyDefaultDoltPort is the historical hard-coded port used by the
@@ -22,18 +17,19 @@ const flagDoltPortSource = "--port flag"
 const cityConfigDoltPortSource = "city config dolt.port"
 
 // PortResolverInput bundles the inputs needed for the dolt port discovery
-// chain (per AD-04 §4.1).
+// chain (per AD-04 §4.1, live-state revision per city-scale plan P1.7).
 type PortResolverInput struct {
 	// Flag carries the --port flag value (empty if not provided).
 	Flag string
 	// CityPort is the city.toml [dolt] port. Zero means "not set".
 	CityPort int
-	// Rigs is the list of registered rigs, in the order
-	// returned by the registry. The HQ rig is preferred when picking
-	// between candidate <rigRoot>/.beads/dolt-server.port files.
-	Rigs []resolverRig
-	// FS is used for reading rig port files.
-	FS fsys.FS
+	// CityPath roots the live managed-dolt resolution steps (runtime
+	// handle, then process-table discovery). Empty records both live
+	// sources as not-provided.
+	CityPath string
+	// LiveResolve overrides the live resolution chain in tests. Nil uses
+	// newLiveDoltPortResolver().resolve.
+	LiveResolve func(cityPath string) (liveDoltPortResolution, error)
 }
 
 // resolverRig is the minimum rig info needed by ResolveDoltPort. It is
@@ -64,13 +60,20 @@ type PortResolutionAttempt struct {
 	Detail string
 }
 
-// ResolveDoltPort applies the discovery chain (AD-04 §4.1):
+// ResolveDoltPort applies the discovery chain (AD-04 §4.1, revised by the
+// city-scale plan P1.7 port-file de-authority):
 //
-//	--port flag > city.toml dolt.port > <rigRoot>/.beads/dolt-server.port (HQ first) > legacy default 3307
+//	--port flag > city.toml dolt.port > live managed dolt (runtime handle, then process table) > legacy default 3307
+//
+// <rigRoot>/.beads/dolt-server.port is deliberately NOT in the chain: it is
+// a bd compatibility status file whose surviving writer has clobbered it in
+// production (incident class 4); see dolt_port_live.go.
 //
 // Returns a PortResolution; Fallback is true only when the legacy default
 // is selected. Never returns an error — caller decides whether the warn
-// state is fatal.
+// state is fatal. A live-step error (ambiguous listeners, discovery
+// failure) stops the chain with Port 0 instead of falling through to the
+// legacy default, mirroring the historical bad-port-file hard stop.
 func ResolveDoltPort(in PortResolverInput) PortResolution {
 	res := PortResolution{}
 
@@ -92,15 +95,18 @@ func ResolveDoltPort(in PortResolverInput) PortResolution {
 	}
 	res.Tried = append(res.Tried, attempt)
 
-	for _, rig := range orderRigsHQFirst(in.Rigs) {
-		path := filepath.Join(rig.Path, ".beads", "dolt-server.port")
-		attempt, port, ok := tryRigPortFile(in.FS, path)
-		res.Tried = append(res.Tried, attempt)
-		if ok {
-			res.Port = port
-			res.Source = attempt.Source
-			return res
-		}
+	liveResolve := in.LiveResolve
+	if liveResolve == nil {
+		liveResolve = newLiveDoltPortResolverForExplicitCity().resolve
+	}
+	live, liveErr := liveResolve(in.CityPath)
+	res.Tried = append(res.Tried, live.Attempts...)
+	if liveErr == nil && validDoltPort(live.Port) {
+		res.Port = live.Port
+		res.Source = live.Source
+		return res
+	}
+	for _, attempt := range live.Attempts {
 		if attempt.Status == "error" {
 			res.Source = attempt.Source
 			return res
@@ -156,44 +162,6 @@ func tryCityConfigPort(port int) (PortResolutionAttempt, int, bool) {
 		}, 0, false
 	}
 	return PortResolutionAttempt{Source: src, Status: "found", Detail: strconv.Itoa(port)}, port, true
-}
-
-func tryRigPortFile(fs fsys.FS, path string) (PortResolutionAttempt, int, bool) {
-	data, err := fs.ReadFile(path)
-	if err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			return PortResolutionAttempt{
-				Source: path,
-				Status: "error",
-				Detail: fmt.Sprintf("read port file: %v", err),
-			}, 0, false
-		}
-		return PortResolutionAttempt{Source: path, Status: "not-found"}, 0, false
-	}
-	text := strings.TrimSpace(string(data))
-	if text == "" {
-		return PortResolutionAttempt{
-			Source: path,
-			Status: "error",
-			Detail: "file is empty",
-		}, 0, false
-	}
-	port, err := strconv.Atoi(text)
-	if err != nil {
-		return PortResolutionAttempt{
-			Source: path,
-			Status: "error",
-			Detail: fmt.Sprintf("invalid port %q: %v", text, err),
-		}, 0, false
-	}
-	if !validDoltPort(port) {
-		return PortResolutionAttempt{
-			Source: path,
-			Status: "error",
-			Detail: invalidDoltPortMessage(port),
-		}, 0, false
-	}
-	return PortResolutionAttempt{Source: path, Status: "found", Detail: strconv.Itoa(port)}, port, true
 }
 
 func validDoltPort(port int) bool {

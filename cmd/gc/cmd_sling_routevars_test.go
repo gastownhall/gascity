@@ -93,8 +93,8 @@ func TestDecorateGraphWorkflowRecipeSubstitutesRouteTargetsWithinRigContext(t *t
 	if design.Metadata["gc.routed_to"] != "frontend/codex" {
 		t.Fatalf("design gc.routed_to = %q, want frontend/codex", design.Metadata["gc.routed_to"])
 	}
-	if design.Assignee != codexSession {
-		t.Fatalf("design assignee = %q, want %q", design.Assignee, codexSession)
+	if design.Assignee != "" {
+		t.Fatalf("design assignee = %q, want unclaimed routed work", design.Assignee)
 	}
 
 	review := recipe.StepByID("demo.review")
@@ -104,8 +104,8 @@ func TestDecorateGraphWorkflowRecipeSubstitutesRouteTargetsWithinRigContext(t *t
 	if review.Metadata["gc.routed_to"] != "frontend/codex" {
 		t.Fatalf("review gc.routed_to = %q, want frontend/codex", review.Metadata["gc.routed_to"])
 	}
-	if review.Assignee != codexSession {
-		t.Fatalf("review assignee = %q, want %q", review.Assignee, codexSession)
+	if review.Assignee != "" {
+		t.Fatalf("review assignee = %q, want unclaimed routed work", review.Assignee)
 	}
 }
 

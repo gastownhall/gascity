@@ -1471,7 +1471,10 @@ func (c *Client) SubmitSession(id, message string, intent session.SubmitIntent) 
 	if err := c.requireCityScope(); err != nil {
 		return SessionSubmitResponse{}, err
 	}
-	body := genclient.SubmitSessionJSONRequestBody{Message: message}
+	// `gc session submit` is an operator's own send, so it resumes a held
+	// session (CONTRACT v5.9 D8).
+	resume := true
+	body := genclient.SubmitSessionJSONRequestBody{Message: message, Resume: &resume}
 	if intent != "" {
 		i := genclient.SubmitIntent(intent)
 		body.Intent = &i
@@ -1547,7 +1550,21 @@ type SlingResult struct {
 	RootBeadID     string
 	AttachedBeadID string
 	Mode           string
-	Warnings       []string
+	MoleculeID     string
+	ConvoyID       string
+	// Batch is set only when the bead was a convoy whose open children were
+	// routed one by one.
+	Batch *SlingBatchSummary
+	// Children is the per-child outcome of a convoy sling, set with Batch.
+	Children []SlingChildOutcome
+	Warnings []string
+}
+
+// Partial reports whether the server routed some convoy children and failed
+// others (status "partial"). The sling changed state; Children says which
+// children still need attention.
+func (r SlingResult) Partial() bool {
+	return r.Status == SlingStatusPartial
 }
 
 // Sling routes work to a target agent or pool over the control plane
@@ -1608,7 +1625,7 @@ func (c *Client) Sling(req SlingRequest) (SlingResult, error) {
 	}
 	r := resp.JSON200
 	out := SlingResult{
-		Status:         r.Status,
+		Status:         string(r.Status),
 		Target:         r.Target,
 		Formula:        derefStr(r.Formula),
 		Bead:           derefStr(r.Bead),
@@ -1616,11 +1633,51 @@ func (c *Client) Sling(req SlingRequest) (SlingResult, error) {
 		RootBeadID:     derefStr(r.RootBeadId),
 		AttachedBeadID: derefStr(r.AttachedBeadId),
 		Mode:           derefStr(r.Mode),
+		MoleculeID:     derefStr(r.MoleculeId),
+		ConvoyID:       derefStr(r.ConvoyId),
+	}
+	if b := r.Batch; b != nil {
+		out.Batch = &SlingBatchSummary{
+			ContainerType: derefStr(b.ContainerType),
+			Total:         int(b.Total),
+			Routed:        int(b.Routed),
+			Failed:        int(b.Failed),
+			Skipped:       int(b.Skipped),
+			Idempotent:    int(b.Idempotent),
+		}
+	}
+	if r.Children != nil {
+		out.Children = make([]SlingChildOutcome, 0, len(*r.Children))
+		for _, c := range *r.Children {
+			out.Children = append(out.Children, SlingChildOutcome{
+				BeadID:     c.BeadId,
+				Outcome:    string(c.Outcome),
+				Status:     derefStr(c.Status),
+				Reason:     derefStr(c.Reason),
+				Formula:    derefStr(c.Formula),
+				WorkflowID: derefStr(c.WorkflowId),
+				MoleculeID: derefStr(c.MoleculeId),
+				Conflict:   slingChildConflictFromWire(c.Conflict),
+			})
+		}
 	}
 	if r.Warnings != nil {
 		out.Warnings = *r.Warnings
 	}
 	return out, nil
+}
+
+// slingChildConflictFromWire converts a convoy child's wire conflict; nil when
+// the child was not refused on a source-workflow conflict.
+func slingChildConflictFromWire(c *genclient.SlingChildConflict) *SlingChildConflict {
+	if c == nil {
+		return nil
+	}
+	conflict := &SlingChildConflict{SourceBeadID: c.SourceBeadId, Hint: c.Hint}
+	if c.BlockingWorkflowIds != nil {
+		conflict.BlockingWorkflowIDs = *c.BlockingWorkflowIds
+	}
+	return conflict
 }
 
 // setStrPtr points *dst at a copy of v when v is non-empty, leaving it nil

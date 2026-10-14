@@ -12,7 +12,7 @@ import (
 // waitForEvent drains the stream until an event matches, tolerating
 // interleaved noise (resyncs from resubscribe cycles, stray-pane events,
 // unrelated status flaps).
-func waitForEvent(t *testing.T, ch <-chan runtime.SessionEvent, timeout time.Duration, match func(runtime.SessionEvent) bool) runtime.SessionEvent {
+func waitForEvent(t *testing.T, ch <-chan runtime.SessionEvent, timeout time.Duration, match func(runtime.SessionEvent) bool) {
 	t.Helper()
 	deadline := time.After(timeout)
 	for {
@@ -22,9 +22,9 @@ func waitForEvent(t *testing.T, ch <-chan runtime.SessionEvent, timeout time.Dur
 				t.Fatalf("event channel closed while waiting")
 			}
 			if match(ev) {
-				return ev
+				return
 			}
-			t.Logf("  (skipping %s session=%q status=%q ref=%q)", ev.Kind, ev.Session, ev.AgentStatus, ev.Ref)
+			t.Logf("  (skipping %s session=%q ref=%q)", ev.Kind, ev.Session, ev.Ref)
 		case <-deadline:
 			t.Fatalf("timed out after %v waiting for matching event", timeout)
 		}
@@ -79,13 +79,12 @@ func TestSessionEventsLive(t *testing.T) {
 			t.Fatalf("pane report-agent %s %s: %v: %s", pane, state, err, out)
 		}
 	}
+	// Both translations are exercised live: a non-idle state arrives as the
+	// vocabulary-free change kind here, and evt-b forces idle below.
 	report(a.PaneID, "working")
-	ev := waitForEvent(t, ch, 10*time.Second, func(ev runtime.SessionEvent) bool {
-		return ev.Kind == runtime.SessionEventAgentStatus && ev.Session == "evt-a"
+	waitForEvent(t, ch, 10*time.Second, func(ev runtime.SessionEvent) bool {
+		return ev.Kind == runtime.SessionEventAgentStateChanged && ev.Session == "evt-a"
 	})
-	if ev.AgentStatus != "working" {
-		t.Errorf("evt-a status event = %q, want working", ev.AgentStatus)
-	}
 
 	// evt-b starts while the stream is live: pane_created → debounced re-list
 	// → resubscribe; its status events must then flow, attributed.
@@ -103,13 +102,10 @@ func TestSessionEventsLive(t *testing.T) {
 	waitForEvent(t, ch, 15*time.Second, func(ev runtime.SessionEvent) bool {
 		return ev.Kind == runtime.SessionEventResync
 	})
-	report(b.PaneID, "blocked")
-	ev = waitForEvent(t, ch, 10*time.Second, func(ev runtime.SessionEvent) bool {
-		return ev.Kind == runtime.SessionEventAgentStatus && ev.Session == "evt-b"
+	report(b.PaneID, "idle")
+	waitForEvent(t, ch, 10*time.Second, func(ev runtime.SessionEvent) bool {
+		return ev.Kind == runtime.SessionEventAgentIdle && ev.Session == "evt-b"
 	})
-	if ev.AgentStatus != "blocked" {
-		t.Errorf("evt-b status event = %q, want blocked", ev.AgentStatus)
-	}
 
 	// evt-c exits on its own: pane_exited must arrive attributed (the
 	// merge-only pane map keeps the mapping even if herdr reaps the agent

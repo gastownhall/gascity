@@ -1,0 +1,15 @@
+schema = 1
+plane = "worker"
+city = "maintainer-city"
+session_id = "mc-abc12"
+generation = 7
+contract = 1
+credential = "file:/home/agent/.config/gascity/connect/maintainer-city/mc-abc12/bearer"
+
+[[ledger]]
+scope = "city"
+url = "https://ctl.example.ts.net:7491"
+project_id = "proj-7d2e"
+ca_file = "/home/agent/.config/gascity/connect/maintainer-city/mc-abc12/ca-city.pem"
+allow_plaintext = false
+workspaces = ["/data/cities/mc", "/data/cities/mc/rigs/app"]

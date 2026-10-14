@@ -66,11 +66,18 @@ func (s *Server) emitAsyncResult(eventType, subject string, payload events.Paylo
 }
 
 func (s *Server) emitRequestFailed(requestID, operation, errorCode, errorMessage string) {
+	s.emitRequestFailedForSession(requestID, operation, "", errorCode, errorMessage)
+}
+
+// emitRequestFailedForSession records a request.failed event that names the
+// session the failed request had already written; an empty sessionID names none.
+func (s *Server) emitRequestFailedForSession(requestID, operation, sessionID, errorCode, errorMessage string) {
 	s.emitAsyncResult(events.RequestFailed, "", RequestFailedPayload{
 		RequestID:    requestID,
 		Operation:    operation,
 		ErrorCode:    errorCode,
 		ErrorMessage: errorMessage,
+		SessionID:    sessionID,
 	})
 }
 
@@ -116,11 +123,20 @@ func (s *Server) emitSessionCreateFailed(requestID, errorCode, errorMessage stri
 	s.emitRequestFailed(requestID, RequestOperationSessionCreate, errorCode, errorMessage)
 }
 
+// emitSessionCreateFailedFor records a session.create failure for a session
+// the create had already written, naming it so the client can find it.
+func (s *Server) emitSessionCreateFailedFor(requestID, sessionID, errorCode, errorMessage string) {
+	s.emitRequestFailedForSession(requestID, RequestOperationSessionCreate, sessionID, errorCode, errorMessage)
+}
+
 // emitSessionMessageSucceeded records a request.result.session.message event.
-func (s *Server) emitSessionMessageSucceeded(requestID, sessionID string) {
+func (s *Server) emitSessionMessageSucceeded(requestID, sessionID string, out messageOutcome) {
 	s.emitAsyncResult(events.RequestResultSessionMessage, sessionID, SessionMessageSucceededPayload{
-		RequestID: requestID,
-		SessionID: sessionID,
+		RequestID:          requestID,
+		SessionID:          sessionID,
+		Queued:             out.Queued,
+		WillStart:          out.willStart,
+		WillNotStartReason: out.willNotStartReason,
 	})
 }
 
@@ -130,12 +146,14 @@ func (s *Server) emitSessionMessageFailed(requestID, errorCode, errorMessage str
 }
 
 // emitSessionSubmitSucceeded records a request.result.session.submit event.
-func (s *Server) emitSessionSubmitSucceeded(requestID, sessionID string, queued bool, intent string) {
+func (s *Server) emitSessionSubmitSucceeded(requestID, sessionID string, out messageOutcome, intent string) {
 	s.emitAsyncResult(events.RequestResultSessionSubmit, sessionID, SessionSubmitSucceededPayload{
-		RequestID: requestID,
-		SessionID: sessionID,
-		Queued:    queued,
-		Intent:    intent,
+		RequestID:          requestID,
+		SessionID:          sessionID,
+		Queued:             out.Queued,
+		Intent:             intent,
+		WillStart:          out.willStart,
+		WillNotStartReason: out.willNotStartReason,
 	})
 }
 

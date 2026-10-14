@@ -24,6 +24,28 @@ func TestExtractConfigPath_EqualsForm(t *testing.T) {
 	}
 }
 
+// TestExtractConfigPath_TrimsWhitespace pins parity with argvFlagValue, which
+// trims its returned values. An untrimmed path fails samePath comparison and
+// would silently drop a rig's protection in doltProcRigOwner.
+func TestExtractConfigPath_TrimsWhitespace(t *testing.T) {
+	cases := []struct {
+		name string
+		argv []string
+	}{
+		{"space separated", []string{"dolt", "sql-server", "--config", "  /tmp/TestFoo/config.yaml\t"}},
+		{"equals form", []string{"dolt", "sql-server", "--config=  /tmp/TestFoo/config.yaml\t"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := extractConfigPath(tc.argv)
+			want := "/tmp/TestFoo/config.yaml"
+			if got != want {
+				t.Errorf("extractConfigPath() = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
 func TestExtractConfigPath_Missing(t *testing.T) {
 	argv := []string{"dolt", "sql-server", "--port", "3307"}
 	got := extractConfigPath(argv)

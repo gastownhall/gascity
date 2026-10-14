@@ -154,7 +154,9 @@ enforced by the conformance suite in `internal/beads/beadstest/conformance.go`.
    reasonable window of the current time.
 
 5. **Get returns ErrNotFound for missing IDs.** The error must wrap
-   `beads.ErrNotFound` so callers can use `errors.Is`.
+   `beads.ErrNotFound` so callers can use `errors.Is`. ErrNotFound
+   asserts confirmed absence: a lookup that failed for infrastructure
+   reasons must surface the underlying error, not ErrNotFound.
 
 6. **Close is idempotent.** Closing an already-closed bead succeeds
    without error. The bead remains closed.
@@ -223,6 +225,24 @@ enforced by the conformance suite in `internal/beads/beadstest/conformance.go`.
     both in `storebinding.EngineReservedPrefixes` -- one function, so two
     providers cannot answer it differently for the same assignment, and a
     third inherits the rule by calling it.
+
+17. **ParentID is a weak, city-scoped reference -- except on the bd-CLI
+    provider.** A split city routes by class, so a parent and its child are
+    co-resident only when they classify the same way. A store therefore
+    persists and filters `ParentID` verbatim and never resolves, validates,
+    rewrites or places by an id in a namespace it does not serve;
+    `beadstest.RunStoreTests` pins that as
+    `ParentIDNamesARowThisStoreDoesNotHave`. MemStore, FileStore, SQLiteStore
+    and the exec provider carry every parent. NativeDoltStore carries a
+    foreign one and refuses a dangling id inside the namespace it serves,
+    before writing -- the strong reading its library forces.
+
+    `BdStore` does not comply. It passes `--parent` through to bd, which
+    resolves the id unconditionally and derives the child's id from it, so a
+    cross-store parent is refused and, when it does resolve, placement
+    follows the parent instead of the child's class. The divergence is
+    invisible to CI because the only conformance run over a real bd is
+    skipped (ga-e7z613). Tracked in ga-6od57.
 
 ## Metadata vocabulary (gc.*)
 
@@ -388,7 +408,9 @@ beads_rust (br) binary as a real external provider (build tag:
   CommandRunner plus real bd in integration tests.
 
 - **Ordering varies by implementation.** In-process stores (MemStore,
-  FileStore) guarantee creation order for List and Ready. BdStore
+  FileStore) guarantee creation order for List and Ready. SQLiteStore
+  returns Ready in the canonical (priority, created_at, id) order, the
+  order a CachingStore serves Ready in. BdStore
   returns bd's default sort order (which may differ for beads sharing
   the same second-precision timestamp). ListByLabel returns newest-first
   across all implementations.

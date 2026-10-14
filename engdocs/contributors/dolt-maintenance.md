@@ -141,6 +141,16 @@ pass:** `live_rows`, `ratio_mb_per_row` and `warning` carry no meaning
 when the count is unknown, so a `0` row count or an absent warning there
 must never be read as a healthy store.
 
+`gc status` reaches that block by two paths and both carry the
+qualifier. The local path builds it directly; the supervisor-managed
+path reads `store_health` from `GET /v0/status`, where the same property
+travels as `rows_measured`. It is spelled for the measured state on
+purpose: a payload that omits the field — an older supervisor, another
+implementation — decodes to `false` and renders as unknown, so silence
+withholds the number rather than asserting a count nobody took. A client
+reading `/v0/status` directly owes the same check, and must treat
+`rows_measured: false` the way the CLI does.
+
 The `⚠ maintenance overdue` suffix appears when
 `size_bytes > 1.0 MB × live_rows`. The same data is available under
 `store_health` in `gc status --json`.

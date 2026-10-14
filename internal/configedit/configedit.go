@@ -320,31 +320,41 @@ func boolPtr(b bool) *bool { return &b }
 // to durable config (not ephemeral session metadata).
 func (e *Editor) SuspendAgent(name string) error {
 	return e.EditExpanded(func(raw, expanded *config.City) error {
-		return mutateAgentSuspended(e.fs, filepath.Dir(e.tomlPath), raw, expanded, name, true)
+		return mutateAgentSuspended(e.fs, e.tomlPath, raw, expanded, name, true)
 	})
 }
 
 // ResumeAgent resumes a suspended agent, mirroring [Editor.SuspendAgent].
 func (e *Editor) ResumeAgent(name string) error {
 	return e.EditExpanded(func(raw, expanded *config.City) error {
-		return mutateAgentSuspended(e.fs, filepath.Dir(e.tomlPath), raw, expanded, name, false)
+		return mutateAgentSuspended(e.fs, e.tomlPath, raw, expanded, name, false)
 	})
 }
 
 // mutateAgentSuspended is the shared dispatch for SuspendAgent and
 // ResumeAgent. Branches on agent provenance:
-//   - OriginInline (city.toml [[agent]]): edit the raw struct.
+//   - OriginInline (city.toml [[agent]]): surgically toggle the on-disk
+//     suspended key so the generic EditExpanded writeback (a lossy
+//     full-struct marshal) never runs.
 //   - OriginDerived + convention-discovered (agents/<name>/): write
 //     agents/<name>/agent.toml; also strip any legacy [[patches.agent]]
-//     suspended override so it can't shadow the new value.
-//   - OriginDerived + pack-declared: add or update [[patches.agent]].
+//     suspended override (in memory and, when unambiguous, surgically on
+//     disk too) so it can't shadow the new value.
+//   - OriginDerived + pack-declared: surgically append a [[patches.agent]]
+//     block on disk, falling back to the in-memory patch (and the generic
+//     lossy writeback) only when the surgical append refuses.
 //
-// Returns [ErrUnmodified] when the change lives entirely in agent.toml
-// and raw was not touched, so EditExpanded skips the city.toml writeback.
-func mutateAgentSuspended(fs fsys.FS, cityRoot string, raw, expanded *config.City, name string, suspended bool) error {
+// Returns [ErrUnmodified] whenever the on-disk city.toml was already
+// written surgically (or the change lives entirely in agent.toml), so
+// EditExpanded skips its own city.toml writeback.
+func mutateAgentSuspended(fs fsys.FS, tomlPath string, raw, expanded *config.City, name string, suspended bool) error {
+	cityRoot := filepath.Dir(tomlPath)
 	switch AgentOrigin(raw, expanded, name) {
 	case OriginInline:
-		return SetAgentSuspended(raw, name, suspended)
+		if err := config.WriteCityAgentSuspendedForEdit(fs, tomlPath, raw, name, suspended); err != nil {
+			return err
+		}
+		return ErrUnmodified
 	case OriginDerived:
 		agent, ok, err := findLocalDiscoveredAgent(fs, expanded, cityRoot, name)
 		if err != nil {
@@ -361,13 +371,34 @@ func mutateAgentSuspended(fs fsys.FS, cityRoot string, raw, expanded *config.Cit
 			// only strip the matching patch, not a same-named entry
 			// targeting a different rig.
 			if StripAgentPatchSuspended(raw, agent.QualifiedName()) {
-				return nil
+				// raw now reflects the stripped patch in memory. Also
+				// strip it surgically on disk so EditExpanded's lossy
+				// full-struct writeback (which drops every comment)
+				// doesn't run for what is otherwise a no-op city.toml
+				// change. Refuse instead of falling back to the lossy
+				// writeback when the on-disk block can't be
+				// unambiguously located -- silently accepting comment
+				// loss here would defeat the point of the surgical edit.
+				dir, base := config.ParseQualifiedName(agent.QualifiedName())
+				if err := config.StripAgentPatchSuspendedForEdit(fs, tomlPath, raw, dir, base); err != nil {
+					if !errors.Is(err, config.ErrSurgicalAgentEditUnsupported) {
+						return err
+					}
+					return fmt.Errorf("agent %q: legacy [[patches.agent]] suspended override could not be surgically stripped: %w", name, err)
+				}
 			}
 			return ErrUnmodified
 		}
-		return AddOrUpdateAgentPatch(raw, name, func(p *config.AgentPatch) {
-			p.Suspended = boolPtr(suspended)
-		})
+		dir, base := config.ParseQualifiedName(name)
+		if err := config.AppendAgentPatchSuspendedForEdit(fs, tomlPath, raw, dir, base, suspended); err != nil {
+			if !errors.Is(err, config.ErrSurgicalAgentEditUnsupported) {
+				return err
+			}
+			return AddOrUpdateAgentPatch(raw, name, func(p *config.AgentPatch) {
+				p.Suspended = boolPtr(suspended)
+			})
+		}
+		return ErrUnmodified
 	case OriginNotFound:
 		return fmt.Errorf("%w: agent %q", ErrNotFound, name)
 	}
@@ -672,15 +703,8 @@ func removeLocalDiscoveredAgentConfig(fs fsys.FS, cityRoot string, agent config.
 // city.toml is no longer touched — `gc doctor` warns about it
 // separately.
 func (e *Editor) SuspendRig(name string) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	cfg, err := e.loadForEdit()
-	if err != nil {
+	if err := e.requireRig(name); err != nil {
 		return err
-	}
-	if !rigDeclared(cfg, name) {
-		return fmt.Errorf("%w: rig %q", ErrNotFound, name)
 	}
 	cityPath := filepath.Dir(e.tomlPath)
 	t := true
@@ -692,6 +716,24 @@ func (e *Editor) SuspendRig(name string) error {
 // even when the rig declares suspended_on_start = true, so users don't
 // have to edit city.toml to keep a committed-default rig running.
 func (e *Editor) ResumeRig(name string) error {
+	if err := e.requireRig(name); err != nil {
+		return err
+	}
+	cityPath := filepath.Dir(e.tomlPath)
+	f := false
+	return suspensionstate.SetRigSuspended(e.fs, cityPath, name, &f)
+}
+
+// requireRig checks, under the Editor's lock, that the config declares a rig
+// named name. SuspendRig and ResumeRig write the runtime state file only after
+// it returns: that write can wait on the suspension fence while a controller
+// stops a scope's store, and the wait must not hold up every other Editor
+// mutation. A caller that serializes its mutations above the Editor (the
+// controller API's publication lock) still holds them up for that wait; the
+// stall is accepted because the fence holder never waits on such a lock, so it
+// ends when the store stop does. The state write orders itself
+// (suspensionstate.Update).
+func (e *Editor) requireRig(name string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -702,9 +744,7 @@ func (e *Editor) ResumeRig(name string) error {
 	if !rigDeclared(cfg, name) {
 		return fmt.Errorf("%w: rig %q", ErrNotFound, name)
 	}
-	cityPath := filepath.Dir(e.tomlPath)
-	f := false
-	return suspensionstate.SetRigSuspended(e.fs, cityPath, name, &f)
+	return nil
 }
 
 // SuspendCity records an explicit "suspended" preference for the city

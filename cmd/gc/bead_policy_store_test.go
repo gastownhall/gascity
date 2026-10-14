@@ -156,6 +156,45 @@ func TestBeadPolicyStoreAppliesDefaultStorageForAllowlistedCreates(t *testing.T)
 	}
 }
 
+func TestBeadPolicyStorePreservesNoHistoryThroughCachingStoreWithPlainBacking(t *testing.T) {
+	cases := []struct {
+		name string
+		bead beads.Bead
+	}{
+		{
+			name: "session",
+			bead: beads.Bead{Title: "session", Type: session.BeadType, Labels: []string{session.LabelSession}},
+		},
+		{
+			name: "order tracking",
+			bead: beads.Bead{Title: "order:daily", Labels: []string{"order-run:daily", labelOrderTracking}},
+		},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			backing := beads.NewMemStore()
+			cache := beads.NewCachingStoreForTest(backing, nil)
+			store := wrapStoreWithBeadPolicies(cache, &config.City{})
+
+			created, err := store.Create(tt.bead)
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			if !created.NoHistory || created.Ephemeral {
+				t.Fatalf("created storage = ephemeral:%v no_history:%v, want no-history", created.Ephemeral, created.NoHistory)
+			}
+			persisted, err := backing.Get(created.ID)
+			if err != nil {
+				t.Fatalf("backing Get: %v", err)
+			}
+			if !persisted.NoHistory || persisted.Ephemeral {
+				t.Fatalf("persisted storage = ephemeral:%v no_history:%v, want no-history", persisted.Ephemeral, persisted.NoHistory)
+			}
+		})
+	}
+}
+
 func TestBeadPolicyStoreBD105OptInUsesFastDefaultStorage(t *testing.T) {
 	backing := &captureCreateStore{Store: beads.NewMemStore()}
 	store := wrapStoreWithBeadPolicies(backing, &config.City{
@@ -677,5 +716,56 @@ func TestBeadPolicyStoreCountUnsupportedWithoutInnerCounter(t *testing.T) {
 	}
 	if _, err := counter.Count(context.Background(), beads.ListQuery{AllowScan: true}); !errors.Is(err, beads.ErrCountUnsupported) {
 		t.Fatalf("Count error = %v, want ErrCountUnsupported", err)
+	}
+}
+
+// witnessCaptureStore is a store that has already handed this process a row,
+// which is the state the store-health count checks a later zero against.
+type witnessCaptureStore struct {
+	beads.Store
+	sawRows bool
+}
+
+func (s *witnessCaptureStore) SawRows() bool { return s.sawRows }
+
+// TestBeadPolicyStorePreservesRowWitness pins the capability the store-health
+// row count depends on across this wrapper.
+//
+// The controller reads its city store through a policy wrapper on every city:
+// the opener policy-wraps its result, and wrapWithCachingStore re-wraps the
+// cache it builds. So a witness that stopped at the wrapper would leave
+// countBeadStoreRows unable to disprove a zero on exactly the stores the guard
+// was written for, and the failure is silent — a missing optional capability
+// reads as "this store cannot witness itself", which is a supported state.
+func TestBeadPolicyStorePreservesRowWitness(t *testing.T) {
+	store := wrapStoreWithBeadPolicies(&witnessCaptureStore{Store: beads.NewMemStore(), sawRows: true}, &config.City{})
+
+	witness, ok := store.(beads.RowWitness)
+	if !ok {
+		t.Fatal("policy store does not implement beads.RowWitness; the store-health count loses its only disproof of a zero on every controller-opened city")
+	}
+	if !witness.SawRows() {
+		t.Fatal("SawRows() = false while the wrapped store had already been handed a row")
+	}
+
+	cold := wrapStoreWithBeadPolicies(&witnessCaptureStore{Store: beads.NewMemStore()}, &config.City{})
+	if cold.(beads.RowWitness).SawRows() {
+		t.Fatal("SawRows() = true over a store holding no evidence; the wrapper must forward the verdict, not manufacture one")
+	}
+}
+
+// TestBeadPolicyStoreReportsNoEvidenceWithoutInnerWitness covers the inner
+// stores that cannot witness themselves. Reporting no evidence is what keeps a
+// caller on its prior behavior, the same way an absent inner Counter reports
+// ErrCountUnsupported rather than failing the read.
+func TestBeadPolicyStoreReportsNoEvidenceWithoutInnerWitness(t *testing.T) {
+	store := wrapStoreWithBeadPolicies(beads.NewMemStore(), &config.City{})
+
+	witness, ok := store.(beads.RowWitness)
+	if !ok {
+		t.Fatal("policy store does not implement beads.RowWitness")
+	}
+	if witness.SawRows() {
+		t.Fatal("SawRows() = true over a store that cannot witness itself")
 	}
 }

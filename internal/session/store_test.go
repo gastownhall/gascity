@@ -197,70 +197,75 @@ func TestGetReflectsApplyPatch(t *testing.T) {
 	}
 }
 
-// TestSleepEmitsSleepPatch proves the typed Sleep method emits exactly the bead
-// write that SleepPatch produces — the same write the reconciler raw op did.
+// TestSleepEmitsSleepPatch proves the typed Sleep method writes the row
+// SleepPatch produces, keeping an operator's user-hold intent and a wait's
+// intent the row carries (ApplySleep, D-J 3).
 func TestSleepEmitsSleepPatch(t *testing.T) {
-	b := sessionBeadFixture("s-1", "open", map[string]string{"state": "active"})
-	is, rec := recordingStore(t, b)
-
 	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
-	if err := is.Sleep("s-1", "idle-timeout", now); err != nil {
-		t.Fatalf("Sleep: %v", err)
-	}
-	calls := rec.CallsForOp("SetMetadataBatch")
-	if len(calls) != 1 {
-		t.Fatalf("want 1 SetMetadataBatch, got %d", len(calls))
-	}
-	want := map[string]string(SleepPatch(now, "idle-timeout"))
-	if !reflect.DeepEqual(calls[0].Metadata, want) {
-		t.Errorf("Sleep batch = %#v, want %#v", calls[0].Metadata, want)
+	for intent, want := range map[string]string{"": "", "idle-stop-pending": "", "user-hold": "user-hold", "wait-hold": "wait-hold"} {
+		b := sessionBeadFixture("s-1", "open", map[string]string{"state": "active", "sleep_intent": intent})
+		is, _ := recordingStore(t, b)
+		if err := is.Sleep("s-1", "idle-timeout", now); err != nil {
+			t.Fatalf("Sleep: %v", err)
+		}
+		got, err := is.Get("s-1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.MetadataState != "asleep" || got.SleepReason != "idle-timeout" || got.SleptAt != now.Format(time.RFC3339) || got.SleepIntent != want {
+			t.Errorf("intent %q: state=%q sleep_reason=%q slept_at=%q sleep_intent=%q, want SleepPatch with sleep_intent %q",
+				intent, got.MetadataState, got.SleepReason, got.SleptAt, got.SleepIntent, want)
+		}
 	}
 }
 
-// TestSetWaitHoldClearWritesEmptyStrings proves clearing wait-hold emits the
-// empty-string writes the raw cmd_wait.go clear did.
+// TestSetWaitHoldClearWritesEmptyStrings proves clearing a wait hold writes
+// the WaitEnd cell's move, fenced on a fresh read: the wait and its own
+// intent, as empty strings, and no other key.
 func TestSetWaitHoldClearWritesEmptyStrings(t *testing.T) {
-	b := sessionBeadFixture("s-1", "open", map[string]string{"wait_hold": "x", "sleep_intent": "x"})
+	b := sessionBeadFixture("s-1", "open", map[string]string{"wait_hold": "x", "sleep_intent": "wait-hold"})
 	is, rec := recordingStore(t, b)
 
 	if err := is.SetWaitHold("s-1", false, ""); err != nil {
 		t.Fatalf("SetWaitHold: %v", err)
 	}
-	calls := rec.CallsForOp("SetMetadataBatch")
+	calls := rec.CallsForOp("Update")
 	if len(calls) != 1 {
-		t.Fatalf("want 1 SetMetadataBatch, got %d", len(calls))
+		t.Fatalf("want 1 Update, got %d", len(calls))
 	}
 	want := map[string]string{"wait_hold": "", "sleep_intent": ""}
-	if !reflect.DeepEqual(calls[0].Metadata, want) {
-		t.Errorf("clear batch = %#v, want %#v", calls[0].Metadata, want)
+	if !reflect.DeepEqual(calls[0].Opts.Metadata, want) {
+		t.Errorf("clear batch = %#v, want %#v", calls[0].Opts.Metadata, want)
 	}
 }
 
 // TestCloseEmitsClosePatchThenClose proves Close stamps ClosePatch metadata and
-// then closes the bead — the byte-identical replacement for closeBead's
-// SetMetadataBatch(ClosePatch)+Close, WITHOUT any work-reassignment side effect
-// (that is Phase 6).
+// then closes the bead, in one transaction on a store without the atomic
+// close (CommitClose), WITHOUT any work-reassignment side effect (that is
+// Phase 6).
 func TestCloseEmitsClosePatchThenClose(t *testing.T) {
 	b := sessionBeadFixture("s-1", "open", map[string]string{"state": "active"})
 	is, rec := recordingStore(t, b)
 
 	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
-	closed, err := is.Close("s-1", "gc_swept", now)
+	closed, err := is.Close(infoFromPersistedBead(b), "gc_swept", now)
 	if err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 	if !closed {
 		t.Fatalf("Close reported not-closed for an open bead")
 	}
-
-	gotOps := opsOf(rec.Calls())
-	wantOps := []string{"SetMetadataBatch", "Close"}
-	if !reflect.DeepEqual(gotOps, wantOps) {
-		t.Fatalf("Close ops = %v, want %v", gotOps, wantOps)
+	got, err := rec.Get("s-1")
+	if err != nil {
+		t.Fatal(err)
 	}
-	want := map[string]string(ClosePatch(now, "gc_swept"))
-	if !reflect.DeepEqual(rec.CallsForOp("SetMetadataBatch")[0].Metadata, want) {
-		t.Errorf("close patch = %#v, want %#v", rec.CallsForOp("SetMetadataBatch")[0].Metadata, want)
+	if got.Status != "closed" {
+		t.Fatalf("status = %q, want closed", got.Status)
+	}
+	for k, v := range ClosePatch(now, "gc_swept") {
+		if got.Metadata[k] != v {
+			t.Errorf("metadata[%q] = %q, want %q", k, got.Metadata[k], v)
+		}
 	}
 }
 
@@ -269,7 +274,7 @@ func TestCloseAlreadyClosedIsNoOp(t *testing.T) {
 	b := sessionBeadFixture("s-1", "closed", nil)
 	is, rec := recordingStore(t, b)
 
-	closed, err := is.Close("s-1", "gc_swept", time.Now())
+	closed, err := is.Close(infoFromPersistedBead(b), "gc_swept", time.Now())
 	if err != nil {
 		t.Fatalf("Close: %v", err)
 	}
@@ -490,8 +495,8 @@ func TestCloseWithoutReasonEmitsSingleClose(t *testing.T) {
 }
 
 // TestSetStatusOpenEmitsStatusOnlyUpdate proves SetStatusOpen emits exactly one
-// Update with only Status="open" set — byte-identical to the raw
-// store.Update(id, UpdateOpts{Status: &"open"}) reopen/retire-archive writes.
+// Update with Status="open" and the runtime lease clear (a reopened row holds
+// no lease), and nothing else.
 func TestSetStatusOpenEmitsStatusOnlyUpdate(t *testing.T) {
 	b := sessionBeadFixture("s-1", "closed", map[string]string{"state": "archived"})
 	is, rec := recordingStore(t, b)
@@ -510,8 +515,8 @@ func TestSetStatusOpenEmitsStatusOnlyUpdate(t *testing.T) {
 	if c.Opts.Status == nil || *c.Opts.Status != "open" {
 		t.Errorf("Update Status = %v, want open", c.Opts.Status)
 	}
-	if c.Opts.Type != nil || c.Opts.Metadata != nil || c.Opts.Labels != nil {
-		t.Errorf("Update set fields beyond Status: %#v", c.Opts)
+	if c.Opts.Type != nil || c.Opts.Labels != nil || !reflect.DeepEqual(c.Opts.Metadata, map[string]string(RuntimeLeaseClearPatch())) {
+		t.Errorf("Update set fields beyond Status and the runtime lease clear: %#v", c.Opts)
 	}
 }
 

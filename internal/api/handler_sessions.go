@@ -11,8 +11,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -94,10 +96,16 @@ func sessionToResponse(info session.Info, cfg *config.City) sessionResponse {
 		provider, displayName = resolveProviderInfo(info.Provider, cfg)
 	}
 	rig, _ := config.ParseQualifiedName(info.Template)
+	state := string(info.State)
+	if info.Closed {
+		// session.Info blanks State on a closed bead and carries closure in
+		// Closed; the wire reports it as the closed lifecycle state.
+		state = string(session.BaseStateClosed)
+	}
 	r := sessionResponse{
 		ID:          info.ID,
 		Template:    info.Template,
-		State:       string(info.State),
+		State:       state,
 		Title:       info.Title,
 		Alias:       info.Alias,
 		Provider:    provider,
@@ -129,6 +137,16 @@ func sessionToResponse(info session.Info, cfg *config.City) sessionResponse {
 	return r
 }
 
+// asProviderSession marks r as a provider session. A provider session is a
+// conversation with a provider, not a member of an agent's pool, so it carries
+// no pool or agent_kind even when its template names the provider's implicit
+// agent (which sessionToResponse classifies as a pool).
+func asProviderSession(r *sessionResponse) {
+	r.Kind = "provider"
+	r.Pool = ""
+	r.AgentKind = ""
+}
+
 // sessionResponseWithReason builds a session response from session.Info plus the
 // persisted-response projection (status + metadata). It is the keystone of the
 // session-response path: scalar fields come from Info, and the
@@ -153,7 +171,7 @@ func sessionResponseWithReason(info session.Info, pr session.PersistedResponse, 
 			r.Kind = "agent"
 			agentTemplateOK = agentFound
 		} else {
-			r.Kind = "provider"
+			asProviderSession(&r)
 		}
 		if agentTemplateOK {
 			rp, _ := resolveProviderForSessionOptions(info, pr.Metadata, cfg)
@@ -186,7 +204,7 @@ func sessionResponseWithReason(info session.Info, pr session.PersistedResponse, 
 	}
 	r.Reason = session.LifecycleDisplayReasonWithLiveness(pr.Status, pr.Metadata, time.Now().UTC(), info.SessionName, isRunning)
 	r.ConfiguredNamedSession = strings.TrimSpace(pr.Metadata[apiNamedSessionMetadataKey]) == "true"
-	r.SubmissionCapabilities = session.SubmissionCapabilitiesForMetadata(pr.Metadata, hasDeferredQueue)
+	r.SubmissionCapabilities = session.SubmissionCapabilitiesForRuntime(pr.Metadata, hasDeferredQueue, runtime.TurnInterruptModeFor(sp, info.SessionName))
 	// Expose only real_world_app_* prefixed metadata keys to API consumers.
 	// Internal fields (session_key, command, work_dir, etc.) are redacted.
 	r.Metadata = filterMetadata(pr.Metadata)
@@ -366,7 +384,7 @@ func (s *Server) handleSessionSuspend(w http.ResponseWriter, r *http.Request) {
 		writeSessionManagerError(w, err)
 		return
 	}
-	if err := handle.Stop(r.Context()); err != nil {
+	if err := handle.Stop(r.Context(), s.actor(session.ActorOperator)); err != nil {
 		writeSessionManagerError(w, err)
 		return
 	}
@@ -389,7 +407,7 @@ func (s *Server) handleSessionClose(w http.ResponseWriter, r *http.Request) {
 		writeSessionManagerError(w, err)
 		return
 	}
-	closeResult, err := handle.CloseDetailed(r.Context())
+	closeResult, err := handle.CloseDetailed(r.Context(), s.actor(session.ActorOperator))
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return
@@ -502,6 +520,13 @@ func (s *Server) handleSessionWake(w http.ResponseWriter, r *http.Request) {
 	if sessionName != "" {
 		s.state.ClearCrashHistory(sessionName)
 	}
+	// Recorded, but a demand-only singleton's pool session will not start
+	// from it (#6858); same enqueue, refusal and code as the Huma route.
+	if msg := demandOnlySingletonWakeRefusal(s.state.Config(), res.Info); msg != "" {
+		s.state.Enqueue(reconcilekey.Session(id))
+		writeError(w, apierr.DemandOnlySingleton.Status, apierr.DemandOnlySingleton.Code, msg)
+		return
+	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "id": id})
 }
@@ -527,7 +552,7 @@ func (s *Server) handleSessionRename(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid", decErr.Error())
 		return
 	}
-	if body.Title == "" {
+	if strings.TrimSpace(body.Title) == "" {
 		writeError(w, http.StatusBadRequest, "invalid", "title is required")
 		return
 	}
@@ -749,7 +774,7 @@ func (s *Server) handleSessionPatch(w http.ResponseWriter, r *http.Request) {
 	var titlePtr *string
 	if rawTitle, ok := body["title"]; ok {
 		title, isString := rawTitle.(string)
-		if !isString || title == "" {
+		if !isString || strings.TrimSpace(title) == "" {
 			writeError(w, http.StatusBadRequest, "invalid", "title must be a non-empty string")
 			return
 		}

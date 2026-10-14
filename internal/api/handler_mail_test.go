@@ -183,12 +183,12 @@ func (f *multiProviderFakeState) MailProviders() map[string]mail.Provider {
 	return f.providers
 }
 
-func TestMailInboxForRecipientsUsesMultiRecipientProvider(t *testing.T) {
+func TestMailInboxForQueryUsesMultiRecipientProvider(t *testing.T) {
 	mp := &multiRecipientInboxMailProvider{}
 
-	msgs, err := mailInboxForRecipients(mp, []string{"sky", "mayor", "sky"})
+	msgs, err := mailInboxForQuery(mp, apiMailQuery{recipients: []string{"sky", "mayor", "sky"}})
 	if err != nil {
-		t.Fatalf("mailInboxForRecipients: %v", err)
+		t.Fatalf("mailInboxForQuery: %v", err)
 	}
 	if len(msgs) != 1 || msgs[0].ID != "multi-1" {
 		t.Fatalf("messages = %#v, want multi-recipient result", msgs)
@@ -202,15 +202,15 @@ func TestMailInboxForRecipientsUsesMultiRecipientProvider(t *testing.T) {
 	}
 }
 
-func TestMailInboxForRecipientsFallbackDedupesMessages(t *testing.T) {
+func TestMailInboxForQueryFallbackDedupesMessages(t *testing.T) {
 	mp := &exactRecipientMailProvider{messages: map[string][]mail.Message{
 		"sky":   {{ID: "msg-1", To: "sky"}, {ID: "shared", To: "sky"}},
 		"mayor": {{ID: "shared", To: "mayor"}, {ID: "msg-2", To: "mayor"}},
 	}}
 
-	msgs, err := mailInboxForRecipients(mp, []string{"sky", "mayor", "sky"})
+	msgs, err := mailInboxForQuery(mp, apiMailQuery{recipients: []string{"sky", "mayor", "sky"}})
 	if err != nil {
-		t.Fatalf("mailInboxForRecipients: %v", err)
+		t.Fatalf("mailInboxForQuery: %v", err)
 	}
 	if len(msgs) != 3 {
 		t.Fatalf("messages = %#v, want 3 deduped fallback messages", msgs)
@@ -250,7 +250,7 @@ func TestMailLifecycle(t *testing.T) {
 	h := newTestCityHandler(t, state)
 
 	// Send a message. Bare "worker" resolves to "myrig/worker" (the qualified name).
-	body := `{"from":"mayor","to":"worker","subject":"Review needed","body":"Please check gc-456"}`
+	body := `{"from":"human","to":"worker","subject":"Review needed","body":"Please check gc-456"}`
 	req := newPostRequest(cityURL(state, "/mail"), bytes.NewBufferString(body))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -329,7 +329,7 @@ func TestMailMarkUnread(t *testing.T) {
 	state := newFakeState(t)
 	h := newTestCityHandler(t, state)
 
-	body := `{"from":"mayor","to":"worker","subject":"Unread test","body":"check this"}`
+	body := `{"from":"human","to":"worker","subject":"Unread test","body":"check this"}`
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/mail"), bytes.NewBufferString(body)))
 	if rec.Code != http.StatusCreated {
@@ -366,6 +366,42 @@ func TestMailMarkUnread(t *testing.T) {
 	json.NewDecoder(rec.Body).Decode(&unread) //nolint:errcheck
 	if unread.Read {
 		t.Fatalf("get after mark-unread: Read = true, want false")
+	}
+}
+
+// TestMailSendOmittedBodyStaysEmpty pins the POST /v0/mail contract for a
+// request that carries a subject and no body. MailSendInput marks Subject
+// required (minLength:"1") and Body optional, so this is a well-formed
+// request, and the omitted body must round-trip as empty rather than being
+// silently backfilled from the subject.
+//
+// The point is cross-surface agreement: `gc mail send <to> -s "text"` stores
+// an empty body too (cmd/gc: TestMailSendSubjectOnlyStoresEmptyBody), so
+// mail.Provider.Send behaves identically whichever surface issued it. A
+// backfill applied at one ingress and not the others is what makes the two
+// diverge. The rendering of a bodyless message is handled in the read paths,
+// downstream of every ingress (ga-6eukj0).
+func TestMailSendOmittedBodyStaysEmpty(t *testing.T) {
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
+
+	body := `{"from":"human","to":"worker","subject":"Build is green"}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/mail"), bytes.NewBufferString(body)))
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+
+	var msg mail.Message
+	if err := json.NewDecoder(rec.Body).Decode(&msg); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if msg.Subject != "Build is green" {
+		t.Errorf("Subject = %q, want %q", msg.Subject, "Build is green")
+	}
+	if msg.Body != "" {
+		t.Errorf("Body = %q, want empty (an omitted optional body must not be backfilled)", msg.Body)
 	}
 }
 
@@ -1285,7 +1321,7 @@ func TestMailSendIdempotentReplayIncludesRig(t *testing.T) {
 	state := newFakeState(t)
 	h := newTestCityHandler(t, state)
 
-	body := `{"rig":"test-city","from":"alice","to":"worker","subject":"Hi","body":"hello"}`
+	body := `{"rig":"test-city","from":"human","to":"worker","subject":"Hi","body":"hello"}`
 	req := newPostRequest(cityURL(state, "/mail"), bytes.NewBufferString(body))
 	req.Header.Set("Idempotency-Key", "mail-send-1")
 	rec := httptest.NewRecorder()
@@ -1368,7 +1404,7 @@ func TestMailReplyWithoutRigHintUsesResolvedRig(t *testing.T) {
 	msg, _ := mp.Send("alice", "bob", "Hi", "hello")
 	h := newTestCityHandler(t, state)
 
-	body := `{"from":"bob","subject":"Re: Hi","body":"reply"}`
+	body := `{"from":"worker","subject":"Re: Hi","body":"reply"}`
 	req := newPostRequest(cityURL(state, "/mail/")+msg.ID+"/reply", bytes.NewBufferString(body))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)

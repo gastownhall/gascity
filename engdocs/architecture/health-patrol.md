@@ -116,9 +116,16 @@ A single controller tick proceeds as follows:
 4. **Wisp GC**. If enabled, purges expired closed molecules older than
    `wisp_ttl`.
 
-5. **Order dispatch** (`ad.dispatch()`). Evaluates all non-manual
-   order gates. For each due order, creates a tracking bead
-   synchronously (to prevent re-fire), then dispatches in a goroutine.
+5. **Orders lane wake**. The tick no longer dispatches orders. It wakes
+   the orders lane (`cmd/gc/orders_lane.go`), which runs dispatch on its
+   own goroutine. A wake runs a pass at once if the lane has idled as long
+   as its previous pass ran, and otherwise as soon as it has, and a timer
+   reset after every pass runs one a patrol interval after the last if no
+   wake came. Each pass applies the
+   same FS-pressure gate and managed-Dolt preflight the tick used to, and
+   evaluates all non-manual order gates. For each due order, it creates a
+   tracking bead synchronously (to prevent re-fire), then dispatches in a
+   goroutine. See [Orders](orders.md#data-flow).
 
 ### Reconciliation State Machine
 

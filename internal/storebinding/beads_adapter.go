@@ -230,14 +230,17 @@ func (a *beadsOrdersAdapter) LastRun(scoped string) (time.Time, error) {
 	if !a.graphDistinct {
 		return latest, nil
 	}
-	items, err := a.graph.List(beads.ListQuery{
-		Label:                    orders.RunLabel(scoped),
-		Limit:                    1,
-		IncludeClosed:            true,
-		Sort:                     beads.SortCreatedDesc,
-		TierMode:                 beads.TierBoth,
-		AllowBackingCreatedLimit: true,
-	})
+	// Only a run record counts (orders.IsRunRecord, the #7766 review).
+	items, err := orders.NewestRunRecords(func(limit int) ([]beads.Bead, error) {
+		return a.graph.List(beads.ListQuery{
+			Label:                    orders.RunLabel(scoped),
+			Limit:                    limit,
+			IncludeClosed:            true,
+			Sort:                     beads.SortCreatedDesc,
+			TierMode:                 beads.TierBoth,
+			AllowBackingCreatedLimit: true,
+		})
+	}, 1)
 	if err != nil {
 		if len(items) == 0 {
 			return time.Time{}, err
@@ -257,13 +260,15 @@ func (a *beadsOrdersAdapter) Cursor(scoped string) orders.EventCursor {
 	if !a.graphDistinct {
 		return latest
 	}
-	items, err := a.graph.List(beads.ListQuery{
-		Label:         orders.RunLabel(scoped),
-		Limit:         10,
-		IncludeClosed: true,
-		Sort:          beads.SortCreatedDesc,
-		TierMode:      beads.TierBoth,
-	})
+	items, err := orders.NewestRunRecords(func(limit int) ([]beads.Bead, error) { // run records only (the #7766 review)
+		return a.graph.List(beads.ListQuery{
+			Label:         orders.RunLabel(scoped),
+			Limit:         limit,
+			IncludeClosed: true,
+			Sort:          beads.SortCreatedDesc,
+			TierMode:      beads.TierBoth,
+		})
+	}, 10)
 	if err != nil {
 		log.Printf("orders: cursor lookup failed for %s: %v", scoped, err)
 	}

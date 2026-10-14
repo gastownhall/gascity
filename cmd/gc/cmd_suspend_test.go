@@ -3,11 +3,13 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
@@ -351,4 +353,64 @@ func TestSuspendInheritance(t *testing.T) {
 			t.Errorf("agent %q should be suspended when city has suspended_on_start=true", a.QualifiedName())
 		}
 	}
+}
+
+// TestSuspendRecordsEventInTargetCity is a regression guard for ga-41g9gr.
+//
+// doSuspendCity writes suspension state to its cityPath argument but used to
+// record the lifecycle event through openCityRecorder, which re-resolves the
+// *ambient* city from cwd/env independently of cityPath. Suspending an
+// explicitly named city from inside a different, live city therefore appended
+// city.suspended/city.resumed to the wrong city's event log — 23 spurious
+// pairs a day on the fleet's real city, which never itself suspended.
+//
+// The event must land in the city whose state actually changed.
+func TestSuspendRecordsEventInTargetCity(t *testing.T) {
+	ambient := newRealCityDir(t, "ambient")
+	target := newRealCityDir(t, "target")
+
+	// Ambient resolution (openCityRecorder -> resolveCity) points at a
+	// city that is NOT the suspend target.
+	t.Setenv("GC_CITY", ambient)
+
+	var stdout, stderr bytes.Buffer
+	if code := doSuspendCity(fsys.OSFS{}, target, true, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("suspend code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	ambientEvents := filepath.Join(ambient, ".gc", "events.jsonl")
+	if data, err := os.ReadFile(ambientEvents); err == nil && strings.Contains(string(data), events.CitySuspended) {
+		t.Errorf("city.suspended leaked into the ambient city's event log %s:\n%s",
+			ambientEvents, data)
+	}
+
+	targetEvents := filepath.Join(target, ".gc", "events.jsonl")
+	data, err := os.ReadFile(targetEvents)
+	if err != nil {
+		t.Fatalf("target city recorded no event at %s: %v", targetEvents, err)
+	}
+	if !strings.Contains(string(data), events.CitySuspended) {
+		t.Errorf("target event log %s = %q, want a %s record",
+			targetEvents, data, events.CitySuspended)
+	}
+}
+
+// newRealCityDir creates a minimal city on the real filesystem. The event
+// recorder always uses the OS filesystem regardless of the fsys.FS handed to
+// doSuspendCity, so this regression test cannot use fsys.NewFake.
+func newRealCityDir(t *testing.T, name string) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), name)
+	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.DefaultCity(name)
+	data, err := cfg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }

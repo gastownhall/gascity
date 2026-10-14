@@ -1,11 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -15,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -36,6 +42,25 @@ type testStore struct {
 	metadataBatchCalls   int
 	metadataBatchPatches []map[string]string
 	metadataBatchErr     error
+	// rows is what Get serves for an id a heal shim persisted (see persistRow).
+	// Any other id reads back as a bare bead, as before.
+	rows map[string]beads.Bead
+}
+
+// persistRow records b as the stored row Get returns, so a write that re-reads
+// the row before landing (the lifecycle-fenced status heal) sees the fixture
+// the test is healing.
+func (s *testStore) persistRow(b beads.Bead) {
+	if s.rows == nil {
+		s.rows = make(map[string]beads.Bead)
+	}
+	b.Type = sessionBeadType
+	meta := make(map[string]string, len(b.Metadata))
+	for k, v := range b.Metadata {
+		meta[k] = v
+	}
+	b.Metadata = meta
+	s.rows[b.ID] = b
 }
 
 func newTestStore() *testStore {
@@ -73,6 +98,9 @@ func (s *testStore) Ping() error {
 }
 
 func (s *testStore) Get(id string) (beads.Bead, error) {
+	if b, ok := s.rows[id]; ok {
+		return b, nil
+	}
 	return beads.Bead{ID: id}, nil
 }
 
@@ -123,6 +151,12 @@ func seedSessionInfo(b beads.Bead) sessionpkg.Info {
 func healStateInfo(session *beads.Bead, alive bool, sessFront *sessionpkg.Store, clk clock.Clock) {
 	if session == nil {
 		return
+	}
+	// The heal re-reads the stored row before writing and refuses when it no
+	// longer matches the snapshot, so a recording testStore must hold the
+	// fixture being healed.
+	if ts, ok := sessFront.Store().Store.(*testStore); ok {
+		ts.persistRow(*session)
 	}
 	batch, err := healStateWithRollbackInfo(seedSessionInfo(*session), alive, true, sessFront, clk, 0, true)
 	if err != nil {
@@ -1214,6 +1248,71 @@ func TestHealExpiredTimers_ClearsExpiredHold(t *testing.T) {
 	}
 }
 
+// TestHealExpiredTimers_KeepsAnOperatorSuspend: an operator's suspend whose
+// held_until has passed keeps its intent and stamp; only the expired timer
+// goes (the TimerTick cell, main's heal). Every operator suspend is ∞, so an
+// expired one was shortened by a race or an undo, never meant to end.
+func TestHealExpiredTimers_KeepsAnOperatorSuspend(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	store := newTestStore()
+	session := makeBead("b1", map[string]string{
+		"held_until":   now.Add(-time.Hour).Format(time.RFC3339),
+		"sleep_intent": "user-hold",
+		"suspended_at": now.Add(-2 * time.Hour).Format(time.RFC3339),
+		"sleep_reason": "user-hold",
+	})
+	got := healExpiredTimersInfo(seedSessionInfo(session), sessionFrontDoor(store), &clock.Fake{Time: now})
+	if got.HeldUntil != "" || got.SleepIntent != "user-hold" || got.SuspendedAt == "" {
+		t.Errorf("after the heal held_until=%q sleep_intent=%q suspended_at=%q, want the timer gone and the suspend kept",
+			got.HeldUntil, got.SleepIntent, got.SuspendedAt)
+	}
+}
+
+// dj2UpdateHook runs hook once, before the first Update reaches the store.
+type dj2UpdateHook struct {
+	beads.Store
+	hook func()
+	done bool
+}
+
+func (s *dj2UpdateHook) Update(id string, opts beads.UpdateOpts) error {
+	if !s.done && s.hook != nil {
+		s.done = true
+		s.hook()
+	}
+	return s.Store.Update(id, opts)
+}
+
+// TestHeartbeatRaceThenTimerHealKeepsTheSuspend (DJ2): on a store without
+// CAS a heartbeat racing an operator suspend shortens its held_until to the
+// heartbeat's (the D-I residual); when that time passes, the timer heal keeps
+// the operator's suspend.
+func TestHeartbeatRaceThenTimerHealKeepsTheSuspend(t *testing.T) {
+	const sessionName, beadID = "testpack__beater", "bead-789"
+	mem := beads.NewMemStoreFrom(0, []beads.Bead{makeSessionBead(beadID, sessionName)}, nil)
+	if err := mem.SetMetadata(beadID, "state", "active"); err != nil {
+		t.Fatal(err)
+	}
+	w := &dj2UpdateHook{Store: mem}
+	w.hook = func() {
+		if _, err := sessionFrontDoor(mem).OperatorSuspend(beadID, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var so, se bytes.Buffer
+	if code := doRuntimeHeartbeat(w, time.Hour, sessionName, sessionName, false, &so, &se); code != 0 {
+		t.Fatalf("heartbeat exit %d: %s", code, se.String())
+	}
+	info, err := sessionFrontDoor(mem).Get(beadID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	healExpiredTimersInfo(info, sessionFrontDoor(mem), &clock.Fake{Time: time.Now().Add(2 * time.Hour)})
+	if healed, _ := mem.Get(beadID); healed.Metadata["sleep_intent"] != "user-hold" {
+		t.Errorf("after the heal sleep_intent=%q held_until=%q: the raced suspend was healed away", healed.Metadata["sleep_intent"], healed.Metadata["held_until"])
+	}
+}
+
 func TestHealExpiredTimers_KeepsActiveHold(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
@@ -1311,7 +1410,7 @@ func TestCheckStability_AliveReturnsFalse(t *testing.T) {
 		"last_woke_at": clk.Now().Add(-10 * time.Second).Format(time.RFC3339),
 	})
 
-	if _, stab := checkStability(seedSessionInfo(session), nil, true, dt, sessionFrontDoor(store), clk, nil); stab {
+	if _, stab := checkStability(seedSessionInfo(session), nil, true, dt, sessionFrontDoor(store), clk, nil, nil, nil); stab {
 		t.Error("alive session should not report stability failure")
 	}
 }
@@ -1327,7 +1426,8 @@ func TestCheckStability_RapidExit(t *testing.T) {
 		"wake_attempts": "0",
 	})
 
-	_, stab := checkStability(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), clk, nil)
+	store.persistRow(session) // the row the accrual reads fresh (mc-uhvqj)
+	_, stab := checkStability(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), clk, nil, nil, nil)
 	syncBeadFromStore(&session, store)
 	if !stab {
 		t.Error("rapid exit should report stability failure")
@@ -1355,7 +1455,7 @@ func TestCheckStability_PendingCreateInFlightNotCounted(t *testing.T) {
 		"wake_attempts":        "0",
 	})
 
-	_, stab := checkStability(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), clk, nil)
+	_, stab := checkStability(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), clk, nil, nil, nil)
 	syncBeadFromStore(&session, store)
 	if stab {
 		t.Fatal("in-flight pending create should not be counted as a rapid exit")
@@ -1379,7 +1479,7 @@ func TestCheckStability_PendingCreateClaimNotCountedAfterStartupLeaseExpires(t *
 		"wake_attempts":        "0",
 	})
 
-	_, stab := checkStability(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), clk, nil)
+	_, stab := checkStability(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), clk, nil, nil, nil)
 	syncBeadFromStore(&session, store)
 	if stab {
 		t.Fatal("pending_create_claim should suppress stability counting until create recovery clears the claim")
@@ -1400,7 +1500,7 @@ func TestCheckStability_DrainingNotCounted(t *testing.T) {
 		"last_woke_at": now.Add(-10 * time.Second).Format(time.RFC3339),
 	})
 
-	if _, stab := checkStability(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), clk, nil); stab {
+	if _, stab := checkStability(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), clk, nil, nil, nil); stab {
 		t.Error("draining session death should not count as stability failure")
 	}
 }
@@ -1416,7 +1516,7 @@ func TestCheckStability_StableSession(t *testing.T) {
 		"last_woke_at": now.Add(-2 * time.Minute).Format(time.RFC3339),
 	})
 
-	if _, stab := checkStability(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), clk, nil); stab {
+	if _, stab := checkStability(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), clk, nil, nil, nil); stab {
 		t.Error("session that lived past threshold should not be stability failure")
 	}
 }
@@ -1435,7 +1535,7 @@ func TestCheckStability_SubprocessProviderSkipsCrashCounting(t *testing.T) {
 		"wake_attempts": "0",
 	})
 
-	_, stab := checkStability(seedSessionInfo(session), cfg, false, dt, sessionFrontDoor(store), clk, nil)
+	_, stab := checkStability(seedSessionInfo(session), cfg, false, dt, sessionFrontDoor(store), clk, nil, nil, nil)
 	syncBeadFromStore(&session, store)
 	if stab {
 		t.Fatal("subprocess rapid exit should not be counted as a crash")
@@ -1455,7 +1555,7 @@ func TestCheckStability_SubprocessProviderSkipsCrashCounting(t *testing.T) {
 // conversation is actually unresumable. Attempt accrual is unaffected.
 func TestRecordWakeFailure_KeepsResumableConversation(t *testing.T) {
 	prevProbe := staleResumeKeyProbe
-	staleResumeKeyProbe = func(_, _, _ string) (present, probeable bool) { return true, true }
+	staleResumeKeyProbe = func(_ []string, _, _, _ string) (present, probeable bool) { return true, true }
 	t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
 
 	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
@@ -1468,7 +1568,7 @@ func TestRecordWakeFailure_KeepsResumableConversation(t *testing.T) {
 		"work_dir":            "/work",
 	})
 
-	recordWakeFailure(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+	recordWakeFailure(seedSessionInfo(session), sessionTranscriptSearchPaths(nil), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil), resumeFailure{}, nil)
 	syncBeadFromStore(&session, store)
 
 	if got := session.Metadata["session_key"]; got != "live-key" {
@@ -1482,11 +1582,274 @@ func TestRecordWakeFailure_KeepsResumableConversation(t *testing.T) {
 	}
 }
 
+// Kills a legacy wake failure that probes only the default transcript roots
+// (mc-zmg7h): both of its entrances, a rapid crash and a failed start, keep a
+// claude conversation kept only under a configured observe path, and accrue
+// the attempt; without the root both reset it.
+func TestWakeFailureUsesConfiguredTranscriptRoots(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	workDir := t.TempDir()
+	root := observedTranscript(t, workDir)
+	row := func() beads.Bead {
+		return makeBead("b1", map[string]string{
+			"session_name": "worker", "provider": "claude", "work_dir": workDir, "session_key": "k-1", "started_config_hash": "h-1",
+			"wake_attempts": "0", "last_woke_at": now.Add(-10 * time.Second).Format(time.RFC3339),
+		})
+	}
+	entrances := map[string]func(store *testStore, session beads.Bead, cfg *config.City){
+		"rapid crash": func(store *testStore, session beads.Bead, cfg *config.City) {
+			store.persistRow(session)
+			if _, stab := checkStability(seedSessionInfo(session), cfg, false, newDrainTracker(), sessionFrontDoor(store), clk, nil, sessionTranscriptSearchPaths(cfg), nil); !stab {
+				t.Fatal("rapid exit not recorded")
+			}
+		},
+		"failed start": func(store *testStore, session beads.Bead, cfg *config.City) {
+			store.persistRow(session)
+			commitStartFailure(startResult{
+				prepared: preparedStart{candidate: startCandidate{info: seedSessionInfo(session), tp: TemplateParams{SessionName: "worker", TemplateName: "worker"}}, transcriptRoots: sessionTranscriptSearchPaths(cfg)},
+				err:      errors.New("boom"),
+				outcome:  TraceOutcomeProviderError,
+			}, sessionFrontDoor(store), clk, events.Discard, 0, io.Discard, nil)
+		},
+	}
+	for name, run := range entrances {
+		for _, observed := range []bool{true, false} {
+			cfg := &config.City{}
+			if observed {
+				cfg.Daemon.ObservePaths = []string{root}
+			}
+			store := newTestStore()
+			session := row()
+			run(store, session, cfg)
+			syncBeadFromStore(&session, store)
+			kept := session.Metadata["session_key"] == "k-1" && session.Metadata["started_config_hash"] == "h-1"
+			if kept != observed || session.Metadata["wake_attempts"] != "1" {
+				t.Errorf("%s, observed %v: session_key %q hash %q wake_attempts %q; want kept=%v and the attempt accrued",
+					name, observed, session.Metadata["session_key"], session.Metadata["started_config_hash"], session.Metadata["wake_attempts"], observed)
+			}
+		}
+	}
+}
+
+// Kills a resume backstop that counts a rapid crash of a fresh launch, or
+// misses a resume launch's (mc-bm1af): a committed manual conversation whose
+// transcript reads present and whose resume launches keep crashing keeps its
+// key for two crashes and resets at the third, in legacy's checkStability and
+// v2's death accrual folded pass by pass, recording one
+// session.conversation_reset{reason:resume-failed}; the same conversation
+// relaunched fresh after that reset (resume_launch cleared by its commit)
+// crashes three more times with nothing counted, reset or recorded.
+func TestResumeBackstopOnARapidCrash(t *testing.T) {
+	prev := staleResumeKeyProbe
+	staleResumeKeyProbe = func([]string, string, string, string) (bool, bool) { return true, true }
+	t.Cleanup(func() { staleResumeKeyProbe = prev })
+	now := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	base := map[string]string{
+		"session_name": "worker", "template": "worker", "session_origin": "manual", "provider": "claude", "work_dir": "/work",
+		"session_key": "k-1", "started_config_hash": "h-1", "wake_attempts": "0",
+	}
+	for _, launch := range []string{"true", ""} {
+		resets, want := 0, 0
+		if launch == "true" {
+			want = 1
+		}
+
+		// Legacy.
+		store := newTestStore()
+		session := makeBead("b1", maps.Clone(base))
+		session.Metadata["resume_launch"] = launch
+		rec := events.NewFake()
+		for crash := 1; crash <= maxResumeFailuresBeforeReset; crash++ {
+			session.Metadata["last_woke_at"] = now.Add(-10 * time.Second).Format(time.RFC3339)
+			store.persistRow(session)
+			if _, stab := checkStability(seedSessionInfo(session), nil, false, newDrainTracker(), sessionFrontDoor(store), clk, nil, nil, rec); !stab {
+				t.Fatalf("legacy, launch %q, crash %d: not recorded", launch, crash)
+			}
+			syncBeadFromStore(&session, store)
+			if session.Metadata["session_key"] == "" {
+				resets++
+				if crash != maxResumeFailuresBeforeReset || launch != "true" {
+					t.Fatalf("legacy, launch %q: reset at crash %d", launch, crash)
+				}
+			}
+		}
+		if resets != want || countEvents(rec.Events, events.SessionConversationReset) != want {
+			t.Fatalf("legacy, launch %q: %d resets, %d events; want %d", launch, resets, countEvents(rec.Events, events.SessionConversationReset), want)
+		}
+
+		// v2.
+		w := &World{Now: now}
+		row := sessionRow("gc-1", "template", "worker", "state", "awake", "session_name", "s-gc-1", "session_origin", "manual", "provider", "claude",
+			"session_key", "k-1", "started_config_hash", "h-1", "wake_attempts", "0", "resume_launch", launch)
+		resets, evs := 0, 0
+		for crash := 1; crash <= maxResumeFailuresBeforeReset; crash++ {
+			row.Metadata["last_woke_at"] = now.Add(-10 * time.Second).Format(time.RFC3339)
+			r := &rowFacts{w: w, row: censusRowOf(t, row), entry: &selectionEntry{Liveness: livenessGone, Desired: desireSleep}}
+			patch, _, accrued, ev := deadRuntimePatch(r, false)
+			if !accrued {
+				t.Fatalf("v2, launch %q, crash %d: no accrual", launch, crash)
+			}
+			if ev != nil {
+				evs++
+			}
+			row.Metadata = patch.Apply(row.Metadata)
+			if row.Metadata["session_key"] == "" {
+				resets++
+			}
+		}
+		if resets != want || evs != want {
+			t.Fatalf("v2, launch %q: %d resets, %d events; want %d", launch, resets, evs, want)
+		}
+	}
+}
+
+// Kills a v2 rapid crash that takes a conversation legacy cannot probe as
+// kept (#7720 review, C09), and pins the retention a committed manual one
+// gets instead (SESSION-LIFE-MANUAL-LOSS), which the resume backstop still
+// bounds: an automatic conversation of an unprobeable provider resets on its
+// first crash with no resume-failed record; a committed manual one keeps its
+// key and counts below the bound, and resets at it with the record. Legacy
+// and v2 agree on each.
+func TestRapidCrashOfAnUnprobeableProvider(t *testing.T) {
+	now := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	for _, c := range []struct {
+		origin, failures string
+		reset            bool
+		count            string // resume_failures after it
+		record           bool
+	}{
+		{"ephemeral", "", true, "", false},
+		{"manual", "", false, "1", false},
+		{"manual", "2", true, "", true},
+	} {
+		name := fmt.Sprintf("%s, resume_failures %q", c.origin, c.failures)
+		meta := map[string]string{
+			"session_name": "worker", "template": "worker", "session_origin": c.origin, "provider": "codex", "work_dir": "/work",
+			"session_key": "k-1", "started_config_hash": "h-1", "wake_attempts": "2", "resume_failures": c.failures, "resume_launch": "true",
+			"last_woke_at": now.Add(-10 * time.Second).Format(time.RFC3339),
+		}
+		store := newTestStore()
+		session := makeBead("b1", maps.Clone(meta))
+		store.persistRow(session)
+		rec := events.NewFake()
+		checkStability(seedSessionInfo(session), nil, false, newDrainTracker(), sessionFrontDoor(store), &clock.Fake{Time: now}, nil, nil, rec)
+		syncBeadFromStore(&session, store)
+		if reset := session.Metadata["session_key"] == ""; reset != c.reset || session.Metadata["resume_failures"] != c.count || (len(rec.Events) == 1) != c.record {
+			t.Fatalf("legacy, %s: key %q resume_failures %q events %+v; want reset %v, %q, record %v", name, session.Metadata["session_key"], session.Metadata["resume_failures"], rec.Events, c.reset, c.count, c.record)
+		}
+		row := sessionRow("gc-1", append([]string{"state", "awake", "session_name", "s-gc-1"}, flatten(meta)...)...)
+		patch, _, _, ev := deadRuntimePatch(&rowFacts{w: &World{Now: now}, row: censusRowOf(t, row), entry: &selectionEntry{Liveness: livenessGone, Desired: desireSleep}}, false)
+		after := patch.Apply(maps.Clone(row.Metadata))
+		if reset := after["session_key"] == ""; reset != c.reset || after["resume_failures"] != c.count || (ev != nil) != c.record {
+			t.Fatalf("v2, %s: patch %v event %+v; want reset %v, resume_failures %q, record %v", name, patch, ev, c.reset, c.count, c.record)
+		}
+	}
+}
+
+// countEvents is how many of evs are of type typ.
+func countEvents(evs []events.Event, typ string) int {
+	n := 0
+	for _, e := range evs {
+		if e.Type == typ {
+			n++
+		}
+	}
+	return n
+}
+
+// flatten is m's pairs, sorted by key.
+func flatten(m map[string]string) []string {
+	var out []string
+	for _, k := range slices.Sorted(maps.Keys(m)) {
+		out = append(out, k, m[k])
+	}
+	return out
+}
+
+// Kills the backstop's run outliving what ends it: a stable run (legacy's
+// clearWakeFailures, v2's stability clear) ends it, and a launch's commit
+// records whether it resumed, a fresh one ending the run too.
+func TestResumeFailuresRunEnds(t *testing.T) {
+	store := newTestStore()
+	session := makeBead("b1", map[string]string{"wake_attempts": "2", "resume_failures": "2"})
+	store.persistRow(session)
+	clearWakeFailures(seedSessionInfo(session), sessionFrontDoor(store))
+	syncBeadFromStore(&session, store)
+	if session.Metadata["resume_failures"] != "" {
+		t.Fatalf("legacy stable run: resume_failures %q, want cleared", session.Metadata["resume_failures"])
+	}
+	c := newHealCase(t, livenessAlive, desireKeep, "state", "awake", "last_woke_at", rowAt(-time.Minute), "resume_failures", "2")
+	if it := c.decide(); it.Reason != decideStabilityClear || it.Patch["resume_failures"] != "" || !hasAny(it.Patch, "resume_failures") {
+		t.Fatalf("v2 stability clear = (%q, %v), want resume_failures cleared", it.Reason, it.Patch)
+	}
+	info := sessionpkg.Info{ResumeFailures: "2"}
+	if p := startCommitPatch(&preparedStart{resumed: true}, info, time.Now()); p["resume_launch"] != "true" || hasAny(p, "resume_failures") {
+		t.Fatalf("a resume's commit %v, want resume_launch true and the run kept", p)
+	}
+	info.ResumeLaunch = "true"
+	if p := startCommitPatch(&preparedStart{}, info, time.Now()); p["resume_launch"] != "" || !hasAny(p, "resume_launch") || p["resume_failures"] != "" || !hasAny(p, "resume_failures") {
+		t.Fatalf("a fresh launch's commit %v, want resume_launch and the run cleared", p)
+	}
+	if p := startCommitPatch(&preparedStart{}, sessionpkg.Info{}, time.Now()); hasAny(p, "resume_launch", "resume_failures") {
+		t.Fatalf("a fresh launch's commit on a clean row %v, want neither key written", p)
+	}
+}
+
+// Kills resumeBackstop's decision table drifting.
+func TestResumeBackstop(t *testing.T) {
+	for _, c := range []struct {
+		failures int
+		keeps    bool
+		rf       resumeFailure
+		reset    bool
+		count    int
+	}{
+		{0, false, resumeFailure{refused: true, counted: true}, false, 0},
+		{0, true, resumeFailure{}, false, 0},
+		{2, true, resumeFailure{}, false, 2},
+		{0, true, resumeFailure{refused: true}, true, 0},
+		{0, true, resumeFailure{counted: true}, false, 1},
+		{1, true, resumeFailure{counted: true}, false, 2},
+		{2, true, resumeFailure{counted: true}, true, 0},
+	} {
+		if reset, count := resumeBackstop(c.failures, c.keeps, c.rf); reset != c.reset || count != c.count {
+			t.Errorf("resumeBackstop(%d, %v, %+v) = (%v, %d), want (%v, %d)", c.failures, c.keeps, c.rf, reset, count, c.reset, c.count)
+		}
+	}
+}
+
+// Kills sessionCommandResumes drifting from resolveSessionCommand: it
+// reports a resume exactly when the command resumes the session's own key.
+func TestSessionCommandResumesMatchesTheCommand(t *testing.T) {
+	providers := map[string]*config.ResolvedProvider{
+		"claude":      {Name: "claude", SessionIDFlag: "--session-id", ResumeFlag: "--resume", ResumeStyle: "flag", ForkFlag: "--fork-session"},
+		"resume-only": {Name: "kimi", ResumeFlag: "--session", ResumeStyle: "flag"},
+		"command":     {Name: "x", ResumeCommand: "x resume {{.SessionKey}}"},
+		"none":        {Name: "y"},
+	}
+	for name, rp := range providers {
+		for _, parent := range []string{"", "p-1"} {
+			for _, first := range []bool{false, true} {
+				for _, fresh := range []bool{false, true} {
+					cmd := resolveSessionCommand("agent", "k-1", parent, rp, first, fresh)
+					resume := resolveResumeCommand("agent", "k-1", rp)
+					want := cmd == resume && resume != "agent"
+					if got := sessionCommandResumes(parent, rp, first, fresh); got != want {
+						t.Errorf("%s parent %q first %v fresh %v: resumes %v, command %q", name, parent, first, fresh, got, cmd)
+					}
+				}
+			}
+		}
+	}
+}
+
 // TestRecordWakeFailure_ClearsUnresumableConversation is the other half: an
 // absent transcript keeps the existing unconditional reset.
 func TestRecordWakeFailure_ClearsUnresumableConversation(t *testing.T) {
 	prevProbe := staleResumeKeyProbe
-	staleResumeKeyProbe = func(_, _, _ string) (present, probeable bool) { return false, true }
+	staleResumeKeyProbe = func(_ []string, _, _, _ string) (present, probeable bool) { return false, true }
 	t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
 
 	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
@@ -1499,7 +1862,7 @@ func TestRecordWakeFailure_ClearsUnresumableConversation(t *testing.T) {
 		"work_dir":            "/work",
 	})
 
-	recordWakeFailure(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+	recordWakeFailure(seedSessionInfo(session), sessionTranscriptSearchPaths(nil), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil), resumeFailure{}, nil)
 	syncBeadFromStore(&session, store)
 
 	if got := session.Metadata["session_key"]; got != "" {
@@ -1515,7 +1878,7 @@ func TestRecordWakeFailure_ClearsUnresumableConversation(t *testing.T) {
 // gaining the new keep-the-conversation behavior.
 func TestRecordWakeFailure_ClearsWhenProviderUnprobeable(t *testing.T) {
 	prevProbe := staleResumeKeyProbe
-	staleResumeKeyProbe = func(_, _, _ string) (present, probeable bool) { return false, false }
+	staleResumeKeyProbe = func(_ []string, _, _, _ string) (present, probeable bool) { return false, false }
 	t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
 
 	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
@@ -1527,7 +1890,7 @@ func TestRecordWakeFailure_ClearsWhenProviderUnprobeable(t *testing.T) {
 		"work_dir":      "/work",
 	})
 
-	recordWakeFailure(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+	recordWakeFailure(seedSessionInfo(session), sessionTranscriptSearchPaths(nil), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil), resumeFailure{}, nil)
 	syncBeadFromStore(&session, store)
 
 	if got := session.Metadata["session_key"]; got != "" {
@@ -1544,7 +1907,7 @@ func TestRecordWakeFailure_Quarantine(t *testing.T) {
 		"wake_attempts": "4", // one below threshold
 	})
 
-	recordWakeFailure(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+	recordWakeFailure(seedSessionInfo(session), sessionTranscriptSearchPaths(nil), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil), resumeFailure{}, nil)
 	syncBeadFromStore(&session, store)
 
 	if session.Metadata["wake_attempts"] != "5" {
@@ -1567,7 +1930,7 @@ func TestRecordWakeFailure_BelowThreshold(t *testing.T) {
 		"wake_attempts": "1",
 	})
 
-	recordWakeFailure(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+	recordWakeFailure(seedSessionInfo(session), sessionTranscriptSearchPaths(nil), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil), resumeFailure{}, nil)
 	syncBeadFromStore(&session, store)
 
 	if session.Metadata["wake_attempts"] != "2" {
@@ -1588,7 +1951,7 @@ func TestRecordWakeFailure_ClearsStartedConfigHash(t *testing.T) {
 		"started_config_hash": "abc123",
 	})
 
-	recordWakeFailure(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+	recordWakeFailure(seedSessionInfo(session), sessionTranscriptSearchPaths(nil), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil), resumeFailure{}, nil)
 	syncBeadFromStore(&session, store)
 
 	if session.Metadata["session_key"] != "" {
@@ -1608,7 +1971,7 @@ func TestRecordWakeFailure_ClearsStartedConfigHashWhenSessionKeyAlreadyEmpty(t *
 		"started_config_hash": "abc123",
 	})
 
-	recordWakeFailure(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+	recordWakeFailure(seedSessionInfo(session), sessionTranscriptSearchPaths(nil), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil), resumeFailure{}, nil)
 	syncBeadFromStore(&session, store)
 
 	if session.Metadata["started_config_hash"] != "" {
@@ -2225,6 +2588,8 @@ func TestHealStatePatchProjectsRuntimeLiveness(t *testing.T) {
 				sessionpkg.PrimedAtMetadataKey:           "",
 				sessionpkg.PrimingAttemptedAtMetadataKey: "",
 				sessionpkg.PromptHashMetadataKey:         "",
+				"resume_failures":                        "",
+				"resume_launch":                          "",
 			},
 		},
 		{
@@ -2311,6 +2676,8 @@ func TestHealStatePatchProjectsRuntimeLiveness(t *testing.T) {
 				sessionpkg.PrimedAtMetadataKey:           "",
 				sessionpkg.PrimingAttemptedAtMetadataKey: "",
 				sessionpkg.PromptHashMetadataKey:         "",
+				"resume_failures":                        "",
+				"resume_launch":                          "",
 			},
 		},
 	}
@@ -2602,7 +2969,7 @@ func TestCheckStability_RapidExitAfterHealStateKeepsStartedConfigHashCleared(t *
 	if session.Metadata["started_config_hash"] != "" {
 		t.Fatalf("healState started_config_hash = %q, want empty", session.Metadata["started_config_hash"])
 	}
-	_, stab := checkStability(seedSessionInfo(session), nil, false, nil, sessionFrontDoor(store), clk, nil)
+	_, stab := checkStability(seedSessionInfo(session), nil, false, nil, sessionFrontDoor(store), clk, nil, nil, nil)
 	syncBeadFromStore(&session, store)
 	if !stab {
 		t.Fatal("checkStability should record the rapid exit")
@@ -2894,7 +3261,7 @@ func TestIsKnownState_UnknownStates(t *testing.T) {
 }
 
 func TestForwardCompatibility_UnknownState(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	env.addDesired("worker", "worker", false)
 
@@ -2920,7 +3287,7 @@ func TestForwardCompatibility_UnknownState(t *testing.T) {
 // state=failed-create cannot reach the provider start path even if a stale
 // desired-state entry points at that session_name.
 func TestReconcileSessionBeads_FailedCreateDesiredTargetNotStarted(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	env.addDesired("worker", "worker", false)
 
@@ -2977,6 +3344,7 @@ func TestCheckChurn_NonProductiveDeath(t *testing.T) {
 		"churn_count":  "0",
 	})
 
+	store.persistRow(session) // the row the accrual reads fresh (mc-uhvqj)
 	_, churn := checkChurn(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), clk)
 	syncBeadFromStore(&session, store)
 	if !churn {
@@ -3182,6 +3550,47 @@ func TestRecordChurn_Quarantine(t *testing.T) {
 	}
 }
 
+// TestRecordAccrualNeverShortensAQuarantine (the #7706 review): legacy's
+// quarantining wake-failure and churn accruals and its rate-limit
+// quarantine write the later of their deadline and the row's unexpired
+// quarantined_until, extending a shorter one and keeping an operator's
+// longer one; the accruals keep the live quarantine's reason (v5.9z).
+func TestRecordAccrualNeverShortensAQuarantine(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	at := func(d time.Duration) string { return now.Add(d).Format(time.RFC3339) }
+	for name, record := range map[string]func(sessionpkg.Info, *sessionpkg.Store, clock.Clock) sessionpkg.Info{
+		"wake failure": func(info sessionpkg.Info, s *sessionpkg.Store, clk clock.Clock) sessionpkg.Info {
+			return recordWakeFailure(info, nil, s, clk, "worker", resumeFailure{}, nil)
+		},
+		"churn": func(info sessionpkg.Info, s *sessionpkg.Store, clk clock.Clock) sessionpkg.Info {
+			return recordChurn(info, s, clk, "worker")
+		},
+		"rate limit": func(info sessionpkg.Info, s *sessionpkg.Store, clk clock.Clock) sessionpkg.Info {
+			next, _ := recordRateLimitQuarantine(info, s, clk)
+			return next
+		},
+	} {
+		accrued := at(defaultQuarantineDuration)
+		if name == "rate limit" {
+			accrued = at(defaultRateLimitQuarantineDuration)
+		}
+		for existing, want := range map[string]string{at(time.Minute): accrued, at(24 * time.Hour): at(24 * time.Hour)} {
+			store := newTestStore()
+			session := makeBead("b1", map[string]string{"wake_attempts": "4", "churn_count": "2", "quarantined_until": existing, "sleep_reason": "rate_limit"})
+			record(seedSessionInfo(session), sessionFrontDoor(store), &clock.Fake{Time: now})
+			syncBeadFromStore(&session, store)
+			if got := session.Metadata["quarantined_until"]; got != want {
+				t.Errorf("%s over quarantined_until %s: it is %s, want %s", name, existing, got, want)
+			}
+			// v5.9z: a crash or churn accrual keeps the live quarantine's
+			// reason, here rate_limit, which neither accrual writes.
+			if got := session.Metadata["sleep_reason"]; got != "rate_limit" {
+				t.Errorf("%s over a live rate-limit quarantine: sleep_reason %q, want rate_limit kept", name, got)
+			}
+		}
+	}
+}
+
 func TestRecordChurn_BelowThreshold(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
@@ -3379,5 +3788,174 @@ func TestComputeWorkSet_RigScopedWorkQueryExpandsRigTemplate(t *testing.T) {
 	}
 	if got := seenCommands[betaDir]; !strings.Contains(got, "gc.routed_to=beta/worker") {
 		t.Errorf("beta probe command = %q, want expanded gc.routed_to=beta/worker", got)
+	}
+}
+
+// staleHealSuspendPatch is what `gc session suspend` writes on a managed city.
+var staleHealSuspendPatch = map[string]string{
+	"held_until":   "2099-01-01T00:00:00Z",
+	"sleep_intent": "user-hold",
+	"state":        "suspended",
+}
+
+// TestHealStateWithRollbackInfoDoesNotRevertAConcurrentSuspend is the
+// regression for the stale status heal (INC-024). The heal is decided from the
+// tick snapshot. When `gc session suspend` lands after that snapshot was read,
+// the heal used to write state=awake unconditionally over state=suspended,
+// leaving the row awake+user-hold+held. It must now write nothing and report
+// no batch, so the caller folds nothing.
+func TestHealStateWithRollbackInfoDoesNotRevertAConcurrentSuspend(t *testing.T) {
+	clk := &clock.Fake{Time: time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)}
+	store := beads.NewMemStore()
+	created, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "worker",
+			"state":        "active",
+			"last_woke_at": clk.Now().UTC().Format(time.RFC3339),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sessFront := sessionFrontDoor(store)
+	snapshot, err := sessFront.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if want := healStatePatchWithRollbackInfo(snapshot, true, true, clk, 0, true); want["state"] != "awake" {
+		t.Fatalf("test premise: heal from the snapshot = %v, want state=awake", want)
+	}
+
+	if err := store.SetMetadataBatch(created.ID, staleHealSuspendPatch); err != nil {
+		t.Fatalf("suspend write: %v", err)
+	}
+
+	batch, err := healStateWithRollbackInfo(snapshot, true, true, sessFront, clk, 0, true)
+	if err != nil {
+		t.Fatalf("healStateWithRollbackInfo: %v", err)
+	}
+	if batch != nil {
+		t.Fatalf("heal batch = %v, want nil: the row changed after the snapshot", batch)
+	}
+	got, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	for key, want := range staleHealSuspendPatch {
+		if got.Metadata[key] != want {
+			t.Fatalf("%s = %q after the stale heal, want the suspend's %q", key, got.Metadata[key], want)
+		}
+	}
+
+	// Control: the same heal from a snapshot that matches the row still lands.
+	fresh, err := sessFront.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if err := store.SetMetadata(created.ID, "state", "active"); err != nil {
+		t.Fatalf("reset state: %v", err)
+	}
+	fresh = fresh.ApplyPatch(map[string]string{"state": "active"})
+	batch, err = healStateWithRollbackInfo(fresh, true, true, sessFront, clk, 0, true)
+	if err != nil || batch["state"] != "awake" {
+		t.Fatalf("heal from a current snapshot = (%v, %v), want state=awake applied", batch, err)
+	}
+	if got, _ := store.Get(created.ID); got.Metadata["state"] != "awake" {
+		t.Fatalf("state = %q, want the current-snapshot heal persisted", got.Metadata["state"])
+	}
+}
+
+// TestReconcileSessionBeads_StaleSnapshotHealKeepsConcurrentSuspend drives the
+// same race through a whole tick: the reconciler is handed a session snapshot
+// read before `gc session suspend` wrote the row. The tick's status heal must
+// not revert the suspend it never saw.
+func TestReconcileSessionBeads_StaleSnapshotHealKeepsConcurrentSuspend(t *testing.T) {
+	env := newReconcilerTestEnv(t)
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	if err := env.sp.SetMeta("worker", "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+	stale := session
+	stale.Metadata = make(map[string]string, len(session.Metadata))
+	for k, v := range session.Metadata {
+		stale.Metadata[k] = v
+	}
+
+	if err := env.store.SetMetadataBatch(session.ID, staleHealSuspendPatch); err != nil {
+		t.Fatalf("suspend write: %v", err)
+	}
+
+	reconcileSessionBeadsAtPath(
+		context.Background(), env.city, []beads.Bead{stale}, env.desiredState, configuredSessionNames(env.cfg, "", env.store),
+		env.cfg, env.sp, env.store, nil, nil, nil, nil, env.dt, map[string]int{}, false, nil, "",
+		newFakeIdleTracker(), env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+		withAsyncDrainAckStopTracker(env.stops),
+	)
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	for key, want := range staleHealSuspendPatch {
+		if got.Metadata[key] != want {
+			t.Fatalf("%s = %q after a tick over the pre-suspend snapshot, want the suspend's %q\nstderr:\n%s", key, got.Metadata[key], want, env.stderr.String())
+		}
+	}
+}
+
+func TestHealStatePatch_ManualRuntimeLossRetainsStartedConversation(t *testing.T) {
+	for _, origin := range []string{"manual", "pool"} {
+		t.Run(origin, func(t *testing.T) {
+			b := makeBead("conversation", map[string]string{
+				"state": "active", "session_origin": origin, "session_key": "native-conversation",
+				"started_config_hash": "config", "primed_at": "primed", "prompt_hash": "prompt",
+			})
+			patch := healStatePatchFromBead(b, false, &clock.Fake{Time: time.Now()}, 0)
+			if patch["state"] != "asleep" {
+				t.Fatalf("missing runtime not healed: %#v", patch)
+			}
+			for _, key := range []string{"session_key", "started_config_hash", "primed_at", "prompt_hash", "continuation_reset_pending"} {
+				_, changed := patch[key]
+				if changed != (origin == "pool") {
+					t.Fatalf("%s: unexpected %s mutation: %#v", origin, key, patch)
+				}
+			}
+		})
+	}
+}
+
+func TestRecordFailure_ManualConversationKeepsIdentityAndAccrues(t *testing.T) {
+	for _, kind := range []string{"wake", "churn"} {
+		t.Run(kind, func(t *testing.T) {
+			clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
+			store := newTestStore()
+			b := makeBead("manual-conversation", map[string]string{
+				"session_origin": "manual", "session_key": "native", "started_config_hash": "config",
+				"wake_attempts": "1", "churn_count": "1",
+			})
+			info := seedSessionInfo(b)
+			if kind == "wake" {
+				recordWakeFailure(info, sessionTranscriptSearchPaths(nil), sessionFrontDoor(store), clk, "test", resumeFailure{}, nil)
+			} else {
+				recordChurn(info, sessionFrontDoor(store), clk, "test")
+			}
+			syncBeadFromStore(&b, store)
+			if b.Metadata["session_key"] != "native" || b.Metadata["started_config_hash"] != "config" || b.Metadata["continuation_reset_pending"] == "true" {
+				t.Errorf("manual conversation was discarded: %#v", b.Metadata)
+			}
+			counter := "wake_attempts"
+			if kind == "churn" {
+				counter = "churn_count"
+			}
+			if b.Metadata[counter] != "2" {
+				t.Errorf("failure accounting changed: %#v", b.Metadata)
+			}
+		})
 	}
 }

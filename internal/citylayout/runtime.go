@@ -1,6 +1,7 @@
 package citylayout
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -81,9 +82,109 @@ func PublishedServicesDir(cityRoot string) string {
 	return RuntimePath(cityRoot, "services", ".published")
 }
 
+// SessionDiagnosticsRoot is the subdirectory, relative to a city's runtime
+// root, holding per-session diagnostic artifacts: start-stderr.log,
+// nudge-unconfirmed.log, and startup-nudge-unconfirmed.log.
+const SessionDiagnosticsRoot = "sessions"
+
+// SessionDiagnosticsDir returns the directory holding per-session diagnostic
+// artifacts for a city, given the city root.
+//
+// Both the writers (internal/runtime/tmux) and the readers (gc doctor's
+// nudge-unconfirmed check) MUST resolve this directory through this function
+// or through SessionDiagnosticsDirForRuntimeDir. They previously each joined
+// their own literal onto a different helper -- the writers onto
+// RuntimePath(city) (.gc), the doctor onto RuntimeDataDir(city) (.gc/runtime)
+// -- so every successfully written diagnostic was invisible to the check that
+// exists to surface it, and the check reported a clean city. The live
+// ds-research city had 6,959 session directories under .gc/sessions and no
+// .gc/runtime/sessions at all. TestSessionDiagnosticsDirMatchesRuntimeDirForm
+// and cmd/gc's TestTmuxConfigRuntimeDirReachesDoctorSessionDiagnostics bind
+// the two forms together so they cannot drift apart again.
+func SessionDiagnosticsDir(cityRoot string) string {
+	return RuntimePath(cityRoot, SessionDiagnosticsRoot)
+}
+
+// SessionDiagnosticsDirForRuntimeDir returns the same directory for a caller
+// that holds a runtime dir rather than a city root (the tmux provider is
+// configured with one). An empty runtimeDir means diagnostic capture is
+// disabled and yields an empty path rather than a bare "sessions" relative
+// path, which would land in the process working directory.
+func SessionDiagnosticsDirForRuntimeDir(runtimeDir string) string {
+	if runtimeDir == "" {
+		return ""
+	}
+	return filepath.Join(runtimeDir, SessionDiagnosticsRoot)
+}
+
+// ACPTranscriptsRoot is the city-relative root holding ACP JSON-RPC capture
+// transcripts, one directory per GC_SESSION_ID and one file per
+// GC_CONTINUATION_EPOCH. It is city-rooted rather than under the provider
+// state directory because that directory lives in the ephemeral supervisor
+// runtime dir, and transcripts must outlive a supervisor restart.
+const ACPTranscriptsRoot = ".gc/transcripts/acp"
+
+// ACPTranscriptExt is the file extension of an ACP capture transcript.
+const ACPTranscriptExt = ".jsonl"
+
+// ACPTranscriptsDir returns the directory holding ACP capture transcripts for
+// a city.
+//
+// The capture writer (internal/runtime/acp, configured with this directory)
+// and every transcript reader MUST resolve paths through ACPTranscriptPath or
+// ACPTranscriptPathForDir so writer and reader cannot drift apart (see
+// SessionDiagnosticsDir for the failure this prevents).
+func ACPTranscriptsDir(cityRoot string) string {
+	return RuntimePath(cityRoot, "transcripts", "acp")
+}
+
+// ACPTranscriptPath returns the capture transcript path for one session
+// continuation epoch: <city>/.gc/transcripts/acp/<sessionID>/<epoch>.jsonl.
+// It rejects empty components, path separators, NUL bytes, and "." / "..",
+// so a hostile or malformed identifier cannot escape the transcripts root.
+func ACPTranscriptPath(cityRoot, sessionID, continuationEpoch string) (string, error) {
+	return ACPTranscriptPathForDir(ACPTranscriptsDir(cityRoot), sessionID, continuationEpoch)
+}
+
+// ACPTranscriptPathForDir returns the same path as ACPTranscriptPath for a
+// caller that holds the transcripts directory rather than the city root (the
+// ACP provider is configured with the directory). An empty dir is an error
+// rather than a path relative to the process working directory.
+func ACPTranscriptPathForDir(transcriptsDir, sessionID, continuationEpoch string) (string, error) {
+	if transcriptsDir == "" {
+		return "", fmt.Errorf("acp transcript path: empty transcripts directory")
+	}
+	if err := validateACPTranscriptComponent("session id", sessionID); err != nil {
+		return "", err
+	}
+	if err := validateACPTranscriptComponent("continuation epoch", continuationEpoch); err != nil {
+		return "", err
+	}
+	return filepath.Join(transcriptsDir, sessionID, continuationEpoch+ACPTranscriptExt), nil
+}
+
+func validateACPTranscriptComponent(label, value string) error {
+	switch {
+	case value == "":
+		return fmt.Errorf("acp transcript path: empty %s", label)
+	case value == "." || value == "..":
+		return fmt.Errorf("acp transcript path: %s %q is a relative path element", label, value)
+	case strings.ContainsAny(value, "/\\\x00"):
+		return fmt.Errorf("acp transcript path: %s %q contains a path separator or NUL", label, value)
+	}
+	return nil
+}
+
+// sessionNameLocksRoot and gateSlotsRoot are runtime-root-relative
+// subdirectories (see SessionNameLocksDir and GateSlotsDir).
+const (
+	sessionNameLocksRoot = "session-name-locks"
+	gateSlotsRoot        = "gate-slots"
+)
+
 // SessionNameLocksDir returns the canonical root for explicit session-name locks.
 func SessionNameLocksDir(cityRoot string) string {
-	return RuntimePath(cityRoot, "session-name-locks")
+	return RuntimePath(cityRoot, sessionNameLocksRoot)
 }
 
 // GateSlotsDir returns the canonical root for the pre-push gate's
@@ -92,7 +193,7 @@ func SessionNameLocksDir(cityRoot string) string {
 // constant exists so Go tooling can locate the same directory without
 // duplicating the ".gc/gate-slots" literal.
 func GateSlotsDir(cityRoot string) string {
-	return RuntimePath(cityRoot, "gate-slots")
+	return RuntimePath(cityRoot, gateSlotsRoot)
 }
 
 // ServiceStateDir returns the canonical runtime directory for a named service.

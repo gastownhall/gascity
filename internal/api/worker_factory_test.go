@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
@@ -958,7 +959,7 @@ func TestWorkerFactorySessionByIDUsesResolvedTemplateRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SessionByID(%q): %v", info.ID, err)
 	}
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), srv.actor(session.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
@@ -1001,7 +1002,7 @@ func TestWorkerFactorySessionByIDPreservesStoredResolvedCommand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SessionByID(%q): %v", info.ID, err)
 	}
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), srv.actor(session.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
@@ -1026,7 +1027,7 @@ func TestWorkerFactorySessionByIDUsesResolvedCommandAndResumeSettingsOnResume(t 
 	}
 
 	srv := New(fs)
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	info, err := mgr.CreateSession(
 		context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "legacy-agent", WorkDir: t.TempDir(), Provider: "resolved-worker", Env: nil, Resume: session.ProviderResume{
 			ResumeFlag:    "--old-resume",
@@ -1036,7 +1037,7 @@ func TestWorkerFactorySessionByIDUsesResolvedCommandAndResumeSettingsOnResume(t 
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testOperatorIn(t, fs.cityPath), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
@@ -1048,8 +1049,9 @@ func TestWorkerFactorySessionByIDUsesResolvedCommandAndResumeSettingsOnResume(t 
 	if err != nil {
 		t.Fatalf("SessionByID(%q): %v", info.ID, err)
 	}
-	if err := handle.Start(context.Background()); err != nil {
-		t.Fatalf("Start: %v", err)
+	// Resuming a suspended session is an operator's own act (D8): Attach.
+	if err := handle.Attach(context.Background(), srv.actor(session.ActorOperator)); err != nil {
+		t.Fatalf("Attach: %v", err)
 	}
 
 	start := fs.sp.LastStartConfig(info.SessionName)
@@ -1071,7 +1073,7 @@ func TestWorkerFactorySessionByIDAppliesTemplateOverridesToExplicitResumeCommand
 	fs.cfg.Providers["resolved-worker"] = spec
 
 	srv := New(fs)
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	info, err := mgr.CreateSession(
 		context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "/bin/echo --skip-permissions", WorkDir: t.TempDir(), Provider: "resolved-worker", Env: nil, Resume: session.ProviderResume{
 			ResumeCommand: "/bin/echo resume {{.SessionKey}} --skip-permissions",
@@ -1080,7 +1082,7 @@ func TestWorkerFactorySessionByIDAppliesTemplateOverridesToExplicitResumeCommand
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testOperatorIn(t, fs.cityPath), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 	if err := fs.cityBeadStore.SetMetadata(info.ID, "template_overrides", `{"permission_mode":"plan"}`); err != nil {
@@ -1095,8 +1097,9 @@ func TestWorkerFactorySessionByIDAppliesTemplateOverridesToExplicitResumeCommand
 	if err != nil {
 		t.Fatalf("SessionByID(%q): %v", info.ID, err)
 	}
-	if err := handle.Start(context.Background()); err != nil {
-		t.Fatalf("Start: %v", err)
+	// Resuming a suspended session is an operator's own act (D8): Attach.
+	if err := handle.Attach(context.Background(), srv.actor(session.ActorOperator)); err != nil {
+		t.Fatalf("Attach: %v", err)
 	}
 
 	start := fs.sp.LastStartConfig(info.SessionName)
@@ -1140,7 +1143,7 @@ func TestWorkerFactoryHandleForTargetUsesResolvedTemplateRuntimeForSessionMeta(t
 	if err != nil {
 		t.Fatalf("HandleForTarget: %v", err)
 	}
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), srv.actor(session.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
@@ -1273,7 +1276,7 @@ func TestWorkerFactoryRoutesWorkerOperationEventsToStateProvider(t *testing.T) {
 		t.Fatalf("newResolvedWorkerSessionHandle: %v", err)
 	}
 
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), srv.actor(session.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
@@ -1284,5 +1287,70 @@ func TestWorkerFactoryRoutesWorkerOperationEventsToStateProvider(t *testing.T) {
 	last := recorded[len(recorded)-1]
 	if got, want := last.Type, events.WorkerOperation; got != want {
 		t.Fatalf("last event type = %q, want %q", got, want)
+	}
+}
+
+// The API builds a worker.Factory per request. The Server holds the
+// derived-activity memo those factories share, so a keyless zcode session's
+// State — polled by the session list, the agent-output read and the stream
+// prechecks — parses an unchanged mirror once, not once per request.
+func TestWorkerFactorySharesDerivedActivityMemoAcrossRequests(t *testing.T) {
+	fs := newSessionFakeState(t)
+	searchBase := t.TempDir()
+	srv := newServerWithSearchPaths(fs, searchBase)
+	workDir := t.TempDir()
+
+	factory, err := srv.workerFactory(fs.cityBeadStore)
+	if err != nil {
+		t.Fatalf("workerFactory: %v", err)
+	}
+	seat, err := factory.Session(worker.SessionSpec{
+		Profile:  worker.ProfileZCodeTmuxCLI,
+		Template: "myrig/worker",
+		Title:    "Probe",
+		Command:  "zcode-repl",
+		WorkDir:  workDir,
+		Provider: "zcode",
+	})
+	if err != nil {
+		t.Fatalf("factory.Session: %v", err)
+	}
+	if err := seat.Start(context.Background(), srv.actor(session.ActorAgent)); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	started, err := seat.State(context.Background())
+	if err != nil {
+		t.Fatalf("State(started): %v", err)
+	}
+
+	scopeDir := filepath.Join(searchBase, sessionlog.ZCodeSeatMirrorScope(started.SessionName, started.SessionID, "1"))
+	if err := os.MkdirAll(scopeDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", scopeDir, err)
+	}
+	mirror := `{"info":{"id":"sess_probe","directory":"` + filepath.ToSlash(workDir) + `"},"messages":[` +
+		`{"info":{"id":"m1","sessionID":"sess_probe","role":"user","parentID":"","time":{"created":1770000000000}},"parts":[{"id":"p1","type":"text","text":"go"}]}]}`
+	if err := os.WriteFile(filepath.Join(scopeDir, "sess_probe.json"), []byte(mirror), 0o644); err != nil {
+		t.Fatalf("write mirror: %v", err)
+	}
+
+	for i := 1; i <= 3; i++ {
+		requestFactory, err := srv.workerFactory(fs.cityBeadStore)
+		if err != nil {
+			t.Fatalf("workerFactory(request %d): %v", i, err)
+		}
+		handle, err := requestFactory.SessionByID(started.SessionID)
+		if err != nil {
+			t.Fatalf("SessionByID(request %d): %v", i, err)
+		}
+		state, err := handle.State(context.Background())
+		if err != nil {
+			t.Fatalf("State(request %d): %v", i, err)
+		}
+		if state.Phase != worker.PhaseBusy {
+			t.Fatalf("State(request %d).Phase = %s, want %s", i, state.Phase, worker.PhaseBusy)
+		}
+	}
+	if got := srv.activityMemo.Derivations(); got != 1 {
+		t.Fatalf("unchanged mirror parsed %d times across 3 per-request factories, want 1", got)
 	}
 }

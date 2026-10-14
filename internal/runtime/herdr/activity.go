@@ -2,9 +2,10 @@ package herdr
 
 import (
 	"context"
-	"strings"
 	"sync"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // This file implements GetLastActivity for herdr. herdr exposes no activity
@@ -189,6 +190,15 @@ func (a *activityTracker) run(ctx context.Context, p *Provider) {
 	if err != nil {
 		events = nil // nil channel blocks forever: degrade to ticker-only
 	}
+	a.reconcileLoop(ctx, events, func() { a.poll(ctx, p.c) })
+}
+
+// reconcileLoop is the acceleration itself, split from run so a test can
+// deliver an event without standing up a provider and its socket. It reads
+// only that an event ARRIVED: no kind is inspected, which is the whole
+// mechanism, and is why a translation layer that filters events by kind
+// silently demotes this loop to its fallback ticker.
+func (a *activityTracker) reconcileLoop(ctx context.Context, events <-chan runtime.SessionEvent, poll func()) {
 	ticker := time.NewTicker(activityPollInterval)
 	defer ticker.Stop()
 	debounce := time.NewTimer(activityEventDebounce)
@@ -212,9 +222,9 @@ func (a *activityTracker) run(ctx context.Context, p *Provider) {
 			}
 		case <-debounce.C:
 			armed = false
-			a.poll(ctx, p.c)
+			poll()
 		case <-ticker.C:
-			a.poll(ctx, p.c)
+			poll()
 		}
 	}
 }
@@ -237,7 +247,7 @@ func (a *activityTracker) poll(ctx context.Context, c *client) {
 		if ag.Name == "" {
 			continue
 		}
-		status := strings.ToLower(strings.TrimSpace(ag.AgentStatus))
+		status := normalizeAgentState(ag.AgentStatus)
 		prev, seen := a.entries[ag.Name]
 		e := activityEntry{status: status, revision: ag.Revision, stamp: prev.stamp}
 		switch {

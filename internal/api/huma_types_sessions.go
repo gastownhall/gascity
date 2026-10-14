@@ -41,6 +41,7 @@ type SessionGetInput struct {
 	ID        string `path:"id" doc:"Session ID, alias, or runtime session_name."`
 	Peek      bool   `query:"peek" required:"false" doc:"Include last output preview."`
 	PeekLines int    `query:"peek_lines" required:"false" minimum:"0" maximum:"10000" doc:"Number of lines to include in the last output preview when peek=true. Defaults to 5."`
+	ExactID   bool   `query:"exact_id" required:"false" doc:"Resolve {id} as an exact session bead id only: a single point read that also finds closed sessions and answers 404 when no bead has that id. Skips the alias, runtime session_name, configured-name and closed-session name lookups. For callers holding a durable id."`
 }
 
 // sessionCreateBody is the request body for POST /v0/sessions.
@@ -54,6 +55,7 @@ type sessionCreateBody struct {
 	Options           map[string]string `json:"options,omitempty" doc:"Provider/agent option overrides."`
 	ProjectID         string            `json:"project_id,omitempty" doc:"Opaque project context identifier."`
 	Title             string            `json:"title,omitempty" doc:"Session title."`
+	Metadata          map[string]string `json:"metadata,omitempty" doc:"External client metadata: real_world_app_* keys only (any other key is refused with 422). The generic bead API never writes a session row."`
 }
 
 // SessionCreateInput is the Huma input for POST /v0/city/{cityName}/sessions.
@@ -79,6 +81,15 @@ type SessionCreateOutput struct {
 type SessionIDInput struct {
 	CityScope
 	ID string `path:"id" doc:"Session ID, alias, or runtime session_name."`
+}
+
+// SessionControlInput is the Huma input for body-less session control
+// endpoints that honor Idempotency-Key (POST .../session/{id}/stop and
+// .../session/{id}/wake).
+type SessionControlInput struct {
+	CityScope
+	ID             string `path:"id" doc:"Session ID, alias, or runtime session_name."`
+	IdempotencyKey string `header:"Idempotency-Key" required:"false" doc:"Idempotency key for safe retries."`
 }
 
 // SessionTranscriptInput is the Huma input for GET /v0/city/{cityName}/session/{id}/transcript.
@@ -119,6 +130,9 @@ type SessionPatchBody struct {
 	_     struct{} `json:"-" additionalProperties:"false"`
 	Title *string  `json:"title,omitempty" minLength:"1" doc:"Session title. If provided, must be non-empty."`
 	Alias *string  `json:"alias,omitempty" doc:"Session alias. Empty string clears the alias."`
+	// Metadata is the external client's real_world_app_* keys, the only
+	// session metadata a client writes (architecture B).
+	Metadata map[string]string `json:"metadata,omitempty" doc:"External client metadata: real_world_app_* keys only (any other key is refused with 422); an empty value clears the key."`
 }
 
 // SessionPatchInput is the Huma input for PATCH /v0/city/{cityName}/session/{id}.
@@ -152,10 +166,12 @@ type SessionCloseInput struct {
 // SessionSubmitInput is the Huma input for POST /v0/city/{cityName}/session/{id}/submit.
 type SessionSubmitInput struct {
 	CityScope
-	ID   string `path:"id" doc:"Session ID, alias, or runtime session_name."`
-	Body struct {
+	ID             string `path:"id" doc:"Session ID, alias, or runtime session_name."`
+	IdempotencyKey string `header:"Idempotency-Key" required:"false" doc:"Idempotency key for safe retries."`
+	Body           struct {
 		Message string               `json:"message" minLength:"1" pattern:"\\S" doc:"Message text to submit."`
 		Intent  session.SubmitIntent `json:"intent,omitempty" enum:"default,follow_up,interrupt_now" doc:"Submit intent; empty defaults to \"default\"."`
+		Resume  bool                 `json:"resume,omitempty" doc:"Start or resume the session here if it is not running (an operator's own message; it consumes an operator's hold). Without it, a message to a session that is not running is queued for its next run (expiring after 24h) and the controller is asked to start it; the result's will_start says whether it will."`
 	}
 }
 
@@ -169,9 +185,11 @@ type SessionSubmitOutput struct {
 // whitespace-only messages are rejected at the validation layer.
 type SessionMessageInput struct {
 	CityScope
-	ID   string `path:"id" doc:"Session ID, alias, or runtime session_name."`
-	Body struct {
+	ID             string `path:"id" doc:"Session ID, alias, or runtime session_name."`
+	IdempotencyKey string `header:"Idempotency-Key" required:"false" doc:"Idempotency key for safe retries."`
+	Body           struct {
 		Message string `json:"message" minLength:"1" pattern:"\\S" doc:"Message text to send."`
+		Resume  bool   `json:"resume,omitempty" doc:"Start or resume the session here if it is not running (an operator's own message; it consumes an operator's hold). Without it, a message to a session that is not running is queued for its next run (expiring after 24h) and the controller is asked to start it; the result's will_start says whether it will."`
 	}
 }
 
@@ -183,8 +201,9 @@ type SessionMessageOutput struct {
 // SessionRespondInput is the Huma input for POST /v0/city/{cityName}/session/{id}/respond.
 type SessionRespondInput struct {
 	CityScope
-	ID   string `path:"id" doc:"Session ID, alias, or runtime session_name."`
-	Body struct {
+	ID             string `path:"id" doc:"Session ID, alias, or runtime session_name."`
+	IdempotencyKey string `header:"Idempotency-Key" required:"false" doc:"Idempotency key for safe retries."`
+	Body           struct {
 		RequestID string            `json:"request_id,omitempty" doc:"Pending interaction request ID (optional)."`
 		Action    string            `json:"action" minLength:"1" doc:"Response action (e.g. allow, deny)."`
 		Text      string            `json:"text,omitempty" doc:"Optional response text."`

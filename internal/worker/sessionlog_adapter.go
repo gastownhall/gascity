@@ -16,9 +16,14 @@ import (
 
 // LoadRequest scopes a Phase 1 transcript load.
 type LoadRequest struct {
-	Provider              string
-	TranscriptPath        string
-	GCSessionID           string
+	Provider       string
+	TranscriptPath string
+	GCSessionID    string
+	// LogicalConversationID is the conversation the snapshot belongs to: the
+	// session's session.Info.LogicalConversationID, or the caller's own
+	// HistoryRequest.LogicalID. Leave it empty only without a session bead:
+	// the fallback, GCSessionID, is shared by every conversation of the
+	// session, so the handle would stitch them together.
 	LogicalConversationID string
 	TailCompactions       int
 	BeforeEntryID         string
@@ -57,6 +62,20 @@ type AgentTranscriptResult struct {
 // sessionlog as the only production transcript parser in Phase 1.
 type SessionLogAdapter struct {
 	SearchPaths []string
+	// activity memoizes derived tail activity across the per-request handles a
+	// Factory hands out. Nil (the zero adapter) derives on every call.
+	activity *DerivedActivityMemo
+	// statTranscript reads a transcript's on-disk identity. Nil uses os.Stat;
+	// tests replace it to land a write at the moment the generation is captured.
+	statTranscript func(path string) (os.FileInfo, error)
+}
+
+// statFile reads path's on-disk identity through the statTranscript seam.
+func (a SessionLogAdapter) statFile(path string) (os.FileInfo, error) {
+	if a.statTranscript != nil {
+		return a.statTranscript(path)
+	}
+	return os.Stat(path)
 }
 
 // DiscoverTranscript returns the best available transcript path for a worker.
@@ -92,6 +111,13 @@ func (a SessionLogAdapter) TailMeta(path string) (*sessionlog.TailMeta, error) {
 // full-file parser diagnostics override, and these readers set none, so clearing
 // it removes a false signal rather than a real one.
 func (a SessionLogAdapter) TailMetaForProvider(provider, path string) (*sessionlog.TailMeta, error) {
+	if sessionlog.IsACPCapturePath(path) {
+		// gc's own ACP capture: the format follows the file, not the provider.
+		return a.TailMeta(path)
+	}
+	if sessionlog.ProviderFamily(provider) == "kimi" {
+		return sessionlog.ExtractKimiTailMetaFromSearchPaths(a.SearchPaths, path)
+	}
 	if sessionlog.ProviderFamily(provider) == "codex" {
 		return sessionlog.ExtractCodexTailMetaFromSearchPaths(a.SearchPaths, path)
 	}
@@ -148,14 +174,23 @@ func (a SessionLogAdapter) InvocationUsage(provider, path, cursorID string) ([]s
 // tail cannot be read from a trailing record. Whole-file-JSON mirror families
 // need the normalized history; everything else keeps the cheap tail path.
 func (a SessionLogAdapter) TailActivityForProvider(provider, path string) (TailActivity, error) {
+	if sessionlog.IsACPCapturePath(path) {
+		return a.TailActivity(path)
+	}
+	if family := sessionlog.ProviderFamily(provider); family == "kimi" || family == "codex" {
+		meta, err := a.TailMetaForProvider(provider, path)
+		return tailActivity(meta), err
+	}
 	if !sessionlog.DerivesActivityFromHistory(provider) {
 		return a.TailActivity(path)
 	}
-	snapshot, err := a.LoadHistory(LoadRequest{Provider: provider, TranscriptPath: path, TailCompactions: 1})
-	if err != nil || snapshot == nil {
-		return TailActivityUnknown, err
-	}
-	return snapshot.TailState.Activity, nil
+	return a.activity.resolve(path, func() (TailActivity, error) {
+		snapshot, err := a.LoadHistory(LoadRequest{Provider: provider, TranscriptPath: path, TailCompactions: 1})
+		if err != nil || snapshot == nil {
+			return TailActivityUnknown, err
+		}
+		return snapshot.TailState.Activity, nil
+	})
 }
 
 // TailActivity reads the transcript tail activity without loading full history.
@@ -180,6 +215,18 @@ func (a SessionLogAdapter) TailActivity(path string) (TailActivity, error) {
 // AgentMappings lists subagent transcript mappings for a parent transcript.
 func (a SessionLogAdapter) AgentMappings(path string) ([]sessionlog.AgentMapping, error) {
 	return sessionlog.FindAgentMappings(strings.TrimSpace(path))
+}
+
+// TranscriptRecords returns every raw transcript record in file order,
+// bypassing the active-branch walk. Records without a uuid — notably
+// queue-operation task notifications — are pruned by BuildDag and are
+// therefore invisible to ReadTranscript.
+func (a SessionLogAdapter) TranscriptRecords(path string) ([]json.RawMessage, error) {
+	entries, err := sessionlog.ReadFileRecords(strings.TrimSpace(path))
+	if err != nil {
+		return nil, err
+	}
+	return rawMessagesFromEntries(entries), nil
 }
 
 // ReadAgentTranscript loads a subagent transcript while preserving raw
@@ -268,6 +315,15 @@ func (a SessionLogAdapter) LoadHistory(req LoadRequest) (*HistorySnapshot, error
 	if err != nil {
 		return nil, err
 	}
+	// Identify the transcript's generation before reading it. A write landing
+	// after this point leaves the content newer than its generation, which the
+	// next load corrects. Identifying it after the read would stamp stale
+	// content with the post-write generation, and SessionHandle would serve
+	// that snapshot until the transcript changes again.
+	info, err := a.statFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("stat transcript: %w", err)
+	}
 	fullSession, err := sessionlog.ReadProviderFileRaw(req.Provider, path, 0)
 	if err != nil {
 		return nil, err
@@ -279,11 +335,6 @@ func (a SessionLogAdapter) LoadHistory(req LoadRequest) (*HistorySnapshot, error
 		if err != nil {
 			return nil, err
 		}
-	}
-
-	info, err := os.Stat(path)
-	if err != nil {
-		return nil, fmt.Errorf("stat transcript: %w", err)
 	}
 
 	entries := normalizeHistoryEntries(req.Provider, path, session.ID, session.Messages)
@@ -309,7 +360,7 @@ func (a SessionLogAdapter) LoadHistory(req LoadRequest) (*HistorySnapshot, error
 	}
 	compactionCount, lastEntryID, pendingIDs := transcriptGlobalFacts(fullSession.Messages)
 
-	tailMeta, err := sessionlog.ExtractTailMeta(path)
+	tailMeta, err := historyTailMeta(req.Provider, path)
 	if err != nil {
 		return nil, err
 	}
@@ -348,7 +399,7 @@ func (a SessionLogAdapter) LoadHistory(req LoadRequest) (*HistorySnapshot, error
 		ProviderSessionID:     session.ID,
 		TranscriptStreamID:    filepath.Clean(path),
 		Generation: Generation{
-			ID:         fmt.Sprintf("%d:%d", info.ModTime().UnixNano(), info.Size()),
+			ID:         transcriptGenerationID(info),
 			ObservedAt: info.ModTime().UTC(),
 		},
 		Cursor: Cursor{
@@ -356,7 +407,7 @@ func (a SessionLogAdapter) LoadHistory(req LoadRequest) (*HistorySnapshot, error
 		},
 		Continuity: continuity,
 		TailState: TailState{
-			Activity:              snapshotTailActivity(req.Provider, tailMeta, entries),
+			Activity:              historyTailActivity(req.Provider, path, tailMeta, entries),
 			LastEntryID:           lastEntryID,
 			OpenToolUseIDs:        openToolUseIDs,
 			PendingInteractionIDs: pendingIDs,
@@ -442,6 +493,9 @@ func normalizeEntry(provider, path, sessionID string, order int, entry *sessionl
 	if normalized.ID != entry.UUID {
 		normalized.Provenance.Derived = true
 	}
+	if entry.Partial {
+		normalized.Status = ResultStatusPartial
+	}
 	if !entry.Timestamp.IsZero() {
 		ts := entry.Timestamp.UTC()
 		normalized.Timestamp = &ts
@@ -477,6 +531,10 @@ func historySystemEventFromSessionLog(event *sessionlog.SystemEvent) *HistorySys
 }
 
 func attachDetachedProviderUsage(provider, path string, entries []HistoryEntry) ([]HistoryEntry, error) {
+	if sessionlog.IsACPCapturePath(path) {
+		// An ACP capture carries its usage on the turn's entries.
+		return entries, nil
+	}
 	family, supported := InvocationUsageFamily(provider)
 	if !supported || family != "codex" {
 		return entries, nil
@@ -914,6 +972,16 @@ func snapshotTailActivity(provider string, meta *sessionlog.TailMeta, entries []
 	return tailActivity(meta)
 }
 
+// historyTailActivity resolves a loaded transcript's tail activity. A gc ACP
+// capture carries its own activity (prompt/response pairing, read by
+// sessionlog.ExtractTailMeta) whatever family the provider belongs to.
+func historyTailActivity(provider, path string, meta *sessionlog.TailMeta, entries []HistoryEntry) TailActivity {
+	if sessionlog.IsACPCapturePath(path) {
+		return tailActivity(meta)
+	}
+	return snapshotTailActivity(provider, meta, entries)
+}
+
 func wholeFileJSONActivity(entries []HistoryEntry) TailActivity {
 	for i := len(entries) - 1; i >= 0; i-- {
 		switch entries[i].Actor {
@@ -924,6 +992,19 @@ func wholeFileJSONActivity(entries []HistoryEntry) TailActivity {
 		}
 	}
 	return TailActivityUnknown
+}
+
+// historyTailMeta reads the tail metadata LoadHistory reports. LoadHistory
+// reads whatever transcript path it is handed, with no search-root check, so
+// this calls the sessionlog parsers directly: TailMetaForProvider would fence
+// the path to the adapter's search roots. A gc-captured ACP transcript has its
+// own format whatever the provider family, so only a native Codex rollout uses
+// the Codex tail parser.
+func historyTailMeta(provider, path string) (*sessionlog.TailMeta, error) {
+	if sessionlog.ProviderFamily(provider) == "codex" && !sessionlog.IsACPCapturePath(path) {
+		return sessionlog.ExtractCodexTailMeta(path)
+	}
+	return sessionlog.ExtractTailMeta(path)
 }
 
 func tailActivity(meta *sessionlog.TailMeta) TailActivity {
@@ -942,11 +1023,18 @@ func tailActivity(meta *sessionlog.TailMeta) TailActivity {
 
 func historyDiagnostics(session sessionlog.SessionDiagnostics) []HistoryDiagnostic {
 	malformedTail := session.MalformedTail
-	if session.MalformedLineCount == 0 && !malformedTail {
+	if session.MalformedLineCount == 0 && !malformedTail && session.DroppedRecordCount == 0 {
 		return nil
 	}
 
 	var diagnostics []HistoryDiagnostic
+	if session.DroppedRecordCount > 0 {
+		diagnostics = append(diagnostics, HistoryDiagnostic{
+			Code:    "dropped_records",
+			Message: "transcript writer dropped records; normalized history has gaps",
+			Count:   session.DroppedRecordCount,
+		})
+	}
 	if malformedTail {
 		diagnostics = append(diagnostics, HistoryDiagnostic{
 			Code:    "malformed_tail",

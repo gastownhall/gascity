@@ -24,7 +24,11 @@ type statusProvider struct {
 	partial  atomic.Bool
 }
 
-var _ runtime.RelaunchProvider = (*statusProvider)(nil)
+var (
+	_ runtime.RelaunchProvider            = (*statusProvider)(nil)
+	_ runtime.LivenessObserverWithError   = (*statusProvider)(nil)
+	_ runtime.AttachmentObserverWithError = (*statusProvider)(nil)
+)
 
 func statusProviderPartial(sp any) bool {
 	p, ok := sp.(*statusProvider)
@@ -90,6 +94,21 @@ func (p *statusProvider) IsAttached(name string) bool {
 	})
 }
 
+// IsAttachedWithError forwards the error-bearing attachment probe. A timed-out
+// probe answers unavailable rather than "not attached".
+func (p *statusProvider) IsAttachedWithError(name string) (bool, error) {
+	type result struct {
+		attached bool
+		err      error
+	}
+	fallbackErr := fmt.Errorf("%w: status attachment probe timed out", runtime.ErrRuntimeUnavailable)
+	got := boundedStatusCall(p, result{err: fallbackErr}, func() result {
+		attached, err := runtime.IsAttachedWithError(p.base, name)
+		return result{attached: attached, err: err}
+	})
+	return got.attached, got.err
+}
+
 func (p *statusProvider) Attach(name string) error {
 	return p.base.Attach(name)
 }
@@ -104,6 +123,19 @@ func (p *statusProvider) ObserveLiveness(name string, processNames []string) run
 	return boundedStatusCall(p, runtime.Liveness{}, func() runtime.Liveness {
 		return runtime.ObserveLiveness(p.base, name, processNames)
 	})
+}
+
+func (p *statusProvider) ObserveLivenessWithError(name string, processNames []string) (runtime.Liveness, error) {
+	type result struct {
+		observation runtime.Liveness
+		err         error
+	}
+	fallbackErr := fmt.Errorf("%w: status liveness probe timed out", runtime.ErrRuntimeUnavailable)
+	got := boundedStatusCall(p, result{err: fallbackErr}, func() result {
+		observation, err := runtime.ObserveLivenessWithError(p.base, name, processNames)
+		return result{observation: observation, err: err}
+	})
+	return got.observation, got.err
 }
 
 func (p *statusProvider) Nudge(name string, content []runtime.ContentBlock) error {

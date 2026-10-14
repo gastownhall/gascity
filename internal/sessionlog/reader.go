@@ -42,6 +42,9 @@ type Session struct {
 type SessionDiagnostics struct {
 	MalformedLineCount int
 	MalformedTail      bool
+	// DroppedRecordCount counts records the transcript writer reported it
+	// could not record (gc ACP captures under backpressure).
+	DroppedRecordCount int
 }
 
 // PaginationInfo describes the pagination state of a session response.
@@ -156,7 +159,9 @@ func ReadProviderFile(provider, path string, tailCompactions int) (*Session, err
 		sess *Session
 		err  error
 	)
-	switch ProviderFamily(provider) {
+	switch transcriptFamily(provider, path) {
+	case acpCaptureFamily:
+		sess, err = ReadACPCaptureFile(path, tailCompactions)
 	case "auggie":
 		sess, err = ReadAuggieFile(path, tailCompactions)
 	case "amp":
@@ -238,7 +243,9 @@ func ReadProviderFileRaw(provider, path string, tailCompactions int) (*Session, 
 		sess *Session
 		err  error
 	)
-	switch ProviderFamily(provider) {
+	switch transcriptFamily(provider, path) {
+	case acpCaptureFamily:
+		sess, err = ReadACPCaptureFile(path, tailCompactions)
 	case "auggie":
 		sess, err = ReadAuggieFile(path, tailCompactions)
 	case "amp":
@@ -406,6 +413,15 @@ func ReadProviderFileRawNewer(provider, path string, tailCompactions int, afterM
 func parseFile(path string) ([]*Entry, error) {
 	entries, _, err := parseFileDetailed(path)
 	return entries, err
+}
+
+// ReadFileRecords reads every JSONL record from a transcript in file order,
+// before any active-branch selection. BuildDag drops entries without a uuid,
+// so records such as queue-operation task notifications never reach a caller
+// that reads a session. Callers that must observe those records — rather than
+// render a conversation — need this instead of a Read* helper.
+func ReadFileRecords(path string) ([]*Entry, error) {
+	return parseFile(path)
 }
 
 // parseFileDetailed reads all JSONL lines from a file into entries and
@@ -1472,13 +1488,18 @@ func DefaultGeminiSearchPaths() []string {
 }
 
 // DefaultKimiSearchPaths returns the default search paths for Kimi Code
-// session files (~/.kimi/sessions).
+// session files: legacy ~/.kimi/sessions, native ~/.kimi-code/sessions, and
+// $KIMI_CODE_HOME/sessions when that variable is set to a non-blank value.
 func DefaultKimiSearchPaths() []string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil
 	}
-	return []string{filepath.Join(home, ".kimi", "sessions")}
+	roots := []string{filepath.Join(home, ".kimi", "sessions"), filepath.Join(home, ".kimi-code", "sessions")}
+	if codeHome := strings.TrimSpace(os.Getenv("KIMI_CODE_HOME")); codeHome != "" {
+		roots = append(roots, filepath.Join(codeHome, "sessions"))
+	}
+	return roots
 }
 
 // DefaultAntigravitySearchPaths returns the default search paths for Antigravity JSONL

@@ -63,7 +63,7 @@ func namespaceSourceSpecStep(step *Step, iterationID string) *Step {
 	clone.WaitsFor = ""
 	clone.Assignee = ""
 	clone.Metadata = withMetadata(clone.Metadata, nil)
-	for _, key := range []string{beadmeta.ScopeRefMetadataKey, beadmeta.ScopeRoleMetadataKey, beadmeta.OnFailMetadataKey, beadmeta.StepIDMetadataKey, beadmeta.RalphStepIDMetadataKey, beadmeta.AttemptMetadataKey, beadmeta.StepRefMetadataKey} {
+	for _, key := range []string{beadmeta.ScopeRefMetadataKey, beadmeta.ScopeRoleMetadataKey, beadmeta.OnFailMetadataKey, beadmeta.StepIDMetadataKey, beadmeta.RalphStepIDMetadataKey, beadmeta.AttemptMetadataKey, beadmeta.RetryAttemptMetadataKey, beadmeta.StepRefMetadataKey} {
 		delete(clone.Metadata, key)
 	}
 	if specForRef := step.Metadata[beadmeta.SpecForRefMetadataKey]; specForRef != "" {

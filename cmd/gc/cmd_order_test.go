@@ -126,6 +126,44 @@ func TestOrderListJSON(t *testing.T) {
 	}
 }
 
+// TestOrderListJSONExposesIdempotent guards that the `idempotent` order flag is
+// visible in the JSON projection. Without it, an operator debugging a starved
+// single-flight order (vp-gprv: code-review-gate never dispatched because the
+// open-work gate timed out) cannot tell from `gc order list/show --json`
+// whether the order is idempotent — i.e. whether it is eligible to fail OPEN on
+// a gate timeout. The flag is the single most load-bearing field for that
+// diagnosis, so it must be serialized.
+func TestOrderListJSONExposesIdempotent(t *testing.T) {
+	aa := []orders.Order{
+		{Name: "sweep", Trigger: "cooldown", Interval: "2m", Exec: "true", Idempotent: true},
+		{Name: "review", Trigger: "cooldown", Interval: "2m", Exec: "true", Idempotent: false},
+	}
+
+	var stdout bytes.Buffer
+	if code := doOrderListJSON("/city", &config.City{}, aa, &stdout); code != 0 {
+		t.Fatalf("doOrderListJSON = %d, want 0", code)
+	}
+
+	var got struct {
+		Orders []struct {
+			Name       string `json:"name"`
+			Idempotent bool   `json:"idempotent"`
+		} `json:"orders"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("order list JSON invalid: %v\n%s", err, stdout.String())
+	}
+	if len(got.Orders) != 2 {
+		t.Fatalf("orders = %+v, want 2", got.Orders)
+	}
+	if got.Orders[0].Name != "sweep" || !got.Orders[0].Idempotent {
+		t.Errorf("idempotent order should serialize idempotent=true; got %+v", got.Orders[0])
+	}
+	if got.Orders[1].Name != "review" || got.Orders[1].Idempotent {
+		t.Errorf("non-idempotent order should serialize idempotent=false; got %+v", got.Orders[1])
+	}
+}
+
 func TestOrderListExecType(t *testing.T) {
 	aa := []orders.Order{
 		{Name: "poll", Trigger: "cooldown", Interval: "2m", Exec: "scripts/poll.sh"},
@@ -154,6 +192,7 @@ func TestOrderShowJSON(t *testing.T) {
 		Trigger:      "cron",
 		Schedule:     "0 3 * * *",
 		Pool:         "dog",
+		Idempotent:   true,
 		Source:       "/city/orders/digest.toml",
 		FormulaLayer: "/city/formulas",
 	}}
@@ -173,11 +212,20 @@ func TestOrderShowJSON(t *testing.T) {
 			Trigger      string `json:"trigger"`
 			Schedule     string `json:"schedule"`
 			Target       string `json:"target"`
+			Idempotent   bool   `json:"idempotent"`
 			FormulaLayer string `json:"formula_layer"`
 		} `json:"order"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
 		t.Fatalf("order show JSON invalid: %v\n%s", err, stdout.String())
+	}
+	// The list projection asserts idempotent directly
+	// (TestOrderListJSONExposesIdempotent); without the same assertion here half
+	// the diagnostic contract could regress silently. idempotent is what decides
+	// whether an order fails open on a gate timeout, so operators reading
+	// `gc order show --json` need it to be accurate.
+	if !got.Order.Idempotent {
+		t.Error("order show JSON: idempotent = false, want true (the show projection must expose the flag the list projection does)")
 	}
 	if got.SchemaVersion != "1" || got.Order.Name != "digest" || got.Order.Target != "dog" || got.Order.FormulaLayer != "/city/formulas" {
 		t.Fatalf("payload = %+v", got)
@@ -743,7 +791,7 @@ func TestOrderLastRunFn(t *testing.T) {
 	store := beads.NewBdStore(t.TempDir(), func(_, _ string, args ...string) ([]byte, error) {
 		joined := strings.Join(args, " ")
 		if strings.Contains(joined, "--label=order-run:digest") {
-			return []byte(`[{"id":"bd-aaa","title":"digest wisp","status":"open","issue_type":"task","created_at":"2026-02-27T10:00:00Z","labels":["order-run:digest"]}]`), nil
+			return []byte(`[{"id":"bd-aaa","title":"digest wisp","status":"open","issue_type":"molecule","created_at":"2026-02-27T10:00:00Z","labels":["order-run:digest"]}]`), nil
 		}
 		return []byte(`[]`), nil
 	})
@@ -836,6 +884,7 @@ func TestOrderCheckWithStoresResolverUsesBoundedEventTail(t *testing.T) {
 	now := time.Now().Add(time.Second)
 	if _, err := cityStore.Create(beads.Bead{
 		Title:  "recent digest run",
+		Type:   "molecule", // the run's pour root: an order-run label alone is no run (mc-v8g4p)
 		Labels: []string{"order-run:digest"},
 	}); err != nil {
 		t.Fatal(err)
@@ -916,6 +965,7 @@ func TestOrderCheckWithStoresResolverUsesRigStore(t *testing.T) {
 	rigStore := beads.NewMemStore()
 	if _, err := rigStore.Create(beads.Bead{
 		Title:  "recent rig run",
+		Type:   "molecule", // the run's pour root: an order-run label alone is no run (mc-v8g4p)
 		Labels: []string{"order-run:digest:rig:frontend"},
 	}); err != nil {
 		t.Fatal(err)
@@ -950,6 +1000,7 @@ func TestOrderCheckWithStoresResolverUsesLegacyCityStore(t *testing.T) {
 	rigStore := beads.NewMemStore()
 	if _, err := cityStore.Create(beads.Bead{
 		Title:  "legacy rig run",
+		Type:   "molecule", // the run's pour root: an order-run label alone is no run (mc-v8g4p)
 		Labels: []string{"order-run:digest:rig:frontend"},
 	}); err != nil {
 		t.Fatal(err)
@@ -1014,7 +1065,7 @@ func TestOrderCheckWithStoresResolverFailsWhenLegacyEventCursorReadFails(t *test
 	rigStore := beads.NewMemStore()
 	legacyStore := labelFailListStore{
 		Store:     beads.NewMemStore(),
-		failLabel: "order:watch:rig:frontend",
+		failLabel: "order-run:watch:rig:frontend",
 	}
 	eventLog := events.NewFake()
 	eventLog.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
@@ -3643,7 +3694,7 @@ func TestBdCursorUsesRowsFromPartialTierError(t *testing.T) {
 		Store: beads.NewMemStore(),
 		rows: []beads.Bead{{
 			ID:     "cursor-1",
-			Labels: []string{"order:digest", "seq:42"},
+			Labels: []string{"order-run:digest", "order:digest", "seq:42", "order-tracking"}, // a run record (the #7766 review)
 		}},
 		err: fmt.Errorf("wisps tier unavailable"),
 	}
@@ -4405,6 +4456,7 @@ prefix = "ct"
 // threshold — and takes stale-close down with it. Nothing else would catch a
 // regression here until a city's tracking backlog stopped draining.
 func TestPackagedOrderTrackingSweepPassesConfirm(t *testing.T) {
+	chdirToRealPackageDir(t)
 	const packOrderPath = "../../internal/bootstrap/packs/core/orders/order-tracking-sweep.toml"
 	var packed struct {
 		Order struct {

@@ -32,13 +32,11 @@ func (s *Server) handleAgentOutputStream(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	// Try session log streaming first, fall back to peek polling.
+	// Try session log streaming first, fall back to peek polling. The
+	// provider the reader dispatches on comes from resolveAgentTranscript,
+	// which resolves the builtin family rather than the config name.
 	workDir := s.resolveAgentWorkDir(agentCfg, name)
-	provider := strings.TrimSpace(agentCfg.Provider)
-	if provider == "" {
-		provider = strings.TrimSpace(cfg.Workspace.Provider)
-	}
-	var logPath string
+	var provider, logPath string
 	resolveLogPath := func() string { return "" }
 	if workDir != "" {
 		transcriptState, err := s.resolveAgentTranscript(name, agentCfg)
@@ -151,6 +149,10 @@ func (s *Server) streamSessionLog(
 		turns := make([]outputTurn, 0, len(sess.Messages))
 		uuids := make([]string, 0, len(sess.Messages))
 		for _, e := range sess.Messages {
+			if e.Partial {
+				// Still growing; send it once it settles (see settledHistorySnapshot).
+				continue
+			}
 			turn := entryToTurn(e)
 			if turn.Text == "" {
 				continue
@@ -344,6 +346,10 @@ func (s *Server) streamSessionLogHuma(
 		turns := make([]outputTurn, 0, len(sess.Messages))
 		uuids := make([]string, 0, len(sess.Messages))
 		for _, entry := range sess.Messages {
+			if entry.Partial {
+				// Still growing; send it once it settles (see settledHistorySnapshot).
+				continue
+			}
 			turn := entryToTurn(entry)
 			if turn.Text == "" {
 				continue
