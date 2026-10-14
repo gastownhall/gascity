@@ -6,32 +6,69 @@ import (
 	"io"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
 // The ownerless-runtime reap (CONTRACT v5.10j, mc-gjc95). A gc runtime whose
-// GC_SESSION_ID names a row the session store no longer holds (purged,
-// deleted, or written to a store this city no longer reads) has no owner to
-// reap it: the closed-owner reap needs a closed row, and the per-row arms
-// need a row. Legacy's start recycled such a dead runtime under any name;
-// v2's FreshOnly start refuses a held name, so a named session over one
-// stayed down. The tick now reaps it, fenced: only a runtime that proves it is
-// this city's (GC_CITY_PATH), whose owner the store answers not found on two
-// sightings at least ownerlessReapConfirmAfter apart, which reads dead (a
-// corpse, or a zombie by its own published process names), with no client
-// attached, under the name's runtime lease. Anything short of that is left
-// running, and gc doctor's ownerless-runtimes finding names it.
+// GC_SESSION_ID names a row no session store holds (purged, deleted, or
+// written to a store this city no longer reads) has no owner to reap it:
+// the closed-owner reap needs a closed row, and the per-row arms need a row.
+// Legacy's start recycled such a dead runtime under any name; v2's
+// FreshOnly start refuses a held name, so a named session over one stayed
+// down. The tick now reaps it, fenced: only a runtime that proves it is this
+// city's (GC_CITY_PATH), whose owner every store a session row can live in
+// answers not found (ownerLookup) on two sightings at least a patrol apart,
+// which reads dead on a fresh read (a corpse, or a zombie by its own
+// published process names), is older than the age grace, and has no client
+// attached, under the name's runtime lease. Each reap records an event.
+// Anything short of that is left running, and gc doctor's
+// ownerless-runtimes finding names it.
 
-// ownerlessReapConfirmAfter is how long an owner must stay not found between
-// the two sightings a reap needs: a store read that lags a create, or a row
-// written to a store this pass did not read, gets a pass to show up.
+// ownerlessReapConfirmAfter is the least time an owner must stay not found
+// between the two sightings a reap needs, and the patrol interval raises it
+// (ownerlessReap.gap): a store read that lags a create, or a row written to
+// a store this pass did not read, gets a pass to show up.
 const ownerlessReapConfirmAfter = 30 * time.Second
+
+// ownerlessAgeGrace is the runtime-age grace: the city's startup_timeout,
+// config's default without one.
+func ownerlessAgeGrace(cfg *config.City) time.Duration {
+	if cfg != nil {
+		if d := cfg.Session.StartupTimeoutDuration(); d > 0 {
+			return d
+		}
+	}
+	return 60 * time.Second
+}
+
+// ownerlessReap is what the closed-bead reap needs to reap a runtime whose
+// owner row is missing (CONTRACT v5.10j): the controller's sightings, every
+// store a session row can live in, the event recorder, the least gap
+// between the two sightings (one patrol, at least
+// ownerlessReapConfirmAfter), the runtime-age grace (startup_timeout: a
+// runtime that young may be a start whose row is not readable yet), and
+// the tick's time.
+type ownerlessReap struct {
+	sightings *ownerlessSightings
+	owners    ownerLookup
+	// lookup, when set, plans owners on the first ownerless runtime a pass
+	// meets, so a pass with none plans nothing.
+	lookup func() ownerLookup
+	rec    events.Recorder
+	gap    time.Duration
+	grace  time.Duration
+	now    time.Time
+}
 
 // ownerlessVerdict is a runtime's ownerless classification, the reap's and
 // the doctor finding's.
@@ -49,12 +86,14 @@ const (
 	ownerlessLivenessError  = "liveness-error"  // its liveness could not be read
 	ownerlessGone           = "gone"            // nothing under the name any more
 	ownerlessAttached       = "attached"        // a client is attached, or attachment cannot be read
+	ownerlessYoung          = "young"           // younger than the age grace, or its age cannot be read
 )
 
-// classifyOwnerlessRuntime classifies name, whose owner ownerID the store
-// answered not found, for cityPath: reapable (reason "") only when it is this
-// city's, reads dead and has no client attached.
-func classifyOwnerlessRuntime(sp runtime.Provider, cityPath, name, ownerID string) ownerlessVerdict {
+// classifyOwnerlessRuntime classifies name, whose owner ownerID the stores
+// answered not found, for cityPath at now: reapable (reason "") only when it
+// is this city's, reads dead on a fresh read, is older than grace and has no
+// client attached.
+func classifyOwnerlessRuntime(sp runtime.Provider, cityPath, name, ownerID string, now time.Time, grace time.Duration) ownerlessVerdict {
 	v := ownerlessVerdict{name: name, ownerID: ownerID}
 	city, err := sp.GetMeta(name, "GC_CITY_PATH")
 	switch {
@@ -65,7 +104,7 @@ func classifyOwnerlessRuntime(sp runtime.Provider, cityPath, name, ownerID strin
 		v.reason = ownerlessCityForeign
 		return v
 	}
-	dead, present, err := ownerlessRuntimeDead(sp, name)
+	dead, present, created, err := ownerlessRuntimeDead(sp, name, now)
 	switch {
 	case err != nil:
 		v.reason = ownerlessLivenessError
@@ -76,6 +115,9 @@ func classifyOwnerlessRuntime(sp runtime.Provider, cityPath, name, ownerID strin
 	case !dead:
 		v.reason = ownerlessAlive
 		return v
+	case created.IsZero() || now.Sub(created) < grace:
+		v.reason = ownerlessYoung
+		return v
 	}
 	if attached, err := runtime.IsAttachedWithError(sp, name); err != nil || attached {
 		v.reason = ownerlessAttached
@@ -83,27 +125,17 @@ func classifyOwnerlessRuntime(sp runtime.Provider, cityPath, name, ownerID strin
 	return v
 }
 
-// ownerlessRuntimeDead reads name's liveness by the process names its start
-// published (GT_PROCESS_NAMES), with no row to supply them: a corpse (no pane
-// alive), or a zombie (a pane up, none of its agent's processes alive). A
-// runtime without published names that runs cannot be told from a live
-// agent, so it is not dead.
-func ownerlessRuntimeDead(sp runtime.Provider, name string) (dead, present bool, err error) {
-	if checker, ok := sp.(runtime.DeadRuntimeSessionChecker); ok {
-		corpse, err := checker.IsDeadRuntimeSession(name)
-		if err != nil {
-			return false, false, err
-		}
-		if corpse {
-			return true, true, nil
-		}
-	}
-	if !sp.IsRunning(name) {
-		return false, false, nil
-	}
+// ownerlessRuntimeDead reads name's liveness fresh (as of now, past any
+// provider cache) by the process names its start published
+// (GT_PROCESS_NAMES), with no row to supply them: a corpse (no pane alive),
+// or a zombie (a pane up, none of its agent's processes alive), and when the
+// runtime was created (zero when the provider cannot say). A runtime without
+// published names that runs cannot be told from a live agent, so it is not
+// dead.
+func ownerlessRuntimeDead(sp runtime.Provider, name string, now time.Time) (dead, present bool, created time.Time, err error) {
 	raw, err := sp.GetMeta(name, "GT_PROCESS_NAMES")
-	if err != nil {
-		return false, true, err
+	if err != nil && !runtime.IsSessionGone(err) {
+		return false, false, time.Time{}, err
 	}
 	var names []string
 	for _, n := range strings.Split(raw, ",") {
@@ -111,7 +143,20 @@ func ownerlessRuntimeDead(sp runtime.Provider, name string) (dead, present bool,
 			names = append(names, n)
 		}
 	}
-	return len(names) > 0 && !sp.ProcessAlive(name, names), true, nil
+	live, err := runtime.ObserveLivenessSince(sp, name, names, now)
+	if err != nil {
+		return false, false, time.Time{}, err
+	}
+	if secs, perr := strconv.ParseInt(strings.TrimSpace(live.ObjectCreated), 10, 64); perr == nil && secs > 0 {
+		created = time.Unix(secs, 0)
+	}
+	switch {
+	case live.Corpse:
+		return true, true, created, nil
+	case !live.Running:
+		return false, false, created, nil
+	}
+	return len(names) > 0 && !live.Alive, true, created, nil
 }
 
 // ownerlessSightings is the controller's in-memory record of ownerless
@@ -136,8 +181,8 @@ func (o *ownerlessSightings) begin() {
 }
 
 // sight records key's sighting at now and reports whether an earlier one at
-// least ownerlessReapConfirmAfter ago confirms it.
-func (o *ownerlessSightings) sight(key string, now time.Time) bool {
+// least gap ago confirms it.
+func (o *ownerlessSightings) sight(key string, now time.Time, gap time.Duration) bool {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if o.first == nil {
@@ -149,7 +194,7 @@ func (o *ownerlessSightings) sight(key string, now time.Time) bool {
 		o.first[key] = now
 		return false
 	}
-	return now.Sub(first) >= ownerlessReapConfirmAfter
+	return now.Sub(first) >= gap
 }
 
 // report reports whether key is reported for the first time.
@@ -182,22 +227,62 @@ func (o *ownerlessSightings) end() {
 	}
 }
 
-// ownerNotFound reports a live store read that finds no row ownerID: only
-// beads.ErrNotFound counts, never another error.
-func ownerNotFound(store beads.Store, ownerID string) bool {
-	_, err := beads.HandlesFor(store).Live.Get(ownerID)
-	return errors.Is(err, beads.ErrNotFound)
+// ownerLookup is every store a session row can live in (the sessions
+// binding, the city work store and every rig store, suspended rigs
+// included: storeref's session plan), or why they could not all be opened.
+type ownerLookup struct {
+	stores []beads.Store
+	err    error
 }
 
-// reapOwnerlessRuntime reaps name, whose owner ownerID the store just
-// answered not found, when classifyOwnerlessRuntime finds it reapable on a
-// confirmed sighting; under the name's runtime lease (with nameOwnerID's
-// record, the open row that owns the name now, if any) it reads the
-// identity, the owner, the liveness and the attachment again before the
-// Stop. It reports whether it stopped name.
-func reapOwnerlessRuntime(store beads.Store, cityPath, name, ownerID, nameOwnerID string, sp runtime.Provider, sightings *ownerlessSightings, now time.Time, stderr io.Writer) bool {
-	key := ownerlessKey(name, ownerID)
-	v := classifyOwnerlessRuntime(sp, cityPath, name, ownerID)
+// notFound reports that no store holds row ownerID, on a live read of each:
+// every one answers beads.ErrNotFound. A store that errors, a lookup missing
+// a store, or no store at all proves nothing, so the owner is not missing.
+func (l ownerLookup) notFound(ownerID string) bool {
+	if l.err != nil || len(l.stores) == 0 {
+		return false
+	}
+	for _, store := range l.stores {
+		if _, err := beads.HandlesFor(store).Live.Get(ownerID); !errors.Is(err, beads.ErrNotFound) {
+			return false
+		}
+	}
+	return true
+}
+
+// sessionOwnerLookup is the lookup over cityPath's session plan: sessions
+// leads, then the work store and every rig store (suspended ones too: a row
+// in a suspended rig still owns its runtime).
+func sessionOwnerLookup(cityPath string, cfg *config.City, sessions beads.Store, rigs map[string]beads.Store) ownerLookup {
+	legs, err := sessionCensusStoreCandidates(cityPath, cfg, sessions, rigs, nil)
+	if err != nil {
+		return ownerLookup{err: err}
+	}
+	l := ownerLookup{}
+	for _, leg := range legs {
+		if leg.store != nil {
+			l.stores = append(l.stores, leg.store)
+		}
+	}
+	return l
+}
+
+// reapOwnerlessRuntime reaps name, whose owner ownerID the sessions store
+// just answered not found, when every session store answers not found and
+// classifyOwnerlessRuntime finds it reapable on a confirmed sighting; under
+// the name's runtime lease (with nameOwnerID's record, the open row that
+// owns the name now, if any) it reads the identity, the owner, the liveness
+// and the attachment again before the Stop, and records the reap. It
+// reports whether it stopped name.
+func reapOwnerlessRuntime(store beads.Store, cityPath, name, ownerID, nameOwnerID string, sp runtime.Provider, o *ownerlessReap, stderr io.Writer) bool {
+	key, sightings, now := ownerlessKey(name, ownerID), o.sightings, o.now
+	if o.lookup != nil {
+		o.owners, o.lookup = o.lookup(), nil
+	}
+	if !o.owners.notFound(ownerID) {
+		return false
+	}
+	v := classifyOwnerlessRuntime(sp, cityPath, name, ownerID, now, o.grace)
 	switch v.reason {
 	case "":
 	case ownerlessAlive, ownerlessAttached:
@@ -208,7 +293,7 @@ func reapOwnerlessRuntime(store beads.Store, cityPath, name, ownerID, nameOwnerI
 	default:
 		return false
 	}
-	if !sightings.sight(key, now) {
+	if !sightings.sight(key, now, o.gap) {
 		return false
 	}
 	_, release, err := tryRuntimeLease(store, cityPath, name, nameOwnerID, session.RuntimeLeaseTTL(0))
@@ -226,7 +311,7 @@ func reapOwnerlessRuntime(store beads.Store, cityPath, name, ownerID, nameOwnerI
 	if again, err := sp.GetMeta(name, "GC_SESSION_ID"); err != nil || strings.TrimSpace(again) != ownerID {
 		return false
 	}
-	if !ownerNotFound(store, ownerID) || classifyOwnerlessRuntime(sp, cityPath, name, ownerID).reason != "" {
+	if !o.owners.notFound(ownerID) || classifyOwnerlessRuntime(sp, cityPath, name, ownerID, now, o.grace).reason != "" {
 		return false
 	}
 	if err := sp.Stop(name); err != nil {
@@ -235,14 +320,22 @@ func reapOwnerlessRuntime(store beads.Store, cityPath, name, ownerID, nameOwnerI
 		}
 		return false
 	}
-	fmt.Fprintf(stderr, "session reconciler: reaped dead runtime %q bound to session bead %s, which the store does not hold\n", name, ownerID) //nolint:errcheck
+	fmt.Fprintf(stderr, "session reconciler: reaped dead runtime %q bound to session bead %s, which no store holds\n", name, ownerID) //nolint:errcheck
+	if o.rec != nil {
+		o.rec.Record(events.Event{
+			Type: events.SessionStopped, Actor: "gc", Subject: name, SessionID: ownerID,
+			Message: "reaped dead runtime whose owner row is missing",
+			Payload: api.SessionLifecyclePayloadJSON(ownerID, "", "ownerless-reap"),
+		})
+	}
 	return true
 }
 
 // ownerlessRuntimeFindings lists the runtimes sp lists for cityPath that no
-// row owns: no readable GC_SESSION_ID, or one the store does not hold, each
-// with why the tick leaves it (or "reapable"). The doctor's finding.
-func ownerlessRuntimeFindings(store beads.Store, sp runtime.Provider, cityPath string) ([]string, error) {
+// row owns: no readable GC_SESSION_ID, or one no session store holds
+// (owners), each with why the tick leaves it (or that it reaps it). The
+// doctor's finding.
+func ownerlessRuntimeFindings(owners ownerLookup, sp runtime.Provider, cityPath string, now time.Time, grace time.Duration) ([]string, error) {
 	names, err := sp.ListRunning("")
 	if err != nil && !runtime.IsPartialListError(err) {
 		return nil, err
@@ -258,10 +351,10 @@ func ownerlessRuntimeFindings(store beads.Store, sp runtime.Provider, cityPath s
 		case id == "":
 			findings = append(findings, fmt.Sprintf("%s: no GC_SESSION_ID; no owner can be proven", name))
 			continue
-		case !ownerNotFound(store, id):
+		case !owners.notFound(id):
 			continue
 		}
-		v := classifyOwnerlessRuntime(sp, cityPath, name, id)
+		v := classifyOwnerlessRuntime(sp, cityPath, name, id, now, grace)
 		why := v.reason
 		if why == "" {
 			why = "dead: the controller reaps it"

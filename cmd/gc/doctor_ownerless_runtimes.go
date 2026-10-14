@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -36,6 +38,26 @@ func (c *ownerlessRuntimesCheck) WarmupEligible() bool { return false }
 
 func (c *ownerlessRuntimesCheck) Fix(_ *doctor.CheckContext) error { return nil }
 
+// ownerLookup is every store a session row of the city can live in, as the
+// tick's reap reads them (sessionOwnerLookup): a rig store that will not
+// open leaves the lookup unable to prove any owner missing.
+func (c *ownerlessRuntimesCheck) ownerLookup(city beads.Store) ownerLookup {
+	rigs := map[string]beads.Store{}
+	if c.cfg != nil {
+		for _, rig := range c.cfg.Rigs {
+			if strings.TrimSpace(rig.Path) == "" {
+				continue
+			}
+			store, err := c.newStore(rig.Path)
+			if err != nil {
+				return ownerLookup{err: fmt.Errorf("opening rig %s's store: %w", rig.Name, err)}
+			}
+			rigs[rig.Name] = store
+		}
+	}
+	return sessionOwnerLookup(c.cityPath, c.cfg, cliSessionStore(city, c.cfg, c.cityPath), rigs)
+}
+
 func (c *ownerlessRuntimesCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 	store, err := c.newStore(c.cityPath)
 	if err != nil {
@@ -44,7 +66,11 @@ func (c *ownerlessRuntimesCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult
 	if c.sp == nil {
 		return warnCheck(c.Name(), fmt.Sprintf("skipping the ownerless-runtime scan: session provider: %v", c.spErr), "fix the session provider, then rerun gc doctor", nil)
 	}
-	findings, err := ownerlessRuntimeFindings(cliSessionStore(store, c.cfg, c.cityPath), c.sp, c.cityPath)
+	owners := c.ownerLookup(store)
+	if owners.err != nil {
+		return warnCheck(c.Name(), fmt.Sprintf("skipping the ownerless-runtime scan: %v", owners.err), "fix the rig store's access, then rerun gc doctor", nil)
+	}
+	findings, err := ownerlessRuntimeFindings(owners, c.sp, c.cityPath, time.Now(), ownerlessAgeGrace(c.cfg))
 	if err != nil && len(findings) == 0 {
 		return warnCheck(c.Name(), fmt.Sprintf("listing runtimes: %v", err), "rerun gc doctor once the session provider answers", nil)
 	}

@@ -3527,13 +3527,13 @@ func reapRuntimesBoundToClosedBeads(
 	cityPath string,
 	stderr io.Writer,
 ) int {
-	return reapRuntimesBoundToClosedBeadsWith(store, sessionBeads, dt, sp, inv, cityPath, nil, time.Time{}, stderr)
+	return reapRuntimesBoundToClosedBeadsWith(store, sessionBeads, dt, sp, inv, cityPath, nil, stderr)
 }
 
 // reapRuntimesBoundToClosedBeadsWith is reapRuntimesBoundToClosedBeads that,
-// with ownerless (the controller's sightings) set, also reaps a dead runtime
-// whose owner the store does not hold at all (reapOwnerlessRuntime, CONTRACT
-// v5.10j), at now.
+// with ownerless (the controller's sightings and owner lookup) set, also
+// reaps a dead runtime whose owner no session store holds at all
+// (reapOwnerlessRuntime, CONTRACT v5.10j).
 func reapRuntimesBoundToClosedBeadsWith(
 	store beads.Store,
 	sessionBeads *sessionBeadSnapshot,
@@ -3541,16 +3541,15 @@ func reapRuntimesBoundToClosedBeadsWith(
 	sp runtime.Provider,
 	inv *runtimeInventoryView,
 	cityPath string,
-	ownerless *ownerlessSightings,
-	now time.Time,
+	ownerless *ownerlessReap,
 	stderr io.Writer,
 ) int {
 	if store == nil || sp == nil {
 		return 0
 	}
 	if ownerless != nil {
-		ownerless.begin()
-		defer ownerless.end()
+		ownerless.sightings.begin()
+		defer ownerless.sightings.end()
 	}
 	if stderr == nil {
 		stderr = io.Discard
@@ -3630,7 +3629,7 @@ func reapRuntimesBoundToClosedBeadsWith(
 			if owner, ok := sessionBeads.FindInfoBySessionName(name); ok {
 				nameOwnerID = owner.ID
 			}
-			if reapOwnerlessRuntime(store, cityPath, name, liveID, nameOwnerID, sp, ownerless, now, stderr) {
+			if reapOwnerlessRuntime(store, cityPath, name, liveID, nameOwnerID, sp, ownerless, stderr) {
 				reaped++
 			}
 			continue

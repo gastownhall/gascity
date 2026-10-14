@@ -3,12 +3,15 @@ package main
 import (
 	"bytes"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -23,9 +26,36 @@ type ownerlessFake struct {
 	// the last read the classification makes before the reap takes the lease.
 	onAttachRead func(n int)
 	attachReads  int
+	// created is each runtime's creation time (none: unknown), freshErrs
+	// each fresh liveness read's error.
+	created   map[string]time.Time
+	freshErrs map[string]error
 }
 
 func (f *ownerlessFake) ProcessAlive(name string, _ []string) bool { return f.alive[name] }
+
+// ObserveLivenessSince is the fresh read: a corpse, a live pane with the
+// agent alive by its names (none reads alive), or nothing, with its
+// creation time.
+func (f *ownerlessFake) ObserveLivenessSince(name string, names []string, _ time.Time) (runtime.Liveness, error) {
+	if err := f.freshErrs[name]; err != nil {
+		return runtime.Liveness{}, err
+	}
+	var l runtime.Liveness
+	if !f.visible[name] {
+		return l, nil
+	}
+	if c, ok := f.created[name]; ok {
+		l.ObjectCreated = strconv.FormatInt(c.Unix(), 10)
+	}
+	switch {
+	case f.dead[name]:
+		l.Corpse = true
+	case f.live[name]:
+		l.Running, l.Alive = true, len(names) == 0 || f.alive[name]
+	}
+	return l, nil
+}
 
 func (f *ownerlessFake) IsAttachedWithError(name string) (bool, error) {
 	f.attachReads++
@@ -66,15 +96,21 @@ type ownerlessCase struct {
 	city      string
 	sp        *ownerlessFake
 	store     beads.Store
+	others    []beads.Store // the other stores a session row can live in
 	snapshot  *sessionBeadSnapshot
 	sightings *ownerlessSightings
+	gap       time.Duration
+	rec       *events.Fake
 	stderr    bytes.Buffer
 }
 
 func newOwnerlessCase(t *testing.T) *ownerlessCase {
 	t.Helper()
-	c := &ownerlessCase{city: t.TempDir(), sightings: &ownerlessSightings{}}
-	c.sp = &ownerlessFake{deadRuntimeArtifactProvider: newDeadRuntimeArtifactProvider(), alive: map[string]bool{}, attached: map[string]bool{}, attachErr: map[string]error{}}
+	c := &ownerlessCase{city: t.TempDir(), sightings: &ownerlessSightings{}, gap: ownerlessReapConfirmAfter, rec: events.NewFake()}
+	c.sp = &ownerlessFake{
+		deadRuntimeArtifactProvider: newDeadRuntimeArtifactProvider(), alive: map[string]bool{}, attached: map[string]bool{}, attachErr: map[string]error{},
+		created: map[string]time.Time{"named-1": ownerlessT0.Add(-time.Hour)}, freshErrs: map[string]error{},
+	}
 	c.sp.visible["named-1"] = true
 	c.sp.dead["named-1"] = true
 	for k, v := range map[string]string{"GC_SESSION_ID": "gc-gone", "GC_CITY_PATH": c.city} {
@@ -88,9 +124,19 @@ func newOwnerlessCase(t *testing.T) *ownerlessCase {
 	return c
 }
 
-// tick runs the closed-bead reap with the ownerless memory at now.
+// ownerlessT0 is the cases' first tick.
+var ownerlessT0 = time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+
+// owners is the case's owner lookup: its sessions store, then the others.
+func (c *ownerlessCase) owners() ownerLookup {
+	return ownerLookup{stores: append([]beads.Store{c.store}, c.others...)}
+}
+
+// tick runs the closed-bead reap with the ownerless memory at now, a
+// minute's age grace.
 func (c *ownerlessCase) tick(now time.Time) int {
-	return reapRuntimesBoundToClosedBeadsWith(c.store, c.snapshot, nil, c.sp, nil, c.city, c.sightings, now, &c.stderr)
+	o := &ownerlessReap{sightings: c.sightings, owners: c.owners(), rec: c.rec, gap: c.gap, grace: time.Minute, now: now}
+	return reapRuntimesBoundToClosedBeadsWith(c.store, c.snapshot, nil, c.sp, nil, c.city, o, &c.stderr)
 }
 
 // TestOwnerlessDeadRuntimeIsReapedOnTheSecondSighting (CONTRACT v5.10j,
@@ -109,7 +155,7 @@ func TestOwnerlessDeadRuntimeIsReapedOnTheSecondSighting(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			t0 := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+			t0 := ownerlessT0
 			if n := c.tick(t0); n != 0 || c.sp.stopCalls["named-1"] != 0 {
 				t.Fatalf("first sighting: reaped %d, stops %d; want none", n, c.sp.stopCalls["named-1"])
 			}
@@ -183,7 +229,7 @@ func TestOwnerlessRuntimeLeftRunning(t *testing.T) {
 			if release := c.set(t, oc); release != nil {
 				defer release()
 			}
-			t0 := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+			t0 := ownerlessT0
 			for i := range 3 {
 				if n := oc.tick(t0.Add(time.Duration(i) * ownerlessReapConfirmAfter)); n != 0 {
 					t.Fatalf("tick %d reaped %d", i, n)
@@ -220,7 +266,7 @@ func TestOwnerlessReapRereadsUnderTheLease(t *testing.T) {
 					change(t, c)
 				}
 			}
-			t0 := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+			t0 := ownerlessT0
 			c.tick(t0)
 			if n := c.tick(t0.Add(ownerlessReapConfirmAfter)); n != 0 || c.sp.stopCalls["named-1"] != 0 {
 				t.Fatalf("reaped %d, stops %d; want it left running; stderr=%q", n, c.sp.stopCalls["named-1"], c.stderr.String())
@@ -234,7 +280,7 @@ func TestOwnerlessReapRereadsUnderTheLease(t *testing.T) {
 // again; a restart (fresh memory) does the same.
 func TestOwnerlessSightingForgottenWhenNotSeen(t *testing.T) {
 	c := newOwnerlessCase(t)
-	t0 := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	t0 := ownerlessT0
 	c.tick(t0)
 	delete(c.sp.visible, "named-1")
 	c.tick(t0.Add(ownerlessReapConfirmAfter))
@@ -272,7 +318,7 @@ func TestOwnerlessRuntimeFindings(t *testing.T) {
 	if err := c.sp.SetMeta("nocity", "GC_SESSION_ID", "gc-third"); err != nil {
 		t.Fatal(err)
 	}
-	findings, err := ownerlessRuntimeFindings(c.store, c.sp, c.city)
+	findings, err := ownerlessRuntimeFindings(c.owners(), c.sp, c.city, ownerlessT0, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -292,7 +338,7 @@ func TestOwnerlessRuntimeFindings(t *testing.T) {
 	}
 	// A store that cannot answer proves no owner gone: only the runtime
 	// without GC_SESSION_ID is named.
-	findings, err = ownerlessRuntimeFindings(&ownerGetErrStore{MemStore: beads.NewMemStore(), err: errors.New("store unreachable")}, c.sp, c.city)
+	findings, err = ownerlessRuntimeFindings(ownerLookup{stores: []beads.Store{&ownerGetErrStore{MemStore: beads.NewMemStore(), err: errors.New("store unreachable")}}}, c.sp, c.city, ownerlessT0, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -314,5 +360,167 @@ func TestOwnerlessRuntimesDoctorCheck(t *testing.T) {
 	delete(c.sp.visible, "named-1")
 	if res := check.Run(nil); res.Status != doctor.StatusOK {
 		t.Fatalf("result %+v, want OK with no ownerless runtime", res)
+	}
+}
+
+// TestOwnerlessReapReadsEveryOwnerStore (the #7811 review, CONTRACT
+// v5.10j item 2): the owner is missing only when every store a session row
+// can live in answers not found. A row in another store (a rig's, a moved
+// sessions binding's) keeps its runtime, and so does a store that errors.
+func TestOwnerlessReapReadsEveryOwnerStore(t *testing.T) {
+	for name, other := range map[string]beads.Store{
+		"the owner in another store": beads.NewMemStoreFrom(1, []beads.Bead{{ID: "gc-gone", Status: "open", Type: "session", Labels: []string{"gc:session"}}}, nil),
+		"another store errors":       &ownerGetErrStore{MemStore: beads.NewMemStore(), err: errors.New("rig store unreachable")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := newOwnerlessCase(t)
+			c.others = []beads.Store{beads.NewMemStore(), other}
+			for i := range 3 {
+				c.tick(ownerlessT0.Add(time.Duration(i) * ownerlessReapConfirmAfter))
+			}
+			if c.sp.stopCalls["named-1"] != 0 {
+				t.Fatalf("stopped %d time(s); want it left running", c.sp.stopCalls["named-1"])
+			}
+			if findings, _ := ownerlessRuntimeFindings(c.owners(), c.sp, c.city, ownerlessT0, time.Minute); strings.Contains(strings.Join(findings, "\n"), "named-1") {
+				t.Fatalf("findings %q name a runtime whose owner is not proven missing", findings)
+			}
+		})
+	}
+	t.Run("an alive runtime whose owner another store holds is not reported", func(t *testing.T) {
+		c := newOwnerlessCase(t)
+		delete(c.sp.dead, "named-1")
+		c.sp.live["named-1"] = true
+		c.others = []beads.Store{beads.NewMemStoreFrom(1, []beads.Bead{{ID: "gc-gone", Status: "open", Type: "session", Labels: []string{"gc:session"}}}, nil)}
+		c.tick(ownerlessT0)
+		if strings.Contains(c.stderr.String(), "left running") {
+			t.Fatalf("stderr %q reports a runtime whose owner is held", c.stderr.String())
+		}
+	})
+	t.Run("every store answers not found", func(t *testing.T) {
+		c := newOwnerlessCase(t)
+		c.others = []beads.Store{beads.NewMemStore(), beads.NewMemStore()}
+		c.tick(ownerlessT0)
+		if n := c.tick(ownerlessT0.Add(ownerlessReapConfirmAfter)); n != 1 {
+			t.Fatalf("reaped %d, want the runtime reaped", n)
+		}
+	})
+	if (ownerLookup{err: errors.New("rig store unopenable"), stores: []beads.Store{beads.NewMemStore()}}).notFound("gc-gone") || (ownerLookup{}).notFound("gc-gone") {
+		t.Fatal("an incomplete or empty lookup proved an owner missing")
+	}
+}
+
+// TestOwnerlessDoctorCheckNeedsEveryStore (the #7811 review): a rig store
+// the doctor cannot open leaves it unable to prove any owner missing, and
+// the check says so instead of naming a runtime.
+func TestOwnerlessDoctorCheckNeedsEveryStore(t *testing.T) {
+	c := newOwnerlessCase(t)
+	cfg := &config.City{Workspace: config.Workspace{Name: "c"}, Rigs: []config.Rig{{Name: "r", Path: "/rigs/r"}}}
+	open := func(path string) (beads.Store, error) {
+		if path == "/rigs/r" {
+			return nil, errors.New("rig store locked")
+		}
+		return c.store, nil
+	}
+	res := newOwnerlessRuntimesCheck(cfg, c.city, open, c.sp, nil).Run(nil)
+	if res.Status != doctor.StatusWarning || !strings.Contains(res.Message, "rig store locked") || len(res.Details) != 0 {
+		t.Fatalf("result %+v, want a warning that the rig store would not open, naming no runtime", res)
+	}
+}
+
+// TestOwnerlessReapWaitsAPatrolAndTheAgeGrace (CONTRACT v5.10j items 2):
+// the two sightings are at least one patrol apart (the gap), and a runtime
+// younger than the age grace, or whose age cannot be read, is not reaped.
+func TestOwnerlessReapWaitsAPatrolAndTheAgeGrace(t *testing.T) {
+	t.Run("a patrol longer than the confirm window", func(t *testing.T) {
+		c := newOwnerlessCase(t)
+		c.gap = 2 * time.Minute
+		c.tick(ownerlessT0)
+		if n := c.tick(ownerlessT0.Add(ownerlessReapConfirmAfter)); n != 0 {
+			t.Fatalf("reaped %d inside the patrol gap", n)
+		}
+		if n := c.tick(ownerlessT0.Add(c.gap)); n != 1 {
+			t.Fatalf("reaped %d a patrol later, want it reaped", n)
+		}
+	})
+	for name, created := range map[string]time.Time{"young": ownerlessT0.Add(ownerlessReapConfirmAfter), "age unknown": {}} {
+		t.Run(name, func(t *testing.T) {
+			c := newOwnerlessCase(t)
+			if created.IsZero() {
+				delete(c.sp.created, "named-1")
+			} else {
+				c.sp.created["named-1"] = created
+			}
+			for i := range 3 {
+				c.tick(ownerlessT0.Add(time.Duration(i) * ownerlessReapConfirmAfter))
+			}
+			if c.sp.stopCalls["named-1"] != 0 {
+				t.Fatalf("stopped %d time(s); want a %s runtime left running", c.sp.stopCalls["named-1"], name)
+			}
+		})
+	}
+}
+
+// TestOwnerlessReapRecordsAnEvent (CONTRACT v5.10j item 5): each reap
+// records a session.stopped event naming the runtime and its missing owner.
+func TestOwnerlessReapRecordsAnEvent(t *testing.T) {
+	c := newOwnerlessCase(t)
+	c.tick(ownerlessT0)
+	c.tick(ownerlessT0.Add(ownerlessReapConfirmAfter))
+	if len(c.rec.Events) != 1 || c.rec.Events[0].Type != events.SessionStopped || c.rec.Events[0].Subject != "named-1" || c.rec.Events[0].SessionID != "gc-gone" {
+		t.Fatalf("events %+v, want one session.stopped for named-1 (gc-gone)", c.rec.Events)
+	}
+}
+
+// TestOwnerlessLivenessErrorLeavesTheRuntime (the #7811 review): a fresh
+// liveness read, or the process-names read, that errors on an alive
+// ownerless runtime never reads it dead: it is left running, and the
+// doctor names the read's failure.
+func TestOwnerlessLivenessErrorLeavesTheRuntime(t *testing.T) {
+	for _, which := range []string{"an alive runtime", "a process-names read"} {
+		t.Run(which, func(t *testing.T) {
+			c := newOwnerlessCase(t)
+			delete(c.sp.dead, "named-1")
+			c.sp.live["named-1"], c.sp.alive["named-1"] = true, true
+			if err := c.sp.SetMeta("named-1", "GT_PROCESS_NAMES", "claude"); err != nil {
+				t.Fatal(err)
+			}
+			if which == "an alive runtime" {
+				c.sp.freshErrs["named-1"] = errors.New("tmux: state refresh failed")
+			} else {
+				c.sp.GetMetaErrors = map[string]map[string]error{"named-1": {"GT_PROCESS_NAMES": errors.New("tmux: server busy")}}
+			}
+			for i := range 3 {
+				c.tick(ownerlessT0.Add(time.Duration(i) * ownerlessReapConfirmAfter))
+			}
+			if c.sp.stopCalls["named-1"] != 0 {
+				t.Fatalf("stopped %d time(s); want the alive runtime left running", c.sp.stopCalls["named-1"])
+			}
+			if findings, _ := ownerlessRuntimeFindings(c.owners(), c.sp, c.city, ownerlessT0, time.Minute); !strings.Contains(strings.Join(findings, "\n"), "(liveness-error)") {
+				t.Fatalf("findings %q, want the liveness error named", findings)
+			}
+		})
+	}
+}
+
+// TestOwnerlessLookupPlannedOnDemand: the tick plans its owner lookup on
+// the first ownerless runtime a pass meets, once, and a pass with none
+// plans nothing.
+func TestOwnerlessLookupPlannedOnDemand(t *testing.T) {
+	c := newOwnerlessCase(t)
+	plans := 0
+	tick := func(now time.Time) int {
+		o := &ownerlessReap{
+			sightings: c.sightings, rec: c.rec, gap: c.gap, grace: time.Minute, now: now,
+			lookup: func() ownerLookup { plans++; return c.owners() },
+		}
+		return reapRuntimesBoundToClosedBeadsWith(c.store, c.snapshot, nil, c.sp, nil, c.city, o, &c.stderr)
+	}
+	tick(ownerlessT0)
+	if n := tick(ownerlessT0.Add(ownerlessReapConfirmAfter)); n != 1 || plans != 2 {
+		t.Fatalf("reaped %d with %d plans; want it reaped, one plan a pass", n, plans)
+	}
+	tick(ownerlessT0.Add(2 * ownerlessReapConfirmAfter))
+	if plans != 2 {
+		t.Fatalf("%d plans after a pass with no ownerless runtime, want none added", plans)
 	}
 }

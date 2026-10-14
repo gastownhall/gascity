@@ -1641,7 +1641,18 @@ func (cr *CityRuntime) phaseCleanupDeadRuntimeSessionCorpses(p *tickPass) bool {
 // name's current owner can rebind it and attach lands on the right runtime.
 func (cr *CityRuntime) phaseReapRuntimesBoundToClosedBeads(p *tickPass) bool {
 	phaseStart := time.Now()
-	reapRuntimesBoundToClosedBeadsWith(cr.sessionsBeadStore().Store, p.sessionBeads, cr.sessionDrains, cr.sp, p.inv, cr.cityPath, &cr.ownerlessRuntimes, time.Now(), cr.stderr)
+	sessions := cr.sessionsBeadStore().Store
+	ownerless := &ownerlessReap{
+		sightings: &cr.ownerlessRuntimes,
+		lookup: func() ownerLookup {
+			return sessionOwnerLookup(cr.cityPath, cr.cfg, sessions, cr.rigBeadStores()) // residency:allow — the census frame; sessionCensusStoreCandidates plans the legs (storeref.Plan)
+		},
+		rec:   cr.rec,
+		gap:   max(ownerlessReapConfirmAfter, cr.cfg.Daemon.PatrolIntervalDuration()),
+		grace: ownerlessAgeGrace(cr.cfg),
+		now:   time.Now(),
+	}
+	reapRuntimesBoundToClosedBeadsWith(sessions, p.sessionBeads, cr.sessionDrains, cr.sp, p.inv, cr.cityPath, ownerless, cr.stderr)
 	p.recordPhase(TraceSiteControllerTickPhase, "reap_runtimes_bound_to_closed_beads", phaseStart, p.inv.closedBoundPhaseFields())
 	return false
 }
