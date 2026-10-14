@@ -1555,6 +1555,9 @@ the failure object carries the code.
 - bead_payload_refused: --payload on bead.created, bead.updated, bead.closed
   or bead.deleted. Their payload is the bead row; use --bead-payload &lt;id&gt; so
   gc reads it from the store.
+- bead_payload_not_found: --bead-payload names a bead none of the city's
+  stores holds. Any other failure to read it is reported on stderr and the
+  event is still recorded, without the payload.
 
 --payload attaches arbitrary JSON to any other event type.
 

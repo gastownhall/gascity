@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/spf13/cobra"
 )
 
@@ -64,6 +66,9 @@ the failure object carries the code.
 - bead_payload_refused: --payload on bead.created, bead.updated, bead.closed
   or bead.deleted. Their payload is the bead row; use --bead-payload <id> so
   gc reads it from the store.
+- bead_payload_not_found: --bead-payload names a bead none of the city's
+  stores holds. Any other failure to read it is reported on stderr and the
+  event is still recorded, without the payload.
 
 --payload attaches arbitrary JSON to any other event type.`,
 		Args: cobra.ExactArgs(1),
@@ -79,7 +84,15 @@ the failure object carries the code.
 				fmt.Fprintf(stderr, "gc event emit: %s\n", refusal.reason) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
-			finalPayload := eventPayloadForEmit(payload, beadPayload, stderr)
+			finalPayload, missing := eventPayloadForEmit(payload, beadPayload, stderr)
+			if missing != nil {
+				reason := fmt.Sprintf("--bead-payload %s: %v; nothing recorded", strings.TrimSpace(beadPayload), missing)
+				if jsonOut {
+					return exitForCode(writeJSONError(stdout, stderr, eventEmitBeadNotFoundCode, reason, 1))
+				}
+				fmt.Fprintf(stderr, "gc event emit: %s\n", reason) //nolint:errcheck // best-effort stderr
+				return errExit
+			}
 			submitted := false
 			if jsonOut {
 				submitted = cmdEventEmitSubmitted(args[0], subject, message, effectiveActor, finalPayload, stderr)
@@ -117,6 +130,7 @@ const cacheActorPrefix = "cache-"
 const (
 	eventEmitReservedActorCode = "reserved_actor"
 	eventEmitBeadPayloadCode   = "bead_payload_refused"
+	eventEmitBeadNotFoundCode  = "bead_payload_not_found"
 )
 
 // beadSnapshotEventTypes are the bead lifecycle types whose payload is a row
@@ -157,23 +171,30 @@ func eventEmitRefusal(eventType, explicitActor, effectiveActor, payload string) 
 	return nil
 }
 
-func eventPayloadForEmit(payload, beadID string, stderr io.Writer) string {
+// eventPayloadForEmit is the event's payload: --payload, or the --bead-payload
+// bead's row. missing is set when no store of the city holds that bead
+// (mc-zg8te): the caller refuses rather than record the event without it.
+// Any other failure to read it is reported and the event goes without it.
+func eventPayloadForEmit(payload, beadID string, stderr io.Writer) (string, error) {
 	if payload == "" || !json.Valid([]byte(payload)) {
 		beadID = strings.TrimSpace(beadID)
 		if beadID == "" {
-			return payload
+			return payload, nil
 		}
 		beadPayload, err := loadEventBeadPayload(beadID, stderr)
+		if errors.Is(err, beads.ErrNotFound) || errors.Is(err, session.ErrSessionNotFound) {
+			return "", err
+		}
 		if err != nil {
 			fmt.Fprintf(stderr, "gc event emit: bead payload %s: %v\n", beadID, err) //nolint:errcheck // best-effort stderr
 			if payload != "" && !json.Valid([]byte(payload)) {
-				return ""
+				return "", nil
 			}
-			return payload
+			return payload, nil
 		}
-		return string(beadPayload)
+		return string(beadPayload), nil
 	}
-	return payload
+	return payload, nil
 }
 
 func loadEventBeadPayload(beadID string, stderr io.Writer) (json.RawMessage, error) {

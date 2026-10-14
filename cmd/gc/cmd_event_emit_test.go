@@ -193,7 +193,10 @@ func TestEventPayloadForEmitFallsBackToStoreBead(t *testing.T) {
 	t.Chdir(dir)
 	t.Setenv("GC_CITY_PATH", dir)
 	var stderr bytes.Buffer
-	payload := eventPayloadForEmit(`{"bead":}`, created.ID, &stderr)
+	payload, missing := eventPayloadForEmit(`{"bead":}`, created.ID, &stderr)
+	if missing != nil {
+		t.Fatalf("bead %s missing: %v", created.ID, missing)
+	}
 	if stderr.Len() != 0 {
 		t.Fatalf("stderr = %q, want none", stderr.String())
 	}
@@ -259,7 +262,10 @@ prefix = "fe"
 	t.Chdir(t.TempDir())
 
 	var stderr bytes.Buffer
-	payload := eventPayloadForEmit(`{"bead":}`, created.ID, &stderr)
+	payload, missing := eventPayloadForEmit(`{"bead":}`, created.ID, &stderr)
+	if missing != nil {
+		t.Fatalf("bead %s missing: %v", created.ID, missing)
+	}
 	if stderr.Len() != 0 {
 		t.Fatalf("stderr = %q, want none", stderr.String())
 	}
@@ -696,6 +702,38 @@ func TestEventEmitBeadPayloadResolvesASessionRowInItsBinding(t *testing.T) {
 	got, stderr := emitBeadPayload(t, cityPath, row.ID)
 	if got.ID != row.ID || got.Title != "worker-1" {
 		t.Fatalf("payload row %+v (stderr %q), want the session row %s from its binding", got, stderr, row.ID)
+	}
+}
+
+// TestEventEmitBeadPayloadNotFoundRecordsNothing (mc-zg8te, mc-op6ol). Kills
+// an emit that reports ok, submitted, with no payload, for a --bead-payload
+// bead no store of the city holds (J24's skew then went out payload-less and
+// the controller never saw it): the command exits 1 with
+// bead_payload_not_found, in --json mode as the failure object, and records
+// no event.
+func TestEventEmitBeadPayloadNotFoundRecordsNothing(t *testing.T) {
+	dir, _ := eventEmitTestCity(t)
+	for _, jsonOut := range []bool{false, true} {
+		args := []string{events.BeadUpdated, "--subject", "gc-missing", "--bead-payload", "gc-missing"}
+		if jsonOut {
+			args = append(args, "--json")
+		}
+		var stdout, stderr bytes.Buffer
+		cmd := newEventEmitCmd(&stdout, &stderr)
+		cmd.SetArgs(args)
+		if err := cmd.Execute(); err == nil {
+			t.Fatalf("json %t: Execute = nil, want a failure; stdout %q", jsonOut, stdout.String())
+		}
+		out := stderr.String()
+		if jsonOut {
+			out = stdout.String()
+		}
+		if !strings.Contains(out, "gc-missing") || jsonOut && !strings.Contains(out, eventEmitBeadNotFoundCode) {
+			t.Fatalf("json %t: output %q, want the missing bead named (and %s in --json)", jsonOut, out, eventEmitBeadNotFoundCode)
+		}
+	}
+	if got := recordedEvents(t, dir); len(got) != 0 {
+		t.Fatalf("recorded %+v, want nothing for a bead no store holds", got)
 	}
 }
 
