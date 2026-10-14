@@ -8,11 +8,12 @@ import (
 var _ GuardedBatcherHandleProvider = (*CachingStore)(nil)
 
 // GuardedBatcherHandle exposes guarded batches through the cache only when its
-// resolved backing can apply them. The handle is the cache's own forwarder, so
+// backing can apply them. It asks the backing itself, not the backing's
+// conditional-writes resolve target: see GuardedBatcherFor. The handle is the cache's own forwarder, so
 // a batch applied through it keeps the cache current and notifies each changed
 // row once.
 func (c *CachingStore) GuardedBatcherHandle() (GuardedBatcher, bool) {
-	backing, ok := GuardedBatcherFor(c.conditionalBacking())
+	backing, ok := GuardedBatcherFor(c.backing)
 	if !ok {
 		return nil, false
 	}

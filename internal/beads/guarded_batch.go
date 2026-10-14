@@ -39,7 +39,8 @@ type GuardedBatcher interface {
 // GuardedBatcherHandleProvider lets a store or wrapper expose a guarded batcher
 // only when it can actually apply one: a cache whose backing has none, or a
 // SQLite layout without the revision column, answers false rather than handing
-// out a batcher that always refuses.
+// out a batcher that always refuses. It is also how a wrapper opts in to
+// forwarding guarded batches at all; see GuardedBatcherFor.
 type GuardedBatcherHandleProvider interface {
 	GuardedBatcherHandle() (GuardedBatcher, bool)
 }
@@ -124,15 +125,23 @@ func (e *BatchItemError) Unwrap() error {
 	return e.Err
 }
 
-// GuardedBatcherFor follows declared conditional-writes resolve targets, as
-// AssignmentGuardedUpdaterFor does, and returns the guarded batcher of the
-// store it lands on. A store that provides a handle answers through it, so a
-// wrapper or layout that cannot apply a batch reports false.
+// GuardedBatcherFor returns the guarded batcher store applies batches through.
+// A store that provides a handle answers through it; otherwise the store
+// itself must be a GuardedBatcher.
+//
+// Discovery is opt-in per wrapper and deliberately does NOT follow
+// ConditionalWritesResolveTarget. That target promises fenced capabilities
+// only (UpdateIfMatch, CAS, the atomic closer), and a wrapper may declare it
+// precisely because it refuses everything unfenced. A guarded batch can carry
+// unguarded updates and pinned creates, so following the target would hand a
+// caller blind writes through a wrapper that refuses them. A wrapper that
+// forwards guarded batches says so by implementing GuardedBatcherHandle,
+// usually by returning GuardedBatcherFor of the store it wraps; any other
+// wrapper hides its inner batcher.
 func GuardedBatcherFor(store Store) (GuardedBatcher, bool) {
 	if store == nil {
 		return nil, false
 	}
-	store = followConditionalWritesResolveTarget(store)
 	if provider, ok := store.(GuardedBatcherHandleProvider); ok {
 		return provider.GuardedBatcherHandle()
 	}

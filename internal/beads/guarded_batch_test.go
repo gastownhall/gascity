@@ -254,11 +254,18 @@ func TestProxiedStoreApplyGuardedRoutesToTheWriteLeaf(t *testing.T) {
 	}
 }
 
-// The typed class wrappers declare their store as the resolve target, so a
-// guarded batcher is discovered through them.
+// Every typed class wrapper opts in to guarded-batch discovery, so a guarded
+// batcher is discovered through each of them.
 func TestGuardedBatcherForFollowsTheClassWrappers(t *testing.T) {
 	m := NewMemStore()
-	for _, wrapped := range []Store{WorkStore{Store: m}, SessionStore{Store: m}, GraphStore{Store: m}} {
+	for _, wrapped := range []Store{
+		WorkStore{Store: m},
+		SessionStore{Store: m},
+		GraphStore{Store: m},
+		MailStore{Store: m},
+		OrdersStore{Store: m},
+		NudgesStore{Store: m},
+	} {
 		b, ok := GuardedBatcherFor(wrapped)
 		if !ok {
 			t.Fatalf("GuardedBatcherFor(%T) = false", wrapped)
@@ -267,10 +274,39 @@ func TestGuardedBatcherForFollowsTheClassWrappers(t *testing.T) {
 			t.Fatalf("GuardedBatcherFor(%T) = %T, want the wrapped MemStore", wrapped, b)
 		}
 	}
+	if _, ok := GuardedBatcherFor(WorkStore{Store: readOnlyStoreForGuardedBatchTest{Store: m}}); ok {
+		t.Fatal("GuardedBatcherFor(WorkStore over an incapable store) = true")
+	}
 	if _, ok := GuardedBatcherFor(nil); ok {
 		t.Fatal("GuardedBatcherFor(nil) = true")
 	}
 }
+
+// A conditional-writes resolve target hands out fenced capabilities only; a
+// guarded batch can also carry unguarded updates and pinned creates, so a
+// wrapper that declares a resolve target but does not opt in to guarded-batch
+// discovery (a blind-write-refusing wrapper, say) hides its inner batcher,
+// directly and from a cache layered over it.
+func TestGuardedBatcherForDoesNotFollowTheConditionalWritesResolveTarget(t *testing.T) {
+	m := NewMemStore()
+	wrapper := &resolveTargetWrapper{Store: readOnlyStoreForGuardedBatchTest{Store: m}, target: m}
+	if got := followConditionalWritesResolveTarget(wrapper); got != Store(m) {
+		t.Fatalf("resolve target = %T, want the MemStore: the fixture must declare it", got)
+	}
+	if b, ok := GuardedBatcherFor(wrapper); ok {
+		t.Fatalf("GuardedBatcherFor(resolve-target-only wrapper) = (%T, true), want no capability", b)
+	}
+	if b, ok := GuardedBatcherFor(NewCachingStoreForTest(wrapper, nil)); ok {
+		t.Fatalf("GuardedBatcherFor(cache over a resolve-target-only wrapper) = (%T, true), want no capability", b)
+	}
+	if b, ok := GuardedBatcherFor(WorkStore{Store: wrapper}); ok {
+		t.Fatalf("GuardedBatcherFor(class wrapper over a resolve-target-only wrapper) = (%T, true), want no capability", b)
+	}
+}
+
+// readOnlyStoreForGuardedBatchTest hides every optional capability of the
+// store it embeds.
+type readOnlyStoreForGuardedBatchTest struct{ Store }
 
 // A batch through the cache announces each changed row once, and a create is
 // visible through the cache without a backing read.

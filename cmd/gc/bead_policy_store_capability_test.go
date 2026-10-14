@@ -150,12 +150,11 @@ func mustOpenSQLiteStoreForCapabilityTest(t *testing.T) beads.Store {
 	return store
 }
 
-// The policy wrapper declares its backing as the conditional-writes resolve
-// target, so beads.GuardedBatcherFor resolves through it to the backing
-// store's batcher without the wrapper growing a method of its own. Both
-// wrapper shapes are covered, plus the production sandwich with the cache on
-// top, and a batch applied through the resolved batcher lands where the
-// wrapper reads.
+// The policy wrapper opts in to guarded-batch discovery through
+// GuardedBatcherHandle, so beads.GuardedBatcherFor resolves through it to the
+// backing store's batcher. Both wrapper shapes are covered, plus the
+// production sandwich with the cache on top, and a batch applied through the
+// resolved batcher lands where the wrapper reads.
 func TestBeadPolicyStoreResolvesTheBackingGuardedBatcher(t *testing.T) {
 	cachedLeaf := beads.NewMemStore()
 	for _, tc := range []struct {

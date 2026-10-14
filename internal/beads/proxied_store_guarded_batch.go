@@ -5,16 +5,33 @@ import (
 	"fmt"
 )
 
-var _ GuardedBatcher = (*ProxiedStore)(nil)
+var (
+	_ GuardedBatcher               = (*ProxiedStore)(nil)
+	_ GuardedBatcherHandleProvider = (*ProxiedStore)(nil)
+)
+
+// GuardedBatcherHandle hands out this wrapper itself, so a batch discovered
+// through GuardedBatcherFor runs inside the generation bracket (the H6
+// register's INSIDE list). It answers false once the native leaf has stood
+// down, and over a write leaf that cannot apply guarded batches (bd), rather
+// than handing out a batcher that always refuses.
+func (s *ProxiedStore) GuardedBatcherHandle() (GuardedBatcher, bool) {
+	if s.nativeLeaf() == nil {
+		return nil, false
+	}
+	if _, ok := GuardedBatcherFor(s.writeLeaf()); !ok {
+		return nil, false
+	}
+	return s, true
+}
 
 // ApplyGuarded applies b through the guarded batcher of the leaf that owns
 // writes, inside the same generation bracket every other mutation runs in.
 //
 // A batch is a write, so it follows rule 2 of the capability surface and goes
-// to the write leaf, never to the read leaf, which is latched read-only. That
-// is also where GuardedBatcherFor lands, because it follows this wrapper's
-// ConditionalWritesResolveTarget: a direct call here and a resolved batcher
-// reach the same store, and over a bd write leaf both report no capability.
+// to the write leaf, never to the read leaf, which is latched read-only.
+// GuardedBatcherFor reaches this method through GuardedBatcherHandle; it does
+// not follow ConditionalWritesResolveTarget past the wrapper.
 //
 // A demoted store answers ErrGuardedBatchUnsupported. The revisions a caller
 // guards on come from native reads, and once the native leaf has stood down
