@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -84,7 +85,7 @@ func TestTerminateManagedProcessSignalsRecordedGroupAfterLeaderExit(t *testing.T
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- TerminateManagedProcess(cmd, pgid, done, time.Hour)
+		errCh <- TerminateManagedProcess(cmd, pgid, done, 100*time.Millisecond)
 	}()
 
 	target := waitKillTarget(t, calls)
@@ -148,6 +149,19 @@ func waitPIDGone(t *testing.T, pid int) {
 		err := syscall.Kill(pid, 0)
 		if errors.Is(err, syscall.ESRCH) {
 			return
+		}
+		// An orphan re-parented to an adopter that does not reap it at once
+		// (a container PID 1, a subreaper) lingers as a zombie, which kill(pid,
+		// 0) still finds. On Linux a zombie or a missing /proc entry counts as
+		// gone; any other read failure keeps polling.
+		stat, readErr := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+		if errors.Is(readErr, os.ErrNotExist) {
+			return
+		}
+		if readErr == nil {
+			if i := strings.LastIndexByte(string(stat), ')'); i >= 0 && i+2 < len(stat) && stat[i+2] == 'Z' {
+				return
+			}
 		}
 		select {
 		case <-deadline.C:
