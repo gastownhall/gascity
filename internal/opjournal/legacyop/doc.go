@@ -1,7 +1,9 @@
 // Package legacyop is the operation journal's O0 front door for the legacy
 // executors: the API and the CLI record each recordable request as an op
 // before their legacy path runs it, and close the op from the legacy result
-// after (engdocs/design/des-o0-api-shadow-ops.md §5).
+// after (engdocs/design/des-o0-api-shadow-ops.md §5; the comments here cite it
+// as DES-O0API). That document is not on main yet; until it lands, the doc
+// comments here and the tests that pin them are the in-tree contract.
 //
 // A Recorder runs under one rollout gate mode. Off records nothing and does
 // no store I/O. Auto (shadow) records where the store can and otherwise lets

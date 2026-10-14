@@ -44,6 +44,22 @@ func TestInflightReleaseByIdentity(t *testing.T) {
 	}
 }
 
+// nil is not an answer: the holder's nil Accept leaves its entry unaccepted,
+// so a same-key request stays busy, and does not erase an earlier answer.
+func TestInflightAcceptIgnoresNil(t *testing.T) {
+	f := NewInflight()
+	e, _ := f.Reserve("op-1", "d")
+	f.Accept("op-1", e, nil)
+	if held, _ := f.Reserve("op-1", "d"); held.Accepted() || held.Replay() != nil {
+		t.Fatalf("a nil answer was accepted: %+v", held)
+	}
+	f.Accept("op-1", e, "answer")
+	f.Accept("op-1", e, nil)
+	if held, _ := f.Reserve("op-1", "d"); !held.Accepted() || held.Replay() != "answer" {
+		t.Fatalf("a nil answer replaced the holder's answer: %+v", held)
+	}
+}
+
 // Thirty-two goroutines reserving one id: exactly one holds it.
 func TestInflightConcurrentReserve(t *testing.T) {
 	f := NewInflight()

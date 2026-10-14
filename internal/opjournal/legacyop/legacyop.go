@@ -138,11 +138,9 @@ type Admission struct {
 	// Entry is the in-flight entry this request holds, or nil.
 	Entry *Entry
 
-	rec        *Recorder
-	store      *opjournal.Store
-	kind       opjournal.Kind
-	unrecorded string
-	done       atomic.Bool
+	rec   *Recorder
+	store *opjournal.Store
+	done  atomic.Bool
 }
 
 // Recorder records one surface's requests under one gate mode. Executor is
@@ -180,7 +178,7 @@ type Recorder struct {
 // before any store I/O. In off it does no store I/O and mints nothing.
 func (r *Recorder) Admit(req Request) (*Admission, error) {
 	if !r.recording() {
-		return &Admission{Decision: Execute, Key: req.Key, rec: r, kind: req.Kind}, nil
+		return &Admission{Decision: Execute, Key: req.Key, rec: r}, nil
 	}
 	if r.Executor != ExecutorAPI && r.Executor != ExecutorCLI {
 		return nil, fmt.Errorf("%w: a legacy recorder's executor is %s or %s, not %q",
@@ -280,13 +278,13 @@ func (r *Recorder) recording() bool { return r.Mode == gate.Auto || r.Mode == ga
 
 // execute is an Execute admission over a recorded op in st.
 func (r *Recorder) execute(st *opjournal.Store, key string, minted bool, op opjournal.Op, entry *Entry, adopted bool) *Admission {
-	return &Admission{Decision: Execute, Key: key, Minted: minted, Recorded: true, Adopted: adopted, Op: op, Entry: entry, rec: r, store: st, kind: op.Kind}
+	return &Admission{Decision: Execute, Key: key, Minted: minted, Recorded: true, Adopted: adopted, Op: op, Entry: entry, rec: r, store: st}
 }
 
 // replay is a Replay admission over a closed op.
 func (r *Recorder) replay(key string, minted bool, op opjournal.Op) *Admission {
 	r.count(op.Kind, StageAdmit, ResultReplayed, "")
-	return &Admission{Decision: Replay, Key: key, Minted: minted, Recorded: true, Op: op, rec: r, kind: op.Kind}
+	return &Admission{Decision: Replay, Key: key, Minted: minted, Recorded: true, Op: op, rec: r}
 }
 
 // inflightAnswer answers a request whose op this process is already admitting
@@ -299,7 +297,7 @@ func (r *Recorder) inflightAnswer(kind opjournal.Kind, key string, minted bool, 
 		return nil, fmt.Errorf("%w: op %s is in flight with digest %s", opjournal.ErrKeyReuse, preview.ID, held.Digest)
 	case held.accepted && held.replay != nil:
 		r.count(kind, StageAdmit, ResultReplayed, "")
-		return &Admission{Decision: Replay, Key: key, Minted: minted, Recorded: true, Op: preview, Cached: held.replay, rec: r, kind: kind}, nil
+		return &Admission{Decision: Replay, Key: key, Minted: minted, Recorded: true, Op: preview, Cached: held.replay, rec: r}, nil
 	default:
 		r.count(kind, StageAdmit, ResultBusy, "")
 		return nil, &BusyError{ID: preview.ID}
@@ -360,7 +358,7 @@ func (r *Recorder) unrecordable(req Request, key string, minted bool, err error)
 		return nil, err
 	}
 	r.count(req.Kind, StageAdmit, ResultUnrecorded, reason)
-	return &Admission{Decision: Execute, Key: key, Minted: minted, rec: r, kind: req.Kind, unrecorded: reason}, nil
+	return &Admission{Decision: Execute, Key: key, Minted: minted, rec: r}, nil
 }
 
 // cannotRecord answers a request the store cannot record: degrade, then run
@@ -372,7 +370,7 @@ func (r *Recorder) cannotRecord(kind opjournal.Kind, key string, minted bool, st
 		return nil, fmt.Errorf("%w: %w", ErrUnavailable, err)
 	}
 	r.count(kind, StageAdmit, ResultUnrecorded, reason)
-	return &Admission{Decision: Execute, Key: key, Minted: minted, rec: r, kind: kind, unrecorded: reason}, nil
+	return &Admission{Decision: Execute, Key: key, Minted: minted, rec: r}, nil
 }
 
 // Unrecorded is an Execute admission for a request the caller knows it cannot
@@ -383,12 +381,14 @@ func (r *Recorder) Unrecorded(kind opjournal.Kind, key, reason string) *Admissio
 	if r.recording() {
 		r.count(kind, StageAdmit, ResultUnrecorded, reason)
 	}
-	return &Admission{Decision: Execute, Key: key, rec: r, kind: kind, unrecorded: reason}
+	return &Admission{Decision: Execute, Key: key, rec: r}
 }
 
 // Accept stores the request's answer in its in-flight entry, so a same-key
-// request replays it while this one runs. It does nothing for a request
-// without an entry.
+// request replays it while this one runs. answer must be non-nil: the replay
+// carries the open op, which has no outcome to build an answer from, so a nil
+// answer is ignored and a same-key request stays busy. It does nothing for a
+// request without an entry.
 func (a *Admission) Accept(answer any) {
 	if a == nil || a.Entry == nil || a.rec == nil || a.rec.Inflight == nil {
 		return

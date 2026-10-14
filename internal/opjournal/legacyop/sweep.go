@@ -21,6 +21,11 @@ type SweepStats struct {
 	Raced int
 	// Failed is the ops whose close failed; the next pass retries them.
 	Failed int
+	// Truncated reports that the read stopped at its page cap after a full
+	// page: legacy ops behind a head of lane or undecodable rows longer than
+	// the cap go unseen, and passes with this limit keep missing them until
+	// that head shrinks.
+	Truncated bool
 	// Undecodable lists the rows the pass could not decode; it never writes
 	// them.
 	Undecodable []string
@@ -28,15 +33,16 @@ type SweepStats struct {
 
 // Sweep closes open legacy ops whose finish_by has passed as
 // failed{deadline_in_flight}, by by, taking at most limit of them (oldest
-// first; Store.ListOpenLegacy pages past lane and undecodable rows). It never
+// first; Store.ListOpenLegacy pages past lane and undecodable rows, up to
+// its page cap, and the stats say Truncated when it hit that cap). It never
 // touches a lane op nor an op before its finish_by: each close re-decides on
 // the row it writes (Store.CloseExpired), so an op an adopter moved after the
 // read counts Pending and one a late executor closed first counts Raced. A
 // second pass over the same state closes nothing. The error joins the read
 // error or every failed close; the stats are valid either way.
 func Sweep(st *opjournal.Store, now time.Time, limit int, by string) (SweepStats, error) {
-	ops, undecodable, err := st.ListOpenLegacy(limit)
-	stats := SweepStats{Listed: len(ops), Undecodable: undecodable}
+	ops, undecodable, truncated, err := st.ListOpenLegacy(limit)
+	stats := SweepStats{Listed: len(ops), Truncated: truncated, Undecodable: undecodable}
 	if err != nil {
 		return stats, fmt.Errorf("sweeping legacy ops: %w", err)
 	}

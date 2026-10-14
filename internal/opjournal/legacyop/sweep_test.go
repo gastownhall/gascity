@@ -2,6 +2,7 @@ package legacyop
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -30,11 +31,11 @@ func TestSweep(t *testing.T) {
 	now := e.clk.Now().Add(time.Second)
 
 	stats, err := Sweep(e.st, now, 2, "controller:op-sweep")
-	if err != nil || stats.Closed != 2 {
+	if err != nil || stats.Closed != 2 || stats.Truncated {
 		t.Fatalf("bounded pass = %+v, %v; want 2 closed", stats, err)
 	}
 	stats, err = Sweep(e.st, now, 100, "controller:op-sweep")
-	if err != nil || stats.Closed != 3 || stats.Pending != 1 || len(stats.Undecodable) != 1 || stats.Undecodable[0] != "gc-op-bogus" {
+	if err != nil || stats.Closed != 3 || stats.Pending != 1 || stats.Truncated || len(stats.Undecodable) != 1 || stats.Undecodable[0] != "gc-op-bogus" {
 		t.Fatalf("full pass = %+v, %v", stats, err)
 	}
 	for _, op := range expired {
@@ -62,6 +63,30 @@ func TestSweep(t *testing.T) {
 	atDeadline, err := Sweep(e.st, fresh.FinishBy, 100, "controller:op-sweep")
 	if err != nil || atDeadline.Closed != 0 {
 		t.Fatalf("sweep at finish_by = %+v, %v", atDeadline, err)
+	}
+}
+
+// A head of open lane ops longer than the read's eight pages of limit hides
+// the expired legacy op behind it; the pass says its read was truncated
+// rather than looking like an empty one, and a larger limit reaches the op.
+func TestSweepReportsATruncatedRead(t *testing.T) {
+	e := newEnv(t)
+	for i := range 9 * 2 {
+		e.seed(t, msg(fmt.Sprint("lane-", i), "x"), opjournal.ExecutorLane)
+	}
+	hidden := e.seed(t, msg("hidden", "x"), ExecutorCLI)
+	now := hidden.FinishBy.Add(time.Second)
+
+	stats, err := Sweep(e.st, now, 2, "controller:op-sweep")
+	if err != nil || stats.Listed != 0 || stats.Closed != 0 || !stats.Truncated {
+		t.Fatalf("capped pass = %+v, %v; want nothing listed, truncated", stats, err)
+	}
+	if got, _ := e.st.Get(hidden.ID); got.Status != opjournal.StatusSubmitted {
+		t.Fatalf("hidden op %s before a pass reached it", got.Status)
+	}
+	stats, err = Sweep(e.st, now, 100, "controller:op-sweep")
+	if err != nil || stats.Listed != 1 || stats.Closed != 1 || stats.Truncated {
+		t.Fatalf("full pass = %+v, %v; want the hidden op closed", stats, err)
 	}
 }
 

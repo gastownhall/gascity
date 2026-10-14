@@ -290,8 +290,11 @@ const legacyScanPages = 8
 // it has read legacyScanPages pages; so a head of unsweepable rows (a lane
 // backlog, a newer build's rows) shorter than that does not starve the
 // sweeper. Undecodable rows are returned by id rather than failing the sweep.
-// A limit below 1 reads every match in one read.
-func (s *Store) ListOpenLegacy(limit int) ([]Op, []string, error) {
+// The bool reports a truncated read: it stopped at that cap after a full
+// page, so legacy ops behind the head may remain unread, and the next read
+// starts again at the oldest row. A limit below 1 reads every match in one
+// read.
+func (s *Store) ListOpenLegacy(limit int) ([]Op, []string, bool, error) {
 	if limit < 0 {
 		limit = 0
 	}
@@ -307,7 +310,7 @@ func (s *Store) ListOpenLegacy(limit int) ([]Op, []string, error) {
 	for page := 1; ; page++ {
 		rows, err := s.store.List(q)
 		if err != nil {
-			return nil, nil, fmt.Errorf("listing open legacy ops: %w", err)
+			return nil, nil, false, fmt.Errorf("listing open legacy ops: %w", err)
 		}
 		for _, b := range rows {
 			if limit > 0 && len(out) == limit {
@@ -323,8 +326,11 @@ func (s *Store) ListOpenLegacy(limit int) ([]Op, []string, error) {
 			}
 			out = append(out, op)
 		}
-		if limit == 0 || len(out) == limit || len(rows) < limit || page == legacyScanPages {
-			return out, undecodable, nil
+		if limit == 0 || len(out) == limit || len(rows) < limit {
+			return out, undecodable, false, nil
+		}
+		if page == legacyScanPages {
+			return out, undecodable, true, nil
 		}
 		last := rows[len(rows)-1]
 		q.SeekAfter = &beads.SeekBoundary{CreatedAt: last.CreatedAt, ID: last.ID}

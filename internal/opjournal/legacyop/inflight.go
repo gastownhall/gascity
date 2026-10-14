@@ -6,8 +6,15 @@ import "sync"
 // executed, keyed by op id. An entry is removed only by its own request
 // (Release by pointer identity: from Finish, from the handler's panic
 // recovery, or by Admit or Finish themselves when they panic): never by age
-// or by size, so the set is bounded by concurrent requests and
-// no replay can see "open, not in flight" while the executor still runs.
+// or by size, so the set is bounded by concurrent requests, and no same-key
+// request in this process can see "open, not in flight" while the executor
+// still runs.
+//
+// The registry is the only in-flight signal adoption reads, so adoption
+// assumes one API process per city (DES-O0API D9, I3): another API process,
+// or an old one still finishing during a restart, holds its requests in its
+// own registry, and this one would adopt and re-run them. A multi-replica API
+// needs a store-visible in-flight mark or a lease fence before it adopts.
 type Inflight struct {
 	mu sync.Mutex
 	m  map[string]*Entry
@@ -51,8 +58,13 @@ func (f *Inflight) Reserve(id, digest string) (*Entry, bool) {
 }
 
 // Accept records the holder's answer on its entry, so a same-key request
-// replays it. It does nothing unless e still holds id.
+// replays it. It does nothing unless e still holds id, and nothing for a nil
+// replay: nil is no answer, so a same-key request stays busy and an earlier
+// answer stands.
 func (f *Inflight) Accept(id string, e *Entry, replay any) {
+	if replay == nil {
+		return
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.m[id] == e {

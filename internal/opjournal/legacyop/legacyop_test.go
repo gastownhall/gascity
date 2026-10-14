@@ -357,7 +357,9 @@ func TestAdmitRefusesANonLegacySurface(t *testing.T) {
 }
 
 // A request in flight here answers a same-key request with its cached answer
-// once it has one, and busy before; another digest is a key reuse.
+// once it has one, and busy before; a nil answer is none, since the replay
+// carries the open op, which has no outcome to build one from. Another digest
+// is a key reuse.
 func TestAdmitInflightReplay(t *testing.T) {
 	e := newEnv(t)
 	r := apiRecorder(e, gate.Auto)
@@ -367,6 +369,10 @@ func TestAdmitInflightReplay(t *testing.T) {
 	}
 	if _, err := r.Admit(msg("k1", "hello")); !errors.Is(err, ErrBusy) {
 		t.Fatalf("before Accept: %v, want ErrBusy", err)
+	}
+	first.Accept(nil)
+	if adm, err := r.Admit(msg("k1", "hello")); !errors.Is(err, ErrBusy) {
+		t.Fatalf("after a nil Accept: %+v, %v; want ErrBusy", adm, err)
 	}
 	first.Accept("202 body")
 	second, err := r.Admit(msg("k1", "hello"))

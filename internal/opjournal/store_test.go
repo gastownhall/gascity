@@ -1513,7 +1513,7 @@ func TestListOpenLegacy(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.rec.Reset()
-	got, undecodable, err := h.store.ListOpenLegacy(100)
+	got, undecodable, truncated, err := h.store.ListOpenLegacy(100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1523,19 +1523,23 @@ func TestListOpenLegacy(t *testing.T) {
 	if fmt.Sprint(undecodable) != "[gc-op-bogus]" {
 		t.Fatalf("undecodable = %v", undecodable)
 	}
+	if truncated {
+		t.Fatal("a read whose matches ran out reported truncated")
+	}
 	ops := h.rec.Ops()
 	if len(ops) != 1 || ops[0].Kind != beadstest.OpList || ops[0].Query.Label != LabelOp ||
 		ops[0].Query.Metadata[keyStatus] != string(StatusSubmitted) || ops[0].Query.Limit != 100 {
 		t.Fatalf("ListOpenLegacy issued %+v, want one List keyed by %s", ops, keyStatus)
 	}
-	if got, _, err := h.store.ListOpenLegacy(1); err != nil || len(got) != 1 || got[0].ID != api.ID {
-		t.Fatalf("ListOpenLegacy(1) = %v, %v", ids(got), err)
+	if got, _, truncated, err := h.store.ListOpenLegacy(1); err != nil || truncated || len(got) != 1 || got[0].ID != api.ID {
+		t.Fatalf("ListOpenLegacy(1) = %v, truncated %t, %v", ids(got), truncated, err)
 	}
 }
 
 // limit counts legacy ops returned, not rows read: a head of lane and
 // undecodable rows at least limit long does not starve the sweeper. Rows
-// read stay bounded by legacyScanPages pages of limit.
+// read stay bounded by legacyScanPages pages of limit, and a read the cap
+// stops after a full page reports truncated: rows behind it may be unread.
 func TestListOpenLegacyPagesPastUnsweepableRows(t *testing.T) {
 	h := newHarness(t)
 	for i := range 3 {
@@ -1550,7 +1554,7 @@ func TestListOpenLegacyPagesPastUnsweepableRows(t *testing.T) {
 	a := h.propose(t, legacyReq(ExecutorLegacyAPI, "a"))
 	b := h.propose(t, legacyReq(ExecutorLegacyCLI, "b"))
 	h.propose(t, legacyReq(ExecutorLegacyCLI, "c"))
-	got, undecodable, err := h.store.ListOpenLegacy(2)
+	got, undecodable, truncated, err := h.store.ListOpenLegacy(2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1560,18 +1564,35 @@ func TestListOpenLegacyPagesPastUnsweepableRows(t *testing.T) {
 	if fmt.Sprint(undecodable) != "[gc-op-bogus]" {
 		t.Fatalf("undecodable = %v", undecodable)
 	}
+	if truncated {
+		t.Fatal("a read that found limit legacy ops reported truncated")
+	}
 
+	// A head longer than the cap hides the legacy op behind it, and says so.
 	capped := newHarness(t)
-	for i := range 2 * legacyScanPages {
+	for i := range 2*legacyScanPages + 1 {
 		capped.propose(t, legacyReq(ExecutorLane, fmt.Sprint("lane", i)))
 	}
 	capped.propose(t, legacyReq(ExecutorLegacyCLI, "late"))
 	capped.rec.Reset()
-	if got, _, err := capped.store.ListOpenLegacy(2); err != nil || len(got) != 0 {
-		t.Fatalf("ListOpenLegacy(2) past the scan cap = %v, %v", ids(got), err)
+	if got, _, truncated, err := capped.store.ListOpenLegacy(2); err != nil || len(got) != 0 || !truncated {
+		t.Fatalf("ListOpenLegacy(2) past the scan cap = %v, truncated %t, %v", ids(got), truncated, err)
 	}
 	if n := capped.countOps(beadstest.OpList); n != legacyScanPages {
 		t.Fatalf("read %d pages, want the cap %d", n, legacyScanPages)
+	}
+
+	// Matches that run out on the last page the cap allows are not truncated.
+	short := newHarness(t)
+	for i := range 2*legacyScanPages - 1 {
+		short.propose(t, legacyReq(ExecutorLane, fmt.Sprint("lane", i)))
+	}
+	short.rec.Reset()
+	if got, _, truncated, err := short.store.ListOpenLegacy(2); err != nil || len(got) != 0 || truncated {
+		t.Fatalf("ListOpenLegacy(2) ending on the cap's short page = %v, truncated %t, %v", ids(got), truncated, err)
+	}
+	if n := short.countOps(beadstest.OpList); n != legacyScanPages {
+		t.Fatalf("read %d pages, want %d", n, legacyScanPages)
 	}
 }
 
