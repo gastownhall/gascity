@@ -3112,7 +3112,7 @@ func reapStaleSessionBeads(
 		// or on an API error), and closing releases the identity lease so a
 		// successor mints under a new name, leaving this box unaddressed. Hold
 		// the row; the next pass retries.
-		if !releaseRowOwnedRuntimeLeased(cityPath, info, sp, stderr, standingRowRuntimeHold(dt, stderr, info.ID, now)) {
+		if !releaseRowOwnedRuntimeLeased(cityPath, store, info, sp, stderr, standingRowRuntimeHold(dt, stderr, info.ID, now)) {
 			continue
 		}
 		if closeSeat(store, sw, info, closeWhy{reason: "stale-session", gate: closeReleasing}, now.UTC(), stderr) {

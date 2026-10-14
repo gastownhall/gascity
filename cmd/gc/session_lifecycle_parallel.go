@@ -2265,7 +2265,7 @@ func commitAsyncStartResultWithContext(
 		// falls through to the lease-expired rollback, which retries the
 		// teardown.
 		if refreshed.err == nil && shouldRollbackPendingCreateInfo(refreshed.prepared.candidate.info) &&
-			releaseRowOwnedRuntime(refreshed.prepared.candidate.info, sp, stderr, nil) {
+			releaseRowOwnedRuntime(refreshed.prepared.candidate.info, sp, stderr, nil, nil) {
 			stopStaleAsyncStartRuntime(refreshed, sp, stderr)
 			rollbackPendingCreate(refreshed.prepared.candidate.info, sessFront, clk.Now().UTC(), stderr)
 		}
@@ -3287,7 +3287,7 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 	// arm below) never reached gc.agent.starts.total at all.
 	telemetry.RecordAgentStart(context.Background(), name, tp.DisplayName(), result.err)
 	if reason := runtime.ProviderTerminalErrorReason(result.err.Error()); reason != "" {
-		if result.rollbackPending && !releaseRowOwnedRuntime(info, result.provider, stderr, nil) {
+		if result.rollbackPending && !releaseRowOwnedRuntime(info, result.provider, stderr, nil, nil) {
 			// The runtime teardown could not be confirmed, so the row must stay
 			// OPEN in its pending-create state: marking the terminal error would
 			// park it asleep with its claim cleared, where neither reconciler
@@ -3379,7 +3379,7 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 			// here: it actually launched and exited, so the stale pending-create
 			// must clear for a fresh attempt next tick, matching base's fast
 			// recovery — see TestGastown_Reconciler_SessionRestartsAfterExit.
-			if releaseRowOwnedRuntime(info, result.provider, stderr, nil) {
+			if releaseRowOwnedRuntime(info, result.provider, stderr, nil, nil) {
 				rollbackPendingCreate(info, sessFront, clk.Now().UTC(), stderr)
 			}
 		} else {
@@ -4064,7 +4064,11 @@ func standingRowRuntimeHold(dt *drainTracker, stderr io.Writer, id string, now t
 // session on tmux, acp or subprocess has its box attributed by identity. A nil provider (test-built
 // results) keeps the previous close-only behavior. A nil hold prints each hold
 // to stderr.
-func releaseRowOwnedRuntime(info sessionpkg.Info, sp runtime.Provider, stderr io.Writer, hold rowRuntimeHoldLog) bool {
+//
+// probes bounds the manual arm's identity reads and post-stop confirmation; a
+// nil probes makes them unbounded (a commit caller, already bounded by its
+// start).
+func releaseRowOwnedRuntime(info sessionpkg.Info, sp runtime.Provider, stderr io.Writer, hold rowRuntimeHoldLog, probes *rowRuntimeProbes) bool {
 	if sp == nil {
 		return true
 	}
@@ -4072,7 +4076,7 @@ func releaseRowOwnedRuntime(info sessionpkg.Info, sp runtime.Provider, stderr io
 		if hold == nil {
 			hold = printRowRuntimeHold(stderr)
 		}
-		return tearDownManualRowRuntime(info, sp, hold)
+		return tearDownManualRowRuntime(info, sp, hold, probes)
 	}
 	name := strings.TrimSpace(info.SessionNameMetadata)
 	if err := sp.Stop(name); err != nil && !runtime.IsSessionGone(err) {
@@ -4086,7 +4090,18 @@ func releaseRowOwnedRuntime(info sessionpkg.Info, sp runtime.Provider, stderr io
 // which holds no start's lease: it stops under the name's flock, and a busy
 // name holds the row open for a later tick. A manual row whose name a
 // composite cannot route yet is held without taking the flock.
-func releaseRowOwnedRuntimeLeased(cityPath string, info sessionpkg.Info, sp runtime.Provider, stderr io.Writer, hold rowRuntimeHoldLog) bool {
+//
+// For a manual row it decides again under the flock: info is the tick's
+// snapshot, and a start that committed the row (or a writer that closed or
+// re-woke it) after the snapshot and before the flock was free would have its
+// box stopped by a decision made from the older read. So it re-reads the row
+// from store and tears down only while the fresh row still matches the
+// snapshot (manualTeardownSnapshotCurrent); otherwise it holds without a stop,
+// and the next tick decides from a fresh snapshot. A read does not bump the
+// row's revision. The identity reads and the post-stop confirmation are held
+// to postStartObservationBound each, so a wedged backend costs a tick at most
+// one unbounded Stop per held row; a read that does not answer in time holds.
+func releaseRowOwnedRuntimeLeased(cityPath string, store beads.Store, info sessionpkg.Info, sp runtime.Provider, stderr io.Writer, hold rowRuntimeHoldLog) bool {
 	if sp == nil {
 		return true
 	}
@@ -4116,7 +4131,76 @@ func releaseRowOwnedRuntimeLeased(cityPath string, info sessionpkg.Info, sp runt
 		return false
 	}
 	defer release()
-	return releaseRowOwnedRuntime(info, sp, stderr, hold)
+	if !pool && store != nil {
+		b, err := store.Get(info.ID)
+		if err != nil {
+			hold("row_reread_failed.pending_create_teardown", fmt.Sprintf(
+				"session reconciler: holding pending create %s open: re-reading it before tearing down its runtime %q: %v", info.ID, name, err))
+			return false
+		}
+		if !manualTeardownSnapshotCurrent(info, sessionInfoFromBead(b)) {
+			return false
+		}
+	}
+	return releaseRowOwnedRuntime(info, sp, stderr, hold, boundedRowRuntimeProbes(cityPath))
+}
+
+// manualTeardownSnapshotCurrent reports whether fresh, the row re-read under
+// its name's flock, is still the incarnation snapshot was decided from: open,
+// not active, with the same instance token, generation, last_woke_at and
+// claim. A commit (state active, claim cleared), a close or a re-wake changes
+// one of them. Other state changes are not compared: heal can project an
+// advisory awake onto a pending create (PendingCreateLease.CanRollback).
+func manualTeardownSnapshotCurrent(snapshot, fresh sessionpkg.Info) bool {
+	return !fresh.Closed &&
+		sessionpkg.State(strings.TrimSpace(fresh.MetadataState)) != sessionpkg.StateActive &&
+		strings.TrimSpace(fresh.InstanceToken) == strings.TrimSpace(snapshot.InstanceToken) &&
+		strings.TrimSpace(fresh.Generation) == strings.TrimSpace(snapshot.Generation) &&
+		strings.TrimSpace(fresh.LastWokeAt) == strings.TrimSpace(snapshot.LastWokeAt) &&
+		fresh.PendingCreateClaim == snapshot.PendingCreateClaim
+}
+
+// rowRuntimeProbes are the reads tearDownManualRowRuntime makes around its
+// stop. A nil *rowRuntimeProbes reads unbounded.
+type rowRuntimeProbes struct {
+	identity func(info sessionpkg.Info, name string, sp runtime.Provider) pendingCreateIdentity
+	stopped  func(name string, sp runtime.Provider) error
+}
+
+// boundedRowRuntimeProbes holds the identity reads, together, and the post-stop
+// confirmation, separately, to postStartObservationBound each. A read that
+// does not answer in time is unverifiable (identity unknown, or a stop that
+// cannot be confirmed), so the row is held.
+func boundedRowRuntimeProbes(cityPath string) *rowRuntimeProbes {
+	return &rowRuntimeProbes{
+		identity: func(info sessionpkg.Info, name string, sp runtime.Provider) pendingCreateIdentity {
+			ctx, cancel := context.WithTimeout(context.Background(), postStartObservationBound)
+			defer cancel()
+			return readPendingCreateIdentityBounded(ctx, cityPath, info, name, sp)
+		},
+		stopped: func(name string, sp runtime.Provider) error {
+			ctx, cancel := context.WithTimeout(context.Background(), postStartObservationBound)
+			defer cancel()
+			_, err := observeSessionBounded(ctx, cityPath, name, func() (struct{}, error) {
+				return struct{}{}, confirmRuntimeStopped(name, sp)
+			})
+			return err
+		},
+	}
+}
+
+func (p *rowRuntimeProbes) readIdentity(info sessionpkg.Info, name string, sp runtime.Provider) pendingCreateIdentity {
+	if p == nil || p.identity == nil {
+		return readPendingCreateIdentity(info, name, sp)
+	}
+	return p.identity(info, name, sp)
+}
+
+func (p *rowRuntimeProbes) confirmStopped(name string, sp runtime.Provider) error {
+	if p == nil || p.stopped == nil {
+		return confirmRuntimeStopped(name, sp)
+	}
+	return p.stopped(name, sp)
 }
 
 // manualRowTearsDownUnattributedRuntime reports whether a pending create's
@@ -4181,7 +4265,7 @@ func holdManualRowRouteUnknown(info sessionpkg.Info, name string, hold rowRuntim
 // or another incarnation of this row) is stopped by name. A stop that fails,
 // or a runtime that still reads running or cannot be observed after it,
 // holds the row; its claim stays, so the level-triggered rollback retries.
-func tearDownManualRowRuntime(info sessionpkg.Info, sp runtime.Provider, hold rowRuntimeHoldLog) bool {
+func tearDownManualRowRuntime(info sessionpkg.Info, sp runtime.Provider, hold rowRuntimeHoldLog, probes *rowRuntimeProbes) bool {
 	applies, routeKnown := manualRowTearsDownUnattributedRuntime(info, sp)
 	if !applies {
 		return true
@@ -4191,7 +4275,7 @@ func tearDownManualRowRuntime(info sessionpkg.Info, sp runtime.Provider, hold ro
 		holdManualRowRouteUnknown(info, name, hold)
 		return false
 	}
-	identity := readPendingCreateIdentity(info, name, sp)
+	identity := probes.readIdentity(info, name, sp)
 	switch {
 	case identity.id == runtimeTokenMismatch, identity.id == runtimeTokenGone, identity.token == runtimeTokenGone:
 		return true
@@ -4208,7 +4292,7 @@ func tearDownManualRowRuntime(info sessionpkg.Info, sp runtime.Provider, hold ro
 		return false
 	}
 	telemetry.RecordAgentStop(context.Background(), name, agentName, "pending-create-rollback", nil)
-	if err := confirmRuntimeStopped(name, sp); err != nil {
+	if err := probes.confirmStopped(name, sp); err != nil {
 		hold("stop_unconfirmed.pending_create_teardown", fmt.Sprintf(
 			"session reconciler: holding pending create %s open: its runtime %q %v", info.ID, name, describeUnconfirmedStop(err)))
 		return false
