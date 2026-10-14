@@ -157,6 +157,13 @@ type TurnScan struct {
 	// MissingIDs reports that the source recorded a turn boundary without a
 	// usable id, so the transcript gives boundaries, not identity (X11 D1).
 	MissingIDs bool
+	// MalformedRecords counts records that could bear on turns but did not
+	// decode, so were skipped. UntimedRecords counts turn records whose
+	// timestamp was absent or did not parse, so their times read as zero
+	// rather than as a start before the window. A follower counts every
+	// record it folded since its last rescan.
+	MalformedRecords int
+	UntimedRecords   int
 }
 
 const (
@@ -287,13 +294,13 @@ func validTurnID(raw string) (string, bool) {
 }
 
 // parseTurnTime parses a source timestamp, keeping its precision. An absent
-// or unreadable timestamp is the zero time.
-func parseTurnTime(raw string) time.Time {
+// or unreadable timestamp is the zero time, and not ok.
+func parseTurnTime(raw string) (time.Time, bool) {
 	t, err := time.Parse(time.RFC3339Nano, raw)
 	if err != nil {
-		return time.Time{}
+		return time.Time{}, false
 	}
-	return t
+	return t, true
 }
 
 // turnLedger tracks the open turn and the ended ones, newest first.
@@ -302,6 +309,8 @@ type turnLedger struct {
 	current    ScannedTurn
 	recent     []ScannedTurn
 	missingIDs bool
+	malformed  int
+	untimed    int
 }
 
 // begin opens a turn, closing a still-open one at the new start without a
@@ -310,6 +319,13 @@ func (l *turnLedger) begin(id string, at time.Time) {
 	l.close(at, "")
 	l.open = true
 	l.current = ScannedTurn{ID: id, StartedAt: at}
+}
+
+// noteTime counts a record whose timestamp did not parse.
+func (l *turnLedger) noteTime(ok bool) {
+	if !ok {
+		l.untimed++
+	}
 }
 
 // close ends the open turn, if any.
@@ -347,7 +363,13 @@ func (l *turnLedger) endedIndex(id string) int {
 }
 
 func (l *turnLedger) snapshot() TurnScan {
-	s := TurnScan{Open: l.open, MissingIDs: l.missingIDs, Recent: slices.Clone(l.recent)}
+	s := TurnScan{
+		Open:             l.open,
+		MissingIDs:       l.missingIDs,
+		Recent:           slices.Clone(l.recent),
+		MalformedRecords: l.malformed,
+		UntimedRecords:   l.untimed,
+	}
 	if l.open {
 		s.Current = l.current
 	}

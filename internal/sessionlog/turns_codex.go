@@ -24,6 +24,9 @@ const (
 	codexRecordComplete
 	codexRecordAborted
 	codexRecordContext
+	// codexRecordMalformed is a line that could be a turn record but did not
+	// decode.
+	codexRecordMalformed
 )
 
 // codexTurnRecord is one rollout line that bears on turns.
@@ -31,6 +34,7 @@ type codexTurnRecord struct {
 	kind   codexRecordKind
 	rawID  string
 	at     time.Time
+	timed  bool
 	failed bool
 }
 
@@ -46,7 +50,7 @@ func parseCodexTurnRecord(line []byte) (codexTurnRecord, bool) {
 	}
 	var entry codexRawEntry
 	if json.Unmarshal(line, &entry) != nil {
-		return codexTurnRecord{}, false
+		return codexTurnRecord{kind: codexRecordMalformed}, true
 	}
 	var payload struct {
 		Type   string          `json:"type"`
@@ -54,9 +58,10 @@ func parseCodexTurnRecord(line []byte) (codexTurnRecord, bool) {
 		Error  json.RawMessage `json:"error"`
 	}
 	if json.Unmarshal(entry.Payload, &payload) != nil {
-		return codexTurnRecord{}, false
+		return codexTurnRecord{kind: codexRecordMalformed}, true
 	}
-	rec := codexTurnRecord{rawID: payload.TurnID, at: parseTurnTime(entry.Timestamp)}
+	rec := codexTurnRecord{rawID: payload.TurnID}
+	rec.at, rec.timed = parseTurnTime(entry.Timestamp)
 	switch {
 	case entry.Type == "turn_context":
 		rec.kind = codexRecordContext
@@ -101,7 +106,7 @@ func (codexTurnFormat) scan(_ string, r io.ReaderAt, size, budget int64) (turnFo
 	if err != nil {
 		return nil, err
 	}
-	if truncated && len(records) == 0 {
+	if truncated && !slices.ContainsFunc(records, func(rec codexTurnRecord) bool { return rec.kind != codexRecordMalformed }) {
 		return nil, ErrTurnStartBeyondBudget
 	}
 	fold := &codexTurnFold{startUnseen: truncated}
@@ -129,6 +134,11 @@ func (f *codexTurnFold) appendable() bool { return true }
 
 func (f *codexTurnFold) addRecord(rec codexTurnRecord) {
 	l := &f.ledger
+	if rec.kind == codexRecordMalformed {
+		l.malformed++
+		return
+	}
+	l.noteTime(rec.timed)
 	id, ok := validTurnID(rec.rawID)
 	if !ok && rec.kind != codexRecordContext {
 		l.missingIDs = true

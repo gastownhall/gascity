@@ -52,6 +52,9 @@ const (
 	claudeRecordTurnEnd
 	claudeRecordAPIError
 	claudeRecordReply
+	// claudeRecordMalformed is a line that could be a turn record but did not
+	// decode.
+	claudeRecordMalformed
 )
 
 // claudeTurnRecord is one transcript entry that bears on turns.
@@ -59,6 +62,7 @@ type claudeTurnRecord struct {
 	kind  claudeRecordKind
 	rawID string
 	at    time.Time
+	timed bool
 	// toolResult marks a user entry carrying a tool result.
 	toolResult bool
 }
@@ -99,10 +103,14 @@ func parseClaudeTurnRecord(line []byte) (claudeTurnRecord, bool) {
 		return claudeTurnRecord{}, false
 	}
 	var e claudeTurnLine
-	if json.Unmarshal(line, &e) != nil || e.IsSidechain {
+	if json.Unmarshal(line, &e) != nil {
+		return claudeTurnRecord{kind: claudeRecordMalformed}, true
+	}
+	if e.IsSidechain {
 		return claudeTurnRecord{}, false
 	}
-	rec := claudeTurnRecord{rawID: e.PromptID, at: parseTurnTime(e.Timestamp)}
+	rec := claudeTurnRecord{rawID: e.PromptID}
+	rec.at, rec.timed = parseTurnTime(e.Timestamp)
 	switch {
 	case e.Type == "user" && e.IsCompactSummary:
 		return claudeTurnRecord{}, false
@@ -209,7 +217,7 @@ func (claudeTurnFormat) scan(_ string, r io.ReaderAt, size, budget int64) (turnF
 // marksTurn reports whether rec starts or ends a turn, rather than only
 // telling how the open one is going.
 func (rec claudeTurnRecord) marksTurn() bool {
-	return rec.kind != claudeRecordAPIError && rec.kind != claudeRecordReply
+	return rec.kind != claudeRecordAPIError && rec.kind != claudeRecordReply && rec.kind != claudeRecordMalformed
 }
 
 // claudeTurnFold folds Claude turn records, oldest first.
@@ -234,6 +242,11 @@ func (f *claudeTurnFold) add(line []byte) {
 func (f *claudeTurnFold) appendable() bool { return true }
 
 func (f *claudeTurnFold) addRecord(rec claudeTurnRecord) {
+	if rec.kind == claudeRecordMalformed {
+		f.ledger.malformed++
+		return
+	}
+	f.ledger.noteTime(rec.timed)
 	switch rec.kind {
 	case claudeRecordUser:
 		f.addUser(rec)

@@ -2,6 +2,7 @@ package sessionlog
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -184,4 +185,64 @@ func writeTurnLines(t *testing.T, name string, lines ...string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+// TestScanTurnsCountsSkippedRecords: a record that could bear on turns but
+// does not decode is skipped and counted, and so is a turn record whose
+// timestamp is absent or does not parse, whose time reads as zero. The
+// follower counts the same.
+func TestScanTurnsCountsSkippedRecords(t *testing.T) {
+	cases := []struct {
+		provider string
+		lines    []string
+	}{
+		{"claude", []string{
+			`{"type":"user","timestamp":"2026-10-13T05:00:00.100Z","promptId":"p1","message":{"role":"user","content":"prompt"}}`,
+			`{"type":"user","timestamp":"2026-10-13T05:00:00.200Z","promptId":["p1"],"message":{"role":"user","content":"prompt"}}`,
+			`{"type":"system","subtype":"turn_duration","timestamp":"yesterday"}`,
+			`{"type":"attachment","timestamp":"2026-10-13T05:00:01.000Z","attachment":"no turn"}`,
+			`{"type":"user","timestamp":"2026-10-13T05:00:02.100Z","promptId":"p2","message":{"role":"user","content":"prompt"}}`,
+		}},
+		{"codex", []string{
+			`{"timestamp":"2026-10-08T02:22:22.191Z","type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}}`,
+			`{"timestamp":"2026-10-08T02:22:23.000Z","type":"event_msg","payload":"task_complete"}`,
+			`{"type":"event_msg","payload":{"type":"task_complete","turn_id":"t1"}}`,
+			`{"timestamp":"2026-10-08T02:22:24.000Z","type":"response_item","payload":{"type":"message"}}`,
+			`{"timestamp":"2026-10-08T02:22:25.191Z","type":"event_msg","payload":{"type":"task_started","turn_id":"t2"}}`,
+		}},
+		{"gemini", []string{
+			`{"sessionId":"s","kind":"main"}`,
+			`{"id":"u1","timestamp":"2026-06-21T17:08:00.694Z","type":"user","content":"prompt"}`,
+			`{"id":["u1"],"type":"user"}`,
+			`{"id":"u2","timestamp":"","type":"user","content":"prompt"}`,
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.provider, func(t *testing.T) {
+			path := writeTurnLines(t, "transcript.jsonl", tc.lines...)
+			got, err := ScanTurns(tc.provider, path)
+			if err != nil {
+				t.Fatalf("ScanTurns: %v", err)
+			}
+			if got.MalformedRecords != 1 || got.UntimedRecords != 1 {
+				t.Fatalf("MalformedRecords = %d, UntimedRecords = %d, want 1 and 1: %+v", got.MalformedRecords, got.UntimedRecords, got)
+			}
+			if !got.Open {
+				t.Fatalf("scan = %+v, want the last turn open", got)
+			}
+
+			followed := filepath.Join(t.TempDir(), "followed.jsonl")
+			if err := os.WriteFile(followed, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			f, err := NewTurnFollower(tc.provider, followed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i, line := range tc.lines {
+				appendTurnBytes(t, followed, line+"\n")
+				assertFollowerMatchesScan(t, fmt.Sprintf("line %d", i), f, tc.provider, followed)
+			}
+		})
+	}
 }

@@ -56,11 +56,11 @@ func (geminiTurnFormat) scan(path string, r io.ReaderAt, size, budget int64) (tu
 	}
 	var lines [][]byte // newest first
 	truncated, err := collectTurnLines(r, size, budget, func(line []byte) bool {
+		lines = append(lines, line)
 		var parsed geminiTurnLine
 		if json.Unmarshal(line, &parsed) != nil {
 			return false
 		}
-		lines = append(lines, line)
 		_, isSnapshot := parsed.snapshot()
 		return isSnapshot
 	})
@@ -117,6 +117,7 @@ type geminiTurnFold struct {
 func (f *geminiTurnFold) add(line []byte) {
 	var parsed geminiTurnLine
 	if json.Unmarshal(line, &parsed) != nil {
+		f.ledger.malformed++
 		return
 	}
 	if messages, ok := parsed.snapshot(); ok {
@@ -136,9 +137,11 @@ func (f *geminiTurnFold) reset(messages []json.RawMessage) {
 	clear(f.seen)
 	for _, raw := range messages {
 		var msg geminiTurnMessage
-		if json.Unmarshal(raw, &msg) == nil {
-			f.addMessage(msg)
+		if json.Unmarshal(raw, &msg) != nil {
+			f.ledger.malformed++
+			continue
 		}
+		f.addMessage(msg)
 	}
 }
 
@@ -156,7 +159,9 @@ func (f *geminiTurnFold) addMessage(msg geminiTurnMessage) {
 	default:
 		f.seen[id] = true
 	}
-	f.ledger.begin(id, parseTurnTime(msg.Timestamp))
+	at, timed := parseTurnTime(msg.Timestamp)
+	f.ledger.noteTime(timed)
+	f.ledger.begin(id, at)
 }
 
 func (f *geminiTurnFold) scan() TurnScan { return f.ledger.snapshot() }
