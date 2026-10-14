@@ -123,7 +123,10 @@ func planRules(snap laneSnapshot, conv ConversationView, now time.Time, by strin
 			rp.rowErr = fmt.Errorf("%w: conversation %s: the runtime row is closed but the view is open", ErrIllegalTransition, conv.ID)
 		}
 	}
-	inFlight, remaining := false, 0
+	// inFlight is the earliest time a live lease can end, zero when no op
+	// is in flight.
+	var inFlight time.Time
+	remaining := 0
 	waitOp := func(op Op, r WaitReason, until time.Time) {
 		rp.waits = append(rp.waits, OpWait{ID: op.ID, Reason: r, Until: until})
 		rp.next = minTime(rp.next, until)
@@ -156,7 +159,7 @@ func planRules(snap laneSnapshot, conv ConversationView, now time.Time, by strin
 		canceled := Outcome{Arm: ArmCanceled}
 		switch {
 		case live:
-			inFlight = true
+			inFlight = minTime(inFlight, op.Lease.Deadline.Add(LeaseSkew))
 			waitOp(op, WaitInFlight, op.Lease.Deadline.Add(LeaseSkew))
 			continue
 		case conv.Closed:
@@ -255,15 +258,20 @@ func planRules(snap laneSnapshot, conv ConversationView, now time.Time, by strin
 }
 
 // decideTake reports whether a Take is possible and, when it is not because
-// of the conversation's state, turns every candidate into a wait.
-func (rp *rulesPlan) decideTake(conv ConversationView, rt runtimeSnap, rowOK, inFlight bool, now time.Time) bool {
+// of the conversation's state, turns every candidate into a wait. inFlight
+// is the earliest end of a live op lease, zero when none is in flight.
+func (rp *rulesPlan) decideTake(conv ConversationView, rt runtimeSnap, rowOK bool, inFlight, now time.Time) bool {
 	candidates := 0
 	for _, e := range append(slices.Clone(rp.control), rp.content...) {
 		if e.candidate() {
 			candidates++
 		}
 	}
-	if conv.Closed || candidates == 0 || rp.rowErr != nil || inFlight {
+	if conv.Closed || candidates == 0 || rp.rowErr != nil {
+		return false
+	}
+	if !inFlight.IsZero() {
+		rp.waitCandidates(WaitInFlight, inFlight, false)
 		return false
 	}
 	view := incarnation{conv.Generation, conv.Epoch}

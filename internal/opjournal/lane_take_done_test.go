@@ -1083,3 +1083,32 @@ func TestLaneCanceledContextIsReported(t *testing.T) {
 		}
 	})
 }
+
+// While an op is in flight, every candidate is reported waiting in_flight
+// until the live lease can end.
+func TestLaneCandidatesWaitWhileAnOpIsInFlight(t *testing.T) {
+	h := newLaneHarness(t)
+	first := h.propose(t, laneMsg("a", RolePrompt, "x"))
+	exec := newFakeExec(h.clk)
+	a := h.lane(t, "ctl")
+	a.hooks.at = crashAt(stageAfterEffect)
+	if _, err := a.Pass(context.Background(), view(), exec); !errors.Is(err, errCrash) {
+		t.Fatalf("pass = %v", err)
+	}
+	until := h.get(t, first.ID).Lease.Deadline.Add(LeaseSkew)
+	h.clk.Advance(time.Second)
+	later := h.propose(t, laneMsg("b", RolePrompt, "y"))
+	res := mustPass(t, h.lane(t, "cli"), view(), exec)
+	if res.Took != TakeNone {
+		t.Fatalf("took %v while an op is in flight", res.Taken)
+	}
+	var got *OpWait
+	for i := range res.Waits {
+		if res.Waits[i].ID == later.ID {
+			got = &res.Waits[i]
+		}
+	}
+	if got == nil || got.Reason != WaitInFlight || !got.Until.Equal(until) {
+		t.Fatalf("waits %+v, want %s in_flight until %s", res.Waits, later.ID, until)
+	}
+}
