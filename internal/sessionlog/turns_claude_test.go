@@ -327,6 +327,9 @@ func TestScanTurnsClaudeAPIErrorThenTurnEnd(t *testing.T) {
 	reply := func(ts string, sidechain bool) string {
 		return fmt.Sprintf(`{"type":"assistant","isSidechain":%v,"timestamp":"2026-10-13T05:%sZ","message":{"role":"assistant","content":[{"type":"text","text":"reply"}]}}`, sidechain, ts)
 	}
+	toolResult := func(ts, id string) string {
+		return `{"type":"user","timestamp":"2026-10-13T05:` + ts + `Z","promptId":"` + id + `","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":"out"}]}}`
+	}
 	end := func(ts string) string {
 		return `{"type":"system","subtype":"turn_duration","timestamp":"2026-10-13T05:` + ts + `Z"}`
 	}
@@ -335,6 +338,7 @@ func TestScanTurnsClaudeAPIErrorThenTurnEnd(t *testing.T) {
 		user("00:02.100", "p2"), apiErr("00:03.000"), user("00:04.000", "p2"), end("00:05.000"),
 		user("00:06.100", "p3"), apiErr("00:07.000"), reply("00:08.000", false), end("00:09.000"),
 		user("00:10.100", "p4"), apiErr("00:11.000"), reply("00:11.500", true), end("00:12.000"),
+		user("00:12.100", "p7"), apiErr("00:12.300"), toolResult("00:12.500", "p7"), end("00:12.900"),
 		user("00:13.100", "p5"), apiErr("00:14.000"), user("00:15.100", "p6"),
 	)
 	got, err := ScanTurns("claude", path)
@@ -347,6 +351,7 @@ func TestScanTurnsClaudeAPIErrorThenTurnEnd(t *testing.T) {
 		Current: ScannedTurn{ID: "p6", StartedAt: turnTime(t, ts("00:15.100"))},
 		Recent: []ScannedTurn{
 			{ID: "p5", StartedAt: turnTime(t, ts("00:13.100")), EndedAt: turnTime(t, ts("00:14.000")), Status: TurnStatusFailed},
+			{ID: "p7", StartedAt: turnTime(t, ts("00:12.100")), EndedAt: turnTime(t, ts("00:12.900")), Status: TurnStatusCompleted},
 			{ID: "p4", StartedAt: turnTime(t, ts("00:10.100")), EndedAt: turnTime(t, ts("00:12.000")), Status: TurnStatusFailed},
 			{ID: "p3", StartedAt: turnTime(t, ts("00:06.100")), EndedAt: turnTime(t, ts("00:09.000")), Status: TurnStatusCompleted},
 			{ID: "p2", StartedAt: turnTime(t, ts("00:02.100")), EndedAt: turnTime(t, ts("00:05.000")), Status: TurnStatusCompleted},
