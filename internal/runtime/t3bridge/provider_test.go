@@ -1038,6 +1038,7 @@ type t3BridgeTestServer struct {
 	commandHook        func(payload map[string]interface{})
 	stalled            bool
 	authStalled        bool
+	upgradeStalled     bool
 	released           chan struct{}
 	closeOnce          sync.Once
 	authFailures       int
@@ -1147,7 +1148,15 @@ func newT3BridgeTestServer(t *testing.T, snapshot map[string]interface{}) *t3Bri
 		ts.mu.Lock()
 		ts.wsRequestCount++
 		ts.wsAuthorization = append(ts.wsAuthorization, r.Header.Get("Authorization"))
+		upgradeStalled := ts.upgradeStalled
 		ts.mu.Unlock()
+		if upgradeStalled {
+			select {
+			case <-r.Context().Done():
+			case <-ts.released:
+			}
+			return
+		}
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			t.Errorf("upgrade websocket: %v", err)
@@ -1238,6 +1247,14 @@ func (ts *t3BridgeTestServer) setAuthStalled() {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 	ts.authStalled = true
+}
+
+// setUpgradeStalled leaves every WebSocket upgrade request unanswered, so the
+// client's handshake stalls until it gives up or the server closes.
+func (ts *t3BridgeTestServer) setUpgradeStalled() {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	ts.upgradeStalled = true
 }
 
 func (ts *t3BridgeTestServer) wsURL() string {

@@ -3,7 +3,6 @@ package t3bridge
 import (
 	"context"
 	"errors"
-	"net"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -474,21 +473,7 @@ func TestInterruptTurnDispatchStopsAtTheDeadline(t *testing.T) {
 		server := newTurnFenceServer(t, turnRunning("t1"))
 		p := newTurnFenceTestProvider(t, server)
 		t.Setenv("T3_BEARER_TOKEN", "")
-		ln, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = ln.Close() })
-		go func() {
-			for {
-				conn, err := ln.Accept()
-				if err != nil {
-					return
-				}
-				t.Cleanup(func() { _ = conn.Close() }) // accepted, never answered
-			}
-		}()
-		t.Setenv("T3_WS_URL", "ws://"+ln.Addr().String())
+		server.setUpgradeStalled()
 		if err := interrupt(t, p); !errors.Is(err, runtime.ErrRuntimeUnavailable) {
 			t.Fatalf("stalled handshake = %v, want ErrRuntimeUnavailable", err)
 		}
