@@ -87,6 +87,7 @@ go_test(
         "staging_preserve_test.go",
         "staging_skip_mergeable_test.go",
         "staging_test.go",
+        "state_cache_staleness_test.go",
         "testenv_import_test.go",
         "turn_events_merge_test.go",
         "turn_interrupt_test.go",

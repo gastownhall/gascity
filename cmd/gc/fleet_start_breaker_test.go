@@ -438,3 +438,91 @@ func TestExecutePlannedStarts_CapacityRefusalsNeverTripTheFleetBreaker(t *testin
 		}
 	}
 }
+
+func fleetTracked(g *fleetStartGuard) int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return len(g.starts)
+}
+
+// A session the reconciler stopped on purpose is forgotten, so its death
+// inside the stability window is not a failed start.
+func TestFleetGuard_ForgetSessionExcusesADeliberateStop(t *testing.T) {
+	g, clk := newFleetTestGuard(t)
+	failFleetStart(t, g, "s1", "a")
+	clk.Advance(time.Second)
+	failFleetStart(t, g, "s2", "b")
+	for _, id := range []string{"s3", "s4", "s5"} {
+		ticket, ok := g.Admit(id, "c")
+		if !ok {
+			t.Fatalf("Admit(%s) denied", id)
+		}
+		ticket.Resolve(fleetStartOK)
+		g.ObserveLiveness(id, true)
+		g.ForgetSession(id)
+		clk.Advance(time.Second)
+		g.ObserveLiveness(id, false)
+	}
+	if got := fleetState(g); got != resilience.StateClosed {
+		t.Fatalf("state after three forgotten sessions ended = %v, want closed", got)
+	}
+	if n := fleetTracked(g); n != 0 {
+		t.Fatalf("starts still tracked after ForgetSession = %d, want 0", n)
+	}
+}
+
+// Without ForgetSession a death inside the window is a failure: the same three
+// sessions, not forgotten, trip the breaker.
+func TestFleetGuard_UnforgottenDeathInsideTheWindowTrips(t *testing.T) {
+	g, clk := newFleetTestGuard(t)
+	failFleetStart(t, g, "s1", "a")
+	clk.Advance(time.Second)
+	ticket, ok := g.Admit("s2", "b")
+	if !ok {
+		t.Fatal("Admit(s2) denied")
+	}
+	ticket.Resolve(fleetStartOK)
+	g.ObserveLiveness("s2", true)
+	clk.Advance(time.Second)
+	g.ObserveLiveness("s2", false)
+	ticket, _ = g.Admit("s3", "c")
+	ticket.Resolve(fleetStartOK)
+	g.ObserveLiveness("s3", true)
+	clk.Advance(time.Second)
+	g.ObserveLiveness("s3", false)
+	if got := fleetState(g); got != resilience.StateOpen {
+		t.Fatalf("state after two unprompted deaths and a failed start = %v, want open", got)
+	}
+}
+
+// A confirmation that resolves leaves nothing behind.
+func TestFleetGuard_ConfirmedStartLeavesNoEntry(t *testing.T) {
+	g, clk := newFleetTestGuard(t)
+	ticket, _ := g.Admit("s1", "a")
+	ticket.Resolve(fleetStartOK)
+	g.ObserveLiveness("s1", true)
+	clk.Advance(stabilityThreshold + time.Second)
+	g.ObserveLiveness("s1", true)
+	if n := fleetTracked(g); n != 0 {
+		t.Fatalf("starts after a confirmed start = %d, want 0", n)
+	}
+}
+
+// A session that is never observed again (closed, removed, renamed) must not
+// leave its start in the guard for the life of the controller.
+func TestFleetGuard_AbandonedStartsArePruned(t *testing.T) {
+	g, clk := newFleetTestGuard(t)
+	for _, id := range []string{"gone-1", "gone-2"} {
+		ticket, _ := g.Admit(id, "a")
+		ticket.Resolve(fleetStartOK)
+	}
+	if n := fleetTracked(g); n != 2 {
+		t.Fatalf("starts after two admitted starts = %d, want 2", n)
+	}
+	clk.Advance(time.Duration(fleetConfirmForgetFactor+1) * stabilityThreshold)
+	ticket, _ := g.Admit("fresh", "a")
+	ticket.Resolve(fleetStartOK)
+	if n := fleetTracked(g); n != 1 {
+		t.Fatalf("starts after the abandoned ones aged out = %d, want only the fresh one", n)
+	}
+}

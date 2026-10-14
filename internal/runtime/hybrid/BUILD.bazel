@@ -18,6 +18,7 @@ go_test(
         "hybrid_test.go",
         "router_test.go",
         "session_events_test.go",
+        "state_cache_staleness_test.go",
         "testenv_import_test.go",
         "turn_events_test.go",
     ],
