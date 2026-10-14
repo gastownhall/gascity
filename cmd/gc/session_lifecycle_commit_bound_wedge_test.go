@@ -17,12 +17,11 @@ import (
 )
 
 // wedgedStore is a beads.Store that stalls the way a wedged Dolt or bd does:
-// once armed, every read and write made by a caller that is not the start
-// phase hangs until release, whoever the caller is. The start phase
-// (runPreparedStartCandidate, and the lease's Watch under it) is left alone so
-// a scenario wedges what comes after provider.Start and nothing earlier. The
-// callers it hangs include the commit and the lease release the start
-// goroutine runs after it, which is what a commit-only gate cannot show.
+// once armed, every read and write the commit and settle phase makes, and every
+// one the release of the start's lease makes, hangs until release. The start
+// phase is left alone so a scenario wedges what comes after provider.Start and
+// nothing earlier. Hanging the lease release as well as the commit is what a
+// commit-only gate cannot show.
 type wedgedStore struct {
 	beads.Store
 
@@ -34,8 +33,7 @@ type wedgedStore struct {
 
 	mu     sync.Mutex
 	hungBy []string
-	// snapshotID names the row whose state is kept at the first stall, the
-	// moment the start phase is over; snapshot is that state.
+	// snapshotID names the row whose state arm keeps; snapshot is that state.
 	snapshotID string
 	snapshot   beads.Bead
 
@@ -47,8 +45,16 @@ func newWedgedStore(inner beads.Store) *wedgedStore {
 	return &wedgedStore{Store: inner, releaseC: make(chan struct{})}
 }
 
-// arm starts hanging the callers after the start phase.
-func (s *wedgedStore) arm() { s.armed.Store(true) }
+// arm starts hanging the callers after the start phase, and keeps the row as
+// it is at that moment.
+func (s *wedgedStore) arm() {
+	s.mu.Lock()
+	if s.snapshotID != "" {
+		s.snapshot, _ = s.Store.Get(s.snapshotID)
+	}
+	s.mu.Unlock()
+	s.armed.Store(true)
+}
 
 // release lets every hung call return. It is idempotent so a scenario can call
 // it and defer it.
@@ -56,8 +62,8 @@ func (s *wedgedStore) release() { s.releaseOnce.Do(func() { close(s.releaseC) })
 
 func (s *wedgedStore) hungNow() int64 { return s.hanging.Load() }
 
-// atFirstStall is the row as the start phase left it.
-func (s *wedgedStore) atFirstStall() beads.Bead {
+// atArm is the row as it was when the store was armed.
+func (s *wedgedStore) atArm() beads.Bead {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.snapshot
@@ -70,14 +76,16 @@ func (s *wedgedStore) callers() string {
 	return strings.Join(s.hungBy, ", ")
 }
 
-// inStartPhase reports whether the calling goroutine is the start phase or the
-// lease watch that runs under it.
-func inStartPhase() bool {
+// inCommitOrRelease reports whether the calling goroutine is the commit and
+// settle phase or the release of the start's lease, the two things that run
+// after the start phase. The start phase's own reads, which run on goroutines
+// of their own, are not.
+func inCommitOrRelease() bool {
 	pcs := make([]uintptr, 64)
 	frames := goruntime.CallersFrames(pcs[:goruntime.Callers(3, pcs)])
 	for {
 		frame, more := frames.Next()
-		if strings.HasSuffix(frame.Function, ".runPreparedStartCandidate") || strings.Contains(frame.Function, "RuntimeLease).Watch") {
+		if strings.HasSuffix(frame.Function, ".commitAsyncStartResultWithContext") || strings.Contains(frame.Function, "RuntimeLease).release") {
 			return true
 		}
 		if !more {
@@ -88,16 +96,13 @@ func inStartPhase() bool {
 
 // stall hangs the caller when the store is wedged for it.
 func (s *wedgedStore) stall(verb string) {
-	if !s.armed.Load() || inStartPhase() {
+	if !s.armed.Load() || !inCommitOrRelease() {
 		return
 	}
 	s.hung.Add(1)
 	s.hanging.Add(1)
 	defer s.hanging.Add(-1)
 	s.mu.Lock()
-	if len(s.hungBy) == 0 && s.snapshotID != "" {
-		s.snapshot, _ = s.Store.Get(s.snapshotID)
-	}
 	s.hungBy = append(s.hungBy, verb)
 	s.mu.Unlock()
 	<-s.releaseC
@@ -145,10 +150,10 @@ func TestAbandonedCommitFreesTheSlotUnderTheProductionLeaseWhenTheStoreIsWedged(
 
 		// Take the production lease first: it writes the row's record, which the
 		// wedge must not stall.
-		run := enqueueCommitPhaseStartShaped(context.Background(), t, testCity, item, sp, store, clk, immediateStartStabilityWaiter, func(t *testing.T, city string, item preparedStart, slot func()) (preparedStart, func(), func()) {
-			item, release, cleanup := productionLease(store)(t, city, item, slot)
+		run := enqueueCommitPhaseStartShaped(context.Background(), t, testCity, item, sp, store, clk, immediateStartStabilityWaiter, func(t *testing.T, city string, item preparedStart) (preparedStart, func(), func()) {
+			item, dropLease, cleanup := productionLease(store)(t, city, item)
 			store.arm()
-			return item, release, cleanup
+			return item, dropLease, cleanup
 		})
 		elapsed := run.awaitFinished(t, sp, store, begin)
 
@@ -156,7 +161,7 @@ func TestAbandonedCommitFreesTheSlotUnderTheProductionLeaseWhenTheStoreIsWedged(
 			t.Fatalf("no store call hung: the scenario no longer reaches the wedge")
 		}
 		if elapsed < commitBound || elapsed > commitBound+time.Second {
-			t.Fatalf("the async start finished %v in, want it to give up the commit at the %v bound and free the slot then; store calls hung: %s", elapsed, commitBound, store.callers())
+			t.Fatalf("the async start finished %v in, want it to give up the commit at the %v bound and free the slot then; store calls hung: %s; log: %s", elapsed, commitBound, store.callers(), run.stderr.String())
 		}
 		if got := run.inFlight(); got != 0 {
 			t.Fatalf("asyncStartLimiter has %d starts in flight, want the slot back although the store is wedged (hung: %s)", got, store.callers())
@@ -167,7 +172,7 @@ func TestAbandonedCommitFreesTheSlotUnderTheProductionLeaseWhenTheStoreIsWedged(
 		if !strings.Contains(run.stderr.String(), "commit_unavailable") {
 			t.Fatalf("log = %q, want a commit_unavailable lifecycle line for the abandoned commit", run.stderr.String())
 		}
-		requireBeadUnchanged(t, inner, store.atFirstStall())
+		requireBeadUnchanged(t, inner, store.atArm())
 	})
 }
 
@@ -195,10 +200,10 @@ func TestRefusedCommitFreesTheSlotUnderTheProductionLeaseWhenTheStoreIsWedged(t 
 		})
 		begin := time.Now()
 
-		run := enqueueCommitPhaseStartShaped(context.Background(), t, testCity, item, sp, store, clk, occupy, func(t *testing.T, city string, item preparedStart, slot func()) (preparedStart, func(), func()) {
-			item, release, cleanup := productionLease(store)(t, city, item, slot)
+		run := enqueueCommitPhaseStartShaped(context.Background(), t, testCity, item, sp, store, clk, occupy, func(t *testing.T, city string, item preparedStart) (preparedStart, func(), func()) {
+			item, dropLease, cleanup := productionLease(store)(t, city, item)
 			store.arm()
-			return item, release, cleanup
+			return item, dropLease, cleanup
 		})
 		elapsed := run.awaitFinished(t, sp, store, begin)
 
@@ -214,7 +219,7 @@ func TestRefusedCommitFreesTheSlotUnderTheProductionLeaseWhenTheStoreIsWedged(t 
 		if !strings.Contains(run.stderr.String(), "commit_unavailable") {
 			t.Fatalf("log = %q, want a commit_unavailable lifecycle line", run.stderr.String())
 		}
-		requireBeadUnchanged(t, inner, store.atFirstStall())
+		requireBeadUnchanged(t, inner, store.atArm())
 	})
 }
 

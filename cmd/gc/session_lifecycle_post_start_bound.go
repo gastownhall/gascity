@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -116,6 +118,16 @@ func readPendingCreateIdentityBounded(ctx context.Context, cityPath string, info
 // pending claim and its lease stay as they are and the reconciler's repair
 // paths pick the row up when the lease ages out.
 //
+// dropLease releases the runtime lease the start holds, and this function owns
+// calling it exactly once. Releasing a lease that carries a row record reads
+// and writes the store, so it is never run on a path that gave up on the store:
+//   - the commit finished: dropLease runs before this returns, as it always did;
+//   - the commit was refused: nothing ran and nothing will, so dropLease runs
+//     detached;
+//   - the commit was abandoned: the commit's own goroutine runs it when the
+//     commit returns, so a commit that lands late does so under the lease that
+//     fences it and is not refused as stale.
+//
 // The wait ends on the bound only, never on ctx: controller shutdown must not
 // abandon a commit, whose shutdown branch settles the row on ctx. The commit
 // itself runs on ctx unchanged.
@@ -130,7 +142,8 @@ func commitAsyncStartBounded(
 	wave int,
 	stdout, stderr io.Writer,
 	trace *sessionReconcilerTraceCycle,
-) bool {
+	dropLease func(),
+) (committed bool) {
 	name := result.prepared.candidate.name()
 	template := result.prepared.candidate.tp.TemplateName
 	// The commit owns result from here on. The waiter keeps its own copies of
@@ -141,14 +154,50 @@ func commitAsyncStartBounded(
 	if base == nil {
 		base = context.Background()
 	}
+	if dropLease == nil {
+		dropLease = func() {}
+	}
+	// commitRunning is the commit's side of the hand-off: running until the
+	// commit returns, then finished, or abandoned once the waiter gave up on it.
+	const (
+		commitRunning int32 = iota
+		commitFinished
+		commitAbandoned
+	)
+	var phase atomic.Int32
+	waiterDone := false
+	defer func() {
+		// A panic out of the wait (the commit's own is recovered inside it)
+		// must not strand the lease.
+		if !waiterDone {
+			dropLease()
+		}
+	}()
 	waitCtx, cancel := context.WithTimeout(context.WithoutCancel(base), commitPhaseBound)
 	defer cancel()
 	committed, err := observeSessionBounded(waitCtx, cityPath, name, func() (bool, error) {
-		return commitAsyncStartResultWithContext(ctx, result, sp, store, clk, rec, wave, stdout, stderr, trace), nil
+		ok := commitAsyncStartResultWithContext(ctx, result, sp, store, clk, rec, wave, stdout, stderr, trace)
+		if !phase.CompareAndSwap(commitRunning, commitFinished) {
+			// The waiter gave up while this ran: the lease is this goroutine's.
+			dropLease()
+		}
+		return ok, nil
 	})
-	if err != nil {
+	waiterDone = true
+	switch {
+	case err == nil:
+		dropLease()
+		return committed
+	case errors.Is(err, worker.ErrObservationOutstanding):
+		go dropLease()
+	case !phase.CompareAndSwap(commitRunning, commitAbandoned):
+		// The commit returned in the instant the wait expired: it did not
+		// abandon the lease, so the waiter, whose commit just answered the
+		// store, takes it down.
+		dropLease()
 		logLifecycleOutcome(stderr, "start", wave, name, template, "commit_unavailable", started, time.Now(), err, phases)
 		return false
 	}
-	return committed
+	logLifecycleOutcome(stderr, "start", wave, name, template, "commit_unavailable", started, time.Now(), err, phases)
+	return false
 }

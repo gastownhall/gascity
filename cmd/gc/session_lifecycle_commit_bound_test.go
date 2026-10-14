@@ -127,27 +127,26 @@ type commitPhaseRun struct {
 	releaseLease func()
 }
 
-// startLeaseShape builds the lease and release an async start is enqueued
-// with, from the slot the reservation gave it. It returns the prepared start
-// carrying the lease, the release the start goroutine runs, and a cleanup that
-// gives the lease back at the end of the test.
-type startLeaseShape func(t *testing.T, city string, item preparedStart, slot func()) (preparedStart, func(), func())
+// startLeaseShape builds the lease an async start is enqueued with. It returns
+// the prepared start carrying the lease, the dropLease the start hands
+// commitAsyncStartBounded (nil when the test releases the lease itself), and a
+// cleanup that gives the lease back at the end of the test.
+type startLeaseShape func(t *testing.T, city string, item preparedStart) (preparedStart, func(), func())
 
 // flockOnlyLease is the lease the post-start tests hold: the name's flock and
-// nothing on the row, released by the test, with the bare slot as the release.
-func flockOnlyLease(t *testing.T, city string, item preparedStart, slot func()) (preparedStart, func(), func()) {
+// nothing on the row, released by the test.
+func flockOnlyLease(t *testing.T, city string, item preparedStart) (preparedStart, func(), func()) {
 	t.Helper()
 	item, dropLease := leasedStart(t, city, item)
-	return item, slot, dropLease
+	return item, nil, dropLease
 }
 
 // productionLease is the lease the reconciler's start pass gives an async start
 // (executePlannedStartsTraced): the name's flock taken against store, then the
-// row's record taken just before PreWake, with dropLease followed by the slot
-// as the release. A release that reads or writes the store is part of this
-// shape.
+// row's record taken just before PreWake, dropped by the start. Dropping it
+// reads and writes the store.
 func productionLease(store beads.Store) startLeaseShape {
-	return func(t *testing.T, city string, item preparedStart, slot func()) (preparedStart, func(), func()) {
+	return func(t *testing.T, city string, item preparedStart) (preparedStart, func(), func()) {
 		t.Helper()
 		lease, dropLease, err := tryRuntimeLease(store, city, startLeaseName(item.candidate), "", 0)
 		if err != nil {
@@ -160,7 +159,7 @@ func productionLease(store beads.Store) startLeaseShape {
 			t.Fatalf("TakeRecord: %v", err)
 		}
 		item.candidate.lease = lease
-		return item, func() { dropLease(); slot() }, dropLease
+		return item, dropLease, dropLease
 	}
 }
 
@@ -185,18 +184,19 @@ func enqueueCommitPhaseStartShaped(ctx context.Context, t *testing.T, city strin
 	if !ok {
 		t.Fatalf("reserve async start slot: %s", reason)
 	}
-	item, release, cleanup := shape(t, city, item, func() {
-		run.released.Add(1)
-		slot()
-	})
+	item, dropLease, cleanup := shape(t, city, item)
 	var cleanupOnce sync.Once
 	run.releaseLease = func() { cleanupOnce.Do(cleanup) }
 	t.Cleanup(run.releaseLease)
 	enqueuePreparedStartWaveForCity(
 		ctx,
 		[]asyncPreparedStart{{
-			item:    item,
-			release: release,
+			item: item,
+			release: func() {
+				run.released.Add(1)
+				slot()
+			},
+			dropLease: dropLease,
 			done: func() {
 				run.finished.Add(1)
 				close(run.finishedC)
@@ -341,6 +341,57 @@ func TestAbandonedCommitRunsToCompletionOnTheControllerContext(t *testing.T) {
 		if !sp.IsRunning("worker") || sp.CountCalls("Stop", "worker") != 0 {
 			t.Fatalf("runtime running=%v stops=%d after the late commit, want the healthy runtime left running", sp.IsRunning("worker"), sp.CountCalls("Stop", "worker"))
 		}
+	})
+}
+
+// Under the lease production hands an async start, a record on the row fences
+// the commit: a commit that finds the record gone or not its own is stale, is
+// refused, and has its runtime stopped. The waiter that gave up on a commit
+// therefore must not release that lease, or the commit that lands afterward
+// finds the record cleared and stops a healthy runtime. The commit's own
+// goroutine releases the lease when it returns; until then the name's flock
+// stays held and another start of the session defers on it
+// (SESSION-RUNTIME-017).
+func TestAbandonedCommitLandsUnderTheProductionLeaseAndThenReleasesIt(t *testing.T) {
+	testCity := t.TempDir()
+	workDir := t.TempDir()
+	synctest.Test(t, func(t *testing.T) {
+		clk := &clock.Fake{Time: time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)}
+		inner, bead, item := noDriftBeadItem(t, clk, workDir)
+		store := newCommitGateStore(inner)
+		sp := newPostStartProvider()
+		defer sp.release()
+		defer store.release()
+		begin := time.Now()
+
+		run := enqueueCommitPhaseStartShaped(context.Background(), t, testCity, item, sp, store, clk, immediateStartStabilityWaiter, productionLease(inner))
+		run.awaitFinished(t, sp, store, begin)
+		if got := run.inFlight(); got != 0 {
+			t.Fatalf("asyncStartLimiter has %d starts in flight at expiry, want the slot back", got)
+		}
+		name := startLeaseName(item.candidate)
+		if _, drop, err := tryRuntimeLease(inner, testCity, name, "", 0); err == nil {
+			drop()
+			t.Fatalf("the name's flock was free at expiry, want it held by the abandoned commit's start so no second start runs under it")
+		}
+		store.release()
+		synctest.Wait()
+
+		got := mustGetBead(t, inner, bead.ID)
+		if got.Metadata["pending_create_claim"] != "" || got.Metadata["state"] != "active" {
+			t.Fatalf("session after the late commit returned: state=%q pending_create_claim=%q, want the start committed (active, claim cleared)", got.Metadata["state"], got.Metadata["pending_create_claim"])
+		}
+		if !sp.IsRunning("worker") || sp.CountCalls("Stop", "worker") != 0 {
+			t.Fatalf("runtime running=%v stops=%d after the late commit, want the healthy runtime left running: the late commit was refused as stale", sp.IsRunning("worker"), sp.CountCalls("Stop", "worker"))
+		}
+		if strings.Contains(run.stderr.String(), "stale_async_start") {
+			t.Fatalf("log = %q, want the late commit accepted, not refused as stale", run.stderr.String())
+		}
+		_, drop, err := tryRuntimeLease(inner, testCity, name, "", 0)
+		if err != nil {
+			t.Fatalf("the name's flock is still held after the late commit returned: %v", err)
+		}
+		drop()
 	})
 }
 
