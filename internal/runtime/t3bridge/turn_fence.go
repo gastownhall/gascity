@@ -21,12 +21,18 @@ var _ runtime.TurnFenceProvider = (*Provider)(nil)
 
 // freshSessionThread reads the thread bound to name from an uncached
 // snapshot, bounded by ctx. It reports [runtime.ErrRuntimeUnavailable] when T3
-// cannot be read, or when no thread is visible yet inside the start grace, and
-// [runtime.ErrSessionNotFound] when no thread is bound to name.
+// cannot be read (wrapping ctx's error when ctx ended), or when no thread is
+// visible yet inside the start grace, and [runtime.ErrSessionNotFound] when no
+// thread is bound to name.
 func (p *Provider) freshSessionThread(ctx context.Context, name string) (map[string]interface{}, error) {
 	snapshot, err := p.rpcSnapshotFresh(ctx)
 	if err != nil {
-		if isSoftBridgeUnavailable(err) || ctx.Err() != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			// A failure over several candidates arrives flattened to text, so
+			// ctx's error is wrapped explicitly.
+			return nil, fmt.Errorf("%w: t3bridge snapshot unavailable for %q: %w: %w", runtime.ErrRuntimeUnavailable, name, ctxErr, err)
+		}
+		if isSoftBridgeUnavailable(err) {
 			return nil, fmt.Errorf("%w: t3bridge snapshot unavailable for %q: %w", runtime.ErrRuntimeUnavailable, name, err)
 		}
 		return nil, err

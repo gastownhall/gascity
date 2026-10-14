@@ -169,6 +169,8 @@ func TestObserveTurnUnreachableIsUnavailable(t *testing.T) {
 // Kills a turn read that outlives its caller's deadline on a stalled T3,
 // whether the snapshot comes over HTTP (a bearer token) or the WebSocket (an
 // unauthenticated loopback), or one that loses the deadline from its error.
+// Production resolves two or more candidates and flattens their failures, so
+// the server is reached through a second, localhost candidate too.
 func TestObserveTurnStalledServerReturnsByTheDeadline(t *testing.T) {
 	for _, bearer := range []string{"test-bearer", ""} {
 		t.Run("bearer="+bearer, func(t *testing.T) {
@@ -176,6 +178,7 @@ func TestObserveTurnStalledServerReturnsByTheDeadline(t *testing.T) {
 			server.setStalled()
 			p := newTurnFenceTestProvider(t, server)
 			t.Setenv("T3_BEARER_TOKEN", bearer)
+			defaultWSURLCandidates = []string{strings.Replace(server.wsURL(), "127.0.0.1", "localhost", 1)}
 
 			ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
 			defer cancel()
