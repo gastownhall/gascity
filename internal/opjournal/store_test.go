@@ -1296,7 +1296,7 @@ func TestUpdateTextSurvivesBdTyping(t *testing.T) {
 
 // legacyReq is a message an O0 legacy surface records: start_by and
 // finish_by at the legacy execution bound, 15 minutes out.
-func legacyReq(executor Executor, key string) Request {
+func legacyReq(executor ExecutorKind, key string) Request {
 	r := msgReq(key, "hello")
 	r.Executor = executor
 	r.Producer.Principal = "operator"

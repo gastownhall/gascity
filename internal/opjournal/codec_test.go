@@ -397,7 +397,7 @@ func TestExecutorCodec(t *testing.T) {
 	if _, err := DecodeOp(b); !errors.Is(err, ErrUnsupportedValue) {
 		t.Fatalf("unknown executor: DecodeOp = %v, want ErrUnsupportedValue", err)
 	}
-	for _, e := range []Executor{"", "box"} {
+	for _, e := range []ExecutorKind{"", "box"} {
 		op := sampleOp(t)
 		op.Executor = e
 		if _, err := EncodeOp(op); !errors.Is(err, ErrInvalidRequest) {
@@ -414,7 +414,7 @@ func TestLegacyOpsCarryNoLease(t *testing.T) {
 	op.Executor = ExecutorLane
 	op.Lease = lease
 	b := encode(t, op)
-	for _, e := range []Executor{ExecutorLegacy, ExecutorLegacyAPI, ExecutorLegacyCLI} {
+	for _, e := range []ExecutorKind{ExecutorLegacy, ExecutorLegacyAPI, ExecutorLegacyCLI} {
 		op.Executor = e
 		if _, err := EncodeOp(op); !errors.Is(err, ErrInvalidRequest) {
 			t.Fatalf("EncodeOp(leased %s op) = %v, want ErrInvalidRequest", e, err)

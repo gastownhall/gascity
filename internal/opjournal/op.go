@@ -173,34 +173,35 @@ const (
 
 var guarantees = []Guarantee{GuaranteeAtLeastOnce, GuaranteeAtMostOnce}
 
-// Executor names who executes an op, written by Propose and never changed.
+// ExecutorKind names who executes an op, written by Propose and never changed.
 // A lane takes, leases and settles only ExecutorLane ops; every other value is
 // a legacy executor, which closes its own op (or an adopter or the sweeper
-// does). A row without the key reads ExecutorLegacy.
-type Executor string
+// does). A row without the key reads ExecutorLegacy. The name Executor is left
+// for the lane's executor interface (DES-O1 §4.2).
+type ExecutorKind string
 
-// Executors.
+// Executor kinds.
 const (
 	// ExecutorLane is an op a conversation or lifecycle lane executes.
-	ExecutorLane Executor = "lane"
+	ExecutorLane ExecutorKind = "lane"
 	// ExecutorLegacy is a legacy op from an unknown surface: never adopted,
 	// closed by its legacy path or the sweeper.
-	ExecutorLegacy Executor = "legacy"
+	ExecutorLegacy ExecutorKind = "legacy"
 	// ExecutorLegacyAPI is a legacy op the API executes; only the API adopts
 	// one.
-	ExecutorLegacyAPI Executor = "legacy:api"
+	ExecutorLegacyAPI ExecutorKind = "legacy:api"
 	// ExecutorLegacyCLI is a legacy op a CLI process executes; it is never
 	// adopted.
-	ExecutorLegacyCLI Executor = "legacy:cli"
+	ExecutorLegacyCLI ExecutorKind = "legacy:cli"
 )
 
-var executors = []Executor{ExecutorLane, ExecutorLegacy, ExecutorLegacyAPI, ExecutorLegacyCLI}
+var executors = []ExecutorKind{ExecutorLane, ExecutorLegacy, ExecutorLegacyAPI, ExecutorLegacyCLI}
 
 // Valid reports whether e is one of the four executors.
-func (e Executor) Valid() bool { return slices.Contains(executors, e) }
+func (e ExecutorKind) Valid() bool { return slices.Contains(executors, e) }
 
 // Legacy reports whether e is a legacy executor: anything but ExecutorLane.
-func (e Executor) Legacy() bool { return e != ExecutorLane }
+func (e ExecutorKind) Legacy() bool { return e != ExecutorLane }
 
 // Actor values gc's own producers use. Actor is an open token; other
 // producers may send their own.
@@ -336,7 +337,7 @@ type Transition struct {
 type Request struct {
 	Conversation string
 	Kind         Kind
-	Executor     Executor
+	Executor     ExecutorKind
 	MintedKey    bool
 	ClientKey    string
 	Producer     Producer
@@ -358,8 +359,8 @@ type Op struct {
 	ID           string
 	Conversation string
 	Kind         Kind
-	// Executor is who executes the op (see Executor).
-	Executor      Executor
+	// Executor is who executes the op (see ExecutorKind).
+	Executor      ExecutorKind
 	SchemaRev     int
 	ClientKey     string
 	Payload       string

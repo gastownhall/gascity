@@ -148,7 +148,7 @@ type Admission struct {
 // every store failure the recorder degrades past.
 type Recorder struct {
 	Mode     gate.Mode
-	Executor opjournal.Executor
+	Executor opjournal.ExecutorKind
 	Open     func() (*opjournal.Store, error)
 	Inflight *Inflight
 	Clock    clock.Clock

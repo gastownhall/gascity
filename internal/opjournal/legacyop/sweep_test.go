@@ -11,7 +11,7 @@ import (
 func TestSweep(t *testing.T) {
 	e := newEnv(t)
 	var expired []opjournal.Op
-	for i, ex := range []opjournal.Executor{ExecutorAPI, ExecutorCLI, opjournal.ExecutorLegacy, ExecutorAPI, ExecutorCLI} {
+	for i, ex := range []opjournal.ExecutorKind{ExecutorAPI, ExecutorCLI, opjournal.ExecutorLegacy, ExecutorAPI, ExecutorCLI} {
 		expired = append(expired, e.seed(t, msg("old-"+string(rune('a'+i)), "x"), ex))
 		e.clk.Advance(time.Second)
 	}

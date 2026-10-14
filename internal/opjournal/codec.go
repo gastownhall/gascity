@@ -278,7 +278,7 @@ func DecodeOp(b beads.Bead) (Op, error) {
 	if err != nil {
 		return Op{}, fmt.Errorf("%w: row %s has kind %q", ErrUnsupportedKind, b.ID, kind)
 	}
-	executor := Executor(d.meta[keyExecutor])
+	executor := ExecutorKind(d.meta[keyExecutor])
 	if executor == "" {
 		executor = ExecutorLegacy
 	}

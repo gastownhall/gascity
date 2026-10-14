@@ -78,7 +78,7 @@ func (e *env) open() (*opjournal.Store, error) {
 	return e.st, nil
 }
 
-func (e *env) recorder(mode gate.Mode, executor opjournal.Executor, inflight *Inflight) *Recorder {
+func (e *env) recorder(mode gate.Mode, executor opjournal.ExecutorKind, inflight *Inflight) *Recorder {
 	return &Recorder{Mode: mode, Executor: executor, Open: e.open, Inflight: inflight, Clock: e.clk, sleep: func(time.Duration) {}}
 }
 
@@ -96,7 +96,7 @@ func msg(key, payload string) Request {
 }
 
 // seed proposes, under executor, the op req would record, at the clock now.
-func (e *env) seed(t *testing.T, req Request, executor opjournal.Executor) opjournal.Op {
+func (e *env) seed(t *testing.T, req Request, executor opjournal.ExecutorKind) opjournal.Op {
 	t.Helper()
 	now := e.clk.Now()
 	op, created, err := e.st.Propose(opjournal.Request{

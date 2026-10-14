@@ -80,7 +80,7 @@ type Degrade struct {
 
 // surface is the telemetry surface of an executor: api, cli, or the
 // executor itself for anything else.
-func surface(e opjournal.Executor) string {
+func surface(e opjournal.ExecutorKind) string {
 	if s, ok := strings.CutPrefix(string(e), "legacy:"); ok {
 		return s
 	}
