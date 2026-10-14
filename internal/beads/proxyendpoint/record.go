@@ -471,3 +471,21 @@ func ShortID(id string) string {
 	}
 	return id[:12]
 }
+
+// SharesCityRoot reports whether scopeRoot, a scope other than the city,
+// resolves the city scope's proxy root, so one proxy serves both. A root
+// either side cannot resolve answers false.
+func SharesCityRoot(cityScopeRoot, scopeRoot string) bool {
+	if cityScopeRoot == "" || pathutil.SamePath(cityScopeRoot, scopeRoot) {
+		return false
+	}
+	cityRoot, err := ProviderRoot(cityScopeRoot)
+	if err != nil || cityRoot == "" {
+		return false
+	}
+	root, err := ProviderRoot(scopeRoot)
+	if err != nil || root == "" {
+		return false
+	}
+	return pathutil.SamePath(cityRoot, root)
+}

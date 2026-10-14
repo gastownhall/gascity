@@ -4,13 +4,18 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	otellog "go.opentelemetry.io/otel/log"
 	otellogglobal "go.opentelemetry.io/otel/log/global"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
 // resetInstruments resets the sync.Once so initInstruments re-runs against
@@ -361,20 +366,70 @@ func (e *recordingLogExporter) recordByBody(body string) *sdklog.Record {
 	return nil
 }
 
-func recordAttrs(rec sdklog.Record) map[string]otellog.Value {
-	attrs := make(map[string]otellog.Value)
-	rec.WalkAttributes(func(kv otellog.KeyValue) bool {
-		attrs[kv.Key] = kv.Value
+func recordAttrs(rec sdklog.Record) map[string]attribute.Value {
+	attrs := make(map[string]attribute.Value)
+	rec.WalkAttributes(func(kv attribute.KeyValue) bool {
+		attrs[string(kv.Key)] = kv.Value
 		return true
 	})
 	return attrs
 }
 
-func logValueStringSlice(value otellog.Value) []string {
+func logValueStringSlice(value attribute.Value) []string {
 	values := value.AsSlice()
 	out := make([]string, 0, len(values))
 	for _, item := range values {
 		out = append(out, item.AsString())
 	}
 	return out
+}
+
+// TestRecordOpRecord pins gc.ops.record.total: one datapoint per (kind,
+// surface, stage, result, unrecorded_reason), the reason empty unless the
+// request ran unrecorded.
+func TestRecordOpRecord(t *testing.T) {
+	resetInstruments(t)
+	reader := sdkmetric.NewManualReader()
+	prev := otel.GetMeterProvider()
+	otel.SetMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)))
+	t.Cleanup(func() { otel.SetMeterProvider(prev) })
+
+	ctx := context.Background()
+	RecordOpRecord(ctx, "message", "api", "admit", "recorded", "")
+	RecordOpRecord(ctx, "message", "api", "admit", "recorded", "")
+	RecordOpRecord(ctx, "wake", "cli", "admit", "unrecorded", "store_unavailable")
+
+	var out metricdata.ResourceMetrics
+	if err := reader.Collect(ctx, &out); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	got := map[string]int64{}
+	for _, sm := range out.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != "gc.ops.record.total" {
+				continue
+			}
+			for _, dp := range m.Data.(metricdata.Sum[int64]).DataPoints {
+				var key []string
+				for _, k := range []attribute.Key{"kind", "surface", "stage", "result", "unrecorded_reason"} {
+					v, ok := dp.Attributes.Value(k)
+					if !ok {
+						t.Fatalf("datapoint %v lacks %s", dp.Attributes, k)
+					}
+					key = append(key, v.AsString())
+				}
+				if dp.Attributes.Len() != 5 {
+					t.Fatalf("datapoint attributes %v, want exactly five", dp.Attributes)
+				}
+				got[strings.Join(key, "|")] = dp.Value
+			}
+		}
+	}
+	want := map[string]int64{
+		"message|api|admit|recorded|":                 2,
+		"wake|cli|admit|unrecorded|store_unavailable": 1,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("gc.ops.record.total = %v, want %v", got, want)
+	}
 }

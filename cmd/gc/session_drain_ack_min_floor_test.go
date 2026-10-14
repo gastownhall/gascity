@@ -190,7 +190,7 @@ func TestIsMinFloorProtectedDrainAckSessionTracksTheIdlePath(t *testing.T) {
 // arm, same agent-sourced ack, and it still stops there because that pool
 // declares no floor.
 func TestReconcileSessionBeads_MinFloorAgentAckKeepsTheSeatWarm(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(1)}}}
 	env.addDesired("worker", "worker", false)
 	if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
@@ -210,8 +210,9 @@ func TestReconcileSessionBeads_MinFloorAgentAckKeepsTheSeatWarm(t *testing.T) {
 		t.Fatalf("setDrainAck: %v", err)
 	}
 
-	reconcileSessionBeads(
+	reconcileSessionBeadsAtPath(
 		context.Background(),
+		env.city,
 		[]beads.Bead{session},
 		env.desiredState,
 		map[string]bool{"worker": true},
@@ -219,6 +220,7 @@ func TestReconcileSessionBeads_MinFloorAgentAckKeepsTheSeatWarm(t *testing.T) {
 		env.sp,
 		env.store,
 		dops,
+		nil,
 		nil,
 		nil,
 		env.dt,
@@ -233,6 +235,7 @@ func TestReconcileSessionBeads_MinFloorAgentAckKeepsTheSeatWarm(t *testing.T) {
 		0,
 		&env.stdout,
 		&env.stderr,
+		withAsyncDrainAckStopTracker(env.stops),
 	)
 
 	got, err := env.store.Get(session.ID)

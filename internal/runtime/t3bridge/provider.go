@@ -2117,6 +2117,13 @@ func latestSeqWithBackoff(ctx context.Context, latest func() (uint64, error)) (u
 	return 0, lastErr
 }
 
+// openWatcherEvents opens the city's event log for the event watcher. It is
+// read-only: the watcher never records, so it holds no write handle that would
+// pin a rotated-away log on disk.
+func openWatcherEvents(cityPath string) *events.FileRecorder {
+	return events.NewReadOnlyFileProvider(filepath.Join(cityPath, ".gc", "events.jsonl"), io.Discard)
+}
+
 func (p *Provider) runEventWatcher(ctx context.Context, _ string, cfg runtime.Config, binding threadBinding, envelope StartupEnvelope, providerName string) {
 	cityPath := cfg.Env["GC_CITY_PATH"]
 	if cityPath == "" {
@@ -2126,11 +2133,7 @@ func (p *Provider) runEventWatcher(ctx context.Context, _ string, cfg runtime.Co
 		return
 	}
 
-	eventPath := filepath.Join(cityPath, ".gc", "events.jsonl")
-	recorder, err := events.NewFileRecorder(eventPath, io.Discard)
-	if err != nil {
-		return
-	}
+	recorder := openWatcherEvents(cityPath)
 	defer func() { _ = recorder.Close() }()
 
 	cache := beadStoreForWatcher(cfg.WorkDir, cfg.Env)
@@ -3017,6 +3020,13 @@ func (p *Provider) SendKeys(_ string, _ ...string) error {
 // RunLive is a no-op; t3bridge does not support live interactive runs.
 func (p *Provider) RunLive(_ string, _ runtime.Config) error {
 	return nil
+}
+
+// TurnInterruptMode reports that t3bridge interrupts turns by protocol: its
+// Interrupt dispatches the bridge's turn interrupt for every agent provider,
+// and SendKeys delivers nothing.
+func (p *Provider) TurnInterruptMode(string) runtime.TurnInterruptMode {
+	return runtime.TurnInterruptProtocol
 }
 
 // Capabilities reports the optional provider features t3bridge supports.

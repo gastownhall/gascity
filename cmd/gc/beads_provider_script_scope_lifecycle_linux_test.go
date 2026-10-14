@@ -52,6 +52,7 @@ func providerOwnedScriptEnv(city, scope, bdBin string) []string {
 		"GC_CITY_PATH="+city,
 		"GC_BEADS_PROVIDER_OWNED=1",
 		"GC_BEADS_TRANSPORT=proxied",
+		"GC_BEADS_PROXIED_IDLE_TIMEOUT=0",
 		"GC_BEADS_TARGET=local",
 		"BEADS_DOLT_PROXIED_SERVER=1",
 		"GC_DOLT=",
@@ -300,6 +301,7 @@ func TestGcBeadsBdProviderOwnedInitAnchorsBeadsDirBeforeBdInit(t *testing.T) {
 				"GC_BEADS_PROVIDER_OWNED=1",
 				"GC_BEADS_TRANSPORT="+tt.transport,
 				"GC_BEADS_TARGET=local",
+				"GC_BEADS_PROXIED_IDLE_TIMEOUT=0",
 			)
 			out, err := runProviderOwnedScriptOp(t, env, "init", scopeDir, "anc", "hq")
 			if tt.bdExit == 0 && err != nil {
@@ -386,7 +388,7 @@ func TestGcBeadsBdProviderOwnedRealInitIgnoresAncestorBeadsWorkspace(t *testing.
 			// unless the dolt config seeded above disables it; on a healthy network
 			// that call returns in 0.2 s and hides a missing config, so the slow
 			// network is reproduced deterministically instead of waited for.
-			env := sanitizedBaseEnv(append([]string{"HOME=" + home, "DOLT_ROOT_PATH=" + home, "GC_CITY_PATH=" + dir, "BEADS_DIR=" + filepath.Join(dir, ".beads"), "BD_BIN=" + bdPath, "GC_BEADS_PROVIDER_OWNED=1", "GC_BEADS_TRANSPORT=" + transport, "GC_BEADS_TARGET=local"}, dolttest.UnroutableHTTPSProxyEnv()...)...)
+			env := sanitizedBaseEnv(append([]string{"HOME=" + home, "DOLT_ROOT_PATH=" + home, "GC_CITY_PATH=" + dir, "BEADS_DIR=" + filepath.Join(dir, ".beads"), "BD_BIN=" + bdPath, "GC_BEADS_PROVIDER_OWNED=1", "GC_BEADS_TRANSPORT=" + transport, "GC_BEADS_TARGET=local", "GC_BEADS_PROXIED_IDLE_TIMEOUT=0"}, dolttest.UnroutableHTTPSProxyEnv()...)...)
 			t.Cleanup(func() {
 				_, _ = runProviderOwnedScriptOp(t, env, "stop")
 				for _, root := range []string{dir, parent} {

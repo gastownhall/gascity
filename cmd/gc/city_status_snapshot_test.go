@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -677,17 +678,25 @@ func TestCityStatusNamedSessionsUseLoadedSnapshotWithoutGet(t *testing.T) {
 
 // TestCityStatusObservationsRunInParallel guards against regression of the
 // serial per-agent observation loop that made `gc status` ~1.4s on multi-rig
-// cities. With N agents and an observer that blocks briefly, wall time should
-// be close to a single observation, not N times it.
+// cities (mc-eecvd: no wall-clock bound). Each observation waits until as
+// many observations as the pool runs at once (statusObservationConcurrency,
+// capped at the agent count) are in flight together, so a narrower or serial
+// pool never fills it and fails at the bound. The per-observation timeout is
+// lifted, so a timed-out call cannot free its pool slot while its observer
+// stays parked and fake the concurrency: every observation returns the
+// observer's own answer.
 func TestCityStatusObservationsRunInParallel(t *testing.T) {
-	const observerDelay = 60 * time.Millisecond
 	const agentCount = 12
+	want := min(statusObservationConcurrency, agentCount)
+
+	oldTimeout := statusObservationTimeout
+	statusObservationTimeout = time.Hour
+	t.Cleanup(func() { statusObservationTimeout = oldTimeout })
 
 	var mu sync.Mutex
-	inflight := 0
-	maxConcurrent := 0
-	totalCalls := 0
-
+	inflight, maxConcurrent, totalCalls := 0, 0, 0
+	full := make(chan struct{})
+	var unfilled atomic.Bool
 	oldObserve := observeSessionTargetForStatus
 	observeSessionTargetForStatus = func(string, beads.Store, runtime.Provider, *config.City, string) (worker.LiveObservation, error) {
 		mu.Lock()
@@ -695,11 +704,16 @@ func TestCityStatusObservationsRunInParallel(t *testing.T) {
 		totalCalls++
 		if inflight > maxConcurrent {
 			maxConcurrent = inflight
+			if maxConcurrent == want {
+				close(full)
+			}
 		}
 		mu.Unlock()
-
-		time.Sleep(observerDelay)
-
+		select {
+		case <-full:
+		case <-time.After(10 * time.Second): // only a pool narrower than want gets here
+			unfilled.Store(true)
+		}
 		mu.Lock()
 		inflight--
 		mu.Unlock()
@@ -716,9 +730,7 @@ func TestCityStatusObservationsRunInParallel(t *testing.T) {
 		Agents:    agents,
 	}
 
-	start := time.Now()
 	snapshot := collectCityStatusSnapshot(runtime.NewFake(), cfg, "/tmp/city", nil, io.Discard)
-	elapsed := time.Since(start)
 
 	if got := len(snapshot.Agents); got != agentCount {
 		t.Fatalf("agents = %d, want %d", got, agentCount)
@@ -726,13 +738,10 @@ func TestCityStatusObservationsRunInParallel(t *testing.T) {
 	if totalCalls != agentCount {
 		t.Fatalf("totalCalls = %d, want %d", totalCalls, agentCount)
 	}
-	if maxConcurrent < 2 {
-		t.Fatalf("maxConcurrent = %d, want >= 2 (observations ran serially)", maxConcurrent)
+	if unfilled.Load() || maxConcurrent != want {
+		t.Fatalf("maxConcurrent = %d, want %d observations in flight at once (the pool ran narrower or serially)", maxConcurrent, want)
 	}
-	// Serial would be agentCount * observerDelay = 720ms. Allow generous
-	// slack for CI scheduling but well below the serial bound.
-	maxAllowed := time.Duration(agentCount) * observerDelay / 2
-	if elapsed > maxAllowed {
-		t.Fatalf("elapsed = %v, want < %v (likely serial); maxConcurrent = %d", elapsed, maxAllowed, maxConcurrent)
+	if snapshot.Summary.RunningAgents != agentCount {
+		t.Fatalf("running agents = %d, want %d: every row the observer's answer, none a timed-out empty observation", snapshot.Summary.RunningAgents, agentCount)
 	}
 }

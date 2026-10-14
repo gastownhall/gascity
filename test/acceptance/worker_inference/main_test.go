@@ -76,11 +76,10 @@ func TestMain(m *testing.M) {
 		panic("worker-inference: " + err.Error())
 	}
 
-	if err := dolttest.WriteGlobalConfig(gcHome); err != nil {
-		panic("worker-inference: " + err.Error())
-	}
-
+	// NewEnv seeds the dolt identity (metrics off) under gcHome/.dolt. The
+	// live providers authenticate through the operator's home.
 	liveEnv = helpers.NewEnv(gcBinary, gcHome, runtimeDir).
+		WithHostHome().
 		Without("GC_SESSION").
 		Without("GC_BEADS").
 		Without("GC_DOLT").

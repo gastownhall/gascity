@@ -123,7 +123,6 @@ var (
 	nudgeCityUsesManagedReconciler           = cityUsesManagedReconciler
 	nudgePokeController                      = enqueueController
 	nudgeObserveTarget                       = workerObserveNudgeTarget
-	nudgeWithdrawQueuedWaitNudges            = withdrawQueuedWaitNudges
 	nudgePollDeliverQueued                   = tryDeliverQueuedNudgesByPoller
 	nudgeWarningWriter             io.Writer = os.Stderr
 )
@@ -250,6 +249,15 @@ func (t nudgeTarget) sessionTransport() string {
 	return t.agent.Session
 }
 
+// processNames are the agent processes the target's provider runs, by
+// which a runtime handle tells a crashed agent in a pane still up.
+func (t nudgeTarget) processNames() []string {
+	if t.resolved == nil {
+		return nil
+	}
+	return t.resolved.ProcessNames
+}
+
 func (t nudgeTarget) providerName() string {
 	if t.resolved != nil && strings.TrimSpace(t.resolved.Name) != "" {
 		return strings.TrimSpace(t.resolved.Name)
@@ -261,6 +269,27 @@ func (t nudgeTarget) providerName() string {
 		return strings.TrimSpace(t.cfg.Workspace.Provider)
 	}
 	return ""
+}
+
+// providerFamily returns the builtin provider family the target runs, which is
+// what the claude wait-idle gates compare against. A resolved provider reports
+// its BuiltinAncestor; otherwise the family is derived from the configured
+// provider name through the city's providers, so a wrapped alias such as a
+// provider with base = "builtin:claude" is still claude-family. A name with no
+// builtin family falls back to the raw configured name.
+func (t nudgeTarget) providerFamily() string {
+	if t.resolved != nil {
+		if family := strings.TrimSpace(t.resolved.BuiltinAncestor); family != "" {
+			return family
+		}
+	}
+	name := t.providerName()
+	if t.cfg != nil {
+		if family := strings.TrimSpace(config.BuiltinFamily(name, t.cfg.Providers)); family != "" {
+			return family
+		}
+	}
+	return name
 }
 
 type queuedNudgeOptions struct {
@@ -740,9 +769,14 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 		}
 	}
 
-	target, err := resolveNudgeTarget(targetID, stderr)
+	// With no explicit target, the drain is the hook's own: GC_SESSION_ID
+	// names its session bead exactly, so it is preferred over GC_ALIAS.
+	target, err := resolveNudgeTargetPreferringHookIdentity(targetID, len(args) == 0, stderr)
 	if err != nil {
 		if inject {
+			if errors.Is(err, errHookSessionClosed) {
+				fmt.Fprintf(stderr, "gc nudge drain: %v; not draining its nudges\n", err) //nolint:errcheck
+			}
 			wispExtra = ""
 			injectPrefix += contextInjectLineForSample(contextUsage, nil, nil)
 			return 0
@@ -844,11 +878,24 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 		return 1
 	}
 	if inject {
+		// gc hook run discards this output if the hook overruns its deadline,
+		// so ack only while there is time to finish; otherwise release the
+		// claims so the next drain delivers the nudges again.
+		if !hookDeadlineAllowsNudgeAck(fmt.Sprintf("%d injected nudge(s)", len(items)), stderr) {
+			if err := releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(items)); err != nil {
+				fmt.Fprintf(stderr, "gc nudge drain: releasing injected nudges: %v; their lease expiry returns them\n", err) //nolint:errcheck
+			}
+			return 0
+		}
 		if err := ackQueuedNudgesWithOutcome(target.cityPath, queuedNudgeIDs(items), "accepted_for_injection", "", "hook-transport-accepted"); err != nil {
 			fmt.Fprintf(stderr, "gc nudge drain: recording injection ack: %v\n", err) //nolint:errcheck
 			return 0
 		}
-		stampLastNudgeDeliveredAt(deliverySessFront, target.sessionID, time.Now())
+		// The delivery stamp is best-effort bookkeeping after the destructive
+		// ack; it is skipped rather than run into the deadline.
+		if hookDeadlineStillLeavesTime() {
+			stampLastNudgeDeliveredAt(deliverySessFront, target.sessionID, time.Now())
+		}
 		return 0
 	}
 	if err := ackQueuedNudges(target.cityPath, queuedNudgeIDs(items)); err != nil {
@@ -1022,6 +1069,12 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 		}
 		idleTicksSinceObserve = 0
 
+		// Observing reads the bead store, and on a stopped city that read
+		// restarts the bd and Dolt servers `gc stop` just retired (#6857).
+		if nudgePollCityStopped(target, sp) {
+			fmt.Fprintf(stderr, "gc nudge poll: city controller and session %q are not running; exiting and leaving queued nudges for the next start\n", target.sessionName) //nolint:errcheck
+			return 0
+		}
 		obs, err := nudgeObserveTarget(target, sessStore, sp)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc nudge poll: %v\n", err) //nolint:errcheck
@@ -1167,6 +1220,19 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 	if queueManagedWake {
 		return queueManagedSessionNudgeWake(target, store, message, mode, jsonOutput, stdout, stderr)
 	}
+	// Never type into a pending permission prompt (#2892): its highlighted
+	// "❯ 1. Yes" reads as an idle composer, and the nudge's Enter would
+	// approve the tool call. wait-idle already means "deliver at a safe
+	// boundary", so queue it behind the prompt; immediate cannot wait, so
+	// refuse with an explanation.
+	pending, err := nudgeTargetPendingInteraction(target, sessStore, sp, mode, stderr)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	if pending != nil {
+		return refuseOrQueueNudgeBehindPendingInteraction(target, store, sp, message, mode, jsonOutput, describeWorkerPendingInteraction(pending), stdout, stderr)
+	}
 	// A wait-idle nudge to a RUNNING-but-busy target must not block the caller in
 	// the worker's synchronous WaitForIdle (runtimeHandleWaitIdleTimeout, 30s):
 	// the session never reports idle for the whole window, so the caller stalls
@@ -1184,7 +1250,7 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 	// live in-process and non-claude returns immediately (see
 	// internal/worker/runtime_handle.go nudgeWaitIdle), so short-circuiting
 	// those would needlessly downgrade live delivery to queued. (gco-90ui)
-	if mode == nudgeDeliveryWaitIdle && target.sessionTransport() != "acp" && target.providerName() == "claude" {
+	if mode == nudgeDeliveryWaitIdle && target.sessionTransport() != "acp" && target.providerFamily() == "claude" {
 		if obs, obsErr := nudgeObserveTarget(target, sessStore, sp); obsErr == nil && obs.Running && nudgeObservationBusy(obs) {
 			return queueSessionNudgeWithWorker(target, store, sp, message, mode, jsonOutput, worker.NudgeUndeliveredNoIdleBoundary, stdout, stderr)
 		}
@@ -1199,7 +1265,7 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	result, err := handle.Nudge(context.Background(), worker.NudgeRequest{
+	result, err := handle.Nudge(context.Background(), sessionActor(session.ActorAgent, target.cityPath), worker.NudgeRequest{
 		Text:     message,
 		Delivery: delivery,
 		Source:   "session",
@@ -1209,9 +1275,6 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 		// busy-indicator OBSERVATION timed out. Delivery is proven, so this
 		// must report success like any other delivered nudge, not a CLI
 		// failure — fall through to the normal success path below.
-		if store != nil {
-			stampLastNudgeDeliveredAt(sessionFrontDoor(sessStore), target.sessionID, time.Now())
-		}
 		result.Delivered = true
 		err = nil
 	}
@@ -1225,11 +1288,29 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 				return 1
 			}
 		}
+		if errors.Is(err, runtime.ErrPendingInteraction) {
+			// The prompt appeared between the probe above and delivery; the
+			// runtime refused to type into it.
+			return refuseOrQueueNudgeBehindPendingInteraction(target, store, sp, message, mode, jsonOutput, err.Error(), stdout, stderr)
+		}
 		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	if mode == nudgeDeliveryWaitIdle && !result.Delivered {
+	if result.Undelivered == worker.NudgeQueued {
+		// The session could not take it now and queued the nudge itself
+		// (CONTRACT v5.9 D8); a held wait-idle nudge (NudgeUndeliveredHeld) is
+		// queued below.
+		return writeQueuedSessionNudgeResult(target, mode, jsonOutput, result.Undelivered, stdout, stderr)
+	}
+	if !result.Delivered {
+		// Not delivered and not queued: a wait-idle nudge that found no
+		// boundary, or any nudge to an agent dead in its pane (mc-48az4).
 		return queueSessionNudgeWithWorker(target, store, sp, message, mode, jsonOutput, result.Undelivered, stdout, stderr)
+	}
+	// Stamp every delivered nudge: a resumed session's manager already
+	// reports a delivered-but-unobserved submit as plain delivery.
+	if result.Delivered && store != nil {
+		stampLastNudgeDeliveredAt(sessionFrontDoor(sessStore), target.sessionID, time.Now())
 	}
 	if jsonOutput {
 		return writeCLIJSONLineOrExit(stdout, stderr, "gc session nudge", sessionNudgeJSON{
@@ -1245,6 +1326,54 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 	}
 	fmt.Fprintf(stdout, "Nudged %s\n", target.agentKey()) //nolint:errcheck
 	return 0
+}
+
+// nudgeTargetPendingInteraction reports the interaction the target session is
+// waiting on, if any. Providers that cannot report interactions report none.
+// A look that fails is an error for an immediate nudge, which cannot wait for
+// an answer. A wait-idle nudge reports the failure on stderr and goes on: its
+// delivery looks for a prompt again before it types, and the nudge is queued
+// behind one it finds.
+func nudgeTargetPendingInteraction(target nudgeTarget, sessStore beads.Store, sp runtime.Provider, mode nudgeDeliveryMode, stderr io.Writer) (*worker.PendingInteraction, error) {
+	handle, err := workerHandleForNudgeTarget(target, sessStore, sp)
+	if err != nil {
+		return nil, err
+	}
+	pending, err := handle.Pending(context.Background())
+	if err == nil {
+		return pending, nil
+	}
+	err = fmt.Errorf("checking %s for a pending permission prompt: %w", target.agentKey(), err)
+	if mode != nudgeDeliveryWaitIdle {
+		return nil, err
+	}
+	fmt.Fprintf(stderr, "gc session nudge: %v; delivering when idle, which looks again before it types\n", err) //nolint:errcheck
+	return nil, nil
+}
+
+func describeWorkerPendingInteraction(pending *worker.PendingInteraction) string {
+	what := strings.TrimSpace(pending.Kind)
+	if what == "" {
+		what = "interaction"
+	}
+	if prompt := strings.TrimSpace(pending.Prompt); prompt != "" {
+		what += " " + strconv.Quote(prompt)
+	}
+	if pending.RequestID != "" {
+		what += ", request " + pending.RequestID
+	}
+	return what
+}
+
+// refuseOrQueueNudgeBehindPendingInteraction handles a nudge to a session that
+// is waiting on a permission prompt: wait-idle queues it for delivery after
+// the prompt is answered; immediate fails with an explanation.
+func refuseOrQueueNudgeBehindPendingInteraction(target nudgeTarget, store beads.Store, sp runtime.Provider, message string, mode nudgeDeliveryMode, jsonOutput bool, what string, stdout, stderr io.Writer) int {
+	if mode == nudgeDeliveryWaitIdle {
+		return queueSessionNudgeWithWorker(target, store, sp, message, mode, jsonOutput, worker.NudgeUndeliveredPendingInteraction, stdout, stderr)
+	}
+	fmt.Fprintf(stderr, "gc session nudge: %s is waiting on a permission prompt (%s); typing now would answer it. Approve or deny it first (POST .../session/{id}/respond), or retry with --delivery=wait-idle or --delivery=queue to deliver after it is answered\n", target.agentKey(), what) //nolint:errcheck
+	return 1
 }
 
 func shouldQueueManagedNudgeWake(target nudgeTarget, store beads.Store, sp runtime.Provider) (bool, error) {
@@ -1288,17 +1417,21 @@ func canRequestManagedNudgeWake(target nudgeTarget, store beads.Store) bool {
 
 func queueManagedSessionNudgeWake(target nudgeTarget, store beads.Store, message string, mode nudgeDeliveryMode, jsonOutput bool, stdout, stderr io.Writer) int {
 	item := newQueuedNudgeWithOptions(target.agentKey(), message, "session", time.Now(), queuedNudgeOptionsFromTarget(target))
-	if err := enqueueManagedNudgeThenWake(target, store, item); err != nil {
+	outcome, err := enqueueManagedNudgeThenWake(target, store, item)
+	if err != nil {
 		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	if err := nudgePokeController(target.cityPath, reconcilekey.Session(target.sessionID)); err != nil {
+	var undelivered worker.NudgeUndeliveredReason
+	if outcome == session.WakeHeld {
+		undelivered = worker.NudgeQueuedHeld
+	} else if err := nudgePokeController(target.cityPath, reconcilekey.Session(target.sessionID)); err != nil {
 		fmt.Fprintf(stderr, "gc session nudge: warning: poke failed: %v\n", err) //nolint:errcheck
 	}
-	return writeQueuedSessionNudgeResult(target, mode, jsonOutput, "", stdout, stderr)
+	return writeQueuedSessionNudgeResult(target, mode, jsonOutput, undelivered, stdout, stderr)
 }
 
-func enqueueManagedNudgeThenWake(target nudgeTarget, store beads.Store, item queuedNudge) error {
+func enqueueManagedNudgeThenWake(target nudgeTarget, store beads.Store, item queuedNudge) (session.WakeRequestOutcome, error) {
 	// store is class-mixed here: the enqueue/rollback arms are nudge-class (wrap
 	// into the typed NudgesStore), while the wake arm reads the session bead and
 	// wakes it (sessions class), so it routes through the session coordination-class
@@ -1306,25 +1439,23 @@ func enqueueManagedNudgeThenWake(target nudgeTarget, store beads.Store, item que
 	// rollback (nudgeFrontDoor) stay nudges.
 	nudges := beads.NudgesStore{Store: store}
 	if err := enqueueQueuedNudgeWithStore(target.cityPath, nudges, item); err != nil {
-		return err
+		return 0, err
 	}
-	if err := requestManagedNudgeWake(target, cliSessionFrontDoor(store, target.cfg, target.cityPath)); err != nil {
+	outcome, err := requestManagedNudgeWake(target, cliSessionFrontDoor(store, target.cfg, target.cityPath))
+	if err != nil {
 		if rollbackErr := rollbackQueuedNudge(target.cityPath, nudgeFrontDoor(nudges), item, "managed wake failed: "+err.Error()); rollbackErr != nil {
-			return errors.Join(err, fmt.Errorf("rolling back queued nudge %q after managed wake failure: %w", item.ID, rollbackErr))
+			return 0, errors.Join(err, fmt.Errorf("rolling back queued nudge %q after managed wake failure: %w", item.ID, rollbackErr))
 		}
-		return err
+		return 0, err
 	}
-	return nil
+	return outcome, nil
 }
 
-// requestManagedNudgeWake wakes a managed session that owns queued nudges. The
-// sessFront param is the session coordination-class write front door:
-// WakeSession operates on the session bead plus its gc:wait beads (both
-// ClassSessions). Callers construct it at the root via cliSessionFrontDoor so a
-// [beads.classes.sessions] relocation reaches it. The one nudge op inside —
-// nudgeWithdrawQueuedWaitNudges — opens its own nudge store and stays on the
-// nudges class.
-func requestManagedNudgeWake(target nudgeTarget, sessFront *session.Store) error {
+// requestManagedNudgeWake asks the controller to wake a managed session that
+// owns queued nudges, never over an operator's hold (CONTRACT v5.9 D8): a
+// held row keeps its nudge queued until an operator resumes it. sessFront is
+// the session-class front door (cliSessionFrontDoor).
+func requestManagedNudgeWake(target nudgeTarget, sessFront *session.Store) (session.WakeRequestOutcome, error) {
 	if !sessFront.Backed() || target.sessionID == "" {
 		// The item IS enqueued; what did not happen is the wake that gets a
 		// stopped session to drain it. Returning nil silently made those two
@@ -1337,21 +1468,9 @@ func requestManagedNudgeWake(target nudgeTarget, sessFront *session.Store) error
 				"gc session nudge: queued for %s but no managed wake was requested (%s); it is delivered when the session next runs\n",
 				target.agentKey(), managedNudgeWakeSkipReason(target, sessFront))
 		}
-		return nil
+		return 0, nil
 	}
-	res, err := sessFront.WakeSession(target.sessionID, time.Now().UTC(), session.WakeOpts{})
-	if err != nil {
-		return err
-	}
-	nudgeIDs := res.NudgeIDs
-	if len(nudgeIDs) > 0 {
-		if err := nudgeWithdrawQueuedWaitNudges(target.cityPath, nudgeIDs); err != nil {
-			if nudgeWarningWriter != nil {
-				fmt.Fprintf(nudgeWarningWriter, "gc session wake: warning: withdrawing queued wait nudges after managed wake: %v\n", err) //nolint:errcheck
-			}
-		}
-	}
-	return nil
+	return sessFront.RequestWakeUnlessHeld(target.sessionID, false, time.Now().UTC())
 }
 
 // managedNudgeWakeSkipReason names which precondition of the managed wake was
@@ -1393,9 +1512,9 @@ func workerHandleForNudgeTarget(target nudgeTarget, store beads.Store, sp runtim
 			sp,
 			target.cfg,
 			target.sessionName,
-			strings.TrimSpace(target.providerName()),
+			strings.TrimSpace(target.providerFamily()),
 			strings.TrimSpace(target.sessionTransport()),
-			nil,
+			target.processNames(),
 		)
 		if err == nil {
 			return handle, nil
@@ -1413,9 +1532,9 @@ func workerHandleForNudgeTarget(target nudgeTarget, store beads.Store, sp runtim
 		sp,
 		target.cfg,
 		target.sessionName,
-		strings.TrimSpace(target.providerName()),
+		strings.TrimSpace(target.providerFamily()),
 		strings.TrimSpace(target.sessionTransport()),
-		nil,
+		target.processNames(),
 	)
 }
 
@@ -1538,6 +1657,14 @@ func queuedNudgeDowngradeNote(target nudgeTarget, undelivered worker.NudgeUndeli
 		return fmt.Sprintf(" (live delivery is unsupported for %s; the queued dispatcher delivers it)", provider)
 	case worker.NudgeUndeliveredNoIdleBoundary:
 		return " (the session never reached an idle boundary; the queued dispatcher delivers it)"
+	case worker.NudgeUndeliveredPendingInteraction:
+		return " (the session is waiting on a permission prompt; the queued dispatcher delivers it after the prompt is answered)"
+	case worker.NudgeUndeliveredHeld, worker.NudgeQueuedHeld:
+		return " (the session is held by an operator or a wait; the nudge is delivered the next time the session runs, and expires after 24h)"
+	case worker.NudgeQueued:
+		return " (the session cannot take it now: it is held by an operator or a wait, not running, or its agent is down; the nudge is delivered the next time the session runs, and expires after 24h)"
+	case worker.NudgeUndeliveredAgentDead:
+		return " (the session's agent is down; the nudge is delivered once the controller restarts it, and expires after 24h)"
 	default:
 		return ""
 	}
@@ -1593,7 +1720,7 @@ func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.
 	if obs.Running {
 		handle, err := workerHandleForNudgeTarget(target, sessStore, sp)
 		if err == nil {
-			result, nudgeErr := handle.Nudge(context.Background(), worker.NudgeRequest{
+			result, nudgeErr := handle.Nudge(context.Background(), sessionActor(session.ActorAgent, target.cityPath), worker.NudgeRequest{
 				Text:     msg,
 				Delivery: worker.NudgeDeliveryWaitIdle,
 				Source:   "mail",
@@ -1618,8 +1745,9 @@ func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.
 	}
 	if !obs.Running && canRequestManagedNudgeWake(target, store) {
 		item := newQueuedNudgeWithOptions(target.agentKey(), msg, "mail", now, opts)
-		if err := enqueueManagedNudgeThenWake(target, store, item); err != nil {
-			return err
+		outcome, err := enqueueManagedNudgeThenWake(target, store, item)
+		if err != nil || outcome == session.WakeHeld {
+			return err // a held session keeps the nudge queued; no poke
 		}
 		if err := nudgePokeController(target.cityPath, reconcilekey.Session(target.sessionID)); err != nil {
 			if nudgeWarningWriter != nil {
@@ -1638,6 +1766,17 @@ func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.
 }
 
 func resolveNudgeTarget(identifier string, warningWriter ...io.Writer) (nudgeTarget, error) {
+	return resolveNudgeTargetPreferringHookIdentity(identifier, false, warningWriter...)
+}
+
+// resolveNudgeTargetPreferringHookIdentity is resolveNudgeTarget for a caller
+// that may target the hook's own session. With preferHookIdentity, an open
+// session bead named by GC_SESSION_ID is the target, resolved with one Get and
+// without entering the named-session materialize path, and a closed one is
+// refused (errHookSessionClosed) rather than replaced by whatever identifier
+// resolves to now — a successor holding the alias. When GC_SESSION_ID is unset
+// or stale, identifier resolves exactly as resolveNudgeTarget resolves it.
+func resolveNudgeTargetPreferringHookIdentity(identifier string, preferHookIdentity bool, warningWriter ...io.Writer) (nudgeTarget, error) {
 	cityPath, err := resolveCity()
 	if err != nil {
 		return nudgeTarget{}, err
@@ -1646,12 +1785,32 @@ func resolveNudgeTarget(identifier string, warningWriter ...io.Writer) (nudgeTar
 	if err != nil {
 		return nudgeTarget{}, err
 	}
-	store := openNudgeBeadStore(cityPath)
+	return resolveNudgeTargetInStore(cityPath, cfg, openNudgeBeadStore(cityPath), identifier, preferHookIdentity)
+}
+
+// resolveNudgeTargetInStore is resolveNudgeTargetPreferringHookIdentity over a
+// city, config and nudges store the caller already holds. A zero store resolves
+// nothing and reports identifier as not found, so a caller that must tell an
+// unopened store from a missing session opens the store itself and checks the
+// open error first.
+func resolveNudgeTargetInStore(cityPath string, cfg *config.City, store beads.NudgesStore, identifier string, preferHookIdentity bool) (nudgeTarget, error) {
 	if store.Store != nil {
 		// Named-session materialization is a session WRITE, and the follow-up Get
 		// reads the session bead; both route through the session-class store
 		// (identity today) while the raw store remains the nudge-queue currency.
 		sessStore := cliSessionStore(store.Store, cfg, cityPath)
+		if preferHookIdentity {
+			identity, ok, err := resolveHookIdentity(sessStore)
+			if err != nil {
+				return nudgeTarget{}, err
+			}
+			if ok {
+				if identity.info.Closed {
+					return nudgeTarget{}, closedHookSessionError(identity.info.ID)
+				}
+				return resolveNudgeTargetFromSessionInfo(cityPath, cfg, identity.info), nil
+			}
+		}
 		sessionID, err := resolveSessionIDMaterializingNamed(cityPath, cfg, sessStore, identifier)
 		if err == nil {
 			info, getErr := sessionFrontDoor(sessStore).Get(sessionID)
@@ -1791,9 +1950,23 @@ func parseNudgeDeliveryMode(raw string) (nudgeDeliveryMode, error) {
 }
 
 func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.Store, sp runtime.Provider, quiescence time.Duration, obs worker.LiveObservation) (bool, error) {
+	// A pane whose agent is dead (a crash the controller has not healed)
+	// takes no queued delivery: the text would be lost with the pane. The
+	// incarnation the heal brings up claims it (mc-48az4). Alive is Running
+	// for a provider with no process names to check.
+	if !obs.Alive {
+		return false, nil
+	}
 	matches, err := nudgeTargetLiveGenerationMatches(target, obs, sp)
 	if err != nil || !matches {
 		return false, err
+	}
+	// An operator's hold keeps queued delivery off the session too (CONTRACT
+	// v5.9 D8 7(a)), as a kill fence does in the dispatcher.
+	if sessStore != nil && target.sessionID != "" {
+		if info, err := sessionFrontDoor(sessStore).Get(target.sessionID); err == nil && session.HoldVerdictInfo(info, obs.Running, time.Now()) {
+			return false, nil
+		}
 	}
 	if !pollerSessionIdleEnough(target, sp, quiescence, obs) {
 		return false, nil
@@ -1876,7 +2049,7 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 		relErr := releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(items))
 		return false, errors.Join(bookkeepErr, err, relErr)
 	}
-	result, err := handle.Nudge(context.Background(), worker.NudgeRequest{
+	result, err := handle.Nudge(context.Background(), sessionActor(session.ActorAgent, target.cityPath), worker.NudgeRequest{
 		Text:     msg,
 		Delivery: worker.NudgeDeliveryDefault,
 		Source:   "queue",
@@ -1884,8 +2057,8 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 	})
 	if err != nil {
 		telemetry.RecordNudge(context.Background(), target.agentKey(), err)
-		if errors.Is(err, runtime.ErrSessionNotFound) {
-			if recErr := releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(items)); recErr != nil {
+		if retryAt, released := queuedNudgeReleaseAfter(err, time.Now()); released {
+			if recErr := releaseQueuedNudgeClaimsUntil(target.cityPath, queuedNudgeIDs(items), retryAt); recErr != nil {
 				return false, errors.Join(bookkeepErr, recErr)
 			}
 			return false, bookkeepErr
@@ -2021,6 +2194,23 @@ func withNudgeTargetFence(store beads.Store, target nudgeTarget) nudgeTarget {
 			target.continuationEpoch = info.ContinuationEpoch
 		}
 		return target
+	}
+	return target
+}
+
+// withNudgeTargetFenceFromLiveSession is withNudgeTargetFence for a caller
+// that has already read the target's live session: when that session carries
+// the target's session name it is the open session the fence would find, so
+// the fence is taken from it without listing the city's sessions.
+func withNudgeTargetFenceFromLiveSession(store beads.Store, live *session.Info, target nudgeTarget) nudgeTarget {
+	if live == nil || live.Closed || target.sessionName == "" || live.SessionNameMetadata != target.sessionName {
+		return withNudgeTargetFence(store, target)
+	}
+	if target.sessionID == "" {
+		target.sessionID = live.ID
+	}
+	if target.continuationEpoch == "" {
+		target.continuationEpoch = live.ContinuationEpoch
 	}
 	return target
 }
@@ -2260,12 +2450,7 @@ func ensureNudgePoller(cityPath, agentName, sessionName string) error {
 		if err != nil {
 			return err
 		}
-		cmd := exec.Command(exe, nudgepoller.CommandArgs(cityPath, sessionName, agentName)...)
-		cmd.Env = os.Environ()
-		cmd.Stdout = io.Discard
-		cmd.Stderr = io.Discard
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		disableProductMetricsForChild(cmd)
+		cmd := newNudgePollerCommand(exe, os.Environ(), cityPath, sessionName, agentName)
 		if err := cmd.Start(); err != nil {
 			return err
 		}
@@ -2276,6 +2461,19 @@ func ensureNudgePoller(cityPath, agentName, sessionName string) error {
 		}
 		return cmd.Process.Release()
 	})
+}
+
+// newNudgePollerCommand builds the detached poller child over environ, without
+// the spawning session's identity (nudgepoller.ChildEnv), so the poller
+// never reads as that session's leaked process.
+func newNudgePollerCommand(exe string, environ []string, cityPath, sessionName, agentName string) *exec.Cmd {
+	cmd := exec.Command(exe, nudgepoller.CommandArgs(cityPath, sessionName, agentName)...)
+	cmd.Env = nudgepoller.ChildEnv(environ)
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	disableProductMetricsForChild(cmd)
+	return cmd
 }
 
 func formatNudgeInjectOutput(items []queuedNudge) string {
@@ -2993,7 +3191,39 @@ func ackQueuedNudgesWithOutcome(cityPath string, ids []string, outcome, reason, 
 	})
 }
 
+// queuedNudgeReleaseAfter reports whether a delivery error leaves the nudges
+// undelivered rather than failed, so their claims are released without
+// spending one of their bounded attempts, and when a later pass may claim them
+// again. A vanished session and a seat holding a pending interaction are
+// refusals, not delivery failures: nothing was typed, and charging them would
+// dead-letter a good nudge for arriving at the wrong moment. A session that
+// went away may be back at once. The ACP provider refuses a nudge while it
+// holds a permission request, and the next pass tries again. A permission
+// prompt the runtime refused to type into (#2892) stays up until someone
+// answers it, so claiming the nudges again on the very next pass would only
+// be refused again.
+func queuedNudgeReleaseAfter(err error, now time.Time) (time.Time, bool) {
+	switch {
+	// Before ErrPendingInteraction: the session layer wraps this refusal in
+	// session.ErrPendingInteraction, which is that sentinel.
+	case errors.Is(err, runtime.ErrNudgeRefusedPendingInteraction):
+		return time.Time{}, true
+	case errors.Is(err, runtime.ErrPendingInteraction):
+		return now.Add(defaultQueuedNudgeRetryDelay), true
+	case errors.Is(err, runtime.ErrSessionNotFound):
+		return time.Time{}, true
+	default:
+		return time.Time{}, false
+	}
+}
+
 func releaseQueuedNudgeClaims(cityPath string, ids []string) error {
+	return releaseQueuedNudgeClaimsUntil(cityPath, ids, time.Time{})
+}
+
+// releaseQueuedNudgeClaimsUntil returns claimed nudges to pending. A non-zero
+// deliverAfter keeps them from being claimed again before then.
+func releaseQueuedNudgeClaimsUntil(cityPath string, ids []string, deliverAfter time.Time) error {
 	if len(ids) == 0 {
 		return nil
 	}
@@ -3025,6 +3255,9 @@ func releaseQueuedNudgeClaims(cityPath string, ids []string) error {
 			}
 			item.ClaimedAt = time.Time{}
 			item.LeaseUntil = time.Time{}
+			if !deliverAfter.IsZero() {
+				item.DeliverAfter = deliverAfter.UTC()
+			}
 			released = append(released, item)
 		}
 		state.InFlight = inFlight

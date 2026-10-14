@@ -33,6 +33,7 @@ go_test(
         "starttime_portable_test.go",
         "subreaper_test.go",
         "testenv_import_test.go",
+        "vanish_linux_test.go",
     ],
     embed = [":pidutil"],
     deps = ["//internal/testenv"],
@@ -46,6 +47,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

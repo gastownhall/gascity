@@ -29,8 +29,10 @@ go_library(
 go_test(
     name = "workertest_test",
     srcs = [
+        "actor_helpers_test.go",
         "catalog_phase2_data_test.go",
         "hangbudget_test.go",
+        "nocity_guard_test.go",
         "phase1_conformance_test.go",
         "phase2_conformance_test.go",
         "phase2_fake_worker_test.go",
@@ -48,7 +50,7 @@ go_test(
         ["**"],
         exclude = ["BUILD.bazel"],
     ) + [
-        "//:repo_source_tree",
+        "//:go.mod",
         "//internal/worker/fakecmd",
     ],
     embed = [":workertest"],
@@ -89,6 +91,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

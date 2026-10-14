@@ -343,6 +343,7 @@ func TestCachingStoreUpdateReflected(t *testing.T) {
 	row := Bead{
 		Title: "t", Status: "in_progress", Type: "task", Priority: &priority,
 		Description: "d", Assignee: "a", Metadata: map[string]string{"k": "v"},
+		Labels: []string{"keep"},
 	}
 	unprioritized := cloneBead(row)
 	unprioritized.Priority = nil
@@ -366,6 +367,10 @@ func TestCachingStoreUpdateReflected(t *testing.T) {
 		{"lagged_assignee", row, UpdateOpts{Assignee: str("b")}, false},
 		{"lagged_metadata", row, UpdateOpts{Metadata: map[string]string{"k": "w"}}, false},
 		{"cleared_key_still_set", row, UpdateOpts{Metadata: map[string]string{"k": ""}}, false},
+		{"labels_present", row, UpdateOpts{Labels: []string{"keep"}, RemoveLabels: []string{"gone"}}, true},
+		{"lagged_added_label", row, UpdateOpts{Labels: []string{"new"}}, false},
+		{"lagged_removed_label", row, UpdateOpts{RemoveLabels: []string{"keep"}}, false},
+		{"label_added_and_removed_absent", row, UpdateOpts{Labels: []string{"x"}, RemoveLabels: []string{"x"}}, true},
 	}
 	for _, tc := range cases {
 		if got := updateReflected(tc.row, tc.opts); got != tc.want {

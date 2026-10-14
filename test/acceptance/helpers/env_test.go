@@ -2,7 +2,9 @@ package acceptancehelpers
 
 import (
 	"os"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -77,6 +79,11 @@ func TestNewEnvSeedsDoltAuthorIdentity(t *testing.T) {
 			t.Errorf("seeded dolt config is missing %q: %s", want, body)
 		}
 	}
+	// Without metrics.disabled every host dolt the suite runs makes a
+	// best-effort send-metrics call to eventsapi.dolthub.com.
+	if !strings.Contains(string(body), `"metrics.disabled":"true"`) {
+		t.Errorf("seeded dolt config does not disable dolt usage metrics: %s", body)
+	}
 }
 
 // NewEnv hands a child only the variables it lists, so the process-wide
@@ -149,33 +156,122 @@ func unwritableHomeForTest(t *testing.T) string {
 	return filepath.Join(blocker, "home")
 }
 
-// Bazel's local sandbox, which is where a fork PR's CI job runs (a fork has no
-// remote executor), mounts the runner's real HOME read-only. gc still needs that
-// HOME — the platform supervisor refuses any other — so it is the Claude state
-// the tests seed that has to move, into a CLAUDE_CONFIG_DIR the Env owns.
-func TestNewCityWithUnwritableHomeSeedsClaudeStateUnderGCHome(t *testing.T) {
-	home := unwritableHomeForTest(t)
+// hostHomeWithBdSharedServer makes the test process look like a developer box
+// running a bd shared server: HOME holds ~/.beads/shared-server with a
+// database named like the acceptance city (the state that turned
+// TestBeadsProxiedDefaultInit/doctor-green red on such a host). It returns that
+// home.
+func hostHomeWithBdSharedServer(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	for _, dir := range []string{
+		filepath.Join(home, ".beads", "shared-server", "dolt", "hq"),
+		filepath.Join(home, ".config", "bd"),
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(home, ".beads", "config.yaml"), []byte("dolt:\n  shared-server: true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("HOME", home)
-	t.Setenv("CLAUDE_CONFIG_DIR", "")
-	gcHome := t.TempDir()
-
-	env := NewEnv("", gcHome, t.TempDir())
-	city := NewCity(t, env)
-
-	if got := env.Get("HOME"); got != home {
-		t.Errorf("NewEnv() HOME = %q, want the ambient %q untouched (gc's supervisor refuses any other)", got, home)
-	}
-	configDir := env.Get("CLAUDE_CONFIG_DIR")
-	if !strings.HasPrefix(configDir, gcHome+string(filepath.Separator)) {
-		t.Fatalf("NewEnv() CLAUDE_CONFIG_DIR = %q, want a directory under GC_HOME %q", configDir, gcHome)
-	}
-	assertClaudeProjectTrustedForTest(t, filepath.Join(configDir, ".claude.json"), city.Dir, nil, nil)
+	return home
 }
 
-// A CLAUDE_CONFIG_DIR from the host carries the operator's credentials, so an
-// unwritable HOME must not replace it.
-func TestNewCityWithUnwritableHomeKeepsInheritedClaudeConfigDir(t *testing.T) {
-	t.Setenv("HOME", unwritableHomeForTest(t))
+// passwdHomeForTest returns the invoking user's passwd home, or "" when the
+// lookup has none.
+func passwdHomeForTest(t *testing.T) string {
+	t.Helper()
+	lu, err := user.LookupId(strconv.Itoa(os.Getuid()))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(lu.HomeDir)
+}
+
+// The acceptance env must never hand gc the operator's home, in any mode: gc
+// doctor (and every other in-process HOME read in gc) would otherwise report on
+// the host — e.g. a bd shared server under ~/.beads/shared-server — and a cached
+// PASS would depend on which machine ran it. Under Bazel the action HOME is
+// TEST_TMPDIR, which the env used to swap for the passwd home.
+func TestNewEnvIsolatesHomeFromTheHost(t *testing.T) {
+	for _, mode := range []string{"go-test", "bazel"} {
+		t.Run(mode, func(t *testing.T) {
+			hostHome := hostHomeWithBdSharedServer(t)
+			if mode == "bazel" {
+				t.Setenv("TEST_TMPDIR", hostHome)
+			} else {
+				t.Setenv("TEST_TMPDIR", "")
+			}
+			gcHome := t.TempDir()
+
+			env := NewEnv("", gcHome, t.TempDir())
+
+			home := env.Get("HOME")
+			if home == "" {
+				t.Fatal("NewEnv() HOME is empty")
+			}
+			for _, host := range []string{hostHome, passwdHomeForTest(t)} {
+				if host != "" && filepath.Clean(home) == filepath.Clean(host) {
+					t.Fatalf("NewEnv() HOME = %q, the host's home; want an isolated home under GC_HOME %q", home, gcHome)
+				}
+			}
+			if !strings.HasPrefix(home, gcHome+string(filepath.Separator)) {
+				t.Fatalf("NewEnv() HOME = %q, want a directory under GC_HOME %q", home, gcHome)
+			}
+			if !dirWritable(home) {
+				t.Fatalf("NewEnv() HOME %q is not a writable directory", home)
+			}
+			if _, err := os.Stat(filepath.Join(home, ".beads")); !os.IsNotExist(err) {
+				t.Fatalf("the host's ~/.beads is visible through the isolated HOME %q (stat err=%v)", home, err)
+			}
+			for _, kv := range env.List() {
+				key, value, _ := strings.Cut(kv, "=")
+				if key != "PATH" && strings.Contains(value, hostHome) {
+					t.Errorf("NewEnv() %s = %q names the host home %q", key, value, hostHome)
+				}
+			}
+			if got := env.Get("GC_SUPERVISOR_ISOLATED_HOME"); got != "1" {
+				t.Errorf("NewEnv() GC_SUPERVISOR_ISOLATED_HOME = %q, want \"1\" so gc bare-starts its supervisor under the isolated HOME", got)
+			}
+		})
+	}
+}
+
+// The tiers that drive a real provider CLI authenticate through the operator's
+// home and opt back into it explicitly.
+func TestEnvWithHostHomeRestoresTheHostHome(t *testing.T) {
+	hostHome := hostHomeWithBdSharedServer(t)
+
+	env := NewEnv("", t.TempDir(), t.TempDir()).WithHostHome()
+
+	if got := env.Get("HOME"); got != hostHome {
+		t.Fatalf("WithHostHome() HOME = %q, want the host's %q", got, hostHome)
+	}
+}
+
+// Claude state the tests seed lands in the isolated HOME, never the host's.
+func TestNewCitySeedsClaudeStateUnderIsolatedHome(t *testing.T) {
+	hostHome := hostHomeWithBdSharedServer(t)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+
+	env := NewEnv("", t.TempDir(), t.TempDir())
+	city := NewCity(t, env)
+
+	if got := env.Get("CLAUDE_CONFIG_DIR"); got != "" {
+		t.Fatalf("NewEnv() CLAUDE_CONFIG_DIR = %q, want it unset: the isolated HOME is writable", got)
+	}
+	assertClaudeProjectTrustedForTest(t, filepath.Join(env.Get("HOME"), ".claude.json"), city.Dir, nil, nil)
+	if _, err := os.Stat(filepath.Join(hostHome, ".claude.json")); !os.IsNotExist(err) {
+		t.Fatalf("Claude state was written into the host home (stat err=%v)", err)
+	}
+}
+
+// A CLAUDE_CONFIG_DIR from the host carries the operator's credentials, so the
+// env keeps it.
+func TestNewCityKeepsInheritedClaudeConfigDir(t *testing.T) {
+	hostHomeWithBdSharedServer(t)
 	inherited := filepath.Join(t.TempDir(), "claude")
 	t.Setenv("CLAUDE_CONFIG_DIR", inherited)
 
@@ -188,18 +284,40 @@ func TestNewCityWithUnwritableHomeKeepsInheritedClaudeConfigDir(t *testing.T) {
 	assertClaudeProjectTrustedForTest(t, filepath.Join(inherited, ".claude.json"), city.Dir, nil, nil)
 }
 
-// The fallback is for a HOME that cannot be written and nothing else: the tiers
-// that run a real Claude keep the operator's own state and credentials.
-func TestNewCityWithWritableHomeSeedsClaudeStateUnderHome(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("CLAUDE_CONFIG_DIR", "")
+// gc's exec orders and pack scripts run bare `gc` through PATH, so the env
+// built from BuildGC's override must resolve that gc to the binary under test.
+func TestVerifyPathGCAcceptsTheEnvBuiltFromBuildGC(t *testing.T) {
+	t.Setenv("GC_ACCEPTANCE_GC_BIN", writeFakeGC(t, filepath.Join(t.TempDir(), "gc-external")))
 
-	env := NewEnv("", t.TempDir(), t.TempDir())
-	city := NewCity(t, env)
+	env := NewEnv(BuildGC(t.TempDir()), t.TempDir(), t.TempDir())
 
-	if got := env.Get("CLAUDE_CONFIG_DIR"); got != "" {
-		t.Fatalf("NewEnv() CLAUDE_CONFIG_DIR = %q, want it left unset while HOME is writable", got)
+	if err := VerifyPathGC(env); err != nil {
+		t.Fatalf("VerifyPathGC() = %v, want nil", err)
 	}
-	assertClaudeProjectTrustedForTest(t, filepath.Join(home, ".claude.json"), city.Dir, nil, nil)
+}
+
+func TestVerifyPathGCRefusesAPathWhoseGCIsNotTheBinaryUnderTest(t *testing.T) {
+	unnamed := writeFakeGC(t, filepath.Join(t.TempDir(), "gc-external"))
+	underTest := writeFakeGC(t, filepath.Join(t.TempDir(), "gc"))
+	host := writeFakeGC(t, filepath.Join(t.TempDir(), "gc"))
+	for name, vars := range map[string]map[string]string{
+		// Exec orders exit 127: only the binary's own directory is on PATH,
+		// and the binary is not named gc.
+		"no gc on PATH": {"GC_ACCEPTANCE_GC_BIN": unnamed, "PATH": filepath.Dir(unnamed)},
+		// Exec orders test the host's gc while RunGC tests the binary.
+		"another gc first": {
+			"GC_ACCEPTANCE_GC_BIN": underTest,
+			"PATH":                 filepath.Dir(host) + string(os.PathListSeparator) + filepath.Dir(underTest),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := VerifyPathGC(&Env{vars: vars})
+			if err == nil {
+				t.Fatal("VerifyPathGC() = nil, want an error")
+			}
+			if !strings.Contains(err.Error(), vars["GC_ACCEPTANCE_GC_BIN"]) {
+				t.Fatalf("VerifyPathGC() = %v, want it to name the binary under test %s", err, vars["GC_ACCEPTANCE_GC_BIN"])
+			}
+		})
+	}
 }

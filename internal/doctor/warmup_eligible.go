@@ -198,6 +198,10 @@ func (c *SupervisorUnitOwnershipCheck) WarmupEligible() bool { return false }
 
 // WarmupEligible returns false; this check is not part of the
 // `gc start` warm-up scan.
+func (c *SupervisorBinaryCheck) WarmupEligible() bool { return false }
+
+// WarmupEligible returns false; this check is not part of the
+// `gc start` warm-up scan.
 func (c *WorktreeCheck) WarmupEligible() bool { return false }
 
 // WarmupEligible returns false; this check is not part of the

@@ -45,16 +45,13 @@ running the latched mode. An unknown value refuses to start the city.
 
 ### Admission
 
-A city that selects `v2` is refused at start until the build carries both
-controller groups. Those are the allocator (P3) and the first session
-group (P4.1). `v2ControllersInBuild` and `defaultV2Controllers` derive
-from the same two constants, so admission and the runtime cannot disagree.
-
-For smoke runs of the skeleton on a throwaway city, the developer
-override `GC_RECONCILER_V2_SKELETON=1` admits v2 anyway. The override is
-read through an injected `lookupEnv`, and it is deleted at P4.1. While it
-exists it is process-wide: under the supervisor it admits every city whose
-config selects v2. A skeleton city starts, restarts and scales nothing.
+Since the cutover (C9), a city that selects `v2` latches it from config
+alone, and its passes act. The latch still refuses v2 when the composed
+config enables a feature v2 defers (`v2LatchRefusals`: the identity
+circuit breaker, `depends_on`, `scale_check`, `max_session_age`, the stall
+timeouts, chat auto-suspend, an unadmitted runtime), and a city whose class
+stores fail C0.7 does not boot. A refused v2 never falls back to legacy:
+remove the key to run legacy.
 
 `gc doctor` has a `daemon-session-reconciler` check:
 
@@ -62,8 +59,8 @@ config selects v2. A skeleton city starts, restarts and scales nothing.
 |---|---|
 | `legacy` or unset | OK |
 | an alias | WARN |
-| `v2`, admitted by the developer override | WARN |
-| `v2`, not admissible in this build | ERROR |
+| `v2`, admissible | OK |
+| `v2`, refused by the latch or by C0.7 | ERROR |
 | an unknown value | ERROR |
 
 ## Model: keys, queue, router
@@ -125,7 +122,8 @@ loop (INC-006). Replays are counted separately from live events.
 | Trigger | Keys |
 |---|---|
 | Session bead event or replay (sessions store) | that row, plus the allocator |
-| Work bead event or replay | the sessions of the old and the new assignee, plus the allocator |
+| Session bead event or replay (another leg: a relic) | the allocator |
+| Work bead event or replay | the sessions of the old and the new assignee. The allocator only for a close or delete, or when the bead's current or previously indexed version carries `gc.routed_to` or an assignee |
 | Undecodable bead event | the allocator |
 | Inventory pass flip | for each changed name: the owning session row, else the rows the name resolves to (and a reused name's previous owner); plus the allocator. A primed or health change alone wakes only the allocator |
 | Session ID key (API, socket, lanes) | that row, with no index lookup |
@@ -133,6 +131,20 @@ loop (INC-006). Replays are counted separately from live events.
 | Allocator, key-less or control-dispatch key | the allocator (MAINT-056) |
 | Supervisor reload | the allocator, plus a full resync |
 | Bead event tail gap | a full resync |
+
+Bead events follow the allocator wake policy (CONTRACT §1.1, C9). Any
+other work event, such as a change to unrouted, unassigned work, wakes no
+allocator pass and is counted (`allocator_wakes_suppressed`). The patrol
+backstop bounds the delay. To check whether a work bead was routed before,
+the router keeps a third index: the open work last seen with
+`gc.routed_to`. Rebuilds refresh it. It is capped at 65,536 IDs; past the
+cap, every work event wakes the allocator until a rebuild fits.
+
+Files the allocator reads have no event source. These are
+`.gc/runtime/suspension-state.json` (written by `gc rig suspend` and
+`resume` without a poke) and `.gc/cache/provider-health.json`. The pass or
+the external-reads lane picks up a change at the next patrol, which is the
+cadence at which legacy reads them per tick.
 
 A mapping panic is recovered. The panic is counted (`router_panics`), its
 trigger is dropped, and a resync is forced (F7).
@@ -261,7 +273,7 @@ Every other field is cumulative or current.
 | `bead_event_latency_p50_ms`, `bead_event_latency_p99_ms` | The same, for reconciles a live bead event queued: the item's first reason is `event`, the add its wait is timed from. This is the bead-event half of target 3's evented inputs; provider events, API and socket keys are not split out |
 | `work_p50_ms`, `work_p99_ms` | Reconcile duration |
 | `session_reasons` | Reason kinds the trace-only session controller was handed (P2 only; P4 replaces it) |
-| `allocator_passes`, `allocator_failures`, `allocator_last_pass_ms`, `allocator_duty`, `allocator_wakes` | The allocator lane; the duty is the busy fraction over the last 5m (target 4); wakes are the passes' reasons by kind |
+| `allocator_passes`, `allocator_failures`, `allocator_last_pass_ms`, `allocator_duty`, `allocator_wakes`, `allocator_wakes_suppressed` | The allocator lane; the duty is the busy fraction over the last 5m (target 4); wakes are the passes' reasons by kind; suppressed counts bead events the wake policy kept from the allocator |
 | `resync_sweep_ms`, `resync_superseded`, `resync_requests`, `boot_ms` | The last sweep's duration, superseded sweeps, resync wakes by reason, and the boot duration (target 6) |
 | `router_events`, `router_replays`, `router_undecodable`, `router_keys_out`, `router_unresolved`, `router_panics` | Router counters; `router_events` includes undecodable live events. A recovered mapping panic drops its trigger and forces a resync |
 | `holds`, `fs_gate` | Active holds; the worker FS gate (`unarmed`, `open` or `held`) |

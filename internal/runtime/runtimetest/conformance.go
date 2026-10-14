@@ -160,13 +160,32 @@ func RunLifecycleTestsWithOptions(t *testing.T, newSession Factory, opts Options
 		}
 	})
 
+	// Stop answers a missing session with nil only while the provider can see
+	// its inventory. The running sentinel holds the provider's backend up, so
+	// the never-started name is a missing session on a responsive provider.
 	t.Run("Stop_Idempotent_NotRunning", func(t *testing.T) {
-		sp, _, _ := newSession(t)
+		sp, cfg, sentinel := newSession(t)
+		startOrSkip(t, opts, sp, sentinel, cfg, "Start sentinel")
 		if err := sp.Stop("never-started-conformance-session"); err != nil {
-			t.Errorf("Stop on never-started session: %v", err)
+			t.Errorf("Stop on never-started session beside running %q: %v", sentinel, err)
 		}
 	})
 
+	// A provider whose backend is not running at all may report that from
+	// Stop rather than certify absence — tmux does when it has no server — so
+	// the never-started case on a fresh provider is the teardown contract:
+	// runtime.StopForCleanup must find nothing left to fail on.
+	t.Run("StopForCleanup_NeverStarted", func(t *testing.T) {
+		sp, _, _ := newSession(t)
+		if err := runtime.StopForCleanup(sp, "never-started-conformance-session"); err != nil {
+			t.Errorf("StopForCleanup on never-started session: %v", err)
+		}
+	})
+
+	// Both Stops are held to the strict contract. Stopping a provider's last
+	// session must leave its backend responsive — tmux keeps an empty server up
+	// (exit-empty off) — so the second Stop meets a missing session on a
+	// responsive provider.
 	t.Run("Stop_Idempotent_AlreadyStopped", func(t *testing.T) {
 		sp, cfg, name := newSession(t)
 		startOrSkip(t, opts, sp, name, cfg, "Start")

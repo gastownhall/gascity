@@ -96,11 +96,6 @@ func TestMain(m *testing.M) {
 		panic("acceptance-c: staging provider binaries: " + err.Error())
 	}
 
-	// Configure dolt in the isolated home (dolt requires user.name).
-	if err := dolttest.WriteGlobalConfig(gcHome); err != nil {
-		panic("acceptance-c: " + err.Error())
-	}
-
 	// Force a token refresh before staging OAuth credentials. Claude Code
 	// refreshes tokens in-memory but may not persist to .credentials.json,
 	// leaving the on-disk token expired. A quick --print call forces the
@@ -125,7 +120,10 @@ func TestMain(m *testing.M) {
 		panic("acceptance-c: ensuring Claude state: " + err.Error())
 	}
 
+	// NewEnv seeds the dolt identity (metrics off) under gcHome/.dolt; the
+	// real providers authenticate through the operator's home.
 	testEnvC = helpers.NewEnv(gcBinary, gcHome, runtimeDir).
+		WithHostHome().
 		Without("GC_SESSION"). // use real tmux, not subprocess
 		Without("GC_BEADS").   // use real bd (dolt-backed) provider
 		Without("GC_DOLT").    // let gc manage dolt (don't skip it)

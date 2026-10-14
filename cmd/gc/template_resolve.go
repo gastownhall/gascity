@@ -124,6 +124,12 @@ type TemplateParams struct {
 	// DependencyOnly marks a realized cold slot kept only so dependency wake
 	// has something concrete to wake even when pool check wants zero.
 	DependencyOnly bool
+	// NamedCanonicalOnly marks an on_demand configured named session that is
+	// desired only because the tick's session snapshot held its canonical
+	// bead (no assigned work wants it). syncSessionBeads creates no row for
+	// it when its fresh read finds that bead gone: an operator close won
+	// the race (mc-58gr9).
+	NamedCanonicalOnly bool
 	// ManualSession marks a discovered root created outside pool scale logic
 	// (for example via `gc session new`). These sessions stay desired without
 	// inflating poolDesired for config-managed slots.
@@ -205,24 +211,13 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 
 	// Step 5: Build copy_files and command with settings args + schema defaults.
 	var copyFiles []runtime.CopyEntry
-	var command string
-	switch sessionTransport {
-	case config.SessionTransportACP:
-		command = resolved.ACPCommandString()
-	case "", config.SessionTransportTmux:
-		command = resolved.CommandString()
-	default:
-		return TemplateParams{}, fmt.Errorf("agent %q: unknown session transport %q", qualifiedName, sessionTransport)
-	}
 	providerFamily := resolvedProviderLaunchFamily(resolved)
 	installHooks := config.ResolveInstallHooks(cfgAgent, p.workspace)
-	if providerFamily == "kimi" && installHooksIncludeFamily(installHooks, "kimi", p.providers) {
-		command = appendKimiHookConfigArg(command)
-	}
-	// Append schema-derived default args (e.g., --dangerously-skip-permissions
-	// from EffectiveDefaults["permission_mode"] = "unrestricted").
-	if defaultArgs := resolved.ResolveDefaultArgs(); len(defaultArgs) > 0 {
-		command = command + " " + shellquote.Join(defaultArgs)
+	// The API persists the same composition as a deferred create's baseline
+	// (config.BuildProviderTemplateLaunchCommand), so keep it shared.
+	command, err := config.ProviderTemplateCommand(resolved, sessionTransport, installHooks, p.providers)
+	if err != nil {
+		return TemplateParams{}, fmt.Errorf("agent %q: %w", qualifiedName, err)
 	}
 	if p.stderr != nil {
 		for _, pin := range resolved.UnhonoredOptionPins() {
@@ -440,14 +435,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// instruction costs a turn and duplicates the context it just received.
 	includePrimeInstruction := !hasHooks && prompt == ""
 	beacon := runtime.FormatBeaconAt(p.cityName, qualifiedName, includePrimeInstruction, p.beaconTime)
-	switch {
-	case suppressStartupPrompt:
-		prompt = ""
-	case prompt != "":
-		prompt = beacon + "\n\n" + prompt
-	default:
-		prompt = beacon
-	}
+	prompt = composeStartupPrompt(beacon, prompt, suppressStartupPrompt)
 
 	// Step 9b: Append the assigned-skills appendix when the agent
 	// has a vendor sink, hasn't opted out, AND the runtime actually
@@ -804,38 +792,19 @@ func isOperationalScript(rel string) bool {
 	return false
 }
 
-func installHooksIncludeFamily(installHooks []string, family string, providers map[string]config.ProviderSpec) bool {
-	family = strings.TrimSpace(family)
-	if family == "" {
-		return false
+// composeStartupPrompt combines the session beacon with the rendered prompt
+// into the startup prompt a launch delivers: empty when the agent's startup
+// prompt is suppressed, the beacon alone when nothing rendered, and otherwise
+// the beacon, a blank line, and the rendered prompt.
+func composeStartupPrompt(beacon, prompt string, suppress bool) string {
+	switch {
+	case suppress:
+		return ""
+	case prompt != "":
+		return beacon + "\n\n" + prompt
+	default:
+		return beacon
 	}
-	for _, hook := range installHooks {
-		hook = strings.TrimSpace(hook)
-		if hook == "" {
-			continue
-		}
-		if hook == family || config.BuiltinFamily(hook, providers) == family {
-			return true
-		}
-	}
-	return false
-}
-
-func appendKimiHookConfigArg(command string) string {
-	parts := shellquote.Split(command)
-	if len(parts) == 0 {
-		return command
-	}
-	configArgs := []string{"--config-file", ".kimi/config.toml"}
-	if parts[len(parts)-1] == "acp" {
-		withConfig := make([]string, 0, len(parts)+len(configArgs))
-		withConfig = append(withConfig, parts[:len(parts)-1]...)
-		withConfig = append(withConfig, configArgs...)
-		withConfig = append(withConfig, parts[len(parts)-1])
-		return shellquote.Join(withConfig)
-	}
-	parts = append(parts, configArgs...)
-	return shellquote.Join(parts)
 }
 
 func suppressStartupPromptForAgent(cfgAgent *config.Agent) bool {

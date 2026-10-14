@@ -29,7 +29,8 @@ const (
 	// attemptPass closes the control as passed.
 	attemptPass attemptDisposition = iota
 	// attemptHardFail closes the control as a terminal hard failure regardless
-	// of attempts remaining (only the retry classifier produces this).
+	// of attempts remaining: a retry attempt classified hard, or a ralph
+	// iteration that failed hard (ralphIterationHardFailure).
 	attemptHardFail
 	// attemptContinue spawns the next attempt when attempts remain, or disposes
 	// of the exhausted control via the strategy when max_attempts is reached.
@@ -117,7 +118,7 @@ func processAttemptControl(store beads.Store, bead beads.Bead, opts ProcessOptio
 	}
 
 	// Find the most recent attempt.
-	attempt, err := findLatestAttempt(store, bead)
+	attempt, err := findLatestAttemptInView(store, bead, opts)
 	if err != nil {
 		return ControlResult{}, fmt.Errorf("%s: finding latest %s: %w", bead.ID, strategy.subjectNoun, err)
 	}
@@ -162,10 +163,12 @@ func processAttemptControl(store beads.Store, bead beads.Bead, opts ProcessOptio
 		if strategy.onPass != nil {
 			strategy.onPass(closeMetadata, attempt)
 		}
-		if err := updateMetadataAndClose(store, bead.ID, closeMetadata); err != nil {
+		closed, err := closeWithMetadata(store, bead.ID, closeMetadata)
+		if err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing passed: %w", bead.ID, err)
 		}
-		scopeResult, err := reconcileClosedScopeMemberWithOptions(store, bead.ID, opts)
+		noteWrite(opts, bead.ID, closed)
+		scopeResult, err := reconcileTerminalScopedMemberWithOptions(store, withWrittenRow(bead, closed), opts)
 		if err != nil {
 			return ControlResult{}, fmt.Errorf("%s: reconciling enclosing scope: %w", bead.ID, err)
 		}
@@ -181,10 +184,12 @@ func processAttemptControl(store beads.Store, bead beads.Bead, opts ProcessOptio
 			beadmeta.FinalDispositionMetadataKey: beadmeta.DispositionHardFail,
 		}
 		clearControllerSpawnErrorMetadata(closeMetadata)
-		if err := updateMetadataAndClose(store, bead.ID, closeMetadata); err != nil {
+		closed, err := closeWithMetadata(store, bead.ID, closeMetadata)
+		if err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing hard-failed: %w", bead.ID, err)
 		}
-		scopeResult, err := reconcileClosedScopeMemberWithOptions(store, bead.ID, opts)
+		noteWrite(opts, bead.ID, closed)
+		scopeResult, err := reconcileTerminalScopedMemberWithOptions(store, withWrittenRow(bead, closed), opts)
 		if err != nil {
 			return ControlResult{}, fmt.Errorf("%s: reconciling enclosing scope: %w", bead.ID, err)
 		}
@@ -279,15 +284,25 @@ func evaluateRetryAttempt(store beads.Store, bead, attempt beads.Bead, _ int, op
 
 // evaluateRalphIteration propagates the iteration's non-gc metadata onto the
 // ralph control, reloads the control so the check sees the updated values, and
-// runs the check script. A GatePass closes the control; anything else spawns
-// the next iteration or exhausts.
+// runs the check script. An iteration that failed hard closes the control as a
+// hard failure without running the check; a GatePass closes the control;
+// anything else spawns the next iteration or exhausts.
 func evaluateRalphIteration(store beads.Store, bead, iteration beads.Bead, iterationNum int, opts ProcessOptions) (attemptEvaluation, error) {
 	// Propagate non-gc metadata from the iteration to the ralph control BEFORE
 	// running the check. This makes the iteration's output (e.g.,
 	// review.verdict) visible on the ralph bead for check scripts that read
-	// $GC_BEAD_ID metadata.
+	// $GC_BEAD_ID metadata, and keeps it as diagnostics on a hard failure.
 	if err := propagateRetrySubjectMetadata(store, bead.ID, iteration); err != nil {
 		return attemptEvaluation{}, fmt.Errorf("%s: propagating iteration metadata: %w", bead.ID, err)
+	}
+	culprit, hard, err := ralphIterationHardFailure(store, bead, iteration, opts)
+	if err != nil {
+		return attemptEvaluation{}, fmt.Errorf("%s: classifying failed %s: %w", bead.ID, iteration.ID, err)
+	}
+	if hard {
+		reason := retryFailureReason(culprit)
+		opts.tracef("ralph hard-fail bead=%s iteration=%s attempt=%d culprit=%s reason=%s", bead.ID, iteration.ID, iterationNum, culprit.ID, reason)
+		return attemptEvaluation{disposition: attemptHardFail, logOutcome: "hard", logDetail: reason, reason: reason}, nil
 	}
 	// Reload the control bead after propagation so the check sees updated values.
 	reloaded, err := store.Get(bead.ID)
@@ -307,6 +322,53 @@ func evaluateRalphIteration(store beads.Store, bead, iteration beads.Bead, itera
 		eval.disposition = attemptContinue
 	}
 	return eval, nil
+}
+
+// ralphIterationHardFailure returns the bead whose hard failure ended a failed
+// ralph iteration: the iteration itself when it closed hard (a childless
+// ralph's work bead, or a scope body whose abort kept its member's record), or
+// else a hard-failed member of the iteration's scope. The member scan covers
+// iteration bodies aborted before abortScope kept that record. Only an explicit
+// hard class counts, matching the retry classifier and the legacy check path;
+// an empty or transient class leaves the loop to iterate.
+func ralphIterationHardFailure(store beads.Store, control, iteration beads.Bead, opts ProcessOptions) (beads.Bead, bool, error) {
+	if strings.TrimSpace(iteration.Metadata[beadmeta.OutcomeMetadataKey]) != beadmeta.OutcomeFail {
+		return beads.Bead{}, false, nil
+	}
+	if closedWithHardFailure(iteration) {
+		return iteration, true, nil
+	}
+	iterationRef := strings.TrimSpace(iteration.Metadata[beadmeta.StepRefMetadataKey])
+	if iteration.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindScope || iterationRef == "" {
+		return beads.Bead{}, false, nil
+	}
+	rootID := control.Metadata[beadmeta.RootBeadIDMetadataKey]
+	if rootID == "" {
+		rootID = control.ID
+	}
+	all, err := rootViewMembers(store, rootID, opts)
+	if err != nil {
+		return beads.Bead{}, false, fmt.Errorf("reading members of root %s: %w", rootID, err)
+	}
+	culprit, ok := firstHardFailedMember(iterationScopeMembers(all, rootID, iterationRef), iteration.ID)
+	return culprit, ok, nil
+}
+
+// iterationScopeMembers returns the members of the scope whose body carries
+// iterationRef as its gc.step_ref: the beads whose gc.scope_ref names it,
+// exactly or as the un-namespaced suffix matchesScopeRef also accepts.
+func iterationScopeMembers(all []beads.Bead, rootID, iterationRef string) []beads.Bead {
+	var members []beads.Bead
+	for _, bead := range all {
+		scopeRef := strings.TrimSpace(bead.Metadata[beadmeta.ScopeRefMetadataKey])
+		if scopeRef == "" || bead.Metadata[beadmeta.RootBeadIDMetadataKey] != rootID {
+			continue
+		}
+		if scopeRef == iterationRef || strings.HasSuffix(iterationRef, "."+scopeRef) {
+			members = append(members, bead)
+		}
+	}
+	return members
 }
 
 func ensureBlockingDependency(store beads.Store, issueID, dependsOnID string) error {
@@ -393,13 +455,19 @@ func markControllerSpawnError(store beads.Store, beadID string, err error, opts 
 	if writeErr := store.SetMetadataBatch(beadID, metadata); writeErr != nil {
 		opts.tracef("controller-spawn-error bead=%s recording hard failure metadata failed err=%v", beadID, writeErr)
 	}
-	if closeErr := setOutcomeAndClose(store, beadID, beadmeta.OutcomeFail); closeErr != nil {
-		opts.tracef("controller-spawn-error bead=%s closing failed bead failed err=%v", beadID, closeErr)
-	}
-	// Reconcile any enclosing scope so a controller_error terminal closure
-	// does not leave the scope body stalled.
-	if _, scopeErr := reconcileClosedScopeMemberWithOptions(store, beadID, opts); scopeErr != nil {
-		opts.tracef("controller-spawn-error bead=%s reconciling enclosing scope failed err=%v", beadID, scopeErr)
+	// Settle any enclosing scope before the bead closes so a controller_error
+	// terminal closure does not leave the scope body stalled: once the bead is
+	// closed nothing re-drives that settle.
+	if _, settleErr := closeScopedControl(store, beadID, map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomeFail}, "", opts); settleErr != nil {
+		opts.tracef("controller-spawn-error bead=%s settling enclosing scope before close failed err=%v", beadID, settleErr)
+		// The hard error is terminal regardless: close the bead and reconcile
+		// the scope best-effort, as before the settle-first order.
+		if closeErr := setOutcomeAndClose(store, beadID, beadmeta.OutcomeFail); closeErr != nil {
+			opts.tracef("controller-spawn-error bead=%s closing failed bead failed err=%v", beadID, closeErr)
+		}
+		if _, scopeErr := reconcileClosedScopeMemberWithOptions(store, beadID, opts); scopeErr != nil {
+			opts.tracef("controller-spawn-error bead=%s reconciling enclosing scope failed err=%v", beadID, scopeErr)
+		}
 	}
 	return false
 }
@@ -514,6 +582,14 @@ var transientNeedles = []transientNeedle{
 	{needle: "too many connections", tier: TierAvailability},
 	{needle: "lock wait timeout", tier: TierAvailability},
 	{needle: "deadlock found", tier: TierAvailability},
+	// Dolt's own 1213/40001 text ("serialization failure: this transaction
+	// conflicts with a committed transaction from another client, try
+	// restarting transaction") shares the MySQL error number with "Deadlock
+	// found" but none of its words. It is the same lock contention, and it only
+	// reaches this classifier once the store layer's bounded write retry has
+	// already lost the race — so it is Tier A, never a hard quarantine.
+	{needle: "serialization failure", tier: TierAvailability},
+	{needle: "conflicts with a committed transaction", tier: TierAvailability},
 	{needle: "database is locked", tier: TierAvailability},
 	{needle: "database table is locked", tier: TierAvailability},
 	{needle: "sqlite_busy", tier: TierAvailability},
@@ -1102,10 +1178,9 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 			formula.ApplyDrainControlMetadata(childMeta, child.Drain)
 			// A plain child (none of Retry/Ralph/Drain) reaches here with no
 			// gc.kind at all, unlike the root above which always gets one.
-			// Default it to task, mirroring rootMeta's unconditional stamp,
-			// so isWorkRecordGatedBead's (Type=="task" && gc.kind=="") test
-			// does not wrongly sweep it into the ADR-0009 work-record close
-			// gate. See gastownhall/gascity#5246.
+			// Default it to task, mirroring rootMeta's unconditional stamp, so
+			// its control-plane identity remains explicit and it stays out of
+			// the ADR-0009 work-record close gate. See gastownhall/gascity#5246.
 			if childMeta[beadmeta.KindMetadataKey] == "" {
 				childMeta[beadmeta.KindMetadataKey] = beadmeta.KindTask
 			}
@@ -1719,33 +1794,51 @@ func isFailedPartialMolecule(bead beads.Bead) bool {
 }
 
 // findLatestAttempt finds the most recent attempt/iteration child of a control
-// bead. It lists beads under the workflow root and, on empty result, walks the
-// control's blocks-dependencies; both feed latestAttemptFromCandidates, which
-// matches the durable gc.control_for lineage stamp (with a legacy ref-string
-// fallback for pre-S38 molecules) and returns the max gc.attempt.
+// bead from live reads; see findLatestAttemptInView.
 func findLatestAttempt(store beads.Store, control beads.Bead) (beads.Bead, error) {
+	return findLatestAttemptInView(store, control, ProcessOptions{})
+}
+
+// findLatestAttemptInView finds the most recent attempt/iteration child of a
+// control bead, reading the workflow root's members from the invocation's root
+// view (rootViewMembers) when opts carries one. Both candidate sources feed
+// latestAttemptFromCandidates, which matches the durable gc.control_for lineage
+// stamp (with a legacy ref-string fallback for pre-S38 molecules) and returns
+// the max gc.attempt.
+//
+// The root's members answer alone only for a root known to be open (the gate
+// root ProcessControl read). Otherwise their answer is unioned with the targets
+// of the control's dependency edges: once the root closes, molecule.Attach
+// roots each new attempt at the control, so only the control's blocks edge
+// reaches it. A dependency walk error is therefore returned, never answered
+// with the root's candidate: that candidate can be an attempt the walk would
+// have superseded, and acting on it retries the control on every pass without
+// ever evaluating the newer attempt.
+func findLatestAttemptInView(store beads.Store, control beads.Bead, opts ProcessOptions) (beads.Bead, error) {
 	rootID := control.Metadata[beadmeta.RootBeadIDMetadataKey]
 	if rootID == "" {
 		rootID = control.ID
 	}
 
-	all, err := beads.DirectMembers(store, rootID)
+	all, err := rootViewMembers(store, rootID, opts)
+	rootLatest := beads.Bead{}
 	if err == nil {
-		latest := latestAttemptFromCandidates(control, all)
-		if latest.ID != "" {
-			return latest, nil
+		rootLatest = latestAttemptFromCandidates(control, all)
+		rootKnownOpen := opts.gateRoot != nil && opts.gateRoot.ID == rootID && opts.gateRoot.Status != "closed"
+		if rootKnownOpen && rootLatest.ID != "" {
+			return rootLatest, nil
 		}
 	}
 
-	latest, depErr := latestAttemptFromDependencies(store, control)
+	latest, depErr := latestAttemptFromDependencies(store, control, all)
 	if depErr != nil {
 		if err != nil {
 			return beads.Bead{}, fmt.Errorf("%w; dependency fallback: %w", err, depErr)
 		}
 		return beads.Bead{}, depErr
 	}
-	if latest.ID != "" {
-		return latest, nil
+	if combined := latestAttemptFromCandidates(control, []beads.Bead{rootLatest, latest}); combined.ID != "" {
+		return combined, nil
 	}
 	if err != nil {
 		return beads.Bead{}, err
@@ -1753,20 +1846,46 @@ func findLatestAttempt(store beads.Store, control beads.Bead) (beads.Bead, error
 	return beads.Bead{}, nil
 }
 
-func latestAttemptFromDependencies(store beads.Store, control beads.Bead) (beads.Bead, error) {
+// latestAttemptFromDependencies selects the latest attempt among the targets of
+// the control's dependency edges, reusing the beads in known (the root's
+// members) instead of reading them again. A target that is an "external:"
+// reference or no longer exists is skipped: it cannot be an attempt, and
+// failing the walk on it would turn one dangling edge into an error on every
+// pass. Any other read error is returned.
+func latestAttemptFromDependencies(store beads.Store, control beads.Bead, known []beads.Bead) (beads.Bead, error) {
 	deps, err := store.DepList(control.ID, "down")
 	if err != nil {
-		return beads.Bead{}, err
+		return beads.Bead{}, fmt.Errorf("listing dependencies: %w", err)
+	}
+	knownByID := make(map[string]beads.Bead, len(known))
+	for _, b := range known {
+		knownByID[b.ID] = b
 	}
 	candidates := make([]beads.Bead, 0, len(deps))
 	for _, dep := range deps {
+		if isExternalDependencyRef(dep.DependsOnID) {
+			continue
+		}
+		if candidate, ok := knownByID[dep.DependsOnID]; ok {
+			candidates = append(candidates, candidate)
+			continue
+		}
 		candidate, err := store.Get(dep.DependsOnID)
+		if errors.Is(err, beads.ErrNotFound) {
+			continue
+		}
 		if err != nil {
-			return beads.Bead{}, err
+			return beads.Bead{}, fmt.Errorf("reading dependency %s: %w", dep.DependsOnID, err)
 		}
 		candidates = append(candidates, candidate)
 	}
 	return latestAttemptFromCandidates(control, candidates), nil
+}
+
+// isExternalDependencyRef reports whether a dependency target is an
+// "external:" reference, which has no bead on its far end.
+func isExternalDependencyRef(id string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(id)), "external:")
 }
 
 // latestAttemptFromCandidates selects the control's latest attempt/iteration
@@ -2041,21 +2160,38 @@ func copyNonGCMetadata(dst, src map[string]string) {
 }
 
 func updateMetadataAndClose(store beads.Store, beadID string, metadata map[string]string) error {
+	_, err := closeWithMetadata(store, beadID, metadata)
+	return err
+}
+
+// closeWithMetadata closes beadID with metadata in one update and returns the
+// closed row. The update reports the row it wrote where the store can
+// (beads.UpdateAndReadBack), so confirming the close costs no extra read. A
+// store that took the metadata but not the status gets an explicit Close.
+func closeWithMetadata(store beads.Store, beadID string, metadata map[string]string) (beads.UpdatedRow, error) {
 	status := "closed"
-	if err := store.Update(beadID, beads.UpdateOpts{
+	row, err := beads.UpdateAndReadBack(store, beadID, beads.UpdateOpts{
 		Status:   &status,
 		Metadata: metadata,
-	}); err != nil {
-		return err
-	}
-	bead, err := store.Get(beadID)
+	})
 	if err != nil {
-		return fmt.Errorf("verifying close of %s: %w", beadID, err)
+		return beads.UpdatedRow{}, err
 	}
-	if bead.Status == "closed" {
-		return nil
+	if row.Status == "closed" {
+		return row, nil
 	}
-	return store.Close(beadID)
+	if err := store.Close(beadID); err != nil {
+		return beads.UpdatedRow{}, err
+	}
+	row.Status = "closed"
+	return row, nil
+}
+
+// withWrittenRow is bead as it stands after a write that reported row.
+func withWrittenRow(bead beads.Bead, row beads.UpdatedRow) beads.Bead {
+	bead.Status = row.Status
+	bead.Metadata = row.Metadata
+	return bead
 }
 
 // Note: setOutcomeAndClose, propagateRetrySubjectMetadata,

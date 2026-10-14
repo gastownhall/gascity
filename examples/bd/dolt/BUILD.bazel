@@ -102,9 +102,12 @@ go_test(
         "backup_order_test.go",
         "cleanup_test.go",
         "compact_backup_remotes_test.go",
+        "compact_history_protection_real_dolt_test.go",
         "compact_history_protection_test.go",
         "compact_no_sync_test.go",
         "compact_notify_cadence_test.go",
+        "compact_real_dolt_callbound_test.go",
+        "compact_real_dolt_test.go",
         "doctor_test.go",
         "dog_exec_scripts_test.go",
         "dog_prompt_test.go",
@@ -131,9 +134,21 @@ go_test(
         exclude = ["BUILD.bazel"],
     ) + [
         "//:go.mod",
-        "//:repo_source_tree",
         "//internal/bootstrap/packs/core:pack_files",
-    ],
+    ] + select({
+        "//:gotags_integration": [
+            "@dolt_bin_v2_2_0//:dolt-linux-amd64/bin/dolt",
+        ],
+        "//conditions:default": [],
+    }),
+    # The integration build's tests run bd/dolt by name: GC_TEST_TOOL_PATHS puts
+    # the pinned binaries first on PATH (internal/testenv).
+    env = select({
+        "//:gotags_integration": {
+            "GC_TEST_TOOL_PATHS": "$(rootpath @dolt_bin_v2_2_0//:dolt-linux-amd64/bin/dolt)",
+        },
+        "//conditions:default": {},
+    }),
     shard_count = 6,
     deps = [
         "//internal/bazeltest",
@@ -142,6 +157,7 @@ go_test(
         "//internal/fsys",
         "//internal/orders",
         "//internal/testenv",
+        "//internal/testutil",
         "//internal/workdir",
     ],
 )
@@ -169,6 +185,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

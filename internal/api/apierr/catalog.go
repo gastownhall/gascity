@@ -47,6 +47,17 @@ var (
 	// dispatch (unknown/unwired sink, policy) — distinct from validation-failed,
 	// which is huma's schema-validation auto-stamp.
 	WebhookRejected = Register(ProblemType{Code: "webhook-rejected", Status: http.StatusUnprocessableEntity, Title: "Webhook Rejected"})
+	// DemandOnlySingleton refuses a session create or wake for a pool agent
+	// with max_active_sessions = 1 and no [[named_session]]: the controller
+	// starts its one session only from pool demand. The request is well-formed;
+	// the client recovers by slinging work to the agent or declaring a named
+	// session, not by fixing the request.
+	DemandOnlySingleton = Register(ProblemType{Code: "demand-only-singleton", Status: http.StatusBadRequest, Title: "Demand-Only Singleton Agent"})
+	// WakeWillNotStart reports a recorded wake the controller will not act
+	// on (an idle-latched row, a suspended rig or agent, no runnable template,
+	// a dependency-only row, a startup-health quarantine). The client
+	// recovers by fixing that condition, not the request.
+	WakeWillNotStart = Register(ProblemType{Code: "wake-will-not-start", Status: http.StatusConflict, Title: "Wake Recorded But Will Not Start"})
 
 	// Concurrency / state conflicts. concurrent-delete/concurrent-modify are
 	// retryable lost-update races (the target changed under the write); wrong-state

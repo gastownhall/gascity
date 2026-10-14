@@ -197,6 +197,42 @@ func TestCheckIgnoresZeroExpiry(t *testing.T) {
 	}
 }
 
+// TestCheckHorizonIsFatalInEveryMode guards the check that stops someone
+// parking a waiver years out. Only a code change can introduce it, so grace
+// does not soften it.
+func TestCheckHorizonIsFatalInEveryMode(t *testing.T) {
+	now := day(2026, time.July, 13)
+	for _, mode := range []Mode{ModeGrace, ModeStrict} {
+		t.Run(mode.String(), func(t *testing.T) {
+			item := sampleExpiry(now.Add(91 * 24 * time.Hour))
+			item.Horizon = 90 * 24 * time.Hour
+			got := Check([]Expiry{item}, now, mode)
+			if len(got.Fatal) != 1 || !strings.Contains(got.Fatal[0], "horizon") {
+				t.Fatalf("Fatal = %v, want one horizon finding", got.Fatal)
+			}
+			if !strings.Contains(got.Fatal[0], "waiver owned by ga-80po0c.3") {
+				t.Fatalf("horizon finding does not name its owner:\n%s", got.Fatal[0])
+			}
+		})
+	}
+}
+
+func TestCheckHorizonAcceptsADateOnIt(t *testing.T) {
+	now := day(2026, time.July, 13)
+	item := sampleExpiry(now.Add(90 * 24 * time.Hour))
+	item.Horizon = 90 * 24 * time.Hour
+	if got := Check([]Expiry{item}, now, ModeStrict); len(got.Fatal) != 0 {
+		t.Fatalf("Fatal = %v, want a date exactly on the horizon accepted", got.Fatal)
+	}
+}
+
+func TestCheckZeroHorizonIsUnbounded(t *testing.T) {
+	got := Check([]Expiry{sampleExpiry(day(2030, time.January, 1))}, day(2026, time.July, 13), ModeStrict)
+	if len(got.Fatal) != 0 || len(got.Warnings) != 0 {
+		t.Fatalf("Check with no horizon returned %+v, want an empty report", got)
+	}
+}
+
 func TestModeString(t *testing.T) {
 	if ModeGrace.String() != "grace" || ModeStrict.String() != "strict" {
 		t.Fatalf("Mode.String() = %q/%q, want grace/strict", ModeGrace, ModeStrict)

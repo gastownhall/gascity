@@ -22,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/tmux"
 	"github.com/gastownhall/gascity/internal/testutil"
 )
 
@@ -914,6 +915,46 @@ func TestZombieSessionsCheck_Fix(t *testing.T) {
 	}
 }
 
+// A zombie whose tmux server dies between Fix's observation and its Stop is
+// gone, which is all Fix is for; a stop that failed to remove the session is
+// still reported, even when a missing-server answer is joined beside it.
+func TestZombieSessionsCheck_FixTreatsDownedServerAsFixedButReportsStopFailures(t *testing.T) {
+	stopFailed := errors.New("terminate zombie: permission denied")
+	for _, tc := range []struct {
+		name    string
+		stopErr error
+		wantErr error
+	}{
+		{name: "downed server", stopErr: fmt.Errorf("killing session zombie: %w", tmux.ErrNoServer)},
+		{name: "stop failure", stopErr: stopFailed, wantErr: stopFailed},
+		{name: "stop failure beside downed server", stopErr: errors.Join(stopFailed, tmux.ErrNoServer), wantErr: stopFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sp := runtime.NewFake()
+			if err := sp.Start(context.Background(), "zombie", runtime.Config{}); err != nil {
+				t.Fatal(err)
+			}
+			sp.Zombies["zombie"] = true
+			sp.StopErrors["zombie"] = tc.stopErr
+
+			cfg := &config.City{
+				Agents: []config.Agent{{Name: "zombie", ProcessNames: []string{"claude"}}},
+			}
+			err := NewZombieSessionsCheck(cfg, "test", "", sp).Fix(&CheckContext{CityPath: t.TempDir()})
+			if tc.wantErr == nil {
+				if err != nil {
+					t.Fatalf("Fix() error = %v, want nil for a zombie already gone with its server", err)
+				}
+			} else if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("Fix() error = %v, want it to report %v", err, tc.wantErr)
+			}
+			if n := sp.CountCalls("Stop", "zombie"); n != 1 {
+				t.Errorf("Stop(%q) called %d times, want 1", "zombie", n)
+			}
+		})
+	}
+}
+
 // TestZombieSessionsCheck_FixSkipsWhenControllerRunning is required by
 // ga-bq9vdi (GH#5742): ZombieSessionsCheck.Fix() kills sessions via the raw
 // runtime.Provider with neither fence engdocs/design/session-store-fences.md
@@ -1093,6 +1134,43 @@ func TestOrphanSessionsCheck_Fix(t *testing.T) {
 	}
 	if !sp.IsRunning("mayor") {
 		t.Error("legitimate session was killed by fix")
+	}
+}
+
+// An orphan whose tmux server dies between Fix's listing and its Stop is gone,
+// which is all Fix is for; a stop that failed to remove the session is still
+// reported, even when a missing-server answer is joined beside it.
+func TestOrphanSessionsCheck_FixTreatsDownedServerAsFixedButReportsStopFailures(t *testing.T) {
+	stopFailed := errors.New("terminate orphan: permission denied")
+	for _, tc := range []struct {
+		name    string
+		stopErr error
+		wantErr error
+	}{
+		{name: "downed server", stopErr: fmt.Errorf("killing session stale-worker: %w", tmux.ErrNoServer)},
+		{name: "stop failure", stopErr: stopFailed, wantErr: stopFailed},
+		{name: "stop failure beside downed server", stopErr: errors.Join(stopFailed, tmux.ErrNoServer), wantErr: stopFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sp := runtime.NewFake()
+			if err := sp.Start(context.Background(), "stale-worker", runtime.Config{}); err != nil {
+				t.Fatal(err)
+			}
+			sp.StopErrors["stale-worker"] = tc.stopErr
+
+			cfg := &config.City{Agents: []config.Agent{{Name: "mayor"}}}
+			err := NewOrphanSessionsCheck(cfg, "test", "", sp).Fix(&CheckContext{CityPath: t.TempDir()})
+			if tc.wantErr == nil {
+				if err != nil {
+					t.Fatalf("Fix() error = %v, want nil for an orphan already gone with its server", err)
+				}
+			} else if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("Fix() error = %v, want it to report %v", err, tc.wantErr)
+			}
+			if n := sp.CountCalls("Stop", "stale-worker"); n != 1 {
+				t.Errorf("Stop(%q) called %d times, want 1", "stale-worker", n)
+			}
+		})
 	}
 }
 
@@ -4363,5 +4441,99 @@ func TestDoltVersionCheck_CanFixFalse(t *testing.T) {
 	c := NewDoltVersionCheck()
 	if c.CanFix() {
 		t.Error("CanFix() = true, want false")
+	}
+}
+
+// nonDoltScopeMetadata is the metadata.json a non-Dolt scope carries: a
+// backend selection only (for a remote backend, `bd connect` pins the server in
+// a per-user sidecar). The name is deliberately not any real backend: the
+// dolt-server checks must decide "not Dolt" without knowing which engine it is.
+const nonDoltScopeMetadata = `{"database":"beads.db","backend":"example-non-dolt"}`
+
+func writeNonDoltScopeMetadata(t *testing.T, scopeRoot string) {
+	t.Helper()
+	writeScopeMetadata(t, scopeRoot, nonDoltScopeMetadata)
+}
+
+func writeScopeMetadata(t *testing.T, scopeRoot, metadata string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(scopeRoot, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(scopeRoot, ".beads", "metadata.json"), []byte(metadata), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestDoltServerChecks_EveryDoltSpellingKeepsTheDial pins the not-applicable
+// gate to contract.IsDoltBackend, the predicate the store factory and the
+// provider lifecycle route on. A proxied scope spelled "bd" or "Dolt" is still
+// served by Dolt, so both dolt-server checks must answer it exactly as they
+// answer the canonical "dolt" — never "not applicable", which would report OK
+// over an outage of the server that scope really uses.
+func TestDoltServerChecks_EveryDoltSpellingKeepsTheDial(t *testing.T) {
+	cityDir := setupCity(t, "[workspace]\nname = \"test\"\n\n[beads]\nprovider = \"bd\"\n")
+	rigDir := filepath.Join(cityDir, "rigs", "demo")
+	checks := []Check{
+		NewDoltServerCheck(cityDir, false),
+		NewRigDoltServerCheck(cityDir, config.Rig{Name: "demo", Path: rigDir}, false),
+	}
+	answers := func(backend string) []*CheckResult {
+		metadata := fmt.Sprintf(`{"database":"beads.db","backend":%q,"dolt_mode":"proxied-server"}`, backend)
+		writeScopeMetadata(t, cityDir, metadata)
+		writeScopeMetadata(t, rigDir, metadata)
+		results := make([]*CheckResult, 0, len(checks))
+		for _, check := range checks {
+			results = append(results, check.Run(&CheckContext{}))
+		}
+		return results
+	}
+
+	canonical := answers("dolt")
+	for _, spelling := range []string{"bd", "Dolt", "DOLT"} {
+		for i, got := range answers(spelling) {
+			want := canonical[i]
+			if strings.Contains(got.Message, "not applicable") {
+				t.Errorf("%s on backend %q answered %q; the factory routes that spelling to Dolt", got.Name, spelling, got.Message)
+				continue
+			}
+			if got.Status != want.Status || got.Message != want.Message {
+				t.Errorf("%s on backend %q = (%d, %q), want the canonical dolt answer (%d, %q)", got.Name, spelling, got.Status, got.Message, want.Status, want.Message)
+			}
+		}
+	}
+}
+
+// TestDoltServerCheck_NonDoltCityIsNotApplicable pins the MC shadow finding F3:
+// a city whose scope is bound to a non-Dolt backend has no Dolt server and no
+// dolt-state.json, so the dolt-server check must answer N/A rather than FAIL
+// with "read dolt runtime state".
+func TestDoltServerCheck_NonDoltCityIsNotApplicable(t *testing.T) {
+	dir := setupCity(t, "[workspace]\nname = \"test\"\n\n[beads]\nprovider = \"bd\"\n")
+	writeNonDoltScopeMetadata(t, dir)
+
+	r := NewDoltServerCheck(dir, false).Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want OK (not applicable); msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "not applicable") || !strings.Contains(r.Message, "example-non-dolt") {
+		t.Fatalf("message = %q, want a not-applicable answer naming the scope's backend", r.Message)
+	}
+}
+
+// TestRigDoltServerCheck_NonDoltRigIsNotApplicable is the rig twin: a rig
+// bound to the same non-Dolt backend has no Dolt endpoint to dial.
+func TestRigDoltServerCheck_NonDoltRigIsNotApplicable(t *testing.T) {
+	cityDir := setupCity(t, "[workspace]\nname = \"test\"\n\n[beads]\nprovider = \"bd\"\n")
+	writeNonDoltScopeMetadata(t, cityDir)
+	rigDir := filepath.Join(cityDir, "rigs", "demo")
+	writeNonDoltScopeMetadata(t, rigDir)
+
+	r := NewRigDoltServerCheck(cityDir, config.Rig{Name: "demo", Path: rigDir}, false).Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want OK (not applicable); msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "not applicable") {
+		t.Fatalf("message = %q, want a not-applicable answer", r.Message)
 	}
 }

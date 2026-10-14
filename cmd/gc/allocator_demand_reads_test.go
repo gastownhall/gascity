@@ -351,12 +351,13 @@ var legacyCollectorBackingReads = func() map[string][]string {
 	}
 }()
 
-// Kills: a live read on an exact leg. With the backing logging every read,
-// all four collectors, clean and then with a dirty row (served from last
-// good), must leave the backing untouched and still count the leg's demand,
-// including the closed named-session index an on_demand named session asks
-// for.
-func TestV2DemandReadsExactLegNeverTouchesBacking(t *testing.T) {
+// Kills: a strict refusal that blanks a cached exact leg. Clean, all four
+// collectors leave the backing untouched; with a dirty row whose stored copy
+// moved on, they still count the leg's demand, serve the row's current
+// value, and touch only the local backing: the overlay's per-row refresh,
+// after which the strict Ready serves. Neither pass reads partial, including
+// the closed named-session index an on_demand named session asks for.
+func TestV2DemandCachedLegDirtyRowServes(t *testing.T) {
 	cfg := demandReadsTestConfig()
 	// An on_demand named session makes the assigned-work collector consult
 	// the closed named-session index, which legacy reads live
@@ -368,21 +369,24 @@ func TestV2DemandReadsExactLegNeverTouchesBacking(t *testing.T) {
 		assignedWorkflowRoot("gc-root", "worker-2"),
 	)
 	backing.armed.Store(true)
-	lastGood := newDemandLastGood()
 	now := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
 
 	for _, step := range []struct {
-		name      string
-		dirty     bool
-		fallbacks bool
+		name  string
+		dirty bool
+		reads []string
 	}{
 		{name: "clean cache"},
-		{name: "dirty row", dirty: true, fallbacks: true},
+		{name: "dirty row", dirty: true, reads: []string{"Get gc-r1", "DepList gc-r1"}},
 	} {
 		if step.dirty {
 			dirtyDemandRow(t, cache, backing, "gc-r1")
+			if err := backing.Store.SetMetadataBatch("gc-r1", map[string]string{"demand.test": "stored"}); err != nil {
+				t.Fatal(err)
+			}
+			backing.ops = nil
 		}
-		reads := newV2DemandReads(now, nil, lastGood)
+		reads := newV2DemandReads(now, nil)
 		run := runDemandCollectors(cfg, cache, func() *readyDemandCache { return newReadyDemandCacheWithReads(reads) }, reads)
 		if run.AssignedPartial || run.RoutedPartial || len(run.ScalePartials) > 0 || len(run.NamedPartials) > 0 {
 			t.Errorf("%s: an exact leg read partial: %+v", step.name, run)
@@ -393,30 +397,45 @@ func TestV2DemandReadsExactLegNeverTouchesBacking(t *testing.T) {
 		if !slices.Equal(run.Routed, []string{"gc-r1"}) || run.ScaleCounts["worker"] != 1 {
 			t.Errorf("%s: routed = %v, worker demand = %d, want [gc-r1] and 1", step.name, run.Routed, run.ScaleCounts["worker"])
 		}
-		if got := len(reads.Fallbacks()) > 0; got != step.fallbacks {
-			t.Errorf("%s: served from last good = %t (%+v), want %t", step.name, got, reads.Fallbacks(), step.fallbacks)
+		if ops := backing.readLog(); !slices.Equal(ops, step.reads) {
+			t.Errorf("%s: backing reads %q, want %q", step.name, ops, step.reads)
 		}
-		now = now.Add(time.Second)
+		if step.dirty {
+			rows, err := reads.RawOpen(cache)
+			if i := slices.IndexFunc(rows, func(b beads.Bead) bool { return b.ID == "gc-r1" }); err != nil || i < 0 || rows[i].Metadata["demand.test"] != "stored" {
+				t.Errorf("%s: RawOpen = %v, %v; want gc-r1 at its stored value", step.name, rows, err)
+			}
+		}
 	}
-	if ops := backing.readLog(); len(ops) > 0 {
-		t.Fatalf("v2 demand reads touched an exact leg's backing: %q", ops)
+
+	// Ready alone on a dirty row: the strict read refuses, and Ready reads
+	// the local backing instead of reading partial.
+	dirtyDemandRow(t, cache, backing, "gc-r1")
+	backing.ops = nil
+	if rows, err := newV2DemandReads(now, nil).ReadyAll(cache); err != nil || !slices.Contains(ids(rows), "gc-r1") {
+		t.Errorf("dirty row: ReadyAll = %v, %v; want gc-r1", ids(rows), err)
+	}
+	if ops, want := backing.readLog(), []string{"Ready [{Assignee: Limit:0 TierMode:2}]"}; !slices.Equal(ops, want) {
+		t.Errorf("dirty row: ReadyAll backing reads %q, want %q", ops, want)
 	}
 }
 
-// Kills: bd-leg demand read from the cache (EB-42o8). The cache holds a
-// blocked bead folded to "open" — a routed row and an assigned workflow
-// root — that the leg's live raw-status read excluded; v2 must serve the
-// recording, not the cache.
-func TestV2DemandReadsNonExactLegServesRecording(t *testing.T) {
+// Kills: a live read inside the pass (C0.4), and bd-leg demand read from the
+// cache (EB-42o8). The cache holds a blocked bead folded to "open" — a routed
+// row and an assigned workflow root — that the leg's live raw-status read
+// excluded; v2 must serve the recording, not the cache. A dirty row never
+// sends the leg to its backing: the live reads still come from the recording
+// and the strict cached List reads partial.
+func TestV2DemandLaneLegReadsRecordingOnly(t *testing.T) {
 	cfg := demandReadsTestConfig()
 	cache, backing := newDemandCache(t, false, routedDemandBead("gc-blocked"), routedDemandBead("gc-open"), assignedWorkflowRoot("gc-root", "worker-dead"))
 	backing.armed.Store(true)
 	now := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
 	open := routedDemandBead("gc-open")
-	rec := &backstopRecording{Seq: 1, At: now, Expires: now.Add(time.Minute), Legs: map[beads.Store]legRecording{
-		demandLabelKey(cache): {RawOpen: []beads.Bead{open}, ReadyAll: []beads.Bead{open}},
+	rec := &externalReadsRecording{Seq: 1, FreshFor: time.Minute, Sources: map[sourceKey]sourceResult{
+		keyOf(sourceDemand, cache): {EndedAt: now, sourcePayload: sourcePayload{Leg: legRecording{RawOpen: []beads.Bead{open}, ReadyAll: []beads.Bead{open}}}},
 	}}
-	reads := newV2DemandReads(now, rec, newDemandLastGood())
+	reads := newV2DemandReads(now, rec)
 
 	run := runDemandCollectors(cfg, cache, func() *readyDemandCache { return newReadyDemandCacheWithReads(reads) }, reads)
 
@@ -438,12 +457,29 @@ func TestV2DemandReadsNonExactLegServesRecording(t *testing.T) {
 
 	// The recorded live Ready failed: the leg's templates read partial with
 	// no demand, never topped up from the cache's folded rows.
-	rec.Legs[demandLabelKey(cache)] = legRecording{RawOpen: []beads.Bead{open}, ReadyAllErr: errDemandBackingDown}
-	reads = newV2DemandReads(now, rec, newDemandLastGood())
+	rec.Sources[keyOf(sourceDemand, cache)] = sourceResult{EndedAt: now, sourcePayload: sourcePayload{Leg: legRecording{RawOpen: []beads.Bead{open}, ReadyAllErr: errDemandBackingDown}}}
+	reads = newV2DemandReads(now, rec)
 	targets := []defaultScaleCheckTarget{{template: "worker", storeKey: "city", store: cache}}
 	counts, _, partials, _ := defaultScaleCheckCountsAndDemand(cfg, targets, newReadyDemandCacheWithReads(reads))
 	if counts["worker"] != 0 || !partials["worker"] {
 		t.Errorf("failed recorded Ready: worker demand = %d, partials = %v; want 0 and worker partial", counts["worker"], partials)
+	}
+
+	rec.Sources[keyOf(sourceDemand, cache)] = sourceResult{EndedAt: now, sourcePayload: sourcePayload{Leg: legRecording{RawOpen: []beads.Bead{open}, ReadyAll: []beads.Bead{open}}}}
+	dirtyDemandRow(t, cache, backing, "gc-open")
+	backing.ops = nil
+	reads = newV2DemandReads(now, rec)
+	if rows, err := reads.RawOpen(cache); err != nil || !slices.Equal(ids(rows), []string{"gc-open"}) {
+		t.Errorf("dirty lane leg: RawOpen = %v, %v; want the recorded gc-open", ids(rows), err)
+	}
+	if rows, err := reads.ReadyAll(cache); err != nil || !slices.Equal(ids(rows), []string{"gc-open"}) {
+		t.Errorf("dirty lane leg: ReadyAll = %v, %v; want the recorded gc-open", ids(rows), err)
+	}
+	if rows, err := reads.Cached(cache, beads.ListQuery{Status: "in_progress"}); len(rows) != 0 || !beads.IsPartialResult(err) || !errors.Is(err, beads.ErrCacheUnavailable) {
+		t.Errorf("dirty lane leg: Cached = %v, %v; want no rows and a partial cache-unavailable error", ids(rows), err)
+	}
+	if ops := backing.readLog(); len(ops) > 0 {
+		t.Errorf("v2 demand reads touched a dirty lane leg's backing: %q", ops)
 	}
 }
 
@@ -454,23 +490,23 @@ func TestV2DemandReadsMissingOrStaleRecordingIsPartial(t *testing.T) {
 	cache, _ := newDemandCache(t, false, routedDemandBead("gc-r1"))
 	now := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
 	const maxAge = 30 * time.Second
-	recordedAt := func(at time.Time) *backstopRecording {
+	recordedAt := func(at time.Time) *externalReadsRecording {
 		r1 := routedDemandBead("gc-r1")
-		return &backstopRecording{Seq: 1, At: at, Expires: at.Add(maxAge), Legs: map[beads.Store]legRecording{
-			demandLabelKey(cache): {RawOpen: []beads.Bead{r1}, ReadyAll: []beads.Bead{r1}},
+		return &externalReadsRecording{Seq: 1, FreshFor: maxAge, Sources: map[sourceKey]sourceResult{
+			keyOf(sourceDemand, cache): {EndedAt: at, sourcePayload: sourcePayload{Leg: legRecording{RawOpen: []beads.Bead{r1}, ReadyAll: []beads.Bead{r1}}}},
 		}}
 	}
 	for _, tc := range []struct {
 		name    string
-		rec     *backstopRecording
+		rec     *externalReadsRecording
 		partial bool
 	}{
 		{name: "fresh recording", rec: recordedAt(now.Add(-maxAge))},
 		{name: "no recording", rec: nil, partial: true},
-		{name: "leg not recorded", rec: &backstopRecording{Seq: 1, At: now, Expires: now.Add(maxAge), Legs: map[beads.Store]legRecording{}}, partial: true},
+		{name: "leg not recorded", rec: &externalReadsRecording{Seq: 1, FreshFor: maxAge, Sources: map[sourceKey]sourceResult{}}, partial: true},
 		{name: "stale recording", rec: recordedAt(now.Add(-maxAge - time.Nanosecond)), partial: true},
 	} {
-		reads := newV2DemandReads(now, tc.rec, newDemandLastGood())
+		reads := newV2DemandReads(now, tc.rec)
 		run := runDemandCollectors(cfg, cache, func() *readyDemandCache { return newReadyDemandCacheWithReads(reads) }, reads)
 		if run.AssignedPartial != tc.partial || run.RoutedPartial != tc.partial || run.ScalePartials["worker"] != tc.partial || run.NamedPartials["worker"] != tc.partial {
 			t.Errorf("%s: partial assigned=%t routed=%t scale=%t named=%t, want all %t",
@@ -479,47 +515,6 @@ func TestV2DemandReadsMissingOrStaleRecordingIsPartial(t *testing.T) {
 		if wantCount := map[bool]int{false: 1, true: 0}[tc.partial]; run.ScaleCounts["worker"] != wantCount {
 			t.Errorf("%s: worker demand = %d, want %d", tc.name, run.ScaleCounts["worker"], wantCount)
 		}
-	}
-}
-
-// Kills: a full backing Ready on a refused strict read. A dirty row makes the
-// exact leg's ReadyContext refuse; the pass must serve the last good Ready
-// (recording its age) without touching the backing, and refuse the last good
-// once it is older than cacheLagBound.
-func TestV2DemandReadsStrictReadyFallsBackToLastGood(t *testing.T) {
-	cfg := demandReadsTestConfig()
-	cache, backing := newDemandCache(t, true, routedDemandBead("gc-r1"), routedDemandBead("gc-r2"))
-	lastGood := newDemandLastGood()
-	targets := []defaultScaleCheckTarget{{template: "worker", storeKey: "city", store: cache}}
-	t0 := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
-	pass := func(at time.Time) (int, map[string]bool, []demandReadFallback) {
-		reads := newV2DemandReads(at, nil, lastGood)
-		counts, _, partials, _ := defaultScaleCheckCountsAndDemand(cfg, targets, newReadyDemandCacheWithReads(reads))
-		return counts["worker"], partials, reads.Fallbacks()
-	}
-
-	if count, partials, fallbacks := pass(t0); count != 2 || len(partials) > 0 || len(fallbacks) > 0 {
-		t.Fatalf("clean pass: worker demand = %d, partials = %v, fallbacks = %+v; want 2, none, none", count, partials, fallbacks)
-	}
-	backing.armed.Store(true)
-	dirtyDemandRow(t, cache, backing, "gc-r1")
-
-	count, partials, fallbacks := pass(t0.Add(30 * time.Second))
-	if count != 2 || len(partials) > 0 {
-		t.Errorf("dirty pass within the bound: worker demand = %d, partials = %v; want the last good 2, none", count, partials)
-	}
-	if want := []demandReadFallback{{Shape: "ready", Age: 30 * time.Second}}; !reflect.DeepEqual(fallbacks, want) {
-		t.Errorf("dirty pass fallbacks = %+v, want %+v", fallbacks, want)
-	}
-	if count, partials, _ := pass(t0.Add(cacheLagBound)); count != 2 || len(partials) > 0 {
-		t.Errorf("dirty pass at the bound: worker demand = %d, partials = %v; want the last good 2, none", count, partials)
-	}
-	count, partials, _ = pass(t0.Add(cacheLagBound + time.Second))
-	if count != 0 || !partials["worker"] {
-		t.Errorf("dirty pass past the bound: worker demand = %d, partials = %v; want 0 and worker partial", count, partials)
-	}
-	if ops := backing.readLog(); len(ops) > 0 {
-		t.Errorf("a refused strict Ready read the backing: %q", ops)
 	}
 }
 
@@ -547,7 +542,7 @@ func TestV2DemandReadsNoReadyTruncation(t *testing.T) {
 	if got := readyAssigned(newReadyDemandCache()); len(got) != 1 {
 		t.Fatalf("legacy ready assigned work = %v, want 1 row: the fixture must exercise the wake budget", got)
 	}
-	reads := newV2DemandReads(time.Now(), nil, newDemandLastGood())
+	reads := newV2DemandReads(time.Now(), nil)
 	if got, want := readyAssigned(newReadyDemandCacheWithReads(reads)), []string{"gc-a1", "gc-a2", "gc-a3"}; !slices.Equal(got, want) {
 		t.Errorf("v2 ready assigned work = %v, want %v", got, want)
 	}
@@ -633,7 +628,7 @@ func TestV2DemandReadsCachedWithoutCacheIsPartial(t *testing.T) {
 	cfg := demandReadsTestConfig()
 	backing := newDemandBacking(routedDemandBead("gc-r1"), assignedDemandBead("gc-p1", "in_progress"))
 	backing.armed.Store(true)
-	reads := newV2DemandReads(time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC), nil, newDemandLastGood())
+	reads := newV2DemandReads(time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC), nil)
 	if rows, err := reads.Cached(backing, beads.ListQuery{Status: "in_progress"}); len(rows) != 0 || !beads.IsPartialResult(err) || !errors.Is(err, errDemandLegUncached) {
 		t.Errorf("Cached on an uncached leg = %v, %v; want no rows and a partial uncached error", ids(rows), err)
 	}
@@ -643,21 +638,6 @@ func TestV2DemandReadsCachedWithoutCacheIsPartial(t *testing.T) {
 	}
 	if ops := backing.readLog(); len(ops) > 0 {
 		t.Errorf("v2 reads touched an uncached leg: %q", ops)
-	}
-}
-
-// Kills: a nil last good dereferenced, on a good read or a refused one.
-// With no last good a refused read is partial.
-func TestV2DemandReadsNilLastGoodIsPartialOnRefusal(t *testing.T) {
-	cache, backing := newDemandCache(t, true, routedDemandBead("gc-n1"))
-	now := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
-	if rows, err := newV2DemandReads(now, nil, nil).ReadyAll(cache); err != nil || len(rows) != 1 {
-		t.Fatalf("clean strict Ready with no last good = %v, %v; want the row", ids(rows), err)
-	}
-	dirtyDemandRow(t, cache, backing, "gc-n1")
-	reads := newV2DemandReads(now, nil, nil)
-	if rows, err := reads.ReadyAll(cache); len(rows) != 0 || !beads.IsPartialResult(err) {
-		t.Errorf("refused strict Ready with no last good = %v, %v; want partial", ids(rows), err)
 	}
 }
 
@@ -677,24 +657,24 @@ func TestClosedNamedIndexLegacyIsDirectCallV2ServesRecording(t *testing.T) {
 	backing.ops = nil
 
 	now := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
-	rec := &backstopRecording{At: now, Expires: now.Add(time.Minute), ClosedNamed: map[beads.Store]closedNamedRecording{backing: {Index: direct}}}
+	rec := &externalReadsRecording{FreshFor: time.Minute, Sources: map[sourceKey]sourceResult{keyOf(sourceClosedNamed, backing): {EndedAt: now, sourcePayload: sourcePayload{ClosedNamed: direct}}}}
 	// A partial read keeps the rows it got and its error, as legacy's does.
 	partial := &beads.PartialResultError{Op: "closed index", Err: errors.New("one leg down")}
-	partialRec := &backstopRecording{At: now, Expires: now.Add(time.Minute), ClosedNamed: map[beads.Store]closedNamedRecording{backing: {Index: direct, Err: partial}}}
+	partialRec := &externalReadsRecording{FreshFor: time.Minute, Sources: map[sourceKey]sourceResult{keyOf(sourceClosedNamed, backing): {EndedAt: now, sourcePayload: sourcePayload{ClosedNamed: direct}, Err: partial}}}
 	for _, tc := range []struct {
 		name    string
 		now     time.Time
-		rec     *backstopRecording
+		rec     *externalReadsRecording
 		wantErr error
 		found   bool
 	}{
 		{"fresh", now.Add(time.Minute), rec, nil, true},
 		{"recorded partial read", now, partialRec, partial, true},
 		{"no recording", now, nil, errDemandRecordingMissing, false},
-		{"store not recorded", now, &backstopRecording{At: now, Expires: now.Add(time.Minute)}, errDemandRecordingMissing, false},
+		{"store not recorded", now, &externalReadsRecording{FreshFor: time.Minute}, errDemandRecordingMissing, false},
 		{"expired", now.Add(time.Minute + time.Nanosecond), rec, errDemandRecordingStale, false},
 	} {
-		idx, err := newV2DemandReads(tc.now, tc.rec, nil).ClosedNamedIndex(backing)
+		idx, err := newV2DemandReads(tc.now, tc.rec).ClosedNamedIndex(backing)
 		_, found := idx.Find("mayor")
 		if !errors.Is(err, tc.wantErr) || found != tc.found {
 			t.Errorf("%s: ClosedNamedIndex found mayor=%t err=%v, want found=%t err %v", tc.name, found, err, tc.found, tc.wantErr)
@@ -709,7 +689,7 @@ func TestClosedNamedIndexLegacyIsDirectCallV2ServesRecording(t *testing.T) {
 // fixture (blocked, foreign-blocked, parent-blocked, deferred, ephemeral and
 // no-history rows, assigned work and workflow roots), the four collectors
 // read the same through v2 as through legacy's live reads, with #31's Ready
-// limit neutralized, and with no last-good fallback.
+// limit neutralized.
 func TestV2DemandReadsExactLegMatchesLegacyOnSQLite(t *testing.T) {
 	opened, err := beads.OpenSQLiteStore(t.TempDir())
 	if err != nil {
@@ -771,16 +751,13 @@ func TestV2DemandReadsExactLegMatchesLegacyOnSQLite(t *testing.T) {
 		t.Fatal(err)
 	}
 	legacy := runDemandCollectors(cfg, cache, newReadyDemandCache, nil)
-	reads := newV2DemandReads(time.Now(), nil, newDemandLastGood())
+	reads := newV2DemandReads(time.Now(), nil)
 	v2 := runDemandCollectors(cfg, cache, func() *readyDemandCache { return newReadyDemandCacheWithReads(reads) }, reads)
 	if l, v := fmt.Sprintf("%+v", legacy), fmt.Sprintf("%+v", v2); l != v {
 		t.Errorf("exact-leg v2 differs from legacy\n legacy %s\n v2     %s", l, v)
 	}
 	if len(legacy.Routed) == 0 || len(legacy.ReadyAssigned) == 0 {
 		t.Errorf("the fixture counted no demand: %+v", legacy)
-	}
-	if fb := reads.Fallbacks(); len(fb) > 0 {
-		t.Errorf("fallbacks on a clean cache: %+v", fb)
 	}
 }
 
@@ -826,7 +803,7 @@ func TestProjectControlDispatcherRoutesMatchesLegacyOnScopeGap(t *testing.T) {
 		t.Fatalf("fixture: legacy demand %v with %d gaps, want none with 1", legacyDemand, len(legacyGaps))
 	}
 
-	reads := newV2DemandReads(time.Now(), nil, newDemandLastGood())
+	reads := newV2DemandReads(time.Now(), nil)
 	v2Rows, _, v2Refs, _ := collectOpenUnassignedRoutedWork(cityPath, cfg, binding, rigs, nil, io.Discard, nil, reads)
 	before := cloneBeadRows(v2Rows)
 	if got := openControlDispatcherDemand(cfg, v2Rows); len(got) == 0 {
@@ -905,25 +882,5 @@ func TestProjectControlDispatcherRoutesMatchesLegacyDeferredRows(t *testing.T) {
 	}
 	if rows[0].Metadata[beadmeta.RoutedToMetadataKey] != cityRoute {
 		t.Error("the projection edited its input rows")
-	}
-}
-
-// Kills: last good answers kept past the bound (M7), so a leg a reload
-// replaced keeps its rows alive. A put drops every answer older than
-// cacheLagBound at its time and keeps the rest.
-func TestDemandLastGoodPrunesAnswersPastTheBound(t *testing.T) {
-	g := newDemandLastGood()
-	t0 := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
-	old, kept, fresh := demandLegRead{shape: "old"}, demandLegRead{shape: "kept"}, demandLegRead{shape: "fresh"}
-	g.put(old, nil, t0)
-	g.put(kept, nil, t0.Add(time.Second))
-	g.put(fresh, nil, t0.Add(cacheLagBound+time.Second))
-	if _, _, ok := g.get(old); ok {
-		t.Error("an answer past the bound survived the next put")
-	}
-	for _, key := range []demandLegRead{kept, fresh} {
-		if _, _, ok := g.get(key); !ok {
-			t.Errorf("%s: an answer within the bound was pruned", key.shape)
-		}
 	}
 }

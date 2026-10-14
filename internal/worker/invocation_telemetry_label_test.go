@@ -27,7 +27,7 @@ func TestMessageRecordsNormalizedProviderFamilyLabel(t *testing.T) {
 	workDir := t.TempDir()
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManagerWithOptions(store, sp)
+	manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()))
 
 	// No Profile is set, so the label/pricing derivation cannot lean on
 	// profileFamily and must normalize the claude-family alias provider itself.
@@ -46,7 +46,7 @@ func TestMessageRecordsNormalizedProviderFamilyLabel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSessionHandle: %v", err)
 	}
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	info, err := manager.Get(handle.sessionID)
@@ -62,7 +62,7 @@ func TestMessageRecordsNormalizedProviderFamilyLabel(t *testing.T) {
 		usageEntry("u1", "claude-opus-4-7", 100, 50, 2000, 800),
 	})
 
-	if _, err := handle.Message(context.Background(), MessageRequest{Text: "hello"}); err != nil {
+	if _, err := handle.Message(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent), MessageRequest{Text: "hello"}); err != nil {
 		t.Fatalf("Message: %v", err)
 	}
 
