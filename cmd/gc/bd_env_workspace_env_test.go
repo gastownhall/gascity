@@ -222,7 +222,6 @@ func TestWorkspaceEnvTableDoesNotCacheErrorsOrMissingCities(t *testing.T) {
 	cityPath := t.TempDir()
 
 	// A missing city.toml is the empty answer, and caches nothing.
-	loadsBefore := workspaceEnvLoads.Load()
 	if got, err := workspaceEnvTable(cityPath); err != nil || len(got) != 0 {
 		t.Fatalf("missing city.toml: table=%v err=%v, want empty,nil", got, err)
 	}
@@ -247,7 +246,7 @@ func TestWorkspaceEnvTableDoesNotCacheErrorsOrMissingCities(t *testing.T) {
 
 	// Repaired: read once, then served from the memo.
 	writeWorkspaceEnvCityTOML(t, cityPath, "[workspace]\nname = \"demo\"\n[workspace.env]\nK = \"v\"\n", workspaceEnvStamp)
-	loadsBefore = workspaceEnvLoads.Load()
+	loadsBefore := workspaceEnvLoads.Load()
 	for i := 0; i < 2; i++ {
 		got, err := workspaceEnvTable(cityPath)
 		if err != nil || got["K"] != "v" {
