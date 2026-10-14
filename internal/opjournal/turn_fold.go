@@ -134,9 +134,11 @@ type TurnCells struct {
 	// Seen is the fold's anchor in the source's window: the newest ended
 	// turn of the last Recent it folded (gc.rt.turn.seen). Turns of Recent
 	// newer than Seen are new; when Seen has left the window, all of Recent
-	// is. It is fold bookkeeping, not an observation for readers: LastID can
-	// name a turn Recent never holds (one ended unobserved or session_gone),
-	// so it cannot anchor the window.
+	// is. That holds only while the caller keeps an ended turn, an inferred
+	// end included, in Recent until it ages out or is current again
+	// (TurnObservation.Recent). It is fold bookkeeping, not an observation
+	// for readers: LastID can name a turn Recent never holds (one ended
+	// unobserved or session_gone), so it cannot anchor the window.
 	Seen string
 	// ObservedAt is the observer's clock at the observation that last
 	// changed the cells (gc.rt.turn.observed_at).
@@ -189,6 +191,15 @@ type TurnObservation struct {
 	// out an earlier incarnation's turns (a resumed transcript keeps them),
 	// because a new generation's fold journals every turn of Recent under
 	// Generation, and the generation is part of each fact's id.
+	//
+	// An ended turn, an inferred end included, stays in Recent until it
+	// ages out of the source's bound or its turn is current again. The
+	// fold anchors on the newest ended turn it last read (TurnCells.Seen)
+	// and reads an anchor missing from Recent as aged out, so every turn
+	// of Recent is new. A source whose inferred end is recomputed on each
+	// read (X11 §5.2's idle overlay) can drop it otherwise, for one when
+	// the session dies right after the inference; the caller carries
+	// such an end forward, or the fold journals the window's turns again.
 	Recent []ObservedTurnEnd
 	// SessionGone reports that the runtime exited.
 	SessionGone bool
@@ -303,9 +314,9 @@ func (o TurnObservation) recent(id string) (ObservedTurnEnd, bool) {
 }
 
 // endedAfter returns the ended turns of Recent newer than the anchor seen,
-// oldest first. Seen was the newest turn of an earlier Recent, so it leaves
-// the window only by aging out, when all of Recent is newer, or by being
-// current again, when none is.
+// oldest first. Seen was the newest turn of an earlier Recent, so under the
+// caller's contract on Recent it leaves the window only by aging out, when
+// all of Recent is newer, or by being current again, when none is.
 func (o TurnObservation) endedAfter(seen string) []ObservedTurnEnd {
 	n := len(o.Recent)
 	switch seen {

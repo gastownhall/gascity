@@ -398,6 +398,20 @@ func TestFoldTurnTable(t *testing.T) {
 			write: true,
 		},
 		{
+			name: "the session gone with the inferred end carried forward in Recent (the caller's precondition): nothing",
+			prev: ended("U", TurnEndEnded, ts(20)),
+			obs: func() TurnObservation {
+				o := obsAt(3, "", time.Time{},
+					ObservedTurnEnd{ID: "U", EndedAt: ts(20), Inferred: true},
+					ObservedTurnEnd{ID: "T1", StartedAt: ts(2), EndedAt: ts(4), Status: TurnSourceCompleted},
+				)
+				o.SessionGone = true
+				return o
+			}(),
+			next:  ended("U", TurnEndEnded, ts(20)),
+			write: false,
+		},
+		{
 			name: "a turn ended unobserved that the source later records: no second fact",
 			prev: TurnCells{
 				Generation: 3, Caps: foldCaps, State: TurnStateEnded, At: ts(30),
