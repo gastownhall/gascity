@@ -40,10 +40,7 @@ func armRestartRequested(r *rowFacts) (intent, bool) {
 	if !r.restartPending() {
 		return r.freshCycle() // SESS-612 (C7a-2c)
 	}
-	if pinnedConfiguredNamedSessionKillProtected(info) && strings.TrimSpace(info.ContinuationResetPending) != "true" && r.runtimeUp() {
-		if !r.rowRestartRequested() {
-			return intent{}, false // the runtime's marker alone: no kill, and the runtime keeps it
-		}
+	if r.pinnedCollateral() && r.runtimeUp() { // the row's marker: restartPending ignores the runtime's here
 		return r.heal(intentRowHeal, decideRestartPinnedClear, session.MetadataPatch{"restart_requested": ""})
 	}
 	res, _ := r.w.Templates.lookup(info)
@@ -62,9 +59,19 @@ func armRestartRequested(r *rowFacts) (intent, bool) {
 // operator holds dormant and AL1 does not drain. A6's dead-runtime heal
 // and its composed start leave it to A13 (the #7823 review): a heal's start
 // would bring up a runtime with the marker still set, which A13 would then
-// stop again, and on a young row count the restart as a death.
+// stop again, and on a young row count the restart as a death. A pinned
+// configured named row with no explicit reset ignores its runtime's marker
+// (SESS-521: a collateral request never kills it), so the request neither
+// holds the row's other arms (SESS-612's cycle) nor fires on a later unpin
+// (the #7879 review; legacy clears it).
 func (r *rowFacts) restartPending() bool {
-	return (r.rowRestartRequested() || r.runtimeRestartRequested()) && !operatorDormantStop(r.row.Info, r.w.Now) && !r.drained()
+	return (r.rowRestartRequested() || r.runtimeRestartRequested() && !r.pinnedCollateral()) && !operatorDormantStop(r.row.Info, r.w.Now) && !r.drained()
+}
+
+// pinnedCollateral reports a pinned configured named row holding no
+// explicit reset, which a restart request does not kill (SESS-521).
+func (r *rowFacts) pinnedCollateral() bool {
+	return pinnedConfiguredNamedSessionKillProtected(r.row.Info) && strings.TrimSpace(r.row.Info.ContinuationResetPending) != "true"
 }
 
 // rowRestartRequested reports the row's restart_requested marker.

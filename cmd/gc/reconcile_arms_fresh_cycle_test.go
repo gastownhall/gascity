@@ -232,3 +232,20 @@ func TestSimSuspendDuringADeferredFreshCycle(t *testing.T) {
 	}
 	s.noViolations(t)
 }
+
+// TestPinnedRuntimeMarkerHoldsNoCycle (the #7879 review): a pinned
+// configured named row with no explicit reset ignores its runtime's
+// restart marker, so the marker is no pending restart: SESS-612's cycle
+// still decides, and an unpin later finds no request to fire.
+func TestPinnedRuntimeMarkerHoldsNoCycle(t *testing.T) {
+	c := freshCase(t, "configured_named_session", "true", "configured_named_identity", "worker", "pin_awake", "true")
+	id := runtimeIdentity{Known: true, SessionID: c.k.ID, Epoch: "3", Token: "tok-3"}
+	c.w.Obs = newObserveCache().publish(censusNow, map[string]InventoryAttrs{"s-heal": {DeadKnown: true, Identity: id, RestartRequested: true}}, completeBackend("tmux", "s-heal"))
+	r := &rowFacts{w: c.w, k: c.k, entry: c.a.Snapshot.Entries[c.k], row: c.w.Census.Rows[c.k], found: true}
+	if r.restartPending() {
+		t.Fatal("a pinned row's runtime marker reads as a pending restart")
+	}
+	if it, ok := armRestartRequested(r); !ok || it.Reason != decideFreshCycle {
+		t.Fatalf("armRestartRequested = (%q, %q) %v, want the fresh cycle", it.Kind, it.Reason, ok)
+	}
+}
