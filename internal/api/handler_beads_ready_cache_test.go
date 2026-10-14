@@ -114,6 +114,48 @@ func TestBeadReadyReadsLiveWhenCacheCold(t *testing.T) {
 	}
 }
 
+// TestBeadReadyGraphLegPrefersItsWarmCache: the relocated graph leg takes its
+// ready cache's answer the way the work legs do. A warm cache answers with no
+// backing scan, and a cold one is read live.
+func TestBeadReadyGraphLegPrefersItsWarmCache(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		prime     bool
+		wantScans int
+	}{
+		{name: "warm", prime: true, wantScans: 0},
+		{name: "cold", prime: false, wantScans: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := newFakeState(t)
+			backing := &countingReadyStore{MemStore: beads.NewMemStore()}
+			step, err := backing.Create(beads.Bead{Title: "graph step"})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			graph := beads.NewCachingStoreForTest(backing, nil)
+			if tc.prime {
+				if err := graph.Prime(context.Background()); err != nil {
+					t.Fatalf("Prime: %v", err)
+				}
+			}
+			state.graphBeadStore = graph
+			backing.readyCalls = 0
+
+			code, resp := getBeadReady(t, state)
+			if code != http.StatusOK {
+				t.Fatalf("status = %d, want 200", code)
+			}
+			if backing.readyCalls != tc.wantScans {
+				t.Fatalf("graph backing Ready scans = %d, want %d", backing.readyCalls, tc.wantScans)
+			}
+			if got := beadIDsOf(resp.Items); len(got) != 1 || got[0] != step.ID {
+				t.Fatalf("ready = %v, want the graph step [%s]", got, step.ID)
+			}
+		})
+	}
+}
+
 // TestBeadReadyReflectsAnInvalidatedCacheRow replaces the old "always live"
 // pin: a write the cache has been told about (the event that closes the
 // blocker) is reflected on the next Ready, under the cache's own invalidation

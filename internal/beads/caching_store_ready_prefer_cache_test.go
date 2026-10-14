@@ -177,6 +177,52 @@ func TestReadyPreferCacheReadsLiveWhenProjectionDegraded(t *testing.T) {
 	}
 }
 
+// TestReadyPreferCacheReadsLiveForAnUnanswerableCandidate: one candidate whose
+// verdict the cache cannot vouch for sends the read live. A query whose
+// assignee filter leaves that row out is still answered from the cache.
+func TestReadyPreferCacheReadsLiveForAnUnanswerableCandidate(t *testing.T) {
+	backing, ids := readyPreferCacheFixture(t)
+	// The dependency-derived predicate does not model a parent-child edge, so
+	// it cannot re-derive this row's verdict once the projected one is lost.
+	if err := backing.DepAdd(ids["issue"], ids["assigned"], "parent-child"); err != nil {
+		t.Fatalf("DepAdd: %v", err)
+	}
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	cache.mu.Lock()
+	cache.markReadyProjectionLostLocked(ids["issue"])
+	cache.mu.Unlock()
+	if !cache.readyProjectionUnknownForTest(ids["issue"]) {
+		t.Fatalf("issue is servable from cache, so the fallback below proves nothing")
+	}
+
+	all := ReadyQuery{TierMode: TierBoth}
+	got, err := cache.ReadyPreferCache(all)
+	if err != nil {
+		t.Fatalf("ReadyPreferCache(%+v): %v", all, err)
+	}
+	if calls := backing.readyCalls(); len(calls) != 1 || calls[0] != all {
+		t.Fatalf("backing Ready calls = %+v, want one live read of %+v", calls, all)
+	}
+	if want, _ := backing.MemStore.Ready(all); !rpcSameIDs(rpcIDs(got), rpcIDs(want)) {
+		t.Fatalf("ReadyPreferCache(%+v) = %v, want the live %v", all, rpcIDs(got), rpcIDs(want))
+	}
+
+	theirs := ReadyQuery{TierMode: TierBoth, Assignee: "olivia"}
+	got, err = cache.ReadyPreferCache(theirs)
+	if err != nil {
+		t.Fatalf("ReadyPreferCache(%+v): %v", theirs, err)
+	}
+	if calls := backing.readyCalls(); len(calls) != 1 {
+		t.Fatalf("backing Ready calls = %d after ReadyPreferCache(%+v), want still 1: the filter leaves the unanswerable row out", len(calls), theirs)
+	}
+	if want := []string{ids["assigned"]}; !rpcSameIDs(rpcIDs(got), want) {
+		t.Fatalf("ReadyPreferCache(%+v) = %v, want %v", theirs, rpcIDs(got), want)
+	}
+}
+
 // TestReadyPreferCacheHonorsInvalidation: an event that closes the blocker
 // invalidates the dependent's verdict, and the next cache-preferred read
 // reflects it without a backing scan, exactly as the zero-query Ready does.
