@@ -1235,3 +1235,54 @@ func TestLaneAmbiguousTakeWithEveryOpClosed(t *testing.T) {
 		t.Fatal("the cell is still held")
 	}
 }
+
+// An after target that no longer decodes (a newer build's schema, say) will
+// not decode on the next pass either: the dependent op waits without a timer,
+// as after_pending does, and says why. A target the store failed to read is
+// retried on a timer. Both name the cause in Detail.
+func TestLaneAfterUnreadableTimerOnlyForReadErrors(t *testing.T) {
+	h, fs := newLaneHarnessFlaky(t)
+	exec := newFakeExec(h.clk)
+	l := h.lane(t, "ctl")
+	target := h.propose(t, laneMsg("t", RoleNotice, "target"))
+	mustPass(t, l, view(), exec)
+	if got := h.get(t, target.ID); got.Status != StatusClosed {
+		t.Fatalf("target %s", got.Status)
+	}
+	h.clk.Advance(time.Millisecond)
+	b := h.propose(t, laneMsg("b", RoleNotice, "after", func(r *Request) { r.After = target.ID }))
+	waitOf := func(res PassResult) OpWait {
+		t.Helper()
+		i := slices.IndexFunc(res.Waits, func(w OpWait) bool { return w.ID == b.ID })
+		if i < 0 || res.Waits[i].Reason != WaitAfterUnreadable {
+			t.Fatalf("%s should wait %s: %+v", b.ID, WaitAfterUnreadable, res.Waits)
+		}
+		return res.Waits[i]
+	}
+
+	fs.setFail(func(id string) bool { return id == target.ID })
+	res := mustPass(t, l, view(), exec)
+	w := waitOf(res)
+	if want := h.clk.Now().Add(TransientBackoffBase); !w.Until.Equal(want) || !res.Next.Equal(want) {
+		t.Fatalf("read error: until %v next %v, want a retry at %v", w.Until, res.Next, want)
+	}
+	if !strings.Contains(w.Detail, errFlakyRead.Error()) {
+		t.Fatalf("read error detail %q does not name the cause", w.Detail)
+	}
+
+	fs.setFail(nil)
+	if err := h.mem.SetMetadataBatch(target.ID, map[string]string{"gc.op.schema": "99"}); err != nil {
+		t.Fatalf("setting a newer schema: %v", err)
+	}
+	res = mustPass(t, l, view(), exec)
+	w = waitOf(res)
+	if !w.Until.IsZero() {
+		t.Fatalf("undecodable target: until %v, want no timer", w.Until)
+	}
+	if want := h.get(t, b.ID).StartBy; res.Next.Before(want) {
+		t.Fatalf("undecodable target: next %v, want nothing before start_by %v", res.Next, want)
+	}
+	if !strings.Contains(w.Detail, ErrUnsupportedSchema.Error()) {
+		t.Fatalf("undecodable target detail %q does not name the cause", w.Detail)
+	}
+}

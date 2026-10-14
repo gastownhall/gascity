@@ -325,7 +325,7 @@ func TestLaneRiderReplayWaitsForAStarterOutsideTheClass(t *testing.T) {
 			rider := p.op(laneMsg("r", RoleNotice, "x", withWhen(WhenAfterTurn)), released)
 			starter := p.op(laneMsg("s", RolePrompt, "y", func(r *Request) { r.After = target }), released)
 			snap := snapOf(rider, starter)
-			snap.after[target] = afterTarget{state: afterUnreadable}
+			snap.after[target] = afterTarget{state: afterUnreadable, err: errFlakyRead}
 			now := t0.Add(time.Hour)
 			rp := planRules(snap, view(), now, "lane:ctl")
 			probe := idleProbe()

@@ -595,6 +595,19 @@ type afterTarget struct {
 	state        afterState
 	arm          Arm
 	conversation string
+	// err is why an afterUnreadable target could not be read; undecodable
+	// is set when the row was read but will not decode on a retry either.
+	err         error
+	undecodable bool
+}
+
+// detail is the wait detail for an unreadable target: its read or decode
+// error.
+func (t afterTarget) detail() string {
+	if t.err == nil {
+		return ""
+	}
+	return t.err.Error()
 }
 
 // read takes one snapshot: the open ops, the runtime row when any lane op is
@@ -644,11 +657,12 @@ func (l *ConversationLane) readAfter(id string) afterTarget {
 		return afterTarget{state: afterMissing}
 	}
 	if err != nil {
-		return afterTarget{state: afterUnreadable}
+		return afterTarget{state: afterUnreadable, err: err}
 	}
 	op, err := DecodeOp(b)
 	if err != nil {
-		return afterTarget{state: afterUnreadable}
+		undecodable := errors.Is(err, ErrUnsupportedSchema) || errors.Is(err, ErrUnsupportedValue) || errors.Is(err, ErrCorruptOp)
+		return afterTarget{state: afterUnreadable, err: err, undecodable: undecodable}
 	}
 	if op.Status != StatusClosed {
 		return afterTarget{state: afterOpen, conversation: op.Conversation}

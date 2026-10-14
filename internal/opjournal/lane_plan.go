@@ -131,11 +131,12 @@ func planRules(snap laneSnapshot, conv ConversationView, now time.Time, by strin
 	// is in flight.
 	var inFlight time.Time
 	remaining := 0
-	waitOp := func(op Op, r WaitReason, until time.Time) {
-		rp.waits = append(rp.waits, OpWait{ID: op.ID, Reason: r, Until: until})
+	waitOpDetail := func(op Op, r WaitReason, detail string, until time.Time) {
+		rp.waits = append(rp.waits, OpWait{ID: op.ID, Reason: r, Detail: detail, Until: until})
 		rp.next = minTime(rp.next, until)
 		remaining++
 	}
+	waitOp := func(op Op, r WaitReason, until time.Time) { waitOpDetail(op, r, "", until) }
 	closeOp := func(read, cur Op, o Outcome) {
 		rp.closes = append(rp.closes, ruleClose{cur: read, next: closedAt(cur, o, by, now)})
 	}
@@ -234,9 +235,14 @@ func planRules(snap laneSnapshot, conv ConversationView, now time.Time, by strin
 			case (t.state == afterClosed || t.state == afterOpen) && t.conversation != op.Conversation:
 				closeOp(op, cur, Outcome{Arm: ArmFailed, Reason: RefusedReasonPrefix + "after_scope"})
 				continue
+			case t.state == afterUnreadable && t.undecodable:
+				// A row this build cannot decode will not decode on a retry:
+				// wait, as after_pending does, until a change or start_by.
+				waitOpDetail(op, WaitAfterUnreadable, t.detail(), time.Time{})
+				continue
 			case t.state == afterUnreadable:
 				// Nothing rings when a store read recovers: retry on a timer.
-				waitOp(op, WaitAfterUnreadable, now.Add(TransientBackoffBase))
+				waitOpDetail(op, WaitAfterUnreadable, t.detail(), now.Add(TransientBackoffBase))
 				continue
 			case t.state != afterClosed:
 				waitOp(op, WaitAfterPending, time.Time{})

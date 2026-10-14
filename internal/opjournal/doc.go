@@ -87,10 +87,12 @@
 // that pass, holds the head as a replay_group waiter), so every send under a
 // key is a subset of every earlier send under it (L2); any other runtime may
 // get a group in parts. A replay group whose open members are all
-// after_turn riders goes without a starter. An after_unreadable wait retries
-// after TransientBackoffBase. Delivered text names no identifier (I14). A lane store must
-// apply guarded batches (NewLaneStore); there is no production caller until
-// OJ-12.
+// after_turn riders goes without a starter. An after_unreadable wait names
+// the cause in its Detail; it retries after TransientBackoffBase when the
+// store failed to read the target, and waits with no timer, as after_pending
+// does, when the target was read but does not decode. Delivered text names
+// no identifier (I14). A lane store must apply guarded batches
+// (NewLaneStore); there is no production caller until OJ-12.
 //
 // # Executor and open rows
 //
