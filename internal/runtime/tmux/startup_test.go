@@ -35,6 +35,9 @@ type startCall struct {
 	processNames []string
 	rc           *RuntimeConfig
 	timeout      time.Duration
+	// ctxErr is the context's Err() when the call was made, so a test can
+	// prove a step ran on a live context.
+	ctxErr error
 	// exitStatus and exitSignal are the dead-pane facts recordStartCrash was
 	// handed, so a test can prove the artifact records what was classified.
 	exitStatus string
@@ -244,12 +247,13 @@ func (f *fakeStartOps) recordUnconfirmedNudge(name, _ string, _ error) string {
 	return f.recordUnconfirmedNudgePath
 }
 
-func (f *fakeStartOps) runSetupCommand(_ context.Context, cmd string, env map[string]string, timeout time.Duration) error {
+func (f *fakeStartOps) runSetupCommand(ctx context.Context, cmd string, env map[string]string, timeout time.Duration) error {
 	f.calls = append(f.calls, startCall{
 		method:  "runSetupCommand",
 		command: cmd,
 		env:     env,
 		timeout: timeout,
+		ctxErr:  ctx.Err(),
 	})
 	if f.runSetupCommandHook != nil {
 		f.runSetupCommandHook(cmd)
@@ -1623,6 +1627,9 @@ func TestDoStartSession_DeadlineAfterUnconfirmedNudgeKeepsLiveSession(t *testing
 		live := callsByMethod(t, ops, "runSetupCommand", 1)
 		if live[0].command != "echo live" {
 			t.Fatalf("session_live command = %q, want %q", live[0].command, "echo live")
+		}
+		if live[0].ctxErr != nil {
+			t.Fatalf("session_live ran on a context with Err() = %v, want a live context: the kept session must still get its session_live commands", live[0].ctxErr)
 		}
 	})
 
