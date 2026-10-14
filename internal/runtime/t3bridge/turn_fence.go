@@ -100,6 +100,9 @@ func (p *Provider) ObserveTurn(ctx context.Context, name string) (runtime.TurnSt
 // turnID in progress. T3's protocol V1 records the turn id but interrupts
 // whatever turn runs, so the answer is never Fenced.
 func (p *Provider) InterruptTurn(ctx context.Context, name, turnID string) (runtime.TurnInterrupt, error) {
+	if turnID == "" {
+		return runtime.TurnInterrupt{}, fmt.Errorf("%w: interrupting a turn of %q", runtime.ErrTurnUnnamed, name)
+	}
 	thread, err := p.freshSessionThread(ctx, name)
 	if err != nil {
 		return runtime.TurnInterrupt{}, err
@@ -127,6 +130,9 @@ func (p *Provider) InterruptTurn(ctx context.Context, name, turnID string) (runt
 // turnPollMax. A thread no longer bound to name has ended its turn. A failed
 // read is remembered and the poll goes on.
 func (p *Provider) WaitTurnEnded(ctx context.Context, name, turnID string, timeout time.Duration) (runtime.TurnState, error) {
+	if turnID == "" {
+		return runtime.TurnState{}, fmt.Errorf("%w: waiting on a turn of %q", runtime.ErrTurnUnnamed, name)
+	}
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	var (

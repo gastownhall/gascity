@@ -357,3 +357,34 @@ func TestSeamBackedImplementsTurnFence(t *testing.T) {
 		t.Fatalf("seam-backed WaitTurnEnded = %v, want ErrTurnNotEnded", err)
 	}
 }
+
+// Kills an InterruptTurn or WaitTurnEnded that accepts an empty turn id: on an
+// idle session the empty id equals the read and an unfenced interrupt goes
+// out, and a wait on it would wait for some turn to start.
+func TestTurnFenceRefusesAnEmptyTurnIDBeforeReading(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		snapshot map[string]interface{}
+	}{
+		{name: "idle", snapshot: turnIdle()},
+		{name: "running", snapshot: turnRunning("t1")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := newTurnFenceServer(t, tc.snapshot)
+			p := newTurnFenceTestProvider(t, server)
+			_, err := p.InterruptTurn(t.Context(), turnFenceSession, "")
+			if !errors.Is(err, runtime.ErrTurnUnnamed) || errors.Is(err, runtime.ErrTurnNotCurrent) {
+				t.Fatalf("InterruptTurn(\"\") = %v, want only ErrTurnUnnamed", err)
+			}
+			if _, err := p.WaitTurnEnded(t.Context(), turnFenceSession, "", time.Second); !errors.Is(err, runtime.ErrTurnUnnamed) {
+				t.Fatalf("WaitTurnEnded(\"\") = %v, want ErrTurnUnnamed", err)
+			}
+			if calls := server.snapshotCalls(); calls != 0 {
+				t.Fatalf("snapshot reads = %d, want none", calls)
+			}
+			if cmds := server.commandTypes(); len(cmds) != 0 {
+				t.Fatalf("commands = %q, want none", cmds)
+			}
+		})
+	}
+}

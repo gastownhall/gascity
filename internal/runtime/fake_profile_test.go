@@ -431,3 +431,24 @@ func TestFullFakeTurnFenceWhenBrokenAndPlainFakeLacksIt(t *testing.T) {
 		t.Error("the tmux profile implements TurnFenceProvider")
 	}
 }
+
+// Kills a FullFake that interrupts or waits on an empty turn id, or that
+// consumes a script entry doing so.
+func TestFullFakeTurnFenceRefusesAnEmptyTurnID(t *testing.T) {
+	f, tf := turnFake()
+	f.TurnScripts = map[string][]string{"s": {"", "t1"}}
+	ctx := t.Context()
+	if _, err := tf.InterruptTurn(ctx, "s", ""); !errors.Is(err, runtime.ErrTurnUnnamed) || errors.Is(err, runtime.ErrTurnNotCurrent) {
+		t.Fatalf("InterruptTurn(\"\") = %v, want only ErrTurnUnnamed", err)
+	}
+	if _, err := tf.WaitTurnEnded(ctx, "s", "", time.Hour); !errors.Is(err, runtime.ErrTurnUnnamed) {
+		t.Fatalf("WaitTurnEnded(\"\") = %v, want ErrTurnUnnamed", err)
+	}
+	if st, err := tf.ObserveTurn(ctx, "s"); err != nil || st.Active() {
+		t.Fatalf("next read = %+v, %v; want the script's first entry, no turn", st, err)
+	}
+	want := []string{"InterruptTurn  error", "WaitTurnEnded", "ObserveTurn"}
+	if got := turnCalls(f); !slices.Equal(got, want) {
+		t.Fatalf("calls = %q, want %q", got, want)
+	}
+}

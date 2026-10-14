@@ -433,12 +433,16 @@ func (f FullFake) ObserveTurn(ctx context.Context, name string) (TurnState, erro
 }
 
 // InterruptTurn implements [TurnFenceProvider]: it reads the script and
-// "sends" only when the read names turnID, recording what it did in Value.
+// "sends" only when the read names turnID, recording what it did in Value. An
+// empty turnID is refused before the read, so no script entry is consumed.
 func (f FullFake) InterruptTurn(ctx context.Context, name, turnID string) (TurnInterrupt, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	call := Call{Method: "InterruptTurn", Name: name, Key: turnID, Value: "error"}
 	defer func() { f.Calls = append(f.Calls, call) }()
+	if turnID == "" {
+		return TurnInterrupt{}, ErrTurnUnnamed
+	}
 	if err := ctx.Err(); err != nil {
 		return TurnInterrupt{}, err
 	}
@@ -465,6 +469,9 @@ func (f FullFake) WaitTurnEnded(ctx context.Context, name, turnID string, _ time
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.Calls = append(f.Calls, Call{Method: "WaitTurnEnded", Name: name, Key: turnID})
+	if turnID == "" {
+		return TurnState{}, ErrTurnUnnamed
+	}
 	if f.broken {
 		return TurnState{}, ErrRuntimeUnavailable
 	}

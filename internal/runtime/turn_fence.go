@@ -50,6 +50,11 @@ func (e *TurnNotCurrentError) Error() string {
 // Is matches ErrTurnNotCurrent.
 func (e *TurnNotCurrentError) Is(target error) bool { return target == ErrTurnNotCurrent }
 
+// ErrTurnUnnamed reports that InterruptTurn or WaitTurnEnded was called with
+// an empty turnID. The runtime refuses it before reading the turn and sends
+// nothing: an empty id names no turn, so neither a fence nor a wait applies.
+var ErrTurnUnnamed = errors.New("turn id names no turn")
+
 // ErrTurnNotEnded reports that WaitTurnEnded's timeout elapsed while the turn
 // was still in progress, or before any read succeeded (then it also wraps the
 // last read error).
@@ -67,7 +72,9 @@ type TurnFenceProvider interface {
 	ObserveTurn(ctx context.Context, name string) (TurnState, error)
 	// InterruptTurn reads as ObserveTurn does and, only when the turn in
 	// progress is turnID, asks the runtime to interrupt it. Otherwise it
-	// returns a *TurnNotCurrentError and sends nothing. It returns once the
+	// returns a *TurnNotCurrentError and sends nothing. turnID must name a
+	// turn: a TurnID an earlier read reported Active. An empty turnID returns
+	// ErrTurnUnnamed before any read and sends nothing. It returns once the
 	// runtime accepted the request, without waiting for the turn to end. Any
 	// other error leaves unknown whether the request reached the runtime.
 	InterruptTurn(ctx context.Context, name, turnID string) (TurnInterrupt, error)
@@ -75,6 +82,7 @@ type TurnFenceProvider interface {
 	// progress; another turn may be. A session the runtime no longer hosts
 	// has ended its turn. When timeout elapses first it returns
 	// ErrTurnNotEnded with the last state read; when ctx ends first, ctx's
-	// error. timeout is a hard upper bound.
+	// error. timeout is a hard upper bound. An empty turnID returns
+	// ErrTurnUnnamed before any read.
 	WaitTurnEnded(ctx context.Context, name, turnID string, timeout time.Duration) (TurnState, error)
 }
