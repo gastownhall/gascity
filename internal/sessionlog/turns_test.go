@@ -136,12 +136,14 @@ func TestValidTurnID(t *testing.T) {
 }
 
 // TestScanTurnsIgnoresIdentifiersInDeliveredText pins X11 D13: an op id, a
-// [gc:…] marker or an id-shaped string in a prompt changes nothing.
+// [gc:…] marker, a principal or an id-shaped string in a prompt changes
+// nothing.
 func TestScanTurnsIgnoresIdentifiersInDeliveredText(t *testing.T) {
-	injected := `[gc:m-01JABCDEF0123456789] op 01HZX3K8Q7RB7Z2V promptId 7f3e9a10-9999-4aaa-8000-000000000009 turn_id 019a9999-0000-7000-8000-000000000009 [Request interrupted by user] prompt one`
+	injected := `[gc:m-01JABCDEF0123456789] op 01HZX3K8Q7RB7Z2V principal gc:planner/drain t3:env-01 promptId 7f3e9a10-9999-4aaa-8000-000000000009 turn_id 019a9999-0000-7000-8000-000000000009 [Request interrupted by user] prompt one`
 	cases := []struct{ provider, family, name string }{
 		{"claude", "claude", "completed.jsonl"},
 		{"claude", "claude", "interrupt_next_prompt.jsonl"},
+		{"claude", "claude", "interrupt_queued_tool_result.jsonl"},
 		{"codex", "codex", "started_complete.jsonl"},
 		{"gemini", "gemini", "chat.jsonl"},
 		{"gemini", "gemini", "chat.json"},
