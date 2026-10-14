@@ -15,6 +15,10 @@ import (
 // until the next one starts. A file is either one JSON document with a
 // messages array, or a JSONL mutation stream: message lines that add or
 // replace a message by id, and snapshot lines that replace the whole list.
+// A JSONL scan reads back to the newest snapshot. A window the budget cuts
+// off before one is an error: a user line in it may edit a message written
+// before the window rather than add one, and only the earlier lines tell
+// which.
 
 type geminiTurnFormat struct{}
 
@@ -67,12 +71,13 @@ func (geminiTurnFormat) scan(path string, r io.ReaderAt, size, budget int64) (tu
 	if err != nil {
 		return nil, err
 	}
+	if truncated {
+		// The walk stops at a snapshot, so a truncated window holds none.
+		return nil, fmt.Errorf("%w: no snapshot in the window", ErrTurnStartBeyondBudget)
+	}
 	fold := &geminiTurnFold{jsonl: true, seen: make(map[string]bool)}
 	for _, line := range slices.Backward(lines) {
 		fold.add(line)
-	}
-	if truncated && !fold.sawUser {
-		return nil, ErrTurnStartBeyondBudget
 	}
 	return fold, nil
 }
@@ -110,8 +115,7 @@ type geminiTurnFold struct {
 	jsonl  bool
 	// seen holds the user message ids already folded, so a mutation of a
 	// message opens no new turn.
-	seen    map[string]bool
-	sawUser bool
+	seen map[string]bool
 }
 
 func (f *geminiTurnFold) add(line []byte) {
@@ -149,7 +153,6 @@ func (f *geminiTurnFold) addMessage(msg geminiTurnMessage) {
 	if msg.Type != "user" {
 		return
 	}
-	f.sawUser = true
 	id, ok := validTurnID(msg.ID)
 	switch {
 	case !ok:

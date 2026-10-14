@@ -54,6 +54,9 @@ func TestTurnSupportFor(t *testing.T) {
 		want     TurnSupport
 	}{
 		{"claude", TurnSupport{Start: TurnStartRecorded, End: TurnEndInferred, Link: TurnLinkCorrelated, Replace: TurnReplaceInterrupt}},
+		{"claude/tmux-cli", TurnSupport{Start: TurnStartRecorded, End: TurnEndInferred, Link: TurnLinkCorrelated, Replace: TurnReplaceInterrupt}},
+		{"claude-eco", TurnSupport{Start: TurnStartRecorded, End: TurnEndInferred, Link: TurnLinkCorrelated, Replace: TurnReplaceInterrupt}},
+		{"opencode-claude", TurnSupport{Start: TurnStartNone, End: TurnEndNone, Link: TurnLinkNone, Replace: TurnReplaceInterrupt}},
 		{"codex", TurnSupport{Start: TurnStartRecorded, End: TurnEndRecorded, Link: TurnLinkCorrelated, Replace: TurnReplaceInterrupt}},
 		{"codex/tmux-cli", TurnSupport{Start: TurnStartRecorded, End: TurnEndRecorded, Link: TurnLinkCorrelated, Replace: TurnReplaceInterrupt}},
 		{"gemini", TurnSupport{Start: TurnStartRecorded, End: TurnEndInferred, Link: TurnLinkCorrelated, Replace: TurnReplaceInterruptReset}},
@@ -83,12 +86,35 @@ func TestTurnFamilyTableIsConsistent(t *testing.T) {
 }
 
 func TestScanTurnsRefusesUnscannedFamilies(t *testing.T) {
-	for _, provider := range []string{"pi", "kimi", "opencode"} {
+	for _, provider := range []string{"pi", "kimi", "opencode", "opencode-claude"} {
 		if _, err := ScanTurns(provider, turnFixture("claude", "completed.jsonl")); !errors.Is(err, ErrTurnsUnsupported) {
 			t.Errorf("ScanTurns(%q) error = %v, want ErrTurnsUnsupported", provider, err)
 		}
 		if _, err := NewTurnFollower(provider, "x"); !errors.Is(err, ErrTurnsUnsupported) {
 			t.Errorf("NewTurnFollower(%q) error = %v, want ErrTurnsUnsupported", provider, err)
+		}
+	}
+}
+
+// TestScanTurnsResolvesClaudeSpellings: a claude spelling ProviderFamily does
+// not place, a worker profile or an alias, scans as claude.
+func TestScanTurnsResolvesClaudeSpellings(t *testing.T) {
+	path := turnFixture("claude", "interrupt_next_prompt.jsonl")
+	want, err := ScanTurns("claude", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, provider := range []string{"claude/tmux-cli", "claude-eco"} {
+		if got, err := ScanTurns(provider, path); err != nil || !reflect.DeepEqual(got, want) {
+			t.Errorf("ScanTurns(%q): error = %v\n got: %+v\nwant: %+v", provider, err, got, want)
+		}
+		f, err := NewTurnFollower(provider, path)
+		if err != nil {
+			t.Errorf("NewTurnFollower(%q): %v", provider, err)
+			continue
+		}
+		if got, err := f.Read(); err != nil || !reflect.DeepEqual(got, want) {
+			t.Errorf("TurnFollower(%q).Read: error = %v\n got: %+v\nwant: %+v", provider, err, got, want)
 		}
 	}
 }

@@ -32,10 +32,13 @@ import (
 // it opened keeps no id and the prompt opens its own turn.
 //
 // A user entry Claude writes itself, with neither origin nor promptSource
-// (Stop hook feedback, the entry a resumed session opens with), may likewise
-// carry a queued prompt's promptId before that prompt is written. While a
-// turn is open it continues that turn, whatever id it carries; with no turn
-// open it opens one, as a self-started turn begins.
+// (Stop hook feedback, the entry a resumed session opens with, a local slash
+// command, `!` bash-mode input), may likewise carry a queued prompt's
+// promptId before that prompt is written. While a turn is open it continues
+// that turn, whatever id it carries; with no turn open it opens one, as a
+// self-started turn begins. A local command or bash-mode input never runs
+// the model, so the turn it opens is one the agent never runs: the scan
+// reports it open until the next turn starts (see TurnScan.Open).
 //
 // An API error does not end a turn by itself: Claude Code retries some errors
 // ("Connection lost mid-response") within the same turn. The failure stays
@@ -43,10 +46,19 @@ import (
 // end the turn failed. A later main-chain reply or tool result clears it. A
 // CLI that dies right after an error leaves its turn open here; TI-2b's idle
 // overlay infers that end.
+//
+// When the fold begins inside a turn and reads that turn's end, a
+// turn_duration or an interrupt, before any turn start, Recent records the end
+// as a turn with neither start nor id, and MissingIDs is set. An API error
+// pending at that turn_duration makes the turn failed. A prompt read first
+// records nothing of the turn the fold began inside, not even an API error
+// pending then: the fold holds no id of that turn, so it cannot tell whether
+// the prompt continues it, as a prompt with the open turn's id does.
 
 // claudeInterruptMarker starts the text Claude Code writes as the whole of a
 // user entry when the user interrupts a turn ("[Request interrupted by
-// user]", "[Request interrupted by user for tool use]").
+// user]", "[Request interrupted by user for tool use]"). The activity scan's
+// isInterruptMessage (tail.go) matches the first form anywhere in the text.
 const claudeInterruptMarker = "[Request interrupted by user"
 
 // claudeToolResultType names a tool result content block. A message without
@@ -256,9 +268,9 @@ type claudeTurnFold struct {
 	// next prompt's id, so a prompt with that id shows the turn was not that
 	// prompt's.
 	provisionalID string
-	// failed is set while an API error of the open turn is pending: no
-	// reply, tool result or prompt of the turn has followed it yet. failedAt
-	// is the error's time.
+	// failed is set while an API error of the open turn, or of the turn the
+	// fold begins inside, is pending: no reply, tool result or prompt of the
+	// turn has followed it yet. failedAt is the error's time.
 	failedAt time.Time
 	failed   bool
 }
@@ -289,7 +301,7 @@ func (f *claudeTurnFold) addRecord(rec claudeTurnRecord) {
 		}
 		f.end(rec.at, status)
 	case claudeRecordAPIError:
-		if f.ledger.open {
+		if f.ledger.open || !f.bounded {
 			f.failed, f.failedAt = true, rec.at
 		}
 	case claudeRecordReply:
@@ -366,9 +378,16 @@ func (f *claudeTurnFold) disownProvisional() {
 }
 
 func (f *claudeTurnFold) end(at time.Time, status TurnStatus) {
+	if f.bounded {
+		f.ledger.close(at, status)
+	} else {
+		// The fold begins inside the turn this record ends, and holds
+		// neither its start nor its id.
+		f.ledger.pushEnded(ScannedTurn{EndedAt: at, Status: status})
+		f.ledger.missingIDs = true
+	}
 	f.startUnseen, f.bounded = false, true
 	f.failed = false
-	f.ledger.close(at, status)
 }
 
 // scan reports the fold. A pending API error leaves its turn open.

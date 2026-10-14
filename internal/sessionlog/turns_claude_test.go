@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -209,10 +210,13 @@ func TestScanTurnsClaudeStartBeyondBudget(t *testing.T) {
 
 // TestScanTurnsClaudeWindowStartsAtMisstampedToolResult: wherever the scan
 // window begins in a turn interrupted with input queued, up to the interrupt
-// marker, the queued prompt opens the next turn. A window that begins at the tool result stamped with
-// the queued prompt's id first opens the interrupted turn under that id; the
-// queued prompt then shows the id was not that turn's, so the interrupted
-// turn keeps no id and the prompt opens its own turn.
+// marker, the queued prompt opens the next turn. A window that begins at the
+// tool result stamped with the queued prompt's id first opens the interrupted
+// turn under that id; the queued prompt then shows the id was not that
+// turn's, so the interrupted turn keeps no id and the prompt opens its own
+// turn. A window that begins at the marker reads only the interrupted turn's
+// end, which records no id of it, so that turn has none and MissingIDs is
+// set.
 func TestScanTurnsClaudeWindowStartsAtMisstampedToolResult(t *testing.T) {
 	path := turnFixture("claude", "interrupt_queued_tool_result.jsonl")
 	data, err := os.ReadFile(path)
@@ -224,13 +228,16 @@ func TestScanTurnsClaudeWindowStartsAtMisstampedToolResult(t *testing.T) {
 	interrupted := func(id string) []ScannedTurn {
 		return []ScannedTurn{{ID: id, EndedAt: turnTime(t, ts("00:10.000")), Status: TurnStatusCancelled}}
 	}
-	for first, recent := range map[int][]ScannedTurn{
-		2: interrupted(claudeP1),
-		3: interrupted(claudeP1),
-		4: interrupted(""),
-		5: interrupted(""),
-		6: interrupted(""),
-		7: nil,
+	for first, tt := range map[int]struct {
+		recent     []ScannedTurn
+		missingIDs bool
+	}{
+		2: {interrupted(claudeP1), false},
+		3: {interrupted(claudeP1), false},
+		4: {interrupted(""), false},
+		5: {interrupted(""), false},
+		6: {interrupted(""), false},
+		7: {interrupted(""), true},
 	} {
 		// The window holds line first onward; the budget also covers the
 		// newline before it, so the line reads whole.
@@ -240,13 +247,123 @@ func TestScanTurnsClaudeWindowStartsAtMisstampedToolResult(t *testing.T) {
 			t.Fatalf("window from line %d: %v", first, err)
 		}
 		want := TurnScan{
-			Open:    true,
-			Current: ScannedTurn{ID: claudeP2, StartedAt: turnTime(t, ts("00:10.050"))},
-			Recent:  recent,
+			Open:       true,
+			Current:    ScannedTurn{ID: claudeP2, StartedAt: turnTime(t, ts("00:10.050"))},
+			Recent:     tt.recent,
+			MissingIDs: tt.missingIDs,
 		}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("window from line %d:\n got: %+v\nwant: %+v", first, got, want)
 		}
+	}
+}
+
+// TestScanTurnsClaudeEndBeforeFirstStart: a fold that begins inside a turn
+// and reads that turn's end, a turn_duration or an interrupt, before any turn
+// start records the end in Recent as a turn with neither start nor id, and
+// sets MissingIDs. An API error pending at the turn_duration makes the turn
+// failed; a tool result after the error opens the turn and clears it. The
+// fold begins inside the turn in a scan window cut after the turn's prompt,
+// and in a file that begins mid-turn, as a continued session's does. Read
+// whole from the prompt, the file reports the same turns, the oldest with
+// the prompt's id and start.
+func TestScanTurnsClaudeEndBeforeFirstStart(t *testing.T) {
+	ts := func(clock string) string { return "2026-10-13T05:" + clock + "Z" }
+	prompt := func(clock, id string) string {
+		return `{"type":"user","timestamp":"` + ts(clock) + `","promptId":"` + id + `","origin":{"kind":"human"},"promptSource":"typed","message":{"role":"user","content":"prompt"}}`
+	}
+	reply := func(clock string) string {
+		return `{"type":"assistant","timestamp":"` + ts(clock) + `","message":{"role":"assistant","content":[{"type":"text","text":"reply"}]}}`
+	}
+	apiErr := func(clock string) string {
+		return `{"type":"assistant","timestamp":"` + ts(clock) + `","isApiErrorMessage":true,"message":{"role":"assistant","content":[{"type":"text","text":"API Error"}]}}`
+	}
+	toolResult := func(clock, id string) string {
+		return `{"type":"user","timestamp":"` + ts(clock) + `","promptId":"` + id + `","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":"out"}]}}`
+	}
+	interrupt := func(clock, id string) string {
+		return `{"type":"user","timestamp":"` + ts(clock) + `","promptId":"` + id + `","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]}}`
+	}
+	end := func(clock string) string {
+		return `{"type":"system","subtype":"turn_duration","timestamp":"` + ts(clock) + `"}`
+	}
+	ended := func(id, clock string, status TurnStatus) []ScannedTurn {
+		return []ScannedTurn{{ID: id, EndedAt: turnTime(t, ts(clock)), Status: status}}
+	}
+	tests := []struct {
+		name string
+		// rest is what follows the turn's prompt, p1 at 00:00.100.
+		rest []string
+		want TurnScan
+	}{
+		{
+			"completed",
+			[]string{reply("00:01.000"), reply("00:02.000"), end("00:03.000")},
+			TurnScan{Recent: ended("", "00:03.000", TurnStatusCompleted), MissingIDs: true},
+		},
+		{
+			"failed",
+			[]string{reply("00:01.000"), apiErr("00:02.000"), end("00:03.000")},
+			TurnScan{Recent: ended("", "00:03.000", TurnStatusFailed), MissingIDs: true},
+		},
+		{
+			"canceled",
+			[]string{reply("00:01.000"), interrupt("00:02.000", claudeP2)},
+			TurnScan{Recent: ended("", "00:02.000", TurnStatusCancelled), MissingIDs: true},
+		},
+		{
+			"next prompt",
+			[]string{reply("00:01.000"), end("00:02.000"), prompt("00:03.000", claudeP2)},
+			TurnScan{
+				Open:       true,
+				Current:    ScannedTurn{ID: claudeP2, StartedAt: turnTime(t, ts("00:03.000"))},
+				Recent:     ended("", "00:02.000", TurnStatusCompleted),
+				MissingIDs: true,
+			},
+		},
+		{
+			"tool result clears the error",
+			[]string{apiErr("00:01.000"), toolResult("00:02.000", claudeP1), end("00:03.000")},
+			TurnScan{Recent: ended(claudeP1, "00:03.000", TurnStatusCompleted)},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writeTurnLines(t, "claude.jsonl", append([]string{prompt("00:00.100", claudeP1)}, tt.rest...)...)
+			// The window holds the lines after the prompt, and the newline
+			// before them.
+			got, err := scanTurnsWithBudget(t, "claude", path, int64(len(strings.Join(tt.rest, "\n")))+2)
+			if err != nil {
+				t.Fatalf("window after the prompt: %v", err)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("window after the prompt:\n got: %+v\nwant: %+v", got, tt.want)
+			}
+
+			whole := tt.want
+			whole.Recent = slices.Clone(tt.want.Recent)
+			oldest := &whole.Recent[len(whole.Recent)-1]
+			oldest.ID, oldest.StartedAt = claudeP1, turnTime(t, ts("00:00.100"))
+			whole.MissingIDs = false
+			if got, err := ScanTurns("claude", path); err != nil || !reflect.DeepEqual(got, whole) {
+				t.Errorf("whole file: error = %v\n got: %+v\nwant: %+v", err, got, whole)
+			}
+
+			// A continued session's file opens with its compaction summary,
+			// which opens no turn. A follower folds the rest line by line.
+			path = writeTurnLines(t, "continued.jsonl", `{"type":"user","isCompactSummary":true,"timestamp":"`+ts("00:00.050")+`","message":{"role":"user","content":"This session is being continued from a previous conversation that ran out of context."}}`)
+			f, err := NewTurnFollower("claude", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i, line := range tt.rest {
+				appendTurnBytes(t, path, line+"\n")
+				assertFollowerMatchesScan(t, fmt.Sprintf("continued session, line %d", i+2), f, "claude", path)
+			}
+			if got, err := ScanTurns("claude", path); err != nil || !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("continued session: error = %v\n got: %+v\nwant: %+v", err, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -365,7 +482,9 @@ func TestScanTurnsClaudeAPIErrorThenTurnEnd(t *testing.T) {
 // prompt's promptId before that prompt is written: Stop hook feedback, or the
 // entry a resumed session opens with. While a turn is open such an entry
 // continues it, so the queued prompt still opens its own turn. With no turn
-// open, it opens one.
+// open, it opens one. A local slash command or bash-mode input opens one too,
+// though the model never runs for it: the open p4 below is that known limit,
+// left to the caller (TurnScan.Open), not a turn the agent runs.
 func TestScanTurnsClaudeUnpromptedEntryContinuesOpenTurn(t *testing.T) {
 	prompt := func(ts, id string) string {
 		return `{"type":"user","timestamp":"2026-10-13T05:` + ts + `Z","promptId":"` + id + `","origin":{"kind":"human"},"promptSource":"queued","message":{"role":"user","content":"prompt"}}`

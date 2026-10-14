@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"slices"
+	"strings"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -18,6 +19,10 @@ import (
 // input that starts it to the moment it is idle again. The scanners here read
 // the ids each provider records for its own turns. They never read delivered
 // text for an id (X11 D13): nothing gc delivers carries one.
+//
+// That design document, cited below as X11, and its build plan are not on
+// main yet; until they land, these comments and the tests that pin them are
+// the in-tree contract.
 //
 // These are sessionlog types; the worker boundary converts them to the
 // runtime's turn types (TI-2b).
@@ -113,10 +118,23 @@ var defaultTurnSupport = TurnSupport{Start: TurnStartNone, End: TurnEndNone, Lin
 // TurnSupportFor reports what provider's transcript family records about its
 // turns.
 func TurnSupportFor(provider string) TurnSupport {
-	if fam, ok := turnFamilies[ProviderFamily(provider)]; ok {
+	if fam, ok := turnFamilies[turnFamilyKey(provider)]; ok {
 		return fam.support
 	}
 	return defaultTurnSupport
+}
+
+// turnFamilyKey resolves provider to its row in turnFamilies. ProviderFamily
+// has no claude clause, so a claude spelling it places in no other family
+// ("claude/tmux-cli", the "claude-eco" alias) comes back as the name itself;
+// that name is claude, as transcript discovery reads it. A name it places
+// elsewhere ("opencode-claude") keeps that family.
+func turnFamilyKey(provider string) string {
+	family := ProviderFamily(provider)
+	if strings.Contains(family, "claude") {
+		return "claude"
+	}
+	return family
 }
 
 // TurnStatus is how an ended turn ended. The empty status means the source
@@ -138,19 +156,23 @@ type ScannedTurn struct {
 	// StartedAt is the source's time for the turn's first record, at the
 	// source's precision; zero when the start lies before the scanned window.
 	StartedAt time.Time
-	// EndedAt is the source's time for the turn's end; zero while it runs.
-	// A turn closed by a newer one ends at the newer turn's start.
+	// EndedAt is the source's time for the turn's end; zero while it is
+	// open. A turn closed by a newer one ends at the newer turn's start.
 	EndedAt time.Time
-	// Status is how the turn ended; empty while it runs or when only a newer
-	// turn closed it.
+	// Status is how the turn ended; empty while it is open or when only a
+	// newer turn closed it.
 	Status TurnStatus
 }
 
 // TurnScan is one read of a transcript's current and recent turns.
 type TurnScan struct {
-	// Open reports whether Current is a turn still running.
+	// Open reports that the transcript records Current's start and no end
+	// yet. Whether the agent is still running is the caller's call (session
+	// liveness, TI-2b's idle overlay): a session killed mid-turn leaves its
+	// turn open, and a local Claude command or bash-mode input opens one the
+	// agent never runs.
 	Open bool
-	// Current is the running turn when Open is set, else the zero value.
+	// Current is the open turn when Open is set, else the zero value.
 	Current ScannedTurn
 	// Recent holds ended turns, newest first, at most MaxRecentTurns.
 	Recent []ScannedTurn
@@ -169,7 +191,10 @@ type TurnScan struct {
 const (
 	// MaxRecentTurns bounds TurnScan.Recent.
 	MaxRecentTurns = 8
-	// MaxTurnIDLen bounds a turn id; a longer one is not an identity (X11 D2).
+	// MaxTurnIDLen bounds a turn id. A longer one is not an identity: it
+	// counts as missing (MissingIDs), never truncated or hashed, because a
+	// changed id would not match the one other observers of the turn report
+	// (X11 D2).
 	MaxTurnIDLen = 128
 	// turnScanBudget bounds how far back from the end ScanTurns reads: the
 	// Codex activity scan's budget.
@@ -186,8 +211,10 @@ var (
 	// ErrTornTurnRecord reports a transcript whose last record is incomplete.
 	// The record may be the next turn's start, so the scan cannot say idle.
 	ErrTornTurnRecord = errors.New("transcript ends in a torn record")
-	// ErrTurnStartBeyondBudget reports a transcript whose scan window holds no
-	// turn record, so the current turn cannot be told.
+	// ErrTurnStartBeyondBudget reports a transcript whose scan window, cut
+	// off by the budget, holds no turn record, so the current turn cannot be
+	// told. A Gemini JSONL window must also hold a snapshot: without one, a
+	// user line cannot be told from an edit of a message before the window.
 	ErrTurnStartBeyondBudget = errors.New("no turn record within the transcript scan budget")
 	// ErrTurnTranscriptBeyondBudget reports a whole-document transcript, read
 	// whole rather than backward, that is larger than the scan budget.
@@ -196,10 +223,10 @@ var (
 
 // ScanTurns reads the turns of provider's transcript at path: the open turn
 // and up to MaxRecentTurns ended ones, newest first, from the last 16 MiB of
-// the file. A torn last record, a window holding no turn record, or a file
-// that cannot be read is an error, never an idle scan. A scan reads up to the
-// whole window; a caller that reads one transcript repeatedly should hold a
-// TurnFollower, which reads only appended bytes.
+// the file. A torn last record, a truncated window holding no turn record, or
+// a file that cannot be read is an error, never an idle scan. A scan reads up
+// to the whole window; a caller that reads one transcript repeatedly should
+// hold a TurnFollower, which reads only appended bytes.
 func ScanTurns(provider, path string) (TurnScan, error) {
 	format, err := turnFormatFor(provider)
 	if err != nil {
@@ -213,7 +240,7 @@ func ScanTurns(provider, path string) (TurnScan, error) {
 }
 
 func turnFormatFor(provider string) (turnFormat, error) {
-	fam, ok := turnFamilies[ProviderFamily(provider)]
+	fam, ok := turnFamilies[turnFamilyKey(provider)]
 	if !ok || fam.format == nil {
 		return nil, fmt.Errorf("%w: %q", ErrTurnsUnsupported, provider)
 	}
@@ -388,7 +415,8 @@ func (l *turnLedger) snapshot() TurnScan {
 //
 // A follower remembers everything it folded since its last rescan, where
 // ScanTurns sees only its window. The two report the same turns while every
-// turn they report began within the last 16 MiB. Past that, the follower
+// turn they report began within the last 16 MiB and, for a Gemini JSONL
+// transcript, that window holds a snapshot. Past that, the follower
 // still reports such a turn's id and StartedAt, while ScanTurns reports a
 // zero StartedAt or ErrTurnStartBeyondBudget. MissingIDs, MalformedRecords
 // and UntimedRecords count every record folded since the last rescan. They

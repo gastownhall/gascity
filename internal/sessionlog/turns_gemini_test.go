@@ -2,8 +2,10 @@ package sessionlog
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -76,6 +78,60 @@ func TestScanTurnsGeminiJSONBeyondBudgetIsAnError(t *testing.T) {
 	path := turnFixture("gemini", "chat.json")
 	if _, err := scanTurnsWithBudget(t, "gemini", path, 64); !errors.Is(err, ErrTurnTranscriptBeyondBudget) {
 		t.Fatalf("error = %v, want ErrTurnTranscriptBeyondBudget", err)
+	}
+}
+
+// TestScanTurnsGeminiJSONLStartBeyondBudget: a JSONL window that holds only
+// replies is an error, never idle.
+func TestScanTurnsGeminiJSONLStartBeyondBudget(t *testing.T) {
+	lines := []string{
+		`{"sessionId":"s","kind":"main"}`,
+		`{"id":"u1","timestamp":"2026-06-21T17:08:00.694Z","type":"user","content":"prompt"}`,
+	}
+	for i := range 10 {
+		lines = append(lines, fmt.Sprintf(`{"id":"g%d","timestamp":"2026-06-21T17:08:01.000Z","type":"gemini","content":%q}`, i, strings.Repeat("y", 200)))
+	}
+	path := writeTurnLines(t, "session.jsonl", lines...)
+	if _, err := scanTurnsWithBudget(t, "gemini", path, 1000); !errors.Is(err, ErrTurnStartBeyondBudget) {
+		t.Fatalf("error = %v, want ErrTurnStartBeyondBudget", err)
+	}
+}
+
+// TestScanTurnsGeminiJSONLWindowWithoutSnapshotIsAnError: a JSONL line for a
+// user id adds a message or edits one in place, and only the lines since the
+// last snapshot tell which. A window cut off before that snapshot, or inside
+// it, is an error, never a turn read off an edit.
+func TestScanTurnsGeminiJSONLWindowWithoutSnapshotIsAnError(t *testing.T) {
+	snapshot := func(content string) string {
+		return `{"$set":{"messages":[{"id":"u1","timestamp":"2026-06-21T17:08:00.694Z","type":"user","content":"` + content + `"}]}}`
+	}
+	reply := `{"id":"g1","timestamp":"2026-06-21T17:08:01.000Z","type":"gemini","content":"` + strings.Repeat("y", 1000) + `"}`
+	newPrompt := `{"id":"u2","timestamp":"2026-06-21T17:09:00.123Z","type":"user","content":"prompt"}`
+	editOfU1 := `{"id":"u1","timestamp":"2026-06-21T17:08:00.694Z","type":"user","content":"edited prompt"}`
+	for _, tc := range []struct {
+		name  string
+		lines []string
+	}{
+		{"snapshot before the window", []string{snapshot("prompt"), reply, newPrompt, editOfU1}},
+		{"snapshot across the window start", []string{snapshot(strings.Repeat("x", 1000)), newPrompt, editOfU1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeTurnLines(t, "session.jsonl", append([]string{`{"sessionId":"s","kind":"main"}`}, tc.lines...)...)
+			// Read from the snapshot on, the edit replaces u1 in place.
+			got, err := ScanTurns("gemini", path)
+			if err != nil {
+				t.Fatalf("ScanTurns: %v", err)
+			}
+			assertTurnScan(t, got, TurnScan{
+				Open:    true,
+				Current: ScannedTurn{ID: "u2", StartedAt: turnTime(t, "2026-06-21T17:09:00.123Z")},
+				Recent:  []ScannedTurn{{ID: "u1", StartedAt: turnTime(t, "2026-06-21T17:08:00.694Z"), EndedAt: turnTime(t, "2026-06-21T17:09:00.123Z")}},
+			})
+			// The window holds both user lines but not the whole snapshot.
+			if _, err := scanTurnsWithBudget(t, "gemini", path, 600); !errors.Is(err, ErrTurnStartBeyondBudget) {
+				t.Fatalf("error = %v, want ErrTurnStartBeyondBudget", err)
+			}
+		})
 	}
 }
 
