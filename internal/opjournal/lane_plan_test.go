@@ -575,6 +575,17 @@ func TestPlanTakeKeys(t *testing.T) {
 	if tp.take.key != kr.ID+":1" || !tp.take.redelivery {
 		t.Fatalf("re-keyed replay %s", tp.take.key)
 	}
+	// A re-take keeps its key even when an earlier attempt's key was
+	// refused: the expired attempt used the stored key (L3).
+	rk := p.op(laneMsg("h", RoleNotice, "x"), executingWith(t0), func(op *Op) {
+		op.Attempt, op.MaybeDelivered = 2, 1
+		op.LastError = lastErrorKeyRejected + ": x"
+	})
+	rp = planRules(snapOf(rk), view(), now, "lane:ctl")
+	tp, _ = planTake(rp, idleProbe(), view(), now)
+	if tp.take.key != rk.DeliveryKey || !tp.take.redelivery {
+		t.Fatalf("re-take key %s, want %s", tp.take.key, rk.DeliveryKey)
+	}
 }
 
 func TestPlanTakeFenceMismatchWaits(t *testing.T) {

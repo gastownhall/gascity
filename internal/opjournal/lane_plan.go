@@ -658,7 +658,11 @@ func (tp *takePlan) formBatch(items []contentItem, mode LinkMode, ridersFree boo
 		}
 		headOp := b.ops[0].op
 		b.key = headOp.DeliveryKey
-		if !replay || b.key == "" || strings.HasPrefix(headOp.LastError, lastErrorKeyRejected) {
+		// A released head whose last attempt had its key refused gets a new
+		// key. A re-take's last attempt is the expired one, under the stored
+		// key, whatever an earlier attempt's last_error says (L3).
+		keyRefused := !b.ops[0].retake && strings.HasPrefix(headOp.LastError, lastErrorKeyRejected)
+		if !replay || b.key == "" || keyRefused {
 			b.key = headOp.ID + ":" + strconv.FormatUint(baseSeq+1, 10)
 		}
 		tp.reportLeft(items, picked, full)

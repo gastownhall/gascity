@@ -1,8 +1,10 @@
 package opjournal
 
 import (
+	"context"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -157,5 +159,42 @@ func TestLaneNonDedupReplayMayGoInPart(t *testing.T) {
 	exec.probe.Boundary = TriNo
 	if res := mustPass(t, l, view(), exec); !slices.Equal(res.Taken, []string{s.ID}) {
 		t.Fatalf("took %v", res.Taken)
+	}
+}
+
+// L3: after a key rejection a later Take mints K'; that attempt may reach the
+// agent before the lane crashes. The re-take must reuse K', not mint K”.
+func TestLaneRetakeAfterKeyRejectedKeepsTheNewKey(t *testing.T) {
+	h := newLaneHarness(t)
+	op := h.propose(t, laneMsg("p", RolePrompt, "x"))
+	exec := newFakeExec(h.clk)
+	exec.probe.Caps.Dedup = true
+	l := h.lane(t, "ctl")
+	exec.deliver = func(Delivery) DeliveryResult { return Unknown{Cause: errors.New("bridge timeout")} }
+	mustPass(t, l, view(), exec) // :1 may have landed
+	h.clk.Advance(ExecutorErrorBackoff + time.Millisecond)
+	exec.deliver = func(Delivery) DeliveryResult { return Rejected{KeyRejected: true, Reason: "nudge_rejected"} }
+	mustPass(t, l, view(), exec) // :1 is refused: the next send re-keys
+	if got := h.get(t, op.ID); !strings.HasPrefix(got.LastError, lastErrorKeyRejected) {
+		t.Fatalf("last_error %q", got.LastError)
+	}
+	h.clk.Advance(ExecutorErrorBackoff + time.Millisecond)
+	exec.deliver = nil
+	l.hooks.at = crashAt(stageAfterEffect)
+	if _, err := l.Pass(context.Background(), view(), exec); !errors.Is(err, errCrash) {
+		t.Fatalf("pass = %v", err)
+	}
+	l.hooks.at = nil
+	h.clk.Advance(DefaultLeaseTTL + LeaseSkew + time.Second)
+	mustPass(t, h.lane(t, "cli"), view(), exec)
+	ds := exec.delivered()
+	if len(ds) != 4 {
+		t.Fatalf("%d deliveries", len(ds))
+	}
+	if ds[2].Key == ds[1].Key {
+		t.Fatalf("the send after the key rejection reused the refused key %s", ds[1].Key)
+	}
+	if ds[3].Key != ds[2].Key {
+		t.Fatalf("the re-take used key %s, but its maybe-delivered attempt used %s (L3)", ds[3].Key, ds[2].Key)
 	}
 }
