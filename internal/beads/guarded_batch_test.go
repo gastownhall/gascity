@@ -55,6 +55,23 @@ func TestValidateGuardedBatchKeepsTheConditionalUpdateErrors(t *testing.T) {
 	}
 }
 
+// A guarded batch must fit in one native batch-apply request, or a batch
+// validation accepts would be refused by the backend.
+func TestMaxGuardedItemsFitsOneNativeApplyRequest(t *testing.T) {
+	if MaxGuardedItems > issueops.MaxApplyBatchItems {
+		t.Fatalf("MaxGuardedItems = %d exceeds issueops.MaxApplyBatchItems = %d", MaxGuardedItems, issueops.MaxApplyBatchItems)
+	}
+}
+
+// A create cannot be both ephemeral and no-history; validation refuses it the
+// same way on every backend instead of leaving it to whichever store rejects it.
+func TestValidateGuardedBatchRefusesBothStorageTiers(t *testing.T) {
+	err := validateGuardedBatch(GuardedBatch{Items: []GuardedItem{{Create: &Bead{ID: "gc-1", Ephemeral: true, NoHistory: true}}}})
+	if !errors.Is(err, ErrInvalidGuardedBatch) {
+		t.Fatalf("ephemeral no-history create = %v, want ErrInvalidGuardedBatch", err)
+	}
+}
+
 // A pinned create keeps the status it names, so one batch can write a row
 // that is already closed.
 func TestMemStoreGuardedCreateKeepsItsStatus(t *testing.T) {

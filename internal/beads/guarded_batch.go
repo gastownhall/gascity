@@ -94,8 +94,8 @@ var ErrGuardedBatchUnsupported = errors.New("beads: store cannot apply guarded b
 
 // ErrInvalidGuardedBatch reports a batch refused by validation, before any
 // write: an empty or oversized batch, an item with not exactly one member, a
-// create without an id or with edges, an update without an id, or a row named
-// twice. Update options the guarded write cannot carry also match the
+// create without an id, with edges or both Ephemeral and NoHistory, an update
+// without an id, or a row named twice. Update options the guarded write cannot carry also match the
 // conditional-update error they raise (ConditionalUpdateFieldUnsupportedError,
 // ErrEmptyConditionalUpdate).
 var ErrInvalidGuardedBatch = errors.New("beads: invalid guarded batch")
@@ -217,6 +217,8 @@ func validateGuardedCreate(b Bead) error {
 		return fmt.Errorf("%w: create needs a pinned id without surrounding space, got %q", ErrInvalidGuardedBatch, b.ID)
 	case b.ParentID != "" || len(b.Needs) > 0 || len(b.Dependencies) > 0:
 		return fmt.Errorf("%w: create %q carries edges; a guarded create writes one row", ErrInvalidGuardedBatch, b.ID)
+	case b.Ephemeral && b.NoHistory:
+		return fmt.Errorf("%w: create %q is both ephemeral and no-history; a row has one storage tier", ErrInvalidGuardedBatch, b.ID)
 	default:
 		return nil
 	}

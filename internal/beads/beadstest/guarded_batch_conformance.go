@@ -300,6 +300,7 @@ func RunGuardedBatchConformance(t *testing.T, name string, open func(t *testing.
 				{Update: &beads.GuardedUpdate{ID: row.ID, Opts: beads.UpdateOpts{Title: guardedPtr("rides along")}}},
 				{Create: &beads.Bead{Title: "no id"}},
 			}},
+			{"create_ephemeral_and_no_history", []beads.GuardedItem{{Create: &beads.Bead{ID: f.pin("tiers"), Title: "both tiers", Ephemeral: true, NoHistory: true}}}},
 			{"create_with_parent", []beads.GuardedItem{{Create: &beads.Bead{ID: f.pin("child"), Title: "child", ParentID: parent}}}},
 			{"update_with_parent", []beads.GuardedItem{{Update: &beads.GuardedUpdate{ID: row.ID, Opts: beads.UpdateOpts{ParentID: &parent}}}}},
 			{"empty_update", []beads.GuardedItem{{Update: &beads.GuardedUpdate{ID: row.ID, ExpectedRevision: &row.Revision}}}},
@@ -310,7 +311,7 @@ func RunGuardedBatchConformance(t *testing.T, name string, open func(t *testing.
 			}
 		}
 		f.wantUnchanged(row)
-		f.wantAbsent(f.pin("over0"), f.pin(fmt.Sprintf("over%d", beads.MaxGuardedItems)), f.pin("twice"), f.pin("both"), f.pin("child"))
+		f.wantAbsent(f.pin("over0"), f.pin(fmt.Sprintf("over%d", beads.MaxGuardedItems)), f.pin("twice"), f.pin("both"), f.pin("child"), f.pin("tiers"))
 	})
 }
 
