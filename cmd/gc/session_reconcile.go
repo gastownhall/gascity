@@ -694,7 +694,7 @@ func sessionHasProviderTerminalErrorInfo(info sessionpkg.Info) bool {
 // recordWakeFailure increments wake_attempts and quarantines if threshold
 // exceeded. It returns the snapshot Info advanced by every write it made
 // (front-door migration Step 6d, write-returns-Info):
-//   - the ConversationResetPatch if session_key or started_config_hash was set
+//   - the ConversationResetPatch when the failure resets the conversation
 //   - the WakeFailureAccrualPatch (quarantine or single-counter increment)
 //
 // A quarantined accrual whose persist failed leaves the snapshot un-advanced for
@@ -705,8 +705,9 @@ func sessionHasProviderTerminalErrorInfo(info sessionpkg.Info) bool {
 // session_key / started_config_hash alone because the conversation the key
 // points at is provably still on disk. Only a probeable provider with a present
 // keyed transcript qualifies; everything else (no key, no work dir, provider we
-// cannot probe, transcript gone) returns false and keeps the unconditional
-// reset that recovery depends on. searchPaths is sessionTranscriptSearchPaths.
+// cannot probe, transcript gone) returns false, and the wake failure resets
+// the conversation unless recordWakeFailure retains a committed manual one
+// (SESSION-LIFE-MANUAL-LOSS). searchPaths is sessionTranscriptSearchPaths.
 func wakeFailureKeepsConversation(info sessionpkg.Info, searchPaths []string) bool {
 	sessionKey := strings.TrimSpace(info.SessionKey)
 	workDir := strings.TrimSpace(info.WorkDir)
@@ -799,26 +800,32 @@ func recordWakeFailure(info sessionpkg.Info, transcriptRoots []string, sessFront
 	// left behind by older builds. The store write is best-effort (its error is
 	// intentionally ignored, as before) while the Info fold is unconditional.
 	//
-	// Exception: keep a conversation that provably still exists on disk. The
-	// reset is recovery for an unresumable key, but any single wake failure
-	// lands here — a transient tmux/spawn flake included — and for providers
-	// that persist a keyed transcript the reset would permanently orphan a
-	// perfectly resumable conversation. Probe first and skip the clear when the
-	// transcript is there; unprobeable providers and absent transcripts keep the
-	// existing unconditional behavior. Attempt accrual and quarantine below are
-	// untouched either way, so a genuinely broken session still escalates.
+	// Exceptions: retain a committed manual conversation
+	// (SESSION-LIFE-MANUAL-LOSS), and keep a conversation that provably still
+	// exists on disk. The reset is recovery for an unresumable key, but any
+	// single wake failure lands here — a transient tmux/spawn flake included —
+	// and for providers that persist a keyed transcript the reset would
+	// permanently orphan a perfectly resumable conversation. Probe first and
+	// skip the clear when the transcript is there; any other conversation (an
+	// unprobeable provider's, an absent transcript's) resets. Attempt accrual
+	// and quarantine below are untouched either way, so a genuinely broken
+	// session still escalates. An always-named conversation is not a manual
+	// one here: it is kept only while the probe finds it. v2 keeps by the same
+	// rule (failureKeepsConversation, deadRuntimePatch's rapid crash); change
+	// the three together.
 	//
-	// The keep has a backstop (resumeBackstop): a resume the provider refused
+	// Either keep has a backstop (resumeBackstop): a resume the provider refused
 	// resets at once, and the maxResumeFailuresBeforeReset-th resume-shaped
 	// failure in a row resets too; a committed manual conversation's reset
 	// records session.conversation_reset{reason:resume-failed}.
 	if info.SessionKey != "" || info.StartedConfigHash != "" {
 		failures, _ := strconv.Atoi(info.ResumeFailures)
-		keeps := wakeFailureKeepsConversation(info, transcriptRoots)
-		backstop, count := resumeBackstop(failures, keeps, rf)
+		manual := sessionpkg.HasStartedManualConversation(info)
+		kept := manual || wakeFailureKeepsConversation(info, transcriptRoots)
+		backstop, count := resumeBackstop(failures, kept, rf)
 		patch := resumeFailuresPatch(info, count)
-		if !keeps || backstop {
-			if backstop && rec != nil && sessionpkg.HasStartedManualConversation(info) {
+		if !kept || backstop {
+			if backstop && rec != nil && manual {
 				rec.Record(resumeFailedConversationResetEvent(info, agentIdentity))
 			}
 			patch = sessionpkg.ConversationResetPatch(true)
@@ -932,11 +939,13 @@ func isDeliberateSleepReason(reason string) bool {
 func recordChurn(info sessionpkg.Info, sessFront *sessionpkg.Store, clk clock.Clock, agentIdentity string) sessionpkg.Info {
 	count, _ := strconv.Atoi(info.ChurnCount)
 
-	// Always clear session_key on churn — context exhaustion means the
+	// Clear automatic-session keys on churn — context exhaustion means the
 	// conversation itself is the problem. A fresh conversation avoids
-	// re-hitting the same wall. Best-effort store write (error ignored, as
-	// before) with an unconditional Info fold.
-	if info.SessionKey != "" {
+	// re-hitting the same wall. A committed manual conversation keeps its
+	// identity under the same retry/quarantine accounting; replacing it takes
+	// an explicit reset. Best-effort store write (error ignored, as before)
+	// with an unconditional Info fold.
+	if info.SessionKey != "" && !sessionpkg.HasStartedManualConversation(info) {
 		reset := sessionpkg.ConversationResetPatch(false)
 		_ = sessFront.ApplyPatch(info.ID, reset)
 		info = info.ApplyPatch(reset)
@@ -1145,7 +1154,7 @@ func healStatePatchWithRollbackInfo(info sessionpkg.Info, alive bool, observed b
 			batch["sleep_reason"] = string(sessionpkg.SleepReasonFailedCreate)
 		}
 		if view.ResetContinuation || stalePendingCreateRollback {
-			if !isNamedSessionInfo(info) || namedSessionModeInfo(info) != "always" {
+			if !sessionpkg.PreserveConversationOnRuntimeLoss(info) {
 				batch["session_key"] = ""
 				batch["started_config_hash"] = ""
 				batch["continuation_reset_pending"] = "true"

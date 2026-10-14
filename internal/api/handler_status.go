@@ -111,11 +111,11 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 	}
 	bucket := responseCacheTimeBucket(time.Now())
 	if !blocking {
-		if body, ok := cachedResponseAs[StatusBody](s, cacheKey, bucket); ok {
-			return &IndexOutput[StatusBody]{Index: index, CacheAgeS: cacheAgeSeconds(store), Body: body}, nil
+		if hit, ok := cachedResponseAs[indexedResponse[StatusBody]](s, cacheKey, bucket); ok {
+			return &IndexOutput[StatusBody]{Index: hit.Index, CacheAgeS: cacheAgeSeconds(store), Body: hit.Body}, nil
 		}
-		if body, ok := cachedResponseWithinAgeAs[StatusBody](s, cacheKey, statusResponseTTLFloor); ok {
-			return &IndexOutput[StatusBody]{Index: index, CacheAgeS: cacheAgeSeconds(store), Body: body}, nil
+		if hit, ok := cachedResponseWithinAgeAs[indexedResponse[StatusBody]](s, cacheKey, statusResponseTTLFloor); ok {
+			return &IndexOutput[StatusBody]{Index: hit.Index, CacheAgeS: cacheAgeSeconds(store), Body: hit.Body}, nil
 		}
 		// Stale-while-revalidate (ra-4u2eqc): the bucket and TTL-floor caches
 		// both missed, so any entry that exists is older than
@@ -137,19 +137,19 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 		// staleness and suppress the banner `gc status` renders above
 		// cacheAgeBannerThresholdSeconds; reporting only the store age would
 		// hide the SWR delay. The max preserves both.
-		if body, age, ok := staleResponseAs[StatusBody](s, cacheKey); ok {
+		if hit, age, ok := staleResponseAs[indexedResponse[StatusBody]](s, cacheKey); ok {
 			s.refreshStatusResponseInBackground(cacheKey, input.Lite)
 			return &IndexOutput[StatusBody]{
-				Index:     index,
+				Index:     hit.Index,
 				CacheAgeS: max(age.Seconds(), cacheAgeSeconds(store)),
-				Body:      body,
+				Body:      hit.Body,
 			}, nil
 		}
 	}
 
 	resp := s.buildStatusBody(ctx, input.Lite)
 	if !blocking {
-		s.storeResponse(cacheKey, bucket, resp)
+		s.storeResponse(cacheKey, bucket, indexedResponse[StatusBody]{Index: index, Body: resp})
 	}
 
 	return &IndexOutput[StatusBody]{Index: index, CacheAgeS: cacheAgeSeconds(store), Body: resp}, nil
@@ -179,8 +179,9 @@ func (s *Server) refreshStatusResponseInBackground(cacheKey string, lite bool) {
 			}
 		}()
 		defer s.endResponseRefresh(cacheKey)
+		index := s.latestIndex()
 		resp := s.buildStatusBody(ctx, lite)
-		s.storeResponse(cacheKey, responseCacheTimeBucket(time.Now()), resp)
+		s.storeResponse(cacheKey, responseCacheTimeBucket(time.Now()), indexedResponse[StatusBody]{Index: index, Body: resp})
 	})
 }
 

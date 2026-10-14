@@ -183,6 +183,8 @@ func preWakeStep(v txView, f preWakeFold, probeErr error) txStep {
 		return txStep{Refuse: causeLivenessUnknown, Err: probeErr}
 	case !session.IsSessionNameSyntaxValid(strings.TrimSpace(v.Row.SessionNameMetadata)):
 		return healInstead(v, txStep{Refuse: causeSessionName})
+	case healDrifted(v): // the carried timer heal no longer holds on the fresh row: no heal, no start
+		return txStep{Refuse: causeHeld}
 	case preWakeRefused(v) || session.IsKillPendingInfo(v.Row, v.Now): // the hold the intent's own patch writes too
 		return healInstead(v, txStep{Refuse: causeHeld})
 	case v.RT.Class != rtAbsent:

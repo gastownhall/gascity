@@ -173,12 +173,12 @@ func TestClaimQueryFailureIsRetriedThenReportedNotDrained(t *testing.T) {
 	}
 }
 
-// The claim door keeps that contract for a read plain `gc hook` would report as
-// store-unavailable: exit 1, no drain, and no GC_HOOK_STORE_UNAVAILABLE token.
-// The token and exit 2 belong to the discovery door (reportWorkQueryFailure);
-// claimHookWorkWithRunner reports its own failed reads, and this row keeps a
-// refactor from routing them through the discovery reporter.
-func TestClaimQueryStoreUnavailableExitsOneWithoutTheToken(t *testing.T) {
+// A read plain `gc hook` would report as store-unavailable gets the same
+// classification on the claim door: exit 2 and the GC_HOOK_STORE_UNAVAILABLE
+// token, so a consumer can tell a dead store from no work. The exit code is the
+// only thing that differs from an ordinary failed read: the seat is still kept,
+// with no drain result and no drain-ack.
+func TestClaimQueryStoreUnavailableExitsTwoWithTokenWithoutDrain(t *testing.T) {
 	withFastClaimRetries(t)
 	h := newFailureHookHarness()
 	readErr := errors.New("bd ready: dial tcp 127.0.0.1:3307: connect: connection refused")
@@ -190,11 +190,11 @@ func TestClaimQueryStoreUnavailableExitsOneWithoutTheToken(t *testing.T) {
 
 	result, code, stderr := runFailureClaim(t, h, stores)
 
-	if code != 1 {
-		t.Fatalf("exit = %d, want 1: the claim door never exits 2, even for an unreachable store", code)
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2: the claim door reports an unreachable store like the discovery door", code)
 	}
-	if strings.Contains(stderr, hookStoreUnavailableToken) {
-		t.Fatalf("stderr = %q, want no %s token on the claim door", stderr, hookStoreUnavailableToken)
+	if !strings.Contains(stderr, hookStoreUnavailableToken) {
+		t.Fatalf("stderr = %q, want the %s token on the claim door", stderr, hookStoreUnavailableToken)
 	}
 	if result.Action != "" || h.drained {
 		t.Fatalf("result = %+v, drained = %v; want no drain result and no drain-ack for a failed read", result, h.drained)

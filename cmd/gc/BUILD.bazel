@@ -1,4 +1,5 @@
 load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+load("//tools/bazel/rules:go_test_run.bzl", "go_test_run")
 load("//tools/bazel/rules:go_variant_test.bzl", "go_variant_test")
 
 # productmetrics_testhook (beside the root's integration): the tagged files
@@ -122,6 +123,7 @@ go_library(
         "class_store.go",
         "class_store_cache.go",
         "class_store_emit.go",
+        "class_store_emit_events_journal.go",
         "cli_class_stores.go",
         "cli_session_store.go",
         "cli_storage_routes.go",
@@ -407,6 +409,7 @@ go_library(
         "pool.go",
         "pool_desired_state.go",
         "pool_detached_orphan_sweep.go",
+        "pool_orphan_foreign_identity.go",
         "pool_session_name.go",
         "pool_slot_workdir.go",
         "prime_auto_handoff_inject.go",
@@ -433,6 +436,7 @@ go_library(
         "reconcile_arms_heals.go",
         "reconcile_arms_identity.go",
         "reconcile_arms_idle.go",
+        "reconcile_arms_lifecycle.go",
         "reconcile_arms_metadata.go",
         "reconcile_arms_start.go",
         "reconcile_arms_stop.go",
@@ -751,6 +755,7 @@ go_library(
         "@com_github_google_uuid//:uuid",
         "@com_github_spf13_cobra//:cobra",
         "@com_github_spf13_pflag//:pflag",
+        "@com_github_steveyegge_beads//journalops",
         "@in_gopkg_yaml_v3//:yaml_v3",
         "@org_golang_x_term//:term",
     ] + select({
@@ -1031,6 +1036,7 @@ go_test(
         "class_store_agreement_test.go",
         "class_store_cache_test.go",
         "class_store_emit_claim_test.go",
+        "class_store_emit_events_journal_test.go",
         "class_store_emit_test.go",
         "class_store_test.go",
         "cli_class_stores_test.go",
@@ -1541,6 +1547,7 @@ go_test(
         "pool_fresh_slot_compat_test.go",
         "pool_hook_processgroup_test.go",
         "pool_on_boot_parallel_test.go",
+        "pool_orphan_foreign_identity_test.go",
         "pool_pieces_prerefactor_test.go",
         "pool_pieces_test.go",
         "pool_release_bd_guard_test.go",
@@ -1563,6 +1570,7 @@ go_test(
         "prepared_start_oversized_prompt_test.go",
         "prepared_start_priming_test.go",
         "prime_inbox_test.go",
+        "prime_manual_provider_session_test.go",
         "prime_prompt_budget_test.go",
         "prime_session_key_capture_test.go",
         "prime_unmanaged_hook_guard_test.go",
@@ -1605,8 +1613,10 @@ go_test(
         "reconcile_arms_drift_test.go",
         "reconcile_arms_heals_test.go",
         "reconcile_arms_idle_test.go",
+        "reconcile_arms_lifecycle_test.go",
         "reconcile_arms_metadata_test.go",
         "reconcile_arms_start_test.go",
+        "reconcile_cutover_roundtrip_test.go",
         "reconcile_dirty_test.go",
         "reconcile_effect_abandon_test.go",
         "reconcile_effect_class_fail_test.go",
@@ -1619,6 +1629,7 @@ go_test(
         "reconcile_effect_lease_test.go",
         "reconcile_effect_metadata_test.go",
         "reconcile_effect_recycle_test.go",
+        "reconcile_effect_recycle_tmux_integration_test.go",
         "reconcile_effect_rekey_test.go",
         "reconcile_effect_restart_e2e_test.go",
         "reconcile_effect_restart_test.go",
@@ -1626,11 +1637,11 @@ go_test(
         "reconcile_effect_signal_test.go",
         "reconcile_effect_start_test.go",
         "reconcile_effect_stop_test.go",
+        "reconcile_effect_stop_tmux_integration_test.go",
         "reconcile_effect_tx_test.go",
         "reconcile_effect_write_test.go",
         "reconcile_effect_zombie_test.go",
         "reconcile_effects_lint_test.go",
-        "reconcile_effects_mode_test.go",
         "reconcile_effects_test.go",
         "reconcile_effects_wiring_test.go",
         "reconcile_enqueue_test.go",
@@ -1661,6 +1672,7 @@ go_test(
         "reconcile_session_namelock_test.go",
         "reconcile_session_timeline_test.go",
         "reconcile_settle_test.go",
+        "reconcile_sim_coverage_test.go",
         "reconcile_sim_invariants_test.go",
         "reconcile_sim_pending_test.go",
         "reconcile_sim_respawn_test.go",
@@ -1813,6 +1825,7 @@ go_test(
         "session_reconciler_inc003_test.go",
         "session_reconciler_killed_seat_test.go",
         "session_reconciler_killsite_fold_test.go",
+        "session_reconciler_manual_create_test.go",
         "session_reconciler_named_collapse_test.go",
         "session_reconciler_observation_regression_test.go",
         "session_reconciler_pool_replacement_test.go",
@@ -2167,6 +2180,7 @@ go_test(
         "@com_github_spf13_cobra//:cobra",
         "@com_github_spf13_pflag//:pflag",
         "@com_github_steveyegge_beads//backend",
+        "@com_github_steveyegge_beads//journalops",
         "@in_gopkg_yaml_v3//:yaml_v3",
         "@io_opentelemetry_go_otel//:otel",
         "@io_opentelemetry_go_otel//attribute",
@@ -2195,14 +2209,66 @@ go_variant_test(
 )
 
 # The full 1024-seed v2 simulator corpus, a CI gate (CONTRACT v5.9n): gc_test
-# runs the first simCISeeds; these run all 1024 in sixteen ranges of 64, each
-# a target of its own (the same binary, no extra compile), so they run in
-# parallel beside gc_test's shards; medium's timeout fails a hang fast. The
-# pending creates (mc-cjtkj) grew a range's run, so the ranges halved.
+# runs the first simCISeeds; these run all 1024 of each corpus in sixteen
+# ranges of 64, the plain corpus and the floored one with pending creates
+# seeded (TestSimCorpusFlooredPending, mc-cjtkj). Each range runs once as an
+# action (go_test_run: the same binary, no extra compile), in parallel beside
+# gc_test's shards, writing its coverage census, and
+# gc_sim_coverage_gate_test sums the censuses (architecture item C), which
+# pulls every range into `bazel test`. A failing or hung range fails the
+# build with its failing seeds' violated: and replay: lines and its log's
+# tail, and is never cached; a passing one is cached as an action, so
+# --cache_test_results=no does not rerun it (--config=fresh does), and the
+# corpus's lines no longer reach bazel coverage's lcov (gc_test's shards still
+# cover its first 64 seeds). --test_filter, --test_arg and --test_env do not
+# reach a range; build one with
+#   bazel build //cmd/gc:gc_sim_corpus_<n>_run
+# and replay one seed with
+#   GC_V2_SIM_SEED=<seed> go test -run '^TestSimCorpus$' ./cmd/gc/
+# (TestSimCorpusFlooredPending for the floored ranges).
+SIM_CORPORA = {
+    "gc_sim_corpus": "TestSimCorpus",
+    "gc_sim_corpus_floored_pending": "TestSimCorpusFlooredPending",
+}
+
+SIM_RANGES = ["%s_%d" % (name, i) for name in SIM_CORPORA for i in range(16)]
+
+[go_test_run(
+    name = "%s_%d_run" % (name, i),
+    testonly = True,
+    outs = {"GC_V2_SIM_COVERAGE": "%s_%d.census.json" % (name, i)},
+    args = ["-test.run=^%s$" % test],
+    env = {
+        "GC_V2_SIM_SEEDS": "64",
+        "GC_V2_SIM_SEED_FIRST": str(1 + 64 * i),
+    },
+    test = ":gc_test",
+) for name, test in SIM_CORPORA.items() for i in range(16)]
+
+# Fails on a registered arm, effect kind or settle outcome no range reaches,
+# unless simCoverageAllowlist names its generator bead (mc-i7efm), or when a
+# range's census is missing.
+go_variant_test(
+    name = "gc_sim_coverage_gate_test",
+    size = "small",
+    args = ["-test.run=^TestSimCoverageGate$$"],
+    data = [":%s_run" % r for r in SIM_RANGES],
+    env = {
+        "GC_V2_SIM_COVERAGE_FILES": " ".join(["$(rootpath :%s_run)" % r for r in SIM_RANGES]),
+        "GC_V2_SIM_COVERAGE_RANGES": str(len(SIM_RANGES)),
+    },
+    test = ":gc_test",
+)
+
+# The corpus on the shifted stream (TestSimCorpusShiftedRNG, mc-946b6): one
+# extra RNG draw per step, so 1024 schedules main's stream never takes, in
+# sixteen ranges of 64. Ordinary test targets, outside SIM_CORPORA (the #7765
+# review): a failure is never cached, a retry reruns it, and --runs_per_test
+# and --test_env reach it.
 [go_variant_test(
-    name = "gc_sim_corpus_%d_test" % i,
+    name = "gc_sim_corpus_shifted_%d_test" % i,
     size = "medium",
-    args = ["-test.run=^TestSimCorpus$$"],
+    args = ["-test.run=^TestSimCorpusShiftedRNG$$"],
     env = {
         "GC_V2_SIM_SEEDS": "64",
         "GC_V2_SIM_SEED_FIRST": str(1 + 64 * i),
@@ -2210,12 +2276,15 @@ go_variant_test(
     test = ":gc_test",
 ) for i in range(16)]
 
-# The floored corpus with pending creates seeded, all 1024 seeds in sixteen
-# ranges of 64, the same way (TestSimCorpusFlooredPending, mc-cjtkj).
+# The floored corpus (TestSimCorpusFloored: a min_active_sessions floor, no
+# pending creates), all 1024 seeds in sixteen ranges of 64 (CONTRACT v5.10l,
+# mc-su7hv); gc_test runs only its first 64. Ordinary test targets outside
+# SIM_CORPORA, as the shifted ranges are. Replay one seed with
+#   GC_V2_SIM_SEED=<seed> go test -run '^TestSimCorpusFloored$' ./cmd/gc/
 [go_variant_test(
-    name = "gc_sim_corpus_floored_pending_%d_test" % i,
+    name = "gc_sim_corpus_floored_%d_test" % i,
     size = "medium",
-    args = ["-test.run=^TestSimCorpusFlooredPending$$"],
+    args = ["-test.run=^TestSimCorpusFloored$$"],
     env = {
         "GC_V2_SIM_SEEDS": "64",
         "GC_V2_SIM_SEED_FIRST": str(1 + 64 * i),

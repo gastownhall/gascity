@@ -7705,7 +7705,8 @@ esac
 		"SELECT 1 FROM config LIMIT 1",
 		"USE `hq`",
 		"VALUES ('issue_prefix', 'gc') ON DUPLICATE KEY UPDATE",
-		"VALUES ('types.custom', 'molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step,startup-health-episode') ON DUPLICATE KEY UPDATE",
+		// The script's default list must stay the SDK's required set.
+		"VALUES ('types.custom', '" + strings.Join(beads.RequiredCustomTypes, ",") + "') ON DUPLICATE KEY UPDATE",
 	} {
 		if !strings.Contains(sqlText, want) {
 			t.Fatalf("dolt SQL log missing %q:\n%s", want, sqlText)
@@ -7838,7 +7839,7 @@ case "$query" in
     fi
     exit 0
     ;;
-  'USE `+"`hq`"+`; INSERT INTO config (`+"`key`"+`, value) VALUES ('\''types.custom'\'', '\''molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step,startup-health-episode'\'') ON DUPLICATE KEY UPDATE value = VALUES(value)')
+  'USE `+"`hq`"+`; INSERT INTO config (`+"`key`"+`, value) VALUES ('\''types.custom'\'', '\''molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step,startup-health-episode,op'\'') ON DUPLICATE KEY UPDATE value = VALUES(value)')
     exit 0
     ;;
   'USE `+"`hq`"+`; INSERT INTO config (`+"`key`"+`, value) VALUES ('\''issue_prefix'\'', '\''gc'\'') ON DUPLICATE KEY UPDATE value = VALUES(value)')
@@ -7998,7 +7999,7 @@ case "$query" in
     fi
     exit 0
     ;;
-  'USE `+"`hq`"+`; INSERT INTO config (`+"`key`"+`, value) VALUES ('\''types.custom'\'', '\''molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step,startup-health-episode'\'') ON DUPLICATE KEY UPDATE value = VALUES(value)')
+  'USE `+"`hq`"+`; INSERT INTO config (`+"`key`"+`, value) VALUES ('\''types.custom'\'', '\''molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step,startup-health-episode,op'\'') ON DUPLICATE KEY UPDATE value = VALUES(value)')
     exit 0
     ;;
   'USE `+"`hq`"+`; INSERT INTO config (`+"`key`"+`, value) VALUES ('\''issue_prefix'\'', '\''gc'\'') ON DUPLICATE KEY UPDATE value = VALUES(value)')
@@ -8091,7 +8092,7 @@ case "$query" in
     fi
     exit 0
     ;;
-  'USE `+"`hq`"+`; INSERT INTO config (`+"`key`"+`, value) VALUES ('\''types.custom'\'', '\''molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step,startup-health-episode'\'') ON DUPLICATE KEY UPDATE value = VALUES(value)')
+  'USE `+"`hq`"+`; INSERT INTO config (`+"`key`"+`, value) VALUES ('\''types.custom'\'', '\''molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step,startup-health-episode,op'\'') ON DUPLICATE KEY UPDATE value = VALUES(value)')
     if [ ! -f %q ] || [ "$(cat %q)" -lt 3 ]; then
       echo "table not found: config" >&2
       exit 1
@@ -8212,7 +8213,7 @@ case "$query" in
     fi
     exit 0
     ;;
-  'USE `+"`hq`"+`; INSERT INTO config (`+"`key`"+`, value) VALUES ('\''types.custom'\'', '\''molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step,startup-health-episode'\'') ON DUPLICATE KEY UPDATE value = VALUES(value)')
+  'USE `+"`hq`"+`; INSERT INTO config (`+"`key`"+`, value) VALUES ('\''types.custom'\'', '\''molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step,startup-health-episode,op'\'') ON DUPLICATE KEY UPDATE value = VALUES(value)')
     count=0
     if [ -f %q ]; then
       count=$(cat %q)
@@ -8369,7 +8370,7 @@ case "$query" in
     fi
     exit 0
     ;;
-  'USE `+"`hq`"+`; INSERT INTO config (`+"`key`"+`, value) VALUES ('\''types.custom'\'', '\''molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step,startup-health-episode'\'') ON DUPLICATE KEY UPDATE value = VALUES(value)')
+  'USE `+"`hq`"+`; INSERT INTO config (`+"`key`"+`, value) VALUES ('\''types.custom'\'', '\''molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step,startup-health-episode,op'\'') ON DUPLICATE KEY UPDATE value = VALUES(value)')
     exit 0
     ;;
   'USE `+"`hq`"+`; INSERT INTO config (`+"`key`"+`, value) VALUES ('\''issue_prefix'\'', '\''gc'\'') ON DUPLICATE KEY UPDATE value = VALUES(value)')

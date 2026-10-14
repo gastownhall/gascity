@@ -62,6 +62,7 @@ const (
 	fenceWorkUnknown          = "work_unknown"
 	fenceStopUnconfirmed      = "stop_unconfirmed"
 	fenceStopFailed           = "stop_failed"
+	fenceRuntimeMoved         = "runtime_moved" // the runtime the fence passed is not the one under the name at the stop
 	fenceLivenessPresent      = "present"
 	fenceLivenessAbsent       = "absent"
 	fenceLivenessUnobservable = "unknown"
@@ -85,6 +86,14 @@ type fenceVerdict struct {
 	Leaf     runtime.Provider
 	Row      session.Info
 	attach   bool // L3 kept: re-checked immediately before the stop (C8.7)
+	// token is L2 kept: the identity is re-read immediately before the stop,
+	// and must still be the row's Current one (mc-rq4d0).
+	token bool
+	// objectID and created are the session object the fence's fresh read
+	// passed (one object across its reads), re-read immediately before the
+	// stop: the name-based Stop goes ahead only while the same object holds
+	// the name (mc-rq4d0). Empty on a backend that reports no object.
+	objectID, created string
 }
 
 // fenceDestructive evaluates req's legs on the transaction's fresh reads of
@@ -98,7 +107,10 @@ func fenceDestructive(rt *txRuntime, f txFence, req fenceRequest) fenceVerdict {
 	if rt == nil {
 		return fenceVerdict{Reason: fenceRouteUnknown, Row: req.Row}
 	}
-	v := fenceVerdict{Leaf: rt.leaf, Row: req.Row, Liveness: rtLiveness(rt), attach: req.Legs&legAttach != 0}
+	v := fenceVerdict{Leaf: rt.leaf, Row: req.Row, Liveness: rtLiveness(rt), attach: req.Legs&legAttach != 0, token: req.Legs&legToken != 0}
+	if rt.Same {
+		v.objectID, v.created = rt.Again.ObjectID, rt.Again.ObjectCreated
+	}
 	switch {
 	case rt.Class == rtUnsupported, req.Legs&legLiveness != 0 && v.Liveness == fenceLivenessUnobservable:
 		v.Reason = fenceLivenessUnknown
@@ -187,6 +199,13 @@ func stopFenced(ctx context.Context, sp runtime.Provider, v fenceVerdict, proces
 		v.Proceed, v.Reason = false, fenceAttached
 		return v, false
 	}
+	switch held, reason := v.stillHeld(ctx, name); {
+	case reason != "":
+		v.Proceed, v.Reason = false, reason
+		return v, false
+	case !held: // the passed runtime left the name since: nothing of the row's to stop
+		return v, confirmStopped(ctx, sp, processNames, name, now())
+	}
 	if err := v.Leaf.Stop(name); err != nil && !errors.Is(err, runtime.ErrSessionNotFound) {
 		v.Proceed, v.Reason = false, fenceStopFailed
 		return v, false
@@ -197,6 +216,38 @@ func stopFenced(ctx context.Context, sp runtime.Provider, v fenceVerdict, proces
 	}
 	unroute(sp, name)
 	return v, true
+}
+
+// stillHeld re-reads, immediately before the name-based Stop, what the fence
+// passed (mc-rq4d0): the session object, on a fresh read at the wall clock,
+// and with L2 kept the row's Current identity, so a runtime replaced under
+// the name since the verdict (another row's, a squatter's) is never stopped
+// by name. held is false when nothing is present under the name any more;
+// a read that fails holds (liveness unknown), and a different object or
+// identity refuses (runtime moved). The object read takes no process names:
+// its object, not its agent, is what it compares (#7762 r3's form).
+func (v fenceVerdict) stillHeld(ctx context.Context, name string) (held bool, reason string) {
+	if v.objectID != "" {
+		again, ok := freshRead(ctx, v.Leaf, name, nil, time.Now())
+		switch {
+		case !ok:
+			return false, fenceLivenessUnknown
+		case !again.Present():
+			return false, ""
+		case again.ObjectID != v.objectID || again.ObjectCreated != v.created:
+			return false, fenceRuntimeMoved
+		}
+	}
+	if !v.token {
+		return true, ""
+	}
+	switch compareIdentity(v.Row, readRuntimeIdentity(ctx, v.Leaf, name)) {
+	case identityCurrent:
+		return true, ""
+	case identityUnknown: // unreadable or undecided
+		return false, fenceLivenessUnknown
+	}
+	return false, fenceRuntimeMoved
 }
 
 // unroute drops name's route on every router hop from sp to its leaf that

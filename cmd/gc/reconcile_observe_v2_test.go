@@ -278,7 +278,7 @@ func TestDoctorReportsNoFloorAndThePassAge(t *testing.T) {
 		{Name: "worker", MinActiveSessions: &two},
 		{Name: "idle"},
 	}
-	override := func(k string) (string, bool) { return "1", k == v2SkeletonEnv }
+	override := noEnv
 	for _, tc := range []struct{ raw string }{{""}, {"v2"}} {
 		cfg := &config.City{Daemon: config.DaemonConfig{SessionReconciler: tc.raw}, Agents: agents}
 		c := newSessionReconcilerDoctorCheck(cfg, override)

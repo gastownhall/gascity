@@ -739,7 +739,10 @@ func (c *ObservationCache) store(next *ObservationSnapshot, flipped bool, at tim
 }
 
 // Note writes one fact from a fresh three-outcome probe. A write observed
-// before the stored fact loses.
+// before the stored fact loses, and so does one observed at the same instant
+// as an inventory pass's fact: the inventory wins a tie, as PublishInventory
+// keeps only facts strictly newer than its start and unlistedSincePass and
+// listedSincePass read a note only strictly after it (#7799 review).
 func (c *ObservationCache) Note(name string, kind FactKind, v ObsFact, at time.Time, src ObsSource, reason string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -749,7 +752,7 @@ func (c *ObservationCache) Note(name string, kind FactKind, v ObsFact, at time.T
 		obs = RuntimeObservation{SessionName: name}
 	}
 	f := obs.fact(kind)
-	if at.Before(f.ObservedAt) {
+	if at.Before(f.ObservedAt) || at.Equal(f.ObservedAt) && f.Source == SourcePoller {
 		return
 	}
 	flipped := f.Value != v

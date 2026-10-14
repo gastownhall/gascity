@@ -249,7 +249,7 @@ var wakeSources = []wakeSource{
 		after: func(w *controllerWake, in wakeInput) { w.OnBeadEvent(events.Event{}, in.snapshot) },
 	},
 	{
-		site:   "api_state.go:mutateAndPoke",
+		site:   "api_state.go:mutateAndPokeLocked",
 		call:   "WakeMaintenance()",
 		before: func(p, d chan<- struct{}, _ wakeInput) { legacyEnqueue(p, d, allocatorKey...) }, // was cs.Enqueue(reconcilekey.Allocator())
 		after:  func(w *controllerWake, _ wakeInput) { w.WakeMaintenance() },

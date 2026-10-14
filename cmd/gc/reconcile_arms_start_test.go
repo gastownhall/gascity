@@ -254,6 +254,55 @@ func TestDeadRuntimeAccrualNeverShortensAQuarantine(t *testing.T) {
 	}
 }
 
+// TestAccrualKeepsALiveQuarantinesReason (CONTRACT v5.9z; seed 499). Kills
+// a v2 accrual that overwrites a live quarantine's reason: A6's rapid-crash
+// and churn accruals and the start-failure abandon's, reaching their
+// threshold during a live quarantine whose reason is the quarantine's,
+// leave sleep_reason as it is; with no quarantine they write their own.
+func TestAccrualKeepsALiveQuarantinesReason(t *testing.T) {
+	at := func(d time.Duration) string { return gatherNow.Add(d).Format(time.RFC3339) }
+	for _, death := range []struct {
+		name, own string
+		meta      []string
+	}{
+		{"a rapid crash", string(session.SleepReasonQuarantine), []string{"last_woke_at", at(-10 * time.Second), "wake_attempts", "4"}},
+		{"churn", string(session.SleepReasonContextChurn), []string{"last_woke_at", at(-2 * time.Minute), "churn_count", "2"}},
+	} {
+		for _, live := range []bool{true, false} {
+			meta := append([]string{"state", "active", "session_key", "k-1"}, death.meta...)
+			if live {
+				meta = append(meta, "quarantined_until", at(time.Minute), "sleep_reason", string(session.SleepReasonRateLimit))
+			}
+			it := newHealCase(t, livenessGone, desireWake, meta...).decide()
+			got, wrote := it.folded()["sleep_reason"]
+			switch {
+			case live && wrote:
+				t.Errorf("%s over a live rate-limit quarantine: sleep_reason written %q, want rate_limit kept", death.name, got)
+			case !live && got != death.own:
+				t.Errorf("%s with no quarantine: sleep_reason %q, want %q", death.name, got, death.own)
+			}
+		}
+	}
+	for _, live := range []bool{true, false} {
+		row := session.Info{ID: "gc-1", MetadataState: string(session.StateCreating), WakeAttemptsMetadata: "4"}
+		meta := map[string]string{}
+		if live {
+			row.QuarantinedUntil, row.SleepReason = at(time.Minute), string(session.SleepReasonRateLimit)
+			meta = map[string]string{"quarantined_until": row.QuarantinedUntil, "sleep_reason": row.SleepReason}
+		}
+		patch, _, quarantined := otherFailurePatch(row, meta, startFailureRead{}, gatherNow)
+		got, wrote := patch["sleep_reason"]
+		switch {
+		case !quarantined:
+			t.Errorf("start-failure abandon (live %t): not quarantined, patch %v", live, patch)
+		case live && wrote:
+			t.Errorf("start-failure abandon over a live rate-limit quarantine: sleep_reason written %q, want rate_limit kept", got)
+		case !live && got != string(session.SleepReasonQuarantine):
+			t.Errorf("start-failure abandon with no quarantine: sleep_reason %q, want quarantine", got)
+		}
+	}
+}
+
 // Kills a heal that pre-empts a wanted row's start by a pass: an expired
 // hold on a wanted row whose runtime is gone heals in its start's PreWake,
 // in the same pass, as legacy heals and wakes in one tick.

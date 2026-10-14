@@ -435,7 +435,11 @@ func TestCreateEffect_NamedReopensClosedCanonicalAndMatchesLegacyMetadata(t *tes
 			h.reserve(t, "c1")
 			plan := namedPlan(t, cfg, "c1", "mayor")
 			plan.Named.AdoptLive, plan.Named.BoundStepID = tc.adopt, tc.bound
-			h.runAll(t, &createPass{cfg: cfg, store: effectStore}, plan)
+			pass := &createPass{cfg: cfg, store: effectStore}
+			if !tc.adopt {
+				pass.sp = newSimProvider() // the reopen's fresh read finds the name free
+			}
+			h.runAll(t, pass, plan)
 
 			state := "stopped"
 			if tc.adopt {
@@ -538,6 +542,95 @@ func (s *namedHookStore) Update(id string, opts beads.UpdateOpts) error {
 	return s.Store.Update(id, opts)
 }
 
+// cancelAfterRead is a fresh-readable provider whose liveness read ends the
+// context once it has answered.
+type cancelAfterRead struct {
+	*simProvider
+	cancel func()
+}
+
+func (p cancelAfterRead) ObserveLivenessSince(name string, processNames []string, since time.Time) (runtime.Liveness, error) {
+	defer p.cancel()
+	return p.simProvider.ObserveLivenessSince(name, processNames, since)
+}
+
+// Kills a named reopen written over a live runtime (the creates generator's
+// seed 335, mc-i7efm): the plan read the name free from an inventory the
+// lag left behind a runtime started since, and the reopen's fresh read under
+// the identifier locks must find it and refuse redecided, writing nothing,
+// so the next pass adopts it or decides again. A name confirmed free reopens.
+func TestCreateEffect_NamedReopenRefusesALiveRuntimeTheLaggedPlanMissed(t *testing.T) {
+	cfg := mayorCity()
+	name := "test-city-mayor"
+	sim := func(mark func(*simRuntime)) func() runtime.Provider {
+		return func() runtime.Provider {
+			sp := newSimProvider()
+			if mark != nil {
+				sp.put(name, "gc-other", "1", "tok-other")
+				mark(sp.rts[name])
+			}
+			return sp
+		}
+	}
+	for _, c := range []struct {
+		label string
+		sp    func() runtime.Provider
+		free  bool
+	}{
+		{"absent", sim(nil), true},
+		{"a corpse is free", sim(func(r *simRuntime) { r.corpse = true }), true},
+		{"a zombie is free", sim(func(r *simRuntime) { r.zombie = true }), true},
+		{"a live runtime the lagged plan missed", sim(func(*simRuntime) {}), false},
+		{"no provider", func() runtime.Provider { return nil }, false},
+		{"a leaf that cannot read fresh", func() runtime.Provider { return runtime.NewFake() }, false},
+		{"a read that errors", sim(func(r *simRuntime) { r.probeErr = true }), false},
+		{"alive through the composite, absent on the routed leaf", func() runtime.Provider {
+			other := newSimProvider()
+			other.put(name, "gc-other", "1", "tok-other")
+			return routedComposite{simProvider: other, leaf: newSimProvider()}
+		}, false},
+	} {
+		t.Run(c.label, func(t *testing.T) {
+			store := fencedMemStore(t)
+			closed := seedClosedNamedRow(t, store, cfg, nil)
+			h := newNamedHarness(t, t.TempDir(), nil)
+			h.reserve(t, "c1")
+			plan := namedPlan(t, cfg, "c1", "mayor") // AdoptLive unset: the lagged inventory read the name absent
+			pass := &createPass{cfg: cfg, store: store}
+			if sp := c.sp(); sp != nil {
+				pass.sp = sp
+			}
+			h.runAll(t, pass, plan)
+			row, err := store.Get(closed.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			e := h.entry(t)
+			switch {
+			case c.free && (row.Status != "open" || !e.Landed):
+				t.Fatalf("row %s settlement %+v, want the free name's row reopened", row.Status, e)
+			case !c.free && (row.Status != "closed" || e.Landed || e.Ambiguous):
+				t.Fatalf("row %s settlement %+v, want the row left closed and no write", row.Status, e)
+			case !c.free:
+				h.assertRefused(t, plan, createStageRedecided)
+			}
+		})
+	}
+}
+
+// Kills a context that ends during the reopen's fresh runtime read taken as
+// a redecided refusal, which backs the identity off: it is an abandoned
+// no-write.
+func TestNamedConfirmedFreeContextEndedDuringTheRead(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	prog := &createProgress{stage: createStageFence}
+	err := nameConfirmedFree(ctx, cancelAfterRead{simProvider: newSimProvider(), cancel: cancel}, nil, "s-1", gatherNow, time.Now, prog)
+	if !errors.Is(err, errCreateAbandoned) || prog.stage != createStageFence {
+		t.Fatalf("err %v stage %q, want an abandoned no-write with the stage left %q", err, prog.stage, createStageFence)
+	}
+}
+
 // Kills: a reopen's settlement that loses the row it reopened (P3-6b T5,
 // AM-N2), and a reopen held in flight after it settled: the row keeps its own
 // token, which no census would show for the plan's (CONTRACT v5 P5).
@@ -547,7 +640,7 @@ func TestCreateEffect_NamedReopenSettlesRetargetAndClears(t *testing.T) {
 	closed := seedClosedNamedRow(t, store, cfg, nil)
 	h := newNamedHarness(t, t.TempDir(), nil)
 	token := h.reserve(t, "c1")
-	h.runAll(t, &createPass{cfg: cfg, store: store}, namedPlan(t, cfg, "c1", "mayor"))
+	h.runAll(t, &createPass{cfg: cfg, sp: newSimProvider(), store: store}, namedPlan(t, cfg, "c1", "mayor"))
 
 	e := h.entry(t)
 	if !e.Landed || e.RetargetRowID != closed.ID || e.Token != token {
@@ -569,7 +662,7 @@ func TestCreateEffect_NamedAmbiguousReopenClearsAtSettlement(t *testing.T) {
 	store.err = errors.New("connection reset during reopen")
 	h := newNamedHarness(t, t.TempDir(), nil)
 	h.reserve(t, "c1")
-	h.runAll(t, &createPass{cfg: cfg, store: store}, namedPlan(t, cfg, "c1", "mayor"))
+	h.runAll(t, &createPass{cfg: cfg, sp: newSimProvider(), store: store}, namedPlan(t, cfg, "c1", "mayor"))
 
 	e := h.entry(t)
 	if !e.Ambiguous || e.RowID != closed.ID || e.RetargetRowID != closed.ID {
@@ -585,7 +678,17 @@ func TestCreateEffect_NamedAmbiguousReopenClearsAtSettlement(t *testing.T) {
 // lets another writer bump the closed row right after the read.
 type namedCASStore struct {
 	beads.Store
-	bump func()
+	bump    func()
+	bumpGet func() // once, on the first Get: the reopen's live re-read of its row
+}
+
+func (s *namedCASStore) Get(id string) (beads.Bead, error) {
+	b, err := s.Store.Get(id)
+	if s.bumpGet != nil {
+		s.bumpGet()
+		s.bumpGet = nil
+	}
+	return b, err
 }
 
 func (s *namedCASStore) List(q beads.ListQuery) ([]beads.Bead, error) {
@@ -622,7 +725,7 @@ func TestNamedReopenConcurrentWriterLosesFence(t *testing.T) {
 		h := newNamedHarness(t, t.TempDir(), nil)
 		h.reserve(t, "c1")
 		plan := namedPlan(t, cfg, "c1", "mayor")
-		h.runAll(t, &createPass{cfg: cfg, store: store}, plan)
+		h.runAll(t, &createPass{cfg: cfg, sp: newSimProvider(), store: store}, plan)
 
 		after, err := mem.Get(closed.ID)
 		if err != nil {
@@ -641,7 +744,7 @@ func TestNamedReopenConcurrentWriterLosesFence(t *testing.T) {
 		h := newNamedHarness(t, t.TempDir(), nil)
 		h.reserve(t, "c1")
 		plan := namedPlan(t, cfg, "c1", "mayor")
-		h.runAll(t, &createPass{cfg: cfg, store: writes}, plan)
+		h.runAll(t, &createPass{cfg: cfg, sp: newSimProvider(), store: writes}, plan)
 		after, err := mem.Get(closed.ID)
 		if err != nil {
 			t.Fatal(err)
@@ -680,7 +783,7 @@ func TestCreateEffect_NamedReopenFencesOnTheLiveReReadOfTheRow(t *testing.T) {
 	h := newNamedHarness(t, t.TempDir(), nil)
 	h.reserve(t, "c1")
 	plan := namedPlan(t, cfg, "c1", "mayor")
-	h.runAll(t, &createPass{cfg: cfg, store: revisionlessListStore{Store: mem}}, plan)
+	h.runAll(t, &createPass{cfg: cfg, sp: newSimProvider(), store: revisionlessListStore{Store: mem}}, plan)
 
 	row, err := mem.Get(closed.ID)
 	if err != nil {
@@ -706,7 +809,7 @@ func TestCreateEffect_NamedReopenReReadsTheRowLive(t *testing.T) {
 	h := newNamedHarness(t, t.TempDir(), nil)
 	h.reserve(t, "c1")
 	plan := namedPlan(t, cfg, "c1", "mayor")
-	h.runAll(t, &createPass{cfg: cfg, store: namedStaleCacheStore{mem}}, plan)
+	h.runAll(t, &createPass{cfg: cfg, sp: newSimProvider(), store: namedStaleCacheStore{mem}}, plan)
 
 	row, err := mem.Get(closed.ID)
 	if err != nil {
@@ -738,7 +841,7 @@ func TestCreateEffect_NamedReopenWritesNothingWhenTheReReadRowMovedOn(t *testing
 	h := newNamedHarness(t, t.TempDir(), nil)
 	h.reserve(t, "c1")
 	plan := namedPlan(t, cfg, "c1", "mayor")
-	h.runAll(t, &createPass{cfg: cfg, store: store}, plan)
+	h.runAll(t, &createPass{cfg: cfg, sp: newSimProvider(), store: store}, plan)
 
 	if got := inner.recorded(); len(got) != 0 {
 		t.Fatalf("writes = %v, want none for a row that is no longer closed", got)
@@ -779,7 +882,7 @@ func TestCreateEffect_NamedLocksIdentityAndSessionNameOnce(t *testing.T) {
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
-			h.runAll(t, &createPass{cfg: cfg, store: store}, namedPlan(t, cfg, "c1", "mayor"))
+			h.runAll(t, &createPass{cfg: cfg, sp: newSimProvider(), store: store}, namedPlan(t, cfg, "c1", "mayor"))
 		}()
 		awaitClose(t, done, "named create under real city flocks")
 		if len(calls) != 1 {
@@ -862,7 +965,7 @@ func TestCreateEffect_NamedFenceReadsLiveInsideLock(t *testing.T) {
 			})
 			h.reserve(t, "c1")
 			plan := namedPlan(t, cfg, "c1", "mayor")
-			h.runAll(t, &createPass{cfg: cfg, store: namedFenceProbeStore{Store: cache, locked: &locked, t: t}}, plan)
+			h.runAll(t, &createPass{cfg: cfg, sp: newSimProvider(), store: namedFenceProbeStore{Store: cache, locked: &locked, t: t}}, plan)
 
 			assertFailedNoWrite(t, h)
 			h.assertRefused(t, plan, createStageFence)
@@ -1157,7 +1260,7 @@ func TestCreateEffect_NamedSettlementNamesTheRow(t *testing.T) {
 		t.Helper()
 		h := newNamedHarness(t, t.TempDir(), nil)
 		h.reserve(t, "c1")
-		h.runAll(t, &createPass{cfg: cfg, store: store}, namedPlan(t, cfg, "c1", "mayor"))
+		h.runAll(t, &createPass{cfg: cfg, sp: newSimProvider(), store: store}, namedPlan(t, cfg, "c1", "mayor"))
 		return h.entry(t)
 	}
 	t.Run("create", func(t *testing.T) {
@@ -1558,7 +1661,7 @@ func TestCreateEffect_NamedConditionalReopenWritesOnceAndOpensTheRow(t *testing.
 	h.reserve(t, "c1")
 	plan := namedPlan(t, cfg, "c1", "mayor")
 	plan.Named.BoundStepID = "gc-step"
-	h.runAll(t, &createPass{cfg: cfg, store: store}, plan)
+	h.runAll(t, &createPass{cfg: cfg, sp: newSimProvider(), store: store}, plan)
 
 	if got, want := store.recorded(), []string{"update-if-match " + closed.ID}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("writes = %v, want %v", got, want)
@@ -1608,7 +1711,7 @@ func TestCreateEffect_NamedRefusedWriteIsNoWriteAndPanicIsAmbiguous(t *testing.T
 			h := newNamedHarness(t, t.TempDir(), nil)
 			h.reserve(t, "c1")
 			plan := namedPlan(t, cfg, "c1", "mayor")
-			h.runAll(t, &createPass{cfg: cfg, store: store}, plan)
+			h.runAll(t, &createPass{cfg: cfg, sp: newSimProvider(), store: store}, plan)
 			if got := store.recorded(); len(got) != 1 {
 				t.Fatalf("writes = %v, want the one attempted write", got)
 			}
@@ -2114,7 +2217,10 @@ func TestCreateEffect_NamedReopenWritesNothingOnceItsEntryIsSettled(t *testing.T
 	h.reserve(t, "c1")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	h.submit(ctx, &createPass{cfg: cfg, store: &namedCASStore{Store: inner, bump: cancel}}, namedPlan(t, cfg, "c1", "mayor"))
+	// The context ends at the reopen's live re-read of its row, after its
+	// fresh runtime read (nameConfirmedFree) found the name free, so the
+	// reopen's own check before its write decides.
+	h.submit(ctx, &createPass{cfg: cfg, sp: newSimProvider(), store: &namedCASStore{Store: inner, bumpGet: cancel}}, namedPlan(t, cfg, "c1", "mayor"))
 	h.wg.Wait()
 
 	if got := inner.recorded(); len(got) != 0 {

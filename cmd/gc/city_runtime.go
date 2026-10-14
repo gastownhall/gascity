@@ -2451,7 +2451,11 @@ var errConfigTransactionInProgress = errors.New("config mutation in progress; re
 // loadReloadCandidate reads one candidate config generation. With a
 // controller state it reads only while no config transaction is in flight, so
 // a multi-file write is never observed half-done; it does not wait, so a slow
-// import cannot stall the reconciler.
+// import cannot stall the reconciler at the read. A candidate read before a
+// transaction began still waits for it at publication (updateFromRuntime takes
+// the publication lock the transaction holds). That stall is accepted: it ends
+// with the transaction, and publication then rejects the candidate if the
+// transaction's generation superseded it.
 func (cr *CityRuntime) loadReloadCandidate(configName, cityRoot string) (*reloadResult, error) {
 	if cr.cs == nil {
 		return tryReloadConfig(cr.tomlPath, configName, cityRoot)
@@ -3057,6 +3061,13 @@ func (cr *CityRuntime) stopConfigWatcher() {
 	}
 }
 
+// warmClaimTriggerProbe is the warm-bind probe over resolve, judging a
+// trigger against this controller's config (isUnclaimedTrigger: a pool
+// template assignee is demand, not a claim).
+func (cr *CityRuntime) warmClaimTriggerProbe(resolve warmClaimTriggerResolver) warmClaimTriggerProbe {
+	return buildWarmClaimTriggerProbe(cr.cfg, resolve, cr.stderr)
+}
+
 // newWarmClaimTriggerResolver returns the reader the warm-bind claim probe asks
 // for one bound trigger bead, resolved over this controller's own topology: the
 // binding it opened at boot, its city work ledger, and the rig legs it is handed.
@@ -3127,13 +3138,6 @@ func (cr *CityRuntime) stopConfigWatcher() {
 // fault. That is accepted because the line is the only outside evidence the nudge
 // was declined at all. If the noise ever outweighs that evidence, hand this caller
 // servingRigStores as readyDemandSnapshotFingerprint does and delete this section.
-// warmClaimTriggerProbe is the warm-bind probe over resolve, judging a
-// trigger against this controller's config (isUnclaimedTrigger: a pool
-// template assignee is demand, not a claim).
-func (cr *CityRuntime) warmClaimTriggerProbe(resolve warmClaimTriggerResolver) warmClaimTriggerProbe {
-	return buildWarmClaimTriggerProbe(cr.cfg, resolve, cr.stderr)
-}
-
 func (cr *CityRuntime) newWarmClaimTriggerResolver(servingRigs map[string]beads.Store) warmClaimTriggerResolver {
 	topo := cr.residencyTopology(servingRigs)
 	return func(triggerID string) (beads.Bead, error) {

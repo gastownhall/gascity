@@ -17,6 +17,7 @@ package storebindingtest
 // without forking the contract.
 
 import (
+	"context"
 	"errors"
 	"sort"
 	"sync"
@@ -27,9 +28,11 @@ import (
 )
 
 const (
-	memoryQueueClaimLease = 2 * time.Minute
-	memoryQueueRetryDelay = 15 * time.Second
-	memoryQueueMaxAttempt = 5
+	memoryQueueClaimLease        = 2 * time.Minute
+	memoryQueueRetryDelay        = 15 * time.Second
+	memoryQueueMaxAttempt        = 5
+	memoryQueueDeadRetention     = time.Hour
+	memoryQueueTerminalRetention = 24 * time.Hour
 )
 
 type memoryQueueState uint8
@@ -44,6 +47,9 @@ const (
 type memoryQueueEntry struct {
 	item  nudgequeue.Item
 	state memoryQueueState
+	// terminalAt is when the entry retired; Maintain sweeps it a retention
+	// window later, which frees its id for a fresh submit.
+	terminalAt time.Time
 }
 
 // MemoryNudgeQueue is a conforming in-process [storebinding.NudgeQueue].
@@ -63,11 +69,10 @@ func NewMemoryNudgeQueue() *MemoryNudgeQueue {
 func (q *MemoryNudgeQueue) Enqueue(item nudgequeue.Item) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	q.expireLeases(time.Now())
 	if _, exists := q.entries[item.ID]; exists {
 		return nil
 	}
-	if item.Reference != nil && item.Reference.ID != "" {
+	if item.Reference != nil && item.Reference.ID != "" && item.Agent != "" {
 		for _, existing := range q.entries {
 			if existing.state != memoryQueuePending && existing.state != memoryQueueInFlight {
 				continue
@@ -106,14 +111,17 @@ func (q *MemoryNudgeQueue) ClaimDue(target storebinding.ClaimTarget, now time.Ti
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	q.expireLeases(now)
 	var claimed []nudgequeue.Item
 	for _, id := range q.order {
 		entry := q.entries[id]
-		if entry == nil || entry.state != memoryQueuePending {
+		if entry == nil || !entry.live() || entry.inFlightAt(now) {
 			continue
 		}
 		if !matchesQueueKeys(entry.item.Agent, target.QueueKeys) {
+			continue
+		}
+		if expired(entry.item, now) {
+			deadLetterExpired(entry)
 			continue
 		}
 		if entry.item.DeliverAfter.After(now) {
@@ -133,7 +141,7 @@ func (q *MemoryNudgeQueue) ClaimDue(target storebinding.ClaimTarget, now time.Ti
 
 // ListForAgent returns the queue buckets addressed exactly to agentName.
 func (q *MemoryNudgeQueue) ListForAgent(agentName string, now time.Time) (pending, inFlight, dead []nudgequeue.Item, err error) {
-	return q.listMatching(now, func(item nudgequeue.Item) bool { return item.Agent == agentName })
+	return q.listMatching(now, func(item nudgequeue.Item) bool { return matchesQueueKeys(item.Agent, []string{agentName}) })
 }
 
 // ListFor returns the queue buckets matching any of target's queue keys.
@@ -148,23 +156,11 @@ func (q *MemoryNudgeQueue) ListFor(target storebinding.ClaimTarget, now time.Tim
 
 // Snapshot returns every queued item in the canonical bucket order.
 func (q *MemoryNudgeQueue) Snapshot() (nudgequeue.State, error) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	var state nudgequeue.State
-	for _, id := range q.order {
-		entry := q.entries[id]
-		if entry == nil {
-			continue
-		}
-		switch entry.state {
-		case memoryQueuePending:
-			state.Pending = append(state.Pending, entry.item)
-		case memoryQueueInFlight:
-			state.InFlight = append(state.InFlight, entry.item)
-		case memoryQueueDead:
-			state.Dead = append(state.Dead, entry.item)
-		}
+	pending, inFlight, dead, err := q.listMatching(time.Now().UTC(), func(nudgequeue.Item) bool { return true })
+	if err != nil {
+		return nudgequeue.State{}, err
 	}
+	state := nudgequeue.State{Pending: pending, InFlight: inFlight, Dead: dead}
 	nudgequeue.SortState(&state)
 	return state, nil
 }
@@ -178,8 +174,13 @@ func (q *MemoryNudgeQueue) Ack(ids []string, _, _, _ string) error {
 		if entry == nil {
 			continue
 		}
-		if entry.state == memoryQueuePending || entry.state == memoryQueueInFlight {
+		if entry.live() && expired(entry.item, time.Now()) {
+			deadLetterExpired(entry)
+			continue
+		}
+		if entry.live() {
 			entry.state = memoryQueueTerminal
+			entry.terminalAt = time.Now().UTC()
 			entry.item.ClaimedAt = time.Time{}
 			entry.item.LeaseUntil = time.Time{}
 		}
@@ -194,6 +195,10 @@ func (q *MemoryNudgeQueue) ReleaseClaims(ids []string) error {
 	for _, id := range ids {
 		entry := q.entries[id]
 		if entry == nil || entry.state != memoryQueueInFlight {
+			continue
+		}
+		if expired(entry.item, time.Now()) {
+			deadLetterExpired(entry)
 			continue
 		}
 		entry.state = memoryQueuePending
@@ -219,7 +224,13 @@ func (q *MemoryNudgeQueue) RecordFailure(ids []string, cause error, now time.Tim
 	var dead []nudgequeue.Item
 	for _, id := range ids {
 		entry := q.entries[id]
-		if entry == nil || (entry.state != memoryQueuePending && entry.state != memoryQueueInFlight) {
+		if entry == nil || !entry.live() {
+			continue
+		}
+		if expired(entry.item, now) {
+			// It expired; it did not fail. No attempt is charged and the
+			// dead letter is not reported as a delivery failure.
+			deadLetterExpired(entry)
 			continue
 		}
 		entry.item.Attempts++
@@ -229,8 +240,7 @@ func (q *MemoryNudgeQueue) RecordFailure(ids []string, cause error, now time.Tim
 		}
 		entry.item.ClaimedAt = time.Time{}
 		entry.item.LeaseUntil = time.Time{}
-		expired := !entry.item.ExpiresAt.IsZero() && !entry.item.ExpiresAt.After(now)
-		if permanent || entry.item.Attempts >= memoryQueueMaxAttempt || expired {
+		if permanent || entry.item.Attempts >= memoryQueueMaxAttempt {
 			entry.item.DeadAt = now.UTC()
 			entry.state = memoryQueueDead
 			dead = append(dead, entry.item)
@@ -273,8 +283,49 @@ func (q *MemoryNudgeQueue) WithdrawQueuedWaitNudges(ids []string) error {
 			continue
 		}
 		entry.state = memoryQueueTerminal
+		entry.terminalAt = time.Now().UTC()
 	}
 	return nil
+}
+
+// Maintain runs the whole-queue recovery pass: expired leases return to
+// pending, expired items dead-letter, dead letters past their retention retire,
+// and retired entries past theirs are forgotten so their ids can be reused.
+// The pass is in-memory and holds the lock throughout, so ctx is only checked
+// before it starts and it never reports Remaining work.
+func (q *MemoryNudgeQueue) Maintain(ctx context.Context, now time.Time) (storebinding.NudgeMaintenance, error) {
+	if err := ctx.Err(); err != nil {
+		return storebinding.NudgeMaintenance{}, err
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.expireLeases(now)
+	kept := q.order[:0]
+	for _, id := range q.order {
+		entry := q.entries[id]
+		if entry == nil {
+			continue
+		}
+		switch entry.state {
+		case memoryQueuePending, memoryQueueInFlight:
+			if expired(entry.item, now) {
+				deadLetterExpired(entry)
+			}
+		case memoryQueueDead:
+			if !entry.item.DeadAt.IsZero() && entry.item.DeadAt.Before(now.Add(-memoryQueueDeadRetention)) {
+				entry.state = memoryQueueTerminal
+				entry.terminalAt = entry.item.DeadAt
+			}
+		}
+		if entry.state == memoryQueueTerminal && !entry.terminalAt.IsZero() &&
+			entry.terminalAt.Before(now.Add(-memoryQueueTerminalRetention)) {
+			delete(q.entries, id)
+			continue
+		}
+		kept = append(kept, id)
+	}
+	q.order = kept
+	return storebinding.NudgeMaintenance{}, nil
 }
 
 func (q *MemoryNudgeQueue) insert(item nudgequeue.Item, state memoryQueueState) {
@@ -282,8 +333,8 @@ func (q *MemoryNudgeQueue) insert(item nudgequeue.Item, state memoryQueueState) 
 	q.order = append(q.order, item.ID)
 }
 
-// expireLeases returns in-flight items whose lease has run out to pending. It
-// is the recovery pass a crashed deliverer depends on.
+// expireLeases records the lease recovery the reads already project: in-flight
+// items whose lease has run out return to pending. It runs only in Maintain.
 func (q *MemoryNudgeQueue) expireLeases(now time.Time) {
 	for _, entry := range q.entries {
 		if entry.state != memoryQueueInFlight {
@@ -301,19 +352,22 @@ func (q *MemoryNudgeQueue) expireLeases(now time.Time) {
 func (q *MemoryNudgeQueue) listMatching(now time.Time, match func(nudgequeue.Item) bool) (pending, inFlight, dead []nudgequeue.Item, err error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	q.expireLeases(now)
 	for _, id := range q.order {
 		entry := q.entries[id]
 		if entry == nil || !match(entry.item) {
 			continue
 		}
-		switch entry.state {
-		case memoryQueuePending:
-			pending = append(pending, entry.item)
-		case memoryQueueInFlight:
-			inFlight = append(inFlight, entry.item)
-		case memoryQueueDead:
+		switch {
+		case entry.state == memoryQueueDead:
 			dead = append(dead, entry.item)
+		case entry.live() && expired(entry.item, now):
+			// An expired item reads as dead by arithmetic before Maintain
+			// records it, the same way an expired lease reads as pending.
+			dead = append(dead, expiredView(entry.item))
+		case entry.inFlightAt(now):
+			inFlight = append(inFlight, entry.item)
+		case entry.live():
+			pending = append(pending, unclaimed(entry.item))
 		}
 	}
 	sortByDelivery(pending)
@@ -332,7 +386,52 @@ func passesFence(item nudgequeue.Item, target storebinding.ClaimTarget) bool {
 	return item.ContinuationEpoch == "" || target.ContinuationEpoch != ""
 }
 
+// expired reports whether item's deliver-by deadline has passed at now.
+func expired(item nudgequeue.Item, now time.Time) bool {
+	return !item.ExpiresAt.IsZero() && !item.ExpiresAt.After(now)
+}
+
+// expiredView is how an expired item reads, before and after it is recorded:
+// dead since its deadline, with no claim.
+func expiredView(item nudgequeue.Item) nudgequeue.Item {
+	if item.LastError == "" {
+		item.LastError = "expired"
+	}
+	item.DeadAt = item.ExpiresAt
+	return unclaimed(item)
+}
+
+// unclaimed is item with its claim cleared.
+func unclaimed(item nudgequeue.Item) nudgequeue.Item {
+	item.ClaimedAt = time.Time{}
+	item.LeaseUntil = time.Time{}
+	return item
+}
+
+// deadLetterExpired records an expired entry as the dead letter it already
+// reads as.
+func deadLetterExpired(entry *memoryQueueEntry) {
+	entry.item = expiredView(entry.item)
+	entry.state = memoryQueueDead
+}
+
+// live reports whether the entry is still queued for delivery.
+func (e *memoryQueueEntry) live() bool {
+	return e.state == memoryQueuePending || e.state == memoryQueueInFlight
+}
+
+// inFlightAt reports whether the entry holds an unexpired claim at now. An
+// expired lease reads as pending by arithmetic; Maintain records it.
+func (e *memoryQueueEntry) inFlightAt(now time.Time) bool {
+	return e.state == memoryQueueInFlight && e.item.LeaseUntil.After(now)
+}
+
+// matchesQueueKeys reports whether agent is one of keys. The empty key
+// addresses nobody.
 func matchesQueueKeys(agent string, keys []string) bool {
+	if agent == "" {
+		return false
+	}
 	for _, key := range keys {
 		if key == agent {
 			return true

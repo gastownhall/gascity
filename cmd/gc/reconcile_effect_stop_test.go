@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
@@ -451,16 +452,21 @@ func TestNothingLiveStillConfirms(t *testing.T) {
 	}
 }
 
-// TestFinalizeNeverClosesOverAnHonoredWake (D7 rule 4). Kills a premise
-// close over a pending explicit wake AL1 honors: the stopped pool seat is
-// drained, not closed, and the wake is left to the next pass's start.
+// TestFinalizeNeverClosesOverAnHonoredWake (D7 rule 4, v5.10n). Kills a
+// premise close over a pending explicit wake AL1 honors, whatever the
+// allocation's desire (a row out of its template's desired set kept at the
+// max included), and a finalize that stamps the wake served: the stopped
+// pool seat is drained, not closed, its slept_at left, and the wake left to
+// the next pass's start.
 func TestFinalizeNeverClosesOverAnHonoredWake(t *testing.T) {
 	wake := []string{"pool_managed", "true", "wake_request", "explicit", "wake_requested_at", rowAt(-time.Second)}
-	s, got, _ := stopRun(t, signaled(drainOrphaned, wake...), func(e *selectionEntry) { e.Desired = desireWake }, func(p *effectPass, _ *fenceLeaf, store beads.Store, _ string) {
-		p.Writers[rowLeg] = fencedWriter{store: atomicClosing{store.(*beads.MemStore)}}
-	})
-	if s.Outcome != settledLanded || got.Status == "closed" || got.Metadata["state"] != string(session.StateDrained) || got.Metadata["wake_request"] != "explicit" {
-		t.Fatalf("settlement %+v, status %s, row %v; want drained, open, the wake kept", s, got.Status, got.Metadata)
+	for _, d := range []desire{desireWake, desireKeep} {
+		s, got, _ := stopRun(t, signaled(drainOrphaned, wake...), func(e *selectionEntry) { e.Desired, e.WakeHonored = d, true }, func(p *effectPass, _ *fenceLeaf, store beads.Store, _ string) {
+			p.Writers[rowLeg] = fencedWriter{store: atomicClosing{store.(*beads.MemStore)}}
+		})
+		if s.Outcome != settledLanded || got.Status == "closed" || got.Metadata["state"] != string(session.StateDrained) || got.Metadata["wake_request"] != "explicit" || got.Metadata["slept_at"] != "" {
+			t.Fatalf("%s: settlement %+v, status %s, row %v; want drained, open, no slept_at, the wake kept", d, s, got.Status, got.Metadata)
+		}
 	}
 }
 
@@ -593,6 +599,104 @@ func TestDormantStopOrigins(t *testing.T) {
 	}
 }
 
+// killedWoken is a killed row the allocation wants awake: a manual or
+// always-named seat after `gc session kill` (CONTRACT v5.10d).
+func killedWoken(e *selectionEntry) { e.Desired, e.InDesired = desireWake, true }
+
+// killedMeta is a killed row's metadata.
+var killedMeta = []string{"state", "asleep", "sleep_reason", "killed", "slept_at", rowAt(-time.Hour)}
+
+// dormantSettled applies a dormant stop's settlement s of row id to a fresh
+// planner's backoff table and returns the row's record.
+func dormantSettled(id string, s settlement) backoffRecord {
+	p := newPlanner(newFakePlannerClock(plannerT0), func() time.Duration { return time.Minute }, nil, newInflightMap(), nil, io.Discard)
+	k := rowKey{Leg: rowLeg, ID: id}
+	s.Key, s.Kind, s.Reason, s.At = k, intentStop, decideDormantStop, plannerT0
+	p.backoffSettled(s)
+	return p.backoff.Record(rowBackoffKey(k))
+}
+
+// TestDormantStopOfAGoneRuntimeSettlesNoop (CONTRACT v5.10d (a)). Kills a
+// killed seat's restart held by a row backoff: the pass read the runtime
+// alive before the kill's own stop ended it, so A4 proposed the dormant
+// stop; its fresh read finds nothing under the name, and the stop settles as
+// a no-op (no Stop, no write) that backs nothing off and notes the runtime
+// gone for the next pass.
+func TestDormantStopOfAGoneRuntimeSettlesNoop(t *testing.T) {
+	var before int
+	s, got, leaf := stopRun(t, killedMeta, killedWoken, func(_ *effectPass, l *fenceLeaf, _ beads.Store, _ string) {
+		if err := l.Stop("s-gc-1"); err != nil { // the kill's own stop, after the pass read
+			t.Fatal(err)
+		}
+		before = stops(l)
+	})
+	if s.Outcome != settledNoop || s.Cause != causeAlreadyGone || stops(leaf) != before || got.Metadata["state"] != "asleep" || got.Metadata["sleep_reason"] != "killed" {
+		t.Fatalf("settlement %+v, %d stops, row %v; want a no-op %q, no stop, the killed row untouched", s, stops(leaf)-before, got.Metadata, causeAlreadyGone)
+	}
+	if n := s.Facts.Noted; n == nil || !n.Gone || n.Name != "s-gc-1" {
+		t.Fatalf("noted %+v, want s-gc-1 gone", n)
+	}
+	if r := dormantSettled(got.ID, s); r.live(plannerT0) {
+		t.Fatalf("row backoff %+v after the gone runtime's no-op, want none", r)
+	}
+}
+
+// TestDormantStopRedecidedOverALiveRuntimeBacksOff (CONTRACT v5.10d (a),
+// scoped). Kills the already-gone no-op widened to every redecided stop: a
+// dormant stop whose fresh read finds a runtime still under the name, no
+// longer the row's own, refuses redecided and keeps its row backoff (the
+// lease churn the backoff paces).
+func TestDormantStopRedecidedOverALiveRuntimeBacksOff(t *testing.T) {
+	s, got, leaf := stopRun(t, killedMeta, killedWoken, func(_ *effectPass, l *fenceLeaf, _ beads.Store, _ string) {
+		if err := l.Stop("s-gc-1"); err != nil {
+			t.Fatal(err)
+		}
+		startRuntime(t, l.Fake, "s-gc-1", map[string]string{"GC_SESSION_ID": "gc-9", "GC_INSTANCE_TOKEN": "tok-9"})
+	})
+	if !leaf.IsRunning("s-gc-1") {
+		t.Fatal("premise: a runtime runs under the name")
+	}
+	if s.Outcome != settledRefused || s.Cause != causeRedecided || s.Facts.Noted != nil {
+		t.Fatalf("settlement %+v, want refused %q with nothing noted", s, causeRedecided)
+	}
+	if r := dormantSettled(got.ID, s); !r.live(plannerT0) || r.Cause != causeRedecided {
+		t.Fatalf("row backoff %+v, want a live redecided backoff", r)
+	}
+}
+
+// TestOnlyTheDormantStopOfAGoneRuntimeIsANoop (CONTRACT v5.10d (a),
+// scoped). Kills the already-gone no-op taken by any stop the fresh read
+// redecides, or over a corpse: on the same killed row and the same absent
+// runtime, the operator-dormant stop settles as the no-op, and an idle stop
+// refuses redecided, keeping its backoff; over a corpse the dormant stop
+// refuses redecided too.
+func TestOnlyTheDormantStopOfAGoneRuntimeIsANoop(t *testing.T) {
+	p, it, store, _ := admittedBeginOn(t, killedMeta, killedWoken)
+	b, err := store.Get(it.Key.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		reason string
+		class  runtimeClass
+		want   txStep
+	}{
+		{decideDormantStop, rtAbsent, txStep{Done: true, Cause: causeAlreadyGone}},
+		{decideIdleTimeout, rtAbsent, txStep{Refuse: causeRedecided}},
+		// A corpse is no runtime gone: still listed, its dead pane the
+		// recycle's or the close's to remove (the #7775 review's a4).
+		{decideDormantStop, rtCorpse, txStep{Refuse: causeRedecided}},
+	} {
+		v := txView{
+			It: intent{Key: it.Key, Kind: intentStop, Reason: c.reason, Basis: it.Basis}, World: p.World, Alloc: p.Alloc,
+			Row: sessionInfoFromBead(b), Meta: b.Metadata, RT: &txRuntime{Class: c.class}, Now: gatherNow,
+		}
+		if got := stopDecide(v); got.Done != c.want.Done || got.Cause != c.want.Cause || got.Refuse != c.want.Refuse {
+			t.Errorf("%s over runtime class %d: %+v, want %+v", c.reason, c.class, got, c.want)
+		}
+	}
+}
+
 // TestFinalizeKeepsAnOperatorHeldSeatOpen (#7612 review, S21; legacy's
 // held-seat rule). Kills a finalize that closes a pool seat an operator
 // holds: it ends drained, open.
@@ -618,6 +722,59 @@ func TestCloseRechecksWorkBeforeClosing(t *testing.T) {
 	})
 	if s.Outcome == settledLanded || got.Status == "closed" {
 		t.Fatalf("settlement %+v, status %s; want the close refused", s, got.Status)
+	}
+}
+
+// TestStopRefusesARuntimeReplacedBeforeTheStop (mc-rq4d0). Kills a
+// name-based Stop that kills whatever holds the name at the call: a stop the
+// fence passed on the row's own runtime refuses runtime_moved, stopping
+// nothing and finalizing nothing, when the runtime under the name is
+// replaced between the fence's read and the Stop, by another row's identity,
+// or by another session object carrying the row's own (its id, its creation
+// or both differing); with nothing replaced the stop goes ahead.
+func TestStopRefusesARuntimeReplacedBeforeTheStop(t *testing.T) {
+	s, got, leaf := stopRun(t, signaled(drainOrphaned), undesired(drainOrphaned), func(p *effectPass, leaf *fenceLeaf, _ beads.Store, _ string) {
+		p.seam = func(_ context.Context, at txSeam, _ intent, section, _ int) error {
+			if at == seamBeforeCall && section == 0 {
+				for k, v := range map[string]string{"GC_SESSION_ID": "gc-9", "GC_INSTANCE_TOKEN": "tok-9"} {
+					if err := leaf.SetMeta("s-gc-1", k, v); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			return nil
+		}
+	})
+	if stops(leaf) != 0 || s.Outcome == settledLanded || !signaledRow(got) {
+		t.Fatalf("another row's identity before the Stop: settlement %+v, %d stops, row %v; want no stop and no finalize", s, stops(leaf), got.Metadata)
+	}
+
+	for _, c := range []struct {
+		name, id, created string
+	}{
+		{"another object", "$2", "2"},
+		{"another object id", "$2", "1"},
+		{"another creation", "$1", "2"},
+		{"nothing replaced", "$1", "1"},
+	} {
+		replace := c.id != "$1" || c.created != "1"
+		var obs *freshObserver
+		s, got, _ = stopRun(t, signaled(drainOrphaned), undesired(drainOrphaned), func(p *effectPass, _ *fenceLeaf, _ beads.Store, id string) {
+			obs = &freshObserver{Fake: runtime.NewFake(), l: runtime.Liveness{Running: true, Alive: true, ObjectID: "$1", ObjectCreated: "1"}, env: map[string]string{"GC_SESSION_ID": id, "GC_INSTANCE_TOKEN": "tok-3"}}
+			if err := obs.Fake.Start(context.Background(), "s-gc-1", runtime.Config{}); err != nil {
+				t.Fatal(err)
+			}
+			p.Runtime = obs.tmux()
+			p.seam = func(_ context.Context, at txSeam, _ intent, section, _ int) error {
+				if at == seamBeforeCall && section == 0 {
+					obs.l.ObjectID, obs.l.ObjectCreated = c.id, c.created // the row's identity, on another object when replaced
+				}
+				return nil
+			}
+		})
+		if n := obs.Fake.CountCalls("Stop", "s-gc-1"); replace && (n != 0 || s.Cause != fenceRuntimeMoved) || !replace && n != 1 {
+			t.Fatalf("%s: settlement %+v, %d stops, row %v; want a stop only on the fenced object", c.name, s, n, got.Metadata)
+		}
 	}
 }
 

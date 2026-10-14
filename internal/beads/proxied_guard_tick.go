@@ -289,6 +289,9 @@ func (g *proxiedGuard) tickSteps(ctx context.Context, n int) proxiedGuardStep {
 	if err := ctx.Err(); err != nil {
 		return proxiedGuardStopped
 	}
+	// Every tick that runs refreshes the events-journal activation, whichever
+	// step it ends at; see step 3.
+	g.store.forgetJournalActivation()
 	pin, native, terminal := g.store.guardState()
 	if native == nil {
 		if terminal {
@@ -327,11 +330,13 @@ func (g *proxiedGuard) tickSteps(ctx context.Context, n int) proxiedGuardStep {
 		return step
 	}
 
-	// Step 3 — the events-journal slot. Deliberately a no-op: journal
-	// activation is applied once per open (openNativeDoltStorage) and gates no
-	// read, so there is nothing for a tick to keep consistent. The slot is named
-	// here rather than dropped so the next reader finds the answer instead of
-	// the question.
+	// Step 3 — the events journal. Activation gates the journal read, and bd's
+	// CLI re-resolves it on every write, so a scope that turns the journal off
+	// stops journaling at once. The tick forgets the cached answer before step
+	// 1, so a tick that ends early (an undecided record or cursors, a
+	// stand-down, a recovery) refreshes it too; the next journal question
+	// re-resolves it. Forgetting costs no I/O, so a scope nobody tails reads no
+	// config here.
 
 	// Step 4 — the socket-owner join, every ownerEvery-th tick.
 	if g.opts.ownerEvery > 0 && n%g.opts.ownerEvery == 0 {
@@ -804,5 +809,6 @@ func (s *ProxiedStore) adoptPin(pin Pin) bool {
 	s.root = pin.Root()
 	s.database = pin.Database()
 	s.verdict = nil
+	s.journal.forget()
 	return true
 }

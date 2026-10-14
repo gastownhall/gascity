@@ -83,6 +83,15 @@ type SessionIDInput struct {
 	ID string `path:"id" doc:"Session ID, alias, or runtime session_name."`
 }
 
+// SessionControlInput is the Huma input for body-less session control
+// endpoints that honor Idempotency-Key (POST .../session/{id}/stop and
+// .../session/{id}/wake).
+type SessionControlInput struct {
+	CityScope
+	ID             string `path:"id" doc:"Session ID, alias, or runtime session_name."`
+	IdempotencyKey string `header:"Idempotency-Key" required:"false" doc:"Idempotency key for safe retries."`
+}
+
 // SessionTranscriptInput is the Huma input for GET /v0/city/{cityName}/session/{id}/transcript.
 type SessionTranscriptInput struct {
 	CityScope

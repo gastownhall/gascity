@@ -196,6 +196,19 @@ func TestArmCloseDecides(t *testing.T) {
 		{name: "an undesired pool row under a wait hold keeps its slot", liveness: livenessGone, desired: desireDrain, drain: drainOrphaned, meta: []string{"state", "asleep", "wait_hold", "w-1"}},
 		{name: "an undesired pool row under a quarantine keeps its slot", liveness: livenessGone, desired: desireDrain, drain: drainOrphaned, meta: []string{"state", "asleep", "quarantined_until", at(time.Hour)}},
 		{name: "an undesired pool row under a hold timer keeps its slot", liveness: livenessGone, desired: desireDrain, drain: drainOrphaned, meta: []string{"state", "suspended", "held_until", at(time.Hour)}},
+		// Any row, not only a pool row: an orphan close never ends an
+		// operator's hold (the A14 generator's seed 660, mc-i7efm).
+		{name: "an undesired manual row under an operator's suspend is kept", liveness: livenessGone, desired: desireDrain, drain: drainOrphaned, meta: []string{"pool_managed", "", "pool_slot", "", "session_origin", "manual", "state", "suspended", "sleep_intent", "user-hold", "held_until", at(1000 * time.Hour), "suspended_at", at(-time.Minute)}},
+		{name: "an undesired manual row under a hold timer is kept", liveness: livenessGone, desired: desireDrain, drain: drainOrphaned, meta: []string{"pool_managed", "", "pool_slot", "", "session_origin", "manual", "state", "asleep", "held_until", at(time.Hour)}},
+		{name: "an undesired manual row under no hold closes", liveness: livenessGone, desired: desireDrain, drain: drainOrphaned, meta: []string{"pool_managed", "", "pool_slot", "", "session_origin", "manual", "state", "asleep"}, want: decideCloseOrphan},
+		// v5.10s: a non-pool row keeps only an operator's dormancy or a live,
+		// readable hold timer; a wait hold or an unreadable timer closes, as
+		// legacy's orphan close does.
+		{name: "an undesired manual row under a wait hold closes", liveness: livenessGone, desired: desireDrain, drain: drainOrphaned, meta: []string{"pool_managed", "", "pool_slot", "", "session_origin", "manual", "state", "asleep", "wait_hold", "w-1", "sleep_intent", "wait-hold"}, want: decideCloseOrphan},
+		{name: "an undesired manual row under an unreadable hold timer closes", liveness: livenessGone, desired: desireDrain, drain: drainOrphaned, meta: []string{"pool_managed", "", "pool_slot", "", "session_origin", "manual", "state", "asleep", "held_until", "not-a-time"}, want: decideCloseOrphan},
+		// M4: a held manual row whose claimed runtime died is kept, so A12
+		// classifies its dead runtime (no orphan close takes it).
+		{name: "an undesired manual row under an operator's suspend with a dead runtime is classified", liveness: livenessDead, desired: desireDrain, drain: drainOrphaned, meta: []string{"pool_managed", "", "pool_slot", "", "session_origin", "manual", "state", "active", "sleep_intent", "user-hold", "suspended_at", at(-time.Hour)}, want: decideZombie},
 		{name: "an undesired soft-suspended pool row heals asleep first (v5.9u)", liveness: livenessGone, desired: desireDrain, drain: drainOrphaned, meta: []string{"state", "suspended", "suspended_at", at(-time.Minute)}, want: decideSuspendHeal},
 		{name: "and once healed, with its suspended_at left, closes", liveness: livenessGone, desired: desireDrain, drain: drainOrphaned, meta: []string{"state", "asleep", "suspended_at", at(-time.Minute)}, want: decideCloseOrphan},
 		{

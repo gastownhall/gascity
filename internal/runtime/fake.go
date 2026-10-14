@@ -43,6 +43,7 @@ type Fake struct {
 	PendingErrors           map[string]error // per-session Pending errors for testing
 	Responses               map[string][]InteractionResponse
 	SleepCapabilityValue    SessionSleepCapability
+	TurnInterruptModeValue  TurnInterruptMode // reported by TurnInterruptMode; empty reads as keystroke
 	WaitForIdleErrors       map[string]error
 	WaitForIdleSequence     map[string][]error
 	DialogErrors            map[string]error
@@ -852,6 +853,14 @@ func (f *Fake) SleepCapability(string) SessionSleepCapability {
 		return SessionSleepCapabilityFull
 	}
 	return f.SleepCapabilityValue
+}
+
+// TurnInterruptMode returns the configured turn-interrupt mode. It records no
+// call: like SleepCapability it reports a fixed trait of the runtime.
+func (f *Fake) TurnInterruptMode(string) TurnInterruptMode {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.TurnInterruptModeValue
 }
 
 // LastStartConfig returns the Config used in the most recent Start call for
