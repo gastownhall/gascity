@@ -139,6 +139,7 @@ type Admission struct {
 	Entry *Entry
 
 	rec        *Recorder
+	store      *opjournal.Store
 	kind       opjournal.Kind
 	unrecorded string
 	done       atomic.Bool
@@ -150,7 +151,8 @@ type Admission struct {
 // registry; nil (the CLI) means never adopt. Degraded, when set, is told of
 // every store failure the recorder degrades past. Logger receives the
 // recorder's rate-limited degrade lines and late-result lines; nil is
-// slog.Default().
+// slog.Default(). Done, when closed (its owner shutting down), ends any
+// background close retry, leaving the op to the sweeper; nil never closes.
 type Recorder struct {
 	Mode     gate.Mode
 	Executor opjournal.ExecutorKind
@@ -159,6 +161,7 @@ type Recorder struct {
 	Clock    clock.Clock
 	Degraded func(Degrade)
 	Logger   *slog.Logger
+	Done     <-chan struct{}
 
 	// sleep waits between close retries; nil is time.Sleep.
 	sleep func(time.Duration)
@@ -247,7 +250,7 @@ func (r *Recorder) Admit(req Request) (*Admission, error) {
 		return r.cannotRecord(req.Kind, key, minted, StagePropose, proposeReason(err), err)
 	case created, ownAmbiguousCreate(minted, op, r.Executor):
 		r.count(req.Kind, StageAdmit, ResultRecorded, "")
-		return r.execute(key, minted, op, entry, false), nil
+		return r.execute(st, key, minted, op, entry, false), nil
 	case op.Status == opjournal.StatusClosed:
 		release()
 		return r.replay(key, minted, op), nil
@@ -275,9 +278,9 @@ func ownAmbiguousCreate(minted bool, op opjournal.Op, executor opjournal.Executo
 // recording reports whether the mode records at all.
 func (r *Recorder) recording() bool { return r.Mode == gate.Auto || r.Mode == gate.Require }
 
-// execute is an Execute admission over a recorded op.
-func (r *Recorder) execute(key string, minted bool, op opjournal.Op, entry *Entry, adopted bool) *Admission {
-	return &Admission{Decision: Execute, Key: key, Minted: minted, Recorded: true, Adopted: adopted, Op: op, Entry: entry, rec: r, kind: op.Kind}
+// execute is an Execute admission over a recorded op in st.
+func (r *Recorder) execute(st *opjournal.Store, key string, minted bool, op opjournal.Op, entry *Entry, adopted bool) *Admission {
+	return &Admission{Decision: Execute, Key: key, Minted: minted, Recorded: true, Adopted: adopted, Op: op, Entry: entry, rec: r, store: st, kind: op.Kind}
 }
 
 // replay is a Replay admission over a closed op.
@@ -327,7 +330,7 @@ func (r *Recorder) adopt(st *opjournal.Store, key string, minted bool, op opjour
 	adopted, err := st.Adopt(op.ID, op.Attempt, string(ExecutorAPI), now.Add(ExecutionBound))
 	if err == nil {
 		r.count(op.Kind, StageAdopt, ResultAdopted, "")
-		return r.execute(key, minted, adopted, entry, true), nil
+		return r.execute(st, key, minted, adopted, entry, true), nil
 	}
 	release()
 	if errors.Is(err, opjournal.ErrAlreadyTerminal) {
@@ -429,9 +432,6 @@ func (a *Admission) Finish(res Result) Finished {
 	}
 	r := a.rec
 	if !a.Recorded {
-		if r.recording() {
-			r.count(a.kind, StageClose, ResultUnrecorded, a.unrecorded)
-		}
 		return Finished{}
 	}
 	// Only a recorder that adopts (the API, with an in-flight registry)
@@ -450,29 +450,33 @@ func (a *Admission) Finish(res Result) Finished {
 			panic(p)
 		}
 	}()
-	st, err := r.Open()
-	if err == nil {
-		var op opjournal.Op
-		op, err = r.closeWithRetries(st, a.Op, res.Outcome)
-		if err == nil {
-			a.release()
-			r.count(a.Op.Kind, StageClose, ResultClosed, "")
-			return Finished{Closed: true, Op: op}
-		}
-		if errors.Is(err, opjournal.ErrAlreadyTerminal) {
-			a.release()
-			r.late(a.Op, res.Outcome, err)
-			return Finished{Late: true}
-		}
+	op, err := r.closeWithRetries(a.store, a.Op, res.Outcome)
+	switch {
+	case err == nil:
+		a.release()
+		r.count(a.Op.Kind, StageClose, ResultClosed, "")
+		return Finished{Closed: true, Op: op}
+	case errors.Is(err, opjournal.ErrAlreadyTerminal):
+		a.release()
+		r.late(a.Op, res.Outcome, err)
+		return Finished{Late: true}
+	case errors.Is(err, opjournal.ErrInvalidRequest):
+		// The legacy path's outcome is invalid: a bug in the caller, not a
+		// store failure, so no degrade and no retry.
+		a.release()
+		r.logger().Error("op journal: invalid outcome; op left to the sweeper", "op", a.Op.ID,
+			"surface", surface(r.Executor), "arm", res.Outcome.Arm, "reason", res.Outcome.Reason, "err", err)
+		r.count(a.Op.Kind, StageClose, ResultFailed, "")
+		return Finished{}
 	}
 	r.degrade(a.Op.Kind, StageClose, degradeReason(err), err)
-	if r.Inflight == nil || st == nil || errors.Is(err, opjournal.ErrInvalidRequest) {
+	if r.Inflight == nil {
 		a.release()
 		r.count(a.Op.Kind, StageClose, ResultFailed, "")
 		return Finished{}
 	}
 	done := make(chan struct{})
-	go a.closeInBackground(st, res.Outcome, done)
+	go a.closeInBackground(res.Outcome, done)
 	return Finished{Background: done}
 }
 
@@ -485,12 +489,13 @@ const (
 )
 
 // closeWithRetries closes op with outcome, retrying a failed close
-// closeRetries times. ErrAlreadyTerminal and a refused outcome are final.
+// closeRetries times, or fewer once Done has closed. ErrAlreadyTerminal and
+// a refused outcome are final.
 func (r *Recorder) closeWithRetries(st *opjournal.Store, op opjournal.Op, outcome opjournal.Outcome) (opjournal.Op, error) {
 	var err error
 	for i := range closeRetries {
-		if i > 0 {
-			r.wait(closeRetryGap)
+		if i > 0 && !r.wait(closeRetryGap) {
+			break
 		}
 		var closedOp opjournal.Op
 		closedOp, err = st.CloseKnown(op, outcome, string(r.Executor))
@@ -501,16 +506,16 @@ func (r *Recorder) closeWithRetries(st *opjournal.Store, op opjournal.Op, outcom
 	return opjournal.Op{}, err
 }
 
-// closeInBackground keeps closing the op, backing off, until it closes or
-// its finish_by passes (the sweeper owns it then), then releases the entry.
-func (a *Admission) closeInBackground(st *opjournal.Store, outcome opjournal.Outcome, done chan<- struct{}) {
+// closeInBackground keeps closing the op, backing off, until it closes, its
+// finish_by passes (the sweeper owns it then) or the recorder's Done closes,
+// then releases the entry.
+func (a *Admission) closeInBackground(outcome opjournal.Outcome, done chan<- struct{}) {
 	r := a.rec
 	defer close(done)
 	defer a.release()
 	gap := closeRetryGap
-	for !r.Clock.Now().After(a.Op.FinishBy) {
-		r.wait(gap)
-		_, err := st.CloseKnown(a.Op, outcome, string(r.Executor))
+	for !r.Clock.Now().After(a.Op.FinishBy) && r.wait(gap) {
+		_, err := a.store.CloseKnown(a.Op, outcome, string(r.Executor))
 		switch {
 		case err == nil:
 			r.count(a.Op.Kind, StageClose, ResultClosed, "")
@@ -531,13 +536,30 @@ func (a *Admission) release() {
 	}
 }
 
-// wait sleeps d.
-func (r *Recorder) wait(d time.Duration) {
+// wait sleeps d and reports whether to go on: false once Done has closed.
+func (r *Recorder) wait(d time.Duration) bool {
 	if r.sleep != nil {
 		r.sleep(d)
-		return
+		return !r.stopped()
 	}
-	time.Sleep(d)
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return true
+	case <-r.Done:
+		return false
+	}
+}
+
+// stopped reports whether Done has closed.
+func (r *Recorder) stopped() bool {
+	select {
+	case <-r.Done:
+		return true
+	default:
+		return false
+	}
 }
 
 // openReason is the unrecorded reason for a store that did not open.

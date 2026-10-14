@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/opjournal"
-	"github.com/gastownhall/gascity/internal/telemetry"
 )
 
 // SweepStats counts what one Sweep pass did.
@@ -70,5 +69,5 @@ func Sweep(st *opjournal.Store, now time.Time, limit int, by string) (SweepStats
 }
 
 func countSweep(kind opjournal.Kind, result string) {
-	telemetry.RecordOpRecord(context.Background(), string(kind), SurfaceController, StageSweep, result, "")
+	recordOpRecord(context.Background(), string(kind), SurfaceController, StageSweep, result, "")
 }

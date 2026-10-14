@@ -88,9 +88,12 @@ func surface(e opjournal.ExecutorKind) string {
 	return string(e)
 }
 
+// recordOpRecord is telemetry.RecordOpRecord; tests capture it.
+var recordOpRecord = telemetry.RecordOpRecord
+
 // count records one recording step.
 func (r *Recorder) count(kind opjournal.Kind, stage, result, reason string) {
-	telemetry.RecordOpRecord(context.Background(), string(kind), surface(r.Executor), stage, result, reason)
+	recordOpRecord(context.Background(), string(kind), surface(r.Executor), stage, result, reason)
 }
 
 // DegradeLogInterval is how often a recorder logs one degrade line per

@@ -699,10 +699,11 @@ func RecordDrainTransition(ctx context.Context, sessionName, reason, transition 
 // (gc.ops.record.total). kind is the op kind; surface is api, cli or
 // controller; stage is admit, close, adopt or sweep; result is recorded,
 // unrecorded, replayed, adopted, busy, key_reuse, refused, closed, left_open,
-// failed or late. unrecordedReason says why a request ran unrecorded
-// (store_unavailable, type_unregistered, no_namespace, payload_too_large,
-// invalid_key, unmaterialized_target, no_generation, propose_error) and is
-// empty otherwise. Every value is a closed token, so the label set stays
+// failed or late. unrecordedReason says why a request ran unrecorded or, in
+// require mode, was refused (store_unavailable, type_unregistered,
+// no_namespace, payload_too_large, invalid_key, invalid_request,
+// unmaterialized_target, no_generation, propose_error); it is empty for every
+// other result. Every value is a closed token, so the label set stays
 // bounded; no op id or key is ever a label.
 func RecordOpRecord(ctx context.Context, kind, surface, stage, result, unrecordedReason string) {
 	initInstruments()
