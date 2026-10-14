@@ -47,6 +47,7 @@ var integrationPackagesShards = map[string]int{
 	"//internal/runtime/tmux:tmux_test":                          3,
 	"//internal/session:session_test":                            1,
 	"//internal/storebinding/beadsworkspace:beadsworkspace_test": 1,
+	"//internal/storebinding:storebinding_test":                  1,
 	"//test/containerhost:containerhost_test":                    1,
 	"//test/dashport:dashport_test":                              1,
 	"//cmd/gc:gc_bd_runtime_custom_types_heal_test":              1,
