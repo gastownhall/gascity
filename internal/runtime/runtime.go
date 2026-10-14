@@ -930,8 +930,9 @@ type LiveRuntime struct {
 // provider lacks the capability.
 type ProcessTableScanner interface {
 	// FindRuntimesBySessionID returns live agent root processes carrying
-	// GC_SESSION_ID equal to id. If id is empty, it returns all live agent root
-	// processes with any GC_SESSION_ID set.
+	// GC_SESSION_ID equal to id. If id is empty, it returns the orphan sweep's
+	// candidates: live agent roots with any GC_SESSION_ID set that were
+	// reparented to init or the user subreaper (proctable.OrphanCandidate).
 	//
 	// Best-effort implementations may return both partial results and a non-nil
 	// error; callers should proceed with any returned results.

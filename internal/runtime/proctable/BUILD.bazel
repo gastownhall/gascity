@@ -32,21 +32,14 @@ go_library(
     importpath = "github.com/gastownhall/gascity/internal/runtime/proctable",
     visibility = ["//:__subpackages__"],
     deps = [
+        "//internal/pidutil",
         "//internal/runtime",
     ] + select({
-        "@rules_go//go/platform:android": [
-            "//internal/pidutil",
-        ],
         "@rules_go//go/platform:darwin": [
-            "//internal/pidutil",
             "@org_golang_x_sys//unix",
         ],
         "@rules_go//go/platform:ios": [
-            "//internal/pidutil",
             "@org_golang_x_sys//unix",
-        ],
-        "@rules_go//go/platform:linux": [
-            "//internal/pidutil",
         ],
         "//conditions:default": [],
     }),

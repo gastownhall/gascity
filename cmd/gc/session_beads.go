@@ -3796,6 +3796,43 @@ func processRootReapable(live runtime.LiveRuntime, selfPID, subreaperPID int) bo
 		!live.ParentIsProviderInfrastructure && pidutil.IsReparentedOrphan(live.PPID, subreaperPID)
 }
 
+// processScanErrorLogRepeat is how often the orphan sweep repeats a scan
+// error of an unchanged shape (mc-ygved): unreadable entries recur every
+// tick on a busy host and say nothing new.
+const processScanErrorLogRepeat = 10 * time.Minute
+
+// processScanErrorLogs paces the orphan sweep's scan-error line per city.
+var processScanErrorLogs = &scanErrorLog{last: map[string]scanErrorLogged{}}
+
+// scanErrorLog remembers, per city, the last scan error the sweep logged.
+type scanErrorLog struct {
+	mu   sync.Mutex
+	last map[string]scanErrorLogged
+}
+
+type scanErrorLogged struct {
+	shape string
+	at    time.Time
+}
+
+// report reports whether err is logged now: a failure of the whole scan
+// always is (it bars rule 2 and must never be hidden); unreadable entries
+// are, the first time their shape (proctable.ScanErrorShape) is seen, and
+// again once processScanErrorLogRepeat has passed.
+func (l *scanErrorLog) report(city string, err error, now time.Time) bool {
+	if proctable.HasWholeScanFailure(err) {
+		return true
+	}
+	shape := proctable.ScanErrorShape(err)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if prev, ok := l.last[city]; ok && prev.shape == shape && now.Sub(prev.at) < processScanErrorLogRepeat {
+		return false
+	}
+	l.last[city] = scanErrorLogged{shape: shape, at: now}
+	return true
+}
+
 // sweepProcessTableOrphans terminates untracked, reparented process roots of
 // this city whose incarnation is over (processRootIncarnationOver). inv, when
 // set, is the tick's inventory view; without it, or when its pass is
@@ -3833,7 +3870,7 @@ func sweepProcessTableOrphans(
 		return 0
 	}
 	found, err := scanner.FindRuntimesBySessionID("")
-	if err != nil {
+	if err != nil && processScanErrorLogs.report(cityPath, err, time.Now()) {
 		fmt.Fprintf(stderr, "session reconciler: scanning process table for orphaned runtimes: %s\n", proctable.SummarizeScanError(err)) //nolint:errcheck
 	}
 	// IsTracked rests on the provider's session listing and per-session
