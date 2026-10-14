@@ -148,7 +148,9 @@ func (p *Provider) InterruptTurn(ctx context.Context, name, turnID string) (runt
 // WaitTurnEnded implements [runtime.TurnFenceProvider] by polling uncached
 // snapshots, first after turnPollInitial and then at doubling intervals up to
 // turnPollMax. A thread no longer bound to name has ended its turn. A failed
-// read is remembered and the poll goes on.
+// read is remembered and the poll goes on. When the bound elapses before any
+// read succeeded, the state is zero and the error carries the last read error,
+// if a read was made at all.
 func (p *Provider) WaitTurnEnded(ctx context.Context, name, turnID string, timeout time.Duration) (runtime.TurnState, error) {
 	if turnID == "" {
 		return runtime.TurnState{}, fmt.Errorf("%w: waiting on a turn of %q", runtime.ErrTurnUnnamed, name)
@@ -168,7 +170,7 @@ func (p *Provider) WaitTurnEnded(ctx context.Context, name, turnID string, timeo
 			if err := ctx.Err(); err != nil {
 				return last, err
 			}
-			if !read {
+			if !read && lastErr != nil {
 				return last, fmt.Errorf("%w: session %q turn %q after %s: last read: %w", runtime.ErrTurnNotEnded, name, turnID, timeout, lastErr)
 			}
 			return last, fmt.Errorf("%w: session %q turn %q after %s", runtime.ErrTurnNotEnded, name, turnID, timeout)

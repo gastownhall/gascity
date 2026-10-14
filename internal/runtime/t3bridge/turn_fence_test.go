@@ -530,3 +530,23 @@ func TestInterruptTurnRefencesBeforeARetry(t *testing.T) {
 		}
 	})
 }
+
+// Kills a WaitTurnEnded whose bound elapses before its first read and then
+// reports a malformed "last read" clause naming no error.
+func TestWaitTurnEndedBoundBeforeTheFirstRead(t *testing.T) {
+	server := newTurnFenceServer(t, turnRunning("t1"))
+	p := newTurnFenceTestProvider(t, server)
+	turnPollInitial = 250 * time.Millisecond
+	for _, timeout := range []time.Duration{0, 50 * time.Millisecond} {
+		st, err := p.WaitTurnEnded(t.Context(), turnFenceSession, "thread-agent-a/t1", timeout)
+		if !errors.Is(err, runtime.ErrTurnNotEnded) || st.Active() {
+			t.Fatalf("timeout %s = %+v, %v; want ErrTurnNotEnded with no state read", timeout, st, err)
+		}
+		if strings.Contains(err.Error(), "%!") || strings.Contains(err.Error(), "last read") {
+			t.Fatalf("timeout %s error = %q, want no last-read clause when nothing was read", timeout, err)
+		}
+	}
+	if calls := server.snapshotCalls(); calls != 0 {
+		t.Fatalf("snapshot reads = %d, want none", calls)
+	}
+}
