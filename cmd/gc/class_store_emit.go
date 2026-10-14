@@ -311,15 +311,23 @@ func (s *emittingClassStore) emitCreated(created beads.Bead, err error) {
 	if err != nil {
 		return
 	}
+	if emission, ok := s.createdEmission(created); ok {
+		s.emit(emission)
+	}
+}
+
+// createdEmission is emitCreated's row, for a caller that records several in
+// one journal open.
+func (s *emittingClassStore) createdEmission(created beads.Bead) (classStoreEmission, bool) {
 	if strings.TrimSpace(created.ID) == "" {
 		warnClassStoreEmit(errors.New("bead.created skipped: the create returned an empty id"))
-		return
+		return classStoreEmission{}, false
 	}
 	bead, ok := s.snapshot(created.ID)
 	if !ok {
 		bead = created
 	}
-	s.emit(classStoreEmission{eventType: events.BeadCreated, bead: bead})
+	return classStoreEmission{eventType: events.BeadCreated, bead: bead}, true
 }
 
 // emitUpdated records bead.updated for a write that cannot have changed the
@@ -345,11 +353,19 @@ func (s *emittingClassStore) emitUpdated(id string) {
 // carried one, so a committed close still rides bead.closed with a non-empty
 // status, and skipped otherwise.
 func (s *emittingClassStore) emitAfterUpdate(id string, opts beads.UpdateOpts, wasClosed bool) {
+	if emission, ok := s.afterUpdateEmission(id, opts, wasClosed); ok {
+		s.emit(emission)
+	}
+}
+
+// afterUpdateEmission is emitAfterUpdate's row, for a caller that records
+// several in one journal open.
+func (s *emittingClassStore) afterUpdateEmission(id string, opts beads.UpdateOpts, wasClosed bool) (classStoreEmission, bool) {
 	bead, ok := s.snapshot(id)
 	if !ok {
 		if opts.Status == nil {
 			warnClassStoreEmit(fmt.Errorf("bead.updated skipped: %s could not be re-read after the update", id))
-			return
+			return classStoreEmission{}, false
 		}
 		bead = beads.Bead{ID: id, Status: *opts.Status, Metadata: maps.Clone(opts.Metadata)}
 	}
@@ -357,7 +373,7 @@ func (s *emittingClassStore) emitAfterUpdate(id string, opts beads.UpdateOpts, w
 	if !wasClosed && beadStatusIsClosed(bead.Status) {
 		eventType = events.BeadClosed
 	}
-	s.emit(classStoreEmission{eventType: eventType, bead: bead})
+	return classStoreEmission{eventType: eventType, bead: bead}, true
 }
 
 // emitClosed records bead.closed for a close this store proved committed.
