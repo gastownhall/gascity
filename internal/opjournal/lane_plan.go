@@ -391,6 +391,7 @@ type contentItem struct {
 	starter  bool // starts a turn on its own
 	rider    bool // after_turn: rides only with a starter
 	stop     bool // a blocking waiter: nothing after it is taken
+	closing  bool // this pass closes it
 }
 
 // planTake picks what one Take carries, given the probe (DES-O1 §4.4's when
@@ -575,6 +576,7 @@ func (tp *takePlan) planContent(rp rulesPlan, probe Probe, now time.Time) *conte
 				it.eligible, it.starter = true, true
 			} else {
 				tp.close(rp, op, Outcome{Arm: ArmSkipped, Reason: ReasonBusy}, now)
+				it.closing = true
 			}
 		case m.When == WhenSteer:
 			switch {
@@ -584,6 +586,7 @@ func (tp *takePlan) planContent(rp rulesPlan, probe Probe, now time.Time) *conte
 				it.eligible = true
 			case m.OnUnsupported == FallbackFail:
 				tp.close(rp, op, Outcome{Arm: ArmFailed, Reason: ReasonUnsupported}, now)
+				it.closing = true
 			default:
 				tp.wait(op, WaitBusy, "")
 				tp.busy = true
@@ -597,15 +600,16 @@ func (tp *takePlan) planContent(rp rulesPlan, probe Probe, now time.Time) *conte
 	if inBand || boundary == TriNo {
 		mode = LinkJoins
 	}
-	batch := tp.formBatch(items, mode, inBand, rp.baseSeq)
+	batch := tp.formBatch(items, mode, inBand, rp.baseSeq, caps.Dedup)
 	if batch != nil {
 		tp.busy = false
 	}
 	return batch
 }
 
-// formBatch picks the batch from the classified items.
-func (tp *takePlan) formBatch(items []contentItem, mode LinkMode, ridersFree bool, baseSeq uint64) *contentBatch {
+// formBatch picks the batch from the classified items. whole says the runtime
+// deduplicates by delivery key, so a replay group goes whole or not at all.
+func (tp *takePlan) formBatch(items []contentItem, mode LinkMode, ridersFree bool, baseSeq uint64, whole bool) *contentBatch {
 	for {
 		head := -1
 		for i, it := range items {
@@ -625,7 +629,15 @@ func (tp *takePlan) formBatch(items []contentItem, mode LinkMode, ridersFree boo
 		full := false
 		replay := items[head].e.maybe > 0
 		if replay {
-			picked, full = pickReplay(items, head)
+			var split bool
+			picked, full, split = pickReplay(items, head, whole)
+			if split {
+				// The head waits for its group and, as a blocking waiter,
+				// holds everything after it (I8).
+				tp.wait(items[head].e.op, WaitReplayGroup, "")
+				items[head].eligible, items[head].stop = false, true
+				continue
+			}
 		} else {
 			picked, full = pickFresh(items, head)
 		}
@@ -654,23 +666,35 @@ func (tp *takePlan) formBatch(items []contentItem, mode LinkMode, ridersFree boo
 	}
 }
 
-// pickReplay picks the head's replay group: the eligible items before the
-// first stop that share its delivery key, within the limits.
-func pickReplay(items []contentItem, head int) ([]int, bool) {
+// pickReplay picks the head's replay group: the open items that share its
+// delivery key (an item this pass closes has left the group), within the
+// limits. A member that is not eligible, or sits behind a stop, is left for
+// a later Take; when whole is set that would split the group, so split is
+// reported and nothing is picked.
+func pickReplay(items []contentItem, head int, whole bool) (picked []int, full, split bool) {
 	key := items[head].e.op.DeliveryKey
 	var lim batchLimits
-	var picked []int
-	for i := head; i < len(items) && !items[i].stop; i++ {
-		it := items[i]
-		if !it.eligible || (i != head && (key == "" || it.e.op.DeliveryKey != key)) {
+	stopped := false
+	for i, it := range items {
+		if it.stop && i != head {
+			stopped = true
+		}
+		member := i == head || (key != "" && it.e.op.DeliveryKey == key && it.e.maybe > 0)
+		if !member || it.closing {
 			continue
 		}
-		if !lim.admit(it.e.op) {
-			return picked, true
+		if !it.eligible || stopped || full || !lim.admit(it.e.op) {
+			if whole {
+				return nil, false, true
+			}
+			if it.eligible && !stopped && i > head {
+				full = true
+			}
+			continue
 		}
 		picked = append(picked, i)
 	}
-	return picked, false
+	return picked, full, false
 }
 
 // pickFresh picks the longest fresh prefix from head: it stops at a stop, at

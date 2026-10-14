@@ -48,6 +48,7 @@ go_test(
         "lane_harness_test.go",
         "lane_plan_test.go",
         "lane_property_test.go",
+        "lane_replay_test.go",
         "lane_store_test.go",
         "lane_take_done_test.go",
         "lane_text_test.go",

@@ -71,9 +71,12 @@
 // re-reading after a refusal or an unknown error. An op whose lease expired
 // is re-taken with its delivery key, so a deduplicating runtime replays it;
 // on any other runtime the redelivery ends with RedeliveryNote (D-NOTE).
-// Delivery keys are <head op id>:<the head's lane_seq at the minting Take>,
-// so no key ever names two contents. Delivered text names no identifier
-// (I14). A lane store must apply guarded batches (NewLaneStore); there is no
+// Delivery keys are <head op id>:<the head's lane_seq at the minting Take>.
+// A deduplicating runtime gets a maybe-delivered group whole or not at all
+// (a member that closed leaves it; a member that cannot go yet holds the
+// head as a replay_group waiter), so every send under a key is a subset of
+// every earlier send under it (L2); any other runtime may get a group in
+// parts. Delivered text names no identifier (I14). A lane store must apply guarded batches (NewLaneStore); there is no
 // production caller until OJ-12.
 //
 // # Executor and open rows

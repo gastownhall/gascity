@@ -321,6 +321,11 @@ const (
 	WaitSettling           WaitReason = "settling"
 	WaitBlocked            WaitReason = "blocked"
 	WaitBatchFull          WaitReason = "batch_full"
+	// WaitReplayGroup is the head of a maybe-delivered group that a
+	// deduplicating runtime must get whole: another open member of the group
+	// is not eligible yet, and a part sent under the group's key would make
+	// the runtime drop the rest.
+	WaitReplayGroup WaitReason = "replay_group"
 )
 
 // ClosedOp is an op a pass closed.
