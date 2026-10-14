@@ -24,7 +24,8 @@ import (
 // first write.
 
 // MaxGuardedItems caps one guarded batch, matching the native batch applier's
-// per-request bound.
+// per-request bound. A caller that adds its own bookkeeping row to a batch of
+// content items carries at most MaxGuardedItems-1 of them.
 const MaxGuardedItems = 100
 
 // GuardedBatcher applies a list of guarded writes as one all-or-nothing
@@ -32,7 +33,14 @@ const MaxGuardedItems = 100
 type GuardedBatcher interface {
 	// ApplyGuarded validates b, then applies every item or none. A refusal
 	// raised by an item is a *BatchItemError naming it; a batch refused by
-	// validation matches ErrInvalidGuardedBatch and writes nothing.
+	// validation matches ErrInvalidGuardedBatch and writes nothing. When
+	// several items would refuse, which one is named depends on the backend.
+	//
+	// Those refusals, and ErrGuardedBatchUnsupported, wrote nothing. Any other
+	// error (a dropped connection, a failed save, a context canceled mid-write)
+	// may or may not have committed: re-read the rows before retrying, since a
+	// committed batch replayed refuses its own pinned creates with
+	// ErrAlreadyExists.
 	ApplyGuarded(ctx context.Context, b GuardedBatch) (GuardedResult, error)
 }
 
@@ -60,7 +68,9 @@ type GuardedItem struct {
 	// Create inserts a new row under its pinned ID. The ID is required and the
 	// create is create-only: an ID that already names a row refuses the whole
 	// batch with ErrAlreadyExists. A guarded create carries no edges (ParentID,
-	// Needs, Dependencies).
+	// Needs, Dependencies) and is written as given: a wrapper's create policy
+	// (the storage tier a policy wrapper picks for Create, say) does not apply,
+	// so the caller sets NoHistory and Ephemeral itself.
 	Create *Bead
 	// Update patches one existing row.
 	Update *GuardedUpdate
@@ -74,7 +84,11 @@ type GuardedUpdate struct {
 	ID   string
 	Opts UpdateOpts
 	// ExpectedRevision guards the update: the batch is refused unless the row's
-	// revision equals it. Nil applies the update unguarded.
+	// revision equals it. Nil applies the update unguarded, with no ordering
+	// against a concurrent writer. On the native store an unguarded label edit
+	// derives its label revision from a read outside the batch's transaction,
+	// so two concurrent unguarded label edits can stamp the same revision;
+	// guard a label edit whose revision the caller relies on.
 	ExpectedRevision *int64
 }
 
@@ -83,6 +97,8 @@ type GuardedResult struct {
 	// Revisions maps every row the batch created or updated to its revision
 	// after the batch, equal to what a later Get reports. Revisions follow the
 	// ConditionalWriter revision contract: compare them, never order them.
+	// A newly created row's revision may be 0 (SQLite reports 0); it is still
+	// a valid equality guard for the next batch.
 	Revisions map[string]int64
 }
 

@@ -350,6 +350,10 @@ func TestCachingStoreGuardedBatchNotifiesEachRowOnce(t *testing.T) {
 	}}); err != nil {
 		t.Fatalf("ApplyGuarded: %v", err)
 	}
+	// The cache announces a guarded create as bead.updated, as it does a row
+	// a Tx creates (refreshTxTouchedBeads), while the CLI emitter announces the
+	// same write as bead.created. The two paths knowingly diverge, and this
+	// pins the cache's side of it.
 	want := []string{"bead.updated gc-gbnew", "bead.closed " + row.ID}
 	if len(events) != len(want) || events[0] != want[0] || events[1] != want[1] {
 		t.Fatalf("events = %v, want %v", events, want)
