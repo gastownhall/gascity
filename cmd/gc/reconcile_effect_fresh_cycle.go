@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"time"
 
@@ -49,14 +48,15 @@ func stopDecideAfterProbe(v txView, prev freshCyclePrev, err error) txStep {
 }
 
 // freshCycleDefers is legacy's defer, on the probe's answer: the previous
-// bead still open, or this incarnation awake since after it closed. A probe
-// that expired defers (v5.10q); any other failure, or a bead no store
-// holds, cycles, as legacy fails toward the cycle.
+// bead still open, or this incarnation awake since after it closed. A read
+// that failed, expired included, defers: it proves the bead neither open
+// nor closed (the #7879 review; legacy cycles). No previous bead, or one no
+// store holds, cycles.
 func freshCycleDefers(row session.Info, prev freshCyclePrev, err error) bool {
 	switch {
-	case errors.Is(err, errProbeExpired):
+	case err != nil:
 		return true
-	case err != nil, prev.none, !prev.found:
+	case prev.none, !prev.found:
 		return false
 	case !convoycore.IsTerminalStatus(prev.bead.Status):
 		return true

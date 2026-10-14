@@ -14,8 +14,9 @@ import (
 // onto the new bead, so its next start is a fresh conversation. The stop
 // defers, in the effect, while the previous bead is still open, or when this
 // incarnation woke after that bead closed (it is already fresh); the
-// lookup's expiry defers too, and any other lookup failure cycles, as
-// legacy fails toward the cycle. A defer refuses with the row's backoff and
+// lookup's failure defers too, as a failed read proves nothing (legacy
+// fails toward the cycle). A defer refuses on the cycle's own backoff key
+// (freshCycleBackoffKey), which holds no other intent of the row, and
 // writes nothing (reconcile_effect_fresh_cycle.go).
 
 // decideFreshCycle is the fresh cycle's stop reason.
@@ -31,7 +32,17 @@ func (r *rowFacts) freshCycle() (intent, bool) {
 		return intent{}, false
 	}
 	bead := strings.TrimSpace(e.AssignedWork.BeadID)
-	if bead == "" || strings.TrimSpace(info.CurrentClaimBeadID) == bead || operatorDormantStop(info, r.w.Now) || !r.freshOwnAlive() {
+	if bead == "" || strings.TrimSpace(info.CurrentClaimBeadID) == bead || operatorDormantStop(info, r.w.Now) {
+		return intent{}, false
+	}
+	// A deferred or refused cycle backs off its own key (the #7879 review):
+	// while that record is live the row falls through to its later arms,
+	// and is decided again when it releases.
+	if rec, ok := r.w.Backoff[freshCycleBackoffKey(r.k)]; ok && rec.live(r.w.Now) {
+		r.after(rec.Until.Sub(r.w.Now))
+		return intent{}, false
+	}
+	if !r.freshOwnAlive() {
 		return intent{}, false
 	}
 	res, _ := r.w.Templates.lookup(info)

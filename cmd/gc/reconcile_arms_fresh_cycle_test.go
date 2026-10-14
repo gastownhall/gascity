@@ -58,8 +58,8 @@ func TestArmFreshCycle(t *testing.T) {
 
 // TestFreshCycleDefers (SESS-612): legacy's defer on the previous bead,
 // read in the effect: open, or closed before this incarnation woke, defers;
-// an expired lookup defers (v5.10q); any other lookup error, no previous
-// bead, or one no store holds cycles, as legacy fails toward the cycle.
+// a lookup that failed or expired defers, as a failed read proves nothing
+// (the #7879 review); no previous bead, or one no store holds, cycles.
 func TestFreshCycleDefers(t *testing.T) {
 	closed := beads.Bead{ID: "gw-old", Status: "closed", Metadata: map[string]string{"closed_at": censusNow.Add(-time.Hour).Format(time.RFC3339Nano)}}
 	awakeAfter := session.Info{AwakeStartedAt: censusNow.Add(-time.Minute).Format(time.RFC3339Nano)}
@@ -76,7 +76,7 @@ func TestFreshCycleDefers(t *testing.T) {
 		{"closed before this incarnation woke", awakeAfter, freshCyclePrev{found: true, bead: closed}, nil, true},
 		{"its wake time unreadable", session.Info{}, freshCyclePrev{found: true, bead: closed}, nil, false},
 		{"the lookup expired", awakeBefore, freshCyclePrev{}, errProbeExpired, true},
-		{"the lookup failed", awakeBefore, freshCyclePrev{}, errors.New("store unreachable"), false},
+		{"the lookup failed", awakeBefore, freshCyclePrev{}, errors.New("store unreachable"), true},
 		{"no store holds it", awakeBefore, freshCyclePrev{}, nil, false},
 		{"no previous bead", awakeBefore, freshCyclePrev{none: true}, nil, false},
 	} {
@@ -187,4 +187,48 @@ func TestFreshCycleProbeReadsOnlyForTheCycle(t *testing.T) {
 	if _, err := freshCycleProbe(context.Background(), effectReads{}, txView{It: intent{Reason: decideFreshCycle}, Row: row}); err == nil {
 		t.Fatal("the cycle's probe read nothing over unusable legs, want the read's error")
 	}
+}
+
+// TestFreshCycleBackoffHoldsOnlyTheCycle (the #7879 review): the cycle
+// settles on its own backoff key, and while that record is live A13 falls
+// through past the cycle (so the row's later arms decide), and is decided
+// again when it releases.
+func TestFreshCycleBackoffHoldsOnlyTheCycle(t *testing.T) {
+	c := freshCase(t)
+	if got := settledBackoffKey(intentStop, decideFreshCycle, c.k); got != freshCycleBackoffKey(c.k) || got == rowBackoffKey(c.k) {
+		t.Fatalf("the cycle settles on %q, want its own key", got)
+	}
+	c.w.Backoff = map[string]backoffRecord{freshCycleBackoffKey(c.k): {Consecutive: 1, Until: censusNow.Add(time.Minute), Cause: causeFreshCycleDefer}}
+	r := &rowFacts{w: c.w, k: c.k, entry: c.a.Snapshot.Entries[c.k], row: c.w.Census.Rows[c.k], found: true}
+	if it, ok := armRestartRequested(r); ok {
+		t.Fatalf("armRestartRequested = (%q, %q) under a live cycle backoff, want a fall-through", it.Kind, it.Reason)
+	}
+	if !r.next.Equal(censusNow.Add(time.Minute)) {
+		t.Fatalf("next %v, want the backoff's release %v", r.next, censusNow.Add(time.Minute))
+	}
+	c.w.Backoff[freshCycleBackoffKey(c.k)] = backoffRecord{Consecutive: 1, Until: censusNow.Add(-time.Second)}
+	if _, ok := armRestartRequested(&rowFacts{w: c.w, k: c.k, entry: c.a.Snapshot.Entries[c.k], row: c.w.Census.Rows[c.k], found: true}); !ok {
+		t.Fatal("no cycle once the backoff released")
+	}
+}
+
+// TestSimSuspendDuringADeferredFreshCycle (the #7879 review): an operator's
+// suspend of a row whose fresh cycle is deferred stops its runtime on the
+// first pass after it: the deferral holds nothing but the cycle.
+func TestSimSuspendDuringADeferredFreshCycle(t *testing.T) {
+	old := beads.Bead{ID: "gw-old", Title: "open", Type: "task", Status: "in_progress", Assignee: "gc-other", Metadata: map[string]string{"gc.routed_to": "worker"}}
+	s := freshSim(t, old)
+	deferred := false
+	for _, r := range s.round {
+		deferred = deferred || r.it.Reason == decideFreshCycle && r.res.Cause == causeFreshCycleDefer
+	}
+	if !deferred {
+		t.Fatal("the cycle was not deferred, so the probe proves nothing")
+	}
+	s.ask("state", "suspended", "sleep_intent", "user-hold")
+	s.settle()
+	if len(s.sp.kills) != 1 {
+		t.Fatalf("kills %d after the suspend's first pass, want its runtime stopped", len(s.sp.kills))
+	}
+	s.noViolations(t)
 }
