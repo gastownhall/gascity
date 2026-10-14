@@ -85,12 +85,12 @@ func TestScanTurnsGeminiJSONBeyondBudgetIsAnError(t *testing.T) {
 // same clock tick would leave its modification time unchanged.
 func TestTurnFollowerKeepsUnchangedGeminiJSON(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		modTime time.Time
-		want    string
+		name string
+		age  time.Duration
+		want string
 	}{
-		{"modified long before the read", time.Now().Add(-time.Hour), "ua"},
-		{"modified just before the read", time.Now(), "ub"},
+		{"modified long before the read", time.Hour, "ua"},
+		{"modified just before the read", 0, "ub"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "session.json")
@@ -100,7 +100,8 @@ func TestTurnFollowerKeepsUnchangedGeminiJSON(t *testing.T) {
 			if err := os.WriteFile(path, doc("ua"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.Chtimes(path, tc.modTime, tc.modTime); err != nil {
+			modTime := time.Now().Add(-tc.age)
+			if err := os.Chtimes(path, modTime, modTime); err != nil {
 				t.Fatal(err)
 			}
 			f, err := NewTurnFollower("gemini", path)
@@ -121,7 +122,7 @@ func TestTurnFollowerKeepsUnchangedGeminiJSON(t *testing.T) {
 			if err := file.Close(); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.Chtimes(path, tc.modTime, tc.modTime); err != nil {
+			if err := os.Chtimes(path, modTime, modTime); err != nil {
 				t.Fatal(err)
 			}
 			got, err := f.Read()
