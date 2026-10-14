@@ -1030,3 +1030,56 @@ func TestLanePlanTakeClosesOfExpiredOpsKeepMaybeDelivered(t *testing.T) {
 		})
 	}
 }
+
+// A canceled context ends the pass with the context's error, not with
+// ErrContention after re-planning casAttempts times.
+func TestLaneCanceledContextIsReported(t *testing.T) {
+	t.Run("before the pass", func(t *testing.T) {
+		h := newLaneHarness(t)
+		h.propose(t, laneMsg("p", RolePrompt, "x"))
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, err := h.lane(t, "ctl").Pass(ctx, view(), newFakeExec(h.clk))
+		if !errors.Is(err, context.Canceled) || errors.Is(err, ErrContention) {
+			t.Fatalf("pass = %v", err)
+		}
+		if n := len(h.batcher.batches()); n != 0 {
+			t.Fatalf("%d batches written", n)
+		}
+	})
+	t.Run("during the pass", func(t *testing.T) {
+		h := newLaneHarness(t)
+		op := h.propose(t, laneMsg("p", RolePrompt, "x"))
+		ctx, cancel := context.WithCancel(context.Background())
+		h.batcher.setFault(func(int, beads.GuardedBatch) (bool, error) {
+			cancel()
+			return false, ctx.Err()
+		})
+		_, err := h.lane(t, "ctl").Pass(ctx, view(), newFakeExec(h.clk))
+		if !errors.Is(err, context.Canceled) || errors.Is(err, ErrContention) {
+			t.Fatalf("pass = %v", err)
+		}
+		if n := len(h.batcher.batches()); n != 1 {
+			t.Fatalf("%d batches written", n)
+		}
+		if got := h.get(t, op.ID); got.Status != StatusSubmitted && got.Status != StatusAccepted {
+			t.Fatalf("op %s", got.Status)
+		}
+	})
+	t.Run("in the rule closes", func(t *testing.T) {
+		h := newLaneHarness(t)
+		h.propose(t, laneMsg("p", RolePrompt, "x"))
+		h.clk.Advance(72 * time.Hour) // past start_by: the rules close it
+		ctx, cancel := context.WithCancel(context.Background())
+		h.batcher.setFault(func(int, beads.GuardedBatch) (bool, error) {
+			cancel()
+			return false, ctx.Err()
+		})
+		if _, err := h.lane(t, "ctl").Pass(ctx, view(), newFakeExec(h.clk)); !errors.Is(err, context.Canceled) {
+			t.Fatalf("pass = %v", err)
+		}
+		if n := len(h.batcher.batches()); n != 1 {
+			t.Fatalf("%d batches written", n)
+		}
+	})
+}

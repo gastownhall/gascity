@@ -463,6 +463,11 @@ func (l *ConversationLane) Pass(ctx context.Context, conv ConversationView, exec
 	}
 	var probe *Probe
 	for range casAttempts {
+		// A write that ended unknown under a canceled context re-plans;
+		// the context's error, not contention, is why the pass ends.
+		if err := ctx.Err(); err != nil {
+			return res, fmt.Errorf("lane pass over conversation %s: %w", conv.ID, err)
+		}
 		snap, err := l.read(conv)
 		if err != nil {
 			return res, err
