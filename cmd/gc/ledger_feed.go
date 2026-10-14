@@ -35,8 +35,11 @@ package main
 // down the live-confirmed close path (applyInferredClose), and handed to the
 // autoclose sweep as a backstop. A row whose refresh was dropped (an error, a
 // fence, a cache not live) is kept for a bounded retry, so its close is
-// still announced once the refresh succeeds; a closing row is handed to the
-// sweep at once, and a row whose retries run out falls back to a re-scan.
+// still announced once the refresh succeeds. A closing row whose refresh
+// failed (an error, a cache not live) is handed to the sweep at once; a
+// fenced one, mostly the controller's own write in flight, is left to the
+// retry; and a row whose retries run out falls back to a re-scan and, if
+// closing, the sweep.
 //
 // The feed reads nothing while its scope's gate is closed (a quiescent city
 // or a suspended rig), and every read and Apply counts as store work, so the
@@ -655,12 +658,18 @@ func (f *ledgerFeed) refreshRows(ids []string, closing map[string]bool, now time
 		deferred  []string
 	)
 	refreshChanged := make(map[string]bool, len(ids))
-	drop := func(id string) {
-		if closing[id] {
-			// The sweep reads the row live whatever the retry finds.
+	// drop keeps a dropped row for a retry. A closing row goes to the sweep
+	// at once when the drop was a failure (the sweep reads the row live
+	// whatever the retry finds), but a fenced one is left to the retry, which
+	// announces and defers a never-held close itself: a fence is mostly the
+	// controller's own write in flight, and deferring each would flood the
+	// sweep. A row whose retries ran out goes to the sweep either way.
+	drop := func(id string, fenced bool) {
+		kept := f.keepForRetry(id, closing[id])
+		if closing[id] && (!fenced || !kept) {
 			deferred = append(deferred, id)
 		}
-		if f.keepForRetry(id, closing[id]) {
+		if kept {
 			return
 		}
 		counts.retryGiveUps++
@@ -685,18 +694,18 @@ func (f *ledgerFeed) refreshRows(ids []string, closing map[string]bool, now time
 			// A newer local write, event or scan owns the row, or a local
 			// write that may touch it is in flight; the retry finds which.
 			counts.fenced++
-			drop(id)
+			drop(id, true)
 			continue
 		case errors.Is(err, beads.ErrCacheUnavailable):
 			counts.unavailable++
 			reconcile = true
-			drop(id)
+			drop(id, false)
 			continue
 		default:
 			counts.refreshErrors++
 			reconcile = true
 			f.logRefreshError(id, err)
-			drop(id)
+			drop(id, false)
 			continue
 		}
 		refreshChanged[id] = rep.Event != ""
