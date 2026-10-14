@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"maps"
 	"math/rand/v2"
+	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -14,9 +16,24 @@ import (
 )
 
 const (
+	// propSeeds is the default seed count; GC_LANE_PROPERTY_SEEDS raises it
+	// for a soak run (1024 seeds take about 15 CPU-minutes).
 	propSeeds = 64
 	propSteps = 400
 )
+
+// propSeedCount is propSeeds, or GC_LANE_PROPERTY_SEEDS when set.
+func propSeedCount(t *testing.T) uint64 {
+	v := os.Getenv("GC_LANE_PROPERTY_SEEDS")
+	if v == "" {
+		return propSeeds
+	}
+	n, err := strconv.ParseUint(v, 10, 64)
+	if err != nil || n == 0 {
+		t.Fatalf("GC_LANE_PROPERTY_SEEDS=%q is not a positive count", v)
+	}
+	return n
+}
 
 var propConversations = []string{"gc-1", "gc-2"}
 
@@ -49,18 +66,23 @@ type propWorld struct {
 	pendingHook func()
 
 	// Invariant bookkeeping.
-	outcomes   map[string]Outcome
-	seqs       map[string]map[uint64]string // conv → lane_seq → op:attempt
-	maxSeq     map[string]uint64
-	seenTake   map[string]bool // op:attempt
-	rowSeen    map[string]RuntimeRow
-	ambiguous  map[string]bool // at_most_once ops whose effect may have happened
-	firstBatch map[string][]string
-	convOf     map[string]string
-	decoded    map[string]Op
-	cov        *propCoverage
-	storedKey  map[string]string
-	keyReject  map[string]bool
+	outcomes  map[string]Outcome
+	seqs      map[string]map[uint64]string // conv → lane_seq → op:attempt
+	maxSeq    map[string]uint64
+	seenTake  map[string]bool // op:attempt
+	rowSeen   map[string]RuntimeRow
+	ambiguous map[string]bool // at_most_once ops whose effect may have happened
+	// lastSend is the op ids of the last send under each key.
+	lastSend map[string][]string
+	convOf   map[string]string
+	decoded  map[string]Op
+	cov      *propCoverage
+	// keyOfAttempt is the key each op's attempt was delivered under.
+	keyOfAttempt map[string]map[int]string
+	// rejectedKeys are the keys a runtime refused.
+	rejectedKeys map[string]bool
+	// lost are the ops already reported as lost.
+	lost       map[string]bool
 	violations []string
 }
 
@@ -75,7 +97,8 @@ func newPropWorld(t *testing.T, seed uint64) *propWorld {
 		convs: map[string]*propConv{}, restricted: seed%2 == 1,
 		outcomes: map[string]Outcome{}, seqs: map[string]map[uint64]string{}, maxSeq: map[string]uint64{},
 		seenTake: map[string]bool{}, rowSeen: map[string]RuntimeRow{}, ambiguous: map[string]bool{},
-		firstBatch: map[string][]string{}, convOf: map[string]string{}, decoded: map[string]Op{}, storedKey: map[string]string{}, keyReject: map[string]bool{},
+		lastSend: map[string][]string{}, convOf: map[string]string{}, decoded: map[string]Op{},
+		keyOfAttempt: map[string]map[int]string{}, rejectedKeys: map[string]bool{}, lost: map[string]bool{},
 	}
 	w.lanes = []*ConversationLane{h.lane(t, "ctl"), h.lane(t, "cli")}
 	for i, id := range propConversations {
@@ -112,19 +135,28 @@ func (e propExec) Deliver(_ context.Context, d Delivery) DeliveryResult {
 		if op.Policy.Guarantee == GuaranteeAtMostOnce && w.ambiguous[op.ID] {
 			w.fail("at_most_once op %s delivered again after an ambiguous attempt", op.ID)
 		}
-		if op.MaybeDelivered > 0 && !w.keyReject[op.ID] && w.storedKey[op.ID] != "" && w.storedKey[op.ID] != d.Key {
-			w.fail("op %s redelivered under %s, was %s (L3)", op.ID, d.Key, w.storedKey[op.ID])
-		}
-	}
-	if first, ok := w.firstBatch[d.Key]; ok {
-		for _, id := range ids {
-			if !slices.Contains(first, id) {
-				w.fail("key %s carries op %s outside its first batch %v (L2)", d.Key, id, first)
+		// L3: a redelivery reuses the key of the attempt that may have
+		// delivered, unless the runtime refused that key.
+		if m := op.MaybeDelivered; m > 0 {
+			if k := w.keyOfAttempt[op.ID][m]; k != "" && !w.rejectedKeys[k] && k != d.Key {
+				w.fail("op %s redelivered under %s; its maybe-delivered attempt %d used %s (L3)", op.ID, d.Key, m, k)
 			}
 		}
-	} else {
-		w.firstBatch[d.Key] = ids
+		if w.keyOfAttempt[op.ID] == nil {
+			w.keyOfAttempt[op.ID] = map[int]string{}
+		}
+		w.keyOfAttempt[op.ID][op.Attempt] = d.Key
 	}
+	// L2, on a deduplicating runtime: every send under a key is a subset of
+	// every earlier send under it, else the runtime drops the new content.
+	if prev, ok := w.lastSend[d.Key]; ok && conv.dedup {
+		for _, id := range ids {
+			if !slices.Contains(prev, id) {
+				w.fail("key %s carries op %s outside its earlier send %v (L2)", d.Key, id, prev)
+			}
+		}
+	}
+	w.lastSend[d.Key] = ids
 	w.cov.add("delivery")
 	if d.Redelivery {
 		w.cov.add("redelivery")
@@ -148,13 +180,12 @@ func (e propExec) Deliver(_ context.Context, d Delivery) DeliveryResult {
 		}
 		conv.receipts[d.Key] = true
 	}
+	rej, isRej := res.(Rejected)
+	if isRej && rej.KeyRejected {
+		w.rejectedKeys[d.Key] = true
+		w.cov.add("key_rejected")
+	}
 	for _, op := range d.Ops {
-		w.storedKey[op.ID] = d.Key
-		rej, isRej := res.(Rejected)
-		w.keyReject[op.ID] = isRej && rej.KeyRejected
-		if w.keyReject[op.ID] {
-			w.cov.add("key_rejected")
-		}
 		_, nd := res.(NotDelivered)
 		if !nd && (!isRej || !rej.KeyRejected) && op.Policy.Guarantee == GuaranteeAtMostOnce {
 			w.ambiguous[op.ID] = true
@@ -322,9 +353,14 @@ func (w *propWorld) cancel() {
 }
 
 func (w *propWorld) pass(lane int, conv string) {
-	_, err := w.lanes[lane].Pass(context.Background(), w.convs[conv].view, propExec{w})
-	if err != nil && !errors.Is(err, errCrash) && !errors.Is(err, ErrContention) && !strings.Contains(err.Error(), "executor") {
+	res, err := w.lanes[lane].Pass(context.Background(), w.convs[conv].view, propExec{w})
+	if err != nil && !errors.Is(err, errCrash) {
 		w.t.Fatalf("Pass: %v", err)
+	}
+	for _, wt := range res.Waits {
+		if wt.Reason == WaitReplayGroup {
+			w.cov.add("replay_group")
+		}
 	}
 }
 
@@ -336,7 +372,7 @@ func (w *propWorld) step() {
 	w.pendingHook = nil
 	conv := propConversations[r.IntN(len(propConversations))]
 	lane := r.IntN(2)
-	switch k := r.IntN(14); {
+	switch k := r.IntN(16); {
 	case k < 4:
 		w.propose()
 	case k == 4:
@@ -355,7 +391,7 @@ func (w *propWorld) step() {
 			if s == stageAfterRead && !ran {
 				ran = true
 				_, err := other.Pass(context.Background(), w.convs[conv].view, propExec{w})
-				if err != nil && !errors.Is(err, ErrContention) && !strings.Contains(err.Error(), "executor") {
+				if err != nil {
 					w.t.Fatalf("inner Pass: %v", err)
 				}
 			}
@@ -372,6 +408,10 @@ func (w *propWorld) step() {
 		} else {
 			v.Epoch++
 		}
+	case k == 13:
+		w.ambiguousThenSplit(lane, conv)
+	case k == 14:
+		w.keyRejectedThenCrash(lane, conv)
 	default:
 		v := &w.convs[conv].view
 		switch r.IntN(10) {
@@ -383,6 +423,59 @@ func (w *propWorld) step() {
 			v.ContentHold = !v.ContentHold
 		}
 	}
+}
+
+// delivered is a healthy runtime's answer: delivered, and shown.
+func (w *propWorld) delivered() func(Delivery) (DeliveryResult, bool) {
+	return func(Delivery) (DeliveryResult, bool) {
+		return Delivered{Record: DeliveryRecord{At: w.h.clk.Now(), Ack: AckDelivered}}, true
+	}
+}
+
+// ambiguousThenSplit targets replay groups: an attempt ends Unknown, then
+// part of its group becomes eligible before the rest (a mid-turn steer, or
+// T3's Stop-with-hold holding normal content while a steer bypasses it),
+// then a boundary comes.
+func (w *propWorld) ambiguousThenSplit(lane int, conv string) {
+	landed := w.r.IntN(2) == 0
+	w.contentRes = func(Delivery) (DeliveryResult, bool) { return Unknown{Cause: errors.New("?")}, landed }
+	w.probe = idleProbe()
+	w.pass(lane, conv)
+	w.h.clk.Advance(ExecutorErrorBackoff + time.Millisecond)
+	w.contentRes = w.delivered()
+	w.probe.Caps.Steer = true
+	v := &w.convs[conv].view
+	hold := v.ContentHold
+	if w.r.IntN(2) == 0 {
+		w.probe.Boundary = TriNo
+	} else {
+		v.ContentHold = true
+	}
+	w.pass(lane, conv)
+	v.ContentHold = hold
+	w.probe = idleProbe()
+	w.pass(1-lane, conv)
+}
+
+// keyRejectedThenCrash targets L3: a maybe-delivered op has its key
+// refused, its next attempt under a new key reaches the agent and the lane
+// crashes before Done; the lease then expires.
+func (w *propWorld) keyRejectedThenCrash(lane int, conv string) {
+	landed := w.r.IntN(2) == 0
+	w.probe = idleProbe()
+	w.contentRes = func(Delivery) (DeliveryResult, bool) { return Unknown{Cause: errors.New("?")}, landed }
+	w.pass(lane, conv)
+	w.h.clk.Advance(ExecutorErrorBackoff + time.Millisecond)
+	w.contentRes = func(Delivery) (DeliveryResult, bool) {
+		return Rejected{KeyRejected: true, Reason: "nudge_rejected"}, false
+	}
+	w.pass(lane, conv)
+	w.h.clk.Advance(ExecutorErrorBackoff + time.Millisecond)
+	w.contentRes = w.delivered()
+	w.lanes[lane].hooks.at = crashAt(stageAfterEffect)
+	w.pass(lane, conv)
+	w.lanes[lane].hooks.at = nil
+	w.h.clk.Advance(DefaultLeaseTTL + LeaseSkew + time.Second)
 }
 
 // check runs the per-step invariants over the store.
@@ -480,6 +573,14 @@ func (w *propWorld) check() {
 			}
 		}
 	}
+	// At least once: an op that closed succeeded with a delivery record
+	// reached the agent.
+	for id, o := range w.outcomes {
+		if o.Arm == ArmSucceeded && !o.Result.Delivery.IsZero() && w.convs[w.convOf[id]].transcript[id] == 0 && !w.lost[id] {
+			w.lost[id] = true
+			w.fail("op %s closed succeeded but the agent never saw it (at least once)", id)
+		}
+	}
 }
 
 // checkOrder is I8 for the restricted generator: among notices of one
@@ -502,38 +603,62 @@ func (w *propWorld) checkOrder() {
 	}
 }
 
-// drain runs a healthy idle runtime past every deadline until nothing is
-// left: every op ends closed.
+// drainSlack bounds how long a healthy runtime may take to settle what the
+// random steps left: leases in flight, backoffs and not_before gates.
+const drainSlack = time.Hour
+
+// drain runs a healthy idle runtime until nothing is left, advancing the
+// clock only to the next time a waiting op can change by itself. Every op
+// must close, and none whose start_by was more than drainSlack ahead when
+// the drain began may close for a deadline (riders aside): that would be
+// starvation.
 func (w *propWorld) drain() {
 	for _, c := range w.convs {
 		c.view.Dormant, c.view.ContentHold = false, false
 	}
-	w.h.clk.Advance(72 * time.Hour)
+	start := w.h.clk.Now()
 	w.probe = idleProbe()
 	w.probe.Caps.Respond = true
-	w.contentRes = func(Delivery) (DeliveryResult, bool) {
-		return Delivered{Record: DeliveryRecord{At: w.h.clk.Now(), Ack: AckDelivered}}, true
-	}
+	w.probe.Caps.Steer = true
+	w.contentRes = w.delivered()
 	w.controlRes = func() ControlResult { return Settled{} }
-	for range 200 {
-		quiet := true
+	for range 500 {
+		quiet, next := true, time.Time{}
 		for _, conv := range propConversations {
 			res, err := w.lanes[0].Pass(context.Background(), w.convs[conv].view, propExec{w})
-			if err != nil && !strings.Contains(err.Error(), "executor") {
+			if err != nil {
 				w.t.Fatalf("drain Pass: %v", err)
 			}
 			if res.Took != TakeNone || len(res.Closed) > 0 || res.More {
 				quiet = false
 			}
+			next = minTime(next, res.Next)
 		}
-		if quiet {
-			break
+		w.check()
+		switch {
+		case !quiet:
+		case next.IsZero():
+			goto settled
+		case next.After(w.h.clk.Now()):
+			w.h.clk.Advance(next.Sub(w.h.clk.Now()))
+		default:
+			w.h.clk.Advance(time.Millisecond)
 		}
 	}
+settled:
 	for _, id := range w.ids {
 		op, _ := w.h.store.Get(id)
-		if op.Status != StatusClosed {
+		switch {
+		case op.Status != StatusClosed:
 			w.fail("op %s still %s after the drain", id, op.Status)
+		case op.Policy.Message.When == WhenAfterTurn:
+			// A rider waits for a turn-starting op by design; with none
+			// left it expires at start_by.
+		case op.StartBy.After(start.Add(drainSlack)) && op.Outcome.Arm == ArmFailed &&
+			(op.Outcome.Reason == ReasonExpiredBeforeStart || op.Outcome.Reason == ReasonDeadlineInFlight) &&
+			op.Transitions[len(op.Transitions)-1].At.After(start):
+			w.fail("op %s starved: it closed %s in the drain, though its start_by %s was more than %s ahead of the drain at %s",
+				id, op.Outcome.Reason, op.StartBy, drainSlack, start)
 		}
 	}
 }
@@ -556,14 +681,14 @@ func TestLaneProperties(t *testing.T) {
 		for _, k := range []string{
 			"delivery", "redelivery", "note", "replay_dedup", "closed:poison", "closed:ambiguous_delivery",
 			"closed:stale", "closed:canceled", "closed:busy", "closed:dependency_failed", "closed:expired_before_start",
-			"closed:deadline_in_flight", "closed:conversation_closed", "key_rejected",
+			"closed:deadline_in_flight", "closed:conversation_closed", "key_rejected", "replay_group",
 		} {
 			if cov.counts[k] == 0 {
 				t.Errorf("the property runs never exercised %s (%v)", k, cov.counts)
 			}
 		}
 	})
-	for seed := range uint64(propSeeds) {
+	for seed := range propSeedCount(t) {
 		t.Run(fmt.Sprintf("seed=%d", seed), func(t *testing.T) {
 			t.Parallel()
 			w := newPropWorld(t, seed)
