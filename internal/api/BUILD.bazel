@@ -323,6 +323,7 @@ go_test(
         "handler_beads_owned_test.go",
         "handler_beads_partial_prime_test.go",
         "handler_beads_partial_test.go",
+        "handler_beads_ready_cache_test.go",
         "handler_beads_test.go",
         "handler_city_test.go",
         "handler_config_test.go",

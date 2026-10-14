@@ -530,6 +530,10 @@ func readyFederationQuery() beads.ReadyQuery {
 //   - Failure: a rig degrades (Partial 200 + partial_errors); the graph leg
 //     does not (503, carrying any work-leg errors recorded before it). See
 //     graphPlaneUnavailable.
+//   - Source: each leg is answered by its ready cache when the cache is warm
+//     and can vouch for the answer (beads.ReadyPreferCache: the freshness and
+//     invalidation rules of the zero-query CachingStore.Ready), and read live
+//     only when it is cold or invalidated.
 //   - Tier: every leg is read at beads.FederatedReadTier, stated explicitly.
 //     A no-argument Ready() left TierMode at its zero value, which the work
 //     legs' bead-policy layer rewrote to TierBoth while the unwrapped graph leg
@@ -552,7 +556,7 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 			return
 		}
 		pa.attempt()
-		ready, err := beads.HandlesFor(store).Live.Ready(readyFederationQuery())
+		ready, err := beads.ReadyPreferCache(store, readyFederationQuery())
 		if err != nil {
 			if beads.IsPartialResult(err) && len(ready) > 0 {
 				pa.record(label, err)
@@ -597,7 +601,7 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 	// does NOT go through federate(): the graph leg has no partial tier.
 	if graph := relocatedGraphStore(s.state); graph != nil {
 		pa.attempt()
-		ready, err := beads.HandlesFor(graph).Live.Ready(readyFederationQuery())
+		ready, err := beads.ReadyPreferCache(graph, readyFederationQuery())
 		if err != nil {
 			return nil, graphPlaneUnavailable("ready", err, pa.messages()...)
 		}
