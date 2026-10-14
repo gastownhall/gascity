@@ -362,6 +362,9 @@ type TurnFollower struct {
 	fold   turnFold
 	info   os.FileInfo
 	offset int64
+	// invalidTail is set while the newest record folded is not valid JSON:
+	// a rescan reports that as a torn record, so the follower does too.
+	invalidTail bool
 }
 
 // NewTurnFollower returns a follower of provider's transcript at path. Its
@@ -384,11 +387,13 @@ func (f *TurnFollower) Read() (TurnScan, error) {
 	if !f.canFollow(info) {
 		return f.rescan()
 	}
-	if info.Size() == f.offset {
-		return f.fold.scan(), nil
+	if info.Size() != f.offset {
+		if err := f.foldAppended(info); err != nil {
+			return TurnScan{}, err
+		}
 	}
-	if err := f.foldAppended(info); err != nil {
-		return TurnScan{}, err
+	if f.invalidTail {
+		return TurnScan{}, ErrTornTurnRecord
 	}
 	return f.fold.scan(), nil
 }
@@ -405,17 +410,18 @@ func (f *TurnFollower) rescan() (TurnScan, error) {
 		f.reset()
 		return TurnScan{}, err
 	}
-	f.fold, f.info, f.offset = fold, info, size
+	f.fold, f.info, f.offset, f.invalidTail = fold, info, size, false
 	return fold.scan(), nil
 }
 
 func (f *TurnFollower) reset() {
-	f.fold, f.info, f.offset = nil, nil, 0
+	f.fold, f.info, f.offset, f.invalidTail = nil, nil, 0, false
 }
 
 // foldAppended folds the records appended since the last read. A torn final
 // record is left unread, to be folded once complete, and reported as an
-// error.
+// error. A complete record that is not valid JSON is passed over, and marks
+// the tail invalid until a valid record follows it.
 func (f *TurnFollower) foldAppended(info os.FileInfo) error {
 	file, err := os.Open(f.path)
 	if err != nil {
@@ -435,12 +441,13 @@ func (f *TurnFollower) foldAppended(info os.FileInfo) error {
 	}
 	for len(data) > 0 {
 		line, rest, complete := bytes.Cut(data, []byte{'\n'})
-		record := bytes.TrimSpace(line)
-		if !complete && len(record) > 0 && !json.Valid(record) {
-			return ErrTornTurnRecord
-		}
-		if len(record) > 0 {
+		if record := bytes.TrimSpace(line); len(record) > 0 {
+			valid := json.Valid(record)
+			if !complete && !valid {
+				return ErrTornTurnRecord
+			}
 			f.fold.add(record)
+			f.invalidTail = !valid
 		}
 		f.offset += int64(len(line))
 		if complete {

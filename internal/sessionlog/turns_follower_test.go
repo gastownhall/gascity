@@ -206,6 +206,45 @@ func TestTurnFollowerEqualsRescan(t *testing.T) {
 	}
 }
 
+// TestTurnFollowerInvalidNewestLine: a newline-terminated invalid record is
+// an error while it is the newest, as it is for a rescan, including when a
+// torn record is completed with other bytes (a writer died mid-record and a
+// restarted one appended a whole record to the same line).
+func TestTurnFollowerInvalidNewestLine(t *testing.T) {
+	u := func(sec int, id string) string {
+		return fmt.Sprintf(`{"type":"user","timestamp":"2026-10-13T05:00:%02d.100Z","promptId":"%s","message":{"role":"user","content":"prompt"}}`, sec, id)
+	}
+	end := `{"type":"system","subtype":"turn_duration","timestamp":"2026-10-13T05:00:01.000Z"}`
+	path := writeTurnLines(t, "claude.jsonl", u(0, "p1"), end)
+	f, err := NewTurnFollower("claude", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertFollowerMatchesScan(t, "start", f, "claude", path)
+
+	appendTurnBytes(t, path, `{"type":"user","timest`)
+	if _, err := f.Read(); !errors.Is(err, ErrTornTurnRecord) {
+		t.Fatalf("torn: follower error = %v, want ErrTornTurnRecord", err)
+	}
+	appendTurnBytes(t, path, u(2, "p2")+"\n")
+	for _, step := range []string{"completed with other bytes", "unchanged"} {
+		if _, err := f.Read(); !errors.Is(err, ErrTornTurnRecord) {
+			t.Fatalf("%s: follower error = %v, want ErrTornTurnRecord", step, err)
+		}
+		assertFollowerMatchesScan(t, step, f, "claude", path)
+	}
+	appendTurnBytes(t, path, "\n")
+	assertFollowerMatchesScan(t, "blank line after it", f, "claude", path)
+
+	appendTurnBytes(t, path, u(3, "p3")+"\n")
+	assertFollowerMatchesScan(t, "valid record after it", f, "claude", path)
+
+	appendTurnBytes(t, path, "not json\n")
+	assertFollowerMatchesScan(t, "invalid complete line", f, "claude", path)
+	appendTurnBytes(t, path, u(4, "p4")+"\n")
+	assertFollowerMatchesScan(t, "valid record after the invalid line", f, "claude", path)
+}
+
 // TestTurnFollowerEqualsRescanOnFixtures: appending each fixture line by
 // line, the follower reports what a full rescan does after every line.
 func TestTurnFollowerEqualsRescanOnFixtures(t *testing.T) {
