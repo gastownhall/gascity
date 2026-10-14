@@ -85,7 +85,7 @@ func abandonedCommitRepairScenario(t *testing.T, testCity, workDir string, advan
 	if shape.restart {
 		env.city = t.TempDir()
 	}
-	time.Sleep(advance)
+	<-time.After(advance) // virtual time: the bubble's clock runs the lease record out
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	env.addDesired("worker", "worker", false)
 	clk.Advance(advance)
