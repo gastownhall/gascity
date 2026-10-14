@@ -469,13 +469,16 @@ func runManagedDoltSQLContext(parent context.Context, host, port, user string, a
 		"--host", host,
 		"--port", port,
 		"--user", user,
-		"--password", managedDoltPassword(),
 		"--no-tls",
 		"sql",
 	}
 	ctx, cancel := context.WithTimeout(parent, managedDoltSQLCommandTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "dolt", append(baseArgs, args...)...)
+	// The password travels in the environment (owner-only /proc/<pid>/environ),
+	// never in argv (world-readable /proc/<pid>/cmdline). It is exported even
+	// when empty so dolt does not fall back to an interactive password prompt.
+	cmd.Env = withEnvValue(os.Environ(), "DOLT_CLI_PASSWORD", managedDoltPassword())
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
 		msg := strings.TrimSpace(string(out))

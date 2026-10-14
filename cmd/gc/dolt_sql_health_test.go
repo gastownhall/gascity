@@ -442,26 +442,58 @@ func TestRunManagedDoltSQLTimesOut(t *testing.T) {
 	}
 }
 
-func TestRunManagedDoltSQLIncludesConfiguredPasswordFlag(t *testing.T) {
-	binDir := t.TempDir()
-	argsFile := filepath.Join(t.TempDir(), "args.txt")
-	fakeDolt := filepath.Join(binDir, "dolt")
-	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" > %q\n", argsFile)
-	if err := os.WriteFile(fakeDolt, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
+// TestRunManagedDoltSQLKeepsPasswordOutOfArgv pins that the managed Dolt
+// password reaches dolt through DOLT_CLI_PASSWORD (owner-only
+// /proc/<pid>/environ), never through argv (world-readable
+// /proc/<pid>/cmdline). An empty password must still be exported so dolt
+// does not fall back to an interactive TTY prompt.
+func TestRunManagedDoltSQLKeepsPasswordOutOfArgv(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		password string
+	}{
+		{name: "configured", password: "s3cr3t-dolt-pw"},
+		{name: "empty", password: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			binDir := t.TempDir()
+			outDir := t.TempDir()
+			argsFile := filepath.Join(outDir, "args.txt")
+			envFile := filepath.Join(outDir, "env.txt")
+			fakeDolt := filepath.Join(binDir, "dolt")
+			script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" > %q\n"+
+				"if [ \"${DOLT_CLI_PASSWORD+set}\" = set ]; then printf 'set:%%s' \"$DOLT_CLI_PASSWORD\" > %q; fi\n",
+				argsFile, envFile)
+			if err := os.WriteFile(fakeDolt, []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
 
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("GC_DOLT_PASSWORD", "secret")
+			t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("GC_DOLT_PASSWORD", tc.password)
+			t.Setenv("DOLT_CLI_PASSWORD", "inherited-must-not-win")
 
-	if _, err := runManagedDoltSQL("127.0.0.1", "3311", "root", "-q", "SELECT 1"); err != nil {
-		t.Fatalf("runManagedDoltSQL() error = %v", err)
-	}
-	data, err := os.ReadFile(argsFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(data), "--password\nsecret\n") {
-		t.Fatalf("dolt args missing configured password flag:\n%s", data)
+			if _, err := runManagedDoltSQL("127.0.0.1", "3311", "root", "-q", "SELECT 1"); err != nil {
+				t.Fatalf("runManagedDoltSQL() error = %v", err)
+			}
+			args, err := os.ReadFile(argsFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, arg := range strings.Split(strings.TrimSpace(string(args)), "\n") {
+				if arg == "--password" || strings.HasPrefix(arg, "--password=") {
+					t.Fatalf("dolt argv carries a password flag:\n%s", args)
+				}
+				if tc.password != "" && strings.Contains(arg, tc.password) {
+					t.Fatalf("dolt argv carries the password value:\n%s", args)
+				}
+			}
+			env, err := os.ReadFile(envFile)
+			if err != nil {
+				t.Fatalf("DOLT_CLI_PASSWORD was not exported to dolt: %v", err)
+			}
+			if got, want := string(env), "set:"+tc.password; got != want {
+				t.Fatalf("DOLT_CLI_PASSWORD = %q, want %q", got, want)
+			}
+		})
 	}
 }
