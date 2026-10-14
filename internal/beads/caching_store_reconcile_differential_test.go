@@ -94,6 +94,10 @@ type mergeEndState struct {
 	// retainedIDs is the key set of retainedAt: the orphan ids whose write
 	// fences the sweep retains. Its stamps are the pass clock.
 	retainedIDs map[string]struct{}
+	// announcedCloseIDs is the key set of announcedCloses: the evicted rows
+	// whose close the merge announced from a confirmed closed row. Its stamps
+	// are the pass clock.
+	announcedCloseIDs map[string]struct{}
 	// fenceFloor rises only when a retention older than the window is
 	// pruned; no seeded state carries one, so it must stay put.
 	fenceFloor     uint64
@@ -317,6 +321,7 @@ func captureEndState(c *CachingStore) mergeEndState {
 		writeAtIDs:           keySet(c.writeAt),
 		readyLost:            cloneDirty(c.readyProjectionLost),
 		retainedIDs:          keySet(c.retainedAt),
+		announcedCloseIDs:    keySet(c.announcedCloses),
 		fenceFloor:           c.fenceFloor,
 		state:                c.state,
 		lastFreshAt:          c.lastFreshAt,

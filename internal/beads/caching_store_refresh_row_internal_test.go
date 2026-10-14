@@ -8,7 +8,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // The tests in this file pin RefreshRow, the per-row live refresh v2's lag
@@ -1073,8 +1075,8 @@ func TestCachingStoreRefreshRowReport(t *testing.T) {
 		},
 		{
 			// The cache's own close, evicted by a re-scan before the refresh:
-			// its retained write fence shows the close was this cache's, and
-			// announced by its write, so the refresh installs it silently.
+			// the cache's record of the close it announced shows the close
+			// went out, so the refresh installs it silently.
 			name: "own_close_evicted_with_option",
 			setup: func(t *testing.T, cache *CachingStore, _ Store) string {
 				id := mustCreateCached(t, cache).ID
@@ -1089,6 +1091,42 @@ func TestCachingStoreRefreshRowReport(t *testing.T) {
 			},
 			opts:      RowRefreshOptions{AnnounceUnheldClose: true},
 			wantFound: true, wantStatus: "closed",
+		},
+		{
+			// An out-of-band close of a held row, evicted and announced by a
+			// re-scan before the refresh: the re-scan's record of the close
+			// shows it went out, so the refresh installs it silently.
+			name:      "oob_close_evicted_with_option",
+			setup:     scanClosedHeldRow,
+			opts:      RowRefreshOptions{AnnounceUnheldClose: true},
+			wantFound: true, wantStatus: "closed",
+		},
+		{
+			// An out-of-band close of a row this cache wrote but never
+			// announced closed, dropped silently by a full Prime before the
+			// refresh: the cache's write fence for the row is no evidence the
+			// close went out, so the refresh announces it.
+			name: "oob_close_of_written_row_dropped_by_prime",
+			setup: func(t *testing.T, cache *CachingStore, backing Store) string {
+				id := mustCreateCached(t, cache).ID
+				if err := cache.SetMetadata(id, "k", "v"); err != nil {
+					t.Fatalf("SetMetadata: %v", err)
+				}
+				// Past the recency keep, so the full Prime drops the row.
+				ageLocalWriteBy(cache, id, 10*time.Second)
+				if err := backing.Close(id); err != nil {
+					t.Fatalf("backing Close: %v", err)
+				}
+				if err := cache.Prime(context.Background()); err != nil {
+					t.Fatalf("Prime: %v", err)
+				}
+				if _, held, _ := cachedRowState(cache, id); held {
+					t.Fatal("the full Prime kept the closed row")
+				}
+				return id
+			},
+			opts:      RowRefreshOptions{AnnounceUnheldClose: true, YieldToLocalWrites: true},
+			wantFound: true, wantEvent: "bead.closed", wantStatus: "closed",
 		},
 		{
 			name: "held_closed_with_option",
@@ -1154,6 +1192,181 @@ func unheldClosedRow(t *testing.T, _ *CachingStore, backing Store) string {
 		t.Fatalf("backing Close: %v", err)
 	}
 	return row.ID
+}
+
+// scanClosedHeldRow has the cache hold a row made behind its back, closes the
+// row there too, and runs a re-scan, which evicts the row and announces its
+// close.
+func scanClosedHeldRow(t *testing.T, cache *CachingStore, backing Store) string {
+	t.Helper()
+	row, err := backing.Create(Bead{Title: "out of process"})
+	if err != nil {
+		t.Fatalf("backing Create: %v", err)
+	}
+	if _, err := cache.RefreshRow(row.ID); err != nil {
+		t.Fatalf("RefreshRow: %v", err)
+	}
+	if err := backing.Close(row.ID); err != nil {
+		t.Fatalf("backing Close: %v", err)
+	}
+	cache.ReconcileNowForTest()
+	if _, held, _ := cachedRowState(cache, row.ID); held {
+		t.Fatal("the re-scan kept the closed row")
+	}
+	return row.ID
+}
+
+// announcedCloseRecorded reports whether the cache records id's close as one
+// it announced.
+func announcedCloseRecorded(cache *CachingStore, id string) bool {
+	cache.mu.RLock()
+	defer cache.mu.RUnlock()
+	_, ok := cache.announcedCloses[id]
+	return ok
+}
+
+// TestCachingStoreRefreshRowReportSkipsACloseTheReconcileAnnounced pins the
+// cache's record of the out-of-band closes a re-scan evicted and announced: a
+// refresh asked to announce an unheld close that finds the row as the re-scan
+// read it, within recentWriteVerifyWindow, announces nothing, so the close
+// goes out once. A row written since, or a refresh past the window, is
+// announced as before. A reopen the cache installs drops the record, and a
+// later re-scan prunes an expired one, as does recording a close once the
+// record holds announcedClosesPruneAt.
+func TestCachingStoreRefreshRowReportSkipsACloseTheReconcileAnnounced(t *testing.T) {
+	t.Parallel()
+	announce := RowRefreshOptions{AnnounceUnheldClose: true}
+	// setup returns a cache on a settable clock whose re-scan announced the
+	// out-of-band close of the returned id.
+	setup := func(t *testing.T) (*CachingStore, Store, *sourcedRecorder, *atomic.Int64, string) {
+		t.Helper()
+		clock := &atomic.Int64{}
+		clock.Store(time.Unix(1_800_000_000, 0).UnixNano())
+		backing := &casBackingStore{Store: NewMemStore()}
+		rec := &sourcedRecorder{}
+		cache := NewCachingStore(backing, rec.record, WithClock(func() time.Time { return time.Unix(0, clock.Load()) }))
+		if err := cache.Prime(context.Background()); err != nil {
+			t.Fatalf("Prime: %v", err)
+		}
+		id := scanClosedHeldRow(t, cache, backing)
+		assertEvents(t, rec.take(), "refresh bead.created "+id, "scan bead.closed "+id)
+		if !announcedCloseRecorded(cache, id) {
+			t.Fatal("the re-scan left no record of the close it announced")
+		}
+		return cache, backing, rec, clock, id
+	}
+	refresh := func(t *testing.T, cache *CachingStore, id string) RowRefresh {
+		t.Helper()
+		rep, err := cache.RefreshRowReport(id, announce)
+		if err != nil {
+			t.Fatalf("RefreshRowReport: %v", err)
+		}
+		if !rep.Found || rep.Held || rep.Bead.Status != "closed" {
+			t.Fatalf("report found=%v held=%v status=%q, want the unheld closed row", rep.Found, rep.Held, rep.Bead.Status)
+		}
+		return rep
+	}
+
+	t.Run("inside_the_window", func(t *testing.T) {
+		t.Parallel()
+		cache, _, rec, clock, id := setup(t)
+		clock.Add(int64(recentWriteVerifyWindow))
+		if rep := refresh(t, cache, id); rep.Event != "" {
+			t.Fatalf("refresh reported %q, want the re-scan's close not announced again", rep.Event)
+		}
+		assertEvents(t, rec.take())
+	})
+	t.Run("past_the_window", func(t *testing.T) {
+		t.Parallel()
+		cache, _, rec, clock, id := setup(t)
+		clock.Add(int64(recentWriteVerifyWindow) + 1)
+		if rep := refresh(t, cache, id); rep.Event != "bead.closed" {
+			t.Fatalf("refresh reported %q, want bead.closed", rep.Event)
+		}
+		assertEvents(t, rec.take(), "refresh bead.closed "+id)
+	})
+	t.Run("closed_again_since", func(t *testing.T) {
+		t.Parallel()
+		cache, backing, rec, _, id := setup(t)
+		if err := backing.Reopen(id); err != nil {
+			t.Fatalf("backing Reopen: %v", err)
+		}
+		if err := backing.Close(id); err != nil {
+			t.Fatalf("backing Close: %v", err)
+		}
+		if rep := refresh(t, cache, id); rep.Event != "bead.closed" {
+			t.Fatalf("refresh reported %q, want the newer close announced", rep.Event)
+		}
+		assertEvents(t, rec.take(), "refresh bead.closed "+id)
+	})
+	t.Run("reopen_installed", func(t *testing.T) {
+		t.Parallel()
+		cache, backing, _, _, id := setup(t)
+		if err := backing.Reopen(id); err != nil {
+			t.Fatalf("backing Reopen: %v", err)
+		}
+		if _, err := cache.RefreshRow(id); err != nil {
+			t.Fatalf("RefreshRow: %v", err)
+		}
+		if announcedCloseRecorded(cache, id) {
+			t.Fatal("the installed reopen left the re-scan's close recorded")
+		}
+	})
+	t.Run("pruned", func(t *testing.T) {
+		t.Parallel()
+		cache, _, _, clock, id := setup(t)
+		clock.Add(int64(recentWriteVerifyWindow))
+		cache.ReconcileNowForTest()
+		if !announcedCloseRecorded(cache, id) {
+			t.Fatal("a re-scan inside the window pruned the record")
+		}
+		clock.Add(1)
+		cache.ReconcileNowForTest()
+		if announcedCloseRecorded(cache, id) {
+			t.Fatal("a re-scan past the window kept the record")
+		}
+	})
+	t.Run("pruned_by_a_record_at_the_bound", func(t *testing.T) {
+		t.Parallel()
+		cache, _, _, clock, id := setup(t)
+		fillAnnouncedCloses(cache, announcedClosesPruneAt)
+		clock.Add(int64(recentWriteVerifyWindow) + 1)
+		cache.recordAnnouncedClose(Bead{ID: "gc-newest"})
+		if announcedCloseRecorded(cache, id) {
+			t.Fatal("a close recorded at the bound kept the expired record")
+		}
+		if n := announcedCloseCount(cache); n != 1 {
+			t.Fatalf("the record holds %d closes after the prune, want only the new one", n)
+		}
+	})
+	t.Run("left_to_the_rescan_below_the_bound", func(t *testing.T) {
+		t.Parallel()
+		cache, _, _, clock, id := setup(t)
+		fillAnnouncedCloses(cache, announcedClosesPruneAt-1)
+		clock.Add(int64(recentWriteVerifyWindow) + 1)
+		cache.recordAnnouncedClose(Bead{ID: "gc-newest"})
+		if !announcedCloseRecorded(cache, id) {
+			t.Fatal("a close recorded below the bound pruned the record")
+		}
+	})
+}
+
+// fillAnnouncedCloses records filler closes at the cache's clock until the
+// record holds n.
+func fillAnnouncedCloses(cache *CachingStore, n int) {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	now := cache.clockNow()
+	for i := 0; len(cache.announcedCloses) < n; i++ {
+		cache.recordAnnouncedCloseLocked("gc-filler-"+strconv.Itoa(i), Bead{}, now)
+	}
+}
+
+// announcedCloseCount is the number of closes the cache's record holds.
+func announcedCloseCount(cache *CachingStore) int {
+	cache.mu.RLock()
+	defer cache.mu.RUnlock()
+	return len(cache.announcedCloses)
 }
 
 // closeHookStore runs onClose after the backing close commits, before the

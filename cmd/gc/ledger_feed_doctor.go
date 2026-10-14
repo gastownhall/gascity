@@ -28,8 +28,14 @@ const (
 )
 
 // ledgerFeedDoctorCheck reports the controller's journal feeds ([beads]
-// ledger_feed). It is advisory only and never fixable: everything it reports
-// is covered by the re-scan, and the operator decides what to change.
+// ledger_feed). It is advisory only and never fixable: the operator decides
+// what to change. Every scope it lists stays on the re-scan, which covers
+// every create and update but, listing active rows only, not the close of a
+// row the cache never held: such a close inside a gap, or one the feed never
+// reads, may go unannounced (ledgerFeed.onGap). The caches over a non-work
+// storage binding (storageRoutes.withControllerCache) and the one rigs share
+// over the legacy file store get no feed by design, so they stay on the
+// re-scan and are not listed.
 type ledgerFeedDoctorCheck struct {
 	cfg   *config.City
 	query func(cityPath string) (ledgerFeedStatus, error)
@@ -104,7 +110,7 @@ func (c *ledgerFeedDoctorCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResul
 		r.Status = doctor.StatusWarning
 		r.Severity = doctor.SeverityAdvisory
 		r.Message = strings.Join(warnings, "; ")
-		r.FixHint = "find a writer the feed missed with `bd events tail`; writers that do not journal run with BD_EVENTS_JOURNAL=0 or an old bd. Every scope stays covered by the controller's re-scan"
+		r.FixHint = "find a writer the feed missed with `bd events tail`; writers that do not journal run with BD_EVENTS_JOURNAL=0 or an old bd. The controller's re-scan still covers every create and update, but not the close of a row the cache never held: such a close inside a gap, or one the feed never reads, may go unannounced"
 		return r
 	}
 	r.Message = fmt.Sprintf("ledger feed %s: %d scope(s) tailed, %d on the re-scan", st.Mode, tailed, scanOnly)
@@ -177,7 +183,8 @@ func ledgerFeedScopeDetail(s ledgerFeedScopeStatus) string {
 		for _, kind := range kinds {
 			gaps = append(gaps, fmt.Sprintf("%s=%d", kind, s.Gaps[kind]))
 		}
-		parts = append(parts, "gaps "+strings.Join(gaps, ","))
+		// The re-scan a gap requests lists active rows only (ledgerFeed.onGap).
+		parts = append(parts, "gaps "+strings.Join(gaps, ",")+" (a never-held row closed inside a gap may go unannounced)")
 	}
 	if actors := topLedgerFeedActors(s.ActorRows, ledgerFeedDoctorTopActors); actors != "" {
 		parts = append(parts, "top actors "+actors)

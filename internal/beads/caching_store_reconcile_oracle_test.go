@@ -237,7 +237,27 @@ func buildExpectedNewEnd(st storeState, in snapshotInputs, postPreserveFresh map
 	exp.writeAtIDs = keySet(exp.writeSeq)
 	exp.deletedSeq = expectedDeletedSeq(st, in, exp)
 	exp.retainedIDs = expectedRetainedIDs(in, exp)
+	exp.announcedCloseIDs = expectedAnnouncedCloseIDs(st, in, exp)
 	return exp
+}
+
+// expectedAnnouncedCloseIDs is every row the cache held open that the
+// snapshot omits, that the merge evicted, and whose close the scan confirmed:
+// the closes a refresh must not announce again. No seeded state carries a
+// record, and each one is stamped with the pass clock, so the prune keeps
+// them all. The frozen branches predate the record, so the reference end
+// state cannot supply it.
+func expectedAnnouncedCloseIDs(st storeState, in snapshotInputs, exp mergeEndState) map[string]struct{} {
+	out := map[string]struct{}{}
+	for id, cached := range st.beads {
+		_, fresh := in.freshByID[id]
+		_, held := exp.beads[id]
+		_, confirmed := in.confirmedClosed[id]
+		if cached.Status != "closed" && !fresh && !held && confirmed {
+			out[id] = struct{}{}
+		}
+	}
+	return out
 }
 
 // expectedWriteSeq re-derives the write-revision map from the input. The merge

@@ -572,8 +572,14 @@ func (c *CachingStore) Reopen(id string) error {
 	return nil
 }
 
-// CloseAll closes multiple beads and sets metadata on each.
+// CloseAll closes multiple beads and sets metadata on each. An empty id list
+// touches no row, so it goes to the backing without the in-flight
+// registration, which with no ids would fence every yielding refresh as a
+// blind write.
 func (c *CachingStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	if len(ids) == 0 {
+		return c.backing.CloseAll(ids, metadata)
+	}
 	startSeq, endWrite := c.beginLocalWrite(ids...)
 	defer endWrite()
 	n, err := c.backing.CloseAll(ids, metadata)

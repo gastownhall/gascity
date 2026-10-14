@@ -1,6 +1,7 @@
 package beads
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -10,7 +11,8 @@ import (
 // that lands between a local write's backing commit and the cache's absorb of
 // it would read the write's row before the cache holds it and announce the
 // cache's own write as a refresh. With the option the refresh yields to the
-// write instead (ErrRowRefreshFenced), and the write alone announces it.
+// write instead (ErrRowRefreshYielded, an ErrRowRefreshFenced), and the write
+// alone announces it.
 
 // writeHookStore runs onWrite with the written row's id after each backing
 // write commits, before the write returns to the cache.
@@ -99,6 +101,17 @@ func (s *writeHookStore) Delete(id string) error {
 	return err
 }
 
+func (s *writeHookStore) ApplyGuarded(ctx context.Context, b GuardedBatch) (GuardedResult, error) {
+	res, err := s.MemStore.ApplyGuarded(ctx, b)
+	if err == nil {
+		ids, _ := guardedBatchTouched(b)
+		for _, id := range ids {
+			s.hook(id)
+		}
+	}
+	return res, err
+}
+
 // refreshNotifications keeps the notifications a refresh emitted.
 func refreshNotifications(events []string) []string {
 	var out []string
@@ -160,6 +173,18 @@ func TestCachingStoreRefreshRowReportYieldsToAnInFlightLocalWrite(t *testing.T) 
 		{name: "delete", gone: true, write: func(_ *testing.T, cache *CachingStore, id string) error {
 			return cache.Delete(id)
 		}},
+		{name: "apply_guarded", write: func(t *testing.T, cache *CachingStore, id string) error {
+			batcher, ok := cache.GuardedBatcherHandle()
+			if !ok {
+				t.Fatal("GuardedBatcherHandle: the backing applies no guarded batches")
+			}
+			title := "renamed"
+			_, err := batcher.ApplyGuarded(context.Background(), GuardedBatch{Items: []GuardedItem{
+				{Create: &Bead{ID: "gc-guarded", Title: "pinned"}},
+				{Update: &GuardedUpdate{ID: id, Opts: UpdateOpts{Title: &title}}},
+			}})
+			return err
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -183,8 +208,8 @@ func TestCachingStoreRefreshRowReportYieldsToAnInFlightLocalWrite(t *testing.T) 
 				t.Fatal("the backing hook never ran")
 			}
 			for i, err := range errs {
-				if !errors.Is(err, ErrRowRefreshFenced) {
-					t.Fatalf("refresh of %s inside the write = %v, want ErrRowRefreshFenced", hooked[i], err)
+				if !errors.Is(err, ErrRowRefreshYielded) || !errors.Is(err, ErrRowRefreshFenced) {
+					t.Fatalf("refresh of %s inside the write = %v, want ErrRowRefreshYielded, an ErrRowRefreshFenced", hooked[i], err)
 				}
 			}
 			if got := refreshNotifications(rec.take()); len(got) != 0 {
@@ -251,8 +276,8 @@ func TestCachingStoreRefreshRowReportYieldsOnlyToWritesThatMayTouchTheRow(t *tes
 	if _, err := cache.Create(Bead{Title: "local"}); err != nil {
 		t.Fatal(err)
 	}
-	if !errors.Is(during, ErrRowRefreshFenced) {
-		t.Fatalf("a refresh during a create = %v, want ErrRowRefreshFenced", during)
+	if !errors.Is(during, ErrRowRefreshYielded) {
+		t.Fatalf("a refresh during a create = %v, want ErrRowRefreshYielded", during)
 	}
 
 	backing.onWrite = nil
@@ -263,10 +288,133 @@ func TestCachingStoreRefreshRowReportYieldsOnlyToWritesThatMayTouchTheRow(t *tes
 	}); err != nil {
 		t.Fatalf("Tx: %v", err)
 	}
-	if !errors.Is(inTx, ErrRowRefreshFenced) {
-		t.Fatalf("a refresh during a Tx = %v, want ErrRowRefreshFenced", inTx)
+	if !errors.Is(inTx, ErrRowRefreshYielded) {
+		t.Fatalf("a refresh during a Tx = %v, want ErrRowRefreshYielded", inTx)
 	}
 	if rep, err := cache.RefreshRowReport(other.ID, RowRefreshOptions{YieldToLocalWrites: true}); err != nil || rep.Event != "bead.created" {
+		t.Fatalf("refresh after the writes = %q, %v; want the out-of-band create", rep.Event, err)
+	}
+}
+
+// batchCallHookStore runs onCall as each CloseAll or ApplyGuarded reaches the
+// backing, whatever rows it names, before the backing applies it.
+type batchCallHookStore struct {
+	*MemStore
+	onCall func()
+}
+
+func (s *batchCallHookStore) hook() {
+	if s.onCall != nil {
+		s.onCall()
+	}
+}
+
+func (s *batchCallHookStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	s.hook()
+	return s.MemStore.CloseAll(ids, metadata)
+}
+
+func (s *batchCallHookStore) ApplyGuarded(ctx context.Context, b GuardedBatch) (GuardedResult, error) {
+	s.hook()
+	return s.MemStore.ApplyGuarded(ctx, b)
+}
+
+// An empty CloseAll or guarded batch names no row, so it is not in flight as
+// a write whose rows its backing call decides: a yielding refresh of another
+// row proceeds while the call runs.
+func TestCachingStoreRefreshRowReportDoesNotYieldToAnEmptyBatchWrite(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name  string
+		write func(t *testing.T, cache *CachingStore)
+	}{
+		{name: "close_all", write: func(t *testing.T, cache *CachingStore) {
+			if n, err := cache.CloseAll(nil, map[string]string{"k": "v"}); n != 0 || err != nil {
+				t.Fatalf("CloseAll of no ids = %d, %v; want 0, nil", n, err)
+			}
+		}},
+		{name: "apply_guarded", write: func(t *testing.T, cache *CachingStore) {
+			batcher, ok := cache.GuardedBatcherHandle()
+			if !ok {
+				t.Fatal("GuardedBatcherHandle: the backing applies no guarded batches")
+			}
+			if _, err := batcher.ApplyGuarded(context.Background(), GuardedBatch{}); !errors.Is(err, ErrInvalidGuardedBatch) {
+				t.Fatalf("ApplyGuarded of an empty batch = %v, want ErrInvalidGuardedBatch", err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			backing := &batchCallHookStore{MemStore: NewMemStore()}
+			cache, rec := newReportCacheForTest(t, backing)
+			outOfBand, err := backing.Create(Bead{Title: "out of band"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			calls := 0
+			var during error
+			backing.onCall = func() {
+				calls++
+				_, during = cache.RefreshRowReport(outOfBand.ID, RowRefreshOptions{YieldToLocalWrites: true})
+			}
+			tc.write(t, cache)
+			backing.onCall = nil
+			if calls != 1 {
+				t.Fatalf("the write reached the backing %d times, want once", calls)
+			}
+			if during != nil {
+				t.Fatalf("a refresh of another row during the empty write = %v, want it to proceed", during)
+			}
+			if got := refreshNotifications(rec.take()); len(got) != 1 || !strings.Contains(got[0], "bead.created "+outOfBand.ID) {
+				t.Fatalf("refresh notifications = %q, want the out-of-band create", got)
+			}
+		})
+	}
+}
+
+// A refresh yields before its backing read, so a caller retrying a row while
+// a graph apply holds the fence for seconds reads nothing, and again after
+// the read, for a write begun during it.
+func TestCachingStoreRefreshRowReportYieldsBeforeItsBackingRead(t *testing.T) {
+	t.Parallel()
+
+	mem := NewMemStore()
+	counted := &observationReadCountingStore{Store: mem}
+	backing := &getHookStore{Store: counted}
+	cache, rec := newReportCacheForTest(t, backing)
+	outOfBand, err := mem.Create(Bead{Title: "out of band"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec.take()
+	yield := RowRefreshOptions{YieldToLocalWrites: true}
+
+	_, end := cache.beginLocalWrite()
+	before := counted.readCalls.Load()
+	for range 3 {
+		if _, err := cache.RefreshRowReport(outOfBand.ID, yield); !errors.Is(err, ErrRowRefreshYielded) {
+			t.Fatalf("a refresh during a write = %v, want ErrRowRefreshYielded", err)
+		}
+	}
+	if reads := counted.readCalls.Load() - before; reads != 0 {
+		t.Fatalf("the yielding refreshes made %d backing reads, want none", reads)
+	}
+	end()
+
+	var endDuring func()
+	backing.onGet = func(id string) { _, endDuring = cache.beginLocalWrite(id) }
+	if _, err := cache.RefreshRowReport(outOfBand.ID, yield); !errors.Is(err, ErrRowRefreshYielded) {
+		t.Fatalf("a refresh during a write begun in its read = %v, want ErrRowRefreshYielded", err)
+	}
+	if endDuring == nil {
+		t.Fatal("the refresh never read the row")
+	}
+	endDuring()
+	if got := refreshNotifications(rec.take()); len(got) != 0 {
+		t.Fatalf("the yielding refreshes notified %q, want nothing", got)
+	}
+	if rep, err := cache.RefreshRowReport(outOfBand.ID, yield); err != nil || rep.Event != "bead.created" {
 		t.Fatalf("refresh after the writes = %q, %v; want the out-of-band create", rep.Event, err)
 	}
 }

@@ -709,6 +709,11 @@ func (c *CachingStore) mergeSnapshotLocked(
 			setBeadStatus(&closed, "closed")
 			if freshClosed, ok := confirmedClosed[id]; ok {
 				closed = cloneBead(freshClosed)
+				// Recorded under the lock, before the notification goes
+				// out, so a refresh that reads this close in between does
+				// not announce it again (RefreshRowReport's
+				// AnnounceUnheldClose).
+				c.recordAnnouncedCloseLocked(id, freshClosed, now)
 			}
 			res.notifications = append(res.notifications, cacheNotification{
 				eventType: "bead.closed",
@@ -746,6 +751,7 @@ func (c *CachingStore) mergeSnapshotLocked(
 		delete(c.deps, id)
 	}
 	c.pruneRetainedFencesLocked(now)
+	c.pruneAnnouncedClosesLocked(now)
 
 	// 4. Shared tail (was duplicated per branch).
 	c.syncFailures = 0

@@ -15,10 +15,18 @@ package main
 // through the cache comes back as a journal row whose refresh finds nothing
 // new, so it neither notifies nor wakes anything (ga-yoix1): a refresh that
 // lands while such a write is in flight yields to it
-// (RowRefreshOptions.YieldToLocalWrites) and is retried, and the cache's own
-// close is not announced again after a re-scan evicted it. A write the
+// (RowRefreshOptions.YieldToLocalWrites) and is retried. A write the
 // controller makes around the cache (straight to the backing) is out of band
-// to the cache and is refreshed like any other.
+// to the cache and is refreshed like any other. A close is announced once,
+// by whichever sees it first: the cache's own closing write, the re-scan
+// that evicts the row the cache held open, or the refresh. The cache
+// remembers each close it announced, so a later refresh does not announce
+// it again; a close it never announced is announced, however recently the
+// cache wrote the row. A refresh more than a minute after the announcement,
+// or one that reads the row other than as it was announced (a later write
+// to it, or a close announced from a lagged read), announces it again; on a
+// backing that stamps whole seconds, a reopen and close inside the second
+// of the announced close looks like that close and is not announced.
 //
 // Under the legacy reconciler the feed wakes the reconciler once per page
 // with at least one changed row (critic A2: the allocator always, plus the
@@ -33,13 +41,23 @@ package main
 // every create and update but not the close of a row the cache never held.
 // That close is announced once by the refresh (critic A3), which sends it
 // down the live-confirmed close path (applyInferredClose), and handed to the
-// autoclose sweep as a backstop. A row whose refresh was dropped (an error, a
-// fence, a cache not live) is kept for a bounded retry, so its close is
-// still announced once the refresh succeeds. A closing row whose refresh
-// failed (an error, a cache not live) is handed to the sweep at once; a
-// fenced one, mostly the controller's own write in flight, is left to the
-// retry; and a row whose retries run out falls back to a re-scan and, if
-// closing, the sweep.
+// autoclose sweep as a backstop. A row is read as closing on a create or
+// close op or an open post-image, and on a closed post-image whose closed_at
+// sits within ledgerFeedCloseWindow of the row's ts: bd journals a close made
+// by an update (bd update --status closed) as op update. An edit inside that
+// window carries the same image, so the feed remembers the rows it read
+// closed for ledgerFeedClosedKeep and does not read such an edit as their
+// close again. A row whose refresh was dropped (an error, a fence, a cache
+// not live) is kept for a bounded retry, so its close is still announced
+// once the refresh succeeds. A closing row whose refresh failed (an error, a
+// cache not live) is handed to the sweep at once; a fenced one, mostly the
+// controller's own write in flight, is left to the retry. A refresh that
+// yields to such a write spends none of the row's retries, and one that
+// starts while the write is in flight reads nothing: the row waits for the
+// write, for a minute at most. A row whose retries or wait run out is
+// logged and falls back to a re-scan and, if closing, the sweep. A gap
+// skips its rows outright, so the close of a never-held row inside it is
+// announced only if an edit of the row lands within its close's window.
 //
 // The feed reads nothing while its scope's gate is closed (a quiescent city
 // or a suspended rig), and every read and Apply counts as store work, so the
@@ -97,13 +115,30 @@ const (
 	// ledgerFeedSampleCap bounds the row-age and apply-duration samples the
 	// percentiles are read from.
 	ledgerFeedSampleCap = 1024
-	// ledgerFeedRefreshErrorLogEvery rate-limits the refresh-error log line.
-	ledgerFeedRefreshErrorLogEvery = time.Minute
+	// ledgerFeedLogEvery rate-limits each of the feed's warnings: a refresh
+	// error, and a row whose retries ran out.
+	ledgerFeedLogEvery = time.Minute
 	// ledgerFeedRetryCap bounds the dropped rows kept for a retry, and
 	// ledgerFeedRetryLimit the drops one row may take, before the feed gives
-	// the row up to a re-scan (and, for a close, the autoclose sweep).
+	// the row up to a re-scan (and, for a close, the autoclose sweep). A
+	// refresh that yielded to the cache's own write in flight is not a drop:
+	// the row waits for the write, for ledgerFeedYieldLimit from its first
+	// yield at most. A graph apply holds that fence for seconds; a wait past
+	// the limit is a write that does not return, or one write after another.
 	ledgerFeedRetryCap   = 4096
 	ledgerFeedRetryLimit = 8
+	ledgerFeedYieldLimit = time.Minute
+	// ledgerFeedCloseWindow is how near an update row's closed post-image
+	// must put its closed_at to the row's ts for the row to be read as the
+	// close itself: bd stamps both in the committing transaction and stores
+	// closed_at to the second. An edit of a row closed longer ago shows no
+	// evidence of a recent close.
+	ledgerFeedCloseWindow = time.Minute
+	// ledgerFeedClosedCap bounds the rows the feed remembers reading closed,
+	// each for ledgerFeedClosedKeep, so that an edit inside a close's window
+	// is not read as that close again.
+	ledgerFeedClosedCap  = 4096
+	ledgerFeedClosedKeep = 2 * ledgerFeedCloseWindow
 )
 
 // The journal ops the feed reads, from beads' frozen issueops vocabulary
@@ -302,31 +337,11 @@ func attachLedgerFeed(ctx context.Context, req *ledgerFeedRequest, store beads.S
 // whose journal turns on after its store was built is tailed without a
 // rebuild.
 func ledgerFeedLane(store beads.Store) (journalops.Journal, string, string) {
-	if carrier := journalCarrier(store); carrier != nil {
-		if journal, ok := carrier.(journalops.Journal); ok {
-			return journal, fmt.Sprintf("%T", carrier), ""
-		}
+	carrier := beads.EventsJournalCarrier(store)
+	if journal, ok := carrier.(journalops.Journal); ok {
+		return journal, fmt.Sprintf("%T", carrier), ""
 	}
 	return nil, fmt.Sprintf("%T", store), fmt.Sprintf("lane %T cannot be tailed", store)
-}
-
-// journalCarrier returns the outermost store in store's Backing chain that
-// carries a journal read, as ActiveEventsJournal finds it, or nil.
-func journalCarrier(store beads.Store) beads.Store {
-	for range 16 {
-		if store == nil {
-			return nil
-		}
-		if _, ok := store.(journalops.Journal); ok {
-			return store
-		}
-		wrapper, ok := store.(interface{ Backing() beads.Store })
-		if !ok {
-			return nil
-		}
-		store = wrapper.Backing()
-	}
-	return nil
 }
 
 // observe returns the onChange the cache is built with: onChange, watched by
@@ -390,16 +405,24 @@ type ledgerFeed struct {
 	reason             string
 	stats              ledgerFeedCounters
 	lastRefreshErrorAt time.Time
+	lastGiveUpAt       time.Time
 	// retries are the dropped rows awaiting a retry, by id.
 	retries map[string]ledgerFeedRetry
+	// closed are the rows refreshed closed on close evidence, by when
+	// (dropSeenCloses).
+	closed map[string]time.Time
 }
 
 // ledgerFeedRetry is one dropped row awaiting a retry.
 type ledgerFeedRetry struct {
 	// closing carries the page's evidence of a recent close or open state.
 	closing bool
-	// drops counts the refreshes of the row the feed dropped.
+	// drops counts the refreshes of the row the feed dropped, but for the
+	// ones that yielded to a local write in flight.
 	drops int
+	// firstYield is when a refresh of the row first yielded to a local write
+	// in flight, or zero.
+	firstYield time.Time
 }
 
 // ledgerFeedCounters are a feed's own counters; the tailer keeps the rest.
@@ -591,8 +614,12 @@ func (f *ledgerFeed) onError(err error) error {
 }
 
 // onGap resyncs the cache from its source of truth. Returning before the
-// re-scan runs is safe: the tailer read gap.To's head before calling this,
-// so a scan requested now lists everything committed at or below it.
+// re-scan runs is safe for the active rows: the tailer read gap.To's head
+// before calling this, so a scan requested now lists every row active at or
+// below it. The scan lists no closed rows, so the close of a row the cache
+// never held, made inside the skipped range, is not recovered (and not
+// handed to the autoclose sweep) unless an edit of the row lands within its
+// close's window.
 func (f *ledgerFeed) onGap(_ context.Context, gap ledgerfeed.Gap) error {
 	f.miss.noteUnhealthy(f.now())
 	f.cache.RequestReconcile()
@@ -613,6 +640,7 @@ func (f *ledgerFeed) apply(_ context.Context, page journalops.Page) error {
 	defer f.refreshMu.Unlock()
 	start := f.now()
 	plan := planLedgerFeedPage(page.Rows)
+	f.dropSeenCloses(&plan, start)
 	ids, closing := f.withRetries(plan)
 	counts := f.refreshRows(ids, closing, start)
 	now := f.now()
@@ -658,14 +686,16 @@ func (f *ledgerFeed) refreshRows(ids []string, closing map[string]bool, now time
 		deferred  []string
 	)
 	refreshChanged := make(map[string]bool, len(ids))
-	// drop keeps a dropped row for a retry. A closing row goes to the sweep
-	// at once when the drop was a failure (the sweep reads the row live
-	// whatever the retry finds), but a fenced one is left to the retry, which
-	// announces and defers a never-held close itself: a fence is mostly the
-	// controller's own write in flight, and deferring each would flood the
-	// sweep. A row whose retries ran out goes to the sweep either way.
-	drop := func(id string, fenced bool) {
-		kept := f.keepForRetry(id, closing[id])
+	// drop keeps a row whose refresh failed with err for a retry. A closing
+	// row goes to the sweep at once when the drop was a failure (the sweep
+	// reads the row live whatever the retry finds), but a fenced one is left
+	// to the retry, which announces and defers a never-held close itself: a
+	// fence is mostly the controller's own write in flight, and deferring
+	// each would flood the sweep. A yield to that write spends none of the
+	// row's drops (keepForRetry). A row given up goes to the sweep either way.
+	drop := func(id string, err error) {
+		fenced := errors.Is(err, beads.ErrRowRefreshFenced)
+		kept := f.keepForRetry(id, closing[id], errors.Is(err, beads.ErrRowRefreshYielded), now)
 		if closing[id] && (!fenced || !kept) {
 			deferred = append(deferred, id)
 		}
@@ -674,6 +704,7 @@ func (f *ledgerFeed) refreshRows(ids []string, closing map[string]bool, now time
 		}
 		counts.retryGiveUps++
 		reconcile = true
+		f.logGiveUp(id, err)
 	}
 	for _, id := range ids {
 		if !f.cache.OwnsBeadID(id) {
@@ -681,31 +712,28 @@ func (f *ledgerFeed) refreshRows(ids []string, closing map[string]bool, now time
 			f.forgetRetry(id)
 			continue
 		}
-		opts := beads.RowRefreshOptions{AnnounceUnheldClose: closing[id], YieldToLocalWrites: true}
-		rep, err := f.cache.RefreshRowReport(id, opts)
-		if errors.Is(err, beads.ErrRowRefreshFenced) {
-			rep, err = f.cache.RefreshRowReport(id, opts)
-		}
+		rep, err := f.cache.RefreshRowReport(id, beads.RowRefreshOptions{AnnounceUnheldClose: closing[id], YieldToLocalWrites: true})
 		switch {
 		case err == nil || errors.Is(err, beads.ErrNotFound):
 			counts.refreshed++
-			f.forgetRetry(id)
+			f.noteRefreshed(id, closing[id], rep, now)
 		case errors.Is(err, beads.ErrRowRefreshFenced):
 			// A newer local write, event or scan owns the row, or a local
-			// write that may touch it is in flight; the retry finds which.
+			// write that may touch it is in flight (ErrRowRefreshYielded);
+			// the retry finds which.
 			counts.fenced++
-			drop(id, true)
+			drop(id, err)
 			continue
 		case errors.Is(err, beads.ErrCacheUnavailable):
 			counts.unavailable++
 			reconcile = true
-			drop(id, false)
+			drop(id, err)
 			continue
 		default:
 			counts.refreshErrors++
 			reconcile = true
 			f.logRefreshError(id, err)
-			drop(id, false)
+			drop(id, err)
 			continue
 		}
 		refreshChanged[id] = rep.Event != ""
@@ -736,8 +764,11 @@ func (f *ledgerFeed) refreshRows(ids []string, closing map[string]bool, now time
 }
 
 // keepForRetry keeps a dropped row for a retry, reporting false when its
-// retries ran out or the retry set is full: the caller gives it up.
-func (f *ledgerFeed) keepForRetry(id string, closing bool) bool {
+// retries ran out or the retry set is full: the caller gives it up. A
+// refresh that yielded to a local write in flight is not counted as a drop;
+// the row waits for the write, for ledgerFeedYieldLimit from its first
+// yield at most.
+func (f *ledgerFeed) keepForRetry(id string, closing, yielded bool, now time.Time) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	r, kept := f.retries[id]
@@ -745,8 +776,13 @@ func (f *ledgerFeed) keepForRetry(id string, closing bool) bool {
 		return false
 	}
 	r.closing = r.closing || closing
-	r.drops++
-	if r.drops >= ledgerFeedRetryLimit {
+	switch {
+	case !yielded:
+		r.drops++
+	case r.firstYield.IsZero():
+		r.firstYield = now
+	}
+	if r.drops >= ledgerFeedRetryLimit || (!r.firstYield.IsZero() && now.Sub(r.firstYield) >= ledgerFeedYieldLimit) {
 		delete(f.retries, id)
 		return false
 	}
@@ -761,6 +797,60 @@ func (f *ledgerFeed) forgetRetry(id string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	delete(f.retries, id)
+}
+
+// noteRefreshed records a refresh that succeeded: the row's retry is done,
+// a row found closed on close evidence is remembered as read closed, and a
+// row found open or missing is forgotten.
+func (f *ledgerFeed) noteRefreshed(id string, closing bool, rep beads.RowRefresh, now time.Time) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.retries, id)
+	switch {
+	case !rep.Found || rep.Bead.Status != "closed":
+		delete(f.closed, id)
+	case closing:
+		f.rememberClosedLocked(id, now)
+	}
+}
+
+// rememberClosedLocked records id as read closed at now. A full set sheds
+// its expired entries first, then its oldest. Caller holds f.mu.
+func (f *ledgerFeed) rememberClosedLocked(id string, now time.Time) {
+	if f.closed == nil {
+		f.closed = make(map[string]time.Time)
+	}
+	if _, known := f.closed[id]; !known && len(f.closed) >= ledgerFeedClosedCap {
+		var oldest string
+		var oldestAt time.Time
+		for seen, at := range f.closed {
+			switch {
+			case now.Sub(at) > ledgerFeedClosedKeep:
+				delete(f.closed, seen)
+			case oldest == "" || at.Before(oldestAt):
+				oldest, oldestAt = seen, at
+			}
+		}
+		if len(f.closed) >= ledgerFeedClosedCap {
+			delete(f.closed, oldest)
+		}
+	}
+	f.closed[id] = now
+}
+
+// dropSeenCloses drops the evidence of the page's ids whose only evidence is
+// a closed post-image and which this feed read closed within
+// ledgerFeedClosedKeep: that is an edit inside the window of a close already
+// read, and a re-scan may have evicted the row since, so refreshing it as
+// closing would announce the close again.
+func (f *ledgerFeed) dropSeenCloses(plan *ledgerFeedPagePlan, now time.Time) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for id := range plan.closedImage {
+		if at, ok := f.closed[id]; ok && now.Sub(at) <= ledgerFeedClosedKeep {
+			delete(plan.closing, id)
+		}
+	}
 }
 
 // notePage folds one applied page into the counters.
@@ -811,16 +901,29 @@ func (f *ledgerFeed) foldCountsLocked(counts ledgerFeedCounters) {
 }
 
 func (f *ledgerFeed) logRefreshError(id string, err error) {
-	f.mu.Lock()
-	now := f.now()
-	due := now.Sub(f.lastRefreshErrorAt) >= ledgerFeedRefreshErrorLogEvery
-	if due {
-		f.lastRefreshErrorAt = now
-	}
-	f.mu.Unlock()
-	if due {
+	if f.logDue(&f.lastRefreshErrorAt) {
 		log.Printf("ledger-feed: %s: refreshing %s: %v (kept for a retry; a re-scan is requested)", f.scope, id, err)
 	}
+}
+
+// logGiveUp reports a row given up after its last dropped refresh, err.
+func (f *ledgerFeed) logGiveUp(id string, err error) {
+	if f.logDue(&f.lastGiveUpAt) {
+		log.Printf("ledger-feed: %s: gave up retrying %s: %v (a re-scan is requested; a close goes to the autoclose sweep)", f.scope, id, err)
+	}
+}
+
+// logDue reports whether a warning last logged at *last is due again,
+// recording now as its time when it is.
+func (f *ledgerFeed) logDue(last *time.Time) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	now := f.now()
+	if now.Sub(*last) < ledgerFeedLogEvery {
+		return false
+	}
+	*last = now
+	return true
 }
 
 // noteReadOK marks a feed that was failing healthy again on a good read.
@@ -907,15 +1010,18 @@ type ledgerFeedPagePlan struct {
 	// order, comments skipped.
 	ids []string
 	// closing marks the ids with evidence of a recent close or an open
-	// state: a create or close op, or an open post-image.
+	// state (rowCloseEvidence).
 	closing map[string]bool
+	// closedImage marks the closing ids whose only evidence is a closed
+	// post-image, which an edit inside a close's window carries too.
+	closedImage map[string]bool
 	// actors counts rows per actor, capped.
 	actors map[string]int64
 }
 
 // planLedgerFeedPage reads one page's rows into a plan.
 func planLedgerFeedPage(rows []journalops.Row) ledgerFeedPagePlan {
-	plan := ledgerFeedPagePlan{closing: map[string]bool{}, actors: map[string]int64{}}
+	plan := ledgerFeedPagePlan{closing: map[string]bool{}, closedImage: map[string]bool{}, actors: map[string]int64{}}
 	seen := make(map[string]struct{}, len(rows))
 	for _, row := range rows {
 		actor := row.Actor
@@ -930,26 +1036,88 @@ func planLedgerFeedPage(rows []journalops.Row) ledgerFeedPagePlan {
 			seen[row.IssueID] = struct{}{}
 			plan.ids = append(plan.ids, row.IssueID)
 		}
-		if row.Op == journalOpCreate || row.Op == journalOpClose || postImageOpen(row.IssueJSON) {
-			plan.closing[row.IssueID] = true
-		}
+		plan.noteEvidence(row)
 	}
 	return plan
 }
 
-// postImageOpen reports whether a row's post-image names a status other than
-// closed.
-func postImageOpen(issueJSON string) bool {
-	if issueJSON == "" {
+// noteEvidence folds one row's close evidence into the plan. Strong evidence
+// for an id outweighs a closed post-image in either order.
+func (p *ledgerFeedPagePlan) noteEvidence(row journalops.Row) {
+	switch rowCloseEvidence(row) {
+	case closeEvidenceStrong:
+		p.closing[row.IssueID] = true
+		delete(p.closedImage, row.IssueID)
+	case closeEvidenceClosedImage:
+		if !p.closing[row.IssueID] {
+			p.closing[row.IssueID] = true
+			p.closedImage[row.IssueID] = true
+		}
+	}
+}
+
+// closeEvidence is what one journal row says of a recent close or an open
+// state.
+type closeEvidence int
+
+const (
+	// closeEvidenceNone: the row says neither.
+	closeEvidenceNone closeEvidence = iota
+	// closeEvidenceStrong: a create or close op, or an open post-image.
+	closeEvidenceStrong
+	// closeEvidenceClosedImage: a closed post-image whose closed_at sits
+	// within ledgerFeedCloseWindow of the row's ts.
+	closeEvidenceClosedImage
+)
+
+// rowCloseEvidence reads one row's close evidence. bd journals a close made
+// by an update (bd update --status closed) as op update, so a closed
+// post-image counts when its closed_at is as recent as the row.
+func rowCloseEvidence(row journalops.Row) closeEvidence {
+	if row.Op == journalOpCreate || row.Op == journalOpClose {
+		return closeEvidenceStrong
+	}
+	image, ok := parsePostImage(row.IssueJSON)
+	switch {
+	case !ok || image.Status == "":
+		return closeEvidenceNone
+	case image.Status != "closed":
+		return closeEvidenceStrong
+	case image.closedNear(row.TS):
+		return closeEvidenceClosedImage
+	}
+	return closeEvidenceNone
+}
+
+// postImage is the part of a row's post-image the feed reads.
+type postImage struct {
+	Status   string `json:"status"`
+	ClosedAt string `json:"closed_at"`
+}
+
+// parsePostImage decodes a row's post-image, reporting false for a row with
+// none or one that does not decode.
+func parsePostImage(issueJSON string) (postImage, bool) {
+	var image postImage
+	if issueJSON == "" || json.Unmarshal([]byte(issueJSON), &image) != nil {
+		return postImage{}, false
+	}
+	return image, true
+}
+
+// closedNear reports whether the image's closed_at sits within
+// ledgerFeedCloseWindow of ts, either side.
+func (p postImage) closedNear(ts string) bool {
+	at, err := time.Parse(time.RFC3339Nano, ts)
+	if err != nil {
 		return false
 	}
-	var image struct {
-		Status string `json:"status"`
-	}
-	if err := json.Unmarshal([]byte(issueJSON), &image); err != nil {
+	closedAt, err := time.Parse(time.RFC3339Nano, p.ClosedAt)
+	if err != nil {
 		return false
 	}
-	return image.Status != "" && image.Status != "closed"
+	d := at.Sub(closedAt)
+	return d >= -ledgerFeedCloseWindow && d <= ledgerFeedCloseWindow
 }
 
 // ledgerFeedWakeKeys are the keys one page's legacy wake names (critic A2):

@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
@@ -116,6 +118,10 @@ type journalingStore struct {
 	afterWrite func(id string)
 	// getHook runs before each Get.
 	getHook func(id string) error
+
+	// closedAt is each closed row's close time, as bd stamps closed_at.
+	closedMu sync.Mutex
+	closedAt map[string]time.Time
 }
 
 func newJournalingStore() *journalingStore {
@@ -130,13 +136,49 @@ func (s *journalingStore) ReadEventsJournalPage(ctx context.Context, since int64
 
 func (s *journalingStore) EventsJournalActive() bool { return s.j.active.Load() }
 
+// image is a row's journal post-image, closed_at included.
 func (s *journalingStore) image(id string) string {
 	b, err := s.Store.Get(id)
 	if err != nil {
 		return ""
 	}
-	data, _ := json.Marshal(b)
+	data, _ := json.Marshal(struct {
+		beads.Bead
+		ClosedAt *time.Time `json:"closed_at,omitempty"`
+	}{Bead: b, ClosedAt: s.closedAtFor(b)})
 	return string(data)
+}
+
+// closedAtFor is a row's closed_at: stamped, at second precision as bd
+// stores it, the first time an image shows the row closed, and forgotten
+// once one shows it open.
+func (s *journalingStore) closedAtFor(b beads.Bead) *time.Time {
+	s.closedMu.Lock()
+	defer s.closedMu.Unlock()
+	if b.Status != "closed" {
+		delete(s.closedAt, b.ID)
+		return nil
+	}
+	at, ok := s.closedAt[b.ID]
+	if !ok {
+		at = time.Now().UTC().Truncate(time.Second)
+		s.setClosedAtLocked(b.ID, at)
+	}
+	return &at
+}
+
+// backdateClose sets a closed row's closed_at, as a close long ago left it.
+func (s *journalingStore) backdateClose(id string, at time.Time) {
+	s.closedMu.Lock()
+	defer s.closedMu.Unlock()
+	s.setClosedAtLocked(id, at.UTC().Truncate(time.Second))
+}
+
+func (s *journalingStore) setClosedAtLocked(id string, at time.Time) {
+	if s.closedAt == nil {
+		s.closedAt = make(map[string]time.Time)
+	}
+	s.closedAt[id] = at
 }
 
 func (s *journalingStore) List(q beads.ListQuery) ([]beads.Bead, error) {
@@ -308,26 +350,46 @@ func (h *feedHarness) reconcileEvents() int {
 }
 
 func TestPlanLedgerFeedPage(t *testing.T) {
+	const ts = "2026-10-14T12:00:30.123456789Z"
+	closedNow := `{"status":"closed","closed_at":"2026-10-14T12:00:00Z"}`
+	closedLongAgo := `{"status":"closed","closed_at":"2026-10-14T11:00:00Z"}`
 	rows := []journalops.Row{
-		{Seq: 1, Op: "update", IssueID: "gc-2", Actor: "a", IssueJSON: `{"status":"closed"}`},
-		{Seq: 2, Op: journalOpComment, IssueID: "gc-9", Actor: "a"},
-		{Seq: 3, Op: journalOpCreate, IssueID: "gc-1", Actor: "b"},
-		{Seq: 4, Op: "update", IssueID: "gc-2", Actor: "b", IssueJSON: `{"status":"closed"}`},
-		{Seq: 5, Op: "update", IssueID: "gc-3", IssueJSON: `{"status":"in_progress"}`},
-		{Seq: 6, Op: journalOpClose, IssueID: "gc-4"},
-		{Seq: 7, Op: "dep_add", IssueID: ""},
-		{Seq: 8, Op: "update", IssueID: "gc-5", IssueJSON: `not json`},
+		{Seq: 1, TS: ts, Op: "update", IssueID: "gc-2", Actor: "a", IssueJSON: closedNow},
+		{Seq: 2, TS: ts, Op: journalOpComment, IssueID: "gc-9", Actor: "a"},
+		{Seq: 3, TS: ts, Op: journalOpCreate, IssueID: "gc-1", Actor: "b"},
+		{Seq: 4, TS: ts, Op: "update", IssueID: "gc-2", Actor: "b", IssueJSON: closedNow},
+		{Seq: 5, TS: ts, Op: "update", IssueID: "gc-3", IssueJSON: `{"status":"in_progress"}`},
+		{Seq: 6, TS: ts, Op: journalOpClose, IssueID: "gc-4"},
+		{Seq: 7, TS: ts, Op: "dep_add", IssueID: ""},
+		{Seq: 8, TS: ts, Op: "update", IssueID: "gc-5", IssueJSON: `not json`},
+		{Seq: 9, TS: ts, Op: "update", IssueID: "gc-6", IssueJSON: closedLongAgo},
+		{Seq: 10, TS: ts, Op: "update", IssueID: "gc-7", IssueJSON: `{"status":"closed"}`},
+		{Seq: 11, TS: ts, Op: "update", IssueID: "gc-8", IssueJSON: closedNow},
+		{Seq: 12, TS: ts, Op: journalOpClose, IssueID: "gc-8", IssueJSON: closedNow},
+		{Seq: 13, TS: ts, Op: "update", IssueID: "gc-10", IssueJSON: closedNow},
+		{Seq: 14, TS: ts, Op: "update", IssueID: "gc-10", IssueJSON: `{"status":"open"}`},
+		{Seq: 15, Op: "update", IssueID: "gc-11", IssueJSON: closedNow},
 	}
 	plan := planLedgerFeedPage(rows)
-	if want := []string{"gc-2", "gc-1", "gc-3", "gc-4", "gc-5"}; !slices.Equal(plan.ids, want) {
+	if want := []string{"gc-2", "gc-1", "gc-3", "gc-4", "gc-5", "gc-6", "gc-7", "gc-8", "gc-10", "gc-11"}; !slices.Equal(plan.ids, want) {
 		t.Fatalf("ids = %v, want %v (comments and empty ids skipped, first-appearance order)", plan.ids, want)
 	}
-	for id, want := range map[string]bool{"gc-1": true, "gc-2": false, "gc-3": true, "gc-4": true, "gc-5": false} {
+	// gc-2 closed by an update (closed_at near its row's ts), gc-6 edited
+	// long after its close, gc-7 closed with no closed_at, gc-11 with no ts.
+	for id, want := range map[string]bool{
+		"gc-1": true, "gc-2": true, "gc-3": true, "gc-4": true, "gc-5": false, "gc-6": false,
+		"gc-7": false, "gc-8": true, "gc-10": true, "gc-11": false,
+	} {
 		if plan.closing[id] != want {
 			t.Errorf("closing[%s] = %v, want %v", id, plan.closing[id], want)
 		}
 	}
-	if plan.actors["a"] != 2 || plan.actors["b"] != 2 || plan.actors[""] != 4 {
+	// Only a closed post-image is weak evidence: a create, close op or open
+	// post-image for the id in the same page overrides it.
+	if want := map[string]bool{"gc-2": true}; !maps.Equal(plan.closedImage, want) {
+		t.Errorf("closedImage = %v, want %v", plan.closedImage, want)
+	}
+	if plan.actors["a"] != 2 || plan.actors["b"] != 2 || plan.actors[""] != 11 {
 		t.Fatalf("actors = %v", plan.actors)
 	}
 	var many []journalops.Row
@@ -337,6 +399,99 @@ func TestPlanLedgerFeedPage(t *testing.T) {
 	capped := planLedgerFeedPage(many).actors
 	if len(capped) != ledgerFeedActorCap+1 || capped[ledgerFeedActorOther] != 5 {
 		t.Fatalf("capped actors = %v, want %d named plus other=5", capped, ledgerFeedActorCap)
+	}
+}
+
+// A create, a close op and an open post-image are evidence of a recent close
+// or an open state. A closed post-image is evidence only when its closed_at
+// sits within ledgerFeedCloseWindow of the row's ts, either side: bd stamps
+// both in the committing transaction, and stores closed_at to the second.
+func TestLedgerFeedRowCloseEvidence(t *testing.T) {
+	ts := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	stamp := ts.Format(time.RFC3339Nano)
+	closedAt := func(at time.Time) string {
+		return fmt.Sprintf(`{"status":"closed","closed_at":%q}`, at.Format(time.RFC3339Nano))
+	}
+	for _, tc := range []struct {
+		name string
+		row  journalops.Row
+		want closeEvidence
+	}{
+		{"create", journalops.Row{Op: journalOpCreate}, closeEvidenceStrong},
+		{"close op", journalops.Row{Op: journalOpClose, TS: stamp, IssueJSON: closedAt(ts.Add(-time.Hour))}, closeEvidenceStrong},
+		{"open image", journalops.Row{Op: "update", IssueJSON: `{"status":"open"}`}, closeEvidenceStrong},
+		{"closed at the window's edge", journalops.Row{Op: "update", TS: stamp, IssueJSON: closedAt(ts.Add(-ledgerFeedCloseWindow))}, closeEvidenceClosedImage},
+		{"closed after the ts", journalops.Row{Op: "update", TS: stamp, IssueJSON: closedAt(ts.Add(ledgerFeedCloseWindow))}, closeEvidenceClosedImage},
+		{"closed before the window", journalops.Row{Op: "update", TS: stamp, IssueJSON: closedAt(ts.Add(-ledgerFeedCloseWindow - time.Nanosecond))}, closeEvidenceNone},
+		{"closed past the window", journalops.Row{Op: "update", TS: stamp, IssueJSON: closedAt(ts.Add(ledgerFeedCloseWindow + time.Nanosecond))}, closeEvidenceNone},
+		{"no closed_at", journalops.Row{Op: "update", TS: stamp, IssueJSON: `{"status":"closed"}`}, closeEvidenceNone},
+		{"bad closed_at", journalops.Row{Op: "update", TS: stamp, IssueJSON: `{"status":"closed","closed_at":"noon"}`}, closeEvidenceNone},
+		{"bad ts", journalops.Row{Op: "update", TS: "noon", IssueJSON: closedAt(ts)}, closeEvidenceNone},
+		{"no status", journalops.Row{Op: "update", TS: stamp, IssueJSON: `{"title":"x"}`}, closeEvidenceNone},
+		{"no image", journalops.Row{Op: "update", TS: stamp}, closeEvidenceNone},
+		{"not json", journalops.Row{Op: "update", TS: stamp, IssueJSON: `not json`}, closeEvidenceNone},
+	} {
+		if got := rowCloseEvidence(tc.row); got != tc.want {
+			t.Errorf("%s: rowCloseEvidence = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// The feed remembers the rows it refreshed closed on close evidence, for
+// ledgerFeedClosedKeep, and drops a later page's closed post-image of one as
+// evidence: that close was already read. Strong evidence is never dropped, a
+// row refreshed open or missing is forgotten, and the set stays bounded.
+func TestLedgerFeedRemembersTheClosesItRead(t *testing.T) {
+	at := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	closedRow := func(id string) beads.RowRefresh {
+		return beads.RowRefresh{Found: true, Bead: beads.Bead{ID: id, Status: "closed"}}
+	}
+	closedImages := func(ids ...string) ledgerFeedPagePlan {
+		plan := ledgerFeedPagePlan{closing: map[string]bool{}, closedImage: map[string]bool{}}
+		for _, id := range ids {
+			plan.closing[id], plan.closedImage[id] = true, true
+		}
+		return plan
+	}
+	f := &ledgerFeed{}
+	f.noteRefreshed("gc-1", true, closedRow("gc-1"), at)
+	f.noteRefreshed("gc-2", false, closedRow("gc-2"), at)
+	plan := closedImages("gc-1", "gc-2")
+	f.dropSeenCloses(&plan, at.Add(ledgerFeedClosedKeep))
+	if want := map[string]bool{"gc-2": true}; !maps.Equal(plan.closing, want) {
+		t.Fatalf("closing = %v, want %v: only the close read on evidence is dropped", plan.closing, want)
+	}
+	plan = closedImages("gc-1")
+	f.dropSeenCloses(&plan, at.Add(ledgerFeedClosedKeep+time.Nanosecond))
+	if !plan.closing["gc-1"] {
+		t.Fatal("a close read past ledgerFeedClosedKeep dropped the evidence")
+	}
+	strong := ledgerFeedPagePlan{closing: map[string]bool{"gc-1": true}, closedImage: map[string]bool{}}
+	f.dropSeenCloses(&strong, at)
+	if !strong.closing["gc-1"] {
+		t.Fatal("strong evidence was dropped")
+	}
+
+	f.noteRefreshed("gc-1", false, beads.RowRefresh{Found: true, Bead: beads.Bead{ID: "gc-1", Status: "open"}}, at)
+	f.noteRefreshed("gc-3", true, closedRow("gc-3"), at)
+	f.noteRefreshed("gc-3", false, beads.RowRefresh{}, at)
+	plan = closedImages("gc-1", "gc-3")
+	f.dropSeenCloses(&plan, at)
+	if want := map[string]bool{"gc-1": true, "gc-3": true}; !maps.Equal(plan.closing, want) {
+		t.Fatalf("closing = %v, want %v: a reopened or missing row is forgotten", plan.closing, want)
+	}
+
+	f = &ledgerFeed{}
+	for i := range ledgerFeedClosedCap {
+		f.noteRefreshed(fmt.Sprintf("gc-%d", i), true, closedRow(fmt.Sprintf("gc-%d", i)), at.Add(time.Duration(i)))
+	}
+	f.noteRefreshed("gc-new", true, closedRow("gc-new"), at.Add(ledgerFeedClosedCap))
+	if _, kept := f.closed["gc-0"]; kept || len(f.closed) != ledgerFeedClosedCap {
+		t.Fatalf("full set: %d entries, oldest kept %v; want the oldest evicted", len(f.closed), kept)
+	}
+	f.noteRefreshed("gc-late", true, closedRow("gc-late"), at.Add(ledgerFeedClosedKeep+time.Hour))
+	if len(f.closed) != 1 {
+		t.Fatalf("full set of expired entries: %d left, want them pruned", len(f.closed))
 	}
 }
 
@@ -614,8 +769,9 @@ func TestLedgerFeedAnnouncesANeverHeldCloseOnce(t *testing.T) {
 		t.Fatalf("completion facts = %d, want 1", got)
 	}
 
-	// A long-closed row the cache does not hold: an update shows no
-	// evidence of a recent close, so it is installed silently.
+	// A long-closed row the cache does not hold: an update whose post-image
+	// carries an hour-old closed_at shows no evidence of a recent close, so
+	// it is installed silently.
 	old, err := store.Store.Create(beads.Bead{Title: "long closed"})
 	if err != nil {
 		t.Fatal(err)
@@ -623,12 +779,62 @@ func TestLedgerFeedAnnouncesANeverHeldCloseOnce(t *testing.T) {
 	if err := store.Store.Close(old.ID); err != nil {
 		t.Fatal(err)
 	}
+	store.backdateClose(old.ID, time.Now().Add(-time.Hour))
 	if err := store.SetMetadata(old.ID, "note", "x"); err != nil {
 		t.Fatal(err)
 	}
 	h.step()
 	if got := h.eventsFor(old.ID); len(got) != 0 {
 		t.Fatalf("update of a long-closed row recorded %v, want nothing", got)
+	}
+}
+
+// A row the cache never held, closed by an update (bd update --status closed
+// journals op update), is announced once from its post-image's fresh
+// closed_at and handed to the autoclose sweep. Later edits of the closed row
+// inside the close window, while the cache holds it and after a re-scan
+// evicted it, announce nothing more.
+func TestLedgerFeedAnnouncesAnUpdateCloseOnce(t *testing.T) {
+	store := newJournalingStore()
+	h := newFeedHarness(t, store)
+	h.step()
+	row, err := store.Store.Create(beads.Bead{Title: "agent work"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed := "closed"
+	if err := store.Update(row.ID, beads.UpdateOpts{Status: &closed}); err != nil {
+		t.Fatal(err)
+	}
+	h.step()
+	closedEvent := events.BeadClosed + "/" + cacheReconcileActor
+	if got := h.eventsFor(row.ID); !slices.Equal(got, []string{closedEvent}) {
+		t.Fatalf("events = %v, want [%s]", got, closedEvent)
+	}
+	if !slices.Equal(h.deferred, []string{row.ID}) {
+		t.Fatalf("deferred to the sweep = %v, want [%s]", h.deferred, row.ID)
+	}
+	if st := h.feed.status(time.Now()); st.UnheldCloses != 1 {
+		t.Fatalf("unheld closes = %d, want 1", st.UnheldCloses)
+	}
+
+	if err := store.SetMetadata(row.ID, "note", "held"); err != nil {
+		t.Fatal(err)
+	}
+	h.step()
+	h.cache.ReconcileNowForTest() // evicts the closed row
+	if err := store.SetMetadata(row.ID, "note", "evicted"); err != nil {
+		t.Fatal(err)
+	}
+	h.step()
+	if got := h.eventsFor(row.ID); countFeedEvents(got, closedEvent) != 1 {
+		t.Fatalf("events = %v, want the close announced once", got)
+	}
+	if !slices.Equal(h.deferred, []string{row.ID}) {
+		t.Fatalf("deferred to the sweep = %v, want [%s] once", h.deferred, row.ID)
+	}
+	if st := h.feed.status(time.Now()); st.UnheldCloses != 1 {
+		t.Fatalf("unheld closes = %d, want 1", st.UnheldCloses)
 	}
 }
 
@@ -662,6 +868,8 @@ func countFeedEvents(got []string, want string) int {
 // once (critic A3): the re-scan lists active rows only and would never see
 // it. A failed refresh hands it to the autoclose sweep at once; a fenced one
 // reaches the sweep through the retry's announce, or when its retries run out.
+// A refresh that yields to the cache's own write in flight spends no retry:
+// the row waits for the write, for ledgerFeedYieldLimit at most.
 func TestLedgerFeedKeepsADroppedNeverHeldClose(t *testing.T) {
 	closedEvent := events.BeadClosed + "/" + cacheReconcileActor
 	t.Run("refresh_error", func(t *testing.T) {
@@ -714,27 +922,77 @@ func TestLedgerFeedKeepsADroppedNeverHeldClose(t *testing.T) {
 			t.Fatalf("deferred = %v, want [%s] once, from the retry's announce", h.deferred, id)
 		}
 	})
-	t.Run("fenced_gives_up", func(t *testing.T) {
+	t.Run("yield_outlasts_the_retry_limit", func(t *testing.T) {
 		store := newJournalingStore()
 		h := newFeedHarness(t, store)
 		h.step()
 		id := closedOutOfBand(t, store)
-		// The create stays in flight across every retry, so each is fenced.
+		// The create stays in flight across more retries than a row may
+		// drop; each yields to it and spends none.
 		store.afterCreate = func(string) {
 			h.step()
-			for range ledgerFeedRetryLimit {
+			for range ledgerFeedRetryLimit + 2 {
 				h.feed.retryPending()
+			}
+			if st := h.feed.status(time.Now()); st.RetryGiveUps != 0 || st.PendingRetries != 2 || len(h.deferred) != 0 {
+				t.Errorf("inside the create: give-ups=%d pending=%d deferred %v, want both yielding rows kept and nothing deferred",
+					st.RetryGiveUps, st.PendingRetries, h.deferred)
 			}
 		}
 		if _, err := h.cache.Create(beads.Bead{Title: "local"}); err != nil {
 			t.Fatal(err)
 		}
 		store.afterCreate = nil
-		if st := h.feed.status(time.Now()); st.RetryGiveUps == 0 || st.PendingRetries != 0 {
-			t.Fatalf("status give-ups=%d pending=%d, want the fenced row given up", st.RetryGiveUps, st.PendingRetries)
+		h.feed.retryPending()
+		if got := h.eventsFor(id); countFeedEvents(got, closedEvent) != 1 {
+			t.Fatalf("events = %v, want one %s from the retry", got, closedEvent)
+		}
+		if !slices.Equal(h.deferred, []string{id}) {
+			t.Fatalf("deferred = %v, want [%s] once, from the retry's announce", h.deferred, id)
+		}
+		if st := h.feed.status(time.Now()); st.RetryGiveUps != 0 || st.PendingRetries != 0 {
+			t.Fatalf("status give-ups=%d pending=%d, want the retries done and none given up", st.RetryGiveUps, st.PendingRetries)
+		}
+	})
+	t.Run("yield_gives_up", func(t *testing.T) {
+		store := newJournalingStore()
+		h := newFeedHarness(t, store)
+		h.step()
+		id := closedOutOfBand(t, store)
+		clock := time.Now()
+		h.feed.now = func() time.Time { return clock }
+		var logs lockedBuffer
+		prevLog := log.Writer()
+		log.SetOutput(&logs)
+		t.Cleanup(func() { log.SetOutput(prevLog) })
+		requests := h.cache.Stats().ReconcileRequests
+		// The create stays in flight for ledgerFeedYieldLimit after the
+		// first yield: the rows are kept until then, and given up at it.
+		store.afterCreate = func(string) {
+			h.step()
+			clock = clock.Add(ledgerFeedYieldLimit - time.Second)
+			h.feed.retryPending()
+			if st := h.feed.status(time.Now()); st.RetryGiveUps != 0 || st.PendingRetries != 2 || len(h.deferred) != 0 {
+				t.Errorf("before the limit: give-ups=%d pending=%d deferred %v, want both yielding rows kept and nothing deferred",
+					st.RetryGiveUps, st.PendingRetries, h.deferred)
+			}
+			clock = clock.Add(time.Second)
+			h.feed.retryPending()
+		}
+		if _, err := h.cache.Create(beads.Bead{Title: "local"}); err != nil {
+			t.Fatal(err)
+		}
+		store.afterCreate = nil
+		st := h.feed.status(time.Now())
+		if st.RetryGiveUps == 0 || st.PendingRetries != 0 || h.cache.Stats().ReconcileRequests <= requests {
+			t.Fatalf("status give-ups=%d pending=%d requests %d->%d, want the yielding rows given up to a re-scan",
+				st.RetryGiveUps, st.PendingRetries, requests, h.cache.Stats().ReconcileRequests)
 		}
 		if countFeedEvents(h.deferred, id) != 1 {
-			t.Fatalf("deferred = %v, want the given-up fenced close with the sweep once", h.deferred)
+			t.Fatalf("deferred = %v, want the given-up close with the sweep once", h.deferred)
+		}
+		if got := logs.String(); !strings.Contains(got, "gave up retrying") {
+			t.Fatalf("log = %q, want the give-up logged", got)
 		}
 	})
 	t.Run("cache_unavailable", func(t *testing.T) {
@@ -787,6 +1045,74 @@ func TestLedgerFeedKeepsADroppedNeverHeldClose(t *testing.T) {
 		if !slices.Contains(h.deferred, id) {
 			t.Fatalf("deferred = %v, want the given-up close with the sweep", h.deferred)
 		}
+	})
+}
+
+// An out-of-band close of a row the cache holds open is announced once,
+// whether the feed or the re-scan reads it first, and is not counted or
+// deferred as a never-held close when the re-scan evicted and announced it
+// first. A held close whose refresh failed reaches the sweep once, at the
+// drop, and its retry after the re-scan announces nothing more.
+func TestLedgerFeedAnnouncesAHeldOutOfBandCloseOnce(t *testing.T) {
+	closedEvent := events.BeadClosed + "/" + cacheReconcileActor
+	// heldClosedOutOfBand creates a row behind the cache's back, lets the
+	// feed install it open, then closes it behind the cache's back.
+	heldClosedOutOfBand := func(t *testing.T, h *feedHarness) string {
+		t.Helper()
+		row, err := h.store.Create(beads.Bead{Title: "agent work"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		h.step()
+		if got, want := h.eventsFor(row.ID), []string{events.BeadCreated + "/" + cacheReconcileActor}; !slices.Equal(got, want) {
+			t.Fatalf("events = %v, want %v: the cache holds the row open", got, want)
+		}
+		if err := h.store.Close(row.ID); err != nil {
+			t.Fatal(err)
+		}
+		return row.ID
+	}
+	assertOnce := func(t *testing.T, h *feedHarness, id string, deferred []string) {
+		t.Helper()
+		if got := h.eventsFor(id); countFeedEvents(got, closedEvent) != 1 {
+			t.Fatalf("events = %v, want one %s", got, closedEvent)
+		}
+		if !slices.Equal(h.deferred, deferred) {
+			t.Fatalf("deferred to the sweep = %v, want %v", h.deferred, deferred)
+		}
+		if st := h.feed.status(time.Now()); st.UnheldCloses != 0 || st.PendingRetries != 0 {
+			t.Fatalf("status unheld=%d pending=%d, want no never-held close and no retry left", st.UnheldCloses, st.PendingRetries)
+		}
+	}
+	t.Run("feed_first", func(t *testing.T) {
+		h := newFeedHarness(t, newJournalingStore())
+		id := heldClosedOutOfBand(t, h)
+		h.step()
+		h.cache.ReconcileNowForTest()
+		assertOnce(t, h, id, nil)
+	})
+	t.Run("scan_first", func(t *testing.T) {
+		h := newFeedHarness(t, newJournalingStore())
+		id := heldClosedOutOfBand(t, h)
+		h.cache.ReconcileNowForTest()
+		h.step()
+		assertOnce(t, h, id, nil)
+	})
+	t.Run("dropped_refresh", func(t *testing.T) {
+		h := newFeedHarness(t, newJournalingStore())
+		id := heldClosedOutOfBand(t, h)
+		var fails atomic.Int32
+		fails.Store(1)
+		h.store.getHook = func(got string) error {
+			if got == id && fails.Add(-1) >= 0 {
+				return errors.New("transient read failure")
+			}
+			return nil
+		}
+		h.step()
+		h.cache.ReconcileNowForTest() // the requested re-scan evicts the row and announces the close
+		h.feed.retryPending()
+		assertOnce(t, h, id, []string{id})
 	})
 }
 
@@ -1343,6 +1669,21 @@ func TestLedgerFeedDoctorCheck(t *testing.T) {
 	check := newLedgerFeedDoctorCheck(cfgWith("auto"), nil)
 	if check.CanFix() || check.WarmupEligible() {
 		t.Fatal("the ledger feed check must be neither fixable nor warm-up eligible")
+	}
+}
+
+// TestLedgerFeedScopeDetailNamesTheGapCaveat pins a scope's gap figures and
+// their caveat: the re-scan a gap requests lists active rows only, so a
+// never-held row closed inside the gap may go unannounced.
+func TestLedgerFeedScopeDetailNamesTheGapCaveat(t *testing.T) {
+	s := ledgerFeedScopeStatus{Scope: "city", State: ledgerFeedStateTailing, Lane: "*beads.NativeDoltStore", ReadOK: true}
+	if d := ledgerFeedScopeDetail(s); strings.Contains(d, "gap") {
+		t.Fatalf("detail %q names gaps the scope never had", d)
+	}
+	s.Gaps = map[string]int64{string(ledgerfeed.GapTruncated): 2, string(ledgerfeed.GapReset): 1}
+	want := "gaps reset=1,truncated=2 (a never-held row closed inside a gap may go unannounced)"
+	if d := ledgerFeedScopeDetail(s); !strings.Contains(d, want) {
+		t.Fatalf("detail %q, want it to contain %q", d, want)
 	}
 }
 
