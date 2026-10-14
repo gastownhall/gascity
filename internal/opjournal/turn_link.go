@@ -134,7 +134,12 @@ type TurnLink struct {
 //
 // Candidates are the Seen turns of rec.Generation that Known lacks and, when
 // SameClock, that started at or after rec.At truncated to the millisecond, in
-// observation order, each id once (later reads repeat a turn). The first matching row decides:
+// observation order. Sightings of one id merge first (later reads repeat a
+// turn): the merged turn sits at its first sighting and takes the first
+// non-zero StartedAt any sighting carried, so a turn first seen with its start
+// unknown still matches row 3 and still passes the same-clock cutoff. A
+// sighting without an id is dropped. A same-clock turn whose start no sighting
+// knew is excluded. The first matching row decides:
 //
 //  1. rec.TurnID set: that turn, exact (hook_payload for an in-band ack,
 //     else runtime_turn).
@@ -194,22 +199,43 @@ func CorrelateTurn(rec DeliveryRecord, ev TurnEvidence) (TurnLink, bool) {
 }
 
 // linkCandidates returns the seen turns that could be the delivery's, in
-// observation order. A turn that several reads showed counts once, at its
-// first sighting.
+// observation order. Sightings merge by id before any filter: a turn that
+// several reads showed counts once, at its first sighting, with the first
+// start time any sighting knew. A sighting without an id is never a turn.
 func linkCandidates(rec DeliveryRecord, ev TurnEvidence) []SeenTurn {
 	cutoff := rec.At.Truncate(time.Millisecond)
 	var out []SeenTurn
-	for _, t := range ev.Seen {
+	for _, t := range mergeSightings(ev.Seen) {
 		if t.Generation != rec.Generation || slices.Contains(ev.Known, t.ID) {
-			continue
-		}
-		if slices.ContainsFunc(out, func(c SeenTurn) bool { return c.ID == t.ID }) {
 			continue
 		}
 		if ev.SameClock && t.StartedAt.Before(cutoff) {
 			continue
 		}
 		out = append(out, t)
+	}
+	return out
+}
+
+// mergeSightings folds the sightings of one turn id into one, kept at its
+// first sighting's position and given the first non-zero StartedAt any
+// sighting carried. Sightings with an empty id are dropped.
+func mergeSightings(seen []SeenTurn) []SeenTurn {
+	var out []SeenTurn
+	at := make(map[string]int, len(seen))
+	for _, t := range seen {
+		if t.ID == "" {
+			continue
+		}
+		i, ok := at[t.ID]
+		if !ok {
+			at[t.ID] = len(out)
+			out = append(out, t)
+			continue
+		}
+		if out[i].StartedAt.IsZero() {
+			out[i].StartedAt = t.StartedAt
+		}
 	}
 	return out
 }

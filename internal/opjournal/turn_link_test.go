@@ -147,6 +147,16 @@ func TestCorrelateTurn(t *testing.T) {
 			},
 			want: TurnLink{Confidence: LinkNone, Basis: BasisReadFailed}, decided: false,
 		},
+		{
+			name: "row 3: a T3 V1 read shows the turn's start unknown, then its requestedAt",
+			rec:  func() DeliveryRecord { r := linkRec(LinkStarts); r.MessageAt = linkAt.Add(40 * ms); return r },
+			ev: func() TurnEvidence {
+				ev := sourced(seen("mine", time.Time{}), seen("mine", linkAt.Add(40*ms)))
+				ev.SameClock = false
+				return ev
+			},
+			want: TurnLink{Turn: "mine", Confidence: LinkCorrelated, Basis: BasisRequestedAt}, decided: true,
+		},
 		// Row 4.
 		{
 			name: "row 4: joins, live turn still current at the first read",
@@ -268,6 +278,34 @@ func TestCorrelateTurn(t *testing.T) {
 			rec:  func() DeliveryRecord { return linkRec(LinkStarts) },
 			ev:   func() TurnEvidence { ev := sourced(seen("a", linkAt.Add(ms))); ev.LiveAtProbe = TriUnknown; return ev },
 			want: TurnLink{Turn: "a", Confidence: LinkAmbiguous, Basis: BasisCompetingTurn}, decided: true,
+		},
+		{
+			name: "row 7: a turn first seen with its start unknown keeps its first-sighting place",
+			rec:  func() DeliveryRecord { return linkRec(LinkStarts) },
+			ev: func() TurnEvidence {
+				return sourced(seen("a", time.Time{}), seen("b", linkAt.Add(2*ms)), seen("a", linkAt.Add(ms)))
+			},
+			want: TurnLink{Turn: "a", Confidence: LinkAmbiguous, Basis: BasisCompetingTurn}, decided: true,
+		},
+		{
+			name: "row 6: a seen turn without an id is never a candidate",
+			rec:  func() DeliveryRecord { return linkRec(LinkStarts) },
+			ev: func() TurnEvidence {
+				ev := sourced(seen("", linkAt.Add(ms)), seen("t1", linkAt.Add(2*ms)))
+				ev.SameClock = false
+				return ev
+			},
+			want: TurnLink{Turn: "t1", Confidence: LinkCorrelated, Basis: BasisHistoryDiff}, decided: true,
+		},
+		{
+			name: "row 8: an idle read's empty turn id is no candidate, even on a serial source",
+			rec:  func() DeliveryRecord { return linkRec(LinkStarts) },
+			ev: func() TurnEvidence {
+				ev := sourced(seen("", time.Time{}))
+				ev.SameClock, ev.Serial = false, true
+				return ev
+			},
+			want: TurnLink{Confidence: LinkNone, Basis: BasisNoCandidate}, decided: false,
 		},
 		// Row 8.
 		{
