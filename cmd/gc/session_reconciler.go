@@ -2051,6 +2051,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	// resolves the non-unique SessionName last-write-wins, so topo order is load-
 	// bearing.
 	tick := newReconcileTick(orderedInfos)
+	healAlive := &healAliveConfirmer{sp: sp}
 	infoByID := tick.infoByID
 	orderedIDs := tick.orderedIDs
 
@@ -2477,7 +2478,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			stateBeforeHeal := strings.TrimSpace(infoByID[id].MetadataState)
 			pendingCreateStartedAtBeforeHeal := strings.TrimSpace(infoByID[id].PendingCreateStartedAt)
 			lastWokeAtBeforeHeal := strings.TrimSpace(infoByID[id].LastWokeAt)
-			healBatch, healErr := healStateWithRollbackInfo(infoByID[id], providerAlive, livenessErr == nil, sessFront, clk, startupTimeout, !storeQueryPartial)
+			healBatch, healErr := healStateWithRollbackInfo(infoByID[id], healAlive.alive(infoByID[id], name, nil, providerAlive), livenessErr == nil, sessFront, clk, startupTimeout, !storeQueryPartial)
 			if healErr != nil {
 				fmt.Fprintf(stderr, "healState: SetMetadataBatch %s: %v\n", id, healErr) //nolint:errcheck
 				continue
@@ -3642,7 +3643,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		stateBeforeHeal := sessionpkg.State(strings.TrimSpace(infoByID[id].MetadataState))
 		pendingCreateStartedAtBeforeHeal := strings.TrimSpace(infoByID[id].PendingCreateStartedAt)
 		lastWokeAtBeforeHeal := strings.TrimSpace(infoByID[id].LastWokeAt)
-		healBatch, healErr := healStateWithRollbackInfo(infoByID[id], healAliveConfirmed(sp, infoByID[id], name, tp.Hints.ProcessNames, alive), true, sessFront, clk, startupTimeout, !capacityHeld)
+		healBatch, healErr := healStateWithRollbackInfo(infoByID[id], healAlive.alive(infoByID[id], name, tp.Hints.ProcessNames, alive), true, sessFront, clk, startupTimeout, !capacityHeld)
 		if healErr != nil {
 			fmt.Fprintf(stderr, "healState: SetMetadataBatch %s: %v\n", id, healErr) //nolint:errcheck
 			continue
@@ -5260,18 +5261,29 @@ func idleRespawnAckUnsafeToStop(
 	return false, "", nil
 }
 
-// healAliveConfirmed is the liveness the state heal reads for info's row. A
-// runtime read alive that would wake an asleep row is confirmed on a fresh
-// read first (mc-pvonx): the tick's read can be served from a listing taken
-// before another process stopped the runtime (the tmux state cache after a
-// `gc session kill`), and a heal on it wrote state=awake over the killed row,
-// which the next pass restarted in place on its claim instead of freeing the
-// slot. A fresh read that fails wakes nothing.
-func healAliveConfirmed(sp runtime.Provider, info sessionpkg.Info, name string, processNames []string, alive bool) bool {
+// healAliveConfirmer is the liveness the state heal reads for a row, one per
+// reconcile pass. A runtime read alive that would wake an asleep row is
+// confirmed on a fresh read first (mc-pvonx): the tick's read can be served
+// from a listing taken before another process stopped the runtime (the tmux
+// state cache after a `gc session kill`), and a heal on it wrote state=awake
+// over the killed row, which the next pass restarted in place on its claim
+// instead of freeing the slot. A fresh read that fails wakes nothing. The
+// pass's first confirmation fixes since, so the later ones reuse the fresh
+// listing (and process snapshot) it took rather than each paying for one.
+type healAliveConfirmer struct {
+	sp    runtime.Provider
+	since time.Time
+}
+
+// alive is the liveness the heal reads for info's row, read alive.
+func (c *healAliveConfirmer) alive(info sessionpkg.Info, name string, processNames []string, alive bool) bool {
 	if !alive || strings.TrimSpace(info.MetadataState) != string(sessionpkg.StateAsleep) {
 		return alive
 	}
-	fresh, err := runtime.ObserveLivenessSince(sp, name, processNames, time.Now())
+	if c.since.IsZero() {
+		c.since = time.Now()
+	}
+	fresh, err := runtime.ObserveLivenessSince(c.sp, name, processNames, c.since)
 	return err == nil && fresh.Alive
 }
 
