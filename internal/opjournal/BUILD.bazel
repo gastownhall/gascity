@@ -46,6 +46,8 @@ go_test(
         "turn_fold_test.go",
         "turn_link_test.go",
     ],
+    # TestTurnFoldIsStdlibOnly parses the fold's source.
+    data = ["turn_fold.go"],
     embed = [":opjournal"],
     deps = [
         "//internal/beadmeta",
