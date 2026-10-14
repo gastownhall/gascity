@@ -904,3 +904,48 @@ func TestExecutionStalledStopReleasesItsClaimAndCloses(t *testing.T) {
 		})
 	}
 }
+
+// TestExecutionStalledStopReleasesOnlyOnAConfirmedStop (v5.10x X7). Kills a
+// stalled stop that gives the claim back before its stop is confirmed: an
+// attached seat the fence refuses, and a stop whose fresh read still finds
+// the runtime, leave the claim in_progress on the seat, which stays open.
+func TestExecutionStalledStopReleasesOnlyOnAConfirmedStop(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		setup func(*fenceLeaf)
+	}{
+		{"attached", func(l *fenceLeaf) { l.SetAttached("s-gc-1", true) }},
+		{"the stop unconfirmed", func(l *fenceLeaf) { l.StopLeavesRunning = map[string]bool{"s-gc-1": true} }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var claimID string
+			var work beads.Store
+			s, got, _ := stopRun(t, signaled(executionStalledDrainReason), undesired(executionStalledDrainReason), func(p *effectPass, l *fenceLeaf, store beads.Store, id string) {
+				work = store
+				claim, err := store.Create(beads.Bead{Title: "stalled step", Type: "task"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				inProgress := "in_progress"
+				if err := store.Update(claim.ID, beads.UpdateOpts{Status: &inProgress, Assignee: &id}); err != nil {
+					t.Fatal(err)
+				}
+				claimID = claim.ID
+				if err := store.SetMetadata(id, executionClaimNudgeWorkKey, claim.ID); err != nil {
+					t.Fatal(err)
+				}
+				rel := newCloseReleases(p.World, nil, io.Discard)
+				rel.legs = testWorkLegs(p.World.CityPath, p.World.Env.Cfg, store, nil)
+				p.held.release = rel
+				c.setup(l)
+			})
+			claim, err := work.Get(claimID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if s.Outcome != settledRefused || claim.Status != "in_progress" || got.Status == "closed" {
+				t.Fatalf("settlement %+v, claim %q, row %s; want refused, the claim kept, the seat open", s, claim.Status, got.Status)
+			}
+		})
+	}
+}

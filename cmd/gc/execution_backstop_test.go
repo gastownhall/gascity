@@ -1017,3 +1017,52 @@ func TestExecutionBackstopNewIncarnationInheritsNoSpentWindow(t *testing.T) {
 		t.Fatalf("after the incarnation's own grace with no nudge to send: drains %v, want one escalation", f.drained)
 	}
 }
+
+// TestExecutionBackstopKeepsAStepStartedPastTheEventTail (mc-muv2x,
+// maintainer-city 18:41Z). Kills a veto that reads only the event log's
+// tail: a review seat started its step at its wake, worked 74 minutes, and
+// was drained when its step_started had scrolled out of the tail. The first
+// pass that sees the event (the seat still busy) stamps the row, and the
+// veto reads the stamp, so with the event gone and the pane quiet past
+// every window the seat is held executing and never drained.
+func TestExecutionBackstopKeepsAStepStartedPastTheEventTail(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	f.cfg.Agents[0].Nudge = ""
+	f.setInstanceToken(t, "incarnation-1")
+	woke := f.now.Add(-80 * time.Minute)
+	if err := f.store.SetMetadata(f.session.ID, "last_woke_at", woke.Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+	f.rec.Record(events.Event{Type: events.ExecutionStepStarted, Ts: woke.Add(2 * time.Minute), Actor: f.session.ID, SessionID: f.session.ID, Subject: f.work.ID})
+	f.idleFor(t, 0) // busy: no window, no veto, but the sighting stamps
+	f.tick(t)
+	if got := f.sessionMeta(t, executionClaimStartedKey); got != "incarnation-1|"+f.work.ID {
+		t.Fatalf("after a busy pass that saw the step start: %s = %q, want the incarnation and claim", executionClaimStartedKey, got)
+	}
+	f.rec = events.NewFake() // the event scrolled out of the tail
+	for i := 0; i < idleClaimNudgeMaxAttempts+3; i++ {
+		f.idleFor(t, 10*time.Minute)
+		f.tick(t)
+		f.now = f.now.Add(idleClaimNudgeGrace + idleClaimNudgeBackoff)
+	}
+	if len(f.drained) != 0 || !strings.HasPrefix(f.sessionMeta(t, executionClaimHoldKey), executionHoldExecuting) {
+		t.Fatalf("a seat whose step started past the tail: drains %v, hold %q; want no drain, held executing", f.drained, f.sessionMeta(t, executionClaimHoldKey))
+	}
+}
+
+// TestExecutionBackstopIgnoresAnotherIncarnationsStartedStamp (mc-muv2x).
+// Kills a stamp outliving the incarnation or claim it names: a stamp of the
+// previous incarnation, with no step started by this one, is no evidence,
+// and the seat escalates.
+func TestExecutionBackstopIgnoresAnotherIncarnationsStartedStamp(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	f.cfg.Agents[0].Nudge = ""
+	f.setInstanceToken(t, "incarnation-2")
+	if err := f.store.SetMetadata(f.session.ID, executionClaimStartedKey, "incarnation-1|"+f.work.ID); err != nil {
+		t.Fatal(err)
+	}
+	f.tickStale(t)
+	if len(f.drained) != 1 {
+		t.Fatalf("with only the previous incarnation's stamp: drains %v, want one escalation", f.drained)
+	}
+}

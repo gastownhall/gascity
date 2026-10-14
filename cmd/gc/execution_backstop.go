@@ -97,6 +97,13 @@ const (
 	// than inheriting an expired window and escalating the moment its pane
 	// goes quiet.
 	executionClaimNudgeTokenKey = "execution_claim_nudge_token"
+	// executionClaimStartedKey persists execution evidence (mc-muv2x):
+	// "<instance_token>|<bead id>" once the backstop has seen an
+	// execution.step_started of that claimed bead from this incarnation. The
+	// veto reads it, so the evidence outlives the event log's tail: a long
+	// turn's step_started can scroll out of any bounded window before its
+	// pane next goes quiet. A value for another token or bead is no evidence.
+	executionClaimStartedKey = "execution_claim_started"
 	// executionClaimNudgeStalledKey latches the one-shot escalation so the
 	// typed event and the drain request fire once per stalled claim rather than
 	// once per tick for as long as the claim is held.
@@ -287,11 +294,18 @@ func (p poolExecutionBackstop) resolve(s beads.Bead, _ map[string]beads.Bead, se
 		p.observeHold(p.store, &s, executionHoldMultiClaim, p.stdout)
 		return backstopTarget{}, backstopResolutionHold
 	}
+	claim := claims[0]
+	// Persist execution evidence while the event is still in the tail,
+	// busy or quiet (mc-muv2x): until this incarnation's claim is stamped,
+	// each pass reads the tail, and the first sighting stamps the row.
+	started := p.markedStarted(s, claim.BeadID)
+	if !started && p.executedSinceWake(s, claim.BeadID) {
+		started = p.markStarted(&s, claim.BeadID)
+	}
 	if hold := p.quietHold(s, sessName); hold != "" {
 		p.observeHold(p.store, &s, hold, p.stdout)
 		return backstopTarget{}, backstopResolutionHold
 	}
-	claim := claims[0]
 	target := backstopTarget{
 		ID:       claim.BeadID,
 		RootID:   claim.RootID,
@@ -299,10 +313,10 @@ func (p poolExecutionBackstop) resolve(s beads.Bead, _ map[string]beads.Bead, se
 		Assignee: claim.Assignee,
 		Store:    claim.Store,
 	}
-	// Execution evidence vetoes "unexecuted" (v5.10x): read only once this
-	// incarnation's window has run out, so a seat inside its grace pays no
-	// read, and every action past it (a nudge, the escalation) waits on it.
-	if same, attempts, last := p.state(s, target); same && decideBackstopAction(attempts, last, p.now) != backstopActionWait && p.executedSinceWake(s, claim.BeadID) {
+	// Execution evidence vetoes "unexecuted" (v5.10x): the row's stamp
+	// (mc-muv2x), so every action past the window (a nudge, the escalation)
+	// waits on it.
+	if same, attempts, last := p.state(s, target); same && decideBackstopAction(attempts, last, p.now) != backstopActionWait && started {
 		p.observeHold(p.store, &s, executionHoldExecuting, p.stdout)
 		return backstopTarget{}, backstopResolutionHold
 	}
@@ -457,6 +471,26 @@ func (p poolExecutionBackstop) executedSinceWake(s beads.Bead, beadID string) bo
 		}
 	}
 	return false
+}
+
+// startedValue is executionClaimStartedKey's value for s's incarnation and
+// beadID.
+func startedValue(s beads.Bead, beadID string) string {
+	return strings.TrimSpace(s.Metadata["instance_token"]) + "|" + strings.TrimSpace(beadID)
+}
+
+// markedStarted reports the row's persisted execution evidence for its
+// current incarnation and beadID (mc-muv2x).
+func (p poolExecutionBackstop) markedStarted(s beads.Bead, beadID string) bool {
+	return strings.TrimSpace(beadID) != "" && strings.TrimSpace(s.Metadata[executionClaimStartedKey]) == startedValue(s, beadID)
+}
+
+// markStarted stamps the row's execution evidence for its incarnation and
+// beadID, and reports whether the evidence holds (it does even when the write
+// fails: the sighting is this pass's evidence, and the next pass reads again).
+func (p poolExecutionBackstop) markStarted(s *beads.Bead, beadID string) bool {
+	writeSessionMetadata(p.store, s, map[string]string{executionClaimStartedKey: startedValue(*s, beadID)}, "execution-claim-started", p.stdout)
+	return true
 }
 
 func (p poolExecutionBackstop) observe(store beads.Store, s *beads.Bead, target backstopTarget, now time.Time, stdout io.Writer) {
@@ -622,6 +656,7 @@ func clearExecutionClaimMarker(store beads.Store, s *beads.Bead, stdout io.Write
 		executionClaimNudgeCountKey,
 		executionClaimNudgeAtKey,
 		executionClaimNudgeTokenKey,
+		executionClaimStartedKey,
 		executionClaimNudgeStalledKey,
 		executionClaimNudgeStalledTokenKey,
 		executionClaimHoldKey,
