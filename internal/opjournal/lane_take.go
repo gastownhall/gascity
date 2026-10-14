@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -31,6 +32,10 @@ type takenBatch struct {
 	ops []Op
 	// row is the runtime row as the Take left it, at its revision.
 	row beads.Bead
+	// abandon, when set, says the effect must not run: an op of the Take
+	// closed before its effect (the text names content that is no longer
+	// open), so the Take is released as transient with this cause.
+	abandon error
 }
 
 func takenIDs(tb *takenBatch) []string {
@@ -119,7 +124,10 @@ func (l *ConversationLane) take(ctx context.Context, snap laneSnapshot, spec *ta
 
 // resolveAmbiguousTake decides whether a Take that ended with an unknown error
 // committed, by re-reading the runtime row and, when it holds the lease, each
-// op's revision.
+// op. The batch goes on with the ops as re-read, so a cancel recorded in the
+// window reaches the effect and Done. An op that no longer holds the lease
+// closed in the window: it is dropped, and the rest are released without the
+// effect.
 func (l *ConversationLane) resolveAmbiguousTake(conv string, spec *takeSpec, lease Lease, ops []Op, cause error) (*takenBatch, takeOutcome, error) {
 	b, found, err := l.store.runtimeBead(conv)
 	if err != nil {
@@ -135,21 +143,27 @@ func (l *ConversationLane) resolveAmbiguousTake(conv string, spec *takeSpec, lea
 	if row.Lease != lease {
 		return nil, takeLost, nil
 	}
-	for i := range ops {
-		ob, err := l.store.store.Get(ops[i].ID)
+	tb := &takenBatch{spec: spec, lease: lease, row: b}
+	var lost []string
+	for _, op := range ops {
+		ob, err := l.store.store.Get(op.ID)
 		if err != nil {
-			return nil, takeFailed, fmt.Errorf("re-reading op %s after an ambiguous Take: %w", ops[i].ID, err)
+			return nil, takeFailed, fmt.Errorf("re-reading op %s after an ambiguous Take: %w", op.ID, err)
 		}
 		got, err := DecodeOp(ob)
 		if err != nil {
 			return nil, takeFailed, err
 		}
 		if got.Lease != lease || got.Status != StatusExecuting {
-			return nil, takeFailed, fmt.Errorf("%w: op %s does not hold the Take's lease after the Take committed", ErrCorruptOp, ops[i].ID)
+			lost = append(lost, op.ID)
+			continue
 		}
-		ops[i].Revision = ob.Revision
+		tb.ops = append(tb.ops, got)
 	}
-	return &takenBatch{spec: spec, lease: lease, ops: ops, row: b}, takeOK, nil
+	if len(lost) > 0 {
+		tb.abandon = fmt.Errorf("op %s closed between the Take and its effect", strings.Join(lost, ", "))
+	}
+	return tb, takeOK, nil
 }
 
 // takeRowItem is the Take's runtime-row item and the row as the Take leaves

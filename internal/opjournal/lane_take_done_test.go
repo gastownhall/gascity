@@ -1112,3 +1112,96 @@ func TestLaneCandidatesWaitWhileAnOpIsInFlight(t *testing.T) {
 		t.Fatalf("waits %+v, want %s in_flight until %s", res.Waits, later.ID, until)
 	}
 }
+
+// An ambiguous Take that committed is resolved from the rows as re-read: a
+// cancel recorded in the window reaches the effect, and an op that closed in
+// the window is dropped; the Take is then released without its effect, since
+// its text names content that is no longer open.
+func TestLaneAmbiguousTakeUsesTheRowsAsReRead(t *testing.T) {
+	t.Run("cancel recorded", func(t *testing.T) {
+		h := newLaneHarness(t)
+		op := h.propose(t, laneMsg("p", RolePrompt, "x"))
+		exec := newFakeExec(h.clk)
+		h.batcher.setFault(func(n int, b beads.GuardedBatch) (bool, error) {
+			if n != 0 {
+				return false, nil
+			}
+			if _, err := h.mem.ApplyGuarded(context.Background(), b); err != nil {
+				t.Errorf("commit: %v", err)
+			}
+			if res, _, err := h.store.Cancel(op.ID, "operator", "read"); err != nil || res != CancelRequested {
+				t.Errorf("Cancel = %s, %v", res, err)
+			}
+			return false, errLinkDropped
+		})
+		res := mustPass(t, h.lane(t, "ctl"), view(), exec)
+		ds := exec.delivered()
+		if res.Done != DoneAccepted || len(ds) != 1 || !ds[0].Ops[0].Cancel.Recorded() {
+			t.Fatalf("pass %+v, deliveries %+v", res, ds)
+		}
+	})
+	t.Run("op closed", func(t *testing.T) {
+		h := newLaneHarness(t)
+		a := h.propose(t, laneMsg("a", RoleNotice, "x"))
+		h.clk.Advance(time.Millisecond)
+		b := h.propose(t, laneMsg("b", RoleNotice, "y"))
+		exec := newFakeExec(h.clk)
+		h.batcher.setFault(func(n int, batch beads.GuardedBatch) (bool, error) {
+			if n != 0 {
+				return false, nil
+			}
+			if _, err := h.mem.ApplyGuarded(context.Background(), batch); err != nil {
+				t.Errorf("commit: %v", err)
+			}
+			if err := h.mem.Close(b.ID); err != nil {
+				t.Errorf("Close: %v", err)
+			}
+			return false, errLinkDropped
+		})
+		res, err := h.lane(t, "ctl").Pass(context.Background(), view(), exec)
+		if err != nil || res.Done != DoneReleased || !slices.Equal(res.Taken, []string{a.ID}) {
+			t.Fatalf("pass = %+v, %v", res, err)
+		}
+		if n := len(exec.delivered()); n != 0 {
+			t.Fatalf("the effect ran %d times with a closed op's text", n)
+		}
+		got := h.get(t, a.ID)
+		if got.Status != StatusAccepted || !got.Lease.IsZero() || got.MaybeDelivered != 0 || got.Failures != 0 {
+			t.Fatalf("op a %+v", got)
+		}
+		if !h.runtime(t).Lease.IsZero() {
+			t.Fatal("the cell is still held")
+		}
+		if res := mustPass(t, h.lane(t, "ctl"), view(), exec); res.Took != TakeNone {
+			// Released with a transient backoff: not taken at once.
+			t.Fatalf("took %v during the backoff", res.Taken)
+		}
+	})
+}
+
+// When every op of an ambiguous Take closed in the window, Done only clears
+// the cell.
+func TestLaneAmbiguousTakeWithEveryOpClosed(t *testing.T) {
+	h := newLaneHarness(t)
+	op := h.propose(t, laneMsg("p", RolePrompt, "x"))
+	exec := newFakeExec(h.clk)
+	h.batcher.setFault(func(n int, batch beads.GuardedBatch) (bool, error) {
+		if n != 0 {
+			return false, nil
+		}
+		if _, err := h.mem.ApplyGuarded(context.Background(), batch); err != nil {
+			t.Errorf("commit: %v", err)
+		}
+		if err := h.mem.Close(op.ID); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+		return false, errLinkDropped
+	})
+	res, err := h.lane(t, "ctl").Pass(context.Background(), view(), exec)
+	if err != nil || res.Done != DoneReleased || len(res.Taken) != 0 || len(exec.delivered()) != 0 {
+		t.Fatalf("pass = %+v, %v", res, err)
+	}
+	if !h.runtime(t).Lease.IsZero() {
+		t.Fatal("the cell is still held")
+	}
+}

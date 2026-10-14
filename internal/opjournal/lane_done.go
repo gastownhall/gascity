@@ -49,9 +49,13 @@ func unknownResult(contract error) effectResult {
 
 // effect runs the taken batch's effect inside the lease: its context ends
 // ExecutorMargin before the lease does, measured on the lane's clock. With no
-// time left nothing runs and the batch is released as transient.
+// time left, or an abandoned Take, nothing runs and the batch is released as
+// transient.
 func (l *ConversationLane) effect(ctx context.Context, exec Executor, tb *takenBatch) (effectResult, time.Time) {
 	now := l.now()
+	if tb.abandon != nil {
+		return effectResult{kind: resultNotDelivered, notDelivered: NotDelivered{Transient: true, Cause: tb.abandon}}, now
+	}
 	budget := tb.lease.Deadline.Sub(now) - ExecutorMargin
 	if budget <= 0 {
 		return effectResult{kind: resultNotDelivered, notDelivered: NotDelivered{Transient: true, Cause: errLeaseTooShort}}, now
