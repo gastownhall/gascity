@@ -80,15 +80,22 @@ func threadActiveTurn(thread map[string]interface{}) (threadID, turnID string, e
 	return threadID, turnID, nil
 }
 
-// threadTurnState is thread's turn as a [runtime.TurnState]: its id is
+// threadTurn is thread's turn as a [runtime.TurnState], with the thread id
+// and T3's raw turn id it is built from. The state's id is
 // "<threadId>/<activeTurnId>", so a thread recreated for the same session
 // never repeats an earlier thread's turn id.
-func threadTurnState(thread map[string]interface{}) (runtime.TurnState, error) {
-	threadID, turnID, err := threadActiveTurn(thread)
-	if err != nil || turnID == "" {
-		return runtime.TurnState{}, err
+func threadTurn(thread map[string]interface{}) (threadID, rawTurnID string, st runtime.TurnState, err error) {
+	threadID, rawTurnID, err = threadActiveTurn(thread)
+	if err != nil || rawTurnID == "" {
+		return threadID, "", runtime.TurnState{}, err
 	}
-	return runtime.TurnState{TurnID: threadID + "/" + turnID}, nil
+	return threadID, rawTurnID, runtime.TurnState{TurnID: threadID + "/" + rawTurnID}, nil
+}
+
+// threadTurnState is threadTurn's state alone.
+func threadTurnState(thread map[string]interface{}) (runtime.TurnState, error) {
+	_, _, st, err := threadTurn(thread)
+	return st, err
 }
 
 // ObserveTurn implements [runtime.TurnFenceProvider] from an uncached
@@ -119,13 +126,9 @@ func (p *Provider) InterruptTurn(ctx context.Context, name, turnID string) (runt
 	if err != nil {
 		return runtime.TurnInterrupt{}, err
 	}
-	threadID, rawTurnID, err := threadActiveTurn(thread)
+	threadID, rawTurnID, current, err := threadTurn(thread)
 	if err != nil {
 		return runtime.TurnInterrupt{}, err
-	}
-	current := runtime.TurnState{}
-	if rawTurnID != "" {
-		current.TurnID = threadID + "/" + rawTurnID
 	}
 	if current.TurnID != turnID {
 		return runtime.TurnInterrupt{}, &runtime.TurnNotCurrentError{Session: name, TurnID: turnID, Current: current}
