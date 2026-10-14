@@ -32,7 +32,10 @@ import (
 )
 
 var (
-	authMu                        sync.Mutex
+	// authSem serializes ws-token requests and guards the cached token. It is
+	// a one-slot semaphore rather than a mutex so a waiter can give up when
+	// its ctx ends: see lockBridgeAuth.
+	authSem                       = make(chan struct{}, 1)
 	cachedBridgeWSToken           string
 	cachedBridgeWSTokenBaseURL    string
 	cachedBridgeWSTokenExpiresAt  time.Time
@@ -267,9 +270,24 @@ func resolveBearerSessionToken() (string, error) {
 	return readCachedBearerSessionToken()
 }
 
+// lockBridgeAuth takes authSem, or returns ctx's error if ctx ends first.
+func lockBridgeAuth(ctx context.Context) error {
+	select {
+	case authSem <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("waiting for the t3 auth lock: %w", ctx.Err())
+	}
+}
+
+// unlockBridgeAuth releases authSem.
+func unlockBridgeAuth() { <-authSem }
+
 func issueT3WebSocketToken(ctx context.Context, wsURL string) (string, error) {
-	authMu.Lock()
-	defer authMu.Unlock()
+	if err := lockBridgeAuth(ctx); err != nil {
+		return "", err
+	}
+	defer unlockBridgeAuth()
 
 	parsed, err := url.Parse(wsURL)
 	if err != nil {

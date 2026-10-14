@@ -1413,18 +1413,17 @@ func (ts *t3BridgeTestServer) wsCalls() int {
 
 func resetBridgeAuthCacheForTest(t *testing.T) {
 	t.Helper()
-	authMu.Lock()
-	cachedBridgeWSToken = ""
-	cachedBridgeWSTokenBaseURL = ""
-	cachedBridgeWSTokenExpiresAt = time.Time{}
-	authMu.Unlock()
-	t.Cleanup(func() {
-		authMu.Lock()
+	reset := func() {
+		if err := lockBridgeAuth(context.Background()); err != nil {
+			t.Fatal(err)
+		}
 		cachedBridgeWSToken = ""
 		cachedBridgeWSTokenBaseURL = ""
 		cachedBridgeWSTokenExpiresAt = time.Time{}
-		authMu.Unlock()
-	})
+		unlockBridgeAuth()
+	}
+	reset()
+	t.Cleanup(reset)
 }
 
 func commandType(payload map[string]interface{}) string {

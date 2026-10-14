@@ -553,3 +553,24 @@ func TestWaitTurnEndedBoundBeforeTheFirstRead(t *testing.T) {
 		t.Fatalf("snapshot reads = %d, want none", calls)
 	}
 }
+
+// Kills a ws-token request that waits on the shared auth lock past its ctx:
+// another caller fetching a token would hold a ctx-bounded fence read for up
+// to the 12 s HTTP timeout.
+func TestIssueWebSocketTokenWaitsForTheAuthLockWithinCtx(t *testing.T) {
+	resetBridgeAuthCacheForTest(t)
+	if err := lockBridgeAuth(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer unlockBridgeAuth()
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := issueT3WebSocketToken(ctx, "ws://t3.invalid:1")
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("issueT3WebSocketToken took %s past a 100ms deadline", elapsed)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("issueT3WebSocketToken = %v, want the deadline", err)
+	}
+}
