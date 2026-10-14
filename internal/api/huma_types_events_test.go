@@ -54,6 +54,7 @@ func TestEventStreamInputResolveRejectsMalformedAfterSeq(t *testing.T) {
 		{name: "padded", afterSeq: " 5 ", wantErr: true},
 		{name: "overflow", afterSeq: "18446744073709551616", wantErr: true},
 		{name: "unparseable last-event-id is not rejected", lastEventID: "abc", wantErr: false},
+		{name: "malformed after_seq rejected even with valid last-event-id", afterSeq: "nope", lastEventID: "42", wantErr: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
