@@ -374,6 +374,9 @@ func validateDeliveryResult(o Outcome) error {
 		if !slices.Contains(ackKinds, d.Ack) {
 			return invalidf("delivery ack %q is not delivered, delivered_unobserved or in_band", d.Ack)
 		}
+		if !storableTime(d.At) || !storableTime(d.MessageAt) {
+			return invalidf("delivery record times must fall in years 0 through 9999")
+		}
 		if d.MessageID != "" {
 			if err := validateText("delivery message id", d.MessageID, maxMessageIDLen); err != nil {
 				return err

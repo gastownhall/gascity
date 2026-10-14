@@ -642,6 +642,21 @@ func TestLaneFieldRefusals(t *testing.T) {
 			op.Outcome = deliveredOutcome()
 			op.Outcome.Result.TurnLink = "psychic"
 		},
+		"delivery time past year 9999": func(op *Op) {
+			op.Status = StatusClosed
+			op.Outcome = deliveredOutcome()
+			op.Outcome.Result.Delivery.At = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
+		},
+		"message time past year 9999": func(op *Op) {
+			op.Status = StatusClosed
+			op.Outcome = deliveredOutcome()
+			op.Outcome.Result.Delivery.MessageAt = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
+		},
+		"message time before year 0": func(op *Op) {
+			op.Status = StatusClosed
+			op.Outcome = deliveredOutcome()
+			op.Outcome.Result.Delivery.MessageAt = time.Date(-1, 1, 1, 0, 0, 0, 0, time.UTC)
+		},
 	}
 	for name, change := range cases {
 		op := laneSample(t)

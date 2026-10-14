@@ -227,7 +227,8 @@ type ControlResult interface{ isControlResult() }
 
 // Delivered is a content delivery the runtime accepted. The executor supplies
 // Record.At (required, not before the call), Ack, MessageID, MessageAt and
-// TurnID; the lane sets Seq, Generation, Epoch and Mode. Evidence comes from
+// TurnID, with both times in years 0 through 9999; the lane sets Seq,
+// Generation, Epoch and Mode. Evidence comes from
 // the executor except LiveAtProbe, LiveTurn and Known, which the lane sets
 // from its own probe.
 type Delivered struct {

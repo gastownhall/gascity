@@ -889,6 +889,36 @@ func TestLaneDeliveredContractBreachStillRecordsTheDelivery(t *testing.T) {
 				}
 			},
 		},
+		"time past year 9999": {
+			d: func(time.Time) Delivered {
+				return Delivered{Record: DeliveryRecord{At: time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC), Ack: AckDelivered}}
+			},
+			check: func(t *testing.T, o Outcome, preCall time.Time) {
+				if !o.Result.Delivery.At.Equal(preCall) || o.Degradation != DegradationExecutorContract {
+					t.Fatalf("at %s degradation %q, want the call time %s", o.Result.Delivery.At, o.Degradation, preCall)
+				}
+			},
+		},
+		"message time past year 9999": {
+			d: func(now time.Time) Delivered {
+				return Delivered{Record: DeliveryRecord{At: now, Ack: AckDelivered, MessageAt: time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)}}
+			},
+			check: func(t *testing.T, o Outcome, _ time.Time) {
+				if !o.Result.Delivery.MessageAt.IsZero() || o.Degradation != DegradationExecutorContract {
+					t.Fatalf("message at %s degradation %q", o.Result.Delivery.MessageAt, o.Degradation)
+				}
+			},
+		},
+		"message time before year 0": {
+			d: func(now time.Time) Delivered {
+				return Delivered{Record: DeliveryRecord{At: now, Ack: AckDelivered, MessageAt: time.Date(-1, 1, 1, 0, 0, 0, 0, time.UTC)}}
+			},
+			check: func(t *testing.T, o Outcome, _ time.Time) {
+				if !o.Result.Delivery.MessageAt.IsZero() || o.Degradation != DegradationExecutorContract {
+					t.Fatalf("message at %s degradation %q", o.Result.Delivery.MessageAt, o.Degradation)
+				}
+			},
+		},
 		"message id too long": {
 			d: func(now time.Time) Delivered {
 				return Delivered{Record: DeliveryRecord{At: now, Ack: AckDelivered, MessageID: strings.Repeat("m", maxMessageIDLen+1)}}

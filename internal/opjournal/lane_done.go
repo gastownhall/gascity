@@ -156,9 +156,16 @@ func (l *ConversationLane) settle(tb *takenBatch, er effectResult, preCall time.
 		case rec.At.IsZero():
 			breach(errors.New("executor delivery record has no time"))
 			rec.At = preCall
+		case !storableTime(rec.At):
+			breach(fmt.Errorf("executor delivery record time %s is outside years 0 through 9999", rec.At))
+			rec.At = preCall
 		case rec.At.Before(preCall):
 			breach(fmt.Errorf("executor delivery record time %s is before the call at %s", formatTime(rec.At), formatTime(preCall)))
 			rec.At = preCall
+		}
+		if !storableTime(rec.MessageAt) {
+			breach(fmt.Errorf("executor delivery message time %s is outside years 0 through 9999", rec.MessageAt))
+			rec.MessageAt = time.Time{}
 		}
 		if rec.MessageID != "" {
 			if err := validateText("delivery message id", rec.MessageID, maxMessageIDLen); err != nil {
