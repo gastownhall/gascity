@@ -51,10 +51,13 @@ type DeliveryRecord struct {
 	Generation int64     // from the Take's fence
 	Epoch      int64
 	Mode       LinkMode
-	Ack        AckKind   // delivered | delivered_unobserved | in_band
-	MessageID  string    // the runtime's id for the delivered message, "" when it reports none
-	MessageAt  time.Time // the creation time the runtime stamped on that message; zero when it reports none
-	TurnID     string    // the turn a runtime receipt or a verified hook payload names
+	Ack        AckKind // delivered | delivered_unobserved | in_band
+	MessageID  string  // the runtime's id for the delivered message, "" when it reports none
+	// MessageAt is the creation time the runtime stamped on that message,
+	// zero when it reports none. Row 3 compares it with turn starts to the
+	// millisecond, so the instant before the runtime formatted it matches.
+	MessageAt time.Time
+	TurnID    string // the turn a runtime receipt or a verified hook payload names
 }
 
 // SeenTurn is one turn a turn-history read showed, in observation order.
@@ -144,7 +147,8 @@ type TurnLink struct {
 //  1. rec.TurnID set: that turn, exact (hook_payload for an in-band ack,
 //     else runtime_turn).
 //  2. No turn source: none, no_source.
-//  3. rec.MessageAt set: the first candidate whose StartedAt equals it,
+//  3. rec.MessageAt set: the first candidate whose StartedAt equals it to
+//     the millisecond,
 //     correlated, requested_at; with none, undecided none (row 8's basis).
 //     It never falls through to a history diff.
 //  4. LinkJoins, a live turn at the probe, and the first read after the
@@ -173,8 +177,9 @@ func CorrelateTurn(rec DeliveryRecord, ev TurnEvidence) (TurnLink, bool) {
 	}
 	candidates := linkCandidates(rec, ev)
 	if !rec.MessageAt.IsZero() {
+		stamp := rec.MessageAt.Truncate(time.Millisecond)
 		for _, c := range candidates {
-			if c.StartedAt.Equal(rec.MessageAt) {
+			if c.StartedAt.Truncate(time.Millisecond).Equal(stamp) {
 				return TurnLink{Turn: c.ID, Confidence: LinkCorrelated, Basis: BasisRequestedAt}, true
 			}
 		}

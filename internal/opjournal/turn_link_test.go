@@ -14,6 +14,14 @@ var linkAt = time.Date(2026, 10, 14, 12, 0, 0, 123_456_789, time.UTC)
 
 const linkGen int64 = 7
 
+// stampedNow is a deliverer's instant with sub-millisecond digits;
+// stampedMillis is the same instant as a runtime stamps it on the message,
+// to the millisecond.
+var (
+	stampedNow    = time.Date(2026, 10, 14, 12, 0, 0, 160_345_678, time.Local)
+	stampedMillis = stampedNow.UTC().Truncate(time.Millisecond)
+)
+
 func linkRec(mode LinkMode) DeliveryRecord {
 	return DeliveryRecord{
 		Seq: 42, At: linkAt, Generation: linkGen, Epoch: 1,
@@ -124,6 +132,28 @@ func TestCorrelateTurn(t *testing.T) {
 				return ev
 			},
 			want: TurnLink{Turn: "mine", Confidence: LinkCorrelated, Basis: BasisRequestedAt}, decided: true,
+		},
+		{
+			// The deliverer holds the pre-format instant; the source reports
+			// the millisecond stamp.
+			name: "row 3: a MessageAt finer than the source's millisecond stamp still matches",
+			rec:  func() DeliveryRecord { r := linkRec(LinkStarts); r.MessageAt = stampedNow; return r },
+			ev: func() TurnEvidence {
+				ev := sourced(seen("mine", stampedMillis))
+				ev.SameClock = false
+				return ev
+			},
+			want: TurnLink{Turn: "mine", Confidence: LinkCorrelated, Basis: BasisRequestedAt}, decided: true,
+		},
+		{
+			name: "row 3: a start one millisecond off does not match",
+			rec:  func() DeliveryRecord { r := linkRec(LinkStarts); r.MessageAt = stampedNow; return r },
+			ev: func() TurnEvidence {
+				ev := sourced(seen("other", stampedMillis.Add(ms)))
+				ev.SameClock = false
+				return ev
+			},
+			want: TurnLink{Confidence: LinkNone, Basis: BasisNoCandidate}, decided: false,
 		},
 		{
 			name: "row 3: polling missed the turn gives none, never a history-diff guess",
