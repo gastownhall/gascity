@@ -297,9 +297,13 @@ func (p poolExecutionBackstop) resolve(s beads.Bead, _ map[string]beads.Bead, se
 	claim := claims[0]
 	// Persist execution evidence while the event is still in the tail,
 	// busy or quiet (mc-muv2x): until this incarnation's claim is stamped,
-	// each pass reads the tail, and the first sighting stamps the row.
+	// each pass reads the tail, and the first sighting stamps the row. Only
+	// a graph step's claim (a root) is ever stamped: step_started is emitted
+	// for graph.v2 steps alone (executionevent), so any other claim reads no
+	// tail, never pays for a read that cannot answer, and keeps the activity
+	// clock alone, as before the veto.
 	started := p.markedStarted(s, claim.BeadID)
-	if !started && p.executedSinceWake(s, claim.BeadID) {
+	if !started && claim.RootID != "" && p.executedSinceWake(s, claim.BeadID) {
 		started = p.markStarted(&s, claim.BeadID)
 	}
 	if hold := p.quietHold(s, sessName); hold != "" {

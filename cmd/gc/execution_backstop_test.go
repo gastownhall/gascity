@@ -34,6 +34,9 @@ type executionBackstopFixture struct {
 	session  beads.Bead
 	work     beads.Bead
 	rec      *events.Fake
+	// recorder, when set, is the recorder the tick hands the backstop in
+	// place of rec.
+	recorder events.Recorder
 	drained  []string
 	now      time.Time
 	stdout   bytes.Buffer
@@ -123,7 +126,11 @@ func (f *executionBackstopFixture) tick(t *testing.T) {
 	if f.provider != nil {
 		sp = f.provider
 	}
-	nudgeStalledPoolExecution(sp, f.cfg, f.store, sessions, work, stores, refs, false, f.now, f.rec,
+	var rec events.Recorder = f.rec
+	if f.recorder != nil {
+		rec = f.recorder
+	}
+	nudgeStalledPoolExecution(sp, f.cfg, f.store, sessions, work, stores, refs, false, f.now, rec,
 		func(sessionBead beads.Bead) error {
 			f.drained = append(f.drained, strings.TrimSpace(sessionBead.Metadata["session_name"]))
 			return nil
@@ -1064,5 +1071,60 @@ func TestExecutionBackstopIgnoresAnotherIncarnationsStartedStamp(t *testing.T) {
 	f.tickStale(t)
 	if len(f.drained) != 1 {
 		t.Fatalf("with only the previous incarnation's stamp: drains %v, want one escalation", f.drained)
+	}
+}
+
+// tailCountingRecorder counts its tail reads.
+type tailCountingRecorder struct {
+	*events.Fake
+	tails int
+}
+
+func (r *tailCountingRecorder) ListTail(filter events.Filter, limit int) ([]events.Event, error) {
+	r.tails++
+	return r.Fake.ListTail(filter, limit)
+}
+
+// TestExecutionBackstopReadsNoTailForANonGraphClaim (mc-muv2x review). Kills
+// a seat holding non-graph work re-reading the event tail on every pass,
+// forever: step_started is emitted for graph.v2 steps alone, so such a claim
+// can never be stamped. Its passes read no tail, and it escalates on the
+// activity clock as before the veto; a graph step's claim reads the tail
+// until it is stamped, then stops.
+func TestExecutionBackstopReadsNoTailForANonGraphClaim(t *testing.T) {
+	for _, graph := range []bool{false, true} {
+		t.Run(map[bool]string{false: "a non-graph claim", true: "a graph step"}[graph], func(t *testing.T) {
+			f := newExecutionBackstopFixture(t)
+			f.cfg.Agents[0].Nudge = ""
+			if !graph {
+				if err := f.store.SetMetadata(f.work.ID, beadmeta.RootBeadIDMetadataKey, ""); err != nil {
+					t.Fatal(err)
+				}
+			}
+			woke := f.now.Add(-time.Minute)
+			if err := f.store.SetMetadata(f.session.ID, "last_woke_at", woke.Format(time.RFC3339)); err != nil {
+				t.Fatal(err)
+			}
+			counting := &tailCountingRecorder{Fake: events.NewFake()}
+			counting.Record(events.Event{Type: events.ExecutionStepStarted, Ts: woke.Add(time.Second), Actor: f.session.ID, SessionID: f.session.ID, Subject: f.work.ID})
+			f.recorder = counting
+			for i := 0; i < 5; i++ {
+				f.idleFor(t, 0) // busy passes
+				f.tick(t)
+				f.now = f.now.Add(10 * time.Second)
+			}
+			switch {
+			case !graph && counting.tails != 0:
+				t.Fatalf("a non-graph claim read the event tail %d times over 5 passes, want none", counting.tails)
+			case graph && counting.tails != 1:
+				t.Fatalf("a graph step read the event tail %d times over 5 passes, want once, until stamped", counting.tails)
+			}
+			if !graph {
+				f.tickStale(t)
+				if len(f.drained) != 1 {
+					t.Fatalf("a quiet non-graph claim: drains %v, want one escalation on the activity clock", f.drained)
+				}
+			}
+		})
 	}
 }
