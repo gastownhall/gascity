@@ -430,7 +430,7 @@ var bazelSuiteConfigs = map[string]bool{"acceptance": true, "integration": true,
 // config. The lane step's own flags (profile, BEP file) are non-key too.
 func TestBazelMultiLaneLanesHashLikePrePush(t *testing.T) {
 	prePush := readFile(t, repoRoot(t), ".githooks/lib/push-suite.sh")
-	if !strings.Contains(prePush, `exec bazel test //... "--config=$config" --keep_going`) {
+	if !strings.Contains(prePush, `run_suite bazel test //... "--config=$config" --keep_going`) {
 		t.Fatalf(".githooks/lib/push-suite.sh no longer runs bazel test //... with one remote-mode config; update this test")
 	}
 	for lane, cmd := range multiLaneCommands {

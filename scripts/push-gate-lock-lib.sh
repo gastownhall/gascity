@@ -30,12 +30,13 @@
 #   scripts/test-local-parallel: the slot FD is closed inside the subshell
 #   that spawns the job fan-out, so no test job — and no daemon a test job
 #   leaks (a tmux server, a dolt sql-server, an escaped `gc`) — ever holds a
-#   copy of it. The consequence for operators is worth stating plainly: a
-#   slot that is still locked when its gate process is gone is NOT a stale
-#   file the kernel forgot to clean up. It means some descendant inherited
-#   the descriptor anyway and outlived the gate. push_gate_describe_slots
-#   flags exactly that case; the fix is to find and kill the leaked
-#   descendant (`lsof <slot-file>`), never to delete the slot file.
+#   copy of it. A slot that is still locked when its stamped gate PID is
+#   gone is NOT a stale file the kernel forgot to clean up. It means some
+#   descendant inherited the descriptor anyway and outlived the gate.
+#   push_gate_describe_slots flags that case. acquire then reaps those
+#   leaked descendants (lsof/fuser + kill) so a dead holder cannot pin a
+#   slot until an operator kills the leak by hand (ga-34a). Never delete
+#   the slot file to "unlock" it — that does not release a live flock.
 #
 #   One deliberate deviation from mpr: mpr's caller is an automatic
 #   cooldown-retry dispatcher, so it fails fast (immediate EX_TEMPFAIL) when
@@ -124,6 +125,15 @@
 #       whose recorded PID no longer exists is flagged as a leaked
 #       descendant (see MECHANISM), since that is the one case where the
 #       holder line alone points at the wrong process.
+#   push_gate_reap_dead_holders <slot_dir> <max_concurrent>
+#       For each occupied slot whose stamped PID is missing or dead, kill
+#       the processes that still have the slot file open (leaked
+#       descendants), once that state has held unchanged for
+#       PUSH_GATE_REAP_SETTLE_SECONDS. Never kills the stamped PID while it
+#       is alive, and never kills this shell ($$). Returns 0 if anything was
+#       signalled (caller should retry acquire immediately), 1 if there was
+#       nothing to reap. Best-effort: if neither lsof nor fuser is
+#       available, prints a diagnostic and returns 1 rather than blocking.
 #   push_gate_release_slot <fd>
 #       Explicit release + close. Normally unnecessary (process exit
 #       releases the flock) — provided for tests and tight loops, mirroring
@@ -248,6 +258,106 @@ push_gate_describe_slots() {
     done
 }
 
+# PIDs that currently have $1 open. Best-effort; empty if neither lsof nor
+# fuser is present.
+_push_gate_slot_holder_pids() {
+    local _pgh_slot="$1"
+    if command -v lsof >/dev/null 2>&1; then
+        lsof -t -- "$_pgh_slot" 2>/dev/null || true
+        return 0
+    fi
+    if command -v fuser >/dev/null 2>&1; then
+        # fuser prints space-separated pids, sometimes with mode suffixes
+        # (e.g. "1234e"). Keep digits only.
+        fuser "$_pgh_slot" 2>/dev/null | tr -cs '0-9' '\n' || true
+        return 0
+    fi
+    return 0
+}
+
+# The stamp line of slot file $1, on stdout, when the slot is locked and the
+# stamped PID is missing or dead; fails otherwise.
+_push_gate_dead_stamp() {
+    local _pgd_slot="$1" _pgd_line="" _pgd_pid
+    [[ -f "$_pgd_slot" ]] || return 1
+    if flock -n "$_pgd_slot" -c 'exit 0' 2>/dev/null; then
+        return 1
+    fi
+    IFS= read -r _pgd_line <"$_pgd_slot" 2>/dev/null || true
+    _pgd_pid="${_pgd_line%% *}"
+    if [[ "$_pgd_pid" =~ ^[0-9]+$ ]] && kill -0 "$_pgd_pid" 2>/dev/null; then
+        return 1
+    fi
+    printf '%s\n' "$_pgd_line"
+}
+
+# Reap leaked descendants holding slots whose stamped gate PID is dead.
+# See function comment in the header.
+#
+# A dead stamp on a locked slot also appears for an instant on a healthy
+# slot: a new holder wins flock before it rewrites the stamp, and a waiter
+# probing the slot has the file open without the lock. So the reaper looks
+# twice, PUSH_GATE_REAP_SETTLE_SECONDS apart, and signals only a process that
+# had the file open both times under the same dead stamp. A new holder has
+# rewritten the stamp by then; a probe has closed the file.
+PUSH_GATE_REAP_SETTLE_SECONDS=1
+push_gate_reap_dead_holders() {
+    local _pgr_dir="$1" _pgr_max="$2"
+    local _pgr_i _pgr_slot _pgr_stamp _pgr_h _pgr_any=0 _pgr_killed=0
+    local -a _pgr_stamps=() _pgr_first=() _pgr_signalled=()
+
+    for (( _pgr_i = 0; _pgr_i < _pgr_max; _pgr_i++ )); do
+        _pgr_slot="$_pgr_dir/slot-${_pgr_i}.lock"
+        _pgr_stamp="$(_push_gate_dead_stamp "$_pgr_slot")" || continue
+        if ! command -v lsof >/dev/null 2>&1 && ! command -v fuser >/dev/null 2>&1; then
+            echo "push-gate: slot-${_pgr_i} holder pid ${_pgr_stamp%% *} is dead but neither lsof nor fuser is available to reap leaked descendants" >&2
+            continue
+        fi
+        _pgr_stamps[_pgr_i]="$_pgr_stamp"
+        _pgr_first[_pgr_i]=" $(_push_gate_slot_holder_pids "$_pgr_slot" | tr '\n' ' ') "
+        _pgr_any=1
+    done
+    if [[ "$_pgr_any" -eq 0 ]]; then
+        return 1
+    fi
+
+    sleep "$PUSH_GATE_REAP_SETTLE_SECONDS"
+    for (( _pgr_i = 0; _pgr_i < _pgr_max; _pgr_i++ )); do
+        [[ -n "${_pgr_first[_pgr_i]:-}" ]] || continue
+        _pgr_slot="$_pgr_dir/slot-${_pgr_i}.lock"
+        _pgr_stamp="$(_push_gate_dead_stamp "$_pgr_slot")" || continue
+        [[ "$_pgr_stamp" == "${_pgr_stamps[_pgr_i]}" ]] || continue
+        _pgr_signalled[_pgr_i]=" "
+        for _pgr_h in $(_push_gate_slot_holder_pids "$_pgr_slot"); do
+            [[ "$_pgr_h" =~ ^[0-9]+$ ]] || continue
+            [[ "$_pgr_h" -eq "$$" ]] && continue
+            [[ "${_pgr_first[_pgr_i]}" == *" $_pgr_h "* ]] || continue
+            echo "push-gate: slot-${_pgr_i} holder pid ${_pgr_stamp%% *} is dead; reaping leaked descendant ${_pgr_h}" >&2
+            kill -TERM "$_pgr_h" 2>/dev/null || true
+            _pgr_signalled[_pgr_i]+="$_pgr_h "
+            _pgr_killed=1
+        done
+    done
+    if [[ "$_pgr_killed" -eq 0 ]]; then
+        return 1
+    fi
+
+    # Give TERM a moment, then SIGKILL what TERM did not free, still under
+    # the same dead stamp.
+    sleep 0.2
+    for (( _pgr_i = 0; _pgr_i < _pgr_max; _pgr_i++ )); do
+        [[ -n "${_pgr_signalled[_pgr_i]:-}" ]] || continue
+        _pgr_slot="$_pgr_dir/slot-${_pgr_i}.lock"
+        _pgr_stamp="$(_push_gate_dead_stamp "$_pgr_slot")" || continue
+        [[ "$_pgr_stamp" == "${_pgr_stamps[_pgr_i]}" ]] || continue
+        for _pgr_h in $(_push_gate_slot_holder_pids "$_pgr_slot"); do
+            [[ "${_pgr_signalled[_pgr_i]}" == *" $_pgr_h "* ]] || continue
+            kill -KILL "$_pgr_h" 2>/dev/null || true
+        done
+    done
+    return 0
+}
+
 # True when file descriptor $1 is already open in this shell. A slot FD is
 # chosen per attempt and must never be a number this shell already holds:
 # `exec N<>file` on a live N closes the old descriptor and silently drops
@@ -348,6 +458,13 @@ push_gate_acquire_slot() {
             fi
             eval "exec ${_pgl_fd}>&-" || true
         done
+
+        # ga-34a: if every slot is pinned by a leaked descendant of a dead
+        # gate process, reap those descendants and retry immediately instead
+        # of burning the wait bound (or waiting for an operator to lsof+kill).
+        if push_gate_reap_dead_holders "$_pgl_slot_dir" "$_pgl_max"; then
+            continue
+        fi
 
         if [[ "$_pgl_announced" -eq 0 ]]; then
             _pgl_announced=1
