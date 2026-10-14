@@ -34,8 +34,9 @@ func FactKinds() []FactKind { return slices.Clone(factKinds) }
 // FactBasis says how a fact is known. It is X11 D8's gc.fact.basis, and it is
 // the one encoding of provenance: DES-O1 §5.3's "Detail: observed" and its
 // "inferred" end are both spelled Basis observed, and Detail carries only the
-// provider's own word for the end. The set is closed; empty means a row
-// written before the key existed, whose basis is unknown.
+// provider's own word for the end. This build writes only the values below;
+// a row may carry a newer build's value, which decodes as read and reads as
+// unknown. Empty means unknown: a row written before the key existed.
 type FactBasis string
 
 // The fact bases.
@@ -175,6 +176,9 @@ func EncodeFact(prefix string, f Fact) (beads.Bead, error) {
 	if err := validateFactBody(f); err != nil {
 		return beads.Bead{}, err
 	}
+	if f.Basis != "" && !slices.Contains(factBases, f.Basis) {
+		return beads.Bead{}, invalidf("fact basis %q", f.Basis)
+	}
 	meta := map[string]string{
 		keyFactSchema:       strconv.Itoa(SchemaRev),
 		keyFactKind:         string(f.Kind),
@@ -218,8 +222,10 @@ func validateFactBody(f Fact) error {
 			return err
 		}
 	}
-	if f.Basis != "" && !slices.Contains(factBases, f.Basis) {
-		return invalidf("fact basis %q", f.Basis)
+	if f.Basis != "" {
+		if err := validateToken("fact basis", string(f.Basis)); err != nil {
+			return err
+		}
 	}
 	if f.Detail != "" {
 		return validateToken("fact detail", f.Detail)
@@ -229,7 +235,8 @@ func validateFactBody(f Fact) error {
 
 // DecodeFact reads a fact row. An unknown kind is ErrUnsupportedKind; a
 // malformed row, or one whose id is not <prefix>-fact-<hash of its occurrence>
-// under a valid prefix, is ErrCorruptOp.
+// under a valid prefix, is ErrCorruptOp. A basis a newer build added is kept
+// as read: it is not part of the fact's identity.
 func DecodeFact(b beads.Bead) (Fact, error) {
 	if b.Type != BeadType || !slices.Contains(b.Labels, LabelFact) {
 		return Fact{}, corruptf(b.ID, "not a fact row (type %q, labels %v)", b.Type, b.Labels)
@@ -262,9 +269,6 @@ func DecodeFact(b beads.Bead) (Fact, error) {
 	}
 	if d.err != nil {
 		return Fact{}, d.err
-	}
-	if f.Basis != "" && !slices.Contains(factBases, f.Basis) {
-		return Fact{}, fmt.Errorf("%w: row %s has fact basis %q", ErrUnsupportedValue, b.ID, f.Basis)
 	}
 	if err := f.validateIdentity(); err != nil {
 		return Fact{}, corruptf(b.ID, "%v", err)

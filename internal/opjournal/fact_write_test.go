@@ -221,3 +221,22 @@ func TestRecordFactConcurrentWriters(t *testing.T) {
 		})
 	}
 }
+
+// A stored fact whose basis a newer build wrote is still the same
+// occurrence: RecordFact reports it recorded rather than failing.
+func TestRecordFactFindsAnOccurrenceWithANewerBasis(t *testing.T) {
+	h := newHarness(t)
+	f := turnEndedFact()
+	b, err := EncodeFact("gc", f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.Metadata[keyFactBasis] = "replayed"
+	if _, err := h.mem.Create(b); err != nil {
+		t.Fatal(err)
+	}
+	created, err := h.store.RecordFact(f)
+	if err != nil || created {
+		t.Fatalf("RecordFact over a newer basis = created %v, %v", created, err)
+	}
+}

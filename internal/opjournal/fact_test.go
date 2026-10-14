@@ -134,7 +134,7 @@ func TestDecodeFactRefusals(t *testing.T) {
 		{"schema 2", mutate(func(b *beads.Bead) { b.Metadata[keyFactSchema] = "2" }), ErrUnsupportedSchema},
 		{"edited turn", mutate(func(b *beads.Bead) { b.Metadata[keyFactTurn] = "run-9:3" }), ErrCorruptOp},
 		{"bad generation", mutate(func(b *beads.Bead) { b.Metadata[keyFactGeneration] = "x" }), ErrCorruptOp},
-		{"unknown basis", mutate(func(b *beads.Bead) { b.Metadata[keyFactBasis] = "guessed" }), ErrUnsupportedValue},
+		{"basis not a token", mutate(func(b *beads.Bead) { b.Metadata[keyFactBasis] = "Guessed It" }), ErrCorruptOp},
 		{"detail not a token", mutate(func(b *beads.Bead) { b.Metadata[keyFactDetail] = "End Turn" }), ErrCorruptOp},
 		{"reserved id prefix", mutate(func(b *beads.Bead) { b.ID = "g.c" + strings.TrimPrefix(b.ID, "gc") }), ErrCorruptOp},
 		{"empty id prefix", mutate(func(b *beads.Bead) { b.ID = strings.TrimPrefix(b.ID, "gc") }), ErrCorruptOp},
@@ -202,5 +202,20 @@ func TestFactBasisAndDetailKeepTheID(t *testing.T) {
 		if _, err := EncodeFact("gc", f); err != nil {
 			t.Errorf("basis %s: %v", basis, err)
 		}
+	}
+}
+
+// A basis a newer build added is provenance, not identity: the row decodes
+// with the basis as read.
+func TestDecodeFactKeepsANewerBasis(t *testing.T) {
+	good, err := EncodeFact("gc", sampleFacts()[3])
+	if err != nil {
+		t.Fatal(err)
+	}
+	good.Metadata = maps.Clone(good.Metadata)
+	good.Metadata[keyFactBasis] = "replayed"
+	got, err := DecodeFact(good)
+	if err != nil || got.Basis != "replayed" {
+		t.Fatalf("DecodeFact(newer basis) = %+v, %v", got, err)
 	}
 }
