@@ -456,17 +456,34 @@ func (c *BinaryCheck) Fix(_ *CheckContext) error { return nil }
 
 // --- Session checks (skipped when controller is running) ---
 
+// SessionRegistry reads the open rows of the session registry and returns
+// each row's runtime session name mapped to the qualified name of the agent
+// it runs. The runtime names pool instances and bead-named sessions
+// differently from agent.SessionNameFor, so the session checks read the
+// registry to know which running sessions belong to which agent. A nil
+// SessionRegistry means only the agent.SessionNameFor names are known.
+type SessionRegistry func() (map[string]string, error)
+
+// read returns the registry's names, or nil when no registry is wired.
+func (r SessionRegistry) read() (map[string]string, error) {
+	if r == nil {
+		return nil, nil
+	}
+	return r()
+}
+
 // AgentSessionsCheck verifies non-suspended agents have running sessions.
 type AgentSessionsCheck struct {
 	cfg             *config.City
 	cityName        string
 	sessionTemplate string
 	sp              runtime.Provider
+	registry        SessionRegistry
 }
 
 // NewAgentSessionsCheck creates a check for agent session liveness.
-func NewAgentSessionsCheck(cfg *config.City, cityName, sessionTemplate string, sp runtime.Provider) *AgentSessionsCheck {
-	return &AgentSessionsCheck{cfg: cfg, cityName: cityName, sessionTemplate: sessionTemplate, sp: sp}
+func NewAgentSessionsCheck(cfg *config.City, cityName, sessionTemplate string, sp runtime.Provider, registry SessionRegistry) *AgentSessionsCheck {
+	return &AgentSessionsCheck{cfg: cfg, cityName: cityName, sessionTemplate: sessionTemplate, sp: sp, registry: registry}
 }
 
 // Name returns the check identifier.
@@ -475,9 +492,21 @@ func (c *AgentSessionsCheck) Name() string { return "agent-sessions" }
 // Run checks that each non-suspended agent has a running session.
 func (c *AgentSessionsCheck) Run(_ *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
+	registered, err := c.registry.read()
+	if err != nil {
+		r.Status = StatusError
+		r.Message = fmt.Sprintf("reading session registry: %v", err)
+		return r
+	}
+	running := make(map[string]bool)
+	for sn, qualifiedName := range registered {
+		if c.sp.IsRunning(sn) {
+			running[qualifiedName] = true
+		}
+	}
 	var missing []string
 	for _, a := range c.cfg.Agents {
-		if a.Suspended {
+		if a.Suspended || running[a.QualifiedName()] {
 			continue
 		}
 		sn := agent.SessionNameFor(c.cityName, a.QualifiedName(), c.sessionTemplate)
@@ -570,17 +599,37 @@ func (c *ZombieSessionsCheck) Fix(ctx *CheckContext) error {
 	return nil
 }
 
-// OrphanSessionsCheck finds sessions with the city prefix not in config.
+// OrphanSessionsCheck finds running sessions that neither a configured agent
+// nor an open session registry row accounts for.
 type OrphanSessionsCheck struct {
 	cfg             *config.City
 	cityName        string
 	sessionTemplate string
 	sp              runtime.Provider
+	registry        SessionRegistry
 }
 
 // NewOrphanSessionsCheck creates a check for orphaned sessions.
-func NewOrphanSessionsCheck(cfg *config.City, cityName, sessionTemplate string, sp runtime.Provider) *OrphanSessionsCheck {
-	return &OrphanSessionsCheck{cfg: cfg, cityName: cityName, sessionTemplate: sessionTemplate, sp: sp}
+func NewOrphanSessionsCheck(cfg *config.City, cityName, sessionTemplate string, sp runtime.Provider, registry SessionRegistry) *OrphanSessionsCheck {
+	return &OrphanSessionsCheck{cfg: cfg, cityName: cityName, sessionTemplate: sessionTemplate, sp: sp, registry: registry}
+}
+
+// expectedSessions returns every session name the city accounts for: the
+// agent.SessionNameFor name of each configured agent and the session name of
+// each open registry row.
+func (c *OrphanSessionsCheck) expectedSessions() (map[string]bool, error) {
+	registered, err := c.registry.read()
+	if err != nil {
+		return nil, fmt.Errorf("reading session registry: %w", err)
+	}
+	expected := make(map[string]bool, len(c.cfg.Agents)+len(registered))
+	for _, a := range c.cfg.Agents {
+		expected[agent.SessionNameFor(c.cityName, a.QualifiedName(), c.sessionTemplate)] = true
+	}
+	for sn := range registered {
+		expected[sn] = true
+	}
+	return expected, nil
 }
 
 // Name returns the check identifier.
@@ -598,11 +647,11 @@ func (c *OrphanSessionsCheck) Run(_ *CheckContext) *CheckResult {
 		return r
 	}
 
-	// Build set of expected session names.
-	expected := make(map[string]bool)
-	for _, a := range c.cfg.Agents {
-		sn := agent.SessionNameFor(c.cityName, a.QualifiedName(), c.sessionTemplate)
-		expected[sn] = true
+	expected, regErr := c.expectedSessions()
+	if regErr != nil {
+		r.Status = StatusError
+		r.Message = regErr.Error()
+		return r
 	}
 
 	var orphans []string
@@ -637,7 +686,9 @@ func (c *OrphanSessionsCheck) CanFix() bool { return true }
 
 // Fix kills all orphaned sessions. It refuses while a controller is running
 // (GH#5742): the controller's own health patrol already reconciles orphan
-// sessions, and an uncoordinated Stop here would race it. Like
+// sessions, and an uncoordinated Stop here would race it. It also refuses
+// when the session registry cannot be read, because without it every pool
+// instance and bead-named session would look orphaned. Like
 // ZombieSessionsCheck.Fix, it stops through runtime.StopForCleanup, so an
 // orphan whose tmux server died after the listing counts as removed.
 func (c *OrphanSessionsCheck) Fix(ctx *CheckContext) error {
@@ -652,10 +703,9 @@ func (c *OrphanSessionsCheck) Fix(ctx *CheckContext) error {
 	if err != nil {
 		return err
 	}
-	expected := make(map[string]bool)
-	for _, a := range c.cfg.Agents {
-		sn := agent.SessionNameFor(c.cityName, a.QualifiedName(), c.sessionTemplate)
-		expected[sn] = true
+	expected, err := c.expectedSessions()
+	if err != nil {
+		return err
 	}
 	for _, s := range running {
 		if !expected[s] {

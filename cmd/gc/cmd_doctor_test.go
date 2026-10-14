@@ -1213,3 +1213,51 @@ func TestWriteDoctorJSONOKReflectsBlockingFailed(t *testing.T) {
 		})
 	}
 }
+
+// The session checks read the registry the way the runtime does: each open
+// session row's session name, mapped to the configured agent it runs. A
+// closed row is not in the registry, and a store that cannot open is an error
+// the checks report, not an empty registry.
+func TestDoctorSessionRegistryReadsOpenSessionRows(t *testing.T) {
+	oldOpen := openSessionProviderStore
+	t.Cleanup(func() { openSessionProviderStore = oldOpen })
+
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Type:   "session",
+		Labels: []string{"gc:session"},
+		Metadata: map[string]string{
+			"session_name": "worker-1-pool",
+			"template":     "worker",
+			"agent_name":   "worker-1",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	closed, err := store.Create(beads.Bead{
+		Type:     "session",
+		Labels:   []string{"gc:session"},
+		Metadata: map[string]string{"session_name": "worker-2-pool", "template": "worker"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(closed.ID); err != nil {
+		t.Fatal(err)
+	}
+	openSessionProviderStore = func(string) (beads.Store, error) { return store, nil }
+
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	names, err := doctorSessionRegistry(t.TempDir(), cfg)()
+	if err != nil {
+		t.Fatalf("registry read: %v", err)
+	}
+	if len(names) != 1 || names["worker-1-pool"] != "worker" {
+		t.Fatalf("registry = %v, want only worker-1-pool -> worker", names)
+	}
+
+	openSessionProviderStore = func(string) (beads.Store, error) { return nil, os.ErrPermission }
+	if _, err := doctorSessionRegistry(t.TempDir(), cfg)(); err == nil {
+		t.Fatal("registry read error = nil, want the store open error")
+	}
+}
