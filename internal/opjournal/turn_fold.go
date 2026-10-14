@@ -176,7 +176,10 @@ type TurnObservation struct {
 	// CurrentStart is the running turn's source start; zero when unknown.
 	CurrentStart time.Time
 	// Recent is the source's ended turns, newest first, at most the
-	// source's bound.
+	// source's bound. It holds only turns of Generation: the caller filters
+	// out an earlier incarnation's turns (a resumed transcript keeps them),
+	// because a new generation's fold journals every turn of Recent under
+	// Generation, and the generation is part of each fact's id.
 	Recent []ObservedTurnEnd
 	// SessionGone reports that the runtime exited.
 	SessionGone bool

@@ -210,6 +210,26 @@ func TestFoldTurnTable(t *testing.T) {
 			write: true,
 		},
 		{
+			// Recent holds only the observed generation's turns (TurnObservation's
+			// precondition), so after a reset every one of them is new.
+			name: "a different generation journals every turn of its Recent",
+			prev: ended("A", TurnEndCompleted, ts(1)),
+			obs:  obsAt(4, "", time.Time{}, ObservedTurnEnd{ID: "B", StartedAt: ts(60), EndedAt: ts(70), Status: TurnSourceCompleted}),
+			next: TurnCells{
+				Generation: 4, Caps: foldCaps, State: TurnStateEnded, At: ts(100),
+				LastID: "B", LastEnd: TurnEndCompleted, LastAt: ts(100), Seen: "B", ObservedAt: ts(100),
+			},
+			facts: []Fact{
+				started(4, "B", ts(60)),
+				func() Fact {
+					f := endedFact("B", TurnEndCompleted, FactBasisRuntime, ts(70))
+					f.Generation = 4
+					return f
+				}(),
+			},
+			write: true,
+		},
+		{
 			name:  "a different generation, idle: reset to unknown",
 			prev:  running(3, "T", ts(5)),
 			obs:   obsAt(4, "", time.Time{}),
