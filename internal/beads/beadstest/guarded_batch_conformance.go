@@ -232,6 +232,43 @@ func RunGuardedBatchConformance(t *testing.T, name string, open func(t *testing.
 		}
 	})
 
+	// The fact-row shape: a row written already closed, with no history, under
+	// a pinned id, carrying its labels and metadata. A second create of the
+	// same id refuses, so a replayed fact never lands twice.
+	t.Run(name+"/closed_no_history_pinned_create", func(t *testing.T) {
+		f := newGuardedFixture(t, open)
+		fact := f.pin("fact")
+		create := beads.GuardedBatch{Items: []beads.GuardedItem{{Create: &beads.Bead{
+			ID:        fact,
+			Title:     "fact",
+			Status:    "closed",
+			NoHistory: true,
+			Labels:    []string{"fact"},
+			Metadata:  map[string]string{"kind": "fact"},
+		}}}}
+		res, err := f.batcher.ApplyGuarded(context.Background(), create)
+		if err != nil {
+			t.Fatalf("ApplyGuarded: %v", err)
+		}
+		got := f.get(fact)
+		if got.Status != "closed" || !got.NoHistory || got.Ephemeral {
+			t.Errorf("fact row status=%q NoHistory=%v Ephemeral=%v, want closed/true/false", got.Status, got.NoHistory, got.Ephemeral)
+		}
+		guardedWantLabels(t, got, []string{"fact"}, nil)
+		if got.Metadata["kind"] != "fact" {
+			t.Errorf("fact row metadata = %v, want kind=fact", got.Metadata)
+		}
+		if got.Revision != res.Revisions[fact] {
+			t.Errorf("fact row revision %d, batch returned %d", got.Revision, res.Revisions[fact])
+		}
+		_, err = f.batcher.ApplyGuarded(context.Background(), create)
+		if !errors.Is(err, beads.ErrAlreadyExists) {
+			t.Fatalf("second create of %s = %v, want ErrAlreadyExists", fact, err)
+		}
+		f.wantItemError(err, 0, fact)
+		f.wantUnchanged(got)
+	})
+
 	t.Run(name+"/invalid_batches_refused_before_any_write", func(t *testing.T) {
 		f := newGuardedFixture(t, open)
 		row := f.seed("row")
