@@ -84,6 +84,14 @@ type propWorld struct {
 	// lost are the ops already reported as lost.
 	lost       map[string]bool
 	violations []string
+
+	// Flaky reads: while flaky is set, a store Get fails transiently, most
+	// often on an after target; while afterDown is set, every read of an
+	// after target fails. fr draws the failures.
+	flaky        bool
+	afterDown    bool
+	afterTargets map[string]bool
+	fr           *rand.Rand
 }
 
 func (w *propWorld) fail(format string, args ...any) {
@@ -91,7 +99,7 @@ func (w *propWorld) fail(format string, args ...any) {
 }
 
 func newPropWorld(t *testing.T, seed uint64) *propWorld {
-	h := newLaneHarnessDirect(t)
+	h, fs := newLaneHarnessFlaky(t)
 	w := &propWorld{
 		t: t, r: rand.New(rand.NewPCG(seed, seed*0x9e3779b97f4a7c15+1)), h: h,
 		convs: map[string]*propConv{}, restricted: seed%2 == 1,
@@ -99,7 +107,14 @@ func newPropWorld(t *testing.T, seed uint64) *propWorld {
 		seenTake: map[string]bool{}, rowSeen: map[string]RuntimeRow{}, ambiguous: map[string]bool{},
 		lastSend: map[string][]string{}, convOf: map[string]string{}, decoded: map[string]Op{},
 		keyOfAttempt: map[string]map[int]string{}, rejectedKeys: map[string]bool{}, lost: map[string]bool{},
+		afterTargets: map[string]bool{}, fr: rand.New(rand.NewPCG(seed+77, seed)),
 	}
+	fs.setFail(func(id string) bool {
+		if w.afterDown && w.afterTargets[id] {
+			return true
+		}
+		return w.flaky && (w.afterTargets[id] && w.fr.IntN(2) == 0 || w.fr.IntN(25) == 0)
+	})
 	w.lanes = []*ConversationLane{h.lane(t, "ctl"), h.lane(t, "cli")}
 	for i, id := range propConversations {
 		w.convs[id] = &propConv{
@@ -217,6 +232,9 @@ func assertNoIdentifiersQuiet(w *propWorld, d Delivery) {
 // checkInFlight is I5: every op the effect carries is executing under its
 // lease, durably, and the runtime row holds that lease.
 func (w *propWorld) checkInFlight(conv string, ops []Op) {
+	flaky, down := w.flaky, w.afterDown
+	w.flaky, w.afterDown = false, false
+	defer func() { w.flaky, w.afterDown = flaky, down }()
 	for _, op := range ops {
 		got, err := w.h.store.Get(op.ID)
 		if err != nil || got.Status != StatusExecuting || got.Lease != op.Lease {
@@ -314,8 +332,9 @@ func (w *propWorld) propose() {
 		if r.IntN(4) == 0 {
 			req.Scope = Scope{Kind: ScopeSession, Generation: max(1, w.convs[conv].view.Generation-int64(r.IntN(2)))}
 		}
-		if r.IntN(6) == 0 && len(w.ids) > 0 {
+		if r.IntN(4) == 0 && len(w.ids) > 0 {
 			req.After = w.ids[r.IntN(len(w.ids))]
+			w.afterTargets[req.After] = true
 		}
 		if r.IntN(6) == 0 {
 			req.NotBefore = w.h.clk.Now().Add(time.Duration(r.IntN(120)) * time.Second)
@@ -352,14 +371,21 @@ func (w *propWorld) cancel() {
 	}
 }
 
+// pass runs one pass; a third of passes read through a flaky store, and a
+// pass may then end with the read error.
 func (w *propWorld) pass(lane int, conv string) {
+	w.flaky = w.r.IntN(3) == 0
 	res, err := w.lanes[lane].Pass(context.Background(), w.convs[conv].view, propExec{w})
-	if err != nil && !errors.Is(err, errCrash) {
+	w.flaky = false
+	if err != nil && !errors.Is(err, errCrash) && !errors.Is(err, errFlakyRead) {
 		w.t.Fatalf("Pass: %v", err)
 	}
 	for _, wt := range res.Waits {
-		if wt.Reason == WaitReplayGroup {
+		switch wt.Reason {
+		case WaitReplayGroup:
 			w.cov.add("replay_group")
+		case WaitAfterUnreadable:
+			w.cov.add("after_unreadable")
 		}
 	}
 }
@@ -372,7 +398,7 @@ func (w *propWorld) step() {
 	w.pendingHook = nil
 	conv := propConversations[r.IntN(len(propConversations))]
 	lane := r.IntN(2)
-	switch k := r.IntN(16); {
+	switch k := r.IntN(17); {
 	case k < 4:
 		w.propose()
 	case k == 4:
@@ -391,7 +417,7 @@ func (w *propWorld) step() {
 			if s == stageAfterRead && !ran {
 				ran = true
 				_, err := other.Pass(context.Background(), w.convs[conv].view, propExec{w})
-				if err != nil {
+				if err != nil && !errors.Is(err, errFlakyRead) {
 					w.t.Fatalf("inner Pass: %v", err)
 				}
 			}
@@ -412,6 +438,8 @@ func (w *propWorld) step() {
 		w.ambiguousThenSplit(lane, conv)
 	case k == 14:
 		w.keyRejectedThenCrash(lane, conv)
+	case k == 15:
+		w.ambiguousThenAfterUnreadable(lane, conv)
 	default:
 		v := &w.convs[conv].view
 		switch r.IntN(10) {
@@ -454,6 +482,47 @@ func (w *propWorld) ambiguousThenSplit(lane int, conv string) {
 	w.pass(lane, conv)
 	v.ContentHold = hold
 	w.probe = idleProbe()
+	w.pass(1-lane, conv)
+}
+
+// ambiguousThenAfterUnreadable targets replay groups whose members the rules
+// keep out of the class: two fresh notices, one after an op that closed
+// succeeded, go in one attempt that ends Unknown; the replay pass cannot read
+// any after target; then the store recovers.
+func (w *propWorld) ambiguousThenAfterUnreadable(lane int, conv string) {
+	if w.restricted {
+		// Restricted runs check arrival order, which after reorders.
+		w.pass(lane, conv)
+		return
+	}
+	var target string
+	for id, o := range w.outcomes {
+		if w.convOf[id] == conv && o.Arm == ArmSucceeded && (target == "" || id < target) {
+			target = id
+		}
+	}
+	for i, after := range []string{"", target} {
+		w.keys++
+		req := laneMsg(fmt.Sprintf("k%d", w.keys), RoleNotice, fmt.Sprintf("grouped %d", i))
+		req.Conversation, req.After = conv, after
+		w.h.clk.Advance(time.Millisecond)
+		op, _, err := w.h.store.Propose(req)
+		if err != nil {
+			w.t.Fatalf("Propose: %v", err)
+		}
+		w.ids = append(w.ids, op.ID)
+		w.convOf[op.ID] = conv
+	}
+	w.afterTargets[target] = target != ""
+	landed := w.r.IntN(2) == 0
+	w.probe = idleProbe()
+	w.contentRes = func(Delivery) (DeliveryResult, bool) { return Unknown{Cause: errors.New("?")}, landed }
+	w.pass(lane, conv)
+	w.h.clk.Advance(ExecutorErrorBackoff + time.Millisecond)
+	w.contentRes = w.delivered()
+	w.afterDown = true
+	w.pass(lane, conv)
+	w.afterDown = false
 	w.pass(1-lane, conv)
 }
 
@@ -681,7 +750,7 @@ func TestLaneProperties(t *testing.T) {
 		for _, k := range []string{
 			"delivery", "redelivery", "note", "replay_dedup", "closed:poison", "closed:ambiguous_delivery",
 			"closed:stale", "closed:canceled", "closed:busy", "closed:dependency_failed", "closed:expired_before_start",
-			"closed:deadline_in_flight", "closed:conversation_closed", "key_rejected", "replay_group",
+			"closed:deadline_in_flight", "closed:conversation_closed", "key_rejected", "replay_group", "after_unreadable",
 		} {
 			if cov.counts[k] == 0 {
 				t.Errorf("the property runs never exercised %s (%v)", k, cov.counts)

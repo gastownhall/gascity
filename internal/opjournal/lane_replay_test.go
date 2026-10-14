@@ -259,3 +259,84 @@ func TestLaneRiderReplayWaitsForItsOpenStarter(t *testing.T) {
 		t.Fatalf("rider wait %q", w)
 	}
 }
+
+// A group member the rules keep out of the content class (its after target
+// cannot be read on this pass) is still in its replay group: on a
+// deduplicating runtime the rest of the group waits for it instead of
+// replaying under the group's key without it, which would leave its own
+// later send under that key dropped while it closed succeeded unseen.
+func TestLaneDedupReplayGroupCountsMembersOutsideTheClass(t *testing.T) {
+	h, fs := newLaneHarnessFlaky(t)
+	exec := newFakeExec(h.clk)
+	l := h.lane(t, "ctl")
+	rt := newDedupRuntime(h, exec)
+	rt.failFirst = false
+	target := h.propose(t, laneMsg("t", RolePrompt, "first"))
+	mustPass(t, l, view(), exec)
+	if got := h.get(t, target.ID); got.Outcome.Arm != ArmSucceeded {
+		t.Fatalf("after target: %+v", got.Outcome)
+	}
+	h.clk.Advance(time.Millisecond)
+	a := h.propose(t, laneMsg("a", RoleNotice, "one"))
+	h.clk.Advance(time.Millisecond)
+	b := h.propose(t, laneMsg("b", RoleNotice, "two", func(r *Request) { r.After = target.ID }))
+	rt.failFirst = true
+	if res := mustPass(t, l, view(), exec); !slices.Equal(res.Taken, []string{a.ID, b.ID}) {
+		t.Fatalf("first attempt took %v, want [%s %s]", res.Taken, a.ID, b.ID)
+	}
+	key := h.get(t, a.ID).DeliveryKey
+
+	h.clk.Advance(ExecutorErrorBackoff + time.Millisecond)
+	fs.setFail(func(id string) bool { return id == target.ID })
+	res := mustPass(t, l, view(), exec)
+	if len(res.Taken) != 0 {
+		t.Fatalf("replay with a member's after target unreadable took %v; the group must wait whole", res.Taken)
+	}
+	if !slices.ContainsFunc(res.Waits, func(w OpWait) bool { return w.ID == a.ID && w.Reason == WaitReplayGroup }) {
+		t.Fatalf("head %s should wait %s: %+v", a.ID, WaitReplayGroup, res.Waits)
+	}
+	unreadable := slices.IndexFunc(res.Waits, func(w OpWait) bool { return w.ID == b.ID && w.Reason == WaitAfterUnreadable })
+	if unreadable < 0 || res.Waits[unreadable].Until.IsZero() || res.Next.IsZero() {
+		t.Fatalf("member %s should wait %s with a retry time that sets Next: waits %+v next %v", b.ID, WaitAfterUnreadable, res.Waits, res.Next)
+	}
+
+	fs.setFail(nil)
+	if res := mustPass(t, l, view(), exec); !slices.Equal(res.Taken, []string{a.ID, b.ID}) {
+		t.Fatalf("replay took %v, want the whole group [%s %s]", res.Taken, a.ID, b.ID)
+	}
+	if got := h.get(t, b.ID).DeliveryKey; got != key {
+		t.Fatalf("replay key %s, want the group's %s", got, key)
+	}
+	assertShownIfSucceeded(t, h, rt, a.ID, b.ID)
+}
+
+// A rider whose group's starter the rules keep out of the class (its after
+// target cannot be read on this pass) still waits for it, on any runtime:
+// the starter has not closed, so the rider is not alone in its group.
+func TestLaneRiderReplayWaitsForAStarterOutsideTheClass(t *testing.T) {
+	for _, dedup := range []bool{false, true} {
+		t.Run(map[bool]string{false: "plain", true: "dedup"}[dedup], func(t *testing.T) {
+			p := newPlanner(t)
+			key := "gc-op-aaaaaaaaaaaaaaaaaaaaaaaaaa:3"
+			target := "gc-op-bbbbbbbbbbbbbbbbbbbbbbbbbb"
+			released := func(op *Op) {
+				op.Status, op.Attempt, op.DeliveryKey, op.MaybeDelivered = StatusAccepted, 1, key, 1
+			}
+			rider := p.op(laneMsg("r", RoleNotice, "x", withWhen(WhenAfterTurn)), released)
+			starter := p.op(laneMsg("s", RolePrompt, "y", func(r *Request) { r.After = target }), released)
+			snap := snapOf(rider, starter)
+			snap.after[target] = afterTarget{state: afterUnreadable}
+			now := t0.Add(time.Hour)
+			rp := planRules(snap, view(), now, "lane:ctl")
+			probe := idleProbe()
+			probe.Caps.Dedup = dedup
+			tp, _ := planTake(rp, probe, view(), now)
+			if tp.take != nil {
+				t.Fatalf("took %v without its starter", takenOf(tp))
+			}
+			if w := waitsOf(append(rp.waits, tp.waits...))[starter.ID]; w != WaitAfterUnreadable {
+				t.Fatalf("starter wait %q", w)
+			}
+		})
+	}
+}

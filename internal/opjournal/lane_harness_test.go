@@ -64,6 +64,47 @@ func (f *faultBatcher) setFault(fn func(n int, b beads.GuardedBatch) (bool, erro
 
 var errLinkDropped = errors.New("connection reset mid-batch")
 
+// errFlakyRead is a store read that failed transiently.
+var errFlakyRead = errors.New("transient read error")
+
+// flakyGetStore fails Get while fail says so for the id, as a store hiccup
+// would.
+type flakyGetStore struct {
+	*beads.MemStore
+	mu   sync.Mutex
+	fail func(id string) bool
+}
+
+func (s *flakyGetStore) Get(id string) (beads.Bead, error) {
+	s.mu.Lock()
+	fail := s.fail
+	s.mu.Unlock()
+	if fail != nil && fail(id) {
+		return beads.Bead{}, errFlakyRead
+	}
+	return s.MemStore.Get(id)
+}
+
+func (s *flakyGetStore) setFail(fn func(id string) bool) {
+	s.mu.Lock()
+	s.fail = fn
+	s.mu.Unlock()
+}
+
+// newLaneHarnessFlaky opens the lane store over a MemStore whose Get the test
+// can fail, with no recorder.
+func newLaneHarnessFlaky(t *testing.T) (*laneHarness, *flakyGetStore) {
+	t.Helper()
+	mem := &beads.MemStore{IDPrefix: "gc", HonorExplicitIDs: true}
+	fs := &flakyGetStore{MemStore: mem}
+	clk := &clock.Fake{Time: t0}
+	s, err := NewLaneStore(beads.SessionStore{Store: fs}, clk, WithIDPrefix("gc"))
+	if err != nil {
+		t.Fatalf("NewLaneStore: %v", err)
+	}
+	return &laneHarness{mem: mem, clk: clk, store: s}, fs
+}
+
 type laneHarness struct {
 	mem     *beads.MemStore
 	rec     *beadstest.OpRecordingStore
@@ -88,19 +129,6 @@ func newLaneHarnessOver(t *testing.T, mem *beads.MemStore, clk *clock.Fake) *lan
 	}
 	t.Cleanup(func() { assertOnlyKeyedLists(t, rec) })
 	return &laneHarness{mem: mem, rec: rec, batcher: fb, clk: clk, store: s}
-}
-
-// newLaneHarnessDirect opens the lane store straight over a MemStore, with no
-// recorder: for the property tests, whose step count makes recording costly.
-func newLaneHarnessDirect(t *testing.T) *laneHarness {
-	t.Helper()
-	mem := &beads.MemStore{IDPrefix: "gc", HonorExplicitIDs: true}
-	clk := &clock.Fake{Time: t0}
-	s, err := NewLaneStore(beads.SessionStore{Store: mem}, clk, WithIDPrefix("gc"))
-	if err != nil {
-		t.Fatalf("NewLaneStore: %v", err)
-	}
-	return &laneHarness{mem: mem, clk: clk, store: s}
 }
 
 // lane returns a lane named host with a counting nonce and a no-op sleep.

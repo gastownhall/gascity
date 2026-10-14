@@ -82,6 +82,10 @@ type rulesPlan struct {
 	// under an open view.
 	rowErr error
 	by     string
+	// groups maps each delivery key to the maybe-delivered ops under it
+	// that the rules leave open and not in flight, in a class or not: a
+	// member waiting on its after target is still in its replay group.
+	groups map[string][]Op
 }
 
 // isUrgent reports urgent content precedence: steer (OJ-17 adds now and the
@@ -135,6 +139,9 @@ func planRules(snap laneSnapshot, conv ConversationView, now time.Time, by strin
 	closeOp := func(read, cur Op, o Outcome) {
 		rp.closes = append(rp.closes, ruleClose{cur: read, next: closedAt(cur, o, by, now)})
 	}
+	// past holds every op past the in-flight and expiry rules, as the rules
+	// see it; the ones a later rule closes are dropped from groups.
+	var past []Op
 	for _, op := range snap.ops {
 		spec, err := Lookup(op.Kind)
 		if err != nil {
@@ -198,6 +205,7 @@ func planRules(snap laneSnapshot, conv ConversationView, now time.Time, by strin
 			closeOp(op, cur, Outcome{Arm: ArmFailed, Reason: reason})
 			continue
 		}
+		past = append(past, cur)
 		// An expired op that survived the rules above is a re-take
 		// candidate; it still passes the scope and state rules.
 		e := entry{op: op, urgent: isUrgent(op), retake: expired, cur: cur}
@@ -227,7 +235,8 @@ func planRules(snap laneSnapshot, conv ConversationView, now time.Time, by strin
 				closeOp(op, cur, Outcome{Arm: ArmFailed, Reason: RefusedReasonPrefix + "after_scope"})
 				continue
 			case t.state == afterUnreadable:
-				waitOp(op, WaitAfterUnreadable, time.Time{})
+				// Nothing rings when a store read recovers: retry on a timer.
+				waitOp(op, WaitAfterUnreadable, now.Add(TransientBackoffBase))
 				continue
 			case t.state != afterClosed:
 				waitOp(op, WaitAfterPending, time.Time{})
@@ -258,9 +267,26 @@ func planRules(snap laneSnapshot, conv ConversationView, now time.Time, by strin
 	}
 	orderEntries(rp.control)
 	orderEntries(rp.content)
+	rp.groups = replayGroups(past, rp.closes)
 	rp.closeRow = conv.Closed && remaining == 0 && rowOK && !rt.row.Closed
 	rp.takePossible = rp.decideTake(conv, rt, rowOK, inFlight, now)
 	return rp
+}
+
+// replayGroups maps each delivery key to the maybe-delivered ops under it
+// among ops, less the ones closes close.
+func replayGroups(ops []Op, closes []ruleClose) map[string][]Op {
+	closed := make(map[string]bool, len(closes))
+	for _, c := range closes {
+		closed[c.cur.ID] = true
+	}
+	groups := map[string][]Op{}
+	for _, op := range ops {
+		if op.MaybeDelivered > 0 && op.DeliveryKey != "" && !closed[op.ID] {
+			groups[op.DeliveryKey] = append(groups[op.DeliveryKey], op)
+		}
+	}
+	return groups
 }
 
 // decideTake reports whether a Take is possible and, when it is not because
@@ -616,7 +642,7 @@ func (tp *takePlan) planContent(rp rulesPlan, probe Probe, now time.Time) *conte
 	if inBand || boundary == TriNo {
 		mode = LinkJoins
 	}
-	batch := tp.formBatch(items, mode, inBand, rp.baseSeq, caps.Dedup)
+	batch := tp.formBatch(items, mode, inBand, rp.baseSeq, caps.Dedup, rp.groups)
 	if batch != nil {
 		tp.busy = false
 	}
@@ -624,8 +650,9 @@ func (tp *takePlan) planContent(rp rulesPlan, probe Probe, now time.Time) *conte
 }
 
 // formBatch picks the batch from the classified items. whole says the runtime
-// deduplicates by delivery key, so a replay group goes whole or not at all.
-func (tp *takePlan) formBatch(items []contentItem, mode LinkMode, ridersFree bool, baseSeq uint64, whole bool) *contentBatch {
+// deduplicates by delivery key, so a replay group goes whole or not at all;
+// groups holds every replay group's open members, in the class or not.
+func (tp *takePlan) formBatch(items []contentItem, mode LinkMode, ridersFree bool, baseSeq uint64, whole bool, groups map[string][]Op) *contentBatch {
 	for {
 		head := -1
 		for i, it := range items {
@@ -644,9 +671,10 @@ func (tp *takePlan) formBatch(items []contentItem, mode LinkMode, ridersFree boo
 		var picked []int
 		full := false
 		replay := items[head].e.cur.MaybeDelivered > 0
+		group := groups[items[head].e.op.DeliveryKey]
 		if replay {
 			var split bool
-			picked, full, split = pickReplay(items, head, whole)
+			picked, full, split = pickReplay(items, head, whole, group)
 			if split {
 				// The head waits for its group and, as a blocking waiter,
 				// holds everything after it (I8).
@@ -657,7 +685,7 @@ func (tp *takePlan) formBatch(items []contentItem, mode LinkMode, ridersFree boo
 		} else {
 			picked, full = pickFresh(items, head)
 		}
-		if !replay || groupHasNonRider(items, head) {
+		if !replay || groupHasNonRider(items, head, group) {
 			// A replay group of riders only lost its starter to a close;
 			// it may already have reached the agent with that turn, so it
 			// goes without one rather than wait until start_by.
@@ -693,10 +721,11 @@ func (tp *takePlan) formBatch(items []contentItem, mode LinkMode, ridersFree boo
 
 // pickReplay picks the head's replay group: the open items that share its
 // delivery key (an item this pass closes has left the group), within the
-// limits. A member that is not eligible, or sits behind a stop, is left for
-// a later Take; when whole is set that would split the group, so split is
+// limits. A member that is not eligible, sits behind a stop, or is in group
+// but not among the items (the rules kept it out of the class) is left for a
+// later Take; when whole is set that would split the group, so split is
 // reported and nothing is picked.
-func pickReplay(items []contentItem, head int, whole bool) (picked []int, full, split bool) {
+func pickReplay(items []contentItem, head int, whole bool, group []Op) (picked []int, full, split bool) {
 	var lim batchLimits
 	stopped := false
 	for i, it := range items {
@@ -717,14 +746,28 @@ func pickReplay(items []contentItem, head int, whole bool) (picked []int, full, 
 		}
 		picked = append(picked, i)
 	}
+	if whole {
+		for _, op := range group {
+			if !slices.ContainsFunc(items, func(it contentItem) bool { return it.e.op.ID == op.ID }) {
+				return nil, false, true
+			}
+		}
+	}
 	return picked, full, false
 }
 
 // groupHasNonRider reports whether the head's replay group still holds an
-// open member, eligible or not, that is not an after_turn rider.
-func groupHasNonRider(items []contentItem, head int) bool {
+// open member, eligible or not and in the class or not, that is not an
+// after_turn rider.
+func groupHasNonRider(items []contentItem, head int, group []Op) bool {
 	for i, it := range items {
 		if inReplayGroup(items, head, i) && it.e.op.Policy.Message.When != WhenAfterTurn {
+			return true
+		}
+	}
+	for _, op := range group {
+		inClass := slices.ContainsFunc(items, func(it contentItem) bool { return it.e.op.ID == op.ID })
+		if !inClass && op.Policy.Message.When != WhenAfterTurn {
 			return true
 		}
 	}
