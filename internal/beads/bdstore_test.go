@@ -4820,37 +4820,54 @@ func TestBdStoreListAssigneesSingleUsesAssigneeFlag(t *testing.T) {
 	}
 }
 
-func TestBdStoreListAssigneesMultipleFallsBackToClientFilter(t *testing.T) {
-	var gotCmd string
+// TestBdStoreListAssigneesMultipleFansOutPerAssignee pins GH#7794's fix: two
+// or more Assignees used to clear the predicate and scan every row of the
+// type (one deployment measured ~1,300 rows per multi-route inbox read).
+// Each Assignees value now gets its own predicated `bd list --assignee=X`
+// read instead. Sort is explicit (SortCreatedDesc, not the default) so the
+// combined limit below proves a real cross-assignee merge, not just
+// whichever assignee happens to be listed first in query.Assignees:
+// route-b's row is newer than route-a's, so it must win the cut even though
+// route-a is read first.
+func TestBdStoreListAssigneesMultipleFansOutPerAssignee(t *testing.T) {
+	var calls []string
+	rows := map[string]string{
+		"route-a": `{"id":"bd-route-a","title":"message","status":"open","issue_type":"message","assignee":"route-a","created_at":"2026-05-01T00:00:01Z"}`,
+		"route-b": `{"id":"bd-route-b","title":"message","status":"open","issue_type":"message","assignee":"route-b","created_at":"2026-05-01T00:00:02Z"}`,
+	}
 	runner := func(_, name string, args ...string) ([]byte, error) {
-		gotCmd = name + " " + strings.Join(args, " ")
-		if strings.Contains(gotCmd, "--assignee=") {
-			t.Fatalf("cmd = %q, multi-route Assignees must not emit a single --assignee", gotCmd)
+		gotCmd := name + " " + strings.Join(args, " ")
+		calls = append(calls, gotCmd)
+		if strings.Contains(gotCmd, "assignee=route-c") {
+			t.Fatalf("cmd = %q, a route not asked for must not be queried", gotCmd)
 		}
-		if strings.Contains(gotCmd, "--limit 1") {
-			return []byte(`[{"id":"bd-route-c","title":"message","status":"open","issue_type":"message","assignee":"route-c","created_at":"2026-05-01T00:00:00Z"}]`), nil
+		if !strings.Contains(gotCmd, "--limit 0") {
+			t.Fatalf("cmd = %q, want each fanned-out read unlimited before the combined client limit", gotCmd)
 		}
-		return []byte(`[
-			{"id":"bd-route-c","title":"message","status":"open","issue_type":"message","assignee":"route-c","created_at":"2026-05-01T00:00:00Z"},
-			{"id":"bd-route-b","title":"message","status":"open","issue_type":"message","assignee":"route-b","created_at":"2026-05-01T00:00:01Z"},
-			{"id":"bd-route-a","title":"message","status":"open","issue_type":"message","assignee":"route-a","created_at":"2026-05-01T00:00:02Z"}
-		]`), nil
+		for route, row := range rows {
+			if strings.Contains(gotCmd, "--assignee="+route) {
+				return []byte("[" + row + "]"), nil
+			}
+		}
+		t.Fatalf("cmd = %q, want exactly one --assignee=<route> per Assignees value", gotCmd)
+		return nil, nil
 	}
 	s := beads.NewBdStore("/city", runner)
 	got, err := s.List(beads.ListQuery{
 		Assignees: []string{"route-a", "route-b"},
 		Type:      "message",
 		Status:    "open",
+		Sort:      beads.SortCreatedDesc,
 		Limit:     1,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(gotCmd, "--limit 0") {
-		t.Fatalf("cmd = %q, want unlimited server query before multi-Assignees client filtering", gotCmd)
+	if len(calls) != 2 {
+		t.Fatalf("calls = %v, want exactly 2 (one bd list per Assignees value)", calls)
 	}
 	if len(got) != 1 || got[0].ID != "bd-route-b" {
-		t.Fatalf("got = %+v, want first matching route after client filter", got)
+		t.Fatalf("got = %+v, want bd-route-b: newer, so it must win the combined limit despite being read second", got)
 	}
 }
 
