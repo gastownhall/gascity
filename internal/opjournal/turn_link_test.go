@@ -9,17 +9,19 @@ import (
 	"time"
 )
 
-// linkAt is a delivery time with sub-millisecond digits, so the tests see
-// truncation to the millisecond at work.
-var linkAt = time.Date(2026, 10, 14, 12, 0, 0, 123_456_789, time.UTC)
+// linkAt is a delivery time whose sub-millisecond digits are over half a
+// millisecond, so truncating it to the millisecond and rounding it differ:
+// the tests see truncation at work.
+var linkAt = time.Date(2026, 10, 14, 12, 0, 0, 123_756_789, time.UTC)
 
 const linkGen int64 = 7
 
-// stampedNow is a deliverer's instant with sub-millisecond digits in a
-// non-UTC zone; stampedMillis is the same instant as a runtime stamps it on
-// the message, in UTC to the millisecond.
+// stampedNow is a deliverer's instant in a non-UTC zone, its sub-millisecond
+// digits over half a millisecond like linkAt's; stampedMillis is the same
+// instant as a runtime stamps it on the message: in UTC, truncated to the
+// millisecond.
 var (
-	stampedNow    = time.Date(2026, 10, 14, 14, 0, 0, 160_345_678, time.FixedZone("UTC+2", 2*60*60))
+	stampedNow    = time.Date(2026, 10, 14, 14, 0, 0, 160_745_678, time.FixedZone("UTC+2", 2*60*60))
 	stampedMillis = stampedNow.UTC().Truncate(time.Millisecond)
 )
 
@@ -187,6 +189,18 @@ func TestCorrelateTurn(t *testing.T) {
 				return ev
 			},
 			want: TurnLink{Turn: "mine", Confidence: LinkCorrelated, Basis: BasisRequestedAt}, decided: true,
+		},
+		{
+			// The stamp cannot tell apart two turns starting within one
+			// millisecond.
+			name: "row 3: of two candidates in the message's millisecond, the first observed wins",
+			rec:  func() DeliveryRecord { r := linkRec(LinkStarts); r.MessageAt = stampedNow; return r },
+			ev: func() TurnEvidence {
+				ev := sourced(seen("first", stampedMillis), seen("second", stampedMillis))
+				ev.SameClock = false
+				return ev
+			},
+			want: TurnLink{Turn: "first", Confidence: LinkCorrelated, Basis: BasisRequestedAt}, decided: true,
 		},
 		// Row 4.
 		{
@@ -373,6 +387,49 @@ func TestCorrelateTurn(t *testing.T) {
 				return ev
 			},
 			want: TurnLink{Turn: "a", Confidence: LinkAmbiguous, Basis: BasisCompetingTurn}, decided: true,
+		},
+		{
+			// Known may lack the probe's live turn, as when a deliverer builds
+			// it from the source's recent turns alone. On a source whose clock
+			// is not the lane host's, no cutoff drops that turn, and it is
+			// still never a candidate.
+			name: "row 8: starts whose live turn Known lacks, before the delivery's turn shows",
+			rec:  func() DeliveryRecord { return linkRec(LinkStarts) },
+			ev: func() TurnEvidence {
+				ev := sourced(SeenTurn{ID: "live", Generation: linkGen, StartedAt: linkAt.Add(-time.Minute), Running: true})
+				ev.SameClock = false
+				ev.LiveAtProbe, ev.LiveTurn = TriYes, "live"
+				ev.FirstRead = FirstTurnRead{Done: true, Current: "live"}
+				return ev
+			},
+			want: TurnLink{Confidence: LinkNone, Basis: BasisNoCandidate}, decided: false,
+		},
+		{
+			name: "row 7: starts whose live turn Known lacks, once the delivery's turn shows",
+			rec:  func() DeliveryRecord { return linkRec(LinkStarts) },
+			ev: func() TurnEvidence {
+				ev := sourced(
+					SeenTurn{ID: "live", Generation: linkGen, StartedAt: linkAt.Add(-time.Minute), Running: true},
+					seen("next", linkAt.Add(5*ms)),
+				)
+				ev.SameClock = false
+				ev.LiveAtProbe, ev.LiveTurn = TriYes, "live"
+				ev.FirstRead = FirstTurnRead{Done: true, Current: "live"}
+				return ev
+			},
+			want: TurnLink{Turn: "next", Confidence: LinkAmbiguous, Basis: BasisCompetingTurn}, decided: true,
+		},
+		{
+			name: "row 8: joins whose live turn Known lacks ended before the first read",
+			rec:  func() DeliveryRecord { return linkRec(LinkJoins) },
+			ev: func() TurnEvidence {
+				ev := sourced(seen("live", linkAt.Add(-time.Minute)))
+				ev.SameClock = false
+				ev.LiveAtProbe, ev.LiveTurn = TriYes, "live"
+				ev.FirstRead = FirstTurnRead{Done: true}
+				return ev
+			},
+			want: TurnLink{Confidence: LinkNone, Basis: BasisNoCandidate}, decided: false,
 		},
 		{
 			name: "row 7: an unknown probe, even on a serial source",

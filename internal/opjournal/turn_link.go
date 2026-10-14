@@ -88,14 +88,20 @@ type FirstTurnRead struct {
 
 // TurnEvidence is what a deliverer read of the session's turns, within the
 // delivery's lease, from the probe up to the latest read after the effect.
+//
+// Known holds only turns of the delivery's generation: the rule matches it by
+// id alone, so the deliverer leaves out an earlier incarnation's turns (a
+// resumed transcript keeps them). Seen holds only the turns of reads that
+// succeeded: a failed read adds none, not even the turns it parsed before it
+// failed, so Seen stays empty while FirstRead.Done is false.
 type TurnEvidence struct {
 	HasSource   bool          // the session's turn starts are recorded and this process can read them
 	SameClock   bool          // StartedAt is on the lane host's clock
 	Serial      bool          // only gc's input can start a turn on this source
 	LiveAtProbe Tri           // whether a turn was running at the probe
-	LiveTurn    string        // the turn running at the probe, "" when unknown
-	Known       []string      // turn ids the probe's read returned; never candidates
-	Seen        []SeenTurn    // every turn the reads after the effect showed, in observation order (see SeenTurn)
+	LiveTurn    string        // the turn running at the probe, "" when unknown; never a candidate
+	Known       []string      // the ids of the current and recent turns the probe's read returned; never candidates
+	Seen        []SeenTurn    // every turn the successful reads after the effect showed, in observation order (see SeenTurn)
 	FirstRead   FirstTurnRead // the first successful read after the effect
 	ReadErr     error         // the last read failed; never read as "no turn"
 }
@@ -151,15 +157,17 @@ type TurnLink struct {
 // turn first seen with its start unknown still matches row 3 and still passes
 // the same-clock cutoff. The same id in another generation is another turn.
 // A sighting without an id is dropped. A same-clock turn whose start no sighting
-// knew is excluded. The first matching row decides:
+// knew is excluded. The probe's LiveTurn is never a candidate, even when Known
+// lacks it: it was running before the effect. The first matching row decides:
 //
 //  1. rec.TurnID set: that turn, exact (hook_payload for an in-band ack,
 //     else runtime_turn).
 //  2. No turn source: none, no_source.
 //  3. rec.MessageAt set: the first candidate whose StartedAt equals it to
-//     the millisecond,
-//     correlated, requested_at; with none, undecided none (row 8's basis).
-//     It never falls through to a history diff.
+//     the millisecond, correlated, requested_at; with none, undecided none
+//     (row 8's basis). It never falls through to a history diff. Only two
+//     turns of the session starting within one millisecond give two such
+//     candidates, and the first observed is taken, not called ambiguous.
 //  4. LinkJoins, a live turn at the probe, and the first read after the
 //     effect shows that turn still current: it, correlated, joined_live_turn.
 //  5. Exactly one candidate, no live turn at the probe, and Serial: it,
@@ -220,7 +228,7 @@ func linkCandidates(rec DeliveryRecord, ev TurnEvidence) []SeenTurn {
 	cutoff := rec.At.Truncate(time.Millisecond)
 	var out []SeenTurn
 	for _, t := range mergeSightings(ev.Seen) {
-		if t.Generation != rec.Generation || slices.Contains(ev.Known, t.ID) {
+		if t.Generation != rec.Generation || t.ID == ev.LiveTurn || slices.Contains(ev.Known, t.ID) {
 			continue
 		}
 		if ev.SameClock && t.StartedAt.Before(cutoff) {
