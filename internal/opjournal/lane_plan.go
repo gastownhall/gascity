@@ -153,8 +153,14 @@ func planRules(snap laneSnapshot, conv ConversationView, now time.Time, by strin
 			cur.MaybeDelivered = cur.Attempt
 			cur.LastError = lastErrorLeaseExpired
 		}
-		if !live && op.StartBy.After(now) {
-			rp.next = minTime(rp.next, op.StartBy)
+		if !live && !now.After(op.StartBy) {
+			// start_by closes an op once now is past it; at start_by
+			// itself the timer is the next instant.
+			at := op.StartBy
+			if !at.After(now) {
+				at = now.Add(time.Nanosecond)
+			}
+			rp.next = minTime(rp.next, at)
 		}
 		canceled := Outcome{Arm: ArmCanceled}
 		switch {

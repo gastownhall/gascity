@@ -217,6 +217,16 @@ func TestPlanRulesNext(t *testing.T) {
 	if want := now.Add(5 * time.Second); !rp.next.Equal(want) {
 		t.Fatalf("next %s, want start_by %s", rp.next, want)
 	}
+	// At start_by itself the op is still open (it closes once now is past
+	// start_by), so the timer is the next instant, never none.
+	at := p.op(laneMsg("d", RoleNotice, "x", withWhen(WhenAfterTurn), func(r *Request) { r.StartBy = now }))
+	rp = planRules(snapOf(at), view(), now, "lane:ctl")
+	if len(rp.closes) != 0 || !rp.next.After(now) {
+		t.Fatalf("closes %v next %s at start_by %s", closesOf(rp), rp.next, now)
+	}
+	if rp = planRules(snapOf(at), view(), rp.next, "lane:ctl"); closesOf(rp)[at.ID] != "failed{expired_before_start}" {
+		t.Fatalf("at the timer: closes %v", closesOf(rp))
+	}
 }
 
 func TestPlanRulesTakePossible(t *testing.T) {
