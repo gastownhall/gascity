@@ -36,7 +36,11 @@ func TestInitScrubsLeakVectors(t *testing.T) {
 	cmd := exec.Command(exe, "-test.run=^TestInitScrubsLeakVectors$", "-test.v")
 	cmd.Env = []string{
 		"GC_TESTENV_CHILD=1",
+		"TEST_SRCDIR=bazel",
 		"GC_FAST_UNIT=should-survive",
+		// Bazel names test binaries without the .test suffix; isGoTestBinary
+		// detects them via TEST_SRCDIR, so the child env must carry it.
+		"TEST_SRCDIR=bazel",
 	}
 	for _, name := range testenv.LeakVectorVars {
 		cmd.Env = append(cmd.Env, name+"=leaked-"+name)
@@ -99,6 +103,8 @@ func TestInitPassthroughPreservesNamed(t *testing.T) {
 	cmd := exec.Command(exe, "-test.run=^TestInitPassthroughPreservesNamed$", "-test.v")
 	cmd.Env = []string{
 		"GC_TESTENV_CHILD=1",
+		"TEST_SRCDIR=bazel",
+		"TEST_SRCDIR=bazel",
 		testenv.PassthroughVar + "=" + strings.Join(keep, ","),
 	}
 	for _, name := range testenv.LeakVectorVars {
@@ -481,6 +487,11 @@ func TestInitRefusesProdDoltPort(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			env := append([]string{"GC_TESTENV_CHILD=1"}, tc.env...)
+			// The real test binary scrubs under bazel via TEST_SRCDIR; the
+			// renamed fakeGC exercises subcommand mode and must not see it.
+			if tc.bin == exe {
+				env = append(env, "TEST_SRCDIR=bazel")
+			}
 			assertRefusesDoltPort(t, tc.bin, "TestInitRefusesProdDoltPort", "", env, tc.wantPanic, tc.wantOutput)
 		})
 	}

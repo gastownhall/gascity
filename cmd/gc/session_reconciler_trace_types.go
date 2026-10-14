@@ -68,6 +68,10 @@ const (
 	TraceSiteDesiredStateBuild              TraceSiteCode = "desired_state.build"
 	TraceSiteDemandSnapshot                 TraceSiteCode = "demand_snapshot.load"
 	TraceSiteOrderDispatch                  TraceSiteCode = "orders.dispatch"
+	TraceSiteRuntimeInventoryPass           TraceSiteCode = "runtime_inventory.pass"
+	TraceSiteRuntimeInventoryOnDeath        TraceSiteCode = "runtime_inventory.on_death"
+	TraceSiteReconcilePass                  TraceSiteCode = "reconcile.pass"
+	TraceSiteV2SessionDecision              TraceSiteCode = "reconcile.session.decision"
 	TraceSitePoolDemandCompute              TraceSiteCode = "pool_desired.compute"
 	TraceSiteSessionSnapshot                TraceSiteCode = "session_snapshot.load"
 	TraceSiteSessionSync                    TraceSiteCode = "session_sync.update_index"
@@ -91,6 +95,7 @@ const (
 	TraceSiteReconcilerUnknownState         TraceSiteCode = "reconciler.session.skip_unknown_state"
 	TraceSiteReconcilerOrphaned             TraceSiteCode = "reconciler.session.orphan_or_suspended"
 	TraceSiteReconcilerCloseOrphan          TraceSiteCode = "reconciler.session.close_orphan"
+	TraceSiteReconcilerRecycleNamedPhantom  TraceSiteCode = "reconciler.session.recycle_named_phantom"
 	TraceSiteReconcilerPendingCreate        TraceSiteCode = "reconciler.session.rollback_pending_create"
 	TraceSiteReconcilerConfigDrift          TraceSiteCode = "reconciler.session.config_drift"
 	TraceSiteReconcilerIdleDrain            TraceSiteCode = "reconciler.session.idle_drain"
@@ -129,6 +134,8 @@ const (
 	TraceSiteReconcilerBeadReassignCycle         TraceSiteCode = "reconciler.session.bead_reassign_cycle"
 	TraceSiteLifecycleStartTerminalProviderError TraceSiteCode = "reconciler.start.terminal_provider_error"
 	TraceSiteLifecycleStartRateLimitHold         TraceSiteCode = "reconciler.start.rate_limit_hold"
+	TraceSiteLifecycleStartCapacityRefused       TraceSiteCode = "reconciler.start.capacity_refused"
+	TraceSiteEndpointCapacityBreaker             TraceSiteCode = "reconciler.endpoint.capacity_breaker"
 	TraceSiteLifecycleShutdownPreserveSessions   TraceSiteCode = "lifecycle.shutdown.preserve_sessions"
 )
 
@@ -165,6 +172,7 @@ const (
 	TraceReasonDrainTimeout           TraceReasonCode = "drain_timeout"
 	TraceReasonStoreQueryPartial      TraceReasonCode = "store_query_partial"
 	TraceReasonNoWakeReason           TraceReasonCode = "no_wake_reason"
+	TraceReasonUndesiredWakeGrace     TraceReasonCode = "undesired_wake_grace"
 	TraceReasonFSPressure             TraceReasonCode = "fs_pressure"
 	TraceReasonResetStalled           TraceReasonCode = "reset_stalled"
 
@@ -175,8 +183,11 @@ const (
 	TraceReasonConfigDriftAttached           TraceReasonCode = "config_drift_attached"
 	TraceReasonConfigDriftRecentlyAttached   TraceReasonCode = "config_drift_recently_attached"
 	TraceReasonPending                       TraceReasonCode = "pending"
+	TraceReasonPendingUnknown                TraceReasonCode = "pending_unknown"
 	TraceReasonAcknowledged                  TraceReasonCode = "acknowledged"
 	TraceReasonMinFloorIdleWorker            TraceReasonCode = "min_floor_idle_worker"
+	TraceReasonOnDemandIdleNoDemand          TraceReasonCode = "on_demand_idle_no_demand"
+	TraceReasonOpenWorkCheckError            TraceReasonCode = "open_work_check_error"
 	TraceReasonLiveDrift                     TraceReasonCode = "live_drift"
 	TraceReasonCircuitOpen                   TraceReasonCode = "circuit_open"
 	TraceReasonCircuitTrip                   TraceReasonCode = "circuit_trip"
@@ -186,6 +197,7 @@ const (
 	TraceReasonPendingCreateRebuildFailed    TraceReasonCode = "pending_create_rebuild_failed"
 	TraceReasonPendingCreateCommitFailed     TraceReasonCode = "pending_create_commit_failed"
 	TraceReasonPendingCreateHealed           TraceReasonCode = "pending_create_healed"
+	TraceReasonPendingCreateSuperseded       TraceReasonCode = "pending_create_superseded"
 	TraceReasonAssignedWork                  TraceReasonCode = "assigned_work"
 	TraceReasonFreshCycle                    TraceReasonCode = "fresh_cycle"
 	TraceReasonScaleCheck                    TraceReasonCode = "scale_check"
@@ -196,6 +208,8 @@ const (
 	TraceReasonQuarantine            TraceReasonCode = "quarantine"
 	TraceReasonPinned                TraceReasonCode = "pinned"
 	TraceReasonAssignedWorkExhausted TraceReasonCode = "assigned_work_exhausted"
+	TraceReasonEndpointCapacityOpen  TraceReasonCode = "endpoint_capacity_open"
+	TraceReasonOnDeathHookPending    TraceReasonCode = "on_death_hook_pending"
 )
 
 type TraceOutcomeCode string
@@ -224,6 +238,7 @@ const (
 	TraceOutcomeSkipped                 TraceOutcomeCode = "skipped"
 	TraceOutcomeDrain                   TraceOutcomeCode = "drain"
 	TraceOutcomeClosed                  TraceOutcomeCode = "closed"
+	TraceOutcomeRecycled                TraceOutcomeCode = "recycled"
 	TraceOutcomeRollback                TraceOutcomeCode = "rollback"
 	TraceOutcomeDeferredAttached        TraceOutcomeCode = "deferred_attached"
 	TraceOutcomeDeferredActive          TraceOutcomeCode = "deferred_active"
@@ -241,7 +256,6 @@ const (
 	// event.
 	TraceOutcomeRebaselinedVersionMismatch TraceOutcomeCode = "rebaselined_version_mismatch"
 
-	TraceOutcomeRollbackDeferred    TraceOutcomeCode = "rollback_deferred"
 	TraceOutcomeKeptOpen            TraceOutcomeCode = "kept_open"
 	TraceOutcomeDeferred            TraceOutcomeCode = "deferred"
 	TraceOutcomeCancelPending       TraceOutcomeCode = "cancel_pending"
@@ -280,6 +294,23 @@ const (
 	TraceOutcomeDeferredPinned      TraceOutcomeCode = "deferred_pinned"
 	TraceOutcomeDeferredBusy        TraceOutcomeCode = "deferred_busy"
 	TraceOutcomeStopDeferExhausted  TraceOutcomeCode = "stop_defer_exhausted"
+
+	// TraceOutcomeCapacityRefused marks a start the serving endpoint refused
+	// (runtime.ErrProviderCapacity). It is not a session failure.
+	TraceOutcomeCapacityRefused TraceOutcomeCode = "capacity_refused"
+	// TraceOutcomeDeferredByEndpointCapacity marks a start the endpoint
+	// capacity breaker deferred before any write.
+	TraceOutcomeDeferredByEndpointCapacity TraceOutcomeCode = "deferred_by_endpoint_capacity"
+	// TraceOutcomeDeferredByOnDeathHook marks a start deferred before any
+	// write because the name's on_death hook is queued or running.
+	TraceOutcomeDeferredByOnDeathHook TraceOutcomeCode = "deferred_by_on_death_hook"
+	// TraceOutcomeSkippedPresent marks an on_death hook skipped because its
+	// name was listed again when the hook was due.
+	TraceOutcomeSkippedPresent TraceOutcomeCode = "skipped_present"
+	// TraceOutcomeOpen and TraceOutcomeHalfOpen report an endpoint capacity
+	// breaker's state (TraceOutcomeClosed is the third).
+	TraceOutcomeOpen     TraceOutcomeCode = "open"
+	TraceOutcomeHalfOpen TraceOutcomeCode = "half-open"
 
 	// TraceOutcomeSkippedLivenessError marks absence-derived reconciliation
 	// skipped this tick because the runtime liveness probe returned an

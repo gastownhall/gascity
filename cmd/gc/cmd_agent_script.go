@@ -389,7 +389,9 @@ func agentScriptBDUpdateArgs(arg any, ctx agentScriptContext) ([]string, error) 
 		return nil, err
 	}
 	if notes != "" {
-		args = append(args, "--notes", notes)
+		// Append rather than replace: scripted agents update work beads,
+		// and --notes would discard notes the bead already carries.
+		args = append(args, "--append-notes", notes)
 	}
 	if rawMetadata, ok := m["metadata"]; ok {
 		metadata, err := agentScriptMapArg("bd_update metadata", rawMetadata)
@@ -801,6 +803,11 @@ func agentScriptHookBeadWithRunner(stderr io.Writer, runHook agentScriptHookRunn
 
 func agentScriptHookExitIsNoWork(output, stderr string) bool {
 	if workQueryHasReadyWork(output) {
+		return false
+	}
+	// The store could not be read, which is not the same as no work, even
+	// when bd's own message is warning-shaped.
+	if strings.Contains(stderr, hookStoreUnavailableToken) {
 		return false
 	}
 	for _, line := range strings.Split(stderr, "\n") {

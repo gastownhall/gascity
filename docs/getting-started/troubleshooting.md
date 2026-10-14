@@ -90,6 +90,51 @@ per-city `.gc/system/packs` tree, adds the missing pinned import(s) to
 `pack.toml`, and refreshes `packs.lock` and the cache. Leftover
 `.gc/system/packs` directories on disk are pruned automatically.
 
+## `gascity-pack-binding` Doctor Warning
+
+Cities created by gc v1.4.x import the public Gas City pack under the key
+`gascity`:
+
+```toml
+[imports.gascity]
+source = "https://github.com/gastownhall/gascity-packs/tree/main/gascity"
+```
+
+The import key namespaces the pack's commands and skills, and the pack
+ecosystem is written against `gc`: the pack documents skill `gc.mayor`, and
+role prompts in Gas City pack releases after 0.1.6 run `gc gc claim`. Under
+`[imports.gascity]` that command is `gc gascity claim`, so role workers fail
+their first claim once the pack is bumped past 0.1.6. Current `gc init` writes
+`[imports.gc]`.
+
+`gc doctor` reports this as a warning; the city keeps working at the pinned
+0.1.6 pack. Run:
+
+```bash
+gc doctor --fix
+```
+
+The `gascity-pack-binding` check renames the key to `[imports.gc]` in
+`pack.toml` (or in a city.toml root `[imports]` override), keeping the source,
+version, and every other field. `packs.lock` is keyed by source, so no
+reinstall is needed. The check identifies the pack by its source (any https,
+http, or SSH spelling of `gastownhall/gascity-packs` with the `gascity` pack
+directory), not by the key name, so a fork or a different pack bound as
+`gascity` is left alone, and it never
+touches rig imports or `[defaults.rig.imports]`.
+
+The fix changes nothing and explains why when:
+
+- `[imports.gc]` already imports a different pack. Rename one of the imports
+  by hand.
+- `[imports.gc]` already imports the Gas City pack with a different version or
+  settings. Remove one of the two imports by hand. An exact duplicate (same
+  source and version) is removed automatically.
+- A string value in `pack.toml` or `city.toml` is shaped like a
+  `gascity.`-qualified name, for example a patch targeting `gascity.<agent>`.
+  The message names the file and key. Update the value to `gc.` and rerun, or
+  rename the import by hand if the value is unrelated. Comments are ignored.
+
 ## "command not found" After Install
 
 If `gc` is installed but your shell cannot find it, the binary is not on your
@@ -244,9 +289,24 @@ For orchestrator-managed Gas City deployments, confirm that the orchestrator is
 wrapping stores with `CachingStore` and emitting `bead.created`,
 `bead.updated`, `bead.closed`, and `bead.deleted` events to the event bus. After
 that migration is verified, remove the executable hook scripts from the city or
-rig `.beads/hooks/` directory to allow native store adoption. Keep
-`GC_BEADS_FORCE_FALLBACK=1` set when a deployment still depends on those hook
-scripts directly.
+rig `.beads/hooks/` directory to allow native store adoption.
+
+While a city still depends on those hook scripts directly, keep its stores on
+the subprocess-backed store by turning native transport off in `city.toml`:
+
+```toml
+[beads]
+native_transport = "off"
+```
+
+Restart a running city after the change: the stores it holds open keep the
+value it read at boot. `gc` commands, and the stores the city opens for a
+single tick, read the current `city.toml` every time. This setting replaces
+the `GC_BEADS_FORCE_FALLBACK=1` environment variable, which still works but is
+deprecated and applies to every city the process serves. With either one,
+`gc start` refuses a `[storage]` binding served by `beads-workspace`, because
+that provider opens the native store. Turn native transport off only in cities
+that have no such binding, or remove the binding first.
 
 ## Native Store Falls Back Because Dolt Is in Embedded Mode
 
@@ -314,6 +374,28 @@ gc restart
 
 Do not bypass or disable the `dolt_mode_safe` check — it guards the store-mode
 contract that keeps `bd` and gc in agreement.
+
+## Listings Miss Durable Beads After Changing `types.infra`
+
+**Symptom:** after a type is added to a store's `types.infra` setting, a
+running city's listings of that type return only its ephemeral beads.
+
+The native store asks the server to filter a listing by type only for types
+the server keeps durable, and it reads which types those are from the store's
+stored `types.infra` setting when it opens. A running city keeps what it read
+for the stores it holds open. `gc` commands, and the stores the city opens for
+a single tick, read the current setting every time.
+
+**Remedy:** change the stored setting, then restart the city:
+
+```bash
+gc bd config set types.infra "<types>"   # add --rig <name> for a rig's store
+gc restart
+```
+
+Gas City reads only the stored setting. If the server of a remote beads
+workspace names `types.infra` in its own `.beads/config.yaml`, put the same
+types in the stored setting too.
 
 ## flock Not Found (macOS)
 
@@ -389,15 +471,83 @@ The file uses dotenv syntax: `KEY=VALUE` per line, `#` comments, blank lines,
 an optional `export ` prefix, and optional surrounding quotes. Only keys that
 are already eligible for the supervisor environment are merged — provider
 credentials (recognized by their standard prefixes such as `ANTHROPIC_`,
-`OPENAI_`, `GEMINI_`) plus any keys you opt in via `GC_SUPERVISOR_ENV`; any
-other key in the file is ignored. A value exported in the calling shell still
-takes precedence over the file, and `GC_SUPERVISOR_OMIT_PROVIDER_CREDS=1`
-suppresses provider credentials from both sources.
+`OPENAI_`, `GEMINI_`), a short built-in list of settings (among them the Dolt
+credential and logging settings `GC_DOLT_USER`, `GC_DOLT_PASSWORD`, and
+`GC_DOLT_LOGLEVEL`, and the beads pool deadlines below), plus any keys you opt
+in via `GC_SUPERVISOR_ENV`; any other key in the file is ignored. A value
+exported in the calling shell still takes precedence over the file, and
+`GC_SUPERVISOR_OMIT_PROVIDER_CREDS=1` suppresses provider credentials from both
+sources.
+
+The same file is the durable home for the beads connection-pool deadlines.
+`gc` reads `BEADS_DOLT_POOL_READ_TIMEOUT` and `BEADS_DOLT_POOL_WRITE_TIMEOUT`
+for its own store connections only from its process environment; the
+`dolt.pool-*-timeout` keys in `.beads/config.yaml` and entries in `.beads/.env`
+reach the `bd` CLI, not `gc`. If the 10-second default is too tight for a
+loaded shared Dolt server (store operations fail with `i/o timeout` or
+`invalid connection`), raise both here:
+
+```bash
+# ~/.gc/secrets.env
+BEADS_DOLT_POOL_READ_TIMEOUT=90s
+BEADS_DOLT_POOL_WRITE_TIMEOUT=90s
+```
+
+These values also reach the `bd` commands and agent sessions that inherit the
+supervisor's environment, where they take precedence over the per-workspace
+`.beads/` settings.
 
 Apply the change by regenerating the service file:
 
 ```bash
-gc service restart     # restarts the launchd/systemd service
+gc supervisor install  # rewrites the service file; restarts on change
+```
+
+## A Custom Environment Variable Doesn't Reach Agent Sessions
+
+Symptom: a non-`GC_`-prefixed variable you've exported and confirmed is set
+(e.g. in your shell, `~/.bash_env`, or a systemd/launchd unit) never shows up
+inside a spawned agent session's environment, even though `gc supervisor
+run` itself can see it.
+
+Cause: `passthroughEnv` only forwards a variable into a session if it is
+either `GC_`-prefixed, part of the small fixed provider/locale/XDG set, or
+named in `GC_SUPERVISOR_ENV` — the same opt-in `gc supervisor install` uses to
+widen the persisted service-file env (see above). Everything else is dropped
+silently, by design: an unbounded sweep of the calling environment would leak
+whatever secrets happen to be sitting in the supervisor's process, into every
+agent session.
+
+Fix: name the variable in `GC_SUPERVISOR_ENV` in the environment the
+supervisor daemon itself runs with, then restart it so the daemon process
+picks up both the opt-in list and the variable's value:
+
+```bash
+export GC_SUPERVISOR_ENV=GC_SUPERVISOR_ENV,MY_CUSTOM_VAR   # the list names itself so it survives restarts; comma or space separated
+export MY_CUSTOM_VAR=/path/to/thing
+gc supervisor install   # regenerates the service file with both persisted
+gc supervisor stop && gc supervisor start   # restart the supervisor so it inherits them
+```
+
+Sessions that are already running keep their old environment; restart them to
+receive a newly forwarded variable.
+
+`GC_SUPERVISOR_ENV` itself needs to be present in the supervisor daemon's own
+environment for this to survive a later restart — it is not automatically
+persisted into the generated service file the way `PATH`/`GC_HOME` are. If
+you rely on a managed service file, either list `GC_SUPERVISOR_ENV` among its
+own opted-in names (`GC_SUPERVISOR_ENV=GC_SUPERVISOR_ENV,MY_CUSTOM_VAR`) or
+set it directly in the unit's `Environment=` lines.
+
+For a value that's the same on every city, `[workspace.env]` in `city.toml` is
+usually simpler than an opt-in — it doesn't depend on the supervisor's own
+process environment at all:
+
+```toml
+[workspace.env]
+MY_CUSTOM_VAR = "/path/to/thing"
+# or, to read it from whatever the supervisor's own environment holds:
+MY_CUSTOM_VAR = "$MY_CUSTOM_VAR"
 ```
 
 ## Supervisor Log Written Twice (journald + supervisor.log)
@@ -503,21 +653,65 @@ lifecycle path; gc never silently falls back to the default unit.
 Setting `GC_SUPERVISOR_SYSTEMD_UNIT` on a non-Linux platform is the
 same kind of hard error — delegation is a systemd contract.
 
+## Supervisor Does Not Come Back After Logout (macOS launchd Agent Disabled)
+
+Symptom: on macOS the supervisor is running, but it does not come back after
+logout or reboot, and `gc supervisor status` prints a warning on stderr:
+
+```text
+gc supervisor status: warning: launchd agent com.gascity.supervisor is disabled; it will not start after logout or reboot. Run 'gc supervisor stop --wait' then 'gc supervisor start' to put it back under launchd
+```
+
+Cause: `gc supervisor stop` disables the launchd agent so the stopped
+supervisor stays stopped, even across logins. That override is persistent: it
+survives logout and reboot, and only `launchctl enable` clears it. A
+supervisor started any other way afterwards, such as a foreground
+`gc supervisor run`, passes every liveness check while launchd would never
+restart it. An installed agent that is not loaded has the same effect, and
+status warns about it too (`... is not loaded; it will not restart if the
+supervisor exits`). To see the override yourself:
+
+```bash
+launchctl print-disabled "gui/$(id -u)" | grep com.gascity.supervisor
+```
+
+The warning leaves the liveness report on stdout and the exit code unchanged.
+With `--json`, status adds `"supervised": false` and a `supervision_warning`
+string carrying the same message. Both keys are absent when launchd is
+supervising, and also when status cannot tell: no agent is installed, its
+plist cannot be read, or launchd does not answer.
+
+Fix: run the command the warning names. It depends on what status found:
+
+| Status found | Remedy |
+|---|---|
+| The agent runs this `gc`, and no supervisor is running | `gc supervisor start`, which enables, loads, and starts the agent |
+| The agent runs this `gc`, and a supervisor is running | `gc supervisor stop --wait`, then `gc supervisor start` |
+| The agent runs a different `gc` binary | `<this gc's path> supervisor install --force`, after `gc supervisor stop --wait` if a supervisor is running |
+
+Use `stop --wait`: a plain `gc supervisor stop` returns while the supervisor
+is still shutting down, and `gc supervisor start` refuses while a supervisor
+is running. A plain `gc supervisor install` is not a substitute either: when
+the service file is already current and a supervisor is running, it reports
+success without enabling the agent.
+
 ## JSONL Archive Push Failures
 
-The core pack runs `jsonl-export` every 15 minutes to dump each bead
-database to a text-diffable JSONL snapshot inside a local git repository
-(the "JSONL archive"). The archive serves as a disaster-recovery backup:
-if the live Dolt server loses data, the last-known-good bead graph can be
-reconstructed from the archive's commit history.
+The core pack runs `jsonl-export` every 15 minutes to export each bead
+store (the city and every rig) with `bd export` into a text-diffable JSONL
+snapshot inside a local git repository (the "JSONL archive"): one issue per
+line, with its labels, dependencies and comments. The archive serves as a
+disaster-recovery backup: a snapshot from any commit restores with
+`gc bd import <file>`.
 
 `jsonl-export` (every 15 minutes) and `reaper` (every 30 minutes) ship in
 the core pack, so they are active in every city by default — including
 cities that previously ran them only via the opt-in gastown maintenance
-pack. On cities without a Dolt target (for example `[beads]
-provider = "file"`), both orders skip with a one-line `no managed dolt
-target for this city` message instead of running. To turn them off
-entirely, skip them by name in `city.toml`:
+pack. Both reach every bead store through `gc bd`, so they work the same on
+bd-owned proxied, gc-managed and mixed cities. On cities whose beads
+provider is not bd (for example `[beads] provider = "file"`), both orders
+skip with a one-line message and an `order.skipped` event instead of
+running. To turn them off entirely, skip them by name in `city.toml`:
 
 ```toml
 [orders]
@@ -545,6 +739,57 @@ git remotes on every run:
 On each run `jsonl-export` logs the active mode to stderr on transitions
 (e.g. after you add or remove `origin`) and re-logs it at least weekly so
 that an operator reading the log file can always find the current mode.
+
+### Archive object maintenance
+
+Every snapshot commit creates loose Git objects, including in local-only
+mode. The exporter checks the archive before each export and after each new
+commit. It runs a foreground, low-priority `git gc` when either of these
+defaults is reached:
+
+- `GC_JSONL_GC_LOOSE_OBJECTS=2000`
+- `GC_JSONL_GC_LOOSE_KB=262144` (256 MiB)
+
+Packing is deliberately single-threaded and uses
+`GC_JSONL_GC_WINDOW_MEMORY=256m` (a positive byte count, without leading
+zeros, with an optional `k`, `m`, or `g` suffix in either case) to avoid
+competing with the Dolt server and worker sessions for memory. These values
+can be lowered for small hosts.
+
+Packing writes a new copy of the archive's objects before it deletes the old
+ones. It starts only when the archive's filesystem can hold that copy and
+still keep `GC_JSONL_GC_MIN_FREE_KB=512000` (500 MiB) free; otherwise the
+order fails with a message giving the free space. The check counts loose
+objects at their full size, though snapshots usually pack to a small fraction
+of it: one archive's 9.01 GiB of loose objects packed to 67.40 MiB. So an
+archive with a large backlog of loose objects can be refused on every run
+even when packing it would fit. To recover, pack it once by hand with the
+command the failure message prints (or the lower-memory one below), free disk
+space, or set `GC_JSONL_GC_MIN_FREE_KB=0` to disable the check. If `df`
+cannot report the free space, packing goes ahead with a warning.
+
+An invalid setting fails the order before it exports anything. A refused
+free-space check or a failed `git gc` fails the order visibly, and later runs
+export no new snapshots until packing succeeds. Snapshots already committed
+still reach `origin`: a run packs only after its push, and a run that finds
+the archive cannot be packed pushes any waiting snapshot before it stops. A
+spike halt sends its alert, or saves it for retry, before it packs.
+
+To inspect the archive without changing it:
+
+```bash
+# The default location. GC_JSONL_ARCHIVE_REPO overrides it, and cities
+# migrated from the gastown maintenance pack keep their legacy path.
+ARCHIVE="$(gc status --json | jq -r '.city_path')/.gc/runtime/packs/core/jsonl-archive"
+git -C "$ARCHIVE" count-objects -vH
+git -C "$ARCHIVE" fsck --connectivity-only
+```
+
+To pack it once by hand with less memory:
+
+```bash
+git -C "$ARCHIVE" -c pack.windowMemory=64m -c pack.threads=1 gc
+```
 
 ### Enabling off-box backup
 
@@ -642,9 +887,20 @@ environment, so set these at orchestrator start to customize routing:
 - `GC_ESCALATE_SEND_TIMEOUT_SECS` — wall-clock bound on one escalation
   send (default: 30). The wake can outlive the send it follows, and
   escalations run inline in maintenance orders, so the bound keeps a slow
-  wake from stalling the run that raised the alarm. The mail is written
-  before the wake blocks, so a tripped bound costs the wake, not the
-  message, and the script still exits 0.
+  wake from stalling the run that raised the alarm. `gc mail send` prints
+  `Sent message` once the mail is written, before the wake. A bound that
+  trips after that line costs at most the wake, never the message, and the
+  script still exits 0. A bound that trips before it means the mail may not
+  exist, for any recipient: the script exits non-zero and the next run
+  sends again.
+- `GC_ESCALATE_REMINDER_SECONDS` — how long an unchanged incident stays
+  quiet before it is mailed again (default: 86400, one day). See
+  [Why a maintenance alert did not repeat](#why-a-maintenance-alert-did-not-repeat).
+- `GC_ESCALATE_INCIDENT_DIR` — where incident state is kept (default:
+  `<city>/.gc/incidents`).
+- `GC_ESCALATE_NOW_EPOCH` — test-only: pins the script's clock. Leave it
+  unset; a fixed clock never reaches the reminder interval, so an unchanged
+  incident is never mailed again.
 - `GC_MAINTENANCE_DONE_TARGET` — session target to nudge with
   `MAINTENANCE_DONE:`/warn summaries when a maintenance run completes
   (default: unset, no completion nudge). Deployments that relied on the
@@ -673,6 +929,46 @@ host is down for scheduled maintenance), set
 restart the city with `gc restart`. That bumps the escalation threshold
 from 3 to 99, which at the current 15-minute tick rate is ~24 hours of
 silence.
+
+### Why a maintenance alert did not repeat
+
+A maintenance order that keeps finding the same problem would otherwise mail
+it on every run: 48 times a day for the 30-minute `reaper` order. So two
+orders raise their failures as **incidents**: an alert that is unchanged since
+it was last mailed stays quiet for `GC_ESCALATE_REMINDER_SECONDS` (default:
+one day). A change in what failed mails at once, and a clean run resolves the
+incident, so the next failure mails at once too.
+
+| Order | Incident key | Mails again sooner when |
+| --- | --- | --- |
+| `mol-dog-backup` | `dolt-backup:required-sync` | the failing databases or their diagnostics change |
+| `reaper` | `reaper:anomalies` | the anomalies change; a stale backup that only grows older does not count |
+
+A quiet run says so in its output:
+
+```
+escalate: incident reaper:anomalies unchanged since 2026-10-08T09:00:00Z; next reminder after 2026-10-09T09:00:00Z
+```
+
+The backup order's missing-`flock` and offsite-publication alerts are not
+incidents and still mail on every run.
+
+Deduplication is best-effort. When the incident state cannot be read or
+written, the alert is mailed anyway, and a send that fails is not recorded,
+so the next run sends it again. To make the next run mail an incident at
+once, delete its state file. From the city directory:
+
+```bash
+# Forget one incident...
+rm -f "$(grep -l '^key=reaper:anomalies$' .gc/incidents/*.state)"
+# ...or all of them.
+rm -f .gc/incidents/*.state
+```
+
+A pack that overrides `escalate.sh` receives `--incident-key KEY
+--fingerprint F` on an alert and `--resolve-incident KEY` on a clean run. The
+override must accept or ignore those flags and must send nothing for
+`--resolve-incident`; an override that rejects them loses the alert.
 
 ## WSL (Windows Subsystem for Linux)
 

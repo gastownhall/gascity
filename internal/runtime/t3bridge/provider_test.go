@@ -1811,3 +1811,40 @@ func TestSeamBackedLastActivityPreservesSnapshotUncertainty(t *testing.T) {
 		})
 	}
 }
+
+// clearBridgeMeta is the third eraser of an agent acknowledgement, and the only
+// one that can run while the session stays alive: Stop reaches it on the
+// isPersistentAgent branch, which deliberately leaves the pane running with the
+// same instance_token. The acknowledgement's provenance must therefore go with
+// the acknowledgement — left behind, the next drain of that same incarnation
+// reads the dead drain's ack as current and declines to remind in silence
+// (ga-o6uw0). The cmd/gc eraser census is the other half of this pin; this one
+// is what makes the removal observable on the provider that owns the keys.
+func TestClearBridgeMetaRemovesTheAcknowledgementProvenance(t *testing.T) {
+	t.Setenv("GC_T3BRIDGE_STATE_DIR", t.TempDir())
+	const name = "worker"
+	keys := []string{
+		"GC_DRAIN",
+		"GC_DRAIN_ACK",
+		"GC_DRAIN_ACK_SOURCE",
+		"GC_DRAIN_ACK_REQUESTER_INSTANCE_TOKEN",
+		"drained",
+	}
+	for _, key := range keys {
+		if err := writeMetaValue(name, key, "1"); err != nil {
+			t.Fatalf("writeMetaValue %s: %v", key, err)
+		}
+	}
+
+	(&Provider{}).clearBridgeMeta(name)
+
+	for _, key := range keys {
+		got, err := readMetaValue(name, key)
+		if err != nil {
+			t.Fatalf("readMetaValue %s: %v", key, err)
+		}
+		if got != "" {
+			t.Errorf("%s = %q after clearBridgeMeta, want cleared with the acknowledgement it belongs to", key, got)
+		}
+	}
+}

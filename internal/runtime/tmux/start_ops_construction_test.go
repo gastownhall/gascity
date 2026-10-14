@@ -22,7 +22,7 @@ func TestProductionStartOpsCarryRuntimeDir(t *testing.T) {
 	dir := t.TempDir()
 	p := NewProviderWithConfig(Config{RuntimeDir: dir})
 
-	ops := p.startOps(runtime.Config{})
+	ops := p.startOps(runtime.Config{}, true)
 	if ops.runtimeDir != dir {
 		t.Fatalf("startOps runtimeDir = %q, want %q; diagnostic capture is disabled on this path", ops.runtimeDir, dir)
 	}

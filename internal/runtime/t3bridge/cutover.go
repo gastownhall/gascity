@@ -16,9 +16,10 @@ type seamBackedProvider struct {
 }
 
 var (
-	_ runtime.Provider                  = (*seamBackedProvider)(nil)
-	_ runtime.SleepCapabilityProvider   = (*seamBackedProvider)(nil)
-	_ runtime.LivenessObserverWithError = (*seamBackedProvider)(nil)
+	_ runtime.Provider                        = (*seamBackedProvider)(nil)
+	_ runtime.SleepCapabilityProvider         = (*seamBackedProvider)(nil)
+	_ runtime.LivenessObserverWithError       = (*seamBackedProvider)(nil)
+	_ runtime.TurnInterruptCapabilityProvider = (*seamBackedProvider)(nil)
 )
 
 // NewSeamBacked constructs a t3bridge provider served through the seams.
@@ -31,6 +32,11 @@ func NewSeamBacked() runtime.Provider {
 // SleepCapability passes through to the underlying provider (non-seam).
 func (s *seamBackedProvider) SleepCapability(name string) runtime.SessionSleepCapability {
 	return s.raw.SleepCapability(name)
+}
+
+// TurnInterruptMode passes through to the underlying provider (non-seam).
+func (s *seamBackedProvider) TurnInterruptMode(name string) runtime.TurnInterruptMode {
+	return s.raw.TurnInterruptMode(name)
 }
 
 // ObserveLivenessWithError passes the raw bridge's snapshot-aware observation

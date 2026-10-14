@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"path/filepath"
 	"strings"
 	"time"
@@ -11,6 +12,8 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/extmsg"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -158,10 +161,10 @@ func (s *Server) retireContinuityIneligibleNamedSessionIdentifiers(store beads.S
 		}
 		if sessionName := strings.TrimSpace(info.SessionNameMetadata); sessionName != "" && s.state.SessionProvider() != nil {
 			if handle, err := s.workerHandleForSession(store, info.ID); err == nil {
-				_ = handle.Kill(context.Background())
+				_ = handle.Kill(context.Background(), s.actor(session.ActorOperator))
 			}
 		}
-		patch := session.RetireNamedSessionPatch(now, "continuity-ineligible-replacement", spec.Identity)
+		patch := session.CellIntoInfo(info, session.ActorController, session.DispEvent{Kind: session.EvRetire}, now, session.RetireNamedSessionPatch(now, "continuity-ineligible-replacement", spec.Identity))
 		patch["alias_history"] = ""
 		if err := store.SetMetadataBatch(info.ID, patch); err != nil {
 			return nil, fmt.Errorf("retiring continuity-ineligible named session identifiers on %s: %w", info.ID, err)
@@ -378,7 +381,16 @@ func (s *Server) materializeNamedSessionWithContext(ctx context.Context, store b
 		if err := s.reassignContinuityIneligibleNamedSessionState(ctx, store, retired, info.ID); err != nil {
 			return "", err
 		}
-		s.state.Poke()
+		// The retired rows just handed their work, waits and bindings to
+		// the replacement; their keys ride along so a keyed reconciler
+		// revisits them too. Legacy: one poke.
+		keys := []reconcilekey.Key{reconcilekey.Session(info.ID)}
+		for _, r := range retired {
+			if strings.TrimSpace(r.ID) != "" && r.ID != info.ID {
+				keys = append(keys, reconcilekey.Session(r.ID))
+			}
+		}
+		s.state.Enqueue(keys...)
 		return info.ID, nil
 	}
 	if bead, ok, lookupErr := s.findCanonicalNamedSession(store, spec); lookupErr == nil && ok {
@@ -631,6 +643,43 @@ func (s *Server) sessionTargetDeliverable(ctx context.Context, store beads.Store
 	return apiSessionTargetNotFound(identifier)
 }
 
+// rejectPendingInteraction refuses a text delivery synchronously while the
+// target session is waiting on a pending interaction such as a tool
+// permission prompt (#2892). The delivery itself runs asynchronously after
+// the 202, so without this check the caller would be told "accepted" and the
+// refusal would surface only as a request.failed event -- or, where the
+// provider could not see the prompt, the text's Enter would answer it. A
+// configured named session that has not been materialized yet has nothing
+// pending, and neither has a session that is not running: the worker handle
+// does not look at its runtime. A look that cannot reach the runtime refuses
+// nothing; the delivery looks again under the session lock.
+func (s *Server) rejectPendingInteraction(ctx context.Context, store beads.Store, identifier string) error {
+	id, err := s.resolveSessionTargetIDWithContext(ctx, store, identifier, apiSessionResolveOptions{})
+	if err != nil {
+		if errors.Is(err, session.ErrSessionNotFound) {
+			return nil
+		}
+		return humaResolveError(err)
+	}
+	handle, err := s.workerHandleForSession(store, id)
+	if err != nil {
+		return humaSessionManagerError(err)
+	}
+	pending, _, err := handle.PendingStatus(ctx)
+	if errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		log.Printf("gc api: accepting text for %s without a look for a pending interaction: %v", id, err)
+		return nil
+	}
+	if err != nil {
+		return humaSessionManagerError(err)
+	}
+	if pending != nil {
+		interaction := runtimePendingInteraction(pending)
+		return humaSessionManagerError(session.PendingInteractionError(&interaction))
+	}
+	return nil
+}
+
 func (s *Server) resolveSessionIDMaterializingNamed(store beads.Store, identifier string) (string, error) {
 	return s.resolveSessionTargetID(store, identifier, apiSessionResolveOptions{materialize: true})
 }
@@ -639,38 +688,128 @@ func (s *Server) resolveSessionIDMaterializingNamedWithContext(ctx context.Conte
 	return s.resolveSessionTargetIDWithContext(ctx, store, identifier, apiSessionResolveOptions{materialize: true})
 }
 
-func (s *Server) submitMessageToSession(ctx context.Context, store beads.Store, id, message string, intent session.SubmitIntent) (session.SubmitOutcome, error) {
+// messageOutcome is a delivered or queued message and, for one the resume
+// policy queued, whether the controller will start the session for it.
+type messageOutcome struct {
+	session.SubmitOutcome
+	willStart          *bool
+	willNotStartReason string
+}
+
+// submitMessageToSession submits message to session id. resume is the
+// request's `resume: true`: only then may the message start or resume the
+// session, here in the controller's process (CONTRACT v5.9 D8, owner ruling
+// 2026-10-08). Otherwise a session that is not running gets the message
+// queued and the start is left to the controller (deferToController).
+func (s *Server) submitMessageToSession(ctx context.Context, store beads.Store, id, message string, intent session.SubmitIntent, resume bool) (messageOutcome, error) {
 	handle, err := s.workerHandleForSession(store, id)
 	if err != nil {
-		return session.SubmitOutcome{}, err
+		return messageOutcome{}, err
 	}
-	result, err := handle.Message(ctx, worker.MessageRequest{
+	by := s.actor(session.ActorBackground)
+	if resume {
+		by = s.actor(session.ActorOperator)
+	}
+	result, err := handle.Message(ctx, by, worker.MessageRequest{
 		Text:     message,
 		Delivery: workerDeliveryIntent(intent),
 	})
 	if err != nil {
-		return session.SubmitOutcome{}, err
+		return messageOutcome{}, err
 	}
-	return session.SubmitOutcome{Queued: result.Queued}, nil
+	out := messageOutcome{SubmitOutcome: session.SubmitOutcome{Queued: result.Queued, Deferred: result.Deferred}}
+	if result.Deferred {
+		out.willStart, out.willNotStartReason = s.deferToController(store, id)
+	}
+	return out, nil
+}
+
+// deferToController asks the controller to start a session a message was
+// queued for (D8 rule 1): it records the wake on an asleep or drained row
+// nothing holds and pokes; a held row gets no wake and no poke. It reports
+// whether the controller will start the session, nil when it cannot tell (a
+// lost wake CAS, a row that is not dormant, a pool seat that starts only for
+// demand) and, if not, why, with the remedy.
+func (s *Server) deferToController(store beads.Store, id string) (*bool, string) {
+	no := false
+	outcome, err := session.NewStore(beads.SessionStore{Store: store}).RequestWakeUnlessHeld(id, false, time.Now().UTC())
+	d := deferralFor(outcome, err)
+	switch d {
+	case deferFailed:
+		log.Printf("gc api: recording the wake for a message queued to %s: %v", id, err)
+		return nil, ""
+	case deferHeld:
+		return &no, "an operator holds the session; resend with resume: true to resume it"
+	}
+	s.state.Enqueue(reconcilekey.Session(id))
+	if d == deferUnknown {
+		return nil, ""
+	}
+	certain := true
+	if refuser, ok := s.state.(WakeStartRefuser); ok {
+		if info, err := session.NewStore(beads.SessionStore{Store: store}).Get(id); err == nil {
+			var why string
+			if why, certain = refuser.WakeStartRefusal(info); why != "" {
+				return &no, why + "; resend with resume: true to start it now"
+			}
+		}
+	}
+	if !certain {
+		return nil, ""
+	}
+	yes := true
+	return &yes, ""
+}
+
+// deferral is what deferToController does with a wake request's answer.
+type deferral uint8
+
+const (
+	deferFailed  deferral = iota // the wake was not recorded: log, no poke, unknown
+	deferHeld                    // held: no poke, will not start
+	deferUnknown                 // poke; whether it starts is unknown
+	deferAsk                     // wake recorded: poke, and ask the refuser
+)
+
+// deferralFor maps RequestWakeUnlessHeld's answer. A lost CAS still pokes
+// (another writer may have recorded the wake); a row that is not dormant (an
+// active row whose runtime died, a create in flight) is the controller's to
+// handle, and neither claims a start.
+func deferralFor(outcome session.WakeRequestOutcome, err error) deferral {
+	switch {
+	case errors.Is(err, session.ErrWakeRequestContended):
+		return deferUnknown
+	case err != nil:
+		return deferFailed
+	case outcome == session.WakeHeld:
+		return deferHeld
+	case outcome == session.WakeRecorded:
+		return deferAsk
+	}
+	return deferUnknown
 }
 
 // sendBackgroundMessageToSession preserves the default provider nudge semantics
 // for system-driven messages that should respect wait-idle behavior when the
-// runtime supports it.
+// runtime supports it. It never starts a session in the controller's process:
+// one that is not running gets the nudge queued and the start left to the
+// controller (CONTRACT v5.9 D8 7(e)).
 func (s *Server) sendBackgroundMessageToSession(ctx context.Context, store beads.Store, id, message string) error {
 	handle, err := s.workerHandleForSession(store, id)
 	if err != nil {
 		return err
 	}
-	_, err = handle.Nudge(ctx, worker.NudgeRequest{Text: message})
+	result, err := handle.Nudge(ctx, s.actor(session.ActorBackground), worker.NudgeRequest{Text: message})
+	if err == nil && result.Undelivered == worker.NudgeQueued {
+		s.deferToController(store, id)
+	}
 	return err
 }
 
 // sendUserMessageToSession keeps POST /messages as a compatibility alias for
 // the semantic default submit path.
-func (s *Server) sendUserMessageToSession(ctx context.Context, store beads.Store, id, message string) error {
-	_, err := s.submitMessageToSession(ctx, store, id, message, session.SubmitIntentDefault)
-	return err
+func (s *Server) sendUserMessageToSession(ctx context.Context, store beads.Store, id, message string, resume bool) (messageOutcome, error) {
+	return s.submitMessageToSession(ctx, store, id, message, session.SubmitIntentDefault, resume)
 }
 
 func (s *Server) workerHandleForSession(store beads.Store, id string) (worker.Handle, error) {

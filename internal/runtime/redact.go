@@ -55,7 +55,16 @@ var envRedactionInert = map[string]bool{
 	"SHELL":   true,
 	"SHLVL":   true,
 	"TMPDIR":  true,
-	"USER":    true,
+	// Go toolchain temp root (CI gates set it beside TMPDIR); same class as
+	// TMPDIR — a path failing commands echo constantly, an authenticator of
+	// nothing.
+	"GOTMPDIR": true,
+	"USER":     true,
+	// Bazel's test runner exports TEST_TMPDIR and (in remote actions) points
+	// HOME at it. Redacting that value through this key scrubs every path in
+	// the diagnostic for bazel-executed controllers - the exact diagnostics
+	// outage this list exists to prevent; it authenticates nothing.
+	"TEST_TMPDIR": true,
 }
 
 // redactableEnvValue reports whether this key/value pair should be scrubbed out

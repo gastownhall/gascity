@@ -16,6 +16,7 @@ none requires per-city configuration.
 | `gate-sweep` | cooldown 30s | Evaluate and close pending gates (timer, GitHub) |
 | `orphan-sweep` | cooldown 5m | Reset beads assigned to dead agents back to the work pool |
 | `cross-rig-deps` | cooldown 5m | Convert satisfied cross-rig `blocks` deps to `related` |
+| `convoy-autoclose-backstop` | cooldown 1h | Close open, un-owned convoys whose members are all terminal (reconciles a missed autoclose) |
 | `order-tracking-sweep` | cooldown | Close stale order-tracking beads and prune expired tracking history |
 | `spawn-storm-detect` | cooldown | Detect beads repeatedly bouncing back to pool |
 | `prune-branches` | cooldown | Clean stale `gc/*` branches from all rigs |
@@ -79,8 +80,10 @@ blocker and an agent owns the dependent.
 
 **Event contract.** Triggers on `bead.closed`. This is the event the close
 transition actually emits — a closed bead only emits `bead.updated` on a later
-metadata edit — so the order fires once, exactly on the transition that
-unblocks dependents. For each closed bead it resolves dependents via:
+metadata edit — so the order fires on the transition that unblocks dependents.
+Delivery is at least once: one close can reach the bus twice (from the closing
+process and from the controller's cache), which the per-pair dedup below
+absorbs. For each closed bead it resolves dependents via:
 
 ```
 gc bd dep list <blocker> --direction=up --type=blocks --json

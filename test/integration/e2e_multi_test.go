@@ -77,7 +77,7 @@ func TestE2E_MultiAgent_PoolAndFixed(t *testing.T) {
 
 	// A POOL member's slot rebinds to a fresh session whenever a holder dies, so
 	// the slot is bookkeeping and the session owns work under its own session
-	// name. Its report is therefore keyed by the session name, not "pooled-N".
+	// bead ID. Its report is therefore keyed by that ID, not "pooled-N".
 	reports := waitForPoolMemberReports(t, cityDir, "pooled", []string{"pooled-1", "pooled-2"}, e2eDefaultTimeout())
 	seen := make(map[string]string, len(reports))
 	for _, slot := range []string{"pooled-1", "pooled-2"} {

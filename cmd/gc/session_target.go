@@ -5,6 +5,8 @@ import (
 	"io"
 	"os"
 	"strings"
+
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 // sessionRuntimeTarget captures the public identity and runtime session name
@@ -13,6 +15,7 @@ type sessionRuntimeTarget struct {
 	cityPath    string
 	display     string
 	sessionName string
+	sessionID   string // resolved session bead ID; empty for the env-derived current session
 }
 
 func defaultSessionDisplayIdentity() string {
@@ -57,6 +60,30 @@ func resolveSessionRuntimeTarget(identifier string, warningWriter ...io.Writer) 
 	if err != nil {
 		return sessionRuntimeTarget{}, err
 	}
+	return sessionRuntimeTargetFromNudge(target), nil
+}
+
+// resolveSessionRuntimeTargetInCity resolves identifier in the city at
+// cityPath with cfg. Unlike resolveSessionRuntimeTarget, a store that will not
+// open is returned as that failure, never as session.ErrSessionNotFound, so a
+// not-found error here means a store that opened has no such session.
+func resolveSessionRuntimeTargetInCity(cityPath string, cfg *config.City, identifier string) (sessionRuntimeTarget, error) {
+	store, opened, err := openNudgeBeadStoreOwned(cityPath)
+	if err != nil {
+		return sessionRuntimeTarget{}, err
+	}
+	defer closeBeadStoreHandle(opened) //nolint:errcheck // best-effort
+	if store.Store == nil {
+		return sessionRuntimeTarget{}, fmt.Errorf("opening the city store at %q: no store", cityPath)
+	}
+	target, err := resolveNudgeTargetInStore(cityPath, cfg, store, identifier, false)
+	if err != nil {
+		return sessionRuntimeTarget{}, err
+	}
+	return sessionRuntimeTargetFromNudge(target), nil
+}
+
+func sessionRuntimeTargetFromNudge(target nudgeTarget) sessionRuntimeTarget {
 	display := target.agentKey()
 	if display == "" {
 		display = target.sessionName
@@ -65,5 +92,6 @@ func resolveSessionRuntimeTarget(identifier string, warningWriter ...io.Writer) 
 		cityPath:    target.cityPath,
 		display:     display,
 		sessionName: target.sessionName,
-	}, nil
+		sessionID:   target.sessionID,
+	}
 }

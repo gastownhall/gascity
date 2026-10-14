@@ -216,7 +216,11 @@
               "worktree-cleanup",
               "worktree-ensure",
               "worktree-verify",
-              "storage-preflight"
+              "storage-preflight",
+              "nudge-drop",
+              "beads-city-migrate-proxied",
+              "storage-repair-sequence",
+              "runtime-workdir-export"
             ]
           },
           "event_id": {

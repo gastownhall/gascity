@@ -9,13 +9,14 @@
 #   PATH     — must include gc and bd binaries
 
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/lib/bead-id.sh"
 cd "$GC_CITY"
 
 while true; do
     # Check inbox for instructions
     inbox=$(gc mail inbox "$GC_AGENT" 2>/dev/null || true)
-    if echo "$inbox" | grep -q "^gc-"; then
-        echo "$inbox" | grep "^gc-" | while read -r line; do
+    if echo "$inbox" | bead_id_rows | grep -q .; then
+        echo "$inbox" | bead_id_rows | while read -r line; do
             id=$(echo "$line" | awk '{print $1}')
             gc mail read "$id" 2>/dev/null || true
         done
@@ -23,8 +24,8 @@ while true; do
 
     # Scan for orphaned beads (open, no assignee)
     ready=$(bd ready 2>/dev/null || true)
-    if echo "$ready" | grep -q "^gc-"; then
-        echo "$ready" | grep "^gc-" | while read -r line; do
+    if echo "$ready" | bead_id_rows | grep -q .; then
+        echo "$ready" | bead_id_rows | while read -r line; do
             id=$(echo "$line" | awk '{print $1}')
             # Signal recovery by sending mail to mayor
             gc mail send mayor "Orphaned bead $id detected" 2>/dev/null || true

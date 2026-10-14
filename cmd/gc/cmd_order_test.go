@@ -4453,6 +4453,7 @@ prefix = "ct"
 // threshold — and takes stale-close down with it. Nothing else would catch a
 // regression here until a city's tracking backlog stopped draining.
 func TestPackagedOrderTrackingSweepPassesConfirm(t *testing.T) {
+	chdirToRealPackageDir(t)
 	const packOrderPath = "../../internal/bootstrap/packs/core/orders/order-tracking-sweep.toml"
 	var packed struct {
 		Order struct {

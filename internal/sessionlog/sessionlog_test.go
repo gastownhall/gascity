@@ -2761,3 +2761,42 @@ func mustTime(s string) time.Time {
 	}
 	return t
 }
+
+func TestBuildDagPreservesParallelToolResults(t *testing.T) {
+	entries := []*Entry{
+		{UUID: "root", Type: "user"},
+		{UUID: "call-a", ParentUUID: "root", Type: "assistant", Message: json.RawMessage(`{"role":"assistant","content":[{"type":"tool_use","id":"a","name":"Bash"}]}`)},
+		{UUID: "call-b", ParentUUID: "call-a", Type: "assistant", Message: json.RawMessage(`{"role":"assistant","content":[{"type":"tool_use","id":"b","name":"Read"}]}`)},
+		{UUID: "result-a", ParentUUID: "call-a", Type: "user", Message: json.RawMessage(`{"role":"user","content":[{"type":"tool_result","tool_use_id":"a","content":"done a"}]}`)},
+		{UUID: "result-b", ParentUUID: "call-b", Type: "user", Message: json.RawMessage(`{"role":"user","content":[{"type":"tool_result","tool_use_id":"b","content":"done b"}]}`)},
+		{UUID: "answer", ParentUUID: "result-b", Type: "assistant", Message: json.RawMessage(`{"role":"assistant","content":[{"type":"text","text":"done"}]}`)},
+	}
+	for i, e := range entries {
+		e.Timestamp = time.Unix(int64(i), 0)
+	}
+	for n := 3; n <= len(entries); n++ {
+		t.Run(fmt.Sprintf("prefix-%d", n), func(t *testing.T) {
+			dag := BuildDag(entries[:n])
+			if len(dag.ActiveBranch) != n {
+				t.Fatalf("retained %d entries, want %d", len(dag.ActiveBranch), n)
+			}
+			for i, e := range dag.ActiveBranch {
+				if e.UUID != entries[i].UUID {
+					t.Fatalf("entry %d=%s, want %s", i, e.UUID, entries[i].UUID)
+				}
+			}
+			if n >= 5 && len(dag.OrphanedToolUseIDs) != 0 {
+				t.Fatalf("closed tools reported open: %v", dag.OrphanedToolUseIDs)
+			}
+		})
+	}
+	// A result belonging to a discarded invocation must not enter the chosen history.
+	other := &Entry{UUID: "other", ParentUUID: "root", Type: "assistant", Timestamp: time.Unix(1, 0), Message: json.RawMessage(`{"role":"assistant","content":[{"type":"tool_use","id":"unrelated","name":"Bash"}]}`)}
+	result := &Entry{UUID: "other-result", ParentUUID: "other", Type: "user", Timestamp: time.Unix(2, 0), Message: json.RawMessage(`{"role":"user","content":[{"type":"tool_result","tool_use_id":"unrelated","content":"discarded"}]}`)}
+	dag := BuildDag(append(append([]*Entry{}, entries...), other, result))
+	for _, e := range dag.ActiveBranch {
+		if e.UUID == "other-result" || e.UUID == "other" {
+			t.Fatalf("discarded branch leaked: %s", e.UUID)
+		}
+	}
+}

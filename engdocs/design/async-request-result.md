@@ -34,7 +34,9 @@ Client                        Handler                    Internal OM
   |--- POST mutation ---------->|                            |
   |                             | validate (sync, fast)      |
   |                             | generate request_id        |
-  |<-- 202 { request_id } -----|                            |
+  |                             | capture event_cursor       |
+  |<-- 202 { request_id,        |                            |
+  |          event_cursor } ----|                            |
   |                             | go func() {               |
   |                             |   result, err := om(...)  ->| (unchanged sync OM)
   |                             |   emit typed event         |
@@ -66,6 +68,10 @@ The async version wraps the OM call in a goroutine:
 func handler(ctx, input) (*Output, error) {
     // validate (same as before — sync, fast)
     reqID := newRequestID()
+    // Capture the cursor before starting the goroutine. A cursor read
+    // afterwards may already be past a fast terminal event, and a
+    // client resuming from it would miss the result.
+    eventCursor := currentCityEventCursor()
     go func() {
         defer recoverAndEmitFailure(reqID, "session.create")
         // EXACT SAME OM call, unchanged
@@ -76,22 +82,36 @@ func handler(ctx, input) (*Output, error) {
             emitSessionCreateSucceeded(reqID, sessionToResponse(result))
         }
     }()
-    return &Output{Body: {RequestID: reqID}}, nil
+    return &Output{Body: {
+        Status:      "accepted",
+        RequestID:   reqID,
+        EventCursor: eventCursor,
+    }}, nil
 }
 ```
 
 The OM call is identical. The only change is WHERE it runs (in a
-goroutine instead of inline) and WHAT the handler returns (just
-the request_id instead of domain data). The completion event
-carries the full typed response the old sync handler returned.
+goroutine instead of inline) and WHAT the handler returns (the
+request_id and event cursor instead of domain data). The completion
+event carries the full typed response the old sync handler returned.
 
 ## The 202 response
 
-The 202 response body contains ONLY the `request_id`:
+The 202 response body carries the correlation `request_id` and an
+`event_cursor` captured before the request was accepted. Pass it as
+`after_seq` on the city stream, or `after_cursor` on the supervisor
+stream, to receive the result without replaying unrelated backlog.
+City-scoped session and rig-create 202s also return
+`status: "accepted"`; the supervisor's city create and unregister
+202s do not:
 
 ```json
-{ "request_id": "req-a1b2c3d4e5f6a1b2c3d4e5f6" }
+{ "status": "accepted", "request_id": "req-a1b2c3d4e5f6a1b2c3d4e5f6", "event_cursor": "1042" }
 ```
+
+A cursor of `"0"` means different things on the two streams; see the
+`event_cursor` descriptions on the `AsyncAcceptedBody` (city) and
+`AsyncAcceptedResponse` (supervisor) schemas in the OpenAPI spec.
 
 No resource IDs. No session data. No domain fields. The resource
 does not exist yet. Returning an ID for it invites the client to
@@ -219,6 +239,7 @@ is an enum identifying which operation failed.
 | `operation` | enum | `city.create`, `city.unregister`, `session.create`, `session.message`, `session.submit` |
 | `error_code` | string | Machine-readable error code |
 | `error_message` | string | Human-readable description |
+| `session_id` | string | Optional, `session.create` only: the session the failed create had already written, when the server could identify it. Absence does not prove that no session was written |
 
 ## Operations using this pattern
 
@@ -251,7 +272,10 @@ giving clients real-time visibility into operation progress.
    - city create/unregister: `/v0/events/stream`
    - session create/message/submit: `/v0/city/{city}/events/stream`
 2. Send the mutation POST.
-3. Parse the 202 response; extract `request_id`.
+3. Parse the 202 response; extract `request_id` and `event_cursor`.
+   A client that subscribes after the POST resumes from that cursor
+   (`after_seq` on the city stream, `after_cursor` on the supervisor
+   stream), so it still receives a result emitted before it subscribed.
 4. Wait for an event where the envelope `type` is the expected
    success type or `request.failed`, and `payload.request_id`
    matches:
@@ -282,7 +306,11 @@ the request ID instead of emitting a second terminal event.
 3. **Use `context.Background()` in the goroutine.** The HTTP
    request context is cancelled when the 202 is sent.
 
-4. **The 202 response contains ONLY `request_id`.** Nothing else.
+4. **Every async-request route's 202 contains no resource IDs or
+   domain data.** Only the `request_id`, the event cursor, and (for
+   city-scoped session and rig-create requests) `status`. The
+   synchronous `respond` 202, which returns the session `id`, is
+   outside this pattern.
 
 5. **Every goroutine has panic recovery.** Panics emit
    `request.failed` with `error_code: "internal_error"`. The

@@ -1,6 +1,7 @@
 package orders
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/events"
 )
 
 type rowsErrorStore struct {
@@ -93,6 +95,129 @@ func TestLastRunUsesRowsFromPartialTierError(t *testing.T) {
 	}
 }
 
+func TestLastRunFuncWithEventFallback_UsesStoreResult(t *testing.T) {
+	want := time.Date(2026, 6, 9, 0, 23, 0, 0, time.UTC)
+	storeFn := func(string) (time.Time, error) { return want, nil }
+	ep := events.NewFake()
+	// Event with a later timestamp — must NOT be chosen when store succeeds.
+	ep.Record(events.Event{
+		Type:    events.OrderFired,
+		Subject: "digest-generate",
+		Ts:      want.Add(time.Hour),
+	})
+
+	got, err := LastRunFuncWithEventFallback(storeFn, ep)("digest-generate")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !got.Equal(want) {
+		t.Fatalf("got %s, want store result %s", got, want)
+	}
+}
+
+func TestLastRunFuncWithEventFallback_FallsBackToEvents(t *testing.T) {
+	storeFn := func(string) (time.Time, error) { return time.Time{}, nil }
+	ep := events.NewFake()
+	want := time.Date(2026, 6, 9, 0, 23, 0, 0, time.UTC)
+	ep.Record(events.Event{
+		Type:    events.OrderFired,
+		Subject: "digest-generate",
+		Ts:      want,
+	})
+
+	got, err := LastRunFuncWithEventFallback(storeFn, ep)("digest-generate")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !got.Equal(want) {
+		t.Fatalf("got %s, want event timestamp %s", got, want)
+	}
+}
+
+func TestLastRunFuncWithEventFallback_FallsBackToLatestEvent(t *testing.T) {
+	storeFn := func(string) (time.Time, error) { return time.Time{}, nil }
+	ep := events.NewFake()
+	older := time.Date(2026, 6, 8, 0, 23, 0, 0, time.UTC)
+	newer := time.Date(2026, 6, 9, 0, 23, 0, 0, time.UTC)
+	ep.Record(events.Event{Type: events.OrderFired, Subject: "digest-generate", Ts: older})
+	ep.Record(events.Event{Type: events.OrderFired, Subject: "digest-generate", Ts: newer})
+
+	got, err := LastRunFuncWithEventFallback(storeFn, ep)("digest-generate")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !got.Equal(newer) {
+		t.Fatalf("got %s, want newest event %s", got, newer)
+	}
+}
+
+func TestLastRunFuncWithEventFallback_IgnoresOtherOrderEvents(t *testing.T) {
+	storeFn := func(string) (time.Time, error) { return time.Time{}, nil }
+	ep := events.NewFake()
+	ep.Record(events.Event{
+		Type:    events.OrderFired,
+		Subject: "other-order",
+		Ts:      time.Date(2026, 6, 9, 0, 23, 0, 0, time.UTC),
+	})
+
+	got, err := LastRunFuncWithEventFallback(storeFn, ep)("digest-generate")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !got.IsZero() {
+		t.Fatalf("got %s, want zero (event is for a different order)", got)
+	}
+}
+
+func TestLastRunFuncWithEventFallback_NilProviderReturnsStoreResult(t *testing.T) {
+	want := time.Date(2026, 6, 9, 0, 23, 0, 0, time.UTC)
+	storeFn := func(string) (time.Time, error) { return want, nil }
+
+	got, err := LastRunFuncWithEventFallback(storeFn, nil)("digest-generate")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !got.Equal(want) {
+		t.Fatalf("got %s, want %s", got, want)
+	}
+}
+
+func TestLastRunFuncWithEventFallback_NilProviderZeroStore(t *testing.T) {
+	storeFn := func(string) (time.Time, error) { return time.Time{}, nil }
+
+	got, err := LastRunFuncWithEventFallback(storeFn, nil)("digest-generate")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !got.IsZero() {
+		t.Fatalf("got %s, want zero (nil provider, no store result)", got)
+	}
+}
+
+func TestLastRunFuncWithEventFallback_StoreErrorPropagated(t *testing.T) {
+	wantErr := errors.New("store error")
+	storeFn := func(string) (time.Time, error) { return time.Time{}, wantErr }
+	ep := events.NewFake()
+
+	_, err := LastRunFuncWithEventFallback(storeFn, ep)("digest-generate")
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("got err %v, want %v", err, wantErr)
+	}
+}
+
+func TestLastRunFuncWithEventFallback_EventErrorFailsOpen(t *testing.T) {
+	storeFn := func(string) (time.Time, error) { return time.Time{}, nil }
+	ep := events.NewFailFake()
+
+	got, err := LastRunFuncWithEventFallback(storeFn, ep)("digest-generate")
+	if err != nil {
+		t.Fatalf("expected nil error (fail-open), got: %v", err)
+	}
+	if !got.IsZero() {
+		t.Fatalf("got %s, want zero time (fail-open on broken provider)", got)
+	}
+}
+
 func TestCursorUsesRowsAndLogsPartialTierError(t *testing.T) {
 	oldLogf := runtimeHelpersLogf
 	var logs []string
@@ -139,5 +264,40 @@ func TestLastRunAcrossReturnsMaxScope(t *testing.T) {
 	}
 	if !got.Equal(lateRun.CreatedAt) {
 		t.Fatalf("LastRunAcross() = %s, want %s (max across scopes)", got, lateRun.CreatedAt)
+	}
+}
+
+// closedHistoryFailsStore serves every active-row read and fails, hard, every
+// read that includes closed history: the shape of a backing whose closed rows
+// are unreachable while the controller's cache still holds the open ones.
+type closedHistoryFailsStore struct{ *beads.MemStore }
+
+func (s closedHistoryFailsStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if q.IncludeClosed {
+		return nil, errors.New("closed history unavailable")
+	}
+	return s.MemStore.List(q)
+}
+
+// Over a CachingStore, a hard backing error on the order-run history read must
+// stay an error. Kills: a cached read that turns it into a partial result of
+// the open rows the cache holds, which LastRun and Cursor would trust as
+// surviving rows — a cooldown clock from an open run, a cursor that replays
+// consumed events.
+func TestLastRunAndCursorKeepAHardBackingErrorThroughACache(t *testing.T) {
+	backing := beads.NewMemStore()
+	if _, err := backing.Create(beads.Bead{Title: "order:digest", Labels: []string{"order-run:digest", "seq:3"}}); err != nil {
+		t.Fatal(err)
+	}
+	cache := beads.NewCachingStore(closedHistoryFailsStore{backing}, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	store := ordersStoreOver(cache)
+	if got, err := store.LastRun("digest"); err == nil {
+		t.Fatalf("LastRun() = %s, nil; a hard backing error was answered from the cache's open rows", got)
+	}
+	if got := store.Cursor("digest"); got != 0 {
+		t.Fatalf("Cursor() = %d, want 0 (unread); a hard backing error was answered from the cache's open rows", got)
 	}
 }

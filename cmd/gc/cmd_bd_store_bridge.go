@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/spf13/cobra"
 )
 
@@ -139,7 +140,14 @@ func runBdStoreBridge(op string, args []string, dir, host, port, user string, st
 		return fmt.Errorf("missing --port")
 	}
 	password := bdStoreBridgePassword()
-	store := beads.NewBdStore(dir, beads.ExecCommandRunnerWithEnv(bdStoreBridgeEnv(dir, host, port, user, password)))
+	env := bdStoreBridgeEnv(dir, host, port, user, password)
+	// Bridge operations can trigger bd hooks that recursively invoke gc. Pin
+	// those callbacks to this exact executable so an ambient GC_BIN cannot
+	// cross the city boundary or select a different gc installation.
+	if err := pinBdGCEnvironment(env); err != nil {
+		return fmt.Errorf("resolve invoking gc executable: %w", err)
+	}
+	store := beads.NewBdStore(dir, beads.ExecCommandRunnerWithEnv(env))
 	switch op {
 	case "create":
 		var req bdStoreBridgeCreateRequest
@@ -201,7 +209,7 @@ func runBdStoreBridge(op string, args []string, dir, host, port, user string, st
 		if len(args) < 1 {
 			return fmt.Errorf("usage: reopen <id>")
 		}
-		return store.Reopen(args[0])
+		return bdStoreBridgeReopen(store, args[0])
 	case "list":
 		query := beads.ListQuery{AllowScan: true}
 		for _, arg := range args {
@@ -297,6 +305,15 @@ func runBdStoreBridge(op string, args []string, dir, host, port, user string, st
 	default:
 		return fmt.Errorf("unsupported operation %q", op)
 	}
+}
+
+// bdStoreBridgeReopen reopens id, clearing a session bead's runtime lease
+// record first: a reopened row holds no lease (SESSION-RUNTIME-012).
+func bdStoreBridgeReopen(store beads.Store, id string) error {
+	if err := session.ClearRuntimeLeaseForReopen(store, id); err != nil {
+		return err
+	}
+	return store.Reopen(id)
 }
 
 func bdStoreBridgeEnv(dir, host, port, user, password string) map[string]string {

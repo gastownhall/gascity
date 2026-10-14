@@ -350,6 +350,95 @@ func TestNativeBackingWithoutTheBlockedColumnSendsReadyToTheLiveVerdict(t *testi
 	if _, ok := beadslib.AsBlockedQuerier(storage); ok {
 		t.Fatal("fixture storage exposes BlockedQuerier; it must model a backing that cannot answer the column")
 	}
+
+	cache, ids := nativeUnreachableColumnFixture(t, storage.nativeDoltMemStorage, storage, storage.blocked)
+	assertReadinessOnlyDegrade(t, cache, ids)
+}
+
+// nativeUnsupportedRefusal is the SHAPE a real backend's refusal arrives in: a
+// backend-owned struct carrying its own context that UNWRAPS to the portable
+// sentinel. bdhttp.UnsupportedError is exactly this, and its Unwrap is what the
+// classification under test has to reach through — a fixture that returned a
+// bare *beadslib.ErrUnsupported would pass an errors.As arm that a direct type
+// assertion would also pass, and production has no such error.
+type nativeUnsupportedRefusal struct{ unsupported *beadslib.ErrUnsupported }
+
+func (e *nativeUnsupportedRefusal) Error() string { return e.unsupported.Error() }
+func (e *nativeUnsupportedRefusal) Unwrap() error { return e.unsupported }
+
+// nativeCallTimeRefusalStorage is a native backing whose Storage SATISFIES
+// BlockedQuerier and then refuses the call, which is the shape the http backend
+// has and the one the interface probe cannot see: its generated stub is a
+// method with the right signature whose whole body is a backstop refusal, so
+// AsBlockedQuerier succeeds, no request is issued, and the refusal arrives at
+// call time.
+//
+// GetReadyWork and the stored column come from nativeProjectionlessStorage,
+// because the two fixtures model the same BACKING FACT — the column is out of
+// reach — reported through two different doors.
+type nativeCallTimeRefusalStorage struct {
+	*nativeProjectionlessStorage
+	batchCalls int
+}
+
+func (s *nativeCallTimeRefusalStorage) IsBlocked(_ context.Context, _ string) (bool, []string, error) {
+	return false, nil, s.refuse()
+}
+
+func (s *nativeCallTimeRefusalStorage) IsBlockedBatch(_ context.Context, _ []string) (map[string]bool, error) {
+	s.batchCalls++
+	return nil, s.refuse()
+}
+
+func (s *nativeCallTimeRefusalStorage) refuse() error {
+	return &nativeUnsupportedRefusal{unsupported: &beadslib.ErrUnsupported{Op: "IsBlockedBatch", Backend: "http"}}
+}
+
+// TestNativeBackingThatRefusesTheBlockedColumnAtCallTimeDegradesReadinessOnly
+// is the same invariant over the door the interface probe cannot see, and it is
+// the whole of ga-2ltro.20: measured against a real bd serve, gc took the BROAD
+// degrade here where the code was written to take the narrow one.
+//
+// The refusal does not arrive at AsBlockedQuerier, so before the fix nothing
+// wrapped ErrReadyProjectionUnsupported, applyReadyProjection's sentinel check
+// missed it, and the enrichment failure folded into primePartialErr — which
+// only a clean prime or a reconcile pass clears, and the control-ready cache
+// runs with neither. Every cache-only handle then declined for the life of the
+// cache and went to the live backing: the shape applyReadyProjection's own
+// comment names as the one maintainer-city was stuck in.
+func TestNativeBackingThatRefusesTheBlockedColumnAtCallTimeDegradesReadinessOnly(t *testing.T) {
+	storage := &nativeCallTimeRefusalStorage{
+		nativeProjectionlessStorage: &nativeProjectionlessStorage{
+			nativeDoltMemStorage: newNativeDoltMemStorage(),
+			blocked:              map[string]bool{},
+		},
+	}
+	// The precondition that makes this a different case from its neighbor: the
+	// probe SUCCEEDS. Without it the fixture would be testing the !ok arm again.
+	if _, ok := beadslib.AsBlockedQuerier(storage); !ok {
+		t.Fatal("fixture storage does not expose BlockedQuerier; it must model a backing whose probe succeeds and whose call refuses")
+	}
+
+	cache, ids := nativeUnreachableColumnFixture(t, storage.nativeDoltMemStorage, storage, storage.blocked)
+	if storage.batchCalls == 0 {
+		t.Fatal("the prime never reached IsBlockedBatch; this fixture is not measuring the call-time refusal")
+	}
+	assertReadinessOnlyDegrade(t, cache, ids)
+}
+
+// nativeUnreachableColumnFixture plants the shape whose readiness verdict ONLY
+// the is_blocked column can give and primes a cache over a backing that cannot
+// give it:
+//
+//	blocker (open) <-- blocks -- parent <-- parent-child -- child
+//
+// child carries no blocking edge of its own, so the cache's direct-dep
+// predicate calls it ready while the backing marks it blocked through the
+// parent-child edge. unrelated is the control both models call ready. blocked
+// is the fixture's stored column, filled in place so the storage the caller
+// built and the cache primed here read the same verdicts.
+func nativeUnreachableColumnFixture(t *testing.T, mem *nativeDoltMemStorage, storage beadslib.Storage, blocked map[string]bool) (*CachingStore, map[string]string) {
+	t.Helper()
 	native := newNativeDoltStoreForTest(storage)
 
 	ids := map[string]string{}
@@ -360,23 +449,42 @@ func TestNativeBackingWithoutTheBlockedColumnSendsReadyToTheLiveVerdict(t *testi
 		}
 		ids[title] = b.ID
 	}
-	if err := storage.store.DepAdd(ids["parent"], ids["blocker"], "blocks"); err != nil {
+	if err := mem.store.DepAdd(ids["parent"], ids["blocker"], "blocks"); err != nil {
 		t.Fatalf("DepAdd blocks: %v", err)
 	}
-	if err := storage.store.DepAdd(ids["child"], ids["parent"], "parent-child"); err != nil {
+	if err := mem.store.DepAdd(ids["child"], ids["parent"], "parent-child"); err != nil {
 		t.Fatalf("DepAdd parent-child: %v", err)
 	}
-	storage.blocked[ids["parent"]] = true
-	storage.blocked[ids["child"]] = true
+	blocked[ids["parent"]] = true
+	blocked[ids["child"]] = true
 
 	cache := NewCachingStoreForTest(native, nil)
 	if err := cache.Prime(context.Background()); err != nil {
 		t.Fatalf("Prime: %v", err)
 	}
+	return cache, ids
+}
+
+// assertReadinessOnlyDegrade is the verdict a backing that cannot answer the
+// column owes, whichever door it reports through: readiness declines to the
+// live backing, and the snapshot keeps serving everything that does not need
+// the column.
+func assertReadinessOnlyDegrade(t *testing.T, cache *CachingStore, ids map[string]string) {
+	t.Helper()
 
 	if !cache.readyReadsMustGoLive() {
 		t.Fatal("a native backing that cannot answer the is_blocked column must latch the ready-projection degrade")
 	}
+	// The half that separates the narrow degrade from the broad one. A
+	// primePartialErr is what every cache-only handle consults, so leaving one
+	// set here costs the snapshot every read rather than one column.
+	cache.mu.RLock()
+	partial := cache.primePartialErr
+	cache.mu.RUnlock()
+	if partial != nil {
+		t.Fatalf("primePartialErr = %v, want nil: a column the backing cannot answer costs the snapshot one column, not every read", partial)
+	}
+
 	rows, err := cache.Ready()
 	if err != nil {
 		t.Fatalf("Ready: %v", err)
@@ -402,6 +510,12 @@ func TestNativeBackingWithoutTheBlockedColumnSendsReadyToTheLiveVerdict(t *testi
 	}
 	if len(cached) != len(ids) {
 		t.Fatalf("CachedList returned %d rows, want %d", len(cached), len(ids))
+	}
+	if _, err := cache.Get(ids["child"]); err != nil {
+		t.Errorf("Get after the degrade: %v", err)
+	}
+	if _, err := cache.Handles().Cached.DepList(ids["child"], "down"); err != nil {
+		t.Errorf("cached reader DepList after the degrade: %v", err)
 	}
 }
 

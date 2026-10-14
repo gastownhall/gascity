@@ -677,3 +677,123 @@ base = "builtin:claude"
 	}
 	t.Fatal("ada explicit root city-pack agent not loaded")
 }
+
+// TestAgentDiscovery_UnreadableAgentTomlFailsLoud is the regression lock for the
+// silent-degradation path: an agents/<name>/agent.toml that exists but cannot be
+// read (permissions, I/O error) used to be skipped as if it were absent, and the
+// agent was then discovered with none of its configuration — no start_command, no
+// provider pin — launching a default interactive model session under the agent's
+// name instead of the configured command. Absence stays legal (agent.toml is
+// optional); an unreadable file must fail the pack scan exactly like a decode
+// error does.
+//
+// The unreadable file is a directory named agent.toml: reading a directory fails
+// with EISDIR for every user, so the test does not depend on permission bits
+// being honored for the invoking user (root ignores them).
+func TestAgentDiscovery_UnreadableAgentTomlFailsLoud(t *testing.T) {
+	dir := t.TempDir()
+	agentDir := filepath.Join(dir, "agents", "mayor")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// agent.toml "exists" as a directory: ReadFile fails with EISDIR, not
+	// ErrNotExist — the exact class the scan must not swallow.
+	if err := os.Mkdir(filepath.Join(agentDir, "agent.toml"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "prompt.md"), []byte("prompt"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	agents, err := DiscoverPackAgents(fsys.OSFS{}, dir, "pk", nil)
+	if err == nil {
+		t.Fatalf("DiscoverPackAgents = %v agents, nil error; want an error naming agents/mayor/agent.toml (unreadable agent.toml must fail the scan, not silently degrade the agent)", agents)
+	}
+	if !strings.Contains(err.Error(), filepath.Join("agents", "mayor", "agent.toml")) {
+		t.Fatalf("error %q does not name the unreadable agent.toml", err)
+	}
+}
+
+// TestAgentDiscovery_AbsentAgentTomlStillConventions locks the legitimate half of
+// the same branch: agent.toml is optional, and its absence must keep producing a
+// convention-discovered agent (prompt/overlay wiring) with no error.
+func TestAgentDiscovery_AbsentAgentTomlStillConventions(t *testing.T) {
+	dir := t.TempDir()
+	agentDir := filepath.Join(dir, "agents", "worker")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "prompt.md"), []byte("You are a worker."), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	agents, err := DiscoverPackAgents(fsys.OSFS{}, dir, "pk", nil)
+	if err != nil {
+		t.Fatalf("DiscoverPackAgents: %v", err)
+	}
+	if len(agents) != 1 || agents[0].Name != "worker" {
+		t.Fatalf("agents = %+v, want exactly the convention-discovered worker", agents)
+	}
+}
+
+func TestDiscoverPackAgents_ExplicitRelativePromptTemplateIsPackRelative(t *testing.T) {
+	// An explicit relative prompt_template declared in agents/<name>/agent.toml
+	// resolves against the declaring PACK directory (pack-spec §2.8 "Path
+	// Resolution": explicit relative prompt_template values in agent.toml stay
+	// pack-relative through the agent's source directory), not against
+	// agents/<name>/. The pack.toml [[agent]] form is pinned by
+	// TestAgentDiscovery_ExplicitTomlAgentGetsConventionDefaults; this pins the
+	// agent.toml form.
+	dir := t.TempDir()
+	packDir := filepath.Join(dir, "packs", "p")
+	agentDir := filepath.Join(packDir, "agents", "w")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	writeTestFile(t, packDir, "pack.toml", `
+[pack]
+name = "p"
+schema = 2
+`)
+	writeTestFile(t, agentDir, "agent.toml", `
+prompt_template = "shared/w.md"
+`)
+	writeTestFile(t, packDir, "shared/w.md", `Pack-relative prompt.`)
+
+	writeTestFile(t, dir, "city.toml", `
+[workspace]
+name = "test"
+
+[imports.p]
+source = "./packs/p"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	explicit := explicitAgents(cfg.Agents)
+	for _, a := range explicit {
+		if a.Name != "w" {
+			continue
+		}
+		want := filepath.Join("packs", "p", "shared", "w.md")
+		if !strings.HasSuffix(a.PromptTemplate, want) {
+			t.Fatalf("w PromptTemplate = %q, want pack-relative path ending in %q", a.PromptTemplate, want)
+		}
+		if strings.Contains(a.PromptTemplate, filepath.Join("agents", "w", "shared")) {
+			t.Fatalf("w PromptTemplate = %q resolved against agents/w/, want pack-relative", a.PromptTemplate)
+		}
+		resolved := a.PromptTemplate
+		if !filepath.IsAbs(resolved) {
+			resolved = filepath.Join(dir, resolved)
+		}
+		if _, err := os.Stat(resolved); err != nil {
+			t.Fatalf("w PromptTemplate %q does not name the file on disk (city root %s): %v", a.PromptTemplate, dir, err)
+		}
+		return
+	}
+	t.Fatalf("w agent not discovered from packs/p/agents/: %+v", explicit)
+}

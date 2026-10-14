@@ -325,6 +325,44 @@ func TestReloadSupervisorFallsBackToDefaultHomeSocket(t *testing.T) {
 	}
 }
 
+func TestSupervisorSocketPathForDirShortDirUnchanged(t *testing.T) {
+	dir := shortTempDir(t, "gc-supervisor-")
+
+	want := filepath.Join(dir, "supervisor.sock")
+	if got := supervisorSocketPathForDir(dir); got != want {
+		t.Fatalf("supervisorSocketPathForDir(%q) = %q, want %q", dir, got, want)
+	}
+}
+
+func TestSupervisorSocketPathForDirLongDirFallsBackToHashedTempPath(t *testing.T) {
+	base := shortTempDir(t, "gc-supervisor-long-")
+
+	longDir := filepath.Join(base, "segment")
+	for len(filepath.Join(longDir, "supervisor.sock")) <= supervisorSocketPathLimit {
+		longDir = filepath.Join(longDir, "segment")
+	}
+	otherLongDir := filepath.Join(base, "other-segment")
+	for len(filepath.Join(otherLongDir, "supervisor.sock")) <= supervisorSocketPathLimit {
+		otherLongDir = filepath.Join(otherLongDir, "segment")
+	}
+
+	got := supervisorSocketPathForDir(longDir)
+	if dir := filepath.Dir(got); dir != filepath.Join("/tmp", "gascity-supervisor") {
+		t.Fatalf("supervisorSocketPathForDir(%q) = %q, want under /tmp/gascity-supervisor", longDir, got)
+	}
+	if len(got) > supervisorSocketPathLimit {
+		t.Fatalf("fallback socket path length = %d, want <= %d: %s", len(got), supervisorSocketPathLimit, got)
+	}
+
+	if again := supervisorSocketPathForDir(longDir); again != got {
+		t.Fatalf("supervisorSocketPathForDir(%q) is not deterministic: %q != %q", longDir, again, got)
+	}
+
+	if other := supervisorSocketPathForDir(otherLongDir); other == got {
+		t.Fatalf("supervisorSocketPathForDir(%q) and supervisorSocketPathForDir(%q) collided on %q", longDir, otherLongDir, got)
+	}
+}
+
 func TestRenderSupervisorLaunchdTemplate(t *testing.T) {
 	data := &supervisorServiceData{
 		GCPath:        "/usr/local/bin/gc",
@@ -764,10 +802,10 @@ func TestBuildSupervisorServiceDataMissingSecretsFileIsNotAnError(t *testing.T) 
 }
 
 // TestBuildSupervisorServiceDataMalformedSecretsFileDegradesGracefully asserts
-// the documented fail-safe: a malformed secrets file does not block service
-// file generation (no error) and contributes no env — the malformed file is
-// ignored rather than partially applied, so the good first line must not leak
-// through.
+// the fix for #5982: a malformed line in the secrets file does not block
+// service file generation (no error) and does not wipe out the entries that
+// parsed cleanly — only the malformed line itself is skipped, the good entry
+// still reaches ExtraEnv.
 func TestBuildSupervisorServiceDataMalformedSecretsFileDegradesGracefully(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
@@ -781,8 +819,60 @@ func TestBuildSupervisorServiceDataMalformedSecretsFileDegradesGracefully(t *tes
 	if err != nil {
 		t.Fatalf("buildSupervisorServiceData with malformed secrets file: %v", err)
 	}
-	if _, ok := supervisorServiceEnvMap(data.ExtraEnv)["ANTHROPIC_AUTH_TOKEN"]; ok {
-		t.Fatalf("ExtraEnv should not include any key from a malformed secrets file")
+	if got := supervisorServiceEnvMap(data.ExtraEnv)["ANTHROPIC_AUTH_TOKEN"]; got != "sk-from-file" {
+		t.Fatalf("ExtraEnv[ANTHROPIC_AUTH_TOKEN] = %q, want %q (a malformed later line must not drop a good earlier entry)",
+			got, "sk-from-file")
+	}
+}
+
+// TestBuildSupervisorServiceDataMultiLineQuotedSecretSkipsBlock is the
+// end-to-end check for #6022 (plus #5982): the issue's multi-line quoted
+// script is skipped as one block, even with both the script key and the
+// continuation-line key opted in via GC_SUPERVISOR_ENV, so neither a truncated
+// GC_NOMAD_AGENT_LAUNCH_SCRIPT nor a stray CODEX_HOME reaches the service env.
+// The valid entry after the block still does, and the stderr diagnostic names
+// the key and line range without echoing any value.
+func TestBuildSupervisorServiceDataMultiLineQuotedSecretSkipsBlock(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+	t.Setenv("GC_SUPERVISOR_ENV", "GC_NOMAD_AGENT_LAUNCH_SCRIPT CODEX_HOME")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+	t.Setenv("GC_NOMAD_AGENT_LAUNCH_SCRIPT", "")
+	t.Setenv("CODEX_HOME", "")
+
+	writeSupervisorSecretsEnvFile(t, `GC_NOMAD_AGENT_LAUNCH_SCRIPT="export PATH=/mnt/nomad/gc/bin/current:$PATH
+export CODEX_HOME=$NOMAD_SECRETS_DIR/codex-home"
+ANTHROPIC_AUTH_TOKEN=sk-from-file
+`)
+
+	var (
+		data *supervisorServiceData
+		err  error
+	)
+	stderr := captureSweepStderr(t, func() {
+		data, err = buildSupervisorServiceData()
+	})
+	if err != nil {
+		t.Fatalf("buildSupervisorServiceData: %v", err)
+	}
+	got := supervisorServiceEnvMap(data.ExtraEnv)
+	if got["ANTHROPIC_AUTH_TOKEN"] != "sk-from-file" {
+		t.Fatalf("ExtraEnv[ANTHROPIC_AUTH_TOKEN] = %q, want %q (all env: %#v)", got["ANTHROPIC_AUTH_TOKEN"], "sk-from-file", got)
+	}
+	for _, key := range []string{"GC_NOMAD_AGENT_LAUNCH_SCRIPT", "CODEX_HOME"} {
+		if v, ok := got[key]; ok {
+			t.Errorf("ExtraEnv[%s] = %q, want absent (multi-line quoted block must be skipped)", key, v)
+		}
+	}
+	if !strings.Contains(stderr, "lines 1-2") || !strings.Contains(stderr, "GC_NOMAD_AGENT_LAUNCH_SCRIPT") {
+		t.Errorf("stderr = %q, want a diagnostic naming lines 1-2 and GC_NOMAD_AGENT_LAUNCH_SCRIPT", stderr)
+	}
+	for _, leak := range []string{"/mnt/nomad", "NOMAD_SECRETS_DIR", "sk-from-file"} {
+		if strings.Contains(stderr, leak) {
+			t.Errorf("stderr leaks value material %q: %q", leak, stderr)
+		}
 	}
 }
 
@@ -4370,6 +4460,126 @@ func TestEnsureSupervisorRunningRejectsHomeOverride(t *testing.T) {
 	}
 }
 
+// requireHomeOverrideGuard skips unless the platform HOME guard applies here.
+func requireHomeOverrideGuard(t *testing.T) {
+	t.Helper()
+	if goruntime.GOOS != "linux" && goruntime.GOOS != "darwin" {
+		t.Skip("platform supervisor home override guard only applies on linux/darwin")
+	}
+	lookup, err := user.LookupId(strconv.Itoa(os.Getuid()))
+	if err != nil || strings.TrimSpace(lookup.HomeDir) == "" {
+		t.Skip("user lookup home unavailable")
+	}
+}
+
+// An isolated run (a test harness giving gc a throwaway HOME beside its own
+// GC_HOME) opts in with GC_SUPERVISOR_ISOLATED_HOME=1. ensureSupervisorRunning
+// must then bare-start the supervisor rather than refuse, and must never write
+// a platform service unit under the throwaway HOME.
+func TestEnsureSupervisorRunningIsolatedHomeSkipsPlatformInstall(t *testing.T) {
+	requireHomeOverrideGuard(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv(supervisorIsolatedHomeEnv, "1")
+
+	oldAlive := supervisorAliveHook
+	t.Cleanup(func() { supervisorAliveHook = oldAlive })
+	supervisorAliveHook = func() int { return 4242 }
+
+	var stdout, stderr bytes.Buffer
+	if code := ensureSupervisorRunning(&stdout, &stderr); code != 0 {
+		t.Fatalf("ensureSupervisorRunning code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "HOME override") {
+		t.Fatalf("stderr = %q, want no HOME override refusal under %s=1", stderr.String(), supervisorIsolatedHomeEnv)
+	}
+	for _, dir := range []string{
+		filepath.Join(home, ".config", "systemd"),
+		filepath.Join(home, "Library", "LaunchAgents"),
+	} {
+		if _, err := os.Stat(dir); !os.IsNotExist(err) {
+			t.Fatalf("platform service dir %q exists under the isolated HOME (err=%v); an isolated run must not install a platform unit", dir, err)
+		}
+	}
+}
+
+// The opt-in admits a bare start only; it never lets gc install a platform
+// unit, which the service manager would run under the real HOME.
+func TestDoSupervisorInstallRejectsHomeOverrideEvenWhenIsolated(t *testing.T) {
+	requireHomeOverrideGuard(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv(supervisorIsolatedHomeEnv, "1")
+
+	var stdout, stderr bytes.Buffer
+	if code := doSupervisorInstall(&stdout, &stderr); code != 1 {
+		t.Fatalf("doSupervisorInstall code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "Keep HOME unchanged and use GC_HOME for isolated runs") {
+		t.Fatalf("stderr = %q, want HOME override guidance", stderr.String())
+	}
+}
+
+// The opt-in requires an explicit GC_HOME: without one, supervisor state would
+// land in the throwaway HOME's default ~/.gc with nothing tying the run to an
+// isolated installation.
+func TestDoSupervisorStartIsolatedHomeRequiresGCHome(t *testing.T) {
+	requireHomeOverrideGuard(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("GC_HOME", "")
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv(supervisorIsolatedHomeEnv, "1")
+
+	var stdout, stderr bytes.Buffer
+	if code := doSupervisorStart(&stdout, &stderr); code != 1 {
+		t.Fatalf("doSupervisorStart code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "Keep HOME unchanged and use GC_HOME for isolated runs") {
+		t.Fatalf("stderr = %q, want HOME override guidance", stderr.String())
+	}
+}
+
+// The opt-in admits a bare start beside a GC_HOME of the run's own: the
+// HOME override no longer blocks `gc supervisor start`.
+func TestBareSupervisorHomeOverrideErrorAdmitsIsolatedGCHome(t *testing.T) {
+	requireHomeOverrideGuard(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv(supervisorIsolatedHomeEnv, "1")
+
+	if msg, blocked := bareSupervisorHomeOverrideError(); blocked {
+		t.Fatalf("bareSupervisorHomeOverrideError() blocked = true (%q), want an isolated run admitted", msg)
+	}
+}
+
+// GC_HOME naming the operator's default ~/.gc is not isolation: under the
+// throwaway HOME, gc would resolve its lock and socket under that ~/.gc rather
+// than $XDG_RUNTIME_DIR/gc, miss the operator's running supervisor, and start
+// a second one over the same cities.toml registry.
+func TestBareSupervisorHomeOverrideErrorRejectsHostDefaultGCHome(t *testing.T) {
+	requireHomeOverrideGuard(t)
+	lookup, err := user.LookupId(strconv.Itoa(os.Getuid()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("GC_HOME", filepath.Join(lookup.HomeDir, ".gc"))
+	t.Setenv(supervisorIsolatedHomeEnv, "1")
+
+	if supervisorIsolatedHome() {
+		t.Fatal("supervisorIsolatedHome() = true with GC_HOME at the operator's default ~/.gc, want false")
+	}
+	msg, blocked := bareSupervisorHomeOverrideError()
+	if !blocked {
+		t.Fatal("bareSupervisorHomeOverrideError() blocked = false with GC_HOME at the operator's default ~/.gc, want true")
+	}
+	if !strings.Contains(msg, "Keep HOME unchanged and use GC_HOME for isolated runs") {
+		t.Fatalf("msg = %q, want HOME override guidance", msg)
+	}
+}
+
 func TestWaitForSupervisorReadyUsesHookedTimeout(t *testing.T) {
 	oldAlive := supervisorAliveHook
 	oldTimeout := supervisorReadyTimeout
@@ -4449,6 +4659,11 @@ func TestDoSupervisorStartAlreadyRunning(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer lock.Close() //nolint:errcheck // test cleanup
+	// A lock holder that never answers on the control socket is waited for
+	// (ga-96smfk.85) only as long as the readiness budget.
+	oldTimeout := supervisorReadyTimeout
+	supervisorReadyTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { supervisorReadyTimeout = oldTimeout })
 
 	var stdout, stderr bytes.Buffer
 	code := doSupervisorStart(&stdout, &stderr)
@@ -5062,6 +5277,47 @@ func TestStopManagedCityDoesNotUseStartupOrDriftTimeouts(t *testing.T) {
 	assertSingleStopWithBenignNoise(t, ops)
 }
 
+// stampedWriter is a Writer that records when each line was written.
+type stampedWriter struct {
+	mu     sync.Mutex
+	buf    bytes.Buffer
+	lines  []stampedLine
+	onLine func(string) // called with each line as it is written
+}
+
+type stampedLine struct {
+	at   time.Time
+	text string
+}
+
+func (w *stampedWriter) Write(p []byte) (int, error) {
+	if w.onLine != nil {
+		w.onLine(string(p))
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.lines = append(w.lines, stampedLine{at: time.Now(), text: string(p)})
+	return w.buf.Write(p)
+}
+
+// at is when the first write containing sub landed; zero when none did.
+func (w *stampedWriter) at(sub string) time.Time {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, l := range w.lines {
+		if strings.Contains(l.text, sub) {
+			return l.at
+		}
+	}
+	return time.Time{}
+}
+
+func (w *stampedWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.String()
+}
+
 // hangingListProvider wraps a runtime.Provider but makes ListRunning block
 // forever. This simulates a session/beads dependency call inside
 // CityRuntime.shutdown that never returns (#5256) — ListRunning has no
@@ -5102,23 +5358,39 @@ func TestStopManagedCityBoundsForcedShutdownWhenRuntimeHangs(t *testing.T) {
 		},
 	}
 
-	var stderr bytes.Buffer
+	// A sibling 100ms timer, armed as the forced phase begins (the grace's
+	// warning), fires as late as the forced wait's own timer on a loaded
+	// host: the forced phase is judged against it, not the wall clock.
+	var sibling atomic.Int64
+	stderr := &stampedWriter{onLine: func(line string) {
+		if strings.Contains(line, "after cancel") {
+			time.AfterFunc(100*time.Millisecond, func() { sibling.Store(time.Now().UnixNano()) })
+		}
+	}}
 	result := make(chan error, 1)
-	start := time.Now()
 	go func() {
-		result <- stopManagedCity(mc, cityPath, &stderr)
+		result <- stopManagedCity(mc, cityPath, stderr)
 	}()
 
 	select {
 	case err := <-result:
 		// ShutdownTimeout is 20ms, so the forced-stop timeout (5x) is
-		// 100ms: the promised ceiling is grace(20ms) + forced(100ms) =
-		// 120ms. A double wait on the forced timeout — the regression
-		// this test guards against — pushes that to ~220ms, so the bound
-		// here must sit strictly below that, not at the old, much looser
-		// 500ms that a doubled wait still passed.
-		if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
-			t.Fatalf("stopManagedCity took %s, want bounded near grace+forced (~120ms) even when CityRuntime.shutdown hangs", elapsed)
+		// 100ms, and with CityRuntime.shutdown hung the forced phase is
+		// one 100ms wait. A second full wait on the forced timeout, the
+		// regression this test guards against, ends it a further 100ms
+		// after the sibling timer. Timing the phase against that sibling
+		// leaves out timer lateness on a loaded host, and the bead
+		// provider's shutdown (an exec subprocess) after the phase.
+		forcedAt := stderr.at("after forced shutdown")
+		if stderr.at("after cancel").IsZero() || forcedAt.IsZero() {
+			t.Fatalf("stderr = %q, want the grace and forced-shutdown warnings", stderr.String())
+		}
+		siblingAt := time.Unix(0, sibling.Load())
+		if sibling.Load() == 0 {
+			siblingAt = time.Now() // not fired yet: the forced phase ended before it
+		}
+		if after := forcedAt.Sub(siblingAt); after >= 50*time.Millisecond {
+			t.Fatalf("the forced phase ended %s after one forced wait would have, want one forced wait (~100ms), not two (~200ms), even when CityRuntime.shutdown hangs", after)
 		}
 		if err == nil {
 			t.Fatal("stopManagedCity err = nil, want non-nil because city never exited and shutdown hung")
@@ -7405,10 +7677,14 @@ func TestRunSupervisorWarnsOnEphemeralAPIPort(t *testing.T) {
 	if err := os.WriteFile(supervisor.ConfigPath(), []byte(cfg), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	sockPath := filepath.Join(supervisor.RuntimeDir(), "supervisor.sock")
+	sockPath := supervisorSocketPath()
 	if err := os.MkdirAll(sockPath, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// sockPath may resolve outside t.TempDir() when GC_HOME exceeds
+	// supervisorSocketPathLimit and the fallback triggers, so Go's own
+	// cleanup will not reap it.
+	t.Cleanup(func() { _ = os.RemoveAll(sockPath) })
 	if err := os.WriteFile(filepath.Join(sockPath, "sentinel"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -7433,10 +7709,14 @@ func TestRunSupervisorNoWarningForLowAPIPort(t *testing.T) {
 	if err := os.WriteFile(supervisor.ConfigPath(), []byte(cfg), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	sockPath := filepath.Join(supervisor.RuntimeDir(), "supervisor.sock")
+	sockPath := supervisorSocketPath()
 	if err := os.MkdirAll(sockPath, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// sockPath may resolve outside t.TempDir() when GC_HOME exceeds
+	// supervisorSocketPathLimit and the fallback triggers, so Go's own
+	// cleanup will not reap it.
+	t.Cleanup(func() { _ = os.RemoveAll(sockPath) })
 	if err := os.WriteFile(filepath.Join(sockPath, "sentinel"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -7447,5 +7727,193 @@ func TestRunSupervisorNoWarningForLowAPIPort(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "Supervisor API listening") {
 		t.Errorf("stdout = %q, want API listening message for low port", stdout.String())
+	}
+}
+
+// TestBuildSupervisorServiceDataMergesPoolTimeoutKeysFromSecretsEnvFile pins
+// the survival path for beads' pooled per-I/O deadline overrides: the
+// supervisor's in-process store opens honor only the env rung, so the two
+// keys must persist into the service env from ${GC_HOME}/secrets.env without
+// a GC_SUPERVISOR_ENV opt-in — that is what the allowlist entry buys. Red on
+// base by construction (the keys were not allowlisted).
+func TestBuildSupervisorServiceDataMergesPoolTimeoutKeysFromSecretsEnvFile(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+	// Ensure the keys are NOT present in the calling shell's environment.
+	t.Setenv("BEADS_DOLT_POOL_READ_TIMEOUT", "")
+	t.Setenv("BEADS_DOLT_POOL_WRITE_TIMEOUT", "")
+
+	writeSupervisorSecretsEnvFile(t, `# machine-local store deadlines
+BEADS_DOLT_POOL_READ_TIMEOUT=90s
+BEADS_DOLT_POOL_WRITE_TIMEOUT=90s
+`)
+
+	data, err := buildSupervisorServiceData()
+	if err != nil {
+		t.Fatalf("buildSupervisorServiceData: %v", err)
+	}
+
+	got := supervisorServiceEnvMap(data.ExtraEnv)
+	for _, key := range []string{"BEADS_DOLT_POOL_READ_TIMEOUT", "BEADS_DOLT_POOL_WRITE_TIMEOUT"} {
+		if got[key] != "90s" {
+			t.Fatalf("ExtraEnv[%s] = %q, want 90s (all env: %#v)", key, got[key], got)
+		}
+	}
+}
+
+// TestBuildSupervisorServiceDataReadsPoolTimeoutKeysFromLaunchctl pins the
+// launchctl fallback tier for the same two keys, mirroring the GC_DOLT_*
+// credential test above.
+func TestBuildSupervisorServiceDataReadsPoolTimeoutKeysFromLaunchctl(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+	t.Setenv("XDG_RUNTIME_DIR", "/tmp/gc-run")
+	for _, key := range []string{
+		"BEADS_DOLT_POOL_READ_TIMEOUT",
+		"BEADS_DOLT_POOL_WRITE_TIMEOUT",
+	} {
+		t.Setenv(key, "")
+	}
+
+	stub := map[string]string{
+		"BEADS_DOLT_POOL_READ_TIMEOUT":  "120s",
+		"BEADS_DOLT_POOL_WRITE_TIMEOUT": "120s",
+	}
+	prev := supervisorLaunchctlGetenv
+	supervisorLaunchctlGetenv = func(key string) string { return stub[key] }
+	t.Cleanup(func() { supervisorLaunchctlGetenv = prev })
+
+	data, err := buildSupervisorServiceData()
+	if err != nil {
+		t.Fatalf("buildSupervisorServiceData: %v", err)
+	}
+
+	got := supervisorServiceEnvMap(data.ExtraEnv)
+	for key, want := range stub {
+		if got[key] != want {
+			t.Fatalf("ExtraEnv[%s] = %q, want %q (all env: %#v)", key, got[key], want, got)
+		}
+	}
+}
+
+// A forked supervisor that exits during startup fails `gc supervisor start`
+// at once, naming the exit and the log lines that explain it, instead of
+// polling the socket of a dead process for supervisorReadyTimeout and
+// pointing at a log file that, in CI, is gone with the test's temp dir
+// (ga-96smfk.45: the cause, "API address ... is already in use", was only in
+// that log).
+func TestWaitForStartedSupervisorReportsAnEarlyExitAtOnce(t *testing.T) {
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+	logLines := "gc supervisor: started: previous_exit=clean\ngc supervisor: API address 127.0.0.1:42509 is already in use.\n"
+	if err := os.WriteFile(supervisorLogPath(), []byte(logLines), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oldAlive := supervisorAliveHook
+	oldTimeout := supervisorReadyTimeout
+	oldPoll := supervisorReadyPollInterval
+	supervisorAliveHook = func() int { return 0 }
+	supervisorReadyTimeout = time.Minute
+	supervisorReadyPollInterval = time.Millisecond
+	t.Cleanup(func() {
+		supervisorAliveHook = oldAlive
+		supervisorReadyTimeout = oldTimeout
+		supervisorReadyPollInterval = oldPoll
+	})
+	exited := make(chan error, 1)
+	exited <- errors.New("exit status 1")
+
+	var stdout, stderr bytes.Buffer
+	start := time.Now()
+	code := waitForStartedSupervisor(&stdout, &stderr, false, "see "+supervisorLogPath(), exited)
+	if code == 0 {
+		t.Fatalf("waitForStartedSupervisor = 0 for an exited supervisor; stdout=%q", stdout.String())
+	}
+	if waited := time.Since(start); waited > 10*time.Second {
+		t.Fatalf("waited %s for a supervisor that had already exited", waited)
+	}
+	got := stderr.String()
+	for _, want := range []string{"exited before it became ready", "exit status 1", "is already in use"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("stderr = %q, want it to contain %q", got, want)
+		}
+	}
+}
+
+// A supervisor that answers on its socket is reported started even when the
+// launcher also watches the forked process.
+func TestWaitForStartedSupervisorReportsAReadySupervisor(t *testing.T) {
+	oldAlive := supervisorAliveHook
+	oldPoll := supervisorReadyPollInterval
+	calls := 0
+	supervisorAliveHook = func() int {
+		calls++
+		if calls < 3 {
+			return 0
+		}
+		return 4242
+	}
+	supervisorReadyPollInterval = time.Millisecond
+	t.Cleanup(func() {
+		supervisorAliveHook = oldAlive
+		supervisorReadyPollInterval = oldPoll
+	})
+	var stdout, stderr bytes.Buffer
+	if code := waitForStartedSupervisor(&stdout, &stderr, false, "", make(chan error)); code != 0 {
+		t.Fatalf("waitForStartedSupervisor = %d; stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Supervisor started (PID 4242)") {
+		t.Fatalf("stdout = %q, want the started PID", stdout.String())
+	}
+}
+
+// When the forked child exits because a concurrent start's instance holds the
+// single-instance lock, the start keeps waiting for that instance's socket,
+// as it did before the launcher watched its child.
+func TestWaitForStartedSupervisorWaitsForAConcurrentInstance(t *testing.T) {
+	oldAlive := supervisorAliveHook
+	oldPoll := supervisorReadyPollInterval
+	oldHeld := supervisorInstanceLockHeld
+	var calls atomic.Int32
+	supervisorAliveHook = func() int {
+		if calls.Add(1) < 20 {
+			return 0
+		}
+		return 4343
+	}
+	supervisorReadyPollInterval = time.Millisecond
+	supervisorInstanceLockHeld = func() bool { return true }
+	t.Cleanup(func() {
+		supervisorAliveHook = oldAlive
+		supervisorReadyPollInterval = oldPoll
+		supervisorInstanceLockHeld = oldHeld
+	})
+	exited := make(chan error, 1)
+	exited <- errors.New("exit status 1")
+	var stdout, stderr bytes.Buffer
+	if code := waitForStartedSupervisor(&stdout, &stderr, false, "", exited); code != 0 {
+		t.Fatalf("waitForStartedSupervisor = %d; stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "PID 4343") {
+		t.Fatalf("stdout = %q, want the concurrent instance's PID", stdout.String())
+	}
+}
+
+// The log tail keeps the last lines and tolerates a log without a trailing
+// newline.
+func TestSupervisorLogTail(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "supervisor.log")
+	if got := supervisorLogTail(path, 2); got != "" {
+		t.Fatalf("tail of a missing log = %q, want empty", got)
+	}
+	if err := os.WriteFile(path, []byte("one\ntwo\nthree"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := supervisorLogTail(path, 2), "two\nthree\n"; got != want {
+		t.Fatalf("tail = %q, want %q", got, want)
 	}
 }
