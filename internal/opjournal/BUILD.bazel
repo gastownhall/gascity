@@ -45,6 +45,7 @@ go_test(
         "gen_test.go",
         "id_test.go",
         "kind_test.go",
+        "lane_done_test.go",
         "lane_harness_test.go",
         "lane_plan_test.go",
         "lane_property_test.go",

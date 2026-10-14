@@ -403,25 +403,25 @@ func (l *ConversationLane) writeDone(ctx context.Context, tb *takenBatch, er eff
 		case batchInvalid:
 			return fmt.Errorf("settling ops of conversation %s: %w", tb.spec.view.ID, err)
 		case batchRefused:
+			// A store refuses the whole batch at its first stale item, so
+			// every pending item is re-read: k moved rows cost one retry,
+			// not k.
 			var item *beads.BatchItemError
 			errors.As(err, &item)
-			i := slices.IndexFunc(pending, func(it *doneItem) bool { return it.id == item.ID })
-			if i < 0 {
+			if !slices.ContainsFunc(pending, func(it *doneItem) bool { return it.id == item.ID }) {
 				return fmt.Errorf("settling ops of conversation %s: refused by a row it did not write: %w", tb.spec.view.ID, err)
 			}
-			if err := l.reconcile(tb, er, success, pending[i]); err != nil {
-				return err
-			}
+			lastErr = err
 		default:
 			lastErr = err
 			if err := l.sleep(ctx, backoff); err != nil {
 				return errors.Join(fmt.Errorf("settling ops of conversation %s: %w", tb.spec.view.ID, lastErr), err)
 			}
 			backoff = min(2*backoff, doneBackoffMax)
-			for _, it := range pending {
-				if err := l.reconcile(tb, er, success, it); err != nil {
-					return err
-				}
+		}
+		for _, it := range pending {
+			if err := l.reconcile(tb, er, success, it); err != nil {
+				return err
 			}
 		}
 	}
