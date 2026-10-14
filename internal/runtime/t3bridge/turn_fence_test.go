@@ -3,6 +3,7 @@ package t3bridge
 import (
 	"context"
 	"errors"
+	"net"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -387,4 +388,105 @@ func TestTurnFenceRefusesAnEmptyTurnIDBeforeReading(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Kills an InterruptTurn whose fence read is served from the 10 s cache: the
+// cache still holds t1 while T3 runs t2, and t1 must not be interrupted.
+func TestInterruptTurnFenceReadBypassesTheCache(t *testing.T) {
+	server := newTurnFenceServer(t, turnRunning("t1"), turnRunning("t2"))
+	p := newTurnFenceTestProvider(t, server)
+	if _, err := p.rpcSnapshot(); err != nil {
+		t.Fatalf("warming the cache: %v", err)
+	}
+	_, err := p.InterruptTurn(t.Context(), turnFenceSession, "thread-agent-a/t1")
+	var nc *runtime.TurnNotCurrentError
+	if !errors.As(err, &nc) || nc.Current.TurnID != "thread-agent-a/t2" {
+		t.Fatalf("InterruptTurn with a warm stale cache = %v, want not-current reading t2", err)
+	}
+	if cmds := server.commandTypes(); len(cmds) != 0 {
+		t.Fatalf("commands = %q, want none", cmds)
+	}
+	if calls := server.snapshotCalls(); calls != 2 {
+		t.Fatalf("snapshot reads = %d, want 2: the fence read must not use the cache", calls)
+	}
+}
+
+// Kills a WebSocket turn read that ignores a cancel without a deadline (it
+// would block on the 30 s read deadline), and one that reports the canceled
+// read as anything but unavailable.
+func TestObserveTurnCanceledReadIsUnavailable(t *testing.T) {
+	server := newTurnFenceServer(t)
+	server.setStalled()
+	p := newTurnFenceTestProvider(t, server)
+	t.Setenv("T3_BEARER_TOKEN", "")
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	time.AfterFunc(100*time.Millisecond, cancel)
+	start := time.Now()
+	_, err := p.ObserveTurn(ctx, turnFenceSession)
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("ObserveTurn took %s after a cancel at 100ms", elapsed)
+	}
+	if !errors.Is(err, runtime.ErrRuntimeUnavailable) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled = %v, want ErrRuntimeUnavailable wrapping context.Canceled", err)
+	}
+}
+
+// Kills a websocket-ticket request or WebSocket dial that ignores ctx: either
+// would hold InterruptTurn for the HTTP or handshake timeout, and then the
+// transient-retry window, past its deadline. The ticket stalls on the
+// dispatch; the handshake stalls on the fence read, which is a WebSocket read
+// without a bearer token.
+func TestInterruptTurnDispatchStopsAtTheDeadline(t *testing.T) {
+	interrupt := func(t *testing.T, p *Provider) error {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+		defer cancel()
+		start := time.Now()
+		_, err := p.InterruptTurn(ctx, turnFenceSession, "thread-agent-a/t1")
+		// Under bridgeWSTimeout (3 s), so a handshake left to its own timeout
+		// fails the test.
+		if elapsed := time.Since(start); elapsed > 2*time.Second {
+			t.Fatalf("InterruptTurn took %s past a 200ms deadline", elapsed)
+		}
+		return err
+	}
+	t.Run("stalled ticket", func(t *testing.T) {
+		server := newTurnFenceServer(t, turnRunning("t1"))
+		p := newTurnFenceTestProvider(t, server)
+		if _, err := p.ObserveTurn(t.Context(), turnFenceSession); err != nil {
+			t.Fatalf("fence read over HTTP: %v", err)
+		}
+		server.setAuthStalled()
+		if err := interrupt(t, p); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("stalled ticket = %v, want the deadline", err)
+		}
+		if cmds := server.commandTypes(); len(cmds) != 0 {
+			t.Fatalf("commands = %q, want none", cmds)
+		}
+	})
+	t.Run("stalled handshake", func(t *testing.T) {
+		server := newTurnFenceServer(t, turnRunning("t1"))
+		p := newTurnFenceTestProvider(t, server)
+		t.Setenv("T3_BEARER_TOKEN", "")
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = ln.Close() })
+		go func() {
+			for {
+				conn, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				t.Cleanup(func() { _ = conn.Close() }) // accepted, never answered
+			}
+		}()
+		t.Setenv("T3_WS_URL", "ws://"+ln.Addr().String())
+		if err := interrupt(t, p); !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+			t.Fatalf("stalled handshake = %v, want ErrRuntimeUnavailable", err)
+		}
+	})
 }

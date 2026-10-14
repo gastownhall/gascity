@@ -1037,6 +1037,7 @@ type t3BridgeTestServer struct {
 	snapshots          []map[string]interface{}
 	commandHook        func(payload map[string]interface{})
 	stalled            bool
+	authStalled        bool
 	released           chan struct{}
 	closeOnce          sync.Once
 	authFailures       int
@@ -1073,7 +1074,15 @@ func newT3BridgeTestServer(t *testing.T, snapshot map[string]interface{}) *t3Bri
 			failureBody := ts.authFailureBody
 			rawType := ts.authRawType
 			rawBody := ts.authRawBody
+			authStalled := ts.authStalled
 			ts.mu.Unlock()
+			if authStalled {
+				select {
+				case <-r.Context().Done():
+				case <-ts.released:
+				}
+				return
+			}
 			if failuresRemaining > 0 {
 				if failureStatus == 0 {
 					failureStatus = http.StatusServiceUnavailable
@@ -1221,6 +1230,14 @@ func (ts *t3BridgeTestServer) setStalled() {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 	ts.stalled = true
+}
+
+// setAuthStalled makes every auth request (ws token or websocket ticket) go
+// unanswered until the client gives up or the server closes.
+func (ts *t3BridgeTestServer) setAuthStalled() {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	ts.authStalled = true
 }
 
 func (ts *t3BridgeTestServer) wsURL() string {
