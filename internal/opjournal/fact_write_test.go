@@ -240,3 +240,25 @@ func TestRecordFactFindsAnOccurrenceWithANewerBasis(t *testing.T) {
 		t.Fatalf("RecordFact over a newer basis = created %v, %v", created, err)
 	}
 }
+
+// closeFailingStore creates rows open, as MemStore and BdStore do, and fails
+// every conditional update.
+type closeFailingStore struct{ *beads.MemStore }
+
+func (s closeFailingStore) UpdateIfMatch(string, int64, beads.UpdateOpts) error {
+	return errors.New("disk full")
+}
+
+// A close that fails after the create still reports the fact created, with
+// an error that names the fact.
+func TestRecordFactReportsAFailedCloseAfterTheCreate(t *testing.T) {
+	mem := &beads.MemStore{IDPrefix: "gc", HonorExplicitIDs: true}
+	h := newHarnessOver(t, mem, closeFailingStore{mem})
+	created, err := h.store.RecordFact(turnEndedFact())
+	if !created || err == nil {
+		t.Fatalf("RecordFact = created %v, %v; want true and the close error", created, err)
+	}
+	if msg := err.Error(); !strings.Contains(msg, "closing fact") || strings.Contains(msg, " op ") {
+		t.Fatalf("error %q does not name the fact", msg)
+	}
+}

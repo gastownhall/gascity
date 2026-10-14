@@ -16,7 +16,9 @@ import (
 // A stored row that names another occurrence under the id is ErrCorruptOp. A
 // refused fact writes nothing. A store that creates every row open has the
 // fact's bead closed right after the create, and a fact row found open is
-// closed then too.
+// closed then too. When that close fails after a create, RecordFact returns
+// created=true with the error: the fact is recorded, and a later RecordFact
+// of the occurrence closes the row.
 //
 // The read comes first so a retry never reaches Create: a store that
 // overwrites a duplicate pinned id instead of refusing it cannot rewrite a
@@ -44,7 +46,7 @@ func (s *Store) RecordFact(f Fact) (created bool, err error) {
 		}
 		if stored.Status != beadStatusClosed {
 			// Some stores create every row open; a fact is closed on create.
-			return true, s.closeBead(b.ID)
+			return true, s.closeRow("fact", b.ID)
 		}
 		return true, nil
 	}
@@ -75,7 +77,7 @@ func (s *Store) matchRecordedFact(want Fact, b beads.Bead) error {
 		return corruptf(want.ID, "stored fact records another occurrence (hash collision)")
 	}
 	if b.Status != beadStatusClosed {
-		return s.closeBead(b.ID)
+		return s.closeRow("fact", b.ID)
 	}
 	return nil
 }

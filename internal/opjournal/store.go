@@ -491,12 +491,16 @@ func patch(b beads.Bead, cur, next Op) (beads.UpdateOpts, error) {
 
 // closeBead repairs a torn close: it closes op id's bead when the metadata is
 // already closed and the bead is not. An already-closed bead is done.
-func (s *Store) closeBead(id string) error {
+func (s *Store) closeBead(id string) error { return s.closeRow("op", id) }
+
+// closeRow closes row id, a row of the named kind, unless it is closed
+// already. Its errors name the row by kind.
+func (s *Store) closeRow(kind, id string) error {
 	var lastConflict error
 	for range casAttempts {
 		b, err := s.store.Get(id)
 		if err != nil {
-			return fmt.Errorf("reading op %s: %w", id, err)
+			return fmt.Errorf("reading %s %s: %w", kind, id, err)
 		}
 		if b.Status == beadStatusClosed {
 			return nil
@@ -508,9 +512,9 @@ func (s *Store) closeBead(id string) error {
 		}
 		var stale *beads.PreconditionFailedError
 		if !errors.As(err, &stale) {
-			return fmt.Errorf("closing op %s: %w", id, err)
+			return fmt.Errorf("closing %s %s: %w", kind, id, err)
 		}
 		lastConflict = err
 	}
-	return fmt.Errorf("%w: closing op %s lost %d revision races: %w", ErrContention, id, casAttempts, lastConflict)
+	return fmt.Errorf("%w: closing %s %s lost %d revision races: %w", ErrContention, kind, id, casAttempts, lastConflict)
 }
