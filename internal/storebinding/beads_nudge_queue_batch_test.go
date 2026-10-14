@@ -663,6 +663,110 @@ func TestBeadsNudgeQueueClaimBatchOverAnUnstampedList(t *testing.T) {
 	}
 }
 
+// claimBatchPastARivalRoundTrip runs a new batch claim over an unstamped List
+// of n-a and n-b while a rival, between that List and the claim's re-read of
+// n-b, claims n-b and gives it back with metadata rewritten. Assignee, status
+// and queue_state read back as the List saw them, so only the rewritten key
+// tells the claim its decision is stale. It returns the claimed items and
+// n-b's record as the rival left it.
+func claimBatchPastARivalRoundTrip(t *testing.T, now time.Time, rewritten map[string]string) ([]nudgequeue.Item, beads.Bead) {
+	t.Helper()
+	backing := openSQLiteNudgeQueueStore(t)
+	contended := &unstampedListStore{SQLiteStore: backing}
+	victim := nudgeQueueBeadID("n-b")
+	ran := false
+	contended.rival = func() {
+		lease, err := newNudgeLease(now)
+		if err != nil {
+			t.Errorf("minting the rival lease: %v", err)
+			return
+		}
+		if _, ok, err := backing.Claim(victim, lease.assignee); err != nil || !ok {
+			t.Errorf("the rival claim of n-b = %v, %v; want it to win", ok, err)
+			return
+		}
+		if err := backing.Update(victim, nudgeQueueUnclaim(rewritten)); err != nil {
+			t.Errorf("the rival release of n-b: %v", err)
+			return
+		}
+		ran = true
+	}
+	queue := newNudgeQueue(t, contended)
+	for _, id := range []string{"n-a", "n-b"} {
+		if err := queue.Enqueue(testNudgeItem(id, "", now)); err != nil {
+			t.Fatalf("Enqueue(%s): %v", id, err)
+		}
+	}
+	before, err := backing.Get(victim)
+	if err != nil {
+		t.Fatalf("Get(n-b) before the claim: %v", err)
+	}
+	// Armed only now: Enqueue reads the record too.
+	contended.victim = victim
+	claimed, err := queue.ClaimBatch(ClaimTarget{QueueKeys: []string{testNudgeAgent}}, now)
+	if err != nil {
+		t.Fatalf("ClaimBatch against a rival: %v", err)
+	}
+	if !ran {
+		t.Fatal("the rival never ran; the test proved nothing")
+	}
+	after, err := backing.Get(victim)
+	if err != nil {
+		t.Fatalf("Get(n-b) after the claim: %v", err)
+	}
+	for _, item := range claimed {
+		if item.ID == "n-b" {
+			t.Fatalf("ClaimBatch claimed n-b straight through the rival's rewrite %v; n-b is now %q in batch %q",
+				rewritten, after.Assignee, after.Metadata[nudgeMetaDeliveryBatch])
+		}
+	}
+	if after.Assignee != before.Assignee || after.Status != before.Status ||
+		after.Metadata[nudgeMetaQueueState] != before.Metadata[nudgeMetaQueueState] {
+		t.Fatalf("the rival left n-b at assignee %q status %q queue_state %q, want %q %q %q: only the rewritten key may differ",
+			after.Assignee, after.Status, after.Metadata[nudgeMetaQueueState],
+			before.Assignee, before.Status, before.Metadata[nudgeMetaQueueState])
+	}
+	return claimed, after
+}
+
+// TestBeadsNudgeQueueClaimBatchSkipsARivalBackoff pins the batch claim's
+// re-read on deliver_after: a rival that claimed n-b and failed it into a
+// backoff between the List and the claim's write leaves n-b not yet due, and
+// the claim skips it rather than claiming straight through the backoff.
+func TestBeadsNudgeQueueClaimBatchSkipsARivalBackoff(t *testing.T) {
+	now := time.Now().UTC()
+	backoff := formatNudgeTime(now.Add(time.Hour))
+	claimed, record := claimBatchPastARivalRoundTrip(t, now, map[string]string{nudgeMetaDeliverAfter: backoff})
+	if ids := nudgeItemIDs(claimed); len(ids) != 1 || ids[0] != "n-a" {
+		t.Fatalf("ClaimBatch against a rival backoff = %v, want only n-a: n-b is not due until %s", ids, backoff)
+	}
+	if record.Metadata[nudgeMetaDeliveryBatch] != "" {
+		t.Fatalf("n-b delivery_batch = %q, want it left unpinned", record.Metadata[nudgeMetaDeliveryBatch])
+	}
+	if record.Metadata[nudgeMetaDeliverAfter] != backoff {
+		t.Fatalf("n-b deliver_after = %q, want the rival's backoff %q", record.Metadata[nudgeMetaDeliverAfter], backoff)
+	}
+}
+
+// TestBeadsNudgeQueueClaimBatchSkipsARivalPin pins the batch claim's re-read
+// on delivery_batch: a rival that claimed n-b into its own batch and released
+// it with the pin kept between the List and the claim's write leaves n-b a
+// member of that batch, and a new batch skips it rather than repinning it.
+func TestBeadsNudgeQueueClaimBatchSkipsARivalPin(t *testing.T) {
+	now := time.Now().UTC()
+	rivalKey, err := newNudgeQueueBatchKey()
+	if err != nil {
+		t.Fatalf("minting the rival batch key: %v", err)
+	}
+	claimed, record := claimBatchPastARivalRoundTrip(t, now, map[string]string{nudgeMetaDeliveryBatch: rivalKey})
+	if ids := nudgeItemIDs(claimed); len(ids) != 1 || ids[0] != "n-a" {
+		t.Fatalf("ClaimBatch against a rival pin = %v, want only n-a: n-b belongs to batch %q", ids, rivalKey)
+	}
+	if record.Metadata[nudgeMetaDeliveryBatch] != rivalKey {
+		t.Fatalf("n-b delivery_batch = %q, want the rival's batch %q left in place", record.Metadata[nudgeMetaDeliveryBatch], rivalKey)
+	}
+}
+
 // openCachedUnstampedNudgeQueue is the controller's view of a nudges store
 // whose List leaves revisions unstamped: a primed CachingStore over it. A Live
 // List installs the unstamped row in the cache, and the cache's Get then serves
