@@ -476,7 +476,9 @@ func (f *TurnFollower) reset() {
 // foldAppended folds the records appended since the last read. A torn final
 // record is left unread, to be folded once complete, and reported as an
 // error. A complete record that is not valid JSON is passed over, and marks
-// the tail invalid until a valid record follows it.
+// the tail invalid until a valid record follows it. A record appended to the
+// line of one already folded, which was written without its newline, makes
+// the two one line to a rescan, so the follower rescans.
 func (f *TurnFollower) foldAppended(info os.FileInfo) error {
 	file, err := os.Open(f.path)
 	if err != nil {
@@ -489,10 +491,21 @@ func (f *TurnFollower) foldAppended(info os.FileInfo) error {
 		_, err := f.rescan()
 		return err
 	}
-	data := make([]byte, opened.Size()-f.offset)
-	if _, err := file.ReadAt(data, f.offset); err != nil {
+	// Read from the byte before the offset, to see whether the last line
+	// folded was ended.
+	start := max(f.offset-1, 0)
+	data := make([]byte, opened.Size()-start)
+	if _, err := file.ReadAt(data, start); err != nil {
 		f.reset()
 		return fmt.Errorf("reading transcript for turns: %w", err)
+	}
+	if f.offset > 0 {
+		ended := data[0] == '\n'
+		data = data[1:]
+		if line, _, _ := bytes.Cut(data, []byte{'\n'}); !ended && len(bytes.TrimSpace(line)) > 0 {
+			_, err := f.rescan()
+			return err
+		}
 	}
 	for len(data) > 0 {
 		line, rest, complete := bytes.Cut(data, []byte{'\n'})

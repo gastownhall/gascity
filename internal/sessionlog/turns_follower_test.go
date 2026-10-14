@@ -254,6 +254,39 @@ func TestTurnFollowerInvalidNewestLine(t *testing.T) {
 	assertFollowerMatchesScan(t, "valid record after the invalid line", f, "claude", path)
 }
 
+// TestTurnFollowerSameLineAppend: a complete record written without its
+// newline, then another record appended to the same line, is one invalid line
+// to a rescan, and so to the follower, whether the follower folded the first
+// record by appending or by rescanning.
+func TestTurnFollowerSameLineAppend(t *testing.T) {
+	u := func(sec int, id string) string {
+		return fmt.Sprintf(`{"type":"user","timestamp":"2026-10-13T05:00:%02d.100Z","promptId":"%s","promptSource":"typed","message":{"role":"user","content":"prompt"}}`, sec, id)
+	}
+	for _, firstRead := range []string{"append", "rescan"} {
+		t.Run(firstRead, func(t *testing.T) {
+			path := writeTurnLines(t, "claude.jsonl", u(0, "p1"))
+			f, err := NewTurnFollower("claude", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if firstRead == "append" {
+				assertFollowerMatchesScan(t, "start", f, "claude", path)
+			}
+			appendTurnBytes(t, path, u(1, "p2"))
+			assertFollowerMatchesScan(t, "record without its newline", f, "claude", path)
+			appendTurnBytes(t, path, "  ")
+			assertFollowerMatchesScan(t, "blanks on its line", f, "claude", path)
+			appendTurnBytes(t, path, u(2, "p3")+"\n")
+			if _, err := f.Read(); !errors.Is(err, ErrTornTurnRecord) {
+				t.Fatalf("record appended to its line: follower error = %v, want ErrTornTurnRecord", err)
+			}
+			assertFollowerMatchesScan(t, "record appended to its line", f, "claude", path)
+			appendTurnBytes(t, path, u(3, "p4")+"\n")
+			assertFollowerMatchesScan(t, "valid record after the line", f, "claude", path)
+		})
+	}
+}
+
 // TestTurnFollowerEqualsRescanOnFixtures: appending each fixture line by
 // line, the follower reports what a full rescan does after every line.
 func TestTurnFollowerEqualsRescanOnFixtures(t *testing.T) {
