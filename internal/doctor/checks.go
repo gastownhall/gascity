@@ -1297,15 +1297,15 @@ func doctorScopeHasFileStoreMarker(scopePath string) bool {
 // scopeNonDoltBackend reports the backend a scope's .beads/metadata.json names
 // when that backend is not Dolt, so a Dolt-only check can answer "not
 // applicable" instead of dialing a server that does not exist. It decides from
-// metadata alone and names no backend: whatever the native store does not serve
-// through its local Dolt route (contract.NativeStoreServesBackend) is not Dolt.
-// Metadata that names nothing, or cannot be read, stays with the Dolt checks:
-// an unnamed backend is the Dolt default, and an unreadable file must not
-// silence a check that would report it.
+// metadata alone and names no backend: "is Dolt" is contract.IsDoltBackend, the
+// predicate the store factory and the provider lifecycle route on, so every
+// spelling they serve as Dolt ("dolt", "bd", in any case) keeps its dial and
+// any other name is not Dolt. Metadata that names nothing, or cannot be read,
+// stays with the Dolt checks: an unnamed backend is the Dolt default, and an
+// unreadable file must not silence a check that would report it.
 func scopeNonDoltBackend(scopeRoot string) (string, bool) {
 	backend, named, err := contract.ReadMetadataBackend(fsys.OSFS{}, filepath.Join(scopeRoot, ".beads", "metadata.json"))
-	backend = strings.TrimSpace(backend)
-	if err != nil || !named || backend == "" || contract.NativeStoreServesBackend(backend) {
+	if err != nil || !named || contract.IsDoltBackend(backend) {
 		return "", false
 	}
 	return backend, true

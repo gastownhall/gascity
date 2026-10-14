@@ -4452,11 +4452,55 @@ const nonDoltScopeMetadata = `{"database":"beads.db","backend":"example-non-dolt
 
 func writeNonDoltScopeMetadata(t *testing.T, scopeRoot string) {
 	t.Helper()
+	writeScopeMetadata(t, scopeRoot, nonDoltScopeMetadata)
+}
+
+func writeScopeMetadata(t *testing.T, scopeRoot, metadata string) {
+	t.Helper()
 	if err := os.MkdirAll(filepath.Join(scopeRoot, ".beads"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(scopeRoot, ".beads", "metadata.json"), []byte(nonDoltScopeMetadata), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(scopeRoot, ".beads", "metadata.json"), []byte(metadata), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestDoltServerChecks_EveryDoltSpellingKeepsTheDial pins the not-applicable
+// gate to contract.IsDoltBackend, the predicate the store factory and the
+// provider lifecycle route on. A proxied scope spelled "bd" or "Dolt" is still
+// served by Dolt, so both dolt-server checks must answer it exactly as they
+// answer the canonical "dolt" — never "not applicable", which would report OK
+// over an outage of the server that scope really uses.
+func TestDoltServerChecks_EveryDoltSpellingKeepsTheDial(t *testing.T) {
+	cityDir := setupCity(t, "[workspace]\nname = \"test\"\n\n[beads]\nprovider = \"bd\"\n")
+	rigDir := filepath.Join(cityDir, "rigs", "demo")
+	checks := []Check{
+		NewDoltServerCheck(cityDir, false),
+		NewRigDoltServerCheck(cityDir, config.Rig{Name: "demo", Path: rigDir}, false),
+	}
+	answers := func(backend string) []*CheckResult {
+		metadata := fmt.Sprintf(`{"database":"beads.db","backend":%q,"dolt_mode":"proxied-server"}`, backend)
+		writeScopeMetadata(t, cityDir, metadata)
+		writeScopeMetadata(t, rigDir, metadata)
+		results := make([]*CheckResult, 0, len(checks))
+		for _, check := range checks {
+			results = append(results, check.Run(&CheckContext{}))
+		}
+		return results
+	}
+
+	canonical := answers("dolt")
+	for _, spelling := range []string{"bd", "Dolt", "DOLT"} {
+		for i, got := range answers(spelling) {
+			want := canonical[i]
+			if strings.Contains(got.Message, "not applicable") {
+				t.Errorf("%s on backend %q answered %q; the factory routes that spelling to Dolt", got.Name, spelling, got.Message)
+				continue
+			}
+			if got.Status != want.Status || got.Message != want.Message {
+				t.Errorf("%s on backend %q = (%d, %q), want the canonical dolt answer (%d, %q)", got.Name, spelling, got.Status, got.Message, want.Status, want.Message)
+			}
+		}
 	}
 }
 
