@@ -121,6 +121,7 @@ go_test(
         "//internal/processgroup/processgrouptest",
         "//internal/sourceworkflow",
         "//internal/testenv",
+        "@com_github_fsnotify_fsnotify//:fsnotify",
         "@com_github_steveyegge_beads//:beads",
         "@com_github_steveyegge_beads//issueops",
     ] + select({
