@@ -16,7 +16,8 @@ package main
 // when that read still proves it: nothing present on the leaf or any
 // fall-through backend for an asleep heal (rtAbsent; no corpse until A12's
 // classification lands), the row's own Current runtime alive for the awake
-// heal. The default premise refuses a fresh row whose lifecycle facts
+// heal, a present runtime that is not the row's (squatter: Foreign, or
+// Ownerless under a tokened row) for the squatter heal. The default premise refuses a fresh row whose lifecycle facts
 // differ from the pass's (legacy's ApplyPatchIfLifecycleUnchanged), so a
 // wake request that lands before the CAS stops it.
 //
@@ -30,15 +31,22 @@ package main
 // repeated ones alert (alertHealRefused).
 const (
 	causeLivenessUnsupported = "liveness-unsupported"
-	causeRuntimePresent      = "runtime-present" // an asleep heal over a present runtime
-	causeRuntimeNotOwn       = "runtime-not-own" // the awake heal over a runtime not alive and Current
+	causeRuntimePresent      = "runtime-present"      // an asleep heal over a present runtime
+	causeRuntimeNotOwn       = "runtime-not-own"      // the awake heal over a runtime not alive and Current
+	causeRuntimeNotSquatter  = "runtime-not-squatter" // the squatter heal over a runtime that is not one
 )
 
 // healSections are the fresh heal's one section: its arm decided again on
 // the fresh row and the fresh runtime read (redecideRow; the rule, once),
-// a refusal named by what that read found (healCause).
+// a refusal named by what that read found (healCause). Only the heal's own
+// arm lands: a fresh read that moves the row to another heal's arm (a
+// squatter gone since the pass, a dead runtime replaced by one) refuses, and
+// the next pass proposes that heal.
 var healSections = []section{{Decide: func(v txView) txStep {
-	step := redecideRow(v)
+	step, fresh := redecideRowIntent(v)
+	if step.Refuse == "" && fresh.Reason != v.It.Reason { // another heal's arm: its own pass proposes it
+		step = txStep{Refuse: causeRedecided}
+	}
 	if step.Refuse == causeRedecided {
 		step.Refuse = healCause(v)
 	}
@@ -61,6 +69,9 @@ func healCause(v txView) string {
 	case v.It.Reason == decideAwakeHeal:
 	case rt.Class == rtUnknown:
 		return causeLivenessUnknown
+	case v.It.Reason == decideSquatterHeal && !squatterProven(v.Row, rt):
+		return causeRuntimeNotSquatter
+	case v.It.Reason == decideSquatterHeal:
 	case rt.Class != rtAbsent:
 		return causeRuntimePresent
 	}

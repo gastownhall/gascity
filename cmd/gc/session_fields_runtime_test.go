@@ -160,7 +160,7 @@ func TestSessionFieldsFlowsWriteTheirKeys(t *testing.T) {
 			plan := namedPlan(t, cfg, "c1", "mayor")
 			plan.Named.BoundStepID = "gc-step"
 			rec.reset()
-			h.runAll(t, &createPass{cfg: cfg, store: rec}, plan)
+			h.runAll(t, &createPass{cfg: cfg, sp: newSimProvider(), store: rec}, plan)
 		}},
 		{"v2 heal effect", "stranded_event_emitted_at", []string{"cmd/gc/reconcile_arms_heals.go:armStrandedClear"}, func(t *testing.T, rec *sessionKeyRecorder) {
 			heal := newHealCase(t, livenessAlive, desireKeep, "state", "active", strandedEventEmittedKey, now.Format(time.RFC3339))
@@ -190,7 +190,8 @@ func TestSessionFieldsFlowsWriteTheirKeys(t *testing.T) {
 			withoutA7(t)
 			named := []string{"configured_named_session", "true", "configured_named_identity", "worker", "configured_named_mode", "always"}
 			c, _ := baselineCase(t, livenessGone, desireKeep, nil, append([]string{
-				"state", "asleep", "started_config_hash", runtime.FingerprintVersion + ":stale", "restart_requested", "true",
+				"state", "asleep", "started_config_hash", runtime.FingerprintVersion + ":stale", // no restart_requested: A13 would restart the row ahead of A14
+
 				"config_drift_deferred_key", "k", "config_drift_deferred_at", rowAt(-time.Hour), "attached_config_drift_deferred_key", "k", "attached_config_drift_deferred_at", rowAt(-time.Hour),
 			}, named...)...)
 			c.w.Env = &reconcileEnv{Cfg: workerCity(1)}
@@ -360,6 +361,20 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 				newFakeDrainOps(), env.dt, env.clk, env.rec, io.Discard)
 			return fieldBead(t, env.store, b.ID).Metadata
 		}},
+		"cmd/gc/reconcile_arms_lifecycle.go:restartHandoff": {[]string{"restart_requested", "true"}, patchSite(func(session.Info) session.MetadataPatch {
+			return restartHandoff("", true, finalizeFacts{Now: now})
+		})},
+		"cmd/gc/reconcile_arms_lifecycle.go:armRestartRequested": { // a pinned named row's collateral clear (SESS-521)
+			[]string{"restart_requested", "true", "configured_named_session", "true", "configured_named_identity", "worker", "pin_awake", "true"},
+			func(t *testing.T, meta []string) map[string]string {
+				c := newHealCase(t, livenessAlive, desireKeep, meta...)
+				it, _ := armRestartRequested(&rowFacts{w: c.w, k: c.k, row: c.w.Census.Rows[c.k], entry: c.a.Snapshot.Entries[c.k], found: true})
+				if err := c.store.SetMetadataBatch(c.k.ID, it.Patch); err != nil {
+					t.Fatal(err)
+				}
+				return c.meta(t)
+			},
+		},
 		"internal/session/lifecycle_transition.go:PreWakePatch": {
 			[]string{
 				"wake_request", "explicit", "wake_requested_at", ago(time.Minute), "detached_at", ago(time.Hour), "sleep_intent", "idle-stop-pending",
@@ -383,7 +398,7 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 				closed := seedClosedNamedRow(t, store, cfg, pairs(meta))
 				h := newNamedHarness(t, t.TempDir(), nil)
 				h.reserve(t, "c1")
-				h.runAll(t, &createPass{cfg: cfg, store: store}, namedPlan(t, cfg, "c1", "mayor"))
+				h.runAll(t, &createPass{cfg: cfg, sp: newSimProvider(), store: store}, namedPlan(t, cfg, "c1", "mayor"))
 				return fieldBead(t, store, closed.ID).Metadata
 			},
 		},

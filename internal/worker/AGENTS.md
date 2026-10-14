@@ -58,3 +58,25 @@ parser. Large tool output must not erase the latest turn boundary. A torn final
 record cannot report idle, since it may be the next turn's start, but an open
 turn still reports in-turn. A turn start more than 16 MiB before the end of the
 rollout reports unknown instead of rescanning the whole rollout on every poll.
+
+## History identity
+
+`HistorySnapshot.GCSessionID` is the durable Gas City session bead ID. Unless
+the caller supplies one, the logical conversation ID is
+`session.Info.LogicalConversationID`: the bead's current continuation epoch,
+`<bead-id>#<epoch>`, and for a provider with a session-id flag also the key
+each new conversation runs under, `<bead-id>#<epoch>/<session-key>`. A fresh
+reset starts a new conversation and a resumed restart keeps it (WC-CONT-002,
+WC-CONT-001), so a snapshot a long-lived handle cached before a fresh reset is
+not stitched in front of the new conversation. A read can still return the
+abandoned conversation under the new conversation's identity, and history then
+shows it in front of the new one: for a provider without a session-id flag,
+before the new transcript exists or after a fresh wake that keeps the epoch;
+for one with a flag, before a start the Manager launched without a key has its
+key written, or from an ACP capture, which the epoch alone scopes
+(`SESSION-HISTORY-CONVERSATION-EPOCH`). Native resume-key discovery must not
+replace either ID. Provider identity belongs in `ProviderSessionID`; a late
+hook must not make an unchanged transcript appear to be a different stream.
+The one exception is a provider with a session-id flag whose start the Manager
+launched without its key: its identity takes the key once one is written,
+normally by the provider's hook.

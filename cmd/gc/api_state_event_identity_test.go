@@ -303,7 +303,7 @@ func TestCommittedCloseCountsItsAutocloseAsStoreWork(t *testing.T) {
 		beadsQuiescent: quiescent,
 	}
 
-	cs.applyBeadEventToStores(events.Event{Type: events.BeadClosed, Subject: child.ID, Payload: payload})
+	cs.applyBeadEventToStores(events.Event{Type: events.BeadClosed, Actor: cacheLocalActor, Subject: child.ID, Payload: payload})
 	if len(queued) != 1 {
 		t.Fatalf("dispatched %d autoclose run(s), want 1", len(queued))
 	}
@@ -316,7 +316,7 @@ func TestCommittedCloseCountsItsAutocloseAsStoreWork(t *testing.T) {
 	}
 
 	quiescent.Store(true)
-	cs.applyBeadEventToStores(events.Event{Type: events.BeadClosed, Subject: child.ID, Payload: payload})
+	cs.applyBeadEventToStores(events.Event{Type: events.BeadClosed, Actor: cacheLocalActor, Subject: child.ID, Payload: payload})
 	if len(queued) != 1 {
 		t.Fatalf("a quiescent city dispatched an autoclose run (%d total)", len(queued))
 	}

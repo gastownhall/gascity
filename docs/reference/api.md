@@ -326,6 +326,21 @@ requests.
   `EventStreamEnvelope` JSON object per line.
 - `gc events --seq` in city scope prints the API's `X-GC-Index` value.
 
+#### Snapshot index
+
+City responses that carry `X-GC-Index` report the city event sequence
+captured before the response's state was read, including when the body
+comes from a response cache or an `Idempotency-Key` replay. Resuming the
+city event stream after that value (`after_seq` or `Last-Event-ID`), or
+blocking on it with `?index=`, observes every change made through the
+supervisor that the body does not already reflect. A change the body does
+reflect may be delivered again, so apply events idempotently by `seq`.
+
+A change that another process writes directly to the city's stores is
+reflected once the supervisor applies its event. A response served in
+between can report an index at or past that event without reflecting the
+change.
+
 ### Supervisor Scope
 
 - `GET /v0/events`

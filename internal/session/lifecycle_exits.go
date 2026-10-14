@@ -179,9 +179,18 @@ func ExtendQuarantine(info Info, until, now time.Time) DispositionPatch {
 	return CellInfo(info, ActorController, DispEvent{Kind: EvQuarantine, Until: until}, now)
 }
 
-// PatchFor is a's write to row info: its patch with its Class.
+// Over is a's patch over row info: a quarantining accrual during a live
+// quarantine keeps the live quarantine's reason (KeepQuarantineReason;
+// CONTRACT v5.9z), as it keeps its later deadline (Class). Legacy's
+// recordWakeFailure and recordChurn and v2's accruals all write it.
+func (a ExitAccrual) Over(info Info, now time.Time) MetadataPatch {
+	return KeepQuarantineReason(maps.Clone(a.Patch), DispositionOfInfo(info), info.SleepReason, now)
+}
+
+// PatchFor is a's write to row info: its patch over info (Over) with its
+// Class.
 func (a ExitAccrual) PatchFor(info Info, now time.Time) MetadataPatch {
-	return a.Class(info, now).Into(info.ID, maps.Clone(a.Patch))
+	return a.Class(info, now).Into(info.ID, a.Over(info, now))
 }
 
 // WakeFailureAccrualPatch builds the write for one more rapid-crash wake

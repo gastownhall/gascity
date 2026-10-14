@@ -773,6 +773,52 @@ type InterruptBoundaryWaitProvider interface {
 	WaitForInterruptBoundary(ctx context.Context, name string, since time.Time, timeout time.Duration) error
 }
 
+// TurnInterruptMode describes how a runtime cancels a session's in-flight
+// agent turn.
+type TurnInterruptMode string
+
+const (
+	// TurnInterruptKeystroke means the caller treats the runtime as driving
+	// the agent's terminal: it picks the keys the agent provider understands,
+	// sends them through [Provider.SendKeys], and uses [Provider.Interrupt] as
+	// Ctrl-C. It is the mode assumed for a runtime that does not implement
+	// [TurnInterruptCapabilityProvider]; such a runtime may still drop keys
+	// (subprocess and ACP do), which this mode cannot express.
+	TurnInterruptKeystroke TurnInterruptMode = "keystroke"
+	// TurnInterruptProtocol means the runtime drives turns through a protocol:
+	// [Provider.Interrupt] cancels the in-flight turn for every agent provider,
+	// and [Provider.SendKeys] delivers nothing.
+	TurnInterruptProtocol TurnInterruptMode = "protocol"
+	// TurnInterruptUnsupported means neither keys nor a protocol interrupt
+	// reach the session's turn: the runtime cannot interrupt it.
+	TurnInterruptUnsupported TurnInterruptMode = "unsupported"
+)
+
+// TurnInterruptCapabilityProvider is an optional extension for runtimes that
+// report how they cancel the in-flight turn of the routed backend of a
+// specific session. Without it a runtime is taken to be
+// [TurnInterruptKeystroke].
+type TurnInterruptCapabilityProvider interface {
+	TurnInterruptMode(name string) TurnInterruptMode
+}
+
+// TurnInterruptModeFor reports how p cancels the in-flight turn of session
+// name: the mode p reports, or [TurnInterruptKeystroke] when p does not
+// implement [TurnInterruptCapabilityProvider] or reports no mode or a mode
+// this build does not know.
+func TurnInterruptModeFor(p Provider, name string) TurnInterruptMode {
+	tp, ok := p.(TurnInterruptCapabilityProvider)
+	if !ok {
+		return TurnInterruptKeystroke
+	}
+	switch mode := tp.TurnInterruptMode(name); mode {
+	case TurnInterruptProtocol, TurnInterruptUnsupported:
+		return mode
+	default:
+		return TurnInterruptKeystroke
+	}
+}
+
 // RelaunchProvider is an optional extension for runtimes that can re-launch the
 // agent inside an already-provisioned (warm) box WITHOUT re-provisioning it — the
 // runtime/transport un-weld payoff. The reconciler calls Relaunch on a launch-only

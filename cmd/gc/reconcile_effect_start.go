@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"maps"
 	"strings"
 	"time"
 
@@ -170,7 +171,7 @@ func verbStep(adopt bool) func(txView, *preparedStart, error) txStep {
 // still finds the runtime absent, on which every such heal rests.
 func healInstead(v txView, refuse txStep) txStep {
 	heal := v.It.Heal
-	if heal == nil || v.RT == nil || v.RT.Class != rtAbsent {
+	if heal == nil || v.RT == nil || v.RT.Class != rtAbsent || healDrifted(v) {
 		return refuse
 	}
 	patch := heal.Patch
@@ -182,6 +183,22 @@ func healInstead(v txView, refuse txStep) txStep {
 		step.Facts.Events = append(step.Facts.Events, *heal.Event)
 	}
 	return step
+}
+
+// healDrifted reports that the A6 timer heal v's start carries no longer
+// re-derives on v.Row, the fresh read (STALE-READ-ARCH): the timers the pass
+// read expired are not what the row holds now (an agent's heartbeat
+// re-armed its hold). The pass's derivation may only veto (C-lite): the
+// start refuses held and writes no heal, and the next pass decides. Both
+// derivations are at the pass's time, so only the row's move counts.
+func healDrifted(v txView) bool {
+	heal := v.It.Heal
+	if heal == nil || heal.Reason != decideTimerHeal {
+		return false
+	}
+	stalePatch, staleClass, _ := timerHealPatch(v.World.Census.Rows[v.It.Key].Info, v.World.Now)
+	freshPatch, freshClass, _ := timerHealPatch(v.Row, v.World.Now)
+	return !maps.Equal(stalePatch, freshPatch) || !maps.Equal(staleClass.Fold(), freshClass.Fold())
 }
 
 // runtimeCause is S1's table's refusal for row's fresh runtime read rt, ""

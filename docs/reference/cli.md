@@ -1542,10 +1542,21 @@ gc event
 
 Record a custom event to the city event log.
 
-Best-effort: always exits 0 so bead hooks never fail. Supports
-attaching arbitrary JSON payloads. JSON summaries report whether submission to
-the configured provider was attempted; the event bus does not acknowledge
-durable persistence.
+Recording is best-effort: once an event is accepted, a provider or payload
+error is reported on stderr and the command still exits 0, so bead hooks never
+fail on it. JSON summaries report whether submission to the configured provider
+was attempted; the event bus does not acknowledge durable persistence.
+
+Two requests are refused with exit 1 and nothing is recorded. In --json mode
+the failure object carries the code.
+
+- reserved_actor: --actor starts with "cache-", or the default actor is one
+  of the controller cache's own actors (cache-local, cache-reconcile).
+- bead_payload_refused: --payload on bead.created, bead.updated, bead.closed
+  or bead.deleted. Their payload is the bead row; use --bead-payload &lt;id&gt; so
+  gc reads it from the store.
+
+--payload attaches arbitrary JSON to any other event type.
 
 ```
 gc event emit <type> [flags]
@@ -1554,7 +1565,7 @@ gc event emit <type> [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--actor` | string |  | Actor name (default: $GC_ALIAS, else $GC_AGENT, else $GC_SESSION_ID, else "human") |
-| `--bead-payload` | string |  | Best-effort bead ID fallback for hook payloads |
+| `--bead-payload` | string |  | Bead ID whose stored row becomes the payload (the only payload source for bead.created/updated/closed/deleted) |
 | `--json` | bool |  | emit JSON summary |
 | `--message` | string |  | Event message |
 | `--payload` | string |  | JSON payload to attach to the event |
@@ -2028,14 +2039,15 @@ Without --inject: prints normalized ready-only output, exits 0 if work exists, 1
 With --inject: silent legacy Stop-hook compatibility; skips the work query and always exits 0.
 With --claim: runs the standard startup claim protocol for one work item.
 
-Without --inject or --claim, a work query that gets no answer from the bead
-store (a connection error, a timeout, a killed query, a locked database, or
-bd's circuit breaker failing fast) exits 2 and prints GC_HOOK_STORE_UNAVAILABLE
-on stderr: the store could not be read, which is not the same as no work. Any
-other work-query failure exits 1. The generated default work query discards
-bd's errors in its single-store tiers, so there a store that fails fast still
-reads as no work; only a deadline overrun exits 2. With --claim, a failed work
-query exits 1 and writes no drain record.
+A work query that gets no answer from the bead store (a connection error, a
+timeout, a killed query, a locked database, or bd's circuit breaker failing
+fast) exits 2 and prints GC_HOOK_STORE_UNAVAILABLE on stderr: the answer is
+unknown, not empty. Any other work-query failure exits 1. This applies with and
+without --claim, and neither writes a drain result. The generated default work
+query discards bd's errors in its single-store tiers, so there a store that
+fails fast still reads as no work; only a deadline overrun exits 2. Only the
+agent's own store reports: other stores the hook also searches are
+best-effort, and one that fails reads as having no work.
 
 The agent is determined from $GC_AGENT or a positional argument.
 
@@ -4016,9 +4028,29 @@ gc runtime drain-ack [name] [flags]
 
 Check if a session is currently draining.
 
-Returns exit code 0 if draining, 1 if not. Designed for use in
-conditionals: "if gc runtime drain-check; then finish-up; fi". Without
-arguments, uses the current session context.
+Consults two sources: the runtime's GC_DRAIN metadata flag, which
+"gc runtime drain" sets, and the session row's state, which reads
+draining once the controller has begun stopping the session. Controller
+drain intents recorded before that point are not consulted yet. Designed
+for use in conditionals: "if gc runtime drain-check; then finish-up; fi".
+Without arguments, uses the current session context.
+
+Exit codes:
+  0  draining: a source that answered says draining
+  1  not draining: both sources answered and neither says draining;
+     or there is no current session context; or the named session
+     does not exist in a session store that opened; or the --json
+     result could not be written
+  3  unknown: a source could not be read, or the named session could
+     not be resolved, and no source says draining; one stderr line
+     names the source that failed
+
+A runtime that reports the session absent, or keeps no metadata, counts
+as an answer of "no GC_DRAIN"; any other runtime error, including a
+runtime that is not running, is a failure to answer. With --json, the
+result carries a "source" field naming the deciding source; an unknown
+result is the JSON error envelope with code "drain_state_unknown" and
+exit code 3.
 
 ```
 gc runtime drain-check [name] [flags]

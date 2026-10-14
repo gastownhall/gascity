@@ -476,7 +476,7 @@ func TestSessionReconcilerDoctorReportsC07(t *testing.T) {
 	} {
 		cfg := workerCity(1)
 		cfg.Daemon.SessionReconciler = tc.mode
-		c := newSessionReconcilerDoctorCheck(cfg, overrideEnv("1"))
+		c := newSessionReconcilerDoctorCheck(cfg, noEnv)
 		c.capabilities = caps
 		r := c.Run(nil)
 		details := strings.Join(r.Details, "\n")

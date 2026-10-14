@@ -60,6 +60,7 @@ go_test(
         "context_test.go",
         "copilot_reader_test.go",
         "cursor_reader_test.go",
+        "dag_parallel_response_test.go",
         "entry_id_occurrence_test.go",
         "entry_id_test.go",
         "grok_reader_test.go",

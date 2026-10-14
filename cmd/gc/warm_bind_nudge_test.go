@@ -8,10 +8,13 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
 
@@ -568,5 +571,87 @@ func TestControllerWarmClaimProbeTreatsATemplateAssigneeAsDemand(t *testing.T) {
 		if got := cr.warmClaimTriggerProbe(cr.newWarmClaimTriggerResolver(cr.rigBeadStores()))(warmBindStampedSession("hq-1", "city")); got != want {
 			t.Errorf("assignee %q: probe = %v, want %v", assignee, got, want)
 		}
+	}
+}
+
+// upAtPreWakeStore brings a session's runtime up, under the incarnation the
+// start path's PreWake write mints, the moment that write lands: the slot is
+// already running when the start reaches the provider, which is the
+// warm-reuse branch startPreparedStartCandidate delivers the warm-bind claim
+// nudge from.
+type upAtPreWakeStore struct {
+	beads.Store
+	sp *runtime.Fake
+}
+
+func (s *upAtPreWakeStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if err := s.Store.SetMetadataBatch(id, kvs); err != nil {
+		return err
+	}
+	if kvs["state"] != "creating" {
+		return nil
+	}
+	name := "worker-1"
+	if err := s.sp.Start(context.Background(), name, runtime.Config{Command: "claude"}); err != nil {
+		return err
+	}
+	for key, value := range map[string]string{"GC_SESSION_ID": id, "GC_INSTANCE_TOKEN": kvs["instance_token"], "GC_RUNTIME_EPOCH": kvs["generation"]} {
+		if err := s.sp.SetMeta(name, key, value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Kills beadReconcileTick installing a warm-bind probe that judges triggers
+// without the controller's config (#7752 review r3, mutant T7: the call site
+// built with a nil cfg): a pending pool slot whose runtime is already up when
+// its start runs gets the claim nudge for a trigger assigned to its pool
+// template, which is demand, and none for a trigger its own session holds.
+func TestBeadReconcileTickWarmBindNudgesTemplateAssignedDemand(t *testing.T) {
+	for assignee, wantNudges := range map[string]int{"worker": 1, "worker-1": 0} {
+		t.Run(assignee, func(t *testing.T) {
+			store := beads.NewMemStore()
+			trigger, err := store.Create(beads.Bead{Title: "step", Type: "task", Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "worker"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			session, err := store.Create(beads.Bead{Title: "worker", Type: sessionBeadType, Labels: []string{sessionBeadLabel, "agent:worker"}, Metadata: map[string]string{
+				"session_name": "worker-1", "template": "worker", "agent_name": "worker", "pool_slot": "1", poolManagedMetadataKey: boolMetadata(true),
+				"state": string(sessionpkg.StateStartPending), "pending_create_claim": "true", "generation": "1",
+				beadmeta.TriggerBeadIDMetadataKey: trigger.ID,
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			sp := runtime.NewFake()
+			cr := &CityRuntime{
+				cityPath: t.TempDir(), cityName: "test-city", sp: sp, standaloneCityStore: &upAtPreWakeStore{Store: store, sp: sp},
+				cfg:           &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)}}},
+				sessionDrains: newDrainTracker(), rec: events.Discard, stdout: io.Discard, stderr: io.Discard,
+			}
+			cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), DesiredStateResult{
+				State: map[string]TemplateParams{"worker-1": {
+					TemplateName: "worker", SessionName: "worker-1", Command: "claude", Hints: agent.StartupHints{Nudge: warmClaimText},
+				}},
+				PoolDesiredCounts: map[string]int{"worker": 1},
+			}, cr.loadSessionBeadSnapshot(), nil, false)
+			if !cr.waitForAsyncStarts() {
+				t.Fatal("async starts did not settle after the tick")
+			}
+			if got := sp.CountCalls("Start", "worker-1"); got != 1 {
+				t.Fatalf("runtime Start calls = %d, want only the fixture's: the tick must reuse the running slot", got)
+			}
+			if got := sp.CountCalls("Nudge", "worker-1"); got != wantNudges {
+				t.Errorf("claim nudges = %d, want %d", got, wantNudges)
+			}
+			got, err := store.Get(session.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if marked := got.Metadata[warmBindNudgedForTriggerKey] == trigger.ID; marked != (wantNudges == 1) {
+				t.Errorf("%s = %q, want marked=%v", warmBindNudgedForTriggerKey, got.Metadata[warmBindNudgedForTriggerKey], wantNudges == 1)
+			}
+		})
 	}
 }

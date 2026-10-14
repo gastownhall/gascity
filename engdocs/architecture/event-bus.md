@@ -231,7 +231,7 @@ are enforced by the conformance suite in
 | `cmd/gc/cmd_handoff.go` | Records handoff-related `session.draining` and `session.stopped` events |
 | `cmd/gc/order_dispatch.go` | Records `order.fired`, `order.completed`, `order.failed` events during order dispatch |
 | `cmd/gc/cmd_events.go` | CLI `gc events` command: reads and displays events with filtering (`--type`, `--since`), watch mode (`--watch`), and sequence query (`--seq`) |
-| `cmd/gc/cmd_event_emit.go` | CLI `gc event emit` command: records custom events from scripts and bd hooks (best-effort, always exits 0) |
+| `cmd/gc/cmd_event_emit.go` | CLI `gc event emit` command: records custom events from scripts and bd hooks (best-effort: exits 0 once an event is accepted; `reserved_actor` and `bead_payload_refused` refusals exit 1 and record nothing) |
 | `cmd/gc/cmd_agent.go` | Records session lifecycle events during start/stop/restart operations |
 | `cmd/gc/cmd_suspend.go` | Records `city.suspended` and `city.resumed` events |
 | `cmd/gc/cmd_mail.go` | Records CLI `mail.*` events for send, read, archive, reply, mark-read/unread, and delete operations |
@@ -253,7 +253,7 @@ are enforced by the conformance suite in
 | `internal/events/events_test.go` | FileRecorder-specific tests: write, payload round-trip, monotonic seq, concurrent safety, seq resume, timestamp handling |
 | `cmd/gc/providers.go` | eventsProviderName: resolution logic (GC_EVENTS env -> city.toml -> default); newEventsProvider: factory function |
 | `cmd/gc/cmd_events.go` | `gc events` CLI: list, filter, watch, payload-match, seq query |
-| `cmd/gc/cmd_event_emit.go` | `gc event emit` CLI: best-effort custom event recording |
+| `cmd/gc/cmd_event_emit.go` | `gc event emit` CLI: best-effort custom event recording that exits 0 once an event is accepted; `reserved_actor` and `bead_payload_refused` refusals exit 1 and record nothing |
 
 ### Event Type Constants
 

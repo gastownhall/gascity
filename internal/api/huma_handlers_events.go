@@ -25,6 +25,7 @@ func (s *Server) humaHandleEventList(ctx context.Context, input *EventListInput)
 	if bp.isBlocking() {
 		waitForChange(ctx, s.state.EventProvider(), bp)
 	}
+	index := s.latestIndex()
 
 	ep := s.state.EventProvider()
 	if ep == nil {
@@ -62,8 +63,6 @@ func (s *Server) humaHandleEventList(ctx context.Context, input *EventListInput)
 	if err != nil {
 		return nil, err
 	}
-
-	index := s.latestIndex()
 
 	// Fetch limit+1 matching events at (first page) or strictly below (cursor
 	// page) the boundary, ascending; the extra row is the has-more signal.

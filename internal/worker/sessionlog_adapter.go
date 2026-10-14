@@ -16,9 +16,14 @@ import (
 
 // LoadRequest scopes a Phase 1 transcript load.
 type LoadRequest struct {
-	Provider              string
-	TranscriptPath        string
-	GCSessionID           string
+	Provider       string
+	TranscriptPath string
+	GCSessionID    string
+	// LogicalConversationID is the conversation the snapshot belongs to: the
+	// session's session.Info.LogicalConversationID, or the caller's own
+	// HistoryRequest.LogicalID. Leave it empty only without a session bead:
+	// the fallback, GCSessionID, is shared by every conversation of the
+	// session, so the handle would stitch them together.
 	LogicalConversationID string
 	TailCompactions       int
 	BeforeEntryID         string

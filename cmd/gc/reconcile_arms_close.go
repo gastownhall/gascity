@@ -85,7 +85,7 @@ func armClose(r *rowFacts) (intent, bool) {
 		}
 		it.Reason, it.Patch = decideClosePoolSlot, session.ClosePatch(now, cmp.Or(strings.TrimSpace(info.SleepReason), "drained"))
 		it.Closing = closeSpec{Kind: closePoolSlot, Killed: killed, Repair: aged && !killed, Template: e.Template}
-	case e.Desired == desireDrain && e.DrainReason != "" && !info.PendingCreateClaim && !deliberatelyHeldPoolRow(info, now):
+	case e.Desired == desireDrain && e.DrainReason != "" && !info.PendingCreateClaim && !deliberatelyHeldRow(info, now):
 		// An undesired pending create is A10's rollback, never a close. The
 		// close reason is the drain's: orphaned, or suspended (§12.2 #17).
 		// Its work is released as legacy's orphan close releases it: an
@@ -150,7 +150,7 @@ func (r *rowFacts) deadRuntimeCloses() bool {
 	info := r.row.Info
 	_, stopping := activeStop(r.row)
 	return r.entry.Desired == desireDrain && r.entry.DrainReason != "" && !isNamedSessionInfo(info) && !info.PendingCreateClaim && !stopping &&
-		!deliberatelyHeldPoolRow(info, r.w.Now) && // A21's orphan guard: a held slot is kept, and classified meanwhile
+		!deliberatelyHeldRow(info, r.w.Now) && // A21's orphan guard: a held row is kept, and classified meanwhile
 		!parkedTerminal(info) // a parked row waits for its operator (§12.2 #19, #59)
 }
 
@@ -179,13 +179,23 @@ func (r *rowFacts) failedCreateLeased() bool {
 	return pendingCreateSessionStillLeasedAt(r.row.Info, cfg, r.w.Now) && !pendingCreateAnchorAhead(r.row.Info, r.w.Now)
 }
 
-// deliberatelyHeldPoolRow is an undesired pool row a deliberate hold parks:
-// a user hold, a wait hold, or a future or unreadable held_until or
-// quarantined_until. A21 keeps its slot until the hold ends, stricter than
-// legacy's MAINT-051 sweep, which closes it whatever holds it (§12.2 #27,
-// v5.7 A10): Disposition.HoldsDeliberately.
-func deliberatelyHeldPoolRow(info session.Info, now time.Time) bool {
-	return isPoolManagedSessionInfo(info) && session.DispositionOfInfo(info).HoldsDeliberately(now)
+// deliberatelyHeldRow is an undesired row a deliberate hold parks, which
+// A21 keeps until the hold ends.
+//   - A pool row: a user hold, a wait hold, or a future or unreadable
+//     held_until or quarantined_until (Disposition.HoldsDeliberately),
+//     stricter than legacy's MAINT-051 sweep, which closes it whatever holds
+//     it (§12.2 #27, v5.7 A10).
+//   - Any other row: an operator's suspend (sleep_intent=user-hold) or a
+//     live, readable held_until alone, so an orphan close never destroys an
+//     operator's dormancy (the A14 generator's seed 660, mc-i7efm); a wait
+//     hold, a quarantine or an unreadable timer keeps no such row, which
+//     closes and releases as legacy's orphan close does (CONTRACT v5.10s).
+func deliberatelyHeldRow(info session.Info, now time.Time) bool {
+	d := session.DispositionOfInfo(info)
+	if isPoolManagedSessionInfo(info) {
+		return d.HoldsDeliberately(now)
+	}
+	return d.Operator == session.OperatorSuspended || d.Until.After(now) || d.Heartbeat.After(now)
 }
 
 // strandedMarker reads the stranded marker (SESS-624). held: it is still
