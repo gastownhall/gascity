@@ -651,7 +651,12 @@ func (tp *takePlan) formBatch(items []contentItem, mode LinkMode, ridersFree boo
 		} else {
 			picked, full = pickFresh(items, head)
 		}
-		picked = dropLoneRiders(items, picked, ridersFree)
+		if !replay || groupHasNonRider(items, head) {
+			// A replay group of riders only lost its starter to a close;
+			// it may already have reached the agent with that turn, so it
+			// goes without one rather than wait until start_by.
+			picked = dropLoneRiders(items, picked, ridersFree)
+		}
 		if len(picked) == 0 {
 			// Only riders were picked and nothing starts a turn for them.
 			for i := head; i < len(items) && !items[i].stop; i++ {
@@ -686,15 +691,13 @@ func (tp *takePlan) formBatch(items []contentItem, mode LinkMode, ridersFree boo
 // a later Take; when whole is set that would split the group, so split is
 // reported and nothing is picked.
 func pickReplay(items []contentItem, head int, whole bool) (picked []int, full, split bool) {
-	key := items[head].e.op.DeliveryKey
 	var lim batchLimits
 	stopped := false
 	for i, it := range items {
 		if it.stop && i != head {
 			stopped = true
 		}
-		member := i == head || (key != "" && it.e.op.DeliveryKey == key && it.e.cur.MaybeDelivered > 0)
-		if !member || it.closing {
+		if !inReplayGroup(items, head, i) {
 			continue
 		}
 		if !it.eligible || stopped || full || !lim.admit(it.e.op) {
@@ -709,6 +712,26 @@ func pickReplay(items []contentItem, head int, whole bool) (picked []int, full, 
 		picked = append(picked, i)
 	}
 	return picked, full, false
+}
+
+// groupHasNonRider reports whether the head's replay group still holds an
+// open member, eligible or not, that is not an after_turn rider.
+func groupHasNonRider(items []contentItem, head int) bool {
+	for i, it := range items {
+		if inReplayGroup(items, head, i) && it.e.op.Policy.Message.When != WhenAfterTurn {
+			return true
+		}
+	}
+	return false
+}
+
+// inReplayGroup reports whether item i is in the replay group of the
+// maybe-delivered head: the head, or a maybe-delivered item under the head's
+// delivery key, that this pass does not close.
+func inReplayGroup(items []contentItem, head, i int) bool {
+	it, key := items[i], items[head].e.op.DeliveryKey
+	member := i == head || (key != "" && it.e.op.DeliveryKey == key && it.e.cur.MaybeDelivered > 0)
+	return member && !it.closing
 }
 
 // pickFresh picks the longest fresh prefix from head: it stops at a stop, at

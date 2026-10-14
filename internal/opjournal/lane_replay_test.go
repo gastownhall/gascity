@@ -198,3 +198,64 @@ func TestLaneRetakeAfterKeyRejectedKeepsTheNewKey(t *testing.T) {
 		t.Fatalf("the re-take used key %s, but its maybe-delivered attempt used %s (L3)", ds[3].Key, ds[2].Key)
 	}
 }
+
+// A maybe-delivered after_turn rider whose starter closed replays alone: it
+// may already have reached the agent with that turn, and waiting for a
+// starter would hold it until start_by.
+func TestLaneRiderReplaysAloneWhenItsStarterClosed(t *testing.T) {
+	for _, dedup := range []bool{false, true} {
+		t.Run(map[bool]string{false: "plain", true: "dedup"}[dedup], func(t *testing.T) {
+			h := newLaneHarness(t)
+			r := h.propose(t, laneMsg("r", RoleNotice, "context", withWhen(WhenAfterTurn)))
+			h.clk.Advance(time.Millisecond)
+			s := h.propose(t, laneMsg("s", RolePrompt, "starter"))
+			exec := newFakeExec(h.clk)
+			exec.probe.Caps.Dedup = dedup
+			a := h.lane(t, "ctl")
+			a.hooks.at = crashAt(stageAfterEffect)
+			if _, err := a.Pass(context.Background(), view(), exec); !errors.Is(err, errCrash) {
+				t.Fatalf("pass = %v", err)
+			}
+			if _, _, err := h.store.Cancel(s.ID, "operator", ""); err != nil {
+				t.Fatal(err)
+			}
+			h.clk.Advance(DefaultLeaseTTL + LeaseSkew + time.Second)
+			l := h.lane(t, "cli")
+			res := mustPass(t, l, view(), exec)
+			if res.Took == TakeNone {
+				// The first pass may only close the canceled starter.
+				res = mustPass(t, l, view(), exec)
+			}
+			if !slices.Equal(res.Taken, []string{r.ID}) {
+				t.Fatalf("took %v, waits %+v", res.Taken, res.Waits)
+			}
+			ds := exec.delivered()
+			if last := ds[len(ds)-1]; last.Key != ds[0].Key || !last.Redelivery {
+				t.Fatalf("rider replay key %s redelivery %v, first key %s", last.Key, last.Redelivery, ds[0].Key)
+			}
+			if got := h.get(t, r.ID); got.Outcome.Arm != ArmSucceeded {
+				t.Fatalf("rider %s %+v", got.Status, got.Outcome)
+			}
+		})
+	}
+}
+
+// A rider whose group still holds a starter waits for it.
+func TestLaneRiderReplayWaitsForItsOpenStarter(t *testing.T) {
+	p := newPlanner(t)
+	key := "gc-op-aaaaaaaaaaaaaaaaaaaaaaaaaa:3"
+	released := func(op *Op) {
+		op.Status, op.Attempt, op.DeliveryKey, op.MaybeDelivered = StatusAccepted, 1, key, 1
+	}
+	rider := p.op(laneMsg("r", RoleNotice, "x", withWhen(WhenAfterTurn)), released)
+	starter := p.op(laneMsg("s", RolePrompt, "y"), released, func(op *Op) { op.RetryAt = t0.Add(48 * time.Hour) })
+	now := t0.Add(time.Hour)
+	rp := planRules(snapOf(rider, starter), view(), now, "lane:ctl")
+	tp, _ := planTake(rp, idleProbe(), view(), now)
+	if tp.take != nil {
+		t.Fatalf("took %v without its starter", takenOf(tp))
+	}
+	if w := waitsOf(tp.waits)[rider.ID]; w != WaitAfterTurn {
+		t.Fatalf("rider wait %q", w)
+	}
+}
