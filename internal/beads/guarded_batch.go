@@ -70,7 +70,9 @@ type GuardedItem struct {
 	// batch with ErrAlreadyExists. A guarded create carries no edges (ParentID,
 	// Needs, Dependencies) and is written as given: a wrapper's create policy
 	// (the storage tier a policy wrapper picks for Create, say) does not apply,
-	// so the caller sets NoHistory and Ephemeral itself.
+	// so the caller sets NoHistory and Ephemeral itself. CloseReason follows
+	// the Bead contract rather than the request: a row created closed records
+	// the trimmed metadata.close_reason, any other row none.
 	Create *Bead
 	// Update patches one existing row.
 	Update *GuardedUpdate
@@ -111,9 +113,9 @@ var ErrGuardedBatchUnsupported = errors.New("beads: store cannot apply guarded b
 // ErrInvalidGuardedBatch reports a batch refused by validation, before any
 // write: an empty or oversized batch, an item with not exactly one member, a
 // create without an id, with edges or both Ephemeral and NoHistory, an update
-// without an id, or a row named twice. Update options the guarded write cannot carry also match the
-// conditional-update error they raise (ConditionalUpdateFieldUnsupportedError,
-// ErrEmptyConditionalUpdate).
+// without an id, or a row named twice. Update options the guarded write cannot
+// carry also match the conditional-update error they raise
+// (ConditionalUpdateFieldUnsupportedError, ErrEmptyConditionalUpdate).
 var ErrInvalidGuardedBatch = errors.New("beads: invalid guarded batch")
 
 // BatchItemError names the item that refused the whole batch. It wraps
@@ -263,6 +265,18 @@ func guardedBatchTouched(b GuardedBatch) ([]string, map[string]struct{}) {
 		}
 	}
 	return ids, closed
+}
+
+// guardedCreateCloseReason applies GuardedItem.Create's close-reason rule to
+// the row a backend is about to insert: one created closed records the trimmed
+// metadata.close_reason, as a close does (recordCloseReason), and any other
+// row records none.
+func guardedCreateCloseReason(b *Bead) {
+	if b.Status == "closed" {
+		recordCloseReason(b)
+		return
+	}
+	b.CloseReason = ""
 }
 
 // guardedPreconditionError is the item refusal for a guard that missed.

@@ -42,7 +42,9 @@ func NewProxiedStoreForGuardedBatchConformance(mintPrefix string) Store {
 //     verb's sentinel (ErrAlreadyExists, ErrVersionMismatch, ErrNotFound);
 //   - each ItemResult carries the row's version after the item;
 //   - a create keeps the status it names, so a row can be written closed
-//     (the shared storage's create always opens the row).
+//     (the shared storage's create always opens the row), and stores the
+//     issue's CloseReason as sent, as the real role's close_reason column
+//     does.
 //
 // Requests are serialized, as the shared applier's are, which models the
 // backing's transaction isolation.
@@ -98,14 +100,14 @@ func (a nativeDoltGuardedBatchApplier) apply(ctx context.Context, req issueops.A
 			if err != nil {
 				return issueops.ApplyBatchResult{}, &issueops.ItemError{Index: i, Kind: item.Kind, Err: err}
 			}
-			if item.Create.Issue.Status == beadslib.StatusClosed {
-				a.storage.store.mu.Lock()
-				if idx := a.storage.store.indexOfLocked(id); idx >= 0 {
+			a.storage.store.mu.Lock()
+			if idx := a.storage.store.indexOfLocked(id); idx >= 0 {
+				if item.Create.Issue.Status == beadslib.StatusClosed {
 					a.storage.store.beads[idx].Status = "closed"
-					recordCloseReason(&a.storage.store.beads[idx])
 				}
-				a.storage.store.mu.Unlock()
+				a.storage.store.beads[idx].CloseReason = item.Create.Issue.CloseReason
 			}
+			a.storage.store.mu.Unlock()
 			result.Items = append(result.Items, issueops.ItemResult{
 				Kind: item.Kind, IssueID: created.Issue.ID, Changed: true, RowVersion: created.Issue.RowVersion,
 			})

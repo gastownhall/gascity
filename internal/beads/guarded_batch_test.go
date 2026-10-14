@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"testing"
 
 	beadslib "github.com/steveyegge/beads"
@@ -228,6 +229,43 @@ func TestNativeDoltStoreGuardedBatchMapsItemRefusals(t *testing.T) {
 	}
 }
 
+// The revisions are the role's item results, one per item in request order,
+// each naming its item's row. A result set that does not line up fails the call
+// rather than attributing a revision to the wrong row, and the failure is none
+// of the typed refusals: the batch applied, so the caller re-reads.
+func TestNativeDoltStoreGuardedBatchRefusesResultsThatDoNotLineUp(t *testing.T) {
+	batch := GuardedBatch{Items: []GuardedItem{
+		{Create: &Bead{ID: "gc-new", Title: "new"}},
+		{Update: &GuardedUpdate{ID: "gc-row", Opts: UpdateOpts{Title: guardedTestPtr("t")}}},
+	}}
+	for _, tc := range []struct {
+		name  string
+		items []issueops.ItemResult
+	}{
+		{"out of order", []issueops.ItemResult{
+			{Kind: issueops.ItemUpdate, IssueID: "gc-row", RowVersion: 12},
+			{Kind: issueops.ItemCreate, IssueID: "gc-new", RowVersion: 11},
+		}},
+		{"short", []issueops.ItemResult{
+			{Kind: issueops.ItemCreate, IssueID: "gc-new", RowVersion: 11},
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spy := newBatchTxSpy(&beadslib.Issue{ID: "gc-row", RowVersion: 9})
+			spy.applier.result = issueops.ApplyBatchResult{Items: tc.items}
+			res, err := newNativeDoltStoreForTest(spy).ApplyGuarded(context.Background(), batch)
+			var itemErr *BatchItemError
+			if err == nil || errors.As(err, &itemErr) || errors.Is(err, ErrInvalidGuardedBatch) || errors.Is(err, ErrGuardedBatchUnsupported) {
+				t.Fatalf("ApplyGuarded = %v, want a failure that is none of the typed refusals", err)
+			}
+			if len(res.Revisions) != 0 {
+				t.Fatalf("Revisions = %v, want none", res.Revisions)
+			}
+			soleBatchRequest(t, spy.applier)
+		})
+	}
+}
+
 // A backend with no batch applier answers unsupported, and a read-only handle
 // refuses before it reaches one.
 func TestNativeDoltStoreGuardedBatchRefusals(t *testing.T) {
@@ -347,15 +385,17 @@ func TestCachingStoreGuardedBatchNotifiesEachRowOnce(t *testing.T) {
 	if _, err := b.ApplyGuarded(context.Background(), GuardedBatch{Items: []GuardedItem{
 		{Create: &Bead{ID: "gc-gbnew", Title: "new"}},
 		{Update: &GuardedUpdate{ID: row.ID, ExpectedRevision: &row.Revision, Opts: UpdateOpts{Status: guardedTestPtr("closed")}}},
+		{Create: &Bead{ID: "gc-gbfact", Title: "fact", Status: "closed"}},
 	}}); err != nil {
 		t.Fatalf("ApplyGuarded: %v", err)
 	}
-	// The cache announces a guarded create as bead.updated, as it does a row
-	// a Tx creates (refreshTxTouchedBeads), while the CLI emitter announces the
-	// same write as bead.created. The two paths knowingly diverge, and this
-	// pins the cache's side of it.
-	want := []string{"bead.updated gc-gbnew", "bead.closed " + row.ID}
-	if len(events) != len(want) || events[0] != want[0] || events[1] != want[1] {
+	// The cache types a create as it does a row a Tx creates
+	// (refreshTxTouchedBeads): an open one is bead.updated, and one created
+	// closed is bead.closed with no bead.created before it. The CLI emitter
+	// announces both as bead.created. The two channels knowingly diverge
+	// (CachingStore.GuardedBatcherHandle), and this pins the cache's side.
+	want := []string{"bead.updated gc-gbnew", "bead.closed " + row.ID, "bead.closed gc-gbfact"}
+	if !slices.Equal(events, want) {
 		t.Fatalf("events = %v, want %v", events, want)
 	}
 }

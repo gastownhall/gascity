@@ -9,9 +9,16 @@ var _ GuardedBatcherHandleProvider = (*CachingStore)(nil)
 
 // GuardedBatcherHandle exposes guarded batches through the cache only when its
 // backing can apply them. It asks the backing itself, not the backing's
-// conditional-writes resolve target: see GuardedBatcherFor. The handle is the cache's own forwarder, so
-// a batch applied through it keeps the cache current and notifies each changed
-// row once.
+// conditional-writes resolve target: see GuardedBatcherFor. The handle is the
+// cache's own forwarder, so a batch applied through it keeps the cache current
+// and notifies each changed row once.
+//
+// Each notification types its row as a Tx's do, from the row read back rather
+// than the item that wrote it: a row the batch left closed is bead.closed
+// unless its close was already announced, and any other changed row is
+// bead.updated. A created row is therefore never announced as bead.created, and
+// one created closed is announced only as bead.closed. A consumer that must
+// tell creates apart reads them from the batch it applied.
 func (c *CachingStore) GuardedBatcherHandle() (GuardedBatcher, bool) {
 	backing, ok := GuardedBatcherFor(c.backing)
 	if !ok {
@@ -23,7 +30,7 @@ func (c *CachingStore) GuardedBatcherHandle() (GuardedBatcher, bool) {
 // cachingGuardedBatcher forwards a batch to the backing batcher, then refreshes
 // every row the batch touched exactly as Tx does (refreshTxTouchedBeads): each
 // row is re-read from the backing and installed verbatim, fenced against any
-// newer local write, and announced once.
+// newer local write, and announced once, typed as GuardedBatcherHandle says.
 type cachingGuardedBatcher struct {
 	cache   *CachingStore
 	backing GuardedBatcher

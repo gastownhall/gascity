@@ -311,23 +311,15 @@ func (s *emittingClassStore) emitCreated(created beads.Bead, err error) {
 	if err != nil {
 		return
 	}
-	if emission, ok := s.createdEmission(created); ok {
-		s.emit(emission)
-	}
-}
-
-// createdEmission is emitCreated's row, for a caller that records several in
-// one journal open.
-func (s *emittingClassStore) createdEmission(created beads.Bead) (classStoreEmission, bool) {
 	if strings.TrimSpace(created.ID) == "" {
 		warnClassStoreEmit(errors.New("bead.created skipped: the create returned an empty id"))
-		return classStoreEmission{}, false
+		return
 	}
 	bead, ok := s.snapshot(created.ID)
 	if !ok {
 		bead = created
 	}
-	return classStoreEmission{eventType: events.BeadCreated, bead: bead}, true
+	s.emit(classStoreEmission{eventType: events.BeadCreated, bead: bead})
 }
 
 // emitUpdated records bead.updated for a write that cannot have changed the

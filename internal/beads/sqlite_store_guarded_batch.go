@@ -109,11 +109,7 @@ func (s *SQLiteStore) guardedCreateTx(ctx context.Context, tx *sql.Tx, idx int, 
 	if err != nil {
 		return err
 	}
-	if stored.Status == "closed" {
-		recordCloseReason(&stored)
-	} else {
-		stored.CloseReason = ""
-	}
+	guardedCreateCloseReason(&stored)
 	if err := s.clearClaimFenceTx(ctx, tx, stored.ID); err != nil {
 		return err
 	}

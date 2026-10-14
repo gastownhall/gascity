@@ -126,14 +126,32 @@ func (s *NativeDoltStore) ApplyGuarded(ctx context.Context, b GuardedBatch) (Gua
 	if err != nil {
 		return GuardedResult{}, s.nativeGuardedBatchError(ctx, storage, b, err)
 	}
+	revisions, err := nativeGuardedRevisions(b, result)
+	if err != nil {
+		return GuardedResult{}, err
+	}
+	return GuardedResult{Revisions: revisions}, nil
+}
+
+// nativeGuardedRevisions maps the applied batch's item results onto its rows.
+// The role reports one result per item, in request order, naming the row the
+// item acted on. A result set that does not line up with the request is an
+// error rather than trusted, since a revision attributed to the wrong row
+// would let the caller's next guard pass against a row it never read. The
+// batch has applied by then, so the error is not one of the typed refusals:
+// it is the kind the GuardedBatcher contract says to re-read after.
+func nativeGuardedRevisions(b GuardedBatch, result issueops.ApplyBatchResult) (map[string]int64, error) {
 	if len(result.Items) != len(b.Items) {
-		return GuardedResult{}, fmt.Errorf("native Dolt store: guarded batch applied but the backend reported %d item results for %d items", len(result.Items), len(b.Items))
+		return nil, fmt.Errorf("native Dolt store: guarded batch applied but the backend reported %d item results for %d items", len(result.Items), len(b.Items))
 	}
 	revisions := make(map[string]int64, len(b.Items))
 	for i, it := range b.Items {
+		if got := result.Items[i].IssueID; got != it.id() {
+			return nil, fmt.Errorf("native Dolt store: guarded batch applied but the backend reported item %d as %q, not %q", i, got, it.id())
+		}
 		revisions[it.id()] = result.Items[i].RowVersion
 	}
-	return GuardedResult{Revisions: revisions}, nil
+	return revisions, nil
 }
 
 // nativeGuardedItems translates the batch into apply items. Only an update
@@ -143,7 +161,9 @@ func (s *NativeDoltStore) nativeGuardedItems(ctx context.Context, storage beadsl
 	items := make([]issueops.ApplyItem, 0, len(b.Items))
 	for idx, it := range b.Items {
 		if it.Create != nil {
-			issue, err := nativeIssueFromBead(*it.Create)
+			create := *it.Create
+			guardedCreateCloseReason(&create)
+			issue, err := nativeIssueFromBead(create)
 			if err != nil {
 				return nil, fmt.Errorf("guarded batch item %d (%s): %w", idx, it.Create.ID, err)
 			}

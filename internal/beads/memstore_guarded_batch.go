@@ -27,6 +27,7 @@ func (m *MemStore) ApplyGuarded(ctx context.Context, b GuardedBatch) (GuardedRes
 // applyGuardedLocked is ApplyGuarded's body. The caller holds m.mu and has
 // validated b.
 func (m *MemStore) applyGuardedLocked(b GuardedBatch) (GuardedResult, error) {
+	m.noteGuardedCreates(b)
 	if err := m.checkGuardedLocked(b); err != nil {
 		return GuardedResult{}, err
 	}
@@ -42,6 +43,21 @@ func (m *MemStore) applyGuardedLocked(b GuardedBatch) (GuardedResult, error) {
 		revisions[it.Update.ID] = m.beads[i].Revision
 	}
 	return GuardedResult{Revisions: revisions}, nil
+}
+
+// noteGuardedCreates reports each create's seed to the session hooks before any
+// guard is checked, as Create reports one before its checks, so a batch the
+// store then refuses has reported its creates too. An update reports as it is
+// applied (applyUpdateLocked), as Update's does.
+func (m *MemStore) noteGuardedCreates(b GuardedBatch) {
+	if m.storageOnly {
+		return
+	}
+	for _, it := range b.Items {
+		if it.Create != nil {
+			noteSessionCreate(*it.Create)
+		}
+	}
 }
 
 // checkGuardedLocked is the first phase: it refuses the batch at the first item
@@ -70,9 +86,6 @@ func (m *MemStore) checkGuardedLocked(b GuardedBatch) error {
 // HonorExplicitIDs, except that the create's status is kept (a batch may write
 // a row already closed). The caller holds m.mu and has checked the id is free.
 func (m *MemStore) insertPinnedLocked(b Bead) Bead {
-	if !m.storageOnly {
-		noteSessionCreate(b)
-	}
 	prefix := m.IDPrefix
 	if prefix == "" {
 		prefix = "gc"
@@ -86,11 +99,7 @@ func (m *MemStore) insertPinnedLocked(b Bead) Bead {
 	if b.Type == "" {
 		b.Type = "task"
 	}
-	if b.Status == "closed" {
-		recordCloseReason(&b)
-	} else {
-		b.CloseReason = ""
-	}
+	guardedCreateCloseReason(&b)
 	b.CreatedAt = time.Now().Round(0)
 	b.UpdatedAt = b.CreatedAt
 	b.Revision = 1

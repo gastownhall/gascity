@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -115,5 +116,48 @@ func TestEmittingClassStoreGuardedBatchReadsEachRowOnce(t *testing.T) {
 		if got[id] != typ {
 			t.Errorf("event for %s = %q, want %q (all events %v)", id, got[id], typ, got)
 		}
+	}
+}
+
+// A batch hands back revisions, not rows, so a create the emitter cannot
+// re-read after the batch has nothing true to journal: the request carries an
+// empty status where the store wrote "open", and the caller's timestamps and
+// revision. Journaling it would clobber the fold, so the create is skipped with
+// a diagnostic, while a close the same batch landed still rides bead.closed
+// from the write's own status.
+func TestEmittingClassStoreGuardedBatchSkipsACreateItCannotReRead(t *testing.T) {
+	cityPath := t.TempDir()
+	leaf := &readMissAfterWriteStore{MemStore: beads.NewMemStore()}
+	row, err := leaf.Create(beads.Bead{Title: "row"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	var warned []string
+	restore := classStoreEmitWarn
+	classStoreEmitWarn = func(err error) { warned = append(warned, err.Error()) }
+	t.Cleanup(func() { classStoreEmitWarn = restore })
+
+	store := &emittingClassStore{Store: leaf, cityPath: cityPath}
+	leaf.missing = true
+	closed := "closed"
+	if _, err := store.ApplyGuarded(context.Background(), beads.GuardedBatch{Items: []beads.GuardedItem{
+		{Create: &beads.Bead{ID: "gc-gbunread", Title: "unread"}},
+		{Update: &beads.GuardedUpdate{ID: row.ID, ExpectedRevision: &row.Revision, Opts: beads.UpdateOpts{Status: &closed}}},
+	}}); err != nil {
+		t.Fatalf("ApplyGuarded: %v", err)
+	}
+	if _, err := leaf.MemStore.Get("gc-gbunread"); err != nil {
+		t.Fatalf("the batch create did not land: %v", err)
+	}
+
+	got := beadEvents(readCityJournal(t, cityPath))
+	if len(got) != 1 || got[0].Type != events.BeadClosed || got[0].Subject != row.ID {
+		t.Fatalf("got %s, want only bead.closed for %s: a create that cannot be re-read must not journal the request", eventSummary(got), row.ID)
+	}
+	if snapshot, ok := beads.DecodeBeadEventPayload(got[0].Payload); !ok || !strings.EqualFold(snapshot.Status, "closed") {
+		t.Errorf("bead.closed payload = %s, want a closed status from the write's own transition", got[0].Payload)
+	}
+	if len(warned) != 1 || !strings.Contains(warned[0], "gc-gbunread") {
+		t.Errorf("diagnostics = %q, want one naming the skipped create gc-gbunread", warned)
 	}
 }
