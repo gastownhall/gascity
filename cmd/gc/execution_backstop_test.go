@@ -754,14 +754,18 @@ func TestExecutionBackstopGivesANewIncarnationItsOwnAttempts(t *testing.T) {
 	}
 
 	// The re-stamped latch holds for the new incarnation exactly as the first
-	// one did for the old.
+	// one did for the old, while the seat stays silent.
+	silentSince := f.now.Add(-10 * time.Minute)
 	for i := 0; i < 3; i++ {
 		f.now = f.now.Add(idleClaimNudgeBackoff)
-		f.idleFor(t, 10*time.Minute)
+		f.sp.SetActivity(f.sessName, silentSince)
 		f.tick(t)
 	}
 	if len(f.drained) != 2 {
 		t.Fatalf("drain requests after further ticks on the new incarnation = %v, want still 2", f.drained)
+	}
+	if got := f.sessionMeta(t, executionClaimNudgeStalledTokenKey); got != "incarnation-2" {
+		t.Fatalf("latch token after further ticks = %q, want the new incarnation's latch to hold", got)
 	}
 }
 
@@ -896,11 +900,14 @@ func TestExecutionBackstopReEscalatesWhenARestartLostTheLatchedDrain(t *testing.
 	f.setInstanceToken(t, "incarnation-1")
 	driveToEscalation(t, f)
 	latchedAt := f.now
+	// The seat stays silent: its last activity predates the nudges it never
+	// answered, so no tick reads an answer that would restart the window.
+	silentSince := latchedAt.Add(-10 * time.Minute)
 
 	// Same incarnation, inside the window: latched on every tick.
 	for f.now.Add(idleClaimNudgeBackoff).Before(latchedAt.Add(executionStalledLatchRetryAfter)) {
 		f.now = f.now.Add(idleClaimNudgeBackoff)
-		f.idleFor(t, 10*time.Minute)
+		f.sp.SetActivity(f.sessName, silentSince)
 		f.tick(t)
 	}
 	if len(f.drained) != 1 {
@@ -909,7 +916,7 @@ func TestExecutionBackstopReEscalatesWhenARestartLostTheLatchedDrain(t *testing.
 
 	// The window has passed with the claim still held: the drain was lost.
 	f.now = latchedAt.Add(executionStalledLatchRetryAfter)
-	f.idleFor(t, 10*time.Minute)
+	f.sp.SetActivity(f.sessName, silentSince)
 	f.tick(t)
 	if len(f.drained) != 2 {
 		t.Fatalf("drain requests once the latch outlived its window = %v, want a second escalation", f.drained)
@@ -920,7 +927,7 @@ func TestExecutionBackstopReEscalatesWhenARestartLostTheLatchedDrain(t *testing.
 
 	// The re-written latch restarts the window.
 	f.now = f.now.Add(2 * time.Minute)
-	f.idleFor(t, 10*time.Minute)
+	f.sp.SetActivity(f.sessName, silentSince)
 	f.tick(t)
 	if len(f.drained) != 2 {
 		t.Fatalf("drain requests right after re-latching = %v, want still 2", f.drained)
