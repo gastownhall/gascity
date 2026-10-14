@@ -601,6 +601,11 @@ func DecodeRuntimeRow(b beads.Bead) (RuntimeRow, error) {
 // observation value this build does not know where the patch writes it; one
 // already stored and left unchanged is kept. The caller writes the patch
 // under b's revision.
+//
+// Build next from DecodeRuntimeRow(b) and change only the cells being
+// written: the patch compares next with every owned key of b, so a next
+// built from scratch writes empty over each cell it leaves zero, a newer
+// build's observation value included.
 func RuntimeRowPatch(b beads.Bead, next RuntimeRow) (beads.UpdateOpts, error) {
 	cur, err := DecodeRuntimeRow(b)
 	if err != nil {

@@ -426,6 +426,43 @@ func TestFoldTurnTable(t *testing.T) {
 			write: true,
 		},
 		{
+			// X and then Y ended unobserved, so X's facts are journaled but
+			// LastID is Y. The caller writes them create-if-absent.
+			name: "two turns ended unobserved, then recorded: the older one's facts come again",
+			prev: TurnCells{
+				Generation: 3, Caps: foldCaps, State: TurnStateEnded, At: ts(30),
+				LastID: "Y", LastEnd: TurnEndUnobserved, LastAt: ts(30), Seen: "R", ObservedAt: ts(30),
+			},
+			obs: obsAt(3, "",
+				time.Time{},
+				ObservedTurnEnd{ID: "Y", StartedAt: ts(20), EndedAt: ts(25), Status: TurnSourceCompleted},
+				ObservedTurnEnd{ID: "X", StartedAt: ts(5), EndedAt: ts(15), Status: TurnSourceCompleted},
+				ObservedTurnEnd{ID: "R", StartedAt: ts(2), EndedAt: ts(4), Status: TurnSourceCompleted},
+			),
+			next:  ended("Y", TurnEndCompleted, ts(100)),
+			facts: []Fact{started(3, "X", ts(5)), endedFact("X", TurnEndCompleted, FactBasisRuntime, ts(15))},
+			write: true,
+		},
+		{
+			// X ended unobserved, then U's inferred end was journaled, and U
+			// is running again with X's end not yet recorded, so Seen went
+			// back to R. X's recorded end moves LastID back to X, and U's
+			// end comes again when U ends.
+			name: "a turn recorded late while the later one runs again moves LastID back",
+			prev: with(running(3, "U", ts(30)), func(c *TurnCells) {
+				c.LastID, c.LastEnd, c.LastAt, c.Seen = "U", TurnEndEnded, ts(25), "R"
+			}),
+			obs: obsAt(3, "U", ts(20),
+				ObservedTurnEnd{ID: "X", StartedAt: ts(5), EndedAt: ts(20)},
+				ObservedTurnEnd{ID: "R", StartedAt: ts(2), EndedAt: ts(4), Status: TurnSourceCompleted},
+			),
+			next: with(running(3, "U", ts(30)), func(c *TurnCells) {
+				c.LastID, c.LastEnd, c.LastAt, c.Seen, c.ObservedAt = "X", TurnEndSuperseded, ts(100), "X", ts(100)
+			}),
+			facts: []Fact{started(3, "X", ts(5)), endedFact("X", TurnEndSuperseded, FactBasisRuntime, ts(20))},
+			write: true,
+		},
+		{
 			name: "no capabilities in the observation keep the stored ones",
 			prev: running(3, "T", ts(5)),
 			obs: func() TurnObservation {

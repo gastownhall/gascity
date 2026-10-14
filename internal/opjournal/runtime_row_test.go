@@ -326,6 +326,29 @@ func TestRuntimeRowPatchPreservesUnknownKeys(t *testing.T) {
 		t.Fatalf("no-change patch = %+v, %v", opts, err)
 	}
 
+	// A next built from scratch, not decoded from the row, writes empty over
+	// every owned cell it leaves zero, a newer build's value included.
+	newer := stored
+	newer.Metadata = maps.Clone(stored.Metadata)
+	newer.Metadata[keyRTState] = "sleeping"
+	fresh, err := RuntimeRowPatch(newer, RuntimeRow{Conversation: cur.Conversation, Seq: cur.Seq + 1})
+	if err != nil {
+		t.Fatalf("fresh-next patch: %v", err)
+	}
+	for _, k := range []string{keyRTState, keyRTTurnState, keyRTObserver, keyRTLease, keyRTHostKinds} {
+		if v, ok := fresh.Metadata[k]; !ok || v != "" {
+			t.Fatalf("fresh-next patch leaves %s = %q (written %v), want it written empty", k, v, ok)
+		}
+	}
+	if v := fresh.Metadata[keyRTSeq]; v != formatUint(cur.Seq+1) {
+		t.Fatalf("fresh-next patch writes seq %q", v)
+	}
+	for k := range fresh.Metadata {
+		if !strings.HasPrefix(k, "gc.rt.") || k == "gc.rt.future_cell" {
+			t.Fatalf("fresh-next patch writes key %s it does not own", k)
+		}
+	}
+
 	next := cur
 	next.Extra = nil // a writer's view of the extras never reaches the store
 	next.Lease = Lease{}

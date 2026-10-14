@@ -3,9 +3,13 @@ package opjournal
 import (
 	"fmt"
 	"math/rand"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 )
 
 // modelTurn is one turn of the simulated source.
@@ -15,39 +19,64 @@ type modelTurn struct {
 	end     time.Time
 	status  TurnSourceStatus
 	running bool
+	// unrecorded is the number of reads still to come that miss the turn's
+	// end: the source records it that many reads late.
+	unrecorded int
+	// inferred is an inferred end the observer read for the turn. It stands
+	// in Recent until the turn reads current again or its end is recorded.
+	inferred bool
 }
 
 // turnSourceModel is a seeded source of turn observations that keeps the
 // fold's caller contract: Recent is newest first, bounded by window, and an
-// inferred end stays in Recent until it ages out or its turn is current
-// again, even when the session is gone.
+// ended turn, an inferred end included, stays in Recent until it ages out or
+// its turn is current again, even when the session is gone. The source
+// records each end late reads after it happens, in order.
 type turnSourceModel struct {
-	rng      *rand.Rand
-	window   int
-	clock    time.Time
-	turns    []*modelTurn
-	running  *modelTurn
-	inferred string
-	nextID   int
+	rng     *rand.Rand
+	window  int
+	late    int
+	clock   time.Time
+	turns   []*modelTurn
+	running *modelTurn
+	nextID  int
 }
 
 func (m *turnSourceModel) recent() []ObservedTurnEnd {
 	var out []ObservedTurnEnd
-	if m.inferred != "" {
-		out = append(out, ObservedTurnEnd{ID: m.running.id, StartedAt: m.running.start, EndedAt: m.clock, Inferred: true})
-	}
 	for i := len(m.turns) - 1; i >= 0 && len(out) < m.window; i-- {
-		if t := m.turns[i]; !t.running {
+		switch t := m.turns[i]; {
+		case !t.running && t.unrecorded == 0:
 			out = append(out, ObservedTurnEnd{ID: t.id, StartedAt: t.start, EndedAt: t.end, Status: t.status})
+		case t.inferred:
+			out = append(out, ObservedTurnEnd{ID: t.id, StartedAt: t.start, EndedAt: m.clock, Inferred: true})
 		}
 	}
 	return out
+}
+
+// read returns Recent and counts the read against every end not yet
+// recorded.
+func (m *turnSourceModel) read() []ObservedTurnEnd {
+	recent := m.recent()
+	for _, t := range m.turns {
+		if t.unrecorded > 0 {
+			t.unrecorded--
+		}
+	}
+	return recent
 }
 
 func (m *turnSourceModel) startTurn() {
 	m.nextID++
 	m.running = &modelTurn{id: fmt.Sprintf("t%d", m.nextID), start: m.clock, running: true}
 	m.turns = append(m.turns, m.running)
+}
+
+// endTurn ends the running turn with status.
+func (m *turnSourceModel) endTurn(status TurnSourceStatus) {
+	m.running.running, m.running.end, m.running.status = false, m.clock, status
+	m.running.unrecorded = m.late
 }
 
 // advance moves the source one tick: a turn may start, end with a recorded
@@ -59,12 +88,10 @@ func (m *turnSourceModel) advance() {
 	case m.running == nil && r < 6:
 		m.startTurn()
 	case m.running != nil && r < 3:
-		m.running.running, m.running.end = false, m.clock
-		m.running.status = []TurnSourceStatus{TurnSourceCompleted, TurnSourceCancelled, TurnSourceFailed}[m.rng.Intn(3)]
-		m.running, m.inferred = nil, ""
+		m.endTurn([]TurnSourceStatus{TurnSourceCompleted, TurnSourceCancelled, TurnSourceFailed}[m.rng.Intn(3)])
+		m.running = nil
 	case m.running != nil && r < 5:
-		m.running.running, m.running.end, m.running.status = false, m.clock, ""
-		m.inferred = ""
+		m.endTurn("")
 		m.startTurn()
 	}
 }
@@ -73,15 +100,13 @@ func (m *turnSourceModel) advance() {
 // ended by inference instead of current.
 func (m *turnSourceModel) observe(falseIdle bool) TurnObservation {
 	obs := TurnObservation{Conversation: "gc-1", Generation: 3, ObservedAt: m.clock, Caps: foldCaps}
-	m.inferred = ""
 	if m.running != nil {
-		if falseIdle && m.rng.Intn(4) == 0 {
-			m.inferred = m.running.id
-		} else {
+		m.running.inferred = falseIdle && m.rng.Intn(4) == 0
+		if !m.running.inferred {
 			obs.Current, obs.CurrentStart = m.running.id, m.running.start
 		}
 	}
-	obs.Recent = m.recent()
+	obs.Recent = m.read()
 	return obs
 }
 
@@ -91,38 +116,61 @@ func (m *turnSourceModel) goneObservation() TurnObservation {
 	m.clock = m.clock.Add(time.Second)
 	return TurnObservation{
 		Conversation: "gc-1", Generation: 3, ObservedAt: m.clock, Caps: foldCaps,
-		Recent: m.recent(), SessionGone: true,
+		Recent: m.read(), SessionGone: true,
 	}
 }
 
-// TestFoldTurnModel folds seeded runs of a source with gaps, false idles and
-// session death, and checks that the fold never journals one fact twice,
-// that every fact encodes, and that folding an observation again writes
-// nothing.
+// TestFoldTurnModel folds seeded runs of a source with gaps, false idles,
+// session death and ends recorded late, and writes every fact with
+// RecordFact. It checks that every fact encodes, that folding an observation
+// again writes nothing, and that the fold returns a journaled fact again only
+// when the source records ends late; RecordFact then reports it not created
+// and leaves the stored row as it was. A late source must return one.
 func TestFoldTurnModel(t *testing.T) {
-	const seeds = 2000
+	// A late source returns journaled facts in most runs, so fewer seeds
+	// cover it.
+	sources := []struct {
+		late  int
+		seeds int64
+	}{{late: 0, seeds: 2000}, {late: 2, seeds: 500}}
 	for _, window := range []int{1, 3, 8} {
 		for _, falseIdle := range []bool{false, true} {
 			for _, gone := range []bool{false, true} {
-				name := fmt.Sprintf("window=%d/false_idle=%v/session_gone=%v", window, falseIdle, gone)
-				t.Run(name, func(t *testing.T) {
-					for seed := int64(1); seed <= seeds; seed++ {
-						if msg := foldTurnModelRun(seed, window, falseIdle, gone); msg != "" {
-							t.Fatalf("seed %d: %s", seed, msg)
+				for _, src := range sources {
+					late := src.late
+					name := fmt.Sprintf("window=%d/false_idle=%v/session_gone=%v/late=%d", window, falseIdle, gone, late)
+					t.Run(name, func(t *testing.T) {
+						repeats := 0
+						for seed := int64(1); seed <= src.seeds; seed++ {
+							n, msg := foldTurnModelRun(seed, window, late, falseIdle, gone)
+							if msg != "" {
+								t.Fatalf("seed %d: %s", seed, msg)
+							}
+							repeats += n
 						}
-					}
-				})
+						if late > 0 && repeats == 0 {
+							t.Fatal("no seed returned a journaled fact again")
+						}
+					})
+				}
 			}
 		}
 	}
 }
 
-// foldTurnModelRun runs one seed and returns a failure with its trace, or "".
-func foldTurnModelRun(seed int64, window int, falseIdle, gone bool) string {
+// foldTurnModelRun runs one seed and returns the number of journaled facts
+// the fold returned again, and a failure with its trace, or "".
+func foldTurnModelRun(seed int64, window, late int, falseIdle, gone bool) (int, string) {
 	rng := rand.New(rand.NewSource(seed))
-	m := &turnSourceModel{rng: rng, window: window, clock: t0}
+	m := &turnSourceModel{rng: rng, window: window, late: late, clock: t0}
+	mem := &beads.MemStore{IDPrefix: "gc", HonorExplicitIDs: true}
+	store, err := NewStore(beads.SessionStore{Store: mem}, &clock.Fake{Time: t0}, WithIDPrefix("gc"))
+	if err != nil {
+		return 0, "NewStore: " + err.Error()
+	}
 	var cells TurnCells
 	recorded := map[string]string{}
+	repeats := 0
 	var trace []string
 	fold := func(obs TurnObservation, ref InterruptRef) string {
 		next, facts, write := FoldTurn(cells, obs, ref)
@@ -133,17 +181,28 @@ func foldTurnModelRun(seed int64, window int, falseIdle, gone bool) string {
 		trace = append(trace, fmt.Sprintf("cur=%q recent=%d gone=%v -> write=%v facts=%v cells{%s %s last=%s/%s seen=%s}",
 			obs.Current, len(obs.Recent), obs.SessionGone, write, got, next.State, next.ID, next.LastID, next.LastEnd, next.Seen))
 		for i, f := range facts {
-			if _, err := EncodeFact("gc", f); err != nil {
-				return "encode: " + err.Error()
-			}
 			id, err := FactID("gc", f)
 			if err != nil {
 				return "fact id: " + err.Error()
 			}
-			if first, dup := recorded[id]; dup {
+			first, journaled := recorded[id]
+			if !journaled {
+				if created, err := store.RecordFact(f); err != nil || !created {
+					return fmt.Sprintf("RecordFact %s = created %v, %v", got[i], created, err)
+				}
+				recorded[id] = got[i]
+				continue
+			}
+			if late == 0 {
 				return fmt.Sprintf("duplicate %s; first %s", got[i], first)
 			}
-			recorded[id] = got[i]
+			repeats++
+			before, _ := mem.Get(id)
+			created, err := store.RecordFact(f)
+			if after, _ := mem.Get(id); err != nil || created || !reflect.DeepEqual(after, before) {
+				return fmt.Sprintf("RecordFact %s, journaled as %s = created %v, %v; row %+v, was %+v",
+					got[i], first, created, err, after, before)
+			}
 		}
 		again, refacts, rewrite := FoldTurn(next, obs, ref)
 		if rewrite || len(refacts) > 0 || !again.equal(next) {
@@ -152,7 +211,7 @@ func foldTurnModelRun(seed int64, window int, falseIdle, gone bool) string {
 		cells = next
 		return ""
 	}
-	fail := func(msg string) string { return msg + "\n" + strings.Join(trace, "\n") }
+	fail := func(msg string) (int, string) { return repeats, msg + "\n" + strings.Join(trace, "\n") }
 
 	steps := 5 + rng.Intn(40)
 	for k := 0; k < steps; k++ {
@@ -174,5 +233,5 @@ func foldTurnModelRun(seed int64, window int, falseIdle, gone bool) string {
 			return fail(msg)
 		}
 	}
-	return ""
+	return repeats, ""
 }

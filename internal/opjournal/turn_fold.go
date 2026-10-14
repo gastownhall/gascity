@@ -203,8 +203,10 @@ type TurnObservation struct {
 	Recent []ObservedTurnEnd
 	// SessionGone reports that the runtime exited.
 	SessionGone bool
-	// ObservedAt is the observer's clock at the read. It is required: it
-	// dates every cell write and every fact without a source time.
+	// ObservedAt is the observer's clock at the read. It is required and
+	// non-zero: it dates every cell write and every fact without a source
+	// time. FoldTurn does not check it; a zero time leaves the time cells
+	// empty, and a fact it dates does not encode.
 	ObservedAt time.Time
 	// Caps is the capabilities stamp to publish; nil keeps the stored one.
 	Caps TurnCapsStamp
@@ -214,7 +216,11 @@ type TurnObservation struct {
 // credits that turn's end to the op. A ref without both an op and a turn is
 // no interrupt: an interrupted end always names its op (X11 D5).
 type InterruptRef struct {
-	Op   string
+	// Op is the interrupt op's journal id. The fold copies it into the
+	// turn.ended fact's CauseOps unchecked, and a fact whose cause is not an
+	// op id does not encode.
+	Op string
+	// Turn is the source-owned id of the interrupted turn.
 	Turn string
 }
 
@@ -242,6 +248,16 @@ func (r InterruptRef) names(turn string) bool { return r.Op != "" && r.Turn != "
 //     fact, and when it ends again the cells follow the source with no
 //     second turn.ended; the first one stays as the record of what gc
 //     concluded.
+//
+// LastID is all the fold remembers of what it journaled. A source that
+// records ends late can show a turn the fold already ended unobserved as
+// newer than Seen once a later turn's end is journaled too; the fold then
+// returns that turn's facts again, with the recorded reason. When the later
+// turn is not in Recent as ended (its end is not yet recorded, or it is
+// running again after a false idle), LastID moves back to the older turn,
+// and the later turn's facts can come again as well. The caller writes each
+// fact create-if-absent, as RecordFact does: an occurrence already stored is
+// success and keeps its first record.
 //
 // Folding the same observation twice writes nothing the second time.
 //
@@ -339,8 +355,9 @@ type folder struct {
 	interrupting InterruptRef
 	next         *TurnCells
 	facts        []Fact
-	// journaled is the turn whose facts are already written: the last end
-	// before this fold.
+	// journaled is the last turn to end before this fold, whose facts are
+	// written. It is the only one the fold knows of (see FoldTurn on ends
+	// recorded late).
 	journaled string
 	// ended reports that the fold recorded at least one end.
 	ended bool
