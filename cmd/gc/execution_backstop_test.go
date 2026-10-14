@@ -701,8 +701,7 @@ func (f *executionBackstopFixture) stalledEvents() int {
 // incarnation still holding the same claim. That incarnation has never been
 // nudged: it starts a fresh attempt window and is drained only once it has
 // spent its own attempts. Re-escalating at once on the old incarnation's spent
-// count drains every incarnation at its first idle grace, which is the loop
-// one seat was caught in 45 times in three hours.
+// count drains every incarnation at its first idle grace.
 func TestExecutionBackstopGivesANewIncarnationItsOwnAttempts(t *testing.T) {
 	f := newExecutionBackstopFixture(t)
 	f.setInstanceToken(t, "incarnation-1")
@@ -773,9 +772,7 @@ func TestExecutionBackstopGivesANewIncarnationItsOwnAttempts(t *testing.T) {
 // a nudge with a turn (runtime activity after the nudge was reserved; tmux
 // already discounts gc's own send-keys echo) is executing, typically waiting
 // on a long-running job between turns. Its attempt window restarts, so it is
-// never drained while it keeps answering. Only the disappearance of the claim
-// used to clear the window, so a seat that answered every nudge was drained at
-// the attempt cap regardless.
+// never drained while it keeps answering.
 func TestExecutionBackstopAnAnsweredNudgeRestartsTheWindow(t *testing.T) {
 	f := newExecutionBackstopFixture(t)
 	f.idleFor(t, 10*time.Minute)
@@ -830,6 +827,43 @@ func TestExecutionBackstopAnAnswerAfterTheLastNudgeHoldsOffTheDrain(t *testing.T
 	}
 	if got := f.sessionMeta(t, executionClaimNudgeCountKey); got != "0" {
 		t.Fatalf("attempt count after the last nudge was answered = %q, want 0", got)
+	}
+}
+
+// TestExecutionBackstopTheLastNudgeGetsItsFullBackoff: the last nudge is
+// answered on the same terms as the earlier ones. A tick after the runtime has
+// discounted the nudge's echo but inside the backoff does not drain the seat,
+// so an answer that starts later in the backoff still restarts the window.
+func TestExecutionBackstopTheLastNudgeGetsItsFullBackoff(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	for i := 0; i < idleClaimNudgeMaxAttempts; i++ {
+		f.now = f.now.Add(idleClaimNudgeGrace + idleClaimNudgeBackoff)
+		f.idleFor(t, 10*time.Minute)
+		f.tick(t)
+	}
+	nudgedAt := f.now
+
+	// Quiet, with the echo already discounted, well inside the backoff.
+	f.now = nudgedAt.Add(20 * time.Second)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if len(f.drained) != 0 {
+		t.Fatalf("drain requests inside the last nudge's backoff = %v, want none; stdout=%s", f.drained, f.stdout.String())
+	}
+
+	// The agent answers at +30 s; the answer is judged after the grace.
+	f.sp.SetActivity(f.sessName, nudgedAt.Add(30*time.Second))
+	f.now = nudgedAt.Add(idleClaimNudgeGrace)
+	f.tick(t)
+	if got := f.sessionMeta(t, executionClaimNudgeCountKey); got != "0" {
+		t.Fatalf("attempt count after a late answer to the last nudge = %q, want a restarted window (0)", got)
+	}
+	f.now = nudgedAt.Add(idleClaimNudgeBackoff)
+	f.tick(t)
+	if len(f.drained) != 0 {
+		t.Fatalf("drain requests after the last nudge was answered = %v, want none", f.drained)
 	}
 }
 

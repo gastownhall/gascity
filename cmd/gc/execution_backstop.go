@@ -315,18 +315,16 @@ func (p poolExecutionBackstop) resolve(s beads.Bead, _ map[string]beads.Bead, se
 // runtime saw activity after the latest attempt was reserved. An agent that
 // answers is executing, most often waiting at its prompt for a long-running
 // job it started, so the window restarts instead of counting toward the drain.
-// Before this, only the claim going away cleared the window, and a seat that
-// answered every nudge was drained at the attempt cap regardless. An
-// unreadable activity signal is no answer, and neither is a window still at
+// An unreadable activity signal is no answer, and neither is a window still at
 // its observe marker.
 //
 // The answer is judged only once idleClaimNudgeGrace has passed since the
 // attempt was reserved. The tmux runtime discounts gc's own send-keys echo
 // (Tmux.GetSessionActivity), but only once its poke grace has elapsed after
 // the delivery completed; before that, the echo of a nudge nobody answered
-// reads as fresh activity. The engine takes no further step on the window
-// until idleClaimNudgeBackoff after the attempt, so judging later loses
-// nothing.
+// reads as fresh activity. Neither the next nudge nor, after the last one, the
+// drain (exhausted) comes before idleClaimNudgeBackoff after the attempt, so
+// judging later loses nothing.
 func (p poolExecutionBackstop) answeredNudge(s beads.Bead, target backstopTarget, last time.Time, err error) bool {
 	if err != nil || last.IsZero() {
 		return false
@@ -421,8 +419,7 @@ func executionSnapshotVetoApplies(meta map[string]string) bool {
 // were spent on a runtime that is gone, and the new one has never been nudged.
 // Reporting it as unobserved makes the engine start a fresh window (observe),
 // rather than escalate again at the new incarnation's first idle grace with no
-// nudge in between, which drained one stopped-and-rewoken seat every few
-// minutes for hours.
+// nudge in between.
 func (p poolExecutionBackstop) state(s beads.Bead, target backstopTarget) (same bool, attempts int, last time.Time) {
 	same = strings.TrimSpace(s.Metadata[executionClaimNudgeWorkKey]) == target.ID &&
 		strings.TrimSpace(s.Metadata[executionClaimNudgeStoreRefKey]) == target.StoreRef &&
@@ -550,6 +547,14 @@ func stalledLatchHolds(s *beads.Bead, atKey, tokenKey string, now time.Time) boo
 // been lost escalates again, and the re-written latch restarts the bound.
 func (p poolExecutionBackstop) exhausted(store beads.Store, s *beads.Bead, stdout io.Writer) {
 	if p.stalledLatchHolds(s) {
+		return
+	}
+	// The last nudge gets the same backoff as the earlier ones before it
+	// counts as unanswered: the engine reports the cap as soon as it is
+	// reserved, and an answer later in the backoff must still restart the
+	// window (answeredNudge).
+	if atoiOr0(s.Metadata[executionClaimNudgeCountKey]) >= 1 &&
+		p.now.Sub(parseRFC3339OrZero(s.Metadata[executionClaimNudgeAtKey])) < idleClaimNudgeBackoff {
 		return
 	}
 	beadID := strings.TrimSpace(s.Metadata[executionClaimNudgeWorkKey])
