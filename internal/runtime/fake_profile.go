@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -463,8 +464,9 @@ func (f FullFake) InterruptTurn(ctx context.Context, name, turnID string) (TurnI
 
 // WaitTurnEnded implements [TurnFenceProvider] without sleeping: it reads the
 // script until the turn is no longer turnID, and answers ErrTurnNotEnded once
-// the script is exhausted on turnID. A read error is remembered and the next
-// entry read, as the bridge's poll does; timeout is not consulted.
+// the script is exhausted on turnID. A read reporting ErrSessionNotFound ends
+// the turn, as the bridge's poll does; another read error is skipped and the
+// next entry read. timeout is not consulted.
 func (f FullFake) WaitTurnEnded(ctx context.Context, name, turnID string, _ time.Duration) (TurnState, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -481,6 +483,8 @@ func (f FullFake) WaitTurnEnded(ctx context.Context, name, turnID string, _ time
 		}
 		st, exhausted, err := f.readTurnLocked(name)
 		switch {
+		case errors.Is(err, ErrSessionNotFound):
+			return TurnState{}, nil
 		case err != nil:
 			continue // TurnReadErrors is finite: the script answers next
 		case st.TurnID != turnID:

@@ -452,3 +452,14 @@ func TestFullFakeTurnFenceRefusesAnEmptyTurnID(t *testing.T) {
 		t.Fatalf("calls = %q, want %q", got, want)
 	}
 }
+
+// Kills a FullFake WaitTurnEnded that reads past a session the runtime no
+// longer hosts instead of treating it as the turn's end, as the bridge does.
+func TestFullFakeWaitTurnEndedSessionGoneEndsTheTurn(t *testing.T) {
+	f, tf := turnFake()
+	f.TurnScripts = map[string][]string{"s": {"t1"}}
+	f.TurnReadErrors = map[string][]error{"s": {runtime.ErrSessionNotFound}}
+	if st, err := tf.WaitTurnEnded(t.Context(), "s", "t1", time.Hour); err != nil || st.Active() {
+		t.Fatalf("session gone mid-wait = %+v, %v; want no turn, nil", st, err)
+	}
+}
