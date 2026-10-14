@@ -10,9 +10,14 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 )
 
-// requireIdempotency lists the create operations that MUST accept an
-// Idempotency-Key header. This set grows as each wiring slice (audit P0 #4)
-// lands; a regression that drops the header fails TestCreateEndpointsAreTriagedForIdempotency.
+// requireIdempotency lists the POST operations that MUST accept an
+// Idempotency-Key header: resource creates, and the session actions a client
+// cannot safely retry without a key (a retried submit or message is delivered
+// twice, a retried stop can interrupt a later turn, a retried wake records a
+// second wake, and a retried respond fails once the first one cleared the
+// interaction). This set grows as each wiring slice (audit P0 #4) lands; a
+// regression that drops the header fails
+// TestCreateEndpointsAreTriagedForIdempotency.
 var requireIdempotency = map[string]bool{
 	"create-bead":             true,
 	"send-mail":               true,
@@ -28,6 +33,8 @@ var requireIdempotency = map[string]bool{
 	"submit-session":          true,
 	"send-session-message":    true,
 	"respond-session":         true,
+	"post-v0-city-by-city-name-session-by-id-stop": true,
+	"post-v0-city-by-city-name-session-by-id-wake": true,
 }
 
 // pendingIdempotency lists known create operations that are deliberately NOT
@@ -39,12 +46,21 @@ var pendingIdempotency = map[string]bool{
 }
 
 // exemptFromIdempotency lists POST operations that are NOT resource creates and
-// therefore need no Idempotency-Key: actions on an existing resource (id in the
-// path — naturally keyed by the target), dispatch/trigger endpoints (their own
-// conflict guards), and reads-via-POST. Listing them explicitly (rather than
-// relying on a status-code heuristic) makes the guard airtight: every POST must
-// be classified, so a new create at ANY status (201, 202, …) that is neither
-// wired nor triaged fails the test.
+// are not required to take an Idempotency-Key: actions on an existing resource
+// (id in the path), dispatch/trigger endpoints (their own conflict guards), and
+// reads-via-POST. Not being a create is not enough on its own: an action a
+// client cannot safely retry without a key belongs in requireIdempotency, like
+// the session actions listed there. Listing every exemption explicitly (rather
+// than relying on a status-code heuristic) makes the guard airtight: every POST
+// must be classified, so a new create at ANY status (201, 202, …) that is
+// neither wired nor triaged fails the test.
+//
+// Of the session actions here, close, permission-mode, pin, rename, suspend and
+// unpin set a state: with no other request in between, a retry sets the same
+// state again or is refused. kill and reset are the exception: the controller
+// may restart the session after either, so a late retry kills or resets the
+// restarted session, the same exposure as a retried stop interrupting a later
+// turn. They stay here until ga-q0gyz3 decides whether to wire them.
 var exemptFromIdempotency = map[string]bool{
 	// ensure-extmsg-group is identity-idempotent by design: the ensure
 	// semantics (same group in → same group out) make a retry safe without a
@@ -85,10 +101,8 @@ var exemptFromIdempotency = map[string]bool{
 	"post-v0-city-by-city-name-session-by-id-pin":              true,
 	"post-v0-city-by-city-name-session-by-id-rename":           true,
 	"post-v0-city-by-city-name-session-by-id-reset":            true,
-	"post-v0-city-by-city-name-session-by-id-stop":             true,
 	"post-v0-city-by-city-name-session-by-id-suspend":          true,
 	"post-v0-city-by-city-name-session-by-id-unpin":            true,
-	"post-v0-city-by-city-name-session-by-id-wake":             true,
 	"post-v0-city-by-city-name-sling":                          true,
 	"post-v0-city-by-city-name-unregister":                     true,
 	"rotate-events":                                            true,
@@ -145,10 +159,11 @@ func liveIdemSpec(t *testing.T) idemSpecDoc {
 //   - exemptFromIdempotency → not a create (action/dispatch/read); no header
 //
 // A POST operation in none of the sets fails the test: a new endpoint was added
-// without triage. If it's a create, wire it through withIdempotency and add it
-// to requireIdempotency; otherwise add it to exemptFromIdempotency. This full
-// partition closes the gap where a create at a non-201 status (e.g. 202) could
-// slip past a status-code heuristic.
+// without triage. If it creates a resource, or a client cannot safely retry it
+// without a key (as for the session actions in requireIdempotency), wire it
+// through withIdempotency and add it to requireIdempotency; otherwise add it to
+// exemptFromIdempotency. This full partition closes the gap where a create at a
+// non-201 status (e.g. 202) could slip past a status-code heuristic.
 func TestCreateEndpointsAreTriagedForIdempotency(t *testing.T) {
 	spec := liveIdemSpec(t)
 

@@ -587,6 +587,8 @@ var timelineGoldenRulings = []goldenRuling{
 	{"a crash 5m0s after wake", timelineGoldenBaseline, "21983abfeb7d"},
 	{"a manual conversation crashes 29s after wake", timelineGoldenBaseline, "5d9d5e446127"},
 	{"a manual conversation crashes 31s after wake", timelineGoldenBaseline, "3fa7f34371d2"},
+	{"a manual conversation crashes 29s after wake", "fix #7470 (mc-k1yy6): a committed manual conversation keeps its key and hash through the wake failure (#7470)", "4f3610da3b6f"},
+	{"a manual conversation crashes 31s after wake", "fix #7470 (mc-k1yy6): a committed manual conversation keeps its key and hash through the churn (#7470)", "b82abd57b861"},
 	{"a live quarantined row 29s after wake", timelineGoldenBaseline, "f559e3fcf255"},
 	{"a live quarantined row 31s after wake", timelineGoldenBaseline, "25811fbce399"},
 	{"a managed suspend drains, then wake", timelineGoldenBaseline, "48df08bf8396"},

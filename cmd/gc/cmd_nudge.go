@@ -249,6 +249,15 @@ func (t nudgeTarget) sessionTransport() string {
 	return t.agent.Session
 }
 
+// processNames are the agent processes the target's provider runs, by
+// which a runtime handle tells a crashed agent in a pane still up.
+func (t nudgeTarget) processNames() []string {
+	if t.resolved == nil {
+		return nil
+	}
+	return t.resolved.ProcessNames
+}
+
 func (t nudgeTarget) providerName() string {
 	if t.resolved != nil && strings.TrimSpace(t.resolved.Name) != "" {
 		return strings.TrimSpace(t.resolved.Name)
@@ -1287,12 +1296,15 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	if result.Undelivered == worker.NudgeQueuedHeld {
-		// The session is held and queued the nudge itself (CONTRACT v5.9 D8);
-		// a held wait-idle nudge (NudgeUndeliveredHeld) is queued below.
+	if result.Undelivered == worker.NudgeQueued {
+		// The session could not take it now and queued the nudge itself
+		// (CONTRACT v5.9 D8); a held wait-idle nudge (NudgeUndeliveredHeld) is
+		// queued below.
 		return writeQueuedSessionNudgeResult(target, mode, jsonOutput, result.Undelivered, stdout, stderr)
 	}
-	if mode == nudgeDeliveryWaitIdle && !result.Delivered {
+	if !result.Delivered {
+		// Not delivered and not queued: a wait-idle nudge that found no
+		// boundary, or any nudge to an agent dead in its pane (mc-48az4).
 		return queueSessionNudgeWithWorker(target, store, sp, message, mode, jsonOutput, result.Undelivered, stdout, stderr)
 	}
 	// Stamp every delivered nudge: a resumed session's manager already
@@ -1502,7 +1514,7 @@ func workerHandleForNudgeTarget(target nudgeTarget, store beads.Store, sp runtim
 			target.sessionName,
 			strings.TrimSpace(target.providerFamily()),
 			strings.TrimSpace(target.sessionTransport()),
-			nil,
+			target.processNames(),
 		)
 		if err == nil {
 			return handle, nil
@@ -1522,7 +1534,7 @@ func workerHandleForNudgeTarget(target nudgeTarget, store beads.Store, sp runtim
 		target.sessionName,
 		strings.TrimSpace(target.providerFamily()),
 		strings.TrimSpace(target.sessionTransport()),
-		nil,
+		target.processNames(),
 	)
 }
 
@@ -1649,6 +1661,10 @@ func queuedNudgeDowngradeNote(target nudgeTarget, undelivered worker.NudgeUndeli
 		return " (the session is waiting on a permission prompt; the queued dispatcher delivers it after the prompt is answered)"
 	case worker.NudgeUndeliveredHeld, worker.NudgeQueuedHeld:
 		return " (the session is held by an operator or a wait; the nudge is delivered the next time the session runs, and expires after 24h)"
+	case worker.NudgeQueued:
+		return " (the session cannot take it now: it is held by an operator or a wait, not running, or its agent is down; the nudge is delivered the next time the session runs, and expires after 24h)"
+	case worker.NudgeUndeliveredAgentDead:
+		return " (the session's agent is down; the nudge is delivered once the controller restarts it, and expires after 24h)"
 	default:
 		return ""
 	}
@@ -1769,7 +1785,15 @@ func resolveNudgeTargetPreferringHookIdentity(identifier string, preferHookIdent
 	if err != nil {
 		return nudgeTarget{}, err
 	}
-	store := openNudgeBeadStore(cityPath)
+	return resolveNudgeTargetInStore(cityPath, cfg, openNudgeBeadStore(cityPath), identifier, preferHookIdentity)
+}
+
+// resolveNudgeTargetInStore is resolveNudgeTargetPreferringHookIdentity over a
+// city, config and nudges store the caller already holds. A zero store resolves
+// nothing and reports identifier as not found, so a caller that must tell an
+// unopened store from a missing session opens the store itself and checks the
+// open error first.
+func resolveNudgeTargetInStore(cityPath string, cfg *config.City, store beads.NudgesStore, identifier string, preferHookIdentity bool) (nudgeTarget, error) {
 	if store.Store != nil {
 		// Named-session materialization is a session WRITE, and the follow-up Get
 		// reads the session bead; both route through the session-class store
@@ -1926,6 +1950,13 @@ func parseNudgeDeliveryMode(raw string) (nudgeDeliveryMode, error) {
 }
 
 func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.Store, sp runtime.Provider, quiescence time.Duration, obs worker.LiveObservation) (bool, error) {
+	// A pane whose agent is dead (a crash the controller has not healed)
+	// takes no queued delivery: the text would be lost with the pane. The
+	// incarnation the heal brings up claims it (mc-48az4). Alive is Running
+	// for a provider with no process names to check.
+	if !obs.Alive {
+		return false, nil
+	}
 	matches, err := nudgeTargetLiveGenerationMatches(target, obs, sp)
 	if err != nil || !matches {
 		return false, err

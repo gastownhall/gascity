@@ -167,7 +167,7 @@ type ListBody[T any] struct {
 // the age is unknown); read-path CLI commands surface this as
 // _cache_age_s in --json output and as a stale-read banner > 30 s.
 type ListOutput[T any] struct {
-	Index     uint64  `header:"X-GC-Index" doc:"Latest event sequence number."`
+	Index     uint64  `header:"X-GC-Index" doc:"City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event."`
 	CacheAgeS float64 `header:"X-GC-Cache-Age-S" doc:"Age in seconds of the CachingStore snapshot that served this response (0 if not applicable)."`
 	Body      ListBody[T]
 }
@@ -182,7 +182,7 @@ type ListOutput[T any] struct {
 // lagging reconciler under-report true staleness and suppress the banner
 // `gc status` renders above cacheAgeBannerThresholdSeconds.
 type IndexOutput[T any] struct {
-	Index     uint64  `header:"X-GC-Index" doc:"Latest event sequence number."`
+	Index     uint64  `header:"X-GC-Index" doc:"City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event."`
 	CacheAgeS float64 `header:"X-GC-Cache-Age-S" doc:"Age in seconds of the CachingStore snapshot that served this response (0 if not applicable)."`
 	Body      T
 }

@@ -88,21 +88,24 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 	case ProfileSSH:
 		return sshProfile{core, b, timed}
 	case ProfileT3Bridge:
-		return t3bridgeProfile{core, b, timed}
+		return t3bridgeProfile{core, b, timed, turnInterruptTrait{TurnInterruptProtocol}}
 	}
 	panic(fmt.Sprintf("runtime: unknown profile %d", p))
 }
 
 // The fixed traits a backend reports.
 type (
-	sleepTrait       struct{ c SessionSleepCapability }
-	freshTrait       struct{}                  // acp and subprocess probe their control socket on every read
-	sidecarTrait     struct{}                  // acp and subprocess keep identity in a local sidecar
-	transportTrait   struct{}                  // acp's
-	probeBudgetTrait struct{ d time.Duration } // exec's idle-proof budget: zero without a handshake, as the profile has none
+	sleepTrait         struct{ c SessionSleepCapability }
+	freshTrait         struct{}                  // acp and subprocess probe their control socket on every read
+	sidecarTrait       struct{}                  // acp and subprocess keep identity in a local sidecar
+	transportTrait     struct{}                  // acp's
+	probeBudgetTrait   struct{ d time.Duration } // exec's idle-proof budget: zero without a handshake, as the profile has none
+	turnInterruptTrait struct{ m TurnInterruptMode }
 )
 
 func (t sleepTrait) SleepCapability(string) SessionSleepCapability { return t.c }
+
+func (t turnInterruptTrait) TurnInterruptMode(string) TurnInterruptMode { return t.m }
 
 func (t probeBudgetTrait) IdleProbeBudget() time.Duration { return t.d }
 
@@ -217,6 +220,7 @@ type (
 		Provider
 		LivenessObserverWithError
 		sleepTrait
+		turnInterruptTrait
 	}
 )
 

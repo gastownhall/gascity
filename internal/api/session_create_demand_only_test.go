@@ -173,7 +173,7 @@ func TestHumaHandleSessionWakeRefusesDemandOnlySingletonSession(t *testing.T) {
 	id := createDemandOnlyPoolSession(t, fs)
 	srv := New(fs)
 
-	_, err := srv.humaHandleSessionWake(context.Background(), &SessionIDInput{ID: id})
+	_, err := srv.humaHandleSessionWake(context.Background(), &SessionControlInput{ID: id})
 	if err == nil {
 		t.Fatal("humaHandleSessionWake() = nil error; want a refusal for a demand-only singleton session")
 	}

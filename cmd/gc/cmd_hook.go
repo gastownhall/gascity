@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -38,14 +39,15 @@ Without --inject: prints normalized ready-only output, exits 0 if work exists, 1
 With --inject: silent legacy Stop-hook compatibility; skips the work query and always exits 0.
 With --claim: runs the standard startup claim protocol for one work item.
 
-Without --inject or --claim, a work query that gets no answer from the bead
-store (a connection error, a timeout, a killed query, a locked database, or
-bd's circuit breaker failing fast) exits 2 and prints GC_HOOK_STORE_UNAVAILABLE
-on stderr: the store could not be read, which is not the same as no work. Any
-other work-query failure exits 1. The generated default work query discards
-bd's errors in its single-store tiers, so there a store that fails fast still
-reads as no work; only a deadline overrun exits 2. With --claim, a failed work
-query exits 1 and writes no drain record.
+A work query that gets no answer from the bead store (a connection error, a
+timeout, a killed query, a locked database, or bd's circuit breaker failing
+fast) exits 2 and prints GC_HOOK_STORE_UNAVAILABLE on stderr: the answer is
+unknown, not empty. Any other work-query failure exits 1. This applies with and
+without --claim, and neither writes a drain result. The generated default work
+query discards bd's errors in its single-store tiers, so there a store that
+fails fast still reads as no work; only a deadline overrun exits 2. Only the
+agent's own store reports: other stores the hook also searches are
+best-effort, and one that fails reads as having no work.
 
 The agent is determined from $GC_AGENT or a positional argument.`,
 		Args: cobra.MaximumNArgs(1),
@@ -832,23 +834,19 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 		discovered, selected, err := selectStoreWithWorkRetrying(workQuery, remaining, primary, run, &ops)
 		if err != nil {
 			emitFailure(workQuery, err)
-			fmt.Fprintf(stderr, "gc hook --claim: %v\n", err) //nolint:errcheck // best-effort stderr
-			// Deliberately NO drain result and NO drain-ack. A failed read is not
-			// an idle store: the controller counted demand for this seat, so
-			// draining here would convert a transport failure into a false idle,
-			// reap the seat, and leave the work for the next tick to rediscover.
-			// Exit non-zero, keep the seat, and let the event above carry the
-			// cause; the idle-claim backstop re-drives the hook.
-			return 1
+			return reportClaimWorkQueryFailure(err, stderr)
 		}
 		if isZeroHookStore(selected) {
 			break // no remaining store has ready work
 		}
+		// On a multi-leg city this re-reads the selected store before the
+		// mutation, and a primary-leg failure there is surfaced exactly like a
+		// discovery failure: it is the same read of the same store, moments
+		// later, so it gets the same classification.
 		claimOutput, claimStore, err := claimStoreWithFallback(workQuery, remaining, selected, primary, discovered, run)
 		if err != nil {
 			emitFailure(workQuery, err)
-			fmt.Fprintf(stderr, "gc hook --claim: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
+			return reportClaimWorkQueryFailure(err, stderr)
 		}
 		if isZeroHookStore(claimStore) {
 			break // selected store emptied and no later store has ready work
@@ -882,18 +880,48 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 	return writeHookClaimNoWork(claimOpts, ops, claimsErrored, workDir, stdout, stderr)
 }
 
+// reportClaimWorkQueryFailure reports a failed claim-path work query on stderr
+// and returns the exit code for it. Every claim read whose failure is surfaced
+// funnels through here: discovery, the claim-time re-validation on a multi-leg
+// city, and tryHookClaim's own read. So a timed-out or transport-class failure
+// on any of them carries the token and exit 2, scoped as
+// hookStoreUnavailableToken's doc states (the agent's own store only).
+//
+// This is the same store-unavailable classification the read path applies.
+// --claim is the form agents actually run in the dispatch loop, so without the
+// token here a transport-class failure is still indistinguishable from "no
+// work" to every consumer that matches on it — the dead-drop the token exists
+// to close. The error is classified ONCE and reused for both the stderr token
+// and the exit code, so the published contract (token <=> exit 2) cannot be
+// split by an edit reaching one and not the other.
+//
+// Deliberately NO drain result and NO drain-ack. A failed read is not an idle
+// store: the controller counted demand for this seat, so draining here would
+// convert a transport failure into a false idle, reap the seat, and leave the
+// work for the next tick to rediscover. Keep the seat and let the event the
+// caller emitted carry the cause; the idle-claim backstop re-drives the hook.
+// That behavior is orthogonal to the exit CODE, which follows the token's
+// published contract: hookStoreUnavailableToken documents exit 2, and a
+// consumer gating on the code must be able to tell a dead store from no-work on
+// this path too.
+func reportClaimWorkQueryFailure(err error, stderr io.Writer) int {
+	return reportWorkQueryFailure("gc hook --claim", err, stderr)
+}
+
 // workQueryStoreUnavailable reports whether err, after classification, means
 // the store could not be read (an unknown answer, not an empty queue).
 func workQueryStoreUnavailable(err error) bool {
 	return errors.Is(classifyWorkQueryStoreUnavailable(err), beads.ErrStoreUnavailable)
 }
 
-// reportWorkQueryFailure renders a failed work query for the discovery door
-// (plain `gc hook`): a store-unavailable failure prints "<prefix>: <token>:
-// <err>" and exits 2; anything else prints "<prefix>: <err>" and exits 1. The
-// token and the exit code come from one classification, so they cannot
-// disagree. The --claim door reports its failed reads itself (exit 1, no drain
-// record, no token); see claimHookWorkWithRunner.
+// reportWorkQueryFailure is the one place the token <=> exit-2 contract is
+// rendered: a store-unavailable failure (classifyWorkQueryStoreUnavailable)
+// prints "<prefix>: <token>: <err>" and exits 2; anything else prints
+// "<prefix>: <err>" and exits 1. The token and the exit code come from one
+// classification, so they cannot disagree. Both gc hook doors report a failed
+// work query through it (doHook directly, the claim reads via
+// reportClaimWorkQueryFailure) so the published contract cannot drift between
+// them.
 func reportWorkQueryFailure(prefix string, err error, stderr io.Writer) int {
 	classified := classifyWorkQueryStoreUnavailable(err)
 	if errors.Is(classified, beads.ErrStoreUnavailable) {
@@ -907,11 +935,11 @@ func reportWorkQueryFailure(prefix string, err error, stderr io.Writer) int {
 // Claim-read retry pacing. A work-query ERROR is a failed read, and the failures
 // this bounds are transport-shaped: a contended SQLite leg, a store mid-write, a
 // binding whose engine is briefly refusing. Those clear in seconds, and the
-// alternative — exiting 1 and parking a seat the controller minted demand for
-// until the 90s backstop re-drives it — is strictly worse. Emptiness is NOT
-// retried: an empty read is an answer, and a seat that lost the sibling race must
-// drain promptly. Package vars follow hookWorkQueryTimeout's convention so tests
-// drive the loop without sleeping.
+// alternative — failing the claim at once and parking a seat the controller
+// minted demand for until the 90s backstop re-drives it — is strictly worse.
+// Emptiness is NOT retried: an empty read is an answer, and a seat that lost
+// the sibling race must drain promptly. Package vars follow
+// hookWorkQueryTimeout's convention so tests drive the loop without sleeping.
 var (
 	hookClaimQueryRetryAttempts = 3
 	hookClaimQueryRetryInterval = 5 * time.Second
@@ -929,8 +957,9 @@ var (
 // strictly inside the window, both before the pacing sleep (the sleep must not
 // run past the window) and after it (the sleep may have overrun). When the window
 // cuts the budget short, the last read error is returned, annotated, so the
-// caller keeps its failed-read contract (exit 1, no drain) instead of treating a
-// dead invocation as an idle store.
+// caller keeps its failed-read contract instead of treating a dead invocation
+// as an idle store: no drain, and reportClaimWorkQueryFailure classifies the
+// code (2 if the read failed transport-class or timed out, else 1).
 func selectStoreWithWorkRetrying(workQuery string, stores []hookStore, primary hookStore, run hookStoreRunner, ops *hookClaimOps) (string, hookStore, error) {
 	out, selected, err := bestStoreWithWork(workQuery, stores, primary, run)
 	for attempt := 0; err != nil && attempt < hookClaimQueryRetryAttempts; attempt++ {
@@ -1172,15 +1201,26 @@ type hookVisibility struct {
 	RouteTargets []string
 }
 
-// hookStoreUnavailableToken is the stderr token plain `gc hook` prints, with
-// exit code 2, when its work query got no answer from the store
-// (classifyWorkQueryStoreUnavailable). It is a published contract: a consumer
-// of `gc hook` stderr matches it to tell "store down" from the exit-1 no-work
-// answer, as agentScriptHookExitIsNoWork does. Rendering an unreachable store
-// as no work is the chronic idle-agents-with-work-waiting dead-drop. The
-// generated single-store work query discards bd's stderr and falls through to
-// "[]", so there a store that fails fast still reads as no work; only the
-// deadline, which bounds every query, surfaces it.
+// hookStoreUnavailableToken is the stderr token gc hook prints, with exit code
+// 2, when its work query got no answer from the store
+// (classifyWorkQueryStoreUnavailable), with or without --claim. It is a
+// published contract: a consumer of `gc hook` stderr matches it to tell "store
+// down" from the exit-1 no-work answer, as agentScriptHookExitIsNoWork does.
+// Rendering an unreachable store as no work is the chronic
+// idle-agents-with-work-waiting dead-drop.
+//
+// It fires only when the failure reaches gc hook, and two layers keep some
+// failures from reaching it:
+//   - The generated single-store work query discards bd's stderr and falls
+//     through to "[]" when every ready tier fails (internal/config/workquery.go),
+//     so there a store that fails fast still reads as no work; only the
+//     deadline, which bounds every query, surfaces it.
+//   - Only a failure of the agent's own (primary) store is reported. Other
+//     stores gc hook queries beside it are best-effort discovery
+//     (bestStoreWithWork), so one that fails or times out reads as no work
+//     from that store. A federated reader (`gc ready`) is not one of those: it
+//     runs as the primary store's query, so a leg it cannot read fails the
+//     primary read.
 const hookStoreUnavailableToken = "GC_HOOK_STORE_UNAVAILABLE"
 
 // bdConnectionErrorMarkers mirrors the messages bd's Dolt store counts as the
@@ -1217,31 +1257,72 @@ func messageHasMarker(lowerMsg string, markers []string) bool {
 	return false
 }
 
+// workQueryErrorPrefix is the stamp shellWorkQueryWithEnv puts on every
+// work-query failure, ahead of the command line it quotes with %q.
+const workQueryErrorPrefix = "running work query"
+
+// workQueryFailureText returns the lowercased text the work-query classifier
+// scans: the error message with the command line quoted after
+// workQueryErrorPrefix cut out. A work query is user-authored shell, so its
+// command text is not the store's answer, and a marker or timeout needle that
+// appears only there must not classify. The cut parses the span as the Go
+// string literal %q wrote, on the original message because lowercasing can
+// change a rune's byte length; a message without a parseable span is scanned
+// whole.
+func workQueryFailureText(msg string) string {
+	i := strings.Index(msg, workQueryErrorPrefix+" ")
+	if i < 0 {
+		return strings.ToLower(msg)
+	}
+	head, rest := msg[:i+len(workQueryErrorPrefix)], msg[i+len(workQueryErrorPrefix)+1:]
+	quoted, err := strconv.QuotedPrefix(rest)
+	if err != nil {
+		return strings.ToLower(msg)
+	}
+	return strings.ToLower(head + rest[len(quoted):])
+}
+
+// workQueryFailure presents a work-query error to the text classifiers as
+// workQueryFailureText while keeping the original error chain, so typed
+// signals such as context.DeadlineExceeded still classify through errors.Is.
+type workQueryFailure struct {
+	err  error
+	text string
+}
+
+func (f workQueryFailure) Error() string { return f.text }
+
+func (f workQueryFailure) Unwrap() error { return f.err }
+
 // classifyWorkQueryStoreUnavailable wraps work-query failures that got no
-// answer from the store as beads.ErrStoreUnavailable so doHook can report them
-// as exit 2 rather than letting a dead store masquerade as a drained queue.
+// answer from the store as beads.ErrStoreUnavailable so both gc hook doors can report
+// them as exit 2 rather than letting a dead store masquerade as a drained queue.
 // Errors that already carry the sentinel pass through unchanged; anything else
 // is returned as-is and stays an ordinary exit-1 error.
 func classifyWorkQueryStoreUnavailable(err error) error {
 	if err == nil || errors.Is(err, beads.ErrStoreUnavailable) {
 		return err
 	}
+	// Every text scan skips the command line the runner quotes into its
+	// error: only what the query reported can say the store was unreachable.
+	failure := workQueryFailure{err: err, text: workQueryFailureText(err.Error())}
 	// The control dispatcher's availability tier is the shared "the store did
 	// not answer" vocabulary. It covers the typed deadline shellWorkQueryWithEnv
 	// wraps for exactly this (a wedged-but-listening backend, with hung
 	// connections and context-deadline floods, is the dominant outage shape,
-	// not "connection refused"), bd's own timeouts, a killed work query, lock
-	// contention and bd's circuit breaker failing fast. Its semantic tier is a
-	// refusal the store answered with, so it stays exit 1.
-	if dispatch.ClassifyControllerError(err) == dispatch.TierAvailability {
+	// not "connection refused"), bd's own timeouts (including a federated
+	// reader's per-leg deadline, which reaches gc hook only as stderr text),
+	// a killed work query, lock contention and bd's circuit breaker failing
+	// fast. Its semantic tier is a refusal the store answered with, so it
+	// stays exit 1.
+	if dispatch.ClassifyControllerError(failure) == dispatch.TierAvailability {
 		return fmt.Errorf("%w: %w", beads.ErrStoreUnavailable, err)
 	}
 	// bdTransportRetryableMarkers is shared with the bd managed-retry path, so
 	// a marker added there classifies here too. bdConnectionErrorMarkers
 	// supplies bd's own connection-error vocabulary, including read-phase
 	// disconnects ("lost connection") that neither of the others lists.
-	lowerMsg := strings.ToLower(err.Error())
-	if messageHasMarker(lowerMsg, bdTransportRetryableMarkers) || messageHasMarker(lowerMsg, bdConnectionErrorMarkers) {
+	if messageHasMarker(failure.text, bdTransportRetryableMarkers) || messageHasMarker(failure.text, bdConnectionErrorMarkers) {
 		return fmt.Errorf("%w: %w", beads.ErrStoreUnavailable, err)
 	}
 	return err
@@ -1301,9 +1382,9 @@ func doHook(workQuery, dir string, inject bool, runner WorkQueryRunner, stdout, 
 	output, err := runner(workQuery, dir)
 	if err != nil {
 		// A store that could not be read is not an empty queue: no partial
-		// stdout, token + exit 2 (reportWorkQueryFailure). Any other failure
-		// first surfaces whatever partial output the query produced, then
-		// reports exit 1.
+		// stdout (the partial text stays in the stderr diagnostic), token +
+		// exit 2 (reportWorkQueryFailure). Any other failure first surfaces
+		// whatever partial output the query produced, then reports exit 1.
 		if !workQueryStoreUnavailable(err) {
 			if normalized := normalizeWorkQueryOutput(strings.TrimSpace(output)); normalized != "" {
 				fmt.Fprint(stdout, normalized) //nolint:errcheck // best-effort stdout

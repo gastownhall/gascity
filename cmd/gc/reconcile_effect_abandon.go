@@ -189,9 +189,9 @@ func abandonStep(v txView) txStep {
 // otherFailurePatch is S3's any-other class: PreWake restored, unless it
 // found the row creating (#7570), then legacy's recordWakeFailure on a row
 // still creating (an operator who killed it mid-start owns it): the
-// conversation reset unless its transcript is on disk (unprobeable
-// providers included), and one wake attempt more, quarantined at the
-// threshold.
+// conversation reset unless the failure keeps it (failureKeepsConversation;
+// unprobeable providers included) short of the resume backstop, and one
+// wake attempt more, quarantined at the threshold.
 func otherFailurePatch(row session.Info, meta map[string]string, f startFailureRead, now time.Time) (_ session.MetadataPatch, _ session.DispositionPatch, quarantined bool) {
 	patch := session.MetadataPatch{}
 	var class session.DispositionPatch
@@ -203,8 +203,9 @@ func otherFailurePatch(row session.Info, meta map[string]string, f startFailureR
 	}
 	if row.SessionKey != "" || row.StartedConfigHash != "" {
 		failures, _ := strconv.Atoi(row.ResumeFailures)
-		backstop, count := resumeBackstop(failures, f.keeps, f.resume)
-		if !f.keeps || backstop {
+		kept := failureKeepsConversation(row, f)
+		backstop, count := resumeBackstop(failures, kept, f.resume)
+		if !kept || backstop {
 			maps.Copy(patch, session.ConversationResetPatch(true, now))
 			count = 0
 		}
@@ -212,16 +213,26 @@ func otherFailurePatch(row session.Info, meta map[string]string, f startFailureR
 	}
 	attempts, _ := strconv.Atoi(row.WakeAttemptsMetadata)
 	accrual := session.WakeFailureAccrualPatch(attempts, defaultMaxWakeAttempts, now.Add(defaultQuarantineDuration))
-	maps.Copy(patch, accrual.Patch)
+	maps.Copy(patch, accrual.Over(row, now)) // a live quarantine keeps its reason (v5.9z)
 	return patch, class.With(accrual.Class(row, now)), accrual.Quarantined
 }
 
+// failureKeepsConversation reports that the any-other failure f leaves
+// row's conversation in place, as legacy's recordWakeFailure does: a
+// committed manual conversation (SESSION-LIFE-MANUAL-LOSS) or one whose
+// transcript is on disk. The resume backstop still bounds either.
+// recordWakeFailure and deadRuntimePatch's rapid crash keep by the same rule;
+// change the three together.
+func failureKeepsConversation(row session.Info, f startFailureRead) bool {
+	return f.keeps || session.HasStartedManualConversation(row)
+}
+
 // resumeFailedReset reports that the any-other failure f of row resets a
-// conversation whose transcript is present, by the resume backstop
-// (resumeBackstop), as legacy's recordWakeFailure does.
+// conversation the failure keeps, by the resume backstop (resumeBackstop),
+// as legacy's recordWakeFailure does.
 func resumeFailedReset(row session.Info, f startFailureRead) bool {
 	failures, _ := strconv.Atoi(row.ResumeFailures)
-	backstop, _ := resumeBackstop(failures, f.keeps, f.resume)
+	backstop, _ := resumeBackstop(failures, failureKeepsConversation(row, f), f.resume)
 	return creating(row) && (row.SessionKey != "" || row.StartedConfigHash != "") && backstop
 }
 

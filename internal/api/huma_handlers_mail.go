@@ -196,6 +196,7 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 	if bp.isBlocking() {
 		waitForChange(ctx, s.state.EventProvider(), bp)
 	}
+	index := s.latestIndex()
 
 	cityStore := s.state.CityBeadStore()
 	if err := cacheLiveOr503(cityStore); err != nil {
@@ -217,7 +218,6 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 	query := s.resolveMailQueryWithContext(ctx, input.Agent)
 	status := input.Status
 	rig := input.Rig
-	index := s.latestIndex()
 	cacheAge := cacheAgeSeconds(cityStore)
 
 	switch status {
@@ -336,6 +336,7 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 
 // humaHandleMailGet is the Huma-typed handler for GET /v0/mail/{id}.
 func (s *Server) humaHandleMailGet(ctx context.Context, input *MailGetInput) (*IndexOutput[mail.Message], error) {
+	index := s.latestIndex()
 	cityStore := s.state.CityBeadStore()
 	if err := cacheLiveOr503(cityStore); err != nil {
 		return nil, err
@@ -367,7 +368,7 @@ func (s *Server) humaHandleMailGet(ctx context.Context, input *MailGetInput) (*I
 	}
 	result.Message.Rig = result.Rig
 	return &IndexOutput[mail.Message]{
-		Index:     s.latestIndex(),
+		Index:     index,
 		CacheAgeS: cacheAgeSeconds(cityStore),
 		Body:      result.Message,
 	}, nil
@@ -377,6 +378,7 @@ func (s *Server) humaHandleMailGet(ctx context.Context, input *MailGetInput) (*I
 // Body validation (To and Subject required, minLength:"1") is enforced by
 // the framework from MailSendInput's struct tags.
 func (s *Server) humaHandleMailSend(ctx context.Context, input *MailSendInput) (*IndexOutput[mail.Message], error) {
+	index := s.latestIndex()
 	resolved, resolveErr := s.resolveMailSendRecipientWithContext(ctx, input.Body.To)
 	if resolveErr != nil {
 		if errors.Is(resolveErr, errMailNoBeadStore) {
@@ -392,8 +394,9 @@ func (s *Server) humaHandleMailSend(ctx context.Context, input *MailSendInput) (
 
 	// Idempotency: send at most once per Idempotency-Key. On replay the closure
 	// is skipped entirely, so no duplicate Send, telemetry op, or MailSent event
-	// fires. The helper guarantees the reservation is released on a send error.
-	msg, err := withIdempotency(s.idem, "/v0/mail", input.IdempotencyKey, input.Body,
+	// fires, and the index cached with the message is returned, not the current
+	// head. The helper guarantees the reservation is released on a send error.
+	res, err := withIndexedIdempotency(s.idem, "/v0/mail", input.IdempotencyKey, input.Body, index,
 		func() (mail.Message, error) {
 			sent, sendErr := mp.Send(input.Body.From, resolved, input.Body.Subject, input.Body.Body)
 			telemetry.RecordMailOp(ctx, "send", sendErr)
@@ -409,8 +412,8 @@ func (s *Server) humaHandleMailSend(ctx context.Context, input *MailSendInput) (
 	}
 
 	return &IndexOutput[mail.Message]{
-		Index: s.latestIndex(),
-		Body:  msg,
+		Index: res.Index,
+		Body:  res.Body,
 	}, nil
 }
 
@@ -478,9 +481,9 @@ func (s *Server) humaHandleMailCount(ctx context.Context, input *MailCountInput)
 
 // humaHandleMailThread is the Huma-typed handler for GET /v0/mail/thread/{id}.
 func (s *Server) humaHandleMailThread(ctx context.Context, input *MailThreadInput) (*MailListOutput, error) {
+	index := s.latestIndex()
 	threadID := input.ID
 	rig := input.Rig
-	index := s.latestIndex()
 
 	if rig != "" {
 		mp := s.state.MailProvider(rig)
@@ -640,6 +643,7 @@ func (s *Server) humaHandleMailArchive(ctx context.Context, input *MailArchiveIn
 
 // humaHandleMailReply is the Huma-typed handler for POST /v0/mail/{id}/reply.
 func (s *Server) humaHandleMailReply(ctx context.Context, input *MailReplyInput) (*IndexOutput[mail.Message], error) {
+	index := s.latestIndex()
 	id := input.ID
 	rig := input.Rig
 
@@ -649,8 +653,9 @@ func (s *Server) humaHandleMailReply(ctx context.Context, input *MailReplyInput)
 	// PathEscape keeps a crafted ID (%2F-encoded slash) from forging the
 	// "/reply:" boundary and aliasing another (id, key) pair's scope. The
 	// provider lookup stays INSIDE the closure so a replay still succeeds
-	// after the original message was archived (the closure is skipped).
-	msg, err := withIdempotency(s.idem, "/v0/mail/"+url.PathEscape(id)+"/reply", input.IdempotencyKey, input.Body,
+	// after the original message was archived (the closure is skipped). A
+	// replay returns the index cached with the reply, not the current head.
+	res, err := withIndexedIdempotency(s.idem, "/v0/mail/"+url.PathEscape(id)+"/reply", input.IdempotencyKey, input.Body, index,
 		func() (mail.Message, error) {
 			mp, resolvedRig, mpErr := s.findMailProviderForMessage(id, rig)
 			if mpErr != nil {
@@ -674,8 +679,8 @@ func (s *Server) humaHandleMailReply(ctx context.Context, input *MailReplyInput)
 	}
 
 	return &IndexOutput[mail.Message]{
-		Index: s.latestIndex(),
-		Body:  msg,
+		Index: res.Index,
+		Body:  res.Body,
 	}, nil
 }
 

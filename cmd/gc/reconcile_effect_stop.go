@@ -32,14 +32,18 @@ import (
 //     the Call removes it under the corpse exception, by exact session
 //     object, when L3 passes; an attached corpse stays.
 //  3. The finalize (D4): the intent's builder (Finish), else finalizePatch,
-//     on the close-gate work read live. A close lands as the premise close
+//     on the close-gate work read live (none for an idle stop). A close lands as the premise close
 //     (closeSection); any other finalize is one CAS that writes its patch
 //     and clears the stop request (D3 step 5). The events are legacy's:
 //     session.stopped with the stop metric when a stop was performed, and
 //     session.drain_acked_with_assigned_work when a drained row keeps work.
 
-// causeDispositionRefused: the Sleep cell refused the finalize's move.
-const causeDispositionRefused = "disposition-refused"
+const (
+	// causeDispositionRefused: the Sleep cell refused the finalize's move.
+	causeDispositionRefused = "disposition-refused"
+	// causeAlreadyGone: an operator-dormant stop found its runtime gone.
+	causeAlreadyGone = "already-gone"
+)
 
 // stopSections are the fence and the Call, the finalize write, and the
 // premise close, which only a finalize that closes reaches: a store that
@@ -71,6 +75,8 @@ func stopLegs(it intent) fenceLegs {
 		return legToken | legAttach | legPending | legWork
 	case it.Reason == decideIdleExhausted: // stopped over its work (SESS-575)
 		return legToken | legAttach | legPending
+	case it.Reason == decideRestartRequested: // A13 (v5.10u): an explicit restart stops an attached session, as legacy's
+		return legToken
 	}
 	return legToken | legAttach
 }
@@ -103,7 +109,7 @@ type corpseObject struct {
 // stopped is the Call's outcome, which the finalize reads.
 type stopped struct {
 	Confirmed bool
-	Performed bool   // a provider Stop was issued
+	Performed bool   // the fence passed: a provider Stop was issued, or the passed runtime had already left the name
 	Reason    string // why not confirmed
 }
 
@@ -115,6 +121,9 @@ func stopDecide(v txView) txStep {
 	// only an idle stop's, must hold too, so the idle finalize never applies
 	// to another stop (a stop request's verb turns finalize on its own).
 	if fresh, _ := decideRow(&w, v.Alloc, v.It.Key); fresh.Kind != v.It.Kind || (isIdleReason(fresh.Reason) || isIdleReason(v.It.Reason)) && fresh.Reason != v.It.Reason {
+		if dormantGone(v) {
+			return txStep{Done: true, Cause: causeAlreadyGone} // the transaction notes the absence (noteAbsence)
+		}
 		return txStep{Refuse: causeRedecided}
 	}
 	name := strings.TrimSpace(v.Row.SessionName)
@@ -150,6 +159,16 @@ func stopDecide(v txView) txStep {
 	}
 	plan.verdict = fv
 	return txStep{Pass: plan}
+}
+
+// dormantGone reports an operator-dormant stop whose fresh read finds
+// nothing under the name: the runtime is already gone (a kill's own stop
+// finished after the pass read it alive). It settles as a no-op, with no row
+// backoff; the transaction notes the absence, as for every effect's absent
+// read, so the next pass decides the row on it (CONTRACT v5.10d (a),
+// v5.10g). Any other redecided stop keeps its backoff.
+func dormantGone(v txView) bool {
+	return v.It.Reason == decideDormantStop && v.RT != nil && v.RT.Class == rtAbsent
 }
 
 // stopCall stops a live runtime through its fence, or, with nothing live,
@@ -200,8 +219,14 @@ type finalizeWork struct {
 	anomaly *beads.Bead
 }
 
-// finalizeWorkProbe reads the row's work in the close-gate form.
+// finalizeWorkProbe reads the row's work in the close-gate form. An idle
+// stop's finalize reads none (mc-ensxp): A15's builders sleep the row
+// whatever its work and never close it, and the idle kill's events name no
+// kept bead; its claim check is the fence's L5, read before the stop.
 func finalizeWorkProbe(_ context.Context, r effectReads, v txView) (finalizeWork, error) {
+	if isIdleReason(v.It.Reason) {
+		return finalizeWork{}, nil
+	}
 	if r.legs.unusable() != nil || v.World.Env == nil {
 		return finalizeWork{}, errNoReadStore
 	}
@@ -273,7 +298,7 @@ func honoredWake(v txView) bool {
 		return false
 	}
 	e := v.Alloc.Snapshot.Entries[v.It.Key]
-	return e != nil && e.Desired == desireWake
+	return e != nil && e.WakeHonored
 }
 
 // stopReason is a stop intent's drain reason.
@@ -415,5 +440,6 @@ func stopFacts(v txView, out stopped, kept *beads.Bead) effectFacts {
 }
 
 // agentStop is a performed stop, for legacy's stop metric
-// (telemetry.RecordAgentStop).
+// (telemetry.RecordAgentStop): one the fence passed, recorded as before
+// mc-rq4d0 also when the runtime had left the name and no Stop was issued.
 type agentStop struct{ Name, Identity string }

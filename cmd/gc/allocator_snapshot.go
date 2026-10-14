@@ -76,6 +76,7 @@ const (
 	reasonConfigSleep          = "config-sleep-suppressed"
 	reasonSuspendedCity        = "suspended-city"
 	reasonNoWake               = "no-wake-reason"
+	reasonExplicitWake         = "explicit-wake" // the awake set's reason for an honored explicit wake (D7)
 	reasonUnknownState         = "unknown-state"
 	reasonRollbackCandidate    = "rollback-candidate"
 	reasonFailedCreate         = "failed-create"
@@ -159,6 +160,10 @@ type selectionEntry struct {
 	// OpenWork is a Drain entry's first open or in-progress assigned work,
 	// ready or not: legacy's undesired-drain keep (SESS-074).
 	OpenWork *assignedWorkView
+	// WakeHonored marks a pending explicit wake AL1 honors (CONTRACT D7
+	// rule 4; the awake set's explicit-wake desire): the row is never Sleep
+	// or Drain, and no finalize closes it.
+	WakeHonored bool
 }
 
 // rowBasis is the row incarnation the pass saw.

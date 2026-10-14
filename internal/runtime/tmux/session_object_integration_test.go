@@ -396,3 +396,34 @@ func TestKillCorpseObjectRealTmuxRefusesClientAttachedAfterCheck(t *testing.T) {
 		t.Fatalf("session object = %s, want the attached %s to survive", got, id)
 	}
 }
+
+// TestSeamBackedPeekReadsADeadPane (mc-g3la1). Kills a peek of a
+// remain-on-exit corpse that reads empty through the seam-backed provider
+// gc runs: the seam's Peek reads through an Attachment, which the tmux
+// transport opens only on a running session, so a dead pane's provider
+// rate-limit screen read as no output and the controller recycled it
+// instead of quarantining. The seam-backed Peek reads the corpse's screen as
+// the raw provider does.
+func TestSeamBackedPeekReadsADeadPane(t *testing.T) {
+	p := newObjectServer(t)
+	startObjectSession(t, p, "rl", "sleep 300")
+	if err := p.tm.SetRemainOnExit(paneTarget("rl"), true); err != nil {
+		t.Fatalf("remain-on-exit: %v", err)
+	}
+	if _, err := p.tm.run("respawn-pane", "-k", "-t", paneTarget("rl"), "sh -c 'echo You have hit your limit; echo /rate-limit-options; exit 1'"); err != nil {
+		t.Fatalf("respawn-pane: %v", err)
+	}
+	waitObjectCondition(t, "rl to become a corpse", func() bool { return objectFormat(t, p, "rl", "#{pane_dead}") == "1" })
+	rt, tp := p.Seams()
+	seamBacked := &seamBackedProvider{Provider: p, seams: runtime.NewProviderFromSeams(rt, tp)}
+	if seamBacked.IsRunning("rl") {
+		t.Fatal("the corpse reads running: the case is vacuous")
+	}
+	got, err := seamBacked.Peek("rl", 40)
+	if err != nil || !strings.Contains(got, "/rate-limit-options") {
+		t.Fatalf("seam-backed Peek of the corpse = (%q, %v), want its screen", got, err)
+	}
+	if raw, _ := p.Peek("rl", 40); raw != got {
+		t.Fatalf("seam-backed Peek %q differs from the raw provider's %q", got, raw)
+	}
+}

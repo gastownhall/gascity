@@ -204,7 +204,7 @@ func sessionResponseWithReason(info session.Info, pr session.PersistedResponse, 
 	}
 	r.Reason = session.LifecycleDisplayReasonWithLiveness(pr.Status, pr.Metadata, time.Now().UTC(), info.SessionName, isRunning)
 	r.ConfiguredNamedSession = strings.TrimSpace(pr.Metadata[apiNamedSessionMetadataKey]) == "true"
-	r.SubmissionCapabilities = session.SubmissionCapabilitiesForMetadata(pr.Metadata, hasDeferredQueue)
+	r.SubmissionCapabilities = session.SubmissionCapabilitiesForRuntime(pr.Metadata, hasDeferredQueue, runtime.TurnInterruptModeFor(sp, info.SessionName))
 	// Expose only real_world_app_* prefixed metadata keys to API consumers.
 	// Internal fields (session_key, command, work_dir, etc.) are redacted.
 	r.Metadata = filterMetadata(pr.Metadata)

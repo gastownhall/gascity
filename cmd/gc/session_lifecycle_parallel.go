@@ -329,6 +329,11 @@ type startResult struct {
 	// configured named session's pending-create should be preserved for a
 	// retry instead of destructively closed" (ga-pmafyc rounds 4 and 5).
 	diedDuringStartup bool
+	// diedPane is the last pane output of a resume launch the post-start
+	// liveness check found dead, redacted (postStartDeathPane). That check's
+	// error carries no pane, so this is where the resume backstop
+	// (startResumeFailure) reads a provider's refusal of the resume.
+	diedPane string
 	// provider is the runtime provider the start ran against. commitStartFailure
 	// uses it to tear down a bead-scoped pool runtime before rolling its row
 	// back (releaseBeadScopedPoolRuntime). Nil on test-built results, which
@@ -1883,8 +1888,11 @@ func runPreparedStartCandidate(
 	// Stale session key detection: if the session was started
 	// with a resume flag but dies immediately, the session key
 	// likely references a conversation that no longer exists
-	// (e.g., "No conversation found"). Report as a failure so
-	// recordWakeFailure clears the key for the next attempt.
+	// (e.g., "No conversation found"). Report as a failure, with
+	// the dead resume's pane for the resume backstop to read that
+	// refusal from, so recordWakeFailure clears the key for the
+	// next attempt.
+	var diedPane string
 	if startedFresh && err == nil && strings.TrimSpace(item.candidate.info.ID) != "" && item.candidate.info.SessionKey != "" {
 		postStartBegin := time.Now()
 		if stabilityWaiter(startCtx, item.candidate.name()) {
@@ -1903,6 +1911,7 @@ func runPreparedStartCandidate(
 			} else if !running || !alive {
 				err = fmt.Errorf("session %q died during startup", item.candidate.name())
 				diedDuringStartup = true
+				diedPane = postStartDeathPane(ctx, item, cityPath, sp, store, cfg)
 			}
 		}
 		phases.PostStartObserve = time.Since(postStartBegin)
@@ -2002,6 +2011,7 @@ func runPreparedStartCandidate(
 		rateLimitScreen:     rateLimitScreen,
 		providerStartCalled: startedFresh,
 		diedDuringStartup:   diedDuringStartup,
+		diedPane:            diedPane,
 		unattributedErr:     unattributedErr,
 		provider:            sp,
 		phases:              phases,
@@ -2063,6 +2073,33 @@ func startupRateLimitScreenDetected(
 		)
 	})
 	return err == nil && runtime.ContainsProviderRateLimitScreen(content)
+}
+
+// postStartDeathPane is the last pane output of a resume launch the post-start
+// liveness check found dead, redacted against the launch's secrets as the
+// runtime's own startup-failure capture is. A provider that refused the resume
+// says so there. The peek is held to postStartObservationBound; one that fails
+// or does not answer reads empty, so the death counts instead of resetting.
+func postStartDeathPane(
+	ctx context.Context,
+	item preparedStart,
+	cityPath string,
+	sp runtime.Provider,
+	store beads.Store,
+	cfg *config.City,
+) string {
+	if !item.resumed {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(ctx, postStartObservationBound)
+	defer cancel()
+	pane, err := observeSessionBounded(ctx, cityPath, item.candidate.name(), func() (string, error) {
+		return workerSessionTargetPeekWithConfig(cityPath, store, sp, cfg, item.candidate.name(), rateLimitPeekLines, item.cfg.ProcessNames)
+	})
+	if err != nil {
+		return ""
+	}
+	return runtime.RedactSecrets(pane, runtime.SetupCommandSecrets(item.cfg.Env))
 }
 
 func enqueuePreparedStartWaveForCity(
@@ -2922,7 +2959,17 @@ func commitStartResultTraced(
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, "runtime_mcp_snapshot_failed", result.started, result.finished, err, result.phases)
 		return startCommitFailed
 	}
-	applied, err := sessFront.CommitStartedIfCurrentUnder(info, metadata, result.prepared.candidate.lease)
+	applied, err := sessFront.CommitStartedIfCurrentUnder(info, metadata, result.prepared.candidate.lease, sessionpkg.StartCommitRefusingHolds())
+	if errors.Is(err, sessionpkg.ErrStartCommitHeld) {
+		// An operator's suspend landed while the start ran (CONTRACT S1
+		// v5.6, §12.2 row 65): nothing commits, the in-flight lease is still
+		// this start's to release, and the caller stops the runtime it
+		// spawned as a stale start's.
+		clearPendingStartInFlightLease(info.ID, sessFront, stderr)
+		fmt.Fprintf(stderr, "session reconciler: discarding the start of %s: %v\n", name, err) //nolint:errcheck
+		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, "user_held", result.started, result.finished, nil, result.phases)
+		return startCommitStale
+	}
 	if err != nil {
 		clearPendingStartInFlightLease(info.ID, sessFront, stderr)
 		fmt.Fprintf(stderr, "session reconciler: storing hashes for %s: %v\n", name, err) //nolint:errcheck
@@ -3361,7 +3408,7 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 	// not carry it. Terminal failure arm; discard the fold (never assign back into
 	// infoByID — this is the async start goroutine). The persist lands via
 	// recordWakeFailure's ApplyPatchInfo/SetMarker writes.
-	rf := startResumeFailure(result.prepared.resumed, result.diedDuringStartup, result.prepared.candidate.info.SessionKey, result.err, "")
+	rf := startResumeFailure(result.prepared.resumed, result.diedDuringStartup, result.prepared.candidate.info.SessionKey, result.err, result.diedPane)
 	_ = recordWakeFailure(result.prepared.candidate.info, result.prepared.transcriptRoots, sessFront, clk, tp.DisplayName(), rf, rec)
 	if trace != nil {
 		trace.RecordOperation(TraceSiteLifecycleStartFailed, TraceReasonStart, result.outcome, "", tp.TemplateName, name, 0, traceRecordPayload{
@@ -3401,14 +3448,19 @@ func recordStartupHealthFailure(info sessionpkg.Info, name string, err error, se
 //
 // The heal is a start's commit, so it runs under the runtime lease like one
 // (I-LEASE): taken without waiting before the rebuild's writes, and the
-// commit is refused once the lease was taken over.
+// commit is refused once the lease was taken over. Like the async commit, it
+// refuses a row an operator suspended (StartCommitRefusingHolds) and stops
+// the start's runtime through sp, as a stale start's (CONTRACT S1 v5.6,
+// §12.2 row 65).
 func recoverRunningPendingCreate(
 	cityPath string,
 	info sessionpkg.Info,
 	tp TemplateParams,
 	cfg *config.City,
 	store beads.Store,
+	sp runtime.Provider,
 	clk clock.Clock,
+	stderr io.Writer,
 	trace *sessionReconcilerTraceCycle,
 ) (bool, map[string]string) {
 	if strings.TrimSpace(info.ID) == "" || store == nil {
@@ -3500,7 +3552,20 @@ func recoverRunningPendingCreate(
 		PrimedAt:            primedAt,
 		PromptHash:          promptHash,
 	})
-	applied, err := sessionFrontDoor(store).CommitStartedIfCurrentUnder(prepared.candidate.info, metadata, lease)
+	applied, err := sessionFrontDoor(store).CommitStartedIfCurrentUnder(prepared.candidate.info, metadata, lease, sessionpkg.StartCommitRefusingHolds())
+	if errors.Is(err, sessionpkg.ErrStartCommitHeld) {
+		// An operator suspended the row before its start committed (CONTRACT
+		// S1 v5.6, §12.2 row 65): the heal never stamps the start over the
+		// hold, and the runtime the suspend did not stop is stopped as the
+		// start's own, under the lease still held.
+		stopStaleAsyncStartRuntime(startResult{prepared: *prepared}, sp, stderr)
+		if trace != nil {
+			trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonPendingCreateSuperseded, TraceOutcomeSkipped, tp.TemplateName, tp.SessionName, traceRecordPayload{
+				"user_held": true,
+			})
+		}
+		return true, pendingCreateResidueFold(prepared.candidate.info)
+	}
 	if err != nil {
 		if trace != nil {
 			trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonPendingCreateCommitFailed, TraceOutcomeFailed, tp.TemplateName, tp.SessionName, traceRecordPayload{

@@ -106,9 +106,10 @@ type Info struct {
 	LastNudgeDeliveredAt time.Time
 	Attached             bool
 	// ContinuationEpoch is the persisted continuation_epoch marker, used by the
-	// wait registration/retry paths to stamp registered_epoch on wait beads.
-	// Additive, internal-only: it is NOT emitted on the HTTP session-response
-	// wire (the response builder maps a fixed field set).
+	// wait registration/retry paths to stamp registered_epoch on wait beads and
+	// to scope LogicalConversationID. Additive, internal-only: it is NOT emitted
+	// on the HTTP session-response wire (the response builder maps a fixed field
+	// set).
 	ContinuationEpoch string
 	// SleepReason is the persisted sleep_reason marker, read by the wait-hold
 	// clear path to decide whether to clear sleep_reason. Additive,

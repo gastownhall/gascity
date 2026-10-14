@@ -426,3 +426,16 @@ func TestGatherK1EnvMintsTheWorkLegs(t *testing.T) {
 		t.Fatalf("work legs over the city work store: %v / %v", err, env.WorkLegs.unusable())
 	}
 }
+
+// Kills a World that drops the pass's suspension state (#7771 review): the
+// orphaned signal's live-claim veto reads its scope from World.Suspension,
+// which gather sets from the suspension reader, rig overrides included.
+func TestGatherCarriesTheSuspensionState(t *testing.T) {
+	yes := true
+	st := suspensionstate.State{Rigs: map[string]suspensionstate.Override{"rig-a": {Suspended: &yes}}}
+	f := newGatherFixture(t, poolRow("gc-1", "worker", 1, "active"))
+	f.env.Suspension = func() suspensionstate.State { return st }
+	if w := f.gather(t); !reflect.DeepEqual(w.Suspension, st) {
+		t.Fatalf("World.Suspension = %+v, want the reader's %+v", w.Suspension, st)
+	}
+}

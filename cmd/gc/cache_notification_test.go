@@ -280,10 +280,10 @@ func statusOf(t *testing.T, store beads.Store, id string) string {
 }
 
 // TestApplyBeadEventToStoresRevalidatesInferredCloses pins I”: a scan-derived
-// bead.closed drives the completion fact and autoclose only when a live read
-// agrees the row is closed (or gone). A local or foreign close is acted on as
-// before, with no re-read: a store that reads back stale (open) does not gate
-// it.
+// or foreign bead.closed drives the completion fact and autoclose only when a
+// live read agrees the row is closed; an open or gone row gets nothing. Only a
+// local close is acted on
+// with no re-read: a store that reads back stale (open) does not gate it.
 func TestApplyBeadEventToStoresRevalidatesInferredCloses(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
@@ -301,7 +301,8 @@ func TestApplyBeadEventToStoresRevalidatesInferredCloses(t *testing.T) {
 		{name: "scan close of a deleted row", actor: cacheReconcileActor, store: "deleted"},
 		{name: "scan close unconfirmable", actor: cacheReconcileActor, store: "unreadable", wantDeferred: true},
 		{name: "local close", actor: cacheLocalActor, store: "open", wantFacts: 1, wantAutoclose: true, wantConvoy: "open"},
-		{name: "foreign close", actor: "bd-close", store: "open", wantFacts: 1, wantAutoclose: true, wantConvoy: "open"},
+		{name: "foreign close of an open row", actor: "bd-close", store: "open", wantConvoy: "open"},
+		{name: "foreign close confirmed", actor: "bd-close", store: "closed", wantFacts: 1, wantAutoclose: true, wantConvoy: "closed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			prev := beadCloseAutocloseDispatch

@@ -225,7 +225,7 @@ var multiLaneCommands = map[string]string{
 	"unit":                 "test --config=ci --keep_going //...",
 	"acceptance":           "test --config=ci --config=acceptance --keep_going //test/acceptance:acceptance_test //test/acceptance:acceptance_solo_tests",
 	"integration":          "test --config=ci --config=integration --keep_going //test/integration:integration_test",
-	"integration-packages": "test --config=ci --config=integration --keep_going //test:integration_packages",
+	"integration-packages": "test --config=ci --config=integration-packages --keep_going //test:integration_packages",
 	"integration-smoke":    "test --config=ci --config=integration-smoke --keep_going //test/integration:integration_test",
 }
 

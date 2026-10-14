@@ -60,8 +60,8 @@ func hookStampSessionCurrentClaim(sessionID, beadID string) error {
 // already draining. It is the production implementation of the
 // hookClaimOps.DrainPending seam — the F-D claim fence's only input.
 //
-// The SESSION ROW is the source, not provider meta. `gc runtime drain-check`
-// reads GC_DRAIN, which reconciler-tracked drains never set, so a provider-meta
+// The SESSION ROW is the source, not provider meta. Provider meta carries only
+// GC_DRAIN, which reconciler-tracked drains never set, so a provider-meta
 // probe would miss the whole keyed population this fence exists for. It reads
 // through the same routed front door the claim back-channel writes through, so a
 // [beads.classes.sessions] relocation reaches the fence too.

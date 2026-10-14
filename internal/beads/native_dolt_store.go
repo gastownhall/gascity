@@ -829,6 +829,13 @@ const (
 // reconcile scan / Get surfaced "begin read tx: dial tcp <old-port>: i/o
 // timeout" after a managed-Dolt rebind instead of recovering.
 func (s *NativeDoltStore) withReadRetry(fn func(context.Context, beadslib.Storage) error) error {
+	return s.withReadRetryContext(context.Background(), fn)
+}
+
+// withReadRetryContext is withReadRetry with the whole chain — reads,
+// reconnects, backoff — also bounded by parent, so a caller's cancellation
+// ends a reconnect in progress instead of waiting out the budget.
+func (s *NativeDoltStore) withReadRetryContext(parent context.Context, fn func(context.Context, beadslib.Storage) error) error {
 	if s == nil {
 		return fmt.Errorf("native Dolt store: %w", ErrStoreClosed)
 	}
@@ -840,7 +847,7 @@ func (s *NativeDoltStore) withReadRetry(fn func(context.Context, beadslib.Storag
 	// (env re-resolution + recovery + reopen), the retried read, and the backoff.
 	// Every step derives its deadline from this ctx and is canceled in-flight
 	// when it expires, so the total cannot stack per-call timeouts past budget.
-	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	ctx, cancel := context.WithTimeout(parent, budget)
 	defer cancel()
 	for {
 		storage, gen, release, err := s.acquireStorageGen()

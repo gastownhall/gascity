@@ -163,3 +163,82 @@ func TestInspectConditionalWritesReportsAModeSourcedWrappersSource(t *testing.T)
 		}
 	}
 }
+
+// TestProbeConditionalWritesRunsTheProbeIgnoringTheMode pins the helper a
+// caller that must fence every write uses to refuse an incapable store: it
+// runs the store's capability probe whatever the rollout stamp says (an
+// unstamped store included), where InspectConditionalWrites reports an
+// unprobed bd as capable.
+func TestProbeConditionalWritesRunsTheProbeIgnoringTheMode(t *testing.T) {
+	helpRunner := func(flag string, calls *int) CommandRunner {
+		return func(_, _ string, args ...string) ([]byte, error) {
+			*calls++
+			if len(args) != 2 || args[1] != "--help" {
+				t.Errorf("probe ran bd %v; want only read-only `bd <verb> --help`", args)
+			}
+			return []byte("Flags:\n      " + flag + " int   help text\n"), nil
+		}
+	}
+
+	t.Run("bd without the flag is incapable", func(t *testing.T) {
+		calls := 0
+		s := NewBdStore("/city", helpRunner("--json", &calls))
+		if !InspectConditionalWrites(s).Capable {
+			t.Fatal("setup: an unprobed bd store inspects as capable")
+		}
+		capable, reason := ProbeConditionalWrites(s)
+		if capable || !strings.Contains(reason, conditionalWriteFlag) {
+			t.Fatalf("ProbeConditionalWrites = %v %q, want incapable naming %s", capable, reason, conditionalWriteFlag)
+		}
+		if calls == 0 {
+			t.Fatal("the probe did not run")
+		}
+	})
+	t.Run("bd with the flag is capable", func(t *testing.T) {
+		calls := 0
+		s := NewBdStore("/city", helpRunner(conditionalWriteFlag, &calls))
+		if capable, reason := ProbeConditionalWrites(s); !capable {
+			t.Fatalf("ProbeConditionalWrites = incapable %q", reason)
+		}
+		if calls != len(conditionalWriteProbeVerbs) {
+			t.Fatalf("%d probe calls, want %d", calls, len(conditionalWriteProbeVerbs))
+		}
+	})
+	t.Run("a broken bd is incapable", func(t *testing.T) {
+		s := NewBdStore("/city", func(string, string, ...string) ([]byte, error) {
+			return nil, errors.New("exec: bd: not found")
+		})
+		if capable, reason := ProbeConditionalWrites(s); capable || !strings.Contains(reason, "not found") {
+			t.Fatalf("ProbeConditionalWrites = %v %q", capable, reason)
+		}
+	})
+	t.Run("mem stores and wrappers", func(t *testing.T) {
+		m := NewMemStore()
+		if capable, _ := ProbeConditionalWrites(NewCachingStore(m, nil)); !capable {
+			t.Fatal("a cache over a capable MemStore is incapable")
+		}
+		m.DisableConditionalWrites = true
+		if capable, _ := ProbeConditionalWrites(NewCachingStore(m, nil)); capable {
+			t.Fatal("a cache over a disabled MemStore is capable")
+		}
+	})
+	t.Run("a store without a writer is incapable", func(t *testing.T) {
+		if capable, _ := ProbeConditionalWrites(nil); capable {
+			t.Fatal("nil store is capable")
+		}
+		if capable, _ := ProbeConditionalWrites(writerlessStore{NewMemStore()}); capable {
+			t.Fatal("a store without ConditionalWriter is capable")
+		}
+	})
+	t.Run("legacy sqlite layout is incapable", func(t *testing.T) {
+		if capable, _ := ProbeConditionalWrites(openSQLiteLayoutForTest(t, false, false)); capable {
+			t.Fatal("a sqlite layout without a revision column is capable")
+		}
+		if capable, reason := ProbeConditionalWrites(openSQLiteLayoutForTest(t, true, false)); !capable {
+			t.Fatalf("a sqlite layout with a revision column is incapable: %s", reason)
+		}
+	})
+}
+
+// writerlessStore hides every optional capability of the store it wraps.
+type writerlessStore struct{ Store }

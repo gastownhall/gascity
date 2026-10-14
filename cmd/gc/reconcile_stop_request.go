@@ -37,6 +37,15 @@ func readStopKeys(meta map[string]string) rawStopKeys {
 	}
 }
 
+// v2SignaledUnacked reports a row whose stop request is v2's own: the
+// controller half at the row's generation, with no ack half, an agent's or an
+// operator's. Legacy's rollback guard reads it (v2SignaledStopHeldForAttach,
+// CONTRACT v5.10v): the accessor's projection, so legacy names no key.
+func v2SignaledUnacked(meta map[string]string) bool {
+	k, gen := readStopKeys(meta), strings.TrimSpace(meta["generation"])
+	return k.rawIntentReason != "" && k.rawIntentIncarnation == gen && k.rawAckIncarnation == ""
+}
+
 // stopPhase is how far a stop request has come.
 type stopPhase uint8
 
@@ -63,6 +72,14 @@ type stopRequest struct {
 	// later at the same generation (Manager.ensureRunning bumps neither the
 	// generation nor the token) is not stopped for its predecessor's request.
 	Residue bool
+}
+
+// intentStands reports that row carries the controller's stop request for
+// reason at its own incarnation, whether activeStop reads it active or as
+// residue (a row that claims no live runtime).
+func intentStands(row censusRow, reason string) bool {
+	k := row.StopKeys
+	return k.rawIntentReason == reason && k.rawIntentIncarnation == strconv.FormatInt(row.Incarnation, 10)
 }
 
 // activeStop is a row's active stop request, by D1's rules in order:

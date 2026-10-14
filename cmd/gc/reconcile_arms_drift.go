@@ -45,7 +45,8 @@ const (
 //   - a launch-only drift its provider can relaunch is relaunched (SESS-560),
 //     falling back to the drain;
 //   - otherwise the config-drift drain (SESS-561), unless a stop request is
-//     active already.
+//     active already, or this incarnation's config-drift request stands as
+//     residue (driftRequestStands).
 //
 // An alive row whose drift resolved has its deferral keys cleared
 // (SESS-562), then a live drift has its session_live run again (SESS-565).
@@ -91,7 +92,7 @@ func armConfigDrift(r *rowFacts) (intent, bool) {
 		return r.heal(intentRowHeal, decideDriftPinned, driftStamp(namedSessionConfigDriftDeferredAtMetadata, namedSessionConfigDriftDeferredKeyMetadata, key, now))
 	case isNamedSessionInfo(info):
 		return r.driftRestart(launchOnly)
-	case containsWakeReason(e.WakeReasons, WakePending) || e.AssignedWork != nil || active:
+	case containsWakeReason(e.WakeReasons, WakePending) || e.AssignedWork != nil || active || driftRequestStands(r.row):
 		return intent{}, false
 	case launchOnly:
 		return r.driftRestart(true)
@@ -101,6 +102,15 @@ func armConfigDrift(r *rowFacts) (intent, bool) {
 	}
 	res, _ := r.w.Templates.lookup(info)
 	return r.drainBegin(drainConfigDrift, &events.Event{Type: events.SessionDraining, Actor: "gc", Subject: res.TP.DisplayName(), Message: "config drift detected", SessionID: info.ID})
+}
+
+// driftRequestStands reports that the row already carries this
+// incarnation's config-drift stop request, even one activeStop reads as
+// residue (a row that claims no live runtime, as a drained one whose own
+// runtime came back): the begin is idempotent, so A14 does not rewrite it
+// each pass (the A14 generator's shifted seed 296, mc-i7efm).
+func driftRequestStands(row censusRow) bool {
+	return intentStands(row, drainConfigDrift)
 }
 
 // driftRestart is a drifted row's restart in place (SESS-557), or its
