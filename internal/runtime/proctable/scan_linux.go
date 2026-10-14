@@ -29,10 +29,14 @@ func ScanBySessionID(id string) ([]runtime.LiveRuntime, error) {
 		return []runtime.LiveRuntime{}, err
 	}
 	if id == "" {
-		return scanOrphanCandidatesWithRoot(scanRoot, pidutil.DetectUserSubreaperPID(os.Getpid()))
+		return scanOrphanCandidatesWithRoot(scanRoot, detectSubreaper(os.Getpid()))
 	}
 	return scanWithRoot(scanRoot, id)
 }
+
+// detectSubreaper is the user subreaper the empty-id scan counts as an
+// orphan parent (a systemd --user supervisor); a test sets its fixture's.
+var detectSubreaper = pidutil.DetectUserSubreaperPID
 
 // ScanBySessionIDSince scans for an exact session incarnation. Inspection
 // failures from processes proven to predate incarnationStartedAt do not make

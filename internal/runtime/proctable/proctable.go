@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/pidutil"
-	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // ErrIncarnationBoundUnsupported reports that this platform has no process
@@ -17,13 +16,6 @@ import (
 // returns it for a non-zero incarnationStartedAt on such platforms; a caller
 // must treat the scan as incomplete, never as a certified absence.
 var ErrIncarnationBoundUnsupported = errors.New("proctable: incarnation start-time bound unsupported on this platform")
-
-// ScanAll returns the live agent root processes with a non-empty
-// GC_SESSION_ID that are orphan candidates ([OrphanCandidate]): the empty-id
-// scan of [ScanBySessionID].
-func ScanAll() ([]runtime.LiveRuntime, error) {
-	return ScanBySessionID("")
-}
 
 // OrphanCandidate reports whether a process whose parent is ppid was
 // reparented away from its spawner, to init or the user subreaper: the only

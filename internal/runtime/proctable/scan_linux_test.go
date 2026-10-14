@@ -1006,11 +1006,16 @@ func TestOrphanCandidateScanReadsOnlyReparentedProcesses(t *testing.T) {
 	// ScanBySessionID: the empty id is the orphan scan, a session id the
 	// full one.
 	SetScanRootForTesting(t, root)
+	savedDetect := detectSubreaper
+	detectSubreaper = func(int) int { return subreaper }
+	t.Cleanup(func() { detectSubreaper = savedDetect })
 	public, _ := ScanBySessionID("")
+	var publicIDs []string
 	for _, r := range public {
-		if r.SessionID == "gc-paned" {
-			t.Fatalf("ScanBySessionID(\"\") %+v reports a root that is no orphan", public)
-		}
+		publicIDs = append(publicIDs, r.SessionID)
+	}
+	if strings.Join(publicIDs, ",") != "gc-init,gc-sub" { // the subreaper's orphan included (a systemd --user supervisor)
+		t.Fatalf("ScanBySessionID(\"\") = %v, want gc-init and gc-sub only", publicIDs)
 	}
 	if scoped, _ := ScanBySessionID("gc-paned"); len(scoped) != 1 {
 		t.Fatalf("ScanBySessionID(gc-paned) = %+v, want the paned root", scoped)
