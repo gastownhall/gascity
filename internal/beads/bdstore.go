@@ -2984,7 +2984,127 @@ func (s *BdStore) listByTier(query ListQuery) ([]Bead, error) {
 	return s.listViaBDList(query)
 }
 
+// bdListFanoutChunk caps how many ids ride one `bd list --id` argument or one
+// `bd query` OR group. Each call is a bd subprocess, so the cap trades argv and
+// SQL size against subprocess count.
+const bdListFanoutChunk = 200
+
+// bdListScope narrows one bd list call beyond the ListQuery it serves: a chunk
+// of ids for --id, or a single parent for --parent.
+type bdListScope struct {
+	ids    []string
+	parent string
+}
+
+// bdPushdownIDs returns the distinct ids of query.IDs when every one can ride a
+// bd argument or query clause, or nil when the filter must stay Go-side.
+func bdPushdownIDs(query ListQuery) []string {
+	if len(query.IDs) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(query.IDs))
+	ids := make([]string, 0, len(query.IDs))
+	for _, id := range query.IDs {
+		if !isBareBdQueryValue(id) || id == "" {
+			return nil
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// bdPushdownParents returns the distinct parents of query.ParentIDs that can
+// ride bd, or nil when the filter cannot be pushed down. none reports a
+// conjunction no bead can satisfy (ParentID outside ParentIDs).
+func bdPushdownParents(query ListQuery) (parents []string, none bool) {
+	if len(query.ParentIDs) == 0 {
+		return nil, false
+	}
+	seen := make(map[string]struct{}, len(query.ParentIDs))
+	for _, p := range query.ParentIDs {
+		if !isBareBdQueryValue(p) || p == "" {
+			return nil, false
+		}
+		if query.ParentID != "" && p != query.ParentID {
+			continue
+		}
+		if _, dup := seen[p]; dup {
+			continue
+		}
+		seen[p] = struct{}{}
+		parents = append(parents, p)
+	}
+	return parents, len(parents) == 0
+}
+
+func chunkStrings(items []string, size int) [][]string {
+	var chunks [][]string
+	for len(items) > size {
+		chunks = append(chunks, items[:size])
+		items = items[size:]
+	}
+	return append(chunks, items)
+}
+
+// listViaBDList runs the bd list leg. IDs and ParentIDs are pushed to bd
+// (--id chunks, one --parent per parent) so a lookup of known beads never
+// dumps the whole store; applyListQuery still re-checks every row.
 func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {
+	var scopes []bdListScope
+	if ids := bdPushdownIDs(query); ids != nil {
+		for _, chunk := range chunkStrings(ids, bdListFanoutChunk) {
+			scopes = append(scopes, bdListScope{ids: chunk})
+		}
+	} else if parents, none := bdPushdownParents(query); none {
+		return []Bead{}, nil
+	} else {
+		for _, p := range parents {
+			scopes = append(scopes, bdListScope{parent: p})
+		}
+	}
+	if len(scopes) == 0 {
+		return s.listViaBDListScoped(query, bdListScope{})
+	}
+	if len(scopes) == 1 {
+		return s.listViaBDListScoped(query, scopes[0])
+	}
+	// Several calls: sort and limit only make sense over the merged rows.
+	inner := query
+	inner.Limit = 0
+	var (
+		merged  []Bead
+		seen    = make(map[string]struct{})
+		partial error
+	)
+	for _, scope := range scopes {
+		part, err := s.listViaBDListScoped(inner, scope)
+		if err != nil {
+			var pe *PartialResultError
+			if !errors.As(err, &pe) {
+				return nil, err
+			}
+			partial = err
+		}
+		for _, b := range part {
+			if _, dup := seen[b.ID]; dup {
+				continue
+			}
+			seen[b.ID] = struct{}{}
+			merged = append(merged, b)
+		}
+	}
+	merged = applyListQuery(merged, query)
+	if partial != nil {
+		return merged, partial
+	}
+	return merged, nil
+}
+
+func (s *BdStore) listViaBDListScoped(query ListQuery, scope bdListScope) ([]Bead, error) {
 	serverQuery, clientFilteredAssignees := bdServerQueryForAssignees(query)
 	limit := serverQuery.Limit
 	if bdListRequiresClientLimit(query, serverQuery, clientFilteredAssignees) {
@@ -3014,8 +3134,15 @@ func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {
 		args = append(args, "--include-templates")
 	}
 	args = append(args, "--limit", fmt.Sprintf("%d", limit))
-	if serverQuery.ParentID != "" {
-		args = append(args, "--parent", serverQuery.ParentID)
+	parent := serverQuery.ParentID
+	if scope.parent != "" {
+		parent = scope.parent
+	}
+	if parent != "" {
+		args = append(args, "--parent", parent)
+	}
+	if len(scope.ids) > 0 {
+		args = append(args, "--id", strings.Join(scope.ids, ","))
 	}
 	if len(serverQuery.Metadata) > 0 {
 		keys := make([]string, 0, len(serverQuery.Metadata))
@@ -3082,10 +3209,10 @@ func bdListRequiresClientLimit(query, serverQuery ListQuery, clientFilteredAssig
 	if serverQuery.SeekAfter != nil {
 		return true
 	}
-	// IDs is a Go-side-only residual filter (see ListQuery.Matches): bd list
-	// has no --id flag, so a bd-side limit could truncate before the
-	// matching IDs are even fetched.
-	if len(serverQuery.IDs) > 0 {
+	// IDs (--id, chunked) and ParentIDs (one --parent call each) fan out into
+	// several bd calls whose rows are merged here; a bd-side limit on any one
+	// call could truncate before the merge, sort and dedupe run.
+	if len(serverQuery.IDs) > 0 || len(serverQuery.ParentIDs) > 0 {
 		return true
 	}
 	return false
@@ -3130,9 +3257,75 @@ func (s *BdStore) listWispsTier(query ListQuery) ([]Bead, error) {
 // <filters>"`. The installed bd list surface does not expose ephemeral rows, so
 // TierWisps and TierBoth must union this path with bd list results.
 func (s *BdStore) listEphemeral(query ListQuery) ([]Bead, error) {
+	// IDs and ParentIDs ride bd as OR groups, chunked like the bd list leg.
+	var groups []string
+	if ids := bdPushdownIDs(query); ids != nil {
+		for _, chunk := range chunkStrings(ids, bdListFanoutChunk) {
+			groups = append(groups, bdOrGroup("id", chunk))
+		}
+	} else if parents, none := bdPushdownParents(query); none {
+		return []Bead{}, nil
+	} else if parents != nil {
+		for _, chunk := range chunkStrings(parents, bdListFanoutChunk) {
+			groups = append(groups, bdOrGroup("parent", chunk))
+		}
+	}
+	if len(groups) <= 1 {
+		group := ""
+		if len(groups) == 1 {
+			group = groups[0]
+		}
+		return s.listEphemeralScoped(query, group)
+	}
+	inner := query
+	inner.Limit = 0
+	var (
+		merged  []Bead
+		seen    = make(map[string]struct{})
+		partial error
+	)
+	for _, group := range groups {
+		part, err := s.listEphemeralScoped(inner, group)
+		if err != nil {
+			var pe *PartialResultError
+			if !errors.As(err, &pe) {
+				return nil, err
+			}
+			partial = err
+		}
+		for _, b := range part {
+			if _, dup := seen[b.ID]; dup {
+				continue
+			}
+			seen[b.ID] = struct{}{}
+			merged = append(merged, b)
+		}
+	}
+	merged = applyListQuery(merged, query)
+	if partial != nil {
+		return merged, partial
+	}
+	return merged, nil
+}
+
+func bdOrGroup(field string, values []string) string {
+	terms := make([]string, len(values))
+	for i, v := range values {
+		terms[i] = field + "=" + v
+	}
+	return "(" + strings.Join(terms, " OR ") + ")"
+}
+
+func (s *BdStore) listEphemeralScoped(query ListQuery, group string) ([]Bead, error) {
 	serverQuery, clientFilteredAssignees := bdServerQueryForAssignees(query)
 	clauses := []string{"ephemeral=true"}
 	serverFilteredOnly := !clientFilteredAssignees
+	if group != "" {
+		clauses = append(clauses, group)
+	} else if len(query.IDs) > 0 {
+		// IDs stays a Go-side filter, so a bd-side limit could cut rows first.
+		serverFilteredOnly = false
+	}
 	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "label", serverQuery.Label)
 	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "status", serverQuery.Status)
 	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "type", serverQuery.Type)
