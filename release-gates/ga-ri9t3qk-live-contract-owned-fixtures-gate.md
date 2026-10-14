@@ -1184,3 +1184,17 @@ Criterion 3 detached service: `/var/tmp/deploy-ga-ri9t3qk.8jCw5gwu/criterion3`. 
 The first scratch materialization's cold local pre-commit build was canceled before any test verdict, with its client verified against the session identity; its output base was released. Scratch commit hooks were suppressed only when recreating the disposable merge tree. Assigned deploy worktree hooks stay active. The runner refused an unused alternate scratch as BUSY; no second gate ran.
 
 The landing guard ga-6ilvcxw stays open until mayor/MPR verifies actual landing on main. Opening this PR and publishing clearance do not release the dependent deploys.
+
+## Exact full-suite commands
+
+These are the phase commands executed by gate-rbe-phase.sh in the pinned merge scratch. The phase flags above and retained BEPs bind each result to its invocation.
+
+```bash
+BAZEL_FLAGS="--config=remote-exec --keep_going --config=ci --nocache_test_results --noremote_local_fallback --rewind_lost_inputs --remote_download_outputs=toplevel --test_env=GO_TEST_WRAP_TESTV=1 --build_event_json_file=/var/tmp/deploy-ga-ri9t3qk.8jCw5gwu/criterion3/evidence/remote/unit.bep.json" NOGO_BUILD_FLAGS="--keep_going --output_groups=nogo_fix --config=remote-exec" make check
+
+bazel test --config=remote-exec --keep_going --config=ci --nocache_test_results --noremote_local_fallback --rewind_lost_inputs --remote_download_outputs=toplevel --test_env=GO_TEST_WRAP_TESTV=1 --build_event_json_file=/var/tmp/deploy-ga-ri9t3qk.8jCw5gwu/criterion3/evidence/remote/acceptance.bep.json --config=acceptance //test/acceptance:acceptance_test //test/acceptance:acceptance_solo_tests
+
+bazel test --config=remote-exec --keep_going --config=ci --nocache_test_results --noremote_local_fallback --rewind_lost_inputs --remote_download_outputs=toplevel --test_env=GO_TEST_WRAP_TESTV=1 --build_event_json_file=/var/tmp/deploy-ga-ri9t3qk.8jCw5gwu/criterion3/evidence/remote/integration-packages.bep.json --config=integration //test:integration_packages
+
+bazel test --config=remote-exec --keep_going --config=ci --nocache_test_results --noremote_local_fallback --rewind_lost_inputs --remote_download_outputs=toplevel --test_env=GO_TEST_WRAP_TESTV=1 --build_event_json_file=/var/tmp/deploy-ga-ri9t3qk.8jCw5gwu/criterion3/evidence/remote/integration-full.bep.json --config=integration --test_arg=-test.v //test/integration:integration_test
+```
