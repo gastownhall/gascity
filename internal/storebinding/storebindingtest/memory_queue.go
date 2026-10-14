@@ -359,7 +359,9 @@ func (q *MemoryNudgeQueue) Ack(ids []string, _, _, _ string) error {
 }
 
 // ReleaseClaims returns undelivered in-flight ids to pending, not claimable
-// before notBefore when it is set. The delivery batch is kept.
+// before notBefore when it is set. The delivery batch is kept. An item whose
+// lease has already run out is no longer in flight, so it is left as it is:
+// there is no claim to give back and no backoff to impose.
 func (q *MemoryNudgeQueue) ReleaseClaims(ids []string, notBefore time.Time) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -372,6 +374,9 @@ func (q *MemoryNudgeQueue) ReleaseClaims(ids []string, notBefore time.Time) erro
 		}
 		if expired(entry.item, now) {
 			deadLetterExpired(entry)
+			continue
+		}
+		if !entry.inFlightAt(now) {
 			continue
 		}
 		entry.state = memoryQueuePending

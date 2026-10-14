@@ -1128,6 +1128,31 @@ func runNudgeBatchTests(r Runner, suite NudgesSuite) {
 		}
 	})
 
+	r.Run("ReleaseClaimsLeavesALapsedLeaseAlone", func(r Runner) {
+		queue := mustQueue(r, suite)
+		now := time.Now().UTC()
+		claimedAt := now.Add(-time.Hour)
+		lapsed := nudgeItem("n-lapsed", "", claimedAt)
+		if err := queue.Enqueue(lapsed); err != nil {
+			r.Fatalf("Enqueue: %v", err)
+		}
+		if claimed, err := queue.ClaimDue(target, claimedAt); err != nil || len(claimed) != 1 {
+			r.Fatalf("ClaimDue an hour ago = %v, %v; want n-lapsed", nudgeIDs(claimed), err)
+		}
+		// The lease ran out long ago, so the item is no longer in flight and
+		// a backoff release has no claim to give back.
+		if err := queue.ReleaseClaims([]string{"n-lapsed"}, now.Add(10*time.Minute)); err != nil {
+			r.Fatalf("ReleaseClaims: %v", err)
+		}
+		claimed, err := queue.ClaimDue(target, now)
+		if err != nil {
+			r.Fatalf("ClaimDue after the release: %v", err)
+		}
+		if len(claimed) != 1 {
+			r.Fatalf("ClaimDue = %v, want n-lapsed claimable now: releasing a lapsed lease must not impose a backoff", nudgeIDs(claimed))
+		}
+	})
+
 	r.Run("DeliveryBatchRoundTrips", func(r Runner) {
 		queue := mustQueue(r, suite)
 		now := time.Now().UTC()
