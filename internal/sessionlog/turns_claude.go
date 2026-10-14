@@ -23,10 +23,13 @@ import (
 // finishes. Input queued while a tool runs, or a scheduled task firing then,
 // stamps the running turn's tool result with the next prompt's promptId. So a
 // tool result never starts a turn: it continues the open one, whatever id it
-// carries. Only when the scan window begins inside a turn does a tool result
-// open that turn, so its id is still known. If a prompt with the same id
-// follows, the tool result carried that prompt's id, so the turn it opened
-// keeps no id and the prompt opens its own turn.
+// carries. Only when the fold begins inside a turn does a tool result open
+// that turn, so its id is still known: when the scan window is truncated, or
+// before the first turn start or end of a file that begins mid-turn, as a
+// session continued into a new file after it ran out of context does. That
+// turn's start lies outside what was read, so it has none. If a prompt with
+// the same id follows, the tool result carried that prompt's id, so the turn
+// it opened keeps no id and the prompt opens its own turn.
 //
 // A user entry Claude writes itself, with neither origin nor promptSource
 // (Stop hook feedback, the entry a resumed session opens with), may likewise
@@ -244,6 +247,10 @@ type claudeTurnFold struct {
 	// startUnseen: the window may begin inside a turn, so the first turn
 	// opened before any boundary has an unknown start.
 	startUnseen bool
+	// bounded is set once the fold has seen a turn start or end. Before
+	// that, a transcript read whole may still begin inside a turn: a session
+	// continued into a new file opens with the running turn's tool results.
+	bounded bool
 	// provisionalID is the id of a turn a tool result or an entry Claude
 	// wrote itself opened at the start of the window. Either may carry the
 	// next prompt's id, so a prompt with that id shows the turn was not that
@@ -298,8 +305,9 @@ func (f *claudeTurnFold) addUser(rec claudeTurnRecord) {
 			// It continues the open turn, whatever promptId it carries.
 			f.failed = false
 			return
-		case !f.startUnseen:
-			// A turn's first entry is never a tool result.
+		case !f.startUnseen && f.bounded:
+			// A turn's first entry is never a tool result. Before the
+			// fold's first boundary it may be the first entry read.
 			return
 		}
 	}
@@ -334,13 +342,13 @@ func (f *claudeTurnFold) addUser(rec claudeTurnRecord) {
 	}
 	at := rec.at
 	f.provisionalID = ""
-	if f.startUnseen {
+	if f.startUnseen || (rec.toolResult && !f.bounded) {
 		at = time.Time{}
 		if !rec.prompted {
 			f.provisionalID = id
 		}
 	}
-	f.startUnseen = false
+	f.startUnseen, f.bounded = false, true
 	l.begin(id, at)
 }
 
@@ -358,7 +366,7 @@ func (f *claudeTurnFold) disownProvisional() {
 }
 
 func (f *claudeTurnFold) end(at time.Time, status TurnStatus) {
-	f.startUnseen = false
+	f.startUnseen, f.bounded = false, true
 	f.failed = false
 	f.ledger.close(at, status)
 }

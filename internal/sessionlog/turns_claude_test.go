@@ -97,6 +97,18 @@ func TestScanTurnsClaudeFixtures(t *testing.T) {
 				{ID: claudeP1, StartedAt: turnTime(t, ts("00:00.123")), EndedAt: turnTime(t, ts("00:06.789")), Status: TurnStatusCompleted},
 			}}
 		}},
+		// A session continued into a new file after it ran out of context
+		// opens inside the running turn: the compaction summary, then that
+		// turn's tool results, none carrying a promptId.
+		{"continued_session.jsonl", func(t *testing.T) TurnScan {
+			return TurnScan{
+				Recent: []ScannedTurn{
+					{ID: claudeP2, StartedAt: turnTime(t, "2026-10-13T05:01:00.459Z"), EndedAt: turnTime(t, "2026-10-13T05:01:01.500Z"), Status: TurnStatusCompleted},
+					{EndedAt: turnTime(t, "2026-10-13T05:00:05.025Z"), Status: TurnStatusFailed},
+				},
+				MissingIDs: true,
+			}
+		}},
 		{"start_beyond_budget.jsonl", func(t *testing.T) TurnScan {
 			return TurnScan{
 				Open:    true,
@@ -130,6 +142,52 @@ func TestScanTurnsClaudeTornTailIsAnError(t *testing.T) {
 	_, err := ScanTurns("claude", turnFixture("claude", "torn_tail.jsonl"))
 	if !errors.Is(err, ErrTornTurnRecord) {
 		t.Fatalf("error = %v, want ErrTornTurnRecord", err)
+	}
+}
+
+// TestScanTurnsClaudeContinuedSessionOpensMidTurn: a session continued into
+// a new file after it ran out of context opens with the compaction summary
+// and the running turn's tool results, with no prompt. Read whole, the file
+// still begins inside that turn, so its first tool result opens it with an
+// unknown start, and the turn's end is kept. The compaction summary opens
+// nothing.
+func TestScanTurnsClaudeContinuedSessionOpensMidTurn(t *testing.T) {
+	data, err := os.ReadFile(turnFixture("claude", "continued_session.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.SplitAfter(strings.TrimSuffix(string(data), "\n"), "\n")
+	ts := func(clock string) string { return "2026-10-13T05:" + clock + "Z" }
+	running := TurnScan{Open: true, MissingIDs: true}
+	failed := ScannedTurn{EndedAt: turnTime(t, ts("00:05.025")), Status: TurnStatusFailed}
+	tests := []struct {
+		lines int
+		want  TurnScan
+	}{
+		{3, TurnScan{}}, // through the compaction summary
+		{4, TurnScan{}}, // the running turn's tool use
+		{5, running},    // its first tool result
+		{8, running},    // the API error leaves it open
+		{9, TurnScan{Recent: []ScannedTurn{failed}, MissingIDs: true}},
+		{10, TurnScan{
+			Open:       true,
+			Current:    ScannedTurn{ID: claudeP2, StartedAt: turnTime(t, ts("01:00.459"))},
+			Recent:     []ScannedTurn{failed},
+			MissingIDs: true,
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("lines=%d", tt.lines), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "claude.jsonl")
+			if err := os.WriteFile(path, []byte(strings.Join(lines[:tt.lines], "")), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			got, err := ScanTurns("claude", path)
+			if err != nil {
+				t.Fatalf("ScanTurns: %v", err)
+			}
+			assertTurnScan(t, got, tt.want)
+		})
 	}
 }
 
