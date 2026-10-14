@@ -482,7 +482,10 @@ func CanonicalCloseReason(stateCode string) string { return canonicalCloseReason
 type TerminalOutcome int
 
 const (
-	// OutcomeNotTerminal is a live nudge (queued, in flight) or an unknown code.
+	// OutcomeNotTerminal is a live nudge (queued, in flight), a closed shadow
+	// that carries no delivery outcome (an enqueue closed by RollbackEnqueue,
+	// or one closed gc-swept by SweepStale), or an unknown code. Wait dispatch
+	// re-queues a wait reminder whose shadows are all in this class.
 	OutcomeNotTerminal TerminalOutcome = iota
 	// OutcomeDelivered means delivery to the provider is proven; the nudge must
 	// not be retried.

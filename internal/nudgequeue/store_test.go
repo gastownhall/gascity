@@ -666,6 +666,7 @@ func TestClassifyTerminalStateIsTheTerminalPredicate(t *testing.T) {
 		"":                       OutcomeNotTerminal,
 		"queued":                 OutcomeNotTerminal,
 		"in_flight":              OutcomeNotTerminal,
+		"gc-swept":               OutcomeNotTerminal,
 		"accepted_for_injection": OutcomeDelivered,
 		"injected":               OutcomeDelivered,
 		"injected_unobserved":    OutcomeDelivered,
