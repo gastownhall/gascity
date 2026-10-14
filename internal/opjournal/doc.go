@@ -82,11 +82,13 @@
 // the runtime refused its key on its last attempt (L3). Delivery keys are
 // <head op id>:<the head's lane_seq at the minting Take>. A deduplicating
 // runtime gets a maybe-delivered group whole or not at all (a member that
-// closed leaves it; a member that cannot go yet holds the head as a
-// replay_group waiter), so every send under a key is a subset of every
-// earlier send under it (L2); any other runtime may get a group in parts. A
-// replay group whose open members are all after_turn riders goes without a
-// starter. Delivered text names no identifier (I14). A lane store must
+// closed leaves it; a member that cannot go yet, including one the rules
+// keep out of its class, such as one whose after target cannot be read on
+// that pass, holds the head as a replay_group waiter), so every send under a
+// key is a subset of every earlier send under it (L2); any other runtime may
+// get a group in parts. A replay group whose open members are all
+// after_turn riders goes without a starter. An after_unreadable wait retries
+// after TransientBackoffBase. Delivered text names no identifier (I14). A lane store must
 // apply guarded batches (NewLaneStore); there is no production caller until
 // OJ-12.
 //
