@@ -3,6 +3,7 @@ package tokenrender
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
@@ -1124,6 +1125,20 @@ func TestSeedNeverDropsContentItDoesNotOwn(t *testing.T) {
 			t.Fatal("a mis-pointed file was overwritten")
 		}
 	})
+	t.Run("larger than the cap, with no token line", func(t *testing.T) {
+		o := output(t, "work")
+		blank := bytes.Repeat([]byte("\n"), connect.MaxTokenFileBytes+1)
+		if err := os.WriteFile(o.TokenFile, blank, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		h := newHarness(t, []Output{o}, nil)
+		if _, err := h.r.RenderOnce(context.Background()); !errors.Is(err, ErrSeedWouldDrop) {
+			t.Fatalf("error = %v, want render_seed_would_drop", err)
+		}
+		if got := readFile(t, o.TokenFile); !bytes.Equal(got, blank) {
+			t.Fatal("a mis-pointed file was overwritten")
+		}
+	})
 	t.Run("operator tokens without a source", func(t *testing.T) {
 		o := output(t, "work")
 		content := []byte("ops-token-1\nops-token-2\n")
@@ -1185,6 +1200,12 @@ func TestReportsAndRenderersPrintNoSecret(t *testing.T) {
 		"op-secret",
 		fmt.Sprintf("%v", renderKey()),
 		fmt.Sprintf("%#v", renderKey()),
+	}
+	// A digest of an operator token is a secret too: a weak one can be
+	// guessed offline from a logged report.
+	opDigest := sha256.Sum256([]byte("op-secret"))
+	for _, verb := range []string{"%v", "%#v", "%x", "%s"} {
+		secrets = append(secrets, strings.Trim(fmt.Sprintf(verb, opDigest), "[]{}"))
 	}
 	cfg := Config{City: testCity, Key: renderKey(), Outputs: []Output{work}, Rows: src}
 	values := map[string]any{"report": rep, "output report": rep.Outputs[0], "renderer": h.r, "config": cfg}
@@ -1324,5 +1345,121 @@ func TestInvalidSessionIDsFromASourceAreCounted(t *testing.T) {
 	}
 	if rep.Rows != 1 || rep.DroppedRows != 1 {
 		t.Fatalf("rows = %d dropped = %d; want the invalid id counted", rep.Rows, rep.DroppedRows)
+	}
+}
+
+// TestALockHeldElsewhereFailsOnlyItsDirectory pins the lock budget: a
+// directory whose lock another renderer holds (a stuck or stopped CLI mint)
+// fails only its own outputs, with a logged cause, and every other output
+// still revokes within the render.
+func TestALockHeldElsewhereFailsOnlyItsDirectory(t *testing.T) {
+	infra, work := output(t, "infra"), output(t, "work")
+	renderedWith(t, work.TokenFile, nil, connect.TokenRow{SessionID: "mc-revoked", Generation: 1})
+	holdDirLock(t, filepath.Dir(infra.TokenFile))
+	src := &fakeSource{}
+	src.set(live("mc-new", 1))
+	h := newHarness(t, []Output{infra, work}, src)
+	h.r.lockBudget = 50 * time.Millisecond
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	rep, err := h.r.RenderOnce(ctx)
+	if ctx.Err() != nil {
+		t.Fatalf("the render waited out its context on a held lock: %v", err)
+	}
+	if !errors.Is(err, ErrWriteFailed) || !errors.Is(rep.Outputs[0].Err, errDirLockHeld) {
+		t.Fatalf("RenderOnce = %v (infra: %v), want infra's render_write_failed for a held lock", err, rep.Outputs[0].Err)
+	}
+	if rep.Outputs[1].Err != nil {
+		t.Fatalf("the free output failed: %v", rep.Outputs[1].Err)
+	}
+	got := readFile(t, work.TokenFile)
+	if connect.TokenFileHoldsLine(got, bearerOf(t, "mc-revoked", 1)) || !connect.TokenFileHoldsLine(got, bearerOf(t, "mc-new", 1)) {
+		t.Fatal("the free output did not render")
+	}
+	if h.logs.count("ledger infra") != 1 || h.logs.count("held by another renderer") != 1 {
+		t.Fatalf("the held lock was not logged once: %q", h.logs.lines)
+	}
+}
+
+// TestLockBudgetDefaultsWellUnderTheInterval pins that the default budget
+// leaves most of the interval for the render itself.
+func TestLockBudgetDefaultsWellUnderTheInterval(t *testing.T) {
+	h := newHarness(t, nil, nil)
+	if b := h.r.lockBudget; b <= 0 || b > DefaultInterval/2 {
+		t.Fatalf("lock budget = %s, want positive and well under %s", b, DefaultInterval)
+	}
+}
+
+// TestRowFailureMarksEveryWritableOutput pins the per-output cause of a
+// failed row read: an output that was not otherwise failed reports
+// render_rows_unavailable rather than looking current.
+func TestRowFailureMarksEveryWritableOutput(t *testing.T) {
+	work, infra := output(t, "work"), output(t, "infra")
+	src := &fakeSource{}
+	src.setErr(errors.New("sessions ledger unreachable"))
+	h := newHarness(t, []Output{work, infra}, src)
+	rep, _ := h.r.RenderOnce(context.Background())
+	for _, o := range rep.Outputs {
+		if !errors.Is(o.Err, ErrRowsUnavailable) {
+			t.Fatalf("output %s Err = %v, want render_rows_unavailable", o.Ledger, o.Err)
+		}
+	}
+}
+
+// TestRenderOnceRefusesAFIFOParentWithoutBlocking pins that a FIFO where a
+// token file's directory should be fails that output at once: opening it as
+// a directory must never wait for a writer.
+func TestRenderOnceRefusesAFIFOParentWithoutBlocking(t *testing.T) {
+	fifo := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		// Unblock a reader stuck in open(2), should the test have failed.
+		if f, err := os.OpenFile(fifo, os.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
+			f.Close() //nolint:errcheck // test cleanup
+		}
+	})
+	bad := Output{Ledger: "infra", TokenFile: filepath.Join(fifo, "serve-tokens")}
+	work := output(t, "work")
+	h := newHarness(t, []Output{bad, work}, nil)
+	done := make(chan Report, 1)
+	go func() {
+		rep, _ := h.r.RenderOnce(context.Background())
+		done <- rep
+	}()
+	select {
+	case rep := <-done:
+		if !errors.Is(rep.Outputs[0].Err, ErrWriteFailed) || rep.Outputs[1].Err != nil {
+			t.Fatalf("outputs = %+v, want only the FIFO's render_write_failed", rep.Outputs)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("RenderOnce blocked opening a FIFO as a directory")
+	}
+	unlock, err := LockOutputs(context.Background(), []Output{work})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlock()
+}
+
+// TestRenderOnceReturnsAReportItDoesNotShare pins that a host editing the
+// report RenderOnce returns cannot change the report a later coalesced
+// Ensure checks.
+func TestRenderOnceReturnsAReportItDoesNotShare(t *testing.T) {
+	src := &fakeSource{}
+	src.set(live("mc-1", 1))
+	h := newHarness(t, []Output{output(t, "work")}, src)
+	rep, err := h.r.RenderOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep.Outputs[0].Err = errors.New("edited by the host")
+	h.r.mu.Lock()
+	last := h.r.last
+	h.r.mu.Unlock()
+	if last.Outputs[0].Err != nil {
+		t.Fatalf("editing the returned report changed the renderer's: %v", last.Outputs[0].Err)
 	}
 }

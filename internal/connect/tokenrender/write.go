@@ -27,6 +27,18 @@ const newFileMode os.FileMode = 0o600
 // the caller's context is live.
 const lockRetryInterval = 10 * time.Millisecond
 
+// errDirLockHeld is wrapped by a render's failure of the outputs whose
+// directory lock another renderer held past the render's lock budget.
+var errDirLockHeld = errors.New("directory lock held by another renderer")
+
+// errForeignOwner is wrapped by WriteTokenFile's refusal to replace a file
+// whose owner it cannot keep.
+var errForeignOwner = errors.New("owned by another user, and only root can keep its owner")
+
+// geteuid is the effective uid WriteTokenFile keeps owners under; tests
+// replace it.
+var geteuid = os.Geteuid
+
 // outputDir is one token-file directory a render locks, identified by its
 // inode so that two spellings of one directory share one lock.
 type outputDir struct {
@@ -55,7 +67,9 @@ func openOutputDirs(outputs []Output) []*outputDir {
 		}
 		d := &outputDir{path: path}
 		byPath[path] = d
-		f, err := os.Open(path)
+		// O_DIRECTORY|O_NONBLOCK: anything but a directory (a FIFO above all)
+		// fails at once instead of blocking the render in open(2).
+		f, err := os.OpenFile(path, os.O_RDONLY|unix.O_DIRECTORY|unix.O_NONBLOCK, 0)
 		if err == nil {
 			var st unix.Stat_t
 			if err = unix.Fstat(int(f.Fd()), &st); err == nil {
@@ -91,10 +105,11 @@ func openOutputDirs(outputs []Output) []*outputDir {
 	return dirs
 }
 
-// lock takes d's exclusive flock, retrying a busy lock until ctx ends. onBusy,
-// when set, runs each time the lock is found busy. A context error is
-// returned wrapped; any other failure is recorded on d.
-func (d *outputDir) lock(ctx context.Context, onBusy func()) error {
+// lock takes d's exclusive flock, retrying a busy lock until ctx ends or,
+// when deadline is set, until deadline passes: then d records errDirLockHeld.
+// onBusy, when set, runs each time the lock is found busy. A context error
+// is returned wrapped; any other failure is recorded on d.
+func (d *outputDir) lock(ctx context.Context, deadline time.Time, onBusy func()) error {
 	if d.err != nil {
 		return nil
 	}
@@ -114,6 +129,10 @@ func (d *outputDir) lock(ctx context.Context, onBusy func()) error {
 		}
 		if onBusy != nil {
 			onBusy()
+		}
+		if !deadline.IsZero() && !time.Now().Before(deadline) {
+			d.err = fmt.Errorf("locking token-file directory %s: %w", d.path, errDirLockHeld)
+			return nil
 		}
 		if timer == nil {
 			timer = time.NewTimer(lockRetryInterval)
@@ -147,12 +166,17 @@ func closeOutputDirs(dirs []*outputDir) {
 
 // lockOutputDirs locks every output's directory in (device, inode) order. A
 // directory that cannot be opened or locked carries its error and the others
-// are still locked; only the context ending fails the call, with every lock
-// released.
-func lockOutputDirs(ctx context.Context, outputs []Output, onBusy func()) ([]*outputDir, error) {
+// are still locked. A positive budget bounds the whole wait for busy locks:
+// once it is spent, a directory still held elsewhere carries errDirLockHeld.
+// Only the context ending fails the call, with every lock released.
+func lockOutputDirs(ctx context.Context, outputs []Output, budget time.Duration, onBusy func()) ([]*outputDir, error) {
+	var deadline time.Time
+	if budget > 0 {
+		deadline = time.Now().Add(budget)
+	}
 	dirs := openOutputDirs(outputs)
 	for _, d := range dirs {
-		if err := d.lock(ctx, onBusy); err != nil {
+		if err := d.lock(ctx, deadline, onBusy); err != nil {
 			closeOutputDirs(dirs)
 			return nil, err
 		}
@@ -164,11 +188,12 @@ func lockOutputDirs(ctx context.Context, outputs []Output, onBusy func()) ([]*ou
 // output's token file, each directory once (by device and inode, however
 // its path is spelled) and in (device, inode) order, so renderers in this
 // process and in others serialize without creating a lock file. A busy lock
-// is retried until ctx ends; then the call returns ctx's error, wrapped. Any
+// is retried until ctx ends (there is no lock budget here, unlike a render's);
+// then the call returns ctx's error, wrapped. Any
 // directory that cannot be locked fails the whole call, with nothing held.
 // The returned unlock releases every lock; it is safe to call more than once.
 func LockOutputs(ctx context.Context, outputs []Output) (unlock func(), err error) {
-	dirs, err := lockOutputDirs(ctx, outputs, nil)
+	dirs, err := lockOutputDirs(ctx, outputs, 0, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -185,13 +210,15 @@ func LockOutputs(ctx context.Context, outputs []Output) (unlock func(), err erro
 // WriteTokenFile replaces the token file at path with content, following
 // DES-CN D5's write rules. Call it with LockOutputs held. Equal bytes write
 // nothing and leave the mtime alone. Otherwise the content goes to a temp
-// file in the same directory with the current file's mode and group (0600
-// and the caller's group when new), is fsynced, gets an mtime strictly after
+// file in the same directory with the current file's mode, owner and group
+// (0600 and the caller's user and group when new), is fsynced, gets an mtime strictly after
 // the previous one (so bd serve's (mtime, size) reload check sees a
 // same-size rotation), is renamed over the path, and the directory is
 // fsynced. Empty, unterminated and oversized content is refused, and so is a
 // path that exists but is not a regular file (a symlink, a directory or a
-// FIFO). It reports whether the file changed.
+// FIFO), and so is a file another user owns unless the caller is root: only
+// root can keep that owner, and a replacement owned by the caller could lock
+// bd serve out of its own token file. It reports whether the file changed.
 func WriteTokenFile(path string, content []byte) (changed bool, err error) {
 	return writeTokenFile(path, content, time.Now)
 }
@@ -211,7 +238,7 @@ func writeTokenFile(path string, content []byte, now func() time.Time) (bool, er
 	}
 	mode := newFileMode
 	var prev time.Time
-	gid := -1
+	uid, gid := -1, -1
 	if info != nil {
 		if bytes.Equal(current, content) {
 			return false, nil
@@ -219,8 +246,11 @@ func writeTokenFile(path string, content []byte, now func() time.Time) (bool, er
 		mode = info.Mode().Perm()
 		prev = info.ModTime()
 		if st, ok := info.Sys().(*syscall.Stat_t); ok {
-			gid = int(st.Gid)
+			uid, gid = int(st.Uid), int(st.Gid)
 		}
+	}
+	if euid := geteuid(); uid >= 0 && uid != euid && euid != 0 {
+		return false, fmt.Errorf("writing token file %s: owner uid %d is not this process's uid %d: %w", path, uid, euid, errForeignOwner)
 	}
 
 	dir := filepath.Dir(path)
@@ -235,8 +265,8 @@ func writeTokenFile(path string, content []byte, now func() time.Time) (bool, er
 			os.Remove(tmpName) //nolint:errcheck // best-effort cleanup of our own temp file
 		}
 	}()
-	if err := keepGroup(tmp, gid); err != nil {
-		return false, fmt.Errorf("writing token file %s: keeping group %d: %w", path, gid, err)
+	if err := keepOwner(tmp, uid, gid); err != nil {
+		return false, fmt.Errorf("writing token file %s: keeping owner %d:%d: %w", path, uid, gid, err)
 	}
 	if err := writeAndSync(tmp, content, mode); err != nil {
 		return false, fmt.Errorf("writing token file %s: %w", path, err)
@@ -254,11 +284,11 @@ func writeTokenFile(path string, content []byte, now func() time.Time) (bool, er
 	return true, nil
 }
 
-// keepGroup gives f the group gid when it has another; gid -1 keeps f's. A
-// failure is returned, never ignored: a replacement in another group could
-// silently lose a reader that reads through its group.
-func keepGroup(f *os.File, gid int) error {
-	if gid < 0 {
+// keepOwner gives f the owner uid and group gid where they differ from f's;
+// -1 keeps f's. A failure is returned, never ignored: a replacement owned by
+// another user or group could silently lose bd serve as a reader.
+func keepOwner(f *os.File, uid, gid int) error {
+	if uid < 0 && gid < 0 {
 		return nil
 	}
 	info, err := f.Stat()
@@ -266,10 +296,18 @@ func keepGroup(f *os.File, gid int) error {
 		f.Close() //nolint:errcheck // the stat error wins
 		return err
 	}
-	if st, ok := info.Sys().(*syscall.Stat_t); ok && int(st.Gid) == gid {
+	if st, ok := info.Sys().(*syscall.Stat_t); ok {
+		if int(st.Uid) == uid {
+			uid = -1
+		}
+		if int(st.Gid) == gid {
+			gid = -1
+		}
+	}
+	if uid < 0 && gid < 0 {
 		return nil
 	}
-	if err := f.Chown(-1, gid); err != nil {
+	if err := f.Chown(uid, gid); err != nil {
 		f.Close() //nolint:errcheck // the chown error wins
 		return err
 	}

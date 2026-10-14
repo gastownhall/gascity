@@ -110,9 +110,13 @@ func ParseOperatorLines(content []byte) (lines []string, gcLike int, err error) 
 // lines and are not among operator: the lines a seed over content would drop
 // (DES-CN D5's seed rule).
 func ForeignOperatorLines(content []byte, operator []string) int {
+	held := make(map[string]struct{}, len(operator))
+	for _, line := range operator {
+		held[line] = struct{}{}
+	}
 	n := 0
 	for _, tok := range TokenLines(content) {
-		if !IsGCLine(tok) && !slices.Contains(operator, tok) {
+		if _, ok := held[tok]; !ok && !IsGCLine(tok) {
 			n++
 		}
 	}
@@ -128,8 +132,9 @@ func ForeignOperatorLines(content []byte, operator []string) int {
 // Operator lines must be as ParseOperatorLines returns them: non-empty,
 // trimmed, without a newline or a gc prefix (an interior carriage return is
 // kept, as bd serve keeps it); a line that is not is refused with an error
-// wrapping ErrInvalidOperatorLine. Every row must be one MintBearer accepts. A render over MaxTokenFileBytes is refused with
-// ErrTokenFileTooLarge. Errors never echo an operator line or the key.
+// wrapping ErrInvalidOperatorLine. Every row must be one MintBearer accepts.
+// A render over MaxTokenFileBytes is refused with ErrTokenFileTooLarge.
+// Errors never echo an operator line or the key.
 func RenderTokenFile(operator []string, key []byte, city string, rows []TokenRow) ([]byte, error) {
 	sentinel, err := Sentinel(key, city)
 	if err != nil {

@@ -369,8 +369,11 @@ func TestWriteTokenFileKeepsGroup(t *testing.T) {
 			break
 		}
 	}
+	if other < 0 && os.Geteuid() == 0 {
+		other = 4243 // root may give a file any group
+	}
 	if other < 0 {
-		t.Skip("the test user has no secondary group")
+		t.Skip("the test user has no secondary group and is not root")
 	}
 	path := filepath.Join(t.TempDir(), "tokens")
 	if err := os.WriteFile(path, []byte("old\n"), 0o600); err != nil {
@@ -412,4 +415,86 @@ func TestWriteTokenFileRefusesAFIFO(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("WriteTokenFile blocked on a FIFO")
 	}
+}
+
+// TestWriteTokenFileAcceptsExactlyTheCap pins the cap's boundary: bd serve
+// reads a file of exactly MaxTokenFileBytes.
+func TestWriteTokenFileAcceptsExactlyTheCap(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tokens")
+	content := append(bytes.Repeat([]byte("a"), connect.MaxTokenFileBytes-1), '\n')
+	if _, err := WriteTokenFile(path, content); err != nil {
+		t.Fatalf("content of exactly the cap was refused: %v", err)
+	}
+	if got := readFile(t, path); !bytes.Equal(got, content) {
+		t.Fatal("the file does not hold the content")
+	}
+}
+
+// TestLockOutputsChecksTheContextFirst pins that an ended context takes no
+// lock, even a free one.
+func TestLockOutputsChecksTheContextFirst(t *testing.T) {
+	dir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	unlock, err := LockOutputs(ctx, []Output{{Ledger: "work", TokenFile: filepath.Join(dir, "a")}})
+	if err == nil {
+		unlock()
+		t.Fatal("LockOutputs took a lock under an ended context")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("LockOutputs = %v, want the context's cancellation", err)
+	}
+}
+
+// TestWriteTokenFileRefusesAnotherOwnersFile pins that a renderer that cannot
+// keep a file's owner leaves the file alone: replacing it would hand bd
+// serve a file owned by the renderer's user, which it may not be able to
+// read.
+func TestWriteTokenFileRefusesAnotherOwnersFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tokens")
+	if err := os.WriteFile(path, []byte("old\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	owner := os.Geteuid()
+	if owner == 0 {
+		t.Skip("root keeps any owner; TestWriteTokenFileKeepsOwnerAsRoot covers it")
+	}
+	setGeteuid(t, func() int { return owner + 1 })
+	if _, err := WriteTokenFile(path, []byte("new\n")); !errors.Is(err, errForeignOwner) {
+		t.Fatalf("WriteTokenFile = %v, want a refusal to change the owner", err)
+	}
+	if got := readFile(t, path); !bytes.Equal(got, []byte("old\n")) {
+		t.Fatalf("another owner's file was replaced: %q", got)
+	}
+}
+
+// TestWriteTokenFileKeepsOwnerAsRoot pins that a renderer running as root
+// (a sidecar's default) keeps the owner of the file it replaces.
+func TestWriteTokenFileKeepsOwnerAsRoot(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root to own a file as another user")
+	}
+	const uid, gid = 4242, 4243
+	path := filepath.Join(t.TempDir(), "tokens")
+	if err := os.WriteFile(path, []byte("old\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chown(path, uid, gid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := WriteTokenFile(path, []byte("new\n")); err != nil {
+		t.Fatal(err)
+	}
+	st := statFile(t, path).Sys().(*syscall.Stat_t)
+	if int(st.Uid) != uid || int(st.Gid) != gid {
+		t.Fatalf("owner = %d:%d, want %d:%d kept", st.Uid, st.Gid, uid, gid)
+	}
+}
+
+// setGeteuid replaces the effective uid writeTokenFile sees for one test.
+func setGeteuid(t *testing.T, f func() int) {
+	t.Helper()
+	prev := geteuid
+	geteuid = f
+	t.Cleanup(func() { geteuid = prev })
 }

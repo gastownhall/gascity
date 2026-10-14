@@ -26,6 +26,11 @@ const DefaultInterval = 15 * time.Second
 // lengthens it.
 const jitterFraction = 0.1
 
+// lockBudgetDivisor sets a render's lock budget to Interval/5: the longest a
+// render waits for directory locks another renderer holds before it fails
+// those directories' outputs and renders the rest.
+const lockBudgetDivisor = 5
+
 // RowSource lists the session rows that earn a bearer line. Each call reads
 // live state, never a cache, so a render's revocation is as fresh as its
 // read. Implementations filter with EligibleTokenRow and return every row it
@@ -88,17 +93,21 @@ type OutputReport struct {
 	// Err is the output's *Error, or nil when the file is current.
 	Err error
 
-	lines lineSet // digests of the file's lines after the render, when Err is nil
+	lines lineSet // digests of the file's gc lines after the render, when Err is nil
 }
 
-// lineSet holds the SHA-256 digests of a file's token lines: enough to tell
-// whether it holds a line, never the line itself.
+// lineSet holds the SHA-256 digests of a file's gc lines: enough to tell
+// whether it holds a bearer, never the line itself. Operator lines are left
+// out: an unsalted digest of a weak operator token in a printed report could
+// be guessed offline, and Ensure only ever looks for a bearer.
 type lineSet map[[sha256.Size]byte]struct{}
 
 func newLineSet(content []byte) lineSet {
 	set := lineSet{}
 	for _, tok := range connect.TokenLines(content) {
-		set[sha256.Sum256([]byte(tok))] = struct{}{}
+		if connect.IsGCLine(tok) {
+			set[sha256.Sum256([]byte(tok))] = struct{}{}
+		}
 	}
 	return set
 }
@@ -153,8 +162,9 @@ type Renderer struct {
 	last    *Report // the latest completed render
 	causes  map[string]string
 
-	onQueued   func() // test hook: an Ensure has taken its ticket
-	onLockBusy func() // test hook: a directory lock was found busy
+	onQueued   func()        // test hook: an Ensure has taken its ticket
+	onLockBusy func()        // test hook: a directory lock was found busy
+	lockBudget time.Duration // the most a render waits for busy directory locks
 
 	after  func(time.Duration) <-chan time.Time
 	jitter func() float64 // uniform in [0, 1)
@@ -190,12 +200,13 @@ func New(cfg Config) (*Renderer, error) {
 	cfg.Outputs = slices.Clone(cfg.Outputs)
 	cfg.Key = slices.Clone(cfg.Key)
 	return &Renderer{
-		cfg:      cfg,
-		sentinel: sentinel,
-		sem:      make(chan struct{}, 1),
-		causes:   map[string]string{},
-		after:    time.After,
-		jitter:   rand.Float64,
+		cfg:        cfg,
+		sentinel:   sentinel,
+		sem:        make(chan struct{}, 1),
+		causes:     map[string]string{},
+		lockBudget: cfg.Interval / lockBudgetDivisor,
+		after:      time.After,
+		jitter:     rand.Float64,
 	}, nil
 }
 
@@ -239,8 +250,10 @@ func cleanAbs(p string) bool {
 // each output reads the operator source, inspects the file and writes the
 // seed into one that holds no gc line; then it reads the rows once, renders
 // and writes each output. The error joins every cause that left an output
-// not current. If ctx ends while a directory lock is busy, RenderOnce
-// returns ctx's error, wrapped, having written nothing.
+// not current. A directory whose lock another renderer holds for longer than
+// the lock budget (a fifth of Interval) fails only its own outputs, with
+// render_write_failed. If ctx ends while a directory lock is busy,
+// RenderOnce returns ctx's error, wrapped, having written nothing.
 func (r *Renderer) RenderOnce(ctx context.Context) (Report, error) {
 	if err := r.acquire(ctx); err != nil {
 		return Report{}, err
@@ -250,6 +263,9 @@ func (r *Renderer) RenderOnce(ctx context.Context) (Report, error) {
 	if err != nil {
 		return Report{}, err
 	}
+	// The renderer keeps rep for coalesced Ensure calls; the caller gets its
+	// own Outputs.
+	rep.Outputs = slices.Clone(rep.Outputs)
 	return rep, rep.Err()
 }
 
@@ -369,13 +385,14 @@ func (r *Renderer) renderLocked(ctx context.Context) (Report, error) {
 	for i, o := range r.cfg.Outputs {
 		states[i] = &outputState{rep: OutputReport{Ledger: o.Ledger, TokenFile: o.TokenFile}}
 	}
-	dirs, err := lockOutputDirs(ctx, r.cfg.Outputs, r.onLockBusy)
+	dirs, err := lockOutputDirs(ctx, r.cfg.Outputs, r.lockBudget, r.onLockBusy)
 	if err != nil {
 		return Report{}, err
 	}
 	defer closeOutputDirs(dirs)
-	// A directory that cannot be locked fails its own outputs only; the
-	// others render, so one bad directory never stops revocation elsewhere.
+	// A directory that cannot be locked, or whose lock another renderer held
+	// past the lock budget, fails its own outputs only; the others render, so
+	// one bad or busy directory never stops revocation elsewhere.
 	for _, d := range dirs {
 		for _, i := range d.outputs {
 			if d.err != nil {

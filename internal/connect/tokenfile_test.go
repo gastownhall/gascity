@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 const goldenCity = "maintainer-city"
@@ -267,5 +268,67 @@ func TestTokenFileHoldsLine(t *testing.T) {
 	}
 	if TokenFileHoldsLine(golden, "") {
 		t.Fatal("the empty line matched")
+	}
+}
+
+// TestRenderTokenFileAcceptsExactlyTheCap pins the cap's boundary: bd serve
+// reads a file of exactly MaxTokenFileBytes, so a render of that size is
+// accepted and one byte more is refused.
+func TestRenderTokenFileAcceptsExactlyTheCap(t *testing.T) {
+	sentinel, err := Sentinel(testKey(), goldenCity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := strings.Repeat("x", MaxTokenFileBytes-len(sentinel)-2)
+	out, err := RenderTokenFile([]string{line}, testKey(), goldenCity, nil)
+	if err != nil {
+		t.Fatalf("a render of exactly the cap was refused: %v", err)
+	}
+	if len(out) != MaxTokenFileBytes {
+		t.Fatalf("render is %d bytes, want exactly %d", len(out), MaxTokenFileBytes)
+	}
+	if _, err := RenderTokenFile([]string{line + "x"}, testKey(), goldenCity, nil); !errors.Is(err, ErrTokenFileTooLarge) {
+		t.Fatalf("a render one byte over the cap = %v, want ErrTokenFileTooLarge", err)
+	}
+
+	// With rows: a bearer that brings the file to exactly the cap is kept,
+	// and a row after it is never silently cut off.
+	first := TokenRow{SessionID: "mc-a", Generation: 1}
+	bearer, err := MintBearer(testKey(), goldenCity, first.SessionID, first.Generation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line = strings.Repeat("x", MaxTokenFileBytes-len(sentinel)-len(bearer)-3)
+	out, err = RenderTokenFile([]string{line}, testKey(), goldenCity, []TokenRow{first})
+	if err != nil || len(out) != MaxTokenFileBytes || !TokenFileHoldsLine(out, bearer) {
+		t.Fatalf("a render of exactly the cap with a row = %d bytes, %v", len(out), err)
+	}
+	second := TokenRow{SessionID: "mc-b", Generation: 1}
+	out, err = RenderTokenFile([]string{line}, testKey(), goldenCity, []TokenRow{first, second})
+	if !errors.Is(err, ErrTokenFileTooLarge) {
+		t.Fatalf("a render over the cap by a whole row = %d bytes, %v; want ErrTokenFileTooLarge", len(out), err)
+	}
+}
+
+// TestForeignOperatorLinesIsLinear pins that the seed check scales with the
+// file and the source, not with their product: a quadratic scan of two
+// sources of this size takes many seconds.
+func TestForeignOperatorLinesIsLinear(t *testing.T) {
+	const n = 50_000
+	operator := make([]string, n)
+	var content bytes.Buffer
+	for i := range operator {
+		operator[i] = fmt.Sprintf("op-%07d", i)
+	}
+	for i := n - 1; i >= 0; i-- {
+		content.WriteString(operator[i])
+		content.WriteByte('\n')
+	}
+	start := time.Now()
+	if got := ForeignOperatorLines(content.Bytes(), operator); got != 0 {
+		t.Fatalf("ForeignOperatorLines = %d, want 0", got)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("ForeignOperatorLines took %s over %d lines; want linear time", elapsed, n)
 	}
 }
