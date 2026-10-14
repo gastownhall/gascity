@@ -27,6 +27,9 @@ type Store struct {
 	writer beads.ConditionalWriter
 	clk    clock.Clock
 	prefix string
+	// batcher applies the conversation lane's guarded batches; nil for a
+	// store opened with NewStore rather than NewLaneStore.
+	batcher beads.GuardedBatcher
 }
 
 // Option configures NewStore.
@@ -543,12 +546,18 @@ func validateOutcomeUpdateText(o Outcome) error {
 
 // closed returns cur moved to closed with outcome and no lease.
 func closed(cur Op, outcome Outcome, by string, clk clock.Clock) Op {
+	return closedAt(cur, outcome, by, utc(clk.Now()))
+}
+
+// closedAt returns cur moved to closed at now with outcome, no lease and no
+// retry gate.
+func closedAt(cur Op, outcome Outcome, by string, now time.Time) Op {
 	next := cur
 	next.Status = StatusClosed
 	next.Outcome = outcome
 	next.Lease = Lease{}
 	next.RetryAt = time.Time{}
-	next.Transitions = appendTransition(cur.Transitions, Transition{Status: StatusClosed, At: utc(clk.Now()), By: by})
+	next.Transitions = appendTransition(cur.Transitions, Transition{Status: StatusClosed, At: now, By: by})
 	return next
 }
 

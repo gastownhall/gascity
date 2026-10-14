@@ -1,0 +1,778 @@
+package opjournal
+
+import (
+	"fmt"
+	"slices"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// incarnation is a (generation, epoch) pair, ordered lexicographically.
+type incarnation struct{ gen, epoch int64 }
+
+func (a incarnation) cmp(b incarnation) int {
+	if a.gen != b.gen {
+		if a.gen < b.gen {
+			return -1
+		}
+		return 1
+	}
+	switch {
+	case a.epoch < b.epoch:
+		return -1
+	case a.epoch > b.epoch:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// Last-error tokens the lane writes.
+const (
+	lastErrorLeaseExpired = "lease_expired"
+	lastErrorTransient    = "transient"
+	lastErrorNotDelivered = "not_delivered"
+	lastErrorUnknown      = "unknown"
+	lastErrorKeyRejected  = "key_rejected"
+)
+
+// entry is one open op in a class's order: a candidate (wait == "") or a
+// blocking waiter, which stops every later op of its class.
+type entry struct {
+	op     Op
+	urgent bool
+	// retake is an executing op whose lease expired, taken again.
+	retake bool
+	// maybe is the op's maybe_delivered as its Take will write it.
+	maybe  int
+	wait   WaitReason
+	blocks bool
+}
+
+func (e entry) candidate() bool { return e.wait == "" }
+
+// ruleClose is one close the planner decided: cur as read (its revision
+// guards the write), next the closed op.
+type ruleClose struct {
+	cur  Op
+	next Op
+}
+
+// rulesPlan is planRules' answer.
+type rulesPlan struct {
+	// inc is the effective incarnation: the larger of the view's and the
+	// runtime row's.
+	inc incarnation
+	// baseSeq is the runtime row's seq as read.
+	baseSeq uint64
+	closes  []ruleClose
+	// closeRow closes the runtime row with the last close batch.
+	closeRow bool
+	// control and content are each class's candidates and blocking waiters,
+	// in order.
+	control, content []entry
+	waits            []OpWait
+	takePossible     bool
+	wake             bool
+	next             time.Time
+	// rowErr stops any Take: the runtime row is undecodable, or closed
+	// under an open view.
+	rowErr error
+	by     string
+}
+
+// isUrgent reports urgent content precedence: steer (OJ-17 adds now and the
+// legacy interrupt).
+func isUrgent(op Op) bool {
+	return op.Kind == KindMessage && op.Policy.Message.When == WhenSteer
+}
+
+// scopeCmp compares an op's scope with the effective incarnation: -1 older,
+// 0 current, 1 newer.
+func scopeCmp(s Scope, inc incarnation) int {
+	switch s.Kind {
+	case ScopeSession:
+		return incarnation{gen: s.Generation}.cmp(incarnation{gen: inc.gen})
+	case ScopeContext:
+		return incarnation{epoch: s.Epoch}.cmp(incarnation{epoch: inc.epoch})
+	default:
+		return 0
+	}
+}
+
+// planRules applies the rules that need no probe to one snapshot (DES-O1
+// §4.4 as refined by OJ-10's design): the closes they decide, each class's
+// order of candidates and blocking waiters, whether a Take is possible at
+// all, the wake need and the next timer. It is pure.
+func planRules(snap laneSnapshot, conv ConversationView, now time.Time, by string) rulesPlan {
+	rp := rulesPlan{by: by, inc: incarnation{conv.Generation, conv.Epoch}}
+	rt := snap.rt
+	rowOK := rt.found && rt.err == nil
+	switch {
+	case rt.err != nil:
+		rp.rowErr = fmt.Errorf("conversation %s: %w", conv.ID, rt.err)
+	case rowOK:
+		rp.baseSeq = rt.row.Seq
+		if row := (incarnation{rt.row.Generation, rt.row.Epoch}); rp.inc.cmp(row) < 0 {
+			rp.inc = row
+		}
+		if rt.row.Closed && !conv.Closed {
+			rp.rowErr = fmt.Errorf("%w: conversation %s: the runtime row is closed but the view is open", ErrIllegalTransition, conv.ID)
+		}
+	}
+	inFlight, remaining := false, 0
+	waitOp := func(op Op, r WaitReason, until time.Time) {
+		rp.waits = append(rp.waits, OpWait{ID: op.ID, Reason: r, Until: until})
+		rp.next = minTime(rp.next, until)
+		remaining++
+	}
+	closeOp := func(read, cur Op, o Outcome) {
+		rp.closes = append(rp.closes, ruleClose{cur: read, next: closedAt(cur, o, by, now)})
+	}
+	for _, op := range snap.ops {
+		spec, err := Lookup(op.Kind)
+		if err != nil {
+			continue
+		}
+		if op.Status == StatusSettling {
+			waitOp(op, WaitSettling, time.Time{})
+			continue
+		}
+		executing := op.Status == StatusExecuting
+		live := executing && !op.Lease.IsZero() && !now.After(op.Lease.Deadline.Add(LeaseSkew))
+		expired := executing && !live
+		cur := op
+		if expired {
+			cur.Failures++
+			cur.MaybeDelivered = cur.Attempt
+			cur.LastError = lastErrorLeaseExpired
+		}
+		if !live && op.StartBy.After(now) {
+			rp.next = minTime(rp.next, op.StartBy)
+		}
+		canceled := Outcome{Arm: ArmCanceled}
+		switch {
+		case live:
+			inFlight = true
+			waitOp(op, WaitInFlight, op.Lease.Deadline.Add(LeaseSkew))
+			continue
+		case conv.Closed:
+			closeOp(op, cur, Outcome{Arm: ArmSkipped, Reason: ReasonConversationClosed})
+			continue
+		case expired && op.Cancel.Recorded():
+			closeOp(op, cur, canceled)
+			continue
+		case expired && now.After(op.FinishBy):
+			closeOp(op, cur, Outcome{Arm: ArmFailed, Reason: ReasonDeadlineInFlight})
+			continue
+		case expired && op.Policy.Guarantee == GuaranteeAtMostOnce:
+			closeOp(op, cur, Outcome{Arm: ArmFailed, Reason: ReasonAmbiguousDelivery})
+			continue
+		case expired && now.After(op.StartBy):
+			closeOp(op, cur, Outcome{Arm: ArmFailed, Reason: ReasonDeadlineInFlight})
+			continue
+		case expired && cur.Failures >= MaxFailures:
+			cur.Failures = MaxFailures
+			closeOp(op, cur, Outcome{Arm: ArmFailed, Reason: ReasonPoison})
+			continue
+		case !executing && op.Cancel.Recorded():
+			closeOp(op, cur, canceled)
+			continue
+		case !executing && now.After(op.StartBy):
+			reason := ReasonExpiredBeforeStart
+			if op.MaybeDelivered > 0 {
+				reason = ReasonDeadlineInFlight
+			}
+			closeOp(op, cur, Outcome{Arm: ArmFailed, Reason: reason})
+			continue
+		}
+		// An expired op that survived the rules above is a re-take
+		// candidate; it still passes the scope and state rules.
+		e := entry{op: op, urgent: isUrgent(op), retake: expired, maybe: cur.MaybeDelivered}
+		scope := scopeCmp(op.Scope, rp.inc)
+		switch {
+		case scope < 0:
+			closeOp(op, cur, Outcome{Arm: ArmSkipped, Reason: ReasonStale})
+			continue
+		case spec.Class == ClassControl && conv.Dormant:
+			closeOp(op, cur, Outcome{Arm: ArmSkipped, Reason: ReasonStale})
+			continue
+		case scope > 0:
+			waitOp(op, WaitScopeFuture, time.Time{})
+			continue
+		}
+		if op.After != "" {
+			if snap.openIDs[op.After] {
+				waitOp(op, WaitAfterPending, time.Time{})
+				continue
+			}
+			t := snap.after[op.After]
+			switch {
+			case t.state == afterClosed && t.arm != ArmSucceeded:
+				closeOp(op, cur, Outcome{Arm: ArmSkipped, Reason: ReasonDependencyFailed})
+				continue
+			case (t.state == afterClosed || t.state == afterOpen) && t.conversation != op.Conversation:
+				closeOp(op, cur, Outcome{Arm: ArmFailed, Reason: RefusedReasonPrefix + "after_scope"})
+				continue
+			case t.state == afterUnreadable:
+				waitOp(op, WaitAfterUnreadable, time.Time{})
+				continue
+			case t.state != afterClosed:
+				waitOp(op, WaitAfterPending, time.Time{})
+				continue
+			}
+		}
+		class := &rp.content
+		if spec.Class == ClassControl {
+			class = &rp.control
+		}
+		switch {
+		case op.NotBefore.After(now):
+			waitOp(op, WaitNotBefore, op.NotBefore)
+			continue
+		case op.RetryAt.After(now):
+			waitOp(op, WaitRetryBackoff, op.RetryAt)
+			e.wait, e.blocks = WaitRetryBackoff, true
+		case spec.Class == ClassContent && (op.Policy.Message.When == WhenNow || op.Policy.Message.When == WhenInterrupt):
+			waitOp(op, WaitNowUnlowered, time.Time{})
+			continue
+		case spec.Class == ClassContent && !e.urgent && conv.ContentHold:
+			waitOp(op, WaitContentHold, time.Time{})
+			e.wait, e.blocks = WaitContentHold, true
+		default:
+			remaining++
+		}
+		*class = append(*class, e)
+	}
+	orderEntries(rp.control)
+	orderEntries(rp.content)
+	rp.closeRow = conv.Closed && remaining == 0 && rowOK && !rt.row.Closed
+	rp.takePossible = rp.decideTake(conv, rt, rowOK, inFlight, now)
+	return rp
+}
+
+// decideTake reports whether a Take is possible and, when it is not because
+// of the conversation's state, turns every candidate into a wait.
+func (rp *rulesPlan) decideTake(conv ConversationView, rt runtimeSnap, rowOK, inFlight bool, now time.Time) bool {
+	candidates := 0
+	for _, e := range append(slices.Clone(rp.control), rp.content...) {
+		if e.candidate() {
+			candidates++
+		}
+	}
+	if conv.Closed || candidates == 0 || rp.rowErr != nil || inFlight {
+		return false
+	}
+	view := incarnation{conv.Generation, conv.Epoch}
+	cellHeld := rowOK && !rt.row.Lease.IsZero() && !now.After(rt.row.Lease.Deadline.Add(LeaseSkew))
+	switch {
+	case cellHeld:
+		until := rt.row.Lease.Deadline.Add(LeaseSkew)
+		rp.waitCandidates(WaitInFlight, until, false)
+		rp.next = minTime(rp.next, until)
+	case view.cmp(rp.inc) != 0:
+		rp.waitCandidates(WaitIncarnation, time.Time{}, false)
+		rp.next = now
+	case conv.Generation < 1:
+		rp.waitCandidates(WaitNoSession, time.Time{}, true)
+	case conv.Dormant:
+		rp.waitCandidates(WaitDormant, time.Time{}, true)
+	default:
+		return true
+	}
+	return false
+}
+
+// waitCandidates reports every candidate as waiting r. wake sets the wake
+// need for an if_needed content candidate.
+func (rp *rulesPlan) waitCandidates(r WaitReason, until time.Time, wake bool) {
+	for _, list := range [][]entry{rp.control, rp.content} {
+		for _, e := range list {
+			if !e.candidate() {
+				continue
+			}
+			rp.waits = append(rp.waits, OpWait{ID: e.op.ID, Reason: r, Until: until})
+			if wake && wantsWake(e.op) {
+				rp.wake = true
+			}
+		}
+	}
+}
+
+// wantsWake reports a content op that may wake its conversation.
+func wantsWake(op Op) bool {
+	return op.Kind == KindMessage && op.Policy.Message.Wake == WakeIfNeeded
+}
+
+// orderEntries sorts one class: urgent before normal, then CompareOrder; then
+// the slots each (precedence, principal) group's client_seq ops hold are
+// refilled with those ops sorted by (client_seq, CompareOrder). Ops without a
+// client_seq keep their slots.
+func orderEntries(es []entry) {
+	slices.SortStableFunc(es, func(a, b entry) int {
+		if a.urgent != b.urgent {
+			if a.urgent {
+				return -1
+			}
+			return 1
+		}
+		return CompareOrder(a.op, b.op)
+	})
+	type group struct {
+		urgent    bool
+		principal string
+	}
+	slots := map[group][]int{}
+	var order []group
+	for i, e := range es {
+		if e.op.ClientSeq == 0 {
+			continue
+		}
+		g := group{e.urgent, e.op.Producer.Principal}
+		if _, ok := slots[g]; !ok {
+			order = append(order, g)
+		}
+		slots[g] = append(slots[g], i)
+	}
+	for _, g := range order {
+		idx := slots[g]
+		members := make([]entry, len(idx))
+		for j, i := range idx {
+			members[j] = es[i]
+		}
+		slices.SortStableFunc(members, func(a, b entry) int {
+			if a.op.ClientSeq != b.op.ClientSeq {
+				if a.op.ClientSeq < b.op.ClientSeq {
+					return -1
+				}
+				return 1
+			}
+			return CompareOrder(a.op, b.op)
+		})
+		for j, i := range idx {
+			es[i] = members[j]
+		}
+	}
+}
+
+// takePlan is planTake's answer.
+type takePlan struct {
+	closes []ruleClose
+	take   *takeSpec
+	waits  []OpWait
+	wake   bool
+	busy   bool
+	more   bool
+	next   time.Time
+}
+
+// takeSpec is the batch a Take writes.
+type takeSpec struct {
+	kind TakeKind
+	// ops are the entries taken, in delivery order.
+	ops        []entry
+	key        string
+	mode       LinkMode
+	steer      bool
+	redelivery bool
+	text       string
+	fence      Fence
+	inc        incarnation
+	baseSeq    uint64
+	probe      Probe
+	view       ConversationView
+}
+
+// contentItem is a content candidate as the probe sees it.
+type contentItem struct {
+	e        entry
+	eligible bool
+	starter  bool // starts a turn on its own
+	rider    bool // after_turn: rides only with a starter
+	stop     bool // a blocking waiter: nothing after it is taken
+}
+
+// planTake picks what one Take carries, given the probe (DES-O1 §4.4's when
+// table and §4.5's batch formation): a control op first, else the content
+// batch. It is pure.
+func planTake(rp rulesPlan, probe Probe, conv ConversationView, now time.Time) (takePlan, error) {
+	var tp takePlan
+	if err := probe.Caps.validate(); err != nil {
+		return tp, err
+	}
+	caps := probe.Caps
+	if f := probe.Fence; f != (Fence{}) && (f.Conversation != conv.ID || f.Generation != conv.Generation || f.Epoch != conv.Epoch) {
+		tp.waitAll(rp, WaitIncarnation)
+		tp.next = now
+		return tp, nil
+	}
+	if !probe.Available {
+		tp.waitAll(rp, WaitUnavailable)
+		return tp, nil
+	}
+	spec := takeSpec{
+		fence:   Fence{Conversation: conv.ID, Generation: conv.Generation, Epoch: conv.Epoch, Token: conv.Token},
+		inc:     rp.inc,
+		baseSeq: rp.baseSeq,
+		probe:   probe,
+		view:    conv,
+	}
+	control := tp.planControl(rp, probe, now)
+	content := tp.planContent(rp, probe, now)
+	switch {
+	case control != nil:
+		spec.kind = TakeControl
+		spec.ops = []entry{*control}
+		tp.take = &spec
+		if content != nil {
+			tp.more = true
+			for _, e := range content.ops {
+				tp.wait(e.op, WaitBlocked, "")
+			}
+		}
+	case content != nil:
+		spec.kind = TakeContent
+		spec.ops = content.ops
+		spec.key = content.key
+		spec.mode = content.mode
+		spec.steer = content.mode == LinkJoins && (!caps.InBand || caps.Live)
+		spec.redelivery = content.redelivery
+		ops := make([]Op, len(spec.ops))
+		for i, e := range spec.ops {
+			ops[i] = e.op
+		}
+		text, err := RenderDelivery(ops, caps.Text, spec.redelivery && !caps.Dedup)
+		if err != nil {
+			return tp, err
+		}
+		spec.text = text
+		tp.take = &spec
+	}
+	return tp, nil
+}
+
+// waitAll reports every candidate of both classes as waiting r.
+func (tp *takePlan) waitAll(rp rulesPlan, r WaitReason) {
+	for _, list := range [][]entry{rp.control, rp.content} {
+		for _, e := range list {
+			if e.candidate() {
+				tp.waits = append(tp.waits, OpWait{ID: e.op.ID, Reason: r})
+			}
+		}
+	}
+}
+
+func (tp *takePlan) wait(op Op, r WaitReason, detail string) {
+	tp.waits = append(tp.waits, OpWait{ID: op.ID, Reason: r, Detail: detail})
+}
+
+func (tp *takePlan) close(rp rulesPlan, op Op, o Outcome, now time.Time) {
+	tp.closes = append(tp.closes, ruleClose{cur: op, next: closedAt(op, o, rp.by, now)})
+}
+
+// planControl picks the first takeable control op (I10), closing a respond
+// the runtime cannot perform. Control takes one op.
+func (tp *takePlan) planControl(rp rulesPlan, probe Probe, now time.Time) *entry {
+	var picked *entry
+	blocked := false
+	for i := range rp.control {
+		e := rp.control[i]
+		switch {
+		case e.blocks:
+			blocked = true
+			continue
+		case !e.candidate():
+			continue
+		case blocked:
+			tp.wait(e.op, WaitBlocked, "")
+		case !probe.Caps.Live:
+			tp.wait(e.op, WaitNotLive, "")
+		case !probe.Running:
+			tp.wait(e.op, WaitNotRunning, "")
+		case e.op.Kind == KindRespond && !probe.Caps.Respond:
+			tp.close(rp, e.op, Outcome{Arm: ArmFailed, Reason: ReasonUnsupported}, now)
+		case picked == nil:
+			picked = &e
+		default:
+			tp.more = true
+		}
+	}
+	return picked
+}
+
+// contentBatch is the content batch planContent formed.
+type contentBatch struct {
+	ops        []entry
+	key        string
+	mode       LinkMode
+	redelivery bool
+}
+
+// planContent classifies every content candidate against the probe and forms
+// the batch (DES-O1 §4.5): a replay of a maybe-delivered head's group under
+// its key, or else the longest fresh prefix within the limits.
+func (tp *takePlan) planContent(rp rulesPlan, probe Probe, now time.Time) *contentBatch {
+	caps := probe.Caps
+	inBand := caps.InBand && !caps.Live
+	boundary := probe.Boundary
+	if inBand {
+		boundary = TriYes
+	}
+	var blockReason WaitReason
+	blockDetail := ""
+	switch {
+	case probe.ContentBlock != "":
+		blockReason, blockDetail = WaitContentBlock, probe.ContentBlock
+	case probe.Pending != "":
+		blockReason = WaitPendingInteraction
+	}
+	items := make([]contentItem, 0, len(rp.content))
+	for _, e := range rp.content {
+		it := contentItem{e: e}
+		if !e.candidate() {
+			it.stop = e.blocks
+			items = append(items, it)
+			continue
+		}
+		op := e.op
+		m := op.Policy.Message
+		switch {
+		case blockReason != "":
+			tp.wait(op, blockReason, blockDetail)
+		case !caps.Live && !caps.InBand:
+			tp.wait(op, WaitNotLive, "")
+		case caps.Live && !probe.Running:
+			tp.wait(op, WaitNotRunning, "")
+			if wantsWake(op) {
+				tp.wake = true
+			}
+		case inBand:
+			if m.Role == RoleNotice && (m.When == WhenBoundary || m.When == WhenAfterTurn) {
+				it.eligible = true
+			} else {
+				tp.wait(op, WaitNotLive, "")
+			}
+		case boundary == TriUnknown:
+			tp.wait(op, WaitBoundaryUnknown, "")
+			tp.busy = true
+		case m.When == WhenBoundary:
+			if boundary == TriYes {
+				it.eligible, it.starter = true, true
+			} else {
+				tp.wait(op, WaitBusy, "")
+				tp.busy = true
+			}
+		case m.When == WhenAfterTurn:
+			if boundary == TriYes {
+				it.eligible, it.rider = true, true
+			} else {
+				tp.wait(op, WaitBusy, "")
+				tp.busy = true
+			}
+		case m.When == WhenIfIdle:
+			if boundary == TriYes {
+				it.eligible, it.starter = true, true
+			} else {
+				tp.close(rp, op, Outcome{Arm: ArmSkipped, Reason: ReasonBusy}, now)
+			}
+		case m.When == WhenSteer:
+			switch {
+			case boundary == TriYes:
+				it.eligible, it.starter = true, true
+			case caps.Steer:
+				it.eligible = true
+			case m.OnUnsupported == FallbackFail:
+				tp.close(rp, op, Outcome{Arm: ArmFailed, Reason: ReasonUnsupported}, now)
+			default:
+				tp.wait(op, WaitBusy, "")
+				tp.busy = true
+			}
+		default:
+			tp.wait(op, WaitNowUnlowered, "")
+		}
+		items = append(items, it)
+	}
+	mode := LinkStarts
+	if inBand || boundary == TriNo {
+		mode = LinkJoins
+	}
+	batch := tp.formBatch(items, mode, inBand, rp.baseSeq)
+	if batch != nil {
+		tp.busy = false
+	}
+	return batch
+}
+
+// formBatch picks the batch from the classified items.
+func (tp *takePlan) formBatch(items []contentItem, mode LinkMode, ridersFree bool, baseSeq uint64) *contentBatch {
+	for {
+		head := -1
+		for i, it := range items {
+			if it.stop {
+				break
+			}
+			if it.eligible {
+				head = i
+				break
+			}
+		}
+		if head < 0 {
+			tp.reportLeft(items, nil, false)
+			return nil
+		}
+		var picked []int
+		full := false
+		replay := items[head].e.maybe > 0
+		if replay {
+			picked, full = pickReplay(items, head)
+		} else {
+			picked, full = pickFresh(items, head)
+		}
+		picked = dropLoneRiders(items, picked, ridersFree)
+		if len(picked) == 0 {
+			// Only riders were picked and nothing starts a turn for them.
+			for i := head; i < len(items) && !items[i].stop; i++ {
+				if items[i].eligible && items[i].rider {
+					tp.wait(items[i].e.op, WaitAfterTurn, "")
+					items[i].eligible = false
+				}
+			}
+			continue
+		}
+		b := &contentBatch{mode: mode, redelivery: replay}
+		for _, i := range deliveryOrder(items, picked) {
+			b.ops = append(b.ops, items[i].e)
+		}
+		headOp := b.ops[0].op
+		b.key = headOp.DeliveryKey
+		if !replay || b.key == "" || strings.HasPrefix(headOp.LastError, lastErrorKeyRejected) {
+			b.key = headOp.ID + ":" + strconv.FormatUint(baseSeq+1, 10)
+		}
+		tp.reportLeft(items, picked, full)
+		return b
+	}
+}
+
+// pickReplay picks the head's replay group: the eligible items before the
+// first stop that share its delivery key, within the limits.
+func pickReplay(items []contentItem, head int) ([]int, bool) {
+	key := items[head].e.op.DeliveryKey
+	var lim batchLimits
+	var picked []int
+	for i := head; i < len(items) && !items[i].stop; i++ {
+		it := items[i]
+		if !it.eligible || (i != head && (key == "" || it.e.op.DeliveryKey != key)) {
+			continue
+		}
+		if !lim.admit(it.e.op) {
+			return picked, true
+		}
+		picked = append(picked, i)
+	}
+	return picked, false
+}
+
+// pickFresh picks the longest fresh prefix from head: it stops at a stop, at
+// a maybe-delivered op and at the first op the limits refuse.
+func pickFresh(items []contentItem, head int) ([]int, bool) {
+	var lim batchLimits
+	var picked []int
+	for i := head; i < len(items); i++ {
+		it := items[i]
+		if it.stop {
+			break
+		}
+		if !it.eligible {
+			continue
+		}
+		if it.e.maybe > 0 {
+			break
+		}
+		if !lim.admit(it.e.op) {
+			return picked, true
+		}
+		picked = append(picked, i)
+	}
+	return picked, false
+}
+
+// batchLimits admits ops up to one prompt, MaxBatchOps ops and
+// MaxBatchPayload bytes.
+type batchLimits struct {
+	ops, payload int
+	prompt       bool
+}
+
+func (l *batchLimits) admit(op Op) bool {
+	prompt := op.Policy.Message.Role == RolePrompt
+	if l.ops+1 > MaxBatchOps || l.payload+len(op.Payload) > MaxBatchPayload || (prompt && l.prompt) {
+		return false
+	}
+	l.ops++
+	l.payload += len(op.Payload)
+	l.prompt = l.prompt || prompt
+	return true
+}
+
+// dropLoneRiders drops after_turn riders from a batch that holds no
+// turn-starting op, unless riders may go alone (an in-band pass).
+func dropLoneRiders(items []contentItem, picked []int, ridersFree bool) []int {
+	if ridersFree {
+		return picked
+	}
+	for _, i := range picked {
+		if items[i].starter {
+			return picked
+		}
+	}
+	var out []int
+	for _, i := range picked {
+		if !items[i].rider {
+			out = append(out, i)
+		}
+	}
+	return out
+}
+
+// deliveryOrder puts the batch's notices first, in order, then its prompt.
+func deliveryOrder(items []contentItem, picked []int) []int {
+	out := make([]int, 0, len(picked))
+	var prompt []int
+	for _, i := range picked {
+		if items[i].e.op.Policy.Message.Role == RolePrompt {
+			prompt = append(prompt, i)
+			continue
+		}
+		out = append(out, i)
+	}
+	return append(out, prompt...)
+}
+
+// reportLeft reports each eligible item outside the batch: batch_full when
+// the limits cut the batch, blocked otherwise. Eligible items before the
+// first stop make the next pass due at once; items behind a stop wait.
+func (tp *takePlan) reportLeft(items []contentItem, picked []int, full bool) {
+	stopped := false
+	for i, it := range items {
+		if it.stop {
+			stopped = true
+			continue
+		}
+		if !it.eligible || slices.Contains(picked, i) {
+			continue
+		}
+		if stopped {
+			tp.wait(it.e.op, WaitBlocked, "")
+			continue
+		}
+		if full {
+			tp.wait(it.e.op, WaitBatchFull, "")
+		} else {
+			tp.wait(it.e.op, WaitBlocked, "")
+		}
+		if picked != nil {
+			tp.more = true
+		}
+	}
+}

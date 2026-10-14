@@ -46,10 +46,35 @@
 // the journal reads closed failed{closed_externally}, and the next Close,
 // Cancel or Transition stores that outcome. A closed op has one outcome: arm
 // succeeded|failed|skipped|canceled plus an open reason; an unknown failed or
-// skipped reason reads failed{other}. O1 lanes Take with a guarded update
-// expecting assignee "" (or the expired lease) and finish with one update that
-// closes op and bead expecting their own lease; until bd batch guards exist the
-// revision CAS subsumes both.
+// skipped reason reads failed{other}. The conversation lane takes and
+// settles ops only through guarded batches (beads.GuardedBatcher); see
+// "Conversation lane" below.
+//
+// # Conversation lane
+//
+// ConversationLane.Pass is the conversation lane's core (DES-O1 §4, OJ-10).
+// A pass reads the conversation's open ops (ListOpenTolerant, quarantining
+// what it cannot decode), its runtime row and each after target; closes what
+// the rules decide (planRules: cancel, deadlines, poison at MaxFailures,
+// stale scope, failed dependencies, a closed conversation); and, when a Take
+// is possible, probes the executor once and takes one batch (planTake):
+// control before content (I10), urgent content before normal, ordered by
+// OrderKey with a per-principal client_seq fix-up, at most one prompt,
+// MaxBatchOps ops and MaxBatchPayload bytes. Take is one guarded batch: the
+// runtime row's lease cell, seq and incarnation plus every op's lease,
+// attempt, lane_seq and delivery key, so one Take is in flight per
+// conversation (I3) and a stale read loses its batch (I9). No effect runs
+// before the Take is known durable (I5); an unknown batch error is resolved
+// by re-reading the lease. Done is one guarded batch that accepts (the
+// delivery record and the turn link CorrelateTurn decides), releases (with
+// retry_at, failures and maybe_delivered) or rejects, reconciled by
+// re-reading after a refusal or an unknown error. An op whose lease expired
+// is re-taken with its delivery key, so a deduplicating runtime replays it;
+// on any other runtime the redelivery ends with RedeliveryNote (D-NOTE).
+// Delivery keys are <head op id>:<the head's lane_seq at the minting Take>,
+// so no key ever names two contents. Delivered text names no identifier
+// (I14). A lane store must apply guarded batches (NewLaneStore); there is no
+// production caller until OJ-12.
 //
 // # Executor and open rows
 //
