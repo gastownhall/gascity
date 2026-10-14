@@ -35,7 +35,7 @@ var Analyzer = New(Config{
 		"confirmDrainAckRuntimeDead":                        2,
 		"controllerStopLease":                               1,
 		"cleanupDeadRuntimeSessionCorpses":                  0,
-		"releaseBeadScopedPoolRuntimeLeased":                0,
+		"releaseRowOwnedRuntimeLeased":                      0,
 		"reapStaleSessionBeads":                             0,
 		"autoSuspendChatSessions":                           0,
 	},
@@ -68,9 +68,13 @@ var allowed = map[string]Allowance{
 		Callers: []string{"commitAsyncStartResultWithContext", "executePlannedStartsTraced", "recoverRunningPendingCreate", "settleUncommittedAsyncStart"},
 	},
 	cmdGC + ":pendingCreateRuntimeClearedForRollback": {Reason: "an async start's rollback, under the start's lease", Callers: []string{"settleUncommittedAsyncStart"}},
-	cmdGC + ":releaseBeadScopedPoolRuntime": {
-		Reason:  "a pool runtime's teardown, under the start's lease, or the tick's flock via releaseBeadScopedPoolRuntimeLeased",
-		Callers: []string{"commitAsyncStartResultWithContext", "commitStartFailure", "releaseBeadScopedPoolRuntimeLeased"},
+	cmdGC + ":releaseRowOwnedRuntime": {
+		Reason:  "a bead-scoped pool runtime's teardown before its row closes, under the start's lease, or the tick's flock via releaseRowOwnedRuntimeLeased",
+		Callers: []string{"commitAsyncStartResultWithContext", "commitStartFailure", "releaseRowOwnedRuntimeLeased"},
+	},
+	cmdGC + ":tearDownManualRowRuntime": {
+		Reason:  "a manual session's runtime teardown before its row closes, identity-checked, under releaseRowOwnedRuntime's lease",
+		Callers: []string{"releaseRowOwnedRuntime"},
 	},
 	cmdGC + ":cleanDeadRuntimeCorpse":            {Reason: "a dead runtime's cleanup, under the name's flock", Callers: []string{"cleanupDeadRuntimeSessionCorpses"}},
 	cmdGC + ":stopStillBoundClosedRuntimeLeased": {Reason: "the closed-row reaper: takes the lease itself, and decides again under it", Callers: []string{"reapRuntimesBoundToClosedBeadsWith", "stopStillBoundClosedRuntime"}},
