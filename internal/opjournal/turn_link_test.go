@@ -330,6 +330,30 @@ func TestCorrelateTurn(t *testing.T) {
 		},
 		// Row 7.
 		{
+			// Row 4 needs LinkJoins: a starts delivery is never a join, even
+			// when the probe's live turn is still current at the first read.
+			name: "row 7: starts whose live turn is still current at the first read",
+			rec:  func() DeliveryRecord { return linkRec(LinkStarts) },
+			ev: func() TurnEvidence {
+				ev := sourced(seen("a", linkAt.Add(ms)))
+				ev.LiveAtProbe, ev.LiveTurn = TriYes, "old-2"
+				ev.FirstRead = FirstTurnRead{Done: true, Current: "old-2"}
+				return ev
+			},
+			want: TurnLink{Turn: "a", Confidence: LinkAmbiguous, Basis: BasisCompetingTurn}, decided: true,
+		},
+		{
+			name: "row 8: starts whose live turn is still current at the first read, with no candidate",
+			rec:  func() DeliveryRecord { return linkRec(LinkStarts) },
+			ev: func() TurnEvidence {
+				ev := sourced()
+				ev.LiveAtProbe, ev.LiveTurn = TriYes, "old-2"
+				ev.FirstRead = FirstTurnRead{Done: true, Current: "old-2"}
+				return ev
+			},
+			want: TurnLink{Confidence: LinkNone, Basis: BasisNoCandidate}, decided: false,
+		},
+		{
 			name: "row 7: a second candidate",
 			rec:  func() DeliveryRecord { return linkRec(LinkStarts) },
 			ev: func() TurnEvidence {
