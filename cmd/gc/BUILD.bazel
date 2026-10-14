@@ -458,6 +458,7 @@ go_library(
         "reconcile_effect_recycle.go",
         "reconcile_effect_rekey.go",
         "reconcile_effect_restart.go",
+        "reconcile_effect_restart_marker.go",
         "reconcile_effect_runtime.go",
         "reconcile_effect_signal.go",
         "reconcile_effect_start.go",

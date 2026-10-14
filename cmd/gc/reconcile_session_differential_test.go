@@ -294,6 +294,9 @@ var parityKindOwners = map[string]*regexp.Regexp{
 	// A7's row-metadata verb (C7d) owns the M1 verb's rows.
 	intentRowMetadata:  regexp.MustCompile(`\bM1 row-metadata verb \(A7\)`),
 	intentRuntimeAlias: regexp.MustCompile(`\bM1 row-metadata verb \(A7\)`), // SESS-716's runtime alias sync
+	// A13's pinned skip clears the runtime's restart marker (SESS-521,
+	// mc-nm6yt).
+	intentMarkerClear: regexp.MustCompile(`\bA13 \+ D3\b`),
 	// A8's baseline (C7c) owns the M2 builder's rows.
 	intentBaseline: regexp.MustCompile(`\bM2 baseline builder \(A8\)`),
 	// A12's zombie effect (C5c2) owns the classification rows.

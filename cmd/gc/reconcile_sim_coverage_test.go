@@ -223,6 +223,7 @@ var simCoverageAllowlist = map[string]string{
 	// No generator asks a row to restart (generators frozen for the
 	// release; the scripted A13 scenarios cover it).
 	"arm:A13/armRestartRequested": "mc-i7efm: restart requested",
+	"effect:" + intentMarkerClear: "mc-i7efm: restart requested",
 	// No generator wakes an awake row (generators frozen for the release;
 	// TestSatisfiedWakeClear and TestSimSatisfiedWakeDoesNotRestartAfterADeath
 	// cover it).

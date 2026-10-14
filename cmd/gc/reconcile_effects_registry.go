@@ -118,6 +118,7 @@ var effectSpecs = map[string]effectSpec{
 	intentRollback:        {class: capProbing, bootGated: true, needs: needs{Runtime: true, Lease: true}, caps: capProviderStart | capRetire, sections: rollbackSections, around: retireAround},            // A10 (C3)
 	intentRowMetadata:     {class: capRowWrites, caps: capReadStores, around: aliasLockAround, sections: rowMetadataSections},                                                                              // A7 (C7d): a row write, lease-free
 	intentRuntimeAlias:    {class: capProbing, needs: needs{Runtime: true, Lease: true}, caps: capProviderStart, sections: runtimeAliasSections},                                                           // A7 (C7d)
+	intentMarkerClear:     {class: capProbing, needs: needs{Runtime: true, Lease: true}, caps: capProviderStart, sections: markerClearSections},                                                            // A13's pinned skip (mc-nm6yt)
 	intentBaseline:        {class: capRowWrites, sections: baselineSections},                                                                                                                               // A8 (C7c)
 	intentRowHeal:         {class: capRowWrites, sections: rowWriteSections},                                                                                                                               // A6
 	intentRowHealFresh:    {class: capProbing, needs: needs{Runtime: true}, sections: healSections},                                                                                                        // A6
