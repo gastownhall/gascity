@@ -4240,7 +4240,7 @@ func staleReapStartBoundaryInfo(i session.Info) (time.Time, bool) {
 // only store: on a split city store is the sessions binding, which holds none
 // of the seat's claims (mc-3ixn3.16).
 func closeBead(store beads.Store, sw *SeatWork, expected session.Info, reason string, now time.Time, stderr io.Writer) bool {
-	return closeBeadPreservingAssignees(store, sw, expected, reason, nil, now, stderr)
+	return closeBeadPreservingAssignees(store, sw, expected, reason, nil, nil, now, stderr)
 }
 
 // closeBeadPreservingAssignees is closeBead with an opt-in exception list: any
@@ -4257,25 +4257,7 @@ func closeBead(store beads.Store, sw *SeatWork, expected session.Info, reason st
 //
 // With a nil or empty preserve set this behaves exactly like closeBead, which
 // is the contract every other caller relies on.
-func closeBeadPreservingAssignees(store beads.Store, sw *SeatWork, expected session.Info, reason string, preserve []string, now time.Time, stderr io.Writer) bool {
-	return closeSessionBead(store, sw, expected, reason, preserve, nil, now, stderr)
-}
-
-// closeBeadWithTranscriptSearchPaths is closeBead with the transcript search
-// paths made explicit. Callers holding a city config pass
-// worker.MergeSearchPaths(cfg.Daemon.ObservePaths) so a transcript living under
-// a configured observe path is still pinnable; closeBead passes nil, which
-// resolves against the provider default paths.
-func closeBeadWithTranscriptSearchPaths(store beads.Store, sw *SeatWork, expected session.Info, reason string, now time.Time, transcriptSearchPaths []string, stderr io.Writer) bool {
-	return closeSessionBead(store, sw, expected, reason, nil, transcriptSearchPaths, now, stderr)
-}
-
-// closeSessionBead is the shared body behind closeBead,
-// closeBeadPreservingAssignees, and closeBeadWithTranscriptSearchPaths: it
-// pins the session transcript, closes the bead with its terminal metadata, and
-// releases the work assigned to it except for the identities in preserve.
-// expected is the row the caller decided to close on.
-func closeSessionBead(store beads.Store, sw *SeatWork, expected session.Info, reason string, preserve, transcriptSearchPaths []string, now time.Time, stderr io.Writer) bool {
+func closeBeadPreservingAssignees(store beads.Store, sw *SeatWork, expected session.Info, reason string, preserve, transcriptSearchPaths []string, now time.Time, stderr io.Writer) bool {
 	id := expected.ID
 	if stderr == nil {
 		stderr = io.Discard

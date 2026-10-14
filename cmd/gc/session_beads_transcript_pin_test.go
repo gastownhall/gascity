@@ -62,7 +62,7 @@ func TestCloseBeadPinsTranscriptBeforeRetirement(t *testing.T) {
 	sessionBead := newPinTestSessionBead(t, store, "worker-fast", workDir)
 	want := writePoolWorkerTranscript(t, searchBase, workDir, "fast-worker.jsonl")
 
-	if !closeBeadWithTranscriptSearchPaths(store, testSeatWork("", nil, store, nil), decidedSessionInfo(store, sessionBead.ID), "dead-runtime", now, []string{searchBase}, ioDiscard{}) {
+	if !closeBeadPreservingAssignees(store, testSeatWork("", nil, store, nil), decidedSessionInfo(store, sessionBead.ID), "dead-runtime", nil, []string{searchBase}, now, ioDiscard{}) {
 		t.Fatal("closeBeadWithTranscriptSearchPaths returned false, want true")
 	}
 
@@ -90,7 +90,7 @@ func TestCloseBeadPinIsAttributableAcrossSuccessor(t *testing.T) {
 	dead := newPinTestSessionBead(t, store, "worker-dead", workDir)
 	want := writePoolWorkerTranscript(t, searchBase, workDir, "dead-worker.jsonl")
 
-	if !closeBeadWithTranscriptSearchPaths(store, testSeatWork("", nil, store, nil), decidedSessionInfo(store, dead.ID), "drained", now, []string{searchBase}, ioDiscard{}) {
+	if !closeBeadPreservingAssignees(store, testSeatWork("", nil, store, nil), decidedSessionInfo(store, dead.ID), "drained", nil, []string{searchBase}, now, ioDiscard{}) {
 		t.Fatal("closeBeadWithTranscriptSearchPaths returned false, want true")
 	}
 	newPinTestSessionBead(t, store, "worker-successor", workDir)
@@ -118,7 +118,7 @@ func TestCloseBeadPinsNothingWhenTranscriptIsUnattributable(t *testing.T) {
 	newPinTestSessionBead(t, store, "worker-two", workDir)
 	writePoolWorkerTranscript(t, searchBase, workDir, "latest.jsonl")
 
-	if !closeBeadWithTranscriptSearchPaths(store, testSeatWork("", nil, store, nil), decidedSessionInfo(store, first.ID), "drained", now, []string{searchBase}, ioDiscard{}) {
+	if !closeBeadPreservingAssignees(store, testSeatWork("", nil, store, nil), decidedSessionInfo(store, first.ID), "drained", nil, []string{searchBase}, now, ioDiscard{}) {
 		t.Fatal("closeBeadWithTranscriptSearchPaths returned false, want true")
 	}
 

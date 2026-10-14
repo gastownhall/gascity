@@ -17,7 +17,7 @@ import (
 func newPinTestManager(t *testing.T, workDir string, titles ...string) (*Manager, *Store, []Info) {
 	t.Helper()
 	store := beads.NewMemStore()
-	mgr := NewManagerWithOptions(store, runtime.NewFake(), WithCityPath(t.TempDir()))
+	mgr := NewManagerWithOptions(beads.SessionStore{Store: store}, runtime.NewFake(), WithCityPath(t.TempDir()))
 	infos := make([]Info, 0, len(titles))
 	for _, title := range titles {
 		info, err := mgr.CreateSession(context.Background(), CreateOptions{
