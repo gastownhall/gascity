@@ -92,17 +92,20 @@ func TestACPPermissionThroughPendingRespondAndStream(t *testing.T) {
 		h.ServeHTTP(rec, streamReq)
 		close(done)
 	}()
-	// pollUntil ticks the stream's peek poll until its body contains want.
+	// pollUntil ticks the stream's peek poll until its body holds the whole
+	// frame that contains want. writeSSEFrame writes a frame's event line,
+	// "data: ", payload, and blank-line terminator as separate writes, so a
+	// body that merely contains want can end mid-frame.
 	pollUntil := func(want string) string {
 		t.Helper()
 		deadline := time.Now().Add(10 * time.Second)
 		for {
 			body := rec.BodyString()
-			if strings.Contains(body, want) {
+			if i := strings.Index(body, want); i >= 0 && strings.Contains(body[i:], "\n\n") {
 				return body
 			}
 			if time.Now().After(deadline) {
-				t.Fatalf("stream never contained %q; body:\n%s", want, body)
+				t.Fatalf("stream never completed a frame containing %q; body:\n%s", want, body)
 			}
 			select {
 			case peekPoll <- time.Now():
