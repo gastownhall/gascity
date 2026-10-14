@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
@@ -382,7 +383,9 @@ func TestControllerStateRuntimeUpdateDoesNotDropPendingMutationRigs(t *testing.T
 	cs := newControllerState(context.Background(), current, runtime.NewFake(), events.NewFake(), "city1", cityDir)
 	cs.markConfigMutationPending("current-rev")
 
-	cs.updateFromRuntime(stale, runtime.NewFake(), "stale-rev")
+	if cs.updateFromRuntime(stale, runtime.NewFake(), "stale-rev") {
+		t.Fatal("stale runtime update reported acceptance")
+	}
 
 	if got := cs.Config(); got != current {
 		t.Fatalf("Config() = %+v, want pending mutation config with rig alpha", got)
@@ -391,7 +394,9 @@ func TestControllerStateRuntimeUpdateDoesNotDropPendingMutationRigs(t *testing.T
 		t.Fatal("pending mutation marker cleared by stale runtime update")
 	}
 
-	cs.updateFromRuntime(current, runtime.NewFake(), "current-rev")
+	if !cs.updateFromRuntime(current, runtime.NewFake(), "current-rev") {
+		t.Fatal("matching runtime update reported rejection")
+	}
 
 	if cs.configMutationPending.Load() {
 		t.Fatal("pending mutation marker not cleared after matching runtime update")
@@ -423,7 +428,9 @@ func TestControllerStateRuntimeUpdateDoesNotDropPendingMutationAgents(t *testing
 	cs := newControllerState(context.Background(), current, runtime.NewFake(), events.NewFake(), "city1", cityDir)
 	cs.markConfigMutationPending("current-rev")
 
-	cs.updateFromRuntime(stale, runtime.NewFake(), "stale-rev")
+	if cs.updateFromRuntime(stale, runtime.NewFake(), "stale-rev") {
+		t.Fatal("stale runtime update reported acceptance")
+	}
 
 	if got := cs.Config(); got != current {
 		t.Fatalf("Config() = %+v, want pending mutation config with helper agent", got)
@@ -856,7 +863,9 @@ provider = "bash"
 	originalProvider := runtime.NewFake()
 	cs := newControllerState(context.Background(), current, originalProvider, events.NewFake(), "city1", cityDir)
 
-	cs.updateFromRuntime(stale, runtime.NewFake(), "stale-rev")
+	if cs.updateFromRuntime(stale, runtime.NewFake(), "stale-rev") {
+		t.Fatal("stale runtime update reported acceptance")
+	}
 
 	if got := cs.Config(); got != current {
 		t.Fatalf("Config() = %+v, want current config with worker agent", got)
@@ -2038,6 +2047,10 @@ func TestControllerStateAppliesCacheReconcileBeadEventsToStores(t *testing.T) {
 
 	updated := created
 	updated.Status = "in_progress"
+	// The scan that emitted the snapshot read it from the backing.
+	if err := backing.Update(created.ID, beads.UpdateOpts{Status: &updated.Status}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
 	payload, err := json.Marshal(updated)
 	if err != nil {
 		t.Fatalf("marshal updated bead: %v", err)
@@ -2091,6 +2104,9 @@ func TestControllerStateEmitsCompletedFromAuthoritativeGraphStepClose(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
+	prev := beadCloseAutocloseDispatch
+	beadCloseAutocloseDispatch = func(fn func()) { fn() }
+	t.Cleanup(func() { beadCloseAutocloseDispatch = prev })
 	rec := events.NewFake()
 	cs := &controllerState{cityBeadStore: store, eventProv: rec}
 	cs.applyBeadEventToStores(events.Event{Type: events.BeadClosed, Actor: "bd-close", Subject: step.ID, Payload: payload})
@@ -2170,7 +2186,7 @@ func TestControllerStateBeadEventWatcherLeavesCompletionRepairToStartupSweep(t *
 	ep := &listCountingEventProvider{Fake: events.NewFake()}
 	ep.Record(events.Event{Type: events.BeadClosed, Actor: "bd-close", Subject: step.ID, Payload: payload})
 	prevCityStore := newControllerStateOpenCityStore
-	newControllerStateOpenCityStore = func(string, gate.Mode) (beads.StoreOpenResult, error) {
+	newControllerStateOpenCityStore = func(string, gate.Mode, beads.NativeTransportMode) (beads.StoreOpenResult, error) {
 		return beads.StoreOpenResult{Store: backing}, nil
 	}
 	t.Cleanup(func() { newControllerStateOpenCityStore = prevCityStore })
@@ -2355,7 +2371,7 @@ func TestControllerStateUpdateClosesReplacedCityStore(t *testing.T) {
 	setControllerStateStoreCloseDelayForTest(t, time.Millisecond)
 
 	replacement := beads.NewMemStore()
-	newControllerStateOpenCityStore = func(string, gate.Mode) (beads.StoreOpenResult, error) {
+	newControllerStateOpenCityStore = func(string, gate.Mode, beads.NativeTransportMode) (beads.StoreOpenResult, error) {
 		return beads.StoreOpenResult{Store: replacement}, nil
 	}
 	oldStore := &closeStoreSpy{Store: beads.NewMemStore()}
@@ -2379,7 +2395,7 @@ func TestControllerStateUpdateClosesReplacedRigStores(t *testing.T) {
 	t.Cleanup(func() { newControllerStateOpenCityStore = prevOpen })
 	setControllerStateStoreCloseDelayForTest(t, time.Millisecond)
 
-	newControllerStateOpenCityStore = func(string, gate.Mode) (beads.StoreOpenResult, error) {
+	newControllerStateOpenCityStore = func(string, gate.Mode, beads.NativeTransportMode) (beads.StoreOpenResult, error) {
 		return beads.StoreOpenResult{}, nil
 	}
 	oldStore := &closeStoreSpy{Store: beads.NewMemStore()}
@@ -2415,7 +2431,7 @@ func TestControllerStateUpdateKeepsStaleRigStoreUsableDuringReload(t *testing.T)
 	t.Cleanup(func() { newControllerStateOpenCityStore = prevOpen })
 	setControllerStateStoreCloseDelayForTest(t, 200*time.Millisecond)
 
-	newControllerStateOpenCityStore = func(string, gate.Mode) (beads.StoreOpenResult, error) {
+	newControllerStateOpenCityStore = func(string, gate.Mode, beads.NativeTransportMode) (beads.StoreOpenResult, error) {
 		return beads.StoreOpenResult{}, nil
 	}
 	oldStore := &closeStoreSpy{Store: beads.NewMemStore()}
@@ -2447,7 +2463,7 @@ func TestControllerStateUpdateReturnsTypedStoreClosedAfterReloadDrain(t *testing
 	t.Cleanup(func() { newControllerStateOpenCityStore = prevOpen })
 	setControllerStateStoreCloseDelayForTest(t, time.Millisecond)
 
-	newControllerStateOpenCityStore = func(string, gate.Mode) (beads.StoreOpenResult, error) {
+	newControllerStateOpenCityStore = func(string, gate.Mode, beads.NativeTransportMode) (beads.StoreOpenResult, error) {
 		return beads.StoreOpenResult{}, nil
 	}
 	oldStore := &closeStoreSpy{Store: beads.NewMemStore()}
@@ -2484,11 +2500,11 @@ func TestControllerStateBeadEventsRespectStorePrefixes(t *testing.T) {
 		}
 	}
 
-	payload, err := json.Marshal(beads.Bead{
-		ID:     "mc-source",
-		Title:  "city source",
-		Status: "open",
-	})
+	// Both backings hold each row, so an event applied to the wrong cache
+	// would install it there.
+	cityBead := beads.Bead{ID: "mc-source", Title: "city source", Status: "open"}
+	createInBackings(t, cityBead, cityBacking, rigBacking)
+	payload, err := json.Marshal(cityBead)
 	if err != nil {
 		t.Fatalf("marshal city bead: %v", err)
 	}
@@ -2520,11 +2536,9 @@ func TestControllerStateBeadEventsRespectStorePrefixes(t *testing.T) {
 		t.Fatalf("rig cache items = %+v, want no city bead", rigItems)
 	}
 
-	payload, err = json.Marshal(beads.Bead{
-		ID:     "ga-rig",
-		Title:  "rig work",
-		Status: "open",
-	})
+	rigBead := beads.Bead{ID: "ga-rig", Title: "rig work", Status: "open"}
+	createInBackings(t, rigBead, cityBacking, rigBacking)
+	payload, err = json.Marshal(rigBead)
 	if err != nil {
 		t.Fatalf("marshal rig bead: %v", err)
 	}
@@ -2563,16 +2577,15 @@ func TestControllerStateBeadEventsUseScopePrefixWhenConfiguredPrefixDrifts(t *te
 	}
 	cfg := &config.City{Rigs: []config.Rig{{Name: "repo", Path: "rigs/repo", Prefix: "ga"}}}
 	bdStore := bdStoreForRig(rigDir, cityDir, cfg, cfg.Rigs[0].EffectivePrefix())
-	rigCache := beads.NewCachingStoreForTestWithPrefix(beads.NewMemStore(), bdStore.IDPrefix(), nil)
+	rigBacking := beads.NewMemStore()
+	rigCache := beads.NewCachingStoreForTestWithPrefix(rigBacking, bdStore.IDPrefix(), nil)
 	if err := rigCache.Prime(context.Background()); err != nil {
 		t.Fatalf("Prime rig cache: %v", err)
 	}
 
-	payload, err := json.Marshal(beads.Bead{
-		ID:     "repo-owned",
-		Title:  "rig-owned work",
-		Status: "open",
-	})
+	rigBead := beads.Bead{ID: "repo-owned", Title: "rig-owned work", Status: "open"}
+	createInBackings(t, rigBead, rigBacking)
+	payload, err := json.Marshal(rigBead)
 	if err != nil {
 		t.Fatalf("marshal rig bead: %v", err)
 	}
@@ -2675,6 +2688,9 @@ func TestControllerStateAppliesBeadEventsOnlyToOwningCache(t *testing.T) {
 		cityBeadStore: cityStore,
 		beadStores:    map[string]beads.Store{"rig1": rigStore},
 	}
+	// Both backings hold the row, so an event applied to the wrong cache
+	// would install it there.
+	createInBackings(t, beads.Bead{ID: "rw-1", Title: "rig bead", Type: "task"}, cityBacking, rigBacking)
 
 	cs.applyBeadEventToStores(events.Event{
 		Type:    events.BeadCreated,
@@ -2682,19 +2698,19 @@ func TestControllerStateAppliesBeadEventsOnlyToOwningCache(t *testing.T) {
 		Payload: json.RawMessage(`{"id":"rw-1","title":"rig bead","status":"open","issue_type":"task","created_at":"2026-04-26T21:37:46Z"}`),
 	})
 
-	if _, err := cityStore.Get("rw-1"); !errors.Is(err, beads.ErrNotFound) {
-		t.Fatalf("city cache Get(rw-1) error = %v, want ErrNotFound", err)
+	if got := cachedTitles(t, cityStore); len(got) != 0 {
+		t.Fatalf("city cache holds %v, want nothing", got)
 	}
-	if got, err := rigStore.Get("rw-1"); err != nil {
-		t.Fatalf("rig cache Get(rw-1): %v", err)
-	} else if got.Title != "rig bead" {
-		t.Fatalf("rig cache title = %q, want rig bead", got.Title)
+	if got := cachedTitles(t, rigStore); got["rw-1"] != "rig bead" || len(got) != 1 {
+		t.Fatalf("rig cache holds %v, want rw-1 titled rig bead", got)
 	}
 }
 
 func TestControllerStateAppliesHyphenatedPrefixEventsOnlyToOwningCache(t *testing.T) {
-	cityStore := beads.NewCachingStoreForTest(beads.NewMemStore(), nil)
-	rigStore := beads.NewCachingStoreForTest(beads.NewMemStore(), nil)
+	cityBacking := beads.NewMemStore()
+	rigBacking := beads.NewMemStore()
+	cityStore := beads.NewCachingStoreForTest(cityBacking, nil)
+	rigStore := beads.NewCachingStoreForTest(rigBacking, nil)
 	if err := cityStore.Prime(context.Background()); err != nil {
 		t.Fatalf("city Prime: %v", err)
 	}
@@ -2711,6 +2727,9 @@ func TestControllerStateAppliesHyphenatedPrefixEventsOnlyToOwningCache(t *testin
 		cityBeadStore: cityStore,
 		beadStores:    map[string]beads.Store{"rig1": rigStore},
 	}
+	// Both backings hold the row, so an event applied to the wrong cache
+	// would install it there.
+	createInBackings(t, beads.Bead{ID: "mc-mogbzvrs-hiv.1", Title: "rig bead", Type: "task"}, cityBacking, rigBacking)
 
 	cs.applyBeadEventToStores(events.Event{
 		Type:    events.BeadCreated,
@@ -2718,14 +2737,40 @@ func TestControllerStateAppliesHyphenatedPrefixEventsOnlyToOwningCache(t *testin
 		Payload: json.RawMessage(`{"id":"mc-mogbzvrs-hiv.1","title":"rig bead","status":"open","issue_type":"task","created_at":"2026-04-26T21:37:46Z"}`),
 	})
 
-	if _, err := cityStore.Get("mc-mogbzvrs-hiv.1"); !errors.Is(err, beads.ErrNotFound) {
-		t.Fatalf("city cache Get(hyphenated rig bead) error = %v, want ErrNotFound", err)
+	if got := cachedTitles(t, cityStore); len(got) != 0 {
+		t.Fatalf("city cache holds %v, want nothing", got)
 	}
-	if got, err := rigStore.Get("mc-mogbzvrs-hiv.1"); err != nil {
-		t.Fatalf("rig cache Get(hyphenated rig bead): %v", err)
-	} else if got.Title != "rig bead" {
-		t.Fatalf("rig cache title = %q, want rig bead", got.Title)
+	if got := cachedTitles(t, rigStore); got["mc-mogbzvrs-hiv.1"] != "rig bead" || len(got) != 1 {
+		t.Fatalf("rig cache holds %v, want mc-mogbzvrs-hiv.1 titled rig bead", got)
 	}
+}
+
+// createInBackings lands b in each backing behind its cache's back, as an
+// external bd write does, so only a bead event brings the row into a cache:
+// an uncached event installs only the cache's backing read of the row.
+func createInBackings(t *testing.T, b beads.Bead, backings ...*beads.MemStore) {
+	t.Helper()
+	for _, backing := range backings {
+		backing.HonorExplicitIDs = true
+		if _, err := backing.Create(b); err != nil {
+			t.Fatalf("backing Create(%s): %v", b.ID, err)
+		}
+	}
+}
+
+// cachedTitles returns the title of every row a live cache holds, by id.
+// CachedList reads only the cache, never the backing.
+func cachedTitles(t *testing.T, cache *beads.CachingStore) map[string]string {
+	t.Helper()
+	rows, ok := cache.CachedList(beads.ListQuery{AllowScan: true})
+	if !ok {
+		t.Fatal("CachedList: the cache cannot serve the query")
+	}
+	titles := make(map[string]string, len(rows))
+	for _, row := range rows {
+		titles[row.ID] = row.Title
+	}
+	return titles
 }
 
 func TestControllerStateBuildStoresFileStoresUseLockFiles(t *testing.T) {
@@ -3695,7 +3740,7 @@ func TestControllerStateEstablishesBeadEventCursorBeforePrimingStores(t *testing
 	ep := newBlockingLatestEventProvider()
 	var storeOpened atomic.Bool
 	prevCityStore := newControllerStateOpenCityStore
-	newControllerStateOpenCityStore = func(string, gate.Mode) (beads.StoreOpenResult, error) {
+	newControllerStateOpenCityStore = func(string, gate.Mode, beads.NativeTransportMode) (beads.StoreOpenResult, error) {
 		storeOpened.Store(true)
 		return beads.StoreOpenResult{Store: beads.NewMemStore()}, nil
 	}
@@ -3729,7 +3774,7 @@ func TestControllerStateEstablishesBeadEventCursorBeforePrimingStores(t *testing
 func TestControllerStateBeadEventWatcherReplaysEventsAfterCachePrime(t *testing.T) {
 	backing := beads.NewMemStore()
 	prevCityStore := newControllerStateOpenCityStore
-	newControllerStateOpenCityStore = func(string, gate.Mode) (beads.StoreOpenResult, error) {
+	newControllerStateOpenCityStore = func(string, gate.Mode, beads.NativeTransportMode) (beads.StoreOpenResult, error) {
 		return beads.StoreOpenResult{Store: backing}, nil
 	}
 	t.Cleanup(func() {
@@ -3785,7 +3830,7 @@ func TestControllerStateBeadEventWatcherReplaysEventsAfterCachePrime(t *testing.
 func TestControllerStateBeadEventWatcherRetriesSetupErrors(t *testing.T) {
 	backing := beads.NewMemStore()
 	prevCityStore := newControllerStateOpenCityStore
-	newControllerStateOpenCityStore = func(string, gate.Mode) (beads.StoreOpenResult, error) {
+	newControllerStateOpenCityStore = func(string, gate.Mode, beads.NativeTransportMode) (beads.StoreOpenResult, error) {
 		return beads.StoreOpenResult{Store: backing}, nil
 	}
 	t.Cleanup(func() {
@@ -3836,7 +3881,7 @@ func TestControllerStateBeadEventWatcherRetriesSetupErrors(t *testing.T) {
 func TestControllerStateBeadEventWatcherConsumesExternalFileEvent(t *testing.T) {
 	backing := beads.NewMemStore()
 	prevCityStore := newControllerStateOpenCityStore
-	newControllerStateOpenCityStore = func(string, gate.Mode) (beads.StoreOpenResult, error) {
+	newControllerStateOpenCityStore = func(string, gate.Mode, beads.NativeTransportMode) (beads.StoreOpenResult, error) {
 		return beads.StoreOpenResult{Store: backing}, nil
 	}
 	t.Cleanup(func() {
@@ -4817,5 +4862,677 @@ func TestControllerStateUpdateRigPathDetachesProviderOwnershipBeforeConfigWrite(
 	}
 	if key, _, owned, err := providerScopeOwnershipRecord(cs2.cityPath, cfg2.Rigs[0].Path); err != nil || !owned || key != "rig:rig1" {
 		t.Fatalf("ownership after prefix-only update = (%q, %t, %v), want attached rig label", key, owned, err)
+	}
+}
+
+// Regression for ga-opn27h (read-after-write half): a runtime reload that
+// publishes the previous mutation's config while a newer API mutation is
+// swapping in its own snapshot must not overwrite it. Before the fix the
+// reload's candidate still matched the previous pending revision (the new one
+// is marked only after the swap), so it was accepted and published over the
+// mutation, whose own read-after-write then failed until the next reload.
+func TestControllerStateMutationNotOverwrittenByConcurrentRuntimePublish(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	cityToml := "[workspace]\nname = \"city1\"\n\n[beads]\nprovider = \"file\"\n\n[providers.bash]\ncommand = \"bash\"\n\n[[agent]]\nname = \"worker\"\nprovider = \"bash\"\n"
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	cs := newControllerState(context.Background(), &config.City{Workspace: config.Workspace{Name: "city1"}}, runtime.NewFake(), events.NewFake(), "city1", cityDir)
+
+	// Each iteration's reload candidate is the config of the previous
+	// mutation, which the runtime has not published yet (its revision is still
+	// the pending one).
+	if err := cs.ResumeAgent("worker"); err != nil {
+		t.Fatalf("seed mutation: %v", err)
+	}
+
+	// The city-store reopen runs inside the mutation's snapshot swap. Use it
+	// to start the reload's publish at that moment; the test waits for the
+	// publish to finish before reading back.
+	prevOpen := newControllerStateOpenCityStore
+	t.Cleanup(func() { newControllerStateOpenCityStore = prevOpen })
+	for i := 0; i < 20; i++ {
+		want := i%2 == 0
+		staleCfg, staleRev, err := cs.loadCurrentConfigSnapshot()
+		if err != nil {
+			t.Fatalf("mutation %d: load reload candidate: %v", i, err)
+		}
+		published := make(chan struct{})
+		var armed atomic.Bool
+		armed.Store(true)
+		newControllerStateOpenCityStore = func(cityPath string, mode gate.Mode, nativeTransport beads.NativeTransportMode) (beads.StoreOpenResult, error) {
+			if armed.CompareAndSwap(true, false) {
+				started := make(chan struct{})
+				go func() {
+					defer close(published)
+					close(started)
+					cs.updateFromRuntime(staleCfg, runtime.NewFake(), staleRev)
+				}()
+				<-started
+			}
+			return prevOpen(cityPath, mode, nativeTransport)
+		}
+		if want {
+			err = cs.SuspendAgent("worker")
+		} else {
+			err = cs.ResumeAgent("worker")
+		}
+		if err != nil {
+			t.Fatalf("mutation %d: %v", i, err)
+		}
+		if armed.Load() {
+			t.Fatalf("mutation %d did not reopen the city store; the test seam moved", i)
+		}
+		<-published
+		got := false
+		for _, a := range cs.Config().Agents {
+			if a.Name == "worker" {
+				got = a.Suspended
+			}
+		}
+		if got != want {
+			t.Fatalf("mutation %d: read after write saw suspended=%v, want %v (a concurrent runtime publish overwrote the mutation)", i, got, want)
+		}
+	}
+}
+
+// A reload of the previous accepted mutation may still be publishing while
+// the next patch is written. A rejected patch must never become the cached
+// raw config, even transiently between its write and rollback.
+func TestControllerStateRejectedPatchCannotPoisonRawSnapshotDuringReload(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	cityDir := t.TempDir()
+	original := []byte("[workspace]\nname = \"city1\"\n\n[beads]\nprovider = \"file\"\n")
+	tomlPath := filepath.Join(cityDir, "city.toml")
+	if err := os.WriteFile(tomlPath, original, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sp := runtime.NewFake()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cs := newControllerState(ctx, &config.City{Workspace: config.Workspace{Name: "city1"}}, sp, events.NewFake(), "city1", cityDir)
+	cfg, revision, err := cs.loadCurrentConfigSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs.update(cfg, sp)
+	cs.markConfigMutationPending(revision)
+
+	written := make(chan error, 1)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	defer unblock()
+	mutationDone := make(chan error, 1)
+	go func() {
+		mutationDone <- cs.mutateAndPoke(func() error {
+			err := cs.editor.SetAgentPatch(config.AgentPatch{Dir: "alpha", Name: "missing", Env: map[string]string{"REJECTED": "1"}})
+			written <- err
+			if err != nil {
+				return err
+			}
+			<-release
+			return nil
+		})
+	}()
+	select {
+	case err := <-written:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(hangBudget):
+		t.Fatal("mutation did not reach its disk write")
+	}
+	// The mutation is paused after its disk write. Assert the publication
+	// fence directly; elapsed time cannot prove another goroutine is blocked.
+	if cs.publishMu.TryLock() {
+		cs.publishMu.Unlock()
+		t.Error("unvalidated disk mutation does not hold the publication fence")
+	}
+	reloadDone := make(chan bool, 1)
+	go func() { reloadDone <- cs.updateFromRuntime(cfg, sp, revision) }()
+	var published bool
+	unblock()
+	select {
+	case err := <-mutationDone:
+		if err == nil {
+			t.Fatal("patch to a missing target was accepted")
+		}
+	case <-time.After(hangBudget):
+		t.Fatal("rejected mutation did not finish its rollback")
+	}
+	select {
+	case published = <-reloadDone:
+	case <-time.After(hangBudget):
+		t.Fatal("reload did not finish after rollback")
+	}
+	if !published {
+		t.Fatal("the prior accepted config was not published")
+	}
+	if got, err := os.ReadFile(tomlPath); err != nil || string(got) != string(original) {
+		t.Fatalf("rollback disk config = %q, err=%v", got, err)
+	}
+	raw := cs.RawConfig()
+	if raw == nil {
+		t.Fatal("raw config missing after rollback")
+	}
+	if len(raw.Patches.Agents) != 0 {
+		t.Fatalf("rejected patch leaked into the API raw snapshot: %+v", raw.Patches.Agents)
+	}
+}
+
+// A config transaction (pack import, rig provisioning) and a plain API edit
+// both take the publication lock and the configedit.Editor lock. In opposite
+// orders they deadlock: the edit holds the publication lock and waits for the
+// Editor lock while the transaction holds the Editor lock and waits for the
+// publication lock. So while another goroutine holds the Editor lock, a
+// transaction must already hold the publication lock as it waits.
+func TestControllerStateConfigTransactionTakesPublicationLockBeforeEditorLock(t *testing.T) {
+	cases := []struct {
+		name    string
+		run     func(cs *controllerState) error
+		wantErr error
+	}{
+		{
+			name: "pack import",
+			run: func(cs *controllerState) error {
+				return cs.SerializeConfigWrite(func() error { return nil })
+			},
+		},
+		{
+			// The rig already exists, so provisioning stops at its duplicate-name
+			// check, after the transaction has taken its locks.
+			name: "rig provisioning",
+			run: func(cs *controllerState) error {
+				_, err := cs.provisionRigLocked(config.Rig{Name: "rig1", Path: filepath.Join(cs.cityPath, "rig1")}, nil)
+				return err
+			},
+			wantErr: configedit.ErrAlreadyExists,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cs, _ := newControllerStateMutationHarness(t)
+			editorHeld := make(chan struct{})
+			releaseEditor := make(chan struct{})
+			var releaseOnce sync.Once
+			release := func() { releaseOnce.Do(func() { close(releaseEditor) }) }
+			defer release()
+			editorDone := make(chan error, 1)
+			go func() {
+				editorDone <- cs.editor.Do(func() error {
+					close(editorHeld)
+					<-releaseEditor
+					return nil
+				})
+			}()
+			awaitClose(t, editorHeld, "Editor lock holder")
+
+			txDone := make(chan error, 1)
+			go func() { txDone <- tc.run(cs) }()
+			awaitCond(t, func() bool {
+				if cs.publishMu.TryLock() {
+					cs.publishMu.Unlock()
+					return false
+				}
+				return true
+			}, "config transaction holding the publication lock while it waits for the Editor lock")
+
+			release()
+			select {
+			case err := <-editorDone:
+				if err != nil {
+					t.Fatalf("Editor lock holder: %v", err)
+				}
+			case <-time.After(hangBudget):
+				t.Fatal("Editor lock holder did not finish")
+			}
+			select {
+			case err := <-txDone:
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("config transaction error = %v, want %v", err, tc.wantErr)
+				}
+			case <-time.After(hangBudget):
+				t.Fatal("config transaction did not finish after the Editor lock was released")
+			}
+		})
+	}
+}
+
+// The reviewer's reproduction of that deadlock through the write paths: a
+// plain edit pauses while it holds the publication lock, a pack import enters
+// its config transaction, and then the edit goes on to take the Editor lock.
+func TestControllerStatePlainEditFinishesBesideConfigTransaction(t *testing.T) {
+	cs, tomlPath := newControllerStateMutationHarness(t)
+	editEntered := make(chan struct{})
+	releaseEdit := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseEdit) }) }
+	defer release()
+	editDone := make(chan error, 1)
+	go func() {
+		editDone <- cs.mutateAndPoke(func() error {
+			close(editEntered)
+			<-releaseEdit
+			return cs.editor.SuspendAgent("rig1/worker")
+		})
+	}()
+	awaitClose(t, editEntered, "plain edit holding the publication lock")
+
+	txDone := make(chan error, 1)
+	go func() { txDone <- cs.SerializeConfigWrite(func() error { return nil }) }()
+	awaitCond(t, func() bool {
+		if cs.configTransactionMu.TryLock() {
+			cs.configTransactionMu.Unlock()
+			return false
+		}
+		return true
+	}, "pack import entering its config transaction")
+
+	release()
+	for _, w := range []struct {
+		name string
+		done <-chan error
+	}{{"plain edit", editDone}, {"pack import", txDone}} {
+		select {
+		case err := <-w.done:
+			if err != nil {
+				t.Fatalf("%s: %v", w.name, err)
+			}
+		case <-time.After(hangBudget):
+			t.Fatalf("%s did not finish: the plain edit and the config transaction take the publication and Editor locks in opposite orders", w.name)
+		}
+	}
+	cfg, err := config.Load(fsys.OSFS{}, tomlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Agents) != 1 || !cfg.Agents[0].Suspended {
+		t.Fatalf("agents after the edit = %+v, want rig1/worker suspended", cfg.Agents)
+	}
+}
+
+// A config transaction holds the publication lock for its whole body,
+// including a pack fetch or rig provisioning, so a runtime reload whose
+// candidate was read before the transaction began waits at publication until
+// the transaction ends. That stall is accepted: it ends with the transaction,
+// and the reload then sees that its candidate is older than the transaction's
+// generation instead of publishing over it.
+func TestControllerStateReloadPublicationWaitsOutConfigTransaction(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	cityDir := t.TempDir()
+	tomlPath := filepath.Join(cityDir, "city.toml")
+	cityToml := "[workspace]\nname = \"city1\"\n\n[beads]\nprovider = \"file\"\n\n[providers.bash]\ncommand = \"bash\"\n\n[[agent]]\nname = \"worker\"\nprovider = \"bash\"\n"
+	if err := os.WriteFile(tomlPath, []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sp := runtime.NewFake()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cs := newControllerState(ctx, &config.City{Workspace: config.Workspace{Name: "city1"}}, sp, events.NewFake(), "city1", cityDir)
+	staleCfg, staleRev, err := cs.loadCurrentConfigSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs.update(staleCfg, sp)
+
+	bodyEntered := make(chan struct{})
+	releaseBody := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseBody) }) }
+	defer release()
+	txDone := make(chan error, 1)
+	go func() {
+		txDone <- cs.SerializeConfigWrite(func() error {
+			close(bodyEntered)
+			<-releaseBody
+			return os.WriteFile(tomlPath, []byte(cityToml+"\n[[agent]]\nname = \"added\"\nprovider = \"bash\"\n"), 0o644)
+		})
+	}()
+	awaitClose(t, bodyEntered, "config transaction body")
+	if cs.publishMu.TryLock() {
+		cs.publishMu.Unlock()
+		t.Fatal("config transaction body runs without the publication lock")
+	}
+	reloadDone := make(chan bool, 1)
+	go func() { reloadDone <- cs.updateFromRuntime(staleCfg, sp, staleRev) }()
+
+	release()
+	select {
+	case err := <-txDone:
+		if err != nil {
+			t.Fatalf("config transaction: %v", err)
+		}
+	case <-time.After(hangBudget):
+		t.Fatal("config transaction did not finish")
+	}
+	select {
+	case published := <-reloadDone:
+		if published {
+			t.Fatal("reload published a candidate read before the config transaction over the transaction's generation")
+		}
+	case <-time.After(hangBudget):
+		t.Fatal("reload publication did not finish after the config transaction")
+	}
+	var added bool
+	for _, a := range cs.Config().Agents {
+		added = added || a.Name == "added"
+	}
+	if !added {
+		t.Fatalf("published agents = %+v, want the transaction's agent \"added\"", cs.Config().Agents)
+	}
+}
+
+// An API suspend or resume holds the publication lock while its state write
+// waits on the suspension fence, which the controller holds while it stops a
+// suspended scope's store. Other API config edits and reload publication wait
+// behind it. That stall is accepted: the fence holder never waits for the
+// publication lock, so the stall ends when the fence is released.
+func TestControllerStateSuspensionFenceWaitHoldsPublicationUntilFenceRelease(t *testing.T) {
+	cs, tomlPath := newControllerStateMutationHarness(t)
+	releaseFence, err := suspensionstate.Fence(cs.cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer releaseFence()
+
+	suspendDone := make(chan error, 1)
+	go func() { suspendDone <- cs.SuspendCity() }()
+	awaitCond(t, func() bool {
+		if cs.publishMu.TryLock() {
+			cs.publishMu.Unlock()
+			return false
+		}
+		return true
+	}, "API suspend holding the publication lock while it waits on the suspension fence")
+	editDone := make(chan error, 1)
+	go func() { editDone <- cs.SuspendAgent("rig1/worker") }()
+
+	releaseFence()
+	for _, w := range []struct {
+		name string
+		done <-chan error
+	}{{"city suspend", suspendDone}, {"agent suspend", editDone}} {
+		select {
+		case err := <-w.done:
+			if err != nil {
+				t.Fatalf("%s: %v", w.name, err)
+			}
+		case <-time.After(hangBudget):
+			t.Fatalf("%s did not finish after the suspension fence was released", w.name)
+		}
+	}
+	st, err := suspensionstate.Load(fsys.OSFS{}, cs.cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !suspensionstate.IsCitySuspended(st) {
+		t.Fatal("city suspend did not land after the fence was released")
+	}
+	cfg, err := config.Load(fsys.OSFS{}, tomlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Agents) != 1 || !cfg.Agents[0].Suspended {
+		t.Fatalf("agents after the edit = %+v, want rig1/worker suspended", cfg.Agents)
+	}
+}
+
+// Before any generation has been captured, RawConfig loads the raw config
+// itself. That load must wait out an in-flight mutation as publication does,
+// or it would cache a rejected edit's write as the API's raw config.
+func TestControllerStateRawConfigFallbackCannotCacheRejectedEdit(t *testing.T) {
+	cs, tomlPath := newControllerStateMutationHarness(t)
+	// A published generation, so the mutation's refresh validates (and
+	// rejects) the patch, but no raw snapshot captured yet.
+	cfg, _, err := cs.loadCurrentConfigSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs.cfg = cfg
+	original, err := os.ReadFile(tomlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	written := make(chan struct{})
+	releaseWrite := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseWrite) }) }
+	defer release()
+	mutationDone := make(chan error, 1)
+	go func() {
+		mutationDone <- cs.mutateAndPoke(func() error {
+			if err := cs.editor.SetAgentPatch(config.AgentPatch{Dir: "rig1", Name: "missing", Env: map[string]string{"REJECTED": "1"}}); err != nil {
+				return err
+			}
+			close(written)
+			<-releaseWrite
+			return nil
+		})
+	}()
+	awaitClose(t, written, "rejected patch's disk write")
+
+	rawDone := make(chan *config.City, 1)
+	go func() { rawDone <- cs.RawConfig() }()
+	// Negative assertion: the window IS the assertion ("RawConfig must not
+	// return while the rejected write is on disk"), so it stays a short literal
+	// rather than the hang budget (cmd/gc/hangbudget_test.go).
+	select {
+	case <-rawDone:
+		t.Fatal("RawConfig read the city config while a rejected edit was on disk")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	release()
+	select {
+	case err := <-mutationDone:
+		if err == nil {
+			t.Fatal("patch to a missing agent was accepted")
+		}
+	case <-time.After(hangBudget):
+		t.Fatal("rejected mutation did not finish its rollback")
+	}
+	select {
+	case raw := <-rawDone:
+		if raw == nil {
+			t.Fatal("RawConfig returned nil after the rollback")
+		}
+		if len(raw.Patches.Agents) != 0 {
+			t.Fatalf("rejected patch was cached as the API raw config: %+v", raw.Patches.Agents)
+		}
+	case <-time.After(hangBudget):
+		t.Fatal("RawConfig did not return after the rollback")
+	}
+	if got, err := os.ReadFile(tomlPath); err != nil || string(got) != string(original) {
+		t.Fatalf("city.toml after rollback = %q, err=%v", got, err)
+	}
+}
+
+// forgedClosePayload is a bead.closed payload for step written by someone
+// other than the controller's cache: it claims the step closed and carries a
+// session the live row never had.
+func forgedClosePayload(t *testing.T, step beads.Bead) json.RawMessage {
+	t.Helper()
+	forged := step
+	forged.Status = "closed"
+	forged.Metadata = map[string]string{}
+	for k, v := range step.Metadata {
+		forged.Metadata[k] = v
+	}
+	forged.Metadata["gc.session_id"] = "gcs-forged"
+	payload, err := beads.EncodeBeadEventPayload(forged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return payload
+}
+
+func completedSessionsFor(rec *events.Fake, id string) []string {
+	var sessions []string
+	for _, evt := range rec.Events {
+		if evt.Type == events.ExecutionStepCompleted && evt.Subject == id {
+			sessions = append(sessions, evt.SessionID)
+		}
+	}
+	return sessions
+}
+
+// TestForgedBeadClosedOfAnOpenRowRecordsNothing: a bead.closed from any actor
+// but the controller's own cache is a claim, not a fact. Its payload says the
+// step closed; the row reads open live, so no completion fact is recorded and
+// no autoclose runs.
+func TestForgedBeadClosedOfAnOpenRowRecordsNothing(t *testing.T) {
+	prev := beadCloseAutocloseDispatch
+	beadCloseAutocloseDispatch = func(fn func()) { fn() }
+	t.Cleanup(func() { beadCloseAutocloseDispatch = prev })
+
+	mem := beads.NewMemStore()
+	mem.HonorExplicitIDs = true
+	step, convoy, _ := graphStepFixture(t, mem)
+	rec := events.NewFake()
+	cs := &controllerState{cityBeadStore: mem, eventProv: rec}
+
+	cs.applyBeadEventToStores(events.Event{Type: events.BeadClosed, Actor: "worker-3", Subject: step.ID, Payload: forgedClosePayload(t, step)})
+
+	if got := completedFor(rec, step.ID); got != 0 {
+		t.Fatalf("completion facts = %d for a forged close of an open row, want 0", got)
+	}
+	if cs.autocloseSweepOf().hasRan(step.ID) {
+		t.Fatal("autoclose ran for a forged close of an open row")
+	}
+	if got := statusOf(t, mem, convoy.ID); got != "open" {
+		t.Fatalf("convoy %s after a forged close, want open", got)
+	}
+}
+
+// TestForeignBeadClosedTakesTheFactFromTheLiveRead: the same foreign close of
+// a row that does read closed live records one fact, built from the live row;
+// a field only the payload carries does not reach it.
+func TestForeignBeadClosedTakesTheFactFromTheLiveRead(t *testing.T) {
+	prev := beadCloseAutocloseDispatch
+	beadCloseAutocloseDispatch = func(fn func()) { fn() }
+	t.Cleanup(func() { beadCloseAutocloseDispatch = prev })
+
+	mem := beads.NewMemStore()
+	mem.HonorExplicitIDs = true
+	step, convoy, _ := graphStepFixture(t, mem)
+	if err := mem.Close(step.ID); err != nil {
+		t.Fatal(err)
+	}
+	rec := events.NewFake()
+	cs := &controllerState{cityBeadStore: mem, eventProv: rec}
+
+	cs.applyBeadEventToStores(events.Event{Type: events.BeadClosed, Actor: "worker-3", Subject: step.ID, Payload: forgedClosePayload(t, step)})
+
+	if got := fmt.Sprint(completedSessionsFor(rec, step.ID)); got != "[gcs-session]" {
+		t.Fatalf("completion facts carry sessions %s, want [gcs-session] from the live read", got)
+	}
+	if got := statusOf(t, mem, convoy.ID); got != "closed" {
+		t.Fatalf("convoy %s after a confirmed close, want closed", got)
+	}
+}
+
+// TestCacheLocalBeadClosedRecordsSynchronously: the controller's own cache
+// write is a fact the backing accepted, so its close records the completion
+// fact before applyBeadEventToStores returns, with no live re-read: a store
+// that reads back stale (open) does not gate it.
+func TestCacheLocalBeadClosedRecordsSynchronously(t *testing.T) {
+	prev := beadCloseAutocloseDispatch
+	beadCloseAutocloseDispatch = func(func()) {} // autoclose never runs; the fact must not depend on it
+	t.Cleanup(func() { beadCloseAutocloseDispatch = prev })
+
+	mem := beads.NewMemStore()
+	mem.HonorExplicitIDs = true
+	step, _, payload := graphStepFixture(t, mem)
+	rec := events.NewFake()
+	cs := &controllerState{cityBeadStore: mem, eventProv: rec}
+
+	cs.applyBeadEventToStores(events.Event{Type: events.BeadClosed, Actor: cacheLocalActor, Subject: step.ID, Payload: payload})
+
+	if got := completedFor(rec, step.ID); got != 1 {
+		t.Fatalf("completion facts = %d for a cache-local close, want 1 recorded synchronously", got)
+	}
+}
+
+// TestSplitCityOneShotCloseRecordsItsFactThroughTheLiveRead is the regression
+// for graph steps that render Running forever: on a split city the graph row
+// lives in the binding, and a one-shot CLI close stamps its bead.closed with
+// eventActor(), not a cache actor. Fed from the city journal, that close must
+// still reach exactly one completion fact, through the live read routed to the
+// binding cache on the dispatched (asynchronous) path.
+func TestSplitCityOneShotCloseRecordsItsFactThroughTheLiveRead(t *testing.T) {
+	clearGCEnv(t)
+	t.Setenv("GC_ALIAS", "worker-7")
+
+	engine := openBindingEngineForTest(t)
+	if _, err := engine.CreateWithForeignID(beads.Bead{ID: "gcg-run", Title: "run", Type: "task", Metadata: map[string]string{
+		"gc.kind": "workflow", "gc.formula_contract": "graph.v2",
+	}}); err != nil {
+		t.Fatalf("seed run root: %v", err)
+	}
+	if _, err := engine.CreateWithForeignID(beads.Bead{ID: "gcg-step", Title: "step", Type: "task", Metadata: map[string]string{
+		"gc.root_bead_id": "gcg-run", "gc.step_id": "build", "gc.session_id": "gcs-session",
+	}}); err != nil {
+		t.Fatalf("seed step: %v", err)
+	}
+	cs, rec := newCachedSplitControllerState(context.Background(), t, splitClassRoutes(engine), beads.NewMemStore())
+
+	cityPath := t.TempDir()
+	cli := splitClassRoutes(engine).withCLIEmission(cityPath)
+	if err := cli.stores[coordclass.ClassGraph].Close("gcg-step"); err != nil {
+		t.Fatalf("one-shot close: %v", err)
+	}
+	journal := beadEvents(readCityJournal(t, cityPath))
+	if len(journal) == 0 {
+		t.Fatal("the one-shot emitter appended no bead event")
+	}
+	for _, evt := range journal {
+		cs.applyBeadEventToStores(evt)
+	}
+	awaitCond(t, func() bool { return !cs.storeWorkInFlight() }, "the dispatched close's store work")
+
+	var facts []string
+	for _, evt := range rec.Events {
+		if evt.Type == events.ExecutionStepCompleted && evt.Subject == "gcg-step" {
+			facts = append(facts, evt.Actor+"/"+evt.SessionID)
+		}
+	}
+	if got := fmt.Sprint(facts); got != "[worker-7/gcs-session]" {
+		t.Fatalf("completion facts = %s, want one fact by the one-shot closer carrying the live row's session", got)
+	}
+}
+
+// TestQuiescentCityDefersEveryCloseToTheSweep: on a quiescent city neither
+// the cache-local nor the live-read path reads or records anything; both owe
+// the close to the sweep.
+func TestQuiescentCityDefersEveryCloseToTheSweep(t *testing.T) {
+	for _, actor := range []string{cacheLocalActor, "worker-3"} {
+		t.Run(actor, func(t *testing.T) {
+			prev := beadCloseAutocloseDispatch
+			beadCloseAutocloseDispatch = func(fn func()) { fn() }
+			t.Cleanup(func() { beadCloseAutocloseDispatch = prev })
+
+			mem := beads.NewMemStore()
+			mem.HonorExplicitIDs = true
+			step, _, payload := graphStepFixture(t, mem)
+			if err := mem.Close(step.ID); err != nil {
+				t.Fatal(err)
+			}
+			quiescent := new(atomic.Bool)
+			quiescent.Store(true)
+			rec := events.NewFake()
+			cs := &controllerState{cityBeadStore: panicGetStore{mem}, eventProv: rec, beadsQuiescent: quiescent}
+
+			cs.applyBeadEventToStores(events.Event{Type: events.BeadClosed, Actor: actor, Subject: step.ID, Payload: payload})
+
+			if got := completedFor(rec, step.ID); got != 0 {
+				t.Fatalf("completion facts = %d on a quiescent city, want 0", got)
+			}
+			if !cs.autocloseSweepOf().isPending(step.ID) {
+				t.Fatal("the close is not owed to the sweep")
+			}
+		})
 	}
 }

@@ -11,7 +11,9 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/molecule"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
@@ -54,6 +56,12 @@ func CollectAttachedBeads(parent beads.Bead, store beads.Store, childQuerier Bea
 			return
 		}
 		seen[id] = struct{}{}
+		// A controller-owned row is never an attachment, whatever a
+		// molecule_id or workflow_id names: no autoclose, force or GC tears
+		// it down (mc-dkblm, architecture B).
+		if coordclass.ControllerOwned(attached) {
+			return
+		}
 		attachments = append(attachments, attached)
 	}
 
@@ -71,7 +79,7 @@ func CollectAttachedBeads(parent beads.Bead, store beads.Store, childQuerier Bea
 			}
 		} else {
 			for _, child := range children {
-				if !IsAttachedRoot(child) {
+				if !IsAttachedRoot(child) || coordclass.ControllerOwned(child) {
 					continue
 				}
 				if _, ok := seen[child.ID]; ok {
@@ -637,7 +645,8 @@ func CheckBeadState(q BeadQuerier, beadID string, a config.Agent, deps SlingDeps
 }
 
 // CheckBeadStateWithOptions checks whether a bead is already routed for the
-// requested route options and returns a structured result.
+// requested route options and returns a structured result, which also
+// carries the status the check read.
 func CheckBeadStateWithOptions(q BeadQuerier, beadID string, a config.Agent, deps SlingDeps, opts BeadCheckOptions) BeadCheckResult {
 	if q == nil {
 		return BeadCheckResult{}
@@ -646,7 +655,14 @@ func CheckBeadStateWithOptions(q BeadQuerier, beadID string, a config.Agent, dep
 	if err != nil {
 		return BeadCheckResult{}
 	}
+	result := checkReadBeadState(q, b, beadID, a, deps, opts)
+	result.Status = b.Status
+	return result
+}
 
+// checkReadBeadState returns the routing verdict of CheckBeadStateWithOptions
+// for b, the bead it just read.
+func checkReadBeadState(q BeadQuerier, b beads.Bead, beadID string, a config.Agent, deps SlingDeps, opts BeadCheckOptions) BeadCheckResult {
 	if IsCustomSlingQuery(a) {
 		return BeadCheckResult{Warnings: routedStateWarnings(b, beadID)}
 	}
@@ -655,14 +671,15 @@ func CheckBeadStateWithOptions(q BeadQuerier, beadID string, a config.Agent, dep
 	isMulti := agentutil.IsMultiSessionAgent(&a)
 	if strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]) == target {
 		// A pool session claims routed work under its own session identity
-		// ("<target>-<session bead id>"), not under the bare pool target, so
-		// bare equality reads already-claimed pool work as un-slung and mints a
-		// second attempt for it. The original keeps gc.routed_to once wrapped,
-		// so both it and its do-work step satisfy the pool work_query: one unit
+		// (its session bead ID since #6324; "<target>-<suffix>" session_name
+		// on older claims), not under the bare pool target, so bare equality
+		// reads already-claimed pool work as un-slung and mints a second
+		// attempt for it. The original keeps gc.routed_to once wrapped, so
+		// both it and its do-work step satisfy the pool work_query: one unit
 		// of work, two dispatchable rows, two sessions. Treat a claim by any of
-		// this pool's own sessions as idempotent. Anchored to target+"-", so a
+		// this pool's own sessions as idempotent (assigneeIsOwnPoolSession); a
 		// claim by a different pool still falls through to the warning below.
-		claimedByOwnPoolSession := isMulti && strings.HasPrefix(b.Assignee, target+"-")
+		claimedByOwnPoolSession := isMulti && assigneeIsOwnPoolSession(b.Assignee, target, q, deps.Store)
 		if b.Assignee == "" || b.Assignee == target || claimedByOwnPoolSession {
 			return resolveConvoyRecovery(q, b, deps, opts, beadID)
 		}
@@ -687,6 +704,30 @@ func CheckBeadStateWithOptions(q BeadQuerier, beadID string, a config.Agent, dep
 		}
 	}
 	return BeadCheckResult{Warnings: routedStateWarnings(b, beadID)}
+}
+
+// assigneeIsOwnPoolSession reports whether assignee is one of pool target's own
+// sessions. A pool session's claim used to be recorded under its session_name
+// ("<target>-<suffix>"), which the prefix check still recognizes for beads
+// claimed before the upgrade. Since #6324 an unaliased pool session claims
+// under its session bead ID, which carries no pool prefix, so the assignee is
+// also resolved as a bead ID: it is this pool's own when it names an open
+// session bead created from target. getters are tried in order; the first
+// that resolves the exact ID decides (bd resolves partial IDs, so a result
+// whose ID differs from assignee is not a match).
+func assigneeIsOwnPoolSession(assignee, target string, getters ...BeadQuerier) bool {
+	assignee = strings.TrimSpace(assignee)
+	if assignee == "" || target == "" {
+		return false
+	}
+	if strings.HasPrefix(assignee, target+"-") {
+		return true
+	}
+	sb, ok := BeadFromGetters(assignee, getters...)
+	if !ok || sb.ID != assignee {
+		return false
+	}
+	return session.IsOpenSessionOfTemplate(sb, target)
 }
 
 // routedStateWarnings reports human-readable warnings describing any existing

@@ -1,0 +1,30 @@
+⏺ Running a four-line script: change to /tmp/gjcapml, running Python to compute
+  5 + 6 and writing to sum.txt, capturing exit status, then reporting completion
+
+  ⎿  $ cd /tmp/gjcapml
+     python3 -c 'print(5 + 6)' > sum.txt
+     STATUS=$?
+     echo "python3 finished with exit status $STATUS and wrote sum.txt into the
+     demo working directory"
+
+────────────────────────────────────────────────────────────────────────────────
+ Bash command
+ │ Run a four-line script: change to /tmp/gjcapml, run Python to compute 5 + 6
+ │ and write to sum.txt, capture exit status, then report completion
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ │ cd /tmp/gjcapml
+ │ python3 -c 'print(5 + 6)' > sum.txt
+ │ STATUS=$?
+ │ echo "python3 finished with exit status $STATUS and wrote sum.txt into the
+ │ demo working directory"
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ This command requires approval
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, and don't ask again for cd /tmp/gjcapml, python3 -c 'print(5 + 6)',
+      and "echo 'python3 finished with exit status __TRACKED_VAR__ and wrote
+      sum.txt into the demo working directory'" commands in /private/tmp/gjcapml
+   3. No
+
+ Esc to cancel · Tab to amend

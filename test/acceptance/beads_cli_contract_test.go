@@ -17,12 +17,15 @@ package acceptance_test
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
 )
 
@@ -31,9 +34,11 @@ import (
 func runBD(t *testing.T, dir string, args ...string) (string, error) {
 	t.Helper()
 	bdPath := helpers.RequireBD(t)
-	cmd := exec.Command(bdPath, args...)
+	cmd := helpers.ToolCommand(t, bdPath, args...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "BEADS_DIR="+filepath.Join(dir, ".beads"))
+	// BEADS_TEST_MODE keeps bd's detached metrics flusher from racing the
+	// TempDir teardown (ga-aik16g).
+	cmd.Env = append(cmd.Env, "BEADS_DIR="+filepath.Join(dir, ".beads"), beadstest.EnvBeadsTestMode+"=1")
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
@@ -53,7 +58,7 @@ func requireBD(t *testing.T, dir string, args ...string) string {
 func initBeadsDir(t *testing.T) string {
 	t.Helper()
 	helpers.RequireBD(t)
-	dir := t.TempDir()
+	dir := beadstest.GuardedTempDir(t)
 	requireBD(t, dir, "init", "-p", "ct", "--skip-hooks", "-q")
 	return dir
 }
@@ -323,7 +328,7 @@ func TestBdBasicCRUD(t *testing.T) {
 		if err != nil {
 			// bd create --graph may not be available in all versions.
 			// If the command is unrecognized, skip rather than fail.
-			if strings.Contains(string(out), "unknown") || strings.Contains(string(out), "unrecognized") {
+			if strings.Contains(out, "unknown") || strings.Contains(out, "unrecognized") {
 				t.Skipf("bd create --graph not supported in this version: %s", out)
 			}
 			t.Fatalf("bd create --graph failed: %v\n%s", err, out)
@@ -366,6 +371,55 @@ func TestBdBasicCRUD(t *testing.T) {
 		}
 		if issues[0].Status == "" {
 			t.Fatal("bd show --json returned empty status field")
+		}
+	})
+
+	// --- Query ---
+
+	// BdStore.Get proves a bd show miss with `bd query --json 'id="<id>"'
+	// --all --limit 1` (bdShowMissError), so bd must carry the quoted ID
+	// verbatim and match it exactly. This workspace holds only a bead and its
+	// child, so every other ID, from a strict prefix of the bead's ID to the
+	// dot, slash, space and double-underscore shapes of child bead IDs and
+	// session names, must answer an empty array.
+	t.Run("QueryExactIDLiteral", func(t *testing.T) {
+		qdir := initBeadsDir(t)
+		parentID := createBead(t, qdir, "query root")
+		childID := extractBeadID(t, requireBD(t, qdir, "create", "--json", "query step",
+			"-t", "task", "--parent", parentID))
+		if childID == "" {
+			t.Fatal("no child id returned")
+		}
+		for _, tc := range []struct {
+			id   string
+			want []string
+		}{
+			{id: parentID, want: []string{parentID}},
+			{id: childID, want: []string{childID}},
+			{id: parentID[:len(parentID)-1]},
+			{id: "ga-abc.9"},
+			{id: "gascity/worker-1"},
+			{id: "gascity/worker 1"},
+			{id: "gascity--gc__worker-1"},
+		} {
+			out := requireBD(t, qdir, "query", "--json", `id="`+tc.id+`"`, "--all", "--limit", "1")
+			idx := strings.Index(out, "[")
+			if idx < 0 {
+				t.Fatalf("bd query --json for id %q returned no JSON array:\n%s", tc.id, out)
+			}
+			var rows []struct {
+				ID string `json:"id"`
+			}
+			if err := json.Unmarshal([]byte(out[idx:]), &rows); err != nil {
+				t.Fatalf("bd query --json for id %q not parseable as array: %v\n%s", tc.id, err, out)
+			}
+			var got []string
+			for _, row := range rows {
+				got = append(got, row.ID)
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("bd query for id %q returned %q, want %q", tc.id, got, tc.want)
+			}
 		}
 	})
 
@@ -626,7 +680,8 @@ func TestBdBasicCRUD(t *testing.T) {
 		out, err := runBD(t, dir, "ready", "--label=pool:mypool", "--unassigned", "--limit=1")
 		// bd returns exit 1 for "no results" which is acceptable.
 		if err != nil {
-			if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+			var exitErr *exec.ExitError
+			if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
 				// Acceptable: no ready work found (bead may need deps resolved).
 				return
 			}

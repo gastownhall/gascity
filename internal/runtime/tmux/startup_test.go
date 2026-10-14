@@ -35,6 +35,10 @@ type startCall struct {
 	processNames []string
 	rc           *RuntimeConfig
 	timeout      time.Duration
+	// exitStatus and exitSignal are the dead-pane facts recordStartCrash was
+	// handed, so a test can prove the artifact records what was classified.
+	exitStatus string
+	exitSignal string
 }
 
 // fakeStartOps records calls with full arguments and simulates outcomes
@@ -77,6 +81,8 @@ type fakeStartOps struct {
 	capturePaneErr             error
 	recordStartCrashPath       string
 	recordUnconfirmedNudgePath string
+	paneDeadStatus             string
+	paneDeadSignal             string
 
 	paneBusyResult bool
 	paneBusyErr    error
@@ -214,8 +220,13 @@ func (f *fakeStartOps) capturePane(name string, _ int) (string, error) {
 	return f.capturePaneText, f.capturePaneErr
 }
 
-func (f *fakeStartOps) recordStartCrash(name, _ string) string {
-	f.calls = append(f.calls, startCall{method: "recordStartCrash", name: name})
+func (f *fakeStartOps) paneDeadInfo(name string) (string, string) {
+	f.calls = append(f.calls, startCall{method: "paneDeadInfo", name: name})
+	return f.paneDeadStatus, f.paneDeadSignal
+}
+
+func (f *fakeStartOps) recordStartCrash(name, _, status, signal string) string {
+	f.calls = append(f.calls, startCall{method: "recordStartCrash", name: name, exitStatus: status, exitSignal: signal})
 	return f.recordStartCrashPath
 }
 
@@ -726,6 +737,7 @@ func TestDoStartSession_ReadyDeadlineWithDeadPaneReportsProviderCrash(t *testing
 		"hasSession",
 		"isSessionRunning",
 		"capturePane",
+		"paneDeadInfo",
 		"recordStartCrash",
 	})
 }
@@ -765,6 +777,7 @@ func TestDoStartSession_FinalDeadPaneReportsProviderCrash(t *testing.T) {
 		"hasSession",
 		"isSessionRunning",
 		"capturePane",
+		"paneDeadInfo",
 		"recordStartCrash",
 	})
 }
@@ -805,6 +818,7 @@ func TestDoStartSession_FinalDeadPaneCaptureErrorFallsBack(t *testing.T) {
 		"hasSession",
 		"isSessionRunning",
 		"capturePane",
+		"paneDeadInfo",
 		"recordStartCrash",
 	})
 }
@@ -845,6 +859,7 @@ func TestDoStartSession_DeadPaneRecordsDurableDiagnostic(t *testing.T) {
 		"hasSession",
 		"isSessionRunning",
 		"capturePane",
+		"paneDeadInfo",
 		"recordStartCrash",
 	})
 }
@@ -3198,7 +3213,7 @@ func TestTmuxStartOpsRunSetupCommandUsesGC_DIRAsWorkingDirectory(t *testing.T) {
 
 func TestPaneDeadInfoParsesStatusAndSignal(t *testing.T) {
 	tm := NewTmux()
-	exec := &fakeExecutor{out: "139|SIGSEGV\n"}
+	exec := &fakeExecutor{out: "pane\t139|SIGSEGV\n"}
 	tm.exec = exec
 
 	status, signal := tm.PaneDeadInfo("mayor")
@@ -3225,10 +3240,9 @@ func TestPaneDeadInfoErrorReturnsEmpty(t *testing.T) {
 func TestRecordStartCrashWritesDurableArtifact(t *testing.T) {
 	dir := t.TempDir()
 	tm := NewTmux()
-	tm.exec = &fakeExecutor{out: "139|SIGSEGV\n"}
 	o := &tmuxStartOps{tm: tm, runtimeDir: dir}
 
-	path := o.recordStartCrash("mayor", "panic: startup failed\nPane is dead")
+	path := o.recordStartCrash("mayor", "panic: startup failed\nPane is dead", "139", "SIGSEGV")
 	want := filepath.Join(citylayout.SessionDiagnosticsDirForRuntimeDir(dir), "mayor", "start-stderr.log")
 	if path != want {
 		t.Fatalf("path = %q, want %q", path, want)
@@ -3246,9 +3260,8 @@ func TestRecordStartCrashWritesDurableArtifact(t *testing.T) {
 
 func TestRecordStartCrashDisabledWhenNoRuntimeDir(t *testing.T) {
 	tm := NewTmux()
-	tm.exec = &fakeExecutor{out: "139|SIGSEGV\n"}
 	o := &tmuxStartOps{tm: tm, runtimeDir: ""}
-	if path := o.recordStartCrash("mayor", "x"); path != "" {
+	if path := o.recordStartCrash("mayor", "x", "139", "SIGSEGV"); path != "" {
 		t.Fatalf("path = %q, want empty when runtimeDir unset", path)
 	}
 }
@@ -3452,6 +3465,9 @@ type partialPasteExecutor struct {
 func (f *partialPasteExecutor) execute(args []string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if row, ok := fakeAgentPaneRow(args); ok {
+		return row, nil
+	}
 	// tmux invocations carry leading flags (-u, socket selection), so match the
 	// subcommand anywhere in the argument list rather than at a fixed index.
 	switch {

@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
@@ -798,7 +799,7 @@ func TestStorageRoutesRefuseAProviderThatOpensNoEngine(t *testing.T) {
 		t.Fatal("the binding in the resolved plan still offers an engine opener")
 	}
 
-	routes, err := openStorageRoutes(plan, target)
+	routes, err := openStorageRoutes(plan, target, cfg, root, nil)
 	if err == nil {
 		_ = routes.close()
 		t.Fatal("routes opened for a binding whose provider opens no bead engine; the classes assigned to it would have fallen through to the work store")
@@ -1059,6 +1060,152 @@ func TestStorageMigrateRefusesRigResidueByName(t *testing.T) {
 	}
 	assertNoConvergenceMarker(t, mustResolveInfraTarget(t, request.CityPath, cfg),
 		"a migrator that refused must record no convergence")
+}
+
+// TestStorageMigrateAcceptsRigSharingTheCityStore covers a rig whose binding
+// is the city's own work store (a unified city whose rig .beads carries a copy
+// of the city's remote binding, or resolves to the same database). Its rows
+// ARE the copy's source rows, so they are not residue: refusing them sent the
+// operator to blank the rig path to get a migration through (MC shadow F1).
+// Both shapes are covered: the same handle behind both opens, and a second,
+// independently opened handle over the same rows.
+func TestStorageMigrateAcceptsRigSharingTheCityStore(t *testing.T) {
+	rigPath := t.TempDir()
+	cfg := infraSplitConfig(filepath.Join(t.TempDir(), "store"))
+	request := storageTestRequest(t, cfg)
+	cfg.Rigs = []config.Rig{{Name: "sandbox", Prefix: "sb", Path: rigPath}}
+
+	city := stubInfraMigrationSource(t)
+	stubInfraControllerPing(t, 0)
+	mustCreateInfraBead(t, city, beads.Bead{Title: "a city wisp", Type: "session", Labels: []string{"alpha", "beta"}})
+	mustCreateInfraBead(t, city, beads.Bead{Title: "ordinary work", Type: "task"})
+	rows, err := city.List(beads.ListQuery{IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
+	if err != nil {
+		t.Fatalf("listing the city work store: %v", err)
+	}
+
+	var rig beads.Store
+	stubStorageScopeStore(t, rigPath, func() beads.Store { return rig })
+	for _, shape := range []struct {
+		name  string
+		store beads.Store
+	}{
+		{"the city's own handle", city},
+		{"a second handle over the same rows", beads.NewMemStoreFrom(len(rows), rows, nil)},
+	} {
+		rig = shape.store
+		if err := censusRigInfraResidue(request.CityPath, cfg); err != nil {
+			t.Errorf("%s: a rig sharing the city work store was refused as residue: %v", shape.name, err)
+		}
+	}
+}
+
+// TestStorageMigrateRefusesRigRowHeldInAnotherState covers a rig store that
+// holds a city id in a state the city work store does not. The copy carries
+// the city's version, so the rig's would be dropped: each is refused by name,
+// on whichever field differs, because a listing has no version stamp to notice
+// the change by (the native store clears Revision and never fills UpdatedAt).
+// A token or a timestamp only one side publishes is no evidence either way,
+// whichever side that is, and neither is bd's readiness projection or the order
+// labels and edges come back in, so those rows are judged on the rest of the
+// row and accepted.
+func TestStorageMigrateRefusesRigRowHeldInAnotherState(t *testing.T) {
+	rigPath := t.TempDir()
+	cfg := infraSplitConfig(filepath.Join(t.TempDir(), "store"))
+	request := storageTestRequest(t, cfg)
+	cfg.Rigs = []config.Rig{{Name: "sandbox", Prefix: "sb", Path: rigPath}}
+
+	city := stubInfraMigrationSource(t)
+	stubInfraControllerPing(t, 0)
+	notBlocked := false
+	shared := mustCreateInfraBead(t, city, beads.Bead{
+		Title:        "a city message",
+		Type:         "message",
+		Labels:       []string{"alpha", "beta"},
+		Metadata:     beads.StringMap{"note": "city"},
+		Dependencies: []beads.Dep{{DependsOnID: "gc-target", Type: "blocks"}, {DependsOnID: "gc-other", Type: "related"}},
+		IsBlocked:    &notBlocked,
+	})
+
+	var rig beads.Store
+	stubStorageScopeStore(t, rigPath, func() beads.Store { return rig })
+	census := func(rows ...beads.Bead) error {
+		rig = beads.NewMemStoreFrom(len(rows), rows, nil)
+		return censusRigInfraResidue(request.CityPath, cfg)
+	}
+	for _, tc := range []struct {
+		name    string
+		mutate  func(beads.Bead) beads.Bead
+		refused bool
+	}{
+		{"title", func(b beads.Bead) beads.Bead { b.Title = "the rig's own copy"; return b }, true},
+		{"status", func(b beads.Bead) beads.Bead { b.Status = "closed"; return b }, true},
+		{"labels", func(b beads.Bead) beads.Bead { b.Labels = []string{"alpha"}; return b }, true},
+		{"metadata", func(b beads.Bead) beads.Bead { b.Metadata = beads.StringMap{"note": "rig"}; return b }, true},
+		{"dependencies", func(b beads.Bead) beads.Bead { b.Dependencies = b.Dependencies[:1]; return b }, true},
+		{"a dependency's type", func(b beads.Bead) beads.Bead {
+			b.Dependencies = []beads.Dep{b.Dependencies[0], {DependsOnID: "gc-other", Type: "blocks"}}
+			return b
+		}, true},
+		{"a published revision", func(b beads.Bead) beads.Bead { b.Revision = shared.Revision + 1; return b }, true},
+		{"a published create time", func(b beads.Bead) beads.Bead { b.CreatedAt = b.CreatedAt.Add(-time.Hour); return b }, true},
+		{"a published update time", func(b beads.Bead) beads.Bead { b.UpdatedAt = b.UpdatedAt.Add(time.Hour); return b }, true},
+		{"an unpublished revision", func(b beads.Bead) beads.Bead { b.Revision = 0; return b }, false},
+		{"an unpublished create time", func(b beads.Bead) beads.Bead { b.CreatedAt = time.Time{}; return b }, false},
+		{"an unpublished update time", func(b beads.Bead) beads.Bead { b.UpdatedAt = time.Time{}; return b }, false},
+		{"label order", func(b beads.Bead) beads.Bead { b.Labels = []string{"beta", "alpha"}; return b }, false},
+		{"edge order", func(b beads.Bead) beads.Bead {
+			b.Dependencies = []beads.Dep{b.Dependencies[1], b.Dependencies[0]}
+			return b
+		}, false},
+		{"the readiness projection", func(b beads.Bead) beads.Bead { blocked := true; b.IsBlocked = &blocked; return b }, false},
+	} {
+		if got := censusRowDiffers(tc.mutate(shared), shared); got != tc.refused {
+			t.Errorf("%s: with the city holding the row that differs in %s, censusRowDiffers = %v, want %v; the answer must not depend on which side holds which state",
+				tc.name, tc.name, got, tc.refused)
+		}
+		err := census(tc.mutate(shared))
+		switch {
+		case !tc.refused && err != nil:
+			t.Errorf("%s: a rig row differing only in %s was refused: %v", tc.name, tc.name, err)
+		case !tc.refused:
+		case err == nil || !strings.Contains(err.Error(), shared.ID+" (rig sandbox)") || !strings.Contains(err.Error(), "in another state"):
+			t.Errorf("%s: a rig row differing in %s was not refused by name as held in another state: %v", tc.name, tc.name, err)
+		case strings.Contains(err.Error(), "Move them"):
+			t.Errorf("%s: the refusal tells the operator to move a row whose id the work store already holds: %v", tc.name, err)
+		}
+	}
+
+	// Each kind of residue keeps the remedy it needs when both are present.
+	stray := shared
+	stray.ID = "gc-only-in-the-rig"
+	stale := shared
+	stale.Title = "the rig's own copy"
+	err := census(stray, stale)
+	if err == nil {
+		t.Fatal("a rig holding an absent row and a diverged row was not refused")
+	}
+	absentPart, divergedPart, ok := strings.Cut(err.Error(), "Move them into the city work store")
+	if !ok || !strings.Contains(absentPart, stray.ID) || strings.Contains(absentPart, shared.ID) {
+		t.Errorf("the absent row is not named under the move remedy alone: %v", err)
+	}
+	if !strings.Contains(divergedPart, shared.ID) || !strings.Contains(divergedPart, storageStopCommand) {
+		t.Errorf("the diverged row is not named under its own remedy, which must say to re-check a stopped city: %v", err)
+	}
+}
+
+// stubStorageScopeStore makes the rig census open rig() for rigPath, read at
+// each open so one stub can serve a sequence of rig stores.
+func stubStorageScopeStore(t *testing.T, rigPath string, rig func() beads.Store) {
+	t.Helper()
+	prev := openStorageScopeStore
+	openStorageScopeStore = func(storePath, cityPath string) (beads.Store, error) {
+		if storePath == rigPath {
+			return rig(), nil
+		}
+		return prev(storePath, cityPath)
+	}
+	t.Cleanup(func() { openStorageScopeStore = prev })
 }
 
 // TestStorageMigrateRequiresItsSourceExplicitly proves the command will not

@@ -8,6 +8,9 @@ go_library(
         "descendants_linux.go",
         "descendants_stub.go",
         "doc.go",
+        "environ_darwin.go",
+        "environ_linux.go",
+        "environ_stub.go",
         "guard.go",
         "identity.go",
         "identity_darwin.go",
@@ -19,6 +22,7 @@ go_library(
         "infrastructure_argv_stub.go",
         "kill_stub.go",
         "kill_unix.go",
+        "names.go",
         "proctable.go",
         "scan_darwin.go",
         "scan_darwin_command.go",
@@ -28,21 +32,57 @@ go_library(
     importpath = "github.com/gastownhall/gascity/internal/runtime/proctable",
     visibility = ["//:__subpackages__"],
     deps = [
-        "//internal/runtime",
+        "//internal/pidutil",
     ] + select({
+        "@rules_go//go/platform:aix": [
+            "//internal/runtime",
+        ],
         "@rules_go//go/platform:android": [
-            "//internal/pidutil",
+            "//internal/runtime",
         ],
         "@rules_go//go/platform:darwin": [
-            "//internal/pidutil",
+            "//internal/runtime",
             "@org_golang_x_sys//unix",
+        ],
+        "@rules_go//go/platform:dragonfly": [
+            "//internal/runtime",
+        ],
+        "@rules_go//go/platform:freebsd": [
+            "//internal/runtime",
+        ],
+        "@rules_go//go/platform:illumos": [
+            "//internal/runtime",
         ],
         "@rules_go//go/platform:ios": [
-            "//internal/pidutil",
+            "//internal/runtime",
             "@org_golang_x_sys//unix",
         ],
+        "@rules_go//go/platform:js": [
+            "//internal/runtime",
+        ],
         "@rules_go//go/platform:linux": [
-            "//internal/pidutil",
+            "//internal/runtime",
+        ],
+        "@rules_go//go/platform:netbsd": [
+            "//internal/runtime",
+        ],
+        "@rules_go//go/platform:openbsd": [
+            "//internal/runtime",
+        ],
+        "@rules_go//go/platform:osx": [
+            "//internal/runtime",
+        ],
+        "@rules_go//go/platform:plan9": [
+            "//internal/runtime",
+        ],
+        "@rules_go//go/platform:qnx": [
+            "//internal/runtime",
+        ],
+        "@rules_go//go/platform:solaris": [
+            "//internal/runtime",
+        ],
+        "@rules_go//go/platform:windows": [
+            "//internal/runtime",
         ],
         "//conditions:default": [],
     }),
@@ -52,26 +92,45 @@ go_test(
     name = "proctable_test",
     srcs = [
         "descendants_test.go",
+        "environ_darwin_test.go",
+        "environ_linux_test.go",
         "guard_test.go",
         "identity_darwin_test.go",
         "infrastructure_argv_test.go",
         "kill_unix_test.go",
+        "proctable_test.go",
         "scan_darwin_command_test.go",
+        "scan_darwin_start_test.go",
         "scan_darwin_test.go",
         "scan_linux_test.go",
+        "scan_stub_test.go",
         "supervisor_fork_orphan_repro_test.go",
+        "sweep_guards_test.go",
         "testenv_import_test.go",
     ],
     embed = [":proctable"],
     deps = [
         "//internal/beads/proxyendpoint",
+        "//internal/nudgepoller",
         "//internal/testenv",
     ] + select({
+        "@rules_go//go/platform:android": [
+            "//internal/pidutil",
+            "//internal/testutil",
+        ],
         "@rules_go//go/platform:darwin": [
+            "//internal/pidutil",
+            "//internal/runtime",
             "@org_golang_x_sys//unix",
         ],
         "@rules_go//go/platform:ios": [
+            "//internal/pidutil",
+            "//internal/runtime",
             "@org_golang_x_sys//unix",
+        ],
+        "@rules_go//go/platform:linux": [
+            "//internal/pidutil",
+            "//internal/testutil",
         ],
         "//conditions:default": [],
     }),
@@ -85,6 +144,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

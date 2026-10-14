@@ -6,31 +6,39 @@ go_library(
         "cutover.go",
         "exec.go",
         "handshake.go",
+        "idle.go",
         "json.go",
         "seams.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/runtime/exec",
     visibility = ["//:__subpackages__"],
     deps = [
+        "//internal/citylayout",
         "//internal/execgrace",
         "//internal/runtime",
+        "//internal/runtime/tmux",
     ],
 )
 
 go_test(
     name = "exec_test",
     srcs = [
+        "capacity_test.go",
         "cutover_test.go",
         "exec_connection_test.go",
         "exec_reuse_test.go",
         "exec_test.go",
         "handshake_test.go",
+        "idle_budget_test.go",
+        "idle_integration_test.go",
+        "idle_test.go",
         "json_test.go",
         "seams_test.go",
         "testenv_import_test.go",
     ],
     embed = [":exec"],
     deps = [
+        "//internal/citylayout",
         "//internal/runtime",
         "//internal/runtime/runtimetest",
         "//internal/testenv",
@@ -45,6 +53,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

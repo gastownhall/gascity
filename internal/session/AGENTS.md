@@ -66,3 +66,44 @@ evidence from tests, source, an issue, or a commit.
   Propagate that stale verdict to the provider-aware caller and clean up using
   the attempted identity outside the mutation lock. Persistence failure alone
   must not trigger runtime cleanup.
+
+When a session has a persisted native conversation key and its provider family
+resolves transcripts by that key (`transcript.SupportsIDLookup`),
+`Manager.TranscriptPathClassified` waits for that exact transcript. Another
+conversation in the same work directory is not a fallback. Nor is it for a
+provider with a session-id flag whose row is `creating` without a key: that
+start's conversation has no key yet. Families without `SupportsIDLookup`
+(Codex, Gemini, OpenCode, MiMo, ZCode) still fall back to work-directory
+discovery after a keyed miss, as does `SessionLogAdapter.DiscoverTranscript`;
+see `SESSION-HISTORY-EXACT-KEY`.
+
+## Manual Close During Reconciliation
+
+A desired manual entry retains a previously discovered conversation; it is not
+a create request. If a close wins before synchronization refreshes the store,
+leave that conversation terminal instead of recreating its alias and runtime.
+
+## Committed conversation recovery
+
+Use the session-owned `PreserveConversationOnRuntimeLoss` policy when healing
+a lost process, and `HasStartedManualConversation` where a reaper, a wake
+failure or churn would discard a conversation. A committed manual conversation
+(`session_origin=manual` or the legacy manual marker, with a `session_key` and
+the `started_config_hash` it started under) keeps its provider key and start
+configuration through the heal, the stuck-creating, pre-boot and dead-runtime
+corpse reapers, wake failure and churn; retry and quarantine accounting still
+apply. A failed resume of a conversation the policy covers that has both a
+`session_key` and a `started_config_hash`, always-named ones included, returns
+`ErrConversationRetained` wrapping the start's own error, its pane output
+redacted against the launch's environment, instead of starting fresh, so the
+reconciler's resume backstop can still classify a provider refusal from its
+pane text; a first start whose key was only preallocated still takes the
+stale-key retry. That keeps the session manager from starting it fresh, not
+the reconcilers: their wake-failure reset keeps an always-named conversation
+only while their transcript probe reads it present, and clears it otherwise.
+A committed manual conversation is still reset when a start is prepared if
+its provider's keyed transcript is probeable and reads absent (the stale-key
+clear, `session.conversation_reset{reason:stale-key}`). While it is kept, the
+resume backstop (a refusal, or the third resume-shaped failure in a row) is
+its only automatic reset, whatever the provider; `gc session reset` is the
+explicit one.

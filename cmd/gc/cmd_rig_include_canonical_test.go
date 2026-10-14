@@ -22,7 +22,7 @@ import (
 // resolves to <city>/packs/gastown, which does not exist — breaking pack
 // expansion citywide.
 //
-// The --include flag's own --help promises it "writes canonical rig imports".
+// The --include help promises a [rigs.imports.<binding>] entry per include.
 // This asserts that promise: a --include token naming a bundled builtin pack
 // must canonicalize to the pack's bundled remote source (with a lock entry
 // so it resolves offline), not the literal token.
@@ -362,6 +362,9 @@ func TestRigAddIncludePrefersConfiguredPackOverBuiltin(t *testing.T) {
 
 	t.Setenv("GC_DOLT", "skip")
 	t.Setenv("GC_BEADS", "bd")
+	// The configured source is a non-bundled remote, so rig add resolves its
+	// version and lock the way gc import add does; fake that network leg.
+	stubRigIncludeImportSeams(t, "1.0.0")
 
 	var stdout, stderr bytes.Buffer
 	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, []string{"gastown"}, "", "", "", false, false, &stdout, &stderr)

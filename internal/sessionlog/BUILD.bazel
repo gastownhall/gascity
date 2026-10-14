@@ -4,6 +4,7 @@ go_library(
     name = "sessionlog",
     srcs = [
         "acp_capture_reader.go",
+        "acp_wire_reader.go",
         "agents.go",
         "amp_reader.go",
         "antigravity_reader.go",
@@ -30,11 +31,16 @@ go_library(
         "reader.go",
         "tail.go",
         "tail_usage.go",
+        "turns.go",
+        "turns_claude.go",
+        "turns_codex.go",
+        "turns_gemini.go",
         "zcode_reader.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/sessionlog",
     visibility = ["//:__subpackages__"],
     deps = [
+        "//internal/citylayout",
         "//internal/fsys",
         "//internal/modelwindow",
         "//internal/pathutil",
@@ -45,6 +51,8 @@ go_library(
 go_test(
     name = "sessionlog_test",
     srcs = [
+        "acp_wire_reader_results_test.go",
+        "acp_wire_reader_test.go",
         "agents_test.go",
         "amp_reader_test.go",
         "antigravity_reader_test.go",
@@ -56,6 +64,7 @@ go_test(
         "context_test.go",
         "copilot_reader_test.go",
         "cursor_reader_test.go",
+        "dag_parallel_response_test.go",
         "entry_id_occurrence_test.go",
         "entry_id_test.go",
         "grok_reader_test.go",
@@ -71,11 +80,18 @@ go_test(
         "tail_test.go",
         "tail_usage_test.go",
         "testenv_import_test.go",
+        "turns_claude_test.go",
+        "turns_codex_test.go",
+        "turns_follower_test.go",
+        "turns_gemini_test.go",
+        "turns_test.go",
         "zcode_reader_test.go",
     ],
+    data = glob(["testdata/**"]),
     embed = [":sessionlog"],
     deps = [
         "//internal/bootstrap/packs/core",
+        "//internal/citylayout",
         "//internal/modelwindow",
         "//internal/testenv",
     ],
@@ -89,6 +105,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

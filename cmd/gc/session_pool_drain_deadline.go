@@ -87,15 +87,14 @@ func swapWorktreePruneForTest(fn func(sessionpkg.Info, string, *config.City, io.
 //
 // state=draining is deliberately NOT matched, and the premise for that is
 // narrower than it first looks. BeginDrainPatch is the sole writer of both
-// state=draining and drain_at, but it has TWO callers, not one:
-// DrainAckStopPendingPatch, whose rows reconcileDrainAckStopPending intercepts
-// and continues before this gate, and the exported session.Manager.BeginDrain,
-// which has no production caller today (only tests). So the real premise is
-// "drain_at is stamped on the controller's drain-ack path", and it holds by
-// call-graph accident rather than by invariant: wiring an operator-facing drain
-// to Manager.BeginDrain would widen this bound's population with nothing
-// failing. That is why gate 1 (poolSlotRetireOwnsSeat) enforces the identity
-// and state exclusions instead of arguing them from reachability.
+// state=draining and drain_at, and its one caller is DrainAckStopPendingPatch,
+// whose rows reconcileDrainAckStopPending intercepts and continues before this
+// gate. So the real premise is "drain_at is stamped on the controller's
+// drain-ack path", and it holds by call-graph accident rather than by
+// invariant: a new caller of BeginDrainPatch (an operator-facing drain, say)
+// would widen this bound's population with nothing failing. That is why gate 1
+// (poolSlotRetireOwnsSeat) enforces the identity and state exclusions instead
+// of arguing them from reachability.
 //
 // The drain-ack population converges through its own machinery when its runtime
 // is killable (measured: 3 ticks); when the runtime is NOT killable it stays
@@ -293,7 +292,7 @@ func poolSlotRetireBlocker(info sessionpkg.Info, now time.Time) string {
 // form <template>-<n> as a legitimate claim by that pool's own session. A pool
 // slot's alias diverges from its session_name exactly when the runtime name
 // steps aside to "<identity>-pool" — the ga-rxhu2 specimen's own shape. Probing
-// the narrower {ID, session_name, configured_named_identity} set would be blind
+// the narrower config-aware set, which drops a rebinding slot alias, would be blind
 // to the agent's own claims on precisely the configuration this bound targets,
 // and unlike every other consumer of that narrow set, this path uses the answer
 // to authorize a Kill, not just a close of an already-dead runtime.
@@ -308,17 +307,8 @@ func poolSlotRetireAssigneeIdentities(info sessionpkg.Info, cfg *config.City) []
 // mol-do-work drain step exactly as the drain-ack close gate does. It fails
 // closed on an unreadable leg (a smaller answer presented as authoritative
 // would read as "holds nothing", and this path acts on that).
-func poolSlotRetireHasAssignedWork(
-	cityPath string,
-	cfg *config.City,
-	store beads.Store,
-	rigStores map[string]beads.Store,
-	info sessionpkg.Info,
-) (bool, error) {
-	identifiers := poolSlotRetireAssigneeIdentities(info, cfg)
-	return assignedWorkExistsForSession(cityPath, cfg, store, rigStores, info, func(s beads.Store) (bool, error) {
-		return sessionHasOpenAssignedWorkInStoreByIdentifiersForCloseGate(s, identifiers)
-	})
+func poolSlotRetireHasAssignedWork(sw *SeatWork, info sessionpkg.Info) (bool, error) {
+	return seatHasWorkForCloseGate(sw, RefuseScope{ids: poolSlotRetireAssigneeIdentities(info, sw.Legs().cfg)})
 }
 
 // retirePoolSlotAtDrainDeadline force-retires a pool-managed seat whose drain
@@ -364,7 +354,7 @@ func retirePoolSlotAtDrainDeadline(
 	cfg *config.City,
 	sp runtime.Provider,
 	store beads.Store,
-	rigStores map[string]beads.Store,
+	sw *SeatWork,
 	info sessionpkg.Info,
 	template string,
 	processNames []string,
@@ -372,6 +362,7 @@ func retirePoolSlotAtDrainDeadline(
 	deferClosesOnBoot bool,
 	clk clock.Clock,
 	rec events.Recorder,
+	dt *drainTracker,
 	stderr io.Writer,
 ) (sessionpkg.MetadataPatch, bool) {
 	if store == nil || sp == nil || info.ID == "" || info.Closed {
@@ -401,7 +392,7 @@ func retirePoolSlotAtDrainDeadline(
 		return nil, false
 	}
 
-	hasAssignedWork, err := poolSlotRetireHasAssignedWork(cityPath, cfg, store, rigStores, info)
+	hasAssignedWork, err := poolSlotRetireHasAssignedWork(sw, info)
 	if err != nil {
 		fmt.Fprintf(stderr, "session reconciler: checking assigned work for drain-deadline retire of %s: %v\n", name, err) //nolint:errcheck
 		return nil, false
@@ -410,7 +401,7 @@ func retirePoolSlotAtDrainDeadline(
 		return nil, false
 	}
 
-	stopped, performedStop := poolSlotRuntimeStoppedForRetire(cityPath, cfg, sp, store, rigStores, info, name, processNames, stderr)
+	stopped, performedStop := poolSlotRuntimeStoppedForRetire(cityPath, cfg, sp, store, sw, info, name, processNames, dt, clk.Now(), stderr)
 	if !stopped {
 		return nil, false
 	}
@@ -440,7 +431,7 @@ func retirePoolSlotAtDrainDeadline(
 	now := clk.Now().UTC()
 	// Final fence: the stop above takes time, and the close must not land on a
 	// seat that claimed work while it was running.
-	stillAssigned, err := poolSlotRetireHasAssignedWork(cityPath, cfg, store, rigStores, info)
+	stillAssigned, err := poolSlotRetireHasAssignedWork(sw, info)
 	if err != nil {
 		fmt.Fprintf(stderr, "session reconciler: re-checking assigned work before drain-deadline close of %s: %v\n", name, err) //nolint:errcheck
 		return nil, false
@@ -456,7 +447,7 @@ func retirePoolSlotAtDrainDeadline(
 		fmt.Fprintf(stderr, "session reconciler: stamping drain-deadline provenance on %s: %v\n", name, err) //nolint:errcheck
 		return nil, false
 	}
-	if !closeBead(store, info.ID, "drained", now, stderr) {
+	if !closeSeat(store, sw, info, closeWhy{reason: "drained", gate: closeGated, keep: notOwnDrainStep}, now, stderr) {
 		if clearErr := sessionFrontDoor(store).ApplyPatch(info.ID, sessionpkg.MetadataPatch{drainFinalizeMetadataKey: ""}); clearErr != nil {
 			fmt.Fprintf(stderr, "session reconciler: clearing drain-deadline provenance after a refused close of %s: %v\n", name, clearErr) //nolint:errcheck
 		}
@@ -514,10 +505,12 @@ func poolSlotRuntimeStoppedForRetire(
 	cfg *config.City,
 	sp runtime.Provider,
 	store beads.Store,
-	rigStores map[string]beads.Store,
+	sw *SeatWork,
 	info sessionpkg.Info,
 	name string,
 	processNames []string,
+	dt *drainTracker,
+	now time.Time,
 	stderr io.Writer,
 ) (confirmedGone bool, performedStop bool) {
 	obs, err := workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, info.ID, processNames)
@@ -529,12 +522,17 @@ func poolSlotRuntimeStoppedForRetire(
 		return true, false
 	}
 	if expected := strings.TrimSpace(info.InstanceToken); expected != "" {
-		if actual, _ := sp.GetMeta(name, "GC_INSTANCE_TOKEN"); actual != "" && actual != expected {
+		switch verdict, err := readRuntimeInstanceToken(sp, name, expected); verdict {
+		case runtimeTokenMismatch:
 			fmt.Fprintf(stderr, "session reconciler: drain-deadline retire of %s skipped: instance token mismatch (session was replaced)\n", name) //nolint:errcheck
+			return false, false
+		case runtimeTokenUnverifiable:
+			logStandingCondition(dt, stderr, info.ID, "token_unverifiable.retire", fmt.Sprintf(
+				"session reconciler: drain-deadline retire of %s skipped: instance token unverifiable (token_unverifiable): %v", name, err), now)
 			return false, false
 		}
 	}
-	claimed, err := poolSlotRetireHasAssignedWork(cityPath, cfg, store, rigStores, info)
+	claimed, err := poolSlotRetireHasAssignedWork(sw, info)
 	if err != nil {
 		fmt.Fprintf(stderr, "session reconciler: re-checking assigned work before drain-deadline stop of %s: %v\n", name, err) //nolint:errcheck
 		return false, false
@@ -542,7 +540,7 @@ func poolSlotRuntimeStoppedForRetire(
 	if claimed {
 		return false, false
 	}
-	if err := workerKillSessionTargetWithConfig(cityPath, store, sp, cfg, name); err != nil && !runtime.IsSessionGone(err) {
+	if err := controllerKillSessionRow(cityPath, store, sp, cfg, info); err != nil && !runtime.IsSessionGone(err) {
 		fmt.Fprintf(stderr, "session reconciler: drain-deadline stop of %s: %v\n", name, err) //nolint:errcheck
 		return false, false
 	}

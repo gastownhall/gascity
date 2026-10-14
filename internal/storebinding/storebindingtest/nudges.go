@@ -14,6 +14,7 @@ package storebindingtest
 // gone.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
@@ -136,6 +137,43 @@ func RunNudgeFrontDoorTests(r Runner, suite NudgesSuite) {
 		}
 		if len(claimed) != 0 {
 			r.Fatalf("ClaimDue = %v, want nothing before deliver_after", nudgeIDs(claimed))
+		}
+	})
+
+	// Nothing runs Maintain before a claim, so an item can expire while its
+	// record still says live; ClaimDue's own check is all that keeps it from a
+	// deliverer. The bystander, due at the same instant, shows the claim ran.
+	r.Run("ClaimDueNeverClaimsAnExpiredItem", func(r Runner) {
+		queue := mustQueue(r, suite)
+		now := time.Now().UTC()
+		expiring := nudgeItem("n-expiring", "", now)
+		expiring.ExpiresAt = now.Add(time.Minute)
+		bystander := nudgeItem("n-bystander", "", now)
+		for _, item := range []nudgequeue.Item{expiring, bystander} {
+			if err := queue.Enqueue(item); err != nil {
+				r.Fatalf("Enqueue(%s): %v", item.ID, err)
+			}
+		}
+		afterExpiry := now.Add(2 * time.Minute)
+		claimed, err := queue.ClaimDue(storebinding.ClaimTarget{QueueKeys: []string{ConformanceNudgeAgent}}, afterExpiry)
+		if err != nil {
+			r.Fatalf("ClaimDue: %v", err)
+		}
+		if len(claimed) != 1 || claimed[0].ID != "n-bystander" {
+			r.Fatalf("ClaimDue = %v, want only the unexpired nudge", nudgeIDs(claimed))
+		}
+		pending, inFlight, dead, err := queue.ListForAgent(ConformanceNudgeAgent, afterExpiry)
+		if err != nil {
+			r.Fatalf("ListForAgent after ClaimDue: %v", err)
+		}
+		if len(dead) != 1 || dead[0].ID != "n-expiring" {
+			r.Fatalf("dead = %v, want the expired nudge", nudgeIDs(dead))
+		}
+		if dead[0].LastError != "expired" {
+			r.Errorf("dead LastError = %q, want %q", dead[0].LastError, "expired")
+		}
+		if len(pending) != 0 || len(inFlight) != 1 || inFlight[0].ID != "n-bystander" {
+			r.Errorf("pending=%v in-flight=%v, want only the bystander in flight", nudgeIDs(pending), nudgeIDs(inFlight))
 		}
 	})
 
@@ -312,6 +350,262 @@ func RunNudgeFrontDoorTests(r Runner, suite NudgesSuite) {
 		}
 	})
 
+	// Maintain is the whole-queue recovery pass the delivery verbs no longer
+	// run. The cases below are its observable effects through the contract:
+	// an expired item leaves delivery for the dead bucket and, past
+	// retention, leaves the queue; a dead letter ages out only through
+	// Maintain; and a retired record is never served again. Retention windows
+	// are provider policy, so each case runs Maintain at maintainHorizon, past
+	// any window a conforming queue may choose.
+	//
+	// The expiry case asserts what only a RECORDED dead letter shows. A read
+	// already projects an expired item as dead, so "dead after Maintain"
+	// proves nothing on its own; a queue that never records the expiry keeps
+	// the item visible after a pass past retention, because to that pass it
+	// has only just died.
+	r.Run("MaintainDeadLettersExpiredItems", func(r Runner) {
+		queue := mustQueue(r, suite)
+		now := time.Now().UTC()
+		expiring := nudgeItem("n-expiring", "", now)
+		expiring.ExpiresAt = now.Add(time.Minute)
+		bystander := nudgeItem("n-bystander", "", now)
+		bystander.ExpiresAt = now.Add(2 * maintainHorizon)
+		for _, item := range []nudgequeue.Item{expiring, bystander} {
+			if err := queue.Enqueue(item); err != nil {
+				r.Fatalf("Enqueue(%s): %v", item.ID, err)
+			}
+		}
+		afterExpiry := now.Add(2 * time.Minute)
+		_, _, projected, err := queue.ListForAgent(ConformanceNudgeAgent, afterExpiry)
+		if err != nil {
+			r.Fatalf("ListForAgent before Maintain: %v", err)
+		}
+		if len(projected) != 1 || projected[0].ID != "n-expiring" {
+			r.Fatalf("dead before Maintain = %v, want the expired nudge read as dead", nudgeIDs(projected))
+		}
+		if _, err := queue.Maintain(context.Background(), afterExpiry); err != nil {
+			r.Fatalf("Maintain: %v", err)
+		}
+		pending, inFlight, dead, err := queue.ListForAgent(ConformanceNudgeAgent, afterExpiry)
+		if err != nil {
+			r.Fatalf("ListForAgent after Maintain: %v", err)
+		}
+		if len(dead) != 1 || dead[0].ID != "n-expiring" {
+			r.Fatalf("dead = %v, want the expired nudge dead-lettered by Maintain", nudgeIDs(dead))
+		}
+		// How the expiry reads must not change when it is recorded: a
+		// dashboard that ages dead letters by DeadAt would otherwise see the
+		// same letter die twice.
+		if !dead[0].DeadAt.Equal(projected[0].DeadAt) || dead[0].LastError != projected[0].LastError {
+			r.Errorf("after Maintain DeadAt=%v LastError=%q, want the projected DeadAt=%v LastError=%q",
+				dead[0].DeadAt, dead[0].LastError, projected[0].DeadAt, projected[0].LastError)
+		}
+		if len(inFlight) != 0 || len(pending) != 1 || pending[0].ID != "n-bystander" {
+			r.Errorf("pending=%v in-flight=%v, want only the unexpired nudge still queued", nudgeIDs(pending), nudgeIDs(inFlight))
+		}
+		later := afterExpiry.Add(maintainHorizon)
+		if _, err := queue.Maintain(context.Background(), later); err != nil {
+			r.Fatalf("Maintain past retention: %v", err)
+		}
+		pending, inFlight, dead, err = queue.ListForAgent(ConformanceNudgeAgent, later)
+		if err != nil {
+			r.Fatalf("ListForAgent past retention: %v", err)
+		}
+		if ids := append(append(nudgeIDs(pending), nudgeIDs(inFlight)...), nudgeIDs(dead)...); containsID(ids, "n-expiring") {
+			r.Fatalf("past retention the queue still serves %v, want the expired nudge aged out; Maintain never recorded its expiry", ids)
+		}
+	})
+
+	r.Run("MaintainAgesDeadLettersOut", func(r Runner) {
+		queue := mustQueue(r, suite)
+		now := time.Now().UTC()
+		item := nudgeItem("n-rolled-back", "", now)
+		if err := queue.Enqueue(item); err != nil {
+			r.Fatalf("Enqueue: %v", err)
+		}
+		if err := queue.Rollback(item, "conformance rollback"); err != nil {
+			r.Fatalf("Rollback: %v", err)
+		}
+		_, _, dead, err := queue.ListForAgent(ConformanceNudgeAgent, now)
+		if err != nil {
+			r.Fatalf("ListForAgent: %v", err)
+		}
+		if len(dead) != 1 || dead[0].ID != "n-rolled-back" {
+			r.Fatalf("dead = %v, want the rolled-back nudge", nudgeIDs(dead))
+		}
+		// Aging out is Maintain's alone: a read far past any retention still
+		// serves the dead letter.
+		later := now.Add(maintainHorizon)
+		_, _, dead, err = queue.ListForAgent(ConformanceNudgeAgent, later)
+		if err != nil {
+			r.Fatalf("ListForAgent past retention: %v", err)
+		}
+		if len(dead) != 1 || dead[0].ID != "n-rolled-back" {
+			r.Fatalf("dead past retention before Maintain = %v, want a read to leave the dead letter alone", nudgeIDs(dead))
+		}
+		if _, err := queue.Maintain(context.Background(), later); err != nil {
+			r.Fatalf("Maintain: %v", err)
+		}
+		pending, inFlight, dead, err := queue.ListForAgent(ConformanceNudgeAgent, later)
+		if err != nil {
+			r.Fatalf("ListForAgent after Maintain: %v", err)
+		}
+		if len(pending)+len(inFlight)+len(dead) != 0 {
+			r.Fatalf("after Maintain past retention pending=%v in-flight=%v dead=%v, want the dead letter aged out",
+				nudgeIDs(pending), nudgeIDs(inFlight), nudgeIDs(dead))
+		}
+	})
+
+	// Whether a swept id may be enqueued again is provider policy: a queue
+	// may keep a permanent tombstone so a pinned id never executes twice. What
+	// every queue owes is that retiring and sweeping never brings the item
+	// back, and that a later submit of the same id never yields two.
+	r.Run("MaintainNeverResurrectsRetiredRecords", func(r Runner) {
+		queue := mustQueue(r, suite)
+		now := time.Now().UTC()
+		item := nudgeItem("n-delivered", "", now)
+		if err := queue.Enqueue(item); err != nil {
+			r.Fatalf("Enqueue: %v", err)
+		}
+		if _, err := queue.ClaimDue(storebinding.ClaimTarget{QueueKeys: []string{ConformanceNudgeAgent}}, now); err != nil {
+			r.Fatalf("ClaimDue: %v", err)
+		}
+		if err := queue.Ack([]string{"n-delivered"}, "delivered", "", "commit"); err != nil {
+			r.Fatalf("Ack: %v", err)
+		}
+		// Until the sweep the retired record still answers for its id, which
+		// is what makes a retried submit of a delivered nudge a no-op.
+		if err := queue.Enqueue(item); err != nil {
+			r.Fatalf("re-Enqueue before the sweep: %v", err)
+		}
+		pending, _, _, err := queue.ListForAgent(ConformanceNudgeAgent, now)
+		if err != nil {
+			r.Fatalf("ListForAgent: %v", err)
+		}
+		if len(pending) != 0 {
+			r.Fatalf("pending = %v, want a retried submit of a delivered nudge to stay retired", nudgeIDs(pending))
+		}
+		later := now.Add(maintainHorizon)
+		if _, err := queue.Maintain(context.Background(), later); err != nil {
+			r.Fatalf("Maintain: %v", err)
+		}
+		pending, inFlight, dead, err := queue.ListForAgent(ConformanceNudgeAgent, later)
+		if err != nil {
+			r.Fatalf("ListForAgent after the sweep: %v", err)
+		}
+		if len(pending)+len(inFlight)+len(dead) != 0 {
+			r.Fatalf("after the sweep pending=%v in-flight=%v dead=%v, want the retired nudge never served again",
+				nudgeIDs(pending), nudgeIDs(inFlight), nudgeIDs(dead))
+		}
+		if err := queue.Enqueue(nudgeItem("n-delivered", "", later)); err != nil {
+			r.Fatalf("Enqueue after the sweep: %v", err)
+		}
+		pending, inFlight, dead, err = queue.ListForAgent(ConformanceNudgeAgent, later)
+		if err != nil {
+			r.Fatalf("ListForAgent after resubmitting: %v", err)
+		}
+		if n := len(pending) + len(inFlight) + len(dead); n > 1 || len(inFlight)+len(dead) != 0 {
+			r.Fatalf("after resubmitting a swept id pending=%v in-flight=%v dead=%v, want at most one pending copy",
+				nudgeIDs(pending), nudgeIDs(inFlight), nudgeIDs(dead))
+		}
+	})
+
+	// A delivery verb that touches an item past its deliver-by deadline
+	// dead-letters it as expired before anything else: an expired nudge is
+	// not acked as delivered, not released back to pending, and not charged a
+	// delivery attempt that would report it as a failure.
+	r.Run("TouchingAnExpiredItemDeadLettersIt", func(r Runner) {
+		queue := mustQueue(r, suite)
+		wall := time.Now().UTC()
+		// Claimed while still deliverable, expired by the time the verbs run
+		// against the wall clock.
+		claimedAt := wall.Add(-90 * time.Second)
+		for _, id := range []string{"n-ack", "n-release", "n-fail"} {
+			item := nudgeItem(id, "", claimedAt.Add(-time.Minute))
+			item.ExpiresAt = wall.Add(-time.Minute)
+			if err := queue.Enqueue(item); err != nil {
+				r.Fatalf("Enqueue(%s): %v", id, err)
+			}
+		}
+		claimed, err := queue.ClaimDue(storebinding.ClaimTarget{QueueKeys: []string{ConformanceNudgeAgent}}, claimedAt)
+		if err != nil {
+			r.Fatalf("ClaimDue: %v", err)
+		}
+		if len(claimed) != 3 {
+			r.Fatalf("ClaimDue = %v, want all three nudges claimed before their deadline", nudgeIDs(claimed))
+		}
+		if err := queue.Ack([]string{"n-ack"}, "delivered", "", "commit"); err != nil {
+			r.Fatalf("Ack: %v", err)
+		}
+		if err := queue.ReleaseClaims([]string{"n-release"}); err != nil {
+			r.Fatalf("ReleaseClaims: %v", err)
+		}
+		reported, err := queue.RecordFailure([]string{"n-fail"}, errors.New("delivery refused"), wall)
+		if err != nil {
+			r.Fatalf("RecordFailure: %v", err)
+		}
+		if len(reported) != 0 {
+			r.Errorf("RecordFailure on an expired nudge reported %v, want nothing: it expired, it did not fail", nudgeIDs(reported))
+		}
+		pending, inFlight, dead, err := queue.ListForAgent(ConformanceNudgeAgent, wall)
+		if err != nil {
+			r.Fatalf("ListForAgent: %v", err)
+		}
+		if len(pending)+len(inFlight) != 0 {
+			r.Errorf("pending=%v in-flight=%v, want every expired nudge out of delivery", nudgeIDs(pending), nudgeIDs(inFlight))
+		}
+		got := map[string]nudgequeue.Item{}
+		for _, item := range dead {
+			got[item.ID] = item
+		}
+		for _, id := range []string{"n-ack", "n-release", "n-fail"} {
+			item, ok := got[id]
+			if !ok {
+				r.Errorf("dead = %v, want %s dead-lettered as expired", nudgeIDs(dead), id)
+				continue
+			}
+			if item.LastError != "expired" || item.Attempts != 0 {
+				r.Errorf("%s dead with LastError=%q Attempts=%d, want expired with no attempt charged", id, item.LastError, item.Attempts)
+			}
+		}
+	})
+
+	// The empty queue key addresses nobody: an empty key in a target's key set
+	// or as an agent name must not match an item whose agent is unset.
+	r.Run("EmptyQueueKeyMatchesNothing", func(r Runner) {
+		queue := mustQueue(r, suite)
+		now := time.Now().UTC()
+		anonymous := nudgeItem("n-anonymous", "", now)
+		anonymous.Agent = ""
+		for _, item := range []nudgequeue.Item{anonymous, nudgeItem("n-addressed", "", now)} {
+			if err := queue.Enqueue(item); err != nil {
+				r.Fatalf("Enqueue(%s): %v", item.ID, err)
+			}
+		}
+		pending, inFlight, dead, err := queue.ListForAgent("", now)
+		if err != nil {
+			r.Fatalf("ListForAgent(\"\"): %v", err)
+		}
+		if n := len(pending) + len(inFlight) + len(dead); n != 0 {
+			r.Errorf("ListForAgent(\"\") = %v, want nothing", nudgeIDs(append(append(pending, inFlight...), dead...)))
+		}
+		empty := storebinding.ClaimTarget{QueueKeys: []string{""}}
+		pending, _, _, err = queue.ListFor(empty, now)
+		if err != nil {
+			r.Fatalf("ListFor(empty key): %v", err)
+		}
+		if len(pending) != 0 {
+			r.Errorf("ListFor(empty key) pending = %v, want nothing", nudgeIDs(pending))
+		}
+		claimed, err := queue.ClaimDue(empty, now)
+		if err != nil {
+			r.Fatalf("ClaimDue(empty key): %v", err)
+		}
+		if len(claimed) != 0 {
+			r.Fatalf("ClaimDue(empty key) = %v, want nothing claimed", nudgeIDs(claimed))
+		}
+	})
+
 	r.Run("ShadowsProjectTheQueuedNudge", func(r Runner) {
 		fronts := mustFrontDoors(r, suite)
 		if fronts.Shadows == nil {
@@ -337,6 +631,11 @@ func RunNudgeFrontDoorTests(r Runner, suite NudgesSuite) {
 		}
 	})
 }
+
+// maintainHorizon is how far past an item's life the Maintain cases run. It is
+// longer than any dead-letter or retired-record retention a conforming queue
+// may choose.
+const maintainHorizon = 30 * 24 * time.Hour
 
 func mustFrontDoors(r Runner, suite NudgesSuite) storebinding.NudgeFrontDoors {
 	r.Helper()

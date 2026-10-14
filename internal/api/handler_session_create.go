@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,8 +11,10 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
 )
@@ -94,10 +97,9 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusServiceUnavailable, "provider_unavailable", err.Error())
 			return
 		}
-		// Agent track stores a transport-aligned base command only.
-		// Do NOT inject OptionsSchema defaults or explicit overrides here.
-		// Options are stored as template_overrides and applied at start time
-		// by the session lifecycle via ResolveExplicitOptions.
+		// Persist the resolved template defaults as the controller startup
+		// command baseline. Explicit session options stay in template_overrides
+		// and are applied at launch without changing that drift baseline.
 		if len(body.Options) > 0 {
 			if len(resolved.OptionsSchema) == 0 {
 				s.idem.unreserve(idemKey)
@@ -138,6 +140,13 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
+	// This route defers agent creates to the reconciler (below), which never
+	// starts a demand-only singleton's session on request (#6858).
+	if msg := demandOnlySingletonCreateRefusal(s.state.Config(), createCtx.Agent); msg != "" {
+		s.idem.unreserve(idemKey)
+		writeError(w, apierr.DemandOnlySingleton.Status, apierr.DemandOnlySingleton.Code, msg)
+		return
+	}
 	alias = createCtx.Alias
 	workDir = createCtx.WorkDir
 
@@ -148,13 +157,12 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	launchCommand, err := config.BuildProviderLaunchCommandWithoutOptions(s.state.CityPath(), resolved, transport)
+	command, err := s.agentTemplateLaunchCommand(createCtx.Agent, resolved, transport)
 	if err != nil {
 		s.idem.unreserve(idemKey)
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
-	command := launchCommand.Command
 
 	// Build template_overrides metadata. Includes schema overrides AND
 	// the initial message (as "initial_message" key). The reconciler
@@ -221,7 +229,7 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	// Do NOT overwrite it here — the old code clobbered initial_message by
 	// writing only the options portion.
 	s.persistSessionMeta(store, info.ID, body.ProjectID, optMeta)
-	s.state.Poke() // wake reconciler to start the agent
+	s.state.Enqueue(reconcilekey.Session(info.ID)) // wake reconciler to start the agent
 
 	// Auto-generate a title from the user's message if no explicit title was provided.
 	titleProvider := s.resolveTitleProvider()
@@ -392,7 +400,7 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 	// Persist kind, option metadata, and project_id on the bead.
 	s.persistSessionMeta(store, info.ID, body.ProjectID, optMeta)
 	if body.Async {
-		s.state.Poke()
+		s.state.Enqueue(reconcilekey.Session(info.ID))
 	}
 
 	// Auto-generate a title from the user's message if no explicit title was provided.
@@ -403,7 +411,7 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 
 	// Deliver initial message if provided.
 	if msg := strings.TrimSpace(body.Message); msg != "" {
-		if _, sendErr := s.submitMessageToSession(r.Context(), store.Store, info.ID, msg, session.SubmitIntentDefault); sendErr != nil {
+		if _, sendErr := s.submitMessageToSession(r.Context(), store.Store, info.ID, msg, session.SubmitIntentDefault, false); sendErr != nil {
 			log.Printf("session %s: initial message delivery failed: %v", info.ID, sendErr)
 			rollbackErr := s.rollbackCreatedSession(store, info.ID)
 			s.idem.unreserve(idemKey)
@@ -419,7 +427,7 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 	}
 
 	resp := sessionToResponse(info, s.state.Config())
-	resp.Kind = "provider"
+	asProviderSession(&resp)
 	if catalog, catErr := s.workerSessionCatalog(store.Store); catErr == nil {
 		if caps, capErr := catalog.SubmissionCapabilities(info.ID); capErr == nil {
 			resp.SubmissionCapabilities = caps
@@ -455,7 +463,7 @@ func (s *Server) rollbackCreatedSession(store beads.SessionStore, sessionID stri
 	if store.Store == nil || strings.TrimSpace(sessionID) == "" {
 		return nil
 	}
-	if err := s.sessionManager(store.Store).Close(sessionID); err != nil {
+	if err := s.sessionManager(store.Store).Close(context.Background(), s.actor(session.ActorOperator), sessionID); err != nil {
 		return fmt.Errorf("close created session: %w", err)
 	}
 	if err := store.Delete(sessionID); err != nil {

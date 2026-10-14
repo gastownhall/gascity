@@ -254,6 +254,8 @@ type fakeRunner struct {
 func newFakeRunner() *fakeRunner { return &fakeRunner{} }
 
 // on registers a rule: if a command contains prefix, return (out, err).
+//
+//nolint:unparam // keeps each rule's canned stdout explicit at the call site.
 func (r *fakeRunner) on(prefix, out string, err error) {
 	r.rules = append(r.rules, fakeRunnerRule{prefix: prefix, out: out, err: err})
 }
@@ -4111,6 +4113,49 @@ func TestDoSlingBatchPartialFailure(t *testing.T) {
 	}
 }
 
+// TestDoSlingBatchFailureCountIncludesNoLongerOpenChildren pins the failure
+// summary denominator to every child the batch listed as open, including one
+// whose fresh read finds it no longer open (#5927), matching the "N/M
+// children failed" error DoSlingBatch returns.
+func TestDoSlingBatchFailureCountIncludesNoLongerOpenChildren(t *testing.T) {
+	runner := newFakeRunner()
+	runner.on("custom-dispatch 'BL-2'", "", fmt.Errorf("dispatch failed"))
+	sp := runtime.NewFake()
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1), SlingQuery: "custom-dispatch {}"}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{a},
+	}
+
+	q := newFakeChildQuerier()
+	q.beadsByID["CVY-1"] = beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"}
+	q.beadsByID["BL-3"] = beads.Bead{ID: "BL-3", Status: "closed", ParentID: "CVY-1"}
+	q.childrenOf["CVY-1"] = []beads.Bead{
+		{ID: "BL-1", Status: "open"},
+		{ID: "BL-2", Status: "open"},
+		{ID: "BL-3", Status: "open"},
+	}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	opts := testOpts(a, "CVY-1")
+	code := doSlingBatch(opts, deps, q, stdout, stderr)
+
+	if code != 1 {
+		t.Fatalf("doSlingBatch returned %d, want 1 (partial failure)", code)
+	}
+	if !strings.Contains(stdout.String(), "Skipped BL-3 (status: closed)") {
+		t.Errorf("stdout = %q, want BL-3 skipped with its fresh status", stdout.String())
+	}
+	for _, call := range runner.calls {
+		if strings.Contains(call, "BL-3") {
+			t.Fatalf("dispatched BL-3 after its fresh read found it closed: calls=%v", runner.calls)
+		}
+	}
+	if !strings.Contains(stderr.String(), "1/3 children failed") {
+		t.Errorf("stderr = %q, want the failure count over all 3 listed-open children", stderr.String())
+	}
+}
+
 func TestDoSlingBatchAllChildrenFail(t *testing.T) {
 	runner := newFakeRunner()
 	runner.on("custom-dispatch", "", fmt.Errorf("dispatch failed"))
@@ -7676,6 +7721,56 @@ func TestDryRunIdempotentBead(t *testing.T) {
 	}
 }
 
+// TestDryRunClosedRoutedBeadStaysIdempotent pins both dry-run previews to the
+// routing verdict for a closed bead already routed to the target: the check
+// reports the bead's status alongside that verdict rather than folding it in,
+// so neither preview claims the bead would be routed (#5927).
+func TestDryRunClosedRoutedBeadStaysIdempotent(t *testing.T) {
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	convoy := beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"}
+	closed := beads.Bead{ID: "BL-42", Title: "Login page", ParentID: "CVY-1", Assignee: "mayor", Status: "closed"}
+
+	t.Run("single bead", func(t *testing.T) {
+		runner := newFakeRunner()
+		deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
+		deps.Store = seededStore("BL-42")
+		opts := testOpts(a, "BL-42")
+		opts.DryRun = true
+		code := doSling(opts, deps, &fakeQuerier{bead: closed, parent: &convoy}, stdout, stderr)
+
+		if code != 0 {
+			t.Fatalf("returned %d, want 0; stderr: %s", code, stderr.String())
+		}
+		out := stdout.String()
+		if !strings.Contains(out, "Idempotency:") || !strings.Contains(out, "already routed to mayor") {
+			t.Errorf("stdout should keep the idempotency preview for a closed routed bead: %s", out)
+		}
+		if len(runner.calls) != 0 {
+			t.Errorf("got %d runner calls, want 0: %v", len(runner.calls), runner.calls)
+		}
+	})
+
+	t.Run("batch child", func(t *testing.T) {
+		q := newFakeChildQuerier()
+		q.beadsByID["CVY-1"] = convoy
+		q.beadsByID["BL-42"] = closed
+		listed := []beads.Bead{{ID: "BL-42", Title: "Login page", ParentID: "CVY-1", Status: "open"}}
+		deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+		opts := testOpts(a, "CVY-1")
+		opts.DryRun = true
+		code := dryRunBatch(opts, deps, stdout, stderr, convoy, listed, listed, q)
+
+		if code != 0 {
+			t.Fatalf("returned %d, want 0; stderr: %s", code, stderr.String())
+		}
+		out := stdout.String()
+		if !strings.Contains(out, "(open) → already routed (skip)") || strings.Contains(out, "would route") {
+			t.Errorf("stdout should preview the closed routed child as already routed: %s", out)
+		}
+	})
+}
+
 // --- Cross-rig guard tests ---
 
 func TestRigPrefixForAgentCityWide(t *testing.T) {
@@ -7903,6 +7998,10 @@ func TestDryRunCrossRigSection(t *testing.T) {
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
 	deps.Store = seededStore("FE-123")
+	// The target reads rig:hello-world; align StoreRef so the cross-store
+	// guard (now also run in dry-run, #6075) does not refuse the route.
+	// This test exercises only the prefix-based Cross-rig preview.
+	deps.StoreRef = "rig:hello-world"
 	opts := testOpts(a, "FE-123")
 	opts.DryRun = true
 	code := doSling(opts, deps, q, stdout, stderr)
@@ -7945,6 +8044,10 @@ func TestDryRunBatchCrossRigSection(t *testing.T) {
 	}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	// The target reads rig:hello-world; align StoreRef so the cross-store
+	// guard (now also run in dry-run, #6075) does not refuse the route.
+	// This test exercises only the prefix-based Cross-rig preview.
+	deps.StoreRef = "rig:hello-world"
 	opts := testOpts(a, "FE-1")
 	opts.DryRun = true
 	code := doSlingBatch(opts, deps, q, stdout, stderr)
@@ -7961,6 +8064,65 @@ func TestDryRunBatchCrossRigSection(t *testing.T) {
 	}
 	if !strings.Contains(out, `rig prefix "hw"`) {
 		t.Errorf("stdout missing rig prefix: %s", out)
+	}
+	if len(runner.calls) != 0 {
+		t.Errorf("got %d runner calls, want 0: %v", len(runner.calls), runner.calls)
+	}
+}
+
+func TestDryRunRefusesCrossStoreRoute(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "hello-world", Path: "/tmp/hw"}},
+	}
+	a := config.Agent{Name: "polecat", Dir: "hello-world"}
+	q := &fakeQuerier{bead: beads.Bead{ID: "FE-123", Type: "task", Status: "open"}}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	deps.Store = seededStore("FE-123")
+	opts := testOpts(a, "FE-123")
+	opts.DryRun = true
+	code := doSling(opts, deps, q, stdout, stderr)
+
+	if code == 0 {
+		t.Fatalf("dry-run returned 0, want non-zero (cross-store refusal); stdout: %s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "refusing cross-store route") {
+		t.Errorf("stderr = %q, want cross-store refusal", stderr.String())
+	}
+	if len(runner.calls) != 0 {
+		t.Errorf("got %d runner calls, want 0: %v", len(runner.calls), runner.calls)
+	}
+}
+
+func TestDryRunBatchRefusesCrossStoreRoute(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "hello-world", Path: "/tmp/hw"}},
+	}
+	a := config.Agent{Name: "polecat", Dir: "hello-world"}
+
+	q := newFakeChildQuerier()
+	q.beadsByID["FE-1"] = beads.Bead{ID: "FE-1", Type: "convoy", Status: "open"}
+	q.childrenOf["FE-1"] = []beads.Bead{
+		{ID: "FE-2", Status: "open"},
+		{ID: "FE-3", Status: "open"},
+	}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	opts := testOpts(a, "FE-1")
+	opts.DryRun = true
+	code := doSlingBatch(opts, deps, q, stdout, stderr)
+
+	if code == 0 {
+		t.Fatalf("dry-run returned 0, want non-zero (cross-store refusal); stdout: %s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "refusing cross-store route") {
+		t.Errorf("stderr = %q, want cross-store refusal", stderr.String())
 	}
 	if len(runner.calls) != 0 {
 		t.Errorf("got %d runner calls, want 0: %v", len(runner.calls), runner.calls)

@@ -183,6 +183,14 @@ const (
 	// drain-ack defect is spreading while this bound quietly absorbs it.
 	// See ga-rxhu2.
 	SessionPoolSlotRetiredAtDrainDeadline = "session.pool_slot_retired_at_drain_deadline"
+	// SessionStrandedClaims fires when claims no lane serves (an unserved
+	// route, or an expanded workflow root with no route of its own) stay
+	// assigned to a closed or retired session: stranded work, which no sweep
+	// releases (owner ruling O5, revised). The close completed; the claims were
+	// kept rather than released into no lane. It fires when the operation
+	// completes and again every 15 minutes (D6's cadence) while they stay, at
+	// once when the set of claims changes.
+	SessionStrandedClaims = "session.stranded_claims"
 	// SessionUnknownState fires when the reconciler observes a session bead
 	// whose metadata state it does not recognize. The reconciler skips such
 	// beads (forward-compatible rollback: an older reconciler ignores a newer
@@ -241,17 +249,44 @@ const (
 	// Emitted by the session reconciler's start-result commit path; the
 	// envelope's Subject carries the session name.
 	SessionColdStartTimeout = "session.cold_start_timeout"
-	ConvoyCreated           = "convoy.created"
-	ConvoyClosed            = "convoy.closed"
-	ControllerStarted       = "controller.started"
-	ControllerStopped       = "controller.stopped"
-	// ControlStalled fires once, when a control bead's bounded semantic-refusal
-	// retry budget expires and the control dispatcher quarantines it. Before
-	// this event the control plane had no control.* vocabulary at all, so a
-	// city whose dispatcher spent 95% of its throughput re-asking a question
-	// the store had already refused was, by construction, invisible on the
-	// event bus: no event, no metric, every health surface green. It is
-	// edge-triggered on the quarantine, not level-triggered on the retry — one
+	// SessionConversationReset fires when the reconciler resets a committed
+	// manual conversation, so that its next start is a fresh conversation
+	// rather than a resume. The payload's reason names the cause: stale-key,
+	// the keyed transcript a resume needs is gone. Emitted once per reset by
+	// the start path (legacy prepare, v2 PreWake); the envelope's Subject is
+	// the agent and SessionID the session bead.
+	SessionConversationReset = "session.conversation_reset"
+	// SessionPending fires when a session gains a pending interaction (an
+	// approval prompt or question the session is blocked on) and
+	// SessionPendingCleared fires when that interaction goes away — answered,
+	// withdrawn, replaced by a different interaction, or the session left the
+	// set GET /v0/city/{cityName}/pending probes. Both carry the same
+	// session_id and request_id, and each fires once per transition, never once
+	// per detection pass. The city's controller emits them whether or not any
+	// client watches the stream; see internal/pendingwatch for the detection
+	// cadence and cmd/gc/pending_interaction_lane.go for the restart
+	// contract (the announced set is rebuilt from this event log). That
+	// contract can miss the clear of an interaction outstanding when a clean
+	// stop parked its session; pendingwatch.RebuildSince says when.
+	SessionPending        = "session.pending"
+	SessionPendingCleared = "session.pending_cleared"
+	ConvoyCreated         = "convoy.created"
+	ConvoyClosed          = "convoy.closed"
+	ControllerStarted     = "controller.started"
+	ControllerStopped     = "controller.stopped"
+	// ControlStalled fires once per disposition whose bounded retry budget
+	// expires: a semantic refusal the control dispatcher then QUARANTINES
+	// (error_class "semantic"), or a drift-pending wait whose loudness horizon
+	// elapsed (error_class "pending"). The two are not interchangeable — a
+	// quarantined bead is CLOSED and its order is dead, while a pending one
+	// stays OPEN and keeps retrying, and completes the moment a human heals the
+	// drift. Only the quarantine emits the paired order.failed; treating a
+	// pending stall as terminal misreads a healable wait as a dead workflow.
+	// Before this event the control plane had no control.* vocabulary at all,
+	// so a city whose dispatcher spent 95% of its throughput re-asking a
+	// question the store had already refused was, by construction, invisible on
+	// the event bus: no event, no metric, every health surface green. It is
+	// edge-triggered on the expiry, not level-triggered on the retry — one
 	// emission per stalled bead under the intended single-control-dispatcher-
 	// per-city topology, never one per attempt. Control beads carry no
 	// claim/lease, so a misconfigured second dispatcher over the same store
@@ -331,7 +366,12 @@ const (
 	// growing is an order that has stopped running with nothing else to say so.
 	// Rate-bounded at the emit site (see cmd/gc/order_dispatch.go) — a
 	// permanently wedged order cannot turn this into a per-tick stream.
-	OrderSuppressed                 = "order.suppressed"
+	OrderSuppressed = "order.suppressed"
+	// OrderSkipped reports that an exec order finished (exit 0) but declared
+	// that some or all of its work did not run: a bead scope it could not
+	// reach, or a safety gate that held a step back. It accompanies the run's
+	// order.completed so a skip is never read as a clean completion.
+	OrderSkipped                    = "order.skipped"
 	ProviderSwapped                 = "provider.swapped"
 	WorkerOperation                 = "worker.operation"
 	ProjectIdentityStamped          = "project.identity.stamped"
@@ -408,6 +448,11 @@ const (
 	// the next episode fires independently. (ADR-0013 A1 M3a)
 	ProviderHealthGateAlert = "provider.health_gate_alert"
 
+	// ReconcilerAlert is the v2 session reconciler's operator alert: a
+	// condition that should never happen, or that needs an operator. The
+	// payload's "alert" names it (cmd/gc reconcile_observe_v2.go).
+	ReconcilerAlert = "reconciler.alert"
+
 	// Emergency events are dolt-independent escalation records written to
 	// .gc/emergency and mirrored into the city event log.
 	EmergencySignaled = "emergency.signaled"
@@ -423,6 +468,14 @@ const (
 	// lifecycle events under bead.*). Registered in stage 2 (S2-T11);
 	// emission is wired in stage 3 — nothing emits it yet.
 	BeadsConditionalWritesDegraded = "beads.conditional_writes.degraded"
+
+	// BeadsBlockedRecomputed fires when gc start runs bd's full is_blocked
+	// recompute over one bd-backed scope as a one-shot upgrade step: the
+	// first start under a bd version the scope has not been repaired with.
+	// beads migration 0059 over-sets is_blocked on stores upgraded from
+	// bd <= 1.3.0 (gastownhall/beads#7037), hiding ready work from `bd ready`
+	// and from gc's ready projection; the payload counts the rows corrected.
+	BeadsBlockedRecomputed = "beads.blocked.recomputed"
 
 	// Storage-class binding outcomes. Emitted once per controller boot by the
 	// storage gate, and once per run by `gc storage migrate`, for a city whose
@@ -464,6 +517,7 @@ var KnownEventTypes = []string{
 	SessionDrainStopEscalated,
 	SessionStranded,
 	SessionPoolSlotRetiredAtDrainDeadline,
+	SessionStrandedClaims,
 	SessionUnknownState,
 	SessionWakeRefused,
 	SessionResetStalled,
@@ -471,6 +525,8 @@ var KnownEventTypes = []string{
 	SessionDrainFenceUnavailable,
 	SessionDemandClaimDivergence,
 	SessionColdStartTimeout,
+	SessionConversationReset,
+	SessionPending, SessionPendingCleared,
 	BeadCreated, BeadClosed, BeadDeleted, BeadUpdated,
 	BeadWorktreeReaped, BeadWorktreeReapSkipped,
 	BeadClaimRejected, BeadClaimReleased,
@@ -492,7 +548,7 @@ var KnownEventTypes = []string{
 	RequestResultSessionSubmit, RequestResultRigCreate, RequestFailed,
 	RigProvisionProgress,
 	CityCreated, CityUnregisterRequested,
-	OrderFired, OrderCompleted, OrderFailed, OrderSuppressed,
+	OrderFired, OrderCompleted, OrderFailed, OrderSuppressed, OrderSkipped,
 	ProviderSwapped, WorkerOperation, ProjectIdentityStamped, SupervisorFSPressureSkippedTick,
 	MoleculeResolved,
 	SupervisorStarted, SupervisorShutdownRequested, SupervisorRequest,
@@ -506,13 +562,13 @@ var KnownEventTypes = []string{
 	StoreDiskWarn, StoreDiskCritical,
 	BackendCredentialResolved,
 	EmergencySignaled, EmergencyAcked,
-	BeadsConditionalWritesDegraded,
+	BeadsConditionalWritesDegraded, BeadsBlockedRecomputed,
 	StorageBindingConverged, StorageBindingGenesis,
 	StorageBindingUnconverged, StorageBindingUncheckable,
 	StorageBindingNotConfigured,
-	// ProviderHealthGateAlert is intentionally omitted from KnownEventTypes.
-	// The event is emitted by the reconciler but its typed SSE payload is not
-	// yet registered in internal/api (the payload registration lives in a
+	// ProviderHealthGateAlert and ReconcilerAlert are intentionally omitted
+	// from KnownEventTypes. Each is emitted by the reconciler but its typed
+	// SSE payload is not yet registered in internal/api (the payload registration lives in a
 	// follow-up that adds the full SSE projection). Until then, subscribers
 	// receive it via the custom-event envelope.
 }

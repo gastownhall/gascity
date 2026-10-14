@@ -365,8 +365,8 @@ func (s *wrappedSessionsStore) SetState(id string, state session.State, reason s
 
 // Close is the session close race: exactly one caller wins, and losing is not
 // an error. It is reported as a claim so a lost race never reads as a failure.
-func (s *wrappedSessionsStore) Close(id, reason string, at time.Time) (bool, error) {
-	won, err := s.SessionsStore.Close(id, reason, at)
+func (s *wrappedSessionsStore) Close(expected session.Info, reason string, at time.Time) (bool, error) {
+	won, err := s.SessionsStore.Close(expected, reason, at)
 	s.emitter.observeClaim("Close", won, err)
 	return won, err
 }
@@ -501,9 +501,14 @@ func (q *wrappedNudgeQueue) EnqueueDeferred(item nudgequeue.Item) error {
 // queue lost nothing — reporting it as a conflict would make an idle fleet
 // indistinguishable from a contended one on every dashboard that counts them,
 // which is exactly the confusion the conflict outcome exists to prevent.
+//
+// A claim that skipped an undecodable record is OK for the same reason: it
+// delivered the good items beside a partial-result error, which crosses the
+// wrapper verbatim. Reporting it as failed would paint every later claim for
+// that target as an outage for as long as the record stays.
 func (q *wrappedNudgeQueue) ClaimDue(target ClaimTarget, now time.Time) ([]nudgequeue.Item, error) {
 	items, err := q.NudgeQueue.ClaimDue(target, now)
-	q.emitter.observe(ClassEventClaim, "ClaimDue", err)
+	q.emitter.emit(ClassEventClaim, "ClaimDue", partialOutcomeFor(err))
 	return items, err
 }
 
@@ -529,6 +534,14 @@ func (q *wrappedNudgeQueue) Rollback(item nudgequeue.Item, reason string) error 
 	err := q.NudgeQueue.Rollback(item, reason)
 	q.emitter.observe(ClassEventWrite, "Rollback", err)
 	return err
+}
+
+// Maintain is the queue's whole-queue recovery pass, reported as maintenance so
+// a dashboard can tell the owner's sweep apart from delivery traffic.
+func (q *wrappedNudgeQueue) Maintain(ctx context.Context, now time.Time) (NudgeMaintenance, error) {
+	report, err := q.NudgeQueue.Maintain(ctx, now)
+	q.emitter.observe(ClassEventMaintenance, "Maintain", err)
+	return report, err
 }
 
 func (q *wrappedNudgeQueue) Snapshot() (nudgequeue.State, error) {

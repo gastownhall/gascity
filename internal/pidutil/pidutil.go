@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -55,18 +56,34 @@ func psTimeout() time.Duration {
 	return parsed
 }
 
+// readProcStat reads a /proc/<pid>/stat file. It is a seam so tests can model a
+// process reaped between two probes, a window too narrow to hit on demand.
+var readProcStat = os.ReadFile
+
+// probeSignal sends a signal for Alive's existence probe. It is a seam so tests
+// can model a process owned by another user, whose probe answers EPERM.
+var probeSignal = syscall.Kill
+
 // Alive reports whether a PID exists and is not a zombie.
 func Alive(pid int) bool {
 	if pid <= 0 {
 		return false
 	}
-	err := syscall.Kill(pid, 0)
-	if err != nil && !errors.Is(err, syscall.EPERM) {
+	probeErr := probeSignal(pid, 0)
+	if probeErr != nil && !errors.Is(probeErr, syscall.EPERM) {
 		return false
 	}
 	statPath := filepath.Join("/proc", strconv.Itoa(pid), "stat")
-	data, err := os.ReadFile(statPath)
+	data, err := readProcStat(statPath)
 	if err != nil {
+		// With /proc mounted, a missing entry after a successful kill(0)
+		// means the process was reaped in between. The ps zombie probe
+		// below finds nothing for a vanished PID and would report it alive.
+		// After EPERM the process exists: its entry can be hidden (hidepid)
+		// rather than gone, so that case keeps the ps probe.
+		if probeErr == nil && errors.Is(err, fs.ErrNotExist) && procMounted() {
+			return false
+		}
 		return !psReportsZombie(pid)
 	}
 	state, ok := procStatState(string(data))
@@ -122,7 +139,7 @@ func StartTime(pid int) (string, error) {
 	if pid <= 0 {
 		return "", fmt.Errorf("pidutil: invalid PID %d", pid)
 	}
-	data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+	data, err := readProcStat(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
 	if err != nil {
 		return psStartTime(pid)
 	}
@@ -150,8 +167,9 @@ func StartTime(pid int) (string, error) {
 // non-empty startTime that no longer matches means the PID was recycled: the
 // original target is dead, so this returns false. When the current start time
 // cannot be read despite Alive reporting true (a transient race, or a host
-// where neither /proc nor ps can answer), it keeps the conservative Alive
-// answer rather than inventing a death.
+// where neither /proc nor ps can answer), it re-checks Alive: a live process
+// keeps the conservative answer rather than inventing a death, while one reaped
+// between the two probes reads as dead.
 func AliveWithStartTime(pid int, startTime string) bool {
 	if !Alive(pid) {
 		return false
@@ -161,9 +179,20 @@ func AliveWithStartTime(pid int, startTime string) bool {
 	}
 	current, err := StartTime(pid)
 	if err != nil {
-		return true
+		// Re-probe rather than answer true outright: a process reaped
+		// between the Alive check above and the identity read is gone, while
+		// a live one with an unreadable identity keeps the conservative
+		// answer.
+		return Alive(pid)
 	}
 	return current == startTime
+}
+
+// procMounted reports whether this host serves process state through /proc,
+// so a missing /proc/<pid> entry is authoritative.
+func procMounted() bool {
+	_, err := os.Stat("/proc/self/stat")
+	return err == nil
 }
 
 // AliveWithCmdline reports whether a PID exists, is not a zombie, and its

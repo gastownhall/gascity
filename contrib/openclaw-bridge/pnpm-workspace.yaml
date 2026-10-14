@@ -1,0 +1,21 @@
+# pnpm view of this package for rules_js (MODULE.bazel npm_openclaw).
+# npm (package-lock.json) drives local use; pnpm-lock.yaml is its `pnpm
+# import` translation.
+
+# No install scripts under Bazel. openclaw's postinstall prunes/patches
+# packaged plugin dist the bridge never imports; the others build optional
+# native or generated pieces the bridge does not load. The suite passes the
+# same under `npm ci --ignore-scripts`.
+allowBuilds:
+  "@google/genai": false
+  koffi: false
+  openclaw: false
+  protobufjs: false
+  tree-sitter-bash: false
+
+# Security pin, mirrored by package.json "overrides" for npm so both lockfiles
+# resolve the same tree (lockfiles_in_sync_test): openclaw 2026.8.35 pins
+# @modelcontextprotocol/sdk 1.30.0 (GHSA-6qxp-vccf-f47h, fixed in 1.31.0, the
+# version openclaw 2026.10.1 ships). Drop both once openclaw pins >= 1.31.0.
+overrides:
+  "@modelcontextprotocol/sdk": 1.31.0

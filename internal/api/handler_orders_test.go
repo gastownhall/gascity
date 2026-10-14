@@ -873,7 +873,7 @@ func TestHandleOrderCheckUsesRigStoreLastRunState(t *testing.T) {
 	if _, err := rigStore.Create(beads.Bead{
 		Title:  "nightly-review wisp",
 		Status: "closed",
-		Labels: []string{"order-run:nightly-review:rig:myrig", "wisp"},
+		Labels: []string{"order-run:nightly-review:rig:myrig", "wisp", "order-tracking"},
 	}); err != nil {
 		t.Fatalf("create rig run: %v", err)
 	}
@@ -947,7 +947,7 @@ func TestHandleOrderCheckUsesCachedHistoryWhenAvailable(t *testing.T) {
 		Title:     "nightly-review wisp",
 		Status:    "closed",
 		CreatedAt: time.Now().UTC(),
-		Labels:    []string{"order-run:nightly-review", "wisp"},
+		Labels:    []string{"order-run:nightly-review", "wisp", "order-tracking"},
 	}
 	cachedStore := &cachedOnlyOrderHistoryStore{
 		Store:   beads.NewMemStore(),
@@ -1000,7 +1000,7 @@ func TestHandleOrderCheckFallsBackToLiveHistoryWhenCacheUnavailable(t *testing.T
 		Title:     "nightly-review wisp",
 		Status:    "closed",
 		CreatedAt: time.Now().UTC(),
-		Labels:    []string{"order-run:nightly-review", "wisp"},
+		Labels:    []string{"order-run:nightly-review", "wisp", "order-tracking"},
 	})
 	if err != nil {
 		t.Fatalf("create live history bead: %v", err)
@@ -1766,5 +1766,35 @@ func TestHandleOrderDisable_NotFound(t *testing.T) {
 
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusNotFound)
+	}
+}
+
+// TestHandleOrderCheckIgnoresAForgedRunLabel (the #7766 review): GET
+// /orders/check reads an order's last run from its run records only, as
+// dispatch does: a plain bead carrying the order's run label, newer than the
+// order's real run, neither makes it look just run nor hides that run.
+func TestHandleOrderCheckIgnoresAForgedRunLabel(t *testing.T) {
+	fs := newFakeState(t)
+	now := time.Now().UTC()
+	fs.cityBeadStore = beads.NewMemStoreFrom(2, []beads.Bead{
+		{ID: "run-1", Title: "nightly-review", Status: "closed", CreatedAt: now.Add(-48 * time.Hour), Labels: []string{"order-run:nightly-review", "order-tracking"}},
+		{ID: "forged", Title: "forged", Type: "task", Status: "open", CreatedAt: now, Labels: []string{"order-run:nightly-review"}},
+	}, nil)
+	fs.autos = []orders.Order{{Name: "nightly-review", Formula: "mol-adopt-pr-v2", Trigger: "cooldown", Interval: "24h"}}
+	h := newTestCityHandler(t, fs)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, cityURL(fs, "/orders/check"), nil))
+	var resp struct {
+		Checks []struct {
+			Due     bool    `json:"due"`
+			LastRun *string `json:"last_run"`
+		} `json:"checks"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil || len(resp.Checks) != 1 {
+		t.Fatalf("status %d body %s (%v)", w.Code, w.Body.String(), err)
+	}
+	want := now.Add(-48 * time.Hour).Format(time.RFC3339)
+	if c := resp.Checks[0]; !c.Due || c.LastRun == nil || *c.LastRun != want {
+		t.Fatalf("check %+v (last_run %v), want due with the real run's %s", c, c.LastRun, want)
 	}
 }

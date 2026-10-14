@@ -221,9 +221,9 @@ func TestMailRecipientResolutionReadsSessionsClass(t *testing.T) {
 		t.Fatalf("resolveMailSendRecipientWithContext: %v", err)
 	}
 
-	recipients := srv.resolveMailQueryRecipientsWithContext(context.Background(), info.SessionName)
+	recipients := srv.resolveMailQueryWithContext(context.Background(), info.SessionName).recipients
 	if len(recipients) == 0 {
-		t.Fatal("resolveMailQueryRecipientsWithContext returned no recipients")
+		t.Fatal("resolveMailQueryWithContext returned no recipients")
 	}
 }
 

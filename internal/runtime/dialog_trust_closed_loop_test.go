@@ -10,6 +10,100 @@ import (
 	"time"
 )
 
+// steppedDialogClock is a virtual clock for the startup-dialog helpers
+// (installed as dialogClock). Time only moves when the handler sleeps: Sleep
+// runs every event due by the end of the sleep, in (time, schedule order), then
+// returns. So the ordering of a fake pane's late keys, lagged frames and
+// re-renders against the handler's peeks is fixed by the scenario, not raced
+// on real timers. Tie rule: an event due at the instant a sleep ends has
+// happened by the next peek.
+type steppedDialogClock struct {
+	mu     sync.Mutex
+	now    time.Time
+	seq    int
+	events []steppedDialogEvent
+}
+
+type steppedDialogEvent struct {
+	at  time.Time
+	seq int
+	f   func()
+}
+
+// useSteppedDialogClock installs a stepped virtual clock as dialogClock for
+// the rest of the test.
+func useSteppedDialogClock(t *testing.T) *steppedDialogClock {
+	t.Helper()
+	c := &steppedDialogClock{now: time.Unix(0, 0)}
+	old := dialogClock
+	dialogClock = c
+	t.Cleanup(func() { dialogClock = old })
+	return c
+}
+
+func (c *steppedDialogClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *steppedDialogClock) Sleep(_ context.Context, d time.Duration) {
+	c.advance(d)
+}
+
+// after schedules f to run d after the current virtual time.
+func (c *steppedDialogClock) after(d time.Duration, f func()) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.seq++
+	c.events = append(c.events, steppedDialogEvent{at: c.now.Add(d), seq: c.seq, f: f})
+}
+
+// advance moves virtual time forward by d, running each event due by then
+// at its own time (an event may schedule further events).
+func (c *steppedDialogClock) advance(d time.Duration) {
+	c.mu.Lock()
+	target := c.now.Add(d)
+	c.mu.Unlock()
+	for c.runNext(target, false) {
+	}
+	c.mu.Lock()
+	if c.now.Before(target) {
+		c.now = target
+	}
+	c.mu.Unlock()
+}
+
+// drain runs every pending event, however far in the future: the in-flight
+// keys and frames land.
+func (c *steppedDialogClock) drain() {
+	for c.runNext(time.Time{}, true) {
+	}
+}
+
+func (c *steppedDialogClock) runNext(target time.Time, all bool) bool {
+	c.mu.Lock()
+	next := -1
+	for i, ev := range c.events {
+		if next < 0 || ev.at.Before(c.events[next].at) ||
+			(ev.at.Equal(c.events[next].at) && ev.seq < c.events[next].seq) {
+			next = i
+		}
+	}
+	if next < 0 || (!all && c.events[next].at.After(target)) {
+		c.mu.Unlock()
+		return false
+	}
+	ev := c.events[next]
+	c.events = append(c.events[:next], c.events[next+1:]...)
+	if ev.at.After(c.now) {
+		c.now = ev.at
+	}
+	c.mu.Unlock()
+	ev.f()
+	return true
+}
+
 // fakeClaudeTrustPane models Claude Code's workspace-trust dialog as observed
 // live on Claude 2.1.278-2.1.281 (#6531/#6532):
 //   - two rows, with the cursor defaulting to "No, exit";
@@ -21,6 +115,8 @@ import (
 //     back to "No, exit" (resetAt; seen live on 2.1.281).
 //
 // Enter confirms whichever row the cursor is on when Enter is applied.
+// Lags and the re-render run on a steppedDialogClock, so they are ordered
+// against the handler's peeks by virtual time, not by goroutine scheduling.
 type fakeClaudeTrustPane struct {
 	mu sync.Mutex
 	// cursor is 0 on "No, exit", 1 on "Yes, I trust this folder".
@@ -33,44 +129,8 @@ type fakeClaudeTrustPane struct {
 	// can drive a change-driven snapshot stream.
 	onChange func(string)
 
-	keyQ, frameQ *delayedQueue
-	inFlight     *sync.WaitGroup
-}
-
-type delayedQueue struct {
-	lag time.Duration
-	ch  chan delayedFunc
-	wg  *sync.WaitGroup
-}
-
-type delayedFunc struct {
-	at time.Time
-	f  func()
-}
-
-func newDelayedQueue(lag time.Duration, wg *sync.WaitGroup) *delayedQueue {
-	q := &delayedQueue{lag: lag, ch: make(chan delayedFunc, 64), wg: wg}
-	if lag > 0 {
-		go func() {
-			for d := range q.ch {
-				// Simulated lag: run f at its scheduled time.
-				<-time.NewTimer(time.Until(d.at)).C
-				d.f()
-				q.wg.Done()
-			}
-		}()
-	}
-	return q
-}
-
-// push runs f after the queue's lag, in FIFO order (immediately when lag is 0).
-func (q *delayedQueue) push(f func()) {
-	if q.lag <= 0 {
-		f()
-		return
-	}
-	q.wg.Add(1)
-	q.ch <- delayedFunc{at: time.Now().Add(q.lag), f: f}
+	clock            *steppedDialogClock
+	keyLag, frameLag time.Duration
 }
 
 type fakePaneOpts struct {
@@ -81,28 +141,21 @@ type fakePaneOpts struct {
 	// resetAt, when set, re-renders the dialog that long after the pane is
 	// created, moving the cursor back to "No, exit".
 	resetAt time.Duration
+	// clock times keyLag, frameLag and resetAt; required when any is set.
+	clock *steppedDialogClock
 }
 
 func newFakeClaudeTrustPane(t *testing.T, o fakePaneOpts) *fakeClaudeTrustPane {
 	t.Helper()
-	wg := &sync.WaitGroup{}
-	p := &fakeClaudeTrustPane{cursor: o.cursor, dropDowns: o.dropDowns, inFlight: wg}
-	p.keyQ = newDelayedQueue(o.keyLag, wg)
-	p.frameQ = newDelayedQueue(o.frameLag, wg)
-	// Let in-flight keys and frames drain (they may feed each other) before
-	// the queues close.
-	t.Cleanup(func() {
-		wg.Wait()
-		for _, q := range []*delayedQueue{p.keyQ, p.frameQ} {
-			if q.lag > 0 {
-				close(q.ch)
-			}
-		}
-	})
+	if o.clock == nil && (o.keyLag > 0 || o.frameLag > 0 || o.resetAt > 0) {
+		t.Fatal("fake pane timing needs a stepped clock (useSteppedDialogClock)")
+	}
+	p := &fakeClaudeTrustPane{
+		cursor: o.cursor, dropDowns: o.dropDowns,
+		clock: o.clock, keyLag: o.keyLag, frameLag: o.frameLag,
+	}
 	if o.resetAt > 0 {
-		wg.Add(1)
-		timer := time.AfterFunc(o.resetAt, func() {
-			defer wg.Done()
+		o.clock.after(o.resetAt, func() {
 			p.mu.Lock()
 			if p.confirmed != "" || p.cursor == 0 {
 				p.mu.Unlock()
@@ -113,21 +166,28 @@ func newFakeClaudeTrustPane(t *testing.T, o fakePaneOpts) *fakeClaudeTrustPane {
 			onChange := p.onChange
 			p.mu.Unlock()
 			if onChange != nil {
-				p.frameQ.push(func() { onChange(f) })
-			}
-		})
-		t.Cleanup(func() {
-			if timer.Stop() {
-				wg.Done()
+				p.later(p.frameLag, func() { onChange(f) })
 			}
 		})
 	}
 	return p
 }
 
-// flush waits until every in-flight key and frame has been applied/delivered.
+// later runs f after lag of virtual time, in FIFO order among equal lags
+// (immediately when lag is 0).
+func (p *fakeClaudeTrustPane) later(lag time.Duration, f func()) {
+	if lag <= 0 {
+		f()
+		return
+	}
+	p.clock.after(lag, f)
+}
+
+// flush applies every in-flight key and delivers every in-flight frame.
 func (p *fakeClaudeTrustPane) flush() {
-	p.inFlight.Wait()
+	if p.clock != nil {
+		p.clock.drain()
+	}
 }
 
 func (p *fakeClaudeTrustPane) frameLocked() string {
@@ -161,7 +221,7 @@ func (p *fakeClaudeTrustPane) sendKeys(keys ...string) error {
 	p.sent = append(p.sent, keys...)
 	p.mu.Unlock()
 	for _, k := range keys {
-		p.keyQ.push(func() { p.apply(k) })
+		p.later(p.keyLag, func() { p.apply(k) })
 	}
 	return nil
 }
@@ -196,7 +256,7 @@ func (p *fakeClaudeTrustPane) apply(k string) {
 	onChange := p.onChange
 	p.mu.Unlock()
 	if onChange != nil {
-		p.frameQ.push(func() { onChange(f) })
+		p.later(p.frameLag, func() { onChange(f) })
 	}
 }
 
@@ -276,14 +336,26 @@ func TestAcceptWorkspaceTrustDialogClosedLoop(t *testing.T) {
 // followed by a second Down, and the wrapping cursor ends back on "No, exit"
 // after briefly showing the trust row. Requiring the trust row on two
 // consecutive frames before Enter keeps Enter off it.
+//
+// Every key lags by the same amount and the handler polls on a fixed cadence
+// (stepped clock), so each lag fixes the order of key arrivals against peeks;
+// the sweep covers every order, including lags that land exactly on a peek.
+// Out of scope, and part of the input-lag residual accepted for #6531: the
+// trust row shows between two queued Downs for the gap between their sends
+// (one handler cycle) plus any extra lag of the second. If that window
+// outlasts the handler's next cycle (the second key lags the first by more,
+// or a later cycle runs shorter than the one that sent it), two peeks a
+// cycle apart can both land in it, and nothing on screen tells that apart
+// from a settled trust row. In production this needs Claude input lag of
+// about two settle delays (~1s) plus that much drift. Under CPU load the old
+// real-timer version of this test drifted by a full 20ms cycle and hit it.
 func TestAcceptWorkspaceTrustDialogLateKeys(t *testing.T) {
-	for _, keyLag := range []time.Duration{5, 15, 25, 35, 45, 60} {
-		keyLag *= time.Millisecond
+	for keyLag := time.Millisecond; keyLag <= 100*time.Millisecond; keyLag += time.Millisecond {
 		t.Run(keyLag.String(), func(t *testing.T) {
 			withZeroDialogTimings(t)
 			startupDialogAcceptDelay = 20 * time.Millisecond
 			dialogPollInterval = 5 * time.Millisecond
-			pane := newFakeClaudeTrustPane(t, fakePaneOpts{keyLag: keyLag})
+			pane := newFakeClaudeTrustPane(t, fakePaneOpts{keyLag: keyLag, clock: useSteppedDialogClock(t)})
 
 			err := acceptWorkspaceTrustDialog(context.Background(), newStartupDialogBudget(2*time.Second), pane.peek, pane.sendKeys)
 
@@ -305,18 +377,27 @@ func TestAcceptWorkspaceTrustDialogLateKeys(t *testing.T) {
 // no move itself, so it must still require the trust row on two consecutive
 // frames, or it Enters on a "Yes" frame that a queued Down is about to move
 // back to "No, exit".
+//
+// Stepped timeline (settle 20ms, key lag 45ms, first Down dropped): pass 1
+// sends Downs at 0, 20 and 40 (landing at 45 dropped, 65, 85), still sees
+// "No" at 60 and gives up. Pass 2 starts at 70 on the "Yes" frame from the
+// 65 Down, with the 85 Down still queued.
 func TestAcceptWorkspaceTrustDialogLaterPassWithKeysInFlight(t *testing.T) {
 	withZeroDialogTimings(t)
 	startupDialogAcceptDelay = 20 * time.Millisecond
 	dialogPollInterval = 5 * time.Millisecond
-	pane := newFakeClaudeTrustPane(t, fakePaneOpts{dropDowns: 1, keyLag: 45 * time.Millisecond})
+	clock := useSteppedDialogClock(t)
+	pane := newFakeClaudeTrustPane(t, fakePaneOpts{dropDowns: 1, keyLag: 45 * time.Millisecond, clock: clock})
 
 	err1 := acceptWorkspaceTrustDialog(context.Background(), newStartupDialogBudget(2*time.Second), pane.peek, pane.sendKeys)
 	if !errors.Is(err1, ErrWorkspaceTrustUnconfirmed) {
 		t.Fatalf("pass 1 error = %v, want ErrWorkspaceTrustUnconfirmed (keys still in flight)", err1)
 	}
 	// Pass 2 starts 10ms after pass 1 gives up, with its keys still queued.
-	<-time.NewTimer(10 * time.Millisecond).C
+	clock.advance(10 * time.Millisecond)
+	if got := pane.frame(); !strings.Contains(got, "❯ Yes") {
+		t.Fatalf("pass 2 should start on a trust-row frame with a Down queued; frame:\n%s", got)
+	}
 	err2 := acceptWorkspaceTrustDialog(context.Background(), newStartupDialogBudget(2*time.Second), pane.peek, pane.sendKeys)
 
 	assertNeverConfirmedNoExit(t, pane)
@@ -354,13 +435,17 @@ func TestAcceptStartupDialogsTrustDialogSurvivesDroppedDown(t *testing.T) {
 // (1s in production, against a re-render seen ~100-200ms after first paint);
 // here the second trust frame is read at ~40ms, so resets land before it.
 func TestAcceptWorkspaceTrustDialogCursorResetByRerender(t *testing.T) {
-	for _, resetAt := range []time.Duration{10, 25, 35} {
+	// Down lands at 10ms; trust frames are read at 20 and 40ms. Resets at
+	// 5 (before the Down: no-op), 10 (same instant, before the Down), 15
+	// (between the Down and the first trust frame), 25 and 35 (between the
+	// two trust frames).
+	for _, resetAt := range []time.Duration{5, 10, 15, 25, 35} {
 		resetAt *= time.Millisecond
 		t.Run(resetAt.String(), func(t *testing.T) {
 			withZeroDialogTimings(t)
 			startupDialogAcceptDelay = 20 * time.Millisecond
 			dialogPollInterval = 5 * time.Millisecond
-			pane := newFakeClaudeTrustPane(t, fakePaneOpts{keyLag: 10 * time.Millisecond, resetAt: resetAt})
+			pane := newFakeClaudeTrustPane(t, fakePaneOpts{keyLag: 10 * time.Millisecond, resetAt: resetAt, clock: useSteppedDialogClock(t)})
 
 			err := acceptWorkspaceTrustDialog(context.Background(), newStartupDialogBudget(2*time.Second), pane.peek, pane.sendKeys)
 
@@ -407,6 +492,7 @@ func TestAcceptWorkspaceTrustDialogFromStreamNeverMoves(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			withZeroDialogTimings(t)
 			startupDialogAcceptDelay = 5 * time.Millisecond
+			tt.opts.clock = useSteppedDialogClock(t)
 			pane := newFakeClaudeTrustPane(t, tt.opts)
 			stream := newChangeDrivenTrustStream(pane, tt.staleCopies)
 
@@ -447,15 +533,15 @@ func TestAcceptStartupDialogsFromStreamTrustDialogFallsBackToPeeks(t *testing.T)
 		name         string
 		opts         fakePaneOpts
 		wantObserved bool
-		wantSent     []string // nil: only check the outcome (timing-dependent)
+		wantSent     []string
 	}{
 		{name: "trust preselected", opts: fakePaneOpts{cursor: 1}, wantObserved: true, wantSent: []string{"Enter"}},
 		{name: "down lands", wantSent: []string{"Down", "Enter"}},
 		{name: "down dropped", opts: fakePaneOpts{dropDowns: 1}, wantSent: []string{"Down", "Down", "Enter"}},
 		// The reviewer's repro shape: 15ms frame lag, 5ms delay.
 		{name: "lagged frames", opts: fakePaneOpts{frameLag: 15 * time.Millisecond}, wantSent: []string{"Down", "Enter"}},
-		{name: "late keys and lagged frames", opts: fakePaneOpts{keyLag: 8 * time.Millisecond, frameLag: 15 * time.Millisecond}},
-		{name: "cursor reset after first paint", opts: fakePaneOpts{keyLag: 5 * time.Millisecond, resetAt: 12 * time.Millisecond}},
+		{name: "late keys and lagged frames", opts: fakePaneOpts{keyLag: 8 * time.Millisecond, frameLag: 15 * time.Millisecond}, wantSent: []string{"Down", "Enter"}},
+		{name: "cursor reset after first paint", opts: fakePaneOpts{keyLag: 5 * time.Millisecond, resetAt: 12 * time.Millisecond}, wantSent: []string{"Down", "Down", "Enter"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			withZeroDialogTimings(t)
@@ -463,6 +549,7 @@ func TestAcceptStartupDialogsFromStreamTrustDialogFallsBackToPeeks(t *testing.T)
 			// (500ms); key lag past it is covered by the LateKeys test.
 			startupDialogAcceptDelay = 20 * time.Millisecond
 			dialogPollInterval = 2 * time.Millisecond
+			tt.opts.clock = useSteppedDialogClock(t)
 			pane := newFakeClaudeTrustPane(t, tt.opts)
 			snapshots := make(chan string, 64)
 			snapshots <- pane.frame()
@@ -512,7 +599,7 @@ func TestAcceptStartupDialogsFromStreamTrustDialogFallsBackToPeeks(t *testing.T)
 			if confirmed != "trust" {
 				t.Fatalf("confirmed = %q sent = %v, want trust", confirmed, sent)
 			}
-			if tt.wantSent != nil && !reflect.DeepEqual(sent, tt.wantSent) {
+			if !reflect.DeepEqual(sent, tt.wantSent) {
 				t.Fatalf("sent = %v, want %v", sent, tt.wantSent)
 			}
 		})

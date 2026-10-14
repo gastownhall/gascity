@@ -75,11 +75,44 @@ No shell invocation — the script is exec'd directly.
 | 0 | Success |
 | 1 | Failure (stderr contains error message) |
 | 2 | Unknown operation (treated as success — forward compatible) |
+| 75 | `start` only: temporary failure (`EX_TEMPFAIL`). The endpoint the agent launches against is at capacity or unavailable, so the start is retryable and not specific to this session. Gas City still tears the box down. On any other operation 75 is an ordinary failure. |
 
 Exit code 2 is the forward-compatibility mechanism. When Gas City adds new
 operations in the future, old scripts return exit 2 and the provider treats
 it as a no-op success. Scripts only need to implement the operations they
-care about.
+care about. An operation a script declares in its
+[handshake](#protocol-handshake-protocol) cannot be unknown, so two declared
+operations do not read exit 2 as success: under `proc.exec`, `exec` returns it
+as the command's own exit code, and under `report-attachment`, `is-attached`
+reports it as a failure.
+
+## Cancellation
+
+Each invocation runs in its own process group. When an operation is canceled
+(its timeout expires, or Gas City abandons the call), the script is stopped in
+two steps:
+
+| Step | Signal | Sent to | What the script should do |
+|------|--------|---------|---------------------------|
+| 1 | `SIGTERM` | the whole process group (the script and any foreground child) | Roll back anything this invocation created, then exit |
+| 2 | `SIGKILL` | the script, after a 2-second grace period | Nothing; it cannot be caught |
+
+A canceled call is reported as canceled whatever the script's exit code, so a
+`TERM` handler may exit with any status, including 2.
+
+Trap `TERM` (or `EXIT`, which bash also runs when `TERM` ends the script) to
+clean up. `SIGINT` is not sent: a script that traps only `INT` gets no chance
+to roll back. Keep the rollback inside the grace period; prefer one bounded
+step (for example `docker rm -f <id>`) over a graceful stop that waits out its
+own timeout.
+
+```bash
+created=$(my-backend create "$name")
+trap 'my-backend remove "$created"' EXIT   # runs on failure, on exit, and on SIGTERM
+trap 'exit 143' TERM                       # turn SIGTERM into an ordinary exit
+my-backend wait-ready "$created"
+trap - EXIT TERM                           # startup succeeded; keep the session
+```
 
 ## Operations
 
@@ -151,14 +184,82 @@ Capabilities:
 
 | Capability | Effect |
 |------------|--------|
-| `report-attachment` | `is-attached <name>` is called and trusted; without it, sessions always read as detached and `is-attached` is never invoked. |
-| `report-activity` | `get-last-activity <name>` results are treated as meaningful for idle/health decisions. |
-| `proc.exec` | The `exec` op's process exit code carries the in-box command's exit code, so an exec-op exit of 2 is read as the command's own exit 2 rather than the "unknown op" sentinel (`ErrExecUnsupported`). Lets the carrier drive input/output over `exec`; without it, gc uses the dedicated driving ops (the fallback path). |
+| `report-attachment` | `is-attached <name>` is called and trusted; without it, sessions always read as detached and `is-attached` is never invoked. Because the op is declared, its exit 2 is a failure like any other non-zero exit, not the "unknown op" sentinel. Also required for full idle sleep (see [Idle sleep](#idle-sleep)). |
+| `report-activity` | `get-last-activity <name>` results are treated as meaningful for idle/health decisions. Report the time of the agent's last output. For a tmux-in-box runtime that is the newest `#{window_activity}` of the session's windows: `#{session_activity}` does not advance while no client is attached. Also required for full idle sleep. |
+| `proc.exec` | The `exec` op's process exit code carries the in-box command's exit code, so an exec-op exit of 2 is read as the command's own exit 2 rather than the "unknown op" sentinel (`ErrExecUnsupported`). Lets the carrier drive input/output over `exec`; without it, gc uses the dedicated driving ops (the fallback path). Also required for full idle sleep. |
 | `proc.provision` | The script implements the box-without-agent `provision` op (see Operations), so the controller provisions the box, then launches the agent over `exec` (the un-weld). Without it, `start` provisions and launches in one op. |
 | `proc.stream` | Reserved (connection-plane family, parallel to `env.*`): declares the persistent bidirectional `stream` connection op (ACP over a stream, tmux pipe-pane). Sets `CanStream`. The `stream` op and its capability-gated conformance entry land with the connection rewrite. |
 | `tty.attach` | Reserved: declares an interactive PTY `attach` connection op. Sets `CanAttachTTY`. |
 
 The handshake runs once per provider instance and is cached.
+
+### Idle sleep
+
+An idle sandbox still costs money and capacity. With a `[session_sleep]`
+policy (or an agent's `sleep_after_idle`), the orchestrator stops a session
+that has been idle long enough and starts it again when work, a nudge, or an
+attach arrives. Which sessions a script-backed runtime can put to sleep
+depends on its handshake:
+
+| Handshake declares | `sleep_capability` | What sleeps |
+|---|---|---|
+| `report-activity`, `report-attachment` **and** `proc.exec` | `full` | Every session class, interactive ones included. |
+| anything less (or no handshake) | `timed_only` | Non-interactive sessions only. An interactive policy resolves to `off` with `sleep_policy_adjustment_reason = interactive_capability_insufficient`. |
+
+`full` needs a safe idle boundary, so an interactive session is never stopped
+in the middle of a turn. A runtime that declares all three must:
+
+- **Run the agent in the in-box tmux session `main`.** The orchestrator reads
+  the pane over `exec` (`tmux capture-pane -t main -p -S -120`). It treats the
+  session as idle after two consecutive captures, 200 ms apart, that show the
+  agent's ready prompt (`ready_prompt_prefix`, default `❯ `) and no busy
+  indicator such as `esc to interrupt`. This is the same check a local tmux
+  session gets.
+- **Answer `is-attached` honestly.** Print `false` and exit 0 for a session
+  that does not exist. Exit non-zero only when you cannot tell; any non-zero
+  exit, 2 included, keeps the session awake.
+- **Treat `stop` as the sleep.** Sleeping a session calls `stop`, and waking it
+  calls `start`. Anything the runtime keeps only inside the box, such as the
+  agent's conversation, is lost across a sleep unless `stop` preserves it.
+
+Each capture is a full round trip to the box, so the orchestrator gives one
+idle check 5 s, not the 1 s a local tmux session gets. Two captures and the
+pause between them fit in 5 s when each capture finishes in under 2.4 s. A
+check in a process that has not yet remembered the session's ready prompt
+(see below) first reads it from the box within the same 5 s, so that check
+needs three round trips, each under 1.6 s. Every check needs the read while
+`GC_READY_PROMPT_PREFIX` is absent from the session. Treat 2.4 s and 1.6 s as
+limits, not targets: a capture that ends exactly at the 5 s mark does not
+count. A slower check fails closed: the session stays awake, and the check
+runs again on the next orchestrator tick.
+
+Once the agent's tmux session exists, the orchestrator stores the session's
+`ready_prompt_prefix` in that session's environment as
+`GC_READY_PROMPT_PREFIX` (`tmux -u set-environment -t main`; a blank prefix
+stores the default prompt, `❯ `), as local tmux sessions do. A process that
+did not start the session, such as a restarted orchestrator or a `gc` command
+that cannot reach the API, reads it back with `tmux -u show-environment -t
+main` and then remembers it. Like local tmux, gc passes `-u` to these
+commands, so the prompt survives an exec environment without a UTF-8 locale.
+Do not clear the `main` session's environment. While the read fails or the
+variable is absent, that process looks for the default prompt and reads again
+on its next wait. The variable is absent when storing it failed (gc does not
+retry; the next start stores it again) and for a session started by an older
+gc. A session whose agent shows another prompt then never reads as idle. It
+stays awake, and every wait for its idle boundary runs to its timeout:
+interrupting it (`interrupt_now`) can restart the session, and stopping a turn
+reports an error.
+
+The `is-attached` rule above applies to every runtime that declares
+`report-attachment`, even without the other two capabilities. gc runs the op
+directly and treats any non-zero exit, including 2, as "attached": the session
+stays awake and destructive actions on it are held.
+
+```toml
+[session_sleep]
+interactive_resume = "10m"   # interactive sessions: needs sleep_capability = full
+noninteractive = "60s"
+```
 
 ### Start Config (JSON on stdin)
 
@@ -223,15 +324,132 @@ hints or ignore them:
 Fields that are **not** included in the JSON (gc-internal, not part of
 the exec protocol):
 
-- `ready_prompt_prefix` — prompt prefix for readiness detection (gc polls
-  via `peek` after `start` returns)
-- `ready_delay_ms` — fixed delay fallback (gc sleeps after `start` returns)
 - `emits_permission_warning` — bypass-permissions dialog handling
 - `fingerprint_extra` — config change detection metadata
 
-The distinction: readiness polling and delay are the *caller's*
-responsibility. Session setup commands are the *script's* responsibility
-— they run on the target filesystem, not the orchestrator.
+`ready_prompt_prefix` and `ready_delay_ms` are sent, but readiness polling
+(via `peek` after `start` returns) and the fixed delay remain the
+*caller's* responsibility; a script may ignore them. Session setup
+commands are the *script's* responsibility — they run on the target
+filesystem, not the orchestrator.
+
+### Work-dir export exclusions
+
+- **`work_dir_exclude`** — array of patterns, relative to `work_dir`,
+  naming orchestrator-local state that must not leave the orchestrator
+  host. gc sends it with every start config that has a `work_dir`, whatever
+  the directory holds: a work dir with no top-level `.gc/` or `.beads/` can
+  still hold rig scopes below it. A script that copies, archives, or syncs
+  `work_dir` into another filesystem (a remote sandbox, a container image)
+  must skip every matching path. A script that runs the agent in place on
+  the orchestrator's filesystem ignores it.
+
+The list is a floor, not the complete set. A script must skip every
+matching path and may skip more. A script that carries its own built-in
+denylist applies the union of that list and `work_dir_exclude`; it never
+replaces its list with gc's, so a gap on either side cannot widen what
+leaves the host.
+
+Rather than implement the grammar below, a script can ask gc for the
+entries that survive it:
+
+```sh
+set -o pipefail
+"$GC_BIN" runtime workdir-export --null "$WORK_DIR" |
+  tar -C "$WORK_DIR" --null --no-recursion -T - -czf -
+```
+
+- Call the gc named by the start config's `env.GC_BIN`, the binary that
+  produced the list. An older `gc` on `PATH` may lack the subcommand.
+- Check its exit status (`set -o pipefail` in a pipeline). On failure it
+  prints nothing to stdout, and an unchecked pipeline archives an empty work
+  dir.
+- Use `--null`. The default newline-terminated output is for humans only:
+  no byte filter makes it safe for a consumer that splits on blanks or
+  quotes, such as `xargs`. As a backstop it refuses, printing nothing, any
+  entry that contains a newline, a carriage return, or a backslash (GNU
+  `tar -T` reads `\057` as `/`), or that starts with `-`.
+- GNU tar reads a `--null` list verbatim only from 1.30; bsdtar always
+  does. Older GNU tar unquotes backslash escapes even with `--null`, so a
+  crafted file name can make it archive `.gc/controller.token` or a file
+  above the work dir. Where GNU tar may predate 1.30, use the form below:
+  1.29 reads the list verbatim with it, and older releases reject its
+  options, which fails the pipeline. bsdtar rejects those options, so keep
+  the form above there.
+
+  ```sh
+  set -o pipefail
+  "$GC_BIN" runtime workdir-export --null "$WORK_DIR" |
+    tar -C "$WORK_DIR" --null --verbatim-files-from --no-unquote \
+      --no-recursion -T - -czf -
+  ```
+- The output lists every surviving file and symlink, plus every surviving
+  directory that is empty on disk. A non-empty directory is never listed, so
+  a consumer that recurses into listed entries still copies nothing
+  excluded; a consumer that does not recurse recreates parent directories
+  from the paths below them. A directory whose every entry is excluded is
+  absent.
+- Entries come in depth-first walk order, each directory's entries sorted by
+  name. This is not `sort` order: `a/b` comes before `a-c`.
+
+A script that applies `work_dir_exclude` itself copies symlinks as links and
+never dereferences them: an in-tree link such as `x -> .gc/controller.token`
+would otherwise ship its target.
+
+Pattern grammar:
+
+- Patterns and paths are `/`-separated and relative to `work_dir`.
+- A segment of exactly `**` matches zero or more whole path segments.
+- Every other segment is a single-segment glob (Go `path.Match` syntax):
+  `*` matches any run of characters except `/`, leading dots included.
+- A path is excluded when it, or any directory above it, matches. A
+  trailing `/**` spells out that a whole subtree stays behind.
+- This is not gitignore, rsync, or tar `--exclude` syntax. A pattern with
+  no `/` matches only at the work-dir root, and `.gc/**/*.sock` matches
+  `.gc/controller.sock` because `**` may match zero segments. Translating
+  patterns into another tool's syntax is error-prone; prefer
+  `gc runtime workdir-export`.
+
+The list covers secrets and credentials (`.gc/services/**`,
+`.gc/secrets/**`, `.gc/controller.token`, `.gc/credentials.toml`,
+`.gc/credentials.json`, `.gc/mcp-adopted/**`, `.beads/.env`, `.beads/.beads-credential-key`,
+`.beads/proxy.secret`), the event and usage logs, the nudge queue,
+per-session diagnostics under `.gc/sessions/` and ACP transcripts under
+`.gc/transcripts/`, sockets, locks and pid files, the stores under
+`.gc/store/` (the default SQLite binding root), `.gc/storage/`,
+`.gc/infra/` and `.gc/dolt-data/`, bd's stores and their backups in any
+scope (`.beads/dolt/`, `.beads/doltlite/`, `.beads/embeddeddolt/`, its
+SQLite files, bd backups and corrupt-store backups), the file provider's
+`.gc/beads.json` and its `.bak` in any scope, the legacy JSONL archive,
+every file named `beads.sqlite*` wherever it sits, bd server, proxy and
+sync state, the provider-lifecycle journal `.gc/scope-ownership.json`,
+orchestrator runtime state, and other agents' work dirs under
+`.gc/worktrees/` and `.gc/agents/`. Copying any of it gives the session a
+stale, private fork of state the orchestrator owns, or hands it secrets it
+must not hold. Files the session needs are never listed:
+`.gc/settings.json`, `.gc/site.toml`, `.gc/cache/` and `.gc/system/` (pid
+and socket files aside), `.gc/scripts/`, the prompt and skill snapshots
+under `.gc/tmp/`, the staged prompts under `.gc/synth/`, the MCP
+projections under `.gc/mcp-managed/`, the step and iteration artifacts
+agents read and write under `.gc/molecules/` and `.gc/artifacts/`, the
+`.gc/file-beads-layout` marker, `.beads/metadata.json`,
+`.beads/config.yaml`, `.beads/http_target.json`, and `.beads/redirect`.
+
+The list is fixed and matches paths by name. It does not read the city's
+configuration: when a SQLite storage binding's `path` moves its root to a
+path inside the work dir that the list does not name, only that root's
+`beads.sqlite*` files match, and a script for such a city adds the root to
+its own denylist. Matching names also cannot stop a process on the
+orchestrator host from copying or hard-linking excluded content to a path
+the list keeps.
+
+`.gc/site.toml` ships because session-side `gc` commands load it with
+`city.toml`: it carries the workspace name and bead prefix as well as rig
+path bindings. Its rig paths are orchestrator-host paths, so a script that
+relocates the work dir remaps them as it remaps the `GC_*` path variables.
+
+The field is additive. A script that predates it ignores the unknown key
+and keeps copying the whole work dir.
 
 ### Conventions
 

@@ -1,5 +1,7 @@
 package beads
 
+import "time"
+
 // NewNativeDoltStoreForConformance returns a NativeDoltStore backed by the
 // in-memory native storage fixture for the external conformance suite.
 func NewNativeDoltStoreForConformance() Store {
@@ -19,7 +21,7 @@ func NewNativeDoltStoreForConformance() Store {
 // trip; without that the fixture would clobber every id the suite pins and the
 // rows would pass against a store that never had to decide anything.
 func NewNativeDoltStoreForPinnedIDFenceConformance(mintPrefix string, namespaces ...string) Store {
-	storage := &nativeDoltMemStorage{store: &MemStore{IDPrefix: mintPrefix, HonorExplicitIDs: true}}
+	storage := &nativeDoltMemStorage{store: &MemStore{storageOnly: true, IDPrefix: mintPrefix, HonorExplicitIDs: true}}
 	store := newNativeDoltStoreForTest(storage, WithNativeDoltStoreReservedIDPrefixes(namespaces...))
 	store.idPrefix = normalizeIDPrefix(mintPrefix)
 	return store
@@ -32,7 +34,7 @@ func NewNativeDoltStoreForPinnedIDFenceConformance(mintPrefix string, namespaces
 // id-resolution seam. The onChange callback receives the same 6-tuple the record
 // site (cmd/gc/api_state.go) wraps into an events.Event.
 func (c *CachingStore) NotifyChangeForTest(eventType string, b Bead) {
-	c.notifyChange(eventType, b)
+	c.notifyChange(ChangeLocal, eventType, b)
 }
 
 // NewProxiedStoreForConformance returns the proxied-native SPLIT store — native
@@ -55,7 +57,7 @@ func (c *CachingStore) NotifyChangeForTest(eventType string, b Bead) {
 // BdStore forks the `bd` binary. It is a second NativeDoltStore over the same
 // storage, which is the closest in-process thing to "the other door".
 func NewProxiedStoreForConformance(mintPrefix string) Store {
-	storage := &nativeDoltMemStorage{store: &MemStore{IDPrefix: mintPrefix, HonorExplicitIDs: true}}
+	storage := &nativeDoltMemStorage{store: &MemStore{storageOnly: true, IDPrefix: mintPrefix, HonorExplicitIDs: true}}
 
 	native := newNativeDoltStoreForTest(storage, WithProxiedReadOnly())
 	native.idPrefix = normalizeIDPrefix(mintPrefix)
@@ -79,4 +81,36 @@ func NewProxiedStoreForConformance(mintPrefix string) Store {
 // into nothing else.
 func PinForTest(scopeRoot, root, database string) Pin {
 	return Pin{admitted: true, scopeRoot: scopeRoot, root: root, database: database}
+}
+
+// ReconcileForTest runs one reconcile pass synchronously as the background
+// loop runs it on its cadence, for beadstest.RunReadyParityConformance. The
+// loop's shortest cadence is far longer than the recency window that protects
+// an in-flight local write (recentLocalMutation), so this ages every local
+// write stamp past that window first instead of waiting it out.
+func (c *CachingStore) ReconcileForTest() {
+	c.mu.Lock()
+	for id, at := range c.localBeadAt {
+		c.localBeadAt[id] = at.Add(-time.Minute)
+	}
+	c.mu.Unlock()
+	c.runReconciliation()
+}
+
+// WriteRowForTest rewrites id's row as an out-of-process writer would: mutate
+// changes its fields and the revision advances. A test delivers that write's
+// event after it, since a CachingStore installs a field-changing event on a
+// cached row only once its backing read agrees (mc-03lk4).
+func (m *MemStore) WriteRowForTest(id string, mutate func(*Bead)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := range m.beads {
+		if m.beads[i].ID == id {
+			mutate(&m.beads[i])
+			m.beads[i].Revision++
+			m.beads[i].UpdatedAt = time.Now().Round(0)
+			return
+		}
+	}
+	panic("WriteRowForTest: no row " + id)
 }

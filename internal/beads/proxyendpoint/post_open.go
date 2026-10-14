@@ -48,10 +48,14 @@ func (r PostOpenReport) IgnoredPlaneReason() string {
 const postOpenHeadQuery = "SELECT DOLT_HASHOF('HEAD')"
 
 // postOpenTables are the tables the observation asks about, in order: the
-// ignored lane's cursor table, then the library's sentinel tables in the
-// library's own probing order.
+// ignored lane's cursor table, then the library's sentinel tables and then its
+// floored sentinel tables, each in the library's own probing order.
 func postOpenTables() []string {
-	return append([]string{cursorTableIgnored}, ignoredSentinelTables...)
+	tables := append([]string{cursorTableIgnored}, ignoredSentinelTables...)
+	for _, floored := range ignoredSentinelFlooredTables {
+		tables = append(tables, floored.Table)
+	}
+	return tables
 }
 
 // postOpenQuery is the observation's ONE statement: HEAD, then one
@@ -136,9 +140,9 @@ func ReadPostOpen(ctx context.Context, db *sql.DB) (PostOpenReport, error) {
 //
 // The sentinel reality is derived in the library's order, as readIgnoredReality
 // derives it: the first absent sentinel TABLE floors the lane at
-// IgnoredSentinelTableFloor and nothing after it can lower that, and only with
-// every table present does the sentinel column's absence floor it at
-// IgnoredSentinelColumnFloor.
+// IgnoredSentinelTableFloor and nothing after it can lower that; only with
+// every sentinel table present do the absent floored tables and the sentinel
+// column floor it, at the lowest of their floors.
 func readPostOpenOnce(ctx context.Context, conn *sql.Conn) (PostOpenReport, error) {
 	query, args := postOpenQuery()
 	tables := postOpenTables()
@@ -162,12 +166,13 @@ func readPostOpenOnce(ctx context.Context, conn *sql.Conn) (PostOpenReport, erro
 			return report, nil
 		}
 	}
-	if counts[len(counts)-1] == 0 {
-		report.Reality = CursorReality{
-			Limited: true,
-			Floor:   IgnoredSentinelColumnFloor,
-			Missing: IgnoredSentinelColumnTable + "." + IgnoredSentinelColumnName,
+	for i, floored := range ignoredSentinelFlooredTables {
+		if counts[1+len(ignoredSentinelTables)+i] == 0 {
+			report.Reality = report.Reality.lowered(floored.Floor, floored.Table)
 		}
+	}
+	if counts[len(counts)-1] == 0 {
+		report.Reality = report.Reality.lowered(IgnoredSentinelColumnFloor, IgnoredSentinelColumnTable+"."+IgnoredSentinelColumnName)
 	}
 	return report, nil
 }

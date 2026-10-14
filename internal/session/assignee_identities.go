@@ -1,6 +1,12 @@
 package session
 
-import "strings"
+import (
+	"fmt"
+	"slices"
+	"strings"
+
+	"github.com/gastownhall/gascity/internal/beads"
+)
 
 // This file is the confined session-class assignee-identity vocabulary: the
 // forms under which a work bead may be assigned to a session. It is shared by
@@ -44,6 +50,60 @@ func AssigneeIdentities(i Info) []string {
 		}
 	}
 	return identities
+}
+
+// recordLookupKeys are the session-bead metadata keys HasRecordAnsweringTo
+// looks an identity up under: the AssigneeIdentities sources that can hold a
+// qualified "<rig>/<name>" identity. A bead ID never contains "/", and the
+// session_name syntax (sessionNamePattern) admits none either.
+var recordLookupKeys = []string{"alias", NamedSessionIdentityMetadata, aliasHistoryMetadataKey}
+
+// HasRecordAnsweringTo reports whether a session bead in store, open or closed,
+// answers to identity under its alias, its configured named identity, or its
+// alias history. Each key is one exact-metadata listing, and the lookup writes
+// nothing: an empty-type session bead counts without being repaired. What a
+// listing costs is the backend's. On SQLite (an indexed metadata lookup) and in
+// memory it follows the records that match, not the size of the session
+// ledger, but bd/Dolt filters metadata without an index, so there each listing
+// scans the whole store (about 0.6s measured on an 11.3k-bead store).
+//
+// alias_history is stored comma-joined, so the exact match finds a prior alias
+// only when it is the record's sole history entry. False therefore means no
+// record was found, not that none exists.
+//
+// A hard listing error ends the lookup and returns false with the error: the
+// answer is unknown. The rows a partial result returns still count, so true is
+// reliable even when the first partial-result error comes back with it. The
+// listings are Live reads, so a CachingStore returns a backing failure as the
+// hard error it is, not as a partial result over its cached open rows.
+func HasRecordAnsweringTo(store beads.Store, identity string) (bool, error) {
+	identity = strings.TrimSpace(identity)
+	if store == nil || identity == "" {
+		return false, nil
+	}
+	var partial error
+	for _, key := range recordLookupKeys {
+		rows, err := store.List(beads.ListQuery{
+			Metadata:      map[string]string{key: identity},
+			IncludeClosed: true,
+			Live:          true,
+		})
+		if err != nil {
+			err = fmt.Errorf("listing session beads by %s: %w", key, err)
+			if !beads.IsPartialResult(err) {
+				return false, err
+			}
+			if partial == nil {
+				partial = err
+			}
+		}
+		for _, b := range rows {
+			if IsSessionBeadOrRepairable(b) && slices.Contains(AssigneeIdentities(infoFromPersistedBead(b)), identity) {
+				return true, partial
+			}
+		}
+	}
+	return false, partial
 }
 
 // isPoolManagedIdentity reports whether i carries one of the reconciler's
@@ -97,4 +157,19 @@ func AssigneeIdentifier(i Info) string {
 		return sn
 	}
 	return strings.TrimSpace(i.ID)
+}
+
+// IsOpenSessionOfTemplate reports whether b is a live (not closed) session bead,
+// or a repairable one, created from template. Callers that meet a work bead's
+// assignee and need to know whether it is one of a pool's own sessions use it
+// after resolving the assignee as a bead ID: since #6324 an unaliased pool or
+// ephemeral session claims under its session bead ID (AssigneeIdentifier), so
+// the "<template>-" session_name prefix no longer identifies the claimant.
+func IsOpenSessionOfTemplate(b beads.Bead, template string) bool {
+	template = strings.TrimSpace(template)
+	if template == "" || !IsSessionBeadOrRepairable(b) {
+		return false
+	}
+	info := infoFromPersistedBead(b)
+	return !info.Closed && strings.TrimSpace(info.Template) == template
 }

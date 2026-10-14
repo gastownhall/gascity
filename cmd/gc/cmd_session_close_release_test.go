@@ -2,9 +2,15 @@ package main
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -93,5 +99,207 @@ max_active_sessions = 1
 	}
 	if gotWork.Status != "open" {
 		t.Errorf("work bead Status = %q, want open (reset so the routed queue can re-pick it)", gotWork.Status)
+	}
+}
+
+// TestCmdSessionCloseClearsClaimInTheSessionStoreOnAMigratedCity pins the store
+// `gc session close` hands the claim clear. On a migrated city the session bead
+// lives in the sessions-class binding while the release sweep leads with the
+// retained work store; clearing the claim back-channel through the work store
+// looked the session bead up where it does not live, logged "clearing current
+// claim on retired session ...: bead not found", and left current_claim_bead_id
+// stamped on the closed session. The helper's own split-store contract is
+// TestUnclaimWorkAssignedToRetiredSessionClearsClaimInTheSessionStore; this row
+// is the command's call site, which that helper test cannot see.
+func TestCmdSessionCloseClearsClaimInTheSessionStoreOnAMigratedCity(t *testing.T) {
+	cityPath, cfg := migratedOneShotCLICity(t)
+	// The seat's template is a configured agent: a claim with no route of its
+	// own is released into the seat's lane.
+	appendCityTOML(t, cityPath, "\n[[agent]]\nname = \"worker\"\nstart_command = \"true\"\n")
+	captureCLIStorageStderr(t)
+	t.Setenv("GC_SESSION", "fake")
+
+	work, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("opening the city work store: %v", err)
+	}
+	t.Cleanup(func() { _ = closeBeadStoreHandle(work) })
+	sessions := cliSessionStore(work, cfg, cityPath)
+
+	sessionBead, err := sessions.Create(beads.Bead{
+		Title:  "claiming worker",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "worker-claiming",
+			"template":     "worker",
+			"state":        "active",
+		},
+	})
+	if err != nil {
+		t.Fatalf("seeding the session bead in the session store: %v", err)
+	}
+	// A claim routed to no configured agent stays on the closed seat, and the
+	// close raises session.stranded_claims for it.
+	unserved, err := work.Create(beads.Bead{Title: "unserved step", Type: "task", Assignee: sessionBead.ID, Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "nowhere/lane"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := work.Create(beads.Bead{
+		Title:    "claimed step",
+		Type:     "task",
+		Assignee: sessionBead.ID,
+	})
+	if err != nil {
+		t.Fatalf("Create(work bead): %v", err)
+	}
+	inProgress := "in_progress"
+	if err := work.Update(claimed.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("mark work in_progress: %v", err)
+	}
+	if err := sessions.SetMetadata(sessionBead.ID, beadmeta.CurrentClaimBeadIDMetadataKey, claimed.ID); err != nil {
+		t.Fatalf("seeding the claim stamp: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionClose([]string{sessionBead.ID}, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdSessionClose = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stderr.String(), "clearing current claim") {
+		t.Errorf("stderr = %q, want no claim-clear failure: the close must clear the claim in the session store", stderr.String())
+	}
+
+	// The funnel's own handle goes first, so the reads below see durable bytes
+	// rather than state an open connection is holding.
+	if err := closeCLIStorageRoutes(); err != nil {
+		t.Fatalf("closing the one-shot routes: %v", err)
+	}
+	closed, err := openMigratedDestination(t, mustResolveInfraTarget(t, cityPath, cfg)).Get(sessionBead.ID)
+	if err != nil {
+		t.Fatalf("reading the session bead back from the binding: %v", err)
+	}
+	if closed.Status != "closed" {
+		t.Errorf("session bead status = %q, want closed", closed.Status)
+	}
+	if got := closed.Metadata[beadmeta.CurrentClaimBeadIDMetadataKey]; got != "" {
+		t.Errorf("current claim = %q on the closed session, want cleared in the session store", got)
+	}
+
+	reopened, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("reopening the work store: %v", err)
+	}
+	t.Cleanup(func() { _ = closeBeadStoreHandle(reopened) })
+	released, err := reopened.Get(claimed.ID)
+	if err != nil {
+		t.Fatalf("Get(work bead): %v", err)
+	}
+	if released.Assignee != "" || released.Status != "open" {
+		t.Errorf("work bead = (assignee %q, status %q), want released to (\"\", open) from the work store; stderr=%s", released.Assignee, released.Status, stderr.String())
+	}
+	// The claim had no route: it takes the seat's, so a lane serves it (the
+	// ga-n2d.2 shape).
+	if got := released.Metadata[beadmeta.RunTargetMetadataKey]; got != "worker" {
+		t.Errorf("released claim's run_target = %q, want the seat's route worker", got)
+	}
+	if kept, err := reopened.Get(unserved.ID); err != nil || kept.Assignee != sessionBead.ID {
+		t.Errorf("unserved claim = %+v (%v), want kept by the closed seat", kept, err)
+	}
+	evs, err := events.ReadAll(filepath.Join(cityPath, ".gc", "events.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(evs, func(e events.Event) bool {
+		return e.Type == events.SessionStrandedClaims && e.Subject == sessionBead.ID && strings.Contains(string(e.Payload), unserved.ID)
+	}) {
+		t.Errorf("no session.stranded_claims for %s in the city's events", unserved.ID)
+	}
+}
+
+// The drain-ack release reads work through the city's work legs over the work
+// store it opened, never the sessions store it resolves the session through:
+// on a migrated city a claim on the work store is released.
+func TestDrainAckReleaseReadsTheWorkStoreOnAMigratedCity(t *testing.T) {
+	cityPath, cfg := migratedOneShotCLICity(t)
+	captureCLIStorageStderr(t)
+	work, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("opening the city work store: %v", err)
+	}
+	t.Cleanup(func() { _ = closeBeadStoreHandle(work) })
+	sessions := cliSessionStore(work, cfg, cityPath)
+	sessionBead, err := sessions.Create(beads.Bead{
+		Title: "draining worker", Type: session.BeadType, Labels: []string{session.LabelSession},
+		Metadata: map[string]string{"session_name": "worker-draining", "state": "active"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := work.Create(beads.Bead{Title: "claimed step", Type: "task", Assignee: sessionBead.ID, Metadata: map[string]string{"gc.routed_to": "worker"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inProgress := "in_progress"
+	if err := work.Update(claimed.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatal(err)
+	}
+
+	var stderr bytes.Buffer
+	releaseUnexecutedClaimsForSessionStore(cityPath, servingRigsCity(cfg, "worker"), work, nil, "worker-draining", &stderr)
+
+	got, err := work.Get(claimed.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Assignee != "" || got.Status != "open" {
+		t.Fatalf("work bead = (%q, %q), want released from the work store; stderr=%s", got.Assignee, got.Status, stderr.String())
+	}
+}
+
+// appendCityTOML appends body to cityPath's city.toml.
+func appendCityTOML(t *testing.T, cityPath, body string) {
+	t.Helper()
+	f, err := os.OpenFile(filepath.Join(cityPath, "city.toml"), os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close() //nolint:errcheck
+	if _, err := f.WriteString(body); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A city whose config does not load refuses the close of a session holding
+// claims, whose routes could not be judged, and closes one holding none.
+func TestCmdSessionCloseWithoutConfigRefusesOnlyOverClaims(t *testing.T) {
+	for _, holds := range []bool{true, false} {
+		t.Run(map[bool]string{true: "holding a claim", false: "holding nothing"}[holds], func(t *testing.T) {
+			cityDir := t.TempDir()
+			writePhase0InterfaceCity(t, cityDir, "[workspace]\nname = \"test-city\"\n\n[beads]\nprovider = \"file\"\n")
+			t.Setenv("GC_CITY", cityDir)
+			t.Setenv("GC_DIR", t.TempDir())
+			t.Setenv("GC_BEADS", "file")
+			t.Setenv("GC_SESSION", "fake")
+			store, err := openCityStoreAt(cityDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			seat, err := store.Create(beads.Bead{Title: "worker", Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: map[string]string{"session_name": "worker-1", "template": "worker", "state": "asleep"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if holds {
+				if _, err := store.Create(beads.Bead{Title: "claim", Type: "task", Assignee: seat.ID, Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			appendCityTOML(t, cityDir, "\n[[[not toml\n")
+			var stdout, stderr bytes.Buffer
+			code := cmdSessionClose([]string{seat.ID}, &stdout, &stderr)
+			refused := strings.Contains(stderr.String(), "refusing to close")
+			if holds && (code == 0 || !refused) || !holds && (code != 0 || refused) {
+				t.Fatalf("cmdSessionClose = %d, stderr %q; want refused %t", code, stderr.String(), holds)
+			}
+		})
 	}
 }

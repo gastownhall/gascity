@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -60,6 +61,11 @@ const (
 	// preflight's advisory print it, for the reason the file header gives: an
 	// instruction naming a command this binary does not carry fails at the shell.
 	storageStopCommand = "gc stop"
+
+	// storageFromBackupFlag names the second source the migrate verb takes:
+	// the retained-source backup a clear wrote, for re-copying a binding whose
+	// database is gone after the work store's copies were cleared.
+	storageFromBackupFlag = "from-backup"
 
 	// storageFleetStoppedFlag is the operator's attestation that nothing this
 	// process cannot see is still writing to the source.
@@ -126,6 +132,26 @@ func storageRecoveryInstruction() string {
 	return storageRecoveryCommand + " --" + storageFleetStoppedFlag
 }
 
+// storageClearInstruction is the operator command that finishes a converged
+// city's cutover by clearing the retained work-store copies: the migration
+// itself, re-run. On a converged city it re-proves convergence and then clears,
+// so the command that repairs a city migrated by an earlier build is the same
+// one an operator already ran.
+func storageClearInstruction() string {
+	return storageMigrationCommand + " --" + storageFleetStoppedFlag
+}
+
+// storageRecopyFromBackupInstruction re-copies a stale binding from the
+// retained-source backup, for a city whose work store no longer holds the
+// slice.
+func storageRecopyFromBackupInstruction() string {
+	surface, err := parseOperatorCommandSpelling(storageMigrationCommand)
+	if err != nil {
+		return "gc storage migrate --" + storageFromBackupFlag + " --" + storageFleetStoppedFlag
+	}
+	return "gc " + surface.Namespace + " " + surface.Verb + " --" + storageFromBackupFlag + " --" + storageFleetStoppedFlag
+}
+
 // storageStatusInstruction renders the read-only report the way an operator
 // types it. The read verb has no operator-command spelling of its own — it
 // takes no source flag — so its namespace is derived from the one the migrate
@@ -184,6 +210,7 @@ operator arranges rather than something a program can observe.`,
 		newStoragePreflightCmd(surface, stdout, stderr),
 		newStorageStatusCmd(surface, stdout, stderr),
 		newStorageRecoverCmd(repair, stdout, stderr),
+		newStorageRepairSequenceCmd(surface, stdout, stderr),
 	)
 	return cmd
 }
@@ -211,6 +238,7 @@ func newUnbuildableStorageCmd(cause error, stderr io.Writer) *cobra.Command {
 func newStorageMigrateCmd(surface storageCommandSurface, stdout, stderr io.Writer) *cobra.Command {
 	var (
 		fromWork     bool
+		fromBackup   bool
 		fleetStopped bool
 	)
 	cmd := &cobra.Command{
@@ -219,21 +247,36 @@ func newStorageMigrateCmd(surface storageCommandSurface, stdout, stderr io.Write
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		Long: `Copy this city's infrastructure-class beads out of the work store and into
-the binding [storage.classes] assigns them to.
+the binding [storage.classes] assigns them to, then clear the work store's
+copies.
 
 Every bead is copied with its id and its within-class dependency topology
 preserved, proven field-equal against a closed and reopened destination, and
-then recorded in a proven-copy manifest and a convergence marker. The source is
-RETAINED verbatim: nothing here writes to, moves or prunes the work store, so a
-rollback before cutover is a config edit with no data recovery step.
+then recorded in a proven-copy manifest and a convergence marker. Nothing in
+the work store changes before the marker, so a rollback before cutover is a
+config edit with no data recovery step.
+
+Past the marker the binding is the only authoritative copy, so the work
+store's now-stale copies are cleared: each is written to a backup beside the
+manifest (infra.retained-source.jsonl), the backup is re-read and proven equal
+to the rows it records, and only then are the rows removed. A work bead whose
+blocking dependency the binding has already satisfied is released; every other
+cross-store edge is kept.
+
+Run it again on a converged city to repair one that still holds its copies —
+a city migrated by an earlier build, or a clear that was interrupted. Boot
+refuses such a city and names this command.
+
+--from-backup re-copies a binding whose database is gone from that backup
+instead of from the work store, which no longer holds the slice.
 
 The move refuses while a writer can reach the source. This binary can prove the
 absence of a controller and cannot prove the absence of anything else, so that
 half is an explicit operator attestation.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if !fromWork {
-				fmt.Fprintf(stderr, "gc %s %s: pass --%s. This build carries one source — the city's work store — and states it explicitly rather than detecting it, so a source added later cannot inherit this one's behavior by silence\n", //nolint:errcheck // best-effort stderr
-					surface.Namespace, surface.Verb, surface.Flag)
+			if fromWork == fromBackup {
+				fmt.Fprintf(stderr, "gc %s %s: pass exactly one of --%s or --%s. The source is stated explicitly rather than detected, so a source added later cannot inherit another's behavior by silence\n", //nolint:errcheck // best-effort stderr
+					surface.Namespace, surface.Verb, surface.Flag, storageFromBackupFlag)
 				return errExit
 			}
 			request, err := resolveStorageOperatorRequest()
@@ -242,11 +285,14 @@ half is an explicit operator attestation.`,
 				return errExit
 			}
 			request.FleetStopped = fleetStopped
+			request.FromBackup = fromBackup
 			return exitForCode(doStorageMigrate(cmd.Context(), request, stdout, stderr))
 		},
 	}
 	cmd.Flags().BoolVar(&fromWork, surface.Flag, false,
 		"migrate the infrastructure classes out of this city's work store")
+	cmd.Flags().BoolVar(&fromBackup, storageFromBackupFlag, false,
+		"re-copy a binding whose database is gone from the retained-source backup")
 	cmd.Flags().BoolVar(&fleetStopped, storageFleetStoppedFlag, false,
 		"attest that "+storageFleetStoppedAttestation)
 	return cmd
@@ -293,6 +339,8 @@ type storageOperatorRequest struct {
 	// FleetStopped carries the operator's attestation about the writers this
 	// command cannot probe.
 	FleetStopped bool
+	// FromBackup selects the retained-source backup as the migration's source.
+	FromBackup bool
 }
 
 // resolveStorageOperatorRequest resolves the city and its configuration.
@@ -374,7 +422,11 @@ func doStorageMigrate(ctx context.Context, request storageOperatorRequest, stdou
 		return 1
 	}
 
-	report := runInfraClassMigration(request.CityPath, target, logPrefix, stderr)
+	from := infraMigrationFromWork
+	if request.FromBackup {
+		from = infraMigrationFromBackup
+	}
+	report := runInfraClassMigrationFrom(request.CityPath, target, from, logPrefix, stderr)
 	report.Target = target
 	report.BindingProvenEmpty, report.BindingProbe = infraBindingHoldsNothing(target)
 	rec := openCityRecorderAt(request.CityPath, stderr)
@@ -387,8 +439,8 @@ func doStorageMigrate(ctx context.Context, request storageOperatorRequest, stdou
 		return 1
 	}
 	recordStorageBindingOutcome(rec, report, "")
-	fmt.Fprintf(stdout, "Migrated. %s now serves %s from %s; the work store keeps its rows. Start the city with `gc start`.\n", //nolint:errcheck // best-effort stdout
-		target.Binding, infraMigrationClassList(), target.Database)
+	fmt.Fprintf(stdout, "Migrated. %s now serves %s from %s; %s. Start the city with `gc start`.\n", //nolint:errcheck // best-effort stdout
+		target.Binding, infraMigrationClassList(), target.Database, describeInfraClear(report.Clear))
 	return 0
 }
 
@@ -475,6 +527,10 @@ func doStorageStatus(request storageOperatorRequest, stdout, stderr io.Writer) i
 				return 1
 			}
 		}
+		if blocked, held := revertHoldingNote(storageSplitNone, request.CityPath); held {
+			fmt.Fprintf(stdout, "binding: none configured, and BLOCKED — %s\n", infraMigrationOperatorAdvice(blocked, logPrefix)) //nolint:errcheck // best-effort stdout
+			return 1
+		}
 		fmt.Fprintln(stdout, "binding: none — every class is served by the work store, and nothing migrates.") //nolint:errcheck // best-effort stdout
 		return exitCode
 	}
@@ -504,10 +560,15 @@ func doStorageStatus(request storageOperatorRequest, stdout, stderr io.Writer) i
 		return 1
 	}
 	fmt.Fprintf(stdout, "source: %d infrastructure bead(s) retained in the work store\n", len(rows)) //nolint:errcheck // best-effort stdout
+	if backup, present, err := readInfraRetainedBackup(target); err != nil {
+		fmt.Fprintf(stdout, "retained-source backup: unreadable — %v\n", err) //nolint:errcheck // best-effort stdout
+	} else if present {
+		fmt.Fprintf(stdout, "retained-source backup: %s (%d cleared bead(s))\n", target.RetainedBackupPath(), len(backup)) //nolint:errcheck // best-effort stdout
+	}
 	// Both sides, always — including on the unconverged arm below, where the
 	// binding's zero is the whole point. The source count alone cannot tell an
-	// operator whether a cutover landed, because the migration retains the
-	// source verbatim and that number is the same either way.
+	// operator whether a cutover landed: it reads zero both on a cleared city
+	// and on one that never held an infrastructure bead.
 	//
 	// A census that could not run prints its reason in place of the number
 	// instead of a confident zero. The unreadable case is a whole missing binding
@@ -520,6 +581,14 @@ func doStorageStatus(request storageOperatorRequest, stdout, stderr io.Writer) i
 		fmt.Fprintf(stdout, "binding: %d infrastructure bead(s) held now\n", held) //nolint:errcheck // best-effort stdout
 	}
 
+	if state == infraConvergenceStale {
+		remedy := storageClearInstruction()
+		if present, err := infraPathExists(target.RetainedBackupPath()); err == nil && present {
+			remedy = storageRecopyFromBackupInstruction()
+		}
+		fmt.Fprintf(stdout, "converged: no (the marker is present and the database is gone)\nblocking invariant: re-copy the binding with `%s`\n", remedy) //nolint:errcheck // best-effort stdout
+		return 1
+	}
 	if state != infraConvergenceMarked {
 		fmt.Fprintf(stdout, "converged: no\nblocking invariant: boot never migrates; run `%s`\n", storageMigrationCommand) //nolint:errcheck // best-effort stdout
 		return 1
@@ -540,8 +609,8 @@ func doStorageStatus(request storageOperatorRequest, stdout, stderr io.Writer) i
 		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	fmt.Fprintf(stdout, "converged: yes\n  proven copy: %d bead(s)\n  stranded:    %d\n  removed since cutover: %d\n", //nolint:errcheck // best-effort stdout
-		len(proven), len(gap.Stranded), gap.RemovedSinceCutover)
+	fmt.Fprintf(stdout, "converged: yes\n  proven copy: %d bead(s)\n  stranded:    %d\n  retained copies: %d\n", //nolint:errcheck // best-effort stdout
+		len(proven), len(gap.Stranded), len(gap.Retained))
 	if len(gap.Stranded) > 0 {
 		fmt.Fprintf(stdout, "  stranded ids: %s\n", strings.Join(gap.Stranded, ", ")) //nolint:errcheck // best-effort stdout
 		// The exit code is the deploy gate; the remedy is what an operator does
@@ -549,6 +618,28 @@ func doStorageStatus(request storageOperatorRequest, stdout, stderr io.Writer) i
 		// an operator would reach for after a non-zero `gc storage status` said
 		// nothing about how to make it zero again.
 		fmt.Fprintf(stdout, "blocking invariant: the binding cannot read these beads. Stop every writer and copy them in with `%s`\n", storageRecoveryInstruction()) //nolint:errcheck // best-effort stdout
+		return 1
+	}
+	note, notePresent, err := readInfraClearedNote(request.CityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if len(note.LostCrossEdges) > 0 {
+		fmt.Fprintf(stdout, "  lost cross-store edges: %d (the work store could not keep these edges from work beads into beads the migration moved; each is recorded in the retained-source backup)\n", len(note.LostCrossEdges)) //nolint:errcheck // best-effort stdout
+		for _, edge := range note.LostCrossEdges {
+			fmt.Fprintf(stdout, "    %s\n", edge) //nolint:errcheck // best-effort stdout
+		}
+	}
+	if notePresent && !note.Complete {
+		fmt.Fprintf(stdout, "  clear: INTERRUPTED (%d bead(s) in the unfinished session)\nblocking invariant: an earlier clear of the retained copies did not finish. Stop the city and finish it with `%s`\n", len(note.Pending), storageClearInstruction()) //nolint:errcheck // best-effort stdout
+		return 1
+	}
+	if len(gap.Retained) > 0 {
+		fmt.Fprintf(stdout, "  retained ids: %s\n", infraStrandedIDList(gap.Retained)) //nolint:errcheck // best-effort stdout
+		// The same refusal boot makes: a second row under an id the binding
+		// owns is served to every reader that reaches the work store first.
+		fmt.Fprintf(stdout, "blocking invariant: the work store still holds copies of beads the binding owns, and readers that reach it first are served the frozen copy. Stop the city and clear them with `%s`\n", storageClearInstruction()) //nolint:errcheck // best-effort stdout
 		return 1
 	}
 	return exitCode
@@ -598,6 +689,90 @@ func reportBindingRelics(target infraBindingTarget, logPrefix string, stdout, st
 	fmt.Fprintf(stdout, "open relics: %d (carried across under their original ids; closed relics stay readable by id, so a binding that ever held one keeps its residence probe)\n", len(relics)) //nolint:errcheck // best-effort stdout
 }
 
+// cityWorkStoreRows lists the copy's source — the city work store, opened
+// the way the migration opens it — keyed by id, for the rig census.
+func cityWorkStoreRows(cityPath string) (map[string]beads.Bead, error) {
+	source, err := openInfraMigrationSource(cityPath)
+	if err != nil {
+		return nil, fmt.Errorf("opening the city work store for the rig census: %w (the census must complete before a cutover, so this is a refusal rather than a skip)", err)
+	}
+	rows, listErr := source.List(beads.ListQuery{IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
+	closeErr := closeBeadStoreHandle(source)
+	if listErr != nil {
+		return nil, fmt.Errorf("listing the city work store for the rig census: %w", listErr)
+	}
+	if closeErr != nil {
+		return nil, fmt.Errorf("closing the city work store after the rig census: %w", closeErr)
+	}
+	byID := make(map[string]beads.Bead, len(rows))
+	for _, bead := range rows {
+		byID[bead.ID] = bead
+	}
+	return byID, nil
+}
+
+// censusRowDiffers reports whether the city work store holds the rig's row in
+// another state than the rig scope shows: state the copy would not carry, so a
+// cutover would keep the city's version and drop the rig's.
+//
+// The same state is what the migration's own equality stage means by a
+// faithful copy: beadCopyDifference, which witnesses every durable field —
+// title, status, type, description, priority, assignee, sender, parent, ref,
+// the two tier bits, the timestamps, defer_until, close_reason, labels as a set
+// and metadata as a map — under a reflection guard that makes a field added to
+// beads.Bead either compared there, and so here, or exempted with its reason.
+// The payload is compared rather than trusted to a version stamp because a
+// listing carries none to rely on: the native store clears Revision on every
+// list row and never fills UpdatedAt, and bd keeps updated_at when it adds a
+// label or an edge.
+//
+// Two list rows are not a source row and its copy, so four things differ from
+// that stage:
+//   - Dependencies are compared as a set of (target, type) edges; the copy's
+//     stage reads them through DepList instead. A store whose list rows carry
+//     no edges shows both sides empty, so there a divergence in edges alone is
+//     not seen. Needs is create-time shorthand for edges, which the copy
+//     strips rather than carries, and is not compared.
+//   - Revision is compared only when both rows publish one. Zero is "no token",
+//     not revision 0 (revisionMoved reads it the same way), so a listing that
+//     publishes none is neither a match nor a mismatch.
+//   - A timestamp is compared only when both rows carry it, for the same reason.
+//   - IsBlocked is not compared: it is bd's readiness projection, not stored
+//     state, and the copy strips it.
+func censusRowDiffers(city, rig beads.Bead) bool {
+	if city.Revision != 0 && rig.Revision != 0 && city.Revision != rig.Revision {
+		return true
+	}
+	if stringSetDifference("dependency", censusEdges(rig.Dependencies), censusEdges(city.Dependencies)) != "" {
+		return true
+	}
+	rig, city = censusComparable(rig, city)
+	return beadCopyDifference(rig, city) != ""
+}
+
+// censusComparable clears what censusRowDiffers does not compare from both
+// rows: the readiness projection, and each timestamp either row lacks.
+func censusComparable(a, b beads.Bead) (beads.Bead, beads.Bead) {
+	a.IsBlocked, b.IsBlocked = nil, nil
+	if a.CreatedAt.IsZero() || b.CreatedAt.IsZero() {
+		a.CreatedAt, b.CreatedAt = time.Time{}, time.Time{}
+	}
+	if a.UpdatedAt.IsZero() || b.UpdatedAt.IsZero() {
+		a.UpdatedAt, b.UpdatedAt = time.Time{}, time.Time{}
+	}
+	return a, b
+}
+
+// censusEdges renders a row's dependency edges as set members, so two rows'
+// edges compare without regard to the order a store lists them in.
+func censusEdges(deps []beads.Dep) []string {
+	edges := make([]string, 0, len(deps))
+	for _, dep := range deps {
+		edges = append(edges, fmt.Sprintf("%s (%s)", dep.DependsOnID, dep.Type))
+	}
+	return edges
+}
+
 // cityMigrationGuardDirectory returns the city .gc directory the migration
 // guard locks.
 func cityMigrationGuardDirectory(cityPath string) string {
@@ -621,12 +796,57 @@ var openStorageScopeStore = openStoreAtForCity
 // than counted or repaired. Repairing it would mean importing rig rows into the
 // city work store, and this binary carries no such importer — naming one in the
 // remedy would send the operator to a command that does not exist.
+//
+// A rig whose binding IS the city work store is not residue. A unified city's
+// rig .beads can carry a copy of the city's own remote binding, or resolve the
+// same database, and its rows are then the copy's source rows: listing it
+// lists the city. Which binding a scope resolves to is bd's to know, not gc's
+// (see work_topology_binding.go), so the census asks the question it actually
+// cares about instead: does the copy's source hold this row in the same state
+// (censusRowDiffers)? Such a row is carried by the copy; anything else —
+// absent, or the same id in another state — would be stranded and is refused
+// by name, with the remedy each needs.
 func censusRigInfraResidue(cityPath string, cfg *config.City) error {
 	if cfg == nil {
 		return nil
 	}
-	var found []string
-	for _, rig := range cfg.Rigs {
+	candidates, err := listRigInfraRows(cityPath, cfg.Rigs)
+	if err != nil {
+		return err
+	}
+	if len(candidates) == 0 {
+		return nil
+	}
+	carried, err := cityWorkStoreRows(cityPath)
+	if err != nil {
+		return err
+	}
+	var absent, diverged []string
+	for _, row := range candidates {
+		name := fmt.Sprintf("%s (rig %s)", row.bead.ID, row.rig)
+		city, ok := carried[row.bead.ID]
+		switch {
+		case !ok:
+			absent = append(absent, name)
+		case censusRowDiffers(city, row.bead):
+			diverged = append(diverged, name)
+		}
+	}
+	return rigResidueRefusal(absent, diverged)
+}
+
+// rigInfraRow is one infrastructure row a rig scope lists, with the rig that
+// listed it.
+type rigInfraRow struct {
+	bead beads.Bead
+	rig  string
+}
+
+// listRigInfraRows lists the infrastructure rows every bound rig scope holds.
+// A rig that cannot be opened, listed or closed fails the census.
+func listRigInfraRows(cityPath string, rigs []config.Rig) ([]rigInfraRow, error) {
+	var found []rigInfraRow
+	for _, rig := range rigs {
 		root := strings.TrimSpace(rig.Path)
 		if root == "" {
 			// An unbound rig has no workspace of its own; openStoreAtForCity
@@ -635,27 +855,46 @@ func censusRigInfraResidue(cityPath string, cfg *config.City) error {
 		}
 		store, err := openStorageScopeStore(root, cityPath)
 		if err != nil {
-			return fmt.Errorf("censusing rig %q for infrastructure beads: %w (the census must complete before a cutover, so this is a refusal rather than a skip)", rig.Name, err)
+			return nil, fmt.Errorf("censusing rig %q for infrastructure beads: %w (the census must complete before a cutover, so this is a refusal rather than a skip)", rig.Name, err)
 		}
 		rows, listErr := store.List(beads.ListQuery{IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
 		closeErr := closeBeadStoreHandle(store)
 		if listErr != nil {
-			return fmt.Errorf("listing rig %q: %w", rig.Name, listErr)
+			return nil, fmt.Errorf("listing rig %q: %w", rig.Name, listErr)
 		}
 		if closeErr != nil {
-			return fmt.Errorf("closing rig %q after the census: %w", rig.Name, closeErr)
+			return nil, fmt.Errorf("closing rig %q after the census: %w", rig.Name, closeErr)
 		}
 		for _, bead := range rows {
 			if coordclass.Classify(bead) == coordclass.ClassWork {
 				continue
 			}
-			found = append(found, fmt.Sprintf("%s (rig %s)", bead.ID, rig.Name))
+			found = append(found, rigInfraRow{bead: bead, rig: rig.Name})
 		}
 	}
-	if len(found) == 0 {
+	return found, nil
+}
+
+// rigResidueRefusal names every rig row a cutover would strand, split by the
+// remedy each needs. A row the city work store lacks has to be moved into it.
+// A row it holds in another state cannot be moved — the id is taken — so the
+// two have to be brought into agreement; and on a running city the census may
+// only have read the row on either side of a write, which a stopped city rules
+// out.
+func rigResidueRefusal(absent, diverged []string) error {
+	var reasons []string
+	if len(absent) > 0 {
+		sort.Strings(absent)
+		reasons = append(reasons, fmt.Sprintf("%d infrastructure bead(s) live in rig scopes rather than in this city's work store, and the copy reads only the work store, so a cutover would leave them unreachable: %s. Move them into the city work store before migrating",
+			len(absent), strings.Join(absent, ", ")))
+	}
+	if len(diverged) > 0 {
+		sort.Strings(diverged)
+		reasons = append(reasons, fmt.Sprintf("%d infrastructure bead(s) in rig scopes are held by this city's work store in another state, and the copy carries only the work store's state, so a cutover would drop the rig's: %s. Bring each rig row and the work store's row into agreement before migrating; if the city is running, a write may have landed between the two reads, so stop it (%s) and check again first",
+			len(diverged), strings.Join(diverged, ", "), storageStopCommand))
+	}
+	if len(reasons) == 0 {
 		return nil
 	}
-	sort.Strings(found)
-	return fmt.Errorf("%d infrastructure bead(s) live in rig scopes rather than in this city's work store, and the copy reads only the work store, so a cutover would leave them unreachable: %s. Move them into the city work store before migrating",
-		len(found), strings.Join(found, ", "))
+	return errors.New(strings.Join(reasons, ". "))
 }

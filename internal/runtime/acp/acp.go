@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -33,9 +34,17 @@ type Config struct {
 	HandshakeTimeout  time.Duration // default 30s
 	NudgeBusyTimeout  time.Duration // default 60s
 	OutputBufferLines int           // default 1000
+	// TranscriptRoot is the directory receiving JSON-RPC capture transcripts
+	// (citylayout.ACPTranscriptsDir for a city). Empty disables capture. See
+	// capture.go for the file layout and format.
+	TranscriptRoot string
 	// StopGrace is how long Stop waits after SIGTERM before escalating to
 	// SIGKILL. Default runtime.ManagedProcessStopGrace.
 	StopGrace time.Duration
+	// CancelTimeout is how long Interrupt waits for session/cancel to end
+	// the in-flight turn before falling back to SIGINT. Default
+	// DefaultCancelTimeout.
+	CancelTimeout time.Duration
 }
 
 func (c *Config) handshakeTimeout() time.Duration {
@@ -83,8 +92,11 @@ type Provider struct {
 	conns         map[string]*sessionConn // in-process tracking
 	workDirs      map[string]string       // session name → workDir (for CopyTo)
 	cfg           Config
+	events        *sessionEventHub
+	turnEvents    turnEventHub
 	activityWrite func(path string, data []byte) error                                         // test seam
 	handshakeFunc func(context.Context, *sessionConn, string, []runtime.MCPServerConfig) error // test seam
+	dial          func(network, addr string, timeout time.Duration) (net.Conn, error)          // test seam
 }
 
 // Compile-time check.
@@ -92,6 +104,10 @@ var (
 	_ runtime.Provider                    = (*Provider)(nil)
 	_ runtime.InteractionProvider         = (*Provider)(nil)
 	_ runtime.TransportCapabilityProvider = (*Provider)(nil)
+	_ runtime.IdleWaitProvider            = (*Provider)(nil)
+	_ runtime.IdleSnapshotProvider        = (*Provider)(nil)
+	_ runtime.LivenessObserverWithError   = (*Provider)(nil)
+	_ runtime.ListingAttestation          = (*Provider)(nil)
 )
 
 // NewProvider returns an ACP [Provider] that stores socket files in
@@ -122,6 +138,7 @@ func NewProviderWithDir(dir string, cfg Config) *Provider {
 		conns:    make(map[string]*sessionConn),
 		workDirs: make(map[string]string),
 		cfg:      cfg,
+		events:   newSessionEventHub(),
 	}
 }
 
@@ -175,8 +192,8 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	// advertise liveness. Discard sidecars from a dead incarnation first.
 	p.cleanupMeta(name)
 	seedMeta, _ := runtime.SplitEnvForMetaSeed(cfg.Env)
-	for key, value := range seedMeta {
-		if err := p.SetMeta(name, key, value); err != nil {
+	for _, key := range runtime.MetaSeedKeys(seedMeta) {
+		if err := p.SetMeta(name, key, seedMeta[key]); err != nil {
 			p.cleanupMeta(name)
 			p.mu.Unlock()
 			return fmt.Errorf("seeding metadata for %q (%s): %w", name, key, err)
@@ -254,6 +271,15 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 			env = append(env, k+"="+cfg.Env[k])
 		}
 	}
+	// The control-socket marker lets any gc process attribute this agent, and
+	// the tool children that inherit its environment, to a live owner; see
+	// [Provider.FindRuntimesBySessionID]. It is appended after the cfg.Env
+	// loop above and deliberately outranks a caller's entry for this key,
+	// including the empty spelling that would otherwise withhold it:
+	// attribution must not be caller-settable, or a caller could point the
+	// marker at any live listener to make its agent read as tracked, or
+	// withhold it to hide the agent from its own owner's handshake rescue.
+	env = append(envWithoutKey(env, controlSocketEnv), controlSocketEnv+"="+p.controlSocketMarker(name))
 	cmd.Env = env
 
 	// Set up stdio pipes for JSON-RPC.
@@ -300,9 +326,11 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	// Close the write end — child inherits it; we only read.
 	stderrW.Close() //nolint:errcheck
 
-	// Create control socket for cross-process discovery.
+	// Create control socket for cross-process discovery. Its interrupt
+	// command runs the owner's Interrupt logic once the connection exists.
 	processDone := make(chan struct{})
-	lis, err := p.startControlSocket(name, cmd, processDone)
+	var owned atomic.Pointer[sessionConn]
+	lis, err := p.startControlSocket(name, cmd, processDone, p.ownedInterrupt(name, &owned))
 	if err != nil {
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		_ = cmd.Wait()
@@ -311,6 +339,9 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	}
 
 	sc := newSessionConn(cmd, stdinPipe, lis, p.cfg.outputBufferLines(), processDone)
+	sc.token = seedMeta["GC_INSTANCE_TOKEN"]
+	sc.capture = p.openCapture(name, cfg.Env, cmd.Process.Pid)
+	owned.Store(sc)
 
 	// Start readLoop before handshake so we can receive responses.
 	go sc.readLoop(stdoutPipe)
@@ -330,13 +361,15 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		// the stdout read end itself, so bytes still unread at that point are
 		// not guaranteed to be dispatched.
 		<-sc.readDone
-		sc.drainPending()
+		sc.capture.close(captureCloseTimeout)
+		sc.drainPending(nil)
 		sc.closeActivityPublisher()
 		_ = os.Remove(p.sockNamePath(name))
 		// Close unlinks the Unix socket. Do not remove its path again: another
 		// provider can bind a replacement as soon as Close makes it disappear.
 		lis.Close() //nolint:errcheck
 		close(processDone)
+		sc.markExited()
 	}()
 
 	// Perform ACP handshake with a deadline. hsCtx (created above with
@@ -374,11 +407,11 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		<-sc.done
 		clearSentinel()
-		// Include stderr tail in the error for diagnostics.
-		if stderr := stderrBuf.String(); stderr != "" {
-			return fmt.Errorf("acp handshake for %q: %w\nagent stderr:\n%s", name, err, stderr)
-		}
-		return fmt.Errorf("acp handshake for %q: %w", name, err)
+		// The monitor closed done after cmd.Wait returned, so ProcessState is
+		// safe to read. An agent that already exited on its own keeps its exit
+		// status; one our SIGKILL ended reports a signal (ExitCode -1), so a 75
+		// here is always the agent's own choice.
+		return acpHandshakeStartError(name, err, cmd.ProcessState.ExitCode(), stderrBuf.String())
 	}
 
 	// Before committing the real conn, check whether Stop was called
@@ -430,6 +463,10 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		clearSentinel()
 		return fmt.Errorf("session %q was stopped during startup", name)
 	}
+	// Attach before publishing the connection so Stop, which finds it only
+	// through p.conns, always reports closed after the attached exit.
+	p.attachSessionEvents(name, sc)
+	p.attachTurnEvents(name, cfg.Env, sc)
 	p.conns[name] = sc
 	p.mu.Unlock()
 	// Stop must be able to close stdin even if initial delivery blocks. Failed
@@ -442,6 +479,51 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	}
 
 	return nil
+}
+
+// acpHandshakeStartError formats a failed handshake's Start error, including
+// the agent's stderr tail for diagnostics. exitCode is the reaped agent's
+// [os.ProcessState.ExitCode]: -1 when a signal ended it (including Start's own
+// SIGKILL) or it was never reaped. When the agent exited with
+// [runtime.ExitCodeTempFail], the launcher declared an endpoint capacity
+// refusal and the error is a [runtime.CapacityError].
+func acpHandshakeStartError(name string, hsErr error, exitCode int, stderr string) error {
+	err := fmt.Errorf("acp handshake for %q: %w", name, hsErr)
+	if stderr != "" {
+		err = fmt.Errorf("acp handshake for %q: %w\nagent stderr:\n%s", name, hsErr, stderr)
+	}
+	if exitCode == runtime.ExitCodeTempFail {
+		return &runtime.CapacityError{ExitCode: exitCode, Source: runtime.CapacitySourceExitStatus, Err: err}
+	}
+	return err
+}
+
+// openCapture opens the JSON-RPC capture transcript for one agent start, or
+// returns nil (capture disabled) when no transcript root is configured, the
+// session environment lacks GC_SESSION_ID or GC_CONTINUATION_EPOCH, or the file
+// cannot be opened. Capture problems are reported on stderr and never fail
+// the session.
+func (p *Provider) openCapture(name string, env map[string]string, pid int) *transcriptCapture {
+	if p.cfg.TranscriptRoot == "" {
+		return nil
+	}
+	id := captureIdentity{
+		SessionID:         env["GC_SESSION_ID"],
+		SessionName:       name,
+		ContinuationEpoch: env["GC_CONTINUATION_EPOCH"],
+		RuntimeEpoch:      env["GC_RUNTIME_EPOCH"],
+		PID:               pid,
+	}
+	if id.SessionID == "" || id.ContinuationEpoch == "" {
+		fmt.Fprintf(os.Stderr, "acp: transcript capture for %q disabled: session env lacks GC_SESSION_ID or GC_CONTINUATION_EPOCH\n", name)
+		return nil
+	}
+	c, err := openTranscriptCapture(p.cfg.TranscriptRoot, id)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "acp: transcript capture for %q disabled: %v\n", name, err)
+		return nil
+	}
+	return c
 }
 
 func envWithoutKey(env []string, key string) []string {
@@ -484,7 +566,13 @@ func (p *Provider) handshake(ctx context.Context, sc *sessionConn, workDir strin
 
 	// Step 3: Send "session/new" request.
 	newReq, _ := newSessionNewRequest(workDir, mcpServers)
-	ch, err = sc.sendRequest(newReq)
+	// session/new carries MCP server env, headers and URLs; the capture
+	// transcript gets a redacted copy.
+	redactedParams, err := redactedSessionNewParams(workDir, mcpServers)
+	if err != nil {
+		return fmt.Errorf("sending session/new: %w", err)
+	}
+	ch, err = sc.sendRequestRedacted(newReq, redactedParams)
 	if err != nil {
 		return fmt.Errorf("sending session/new: %w", err)
 	}
@@ -561,13 +649,23 @@ func (p *Provider) Stop(name string) error {
 
 	if ok {
 		if !sc.alive() {
-			p.cleanupMeta(name)
+			p.cleanupOwnMeta(name, sc.token)
+			// cmd != nil is the observable proxy for "this conn came from
+			// newSessionConn", which is what guarantees exitReported is
+			// non-nil; emitClosed waits on that channel, and waiting on a nil
+			// one would block Stop forever. Start's sentinel conn is the only
+			// conn built outside newSessionConn, and Stop returns above before
+			// reaching here for it.
+			if sc.cmd != nil {
+				sc.emitClosed()
+			}
 			return nil
 		}
 		_ = sc.stdin.Close()
 		err := terminateProcess(sc, p.cfg.stopGrace())
 		if err == nil || runtime.IsSessionGone(err) {
-			p.cleanupMeta(name)
+			p.cleanupOwnMeta(name, sc.token)
+			sc.emitClosed()
 			return nil
 		}
 		return err
@@ -582,18 +680,27 @@ func (p *Provider) Stop(name string) error {
 	return err
 }
 
-// Interrupt sends SIGINT to the named session's process.
-// Best-effort: returns nil if the session doesn't exist.
+// Interrupt cancels the session's in-flight prompt turn with ACP session/cancel
+// and waits for it to settle: outstanding permission requests are answered
+// canceled first, then session/cancel is sent, and the turn gets
+// Config.CancelTimeout to end. A turn still open after that gets SIGINT to its
+// process group, twice at most, a short wait each; if it is still open,
+// Interrupt returns an error wrapping runtime.ErrInterruptNotSettled and the
+// agent keeps running. Interrupt never kills the agent. With no turn in
+// flight it sends nothing and returns nil. An agent that exits during the
+// wait counts as settled.
+//
+// Best-effort for sessions this provider does not own: it returns nil if the
+// session doesn't exist. A session owned by another process is interrupted
+// there, through the control socket. The owner acknowledges the command at
+// once and runs the cancel and settle itself, so this call does not wait for
+// the turn to end, does not learn whether it did, and returns nil.
 func (p *Provider) Interrupt(name string) error {
 	p.mu.Lock()
 	sc, ok := p.conns[name]
 	p.mu.Unlock()
 	if ok {
-		// Guard against sentinel sessionConn (nil cmd during handshake).
-		if sc.cmd == nil {
-			return nil
-		}
-		return syscall.Kill(-sc.cmd.Process.Pid, syscall.SIGINT)
+		return sc.interrupt(name, p.cfg.cancelTimeout())
 	}
 
 	// Fall back to socket (cross-process case).
@@ -603,14 +710,26 @@ func (p *Provider) Interrupt(name string) error {
 
 // IsRunning reports whether the named session has a live process.
 func (p *Provider) IsRunning(name string) bool {
+	obs, _ := p.ObserveLivenessWithError(name, nil)
+	return obs.Running
+}
+
+// ObserveLivenessWithError implements [runtime.LivenessObserverWithError]. A
+// session this provider owns answers from its process; any other answers from
+// its control socket (see probeSessionSocket), so a probe that cannot tell
+// returns an error wrapping [runtime.ErrRuntimeUnavailable] instead of
+// absence. Process names are ignored, as in ProcessAlive.
+func (p *Provider) ObserveLivenessWithError(name string, _ []string) (runtime.Liveness, error) {
 	p.mu.Lock()
 	sc, ok := p.conns[name]
 	p.mu.Unlock()
 
 	if ok {
-		return sc.alive()
+		alive := sc.alive()
+		return runtime.Liveness{Running: alive, Alive: alive}, nil
 	}
-	return p.socketAlive(name)
+	present, err := p.probeSessionSocket(name)
+	return runtime.Liveness{Running: present, Alive: present}, err
 }
 
 // IsAttached always returns false — ACP sessions have no terminal.
@@ -661,9 +780,15 @@ func (p *Provider) nudgeConn(name string, sc *sessionConn, content []runtime.Con
 		return nil
 	}
 
-	// Wait for agent to become idle.
-	if !sc.waitIdle(p.cfg.nudgeBusyTimeout()) {
-		return fmt.Errorf("agent %q busy, timed out waiting for idle", name)
+	// Wait for agent to become idle. A turn held open by a permission
+	// request refuses instead, so the answer is not stuck behind this wait.
+	// The next turn starts only after the last one's idle channel has
+	// closed; interrupt's guards depend on that (see markBusyLocked).
+	if err := sc.waitNudgeable(p.cfg.nudgeBusyTimeout()); err != nil {
+		if errors.Is(err, runtime.ErrNudgeRefusedPendingInteraction) {
+			return fmt.Errorf("%w: %s", err, name)
+		}
+		return fmt.Errorf("agent %q busy, %w", name, err)
 	}
 
 	sc.mu.Lock()
@@ -678,11 +803,26 @@ func (p *Provider) nudgeConn(name string, sc *sessionConn, content []runtime.Con
 	// Set busy state BEFORE sendRequest so that dispatch can match the
 	// response ID and clear it. If we set it after, a fast agent could
 	// respond before setActivePrompt runs, leaving busy set permanently.
-	sc.setActivePrompt(id)
+	if !sc.setActivePrompt(id) {
+		// The stdout reader has drained, so no response could settle this
+		// turn. An exiting agent keeps the best-effort nil contract. The bound
+		// is stopGrace() for the same reason the pipe-write branch below uses
+		// it: both wait out the identical "agent is exiting" race, so they must
+		// move together when Config.StopGrace is tuned. A live agent whose
+		// output can no longer be read is reported as an error instead of
+		// receiving a turn that can never finish, but only after the full
+		// bound, which is runtime.ManagedProcessStopGrace by default.
+		select {
+		case <-sc.done:
+			return nil
+		case <-time.After(p.cfg.stopGrace()):
+			return fmt.Errorf("sending prompt to %q: %w", name, errACPConnClosed(name))
+		}
+	}
 
 	ch, err := sc.sendRequest(msg)
 	if err != nil {
-		sc.clearActivePrompt(id)
+		sc.abandonPrompt(id, err)
 		// Non-pipe failures (e.g., marshal errors) have nothing to do with
 		// the agent lifecycle, so surface them immediately rather than
 		// stalling the caller on sc.done.
@@ -709,8 +849,8 @@ func (p *Provider) nudgeConn(name string, sc *sessionConn, content []runtime.Con
 		}
 	}
 
-	// Drain the response channel in the background. If the agent
-	// returns a JSON-RPC error, log it rather than silently dropping.
+	// Drain the response channel in the background. The read loop records
+	// the turn outcome; a JSON-RPC error is also logged for operators.
 	go func() {
 		resp, ok := <-ch
 		if !ok {
@@ -724,20 +864,6 @@ func (p *Provider) nudgeConn(name string, sc *sessionConn, content []runtime.Con
 	}()
 
 	return nil
-}
-
-// Pending reports structured pending interactions. ACP only tracks whether an
-// outbound prompt is in flight; that busy state is not a user-facing blocking
-// interaction, so the provider intentionally reports this capability as
-// unsupported.
-func (p *Provider) Pending(_ string) (*runtime.PendingInteraction, error) {
-	return nil, runtime.ErrInteractionUnsupported
-}
-
-// Respond resolves a pending structured interaction. ACP does not currently
-// expose those interactions over the protocol, so responses are unsupported.
-func (p *Provider) Respond(_ string, _ runtime.InteractionResponse) error {
-	return runtime.ErrInteractionUnsupported
 }
 
 // SendKeys is a no-op for ACP sessions (no terminal).
@@ -775,6 +901,13 @@ func (p *Provider) SetMeta(name, key, value string) error {
 	}
 	return runtime.WritePrivateFile(p.metaPath(name, key), []byte(value))
 }
+
+// LocalIdentitySidecar implements [runtime.IdentitySidecarProvider]: GetMeta
+// reads the session's local 0600 sidecar.
+func (p *Provider) LocalIdentitySidecar() bool { return true }
+
+// LivenessReadsFresh implements [runtime.FreshByConstruction].
+func (p *Provider) LivenessReadsFresh() bool { return true }
 
 // GetMeta retrieves a metadata value from a sidecar file.
 // Returns ("", nil) if the key is not set.
@@ -895,7 +1028,9 @@ func (p *Provider) CopyTo(name, src, relDst string) error {
 }
 
 // ListRunning returns the names of all running sessions whose names
-// match the given prefix, discovered via socket files.
+// match the given prefix, discovered via socket files. A socket that cannot be
+// classified (see probeSessionSocket) leaves its name out, so the names come
+// back with a [runtime.PartialListError] rather than as a complete list.
 func (p *Provider) ListRunning(prefix string) ([]string, error) {
 	entries, err := os.ReadDir(p.dir)
 	if err != nil {
@@ -904,7 +1039,10 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 		}
 		return nil, err
 	}
-	var names []string
+	var (
+		names    []string
+		failures []error
+	)
 	for _, e := range entries {
 		n := e.Name()
 		if !strings.HasSuffix(n, ".sock") {
@@ -914,15 +1052,39 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 		if !strings.HasPrefix(sn, prefix) {
 			continue
 		}
-		if p.socketAlive(sn) {
+		present, err := p.probeSessionSocket(sn)
+		if err != nil {
+			failures = append(failures, err)
+			continue
+		}
+		if present {
 			names = append(names, sn)
 		}
+	}
+	if len(failures) > 0 {
+		return names, &runtime.PartialListError{Err: errors.Join(failures...)}
 	}
 	return names, nil
 }
 
+// ListRunningComplete implements [runtime.ListingAttestation]: a socket that
+// cannot be classified makes ListRunning partial, so an error-free result
+// lists every running session.
+func (p *Provider) ListRunningComplete() bool { return true }
+
 func (p *Provider) metaPath(name, key string) string {
 	return filepath.Join(p.dir, metaFilePrefix(name)+".meta."+metaFileKey(key))
+}
+
+// cleanupOwnMeta clears name's sidecars only while they still carry token, the
+// one the stopped incarnation seeded. The lifecycle lock keeps any Start in
+// this or another provider out while it runs, but a replacement another
+// provider started earlier, beside a dead or unreachable conn of this one, has
+// reseeded the sidecars with its own token and keeps them.
+func (p *Provider) cleanupOwnMeta(name, token string) {
+	if current, err := p.GetMeta(name, "GC_INSTANCE_TOKEN"); err == nil && current == token {
+		p.cleanupMeta(name)
+	}
 }
 
 // cleanupMeta removes all sidecar meta files for the named session.
@@ -973,8 +1135,22 @@ func (p *Provider) socketNameForEntry(key string) string {
 	return name
 }
 
+// ownedInterrupt returns the control socket's interrupt command for session
+// name. The socket starts before the connection exists, so the command runs
+// the owner's interrupt on the connection Start later stores in owned, and
+// does nothing until then: no turn can be in flight before that.
+func (p *Provider) ownedInterrupt(name string, owned *atomic.Pointer[sessionConn]) func() error {
+	return func() error {
+		if sc := owned.Load(); sc != nil {
+			return sc.interrupt(name, p.cfg.cancelTimeout())
+		}
+		return nil
+	}
+}
+
 // startControlSocket creates a unix socket for cross-process commands.
-func (p *Provider) startControlSocket(name string, cmd *exec.Cmd, done <-chan struct{}) (net.Listener, error) {
+// interrupt runs the owner's Interrupt logic for the "interrupt" command.
+func (p *Provider) startControlSocket(name string, cmd *exec.Cmd, done <-chan struct{}, interrupt func() error) (net.Listener, error) {
 	sp := p.sockPath(name)
 	namePath := p.sockNamePath(name)
 	os.Remove(sp) //nolint:errcheck
@@ -993,15 +1169,17 @@ func (p *Provider) startControlSocket(name string, cmd *exec.Cmd, done <-chan st
 			if err != nil {
 				return
 			}
-			go handleControlConn(conn, cmd, done, p.cfg.stopGrace())
+			go handleControlConn(conn, cmd, done, p.cfg.stopGrace(), interrupt)
 		}
 	}()
 	return lis, nil
 }
 
 // handleControlConn reads a command from the connection and acts on the process.
-// A "stop" escalates from SIGTERM to SIGKILL after stopGrace.
-func handleControlConn(conn net.Conn, cmd *exec.Cmd, done <-chan struct{}, stopGrace time.Duration) {
+// A "stop" escalates from SIGTERM to SIGKILL after stopGrace. An "interrupt"
+// is fire-and-forget: it replies at once and runs interrupt, the owner's
+// session/cancel-and-settle logic, in the background.
+func handleControlConn(conn net.Conn, cmd *exec.Cmd, done <-chan struct{}, stopGrace time.Duration, interrupt func() error) {
 	defer conn.Close()                                     //nolint:errcheck
 	conn.SetReadDeadline(time.Now().Add(10 * time.Second)) //nolint:errcheck
 	scanner := bufio.NewScanner(conn)
@@ -1013,7 +1191,15 @@ func handleControlConn(conn net.Conn, cmd *exec.Cmd, done <-chan struct{}, stopG
 		_ = runtime.TerminateManagedProcess(cmd, done, stopGrace)
 		conn.Write([]byte("ok\n")) //nolint:errcheck
 	case "interrupt":
-		_ = runtime.SignalProcessGroup(cmd, syscall.SIGINT)
+		// The settle can take the whole cancel_timeout plus the SIGINT
+		// retries, far longer than the caller's socket deadline, and the
+		// caller does not wait for it. Nobody reads a result, so a turn
+		// that does not settle is only logged here.
+		go func() {
+			if err := interrupt(); err != nil {
+				fmt.Fprintf(os.Stderr, "acp: interrupt via control socket: %v\n", err)
+			}
+		}()
 		conn.Write([]byte("ok\n")) //nolint:errcheck
 	case "ping":
 		conn.Write([]byte("ok\n")) //nolint:errcheck
@@ -1022,19 +1208,55 @@ func handleControlConn(conn net.Conn, cmd *exec.Cmd, done <-chan struct{}, stopG
 	}
 }
 
-// socketAlive checks if a session is alive by pinging its control socket.
+// socketAlive reports whether the session's control socket accepts a
+// connection. A socket that cannot be classified reads as not alive.
 func (p *Provider) socketAlive(name string) bool {
+	present, _ := p.probeSessionSocket(name)
+	return present
+}
+
+// socketProbeTimeout bounds one control-socket dial in probeSessionSocket.
+const socketProbeTimeout = 500 * time.Millisecond
+
+// probeSessionSocket classifies the named session's control socket, trying the
+// hashed path and then the legacy name-based one. It is the one answer behind
+// IsRunning, ObserveLivenessWithError and ListRunning:
+//   - (true, nil): a path accepted the connection. The owner closes its
+//     listener when the process exits, so the session is running even when it
+//     is too busy to answer a ping.
+//   - (false, nil): every path is missing, refuses connections, or is too long
+//     to bind (see [runtime.ClassifyControlSocketDial] for what refused means
+//     off Linux).
+//   - (false, err): no path connected and one failed another way (a dial
+//     timeout, EACCES); err wraps [runtime.ErrRuntimeUnavailable].
+func (p *Provider) probeSessionSocket(name string) (bool, error) {
+	var unknown error
 	for _, sp := range []string{p.sockPath(name), p.legacySockPath(name)} {
-		conn, err := net.DialTimeout("unix", sp, 500*time.Millisecond)
-		if err != nil {
+		if runtime.UnixSocketPathTooLong(sp) {
 			continue
 		}
-		_ = conn.Close()
-		if p.sendSocketCommand(name, "ping", 500*time.Millisecond) == nil {
-			return true
+		conn, err := p.dialSocket(sp, socketProbeTimeout)
+		switch runtime.ClassifyControlSocketDial(err) {
+		case runtime.ControlSocketPresent:
+			_ = conn.Close()
+			return true, nil
+		case runtime.ControlSocketUnknown:
+			if unknown == nil {
+				unknown = err
+			}
 		}
 	}
-	return false
+	if unknown != nil {
+		return false, fmt.Errorf("%w: acp control socket for %q: %w", runtime.ErrRuntimeUnavailable, name, unknown)
+	}
+	return false, nil
+}
+
+func (p *Provider) dialSocket(path string, timeout time.Duration) (net.Conn, error) {
+	if p.dial != nil {
+		return p.dial("unix", path, timeout)
+	}
+	return net.DialTimeout("unix", path, timeout)
 }
 
 // sendSocketCommand connects to the session's control socket and sends a command.
@@ -1044,8 +1266,13 @@ func (p *Provider) sendSocketCommand(name, command string, timeout time.Duration
 		firstActionableErr error
 	)
 	for _, sp := range []string{p.sockPath(name), p.legacySockPath(name)} {
+		if runtime.UnixSocketPathTooLong(sp) {
+			// Nothing can be bound here; a dial would fail with EINVAL.
+			lastErr = fmt.Errorf("acp control socket path is too long to bind: %w", os.ErrNotExist)
+			continue
+		}
 		err := func(path string) error {
-			conn, err := net.DialTimeout("unix", path, timeout)
+			conn, err := p.dialSocket(path, timeout)
 			if err != nil {
 				return err
 			}
@@ -1093,9 +1320,7 @@ func (p *Provider) stopBySocket(name string) error {
 }
 
 func isUnavailableSocketError(err error) bool {
-	return errors.Is(err, os.ErrNotExist) ||
-		errors.Is(err, syscall.ENOENT) ||
-		errors.Is(err, syscall.ECONNREFUSED)
+	return err != nil && runtime.ClassifyControlSocketDial(err) == runtime.ControlSocketAbsent
 }
 
 // Capabilities reports ACP provider capabilities. ACP sessions are headless,
@@ -1120,7 +1345,7 @@ func (p *Provider) SleepCapability(string) runtime.SessionSleepCapability {
 // check and the write. os.ErrClosed covers the window where exec.Cmd.Wait has
 // already closed the parent's StdinPipe but sc.done is not yet closed. Other
 // sendRequest failures (marshal errors, etc.) are unrelated to lifecycle and
-// should surface immediately.
+// should surface immediately. readLoopCause is the read-side twin for stdout.
 func isPipeWriteError(err error) bool {
 	return errors.Is(err, io.ErrClosedPipe) || errors.Is(err, syscall.EPIPE) || errors.Is(err, os.ErrClosed)
 }
