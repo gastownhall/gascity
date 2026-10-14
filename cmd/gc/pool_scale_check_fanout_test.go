@@ -127,6 +127,46 @@ func TestEvaluatePoolFanOutSumBestEffortOnProbeError(t *testing.T) {
 	}
 }
 
+// TestEvaluatePendingPoolsFanOutRecoversPanickingProbe pins that a panic in
+// one per-probe goroutine of the fan-out does not kill the controller.
+// recover works only on the goroutine that panicked, so the recoverLeg that
+// guards evaluatePendingPools' outer pool goroutine (mc-zndi7.40) never sees a
+// panic raised in a probe goroutine evaluatePoolFanOutSum spawned. The
+// panicking probe must read as a failed leg (the pool is partial), its healthy
+// sibling's count must still be summed, and the panic value and stack must
+// reach stderr.
+func TestEvaluatePendingPoolsFanOutRecoversPanickingProbe(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	pending := []poolEvalWork{{
+		agentIdx:  0,
+		sp:        scaleParams{Min: 0, Max: 100, Check: "check"},
+		newDemand: true,
+		probes:    []poolStoreProbe{fanOutProbe("city", "city"), fanOutProbe("riga", "riga")},
+	}}
+	runner := func(_, dir string, _ map[string]string) (string, error) {
+		if dir == "riga" {
+			panic("injected fan-out probe panic")
+		}
+		return "3", nil
+	}
+	var stderr strings.Builder
+
+	counts, partials := evaluatePendingPools(cfg, pending, runner, &stderr, nil)
+
+	if !partials[0] {
+		t.Fatalf("pool with a panicking probe reported not partial; stderr = %q", stderr.String())
+	}
+	if counts[0] != 3 {
+		t.Fatalf("pool demand = %d, want 3: the healthy city probe's count must still be summed", counts[0])
+	}
+	if !strings.Contains(stderr.String(), "injected fan-out probe panic") || !strings.Contains(stderr.String(), "goroutine") {
+		t.Fatalf("stderr = %q, want the panic value and its stack", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "riga") {
+		t.Fatalf("stderr = %q, want the label to name the panicking probe's store", stderr.String())
+	}
+}
+
 // TestEvaluatePoolFanOutSumRunsProbesConcurrently is AC6's concurrency proof:
 // a city-scoped agent's fan-out across N stores must run those N probes
 // concurrently, not one at a time. Proven with a WaitGroup barrier rather
