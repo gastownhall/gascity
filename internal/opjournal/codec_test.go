@@ -479,3 +479,29 @@ func TestOpenKeyAndRevision(t *testing.T) {
 		t.Fatalf("closed op carries %s = %q", keyOpen, v)
 	}
 }
+
+// arrival_seq is platform-owned: bd assigns it as a row column, and gc reads
+// it from there (OJ-10a), never from gc.op.* metadata a producer could forge.
+// The codec neither writes nor reads gc.op.arrival_seq, so Op.ArrivalSeq
+// stays zero until OJ-10a maps the column.
+func TestArrivalSeqIsNeverOpMetadata(t *testing.T) {
+	const forged = "gc.op.arrival_seq"
+	op := sampleOp(t)
+	op.ArrivalSeq = 42
+	b := encode(t, op)
+	if v, ok := b.Metadata[forged]; ok {
+		t.Fatalf("EncodeOp wrote %s = %q", forged, v)
+	}
+	b.Metadata[forged] = "7"
+	got, err := DecodeOp(b)
+	if err != nil {
+		t.Fatalf("DecodeOp with a forged %s: %v", forged, err)
+	}
+	if got.ArrivalSeq != 0 {
+		t.Fatalf("DecodeOp read ArrivalSeq = %d from %s, want 0", got.ArrivalSeq, forged)
+	}
+	b.Metadata[forged] = "not-a-number"
+	if _, err := DecodeOp(b); err != nil {
+		t.Fatalf("DecodeOp parsed %s: %v", forged, err)
+	}
+}

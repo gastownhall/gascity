@@ -378,7 +378,10 @@ type Op struct {
 	// CreatedAt is the proposer's clock at Propose, the ordering timestamp.
 	CreatedAt time.Time
 
-	Status      Status
+	Status Status
+	// ArrivalSeq is bd's platform-owned arrival order, a row column. It is
+	// read-only and zero until OJ-10a maps the column; the codec never
+	// writes or reads it as gc.op.* metadata, which a producer could forge.
 	ArrivalSeq  uint64
 	LaneSeq     uint64
 	Attempt     int

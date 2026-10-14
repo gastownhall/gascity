@@ -98,11 +98,15 @@
 //
 // A producer-declared after (handoff's message{after: restart}, for one) is
 // satisfied only by succeeded; otherwise the dependent closes
-// skipped{dependency_failed}. Deliver-now uses no after. Order: (max(not_before, created_at), created_at,
-// id) via CompareOrder. Cancel: before Take (or, for lifecycle, before
-// lowering) closes canceled; executing or lowered records the request and the
-// outcome says who won; settling is already_decided, closed already_terminal,
-// and neither records the cancel. On conversation close, open ops close
+// skipped{dependency_failed}. Deliver-now uses no after. Order:
+// (max(not_before, created_at), created_at, id) via CompareOrder, the interim
+// key until gc reads bd's arrival_seq (BD-5, OJ-10a). arrival_seq is
+// platform-owned: gc reads it from the row column, never from gc.op.*
+// metadata, so Op.ArrivalSeq stays zero until then. Cancel: before Take (or,
+// for lifecycle, before lowering) closes canceled; executing or lowered
+// records the request and the outcome says who won; settling is
+// already_decided, closed already_terminal, and neither records the cancel.
+// On conversation close, open ops close
 // skipped{conversation_closed} except settling ops and the close op. Facts:
 // session.started/ended, turn.started/ended, interaction.raised/resolved,
 // create-if-absent by occurrence; planner level changes stay cells and reach L1

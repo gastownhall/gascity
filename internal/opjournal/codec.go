@@ -78,7 +78,6 @@ const (
 
 	keyStatus      = "gc.op.status"
 	keyTransitions = "gc.op.transitions"
-	keyArrivalSeq  = "gc.op.arrival_seq"
 	keyLaneSeq     = "gc.op.lane_seq"
 	keyAttempt     = "gc.op.attempt"
 
@@ -182,7 +181,6 @@ func EncodeOp(op Op) (beads.Bead, error) {
 		keyCreatedAt:     formatOptionalTime(op.CreatedAt),
 		keyStatus:        string(op.Status),
 		keyTransitions:   transitions,
-		keyArrivalSeq:    formatUint(op.ArrivalSeq),
 		keyLaneSeq:       formatUint(op.LaneSeq),
 		keyAttempt:       formatInt(int64(op.Attempt)),
 	}
@@ -324,7 +322,6 @@ func DecodeOp(b beads.Bead) (Op, error) {
 		Correlation: d.meta[keyCorrelation],
 		CreatedAt:   d.time(keyCreatedAt),
 		Status:      Status(d.required(keyStatus)),
-		ArrivalSeq:  d.uint64(keyArrivalSeq),
 		LaneSeq:     d.uint64(keyLaneSeq),
 		Attempt:     d.int(keyAttempt),
 		Cancel: Cancel{

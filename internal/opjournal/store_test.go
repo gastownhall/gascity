@@ -1780,3 +1780,24 @@ func TestLegacyOpsRefuseTransitionAndCancel(t *testing.T) {
 		t.Fatalf("Cancel(closed legacy op) = %s, %v; want already_terminal", res, err)
 	}
 }
+
+// A gc.op.arrival_seq a producer wrote through bd is not this build's key:
+// the store neither reads it nor removes it.
+func TestStoreLeavesAForgedArrivalSeqUntouched(t *testing.T) {
+	const forged = "gc.op.arrival_seq"
+	h := newHarness(t)
+	op := h.propose(t, msgReq("a", "x"))
+	if err := h.mem.SetMetadata(op.ID, forged, "9"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := h.store.Get(op.ID)
+	if err != nil || got.ArrivalSeq != 0 {
+		t.Fatalf("Get = ArrivalSeq %d, %v; want 0", got.ArrivalSeq, err)
+	}
+	if _, err := h.store.Close(op.ID, Outcome{Arm: ArmSucceeded}, "lane"); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := h.mem.Get(op.ID); b.Metadata[forged] != "9" {
+		t.Fatalf("Close changed %s to %q", forged, b.Metadata[forged])
+	}
+}
