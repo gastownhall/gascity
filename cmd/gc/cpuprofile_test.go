@@ -124,44 +124,46 @@ func TestCPUProfileFromEnvLeavesARunningProfilerAlone(t *testing.T) {
 // subprocess) with GC_CPUPROFILE set, so it proves the wiring and not just the
 // helper: a command that returns normally leaves a profile at <prefix>.<pid>.
 func TestCPUProfileEnvScript(t *testing.T) {
-	params := newTestscriptParams(t, filepath.Join("testdata", "cpuprofile-env.txtar"))
-	params.Cmds = map[string]func(*testscript.TestScript, bool, []string){
-		// gzip-profiles <dir> <prefix> <count>: exactly <count> files in <dir>
-		// start with "<prefix>." and hold a complete gzip stream.
-		"gzip-profiles": func(ts *testscript.TestScript, neg bool, args []string) {
-			if neg || len(args) != 3 {
-				ts.Fatalf("usage: gzip-profiles <dir> <prefix> <count>")
-			}
-			want, err := strconv.Atoi(args[2])
-			if err != nil {
-				ts.Fatalf("count %q: %v", args[2], err)
-			}
-			entries, err := os.ReadDir(ts.MkAbs(args[0]))
-			if err != nil {
-				ts.Fatalf("reading %s: %v", args[0], err)
-			}
-			got := 0
-			for _, entry := range entries {
-				if !strings.HasPrefix(entry.Name(), args[1]+".") {
-					continue
-				}
-				got++
-				data, err := os.ReadFile(filepath.Join(ts.MkAbs(args[0]), entry.Name()))
-				if err != nil {
-					ts.Fatalf("reading %s: %v", entry.Name(), err)
-				}
-				reader, err := gzip.NewReader(bytes.NewReader(data))
-				if err != nil {
-					ts.Fatalf("%s is not a gzip profile: %v", entry.Name(), err)
-				}
-				if _, err := io.Copy(io.Discard, reader); err != nil {
-					ts.Fatalf("%s gzip stream is truncated: %v", entry.Name(), err)
-				}
-			}
-			if got != want {
-				ts.Fatalf("%d profile(s) named %s.<pid> in %s, want %d", got, args[1], args[0], want)
-			}
-		},
+	testscript.Run(t, newTestscriptParams(t, filepath.Join("testdata", "cpuprofile-env.txtar")))
+}
+
+// gzipProfilesCmd implements the gzip-profiles testscript command, registered
+// by newTestscriptParams so every harness that runs testdata/*.txtar (the
+// directory-wide TestTutorial01 included) can run cpuprofile-env.txtar.
+//
+// Usage: gzip-profiles <dir> <prefix> <count>. Exactly <count> files in <dir>
+// start with "<prefix>." and hold a complete gzip stream.
+func gzipProfilesCmd(ts *testscript.TestScript, neg bool, args []string) {
+	if neg || len(args) != 3 {
+		ts.Fatalf("usage: gzip-profiles <dir> <prefix> <count>")
 	}
-	testscript.Run(t, params)
+	want, err := strconv.Atoi(args[2])
+	if err != nil {
+		ts.Fatalf("count %q: %v", args[2], err)
+	}
+	entries, err := os.ReadDir(ts.MkAbs(args[0]))
+	if err != nil {
+		ts.Fatalf("reading %s: %v", args[0], err)
+	}
+	got := 0
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), args[1]+".") {
+			continue
+		}
+		got++
+		data, err := os.ReadFile(filepath.Join(ts.MkAbs(args[0]), entry.Name()))
+		if err != nil {
+			ts.Fatalf("reading %s: %v", entry.Name(), err)
+		}
+		reader, err := gzip.NewReader(bytes.NewReader(data))
+		if err != nil {
+			ts.Fatalf("%s is not a gzip profile: %v", entry.Name(), err)
+		}
+		if _, err := io.Copy(io.Discard, reader); err != nil {
+			ts.Fatalf("%s gzip stream is truncated: %v", entry.Name(), err)
+		}
+	}
+	if got != want {
+		ts.Fatalf("%d profile(s) named %s.<pid> in %s, want %d", got, args[1], args[0], want)
+	}
 }
