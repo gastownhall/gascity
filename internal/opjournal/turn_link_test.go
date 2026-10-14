@@ -300,6 +300,25 @@ func TestCorrelateTurn(t *testing.T) {
 			want: TurnLink{Turn: "t1", Confidence: LinkCorrelated, Basis: BasisHistoryDiff}, decided: true,
 		},
 		{
+			name: "row 6: an earlier sighting of the same id in another generation is a different turn",
+			rec:  func() DeliveryRecord { return linkRec(LinkStarts) },
+			ev: func() TurnEvidence {
+				return sourced(
+					SeenTurn{ID: "X", Generation: linkGen + 1, StartedAt: linkAt.Add(ms)},
+					seen("X", linkAt.Add(ms)),
+				)
+			},
+			want: TurnLink{Turn: "X", Confidence: LinkCorrelated, Basis: BasisHistoryDiff}, decided: true,
+		},
+		{
+			name: "row 8: a later sighting of the same id in another generation does not lend its start",
+			rec:  func() DeliveryRecord { return linkRec(LinkStarts) },
+			ev: func() TurnEvidence {
+				return sourced(seen("X", time.Time{}), SeenTurn{ID: "X", Generation: linkGen + 1, StartedAt: linkAt.Add(ms)})
+			},
+			want: TurnLink{Confidence: LinkNone, Basis: BasisNoCandidate}, decided: false,
+		},
+		{
 			name: "row 6: one turn repeated by several reads is one candidate",
 			rec:  func() DeliveryRecord { return linkRec(LinkStarts) },
 			ev: func() TurnEvidence {
@@ -561,6 +580,10 @@ var linkMutations = []linkMutation{
 	}},
 	{name: "add another generation's turn", apply: func(g *linkGenerator, rec DeliveryRecord, e TurnEvidence) TurnEvidence {
 		st := SeenTurn{ID: g.id("other-gen"), Generation: rec.Generation + 1 + int64(g.r.IntN(3)), StartedAt: g.at(true)}
+		// Another generation's turn may carry an id this generation's turns use.
+		if len(e.Seen) > 0 && g.r.IntN(2) == 0 {
+			st.ID = e.Seen[g.r.IntN(len(e.Seen))].ID
+		}
 		if !rec.MessageAt.IsZero() {
 			st.StartedAt = rec.MessageAt
 		}
