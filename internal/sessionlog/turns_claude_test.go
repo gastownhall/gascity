@@ -253,3 +253,28 @@ func TestScanTurnsClaudeAPIErrorThenTurnEnd(t *testing.T) {
 		},
 	})
 }
+
+// TestScanTurnsClaudePromptOfMarkerTextIsAPrompt: Claude's interrupt marker
+// carries neither origin nor promptSource, and every prompt carries them, so
+// a delivered prompt whose whole text is the marker opens its own turn.
+func TestScanTurnsClaudePromptOfMarkerTextIsAPrompt(t *testing.T) {
+	markerText := `"content":[{"type":"text","text":"[Request interrupted by user]"}]`
+	path := writeTurnLines(t, "claude.jsonl",
+		`{"type":"user","timestamp":"2026-10-13T05:00:00.100Z","promptId":"p1","origin":{"kind":"human"},"promptSource":"prompt","message":{"role":"user","content":"prompt"}}`,
+		`{"type":"user","timestamp":"2026-10-13T05:00:02.100Z","promptId":"p2","origin":{"kind":"human"},"promptSource":"prompt","message":{"role":"user",`+markerText+`}}`,
+		`{"type":"user","timestamp":"2026-10-13T05:00:03.100Z","promptId":"p3","promptSource":"system","isMeta":true,"message":{"role":"user","content":"[Request interrupted by user]"}}`,
+	)
+	got, err := ScanTurns("claude", path)
+	if err != nil {
+		t.Fatalf("ScanTurns: %v", err)
+	}
+	ts := func(clock string) string { return "2026-10-13T05:" + clock + "Z" }
+	assertTurnScan(t, got, TurnScan{
+		Open:    true,
+		Current: ScannedTurn{ID: "p3", StartedAt: turnTime(t, ts("00:03.100"))},
+		Recent: []ScannedTurn{
+			{ID: "p2", StartedAt: turnTime(t, ts("00:02.100")), EndedAt: turnTime(t, ts("00:03.100"))},
+			{ID: "p1", StartedAt: turnTime(t, ts("00:00.100")), EndedAt: turnTime(t, ts("00:02.100"))},
+		},
+	})
+}

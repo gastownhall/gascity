@@ -1,6 +1,7 @@
 package sessionlog
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"slices"
@@ -13,7 +14,8 @@ import (
 // a self-started turn opens with. A system turn_duration entry closes the open
 // turn by position. An API error is an assistant entry flagged
 // isApiErrorMessage. An interrupt is a user entry holding only Claude's
-// interrupt marker; it is often written just before the next prompt and
+// interrupt marker, written by Claude itself, so it carries neither the
+// origin nor the promptSource every prompt carries; it is often written just before the next prompt and
 // stamped with that prompt's promptId, so the marker closes the open turn and
 // its promptId is never read.
 //
@@ -65,8 +67,17 @@ type claudeTurnLine struct {
 	IsCompactSummary bool            `json:"isCompactSummary"`
 	IsAPIError       bool            `json:"isApiErrorMessage"`
 	PromptID         string          `json:"promptId"`
+	Origin           json.RawMessage `json:"origin"`
+	PromptSource     string          `json:"promptSource"`
 	Timestamp        string          `json:"timestamp"`
 	Message          json.RawMessage `json:"message"`
+}
+
+// prompted reports whether the entry carries the origin or promptSource of a
+// prompt, which Claude's own interrupt marker never does.
+func (e claudeTurnLine) prompted() bool {
+	origin := bytes.TrimSpace(e.Origin)
+	return e.PromptSource != "" || (len(origin) > 0 && !bytes.Equal(origin, []byte("null")))
 }
 
 // parseClaudeTurnRecord reads line as a turn record. Sidechain entries,
@@ -81,7 +92,7 @@ func parseClaudeTurnRecord(line []byte) (claudeTurnRecord, bool) {
 	switch {
 	case e.Type == "user" && e.IsCompactSummary:
 		return claudeTurnRecord{}, false
-	case e.Type == "user" && claudeInterruptEntry(e.Message):
+	case e.Type == "user" && !e.prompted() && claudeInterruptEntry(e.Message):
 		rec.kind = claudeRecordInterrupt
 	case e.Type == "user":
 		rec.kind = claudeRecordUser
