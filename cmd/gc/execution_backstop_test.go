@@ -695,13 +695,15 @@ func (f *executionBackstopFixture) stalledEvents() int {
 	return n
 }
 
-// TestExecutionBackstopReEscalatesForANewIncarnation: the stalled latch
+// TestExecutionBackstopGivesANewIncarnationItsOwnAttempts: the stalled latch
 // belongs to the incarnation it escalated. The latched drain stopped the
-// runtime, but the supervisor restarted before the bead closed and released
-// the claim, so boot woke the same row as a NEW incarnation still holding the
-// same claim. A latch that ignores the incarnation keeps the backstop silent
-// for the whole remaining life of that seat.
-func TestExecutionBackstopReEscalatesForANewIncarnation(t *testing.T) {
+// runtime without releasing the claim, so the same row was woken as a NEW
+// incarnation still holding the same claim. That incarnation has never been
+// nudged: it starts a fresh attempt window and is drained only once it has
+// spent its own attempts. Re-escalating at once on the old incarnation's spent
+// count drains every incarnation at its first idle grace, which is the loop
+// one seat was caught in 45 times in three hours.
+func TestExecutionBackstopGivesANewIncarnationItsOwnAttempts(t *testing.T) {
 	f := newExecutionBackstopFixture(t)
 	f.setInstanceToken(t, "incarnation-1")
 	driveToEscalation(t, f)
@@ -714,8 +716,35 @@ func TestExecutionBackstopReEscalatesForANewIncarnation(t *testing.T) {
 	f.idleFor(t, 10*time.Minute)
 	f.tick(t)
 
+	if len(f.drained) != 1 {
+		t.Fatalf("drain requests at the new incarnation's first idle tick = %v, want still 1", f.drained)
+	}
+	if got := f.sessionMeta(t, executionClaimNudgeCountKey); got != "0" {
+		t.Fatalf("attempt count for the new incarnation = %q, want a fresh window (0)", got)
+	}
+	for _, key := range []string{executionClaimNudgeStalledKey, executionClaimNudgeStalledTokenKey} {
+		if got := f.sessionMeta(t, key); got != "" {
+			t.Fatalf("%s after the fresh window = %q, want the old incarnation's latch cleared", key, got)
+		}
+	}
+
+	// The new incarnation gets its own nudges, then escalates once.
+	for i := 0; i < idleClaimNudgeMaxAttempts; i++ {
+		f.now = f.now.Add(idleClaimNudgeGrace + idleClaimNudgeBackoff)
+		f.idleFor(t, 10*time.Minute)
+		f.tick(t)
+	}
+	if got := f.nudgeCount(); got != 2*idleClaimNudgeMaxAttempts {
+		t.Fatalf("delivered nudges = %d, want %d per incarnation; stdout=%s", got, idleClaimNudgeMaxAttempts, f.stdout.String())
+	}
+	if len(f.drained) != 1 {
+		t.Fatalf("drain requests before the new incarnation spent its attempts = %v, want still 1", f.drained)
+	}
+	f.now = f.now.Add(idleClaimNudgeBackoff)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
 	if len(f.drained) != 2 {
-		t.Fatalf("drain requests after a new incarnation idles on the same claim = %v, want a second escalation", f.drained)
+		t.Fatalf("drain requests once the new incarnation spent its attempts = %v, want a second escalation", f.drained)
 	}
 	if got := f.stalledEvents(); got != 2 {
 		t.Fatalf("execution.step_stalled events = %d, want one per escalated incarnation", got)
@@ -733,6 +762,125 @@ func TestExecutionBackstopReEscalatesForANewIncarnation(t *testing.T) {
 	}
 	if len(f.drained) != 2 {
 		t.Fatalf("drain requests after further ticks on the new incarnation = %v, want still 2", f.drained)
+	}
+}
+
+// TestExecutionBackstopAnAnsweredNudgeRestartsTheWindow: an agent that answers
+// a nudge with a turn (runtime activity after the nudge was reserved; tmux
+// already discounts gc's own send-keys echo) is executing, typically waiting
+// on a long-running job between turns. Its attempt window restarts, so it is
+// never drained while it keeps answering. Only the disappearance of the claim
+// used to clear the window, so a seat that answered every nudge was drained at
+// the attempt cap regardless.
+func TestExecutionBackstopAnAnsweredNudgeRestartsTheWindow(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t) // observe
+
+	for round := 0; round < 2*idleClaimNudgeMaxAttempts; round++ {
+		f.now = f.now.Add(idleClaimNudgeGrace + idleClaimNudgeBackoff)
+		f.idleFor(t, 10*time.Minute)
+		f.tick(t) // nudge
+		if got := f.sessionMeta(t, executionClaimNudgeCountKey); got != "1" {
+			t.Fatalf("round %d: attempt count after the nudge = %q, want 1; stdout=%s", round, got, f.stdout.String())
+		}
+
+		// The agent answers: one short turn, then quiet at its prompt again.
+		answeredAt := f.now.Add(10 * time.Second)
+		f.now = f.now.Add(idleClaimNudgeGrace)
+		f.sp.SetActivity(f.sessName, answeredAt)
+		f.tick(t)
+		if got := f.sessionMeta(t, executionClaimNudgeCountKey); got != "0" {
+			t.Fatalf("round %d: attempt count after an answered nudge = %q, want a restarted window (0)", round, got)
+		}
+		if got := f.sessionMeta(t, executionClaimNudgeAtKey); got != f.now.UTC().Format(time.RFC3339) {
+			t.Fatalf("round %d: window start = %q, want the tick that saw the answer", round, got)
+		}
+	}
+	if len(f.drained) != 0 {
+		t.Fatalf("drain requests for an agent that answers every nudge = %v, want none", f.drained)
+	}
+	if got := f.stalledEvents(); got != 0 {
+		t.Fatalf("execution.step_stalled events = %d, want none", got)
+	}
+}
+
+// TestExecutionBackstopAnAnswerAfterTheLastNudgeHoldsOffTheDrain: the answer to
+// the final nudge counts as well: the cap is reached only by attempts that went
+// unanswered.
+func TestExecutionBackstopAnAnswerAfterTheLastNudgeHoldsOffTheDrain(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	for i := 0; i < idleClaimNudgeMaxAttempts; i++ {
+		f.now = f.now.Add(idleClaimNudgeGrace + idleClaimNudgeBackoff)
+		f.idleFor(t, 10*time.Minute)
+		f.tick(t)
+	}
+	f.sp.SetActivity(f.sessName, f.now.Add(10*time.Second))
+	f.now = f.now.Add(idleClaimNudgeBackoff)
+	f.tick(t)
+
+	if len(f.drained) != 0 {
+		t.Fatalf("drain requests after the last nudge was answered = %v, want none", f.drained)
+	}
+	if got := f.sessionMeta(t, executionClaimNudgeCountKey); got != "0" {
+		t.Fatalf("attempt count after the last nudge was answered = %q, want 0", got)
+	}
+}
+
+// TestExecutionBackstopActivityBeforeTheNudgeIsNoAnswer: only activity after
+// the attempt was reserved restarts the window. An agent that went quiet before
+// the nudge and stayed quiet spends its attempts and is drained.
+func TestExecutionBackstopActivityBeforeTheNudgeIsNoAnswer(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	f.now = f.now.Add(idleClaimNudgeGrace + idleClaimNudgeBackoff)
+	f.idleFor(t, 2*time.Minute)
+	f.tick(t) // attempt 1, with activity two minutes before it
+
+	f.now = f.now.Add(idleClaimNudgeGrace)
+	f.tick(t)
+	if got := f.sessionMeta(t, executionClaimNudgeCountKey); got != "1" {
+		t.Fatalf("attempt count after activity that predates the nudge = %q, want still 1", got)
+	}
+}
+
+// TestExecutionBackstopTheNudgeEchoIsNoAnswer: the tmux runtime counts gc's
+// own send-keys echo as activity until its poke grace has elapsed after the
+// delivery, and only then discounts it. A tick inside that window must not
+// read the echo as an answer, or an agent that never answers would have its
+// window restarted after every nudge and never be drained.
+func TestExecutionBackstopTheNudgeEchoIsNoAnswer(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	f.now = f.now.Add(idleClaimNudgeGrace + idleClaimNudgeBackoff)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t) // attempt 1
+	nudgedAt := f.now
+
+	// The echo, still undiscounted, on a tick shortly after the delivery.
+	f.sp.SetActivity(f.sessName, nudgedAt.Add(2*time.Second))
+	f.now = nudgedAt.Add(10 * time.Second)
+	f.tick(t)
+	if got := f.sessionMeta(t, executionClaimNudgeCountKey); got != "1" {
+		t.Fatalf("attempt count after the nudge's own echo = %q, want still 1", got)
+	}
+
+	// Once the poke grace has passed the runtime discounts the echo, and the
+	// unanswered attempts run on to the drain.
+	for i := 1; i < idleClaimNudgeMaxAttempts; i++ {
+		f.now = f.now.Add(idleClaimNudgeGrace + idleClaimNudgeBackoff)
+		f.idleFor(t, 10*time.Minute)
+		f.tick(t)
+	}
+	f.now = f.now.Add(idleClaimNudgeBackoff)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if len(f.drained) != 1 {
+		t.Fatalf("drain requests for an agent that never answered = %v, want exactly 1; stdout=%s", f.drained, f.stdout.String())
 	}
 }
 

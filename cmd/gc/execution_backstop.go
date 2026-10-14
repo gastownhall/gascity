@@ -51,11 +51,20 @@ package main
 // recycle roulette. Restart-with-backoff is established framework liveness (the
 // same shape as health patrol); the decision about the WORK is still the agent's.
 // The escalation is latched on the session bead so it fires once per stalled
-// claim and incarnation, not once per tick. The latch is honored only for the
-// incarnation it escalated and only for executionStalledLatchRetryAfter: the
-// drain it requests lives in the controller's memory, so a supervisor restart
-// can lose it, and a latch that outlives its drain would otherwise silence the
-// backstop for the rest of the seat's life.
+// claim and incarnation, not once per tick. The latch is honored only for
+// executionStalledLatchRetryAfter: the drain it requests lives in the
+// controller's memory, so a supervisor restart can lose it, and a latch that
+// outlives its drain would otherwise silence the backstop for the rest of the
+// seat's life.
+//
+// # Attempts belong to one incarnation, and an answer is execution
+//
+// A latch stamped by an earlier incarnation starts a fresh window: the seat the
+// drain stopped can be woken again still holding the claim, and the new
+// incarnation has never been nudged, so it gets its own attempts before it is
+// drained. Activity after a delivered nudge restarts the window too: an agent
+// that answers a nudge is executing, typically waiting at its prompt for a job
+// it started, and is not drained for it.
 //
 // # Holds are named
 //
@@ -258,7 +267,9 @@ func (p poolExecutionBackstop) governs(s beads.Bead) bool {
 
 // resolve reports an outstanding stall only when all of it holds: the session
 // holds exactly ONE in-progress claim under a current identity, and the runtime
-// says the session has been quiet for at least the grace window (quietHold).
+// says the session has been quiet for at least the grace window (quietHoldAt).
+// Before the quiet check, an answer to this window's latest nudge restarts the
+// window (answeredNudge).
 //
 // Exactly one, because the pacing state names a single bead: a session juggling
 // several claims is demonstrably doing something, and picking one of them to
@@ -277,38 +288,75 @@ func (p poolExecutionBackstop) resolve(s beads.Bead, _ map[string]beads.Bead, se
 		p.observeHold(p.store, &s, executionHoldMultiClaim, p.stdout)
 		return backstopTarget{}, backstopResolutionHold
 	}
-	if hold := p.quietHold(s, sessName); hold != "" {
-		p.observeHold(p.store, &s, hold, p.stdout)
-		return backstopTarget{}, backstopResolutionHold
-	}
 	claim := claims[0]
-	return backstopTarget{
+	target := backstopTarget{
 		ID:       claim.BeadID,
 		RootID:   claim.RootID,
 		StoreRef: claim.StoreRef,
 		Assignee: claim.Assignee,
 		Store:    claim.Store,
-	}, backstopResolutionOutstanding
+	}
+	last, lastErr := p.sp.GetLastActivity(sessName)
+	if p.answeredNudge(s, target, last, lastErr) {
+		// s shares the engine's Metadata map (see above), so the engine's
+		// state read this tick sees the restarted window.
+		fmt.Fprintf(p.stdout, "execution-claim-nudge: %s answered the nudge for %s; restarting its attempt window\n", sessName, target.ID) //nolint:errcheck // best-effort
+		p.observe(p.store, &s, target, p.now, p.stdout)
+	}
+	if hold := quietHoldAt(p.sp, s, sessName, p.now, last, lastErr); hold != "" {
+		p.observeHold(p.store, &s, hold, p.stdout)
+		return backstopTarget{}, backstopResolutionHold
+	}
+	return target, backstopResolutionOutstanding
 }
 
-// quietHold names the gate that keeps session s from counting as quiet, or
-// returns "" when it is quiet: the runtime has observed no activity for at
-// least the grace window and, for a busy-readable provider family on a
-// non-ACP transport (executionSnapshotVetoApplies), a point-in-time snapshot
-// does not show the busy indicator. An unreadable or unset activity signal is
-// NOT quiet: a backstop that treats "unknown" as "idle" nudges working agents,
-// which is exactly how the reverted idle-session nudger produced restart
-// storms. The snapshot is taken only once activity is stale, so a session still
-// producing output costs no pane capture.
-func (p poolExecutionBackstop) quietHold(s beads.Bead, sessName string) string {
-	return sessionQuietHold(p.sp, s, sessName, p.now)
+// answeredNudge reports whether the session answered a nudge this window
+// delivered for target: at least one attempt is recorded for it, and the
+// runtime saw activity after the latest attempt was reserved. An agent that
+// answers is executing, most often waiting at its prompt for a long-running
+// job it started, so the window restarts instead of counting toward the drain.
+// Before this, only the claim going away cleared the window, and a seat that
+// answered every nudge was drained at the attempt cap regardless. An
+// unreadable activity signal is no answer, and neither is a window still at
+// its observe marker.
+//
+// The answer is judged only once idleClaimNudgeGrace has passed since the
+// attempt was reserved. The tmux runtime discounts gc's own send-keys echo
+// (Tmux.GetSessionActivity), but only once its poke grace has elapsed after
+// the delivery completed; before that, the echo of a nudge nobody answered
+// reads as fresh activity. The engine takes no further step on the window
+// until idleClaimNudgeBackoff after the attempt, so judging later loses
+// nothing.
+func (p poolExecutionBackstop) answeredNudge(s beads.Bead, target backstopTarget, last time.Time, err error) bool {
+	if err != nil || last.IsZero() {
+		return false
+	}
+	same, attempts, at := p.state(s, target)
+	if !same || attempts < 1 || at.IsZero() || p.now.Sub(at) < idleClaimNudgeGrace {
+		return false
+	}
+	return last.After(at)
 }
 
-// sessionQuietHold is quietHold for any backstop: the hold that keeps sp's
-// session sessName (its row s) from being treated as quiet at now, "" when it
-// is quiet. The pool-claim backstop reads it before its terminal drain.
+// sessionQuietHold is the hold that keeps sp's session sessName (its row s)
+// from being treated as quiet at now, "" when it is quiet (quietHoldAt). The
+// pool-claim backstop reads it before its terminal drain.
 func sessionQuietHold(sp runtime.Provider, s beads.Bead, sessName string, now time.Time) string {
 	last, err := sp.GetLastActivity(sessName)
+	return quietHoldAt(sp, s, sessName, now, last, err)
+}
+
+// quietHoldAt names the gate that keeps session s from counting as quiet, given
+// its last activity (last, err) as already read, or returns "" when it is
+// quiet: the runtime has observed no activity for at least the grace window
+// and, for a busy-readable provider family on a non-ACP transport
+// (executionSnapshotVetoApplies), a point-in-time snapshot does not show the
+// busy indicator. An unreadable or unset activity signal is NOT quiet: a
+// backstop that treats "unknown" as "idle" nudges working agents, which is
+// exactly how the reverted idle-session nudger produced restart storms. The
+// snapshot is taken only once activity is stale, so a session still producing
+// output costs no pane capture.
+func quietHoldAt(sp runtime.Provider, s beads.Bead, sessName string, now, last time.Time, err error) string {
 	if err != nil || last.IsZero() || now.Sub(last) < idleClaimNudgeGrace {
 		return executionHoldNotQuiet
 	}
@@ -368,10 +416,25 @@ func executionSnapshotVetoApplies(meta map[string]string) bool {
 	return tmux.BusyIndicatorReadable(sessionpkg.ProviderFamilyFromMetadata(meta, ""))
 }
 
+// state reports the persisted window for target. A window whose escalation was
+// latched by an earlier incarnation is not this incarnation's: its attempts
+// were spent on a runtime that is gone, and the new one has never been nudged.
+// Reporting it as unobserved makes the engine start a fresh window (observe),
+// rather than escalate again at the new incarnation's first idle grace with no
+// nudge in between, which drained one stopped-and-rewoken seat every few
+// minutes for hours.
 func (p poolExecutionBackstop) state(s beads.Bead, target backstopTarget) (same bool, attempts int, last time.Time) {
 	same = strings.TrimSpace(s.Metadata[executionClaimNudgeWorkKey]) == target.ID &&
-		strings.TrimSpace(s.Metadata[executionClaimNudgeStoreRefKey]) == target.StoreRef
+		strings.TrimSpace(s.Metadata[executionClaimNudgeStoreRefKey]) == target.StoreRef &&
+		!latchedByAnotherIncarnation(s)
 	return same, atoiOr0(s.Metadata[executionClaimNudgeCountKey]), parseRFC3339OrZero(s.Metadata[executionClaimNudgeAtKey])
+}
+
+// latchedByAnotherIncarnation reports whether s carries an escalation latch
+// stamped for an incarnation other than its current one.
+func latchedByAnotherIncarnation(s beads.Bead) bool {
+	return strings.TrimSpace(s.Metadata[executionClaimNudgeStalledKey]) != "" &&
+		strings.TrimSpace(s.Metadata[executionClaimNudgeStalledTokenKey]) != strings.TrimSpace(s.Metadata["instance_token"])
 }
 
 func (p poolExecutionBackstop) content(s beads.Bead) string {
@@ -401,8 +464,14 @@ func (p poolExecutionBackstop) revalidate(target backstopTarget) backstopResolut
 	return backstopResolutionOutstanding
 }
 
+// observe starts a fresh window for target. It clears any escalation latch:
+// the latch belongs to the window it escalated, and a new window (a new claim,
+// a new incarnation, or an answered nudge) has escalated nothing yet.
 func (p poolExecutionBackstop) observe(store beads.Store, s *beads.Bead, target backstopTarget, now time.Time, stdout io.Writer) {
-	writeExecutionClaimMarker(store, s, target, 0, now, stdout)
+	kvs := executionClaimMarker(target, 0, now)
+	kvs[executionClaimNudgeStalledKey] = ""
+	kvs[executionClaimNudgeStalledTokenKey] = ""
+	writeSessionMetadata(store, s, kvs, "execution-claim-nudge", stdout)
 }
 
 func (p poolExecutionBackstop) reserve(store beads.Store, s *beads.Bead, target backstopTarget, attempts int, now time.Time, stdout io.Writer) bool {
@@ -469,9 +538,11 @@ func stalledLatchHolds(s *beads.Bead, atKey, tokenKey string, now time.Time) boo
 
 // exhausted turns a spent attempt budget into one observable fact and one drain
 // request, latched so both happen exactly once per claim and incarnation
-// however many ticks the session survives. A latch from an earlier incarnation,
-// or one old enough that its drain must have been lost, escalates again; the
-// re-written latch restarts both bounds.
+// however many ticks the session survives. A latch from an earlier incarnation
+// never reaches here, because state starts that incarnation a fresh window;
+// stalledLatchHolds still declines it, so a latch is never honored for an
+// incarnation it did not escalate. A latch old enough that its drain must have
+// been lost escalates again, and the re-written latch restarts the bound.
 func (p poolExecutionBackstop) exhausted(store beads.Store, s *beads.Bead, stdout io.Writer) {
 	if p.stalledLatchHolds(s) {
 		return
@@ -542,13 +613,19 @@ func (p poolExecutionBackstop) clear(store beads.Store, s *beads.Bead, stdout io
 }
 
 func writeExecutionClaimMarker(store beads.Store, s *beads.Bead, target backstopTarget, attempts int, now time.Time, stdout io.Writer) bool {
-	return writeSessionMetadata(store, s, map[string]string{
+	return writeSessionMetadata(store, s, executionClaimMarker(target, attempts, now), "execution-claim-nudge", stdout)
+}
+
+// executionClaimMarker is the window patch for target at attempts, started or
+// last advanced at now.
+func executionClaimMarker(target backstopTarget, attempts int, now time.Time) map[string]string {
+	return map[string]string{
 		executionClaimNudgeWorkKey:     target.ID,
 		executionClaimNudgeRootKey:     target.RootID,
 		executionClaimNudgeStoreRefKey: target.StoreRef,
 		executionClaimNudgeCountKey:    strconv.Itoa(attempts),
 		executionClaimNudgeAtKey:       now.UTC().Format(time.RFC3339),
-	}, "execution-claim-nudge", stdout)
+	}
 }
 
 // clearExecutionClaimMarker wipes the state machine — including the escalation
