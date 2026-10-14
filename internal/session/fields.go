@@ -148,16 +148,14 @@ const (
 )
 
 // Shared sites. The pending ones' beads: mc-cfmtd (S1's PreWake, the C5a1
-// replay), mc-yeiz3 (NEW-1) and mc-fmhlc (NEW-2), both the C5d replay,
-// mc-h28bx (C5a3), mc-7je1h (the SESS-537/538 accrual owner).
+// replay), mc-h28bx (C5a3), mc-7je1h (the SESS-537/538 accrual owner).
 var (
 	legacyPreWake = legacy(srcTransition, "PreWakePatch")
 	legacyCommit  = legacy(srcTransition, "CommitStartedPatch")
 	v2PreWake     = Site{Mode: ModeV2, File: "cmd/gc/reconcile_effect_start.go"}.pending("mc-cfmtd",
 		"S1's PreWake stamps the incarnation and consumes and clears the row's requests")
-	v2AwakeHeal = v2(srcHeals, "armAwakeHeal").pending("mc-yeiz3",
-		"A6's asleep-to-awake heal clears the wake request (D7 rule 2)")
-	v2SatisfiedWake = Site{Mode: ModeV2, File: srcHeals}.pending("mc-fmhlc", "A6's satisfied-wake clear (D7)")
+	v2AwakeHeal     = v2(srcHeals, "armAwakeHeal")     // A6's asleep-to-awake heal clears the wake request (D7 rule 2)
+	v2SatisfiedWake = v2(srcHeals, "armSatisfiedWake") // A6's satisfied-wake clear (D7 rule 2)
 	v2AdoptCommit   = Site{Mode: ModeV2, File: "cmd/gc/reconcile_effect_start.go"}.pending("mc-h28bx",
 		"S2's adopt commit clears the wake request (D7)")
 	// v2Accrual is A6's accrual of a dead runtime (SESS-537/538), which

@@ -223,6 +223,10 @@ var simCoverageAllowlist = map[string]string{
 	// No generator asks a row to restart (generators frozen for the
 	// release; the scripted A13 scenarios cover it).
 	"arm:A13/armRestartRequested": "mc-i7efm: restart requested",
+	// No generator wakes an awake row (generators frozen for the release;
+	// TestSatisfiedWakeClear and TestSimSatisfiedWakeDoesNotRestartAfterADeath
+	// cover it).
+	"arm:A6/armSatisfiedWake": "mc-i7efm: wake requests",
 	// No agent sleeps after idle (sleep_after_idle, mc-ivrct).
 	"arm:A15/armIdleTimeout": "mc-i7efm: idle timeout",
 	// No execution stalls past the backstop.

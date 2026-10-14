@@ -1866,3 +1866,39 @@ func TestSimRigRestartRevivesTheFloor(t *testing.T) {
 		})
 	}
 }
+
+// Scenario J21 C / mc-sqdv6 (CONTRACT v5.7 D7 rule 2, §12.2 #26): an
+// operator wakes an asleep seat and attaches, so its runtime comes up
+// outside the controller, the wake request still on the row. A6's
+// asleep-to-awake heal clears the wake in its own write (or, on an awake row,
+// the satisfied-wake clear does). When the runtime later dies, the row's
+// runtime-missing heal finds no wake left to restart it with. Kills a
+// residue wake that restarts the seat once after the death.
+func TestSimSatisfiedWakeDoesNotRestartAfterADeath(t *testing.T) {
+	for _, state := range []string{"asleep", "awake"} {
+		t.Run(state, func(t *testing.T) {
+			s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, state, "instance_token", "tok-gc-1", "last_woke_at", rowAt(-time.Hour),
+				"wake_request", "explicit", "wake_requested_at", rowAt(-time.Minute)))
+			s.settle()
+			s.settle()
+			if m := s.gc1(); m["wake_request"] != "" || m["wake_requested_at"] != "" {
+				t.Fatalf("row %v: want the wake consumed while its runtime runs", m)
+			}
+			s.sp.mu.Lock()
+			starts := len(s.sp.starts)
+			s.sp.drop("s-gc-1")
+			s.sp.mu.Unlock()
+			for range 6 {
+				s.advance(simPatrol)
+				s.settle()
+			}
+			s.sp.mu.Lock()
+			restarted := len(s.sp.starts) > starts
+			s.sp.mu.Unlock()
+			if restarted {
+				t.Errorf("row %v: the seat restarted after its runtime died, want the wake consumed and no restart; schedule:\n%s", s.gc1(), strings.Join(s.schedule, "\n"))
+			}
+			s.noViolations(t)
+		})
+	}
+}

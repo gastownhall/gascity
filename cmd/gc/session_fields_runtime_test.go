@@ -523,6 +523,20 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 				return c.meta(t)
 			},
 		},
+		"cmd/gc/reconcile_arms_heals.go:armSatisfiedWake": { // D7 rule 2
+			[]string{"state", "active", "wake_request", "explicit", "wake_requested_at", ago(time.Minute)},
+			func(t *testing.T, meta []string) map[string]string {
+				c := ownRuntimeCase(t, "tok-3", meta...)
+				it, ok := armSatisfiedWake(&rowFacts{w: c.w, k: c.k, row: c.w.Census.Rows[c.k], entry: c.a.Snapshot.Entries[c.k]})
+				if !ok || it.Reason != decideSatisfiedWake {
+					t.Fatalf("the satisfied-wake clear did not fire: %+v", it)
+				}
+				if err := c.store.SetMetadataBatch(c.k.ID, it.folded()); err != nil {
+					t.Fatal(err)
+				}
+				return c.meta(t)
+			},
+		},
 		"cmd/gc/reconcile_arms_heals.go:deadRuntimePatch": { // SESS-532
 			[]string{"state", "active", "sleep_intent", "idle-stop-pending"},
 			func(t *testing.T, meta []string) map[string]string {
