@@ -45,27 +45,31 @@ const (
 // DeliveryRecord is what Done records on every op of one delivery. It carries
 // no text: an op's turn comes from correlating this record with observed
 // turns, never from anything in the delivered text.
+//
+// At is required: on a same-clock source it is the cutoff for candidates, and
+// a zero At would admit every unknown turn of the generation. Row 3 compares
+// MessageAt with turn starts to the millisecond, so the deliverer may record
+// the instant before the runtime formatted its stamp.
 type DeliveryRecord struct {
 	Seq        uint64    // lane_seq of the delivery's head op
 	At         time.Time // lane host clock, just before the effect's first input
 	Generation int64     // from the Take's fence
 	Epoch      int64
 	Mode       LinkMode
-	Ack        AckKind // delivered | delivered_unobserved | in_band
-	MessageID  string  // the runtime's id for the delivered message, "" when it reports none
-	// MessageAt is the creation time the runtime stamped on that message,
-	// zero when it reports none. Row 3 compares it with turn starts to the
-	// millisecond, so the instant before the runtime formatted it matches.
-	MessageAt time.Time
-	TurnID    string // the turn a runtime receipt or a verified hook payload names
+	Ack        AckKind   // delivered | delivered_unobserved | in_band
+	MessageID  string    // the runtime's id for the delivered message, "" when it reports none
+	MessageAt  time.Time // the creation time the runtime stamped on that message; zero when it reports none
+	TurnID     string    // the turn a runtime receipt or a verified hook payload names
 }
 
-// SeenTurn is one turn a turn-history read showed, in observation order.
+// SeenTurn is one turn a turn-history read showed. The deliverer appends
+// each read's turns after the earlier reads' turns, and within one read
+// oldest start first, so the first candidate is the earliest observed.
 type SeenTurn struct {
-	ID         string
+	ID         string // the source's turn id; a sighting with no id is ignored
 	Generation int64
 	StartedAt  time.Time // the source's start time; zero when unknown
-	Running    bool
+	Running    bool      // informational: the rule does not read it
 }
 
 // FirstTurnRead is the first turn-history read after the effect that
@@ -91,7 +95,7 @@ type TurnEvidence struct {
 	LiveAtProbe Tri           // whether a turn was running at the probe
 	LiveTurn    string        // the turn running at the probe, "" when unknown
 	Known       []string      // turn ids the probe's read returned; never candidates
-	Seen        []SeenTurn    // every turn the reads after the effect showed, in observation order
+	Seen        []SeenTurn    // every turn the reads after the effect showed, in observation order (see SeenTurn)
 	FirstRead   FirstTurnRead // the first successful read after the effect
 	ReadErr     error         // the last read failed; never read as "no turn"
 }
@@ -107,18 +111,22 @@ const (
 	LinkNone       LinkConfidence = "none"
 )
 
-// Basis tokens: the row of CorrelateTurn's rule that decided a link.
+// LinkBasis names the row of CorrelateTurn's rule that decided a link. It is
+// distinct from the fact bases of the journal's other records.
+type LinkBasis string
+
+// Link basis tokens.
 const (
-	BasisRuntimeTurn    = "runtime_turn"     // row 1: a runtime receipt names the turn
-	BasisHookPayload    = "hook_payload"     // row 1: a verified hook payload names the turn
-	BasisNoSource       = "no_source"        // row 2: no readable turn source
-	BasisRequestedAt    = "requested_at"     // row 3: a turn's start equals the message's stamp
-	BasisNoCandidate    = "no_candidate"     // rows 3 and 8: no turn matched
-	BasisJoinedLiveTurn = "joined_live_turn" // row 4: joined the turn live at the probe
-	BasisACPSerial      = "acp_serial"       // row 5: the one new turn on a serial source
-	BasisHistoryDiff    = "history_diff"     // row 6: the one new turn
-	BasisCompetingTurn  = "competing_turn"   // row 7: another turn could have consumed it
-	BasisReadFailed     = "read_failed"      // rows 3 and 8: no read after the effect succeeded
+	BasisRuntimeTurn    LinkBasis = "runtime_turn"     // row 1: a runtime receipt names the turn
+	BasisHookPayload    LinkBasis = "hook_payload"     // row 1: a verified hook payload names the turn
+	BasisNoSource       LinkBasis = "no_source"        // row 2: no readable turn source
+	BasisRequestedAt    LinkBasis = "requested_at"     // row 3: a turn's start equals the message's stamp
+	BasisNoCandidate    LinkBasis = "no_candidate"     // rows 3 and 8: no turn matched
+	BasisJoinedLiveTurn LinkBasis = "joined_live_turn" // row 4: joined the turn live at the probe
+	BasisACPSerial      LinkBasis = "acp_serial"       // row 5: the one new turn on a serial source
+	BasisHistoryDiff    LinkBasis = "history_diff"     // row 6: the one new turn
+	BasisCompetingTurn  LinkBasis = "competing_turn"   // row 7: another turn could have consumed it
+	BasisReadFailed     LinkBasis = "read_failed"      // rows 3 and 8: no read after the effect succeeded, and the last read failed
 )
 
 // TurnLink is a delivered op's turn, its confidence and the rule that decided
@@ -126,7 +134,7 @@ const (
 type TurnLink struct {
 	Turn       string
 	Confidence LinkConfidence
-	Basis      string
+	Basis      LinkBasis
 }
 
 // CorrelateTurn decides a delivery's link to the turn that consumed it: the
@@ -164,7 +172,7 @@ type TurnLink struct {
 //     effect succeeded and the last one failed, else no_candidate.
 //
 // decided is false only in row 3 without a match and in row 8.
-func CorrelateTurn(rec DeliveryRecord, ev TurnEvidence) (TurnLink, bool) {
+func CorrelateTurn(rec DeliveryRecord, ev TurnEvidence) (link TurnLink, decided bool) {
 	if rec.TurnID != "" {
 		basis := BasisRuntimeTurn
 		if rec.Ack == AckInBand {

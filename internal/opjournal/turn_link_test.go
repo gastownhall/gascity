@@ -62,10 +62,10 @@ func TestLinkTokens(t *testing.T) {
 		string(LinkStarts): "starts", string(LinkJoins): "joins",
 		string(AckDelivered): "delivered", string(AckDeliveredUnobserved): "delivered_unobserved", string(AckInBand): "in_band",
 		string(LinkExact): "exact", string(LinkCorrelated): "correlated", string(LinkAmbiguous): "ambiguous", string(LinkNone): "none",
-		BasisRuntimeTurn: "runtime_turn", BasisHookPayload: "hook_payload", BasisNoSource: "no_source",
-		BasisRequestedAt: "requested_at", BasisNoCandidate: "no_candidate", BasisJoinedLiveTurn: "joined_live_turn",
-		BasisACPSerial: "acp_serial", BasisHistoryDiff: "history_diff", BasisCompetingTurn: "competing_turn",
-		BasisReadFailed: "read_failed",
+		string(BasisRuntimeTurn): "runtime_turn", string(BasisHookPayload): "hook_payload", string(BasisNoSource): "no_source",
+		string(BasisRequestedAt): "requested_at", string(BasisNoCandidate): "no_candidate", string(BasisJoinedLiveTurn): "joined_live_turn",
+		string(BasisACPSerial): "acp_serial", string(BasisHistoryDiff): "history_diff", string(BasisCompetingTurn): "competing_turn",
+		string(BasisReadFailed): "read_failed",
 	}
 	for got, want := range tokens {
 		if got != want {
