@@ -1243,14 +1243,20 @@ func (q *beadsNudgeQueue) buckets(verb string, keys []string, now time.Time) (pe
 func nudgeQueueBucketState(entries []nudgeQueueEntry, now time.Time) nudgequeue.State {
 	var state nudgequeue.State
 	for _, entry := range entries {
-		switch {
-		case entry.state == nudgeQueueStateDead:
-			state.Dead = append(state.Dead, entry.item)
-		case (entry.state == nudgeQueueStateLive || entry.state == nudgeQueueInFlight) && nudgeQueueItemExpired(entry.item, now):
-			state.Dead = append(state.Dead, nudgeQueueExpiredView(entry.item))
-		case entry.state == nudgeQueueStateLive:
+		bucket, ok := nudgeQueueBucketOf(entry, now)
+		if !ok {
+			continue
+		}
+		switch bucket {
+		case nudgequeue.BucketDead:
+			if entry.state == nudgeQueueStateDead {
+				state.Dead = append(state.Dead, entry.item)
+			} else {
+				state.Dead = append(state.Dead, nudgeQueueExpiredView(entry.item))
+			}
+		case nudgequeue.BucketPending:
 			state.Pending = append(state.Pending, entry.item)
-		case entry.state == nudgeQueueInFlight:
+		case nudgequeue.BucketInFlight:
 			state.InFlight = append(state.InFlight, entry.item)
 		}
 	}
@@ -1258,8 +1264,9 @@ func nudgeQueueBucketState(entries []nudgeQueueEntry, now time.Time) nudgequeue.
 	return state
 }
 
-// nudgeQueueBucketOf is the bucket entry reads as at now, by the same rules as
-// nudgeQueueBucketState, or false when the queue no longer serves it.
+// nudgeQueueBucketOf is the bucket entry reads as at now, or false when the
+// queue no longer serves it. It is the one definition of the projection:
+// nudgeQueueBucketState, Lookup and DueKeys all read buckets through it.
 func nudgeQueueBucketOf(entry nudgeQueueEntry, now time.Time) (nudgequeue.Bucket, bool) {
 	switch {
 	case entry.state == nudgeQueueStateDead:
