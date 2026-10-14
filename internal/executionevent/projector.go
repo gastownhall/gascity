@@ -480,8 +480,9 @@ func lifecycleEventFromStore(graphStore beads.Store, eventType string, step bead
 }
 
 // EmitCompleted is the sole close-side lifecycle entry point. step is a
-// committed close: the snapshot a local close or its writer's bead.closed
-// carried, or a live read that returned the row closed. Inferences (a row
+// committed close: the snapshot the controller's own cache write carried, or a
+// live read that returned the row closed. Any other writer's bead.closed is a
+// claim and reaches here only through such a read. Inferences (a row
 // absent from a scan) must be confirmed by such a read first.
 //
 // It records at most one fact per key: a fact this index already holds, from

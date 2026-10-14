@@ -63,6 +63,7 @@ import (
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/storebinding"
+	"github.com/gastownhall/gascity/internal/storebinding/beadsworkspace"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
 
@@ -374,12 +375,16 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 		// and proves the one invariant the work store alone can prove.
 		target = infraBindingTarget{Binding: binding}
 		// A provider that opens no bead engine cannot serve regardless of
-		// what the work store holds. Refusing here, before any outcome is
-		// recorded, keeps the event stream honest: a permanently unservable
-		// binding must not publish converged on every boot.
+		// what the work store holds, and native transport "off" refuses one
+		// that opens native Dolt. Refusing here, before any outcome is
+		// recorded, keeps the event stream honest: a binding the config
+		// cannot serve must not publish converged on every boot.
 		if opener := plannedBindingOpener(plan, binding); opener == nil {
 			return nil, fmt.Errorf("%s: binding %q is served by provider %q, which does not open a bead engine, so the classes assigned to it cannot be served; %s",
 				logPrefix, binding, storage.Bindings[binding].Provider, contract.BackendNotOpenedGuarantee)
+		}
+		if err := nativeTransportBindingRefusal(binding, storebinding.ProviderID(storage.Bindings[binding].Provider), cfg); err != nil {
+			return nil, fmt.Errorf("%s: %w", logPrefix, err)
 		}
 		location, err := servedBindingLocation(plan, binding, storage.Bindings[binding])
 		if err != nil {
@@ -697,6 +702,27 @@ func plannedBindingOpener(plan *storebinding.StoragePlan, name string) storebind
 	return nil
 }
 
+// nativeTransportBindingRefusal returns why the named binding must not open
+// for this city under native transport "off", or nil when it may. Only
+// beads-workspace is refused: it opens native Dolt, while other providers that
+// open a bead engine, such as sqlite-beads, never use native transport. The
+// deprecated GC_BEADS_FORCE_FALLBACK alias is checked first because it
+// overrides every city's value, and it is the only cause a nil cfg can carry.
+func nativeTransportBindingRefusal(binding string, provider storebinding.ProviderID, cfg *config.City) error {
+	if provider != beadsworkspace.ProviderID {
+		return nil
+	}
+	if beads.ForceNativeFallbackActive() {
+		return fmt.Errorf("binding %q is served by provider %q, which opens native transport, and GC_BEADS_FORCE_FALLBACK is set: the deprecated alias forces native_transport \"off\" for every city in this process (unset GC_BEADS_FORCE_FALLBACK, or remove this binding, to proceed)",
+			binding, provider)
+	}
+	if resolvedNativeTransportMode(cfg) == beads.NativeTransportOff {
+		return fmt.Errorf("binding %q is served by provider %q, which opens native transport, and this city sets beads.native_transport = \"off\" (set native_transport to \"auto\", or remove this binding, to proceed)",
+			binding, provider)
+	}
+	return nil
+}
+
 // storageBindingEventTypes maps a migration outcome to the event that reports
 // it. Every outcome has one, and TestEveryMigrationOutcomeReachesARegisteredEventType
 // keeps it that way: an unmapped outcome publishes nothing and does so silently,
@@ -788,6 +814,12 @@ func openStorageRoutes(plan *storebinding.StoragePlan, target infraBindingTarget
 	if !ok {
 		return nil, fmt.Errorf("storage routing: binding %q is served by provider %q, which does not open a bead engine, so the classes assigned to it cannot be served; %s",
 			target.Binding, planned.ProviderID, contract.BackendNotOpenedGuarantee)
+	}
+	// The boot gate refuses this before it records an outcome, and the
+	// read-only census before it opens with a nil cfg; this check covers
+	// every other caller.
+	if err := nativeTransportBindingRefusal(target.Binding, planned.ProviderID, cfg); err != nil {
+		return nil, fmt.Errorf("storage routing: %w", err)
 	}
 	store, closer, err := opener.OpenEngine(planned.Spec, planned.AssignedClasses)
 	if err != nil {

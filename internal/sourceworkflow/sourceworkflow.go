@@ -27,6 +27,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/closeorder"
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
@@ -70,10 +71,27 @@ const WorkflowSkippedCloseReason = "workflow cleanup: subtree bead force-closed 
 // stay in sync with sling.IsWorkflowAttachment: roots may be marked via the
 // legacy gc.kind=workflow label, via gc.formula_contract=graph.v2, or both.
 // Queries that only match one label miss graph.v2-only roots and allow
-// --force to spawn duplicates.
+// --force to spawn duplicates. A controller-owned row (a session row, a
+// startup-health episode, a convergence root) is never one, whatever marks
+// it carries: no workflow lookup, teardown or cancel takes it (architecture
+// B).
 func IsWorkflowRoot(b beads.Bead) bool {
-	return strings.EqualFold(strings.TrimSpace(b.Metadata[beadmeta.KindMetadataKey]), beadmeta.KindWorkflow) ||
-		strings.EqualFold(strings.TrimSpace(b.Metadata[beadmeta.FormulaContractMetadataKey]), beadmeta.FormulaContractGraphV2)
+	return (strings.EqualFold(strings.TrimSpace(b.Metadata[beadmeta.KindMetadataKey]), beadmeta.KindWorkflow) ||
+		strings.EqualFold(strings.TrimSpace(b.Metadata[beadmeta.FormulaContractMetadataKey]), beadmeta.FormulaContractGraphV2)) &&
+		!coordclass.ControllerOwned(b)
+}
+
+// KeyedRoots lists the workflow roots (IsWorkflowRoot) carrying metadata
+// key=value, every match read (opts as ListByMetadata's): a lookup by an
+// idempotence key (gc.graphv2_root_key, a drain's item-root key) takes only
+// a root, so another bead carrying the key (a task's) neither stands in for
+// the root a launch would mint nor makes it ambiguous (architecture B).
+func KeyedRoots(store beads.Store, key, value string, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+	matches, err := store.ListByMetadata(map[string]string{key: value}, 0, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return slices.DeleteFunc(matches, func(b beads.Bead) bool { return !IsWorkflowRoot(b) }), nil
 }
 
 func (e *ConflictError) Error() string {
@@ -601,8 +619,9 @@ func closeRootWithMarker(store beads.Store, rootID string, rootMeta map[string]s
 		return store.CloseAll([]string{rootID}, rootMeta)
 	}
 	// Re-read as close to the write as possible and skip an already-closed root,
-	// so a concurrently finalized root is not re-stamped — the same guard CloseAll
-	// applies per id before it writes.
+	// so a concurrently finalized root is not re-stamped. CloseAll is no such
+	// guard: whether it stamps a closed id is store-specific (see the
+	// beads.Store CloseAll doc).
 	current, err := store.Get(rootID)
 	if err != nil {
 		return 0, err
@@ -673,7 +692,11 @@ func orderedOpenWorkflowSubtree(store beads.Store, rootID string, exclude func(b
 	})
 	ids := make([]string, 0, len(matched))
 	for _, bead := range matched {
-		if bead.ID == "" || bead.Status == "closed" {
+		// A controller-owned row (a session row, a startup-health episode,
+		// a convergence root) is never a workflow member to close, whatever
+		// gc.root_bead_id or gc.kind it carries: its owner closes it
+		// (mc-dkblm, architecture B).
+		if bead.ID == "" || bead.Status == "closed" || coordclass.ControllerOwned(bead) {
 			continue
 		}
 		if exclude != nil && exclude(bead) {
@@ -714,7 +737,7 @@ func CloseSpecSidecarsForRoot(store beads.Store, rootID, reason string) (int, er
 	}
 	ids := make([]string, 0, len(matched))
 	for _, bead := range matched {
-		if bead.ID == "" || bead.Status == "closed" || !IsGeneratedSpecSidecar(bead) {
+		if bead.ID == "" || bead.Status == "closed" || !IsGeneratedSpecSidecar(bead) || coordclass.ControllerOwned(bead) {
 			continue
 		}
 		ids = append(ids, bead.ID)

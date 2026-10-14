@@ -655,14 +655,17 @@ func ResolveBindingOwner(p ResolvedPlan, id string) (Owner, bool, error) {
 // A standing storage refusal is normally tolerated on a residence probe — a
 // refused city still serves WORK — and the two cases are then indistinguishable
 // in the text: the operator sees the boot gate's own sentence and goes looking
-// for a bead. What actually happened is that a census proved this binding holds
-// ids the migration preserved, which withdrew the carve-out and denied a read
-// that would otherwise have been served from the frozen copy.
+// for a bead. What actually happened is that this read was proven to have a
+// frozen twin, which withdrew the carve-out and denied a read that would
+// otherwise have been served from the frozen copy. The proof is per id: the
+// binding holds the id, the migration's copy manifest records delivering it
+// there, or, with no manifest to read, the binding holds ids outside its
+// reserved namespaces at all.
 //
 // It is a sentinel as well as a sentence because the remedy is the CALLER's to
 // phrase: this package knows the reason, and not what a plane has to do to make
 // the condition go away. cmd/gc's by-id seam matches on it and appends its own.
-var ErrProvenRelicRefusal = errors.New("a relic census proved this binding holds ids outside its reserved namespaces, so its standing storage refusal is a denial rather than a leg to skip")
+var ErrProvenRelicRefusal = errors.New("a relic proof for this id (the binding holds it, the migration's copy manifest records delivering it there, or, with no manifest to read, the binding holds ids outside its reserved namespaces) makes this binding's standing storage refusal a denial rather than a leg to skip")
 
 // resolveByID is the leg walk both ModeFirstOwner executors share. found
 // reports whether an owner was pinned; bindingOnly stops the walk at the work

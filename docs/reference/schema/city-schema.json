@@ -24,6 +24,11 @@
           "type": "string",
           "description": "StopGrace is how long stopping an ACP session waits after SIGTERM\nbefore escalating to SIGKILL. Raise it for agents that need longer to\ndrain in-flight tool calls on shutdown. Duration string (e.g., \"5s\",\n\"20s\"). Defaults to \"5s\"; non-positive or unparseable values fall back\nto the default. gc stop bounds each session at 30s, so keep stop_grace\ncomfortably below that.",
           "default": "5s"
+        },
+        "cancel_timeout": {
+          "type": "string",
+          "description": "CancelTimeout is how long interrupting an ACP session waits for the\nagent to end its turn after session/cancel before falling back to\nSIGINT. The interrupt never kills the agent. Duration string (e.g.,\n\"10s\", \"30s\"). Defaults to \"10s\"; non-positive or unparseable values\nfall back to the default.",
+          "default": "10s"
         }
       },
       "additionalProperties": false,
@@ -112,7 +117,7 @@
         },
         "prompt_template": {
           "type": "string",
-          "description": "PromptTemplate is the path to this agent's prompt template file.\nRelative paths resolve against the city directory."
+          "description": "PromptTemplate is the path to this agent's prompt template file.\nRelative paths resolve against the directory of the file that declares\nthe agent: the city directory for city.toml, the fragment's directory\nfor an included fragment, and the pack directory for an agent a pack\ndeclares — in pack.toml or in agents/\u003cname\u003e/agent.toml alike. Paths\nprefixed with \"//\" resolve against the city root."
         },
         "nudge": {
           "type": "string",
@@ -234,7 +239,7 @@
         },
         "work_query": {
           "type": "string",
-          "description": "WorkQuery is the shell command template to find available work for this\nagent. If it contains Go template placeholders, gc expands them using\nthe same PathContext fields as work_dir and session_setup (Agent,\nAgentBase, Rig, RigRoot, CityRoot, CityName, DefaultBranch) before\nprobe, hook, and prompt-context execution. Used by gc hook and available in prompt\ntemplates as {{.WorkQuery}}.\nIf unset, Gas City uses a three-tier default query:\n  1. in_progress work assigned to this session/alias (crash recovery)\n  2. ready work assigned to this session/alias (pre-assigned work)\n  3. ready unassigned work with gc.routed_to=\u003cqualified-name\u003e\nWhen the controller probes for demand without session context, only the\nrouted_to tier applies. Override to integrate with external task systems."
+          "description": "WorkQuery is the shell command template to find available work for this\nagent. If it contains Go template placeholders, gc expands them using\nthe same PathContext fields as work_dir and session_setup (Agent,\nAgentBase, Rig, RigRoot, CityRoot, CityName, DefaultBranch) before\nprobe, hook, and prompt-context execution. Used by gc hook and available in prompt\ntemplates as {{.WorkQuery}}.\nIf unset, Gas City uses a three-tier default query:\n  1. in_progress work assigned to this session/alias (crash recovery)\n  2. ready work assigned to this session/alias (pre-assigned work)\n  3. ready unassigned work with gc.routed_to=\u003cqualified-name\u003e\nWhen the controller probes for demand without session context, only the\nrouted_to tier applies. Override to integrate with external task systems.\nA custom query that looks up assigned work should read $GC_ALIAS: under\ngc hook --claim, a single-slot pool session the supervisor collapsed onto\nthe agent's canonical [[named_session]] identity runs the query with\n$GC_ALIAS set to that identity, while $GC_AGENT keeps the session's\nruntime value."
         },
         "sling_query": {
           "type": "string",
@@ -1094,10 +1099,24 @@
           ],
           "description": "GuardedRelease selects the ownership-release discipline for work beads:\n\"off\" (legacy, owner-blind bd update/unclaim), \"auto\" (fence-guarded\nrelease verbs where the bd binary is capable, loud degrade otherwise), or\n\"require\" (guarded release or a typed refusal). Empty defaults to \"off\".\nAny other value fails config load."
         },
+        "allow_schema_behind_migrate": {
+          "type": "boolean",
+          "description": "AllowSchemaBehindMigrate opts this city in to letting the linked beads\nlibrary migrate its database forward when the database's own schema\ncursor trails the library's ceiling. Without it, the native-store\npreflight schema check FAILs a behind schema (stays on BdStore) instead\nof risking a native open that would migrate a possibly-shared database;\nthe direct native-open path withholds BD_ALLOW_REMOTE_MIGRATE from the\nlinked library the same way. Default: false (nil). A break-glass\nGC_BEADS_ALLOW_SCHEMA_BEHIND_MIGRATE env override is registered in\ninternal/rollout (beads.allow_schema_behind_migrate); read the effective\nvalue through internal/rollout.Flags.AllowSchemaBehindMigrate, never\nthis field directly.",
+          "default": false
+        },
         "proxied_idle_timeout": {
           "type": "string",
           "description": "ProxiedIdleTimeout is how long a bd-owned proxied scope's proxy and Dolt\nchild stay up with no connections before bd retires them; the next bd\ncommand restarts them. Go duration; \"0\" means never. A finite value\nmust be at least 1m. Empty uses the default, 30m. It applies to scopes gc\ninitializes (gc init, gc rig add, gc beads city migrate-proxied); bd\ncannot change an existing scope's value, and gc doctor reports drift.\nOverridden per rig by beads_proxied_idle_timeout and by the\nGC_BEADS_PROXIED_IDLE_TIMEOUT environment variable.",
           "default": "30m"
+        },
+        "native_transport": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "off"
+          ],
+          "description": "NativeTransport selects whether this city's bead stores may open the\nnative Dolt store at all: \"off\" (this city's stores never open\nnatively; always BdStore, the bd CLI subprocess — logged once at boot)\nor \"auto\" (default: native when preflight-eligible, today's behavior).\nEmpty defaults to \"auto\". Any other value (including \"require\", which\nbelongs to conditional_writes/guarded_release, not this switch) fails\nconfig load. A running city keeps the stores it holds open on the value\nit read at boot until it restarts; every other open, by a gc command or\nfor a single tick, reads the current value.\nGC_BEADS_FORCE_FALLBACK remains a deprecated process-wide alias for\n\"off\" that overrides every city's value for one release.",
+          "default": "auto"
         },
         "policies": {
           "additionalProperties": {
@@ -1406,7 +1425,7 @@
         },
         "dolt_start_address_in_use_retry_window": {
           "type": "string",
-          "description": "DoltStartAddressInUseRetryWindow is how long the managed dolt start\npath waits on the originally requested port when bind fails with\n\"address already in use\" before falling back to a higher port. The\ncommon cause is a TIME_WAIT socket left by an abrupt stop of a sibling\ndolt subprocess (external SIGTERM, supervisor restart, OOM kill); on\nLinux the listening-socket slot typically frees within ~30s. Falling\nback immediately publishes the rebound port to provider state, after\nwhich `recoverManagedDoltShouldReuseExisting` keeps accepting the\nrebound instance as canonical and consumers hardcoded to the original\nport stay broken until the orphan is killed. Duration string (e.g.,\n\"30s\", \"1m\"). Set to \"0s\" to disable the retry (legacy fall-back-\nimmediately behavior). Defaults to \"30s\". Each port is waited on at\nmost once per startManagedDoltProcessWithOptions invocation, so the\nworst-case wall time per startup is bounded by\n(DoltStartAddressInUseRetryWindow + per-attempt-startup) × min(5,\ndistinct-ports-tried) rather than DoltStartAddressInUseRetryWindow × 5.\nNegative values are rejected at config load.",
+          "description": "DoltStartAddressInUseRetryWindow is how long the managed dolt start\npath waits on the originally requested port when dolt reports it in\nuse (\"address already in use\", or \"Port N already in use.\" from dolt\n2.3.3) before falling back to a higher port. The\ncommon cause is a TIME_WAIT socket left by an abrupt stop of a sibling\ndolt subprocess (external SIGTERM, supervisor restart, OOM kill); on\nLinux the listening-socket slot typically frees within ~30s. Falling\nback immediately publishes the rebound port to provider state, after\nwhich `recoverManagedDoltShouldReuseExisting` keeps accepting the\nrebound instance as canonical and consumers hardcoded to the original\nport stay broken until the orphan is killed. Duration string (e.g.,\n\"30s\", \"1m\"). Set to \"0s\" to disable the retry (legacy fall-back-\nimmediately behavior). Defaults to \"30s\". Each port is waited on at\nmost once per startManagedDoltProcessWithOptions invocation, so the\nworst-case wall time per startup is bounded by\n(DoltStartAddressInUseRetryWindow + per-attempt-startup) × min(5,\ndistinct-ports-tried) rather than DoltStartAddressInUseRetryWindow × 5.\nNegative values are rejected at config load.",
           "default": "30s"
         },
         "wisp_gc_interval": {
@@ -1733,6 +1752,13 @@
           "type": "string",
           "description": "Rig is the Gas City rig that owns repair work for this repository."
         },
+        "authors": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Authors is an optional fail-closed allow-list of GitHub author logins.\nWhen empty, the monitor acts on every open PR against the monitored\nrepo/base branches (the historical behavior). When non-empty, the monitor\nacts ONLY on PRs whose author login exactly (case-sensitively) matches an\nallowed value; a PR with an unresolved or empty author is skipped. This\nlets an operator scope the native monitor to their own PRs so it cannot\nmint repair beads for other contributors' pull requests."
+        },
         "notify": {
           "items": {
             "type": "string"
@@ -1956,6 +1982,10 @@
         "retention_ttl": {
           "type": "string",
           "description": "RetentionTTL has two consumers: it is how long read messages are\nretained before purge, and how long a read mail bead stays open before\nthe nudge-mail sweep closes it. Empty or \"0\" disables read-message\npurge. The sweep distinguishes the two: empty leaves it at its own\n60-minute default, while \"0\" disables its mail-close phase."
+        },
+        "unread_retention_ttl": {
+          "type": "string",
+          "description": "UnreadRetentionTTL is how long a never-read mail bead stays open before\nthe nudge-mail sweep closes it. Empty or \"0\" disables the unread-mail\nphase; it is opt-in so unread mail is never closed by default."
         }
       },
       "additionalProperties": false,

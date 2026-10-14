@@ -56,6 +56,8 @@ go_test(
     srcs = [
         "beads_adapter_graph_capability_test.go",
         "beads_adapter_test.go",
+        "beads_nudge_queue_keyed_test.go",
+        "beads_nudge_queue_maintain_test.go",
         "beads_nudge_queue_test.go",
         "beads_over_sqlite_conformance_test.go",
         "builder_publication_census_test.go",
@@ -99,12 +101,13 @@ go_test(
         exclude = ["BUILD.bazel"],
     ) + [
         "//:go.mod",
-        "//:repo_source_tree",
+        "//:repo_go_srcs",
     ],
     embed = [":storebinding"],
     deps = [
         "//internal/bazeltest",
         "//internal/beads",
+        "//internal/beads/beadstest",
         "//internal/config",
         "//internal/coordclass",
         "//internal/extmsg",
@@ -152,6 +155,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

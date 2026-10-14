@@ -118,10 +118,18 @@ config_ref = "infra"
 // engine provider, for the whole of one test.
 func registerConfigRefEngineProvider(t *testing.T) {
 	t.Helper()
+	registerSoleStorageProvider(t, configRefEngineProviderFactory{})
+}
+
+// registerSoleStorageProvider freezes a registry carrying only factory, for the
+// rest of one test. A row that re-registers over a city already seeded swaps
+// the provider its binding resolves to without touching the engine on disk.
+func registerSoleStorageProvider(t *testing.T, factory storebinding.ProviderFactory) {
+	t.Helper()
 	prev := newStorageRegistryForPlan
 	newStorageRegistryForPlan = func() (*storebinding.ProviderRegistry, error) {
 		registry := storebinding.NewProviderRegistry()
-		if err := registry.Register(configRefEngineProviderFactory{}); err != nil {
+		if err := registry.Register(factory); err != nil {
 			return nil, err
 		}
 		if err := registry.Freeze(); err != nil {

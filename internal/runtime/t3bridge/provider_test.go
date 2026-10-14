@@ -1031,6 +1031,8 @@ type t3BridgeTestServer struct {
 	server             *httptest.Server
 	mu                 sync.Mutex
 	commands           []string
+	payloads           []map[string]interface{}
+	rejectCommands     map[string]interface{}
 	snapshot           map[string]interface{}
 	authFailures       int
 	authFailureStatus  int
@@ -1147,15 +1149,23 @@ func newT3BridgeTestServer(t *testing.T, snapshot map[string]interface{}) *t3Bri
 				return
 			}
 			ts.recordCommand(commandType(payload))
+			ts.recordPayload(payload)
 		}
 
+		exit := map[string]interface{}{
+			"_tag":  "Success",
+			"value": value,
+		}
+		if cause, rejected := ts.rejection(req.Tag, req.Payload); rejected {
+			exit = map[string]interface{}{
+				"_tag":  "Failure",
+				"cause": cause,
+			}
+		}
 		resp := map[string]interface{}{
 			"_tag":      "Exit",
 			"requestId": req.ID,
-			"exit": map[string]interface{}{
-				"_tag":  "Success",
-				"value": value,
-			},
+			"exit":      exit,
 		}
 		if err := conn.WriteJSON(resp); err != nil {
 			t.Errorf("write websocket response: %v", err)
@@ -1176,6 +1186,60 @@ func (ts *t3BridgeTestServer) recordCommand(typ string) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 	ts.commands = append(ts.commands, typ)
+}
+
+func (ts *t3BridgeTestServer) recordPayload(payload map[string]interface{}) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	ts.payloads = append(ts.payloads, payload)
+}
+
+// commandPayloads returns every dispatched command payload of the given type.
+func (ts *t3BridgeTestServer) commandPayloads(typ string) []map[string]interface{} {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	var out []map[string]interface{}
+	for _, payload := range ts.payloads {
+		if commandType(payload) == typ {
+			out = append(out, payload)
+		}
+	}
+	return out
+}
+
+// rejectCommand makes the bridge answer every dispatched command of the given
+// type with an Exit Failure whose cause is a Fail carrying T3's command
+// invariant error with message: T3's definitive rejection.
+func (ts *t3BridgeTestServer) rejectCommand(typ, message string) {
+	ts.failCommand(typ, map[string]interface{}{
+		"_tag":  "Fail",
+		"error": map[string]interface{}{"_tag": "OrchestrationCommandInvariantError", "message": message},
+	})
+}
+
+// failCommand makes the bridge answer every dispatched command of the given
+// type with an Exit Failure carrying cause verbatim.
+func (ts *t3BridgeTestServer) failCommand(typ string, cause interface{}) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	if ts.rejectCommands == nil {
+		ts.rejectCommands = make(map[string]interface{})
+	}
+	ts.rejectCommands[typ] = cause
+}
+
+func (ts *t3BridgeTestServer) rejection(tag string, raw json.RawMessage) (interface{}, bool) {
+	if tag != "orchestration.dispatchCommand" {
+		return nil, false
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return nil, false
+	}
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	cause, ok := ts.rejectCommands[commandType(payload)]
+	return cause, ok
 }
 
 func (ts *t3BridgeTestServer) commandTypes() []string {

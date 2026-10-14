@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clientcontext"
 	"github.com/google/uuid"
@@ -32,10 +33,14 @@ import (
 func TestCapstoneIntegrationRealMinter(t *testing.T) {
 	h := newCapstoneHarness(t)
 
-	// Build the real minter. The test cwd is cmd/gc, so build by import path.
-	bin := filepath.Join(t.TempDir(), "gc-write-mint")
-	if out, err := exec.Command("go", "build", "-o", bin, "github.com/gastownhall/gascity/cmd/gc-write-mint").CombinedOutput(); err != nil {
-		t.Fatalf("build gc-write-mint: %v\n%s", err, out)
+	// The real minter: Bazel hands the test the //cmd/gc-write-mint it built;
+	// under go test, build it. The test cwd is cmd/gc, so build by import path.
+	bin := bazeltest.DataPath(t, "GC_TEST_WRITE_MINT_BIN")
+	if bin == "" {
+		bin = filepath.Join(t.TempDir(), "gc-write-mint")
+		if out, err := exec.Command("go", "build", "-o", bin, "github.com/gastownhall/gascity/cmd/gc-write-mint").CombinedOutput(); err != nil {
+			t.Fatalf("build gc-write-mint: %v\n%s", err, out)
+		}
 	}
 
 	// The minter signs with the private key whose public half the server trusts

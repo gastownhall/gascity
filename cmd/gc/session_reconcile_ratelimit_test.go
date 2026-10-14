@@ -48,7 +48,7 @@ func TestCheckStability_RateLimitScreen_DoesNotCountAsCrash(t *testing.T) {
 		return paneContent, nil
 	}
 
-	_, stab := checkStability(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), clk, peek)
+	_, stab := checkStability(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), clk, peek, nil, nil)
 	syncBeadFromStore(&session, store)
 	if !stab {
 		t.Fatal("checkStability should return true when it records a rate-limit hold")
@@ -110,7 +110,7 @@ func TestCheckStability_RateLimitPendingCreateClearsStartedAt(t *testing.T) {
 		return "You've hit your limit, Pro plan\n\n/rate-limit-options", nil
 	}
 
-	_, stab := checkStability(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), clk, peek)
+	_, stab := checkStability(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), clk, peek, nil, nil)
 	syncBeadFromStore(&session, store)
 	if !stab {
 		t.Fatal("checkStability should return true when it records a rate-limit hold")
@@ -305,7 +305,8 @@ func TestCheckStability_RateLimitScreen_EmptyPaneStillCountsAsCrash(t *testing.T
 
 	peek := func(_ int) (string, error) { return "", nil }
 
-	_, stab := checkStability(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), clk, peek)
+	store.persistRow(session) // the row the accrual reads fresh (mc-uhvqj)
+	_, stab := checkStability(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), clk, peek, nil, nil)
 	syncBeadFromStore(&session, store)
 	if !stab {
 		t.Error("rapid exit with no rate-limit signature should report stability failure")
@@ -330,7 +331,8 @@ func TestCheckStability_RateLimitScreen_NilPeekFallsBackToCrash(t *testing.T) {
 		"wake_attempts": "0",
 	})
 
-	_, stab := checkStability(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), clk, nil)
+	store.persistRow(session) // the row the accrual reads fresh (mc-uhvqj)
+	_, stab := checkStability(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), clk, nil, nil, nil)
 	syncBeadFromStore(&session, store)
 	if !stab {
 		t.Error("rapid exit with nil peek should fall back to crash-counting behavior")
@@ -355,7 +357,8 @@ func TestCheckStability_RateLimitScreen_PeekErrorFallsBackToCrash(t *testing.T) 
 		return "", errors.New("peek failed")
 	}
 
-	_, stab := checkStability(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), clk, peek)
+	store.persistRow(session) // the row the accrual reads fresh (mc-uhvqj)
+	_, stab := checkStability(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), clk, peek, nil, nil)
 	syncBeadFromStore(&session, store)
 	if !stab {
 		t.Error("rapid exit with peek error should fall back to crash-counting behavior")
@@ -386,7 +389,7 @@ func TestCheckStability_TerminalErrorScreen_MarksTerminalNotCrash(t *testing.T) 
 		return "model_not_found: gpt-5.3-codex-spark", nil
 	}
 
-	_, stab := checkStability(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), clk, peek)
+	_, stab := checkStability(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), clk, peek, nil, nil)
 	syncBeadFromStore(&session, store)
 	if !stab {
 		t.Fatal("checkStability should return true when it records a terminal provider error")

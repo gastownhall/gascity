@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
+	"maps"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // T-A: THE agreement property.
@@ -80,7 +83,7 @@ func agreementRows() []agreementRow {
 			// is the #2763 shape the fallback exists for — a root-only molecule
 			// whose root IS the unit of work. This one was compiled with real
 			// child steps, so gc.workflow_expanded is stamped and the root is
-			// only ever claimable via gc.routed_to (#5900). Counting it would
+			// no longer executable itself (#5900). Counting it would
 			// be permanent demand for a row every worker's claim matcher
 			// refuses: seat spawns, hook reads empty, drains, counted again.
 			name: "fully-expanded workflow root with only run_target",
@@ -88,6 +91,31 @@ func agreementRows() []agreementRow {
 				beadmeta.KindMetadataKey:             beadmeta.KindWorkflow,
 				beadmeta.RunTargetMetadataKey:        agreementTemplate,
 				beadmeta.WorkflowExpandedMetadataKey: "true",
+			}},
+			wantServable: false,
+		},
+		{
+			name: "fully-expanded workflow root with explicit worker route",
+			bead: beads.Bead{ID: "a-topology-root", Status: "open", Type: "task", Metadata: map[string]string{
+				beadmeta.KindMetadataKey:             beadmeta.KindWorkflow,
+				beadmeta.RoutedToMetadataKey:         agreementTemplate,
+				beadmeta.WorkflowExpandedMetadataKey: "true",
+			}},
+			wantServable: false,
+		},
+		{
+			name: "scope latch with explicit worker route",
+			bead: beads.Bead{ID: "a-topology-scope", Status: "open", Type: "task", Metadata: map[string]string{
+				beadmeta.KindMetadataKey:     beadmeta.KindScope,
+				beadmeta.RoutedToMetadataKey: agreementTemplate,
+			}},
+			wantServable: false,
+		},
+		{
+			name: "spec latch with explicit worker route",
+			bead: beads.Bead{ID: "a-topology-spec", Status: "open", Type: "task", Metadata: map[string]string{
+				beadmeta.KindMetadataKey:     beadmeta.KindSpec,
+				beadmeta.RoutedToMetadataKey: agreementTemplate,
 			}},
 			wantServable: false,
 		},
@@ -113,7 +141,7 @@ func agreementRows() []agreementRow {
 			wantServable: true,
 		},
 		{
-			// The discriminating row for LABEL comparison, and it points the
+			// The discriminating row for HOLD comparison, and it points the
 			// other way: the reader serves it (exact-match miss) but the hook
 			// strips it (EqualFold hit), so the worker never sees it.
 			name: "routed bead held by a case-variant hold label",
@@ -123,6 +151,42 @@ func agreementRows() []agreementRow {
 				Metadata: map[string]string{beadmeta.RoutedToMetadataKey: agreementTemplate},
 			},
 			wantServable: false,
+		},
+		{
+			// The discriminating row for a label the worker's query excludes that is
+			// NOT a dispatch hold: bd's native human label, a bead parked for a
+			// person. beadmeta.DispatchHoldLabels names only the two canonical
+			// holds, so the generated hold rows below cannot reach it. Without its
+			// own row demand would keep counting a bead no worker is ever served:
+			// the seat spawns, its hook reads empty, it drains, and the row is
+			// counted again.
+			name: "routed bead flagged for a human",
+			bead: beads.Bead{
+				ID: "a-14", Status: "open", Type: "task",
+				Labels:   []string{"human"},
+				Metadata: map[string]string{beadmeta.RoutedToMetadataKey: agreementTemplate},
+			},
+			wantServable: false,
+		},
+		{
+			// Human labels are exact-match exclusions; case variants remain
+			// claimable and must also count as demand.
+			name: "routed bead with Human label",
+			bead: beads.Bead{
+				ID: "a-15", Status: "open", Type: "task",
+				Labels:   []string{"Human"},
+				Metadata: map[string]string{beadmeta.RoutedToMetadataKey: agreementTemplate},
+			},
+			wantServable: true,
+		},
+		{
+			name: "routed bead with HUMAN label",
+			bead: beads.Bead{
+				ID: "a-16", Status: "open", Type: "task",
+				Labels:   []string{"HUMAN"},
+				Metadata: map[string]string{beadmeta.RoutedToMetadataKey: agreementTemplate},
+			},
+			wantServable: true,
 		},
 		{
 			// Collapse x hold: the route form is fixed by the pass, and the row
@@ -209,6 +273,106 @@ func TestDemandCountsExactlyTheClaimableRows(t *testing.T) {
 					bead.ID, bead.Metadata[beadmeta.RoutedToMetadataKey])
 			}
 		})
+	}
+}
+
+// TestDemandCountsControlRowsOnlyForTheirScopeDispatcher pins the ownership
+// rule for control rows (mc-zndi7.41): a control-kind row whose gc.root_store_ref
+// names a scope is demand only for that scope's control dispatcher, and for no
+// one when the scope has none. It is the rule the route repair applies to the
+// collected snapshot (desiredRoute, deferRouteRepair). The probe reads the
+// durable route, which can still name another scope's dispatcher. Work rows and
+// unscoped control rows keep the plain route match: the repair leaves them alone.
+func TestDemandCountsControlRowsOnlyForTheirScopeDispatcher(t *testing.T) {
+	const (
+		cityDispatcher = "core.control-dispatcher"
+		rigDispatcher  = "fixture/core.control-dispatcher"
+	)
+	row := func(kind, route, rootRef string) beads.Bead {
+		meta := map[string]string{beadmeta.RoutedToMetadataKey: route}
+		if kind != "" {
+			meta[beadmeta.KindMetadataKey] = kind
+		}
+		if rootRef != "" {
+			meta[beadmeta.RootStoreRefMetadataKey] = rootRef
+		}
+		return beads.Bead{ID: "c-1", Status: "open", Type: "task", Metadata: meta}
+	}
+	bindingRef := string(storeref.ClassRef(wholeSplitClasses()))
+	tests := []struct {
+		name         string
+		cityOnly     bool
+		nilCfg       bool
+		bead         beads.Bead
+		wantTemplate string
+	}{
+		{name: "city-rooted row, city route", bead: row(beadmeta.KindWorkflowFinalize, cityDispatcher, "city:test-city"), wantTemplate: cityDispatcher},
+		{name: "binding-rooted row reads as city", bead: row(beadmeta.KindDrain, cityDispatcher, bindingRef), wantTemplate: cityDispatcher},
+		{name: "rig-rooted row, rig route", bead: row(beadmeta.KindDrain, rigDispatcher, "rig:fixture"), wantTemplate: rigDispatcher},
+		{name: "rig-rooted row, stale city route", bead: row(beadmeta.KindWorkflowFinalize, cityDispatcher, "rig:fixture")},
+		{name: "city-rooted row, stale rig route", bead: row(beadmeta.KindDrain, rigDispatcher, "city:test-city")},
+		{name: "rig-rooted row, rig has no dispatcher", cityOnly: true, bead: row(beadmeta.KindWorkflowFinalize, cityDispatcher, "rig:fixture")},
+		{name: "unscoped control row keeps its route", bead: row(beadmeta.KindWorkflowFinalize, rigDispatcher, ""), wantTemplate: rigDispatcher},
+		{name: "nil cfg resolves no ownership", nilCfg: true, bead: row(beadmeta.KindWorkflowFinalize, cityDispatcher, "rig:fixture"), wantTemplate: cityDispatcher},
+		{name: "rig-rooted work row keeps its route", bead: row("", cityDispatcher, "rig:fixture"), wantTemplate: cityDispatcher},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := classBindingDispatcherFixtureConfig(t)
+			templates := map[string]struct{}{cityDispatcher: {}, rigDispatcher: {}}
+			if tt.cityOnly {
+				cfg = cityOnlyDispatcherFixtureConfig(t)
+				templates = map[string]struct{}{cityDispatcher: {}}
+			}
+			if tt.nilCfg {
+				cfg = nil
+			}
+			got, ok := demandServableForTemplates(cfg, tt.bead, templates)
+			if want := tt.wantTemplate != ""; ok != want || got != tt.wantTemplate {
+				t.Fatalf("demandServableForTemplates = (%q, %v), want (%q, %v)", got, ok, tt.wantTemplate, want)
+			}
+		})
+	}
+}
+
+// TestControlRowServableAgreesWithTheRouteRepair keeps the probe's ownership
+// rule and the route repair in lockstep. With no store, every route rewrite
+// the repair wants is deferred, so a route the repair leaves in place is
+// exactly a route it considers owned. controlRowServableByTemplate must hold
+// for exactly those (row, route) pairs. A rule edited on one side only fails
+// here.
+func TestControlRowServableAgreesWithTheRouteRepair(t *testing.T) {
+	bindingRef := string(storeref.ClassRef(wholeSplitClasses()))
+	configs := map[string]*config.City{
+		"two dispatchers": classBindingDispatcherFixtureConfig(t),
+		"city only":       cityOnlyDispatcherFixtureConfig(t),
+	}
+	kinds := []string{"", beadmeta.KindWorkflowFinalize, beadmeta.KindDrain}
+	roots := []string{"", "city:test-city", bindingRef, "rig:fixture", "rig:elsewhere"}
+	routes := []string{"core.control-dispatcher", "fixture/core.control-dispatcher", "control-dispatcher", "fixture/worker"}
+	for name, cfg := range configs {
+		for _, kind := range kinds {
+			for _, root := range roots {
+				for _, route := range routes {
+					meta := map[string]string{beadmeta.RoutedToMetadataKey: route}
+					if kind != "" {
+						meta[beadmeta.KindMetadataKey] = kind
+					}
+					if root != "" {
+						meta[beadmeta.RootStoreRefMetadataKey] = root
+					}
+					row := beads.Bead{ID: "c-1", Status: "open", Type: "task", Metadata: meta}
+					repaired := beads.Bead{ID: row.ID, Status: row.Status, Type: row.Type, Metadata: maps.Clone(meta)}
+					newControlDispatcherRouteRepair(cfg, io.Discard).repairBead(&repaired, nil, bindingRef)
+
+					kept := repaired.Metadata[beadmeta.RoutedToMetadataKey] == route
+					if got := controlRowServableByTemplate(cfg, row, route); got != kept {
+						t.Errorf("%s kind=%q root=%q route=%q: servable=%v, but the repair keeps the route=%v",
+							name, kind, root, route, got, kept)
+					}
+				}
+			}
+		}
 	}
 }
 

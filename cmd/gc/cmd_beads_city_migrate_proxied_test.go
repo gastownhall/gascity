@@ -234,9 +234,10 @@ func TestMigrateProxiedRefusesTypedScopes(t *testing.T) {
 	}{
 		{name: "embedded", mode: "embedded", backend: "dolt", want: "embedded Dolt scope"},
 		{name: "doltlite", mode: "", backend: "doltlite", want: "doltlite scope"},
-		// Neither dolt nor doltlite is refused by the metadata loader itself,
-		// which is the only thing standing between a foreign backend and the
-		// migratable arm. It names the backend and says nothing was opened.
+		// A backend that is not dolt, not doltlite, and not a library
+		// extension backend is refused by the metadata loader itself, which is
+		// the only thing standing between it and the migratable arm. It names
+		// the backend and says nothing was opened.
 		{name: "foreign backend", mode: "", backend: "sqlite", want: `unsupported backend "sqlite"`},
 	}
 	for _, tc := range cases {
@@ -258,6 +259,80 @@ func TestMigrateProxiedRefusesTypedScopes(t *testing.T) {
 				t.Fatalf("report = %+v, want a refusal mentioning %q", report, tc.want)
 			}
 		})
+	}
+}
+
+// A workspace `bd connect --convert-workspace` handed to a library backend has
+// no gc-managed Dolt server behind it, yet records no dolt_mode: the shape this
+// command migrates as a legacy direct server. It must be refused before a Dolt
+// root is initialized beside it and before bd runs, leaving the library's
+// metadata exactly as it was.
+func TestMigrateProxiedRefusesLibraryBackendCity(t *testing.T) {
+	registerLibraryBackendForTest(t, "http")
+	city, _ := newLegacyManagedCityFixture(t)
+	metadataPath := filepath.Join(city, ".beads", "metadata.json")
+	if err := os.WriteFile(metadataPath, []byte(convertedHTTPMetadata), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stubMigrateProxiedBd(t, func(_, scopeRoot string, args ...string) ([]byte, error) {
+		t.Fatalf("a library backend scope must not reach bd: %s %v", scopeRoot, args)
+		return nil, nil
+	})
+	runDoltInitDataDir = func(dataDir string) ([]byte, error) {
+		t.Fatalf("a library backend scope must not get a Dolt root: dolt init %s", dataDir)
+		return nil, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := doBeadsCityMigrateProxied(city, migrateProxiedOptions{JSON: true}, &stdout, &stderr); code != 1 {
+		t.Fatalf("doBeadsCityMigrateProxied() = %d, want 1\nstdout=%s\nstderr=%s", code, stdout.String(), stderr.String())
+	}
+	report := decodeMigrateProxiedReport(t, stdout.String())
+	if report.Failed != 1 || !strings.Contains(report.Scopes[0].Error, `uses library backend "http"`) {
+		t.Fatalf("report = %+v, want a library-backend refusal", report)
+	}
+	if got := mustReadFile(t, metadataPath); string(got) != convertedHTTPMetadata {
+		t.Fatalf("metadata.json was rewritten by a refused migration:\n%s", got)
+	}
+}
+
+// The shared-root half of the same refusal. A converted rig whose database the
+// legacy layout placed in the city's data directory is planned onto that
+// directory, so once the city's own turn succeeds gc would stamp a
+// dolt_data_dir into metadata the library owns and hand the rig to bd.
+func TestMigrateProxiedRefusesLibraryBackendSharedRootRig(t *testing.T) {
+	registerLibraryBackendForTest(t, "http")
+	city, rigs := newLegacyManagedCityFixture(t, "spike")
+	rig := rigs["spike"]
+	seedCityDatabaseDir(t, city, "sp")
+	initDoltRootMarker(t, filepath.Join(city, ".beads", "dolt"))
+	// The rig's own conversion: convertedHTTPMetadata's shape, naming the
+	// rig's database.
+	const rigMetadata = `{"database":"dolt","backend":"http","dolt_database":"sp","project_id":"proj-1"}`
+	rigMetadataPath := filepath.Join(rig, ".beads", "metadata.json")
+	if err := os.WriteFile(rigMetadataPath, []byte(rigMetadata), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	calls := stubMigrateProxiedBdFlippingMetadata(t)
+
+	var stdout, stderr bytes.Buffer
+	if code := doBeadsCityMigrateProxied(city, migrateProxiedOptions{JSON: true}, &stdout, &stderr); code != 1 {
+		t.Fatalf("doBeadsCityMigrateProxied() = %d, want 1\nstdout=%s\nstderr=%s", code, stdout.String(), stderr.String())
+	}
+	report := decodeMigrateProxiedReport(t, stdout.String())
+	if len(report.Scopes) != 2 || report.Scopes[0].Status != migrateProxiedStatusMigrated {
+		t.Fatalf("report = %+v, want the legacy city migrated", report)
+	}
+	if got := report.Scopes[1]; got.Status != migrateProxiedStatusFailed || !strings.Contains(got.Error, `uses library backend "http"`) {
+		t.Fatalf("rig outcome = %+v, want a library-backend refusal", got)
+	}
+	if got := mustReadFile(t, rigMetadataPath); string(got) != rigMetadata {
+		t.Fatalf("rig metadata.json was rewritten by a refused migration:\n%s", got)
+	}
+	for _, call := range *calls {
+		if samePath(call.scope, rig) {
+			t.Fatalf("a library backend rig reached bd: %v", call.args)
+		}
 	}
 }
 

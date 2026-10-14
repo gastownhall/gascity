@@ -146,8 +146,11 @@ work_query = "kill -9 $$"
 
 	var stdout, stderr bytes.Buffer
 	code := cmdHookWithFormat(nil, false, "", &stdout, &stderr)
-	if code != 1 {
-		t.Fatalf("cmdHookWithFormat() = %d, want 1 for killed work query; stderr=%s", code, stderr.String())
+	if code != 2 {
+		t.Fatalf("cmdHookWithFormat() = %d, want 2 (store unavailable) for killed work query; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), hookStoreUnavailableToken) {
+		t.Fatalf("stderr = %q, want %s for killed work query", stderr.String(), hookStoreUnavailableToken)
 	}
 	evts, err := events.ReadFiltered(filepath.Join(cityDir, ".gc", "events.jsonl"), events.Filter{Type: events.SessionWorkQueryFailed})
 	if err != nil {
@@ -206,8 +209,8 @@ work_query = "kill -9 $$"
 
 	var stdout, stderr bytes.Buffer
 	code := cmdHookWithFormat([]string{"other"}, false, "", &stdout, &stderr)
-	if code != 1 {
-		t.Fatalf("cmdHookWithFormat(explicit other) = %d, want 1 for killed work query; stderr=%s", code, stderr.String())
+	if code != 2 {
+		t.Fatalf("cmdHookWithFormat(explicit other) = %d, want 2 (store unavailable) for killed work query; stderr=%s", code, stderr.String())
 	}
 	evts, err := events.ReadFiltered(filepath.Join(cityDir, ".gc", "events.jsonl"), events.Filter{Type: events.SessionWorkQueryFailed})
 	if err != nil {
@@ -1003,11 +1006,16 @@ func TestDoHookClaimCommandErrorKeepsProtocolStdoutEmpty(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	code := doHookClaim("bd ready --json", "", opts, ops, &stdout, &stderr)
-	if code != 1 {
-		t.Fatalf("doHookClaim(error) = %d, want 1", code)
+	// A timed-out read got no answer from the store, so the claim door reports
+	// it as store-unavailable: exit 2 with the token, like plain gc hook.
+	if code != 2 {
+		t.Fatalf("doHookClaim(error) = %d, want 2", code)
 	}
 	if stdout.Len() != 0 {
 		t.Fatalf("stdout = %q, want empty protocol stdout on work-query error", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), hookStoreUnavailableToken) {
+		t.Fatalf("stderr = %q, want the %s token", stderr.String(), hookStoreUnavailableToken)
 	}
 	if !strings.Contains(stderr.String(), "partial stdout") {
 		t.Fatalf("stderr = %q, want timeout diagnostic", stderr.String())
@@ -1308,9 +1316,13 @@ func TestHookCommandError(t *testing.T) {
 	}
 }
 
+// TestHookCommandErrorPrintsPartialOutput pins that an ordinary work-query
+// failure still prints whatever output the runner returned with it before
+// exiting 1. TestDoHookStoreUnavailableSuppressesPartialStdout is the companion:
+// a store-unavailable failure, such as a timed-out query, prints none of it.
 func TestHookCommandErrorPrintsPartialOutput(t *testing.T) {
 	runner := func(string, string) (string, error) {
-		return "[]\n", fmt.Errorf("timed out after 15s with partial stdout")
+		return "[]\n", fmt.Errorf("running work query %q: exit status 1: invalid value for --limit", "bd ready")
 	}
 	var stdout, stderr bytes.Buffer
 	code := doHook("bd ready", "", false, runner, &stdout, &stderr, hookVisibility{})
@@ -1320,8 +1332,11 @@ func TestHookCommandErrorPrintsPartialOutput(t *testing.T) {
 	if got := stdout.String(); got != "[]" {
 		t.Errorf("stdout = %q, want partial JSON output", got)
 	}
-	if !strings.Contains(stderr.String(), "partial stdout") {
-		t.Errorf("stderr = %q, want timeout diagnostic", stderr.String())
+	if !strings.Contains(stderr.String(), "invalid value for --limit") {
+		t.Errorf("stderr = %q, want the work-query diagnostic", stderr.String())
+	}
+	if strings.Contains(stderr.String(), hookStoreUnavailableToken) {
+		t.Errorf("stderr = %q carries the store-unavailable token for an ordinary failure", stderr.String())
 	}
 }
 
@@ -3016,6 +3031,104 @@ func TestDoHookClaimSkipsUnclaimableCandidateError(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "hw-unresolvable") {
 		t.Fatalf("expected stderr to record the skipped claim error; got %q", stderr.String())
+	}
+}
+
+// TestDoHookClaimSkipsReadyAssignmentThatResolvesToAWisp pins the wisp skip in
+// the ready tier (claimFirstReadyHookAssignment), which fences every claim error
+// it does not recognize as benign with a terminal failure (ownership would
+// otherwise be left unresolved on a bead this session already owns).
+// beads.ErrWispNotClaimable is a routed id resolving, through the claim-time
+// class route, to a wisp row — refused before any write, so nothing is left
+// outstanding — and must be skipped like hookClaimBeadIsElsewhere and
+// hookClaimBindingRefusedTheClaim are, not treated as an unresolved operational
+// failure.
+func TestDoHookClaimSkipsReadyAssignmentThatResolvesToAWisp(t *testing.T) {
+	runner := func(string, string) (string, error) {
+		return `[{"id":"hw-wisp","status":"open","assignee":"worker-alias","metadata":{"gc.routed_to":"worker"}}]`, nil
+	}
+	claimCalls := 0
+	ops := hookClaimOps{
+		Runner: runner,
+		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+			claimCalls++
+			if beadID != "hw-wisp" || assignee != "worker-alias" {
+				t.Fatalf("claim = (%q, %q), want (hw-wisp, worker-alias)", beadID, assignee)
+			}
+			return beads.Bead{}, false, fmt.Errorf("claiming bead %q: %w", beadID, beads.ErrWispNotClaimable)
+		},
+		DrainAck: func(io.Writer) error { return nil },
+	}
+	opts := hookClaimOptions{
+		Assignee:           "worker-canonical",
+		IdentityCandidates: []string{"worker-canonical", "worker-alias"},
+		RouteTargets:       []string{"worker"},
+		DrainAck:           true,
+		JSON:               true,
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doHookClaim(ready assignment resolves to a wisp) = %d, want 0 (skip, not terminal); stderr=%s", code, stderr.String())
+	}
+	if claimCalls != 1 {
+		t.Fatalf("claim calls = %d, want 1", claimCalls)
+	}
+	if !strings.Contains(stderr.String(), "skipping ready assignment hw-wisp") {
+		t.Fatalf("expected stderr to record the skipped wisp claim; got %q", stderr.String())
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.Action != "drain" || result.Reason != "claims_errored" {
+		t.Fatalf("claim result = %+v, want drain/claims_errored (a wisp that no front door can ever claim must not fail the whole hook)", result)
+	}
+}
+
+// TestDoHookClaimSkipsReadyAssignmentWhoseBindingCannotClaim pins that the
+// ready tier skips a routed claim refused with beads.ErrClaimUnsupported — the
+// pre-write capability veto a forwarding wrapper returns for a claim-less
+// engine behind it — instead of failing the whole hook invocation.
+func TestDoHookClaimSkipsReadyAssignmentWhoseBindingCannotClaim(t *testing.T) {
+	runner := func(string, string) (string, error) {
+		return `[{"id":"hw-nocas","status":"open","assignee":"worker-alias","metadata":{"gc.routed_to":"worker"}}]`, nil
+	}
+	claimCalls := 0
+	ops := hookClaimOps{
+		Runner: runner,
+		Claim: func(_ context.Context, _ string, _ []string, beadID, _ string) (beads.Bead, bool, error) {
+			claimCalls++
+			return beads.Bead{}, false, fmt.Errorf("claiming bead %q: %w", beadID, beads.ErrClaimUnsupported)
+		},
+		DrainAck: func(io.Writer) error { return nil },
+	}
+	opts := hookClaimOptions{
+		Assignee:           "worker-canonical",
+		IdentityCandidates: []string{"worker-canonical", "worker-alias"},
+		RouteTargets:       []string{"worker"},
+		DrainAck:           true,
+		JSON:               true,
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doHookClaim(ready assignment on a claim-less binding) = %d, want 0 (skip, not terminal); stderr=%s", code, stderr.String())
+	}
+	if claimCalls != 1 {
+		t.Fatalf("claim calls = %d, want 1", claimCalls)
+	}
+	if !strings.Contains(stderr.String(), "skipping ready assignment hw-nocas") {
+		t.Fatalf("expected stderr to record the skipped claim; got %q", stderr.String())
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.Action != "drain" || result.Reason != "claims_errored" {
+		t.Fatalf("claim result = %+v, want drain/claims_errored", result)
 	}
 }
 

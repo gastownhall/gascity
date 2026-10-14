@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -37,7 +39,17 @@ Without --inject: prints normalized ready-only output, exits 0 if work exists, 1
 With --inject: silent legacy Stop-hook compatibility; skips the work query and always exits 0.
 With --claim: runs the standard startup claim protocol for one work item.
 
-		The agent is determined from $GC_AGENT or a positional argument.`,
+A work query that gets no answer from the bead store (a connection error, a
+timeout, a killed query, a locked database, or bd's circuit breaker failing
+fast) exits 2 and prints GC_HOOK_STORE_UNAVAILABLE on stderr: the answer is
+unknown, not empty. Any other work-query failure exits 1. This applies with and
+without --claim, and neither writes a drain result. The generated default work
+query discards bd's errors in its single-store tiers, so there a store that
+fails fast still reads as no work; only a deadline overrun exits 2. Only the
+agent's own store reports: other stores the hook also searches are
+best-effort, and one that fails reads as having no work.
+
+The agent is determined from $GC_AGENT or a positional argument.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			opts := hookCommandOptions{
@@ -47,10 +59,11 @@ With --claim: runs the standard startup claim protocol for one work item.
 				DrainAck:   drainAck,
 				JSON:       jsonOut,
 			}
-			if cmdHookWithOptions(args, opts, stdout, stderr) != 0 {
-				return errExit
-			}
-			return nil
+			// exitForCode, not `!= 0 → errExit`: the store-unavailable
+			// contract is exit 2 (reportWorkQueryFailure), and folding it
+			// into errExit renders it as the no-work exit 1 at the process
+			// boundary — the idle-agents-with-work-waiting dead-drop.
+			return exitForCode(cmdHookWithOptions(args, opts, stdout, stderr))
 		},
 	}
 	cmd.Flags().BoolVar(&inject, "inject", false, "silent legacy Stop-hook compatibility; skip work query and exit 0")
@@ -128,7 +141,12 @@ func cmdHookRun(args []string, opts hookRunOptions, stdin io.Reader, stdout, std
 	// parked the instant it is won; the claim path refuses on this marker (F-A,
 	// hookClaimNonTurnMarker). Every other hook use of a callback lane —
 	// --inject, nudge drain, mail check — is read-only and unaffected.
-	cmd.Env = append(os.Environ(), "GC_HOOK_CALLBACK_LANE=1")
+	//
+	// The child also gets the deadline its output must beat (hookDeadlineEnv),
+	// so it can skip a destructive step it would not finish in time
+	// (childHookDeadline).
+	cmd.Env = append(removeEnvKey(os.Environ(), hookDeadlineEnv),
+		"GC_HOOK_CALLBACK_LANE=1", hookDeadlineEnv+"="+hookDeadlineEnvValue(childHookDeadline(ctx)))
 	// Read the provider's hook stdin FULLY into a buffer before running the
 	// wrapped command, then hand it that buffer. Forwarding the live stdin
 	// (cmd.Stdin = stdin) let the wrapped command exit — on its fast path or on
@@ -311,6 +329,11 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	// documented tokenless-runtime compatibility escape hatch), or a transient
 	// session-store fault, so a healthy worker still falls through to the
 	// suspension and config checks below.
+	// fencedSession is the session bead the claim fence verified as this
+	// runtime's current incarnation (nil when no fence ran or it failed open).
+	// It is what lets the claim honor an identity the supervisor collapsed onto
+	// the session after its runtime env was stamped (hookClaimCollapsedIdentity).
+	var fencedSession *session.Info
 	if opts.Claim {
 		// F-A, at the earliest point that can answer it. tryHookClaim carries the
 		// same fence over the same predicate — it is the seam every ops-level
@@ -323,9 +346,11 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		if marker := hookClaimNonTurnMarker(os.Environ()); marker != "" {
 			return writeHookClaimNonTurnDrain(marker, hookClaimOptions{JSON: opts.JSON}, stdout, stderr)
 		}
-		if code, handled := fenceHookClaimSession(cityPath, cfg, strings.TrimSpace(os.Getenv("GC_SESSION_ID")), opts, stdout, stderr); handled {
+		code, handled, info := fenceHookClaimSession(cityPath, cfg, strings.TrimSpace(os.Getenv("GC_SESSION_ID")), opts, stdout, stderr)
+		if handled {
 			return code
 		}
+		fencedSession = info
 	}
 
 	st, err := loadSuspensionState(fsys.OSFS{}, cityPath)
@@ -421,13 +446,25 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	}
 	overrides["GC_AGENT"] = agentForQuery
 	overrides["GC_SESSION_NAME"] = sessionForQuery
+	collapsedIdentity := ""
+	runtimeAlias := ""
 	if sessionTemplateContext {
 		overrides["GC_ALIAS"] = os.Getenv("GC_ALIAS")
+		runtimeAlias = overrides["GC_ALIAS"]
+		// The work query's assigned tiers walk $GC_SESSION_ID $GC_SESSION_NAME
+		// $GC_ALIAS; a session serving a collapsed identity must look up that
+		// identity's assignments too. The recorded claim assignee below still
+		// comes from the runtime's own env (runtimeAlias).
+		if collapsedIdentity = hookClaimCollapsedIdentity(&a, fencedSession, overrides["GC_ALIAS"]); collapsedIdentity != "" {
+			fmt.Fprintf(stderr, "gc hook --claim: session %s serves collapsed identity %q\n", strings.TrimSpace(os.Getenv("GC_SESSION_ID")), collapsedIdentity) //nolint:errcheck
+			overrides["GC_ALIAS"] = collapsedIdentity
+		}
 		overrides["GC_SESSION_ID"] = os.Getenv("GC_SESSION_ID")
 		overrides["GC_SESSION_ORIGIN"] = os.Getenv("GC_SESSION_ORIGIN")
 		overrides["GC_TEMPLATE"] = os.Getenv("GC_TEMPLATE")
 	} else {
 		overrides["GC_ALIAS"] = resolvedAgentName
+		runtimeAlias = resolvedAgentName
 		overrides["GC_SESSION_ID"] = ""
 		overrides["GC_SESSION_ORIGIN"] = ""
 		overrides["GC_TEMPLATE"] = ""
@@ -465,7 +502,10 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	// sessionID feeds only the claim/visibility assignee identity.
 	sessionID := strings.TrimSpace(overrides["GC_SESSION_ID"])
 	sessionName := strings.TrimSpace(sessionForQuery)
-	alias := strings.TrimSpace(overrides["GC_ALIAS"])
+	// The claim is RECORDED under the runtime's own identity (runtimeAlias, not
+	// a collapsed identity the query env may carry), so liveness readers keep
+	// resolving the assignee to this exact session.
+	alias := strings.TrimSpace(runtimeAlias)
 	assignee := hookClaimAssigneeIdentity(alias, sessionID, agentForQuery, resolvedAgentName, sessionName)
 	// IdentityCandidates governs ADOPTION of already-owned in_progress/open
 	// work (hookClaimExistingAssignment, claimFirstReadyHookAssignment, and
@@ -478,13 +518,19 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	// (ga-80pen8). The bare template stays in RouteTargets, which governs
 	// FRESH claims of UNASSIGNED routed work. The canonical slot / named
 	// holder keep it via `alias` (GC_ALIAS == qualified bare name); only
-	// suffixed workers drop it.
+	// suffixed workers drop it. A single-slot pool session the supervisor
+	// collapsed onto the canonical identity serves that identity, so it adopts
+	// its assignments too (hookClaimCollapsedIdentity) — on the --claim door
+	// only: fencedSession is loaded inside opts.Claim, so on the discovery door
+	// collapsedIdentity is "" and neither the query env nor these candidates
+	// carry the collapsed identity.
 	identityCandidates := hookClaimIdentityCandidates(
 		assignee,
 		sessionID,
 		sessionName,
 		alias,
 		agentForQuery,
+		collapsedIdentity,
 	)
 	routeTargets := hookClaimRouteTargets(hookClaimPrimaryRouteTarget(&a), resolvedAgentName, strings.TrimSpace(overrides["GC_TEMPLATE"]))
 	if opts.Claim {
@@ -496,6 +542,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 			Env:                queryEnv,
 			DrainAck:           opts.DrainAck,
 			JSON:               opts.JSON,
+			StrictDrainAck:     drainAckStrictConfig(cfg),
 			RuntimeActor:       strings.TrimSpace(os.Getenv("BEADS_ACTOR")),
 		}
 		return claimHookWork(cityPath, workQuery, workDir, queryEnv, stores, claimOpts, emitQueryFailure, stdout, stderr)
@@ -503,9 +550,10 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	// The discovery door is fenced too: a draining seat must not be handed its
 	// preassigned continuation sibling by the packs' post-close `gc hook`.
 	return doHookDiscovery(workQuery, workDir, false, hookClaimOptions{
-		Env:      queryEnv,
-		DrainAck: opts.DrainAck,
-		JSON:     opts.JSON,
+		Env:            queryEnv,
+		DrainAck:       opts.DrainAck,
+		JSON:           opts.JSON,
+		StrictDrainAck: drainAckStrictConfig(cfg),
 	}, hookClaimOps{}, runner, stdout, stderr, hookVisibility{
 		Identities:   identityCandidates,
 		RouteTargets: routeTargets,
@@ -547,7 +595,7 @@ const (
 // transient session-store fault all return handled=false so the normal claim
 // path runs — the fence never turns an infrastructure hiccup or an
 // in-progress start into a false refusal.
-func fenceHookClaimSession(cityPath string, cfg *config.City, sessionID string, opts hookCommandOptions, stdout, stderr io.Writer) (int, bool) {
+func fenceHookClaimSession(cityPath string, cfg *config.City, sessionID string, opts hookCommandOptions, stdout, stderr io.Writer) (int, bool, *session.Info) {
 	if sessionID == "" {
 		// GC_TEMPLATE is the pool-membership signal (set only alongside
 		// GC_SESSION_ID by RuntimeEnvWithSessionContext, the single front door
@@ -566,26 +614,27 @@ func fenceHookClaimSession(cityPath string, cfg *config.City, sessionID string, 
 		// unfenced.
 		if template := strings.TrimSpace(os.Getenv("GC_TEMPLATE")); template != "" {
 			fmt.Fprintf(stderr, "gc hook --claim: refusing unregistered managed session for pool template %q: GC_TEMPLATE is set but GC_SESSION_ID is empty, so no durable session bead can be verified\n", template) //nolint:errcheck
-			return writeHookClaimMissingSessionRegistrationDrain(opts, stdout, stderr), true
+			return writeHookClaimMissingSessionRegistrationDrain(opts, stdout, stderr), true, nil
 		}
-		return 0, false
+		return 0, false, nil
 	}
 	instanceToken := strings.TrimSpace(os.Getenv("GC_INSTANCE_TOKEN"))
 	if instanceToken == "" {
-		return 0, false
+		return 0, false, nil
 	}
-	switch verdict, reason := classifyHookClaimSession(cityPath, cfg, sessionID, instanceToken); verdict {
+	verdict, reason, info := classifyHookClaimSessionInfo(cityPath, cfg, sessionID, instanceToken)
+	switch verdict {
 	case hookClaimSessionStale:
 		fmt.Fprintf(stderr, "gc hook --claim: refusing stale session %s: %s\n", sessionID, reason) //nolint:errcheck
-		return writeHookClaimStaleSessionDrain(opts, stdout, stderr), true
+		return writeHookClaimStaleSessionDrain(opts, stdout, stderr), true, nil
 	case hookClaimSessionStoreUnavailable:
 		// Fail open: let the claim path run and surface/escalate its own store
 		// error rather than reporting a false stale session. Name the fault
 		// without the alarming "stale session" wording.
 		fmt.Fprintf(stderr, "gc hook --claim: session fence unavailable for %s: %s; proceeding to claim\n", sessionID, reason) //nolint:errcheck
-		return 0, false
+		return 0, false, nil
 	default:
-		return 0, false
+		return 0, false, info
 	}
 }
 
@@ -598,17 +647,72 @@ func fenceHookClaimSession(cityPath string, cfg *config.City, sessionID string, 
 // hiccup is not mislabeled as staleness AND a vanished session is not laundered
 // into an infrastructure hiccup that lets a stale runtime reach the claim path.
 func classifyHookClaimSession(cityPath string, cfg *config.City, sessionID, instanceToken string) (hookClaimSessionVerdict, string) {
+	verdict, reason, _ := classifyHookClaimSessionInfo(cityPath, cfg, sessionID, instanceToken)
+	return verdict, reason
+}
+
+// classifyHookClaimSessionInfo is classifyHookClaimSession that also returns the
+// session Info it read when the verdict is eligible (nil otherwise), so the
+// claim can act on the session bead's persisted identity without a second read.
+func classifyHookClaimSessionInfo(cityPath string, cfg *config.City, sessionID, instanceToken string) (hookClaimSessionVerdict, string, *session.Info) {
 	// cfg is the config this one-shot `gc hook` invocation loaded; reuse it
 	// rather than reloading the whole city config inside the open.
 	store, err := openCityStoreAtWithConfig(cityPath, cfg)
 	if err != nil {
-		return hookClaimSessionStoreUnavailable, fmt.Sprintf("opening session store: %v", err)
+		return hookClaimSessionStoreUnavailable, fmt.Sprintf("opening session store: %v", err), nil
 	}
 	info, err := cliSessionFrontDoor(store, cfg, cityPath).Get(sessionID)
 	if err != nil {
-		return classifyHookClaimSessionLookupError(err)
+		verdict, reason := classifyHookClaimSessionLookupError(err)
+		return verdict, reason, nil
 	}
-	return hookClaimSessionEligibility(info, instanceToken)
+	verdict, reason := hookClaimSessionEligibility(info, instanceToken)
+	if verdict != hookClaimSessionEligible {
+		return verdict, reason, nil
+	}
+	return verdict, reason, &info
+}
+
+// hookClaimCollapsedIdentity returns the canonical identity a pool session
+// serves when the supervisor collapsed it onto that identity after its runtime
+// env was stamped, or "" when the session serves only its own runtime identity.
+//
+// A single-slot pool (max_active_sessions = 1, no namepool) whose template is
+// ALSO a [[named_session]] steps its runtime name aside to "<name>-pool"
+// (poolRuntimeSessionName) and launches with a blank GC_ALIAS
+// (clearPoolTemplateRuntimeIdentity). buildDesiredState then collapses the
+// session bead onto the canonical identity ("collapsing phantom pool identity
+// ... to <name>", normalizeNonExpandingPoolSessionInfo) and wakes it on
+// namedWorkReady for work assigned to <name>. The runtime env never learns the
+// collapse, so the claim looked only for <name>-pool / session-id work and
+// drained no_work while the named identity's assignment waited — the olivia
+// seat in maintainer-city, 2026-09-22/23. The persisted alias/agent_name on the
+// fenced session bead is the authority for which identity this seat serves —
+// specifically its exclusive alias, never the shared agent_name.
+//
+// The ga-80pen8 guard still holds: only a single-slot pool can collapse (there
+// is never a second live member to double-adopt the holder's work), a
+// configured named-session bead already carries its own alias, and a pool
+// session whose bead does NOT carry the canonical identity gets nothing.
+func hookClaimCollapsedIdentity(a *config.Agent, info *session.Info, runtimeAlias string) string {
+	if a == nil || info == nil || info.Closed || !a.UsesCanonicalSingletonPoolIdentity() ||
+		isNamedSessionInfo(*info) || isManualSessionInfoForAgent(*info, a) {
+		return ""
+	}
+	canonical := strings.TrimSpace(a.QualifiedName())
+	if canonical == "" || strings.TrimSpace(runtimeAlias) == canonical {
+		return ""
+	}
+	// Only the alias is exclusive: it is written under the city session alias
+	// lock after EnsureAliasAvailable, so at most one live session holds it.
+	// agent_name is NOT exclusive — an alias-deferred pool session, a woken
+	// named holder, and manual sessions (`gc session new olivia --alias x`) all
+	// carry agent_name=<canonical> — so accepting it let two sessions adopt the
+	// same in_progress assignment.
+	if strings.TrimSpace(info.Alias) == canonical {
+		return canonical
+	}
+	return ""
 }
 
 // classifyHookClaimSessionLookupError maps a session Store.Get error to a fence
@@ -730,23 +834,19 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 		discovered, selected, err := selectStoreWithWorkRetrying(workQuery, remaining, primary, run, &ops)
 		if err != nil {
 			emitFailure(workQuery, err)
-			fmt.Fprintf(stderr, "gc hook --claim: %v\n", err) //nolint:errcheck // best-effort stderr
-			// Deliberately NO drain result and NO drain-ack. A failed read is not
-			// an idle store: the controller counted demand for this seat, so
-			// draining here would convert a transport failure into a false idle,
-			// reap the seat, and leave the work for the next tick to rediscover.
-			// Exit non-zero, keep the seat, and let the event above carry the
-			// cause; the idle-claim backstop re-drives the hook.
-			return 1
+			return reportClaimWorkQueryFailure(err, stderr)
 		}
 		if isZeroHookStore(selected) {
 			break // no remaining store has ready work
 		}
+		// On a multi-leg city this re-reads the selected store before the
+		// mutation, and a primary-leg failure there is surfaced exactly like a
+		// discovery failure: it is the same read of the same store, moments
+		// later, so it gets the same classification.
 		claimOutput, claimStore, err := claimStoreWithFallback(workQuery, remaining, selected, primary, discovered, run)
 		if err != nil {
 			emitFailure(workQuery, err)
-			fmt.Fprintf(stderr, "gc hook --claim: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
+			return reportClaimWorkQueryFailure(err, stderr)
 		}
 		if isZeroHookStore(claimStore) {
 			break // selected store emptied and no later store has ready work
@@ -780,14 +880,66 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 	return writeHookClaimNoWork(claimOpts, ops, claimsErrored, workDir, stdout, stderr)
 }
 
+// reportClaimWorkQueryFailure reports a failed claim-path work query on stderr
+// and returns the exit code for it. Every claim read whose failure is surfaced
+// funnels through here: discovery, the claim-time re-validation on a multi-leg
+// city, and tryHookClaim's own read. So a timed-out or transport-class failure
+// on any of them carries the token and exit 2, scoped as
+// hookStoreUnavailableToken's doc states (the agent's own store only).
+//
+// This is the same store-unavailable classification the read path applies.
+// --claim is the form agents actually run in the dispatch loop, so without the
+// token here a transport-class failure is still indistinguishable from "no
+// work" to every consumer that matches on it — the dead-drop the token exists
+// to close. The error is classified ONCE and reused for both the stderr token
+// and the exit code, so the published contract (token <=> exit 2) cannot be
+// split by an edit reaching one and not the other.
+//
+// Deliberately NO drain result and NO drain-ack. A failed read is not an idle
+// store: the controller counted demand for this seat, so draining here would
+// convert a transport failure into a false idle, reap the seat, and leave the
+// work for the next tick to rediscover. Keep the seat and let the event the
+// caller emitted carry the cause; the idle-claim backstop re-drives the hook.
+// That behavior is orthogonal to the exit CODE, which follows the token's
+// published contract: hookStoreUnavailableToken documents exit 2, and a
+// consumer gating on the code must be able to tell a dead store from no-work on
+// this path too.
+func reportClaimWorkQueryFailure(err error, stderr io.Writer) int {
+	return reportWorkQueryFailure("gc hook --claim", err, stderr)
+}
+
+// workQueryStoreUnavailable reports whether err, after classification, means
+// the store could not be read (an unknown answer, not an empty queue).
+func workQueryStoreUnavailable(err error) bool {
+	return errors.Is(classifyWorkQueryStoreUnavailable(err), beads.ErrStoreUnavailable)
+}
+
+// reportWorkQueryFailure is the one place the token <=> exit-2 contract is
+// rendered: a store-unavailable failure (classifyWorkQueryStoreUnavailable)
+// prints "<prefix>: <token>: <err>" and exits 2; anything else prints
+// "<prefix>: <err>" and exits 1. The token and the exit code come from one
+// classification, so they cannot disagree. Both gc hook doors report a failed
+// work query through it (doHook directly, the claim reads via
+// reportClaimWorkQueryFailure) so the published contract cannot drift between
+// them.
+func reportWorkQueryFailure(prefix string, err error, stderr io.Writer) int {
+	classified := classifyWorkQueryStoreUnavailable(err)
+	if errors.Is(classified, beads.ErrStoreUnavailable) {
+		fmt.Fprintf(stderr, "%s: %s: %v\n", prefix, hookStoreUnavailableToken, classified) //nolint:errcheck // best-effort stderr
+		return 2
+	}
+	fmt.Fprintf(stderr, "%s: %v\n", prefix, err) //nolint:errcheck // best-effort stderr
+	return 1
+}
+
 // Claim-read retry pacing. A work-query ERROR is a failed read, and the failures
 // this bounds are transport-shaped: a contended SQLite leg, a store mid-write, a
 // binding whose engine is briefly refusing. Those clear in seconds, and the
-// alternative — exiting 1 and parking a seat the controller minted demand for
-// until the 90s backstop re-drives it — is strictly worse. Emptiness is NOT
-// retried: an empty read is an answer, and a seat that lost the sibling race must
-// drain promptly. Package vars follow hookWorkQueryTimeout's convention so tests
-// drive the loop without sleeping.
+// alternative — failing the claim at once and parking a seat the controller
+// minted demand for until the 90s backstop re-drives it — is strictly worse.
+// Emptiness is NOT retried: an empty read is an answer, and a seat that lost
+// the sibling race must drain promptly. Package vars follow
+// hookWorkQueryTimeout's convention so tests drive the loop without sleeping.
 var (
 	hookClaimQueryRetryAttempts = 3
 	hookClaimQueryRetryInterval = 5 * time.Second
@@ -805,8 +957,9 @@ var (
 // strictly inside the window, both before the pacing sleep (the sleep must not
 // run past the window) and after it (the sleep may have overrun). When the window
 // cuts the budget short, the last read error is returned, annotated, so the
-// caller keeps its failed-read contract (exit 1, no drain) instead of treating a
-// dead invocation as an idle store.
+// caller keeps its failed-read contract instead of treating a dead invocation
+// as an idle store: no drain, and reportClaimWorkQueryFailure classifies the
+// code (2 if the read failed transport-class or timed out, else 1).
 func selectStoreWithWorkRetrying(workQuery string, stores []hookStore, primary hookStore, run hookStoreRunner, ops *hookClaimOps) (string, hookStore, error) {
 	out, selected, err := bestStoreWithWork(workQuery, stores, primary, run)
 	for attempt := 0; err != nil && attempt < hookClaimQueryRetryAttempts; attempt++ {
@@ -1048,10 +1201,133 @@ type hookVisibility struct {
 	RouteTargets []string
 }
 
-// doHook is the pure logic for gc hook. Runs the work query and outputs
-// results based on mode. Without inject: prints normalized ready-only output,
-// returns 0 if work exists, 1 if empty. With inject: skips the work query and
-// returns 0.
+// hookStoreUnavailableToken is the stderr token gc hook prints, with exit code
+// 2, when its work query got no answer from the store
+// (classifyWorkQueryStoreUnavailable), with or without --claim. It is a
+// published contract: a consumer of `gc hook` stderr matches it to tell "store
+// down" from the exit-1 no-work answer, as agentScriptHookExitIsNoWork does.
+// Rendering an unreachable store as no work is the chronic
+// idle-agents-with-work-waiting dead-drop.
+//
+// It fires only when the failure reaches gc hook, and two layers keep some
+// failures from reaching it:
+//   - The generated single-store work query discards bd's stderr and falls
+//     through to "[]" when every ready tier fails (internal/config/workquery.go),
+//     so there a store that fails fast still reads as no work; only the
+//     deadline, which bounds every query, surfaces it.
+//   - Only a failure of the agent's own (primary) store is reported. Other
+//     stores gc hook queries beside it are best-effort discovery
+//     (bestStoreWithWork), so one that fails or times out reads as no work
+//     from that store. A federated reader (`gc ready`) is not one of those: it
+//     runs as the primary store's query, so a leg it cannot read fails the
+//     primary read.
+const hookStoreUnavailableToken = "GC_HOOK_STORE_UNAVAILABLE"
+
+// bdConnectionErrorMarkers mirrors the messages bd's Dolt store counts as the
+// server being down: the connection-error test its circuit breaker trips on
+// (isConnectionError, beads v1.3.1 internal/storage/dolt/circuit.go). Several
+// strike after a query is under way ("Error 2013: Lost connection to MySQL
+// server during query"), past every connect-time marker in
+// bdTransportRetryableMarkers, and they stay out of that table on purpose:
+// the managed retry reads it and re-runs any bd command, writes included.
+// The table is not exhaustive. No marker here, in bdTransportRetryableMarkers
+// or in dispatch's availability needles matches a read- or write-phase "no
+// route to host" or "connection timed out" (only a dial-phase one, through
+// "dial tcp"), so those still exit 1; such a phrase belongs here, with a row
+// in TestClassifyWorkQueryStoreUnavailable.
+var bdConnectionErrorMarkers = []string{
+	"connection refused",
+	"connection reset",
+	"broken pipe",
+	"i/o timeout",
+	"bad connection",
+	"invalid connection",
+	"lost connection",
+	"gone away",
+}
+
+// messageHasMarker reports whether a lowercased error message contains any of
+// markers.
+func messageHasMarker(lowerMsg string, markers []string) bool {
+	for _, marker := range markers {
+		if strings.Contains(lowerMsg, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// workQueryErrorPrefix is the stamp shellWorkQueryWithEnv puts on every
+// work-query failure, ahead of the command line it quotes with %q.
+const workQueryErrorPrefix = "running work query"
+
+// workQueryFailureText returns the lowercased text the work-query classifier
+// scans: the error message with the command line quoted after
+// workQueryErrorPrefix cut out. A work query is user-authored shell, so its
+// command text is not the store's answer, and a marker or timeout needle that
+// appears only there must not classify. The cut parses the span as the Go
+// string literal %q wrote, on the original message because lowercasing can
+// change a rune's byte length; a message without a parseable span is scanned
+// whole.
+func workQueryFailureText(msg string) string {
+	i := strings.Index(msg, workQueryErrorPrefix+" ")
+	if i < 0 {
+		return strings.ToLower(msg)
+	}
+	head, rest := msg[:i+len(workQueryErrorPrefix)], msg[i+len(workQueryErrorPrefix)+1:]
+	quoted, err := strconv.QuotedPrefix(rest)
+	if err != nil {
+		return strings.ToLower(msg)
+	}
+	return strings.ToLower(head + rest[len(quoted):])
+}
+
+// workQueryFailure presents a work-query error to the text classifiers as
+// workQueryFailureText while keeping the original error chain, so typed
+// signals such as context.DeadlineExceeded still classify through errors.Is.
+type workQueryFailure struct {
+	err  error
+	text string
+}
+
+func (f workQueryFailure) Error() string { return f.text }
+
+func (f workQueryFailure) Unwrap() error { return f.err }
+
+// classifyWorkQueryStoreUnavailable wraps work-query failures that got no
+// answer from the store as beads.ErrStoreUnavailable so both gc hook doors can report
+// them as exit 2 rather than letting a dead store masquerade as a drained queue.
+// Errors that already carry the sentinel pass through unchanged; anything else
+// is returned as-is and stays an ordinary exit-1 error.
+func classifyWorkQueryStoreUnavailable(err error) error {
+	if err == nil || errors.Is(err, beads.ErrStoreUnavailable) {
+		return err
+	}
+	// Every text scan skips the command line the runner quotes into its
+	// error: only what the query reported can say the store was unreachable.
+	failure := workQueryFailure{err: err, text: workQueryFailureText(err.Error())}
+	// The control dispatcher's availability tier is the shared "the store did
+	// not answer" vocabulary. It covers the typed deadline shellWorkQueryWithEnv
+	// wraps for exactly this (a wedged-but-listening backend, with hung
+	// connections and context-deadline floods, is the dominant outage shape,
+	// not "connection refused"), bd's own timeouts (including a federated
+	// reader's per-leg deadline, which reaches gc hook only as stderr text),
+	// a killed work query, lock contention and bd's circuit breaker failing
+	// fast. Its semantic tier is a refusal the store answered with, so it
+	// stays exit 1.
+	if dispatch.ClassifyControllerError(failure) == dispatch.TierAvailability {
+		return fmt.Errorf("%w: %w", beads.ErrStoreUnavailable, err)
+	}
+	// bdTransportRetryableMarkers is shared with the bd managed-retry path, so
+	// a marker added there classifies here too. bdConnectionErrorMarkers
+	// supplies bd's own connection-error vocabulary, including read-phase
+	// disconnects ("lost connection") that neither of the others lists.
+	if messageHasMarker(failure.text, bdTransportRetryableMarkers) || messageHasMarker(failure.text, bdConnectionErrorMarkers) {
+		return fmt.Errorf("%w: %w", beads.ErrStoreUnavailable, err)
+	}
+	return err
+}
+
 // doHookDiscovery is the drain-fenced entry point for plain `gc hook`, the
 // DISCOVERY door. doHook itself stays a pure query-and-print function; this
 // wrapper is where the F-D fence lives for the non-claim path.
@@ -1091,6 +1367,13 @@ func doHookDiscovery(workQuery, dir string, inject bool, opts hookClaimOptions, 
 	return doHook(workQuery, dir, inject, runner, stdout, stderr, visibility)
 }
 
+// doHook is the pure logic for gc hook. Runs the work query and outputs
+// results based on mode. Without inject: prints normalized ready-only output,
+// returns 0 if work exists, 1 if empty. A work query that fails because the
+// store could not be read (classifyWorkQueryStoreUnavailable) returns 2,
+// prints nothing on stdout, and puts GC_HOOK_STORE_UNAVAILABLE on stderr; any
+// other failure returns 1 (reportWorkQueryFailure). With inject: skips the
+// work query and returns 0.
 func doHook(workQuery, dir string, inject bool, runner WorkQueryRunner, stdout, stderr io.Writer, visibility hookVisibility) int {
 	if inject {
 		return 0
@@ -1098,11 +1381,16 @@ func doHook(workQuery, dir string, inject bool, runner WorkQueryRunner, stdout, 
 
 	output, err := runner(workQuery, dir)
 	if err != nil {
-		if normalized := normalizeWorkQueryOutput(strings.TrimSpace(output)); normalized != "" {
-			fmt.Fprint(stdout, normalized) //nolint:errcheck // best-effort stdout
+		// A store that could not be read is not an empty queue: no partial
+		// stdout (the partial text stays in the stderr diagnostic), token +
+		// exit 2 (reportWorkQueryFailure). Any other failure first surfaces
+		// whatever partial output the query produced, then reports exit 1.
+		if !workQueryStoreUnavailable(err) {
+			if normalized := normalizeWorkQueryOutput(strings.TrimSpace(output)); normalized != "" {
+				fmt.Fprint(stdout, normalized) //nolint:errcheck // best-effort stdout
+			}
 		}
-		fmt.Fprintf(stderr, "gc hook: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+		return reportWorkQueryFailure("gc hook", err, stderr)
 	}
 
 	trimmed := strings.TrimSpace(output)
@@ -1184,6 +1472,15 @@ func filterUnreadyHookCandidates(output string, now time.Time) string {
 			continue
 		}
 		if isHeldHookCandidate(obj) {
+			continue
+		}
+		// Keep assigned workflow anchors available for continuation, but never
+		// offer an unassigned structural latch as fresh worker work.
+		assignee, _ := obj["assignee"].(string)
+		metadata, _ := obj["metadata"].(map[string]any)
+		kind, _ := metadata[beadmeta.KindMetadataKey].(string)
+		expanded, _ := metadata[beadmeta.WorkflowExpandedMetadataKey].(string)
+		if strings.TrimSpace(assignee) == "" && workflowTopologyIsNonExecutable(kind, expanded) {
 			continue
 		}
 		filtered = append(filtered, obj)
@@ -1332,36 +1629,38 @@ func isSelfBlockedHookCandidate(item map[string]any) bool {
 // hold dimension is filtered here, in the one seam every hook path already runs
 // through (the claim, the cross-store federation, and plain `gc hook`).
 //
-// Only the two canonical values match, compared exactly against the shared
-// beadmeta constants: unrelated labels that merely look hold-ish (`mpr-human-hold`,
-// the routing label `needs-mayor`) are ordinary work and must not be stranded.
+// Only the two canonical values match: each label is trimmed and compared
+// whole, case-insensitively, against the shared beadmeta constants, so
+// unrelated labels that merely look hold-ish (`mpr-human-hold`, the routing
+// label `needs-mayor`) are ordinary work and must not be stranded.
 //
 // An absent or null labels field means "no labels", never "unknown" — bd emits
 // labels:null for an unlabeled bead — so this fails open exactly like the
 // is_blocked projection above it.
 //
-// Scope (ga-5736js): this filters what the hook SERVES as work. It does not
-// touch the assignee-scoped demand/liveness tiers, which stay hold-transparent
-// by design so a held assignment still keeps its owner visible to the pool and
-// to crash recovery.
+// Scope (ga-5736js): this filters what the hook SERVES as work, on every hook
+// path. The controller applies the same predicate (beadmeta.HasDispatchHold)
+// to assigned OPEN work, so a held OPEN row carries no wake readiness, does not
+// keep its assignee awake, and is not a drain-ack strand. The rest of the
+// assignment's accounting stays hold-transparent: the assigned-work snapshot,
+// orphan release, pool accounting and the in_progress tiers still count it, so
+// a held assignment keeps its owner visible to the pool and to crash recovery.
 func isHeldHookCandidate(item map[string]any) bool {
 	raw, ok := item["labels"].([]any)
 	if !ok {
 		return false
 	}
+	labels := make([]string, 0, len(raw))
 	for _, entry := range raw {
-		label, ok := entry.(string)
-		if !ok {
-			continue
-		}
-		label = strings.TrimSpace(label)
-		for _, hold := range beadmeta.DispatchHoldLabels {
-			if strings.EqualFold(label, hold) {
-				return true
-			}
+		if label, ok := entry.(string); ok {
+			labels = append(labels, label)
 		}
 	}
-	return false
+	// One predicate for "held": the controller's wake-demand and drain-ack
+	// claimability gates (assignedOpenWorkHeld, classifyDemandRowClaimability)
+	// answer with the same function, so they cannot drift from what the hook
+	// actually refuses to serve.
+	return beadmeta.HasDispatchHold(labels)
 }
 
 // isClosedHookCandidate reports whether item is a closed bead. Defense-in-depth

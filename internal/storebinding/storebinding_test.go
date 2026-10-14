@@ -1,6 +1,7 @@
 package storebinding
 
 import (
+	"context"
 	"errors"
 	"reflect"
 	"strings"
@@ -330,5 +331,8 @@ func (nudgeQueueFake) RecordFailure([]string, error, time.Time) ([]nudgequeue.It
 }
 func (nudgeQueueFake) Rollback(nudgequeue.Item, string) error  { return nil }
 func (nudgeQueueFake) WithdrawQueuedWaitNudges([]string) error { return nil }
+func (nudgeQueueFake) Maintain(context.Context, time.Time) (NudgeMaintenance, error) {
+	return NudgeMaintenance{}, nil
+}
 
 var _ NudgeQueue = nudgeQueueFake{}

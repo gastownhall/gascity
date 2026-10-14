@@ -607,14 +607,21 @@ func desiredScopeDoltConfigStateForInit(cityPath, dir, prefix string) (contract.
 }
 
 // registerProviderOwnedScopeCustomTypes registers Gas City's bead vocabulary
-// with a scope bd has just created. bd init writes its own generic config,
-// whose types.custom is unset, and bd validates bead types on create and on
-// list — so without this every gc type (session, molecule, convoy, and the
-// rest) comes back "invalid issue type", which takes out `gc status`, the
-// session model, the startup-health scan and doctor's custom-types check on a
-// city that has just been initialized. `bd config set` is also what keeps bd's
-// normalized custom_types table in step, the same call
-// doctor.CustomTypesCheck.Fix makes.
+// with a provider-owned scope through the provider's own projection of it.
+func registerProviderOwnedScopeCustomTypes(cityPath, dir string) {
+	registerScopeCustomTypes(cityPath, dir, providerOwnedScopeCustomTypesEnv)
+}
+
+// registerScopeCustomTypes registers Gas City's bead vocabulary with a scope
+// whose config is bd's to write: a provider-owned scope bd has just created, or
+// an embedded one. bd init writes its own generic config, whose types.custom is
+// unset, and bd validates bead types on create and on list — so without this
+// every gc type (session, molecule, convoy, and the rest) comes back "invalid
+// issue type", which takes out `gc status`, the session model, the
+// startup-health scan and doctor's custom-types check on a city that has just
+// been initialized. `bd config set` is also what keeps bd's normalized
+// custom_types table in step, the same call doctor.CustomTypesCheck.Fix makes.
+// scopeEnv aims each bd call at dir's store.
 //
 // Nothing else in the scope's .beads is gc's to write: bd owns that config for
 // a scope whose Dolt topology it owns. The vocabulary goes in through bd's own
@@ -623,9 +630,9 @@ func desiredScopeDoltConfigStateForInit(cityPath, dir, prefix string) (contract.
 // It lives here rather than in gc-beads-bd.sh on purpose: ga-5mym bans
 // `bd config set` from that script because it runs inside the provider op
 // timeout, where bd's auto-migrate can cost tens of seconds on a populated
-// store. This runs after the provider's init op on every start, outside that
-// budget; on a store that is already registered it costs two bd reads and no
-// write.
+// store. This runs once the scope is initialized, on every start and outside
+// that budget; on a store that is already registered it costs two bd reads and
+// no write.
 //
 // Existing registrations are merged, never narrowed: the value written is the
 // config row ∪ what `bd types --json` reports (the custom_types table bd's
@@ -643,9 +650,9 @@ func desiredScopeDoltConfigStateForInit(cityPath, dir, prefix string) (contract.
 // `gc doctor --fix` hint instead of failing init: doctor's custom-types check
 // reports the same drift and --fix performs the same merge. Failing the whole
 // init over it would destroy a city that is otherwise complete.
-func registerProviderOwnedScopeCustomTypes(cityPath, dir string) {
+func registerScopeCustomTypes(cityPath, dir string, scopeEnv func(cityPath, dir string) (map[string]string, error)) {
 	const hint = "; run `gc doctor --fix`"
-	env, err := providerOwnedScopeCustomTypesEnv(cityPath, dir)
+	env, err := scopeEnv(cityPath, dir)
 	if err != nil {
 		log.Printf("gc: custom bead types not registered for %s: %v%s", dir, err, hint)
 		return
@@ -706,9 +713,43 @@ func providerOwnedScopeCustomTypesEnv(cityPath, dir string) (map[string]string, 
 	return env, nil
 }
 
+// embeddedScopeCustomTypesEnv builds registerScopeCustomTypes' env for a scope
+// whose metadata.json records embedded Dolt: doctor's custom-types store
+// projection, the one `gc doctor --fix` registers under, which aims bd at the
+// scope's own .beads with every server selector cleared, plus the workspace's
+// pinned BD_BIN and export suppression. The provider projection would hand bd
+// the city's server endpoint, which an embedded scope never serves from.
+func embeddedScopeCustomTypesEnv(cityPath, dir string) (map[string]string, error) {
+	base, err := doctor.CustomTypesStoreEnv(cityPath, dir)
+	if err != nil {
+		return nil, err
+	}
+	env := runtimeEnvEntriesToMap(base)
+	if err := applyWorkspacePinnedBdBinary(env, cityPath); err != nil {
+		return nil, err
+	}
+	applyExportSuppressionEnv(env)
+	return env, nil
+}
+
 //nolint:unparam // keep fs seam for future testable FS injection
 func ensureCanonicalScopeConfigState(fs fsys.FS, dir string, state contract.ConfigState) error {
 	beadsDir := filepath.Join(dir, ".beads")
+	embedded, err := scopeMetadataRecordsEmbeddedDolt(fs, dir)
+	if err != nil {
+		return err
+	}
+	if embedded {
+		// An embedded scope keeps its storage mode (ga-p9iuv) and its config.yaml
+		// stays bd's: gc only takes back endpoint claims an earlier pass stamped.
+		// No managed endpoint, topology or policy keys, no prefix or types line
+		// (bd keeps both in the store, where initAndHookDir registers gc's types
+		// through bd), and no removal of an issues.jsonl nothing gc replaces. Nor
+		// does this pass create or chmod .beads; only the metadata
+		// canonicalization beside it may tighten an existing .beads to the
+		// owner-only mode bd warns without, and git tracks no directory modes.
+		return scrubEmbeddedScopeEndpointClaims(fs, dir)
+	}
 	if err := ensureBeadsDir(fs, beadsDir); err != nil {
 		return err
 	}
@@ -724,7 +765,9 @@ func ensureCanonicalScopeConfigState(fs fsys.FS, dir string, state contract.Conf
 	if err != nil {
 		return err
 	}
-	if changed && state.EndpointOrigin != contract.EndpointOriginExplicit {
+	autoExport, autoExportSet, autoExportErr := contract.ReadExportAuto(fs, filepath.Join(beadsDir, "config.yaml"))
+	if changed && state.EndpointOrigin != contract.EndpointOriginExplicit &&
+		autoExportErr == nil && (!autoExportSet || !autoExport) {
 		// PR 1965 made export.auto:false canonical, but a pre-existing
 		// .beads/issues.jsonl from before this normalization still triggers
 		// bd's auto-import-on-write trap (sa-41j3kp) — bd sees the file,
@@ -732,16 +775,20 @@ func ensureCanonicalScopeConfigState(fs fsys.FS, dir string, state contract.Conf
 		// subprocess timeout while it re-imports the JSONL. The file is a
 		// stale export from when auto-export was on; with the canonical
 		// config now suppressing auto-export, nothing will refresh it. Explicit
-		// opt-out scopes keep JSONL as load-bearing state.
+		// opt-out scopes and scopes with export.auto:true keep JSONL as
+		// load-bearing state. A config that cannot be read back may hold that
+		// true, so the file is left for the store-open reaper to judge.
 		removeStaleBdExportJSONL(fs, beadsDir)
 	}
 	return nil
 }
 
-// removeStaleBdExportJSONL removes .beads/issues.jsonl if present. Called after
-// EnsureCanonicalConfig writes export.auto:false, since the file is a stale
-// export that bd's auto-import path would otherwise re-load on every write,
-// stalling bd create for the full subprocess timeout on large datasets.
+// removeStaleBdExportJSONL removes .beads/issues.jsonl if present. Called
+// after EnsureCanonicalConfig has canonicalized export.auto to false — that
+// is, for scopes where gc does not observe an explicit export.auto:true —
+// since the file is then a stale export that bd's auto-import path would
+// otherwise re-load on every write, stalling bd create for the full
+// subprocess timeout on large datasets.
 // Best-effort: any error is non-fatal because the env-var BD_EXPORT_AUTO=false
 // path (bdRuntimeEnv) is a second line of defense for gc-initiated calls.
 func removeStaleBdExportJSONL(fs fsys.FS, beadsDir string) {
@@ -750,6 +797,39 @@ func removeStaleBdExportJSONL(fs fsys.FS, beadsDir string) {
 		return
 	}
 	_ = fs.Remove(path)
+}
+
+// scopeMetadataRecordsEmbeddedDolt reports whether dir's metadata.json records
+// embedded Dolt storage under the explicit dolt backend — the same condition
+// under which ensureCanonicalScopeMetadata treats the recorded mode as
+// authoritative and preserves it.
+func scopeMetadataRecordsEmbeddedDolt(fs fsys.FS, dir string) (bool, error) {
+	path := scopeMetadataJSONPath(dir)
+	backend, ok, err := contract.ReadMetadataBackend(fs, path)
+	if err != nil || !ok || !strings.EqualFold(backend, "dolt") {
+		return false, err
+	}
+	mode, ok, err := contract.ReadDoltMode(fs, path)
+	if err != nil || !ok {
+		return false, err
+	}
+	return strings.EqualFold(mode, "embedded"), nil
+}
+
+// scrubEmbeddedScopeEndpointClaims takes back the endpoint claims an earlier gc
+// pass stamped into an embedded scope's config.yaml (see
+// contract.ScrubEmbeddedScopeConfig), and says which: the file is bd's and
+// git-tracked, so an edit gc makes to it must not be silent.
+func scrubEmbeddedScopeEndpointClaims(fs fsys.FS, dir string) error {
+	path := filepath.Join(dir, ".beads", "config.yaml")
+	removed, err := contract.ScrubEmbeddedScopeConfig(fs, path)
+	if err != nil {
+		return fmt.Errorf("removing gc endpoint claims from embedded scope config %s: %w", path, err)
+	}
+	if len(removed) > 0 {
+		log.Printf("gc: removed gc-stamped endpoint claims from embedded scope config %s: %s", path, strings.Join(removed, ", "))
+	}
+	return nil
 }
 
 func seedDeferredManagedBeads(cityPath, dir, prefix, doltDatabase string) {
@@ -903,6 +983,25 @@ func initAndHookDir(cityPath, dir, prefix string) error {
 		}
 		return nil
 	}
+	if embedded, err := scopeMetadataRecordsEmbeddedDolt(fsys.OSFS{}, dir); err != nil {
+		return err
+	} else if embedded && cityUsesBdStoreContract(cityPath) {
+		// An embedded scope's store already lives in .beads/embeddeddolt and
+		// stays authoritative (ga-p9iuv). The managed-Dolt init chain would
+		// register a database for it on the city's server and run a
+		// server-mode bd init over it (#6118), so only the normalization pass
+		// runs — it takes back endpoint claims an earlier gc stamped and is a
+		// no-op on a clean scope. gc's bead types go into the store through bd,
+		// whose write leaves config.yaml and every other tracked file alone.
+		if err := normalizeCanonicalBdScopeFilesForInit(cityPath, dir, prefix, ""); err != nil {
+			return err
+		}
+		registerScopeCustomTypes(cityPath, dir, embeddedScopeCustomTypesEnv)
+		if err := installBeadHooks(dir, cityPath); err != nil {
+			return fmt.Errorf("install hooks at %s: %w", dir, err)
+		}
+		return nil
+	}
 	doltDatabase := canonicalScopeDoltDatabase(cityPath, dir, prefix)
 	if err := normalizeCanonicalBdScopeFilesForInit(cityPath, dir, prefix, doltDatabase); err != nil {
 		return err
@@ -1025,7 +1124,9 @@ func scopeHasOwnConfigYAML(dir string) bool {
 // scopeHasCompleteStorageBinding recognizes the opaque workspace binding
 // before legacy metadata parsing. Only all three non-empty fields authorize
 // this dispatch; absent fields remain ordinary legacy metadata and partial
-// fields fail closed.
+// fields fail closed. A scope whose metadata names a backend the linked beads
+// library registered as an extension (contract.IsLibraryExtensionBackend) and
+// carries no storage fields is the same opaque binding by another shape.
 func scopeHasCompleteStorageBinding(path string) (bool, error) {
 	data, err := fsys.OSFS{}.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -1045,7 +1146,16 @@ func scopeHasCompleteStorageBinding(path string) (bool, error) {
 		return false, nil
 	}
 	if len(presence.StorageEndpoint) == 0 && len(presence.StorageDatabase) == 0 {
-		return false, nil
+		// A backend the linked beads library registered as an extension keeps
+		// its target beside metadata.json rather than in it, and is just as
+		// opaque to gc: the library opens it and bd reads its own credentials.
+		var named struct {
+			Backend string `json:"backend"`
+		}
+		if err := json.Unmarshal(data, &named); err != nil {
+			return false, fmt.Errorf("parse beads storage binding %s: %w", path, err)
+		}
+		return contract.IsLibraryExtensionBackend(strings.TrimSpace(named.Backend)), nil
 	}
 
 	var binding struct {
@@ -1221,11 +1331,12 @@ func runProviderOwnedScopeLifecycleOpContext(parent context.Context, cityPath, s
 // any wait for it and before the provider script runs. A non-nil error from it
 // is returned as-is and nothing is run.
 //
-// It exists for a verb aimed at a particular state that another holder of the
-// slot may change while this one queues: the proxied admission recover, whose
-// target generation the health loop's own recover of the same zombie may have
-// replaced with a healthy proxy by the time the slot is granted (round4
-// review F3).
+// It exists for a verb aimed at a particular state that may change while this
+// one queues: the proxied admission recover, whose target generation the
+// health loop's own recover of the same zombie may have replaced with a
+// healthy proxy by the time the slot is granted (round4 review F3), and the
+// controller's stop of a suspended scope, which a resume may have reached by
+// then (stopStillSuspendedScope).
 func runProviderOwnedScopeLifecycleOpGuarded(parent context.Context, cityPath, scopeRoot, op string, precondition func() error) error {
 	provider := beadsProvider(cityPath)
 	if !strings.HasPrefix(provider, "exec:") {
@@ -1746,7 +1857,22 @@ func ensureBeadsProvider(cityPath string) error {
 // idempotent on bd v1.3.0-rc.2, so a repeated gc stop is a clean no-op. It
 // must remain the LAST teardown step: bd restarts a proxied scope's proxy and
 // Dolt child on any read, so a reader that outlives this call undoes it.
+//
+// For that reason it first stops the city's nudge pollers, the long-lived
+// readers the city itself spawns (#6857), and then stops the store even if a
+// poller could not be stopped.
 func shutdownBeadsProvider(cityPath string) error {
+	pollersErr := stopCityNudgePollers(cityPath)
+	storeErr := stopBeadsProviderBackend(cityPath)
+	if pollersErr == nil {
+		return storeErr
+	}
+	return errors.Join(fmt.Errorf("stopping nudge pollers: %w", pollersErr), storeErr)
+}
+
+// stopBeadsProviderBackend stops the bead store's backing service. See
+// shutdownBeadsProvider, its only caller.
+func stopBeadsProviderBackend(cityPath string) error {
 	if owned, err := cityScopeProviderOwned(cityPath); err != nil {
 		return err
 	} else if owned {
@@ -1832,7 +1958,7 @@ func initBeadsForDirWithExecutor(cityPath, dir, prefix, doltDatabase string, exe
 			args = append(args, doltDatabase)
 		}
 		script := strings.TrimPrefix(provider, "exec:")
-		if execProviderUsesCanonicalBdScopeFiles(provider) && (scopeInitUsesProxiedDoltMode(cityPath, dir)) {
+		if execProviderUsesCanonicalBdScopeFiles(provider) && scopeInitUsesProxiedDoltMode(cityPath, dir) {
 			// Callers may invoke initBeadsForDir directly without the
 			// initAndHookDir wrapper that normally supplies the canonical
 			// database name. Resolve the same fallback here so proxied and
@@ -3123,6 +3249,21 @@ func syncConfiguredDoltPortFiles(cityPath string, cityDolt config.DoltConfig, ci
 			return err
 		}
 		if rigHasCompleteStorageBinding {
+			continue
+		}
+		embedded, err := scopeMetadataRecordsEmbeddedDolt(fsys.OSFS{}, rig.Path)
+		if err != nil {
+			return fmt.Errorf("classifying rig %q storage mode: %w", rig.Name, err)
+		}
+		if embedded {
+			// An embedded rig serves its own store (ga-p9iuv): it inherits no
+			// city endpoint and never reaches the managed server, so its
+			// .beads/dolt-server.port is not gc's to write or remove, and a
+			// desired endpoint resolved for it would only be a server claim
+			// on bd's config.yaml. The claims an earlier gc stamped come off.
+			if err := scrubEmbeddedScopeEndpointClaims(fsys.OSFS{}, rig.Path); err != nil {
+				return err
+			}
 			continue
 		}
 		rigState, err := syncDesiredRigDoltConfigState(cityPath, rig, cityState)

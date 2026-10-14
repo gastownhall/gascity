@@ -130,25 +130,40 @@ func bdReadyIncludeEphemeralArg(includeEphemeralReady bool) string {
 	return ""
 }
 
-// holdLabelMatchCondsJQ renders the jq boolean expression that tests whether
-// the label currently in scope (`.`) is one of the beadmeta.DispatchHoldLabels
-// values, e.g. `. == "hold:mayor" or . == "hold:external"`. Shared by every
-// jq-based hold filter so the label set is spelled exactly once.
-func holdLabelMatchCondsJQ() string {
-	conds := make([]string, len(beadmeta.DispatchHoldLabels))
-	for i, label := range beadmeta.DispatchHoldLabels {
+// labelMatchCondsJQ renders the jq boolean expression that tests whether the
+// label currently in scope (`.`) is one of labels, e.g.
+// `. == "hold:mayor" or . == "human"`.
+func labelMatchCondsJQ(labels []string) string {
+	conds := make([]string, len(labels))
+	for i, label := range labels {
 		conds[i] = `. == "` + label + `"`
 	}
 	return strings.Join(conds, " or ")
 }
 
-// excludeHoldLabelsJQClause returns a jq select(...) clause dropping beads
-// that carry any beadmeta.DispatchHoldLabels value, for jq-based pool-demand
-// filters that have no bd-side --exclude-label flag to lean on. Mirrors the
-// bracketed-count style of the dependency-blocking select above it so both
-// clauses read the same way (ga-x9kptu / ga-5736js).
+// holdLabelMatchCondsJQ is labelMatchCondsJQ over the
+// beadmeta.DispatchHoldLabels values, e.g.
+// `. == "hold:mayor" or . == "hold:external"`. Shared by every jq-based hold
+// filter so the label set is spelled exactly once.
+func holdLabelMatchCondsJQ() string {
+	return labelMatchCondsJQ(beadmeta.DispatchHoldLabels)
+}
+
+// excludeLabelsJQClause returns a jq select(...) clause dropping beads that
+// carry any of labels, for jq-based filters that have no bd-side
+// --exclude-label flag to lean on. Mirrors the bracketed-count style of the
+// dependency-blocking select above it so both clauses read the same way
+// (ga-x9kptu / ga-5736js).
+func excludeLabelsJQClause(labels []string) string {
+	return ` | select(([ (.labels // [])[] | select(` + labelMatchCondsJQ(labels) + `) ] | length) == 0)`
+}
+
+// excludeHoldLabelsJQClause is excludeLabelsJQClause over the
+// beadmeta.DispatchHoldLabels values alone, for the assignee-scoped in_progress
+// probes: they must drop a held bead and nothing else, so they never take the
+// pool-demand serve rules' wider label set.
 func excludeHoldLabelsJQClause() string {
-	return ` | select(([ (.labels // [])[] | select(` + holdLabelMatchCondsJQ() + `) ] | length) == 0)`
+	return excludeLabelsJQClause(beadmeta.DispatchHoldLabels)
 }
 
 // heldLabelCountJQ counts how many beadmeta.DispatchHoldLabels values the FIRST
@@ -190,7 +205,8 @@ type PoolDemandServeRules struct {
 	// ExcludeTypes mirrors --exclude-type: issue types the tier never serves.
 	ExcludeTypes []string
 	// ExcludeLabels mirrors the repeated --exclude-label flags: the dispatch
-	// holds a worker is deliberately forbidden to claim through.
+	// holds, and bd's native human label, that a worker is deliberately
+	// forbidden to claim through.
 	ExcludeLabels []string
 }
 
@@ -201,7 +217,7 @@ func PoolDemandServeRulesForQuery() PoolDemandServeRules {
 	return PoolDemandServeRules{
 		RequireUnassigned: true,
 		ExcludeTypes:      []string{"epic"},
-		ExcludeLabels:     append([]string(nil), beadmeta.DispatchHoldLabels...),
+		ExcludeLabels:     append(append([]string(nil), beadmeta.DispatchHoldLabels...), beadmeta.HumanLabel),
 	}
 }
 
@@ -288,15 +304,17 @@ func ephemeralStatusSnapshotShell(shellVar, status string) string {
 
 // ephemeralReadyBaseSelectorJQ composes the selector clauses shared by every
 // ephemeral ready-tier filter: the caller's own assignee/routing selector,
-// plus the epic exclusion and optional hold-label exclusion every variant
-// applies alike. Dependency gating is layered on top by each caller, since
-// `bd query --json` exposes only a `dependency_count` scalar — never a
-// `dependencies` array — which is precise enough to prove "definitely no
-// dependencies" but not to resolve whether a nonzero count is still open.
-func ephemeralReadyBaseSelectorJQ(selector string, excludeHoldLabels bool) string {
+// plus the epic exclusion and, when excludeServeLabels is set, the exclusion of
+// every label the routed pool-demand tier refuses
+// (PoolDemandServeRules.ExcludeLabels). Only the route-scoped tier sets it.
+// Dependency gating is layered on top by each caller, since `bd query --json`
+// exposes only a `dependency_count` scalar — never a `dependencies` array —
+// which is precise enough to prove "definitely no dependencies" but not to
+// resolve whether a nonzero count is still open.
+func ephemeralReadyBaseSelectorJQ(selector string, excludeServeLabels bool) string {
 	body := selector + ` | select(((.issue_type // .type // "") != "epic"))`
-	if excludeHoldLabels {
-		body += excludeHoldLabelsJQClause()
+	if excludeServeLabels {
+		body += excludeLabelsJQClause(PoolDemandServeRulesForQuery().ExcludeLabels)
 	}
 	return body
 }
@@ -308,8 +326,8 @@ func ephemeralReadyBaseSelectorJQ(selector string, excludeHoldLabels bool) strin
 // pairs it with ephemeralReadyDependencyCandidateFilterJQ's real bd show
 // enrichment for the dependency_count > 0 case, so a step whose dependencies
 // have since all closed is still reachable instead of withheld forever.
-func legacyEphemeralReadyFilterJQ(selector string, limit int, excludeHoldLabels bool) string {
-	body := ephemeralReadyBaseSelectorJQ(selector, excludeHoldLabels) +
+func legacyEphemeralReadyFilterJQ(selector string, limit int, excludeServeLabels bool) string {
+	body := ephemeralReadyBaseSelectorJQ(selector, excludeServeLabels) +
 		` | select(((.dependency_count // 0) == 0))`
 	filter := `[.[] | ` + body + `]` + ` | sort_by(.created_at // "", .id // "")`
 	if limit > 0 {
@@ -323,8 +341,8 @@ func legacyEphemeralReadyFilterJQ(selector string, limit int, excludeHoldLabels 
 // withheld (dependency_count > 0) so the caller can enrich them with a real
 // bd show --json call via inProgressBlockedByEnrichmentScript and decide
 // readiness precisely, instead of leaving them permanently unservable.
-func ephemeralReadyDependencyCandidateFilterJQ(selector string, limit int, excludeHoldLabels bool) string {
-	body := ephemeralReadyBaseSelectorJQ(selector, excludeHoldLabels) +
+func ephemeralReadyDependencyCandidateFilterJQ(selector string, limit int, excludeServeLabels bool) string {
+	body := ephemeralReadyBaseSelectorJQ(selector, excludeServeLabels) +
 		` | select(((.dependency_count // 0) > 0))`
 	filter := `[.[] | ` + body + `]` + ` | sort_by(.created_at // "", .id // "")`
 	if limit > 0 {
@@ -333,16 +351,23 @@ func ephemeralReadyDependencyCandidateFilterJQ(selector string, limit int, exclu
 	return filter
 }
 
-func legacyEphemeralPoolDemandShell(limit int, topo QueryTopology, quiet bool) string {
-	if topo.includeEphemeralReady() {
-		return `printf "[]"`
-	}
-	filter := legacyEphemeralReadyFilterJQ(
+// legacyEphemeralPoolDemandFilterJQ selects, from the open ephemeral tier,
+// the unassigned rows routed to $target or carrying its unexpanded legacy
+// workflow run target.
+func legacyEphemeralPoolDemandFilterJQ(limit int) string {
+	return legacyEphemeralReadyFilterJQ(
 		`select((.assignee // "") == "")`+
 			` | select((`+jqMeta(beadmeta.RoutedToMetadataKey)+` == $target) or ((`+jqMeta(beadmeta.RoutedToMetadataKey)+` == "") and (`+jqMeta(beadmeta.RunTargetMetadataKey)+` == $target) and (`+jqMeta(beadmeta.KindMetadataKey)+` == "`+beadmeta.KindWorkflow+`") and (`+jqMeta(beadmeta.WorkflowExpandedMetadataKey)+` != "true")))`,
 		limit,
 		true,
 	)
+}
+
+func legacyEphemeralPoolDemandShell(limit int, topo QueryTopology, quiet bool) string {
+	if topo.includeEphemeralReady() {
+		return `printf "[]"`
+	}
+	filter := legacyEphemeralPoolDemandFilterJQ(limit)
 	query := bdQueryEphemeralStatusShell("open")
 	if quiet {
 		query = bdQueryEphemeralStatusQuietShell("open")
@@ -352,6 +377,32 @@ func legacyEphemeralPoolDemandShell(limit int, topo QueryTopology, quiet bool) s
 		jqStderr = ` 2>/dev/null`
 	}
 	return `{ ` + query + ` | jq --arg target "$target" ` + shellquote.Quote(filter) + jqStderr + `; } || printf "[]"`
+}
+
+// legacyEphemeralPoolDemandFromSnapshotShell is the worker-side form of
+// legacyEphemeralPoolDemandShell: it assigns shellVar the legacy ephemeral
+// pool-demand candidates, filtered from the memoized open-ephemeral snapshot
+// (ephemeralStatusSnapshotShell) rather than a scan of its own. The assigned
+// ready tier before it takes that snapshot with the same read — `bd query`
+// of the open ephemeral tier, quiet — so a combined work query scans the
+// wisp tier for open rows once, not once per tier and target; a probe run
+// with no snapshot taken scans once and keeps it for the next target. The
+// same filter applies to the same rows, so the selection is unchanged.
+//
+// The snapshot can be stale by the time this tier reads it: it was taken
+// before the assigned and routed tiers ran, so a wisp routed to the target
+// since is not offered until the next probe, and one another worker claimed
+// since is still offered. That is the trade ephemeralStatusSnapshotShell
+// already makes between identities, and both are safe: a work query is a
+// point-in-time probe the caller re-runs, and a stale candidate is settled by
+// the claim that follows it, not by this read.
+func legacyEphemeralPoolDemandFromSnapshotShell(shellVar string, limit int, topo QueryTopology) string {
+	if topo.includeEphemeralReady() {
+		return shellVar + `=$(printf "[]"); `
+	}
+	filter := legacyEphemeralPoolDemandFilterJQ(limit)
+	return ephemeralStatusSnapshotShell("open_ephemeral", "open") +
+		shellVar + `=$({ printf "%s" "$open_ephemeral" | jq --arg target "$target" ` + shellquote.Quote(filter) + ` 2>/dev/null; } || printf "[]"); `
 }
 
 // poolDemandFirstRowFunctionScript emits the work_query Tier 3 function: it
@@ -369,7 +420,7 @@ func poolDemandFirstRowFunctionScript(topo QueryTopology) string {
 		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit=20", topo) + readyReaderStderrSink(fed) + `)` + readyReaderFailurePropagation(fed) + `; ` +
 		`r=$(printf "%s" "$legacy_candidates" | ` + poolDemandMigrationFilterJQ(1) + ` 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
-		`legacy_ephemeral_candidates=$(` + legacyEphemeralPoolDemandShell(20, topo, true) + `); ` +
+		legacyEphemeralPoolDemandFromSnapshotShell("legacy_ephemeral_candidates", 20, topo) +
 		`r=$(printf "%s" "$legacy_ephemeral_candidates" | jq '.[0:1]' 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`return 1; ` +
@@ -423,13 +474,31 @@ func routedReadyTierCommand(topo QueryTopology) string {
 // form needed no new failure clause when the federated reader arrived — it is
 // the shape readyReaderFailurePropagation gives the worker-side tiers.
 func poolDemandCountShell(target string, topo QueryTopology) string {
+	countFilter := `(add // []) | unique_by(.id) | map(` + executableWorkflowTopologyJQ() + `) | length`
 	script := `target="$1"; ` +
 		`ready_json=$(` + bdReadyPoolDemandShell("--limit 0", topo) + `) || exit $?; ` +
 		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit 0", topo) + `) || exit $?; ` +
 		`legacy_json=$(printf "%s" "$legacy_candidates" | ` + poolDemandMigrationFilterJQ(0) + `) || exit $?; ` +
 		`legacy_ephemeral_json=$(` + legacyEphemeralPoolDemandShell(0, topo, false) + `); ` +
-		`printf "%s\n%s\n%s\n" "$ready_json" "$legacy_json" "$legacy_ephemeral_json" | jq -s "(add // []) | unique_by(.id) | length"`
+		`printf "%s\n%s\n%s\n" "$ready_json" "$legacy_json" "$legacy_ephemeral_json" | ` + shellquote.Join([]string{"jq", "-s", countFilter})
 	return shellquote.Join([]string{"sh", "-c", script, "--", target})
+}
+
+// Match the hook/controller gate even when scale_check runs the shell count
+// form. The topology vocabulary is shared; a never-expanded workflow root is
+// the compatibility exception because the root itself can be executable work.
+func executableWorkflowTopologyJQ() string {
+	kind := `(` + jqMeta(beadmeta.KindMetadataKey) + ` | gsub("^\\s+|\\s+$"; ""))`
+	expanded := `(` + jqMeta(beadmeta.WorkflowExpandedMetadataKey) + ` | gsub("^\\s+|\\s+$"; ""))`
+	clauses := make([]string, 0, len(beadmeta.WorkflowTopologyKinds))
+	for _, topologyKind := range beadmeta.WorkflowTopologyKinds {
+		clause := fmt.Sprintf(`%s != %q`, kind, topologyKind)
+		if topologyKind == beadmeta.KindWorkflow {
+			clause = `(` + clause + ` or ` + expanded + ` != "true")`
+		}
+		clauses = append(clauses, clause)
+	}
+	return `select(` + strings.Join(clauses, ` and `) + `)`
 }
 
 func (a *Agent) poolDemandTarget() string {
@@ -438,6 +507,22 @@ func (a *Agent) poolDemandTarget() string {
 		target = a.PoolName
 	}
 	return target
+}
+
+// identityLoopHead opens the loop over the hook's identities — GC_SESSION_ID,
+// GC_SESSION_NAME, GC_ALIAS, in that order — that every assigned tier runs,
+// binding each to $id. An unset identity, and one equal to an identity the loop
+// already visited, is skipped: for a configured named session the session name
+// and the alias are the same string, and the tiers would ask bd the identical
+// question twice for the identical answer. Only test builtins compare, so the
+// skip costs no process, and the comparison is exact for any identity string.
+func identityLoopHead() string {
+	return `gc_id_seen1=""; gc_id_seen2=""; ` +
+		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
+		`[ -z "$id" ] && continue; ` +
+		`[ "$id" = "$gc_id_seen1" ] && continue; ` +
+		`[ "$id" = "$gc_id_seen2" ] && continue; ` +
+		`if [ -z "$gc_id_seen1" ]; then gc_id_seen1="$id"; else gc_id_seen2="$id"; fi; `
 }
 
 func standardAssignedWorkQueryScript(topo QueryTopology) string {
@@ -456,8 +541,7 @@ func standardAssignedWorkQueryScript(topo QueryTopology) string {
 // tier alone still receive the anchor.
 func standardAssignedInProgressWorkQueryScriptDeferringGraphAnchor(topo QueryTopology) string {
 	return `gc_assigned_workflow_anchor_json=""; ` +
-		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
-		`[ -z "$id" ] && continue; ` +
+		identityLoopHead() +
 		assignedInProgressTierCommand("id", topo) +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
 		inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(topo.FederatedReady, true) +
@@ -520,8 +604,7 @@ func assignedInProgressTierCommandWithLimit(shellVar string, topo QueryTopology,
 
 // standardAssignedInProgressWorkQueryScript is the crash-recovery tier.
 func standardAssignedInProgressWorkQueryScript(topo QueryTopology) string {
-	return `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
-		`[ -z "$id" ] && continue; ` +
+	return identityLoopHead() +
 		assignedInProgressTierCommand("id", topo) +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
 		inProgressBlockedByEnrichmentScript(topo.FederatedReady, true) +
@@ -692,8 +775,7 @@ func assignedReadyTierCommand(shellVar string, topo QueryTopology) string {
 }
 
 func standardAssignedReadyWorkQueryScript(topo QueryTopology) string {
-	return `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
-		`[ -z "$id" ] && continue; ` +
+	return identityLoopHead() +
 		assignedReadyTierCommand("id", topo) +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		ephemeralAssignedReadyProbeScript("id", topo) +
@@ -707,8 +789,7 @@ func legacyControlAssignedWorkQueryScript(topo QueryTopology) string {
 
 func legacyControlAssignedInProgressWorkQueryScriptDeferringGraphAnchor(topo QueryTopology) string {
 	return `gc_assigned_workflow_anchor_json=""; ` +
-		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
-		`[ -z "$id" ] && continue; ` +
+		identityLoopHead() +
 		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
 		`for cand in "$id" "$legacy"; do ` +
 		`[ -z "$cand" ] && continue; ` +
@@ -728,8 +809,7 @@ func legacyControlAssignedInProgressWorkQueryScriptDeferringGraphAnchor(topo Que
 }
 
 func legacyControlAssignedInProgressWorkQueryScript(topo QueryTopology) string {
-	return `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
-		`[ -z "$id" ] && continue; ` +
+	return identityLoopHead() +
 		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
 		`for cand in "$id" "$legacy"; do ` +
 		`[ -z "$cand" ] && continue; ` +
@@ -743,8 +823,7 @@ func legacyControlAssignedInProgressWorkQueryScript(topo QueryTopology) string {
 }
 
 func legacyControlAssignedReadyWorkQueryScript(topo QueryTopology) string {
-	return `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
-		`[ -z "$id" ] && continue; ` +
+	return identityLoopHead() +
 		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
 		`for cand in "$id" "$legacy"; do ` +
 		`[ -z "$cand" ] && continue; ` +

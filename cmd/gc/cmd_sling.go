@@ -978,30 +978,8 @@ func doSlingBatchWithJSON(opts slingOpts, deps slingDeps, querier BeadChildQueri
 		fmt.Fprintln(stderr, newErr) //nolint:errcheck
 		return 1
 	}
-	_ = context.Background() // ctx available for future intent API use
-
-	// For formula/on-formula batch, delegate to the old DoSlingBatch
-	// which handles per-child formula attachment internally.
-	// ExpandConvoy is for plain bead routing of convoy children.
-	var result sling.SlingResult
-	var err error
-	if opts.IsFormula || opts.OnFormula != "" || (!opts.NoFormula && opts.Target.EffectiveDefaultSlingFormula() != "") {
-		// Formula paths need per-child wisp attachment -- use legacy API.
-		result, err = sling.DoSlingBatch(opts, deps, querier)
-	} else {
-		result, err = sl.ExpandConvoy(context.Background(), opts.BeadOrFormula, opts.Target, sling.RouteOpts{
-			Merge:      opts.Merge,
-			NoConvoy:   opts.NoConvoy,
-			Owned:      opts.Owned,
-			Reassign:   opts.Reassign,
-			Nudge:      opts.Nudge,
-			Force:      opts.Force,
-			SkipPoke:   opts.SkipPoke,
-			DryRun:     opts.DryRun,
-			InlineText: opts.InlineText,
-			NoFormula:  opts.NoFormula,
-		}, querier)
-	}
+	// The same entry point POST /sling uses, so the two cannot drift.
+	result, err := sl.Dispatch(context.Background(), opts, querier)
 	// Print warnings before error check so they're visible on failure.
 	printSlingWarnings(result, stderr)
 	// Always print results when we have children (partial failures
@@ -1034,7 +1012,7 @@ func doSlingBatchWithJSON(opts slingOpts, deps slingDeps, querier BeadChildQueri
 		// so printing it verbatim duplicates every child line. Summarize
 		// instead when we have per-child detail.
 		if len(result.Children) > 0 {
-			fmt.Fprintf(stderr, "%d/%d children failed\n", result.Failed, result.Failed+result.Routed+result.IdempotentCt) //nolint:errcheck
+			fmt.Fprintf(stderr, "%d/%d children failed\n", result.Failed, result.Failed+result.Routed+result.IdempotentCt+result.NotOpenCt) //nolint:errcheck
 		} else {
 			fmt.Fprintln(stderr, err) //nolint:errcheck
 		}
@@ -1206,16 +1184,23 @@ func printSourceWorkflowConflict(stderr io.Writer, conflictErr *sourceworkflow.C
 	if conflictErr == nil {
 		return
 	}
+	printSourceWorkflowConflictLines(stderr, conflictErr.SourceBeadID, conflictErr.WorkflowIDs,
+		sourceWorkflowCleanupCommand(conflictErr.SourceBeadID, storeRef))
+}
+
+// printSourceWorkflowConflictLines prints what gc sling shows for a source
+// workflow conflict: the blocking workflows, then the cleanup command.
+func printSourceWorkflowConflictLines(stderr io.Writer, sourceBeadID string, workflowIDs []string, cleanup string) {
 	_, _ = fmt.Fprintf(
 		stderr,
 		"gc sling: source bead %s already has live workflow(s): %s\n",
-		conflictErr.SourceBeadID,
-		strings.Join(conflictErr.WorkflowIDs, ","),
+		sourceBeadID,
+		strings.Join(workflowIDs, ","),
 	)
 	_, _ = fmt.Fprintf(
 		stderr,
 		"gc sling: use --force to override, or %s to clean up\n",
-		sourceWorkflowCleanupCommand(conflictErr.SourceBeadID, storeRef),
+		cleanup,
 	)
 }
 
@@ -1701,7 +1686,7 @@ func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store beads.Stor
 	if running {
 		handle, err := workerHandleForNudgeTarget(target, sessStore, sp)
 		if err == nil {
-			result, nudgeErr := handle.Nudge(context.Background(), worker.NudgeRequest{
+			result, nudgeErr := handle.Nudge(context.Background(), sessionActor(session.ActorAgent, target.cityPath), worker.NudgeRequest{
 				Text:     msg,
 				Delivery: worker.NudgeDeliveryWaitIdle,
 				Source:   "sling",

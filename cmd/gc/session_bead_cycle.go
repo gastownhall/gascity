@@ -73,8 +73,16 @@ func prevAssignedBeadStatus(topo storeref.Topology, id string) (open bool, close
 	if !convoycore.IsTerminalStatus(b.Status) {
 		return true, time.Time{}, nil
 	}
-	// UpdatedAt is second-truncated on BdStore; round up so a wake
-	// earlier in the same second as the close never reads as "after".
+	return false, beadClosedAt(b), nil
+}
+
+// beadClosedAt is a terminal bead's close time, as prevAssignedBeadStatus
+// reads it: the metadata closed_at when parseable, else UpdatedAt rounded up
+// to the next second (BdStore truncates it), so a wake earlier in the same
+// second as the close never reads as "after". v2's SESS-612 defer reads it
+// too.
+func beadClosedAt(b beads.Bead) time.Time {
+	var closedAt time.Time
 	if !b.UpdatedAt.IsZero() {
 		closedAt = b.UpdatedAt.Truncate(time.Second).Add(time.Second)
 	}
@@ -83,7 +91,7 @@ func prevAssignedBeadStatus(topo storeref.Topology, id string) (open bool, close
 			closedAt = t
 		}
 	}
-	return false, closedAt, nil
+	return closedAt
 }
 
 // cycleAliveSessionForFreshReassign tears down a live wake_mode=fresh
@@ -104,6 +112,7 @@ func prevAssignedBeadStatus(topo storeref.Topology, id string) (open bool, close
 // conversation reset. We also update currently_processing_bead_id to the
 // new anchor so the divergence check does not refire on the next tick.
 func cycleAliveSessionForFreshReassign(
+	cityPath string,
 	info sessionpkg.Info,
 	tp TemplateParams,
 	sp runtime.Provider,
@@ -124,7 +133,7 @@ func cycleAliveSessionForFreshReassign(
 		return false, nil
 	}
 	prevBeadID := strings.TrimSpace(info.CurrentlyProcessingBeadID)
-	if err := workerKillSessionTargetWithConfig("", store, sp, cfg, name); err != nil {
+	if err := controllerKillSessionRow(cityPath, store, sp, cfg, info); err != nil {
 		if stderr != nil {
 			fmt.Fprintf(stderr, "session reconciler: stopping fresh-cycle %s: %v\n", name, err) //nolint:errcheck
 		}

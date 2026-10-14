@@ -381,8 +381,8 @@ func goTestScriptEnv(t *testing.T, tmpDir string) []string {
 		"PATH=" + os.Getenv("PATH"),
 		"HOME=" + t.TempDir(),
 		"TMPDIR=" + tmpDir,
-		// Pure Go: never the host's C compiler, which tools/rbe/worker-env
-		// does not measure.
+		// Pure Go: never the host's C compiler, which the worker-env
+		// measurement (rbe-worker's worker/worker-env) does not cover.
 		"CGO_ENABLED=0",
 	}
 	for _, key := range []string{

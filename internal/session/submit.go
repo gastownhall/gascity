@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -55,6 +56,9 @@ type SubmissionCapabilities struct {
 // SubmitOutcome reports whether a submit was delivered now or queued.
 type SubmitOutcome struct {
 	Queued bool
+	// Deferred marks a queue the actor caused: the call may not start
+	// or resume the session (CONTRACT v5.9 D8 rule 1), so a controller should.
+	Deferred bool
 }
 
 // SubmissionCapabilitiesForMetadata derives runtime submit affordances from
@@ -67,36 +71,65 @@ func SubmissionCapabilitiesForMetadata(metadata map[string]string, hasDeferredQu
 	}
 }
 
+// SubmissionCapabilitiesForRuntime is [SubmissionCapabilitiesForMetadata] for
+// a session whose runtime cancels turns in mode, the session's
+// [runtime.TurnInterruptModeFor]: a runtime that cannot interrupt the
+// session's turn withdraws interrupt_now.
+func SubmissionCapabilitiesForRuntime(metadata map[string]string, hasDeferredQueue bool, mode runtime.TurnInterruptMode) SubmissionCapabilities {
+	caps := SubmissionCapabilitiesForMetadata(metadata, hasDeferredQueue)
+	if refusesTurnInterrupt(beads.Bead{Metadata: metadata}, mode) {
+		caps.SupportsInterruptNow = false
+	}
+	return caps
+}
+
 func supportsInterruptNowForMetadata(metadata map[string]string) bool {
 	return ProviderFamilyFromMetadata(metadata, "") != "antigravity"
 }
 
 // SubmissionCapabilities reports which semantic submit intents the session can
-// currently support.
+// currently support. A runtime that cannot interrupt the session's turn
+// withdraws interrupt_now.
 func (m *Manager) SubmissionCapabilities(id string) (SubmissionCapabilities, error) {
-	b, _, err := m.loadSessionBead(id, true)
+	b, sessName, err := m.loadSessionBead(id, true)
 	if err != nil {
 		return SubmissionCapabilities{}, err
 	}
-	return SubmissionCapabilitiesForMetadata(b.Metadata, strings.TrimSpace(m.cityPath) != ""), nil
+	return SubmissionCapabilitiesForRuntime(b.Metadata, strings.TrimSpace(m.cityPath) != "", runtime.TurnInterruptModeFor(m.sp, sessName)), nil
+}
+
+// refusesTurnInterrupt reports whether a runtime with mode cannot replace the
+// session's running turn: it can interrupt it neither by keys nor by
+// protocol, and the session's family does not replace turns by restarting.
+func refusesTurnInterrupt(b beads.Bead, mode runtime.TurnInterruptMode) bool {
+	return mode == runtime.TurnInterruptUnsupported && !requiresHardRestartInterrupt(b)
 }
 
 // Submit delivers a user message according to the requested semantic intent.
-func (m *Manager) Submit(ctx context.Context, id, message, resumeCommand string, hints runtime.Config, intent SubmitIntent) (SubmitOutcome, error) {
+// A dormant session it may not resume as its actor (CONTRACT v5.9 D8) gets
+// the message queued.
+func (m *Manager) Submit(ctx context.Context, by Actor, id, message, resumeCommand string, hints runtime.Config, intent SubmitIntent) (SubmitOutcome, error) {
 	switch intent {
 	case "", SubmitIntentDefault, SubmitIntentFollowUp, SubmitIntentInterruptNow:
 	default:
 		return SubmitOutcome{}, fmt.Errorf("invalid submit intent %q", intent)
 	}
-	return m.submit(ctx, id, message, resumeCommand, hints, intent)
+	return m.submit(ctx, by, id, message, resumeCommand, hints, intent)
 }
 
-func (m *Manager) submit(ctx context.Context, id, message, resumeCommand string, hints runtime.Config, intent SubmitIntent) (SubmitOutcome, error) {
+func (m *Manager) submit(ctx context.Context, by Actor, id, message, resumeCommand string, hints runtime.Config, intent SubmitIntent) (SubmitOutcome, error) {
+	if err := m.checkStarter(by); err != nil {
+		return SubmitOutcome{}, err
+	}
 	var outcome SubmitOutcome
-	err := withSessionMutationLock(id, func() error {
+	err := withSessionStartLock(ctx, id, func() error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
+		}
+		if m.queueFor(b.Metadata, sessName, by) {
+			outcome.Queued, outcome.Deferred = true, true
+			return m.enqueueDeferredSubmitLocked(b, sessName, message)
 		}
 		switch intent {
 		case SubmitIntentFollowUp:
@@ -104,7 +137,9 @@ func (m *Manager) submit(ctx context.Context, id, message, resumeCommand string,
 				return ErrInteractionUnsupported
 			}
 			if State(b.Metadata["state"]) == StateSuspended || !m.sp.IsRunning(sessName) {
-				return m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, true)
+				outcome.Queued, err = m.sendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints, true)
+				outcome.Deferred = outcome.Queued
+				return err
 			}
 			if err := m.pendingInteractionLocked(sessName); err != nil {
 				return err
@@ -118,7 +153,16 @@ func (m *Manager) submit(ctx context.Context, id, message, resumeCommand string,
 			if !supportsInterruptNowForMetadata(b.Metadata) {
 				return ErrInteractionUnsupported
 			}
-			return m.interruptAndSubmitLocked(ctx, id, b, sessName, message, resumeCommand, hints)
+			// The interrupt keystroke would dismiss a pending permission
+			// prompt as a side effect; make the caller answer it explicitly.
+			if State(b.Metadata["state"]) != StateSuspended && m.sp.IsRunning(sessName) {
+				if err := m.pendingInteractionLocked(sessName); err != nil {
+					return err
+				}
+			}
+			outcome.Queued, err = m.interruptAndSubmitLocked(ctx, by, id, b, sessName, message, resumeCommand, hints)
+			outcome.Deferred = outcome.Queued
+			return err
 		default:
 			running := m.sp.IsRunning(sessName)
 			if pendingConversationRestart(b) && !running {
@@ -143,7 +187,9 @@ func (m *Manager) submit(ctx context.Context, id, message, resumeCommand string,
 				return nil
 			}
 			resuming := State(b.Metadata["state"]) == StateSuspended || !running
-			return m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, usesImmediateDefaultSubmit(b, resuming))
+			outcome.Queued, err = m.sendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints, usesImmediateDefaultSubmit(b, resuming))
+			outcome.Deferred = outcome.Queued
+			return err
 		}
 	})
 	return outcome, err
@@ -164,61 +210,102 @@ func (m *Manager) supportsFollowUpLocked(b beads.Bead) bool {
 	).SupportsFollowUp
 }
 
-func (m *Manager) interruptAndSubmitLocked(ctx context.Context, id string, b beads.Bead, sessName, message, resumeCommand string, hints runtime.Config) error {
-	running := State(b.Metadata["state"]) != StateSuspended && m.sp.IsRunning(sessName)
-	if !running {
-		return m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, true)
+// interruptAndSubmitLocked runs after submit's actor check. It reports
+// whether its send queued the message: a dead agent's (sendLocked, on
+// ensureDeliverable's fresh read) takes no interrupt keys and queues it for
+// the incarnation the controller's heal brings up.
+func (m *Manager) interruptAndSubmitLocked(ctx context.Context, by Actor, id string, b beads.Bead, sessName, message, resumeCommand string, hints runtime.Config) (bool, error) {
+	// A row whose drain-ack stop is pending belongs to the controller's stop:
+	// no interrupt keys, no hard-restart stop (as ensureRunning refuses it).
+	if drainAckStopPendingMetadata(b.Metadata) {
+		return false, fmt.Errorf("%w: %s", ErrSessionStopping, id)
 	}
-	if requiresHardRestartInterrupt(b) {
+	running := State(b.Metadata["state"]) != StateSuspended && m.liveAgent(sessName, hints.ProcessNames)
+	if !running {
+		return m.sendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints, true)
+	}
+	mode := runtime.TurnInterruptModeFor(m.sp, sessName)
+	// A protocol runtime cancels the turn itself; its Stop may leave the
+	// runtime running, so the hard restart would interrupt nothing.
+	hardRestart := requiresHardRestartInterrupt(b) && mode != runtime.TurnInterruptProtocol
+	if refusesTurnInterrupt(b, mode) {
+		// Refuse before taking the lease: waiting on a busy lease would
+		// hide this reason behind ErrSessionStarting.
+		return false, fmt.Errorf("%w: %s", ErrTurnInterruptUnsupported, sessName)
+	}
+	// Every interrupt may end in a stop and a restart: take the runtime lease
+	// before sending anything, and carry it to the restart (D8D-5).
+	by, release, err := m.leaseForRestartLocked(ctx, by, id, sessName)
+	if err != nil {
+		return false, err
+	}
+	defer release()
+	if hardRestart {
 		piTranscriptPath, err := piPendingTurnPath(b, hints)
 		if err != nil {
-			return err
+			return false, err
 		}
-		if err := m.sp.Stop(sessName); err != nil {
-			return fmt.Errorf("stopping session for interrupt replacement: %w", err)
+		// Replacement only needs the outgoing incarnation gone, so a session
+		// that is already gone — including one whose tmux server died — is
+		// cleared to restart rather than reported as a failed stop.
+		if err := runtime.StopForCleanup(m.sp, sessName); err != nil {
+			return false, fmt.Errorf("stopping session for interrupt replacement: %w", err)
 		}
 		if err := discardPiPendingTurn(piTranscriptPath, hints); err != nil {
 			// Pi must be stopped before transcript truncation so it cannot race the
 			// write. If truncation fails, restart on the dirty transcript; the
 			// caller's retry will repeat this stop-and-discard sequence.
-			if restartErr := m.restoreAfterHardRestartFailureLocked(ctx, id, b, sessName, resumeCommand, hints); restartErr != nil {
-				return fmt.Errorf("%w; additionally failed to restore session: %w", err, restartErr)
+			if restartErr := m.restoreAfterHardRestartFailureLocked(ctx, by, id, b, sessName, resumeCommand, hints); restartErr != nil {
+				return false, fmt.Errorf("%w; additionally failed to restore session: %w", err, restartErr)
 			}
-			return err
+			return false, err
 		}
-		return m.restartAndSendLocked(ctx, id, b, sessName, message, resumeCommand, hints)
+		return false, m.restartAndSendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints)
 	}
 	interruptStartedAt := time.Now()
-	if err := m.stopTurnLocked(b, sessName); err != nil {
-		return err
+	if err := m.stopTurnLocked(b, sessName, mode); err != nil {
+		return false, err
 	}
-	if err := m.waitForInterruptIdleLocked(ctx, b, sessName); err != nil {
+	if err := m.waitForInterruptIdleLocked(ctx, b, sessName, mode); err != nil {
+		if mode == runtime.TurnInterruptProtocol {
+			// A protocol runtime's Stop may leave it running, so a restart
+			// would interrupt nothing and nudge the message into the turn.
+			return false, fmt.Errorf("waiting for interrupted session to become idle: %w", err)
+		}
 		// Idle wait failed (e.g. timeout). Fall back to hard
 		// restart so the session isn't left in limbo.
-		if stopErr := m.sp.Stop(sessName); stopErr != nil {
-			return fmt.Errorf("stopping session after idle timeout: %w", stopErr)
+		if stopErr := runtime.StopForCleanup(m.sp, sessName); stopErr != nil {
+			return false, fmt.Errorf("stopping session after idle timeout: %w", stopErr)
 		}
-		return m.restartAndSendLocked(ctx, id, b, sessName, message, resumeCommand, hints)
+		return false, m.restartAndSendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints)
 	}
 	if err := m.waitForInterruptBoundaryLocked(ctx, b, sessName, interruptStartedAt); err != nil {
-		if stopErr := m.sp.Stop(sessName); stopErr != nil {
-			return fmt.Errorf("stopping session after interrupt boundary timeout: %w", stopErr)
+		if mode == runtime.TurnInterruptProtocol {
+			return false, err
 		}
-		return m.restartAndSendLocked(ctx, id, b, sessName, message, resumeCommand, hints)
+		if stopErr := runtime.StopForCleanup(m.sp, sessName); stopErr != nil {
+			return false, fmt.Errorf("stopping session after interrupt boundary timeout: %w", stopErr)
+		}
+		return false, m.restartAndSendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints)
 	}
 	if err := m.resetInterruptedTurnLocked(ctx, b, sessName); err != nil {
-		return err
+		return false, err
 	}
-	if shouldClearInterruptedInputBeforeSubmit(b) {
-		if err := m.clearInterruptedInputLocked(ctx, sessName); err != nil {
-			return err
+	if shouldClearInterruptedInputBeforeSubmit(b) && mode == runtime.TurnInterruptKeystroke {
+		if err := m.clearInterruptedInputLocked(ctx, b, sessName); err != nil {
+			return false, err
 		}
 	}
-	return m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, true)
+	return m.sendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints, true)
 }
 
-func (m *Manager) restartAndSendLocked(ctx context.Context, id string, b beads.Bead, sessName, message, resumeCommand string, hints runtime.Config) error {
-	if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints); err != nil {
+// restartAndSendLocked replaces the runtime the interrupt just stopped. The
+// hold was decided before the stop, so the restart does not re-read it: the
+// dead runtime would make a heartbeat or unreadable hold refuse, losing the
+// session and the message. Only an operator's resume consumes a user hold
+// (Actor.consumesHold).
+func (m *Manager) restartAndSendLocked(ctx context.Context, by Actor, id string, b beads.Bead, sessName, message, resumeCommand string, hints runtime.Config) error {
+	if err := m.ensureRunning(ctx, by, id, b, sessName, resumeCommand, hints, true); err != nil {
 		return err
 	}
 	if err := m.waitUntilRunningLocked(ctx, id, sessName, 2*time.Second); err != nil {
@@ -250,9 +337,22 @@ func (m *Manager) waitUntilRunningLocked(ctx context.Context, id, sessName strin
 	}
 }
 
-func (m *Manager) stopTurnLocked(b beads.Bead, sessName string) error {
+// stopTurnLocked sends the turn interrupt for mode, the session runtime's
+// [runtime.TurnInterruptModeFor]. Only keystroke mode sends the
+// provider-specific keys (soft Escape, Ctrl-C fallback, input clear): a
+// protocol runtime drops keys and is interrupted through Interrupt alone.
+func (m *Manager) stopTurnLocked(b beads.Bead, sessName string, mode runtime.TurnInterruptMode) error {
 	if State(b.Metadata["state"]) == StateSuspended || !m.sp.IsRunning(sessName) {
 		return nil
+	}
+	switch mode {
+	case runtime.TurnInterruptProtocol:
+		if err := m.sp.Interrupt(sessName); err != nil {
+			return fmt.Errorf("interrupting session: %w", err)
+		}
+		return nil
+	case runtime.TurnInterruptUnsupported:
+		return fmt.Errorf("%w: %s", ErrTurnInterruptUnsupported, sessName)
 	}
 	if usesSoftEscapeInterrupt(b) {
 		if err := m.sp.SendKeys(sessName, "Escape"); err != nil {
@@ -266,7 +366,7 @@ func (m *Manager) stopTurnLocked(b beads.Bead, sessName string) error {
 	return nil
 }
 
-func (m *Manager) waitForInterruptIdleLocked(ctx context.Context, b beads.Bead, sessName string) error {
+func (m *Manager) waitForInterruptIdleLocked(ctx context.Context, b beads.Bead, sessName string, mode runtime.TurnInterruptMode) error {
 	if !waitsForIdleAfterInterrupt(b) {
 		return nil
 	}
@@ -281,7 +381,7 @@ func (m *Manager) waitForInterruptIdleLocked(ctx context.Context, b beads.Bead, 
 		}
 		return err
 	}
-	if usesSoftEscapeInterrupt(b) {
+	if usesSoftEscapeInterrupt(b) && mode == runtime.TurnInterruptKeystroke {
 		if requiresImmediateInterruptConfirm(b) {
 			if err := m.sp.Interrupt(sessName); err != nil {
 				return fmt.Errorf("confirming interrupt after soft escape: %w", err)
@@ -429,7 +529,51 @@ func (m *Manager) resetInterruptedTurnLocked(ctx context.Context, b beads.Bead, 
 	return nil
 }
 
-func (m *Manager) clearInterruptedInputLocked(ctx context.Context, sessName string) error {
+// claudeInputRestoreWindow is how long StopTurn and interrupt_now give Claude
+// Code to put an interrupted prompt back into its input box before clearing
+// it. In the lost-turn repro (Claude Code 2.1.288) the prompt reappeared
+// within about 0.3 s of the idle prompt.
+const claudeInputRestoreWindow = 2 * time.Second
+
+// restoresInterruptedInput reports whether the provider puts a prompt that was
+// interrupted before its first response chunk back into its input box. Claude
+// Code does: the next message is appended to it unless the input box is
+// cleared first.
+func restoresInterruptedInput(b beads.Bead) bool {
+	return transportFromMetadata(b) != "acp" && providerKind(b) == "claude"
+}
+
+// clearRestoredInputLocked waits briefly for Claude to restore an interrupted
+// prompt, then clears the input box and verifies it is empty. handled is false
+// when the runtime cannot do a verified clear. When a client is attached the
+// runtime leaves the input box alone (a human may be typing in it, #5192);
+// that is logged and handled, so no caller falls back to a raw Ctrl-U.
+func (m *Manager) clearRestoredInputLocked(ctx context.Context, sessName string) (handled bool, err error) {
+	clearer, ok := m.sp.(runtime.InputClearProvider)
+	if !ok {
+		return false, nil
+	}
+	err = clearer.ClearInput(ctx, sessName, claudeInputRestoreWindow)
+	if errors.Is(err, runtime.ErrInteractionUnsupported) {
+		return false, nil
+	}
+	if errors.Is(err, runtime.ErrInputClearSkipped) {
+		log.Printf("session: left the input box of %q as it is after an interrupt: %v", sessName, err)
+		return true, nil
+	}
+	if err != nil {
+		return true, fmt.Errorf("clearing the interrupted prompt from the input box: %w", err)
+	}
+	return true, nil
+}
+
+func (m *Manager) clearInterruptedInputLocked(ctx context.Context, b beads.Bead, sessName string) error {
+	if restoresInterruptedInput(b) {
+		handled, err := m.clearRestoredInputLocked(ctx, sessName)
+		if err != nil || handled {
+			return err
+		}
+	}
 	if err := m.sp.SendKeys(sessName, "C-u"); err != nil {
 		return fmt.Errorf("clearing interrupted input: %w", err)
 	}
@@ -479,8 +623,10 @@ func waitsForIdleAfterHardRestart(b beads.Bead) bool {
 	return providerKind(b) != "pi"
 }
 
-func (m *Manager) restoreAfterHardRestartFailureLocked(ctx context.Context, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config) error {
-	if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints); err != nil {
+// restoreAfterHardRestartFailureLocked restarts the runtime the interrupt
+// stopped; like restartAndSendLocked it does not re-read the hold.
+func (m *Manager) restoreAfterHardRestartFailureLocked(ctx context.Context, by Actor, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config) error {
+	if err := m.ensureRunning(ctx, by, id, b, sessName, resumeCommand, hints, true); err != nil {
 		return err
 	}
 	return m.waitUntilRunningLocked(ctx, id, sessName, 2*time.Second)
@@ -594,18 +740,14 @@ func (m *Manager) enqueueDeferredSubmitLocked(b beads.Bead, sessName, message st
 // deferredSubmitEpoch returns the continuation epoch a deferred submit is
 // fenced against.
 //
-// A submit deferred while a conversation reset is pending must survive the
-// reset's epoch rotation: commitPendingContinuationReset advances
-// continuation_epoch N->N+1 when the replacement incarnation starts, which
-// happens after this item is queued. A fixed epoch-N stamp would then fail the
-// queued-nudge fence (queuedNudgeMatchesTargetFence) and be dead-lettered,
-// silently dropping the message. Returning an empty epoch leaves the item
-// fenced by SessionID alone, so the post-reset incarnation — same session
-// bead, epoch N+1 — still claims and delivers it.
-//
-// A plain restart (restart_requested without a reset) does not rotate the
-// epoch, so those defers keep the current-epoch stamp and stay fenced to the
-// resumed conversation.
+// A submit deferred while a conversation reset is pending is fenced by its
+// session alone (an empty epoch): commitPendingContinuationReset advances
+// continuation_epoch N->N+1 when the replacement incarnation starts, after
+// this item is queued. Any other defer keeps the current epoch's stamp. An
+// epoch rotated since (a reset, or a crash heal's) does not lose the item:
+// since #5775 delivery re-stamps an item for the same session with the live
+// epoch (splitQueuedNudgesForTarget) and delivers it, so the stamp records
+// the conversation the message was written for, not a gate on delivery.
 func deferredSubmitEpoch(b beads.Bead) string {
 	if strings.TrimSpace(b.Metadata["continuation_reset_pending"]) != "" {
 		return ""
@@ -651,8 +793,7 @@ func ensureSessionSubmitPoller(cityPath, agentName, sessionName string) error {
 		if isGoTestExecutable(exe) {
 			return fmt.Errorf("refusing to start nudge poller with Go test binary %q", exe)
 		}
-		cmd := exec.Command(exe, nudgepoller.CommandArgs(cityPath, sessionName, agentName)...)
-		cmd.Env = execenv.WithUsageMetricsDisabled(os.Environ())
+		cmd := newSessionSubmitPollerCommand(exe, os.Environ(), cityPath, sessionName, agentName)
 		logFile, err := os.OpenFile(sessionSubmitPollerLogPath(cityPath, sessionName, agentName), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 		if err != nil {
 			return err
@@ -671,6 +812,15 @@ func ensureSessionSubmitPoller(cityPath, agentName, sessionName string) error {
 		}
 		return cmd.Process.Release()
 	})
+}
+
+// newSessionSubmitPollerCommand builds the detached poller child over
+// environ, without the spawning session's identity (nudgepoller.ChildEnv),
+// so the poller never reads as that session's leaked process.
+func newSessionSubmitPollerCommand(exe string, environ []string, cityPath, sessionName, agentName string) *exec.Cmd {
+	cmd := exec.Command(exe, nudgepoller.CommandArgs(cityPath, sessionName, agentName)...)
+	cmd.Env = execenv.WithUsageMetricsDisabled(nudgepoller.ChildEnv(environ))
+	return cmd
 }
 
 func isGoTestExecutable(path string) bool {

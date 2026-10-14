@@ -111,11 +111,11 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 	}
 	bucket := responseCacheTimeBucket(time.Now())
 	if !blocking {
-		if body, ok := cachedResponseAs[StatusBody](s, cacheKey, bucket); ok {
-			return &IndexOutput[StatusBody]{Index: index, CacheAgeS: cacheAgeSeconds(store), Body: body}, nil
+		if hit, ok := cachedResponseAs[indexedResponse[StatusBody]](s, cacheKey, bucket); ok {
+			return &IndexOutput[StatusBody]{Index: hit.Index, CacheAgeS: cacheAgeSeconds(store), Body: hit.Body}, nil
 		}
-		if body, ok := cachedResponseWithinAgeAs[StatusBody](s, cacheKey, statusResponseTTLFloor); ok {
-			return &IndexOutput[StatusBody]{Index: index, CacheAgeS: cacheAgeSeconds(store), Body: body}, nil
+		if hit, ok := cachedResponseWithinAgeAs[indexedResponse[StatusBody]](s, cacheKey, statusResponseTTLFloor); ok {
+			return &IndexOutput[StatusBody]{Index: hit.Index, CacheAgeS: cacheAgeSeconds(store), Body: hit.Body}, nil
 		}
 		// Stale-while-revalidate (ra-4u2eqc): the bucket and TTL-floor caches
 		// both missed, so any entry that exists is older than
@@ -137,19 +137,19 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 		// staleness and suppress the banner `gc status` renders above
 		// cacheAgeBannerThresholdSeconds; reporting only the store age would
 		// hide the SWR delay. The max preserves both.
-		if body, age, ok := staleResponseAs[StatusBody](s, cacheKey); ok {
+		if hit, age, ok := staleResponseAs[indexedResponse[StatusBody]](s, cacheKey); ok {
 			s.refreshStatusResponseInBackground(cacheKey, input.Lite)
 			return &IndexOutput[StatusBody]{
-				Index:     index,
+				Index:     hit.Index,
 				CacheAgeS: max(age.Seconds(), cacheAgeSeconds(store)),
-				Body:      body,
+				Body:      hit.Body,
 			}, nil
 		}
 	}
 
 	resp := s.buildStatusBody(ctx, input.Lite)
 	if !blocking {
-		s.storeResponse(cacheKey, bucket, resp)
+		s.storeResponse(cacheKey, bucket, indexedResponse[StatusBody]{Index: index, Body: resp})
 	}
 
 	return &IndexOutput[StatusBody]{Index: index, CacheAgeS: cacheAgeSeconds(store), Body: resp}, nil
@@ -179,8 +179,9 @@ func (s *Server) refreshStatusResponseInBackground(cacheKey string, lite bool) {
 			}
 		}()
 		defer s.endResponseRefresh(cacheKey)
+		index := s.latestIndex()
 		resp := s.buildStatusBody(ctx, lite)
-		s.storeResponse(cacheKey, responseCacheTimeBucket(time.Now()), resp)
+		s.storeResponse(cacheKey, responseCacheTimeBucket(time.Now()), indexedResponse[StatusBody]{Index: index, Body: resp})
 	})
 }
 
@@ -250,7 +251,7 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 		if rigName != "" {
 			scope = "rig"
 		}
-		expanded := expandAgent(a, cityName, sessTmpl, sp)
+		expanded := expandAgent(a, cityName, sessTmpl, sp, cfg.NamedSessions)
 		expanded = appendUnlimitedPoolSessionBeads(expanded, a, cityName, sessTmpl, sessionSnapshot)
 		isPool := len(expanded) > 1 || a.SupportsInstanceExpansion()
 		groupName := a.QualifiedName()
@@ -260,7 +261,7 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 			if rigName != "" {
 				perRigAgentTotals[rigName]++
 			}
-			sessName := statusRuntimeSessionName(cityName, sessTmpl, ea.qualifiedName, groupName, sessionSnapshot)
+			sessName := statusRuntimeSessionName(cityName, sessTmpl, ea.qualifiedName, groupName, statusListsTemplateBeads(a), sessionSnapshot)
 			info, hasInfo := sessionSnapshot.bySessionName[sessName]
 			running := statusProviderRunning(sp, sessName)
 			// An agent whose work runs under a relocated-graph wisp session is
@@ -464,23 +465,13 @@ func (s *Server) cityBeadsDiagnostic() *beads.BeadsDiagnostic {
 // poolScaleLabel renders the "scaled (min=N, max=M)" banner the CLI emits
 // once per pool group. Mirrors the label buildCityStatusSnapshot emits
 // client-side so human output is identical whether served via API or
-// fallback.
+// fallback: an unset max_active_sessions is unlimited, as in scaleParamsFor.
 func poolScaleLabel(a config.Agent) string {
-	minSessions := 0
-	if a.MinActiveSessions != nil {
-		minSessions = *a.MinActiveSessions
+	maxLabel := "max=unlimited"
+	if maxSessions := a.EffectiveMaxActiveSessions(); maxSessions != nil && *maxSessions >= 0 {
+		maxLabel = fmt.Sprintf("max=%d", *maxSessions)
 	}
-	maxSessions := 1
-	maxLabel := fmt.Sprintf("max=%d", maxSessions)
-	if a.MaxActiveSessions != nil {
-		maxSessions = *a.MaxActiveSessions
-		if maxSessions < 0 {
-			maxLabel = "max=unlimited"
-		} else {
-			maxLabel = fmt.Sprintf("max=%d", maxSessions)
-		}
-	}
-	return fmt.Sprintf("scaled (min=%d, %s)", minSessions, maxLabel)
+	return fmt.Sprintf("scaled (min=%d, %s)", a.EffectiveMinActiveSessions(), maxLabel)
 }
 
 // namedSessionStatus classifies a named session for the StatusBody detail
@@ -695,12 +686,13 @@ type statusWorkResult struct {
 }
 
 // statusWorkCounts tallies persisted open/in_progress work across BeadStores
-// and federates canonical Ready work the way GET /beads/ready does over the
-// work stores: the city store first, then BeadStores excluding the CityName
-// alias. Stores exposing beads.Counter answer persisted counts without
-// hydrating rows — the caching layer counts matches in memory when its cache is
-// clean (#1896). Stores are queried concurrently; results aggregate in
-// deterministic city/rig order.
+// and federates canonical Ready work over the work-store legs GET /beads/ready
+// reads, in the same order: the city store first, then BeadStores excluding the
+// CityName alias. It reads each leg from a different source, though (see
+// statusReadyStoreWithTimeout). Stores exposing beads.Counter answer persisted
+// counts without hydrating rows — the caching layer counts matches in memory
+// when its cache is clean (#1896). Stores are queried concurrently; results
+// aggregate in deterministic city/rig order.
 //
 // NOT identical to GET /beads/ready on a split city: that handler grew a
 // relocated-graph-store leg (huma_handlers_beads.go) and this one has none, so
@@ -976,10 +968,15 @@ func statusListStoreWithTimeout(ctx context.Context, state State, store beads.St
 	}
 }
 
-// statusReadyStoreWithTimeout reads the same live canonical Ready projection
-// as GET /beads/ready. Policy-aware stores retain their tier behavior through
-// ScopedStoreLike; the scoped clone binds bd subprocesses to reqCtx so timeout
-// cancellation cannot leak a child beyond the status request.
+// statusReadyStoreWithTimeout reads the canonical Ready projection of one leg
+// GET /beads/ready federates, but not from the source that endpoint uses. A
+// beads.ContextReadyReader is read through ReadyContext; for a CachingStore
+// that read is cache-only and fails with beads.ErrCacheUnavailable rather than
+// read live. Any other store is read live through ScopedStoreLike: policy-aware
+// stores retain their tier behavior, and the scoped clone binds bd subprocesses
+// to reqCtx so timeout cancellation cannot leak a child beyond the status
+// request. GET /beads/ready instead reads a leg whose cache cannot answer live
+// (beads.ReadyPreferCache).
 func statusReadyStoreWithTimeout(ctx context.Context, state State, store beads.Store) ([]beads.Bead, error) {
 	if store == nil {
 		return nil, nil
@@ -1052,9 +1049,16 @@ func statusMailCountWithTimeout(mp interface {
 	}
 }
 
-func appendUnlimitedPoolSessionBeads(expanded []expandedAgent, a config.Agent, cityName, sessTmpl string, snapshot statusSessionSnapshot) []expandedAgent {
+// statusListsTemplateBeads reports whether status lists every session bead
+// recorded against the agent's template as a row of its own: true for an
+// unlimited pool, whose instances config cannot enumerate.
+func statusListsTemplateBeads(a config.Agent) bool {
 	maxSess := a.EffectiveMaxActiveSessions()
-	if !a.SupportsInstanceExpansion() || (maxSess != nil && *maxSess >= 0) {
+	return a.SupportsInstanceExpansion() && (maxSess == nil || *maxSess < 0)
+}
+
+func appendUnlimitedPoolSessionBeads(expanded []expandedAgent, a config.Agent, cityName, sessTmpl string, snapshot statusSessionSnapshot) []expandedAgent {
+	if !statusListsTemplateBeads(a) {
 		return expanded
 	}
 
@@ -1130,10 +1134,23 @@ func statusSessionStateInfo(info session.Info) session.State {
 //  3. for a single-instance identity, the one session bead recorded against
 //     it as template.
 //
+// templateBeadsListed is statusListsTemplateBeads for the agent. When it
+// holds, every session bead recorded against the template is already listed
+// as a row of its own, so the template's own row (the named session a
+// template declares under its bare name) stops after step 1: any other bead
+// is another row's session, whether it names a sibling instance such as the
+// <template>-1 seat routed work mints or records no identity at all, and
+// taking it would count that session twice. A named session runs under its
+// canonical name anyway. A bounded template lists no beads, so steps 2 and 3
+// still find a single seat recorded under a slot-suffixed identity.
+//
 // Anything ambiguous falls back to the canonical name rather than guessing.
-func statusRuntimeSessionName(cityName, sessTmpl, qualifiedName, groupName string, snapshot statusSessionSnapshot) string {
+func statusRuntimeSessionName(cityName, sessTmpl, qualifiedName, groupName string, templateBeadsListed bool, snapshot statusSessionSnapshot) string {
 	canonical := agentSessionName(cityName, qualifiedName, sessTmpl)
 	if _, ok := snapshot.bySessionName[canonical]; ok {
+		return canonical
+	}
+	if templateBeadsListed && qualifiedName == groupName {
 		return canonical
 	}
 

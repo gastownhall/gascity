@@ -26,6 +26,9 @@ func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
 		items, err := c.backing.List(query)
 		if err == nil {
 			items = c.refreshCachedBeads(query, startSeq, startScan, items)
+			// A live list is often the first reader to see a close made by
+			// another process (bd close); announce what it installed.
+			c.announceUnannouncedCloses()
 		}
 		return items, err
 	}
@@ -362,7 +365,7 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq, startScan u
 	if c.state != cacheLive && c.state != cachePartial {
 		return items
 	}
-	now := time.Now()
+	now := c.clockNow()
 	refreshed := make([]Bead, 0, len(items))
 	for _, item := range items {
 		if c.deletedSeq[item.ID] > startSeq {
@@ -449,7 +452,7 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq, startScan u
 		}
 		c.evictListedGoneLocked(id)
 	}
-	c.markFreshLocked(time.Now())
+	c.markFreshLocked(c.clockNow())
 	c.updateStatsLocked()
 	return refreshed
 }
@@ -532,6 +535,9 @@ func (c *CachingStore) ListOpen(status ...string) ([]Bead, error) {
 
 // Get returns a single bead by ID from the cache or backing store.
 func (c *CachingStore) Get(id string) (Bead, error) {
+	// Deferred so it runs after every unlock below: a dirty-row refresh can be
+	// the first reader to see a close made by another process.
+	defer c.announceUnannouncedCloses()
 	c.mu.RLock()
 	if _, deleted := c.deletedSeq[id]; deleted {
 		c.mu.RUnlock()
@@ -603,8 +609,8 @@ func (c *CachingStore) Get(id string) (Bead, error) {
 			if depsFromBacking {
 				opts.depsMode, opts.deps = depsExplicit, freshDeps
 			}
-			c.absorbFreshLocked(id, fresh, time.Now(), opts)
-			c.markFreshLocked(time.Now())
+			c.absorbFreshLocked(id, fresh, c.clockNow(), opts)
+			c.markFreshLocked(c.clockNow())
 			c.updateStatsLocked()
 			c.mu.Unlock()
 			return fresh, nil
@@ -757,16 +763,22 @@ func (c *CachingStore) RefreshRow(id string) (Bead, error) {
 	evicted := false
 	if found {
 		opts := absorbOpts{depsMode: depsFromFieldsIfCarried, seqMode: seqKeep, clearDirty: true}
+		// RefreshRow announces the close of a row it held open itself
+		// (rowRefreshChange), so that close is not queued as well.
+		opts.closeAnnounced = held && cached.Status != "closed" && fresh.Status == "closed"
 		if depsFromBacking {
 			opts.depsMode, opts.deps = depsExplicit, freshDeps
 		}
-		c.absorbFreshLocked(id, fresh, time.Now(), opts)
+		c.absorbFreshLocked(id, fresh, c.clockNow(), opts)
 		installed = cloneBead(c.beads[id])
 	} else if _, dirty := c.dirty[id]; held || dirty {
 		c.evictLocked(id)
 		evicted = true
 	}
 	eventType, changed := rowRefreshChange(held, cached, cachedDeps, found, installed, c.deps[id])
+	if eventType == "bead.closed" {
+		c.noteCloseAnnouncedLocked(id)
+	}
 	if changed || evicted {
 		// The eviction dropped the row's beadSeq, a dirty uncached row's
 		// included, so it is stamped anew.
@@ -774,7 +786,7 @@ func (c *CachingStore) RefreshRow(id string) (Bead, error) {
 		if (found && !held) || (held && (!found || cached.Status != installed.Status)) {
 			c.clearDependentReadyProjectionsLocked(id)
 		}
-		c.markFreshLocked(time.Now())
+		c.markFreshLocked(c.clockNow())
 		c.updateStatsLocked()
 	}
 	c.mu.Unlock()
@@ -825,6 +837,33 @@ func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	if readyQueryFromArgs(query) != (ReadyQuery{}) {
 		return c.backing.Ready(query...)
 	}
+	if rows, ok := c.readyFromCache(ReadyQuery{}); ok {
+		return rows, nil
+	}
+	return c.backing.Ready(query...)
+}
+
+// ReadyPreferCache answers any ready query (tier, assignee, limit) from the
+// cache when the cache can vouch for it, under exactly the rules the
+// zero-query Ready applies: a fully live, dependency-complete cache whose
+// ready projection is not degraded, with dirty rows refreshed through the
+// bounded overlay first. When the cache is cold, partial, invalidated past the
+// overlay, or cannot vouch for one candidate's verdict, it reads the backing
+// with the caller's query, as Live.Ready does.
+//
+// It is a separate entry rather than a widening of Ready because Ready with
+// arguments has always meant "authoritative" to its existing callers; the
+// native Ready endpoint opts in explicitly.
+func (c *CachingStore) ReadyPreferCache(query ReadyQuery) ([]Bead, error) {
+	if rows, ok := c.readyFromCache(query); ok {
+		return rows, nil
+	}
+	return c.backing.Ready(query)
+}
+
+// readyFromCache computes query's ready set from the cache, reporting false
+// when the cache cannot answer and the caller must read the backing.
+func (c *CachingStore) readyFromCache(query ReadyQuery) ([]Bead, bool) {
 	var (
 		statusByID      map[string]string
 		workOutcomeByID map[string]string
@@ -851,14 +890,18 @@ func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 					continue
 				}
 				statusByID[b.ID] = b.Status
-				workOutcomeByID[b.ID] = b.Metadata[beadmeta.WorkOutcomeMetadataKey]
-				if IsReadyCandidate(b, now) {
-					if c.readyProjectionUnknownLocked(b.ID) {
-						unanswerable = true
-						return
-					}
-					openBeads = append(openBeads, cloneBead(b))
+				workOutcomeByID[b.ID] = ReadinessWorkOutcome(b.Metadata)
+				if !IsReadyCandidateForTier(b, now, query.TierMode) {
+					continue
 				}
+				if query.Assignee != "" && b.Assignee != query.Assignee {
+					continue
+				}
+				if c.readyProjectionUnknownLocked(b.ID) {
+					unanswerable = true
+					return
+				}
+				openBeads = append(openBeads, cloneBead(b))
 			}
 			depsByID = make(map[string][]Dep, len(openBeads))
 			for _, b := range openBeads {
@@ -866,12 +909,12 @@ func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 			}
 		},
 	); err != nil {
-		return c.backing.Ready(query...)
+		return nil, false
 	}
 	if unanswerable {
 		// One candidate whose verdict the cache cannot vouch for costs this
 		// read the cache, not correctness: the live scan is slower and right.
-		return c.backing.Ready(query...)
+		return nil, false
 	}
 
 	var result []Bead
@@ -884,7 +927,10 @@ func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	// call; impose the canonical ready order so cache-served results
 	// match the SQL-backed ready readers (#3208).
 	sortBeadsReadyOrder(result)
-	return result, nil
+	if query.Limit > 0 && len(result) > query.Limit {
+		result = result[:query.Limit]
+	}
+	return result, true
 }
 
 // ReadyContext answers only from the dependency-complete active cache. It
@@ -929,7 +975,7 @@ func (c *CachingStore) CachedReady() ([]Bead, bool) {
 	now := time.Now().UTC()
 	for _, b := range c.beads {
 		statusByID[b.ID] = b.Status
-		workOutcomeByID[b.ID] = b.Metadata[beadmeta.WorkOutcomeMetadataKey]
+		workOutcomeByID[b.ID] = ReadinessWorkOutcome(b.Metadata)
 		if IsReadyCandidate(b, now) {
 			if c.readyProjectionUnknownLocked(b.ID) {
 				return nil, false

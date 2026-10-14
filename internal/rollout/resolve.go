@@ -3,6 +3,7 @@ package rollout
 import (
 	"fmt"
 	"os"
+	"strconv"
 
 	"github.com/gastownhall/gascity/internal/config"
 )
@@ -54,6 +55,11 @@ func Resolve(cfg *config.City, opts ResolveOptions) (Flags, error) {
 	if value, defined := readDaemonFormulaV2(cfg); defined {
 		f.formulaV2 = resolved[bool]{value: value, origin: OriginConfig}
 	}
+
+	// beads.allow_schema_behind_migrate — bool killswitch, EnvOverrides semantics.
+	resolveBoolGate(cfg, lookup, &f, beadsAllowSchemaBehindMigrateSpec(),
+		readBeadsAllowSchemaBehindMigrate,
+		func(f *Flags, r resolved[bool]) { f.allowSchemaBehindMigrate = r })
 
 	return f, nil
 }
@@ -126,4 +132,68 @@ func resolveModeGate(
 
 	set(f, resolved[Mode]{value: mode, origin: origin})
 	return nil
+}
+
+// resolveBoolGate resolves one bool gate from config plus its
+// registry-declared env override, mirroring resolveModeGate's precedence and
+// notice semantics (EnvOverrides/EnvFillsNil, malformed-env-ignored,
+// redundant-env-no-notice) for a strconv.ParseBool-spelled value instead of a
+// Mode. A bool config field is type-checked by the TOML decoder itself, so
+// (unlike resolveModeGate) there is no out-of-enum CONFIG value to reject —
+// this never fails Resolve.
+func resolveBoolGate(
+	cfg *config.City,
+	lookup func(string) (string, bool),
+	f *Flags,
+	spec Spec,
+	read func(*config.City) (value bool, defined bool),
+	set func(*Flags, resolved[bool]),
+) {
+	key := spec.Key
+
+	value, defined := read(cfg)
+	origin := OriginBuiltin
+	if defined {
+		origin = OriginConfig
+	}
+	raw := ""
+	if defined {
+		raw = strconv.FormatBool(value)
+	}
+
+	if spec.EnvOverride != "" {
+		if envRaw, ok := lookup(spec.EnvOverride); ok {
+			v, err := strconv.ParseBool(envRaw)
+			switch {
+			case err != nil:
+				f.notices = append(f.notices, Notice{
+					Kind: NoticeInvalidEnvIgnored, FlagKey: key,
+					EnvVar: spec.EnvOverride, ConfigValue: raw, EnvValue: envRaw,
+					Message: fmt.Sprintf("%s=%q is not a bool; ignored, keeping %s=%s (%s)",
+						spec.EnvOverride, envRaw, key, strconv.FormatBool(value), origin),
+				})
+			case spec.EnvSemantics == EnvFillsNil && defined:
+				// fills-nil: config already set, so the env value does not apply.
+			case defined && v != value:
+				f.notices = append(f.notices, Notice{
+					Kind: NoticeEnvOverridesConfig, FlagKey: key,
+					EnvVar: spec.EnvOverride, ConfigValue: raw, EnvValue: envRaw,
+					Message: fmt.Sprintf("%s=%q overrides config %s=%s", spec.EnvOverride, strconv.FormatBool(v), key, raw),
+				})
+				value, origin = v, OriginEnv
+			case defined && v == value:
+				// Env agrees with an explicit config value: redundant, so keep the
+				// config origin and emit no (misleading "config unset") notice.
+			default: // !defined: env supplies the value.
+				f.notices = append(f.notices, Notice{
+					Kind: NoticeEnvOverrideActive, FlagKey: key,
+					EnvVar: spec.EnvOverride, ConfigValue: raw, EnvValue: envRaw,
+					Message: fmt.Sprintf("%s=%q applied (config unset)", spec.EnvOverride, strconv.FormatBool(v)),
+				})
+				value, origin = v, OriginEnv
+			}
+		}
+	}
+
+	set(f, resolved[bool]{value: value, origin: origin})
 }

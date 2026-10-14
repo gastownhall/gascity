@@ -2878,3 +2878,22 @@ func TestCoResidentDrainMemberAnswersFromTheBinding(t *testing.T) {
 		t.Fatalf("retained work copy carries reservation %q, want none; the frozen copy must not be written", got)
 	}
 }
+
+// TestDrainUnitConvoyByKeyTakesOnlyAConvoy (architecture B): a task carrying
+// a unit's drain key is no unit convoy to resume; the convoy is.
+func TestDrainUnitConvoyByKeyTakesOnlyAConvoy(t *testing.T) {
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{Title: "forged", Type: "task", Metadata: map[string]string{beadmeta.DrainUnitKeyMetadataKey: "u"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, found, err := drainUnitConvoyByKey(store, "u", ProcessOptions{}); err != nil || found {
+		t.Fatalf("found %t (%v), want no unit convoy", found, err)
+	}
+	unit, err := store.Create(beads.Bead{Title: "unit", Type: "convoy", Metadata: map[string]string{beadmeta.DrainUnitKeyMetadataKey: "u"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _, found, err := drainUnitConvoyByKey(store, "u", ProcessOptions{}); err != nil || !found || got.ID != unit.ID {
+		t.Fatalf("got %s found %t (%v), want %s", got.ID, found, err, unit.ID)
+	}
+}

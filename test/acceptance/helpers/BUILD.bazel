@@ -18,6 +18,7 @@ go_library(
         "provider_shim.go",
         "recording_bd.go",
         "sentinel_dolt.go",
+        "supervisor_ready.go",
         "tool_home.go",
         "tooling.go",
     ],
@@ -47,6 +48,7 @@ go_test(
         "provider_shim_test.go",
         "recording_bd_test.go",
         "sentinel_dolt_test.go",
+        "supervisor_ready_test.go",
         "testenv_import_test.go",
         "tool_home_test.go",
         "tooling_test.go",
@@ -66,6 +68,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

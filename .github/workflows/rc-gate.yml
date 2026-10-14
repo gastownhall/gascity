@@ -30,65 +30,30 @@ jobs:
       force_blacksmith: true
     secrets: inherit
 
-  ubuntu_fast_tests:
-    name: ubuntu / fast tests / ${{ matrix.label }}
-    runs-on: blacksmith-32vcpu-ubuntu-2404
-    timeout-minutes: ${{ matrix.timeout_minutes }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - label: fsys-darwin-compile
-            timeout_minutes: 10
-            command: |
-              tmp="$(mktemp -d)"
-              trap 'rm -rf "$tmp"' EXIT
-              GOOS=darwin GOARCH=arm64 go test -c -o "$tmp/fsys.test" ./internal/fsys
-          - label: unit-core
-            timeout_minutes: 20
-            command: |
-              GC_FAST_UNIT=1 go test -timeout 8m $(go list ./... | grep -v '^github.com/gastownhall/gascity/cmd/gc$')
-          - label: cmd-gc-1-of-6
-            timeout_minutes: 20
-            command: GC_FAST_UNIT=1 GO_TEST_COUNT=1 GO_TEST_TIMEOUT=20m ./scripts/test-go-test-shard ./cmd/gc 1 6
-          - label: cmd-gc-2-of-6
-            timeout_minutes: 20
-            command: GC_FAST_UNIT=1 GO_TEST_COUNT=1 GO_TEST_TIMEOUT=20m ./scripts/test-go-test-shard ./cmd/gc 2 6
-          - label: cmd-gc-3-of-6
-            timeout_minutes: 20
-            command: GC_FAST_UNIT=1 GO_TEST_COUNT=1 GO_TEST_TIMEOUT=20m ./scripts/test-go-test-shard ./cmd/gc 3 6
-          - label: cmd-gc-4-of-6
-            timeout_minutes: 20
-            command: GC_FAST_UNIT=1 GO_TEST_COUNT=1 GO_TEST_TIMEOUT=20m ./scripts/test-go-test-shard ./cmd/gc 4 6
-          - label: cmd-gc-5-of-6
-            timeout_minutes: 20
-            command: GC_FAST_UNIT=1 GO_TEST_COUNT=1 GO_TEST_TIMEOUT=20m ./scripts/test-go-test-shard ./cmd/gc 5 6
-          - label: cmd-gc-6-of-6
-            timeout_minutes: 20
-            command: GC_FAST_UNIT=1 GO_TEST_COUNT=1 GO_TEST_TIMEOUT=20m ./scripts/test-go-test-shard ./cmd/gc 6 6
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: ./.github/actions/setup-gascity-ubuntu
-        with:
-          dolt-version: ${{ env.DOLT_VERSION }}
-          bd-version: ${{ env.BD_VERSION }}
-          install-claude-cli: "false"
-      - name: Run fast test shard
-        run: ${{ matrix.command }}
-
-  ubuntu_make_check_docs:
-    name: ubuntu / make check-docs
-    runs-on: blacksmith-2vcpu-ubuntu-2404
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: ./.github/actions/setup-gascity-ubuntu
-        with:
-          dolt-version: ${{ env.DOLT_VERSION }}
-          bd-version: ${{ env.BD_VERSION }}
-          install-claude-cli: "false"
-      - name: Run make check-docs
-        run: make check-docs
+  # Every Bazel lane on the dispatched ref, executing on rbe-west: unit
+  # (the untagged suite with cmd/gc's fast tests, docsync, the generated
+  # artifact and policy checks, nogo), acceptance (Tier A), integration-
+  # packages (cmd/gc's process suite and every package's integration-tagged
+  # tests), integration-smoke and, as a dispatch, the full //test/integration
+  # suite (evidence-only until G3). It replaces the go-test fast-test shards
+  # and `make check-docs-go`; the darwin build of internal/fsys is
+  # mac_regression's native one.
+  bazel_parity:
+    name: Bazel parity
+    permissions:
+      contents: read
+      actions: write # bazel.yml's rbe job pre-warms the worker pool
+      # issues: write and id-token: write are requested by bazel.yml's
+      # rrc-verify and repo contents cache seed jobs; GitHub validates a called
+      # workflow's permissions at startup even for jobs that skip, so the
+      # caller must grant them (startup_failure otherwise). Neither job runs
+      # for RC Gate's events, and the mint refuses non-main-push tokens.
+      issues: write
+      id-token: write
+    uses: ./.github/workflows/bazel.yml
+    with:
+      rbe: "on"
+    secrets: inherit
 
   # Release-time pin guard: the bundled core/bd/dolt pin must name an
   # ancestor commit with the content this ref embeds, and DOLT_VERSION must be
@@ -441,8 +406,7 @@ jobs:
     runs-on: blacksmith-2vcpu-ubuntu-2404
     needs:
       - ci_parity
-      - ubuntu_fast_tests
-      - ubuntu_make_check_docs
+      - bazel_parity
       - ubuntu_embedded_pins
       - ubuntu_acceptance_a
       - ubuntu_acceptance_b
@@ -468,7 +432,7 @@ jobs:
               "",
               "This workflow is the manual pre-RC gate. It calls the reusable CI workflow plus RC-only release jobs for the dispatched ref.",
               "",
-              "The `ci_parity` entry is the aggregate result of the shared CI workflow. Inspect the nested CI jobs in this run for per-check detail.",
+              "The `ci_parity` and `bazel_parity` entries are the aggregate results of the shared CI and Bazel workflows. Inspect their nested jobs in this run for per-check detail.",
               "",
               "Jobs that show `skipped` were intentionally gated off by the same conditional logic used in CI.",
               "",

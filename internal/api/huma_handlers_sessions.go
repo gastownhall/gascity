@@ -8,6 +8,7 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -49,20 +50,38 @@ func humaSessionManagerError(err error) error {
 		return apierr.InvalidRequest.Msg("invalid: " + err.Error())
 	case errors.Is(err, session.ErrInteractionUnsupported):
 		return apierr.NotImplemented.Msg("unsupported: " + err.Error())
+	case errors.Is(err, session.ErrTurnInterruptUnsupported):
+		return apierr.NotImplemented.Msg(turnInterruptUnsupportedCode + ": " + err.Error())
 	case errors.Is(err, session.ErrPendingInteraction):
 		return apierr.SessionConflict.Msg("pending_interaction: " + err.Error())
 	case errors.Is(err, session.ErrNoPendingInteraction):
 		return apierr.SessionConflict.Msg("no_pending: " + err.Error())
 	case errors.Is(err, session.ErrInteractionMismatch):
 		return apierr.SessionConflict.Msg("invalid_interaction: " + err.Error())
+	case errors.Is(err, session.ErrConversationRetained):
+		// Not retryable as is: the kept conversation's resume failed, and the
+		// message names the explicit reset that starts the session fresh.
+		return apierr.SessionConflict.Msg("conversation_retained: " + err.Error())
 	case errors.Is(err, session.ErrSessionClosed), errors.Is(err, session.ErrResumeRequired), errors.Is(err, session.ErrSessionKillPending):
 		return apierr.SessionConflict.Msg("conflict: " + err.Error())
-	case errors.Is(err, session.ErrSessionActive):
+	case errors.Is(err, session.ErrSessionActive), errors.Is(err, session.ErrSessionInactive):
 		return apierr.SessionConflict.Msg("conflict: " + err.Error())
+	case errors.Is(err, session.ErrSessionStarting):
+		// Retryable: another holder (usually the controller) has the runtime lease.
+		return apierr.SessionConflict.Msg("session_starting: " + err.Error())
+	case errors.Is(err, session.ErrSessionStopping):
+		// Retryable: the controller is stopping the runtime (drain-ack).
+		return apierr.SessionConflict.Msg("session_stopping: " + err.Error())
 	case errors.Is(err, session.ErrNotSession):
 		return apierr.InvalidRequest.Msg("invalid: " + err.Error())
 	case errors.Is(err, session.ErrIllegalTransition):
 		return apierr.SessionConflict.Msg("illegal_transition: " + err.Error())
+	case errors.Is(err, runtime.ErrRuntimeUnavailable):
+		// Retryable: the runtime could not be observed, so nothing was done.
+		return apierr.ServiceUnavailable.Msg("runtime_unavailable: " + err.Error())
+	case errors.Is(err, runtime.ErrNudgeRejected):
+		// The runtime refused the turn in its current state: nothing was delivered.
+		return apierr.SessionConflict.Msg("nudge_rejected: " + err.Error())
 	default:
 		return humaStoreError(err)
 	}

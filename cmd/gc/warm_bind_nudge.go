@@ -12,6 +12,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -74,7 +75,7 @@ type warmClaimTriggerResolver func(triggerID string) (beads.Bead, error)
 // that once per tick rather than once per pool slot: a refused city or a dark
 // binding suppresses the nudge for every slot at once, so a per-session line would
 // be a fleet-sized burst of a single fact. A nil faults writer discards.
-func buildWarmClaimTriggerProbe(resolve warmClaimTriggerResolver, faults io.Writer) warmClaimTriggerProbe {
+func buildWarmClaimTriggerProbe(cfg *config.City, resolve warmClaimTriggerResolver, faults io.Writer) warmClaimTriggerProbe {
 	var reported sync.Once // the probe runs from async start goroutines too
 	return func(session beads.Bead) bool {
 		if resolve == nil {
@@ -93,7 +94,7 @@ func buildWarmClaimTriggerProbe(resolve warmClaimTriggerResolver, faults io.Writ
 			}
 			return false
 		}
-		return isUnclaimedTrigger(wb, strings.TrimSpace(session.Metadata["session_name"]))
+		return isUnclaimedTrigger(cfg, wb)
 	}
 }
 

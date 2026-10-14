@@ -74,6 +74,9 @@ type recorderInstruments struct {
 	// HTTP API request instrumentation
 	httpRequestTotal    metric.Int64Counter
 	httpRequestDuration metric.Float64Histogram
+
+	// Operation journal recording (O0 shadow ops)
+	opsRecordTotal metric.Int64Counter
 }
 
 var (
@@ -178,6 +181,11 @@ func initInstruments() {
 		inst.httpRequestDuration, _ = m.Float64Histogram("gc.http.duration_ms",
 			metric.WithDescription("HTTP API request latency in milliseconds"),
 			metric.WithUnit("ms"),
+		)
+
+		// Operation journal recording
+		inst.opsRecordTotal, _ = m.Int64Counter("gc.ops.record.total",
+			metric.WithDescription("Total operation-journal recording steps by kind, surface, stage and result"),
 		)
 	})
 }
@@ -684,5 +692,28 @@ func RecordDrainTransition(ctx context.Context, sessionName, reason, transition 
 		attribute.String("session", sessionName),
 		attribute.String("reason", reason),
 		attribute.String("transition", transition),
+	)
+}
+
+// RecordOpRecord counts one step of recording an operation-journal op
+// (gc.ops.record.total). kind is the op kind; surface is api, cli or
+// controller; stage is admit, close, adopt or sweep; result is recorded,
+// unrecorded, replayed, adopted, busy, key_reuse, refused, closed, left_open,
+// failed or late. unrecordedReason says why a request ran unrecorded or, in
+// require mode, was refused (store_unavailable, type_unregistered,
+// no_namespace, payload_too_large, invalid_key, invalid_request,
+// unmaterialized_target, no_generation, propose_error); it is empty for every
+// other result. Every value is a closed token, so the label set stays
+// bounded; no op id or key is ever a label.
+func RecordOpRecord(ctx context.Context, kind, surface, stage, result, unrecordedReason string) {
+	initInstruments()
+	inst.opsRecordTotal.Add(ctx, 1,
+		metric.WithAttributes(
+			attribute.String("kind", kind),
+			attribute.String("surface", surface),
+			attribute.String("stage", stage),
+			attribute.String("result", result),
+			attribute.String("unrecorded_reason", unrecordedReason),
+		),
 	)
 }
