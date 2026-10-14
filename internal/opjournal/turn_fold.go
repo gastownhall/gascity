@@ -375,15 +375,19 @@ func (f *folder) end(e ObservedTurnEnd) {
 	f.setEnded(e.ID, reason)
 }
 
-// endMissing ends the running turn that is neither current nor in Recent.
+// endMissing ends the running turn that is neither current nor in Recent. A
+// turn whose end is journaled already (one resumed after a false idle) moves
+// the cells only.
 func (f *folder) endMissing(turn string) {
 	reason := TurnEndUnobserved
 	if f.obs.SessionGone {
 		reason = TurnEndSessionGone
 	}
-	fact := f.fact(FactTurnEnded, turn, f.obs.ObservedAt, FactBasisObserved)
-	fact.Reason = string(reason)
-	f.facts = append(f.facts, fact)
+	if turn != f.journaled {
+		fact := f.fact(FactTurnEnded, turn, f.obs.ObservedAt, FactBasisObserved)
+		fact.Reason = string(reason)
+		f.facts = append(f.facts, fact)
+	}
 	f.setEnded(turn, reason)
 }
 

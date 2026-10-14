@@ -367,6 +367,37 @@ func TestFoldTurnTable(t *testing.T) {
 			write: true,
 		},
 		{
+			name: "the resumed turn ends with the session gone, absent from Recent: the cells follow and no second turn.ended",
+			prev: TurnCells{
+				Generation: 3, Caps: foldCaps, ID: "U", State: TurnStateRunning, At: ts(30),
+				LastID: "U", LastEnd: TurnEndEnded, LastAt: ts(20), Seen: "T1", ObservedAt: ts(30),
+			},
+			obs: func() TurnObservation {
+				o := obsAt(3, "", time.Time{}, ObservedTurnEnd{ID: "T1", StartedAt: ts(2), EndedAt: ts(4), Status: TurnSourceCompleted})
+				o.SessionGone = true
+				return o
+			}(),
+			next: TurnCells{
+				Generation: 3, Caps: foldCaps, State: TurnStateEnded, At: ts(100),
+				LastID: "U", LastEnd: TurnEndSessionGone, LastAt: ts(100), Seen: "T1", ObservedAt: ts(100),
+			},
+			write: true,
+		},
+		{
+			name: "the resumed turn ages out of Recent while V runs: the cells follow, V starts, no second turn.ended",
+			prev: TurnCells{
+				Generation: 3, Caps: foldCaps, ID: "U", State: TurnStateRunning, At: ts(30),
+				LastID: "U", LastEnd: TurnEndEnded, LastAt: ts(20), Seen: "T1", ObservedAt: ts(30),
+			},
+			obs: obsAt(3, "V", ts(50)),
+			next: TurnCells{
+				Generation: 3, Caps: foldCaps, ID: "V", State: TurnStateRunning, At: ts(100),
+				LastID: "U", LastEnd: TurnEndUnobserved, LastAt: ts(100), Seen: "T1", ObservedAt: ts(100),
+			},
+			facts: []Fact{started(3, "V", ts(50))},
+			write: true,
+		},
+		{
 			name: "a turn ended unobserved that the source later records: no second fact",
 			prev: TurnCells{
 				Generation: 3, Caps: foldCaps, State: TurnStateEnded, At: ts(30),

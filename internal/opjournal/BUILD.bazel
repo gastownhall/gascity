@@ -41,6 +41,7 @@ go_test(
         "runtime_row_test.go",
         "store_test.go",
         "testenv_import_test.go",
+        "turn_fold_model_test.go",
         "turn_fold_test.go",
     ],
     # TestTurnFoldIsStdlibOnly parses the fold's source.
