@@ -1389,13 +1389,20 @@ func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, sess
 // shadow already delivered or failed this attempt. The id embeds the delivery
 // attempt, so a resolved shadow means a delivery acked after this tick's wait
 // prepare; the next prepare finalizes the wait from it. A superseded shadow did
-// not resolve the attempt and is re-queued.
+// not resolve the attempt and is re-queued. A capped terminal lookup is also
+// unresolved: FindIncludingTerminal returns the newest terminal shadow before
+// it checks the cap, so the cap means none of the newest closed shadows
+// delivered or failed the attempt (for example, enqueues rolled back by
+// RollbackEnqueue), and the reminder is re-queued.
 func waitNudgeAttemptQueuedOrResolved(front *nudgequeue.Store, nudgeID string) (bool, error) {
 	_, open, err := front.Find(nudgeID)
 	if err != nil || open {
 		return open, err
 	}
 	shadow, ok, err := front.FindIncludingTerminal(nudgeID)
+	if beads.IsLookupLimitError(err) {
+		return false, nil
+	}
 	if err != nil || !ok {
 		return false, err
 	}

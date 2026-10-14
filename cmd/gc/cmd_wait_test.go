@@ -25,6 +25,7 @@ import (
 	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/overlay"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/tmux"
@@ -2112,6 +2113,101 @@ func TestDispatchReadyWaitNudges_SkipsAttemptResolvedByTerminalShadow(t *testing
 				t.Fatalf("nudge shadows for %s = %d, want %d", nudgeID, got, tc.wantShadows)
 			}
 		})
+	}
+}
+
+// TestDispatchReadyWaitNudges_RequeuesWhenRolledBackShadowsCapLookup covers a
+// ready wait whose current attempt has more than NudgeLookupLimit closed
+// shadows with no delivery outcome, as RollbackEnqueue leaves after repeated
+// failed enqueue transactions. The capped terminal lookup proves no recent
+// shadow delivered or failed the attempt, so dispatch must queue the reminder
+// again rather than skip, and the wait must close once that reminder is acked.
+func TestDispatchReadyWaitNudges_RequeuesWhenRolledBackShadowsCapLookup(t *testing.T) {
+	setWaitTestFileBeads(t)
+	dir := t.TempDir()
+	store := beads.NewMemStore()
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":       "worker",
+			"agent_name":         "worker",
+			"continuation_epoch": "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	waitBead, err := store.Create(beads.Bead{
+		Type:   waitBeadType,
+		Labels: []string{waitBeadLabel, "session:" + sessionBead.ID},
+		Metadata: map[string]string{
+			"session_id":       sessionBead.ID,
+			"session_name":     "worker",
+			"kind":             "deps",
+			"state":            waitStateReady,
+			"dep_ids":          "gc-1",
+			"dep_mode":         "all",
+			"registered_epoch": "1",
+			"delivery_attempt": "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create wait bead: %v", err)
+	}
+	nudgeID := waitNudgeID(sessionpkg.WaitInfoFromBead(waitBead))
+	front := nudgeFrontDoor(beads.NudgesStore{Store: store})
+	for i := 0; i < nudgequeue.NudgeLookupLimit+1; i++ {
+		shadow, err := store.Create(beads.Bead{
+			Type:   nudgeBeadType,
+			Title:  "nudge:" + nudgeID,
+			Labels: []string{nudgeBeadLabel, "nudge:" + nudgeID},
+			Metadata: map[string]string{
+				"nudge_id":           nudgeID,
+				"state":              "queued",
+				"continuation_epoch": "1",
+			},
+		})
+		if err != nil {
+			t.Fatalf("create shadow %d: %v", i, err)
+		}
+		if err := front.RollbackEnqueue(shadow.ID); err != nil {
+			t.Fatalf("rollback shadow %d: %v", i, err)
+		}
+	}
+	if _, _, err := front.FindIncludingTerminal(nudgeID); !beads.IsLookupLimitError(err) {
+		t.Fatalf("FindIncludingTerminal(%s) err = %v, want lookup limit error", nudgeID, err)
+	}
+
+	if err := dispatchReadyWaitNudges(dir, store, runtime.NewFake(), time.Now().UTC()); err != nil {
+		t.Fatalf("dispatchReadyWaitNudges: %v", err)
+	}
+	open, err := store.List(beads.ListQuery{Label: "nudge:" + nudgeID})
+	if err != nil {
+		t.Fatalf("list open shadows: %v", err)
+	}
+	if len(open) != 1 {
+		t.Fatalf("open shadows for %s after dispatch = %d, want 1", nudgeID, len(open))
+	}
+
+	if err := store.SetMetadataBatch(open[0].ID, map[string]string{
+		"state":           "injected",
+		"commit_boundary": "provider-nudge-return",
+	}); err != nil {
+		t.Fatalf("ack shadow injected: %v", err)
+	}
+	if err := store.Close(open[0].ID); err != nil {
+		t.Fatalf("close acked shadow: %v", err)
+	}
+	if _, err := prepareWaitWakeState(store, time.Now().UTC()); err != nil {
+		t.Fatalf("prepareWaitWakeState: %v", err)
+	}
+	updated, err := store.Get(waitBead.ID)
+	if err != nil {
+		t.Fatalf("get wait: %v", err)
+	}
+	if got := updated.Metadata["state"]; got != waitStateClosed {
+		t.Fatalf("wait state = %q, want %q", got, waitStateClosed)
 	}
 }
 
