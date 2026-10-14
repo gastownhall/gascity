@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
@@ -92,20 +93,56 @@ func (r *Recorder) count(kind opjournal.Kind, stage, result, reason string) {
 	telemetry.RecordOpRecord(context.Background(), string(kind), surface(r.Executor), stage, result, reason)
 }
 
-// degrade tells the Degraded hook about a store failure and logs it.
+// DegradeLogInterval is how often a recorder logs one degrade line per
+// (surface, stage, reason): a store outage logs once per interval, not once
+// per request (DES-O0API D13). The Degraded hook still hears every degrade.
+const DegradeLogInterval = 10 * time.Minute
+
+type degradeLogKey struct {
+	surface, stage, reason string
+}
+
+// degrade tells the Degraded hook about a store failure and logs it, at most
+// once per DegradeLogInterval per (surface, stage, reason).
 func (r *Recorder) degrade(kind opjournal.Kind, stage, reason string, err error) {
 	d := Degrade{Mode: r.Mode, Surface: surface(r.Executor), Kind: kind, Stage: stage, Reason: reason, Err: err}
-	slog.Warn("op journal: recording degraded", "mode", d.Mode, "surface", d.Surface, "kind", d.Kind,
-		"stage", d.Stage, "reason", d.Reason, "err", err)
+	if r.shouldLogDegrade(degradeLogKey{surface: d.Surface, stage: stage, reason: reason}) {
+		r.logger().Warn("op journal: recording degraded", "mode", d.Mode, "surface", d.Surface, "kind", d.Kind,
+			"stage", d.Stage, "reason", d.Reason, "err", err)
+	}
 	if r.Degraded != nil {
 		r.Degraded(d)
 	}
 }
 
+// shouldLogDegrade reports whether key's degrade line is due, and if so
+// latches it for DegradeLogInterval.
+func (r *Recorder) shouldLogDegrade(key degradeLogKey) bool {
+	now := r.Clock.Now()
+	r.logMu.Lock()
+	defer r.logMu.Unlock()
+	if last, ok := r.logged[key]; ok && now.Before(last.Add(DegradeLogInterval)) {
+		return false
+	}
+	if r.logged == nil {
+		r.logged = map[degradeLogKey]time.Time{}
+	}
+	r.logged[key] = now
+	return true
+}
+
+// logger is the recorder's logger.
+func (r *Recorder) logger() *slog.Logger {
+	if r.Logger != nil {
+		return r.Logger
+	}
+	return slog.Default()
+}
+
 // late logs and counts a result that arrived after the op was closed by
 // someone else.
 func (r *Recorder) late(op opjournal.Op, outcome opjournal.Outcome, err error) {
-	slog.Warn("op journal: late result for a closed op", "op", op.ID, "surface", surface(r.Executor),
+	r.logger().Warn("op journal: late result for a closed op", "op", op.ID, "surface", surface(r.Executor),
 		"arm", outcome.Arm, "reason", outcome.Reason, "err", err)
 	r.count(op.Kind, StageClose, ResultLate, "")
 }

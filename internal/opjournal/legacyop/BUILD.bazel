@@ -28,6 +28,7 @@ go_test(
         "inflight_test.go",
         "legacyop_test.go",
         "sweep_test.go",
+        "telemetry_test.go",
         "testenv_import_test.go",
     ],
     # TestImportBoundary parses the package's own sources.

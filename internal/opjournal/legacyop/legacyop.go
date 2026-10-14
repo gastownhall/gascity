@@ -5,7 +5,9 @@ import (
 	"encoding/base32"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -146,7 +148,9 @@ type Admission struct {
 // ExecutorAPI or ExecutorCLI; Admit refuses any other. Open opens
 // the op store lazily; the caller caches it. Inflight is the API's in-flight
 // registry; nil (the CLI) means never adopt. Degraded, when set, is told of
-// every store failure the recorder degrades past.
+// every store failure the recorder degrades past. Logger receives the
+// recorder's rate-limited degrade lines and late-result lines; nil is
+// slog.Default().
 type Recorder struct {
 	Mode     gate.Mode
 	Executor opjournal.ExecutorKind
@@ -154,9 +158,13 @@ type Recorder struct {
 	Inflight *Inflight
 	Clock    clock.Clock
 	Degraded func(Degrade)
+	Logger   *slog.Logger
 
 	// sleep waits between close retries; nil is time.Sleep.
 	sleep func(time.Duration)
+
+	logMu  sync.Mutex
+	logged map[degradeLogKey]time.Time
 }
 
 // Admit decides how to run req (DES-O0API §5.1). It returns an error only for
