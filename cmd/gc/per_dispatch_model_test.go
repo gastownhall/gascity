@@ -425,7 +425,7 @@ func TestBuildPreparedStart_ClaimedWorkWithoutOptionsSuppressesTriggerBead(t *te
 		return reachableClaimedWorkProbe(testSeatWork("", declaredRigsConfig("frontend"), sessionStore, map[string]beads.Store{"frontend": rigStore}))
 	}
 	failing := func(beads.Store, beads.Store) claimedWorkProbe {
-		return func(sessionpkg.Info) (bool, error) { return false, errors.New("rig store unavailable") }
+		return func(sessionpkg.Info) ([]beads.Bead, error) { return nil, errors.New("rig store unavailable") }
 	}
 	for _, tc := range []struct {
 		name         string
@@ -482,7 +482,7 @@ func TestBuildPreparedStart_TriggerClaimedBySessionKeepsItsPins(t *testing.T) {
 		t.Fatalf("claim trigger: %v", err)
 	}
 	probe := reachableClaimedWorkProbe(testSeatWork("", declaredRigsConfig("frontend"), sessionStore, map[string]beads.Store{"frontend": rigStore}))
-	if claimed, err := probe(candidate.info); err != nil || !claimed {
+	if claimed, err := probe(candidate.info); err != nil || len(claimed) == 0 {
 		t.Fatalf("claimed-work probe = (%v, %v), want the rig-resident claim visible", claimed, err)
 	}
 
@@ -493,6 +493,45 @@ func TestBuildPreparedStart_TriggerClaimedBySessionKeepsItsPins(t *testing.T) {
 	}
 	if !strings.Contains(prepared.cfg.Command, "--effort low") || strings.Contains(prepared.cfg.Command, "--effort high") {
 		t.Fatalf("prepared command = %q, want the claimed rig trigger's --effort low", prepared.cfg.Command)
+	}
+}
+
+// TestBuildPreparedStart_RigStoreClaimSuppliesItsPins pins that a claim held
+// outside the session store is a source of opt_* pins, not only a veto on the
+// trigger's: a rig-routed work bead lives in its rig store, so a seat that
+// relaunches holding it (with or without a trigger bead) must launch with that
+// bead's pins instead of the provider defaults.
+func TestBuildPreparedStart_RigStoreClaimSuppliesItsPins(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		withTrigger bool
+	}{
+		{name: "no trigger bead"},
+		{name: "unclaimed trigger bead", withTrigger: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			rigStore := beads.NewMemStore()
+			var candidate startCandidate
+			if tc.withTrigger {
+				candidate, _ = newTriggerOptionSessionCandidate(t, store, map[string]string{"effort": "low"}, nil, "")
+			} else {
+				candidate = newTriggerSessionCandidate(t, store, "", nil, "")
+			}
+			assignInProgressWork(t, rigStore, "worker", map[string]string{"effort": "high"})
+			probe := reachableClaimedWorkProbe(testSeatWork("", declaredRigsConfig("frontend"), store, map[string]beads.Store{"frontend": rigStore}))
+
+			prepared, _, err := buildPreparedStartWithWorkDirResolver(candidate, "", &config.City{}, store, nil, dispatchOptionSources{claimedWork: probe})
+			if err != nil {
+				t.Fatalf("buildPreparedStartWithWorkDirResolver: %v", err)
+			}
+			if !strings.Contains(prepared.cfg.Command, "--effort high") {
+				t.Fatalf("prepared command = %q, want the rig-store claim's --effort high", prepared.cfg.Command)
+			}
+			if strings.Contains(prepared.cfg.Command, "--effort low") {
+				t.Fatalf("prepared command = %q, trigger pins must not beat a claimed bead", prepared.cfg.Command)
+			}
+		})
 	}
 }
 
