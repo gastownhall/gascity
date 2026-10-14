@@ -14,13 +14,19 @@
 // A conversation is the durable entity, a session (generation) one execution of
 // it, a context epoch its transcript lineage. L1 rows are beads of type "op"
 // stored with the conversation row (coordclass routes them to the sessions
-// class): op rows, one per request (labels gc:op, gc:op-conv:<conversation>),
-// and fact rows, one per occurrence that is never coalesced (gc:fact,
-// gc:fact-conv:<conversation>), closed on create. Rows are no-history and never
-// ephemeral. Type "op" is ready-excluded, rows carry no gc.routed_to, and an
-// op's assignee is only ever a lane lease <lane>@<conversation>#<gen>#<nonce>@<deadline>,
-// so ops never reach Ready or work queries. A lease is at most 255 runes, bd's
-// assignee limit. Fields live in gc.op.* metadata. Type "op" is
+// class): op rows, one per request (labels gc:op, gc:op-conv:<conversation>);
+// fact rows, one per occurrence that is never coalesced (gc:fact,
+// gc:fact-conv:<conversation>), written closed or, on a store that creates
+// rows open, closed right after the create (RecordFact); and one runtime row
+// per conversation (gc:rt, gc:rt-conv:<conversation>) at the pinned id
+// RuntimeRowID, which holds the lane cells (gen, epoch, seq, lease) and the
+// runtime and turn observations in gc.rt.* metadata; lanes and observers
+// update it in place under revision guards (RuntimeRowPatch builds the
+// update). Rows are no-history and never ephemeral. Type "op" is
+// ready-excluded, rows carry no gc.routed_to, and an op's assignee is only ever
+// a lane lease <lane>@<conversation>#<gen>#<nonce>@<deadline>, so ops never
+// reach Ready or work queries. A lease is at most 255 runes, bd's assignee
+// limit. Fields live in gc.op.* metadata. Type "op" is
 // coordclass.ControllerOwned (decided in OJ-2a, before any producer writes a
 // row): the generic bead API never writes an op or fact row; only this
 // package's store, through the producers' and lanes' verbs, does.
@@ -110,8 +116,9 @@
 // skipped{conversation_closed} except settling ops and the close op. Facts:
 // session.started/ended, turn.started/ended, interaction.raised/resolved,
 // create-if-absent by occurrence; planner level changes stay cells and reach L1
-// as session.ended{reason}. This package never deletes an op or fact row; its
-// one delete is Propose removing a row a store minted under its own id instead
-// of the pinned one (ErrPinnedIDNotHonored). Retention, archive and permanent
-// tombstones are later milestones (the design's OJ-29, OJ-30 and BD-6).
+// as session.ended{reason}. This package never deletes an op, fact or runtime
+// row; its two deletes, in Propose and RecordFact, remove a row a store minted
+// under its own id instead of the pinned one (ErrPinnedIDNotHonored).
+// Retention, archive and permanent tombstones are later milestones (the
+// design's OJ-29, OJ-30 and BD-6).
 package opjournal

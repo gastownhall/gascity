@@ -1974,6 +1974,15 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			// carrying its old alias and runtime name.
 			continue
 		}
+		if !exists && tp.NamedCanonicalOnly {
+			// The canonical bead that made this on_demand session desired was
+			// in the tick's snapshot, but the fresh read above found it gone:
+			// an operator close won the race. Without work it is no longer
+			// desired, so neither reopen nor mint a row, which would sit open
+			// and asleep answering to the name until someone closed it again
+			// (mc-58gr9). The next tick no longer materializes it.
+			continue
+		}
 		state := syncSessionCachedState(sn, b, exists, sp)
 		if !exists && isConfiguredNamed {
 			extraMeta := startupKickoffReopenMetadata(tp.BoundStepID, now)

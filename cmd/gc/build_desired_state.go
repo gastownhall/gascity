@@ -831,6 +831,7 @@ func buildDesiredStateWithSessionBeadsAt(
 			continue
 		}
 		applyNamedTemplateOverrides(&tp, spec, identity, named.workBeadID[identity])
+		tp.NamedCanonicalOnly = spec.Mode != "always" && !named.workReady[identity]
 		// When a canonical bead exists, use ITS session_name as the
 		// desiredState key so syncSessionBeads finds it in bySessionName
 		// and takes the UPDATE path. Without this, resolveSessionName

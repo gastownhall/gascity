@@ -1748,6 +1748,7 @@ go_test(
         "session_beads_current_claim_clear_test.go",
         "session_beads_handoff_orphan_test.go",
         "session_beads_mail_release_test.go",
+        "session_beads_named_close_race_test.go",
         "session_beads_provider_chat_test.go",
         "session_beads_retire_rows_canonical_test.go",
         "session_beads_test.go",
