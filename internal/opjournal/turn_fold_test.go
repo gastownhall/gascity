@@ -443,7 +443,10 @@ func TestFoldTurnReasonMapping(t *testing.T) {
 		{"inferred, gc interrupting another turn", ObservedTurnEnd{Inferred: true}, false, other, TurnEndEnded, FactBasisObserved, nil},
 		{"inferred", ObservedTurnEnd{Inferred: true}, false, InterruptRef{}, TurnEndEnded, FactBasisObserved, nil},
 		{"a status this build does not know", ObservedTurnEnd{Status: "paused"}, false, InterruptRef{}, TurnEndEnded, FactBasisRuntime, nil},
-		{"an interrupt with no op id", ObservedTurnEnd{Status: TurnSourceCancelled}, false, InterruptRef{Turn: "T"}, TurnEndInterrupted, FactBasisRuntime, nil},
+		// interrupted names the op that caused it (X11 D5): a ref with no op
+		// is no gc interrupt.
+		{"canceled, a ref with no op id", ObservedTurnEnd{Status: TurnSourceCancelled}, false, InterruptRef{Turn: "T"}, TurnEndInterruptedLocally, FactBasisRuntime, nil},
+		{"inferred, a ref with no op id", ObservedTurnEnd{Inferred: true}, false, InterruptRef{Turn: "T"}, TurnEndEnded, FactBasisObserved, nil},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

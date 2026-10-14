@@ -196,14 +196,15 @@ type TurnObservation struct {
 }
 
 // InterruptRef names the interrupt gc is running on a turn, so the fold
-// credits that turn's end to the op. The zero value is no interrupt.
+// credits that turn's end to the op. A ref without both an op and a turn is
+// no interrupt: an interrupted end always names its op (X11 D5).
 type InterruptRef struct {
 	Op   string
 	Turn string
 }
 
-// names reports whether r is an interrupt of turn.
-func (r InterruptRef) names(turn string) bool { return r.Turn != "" && r.Turn == turn }
+// names reports whether r is an interrupt op on turn.
+func (r InterruptRef) names(turn string) bool { return r.Op != "" && r.Turn != "" && r.Turn == turn }
 
 // FoldTurn folds one observation into the turn cells and returns the facts to
 // create (if absent) in the same batch. Unchanged state yields no write, and
@@ -363,7 +364,7 @@ func (f *folder) end(e ObservedTurnEnd) {
 	}
 	fact := f.fact(FactTurnEnded, e.ID, orTime(e.EndedAt, f.obs.ObservedAt), basis)
 	fact.Reason, fact.Detail = string(reason), stopDetail(e.StopReason)
-	if reason == TurnEndInterrupted && f.interrupting.Op != "" {
+	if reason == TurnEndInterrupted {
 		fact.CauseOps = []string{f.interrupting.Op}
 	}
 	f.facts = append(f.facts, fact)
