@@ -4,8 +4,9 @@ import "sync"
 
 // Inflight is the API's per-process registry of requests being admitted or
 // executed, keyed by op id. An entry is removed only by its own request
-// (Release by pointer identity, from Finish or the handler's panic recovery):
-// never by age or by size, so the set is bounded by concurrent requests and
+// (Release by pointer identity: from Finish, from the handler's panic
+// recovery, or by Admit or Finish themselves when they panic): never by age
+// or by size, so the set is bounded by concurrent requests and
 // no replay can see "open, not in flight" while the executor still runs.
 type Inflight struct {
 	mu sync.Mutex

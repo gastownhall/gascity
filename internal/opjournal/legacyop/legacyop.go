@@ -219,6 +219,14 @@ func (r *Recorder) Admit(req Request) (*Admission, error) {
 			r.Inflight.Release(preview.ID, entry)
 		}
 	}
+	// A panic from here until the entry passes to the returned Admission
+	// would leave no Admission to Finish: release the entry and re-panic.
+	defer func() {
+		if p := recover(); p != nil {
+			release()
+			panic(p)
+		}
+	}()
 	op, created, err := st.Propose(oreq)
 	switch {
 	case errors.Is(err, opjournal.ErrKeyReuse):
@@ -410,6 +418,14 @@ func (a *Admission) Finish(res Result) Finished {
 		r.count(a.Op.Kind, StageClose, ResultLeftOpen, "")
 		return Finished{}
 	}
+	// done is already set, so the handler's recovery cannot Finish again: a
+	// panic in the close releases the entry here and re-panics.
+	defer func() {
+		if p := recover(); p != nil {
+			a.release()
+			panic(p)
+		}
+	}()
 	st, err := r.Open()
 	if err == nil {
 		var op opjournal.Op

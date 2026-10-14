@@ -648,3 +648,81 @@ func TestDegradeReasonsAndUnrecorded(t *testing.T) {
 		t.Fatalf("Finish of an unrecorded request = %+v, opens %d", f, e.opens.Load())
 	}
 }
+
+// panicStore panics on Create or UpdateIfMatch when armed: a store bug.
+type panicStore struct {
+	*beads.MemStore
+	panicCreate, panicUpdate bool
+}
+
+func (s *panicStore) Create(b beads.Bead) (beads.Bead, error) {
+	if s.panicCreate {
+		panic("store bug in Create")
+	}
+	return s.MemStore.Create(b)
+}
+
+func (s *panicStore) UpdateIfMatch(id string, rev int64, opts beads.UpdateOpts) error {
+	if s.panicUpdate {
+		panic("store bug in UpdateIfMatch")
+	}
+	return s.MemStore.UpdateIfMatch(id, rev, opts)
+}
+
+func newPanicRecorder(t *testing.T) (*panicStore, *Recorder) {
+	t.Helper()
+	ps := &panicStore{MemStore: &beads.MemStore{IDPrefix: "gc", HonorExplicitIDs: true}}
+	clk := &clock.Fake{Time: t0}
+	st, err := opjournal.NewStore(beads.SessionStore{Store: ps}, clk, opjournal.WithIDPrefix("gc"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ps, &Recorder{
+		Mode: gate.Auto, Executor: ExecutorAPI, Open: func() (*opjournal.Store, error) { return st, nil },
+		Inflight: NewInflight(), Clock: clk, sleep: func(time.Duration) {},
+	}
+}
+
+// recovered runs f and reports whether it panicked.
+func recovered(f func()) (panicked bool) {
+	defer func() { panicked = recover() != nil }()
+	f()
+	return false
+}
+
+// A panic inside Admit after it reserved the id releases the entry and
+// propagates: the handler's recovery has no Admission to Finish.
+func TestAdmitPanicReleasesTheEntry(t *testing.T) {
+	ps, r := newPanicRecorder(t)
+	ps.panicCreate = true
+	if !recovered(func() { _, _ = r.Admit(msg("k1", "hello")) }) {
+		t.Fatal("Admit swallowed the store's panic")
+	}
+	if n := r.Inflight.Len(); n != 0 {
+		t.Fatalf("registry holds %d entries after a panic inside Admit", n)
+	}
+	ps.panicCreate = false
+	if adm, err := r.Admit(msg("k1", "hello")); err != nil || adm.Decision != Execute {
+		t.Fatalf("same-key retry = %+v, %v", adm, err)
+	}
+}
+
+// A panic inside Finish's close releases the entry and propagates; the
+// recovery's second Finish is a no-op.
+func TestFinishPanicReleasesTheEntry(t *testing.T) {
+	ps, r := newPanicRecorder(t)
+	adm, err := r.Admit(msg("k1", "hello"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ps.panicUpdate = true
+	if !recovered(func() { adm.Finish(Result{Outcome: succeeded(ViaLegacyDelivered)}) }) {
+		t.Fatal("Finish swallowed the store's panic")
+	}
+	if n := r.Inflight.Len(); n != 0 {
+		t.Fatalf("registry holds %d entries after a panic inside Finish", n)
+	}
+	if f := adm.Finish(Result{Outcome: failed(opjournal.ReasonOther)}); f.Closed || f.Late || f.Background != nil {
+		t.Fatalf("second Finish = %+v", f)
+	}
+}
