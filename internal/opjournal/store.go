@@ -514,7 +514,7 @@ func (s *Store) Close(id string, outcome Outcome, by string) (Op, error) {
 			return Op{}, false, err
 		}
 		if cur.Status == StatusClosed {
-			if cur.Outcome != outcome {
+			if !cur.Outcome.Equal(outcome) {
 				return Op{}, false, fmt.Errorf("%w: op %s closed %s{%s}", ErrAlreadyTerminal, id, cur.Outcome.Arm, cur.Outcome.Reason)
 			}
 			return cur, false, nil
@@ -547,6 +547,7 @@ func closed(cur Op, outcome Outcome, by string, clk clock.Clock) Op {
 	next.Status = StatusClosed
 	next.Outcome = outcome
 	next.Lease = Lease{}
+	next.RetryAt = time.Time{}
 	next.Transitions = appendTransition(cur.Transitions, Transition{Status: StatusClosed, At: utc(clk.Now()), By: by})
 	return next
 }
