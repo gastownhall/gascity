@@ -203,6 +203,16 @@ func TestAdmitMatrix(t *testing.T) {
 			e.fault.ambiguous = true
 			return msg("k1", "hello")
 		}, [2]want{{decision: Execute, recorded: true, adopted: true}, busy}, [2]want{{decision: Execute, recorded: true, adopted: true}, busy}},
+		{
+			// A minted 128-bit key names no other op: the open row Propose
+			// found after a failed create is this call's own committed row.
+			"ambiguous create with a minted key", func(_ *testing.T, e *env, _ *Recorder) Request {
+				e.fault.ambiguous = true
+				return msg("", "hello")
+			},
+			[2]want{execRec, execRec},
+			[2]want{execRec, execRec},
+		},
 		{"key reuse", func(t *testing.T, e *env, r *Recorder) Request {
 			e.seed(t, msg("k1", "first"), r.Executor)
 			return msg("k1", "second")

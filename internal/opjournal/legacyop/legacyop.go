@@ -167,7 +167,8 @@ type Recorder struct {
 	logged map[degradeLogKey]time.Time
 }
 
-// Admit decides how to run req (DES-O0API §5.1). It returns an error only for
+// Admit decides how to run req (DES-O0API §5.1, refined so a minted key's
+// ambiguous create executes as created; see ownAmbiguousCreate). It returns an error only for
 // a refusal the caller maps to its wire: *BusyError (ErrBusy) and
 // opjournal.ErrKeyReuse in every mode; ErrUnavailable,
 // opjournal.ErrPayloadTooLarge and opjournal.ErrInvalidRequest in require
@@ -244,7 +245,7 @@ func (r *Recorder) Admit(req Request) (*Admission, error) {
 	case err != nil:
 		release()
 		return r.cannotRecord(req.Kind, key, minted, StagePropose, proposeReason(err), err)
-	case created:
+	case created, ownAmbiguousCreate(minted, op, r.Executor):
 		r.count(req.Kind, StageAdmit, ResultRecorded, "")
 		return r.execute(key, minted, op, entry, false), nil
 	case op.Status == opjournal.StatusClosed:
@@ -259,6 +260,16 @@ func (r *Recorder) Admit(req Request) (*Admission, error) {
 		r.count(req.Kind, StageAdmit, ResultBusy, "")
 		return nil, &BusyError{ID: op.ID, Since: op.CreatedAt}
 	}
+}
+
+// ownAmbiguousCreate reports whether op, found by Propose without creating
+// it, is this call's own row from a create that committed but answered an
+// error: a key minted in this call (128 random bits) names no other op, so an
+// open op at attempt 0 under this recorder's executor can only be that row.
+// Admit then executes it as created, rather than answering busy (the CLI) or
+// adopting its own op (the API).
+func ownAmbiguousCreate(minted bool, op opjournal.Op, executor opjournal.ExecutorKind) bool {
+	return minted && op.Status != opjournal.StatusClosed && op.Attempt == 0 && op.Executor == executor
 }
 
 // recording reports whether the mode records at all.
