@@ -98,9 +98,9 @@ func handleFleetBreakerSocketCmd(conn net.Conn, cityPath, command string) {
 	case fleetBreakerStatusCommand:
 		writeJSONLine(conn, fleetBreakerReplyFor(guard))
 	case fleetBreakerResetCommand:
+		wasOpen := guard.Reset()
 		reply := fleetBreakerReplyFor(guard)
-		reply.WasOpen = guard.Reset()
-		reply.State = resilience.StateClosed.String()
+		reply.WasOpen = wasOpen
 		writeJSONLine(conn, reply)
 	default:
 		writeJSONLine(conn, fleetBreakerReply{
@@ -113,8 +113,28 @@ func handleFleetBreakerSocketCmd(conn net.Conn, cityPath, command string) {
 // sendFleetBreakerCommand asks the city's controller to run a fleet breaker
 // command.
 func sendFleetBreakerCommand(cityPath, command string) (fleetBreakerReply, error) {
-	var reply fleetBreakerReply
 	resp, err := sendControllerCommand(cityPath, fleetBreakerCommandPrefix+command)
+	return decodeFleetBreakerReply(command, resp, err)
+}
+
+// Bounds on the courtesy breaker query gc status and gc doctor make: a
+// controller that does not answer promptly must not stall them.
+const (
+	fleetBreakerQueryDial  = 500 * time.Millisecond
+	fleetBreakerQueryWrite = 500 * time.Millisecond
+	fleetBreakerQueryRead  = 2 * time.Second
+)
+
+// queryFleetBreakerStatus is the status command with short timeouts, for the
+// callers that only decorate their own output with it.
+func queryFleetBreakerStatus(cityPath string) (fleetBreakerReply, error) {
+	resp, err := sendControllerCommandWithTimeouts(cityPath, fleetBreakerCommandPrefix+fleetBreakerStatusCommand,
+		fleetBreakerQueryDial, fleetBreakerQueryWrite, fleetBreakerQueryRead)
+	return decodeFleetBreakerReply(fleetBreakerStatusCommand, resp, err)
+}
+
+func decodeFleetBreakerReply(command string, resp []byte, err error) (fleetBreakerReply, error) {
+	var reply fleetBreakerReply
 	if err != nil {
 		return reply, err
 	}
@@ -261,7 +281,7 @@ func cmdBreakerReset(stdout, stderr io.Writer) int {
 // doctor. It is empty when the breaker is closed or disabled, or when the
 // controller cannot be asked; the second result is the query error.
 func fleetBreakerLine(cityPath string) (string, error) {
-	reply, err := sendFleetBreakerCommand(cityPath, fleetBreakerStatusCommand)
+	reply, err := queryFleetBreakerStatus(cityPath)
 	if err != nil {
 		return "", err
 	}
@@ -288,9 +308,7 @@ type fleetBreakerDoctorCheck struct {
 }
 
 func newFleetBreakerDoctorCheck(cfg *config.City) *fleetBreakerDoctorCheck {
-	return &fleetBreakerDoctorCheck{cfg: cfg, query: func(cityPath string) (fleetBreakerReply, error) {
-		return sendFleetBreakerCommand(cityPath, fleetBreakerStatusCommand)
-	}}
+	return &fleetBreakerDoctorCheck{cfg: cfg, query: queryFleetBreakerStatus}
 }
 
 // Name returns the check's identifier.

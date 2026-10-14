@@ -218,6 +218,7 @@ type fleetFailure struct {
 type fleetStart struct {
 	template string
 	probe    bool
+	at       time.Time
 }
 
 // fleetStartGuard is the fleet-wide breaker over automatic session starts. It
@@ -380,9 +381,17 @@ func (g *fleetStartGuard) resolve(t *fleetTicket, o fleetOutcome) {
 // beginConfirm starts watching a started session for stabilityThreshold.
 func (g *fleetStartGuard) beginConfirm(sessionID, template string, probe bool) {
 	g.confirm.Begin(sessionID)
+	now := g.now()
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	g.starts[sessionID] = fleetStart{template: template, probe: probe}
+	// A start whose session is never observed again (closed, renamed) would
+	// stay here for the life of the controller; drop it once the tracker has.
+	for id, st := range g.starts {
+		if now.Sub(st.at) > fleetConfirmForgetFactor*stabilityThreshold {
+			delete(g.starts, id)
+		}
+	}
+	g.starts[sessionID] = fleetStart{template: template, probe: probe, at: now}
 }
 
 // noteFailure records an automatic-start failure and trips the breaker when
@@ -462,6 +471,13 @@ func (g *fleetStartGuard) ObserveLiveness(sessionID string, alive bool) {
 		return
 	}
 	verdict := g.confirm.Observe(sessionID, alive)
+	if verdict == confirmUntracked {
+		// The tracker aged the start out without a verdict.
+		g.mu.Lock()
+		delete(g.starts, sessionID)
+		g.mu.Unlock()
+		return
+	}
 	if verdict != confirmAlive && verdict != confirmDied {
 		return
 	}
@@ -485,8 +501,11 @@ func (g *fleetStartGuard) ObserveLiveness(sessionID string, alive bool) {
 	}
 }
 
-// ForgetSession drops any start being confirmed for sessionID, for a session
-// the reconciler stopped or closed on purpose.
+// ForgetSession drops any start being confirmed for sessionID. The reconciler
+// calls it for a session it is stopping, draining or closing, or that has left
+// the desired set: its runtime ending is then the reconciler's own doing, not a
+// start that failed. A session whose runtime ends with no such cause inside
+// stabilityThreshold is a failed start and is not forgotten.
 func (g *fleetStartGuard) ForgetSession(sessionID string) {
 	if g == nil {
 		return

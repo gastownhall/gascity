@@ -1959,8 +1959,10 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	capacityGuard := reconcileOpts.capacityGuard
 	fleetGuard := reconcileOpts.fleetGuard
 	// fleetTracked counts the desired sessions this pass checked for
-	// liveness: the sessions the fleet breaker's state-cache trigger expects
-	// the runtime to be tracking.
+	// liveness that are persisted as running or starting: the sessions the
+	// fleet breaker's state-cache trigger expects the runtime to be tracking.
+	// Asleep and on-demand sessions are not expected up, so a stale cache
+	// cannot be wrong about them.
 	fleetTracked := 0
 	effectiveStartOptions := startOptions
 	if !storeQueryPartial && reconcileOpts.workDirResolver == nil && len(assignedWorkBeads) > 0 {
@@ -2247,6 +2249,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// Handle BEFORE heal/stability to avoid false crash detection —
 		// a running session that leaves the desired set is not a crash.
 		if !desired {
+			// Whatever ends this session's runtime from here is the reconciler's
+			// doing, not a start that failed.
+			fleetGuard.ForgetSession(id)
 			providerAlive, livenessErr := workerSessionTargetRunningWithConfig(cityPath, store, sp, cfg, id)
 			if livenessErr != nil {
 				// A configured named spec is positive control-plane evidence even
@@ -2966,13 +2971,22 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// the expected child process is alive (when ProcessNames configured).
 		// The desired-session fast path only needs running/alive; attachment
 		// and activity are probed by the narrower branches that use them.
-		fleetTracked++
+		switch infoByID[id].State {
+		case sessionpkg.StateActive, sessionpkg.StateCreating, sessionpkg.StateAwake:
+			fleetTracked++
+		}
 		running, alive, livenessErr := observeRuntimeProviderLiveness(sp, name, tp.Hints.ProcessNames)
 		if livenessErr != nil {
 			fmt.Fprintf(stderr, "session reconciler: skipping lifecycle reconciliation of '%s': liveness observation failed: %v\n", name, livenessErr) //nolint:errcheck
 			continue
 		}
-		fleetGuard.ObserveLiveness(id, running && alive)
+		if (dt != nil && dt.get(id) != nil) || isDrainAckStopPendingInfo(infoByID[id]) {
+			// A session being drained or stopped on purpose dies as the
+			// reconciler's doing: that is not a failed start.
+			fleetGuard.ForgetSession(id)
+		} else {
+			fleetGuard.ObserveLiveness(id, running && alive)
+		}
 		peek := cachedSessionPeek(cityPath, store, sp, cfg, id, tp.Hints.ProcessNames)
 		if running && !alive {
 			// Warm the peek before recordResetStallIfDue may evict the stale
@@ -3349,6 +3363,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							tick.set(id, updated)
 							clearDrainTrackerForStopPending(id, dt)
 							// The stop executes against the decision the mark landed on.
+							fleetGuard.ForgetSession(id)
 							queueDrainAckAsyncStop(cityPath, store, sp, cfg, stop, name, tp.Hints.ProcessNames, asyncStopTracker, dt, stderr)
 							if trace != nil {
 								trace.RecordDecision(TraceSiteReconcilerDrainAck, TraceReasonAcknowledged, TraceOutcomeStopPending, tp.TemplateName, name, nil)
@@ -4005,6 +4020,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 								ddt = defaultDrainTimeout
 							}
 							if beginSessionDrainInfo(infoByID[id], sp, dt, "config-drift", clk, ddt) {
+								fleetGuard.ForgetSession(id)
 								fmt.Fprintf(stdout, "Draining session '%s': config-drift\n", name) //nolint:errcheck
 								if trace != nil {
 									trace.RecordDecision(TraceSiteReconcilerConfigDrift, TraceReasonConfigDrift, TraceOutcomeDrain, tp.TemplateName, name, configDriftTracePayload(storedHash, currentHash, driftedFields, nil))
