@@ -202,6 +202,7 @@ type RequestFailedPayload struct {
 	Operation    string `json:"operation" enum:"city.create,city.unregister,session.create,session.message,session.submit,rig.create" doc:"Which operation failed."`
 	ErrorCode    string `json:"error_code" doc:"Machine-readable error code."`
 	ErrorMessage string `json:"error_message" doc:"Human-readable error description."`
+	SessionID    string `json:"session_id,omitempty" doc:"Session a failed session.create had already written, when the server could identify it, so the client can inspect or clean it up instead of retrying into a duplicate. Absence does not prove that no session was written. The event subject does not carry this ID; match the event to its request by request_id."`
 }
 
 // IsEventPayload marks RequestFailedPayload as an events.Payload variant.

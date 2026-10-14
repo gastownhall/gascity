@@ -437,12 +437,9 @@ row:gc-1:sleep_policy_source=legacy_off
 ## 1 crash (+1m19s)
 ~ op
 @ +29s
-row:gc-1:continuation_reset_pending=true
 row:gc-1:last_woke_at=
 row:gc-1:quarantined_until=T+5m29s
-row:gc-1:session_key=
 row:gc-1:sleep_reason=quarantine
-row:gc-1:started_config_hash=
 row:gc-1:state=asleep
 row:gc-1:wake_attempts=5
 === a manual conversation crashes 31s after wake
@@ -481,12 +478,9 @@ row:gc-1:wake_attempts=0
 ~ op
 @ +31s
 row:gc-1:churn_count=3
-row:gc-1:continuation_reset_pending=true
 row:gc-1:last_woke_at=
 row:gc-1:quarantined_until=T+5m31s
-row:gc-1:session_key=
 row:gc-1:sleep_reason=context-churn
-row:gc-1:started_config_hash=
 row:gc-1:state=asleep
 === a manual create read between its two writes
 ## 0 seed (+20s)

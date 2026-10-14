@@ -1665,8 +1665,8 @@ func clientProviderChat(origin string, agent *config.Agent) bool {
 	return origin == "manual" && agent != nil && agent.Implicit
 }
 
-// syncSessionBeadsWithSnapshotAndRigStores ensures every desired session has a corresponding session
-// bead. Accepts desiredState (sessionName → TemplateParams) instead of
+// syncSessionBeadsWithSnapshotAndRigStores materializes configured desired sessions and retains existing
+// manual sessions. Accepts desiredState (sessionName → TemplateParams) instead of
 // map[string]TemplateParams, and uses runtime.Provider for liveness checks.
 //
 // configuredNames is the set of ALL configured agent session names (including
@@ -1966,6 +1966,13 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 				}
 				openBeads = upsertOpenSessionBead(openBeads, indexBySessionName, recovered)
 			}
+		}
+		if !exists && tp.ManualSession {
+			// Manual entries retain sessions discovered during planning; they
+			// are not create requests. A close can win before this fresh store
+			// read. Never replace that terminal conversation with a new bead
+			// carrying its old alias and runtime name.
+			continue
 		}
 		state := syncSessionCachedState(sn, b, exists, sp)
 		if !exists && isConfiguredNamed {
@@ -3024,7 +3031,9 @@ func reapStaleSessionBeads(
 		// They may legitimately be stopped between supervisor restarts; the
 		// named-session reconciler is responsible for preserving, waking, or
 		// retiring them after desired state is rebuilt from config.
-		if isNamedSessionInfo(info) {
+		// A committed manual conversation may be creating again while it
+		// resumes after runtime loss. It is not an abandoned first creation.
+		if isNamedSessionInfo(info) || session.HasStartedManualConversation(info) {
 			continue
 		}
 		// Session is alive — nothing to reap.
@@ -3199,7 +3208,10 @@ func reapPreBootSessionBeads(
 		}
 		// Manual sessions are operator-owned; drain/archive states have their
 		// own lifecycle paths that must not be short-circuited here.
-		if info.ManualSession || !reapableStateForPreBoot(info) {
+		// ManualSession, the retired legacy marker, keeps a marked row whether
+		// or not it ever started; HasStartedManualConversation is the committed
+		// manual conversation the sibling reapers keep too.
+		if info.ManualSession || session.HasStartedManualConversation(info) || !reapableStateForPreBoot(info) {
 			continue
 		}
 		// A clean `gc stop` parks pool beads asleep with sleep_reason=city-stop;
@@ -3457,7 +3469,12 @@ func cleanDeadRuntimeCorpse(store beads.Store, sw *SeatWork, info session.Info, 
 	// the dead pane is that sleep's leftover. Closing it would make the
 	// session impossible to wake. Reaping the pane above is still right: it
 	// frees the name for that wake.
-	if claimsLive {
+	//
+	// A committed manual conversation is never closed here either
+	// (SESSION-LIFE-MANUAL-LOSS): its provider key, not the pane, holds the
+	// conversation, so losing the pane leaves the row for the heal and the
+	// next wake to resume.
+	if claimsLive && !session.HasStartedManualConversation(info) {
 		fmt.Fprintf(stderr, "session reconciler: closing session bead %s as dead-runtime (session %s, state %q)\n", info.ID, name, strings.TrimSpace(info.MetadataState)) //nolint:errcheck
 		closeSeat(store, sw, info, closeWhy{reason: "dead-runtime", gate: closeReleasing}, clk.Now().UTC(), stderr)
 	}

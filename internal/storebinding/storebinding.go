@@ -365,6 +365,22 @@ type ClaimTarget struct {
 var ErrNudgeSessionFenceMismatch = errors.New("queued nudge session fence mismatch")
 
 // NudgeQueue is the closed durable nudge queue contract.
+//
+// The delivery verbs (Enqueue, ClaimDue, ListFor, ListForAgent, Ack,
+// ReleaseClaims, RecordFailure) are target-scoped: they read only the records
+// addressed to the queue keys they are given and repair only the records they
+// touch, so the requests they issue and the records they read do not grow with
+// the rest of the queue. (What one keyed read costs inside the store is the
+// store's index plan; see each implementation.) The
+// whole-queue recovery work — revoking expired leases, dead-lettering expired
+// items, aging dead letters out, and sweeping retired records past retention —
+// is Maintain's alone, and the infrastructure owner runs it on its own cadence.
+//
+// A delivery read (ClaimDue, ListFor, ListForAgent) that meets a record it
+// cannot decode skips it rather than failing every delivery to that target:
+// it returns everything it could read together with an error for which
+// beads.IsPartialResult reports true. The caller delivers what it got and
+// reports the error.
 type NudgeQueue interface {
 	Enqueue(nudgequeue.Item) error
 	EnqueueDeferred(nudgequeue.Item) error
@@ -377,6 +393,26 @@ type NudgeQueue interface {
 	RecordFailure([]string, error, time.Time) ([]nudgequeue.Item, error)
 	Rollback(nudgequeue.Item, string) error
 	WithdrawQueuedWaitNudges([]string) error
+	// Maintain runs one whole-queue recovery pass as of now. ctx is checked
+	// between transitions, so it bounds the writes, not a read already in
+	// progress; the sweep deletes at most one batch per pass. A failed
+	// transition does not stop the pass: every failure is joined into the
+	// returned error. Records it could not decode are not a failure; they are
+	// listed in the report.
+	Maintain(context.Context, time.Time) (NudgeMaintenance, error)
+}
+
+// NudgeMaintenance is what one [NudgeQueue.Maintain] pass found that is not a
+// failure of the pass.
+type NudgeMaintenance struct {
+	// Corrupt holds one error per queue record the pass could not decode
+	// (wrapping ErrBeadsNudgeQueueCorrupt for the beads queue). The pass did
+	// everything else it could.
+	Corrupt []error
+	// Remaining reports that the pass stopped at its per-call bound with
+	// retired records possibly still due for the sweep; the next pass
+	// continues.
+	Remaining bool
 }
 
 // NudgeShadows is the closed nudge shadow projection contract.

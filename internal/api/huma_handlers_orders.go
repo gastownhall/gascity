@@ -676,15 +676,19 @@ func (s *Server) humaHandleOrdersFeed(_ context.Context, input *OrdersFeedInput)
 	Body ordersFeedBody
 }, error,
 ) {
+	index := s.latestIndex()
 	scopeKind, scopeRef, scopeErr := parseWorkflowRequestScope(input.ScopeKind, input.ScopeRef)
 	if scopeErr != "" {
 		return nil, apierr.InvalidRequest.Msg(scopeErr)
 	}
 
 	limit := normalizeFeedLimit(input.Limit)
-	index := s.latestIndex()
 
 	cacheKey := "orders-feed?" + scopeKind + "|" + scopeRef + "|" + strconv.Itoa(input.Limit)
+	// The key is the index captured before any state is read, and a hit
+	// needs an exact match, so a cached body reflects every change up to the
+	// current head. A key that can hit across index changes (the time bucket
+	// /status uses) would serve a body that misses later changes.
 	if body, ok := cachedResponseAs[ordersFeedBody](s, cacheKey, index); ok {
 		return &struct {
 			Body ordersFeedBody

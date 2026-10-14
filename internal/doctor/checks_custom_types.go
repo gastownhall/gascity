@@ -14,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
 // RequiredCustomTypes lists the bead types that Gas City requires
@@ -113,7 +114,7 @@ func (c *CustomTypesCheck) Run(ctx *CheckContext) *CheckResult {
 	if err != nil {
 		r.Status = StatusWarning
 		r.Message = fmt.Sprintf("could not read types.custom: %v", err)
-		r.FixHint = "run gc doctor --fix to set required custom types"
+		r.FixHint = c.readFailureHint("types.custom")
 		// Treat as all missing — fix will set the full list.
 		c.missing = RequiredCustomTypes
 		c.tableMissing = nil
@@ -127,7 +128,7 @@ func (c *CustomTypesCheck) Run(ctx *CheckContext) *CheckResult {
 	if err != nil {
 		r.Status = StatusWarning
 		r.Message = fmt.Sprintf("could not read custom_types table: %v", err)
-		r.FixHint = "run gc doctor --fix to register required custom types"
+		r.FixHint = c.readFailureHint("the custom_types table")
 		c.tableMissing = RequiredCustomTypes
 		return r
 	}
@@ -148,8 +149,28 @@ func (c *CustomTypesCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 	r.Status = StatusError
 	r.Message = strings.Join(parts, "; ")
-	r.FixHint = "run gc doctor --fix to register missing types"
+	// Name the exact one-shot repair. No boot path registers types on a store
+	// gc does not provision (an external Dolt server, an HTTP binding), so a
+	// store an older gc registered stays short of a newer required type until
+	// an operator runs this, and an operator about to write a production store
+	// needs to know the write only adds types (Fix merges row ∪ table ∪
+	// required through `bd config set types.custom`).
+	r.FixHint = fmt.Sprintf("run `%s` (additive: merges the missing types into types.custom with `bd config set`, never removes one)", c.fixCommand())
 	return r
+}
+
+// readFailureHint names the scoped repair for a store bd could not read, and
+// says it waits on that read: Fix re-reads the row and the table and refuses to
+// write a list it cannot prove is a superset, so running it before the read
+// succeeds fails the same way.
+func (c *CustomTypesCheck) readFailureHint(unread string) string {
+	return fmt.Sprintf("once bd can read %s, run `%s` (it re-reads the store and writes nothing while either read fails)", unread, c.fixCommand())
+}
+
+// fixCommand is the one-shot repair scoped to this check, quoted for pasting:
+// a rig's check name carries the rig name, which can hold a space.
+func (c *CustomTypesCheck) fixCommand() string {
+	return shellquote.Join([]string{"gc", "doctor", "--fix", "--check", c.Name()})
 }
 
 // typesNotIn returns the entries of want that are absent from have, in

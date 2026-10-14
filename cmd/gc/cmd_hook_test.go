@@ -1006,11 +1006,16 @@ func TestDoHookClaimCommandErrorKeepsProtocolStdoutEmpty(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	code := doHookClaim("bd ready --json", "", opts, ops, &stdout, &stderr)
-	if code != 1 {
-		t.Fatalf("doHookClaim(error) = %d, want 1", code)
+	// A timed-out read got no answer from the store, so the claim door reports
+	// it as store-unavailable: exit 2 with the token, like plain gc hook.
+	if code != 2 {
+		t.Fatalf("doHookClaim(error) = %d, want 2", code)
 	}
 	if stdout.Len() != 0 {
 		t.Fatalf("stdout = %q, want empty protocol stdout on work-query error", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), hookStoreUnavailableToken) {
+		t.Fatalf("stderr = %q, want the %s token", stderr.String(), hookStoreUnavailableToken)
 	}
 	if !strings.Contains(stderr.String(), "partial stdout") {
 		t.Fatalf("stderr = %q, want timeout diagnostic", stderr.String())

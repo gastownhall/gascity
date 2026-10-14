@@ -272,11 +272,18 @@ func (h *RuntimeHandle) Message(ctx context.Context, _ sessionpkg.Actor, req Mes
 	return result, nil
 }
 
-// Interrupt asks the provider to interrupt the live runtime session.
+// Interrupt asks the provider to interrupt the live runtime session. With no
+// session bead to pick provider-specific keys, keystroke and protocol
+// runtimes both get Interrupt; a runtime that cannot interrupt the turn is
+// sent nothing and reported with [sessionpkg.ErrTurnInterruptUnsupported].
 func (h *RuntimeHandle) Interrupt(ctx context.Context, _ InterruptRequest) (err error) {
 	event := h.beginOperationEvent(ctx, workerOperationInterrupt)
 	defer func() { event.finish(err) }()
 
+	if runtime.TurnInterruptModeFor(h.provider, h.sessionName) == runtime.TurnInterruptUnsupported {
+		err = fmt.Errorf("%w: %s", sessionpkg.ErrTurnInterruptUnsupported, h.sessionName)
+		return err
+	}
 	err = h.provider.Interrupt(h.sessionName)
 	return err
 }
@@ -295,7 +302,15 @@ func (h *RuntimeHandle) Nudge(ctx context.Context, _ sessionpkg.Actor, req Nudge
 		err = fmt.Errorf("nudge text is required")
 		return NudgeResult{}, err
 	}
-	if !h.provider.IsRunning(h.sessionName) {
+	// Decided on a fresh read, not the provider's cache: the tmux state
+	// cache can show a crashed agent alive for seconds after the crash.
+	live, liveErr := runtime.ObserveLivenessSince(h.provider, h.sessionName, h.processNames, time.Now())
+	if liveErr != nil || live.Running && !live.Alive {
+		// A dead agent's pane takes nothing (mc-48az4): the caller queues it.
+		result = NudgeResult{Undelivered: NudgeUndeliveredAgentDead}
+		return result, nil
+	}
+	if !live.Running {
 		if normalizeNudgeWakePolicy(req.Wake) == NudgeWakeLiveOnly {
 			result = NudgeResult{Delivered: false}
 			return result, nil

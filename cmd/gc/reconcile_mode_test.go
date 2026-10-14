@@ -85,23 +85,25 @@ func TestLoadCitySessionReconcilerUnknownIsStrictFatal(t *testing.T) {
 }
 
 // TestLatchReconcilerModeRefusesUnknownAndInadmissibleV2 pins the admission
-// gate (F5, OQ-1): v2 has no session controllers in this build, so selecting it
-// refuses controller start rather than running a city that starts nothing; an
-// unknown value refuses rather than silently running legacy. An alias latches
-// legacy.
+// gate (F5, OQ-1; C9): v2 latches from config alone, a v2 the latch refuses
+// (a feature v2 defers) refuses controller start, and an unknown value
+// refuses rather than silently running legacy. An alias latches legacy.
 func TestLatchReconcilerModeRefusesUnknownAndInadmissibleV2(t *testing.T) {
 	for _, tc := range []struct {
 		raw     string
+		refused bool // a feature v2 defers
+		wantV2  bool
 		wantErr string
 	}{
 		{raw: ""},
 		{raw: "legacy"},
 		{raw: "auto"},
-		{raw: "v2", wantErr: "not available in this build"},
-		{raw: " V2 ", wantErr: "not available in this build"},
+		{raw: "v2", wantV2: true},
+		{raw: " V2 ", wantV2: true},
+		{raw: "v2", refused: true, wantErr: "is refused"},
 		{raw: "v3", wantErr: "not a known value"},
 	} {
-		cfg := &config.City{Daemon: config.DaemonConfig{SessionReconciler: tc.raw}}
+		cfg := &config.City{Daemon: config.DaemonConfig{SessionReconciler: tc.raw, SessionCircuitBreaker: tc.refused}}
 		mode, err := latchReconcilerMode(cfg, nil)
 		if tc.wantErr != "" {
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
@@ -109,12 +111,12 @@ func TestLatchReconcilerModeRefusesUnknownAndInadmissibleV2(t *testing.T) {
 			}
 			continue
 		}
-		if err != nil {
-			t.Errorf("latch(%q) err = %v, want legacy", tc.raw, err)
-			continue
+		want := reconcilerLegacy
+		if tc.wantV2 {
+			want = reconcilerV2
 		}
-		if mode != reconcilerLegacy {
-			t.Errorf("latch(%q) = %v, want legacy", tc.raw, mode)
+		if err != nil || mode != want {
+			t.Errorf("latch(%q) = %v, %v; want %v", tc.raw, mode, err, want)
 		}
 	}
 }
@@ -127,18 +129,18 @@ func TestLatchReconcilerModeRefusesUnknownAndInadmissibleV2(t *testing.T) {
 func TestLatchRefusesV2WithIdentityBreaker(t *testing.T) {
 	const want = `[daemon] session_reconciler = "v2" is refused: [daemon] session_circuit_breaker = true (the identity circuit breaker) is not available under v2 until PAR-BRK; remove those settings or run legacy`
 	cfg := &config.City{Daemon: config.DaemonConfig{SessionReconciler: "v2", SessionCircuitBreaker: true}}
-	if _, err := latchReconcilerMode(cfg, overrideEnv("1")); err == nil || err.Error() != want {
+	if _, err := latchReconcilerMode(cfg, noEnv); err == nil || err.Error() != want {
 		t.Fatalf("latch(v2, breaker) err = %v, want %q", err, want)
 	}
-	if r := newSessionReconcilerDoctorCheck(cfg, overrideEnv("1")).Run(&doctor.CheckContext{}); r.Status != doctor.StatusError || !strings.Contains(r.Message, want) {
+	if r := newSessionReconcilerDoctorCheck(cfg, noEnv).Run(&doctor.CheckContext{}); r.Status != doctor.StatusError || !strings.Contains(r.Message, want) {
 		t.Errorf("doctor = %v %q, want an error naming %q", r.Status, r.Message, want)
 	}
 	cfg.Daemon.SessionReconciler = ""
-	if mode, err := latchReconcilerMode(cfg, overrideEnv("1")); err != nil || mode != reconcilerLegacy {
+	if mode, err := latchReconcilerMode(cfg, noEnv); err != nil || mode != reconcilerLegacy {
 		t.Errorf("latch(legacy, breaker) = %v, %v; want legacy, nil", mode, err)
 	}
 	cfg.Daemon.SessionReconciler, cfg.Daemon.SessionCircuitBreaker = "v2", false
-	if mode, err := latchReconcilerMode(cfg, overrideEnv("1")); err != nil || mode != reconcilerV2 {
+	if mode, err := latchReconcilerMode(cfg, noEnv); err != nil || mode != reconcilerV2 {
 		t.Errorf("latch(v2, no breaker) = %v, %v; want v2, nil", mode, err)
 	}
 }
@@ -171,10 +173,12 @@ func TestReloadSessionReconcilerDriftWarnsOncePerTransition(t *testing.T) {
 			if step.wantWarn != "" && (!strings.HasPrefix(got, "pending restart: ") || !strings.Contains(got, step.wantWarn)) {
 				t.Errorf("step %d (%q): warning = %q, want %q", i, step.onDisk, got, step.wantWarn)
 			}
-			// Every value this build refuses says so, so the warning never
-			// presents an inadmissible value as merely pending.
-			if step.wantWarn != "" && !strings.Contains(got, "; the next controller start will refuse it: ") {
-				t.Errorf("step %d (%q): warning = %q, want the start refusal named", i, step.onDisk, got)
+			// Every value the latch refuses says so, so the warning never
+			// presents an inadmissible value as merely pending; an admissible
+			// v2 (C9) is merely pending.
+			refused := step.wantWarn != "" && strings.Contains(step.wantWarn, "not a known value")
+			if step.wantWarn != "" && refused != strings.Contains(got, "; the next controller start will refuse it: ") {
+				t.Errorf("step %d (%q): warning = %q, want the start refusal named: %v", i, step.onDisk, got, refused)
 			}
 			if d.running != reconcilerLegacy {
 				t.Fatalf("step %d (%q): reload re-latched the running mode to %v", i, step.onDisk, d.running)
@@ -241,16 +245,18 @@ func TestReloadSessionReconcilerDriftWarnsOncePerTransition(t *testing.T) {
 // value the controller latch refuses is an error, never a warning.
 func TestDoctorSessionReconcilerCheck(t *testing.T) {
 	for _, tc := range []struct {
-		raw  string
-		want doctor.CheckStatus
+		raw     string
+		refused bool // a feature v2 defers
+		want    doctor.CheckStatus
 	}{
 		{raw: "", want: doctor.StatusOK},
 		{raw: "legacy", want: doctor.StatusOK},
 		{raw: "auto", want: doctor.StatusWarning},
-		{raw: "v2", want: doctor.StatusError}, // refused while !v2ControllersInBuild
+		{raw: "v2", want: doctor.StatusOK}, // admissible since C9
+		{raw: "v2", refused: true, want: doctor.StatusError},
 		{raw: "v3", want: doctor.StatusError},
 	} {
-		cfg := &config.City{Daemon: config.DaemonConfig{SessionReconciler: tc.raw}}
+		cfg := &config.City{Daemon: config.DaemonConfig{SessionReconciler: tc.raw, SessionCircuitBreaker: tc.refused}}
 		r := newSessionReconcilerDoctorCheck(cfg, nil).Run(&doctor.CheckContext{})
 		if r.Status != tc.want {
 			t.Errorf("session_reconciler = %q: status = %v (%s), want %v", tc.raw, r.Status, r.Message, tc.want)
@@ -262,9 +268,17 @@ func TestDoctorSessionReconcilerCheck(t *testing.T) {
 }
 
 // newRefusedSessionReconcilerCity is newForegroundStartLockCity with
-// session_reconciler = "v2": its exec bead-store script logs every op it runs,
+// session_reconciler = "v2" and a feature v2 defers (the identity breaker),
+// so the latch refuses it: its exec bead-store script logs every op it runs,
 // so the log is the store spy.
 func newRefusedSessionReconcilerCity(t *testing.T) (cityPath, opsLog string) {
+	t.Helper()
+	return newV2SessionReconcilerCity(t, "session_circuit_breaker = true\n")
+}
+
+// newV2SessionReconcilerCity is newForegroundStartLockCity with
+// session_reconciler = "v2" plus extra [daemon] lines.
+func newV2SessionReconcilerCity(t *testing.T, extra string) (cityPath, opsLog string) {
 	t.Helper()
 	cityPath, opsLog = newForegroundStartLockCity(t, "0")
 	tomlPath := filepath.Join(cityPath, "city.toml")
@@ -272,7 +286,7 @@ func newRefusedSessionReconcilerCity(t *testing.T) (cityPath, opsLog string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(tomlPath, append(data, "\n[daemon]\nsession_reconciler = \"v2\"\n"...), 0o644); err != nil {
+	if err := os.WriteFile(tomlPath, append(data, "\n[daemon]\nsession_reconciler = \"v2\"\n"+extra...), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	return cityPath, opsLog
@@ -324,7 +338,7 @@ func TestStartStandaloneRefusesSessionReconcilerBeforeInit(t *testing.T) {
 			if code := doStartStandalone([]string{cityPath}, tc.foreground, &stdout, &stderr); code != 1 {
 				t.Fatalf("doStartStandalone exit = %d, want 1\nstdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
 			}
-			if !strings.Contains(stderr.String(), "session_reconciler = \"v2\" is not available in this build") {
+			if !strings.Contains(stderr.String(), "session_reconciler = \"v2\" is refused") {
 				t.Errorf("stderr = %q, want the v2 refusal", stderr.String())
 			}
 			assertRefusedCityUntouched(t, cityPath, opsLog)
@@ -377,7 +391,7 @@ func TestReconcileCitiesRefusesSessionReconcilerBeforeInit(t *testing.T) {
 			t.Errorf("initStatus = %+v after refusal, want cleared", st)
 		}
 		rec := initFailures[cityPath]
-		if rec == nil || !strings.Contains(rec.lastError, "not available in this build") {
+		if rec == nil || !strings.Contains(rec.lastError, "is refused") {
 			t.Errorf("initFailures = %+v, want the v2 refusal recorded", rec)
 		}
 	})

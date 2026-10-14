@@ -29,41 +29,42 @@ import (
 // optionalInterfaces are the runtime package's optional provider
 // interfaces, by name. TestOptionalInterfacesAreListed keeps it complete.
 var optionalInterfaces = map[string]reflect.Type{
-	"AttachmentObserverWithError":    reflect.TypeFor[runtime.AttachmentObserverWithError](),
-	"BackendListingProvider":         reflect.TypeFor[runtime.BackendListingProvider](),
-	"BackendsProvider":               reflect.TypeFor[runtime.BackendsProvider](),
-	"ConditionalProcessTableScanner": reflect.TypeFor[runtime.ConditionalProcessTableScanner](),
-	"DeadRuntimeSessionChecker":      reflect.TypeFor[runtime.DeadRuntimeSessionChecker](),
-	"DialogProvider":                 reflect.TypeFor[runtime.DialogProvider](),
-	"EnvironmentBatchProvider":       reflect.TypeFor[runtime.EnvironmentBatchProvider](),
-	"ExecProvider":                   reflect.TypeFor[runtime.ExecProvider](),
-	"FreshByConstruction":            reflect.TypeFor[runtime.FreshByConstruction](),
-	"FreshLivenessObserver":          reflect.TypeFor[runtime.FreshLivenessObserver](),
-	"IdentitySidecarProvider":        reflect.TypeFor[runtime.IdentitySidecarProvider](),
-	"IdleProbeBudgetProvider":        reflect.TypeFor[runtime.IdleProbeBudgetProvider](),
-	"IdleSnapshotProvider":           reflect.TypeFor[runtime.IdleSnapshotProvider](),
-	"IdleWaitProvider":               reflect.TypeFor[runtime.IdleWaitProvider](),
-	"ImmediateNudgeProvider":         reflect.TypeFor[runtime.ImmediateNudgeProvider](),
-	"InputClearProvider":             reflect.TypeFor[runtime.InputClearProvider](),
-	"InteractionProvider":            reflect.TypeFor[runtime.InteractionProvider](),
-	"InterruptBoundaryWaitProvider":  reflect.TypeFor[runtime.InterruptBoundaryWaitProvider](),
-	"InterruptedTurnResetProvider":   reflect.TypeFor[runtime.InterruptedTurnResetProvider](),
-	"InventoryProvider":              reflect.TypeFor[runtime.InventoryProvider](),
-	"ListingAttestation":             reflect.TypeFor[runtime.ListingAttestation](),
-	"LivenessObserver":               reflect.TypeFor[runtime.LivenessObserver](),
-	"LivenessObserverWithError":      reflect.TypeFor[runtime.LivenessObserverWithError](),
-	"ProcessTableScanner":            reflect.TypeFor[runtime.ProcessTableScanner](),
-	"RelaunchProvider":               reflect.TypeFor[runtime.RelaunchProvider](),
-	"Router":                         reflect.TypeFor[runtime.Router](),
-	"ServerDeathConfirmer":           reflect.TypeFor[runtime.ServerDeathConfirmer](),
-	"ServerLifecycleProvider":        reflect.TypeFor[runtime.ServerLifecycleProvider](),
-	"SessionEventProvider":           reflect.TypeFor[runtime.SessionEventProvider](),
-	"SessionObjectKiller":            reflect.TypeFor[runtime.SessionObjectKiller](),
-	"SessionRosterProvider":          reflect.TypeFor[runtime.SessionRosterProvider](),
-	"SleepCapabilityProvider":        reflect.TypeFor[runtime.SleepCapabilityProvider](),
-	"TransportCapabilityProvider":    reflect.TypeFor[runtime.TransportCapabilityProvider](),
-	"TurnEventProvider":              reflect.TypeFor[runtime.TurnEventProvider](),
-	"UnattendedSessionStopper":       reflect.TypeFor[runtime.UnattendedSessionStopper](),
+	"AttachmentObserverWithError":     reflect.TypeFor[runtime.AttachmentObserverWithError](),
+	"BackendListingProvider":          reflect.TypeFor[runtime.BackendListingProvider](),
+	"BackendsProvider":                reflect.TypeFor[runtime.BackendsProvider](),
+	"ConditionalProcessTableScanner":  reflect.TypeFor[runtime.ConditionalProcessTableScanner](),
+	"DeadRuntimeSessionChecker":       reflect.TypeFor[runtime.DeadRuntimeSessionChecker](),
+	"DialogProvider":                  reflect.TypeFor[runtime.DialogProvider](),
+	"EnvironmentBatchProvider":        reflect.TypeFor[runtime.EnvironmentBatchProvider](),
+	"ExecProvider":                    reflect.TypeFor[runtime.ExecProvider](),
+	"FreshByConstruction":             reflect.TypeFor[runtime.FreshByConstruction](),
+	"FreshLivenessObserver":           reflect.TypeFor[runtime.FreshLivenessObserver](),
+	"IdentitySidecarProvider":         reflect.TypeFor[runtime.IdentitySidecarProvider](),
+	"IdleProbeBudgetProvider":         reflect.TypeFor[runtime.IdleProbeBudgetProvider](),
+	"IdleSnapshotProvider":            reflect.TypeFor[runtime.IdleSnapshotProvider](),
+	"IdleWaitProvider":                reflect.TypeFor[runtime.IdleWaitProvider](),
+	"ImmediateNudgeProvider":          reflect.TypeFor[runtime.ImmediateNudgeProvider](),
+	"InputClearProvider":              reflect.TypeFor[runtime.InputClearProvider](),
+	"InteractionProvider":             reflect.TypeFor[runtime.InteractionProvider](),
+	"InterruptBoundaryWaitProvider":   reflect.TypeFor[runtime.InterruptBoundaryWaitProvider](),
+	"InterruptedTurnResetProvider":    reflect.TypeFor[runtime.InterruptedTurnResetProvider](),
+	"InventoryProvider":               reflect.TypeFor[runtime.InventoryProvider](),
+	"ListingAttestation":              reflect.TypeFor[runtime.ListingAttestation](),
+	"LivenessObserver":                reflect.TypeFor[runtime.LivenessObserver](),
+	"LivenessObserverWithError":       reflect.TypeFor[runtime.LivenessObserverWithError](),
+	"ProcessTableScanner":             reflect.TypeFor[runtime.ProcessTableScanner](),
+	"RelaunchProvider":                reflect.TypeFor[runtime.RelaunchProvider](),
+	"Router":                          reflect.TypeFor[runtime.Router](),
+	"ServerDeathConfirmer":            reflect.TypeFor[runtime.ServerDeathConfirmer](),
+	"ServerLifecycleProvider":         reflect.TypeFor[runtime.ServerLifecycleProvider](),
+	"SessionEventProvider":            reflect.TypeFor[runtime.SessionEventProvider](),
+	"SessionObjectKiller":             reflect.TypeFor[runtime.SessionObjectKiller](),
+	"SessionRosterProvider":           reflect.TypeFor[runtime.SessionRosterProvider](),
+	"SleepCapabilityProvider":         reflect.TypeFor[runtime.SleepCapabilityProvider](),
+	"TransportCapabilityProvider":     reflect.TypeFor[runtime.TransportCapabilityProvider](),
+	"TurnEventProvider":               reflect.TypeFor[runtime.TurnEventProvider](),
+	"TurnInterruptCapabilityProvider": reflect.TypeFor[runtime.TurnInterruptCapabilityProvider](),
+	"UnattendedSessionStopper":        reflect.TypeFor[runtime.UnattendedSessionStopper](),
 }
 
 // notOptional are the package's exported interfaces that are not optional
@@ -160,7 +161,8 @@ current-context: c
 // Kills a profile that drifts from its backend: one optional interface more
 // or fewer than the provider production builds, other capabilities, another
 // answer from a fixed trait (sleep capability, fresh reads, an identity
-// sidecar, a transport, an idle-proof budget), or no backend checked.
+// sidecar, a transport, an idle-proof budget, a turn-interrupt mode), or no
+// backend checked.
 func TestFakeProfilesMatchTheirBackends(t *testing.T) {
 	backends := productionBackends(t)
 	for p := runtime.ProfileTmux; p <= runtime.ProfileT3Bridge; p++ {
@@ -185,7 +187,7 @@ func TestFakeProfilesMatchTheirBackends(t *testing.T) {
 // traits are p's answers to the optional interfaces that report a backend's
 // fixed traits, "-" for one it does not implement.
 func traits(p runtime.Provider) string {
-	out := []string{"-", "-", "-", "-", "-"}
+	out := []string{"-", "-", "-", "-", "-", "-"}
 	if s, ok := p.(runtime.SleepCapabilityProvider); ok {
 		out[0] = string(s.SleepCapability("s"))
 	}
@@ -200,6 +202,9 @@ func traits(p runtime.Provider) string {
 	}
 	if f, ok := p.(runtime.IdleProbeBudgetProvider); ok {
 		out[4] = f.IdleProbeBudget().String()
+	}
+	if f, ok := p.(runtime.TurnInterruptCapabilityProvider); ok {
+		out[5] = string(f.TurnInterruptMode("s"))
 	}
 	return strings.Join(out, " ")
 }

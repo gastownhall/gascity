@@ -329,7 +329,7 @@ func TestACPLiveOnlyNudgeRefusedWhilePermissionPending(t *testing.T) {
 	}
 	result := make(chan sendResult, 1)
 	go func() {
-		delivered, err := s.mgr.SendLiveOnly(context.Background(), s.id, "queued nudge")
+		delivered, err := s.mgr.SendLiveOnly(context.Background(), s.id, "queued nudge", nil)
 		result <- sendResult{delivered, err}
 	}()
 	select {
