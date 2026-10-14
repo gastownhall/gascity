@@ -170,6 +170,8 @@ func TestNudgesSuiteRejectsBrokenQueues(t *testing.T) {
 			name:   "a batch claim that resumes a pinned batch in part",
 			defect: NudgesDefectClaimBatchSplits,
 			want: []string{
+				"ClaimBatchAdoptsASupersededSessionsBatch",
+				"ClaimBatchHonorsTheMemberFence",
 				"ClaimBatchNeverClaimsAStrictSubset",
 				"ClaimBatchResumesAPinnedBatchWhole",
 				"ClaimBatchWaitsOnASplitBatch",

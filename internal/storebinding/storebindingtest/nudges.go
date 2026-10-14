@@ -946,6 +946,82 @@ func runNudgeBatchTests(r Runner, suite NudgesSuite) {
 		}
 	})
 
+	r.Run("ClaimBatchHonorsTheMemberFence", func(r Runner) {
+		queue := mustQueue(r, suite)
+		now := time.Now().UTC()
+		for _, item := range []nudgequeue.Item{nudgeItem("n-open", "", now), nudgeItem("n-fenced", "session-1", now)} {
+			if err := queue.Enqueue(item); err != nil {
+				r.Fatalf("Enqueue(%s): %v", item.ID, err)
+			}
+		}
+		first, err := queue.ClaimBatch(storebinding.ClaimTarget{QueueKeys: []string{ConformanceNudgeAgent}, SessionID: "session-1"}, now)
+		if err != nil {
+			r.Fatalf("ClaimBatch by session-1: %v", err)
+		}
+		key := assertOneBatch(r, "ClaimBatch by session-1", first, "n-fenced", "n-open")
+		if err := queue.ReleaseClaims([]string{"n-open", "n-fenced"}, time.Time{}); err != nil {
+			r.Fatalf("ReleaseClaims: %v", err)
+		}
+		bothSeated := func() (map[string]struct{}, bool) {
+			return map[string]struct{}{"session-1": {}, "session-2": {}}, true
+		}
+		sibling, err := queue.ClaimBatch(storebinding.ClaimTarget{
+			QueueKeys:         []string{ConformanceNudgeAgent},
+			SessionID:         "session-2",
+			LiveFenceSessions: bothSeated,
+		}, now)
+		if err != nil {
+			r.Fatalf("ClaimBatch by sibling session-2: %v", err)
+		}
+		if len(sibling) != 0 {
+			r.Fatalf("sibling session-2 claimed %v while session-1 still holds its seat, want nothing: n-fenced belongs to session-1 and its batch is claimed whole or not at all", nudgeIDs(sibling))
+		}
+		owner, err := queue.ClaimBatch(storebinding.ClaimTarget{QueueKeys: []string{ConformanceNudgeAgent}, SessionID: "session-1"}, now)
+		if err != nil {
+			r.Fatalf("ClaimBatch by session-1 again: %v", err)
+		}
+		if got := assertOneBatch(r, "ClaimBatch by session-1 again", owner, "n-fenced", "n-open"); got != key {
+			r.Fatalf("batch key = %q, want the pinned %q", got, key)
+		}
+	})
+
+	r.Run("ClaimBatchAdoptsASupersededSessionsBatch", func(r Runner) {
+		queue := mustQueue(r, suite)
+		now := time.Now().UTC()
+		for _, item := range []nudgequeue.Item{nudgeItem("n-1", "session-old", now), nudgeItem("n-2", "session-old", now)} {
+			if err := queue.Enqueue(item); err != nil {
+				r.Fatalf("Enqueue(%s): %v", item.ID, err)
+			}
+		}
+		first, err := queue.ClaimBatch(storebinding.ClaimTarget{QueueKeys: []string{ConformanceNudgeAgent}, SessionID: "session-old"}, now)
+		if err != nil {
+			r.Fatalf("ClaimBatch by session-old: %v", err)
+		}
+		key := assertOneBatch(r, "ClaimBatch by session-old", first, "n-1", "n-2")
+		if err := queue.ReleaseClaims([]string{"n-1", "n-2"}, time.Time{}); err != nil {
+			r.Fatalf("ReleaseClaims: %v", err)
+		}
+		calls := 0
+		successorOnly := func() (map[string]struct{}, bool) {
+			calls++
+			return map[string]struct{}{"session-new": {}}, true
+		}
+		resumed, err := queue.ClaimBatch(storebinding.ClaimTarget{
+			QueueKeys:         []string{ConformanceNudgeAgent},
+			SessionID:         "session-new",
+			LiveFenceSessions: successorOnly,
+		}, now)
+		if err != nil {
+			r.Fatalf("ClaimBatch by session-new: %v", err)
+		}
+		if got := assertOneBatch(r, "ClaimBatch by session-new", resumed, "n-1", "n-2"); got != key {
+			r.Fatalf("adopted batch key = %q, want the pinned %q; a redelivery must be the same delivery", got, key)
+		}
+		if calls != 1 {
+			r.Errorf("one ClaimBatch asked the census %d times, want exactly once", calls)
+		}
+	})
+
 	r.Run("RecordFailureRejectionUnpins", func(r Runner) {
 		queue := mustQueue(r, suite)
 		now := time.Now().UTC()
