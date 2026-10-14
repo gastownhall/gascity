@@ -215,7 +215,7 @@ func TestIdempotentCreateReplayIndexDoesNotSkipLaterChanges(t *testing.T) {
 		{
 			name: "mail send",
 			request: func(_ *testing.T, fs *fakeMutatorState) (string, string) {
-				return cityURL(fs, "/mail"), `{"rig":"test-city","from":"alice","to":"worker","subject":"Hi","body":"hello"}`
+				return cityURL(fs, "/mail"), `{"rig":"test-city","from":"human","to":"worker","subject":"Hi","body":"hello"}`
 			},
 			mutate: markRead,
 		},

@@ -69,7 +69,7 @@ func TestOrderRunRootsStillCount(t *testing.T) {
 }
 
 // TestLastRunReadsPastAForgedNewestBounded (ga-klv, mc-v8g4p): with a plain
-// bead newest, LastRun's second read is bounded too (runRecordScanBound).
+// bead newest, LastRun's second read is bounded too (1 + runRecordScanBound).
 func TestLastRunReadsPastAForgedNewestBounded(t *testing.T) {
 	spy := &listSpyStore{Store: beads.NewMemStore()}
 	if _, err := spy.Create(beads.Bead{Title: "forged", Type: "task", Labels: []string{"order-run:digest"}}); err != nil {
@@ -79,8 +79,8 @@ func TestLastRunReadsPastAForgedNewestBounded(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i, q := range spy.queries {
-		if q.Limit < 1 || q.Limit > runRecordScanBound {
-			t.Fatalf("query %d: Limit = %d, want 1..%d", i, q.Limit, runRecordScanBound)
+		if q.Limit < 1 || q.Limit > 1+runRecordScanBound {
+			t.Fatalf("query %d: Limit = %d, want 1..%d", i, q.Limit, 1+runRecordScanBound)
 		}
 	}
 	if len(spy.queries) != 2 {
@@ -112,9 +112,9 @@ func TestIsRunRecordTakesEveryWorkflowRoot(t *testing.T) {
 }
 
 // TestNewestRunRecordsSecondReadNeverNarrows (the #7766 review): when a
-// plain bead displaces a run record, the second read asks for at least as
-// many rows as the first, so a caller wanting more than runRecordScanBound
-// records does not get fewer back for the displacement.
+// plain bead displaces a run record, the second read asks for
+// runRecordScanBound rows past the first's n, so a caller gets its n records
+// back whatever the displacement.
 func TestNewestRunRecordsSecondReadNeverNarrows(t *testing.T) {
 	for _, n := range []int{1, runRecordScanBound, 2 * runRecordScanBound} {
 		var limits []int
@@ -129,9 +129,8 @@ func TestNewestRunRecordsSecondReadNeverNarrows(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		want := min(n, max(n, runRecordScanBound)-1) // the plain bead takes a row of the second read
-		if len(limits) != 2 || limits[1] != max(n, runRecordScanBound) || len(got) != want {
-			t.Fatalf("n=%d: limits %v, %d records; want a second read of %d and %d records", n, limits, len(got), max(n, runRecordScanBound), want)
+		if len(limits) != 2 || limits[1] != n+runRecordScanBound || len(got) != n {
+			t.Fatalf("n=%d: limits %v, %d records; want a second read of %d and %d records", n, limits, len(got), n+runRecordScanBound, n)
 		}
 	}
 }

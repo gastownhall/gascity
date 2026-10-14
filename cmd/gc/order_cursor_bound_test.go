@@ -62,7 +62,7 @@ func TestBdCursorIgnoresAForgedSeq(t *testing.T) {
 	if _, err := mem.Create(beads.Bead{Title: "run", Labels: []string{"order-run:digest", "order:digest", "seq:5", "order-tracking"}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := mem.Create(beads.Bead{Title: "forged", Type: "task", Labels: []string{"order:digest", "seq:999999"}}); err != nil {
+	if _, err := mem.Create(beads.Bead{Title: "forged", Type: "task", Labels: []string{"order-run:digest", "order:digest", "seq:999999"}}); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := bdCursor(mem, "digest"); err != nil || got != 5 {
