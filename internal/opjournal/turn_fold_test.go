@@ -503,3 +503,28 @@ func TestTurnFoldIsStdlibOnly(t *testing.T) {
 		}
 	}
 }
+
+// A provider stop reason becomes the fact's Detail only as a token, so a
+// reason outside the alphabet never makes the end's fact unencodable.
+func TestFoldTurnStopReasonDetail(t *testing.T) {
+	cases := []struct{ stop, detail string }{
+		{"end_turn", "end_turn"},
+		{"MAX_TOKENS", "max_tokens"},
+		{"stop sequence", ""},
+		{"refusal!", ""},
+		{strings.Repeat("a", maxTokenLen+1), ""},
+		{"", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.stop, func(t *testing.T) {
+			obs := obsAt(3, "", time.Time{}, ObservedTurnEnd{ID: "T", EndedAt: ts(8), Status: TurnSourceCompleted, StopReason: c.stop})
+			_, facts, _ := FoldTurn(running(3, "T", ts(5)), obs, InterruptRef{})
+			if len(facts) != 1 || facts[0].Detail != c.detail {
+				t.Fatalf("facts %+v, want one with detail %q", facts, c.detail)
+			}
+			if _, err := EncodeFact("gc", facts[0]); err != nil {
+				t.Fatalf("fact does not encode: %v", err)
+			}
+		})
+	}
+}

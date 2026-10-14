@@ -2,6 +2,7 @@ package opjournal
 
 import (
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -160,8 +161,9 @@ type ObservedTurnEnd struct {
 	Status    TurnSourceStatus
 	// Inferred is an end read off an idle boundary rather than recorded.
 	Inferred bool
-	// StopReason is the provider's own stop reason, if any; it becomes the
-	// fact's Detail.
+	// StopReason is the provider's own stop reason, if any. It becomes the
+	// fact's Detail, lower-cased; one that is still not a token is left
+	// out, since Detail is optional and nothing decides on it.
 	StopReason string
 }
 
@@ -357,7 +359,7 @@ func (f *folder) end(e ObservedTurnEnd) {
 		return
 	}
 	fact := f.fact(FactTurnEnded, e.ID, orTime(e.EndedAt, f.obs.ObservedAt), basis)
-	fact.Reason, fact.Detail = string(reason), e.StopReason
+	fact.Reason, fact.Detail = string(reason), stopDetail(e.StopReason)
 	if reason == TurnEndInterrupted && f.interrupting.Op != "" {
 		fact.CauseOps = []string{f.interrupting.Op}
 	}
@@ -413,6 +415,16 @@ func (f *folder) reason(e ObservedTurnEnd) (TurnEndReason, FactBasis) {
 	default:
 		return TurnEndEnded, FactBasisRuntime
 	}
+}
+
+// stopDetail renders a provider stop reason as a fact Detail: lower-cased,
+// and empty when that is not a token.
+func stopDetail(stop string) string {
+	detail := strings.ToLower(stop)
+	if detail == "" || validateToken("stop reason", detail) != nil {
+		return ""
+	}
+	return detail
 }
 
 func orTime(t, fallback time.Time) time.Time {
