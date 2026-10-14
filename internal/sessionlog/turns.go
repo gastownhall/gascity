@@ -387,9 +387,9 @@ func (l *turnLedger) snapshot() TurnScan {
 // modification time changes. A TurnFollower is not safe for concurrent use.
 //
 // A follower remembers everything it folded since its last rescan, where
-// ScanTurns sees only its window. The two agree while the open turn began
-// within the last 16 MiB. Past that, the follower still reports the turn's
-// id and StartedAt, while ScanTurns reports a zero StartedAt or
+// ScanTurns sees only its window. The two agree while every turn they report
+// began within the last 16 MiB. Past that, the follower still reports such a
+// turn's id and StartedAt, while ScanTurns reports a zero StartedAt or
 // ErrTurnStartBeyondBudget. MissingIDs, MalformedRecords and
 // UntimedRecords likewise stay set for records that have left the window.
 type TurnFollower struct {
