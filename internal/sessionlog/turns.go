@@ -179,6 +179,9 @@ var (
 	// ErrTurnStartBeyondBudget reports a transcript whose scan window holds no
 	// turn record, so the current turn cannot be told.
 	ErrTurnStartBeyondBudget = errors.New("no turn record within the transcript scan budget")
+	// ErrTurnTranscriptBeyondBudget reports a whole-document transcript, read
+	// whole rather than backward, that is larger than the scan budget.
+	ErrTurnTranscriptBeyondBudget = errors.New("whole-document transcript exceeds the turn scan budget")
 )
 
 // ScanTurns reads the turns of provider's transcript at path: the open turn
@@ -353,7 +356,8 @@ func (l *turnLedger) snapshot() TurnScan {
 
 // TurnFollower reads one transcript's turns repeatedly. It folds only the
 // bytes appended since its last read, and rescans after the file shrinks or
-// is replaced. A TurnFollower is not safe for concurrent use.
+// is replaced. A whole-document transcript is rescanned only when its size or
+// modification time changes. A TurnFollower is not safe for concurrent use.
 type TurnFollower struct {
 	path   string
 	format turnFormat
@@ -384,6 +388,9 @@ func (f *TurnFollower) Read() (TurnScan, error) {
 		f.reset()
 		return TurnScan{}, fmt.Errorf("reading transcript for turns: %w", err)
 	}
+	if f.unchanged(info) {
+		return f.fold.scan(), nil
+	}
 	if !f.canFollow(info) {
 		return f.rescan()
 	}
@@ -402,6 +409,14 @@ func (f *TurnFollower) Read() (TurnScan, error) {
 func (f *TurnFollower) canFollow(info os.FileInfo) bool {
 	return f.fold != nil && f.fold.appendable() && os.SameFile(f.info, info) &&
 		info.Size() >= f.offset && info.Size()-f.offset <= f.budget
+}
+
+// unchanged reports whether info's file is a whole-document transcript
+// already folded, with the same size and modification time. Such a file is
+// rewritten rather than appended to, so only a rewrite changes it.
+func (f *TurnFollower) unchanged(info os.FileInfo) bool {
+	return f.fold != nil && !f.fold.appendable() && os.SameFile(f.info, info) &&
+		info.Size() == f.offset && info.ModTime().Equal(f.info.ModTime())
 }
 
 func (f *TurnFollower) rescan() (TurnScan, error) {

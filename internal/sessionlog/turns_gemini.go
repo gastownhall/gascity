@@ -2,6 +2,7 @@ package sessionlog
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -51,7 +52,7 @@ func (l geminiTurnLine) snapshot() ([]json.RawMessage, bool) {
 
 func (geminiTurnFormat) scan(path string, r io.ReaderAt, size, budget int64) (turnFold, error) {
 	if !strings.EqualFold(filepath.Ext(path), ".jsonl") {
-		return scanGeminiJSONTurns(r, size)
+		return scanGeminiJSONTurns(r, size, budget)
 	}
 	var lines [][]byte // newest first
 	truncated, err := collectTurnLines(r, size, budget, func(line []byte) bool {
@@ -77,8 +78,12 @@ func (geminiTurnFormat) scan(path string, r io.ReaderAt, size, budget int64) (tu
 }
 
 // scanGeminiJSONTurns reads a whole-document chat file. The document is
-// rewritten as a whole, so it is read whole and never followed by appends.
-func scanGeminiJSONTurns(r io.ReaderAt, size int64) (turnFold, error) {
+// rewritten as a whole, so it is read whole, at most budget bytes, and never
+// followed by appends.
+func scanGeminiJSONTurns(r io.ReaderAt, size, budget int64) (turnFold, error) {
+	if size > budget {
+		return nil, fmt.Errorf("%w: %d bytes", ErrTurnTranscriptBeyondBudget, size)
+	}
 	data := make([]byte, size)
 	if _, err := r.ReadAt(data, 0); err != nil {
 		return nil, fmt.Errorf("reading transcript for turns: %w", err)
@@ -86,10 +91,12 @@ func scanGeminiJSONTurns(r io.ReaderAt, size int64) (turnFold, error) {
 	var doc struct {
 		Messages []json.RawMessage `json:"messages"`
 	}
-	if !json.Valid(data) {
-		return nil, ErrTornTurnRecord
-	}
 	if err := json.Unmarshal(data, &doc); err != nil {
+		var syntax *json.SyntaxError
+		if errors.As(err, &syntax) {
+			// A document caught mid-rewrite is torn.
+			return nil, fmt.Errorf("%w: %w", ErrTornTurnRecord, err)
+		}
 		return nil, fmt.Errorf("decoding Gemini chat file for turns: %w", err)
 	}
 	fold := &geminiTurnFold{seen: make(map[string]bool)}
