@@ -372,7 +372,7 @@ func TestPendingCreateLeaseAnchor(t *testing.T) {
 		name        string
 		info        sessionpkg.Info
 		wantAnchor  time.Time
-		wantExpired bool // at created+14m: past the lease from 'created', inside it from 'claimed'
+		wantExpired bool // at created+12m: past the lease from 'created' (10m), inside it from 'claimed' (13m)
 	}{
 		{"claim time wins when it parses", deferralInfo(created, claimed), claimed, false},
 		{"claim time absent: creation", deferralInfo(created, time.Time{}), created, true},
@@ -388,7 +388,7 @@ func TestPendingCreateLeaseAnchor(t *testing.T) {
 			if got := pendingCreateLeaseAnchor(tc.info); !got.Equal(tc.wantAnchor) {
 				t.Fatalf("anchor = %v, want %v", got, tc.wantAnchor)
 			}
-			now := created.Add(14 * time.Minute)
+			now := created.Add(12 * time.Minute)
 			if got := pendingCreateNeverStartedLeaseExpiredAt(tc.info, now); got != tc.wantExpired {
 				t.Fatalf("lease expired at %v = %v, want %v", now, got, tc.wantExpired)
 			}

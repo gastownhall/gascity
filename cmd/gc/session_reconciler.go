@@ -1565,6 +1565,12 @@ func pendingCreateLeaseActive(i sessionpkg.Info, inFlight, neverStartedExpired, 
 // window still handles corrupt/unparseable last_woke_at metadata and generic
 // creating-state cleanup, while never-started creates need enough time to sit
 // behind a busy pool start queue.
+//
+// A never-started create waiting only on a start gate (the per-tick wake budget
+// or the async start limiter) is kept past this lease by startDeferralMemo, up
+// to startDeferralHoldCeiling. The memo is in-memory and read by the
+// reconciler and the reaper; a reader that sees only the bead (gc session wake)
+// still judges the row by this lease alone, and a restart forgets the memo.
 const pendingCreateNeverStartedTimeout = 10 * time.Minute
 
 // wakeUndesiredGrace is how long a live session woken recently is spared the
@@ -1682,10 +1688,7 @@ func pendingCreateNeverStartedLeaseExpiredAt(i sessionpkg.Info, now time.Time) b
 	if strings.TrimSpace(i.LastWokeAt) != "" {
 		return false
 	}
-	anchor := i.CreatedAt
-	if started, ok := parseRFC3339Metadata(i.PendingCreateStartedAt); ok {
-		anchor = started
-	}
+	anchor := pendingCreateLeaseAnchor(i)
 	if anchor.IsZero() {
 		return true
 	}
@@ -2026,6 +2029,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		}
 	}
 	capacityGuard := reconcileOpts.capacityGuard
+	deferralMemo := reconcileOpts.deferralMemo
 	effectiveStartOptions := startOptions
 	if !storeQueryPartial && reconcileOpts.workDirResolver == nil && len(assignedWorkBeads) > 0 {
 		effectiveStartOptions = append(append([]startExecutionOption(nil), startOptions...), withTaskWorkDirResolver(newAssignedTaskWorkDirResolver(cityPath, assignedWorkBeads)))
@@ -3208,6 +3212,19 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonEndpointCapacityOpen, TraceOutcomeDeferred, tp.TemplateName, name, traceRecordPayload{
 							"endpoint": string(endpoint),
 							"state":    st.State.String(),
+						})
+					}
+				} else if now := clk.Now(); deferralMemo.Holds(infoPostZombie, now) {
+					// The create waits only on a start gate (the per-tick wake
+					// budget or the async start limiter): nothing refused it, so
+					// the lease does not roll it back while the pool drains.
+					expired = false
+					capacityHeld = true
+					fmt.Fprintf(stderr, "session reconciler: keeping pending create %s past its lease: its start is waiting on a start gate\n", name) //nolint:errcheck
+					if trace != nil {
+						trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonStartGateDeferred, TraceOutcomeDeferred, tp.TemplateName, name, traceRecordPayload{
+							"hold":       "start_gate",
+							"anchor_age": now.Sub(pendingCreateLeaseAnchor(infoPostZombie)).Truncate(time.Second).String(),
 						})
 					}
 				}
