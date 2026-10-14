@@ -39,6 +39,10 @@ func TestDecideRowConfigDrift(t *testing.T) {
 	key := stale + ":" + core
 	launchOnly := []string{"started_provision_hash", runtime.ProvisionFingerprint(cfg), "started_launch_hash", runtime.FingerprintVersion + ":old-launch"}
 	named := []string{"configured_named_session", "true", "configured_named_identity", "worker", "configured_named_mode", "always"}
+	// An agent heartbeat's hold (a live held_until under no sleep intent)
+	// keeps A6's awake heal off a drained row (operator-dormant), so A14
+	// decides on it with the request still residue.
+	heartbeat := []string{"held_until", rowAt(time.Hour)}
 	for _, tc := range []struct {
 		name             string
 		meta             []string
@@ -54,8 +58,11 @@ func TestDecideRowConfigDrift(t *testing.T) {
 		// drained row whose own runtime came back carries this incarnation's
 		// request as residue, which A14 does not rewrite; another
 		// incarnation's request is no such residue.
-		{name: "a drained row's standing drift request is not begun again", meta: slices.Concat([]string{"started_config_hash", stale, "state", "drained"}, intentAt(drainConfigDrift, "3")), alive: true},
-		{name: "another incarnation's drift request is begun anew", meta: slices.Concat([]string{"started_config_hash", stale, "state", "drained"}, intentAt(drainConfigDrift, "2")), alive: true, wantKind: intentDrainBegin, wantReason: decideDrainBegin + drainConfigDrift},
+		{name: "a drained row's standing drift request is not begun again", meta: slices.Concat([]string{"started_config_hash", stale, "state", "drained"}, heartbeat, intentAt(drainConfigDrift, "3")), alive: true},
+		{name: "another incarnation's drift request is begun anew", meta: slices.Concat([]string{"started_config_hash", stale, "state", "drained"}, heartbeat, intentAt(drainConfigDrift, "2")), alive: true, wantKind: intentDrainBegin, wantReason: decideDrainBegin + drainConfigDrift},
+		// Without the heartbeat's hold, A6 heals such a drained row awake
+		// first (legacy's healState; release B7), so the request stands active.
+		{name: "a drained row whose own runtime is alive heals awake first", meta: slices.Concat([]string{"started_config_hash", stale, "state", "drained"}, intentAt(drainConfigDrift, "3")), alive: true, wantKind: intentRowHealFresh, wantReason: decideAwakeHeal},
 		{name: "attached stamps its deferral", meta: []string{"started_config_hash", stale}, alive: true, attached: true, wantKind: intentRowHeal, wantReason: decideDriftAttached},
 		{name: "an attach unknown stamps its deferral", meta: []string{"started_config_hash", stale}, alive: true, unsure: true, wantKind: intentRowHeal, wantReason: decideDriftAttached},
 		{name: "attached with a fresh stamp writes nothing", meta: []string{"started_config_hash", stale, "attached_config_drift_deferred_key", key, "attached_config_drift_deferred_at", rowAt(-time.Minute)}, alive: true, attached: true},
