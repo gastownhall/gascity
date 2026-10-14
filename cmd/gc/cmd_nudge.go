@@ -3758,9 +3758,11 @@ func recoverExpiredInFlightNudgesWithClock(state *nudgeQueueState, front *nudgeq
 	return nil
 }
 
-// pruneDeadQueuedNudges removes dead-letter items older than defaultQueuedNudgeDeadRetention
-// when a durable terminal bead record exists in the store. Items without a confirmed terminal
-// bead are retained so terminal history is not lost if the bead store write failed.
+// pruneDeadQueuedNudges removes dead-letter items older than defaultQueuedNudgeDeadRetention.
+// A shadow-backed item (non-empty BeadID) is pruned only once its terminal bead record is
+// confirmed in the store; shadow-backed items without a confirmed terminal bead are retained
+// so terminal history is not lost if the bead store write failed. A shadowless item has no
+// record to confirm and is pruned on DeadAt alone. Items with a zero DeadAt are retained.
 func pruneDeadQueuedNudges(state *nudgeQueueState, front *nudgequeue.Store, now, deadline time.Time) error {
 	return pruneDeadQueuedNudgesWithClock(state, front, now, deadline, clock.Real{})
 }
@@ -3815,6 +3817,10 @@ func pruneDeadQueuedNudgesWithClock(state *nudgeQueueState, front *nudgequeue.St
 				// prune once past retention.
 				continue
 			}
+		} else if !item.DeadAt.IsZero() && item.DeadAt.Before(cutoff) {
+			// No shadow to confirm: the queue entry is the only record, so
+			// it ages out on DeadAt alone.
+			continue
 		}
 		filtered = append(filtered, item)
 	}
