@@ -315,12 +315,7 @@ func bdStoreForCityWithConfig(dir, cityPath string, cfg *config.City) *beads.BdS
 		}
 	}
 	reapStaleBdExportJSONL(dir)
-	return beads.NewBdStoreWithPrefix(
-		dir,
-		withBdReadMemo(cityPath, bdCommandRunnerForCity(cityPath)),
-		issuePrefixForScope(dir, cityPath, cfg),
-		bdStoreOptionsForConfig(cfg)...,
-	)
+	return beads.NewBdStoreWithPrefix(dir, withBdReadMemo(cityPath, bdCommandRunnerForCity(cityPath)), issuePrefixForScope(dir, cityPath, cfg), bdStoreOptionsWithReadMemo(cityPath, cfg)...)
 }
 
 // bdStoreForRig opens a bead store at rigDir using rig-level Dolt config
@@ -337,12 +332,7 @@ func bdStoreForRig(rigDir, cityPath string, cfg *config.City, knownPrefix ...str
 		}
 	}
 	reapStaleBdExportJSONL(rigDir)
-	return beads.NewBdStoreWithPrefix(
-		rigDir,
-		withBdReadMemo(cityPath, bdCommandRunnerForRig(cityPath, cfg, rigDir)),
-		prefix,
-		bdStoreOptionsForConfig(cfg)...,
-	)
+	return beads.NewBdStoreWithPrefix(rigDir, withBdReadMemo(cityPath, bdCommandRunnerForRig(cityPath, cfg, rigDir)), prefix, bdStoreOptionsWithReadMemo(cityPath, cfg)...)
 }
 
 func bdStoreOptionsForConfig(cfg *config.City) []beads.BdStoreOption {
@@ -454,12 +444,7 @@ func scopeJSONLIsReapable(fs fsys.FS, scopeRoot string) bool {
 
 func controlBdStoreForCity(dir, cityPath string, cfg *config.City) *beads.BdStore {
 	reapStaleBdExportJSONL(dir)
-	return beads.NewBdStoreWithPrefix(
-		dir,
-		withBdReadMemo(cityPath, controlBdCommandRunnerForCity(cityPath)),
-		issuePrefixForScope(dir, cityPath, cfg),
-		bdStoreOptionsForConfig(cfg)...,
-	)
+	return beads.NewBdStoreWithPrefix(dir, withBdReadMemo(cityPath, controlBdCommandRunnerForCity(cityPath)), issuePrefixForScope(dir, cityPath, cfg), bdStoreOptionsWithReadMemo(cityPath, cfg)...)
 }
 
 func controlBdStoreForRig(rigDir, cityPath string, cfg *config.City, knownPrefix ...string) *beads.BdStore {
@@ -473,12 +458,7 @@ func controlBdStoreForRig(rigDir, cityPath string, cfg *config.City, knownPrefix
 		}
 	}
 	reapStaleBdExportJSONL(rigDir)
-	return beads.NewBdStoreWithPrefix(
-		rigDir,
-		withBdReadMemo(cityPath, controlBdCommandRunnerForRig(cityPath, cfg, rigDir)),
-		prefix,
-		bdStoreOptionsForConfig(cfg)...,
-	)
+	return beads.NewBdStoreWithPrefix(rigDir, withBdReadMemo(cityPath, controlBdCommandRunnerForRig(cityPath, cfg, rigDir)), prefix, bdStoreOptionsWithReadMemo(cityPath, cfg)...)
 }
 
 func controlBdCommandRunnerForCity(cityPath string) beads.CommandRunner {
