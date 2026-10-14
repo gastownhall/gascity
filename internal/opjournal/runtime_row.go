@@ -365,7 +365,7 @@ func (c TurnCells) validate() error {
 	return c.Caps.validate()
 }
 
-func (cs TurnCaps) validate() error {
+func (cs TurnCapsStamp) validate() error {
 	seen := make(map[string]bool, len(cs))
 	for _, c := range cs {
 		if c.Key == "" || c.Value == "" {
@@ -383,7 +383,7 @@ func (cs TurnCaps) validate() error {
 }
 
 // String renders the stamp as k=v pairs joined by ",".
-func (cs TurnCaps) String() string {
+func (cs TurnCapsStamp) String() string {
 	parts := make([]string, len(cs))
 	for i, c := range cs {
 		parts[i] = c.Key + "=" + c.Value
@@ -391,18 +391,18 @@ func (cs TurnCaps) String() string {
 	return strings.Join(parts, ",")
 }
 
-// ParseTurnCaps parses a stamp written by TurnCaps.String.
-func ParseTurnCaps(s string) (TurnCaps, error) {
+// ParseTurnCapsStamp parses a stamp written by TurnCapsStamp.String.
+func ParseTurnCapsStamp(s string) (TurnCapsStamp, error) {
 	if s == "" {
 		return nil, nil
 	}
-	var out TurnCaps
+	var out TurnCapsStamp
 	for _, part := range strings.Split(s, ",") {
 		k, v, ok := strings.Cut(part, "=")
 		if !ok {
 			return nil, invalidf("turn capability %q is not k=v", part)
 		}
-		out = append(out, TurnCap{Key: k, Value: v})
+		out = append(out, TurnCapsPair{Key: k, Value: v})
 	}
 	if err := out.validate(); err != nil {
 		return nil, err
@@ -494,7 +494,7 @@ func DecodeRuntimeRow(b beads.Bead) (RuntimeRow, error) {
 		}
 		r.Lease = l
 	}
-	caps, err := ParseTurnCaps(d.meta[keyRTTurnCaps])
+	caps, err := ParseTurnCapsStamp(d.meta[keyRTTurnCaps])
 	if err != nil {
 		return RuntimeRow{}, corruptf(b.ID, "%s: %v", keyRTTurnCaps, err)
 	}

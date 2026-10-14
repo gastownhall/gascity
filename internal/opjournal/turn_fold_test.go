@@ -12,7 +12,7 @@ import (
 
 var (
 	ts       = func(sec int) time.Time { return t0.Add(time.Duration(sec) * time.Second) }
-	foldCaps = TurnCaps{{"start", "recorded"}, {"end", "recorded"}, {"fence", "checked"}, {"link", "correlated"}, {"source", "transcript"}}
+	foldCaps = TurnCapsStamp{{"start", "recorded"}, {"end", "recorded"}, {"fence", "checked"}, {"link", "correlated"}, {"source", "transcript"}}
 	stopOp   = "gc-op-kdpftlql5feaypldytje3nypwy"
 )
 
@@ -200,10 +200,10 @@ func TestFoldTurnTable(t *testing.T) {
 			prev: running(3, "T", ts(5)),
 			obs: func() TurnObservation {
 				o := obsAt(4, "U", ts(50))
-				o.Caps = TurnCaps{{"start", "boundary"}}
+				o.Caps = TurnCapsStamp{{"start", "boundary"}}
 				return o
 			}(),
-			next:  TurnCells{Generation: 4, Caps: TurnCaps{{"start", "boundary"}}, ID: "U", State: TurnStateRunning, At: ts(50), ObservedAt: ts(100)},
+			next:  TurnCells{Generation: 4, Caps: TurnCapsStamp{{"start", "boundary"}}, ID: "U", State: TurnStateRunning, At: ts(50), ObservedAt: ts(100)},
 			facts: []Fact{started(4, "U", ts(50))},
 			write: true,
 		},
@@ -251,12 +251,12 @@ func TestFoldTurnTable(t *testing.T) {
 			prev: running(3, "T", ts(5)),
 			obs: func() TurnObservation {
 				o := obsAt(3, "T", ts(5))
-				o.Caps = TurnCaps{{"start", "boundary"}}
+				o.Caps = TurnCapsStamp{{"start", "boundary"}}
 				return o
 			}(),
 			next: func() TurnCells {
 				c := running(3, "T", ts(5))
-				c.Caps, c.ObservedAt = TurnCaps{{"start", "boundary"}}, ts(100)
+				c.Caps, c.ObservedAt = TurnCapsStamp{{"start", "boundary"}}, ts(100)
 				return c
 			}(),
 			write: true,

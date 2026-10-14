@@ -80,18 +80,20 @@ const (
 	TurnSourceRestarted TurnSourceStatus = "restarted"
 )
 
-// TurnCap is one key=value pair of the turn capabilities stamp.
-type TurnCap struct {
+// TurnCapsPair is one key=value pair of the turn capabilities stamp.
+type TurnCapsPair struct {
 	Key   string
 	Value string
 }
 
-// TurnCaps is the turn capabilities stamp (gc.rt.turn.caps): the turn axes,
-// then source, interrupt and replace, in the observer's order, as k=v pairs
-// joined by ",". Keys and values are tokens. The observer writes it at the
-// first observation of a generation and at every downgrade; the codec does
-// not interpret it.
-type TurnCaps []TurnCap
+// TurnCapsStamp is the stored form of the turn capabilities stamp
+// (gc.rt.turn.caps): the turn axes, then source, interrupt and replace, in the
+// observer's order, as k=v pairs joined by ",". Keys and values are tokens.
+// The observer writes it at the first observation of a generation and at
+// every downgrade; the codec does not interpret it. The typed capability axes
+// the lane reads (DES-O1 §4.2's Caps.Turns) are parsed from it at that edge
+// and are not this type.
+type TurnCapsStamp []TurnCapsPair
 
 // TurnCells are the runtime row's gc.rt.turn.* cells. The turn observer is
 // their only writer (D-TURN). They are observations: hints with an age, never
@@ -104,7 +106,7 @@ type TurnCells struct {
 	// unknown.
 	Generation int64
 	// Caps is the capabilities stamp (gc.rt.turn.caps).
-	Caps TurnCaps
+	Caps TurnCapsStamp
 	// ID is the running turn's source-owned id while State is running, and
 	// empty otherwise (gc.rt.turn.id).
 	ID string
@@ -172,7 +174,7 @@ type TurnObservation struct {
 	// dates every cell write and every fact without a source time.
 	ObservedAt time.Time
 	// Caps is the capabilities stamp to publish; nil keeps the stored one.
-	Caps TurnCaps
+	Caps TurnCapsStamp
 }
 
 // InterruptRef names the interrupt gc is running on a turn, so the fold
