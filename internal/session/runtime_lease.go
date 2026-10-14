@@ -497,6 +497,9 @@ func (l *RuntimeLease) Watch(ctx context.Context, every time.Duration) (context.
 			case <-watched.Done():
 				return
 			case <-t.C:
+				if watched.Err() != nil { // a tick racing the end starts no read
+					return
+				}
 				if bead, err := l.store.freshBead(l.id); err == nil && !l.holdsRow(bead) {
 					cancelLost(ErrRuntimeLeaseLost)
 					return
