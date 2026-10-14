@@ -376,7 +376,9 @@ func (a *Admission) Accept(answer any) {
 
 // Result is a legacy path's verdict for Finish. LeaveOpen keeps a
 // client-keyed op open after a retryable error, so a same-key retry adopts
-// it (DES-O0API D10); Outcome then says what the error was.
+// it (DES-O0API D10); Outcome then says what the error was. Only a recorder
+// that adopts (one with an in-flight registry) honors LeaveOpen; the CLI
+// closes the op with Outcome.
 type Result struct {
 	Outcome   opjournal.Outcome
 	LeaveOpen bool
@@ -397,9 +399,9 @@ type Finished struct {
 	Background <-chan struct{}
 }
 
-// Finish closes the op from res (or deliberately leaves it open) and releases
-// the in-flight entry (DES-O0API §5.2). It acts once per admission and
-// nothing for a Replay. A close that keeps failing degrades; the API then
+// Finish closes the op from res (or, on the API, deliberately leaves it
+// open) and releases the in-flight entry (DES-O0API §5.2). It acts once per
+// admission and nothing for a Replay. A close that keeps failing degrades; the API then
 // retries in the background until finish_by, holding the entry, and the CLI
 // gives up and leaves the op to the sweeper.
 func (a *Admission) Finish(res Result) Finished {
@@ -413,7 +415,10 @@ func (a *Admission) Finish(res Result) Finished {
 		}
 		return Finished{}
 	}
-	if res.LeaveOpen {
+	// Only a recorder that adopts (the API, with an in-flight registry)
+	// leaves an op open for a same-key retry; CLI ops always close
+	// (DES-O0API §8.2).
+	if res.LeaveOpen && r.Inflight != nil {
 		a.release()
 		r.count(a.Op.Kind, StageClose, ResultLeftOpen, "")
 		return Finished{}

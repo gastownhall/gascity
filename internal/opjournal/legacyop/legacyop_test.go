@@ -491,6 +491,29 @@ func TestFinish(t *testing.T) {
 			t.Fatalf("retry = %+v, %v", again, err)
 		}
 	})
+	t.Run("the CLI closes what the API would leave open", func(t *testing.T) {
+		// CLI ops always close (DES-O0API §8.2): nobody can adopt one, so a
+		// left-open op would only turn the next same-key run busy and then
+		// replay the sweeper's failed{deadline_in_flight}.
+		e := newEnv(t)
+		r := cliRecorder(e, gate.Auto)
+		adm, err := r.Admit(msg("k1", "hello"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		res := testSentinels.SyncResult(opjournal.KindWake, wrap(errStarting), adm.Minted)
+		if !res.LeaveOpen {
+			t.Fatal("setup: a client-keyed retryable error is not left open")
+		}
+		f := adm.Finish(res)
+		if !f.Closed || f.Op.Outcome != res.Outcome {
+			t.Fatalf("Finish = %+v", f)
+		}
+		again, err := r.Admit(msg("k1", "hello"))
+		if err != nil || again.Decision != Replay || again.Op.Outcome != failed(opjournal.RefusedReasonPrefix+"session_starting") {
+			t.Fatalf("same-key run = %+v, %v; want a replay of the refusal", again, err)
+		}
+	})
 	t.Run("a late result", func(t *testing.T) {
 		e := newEnv(t)
 		r := cliRecorder(e, gate.Auto)

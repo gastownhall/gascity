@@ -85,7 +85,8 @@ func (s Sentinels) MessageResult(queued bool, err error) Result {
 // succeeded{via: legacy} (a reset that rolled back a pending create sets
 // ViaLegacyRollback itself). Definitive answers close; a retryable error
 // leaves a client-keyed op open, so a same-key retry adopts and re-executes,
-// and closes a minted-key op with its outcome (DES-O0API D10).
+// and closes a minted-key op with its outcome (DES-O0API D10). LeaveOpen is
+// a request: Finish honors it only on a surface that adopts (the API).
 func (s Sentinels) SyncResult(kind opjournal.Kind, err error, minted bool) Result {
 	switch {
 	case err == nil:

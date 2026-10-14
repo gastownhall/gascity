@@ -9,8 +9,9 @@
 // hook. Require (durable) refuses a request it cannot record before any legacy
 // effect. Admit decides: execute (recorded or not) or replay a stored or
 // in-flight outcome, and returns an error only for refusals a caller maps to
-// its wire. Finish closes the op from the legacy result, or leaves a
-// client-keyed op open for a same-key retry to adopt.
+// its wire. Finish closes the op from the legacy result, or, on the API,
+// leaves a client-keyed op open for a same-key retry to adopt; CLI ops always
+// close.
 //
 // The ops are acceptance records: their executor is legacy:api or legacy:cli,
 // so a lane never takes one; only their legacy path, an API adopter (Adopt;
