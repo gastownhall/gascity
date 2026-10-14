@@ -18,6 +18,7 @@ go_library(
         "runtime_row.go",
         "store.go",
         "turn_fold.go",
+        "turn_link.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/opjournal",
     visibility = ["//:__subpackages__"],
@@ -43,9 +44,8 @@ go_test(
         "testenv_import_test.go",
         "turn_fold_model_test.go",
         "turn_fold_test.go",
+        "turn_link_test.go",
     ],
-    # TestTurnFoldIsStdlibOnly parses the fold's source.
-    data = ["turn_fold.go"],
     embed = [":opjournal"],
     deps = [
         "//internal/beadmeta",

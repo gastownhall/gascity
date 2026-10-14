@@ -1,0 +1,224 @@
+package opjournal
+
+import (
+	"slices"
+	"time"
+)
+
+// Tri is yes, no or unknown. The zero value is TriUnknown, so an unset value
+// never reads as "no".
+type Tri int8
+
+// Tri values.
+const (
+	TriUnknown Tri = iota
+	TriNo
+	TriYes
+)
+
+// LinkMode is how a delivery meets the session's turns. The lane sets it from
+// the plan: LinkJoins for a steer delivered mid-turn and for an in-band pass,
+// LinkStarts for everything else, including a steer delivered at a boundary.
+type LinkMode string
+
+// Link modes.
+const (
+	LinkStarts LinkMode = "starts" // delivered at a boundary: it starts the next turn
+	LinkJoins  LinkMode = "joins"  // steer, or an in-band pass: it joins the running turn
+)
+
+// AckKind is the runtime's answer to one delivery.
+type AckKind string
+
+// Runtime acks.
+const (
+	// AckDelivered: the runtime accepted the input (for some terminals, it saw
+	// the session turn busy after the submit).
+	AckDelivered AckKind = "delivered"
+	// AckDeliveredUnobserved: the input was delivered, but the runtime never
+	// saw the session turn busy.
+	AckDeliveredUnobserved AckKind = "delivered_unobserved"
+	// AckInBand: the input was injected into a starting turn by a hook.
+	AckInBand AckKind = "in_band"
+)
+
+// DeliveryRecord is what Done records on every op of one delivery. It carries
+// no text: an op's turn comes from correlating this record with observed
+// turns, never from anything in the delivered text.
+type DeliveryRecord struct {
+	Seq        uint64    // lane_seq of the delivery's head op
+	At         time.Time // lane host clock, just before the effect's first input
+	Generation int64     // from the Take's fence
+	Epoch      int64
+	Mode       LinkMode
+	Ack        AckKind   // delivered | delivered_unobserved | in_band
+	MessageID  string    // the runtime's id for the delivered message, "" when it reports none
+	MessageAt  time.Time // the creation time the runtime stamped on that message; zero when it reports none
+	TurnID     string    // the turn a runtime receipt or a verified hook payload names
+}
+
+// SeenTurn is one turn a turn-history read showed, in observation order.
+type SeenTurn struct {
+	ID         string
+	Generation int64
+	StartedAt  time.Time // the source's start time; zero when unknown
+	Running    bool
+}
+
+// FirstTurnRead is the first turn-history read after the effect that
+// succeeded. Row 4 of CorrelateTurn's rule reads "the probe's live turn is
+// still current at the first read after the effect" from it alone, never from
+// Seen, which merges every read and so has no read boundaries. The
+// deliverer sets it once, from that read, and leaves it as is on later reads.
+type FirstTurnRead struct {
+	// Done is true once a read after the effect succeeded. While it is false,
+	// row 4 cannot match, and a failed read leaves the link read_failed.
+	Done bool
+	// Current is the id of the turn that read showed running, "" when none
+	// was running.
+	Current string
+}
+
+// TurnEvidence is what a deliverer read of the session's turns, within the
+// delivery's lease, from the probe up to the latest read after the effect.
+type TurnEvidence struct {
+	HasSource   bool          // the session's turn starts are recorded and this process can read them
+	SameClock   bool          // StartedAt is on the lane host's clock
+	Serial      bool          // only gc's input can start a turn on this source
+	LiveAtProbe Tri           // whether a turn was running at the probe
+	LiveTurn    string        // the turn running at the probe, "" when unknown
+	Known       []string      // turn ids the probe's read returned; never candidates
+	Seen        []SeenTurn    // every turn the reads after the effect showed, in observation order
+	FirstRead   FirstTurnRead // the first successful read after the effect
+	ReadErr     error         // the last read failed; never read as "no turn"
+}
+
+// LinkConfidence grades a delivered op's link to its turn.
+type LinkConfidence string
+
+// Link confidences.
+const (
+	LinkExact      LinkConfidence = "exact"
+	LinkCorrelated LinkConfidence = "correlated"
+	LinkAmbiguous  LinkConfidence = "ambiguous"
+	LinkNone       LinkConfidence = "none"
+)
+
+// Basis tokens: the row of CorrelateTurn's rule that decided a link.
+const (
+	BasisRuntimeTurn    = "runtime_turn"     // row 1: a runtime receipt names the turn
+	BasisHookPayload    = "hook_payload"     // row 1: a verified hook payload names the turn
+	BasisNoSource       = "no_source"        // row 2: no readable turn source
+	BasisRequestedAt    = "requested_at"     // row 3: a turn's start equals the message's stamp
+	BasisNoCandidate    = "no_candidate"     // rows 3 and 8: no turn matched
+	BasisJoinedLiveTurn = "joined_live_turn" // row 4: joined the turn live at the probe
+	BasisACPSerial      = "acp_serial"       // row 5: the one new turn on a serial source
+	BasisHistoryDiff    = "history_diff"     // row 6: the one new turn
+	BasisCompetingTurn  = "competing_turn"   // row 7: another turn could have consumed it
+	BasisReadFailed     = "read_failed"      // rows 3 and 8: no read after the effect succeeded
+)
+
+// TurnLink is a delivered op's turn, its confidence and the rule that decided
+// it. Turn is "" when Confidence is LinkNone.
+type TurnLink struct {
+	Turn       string
+	Confidence LinkConfidence
+	Basis      string
+}
+
+// CorrelateTurn decides a delivery's link to the turn that consumed it: the
+// one it started (LinkStarts) or the one it joined (LinkJoins). decided is
+// false while more evidence could still add a candidate; the deliverer reads
+// again until it is true or its link wait passes, and then records the link
+// as returned.
+//
+// Candidates are the Seen turns of rec.Generation that Known lacks and, when
+// SameClock, that started at or after rec.At truncated to the millisecond, in
+// observation order, each id once (later reads repeat a turn). The first matching row decides:
+//
+//  1. rec.TurnID set: that turn, exact (hook_payload for an in-band ack,
+//     else runtime_turn).
+//  2. No turn source: none, no_source.
+//  3. rec.MessageAt set: the first candidate whose StartedAt equals it,
+//     correlated, requested_at; with none, undecided none (row 8's basis).
+//     It never falls through to a history diff.
+//  4. LinkJoins, a live turn at the probe, and the first read after the
+//     effect shows that turn still current: it, correlated, joined_live_turn.
+//  5. Exactly one candidate, no live turn at the probe, and Serial: it,
+//     exact, acp_serial.
+//  6. Exactly one candidate and no live turn at the probe: it, correlated,
+//     history_diff.
+//  7. Any other candidate set: a second candidate, a live or unknown turn at
+//     the probe, or (LinkJoins) the probe's live turn no longer current at
+//     the first read. The first candidate, ambiguous, competing_turn.
+//  8. No candidate: undecided none, read_failed when no read after the
+//     effect succeeded and the last one failed, else no_candidate.
+//
+// decided is false only in row 3 without a match and in row 8.
+func CorrelateTurn(rec DeliveryRecord, ev TurnEvidence) (TurnLink, bool) {
+	if rec.TurnID != "" {
+		basis := BasisRuntimeTurn
+		if rec.Ack == AckInBand {
+			basis = BasisHookPayload
+		}
+		return TurnLink{Turn: rec.TurnID, Confidence: LinkExact, Basis: basis}, true
+	}
+	if !ev.HasSource {
+		return TurnLink{Confidence: LinkNone, Basis: BasisNoSource}, true
+	}
+	candidates := linkCandidates(rec, ev)
+	if !rec.MessageAt.IsZero() {
+		for _, c := range candidates {
+			if c.StartedAt.Equal(rec.MessageAt) {
+				return TurnLink{Turn: c.ID, Confidence: LinkCorrelated, Basis: BasisRequestedAt}, true
+			}
+		}
+		return noCandidate(ev), false
+	}
+	if rec.Mode == LinkJoins && ev.LiveAtProbe == TriYes && ev.LiveTurn != "" &&
+		ev.FirstRead.Done && ev.FirstRead.Current == ev.LiveTurn {
+		return TurnLink{Turn: ev.LiveTurn, Confidence: LinkCorrelated, Basis: BasisJoinedLiveTurn}, true
+	}
+	switch {
+	case len(candidates) == 0:
+		return noCandidate(ev), false
+	case len(candidates) == 1 && ev.LiveAtProbe == TriNo && ev.Serial:
+		return TurnLink{Turn: candidates[0].ID, Confidence: LinkExact, Basis: BasisACPSerial}, true
+	case len(candidates) == 1 && ev.LiveAtProbe == TriNo:
+		return TurnLink{Turn: candidates[0].ID, Confidence: LinkCorrelated, Basis: BasisHistoryDiff}, true
+	default:
+		// Row 4 already took a joins delivery whose live turn stayed current,
+		// so every remaining candidate set has a competitor.
+		return TurnLink{Turn: candidates[0].ID, Confidence: LinkAmbiguous, Basis: BasisCompetingTurn}, true
+	}
+}
+
+// linkCandidates returns the seen turns that could be the delivery's, in
+// observation order. A turn that several reads showed counts once, at its
+// first sighting.
+func linkCandidates(rec DeliveryRecord, ev TurnEvidence) []SeenTurn {
+	cutoff := rec.At.Truncate(time.Millisecond)
+	var out []SeenTurn
+	for _, t := range ev.Seen {
+		if t.Generation != rec.Generation || slices.Contains(ev.Known, t.ID) {
+			continue
+		}
+		if slices.ContainsFunc(out, func(c SeenTurn) bool { return c.ID == t.ID }) {
+			continue
+		}
+		if ev.SameClock && t.StartedAt.Before(cutoff) {
+			continue
+		}
+		out = append(out, t)
+	}
+	return out
+}
+
+// noCandidate is the undecided link while no turn matched. A failed read is
+// never read as "no turn".
+func noCandidate(ev TurnEvidence) TurnLink {
+	if ev.ReadErr != nil && !ev.FirstRead.Done {
+		return TurnLink{Confidence: LinkNone, Basis: BasisReadFailed}
+	}
+	return TurnLink{Confidence: LinkNone, Basis: BasisNoCandidate}
+}
