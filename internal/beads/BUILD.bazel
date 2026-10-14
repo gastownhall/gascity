@@ -154,6 +154,7 @@ go_test(
         "factory_metadata_backend_test.go",
         "factory_test.go",
         "filestore_atomic_close_test.go",
+        "filestore_guarded_batch_test.go",
         "filestore_test.go",
         "guarded_batch_export_test.go",
         "guarded_batch_test.go",
