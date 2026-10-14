@@ -2,6 +2,11 @@ package sessionlog
 
 import (
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -66,10 +71,22 @@ func TestScanTurnsClaudeFixtures(t *testing.T) {
 				{ID: claudeP1, StartedAt: turnTime(t, ts("00:00.123")), EndedAt: turnTime(t, ts("00:02.345")), Status: TurnStatusCancelled},
 			}}
 		}},
+		// An API error alone ends nothing: Claude Code retries some errors
+		// within the turn. The turn ends failed at its turn_duration or when
+		// a new prompt starts; a CLI that dies after the error leaves the end
+		// to the idle overlay (TI-2b).
 		{"api_error_last.jsonl", func(t *testing.T) TurnScan {
+			return TurnScan{
+				Open:    true,
+				Current: ScannedTurn{ID: claudeP2, StartedAt: turnTime(t, ts("00:02.250"))},
+				Recent: []ScannedTurn{
+					{ID: claudeP1, StartedAt: turnTime(t, ts("00:00.123")), EndedAt: turnTime(t, ts("00:01.500")), Status: TurnStatusCompleted},
+				},
+			}
+		}},
+		{"api_error_mid_response.jsonl", func(t *testing.T) TurnScan {
 			return TurnScan{Recent: []ScannedTurn{
-				{ID: claudeP2, StartedAt: turnTime(t, ts("00:02.250")), EndedAt: turnTime(t, ts("00:14.562")), Status: TurnStatusFailed},
-				{ID: claudeP1, StartedAt: turnTime(t, ts("00:00.123")), EndedAt: turnTime(t, ts("00:01.500")), Status: TurnStatusCompleted},
+				{ID: claudeP1, StartedAt: turnTime(t, ts("00:00.123")), EndedAt: turnTime(t, ts("00:08.010")), Status: TurnStatusCompleted},
 			}}
 		}},
 		{"sidechain.jsonl", func(t *testing.T) TurnScan {
@@ -170,9 +187,35 @@ func TestScanTurnsClaudeOverlongPromptIDIsNotAnIdentity(t *testing.T) {
 	assertTurnScan(t, got, TurnScan{Open: true, Current: ScannedTurn{StartedAt: turnTime(t, "2026-10-13T05:00:00.123Z")}, MissingIDs: true})
 }
 
-// TestScanTurnsClaudeAPIErrorThenTurnEnd: an API error followed by the
-// turn's turn_duration ends the turn failed at the turn_duration; an API
-// error the turn recovers from ends nothing.
+// TestScanTurnsClaudeMidResponseRetryStaysOpen: Claude Code writes "API
+// Error: Connection lost mid-response" and then continues the same turn, so
+// every prefix of the retried turn reads it open until its turn_duration.
+func TestScanTurnsClaudeMidResponseRetryStaysOpen(t *testing.T) {
+	data, err := os.ReadFile(turnFixture("claude", "api_error_mid_response.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.SplitAfter(strings.TrimSuffix(string(data), "\n"), "\n")
+	want := TurnScan{Open: true, Current: ScannedTurn{ID: claudeP1, StartedAt: turnTime(t, "2026-10-13T05:00:00.123Z")}}
+	for n := 1; n < len(lines); n++ {
+		path := filepath.Join(t.TempDir(), "claude.jsonl")
+		if err := os.WriteFile(path, []byte(strings.Join(lines[:n], "")), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got, err := ScanTurns("claude", path)
+		if err != nil {
+			t.Fatalf("after line %d: ScanTurns: %v", n, err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("after line %d:\n got: %+v\nwant: %+v", n, got, want)
+		}
+	}
+}
+
+// TestScanTurnsClaudeAPIErrorThenTurnEnd: an API error the turn does not
+// recover from ends the turn failed, at its turn_duration or, when a new
+// prompt comes first, at the error. A later main-chain reply or tool result
+// means the turn recovered, and it ends as its turn_duration says.
 func TestScanTurnsClaudeAPIErrorThenTurnEnd(t *testing.T) {
 	user := func(ts, id string) string {
 		return `{"type":"user","timestamp":"2026-10-13T05:` + ts + `Z","promptId":"` + id + `","message":{"role":"user","content":"prompt"}}`
@@ -180,20 +223,33 @@ func TestScanTurnsClaudeAPIErrorThenTurnEnd(t *testing.T) {
 	apiErr := func(ts string) string {
 		return `{"type":"assistant","timestamp":"2026-10-13T05:` + ts + `Z","isApiErrorMessage":true,"message":{"role":"assistant","content":[{"type":"text","text":"API Error"}]}}`
 	}
+	reply := func(ts string, sidechain bool) string {
+		return fmt.Sprintf(`{"type":"assistant","isSidechain":%v,"timestamp":"2026-10-13T05:%sZ","message":{"role":"assistant","content":[{"type":"text","text":"reply"}]}}`, sidechain, ts)
+	}
 	end := func(ts string) string {
 		return `{"type":"system","subtype":"turn_duration","timestamp":"2026-10-13T05:` + ts + `Z"}`
 	}
 	path := writeTurnLines(t, "claude.jsonl",
 		user("00:00.100", "p1"), apiErr("00:01.000"), end("00:01.010"),
 		user("00:02.100", "p2"), apiErr("00:03.000"), user("00:04.000", "p2"), end("00:05.000"),
+		user("00:06.100", "p3"), apiErr("00:07.000"), reply("00:08.000", false), end("00:09.000"),
+		user("00:10.100", "p4"), apiErr("00:11.000"), reply("00:11.500", true), end("00:12.000"),
+		user("00:13.100", "p5"), apiErr("00:14.000"), user("00:15.100", "p6"),
 	)
 	got, err := ScanTurns("claude", path)
 	if err != nil {
 		t.Fatalf("ScanTurns: %v", err)
 	}
 	ts := func(clock string) string { return "2026-10-13T05:" + clock + "Z" }
-	assertTurnScan(t, got, TurnScan{Recent: []ScannedTurn{
-		{ID: "p2", StartedAt: turnTime(t, ts("00:02.100")), EndedAt: turnTime(t, ts("00:05.000")), Status: TurnStatusCompleted},
-		{ID: "p1", StartedAt: turnTime(t, ts("00:00.100")), EndedAt: turnTime(t, ts("00:01.010")), Status: TurnStatusFailed},
-	}})
+	assertTurnScan(t, got, TurnScan{
+		Open:    true,
+		Current: ScannedTurn{ID: "p6", StartedAt: turnTime(t, ts("00:15.100"))},
+		Recent: []ScannedTurn{
+			{ID: "p5", StartedAt: turnTime(t, ts("00:13.100")), EndedAt: turnTime(t, ts("00:14.000")), Status: TurnStatusFailed},
+			{ID: "p4", StartedAt: turnTime(t, ts("00:10.100")), EndedAt: turnTime(t, ts("00:12.000")), Status: TurnStatusFailed},
+			{ID: "p3", StartedAt: turnTime(t, ts("00:06.100")), EndedAt: turnTime(t, ts("00:09.000")), Status: TurnStatusCompleted},
+			{ID: "p2", StartedAt: turnTime(t, ts("00:02.100")), EndedAt: turnTime(t, ts("00:05.000")), Status: TurnStatusCompleted},
+			{ID: "p1", StartedAt: turnTime(t, ts("00:00.100")), EndedAt: turnTime(t, ts("00:01.010")), Status: TurnStatusFailed},
+		},
+	})
 }

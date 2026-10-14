@@ -23,6 +23,13 @@ import (
 // tool result never starts a turn: it continues the open one, whatever id it
 // carries. Only when the scan window begins inside a turn does a tool result
 // open that turn, so its id is still known.
+//
+// An API error does not end a turn by itself: Claude Code retries some errors
+// ("Connection lost mid-response") within the same turn. The failure stays
+// pending until the turn_duration that follows it or the next prompt, which
+// end the turn failed. A later main-chain reply or tool result clears it. A
+// CLI that dies right after an error leaves its turn open here; TI-2b's idle
+// overlay infers that end.
 
 // claudeInterruptMarker starts the text Claude Code writes as the whole of a
 // user entry when the user interrupts a turn ("[Request interrupted by
@@ -38,6 +45,7 @@ const (
 	claudeRecordInterrupt
 	claudeRecordTurnEnd
 	claudeRecordAPIError
+	claudeRecordReply
 )
 
 // claudeTurnRecord is one transcript entry that bears on turns.
@@ -82,6 +90,8 @@ func parseClaudeTurnRecord(line []byte) (claudeTurnRecord, bool) {
 		rec.kind = claudeRecordTurnEnd
 	case e.Type == "assistant" && e.IsAPIError:
 		rec.kind = claudeRecordAPIError
+	case e.Type == "assistant":
+		rec.kind = claudeRecordReply
 	default:
 		return claudeTurnRecord{}, false
 	}
@@ -154,7 +164,7 @@ func (claudeTurnFormat) scan(_ string, r io.ReaderAt, size, budget int64) (turnF
 	if err != nil {
 		return nil, err
 	}
-	if truncated && !slices.ContainsFunc(records, func(rec claudeTurnRecord) bool { return rec.kind != claudeRecordAPIError }) {
+	if truncated && !slices.ContainsFunc(records, claudeTurnRecord.marksTurn) {
 		return nil, ErrTurnStartBeyondBudget
 	}
 	fold := &claudeTurnFold{startUnseen: truncated}
@@ -164,13 +174,21 @@ func (claudeTurnFormat) scan(_ string, r io.ReaderAt, size, budget int64) (turnF
 	return fold, nil
 }
 
+// marksTurn reports whether rec starts or ends a turn, rather than only
+// telling how the open one is going.
+func (rec claudeTurnRecord) marksTurn() bool {
+	return rec.kind != claudeRecordAPIError && rec.kind != claudeRecordReply
+}
+
 // claudeTurnFold folds Claude turn records, oldest first.
 type claudeTurnFold struct {
 	ledger turnLedger
 	// startUnseen: the window may begin inside a turn, so the first turn
 	// opened before any boundary has an unknown start.
 	startUnseen bool
-	// failedAt is set while the open turn's latest entry is an API error.
+	// failed is set while an API error of the open turn is pending: no
+	// reply, tool result or prompt of the turn has followed it yet. failedAt
+	// is the error's time.
 	failedAt time.Time
 	failed   bool
 }
@@ -199,6 +217,8 @@ func (f *claudeTurnFold) addRecord(rec claudeTurnRecord) {
 		if f.ledger.open {
 			f.failed, f.failedAt = true, rec.at
 		}
+	case claudeRecordReply:
+		f.failed = false
 	}
 }
 
@@ -250,14 +270,5 @@ func (f *claudeTurnFold) end(at time.Time, status TurnStatus) {
 	f.ledger.close(at, status)
 }
 
-// scan reports the fold. An open turn whose latest entry is an API error has
-// ended failed: Claude writes nothing more until the next prompt.
-func (f *claudeTurnFold) scan() TurnScan {
-	if !f.failed {
-		return f.ledger.snapshot()
-	}
-	l := f.ledger
-	l.recent = slices.Clone(l.recent)
-	l.close(f.failedAt, TurnStatusFailed)
-	return l.snapshot()
-}
+// scan reports the fold. A pending API error leaves its turn open.
+func (f *claudeTurnFold) scan() TurnScan { return f.ledger.snapshot() }
