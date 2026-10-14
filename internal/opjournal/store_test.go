@@ -75,9 +75,11 @@ func msgReq(key, payload string) Request {
 	}
 }
 
+// lifecycleReq is a lifecycle-lane op: the store tests drive the lane's
+// status machine, which only lane ops take.
 func lifecycleReq(kind Kind, key string) Request {
 	r := Request{
-		Conversation: "gc-1", Kind: kind, ClientKey: key,
+		Conversation: "gc-1", Kind: kind, Executor: ExecutorLane, ClientKey: key,
 		Producer: Producer{Principal: "operator:alice", Actor: ActorOperator},
 	}
 	if kind == KindKill {
@@ -1711,4 +1713,28 @@ func TestCloseExpired(t *testing.T) {
 			t.Fatalf("CloseExpired(closed) = %s %+v closed %v, %v", got.Status, got.Outcome, closedNow, err)
 		}
 	})
+}
+
+// Only its legacy path, an adopter or the sweeper closes a legacy op, and it
+// never leaves submitted before: Transition and Cancel refuse an open one.
+func TestLegacyOpsRefuseTransitionAndCancel(t *testing.T) {
+	h := newHarness(t)
+	op := h.propose(t, legacyReq(ExecutorLegacyCLI, "k"))
+	for _, to := range []Status{StatusAccepted, StatusExecuting} {
+		if _, err := h.store.Transition(op.ID, StatusSubmitted, to, "lane"); !errors.Is(err, ErrIllegalTransition) {
+			t.Fatalf("Transition(legacy op -> %s) = %v, want ErrIllegalTransition", to, err)
+		}
+	}
+	if _, _, err := h.store.Cancel(op.ID, "operator:alice", "no"); !errors.Is(err, ErrIllegalTransition) {
+		t.Fatalf("Cancel(open legacy op) = %v, want ErrIllegalTransition", err)
+	}
+	if got, _ := h.store.Get(op.ID); got.Status != StatusSubmitted || got.Revision != op.Revision {
+		t.Fatalf("refused moves wrote the op: %s revision %d", got.Status, got.Revision)
+	}
+	if _, err := h.store.Close(op.ID, Outcome{Arm: ArmSucceeded, Result: Result{Via: "legacy"}}, "legacy:cli"); err != nil {
+		t.Fatal(err)
+	}
+	if res, _, err := h.store.Cancel(op.ID, "operator:alice", "no"); err != nil || res != CancelAlreadyTerminal {
+		t.Fatalf("Cancel(closed legacy op) = %s, %v; want already_terminal", res, err)
+	}
 }

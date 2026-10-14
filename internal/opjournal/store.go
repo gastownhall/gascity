@@ -448,7 +448,8 @@ var legalEdges = map[Status][]Status{
 
 // Transition moves op id from expect to to. A status other than expect is
 // *StatusError; an edge outside the machine, a lifecycle op entering
-// executing, and any move to submitted or closed are ErrIllegalTransition.
+// executing, any move of a legacy op (it stays submitted until it closes) and
+// any move to submitted or closed are ErrIllegalTransition.
 func (s *Store) Transition(id string, expect, to Status, by string) (Op, error) {
 	if err := validateText("transition by", by, maxPrincipalLen); err != nil {
 		return Op{}, err
@@ -456,6 +457,9 @@ func (s *Store) Transition(id string, expect, to Status, by string) (Op, error) 
 	return s.mutate(id, by, func(cur Op, spec Spec) (Op, bool, error) {
 		if cur.Status != expect {
 			return Op{}, false, &StatusError{ID: id, Expected: expect, Current: cur.Status}
+		}
+		if cur.Executor.Legacy() {
+			return Op{}, false, fmt.Errorf("%w: %s op %s stays submitted until it closes", ErrIllegalTransition, cur.Executor, id)
 		}
 		if !slices.Contains(legalEdges[cur.Status], to) {
 			return Op{}, false, fmt.Errorf("%w: op %s %s -> %s", ErrIllegalTransition, id, cur.Status, to)
@@ -548,7 +552,8 @@ const (
 // decides the outcome. A settling op is AlreadyDecided and a closed op
 // AlreadyTerminal; neither is written, beyond repairing a torn close or
 // storing a close made outside the journal, and the caller audits the typed
-// result.
+// result. An open legacy op is not cancelable (ErrIllegalTransition): only its
+// legacy path, an adopter or the sweeper closes one.
 func (s *Store) Cancel(id, by, reason string) (CancelResult, Op, error) {
 	if err := validateText("cancel by", by, maxPrincipalLen); err != nil {
 		return "", Op{}, err
@@ -569,6 +574,8 @@ func (s *Store) Cancel(id, by, reason string) (CancelResult, Op, error) {
 		case cur.Status == StatusClosed:
 			result = CancelAlreadyTerminal
 			return cur, false, nil
+		case cur.Executor.Legacy():
+			return Op{}, false, fmt.Errorf("%w: %s op %s is closed only by its legacy path, an adopter or the sweeper", ErrIllegalTransition, cur.Executor, id)
 		case cur.Status == StatusSettling:
 			result = CancelAlreadyDecided
 			return cur, false, nil

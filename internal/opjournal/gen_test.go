@@ -137,6 +137,9 @@ func (g *opGen) op() Op {
 		statuses = append(statuses, StatusExecuting)
 	}
 	op.Status = pick(r, statuses)
+	if op.Executor.Legacy() && op.Status != StatusClosed {
+		op.Status = StatusSubmitted // a legacy op stays submitted until it closes
+	}
 	op.ArrivalSeq = r.Uint64N(1 << 50)
 	op.LaneSeq = r.Uint64N(1 << 50)
 	op.Attempt = r.IntN(6)

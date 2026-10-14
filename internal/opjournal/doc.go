@@ -52,8 +52,10 @@
 // ErrUnsupportedValue. Propose writes it and nothing changes it; it is outside
 // the request digest, so a retry after a mode flip returns the stored op.
 // Lanes take, lease and settle only lane ops. A legacy op carries no lease
-// and never leaves submitted until it closes; it is closed only by its legacy
-// path, an adopter (Adopt, legacy:api ops only) or the sweeper, at finish_by.
+// and never leaves submitted until it closes (the codec refuses either, and
+// Transition and Cancel refuse an open legacy op); it is closed only by its
+// legacy path, an adopter (Adopt, legacy:api ops only) or the sweeper, at
+// finish_by (CloseExpired).
 // gc.op.open holds the conversation id exactly while the op is not closed (the
 // close patch blanks it), so ListOpen is one keyed read that returns open rows
 // only; the gc:op-conv label stays for history reads. ListOpenTolerant serves

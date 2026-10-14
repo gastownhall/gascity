@@ -350,6 +350,9 @@ func validateState(op Op, spec Spec) error {
 	if spec.Lane == LaneLifecycle && op.Status == StatusExecuting {
 		return invalidf("lifecycle ops never execute")
 	}
+	if op.Executor.Legacy() && op.Status != StatusSubmitted && op.Status != StatusClosed {
+		return invalidf("a %s op is %s; a legacy op stays submitted until it closes", op.Executor, op.Status)
+	}
 	if op.Status == StatusClosed {
 		if err := validateOutcome(op.Outcome, op.Cancel); err != nil {
 			return err

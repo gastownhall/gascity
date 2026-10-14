@@ -427,6 +427,31 @@ func TestLegacyOpsCarryNoLease(t *testing.T) {
 	}
 }
 
+// A legacy op never leaves submitted until it closes (the sweeper's keyed
+// read depends on it): one in another open status is not encoded and reads
+// as damage.
+func TestLegacyOpsStaySubmittedUntilClosed(t *testing.T) {
+	op := sampleOp(t)
+	op.Executor = ExecutorLane
+	op.Status = StatusAccepted
+	b := encode(t, op)
+	for _, e := range []ExecutorKind{ExecutorLegacy, ExecutorLegacyAPI, ExecutorLegacyCLI} {
+		for _, status := range []Status{StatusAccepted, StatusExecuting, StatusSettling} {
+			op.Executor = e
+			op.Status = status
+			if _, err := EncodeOp(op); !errors.Is(err, ErrInvalidRequest) {
+				t.Fatalf("EncodeOp(%s op in %s) = %v, want ErrInvalidRequest", e, status, err)
+			}
+			b.Metadata = maps.Clone(b.Metadata)
+			b.Metadata[keyExecutor] = string(e)
+			b.Metadata[keyStatus] = string(status)
+			if _, err := DecodeOp(b); !errors.Is(err, ErrCorruptOp) {
+				t.Fatalf("DecodeOp(%s row in %s) = %v, want ErrCorruptOp", e, status, err)
+			}
+		}
+	}
+}
+
 // gc.op.open carries the conversation exactly while the op is open; one
 // naming another conversation is damage. Revision is decoded from the bead
 // and never encoded.
