@@ -197,7 +197,7 @@ type TurnObservation struct {
 	// fold anchors on the newest ended turn it last read (TurnCells.Seen)
 	// and reads an anchor missing from Recent as aged out, so every turn
 	// of Recent is new. A source whose inferred end is recomputed on each
-	// read (X11 §5.2's idle overlay) can drop it otherwise, for one when
+	// read (X11 §5.2's idle overlay) can drop it otherwise, for example when
 	// the session dies right after the inference; the caller carries
 	// such an end forward, or the fold journals the window's turns again.
 	Recent []ObservedTurnEnd

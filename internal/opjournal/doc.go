@@ -22,8 +22,7 @@
 // RuntimeRowID, which holds the lane cells (gen, epoch, seq, lease) and the
 // runtime and turn observations in gc.rt.* metadata; lanes and observers
 // update it in place under revision guards (RuntimeRowPatch builds the
-// update). Rows are no-history and never
-// ephemeral. Type "op" is ready-excluded, rows carry no gc.routed_to, and an
+// update). Rows are no-history and never ephemeral. Type "op" is ready-excluded, rows carry no gc.routed_to, and an
 // op's assignee is only ever a lane lease <lane>@<conversation>#<gen>#<nonce>@<deadline>,
 // so ops never reach Ready or work queries. A lease is at most 255 runes, bd's
 // assignee limit. Fields live in gc.op.* metadata. Rows are not yet
