@@ -840,6 +840,27 @@ committed_tables() {
   rm -f "$out_tmp" "$err_tmp"
 }
 
+# committed_base_tables — emit one table name per line for the base tables
+# present in the committed root at <rev>, excluding views and dolt_* names to
+# match user_tables. committed_tables' bare SHOW TABLES AS OF also lists views
+# (measured Dolt 2.3.3: bd's ready_issues), which user_tables never records, so
+# comparing it against a user_tables-derived set reports every view as new.
+committed_base_tables() {
+  db="$1"
+  rev="$2"
+  out_tmp=$(mktemp)
+  err_tmp=$(mktemp)
+  if ! dolt_query "$db" "SHOW FULL TABLES AS OF '$rev' WHERE Table_type = 'BASE TABLE'" \
+    > "$out_tmp" 2>"$err_tmp"; then
+    printf 'compact: db=%s committed base table list probe failed at revision=%s\n' "$db" "$rev" >&2
+    emit_error_file "$db" "$err_tmp"
+    rm -f "$out_tmp" "$err_tmp"
+    return 1
+  fi
+  awk -F'|' 'NR>=4 && /^\|/ {t=$2; gsub(/ /, "", t); if (t != "" && t !~ /^dolt_/) print t}' "$out_tmp"
+  rm -f "$out_tmp" "$err_tmp"
+}
+
 # dolt_ignore_patterns — emit one pattern per line from dolt_ignore WHERE ignored=1.
 # Fails open (returns 0 with empty output) when dolt_ignore does not exist or the
 # query fails: older stores and bare servers may lack this table. The ignored=1
@@ -1396,11 +1417,12 @@ verify_counts() {
   # Pinned to the same revision as the per-table reads above: an unpinned
   # information_schema.tables read (user_tables) reflects whatever a
   # concurrent writer most recently committed, which would report that
-  # writer's new table as "appeared after pre-flight snapshot". committed_tables
-  # at $revision reads the flatten's own committed root instead.
+  # writer's new table as "appeared after pre-flight snapshot".
+  # committed_base_tables at $revision reads the flatten's own committed root
+  # instead, excluding views and dolt_* names to match user_tables.
   post_tables_rc=0
   if [ -n "$revision" ]; then
-    committed_tables "$db" "$revision" > "$post_tables_tmp" || post_tables_rc=1
+    committed_base_tables "$db" "$revision" > "$post_tables_tmp" || post_tables_rc=1
   else
     user_tables "$db" > "$post_tables_tmp" || post_tables_rc=1
   fi
