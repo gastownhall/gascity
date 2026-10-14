@@ -65,19 +65,30 @@
 // attempt, lane_seq and delivery key, so one Take is in flight per
 // conversation (I3) and a stale read loses its batch (I9). No effect runs
 // before the Take is known durable (I5); an unknown batch error is resolved
-// by re-reading the lease. Done is one guarded batch that accepts (the
-// delivery record and the turn link CorrelateTurn decides), releases (with
-// retry_at, failures and maybe_delivered) or rejects, reconciled by
-// re-reading after a refusal or an unknown error. An op whose lease expired
-// is re-taken with its delivery key, so a deduplicating runtime replays it;
-// on any other runtime the redelivery ends with RedeliveryNote (D-NOTE).
-// Delivery keys are <head op id>:<the head's lane_seq at the minting Take>.
-// A deduplicating runtime gets a maybe-delivered group whole or not at all
-// (a member that closed leaves it; a member that cannot go yet holds the
-// head as a replay_group waiter), so every send under a key is a subset of
-// every earlier send under it (L2); any other runtime may get a group in
-// parts. Delivered text names no identifier (I14). A lane store must apply guarded batches (NewLaneStore); there is no
-// production caller until OJ-12.
+// by re-reading the lease and then each op, and the Take goes on with the
+// ops as re-read (an op that closed in that window is dropped and the rest
+// are released without the effect). Done is one guarded batch that accepts
+// (the delivery record and the turn link CorrelateTurn decides), releases
+// (with retry_at, failures and maybe_delivered) or rejects; after a refusal
+// or an unknown error it re-reads every row it still has to write. Only a
+// missing or unknown ack makes a Delivered result Unknown: once the runtime
+// acked, a defect in another recording field is clamped or dropped, the
+// outcome records DegradationExecutorContract and Pass returns the breach,
+// so the effect never runs again for it.
+//
+// An op whose lease expired is re-taken with its delivery key, so a
+// deduplicating runtime replays it; on any other runtime the redelivery
+// ends with RedeliveryNote (D-NOTE). A released op is re-keyed only when
+// the runtime refused its key on its last attempt (L3). Delivery keys are
+// <head op id>:<the head's lane_seq at the minting Take>. A deduplicating
+// runtime gets a maybe-delivered group whole or not at all (a member that
+// closed leaves it; a member that cannot go yet holds the head as a
+// replay_group waiter), so every send under a key is a subset of every
+// earlier send under it (L2); any other runtime may get a group in parts. A
+// replay group whose open members are all after_turn riders goes without a
+// starter. Delivered text names no identifier (I14). A lane store must
+// apply guarded batches (NewLaneStore); there is no production caller until
+// OJ-12.
 //
 // # Executor and open rows
 //
