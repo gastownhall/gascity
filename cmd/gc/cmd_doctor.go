@@ -630,6 +630,19 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	return checks
 }
 
+// gatherSupervisorUnitOwnership relates the live supervisor PID to gc's own
+// systemd user unit for the supervisor-unit-ownership doctor check.
+func gatherSupervisorUnitOwnership(pid int) doctor.SupervisorUnitOwnership {
+	raw := supervisorDetermineUnitOwnership(pid)
+	return doctor.SupervisorUnitOwnership{
+		Status:     raw.Status,
+		Unit:       raw.Unit,
+		UnitActive: raw.UnitActive,
+		UnitPID:    raw.UnitPID,
+		ProbeErr:   raw.ProbeErr,
+	}
+}
+
 // doDoctor runs the health checks and prints results. With opts.Checks set it
 // runs only those checks and derives the exit code from them alone.
 func doDoctor(opts doctorOpts, stdout, stderr io.Writer) int {
@@ -660,13 +673,7 @@ func doDoctor(opts doctorOpts, stdout, stderr io.Writer) int {
 	var supervisorBinary doctor.SupervisorBinary
 	if supervisorPID != 0 {
 		supervisorBinary = gatherSupervisorBinary(supervisorPID)
-		raw := supervisorDetermineUnitOwnership(supervisorPID)
-		supervisorUnitOwnership = doctor.SupervisorUnitOwnership{
-			Status:     raw.Status,
-			Unit:       raw.Unit,
-			UnitActive: raw.UnitActive,
-			UnitPID:    raw.UnitPID,
-		}
+		supervisorUnitOwnership = gatherSupervisorUnitOwnership(supervisorPID)
 	}
 	skipRigDoltChecks := gcDoltSkip()
 	skipCityDoltCheck := skipRigDoltChecks || (!scopeUsesManagedBdStoreContract(cityPath, cityPath) && !workspaceNeedsCityDoltCheck(cityPath, cfg))

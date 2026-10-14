@@ -26,6 +26,7 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/pathutil"
+	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/processenv"
 	"github.com/gastownhall/gascity/internal/processgroup"
 	"github.com/gastownhall/gascity/internal/searchpath"
@@ -153,7 +154,7 @@ var (
 	supervisorProcRoot                                  = "/proc"
 	supervisorProcReadDir                               = os.ReadDir
 	supervisorProcReadFile                              = os.ReadFile
-	supervisorReadProcessCgroup                         = readSupervisorProcessCgroup
+	supervisorParentPID                                 = pidutil.ParentPID
 	supervisorGetpgid                                   = syscall.Getpgid
 	supervisorGetpgrp                                   = syscall.Getpgrp
 	supervisorKill                                      = syscall.Kill
@@ -1000,19 +1001,26 @@ func supervisorPreForkOwnershipWarning() string {
 // gc's own systemd user unit, for `gc supervisor status` and the doctor
 // check. Status is one of:
 //   - "owned": the unit is installed and active, and the live supervisor PID
-//     equals its MainPID or sits in its cgroup (an sg wrapper is MainPID and gc
-//     runs as its descendant) — systemd's Restart=always is protecting it.
+//     is its MainPID or a descendant of it (a wrapper such as sg can be
+//     MainPID with gc as its child) — systemd's Restart=always is protecting
+//     it.
 //   - "outside_unit": the unit is installed but the live PID is neither its
-//     MainPID nor in its cgroup (inactive unit, or a process forked from a tmux
-//     pane) — the ga-s434i0 defect shape.
+//     MainPID nor a descendant of it: the unit is inactive, the supervisor was
+//     forked from a tmux pane, or its parent exited and it was reparented —
+//     the ga-s434i0 defect shape. Sitting in the unit's cgroup does not count,
+//     because KillMode=process leaves such processes behind in it.
 //   - "no_unit": no unit is installed; the supervisor is intentionally
 //     unmanaged (e.g. `gc supervisor start` on a workstation that never ran
 //     `gc supervisor install`).
+//
+// ProbeErr is set when the live PID's ancestry could not be read, so an
+// "outside_unit" result is unverified rather than proven.
 type supervisorUnitOwnershipStatus struct {
 	Status     string
 	Unit       string
 	UnitActive bool
 	UnitPID    int
+	ProbeErr   error
 }
 
 func supervisorDetermineUnitOwnership(livePID int) supervisorUnitOwnershipStatus {
@@ -1027,39 +1035,42 @@ func supervisorDetermineUnitOwnership(livePID int) supervisorUnitOwnershipStatus
 	if !ok {
 		pid = 0
 	}
-	cgroup, err := supervisorReadProcessCgroup(livePID)
-	if err != nil {
-		cgroup = nil
-	}
-	if supervisorUnitOwnsProcess(true, livePID, pid, cgroup, unit) {
+	owned, err := supervisorProcessDescendsFrom(livePID, pid)
+	if owned {
 		return supervisorUnitOwnershipStatus{Status: "owned", Unit: unit, UnitActive: true, UnitPID: pid}
 	}
-	return supervisorUnitOwnershipStatus{Status: "outside_unit", Unit: unit, UnitActive: true, UnitPID: pid}
+	return supervisorUnitOwnershipStatus{Status: "outside_unit", Unit: unit, UnitActive: true, UnitPID: pid, ProbeErr: err}
 }
 
-func readSupervisorProcessCgroup(pid int) ([]byte, error) {
-	return supervisorProcReadFile(filepath.Join(supervisorProcRoot, strconv.Itoa(pid), "cgroup"))
-}
+// supervisorUnitAncestryMaxHops bounds the parent walk in
+// supervisorProcessDescendsFrom. A wrapper ExecStart puts gc one or two hops
+// below MainPID; the bound only guards against malformed /proc data.
+const supervisorUnitAncestryMaxHops = 8
 
-func supervisorUnitOwnsProcess(unitActive bool, livePID, mainPID int, cgroup []byte, unit string) bool {
-	if !unitActive {
-		return false
+// supervisorProcessDescendsFrom reports whether pid is the ancestor itself or
+// descends from it within supervisorUnitAncestryMaxHops parent hops. A
+// process whose parent exited was reparented to init or to a subreaper such
+// as systemd --user, so it no longer descends from the MainPID that started
+// it. The walk stops at PID 1, and an ancestor of 1 or less never matches
+// because it cannot be a unit's MainPID. A failed parent read ends the walk
+// and is returned, because the answer is then unknown rather than false.
+func supervisorProcessDescendsFrom(pid, ancestor int) (bool, error) {
+	if pid <= 0 || ancestor <= 1 {
+		return false, nil
 	}
-	if livePID > 0 && livePID == mainPID {
-		return true
-	}
-	for _, line := range bytes.Split(cgroup, []byte{'\n'}) {
-		fields := bytes.SplitN(line, []byte{':'}, 3)
-		if len(fields) != 3 {
-			continue
+	for hops := 0; ; hops++ {
+		if pid == ancestor {
+			return true, nil
 		}
-		for _, component := range strings.Split(string(fields[2]), "/") {
-			if component == unit {
-				return true
-			}
+		if pid <= 1 || hops == supervisorUnitAncestryMaxHops {
+			return false, nil
 		}
+		parent, err := supervisorParentPID(pid)
+		if err != nil {
+			return false, fmt.Errorf("reading the parent of PID %d: %w", pid, err)
+		}
+		pid = parent
 	}
-	return false
 }
 
 func ensureSupervisorRunning(stdout, stderr io.Writer) int {
