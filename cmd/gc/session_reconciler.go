@@ -1064,10 +1064,13 @@ func reconcileDrainAckStopPending(
 // row must not be stopped under the client. The row is v2's when it carries
 // the controller half of a stop request at its generation and no ack half
 // (v2SignaledUnacked): an agent's or an operator's ack keeps legacy's
-// behavior. The attach probe is fresh, and one that errors counts
-// as attached, as v2's L3 does; a session that is gone is not attached, so
-// a dead runtime still finalizes. A row the store cannot read keeps
-// legacy's behavior.
+// behavior. Attachment is read only once the runtime is seen present: a
+// session that is gone is not attached, so a dead runtime still finalizes,
+// even when no tmux server is left to answer the attach probe (whose
+// unavailable error would otherwise count as attached; mc-7i9i7). The
+// attach probe is fresh, and one that errors over a present runtime counts
+// as attached, as v2's L3 does. A row the store cannot read keeps legacy's
+// behavior.
 func v2SignaledStopHeldForAttach(store beads.Store, sp runtime.Provider, info sessionpkg.Info, name string, stderr io.Writer) bool {
 	if store == nil || sp == nil || name == "" {
 		return false
@@ -1076,7 +1079,7 @@ func v2SignaledStopHeldForAttach(store beads.Store, sp runtime.Provider, info se
 	if err != nil || !v2SignaledUnacked(b.Metadata) {
 		return false
 	}
-	if !runtime.AttachProbeHolds(runtime.IsAttachedWithError(sp, name)) {
+	if !sp.IsRunning(name) || !runtime.AttachProbeHolds(runtime.IsAttachedWithError(sp, name)) {
 		return false
 	}
 	fmt.Fprintf(stderr, "session reconciler: holding the v2-signaled stop of %s: a client is attached\n", name) //nolint:errcheck // best-effort stderr
