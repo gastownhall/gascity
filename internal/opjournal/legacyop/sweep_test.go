@@ -1,11 +1,14 @@
 package legacyop
 
 import (
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/opjournal"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 )
 
 func TestSweep(t *testing.T) {
@@ -75,5 +78,93 @@ func TestSweepLosesToAnExecutor(t *testing.T) {
 	}
 	if got, _ := e.st.Get(op.ID); got.Outcome != succeeded(ViaLegacy) {
 		t.Fatalf("outcome %+v", got.Outcome)
+	}
+}
+
+// hookStore runs beforeUpdate once, just before the next UpdateIfMatch: the
+// window between a closer's read and its write.
+type hookStore struct {
+	*beads.MemStore
+	beforeUpdate func()
+}
+
+func (s *hookStore) UpdateIfMatch(id string, rev int64, opts beads.UpdateOpts) error {
+	if f := s.beforeUpdate; f != nil {
+		s.beforeUpdate = nil
+		f()
+	}
+	return s.MemStore.UpdateIfMatch(id, rev, opts)
+}
+
+func newHookEnv(t *testing.T) (*hookStore, *opjournal.Store, *clock.Fake) {
+	t.Helper()
+	hs := &hookStore{MemStore: &beads.MemStore{IDPrefix: "gc", HonorExplicitIDs: true}}
+	clk := &clock.Fake{Time: t0}
+	st, err := opjournal.NewStore(beads.SessionStore{Store: hs}, clk, opjournal.WithIDPrefix("gc"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return hs, st, clk
+}
+
+// An API retry that adopts an expired op after the sweeper listed it keeps
+// its op: the sweeper re-decides on the row it writes, and the adopted
+// execution's Finish closes the op with its own outcome (I7).
+func TestSweepSparesAnOpAdoptedMidPass(t *testing.T) {
+	hs, st, clk := newHookEnv(t)
+	open := func() (*opjournal.Store, error) { return st, nil }
+	api := &Recorder{Mode: gate.Auto, Executor: ExecutorAPI, Open: open, Inflight: NewInflight(), Clock: clk, sleep: func(time.Duration) {}}
+	first, err := api.Admit(msg("k1", "hello"))
+	if err != nil || first.Decision != Execute {
+		t.Fatalf("first = %+v, %v", first, err)
+	}
+	api.Inflight = NewInflight() // the API restarted: nothing in flight
+	clk.Advance(ExecutionBound + time.Minute)
+
+	var adopted *Admission
+	hs.beforeUpdate = func() {
+		var err error
+		adopted, err = api.Admit(msg("k1", "hello"))
+		if err != nil || !adopted.Adopted {
+			t.Fatalf("retry = %+v, %v", adopted, err)
+		}
+	}
+	stats, err := Sweep(st, clk.Now(), 10, "controller:op-sweep")
+	if err != nil || stats.Closed != 0 || stats.Pending != 1 {
+		t.Fatalf("sweep = %+v, %v; want the adopted op pending", stats, err)
+	}
+	if got, _ := st.Get(first.Op.ID); got.Status != opjournal.StatusSubmitted || got.Attempt != 1 {
+		t.Fatalf("after sweep: %s attempt %d", got.Status, got.Attempt)
+	}
+	if f := adopted.Finish(Result{Outcome: succeeded(ViaLegacyDelivered)}); !f.Closed || f.Late {
+		t.Fatalf("adopted Finish = %+v", f)
+	}
+}
+
+// The CLI's expiry rule loses the same race: an op the API adopts between
+// the CLI's read and its close stays open, and the CLI answers busy.
+func TestAdmitCLIExpirySparesAnOpAdoptedMidAdmit(t *testing.T) {
+	hs, st, clk := newHookEnv(t)
+	open := func() (*opjournal.Store, error) { return st, nil }
+	api := &Recorder{Mode: gate.Auto, Executor: ExecutorAPI, Open: open, Inflight: NewInflight(), Clock: clk, sleep: func(time.Duration) {}}
+	cli := &Recorder{Mode: gate.Auto, Executor: ExecutorCLI, Open: open, Clock: clk, sleep: func(time.Duration) {}}
+	req := msg("k1", "hello")
+	req.Principal = PrincipalOperator
+	first, err := api.Admit(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.Inflight = NewInflight()
+	clk.Advance(ExecutionBound + time.Minute)
+	hs.beforeUpdate = func() {
+		if adm, err := api.Admit(req); err != nil || !adm.Adopted {
+			t.Fatalf("API retry = %+v, %v", adm, err)
+		}
+	}
+	if adm, err := cli.Admit(req); !errors.Is(err, ErrBusy) {
+		t.Fatalf("CLI Admit = %+v, %v; want busy", adm, err)
+	}
+	if got, _ := st.Get(first.Op.ID); got.Status != opjournal.StatusSubmitted || got.Attempt != 1 {
+		t.Fatalf("after CLI admit: %s attempt %d", got.Status, got.Attempt)
 	}
 }

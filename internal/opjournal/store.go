@@ -352,7 +352,8 @@ func (s *Store) Adopt(id string, expectAttempt int, by string, finishBy time.Tim
 // UpdateIfMatch at that revision, saving Close's read on the common path. When
 // the row has moved (*beads.PreconditionFailedError) it falls back to Close,
 // which re-reads and keeps Close's rules: the same outcome is idempotent and
-// another is ErrAlreadyTerminal.
+// another is ErrAlreadyTerminal. It does not re-check why the caller closes;
+// a closer whose reason can lapse while the row moves uses CloseExpired.
 func (s *Store) CloseKnown(op Op, outcome Outcome, by string) (Op, error) {
 	if err := validateText("close by", by, maxPrincipalLen); err != nil {
 		return Op{}, err
@@ -366,24 +367,76 @@ func (s *Store) CloseKnown(op Op, outcome Outcome, by string) (Op, error) {
 	if err := validateOutcome(outcome, op.Cancel); err != nil {
 		return Op{}, err
 	}
-	next := closed(op, outcome, by, s.clk)
+	next, moved, err := s.writeKnown(op, closed(op, outcome, by, s.clk))
+	if !moved {
+		return next, err
+	}
+	return s.Close(op.ID, outcome, by)
+}
+
+// writeKnown writes next over op, as read at op.Revision, in one
+// UpdateIfMatch at that revision. moved says the row has moved since: nothing
+// was written and the caller re-reads.
+func (s *Store) writeKnown(op, next Op) (Op, bool, error) {
 	have, err := EncodeOp(op)
 	if err != nil {
-		return Op{}, err
+		return Op{}, false, err
 	}
 	opts, err := patch(have, op, next)
 	if err != nil {
-		return Op{}, err
+		return Op{}, false, err
 	}
 	err = s.writer.UpdateIfMatch(op.ID, op.Revision, opts)
 	if err == nil {
-		return next, nil
+		return next, false, nil
 	}
 	var stale *beads.PreconditionFailedError
-	if !errors.As(err, &stale) {
-		return Op{}, fmt.Errorf("closing op %s: %w", op.ID, err)
+	if errors.As(err, &stale) {
+		return Op{}, true, nil
 	}
-	return s.Close(op.ID, outcome, by)
+	return Op{}, false, fmt.Errorf("closing op %s: %w", op.ID, err)
+}
+
+// CloseExpired closes op failed{deadline_in_flight} by by when the op is
+// open, legacy and past its finish_by at now, deciding on the row it writes:
+// one UpdateIfMatch at op.Revision when op, as read, is expired, else (or when
+// the row has moved) a revision-fenced re-read and re-decide. closed says it
+// closed the op. Otherwise it writes nothing and returns the op as it stands:
+// an op an adopter moved (a later finish_by), a lane op, an op not yet expired
+// and an op another closer reached first all stay as they are. The sweeper
+// and the CLI's expiry rule close through it, so neither ever closes an op
+// before its current finish_by (DES-O0API I7).
+func (s *Store) CloseExpired(op Op, now time.Time, by string) (Op, bool, error) {
+	if err := validateText("close by", by, maxPrincipalLen); err != nil {
+		return Op{}, false, err
+	}
+	expired := Outcome{Arm: ArmFailed, Reason: ReasonDeadlineInFlight}
+	isExpired := func(cur Op) bool {
+		return cur.Status != StatusClosed && cur.Executor.Legacy() && now.After(cur.FinishBy)
+	}
+	if isExpired(op) {
+		next, moved, err := s.writeKnown(op, closed(op, expired, by, s.clk))
+		if !moved {
+			return next, err == nil, err
+		}
+	}
+	closedNow := false
+	cur, err := s.mutate(op.ID, by, func(cur Op, _ Spec) (Op, bool, error) {
+		closedNow = isExpired(cur)
+		if !closedNow {
+			return cur, false, nil
+		}
+		return closed(cur, expired, by, s.clk), true, nil
+	})
+	if err != nil {
+		return Op{}, false, err
+	}
+	if cur.Status == StatusClosed {
+		if err := s.closeBead(op.ID); err != nil {
+			return Op{}, false, err
+		}
+	}
+	return cur, closedNow, nil
 }
 
 // legalEdges is the status machine. Only Close and Cancel reach closed.

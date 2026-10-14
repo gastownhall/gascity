@@ -1641,3 +1641,74 @@ func TestListOpenTolerantQuarantines(t *testing.T) {
 		t.Fatalf("ListOpen = %v, want ErrUnsupportedKind", err)
 	}
 }
+
+// CloseExpired closes an open legacy op past its finish_by, deciding on the
+// row it reads: an op adopted (finish_by moved), a lane op, an op not yet
+// expired and a closed op are not written.
+func TestCloseExpired(t *testing.T) {
+	expired := Outcome{Arm: ArmFailed, Reason: ReasonDeadlineInFlight}
+	past := t0.Add(16 * time.Minute)
+	t.Run("closes an expired legacy op", func(t *testing.T) {
+		h := newHarness(t)
+		op := h.propose(t, legacyReq(ExecutorLegacyCLI, "k"))
+		h.rec.Reset()
+		got, closedNow, err := h.store.CloseExpired(op, past, "controller:op-sweep")
+		if err != nil || !closedNow || got.Status != StatusClosed || got.Outcome != expired {
+			t.Fatalf("CloseExpired = %s %+v closed %v, %v", got.Status, got.Outcome, closedNow, err)
+		}
+		if ops := h.rec.Ops(); len(ops) != 1 || ops[0].Kind != beadstest.OpUpdateIfMatch {
+			t.Fatalf("CloseExpired of a known expired op issued %+v, want one fenced update", ops)
+		}
+		if b, _ := h.mem.Get(op.ID); b.Status != "closed" {
+			t.Fatalf("bead %s", b.Status)
+		}
+		if last := got.Transitions[len(got.Transitions)-1]; last.By != "controller:op-sweep" {
+			t.Fatalf("closed by %q", last.By)
+		}
+	})
+	t.Run("leaves an adopted op open", func(t *testing.T) {
+		h := newHarness(t)
+		op := h.propose(t, legacyReq(ExecutorLegacyAPI, "k"))
+		if _, err := h.store.Adopt(op.ID, 0, "legacy:api", past.Add(15*time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+		rev := h.revision(t, op.ID)
+		// op is the row as read before the adoption: the fenced write misses
+		// and the re-read sees the adopter's finish_by.
+		got, closedNow, err := h.store.CloseExpired(op, past, "controller:op-sweep")
+		if err != nil || closedNow || got.Status != StatusSubmitted || got.Attempt != 1 {
+			t.Fatalf("CloseExpired(adopted) = %s attempt %d closed %v, %v", got.Status, got.Attempt, closedNow, err)
+		}
+		if h.revision(t, op.ID) != rev {
+			t.Fatal("CloseExpired wrote an adopted op")
+		}
+	})
+	t.Run("leaves an op at or before its finish_by open", func(t *testing.T) {
+		h := newHarness(t)
+		op := h.propose(t, legacyReq(ExecutorLegacyCLI, "k"))
+		for _, now := range []time.Time{t0, op.FinishBy} {
+			if got, closedNow, err := h.store.CloseExpired(op, now, "controller:op-sweep"); err != nil || closedNow || got.Status != StatusSubmitted {
+				t.Fatalf("CloseExpired(at %s) = %s closed %v, %v", now, got.Status, closedNow, err)
+			}
+		}
+	})
+	t.Run("never closes a lane op", func(t *testing.T) {
+		h := newHarness(t)
+		op := h.propose(t, legacyReq(ExecutorLane, "k"))
+		if got, closedNow, err := h.store.CloseExpired(op, past, "controller:op-sweep"); err != nil || closedNow || got.Status != StatusSubmitted {
+			t.Fatalf("CloseExpired(lane) = %s closed %v, %v", got.Status, closedNow, err)
+		}
+	})
+	t.Run("returns a closed op unchanged", func(t *testing.T) {
+		h := newHarness(t)
+		op := h.propose(t, legacyReq(ExecutorLegacyCLI, "k"))
+		done := Outcome{Arm: ArmSucceeded, Result: Result{Via: "legacy"}}
+		if _, err := h.store.Close(op.ID, done, "legacy:cli"); err != nil {
+			t.Fatal(err)
+		}
+		got, closedNow, err := h.store.CloseExpired(op, past, "controller:op-sweep")
+		if err != nil || closedNow || got.Status != StatusClosed || got.Outcome != done {
+			t.Fatalf("CloseExpired(closed) = %s %+v closed %v, %v", got.Status, got.Outcome, closedNow, err)
+		}
+	})
+}

@@ -29,17 +29,18 @@ type SweepStats struct {
 
 // Sweep closes open legacy ops whose finish_by has passed as
 // failed{deadline_in_flight}, by by, reading at most limit of them (oldest
-// first). It never touches a lane op nor an op before its finish_by, and its
-// closes are revision-fenced, so an adopter or a late executor racing it is
-// safe. A second pass over the same state closes nothing. The error joins the
-// read error or every failed close; the stats are valid either way.
+// first). It never touches a lane op nor an op before its finish_by: each
+// close re-decides on the row it writes (Store.CloseExpired), so an op an
+// adopter moved after the read counts Pending and one a late executor closed
+// first counts Raced. A second pass over the same state closes nothing. The
+// error joins the read error or every failed close; the stats are valid
+// either way.
 func Sweep(st *opjournal.Store, now time.Time, limit int, by string) (SweepStats, error) {
 	ops, undecodable, err := st.ListOpenLegacy(limit)
 	stats := SweepStats{Listed: len(ops), Undecodable: undecodable}
 	if err != nil {
 		return stats, fmt.Errorf("sweeping legacy ops: %w", err)
 	}
-	expired := opjournal.Outcome{Arm: opjournal.ArmFailed, Reason: opjournal.ReasonDeadlineInFlight}
 	var errs []error
 	for _, op := range ops {
 		if !op.Executor.Legacy() || op.Status == opjournal.StatusClosed {
@@ -49,18 +50,20 @@ func Sweep(st *opjournal.Store, now time.Time, limit int, by string) (SweepStats
 			stats.Pending++
 			continue
 		}
-		_, err := st.CloseKnown(op, expired, by)
+		got, closedNow, err := st.CloseExpired(op, now, by)
 		switch {
-		case err == nil:
-			stats.Closed++
-			countSweep(op.Kind, ResultClosed)
-		case errors.Is(err, opjournal.ErrAlreadyTerminal):
-			stats.Raced++
-			countSweep(op.Kind, ResultLate)
-		default:
+		case err != nil:
 			stats.Failed++
 			countSweep(op.Kind, ResultFailed)
 			errs = append(errs, fmt.Errorf("sweeping op %s: %w", op.ID, err))
+		case closedNow:
+			stats.Closed++
+			countSweep(op.Kind, ResultClosed)
+		case got.Status == opjournal.StatusClosed:
+			stats.Raced++
+			countSweep(op.Kind, ResultLate)
+		default:
+			stats.Pending++
 		}
 	}
 	return stats, errors.Join(errs...)

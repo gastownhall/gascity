@@ -228,7 +228,7 @@ func (r *Recorder) Admit(req Request) (*Admission, error) {
 		release()
 		return r.replay(key, minted, op), nil
 	case r.Inflight == nil && now.After(op.FinishBy):
-		return r.closeExpired(st, key, minted, op)
+		return r.closeExpired(st, key, minted, op, now)
 	case op.Executor == ExecutorAPI && r.Inflight != nil:
 		return r.adopt(st, key, minted, op, entry, release, now)
 	default:
@@ -271,18 +271,20 @@ func (r *Recorder) inflightAnswer(kind opjournal.Kind, key string, minted bool, 
 
 // closeExpired closes an open op whose finish_by has passed, as the sweeper
 // would, and replays it. Only a recorder without an in-flight registry (the
-// CLI) does this; the API adopts instead.
-func (r *Recorder) closeExpired(st *opjournal.Store, key string, minted bool, op opjournal.Op) (*Admission, error) {
-	closedOp, err := st.CloseKnown(op, opjournal.Outcome{Arm: opjournal.ArmFailed, Reason: opjournal.ReasonDeadlineInFlight}, string(r.Executor))
-	if errors.Is(err, opjournal.ErrAlreadyTerminal) {
-		closedOp, err = st.Get(op.ID)
-	}
+// CLI) does this; the API adopts instead. The close re-decides on the row it
+// writes, so an op an API adopted after Propose read it stays open: busy.
+func (r *Recorder) closeExpired(st *opjournal.Store, key string, minted bool, op opjournal.Op, now time.Time) (*Admission, error) {
+	cur, _, err := st.CloseExpired(op, now, string(r.Executor))
 	if err != nil {
 		r.degrade(op.Kind, StageClose, degradeReason(err), err)
 		r.count(op.Kind, StageAdmit, ResultBusy, "")
 		return nil, &BusyError{ID: op.ID, Since: op.CreatedAt}
 	}
-	return r.replay(key, minted, closedOp), nil
+	if cur.Status != opjournal.StatusClosed {
+		r.count(op.Kind, StageAdmit, ResultBusy, "")
+		return nil, &BusyError{ID: op.ID, Since: op.CreatedAt}
+	}
+	return r.replay(key, minted, cur), nil
 }
 
 // adopt re-runs an open legacy:api op that is not in flight here: its API
