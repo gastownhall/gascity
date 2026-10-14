@@ -6,9 +6,13 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 const testDigest = "9f2c0000000000000000000000000000000000000000000000000000000000ab"
@@ -35,13 +39,39 @@ func validBundle(t *testing.T) Bundle {
 			InstanceTokenSHA256: testDigest,
 		},
 		Bearer: mustMint(t, "maintainer-city", "mc-abc12", 7),
-		Ledgers: []Ledger{{
-			Scope:     ScopeCity,
-			URL:       "https://ctl.example.ts.net:7491",
-			ProjectID: "proj-7d2e",
-			CAPEM:     string(readTestdata(t, "ca.pem")),
-		}},
+		Ledgers: []Ledger{
+			{
+				Scope:     ScopeCity,
+				Classes:   []string{"work"},
+				URL:       "https://ctl.example.ts.net:7491",
+				ProjectID: "proj-7d2e",
+				CAPEM:     string(readTestdata(t, "ca.pem")),
+			},
+			infraLedger(),
+		},
 	}
+}
+
+// infraLedger is maintainer-city's infra binding served beside remote
+// Postgres and rendered by a sidecar (DES-CN D15, D16).
+func infraLedger() Ledger {
+	return Ledger{
+		Scope:           BindingScope("infra"),
+		Classes:         []string{"graph", "sessions", "messaging", "orders", "nudges"},
+		ConfigRef:       "infra",
+		URL:             "https://infra.example.ts.net:7492",
+		ProjectID:       "proj-91c0",
+		AuthWaitSeconds: 20,
+	}
+}
+
+// cityOnlyBundle is a bundle whose one city ledger serves every class.
+func cityOnlyBundle(t *testing.T) Bundle {
+	t.Helper()
+	b := validBundle(t)
+	b.Ledgers = b.Ledgers[:1]
+	b.Ledgers[0].Classes = StorageClasses()
+	return b
 }
 
 func requireCode(t *testing.T, err error, want Code) {
@@ -81,7 +111,7 @@ func TestDecodeBundleGoldenRoundTrip(t *testing.T) {
 	}
 	want := validBundle(t)
 	if b.City != want.City || b.Session != want.Session || b.Bearer != want.Bearer ||
-		!b.MintedAt.Equal(want.MintedAt) || len(b.Ledgers) != 1 || b.Ledgers[0] != want.Ledgers[0] {
+		!b.MintedAt.Equal(want.MintedAt) || !reflect.DeepEqual(b.Ledgers, want.Ledgers) {
 		t.Fatalf("decoded bundle = %+v, want %+v", b, want)
 	}
 }
@@ -291,5 +321,184 @@ func TestBundleRefusalsNeverEchoTheBearer(t *testing.T) {
 	err := b.Validate()
 	if err == nil || strings.Contains(err.Error(), other[strings.LastIndexByte(other, '.')+1:]) {
 		t.Fatalf("Validate error %v must refuse without echoing the bearer MAC", err)
+	}
+}
+
+// TestBundleLedgerRules is DES-CN §10 CN-1c's bundle-ledger table.
+func TestBundleLedgerRules(t *testing.T) {
+	second := func(b *Bundle) *Ledger { return &b.Ledgers[1] }
+	refused := []struct {
+		name   string
+		mutate func(*Bundle)
+	}{
+		{"no ledgers", func(b *Bundle) { b.Ledgers = nil }},
+		{"two city ledgers", func(b *Bundle) {
+			second(b).Scope, second(b).ConfigRef = ScopeCity, ""
+		}},
+		{"no city ledger", func(b *Bundle) {
+			b.Ledgers[0] = infraLedger()
+			b.Ledgers[0].Scope, b.Ledgers[0].ConfigRef = BindingScope("work2"), "work2"
+			b.Ledgers[0].URL, b.Ledgers[0].ProjectID = "https://w.example.ts.net", "proj-w"
+			b.Ledgers[0].Classes = []string{"work"}
+		}},
+		{"duplicate binding scope", func(b *Bundle) {
+			dup := infraLedger()
+			dup.URL, dup.ProjectID, dup.Classes = "https://other.example.ts.net", "proj-other", []string{"nudges"}
+			second(b).Classes = []string{"graph", "sessions", "messaging", "orders"}
+			b.Ledgers = append(b.Ledgers, dup)
+		}},
+		{"empty binding name", func(b *Bundle) { second(b).Scope = "binding:" }},
+		{"reserved binding name", func(b *Bundle) { second(b).Scope = "binding:work" }},
+		{"dot-dot binding name", func(b *Bundle) { second(b).Scope = "binding:.." }},
+		{"dot binding name", func(b *Bundle) { second(b).Scope = "binding:." }},
+		{"slash in binding name", func(b *Bundle) { second(b).Scope = "binding:a/b" }},
+		{"rig scope", func(b *Bundle) { second(b).Scope = "rig:app" }},
+		{"bare binding", func(b *Bundle) { second(b).Scope = "infra" }},
+		{"config_ref missing on a binding", func(b *Bundle) { second(b).ConfigRef = "" }},
+		{"config_ref on city", func(b *Bundle) { b.Ledgers[0].ConfigRef = "work" }},
+		{"config_ref dot-dot", func(b *Bundle) { second(b).ConfigRef = ".." }},
+		{"config_ref with a slash", func(b *Bundle) { second(b).ConfigRef = "a/b" }},
+		{"empty classes", func(b *Bundle) { second(b).Classes = nil }},
+		{"empty class list on city", func(b *Bundle) { b.Ledgers[0].Classes = []string{} }},
+		{"unknown class", func(b *Bundle) { second(b).Classes = append(second(b).Classes, "mail") }},
+		{"class twice in one ledger", func(b *Bundle) { second(b).Classes = append(second(b).Classes, "graph") }},
+		{"class in two ledgers", func(b *Bundle) { b.Ledgers[0].Classes = []string{"work", "graph"} }},
+		{"work off the city ledger", func(b *Bundle) {
+			b.Ledgers[0].Classes = []string{"graph"}
+			second(b).Classes = []string{"work", "sessions", "messaging", "orders", "nudges"}
+		}},
+		{"class missing from the union", func(b *Bundle) { second(b).Classes = []string{"graph", "sessions", "messaging", "orders"} }},
+		{"duplicate url", func(b *Bundle) { second(b).URL = b.Ledgers[0].URL }},
+		{"duplicate project id", func(b *Bundle) { second(b).ProjectID = b.Ledgers[0].ProjectID }},
+		{"auth_wait_s -1", func(b *Bundle) { second(b).AuthWaitSeconds = -1 }},
+		{"auth_wait_s 121", func(b *Bundle) { second(b).AuthWaitSeconds = MaxAuthWaitSeconds + 1 }},
+		{"second ledger plaintext url", func(b *Bundle) { second(b).URL = "http://infra.example.ts.net:7492" }},
+		{"second ledger empty project", func(b *Bundle) { second(b).ProjectID = "" }},
+		{"second ledger bad PEM", func(b *Bundle) { second(b).CAPEM = "not a certificate" }},
+	}
+	for _, tc := range refused {
+		t.Run(tc.name, func(t *testing.T) {
+			b := validBundle(t)
+			tc.mutate(&b)
+			err := b.Validate()
+			requireCode(t, err, CodeBundleInvalid)
+			for _, l := range b.Ledgers {
+				if l.URL != "" && strings.Contains(err.Error(), l.URL) {
+					t.Fatalf("refusal echoes a URL: %v", err)
+				}
+			}
+		})
+	}
+
+	accepted := []struct {
+		name   string
+		bundle func(*testing.T) Bundle
+	}{
+		{"one city ledger with every class", cityOnlyBundle},
+		{"city plus binding:infra", validBundle},
+		{"three ledgers", func(t *testing.T) Bundle {
+			b := validBundle(t)
+			b.Ledgers[1].Classes = []string{"graph", "sessions", "messaging", "orders"}
+			b.Ledgers = append(b.Ledgers, Ledger{
+				Scope: BindingScope("queue.v2"), Classes: []string{"nudges"}, ConfigRef: "queue.v2",
+				URL: "http://127.0.0.1:7493", ProjectID: "proj-q", AuthWaitSeconds: MaxAuthWaitSeconds,
+			})
+			return b
+		}},
+		{"binding ledger first", func(t *testing.T) Bundle {
+			b := validBundle(t)
+			slices.Reverse(b.Ledgers)
+			return b
+		}},
+		{"auth_wait_s 1", func(t *testing.T) Bundle {
+			b := validBundle(t)
+			b.Ledgers[0].AuthWaitSeconds = 1
+			return b
+		}},
+	}
+	for _, tc := range accepted {
+		t.Run(tc.name, func(t *testing.T) {
+			b := tc.bundle(t)
+			if err := b.Validate(); err != nil {
+				t.Fatalf("Validate: %v", err)
+			}
+			data, err := EncodeBundle(b)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := DecodeBundle(data); err != nil {
+				t.Fatalf("DecodeBundle: %v", err)
+			}
+		})
+	}
+}
+
+// TestDecodeBundleRefusesCN1aShape: a bundle shaped as CN-1a merged it, with
+// no classes, is not a contract-1 bundle any more.
+func TestDecodeBundleRefusesCN1aShape(t *testing.T) {
+	data, err := EncodeBundle(cityOnlyBundle(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatal(err)
+	}
+	delete(m["ledgers"].([]any)[0].(map[string]any), "classes")
+	legacy, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = DecodeBundle(legacy)
+	requireCode(t, err, CodeBundleInvalid)
+	if !strings.Contains(err.Error(), "ledgers[0]") {
+		t.Fatalf("refusal %v does not name the ledger", err)
+	}
+}
+
+func TestLedgerAuthWait(t *testing.T) {
+	cases := map[int]time.Duration{0: 5 * time.Second, 1: time.Second, 20: 20 * time.Second, MaxAuthWaitSeconds: 120 * time.Second}
+	for secs, want := range cases {
+		if got := (Ledger{AuthWaitSeconds: secs}).AuthWait(); got != want {
+			t.Errorf("AuthWait(%d) = %s, want %s", secs, got, want)
+		}
+	}
+	if DefaultAuthWaitSeconds != 5 || MaxAuthWaitSeconds != 120 {
+		t.Fatal("auth wait bounds drifted from DES-CN §3.2")
+	}
+}
+
+func TestScopeBinding(t *testing.T) {
+	if b, ok := ScopeBinding(ScopeCity); !ok || b != "work" {
+		t.Fatalf("ScopeBinding(city) = %q, %v", b, ok)
+	}
+	for _, name := range []string{"infra", "a", "infra.v2", "A_b-9", "..x", "x.."} {
+		if got, ok := ScopeBinding(BindingScope(name)); !ok || got != name {
+			t.Errorf("ScopeBinding(BindingScope(%q)) = %q, %v", name, got, ok)
+		}
+	}
+	for _, scope := range []string{"", "binding:", "binding:work", "binding:.", "binding:..", "binding:a/b", "binding:a b", "rig:app", "infra", "Binding:infra", "City"} {
+		if got, ok := ScopeBinding(scope); ok {
+			t.Errorf("ScopeBinding(%q) = %q, true", scope, got)
+		}
+	}
+}
+
+// TestStorageClassesMatchConfig keeps the bundle's class vocabulary equal to
+// config.StorageClasses' toml keys, in order: a seventh class fails here.
+func TestStorageClassesMatchConfig(t *testing.T) {
+	typ := reflect.TypeFor[config.StorageClasses]()
+	var tags []string
+	for i := range typ.NumField() {
+		tag, _, _ := strings.Cut(typ.Field(i).Tag.Get("toml"), ",")
+		tags = append(tags, tag)
+	}
+	if got := StorageClasses(); !slices.Equal(got, tags) {
+		t.Fatalf("StorageClasses() = %q, config.StorageClasses keys = %q", got, tags)
+	}
+	got := StorageClasses()
+	got[0] = "mutated"
+	if StorageClasses()[0] != "work" {
+		t.Fatal("StorageClasses returned shared storage")
 	}
 }

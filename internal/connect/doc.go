@@ -9,7 +9,9 @@
 //     ParseBearer, Sentinel), HMAC-SHA256 values keyed by the city's key;
 //   - the worker-site descriptor `.gc/control-plane.toml` (Descriptor,
 //     EncodeDescriptor, DecodeDescriptor), which marks a city directory as a
-//     worker site and records where its ledger lives;
+//     worker site and records where its ledgers live: one per served
+//     storage binding the box uses, each with the classes it serves and the
+//     workspaces attached to it;
 //   - the rendered bd serve token file (RenderTokenFile, ParseOperatorLines,
 //     InspectTokenFile): the operator's lines, the sentinel, then one bearer
 //     per eligible session row, as a pure function of those inputs;

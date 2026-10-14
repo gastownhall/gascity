@@ -19,8 +19,8 @@ func TestCodesAreUniqueAndPrefixed(t *testing.T) {
 		}
 		seen[c] = true
 	}
-	if len(seen) != 25 {
-		t.Errorf("Codes() has %d codes, want the 25 §3.8 publishes", len(seen))
+	if len(seen) != 26 {
+		t.Errorf("Codes() has %d codes, want the 26 §3.8 publishes", len(seen))
 	}
 }
 
@@ -35,6 +35,7 @@ func TestCodesGolden(t *testing.T) {
 		"connect_no_city",
 		"connect_city_mismatch",
 		"connect_controller_host",
+		"connect_storage_mismatch",
 		"connect_competing_selector",
 		"connect_identity_incomplete",
 		"connect_identity_mismatch",
