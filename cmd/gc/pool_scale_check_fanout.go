@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -57,7 +58,7 @@ func cityScopedFanOutProbes(cityPath string, cfg *config.City, a *config.Agent, 
 // agent (rigName non-empty) and an agent with no custom scale_check keep the
 // single-store path. The demand pass (both pool shapes in buildDemandTargets)
 // and the allocator lane's customScaleCheckWork both build their pools through
-// this one predicate, so the count the lane publishes cannot drift from the one
+// this one helper, so the count the lane publishes cannot drift from the one
 // the demand pass sums (POOL-005). ownEnv is the env the pool's own city probe
 // runs with: the probe env for a generic pool, nil for one backing a named
 // session.
@@ -80,8 +81,11 @@ func customScaleCheckFanOutProbes(cityPath string, cfg *config.City, a *config.A
 // probe error -- its store env unresolved, its command failing, or its output
 // not parsing -- contributes 0 to the sum (best-effort, matching
 // bestStoreWithWork's federation contract) and is returned for the caller to
-// log; it never poisons the other probes' counts.
-func evaluatePoolFanOutSum(agentName string, sp scaleParams, probes []poolStoreProbe, runner ScaleCheckRunner, sem chan struct{}, newDemand bool) (int, []error) {
+// log; it never poisons the other probes' counts. A panic in a probe's runner,
+// output parse or telemetry is recovered on that probe's own goroutine -- the
+// caller's recoverLeg covers only the goroutine that called this function --
+// and reads as that probe's error, with the panic and its stack on stderr.
+func evaluatePoolFanOutSum(agentName string, sp scaleParams, probes []poolStoreProbe, runner ScaleCheckRunner, sem chan struct{}, newDemand bool, stderr io.Writer) (int, []error) {
 	counts := make([]int, len(probes))
 	errs := make([]error, len(probes))
 	var wg sync.WaitGroup
@@ -89,6 +93,7 @@ func evaluatePoolFanOutSum(agentName string, sp scaleParams, probes []poolStoreP
 		wg.Add(1)
 		go func(i int, probe poolStoreProbe) {
 			defer wg.Done()
+			defer recoverLeg(&errs[i], "scale_check "+agentName+" probe "+probe.ref, stderr)
 			if probe.err != nil {
 				telemetry.RecordPoolCheck(context.Background(), agentName, 0, 0, probe.err)
 				errs[i] = fmt.Errorf("%s: %w", probe.ref, probe.err)

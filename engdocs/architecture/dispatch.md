@@ -240,7 +240,7 @@ Both call sites resolve their suspended-rig exclusion through the same
 `buildSuspendedRigPathsForCity` helper (`build_desired_state.go`) — the
 worker path calls it directly inside `appendRigHookStores`, and the
 reconciler path computes it once per desired-state pass and threads it into
-`customScaleCheckFanOutProbes`, the one predicate that both pool shapes in
+`customScaleCheckFanOutProbes`, the one helper that both pool shapes in
 `buildDemandTargets` and the allocator lane's `customScaleCheckWork` build
 their probes through. Sharing one helper is what makes the store sets match
 by construction rather than by convention: a rig suspension becomes
