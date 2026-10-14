@@ -10,8 +10,8 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
-	"github.com/gastownhall/gascity/internal/session"
 	"github.com/spf13/cobra"
 )
 
@@ -66,8 +66,9 @@ the failure object carries the code.
 - bead_payload_refused: --payload on bead.created, bead.updated, bead.closed
   or bead.deleted. Their payload is the bead row; use --bead-payload <id> so
   gc reads it from the store.
-- bead_payload_not_found: --bead-payload names a bead none of the city's
-  stores holds. Any other failure to read it is reported on stderr and the
+- bead_payload_not_found: --bead-payload names a bead the store it resolves
+  to does not hold (bead.deleted excepted: the event is recorded with its
+  subject alone). Any other failure to read it is reported on stderr and the
   event is still recorded, without the payload.
 
 --payload attaches arbitrary JSON to any other event type.`,
@@ -85,6 +86,9 @@ the failure object carries the code.
 				return errExit
 			}
 			finalPayload, missing := eventPayloadForEmit(payload, beadPayload, stderr)
+			if missing != nil && args[0] == events.BeadDeleted {
+				missing = nil // a deleted bead is gone by design: recorded with its subject alone
+			}
 			if missing != nil {
 				reason := fmt.Sprintf("--bead-payload %s: %v; nothing recorded", strings.TrimSpace(beadPayload), missing)
 				if jsonOut {
@@ -181,8 +185,8 @@ func eventPayloadForEmit(payload, beadID string, stderr io.Writer) (string, erro
 		if beadID == "" {
 			return payload, nil
 		}
-		beadPayload, err := loadEventBeadPayload(beadID, stderr)
-		if errors.Is(err, beads.ErrNotFound) || errors.Is(err, session.ErrSessionNotFound) {
+		beadPayload, err := loadEventBeadPayload(beadID)
+		if errors.Is(err, beads.ErrNotFound) {
 			return "", err
 		}
 		if err != nil {
@@ -197,12 +201,12 @@ func eventPayloadForEmit(payload, beadID string, stderr io.Writer) (string, erro
 	return payload, nil
 }
 
-func loadEventBeadPayload(beadID string, stderr io.Writer) (json.RawMessage, error) {
+func loadEventBeadPayload(beadID string) (json.RawMessage, error) {
 	ctx, err := resolveContext()
 	if err != nil {
 		return nil, err
 	}
-	scopeRoot, err := eventBeadPayloadScopeRoot(ctx, cityFlag != "", stderr)
+	scopeRoot, err := eventBeadPayloadScopeRoot(ctx, cityFlag != "", beadID)
 	if err != nil {
 		return nil, fmt.Errorf("resolving current scope: %w", err)
 	}
@@ -229,12 +233,49 @@ func loadEventBeadPayload(beadID string, stderr io.Writer) (json.RawMessage, err
 	return payload, nil
 }
 
-// eventBeadPayloadScopeRoot is the work store's scope for --bead-payload: the
-// bead's rig from BEADS_DIR or GC_RIG_ROOT (a hook's environment), else, with
-// --city given, the --rig's root or the city itself, never the working
-// directory (mc-zg8te: a command run from another city's tree read that
-// city's store), else the working directory.
-func eventBeadPayloadScopeRoot(ctx resolvedContext, explicitCity bool, stderr io.Writer) (string, error) {
+// eventBeadPayloadScopeRoot is the work store's scope for --bead-payload.
+// Without --city it is the bead's rig from BEADS_DIR or GC_RIG_ROOT (a hook's
+// environment), else the working directory. With --city it never reaches
+// outside that city (mc-zg8te): the --rig's root; else an inherited
+// BEADS_DIR or GC_RIG_ROOT only when it names the city's root or one of its
+// rig roots (a rig agent's environment names its own city's rig); else the
+// rig the bead's prefix names; else the city itself.
+func eventBeadPayloadScopeRoot(ctx resolvedContext, explicitCity bool, beadID string) (string, error) {
+	inherited, err := inheritedBeadPayloadScopeRoot()
+	if err != nil {
+		return "", err
+	}
+	if !explicitCity {
+		if inherited != "" {
+			return inherited, nil
+		}
+		return os.Getwd()
+	}
+	cfg, cfgErr := loadCityConfig(ctx.CityPath, io.Discard)
+	if ctx.RigName != "" {
+		if cfgErr != nil {
+			return "", cfgErr
+		}
+		if root := rigRootForName(ctx.RigName, cfg.Rigs); root != "" {
+			return cleanAbsPath(resolveStoreScopeRoot(ctx.CityPath, root))
+		}
+		return "", fmt.Errorf("rig %q is not bound in %s", ctx.RigName, ctx.CityPath)
+	}
+	if cfgErr != nil {
+		return cleanAbsPath(ctx.CityPath) // no rig to match: the city itself
+	}
+	if inherited != "" && cityScopeRoots(ctx.CityPath, cfg)[normalizePathForCompare(inherited)] {
+		return inherited, nil
+	}
+	if dir := rigDirForBead(cfg, beadID); dir != "" {
+		return cleanAbsPath(resolveStoreScopeRoot(ctx.CityPath, dir))
+	}
+	return cleanAbsPath(ctx.CityPath)
+}
+
+// inheritedBeadPayloadScopeRoot is the scope a hook's environment names:
+// BEADS_DIR's parent, else GC_RIG_ROOT; empty when neither is set.
+func inheritedBeadPayloadScopeRoot() (string, error) {
 	if beadsDir := strings.TrimSpace(os.Getenv("BEADS_DIR")); beadsDir != "" {
 		// filepath.Clean beadsDir before Dir: a trailing-slash BEADS_DIR
 		// (e.g. "/root/.beads/") makes filepath.Dir return beadsDir itself
@@ -246,20 +287,24 @@ func eventBeadPayloadScopeRoot(ctx resolvedContext, explicitCity bool, stderr io
 	if rigRoot := strings.TrimSpace(os.Getenv("GC_RIG_ROOT")); rigRoot != "" {
 		return cleanAbsPath(rigRoot)
 	}
-	if explicitCity {
-		if ctx.RigName != "" {
-			cfg, err := loadCityConfig(ctx.CityPath, stderr)
-			if err != nil {
-				return "", err
-			}
-			if root := rigRootForName(ctx.RigName, cfg.Rigs); root != "" {
-				return cleanAbsPath(resolveStoreScopeRoot(ctx.CityPath, root))
-			}
-			return "", fmt.Errorf("rig %q is not bound in %s", ctx.RigName, ctx.CityPath)
+	return "", nil
+}
+
+// cityScopeRoots is the city's root and its bound rigs' roots, compared
+// normalized.
+func cityScopeRoots(cityPath string, cfg *config.City) map[string]bool {
+	roots := map[string]bool{normalizePathForCompare(cityPath): true}
+	for _, rig := range cfg.Rigs {
+		if strings.TrimSpace(rig.Path) == "" {
+			continue
 		}
-		return cleanAbsPath(ctx.CityPath)
+		root := resolveStoreScopeRoot(cityPath, rig.Path)
+		if !filepath.IsAbs(root) {
+			root = filepath.Join(cityPath, root)
+		}
+		roots[normalizePathForCompare(root)] = true
 	}
-	return os.Getwd()
+	return roots
 }
 
 func cleanAbsPath(path string) (string, error) {
