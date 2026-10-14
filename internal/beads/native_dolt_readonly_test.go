@@ -82,6 +82,7 @@ var nativeStoreMethodKinds = map[string]nativeStoreMethodKind{
 	"TransferIfCurrent":           nativeStoreMutation,
 	"Claim":                       nativeStoreMutation,
 	"UpdateIfMatch":               nativeStoreMutation,
+	"ApplyGuarded":                nativeStoreMutation,
 	"WaitForParentProjection":     nativeStoreRead,
 	"Count":                       nativeStoreRead,
 	"ReadEventsJournalPage":       nativeStoreRead,
