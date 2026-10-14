@@ -278,3 +278,51 @@ func TestScanTurnsClaudePromptOfMarkerTextIsAPrompt(t *testing.T) {
 		},
 	})
 }
+
+// TestScanTurnsClaudeFilterIgnoresSpacing: the type-name filter matches the
+// JSON string alone, so a transcript written with spaces reads the same.
+func TestScanTurnsClaudeFilterIgnoresSpacing(t *testing.T) {
+	for _, name := range []string{"completed.jsonl", "interrupt_queued_tool_result.jsonl", "api_error_last.jsonl"} {
+		src := turnFixture("claude", name)
+		data, err := os.ReadFile(src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		spaced := strings.NewReplacer(`":`, `": `, `,"`, `, "`).Replace(string(data))
+		path := filepath.Join(t.TempDir(), name)
+		if err := os.WriteFile(path, []byte(spaced), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		want, err := ScanTurns("claude", src)
+		if err != nil {
+			t.Fatalf("ScanTurns(%s): %v", name, err)
+		}
+		got, err := ScanTurns("claude", path)
+		if err != nil {
+			t.Fatalf("ScanTurns(spaced %s): %v", name, err)
+		}
+		assertTurnScan(t, got, want)
+	}
+}
+
+// BenchmarkScanTurnsClaudeLongTurn scans a full 16 MiB window of one long
+// turn: mostly attachments, with tool calls and results between them.
+func BenchmarkScanTurnsClaudeLongTurn(b *testing.B) {
+	attachment := `{"type":"attachment","timestamp":"2026-10-13T05:00:01.000Z","attachment":{"type":"file","content":"` + strings.Repeat("a", 16<<10) + `"}}`
+	call := `{"type":"assistant","timestamp":"2026-10-13T05:00:01.000Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"t","input":{"command":"` + strings.Repeat("c", 2<<10) + `"}}]}}`
+	result := `{"type":"user","timestamp":"2026-10-13T05:00:01.000Z","promptId":"p1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":"` + strings.Repeat("r", 4<<10) + `"}]}}`
+	lines := []string{`{"type":"user","timestamp":"2026-10-13T05:00:00.000Z","promptId":"p1","origin":{"kind":"human"},"promptSource":"prompt","message":{"role":"user","content":"prompt"}}`}
+	for size := 0; size < turnScanBudget+(1<<20); size += len(attachment) + len(call) + len(result) {
+		lines = append(lines, attachment, call, result)
+	}
+	path := filepath.Join(b.TempDir(), "claude.jsonl")
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		b.Fatal(err)
+	}
+	b.ResetTimer()
+	for b.Loop() {
+		if _, err := ScanTurns("claude", path); err != nil {
+			b.Fatal(err)
+		}
+	}
+}

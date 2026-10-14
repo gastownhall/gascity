@@ -38,6 +38,10 @@ import (
 // user]", "[Request interrupted by user for tool use]").
 const claudeInterruptMarker = "[Request interrupted by user"
 
+// claudeToolResultType names a tool result content block. A message without
+// it, quoted or escaped, is not decoded for one.
+var claudeToolResultType = []byte("tool_result")
+
 type claudeTurnFormat struct{}
 
 type claudeRecordKind int
@@ -80,10 +84,20 @@ func (e claudeTurnLine) prompted() bool {
 	return e.PromptSource != "" || (len(origin) > 0 && !bytes.Equal(origin, []byte("null")))
 }
 
+// claudeTurnTypes are the JSON strings one of which every line that can be a
+// turn record holds: its entry type, or the turn_duration subtype. A line
+// holding none is not decoded; most of a transcript's bytes are attachments
+// and other entries that bear on no turn.
+var claudeTurnTypes = [][]byte{[]byte(`"user"`), []byte(`"assistant"`), []byte(`"turn_duration"`)}
+
 // parseClaudeTurnRecord reads line as a turn record. Sidechain entries,
 // compaction summaries and entries that do not bear on turns are not
-// records.
+// records. The type-name check is only a filter: any text can hold the
+// names too.
 func parseClaudeTurnRecord(line []byte) (claudeTurnRecord, bool) {
+	if !slices.ContainsFunc(claudeTurnTypes, func(name []byte) bool { return bytes.Contains(line, name) }) {
+		return claudeTurnRecord{}, false
+	}
 	var e claudeTurnLine
 	if json.Unmarshal(line, &e) != nil || e.IsSidechain {
 		return claudeTurnRecord{}, false
@@ -92,11 +106,12 @@ func parseClaudeTurnRecord(line []byte) (claudeTurnRecord, bool) {
 	switch {
 	case e.Type == "user" && e.IsCompactSummary:
 		return claudeTurnRecord{}, false
-	case e.Type == "user" && !e.prompted() && claudeInterruptEntry(e.Message):
-		rec.kind = claudeRecordInterrupt
 	case e.Type == "user":
 		rec.kind = claudeRecordUser
 		rec.toolResult = claudeToolResultEntry(e.Message)
+		if !rec.toolResult && !e.prompted() && claudeInterruptEntry(e.Message) {
+			rec.kind = claudeRecordInterrupt
+		}
 	case e.Type == "system" && e.Subtype == "turn_duration":
 		rec.kind = claudeRecordTurnEnd
 	case e.Type == "assistant" && e.IsAPIError:
@@ -113,6 +128,9 @@ func parseClaudeTurnRecord(line []byte) (claudeTurnRecord, bool) {
 // Claude's interrupt marker. A prompt that merely mentions the marker is not
 // one.
 func claudeInterruptEntry(message json.RawMessage) bool {
+	if !bytes.Contains(message, []byte(claudeInterruptMarker)) {
+		return false
+	}
 	var msg struct {
 		Content json.RawMessage `json:"content"`
 	}
@@ -137,6 +155,9 @@ func claudeInterruptEntry(message json.RawMessage) bool {
 // claudeToolResultEntry reports whether a user message carries a tool result
 // block. It reads the blocks' types only, never their text.
 func claudeToolResultEntry(message json.RawMessage) bool {
+	if !bytes.Contains(message, claudeToolResultType) {
+		return false
+	}
 	var msg struct {
 		Content []struct {
 			Type string `json:"type"`
