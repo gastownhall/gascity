@@ -1468,6 +1468,7 @@ go_test(
         "legacy_raw_session_writes_test.go",
         "lifecycle_coordination_test.go",
         "lifecycle_live_query_test.go",
+        "live_pool_sessions_test.go",
         "load_city_config_snapshot_test.go",
         "mail_inject_newest_window_test.go",
         "mail_session_inbox_test.go",
