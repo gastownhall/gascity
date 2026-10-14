@@ -106,8 +106,14 @@ type Info struct {
 	ResumeFlag    string // stored provider resume flag (e.g., "--resume")
 	ResumeStyle   string // "flag" or "subcommand"
 	ResumeCommand string // explicit resume command template ({{.SessionKey}})
-	CreatedAt     time.Time
-	LastActive    time.Time
+	// TranscriptPath is the transcript file pinned on the bead while the
+	// session was still open (PinnedTranscriptMetadataKey). It is what keeps a
+	// short-lived pooled worker readable after its slot retires, when the
+	// workdir fallback can no longer attribute a transcript to one session.
+	// Additive, internal-only (absent from the HTTP wire).
+	TranscriptPath string
+	CreatedAt      time.Time
+	LastActive     time.Time
 	// LastNudgeDeliveredAt records the wall-clock time of the most recent
 	// successful nudge delivery to this session. Zero when no nudge has
 	// been delivered yet (or the metadata predates the stamping path).
