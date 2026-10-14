@@ -468,10 +468,15 @@ func (p poolExecutionBackstop) revalidate(target backstopTarget) backstopResolut
 // the latch belongs to the window it escalated, and a new window (a new claim,
 // a new incarnation, or an answered nudge) has escalated nothing yet.
 func (p poolExecutionBackstop) observe(store beads.Store, s *beads.Bead, target backstopTarget, now time.Time, stdout io.Writer) {
-	kvs := executionClaimMarker(target, 0, now)
-	kvs[executionClaimNudgeStalledKey] = ""
-	kvs[executionClaimNudgeStalledTokenKey] = ""
-	writeSessionMetadata(store, s, kvs, "execution-claim-nudge", stdout)
+	writeSessionMetadata(store, s, map[string]string{
+		executionClaimNudgeWorkKey:         target.ID,
+		executionClaimNudgeRootKey:         target.RootID,
+		executionClaimNudgeStoreRefKey:     target.StoreRef,
+		executionClaimNudgeCountKey:        "0",
+		executionClaimNudgeAtKey:           now.UTC().Format(time.RFC3339),
+		executionClaimNudgeStalledKey:      "",
+		executionClaimNudgeStalledTokenKey: "",
+	}, "execution-claim-nudge", stdout)
 }
 
 func (p poolExecutionBackstop) reserve(store beads.Store, s *beads.Bead, target backstopTarget, attempts int, now time.Time, stdout io.Writer) bool {
@@ -613,19 +618,13 @@ func (p poolExecutionBackstop) clear(store beads.Store, s *beads.Bead, stdout io
 }
 
 func writeExecutionClaimMarker(store beads.Store, s *beads.Bead, target backstopTarget, attempts int, now time.Time, stdout io.Writer) bool {
-	return writeSessionMetadata(store, s, executionClaimMarker(target, attempts, now), "execution-claim-nudge", stdout)
-}
-
-// executionClaimMarker is the window patch for target at attempts, started or
-// last advanced at now.
-func executionClaimMarker(target backstopTarget, attempts int, now time.Time) map[string]string {
-	return map[string]string{
+	return writeSessionMetadata(store, s, map[string]string{
 		executionClaimNudgeWorkKey:     target.ID,
 		executionClaimNudgeRootKey:     target.RootID,
 		executionClaimNudgeStoreRefKey: target.StoreRef,
 		executionClaimNudgeCountKey:    strconv.Itoa(attempts),
 		executionClaimNudgeAtKey:       now.UTC().Format(time.RFC3339),
-	}
+	}, "execution-claim-nudge", stdout)
 }
 
 // clearExecutionClaimMarker wipes the state machine — including the escalation
