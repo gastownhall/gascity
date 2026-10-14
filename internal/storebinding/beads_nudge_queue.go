@@ -447,9 +447,19 @@ func (q *beadsNudgeQueue) DueKeys(now time.Time) ([]string, error) {
 // Empty reports that the queue serves no pending, in-flight or dead item. It is
 // at most two indexed probes of one row each: live records, then dead ones. A
 // queue that cannot be read is not empty.
+//
+// Each probe names no type and admits closed records, so the native store can
+// push its one-row limit down instead of fetching every record in the state
+// and cutting the answer in Go. That widening is exact: queue_state is written
+// only by queue records, and the queue closes a record only after recording
+// it terminal, so no closed record carries a served state. A record closed
+// outside the queue with a served state still on it would read as not empty,
+// which costs the caller a full read and never skips work.
 func (q *beadsNudgeQueue) Empty() (bool, error) {
 	for _, state := range nudgeQueueServedStates {
 		query := nudgeQueueStateQuery(state)
+		query.Type = ""
+		query.IncludeClosed = true
 		query.Limit = 1
 		records, err := q.store.List(query)
 		if err != nil {

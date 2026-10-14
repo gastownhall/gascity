@@ -193,7 +193,8 @@ func TestBeadsNudgeQueueNeverListsByLabelAlone(t *testing.T) {
 }
 
 // TestBeadsNudgeQueueEmptyIsTwoBoundedProbes pins Empty's cost: at most two
-// indexed probes, pending first and then dead, each asking for one row.
+// indexed probes, pending first and then dead, each asking for one row in a
+// shape the store can bound to one row.
 func TestBeadsNudgeQueueEmptyIsTwoBoundedProbes(t *testing.T) {
 	queue, recorder, backing := newRecordedNudgeQueue(t)
 	now := time.Now().UTC()
@@ -217,6 +218,13 @@ func TestBeadsNudgeQueueEmptyIsTwoBoundedProbes(t *testing.T) {
 		for i, query := range got {
 			if query.Metadata[nudgeMetaQueueState] != want[i] || query.Limit != 1 || !query.Live {
 				t.Errorf("Empty %s probe %d = %+v, want a Live Limit:1 probe on queue_state=%s", when, i, query, want[i])
+			}
+			// The native store pushes a limit down only when no residual
+			// filter runs after its page is cut: every status, no type, both
+			// tiers. Any of those would make each probe fetch every record in
+			// its state and cut the answer in Go.
+			if query.Type != "" || !query.IncludeClosed || query.Status != "" || query.TierMode != beads.TierBoth {
+				t.Errorf("Empty %s probe %d = %+v, want a probe the native store can bound to one row (no Type, IncludeClosed, no Status, TierBoth)", when, i, query)
 			}
 		}
 	}
