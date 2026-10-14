@@ -28,6 +28,12 @@ import (
 // follows, the tool result carried that prompt's id, so the turn it opened
 // keeps no id and the prompt opens its own turn.
 //
+// A user entry Claude writes itself, with neither origin nor promptSource
+// (Stop hook feedback, the entry a resumed session opens with), may likewise
+// carry a queued prompt's promptId before that prompt is written. While a
+// turn is open it continues that turn, whatever id it carries; with no turn
+// open it opens one, as a self-started turn begins.
+//
 // An API error does not end a turn by itself: Claude Code retries some errors
 // ("Connection lost mid-response") within the same turn. The failure stays
 // pending until the turn_duration that follows it or the next prompt, which
@@ -188,11 +194,13 @@ func claudeToolResultEntry(message json.RawMessage) bool {
 	return false
 }
 
-// scan collects records backward until it has passed the first entry of
-// the oldest turn it reports, then folds them oldest first. Only an id that
-// can start a turn counts toward that stop: a tool result may carry the next
-// prompt's id before the prompt is written, and counting it would stop the
-// scan a turn early.
+// scan collects records backward through the newest prompt of the turn
+// before the oldest one it reports, then folds them oldest first, so the fold
+// begins at a prompt rather than inside a turn. Only a prompt's id counts
+// toward that stop: a tool result, or an entry Claude writes itself, may
+// carry the next prompt's id before the prompt is written, and counting it
+// would stop the scan a turn early. Such an entry may still open a turn,
+// which only makes the scan read further.
 func (claudeTurnFormat) scan(_ string, r io.ReaderAt, size, budget int64) (turnFold, error) {
 	var records []claudeTurnRecord // newest first
 	ids := make(map[string]bool)
@@ -201,11 +209,12 @@ func (claudeTurnFormat) scan(_ string, r io.ReaderAt, size, budget int64) (turnF
 		if !ok {
 			return false
 		}
-		if id, ok := validTurnID(rec.rawID); ok && rec.kind == claudeRecordUser && !rec.toolResult && !ids[id] {
-			if len(ids) == MaxRecentTurns+1 {
+		if id, ok := validTurnID(rec.rawID); ok && rec.kind == claudeRecordUser && rec.prompted && !rec.toolResult && !ids[id] {
+			ids[id] = true
+			if len(ids) > MaxRecentTurns+1 {
+				records = append(records, rec)
 				return true
 			}
-			ids[id] = true
 		}
 		records = append(records, rec)
 		return false
@@ -235,9 +244,10 @@ type claudeTurnFold struct {
 	// startUnseen: the window may begin inside a turn, so the first turn
 	// opened before any boundary has an unknown start.
 	startUnseen bool
-	// provisionalID is the id of a turn a tool result opened at the start
-	// of the window. The tool result may carry the next prompt's id, so a
-	// prompt with that id shows the turn was not that prompt's.
+	// provisionalID is the id of a turn a tool result or an entry Claude
+	// wrote itself opened at the start of the window. Either may carry the
+	// next prompt's id, so a prompt with that id shows the turn was not that
+	// prompt's.
 	provisionalID string
 	// failed is set while an API error of the open turn is pending: no
 	// reply, tool result or prompt of the turn has followed it yet. failedAt
@@ -293,6 +303,11 @@ func (f *claudeTurnFold) addUser(rec claudeTurnRecord) {
 			return
 		}
 	}
+	if !rec.prompted && l.open {
+		// Claude wrote it itself: it continues the open turn, whatever
+		// promptId it carries, and is no reply that clears a failure.
+		return
+	}
 	id, ok := validTurnID(rec.rawID)
 	if ok && rec.prompted && id == f.provisionalID {
 		f.disownProvisional()
@@ -321,7 +336,7 @@ func (f *claudeTurnFold) addUser(rec claudeTurnRecord) {
 	f.provisionalID = ""
 	if f.startUnseen {
 		at = time.Time{}
-		if rec.toolResult {
+		if !rec.prompted {
 			f.provisionalID = id
 		}
 	}
@@ -329,8 +344,9 @@ func (f *claudeTurnFold) addUser(rec claudeTurnRecord) {
 	l.begin(id, at)
 }
 
-// disownProvisional drops the id of the turn a tool result opened at the
-// start of the window, once a prompt shows the id is the prompt's own.
+// disownProvisional drops the id of the turn a tool result or an entry Claude
+// wrote itself opened at the start of the window, once a prompt shows the id
+// is the prompt's own.
 func (f *claudeTurnFold) disownProvisional() {
 	l := &f.ledger
 	if l.isCurrent(f.provisionalID) {

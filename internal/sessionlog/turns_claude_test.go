@@ -261,7 +261,7 @@ func TestScanTurnsClaudeMidResponseRetryStaysOpen(t *testing.T) {
 // means the turn recovered, and it ends as its turn_duration says.
 func TestScanTurnsClaudeAPIErrorThenTurnEnd(t *testing.T) {
 	user := func(ts, id string) string {
-		return `{"type":"user","timestamp":"2026-10-13T05:` + ts + `Z","promptId":"` + id + `","message":{"role":"user","content":"prompt"}}`
+		return `{"type":"user","timestamp":"2026-10-13T05:` + ts + `Z","promptId":"` + id + `","promptSource":"typed","message":{"role":"user","content":"prompt"}}`
 	}
 	apiErr := func(ts string) string {
 		return `{"type":"assistant","timestamp":"2026-10-13T05:` + ts + `Z","isApiErrorMessage":true,"message":{"role":"assistant","content":[{"type":"text","text":"API Error"}]}}`
@@ -295,6 +295,85 @@ func TestScanTurnsClaudeAPIErrorThenTurnEnd(t *testing.T) {
 			{ID: "p1", StartedAt: turnTime(t, ts("00:00.100")), EndedAt: turnTime(t, ts("00:01.010")), Status: TurnStatusFailed},
 		},
 	})
+}
+
+// TestScanTurnsClaudeUnpromptedEntryContinuesOpenTurn: a user entry Claude
+// writes itself, with neither origin nor promptSource, may carry a queued
+// prompt's promptId before that prompt is written: Stop hook feedback, or the
+// entry a resumed session opens with. While a turn is open such an entry
+// continues it, so the queued prompt still opens its own turn. With no turn
+// open, it opens one.
+func TestScanTurnsClaudeUnpromptedEntryContinuesOpenTurn(t *testing.T) {
+	prompt := func(ts, id string) string {
+		return `{"type":"user","timestamp":"2026-10-13T05:` + ts + `Z","promptId":"` + id + `","origin":{"kind":"human"},"promptSource":"queued","message":{"role":"user","content":"prompt"}}`
+	}
+	meta := func(ts, id, text string) string {
+		return `{"type":"user","timestamp":"2026-10-13T05:` + ts + `Z","promptId":"` + id + `","isMeta":true,"message":{"role":"user","content":"` + text + `"}}`
+	}
+	apiErr := func(ts string) string {
+		return `{"type":"assistant","timestamp":"2026-10-13T05:` + ts + `Z","isApiErrorMessage":true,"message":{"role":"assistant","content":[{"type":"text","text":"API Error"}]}}`
+	}
+	end := func(ts string) string {
+		return `{"type":"system","subtype":"turn_duration","timestamp":"2026-10-13T05:` + ts + `Z"}`
+	}
+	path := writeTurnLines(t, "claude.jsonl",
+		prompt("00:00.100", "p1"), meta("00:01.000", "p2", "Stop hook feedback: hook text"), end("00:01.010"),
+		prompt("00:01.100", "p2"), apiErr("00:02.000"),
+		meta("00:03.000", "p3", "Continue from where you left off."), prompt("00:03.050", "p3"), end("00:04.000"),
+		meta("00:05.000", "p4", "local command caveat"), meta("00:05.000", "p4", "local command output"),
+	)
+	got, err := ScanTurns("claude", path)
+	if err != nil {
+		t.Fatalf("ScanTurns: %v", err)
+	}
+	ts := func(clock string) string { return "2026-10-13T05:" + clock + "Z" }
+	assertTurnScan(t, got, TurnScan{
+		Open:    true,
+		Current: ScannedTurn{ID: "p4", StartedAt: turnTime(t, ts("00:05.000"))},
+		Recent: []ScannedTurn{
+			{ID: "p3", StartedAt: turnTime(t, ts("00:03.050")), EndedAt: turnTime(t, ts("00:04.000")), Status: TurnStatusCompleted},
+			{ID: "p2", StartedAt: turnTime(t, ts("00:01.100")), EndedAt: turnTime(t, ts("00:02.000")), Status: TurnStatusFailed},
+			{ID: "p1", StartedAt: turnTime(t, ts("00:00.100")), EndedAt: turnTime(t, ts("00:01.010")), Status: TurnStatusCompleted},
+		},
+	})
+}
+
+// TestScanTurnsClaudeWindowStartsAtUnpromptedEntry: a scan window that
+// begins at Stop hook feedback stamped with the queued prompt's id opens the
+// ending turn under that id; the queued prompt then shows the id was its own,
+// so the ended turn keeps no id and the prompt opens its own turn.
+func TestScanTurnsClaudeWindowStartsAtUnpromptedEntry(t *testing.T) {
+	ts := func(clock string) string { return "2026-10-13T05:" + clock + "Z" }
+	lines := []string{
+		`{"type":"user","timestamp":"` + ts("00:00.100") + `","promptId":"p1","origin":{"kind":"human"},"promptSource":"typed","message":{"role":"user","content":"prompt"}}`,
+		`{"type":"user","timestamp":"` + ts("00:01.000") + `","promptId":"p1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":"out"}]}}`,
+		`{"type":"user","timestamp":"` + ts("00:02.000") + `","promptId":"p2","isMeta":true,"message":{"role":"user","content":"Stop hook feedback: hook text"}}`,
+		`{"type":"system","subtype":"turn_duration","timestamp":"` + ts("00:02.010") + `"}`,
+		`{"type":"user","timestamp":"` + ts("00:02.100") + `","promptId":"p2","origin":{"kind":"human"},"promptSource":"queued","message":{"role":"user","content":"prompt"}}`,
+	}
+	path := writeTurnLines(t, "claude.jsonl", lines...)
+	ended := func(id string) []ScannedTurn {
+		return []ScannedTurn{{ID: id, EndedAt: turnTime(t, ts("00:02.010")), Status: TurnStatusCompleted}}
+	}
+	for first, recent := range map[int][]ScannedTurn{
+		2: ended("p1"),
+		3: ended(""),
+	} {
+		// The window holds line first onward, and the newline before it.
+		budget := int64(len(strings.Join(lines[first-1:], "\n"))) + 2
+		got, err := scanTurnsWithBudget(t, "claude", path, budget)
+		if err != nil {
+			t.Fatalf("window from line %d: %v", first, err)
+		}
+		want := TurnScan{
+			Open:    true,
+			Current: ScannedTurn{ID: "p2", StartedAt: turnTime(t, ts("00:02.100"))},
+			Recent:  recent,
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("window from line %d:\n got: %+v\nwant: %+v", first, got, want)
+		}
+	}
 }
 
 // TestScanTurnsClaudePromptOfMarkerTextIsAPrompt: Claude's interrupt marker

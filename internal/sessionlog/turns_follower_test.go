@@ -10,8 +10,10 @@ import (
 )
 
 // claudeTurnLines returns n Claude turns ending in turn: interrupted (the
-// tool result and the marker stamped with the next promptId), completed,
-// failed, or left open until the next turn starts, by turn number modulo 4.
+// tool result and the marker stamped with the next promptId), completed
+// (after Stop hook feedback stamped with the next promptId), failed, or left
+// open until the next turn starts (after an entry Claude wrote itself,
+// stamped with an id no prompt carries), by turn number modulo 4.
 func claudeTurnLines(n int) []string {
 	var lines []string
 	for i := 1; i <= n; i++ {
@@ -22,7 +24,7 @@ func claudeTurnLines(n int) []string {
 		}
 		ts := func(sec int) string { return fmt.Sprintf("2026-10-13T05:%02d:%02d.%03dZ", i, sec, i) }
 		lines = append(lines,
-			`{"type":"user","timestamp":"`+ts(0)+`","promptId":"`+id+`","message":{"role":"user","content":"prompt"}}`,
+			`{"type":"user","timestamp":"`+ts(0)+`","promptId":"`+id+`","origin":{"kind":"human"},"promptSource":"typed","message":{"role":"user","content":"prompt"}}`,
 			`{"type":"assistant","timestamp":"`+ts(1)+`","message":{"role":"assistant","content":[{"type":"tool_use","id":"t"}],"stop_reason":"tool_use"}}`,
 			`{"type":"user","timestamp":"`+ts(2)+`","promptId":"`+resultID+`","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":"out"}]}}`,
 		)
@@ -30,9 +32,13 @@ func claudeTurnLines(n int) []string {
 		case 0:
 			lines = append(lines, `{"type":"user","timestamp":"`+ts(3)+`","promptId":"`+fmt.Sprintf("p%02d", i+1)+`","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]}}`)
 		case 1:
-			lines = append(lines, `{"type":"system","subtype":"turn_duration","timestamp":"`+ts(4)+`"}`)
+			lines = append(lines,
+				`{"type":"user","timestamp":"`+ts(3)+`","promptId":"`+fmt.Sprintf("p%02d", i+1)+`","isMeta":true,"message":{"role":"user","content":"Stop hook feedback: hook text"}}`,
+				`{"type":"system","subtype":"turn_duration","timestamp":"`+ts(4)+`"}`)
 		case 2:
 			lines = append(lines, `{"type":"assistant","timestamp":"`+ts(4)+`","isApiErrorMessage":true,"message":{"role":"assistant","content":[{"type":"text","text":"API Error"}]}}`)
+		case 3:
+			lines = append(lines, `{"type":"user","timestamp":"`+ts(3)+`","promptId":"`+fmt.Sprintf("q%02d", i)+`","isMeta":true,"message":{"role":"user","content":"local command output"}}`)
 		}
 	}
 	return lines
