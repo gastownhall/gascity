@@ -128,25 +128,23 @@ type commitPhaseRun struct {
 }
 
 // startLeaseShape builds the lease an async start is enqueued with. It returns
-// the prepared start carrying the lease, the dropLease the start hands
-// commitAsyncStartBounded (nil when the test releases the lease itself), and a
-// cleanup that gives the lease back at the end of the test.
-type startLeaseShape func(t *testing.T, city string, item preparedStart) (preparedStart, func(), func())
+// the prepared start carrying the lease, which the start itself ends, and a
+// cleanup that gives the lease back at the end of the test if the start did not.
+type startLeaseShape func(t *testing.T, city string, item preparedStart) (preparedStart, func())
 
 // flockOnlyLease is the lease the post-start tests hold: the name's flock and
 // nothing on the row, released by the test.
-func flockOnlyLease(t *testing.T, city string, item preparedStart) (preparedStart, func(), func()) {
+func flockOnlyLease(t *testing.T, city string, item preparedStart) (preparedStart, func()) {
 	t.Helper()
-	item, dropLease := leasedStart(t, city, item)
-	return item, nil, dropLease
+	return leasedStart(t, city, item)
 }
 
 // productionLease is the lease the reconciler's start pass gives an async start
 // (executePlannedStartsTraced): the name's flock taken against store, then the
-// row's record taken just before PreWake, dropped by the start. Dropping it
+// row's record taken just before PreWake, ended by the start. Releasing it
 // reads and writes the store.
 func productionLease(store beads.Store) startLeaseShape {
-	return func(t *testing.T, city string, item preparedStart) (preparedStart, func(), func()) {
+	return func(t *testing.T, city string, item preparedStart) (preparedStart, func()) {
 		t.Helper()
 		lease, dropLease, err := tryRuntimeLease(store, city, startLeaseName(item.candidate), "", 0)
 		if err != nil {
@@ -159,7 +157,7 @@ func productionLease(store beads.Store) startLeaseShape {
 			t.Fatalf("TakeRecord: %v", err)
 		}
 		item.candidate.lease = lease
-		return item, dropLease, dropLease
+		return item, dropLease
 	}
 }
 
@@ -184,7 +182,7 @@ func enqueueCommitPhaseStartShaped(ctx context.Context, t *testing.T, city strin
 	if !ok {
 		t.Fatalf("reserve async start slot: %s", reason)
 	}
-	item, dropLease, cleanup := shape(t, city, item)
+	item, cleanup := shape(t, city, item)
 	var cleanupOnce sync.Once
 	run.releaseLease = func() { cleanupOnce.Do(cleanup) }
 	t.Cleanup(run.releaseLease)
@@ -196,7 +194,6 @@ func enqueueCommitPhaseStartShaped(ctx context.Context, t *testing.T, city strin
 				run.released.Add(1)
 				slot()
 			},
-			dropLease: dropLease,
 			done: func() {
 				run.finished.Add(1)
 				close(run.finishedC)

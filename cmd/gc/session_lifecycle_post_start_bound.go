@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"sync/atomic"
@@ -108,25 +108,92 @@ func readPendingCreateIdentityBounded(ctx context.Context, cityPath string, info
 	})
 }
 
+// commitHandoff is the one word that decides who ends a start's runtime lease
+// once the commit phase is bounded: the waiter (the start goroutine, which
+// holds the async slot) or the commit closure. It starts waiter-owned and
+// moves out of that state exactly once:
+//   - claim, the closure's first instruction, takes the lease for the commit;
+//     the closure then commits, and releases the lease when it returns;
+//   - abandon, the waiter's move once the bound has returned, gives the lease
+//     up instead: it drops the name's flock and nothing else
+//     (session.RuntimeLease.Abandon), and any closure that starts afterwards
+//     finds it lost and returns at once.
+//
+// Whoever moves it first wins, so a commit that never started cannot land
+// against a lease the waiter has dropped (a lease's record still satisfies
+// HoldsMeta after Abandon), and a commit that is running keeps its lease.
+type commitHandoff struct{ state atomic.Int32 }
+
+const (
+	handoffWaiter    int32 = iota // initial: nobody has taken the lease
+	handoffCommit                 // the commit closure took the lease
+	handoffAbandoned              // the waiter abandoned the lease
+)
+
+// claim reports whether the commit closure won the lease. A false return means
+// the waiter abandoned it first and the closure must do nothing.
+func (h *commitHandoff) claim() bool {
+	return h.state.CompareAndSwap(handoffWaiter, handoffCommit)
+}
+
+// abandon reports whether the waiter won the lease, and if so abandons it. It
+// makes no store call, runs from any goroutine, and is a no-op that returns
+// false once the commit closure has claimed the lease.
+func (h *commitHandoff) abandon(lease *sessionpkg.RuntimeLease) bool {
+	if !h.state.CompareAndSwap(handoffWaiter, handoffAbandoned) {
+		return false
+	}
+	lease.Abandon()
+	return true
+}
+
+// runHandedOffCommit is the commit closure of commitAsyncStartBounded. It
+// claims the lease first and returns at once, committing and touching nothing,
+// if the waiter abandoned it. A closure that wins releases the lease whatever
+// the commit does, a panic included, after it ends the lease watch.
+func runHandedOffCommit(h *commitHandoff, lease *sessionpkg.RuntimeLease, unwatch func(), commit func() bool) (bool, error) {
+	if !h.claim() {
+		return false, nil
+	}
+	defer lease.Release()
+	if unwatch != nil {
+		unwatch()
+	}
+	return commit(), nil
+}
+
+// Dispositions of the runtime lease the log line of an unavailable commit
+// names.
+const (
+	leaseRetainedByCommit = "runtime lease retained by the running commit"
+	leaseAbandoned        = "runtime lease abandoned (flock released, record left to lapse)"
+)
+
 // commitAsyncStartBounded is commitAsyncStartResultWithContext held to
 // commitPhaseBound, under the same per-session key as the post-start
 // observations. It returns whether the commit succeeded. When the commit does
 // not answer in time, or an observation of the session is already outstanding
 // so it is refused without running, it logs commit_unavailable and returns
-// false; the waiter writes nothing to the session, and a commit that was
-// started keeps running on the controller's ctx and finishes on its own. The
-// pending claim and its lease stay as they are and the reconciler's repair
-// paths pick the row up when the lease ages out.
+// false. The waiter makes no store or runtime call at all: a commit that was
+// started keeps running on the controller's ctx and finishes on its own, and the
+// pending claim stays as it is for the reconciler's repair paths.
 //
-// dropLease releases the runtime lease the start holds, and this function owns
-// calling it exactly once. Releasing a lease that carries a row record reads
-// and writes the store, so it is never run on a path that gave up on the store:
-//   - the commit finished: dropLease runs before this returns, as it always did;
-//   - the commit was refused: nothing ran and nothing will, so dropLease runs
-//     detached;
-//   - the commit was abandoned: the commit's own goroutine runs it when the
-//     commit returns, so a commit that lands late does so under the lease that
-//     fences it and is not refused as stale.
+// lease is the runtime lease the start holds (nil when it holds none); this
+// function and the commit closure share it through a commitHandoff, and exactly
+// one of them ends it:
+//   - the commit ran to its end: the closure releases the lease (clearing its
+//     record) before it returns, so a commit that lands late does so under the
+//     lease that fences it and is not refused as stale;
+//   - the commit was refused, or has not started when the bound ends, or is
+//     still running: the waiter abandons the lease only if the closure has not
+//     claimed it, dropping the flock and leaving the record to lapse. A closure
+//     that already claimed it keeps it, flock included, until it returns, and
+//     the log line says so.
+//
+// unwatch ends the lease watch of the start. It moves into the commit closure,
+// after it claims the lease and before it commits: stopping the watch waits for
+// a read of the lease in flight, which the waiter must never wait on. The
+// waiter never calls it; the watch also ends when the lease is abandoned.
 //
 // The wait ends on the bound only, never on ctx: controller shutdown must not
 // abandon a commit, whose shutdown branch settles the row on ctx. The commit
@@ -142,7 +209,8 @@ func commitAsyncStartBounded(
 	wave int,
 	stdout, stderr io.Writer,
 	trace *sessionReconcilerTraceCycle,
-	dropLease func(),
+	lease *sessionpkg.RuntimeLease,
+	unwatch func(),
 ) (committed bool) {
 	name := result.prepared.candidate.name()
 	template := result.prepared.candidate.tp.TemplateName
@@ -154,49 +222,33 @@ func commitAsyncStartBounded(
 	if base == nil {
 		base = context.Background()
 	}
-	if dropLease == nil {
-		dropLease = func() {}
-	}
-	// commitRunning is the commit's side of the hand-off: running until the
-	// commit returns, then finished, or abandoned once the waiter gave up on it.
-	const (
-		commitRunning int32 = iota
-		commitFinished
-		commitAbandoned
-	)
-	var phase atomic.Int32
+	var handoff commitHandoff
 	waiterDone := false
 	defer func() {
 		// A panic out of the wait (the commit's own is recovered inside it)
-		// must not strand the lease.
+		// must not strand the flock. Abandon, as the waiter does: no store call.
 		if !waiterDone {
-			dropLease()
+			handoff.abandon(lease)
 		}
 	}()
 	waitCtx, cancel := context.WithTimeout(context.WithoutCancel(base), commitPhaseBound)
 	defer cancel()
 	committed, err := observeSessionBounded(waitCtx, cityPath, name, func() (bool, error) {
-		ok := commitAsyncStartResultWithContext(ctx, result, sp, store, clk, rec, wave, stdout, stderr, trace)
-		if !phase.CompareAndSwap(commitRunning, commitFinished) {
-			// The waiter gave up while this ran: the lease is this goroutine's.
-			dropLease()
-		}
-		return ok, nil
+		return runHandedOffCommit(&handoff, lease, unwatch, func() bool {
+			return commitAsyncStartResultWithContext(ctx, result, sp, store, clk, rec, wave, stdout, stderr, trace)
+		})
 	})
+	abandoned := handoff.abandon(lease)
 	waiterDone = true
-	switch {
-	case err == nil:
-		dropLease()
+	if err == nil {
 		return committed
-	case errors.Is(err, worker.ErrObservationOutstanding):
-		go dropLease()
-	case !phase.CompareAndSwap(commitRunning, commitAbandoned):
-		// The commit returned in the instant the wait expired: it did not
-		// abandon the lease, so the waiter, whose commit just answered the
-		// store, takes it down.
-		dropLease()
-		logLifecycleOutcome(stderr, "start", wave, name, template, "commit_unavailable", started, time.Now(), err, phases)
-		return false
+	}
+	if lease != nil {
+		disposition := leaseRetainedByCommit
+		if abandoned {
+			disposition = leaseAbandoned
+		}
+		err = fmt.Errorf("%w; %s", err, disposition)
 	}
 	logLifecycleOutcome(stderr, "start", wave, name, template, "commit_unavailable", started, time.Now(), err, phases)
 	return false

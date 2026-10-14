@@ -150,10 +150,10 @@ func TestAbandonedCommitFreesTheSlotUnderTheProductionLeaseWhenTheStoreIsWedged(
 
 		// Take the production lease first: it writes the row's record, which the
 		// wedge must not stall.
-		run := enqueueCommitPhaseStartShaped(context.Background(), t, testCity, item, sp, store, clk, immediateStartStabilityWaiter, func(t *testing.T, city string, item preparedStart) (preparedStart, func(), func()) {
-			item, dropLease, cleanup := productionLease(store)(t, city, item)
+		run := enqueueCommitPhaseStartShaped(context.Background(), t, testCity, item, sp, store, clk, immediateStartStabilityWaiter, func(t *testing.T, city string, item preparedStart) (preparedStart, func()) {
+			item, cleanup := productionLease(store)(t, city, item)
 			store.arm()
-			return item, dropLease, cleanup
+			return item, cleanup
 		})
 		elapsed := run.awaitFinished(t, sp, store, begin)
 
@@ -200,10 +200,10 @@ func TestRefusedCommitFreesTheSlotUnderTheProductionLeaseWhenTheStoreIsWedged(t 
 		})
 		begin := time.Now()
 
-		run := enqueueCommitPhaseStartShaped(context.Background(), t, testCity, item, sp, store, clk, occupy, func(t *testing.T, city string, item preparedStart) (preparedStart, func(), func()) {
-			item, dropLease, cleanup := productionLease(store)(t, city, item)
+		run := enqueueCommitPhaseStartShaped(context.Background(), t, testCity, item, sp, store, clk, occupy, func(t *testing.T, city string, item preparedStart) (preparedStart, func()) {
+			item, cleanup := productionLease(store)(t, city, item)
 			store.arm()
-			return item, dropLease, cleanup
+			return item, cleanup
 		})
 		elapsed := run.awaitFinished(t, sp, store, begin)
 
