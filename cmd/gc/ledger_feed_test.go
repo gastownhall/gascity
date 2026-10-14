@@ -658,9 +658,10 @@ func countFeedEvents(got []string, want string) int {
 }
 
 // A never-held close whose refresh the feed had to drop (a read error, a
-// fence, a cache that is not live) is handed to the autoclose sweep at once
-// and kept for a retry, which announces it once (critic A3): the re-scan
-// lists active rows only and would never see it.
+// fence, a cache that is not live) is kept for a retry, which announces it
+// once (critic A3): the re-scan lists active rows only and would never see
+// it. A failed refresh hands it to the autoclose sweep at once; a fenced one
+// reaches the sweep through the retry's announce, or when its retries run out.
 func TestLedgerFeedKeepsADroppedNeverHeldClose(t *testing.T) {
 	closedEvent := events.BeadClosed + "/" + cacheReconcileActor
 	t.Run("refresh_error", func(t *testing.T) {
@@ -702,12 +703,38 @@ func TestLedgerFeedKeepsADroppedNeverHeldClose(t *testing.T) {
 			t.Fatal(err)
 		}
 		store.afterCreate = nil
-		if !slices.Contains(h.deferred, id) || len(h.eventsFor(id)) != 0 {
-			t.Fatalf("after the fenced refresh: deferred %v events %v, want the id deferred and no event yet", h.deferred, h.eventsFor(id))
+		if len(h.deferred) != 0 || len(h.eventsFor(id)) != 0 {
+			t.Fatalf("after the fenced refresh: deferred %v events %v, want nothing deferred and no event yet: the retry owns a fenced close", h.deferred, h.eventsFor(id))
 		}
 		h.feed.retryPending()
 		if got := h.eventsFor(id); countFeedEvents(got, closedEvent) != 1 {
 			t.Fatalf("events = %v, want one %s from the retry", got, closedEvent)
+		}
+		if !slices.Equal(h.deferred, []string{id}) {
+			t.Fatalf("deferred = %v, want [%s] once, from the retry's announce", h.deferred, id)
+		}
+	})
+	t.Run("fenced_gives_up", func(t *testing.T) {
+		store := newJournalingStore()
+		h := newFeedHarness(t, store)
+		h.step()
+		id := closedOutOfBand(t, store)
+		// The create stays in flight across every retry, so each is fenced.
+		store.afterCreate = func(string) {
+			h.step()
+			for range ledgerFeedRetryLimit {
+				h.feed.retryPending()
+			}
+		}
+		if _, err := h.cache.Create(beads.Bead{Title: "local"}); err != nil {
+			t.Fatal(err)
+		}
+		store.afterCreate = nil
+		if st := h.feed.status(time.Now()); st.RetryGiveUps == 0 || st.PendingRetries != 0 {
+			t.Fatalf("status give-ups=%d pending=%d, want the fenced row given up", st.RetryGiveUps, st.PendingRetries)
+		}
+		if countFeedEvents(h.deferred, id) != 1 {
+			t.Fatalf("deferred = %v, want the given-up fenced close with the sweep once", h.deferred)
 		}
 	})
 	t.Run("cache_unavailable", func(t *testing.T) {
@@ -761,6 +788,63 @@ func TestLedgerFeedKeepsADroppedNeverHeldClose(t *testing.T) {
 			t.Fatalf("deferred = %v, want the given-up close with the sweep", h.deferred)
 		}
 	})
+}
+
+// A burst of the controller's own closes, each read by the feed while the
+// write is still in flight, is fenced and left to the retry alone: nothing is
+// deferred to the autoclose sweep. A real never-held close fenced in the same
+// burst reaches the sweep exactly once, when the retry announces it.
+func TestLedgerFeedFencedDropsDeferNothingToTheSweep(t *testing.T) {
+	store := newJournalingStore()
+	h := newFeedHarness(t, store)
+	var own []string
+	for i := range 8 {
+		b, err := h.cache.Create(beads.Bead{Title: fmt.Sprintf("own %d", i)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		own = append(own, b.ID)
+	}
+	h.step()
+	stray := closedOutOfBand(t, store)
+
+	// A local create in flight fences every yielding refresh, the stray
+	// close's among them; each own close then fences its own row.
+	store.afterWrite = func(string) { h.step() }
+	store.afterCreate = func(string) { h.step() }
+	if _, err := h.cache.Create(beads.Bead{Title: "fences the stray close"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(h.deferred) != 0 {
+		t.Fatalf("after the fenced stray close: deferred %v, want nothing yet", h.deferred)
+	}
+	for _, id := range own {
+		if err := h.cache.Close(id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store.afterWrite, store.afterCreate = nil, nil
+
+	st := h.feed.status(time.Now())
+	if st.Fenced < int64(len(own)+1) || st.PendingRetries == 0 {
+		t.Fatalf("after the fenced burst: fenced=%d pending=%d, want every own write fenced and kept for a retry", st.Fenced, st.PendingRetries)
+	}
+	for _, id := range h.deferred {
+		if slices.Contains(own, id) {
+			t.Fatalf("deferred to the sweep = %v, want none of the controller's own closes", h.deferred)
+		}
+	}
+	h.feed.retryPending()
+	h.step()
+	if !slices.Equal(h.deferred, []string{stray}) {
+		t.Fatalf("deferred to the sweep = %v, want exactly [%s]", h.deferred, stray)
+	}
+	if got := h.eventsFor(stray); countFeedEvents(got, events.BeadClosed+"/"+cacheReconcileActor) != 1 {
+		t.Fatalf("stray close events = %v, want one announced close", got)
+	}
+	if st := h.feed.status(time.Now()); st.PendingRetries != 0 || st.UnheldCloses != 1 {
+		t.Fatalf("status pending=%d unheld=%d, want the retries done and one never-held close", st.PendingRetries, st.UnheldCloses)
+	}
 }
 
 // A truncation gap requests one re-scan, is counted, and the feed continues
