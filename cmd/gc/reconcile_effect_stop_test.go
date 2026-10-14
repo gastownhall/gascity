@@ -830,3 +830,77 @@ func TestDormantFinalizeClearsALeftoverRequest(t *testing.T) {
 		}
 	}
 }
+
+// TestExecutionStalledStopReleasesItsClaimAndCloses (v5.10x, maintainer-city
+// build 42dd71f94d). Kills an execution-stalled drain that finalizes the seat
+// asleep holding the claim it was drained for: the assigned-work wake then
+// restarted it on the same claim, and the backstop drained it again, in a
+// loop. A confirmed execution-stalled stop gives back the claim its marker
+// names, so the seat closes and a fresh seat takes the claim; another
+// in-progress bead of the seat's, or the same drain for another reason,
+// keeps its work as before.
+func TestExecutionStalledStopReleasesItsClaimAndCloses(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		reason  string
+		release bool
+		other   bool // the seat holds a second in-progress bead
+	}{
+		{"execution-stalled", executionStalledDrainReason, true, false},
+		{"execution-stalled, a second claim held", executionStalledDrainReason, true, true},
+		{"another drain reason", drainOrphaned, false, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var claimID, otherID string
+			var work beads.Store
+			s, got, leaf := stopRun(t, signaled(c.reason), undesired(c.reason), func(p *effectPass, _ *fenceLeaf, store beads.Store, id string) {
+				work = store
+				claim, err := store.Create(beads.Bead{Title: "stalled step", Type: "task"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				inProgress := "in_progress"
+				if err := store.Update(claim.ID, beads.UpdateOpts{Status: &inProgress, Assignee: &id}); err != nil {
+					t.Fatal(err)
+				}
+				claimID = claim.ID
+				if c.other {
+					other, err := store.Create(beads.Bead{Title: "other step", Type: "task"})
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := store.Update(other.ID, beads.UpdateOpts{Status: &inProgress, Assignee: &id}); err != nil {
+						t.Fatal(err)
+					}
+					otherID = other.ID
+				}
+				if err := store.SetMetadata(id, executionClaimNudgeWorkKey, claim.ID); err != nil {
+					t.Fatal(err)
+				}
+				rel := newCloseReleases(p.World, nil, io.Discard)
+				rel.legs = testWorkLegs(p.World.CityPath, p.World.Env.Cfg, store, nil) // the pass's raw work legs, over the row's store
+				p.held.release = rel
+			})
+			claim, err := work.Get(claimID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch {
+			case s.Outcome != settledLanded || stops(leaf) != 1:
+				t.Fatalf("settlement %+v with %d stops, want landed after one", s, stops(leaf))
+			case c.other:
+				other, err := work.Get(otherID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if claim.Status != "open" || other.Status != "in_progress" || got.Status == "closed" {
+					t.Fatalf("named claim %q, other %q, row %s; want only the named claim given back, the other kept and the seat open", claim.Status, other.Status, got.Status)
+				}
+			case c.release && (claim.Status != "open" || claim.Assignee != "" || got.Status != "closed"):
+				t.Fatalf("claim %s %q assignee %q, row %s %v; want the claim given back and the seat closed", claimID, claim.Status, claim.Assignee, got.Status, got.Metadata)
+			case !c.release && (claim.Status != "in_progress" || got.Status == "closed"):
+				t.Fatalf("claim %s %q, row %s; want the work kept and the seat open", claimID, claim.Status, got.Status)
+			}
+		})
+	}
+}

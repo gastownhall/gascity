@@ -713,9 +713,23 @@ func TestExecutionBackstopReEscalatesForANewIncarnation(t *testing.T) {
 	f.now = f.now.Add(2 * time.Minute)
 	f.idleFor(t, 10*time.Minute)
 	f.tick(t)
+	// v5.10x: the new incarnation starts its own window; it does not inherit
+	// the old one's spent grace and escalate on its first quiet tick.
+	if len(f.drained) != 1 || f.sessionMeta(t, executionClaimNudgeTokenKey) != "incarnation-2" || f.sessionMeta(t, executionClaimNudgeCountKey) != "0" {
+		t.Fatalf("first tick of a new incarnation: drains %v, marker token %q count %q; want no drain and a fresh observation for incarnation-2",
+			f.drained, f.sessionMeta(t, executionClaimNudgeTokenKey), f.sessionMeta(t, executionClaimNudgeCountKey))
+	}
+	for i := 0; i < idleClaimNudgeMaxAttempts; i++ {
+		f.now = f.now.Add(idleClaimNudgeGrace + idleClaimNudgeBackoff)
+		f.idleFor(t, 10*time.Minute)
+		f.tick(t)
+	}
+	f.now = f.now.Add(idleClaimNudgeBackoff)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
 
 	if len(f.drained) != 2 {
-		t.Fatalf("drain requests after a new incarnation idles on the same claim = %v, want a second escalation", f.drained)
+		t.Fatalf("drain requests after a new incarnation idles out its own window on the same claim = %v, want a second escalation", f.drained)
 	}
 	if got := f.stalledEvents(); got != 2 {
 		t.Fatalf("execution.step_stalled events = %d, want one per escalated incarnation", got)
@@ -937,5 +951,69 @@ func TestExecutionBackstopRecordsARevalidateHoldWithoutFlapping(t *testing.T) {
 	}
 	if got := f.sessionMeta(t, executionClaimHoldKey); got != "" {
 		t.Fatalf("hold breadcrumb after delivery = %q, want cleared", got)
+	}
+}
+
+// TestExecutionBackstopNeverDrainsASeatExecutingSinceItsWake (v5.10x, the
+// maintainer-city loop). Kills an escalation of a seat whose claimed step
+// started this incarnation: with no nudge configured and its pane quiet past
+// every window (a human-approval wait), a step_started of its claim, from
+// it, since its last_woke_at, holds it as executing and nothing drains it;
+// the same step started before its wake (an earlier incarnation's) is no
+// evidence, and the seat escalates.
+func TestExecutionBackstopNeverDrainsASeatExecutingSinceItsWake(t *testing.T) {
+	for _, sinceWake := range []bool{true, false} {
+		t.Run(map[bool]string{true: "started since the wake", false: "started before the wake"}[sinceWake], func(t *testing.T) {
+			f := newExecutionBackstopFixture(t)
+			f.cfg.Agents[0].Nudge = ""
+			woke := f.now.Add(-time.Minute)
+			if err := f.store.SetMetadata(f.session.ID, "last_woke_at", woke.Format(time.RFC3339)); err != nil {
+				t.Fatal(err)
+			}
+			at := woke.Add(10 * time.Second)
+			if !sinceWake {
+				at = woke.Add(-time.Minute)
+			}
+			f.rec.Record(events.Event{Type: events.ExecutionStepStarted, Ts: at, Actor: f.session.ID, SessionID: f.session.ID, Subject: f.work.ID})
+			for i := 0; i < idleClaimNudgeMaxAttempts+3; i++ {
+				f.idleFor(t, 10*time.Minute)
+				f.tick(t)
+				f.now = f.now.Add(idleClaimNudgeGrace + idleClaimNudgeBackoff)
+			}
+			switch {
+			case sinceWake && (len(f.drained) != 0 || !strings.HasPrefix(f.sessionMeta(t, executionClaimHoldKey), executionHoldExecuting)):
+				t.Fatalf("a seat executing since its wake: drains %v, hold %q; want no drain, held executing", f.drained, f.sessionMeta(t, executionClaimHoldKey))
+			case !sinceWake && len(f.drained) != 1:
+				t.Fatalf("a step started before the wake: drains %v, want one escalation", f.drained)
+			}
+		})
+	}
+}
+
+// TestExecutionBackstopNewIncarnationInheritsNoSpentWindow (v5.10x, the
+// maintainer-city loop's row). Kills a new incarnation escalating on its
+// first quiet tick because the marker its predecessor left (same claim,
+// observed hours ago, no token) reads as an expired window: it is observed
+// afresh for the current incarnation, and only its own window escalates it.
+func TestExecutionBackstopNewIncarnationInheritsNoSpentWindow(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	f.cfg.Agents[0].Nudge = ""
+	f.setInstanceToken(t, "incarnation-117")
+	if err := f.store.SetMetadataBatch(f.session.ID, map[string]string{
+		executionClaimNudgeWorkKey: f.work.ID, executionClaimNudgeStoreRefKey: "", executionClaimNudgeCountKey: "0",
+		executionClaimNudgeAtKey: f.now.Add(-8 * time.Hour).Format(time.RFC3339),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if len(f.drained) != 0 || f.sessionMeta(t, executionClaimNudgeTokenKey) != "incarnation-117" {
+		t.Fatalf("first quiet tick of the incarnation: drains %v, marker token %q; want no drain and a fresh observation", f.drained, f.sessionMeta(t, executionClaimNudgeTokenKey))
+	}
+	f.now = f.now.Add(idleClaimNudgeGrace)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if len(f.drained) != 1 {
+		t.Fatalf("after the incarnation's own grace with no nudge to send: drains %v, want one escalation", f.drained)
 	}
 }

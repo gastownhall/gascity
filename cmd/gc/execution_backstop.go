@@ -91,6 +91,12 @@ const (
 	executionClaimNudgeStoreRefKey = "execution_claim_nudge_store_ref"
 	executionClaimNudgeCountKey    = "execution_claim_nudge_count"
 	executionClaimNudgeAtKey       = "execution_claim_nudge_at"
+	// executionClaimNudgeTokenKey records the instance_token of the
+	// incarnation the marker observed (v5.10x): a later incarnation holding
+	// the same claim starts its own grace window and attempt count, rather
+	// than inheriting an expired window and escalating the moment its pane
+	// goes quiet.
+	executionClaimNudgeTokenKey = "execution_claim_nudge_token"
 	// executionClaimNudgeStalledKey latches the one-shot escalation so the
 	// typed event and the drain request fire once per stalled claim rather than
 	// once per tick for as long as the claim is held.
@@ -117,7 +123,11 @@ const (
 	// stale, but the snapshot still showed the busy indicator, or could not be
 	// taken.
 	executionHoldSnapshotNotIdle = "snapshot_not_idle"
-	executionHoldSnapshotError   = "snapshot_error"
+	// executionHoldExecuting names execution evidence (v5.10x): the claimed
+	// bead's step started since the seat's wake, so it is being executed,
+	// however quiet its pane.
+	executionHoldExecuting     = "executing"
+	executionHoldSnapshotError = "snapshot_error"
 )
 
 // executionStalledLatchRetryAfter bounds how long a latch silences
@@ -282,13 +292,21 @@ func (p poolExecutionBackstop) resolve(s beads.Bead, _ map[string]beads.Bead, se
 		return backstopTarget{}, backstopResolutionHold
 	}
 	claim := claims[0]
-	return backstopTarget{
+	target := backstopTarget{
 		ID:       claim.BeadID,
 		RootID:   claim.RootID,
 		StoreRef: claim.StoreRef,
 		Assignee: claim.Assignee,
 		Store:    claim.Store,
-	}, backstopResolutionOutstanding
+	}
+	// Execution evidence vetoes "unexecuted" (v5.10x): read only once this
+	// incarnation's window has run out, so a seat inside its grace pays no
+	// read, and every action past it (a nudge, the escalation) waits on it.
+	if same, attempts, last := p.state(s, target); same && decideBackstopAction(attempts, last, p.now) != backstopActionWait && p.executedSinceWake(s, claim.BeadID) {
+		p.observeHold(p.store, &s, executionHoldExecuting, p.stdout)
+		return backstopTarget{}, backstopResolutionHold
+	}
+	return target, backstopResolutionOutstanding
 }
 
 // quietHold names the gate that keeps session s from counting as quiet, or
@@ -370,7 +388,8 @@ func executionSnapshotVetoApplies(meta map[string]string) bool {
 
 func (p poolExecutionBackstop) state(s beads.Bead, target backstopTarget) (same bool, attempts int, last time.Time) {
 	same = strings.TrimSpace(s.Metadata[executionClaimNudgeWorkKey]) == target.ID &&
-		strings.TrimSpace(s.Metadata[executionClaimNudgeStoreRefKey]) == target.StoreRef
+		strings.TrimSpace(s.Metadata[executionClaimNudgeStoreRefKey]) == target.StoreRef &&
+		strings.TrimSpace(s.Metadata[executionClaimNudgeTokenKey]) == strings.TrimSpace(s.Metadata["instance_token"])
 	return same, atoiOr0(s.Metadata[executionClaimNudgeCountKey]), parseRFC3339OrZero(s.Metadata[executionClaimNudgeAtKey])
 }
 
@@ -399,6 +418,45 @@ func (p poolExecutionBackstop) revalidate(target backstopTarget) backstopResolut
 		return backstopResolutionClear
 	}
 	return backstopResolutionOutstanding
+}
+
+// executionEvidenceTailBytes bounds how far back the execution-evidence read
+// walks the event log from its end: the evidence it looks for is from the
+// seat's current incarnation, so a recent window answers it.
+const executionEvidenceTailBytes = 8 << 20
+
+// executionEvidenceTailEvents caps the matching events that read returns.
+const executionEvidenceTailEvents = 20
+
+// executedSinceWake reports execution evidence for the claim (v5.10x): an
+// execution.step_started of beadID, from this session, at or after the row's
+// last_woke_at. `gc hook --claim` records it when the seat takes up its
+// claimed step, the existing assignment after a restart included, so a seat
+// that started its step this incarnation is executing it, however quiet its
+// pane (a long model turn, a human-approval wait). It answers only from a
+// recorder that can be read, and with a wake time to read from; otherwise it
+// reports no evidence and the activity clock decides, as before.
+func (p poolExecutionBackstop) executedSinceWake(s beads.Bead, beadID string) bool {
+	tail, ok := p.rec.(events.TailProvider)
+	if !ok || strings.TrimSpace(beadID) == "" {
+		return false
+	}
+	woke := parseRFC3339OrZero(s.Metadata["last_woke_at"])
+	if woke.IsZero() {
+		return false
+	}
+	evts, err := tail.ListTail(events.Filter{
+		Type: events.ExecutionStepStarted, Subject: beadID, Since: woke, MaxScanBytes: executionEvidenceTailBytes,
+	}, executionEvidenceTailEvents)
+	if err != nil {
+		return false
+	}
+	for _, e := range evts {
+		if e.SessionID == s.ID || e.Actor == s.ID {
+			return true
+		}
+	}
+	return false
 }
 
 func (p poolExecutionBackstop) observe(store beads.Store, s *beads.Bead, target backstopTarget, now time.Time, stdout io.Writer) {
@@ -548,6 +606,7 @@ func writeExecutionClaimMarker(store beads.Store, s *beads.Bead, target backstop
 		executionClaimNudgeStoreRefKey: target.StoreRef,
 		executionClaimNudgeCountKey:    strconv.Itoa(attempts),
 		executionClaimNudgeAtKey:       now.UTC().Format(time.RFC3339),
+		executionClaimNudgeTokenKey:    strings.TrimSpace(s.Metadata["instance_token"]),
 	}, "execution-claim-nudge", stdout)
 }
 
@@ -562,6 +621,7 @@ func clearExecutionClaimMarker(store beads.Store, s *beads.Bead, stdout io.Write
 		executionClaimNudgeStoreRefKey,
 		executionClaimNudgeCountKey,
 		executionClaimNudgeAtKey,
+		executionClaimNudgeTokenKey,
 		executionClaimNudgeStalledKey,
 		executionClaimNudgeStalledTokenKey,
 		executionClaimHoldKey,
