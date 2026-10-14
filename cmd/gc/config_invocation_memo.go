@@ -14,11 +14,17 @@ import (
 //
 // `gc bd` is the case it exists for. Before it execs bd, the passthrough's
 // guards and env builders each loaded the composed config of the same city on
-// their own: doBd itself, the by-id twin census and the pinned-bd resolver
-// (twice, once through the storage-binding env). Each load walks every pack,
-// include and order directory; on a production-sized city that is 50-70 ms a
-// time, and the repeats were most of gc's own share of an operator
-// `gc bd show`.
+// their own: doBd itself, the by-id twin census, the pinned-bd resolver
+// (twice, once through the storage-binding env) and the hosted-credential
+// probe. Each load walks every pack, include and order directory; on a
+// production-sized city that is 50-70 ms a time, and the repeats were most of
+// gc's own share of an operator `gc bd show`. A load that calls
+// config.LoadWithIncludesOptions itself is not shared, and the one-shot storage
+// funnel's routing read (resolveCLIStorageRoutes) stays one by choice: a by-id
+// `gc bd` that enters the funnel composes there once more, at most once per
+// process, so that the config storageBootGate routes from shares no state with
+// the scope's callers, and its wide call graph is not bound by the
+// no-write-through rule below.
 //
 // The memo is OFF unless a command opens a scope with beginInvocationConfigMemo,
 // so a long-running process (the supervisor, the API server) never sees it and
@@ -28,12 +34,19 @@ import (
 // else) — and only for a successful load; an error is never remembered, so a
 // helper that failed to load still fails on its own terms.
 //
-// Each caller gets its own copy of the composed config (callerCopyOfCityConfig):
-// the helpers resolve rig paths in place, and a shared pointer would hand the
-// next helper a config another one already rewrote. What a cached
-// answer gives up is a re-read of files edited during the few hundred
-// milliseconds between two of the helpers' loads, which the uncached path never
-// guaranteed either (each load already reads its sources one by one).
+// Inside a scope the memo serves every composed load of that shape, not only
+// the helpers named above: every loadCityConfigFS and
+// loadPrematerializedCityConfig caller, and every direct loadComposedCityConfig
+// caller. Each gets its own copy (callerCopyOfCityConfig), so a caller may
+// reassign top-level fields and Rigs[i]/Agents[i] element fields, as
+// resolveRigPaths does; everything deeper is shared by every caller in the
+// scope, so a caller must not write through a map, any other slice, or a
+// pointer reachable from the config. The *config.Provenance is not copied at
+// all: every caller of a key, the first included, gets the one the memo
+// stored, so no caller may modify it. What a cached answer gives up is a
+// re-read of files edited during the few hundred milliseconds between two of
+// the helpers' loads, which the uncached path never guaranteed either (each
+// load already reads its sources one by one).
 type invocationConfigMemo struct {
 	mu      sync.Mutex
 	entries map[string]invocationConfigMemoEntry
@@ -55,8 +68,8 @@ var (
 )
 
 // invocationMemoLoadOptions is the only option set the memo answers: the
-// one-shot load (skipRevisionSnapshot and cliStorageRoutesLoad are both
-// exactly this).
+// one-shot load (skipRevisionSnapshot, cliStorageRoutesLoad and
+// hostedCredentialProbeLoad are all exactly this).
 var invocationMemoLoadOptions = config.LoadOptions{SkipRevisionSnapshot: true}
 
 // beginInvocationConfigMemo opens a memo scope for the rest of a one-shot
@@ -110,12 +123,13 @@ func loadComposedCityConfig(fs fsys.FS, tomlPath string, opts config.LoadOptions
 }
 
 // callerCopyOfCityConfig gives one caller its own view of a memoized config:
-// a fresh top-level City with its own Rigs and Agents slices. The helpers that
-// share the memo rewrite those in place (resolveRigPaths turns each rig path
-// absolute), and before the memo each of them had a config of its own; the
-// memo keeps the copy it stores untouched and hands every caller, the first
-// included, an independent one. Deeper values (maps, nested pointers) are
-// shared; the helpers that use the memo are not known to write them.
+// a fresh top-level City with its own Rigs and Agents slices. The memo keeps
+// the copy it stores untouched and hands every caller, the first included, an
+// independent one, so a caller may reassign top-level fields and
+// Rigs[i]/Agents[i] element fields (resolveRigPaths turns each rig path
+// absolute in place). Everything deeper — maps, other slices, pointees — is
+// shared with every other caller in the scope, and a caller must not write
+// through it.
 func callerCopyOfCityConfig(cfg *config.City) *config.City {
 	if cfg == nil {
 		return nil

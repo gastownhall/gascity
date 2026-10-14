@@ -26,6 +26,9 @@ import (
 // hot per-tick paths (order dispatch) must reuse an already-resolved
 // *config.City instead of driving this counter once per scope per tick
 // (ga-237xpr) — tests assert on this counter to guard against a regression.
+// It counts loader calls: inside an invocation scope a call the memo answers
+// still counts here (see invocationConfigMemo). composedCityConfigLoads counts
+// the compositions actually performed.
 var loadCityConfigCalls atomic.Int64
 
 const agentAddPromptScaffold = `You are the {{ .AgentName }} agent.

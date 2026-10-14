@@ -51,6 +51,10 @@ func TestInvocationConfigMemoSharesOneLoadInAScope(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "city.toml")
 
 	end := beginInvocationConfigMemo()
+	// The scope is process-global: a t.Fatal before the explicit end() below
+	// must not leave it open for the rest of the package's tests. end is
+	// idempotent, so the explicit call stays the one under test.
+	t.Cleanup(end)
 	innerEnd := beginInvocationConfigMemo() // nested begin reuses the open scope
 	innerEnd()
 	if currentInvocationConfigMemo() == nil {
