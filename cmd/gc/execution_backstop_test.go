@@ -79,9 +79,16 @@ func newExecutionBackstopFixture(t *testing.T) *executionBackstopFixture {
 	}
 	f.session = session
 	work, err := f.store.Create(beads.Bead{
-		Title:    "claimed step",
-		Type:     "task",
-		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "root-1"},
+		Title: "claimed step",
+		Type:  "task",
+		// A graph step the hook claimed for this seat: the stamps
+		// executionLifecycleCandidate reads.
+		Metadata: map[string]string{
+			beadmeta.RootBeadIDMetadataKey:  "root-1",
+			beadmeta.StepIDMetadataKey:      "step-1",
+			beadmeta.SessionIDMetadataKey:   session.ID,
+			beadmeta.SessionNameMetadataKey: f.sessName,
+		},
 	})
 	if err != nil {
 		t.Fatalf("seeding the work bead: %v", err)
@@ -1057,20 +1064,68 @@ func TestExecutionBackstopKeepsAStepStartedPastTheEventTail(t *testing.T) {
 	}
 }
 
-// TestExecutionBackstopIgnoresAnotherIncarnationsStartedStamp (mc-muv2x).
-// Kills a stamp outliving the incarnation or claim it names: a stamp of the
-// previous incarnation, with no step started by this one, is no evidence,
-// and the seat escalates.
-func TestExecutionBackstopIgnoresAnotherIncarnationsStartedStamp(t *testing.T) {
+// TestExecutionBackstopKeepsTheStampAcrossAOnePassClaimGap (mc-muv2x
+// review). Kills the claim marker's clear wiping the stamp: the cache folds
+// blocked, deferred, review and testing into open, so a stamped claim can
+// drop out of the in_progress snapshot for one pass (here, marked blocked
+// during a wait) and come back after its step_started left the tail. The
+// stamp survives the gap, and the seat is held executing, never drained.
+func TestExecutionBackstopKeepsTheStampAcrossAOnePassClaimGap(t *testing.T) {
 	f := newExecutionBackstopFixture(t)
 	f.cfg.Agents[0].Nudge = ""
-	f.setInstanceToken(t, "incarnation-2")
-	if err := f.store.SetMetadata(f.session.ID, executionClaimStartedKey, "incarnation-1|"+f.work.ID); err != nil {
+	f.setInstanceToken(t, "incarnation-1")
+	woke := f.now.Add(-80 * time.Minute)
+	if err := f.store.SetMetadata(f.session.ID, "last_woke_at", woke.Format(time.RFC3339)); err != nil {
 		t.Fatal(err)
 	}
-	f.tickStale(t)
-	if len(f.drained) != 1 {
-		t.Fatalf("with only the previous incarnation's stamp: drains %v, want one escalation", f.drained)
+	f.rec.Record(events.Event{Type: events.ExecutionStepStarted, Ts: woke.Add(2 * time.Minute), Actor: f.session.ID, SessionID: f.session.ID, Subject: f.work.ID})
+	f.idleFor(t, 0) // busy: the sighting stamps
+	f.tick(t)
+	blocked, inProgress := "blocked", "in_progress"
+	if err := f.store.Update(f.work.ID, beads.UpdateOpts{Status: &blocked}); err != nil {
+		t.Fatal(err)
+	}
+	f.now = f.now.Add(time.Minute)
+	f.idleFor(t, 0)
+	f.tick(t) // no claim this pass: the marker clears
+	if got := f.sessionMeta(t, executionClaimStartedKey); got != "incarnation-1|"+f.work.ID {
+		t.Fatalf("after a pass with the claim out of the snapshot: %s = %q, want the stamp kept", executionClaimStartedKey, got)
+	}
+	if err := f.store.Update(f.work.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatal(err)
+	}
+	f.rec = events.NewFake() // the event scrolled out of the tail
+	for i := 0; i < idleClaimNudgeMaxAttempts+3; i++ {
+		f.idleFor(t, 10*time.Minute)
+		f.tick(t)
+		f.now = f.now.Add(idleClaimNudgeGrace + idleClaimNudgeBackoff)
+	}
+	if len(f.drained) != 0 || !strings.HasPrefix(f.sessionMeta(t, executionClaimHoldKey), executionHoldExecuting) {
+		t.Fatalf("a seat back from a one-pass claim gap: drains %v, hold %q; want no drain, held executing", f.drained, f.sessionMeta(t, executionClaimHoldKey))
+	}
+}
+
+// TestExecutionBackstopIgnoresAnotherIncarnationsStartedStamp (mc-muv2x).
+// Kills a stamp outliving the incarnation or claim it names: a stamp of the
+// previous incarnation, or of this incarnation's earlier claim, with no step
+// started for the current one, is no evidence, and the seat escalates.
+func TestExecutionBackstopIgnoresAnotherIncarnationsStartedStamp(t *testing.T) {
+	for name, stamp := range map[string]func(f *executionBackstopFixture) string{
+		"another incarnation": func(f *executionBackstopFixture) string { return "incarnation-1|" + f.work.ID },
+		"another claim":       func(*executionBackstopFixture) string { return "incarnation-2|an-earlier-bead" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newExecutionBackstopFixture(t)
+			f.cfg.Agents[0].Nudge = ""
+			f.setInstanceToken(t, "incarnation-2")
+			if err := f.store.SetMetadata(f.session.ID, executionClaimStartedKey, stamp(f)); err != nil {
+				t.Fatal(err)
+			}
+			f.tickStale(t)
+			if len(f.drained) != 1 {
+				t.Fatalf("with only a stamp of %s: drains %v, want one escalation", name, f.drained)
+			}
+		})
 	}
 }
 
@@ -1086,18 +1141,32 @@ func (r *tailCountingRecorder) ListTail(filter events.Filter, limit int) ([]even
 }
 
 // TestExecutionBackstopReadsNoTailForANonGraphClaim (mc-muv2x review). Kills
-// a seat holding non-graph work re-reading the event tail on every pass,
-// forever: step_started is emitted for graph.v2 steps alone, so such a claim
-// can never be stamped. Its passes read no tail, and it escalates on the
-// activity clock as before the veto; a graph step's claim reads the tail
-// until it is stamped, then stops.
+// a seat holding work that can never carry a step_started re-reading the
+// event tail, up to 8 MiB, on every pass, forever. Only a claim the hook's
+// lifecycle gate admits (hookClaimLifecycleCandidate: a rooted graph step,
+// stamped with this seat's session, not a control kind) is ever stamped; any
+// other reads no tail and escalates on the activity clock as before the
+// veto, even rooted. A graph step's claim reads the tail until stamped, then
+// stops.
 func TestExecutionBackstopReadsNoTailForANonGraphClaim(t *testing.T) {
-	for _, graph := range []bool{false, true} {
-		t.Run(map[bool]string{false: "a non-graph claim", true: "a graph step"}[graph], func(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		meta  map[string]string // overrides on the fixture's graph step
+		tails int
+	}{
+		{name: "a graph step", tails: 1},
+		{name: "a non-graph claim", meta: map[string]string{beadmeta.RootBeadIDMetadataKey: ""}},
+		{name: "a rooted claim with no step", meta: map[string]string{beadmeta.StepIDMetadataKey: ""}},
+		{name: "a rooted claim made outside the hook", meta: map[string]string{beadmeta.SessionIDMetadataKey: ""}},
+		{name: "a rooted claim of another seat", meta: map[string]string{beadmeta.SessionIDMetadataKey: "another-session"}},
+		{name: "a rooted claim of another session name", meta: map[string]string{beadmeta.SessionNameMetadataKey: "test-city--worker-9"}},
+		{name: "a rooted control bead", meta: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindCheck}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			f := newExecutionBackstopFixture(t)
 			f.cfg.Agents[0].Nudge = ""
-			if !graph {
-				if err := f.store.SetMetadata(f.work.ID, beadmeta.RootBeadIDMetadataKey, ""); err != nil {
+			if len(tc.meta) > 0 {
+				if err := f.store.SetMetadataBatch(f.work.ID, tc.meta); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -1113,16 +1182,13 @@ func TestExecutionBackstopReadsNoTailForANonGraphClaim(t *testing.T) {
 				f.tick(t)
 				f.now = f.now.Add(10 * time.Second)
 			}
-			switch {
-			case !graph && counting.tails != 0:
-				t.Fatalf("a non-graph claim read the event tail %d times over 5 passes, want none", counting.tails)
-			case graph && counting.tails != 1:
-				t.Fatalf("a graph step read the event tail %d times over 5 passes, want once, until stamped", counting.tails)
+			if counting.tails != tc.tails {
+				t.Fatalf("%s read the event tail %d times over 5 passes, want %d", tc.name, counting.tails, tc.tails)
 			}
-			if !graph {
+			if tc.tails == 0 {
 				f.tickStale(t)
 				if len(f.drained) != 1 {
-					t.Fatalf("a quiet non-graph claim: drains %v, want one escalation on the activity clock", f.drained)
+					t.Fatalf("%s, quiet: drains %v, want one escalation on the activity clock", tc.name, f.drained)
 				}
 			}
 		})

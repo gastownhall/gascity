@@ -102,7 +102,10 @@ const (
 	// execution.step_started of that claimed bead from this incarnation. The
 	// veto reads it, so the evidence outlives the event log's tail: a long
 	// turn's step_started can scroll out of any bounded window before its
-	// pane next goes quiet. A value for another token or bead is no evidence.
+	// pane next goes quiet. A value for another token or bead is no evidence,
+	// so the claim marker's clear leaves it (mc-muv2x review): the cache folds
+	// blocked, deferred, review and testing into open, so a stamped claim can
+	// drop out of the in_progress snapshot for a pass and come back.
 	executionClaimStartedKey = "execution_claim_started"
 	// executionClaimNudgeStalledKey latches the one-shot escalation so the
 	// typed event and the drain request fire once per stalled claim rather than
@@ -193,6 +196,26 @@ type executionClaim struct {
 	StoreRef string
 	Assignee string
 	Store    beads.Store
+	// The claimed bead's lifecycle identity, as the hook stamps it: its
+	// graph step, the session that holds it, and its kind
+	// (executionLifecycleCandidate).
+	StepID, SessionID, SessionName, Kind string
+}
+
+// executionLifecycleCandidate reports whether claim can carry a step_started
+// from session s: the hook's own gate (hookClaimLifecycleCandidate), read off
+// the snapshot's metadata. A rooted graph step, stamped with this seat's
+// session, not a control bead. Only such a claim is ever stamped, so only
+// such a claim reads the event tail (mc-muv2x review): a v1 molecule step,
+// a control kind, or a claim made outside the hook would re-read it every
+// pass, forever.
+func executionLifecycleCandidate(claim executionClaim, s beads.Bead) bool {
+	if claim.RootID == "" || claim.StepID == "" || beadmeta.IsControlKind(claim.Kind) ||
+		claim.SessionID == "" || claim.SessionID != strings.TrimSpace(s.ID) {
+		return false
+	}
+	name := strings.TrimSpace(s.Metadata["session_name"])
+	return name == "" || claim.SessionName == name
 }
 
 // executionClaimSnapshot indexes in-progress claims by their exact assignee
@@ -214,9 +237,13 @@ func newExecutionClaimSnapshot(work []beads.Bead, stores []beads.Store, storeRef
 			continue
 		}
 		claim := executionClaim{
-			BeadID:   wb.ID,
-			RootID:   strings.TrimSpace(wb.Metadata[beadmeta.RootBeadIDMetadataKey]),
-			Assignee: assignee,
+			BeadID:      wb.ID,
+			RootID:      strings.TrimSpace(wb.Metadata[beadmeta.RootBeadIDMetadataKey]),
+			Assignee:    assignee,
+			StepID:      strings.TrimSpace(wb.Metadata[beadmeta.StepIDMetadataKey]),
+			SessionID:   strings.TrimSpace(wb.Metadata[beadmeta.SessionIDMetadataKey]),
+			SessionName: strings.TrimSpace(wb.Metadata[beadmeta.SessionNameMetadataKey]),
+			Kind:        strings.TrimSpace(wb.Metadata[beadmeta.KindMetadataKey]),
 		}
 		if i < len(storeRefs) {
 			claim.StoreRef = normalizeIdleClaimStoreRef(storeRefs[i])
@@ -298,12 +325,11 @@ func (p poolExecutionBackstop) resolve(s beads.Bead, _ map[string]beads.Bead, se
 	// Persist execution evidence while the event is still in the tail,
 	// busy or quiet (mc-muv2x): until this incarnation's claim is stamped,
 	// each pass reads the tail, and the first sighting stamps the row. Only
-	// a graph step's claim (a root) is ever stamped: step_started is emitted
-	// for graph.v2 steps alone (executionevent), so any other claim reads no
-	// tail, never pays for a read that cannot answer, and keeps the activity
-	// clock alone, as before the veto.
+	// a claim that can carry a step_started (executionLifecycleCandidate) is
+	// ever stamped, so any other reads no tail, never pays for a read that
+	// cannot answer, and keeps the activity clock alone, as before the veto.
 	started := p.markedStarted(s, claim.BeadID)
-	if !started && claim.RootID != "" && p.executedSinceWake(s, claim.BeadID) {
+	if !started && executionLifecycleCandidate(claim, s) && p.executedSinceWake(s, claim.BeadID) {
 		started = p.markStarted(&s, claim.BeadID)
 	}
 	if hold := p.quietHold(s, sessName); hold != "" {
@@ -660,7 +686,6 @@ func clearExecutionClaimMarker(store beads.Store, s *beads.Bead, stdout io.Write
 		executionClaimNudgeCountKey,
 		executionClaimNudgeAtKey,
 		executionClaimNudgeTokenKey,
-		executionClaimStartedKey,
 		executionClaimNudgeStalledKey,
 		executionClaimNudgeStalledTokenKey,
 		executionClaimHoldKey,
