@@ -472,8 +472,7 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 
 	output, err := ops.Runner(workQuery, dir)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc hook --claim: %v\n", err) //nolint:errcheck
-		return hookClaimResult{terminal: true, code: 1}
+		return hookClaimResult{terminal: true, code: reportClaimWorkQueryFailure(err, stderr)}
 	}
 
 	normalized := normalizeWorkQueryOutput(strings.TrimSpace(output))

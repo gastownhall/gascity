@@ -90,7 +90,7 @@ func newDefaultPlanner(stderr io.Writer) *plannerRuntime {
 	rt.exec.preserve = func() bool { return rt.host.preserveSessions != nil && rt.host.preserveSessions() }
 	rt.planner = newPlanner(realPlannerClock{}, func() time.Duration { return rt.env.Load().patrol() }, rt.pass, newInflightMap(), rt.exec.stop, stderr)
 	rt.softReload = rt.acceptSoftReload
-	if v2EffectsEnabled(reconcilerModeLookupEnv) {
+	if v2EffectsReal {
 		rt.planner.effects = rt.exec
 	}
 	return rt
@@ -257,7 +257,7 @@ func (rt *plannerRuntime) pass(now time.Time) passResult {
 	if rt.planner.boot.open() {
 		rt.readyOnce.Do(func() { close(rt.ready) })
 	}
-	rt.traceRows(append(slices.Clone(rec.Rows), rec.IdleDefers...))
+	rt.traceRows(append(slices.Clone(rec.Rows), rec.IdleTraces...))
 	return res
 }
 

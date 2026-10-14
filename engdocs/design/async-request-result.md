@@ -239,6 +239,7 @@ is an enum identifying which operation failed.
 | `operation` | enum | `city.create`, `city.unregister`, `session.create`, `session.message`, `session.submit` |
 | `error_code` | string | Machine-readable error code |
 | `error_message` | string | Human-readable description |
+| `session_id` | string | Optional, `session.create` only: the session the failed create had already written, when the server could identify it. Absence does not prove that no session was written |
 
 ## Operations using this pattern
 

@@ -250,7 +250,7 @@ jobs:
           # Gating. Every package's integration-tagged and GC_FAST_UNIT=0
           # tests outside //test/integration (scripts/test-integration-shard's
           # packages-* shards).
-          packages='{"lane":"integration-packages","cmd":"test --config=ci --config=integration --keep_going //test:integration_packages'"$fresh"'"}'
+          packages='{"lane":"integration-packages","cmd":"test --config=ci --config=integration-packages --keep_going //test:integration_packages'"$fresh"'"}'
           # Gating. The integration suite's bdstore and REST smoke tests
           # (scripts/test-integration-shard bdstore_tests + rest_smoke_tests:
           # .bazelrc test:integration-smoke's --test_filter).

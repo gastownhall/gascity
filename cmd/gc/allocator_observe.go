@@ -194,13 +194,16 @@ func observeRow(snap *ObservationSnapshot, row session.Info, name string, listed
 
 // readPresence reads name's presence from the latest pass (listed, complete:
 // inventoryAbsence) and snap's facts: the observation of a present name, or
-// gone when the pass proves the name unlisted; otherwise neither, with the
-// reason. observeRow and readRuntimeName read presence in this one order.
+// gone when the pass proves the name unlisted or a probe since found it
+// absent; otherwise neither, with the reason. observeRow and readRuntimeName
+// read presence in this one order.
 func readPresence(snap *ObservationSnapshot, name string, listed map[string]bool, complete bool, now time.Time, maxAge time.Duration) (obs RuntimeObservation, present, gone bool, reason string) {
 	f := snap.Fact(name, FactListed, now, maxAge)
 	switch {
 	case name == "":
 		reason = observeReasonNoPass
+	case unlistedSincePass(snap, name, now, maxAge):
+		gone = true
 	case listed[name] && f.Value == ObsYes:
 		obs, present = snap.Observation(name, now, maxAge)
 	case listed[name]:
@@ -232,6 +235,17 @@ func listedSincePass(snap *ObservationSnapshot, name string, now time.Time, maxA
 	}
 	f := snap.ByName[name].Listed
 	return f.Value == ObsYes && f.ObservedAt.After(snap.Inventory.StartedAt) && now.Sub(f.ObservedAt) <= maxAge
+}
+
+// unlistedSincePass reports whether a fresh probe found name absent after
+// the latest pass started (v5.10d (a)), so that pass's listing predates the
+// runtime's end; a pass that started later overrides it.
+func unlistedSincePass(snap *ObservationSnapshot, name string, now time.Time, maxAge time.Duration) bool {
+	if snap == nil {
+		return false
+	}
+	f := snap.ByName[name].Listed
+	return f.Value == ObsNo && f.ObservedAt.After(snap.Inventory.StartedAt) && now.Sub(f.ObservedAt) <= maxAge
 }
 
 // listedObservation is Observation without the priming rule, for a name the

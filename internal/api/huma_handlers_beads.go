@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/coordclass"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -38,6 +39,7 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 	if blocking {
 		waitForChange(ctx, s.state.EventProvider(), bp)
 	}
+	index := s.latestIndex()
 
 	cityStore := s.state.CityBeadStore()
 	if err := cacheLiveOr503(cityStore); err != nil {
@@ -74,11 +76,11 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 	if input.All && !blocking {
 		cacheKey = cacheKeyFor("beads", input)
 		bucket = responseCacheTimeBucket(time.Now())
-		if body, ok := cachedResponseAs[ListBody[beads.Bead]](s, cacheKey, bucket); ok {
+		if hit, ok := cachedResponseAs[indexedResponse[ListBody[beads.Bead]]](s, cacheKey, bucket); ok {
 			return &ListOutput[beads.Bead]{
-				Index:     s.latestIndex(),
+				Index:     hit.Index,
 				CacheAgeS: cacheAgeSeconds(cityStore),
-				Body:      body,
+				Body:      hit.Body,
 			}, nil
 		}
 	}
@@ -248,7 +250,6 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 		beads.SortBeads(all, beads.SortCreatedDesc)
 	}
 
-	index := s.latestIndex()
 	cacheAge := cacheAgeSeconds(cityStore)
 	// A non-cursor request is first-page paging: a truncated first page
 	// carries the continuation cursor too, otherwise the remainder of a
@@ -267,7 +268,7 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 		PartialErrors: pa.messages(),
 	}
 	if cacheKey != "" {
-		s.storeResponse(cacheKey, bucket, body)
+		s.storeResponse(cacheKey, bucket, indexedResponse[ListBody[beads.Bead]]{Index: index, Body: body})
 	}
 	return &ListOutput[beads.Bead]{
 		Index:     index,
@@ -537,6 +538,7 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 	if bp.isBlocking() {
 		waitForChange(ctx, s.state.EventProvider(), bp)
 	}
+	index := s.latestIndex()
 
 	stores := s.state.BeadStores()
 	rigNames := sortedRigNames(stores)
@@ -614,7 +616,6 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 		all = []beads.Bead{}
 	}
 
-	index := s.latestIndex()
 	return &ListOutput[beads.Bead]{
 		Index: index,
 		Body: ListBody[beads.Bead]{
@@ -628,6 +629,7 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 
 // humaHandleBeadGraph is the Huma-typed handler for GET /v0/beads/graph/{rootID}.
 func (s *Server) humaHandleBeadGraph(_ context.Context, input *BeadGraphInput) (*IndexOutput[BeadGraphResponse], error) {
+	index := s.latestIndex()
 	rootID := input.RootID
 	if rootID == "" {
 		// Defensive: the {rootID} path segment is required, so the router never
@@ -657,7 +659,7 @@ func (s *Server) humaHandleBeadGraph(_ context.Context, input *BeadGraphInput) (
 	deps = mergeWorkflowDeps(deps, parentEdges)
 
 	return &IndexOutput[BeadGraphResponse]{
-		Index: s.latestIndex(),
+		Index: index,
 		Body: BeadGraphResponse{
 			Root:       root,
 			Beads:      graphBeads,
@@ -669,6 +671,7 @@ func (s *Server) humaHandleBeadGraph(_ context.Context, input *BeadGraphInput) (
 
 // humaHandleBeadGet is the Huma-typed handler for GET /v0/bead/{id}.
 func (s *Server) humaHandleBeadGet(_ context.Context, input *BeadGetInput) (*IndexOutput[beads.Bead], error) {
+	index := s.latestIndex()
 	id := input.ID
 
 	cityStore := s.state.CityBeadStore()
@@ -681,7 +684,7 @@ func (s *Server) humaHandleBeadGet(_ context.Context, input *BeadGetInput) (*Ind
 		return nil, err
 	}
 	return &IndexOutput[beads.Bead]{
-		Index:     s.latestIndex(),
+		Index:     index,
 		CacheAgeS: cacheAgeSeconds(cityStore),
 		Body:      b,
 	}, nil
@@ -689,6 +692,7 @@ func (s *Server) humaHandleBeadGet(_ context.Context, input *BeadGetInput) (*Ind
 
 // humaHandleBeadDeps is the Huma-typed handler for GET /v0/bead/{id}/deps.
 func (s *Server) humaHandleBeadDeps(_ context.Context, input *BeadDepsInput) (*IndexOutput[BeadDepsResponse], error) {
+	index := s.latestIndex()
 	id := input.ID
 	store, parent, err := s.resolveBeadOwner(id)
 	if err != nil {
@@ -706,7 +710,7 @@ func (s *Server) humaHandleBeadDeps(_ context.Context, input *BeadDepsInput) (*I
 		children = []beads.Bead{}
 	}
 	return &IndexOutput[BeadDepsResponse]{
-		Index: s.latestIndex(),
+		Index: index,
 		Body:  BeadDepsResponse{Children: children},
 	}, nil
 }
@@ -719,10 +723,12 @@ type BeadDepsResponse struct {
 // humaHandleBeadCreate is the Huma-typed handler for POST /v0/beads.
 // Title required via struct tag on BeadCreateInput.
 func (s *Server) humaHandleBeadCreate(ctx context.Context, input *BeadCreateInput) (*IndexOutput[beads.Bead], error) {
+	index := s.latestIndex()
 	// Idempotency: run the create at most once per Idempotency-Key. The helper
 	// owns reserve/replay/mismatch/in-flight and guarantees the reservation is
-	// released on any error, so every fallible step lives in the closure.
-	b, err := withIdempotency(s.idem, "/v0/beads", input.IdempotencyKey, input.Body,
+	// released on any error, so every fallible step lives in the closure. A
+	// replay returns the index cached with the body, not the current head.
+	res, err := withIndexedIdempotency(s.idem, "/v0/beads", input.IdempotencyKey, input.Body, index,
 		func() (beads.Bead, error) {
 			candidate := beads.Bead{
 				Title:       input.Body.Title,
@@ -764,10 +770,11 @@ func (s *Server) humaHandleBeadCreate(ctx context.Context, input *BeadCreateInpu
 	if err != nil {
 		return nil, err
 	}
+	s.wakeAfterBeadWrite()
 
 	return &IndexOutput[beads.Bead]{
-		Index: s.latestIndex(),
-		Body:  b,
+		Index: res.Index,
+		Body:  res.Body,
 	}, nil
 }
 
@@ -827,6 +834,7 @@ func (s *Server) humaHandleBeadClose(ctx context.Context, input *BeadCloseInput)
 		}
 		return nil, apierr.Internal.Msg(err.Error())
 	}
+	s.wakeAfterBeadWrite()
 	resp := &OKResponse{}
 	resp.Body.Status = "closed"
 	return resp, nil
@@ -849,6 +857,7 @@ func (s *Server) humaHandleBeadReopen(_ context.Context, input *BeadReopenInput)
 	if err := store.Reopen(id); err != nil {
 		return nil, apierr.Internal.Msg(err.Error())
 	}
+	s.wakeAfterBeadWrite()
 	resp := &OKResponse{}
 	resp.Body.Status = "reopened"
 	return resp, nil
@@ -856,6 +865,7 @@ func (s *Server) humaHandleBeadReopen(_ context.Context, input *BeadReopenInput)
 
 // humaHandleBeadAssign is the Huma-typed handler for POST /v0/bead/{id}/assign.
 func (s *Server) humaHandleBeadAssign(ctx context.Context, input *BeadAssignInput) (*IndexOutput[map[string]string], error) {
+	index := s.latestIndex()
 	id := input.ID
 	store, current, err := s.resolveBeadOwner(id)
 	if err != nil {
@@ -879,8 +889,9 @@ func (s *Server) humaHandleBeadAssign(ctx context.Context, input *BeadAssignInpu
 		}
 		return nil, apierr.Internal.Msg(err.Error())
 	}
+	s.wakeAfterBeadWrite()
 	return &IndexOutput[map[string]string]{
-		Index: s.latestIndex(),
+		Index: index,
 		Body:  map[string]string{"status": "assigned", "assignee": assignee},
 	}, nil
 }
@@ -952,6 +963,10 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 		}
 		return nil, apierr.Internal.Msg(err.Error())
 	}
+	// The write landed, so it wakes even if the parent projection wait fails;
+	// deferred so a woken pass's parent-keyed listings, which bypass the
+	// CachingStore, read bd only after the wait.
+	defer s.wakeAfterBeadWrite()
 	if opts.ParentID != nil && current.ParentID != *opts.ParentID && !closesStatus(opts.Status) {
 		if waiter, ok := store.(beads.ParentProjectionWaiter); ok {
 			if err := awaitBeadParentProjection(ctx, waiter, id, current.ParentID, *opts.ParentID); err != nil {
@@ -1135,7 +1150,20 @@ func (s *Server) humaHandleBeadDelete(_ context.Context, input *BeadDeleteInput)
 		}
 		return nil, apierr.Internal.Msg(err.Error())
 	}
+	s.wakeAfterBeadWrite()
 	resp := &OKResponse{}
 	resp.Body.Status = "closed"
 	return resp, nil
+}
+
+// wakeAfterBeadWrite asks the controller to reconcile after a successful
+// generic bead write. The write lands through the controller's CachingStore
+// as a cache-authored bead event, which never wakes the legacy reconciler,
+// so without this an API-written bead waits for the patrol interval. One
+// call: one legacy poke plus the control-dispatcher key, the pair sling
+// wakes. Under v2 this marks the planner on every write, including writes
+// OnBeadEvent's relevance filter skips (critic D7); v2 is trace-only in
+// builds, and gating this to the legacy reconciler is a tracked follow-up.
+func (s *Server) wakeAfterBeadWrite() {
+	s.state.Enqueue(reconcilekey.Allocator(), reconcilekey.ControlDispatch())
 }

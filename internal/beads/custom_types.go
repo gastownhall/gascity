@@ -7,5 +7,5 @@ package beads
 var RequiredCustomTypes = []string{
 	"molecule", "convoy", "message", "event", "gate",
 	"merge-request", "agent", "role", "rig", "session", "spec",
-	"convergence", "step", "startup-health-episode",
+	"convergence", "step", "startup-health-episode", "op",
 }

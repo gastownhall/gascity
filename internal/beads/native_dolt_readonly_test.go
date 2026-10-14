@@ -84,6 +84,8 @@ var nativeStoreMethodKinds = map[string]nativeStoreMethodKind{
 	"UpdateIfMatch":               nativeStoreMutation,
 	"WaitForParentProjection":     nativeStoreRead,
 	"Count":                       nativeStoreRead,
+	"ReadEventsJournalPage":       nativeStoreRead,
+	"EventsJournalActive":         nativeStoreLifecycle,
 	"DepMetadata":                 nativeStoreRead,
 	"SawRows":                     nativeStoreRead,
 	"IDPrefix":                    nativeStoreLifecycle,

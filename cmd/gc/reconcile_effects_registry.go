@@ -39,7 +39,8 @@ type effectReads struct {
 	legs WorkLegs
 	// city and rigs are the sessions store and the rig stores, read-only,
 	// which the start effect's prepare reads (template overrides, the task
-	// work dir, the claimed-work probe); the live work read uses legs.
+	// work dir, the claimed-work probe); the live work read uses legs, and
+	// the orphaned signal's live-claim veto reads the row from city.
 	city beads.Store
 	rigs map[string]beads.Store
 	// cityPath keys the city's identifier locks (A7's alias lock).
@@ -107,8 +108,8 @@ var effectSpecs = map[string]effectSpec{
 	intentZombie:          {class: capProbing, bootGated: true, needs: needs{Runtime: true, Lease: true}, sections: zombieSections},                                                                        // A12 (C5c2)
 	intentDrainBegin:      {class: capRowWrites, bootGated: true, needsFor: drainBeginNeeds, sections: drainBeginSections},                                                                                 // A20 (C6a2)
 	intentDrainBeginFresh: {class: capProbing, bootGated: true, needsFor: drainBeginNeeds, sections: drainBeginSections},                                                                                   // A20 (C6a2)
-	intentSignal:          {class: capRowWrites, bootGated: true, needs: needs{NameLock: true}, sections: signalSections},                                                                                  // A20's signal (C6b1)
-	intentSignalFresh:     {class: capProbing, bootGated: true, needs: signalFreshNeeds, caps: capReadStores, sections: signalSections},                                                                    // A20's signal (C6b1)
+	intentSignal:          {class: capRowWrites, bootGated: true, needs: needs{NameLock: true}, needsFor: signalNeeds, sections: signalSections},                                                           // A20's signal (C6b1); L5 for orphaned (v5.10a B)
+	intentSignalFresh:     {class: capProbing, bootGated: true, needs: signalFreshNeeds, needsFor: signalNeeds, caps: capReadStores, sections: signalSections},                                             // A20's signal (C6b1); L5 for no-wake-reason (v5.10a B)
 	intentSignalAck:       {class: capProbing, bootGated: true, needs: needs{Runtime: true}, sections: signalSections},                                                                                     // A11 (C6c2)
 	intentDrainCancel:     {class: capRowWrites, sections: drainClearSections},                                                                                                                             // A19 (C6a)
 	intentDrainVoid:       {class: capRowWrites, sections: drainClearSections},                                                                                                                             // A19 (C6a)

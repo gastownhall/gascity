@@ -76,6 +76,7 @@ var excludedDirs = []string{
 	"internal/events",           // gc.* event-type names (events.KnownEventTypes)
 	"internal/telemetry",        // gc.* metric/counter names
 	"internal/runtime/t3bridge", // t3bridge UI thread-metadata namespace
+	"internal/opjournal",        // op journal gc.op.* / gc.fact.* namespace; its codec is the only reader and writer
 	"internal/api/genclient",    // generated client code
 }
 

@@ -133,3 +133,37 @@ func InspectConditionalWrites(store Store) ConditionalWritesInspection {
 		insp.Latch != ConditionalWriteLatchIncapable
 	return insp
 }
+
+// ProbeConditionalWrites reports whether store can perform revision-fenced
+// writes, with the reason when it cannot. Unlike InspectConditionalWrites it
+// RUNS the store's capability probe if no verdict is memoized yet — for a bd
+// store that is a read-only `bd <verb> --help` per conditional-write verb,
+// once per store instance — so an unexercised store is never reported capable
+// on faith. Unlike ResolveConditionalWriter it ignores the rollout mode: it
+// serves callers that fence every write and must refuse a store that cannot.
+// It walks the same declared resolve targets and mode source as the write
+// path.
+func ProbeConditionalWrites(store Store) (bool, string) {
+	if store == nil {
+		return false, "no store"
+	}
+	store = followConditionalWritesResolveTarget(store)
+	src, sourced := conditionalWritesModeSource(store)
+	if _, ok := ConditionalWriterFor(store); !ok {
+		return false, "store does not implement conditional writes"
+	}
+	if sourced {
+		if _, ok := ConditionalWriterFor(src); !ok {
+			return false, "mode source does not implement conditional writes"
+		}
+	}
+	if liveness, ok := src.(conditionalWritesLiveness); ok {
+		if err := liveness.conditionalWritesStoreOpen(); err != nil {
+			return false, err.Error()
+		}
+	}
+	if prober, ok := src.(conditionalWriteCapabilityProber); ok {
+		return prober.probeConditionalWriteCapability()
+	}
+	return true, ""
+}

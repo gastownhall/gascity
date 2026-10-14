@@ -2732,6 +2732,10 @@ export type RequestFailedPayload = {
      * Correlation ID from the 202 response.
      */
     request_id: string;
+    /**
+     * Session a failed session.create had already written, when the server could identify it, so the client can inspect or clean it up instead of retrying into a duplicate. Absence does not prove that no session was written. The event subject does not carry this ID; match the event to its request by request_id.
+     */
+    session_id?: string;
 };
 
 export type RigActionBody = {
@@ -18726,6 +18730,10 @@ export type PostV0CityByCityNameSessionByIdStopData = {
          * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
          */
         'X-GC-Request': string;
+        /**
+         * Idempotency key for safe retries.
+         */
+        'Idempotency-Key'?: string;
     };
     path: {
         /**
@@ -18766,6 +18774,10 @@ export type PostV0CityByCityNameSessionByIdStopErrors = {
      * Internal Server Error
      */
     500: ErrorModel;
+    /**
+     * Not Implemented
+     */
+    501: ErrorModel;
     /**
      * Service Unavailable
      */
@@ -19214,6 +19226,10 @@ export type PostV0CityByCityNameSessionByIdWakeData = {
          * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
          */
         'X-GC-Request': string;
+        /**
+         * Idempotency key for safe retries.
+         */
+        'Idempotency-Key'?: string;
     };
     path: {
         /**

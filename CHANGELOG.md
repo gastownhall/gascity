@@ -32,6 +32,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `gc:wait`, `gc:nudge`, `order-tracking`, `gc:wisp`, `gc:extmsg-*`)
   are unchanged.
 
+- **`gc runtime drain-check` has a third exit code, 3 ("unknown").** It now
+  reads the session row's state as well as the runtime's `GC_DRAIN`, and
+  exits 1 ("not draining") only when both sources answered. When a source
+  cannot be read and none says draining, it exits 3 with one stderr line
+  naming the source that failed. `if gc runtime drain-check` still treats 3
+  as false. Under `--json`, that case is now the error envelope with code
+  `drain_state_unknown` and `exit_code` 3, where it used to be
+  `command_failed` with exit 1; a successful result adds a `source` field.
+  Cases that move from exit 1 to exit 3: a `[name]` target that cannot be
+  resolved because the city, its config or its store cannot be read, or
+  that is ambiguous (a name a store that opened does not know still exits
+  1); a session row that cannot be read or found (for example a
+  `GC_SESSION_ID` that names no session row) while `GC_DRAIN` is clear; a
+  session provider that cannot be constructed; a runtime error that is not
+  a typed "session not found", including a local city whose tmux server is
+  not running and an exec adapter whose `get-meta` fails for any reason.
+
 - **New proxied scopes retire their proxy and Dolt child after 30 minutes
   idle.** Before this release every scope gc created was pinned to never, so a
   pair started by a stray read after `gc stop`, by `gc init --no-start`, or by
@@ -303,6 +320,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same way. Pass `--version` to choose another constraint.
 
 ### Fixed
+
+- **The pool orphan sweep treats a claim it cannot observe as unobservable,
+  not dead.** On a shared store, an assignee in `<rig>/<name>` form that this
+  city's config does not mint — another city's identity, a binding this city
+  imports only on another rig, or an agent, binding or namepool name since
+  REMOVED from local config — used to be judged by local session evidence
+  alone and silently stripped (`in_progress` → `open`, assignee cleared).
+  The dead-assignee sweep now keeps such a claim unless one of this city's
+  own session beads, open or closed, answers to the identity under its alias,
+  its configured named identity or its sole alias-history entry (looked up per
+  identity, at most once per pass), and logs one
+  `protected N foreign/unknown identities` summary per pass naming each
+  identity it kept and its claims. A namepool seat whose name was trimmed
+  therefore stays reapable after it closes; claims under the earlier aliases
+  of a seat renamed more than once are kept and named. The orphan-close
+  release of a confirmed orphaned session is unchanged. Only this Go sweep is
+  guarded: the core pack's `orphan-sweep.sh` order still releases a foreign
+  `<rig>/<name>` claim (#5955). Migration notes: a `<rig>/<name>` identity
+  moved to another city on the shared rig store keeps being released here
+  until this city's closed session records for it are purged or re-aliased.
+  The session record of a removed agent, binding or namepool name lasts until
+  closed session beads are purged, which happens only after
+  `GC_INFRA_SESSION_PURGE_AGE` (default 72h) on a relocated SQLite sessions
+  ledger with `wisp_ttl` set, or after `GC_REAPER_SESSION_PURGE_AGE` (default
+  720h) in the city store when the reaper's `GC_REAPER_SESSION_BEAD_PATTERN`
+  (default `gm-*`) matches the city's session bead IDs or is set to `""`.
+  Anywhere else closed session beads are kept indefinitely. Once the record is
+  purged, the sweep protects the identity's outstanding claims, so release them
+  explicitly (`gc bd release-if-current <id> <assignee>`/reassign) when
+  retiring one, and watch the summary line for claims held back.
 
 - **Codex `suggest` sessions start on current codex-cli and ask before
   acting.** `permission_mode = "suggest"` passed `--ask-for-approval

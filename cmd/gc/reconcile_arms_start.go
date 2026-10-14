@@ -3,6 +3,7 @@ package main
 import (
 	"maps"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
@@ -19,7 +20,8 @@ import (
 const (
 	decideAdopt             = "adopt"
 	decideRollback          = "rollback"
-	decideStaleCreate       = "stale-create-exit" // v5 S7: a pending create's StaleSelf runtime
+	decideStaleCreate       = "stale-create-exit"             // v5 S7: a pending create's StaleSelf runtime
+	decideRollbackHeld      = "rollback-held:occupant-corpse" // v5.10i: a foreign corpse inside the lease
 	decideStart             = "start"
 	decideHeartbeatRespawn  = "heartbeat-respawn"                  // A17, SESS-602
 	decideStartAccrued      = "start-held:death-accrual"           // SESS-537/538: legacy restarts the next tick
@@ -48,8 +50,9 @@ func armAdopt(r *rowFacts) (intent, bool) {
 // armRollback is A10's rollback (v5 §4 A10, C3): a pending create the
 // allocation reads past its never-started deadline with nothing running
 // (its rollback candidate), undesired (a Drain row, C5b-2) with its runtime
-// gone or dead, or under a name another row's runtime holds. The effect reads
-// the runtime fresh and attributes it (C3, O2, C8.2(a)).
+// gone or dead, or under a name another row's runtime holds: alive or a
+// zombie, or a corpse once the lease lapsed (v5.10i). The effect reads the
+// runtime fresh and attributes it (C3, O2, C8.2(a)).
 //
 // Its StaleSelf exit (v5 S7): a pending create, which S4 never re-keys,
 // whose live runtime reads StaleSelf. At the row's generation it is the
@@ -66,6 +69,9 @@ func armRollback(r *rowFacts) (intent, bool) {
 	switch {
 	case e.Desired == desireNone && e.Reason == reasonRollbackCandidate:
 	case e.Desired == desireDrain && e.Liveness.startCandidate():
+	case e.Liveness == livenessOccupied && r.occupantCorpseInLease():
+		r.after(requeueUntil(r.w.Now, r.pendingCreateLeaseEnd())) // a pass when the lease lapses
+		return intent{Reason: decideRollbackHeld}, true           // the effect would find the occupant gone and the lease holding it (F1)
 	case e.Liveness == livenessOccupied:
 		occupant = true
 	case e.Liveness == livenessAlive && compareIdentity(info, r.w.Observed[r.k].Identity) == identityStaleSelf:
@@ -77,6 +83,51 @@ func armRollback(r *rowFacts) (intent, bool) {
 	r.rests |= restRuntime
 	basis := rowBasis{Incarnation: r.row.Incarnation, InstanceToken: r.row.InstanceToken}
 	return intent{Kind: intentRollback, Reason: reason, Basis: basis, Relaunch: relaunch, Occupant: occupant}, true
+}
+
+// occupantCorpseInLease reports a pending create whose name another
+// session's corpse holds, inside its lease (CONTRACT v5.10i): the rollback's
+// own read takes a corpse for an occupant that left (occupantStays), so
+// inside the lease it would refuse redecided each pass. The row holds until
+// the lease lapses, or the occupant lives again (alive or a zombie).
+func (r *rowFacts) occupantCorpseInLease() bool {
+	info := r.row.Info
+	if readRuntimeName(r.w.Obs, info.SessionName, r.w.Now, r.w.ObsMaxAge).state != nameCorpse {
+		return false
+	}
+	var cfg *config.City
+	if r.w.Env != nil {
+		cfg = r.w.Env.Cfg
+	}
+	return !pendingCreateAnchorAhead(info, r.w.Now) && pendingCreateSessionStillLeasedAt(info, cfg, r.w.Now)
+}
+
+// pendingCreateLeaseEnd is when the row's pending-create lease lapses, as
+// pendingCreateLeaseActive decides it: a started create's lease runs while
+// its start is in flight (last_woke_at plus the startup timeout and the
+// stale-key and settle allowances) or its attempt is fresh (the anchor,
+// pending_create_started_at or the row's creation, plus
+// staleCreatingStateTimeout), whichever ends later; a never-started one's
+// runs pendingCreateNeverStartedTimeout past its anchor.
+func (r *rowFacts) pendingCreateLeaseEnd() time.Time {
+	info := r.row.Info
+	anchor := info.CreatedAt
+	if started, ok := parseRFC3339Metadata(info.PendingCreateStartedAt); ok {
+		anchor = started
+	}
+	woke, ok := parseRFC3339Metadata(strings.TrimSpace(info.LastWokeAt))
+	if !ok {
+		return anchor.Add(pendingCreateNeverStartedTimeout).Add(time.Second) // expired only strictly after
+	}
+	startup := time.Minute
+	if r.w.Env != nil && r.w.Env.Cfg != nil && r.w.Env.Cfg.Session.StartupTimeoutDuration() > 0 {
+		startup = r.w.Env.Cfg.Session.StartupTimeoutDuration()
+	}
+	inFlight := woke.Add(startup + staleKeyDetectDelay + 5*time.Second)
+	if fresh := anchor.Add(staleCreatingStateTimeout); fresh.After(inFlight) {
+		return fresh
+	}
+	return inFlight
 }
 
 // configuredNamed reports a configured named row with its spec, which a

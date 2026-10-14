@@ -23,6 +23,7 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 	if bp.isBlocking() {
 		waitForChange(ctx, s.state.EventProvider(), bp)
 	}
+	index := s.latestIndex()
 
 	cfg := s.state.Config()
 	sp := s.state.SessionProvider()
@@ -35,7 +36,6 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 	// back to the patch-presence heuristic.
 	rawCfg := s.rawConfig()
 
-	index := s.latestIndex()
 	cacheKey := ""
 	if !wantPeek {
 		// Cache key derived from input struct tags — adding a new query
@@ -43,6 +43,11 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 		// The list projects the config, whose swaps do not advance the
 		// event index, so the key also carries the config generation.
 		cacheKey = cacheKeyFor("agents", input) + "#cfg=" + strconv.FormatUint(s.configGeneration(cfg), 10)
+		// A hit needs the exact index captured above, before any state was
+		// read, so the cached body reflects every change up to index and
+		// returning this request's index with it is safe. A key that can hit
+		// across index changes (the time bucket /status uses) must cache the
+		// build index with the body instead (indexedResponse).
 		if body, ok := cachedResponseAs[ListBody[agentResponse]](s, cacheKey, index); ok {
 			return &ListOutput[agentResponse]{
 				Index: index,
@@ -273,6 +278,7 @@ func (s *Server) humaHandleAgentQualified(_ context.Context, input *AgentGetQual
 // and unqualified routes normalize to a single "name" string before
 // dispatching here.
 func (s *Server) agentByName(name string) (*IndexOutput[agentResponse], error) {
+	index := s.latestIndex()
 	if name == "" {
 		return nil, apierr.InvalidRequest.Msg("agent name required")
 	}
@@ -370,7 +376,7 @@ func (s *Server) agentByName(name string) (*IndexOutput[agentResponse], error) {
 	}
 
 	return &IndexOutput[agentResponse]{
-		Index: s.latestIndex(),
+		Index: index,
 		Body:  resp,
 	}, nil
 }

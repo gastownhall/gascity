@@ -3022,6 +3022,13 @@ func (p *Provider) RunLive(_ string, _ runtime.Config) error {
 	return nil
 }
 
+// TurnInterruptMode reports that t3bridge interrupts turns by protocol: its
+// Interrupt dispatches the bridge's turn interrupt for every agent provider,
+// and SendKeys delivers nothing.
+func (p *Provider) TurnInterruptMode(string) runtime.TurnInterruptMode {
+	return runtime.TurnInterruptProtocol
+}
+
 // Capabilities reports the optional provider features t3bridge supports.
 func (p *Provider) Capabilities() runtime.ProviderCapabilities {
 	return runtime.ProviderCapabilities{

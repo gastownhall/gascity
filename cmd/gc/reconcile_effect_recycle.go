@@ -64,7 +64,16 @@ type deadPeek struct {
 }
 
 // peekDead peeks the dead runtime's pane when it is the row's own and not
-// classified yet; nothing otherwise.
+// classified yet; nothing otherwise. A corpse whose agent pane is gone (an
+// operator's split left as its only, dead, pane) has no screen of the
+// agent's to classify: it reads empty, and the recycle removes it by exact
+// object as before (the #7762 review). A zombie's never does: its live pane
+// may be an operator's, which KillZombieObject would kill, so the peek
+// refuses. The screen counts only when a fresh read after the capture, taken
+// at the wall clock (so no snapshot from before the capture answers it),
+// still finds the session object the classification read, its id and its
+// created time (tmux reuses ids after a server restart); otherwise the peek
+// refuses (errPeekObjectMoved).
 func peekDead(ctx context.Context, _ effectReads, v txView) (deadPeek, error) {
 	if v.RT == nil || v.RT.Class != rtCorpse && v.RT.Class != rtZombie || !ownRuntime(compareIdentity(v.Row, v.RT.Identity), v.Row, v.RT.Identity) {
 		return deadPeek{}, nil
@@ -72,12 +81,24 @@ func peekDead(ctx context.Context, _ effectReads, v txView) (deadPeek, error) {
 	if c, ok := v.World.Classified[v.It.Key]; ok && c.classifies(v.RT.Identity) {
 		return deadPeek{read: true, known: &c}, nil
 	}
-	content, err := v.RT.leaf.Peek(strings.TrimSpace(v.Row.SessionName), rateLimitPeekLines)
-	if err != nil {
+	name := strings.TrimSpace(v.Row.SessionName)
+	content, err := v.RT.leaf.Peek(name, rateLimitPeekLines)
+	switch {
+	case errors.Is(err, runtime.ErrTmuxAgentPaneGone) && v.RT.Class == rtCorpse:
+		return deadPeek{read: true}, ctx.Err()
+	case err != nil:
 		return deadPeek{}, err
+	}
+	if again, ok := freshRead(ctx, v.RT.leaf, name, nil, time.Now()); !ok || again.ObjectID != v.RT.Again.ObjectID || again.ObjectCreated != v.RT.Again.ObjectCreated {
+		return deadPeek{}, errPeekObjectMoved
 	}
 	return deadPeek{read: true, content: content}, ctx.Err()
 }
+
+// errPeekObjectMoved: the session object under the name changed, or could
+// not be read again, between the classification's read and the capture, so
+// the screen may be another object's.
+var errPeekObjectMoved = errors.New("v2 recycle: the session object changed across the peek")
 
 // deadKill is the dead runtime the recycle's Call removes, the crash it
 // records once the kill landed, and whether the death is the row's own to
@@ -160,7 +181,14 @@ func deadScreen(v txView, content string) (screenWrite, bool) {
 	if !runtime.ContainsProviderRateLimitScreen(content) {
 		return screenWrite{}, false
 	}
-	_, draining := activeStop(v.World.Census.reread(v.It.Key, v.Row, v.Meta)) // the fresh row's stop keys
+	// A drain a request explains (the controller's, or an operator's)
+	// quarantines no screen, as legacy's exit decision (D09). A bare ack,
+	// the agent's own (a dead floor seat's, which A18 restarts in place
+	// with the ack on the row), suppresses only the death's crash and churn
+	// accounting (deadRuntimePatch), not this screen, so the seat is not
+	// relaunched into the limit (§12.2 row 66).
+	req, draining := activeStop(v.World.Census.reread(v.It.Key, v.Row, v.Meta)) // the fresh row's stop keys
+	draining = draining && (req.Reason != "" || req.Operator)
 	facts := session.ExitFacts{LastWokeAt: v.Row.LastWokeAt, Now: v.Now, ScreenAvailable: true, Screen: session.ScreenRateLimit, DrainPending: draining}
 	if cfg := v.World.Env.Cfg; cfg != nil {
 		facts.SubprocessProvider = cfg.Session.Provider == "subprocess"
