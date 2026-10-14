@@ -1902,3 +1902,37 @@ func TestSimSatisfiedWakeDoesNotRestartAfterADeath(t *testing.T) {
 		})
 	}
 }
+
+// Scenario DRAIN-047 (the #7855 review): an operator wakes an awake seat
+// whose idle or no-wake drain is requested (begun, not yet signaled); the
+// wake makes A19 cancel that drain, and the seat stays up through it; the
+// satisfied-wake clear consumes the wake only after the cancel. Kills the
+// clear consuming that wake first, so the requested drain goes on and the
+// seat is stopped. (Once the wake is consumed, the seat idle-sleeps
+// normally on a later drain of its own, §12.2 #26.)
+func TestSimWakeOverARequestedDrainCancelsIt(t *testing.T) {
+	for _, reason := range []string{"idle", reasonNoWake} {
+		t.Run(reason, func(t *testing.T) {
+			s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "awake", "instance_token", "tok-gc-1", "last_woke_at", rowAt(-time.Hour),
+				session.DrainIntentReasonKey, reason, session.DrainIntentAtKey, rowAt(-5*time.Second), session.DrainIntentIncarnationKey, "1",
+				"wake_request", "explicit", "wake_requested_at", rowAt(-time.Second)))
+			s.settle()
+			s.settle()
+			s.sp.mu.Lock()
+			rt := s.sp.rts["s-gc-1"]
+			kills := len(s.sp.kills)
+			s.sp.mu.Unlock()
+			b := s.gc1()
+			canceled := slices.ContainsFunc(s.schedule, func(l string) bool { return strings.Contains(l, "admitted [drain-cancel:gc-1") })
+			switch {
+			case !canceled:
+				t.Errorf("%s: no drain cancel admitted; schedule:\n%s", reason, strings.Join(s.schedule, "\n"))
+			case rt == nil || rt.corpse || kills != 0 || b[session.DrainIntentReasonKey] != "":
+				t.Errorf("%s: runtime %+v, kills %d, row %v; want the seat up and the requested drain canceled", reason, rt, kills, b)
+			case b["wake_request"] != "":
+				t.Errorf("%s: row %v; want the wake consumed once the cancel landed", reason, b)
+			}
+			s.noViolations(t)
+		})
+	}
+}

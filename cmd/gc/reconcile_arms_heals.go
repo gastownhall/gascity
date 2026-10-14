@@ -442,9 +442,13 @@ func wakeRequested(info session.Info) bool {
 // keeps the row wanted and never idle-sleeping, and comes back after a later
 // runtime-missing heal to restart it (§12.2 #26; J21 C). An asleep row's
 // wake is the awake heal's; a row an operator holds dormant is never
-// touched (I15).
+// touched (I15); and a row with an active stop request keeps its wake, which
+// A19 reads to cancel a requested drain (DRAIN-047).
 func armSatisfiedWake(r *rowFacts) (intent, bool) {
 	info := r.row.Info
+	if _, stopping := activeStop(r.row); stopping {
+		return intent{}, false // the wake is A19's to cancel a requested drain with (DRAIN-047), not satisfied
+	}
 	if !committed(info) || !wakeRequested(info) || session.DispositionOfInfo(info).OperatorDormant(r.w.Now) || !r.freshOwnAlive() {
 		return intent{}, false
 	}
