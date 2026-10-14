@@ -44,6 +44,7 @@ var (
 	_ runtime.SessionRosterProvider           = (*Provider)(nil)
 	_ runtime.SessionObjectKiller             = (*Provider)(nil)
 	_ runtime.TurnEventProvider               = (*Provider)(nil)
+	_ runtime.TurnFenceProvider               = (*Provider)(nil)
 )
 
 // New creates a hybrid provider. isRemote returns true for sessions
@@ -252,6 +253,33 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 // in-flight turn.
 func (p *Provider) TurnInterruptMode(name string) runtime.TurnInterruptMode {
 	return runtime.TurnInterruptModeFor(p.route(name), name)
+}
+
+// ObserveTurn delegates to the routed backend when it reports which turn is
+// in progress.
+func (p *Provider) ObserveTurn(ctx context.Context, name string) (runtime.TurnState, error) {
+	if tf, ok := p.route(name).(runtime.TurnFenceProvider); ok {
+		return tf.ObserveTurn(ctx, name)
+	}
+	return runtime.TurnState{}, runtime.ErrInteractionUnsupported
+}
+
+// InterruptTurn delegates to the routed backend when it can interrupt a named
+// turn.
+func (p *Provider) InterruptTurn(ctx context.Context, name, turnID string) (runtime.TurnInterrupt, error) {
+	if tf, ok := p.route(name).(runtime.TurnFenceProvider); ok {
+		return tf.InterruptTurn(ctx, name, turnID)
+	}
+	return runtime.TurnInterrupt{}, runtime.ErrInteractionUnsupported
+}
+
+// WaitTurnEnded delegates to the routed backend when it can report that a
+// named turn ended.
+func (p *Provider) WaitTurnEnded(ctx context.Context, name, turnID string, timeout time.Duration) (runtime.TurnState, error) {
+	if tf, ok := p.route(name).(runtime.TurnFenceProvider); ok {
+		return tf.WaitTurnEnded(ctx, name, turnID, timeout)
+	}
+	return runtime.TurnState{}, runtime.ErrInteractionUnsupported
 }
 
 // WaitForInterruptBoundary delegates to the routed backend when it can confirm

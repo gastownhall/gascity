@@ -342,7 +342,7 @@ func TestAuthenticatedWsURL_ExchangesBearerForShortLivedLoopbackWebSocketTicket(
 	defer server.Close()
 	t.Setenv("T3_BEARER_TOKEN", "test-bearer")
 	t.Setenv("GC_T3BRIDGE_STATE_DIR", t.TempDir())
-	wsURL, headers, err := authenticatedWsURL(server.wsURL())
+	wsURL, headers, err := authenticatedWsURL(context.Background(), server.wsURL())
 	if err != nil {
 		t.Fatalf("authenticatedWsURL: %v", err)
 	}
@@ -365,7 +365,7 @@ func TestAuthenticatedWsURL_RedactsBearerEchoedByTicketEndpoint(t *testing.T) {
 	t.Setenv("T3_BEARER_TOKEN", "test-bearer")
 	t.Setenv("GC_T3BRIDGE_STATE_DIR", t.TempDir())
 
-	_, _, err := authenticatedWsURL(server.wsURL())
+	_, _, err := authenticatedWsURL(context.Background(), server.wsURL())
 	if err == nil {
 		t.Fatal("authenticatedWsURL error = nil, want ticket rejection")
 	}
@@ -382,7 +382,7 @@ func TestAuthenticatedWsURL_FallsBackToBearerHeaderWhenTicketEndpointUnsupported
 	t.Setenv("T3_BEARER_TOKEN", "test-bearer")
 	t.Setenv("GC_T3BRIDGE_STATE_DIR", t.TempDir())
 
-	wsURL, headers, err := authenticatedWsURL(server.wsURL())
+	wsURL, headers, err := authenticatedWsURL(context.Background(), server.wsURL())
 	if err != nil {
 		t.Fatalf("authenticatedWsURL: %v", err)
 	}
@@ -402,7 +402,7 @@ func TestAuthenticatedWsURL_FallsBackToBearerHeaderWhenTicketEndpointReturnsHTML
 	t.Setenv("T3_BEARER_TOKEN", "test-bearer")
 	t.Setenv("GC_T3BRIDGE_STATE_DIR", t.TempDir())
 
-	wsURL, headers, err := authenticatedWsURL(server.wsURL())
+	wsURL, headers, err := authenticatedWsURL(context.Background(), server.wsURL())
 	if err != nil {
 		t.Fatalf("authenticatedWsURL: %v", err)
 	}
@@ -1034,6 +1034,11 @@ type t3BridgeTestServer struct {
 	payloads           []map[string]interface{}
 	rejectCommands     map[string]interface{}
 	snapshot           map[string]interface{}
+	snapshots          []map[string]interface{}
+	commandHook        func(payload map[string]interface{})
+	stalled            bool
+	released           chan struct{}
+	closeOnce          sync.Once
 	authFailures       int
 	authFailureStatus  int
 	authFailureBody    string
@@ -1053,7 +1058,7 @@ type t3BridgeTestServer struct {
 
 func newT3BridgeTestServer(t *testing.T, snapshot map[string]interface{}) *t3BridgeTestServer {
 	t.Helper()
-	ts := &t3BridgeTestServer{t: t, snapshot: snapshot}
+	ts := &t3BridgeTestServer{t: t, snapshot: snapshot, released: make(chan struct{})}
 	upgrader := websocket.Upgrader{}
 	ts.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/auth/ws-token" || r.URL.Path == "/api/auth/bridge-ws-token" || r.URL.Path == "/api/auth/websocket-ticket" {
@@ -1103,7 +1108,20 @@ func newT3BridgeTestServer(t *testing.T, snapshot map[string]interface{}) *t3Bri
 			failureBody := ts.snapshotFailBody
 			rawType := ts.snapshotRawType
 			rawBody := ts.snapshotRawBody
+			stalled := ts.stalled
 			ts.mu.Unlock()
+			if stalled {
+				select {
+				case <-r.Context().Done():
+				case <-ts.released:
+				}
+				return
+			}
+			snapshot, ok := ts.nextSnapshot()
+			if !ok {
+				http.Error(w, "bridge warming up", http.StatusServiceUnavailable)
+				return
+			}
 			if failureStatus != 0 {
 				http.Error(w, failureBody, failureStatus)
 				return
@@ -1114,7 +1132,7 @@ func newT3BridgeTestServer(t *testing.T, snapshot map[string]interface{}) *t3Bri
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(ts.snapshot)
+			_ = json.NewEncoder(w).Encode(snapshot)
 			return
 		}
 		ts.mu.Lock()
@@ -1141,7 +1159,18 @@ func newT3BridgeTestServer(t *testing.T, snapshot map[string]interface{}) *t3Bri
 		value := map[string]interface{}{}
 		switch req.Tag {
 		case "orchestration.getSnapshot":
-			value = ts.snapshot
+			ts.mu.Lock()
+			stalled := ts.stalled
+			ts.mu.Unlock()
+			if stalled {
+				_, _, _ = conn.ReadMessage() // unanswered: returns when the client leaves
+				return
+			}
+			snapshot, ok := ts.nextSnapshot()
+			if !ok {
+				return // an outage: the connection closes without an answer
+			}
+			value = snapshot
 		case "orchestration.dispatchCommand":
 			var payload map[string]interface{}
 			if err := json.Unmarshal(req.Payload, &payload); err != nil {
@@ -1150,6 +1179,12 @@ func newT3BridgeTestServer(t *testing.T, snapshot map[string]interface{}) *t3Bri
 			}
 			ts.recordCommand(commandType(payload))
 			ts.recordPayload(payload)
+			ts.mu.Lock()
+			hook := ts.commandHook
+			ts.mu.Unlock()
+			if hook != nil {
+				hook(payload)
+			}
 		}
 
 		exit := map[string]interface{}{
@@ -1175,11 +1210,52 @@ func newT3BridgeTestServer(t *testing.T, snapshot map[string]interface{}) *t3Bri
 }
 
 func (ts *t3BridgeTestServer) Close() {
+	ts.closeOnce.Do(func() { close(ts.released) })
+	ts.server.CloseClientConnections()
 	ts.server.Close()
+}
+
+// setStalled makes every snapshot read, over HTTP or the WebSocket, go
+// unanswered until the client gives up or the server closes.
+func (ts *t3BridgeTestServer) setStalled() {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	ts.stalled = true
 }
 
 func (ts *t3BridgeTestServer) wsURL() string {
 	return "ws" + strings.TrimPrefix(ts.server.URL, "http")
+}
+
+// setSnapshots scripts the snapshots the server answers: each snapshot read,
+// over HTTP or the WebSocket, takes the next, and the last repeats. A nil
+// entry is an outage: HTTP answers 503 and the WebSocket closes unanswered.
+func (ts *t3BridgeTestServer) setSnapshots(seq ...map[string]interface{}) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	ts.snapshots = seq
+}
+
+// setCommandHook runs hook on every dispatched command, after it is recorded
+// and before it is answered.
+func (ts *t3BridgeTestServer) setCommandHook(hook func(payload map[string]interface{})) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	ts.commandHook = hook
+}
+
+// nextSnapshot is the snapshot the next read answers; false for an outage.
+func (ts *t3BridgeTestServer) nextSnapshot() (map[string]interface{}, bool) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	if len(ts.snapshots) == 0 {
+		return ts.snapshot, true
+	}
+	next := ts.snapshots[0]
+	if len(ts.snapshots) > 1 {
+		ts.snapshots = ts.snapshots[1:]
+	}
+	return next, next != nil
 }
 
 func (ts *t3BridgeTestServer) recordCommand(typ string) {

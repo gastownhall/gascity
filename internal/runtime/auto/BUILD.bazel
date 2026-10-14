@@ -25,6 +25,7 @@ go_test(
         "session_events_test.go",
         "testenv_import_test.go",
         "turn_events_test.go",
+        "turn_fence_test.go",
     ],
     embed = [":auto"],
     deps = [

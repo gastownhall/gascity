@@ -267,7 +267,7 @@ func resolveBearerSessionToken() (string, error) {
 	return readCachedBearerSessionToken()
 }
 
-func issueT3WebSocketToken(wsURL string) (string, error) {
+func issueT3WebSocketToken(ctx context.Context, wsURL string) (string, error) {
 	authMu.Lock()
 	defer authMu.Unlock()
 
@@ -295,7 +295,7 @@ func issueT3WebSocketToken(wsURL string) (string, error) {
 		return cachedBridgeWSToken, nil
 	}
 
-	req, err := http.NewRequest(http.MethodPost, baseURL, bytes.NewReader([]byte("{}")))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL, bytes.NewReader([]byte("{}")))
 	if err != nil {
 		return "", fmt.Errorf("build bridge ws-token request: %w", err)
 	}
@@ -331,7 +331,7 @@ func issueT3WebSocketToken(wsURL string) (string, error) {
 	return payload.Token, nil
 }
 
-func issueT3WebSocketTicket(wsURL, bearerToken string) (string, error) {
+func issueT3WebSocketTicket(ctx context.Context, wsURL, bearerToken string) (string, error) {
 	parsed, err := url.Parse(wsURL)
 	if err != nil {
 		return "", fmt.Errorf("parse ws url: %w", err)
@@ -348,7 +348,7 @@ func issueT3WebSocketTicket(wsURL, bearerToken string) (string, error) {
 	parsed.RawQuery = ""
 	parsed.Fragment = ""
 
-	req, err := http.NewRequest(http.MethodPost, parsed.String(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, parsed.String(), nil)
 	if err != nil {
 		return "", fmt.Errorf("build websocket-ticket request: %w", err)
 	}
@@ -591,13 +591,13 @@ func isLoopbackWsURL(wsURL string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-func authenticatedWsURL(wsURL string) (string, http.Header, error) {
+func authenticatedWsURL(ctx context.Context, wsURL string) (string, http.Header, error) {
 	bearerToken, err := resolveBearerSessionToken()
 	if err != nil {
 		return "", nil, err
 	}
 	if bearerToken != "" {
-		ticket, err := issueT3WebSocketTicket(wsURL, bearerToken)
+		ticket, err := issueT3WebSocketTicket(ctx, wsURL, bearerToken)
 		if err != nil {
 			if errors.Is(err, errWebSocketTicketUnsupported) {
 				headers := http.Header{}
@@ -618,7 +618,7 @@ func authenticatedWsURL(wsURL string) (string, http.Header, error) {
 	if isLoopbackWsURL(wsURL) {
 		return wsURL, nil, nil
 	}
-	wsToken, err := issueT3WebSocketToken(wsURL)
+	wsToken, err := issueT3WebSocketToken(ctx, wsURL)
 	if err != nil {
 		return "", nil, err
 	}
@@ -1152,6 +1152,12 @@ func (p *Provider) recentStartNames(prefix string) []string {
 
 // rpcCall makes a generic WebSocket RPC call and returns the result map.
 func (p *Provider) rpcCall(method string, params map[string]interface{}) (map[string]interface{}, error) {
+	return p.rpcCallCtx(context.Background(), method, params)
+}
+
+// rpcCallCtx is rpcCall bounded by ctx: the dial, the auth requests and the
+// read stop when ctx ends, and so do the transient-retry sleeps.
+func (p *Provider) rpcCallCtx(ctx context.Context, method string, params map[string]interface{}) (map[string]interface{}, error) {
 	p.mu.Lock()
 	p.reqSeq++
 	reqID := p.reqSeq
@@ -1159,22 +1165,33 @@ func (p *Provider) rpcCall(method string, params map[string]interface{}) (map[st
 
 	deadline := time.Now().Add(bridgeConnectRetryWindow)
 	for attempt := 1; ; attempt++ {
-		result, err := p.rpcCallOnce(method, params, reqID)
+		result, err := p.rpcCallOnceCtx(ctx, method, params, reqID)
 		if err == nil {
 			return result, nil
 		}
 		if !isTransientBridgeError(err) || time.Now().After(deadline) {
 			return nil, err
 		}
-		time.Sleep(nextBridgeRetryDelay(attempt))
+		retry := time.NewTimer(nextBridgeRetryDelay(attempt))
+		select {
+		case <-ctx.Done():
+			retry.Stop()
+			return nil, fmt.Errorf("t3 rpc %s: %w: %w", method, ctx.Err(), err)
+		case <-retry.C:
+		}
 	}
 }
 
-func (p *Provider) rpcCallOnce(method string, params map[string]interface{}, reqID int) (map[string]interface{}, error) {
+func (p *Provider) rpcCallOnceCtx(ctx context.Context, method string, params map[string]interface{}, reqID int) (map[string]interface{}, error) {
 	var lastErr error
 	var failures []string
 	for _, candidate := range resolveWsURLCandidates() {
-		wsURL, headers, err := authenticatedWsURL(candidate)
+		if err := ctx.Err(); err != nil {
+			lastErr = fmt.Errorf("%s: %w", candidate, err)
+			failures = append(failures, lastErr.Error())
+			break
+		}
+		wsURL, headers, err := authenticatedWsURL(ctx, candidate)
 		if err != nil {
 			lastErr = fmt.Errorf("%s: %w", candidate, err)
 			failures = append(failures, lastErr.Error())
@@ -1182,13 +1199,17 @@ func (p *Provider) rpcCallOnce(method string, params map[string]interface{}, req
 		}
 		dialer := *websocket.DefaultDialer
 		dialer.HandshakeTimeout = bridgeWSTimeout
-		conn, _, err := dialer.Dial(wsURL, headers)
+		conn, _, err := dialer.DialContext(ctx, wsURL, headers)
 		if err != nil {
 			lastErr = fmt.Errorf("%s: %w", candidate, err)
 			failures = append(failures, lastErr.Error())
 			continue
 		}
 		defer func() { _ = conn.Close() }()
+		// Closing the connection when ctx ends unblocks the read below even
+		// when ctx has no deadline.
+		stopClose := context.AfterFunc(ctx, func() { _ = conn.Close() })
+		defer stopClose()
 
 		payload := params
 		if payload == nil {
@@ -1207,10 +1228,17 @@ func (p *Provider) rpcCallOnce(method string, params map[string]interface{}, req
 			continue
 		}
 
-		_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+		readDeadline := time.Now().Add(30 * time.Second)
+		if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(readDeadline) {
+			readDeadline = ctxDeadline
+		}
+		_ = conn.SetReadDeadline(readDeadline)
 		for {
 			_, msg, err := conn.ReadMessage()
 			if err != nil {
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					err = fmt.Errorf("%w: %w", ctxErr, err)
+				}
 				lastErr = fmt.Errorf("%s: %w", candidate, err)
 				failures = append(failures, lastErr.Error())
 				break
@@ -1326,7 +1354,9 @@ func (p *Provider) rpcDispatchCommand(command map[string]interface{}) error {
 	return err
 }
 
-func (p *Provider) rpcHTTPSnapshot(bearerToken string) (map[string]interface{}, error) {
+// rpcHTTPSnapshot reads the orchestration snapshot over T3's HTTP endpoint,
+// bounded by ctx as well as the client timeout.
+func (p *Provider) rpcHTTPSnapshot(ctx context.Context, bearerToken string) (map[string]interface{}, error) {
 	var lastErr error
 	var unsupportedErr error
 	var failures []string
@@ -1351,7 +1381,7 @@ func (p *Provider) rpcHTTPSnapshot(bearerToken string) (map[string]interface{}, 
 		parsed.RawQuery = ""
 		parsed.Fragment = ""
 
-		req, err := http.NewRequest(http.MethodGet, parsed.String(), nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
 		if err != nil {
 			lastErr = fmt.Errorf("%s: build snapshot request: %w", candidate, err)
 			failures = append(failures, lastErr.Error())
@@ -1407,19 +1437,25 @@ func (p *Provider) rpcSnapshot() (map[string]interface{}, error) {
 		return snapshot, nil
 	}
 	p.mu.Unlock()
+	return p.rpcSnapshotFresh(context.Background())
+}
 
+// rpcSnapshotFresh reads the orchestration snapshot from T3, bounded by ctx,
+// never from the cache, and caches what it read for the bridge's other
+// readers.
+func (p *Provider) rpcSnapshotFresh(ctx context.Context) (map[string]interface{}, error) {
 	bearerToken, err := resolveBearerSessionToken()
 	if err != nil {
 		return nil, err
 	}
 	var snapshot map[string]interface{}
 	if bearerToken != "" {
-		snapshot, err = p.rpcHTTPSnapshot(bearerToken)
+		snapshot, err = p.rpcHTTPSnapshot(ctx, bearerToken)
 		if errors.Is(err, errHTTPSnapshotUnsupported) {
-			snapshot, err = p.rpcCall("orchestration.getSnapshot", map[string]interface{}{})
+			snapshot, err = p.rpcCallCtx(ctx, "orchestration.getSnapshot", map[string]interface{}{})
 		}
 	} else {
-		snapshot, err = p.rpcCall("orchestration.getSnapshot", map[string]interface{}{})
+		snapshot, err = p.rpcCallCtx(ctx, "orchestration.getSnapshot", map[string]interface{}{})
 	}
 	if err != nil {
 		return nil, err
@@ -1667,12 +1703,24 @@ func (p *Provider) dispatchTurnStart(threadID, text, provider, model string, ids
 }
 
 func (p *Provider) dispatchTurnInterrupt(threadID string) error {
-	return p.rpcDispatchCommand(map[string]interface{}{
+	return p.dispatchTurnInterruptFor(context.Background(), threadID, "")
+}
+
+// dispatchTurnInterruptFor dispatches thread.turn.interrupt bounded by ctx,
+// with a fresh command id. A non-empty turnID is T3's raw turn id: V1 records
+// it and interrupts whatever turn runs.
+func (p *Provider) dispatchTurnInterruptFor(ctx context.Context, threadID, turnID string) error {
+	command := map[string]interface{}{
 		"type":      "thread.turn.interrupt",
 		"commandId": p.nextCommandID("t3bridge-interrupt"),
 		"threadId":  threadID,
 		"createdAt": time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
-	})
+	}
+	if turnID != "" {
+		command["turnId"] = turnID
+	}
+	_, err := p.rpcCallCtx(ctx, "orchestration.dispatchCommand", command)
+	return err
 }
 
 func snapshotProjects(snapshot map[string]interface{}) []map[string]interface{} {

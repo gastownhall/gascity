@@ -39,6 +39,7 @@ go_library(
         "tmux_agent_pane.go",
         "turn_events.go",
         "turn_events_merge.go",
+        "turn_fence.go",
         "worker.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/runtime",

@@ -77,6 +77,18 @@ type Fake struct {
 	// ListingUnattested makes Fake.ListRunningComplete report false, modeling
 	// a provider whose ListRunning may omit live sessions.
 	ListingUnattested bool
+	// TurnScripts script a FullFake's TurnFenceProvider by session name. Every
+	// turn read (ObserveTurn, InterruptTurn's fence read, each WaitTurnEnded
+	// read) takes the next entry, and the last entry repeats; "" means no turn.
+	// A session with no script has no turn in progress.
+	TurnScripts map[string][]string
+	// TurnReadErrors fail turn reads by session name, in order. A nil entry
+	// reads the script.
+	TurnReadErrors map[string][]error
+	// InterruptTurnErrors fail InterruptTurn after a matching fence read.
+	InterruptTurnErrors map[string]error
+	// FencedTurnInterrupts makes InterruptTurn answer Fenced: true.
+	FencedTurnInterrupts bool
 }
 
 var (
@@ -98,12 +110,16 @@ type Call struct {
 	// DeliveryKey is set for a Nudge delivered through
 	// [KeyedNudgeProvider.NudgeKeyed] (a [FullFake]'s).
 	DeliveryKey string
-	Key         string // only set for meta calls
-	Value       string // only set for SetMeta calls
-	Src         string // only set for CopyTo calls
-	Dst         string // only set for CopyTo calls
-	RequestID   string // only set for Respond calls
-	Action      string // only set for Respond calls
+	// Key is set for meta calls, and for a [FullFake]'s turn-fence calls to
+	// the turn they name (empty for ObserveTurn).
+	Key string
+	// Value is set for SetMeta calls, and for a [FullFake]'s InterruptTurn to
+	// what it did: sent, not_current or error.
+	Value     string
+	Src       string // only set for CopyTo calls
+	Dst       string // only set for CopyTo calls
+	RequestID string // only set for Respond calls
+	Action    string // only set for Respond calls
 }
 
 // FakeExecResult configures one [Fake.Exec] outcome.

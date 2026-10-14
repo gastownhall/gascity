@@ -66,6 +66,7 @@ type ProfileBackend interface {
 	SessionObjectKiller
 	SessionRosterProvider
 	TurnEventProvider
+	TurnFenceProvider
 	UnattendedSessionStopper
 }
 
@@ -90,7 +91,7 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 	case ProfileSSH:
 		return sshProfile{core, b, timed}
 	case ProfileT3Bridge:
-		return t3bridgeProfile{core, b, b, b, timed, turnInterruptTrait{TurnInterruptProtocol}}
+		return t3bridgeProfile{core, b, b, b, b, timed, turnInterruptTrait{TurnInterruptProtocol}}
 	}
 	panic(fmt.Sprintf("runtime: unknown profile %d", p))
 }
@@ -223,6 +224,7 @@ type (
 		KeyedNudgeProvider
 		LivenessObserverWithError
 		SessionBindingProvider
+		TurnFenceProvider
 		sleepTrait
 		turnInterruptTrait
 	}
@@ -416,6 +418,93 @@ func (f FullFake) SubscribeTurnEvents(ctx context.Context) (<-chan TurnEvent, er
 		close(ch)
 	}()
 	return ch, nil
+}
+
+// ObserveTurn implements [TurnFenceProvider] from the fake's TurnScripts.
+func (f FullFake) ObserveTurn(ctx context.Context, name string) (TurnState, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, Call{Method: "ObserveTurn", Name: name})
+	if err := ctx.Err(); err != nil {
+		return TurnState{}, err
+	}
+	st, _, err := f.readTurnLocked(name)
+	return st, err
+}
+
+// InterruptTurn implements [TurnFenceProvider]: it reads the script and
+// "sends" only when the read names turnID, recording what it did in Value.
+func (f FullFake) InterruptTurn(ctx context.Context, name, turnID string) (TurnInterrupt, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	call := Call{Method: "InterruptTurn", Name: name, Key: turnID, Value: "error"}
+	defer func() { f.Calls = append(f.Calls, call) }()
+	if err := ctx.Err(); err != nil {
+		return TurnInterrupt{}, err
+	}
+	st, _, err := f.readTurnLocked(name)
+	if err != nil {
+		return TurnInterrupt{}, err
+	}
+	if st.TurnID != turnID {
+		call.Value = "not_current"
+		return TurnInterrupt{}, &TurnNotCurrentError{Session: name, TurnID: turnID, Current: st}
+	}
+	if err := f.InterruptTurnErrors[name]; err != nil {
+		return TurnInterrupt{}, err
+	}
+	call.Value = "sent"
+	return TurnInterrupt{Fenced: f.FencedTurnInterrupts}, nil
+}
+
+// WaitTurnEnded implements [TurnFenceProvider] without sleeping: it reads the
+// script until the turn is no longer turnID, and answers ErrTurnNotEnded once
+// the script is exhausted on turnID. A read error is remembered and the next
+// entry read, as the bridge's poll does; timeout is not consulted.
+func (f FullFake) WaitTurnEnded(ctx context.Context, name, turnID string, _ time.Duration) (TurnState, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, Call{Method: "WaitTurnEnded", Name: name, Key: turnID})
+	if f.broken {
+		return TurnState{}, ErrRuntimeUnavailable
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return TurnState{}, err
+		}
+		st, exhausted, err := f.readTurnLocked(name)
+		switch {
+		case err != nil:
+			continue // TurnReadErrors is finite: the script answers next
+		case st.TurnID != turnID:
+			return st, nil
+		case exhausted:
+			return st, ErrTurnNotEnded
+		}
+	}
+}
+
+// readTurnLocked is one turn read: the next TurnReadErrors entry, else the
+// next script entry. exhausted reports that the entry read repeats from here
+// on. The caller holds f.mu.
+func (f FullFake) readTurnLocked(name string) (st TurnState, exhausted bool, err error) {
+	if f.broken {
+		return TurnState{}, true, ErrRuntimeUnavailable
+	}
+	if errs := f.TurnReadErrors[name]; len(errs) > 0 {
+		f.TurnReadErrors[name] = errs[1:]
+		if errs[0] != nil {
+			return TurnState{}, false, errs[0]
+		}
+	}
+	script := f.TurnScripts[name]
+	if len(script) == 0 {
+		return TurnState{}, true, nil
+	}
+	if len(script) > 1 {
+		f.TurnScripts[name] = script[1:]
+	}
+	return TurnState{TurnID: script[0]}, len(script) == 1, nil
 }
 
 func (f FullFake) record(method, name string) {

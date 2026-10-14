@@ -65,6 +65,7 @@ var optionalInterfaces = map[string]reflect.Type{
 	"SleepCapabilityProvider":         reflect.TypeFor[runtime.SleepCapabilityProvider](),
 	"TransportCapabilityProvider":     reflect.TypeFor[runtime.TransportCapabilityProvider](),
 	"TurnEventProvider":               reflect.TypeFor[runtime.TurnEventProvider](),
+	"TurnFenceProvider":               reflect.TypeFor[runtime.TurnFenceProvider](),
 	"TurnInterruptCapabilityProvider": reflect.TypeFor[runtime.TurnInterruptCapabilityProvider](),
 	"UnattendedSessionStopper":        reflect.TypeFor[runtime.UnattendedSessionStopper](),
 }
@@ -286,4 +287,147 @@ func (b *profileInputClearSpy) ClearInput(ctx context.Context, name string, wind
 	b.ctx, b.name, b.window = ctx, name, window
 	b.calls++
 	return b.result
+}
+
+// turnFake is a FullFake whose turns test scripts set.
+func turnFake() (*runtime.Fake, runtime.TurnFenceProvider) {
+	f := runtime.NewFake()
+	return f, runtime.FullFake{Fake: f}
+}
+
+// turnCalls are f's recorded turn-fence calls as "Method Key Value".
+func turnCalls(f *runtime.Fake) []string {
+	var out []string
+	for _, c := range f.SnapshotCalls() {
+		switch c.Method {
+		case "ObserveTurn", "InterruptTurn", "WaitTurnEnded":
+			out = append(out, strings.TrimSpace(c.Method+" "+c.Key+" "+c.Value))
+		}
+	}
+	return out
+}
+
+// Kills a script that does not pop, does not repeat its last entry, or reads
+// an unscripted session as running; and read errors that apply out of order or
+// consume a script entry.
+func TestFullFakeTurnScriptPopsAndRepeatsItsLastEntry(t *testing.T) {
+	f, tf := turnFake()
+	f.TurnScripts = map[string][]string{"s": {"t1", "", "t2"}}
+	f.TurnReadErrors = map[string][]error{"s": {nil, runtime.ErrRuntimeUnavailable, nil}}
+	ctx := t.Context()
+	var got []string
+	for range 5 {
+		st, err := tf.ObserveTurn(ctx, "s")
+		switch {
+		case err != nil:
+			got = append(got, "err:"+err.Error())
+		default:
+			got = append(got, st.TurnID)
+		}
+	}
+	want := []string{"t1", "err:" + runtime.ErrRuntimeUnavailable.Error(), "", "t2", "t2"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("reads = %q, want %q", got, want)
+	}
+	if st, err := tf.ObserveTurn(ctx, "unscripted"); err != nil || st.Active() {
+		t.Fatalf("unscripted read = %+v, %v; want no turn", st, err)
+	}
+	if calls := turnCalls(f); len(calls) != 6 || calls[0] != "ObserveTurn" {
+		t.Fatalf("calls = %q, want six bare ObserveTurn calls", calls)
+	}
+}
+
+// Kills an InterruptTurn that interrupts a turn it did not read, that hides
+// what it read, or that records the wrong effect.
+func TestFullFakeInterruptTurnFencesOnItsRead(t *testing.T) {
+	f, tf := turnFake()
+	f.TurnScripts = map[string][]string{"s": {"t2", "", "t1", "t1"}}
+	ctx := t.Context()
+
+	_, err := tf.InterruptTurn(ctx, "s", "t1")
+	var nc *runtime.TurnNotCurrentError
+	if !errors.As(err, &nc) || nc.Current.TurnID != "t2" || nc.TurnID != "t1" || nc.Session != "s" {
+		t.Fatalf("mismatch = %v, want not-current reading t2", err)
+	}
+	if _, err := tf.InterruptTurn(ctx, "s", "t1"); !errors.As(err, &nc) || nc.Current.Active() {
+		t.Fatalf("idle = %v, want not-current reading no turn", err)
+	}
+	ack, err := tf.InterruptTurn(ctx, "s", "t1")
+	if err != nil || ack.Fenced {
+		t.Fatalf("match = %+v, %v; want sent, unfenced", ack, err)
+	}
+	f.FencedTurnInterrupts = true
+	if ack, err := tf.InterruptTurn(ctx, "s", "t1"); err != nil || !ack.Fenced {
+		t.Fatalf("fenced match = %+v, %v; want sent, fenced", ack, err)
+	}
+	boom := errors.New("boom")
+	f.InterruptTurnErrors = map[string]error{"s": boom}
+	if _, err := tf.InterruptTurn(ctx, "s", "t1"); !errors.Is(err, boom) {
+		t.Fatalf("failing match = %v, want boom", err)
+	}
+	want := []string{"InterruptTurn t1 not_current", "InterruptTurn t1 not_current", "InterruptTurn t1 sent", "InterruptTurn t1 sent", "InterruptTurn t1 error"}
+	if got := turnCalls(f); !slices.Equal(got, want) {
+		t.Fatalf("calls = %q, want %q", got, want)
+	}
+}
+
+// Kills a WaitTurnEnded that sleeps, stops before the turn changes, misses a
+// replacement turn, or waits forever on a script that never ends the turn.
+func TestFullFakeWaitTurnEndedReadsTheScript(t *testing.T) {
+	f, tf := turnFake()
+	ctx := t.Context()
+	f.TurnScripts = map[string][]string{"ends": {"t1", "t1", ""}, "replaced": {"t1", "t2"}, "stuck": {"t1", "t1"}, "flaky": {"t1", ""}}
+	f.TurnReadErrors = map[string][]error{"flaky": {runtime.ErrRuntimeUnavailable}}
+
+	if st, err := tf.WaitTurnEnded(ctx, "ends", "t1", time.Hour); err != nil || st.Active() {
+		t.Fatalf("ends = %+v, %v; want no turn", st, err)
+	}
+	if st, err := tf.WaitTurnEnded(ctx, "replaced", "t1", time.Hour); err != nil || st.TurnID != "t2" {
+		t.Fatalf("replaced = %+v, %v; want t2", st, err)
+	}
+	st, err := tf.WaitTurnEnded(ctx, "stuck", "t1", time.Hour)
+	if !errors.Is(err, runtime.ErrTurnNotEnded) || st.TurnID != "t1" {
+		t.Fatalf("stuck = %+v, %v; want ErrTurnNotEnded with t1", st, err)
+	}
+	if st, err := tf.WaitTurnEnded(ctx, "flaky", "t1", time.Hour); err != nil || st.Active() {
+		t.Fatalf("flaky = %+v, %v; want the read after the outage", st, err)
+	}
+	want := []string{"WaitTurnEnded t1", "WaitTurnEnded t1", "WaitTurnEnded t1", "WaitTurnEnded t1"}
+	if got := turnCalls(f); !slices.Equal(got, want) {
+		t.Fatalf("calls = %q, want %q", got, want)
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := tf.WaitTurnEnded(canceled, "stuck", "t1", time.Hour); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled = %v, want context.Canceled", err)
+	}
+}
+
+// Kills a broken fake that reads a turn, and a plain Fake that implements the
+// capability, which would move every protocol test off its path.
+func TestFullFakeTurnFenceWhenBrokenAndPlainFakeLacksIt(t *testing.T) {
+	broken := runtime.FullFake{Fake: runtime.NewFailFake()}
+	broken.TurnScripts = map[string][]string{"s": {"t1"}}
+	ctx := t.Context()
+	if _, err := broken.ObserveTurn(ctx, "s"); !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		t.Errorf("broken ObserveTurn = %v, want ErrRuntimeUnavailable", err)
+	}
+	if _, err := broken.InterruptTurn(ctx, "s", "t1"); !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		t.Errorf("broken InterruptTurn = %v, want ErrRuntimeUnavailable", err)
+	}
+	if _, err := broken.WaitTurnEnded(ctx, "s", "t1", time.Hour); !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		t.Errorf("broken WaitTurnEnded = %v, want ErrRuntimeUnavailable", err)
+	}
+	if got := turnCalls(broken.Fake); !slices.Equal(got, []string{"ObserveTurn", "InterruptTurn t1 error", "WaitTurnEnded t1"}) {
+		t.Errorf("broken calls = %q", got)
+	}
+	if _, ok := any(runtime.NewFake()).(runtime.TurnFenceProvider); ok {
+		t.Error("the plain Fake implements TurnFenceProvider")
+	}
+	if _, ok := runtime.NewFakeProfile(runtime.ProfileT3Bridge, runtime.FullFake{Fake: runtime.NewFake()}).(runtime.TurnFenceProvider); !ok {
+		t.Error("the t3bridge profile lacks TurnFenceProvider")
+	}
+	if _, ok := runtime.NewFakeProfile(runtime.ProfileTmux, runtime.FullFake{Fake: runtime.NewFake()}).(runtime.TurnFenceProvider); ok {
+		t.Error("the tmux profile implements TurnFenceProvider")
+	}
 }
