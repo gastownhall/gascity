@@ -1,7 +1,7 @@
 package main
 
 import (
-	"context"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -234,44 +234,53 @@ func TestRollbackHoldsAV2SignaledStopForAnAttachedClient(t *testing.T) {
 	}
 }
 
-// attachProbe is a fake whose attach probe answers attached, or errs as
-// tmux's does with no server running (ErrRuntimeUnavailable).
+// attachProbe is a fake whose attach probe answers attached, or errs; its
+// IsRunning reads stale (a tmux state cache past its TTL), and its server
+// may confirm dead.
 type attachProbe struct {
 	*runtime.Fake
 	attached bool
 	err      error
+	dead     bool
 }
 
 func (p attachProbe) IsAttachedWithError(string) (bool, error) { return p.attached, p.err }
+func (attachProbe) IsRunning(string) bool                      { return false }
+func (p attachProbe) ServerConfirmedDead() bool                { return p.dead }
 
-// TestRollbackGuardReadsAttachOnlyOverAPresentRuntime (mc-7i9i7; the #7824
-// r2 review). Kills the guard holding a gone runtime: with no tmux server
-// left, the attach probe fails unavailable, which counts as attached, and
-// the row stayed draining until another session started; the guard now
-// reads attachment only over a runtime present. Over a present runtime a
-// probe error still holds (g5, as v2's L3), and an attached client holds; a
-// detached one does not. An ack at the row's generation keeps legacy's stop;
-// one of another incarnation acks nothing of this one's.
-func TestRollbackGuardReadsAttachOnlyOverAPresentRuntime(t *testing.T) {
+// TestRollbackGuardReadsPresenceFromTheAttachProbe (mc-7i9i7; the #7824 r2
+// and #7858 reviews). Kills the guard holding a gone runtime, and the guard
+// letting a present, attached one go. Presence and attachment come from the
+// error-aware attach probe, never IsRunning, which here reads a stale cache
+// (not running) throughout: a session not found is gone; an unavailable
+// probe with the server confirmed dead (no tmux server left) is gone; one
+// with the server not confirmed dead holds, and so does any other probe
+// error (g5, as v2's L3); an attached client holds; a detached one does
+// not. An ack at the row's generation keeps legacy's stop; one of another
+// incarnation acks nothing of this one's.
+func TestRollbackGuardReadsPresenceFromTheAttachProbe(t *testing.T) {
 	unavailable := fmt.Errorf("probing attachment: tmux server unreachable or empty: %w", runtime.ErrRuntimeUnavailable)
+	notFound := fmt.Errorf("probing attachment: %w", runtime.ErrSessionNotFound)
 	signaled := []string{
 		"state", "draining", "state_reason", session.DrainAckStopPendingReason, "generation", "2", "session_name", "s-gc-1",
 		session.DrainIntentReasonKey, "idle", session.DrainIntentIncarnationKey, "2",
 	}
 	for _, c := range []struct {
 		name     string
-		running  bool
 		attached bool
 		err      error
+		dead     bool
 		ack      string // the ack half's incarnation, "" for none
 		held     bool
 	}{
-		{"gone, no tmux server", false, false, unavailable, "", false},
-		{"present, the probe errs (g5)", true, false, unavailable, "", true},
-		{"present, attached", true, true, nil, "", true},
-		{"present, detached", true, false, nil, "", false},
-		{"present, attached, acked at its generation", true, true, nil, "2", false},
-		{"present, attached, acked by another incarnation", true, true, nil, "1", true},
+		{"session not found", false, notFound, false, "", false},
+		{"unavailable, the server confirmed dead", false, unavailable, true, "", false},
+		{"unavailable, the server not confirmed dead", false, unavailable, false, "", true},
+		{"another probe error (g5)", false, errors.New("probe failed"), false, "", true},
+		{"attached, IsRunning stale (the #7858 probe)", true, nil, false, "", true},
+		{"detached", false, nil, false, "", false},
+		{"attached, acked at its generation", true, nil, false, "2", false},
+		{"attached, acked by another incarnation", true, nil, false, "1", true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			meta := map[string]string{}
@@ -286,12 +295,7 @@ func TestRollbackGuardReadsAttachOnlyOverAPresentRuntime(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			sp := attachProbe{Fake: runtime.NewFake(), attached: c.attached, err: c.err}
-			if c.running {
-				if err := sp.Start(context.Background(), "s-gc-1", runtime.Config{}); err != nil {
-					t.Fatal(err)
-				}
-			}
+			sp := attachProbe{Fake: runtime.NewFake(), attached: c.attached, err: c.err, dead: c.dead}
 			info := session.Info{ID: b.ID, MetadataState: "draining", StateReason: session.DrainAckStopPendingReason, SessionNameMetadata: "s-gc-1"}
 			if held := v2SignaledStopHeldForAttach(store, sp, info, "s-gc-1", io.Discard); held != c.held {
 				t.Errorf("held %t, want %t", held, c.held)

@@ -1064,13 +1064,13 @@ func reconcileDrainAckStopPending(
 // row must not be stopped under the client. The row is v2's when it carries
 // the controller half of a stop request at its generation and no ack half
 // (v2SignaledUnacked): an agent's or an operator's ack keeps legacy's
-// behavior. Attachment is read only once the runtime is seen present: a
-// session that is gone is not attached, so a dead runtime still finalizes,
-// even when no tmux server is left to answer the attach probe (whose
-// unavailable error would otherwise count as attached; mc-7i9i7). The
-// attach probe is fresh, and one that errors over a present runtime counts
-// as attached, as v2's L3 does. A row the store cannot read keeps legacy's
-// behavior.
+// behavior. Presence and attachment both come from the fresh, error-aware
+// attach probe, never IsRunning (tmux's can read a stale cache and report a
+// present, attached session absent; #7858 review): a session not found is
+// gone, and so is one whose probe is unavailable with its server confirmed
+// dead (no tmux server left; mc-7i9i7), so a dead runtime still finalizes;
+// an attached client holds, and any other probe error holds, as v2's L3
+// does. A row the store cannot read keeps legacy's behavior.
 func v2SignaledStopHeldForAttach(store beads.Store, sp runtime.Provider, info sessionpkg.Info, name string, stderr io.Writer) bool {
 	if store == nil || sp == nil || name == "" {
 		return false
@@ -1079,11 +1079,39 @@ func v2SignaledStopHeldForAttach(store beads.Store, sp runtime.Provider, info se
 	if err != nil || !v2SignaledUnacked(b.Metadata) {
 		return false
 	}
-	if !sp.IsRunning(name) || !runtime.AttachProbeHolds(runtime.IsAttachedWithError(sp, name)) {
+	attached, err := runtime.IsAttachedWithError(sp, name)
+	switch {
+	case errors.Is(err, runtime.ErrSessionNotFound):
+		return false // gone
+	case errors.Is(err, runtime.ErrRuntimeUnavailable) && serverConfirmedDead(sp, name):
+		return false // no server left to run it: gone
+	case err == nil && !attached:
 		return false
 	}
 	fmt.Fprintf(stderr, "session reconciler: holding the v2-signaled stop of %s: a client is attached\n", name) //nolint:errcheck // best-effort stderr
 	return true
+}
+
+// serverConfirmedDead reports that sp, or the leaf it routes name to,
+// confirms its runtime server dead (runtime.ServerDeathConfirmer): no
+// session of it can exist. A provider without the capability confirms
+// nothing.
+func serverConfirmedDead(sp runtime.Provider, name string) bool {
+	for _, p := range []runtime.Provider{sp, resolvedLeaf(sp, name)} {
+		if c, ok := p.(runtime.ServerDeathConfirmer); ok && c.ServerConfirmedDead() {
+			return true
+		}
+	}
+	return false
+}
+
+// resolvedLeaf is the leaf sp routes name to, or nil.
+func resolvedLeaf(sp runtime.Provider, name string) runtime.Provider {
+	leaf, _, known := runtime.ResolveBackend(sp, name)
+	if !known {
+		return nil
+	}
+	return leaf
 }
 
 // drainAckStopPendingProcessNames resolves the configured agent process-name
