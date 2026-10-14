@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"slices"
 	"testing"
 	"time"
 )
@@ -14,11 +15,11 @@ var linkAt = time.Date(2026, 10, 14, 12, 0, 0, 123_456_789, time.UTC)
 
 const linkGen int64 = 7
 
-// stampedNow is a deliverer's instant with sub-millisecond digits;
-// stampedMillis is the same instant as a runtime stamps it on the message,
-// to the millisecond.
+// stampedNow is a deliverer's instant with sub-millisecond digits in a
+// non-UTC zone; stampedMillis is the same instant as a runtime stamps it on
+// the message, in UTC to the millisecond.
 var (
-	stampedNow    = time.Date(2026, 10, 14, 12, 0, 0, 160_345_678, time.Local)
+	stampedNow    = time.Date(2026, 10, 14, 14, 0, 0, 160_345_678, time.FixedZone("UTC+2", 2*60*60))
 	stampedMillis = stampedNow.UTC().Truncate(time.Millisecond)
 )
 
@@ -234,6 +235,33 @@ func TestCorrelateTurn(t *testing.T) {
 			},
 			want: TurnLink{Confidence: LinkNone, Basis: BasisNoCandidate}, decided: false,
 		},
+		{
+			name: "row 8: joins whose probe saw a live turn without an id",
+			rec:  func() DeliveryRecord { return linkRec(LinkJoins) },
+			ev: func() TurnEvidence {
+				ev := sourced()
+				ev.LiveAtProbe = TriYes
+				ev.FirstRead = FirstTurnRead{Done: true}
+				return ev
+			},
+			want: TurnLink{Confidence: LinkNone, Basis: BasisNoCandidate}, decided: false,
+		},
+		{
+			name: "row 3 before row 4: joins with a message stamp never falls back to the live turn",
+			rec: func() DeliveryRecord {
+				r := linkRec(LinkJoins)
+				r.MessageAt = linkAt.Add(40 * time.Millisecond)
+				return r
+			},
+			ev: func() TurnEvidence {
+				ev := sourced()
+				ev.LiveAtProbe, ev.LiveTurn = TriYes, "live"
+				ev.Known = append(ev.Known, "live")
+				ev.FirstRead = FirstTurnRead{Done: true, Current: "live"}
+				return ev
+			},
+			want: TurnLink{Confidence: LinkNone, Basis: BasisNoCandidate}, decided: false,
+		},
 		// Rows 5 and 6.
 		{
 			name: "row 5: ACP's single new record is exact",
@@ -304,9 +332,13 @@ func TestCorrelateTurn(t *testing.T) {
 			want: TurnLink{Turn: "a", Confidence: LinkAmbiguous, Basis: BasisCompetingTurn}, decided: true,
 		},
 		{
-			name: "row 7: an unknown probe",
+			name: "row 7: an unknown probe, even on a serial source",
 			rec:  func() DeliveryRecord { return linkRec(LinkStarts) },
-			ev:   func() TurnEvidence { ev := sourced(seen("a", linkAt.Add(ms))); ev.LiveAtProbe = TriUnknown; return ev },
+			ev: func() TurnEvidence {
+				ev := sourced(seen("a", linkAt.Add(ms)))
+				ev.LiveAtProbe, ev.Serial = TriUnknown, true
+				return ev
+			},
 			want: TurnLink{Turn: "a", Confidence: LinkAmbiguous, Basis: BasisCompetingTurn}, decided: true,
 		},
 		{
@@ -342,6 +374,12 @@ func TestCorrelateTurn(t *testing.T) {
 			name: "row 8: same-clock candidate one millisecond before At is excluded",
 			rec:  func() DeliveryRecord { return linkRec(LinkStarts) },
 			ev:   func() TurnEvidence { return sourced(seen("early", cut.Add(-ms))) },
+			want: TurnLink{Confidence: LinkNone, Basis: BasisNoCandidate}, decided: false,
+		},
+		{
+			name: "row 8: a same-clock turn whose start no read knew is excluded",
+			rec:  func() DeliveryRecord { return linkRec(LinkStarts) },
+			ev:   func() TurnEvidence { return sourced(seen("t1", time.Time{}), seen("t1", time.Time{})) },
 			want: TurnLink{Confidence: LinkNone, Basis: BasisNoCandidate}, decided: false,
 		},
 		{
@@ -414,6 +452,10 @@ type linkGenerator struct {
 	n int
 }
 
+func newLinkGenerator(seed1, seed2 uint64) *linkGenerator {
+	return &linkGenerator{r: rand.New(rand.NewPCG(seed1, seed2^0x9e3779b97f4a7c15))}
+}
+
 func (g *linkGenerator) id(prefix string) string {
 	g.n++
 	return fmt.Sprintf("%s-%d", prefix, g.n)
@@ -453,16 +495,30 @@ func (g *linkGenerator) evidence(rec DeliveryRecord) TurnEvidence {
 	for range g.r.IntN(4) {
 		ev.Known = append(ev.Known, g.id("known"))
 	}
-	if ev.LiveAtProbe == TriYes && len(ev.Known) > 0 {
+	if ev.LiveAtProbe == TriYes && len(ev.Known) > 0 && g.r.IntN(4) != 0 {
 		ev.LiveTurn = ev.Known[0]
 	}
 	for range g.r.IntN(4) {
 		st := seen(g.id("turn"), g.at(true))
-		if !rec.MessageAt.IsZero() && g.r.IntN(2) == 0 {
+		switch {
+		case !rec.MessageAt.IsZero() && g.r.IntN(2) == 0:
 			st.StartedAt = rec.MessageAt
+		case g.r.IntN(6) == 0:
+			st.StartedAt = time.Time{}
+		}
+		if g.r.IntN(10) == 0 {
+			st.ID = ""
 		}
 		st.Running = g.r.IntN(2) == 0
 		ev.Seen = append(ev.Seen, st)
+	}
+	// A later read repeats a turn, sometimes now with its start known.
+	if len(ev.Seen) > 0 && g.r.IntN(3) == 0 {
+		again := ev.Seen[g.r.IntN(len(ev.Seen))]
+		if again.StartedAt.IsZero() {
+			again.StartedAt = g.at(true)
+		}
+		ev.Seen = append(ev.Seen, again)
 	}
 	if ev.FirstRead.Done && g.r.IntN(2) == 0 {
 		if ev.LiveTurn != "" && g.r.IntN(2) == 0 {
@@ -491,53 +547,87 @@ func cloneEvidence(ev TurnEvidence) TurnEvidence {
 	return ev
 }
 
-// TestCorrelateTurnInvariance pins what the link must not depend on: the order
-// of Known, and seen turns the rule excludes (another generation, a known turn,
-// or on a same-clock source a turn that started before At).
+// linkMutation is a change to the evidence that must not change the link.
+type linkMutation struct {
+	name     string
+	sameOnly bool // applies only to a same-clock source
+	apply    func(g *linkGenerator, rec DeliveryRecord, e TurnEvidence) TurnEvidence
+}
+
+var linkMutations = []linkMutation{
+	{name: "permute Known", apply: func(g *linkGenerator, _ DeliveryRecord, e TurnEvidence) TurnEvidence {
+		g.r.Shuffle(len(e.Known), func(a, b int) { e.Known[a], e.Known[b] = e.Known[b], e.Known[a] })
+		return e
+	}},
+	{name: "add another generation's turn", apply: func(g *linkGenerator, rec DeliveryRecord, e TurnEvidence) TurnEvidence {
+		st := SeenTurn{ID: g.id("other-gen"), Generation: rec.Generation + 1 + int64(g.r.IntN(3)), StartedAt: g.at(true)}
+		if !rec.MessageAt.IsZero() {
+			st.StartedAt = rec.MessageAt
+		}
+		e.Seen = insertSeen(g.r, e.Seen, st)
+		return e
+	}},
+	{name: "add a known turn", apply: func(g *linkGenerator, rec DeliveryRecord, e TurnEvidence) TurnEvidence {
+		id := g.id("known-late")
+		e.Known = append(e.Known, id)
+		st := seen(id, g.at(true))
+		if !rec.MessageAt.IsZero() {
+			st.StartedAt = rec.MessageAt
+		}
+		e.Seen = insertSeen(g.r, e.Seen, st)
+		return e
+	}},
+	{name: "add a pre-At turn", sameOnly: true, apply: func(g *linkGenerator, _ DeliveryRecord, e TurnEvidence) TurnEvidence {
+		e.Seen = insertSeen(g.r, e.Seen, seen(g.id("pre"), g.at(false)))
+		return e
+	}},
+}
+
+// checkLinkInvariants asserts what every link must satisfy, whatever row
+// decided it.
+func checkLinkInvariants(rec DeliveryRecord, ev TurnEvidence, link TurnLink, decided bool) error {
+	if (link.Turn == "") != (link.Confidence == LinkNone) {
+		return fmt.Errorf("turn %q with confidence %s", link.Turn, link.Confidence)
+	}
+	if !decided && (link.Confidence != LinkNone || (link.Basis != BasisNoCandidate && link.Basis != BasisReadFailed)) {
+		return fmt.Errorf("undecided link %+v", link)
+	}
+	if link.Confidence == LinkExact && link.Basis != BasisRuntimeTurn && link.Basis != BasisHookPayload && link.Basis != BasisACPSerial {
+		return fmt.Errorf("exact link on basis %s", link.Basis)
+	}
+	if link.Turn != "" && link.Turn != rec.TurnID && link.Turn != ev.LiveTurn &&
+		!slices.ContainsFunc(ev.Seen, func(s SeenTurn) bool { return s.ID == link.Turn }) {
+		return fmt.Errorf("turn %q is not in the evidence", link.Turn)
+	}
+	return nil
+}
+
+// TestCorrelateTurnInvariance checks the link invariants on random evidence
+// and pins what the link must not depend on: the order of Known, and seen
+// turns the rule excludes (another generation, a known turn, or on a
+// same-clock source a turn that started before At). Each mutation draws from
+// its own generator seeded by (seed, case, mutation), so a failure's seed and
+// case reproduce it.
 func TestCorrelateTurnInvariance(t *testing.T) {
 	for _, seed := range []uint64{1, 2, 3, 0xd1ce, 0x5eed} {
-		g := &linkGenerator{r: rand.New(rand.NewPCG(seed, seed^0x9e3779b97f4a7c15))}
+		g := newLinkGenerator(seed, seed)
 		for i := range 2000 {
 			rec := g.record()
 			ev := g.evidence(rec)
 			wantLink, wantDecided := CorrelateTurn(rec, ev)
-
-			mutations := map[string]func(TurnEvidence) TurnEvidence{
-				"permute Known": func(e TurnEvidence) TurnEvidence {
-					g.r.Shuffle(len(e.Known), func(a, b int) { e.Known[a], e.Known[b] = e.Known[b], e.Known[a] })
-					return e
-				},
-				"add another generation's turn": func(e TurnEvidence) TurnEvidence {
-					st := SeenTurn{ID: g.id("other-gen"), Generation: rec.Generation + 1 + int64(g.r.IntN(3)), StartedAt: g.at(true)}
-					if !rec.MessageAt.IsZero() {
-						st.StartedAt = rec.MessageAt
-					}
-					e.Seen = insertSeen(g.r, e.Seen, st)
-					return e
-				},
-				"add a known turn": func(e TurnEvidence) TurnEvidence {
-					id := g.id("known-late")
-					e.Known = append(e.Known, id)
-					st := seen(id, g.at(true))
-					if !rec.MessageAt.IsZero() {
-						st.StartedAt = rec.MessageAt
-					}
-					e.Seen = insertSeen(g.r, e.Seen, st)
-					return e
-				},
+			if err := checkLinkInvariants(rec, ev, wantLink, wantDecided); err != nil {
+				t.Fatalf("seed %d case %d: %v\nrec %+v\nev %+v", seed, i, err, rec, ev)
 			}
-			if ev.SameClock {
-				mutations["add a pre-At turn"] = func(e TurnEvidence) TurnEvidence {
-					e.Seen = insertSeen(g.r, e.Seen, seen(g.id("pre"), g.at(false)))
-					return e
+			for k, m := range linkMutations {
+				if m.sameOnly && !ev.SameClock {
+					continue
 				}
-			}
-			for name, mutate := range mutations {
-				mutated := mutate(cloneEvidence(ev))
+				mg := newLinkGenerator(seed, uint64(i)<<8|uint64(k))
+				mutated := m.apply(mg, rec, cloneEvidence(ev))
 				gotLink, gotDecided := CorrelateTurn(rec, mutated)
 				if gotLink != wantLink || gotDecided != wantDecided {
 					t.Fatalf("seed %d case %d, %s: %+v decided %v, want %+v decided %v\nrec %+v\nev %+v\nmutated %+v",
-						seed, i, name, gotLink, gotDecided, wantLink, wantDecided, rec, ev, mutated)
+						seed, i, m.name, gotLink, gotDecided, wantLink, wantDecided, rec, ev, mutated)
 				}
 			}
 		}
