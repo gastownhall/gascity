@@ -47,9 +47,15 @@ const (
 	// move I10's bound (quietBound).
 	simQuietExtension = 15 * time.Minute
 	simCISeeds        = 64
-	simGuard          = 10 * time.Second // real time: turns a hang into a failure
-	simCityLeg        = "city"
-	simRigLeg         = "rig-a"
+	// simGuard is real time: it turns a hang into a failure that names the
+	// seed. Nothing the sim waits on is paced by real time (its clock is
+	// fake, and a deadline cancels inside the Advance that reaches it), so
+	// only a hang reaches it; it is generous because a loaded runner can
+	// stall a goroutine for seconds (seeds 130 and 834 tripped 10s on RBE,
+	// mc-gfdi5). The corpus target's own -test.timeout bounds the range.
+	simGuard   = 2 * time.Minute
+	simCityLeg = "city"
+	simRigLeg  = "rig-a"
 )
 
 // simStaleEvents lets a step deliver an event older than its row's backing:
