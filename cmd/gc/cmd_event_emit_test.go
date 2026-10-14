@@ -379,6 +379,7 @@ func TestEventBeadPayloadScopeRoot(t *testing.T) {
 	cases := []struct {
 		name string
 		env  map[string]string
+		city string // --city's path, when given
 		want string
 	}{
 		{
@@ -399,6 +400,12 @@ func TestEventBeadPayloadScopeRoot(t *testing.T) {
 			env:  map[string]string{"GC_RIG_ROOT": "/rig/root"},
 			want: "/rig/root",
 		},
+		{
+			// mc-zg8te: never the working directory when --city is given.
+			name: "--city with no hook environment is the city",
+			city: "/city/root",
+			want: "/city/root",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -409,7 +416,7 @@ func TestEventBeadPayloadScopeRoot(t *testing.T) {
 			for k, v := range tc.env {
 				t.Setenv(k, v)
 			}
-			got, err := eventBeadPayloadScopeRoot()
+			got, err := eventBeadPayloadScopeRoot(resolvedContext{CityPath: tc.city}, tc.city != "", io.Discard)
 			if err != nil {
 				t.Fatalf("eventBeadPayloadScopeRoot() error = %v", err)
 			}
@@ -609,6 +616,86 @@ func TestEventEmitAllowsNonBeadPayloadsAndBeadPayloadFromTheStore(t *testing.T) 
 	}
 	if got[1].Type != "deploy.started" || string(got[1].Payload) != `{"version":"2.1"}` {
 		t.Fatalf("deploy.started event = %+v, want its payload", got[1])
+	}
+}
+
+// withCityFlag sets the --city persistent flag for the rest of one test.
+func withCityFlag(t *testing.T, city string) {
+	t.Helper()
+	prev := cityFlag
+	cityFlag = city
+	t.Cleanup(func() { cityFlag = prev })
+}
+
+// emitBeadPayload runs gc event emit bead.updated --bead-payload id and
+// returns the recorded event's decoded row.
+func emitBeadPayload(t *testing.T, cityPath, id string) (beads.Bead, string) {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	cmd := newEventEmitCmd(&stdout, &stderr)
+	cmd.SetArgs([]string{events.BeadUpdated, "--subject", id, "--actor", "worker-1", "--bead-payload", id})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute = %v; stderr: %s", err, stderr.String())
+	}
+	var updated []events.Event
+	for _, e := range recordedEvents(t, cityPath) {
+		if e.Type == events.BeadUpdated {
+			updated = append(updated, e)
+		}
+	}
+	if len(updated) != 1 {
+		t.Fatalf("recorded %d bead.updated events, want 1: %+v; stderr: %s", len(updated), updated, stderr.String())
+	}
+	decoded, ok := beads.DecodeBeadEventPayload(updated[0].Payload)
+	if !ok {
+		return beads.Bead{}, stderr.String()
+	}
+	return decoded, stderr.String()
+}
+
+// TestEventEmitBeadPayloadHonorsTheCityFlag (mc-zg8te). Kills a
+// --bead-payload read that finds its store from the working directory when
+// --city names the city: run from another tree whose .beads is not this
+// city's (staging read maintainer-city's .beads/config.yaml so), the payload
+// is still the --city's row.
+func TestEventEmitBeadPayloadHonorsTheCityFlag(t *testing.T) {
+	dir, created := eventEmitTestCity(t)
+	decoy := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(decoy, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(decoy, ".beads", "config.yaml"), []byte("not: [a valid config\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(decoy)
+	t.Setenv("GC_CITY_PATH", "")
+	withCityFlag(t, dir)
+	got, stderr := emitBeadPayload(t, dir, created.ID)
+	if got.ID != created.ID || got.Title != "step" {
+		t.Fatalf("payload row %+v (stderr %q), want the --city store's row %s", got, stderr, created.ID)
+	}
+}
+
+// TestEventEmitBeadPayloadResolvesASessionRowInItsBinding (mc-zg8te). Kills a
+// --bead-payload read of the work store alone: a session row lives in the
+// sessions class's binding, and its payload is that row, not "bead not
+// found".
+func TestEventEmitBeadPayloadResolvesASessionRowInItsBinding(t *testing.T) {
+	cityPath, classStore := foreignProviderCity(t)
+	t.Setenv("GC_SESSION", "fake")
+	t.Setenv("GC_DOLT", "skip")
+	if err := ensureScopedFileStoreLayout(cityPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensurePersistedScopeLocalFileStore(cityPath); err != nil {
+		t.Fatal(err)
+	}
+	row := mustCreateClassBead(t, classStore, beads.Bead{Title: "worker-1", Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: map[string]string{"session_name": "worker-1", "state": "awake"}})
+	t.Chdir(cityPath)
+	withCityFlag(t, cityPath)
+	got, stderr := emitBeadPayload(t, cityPath, row.ID)
+	if got.ID != row.ID || got.Title != "worker-1" {
+		t.Fatalf("payload row %+v (stderr %q), want the session row %s from its binding", got, stderr, row.ID)
 	}
 }
 

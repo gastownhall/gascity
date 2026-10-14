@@ -163,7 +163,7 @@ func eventPayloadForEmit(payload, beadID string, stderr io.Writer) string {
 		if beadID == "" {
 			return payload
 		}
-		beadPayload, err := loadEventBeadPayload(beadID)
+		beadPayload, err := loadEventBeadPayload(beadID, stderr)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc event emit: bead payload %s: %v\n", beadID, err) //nolint:errcheck // best-effort stderr
 			if payload != "" && !json.Valid([]byte(payload)) {
@@ -176,22 +176,30 @@ func eventPayloadForEmit(payload, beadID string, stderr io.Writer) string {
 	return payload
 }
 
-func loadEventBeadPayload(beadID string) (json.RawMessage, error) {
-	cityPath, err := resolveCity()
+func loadEventBeadPayload(beadID string, stderr io.Writer) (json.RawMessage, error) {
+	ctx, err := resolveContext()
 	if err != nil {
 		return nil, err
 	}
-	scopeRoot, err := eventBeadPayloadScopeRoot()
+	scopeRoot, err := eventBeadPayloadScopeRoot(ctx, cityFlag != "", stderr)
 	if err != nil {
 		return nil, fmt.Errorf("resolving current scope: %w", err)
 	}
-	store, err := openStoreAtForCity(scopeRoot, cityPath)
+	work, err := openStoreAtForCity(scopeRoot, ctx.CityPath)
 	if err != nil {
 		return nil, fmt.Errorf("opening bead store: %w", err)
 	}
-	bead, err := store.Get(beadID)
+	// The bead may live in a relocated class's binding (a session row, a
+	// molecule), not the work store: resolve it across the city's stores.
+	owner, err := cliByIDOwner(ctx.CityPath, beadID, work)
 	if err != nil {
-		return nil, fmt.Errorf("loading bead: %w", err)
+		return nil, fmt.Errorf("resolving bead: %w", err)
+	}
+	bead := owner.Bead
+	if !owner.Read {
+		if bead, err = owner.Store.Get(beadID); err != nil {
+			return nil, fmt.Errorf("loading bead: %w", err)
+		}
 	}
 	payload, err := beads.EncodeBeadEventPayload(bead)
 	if err != nil {
@@ -200,7 +208,12 @@ func loadEventBeadPayload(beadID string) (json.RawMessage, error) {
 	return payload, nil
 }
 
-func eventBeadPayloadScopeRoot() (string, error) {
+// eventBeadPayloadScopeRoot is the work store's scope for --bead-payload: the
+// bead's rig from BEADS_DIR or GC_RIG_ROOT (a hook's environment), else, with
+// --city given, the --rig's root or the city itself, never the working
+// directory (mc-zg8te: a command run from another city's tree read that
+// city's store), else the working directory.
+func eventBeadPayloadScopeRoot(ctx resolvedContext, explicitCity bool, stderr io.Writer) (string, error) {
 	if beadsDir := strings.TrimSpace(os.Getenv("BEADS_DIR")); beadsDir != "" {
 		// filepath.Clean beadsDir before Dir: a trailing-slash BEADS_DIR
 		// (e.g. "/root/.beads/") makes filepath.Dir return beadsDir itself
@@ -211,6 +224,19 @@ func eventBeadPayloadScopeRoot() (string, error) {
 	}
 	if rigRoot := strings.TrimSpace(os.Getenv("GC_RIG_ROOT")); rigRoot != "" {
 		return cleanAbsPath(rigRoot)
+	}
+	if explicitCity {
+		if ctx.RigName != "" {
+			cfg, err := loadCityConfig(ctx.CityPath, stderr)
+			if err != nil {
+				return "", err
+			}
+			if root := rigRootForName(ctx.RigName, cfg.Rigs); root != "" {
+				return cleanAbsPath(resolveStoreScopeRoot(ctx.CityPath, root))
+			}
+			return "", fmt.Errorf("rig %q is not bound in %s", ctx.RigName, ctx.CityPath)
+		}
+		return cleanAbsPath(ctx.CityPath)
 	}
 	return os.Getwd()
 }
