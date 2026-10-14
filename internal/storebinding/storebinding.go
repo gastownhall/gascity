@@ -421,7 +421,10 @@ type NudgeQueue interface {
 	// deliver-by deadline reads as dead.
 	Lookup(ids []string, now time.Time) (map[string]nudgequeue.Bucket, error)
 	// DueKeys returns, sorted and unique, the non-empty queue keys with a due
-	// pending item or an in-flight item whose lease has expired.
+	// pending item or an in-flight item whose lease has expired. Like the
+	// delivery reads, it skips a record it cannot decode and returns the keys
+	// it could read together with an error for which beads.IsPartialResult
+	// reports true; the caller acts on the keys and reports the error.
 	DueKeys(time.Time) ([]string, error)
 	// Empty reports that the queue serves no pending, in-flight or dead item.
 	// An unreadable queue is not empty: it reports false with the error.

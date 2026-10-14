@@ -480,9 +480,10 @@ func (q *beadsNudgeQueue) Ack(ids []string, outcome, reason, commitBoundary stri
 // ReleaseClaims returns undelivered in-flight ids to pending. With a zero
 // notBefore it revokes their leases with a compare-and-swap on the exact lease
 // it observed, so a claim that has already moved on is never disturbed. With a
-// non-zero notBefore it is one revision-fenced update per item that clears the
-// lease and sets deliver_after, so the item is not claimable before then; a
-// record that moved since it was read is left alone. Either way the delivery
+// non-zero notBefore it is a revision-fenced read-modify-write (mutate) that
+// clears the lease and sets deliver_after, so the item is not claimable before
+// then; it re-reads and retries a refused write, and applies only while the
+// item is still in flight under the lease first observed. Either way the delivery
 // batch is kept. An item past its deliver-by deadline is dead-lettered as
 // expired instead.
 func (q *beadsNudgeQueue) ReleaseClaims(ids []string, notBefore time.Time) error {
