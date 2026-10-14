@@ -1346,6 +1346,12 @@ func TestPrepareWaitWakeState_FinalizesFromNudge(t *testing.T) {
 			if updated.Status != "closed" {
 				t.Fatalf("wait status = %q, want closed", updated.Status)
 			}
+			if got := updated.Metadata["commit_boundary"]; got != "provider-nudge-return" {
+				t.Fatalf("wait commit_boundary = %q, want the shadow's provider-nudge-return", got)
+			}
+			if got := updated.Metadata["nudge_id"]; got != nudgeID {
+				t.Fatalf("wait nudge_id = %q, want %q", got, nudgeID)
+			}
 
 			sp := runtime.NewFake()
 			if err := dispatchReadyWaitNudges(dir, store, sp, time.Now().UTC()); err != nil {
@@ -1780,17 +1786,30 @@ func TestDepsWaitReady_IgnoresEmptyDependencyEntries(t *testing.T) {
 }
 
 func TestNextWaitDeliveryAttempt_IncrementsAfterTerminalNudge(t *testing.T) {
-	// A re-armed wait whose previous nudge was acked injected_unobserved must
-	// advance the attempt like any other terminal shadow, or the re-arm reuses
-	// the delivered nudge id and the new reminder is never queued.
-	for _, state := range []string{"failed", "injected_unobserved"} {
+	// A wait whose previous nudge reached a terminal shadow must advance the
+	// attempt on re-arm. The wait-side state is what that shadow leaves behind:
+	// failed for a failed nudge, closed for a delivered one (injected_unobserved
+	// closes the wait like injected). The attempt bump is load-bearing on the
+	// MarkWaitReadyForRedelivery path, which re-arms the same wait bead (for
+	// example one left open in a terminal state by a partial terminal-state
+	// write): without it the re-arm reuses the delivered nudge id and the new
+	// reminder is never queued. RetryClosedWait mints a new wait id, so the
+	// closed case also pins that the bump does not depend on the wait state.
+	for _, tc := range []struct {
+		nudgeState string
+		waitState  string
+	}{
+		{nudgeState: "failed", waitState: waitStateFailed},
+		{nudgeState: "injected_unobserved", waitState: waitStateClosed},
+	} {
+		state := tc.nudgeState
 		t.Run(state, func(t *testing.T) {
 			store := beads.NewMemStore()
 			wait, err := store.Create(beads.Bead{
 				Type:   waitBeadType,
 				Labels: []string{waitBeadLabel},
 				Metadata: map[string]string{
-					"state":            waitStateFailed,
+					"state":            tc.waitState,
 					"registered_epoch": "1",
 					"delivery_attempt": "1",
 				},
@@ -1910,6 +1929,12 @@ func TestReadyWaitClosesAfterDeliveredUnobservedNudge(t *testing.T) {
 	}
 	if got := updated.Metadata["state"]; got != waitStateClosed || updated.Status != "closed" {
 		t.Fatalf("wait state/status = %q/%q, want %q/closed", got, updated.Status, waitStateClosed)
+	}
+	if got := updated.Metadata["commit_boundary"]; got != "provider-nudge-return" {
+		t.Fatalf("wait commit_boundary = %q, want the shadow's provider-nudge-return", got)
+	}
+	if got := updated.Metadata["nudge_id"]; got != nudgeID {
+		t.Fatalf("wait nudge_id = %q, want %q", got, nudgeID)
 	}
 
 	if err := dispatchReadyWaitNudges(dir, store.Store, fake, time.Now().UTC()); err != nil {
