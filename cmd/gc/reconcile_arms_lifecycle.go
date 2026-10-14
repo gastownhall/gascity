@@ -16,7 +16,7 @@ import (
 // The runtime's own GC_RESTART_REQUESTED marker, which request-restart and
 // handoff set beside the row's, triggers it too when the row write failed
 // (C7a-2b): the inventory reads it, and the stop clears it. SESS-612's
-// fresh-mode cycle is C7a-2c.
+// fresh-mode cycle (reconcile_arms_fresh_cycle.go) is C7a-2c.
 
 // A13's reasons.
 const (
@@ -34,8 +34,11 @@ const (
 // (restartHandoff).
 func armRestartRequested(r *rowFacts) (intent, bool) {
 	info := r.row.Info
-	if !r.found || !r.restartPending() {
+	if !r.found {
 		return intent{}, false
+	}
+	if !r.restartPending() {
+		return r.freshCycle() // SESS-612 (C7a-2c)
 	}
 	if pinnedConfiguredNamedSessionKillProtected(info) && strings.TrimSpace(info.ContinuationResetPending) != "true" && r.runtimeUp() {
 		if !r.rowRestartRequested() {

@@ -49,7 +49,7 @@ const (
 // premise close, which only a finalize that closes reaches: a store that
 // cannot close atomically still stops and finalizes every other row.
 var stopSections = []section{
-	called(callStop, section{Premise: premiseDrainBasis, Decide: stopDecide}, stopCall),
+	called(callStop, drainBasis(probed(freshCycleProbe, stopDecideAfterProbe)), stopCall),
 	called(0, probed(finalizeWorkProbe, stopFinalizeStep), passStopped),
 	asStopClose(probed(finalizeWorkProbe, stopCloseStep)),
 }
@@ -79,6 +79,12 @@ func stopLegs(it intent) fenceLegs {
 		return legToken
 	}
 	return legToken | legAttach
+}
+
+// drainBasis is sec with the stop's drain-basis premise.
+func drainBasis(sec section) section {
+	sec.Premise = premiseDrainBasis
+	return sec
 }
 
 // asStopClose is sec as the stop's premise-close section.
@@ -266,6 +272,11 @@ func stopChoice(v txView, work finalizeWork, probeErr error) finalizeChoice {
 		OperatorHeld: session.DispositionOfInfo(v.Row).KeepsSlot(),
 		HonoredWake:  honoredWake(v),
 		FreshWake:    v.Row.WakeMode == "fresh", RestartRequested: v.Row.RestartRequested == "true",
+	}
+	if v.Alloc != nil && v.Alloc.Snapshot != nil {
+		if e := v.Alloc.Snapshot.Entries[v.It.Key]; e != nil && e.AssignedWork != nil {
+			f.AssignedBead = strings.TrimSpace(e.AssignedWork.BeadID)
+		}
 	}
 	switch {
 	case v.It.Finish != nil:
