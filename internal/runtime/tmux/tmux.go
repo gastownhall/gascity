@@ -1497,7 +1497,7 @@ func (t *Tmux) listSessionNames() ([]string, error) {
 // runtimeInventoryFormat is the per-pane line listRuntimeInventory reads:
 // session name, session id, creation time, attached client count,
 // window.pane index, pane_dead, pane pid and the pane's window activity.
-const runtimeInventoryFormat = "#{session_name}\t#{session_id}\t#{session_created}\t#{session_attached}\t#{window_index}.#{pane_index}\t#{pane_dead}\t#{pane_pid}\t#{window_activity}"
+const runtimeInventoryFormat = "#{session_name}\t#{session_id}\t#{session_created}\t#{session_attached}\t#{window_index}.#{pane_index}\t#{pane_dead}\t#{pane_pid}\t#{window_activity}\t#{" + restartRequestedOption + "}"
 
 // listRuntimeInventory reads every pane on the server with one untargeted
 // list-panes -a and folds the panes into one entry per session. A live server
@@ -1538,7 +1538,7 @@ func parseRuntimeInventory(out string) (map[string]runtime.InventoryEntry, error
 			continue
 		}
 		fields := strings.Split(line, "\t")
-		if len(fields) != 8 || fields[0] == "" {
+		if len(fields) != 9 || fields[0] == "" {
 			return nil, fmt.Errorf("tmux list-panes: malformed inventory line %q", line)
 		}
 		name, sessionID, created, attached, index, paneDead, panePID := fields[0], fields[1], fields[2], fields[3], fields[4], fields[5], fields[6]
@@ -1555,6 +1555,7 @@ func parseRuntimeInventory(out string) (map[string]runtime.InventoryEntry, error
 			entry.AttachedKnown = err == nil && clients >= 0
 			entry.Attached = entry.AttachedKnown && clients > 0
 			entry.DeadKnown, entry.AllPanesDead = true, true
+			entry.RestartRequested = strings.TrimSpace(fields[8]) != "" // a session option: every pane line carries it
 		}
 		switch paneDead {
 		case "0":

@@ -82,7 +82,7 @@ func newFakeDrainOps() *fakeDrainOps {
 func TestProviderDrainOpsClearRestartRequestedUsesCityTmuxSocket(t *testing.T) {
 	const socket = "bright-lights"
 	argsFile := filepath.Join(t.TempDir(), "args")
-	installFakeTmux(t, `printf '%s\n' "$@" > "$FAKE_TMUX_ARGS"`)
+	installFakeTmux(t, `printf '%s\n' "$@" >> "$FAKE_TMUX_ARGS"`)
 	t.Setenv("FAKE_TMUX_ARGS", argsFile)
 
 	sp, err := newSessionProviderForCityByName(
@@ -103,7 +103,9 @@ func TestProviderDrainOpsClearRestartRequestedUsesCityTmuxSocket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read fake tmux args: %v", err)
 	}
-	want := "-u\n-L\n" + socket + "\nset-environment\n-t\n=worker\n-u\nGC_RESTART_REQUESTED\n"
+	// The environment, then the marker's user-option mirror (C7a-2b).
+	want := "-u\n-L\n" + socket + "\nset-environment\n-t\n=worker\n-u\nGC_RESTART_REQUESTED\n" +
+		"-u\n-L\n" + socket + "\nset-option\n-t\n=worker\n-u\n@GC_RESTART_REQUESTED\n"
 	if string(got) != want {
 		t.Fatalf("tmux args = %q, want %q", got, want)
 	}

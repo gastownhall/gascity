@@ -810,9 +810,20 @@ func (p *Provider) NudgeNow(name string, content []runtime.ContentBlock) error {
 	return err
 }
 
-// SetMeta stores a key-value pair in the named session's tmux environment.
+// restartRequestedOption is GC_RESTART_REQUESTED's mirror as a session user
+// option, which the batched inventory reads in its one list-panes
+// (#{@GC_RESTART_REQUESTED}, CONTRACT v5.10q C7a-2b). The environment stays
+// the copy GetMeta reads.
+const restartRequestedOption = "@GC_RESTART_REQUESTED"
+
+// SetMeta stores a key-value pair in the named session's tmux environment,
+// and the restart marker in its user-option mirror too.
 func (p *Provider) SetMeta(name, key, value string) error {
-	return p.tm.SetEnvironment(name, key, value)
+	if err := p.tm.SetEnvironment(name, key, value); err != nil || key != "GC_RESTART_REQUESTED" {
+		return err
+	}
+	_, err := p.tm.run("set-option", "-t", sessionTarget(name), restartRequestedOption, value)
+	return err
 }
 
 // GetMeta retrieves a value from the named session's tmux environment.
@@ -1014,7 +1025,11 @@ func parseNonnegativeTmuxCount(value string) (int, error) {
 
 // RemoveMeta removes a key from the named session's tmux environment.
 func (p *Provider) RemoveMeta(name, key string) error {
-	return p.tm.RemoveEnvironment(name, key)
+	if err := p.tm.RemoveEnvironment(name, key); err != nil || key != "GC_RESTART_REQUESTED" {
+		return err
+	}
+	_, err := p.tm.run("set-option", "-t", sessionTarget(name), "-u", restartRequestedOption)
+	return err
 }
 
 // Peek captures the last N lines of output from the named session.

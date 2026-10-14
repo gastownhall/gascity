@@ -702,6 +702,11 @@ type InventoryEntry struct {
 	// batch. LastActivity is meaningless unless ActivityKnown.
 	ActivityKnown bool
 	LastActivity  time.Time
+	// RestartRequested reports the session's restart marker
+	// (GC_RESTART_REQUESTED, which `gc runtime request-restart` and
+	// `gc handoff` set) as the batched read sees it. On tmux it is the
+	// marker's user-option mirror (#{@GC_RESTART_REQUESTED}).
+	RestartRequested bool
 }
 
 // EnvironmentBatchProvider is an optional extension exposing a single-exec

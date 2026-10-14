@@ -81,6 +81,7 @@ type simRuntime struct {
 	zombie           bool   // the pane lives; the agent died
 	attached         bool
 	probeErr         bool // a process probe errors, answering the agent not alive (v5 O3)
+	restart          bool // GC_RESTART_REQUESTED, as tmux's user-option mirror carries it (C7a-2b)
 }
 
 // simStart and simKill are the spy's records of a Start and of a
@@ -190,9 +191,29 @@ func (p *simProvider) RuntimeInventory(context.Context) (map[string]runtime.Inve
 	for name, rt := range p.rts {
 		inc := fmt.Sprintf("$%d:%d:%d", rt.object, rt.created, rt.object+1000)
 		at := p.Activity[name] // the embedded fake's, as tmux's batched read carries it
-		out[name] = runtime.InventoryEntry{Incarnation: inc, DeadKnown: true, AllPanesDead: rt.corpse, AttachedKnown: true, Attached: rt.attached, ActivityKnown: !at.IsZero(), LastActivity: at}
+		out[name] = runtime.InventoryEntry{Incarnation: inc, DeadKnown: true, AllPanesDead: rt.corpse, AttachedKnown: true, Attached: rt.attached, ActivityKnown: !at.IsZero(), LastActivity: at, RestartRequested: rt.restart}
 	}
 	return out, nil
+}
+
+// SetMeta and RemoveMeta keep the restart marker on the runtime, which the
+// marker lives and dies with, as a tmux session's environment does.
+func (p *simProvider) SetMeta(name, key, value string) error {
+	p.setRestart(name, key, value != "")
+	return p.Fake.SetMeta(name, key, value)
+}
+
+func (p *simProvider) RemoveMeta(name, key string) error {
+	p.setRestart(name, key, false)
+	return p.Fake.RemoveMeta(name, key)
+}
+
+func (p *simProvider) setRestart(name, key string, set bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if rt := p.rts[name]; rt != nil && key == "GC_RESTART_REQUESTED" {
+		rt.restart = set
+	}
 }
 
 func (p *simProvider) GetAllEnvironment(name string) (map[string]string, error) {

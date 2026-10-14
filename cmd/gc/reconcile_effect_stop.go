@@ -96,6 +96,7 @@ type stopPlan struct {
 	corpse  *corpseObject
 	now     time.Time
 	idle    bool // an idle-timeout stop clears the pane's scrollback after it (SESS-576)
+	restart bool // A13's restart clears the runtime's restart marker after it (C7a-2b)
 }
 
 // corpseObject is the corpse a confirmed stop removes: its leaf and the
@@ -127,7 +128,7 @@ func stopDecide(v txView) txStep {
 		return txStep{Refuse: causeRedecided}
 	}
 	name := strings.TrimSpace(v.Row.SessionName)
-	plan := stopPlan{name: name, names: processNamesFor(v.World, v.Row), now: v.Now, idle: isIdleReason(v.It.Reason)}
+	plan := stopPlan{name: name, names: processNamesFor(v.World, v.Row), now: v.Now, idle: isIdleReason(v.It.Reason), restart: v.It.Reason == decideRestartRequested}
 	switch rt := v.RT; rt.Class {
 	case rtAbsent:
 		return txStep{Pass: plan}
@@ -183,6 +184,9 @@ func stopCall(ctx context.Context, c txCaps, p stopPlan) (stopped, error) {
 		if ok && v.Proceed && p.idle {
 			_ = sp.ClearScrollback(p.name) // legacy's, best effort
 		}
+		if ok {
+			clearRestartMarker(sp, p)
+		}
 		return stopped{Confirmed: ok, Performed: v.Proceed, Reason: v.Reason}, nil
 	}
 	if p.name == "" || !confirmStopped(ctx, sp, p.names, p.name, p.now) {
@@ -191,7 +195,18 @@ func stopCall(ctx context.Context, c txCaps, p stopPlan) (stopped, error) {
 	if k := p.corpse; k != nil {
 		removeCorpse(ctx, *k, now())
 	}
+	clearRestartMarker(sp, p)
 	return stopped{Confirmed: true}, nil
+}
+
+// clearRestartMarker clears the runtime's restart marker after A13's
+// confirmed stop, best effort, as legacy's clearRestartRequested: a tmux
+// session takes its marker with it, but a corpse the stop leaves, or a
+// sidecar that outlives its process, keeps it.
+func clearRestartMarker(sp runtime.Provider, p stopPlan) {
+	if p.restart && p.name != "" {
+		_ = sp.RemoveMeta(p.name, "GC_RESTART_REQUESTED")
+	}
 }
 
 // removeCorpse removes a confirmed corpse under the corpse exception (v5

@@ -169,6 +169,10 @@ type RuntimeObservation struct {
 	// Content is the pass's read of the pane's content, for a name the
 	// planner asked the lane to read (WantContent): A15's content clock.
 	Content contentState
+	// RestartRequested is the runtime's restart marker as the pass that
+	// enriched the name read it (InventoryAttrs.RestartRequested): A13's
+	// trigger when the row write failed (C7a-2b).
+	RestartRequested bool
 	// FirstListedAt is the first pass in this epoch that listed this
 	// incarnation; LastListedAt the latest.
 	FirstListedAt time.Time
@@ -321,6 +325,10 @@ type InventoryAttrs struct {
 	ActivityKnown bool
 	LastActivity  time.Time
 	Content       contentState
+	// RestartRequested is the runtime's own restart marker
+	// (GC_RESTART_REQUESTED) as the pass read it: the batched inventory's,
+	// or a local sidecar's GetMeta (C7a-2b).
+	RestartRequested bool
 }
 
 // contentState is a pane content read (runtime.IdleSnapshotProvider), a
@@ -694,7 +702,7 @@ func applyInventoryAttrs(obs *RuntimeObservation, a InventoryAttrs, at time.Time
 	if a.ActivityKnown {
 		obs.LastActivity, obs.LastActivityKnown = a.LastActivity, true
 	}
-	obs.Content = a.Content
+	obs.Content, obs.RestartRequested = a.Content, a.RestartRequested
 	obs.OwnerState, obs.Owner, obs.InstanceToken, obs.Identity = a.OwnerState, reconcilekey.Key{}, a.InstanceToken, a.Identity
 	if a.OwnerState == OwnerSession {
 		obs.Owner = reconcilekey.SessionRef(a.OwnerID, obs.SessionName)
@@ -712,7 +720,7 @@ func observationChanged(old, next RuntimeObservation, had bool) bool {
 			return true
 		}
 	}
-	return old.Incarnation != next.Incarnation || old.OwnerState != next.OwnerState || old.Owner != next.Owner ||
+	return old.Incarnation != next.Incarnation || old.OwnerState != next.OwnerState || old.Owner != next.Owner || old.RestartRequested != next.RestartRequested ||
 		!sameIdentity(old.Identity, next.Identity)
 }
 

@@ -13,8 +13,10 @@ import (
 // handoff finalize (legacy's restart block, session_reconciler.go). A live
 // runtime is stopped first; a gone one is confirmed gone and handed off,
 // and A18 starts the row a pass later (legacy starts it in the same tick).
-// The runtime's own GC_RESTART_REQUESTED marker, and SESS-612's fresh-mode
-// cycle, are post-release (C7a-2b, C7a-2c).
+// The runtime's own GC_RESTART_REQUESTED marker, which request-restart and
+// handoff set beside the row's, triggers it too when the row write failed
+// (C7a-2b): the inventory reads it, and the stop clears it. SESS-612's
+// fresh-mode cycle is C7a-2c.
 
 // A13's reasons.
 const (
@@ -36,6 +38,9 @@ func armRestartRequested(r *rowFacts) (intent, bool) {
 		return intent{}, false
 	}
 	if pinnedConfiguredNamedSessionKillProtected(info) && strings.TrimSpace(info.ContinuationResetPending) != "true" && r.runtimeUp() {
+		if !r.rowRestartRequested() {
+			return intent{}, false // the runtime's marker alone: no kill, and the runtime keeps it
+		}
 		return r.heal(intentRowHeal, decideRestartPinnedClear, session.MetadataPatch{"restart_requested": ""})
 	}
 	res, _ := r.w.Templates.lookup(info)
@@ -49,13 +54,34 @@ func armRestartRequested(r *rowFacts) (intent, bool) {
 	return it, true
 }
 
-// restartPending reports a row A13 restarts: restart_requested on a row
-// no operator holds dormant and AL1 does not drain. A6's dead-runtime heal
+// restartPending reports a row A13 restarts: restart_requested, on the row
+// or on its own running runtime (runtimeRestartRequested), on a row no
+// operator holds dormant and AL1 does not drain. A6's dead-runtime heal
 // and its composed start leave it to A13 (the #7823 review): a heal's start
 // would bring up a runtime with the marker still set, which A13 would then
 // stop again, and on a young row count the restart as a death.
 func (r *rowFacts) restartPending() bool {
-	return strings.TrimSpace(r.row.Info.RestartRequested) == "true" && !operatorDormantStop(r.row.Info, r.w.Now) && !r.drained()
+	return (r.rowRestartRequested() || r.runtimeRestartRequested()) && !operatorDormantStop(r.row.Info, r.w.Now) && !r.drained()
+}
+
+// rowRestartRequested reports the row's restart_requested marker.
+func (r *rowFacts) rowRestartRequested() bool {
+	return strings.TrimSpace(r.row.Info.RestartRequested) == "true"
+}
+
+// runtimeRestartRequested reports the runtime's own GC_RESTART_REQUESTED
+// marker, as the pass's inventory read it (C7a-2b), on the row's Current
+// runtime while it runs: alive, or a zombie whose pane is up, as legacy
+// reads it only on a running runtime. A corpse's marker is never read, so
+// a corpse the stop leaves (an attached one) restarts nothing again.
+func (r *rowFacts) runtimeRestartRequested() bool {
+	if r.entry == nil || r.w.Obs == nil {
+		return false
+	}
+	info := r.row.Info
+	obs, ok := r.w.Obs.Observation(strings.TrimSpace(info.SessionName), r.w.Now, r.w.ObsMaxAge)
+	running := r.entry.Liveness.alive() || r.entry.Liveness == livenessDead && obs.Running.Value == ObsYes
+	return ok && running && obs.RestartRequested && compareIdentity(info, obs.Identity) == identityCurrent
 }
 
 // drained reports a row AL1 drains (orphaned, suspended, over its pool's

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"testing"
@@ -334,5 +335,150 @@ func TestRestartRequestedHealComposesNoStart(t *testing.T) {
 	c := newHealCase(t, livenessGone, desireWake, append([]string{"state", "asleep", "held_until", rowAt(-time.Minute)}, restartAsked...)...)
 	if it := c.decide(); it.Kind != intentRowHeal || it.Heal != nil {
 		t.Fatalf("decideRow = (%q, %q), heal %v; want the hold's clear alone, no start", it.Kind, it.Reason, it.Heal != nil)
+	}
+}
+
+// TestSimRuntimeRestartMarkerRestartsALiveRow (CONTRACT v5.10q, C7a-2b;
+// SESS-520): when request-restart's row write failed, the runtime's own
+// marker, read by the inventory, restarts the live row once: stopped,
+// handed off, and started as a new incarnation on a fresh conversation (its
+// continuation epoch advanced) that carries no marker, so nothing restarts
+// it again.
+func TestSimRuntimeRestartMarkerRestartsALiveRow(t *testing.T) {
+	s := converged(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-1", "session_key", "k-1", "started_config_hash", "h-1", "last_woke_at", rowAt(-time.Hour)), gc1Work())
+	if err := newDrainOps(s.sp).setRestartRequested("s-gc-1"); err != nil {
+		t.Fatal(err)
+	}
+	for range 6 {
+		s.settle()
+		s.advance(simPatrol)
+	}
+	b, err := s.legs[0].backing.Get("gc-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.sp.mu.Lock()
+	starts, kills := len(s.sp.starts), len(s.sp.kills)
+	marked := s.sp.rts["s-gc-1"] != nil && s.sp.rts["s-gc-1"].restart
+	s.sp.mu.Unlock()
+	if m := b.Metadata; starts != 1 || kills != 1 || marked || m["instance_token"] == "tok-1" || !s.livePane(b) || m["continuation_epoch"] != "2" {
+		t.Fatalf("starts %d, kills %d, marked %t, row %v; want one restart into a new unmarked incarnation on a fresh conversation", starts, kills, marked, m)
+	}
+	s.noViolations(t)
+}
+
+// TestSimRuntimeRestartMarkerSparesAPinnedRow (C7a-2b; SESS-521): a pinned
+// named row whose runtime alone carries the marker, with no explicit reset
+// on the row, is not killed.
+func TestSimRuntimeRestartMarkerSparesAPinnedRow(t *testing.T) {
+	s := converged(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-1", "session_key", "k-1", "last_woke_at", rowAt(-time.Hour),
+		"configured_named_session", "true", "configured_named_identity", "worker", "pin_awake", "true"), gc1Work())
+	if err := newDrainOps(s.sp).setRestartRequested("s-gc-1"); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		s.settle()
+		s.advance(simPatrol)
+	}
+	if m := s.gc1(); len(s.sp.kills) != 0 || m["session_key"] != "k-1" {
+		t.Fatalf("kills %d, row %v; want the pinned runtime left running", len(s.sp.kills), m)
+	}
+	s.noViolations(t)
+}
+
+// TestRuntimeRestartMarkerReadsOnlyARunningOwnRuntime (C7a-2b): A13 takes
+// the runtime's marker only on the row's Current runtime while it runs
+// (alive, or a zombie's live pane); a corpse's, another incarnation's, or a
+// row with no marker anywhere decides nothing.
+func TestRuntimeRestartMarkerReadsOnlyARunningOwnRuntime(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		liveness rowLiveness
+		attrs    InventoryAttrs
+		want     bool
+	}{
+		{"alive, marked", livenessAlive, InventoryAttrs{DeadKnown: true, RestartRequested: true}, true},
+		{"alive, unmarked", livenessAlive, InventoryAttrs{DeadKnown: true}, false},
+		{"a zombie, marked", livenessDead, InventoryAttrs{DeadKnown: true, ProcessKnown: true, RestartRequested: true}, true},
+		{"a corpse, marked", livenessDead, InventoryAttrs{DeadKnown: true, AllPanesDead: true, RestartRequested: true}, false},
+		{"another incarnation, marked", livenessAlive, InventoryAttrs{DeadKnown: true, RestartRequested: true, Identity: runtimeIdentity{Known: true, Token: "tok-other"}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newHealCase(t, tc.liveness, desireWake, "state", "active")
+			a := tc.attrs
+			if !a.Identity.Known {
+				a.Identity = runtimeIdentity{Known: true, SessionID: c.k.ID, Epoch: "3", Token: "tok-3"}
+			} else {
+				a.Identity.SessionID, a.Identity.Epoch = c.k.ID, "3"
+			}
+			c.w.ObsMaxAge = observeMaxAge
+			c.w.Obs = newObserveCache().publish(c.w.Now, map[string]InventoryAttrs{"s-heal": a}, completeBackend("tmux", "s-heal"))
+			r := &rowFacts{w: c.w, k: c.k, entry: c.a.Snapshot.Entries[c.k], row: c.w.Census.Rows[c.k], found: true}
+			if got := r.restartPending(); got != tc.want {
+				t.Fatalf("restartPending = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSidecarRestartMarkerFallback (C7a-2b): a name on a local sidecar
+// leaf has its restart marker read through GetMeta every pass, and one that
+// errors reads unset; a batched leaf's names are left to its inventory.
+func TestSidecarRestartMarkerFallback(t *testing.T) {
+	side := sidecarProvider([]string{"asked", "quiet", "unreadable"}, map[string]map[string]string{"asked": {"GC_RESTART_REQUESTED": "1"}, "unreadable": {"GC_RESTART_REQUESTED": "1"}})
+	side.GetMetaErrors = map[string]map[string]error{"unreadable": {"GC_RESTART_REQUESTED": errors.New("sidecar unreadable")}}
+	batched := &simProvider{Fake: runtime.NewFake(), rts: map[string]*simRuntime{}}
+	if err := batched.Fake.SetMeta("other", "GC_RESTART_REQUESTED", "1"); err != nil {
+		t.Fatal(err)
+	}
+	attrs := map[string]InventoryAttrs{"asked": {}, "quiet": {}, "unreadable": {}, "other": {}}
+	hosts := map[string]runtime.Provider{"asked": side, "quiet": side, "unreadable": side, "other": batched}
+	readSidecarRestartMarkers(context.Background(), attrs, hosts, 2)
+	if !attrs["asked"].RestartRequested || attrs["quiet"].RestartRequested || attrs["unreadable"].RestartRequested || attrs["other"].RestartRequested {
+		t.Fatalf("attrs %+v, want only the sidecar's readable marked name set", attrs)
+	}
+}
+
+// TestRestartStopClearsTheRuntimeMarker (C7a-2b): A13's confirmed stop
+// clears the runtime's restart marker, as legacy's clearRestartRequested
+// does, so a runtime the stop leaves (a corpse, a sidecar that outlives
+// its process) restarts nothing again; any other stop leaves it alone.
+func TestRestartStopClearsTheRuntimeMarker(t *testing.T) {
+	for _, restart := range []bool{true, false} {
+		sp := &simProvider{Fake: runtime.NewFake(), rts: map[string]*simRuntime{}, changed: map[string]uint64{}, now: func() time.Time { return plannerT0 }}
+		caps := txCaps{stop: stopCaps{sp: sp, clock: newFakePlannerClock(plannerT0)}}
+		out, err := stopCall(context.Background(), caps, stopPlan{name: "s-gone", now: plannerT0, restart: restart})
+		if err != nil || !out.Confirmed {
+			t.Fatalf("restart %t: stopCall = %+v, %v; want the gone runtime confirmed", restart, out, err)
+		}
+		if got := sp.CountCalls("RemoveMeta", "s-gone"); got != map[bool]int{true: 1, false: 0}[restart] {
+			t.Fatalf("restart %t: %d marker clears", restart, got)
+		}
+	}
+}
+
+// TestRestartMarkerFlipIsAnObservationChange (C7a-2b): a runtime's restart
+// marker turning on is a change the planner is signaled for, though no
+// fact or identity moved.
+func TestRestartMarkerFlipIsAnObservationChange(t *testing.T) {
+	old := RuntimeObservation{SessionName: "s"}
+	next := old
+	next.RestartRequested = true
+	if !observationChanged(old, next, true) {
+		t.Fatal("a marker flip read as no change")
+	}
+}
+
+// TestPinnedRuntimeMarkerAloneDecidesNothing (C7a-2b; SESS-521): a pinned
+// named row with no explicit reset, whose runtime alone carries the marker,
+// decides nothing: no kill, and no clear of a row marker it does not hold
+// (which would rewrite the row every pass).
+func TestPinnedRuntimeMarkerAloneDecidesNothing(t *testing.T) {
+	c := newHealCase(t, livenessAlive, desireWake, "state", "active", "configured_named_session", "true", "configured_named_identity", "worker", "pin_awake", "true")
+	c.w.ObsMaxAge = observeMaxAge
+	id := runtimeIdentity{Known: true, SessionID: c.k.ID, Epoch: "3", Token: "tok-3"}
+	c.w.Obs = newObserveCache().publish(c.w.Now, map[string]InventoryAttrs{"s-heal": {DeadKnown: true, RestartRequested: true, Identity: id}}, completeBackend("tmux", "s-heal"))
+	if it, ok := armRestartRequested(&rowFacts{w: c.w, k: c.k, entry: c.a.Snapshot.Entries[c.k], row: c.w.Census.Rows[c.k], found: true}); ok {
+		t.Fatalf("armRestartRequested = (%q, %q) %v, want no decision", it.Kind, it.Reason, it.Patch)
 	}
 }
