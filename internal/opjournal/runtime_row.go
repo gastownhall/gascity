@@ -159,9 +159,11 @@ type HostStamp struct {
 // Age semantics. The lane cells (Seq and Lease, with the Generation and Epoch
 // lanes serve) are authoritative: lanes write them under the row's revision
 // guard. Every other cell is an observation, published on transitions only
-// (no heartbeat), and carries its _at: when the observer saw the transition,
-// not when it happened. A reader may use an observation only as a hint of
-// that age, never as proof that a runtime or turn is live or gone.
+// (no heartbeat), and every time cell beside it (each _at, and the turn
+// cells' at and last_at) is the observer's clock: when the observer saw the
+// transition, not when it happened. A reader may use an observation only as
+// a hint of that age, never as proof that a runtime or turn is live or gone.
+// The source's own times live on the facts.
 //
 // Writers: lanes at Take and Done (Generation, Epoch, Seq, Lease); the turn
 // observer only (Turn); the lane host or box daemon on observed transitions

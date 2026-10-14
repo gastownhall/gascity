@@ -41,7 +41,8 @@ type FactBasis string
 // The fact bases.
 const (
 	// FactBasisRuntime is an occurrence the provider recorded: a protocol
-	// event or a transcript entry. The fact's At is the source's time.
+	// event or a transcript entry. The fact's At is the source's time, or
+	// the observer's clock when the source gives no time.
 	FactBasisRuntime FactBasis = "runtime"
 	// FactBasisObserved is an occurrence gc inferred from what it saw, such
 	// as a turn end read off an idle boundary. The fact's At is the

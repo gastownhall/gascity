@@ -97,9 +97,11 @@ type TurnCapsStamp []TurnCapsPair
 
 // TurnCells are the runtime row's gc.rt.turn.* cells. The turn observer is
 // their only writer (D-TURN). They are observations: hints with an age, never
-// proof that a turn is or is not running. ObservedAt is the age anchor, when
-// the observer last saw a transition; At and LastAt are the source's times
-// when it gave them.
+// proof that a turn is or is not running. Every time cell is the observer's
+// clock (X11 §8, D9; DES-O1 §5.1): At and LastAt are when the observer saw
+// the transition, not when the source says it happened, and ObservedAt is
+// the observation that last changed the cells. The source's own times live
+// on the turn facts.
 type TurnCells struct {
 	// Generation is the session the cells describe (gc.rt.turn.gen). A
 	// reader whose current generation is another reads every cell as
@@ -112,11 +114,12 @@ type TurnCells struct {
 	ID string
 	// State is gc.rt.turn.state.
 	State TurnState
-	// At is when the current state began: the running turn's start, or the
-	// last end (gc.rt.turn.at).
+	// At is when the observer saw the current state begin: the running
+	// turn's start, or the last end (gc.rt.turn.at).
 	At time.Time
 	// LastID, LastEnd and LastAt name the last turn seen to end, its reason
-	// and its end time (gc.rt.turn.last_id, last_end, last_at).
+	// and when the observer saw it end (gc.rt.turn.last_id, last_end,
+	// last_at).
 	LastID  string
 	LastEnd TurnEndReason
 	LastAt  time.Time
@@ -245,7 +248,7 @@ func FoldTurn(prev TurnCells, obs TurnObservation, interrupting InterruptRef) (n
 	case obs.Current != "" && obs.Current != runningTurn:
 		at := orTime(obs.CurrentStart, obs.ObservedAt)
 		f.facts = append(f.facts, f.fact(FactTurnStarted, obs.Current, at, FactBasisRuntime))
-		next.ID, next.State, next.At = obs.Current, TurnStateRunning, at
+		next.ID, next.State, next.At = obs.Current, TurnStateRunning, obs.ObservedAt
 	case obs.Current == "" && f.ended:
 		next.ID, next.State, next.At = "", TurnStateEnded, next.LastAt
 	}
@@ -320,7 +323,7 @@ func (f *folder) end(e ObservedTurnEnd) {
 		fact.CauseOps = []string{f.interrupting.Op}
 	}
 	f.facts = append(f.facts, fact)
-	f.setEnded(e.ID, reason, fact.At)
+	f.setEnded(e.ID, reason)
 }
 
 // endMissing ends the running turn that is neither current nor in Recent.
@@ -332,14 +335,14 @@ func (f *folder) endMissing(turn string) {
 	fact := f.fact(FactTurnEnded, turn, f.obs.ObservedAt, FactBasisObserved)
 	fact.Reason = string(reason)
 	f.facts = append(f.facts, fact)
-	f.setEnded(turn, reason, fact.At)
+	f.setEnded(turn, reason)
 }
 
-// setEnded moves the last-end cells to turn. The state cells settle once the
-// whole observation is folded.
-func (f *folder) setEnded(turn string, reason TurnEndReason, at time.Time) {
+// setEnded moves the last-end cells to turn, dated by the observer's clock.
+// The state cells settle once the whole observation is folded.
+func (f *folder) setEnded(turn string, reason TurnEndReason) {
 	f.ended = true
-	f.next.LastID, f.next.LastEnd, f.next.LastAt = turn, reason, at
+	f.next.LastID, f.next.LastEnd, f.next.LastAt = turn, reason, f.obs.ObservedAt
 }
 
 // reason maps how the source says e ended to its turn.ended reason and basis.
