@@ -102,6 +102,37 @@ author: every commit after the watermark is squashed, whichever city wrote it.
     only if no other city, clone, or client outside this city has ever written
     to this database, including before this city started using it.
 
+## Live-database gate
+
+Every pass that rewrites a database's storage (a flatten, a full or bare GC, or
+a pending-GC retry) ends by checking that the database is still live. Its
+`<data_dir>/<db>/.dolt` directory must still be there, and the server must still
+serve the name with a resolvable HEAD. A failed check is retried
+`GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS` times (default 3),
+`GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS` apart (default 2), so a brief reconnect
+after a GC is not mistaken for a lost database.
+
+When every attempt fails, compact:
+
+- writes an integrity-quarantine marker with reason `live database unavailable
+  after compaction`, recording the step, the probe failure, the data-dir entry,
+  and the pre-compaction HEAD, and alerts like any other quarantine;
+- stops the run at once, leaving every later database untouched and naming them
+  in the log;
+- exits non-zero.
+
+Compact does not restore the database itself. Before clients write to that name
+again:
+
+1. Confirm what is missing: `gc dolt status`, and whether `<data_dir>/<db>/.dolt`
+   exists.
+2. Restore it from the newest good backup (for example
+   `dolt backup restore <backup-url> <db>` in the data directory), then run
+   `gc dolt restart` so the server loads it. Reconcile against the newest JSONL
+   export if there is one.
+3. Verify bead reads and writes against the database, then clear the marker as
+   `docs/troubleshooting/dolt-bloat-recovery.md` describes.
+
 ## Flags
 
 - `--gc-only` — Reclaim orphaned chunks via
