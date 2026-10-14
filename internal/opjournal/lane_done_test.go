@@ -150,3 +150,31 @@ func TestLaneDoneThatCannotSettleReportsNoArm(t *testing.T) {
 		t.Fatalf("op %s, want executing until its lease ends", got.Status)
 	}
 }
+
+// The same holds when another lane re-took part of the batch: a Done that
+// returns an error reports no arm, superseded included.
+func TestLaneDoneThatCannotSettleReportsNoSuperseded(t *testing.T) {
+	h, fs := newLaneHarnessFlaky(t)
+	a := h.propose(t, laneMsg("a", RoleNotice, "one"))
+	h.clk.Advance(time.Millisecond)
+	b := h.propose(t, laneMsg("b", RoleNotice, "two"))
+	exec := newFakeExec(h.clk)
+	other := newFakeExec(h.clk)
+	exec.onEffect = func() {
+		// The effect overruns its lease; another lane re-takes and settles
+		// both ops, then b's row becomes unreadable for this Done.
+		h.clk.Advance(DefaultLeaseTTL + LeaseSkew + time.Second)
+		if res, err := h.lane(t, "cli").Pass(context.Background(), view(), other); err != nil {
+			t.Errorf("re-take pass: %+v %v", res, err)
+		}
+		fs.setFail(func(id string) bool { return id == b.ID })
+	}
+	res, err := h.lane(t, "ctl").Pass(context.Background(), view(), exec)
+	fs.setFail(nil)
+	if !errors.Is(err, errFlakyRead) {
+		t.Fatalf("pass err = %v, want the read error", err)
+	}
+	if res.Done != "" {
+		t.Fatalf("pass reported done %q alongside %v (a=%s b=%s)", res.Done, err, a.ID, b.ID)
+	}
+}

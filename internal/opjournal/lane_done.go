@@ -411,7 +411,9 @@ func (l *ConversationLane) done(ctx context.Context, tb *takenBatch, er effectRe
 		switch {
 		case it.kind != doneOp:
 		case it.superseded:
-			res.Done = DoneSuperseded
+			if err == nil {
+				res.Done = DoneSuperseded
+			}
 		case it.written && it.next.Status == StatusClosed:
 			res.Closed = append(res.Closed, ClosedOp{ID: it.id, Arm: it.next.Outcome.Arm, Reason: it.next.Outcome.Reason})
 		case it.written:
