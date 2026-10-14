@@ -13,6 +13,8 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/events"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/session/sessiontest"
 )
 
 const (
@@ -106,6 +108,11 @@ func (l *lockedLog) String() string {
 	return l.buf.String()
 }
 
+// hungGetReporter is a test store that can say how many calls are hung on it.
+type hungGetReporter interface{ hungNow() int64 }
+
+func (s *commitGateStore) hungNow() int64 { return s.hanging.Load() }
+
 // commitPhaseRun is one async start enqueued the way the reconciler enqueues
 // it, with the counters the commit-phase scenarios assert on.
 type commitPhaseRun struct {
@@ -120,9 +127,53 @@ type commitPhaseRun struct {
 	releaseLease func()
 }
 
+// startLeaseShape builds the lease and release an async start is enqueued
+// with, from the slot the reservation gave it. It returns the prepared start
+// carrying the lease, the release the start goroutine runs, and a cleanup that
+// gives the lease back at the end of the test.
+type startLeaseShape func(t *testing.T, city string, item preparedStart, slot func()) (preparedStart, func(), func())
+
+// flockOnlyLease is the lease the post-start tests hold: the name's flock and
+// nothing on the row, released by the test, with the bare slot as the release.
+func flockOnlyLease(t *testing.T, city string, item preparedStart, slot func()) (preparedStart, func(), func()) {
+	t.Helper()
+	item, dropLease := leasedStart(t, city, item)
+	return item, slot, dropLease
+}
+
+// productionLease is the lease the reconciler's start pass gives an async start
+// (executePlannedStartsTraced): the name's flock taken against store, then the
+// row's record taken just before PreWake, with dropLease followed by the slot
+// as the release. A release that reads or writes the store is part of this
+// shape.
+func productionLease(store beads.Store) startLeaseShape {
+	return func(t *testing.T, city string, item preparedStart, slot func()) (preparedStart, func(), func()) {
+		t.Helper()
+		lease, dropLease, err := tryRuntimeLease(store, city, startLeaseName(item.candidate), "", 0)
+		if err != nil {
+			t.Fatalf("tryRuntimeLease: %v", err)
+		}
+		if err := lease.TakeRecord(sessionFrontDoor(store), sessionpkg.RuntimeLeaseRequest{
+			City: city, Name: item.candidate.info.SessionName, ID: item.candidate.info.ID, TTL: sessionpkg.RuntimeLeaseTTL(postStartTimeout),
+		}); err != nil {
+			dropLease()
+			t.Fatalf("TakeRecord: %v", err)
+		}
+		item.candidate.lease = lease
+		return item, func() { dropLease(); slot() }, dropLease
+	}
+}
+
 // enqueueCommitPhaseStart reserves a slot and enqueues one async start of the
-// fixture session on ctx, the controller's context.
+// fixture session on ctx, the controller's context, under the flock-only lease.
 func enqueueCommitPhaseStart(ctx context.Context, t *testing.T, city string, item preparedStart, sp *postStartProvider, store beads.Store, clk clock.Clock, waiter startStabilityWaiter) *commitPhaseRun {
+	t.Helper()
+	return enqueueCommitPhaseStartShaped(ctx, t, city, item, sp, store, clk, waiter, flockOnlyLease)
+}
+
+// enqueueCommitPhaseStartShaped is enqueueCommitPhaseStart under the lease
+// shape the caller picks.
+func enqueueCommitPhaseStartShaped(ctx context.Context, t *testing.T, city string, item preparedStart, sp *postStartProvider, store beads.Store, clk clock.Clock, waiter startStabilityWaiter, shape startLeaseShape) *commitPhaseRun {
 	t.Helper()
 	run := &commitPhaseRun{
 		limiter:   newAsyncStartLimiter(1),
@@ -130,22 +181,22 @@ func enqueueCommitPhaseStart(ctx context.Context, t *testing.T, city string, ite
 		stderr:    &lockedLog{},
 		rec:       events.NewFake(),
 	}
-	release, ok, reason := reserveAsyncStartSlot(context.Background(), run.limiter)
+	slot, ok, reason := reserveAsyncStartSlot(context.Background(), run.limiter)
 	if !ok {
 		t.Fatalf("reserve async start slot: %s", reason)
 	}
-	item, releaseLease := leasedStart(t, city, item)
-	var releaseLeaseOnce sync.Once
-	run.releaseLease = func() { releaseLeaseOnce.Do(releaseLease) }
+	item, release, cleanup := shape(t, city, item, func() {
+		run.released.Add(1)
+		slot()
+	})
+	var cleanupOnce sync.Once
+	run.releaseLease = func() { cleanupOnce.Do(cleanup) }
 	t.Cleanup(run.releaseLease)
 	enqueuePreparedStartWaveForCity(
 		ctx,
 		[]asyncPreparedStart{{
-			item: item,
-			release: func() {
-				run.released.Add(1)
-				release()
-			},
+			item:    item,
+			release: release,
 			done: func() {
 				run.finished.Add(1)
 				close(run.finishedC)
@@ -160,13 +211,13 @@ func enqueueCommitPhaseStart(ctx context.Context, t *testing.T, city string, ite
 
 // awaitFinished fails the test if the async start has not finished within
 // commitWatchdog of fake time, and returns the fake time it took.
-func (r *commitPhaseRun) awaitFinished(t *testing.T, sp *postStartProvider, store *commitGateStore, begin time.Time) time.Duration {
+func (r *commitPhaseRun) awaitFinished(t *testing.T, sp *postStartProvider, store hungGetReporter, begin time.Time) time.Duration {
 	t.Helper()
 	select {
 	case <-r.finishedC:
 		return time.Since(begin)
 	case <-time.After(commitWatchdog):
-		t.Fatalf("the async start had not finished %v in and still holds its slot: the commit phase after runPreparedStartCandidate is unbounded (the bound is %v); %d store Gets hung, provider calls hung: %s", commitWatchdog, commitBound, store.hanging.Load(), sp.hungIn())
+		t.Fatalf("the async start had not finished %v in and still holds its slot: the commit phase after runPreparedStartCandidate is unbounded (the bound is %v); %d store calls hung, provider calls hung: %s", commitWatchdog, commitBound, store.hungNow(), sp.hungIn())
 		return 0
 	}
 }
@@ -226,7 +277,6 @@ func TestEnqueuePreparedStartWaveReleasesItsSlotWhenTheCommitHangs(t *testing.T)
 		if len(run.rec.Events) != 0 {
 			t.Fatalf("lifecycle events = %#v, want none from an abandoned commit", run.rec.Events)
 		}
-		settled := mustGetBead(t, inner, bead.ID)
 
 		// The abandoned commit's Get returns late. The goroutine that waited
 		// for it is gone, so nothing may be reported or released twice. Run
@@ -239,20 +289,34 @@ func TestEnqueuePreparedStartWaveReleasesItsSlotWhenTheCommitHangs(t *testing.T)
 		if got := store.hanging.Load(); got != 0 {
 			t.Fatalf("%d store Gets still hung after release", got)
 		}
-		_ = settled
 	})
+}
+
+// noDriftBeadItem is postStartBeadItem with the row's command equal to the
+// command the start launches, so a late commit of the start finds no drift to
+// roll back: left alone it commits the start.
+func noDriftBeadItem(t *testing.T, clk clock.Clock, workDir string) (beads.Store, beads.Bead, preparedStart) {
+	t.Helper()
+	store := beads.NewMemStore()
+	bead, _ := createStartRecoveryFixture(t, store, clk, workDir)
+	if err := store.SetMetadata(bead.ID, "command", "claude --resume resume-key"); err != nil {
+		t.Fatalf("SetMetadata command: %v", err)
+	}
+	bead = mustGetBead(t, store, bead.ID)
+	return store, bead, postStartItem(sessiontest.SeedBead(t, bead), workDir)
 }
 
 // Expiry of the commit bound is not a shutdown: the shutdown branch inside the
 // commit is keyed on the controller's context, and the abandoned commit keeps
-// running on it. A late commit that finds the controller still up commits like
-// any other.
+// running on it. A healthy start whose commit outlives the bound and then
+// completes, with the controller still up, commits the start like any other:
+// the row leaves its pending create and the runtime is left running.
 func TestAbandonedCommitRunsToCompletionOnTheControllerContext(t *testing.T) {
 	testCity := t.TempDir()
 	workDir := t.TempDir()
 	synctest.Test(t, func(t *testing.T) {
 		clk := &clock.Fake{Time: time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)}
-		inner, bead, before, item := postStartBeadItem(t, clk, workDir)
+		inner, bead, item := noDriftBeadItem(t, clk, workDir)
 		store := newCommitGateStore(inner)
 		sp := newPostStartProvider()
 		defer sp.release()
@@ -264,15 +328,18 @@ func TestAbandonedCommitRunsToCompletionOnTheControllerContext(t *testing.T) {
 		if got := sp.CountCalls("Stop", "worker"); got != 0 {
 			t.Fatalf("Stop calls = %d at expiry, want 0: the waiter must not tear the runtime down", got)
 		}
+		if at := mustGetBead(t, inner, bead.ID); at.Metadata["pending_create_claim"] != "true" {
+			t.Fatalf("pending_create_claim = %q at expiry, want the abandoned commit to have written nothing yet", at.Metadata["pending_create_claim"])
+		}
 		store.release()
 		synctest.Wait()
 
 		got := mustGetBead(t, inner, bead.ID)
-		if got.Metadata["pending_create_claim"] == before["pending_create_claim"] && got.Metadata["state"] == before["state"] {
-			t.Fatalf("session after the late commit returned: state=%q pending_create_claim=%q, want the commit to have run to completion on the controller's context", got.Metadata["state"], got.Metadata["pending_create_claim"])
+		if got.Metadata["pending_create_claim"] != "" || got.Metadata["state"] != "active" {
+			t.Fatalf("session after the late commit returned: state=%q pending_create_claim=%q, want the start committed (active, claim cleared) on the controller's context", got.Metadata["state"], got.Metadata["pending_create_claim"])
 		}
-		if !strings.Contains(run.stderr.String(), "async_start_drift_rolled_back") {
-			t.Fatalf("log = %q, want the late commit's own outcome line: it ran to completion on the controller's context", run.stderr.String())
+		if !sp.IsRunning("worker") || sp.CountCalls("Stop", "worker") != 0 {
+			t.Fatalf("runtime running=%v stops=%d after the late commit, want the healthy runtime left running", sp.IsRunning("worker"), sp.CountCalls("Stop", "worker"))
 		}
 	})
 }
