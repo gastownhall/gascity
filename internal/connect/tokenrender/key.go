@@ -25,15 +25,14 @@ const (
 // LoadKey reads the city key K from a file: base64url text (padding
 // optional, surrounding whitespace ignored) decoding to at least
 // connect.MinKeyLen bytes, in a file no group or other user can access,
-// inside a directory no group or other user can access. A missing file
-// returns an error wrapping os.ErrNotExist. Errors never echo the key.
+// inside a directory no group or other user can access. The file's type and
+// mode are checked on the opened descriptor, so a swap after the check
+// cannot pass, and a FIFO never blocks the caller. A missing file returns an
+// error wrapping os.ErrNotExist. Errors never echo the key.
 func LoadKey(path string) ([]byte, error) {
-	info, err := os.Stat(path)
+	data, info, err := readRegular(path, maxKeyFileBytes, true)
 	if err != nil {
 		return nil, fmt.Errorf("loading connect key %s: %w", path, err)
-	}
-	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("loading connect key %s: not a regular file", path)
 	}
 	if perm := info.Mode().Perm(); perm&0o077 != 0 {
 		return nil, fmt.Errorf("loading connect key %s: mode %04o is accessible to group or others; want 0600", path, perm)
@@ -45,10 +44,6 @@ func LoadKey(path string) ([]byte, error) {
 	}
 	if perm := dirInfo.Mode().Perm(); perm&0o077 != 0 {
 		return nil, fmt.Errorf("loading connect key %s: directory %s mode %04o is accessible to group or others; want 0700", path, dir, perm)
-	}
-	data, err := readCapped(path, maxKeyFileBytes)
-	if err != nil {
-		return nil, fmt.Errorf("loading connect key %s: %w", path, err)
 	}
 	if len(data) > maxKeyFileBytes {
 		return nil, fmt.Errorf("loading connect key %s: file exceeds %d bytes", path, maxKeyFileBytes)

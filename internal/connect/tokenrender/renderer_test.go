@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -38,12 +39,14 @@ type fakeSource struct {
 	entered chan int      // receives the call number as each read begins
 	gate    chan struct{} // when set, each read waits for a value
 	check   func() error  // runs inside each read
+	// hook runs inside each read with the read's context and call number.
+	hook func(ctx context.Context, n int) error
 }
 
-func (f *fakeSource) EligibleRows(context.Context) ([]connect.TokenRow, error) {
+func (f *fakeSource) EligibleRows(ctx context.Context) ([]connect.TokenRow, error) {
 	f.mu.Lock()
 	f.calls++
-	n, entered, gate, check := f.calls, f.entered, f.gate, f.check
+	n, entered, gate, check, hook := f.calls, f.entered, f.gate, f.check, f.hook
 	f.mu.Unlock()
 	if entered != nil {
 		entered <- n
@@ -53,6 +56,11 @@ func (f *fakeSource) EligibleRows(context.Context) ([]connect.TokenRow, error) {
 	}
 	if check != nil {
 		if err := check(); err != nil {
+			return nil, err
+		}
+	}
+	if hook != nil {
+		if err := hook(ctx, n); err != nil {
 			return nil, err
 		}
 	}
@@ -628,7 +636,9 @@ func TestRunJittersTheInterval(t *testing.T) {
 	i := 0
 	h.r.jitter = func() float64 { v := values[i%len(values)]; i++; return v }
 	rh := startRun(t, h)
-	lo, hi := DefaultInterval*9/10, DefaultInterval*11/10
+	// Jitter only shortens the interval, so revocation never waits longer
+	// than one Interval (DES-CN §6).
+	lo, hi := DefaultInterval*9/10, DefaultInterval
 	var seen []time.Duration
 	for range values {
 		d := rh.pass(t)
@@ -638,7 +648,7 @@ func TestRunJittersTheInterval(t *testing.T) {
 		seen = append(seen, d)
 		rh.tick()
 	}
-	if seen[0] != lo || seen[2] != DefaultInterval {
+	if seen[0] != DefaultInterval || seen[2] != DefaultInterval*19/20 || seen[1] <= lo {
 		t.Fatalf("intervals = %v", seen)
 	}
 }
@@ -821,7 +831,498 @@ func TestErrorIsMatchesItsCauseOnly(t *testing.T) {
 		}
 		seen[c] = true
 	}
-	if len(seen) != 7 {
-		t.Fatalf("%d causes, want DES-CN §3.8's 7", len(seen))
+	if len(seen) != 8 {
+		t.Fatalf("%d causes, want DES-CN §3.8's 8", len(seen))
+	}
+}
+
+// renderedWith writes a file this renderer would have rendered from operator
+// and rows, and returns its bytes.
+func renderedWith(t *testing.T, path string, operator []string, rows ...connect.TokenRow) []byte {
+	t.Helper()
+	content := expectRender(t, operator, rows...)
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return content
+}
+
+// TestRenderOnceRefusesAnIncompleteOperatorSource pins bd-enterprise's
+// completeness rule across the copy: a source caught mid-write by a
+// non-atomic writer leaves the served file as it is, so a fragment never
+// becomes a token and the operator's real token is never dropped.
+func TestRenderOnceRefusesAnIncompleteOperatorSource(t *testing.T) {
+	for name, partial := range map[string]string{
+		"cut mid-token":      "rot",
+		"truncated to empty": "",
+		"whitespace only":    "\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			work := output(t, "work", "rotated-token-old")
+			src := &fakeSource{}
+			src.set(live("mc-1", 1))
+			prior := renderedWith(t, work.TokenFile, []string{"rotated-token-old"}, connect.TokenRow{SessionID: "mc-1", Generation: 1})
+			if err := os.WriteFile(work.OperatorFile, []byte(partial), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			h := newHarness(t, []Output{work}, src)
+			_, err := h.r.RenderOnce(context.Background())
+			if !errors.Is(err, ErrOperatorUnreadable) {
+				t.Fatalf("error = %v, want render_operator_unreadable", err)
+			}
+			if got := readFile(t, work.TokenFile); !bytes.Equal(got, prior) {
+				t.Fatalf("an incomplete operator source changed the served file: %q", got)
+			}
+		})
+	}
+}
+
+// TestOperatorLinesWithAnInteriorCarriageReturnRender pins that every line
+// ParseOperatorLines returns renders: bd splits only on "\n", so an interior
+// "\r" is part of the token and is copied as it is.
+func TestOperatorLinesWithAnInteriorCarriageReturnRender(t *testing.T) {
+	work := output(t, "work", "tokA\rtokB")
+	h := newHarness(t, []Output{work}, nil)
+	if _, err := h.r.RenderOnce(context.Background()); err != nil {
+		t.Fatalf("RenderOnce: %v", err)
+	}
+	if !connect.TokenFileHoldsLine(readFile(t, work.TokenFile), "tokA\rtokB") {
+		t.Fatalf("file = %q, want the operator line copied", readFile(t, work.TokenFile))
+	}
+}
+
+func TestRenderOnceSkipsANonRegularOperatorSource(t *testing.T) {
+	work := output(t, "work", "op")
+	if err := os.Remove(work.OperatorFile); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(work.OperatorFile, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	infra := output(t, "infra")
+	src := &fakeSource{}
+	src.set(live("mc-1", 1))
+	h := newHarness(t, []Output{work, infra}, src)
+	done := make(chan error, 1)
+	go func() {
+		_, err := h.r.RenderOnce(context.Background())
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrOperatorUnreadable) {
+			t.Fatalf("error = %v, want render_operator_unreadable", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("a FIFO operator source blocked the render")
+	}
+	if !connect.TokenFileHoldsLine(readFile(t, infra.TokenFile), bearerOf(t, "mc-1", 1)) {
+		t.Fatal("the other output did not render")
+	}
+}
+
+// TestRenderHonorsContextWhileADirectoryIsLocked models a CLI renderer
+// stopped while it holds the directory lock: Ensure must return at its
+// deadline and Run at its cancellation, not block on the lock.
+func TestRenderHonorsContextWhileADirectoryIsLocked(t *testing.T) {
+	work := output(t, "work")
+	release := holdDirLock(t, filepath.Dir(work.TokenFile))
+	src := &fakeSource{}
+	src.set(live("mc-1", 1))
+	h := newHarness(t, []Output{work}, src)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if err := h.r.Ensure(ctx, connect.TokenRow{SessionID: "mc-1", Generation: 1}); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Ensure = %v, want the context's deadline", err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("Ensure returned %s after its deadline", elapsed)
+	}
+
+	runCtx, runCancel := context.WithCancel(context.Background())
+	busy := make(chan struct{}, 1)
+	h.r.onLockBusy = func() {
+		select {
+		case busy <- struct{}{}:
+		default:
+		}
+	}
+	done := make(chan error, 1)
+	go func() { done <- h.r.Run(runCtx) }()
+	select {
+	case <-busy:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run never waited on the lock")
+	}
+	runCancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run = %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not return while the lock was held")
+	}
+
+	// Once the lock is free the same renderer renders.
+	release()
+	h.r.onLockBusy = nil
+	if err := h.r.Ensure(context.Background(), connect.TokenRow{SessionID: "mc-1", Generation: 1}); err != nil {
+		t.Fatalf("Ensure after release: %v", err)
+	}
+}
+
+// TestOneUnlockableDirectoryDoesNotStopTheOthers pins per-output isolation
+// at the lock: an output whose directory cannot be locked fails alone, and
+// every other output still revokes and ensures.
+func TestOneUnlockableDirectoryDoesNotStopTheOthers(t *testing.T) {
+	missing := Output{Ledger: "infra", TokenFile: filepath.Join(t.TempDir(), "not-provisioned", "serve-tokens")}
+	work := output(t, "work")
+	renderedWith(t, work.TokenFile, nil, connect.TokenRow{SessionID: "mc-revoked", Generation: 1})
+	src := &fakeSource{}
+	src.set(live("mc-new", 1))
+	h := newHarness(t, []Output{missing, work}, src)
+	err := h.r.Ensure(context.Background(), connect.TokenRow{SessionID: "mc-new", Generation: 1})
+	if !errors.Is(err, ErrWriteFailed) {
+		t.Fatalf("Ensure = %v, want the missing directory's render_write_failed", err)
+	}
+	if !strings.Contains(err.Error(), "ledger infra") || strings.Contains(err.Error(), "ledger work") {
+		t.Fatalf("the failure is not attributed to the missing output alone: %v", err)
+	}
+	got := readFile(t, work.TokenFile)
+	if connect.TokenFileHoldsLine(got, bearerOf(t, "mc-revoked", 1)) {
+		t.Fatal("the healthy output kept a revoked bearer")
+	}
+	if !connect.TokenFileHoldsLine(got, bearerOf(t, "mc-new", 1)) {
+		t.Fatal("the healthy output lacks the ensured bearer")
+	}
+}
+
+// TestRenderHoldsEveryDirectoryLockAcrossTheRowRead pins the render's own
+// use of the lock: another open file description cannot take any output's
+// directory lock while the rows are read.
+func TestRenderHoldsEveryDirectoryLockAcrossTheRowRead(t *testing.T) {
+	work, infra := output(t, "work"), output(t, "infra")
+	src := &fakeSource{}
+	src.set(live("mc-1", 1))
+	src.check = func() error {
+		for _, o := range []Output{work, infra} {
+			if !dirLocked(t, filepath.Dir(o.TokenFile)) {
+				return fmt.Errorf("%s's directory is not locked during the row read", o.Ledger)
+			}
+		}
+		return nil
+	}
+	h := newHarness(t, []Output{work, infra}, src)
+	if _, err := h.r.RenderOnce(context.Background()); err != nil {
+		t.Fatalf("RenderOnce: %v", err)
+	}
+	for _, o := range []Output{work, infra} {
+		if dirLocked(t, filepath.Dir(o.TokenFile)) {
+			t.Fatalf("%s's directory is still locked after the render", o.Ledger)
+		}
+	}
+}
+
+// TestAStaleRenderNeverLandsAfterANewerOne models a CLI renderer whose row
+// read predates a revocation racing another renderer of the same file: the
+// directory lock makes the later row read write last, so the revoked bearer
+// does not come back.
+func TestAStaleRenderNeverLandsAfterANewerOne(t *testing.T) {
+	dir := t.TempDir()
+	o := Output{Ledger: "work", TokenFile: filepath.Join(dir, "serve-tokens")}
+	stale := &fakeSource{entered: make(chan int, 1), gate: make(chan struct{})}
+	stale.set(live("mc-x", 1))
+	a := newHarness(t, []Output{o}, stale)
+	fresh := &fakeSource{}
+	fresh.set() // mc-x revoked
+	b := newHarness(t, []Output{o}, fresh)
+
+	aDone := make(chan error, 1)
+	go func() {
+		_, err := a.r.RenderOnce(context.Background())
+		aDone <- err
+	}()
+	recvCall(t, stale.entered) // A has read rows holding mc-x and waits
+
+	busy := make(chan struct{}, 1)
+	b.r.onLockBusy = func() {
+		select {
+		case busy <- struct{}{}:
+		default:
+		}
+	}
+	bDone := make(chan error, 1)
+	go func() {
+		_, err := b.r.RenderOnce(context.Background())
+		bDone <- err
+	}()
+	select {
+	case <-busy: // B waits for A's lock, as it must
+	case err := <-bDone:
+		t.Fatalf("B rendered while A held its directory lock (err %v)", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("B neither waited nor rendered")
+	}
+	stale.gate <- struct{}{}
+	for _, ch := range []chan error{aDone, bDone} {
+		select {
+		case err := <-ch:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("a render never finished")
+		}
+	}
+	if connect.TokenFileHoldsLine(readFile(t, o.TokenFile), bearerOf(t, "mc-x", 1)) {
+		t.Fatal("the stale render landed after the newer one: the revoked bearer is back")
+	}
+}
+
+func TestRenderOnceWithADirectoryReachedTwoWays(t *testing.T) {
+	realDir := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(realDir, alias); err != nil {
+		t.Fatal(err)
+	}
+	a := Output{Ledger: "work", TokenFile: filepath.Join(realDir, "work-tokens")}
+	b := Output{Ledger: "infra", TokenFile: filepath.Join(alias, "infra-tokens")}
+	src := &fakeSource{}
+	src.set(live("mc-1", 1))
+	h := newHarness(t, []Output{a, b}, src)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := h.r.RenderOnce(ctx); err != nil {
+		t.Fatalf("RenderOnce over one directory reached two ways: %v", err)
+	}
+	for _, o := range []Output{a, b} {
+		if !connect.TokenFileHoldsLine(readFile(t, o.TokenFile), bearerOf(t, "mc-1", 1)) {
+			t.Fatalf("%s did not render", o.Ledger)
+		}
+	}
+}
+
+// TestSeedNeverDropsContentItDoesNotOwn pins the tightened seed rule: a
+// file with no gc line is seeded over only when that drops nothing, so a
+// mis-pointed path or an operator file not yet split into a source is left
+// as it is.
+func TestSeedNeverDropsContentItDoesNotOwn(t *testing.T) {
+	t.Run("larger than the cap", func(t *testing.T) {
+		o := output(t, "work")
+		big := bytes.Repeat([]byte("not a token file\n"), 3<<20/17)
+		if err := os.WriteFile(o.TokenFile, big, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		h := newHarness(t, []Output{o}, nil)
+		if _, err := h.r.RenderOnce(context.Background()); !errors.Is(err, ErrSeedWouldDrop) {
+			t.Fatalf("error = %v, want render_seed_would_drop", err)
+		}
+		if got := readFile(t, o.TokenFile); !bytes.Equal(got, big) {
+			t.Fatal("a mis-pointed file was overwritten")
+		}
+	})
+	t.Run("operator tokens without a source", func(t *testing.T) {
+		o := output(t, "work")
+		content := []byte("ops-token-1\nops-token-2\n")
+		if err := os.WriteFile(o.TokenFile, content, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		h := newHarness(t, []Output{o}, nil)
+		_, err := h.r.RenderOnce(context.Background())
+		if !errors.Is(err, ErrSeedWouldDrop) {
+			t.Fatalf("error = %v, want render_seed_would_drop", err)
+		}
+		if !strings.Contains(err.Error(), "2 ") || strings.Contains(err.Error(), "ops-token") {
+			t.Fatalf("the error must name a count and never a line: %v", err)
+		}
+		if got := readFile(t, o.TokenFile); !bytes.Equal(got, content) {
+			t.Fatal("operator tokens were dropped")
+		}
+	})
+	t.Run("operator tokens partly in the source", func(t *testing.T) {
+		o := output(t, "work", "ops-token-1")
+		content := []byte("ops-token-1\nops-token-2\n")
+		if err := os.WriteFile(o.TokenFile, content, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		h := newHarness(t, []Output{o}, nil)
+		if _, err := h.r.RenderOnce(context.Background()); !errors.Is(err, ErrSeedWouldDrop) {
+			t.Fatalf("error = %v, want render_seed_would_drop", err)
+		}
+	})
+	t.Run("operator tokens all in the source", func(t *testing.T) {
+		o := output(t, "work", "ops-token-2", "ops-token-1", "ops-token-3")
+		if err := os.WriteFile(o.TokenFile, []byte("ops-token-1\nops-token-2\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		h := newHarness(t, []Output{o}, nil)
+		rep, err := h.r.RenderOnce(context.Background())
+		if err != nil || !rep.Outputs[0].Seeded {
+			t.Fatalf("RenderOnce = %+v, %v; want the seed", rep.Outputs, err)
+		}
+	})
+}
+
+// TestReportsAndRenderersPrintNoSecret pins that ordinary fmt verbs on the
+// values a host logs never print the key, the sentinel or a bearer.
+func TestReportsAndRenderersPrintNoSecret(t *testing.T) {
+	work := output(t, "work", "op-secret")
+	src := &fakeSource{}
+	src.set(live("mc-1", 1))
+	h := newHarness(t, []Output{work}, src)
+	rep, err := h.r.RenderOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sentinel, _ := connect.Sentinel(renderKey(), testCity)
+	bearer := bearerOf(t, "mc-1", 1)
+	secrets := []string{
+		sentinel[len(connect.SentinelPrefix):],
+		bearer[strings.LastIndex(bearer, ".")+1:],
+		"op-secret",
+		fmt.Sprintf("%v", renderKey()),
+		fmt.Sprintf("%#v", renderKey()),
+	}
+	cfg := Config{City: testCity, Key: renderKey(), Outputs: []Output{work}, Rows: src}
+	values := map[string]any{"report": rep, "output report": rep.Outputs[0], "renderer": h.r, "config": cfg}
+	for name, v := range values {
+		for _, verb := range []string{"%v", "%+v", "%#v", "%s"} {
+			out := fmt.Sprintf(verb, v)
+			for _, secret := range secrets {
+				if strings.Contains(out, secret) {
+					t.Fatalf("%s of the %s prints a secret: %s", verb, name, out)
+				}
+			}
+		}
+	}
+}
+
+// TestACoalescedEnsureSurvivesAnotherCallersDeadline pins that a queued
+// Ensure with a healthy context is not failed by a shared render that lost
+// only to another caller's deadline.
+func TestACoalescedEnsureSurvivesAnotherCallersDeadline(t *testing.T) {
+	work := output(t, "work")
+	src := &fakeSource{entered: make(chan int, 8)}
+	src.set(live("mc-1", 1))
+	h := newHarness(t, []Output{work}, src)
+	if _, err := h.r.RenderOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	recvCall(t, src.entered)
+
+	// A's render waits on the directory lock, holding the render slot.
+	release := holdDirLock(t, filepath.Dir(work.TokenFile))
+	busy := make(chan struct{}, 1)
+	h.r.onLockBusy = func() {
+		select {
+		case busy <- struct{}{}:
+		default:
+		}
+	}
+	queued := make(chan struct{}, 2)
+	h.r.onQueued = func() { queued <- struct{}{} }
+	ctxA, cancelA := context.WithCancel(context.Background())
+	defer cancelA()
+	src.hook = func(ctx context.Context, n int) error {
+		if n == 2 { // A's row read: it outlives A's context
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return nil
+	}
+	row := connect.TokenRow{SessionID: "mc-1", Generation: 1}
+	aDone := make(chan error, 1)
+	go func() { aDone <- h.r.Ensure(ctxA, row) }()
+	<-queued
+	select {
+	case <-busy:
+	case <-time.After(10 * time.Second):
+		t.Fatal("A never waited on the lock")
+	}
+	// B queues behind A before A's row read begins, so A's render could
+	// satisfy it.
+	bDone := make(chan error, 1)
+	go func() { bDone <- h.r.Ensure(context.Background(), row) }()
+	<-queued
+	release()
+	if n := recvCall(t, src.entered); n != 2 {
+		t.Fatalf("A's read is call %d", n)
+	}
+	cancelA()
+	if err := <-aDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("A = %v, want its own cancellation", err)
+	}
+	select {
+	case err := <-bDone:
+		if err != nil {
+			t.Fatalf("B failed with A's cancellation: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("B never returned")
+	}
+}
+
+// TestRunSchedulesFromTheRenderStart pins that a slow render does not
+// stretch the period: the wait is the interval less the render's duration.
+func TestRunSchedulesFromTheRenderStart(t *testing.T) {
+	src := &fakeSource{}
+	h := newHarness(t, []Output{output(t, "work")}, src)
+	src.hook = func(context.Context, int) error {
+		h.clk.Advance(4 * time.Second)
+		return nil
+	}
+	h.r.jitter = func() float64 { return 0 }
+	rh := startRun(t, h)
+	if d := rh.pass(t); d != DefaultInterval-4*time.Second {
+		t.Fatalf("wait = %s, want the interval less the 4 s render", d)
+	}
+	src.hook = func(context.Context, int) error {
+		h.clk.Advance(time.Minute)
+		return nil
+	}
+	rh.tick()
+	if d := rh.pass(t); d != 0 {
+		t.Fatalf("wait after a render longer than the interval = %s, want 0", d)
+	}
+}
+
+func TestRenderRemovesStaleTempFiles(t *testing.T) {
+	o := output(t, "work")
+	dir := filepath.Dir(o.TokenFile)
+	stale := filepath.Join(dir, ".serve-tokens.tmp-123456")
+	unrelated := []string{filepath.Join(dir, ".serve-tokens.tmp-notours"), filepath.Join(dir, ".other.tmp-1")}
+	for _, p := range append([]string{stale}, unrelated...) {
+		if err := os.WriteFile(p, []byte("gcs1.leaked\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h := newHarness(t, []Output{o}, nil)
+	if _, err := h.r.RenderOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(stale); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a stale temp file survived the render: %v", err)
+	}
+	for _, p := range unrelated {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("a file that is not the renderer's temp file was removed: %v", err)
+		}
+	}
+}
+
+func TestInvalidSessionIDsFromASourceAreCounted(t *testing.T) {
+	o := output(t, "work")
+	src := &fakeSource{}
+	src.set(live("mc-1", 1), live("bad id", 1))
+	h := newHarness(t, []Output{o}, src)
+	rep, err := h.r.RenderOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Rows != 1 || rep.DroppedRows != 1 {
+		t.Fatalf("rows = %d dropped = %d; want the invalid id counted", rep.Rows, rep.DroppedRows)
 	}
 }

@@ -90,10 +90,18 @@ func TestEligibleTokenRowNormalizesGenerationAsTheStartPath(t *testing.T) {
 	}
 }
 
-func TestEligibleTokenRowRefusesInvalidSessionIDs(t *testing.T) {
+// TestEligibleTokenRowPassesInvalidSessionIDsThrough pins that eligibility is
+// D6's lifecycle rule alone: a row whose id no bearer can carry reaches the
+// renderer, which drops and counts it (Report.DroppedRows), so gc doctor sees
+// it instead of a source dropping it silently.
+func TestEligibleTokenRowPassesInvalidSessionIDsThrough(t *testing.T) {
 	for _, id := range []string{"", "-lead", "has space", "a/b", "é"} {
-		if row, ok := EligibleTokenRow(sessionBead(id, "open", map[string]string{"state": "active"})); ok {
-			t.Errorf("id %q eligible as %+v", id, row)
+		row, ok := EligibleTokenRow(sessionBead(id, "open", map[string]string{"state": "active"}))
+		if !ok || row.SessionID != id || row.Generation != 1 {
+			t.Errorf("id %q = %+v, %v; want it passed through", id, row, ok)
+		}
+		if _, ok := EligibleTokenRow(sessionBead(id, "closed", nil)); ok {
+			t.Errorf("closed id %q eligible", id)
 		}
 	}
 }

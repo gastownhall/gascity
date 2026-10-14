@@ -7,7 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/connect"
 )
@@ -157,5 +159,25 @@ func TestCreateKeyRefusesLooseParent(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("a refused CreateKey left a file: %v", err)
+	}
+}
+
+func TestLoadKeyRefusesAFIFOWithoutBlocking(t *testing.T) {
+	path := filepath.Join(keyDir(t), "city.key")
+	if err := syscall.Mkfifo(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := LoadKey(path)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("a FIFO key was loaded")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("LoadKey blocked on a FIFO")
 	}
 }

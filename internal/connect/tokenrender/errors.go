@@ -30,6 +30,11 @@ const (
 	// CauseRowIneligible means an Ensure's row was not rendered: the row is
 	// not open, not eligible, or at another generation.
 	CauseRowIneligible Cause = "render_row_ineligible"
+	// CauseSeedWouldDrop means an output holds no gc line but holds content
+	// the seed would drop: more than bd serve's 1 MiB cap (a mis-pointed
+	// path), or token lines its operator source does not hold. The file is
+	// left as it is; move those lines into the operator source first.
+	CauseSeedWouldDrop Cause = "render_seed_would_drop"
 )
 
 // Causes lists every renderer cause in §3.8's order.
@@ -37,6 +42,7 @@ func Causes() []Cause {
 	return []Cause{
 		CauseOperatorUnreadable, CauseRowsUnavailable, CauseForeignSentinel,
 		CauseNewerFormat, CauseTooLarge, CauseWriteFailed, CauseRowIneligible,
+		CauseSeedWouldDrop,
 	}
 }
 
@@ -59,6 +65,7 @@ var (
 	ErrTooLarge           = &Error{Cause: CauseTooLarge}
 	ErrWriteFailed        = &Error{Cause: CauseWriteFailed}
 	ErrRowIneligible      = &Error{Cause: CauseRowIneligible}
+	ErrSeedWouldDrop      = &Error{Cause: CauseSeedWouldDrop}
 )
 
 // Error renders "<cause>: ledger <name>: <detail>: <err>", omitting empty parts.

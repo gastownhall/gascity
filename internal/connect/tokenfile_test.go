@@ -79,7 +79,7 @@ func TestRenderTokenFileRefusals(t *testing.T) {
 		rows     []TokenRow
 	}{
 		{"operator line holding a newline", []string{"a\nb"}, testKey(), goldenCity, nil},
-		{"operator line holding a carriage return", []string{"a\rb"}, testKey(), goldenCity, nil},
+		{"operator line ending in a carriage return", []string{"a\r"}, testKey(), goldenCity, nil},
 		{"empty operator line", []string{""}, testKey(), goldenCity, nil},
 		{"untrimmed operator line", []string{" a"}, testKey(), goldenCity, nil},
 		{"gc bearer as operator line", []string{"gcb1.x.1.y"}, testKey(), goldenCity, nil},
@@ -92,8 +92,12 @@ func TestRenderTokenFileRefusals(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if out, err := RenderTokenFile(tc.operator, tc.key, tc.city, tc.rows); err == nil {
+			out, err := RenderTokenFile(tc.operator, tc.key, tc.city, tc.rows)
+			if err == nil {
 				t.Fatalf("RenderTokenFile accepted; rendered %q", out)
+			}
+			if isOperatorCase := len(tc.operator) > 0; isOperatorCase != errors.Is(err, ErrInvalidOperatorLine) {
+				t.Fatalf("error = %v; ErrInvalidOperatorLine must mark exactly the operator-line refusals", err)
 			}
 		})
 	}
@@ -116,20 +120,22 @@ func TestRenderTokenFileSizeCap(t *testing.T) {
 }
 
 func TestParseOperatorLines(t *testing.T) {
-	content := []byte("  tok-a \n\n\r\ngcb1.s.1.mac\ntok-b\r\ngcs1.sentinel\n\tgcb7.future\ngcbx.not-gc\ntok-a\nlast-unterminated")
+	content := []byte("  tok-a \n\n\r\ngcb1.s.1.mac\ntok-b\r\ngcs1.sentinel\n\tgcb7.future\ngcbx.not-gc\ntok-a\ntok\rinner-cr\n")
 	lines, gcLike, err := ParseOperatorLines(content)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"tok-a", "tok-b", "gcbx.not-gc", "tok-a", "last-unterminated"}
+	want := []string{"tok-a", "tok-b", "gcbx.not-gc", "tok-a", "tok\rinner-cr"}
 	if !slices.Equal(lines, want) {
 		t.Fatalf("lines = %q, want %q", lines, want)
 	}
 	if gcLike != 3 {
 		t.Fatalf("gcLike = %d, want 3", gcLike)
 	}
-	if lines, gcLike, err := ParseOperatorLines(nil); err != nil || len(lines) != 0 || gcLike != 0 {
-		t.Fatalf("empty source = %q, %d, %v", lines, gcLike, err)
+	// Only gc-like lines: bd serve would load the file, so the source is
+	// whole; nothing is copied.
+	if lines, gcLike, err := ParseOperatorLines([]byte("gcb1.s.1.mac\n")); err != nil || len(lines) != 0 || gcLike != 1 {
+		t.Fatalf("gc-only source = %q, %d, %v", lines, gcLike, err)
 	}
 	if _, _, err := ParseOperatorLines(make([]byte, MaxTokenFileBytes+1)); !errors.Is(err, ErrTokenFileTooLarge) {
 		t.Fatalf("oversized source error = %v, want ErrTokenFileTooLarge", err)
@@ -137,6 +143,59 @@ func TestParseOperatorLines(t *testing.T) {
 	// Whatever the source holds, its parsed lines always render.
 	if _, err := RenderTokenFile(lines, testKey(), goldenCity, nil); err != nil {
 		t.Fatalf("parsed operator lines do not render: %v", err)
+	}
+}
+
+// TestParseOperatorLinesRefusesIncompleteSources pins bd-enterprise's
+// completeness rule (DES-CN F5) on the operator source: a source caught
+// mid-write by a non-atomic writer is refused whole, never copied, so a
+// fragment of a secret never becomes a served token.
+func TestParseOperatorLinesRefusesIncompleteSources(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		want    error
+	}{
+		{"truncated to empty", "", ErrTokenFileNoTokens},
+		{"whitespace only", " \n\r\n", ErrTokenFileNoTokens},
+		{"cut mid-token", "rot", ErrTokenFileUnterminated},
+		{"cut after a whole line", "rotated-token-old\nrot", ErrTokenFileUnterminated},
+		{"trailing whitespace without a newline", "tok\n  ", ErrTokenFileUnterminated},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			lines, _, err := ParseOperatorLines([]byte(tc.content))
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("error = %v, want %v", err, tc.want)
+			}
+			if lines != nil {
+				t.Fatalf("an incomplete source returned lines %q", lines)
+			}
+			if strings.Contains(err.Error(), "rot") {
+				t.Fatal("the error echoes source content")
+			}
+		})
+	}
+}
+
+func TestForeignOperatorLines(t *testing.T) {
+	content := []byte("op-a\n gcs1.x \nop-b\nop-a\ngcb1.s.1.m\n")
+	cases := []struct {
+		operator []string
+		want     int
+	}{
+		{nil, 3},
+		{[]string{"op-a"}, 1},
+		{[]string{"op-a", "op-b"}, 0},
+		{[]string{"op-b", "op-a", "op-c"}, 0},
+	}
+	for _, tc := range cases {
+		if got := ForeignOperatorLines(content, tc.operator); got != tc.want {
+			t.Errorf("ForeignOperatorLines(%q) = %d, want %d", tc.operator, got, tc.want)
+		}
+	}
+	if got := ForeignOperatorLines(nil, nil); got != 0 {
+		t.Errorf("absent content = %d", got)
 	}
 }
 
@@ -155,7 +214,7 @@ func TestIsGCLine(t *testing.T) {
 
 func TestInspectTokenFile(t *testing.T) {
 	for _, content := range []string{"", "op-a\nop-b\n", "  \n\n"} {
-		if v := InspectTokenFile([]byte(content)); v.GCLines != 0 || v.NewerFormat || len(v.Sentinels) != 0 || len(v.Bearers) != 0 {
+		if v := InspectTokenFile([]byte(content)); v.GCLines != 0 || v.NewerFormat || v.Sentinels != 0 || len(v.Bearers) != 0 {
 			t.Errorf("InspectTokenFile(%q) = %+v, want no gc line", content, v)
 		}
 	}
@@ -168,8 +227,15 @@ func TestInspectTokenFile(t *testing.T) {
 	if v.GCLines != 5 || v.NewerFormat || v.Unterminated {
 		t.Fatalf("golden view = %+v", v)
 	}
-	if !slices.Equal(v.Sentinels, []string{"gcs1.x5f4iebvW3fmymjWGE5g9uG-H6FDn7W7LdrsnfWCTGU"}) {
-		t.Fatalf("sentinels = %q", v.Sentinels)
+	const goldenSentinel = "gcs1.x5f4iebvW3fmymjWGE5g9uG-H6FDn7W7LdrsnfWCTGU"
+	if v.Sentinels != 1 || !v.HasSentinel(goldenSentinel) || v.HasSentinel("gcs1.other") || v.HasSentinel("") {
+		t.Fatalf("sentinels = %d, HasSentinel(golden) = %v", v.Sentinels, v.HasSentinel(goldenSentinel))
+	}
+	// The view never carries a sentinel in clear text, so printing it is safe.
+	for _, verb := range []string{"%v", "%+v", "%#v"} {
+		if out := fmt.Sprintf(verb, v); strings.Contains(out, goldenSentinel[len(SentinelPrefix):]) {
+			t.Fatalf("%s of a TokenFileView prints the sentinel: %s", verb, out)
+		}
 	}
 	wantRows := []TokenRow{{"mc-abc12", 7}, {"mc-abc12", 10}, {"mc-zz9", 1}, {"mc.abc.12", 130}}
 	if !slices.Equal(v.Bearers, wantRows) {

@@ -2,11 +2,14 @@ package tokenrender
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,15 +18,19 @@ import (
 )
 
 // DefaultInterval is the periodic render interval (DES-CN D5): revocation
-// lands within one interval plus bd serve's one-second reload.
+// lands within one interval, plus the render's own duration, plus bd serve's
+// one-second reload.
 const DefaultInterval = 15 * time.Second
 
-// jitterFraction is Run's symmetric jitter around the interval.
+// jitterFraction is how much Run's jitter may shorten the interval; it never
+// lengthens it.
 const jitterFraction = 0.1
 
 // RowSource lists the session rows that earn a bearer line. Each call reads
 // live state, never a cache, so a render's revocation is as fresh as its
-// read. Implementations filter with EligibleTokenRow.
+// read. Implementations filter with EligibleTokenRow and return every row it
+// passes, including one whose id no bearer can carry: the renderer drops and
+// counts those (Report.DroppedRows).
 type RowSource interface {
 	EligibleRows(ctx context.Context) ([]connect.TokenRow, error)
 }
@@ -54,13 +61,20 @@ type Config struct {
 	Rows RowSource
 	// Interval is Run's render interval; zero means DefaultInterval.
 	Interval time.Duration
-	// Clock stamps token-file mtimes; nil means the real clock.
+	// Clock stamps token-file mtimes and times Run's schedule; nil means the
+	// real clock.
 	Clock clock.Clock
 	// Logf receives one line per change of a render cause; nil discards.
 	Logf func(format string, args ...any)
 }
 
-// OutputReport is one output's result in a render.
+// Format prints the config without its key.
+func (c Config) Format(f fmt.State, _ rune) {
+	_, _ = fmt.Fprintf(f, "tokenrender.Config{City: %s, Key: [redacted], Outputs: %d, Interval: %s}", c.City, len(c.Outputs), c.Interval)
+}
+
+// OutputReport is one output's result in a render. It holds no token-file
+// content, so printing a report leaks no credential.
 type OutputReport struct {
 	Ledger    string
 	TokenFile string
@@ -74,7 +88,24 @@ type OutputReport struct {
 	// Err is the output's *Error, or nil when the file is current.
 	Err error
 
-	content []byte // the file's bytes after the render, when Err is nil
+	lines lineSet // digests of the file's lines after the render, when Err is nil
+}
+
+// lineSet holds the SHA-256 digests of a file's token lines: enough to tell
+// whether it holds a line, never the line itself.
+type lineSet map[[sha256.Size]byte]struct{}
+
+func newLineSet(content []byte) lineSet {
+	set := lineSet{}
+	for _, tok := range connect.TokenLines(content) {
+		set[sha256.Sum256([]byte(tok))] = struct{}{}
+	}
+	return set
+}
+
+func (s lineSet) holds(line string) bool {
+	_, ok := s[sha256.Sum256([]byte(line))]
+	return ok
 }
 
 // Report is the result of one render.
@@ -89,6 +120,12 @@ type Report struct {
 
 	seq  uint64 // the render's row-read sequence number
 	rows []connect.TokenRow
+}
+
+// ctxFailed reports whether the render's row read failed only because the
+// context it ran under ended.
+func (r Report) ctxFailed() bool {
+	return errors.Is(r.RowsErr, context.Canceled) || errors.Is(r.RowsErr, context.DeadlineExceeded)
 }
 
 // Err joins every failure in the report; nil means every output is current.
@@ -116,7 +153,8 @@ type Renderer struct {
 	last    *Report // the latest completed render
 	causes  map[string]string
 
-	onQueued func() // test hook: an Ensure has taken its ticket
+	onQueued   func() // test hook: an Ensure has taken its ticket
+	onLockBusy func() // test hook: a directory lock was found busy
 
 	after  func(time.Duration) <-chan time.Time
 	jitter func() float64 // uniform in [0, 1)
@@ -161,6 +199,11 @@ func New(cfg Config) (*Renderer, error) {
 	}, nil
 }
 
+// Format prints the renderer without its key or sentinel.
+func (r *Renderer) Format(f fmt.State, _ rune) {
+	_, _ = fmt.Fprintf(f, "tokenrender.Renderer{City: %s, Outputs: %d}", r.cfg.City, len(r.cfg.Outputs))
+}
+
 func validateOutputs(outputs []Output) error {
 	ledgers := map[string]bool{}
 	tokenFiles := map[string]bool{}
@@ -192,16 +235,21 @@ func cleanAbs(p string) bool {
 	return p != "" && filepath.IsAbs(p) && filepath.Clean(p) == p
 }
 
-// RenderOnce runs one render: for each output it reads the operator source,
-// inspects the file and writes the seed into one that holds no gc line; then
-// it reads the rows once, renders and writes each output. The error joins
-// every cause that left an output not current.
+// RenderOnce runs one render: it locks each output's directory, then for
+// each output reads the operator source, inspects the file and writes the
+// seed into one that holds no gc line; then it reads the rows once, renders
+// and writes each output. The error joins every cause that left an output
+// not current. If ctx ends while a directory lock is busy, RenderOnce
+// returns ctx's error, wrapped, having written nothing.
 func (r *Renderer) RenderOnce(ctx context.Context) (Report, error) {
 	if err := r.acquire(ctx); err != nil {
 		return Report{}, err
 	}
 	defer r.release()
-	rep := r.render(ctx)
+	rep, err := r.render(ctx)
+	if err != nil {
+		return Report{}, err
+	}
 	return rep, rep.Err()
 }
 
@@ -209,7 +257,9 @@ func (r *Renderer) RenderOnce(ctx context.Context) (Report, error) {
 // row's bearer into every output, or with the reason it did not:
 // render_row_ineligible when the row was not among the eligible rows (closed,
 // ineligible, or at another generation), otherwise the cause that left an
-// output without the line. Concurrent Ensure calls share one render.
+// output without the line. Concurrent Ensure calls share one render; a
+// shared render whose row read failed only on another caller's context is
+// not reused.
 func (r *Renderer) Ensure(ctx context.Context, row connect.TokenRow) error {
 	bearer, err := connect.MintBearer(r.cfg.Key, r.cfg.City, row.SessionID, row.Generation)
 	if err != nil {
@@ -225,14 +275,17 @@ func (r *Renderer) Ensure(ctx context.Context, row connect.TokenRow) error {
 	if err := r.acquire(ctx); err != nil {
 		return err
 	}
+	defer r.release()
 	r.mu.Lock()
 	rep := r.last
 	r.mu.Unlock()
-	if rep == nil || rep.seq <= ticket {
-		fresh := r.render(ctx)
+	if rep == nil || rep.seq <= ticket || rep.ctxFailed() {
+		fresh, err := r.render(ctx)
+		if err != nil {
+			return err
+		}
 		rep = &fresh
 	}
-	r.release()
 	return checkEnsured(*rep, row, bearer)
 }
 
@@ -248,31 +301,35 @@ func checkEnsured(rep Report, row connect.TokenRow, bearer string) error {
 		switch {
 		case o.Err != nil:
 			errs = append(errs, o.Err)
-		case !connect.TokenFileHoldsLine(o.content, bearer):
+		case !o.lines.holds(bearer):
 			errs = append(errs, &Error{Cause: CauseRowIneligible, Ledger: o.Ledger, Detail: fmt.Sprintf("session %q generation %d is missing from the rendered file", row.SessionID, row.Generation)})
 		}
 	}
 	return errors.Join(errs...)
 }
 
-// Run renders every Interval, with ±10% jitter, until ctx ends, and returns
-// ctx's error. Each distinct cause is logged once until it changes or clears.
+// Run renders until ctx ends, and returns ctx's error. Each render starts
+// at most one Interval after the previous one started: jitter only shortens
+// the interval (by up to 10%), and a render's duration is taken out of the
+// wait. Each distinct cause is logged once until it changes or clears.
 func (r *Renderer) Run(ctx context.Context) error {
 	for {
+		start := r.cfg.Clock.Now()
 		if _, err := r.RenderOnce(ctx); err != nil && ctx.Err() != nil {
 			return ctx.Err()
 		}
+		wait := max(r.nextInterval()-r.cfg.Clock.Now().Sub(start), 0)
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-r.after(r.nextInterval()):
+		case <-r.after(wait):
 		}
 	}
 }
 
 func (r *Renderer) nextInterval() time.Duration {
 	spread := float64(r.cfg.Interval) * jitterFraction
-	return r.cfg.Interval + time.Duration((r.jitter()*2-1)*spread)
+	return r.cfg.Interval - time.Duration(r.jitter()*spread)
 }
 
 func (r *Renderer) acquire(ctx context.Context) error {
@@ -293,33 +350,41 @@ type outputState struct {
 }
 
 // render runs one render with r.sem held, records it as the latest, and
-// logs cause changes.
-func (r *Renderer) render(ctx context.Context) Report {
-	rep := r.renderLocked(ctx)
+// logs cause changes. It fails only when ctx ends while a directory lock is
+// busy; then nothing is written or recorded.
+func (r *Renderer) render(ctx context.Context) (Report, error) {
+	rep, err := r.renderLocked(ctx)
+	if err != nil {
+		return Report{}, err
+	}
 	r.mu.Lock()
 	r.last = &rep
 	r.mu.Unlock()
 	r.logCauses(rep)
-	return rep
+	return rep, nil
 }
 
-func (r *Renderer) renderLocked(ctx context.Context) Report {
+func (r *Renderer) renderLocked(ctx context.Context) (Report, error) {
 	states := make([]*outputState, len(r.cfg.Outputs))
 	for i, o := range r.cfg.Outputs {
 		states[i] = &outputState{rep: OutputReport{Ledger: o.Ledger, TokenFile: o.TokenFile}}
 	}
-	unlock, err := LockOutputs(r.cfg.Outputs)
+	dirs, err := lockOutputDirs(ctx, r.cfg.Outputs, r.onLockBusy)
 	if err != nil {
-		// The row read below still runs so Ensure can tell an ineligible row
-		// from a lock failure; every output carries the failure.
-		for _, s := range states {
-			s.rep.Err = &Error{Cause: CauseWriteFailed, Ledger: s.rep.Ledger, Err: err}
-		}
-		unlock = func() {}
+		return Report{}, err
 	}
-	defer unlock()
-	if err == nil {
-		for i, o := range r.cfg.Outputs {
+	defer closeOutputDirs(dirs)
+	// A directory that cannot be locked fails its own outputs only; the
+	// others render, so one bad directory never stops revocation elsewhere.
+	for _, d := range dirs {
+		for _, i := range d.outputs {
+			if d.err != nil {
+				states[i].rep.Err = &Error{Cause: CauseWriteFailed, Ledger: states[i].rep.Ledger, Err: d.err}
+			}
+		}
+	}
+	for i, o := range r.cfg.Outputs {
+		if states[i].rep.Err == nil {
 			r.prepare(o, states[i])
 		}
 	}
@@ -329,6 +394,8 @@ func (r *Renderer) renderLocked(ctx context.Context) Report {
 	rep := Report{seq: r.readSeq}
 	r.mu.Unlock()
 
+	// The row read runs even when no output can be written, so Ensure can
+	// tell an ineligible row from an output failure.
 	rows, rowsErr := r.cfg.Rows.EligibleRows(ctx)
 	if rowsErr != nil {
 		rep.RowsErr = &Error{Cause: CauseRowsUnavailable, Err: rowsErr}
@@ -349,14 +416,19 @@ func (r *Renderer) renderLocked(ctx context.Context) Report {
 	for _, s := range states {
 		rep.Outputs = append(rep.Outputs, s.rep)
 	}
-	return rep
+	return rep, nil
 }
 
-// prepare reads the operator source and the current file, applies the
-// refusals, and writes the seed into a file that holds no gc line.
+// prepare removes the renderer's own stale temp files, reads the operator
+// source and the current file, applies the refusals, and writes the seed
+// into a file that holds no gc line when that drops nothing.
 func (r *Renderer) prepare(o Output, s *outputState) {
+	if err := r.removeStaleTemps(o); err != nil {
+		s.rep.Err = &Error{Cause: CauseWriteFailed, Ledger: o.Ledger, Detail: "removing stale temp files", Err: err}
+		return
+	}
 	if o.OperatorFile != "" {
-		data, err := readCapped(o.OperatorFile, connect.MaxTokenFileBytes)
+		data, _, err := readRegular(o.OperatorFile, connect.MaxTokenFileBytes, true)
 		if err != nil {
 			s.rep.Err = &Error{Cause: CauseOperatorUnreadable, Ledger: o.Ledger, Err: err}
 			return
@@ -378,10 +450,17 @@ func (r *Renderer) prepare(o Output, s *outputState) {
 	case view.NewerFormat:
 		s.rep.Err = &Error{Cause: CauseNewerFormat, Ledger: o.Ledger, Detail: o.TokenFile + " holds a gc line of a newer format"}
 		return
-	case view.GCLines > 0 && !slices.Contains(view.Sentinels, r.sentinel):
+	case view.GCLines > 0 && !view.HasSentinel(r.sentinel):
 		s.rep.Err = &Error{Cause: CauseForeignSentinel, Ledger: o.Ledger, Detail: o.TokenFile + " holds gc lines without this city's and key's sentinel"}
 		return
 	case view.GCLines > 0:
+		return
+	case len(current) > connect.MaxTokenFileBytes:
+		s.rep.Err = &Error{Cause: CauseSeedWouldDrop, Ledger: o.Ledger, Detail: o.TokenFile + " exceeds bd serve's 1 MiB cap, so it is not a token file; check the path"}
+		return
+	}
+	if n := connect.ForeignOperatorLines(current, s.operator); n > 0 {
+		s.rep.Err = &Error{Cause: CauseSeedWouldDrop, Ledger: o.Ledger, Detail: fmt.Sprintf("%s holds %d token lines its operator source does not; move them into the operator source", o.TokenFile, n)}
 		return
 	}
 	seed, err := connect.RenderTokenFile(s.operator, r.cfg.Key, r.cfg.City, nil)
@@ -397,6 +476,43 @@ func (r *Renderer) prepare(o Output, s *outputState) {
 	s.rep.Seeded = changed
 }
 
+// removeStaleTemps removes the temp files a crashed write of o's token file
+// left behind ('.<base>.tmp-<digits>', the pattern writeTokenFile creates):
+// each holds a whole render. Call it with o's directory locked, so no write
+// of this file is in flight. A path another output owns is never removed.
+func (r *Renderer) removeStaleTemps(o Output) error {
+	dir, base := filepath.Split(o.TokenFile)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	prefix := "." + base + ".tmp-"
+	var errs []error
+	for _, e := range entries {
+		suffix, ok := strings.CutPrefix(e.Name(), prefix)
+		if !ok || suffix == "" || strings.Trim(suffix, "0123456789") != "" || !e.Type().IsRegular() {
+			continue
+		}
+		path := filepath.Join(dir, e.Name())
+		if r.ownedByAnOutput(path) {
+			continue
+		}
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (r *Renderer) ownedByAnOutput(path string) bool {
+	for _, o := range r.cfg.Outputs {
+		if o.TokenFile == path || o.OperatorFile == path {
+			return true
+		}
+	}
+	return false
+}
+
 // write renders the output from the rows and replaces the file.
 func (r *Renderer) write(o Output, s *outputState, rows []connect.TokenRow) {
 	content, err := connect.RenderTokenFile(s.operator, r.cfg.Key, r.cfg.City, rows)
@@ -410,12 +526,15 @@ func (r *Renderer) write(o Output, s *outputState, rows []connect.TokenRow) {
 		return
 	}
 	s.rep.Changed = changed
-	s.rep.content = content
+	s.rep.lines = newLineSet(content)
 }
 
 func renderError(ledger string, err error) *Error {
-	if errors.Is(err, connect.ErrTokenFileTooLarge) {
+	switch {
+	case errors.Is(err, connect.ErrTokenFileTooLarge):
 		return &Error{Cause: CauseTooLarge, Ledger: ledger, Err: err}
+	case errors.Is(err, connect.ErrInvalidOperatorLine):
+		return &Error{Cause: CauseOperatorUnreadable, Ledger: ledger, Err: err}
 	}
 	return &Error{Cause: CauseWriteFailed, Ledger: ledger, Err: err}
 }

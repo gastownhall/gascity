@@ -2,14 +2,18 @@ package tokenrender
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/gastownhall/gascity/internal/connect"
 )
@@ -221,13 +225,13 @@ func TestWriteTokenFileIsAtomic(t *testing.T) {
 func TestLockOutputsSerializesInProcess(t *testing.T) {
 	dir := t.TempDir()
 	outputs := []Output{{Ledger: "work", TokenFile: filepath.Join(dir, "a")}}
-	unlock, err := LockOutputs(outputs)
+	unlock, err := LockOutputs(context.Background(), outputs)
 	if err != nil {
 		t.Fatal(err)
 	}
 	acquired := make(chan struct{})
 	go func() {
-		unlock2, err := LockOutputs([]Output{{Ledger: "infra", TokenFile: filepath.Join(dir, "b")}})
+		unlock2, err := LockOutputs(context.Background(), []Output{{Ledger: "infra", TokenFile: filepath.Join(dir, "b")}})
 		if err != nil {
 			t.Error(err)
 			close(acquired)
@@ -252,7 +256,7 @@ func TestLockOutputsSerializesInProcess(t *testing.T) {
 
 func TestLockOutputsLocksEachDirectoryOnce(t *testing.T) {
 	dir1, dir2 := t.TempDir(), t.TempDir()
-	unlock, err := LockOutputs([]Output{
+	unlock, err := LockOutputs(context.Background(), []Output{
 		{Ledger: "b", TokenFile: filepath.Join(dir2, "x")},
 		{Ledger: "a", TokenFile: filepath.Join(dir1, "x")},
 		{Ledger: "c", TokenFile: filepath.Join(dir1, "y")},
@@ -261,7 +265,151 @@ func TestLockOutputsLocksEachDirectoryOnce(t *testing.T) {
 		t.Fatalf("LockOutputs over a shared directory: %v", err)
 	}
 	unlock()
-	if _, err := LockOutputs([]Output{{Ledger: "x", TokenFile: filepath.Join(dir1, "missing-dir", "f")}}); err == nil {
+	if _, err := LockOutputs(context.Background(), []Output{{Ledger: "x", TokenFile: filepath.Join(dir1, "missing-dir", "f")}}); err == nil {
 		t.Fatal("locking a missing directory succeeded")
+	}
+}
+
+// holdDirLock takes an exclusive flock on dir through its own open file
+// description, as another process would, and returns its release.
+func holdDirLock(t *testing.T, dir string) func() {
+	t.Helper()
+	f, err := os.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		f.Close() //nolint:errcheck // test cleanup
+		t.Fatalf("holding %s: %v", dir, err)
+	}
+	var once sync.Once
+	release := func() {
+		once.Do(func() {
+			unix.Flock(int(f.Fd()), unix.LOCK_UN) //nolint:errcheck // close releases it anyway
+			f.Close()                             //nolint:errcheck // test cleanup
+		})
+	}
+	t.Cleanup(release)
+	return release
+}
+
+// dirLocked reports whether another open file description holds dir's flock.
+func dirLocked(t *testing.T, dir string) bool {
+	t.Helper()
+	f, err := os.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close() //nolint:errcheck // test probe
+	err = unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+	if err == nil {
+		unix.Flock(int(f.Fd()), unix.LOCK_UN) //nolint:errcheck // probe only
+		return false
+	}
+	if !errors.Is(err, unix.EWOULDBLOCK) {
+		t.Fatalf("probing %s: %v", dir, err)
+	}
+	return true
+}
+
+func TestLockOutputsHonorsContext(t *testing.T) {
+	dir := t.TempDir()
+	holdDirLock(t, dir)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := LockOutputs(ctx, []Output{{Ledger: "work", TokenFile: filepath.Join(dir, "a")}})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("LockOutputs = %v, want the context's deadline", err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("LockOutputs returned %s after its deadline", elapsed)
+	}
+}
+
+// TestLockOutputsDedupesOneDirectoryReachedTwoWays pins that a directory
+// reached through a symlinked alias is locked once: two flocks on one inode
+// through separate open file descriptions would block the caller on itself.
+func TestLockOutputsDedupesOneDirectoryReachedTwoWays(t *testing.T) {
+	realDir := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(realDir, alias); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	unlock, err := LockOutputs(ctx, []Output{
+		{Ledger: "work", TokenFile: filepath.Join(realDir, "a")},
+		{Ledger: "infra", TokenFile: filepath.Join(alias, "b")},
+	})
+	if err != nil {
+		t.Fatalf("LockOutputs over one directory reached two ways: %v", err)
+	}
+	if !dirLocked(t, realDir) {
+		t.Fatal("the directory is not locked")
+	}
+	unlock()
+	if dirLocked(t, realDir) {
+		t.Fatal("unlock left the directory locked")
+	}
+}
+
+// TestWriteTokenFileKeepsGroup pins that a replacement keeps the file's group
+// as well as its mode: a bd serve reading a 0640 file through its group must
+// keep reading it after a render.
+func TestWriteTokenFileKeepsGroup(t *testing.T) {
+	groups, err := os.Getgroups()
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := -1
+	for _, g := range groups {
+		if g != os.Getegid() {
+			other = g
+			break
+		}
+	}
+	if other < 0 {
+		t.Skip("the test user has no secondary group")
+	}
+	path := filepath.Join(t.TempDir(), "tokens")
+	if err := os.WriteFile(path, []byte("old\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chown(path, -1, other); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := WriteTokenFile(path, []byte("new\n")); err != nil {
+		t.Fatal(err)
+	}
+	st := statFile(t, path)
+	if gid := int(st.Sys().(*syscall.Stat_t).Gid); gid != other {
+		t.Fatalf("group = %d, want %d kept", gid, other)
+	}
+	if mode := st.Mode().Perm(); mode != 0o640 {
+		t.Fatalf("mode = %o, want 640 kept", mode)
+	}
+}
+
+func TestWriteTokenFileRefusesAFIFO(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tokens")
+	if err := syscall.Mkfifo(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := WriteTokenFile(path, []byte("x\n"))
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("a FIFO token file was replaced")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("WriteTokenFile blocked on a FIFO")
 	}
 }

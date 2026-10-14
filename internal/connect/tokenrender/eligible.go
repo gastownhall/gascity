@@ -28,11 +28,11 @@ var ineligibleStates = map[session.BaseState]bool{
 // the bead's status and metadata; the generation is normalized exactly as the
 // start path normalizes it (an unparsable or non-positive value becomes
 // session.DefaultGeneration), so the line matches the bearer minted for that
-// start. A bead id a bearer cannot carry is ineligible.
+// start. Eligibility is D6's lifecycle rule alone: a bead whose id no bearer
+// can carry is still returned, so the renderer drops and counts it
+// (Report.DroppedRows) and gc doctor sees it, rather than a source dropping
+// it uncounted.
 func EligibleTokenRow(b beads.Bead) (connect.TokenRow, bool) {
-	if !connect.ValidSessionID(b.ID) {
-		return connect.TokenRow{}, false
-	}
 	base := session.ProjectLifecycle(session.LifecycleInputFromMetadata(b.Status, b.Metadata)).BaseState
 	if ineligibleStates[base] {
 		return connect.TokenRow{}, false
