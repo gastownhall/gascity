@@ -11124,6 +11124,30 @@ exit 0
 	}
 }
 
+// TestGateSweepSkipsRigsThatAreNotBdStores pins that a rig whose beads
+// provider is not bd (a file-backed store under a bd city) is skipped, not
+// failed: gc refuses `gc bd` there, and the store has no bd gates to check.
+// Counting the refusal as a timer failure would fail the order on every
+// cooldown and bury a real timer failure in the noise.
+func TestGateSweepSkipsRigsThatAreNotBdStores(t *testing.T) {
+	gateDir, bdLog, env := gateSweepRigEnv(t, gateSweepRigStoreBd, "city", "rig:frontend")
+	env["FAKE_NOT_BD_SCOPES"] = "rig:backend"
+
+	out, err := runScriptResult(t, coreScriptPath("gate-sweep.sh"), env)
+	if err != nil {
+		t.Fatalf("gate-sweep should exit 0 when a rig is not a bd bead store; got %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "backend is not a bd bead store") {
+		t.Errorf("the output must name the rig that was skipped; got:\n%s", out)
+	}
+	log, _ := os.ReadFile(bdLog)
+	for _, scope := range []string{"city", "rig:frontend"} {
+		if !gateClosed(gateDir, scope) {
+			t.Errorf("due timer gate in %s still open after a sweep; bd calls:\n%s\n%s", scope, log, out)
+		}
+	}
+}
+
 // TestGateSweepFailsLoudWhenRigsCannotBeListed pins that an unreadable rig
 // list is reported rather than silently narrowing the sweep to the city
 // store, which is the defect the rig sweep exists to fix. The city store is
