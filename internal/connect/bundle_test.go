@@ -387,6 +387,9 @@ func TestBundleLedgerRules(t *testing.T) {
 					t.Fatalf("refusal echoes a URL: %v", err)
 				}
 			}
+			if strings.HasPrefix(tc.name, "second ledger") && !strings.Contains(err.Error(), "ledgers[1]") {
+				t.Fatalf("refusal %v does not name ledgers[1]", err)
+			}
 		})
 	}
 
