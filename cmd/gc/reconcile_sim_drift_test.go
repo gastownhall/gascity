@@ -95,6 +95,9 @@ func TestI10V510mExemptions(t *testing.T) {
 		{"another key moved too", stamped(sessionAttachedConfigDriftRefreshInterval, "k", "sleep_reason", "x"), []simResult{heal}, false, false},
 		{"a detached row", stamped(sessionAttachedConfigDriftRefreshInterval, "k"), []simResult{heal}, true, false},
 		{"another effect in the round", stamped(sessionAttachedConfigDriftRefreshInterval, "k"), []simResult{heal, {it: intent{Kind: intentStart}, res: settlement{Outcome: settledLanded}}}, false, false},
+		{"a landed re-stamp that moved nothing", stamped(0, "k"), []simResult{heal}, false, false},
+		{"a refused re-stamp", stamped(sessionAttachedConfigDriftRefreshInterval, "k"), []simResult{{it: heal.it, res: settlement{Outcome: settledRefused, Cause: causePremise}}}, false, false},
+		{"a re-stamp of another row than the heal's", stamped(sessionAttachedConfigDriftRefreshInterval, "k"), []simResult{{it: intent{Kind: intentRowHeal, Reason: decideDriftAttached, Key: rowKey{Leg: rowLeg, ID: "gc-2"}}, res: settlement{Outcome: settledLanded}}}, false, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			before := stamped(0, "k")

@@ -1541,10 +1541,12 @@ func (s *sim) attachedDriftRestamps(before, after map[string]beads.Bead) bool {
 	if len(s.round) == 0 || len(before) != len(after) {
 		return false
 	}
+	healed := map[string]bool{} // the rows the round's heals re-stamped, by ID
 	for _, r := range s.round {
 		if r.it.Kind != intentRowHeal || r.it.Reason != decideDriftAttached || r.res.Outcome != settledLanded {
 			return false
 		}
+		healed[r.it.Key.ID] = false
 	}
 	stamp := map[string]bool{sessionAttachedConfigDriftDeferredAtMetadata: true, sessionAttachedConfigDriftDeferredKeyMetadata: true}
 	for k, b := range after {
@@ -1564,7 +1566,15 @@ func (s *sim) attachedDriftRestamps(before, after map[string]beads.Bead) bool {
 		next, err2 := time.Parse(time.RFC3339, b.Metadata[sessionAttachedConfigDriftDeferredAtMetadata])
 		key := b.Metadata[sessionAttachedConfigDriftDeferredKeyMetadata]
 		attached := s.sp.IsAttached(b.Metadata["session_name"])
-		if err1 != nil || err2 != nil || next.Sub(prev) < sessionAttachedConfigDriftRefreshInterval || key == "" || key != a.Metadata[sessionAttachedConfigDriftDeferredKeyMetadata] || !attached {
+		if _, ok := healed[b.ID]; !ok || err1 != nil || err2 != nil || next.Sub(prev) < sessionAttachedConfigDriftRefreshInterval || key == "" || key != a.Metadata[sessionAttachedConfigDriftDeferredKeyMetadata] || !attached {
+			return false
+		}
+		healed[b.ID] = true
+	}
+	// Every heal re-stamped its row: a landed heal that moved nothing is a
+	// busy loop, no throttled re-stamp (the #7859 review).
+	for _, moved := range healed {
+		if !moved {
 			return false
 		}
 	}
