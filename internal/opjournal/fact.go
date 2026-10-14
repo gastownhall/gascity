@@ -36,7 +36,8 @@ func FactKinds() []FactKind { return slices.Clone(factKinds) }
 // "inferred" end are both spelled Basis observed, and Detail carries only the
 // provider's own word for the end. This build writes only the values below;
 // a row may carry a newer build's value, which decodes as read and reads as
-// unknown. Empty means unknown: a row written before the key existed.
+// unknown. Every new fact names one; empty is only read, from a row written
+// before the key existed, and means unknown.
 type FactBasis string
 
 // The fact bases.
@@ -163,8 +164,9 @@ func factIDSuffix(f Fact) string {
 	return hash16(factIDTag, f.Conversation, string(f.Kind), strconv.FormatInt(f.Generation, 10), f.occurrence())
 }
 
-// EncodeFact renders f as its bead row under prefix. Fact rows are closed on
-// create; a fact is an occurrence, not a request.
+// EncodeFact renders f as its bead row under prefix. Every new fact names its
+// basis. Fact rows are closed on create; a fact is an occurrence, not a
+// request.
 func EncodeFact(prefix string, f Fact) (beads.Bead, error) {
 	id, err := FactID(prefix, f)
 	if err != nil {
@@ -176,8 +178,8 @@ func EncodeFact(prefix string, f Fact) (beads.Bead, error) {
 	if err := validateFactBody(f); err != nil {
 		return beads.Bead{}, err
 	}
-	if f.Basis != "" && !slices.Contains(factBases, f.Basis) {
-		return beads.Bead{}, invalidf("fact basis %q", f.Basis)
+	if !slices.Contains(factBases, f.Basis) {
+		return beads.Bead{}, invalidf("fact basis %q is not one of %v", f.Basis, factBases)
 	}
 	meta := map[string]string{
 		keyFactSchema:       strconv.Itoa(SchemaRev),

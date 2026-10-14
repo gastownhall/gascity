@@ -38,14 +38,14 @@ func TestFactKinds(t *testing.T) {
 func sampleFacts() []Fact {
 	at := time.Date(2026, 10, 13, 12, 0, 0, 42, time.UTC)
 	return []Fact{
-		{Kind: FactSessionStarted, Conversation: "gc-1", Generation: 7, At: at},
+		{Kind: FactSessionStarted, Conversation: "gc-1", Generation: 7, Basis: FactBasisLane, At: at},
 		{
-			Kind: FactSessionEnded, Conversation: "gc-1", Generation: 7, Reason: "drained", At: at,
+			Kind: FactSessionEnded, Conversation: "gc-1", Generation: 7, Reason: "drained", Basis: FactBasisLane, At: at,
 			CauseOps: []string{"gc-op-kdpftlql5feaypldytje3nypwy", "gc-op-ygkwx2lvlsdrq7bnvlmgvytouu"},
 		},
 		{
 			Kind: FactTurnStarted, Conversation: "gc-1", Generation: 7, Turn: "run-9:2", At: at,
-			CauseOps: []string{"gc-op-kdpftlql5feaypldytje3nypwy"},
+			CauseOps: []string{"gc-op-kdpftlql5feaypldytje3nypwy"}, Basis: FactBasisRuntime,
 		},
 		{
 			Kind: FactTurnEnded, Conversation: "gc-1", Generation: 7, Turn: "run-9:2", At: at,
@@ -56,7 +56,7 @@ func sampleFacts() []Fact {
 			Reason: "ended", Basis: FactBasisObserved,
 		},
 		{Kind: FactInteractionRaised, Conversation: "gc-1", Generation: 7, Interaction: "req-1", At: at, Basis: FactBasisObserved},
-		{Kind: FactInteractionResolved, Conversation: "gc-1", Generation: 7, Interaction: "req-1", At: at},
+		{Kind: FactInteractionResolved, Conversation: "gc-1", Generation: 7, Interaction: "req-1", At: at, Basis: FactBasisRuntime},
 	}
 }
 
@@ -102,7 +102,8 @@ func TestFactIdentityRefusals(t *testing.T) {
 		"bad conversation":      {Kind: FactSessionStarted, Conversation: "gc 1", Generation: 1, At: at},
 		"wrong id for occasion": {ID: "gc-fact-aaaaaaaaaaaaaaaaaaaaaaaaaa", Kind: FactSessionStarted, Conversation: "gc-1", Generation: 1, At: at},
 		"unknown basis":         {Kind: FactSessionStarted, Conversation: "gc-1", Generation: 1, At: at, Basis: "guessed"},
-		"detail not a token":    {Kind: FactTurnEnded, Conversation: "gc-1", Generation: 1, Turn: "t", At: at, Detail: "End Turn"},
+		"no basis":              {Kind: FactSessionStarted, Conversation: "gc-1", Generation: 1, At: at},
+		"detail not a token":    {Kind: FactTurnEnded, Conversation: "gc-1", Generation: 1, Turn: "t", At: at, Basis: FactBasisRuntime, Detail: "End Turn"},
 	}
 	for name, f := range cases {
 		if _, err := EncodeFact("gc", f); !errors.Is(err, ErrInvalidRequest) {
@@ -182,7 +183,7 @@ func TestFactRowsWithoutBasisOrDetailDecode(t *testing.T) {
 // Basis and detail are provenance, not identity: they never move the id.
 func TestFactBasisAndDetailKeepTheID(t *testing.T) {
 	at := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
-	plain := Fact{Kind: FactTurnEnded, Conversation: "gc-1", Generation: 7, Turn: "run-9:2", At: at}
+	plain := Fact{Kind: FactTurnEnded, Conversation: "gc-1", Generation: 7, Turn: "run-9:2", Basis: FactBasisRuntime, At: at}
 	marked := plain
 	marked.Basis, marked.Detail, marked.Reason = FactBasisObserved, "max_tokens", "ended"
 	a, errA := EncodeFact("gc", plain)
@@ -193,8 +194,8 @@ func TestFactBasisAndDetailKeepTheID(t *testing.T) {
 	if b.Metadata[keyFactBasis] != "observed" || b.Metadata[keyFactDetail] != "max_tokens" {
 		t.Fatalf("basis and detail keys: %v", b.Metadata)
 	}
-	if _, ok := a.Metadata[keyFactBasis]; ok {
-		t.Fatalf("an empty basis is written: %v", a.Metadata)
+	if a.Metadata[keyFactBasis] != "runtime" {
+		t.Fatalf("basis key: %v", a.Metadata)
 	}
 	for _, basis := range FactBases() {
 		f := plain
