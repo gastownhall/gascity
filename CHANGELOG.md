@@ -219,6 +219,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The core `orphan-sweep` order can be scoped to this city's own rig
+  claims.** Set `GC_ORPHAN_SWEEP_RIG_ASSIGNEE_REGEX` (for example with an
+  `[[orders.overrides]]` entry for `orphan-sweep` and its `env` table) and the
+  shell sweep considers a rig bead only when its assignee matches the regex.
+  Claims held in a shared rig store by another city or by a person are then no
+  longer released as dead. HQ beads are not filtered; unset keeps today's
+  behavior. Refs #5955.
 - **`[beads] proxied_idle_timeout` sets how long a bd-owned proxied scope's
   proxy and Dolt child stay up with no connections.** bd retires the pair
   after that much quiet and the next bd command restarts it. The value is a Go

@@ -11801,3 +11801,219 @@ exit 0
 		t.Fatalf("cross-rig-deps summary missing or wrong (subshell counter regression?)\nwant substring: %q\ngot output:\n%s\nbd log:\n%s", want, out, logData)
 	}
 }
+
+// orphanSweepRigAssigneeFakeGC serves one HQ bead, three beads in the shared
+// rig "shared" (this city's dead worker, another city's worker, a person) and
+// two in rig "other" (one matching the test regex, one not). No assignee is a
+// configured agent or a live session, so the unfiltered sweep releases all six.
+const orphanSweepRigAssigneeFakeGC = `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+if [ "$1" = "--rig" ]; then
+  shift 2
+fi
+case "$1" in
+  mail)
+    exit 0
+    ;;
+  config)
+    if [ "$2" = "explain" ]; then
+      cat <<'EOF'
+Agent: project/worker
+  source: pack
+EOF
+      exit 0
+    fi
+    ;;
+  rig)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"rigs":[{"name":"hq","hq":true},{"name":"shared","hq":false},{"name":"other","hq":false}]}\n'
+      exit 0
+    fi
+    ;;
+  session)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"sessions":[{"id":"orphan-sweep-test-keepalive","session_name":"orphan-sweep-test-keepalive","closed":false}],"summary":{},"filters":{},"schema_version":"1"}\n'
+      exit 0
+    fi
+    ;;
+  bd)
+    if [ "$2" = "list" ]; then
+      if [ "$3" = "--rig" ] && [ "$4" = "shared" ]; then
+        cat <<'EOF'
+[
+  {"id":"ga-own-orphan","status":"in_progress","assignee":"alice-dead-worker"},
+  {"id":"ga-foreign-claim","status":"in_progress","assignee":"bob-worker"},
+  {"id":"ga-person-claim","status":"in_progress","assignee":"Pat Example"}
+]
+EOF
+      elif [ "$3" = "--rig" ] && [ "$4" = "other" ]; then
+        cat <<'EOF'
+[
+  {"id":"ga-other-own","status":"in_progress","assignee":"alice-other-worker"},
+  {"id":"ga-other-foreign","status":"in_progress","assignee":"carol-worker"}
+]
+EOF
+      else
+        cat <<'EOF'
+[
+  {"id":"ga-hq-orphan","status":"in_progress","assignee":"missing-hq-session"}
+]
+EOF
+      fi
+      exit 0
+    fi
+    if [ "$2" = "show" ] && [ "$4" = "--json" ]; then
+      case "$3" in
+        ga-hq-orphan) a="missing-hq-session" ;;
+        ga-own-orphan) a="alice-dead-worker" ;;
+        ga-foreign-claim) a="bob-worker" ;;
+        ga-person-claim) a="Pat Example" ;;
+        ga-other-own) a="alice-other-worker" ;;
+        ga-other-foreign) a="carol-worker" ;;
+        *) exit 1 ;;
+      esac
+      printf '[{"id":"%s","status":"in_progress","assignee":"%s"}]\n' "$3" "$a"
+      exit 0
+    fi
+    if [ "$2" = "release-if-current" ]; then
+      printf 'released\n'
+      exit 0
+    fi
+    ;;
+esac
+exit 1
+`
+
+// TestOrphanSweepRigAssigneeRegexScopesRigBeads verifies the opt-in regex
+// filters each rig's in-progress beads independently and never filters HQ.
+func TestOrphanSweepRigAssigneeRegexScopesRigBeads(t *testing.T) {
+	// The HQ bead's assignee deliberately does not match the regex, so its
+	// release proves HQ beads are never filtered.
+	cases := []struct {
+		name         string
+		regex        string // "" disables the filter
+		wantReset    int
+		wantReleased []string
+		wantKept     []string
+	}{
+		{
+			name:         "unset keeps the unfiltered sweep",
+			wantReset:    6,
+			wantReleased: []string{"ga-hq-orphan missing-hq-session", "ga-own-orphan alice-dead-worker", "ga-foreign-claim bob-worker", "ga-person-claim Pat Example", "ga-other-own alice-other-worker", "ga-other-foreign carol-worker"},
+		},
+		{
+			name:         "regex leaves foreign and person rig claims alone",
+			regex:        `^alice-`,
+			wantReset:    3,
+			wantReleased: []string{"ga-hq-orphan missing-hq-session", "ga-own-orphan alice-dead-worker", "ga-other-own alice-other-worker"},
+			wantKept:     []string{"ga-foreign-claim", "ga-person-claim", "ga-other-foreign"},
+		},
+		{
+			name:         "invalid regex releases nothing in the rig",
+			regex:        `(`,
+			wantReset:    1,
+			wantReleased: []string{"ga-hq-orphan missing-hq-session"},
+			wantKept:     []string{"ga-own-orphan", "ga-foreign-claim", "ga-person-claim", "ga-other-own", "ga-other-foreign"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			binDir := t.TempDir()
+			gcLog := filepath.Join(t.TempDir(), "gc.log")
+			writeExecutable(t, filepath.Join(binDir, "gc"), orphanSweepRigAssigneeFakeGC)
+
+			env := map[string]string{
+				"GC_CITY":      cityDir,
+				"GC_CITY_PATH": cityDir,
+				"GC_CALL_LOG":  gcLog,
+				"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+				// Always set, so an exported value cannot leak into the unset case.
+				"GC_ORPHAN_SWEEP_RIG_ASSIGNEE_REGEX": tc.regex,
+			}
+
+			script := coreScriptPath("orphan-sweep.sh")
+			cmd := exec.Command(script)
+			cmd.Env = mergeTestEnv(env)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, out)
+			}
+			if want := fmt.Sprintf("orphan-sweep: reset %d orphaned bead", tc.wantReset); !strings.Contains(string(out), want) {
+				t.Fatalf("output missing %q:\n%s", want, out)
+			}
+
+			logData, err := os.ReadFile(gcLog)
+			if err != nil {
+				t.Fatalf("ReadFile(gc log): %v", err)
+			}
+			log := string(logData)
+			for _, released := range tc.wantReleased {
+				if !strings.Contains(log, "bd release-if-current "+released) {
+					t.Fatalf("expected release of %q:\n%s", released, log)
+				}
+			}
+			for _, kept := range tc.wantKept {
+				if strings.Contains(log, "bd release-if-current "+kept+" ") {
+					t.Fatalf("bead %s was released but the regex excludes it:\n%s", kept, log)
+				}
+				if strings.Contains(log, "bd show "+kept+" ") {
+					t.Fatalf("bead %s was probed but the regex excludes it:\n%s", kept, log)
+				}
+			}
+		})
+	}
+}
+
+// TestOrphanSweepRigAssigneeRegexExampleMatchesIdentityShapes verifies the
+// example and any-rig patterns documented in the script match this city's
+// identity shapes and reject another city's and a person's assignee.
+func TestOrphanSweepRigAssigneeRegexExampleMatchesIdentityShapes(t *testing.T) {
+	src, err := os.ReadFile(coreScriptPath("orphan-sweep.sh"))
+	if err != nil {
+		t.Fatalf("ReadFile(orphan-sweep.sh): %v", err)
+	}
+	for _, p := range []struct {
+		name  string
+		find  string
+		cases map[string]bool
+	}{
+		{"example", `GC_ORPHAN_SWEEP_RIG_ASSIGNEE_REGEX = '([^']+)'`, map[string]bool{
+			"myrig/mycity.worker":        true,
+			"myrig--mycity__worker-pool": true,
+			"mycity__worker-gc-abc":      true,
+			"myrig/othercity.worker":     false,
+			"Pat Example":                false,
+		}},
+		{"any-rig", `(?m)^# instead: (\S+)$`, map[string]bool{
+			"my-rig/mycity.worker":           true,
+			"my-rig--mycity__worker-pool":    true,
+			"mycity.worker":                  true,
+			"my-rig/othercity.worker":        false,
+			"my-rig--othercity__worker-pool": false,
+			// Odd rig names, and a rig named like the city holding a foreign claim.
+			"rig_2/mycity.worker":                   true,
+			"rig.v2/mycity.worker":                  true,
+			"a/mycity.worker":                       true,
+			"alpha-beta-gamma--mycity__worker-pool": true,
+			"mycity/othercity.worker":               false,
+			"mycity--othercity__worker-pool":        false,
+			"my-rig/notmycity.worker":               false,
+			"my-rig--mycityx__worker-pool":          false,
+		}},
+	} {
+		m := regexp.MustCompile(p.find).FindSubmatch(src)
+		if m == nil {
+			t.Fatalf("orphan-sweep.sh has no %s pattern matching %q", p.name, p.find)
+		}
+		for s, want := range p.cases {
+			out, err := exec.Command("jq", "-n", "--arg", "re", string(m[1]), "--arg", "s", s, "$s | test($re)").Output()
+			if err != nil {
+				t.Fatalf("jq test(%q): %v", s, err)
+			}
+			if got := strings.TrimSpace(string(out)) == "true"; got != want {
+				t.Errorf("%s pattern on %q = %v, want %v", p.name, s, got, want)
+			}
+		}
+	}
+}

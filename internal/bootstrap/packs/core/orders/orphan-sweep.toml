@@ -4,6 +4,7 @@
 # to non-existent agents get reset to open/unassigned so they are routable
 # again. No worktree salvage — cities that staff a work-health patrol role
 # (e.g. the gastown pack's witness) handle that separately.
+# Set GC_ORPHAN_SWEEP_RIG_ASSIGNEE_REGEX to scope rig beads (see the script).
 [order]
 description = "Reset beads assigned to dead agents back to the work pool"
 trigger = "cooldown"

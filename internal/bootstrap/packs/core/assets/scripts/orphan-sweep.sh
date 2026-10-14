@@ -25,6 +25,29 @@ esac
 # recipient alias that resolves in every city, including core-only ones.
 ESCALATION_TARGET="${GC_ESCALATION_TARGET:-human}"
 
+# Optional rig-scope assignee filter. A rig store can be shared: other cities
+# attached to the same rig, and people, hold in-progress claims in it that
+# this city can neither resolve against its roster nor observe a session for.
+# This sweep would count those claims as dead and release them. When set, a
+# rig bead is considered only when its assignee matches this regex (jq/Oniguruma
+# syntax, matched with test()); every other rig bead is left alone. HQ beads
+# are never filtered. Unset or empty keeps the unfiltered behavior. An invalid
+# regex makes jq fail, which leaves that rig with no candidates (nothing is
+# released there) and logs one line to stderr. mycity and myrig are
+# placeholders: mycity stands for a prefix that only this city's identities
+# carry (for example its pack import binding), which need not be the city's
+# name. The example covers both the qualified name (myrig/mycity.x) and the
+# session-name encoding (myrig--mycity__x). Set it per city with an order
+# override, e.g.
+#   [[orders.overrides]]
+#   name = "orphan-sweep"
+#   [orders.overrides.env]
+#   GC_ORPHAN_SWEEP_RIG_ASSIGNEE_REGEX = '^(myrig/)?mycity\.|^(myrig--)?mycity__'
+# The one pattern applies to every rig this city sweeps, shared or not, and the
+# example names a single rig. To match any rig name, generalize the rig prefix
+# instead: ^([^/]+/)?mycity\.|^(.+--)?mycity__
+RIG_ASSIGNEE_REGEX="${GC_ORPHAN_SWEEP_RIG_ASSIGNEE_REGEX:-}"
+
 # Step 1: Collect in-progress beads from HQ and every rig whose session
 # liveness can be determined.
 # `gc bd list` without --rig is HQ-scoped from the city cwd, so per-rig
@@ -93,7 +116,14 @@ append_rig_scope() {
         rm -f "$bead_fetch_tmp"
         return 1
     }
-    gc bd list --rig "$rig" --status=in_progress --json --limit=0 2>/dev/null >"$bead_fetch_tmp" || true
+    if [ -n "$RIG_ASSIGNEE_REGEX" ]; then
+        gc bd list --rig "$rig" --status=in_progress --json --limit=0 2>/dev/null \
+            | jq -c --arg re "$RIG_ASSIGNEE_REGEX" '[.[]? | select((.assignee // "") | test($re))]' \
+                >"$bead_fetch_tmp" 2>/dev/null \
+            || echo "orphan-sweep: listing or filtering beads failed for rig $rig; skipping its beads" >&2
+    else
+        gc bd list --rig "$rig" --status=in_progress --json --limit=0 2>/dev/null >"$bead_fetch_tmp" || true
+    fi
     append_session_list gc --rig "$rig" session list --json || {
         rm -f "$bead_fetch_tmp"
         return 1
