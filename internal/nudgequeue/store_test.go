@@ -656,3 +656,29 @@ func TestFindIncludingTerminalReturnsNewestDeliveredUnobservedPastLookupCap(t *t
 		t.Fatalf("shadow = %s/%q, want newest %s/injected_unobserved", shadow.BeadID, shadow.State, newest[0].ID)
 	}
 }
+
+// TestClassifyTerminalStateIsTheTerminalPredicate pins the canonical outcome of
+// every nudge lifecycle state code and guards that IsTerminalState accepts
+// exactly the states that classify to a terminal outcome, so a new terminal
+// state cannot be added to one list and missed by consumers of the other.
+func TestClassifyTerminalStateIsTheTerminalPredicate(t *testing.T) {
+	want := map[string]TerminalOutcome{
+		"":                       OutcomeNotTerminal,
+		"queued":                 OutcomeNotTerminal,
+		"in_flight":              OutcomeNotTerminal,
+		"accepted_for_injection": OutcomeDelivered,
+		"injected":               OutcomeDelivered,
+		"injected_unobserved":    OutcomeDelivered,
+		"expired":                OutcomeFailed,
+		"failed":                 OutcomeFailed,
+		"superseded":             OutcomeSuperseded,
+	}
+	for state, outcome := range want {
+		if got := ClassifyTerminalState(state); got != outcome {
+			t.Errorf("ClassifyTerminalState(%q) = %v, want %v", state, got, outcome)
+		}
+		if got, wantTerminal := IsTerminalState(state), outcome != OutcomeNotTerminal; got != wantTerminal {
+			t.Errorf("IsTerminalState(%q) = %v, want %v (outcome %v)", state, got, wantTerminal, outcome)
+		}
+	}
+}
