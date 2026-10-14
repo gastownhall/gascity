@@ -1556,6 +1556,120 @@ func TestDoStartSession_WarnsAfterExhaustingNudgeRetries(t *testing.T) {
 	callsByMethod(t, ops, "sendKeys", 2)
 }
 
+// nudgeDeadlineCtx stays healthy until trip, then reports
+// context.DeadlineExceeded. Startup steps before the nudge must see a live
+// context; the deadline shows up only once the nudge itself has run.
+type nudgeDeadlineCtx struct {
+	context.Context
+	tripped bool
+}
+
+func (n *nudgeDeadlineCtx) Err() error {
+	if n.tripped {
+		return context.DeadlineExceeded
+	}
+	return n.Context.Err()
+}
+
+func (n *nudgeDeadlineCtx) Deadline() (time.Time, bool) {
+	if n.tripped {
+		return time.Now().Add(-time.Millisecond), true
+	}
+	return n.Context.Deadline()
+}
+
+func (n *nudgeDeadlineCtx) Done() <-chan struct{} {
+	if n.tripped {
+		ch := make(chan struct{})
+		close(ch)
+		return ch
+	}
+	return n.Context.Done()
+}
+
+// TestDoStartSession_DeadlineAfterUnconfirmedNudgeKeepsLiveSession is the
+// load-gate failure of TestPhase2WorkerCoreRealTransportProof/claude/tmux-cli:
+// claude submit confirmation never sees a busy shell, the retry ladder's
+// pane polls do not watch ctx, and the parent deadline expires after the
+// nudge was already classified unconfirmed. That deadline must not fail a
+// session that is still alive — Provider.Start would tear it down. A
+// deadline with a dead session, and a real cancel, still fail the start.
+func TestDoStartSession_DeadlineAfterUnconfirmedNudgeKeepsLiveSession(t *testing.T) {
+	origBackoffs := startupNudgeRetryBackoffs
+	startupNudgeRetryBackoffs = []time.Duration{time.Millisecond}
+	defer func() { startupNudgeRetryBackoffs = origBackoffs }()
+
+	t.Run("live session", func(t *testing.T) {
+		ctx := &nudgeDeadlineCtx{Context: context.Background()}
+		ops := &fakeStartOps{
+			hasSessionResult: true,
+			sendKeysErr:      ErrNudgeSubmitUnconfirmed,
+			sendKeysHook: func() {
+				ctx.tripped = true
+			},
+		}
+		cfg := runtime.Config{
+			Command:     "claude",
+			Nudge:       "start working",
+			SessionLive: []string{"echo live"},
+		}
+
+		err := doStartSession(ctx, ops, "test", cfg, DefaultConfig().SetupTimeout)
+		if err != nil {
+			t.Fatalf("doStartSession = %v, want nil: a deadline during an unconfirmed startup nudge must not fail a live session", err)
+		}
+		callsByMethod(t, ops, "sendKeys", 1)
+		callsByMethod(t, ops, "recordUnconfirmedNudge", 1)
+		live := callsByMethod(t, ops, "runSetupCommand", 1)
+		if live[0].command != "echo live" {
+			t.Fatalf("session_live command = %q, want %q", live[0].command, "echo live")
+		}
+	})
+
+	t.Run("dead session", func(t *testing.T) {
+		ctx := &nudgeDeadlineCtx{Context: context.Background()}
+		ops := &fakeStartOps{
+			hasSessionResult: true,
+			sendKeysErr:      ErrNudgeSubmitUnconfirmed,
+		}
+		ops.sendKeysHook = func() {
+			ctx.tripped = true
+			ops.hasSessionResult = false
+		}
+		cfg := runtime.Config{
+			Command:     "claude",
+			Nudge:       "start working",
+			SessionLive: []string{"echo live"},
+		}
+
+		err := doStartSession(ctx, ops, "test", cfg, DefaultConfig().SetupTimeout)
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("doStartSession = %v, want context.DeadlineExceeded for a dead session", err)
+		}
+		callsByMethod(t, ops, "recordUnconfirmedNudge", 1)
+		callsByMethod(t, ops, "runSetupCommand", 0)
+	})
+
+	t.Run("cancel", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		ops := &fakeStartOps{
+			hasSessionResult: true,
+			sendKeysErr:      ErrNudgeSubmitUnconfirmed,
+			sendKeysHook:     cancel,
+		}
+		cfg := runtime.Config{
+			Command: "claude",
+			Nudge:   "start working",
+		}
+
+		err := doStartSession(ctx, ops, "test", cfg, DefaultConfig().SetupTimeout)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("doStartSession = %v, want context.Canceled", err)
+		}
+	})
+}
+
 func TestDoStartSession_AcceptStartupDialogsOnly(t *testing.T) {
 	ops := &fakeStartOps{
 		hasSessionResult: true,
