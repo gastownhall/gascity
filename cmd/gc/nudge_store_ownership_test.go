@@ -191,6 +191,11 @@ func TestNudgeOwningFramesCloseTheWorkStoreTheyOpenedOnARelocatedCity(t *testing
 				t.Fatalf("record failure: %v", err)
 			}
 		}},
+		{"wait-nudge withdrawal", func(t *testing.T, cityPath string, item queuedNudge) {
+			if err := withdrawQueuedWaitNudges(cityPath, []string{item.ID}); err != nil {
+				t.Fatalf("withdraw wait nudges: %v", err)
+			}
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
