@@ -14,6 +14,9 @@ import (
 	"github.com/rogpeppe/go-internal/testscript"
 )
 
+// burnSink keeps burnCPU's result live so the loop is not optimized away.
+var burnSink int
+
 // burnCPU keeps the process on-CPU long enough for the profiler to sample.
 func burnCPU() int {
 	sum := 0
@@ -57,7 +60,7 @@ func TestCPUProfileFromEnvWritesPidSuffixedProfile(t *testing.T) {
 	var stderr bytes.Buffer
 
 	stop := startCPUProfileFromEnv(&stderr)
-	burnCPU()
+	burnSink = burnCPU()
 	stop()
 
 	requireGzipProfile(t, prefix+"."+strconv.Itoa(os.Getpid()))
