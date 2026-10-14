@@ -13,7 +13,34 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
-var _ GuardedBatcher = (*NativeDoltStore)(nil)
+var (
+	_ GuardedBatcher               = (*NativeDoltStore)(nil)
+	_ GuardedBatcherHandleProvider = (*NativeDoltStore)(nil)
+)
+
+// GuardedBatcherHandle reports the store as a guarded batcher only when a call
+// could apply a batch: a read-only handle (WithProxiedReadOnly, or one latched
+// read-only) and a backend whose storage refuses the batch-applier role answer
+// false, so a caller that requires atomic batches refuses at startup rather
+// than at the first write. Any other failure to reach the storage is left to
+// the call to report.
+func (s *NativeDoltStore) GuardedBatcherHandle() (GuardedBatcher, bool) {
+	if s.readOnlyGuard() != nil {
+		return nil, false
+	}
+	storage, release, err := s.acquireStorage()
+	if err != nil {
+		return s, true
+	}
+	defer release()
+	if _, err := storage.BatchApplier(); err != nil {
+		var unsupported *beadslib.ErrUnsupported
+		if errors.As(err, &unsupported) {
+			return nil, false
+		}
+	}
+	return s, true
+}
 
 // nativeGuardedBatchProvenance labels a batch's history entry when the caller
 // gives no reason.

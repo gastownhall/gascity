@@ -338,3 +338,28 @@ func TestCachingStoreGuardedBatchNotifiesEachRowOnce(t *testing.T) {
 		t.Fatalf("events = %v, want %v", events, want)
 	}
 }
+
+// A native store reports guarded batches only when a call could apply one: a
+// read-only handle and a backend without a batch applier are not discovered,
+// directly or through a cache, rather than handing out a batcher that always
+// refuses.
+func TestNativeDoltStoreGuardedBatchDiscovery(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		store *NativeDoltStore
+		want  bool
+	}{
+		{"capable", newNativeDoltStoreForTest(newBatchTxSpy()), true},
+		{"read-only handle", newNativeDoltStoreForTest(newBatchTxSpy(), WithProxiedReadOnly()), false},
+		{"no batch applier", newNativeDoltStoreForTest(&batchlessStorage{nativeDoltMemStorage: newNativeDoltMemStorage()}), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, ok := GuardedBatcherFor(tc.store); ok != tc.want {
+				t.Fatalf("GuardedBatcherFor = %v, want %v", ok, tc.want)
+			}
+			if _, ok := GuardedBatcherFor(NewCachingStoreForTest(tc.store, nil)); ok != tc.want {
+				t.Fatalf("GuardedBatcherFor(cache over it) = %v, want %v", ok, tc.want)
+			}
+		})
+	}
+}

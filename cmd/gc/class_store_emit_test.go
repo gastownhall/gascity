@@ -1741,7 +1741,7 @@ func TestEmittingClassStoreOverClaimsArePinnedPerEngine(t *testing.T) {
 		reflect.TypeOf(&beads.NativeDoltStore{}): {
 			"AdvanceSequenceFloor", "AtomicConditionalCloserHandle", "CachedReadExact",
 			"ConditionalWritesModeSource", "CreateWithStorage", "DepAddWithMetadata",
-			"GuardedBatcherHandle", "HasResidentOutside", "NamespaceCensusHandle", "ReadyContext",
+			"HasResidentOutside", "NamespaceCensusHandle", "ReadyContext",
 			"SequenceFloor", "SetSequenceFloor", "StoreHealthPath",
 		},
 		reflect.TypeOf(&beads.SQLiteStore{}): {
