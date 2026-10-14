@@ -1723,3 +1723,58 @@ func TestSimWakeDuringAStopKillRunsTheSeatAgain(t *testing.T) {
 	}
 	s.noViolations(t)
 }
+
+// Scenario mc-4gyej (CONTRACT v5.10w, §12.2 row 66): a floor seat's agent
+// acks its own idle drain and exits, leaving a corpse. With the row's token
+// on the corpse the seat restarts in place, as row 66 says; with no token,
+// or no identity at all, nothing can attribute the corpse to the row, so
+// the ack is signaled and the stop finalizes the row (closed, drained,
+// the corpse removed) for the floor to recreate the seat, instead of the
+// floor check voiding the ack and A9 holding the row over the corpse for
+// good. Kills: the floor check canceling the token-less ack, and the
+// token case losing its restart in place.
+func TestSimFloorAckOverATokenlessCorpseFinalizes(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		id, token string
+		inPlace   bool
+	}{
+		{"the row's token: restarted in place", "gc-1", "tok-gc-1", true},
+		{"no token: finalized", "gc-1", "", false},
+		{"no identity: finalized", "", "", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			row := poolRow("gc-1", "worker", 1, "awake", "instance_token", "tok-gc-1", "last_woke_at", rowAt(-10*time.Minute), session.DrainAckIncarnationKey, "1")
+			s := scripted(t, []string{"gc-1"}, row)
+			s.cfg.Agents[0].MinActiveSessions = intPtr(1)
+			s.advance(time.Second)
+			s.operator("gc-1", session.DrainAckAtKey, s.rel(0)) // the ack lands after the runtime started
+			name := row.Metadata["session_name"]
+			s.sp.mu.Lock()
+			rt := s.sp.rts[name]
+			first := rt.object
+			rt.id, rt.token, rt.corpse = c.id, c.token, true
+			s.sp.touch(name)
+			s.sp.mu.Unlock()
+			for range 10 {
+				s.settle()
+				s.advance(simPatrol)
+			}
+			s.quiesce()
+			b, err := s.legs[0].backing.Get("gc-1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.sp.mu.Lock()
+			now := s.sp.rts[name]
+			s.sp.mu.Unlock()
+			switch {
+			case c.inPlace && (b.Status != "open" || now == nil || now.corpse || now.object == first || now.id != "gc-1"):
+				t.Fatalf("row %s/%s, runtime %+v; want the seat restarted in place", b.Status, b.Metadata["state"], now)
+			case !c.inPlace && (b.Status != "closed" || b.Metadata["state"] != string(session.StateDrained) || now != nil):
+				t.Fatalf("row %s/%s, runtime %+v; want the row finalized (closed, drained) and the corpse removed", b.Status, b.Metadata["state"], now)
+			}
+			s.noViolations(t)
+		})
+	}
+}
