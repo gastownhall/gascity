@@ -216,3 +216,34 @@ func TestResolveBdScopeTargetSkipsProbesThatCannotChangeTheAnswer(t *testing.T) 
 		})
 	}
 }
+
+// TestGcBdPassthroughLoadsCityConfigOnce pins the passthrough's config cost: a
+// `gc bd` invocation composes the city config (packs, includes, site binding)
+// once, and every guard and env builder before the exec shares it. The
+// passthrough used to compose it once per helper (doBd, the by-id twin census,
+// the pinned-bd resolver twice), about 60 ms each on a production-sized city,
+// which was most of gc's own share of the command.
+func TestGcBdPassthroughLoadsCityConfigOnce(t *testing.T) {
+	for _, args := range [][]string{
+		{"show", "demo-abc"},
+		{"show", "demo-abc", "--json"},
+		{"list", "--json"},
+		{"show", "fe-abc"},
+		{"update", "demo-abc", "--status", "in_progress"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			newSingleExecTestCity(t)
+			before := composedCityConfigLoads.Load()
+			var stdout, stderr bytes.Buffer
+			if got := doBd(args, &stdout, &stderr); got != 0 {
+				t.Fatalf("doBd(%v) = %d, want 0; stderr=%q", args, got, stderr.String())
+			}
+			if loads := composedCityConfigLoads.Load() - before; loads != 1 {
+				t.Fatalf("doBd(%v) composed the city config %d times, want 1", args, loads)
+			}
+			if currentInvocationConfigMemo() != nil {
+				t.Fatal("doBd left its invocation config memo open")
+			}
+		})
+	}
+}
