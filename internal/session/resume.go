@@ -44,7 +44,12 @@ const (
 // stopped yet must not take a send that flips it active); any other actor
 // may not on a held one (HoldVerdict).
 func (m *Manager) queueFor(meta map[string]string, sessName string, by Actor) bool {
-	running := m.sp.IsRunning(sessName)
+	return m.queueForRunning(meta, m.sp.IsRunning(sessName), by)
+}
+
+// queueForRunning is queueFor with whether the runtime runs already read
+// (ensureRunningOn: a delivery's fresh read, not a caching provider's).
+func (m *Manager) queueForRunning(meta map[string]string, running bool, by Actor) bool {
 	switch by.Kind {
 	case ActorOperator:
 		return false

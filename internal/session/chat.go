@@ -636,17 +636,25 @@ func (m *Manager) startRefusal(by Actor, id string, b beads.Bead) error {
 }
 
 func (m *Manager) ensureRunning(ctx context.Context, by Actor, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config, replacing bool) error {
+	return m.ensureRunningOn(ctx, by, id, b, sessName, resumeCommand, hints, replacing, m.sp.IsRunning(sessName))
+}
+
+// ensureRunningOn is ensureRunning with whether sessName's runtime runs
+// already read: the provider's IsRunning for ensureRunning, a fresh read for
+// a delivery (ensureDeliverable), so a corpse a stale cache still shows
+// running is not taken for a live runtime to type into (J26 C2, mc-ir8qp).
+func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config, replacing, running bool) error {
 	if err := m.startRefusal(by, id, b); err != nil {
 		return err
 	}
 	// Only an operator's own resume consumes an operator's hold (CONTRACT
 	// v5.9 D8 rule 1); any other caller queues instead.
-	if !replacing && m.queueFor(b.Metadata, sessName, by) {
+	if !replacing && m.queueForRunning(b.Metadata, running, by) {
 		return fmt.Errorf("%w: %s", ErrResumeHeld, id)
 	}
 	transport, transportVerified := m.transportForBead(b, sessName)
 	unroute := m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
-	if State(b.Metadata["state"]) != StateSuspended && m.sp.IsRunning(sessName) {
+	if State(b.Metadata["state"]) != StateSuspended && running {
 		if b.Metadata["transport"] == "" && transportVerified {
 			m.persistTransport(id, b.Metadata["provider"], transport)
 		}
@@ -849,22 +857,28 @@ func (m *Manager) ensureRunning(ctx context.Context, by Actor, id string, b bead
 // fresh read of an unsuspended row's runtime: a live pane whose agent is
 // dead, or a runtime the read cannot vouch for, is ErrAgentDead, so the
 // caller queues the text rather than type it into a pane it would be lost
-// with (mc-48az4, mc-wdjni). The read refreshes a caching provider, so
-// ensureRunning's reads after it see a corpse as not running. Start and
+// with (mc-48az4, mc-wdjni). Whether the runtime runs is that read's too
+// (ensureRunningOn), never a caching provider's IsRunning. Start and
 // Attach keep ensureRunning's: an operator attaches to a crashed pane to read
 // it.
 func (m *Manager) ensureDeliverable(ctx context.Context, by Actor, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config) error {
 	if err := m.startRefusal(by, id, b); err != nil {
 		return err
 	}
-	if State(b.Metadata["state"]) != StateSuspended {
-		if live, err := m.freshLiveness(sessName, hints.ProcessNames); err != nil {
-			return fmt.Errorf("%w: %s: %w", ErrAgentDead, id, err)
-		} else if live.Running && !live.Alive {
-			return fmt.Errorf("%w: %s", ErrAgentDead, id)
-		}
+	if State(b.Metadata["state"]) == StateSuspended {
+		return m.ensureRunning(ctx, by, id, b, sessName, resumeCommand, hints, false)
 	}
-	return m.ensureRunning(ctx, by, id, b, sessName, resumeCommand, hints, false)
+	live, err := m.freshLiveness(sessName, hints.ProcessNames)
+	switch {
+	case err != nil:
+		return fmt.Errorf("%w: %s: %w", ErrAgentDead, id, err)
+	case live.Running && !live.Alive:
+		return fmt.Errorf("%w: %s", ErrAgentDead, id)
+	}
+	// The fresh read, not the provider's cache, says whether the runtime
+	// runs: a corpse reads not running whether or not the read refreshed a
+	// caching provider (J26 C2, mc-ir8qp).
+	return m.ensureRunningOn(ctx, by, id, b, sessName, resumeCommand, hints, false, live.Running)
 }
 
 // freshLiveness reads sessName's runtime as of now, not from a provider's
