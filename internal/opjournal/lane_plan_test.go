@@ -586,9 +586,11 @@ func TestPlanTakeKeys(t *testing.T) {
 		t.Fatalf("re-keyed replay %s", tp.take.key)
 	}
 	// A re-take keeps its key even when an earlier attempt's key was
-	// refused: the expired attempt used the stored key (L3).
+	// refused: the expired attempt used the stored key (L3). The stored
+	// key names lane_seq 3, which a fresh mint here (seq 1) cannot produce.
 	rk := p.op(laneMsg("h", RoleNotice, "x"), executingWith(t0), func(op *Op) {
-		op.Attempt, op.MaybeDelivered = 2, 1
+		op.Attempt, op.MaybeDelivered, op.LaneSeq = 2, 1, 3
+		op.DeliveryKey = op.ID + ":3"
 		op.LastError = lastErrorKeyRejected + ": x"
 	})
 	rp = planRules(snapOf(rk), view(), now, "lane:ctl")
