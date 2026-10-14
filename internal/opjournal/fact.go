@@ -71,8 +71,12 @@ type Fact struct {
 	Generation int64
 	// Turn identifies the turn of a turn.* fact and is empty otherwise.
 	Turn string
-	// Interaction identifies the request of an interaction.* fact and is
-	// empty otherwise.
+	// Interaction identifies the occurrence of an interaction.* fact and is
+	// empty otherwise. It must identify one raising, not just the request:
+	// a runtime may raise the same request id again (tmux's content-hash ids
+	// repeat), and the fact id, which keys respond (DES-O0API §3.2), would
+	// otherwise merge the second raising into the first. The producer adds a
+	// per-raising discriminator to the request id.
 	Interaction string
 	// CauseOps are the op ids that caused the fact, if any.
 	CauseOps []string

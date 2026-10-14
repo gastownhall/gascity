@@ -114,7 +114,11 @@ type TurnCells struct {
 	// Caps is the capabilities stamp (gc.rt.turn.caps).
 	Caps TurnCapsStamp
 	// ID is the running turn's source-owned id while State is running, and
-	// empty otherwise (gc.rt.turn.id).
+	// empty otherwise (gc.rt.turn.id). EncodeRuntimeRow stores any text, but
+	// RuntimeRowPatch refuses an id that spells a JSON number, boolean or
+	// null, since a fenced update would not store it as a string; the same
+	// holds for LastID and Seen. Sources whose ids can look like that must
+	// make them non-scalar before folding.
 	ID string
 	// State is gc.rt.turn.state.
 	State TurnState
