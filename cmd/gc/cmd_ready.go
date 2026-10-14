@@ -177,6 +177,11 @@ type readyOpts struct {
 	sortOrder      string
 	limit          int
 	status         string
+	// ready, on the in_progress arm, drops rows with a non-closed blocking
+	// dependency before the limit, the bd list --status in_progress --ready
+	// contract (bd 1.3.1+). The ready arm is ready already, so it is a no-op
+	// there.
+	ready bool
 }
 
 // newReadyCmd builds `gc ready`: the in-process, city-wide claimable-work reader
@@ -256,6 +261,7 @@ func registerReadyFlags(cmd *cobra.Command, opts *readyOpts, includeEphemeral, j
 	// quietly narrows (ga-8lyxc).
 	cmd.Flags().BoolVar(includeEphemeral, "include-ephemeral", false, "accept --include-ephemeral for bd-ready parity (every leg already spans the wisp tier)")
 	cmd.Flags().StringVar(&opts.status, "status", "", "list beads in this status instead of ready work: open|in_progress|blocked|closed")
+	cmd.Flags().BoolVar(&opts.ready, "ready", false, "with --status in_progress, drop rows that have an open blocker before --limit applies")
 	// --json is accepted for parity with `bd ready --json`, which the generated
 	// work_query carries verbatim. The payload is a JSON array either way; the
 	// flag exists so the query does not have to be rewritten to drop it.
@@ -333,17 +339,49 @@ func readyBeadsForOpts(legs []readyLeg, opts readyOpts) ([]readyBead, error) {
 	}
 	items = filterReadyBeads(items, opts, filters)
 	order(items)
+	// --ready has to see every row before the bound, or a blocked first row
+	// fills a --limit=1 read and hides the workable rows behind it. It pays a
+	// dependency read per candidate row for that; without --ready the bound
+	// comes first and only the emitted rows are read.
+	var blockers map[string][]readyBeadBlocker
+	enriched := opts.ready && status == readyStatusInProgress
+	if enriched {
+		if blockers, err = readyBlockedByForRows(items, owners); err != nil {
+			return nil, err
+		}
+		items = dropReadyBlockedRows(items, blockers)
+	}
 	if opts.limit > 0 && len(items) > opts.limit {
 		items = items[:opts.limit]
 	}
 	// Enrich AFTER the bound, so the dependency reads are paid only for the rows
 	// actually emitted. The crash-recovery tier asks for --limit=1, which makes
 	// this one dependency read on the one row that matters.
-	blockers, err := readyBlockedByForRows(items, owners)
-	if err != nil {
-		return nil, err
+	if !enriched {
+		if blockers, err = readyBlockedByForRows(items, owners); err != nil {
+			return nil, err
+		}
 	}
 	return toReadyBeads(items, blockers), nil
+}
+
+// dropReadyBlockedRows keeps the rows with no non-closed blocker, the same
+// test the work query's in_progress serve gate applies to blocked_by.
+func dropReadyBlockedRows(items []beads.Bead, blockers map[string][]readyBeadBlocker) []beads.Bead {
+	out := items[:0]
+	for _, item := range items {
+		blocked := false
+		for _, b := range blockers[item.ID] {
+			if !strings.EqualFold(b.Status, "closed") {
+				blocked = true
+				break
+			}
+		}
+		if !blocked {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 // readyBlockedByForRows resolves each row's blocking dependencies through the

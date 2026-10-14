@@ -598,8 +598,35 @@ func assignedInProgressTierCommandWithLimit(shellVar string, topo QueryTopology,
 	if fed {
 		reader = gcReadyCommand + ` --status in_progress`
 	}
-	return `r=$(` + reader + ` --assignee="$` + shellVar + `" --json --limit=` + strconv.Itoa(limit) +
+	return `r=$(` + reader + inProgressWorkableFilterArgs(topo) + ` --assignee="$` + shellVar + `" --json --limit=` + strconv.Itoa(limit) +
 		readyReaderStderrSink(fed) + `)` + readyReaderFailurePropagation(fed) + `; `
+}
+
+// inProgressWorkableFilterArgs returns the flags that make the crash-recovery
+// read return only in_progress beads that can be worked: no open blocker
+// (--ready) and no dispatch hold (--exclude-label per
+// beadmeta.DispatchHoldLabels). The reader applies them BEFORE --limit, so the
+// limit-1 read returns the first workable row instead of the first row, and a
+// blocked or held first row no longer hides the agent's other in_progress
+// work. inProgressBlockedByEnrichmentScript still runs on the row afterwards;
+// it is now the fail-open backstop, not the only gate.
+//
+// On bd, --ready alongside --status in_progress needs bd 1.3.1 (beads #5924):
+// older bd forces status open under --ready, and this tier would serve open
+// rows and never an in_progress one. That bd also excludes deferred beads and
+// children of a blocked or deferred parent, the same set `bd ready` excludes.
+// The federated reader computes blocked_by itself (cmd/gc/cmd_ready.go). Both
+// sit behind [beads] bd_list_ready_status so that, unset, every generated query
+// is byte-identical to the one already deployed.
+func inProgressWorkableFilterArgs(topo QueryTopology) string {
+	if !topo.Beads.UsesBDListReadyStatus() {
+		return ""
+	}
+	args := ` --ready`
+	for _, label := range beadmeta.DispatchHoldLabels {
+		args += ` --exclude-label=` + label
+	}
+	return args
 }
 
 // standardAssignedInProgressWorkQueryScript is the crash-recovery tier.
