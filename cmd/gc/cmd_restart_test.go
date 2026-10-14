@@ -747,44 +747,79 @@ func TestLegacyFloorRevivesARigRestartedSeat(t *testing.T) {
 	}
 }
 
-// Kills a city-stop mark written over an operator's suspend that lands
-// after the mark's listing (the #7787 review; gc stop's mark had the same
-// race): the mark is decided again on a fresh read, so the suspended row
-// keeps its hold and gets no city-stop reason, which the floor revival
-// would otherwise wake.
+// Kills a city-stop mark written over a hold or a sleep that lands after the
+// mark's listing (the #7787 review; gc stop's mark had the same race): the
+// mark is decided again on a fresh read, so an operator's suspend keeps its
+// hold, and a quarantine its own reason, and neither gets city-stop, which
+// the floor revival would otherwise wake.
 func TestCityStopMarkSparesASuspendAfterTheListing(t *testing.T) {
-	store := &suspendAfterListStore{MemStore: beads.NewMemStore()}
-	b, err := store.Create(beads.Bead{Title: "worker-1", Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: map[string]string{
-		"template": "worker", "session_name": "worker-1", "state": "awake",
-	}})
+	for _, c := range []struct {
+		name  string
+		patch map[string]string
+	}{
+		{"an operator's suspend", map[string]string{"state": "suspended", "sleep_intent": "user-hold"}},
+		{"a quarantine", map[string]string{"sleep_reason": "quarantine", "quarantined_until": time.Now().Add(time.Hour).UTC().Format(time.RFC3339)}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			store := &writeAfterListStore{MemStore: beads.NewMemStore(), patch: c.patch}
+			b, err := store.Create(beads.Bead{Title: "worker-1", Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: map[string]string{
+				"template": "worker", "session_name": "worker-1", "state": "awake",
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			store.target = b.ID
+			var stderr bytes.Buffer
+			markSessionsCityStop(sessionFrontDoor(store), map[string]bool{"worker-1": true}, "gc rig restart", &stderr)
+			got, err := store.Get(b.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for k, v := range c.patch {
+				if got.Metadata[k] != v {
+					t.Fatalf("written after the listing %v: row %v (stderr %q); want %s=%q kept and no city-stop mark", store.written, got.Metadata, stderr.String(), k, v)
+				}
+			}
+			if !store.written || got.Metadata["sleep_reason"] == "city-stop" {
+				t.Fatalf("written after the listing %v: row %v; want no city-stop mark", store.written, got.Metadata)
+			}
+		})
+	}
+}
+
+// writeAfterListStore writes patch on its target row, as an operator or the
+// controller would, right after the first label listing returns.
+type writeAfterListStore struct {
+	*beads.MemStore
+	target  string
+	patch   map[string]string
+	written bool
+}
+
+func (s *writeAfterListStore) ListByLabel(label string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+	out, err := s.MemStore.ListByLabel(label, limit, opts...)
+	if err == nil && !s.written && s.target != "" {
+		s.written = true
+		err = s.SetMetadataBatch(s.target, s.patch)
+	}
+	return out, err
+}
+
+// Kills a stop that warns on every gc:session-labeled row the session front
+// door refuses (a non-session type): the mark skips it quietly.
+func TestCityStopMarkSkipsATypeDamagedRowQuietly(t *testing.T) {
+	store := beads.NewMemStore()
+	b, err := store.Create(beads.Bead{Title: "damaged", Type: "task", Labels: []string{sessionBeadLabel}, Metadata: map[string]string{"session_name": "damaged", "state": "awake"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.target = b.ID
 	var stderr bytes.Buffer
-	markSessionsCityStop(sessionFrontDoor(store), map[string]bool{"worker-1": true}, "gc rig restart", &stderr)
+	markSessionsCityStop(sessionFrontDoor(store), nil, "gc stop", &stderr)
 	got, err := store.Get(b.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !store.suspended || got.Metadata["sleep_reason"] != "" || got.Metadata["state"] != "suspended" {
-		t.Fatalf("suspended after the listing %v: row %v (stderr %q); want the suspend kept and no city-stop mark", store.suspended, got.Metadata, stderr.String())
+	if stderr.Len() != 0 || got.Metadata["sleep_reason"] != "" {
+		t.Fatalf("stderr %q, row %v; want the damaged row skipped quietly", stderr.String(), got.Metadata)
 	}
-}
-
-// suspendAfterListStore suspends its target row, as an operator would, right
-// after the first label listing returns.
-type suspendAfterListStore struct {
-	*beads.MemStore
-	target    string
-	suspended bool
-}
-
-func (s *suspendAfterListStore) ListByLabel(label string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
-	out, err := s.MemStore.ListByLabel(label, limit, opts...)
-	if err == nil && !s.suspended && s.target != "" {
-		s.suspended = true
-		err = s.SetMetadataBatch(s.target, map[string]string{"state": "suspended", "sleep_intent": "user-hold"})
-	}
-	return out, err
 }

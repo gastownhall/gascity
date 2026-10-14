@@ -899,18 +899,19 @@ func markSessionsCityStop(sessFront *session.Store, names map[string]bool, logPr
 	if !sessFront.Backed() || names != nil && len(names) == 0 {
 		return
 	}
-	// The label-only, closed-excluded, IsSessionBeadOrRepairable-UNfiltered Info
-	// lister is byte-identical to the former ListByLabel("gc:session") + closed-skip
-	// sweep: it keeps damaged gc:session-labeled beads with a non-"session" type (which
-	// the narrowing Store.List would drop) and reads each row's classifier through the
-	// typed twin (sessionMetadataStateInfo) + the Info.SleepReason mirror.
+	// The label-only, closed-excluded lister reads each row's classifier through
+	// the typed twin (sessionMetadataStateInfo) and the Info.SleepReason mirror.
+	// A gc:session-labeled row that is not a session bead, not even a
+	// repairable one, is skipped: the fenced mark re-reads through the session
+	// front door, which refuses it (ErrSessionNotFound), so it was never marked
+	// and would only warn on every stop.
 	sessions, err := sessFront.ListLabeledSessionInfosUnfiltered()
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: marking sessions: %v\n", logPrefix, err) //nolint:errcheck // best-effort warning
 		return
 	}
 	for _, info := range sessions {
-		if sessionMetadataStateInfo(info) != "active" || names != nil && !names[strings.TrimSpace(info.SessionName)] {
+		if !session.IsSessionBeadOrRepairableInfo(info) || sessionMetadataStateInfo(info) != "active" || names != nil && !names[strings.TrimSpace(info.SessionName)] {
 			continue
 		}
 		if strings.TrimSpace(info.SleepReason) != "" {
