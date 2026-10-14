@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -504,6 +505,60 @@ func TestRuntimeLeaseWatch(t *testing.T) {
 	if !errors.Is(context.Cause(held), ErrRuntimeLeaseReleased) {
 		t.Fatalf("Watch after Release = %v, want ErrRuntimeLeaseReleased", context.Cause(held))
 	}
+}
+
+// TestRuntimeLeaseWatchCancelWaitsForItsRead (mc-rj2fc). Kills a cancel
+// that returns while the watch's read is still in flight: the caller then
+// closes the store under the read (CI's nil-DB panic in TestRuntimeLeaseWatch,
+// whose deferred cancel runs before the store's cleanup closes it). A cancel
+// over a blocked read returns only once that read has.
+func TestRuntimeLeaseWatchCancelWaitsForItsRead(t *testing.T) {
+	backing := openLeaseStore(t, t.TempDir())
+	store := &blockingReadStore{rowWriteRecorder: &rowWriteRecorder{Store: backing}, entered: make(chan struct{}, 1), release: make(chan struct{})}
+	var unblock sync.Once
+	unblockReads := func() { unblock.Do(func() { store.block.Store(false); close(store.release) }) }
+	f := leaseFixtureOver(t, store)
+	l, err := TryRuntimeLease(f.front, f.req(t.TempDir(), leaseT0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Release()
+	defer unblockReads() // before the Release, which reads too
+	store.block.Store(true)
+	_, cancel, err := l.Watch(context.Background(), time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-store.entered // the watch's read is in flight
+	canceled := make(chan struct{})
+	go func() { cancel(); close(canceled) }()
+	select {
+	case <-canceled:
+		t.Fatal("cancel returned while the watch's read was still in flight")
+	case <-time.After(50 * time.Millisecond):
+	}
+	unblockReads()
+	<-canceled
+}
+
+// blockingReadStore blocks every read while block is set, until release
+// closes, signaling entered as each blocked read starts.
+type blockingReadStore struct {
+	*rowWriteRecorder
+	block   atomic.Bool
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (s *blockingReadStore) Get(id string) (beads.Bead, error) {
+	if s.block.Load() {
+		select {
+		case s.entered <- struct{}{}:
+		default:
+		}
+		<-s.release
+	}
+	return s.rowWriteRecorder.Get(id)
 }
 
 // failingReadStore fails every read while fail is set.

@@ -468,7 +468,9 @@ func (l *RuntimeLease) updateMetadataFenced(attempts int, decide func(Info, Pers
 // Release (ErrRuntimeLeaseReleased), or once a fresh read every interval finds
 // the row closed or no longer recording the lease (ErrRuntimeLeaseLost). It never writes
 // and never renews. A provider Call runs on it, so a holder that lost its
-// record stops calling. A failed read cancels nothing.
+// record stops calling. A failed read cancels nothing. The returned cancel
+// returns once the watch's reads have stopped, so a caller may close the
+// store after it (an in-flight read is waited for, never abandoned).
 func (l *RuntimeLease) Watch(ctx context.Context, every time.Duration) (context.Context, context.CancelFunc, error) {
 	if every <= 0 {
 		return nil, nil, fmt.Errorf("runtime lease: watch interval %v must be positive", every)
@@ -485,7 +487,9 @@ func (l *RuntimeLease) Watch(ctx context.Context, every time.Duration) (context.
 		return lost, func() { cancelLost(context.Canceled) }, nil
 	}
 	watched, cancelWatched := context.WithDeadlineCause(lost, time.Now().Add(l.SafeUntil().Sub(l.now())), ErrRuntimeLeaseExpired)
+	stopped := make(chan struct{})
 	go func() {
+		defer close(stopped)
 		t := time.NewTicker(every)
 		defer t.Stop()
 		for {
@@ -500,7 +504,7 @@ func (l *RuntimeLease) Watch(ctx context.Context, every time.Duration) (context.
 			}
 		}
 	}()
-	return watched, func() { cancelWatched(); cancelLost(context.Canceled) }, nil
+	return watched, func() { cancelWatched(); cancelLost(context.Canceled); <-stopped }, nil
 }
 
 // Release cancels the lease's Watch contexts, clears the record if it is
