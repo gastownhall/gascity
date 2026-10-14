@@ -151,14 +151,17 @@ func appendTurnBytes(t *testing.T, path, data string) {
 
 // TestTurnFollowerEqualsRescan: after every append (including a torn one),
 // a truncation and a rotation, the follower reports what a full rescan does.
+// Thirteen turns put more than MaxRecentTurns turns before turn 12's tool
+// result, which carries turn 13's promptId before turn 13's prompt, so a
+// rescan has to stop counting turns at the right record.
 func TestTurnFollowerEqualsRescan(t *testing.T) {
 	cases := []struct {
 		provider string
 		lines    []string
 	}{
-		{"claude", claudeTurnLines(11)},
-		{"codex", codexTurnLines(11)},
-		{"gemini", geminiTurnLines(11)},
+		{"claude", claudeTurnLines(13)},
+		{"codex", codexTurnLines(13)},
+		{"gemini", geminiTurnLines(13)},
 	}
 	for _, tc := range cases {
 		t.Run(tc.provider, func(t *testing.T) {

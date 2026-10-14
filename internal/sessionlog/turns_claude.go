@@ -183,7 +183,10 @@ func claudeToolResultEntry(message json.RawMessage) bool {
 }
 
 // scan collects records backward until it has passed the first entry of
-// the oldest turn it reports, then folds them oldest first.
+// the oldest turn it reports, then folds them oldest first. Only an id that
+// can start a turn counts toward that stop: a tool result may carry the next
+// prompt's id before the prompt is written, and counting it would stop the
+// scan a turn early.
 func (claudeTurnFormat) scan(_ string, r io.ReaderAt, size, budget int64) (turnFold, error) {
 	var records []claudeTurnRecord // newest first
 	ids := make(map[string]bool)
@@ -192,7 +195,7 @@ func (claudeTurnFormat) scan(_ string, r io.ReaderAt, size, budget int64) (turnF
 		if !ok {
 			return false
 		}
-		if id, ok := validTurnID(rec.rawID); ok && rec.kind == claudeRecordUser && !ids[id] {
+		if id, ok := validTurnID(rec.rawID); ok && rec.kind == claudeRecordUser && !rec.toolResult && !ids[id] {
 			if len(ids) == MaxRecentTurns+1 {
 				return true
 			}
