@@ -233,32 +233,53 @@ func TestValidCityName(t *testing.T) {
 // descriptor.
 func TestDescriptorLedgerRules(t *testing.T) {
 	infra := func(d *Descriptor) *DescriptorLedger { return &d.Ledgers[1] }
-	refused := map[string]func(*Descriptor){
-		"no ledgers":              func(d *Descriptor) { d.Ledgers = nil },
-		"two city ledgers":        func(d *Descriptor) { infra(d).Scope = ScopeCity },
-		"no city ledger":          func(d *Descriptor) { d.Ledgers[0].Scope = BindingScope("primary") },
-		"duplicate binding scope": func(d *Descriptor) { d.Ledgers = append(d.Ledgers, d.Ledgers[1]) },
-		"reserved binding name":   func(d *Descriptor) { infra(d).Scope = "binding:work" },
-		"dot-dot binding name":    func(d *Descriptor) { infra(d).Scope = "binding:.." },
-		"rig scope":               func(d *Descriptor) { infra(d).Scope = "rig:app" },
-		"class in two ledgers":    func(d *Descriptor) { d.Ledgers[0].Classes = []string{"work", "graph"} },
-		"work off the city ledger": func(d *Descriptor) {
+	refused := []struct {
+		name   string
+		mutate func(*Descriptor)
+		want   string
+	}{
+		{"no ledgers", func(d *Descriptor) { d.Ledgers = nil }, "no ledgers"},
+		{"two city ledgers", func(d *Descriptor) { infra(d).Scope = ScopeCity }, `ledger[1]: scope "city" duplicates ledger[0]`},
+		{"no city ledger", func(d *Descriptor) { d.Ledgers[0].Scope = BindingScope("primary") }, `no "city" ledger`},
+		{"duplicate binding scope", func(d *Descriptor) {
+			infra(d).Classes = []string{"graph", "sessions", "messaging", "orders"}
+			d.Ledgers = append(d.Ledgers, DescriptorLedger{
+				Scope: BindingScope("infra"), Classes: []string{"nudges"}, URL: "https://other.example.ts.net",
+				ProjectID: "proj-other", Workspaces: []string{"/data/cities/mc/.gc/storage/other"},
+			})
+		}, `ledger[2]: scope "binding:infra" duplicates ledger[1]`},
+		{"empty binding name", func(d *Descriptor) { infra(d).Scope = "binding:" }, "ledger[1]: scope is neither"},
+		{"reserved binding name", func(d *Descriptor) { infra(d).Scope = "binding:work" }, "ledger[1]: scope is neither"},
+		{"dot-dot binding name", func(d *Descriptor) { infra(d).Scope = "binding:.." }, "ledger[1]: scope is neither"},
+		{"all-dots binding name", func(d *Descriptor) { infra(d).Scope = "binding:..." }, "ledger[1]: scope is neither"},
+		{"slash in binding name", func(d *Descriptor) { infra(d).Scope = "binding:a/b" }, "ledger[1]: scope is neither"},
+		{"bare binding", func(d *Descriptor) { infra(d).Scope = "infra" }, "ledger[1]: scope is neither"},
+		{"rig scope", func(d *Descriptor) { infra(d).Scope = "rig:app" }, "ledger[1]: scope is neither"},
+		{"empty classes on a binding beside a full city", func(d *Descriptor) {
+			d.Ledgers[0].Classes = StorageClasses()
+			infra(d).Classes = nil
+		}, "ledger[1]: classes is empty"},
+		{"class in two ledgers", func(d *Descriptor) { d.Ledgers[0].Classes = []string{"work", "graph"} }, `ledger[1]: class "graph" is also on ledger[0]`},
+		{"work off the city ledger", func(d *Descriptor) {
 			d.Ledgers[0].Classes, infra(d).Classes = []string{"graph"}, []string{"work", "sessions", "messaging", "orders", "nudges"}
-		},
-		"class missing":               func(d *Descriptor) { infra(d).Classes = []string{"graph"} },
-		"class twice in one ledger":   func(d *Descriptor) { infra(d).Classes = append(infra(d).Classes, "orders") },
-		"duplicate url":               func(d *Descriptor) { infra(d).URL = d.Ledgers[0].URL },
-		"duplicate project id":        func(d *Descriptor) { infra(d).ProjectID = d.Ledgers[0].ProjectID },
-		"workspace under two ledgers": func(d *Descriptor) { infra(d).Workspaces = []string{"/data/cities/mc"} },
-		"second ledger plaintext url": func(d *Descriptor) { infra(d).URL = "http://infra.example.ts.net:7492" },
+		}, `ledger[1]: class "work" is not on the "city" ledger`},
+		{"class missing", func(d *Descriptor) { infra(d).Classes = []string{"graph"} }, "is on no ledger"},
+		{"class twice in one ledger", func(d *Descriptor) { infra(d).Classes = append(infra(d).Classes, "orders") }, `ledger[1]: class "orders" is listed twice`},
+		{"duplicate url", func(d *Descriptor) { infra(d).URL = d.Ledgers[0].URL }, "ledger[1]: url duplicates ledger[0]'s"},
+		{"duplicate project id", func(d *Descriptor) { infra(d).ProjectID = d.Ledgers[0].ProjectID }, "ledger[1]: project_id duplicates ledger[0]'s"},
+		{"workspace under two ledgers", func(d *Descriptor) { infra(d).Workspaces = []string{"/data/cities/mc"} }, "ledger[1]: workspace"},
+		{"second ledger plaintext url", func(d *Descriptor) { infra(d).URL = "http://infra.example.ts.net:7492" }, "ledger[1]: url is http"},
 	}
-	for name, mutate := range refused {
-		t.Run(name, func(t *testing.T) {
+	for _, tc := range refused {
+		t.Run(tc.name, func(t *testing.T) {
 			d := validDescriptor()
-			mutate(&d)
+			tc.mutate(&d)
 			err := d.Validate()
 			if !errors.Is(err, ErrDescriptorInvalid) {
 				t.Fatalf("Validate = %v, want ErrDescriptorInvalid", err)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Validate = %v, want it to contain %q", err, tc.want)
 			}
 			if _, err := EncodeDescriptor(d); !errors.Is(err, ErrDescriptorInvalid) {
 				t.Fatalf("EncodeDescriptor = %v, want ErrDescriptorInvalid", err)

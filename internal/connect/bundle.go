@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"net"
 	"net/url"
 	"regexp"
 	"slices"
@@ -82,10 +83,12 @@ func ScopeBinding(scope string) (binding string, ok bool) {
 var storageIdentifierRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 // validStorageIdentifier accepts the storage identifier charset
-// (internal/config's validateStorageIdentifier) except "." and "..", which
-// would name a directory other than the binding's own.
+// (internal/config's validateStorageIdentifier) except an all-dots value,
+// which would name a directory other than the binding's own. It matches the
+// predicate beadsworkspace.WorkspaceRoot applies to a config_ref, so a bundle
+// never names a workspace the box's provider refuses to open.
 func validStorageIdentifier(s string) bool {
-	return storageIdentifierRe.MatchString(s) && s != "." && s != ".."
+	return storageIdentifierRe.MatchString(s) && strings.Trim(s, ".") != ""
 }
 
 // validBindingName accepts a non-reserved binding name.
@@ -239,7 +242,7 @@ func (b Bundle) Validate() error {
 	}
 	shapes := make([]ledgerShape, len(b.Ledgers))
 	for i, l := range b.Ledgers {
-		shapes[i] = ledgerShape{scope: l.Scope, classes: l.Classes, url: l.URL, projectID: l.ProjectID}
+		shapes[i] = ledgerShape{scope: l.Scope, classes: l.Classes, url: l.URL, projectID: l.ProjectID, configRef: l.ConfigRef}
 	}
 	if err := validateLedgerSet("ledgers", shapes); err != nil {
 		return refuse(CodeBundleInvalid, err.Error())
@@ -257,7 +260,7 @@ func (l Ledger) validate() error {
 	case l.Scope != ScopeCity && l.ConfigRef == "":
 		return fmt.Errorf("config_ref is empty on a binding ledger")
 	case l.Scope != ScopeCity && !validStorageIdentifier(l.ConfigRef):
-		return fmt.Errorf("config_ref is not [A-Za-z0-9._-]+ (and not . or ..)")
+		return fmt.Errorf("config_ref is not [A-Za-z0-9._-]+ or is only dots")
 	}
 	if err := validateClasses(l.Classes); err != nil {
 		return err
@@ -334,25 +337,27 @@ func isLoopbackHost(host string) bool {
 	return false
 }
 
-// validateScope accepts ScopeCity or a valid "binding:<name>".
+// validateScope accepts ScopeCity or a valid "binding:<name>". An
+// unrecognized scope is not echoed: it is untrusted bundle text and may hold
+// a URL with userinfo.
 func validateScope(scope string) error {
 	if _, ok := ScopeBinding(scope); !ok {
-		return fmt.Errorf("scope %q is neither %q nor %s<name> with a non-reserved [A-Za-z0-9._-]+ name", scope, ScopeCity, ScopeBindingPrefix)
+		return fmt.Errorf("scope is neither %q nor %s<name> with a non-reserved [A-Za-z0-9._-]+ name that is not only dots", ScopeCity, ScopeBindingPrefix)
 	}
 	return nil
 }
 
 // validateClasses checks one ledger's class list: non-empty, every entry a
-// storage class, none twice.
+// storage class, none twice. An unknown class is named by index, not echoed.
 func validateClasses(classes []string) error {
 	if len(classes) == 0 {
 		return fmt.Errorf("classes is empty")
 	}
 	known := StorageClasses()
 	seen := make(map[string]bool, len(classes))
-	for _, c := range classes {
+	for i, c := range classes {
 		if !slices.Contains(known, c) {
-			return fmt.Errorf("class %q is not a storage class", c)
+			return fmt.Errorf("classes[%d] is not a storage class", i)
 		}
 		if seen[c] {
 			return fmt.Errorf("class %q is listed twice", c)
@@ -369,13 +374,17 @@ type ledgerShape struct {
 	classes   []string
 	url       string
 	projectID string
+	// configRef is a bundle binding ledger's config_ref; the descriptor,
+	// which names workspaces by path instead, leaves it empty.
+	configRef string
 }
 
 // validateLedgerSet applies the cross-ledger rules (DES-CN §3.2, §3.6) to
 // ledgers that each passed their own checks: at least one ledger and exactly
-// one city ledger; unique scopes, URLs and project ids; every storage class
-// on exactly one ledger, with work on the city ledger. Errors name ledgers by
-// index and never echo a URL.
+// one city ledger; unique scopes, URLs (compared by ledgerURLKey), project
+// ids and non-empty config_refs; every storage class on exactly one ledger,
+// with work on the city ledger. Errors name ledgers by index and never echo
+// a URL.
 func validateLedgerSet(field string, ledgers []ledgerShape) error {
 	if len(ledgers) == 0 {
 		return fmt.Errorf("no ledgers")
@@ -383,20 +392,28 @@ func validateLedgerSet(field string, ledgers []ledgerShape) error {
 	scopeAt := map[string]int{}
 	urlAt := map[string]int{}
 	projectAt := map[string]int{}
+	configRefAt := map[string]int{}
 	classAt := map[string]int{}
 	for i, l := range ledgers {
 		if j, dup := scopeAt[l.scope]; dup {
 			return fmt.Errorf("%s[%d]: scope %q duplicates %s[%d]", field, i, l.scope, field, j)
 		}
 		scopeAt[l.scope] = i
-		if j, dup := urlAt[l.url]; dup {
+		key := ledgerURLKey(l.url)
+		if j, dup := urlAt[key]; dup {
 			return fmt.Errorf("%s[%d]: url duplicates %s[%d]'s", field, i, field, j)
 		}
-		urlAt[l.url] = i
+		urlAt[key] = i
 		if j, dup := projectAt[l.projectID]; dup {
 			return fmt.Errorf("%s[%d]: project_id duplicates %s[%d]'s", field, i, field, j)
 		}
 		projectAt[l.projectID] = i
+		if l.configRef != "" {
+			if j, dup := configRefAt[l.configRef]; dup {
+				return fmt.Errorf("%s[%d]: config_ref duplicates %s[%d]'s", field, i, field, j)
+			}
+			configRefAt[l.configRef] = i
+		}
 		for _, c := range l.classes {
 			if j, dup := classAt[c]; dup {
 				return fmt.Errorf("%s[%d]: class %q is also on %s[%d]", field, i, c, field, j)
@@ -418,6 +435,26 @@ func validateLedgerSet(field string, ledgers []ledgerShape) error {
 	}
 	return nil
 }
+
+// ledgerURLKey returns the form two ledger URLs are compared in: scheme and
+// host lowercased, the scheme's default port made explicit, and trailing
+// slashes trimmed from the path, which is kept so path-mounted ledgers on
+// one host stay distinct. raw has passed ValidateLedgerURL.
+func ledgerURLKey(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	scheme := strings.ToLower(u.Scheme)
+	port := u.Port()
+	if port == "" {
+		port = defaultPorts[scheme]
+	}
+	return scheme + "://" + net.JoinHostPort(strings.ToLower(u.Hostname()), port) + strings.TrimRight(u.EscapedPath(), "/")
+}
+
+// defaultPorts are the ports a ledger URL without one dials.
+var defaultPorts = map[string]string{"https": "443", "http": "80"}
 
 // pemBegin opens every PEM block.
 var pemBegin = []byte("-----BEGIN ")

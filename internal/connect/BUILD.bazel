@@ -22,6 +22,7 @@ go_test(
         "bundle_test.go",
         "descriptor_test.go",
         "refusal_test.go",
+        "storage_classes_test.go",
         "testenv_import_test.go",
         "tokenfile_test.go",
     ],
