@@ -2104,22 +2104,14 @@ exit 0
 
 func runSyncGC(t *testing.T, cityPath, binDir string, port int, args ...string) string {
 	t.Helper()
-	root := repoRoot(t)
-	cmd := exec.Command("sh", append([]string{filepath.Join(root, syncScript), "--db", "app"}, args...)...)
-	cmd.Env = append(syncFilteredEnv(),
-		"PATH="+binDir+":"+os.Getenv("PATH"),
-		"GC_CITY_PATH="+cityPath,
-		"GC_PACK_DIR="+root,
-		"GC_DOLT_DATA_DIR="+filepath.Join(cityPath, "data"),
-		fmt.Sprintf("GC_DOLT_PORT=%d", port),
-		"GC_DOLT_USER=root",
-		"GC_DOLT_PASSWORD=",
-	)
-	out, err := cmd.CombinedOutput()
+	// runSync defaults GC_DOLT_PORT to 1; the later entry in extraEnv wins, so
+	// the script sees the reachable listener and takes the live-SQL path.
+	extraEnv := []string{fmt.Sprintf("GC_DOLT_PORT=%d", port)}
+	out, err := runSync(t, binDir, cityPath, extraEnv, append([]string{"--db", "app"}, args...)...)
 	if err != nil {
 		t.Fatalf("gc dolt sync %v failed: %v\n%s", args, err, out)
 	}
-	return string(out)
+	return out
 }
 
 // TestSyncGCForcesThePurge pins that --gc actually deletes: bd purge only
