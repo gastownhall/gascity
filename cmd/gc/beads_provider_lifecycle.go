@@ -208,6 +208,9 @@ func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer)
 // binding recorded at boot; city init and normalization hold the city's
 // metadata to it and take the database name from it, never the fallback.
 func startBeadsLifecycleResolvingCityDatabase(cityPath string, cfg *config.City, stderr io.Writer, bootStore *cityStoreRecord) error {
+	// Warn before init/hooks, which can migrate the city store forward to a
+	// schema the standalone PATH bd does not know. Never fatal.
+	warnPATHBdSchemaSkew(stderr)
 	if err := ensureFreshRigProviderOwnership(cityPath, cfg); err != nil {
 		return err
 	}
