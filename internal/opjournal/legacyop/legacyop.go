@@ -142,7 +142,8 @@ type Admission struct {
 	done       atomic.Bool
 }
 
-// Recorder records one surface's requests under one gate mode. Open opens
+// Recorder records one surface's requests under one gate mode. Executor is
+// ExecutorAPI or ExecutorCLI; Admit refuses any other. Open opens
 // the op store lazily; the caller caches it. Inflight is the API's in-flight
 // registry; nil (the CLI) means never adopt. Degraded, when set, is told of
 // every store failure the recorder degrades past.
@@ -162,10 +163,16 @@ type Recorder struct {
 // a refusal the caller maps to its wire: *BusyError (ErrBusy) and
 // opjournal.ErrKeyReuse in every mode; ErrUnavailable,
 // opjournal.ErrPayloadTooLarge and opjournal.ErrInvalidRequest in require
-// mode only. In off it does no store I/O and mints nothing.
+// mode only. A recorder whose Executor is not a legacy surface is a
+// programming error: opjournal.ErrInvalidRequest in every recording mode,
+// before any store I/O. In off it does no store I/O and mints nothing.
 func (r *Recorder) Admit(req Request) (*Admission, error) {
 	if !r.recording() {
 		return &Admission{Decision: Execute, Key: req.Key, rec: r, kind: req.Kind}, nil
+	}
+	if r.Executor != ExecutorAPI && r.Executor != ExecutorCLI {
+		return nil, fmt.Errorf("%w: a legacy recorder's executor is %s or %s, not %q",
+			opjournal.ErrInvalidRequest, ExecutorAPI, ExecutorCLI, r.Executor)
 	}
 	now := r.Clock.Now()
 	key, minted := req.Key, false
@@ -227,7 +234,7 @@ func (r *Recorder) Admit(req Request) (*Admission, error) {
 	case op.Status == opjournal.StatusClosed:
 		release()
 		return r.replay(key, minted, op), nil
-	case r.Inflight == nil && now.After(op.FinishBy):
+	case r.Inflight == nil && op.Executor.Legacy() && now.After(op.FinishBy):
 		return r.closeExpired(st, key, minted, op, now)
 	case op.Executor == ExecutorAPI && r.Inflight != nil:
 		return r.adopt(st, key, minted, op, entry, release, now)

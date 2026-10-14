@@ -234,6 +234,11 @@ func TestAdmitMatrix(t *testing.T) {
 			e.seed(t, msg("k1", "hello"), opjournal.ExecutorLane)
 			return msg("k1", "hello")
 		}, [2]want{busy, busy}, [2]want{busy, busy}},
+		{"expired lane op", func(t *testing.T, e *env, _ *Recorder) Request {
+			e.seed(t, msg("k1", "hello"), opjournal.ExecutorLane)
+			e.clk.Advance(ExecutionBound + time.Second)
+			return msg("k1", "hello")
+		}, [2]want{busy, busy}, [2]want{busy, busy}},
 	}
 	for _, s := range states {
 		for _, mode := range []gate.Mode{gate.Auto, gate.Require} {
@@ -304,6 +309,40 @@ func TestAdmitCLIClosesAnExpiredOp(t *testing.T) {
 	if err != nil || adm.Decision != Replay || adm.Op.Status != opjournal.StatusClosed ||
 		adm.Op.Outcome != failed(opjournal.ReasonDeadlineInFlight) {
 		t.Fatalf("Admit = %+v, %v", adm, err)
+	}
+}
+
+// Only lanes settle lane ops: the CLI's expiry rule leaves an expired lane op
+// that shares the id open, writing nothing.
+func TestAdmitCLILeavesAnExpiredLaneOp(t *testing.T) {
+	e := newEnv(t)
+	lane := e.seed(t, msg("k1", "hello"), opjournal.ExecutorLane)
+	e.clk.Advance(ExecutionBound + time.Second)
+	rev := lane.Revision
+	if adm, err := cliRecorder(e, gate.Auto).Admit(msg("k1", "hello")); !errors.Is(err, ErrBusy) {
+		t.Fatalf("Admit = %+v, %v; want busy", adm, err)
+	}
+	if b, _ := e.mem.Get(lane.ID); b.Revision != rev || b.Status != "open" {
+		t.Fatalf("the lane op was written: revision %d (was %d), %s", b.Revision, rev, b.Status)
+	}
+}
+
+// A recorder records only as a legacy surface, the API or the CLI: any other
+// executor is refused before any store I/O, so Finish and the expiry rule can
+// never act on a lane op.
+func TestAdmitRefusesANonLegacySurface(t *testing.T) {
+	for _, ex := range []opjournal.ExecutorKind{opjournal.ExecutorLane, opjournal.ExecutorLegacy, "", "box"} {
+		for _, mode := range []gate.Mode{gate.Auto, gate.Require} {
+			e := newEnv(t)
+			r := e.recorder(mode, ex, nil)
+			adm, err := r.Admit(msg("k1", "hello"))
+			if !errors.Is(err, opjournal.ErrInvalidRequest) || adm != nil {
+				t.Fatalf("%q/%s: Admit = %+v, %v; want ErrInvalidRequest", ex, mode, adm, err)
+			}
+			if e.opens.Load() != 0 {
+				t.Fatalf("%q/%s: opened the store", ex, mode)
+			}
+		}
 	}
 }
 
