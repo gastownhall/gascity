@@ -236,7 +236,7 @@ func TestBdStoreBlockedReleaseRefusesUnresolvedRows(t *testing.T) {
 	}{
 		{name: "empty ID", holder: "dead-session", wantErr: true},
 		{name: "empty holder", id: "bd-42.1", holder: " ", wantErr: true},
-		{name: "child miss cannot enter wisp query", id: "bd-42.1", holder: "dead-session", showMiss: true, wantErr: true},
+		{name: "child miss cannot enter wisp query", id: "bd-42.1", holder: "dead-session", showMiss: true},
 		{name: "exact ID collision", id: "bd-42.1", holder: "dead-session", row: `[{"id":"bd-42.2","status":"blocked","assignee":"dead-session"}]`, wantErr: true},
 		{name: "holder changed", id: "bd-42.1", holder: "dead-session", row: `[{"id":"bd-42.1","status":"blocked","assignee":"live-session"}]`},
 		{name: "absent", id: "bd-42.1", holder: "dead-session", row: `[]`},

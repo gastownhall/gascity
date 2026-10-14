@@ -344,6 +344,16 @@ func releaseListedWithClock(claims []seatWorkHit, why releaseWhy, seat releaseSe
 		}
 		clearDetached := false
 		if p.pool {
+			matches, err := livePoolReleaseSnapshotMatches(c.store, c.bead)
+			if err != nil {
+				out.Failed = append(out.Failed, c)
+				out.Why[c.bead.ID] = err.Error()
+				continue
+			}
+			if !matches {
+				keep(c, keptMoved)
+				continue
+			}
 			var allowed bool
 			allowed, clearDetached = detachedProbeAllowsOrphanRelease(c.bead)
 			if !allowed {
@@ -353,7 +363,7 @@ func releaseListedWithClock(claims []seatWorkHit, why releaseWhy, seat releaseSe
 		}
 		// A killed seat with started work already returned above. Every
 		// remaining path must probe a normalized-open row before releasing it.
-		if released, handled, err := releaseBlockedAssignment(c.store, c.bead, fallback); err != nil {
+		if released, handled, err := releaseBlockedAssignment(c.store, c.bead, fallback, clearDetached); err != nil {
 			out.Failed = append(out.Failed, c)
 			out.Why[c.bead.ID] = err.Error()
 			continue
@@ -369,11 +379,6 @@ func releaseListedWithClock(claims []seatWorkHit, why releaseWhy, seat releaseSe
 			continue
 		}
 		if p.pool {
-			assignee := strings.TrimSpace(c.bead.Assignee)
-			if !liveWorkAssignmentStillReleasable(c.store, c.bead.ID, c.bead.Status, assignee) {
-				keep(c, keptMoved)
-				continue
-			}
 			if !releaseOrphanedPoolAssignment(c.store, c.bead, clearDetached) {
 				keep(c, keptMoved)
 				continue
@@ -383,6 +388,21 @@ func releaseListedWithClock(claims []seatWorkHit, why releaseWhy, seat releaseSe
 				out.Failed = append(out.Failed, c)
 				out.Why[c.bead.ID] = err.Error()
 				continue
+			}
+			if _, canProbeBlocked := beads.BlockedAssignmentReleaserFor(c.store); c.bead.Status == "open" && !canProbeBlocked {
+				// This store supplied no raw-status probe. Its existing ordinary
+				// release can return nil on a lost fence, so confirm an empty
+				// assignee before counting a release; this proves no raw status.
+				rows, err := c.store.List(beads.ListQuery{IDs: []string{c.bead.ID}, Live: true, TierMode: beads.TierBoth})
+				if err != nil {
+					out.Failed = append(out.Failed, c)
+					out.Why[c.bead.ID] = err.Error()
+					continue
+				}
+				if len(rows) != 1 || rows[0].ID != c.bead.ID || strings.TrimSpace(rows[0].Assignee) != "" {
+					keep(c, keptMoved)
+					continue
+				}
 			}
 		}
 		out.Released = append(out.Released, c)

@@ -17,7 +17,16 @@ func TestReleaseListedPreservesRawBlockedHold(t *testing.T) {
 	for _, why := range []releaseWhy{releaseDrainAck, releaseCloseCascade, releaseStrandedRepair, releaseOrphan, releaseRetired} {
 		t.Run(string(rune('a'+why)), func(t *testing.T) {
 			ledger := newBdGuardLedger("blocked", "dead-session", map[string]string{beadmeta.RoutedToMetadataKey: "repo/worker", "hold_reason": "needs input", beadmeta.ContinuationGroupMetadataKey: "group"})
-			backing := beads.NewBdStoreWithPrefix(t.TempDir(), ledger.run, "bd")
+			run := func(dir, name string, args ...string) ([]byte, error) {
+				if len(args) > 0 && args[0] == "list" {
+					return ledger.render()
+				}
+				if len(args) > 0 && args[0] == "query" {
+					return []byte("[]"), nil
+				}
+				return ledger.run(dir, name, args...)
+			}
+			backing := beads.NewBdStoreWithPrefix(t.TempDir(), run, "bd")
 			snapshot, err := backing.Get(ledger.bead.ID)
 			if err != nil || snapshot.Status != "open" {
 				t.Fatalf("normalized snapshot = %+v, %v", snapshot, err)
@@ -374,6 +383,9 @@ func TestBlockedOrphanReleasesConfirmedClosedHolder(t *testing.T) {
 	ledger := newBdGuardLedger("blocked", "closed-session", map[string]string{beadmeta.RoutedToMetadataKey: "repo/worker"})
 	run := func(dir, name string, args ...string) ([]byte, error) {
 		if name == "bd" && len(args) > 0 && args[0] == "list" {
+			return ledger.render()
+		}
+		if name == "bd" && len(args) > 0 && args[0] == "query" {
 			return []byte("[]"), nil
 		}
 		return ledger.run(dir, name, args...)
@@ -401,4 +413,185 @@ type blockedSessionReadFailure struct{ beads.Store }
 
 func (s *blockedSessionReadFailure) List(beads.ListQuery) ([]beads.Bead, error) {
 	return nil, errors.New("session store unreadable")
+}
+
+func TestReleaseListedBlockedOrphanClearsDetachedAtomically(t *testing.T) {
+	for _, tc := range []struct {
+		name, tmux   string
+		errorsBefore int
+		change       func(*beads.Bead)
+		alive        bool
+	}{
+		{name: "dead", tmux: "exit 1"},
+		{name: "error threshold", tmux: "exit 2", errorsBefore: 2},
+		{name: "alive", tmux: "exit 0", alive: true},
+		{name: "owner guard lost", tmux: "exit 1", change: func(b *beads.Bead) { b.Assignee = "live-session" }},
+		{name: "status guard lost", tmux: "exit 1", change: func(b *beads.Bead) { b.Status = "open" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetDetachedProbeErrorCountsForTest()
+			installFakeTmux(t, tc.tmux)
+			ledger := newBdGuardLedger("blocked", "dead-session", map[string]string{
+				beadmeta.RoutedToMetadataKey: "repo/worker",
+				detachedProbeMetadataKey:     testDetachedPoolProbeSpec,
+				"hold_reason":                "needs human input", "work_result": "retained",
+			})
+			ledger.bead.Labels = []string{"hold:external"}
+			ledger.bead.Description = "retained description"
+			for _, key := range beadmeta.SessionAffinityMetadataKeys {
+				ledger.bead.Metadata[key] = "obsolete-session"
+			}
+			run := func(dir, name string, args ...string) ([]byte, error) {
+				if len(args) > 0 && args[0] == "list" {
+					return ledger.render()
+				}
+				if len(args) > 0 && args[0] == "query" {
+					return []byte("[]"), nil
+				}
+				return ledger.run(dir, name, args...)
+			}
+			store := beads.NewCachingStore(beads.NewBdStoreWithPrefix(t.TempDir(), run, "bd"), nil)
+			snapshot, err := store.Get(ledger.bead.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := ledger.row()
+			ledger.beforeUpdate = tc.change
+			for i := 0; i < tc.errorsBefore; i++ {
+				incrementDetachedProbeErrorCount(snapshot.ID)
+			}
+			out := releaseListed([]seatWorkHit{{store: store, bead: snapshot}}, releaseOrphan, releaseSeat{}, &config.City{Agents: []config.Agent{persistentWorker()}}, ReleaseOpts{})
+			if tc.alive || tc.change != nil {
+				if len(out.Released) != 0 || len(out.Kept) != 1 || len(out.Failed) != 0 {
+					t.Fatalf("protected release = %+v", out)
+				}
+				if !reflect.DeepEqual(ledger.row().Metadata, before.Metadata) {
+					t.Fatalf("lost guard changed metadata: %v", ledger.row().Metadata)
+				}
+				if tc.alive && len(ledger.updates) != 0 {
+					t.Fatalf("alive probe reached update: %v", ledger.updates)
+				}
+				return
+			}
+			want := before
+			want.Assignee = ""
+			want.Metadata = make(map[string]string, len(before.Metadata))
+			for k, v := range before.Metadata {
+				want.Metadata[k] = v
+			}
+			for _, k := range beadmeta.SessionAffinityMetadataKeys {
+				want.Metadata[k] = ""
+			}
+			want.Metadata[detachedProbeMetadataKey] = ""
+			if len(out.Released) != 1 || len(out.Kept) != 0 || len(out.Failed) != 0 || !reflect.DeepEqual(ledger.row(), want) {
+				t.Fatalf("release = %+v, row %+v, want %+v", out, ledger.row(), want)
+			}
+			if len(ledger.updates) != 1 || hasBdFlag(ledger.updates[0], "--status") || testFlagValue(ledger.updates[0], "--if-status") != "blocked" || testFlagValue(ledger.updates[0], "--if-assignee") != "dead-session" {
+				t.Fatalf("not one guarded update: %v", ledger.updates)
+			}
+			cached, err := store.Get(snapshot.ID)
+			if err != nil || cached.Assignee != "" || cached.Metadata[detachedProbeMetadataKey] != "" {
+				t.Fatalf("cache retained detached assignment: %+v, %v", cached, err)
+			}
+		})
+	}
+}
+
+func TestReleaseListedOrphanChecksLiveAssignmentBeforeDetachedProbe(t *testing.T) {
+	for _, status := range []string{"open", "in_progress"} {
+		t.Run(status, func(t *testing.T) {
+			resetDetachedProbeErrorCountsForTest()
+			ledger := newBdGuardLedger(status, "dead-session", map[string]string{beadmeta.RoutedToMetadataKey: "repo/worker", detachedProbeMetadataKey: "invalid"})
+			run := func(dir, name string, args ...string) ([]byte, error) {
+				if len(args) > 0 && args[0] == "list" {
+					return ledger.render()
+				}
+				if len(args) > 0 && args[0] == "query" {
+					return []byte("[]"), nil
+				}
+				return ledger.run(dir, name, args...)
+			}
+			store := beads.NewCachingStore(beads.NewBdStoreWithPrefix(t.TempDir(), run, "bd"), nil)
+			snapshot, err := store.Get(ledger.bead.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ledger.bead.Assignee = "live-session"
+			out := releaseListed([]seatWorkHit{{store: store, bead: snapshot}}, releaseOrphan, releaseSeat{}, &config.City{Agents: []config.Agent{persistentWorker()}}, ReleaseOpts{})
+			if len(out.Released) != 0 || len(out.Kept) != 1 || out.Why[snapshot.ID] != keptMoved || len(ledger.updates) != 0 {
+				t.Fatalf("stale assignment = %+v, updates %v", out, ledger.updates)
+			}
+			detachedProbeErrorCounts.Lock()
+			count := detachedProbeErrorCounts.byBead[snapshot.ID]
+			detachedProbeErrorCounts.Unlock()
+			if count != 0 {
+				t.Fatalf("stale claim incurred detached probe errors: %d", count)
+			}
+		})
+	}
+}
+
+func TestReleaseListedWithoutBlockedProbeAccountsForObservedAssignment(t *testing.T) {
+	for _, tc := range []struct {
+		name                        string
+		apply, readFailure, missing bool
+	}{
+		{name: "lost fence"},
+		{name: "applied", apply: true},
+		{name: "read failed", readFailure: true},
+		{name: "missing after write", missing: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := beads.NewMemStore()
+			b, err := mem.Create(beads.Bead{Status: "open", Assignee: "dead-session", Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "repo/worker"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			store := &releaseWithoutBlockedProbe{Store: mem, apply: tc.apply, readFailure: tc.readFailure, missing: tc.missing}
+			out := releaseListed([]seatWorkHit{{store: store, bead: b}}, releaseCloseCascade, releaseSeat{}, &config.City{Agents: []config.Agent{persistentWorker()}}, ReleaseOpts{})
+			if tc.apply {
+				if len(out.Released) != 1 || len(out.Kept) != 0 || len(out.Failed) != 0 {
+					t.Fatalf("applied assignment = %+v", out)
+				}
+			} else if tc.readFailure {
+				if len(out.Released) != 0 || len(out.Failed) != 1 {
+					t.Fatalf("unverified release = %+v", out)
+				}
+			} else if len(out.Released) != 0 || len(out.Kept) != 1 || out.Why[b.ID] != keptMoved || len(out.Failed) != 0 {
+				t.Fatalf("lost fence counted as released: %+v", out)
+			}
+			if !tc.apply {
+				got, err := mem.Get(b.ID)
+				if err != nil || !reflect.DeepEqual(got, b) {
+					t.Fatalf("lost fence mutated claim: %+v, %v", got, err)
+				}
+			}
+		})
+	}
+}
+
+type releaseWithoutBlockedProbe struct {
+	beads.Store
+	apply, readFailure, missing bool
+}
+
+func (s *releaseWithoutBlockedProbe) UpdateIfAssignment(id, status, assignee string, opts beads.UpdateOpts) (bool, error) {
+	if !s.apply {
+		return false, nil
+	}
+	b, err := s.Store.Get(id)
+	if err != nil || b.Status != status || b.Assignee != assignee {
+		return false, err
+	}
+	err = s.Store.Update(id, opts)
+	return err == nil, err
+}
+func (s *releaseWithoutBlockedProbe) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if s.readFailure {
+		return nil, errors.New("assignment observation failed")
+	}
+	if s.missing {
+		return nil, nil
+	}
+	return s.Store.List(q)
 }

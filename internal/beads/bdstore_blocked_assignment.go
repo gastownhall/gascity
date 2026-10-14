@@ -23,7 +23,9 @@ func (s *BdStore) ReleaseBlockedIfCurrent(id, expectedAssignee string, metadata 
 			return false, true, fmt.Errorf("blocked release %q: %w", id, err)
 		}
 		if !isWispQueryableID(id) {
-			return false, true, fmt.Errorf("blocked release %q: %w", id, err)
+			// A confirmed missing non-wisp no longer has an assignment to
+			// release. Do not turn absence into an operational failure.
+			return false, true, nil
 		}
 		// The existing Get fallback for the wisp plane, retaining the raw row.
 		out, err = s.runBDTransientRead("query", "--json", "ephemeral=true AND id="+id, "--all", "--limit", "1")
