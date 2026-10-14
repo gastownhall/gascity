@@ -855,7 +855,7 @@ func HasReadyExcludedLabel(b Bead) bool {
 	for _, label := range b.Labels {
 		switch label {
 		case "gc:session", "gc:order-tracking", "order-tracking",
-			"gc:op", "gc:fact": // op and fact rows; canonical: internal/opjournal
+			"gc:op", "gc:fact", "gc:rt": // op, fact and runtime rows; canonical: internal/opjournal
 			return true
 		}
 	}

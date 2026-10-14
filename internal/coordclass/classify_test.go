@@ -64,6 +64,9 @@ func TestClassifyGoldenTable(t *testing.T) {
 		{"fact row", beads.Bead{Type: "op", Status: "closed", Labels: []string{"gc:fact", "gc:fact-conv:gc-7"}}, ClassSessions},
 		{"op row with stray root_bead_id", beads.Bead{Type: "op", Labels: []string{"gc:op"}, Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "gc-100"}}, ClassSessions},
 		{"op label on another type", beads.Bead{Type: "task", Labels: []string{"gc:op"}}, ClassSessions},
+		{"runtime row", beads.Bead{Type: "op", Status: "open", Labels: []string{"gc:rt", "gc:rt-conv:gc-7"}}, ClassSessions},
+		{"runtime label on another type", beads.Bead{Type: "task", Labels: []string{"gc:rt"}}, ClassSessions},
+		{"runtime conversation label alone stays work", beads.Bead{Type: "task", Labels: []string{"gc:rt-conv:gc-7"}}, ClassWork},
 		{"conversation key label alone stays work", beads.Bead{Type: "task", Labels: []string{"gc:op-conv:gc-7"}}, ClassWork},
 		// A real wait bead carries BOTH gc:wait and the per-entity session:<id>
 		// label; it classifies via the gc:wait class signal.
