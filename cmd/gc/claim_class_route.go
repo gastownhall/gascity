@@ -325,9 +325,9 @@ func hookClaimBindingRefusedTheClaim(err error) bool {
 //
 // The ready tier's claimFirstReadyHookAssignment fails the whole hook invocation
 // on any claim error it does not recognize, so an unrecognized wisp refusal
-// would stop this session over one routed id that no front door will ever be
-// able to claim — the one outcome ErrWispNotClaimable's own doc comment says
-// should instead be "log it once and move on."
+// would stop this session over one routed id that this binding cannot claim —
+// the one outcome ErrWispNotClaimable's own doc comment says should instead be
+// "log it once and move on."
 func hookClaimBeadIsAWisp(err error) bool {
 	return errors.Is(err, beads.ErrWispNotClaimable)
 }

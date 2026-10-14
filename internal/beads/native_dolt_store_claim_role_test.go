@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"testing"
 	"time"
 
@@ -28,10 +29,11 @@ type claimRoleSpy struct {
 
 	// lifecycleErr, updateResult and updateErr configure IssueLifecycle()
 	// and its Update, which Claim dials (Claim:true) for a wisp the claimer
-	// refused when the store can claim through the update operation (S24-G).
-	// updates records every Update request, so a test can assert none was
-	// dialed.
+	// refused (S24-G); nilLifecycle makes IssueLifecycle hand out no role and
+	// no error. updates records every Update request, so a test can assert
+	// none was dialed.
 	lifecycleErr error
+	nilLifecycle bool
 	updates      []issueops.UpdateRequest
 	updateResult issueops.UpdateResult
 	updateErr    error
@@ -40,6 +42,9 @@ type claimRoleSpy struct {
 func (s *claimRoleSpy) IssueLifecycle() (issueops.Lifecycle, error) {
 	if s.lifecycleErr != nil {
 		return nil, s.lifecycleErr
+	}
+	if s.nilLifecycle {
+		return nil, nil
 	}
 	return claimLifecycleSpy{spy: s}, nil
 }
@@ -58,7 +63,9 @@ func (l claimLifecycleSpy) Update(_ context.Context, req issueops.UpdateRequest)
 
 // claimRemoteSpy is claimRoleSpy behind a remote (bd serve) handle: it answers
 // ServerContext the way the beads http store does, with the capability tokens
-// of the server's cached handshake.
+// of the server's cached handshake. Production Claim never reads
+// ServerContext, so the remote variants run the local path; they pin that
+// absence, and a capability gate on the wisp claim would fail them.
 type claimRemoteSpy struct {
 	*claimRoleSpy
 	capabilities []string
@@ -67,6 +74,12 @@ type claimRemoteSpy struct {
 func (s claimRemoteSpy) ServerContext() (serverURL, bdVersion string, capabilities []string) {
 	return "https://beads.example.test", "test", append([]string(nil), s.capabilities...)
 }
+
+// bdServeHandshake is what a bd serve handshake advertises for the operations a
+// claim reaches. No token announces that updateIssue accepts claim (the beads
+// client's own doc: "no capability token announces the member"), so a remote
+// store's wisp claim must not wait for one.
+var bdServeHandshake = []string{"issues.claim", "issues.get", "issues.update"}
 
 func (s *claimRoleSpy) IssueClaimer() (issueops.Claimer, error) { return s, nil }
 
@@ -272,7 +285,7 @@ func (s *claimBlockingSpy) Claim(_ context.Context, _ issueops.ClaimRequest) (is
 // writer (a reconnect swap, or here a plain s.mu.Lock()/Unlock() standing in
 // for one) arriving while Claim holds its outer RLock would wedge that nested
 // RLock behind the writer, which itself could never proceed because Claim's
-// outer RLock is never released. nativeClaimWispTarget reads off the
+// outer RLock is never released. nativeClaimTargetIsWisp reads off the
 // storage handle and ctx Claim already has, so neither side can block the
 // other.
 func TestClaimDoesNotDeadlockWhenAPendingWriterArrivesWhileItHoldsItsReadLock(t *testing.T) {
@@ -326,7 +339,7 @@ func (claimReconnectSpy) Close() error { return nil }
 // can never be granted: a goroutine cannot upgrade its own read lock to a
 // write lock, and nothing else can release the RLock it holds. Claim never
 // calls s.Get/withReadRetry for this read (see Claim's doc comment and
-// nativeClaimWispTarget), so a transient error here keeps the claimer's
+// nativeClaimTargetIsWisp), so a transient error here keeps the claimer's
 // ErrNotFound instead of reaching reconnect.
 func TestClaimDoesNotSelfDeadlockWhenTheDisambiguationReadNeedsAReconnect(t *testing.T) {
 	spy := claimReconnectSpy{&claimRoleSpy{
@@ -384,7 +397,8 @@ func TestGetAloneStillReconnectsOnATransientFailureWithoutHanging(t *testing.T) 
 }
 
 // wispClaimSpy seeds a claimRoleSpy whose claimer refuses id as not found and
-// whose reader resolves it to an open wisp at row version 7.
+// whose reader resolves it to an open wisp at row version 7, the version a
+// wisp claim must not be fenced on.
 func wispClaimSpy(marker string) *claimRoleSpy {
 	row := beadslib.Issue{ID: "gc-wisp-1", Status: beadslib.StatusOpen, RowVersion: 7}
 	switch marker {
@@ -404,24 +418,24 @@ func wispClaimSpy(marker string) *claimRoleSpy {
 	}
 }
 
-// assertWispClaimDial pins the one Update a wisp claim may dial: Claim:true
-// for the assignee as actor, fenced on the row version the disambiguating read
-// observed, and nothing else (no patch, no assignee/status guard, no force).
+// assertWispClaimDial pins the one Update a wisp claim may dial: the bare
+// claim `bd update <id> --claim` sends, Claim:true for the assignee as actor
+// and nothing else. In particular it carries no ExpectedVersion fence on the
+// row version the disambiguating read observed: the update's claim re-checks
+// holder and status inside its own write transaction, and the beads http
+// client sends only a request with no fence, guard, patch or force through
+// its claim-only fallback for a server that predates claim on updateIssue.
 func assertWispClaimDial(t *testing.T, spy *claimRoleSpy) {
 	t.Helper()
 	if len(spy.updates) != 1 {
 		t.Fatalf("Update dialed %d times, want exactly 1", len(spy.updates))
 	}
 	req := spy.updates[0]
-	if !req.Claim || req.Actor != "worker-1" || req.IssueID != "gc-wisp-1" {
-		t.Errorf("Update request = %+v, want Claim:true for worker-1 on gc-wisp-1", req)
+	if req.ExpectedVersion != nil {
+		t.Errorf("Update ExpectedVersion = %d, want no fence on the read's row version", *req.ExpectedVersion)
 	}
-	if req.ExpectedVersion == nil || *req.ExpectedVersion != 7 {
-		t.Errorf("Update ExpectedVersion = %v, want the read's row version 7", req.ExpectedVersion)
-	}
-	if req.ExpectedAssignee != nil || req.ExpectedStatus != nil || req.IssuePlaneOnly ||
-		req.ForceAssigneeTransfer || req.ForceClosePolicy {
-		t.Errorf("Update request = %+v, want no guard but the version and no force", req)
+	if want := (issueops.UpdateRequest{Actor: "worker-1", IssueID: "gc-wisp-1", Claim: true}); !reflect.DeepEqual(req, want) {
+		t.Errorf("Update request = %+v, want only the bare claim %+v", req, want)
 	}
 }
 
@@ -448,40 +462,66 @@ func TestClaimClaimsAWispThroughTheUpdateOperationOnALocalStore(t *testing.T) {
 	}
 }
 
-// TestClaimClaimsAWispOnARemoteStoreThatAdvertisesUpdateClaim pins S24-G over
-// http: a server advertising issues.update.claim resolves a claim through
-// updateIssue on both planes, so the wisp is claimed with one Update.
-func TestClaimClaimsAWispOnARemoteStoreThatAdvertisesUpdateClaim(t *testing.T) {
-	spy := wispClaimSpy("ephemeral")
-	store := newNativeDoltStoreForTest(claimRemoteSpy{claimRoleSpy: spy, capabilities: []string{"issues.claim", "issues.update", "issues.update.claim"}})
-
-	_, claimed, err := store.Claim("gc-wisp-1", "worker-1")
-	if err != nil || !claimed {
-		t.Fatalf("Claim(wisp) = (claimed=%v, err=%v), want a claim", claimed, err)
-	}
-	assertWispClaimDial(t, spy)
-}
-
-// TestClaimRefusesAWispByNameOnARemoteStoreWithoutUpdateClaim pins the G8
-// named refusal: a server that does not advertise issues.update.claim cannot
-// claim a wisp, so Claim refuses it as ErrWispNotClaimable (never ErrNotFound,
-// which would send the class route looking for the wisp in the graph store)
-// and dials no Update at all.
-func TestClaimRefusesAWispByNameOnARemoteStoreWithoutUpdateClaim(t *testing.T) {
+// TestClaimClaimsAWispThroughTheUpdateOperationOnARemoteStore pins S24-G over
+// http: a remote store gets the same bare claim a local one does, whatever its
+// cached handshake says. No capability token announces claim on updateIssue,
+// so Claim never gates on one: a server that serves the claim claims the wisp
+// here, and one that predates it refuses the wisp by name
+// (TestClaimMapsAByNameUpdateRefusalToErrWispNotClaimable).
+func TestClaimClaimsAWispThroughTheUpdateOperationOnARemoteStore(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		caps []string
 	}{
-		{"server lacks the token", []string{"issues.claim", "issues.update"}},
+		{"a bd serve handshake", bdServeHandshake},
 		{"no handshake cached", nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			spy := wispClaimSpy("ephemeral")
 			store := newNativeDoltStoreForTest(claimRemoteSpy{claimRoleSpy: spy, capabilities: tc.caps})
 
+			bead, claimed, err := store.Claim("gc-wisp-1", "worker-1")
+			if err != nil || !claimed {
+				t.Fatalf("Claim(wisp) = (%+v, %v, %v), want (bead, true, nil)", bead, claimed, err)
+			}
+			if bead.ID != "gc-wisp-1" || bead.Assignee != "worker-1" || bead.Status != "in_progress" {
+				t.Errorf("bead = %+v, want the claimed wisp back", bead)
+			}
+			assertWispClaimDial(t, spy)
+		})
+	}
+}
+
+// TestClaimRefusesAWispByNameWhenTheStoreHasNoLifecycleRole pins the G8 named
+// refusal for a store, local or remote, that hands out no lifecycle role: it
+// cannot claim the wisp through the update operation, so Claim refuses it as
+// ErrWispNotClaimable (never ErrNotFound, which would send the class route
+// looking for the wisp in the graph store), keeps the role's error, when there
+// is one, as the cause, and dials no Update at all.
+func TestClaimRefusesAWispByNameWhenTheStoreHasNoLifecycleRole(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		remote       bool
+		lifecycleErr error
+	}{
+		{"local, role refused", false, &beadslib.ErrUnsupported{Op: "IssueLifecycle", Backend: "dolt"}},
+		{"remote, role refused", true, &beadslib.ErrUnsupported{Op: "IssueLifecycle", Backend: "http"}},
+		{"local, no role", false, nil},
+		{"remote, no role", true, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spy := wispClaimSpy("ephemeral")
+			spy.lifecycleErr = tc.lifecycleErr
+			spy.nilLifecycle = tc.lifecycleErr == nil
+			var storage beadslib.Storage = spy
+			if tc.remote {
+				storage = claimRemoteSpy{claimRoleSpy: spy, capabilities: bdServeHandshake}
+			}
+			store := newNativeDoltStoreForTest(storage)
+
 			_, claimed, err := store.Claim("gc-wisp-1", "worker-1")
 			if claimed {
-				t.Fatal("claimed = true on a wisp the server cannot claim")
+				t.Fatal("claimed = true on a wisp the store cannot claim")
 			}
 			if !errors.Is(err, ErrWispNotClaimable) {
 				t.Fatalf("error = %v, want it to wrap beads.ErrWispNotClaimable", err)
@@ -489,48 +529,44 @@ func TestClaimRefusesAWispByNameOnARemoteStoreWithoutUpdateClaim(t *testing.T) {
 			if errors.Is(err, ErrNotFound) {
 				t.Errorf("error = %v, want it NOT to read as ErrNotFound", err)
 			}
+			if tc.lifecycleErr != nil && !errors.Is(err, tc.lifecycleErr) {
+				t.Errorf("error = %v, want the lifecycle role's own error kept as the cause", err)
+			}
 			if len(spy.updates) != 0 {
-				t.Errorf("Update dialed %d times, want none without issues.update.claim", len(spy.updates))
+				t.Errorf("Update dialed %d times, want none without a lifecycle role", len(spy.updates))
 			}
 		})
 	}
 }
 
-// TestClaimRefusesAWispByNameWhenTheStoreHasNoLifecycleRole pins the local
-// half of the qualification: a store whose lifecycle role is unavailable
-// cannot claim through update, so the wisp keeps its named refusal.
-func TestClaimRefusesAWispByNameWhenTheStoreHasNoLifecycleRole(t *testing.T) {
-	spy := wispClaimSpy("ephemeral")
-	spy.lifecycleErr = &beadslib.ErrUnsupported{}
-	store := newNativeDoltStoreForTest(spy)
-
-	_, claimed, err := store.Claim("gc-wisp-1", "worker-1")
-	if claimed || !errors.Is(err, ErrWispNotClaimable) || errors.Is(err, ErrNotFound) {
-		t.Fatalf("Claim(wisp) = (claimed=%v, err=%v), want the named ErrWispNotClaimable refusal", claimed, err)
-	}
-}
-
-// TestClaimMapsAByNameUpdateRefusalToErrWispNotClaimable pins the refusal
-// mapping: when the update operation itself refuses the wisp claim by name
-// (the beads client's capability refusal, *ErrUnsupported, e.g. the
-// W-ClaimRequest.Wisp ledger row), Claim reports ErrWispNotClaimable, never a
-// bare error the hook would fail on and never ErrNotFound.
+// TestClaimMapsAByNameUpdateRefusalToErrWispNotClaimable pins the refusal a
+// remote store reaches when its server predates claim on updateIssue: the
+// beads client retries the bare claim through its claim-only fallback, whose
+// claim operation excludes the wisp plane, so it refuses the wisp by name
+// (*ErrUnsupported, the W-ClaimRequest.Wisp ledger row). Claim reports that as
+// ErrWispNotClaimable, never a bare error the hook would fail on and never
+// ErrNotFound, and keeps the refusal as the cause.
 func TestClaimMapsAByNameUpdateRefusalToErrWispNotClaimable(t *testing.T) {
 	spy := wispClaimSpy("ephemeral")
 	spy.updateResult = issueops.UpdateResult{}
-	spy.updateErr = fmt.Errorf("updateIssue: %w", &beadslib.ErrUnsupported{})
-	store := newNativeDoltStoreForTest(claimRemoteSpy{claimRoleSpy: spy, capabilities: []string{"issues.update.claim"}})
+	refusal := &beadslib.ErrUnsupported{Op: "updateIssue", Backend: "http"}
+	spy.updateErr = fmt.Errorf("claiming a wisp is not supported by this bd serve: %w", refusal)
+	store := newNativeDoltStoreForTest(claimRemoteSpy{claimRoleSpy: spy, capabilities: bdServeHandshake})
 
 	_, claimed, err := store.Claim("gc-wisp-1", "worker-1")
 	if claimed || !errors.Is(err, ErrWispNotClaimable) || errors.Is(err, ErrNotFound) {
 		t.Fatalf("Claim(wisp) = (claimed=%v, err=%v), want the named ErrWispNotClaimable refusal", claimed, err)
 	}
+	if !errors.Is(err, refusal) {
+		t.Errorf("error = %v, want the update's refusal kept as the cause", err)
+	}
+	assertWispClaimDial(t, spy)
 }
 
-// TestClaimReportsALostWispClaimAsNotClaimed pins CAS and fencing on the wisp
-// path: a foreign holder, an ineligible status, or a row written between the
-// disambiguating read and the claim (the ExpectedVersion fence) is a lost
-// claim, (false, nil), exactly as the claimer's conflicts are.
+// TestClaimReportsALostWispClaimAsNotClaimed pins CAS on the wisp path: the
+// update's claim re-checks holder and status inside its write transaction, so
+// a foreign holder or an ineligible status is a lost claim, (false, nil),
+// exactly as the claimer's conflicts are.
 func TestClaimReportsALostWispClaimAsNotClaimed(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -538,7 +574,6 @@ func TestClaimReportsALostWispClaimAsNotClaimed(t *testing.T) {
 	}{
 		{"a foreign holder", &issueops.ClaimConflictError{Err: issueops.ErrAlreadyClaimed}},
 		{"an ineligible status", issueops.ErrNotClaimable},
-		{"a stale row version", fmt.Errorf("%w: expected 7, got 9", issueops.ErrVersionMismatch)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			spy := wispClaimSpy("ephemeral")
@@ -558,17 +593,17 @@ func TestClaimReportsALostWispClaimAsNotClaimed(t *testing.T) {
 // TestClaimOfAMissingIDNeverDialsTheWispClaim pins the class-route boundary:
 // an id no plane holds stays ErrNotFound (the error that opens the hook's
 // claim-time class route) and the update operation is never dialed, on a
-// remote store advertising issues.update.claim or a local one.
+// remote store or a local one.
 func TestClaimOfAMissingIDNeverDialsTheWispClaim(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		remote bool
-	}{{"local", false}, {"remote with issues.update.claim", true}} {
+	}{{"local", false}, {"remote", true}} {
 		t.Run(tc.name, func(t *testing.T) {
 			spy := &claimRoleSpy{err: issueops.ErrNotFound, getErr: issueops.ErrNotFound}
 			var storage beadslib.Storage = spy
 			if tc.remote {
-				storage = claimRemoteSpy{claimRoleSpy: spy, capabilities: []string{"issues.update.claim"}}
+				storage = claimRemoteSpy{claimRoleSpy: spy, capabilities: bdServeHandshake}
 			}
 			store := newNativeDoltStoreForTest(storage)
 

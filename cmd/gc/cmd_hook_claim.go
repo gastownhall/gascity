@@ -791,11 +791,11 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 				// bead no store can claim must not stop this session claiming
 				// the work that other stores can.
 				//
-				// A routed id that resolves to a wisp row carries the same proof
-				// for the same reason (hookClaimBeadIsAWisp): the claimer refused
-				// before any write, so nothing is outstanding, and a wisp is never
-				// claimable through this role no matter how many times it is
-				// retried.
+				// A routed id that resolves to a wisp the binding could not claim
+				// through its update operation either carries the same proof for
+				// the same reason (hookClaimBeadIsAWisp): the refusal lands before
+				// any write, so nothing is outstanding, and retrying against the
+				// same binding cannot change the answer.
 				fmt.Fprintf(stderr, "gc hook --claim: skipping ready assignment %s: %v\n", candidate.ID, err) //nolint:errcheck
 				claimsErrored = true
 				continue
