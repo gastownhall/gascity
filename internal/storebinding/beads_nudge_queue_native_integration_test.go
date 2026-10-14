@@ -19,6 +19,7 @@ package storebinding
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -140,5 +141,82 @@ func TestBeadsNudgeQueueClaimBatchOnTheNativeStore(t *testing.T) {
 	}
 	if len(drained) != 2 {
 		t.Fatalf("ClaimDue = %v, want both nudges claimed by the native Claim", nudgeItemIDs(drained))
+	}
+}
+
+// TestBeadsNudgeQueueClaimBatchOverTheCachedNativeStore runs the queue the way
+// the controller hosts it: over a primed CachingStore wrapping the native
+// store, with records enqueued by another process straight on the store. The
+// native List leaves revisions unstamped, so the cache serves revision 0 after
+// any Live List; a new batch, a resumed batch and a backoff release must still
+// land on the first pass.
+func TestBeadsNudgeQueueClaimBatchOverTheCachedNativeStore(t *testing.T) {
+	for _, prime := range []string{"active", "full"} {
+		t.Run(prime, func(t *testing.T) {
+			native := openNativeNudgeQueueWorkspace(t)
+			other := newNudgeQueue(t, native)
+			cache := beads.NewCachingStoreForTest(native, nil)
+			switch prime {
+			case "active":
+				if err := cache.PrimeActive(); err != nil {
+					t.Fatalf("PrimeActive: %v", err)
+				}
+			case "full":
+				if err := cache.Prime(context.Background()); err != nil {
+					t.Fatalf("Prime: %v", err)
+				}
+			}
+			queue := newNudgeQueue(t, cache)
+			now := time.Now().UTC()
+			target := ClaimTarget{QueueKeys: []string{testNudgeAgent}}
+			for _, id := range []string{"n-a", "n-b"} {
+				if err := other.Enqueue(testNudgeItem(id, "", now)); err != nil {
+					t.Fatalf("Enqueue(%s): %v", id, err)
+				}
+			}
+			fresh, err := queue.ClaimBatch(target, now)
+			if err != nil || len(fresh) != 2 {
+				t.Fatalf("new ClaimBatch = %v, %v; want both nudges on the first pass", nudgeItemIDs(fresh), err)
+			}
+			key := fresh[0].DeliveryBatch
+			if err := queue.ReleaseClaims([]string{"n-a", "n-b"}, time.Time{}); err != nil {
+				t.Fatalf("ReleaseClaims: %v", err)
+			}
+			resumed, err := queue.ClaimBatch(target, now)
+			if err != nil || len(resumed) != 2 || resumed[0].DeliveryBatch != key {
+				t.Fatalf("resumed ClaimBatch = %+v, %v; want both nudges under %q on the first pass", resumed, err, key)
+			}
+			if _, _, _, err := queue.ListFor(target, now); err != nil {
+				t.Fatalf("ListFor: %v", err)
+			}
+			notBefore := now.Add(10 * time.Minute)
+			if err := queue.ReleaseClaims([]string{"n-a", "n-b"}, notBefore); err != nil {
+				t.Fatalf("ReleaseClaims(notBefore): %v", err)
+			}
+			for _, id := range []string{"n-a", "n-b"} {
+				assertReleasedUntil(t, native, id, notBefore)
+			}
+		})
+	}
+}
+
+// TestBeadsNudgeQueueSweepOnTheNativeStore pins the terminal sweep on the
+// native store, whose List leaves revisions unstamped: a retired record past
+// retention is deleted.
+func TestBeadsNudgeQueueSweepOnTheNativeStore(t *testing.T) {
+	native := openNativeNudgeQueueWorkspace(t)
+	queue := newNudgeQueue(t, native)
+	now := time.Now().UTC()
+	if err := queue.Enqueue(testNudgeItem("n-a", "", now)); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if err := queue.Ack([]string{"n-a"}, "delivered", "", "commit"); err != nil {
+		t.Fatalf("Ack: %v", err)
+	}
+	if _, err := queue.Maintain(context.Background(), now.Add(nudgeQueueTerminalRetention).Add(time.Hour)); err != nil {
+		t.Fatalf("Maintain: %v", err)
+	}
+	if _, err := native.Get(nudgeQueueBeadID("n-a")); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("Get after the sweep = %v, want the retired record deleted", err)
 	}
 }

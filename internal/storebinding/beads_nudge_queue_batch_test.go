@@ -654,3 +654,116 @@ func TestBeadsNudgeQueueClaimBatchOverAnUnstampedList(t *testing.T) {
 		t.Fatalf("n-b assignee = %q, want the rival's lease %q left in place", record.Assignee, rivalLease)
 	}
 }
+
+// openCachedUnstampedNudgeQueue is the controller's view of a nudges store
+// whose List leaves revisions unstamped: a primed CachingStore over it. A Live
+// List installs the unstamped row in the cache, and the cache's Get then serves
+// revision 0, so no guarded write may trust the first revision it is handed.
+func openCachedUnstampedNudgeQueue(t *testing.T) (*unstampedListStore, NudgeQueue) {
+	t.Helper()
+	backing := &unstampedListStore{SQLiteStore: openSQLiteNudgeQueueStore(t)}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	return backing, newNudgeQueue(t, cache)
+}
+
+// TestBeadsNudgeQueueClaimBatchOverACacheOfAnUnstampedList pins the batch
+// claim over the controller's cache of a store whose List carries no revision:
+// a new batch, a batch resumed after a release, and a backoff release after a
+// Live List of the in-flight rows all land rather than reading as lost races.
+func TestBeadsNudgeQueueClaimBatchOverACacheOfAnUnstampedList(t *testing.T) {
+	backing, queue := openCachedUnstampedNudgeQueue(t)
+	other := newNudgeQueue(t, backing) // another process writes straight to the store
+	now := time.Now().UTC()
+	target := ClaimTarget{QueueKeys: []string{testNudgeAgent}}
+	for _, id := range []string{"n-a", "n-b"} {
+		if err := other.Enqueue(testNudgeItem(id, "", now)); err != nil {
+			t.Fatalf("Enqueue(%s): %v", id, err)
+		}
+	}
+	fresh, err := queue.ClaimBatch(target, now)
+	if err != nil || len(fresh) != 2 {
+		t.Fatalf("new ClaimBatch over the cache = %v, %v; want both nudges", nudgeItemIDs(fresh), err)
+	}
+	key := fresh[0].DeliveryBatch
+	if err := queue.ReleaseClaims([]string{"n-a", "n-b"}, time.Time{}); err != nil {
+		t.Fatalf("ReleaseClaims: %v", err)
+	}
+	resumed, err := queue.ClaimBatch(target, now)
+	if err != nil || len(resumed) != 2 || resumed[0].DeliveryBatch != key {
+		t.Fatalf("resumed ClaimBatch over the cache = %+v, %v; want both nudges under %q", resumed, err, key)
+	}
+	if _, _, _, err := queue.ListFor(target, now); err != nil { // a Live List of the in-flight rows
+		t.Fatalf("ListFor: %v", err)
+	}
+	notBefore := now.Add(10 * time.Minute)
+	if err := queue.ReleaseClaims([]string{"n-a", "n-b"}, notBefore); err != nil {
+		t.Fatalf("ReleaseClaims(notBefore): %v", err)
+	}
+	for _, id := range []string{"n-a", "n-b"} {
+		assertReleasedUntil(t, backing, id, notBefore)
+	}
+}
+
+// TestBeadsNudgeQueueReleaseWithNotBeforeOverACacheOfAnUnstampedList pins the
+// backoff release after a ClaimDue: a Live List that put the unstamped row in
+// the cache must not turn the release into a silent no-op.
+func TestBeadsNudgeQueueReleaseWithNotBeforeOverACacheOfAnUnstampedList(t *testing.T) {
+	backing, queue := openCachedUnstampedNudgeQueue(t)
+	now := time.Now().UTC()
+	target := ClaimTarget{QueueKeys: []string{testNudgeAgent}}
+	if err := queue.Enqueue(testNudgeItem("n-a", "", now)); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if claimed, err := queue.ClaimDue(target, now); err != nil || len(claimed) != 1 {
+		t.Fatalf("ClaimDue = %v, %v", nudgeItemIDs(claimed), err)
+	}
+	if _, _, _, err := queue.ListFor(target, now); err != nil {
+		t.Fatalf("ListFor: %v", err)
+	}
+	notBefore := now.Add(10 * time.Minute)
+	if err := queue.ReleaseClaims([]string{"n-a"}, notBefore); err != nil {
+		t.Fatalf("ReleaseClaims(notBefore): %v", err)
+	}
+	assertReleasedUntil(t, backing, "n-a", notBefore)
+}
+
+// TestBeadsNudgeQueueReleaseWithNotBeforeLeavesAnUnheldItem pins the guard on
+// the backoff release: it moves only an item still held in flight, so an item
+// nobody holds keeps its deliver-after and stays due.
+func TestBeadsNudgeQueueReleaseWithNotBeforeLeavesAnUnheldItem(t *testing.T) {
+	backing := openSQLiteNudgeQueueStore(t)
+	queue := newNudgeQueue(t, backing)
+	now := time.Now().UTC()
+	target := ClaimTarget{QueueKeys: []string{testNudgeAgent}}
+	if err := queue.Enqueue(testNudgeItem("n-a", "", now)); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if err := queue.ReleaseClaims([]string{"n-a"}, now.Add(time.Minute)); err != nil {
+		t.Fatalf("ReleaseClaims of a pending item: %v", err)
+	}
+	record, err := backing.Get(nudgeQueueBeadID("n-a"))
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if record.Metadata[nudgeMetaDeliverAfter] == formatNudgeTime(now.Add(time.Minute)) {
+		t.Fatalf("ReleaseClaims(notBefore) moved the deliver_after of an item nobody held")
+	}
+	if claimed, err := queue.ClaimDue(target, now); err != nil || len(claimed) != 1 {
+		t.Fatalf("ClaimDue after a no-op release = %v, %v; want the item still due", nudgeItemIDs(claimed), err)
+	}
+}
+
+func assertReleasedUntil(t *testing.T, store beads.Store, id string, notBefore time.Time) {
+	t.Helper()
+	record, err := store.Get(nudgeQueueBeadID(id))
+	if err != nil {
+		t.Fatalf("Get(%s): %v", id, err)
+	}
+	if record.Assignee != "" || record.Status != "open" || record.Metadata[nudgeMetaDeliverAfter] != formatNudgeTime(notBefore) {
+		t.Errorf("%s after ReleaseClaims(notBefore) status=%q assignee=%q deliver_after=%q; want the lease cleared and deliver_after %q",
+			id, record.Status, record.Assignee, record.Metadata[nudgeMetaDeliverAfter], formatNudgeTime(notBefore))
+	}
+}

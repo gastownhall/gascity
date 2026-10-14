@@ -184,39 +184,46 @@ func (q *beadsNudgeQueue) claimNewBatch(candidates []nudgeQueueEntry, now time.T
 }
 
 // claimAndPin is the batch claim's one guarded write: lease and pin entry at
-// the revision it was read at. It reports false when the record moved since.
+// the revision its decision rests on. It reports false when the record moved
+// since the claim decided on it. A write refused at a revision that was not
+// the row's current one, while the fields the decision rested on are
+// unchanged, is presented again at the current revision: a store whose List
+// leaves revisions unstamped, or a cache that served such a row to the
+// re-read, hands over no usable token on the first attempt.
 func (q *beadsNudgeQueue) claimAndPin(entry nudgeQueueEntry, lease nudgeLease, key string) (bool, error) {
-	revision, current, err := q.decidedRevision(entry)
-	if err != nil || !current {
-		return false, err
+	revision := entry.bead.Revision
+	for attempt := 0; attempt < nudgeQueueCASAttempts; attempt++ {
+		if revision == 0 || attempt > 0 {
+			current, unchanged, err := q.decidedRecord(entry)
+			if err != nil || !unchanged {
+				return false, err
+			}
+			revision = current
+		}
+		assignee, inProgress := lease.assignee, "in_progress"
+		err := q.writer.UpdateIfMatch(entry.bead.ID, revision, beads.UpdateOpts{
+			Assignee: &assignee,
+			Status:   &inProgress,
+			Metadata: map[string]string{nudgeMetaDeliveryBatch: key},
+		})
+		if err == nil {
+			return true, nil
+		}
+		if errors.Is(err, beads.ErrNotFound) {
+			return false, nil
+		}
+		var stale *beads.PreconditionFailedError
+		if !errors.As(err, &stale) {
+			return false, fmt.Errorf("claiming nudge %q into batch %q: %w", entry.item.ID, key, err)
+		}
 	}
-	assignee, inProgress := lease.assignee, "in_progress"
-	err = q.writer.UpdateIfMatch(entry.bead.ID, revision, beads.UpdateOpts{
-		Assignee: &assignee,
-		Status:   &inProgress,
-		Metadata: map[string]string{nudgeMetaDeliveryBatch: key},
-	})
-	if err == nil {
-		return true, nil
-	}
-	var stale *beads.PreconditionFailedError
-	if errors.As(err, &stale) || errors.Is(err, beads.ErrNotFound) {
-		return false, nil
-	}
-	return false, fmt.Errorf("claiming nudge %q into batch %q: %w", entry.item.ID, key, err)
+	return false, nil
 }
 
-// decidedRevision returns the revision the guarded write must present for the
-// record the claim decided on. A store whose List stamps revisions (SQLite,
-// MemStore) hands it over with the read. The native store's List leaves it
-// zero, so the record is read again; the revision that read returns is used
-// only if the fields the decision rested on (lifecycle, lease, status, pin and
-// deliver-after) are unchanged, because a claim that landed between the List
-// and this read would otherwise be overwritten at its own fresh revision.
-func (q *beadsNudgeQueue) decidedRevision(entry nudgeQueueEntry) (int64, bool, error) {
-	if entry.bead.Revision != 0 {
-		return entry.bead.Revision, true, nil
-	}
+// decidedRecord reads entry's record again and reports its revision and
+// whether the fields the claim decided on (lifecycle, lease, status, pin and
+// deliver-after) are unchanged since entry was read.
+func (q *beadsNudgeQueue) decidedRecord(entry nudgeQueueEntry) (int64, bool, error) {
 	record, err := q.store.Get(entry.bead.ID)
 	if errors.Is(err, beads.ErrNotFound) {
 		return 0, false, nil

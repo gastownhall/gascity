@@ -510,10 +510,14 @@ func (q *beadsNudgeQueue) ReleaseClaims(ids []string, notBefore time.Time) error
 			}
 			continue
 		}
-		update := nudgeQueueUnclaim(map[string]string{nudgeMetaDeliverAfter: formatNudgeTime(notBefore)})
-		err = q.writer.UpdateIfMatch(entry.bead.ID, entry.bead.Revision, update)
-		var stale *beads.PreconditionFailedError
-		if err != nil && !errors.As(err, &stale) && !errors.Is(err, beads.ErrNotFound) {
+		held := entry.bead.Assignee
+		err = q.mutate(id, now, func(current nudgeQueueEntry) (beads.UpdateOpts, bool, error) {
+			if current.state != nudgeQueueInFlight || current.bead.Assignee != held {
+				return beads.UpdateOpts{}, false, nil
+			}
+			return nudgeQueueUnclaim(map[string]string{nudgeMetaDeliverAfter: formatNudgeTime(notBefore)}), true, nil
+		})
+		if err != nil {
 			return fmt.Errorf("releasing nudge claim %q until %s: %w", id, formatNudgeTime(notBefore), err)
 		}
 	}
@@ -722,18 +726,20 @@ func (q *beadsNudgeQueue) maintainEntry(entry nudgeQueueEntry, now time.Time) er
 // family (label "gc:nudge-queue"); the nudge SHADOW beads the audit trail is
 // read from carry "gc:nudge" and are untouched.
 //
-// Each delete is revision-fenced, so a record another writer has just moved is
-// left alone and collected on a later pass rather than removed out from under
-// it. A delete that fails does not stop the sweep; the failures are returned.
+// Each delete is revision-fenced (deleteRetired), so a record another writer
+// has just moved is left alone and collected on a later pass rather than
+// removed out from under it. A delete that fails does not stop the sweep; the
+// failures are returned.
 func (q *beadsNudgeQueue) sweepTerminalRecords(ctx context.Context, now time.Time) (bool, []error, error) {
 	if err := ctx.Err(); err != nil {
 		return false, nil, err
 	}
+	cutoff := now.Add(-nudgeQueueTerminalRetention)
 	records, err := q.store.List(beads.ListQuery{
 		Label:         nudgeQueueLabel,
 		Metadata:      map[string]string{nudgeMetaQueueState: nudgeQueueStateTerminal},
 		Status:        "closed",
-		UpdatedBefore: now.Add(-nudgeQueueTerminalRetention),
+		UpdatedBefore: cutoff,
 		Limit:         q.sweepBatch,
 		Sort:          beads.SortCreatedAsc,
 		TierMode:      beads.TierBoth,
@@ -747,17 +753,45 @@ func (q *beadsNudgeQueue) sweepTerminalRecords(ctx context.Context, now time.Tim
 		if err := ctx.Err(); err != nil {
 			return true, failures, err
 		}
-		err := q.writer.DeleteIfMatch(record.ID, record.Revision)
-		if err == nil {
-			continue
+		if err := q.deleteRetired(record, cutoff); err != nil {
+			failures = append(failures, err)
 		}
-		var stale *beads.PreconditionFailedError
-		if errors.Is(err, beads.ErrNotFound) || errors.As(err, &stale) {
-			continue
-		}
-		failures = append(failures, fmt.Errorf("deleting retired nudge record %q: %w", record.ID, err))
 	}
 	return len(records) >= q.sweepBatch, failures, nil
+}
+
+// deleteRetired deletes one retired record the sweep listed, fenced on its
+// revision. A store whose List leaves revisions unstamped (the native store),
+// or a cache that served such a row, hands over no usable token, so a refused
+// delete is presented again at the revision of a fresh read — but only while
+// that read still shows a closed, terminal record last written before cutoff.
+// A record another writer moved is left for a later pass.
+func (q *beadsNudgeQueue) deleteRetired(record beads.Bead, cutoff time.Time) error {
+	revision := record.Revision
+	for attempt := 0; attempt < nudgeQueueCASAttempts; attempt++ {
+		if revision == 0 || attempt > 0 {
+			current, err := q.store.Get(record.ID)
+			if errors.Is(err, beads.ErrNotFound) {
+				return nil
+			}
+			if err != nil {
+				return fmt.Errorf("reading retired nudge record %q before deleting it: %w", record.ID, err)
+			}
+			if current.Status != "closed" || current.Metadata[nudgeMetaQueueState] != nudgeQueueStateTerminal || !current.UpdatedAt.Before(cutoff) {
+				return nil
+			}
+			revision = current.Revision
+		}
+		err := q.writer.DeleteIfMatch(record.ID, revision)
+		if err == nil || errors.Is(err, beads.ErrNotFound) {
+			return nil
+		}
+		var stale *beads.PreconditionFailedError
+		if !errors.As(err, &stale) {
+			return fmt.Errorf("deleting retired nudge record %q: %w", record.ID, err)
+		}
+	}
+	return nil
 }
 
 // revokeLease clears a lease that has run out. ReleaseIfCurrent is the precise

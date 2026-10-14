@@ -380,3 +380,26 @@ func TestBeadsNudgeQueueStaleLeaseReclaimHasExactlyOneWinner(t *testing.T) {
 		}
 	}
 }
+
+// TestBeadsNudgeQueueSweepDeletesOverAnUnstampedList pins the sweep over a
+// store whose List carries no revision, as the native store's does: the delete
+// presents the revision of a fresh read, so a retired record past retention is
+// removed rather than skipped as stale on every pass.
+func TestBeadsNudgeQueueSweepDeletesOverAnUnstampedList(t *testing.T) {
+	backing := &unstampedListStore{SQLiteStore: openSQLiteNudgeQueueStore(t)}
+	queue := newNudgeQueue(t, backing)
+	now := time.Now().UTC()
+	// Delivered and acked, so the record's revision has moved past zero.
+	if err := queue.Enqueue(testNudgeItem("n-retired", "", now)); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if err := queue.Ack([]string{"n-retired"}, "delivered", "", "commit"); err != nil {
+		t.Fatalf("Ack: %v", err)
+	}
+	if _, err := queue.Maintain(context.Background(), now.Add(nudgeQueueTerminalRetention).Add(time.Hour)); err != nil {
+		t.Fatalf("Maintain: %v", err)
+	}
+	if got := queueRecordIDs(t, backing.SQLiteStore); len(got) != 0 {
+		t.Fatalf("records after the sweep = %v, want the retired record deleted", got)
+	}
+}
