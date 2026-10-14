@@ -1100,6 +1100,12 @@ func (c *CachingStore) notifyChange(source ChangeSource, eventType string, b Bea
 }
 
 func (c *CachingStore) emitChange(source ChangeSource, eventType string, b Bead) {
+	if eventType == "bead.closed" {
+		// Recorded before the announcement reaches onChange, so a refresh
+		// that reads this close meanwhile does not announce it again
+		// (announcedCloses).
+		c.recordAnnouncedClose(b)
+	}
 	if c.onChange == nil {
 		return
 	}

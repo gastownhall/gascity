@@ -376,7 +376,8 @@ func newControllerStateWithRoutes(
 // to bd on demand. Suspended rigs pass false: they spawn no agents, so nothing
 // writes locally, and gc must not touch a suspended scope at all — any bd read
 // restarts its retired proxy and Dolt (gastownhall/gascity #1978 follow-up,
-// #6561).
+// #6561). The cache never tails a journal: wrapWithCachingStoreFeed builds
+// one that does.
 func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Provider, backgroundRefresh bool, opts ...beads.CachingStoreOption) beads.Store {
 	return wrapWithCachingStoreFeed(ctx, store, ep, backgroundRefresh, nil, opts...)
 }
@@ -538,8 +539,7 @@ func (cs *controllerState) reconcileGate() beads.CachingStoreOption {
 // cityScopeGate admits store reads of the city scope: false while the city
 // is quiescent. The city cache's reconcile and its journal feed share it.
 func (cs *controllerState) cityScopeGate() func() bool {
-	quiescent := cs.beadsQuiescent
-	return func() bool { return quiescent == nil || !quiescent.Load() }
+	return quiescenceGate(cs.beadsQuiescent)
 }
 
 // rigScopeGate is cityScopeGate for one rig's scope: also false while that
@@ -551,7 +551,14 @@ func (cs *controllerState) rigScopeGate(rigName string) func() bool {
 
 // reconcileGateFor pauses a cache's periodic reconcile while quiescent is set.
 func reconcileGateFor(quiescent *atomic.Bool) beads.CachingStoreOption {
-	return beads.WithReconcileGate(func() bool { return quiescent == nil || !quiescent.Load() })
+	return beads.WithReconcileGate(quiescenceGate(quiescent))
+}
+
+// quiescenceGate is false while quiescent is set. It is the one spelling of
+// the quiescence gate: the city scope's (cityScopeGate) and that of a binding
+// cache built before the controller state (reconcileGateFor).
+func quiescenceGate(quiescent *atomic.Bool) func() bool {
+	return func() bool { return quiescent == nil || !quiescent.Load() }
 }
 
 // rigReconcileGate is reconcileGate for one rig's cache: it also pauses while

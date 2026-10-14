@@ -127,9 +127,19 @@ type CachingStore struct {
 	// new generation, so a close after it is announced again. CloseAll
 	// registers no intent: its backing reports a count, not which ids it
 	// closed, so it announces only the closes of rows the cache held, and the
-	// close of a bead the cache never held goes unannounced, even when a read
-	// caches the closed row while the write is in flight.
+	// close of a bead the cache never held is not announced by the write, even
+	// when a read caches the closed row while the write is in flight.
 	closeIntents map[string]*closeIntent
+	// announcedCloses holds the closes this cache announced (announcedClose):
+	// every bead.closed emitChange sends, and the closes a reconcile announces
+	// as it evicts a row the cache held open, recorded under the lock before
+	// the notification goes out. A RefreshRowReport that then finds the row
+	// closed and unheld does not announce that close again
+	// (announcedCloseCoversLocked). A row installed not closed drops its entry,
+	// and entries older than recentWriteVerifyWindow are pruned at each
+	// reconcile merge and, once it holds announcedClosesPruneAt entries, as
+	// each announcement is recorded.
+	announcedCloses map[string]announcedClose
 	// localWrites tracks the local writes between their start and their
 	// return, so a yielding RefreshRowReport does not announce a write's row
 	// before the write absorbs it (localWritesInFlight).
@@ -827,15 +837,6 @@ const recentWriteVerifyWindow = 60 * time.Second
 func (c *CachingStore) recentWriteLocked(id string, now time.Time) bool {
 	at, ok := c.writeAt[id]
 	return ok && now.Sub(at) <= recentWriteVerifyWindow
-}
-
-// retainsWriteFenceLocked reports whether the cache still carries a local
-// write or deletion fence for id: it wrote or deleted the row within the
-// fence retention (pruneRetainedFencesLocked). Caller must hold c.mu.
-func (c *CachingStore) retainsWriteFenceLocked(id string) bool {
-	_, wrote := c.writeSeq[id]
-	_, deleted := c.deletedSeq[id]
-	return wrote || deleted
 }
 
 // absorbDepsMode selects how absorbFreshLocked sources the deps row for a bead.

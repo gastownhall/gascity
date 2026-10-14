@@ -705,9 +705,10 @@ func (c *CachingStore) rowReadDisagreesLocked(id string, fresh Bead, found bool)
 //     was evicted;
 //   - ErrRowRefreshFenced: a write, deletion or event newer than the read
 //     owns the row (refetchFencedLocked), or a reconcile, full Prime or
-//     PrimeActive merged since the read began (scanGen), or, with
-//     RowRefreshOptions.YieldToLocalWrites, a local write that may touch
-//     the row is in flight; retry;
+//     PrimeActive merged since the read began (scanGen); retry. With
+//     RowRefreshOptions.YieldToLocalWrites it is ErrRowRefreshYielded
+//     while a local write that may touch the row is in flight; retry once
+//     the write has returned;
 //   - ErrCacheUnavailable: the cache is neither live nor partial, or id is
 //     outside the namespaces this cache owns (ownsBeadID);
 //   - any other error: the backing read of the row or its edges failed.
@@ -740,21 +741,30 @@ type RowRefreshOptions struct {
 	// AnnounceUnheldClose announces, as bead.closed (ChangeRefresh), a closed
 	// row the refresh installs that the cache did not hold, unless a closing
 	// write of this cache is in flight for it (that write announces it) or
-	// the cache still retains a write fence for it: a row this cache wrote
-	// was held when it closed, so its close was announced then, by the
-	// closing write or by the re-scan that evicted it, and a re-scan evicts
-	// closed rows silently. Pass it only with evidence the row closed
-	// recently: a re-scan holds no closed rows, so without it a long-closed
-	// row would be announced again every time a read installed it.
+	// this cache announced this close within recentWriteVerifyWindow
+	// (announcedCloses): its closing write, a re-scan or a refresh announced
+	// it, and a re-scan or full Prime then dropped the closed row. A close
+	// the cache never announced is announced, however recently the cache
+	// wrote the row: a full Prime drops a row closed out of band silently.
+	// Pass it with YieldToLocalWrites: a closing write of this cache can drop
+	// its row before it announces the close, and without the yield a refresh
+	// in between announces the close too. Pass it only with evidence the row
+	// closed recently: a re-scan holds no closed rows, so without it a
+	// long-closed row would be announced again every time a read installed
+	// it.
 	AnnounceUnheldClose bool
-	// YieldToLocalWrites refuses with ErrRowRefreshFenced, installing and
+	// YieldToLocalWrites refuses with ErrRowRefreshYielded, installing and
 	// notifying nothing, while a local write of this cache that may touch
 	// the row is in flight: one naming id, or one whose rows its backing
 	// call decides (Create, Tx, a graph apply). Between that write's backing
 	// commit and its absorb the backing read would see the write before the
 	// cache holds it, and the refresh would announce the cache's own write.
 	// The write absorbs and announces it; a refresh after it returns finds
-	// nothing new. A caller that passes it must retry a fenced row later.
+	// nothing new. The refresh checks before its backing read, so one that
+	// starts while the write is in flight reads nothing, and again after
+	// the read, for a write that started during it.
+	// A caller that passes it must retry a yielded row for as long as the
+	// write may run: a graph apply holds the fence for seconds.
 	YieldToLocalWrites bool
 }
 
@@ -789,6 +799,9 @@ func (c *CachingStore) RefreshRowReport(id string, opts RowRefreshOptions) (RowR
 	if !live {
 		return RowRefresh{}, fmt.Errorf("refresh %s: %w", id, ErrCacheUnavailable)
 	}
+	if opts.YieldToLocalWrites && c.localWrites.mayTouch(id) {
+		return RowRefresh{}, fmt.Errorf("refresh %s: %w", id, ErrRowRefreshYielded)
+	}
 	fresh, readErr := c.backing.Get(id)
 	if readErr != nil && !errors.Is(readErr, ErrNotFound) {
 		return RowRefresh{}, readErr
@@ -815,12 +828,12 @@ func (c *CachingStore) RefreshRowReport(id string, opts RowRefreshOptions) (RowR
 	}
 	if opts.YieldToLocalWrites && c.localWrites.mayTouch(id) {
 		c.mu.Unlock()
-		return RowRefresh{}, fmt.Errorf("refresh %s: a local write is in flight: %w", id, ErrRowRefreshFenced)
+		return RowRefresh{}, fmt.Errorf("refresh %s: %w", id, ErrRowRefreshYielded)
 	}
 	cached, held := c.beads[id]
 	cachedDeps := c.deps[id]
 	announceUnheld := opts.AnnounceUnheldClose && found && !held && fresh.Status == "closed" &&
-		c.closeIntents[id] == nil && !c.retainsWriteFenceLocked(id)
+		c.closeIntents[id] == nil && !c.announcedCloseCoversLocked(id, fresh, c.clockNow())
 	var installed Bead
 	evicted := false
 	if found {

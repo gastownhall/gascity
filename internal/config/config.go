@@ -1483,9 +1483,12 @@ type BeadsConfig struct {
 	// bd, humans) into its caches within about a second instead of at the
 	// next re-scan: "off" (default) or "auto" (tail the scopes whose native or
 	// proxied store has the journal active; gc never turns the journal on).
-	// Scopes that cannot be tailed stay on the re-scan, and gc doctor reports
-	// which. Any other value fails config load. A reload that changes it
-	// rebuilds the controller's stores.
+	// Any other value fails config load. Scopes that cannot be tailed stay on
+	// the re-scan, and gc doctor reports which. The stores of a non-work
+	// [storage] binding, and rigs that share the city's legacy file store,
+	// are never tailed: they stay on the re-scan, and gc doctor does not list
+	// them. A reload that changes ledger_feed rebuilds the controller's
+	// stores.
 	LedgerFeed string `toml:"ledger_feed,omitempty" jsonschema:"default=off,enum=off,enum=auto"`
 	// Policies defines per-bead-use storage and garbage-collection defaults.
 	// Policy names are interpreted by higher-level systems; unknown names are

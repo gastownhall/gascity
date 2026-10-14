@@ -87,6 +87,9 @@ func TestCacheChangeRecorderSuppressesRepeatedUpdates(t *testing.T) {
 	send(events.BeadCreated, "gc-3", `{"id":"gc-3","v":2}`) // a different one is recorded
 	send(events.BeadClosed, "gc-3", `{"id":"gc-3","v":2}`)
 	send(events.BeadCreated, "gc-3", `{"id":"gc-3","v":2}`) // the close forgot it
+	send(events.BeadUpdated, "gc-4", `{"id":"gc-4"}`)
+	send(events.BeadCreated, "gc-4", `{"id":"gc-4"}`) // a create repeats only a create
+	send(events.BeadUpdated, "gc-4", `{"id":"gc-4"}`) // the same as the create
 
 	var got []string
 	for _, evt := range ep.Events {
@@ -105,6 +108,8 @@ func TestCacheChangeRecorderSuppressesRepeatedUpdates(t *testing.T) {
 		`bead.created gc-3 {"id":"gc-3","v":2}`,
 		`bead.closed gc-3 {"id":"gc-3","v":2}`,
 		`bead.created gc-3 {"id":"gc-3","v":2}`,
+		`bead.updated gc-4 {"id":"gc-4"}`,
+		`bead.created gc-4 {"id":"gc-4"}`,
 	}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("recorded:\n%v\nwant:\n%v", got, want)

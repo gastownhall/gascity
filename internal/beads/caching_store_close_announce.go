@@ -1,10 +1,14 @@
 package beads
 
-import "sort"
+import (
+	"sort"
+	"time"
+)
 
 // This file holds the CachingStore's bead.closed announcement bookkeeping: the
-// queue of closes a non-announcing absorb installed (gastownhall/gascity#6860)
-// and the drain that announces each queued close once. That is once per cache,
+// queue of closes a non-announcing absorb installed (gastownhall/gascity#6860),
+// the drain that announces each queued close once, and the record of the
+// closes the cache announced (announcedCloses). That is once per cache,
 // not once per close: a close another process made and announced itself
 // reaches this cache either as its bead.closed, absorbed as already announced,
 // or through a read, and when the read lands first this cache announces the
@@ -15,8 +19,9 @@ import "sort"
 
 // trackCloseTransitionLocked keeps unannouncedCloses in step with the row just
 // installed for id. A row that is not closed cancels any queued close (a
-// reopen before the drain must not announce a stale close) and starts a new
-// close generation for the closing writes in flight (noteNotClosedLocked). A
+// reopen before the drain must not announce a stale close), drops the record
+// of the close the cache announced (announcedCloses), and starts a new close
+// generation for the closing writes in flight (noteNotClosedLocked). A
 // not-closed to closed transition is queued unless the caller announces it
 // itself, and so is a closed row installed with no cached row before it while
 // a closing write of ours is in flight (closeIntents) and its generation's
@@ -27,6 +32,7 @@ func (c *CachingStore) trackCloseTransitionLocked(id string, previous Bead, hadP
 	if installed.Status != "closed" {
 		c.noteNotClosedLocked(id)
 		c.dropQueuedCloseLocked(id)
+		delete(c.announcedCloses, id)
 		return
 	}
 	if announced {
@@ -61,6 +67,66 @@ func (c *CachingStore) trackCloseTransitionLocked(id string, previous Bead, hadP
 type queuedClose struct {
 	bead       Bead
 	generation uint64
+}
+
+// announcedClose is a close the cache announced: when, and the announced row's
+// UpdatedAt, which tells that close from a later one.
+type announcedClose struct {
+	at        time.Time
+	updatedAt time.Time
+}
+
+// announcedClosesPruneAt is the record size from which recording a close
+// prunes the expired ones first. Below it, the reconcile merge's prune keeps
+// the record small, and a close costs no scan of it.
+const announcedClosesPruneAt = 4096
+
+// recordAnnouncedClose records that the cache is announcing b's close now.
+// emitChange calls it for every bead.closed, before the announcement reaches
+// onChange. From announcedClosesPruneAt records on it prunes the expired ones
+// first, so a cache whose reconcile loop does not run keeps a bounded record.
+// Callers must not hold c.mu.
+func (c *CachingStore) recordAnnouncedClose(b Bead) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := c.clockNow()
+	if len(c.announcedCloses) >= announcedClosesPruneAt {
+		c.pruneAnnouncedClosesLocked(now)
+	}
+	c.recordAnnouncedCloseLocked(b.ID, b, now)
+}
+
+// recordAnnouncedCloseLocked records that the cache announced id's close at
+// now, closed being the row the announcement carries. Caller must hold c.mu
+// in write mode.
+func (c *CachingStore) recordAnnouncedCloseLocked(id string, closed Bead, now time.Time) {
+	if c.announcedCloses == nil {
+		c.announcedCloses = make(map[string]announcedClose)
+	}
+	c.announcedCloses[id] = announcedClose{at: now, updatedAt: closed.UpdatedAt}
+}
+
+// announcedCloseCoversLocked reports whether fresh, a closed row read for id,
+// is a close the cache announced within recentWriteVerifyWindow of now: its
+// UpdatedAt is the announced row's. A write since, an edit or a reopen and
+// close read together, moves UpdatedAt, so that close is announced again, as
+// bead.closed delivery allows; so is a close announced with a row read before
+// it committed (a lagged read after a closing write). A backing that stamps
+// whole seconds can tie a reopen and close inside the second of the announced
+// close, and the new close then goes unannounced. Caller must hold c.mu.
+func (c *CachingStore) announcedCloseCoversLocked(id string, fresh Bead, now time.Time) bool {
+	ac, ok := c.announcedCloses[id]
+	return ok && now.Sub(ac.at) <= recentWriteVerifyWindow && fresh.UpdatedAt.Equal(ac.updatedAt)
+}
+
+// pruneAnnouncedClosesLocked drops the announcedCloses entries older than
+// recentWriteVerifyWindow. Caller must hold c.mu in write mode.
+func (c *CachingStore) pruneAnnouncedClosesLocked(now time.Time) {
+	for id, ac := range c.announcedCloses {
+		if now.Sub(ac.at) > recentWriteVerifyWindow {
+			delete(c.announcedCloses, id)
+		}
+	}
 }
 
 // dropQueuedCloseLocked removes id's queued close and reports whether one was
@@ -102,8 +168,8 @@ func (c *CachingStore) takeUnannouncedClosesLocked() []Bead {
 // announceUnannouncedCloses emits bead.closed for every close queued by
 // trackCloseTransitionLocked. Draining under c.mu makes each queued close go
 // out exactly once however many goroutines race here. The close was inferred
-// from a read, so it carries ChangeScan's inferred source. Callers must not
-// hold c.mu.
+// from a read, so it carries ChangeRefresh, the inferred-from-a-read source;
+// ChangeScan is only the reconcile scan's diff. Callers must not hold c.mu.
 func (c *CachingStore) announceUnannouncedCloses() {
 	if !c.hasUnannouncedCloses.Load() {
 		return
