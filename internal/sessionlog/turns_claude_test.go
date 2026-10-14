@@ -36,6 +36,31 @@ func TestScanTurnsClaudeFixtures(t *testing.T) {
 				},
 			}
 		}},
+		// Input queued while a tool ran, then an interrupt: Claude stamps the
+		// in-flight tool result, the marker and the queued prompt with the
+		// queued prompt's promptId. The tool result continues the
+		// interrupted turn; the prompt opens the next one.
+		{"interrupt_queued_tool_result.jsonl", func(t *testing.T) TurnScan {
+			return TurnScan{
+				Open:    true,
+				Current: ScannedTurn{ID: claudeP2, StartedAt: turnTime(t, ts("00:10.050"))},
+				Recent: []ScannedTurn{
+					{ID: claudeP1, StartedAt: turnTime(t, ts("00:00.123")), EndedAt: turnTime(t, ts("00:10.000")), Status: TurnStatusCancelled},
+				},
+			}
+		}},
+		// A scheduled task fires while a tool runs: the in-flight tool
+		// result carries the scheduled prompt's promptId, but the running
+		// turn completes and the scheduled prompt opens its own turn.
+		{"scheduled_task_mid_tool.jsonl", func(t *testing.T) TurnScan {
+			return TurnScan{
+				Open:    true,
+				Current: ScannedTurn{ID: claudeP2, StartedAt: turnTime(t, ts("00:08.285"))},
+				Recent: []ScannedTurn{
+					{ID: claudeP1, StartedAt: turnTime(t, ts("00:00.123")), EndedAt: turnTime(t, ts("00:08.233")), Status: TurnStatusCompleted},
+				},
+			}
+		}},
 		{"interrupt_same_prompt.jsonl", func(t *testing.T) TurnScan {
 			return TurnScan{Recent: []ScannedTurn{
 				{ID: claudeP1, StartedAt: turnTime(t, ts("00:00.123")), EndedAt: turnTime(t, ts("00:02.345")), Status: TurnStatusCancelled},

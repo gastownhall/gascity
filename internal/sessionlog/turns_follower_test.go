@@ -10,17 +10,21 @@ import (
 )
 
 // claudeTurnLines returns n Claude turns ending in turn: interrupted (the
-// marker stamped with the next promptId), completed, failed, or left open
-// until the next turn starts, by turn number modulo 4.
+// tool result and the marker stamped with the next promptId), completed,
+// failed, or left open until the next turn starts, by turn number modulo 4.
 func claudeTurnLines(n int) []string {
 	var lines []string
 	for i := 1; i <= n; i++ {
 		id := fmt.Sprintf("p%02d", i)
+		resultID := id
+		if i%4 == 0 {
+			resultID = fmt.Sprintf("p%02d", i+1)
+		}
 		ts := func(sec int) string { return fmt.Sprintf("2026-10-13T05:%02d:%02d.%03dZ", i, sec, i) }
 		lines = append(lines,
 			`{"type":"user","timestamp":"`+ts(0)+`","promptId":"`+id+`","message":{"role":"user","content":"prompt"}}`,
 			`{"type":"assistant","timestamp":"`+ts(1)+`","message":{"role":"assistant","content":[{"type":"tool_use","id":"t"}],"stop_reason":"tool_use"}}`,
-			`{"type":"user","timestamp":"`+ts(2)+`","promptId":"`+id+`","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":"out"}]}}`,
+			`{"type":"user","timestamp":"`+ts(2)+`","promptId":"`+resultID+`","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":"out"}]}}`,
 		)
 		switch i % 4 {
 		case 0:
@@ -199,6 +203,40 @@ func TestTurnFollowerEqualsRescan(t *testing.T) {
 				t.Fatalf("removed: follower error = %v, want ErrNotExist", err)
 			}
 		})
+	}
+}
+
+// TestTurnFollowerEqualsRescanOnFixtures: appending each fixture line by
+// line, the follower reports what a full rescan does after every line.
+func TestTurnFollowerEqualsRescanOnFixtures(t *testing.T) {
+	for _, family := range []string{"claude", "codex", "gemini"} {
+		fixtures, err := filepath.Glob(filepath.Join("testdata", "turns", family, "*.jsonl"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, fixture := range fixtures {
+			t.Run(family+"/"+filepath.Base(fixture), func(t *testing.T) {
+				data, err := os.ReadFile(fixture)
+				if err != nil {
+					t.Fatal(err)
+				}
+				path := filepath.Join(t.TempDir(), "transcript.jsonl")
+				if err := os.WriteFile(path, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				f, err := NewTurnFollower(family, path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for i, line := range strings.SplitAfter(string(data), "\n") {
+					if line == "" {
+						continue
+					}
+					appendTurnBytes(t, path, line)
+					assertFollowerMatchesScan(t, fmt.Sprintf("line %d", i), f, family, path)
+				}
+			})
+		}
 	}
 }
 

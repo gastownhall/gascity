@@ -16,6 +16,13 @@ import (
 // interrupt marker; it is often written just before the next prompt and
 // stamped with that prompt's promptId, so the marker closes the open turn and
 // its promptId is never read.
+//
+// A tool result is stamped with whatever promptId Claude holds when the tool
+// finishes. Input queued while a tool runs, or a scheduled task firing then,
+// stamps the running turn's tool result with the next prompt's promptId. So a
+// tool result never starts a turn: it continues the open one, whatever id it
+// carries. Only when the scan window begins inside a turn does a tool result
+// open that turn, so its id is still known.
 
 // claudeInterruptMarker starts the text Claude Code writes as the whole of a
 // user entry when the user interrupts a turn ("[Request interrupted by
@@ -38,6 +45,8 @@ type claudeTurnRecord struct {
 	kind  claudeRecordKind
 	rawID string
 	at    time.Time
+	// toolResult marks a user entry carrying a tool result.
+	toolResult bool
 }
 
 // claudeTurnLine is the subset of a Claude transcript entry the scan reads.
@@ -68,6 +77,7 @@ func parseClaudeTurnRecord(line []byte) (claudeTurnRecord, bool) {
 		rec.kind = claudeRecordInterrupt
 	case e.Type == "user":
 		rec.kind = claudeRecordUser
+		rec.toolResult = claudeToolResultEntry(e.Message)
 	case e.Type == "system" && e.Subtype == "turn_duration":
 		rec.kind = claudeRecordTurnEnd
 	case e.Type == "assistant" && e.IsAPIError:
@@ -101,6 +111,25 @@ func claudeInterruptEntry(message json.RawMessage) bool {
 	}
 	text = strings.TrimSpace(text)
 	return strings.HasPrefix(text, claudeInterruptMarker) && strings.HasSuffix(text, "]") && !strings.Contains(text, "\n")
+}
+
+// claudeToolResultEntry reports whether a user message carries a tool result
+// block. It reads the blocks' types only, never their text.
+func claudeToolResultEntry(message json.RawMessage) bool {
+	var msg struct {
+		Content []struct {
+			Type string `json:"type"`
+		} `json:"content"`
+	}
+	if json.Unmarshal(unwrapJSONString(message), &msg) != nil {
+		return false
+	}
+	for _, block := range msg.Content {
+		if block.Type == "tool_result" {
+			return true
+		}
+	}
+	return false
 }
 
 // scan collects records backward until it has passed the first entry of
@@ -175,6 +204,17 @@ func (f *claudeTurnFold) addRecord(rec claudeTurnRecord) {
 
 func (f *claudeTurnFold) addUser(rec claudeTurnRecord) {
 	l := &f.ledger
+	if rec.toolResult {
+		switch {
+		case l.open:
+			// It continues the open turn, whatever promptId it carries.
+			f.failed = false
+			return
+		case !f.startUnseen:
+			// A turn's first entry is never a tool result.
+			return
+		}
+	}
 	id, ok := validTurnID(rec.rawID)
 	switch {
 	case !ok:
