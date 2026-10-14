@@ -194,7 +194,9 @@ var (
 // ScanTurns reads the turns of provider's transcript at path: the open turn
 // and up to MaxRecentTurns ended ones, newest first, from the last 16 MiB of
 // the file. A torn last record, a window holding no turn record, or a file
-// that cannot be read is an error, never an idle scan.
+// that cannot be read is an error, never an idle scan. A scan reads up to the
+// whole window; a caller that reads one transcript repeatedly should hold a
+// TurnFollower, which reads only appended bytes.
 func ScanTurns(provider, path string) (TurnScan, error) {
 	format, err := turnFormatFor(provider)
 	if err != nil {
@@ -380,6 +382,13 @@ func (l *turnLedger) snapshot() TurnScan {
 // bytes appended since its last read, and rescans after the file shrinks or
 // is replaced. A whole-document transcript is rescanned only when its size or
 // modification time changes. A TurnFollower is not safe for concurrent use.
+//
+// A follower remembers everything it folded since its last rescan, where
+// ScanTurns sees only its window. The two agree while the open turn began
+// within the last 16 MiB. Past that, the follower still reports the turn's
+// id and StartedAt, while ScanTurns reports a zero StartedAt or
+// ErrTurnStartBeyondBudget. MissingIDs, MalformedRecords and
+// UntimedRecords likewise stay set for records that have left the window.
 type TurnFollower struct {
 	path   string
 	format turnFormat
