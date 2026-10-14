@@ -15,9 +15,9 @@ import (
 // turn by position. An API error is an assistant entry flagged
 // isApiErrorMessage. An interrupt is a user entry holding only Claude's
 // interrupt marker, written by Claude itself, so it carries neither the
-// origin nor the promptSource every prompt carries; it is often written just before the next prompt and
-// stamped with that prompt's promptId, so the marker closes the open turn and
-// its promptId is never read.
+// origin nor the promptSource every prompt carries. It is often written just
+// before the next prompt and stamped with that prompt's promptId, so the
+// marker closes the open turn and its promptId is never read.
 //
 // A tool result is stamped with whatever promptId Claude holds when the tool
 // finishes. Input queued while a tool runs, or a scheduled task firing then,
