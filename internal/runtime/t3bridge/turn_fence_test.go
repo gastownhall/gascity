@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/http"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -487,6 +488,45 @@ func TestInterruptTurnDispatchStopsAtTheDeadline(t *testing.T) {
 		t.Setenv("T3_WS_URL", "ws://"+ln.Addr().String())
 		if err := interrupt(t, p); !errors.Is(err, runtime.ErrRuntimeUnavailable) {
 			t.Fatalf("stalled handshake = %v, want ErrRuntimeUnavailable", err)
+		}
+	})
+}
+
+// Kills a fenced dispatch that retries a transient failure without reading
+// the turn again: the retry would reach T3 seconds after the fence read and
+// interrupt whatever turn runs then. A retry goes out only while the named
+// turn still runs; otherwise the call fails as unavailable, never as
+// not-current, because an earlier attempt may have reached T3.
+func TestInterruptTurnRefencesBeforeARetry(t *testing.T) {
+	t.Run("turn changed", func(t *testing.T) {
+		server := newTurnFenceServer(t, turnRunning("t1"), turnRunning("t2"))
+		p := newTurnFenceTestProvider(t, server)
+		server.setAuthFailures(1, http.StatusServiceUnavailable, "warming up")
+		_, err := p.InterruptTurn(t.Context(), turnFenceSession, "thread-agent-a/t1")
+		if !errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.Is(err, runtime.ErrTurnNotCurrent) {
+			t.Fatalf("InterruptTurn = %v, want only ErrRuntimeUnavailable", err)
+		}
+		if cmds := server.commandTypes(); len(cmds) != 0 {
+			t.Fatalf("commands = %q, want none", cmds)
+		}
+		if calls := server.snapshotCalls(); calls != 2 {
+			t.Fatalf("snapshot reads = %d, want the fence read and one re-read", calls)
+		}
+	})
+	t.Run("turn unchanged", func(t *testing.T) {
+		server := newTurnFenceServer(t, turnRunning("t1"))
+		p := newTurnFenceTestProvider(t, server)
+		server.setAuthFailures(1, http.StatusServiceUnavailable, "warming up")
+		var readsAtDispatch atomic.Int64
+		server.setCommandHook(func(map[string]interface{}) { readsAtDispatch.Store(int64(server.snapshotCalls())) })
+		if _, err := p.InterruptTurn(t.Context(), turnFenceSession, "thread-agent-a/t1"); err != nil {
+			t.Fatalf("InterruptTurn = %v, want the retry sent", err)
+		}
+		if got := readsAtDispatch.Load(); got != 2 {
+			t.Fatalf("snapshot reads before the retried dispatch = %d, want 2", got)
+		}
+		if payloads := server.commandPayloads("thread.turn.interrupt"); len(payloads) != 1 || payloads[0]["turnId"] != "t1" {
+			t.Fatalf("interrupts = %+v, want one for t1", payloads)
 		}
 	})
 }

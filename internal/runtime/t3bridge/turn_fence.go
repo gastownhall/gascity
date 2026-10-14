@@ -99,6 +99,12 @@ func (p *Provider) ObserveTurn(ctx context.Context, name string) (runtime.TurnSt
 // thread.turn.interrupt carrying T3's turn id only when an uncached read shows
 // turnID in progress. T3's protocol V1 records the turn id but interrupts
 // whatever turn runs, so the answer is never Fenced.
+//
+// A transient dispatch failure is retried only after another uncached read
+// still shows turnID in progress, which keeps the gap between the read and
+// the interrupt T3 handles at about one round trip. When the re-read fails or
+// shows another turn, the call fails with [runtime.ErrRuntimeUnavailable],
+// not a *TurnNotCurrentError: the failed attempt may have reached T3.
 func (p *Provider) InterruptTurn(ctx context.Context, name, turnID string) (runtime.TurnInterrupt, error) {
 	if turnID == "" {
 		return runtime.TurnInterrupt{}, fmt.Errorf("%w: interrupting a turn of %q", runtime.ErrTurnUnnamed, name)
@@ -118,7 +124,21 @@ func (p *Provider) InterruptTurn(ctx context.Context, name, turnID string) (runt
 	if current.TurnID != turnID {
 		return runtime.TurnInterrupt{}, &runtime.TurnNotCurrentError{Session: name, TurnID: turnID, Current: current}
 	}
-	if err := p.dispatchTurnInterruptFor(ctx, threadID, rawTurnID); err != nil {
+	refence := func(ctx context.Context) error {
+		thread, err := p.freshSessionThread(ctx, name)
+		if err != nil {
+			return fmt.Errorf("%w: re-reading turn %q of %q: %w", runtime.ErrRuntimeUnavailable, turnID, name, err)
+		}
+		st, err := threadTurnState(thread)
+		if err != nil {
+			return fmt.Errorf("%w: re-reading turn %q of %q: %w", runtime.ErrRuntimeUnavailable, turnID, name, err)
+		}
+		if st.TurnID != turnID {
+			return fmt.Errorf("%w: turn %q of %q is no longer current (read %q) and an earlier attempt may have reached t3", runtime.ErrRuntimeUnavailable, turnID, name, st.TurnID)
+		}
+		return nil
+	}
+	if err := p.dispatchTurnInterruptFor(ctx, threadID, rawTurnID, refence); err != nil {
 		return runtime.TurnInterrupt{}, fmt.Errorf("interrupting turn %q of %q: %w", turnID, name, err)
 	}
 	p.clearSnapshotCache()

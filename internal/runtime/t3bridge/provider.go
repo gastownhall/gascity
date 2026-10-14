@@ -1158,6 +1158,12 @@ func (p *Provider) rpcCall(method string, params map[string]interface{}) (map[st
 // rpcCallCtx is rpcCall bounded by ctx: the dial, the auth requests and the
 // read stop when ctx ends, and so do the transient-retry sleeps.
 func (p *Provider) rpcCallCtx(ctx context.Context, method string, params map[string]interface{}) (map[string]interface{}, error) {
+	return p.rpcCallCheckedCtx(ctx, method, params, nil)
+}
+
+// rpcCallCheckedCtx is rpcCallCtx that runs beforeRetry, when set, after each
+// transient-retry sleep and before the next attempt; its error ends the call.
+func (p *Provider) rpcCallCheckedCtx(ctx context.Context, method string, params map[string]interface{}, beforeRetry func(context.Context) error) (map[string]interface{}, error) {
 	p.mu.Lock()
 	p.reqSeq++
 	reqID := p.reqSeq
@@ -1178,6 +1184,11 @@ func (p *Provider) rpcCallCtx(ctx context.Context, method string, params map[str
 			retry.Stop()
 			return nil, fmt.Errorf("t3 rpc %s: %w: %w", method, ctx.Err(), err)
 		case <-retry.C:
+		}
+		if beforeRetry != nil {
+			if checkErr := beforeRetry(ctx); checkErr != nil {
+				return nil, fmt.Errorf("t3 rpc %s: not retried after attempt %d failed: %w: %w", method, attempt, checkErr, err)
+			}
 		}
 	}
 }
@@ -1703,13 +1714,14 @@ func (p *Provider) dispatchTurnStart(threadID, text, provider, model string, ids
 }
 
 func (p *Provider) dispatchTurnInterrupt(threadID string) error {
-	return p.dispatchTurnInterruptFor(context.Background(), threadID, "")
+	return p.dispatchTurnInterruptFor(context.Background(), threadID, "", nil)
 }
 
 // dispatchTurnInterruptFor dispatches thread.turn.interrupt bounded by ctx,
-// with a fresh command id. A non-empty turnID is T3's raw turn id: V1 records
-// it and interrupts whatever turn runs.
-func (p *Provider) dispatchTurnInterruptFor(ctx context.Context, threadID, turnID string) error {
+// with a fresh command id that every retry reuses. A non-empty turnID is T3's
+// raw turn id: V1 records it and interrupts whatever turn runs. beforeRetry,
+// when set, must pass before each transient retry.
+func (p *Provider) dispatchTurnInterruptFor(ctx context.Context, threadID, turnID string, beforeRetry func(context.Context) error) error {
 	command := map[string]interface{}{
 		"type":      "thread.turn.interrupt",
 		"commandId": p.nextCommandID("t3bridge-interrupt"),
@@ -1719,7 +1731,7 @@ func (p *Provider) dispatchTurnInterruptFor(ctx context.Context, threadID, turnI
 	if turnID != "" {
 		command["turnId"] = turnID
 	}
-	_, err := p.rpcCallCtx(ctx, "orchestration.dispatchCommand", command)
+	_, err := p.rpcCallCheckedCtx(ctx, "orchestration.dispatchCommand", command, beforeRetry)
 	return err
 }
 
