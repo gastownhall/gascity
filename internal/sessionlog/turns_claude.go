@@ -24,7 +24,9 @@ import (
 // stamps the running turn's tool result with the next prompt's promptId. So a
 // tool result never starts a turn: it continues the open one, whatever id it
 // carries. Only when the scan window begins inside a turn does a tool result
-// open that turn, so its id is still known.
+// open that turn, so its id is still known. If a prompt with the same id
+// follows, the tool result carried that prompt's id, so the turn it opened
+// keeps no id and the prompt opens its own turn.
 //
 // An API error does not end a turn by itself: Claude Code retries some errors
 // ("Connection lost mid-response") within the same turn. The failure stays
@@ -65,6 +67,9 @@ type claudeTurnRecord struct {
 	timed bool
 	// toolResult marks a user entry carrying a tool result.
 	toolResult bool
+	// prompted marks a user entry carrying a prompt's origin or
+	// promptSource.
+	prompted bool
 }
 
 // claudeTurnLine is the subset of a Claude transcript entry the scan reads.
@@ -117,7 +122,8 @@ func parseClaudeTurnRecord(line []byte) (claudeTurnRecord, bool) {
 	case e.Type == "user":
 		rec.kind = claudeRecordUser
 		rec.toolResult = claudeToolResultEntry(e.Message)
-		if !rec.toolResult && !e.prompted() && claudeInterruptEntry(e.Message) {
+		rec.prompted = e.prompted()
+		if !rec.toolResult && !rec.prompted && claudeInterruptEntry(e.Message) {
 			rec.kind = claudeRecordInterrupt
 		}
 	case e.Type == "system" && e.Subtype == "turn_duration":
@@ -229,6 +235,10 @@ type claudeTurnFold struct {
 	// startUnseen: the window may begin inside a turn, so the first turn
 	// opened before any boundary has an unknown start.
 	startUnseen bool
+	// provisionalID is the id of a turn a tool result opened at the start
+	// of the window. The tool result may carry the next prompt's id, so a
+	// prompt with that id shows the turn was not that prompt's.
+	provisionalID string
 	// failed is set while an API error of the open turn is pending: no
 	// reply, tool result or prompt of the turn has followed it yet. failedAt
 	// is the error's time.
@@ -284,6 +294,9 @@ func (f *claudeTurnFold) addUser(rec claudeTurnRecord) {
 		}
 	}
 	id, ok := validTurnID(rec.rawID)
+	if ok && rec.prompted && id == f.provisionalID {
+		f.disownProvisional()
+	}
 	switch {
 	case !ok:
 		// Boundary only: an entry without an id continues the open turn
@@ -305,11 +318,27 @@ func (f *claudeTurnFold) addUser(rec claudeTurnRecord) {
 		f.failed = false
 	}
 	at := rec.at
+	f.provisionalID = ""
 	if f.startUnseen {
 		at = time.Time{}
+		if rec.toolResult {
+			f.provisionalID = id
+		}
 	}
 	f.startUnseen = false
 	l.begin(id, at)
+}
+
+// disownProvisional drops the id of the turn a tool result opened at the
+// start of the window, once a prompt shows the id is the prompt's own.
+func (f *claudeTurnFold) disownProvisional() {
+	l := &f.ledger
+	if l.isCurrent(f.provisionalID) {
+		l.current.ID = ""
+	} else if i := l.endedIndex(f.provisionalID); i >= 0 {
+		l.recent[i].ID = ""
+	}
+	f.provisionalID = ""
 }
 
 func (f *claudeTurnFold) end(at time.Time, status TurnStatus) {

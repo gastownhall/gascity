@@ -149,6 +149,49 @@ func TestScanTurnsClaudeStartBeyondBudget(t *testing.T) {
 	}
 }
 
+// TestScanTurnsClaudeWindowStartsAtMisstampedToolResult: wherever the scan
+// window begins in a turn interrupted with input queued, up to the interrupt
+// marker, the queued prompt opens the next turn. A window that begins at the tool result stamped with
+// the queued prompt's id first opens the interrupted turn under that id; the
+// queued prompt then shows the id was not that turn's, so the interrupted
+// turn keeps no id and the prompt opens its own turn.
+func TestScanTurnsClaudeWindowStartsAtMisstampedToolResult(t *testing.T) {
+	path := turnFixture("claude", "interrupt_queued_tool_result.jsonl")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.SplitAfter(string(data), "\n")
+	ts := func(clock string) string { return "2026-10-13T05:" + clock + "Z" }
+	interrupted := func(id string) []ScannedTurn {
+		return []ScannedTurn{{ID: id, EndedAt: turnTime(t, ts("00:10.000")), Status: TurnStatusCancelled}}
+	}
+	for first, recent := range map[int][]ScannedTurn{
+		2: interrupted(claudeP1),
+		3: interrupted(claudeP1),
+		4: interrupted(""),
+		5: interrupted(""),
+		6: interrupted(""),
+		7: nil,
+	} {
+		// The window holds line first onward; the budget also covers the
+		// newline before it, so the line reads whole.
+		budget := int64(len(strings.Join(lines[first-1:], ""))) + 1
+		got, err := scanTurnsWithBudget(t, "claude", path, budget)
+		if err != nil {
+			t.Fatalf("window from line %d: %v", first, err)
+		}
+		want := TurnScan{
+			Open:    true,
+			Current: ScannedTurn{ID: claudeP2, StartedAt: turnTime(t, ts("00:10.050"))},
+			Recent:  recent,
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("window from line %d:\n got: %+v\nwant: %+v", first, got, want)
+		}
+	}
+}
+
 func TestClaudeInterruptEntry(t *testing.T) {
 	tests := []struct {
 		message string
