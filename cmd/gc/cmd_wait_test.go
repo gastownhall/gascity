@@ -2035,6 +2035,86 @@ func TestDispatchReadyWaitNudges_EnqueuesDeterministicNudge(t *testing.T) {
 	}
 }
 
+// TestDispatchReadyWaitNudges_SkipsAttemptResolvedByTerminalShadow covers a
+// delivery acked between a tick's wait prepare and its dispatch: the wait is
+// still ready, but its current attempt's shadow is already closed delivered or
+// failed. The nudge id embeds the attempt, so dispatch must not queue a second
+// copy; the next prepare finalizes the wait. A superseded shadow did not
+// resolve the attempt, so dispatch still re-queues it.
+func TestDispatchReadyWaitNudges_SkipsAttemptResolvedByTerminalShadow(t *testing.T) {
+	for _, tc := range []struct {
+		state       string
+		wantShadows int
+	}{
+		{state: "injected", wantShadows: 1},
+		{state: "injected_unobserved", wantShadows: 1},
+		{state: "accepted_for_injection", wantShadows: 1},
+		{state: "failed", wantShadows: 1},
+		{state: "expired", wantShadows: 1},
+		{state: "superseded", wantShadows: 2},
+	} {
+		t.Run(tc.state, func(t *testing.T) {
+			setWaitTestFileBeads(t)
+			dir := t.TempDir()
+			store := beads.NewMemStore()
+			sessionBead, err := store.Create(beads.Bead{
+				Type:   sessionBeadType,
+				Labels: []string{sessionBeadLabel},
+				Metadata: map[string]string{
+					"session_name":       "worker",
+					"agent_name":         "worker",
+					"continuation_epoch": "1",
+				},
+			})
+			if err != nil {
+				t.Fatalf("create session bead: %v", err)
+			}
+			waitBead, err := store.Create(beads.Bead{
+				Type:   waitBeadType,
+				Labels: []string{waitBeadLabel, "session:" + sessionBead.ID},
+				Metadata: map[string]string{
+					"session_id":       sessionBead.ID,
+					"session_name":     "worker",
+					"kind":             "deps",
+					"state":            waitStateReady,
+					"dep_ids":          "gc-1",
+					"dep_mode":         "all",
+					"registered_epoch": "1",
+					"delivery_attempt": "1",
+				},
+			})
+			if err != nil {
+				t.Fatalf("create wait bead: %v", err)
+			}
+			nudgeID := waitNudgeID(sessionpkg.WaitInfoFromBead(waitBead))
+			nudge, err := store.Create(beads.Bead{
+				Type:   nudgeBeadType,
+				Title:  "nudge:" + nudgeID,
+				Labels: []string{nudgeBeadLabel, "nudge:" + nudgeID},
+				Metadata: map[string]string{
+					"nudge_id":           nudgeID,
+					"state":              tc.state,
+					"commit_boundary":    "provider-nudge-return",
+					"continuation_epoch": "1",
+				},
+			})
+			if err != nil {
+				t.Fatalf("create nudge bead: %v", err)
+			}
+			if err := store.Close(nudge.ID); err != nil {
+				t.Fatalf("close nudge bead: %v", err)
+			}
+
+			if err := dispatchReadyWaitNudges(dir, store, runtime.NewFake(), time.Now().UTC()); err != nil {
+				t.Fatalf("dispatchReadyWaitNudges: %v", err)
+			}
+			if got := waitNudgeShadowCount(t, store, nudgeID); got != tc.wantShadows {
+				t.Fatalf("nudge shadows for %s = %d, want %d", nudgeID, got, tc.wantShadows)
+			}
+		})
+	}
+}
+
 func TestDispatchReadyWaitNudges_UsesOpenSessionSnapshotInsteadOfWorkerRunningCheck(t *testing.T) {
 	setWaitTestFileBeads(t)
 	dir := t.TempDir()
