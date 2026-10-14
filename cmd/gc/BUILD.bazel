@@ -872,6 +872,7 @@ go_test(
         "actor_helpers_test.go",
         "adoption_barrier_test.go",
         "agent_home_worktree_cleanup_test.go",
+        "agent_lookup_test.go",
         "allocator_backoff_test.go",
         "allocator_backstop_lane_test.go",
         "allocator_bucket_test.go",
