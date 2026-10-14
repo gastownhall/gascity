@@ -93,15 +93,13 @@ func TestACPPermissionThroughPendingRespondAndStream(t *testing.T) {
 		close(done)
 	}()
 	// pollUntil ticks the stream's peek poll until its body holds the whole
-	// frame that contains want. writeSSEFrame writes a frame's event line,
-	// "data: ", payload, and blank-line terminator as separate writes, so a
-	// body that merely contains want can end mid-frame.
+	// frame that contains want (see sseFrameComplete).
 	pollUntil := func(want string) string {
 		t.Helper()
 		deadline := time.Now().Add(10 * time.Second)
 		for {
 			body := rec.BodyString()
-			if i := strings.Index(body, want); i >= 0 && strings.Contains(body[i:], "\n\n") {
+			if sseFrameComplete(body, want) {
 				return body
 			}
 			if time.Now().After(deadline) {
@@ -152,9 +150,14 @@ func TestACPPermissionThroughPendingRespondAndStream(t *testing.T) {
 		t.Fatalf("respond status = %d, want 202; body: %s", respondRec.Code, respondRec.Body.String())
 	}
 
-	body = pollUntil("event: pending_cleared")
-	if !strings.Contains(body, `"request_id":`+jsonString(t, requestID)) {
-		t.Fatalf("pending_cleared frame missing request_id %q; body:\n%s", requestID, body)
+	body = pollUntil("event: pending_cleared\n")
+	clearedFrame := firstSSETestFrame(t, body, "pending_cleared")
+	var cleared SessionPendingClearedEvent
+	if err := json.Unmarshal([]byte(clearedFrame.Data), &cleared); err != nil {
+		t.Fatalf("decode pending_cleared frame: %v; data=%s", err, clearedFrame.Data)
+	}
+	if cleared.RequestID != requestID {
+		t.Fatalf("pending_cleared request_id = %q, want %q; body:\n%s", cleared.RequestID, requestID, body)
 	}
 	var reply []byte
 	deadline := time.NewTimer(10 * time.Second)
