@@ -123,6 +123,13 @@ type TurnCells struct {
 	LastID  string
 	LastEnd TurnEndReason
 	LastAt  time.Time
+	// Seen is the fold's anchor in the source's window: the newest ended
+	// turn of the last Recent it folded (gc.rt.turn.seen). Turns of Recent
+	// newer than Seen are new; when Seen has left the window, all of Recent
+	// is. It is fold bookkeeping, not an observation for readers: LastID can
+	// name a turn Recent never holds (one ended unobserved or session_gone),
+	// so it cannot anchor the window.
+	Seen string
 	// ObservedAt is the observer's clock at the observation that last
 	// changed the cells (gc.rt.turn.observed_at).
 	ObservedAt time.Time
@@ -131,7 +138,7 @@ type TurnCells struct {
 func (c TurnCells) equal(o TurnCells) bool {
 	return c.Generation == o.Generation && slices.Equal(c.Caps, o.Caps) && c.ID == o.ID &&
 		c.State == o.State && c.At.Equal(o.At) && c.LastID == o.LastID && c.LastEnd == o.LastEnd &&
-		c.LastAt.Equal(o.LastAt) && c.ObservedAt.Equal(o.ObservedAt)
+		c.LastAt.Equal(o.LastAt) && c.Seen == o.Seen && c.ObservedAt.Equal(o.ObservedAt)
 }
 
 // running reports the turn the cells say is running, or "".
@@ -202,9 +209,17 @@ func (r InterruptRef) names(turn string) bool { return r.Turn != "" && r.Turn ==
 //   - The running turn T ends when the observation no longer shows it
 //     current: with its recorded reason when T is in Recent; session_gone
 //     when the session is gone; else unobserved.
-//   - Turns in Recent newer than the last known end and never seen running
-//     get both facts, oldest first.
+//   - Turns in Recent newer than the cells' Seen anchor and never seen
+//     running get both facts, oldest first. When Seen has left the window
+//     all of Recent is new; when Seen is the current turn again none is.
 //   - A current turn that is not the running one starts.
+//   - The last ended turn (LastID) has its facts already. When it is current
+//     again (X11 §8's false idle) the cells go back to running with no
+//     fact, and when it ends again the cells follow the source with no
+//     second turn.ended; the first one stays as the record of what gc
+//     concluded.
+//
+// Folding the same observation twice writes nothing the second time.
 //
 // Ended reasons: completed is completed; a canceled turn is interrupted when
 // interrupting names the turn (CauseOps then names the op) and
@@ -225,10 +240,10 @@ func FoldTurn(prev TurnCells, obs TurnObservation, interrupting InterruptRef) (n
 	if obs.Caps != nil {
 		next.Caps = slices.Clone(obs.Caps)
 	}
-	f := folder{obs: obs, interrupting: interrupting, next: &next}
+	f := folder{obs: obs, interrupting: interrupting, next: &next, journaled: next.LastID}
 
 	runningTurn := next.running()
-	unseen := obs.newerThan(next.LastID)
+	unseen := obs.endedAfter(next.Seen)
 	if runningTurn != "" && obs.Current != runningTurn {
 		if i := slices.IndexFunc(unseen, func(e ObservedTurnEnd) bool { return e.ID == runningTurn }); i >= 0 {
 			// Recorded: its end comes in order with the other unseen turns.
@@ -246,11 +261,16 @@ func FoldTurn(prev TurnCells, obs TurnObservation, interrupting InterruptRef) (n
 
 	switch {
 	case obs.Current != "" && obs.Current != runningTurn:
-		at := orTime(obs.CurrentStart, obs.ObservedAt)
-		f.facts = append(f.facts, f.fact(FactTurnStarted, obs.Current, at, FactBasisRuntime))
+		if obs.Current != f.journaled {
+			at := orTime(obs.CurrentStart, obs.ObservedAt)
+			f.facts = append(f.facts, f.fact(FactTurnStarted, obs.Current, at, FactBasisRuntime))
+		}
 		next.ID, next.State, next.At = obs.Current, TurnStateRunning, obs.ObservedAt
 	case obs.Current == "" && f.ended:
 		next.ID, next.State, next.At = "", TurnStateEnded, next.LastAt
+	}
+	if len(obs.Recent) > 0 {
+		next.Seen = obs.Recent[0].ID
 	}
 
 	if len(f.facts) == 0 && next.equal(prev) {
@@ -269,12 +289,18 @@ func (o TurnObservation) recent(id string) (ObservedTurnEnd, bool) {
 	return o.Recent[i], true
 }
 
-// newerThan returns the ended turns of Recent after lastID, oldest first:
-// all of Recent when lastID is empty or has left the window.
-func (o TurnObservation) newerThan(lastID string) []ObservedTurnEnd {
+// endedAfter returns the ended turns of Recent newer than the anchor seen,
+// oldest first. Seen was the newest turn of an earlier Recent, so it leaves
+// the window only by aging out, when all of Recent is newer, or by being
+// current again, when none is.
+func (o TurnObservation) endedAfter(seen string) []ObservedTurnEnd {
 	n := len(o.Recent)
-	if lastID != "" {
-		if i := slices.IndexFunc(o.Recent, func(e ObservedTurnEnd) bool { return e.ID == lastID }); i >= 0 {
+	switch seen {
+	case "":
+	case o.Current:
+		n = 0
+	default:
+		if i := slices.IndexFunc(o.Recent, func(e ObservedTurnEnd) bool { return e.ID == seen }); i >= 0 {
 			n = i
 		}
 	}
@@ -289,6 +315,9 @@ type folder struct {
 	interrupting InterruptRef
 	next         *TurnCells
 	facts        []Fact
+	// journaled is the turn whose facts are already written: the last end
+	// before this fold.
+	journaled string
 	// ended reports that the fold recorded at least one end.
 	ended bool
 }
@@ -308,15 +337,22 @@ func (f *folder) endUnseen(turns []ObservedTurnEnd, stillRunning string) {
 		if e.ID == f.obs.Current || e.ID == stillRunning {
 			continue
 		}
-		start := orTime(e.StartedAt, orTime(e.EndedAt, f.obs.ObservedAt))
-		f.facts = append(f.facts, f.fact(FactTurnStarted, e.ID, start, FactBasisRuntime))
+		if e.ID != f.journaled {
+			start := orTime(e.StartedAt, orTime(e.EndedAt, f.obs.ObservedAt))
+			f.facts = append(f.facts, f.fact(FactTurnStarted, e.ID, start, FactBasisRuntime))
+		}
 		f.end(e)
 	}
 }
 
-// end records e's turn.ended and moves the cells to ended.
+// end records e's turn.ended and moves the cells to ended. A turn whose end
+// is journaled already moves the cells only.
 func (f *folder) end(e ObservedTurnEnd) {
 	reason, basis := f.reason(e)
+	if e.ID == f.journaled {
+		f.setEnded(e.ID, reason)
+		return
+	}
 	fact := f.fact(FactTurnEnded, e.ID, orTime(e.EndedAt, f.obs.ObservedAt), basis)
 	fact.Reason, fact.Detail = string(reason), e.StopReason
 	if reason == TurnEndInterrupted && f.interrupting.Op != "" {

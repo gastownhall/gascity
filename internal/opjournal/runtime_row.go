@@ -61,6 +61,7 @@ const (
 	keyRTTurnLastID     = "gc.rt.turn.last_id"
 	keyRTTurnLastEnd    = "gc.rt.turn.last_end"
 	keyRTTurnLastAt     = "gc.rt.turn.last_at"
+	keyRTTurnSeen       = "gc.rt.turn.seen"
 	keyRTTurnObservedAt = "gc.rt.turn.observed_at"
 
 	keyRTState      = "gc.rt.state"
@@ -85,7 +86,7 @@ const (
 var runtimeKeys = []string{
 	keyRTSchema, keyRTConversation, keyRTGen, keyRTEpoch, keyRTSeq, keyRTLease,
 	keyRTTurnCaps, keyRTTurnGen, keyRTTurnID, keyRTTurnState, keyRTTurnAt,
-	keyRTTurnLastID, keyRTTurnLastEnd, keyRTTurnLastAt, keyRTTurnObservedAt,
+	keyRTTurnLastID, keyRTTurnLastEnd, keyRTTurnLastAt, keyRTTurnSeen, keyRTTurnObservedAt,
 	keyRTState, keyRTStateAt, keyRTAttached, keyRTAttachedAt, keyRTActivityAt, keyRTObserver,
 	keyRTBindingThread, keyRTBindingProject, keyRTBindingProviderSession,
 	keyRTHost, keyRTHostGen, keyRTHostKinds, keyRTHostProtocol, keyRTHostBuild, keyRTHostSince,
@@ -94,7 +95,7 @@ var runtimeKeys = []string{
 // updateTextKeys hold free text a fenced update writes; they are refused when
 // bd would type them as a JSON scalar.
 var updateTextKeys = []string{
-	keyRTTurnID, keyRTTurnLastID, keyRTTurnLastEnd, keyRTObserver,
+	keyRTTurnID, keyRTTurnLastID, keyRTTurnLastEnd, keyRTTurnSeen, keyRTObserver,
 	keyRTBindingThread, keyRTBindingProject, keyRTBindingProviderSession,
 	keyRTHost, keyRTHostProtocol, keyRTHostBuild,
 }
@@ -266,6 +267,7 @@ func (r RuntimeRow) ownedFields() map[string]string {
 		keyRTTurnLastID:     t.LastID,
 		keyRTTurnLastEnd:    string(t.LastEnd),
 		keyRTTurnLastAt:     formatOptionalTime(t.LastAt),
+		keyRTTurnSeen:       t.Seen,
 		keyRTTurnObservedAt: formatOptionalTime(t.ObservedAt),
 
 		keyRTState:      string(r.State),
@@ -361,6 +363,11 @@ func (c TurnCells) validate() error {
 	}
 	if c.LastEnd != "" {
 		if err := validateToken("last turn end", string(c.LastEnd)); err != nil {
+			return err
+		}
+	}
+	if c.Seen != "" {
+		if err := validateText("seen turn id", c.Seen, maxClientKeyLen); err != nil {
 			return err
 		}
 	}
@@ -465,6 +472,7 @@ func DecodeRuntimeRow(b beads.Bead) (RuntimeRow, error) {
 			LastID:     d.meta[keyRTTurnLastID],
 			LastEnd:    TurnEndReason(d.meta[keyRTTurnLastEnd]),
 			LastAt:     d.time(keyRTTurnLastAt),
+			Seen:       d.meta[keyRTTurnSeen],
 			ObservedAt: d.time(keyRTTurnObservedAt),
 		},
 		State:      RuntimeState(d.meta[keyRTState]),

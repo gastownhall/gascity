@@ -20,11 +20,19 @@ func running(gen int64, id string, at time.Time) TurnCells {
 	return TurnCells{Generation: gen, Caps: foldCaps, ID: id, State: TurnStateRunning, At: at, ObservedAt: at}
 }
 
+// ended is the cells after the end of last, which the source's window
+// showed as its newest ended turn.
 func ended(last string, reason TurnEndReason, at time.Time) TurnCells {
 	return TurnCells{
 		Generation: 3, Caps: foldCaps, State: TurnStateEnded, At: at,
-		LastID: last, LastEnd: reason, LastAt: at, ObservedAt: at,
+		LastID: last, LastEnd: reason, LastAt: at, Seen: last, ObservedAt: at,
 	}
+}
+
+// with returns c changed by fn.
+func with(c TurnCells, fn func(*TurnCells)) TurnCells {
+	fn(&c)
+	return c
 }
 
 func obsAt(gen int64, current string, start time.Time, recent ...ObservedTurnEnd) TurnObservation {
@@ -59,7 +67,7 @@ func TestFoldTurnTable(t *testing.T) {
 			name:  "ended, current U: U starts",
 			prev:  ended("A", TurnEndCompleted, ts(1)),
 			obs:   obsAt(3, "U", ts(5), ObservedTurnEnd{ID: "A", StartedAt: ts(0), EndedAt: ts(1), Status: TurnSourceCompleted}),
-			next:  TurnCells{Generation: 3, Caps: foldCaps, ID: "U", State: TurnStateRunning, At: ts(100), LastID: "A", LastEnd: TurnEndCompleted, LastAt: ts(1), ObservedAt: ts(100)},
+			next:  TurnCells{Generation: 3, Caps: foldCaps, ID: "U", State: TurnStateRunning, At: ts(100), LastID: "A", LastEnd: TurnEndCompleted, LastAt: ts(1), Seen: "A", ObservedAt: ts(100)},
 			facts: []Fact{started(3, "U", ts(5))},
 			write: true,
 		},
@@ -82,7 +90,7 @@ func TestFoldTurnTable(t *testing.T) {
 			name: "running T, current U, T in Recent: T ends with its reason, then U starts",
 			prev: running(3, "T", ts(5)),
 			obs:  obsAt(3, "U", ts(9), ObservedTurnEnd{ID: "T", StartedAt: ts(5), EndedAt: ts(8), Status: TurnSourceCompleted, StopReason: "end_turn"}),
-			next: TurnCells{Generation: 3, Caps: foldCaps, ID: "U", State: TurnStateRunning, At: ts(100), LastID: "T", LastEnd: TurnEndCompleted, LastAt: ts(100), ObservedAt: ts(100)},
+			next: TurnCells{Generation: 3, Caps: foldCaps, ID: "U", State: TurnStateRunning, At: ts(100), LastID: "T", LastEnd: TurnEndCompleted, LastAt: ts(100), Seen: "T", ObservedAt: ts(100)},
 			facts: []Fact{
 				func() Fact {
 					f := endedFact("T", TurnEndCompleted, FactBasisRuntime, ts(8))
@@ -97,7 +105,7 @@ func TestFoldTurnTable(t *testing.T) {
 			name: "running T, current U, T closed by U with no status: superseded",
 			prev: running(3, "T", ts(5)),
 			obs:  obsAt(3, "U", ts(9), ObservedTurnEnd{ID: "T", StartedAt: ts(5), EndedAt: ts(9)}),
-			next: TurnCells{Generation: 3, Caps: foldCaps, ID: "U", State: TurnStateRunning, At: ts(100), LastID: "T", LastEnd: TurnEndSuperseded, LastAt: ts(100), ObservedAt: ts(100)},
+			next: TurnCells{Generation: 3, Caps: foldCaps, ID: "U", State: TurnStateRunning, At: ts(100), LastID: "T", LastEnd: TurnEndSuperseded, LastAt: ts(100), Seen: "T", ObservedAt: ts(100)},
 			facts: []Fact{
 				endedFact("T", TurnEndSuperseded, FactBasisRuntime, ts(9)),
 				started(3, "U", ts(9)),
@@ -157,7 +165,7 @@ func TestFoldTurnTable(t *testing.T) {
 				ObservedTurnEnd{ID: "B", StartedAt: ts(3), EndedAt: ts(4), Status: TurnSourceCompleted},
 				ObservedTurnEnd{ID: "A", StartedAt: ts(0), EndedAt: ts(1), Status: TurnSourceCompleted},
 			),
-			next: TurnCells{Generation: 3, Caps: foldCaps, ID: "D", State: TurnStateRunning, At: ts(100), LastID: "C", LastEnd: TurnEndCompleted, LastAt: ts(100), ObservedAt: ts(100)},
+			next: TurnCells{Generation: 3, Caps: foldCaps, ID: "D", State: TurnStateRunning, At: ts(100), LastID: "C", LastEnd: TurnEndCompleted, LastAt: ts(100), Seen: "C", ObservedAt: ts(100)},
 			facts: []Fact{
 				started(3, "B", ts(3)), endedFact("B", TurnEndCompleted, FactBasisRuntime, ts(4)),
 				started(3, "C", ts(6)), endedFact("C", TurnEndCompleted, FactBasisRuntime, ts(7)),
@@ -256,6 +264,103 @@ func TestFoldTurnTable(t *testing.T) {
 			write: true,
 		},
 		{
+			name: "running T, idle, T absent, an older turn in Recent: only T ends",
+			prev: with(running(3, "T", ts(5)), func(c *TurnCells) {
+				c.LastID, c.LastEnd, c.LastAt, c.Seen = "R", TurnEndCompleted, ts(4), "R"
+			}),
+			obs: obsAt(3, "", time.Time{}, ObservedTurnEnd{ID: "R", StartedAt: ts(2), EndedAt: ts(4), Status: TurnSourceCompleted}),
+			next: TurnCells{
+				Generation: 3, Caps: foldCaps, State: TurnStateEnded, At: ts(100),
+				LastID: "T", LastEnd: TurnEndUnobserved, LastAt: ts(100), Seen: "R", ObservedAt: ts(100),
+			},
+			facts: []Fact{endedFact("T", TurnEndUnobserved, FactBasisObserved, ts(100))},
+			write: true,
+		},
+		{
+			name: "running T, the session gone, T absent, an older turn in Recent: only T ends",
+			prev: with(running(3, "T", ts(5)), func(c *TurnCells) {
+				c.LastID, c.LastEnd, c.LastAt, c.Seen = "R", TurnEndCompleted, ts(4), "R"
+			}),
+			obs: func() TurnObservation {
+				o := obsAt(3, "", time.Time{}, ObservedTurnEnd{ID: "R", StartedAt: ts(2), EndedAt: ts(4), Status: TurnSourceCompleted})
+				o.SessionGone = true
+				return o
+			}(),
+			next: TurnCells{
+				Generation: 3, Caps: foldCaps, State: TurnStateEnded, At: ts(100),
+				LastID: "T", LastEnd: TurnEndSessionGone, LastAt: ts(100), Seen: "R", ObservedAt: ts(100),
+			},
+			facts: []Fact{endedFact("T", TurnEndSessionGone, FactBasisObserved, ts(100))},
+			write: true,
+		},
+		{
+			name: "running T, current U, T absent, an older turn in Recent: T unobserved, then U starts",
+			prev: with(running(3, "T", ts(5)), func(c *TurnCells) {
+				c.LastID, c.LastEnd, c.LastAt, c.Seen = "R", TurnEndCompleted, ts(4), "R"
+			}),
+			obs: obsAt(3, "U", ts(9), ObservedTurnEnd{ID: "R", StartedAt: ts(2), EndedAt: ts(4), Status: TurnSourceCompleted}),
+			next: TurnCells{
+				Generation: 3, Caps: foldCaps, ID: "U", State: TurnStateRunning, At: ts(100),
+				LastID: "T", LastEnd: TurnEndUnobserved, LastAt: ts(100), Seen: "R", ObservedAt: ts(100),
+			},
+			facts: []Fact{
+				endedFact("T", TurnEndUnobserved, FactBasisObserved, ts(100)),
+				started(3, "U", ts(9)),
+			},
+			write: true,
+		},
+		{
+			name: "the newest seen turn left the window: every turn in Recent is new",
+			prev: ended("A", TurnEndCompleted, ts(1)),
+			obs: obsAt(3, "", time.Time{},
+				ObservedTurnEnd{ID: "C", StartedAt: ts(6), EndedAt: ts(7), Status: TurnSourceCompleted},
+				ObservedTurnEnd{ID: "B", StartedAt: ts(3), EndedAt: ts(4), Status: TurnSourceCompleted},
+			),
+			next: ended("C", TurnEndCompleted, ts(100)),
+			facts: []Fact{
+				started(3, "B", ts(3)), endedFact("B", TurnEndCompleted, FactBasisRuntime, ts(4)),
+				started(3, "C", ts(6)), endedFact("C", TurnEndCompleted, FactBasisRuntime, ts(7)),
+			},
+			write: true,
+		},
+		{
+			name: "false idle: the inferred-ended turn is current again; the cells go back to running with no fact",
+			prev: ended("U", TurnEndEnded, ts(20)),
+			obs:  obsAt(3, "U", ts(10), ObservedTurnEnd{ID: "T1", StartedAt: ts(2), EndedAt: ts(4), Status: TurnSourceCompleted}),
+			next: TurnCells{
+				Generation: 3, Caps: foldCaps, ID: "U", State: TurnStateRunning, At: ts(100),
+				LastID: "U", LastEnd: TurnEndEnded, LastAt: ts(20), Seen: "T1", ObservedAt: ts(100),
+			},
+			write: true,
+		},
+		{
+			name: "the resumed turn ends for real: the cells follow the source and its turn.ended is not written twice",
+			prev: TurnCells{
+				Generation: 3, Caps: foldCaps, ID: "U", State: TurnStateRunning, At: ts(30),
+				LastID: "U", LastEnd: TurnEndEnded, LastAt: ts(20), Seen: "T1", ObservedAt: ts(30),
+			},
+			obs: obsAt(3, "", time.Time{},
+				ObservedTurnEnd{ID: "U", StartedAt: ts(10), EndedAt: ts(40), Status: TurnSourceCompleted},
+				ObservedTurnEnd{ID: "T1", StartedAt: ts(2), EndedAt: ts(4), Status: TurnSourceCompleted},
+			),
+			next:  ended("U", TurnEndCompleted, ts(100)),
+			write: true,
+		},
+		{
+			name: "a turn ended unobserved that the source later records: no second fact",
+			prev: TurnCells{
+				Generation: 3, Caps: foldCaps, State: TurnStateEnded, At: ts(30),
+				LastID: "T", LastEnd: TurnEndUnobserved, LastAt: ts(30), Seen: "R", ObservedAt: ts(30),
+			},
+			obs: obsAt(3, "",
+				time.Time{},
+				ObservedTurnEnd{ID: "T", StartedAt: ts(5), EndedAt: ts(25), Status: TurnSourceCompleted},
+				ObservedTurnEnd{ID: "R", StartedAt: ts(2), EndedAt: ts(4), Status: TurnSourceCompleted},
+			),
+			next:  ended("T", TurnEndCompleted, ts(100)),
+			write: true,
+		},
+		{
 			name: "no capabilities in the observation keep the stored ones",
 			prev: running(3, "T", ts(5)),
 			obs: func() TurnObservation {
@@ -283,6 +388,12 @@ func TestFoldTurnTable(t *testing.T) {
 				if _, err := EncodeFact("gc", f); err != nil {
 					t.Fatalf("fact %+v does not encode: %v", f, err)
 				}
+			}
+			// An unchanged state writes nothing: the same observation folded
+			// again over the cells it produced is no write and no facts.
+			again, refacts, rewrite := FoldTurn(next, c.obs, c.interrupting)
+			if rewrite || refacts != nil || !reflect.DeepEqual(again, next) {
+				t.Fatalf("folding the same observation again: write %v, facts %+v, cells %+v", rewrite, refacts, again)
 			}
 		})
 	}
