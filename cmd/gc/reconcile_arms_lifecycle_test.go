@@ -578,3 +578,68 @@ func TestPinnedRowMarkerClearsFirst(t *testing.T) {
 		t.Fatalf("armRestartRequested = (%q, %q) %v, want the row marker's clear first", it.Kind, it.Reason, ok)
 	}
 }
+
+// TestSimFailingMarkerClearHoldsNoSuspend (the #7893 review, its probe):
+// a pinned row's marker clear that keeps failing (a sidecar or a tmux
+// option the controller cannot remove) backs off its own record, so an
+// operator's suspend of the row stops its runtime on the first pass, as it
+// does when the clear lands.
+func TestSimFailingMarkerClearHoldsNoSuspend(t *testing.T) {
+	for _, failing := range []bool{false, true} {
+		t.Run(fmt.Sprintf("failing %t", failing), func(t *testing.T) {
+			s := converged(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-1", "session_key", "k-1", "last_woke_at", rowAt(-time.Hour),
+				"configured_named_session", "true", "configured_named_identity", "worker", "pin_awake", "true"), gc1Work())
+			if err := newDrainOps(s.sp).setRestartRequested("s-gc-1"); err != nil {
+				t.Fatal(err)
+			}
+			if failing {
+				s.sp.mu.Lock()
+				s.sp.RemoveMetaErrors = map[string]map[string]error{"s-gc-1": {"GC_RESTART_REQUESTED": errors.New("sim: permission denied")}}
+				s.sp.mu.Unlock()
+			}
+			for range 40 {
+				s.settle()
+				s.advance(simPatrol)
+			}
+			s.ask("state", "suspended", "sleep_intent", "user-hold", "suspended_at", s.clk.Now().Format(time.RFC3339))
+			s.settle()
+			s.sp.mu.Lock()
+			gone := s.sp.rts["s-gc-1"] == nil
+			s.sp.mu.Unlock()
+			if !gone {
+				t.Fatalf("failing %t: the suspend's first pass left the runtime; trace %q", failing, s.p.rowTrace[rowKey{Leg: rowLeg, ID: "gc-1"}])
+			}
+			s.noViolations(t)
+		})
+	}
+}
+
+// TestMarkerClearBackoffHoldsOnlyTheClear (the #7893 review): the clear
+// settles on its own backoff key, and while that record is live A13 falls
+// through past the clear, its release the row's next deadline.
+func TestMarkerClearBackoffHoldsOnlyTheClear(t *testing.T) {
+	c, _ := pinnedMarkerCase(t)
+	if got := settledBackoffKey(intentMarkerClear, decideRestartMarkerClear, c.k); got != markerClearBackoffKey(c.k) || got == rowBackoffKey(c.k) {
+		t.Fatalf("the clear settles on %q, want its own key", got)
+	}
+	c.w.Backoff = map[string]backoffRecord{markerClearBackoffKey(c.k): {Consecutive: 1, Until: c.w.Now.Add(time.Minute)}}
+	r := &rowFacts{w: c.w, k: c.k, entry: c.a.Snapshot.Entries[c.k], row: c.w.Census.Rows[c.k], found: true}
+	if it, ok := armRestartRequested(r); ok && it.Kind == intentMarkerClear {
+		t.Fatalf("armRestartRequested = (%q, %q) under a live clear backoff, want a fall-through", it.Kind, it.Reason)
+	}
+	if !r.next.Equal(c.w.Now.Add(time.Minute)) {
+		t.Fatalf("next %v, want the backoff's release", r.next)
+	}
+}
+
+// TestMarkerClearNeedsOneSessionObject (the #7893 review nit): a fresh read
+// that sees another session object under the name between its reads clears
+// nothing.
+func TestMarkerClearNeedsOneSessionObject(t *testing.T) {
+	c, live := pinnedMarkerCase(t)
+	n := 0
+	live.read = func() { n++; live.l.ObjectID = fmt.Sprintf("$%d", n) }
+	if _, s := c.run(t, live.tmux(), nil); live.Fake.CountCalls("RemoveMeta", "s-heal") != 0 {
+		t.Fatalf("settled %+v, cleared over a moving session object", s)
+	}
+}

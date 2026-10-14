@@ -38,7 +38,12 @@ func armRestartRequested(r *rowFacts) (intent, bool) {
 	if !r.found {
 		return intent{}, false
 	}
-	if r.pinnedMarkerClear() {
+	// A clear that failed backs off its own key; while that record is live
+	// the row falls through to the rest of A13 and the later arms, and the
+	// clear is decided again when it releases (the #7893 review).
+	if rec, ok := r.w.Backoff[markerClearBackoffKey(r.k)]; ok && rec.live(r.w.Now) {
+		r.after(rec.Until.Sub(r.w.Now))
+	} else if r.pinnedMarkerClear() {
 		return intent{Kind: intentMarkerClear, Reason: decideRestartMarkerClear, Basis: rowBasis{Incarnation: r.row.Incarnation, InstanceToken: r.row.InstanceToken}}, true
 	}
 	if !r.restartPending() {

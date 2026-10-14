@@ -50,6 +50,11 @@ func driftBackoffKey(k rowKey) string { return "drift:" + k.Leg + "/" + k.ID }
 // idleBackoffKey is the key A15's idle stops settle on.
 func idleBackoffKey(k rowKey) string { return "idle:" + k.Leg + "/" + k.ID }
 
+// markerClearBackoffKey is the key A13's pinned marker clear settles on: a
+// clear that keeps failing holds only itself, never the row's suspend or
+// reset (the #7893 review).
+func markerClearBackoffKey(k rowKey) string { return "marker-clear:" + k.Leg + "/" + k.ID }
+
 // freshCycleBackoffKey is the key SESS-612's fresh cycle settles on: a
 // deferred cycle holds only itself, never the row's other intents.
 func freshCycleBackoffKey(k rowKey) string { return "fresh-cycle:" + k.Leg + "/" + k.ID }
@@ -64,6 +69,8 @@ func settledBackoffKey(kind, reason string, k rowKey) string {
 		return idleBackoffKey(k)
 	case kind == intentStop && reason == decideFreshCycle:
 		return freshCycleBackoffKey(k)
+	case kind == intentMarkerClear:
+		return markerClearBackoffKey(k)
 	}
 	return rowBackoffKey(k)
 }

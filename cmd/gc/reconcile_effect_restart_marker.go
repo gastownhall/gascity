@@ -19,6 +19,8 @@ import (
 var markerClearSections = []section{called(0, section{Decide: markerClearStep}, clearRuntimeRestartMarker)}
 
 // markerClearStep passes only a runtime alive and Current on the fresh read.
+// Alive holds only on one session object across the read (txRuntime.Same),
+// so the name the Call clears is the runtime the read proved the row's.
 // A row that moved since the pass (unpinned, reset, held) is the premise's
 // refusal, before this step.
 func markerClearStep(v txView) txStep {
