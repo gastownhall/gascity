@@ -10,7 +10,6 @@ package dolt_test
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -151,15 +150,11 @@ func newProxiedSyncCity(t *testing.T) (cityPath, binDir string, fake proxiedSync
 func runProxiedSync(t *testing.T, binDir, cityPath string, extraEnv []string, args ...string) (string, error) {
 	t.Helper()
 	root := repoRoot(t)
-	cmd := exec.Command("sh", append([]string{filepath.Join(root, syncScript)}, args...)...)
-	cmd.Env = append(syncFilteredEnv(),
+	return execSyncScript(filepath.Join(root, syncScript), append(syncFilteredEnv(),
 		"PATH="+binDir+string(os.PathListSeparator)+hostileToolPath(t),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
-	)
-	cmd.Env = append(cmd.Env, extraEnv...)
-	out, err := cmd.CombinedOutput()
-	return string(out), err
+	), extraEnv, args)
 }
 
 func rigListJSON(rigs ...string) string {
