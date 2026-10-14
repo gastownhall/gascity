@@ -263,12 +263,15 @@ jobs:
           - shard_name: review-formulas-basic-2-of-2
             timeout_minutes: 35
             command: ./scripts/test-integration-shard review-formulas-basic-2-of-2
-          - shard_name: review-formulas-retries-1-of-2
+          - shard_name: review-formulas-retries-1-of-3
             timeout_minutes: 35
-            command: ./scripts/test-integration-shard review-formulas-retries-1-of-2
-          - shard_name: review-formulas-retries-2-of-2
+            command: ./scripts/test-integration-shard review-formulas-retries-1-of-3
+          - shard_name: review-formulas-retries-2-of-3
             timeout_minutes: 35
-            command: ./scripts/test-integration-shard review-formulas-retries-2-of-2
+            command: ./scripts/test-integration-shard review-formulas-retries-2-of-3
+          - shard_name: review-formulas-retries-3-of-3
+            timeout_minutes: 35
+            command: ./scripts/test-integration-shard review-formulas-retries-3-of-3
           - shard_name: review-formulas-recovery
             timeout_minutes: 35
             command: make test-integration-review-formulas-recovery
