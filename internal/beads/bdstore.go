@@ -3185,6 +3185,10 @@ func (s *BdStore) listEphemeral(query ListQuery) ([]Bead, error) {
 	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "type", serverQuery.Type)
 	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "assignee", serverQuery.Assignee)
 	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "parent", serverQuery.ParentID)
+	// Metadata narrows the read only; applyListQuery below still applies
+	// every metadata filter, and canApplyWispsServerLimit keeps the limit
+	// client-side whenever one is set.
+	clauses = appendBdQueryMetadataClauses(clauses, serverQuery.Metadata)
 
 	args := []string{"query", "--json", strings.Join(clauses, " AND ")}
 	if serverQuery.IncludeClosed || serverQuery.Status == "closed" {
@@ -3322,6 +3326,52 @@ func appendBdQueryClause(clauses []string, serverFilteredOnly bool, field, value
 		value = quoteBdQueryValue(value)
 	}
 	return append(clauses, field+"="+value), serverFilteredOnly
+}
+
+// appendBdQueryMetadataClauses adds a metadata.<key>="<value>" clause for each
+// filter bd query evaluates exactly like matchesMetadata on every supported
+// bd. bd compares JSON_UNQUOTE(JSON_EXTRACT(metadata, key)) = value, so a
+// pushed clause never drops a row the client filter keeps. The others stay
+// client-side only:
+//   - an empty value, which the client filter matches against a missing key;
+//   - a key outside [a-z_][a-z0-9_.]*: bd v1.0.4 lowercases the key and
+//     rejects '/' in a query identifier;
+//   - a value outside printable ASCII: bd's lexer reads quoted strings a
+//     byte at a time;
+//   - a value starting with '{' or '[': the client sees an object or array
+//     as bd's indented output text, which Dolt's comparison text differs
+//     from in whitespace.
+func appendBdQueryMetadataClauses(clauses []string, metadata map[string]string) []string {
+	keys := make([]string, 0, len(metadata))
+	for k, v := range metadata {
+		if isPortableBdQueryMetadataKey(k) && isPortableBdQueryMetadataValue(v) {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		clauses = append(clauses, "metadata."+k+"="+quoteBdQueryValue(metadata[k]))
+	}
+	return clauses
+}
+
+func isPortableBdQueryMetadataKey(key string) bool {
+	if key == "" {
+		return false
+	}
+	for i, r := range key {
+		switch {
+		case r >= 'a' && r <= 'z', r == '_':
+		case i > 0 && (r >= '0' && r <= '9' || r == '.'):
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func isPortableBdQueryMetadataValue(value string) bool {
+	return value != "" && value[0] != '{' && value[0] != '[' && isPrintableASCII(value)
 }
 
 // isBdQueryEmptinessValue reports whether bd's query DSL reads value as the
