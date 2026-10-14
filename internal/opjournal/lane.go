@@ -354,7 +354,8 @@ type PassResult struct {
 	Took TakeKind
 	// Taken are the taken op ids in delivery order.
 	Taken []string
-	// Done is how the Take ended; "" when nothing was taken.
+	// Done is how the Take ended; "" when nothing was taken, or when Done
+	// could not settle it (the pass then returns the error).
 	Done        DoneArm
 	Closed      []ClosedOp
 	Waits       []OpWait

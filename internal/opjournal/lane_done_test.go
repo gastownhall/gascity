@@ -90,3 +90,63 @@ func TestLaneDoneSupersededByManyRetakes(t *testing.T) {
 		t.Fatalf("pass = %+v, %v", res, err)
 	}
 }
+
+// A transient read error while Done reconciles is retried within Done's
+// budget, as an unknown batch error is: the settle still lands and the cell
+// is cleared.
+func TestLaneDoneRetriesATransientReconcileRead(t *testing.T) {
+	h, fs := newLaneHarnessFlaky(t)
+	op := h.propose(t, laneMsg("p", RolePrompt, "x"))
+	exec := newFakeExec(h.clk)
+	exec.onEffect = func() {
+		// A cancel recorded during the effect moves the op's revision, so
+		// Done is refused and re-reads the op; that read fails once.
+		if _, _, err := h.store.Cancel(op.ID, "operator", "read"); err != nil {
+			t.Errorf("Cancel: %v", err)
+		}
+		failed := false
+		fs.setFail(func(id string) bool {
+			if id != op.ID || failed {
+				return false
+			}
+			failed = true
+			return true
+		})
+	}
+	res, err := h.lane(t, "ctl").Pass(context.Background(), view(), exec)
+	fs.setFail(nil)
+	if err != nil || res.Done != DoneAccepted {
+		t.Fatalf("pass = %+v, %v", res, err)
+	}
+	if got := h.get(t, op.ID); got.Status != StatusClosed || got.Outcome.Arm != ArmSucceeded {
+		t.Fatalf("op %s %+v", got.Status, got.Outcome)
+	}
+	if rt := h.runtime(t); !rt.Lease.IsZero() {
+		t.Fatalf("cell still holds %s", rt.Lease)
+	}
+}
+
+// When Done cannot settle at all, the pass names the read error and reports
+// no Done arm: nothing it planned was written.
+func TestLaneDoneThatCannotSettleReportsNoArm(t *testing.T) {
+	h, fs := newLaneHarnessFlaky(t)
+	op := h.propose(t, laneMsg("p", RolePrompt, "x"))
+	exec := newFakeExec(h.clk)
+	exec.onEffect = func() {
+		if _, _, err := h.store.Cancel(op.ID, "operator", "read"); err != nil {
+			t.Errorf("Cancel: %v", err)
+		}
+		fs.setFail(func(id string) bool { return id == op.ID })
+	}
+	res, err := h.lane(t, "ctl").Pass(context.Background(), view(), exec)
+	fs.setFail(nil)
+	if !errors.Is(err, errFlakyRead) {
+		t.Fatalf("pass err = %v, want the read error", err)
+	}
+	if res.Done != "" || len(res.Closed) != 0 {
+		t.Fatalf("pass reported done %q closed %v though nothing settled", res.Done, res.Closed)
+	}
+	if got := h.get(t, op.ID); got.Status != StatusExecuting {
+		t.Fatalf("op %s, want executing until its lease ends", got.Status)
+	}
+}

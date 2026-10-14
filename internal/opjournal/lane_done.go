@@ -364,6 +364,9 @@ type doneItem struct {
 	done       bool
 	written    bool
 	superseded bool
+	// stale says a refusal or an unknown error left the item's row unread
+	// since: it is re-read before it is written again.
+	stale bool
 }
 
 // done settles a Take with one guarded batch (DES-O1 §4.7), reconciled after
@@ -394,7 +397,9 @@ func (l *ConversationLane) done(ctx context.Context, tb *takenBatch, er effectRe
 	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), min(max(remaining, doneMinBudget), doneMaxBudget))
 	defer cancel()
 	err := l.writeDone(dctx, tb, er, success, items)
-	res.Done = er.doneArm()
+	if err == nil {
+		res.Done = er.doneArm()
+	}
 	for _, it := range items {
 		switch {
 		case it.kind != doneOp:
@@ -409,11 +414,36 @@ func (l *ConversationLane) done(ctx context.Context, tb *takenBatch, er effectRe
 	return errors.Join(err, er.contractErr)
 }
 
-// writeDone applies Done's items until every one is written or dropped.
+// writeDone applies Done's items until every one is written or dropped. A
+// refusal or an unknown error leaves the items stale; a transient error
+// re-reading them backs off and retries, like an unknown batch error.
 func (l *ConversationLane) writeDone(ctx context.Context, tb *takenBatch, er effectResult, success Outcome, items []*doneItem) error {
 	backoff := doneBackoffStart
 	var lastErr error
 	for range casAttempts {
+		var readErr error
+		for _, it := range items {
+			if it.done || !it.stale {
+				continue
+			}
+			rerr, err := l.reconcile(tb, er, success, it)
+			if err != nil {
+				return err
+			}
+			if rerr != nil {
+				readErr = rerr
+				continue
+			}
+			it.stale = false
+		}
+		if readErr != nil {
+			lastErr = readErr
+			if err := l.sleep(ctx, backoff); err != nil {
+				return errors.Join(fmt.Errorf("settling ops of conversation %s: %w", tb.spec.view.ID, lastErr), err)
+			}
+			backoff = min(2*backoff, doneBackoffMax)
+			continue
+		}
 		var batch []beads.GuardedItem
 		var pending []*doneItem
 		for _, it := range items {
@@ -457,9 +487,7 @@ func (l *ConversationLane) writeDone(ctx context.Context, tb *takenBatch, er eff
 			backoff = min(2*backoff, doneBackoffMax)
 		}
 		for _, it := range pending {
-			if err := l.reconcile(tb, er, success, it); err != nil {
-				return err
-			}
+			it.stale = true
 		}
 	}
 	return fmt.Errorf("%w: settling ops of conversation %s lost %d tries: %w", ErrContention, tb.spec.view.ID, casAttempts, lastErr)
@@ -488,40 +516,41 @@ func (l *ConversationLane) doneGuardedItem(it *doneItem) (beads.GuardedItem, err
 }
 
 // reconcile re-reads one Done item's row after a refusal or an unknown error
-// and decides what is left to write.
-func (l *ConversationLane) reconcile(tb *takenBatch, er effectResult, success Outcome, it *doneItem) error {
+// and decides what is left to write. readErr is a failed read, to retry; err
+// is a row Done cannot settle.
+func (l *ConversationLane) reconcile(tb *takenBatch, er effectResult, success Outcome, it *doneItem) (readErr, err error) {
 	switch it.kind {
 	case doneRow:
 		b, found, err := l.store.runtimeBead(tb.spec.view.ID)
 		if err != nil {
-			return err
+			return fmt.Errorf("re-reading the runtime row of conversation %s while settling: %w", tb.spec.view.ID, err), nil
 		}
 		if !found {
 			it.done = true
-			return nil
+			return nil, nil
 		}
 		row, err := DecodeRuntimeRow(b)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if row.Lease != tb.lease {
 			it.done = true
-			return nil
+			return nil, nil
 		}
 		it.row = b
-		return nil
+		return nil, nil
 	case doneOp:
 		b, err := l.store.store.Get(it.id)
 		if errors.Is(err, beads.ErrNotFound) {
 			it.done, it.superseded = true, true
-			return nil
+			return nil, nil
 		}
 		if err != nil {
-			return fmt.Errorf("re-reading op %s while settling it: %w", it.id, err)
+			return fmt.Errorf("re-reading op %s while settling it: %w", it.id, err), nil
 		}
 		cur, err := DecodeOp(b)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		switch {
 		case cur.Status == StatusClosed:
@@ -539,25 +568,25 @@ func (l *ConversationLane) reconcile(tb *takenBatch, er effectResult, success Ou
 		default:
 			it.done, it.superseded = true, true
 		}
-		return nil
+		return nil, nil
 	default:
 		b, err := l.store.store.Get(it.id)
 		if errors.Is(err, beads.ErrNotFound) {
-			return nil
+			return nil, nil
 		}
 		if err != nil {
-			return fmt.Errorf("re-reading fact %s while settling: %w", it.id, err)
+			return fmt.Errorf("re-reading fact %s while settling: %w", it.id, err), nil
 		}
 		got, err := DecodeFact(b)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if got.Kind != it.fact.Kind || got.Conversation != it.fact.Conversation ||
 			got.Generation != it.fact.Generation || got.occurrence() != it.fact.occurrence() {
-			return corruptf(it.id, "stored fact records another occurrence (hash collision)")
+			return nil, corruptf(it.id, "stored fact records another occurrence (hash collision)")
 		}
 		it.done = true
-		return nil
+		return nil, nil
 	}
 }
 
