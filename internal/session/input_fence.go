@@ -48,8 +48,9 @@ func (m *Manager) InputFencing(id string) (runtime.InputFencing, error) {
 // StopTurnFenced is StopTurn with every key and interrupt it sends fenced
 // to f's incarnation. A runtime that cannot fence the session is refused
 // with runtime.ErrInputFenceUnsupported before anything is sent, and a miss
-// is a *runtime.FenceMismatchError. As with StopTurn, a session that is not
-// running is nil: it has no turn to stop.
+// is a *runtime.FenceMismatchError. Unlike StopTurn, a session that is not
+// running is a miss finding it absent (runtime.FenceFoundAbsent): a fenced
+// call never reports success into an incarnation that is not there.
 func (m *Manager) StopTurnFenced(ctx context.Context, id string, f runtime.InputFence) error {
 	if err := f.Validate(); err != nil {
 		return fmt.Errorf("stopping the turn of %s: %w", id, err)

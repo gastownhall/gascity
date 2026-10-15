@@ -261,3 +261,58 @@ func TestFencedLiveOnlySendsCarryFence(t *testing.T) {
 		}
 	}
 }
+
+// startFenceProbe records whether Start was handed a ctx input fence.
+type startFenceProbe struct {
+	*runtime.Fake
+	startFenced bool
+}
+
+func (p *startFenceProbe) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if _, ok := runtime.InputFenceFrom(ctx); ok {
+		p.startFenced = true
+	}
+	return p.Fake.Start(ctx, name, cfg)
+}
+
+// FI9 at the session layer: a start never runs under a caller's input
+// fence, which names an incarnation the start is replacing.
+func TestEnsureRunningStartsWithoutCallerFence(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := &startFenceProbe{Fake: runtime.NewFake()}
+	mgr := newTestManager(t, store, sp)
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, _ := InputFenceFor(info)
+	if err := sp.Stop(info.SessionName); err != nil {
+		t.Fatal(err)
+	}
+	sp.startFenced = false
+	_, _ = mgr.Send(runtime.WithInputFence(context.Background(), f), testActor(mgr, ActorOperator), info.ID, "hi", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir})
+	if !slices.ContainsFunc(sp.SnapshotCalls(), func(c runtime.Call) bool { return c.Method == "Start" }) {
+		t.Fatal("Send never restarted the stopped session: the test misses the start path")
+	}
+	if sp.startFenced {
+		t.Fatal("Start ran under the caller's input fence")
+	}
+}
+
+// A fenced stop of a session that is not running reports the incarnation
+// absent, as a fenced call never reports success into an absent one; the
+// unfenced stop stays nil.
+func TestStopTurnFencedOfStoppedSessionIsAbsent(t *testing.T) {
+	mgr, sp, info, f := newFencedStopSession(t, "claude", nil, runtime.TurnInterruptKeystroke)
+	if err := sp.Stop(info.SessionName); err != nil {
+		t.Fatal(err)
+	}
+	err := mgr.StopTurnFenced(context.Background(), info.ID, f)
+	var miss *runtime.FenceMismatchError
+	if !errors.As(err, &miss) || miss.Found != runtime.FenceFoundAbsent {
+		t.Fatalf("StopTurnFenced of a stopped session = %v, want an absent miss", err)
+	}
+	if err := mgr.StopTurn(info.ID); err != nil {
+		t.Fatalf("StopTurn of a stopped session = %v, want nil", err)
+	}
+}

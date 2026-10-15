@@ -644,6 +644,9 @@ func (m *Manager) ensureRunning(ctx context.Context, by Actor, id string, b bead
 // a delivery (ensureDeliverable), so a corpse a stale cache still shows
 // running is not taken for a live runtime to type into (J26 C2, mc-ir8qp).
 func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config, replacing, running bool) error {
+	// A start never runs under a caller's input fence: the fence names the
+	// incarnation this start may replace (FI9).
+	ctx = runtime.WithInputFence(ctx, runtime.InputFence{})
 	if err := m.startRefusal(by, id, b); err != nil {
 		return err
 	}
@@ -1426,13 +1429,18 @@ func (m *Manager) stopTurn(ctx context.Context, id string) error {
 		if err != nil {
 			return err
 		}
-		if _, fenced := runtime.InputFenceFrom(ctx); fenced && runtime.InputFencingFor(m.sp, sessName) == runtime.InputFencingNone {
+		_, fenced := runtime.InputFenceFrom(ctx)
+		if fenced && runtime.InputFencingFor(m.sp, sessName) == runtime.InputFencingNone {
 			return fmt.Errorf("stopping the turn of %s: %w", id, runtime.ErrInputFenceUnsupported)
 		}
 		running := State(b.Metadata["state"]) != StateSuspended && m.sp.IsRunning(sessName)
 		if !running {
 			// No runtime means no turn to interrupt: stopTurnLocked sends
-			// nothing, so there is nothing to wait for either.
+			// nothing, so there is nothing to wait for either. A fenced stop
+			// reports its incarnation absent: never success into none.
+			if fenced {
+				return &runtime.FenceMismatchError{Session: sessName, Found: runtime.FenceFoundAbsent}
+			}
 			return nil
 		}
 		mode := runtime.TurnInterruptModeFor(m.sp, sessName)
