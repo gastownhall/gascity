@@ -39,8 +39,11 @@ type nudgeClaimRepinner interface {
 }
 
 // openNudgeQueue is the only constructor of the city's nudge queue in cmd/gc.
-// store is the nudges-class store the caller already holds; the zero value
-// means each verb that needs one opens its own, as the facades always did.
+// store is the nudges-class store the caller already holds. With the zero
+// value, Enqueue, RecordFailure and the verbs that run a maintenance pass open
+// their own, as the facades always did; Rollback and WithdrawQueuedWaitNudges
+// do not, and reach shadows only through a caller-passed store, so with the
+// zero value they retire the queue item and leave its shadow open.
 func openNudgeQueue(cityPath string, store beads.NudgesStore) nudgeQueueHandle {
 	q := &fileNudgeQueue{cityPath: cityPath, store: store, clk: clock.Real{}}
 	return nudgeQueueHandle{
