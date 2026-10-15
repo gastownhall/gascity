@@ -985,6 +985,54 @@ func runNudgeBatchTests(r Runner, suite NudgesSuite) {
 		}
 	})
 
+	// A batch whose every member is backed off is not claimable, so a claim
+	// never asks the census whether it splits across sessions.
+	r.Run("ClaimBatchSkipsTheCensusForABackedOffBatch", func(r Runner) {
+		queue := mustQueue(r, suite)
+		now := time.Now().UTC()
+		if err := queue.Enqueue(nudgeItem("n-old", "session-old", now)); err != nil {
+			r.Fatalf("Enqueue: %v", err)
+		}
+		first, err := queue.ClaimBatch(storebinding.ClaimTarget{QueueKeys: []string{ConformanceNudgeAgent}, SessionID: "session-old"}, now)
+		if err != nil {
+			r.Fatalf("ClaimBatch by session-old: %v", err)
+		}
+		key := assertOneBatch(r, "ClaimBatch by session-old", first, "n-old")
+		retry := now.Add(time.Hour)
+		if err := queue.ReleaseClaims([]string{"n-old"}, retry); err != nil {
+			r.Fatalf("ReleaseClaims: %v", err)
+		}
+		calls := 0
+		successor := storebinding.ClaimTarget{
+			QueueKeys: []string{ConformanceNudgeAgent},
+			SessionID: "session-new",
+			LiveFenceSessions: func() (map[string]struct{}, bool) {
+				calls++
+				return map[string]struct{}{"session-new": {}}, true
+			},
+		}
+		early, err := queue.ClaimBatch(successor, now)
+		if err != nil {
+			r.Fatalf("ClaimBatch before the batch is due: %v", err)
+		}
+		if len(early) != 0 {
+			r.Fatalf("ClaimBatch before the batch is due = %v, want nothing", nudgeIDs(early))
+		}
+		if calls != 0 {
+			r.Errorf("a ClaimBatch with no due candidate asked the census %d times, want never", calls)
+		}
+		resumed, err := queue.ClaimBatch(successor, retry.Add(time.Second))
+		if err != nil {
+			r.Fatalf("ClaimBatch once the batch is due: %v", err)
+		}
+		if got := assertOneBatch(r, "ClaimBatch once the batch is due", resumed, "n-old"); got != key {
+			r.Fatalf("adopted batch key = %q, want the pinned %q", got, key)
+		}
+		if calls != 1 {
+			r.Errorf("one ClaimBatch with a due batch pinned elsewhere asked the census %d times, want exactly once", calls)
+		}
+	})
+
 	r.Run("ClaimBatchAdoptsASupersededSessionsBatch", func(r Runner) {
 		queue := mustQueue(r, suite)
 		now := time.Now().UTC()

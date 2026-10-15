@@ -344,7 +344,11 @@ type ClaimTarget struct {
 	// LiveFenceSessions reports the ids of the sessions that still hold a
 	// nudge fence and whether that census was available. Nil keeps strict
 	// fencing. An implementation calls it at most once per claim, and only
-	// when a due candidate is pinned to a session other than SessionID. A
+	// when a due candidate is pinned to a session other than SessionID, or,
+	// in ClaimBatch, when a pinned batch with a due candidate has a member
+	// that is not yet due and is pinned to such a session: the legacy file
+	// queue claims a pinned batch whole whatever its members' deliver_after,
+	// so whether that member passes the fence decides the claim. A
 	// session-pinned item is claimable by another session only if the census
 	// is available, contains SessionID, and does not contain the item's
 	// session.
