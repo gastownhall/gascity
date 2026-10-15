@@ -385,9 +385,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   therefore stays reapable after it closes; claims under the earlier aliases
   of a seat renamed more than once are kept and named. The orphan-close
   release of a confirmed orphaned session is unchanged. The core `orphan-sweep`
-  order now applies the same gate through `gc agent is-foreign`; see below. Migration notes: a `<rig>/<name>` identity
-  moved to another city on the shared rig store keeps being released here
-  until this city's closed session records for it are purged or re-aliased.
+  order now applies the same gate through `gc agent is-foreign`; see the entry
+  above. Migration notes: a `<rig>/<name>` identity moved to another city on
+  the shared rig store keeps being released here until this city's closed
+  session records for it are purged or re-aliased.
   The session record of a removed agent, binding or namepool name lasts until
   closed session beads are purged, which happens only after
   `GC_INFRA_SESSION_PURGE_AGE` (default 72h) on a relocated SQLite sessions

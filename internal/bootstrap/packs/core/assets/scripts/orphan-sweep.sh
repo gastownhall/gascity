@@ -437,10 +437,13 @@ PROTECTED=0
 PROTECTED_ROWS=""
 PROTECTED_ID_SAMPLE_LIMIT=5
 
+# gate_list_has never matches an empty candidate: every memo list ends in a
+# newline, so the here-string carries an empty last line that grep -Fx would
+# match, vouching for an identity the gate was never asked about.
 gate_list_has() {
     local list="$1"
     local candidate="$2"
-    [ -n "$list" ] && grep -Fxq -- "$candidate" <<<"$list"
+    [ -n "$candidate" ] && [ -n "$list" ] && grep -Fxq -- "$candidate" <<<"$list"
 }
 
 # claim_gate_verdict sets GATE_VERDICT to local, foreign or unknown for an
@@ -560,13 +563,16 @@ if [ "$PROTECTED" -gt 0 ]; then
             + (map("\(.identity | tojson) (\(.beads | length): \(.beads[:$limit] | join(", "))\(if (.beads | length) > $limit then " +\((.beads | length) - $limit) more" else "" end))") | join(", "))
         ' <<<"$PROTECTED_JSON") || PROTECTED_DETAIL=""
         order_outcome_set partial "protected $PROTECTED claim(s) held by identities this city cannot vouch for: not in its roster, and no session record of its own answers to them"
-        while IFS=$'\t' read -r scope reason; do
+        # Reason first, identity last, joined by a bare tab: the spool holds no
+        # tab or newline, so the identity reads back verbatim. @tsv would
+        # escape a backslash, and the scope would stop naming the identity.
+        while IFS=$'\t' read -r reason scope; do
             [ -n "$scope" ] || continue
             order_outcome_scope_skipped "$scope" "$reason"
         done < <(jq -r --argjson limit "$PROTECTED_ID_SAMPLE_LIMIT" '
-            .[] | [.identity,
-                   "\(.beads | length) claim(s) kept: \(.beads[:$limit] | join(", "))\(if (.beads | length) > $limit then " +\((.beads | length) - $limit) more" else "" end)\(if .reason != "" then " (\(.reason))" else "" end)"]
-            | @tsv' <<<"$PROTECTED_JSON")
+            .[] | ["\(.beads | length) claim(s) kept: \(.beads[:$limit] | join(", "))\(if (.beads | length) > $limit then " +\((.beads | length) - $limit) more" else "" end)\(if .reason != "" then " (\(.reason))" else "" end)",
+                   .identity]
+            | join("\t")' <<<"$PROTECTED_JSON")
     fi
     if [ -z "$PROTECTED_DETAIL" ]; then
         PROTECTED_DETAIL="orphan-sweep: protected $PROTECTED claims this pass, but the per-identity summary is UNAVAILABLE"

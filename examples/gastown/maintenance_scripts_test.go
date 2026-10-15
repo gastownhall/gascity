@@ -11811,9 +11811,14 @@ exit 0
 // argument) the way this city's foreign-identity gate would: foreign (exit 1)
 // for identities listed in ORPHAN_SWEEP_FOREIGN_IDENTITIES, otherwise local
 // (exit 0), modeling a dead local claimant whose closed session record
-// survives. It uses echo, not printf, so it is safe inside fmt.Sprintf stubs.
+// survives. An empty identity gets the verb's usage answer (exit 2, unknown).
+// It uses echo, not printf, so it is safe inside fmt.Sprintf stubs.
 const orphanSweepGateStubArm = `if [ "$1" = "agent" ] && [ "$2" = "is-foreign" ]; then
   for identity; do :; done
+  if [ -z "$identity" ] || [ "$identity" = "--" ]; then
+    echo '{"schema_version":"1","ok":true,"verdict":"unknown","reason":"no_config","detail":"usage: exactly one identity is required","roster_source":""}'
+    exit 2
+  fi
   if [ -n "${ORPHAN_SWEEP_FOREIGN_IDENTITIES:-}" ] && echo "$ORPHAN_SWEEP_FOREIGN_IDENTITIES" | grep -Fxq -- "$identity"; then
     echo '{"schema_version":"1","ok":true,"verdict":"foreign","reason":"absent_from_roster","roster_source":"stub"}'
     exit 1
@@ -12349,15 +12354,31 @@ func TestOrphanSweepReportsProtectedIdentitiesWhenEscalationMailFails(t *testing
 
 // TestOrphanSweepSummaryQuotesUntrustedIdentities keeps an assignee written by
 // another city from forging structure in the summary line: identities are
-// JSON-quoted and tabs are neutralized.
+// JSON-quoted and tabs are neutralized. The outcome declaration names each
+// identity verbatim, a backslash included, so the order.skipped scope is the
+// identity an operator has to look up.
 func TestOrphanSweepSummaryQuotesUntrustedIdentities(t *testing.T) {
 	forged := `evil, "x" (9: y)`
 	tabbed := "tab\tbed"
+	backslashed := `DOMAIN\pat`
 	run := runOrphanSweepGateFixture(t, nil,
-		[]orphanSweepGateRow{inProgress("sh-forged", forged), inProgress("sh-tabbed", tabbed)},
-		nil, []string{forged, tabbed}, nil)
+		[]orphanSweepGateRow{inProgress("sh-forged", forged), inProgress("sh-tabbed", tabbed), inProgress("sh-backslashed", backslashed)},
+		nil, []string{forged, tabbed, backslashed}, nil)
 	if run.err != nil {
 		t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+	}
+	outcome, ok := run.outcome(t)
+	if !ok {
+		t.Fatalf("no outcome declaration\n%s", run.context())
+	}
+	scopes := map[string]string{}
+	for _, scope := range outcome.Scopes {
+		scopes[scope.Scope] = scope.Reason
+	}
+	for identity, bead := range map[string]string{forged: "sh-forged", "tab bed": "sh-tabbed", backslashed: "sh-backslashed"} {
+		if reason, found := scopes[identity]; !found || !strings.Contains(reason, bead) {
+			t.Errorf("outcome declares no scope named %q with %s: %+v", identity, bead, outcome.Scopes)
+		}
 	}
 	var lineB string
 	for _, line := range strings.Split(run.out, "\n") {
@@ -12379,5 +12400,41 @@ func TestOrphanSweepSummaryQuotesUntrustedIdentities(t *testing.T) {
 	}
 	if strings.Contains(lineB, "\t") || !strings.Contains(lineB, `"tab bed" (1: sh-tabbed)`) {
 		t.Fatalf("protected line %q does not neutralize the tab", lineB)
+	}
+}
+
+// TestOrphanSweepNeverVouchesForAnEmptyIdentity keeps the gate's memo from
+// answering for an identity the gate was never asked about. A newline in an
+// assignee splits its row, so the tail reads as a row of its own whose bead ID
+// is attacker-chosen text and whose assignee is empty. Once a dead local claim
+// has been vouched for, the memo must not vouch for "" too: that would release
+// an unrelated in-progress bead that has no assignee at all, a bead the sweep
+// never selects on its own.
+func TestOrphanSweepNeverVouchesForAnEmptyIdentity(t *testing.T) {
+	run := runOrphanSweepGateFixture(t, nil,
+		[]orphanSweepGateRow{
+			inProgress("sh-local-dead", "gastown__polecat-gc-d34d1"),
+			inProgress("sh-split", "\nsh-unassigned"),
+			{ID: "sh-unassigned", Status: "in_progress"},
+		}, nil, nil, nil)
+	if run.err != nil {
+		t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+	}
+	if !run.released("sh-local-dead") {
+		t.Fatalf("dead local claim was not released, so the memo was never primed\n%s", run.context())
+	}
+	for _, bead := range []string{"sh-split", "sh-unassigned"} {
+		if run.released(bead) {
+			t.Fatalf("%s was released under an empty identity the gate never vouched for\n%s", bead, run.context())
+		}
+	}
+	if !strings.Contains(run.out, `"" (2: sh-split, sh-unassigned)`) {
+		t.Fatalf("output does not name the claims kept under the empty identity:\n%s", run.out)
+	}
+	// An empty identity cannot name a scope; it must not shift its reason into
+	// the scope name either.
+	outcome, ok := run.outcome(t)
+	if !ok || outcome.Outcome != "partial" || len(outcome.Scopes) != 0 {
+		t.Fatalf("outcome = %+v (written %v), want partial with no scope", outcome, ok)
 	}
 }
