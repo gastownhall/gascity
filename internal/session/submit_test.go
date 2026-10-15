@@ -2640,3 +2640,56 @@ func TestCrashedAgentStopAndKillFencesStillRefuse(t *testing.T) {
 		})
 	}
 }
+
+func TestIsGoTestExecutableForBazelRunfilesSymlink(t *testing.T) {
+	dir := t.TempDir()
+	realBin := filepath.Join(dir, "bin", "session_test_", "session_test")
+	spyBin := filepath.Join(dir, "spy", "session_test")
+	for _, p := range []string{realBin, spyBin} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		if err := os.WriteFile(p, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+	}
+	// Bazel's test-setup.sh execs the test via its runfiles path, which is a
+	// symlink to the built binary under local (non-RBE) execution, while
+	// os.Executable reports the resolved target.
+	runfilesLink := filepath.Join(dir, "runfiles", "_main", "internal", "session", "session_test")
+	if err := os.MkdirAll(filepath.Dir(runfilesLink), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.Symlink(realBin, runfilesLink); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+	resolvedReal, err := filepath.EvalSymlinks(realBin)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	const srcdir = "/runfiles"
+
+	tests := []struct {
+		name       string
+		path       string
+		argv0      string
+		testSrcdir string
+		want       bool
+	}{
+		{"go test binary", filepath.Join(dir, "session.test"), "/elsewhere/x", "", true},
+		{"bazel direct exec", realBin, realBin, srcdir, true},
+		{"bazel runfiles symlink exec", resolvedReal, runfilesLink, srcdir, true},
+		{"symlink exec outside bazel", resolvedReal, runfilesLink, "", false},
+		{"renamed spy binary", spyBin, runfilesLink, srcdir, false},
+		{"renamed spy binary direct argv0", spyBin, realBin, srcdir, false},
+		{"unresolvable argv0", resolvedReal, filepath.Join(dir, "missing", "session_test"), srcdir, false},
+		{"production gc binary", "/usr/local/bin/gc", "/usr/local/bin/gc", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isGoTestExecutableFor(tt.path, tt.argv0, tt.testSrcdir); got != tt.want {
+				t.Fatalf("isGoTestExecutableFor(%q, %q, %q) = %v, want %v", tt.path, tt.argv0, tt.testSrcdir, got, tt.want)
+			}
+		})
+	}
+}
