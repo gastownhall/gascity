@@ -106,7 +106,8 @@ func (m *Manager) sightTurn(ctx context.Context, id string) turnSighting {
 // was skipped or read another runtime name says nothing about the
 // capability, so a row the fenced path would not refuse has it read here,
 // under the session mutation lock: a composite may route sessName to a
-// backend without it.
+// backend without it. The fence does not reuse that read: it reads the turn
+// again once it holds the runtime lease, which it may have waited for.
 func (m *Manager) turnFenceFor(ctx context.Context, by Actor, id string, b beads.Bead, sessName string, seen turnSighting) runtime.TurnFenceProvider {
 	if seen.unsupported || State(b.Metadata["state"]) == StateSuspended ||
 		runtime.TurnInterruptModeFor(m.sp, sessName) != runtime.TurnInterruptProtocol {
@@ -147,11 +148,8 @@ func (m *Manager) fencedInterruptAndSubmitLocked(ctx context.Context, by Actor, 
 	out := SubmitOutcome{Interrupt: &report}
 	if now {
 		queued, sendErr := m.sendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints, true)
-		// A send the runtime refused as unavailable sent nothing: queue it.
-		// Precondition, not yet in the runtime contract: a
-		// TurnFenceProvider's Nudge returns ErrRuntimeUnavailable only
-		// before dispatch. One that returned it after the text left would
-		// have this message delivered twice, once sent and once queued.
+		// A send the runtime refused as unavailable sent nothing, as
+		// runtime.TurnFenceProvider requires: queue it.
 		if !errors.Is(sendErr, runtime.ErrRuntimeUnavailable) {
 			out.Queued, out.Deferred = queued, queued
 			recordTurnInterrupt(ctx, sessName, report, out, sendErr)

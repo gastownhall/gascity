@@ -711,16 +711,70 @@ func TestFencedDeliverNowSightsOnceAcrossLeaseRetry(t *testing.T) {
 }
 
 func TestFencedDeliverNowRefusesAStoppingRow(t *testing.T) {
-	checkFencedRefusal(t, map[string]string{"state": string(StateDraining), "state_reason": DrainAckStopPendingReason}, ErrSessionStopping)
+	checkFencedRefusal(t, stoppingRow(), ErrSessionStopping)
 }
 
 func TestFencedDeliverNowRefusesAKillPendingRow(t *testing.T) {
-	checkFencedRefusal(t, map[string]string{"state": string(StateAsleep), "state_reason": KillPendingReason, "sleep_reason": string(SleepReasonKilled), "slept_at": time.Now().UTC().Format(time.RFC3339)}, ErrSessionKillPending)
+	checkFencedRefusal(t, killPendingRow(), ErrSessionKillPending)
+}
+
+// A skipped sighting leaves the capability unread, and a row the fenced path
+// refuses must not have it read: no turn read, no effect, the row's own
+// refusal. Behind the composite the read never reaches the fake (the
+// composite answers it as unsupported), so there only the kill-pending row
+// shows an unguarded read: the unfenced path does not refuse it first.
+func TestFencedDeliverNowRefusesWithoutASighting(t *testing.T) {
+	for _, rt := range []struct {
+		name string
+		wrap func(*runtime.Fake) runtime.Provider
+	}{
+		{"t3bridge", t3bridgeComposites["t3bridge"]},
+		{"composite without capability", compositeWithoutCapability},
+	} {
+		for _, row := range []struct {
+			name string
+			meta map[string]string
+			want error
+		}{
+			{"stopping", stoppingRow(), ErrSessionStopping},
+			{"kill pending", killPendingRow(), ErrSessionKillPending},
+		} {
+			t.Run(rt.name+"/"+row.name, func(t *testing.T) {
+				store := &failingGetStore{Store: beads.NewMemStore()}
+				x := newFenceFixture(t, fenceFixtureOpts{store: store, wrap: rt.wrap})
+				store.armed.Store(true)
+				expectFencedRefusal(t, x, row.meta, row.want)
+				if n := countMethod(x.f.Calls, "ObserveTurn"); n != 0 {
+					t.Fatalf("ObserveTurn calls = %d, want none; calls %v", n, callMethods(x.f.Calls))
+				}
+			})
+		}
+	}
+}
+
+// stoppingRow is the metadata of a row a drain-ack stop is retiring.
+func stoppingRow() map[string]string {
+	return map[string]string{"state": string(StateDraining), "state_reason": DrainAckStopPendingReason}
+}
+
+// killPendingRow is the metadata of a row a kill put to sleep.
+func killPendingRow() map[string]string {
+	return map[string]string{"state": string(StateAsleep), "state_reason": KillPendingReason, "sleep_reason": string(SleepReasonKilled), "slept_at": time.Now().UTC().Format(time.RFC3339)}
 }
 
 func checkFencedRefusal(t *testing.T, meta map[string]string, want error) {
 	t.Helper()
 	x := newFenceFixture(t, fenceFixtureOpts{})
+	expectFencedRefusal(t, x, meta, want)
+	if n := countMethod(x.f.Calls, "ObserveTurn"); n > 1 {
+		t.Fatalf("ObserveTurn calls = %d, want at most the intake sighting", n)
+	}
+}
+
+// expectFencedRefusal gives x's row meta and expects a deliver-now on it to be
+// refused with want, having queued, reported and done nothing.
+func expectFencedRefusal(t *testing.T, x fenceFixture, meta map[string]string, want error) {
+	t.Helper()
 	if err := x.mgr.store.SetMetadataBatch(x.info.ID, meta); err != nil {
 		t.Fatal(err)
 	}
@@ -739,9 +793,6 @@ func checkFencedRefusal(t *testing.T, meta map[string]string, want error) {
 	}
 	if got := fenceEffects(x.f.Calls); got != "" {
 		t.Fatalf("effects = %q, want none", got)
-	}
-	if n := countMethod(x.f.Calls, "ObserveTurn"); n > 1 {
-		t.Fatalf("ObserveTurn calls = %d, want at most the intake sighting", n)
 	}
 	if pending := x.pending(t); len(pending) != 0 {
 		t.Fatalf("pending %+v, want nothing queued", pending)
@@ -1047,11 +1098,15 @@ func TestFencedDeliverNowRecordsOneOutcome(t *testing.T) {
 	}
 }
 
+// compositeWithoutCapability routes the session to f, a protocol-mode backend
+// that does not report turns, behind a composite that does.
+func compositeWithoutCapability(f *runtime.Fake) runtime.Provider {
+	f.TurnInterruptModeValue = runtime.TurnInterruptProtocol
+	return auto.New(f, runtime.NewFakeProfile(runtime.ProfileACP, runtime.FullFake{Fake: runtime.NewFake()}))
+}
+
 func TestFencedDeliverNowCompositeWithoutCapabilityKeepsProtocolSequence(t *testing.T) {
-	x := newFenceFixture(t, fenceFixtureOpts{wrap: func(f *runtime.Fake) runtime.Provider {
-		f.TurnInterruptModeValue = runtime.TurnInterruptProtocol
-		return auto.New(f, runtime.NewFakeProfile(runtime.ProfileACP, runtime.FullFake{Fake: runtime.NewFake()}))
-	}})
+	x := newFenceFixture(t, fenceFixtureOpts{wrap: compositeWithoutCapability})
 	out, err := x.submit(t, fenceMsg)
 	if err != nil {
 		t.Fatalf("Submit: %v", err)
@@ -1072,10 +1127,7 @@ func TestFencedDeliverNowCompositeWithoutCapabilityKeepsProtocolSequence(t *test
 // row read failed): the capability is re-read under the lock.
 func TestFencedDeliverNowCompositeWithoutCapabilityAndASkippedSightingKeepsProtocolSequence(t *testing.T) {
 	store := &failingGetStore{Store: beads.NewMemStore()}
-	x := newFenceFixture(t, fenceFixtureOpts{store: store, wrap: func(f *runtime.Fake) runtime.Provider {
-		f.TurnInterruptModeValue = runtime.TurnInterruptProtocol
-		return auto.New(f, runtime.NewFakeProfile(runtime.ProfileACP, runtime.FullFake{Fake: runtime.NewFake()}))
-	}})
+	x := newFenceFixture(t, fenceFixtureOpts{store: store, wrap: compositeWithoutCapability})
 	store.armed.Store(true)
 	out, err := x.submit(t, fenceMsg)
 	if err != nil {
