@@ -374,13 +374,17 @@ func (h *SessionHandle) Message(ctx context.Context, by sessionpkg.Actor, req Me
 }
 
 // Interrupt soft-stops any in-flight worker turn.
-func (h *SessionHandle) Interrupt(ctx context.Context, _ InterruptRequest) (err error) {
+func (h *SessionHandle) Interrupt(ctx context.Context, req InterruptRequest) (err error) {
 	event := h.beginOperationEvent(ctx, workerOperationInterrupt)
 	defer func() { event.finish(err) }()
 
 	id := h.currentSessionID()
 	if id == "" {
 		return nil
+	}
+	if !req.Fence.IsZero() {
+		err = h.manager.StopTurnFenced(ctx, id, req.Fence)
+		return err
 	}
 	err = h.manager.StopTurn(id)
 	return err
@@ -406,6 +410,11 @@ func (h *SessionHandle) Nudge(ctx context.Context, by sessionpkg.Actor, req Nudg
 	if err != nil {
 		return NudgeResult{}, err
 	}
+	ctx, unfenced, err := fencedNudgeContext(ctx, req, func() (runtime.InputFencing, error) { return h.manager.InputFencing(id) })
+	if err != nil {
+		return NudgeResult{}, err
+	}
+	defer func() { result.Unfenced = unfenced && result.Delivered }()
 	resumeCommand, err := h.startCommand(id)
 	if err != nil {
 		return NudgeResult{}, err

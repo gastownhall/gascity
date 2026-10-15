@@ -179,8 +179,15 @@ const (
 	CreateModeStarted CreateMode = "started"
 )
 
-// InterruptRequest is reserved for future interrupt controls.
-type InterruptRequest struct{}
+// InterruptRequest controls one interrupt of the worker's current turn.
+type InterruptRequest struct {
+	// Fence, when set, confines every key and interrupt to the incarnation
+	// it names (see runtime.InputFence). A runtime that cannot fence the
+	// session refuses with runtime.ErrInputFenceUnsupported before sending
+	// anything; a miss is a *runtime.FenceMismatchError. It is a capability
+	// and never serialized.
+	Fence runtime.InputFence `json:"-"`
+}
 
 // NudgeDelivery controls how a nudge should be delivered.
 type NudgeDelivery string
@@ -209,6 +216,55 @@ type NudgeRequest struct {
 	// immediate and wait-idle delivery can go out unkeyed, as through
 	// [runtime.ImmediateNudgeProvider], whose NudgeNow takes no key.
 	DeliveryKey string `json:"delivery_key,omitempty"`
+	// Fence, when set, delivers only to the incarnation it names (see
+	// runtime.InputFence): a miss is a *runtime.FenceMismatchError, and a
+	// runtime that cannot fence the session refuses with
+	// runtime.ErrInputFenceUnsupported unless AllowUnfenced. A fenced nudge
+	// must be live-only with default or immediate delivery
+	// (ErrFencedNudgeShape). It is a capability and never serialized.
+	Fence runtime.InputFence `json:"-"`
+	// AllowUnfenced lets a fenced nudge to a runtime that cannot fence the
+	// session go out unfenced; the result then reports Unfenced.
+	AllowUnfenced bool `json:"allow_unfenced,omitempty"`
+}
+
+// ErrFencedNudgeShape reports a fenced nudge that is not live-only, or that
+// waits for idle: a fenced nudge never starts a runtime, and the wait-idle
+// path cannot report a refused send.
+var ErrFencedNudgeShape = errors.New("a fenced nudge must be live-only with default or immediate delivery")
+
+// fencedNudgeContext applies req's fence to ctx. A request with no fence
+// returns ctx unchanged. Otherwise the fence must name an incarnation and
+// the request must have a fenced shape; then fencing (the runtime's
+// fencing of the session) decides: a runtime that cannot fence is refused
+// with runtime.ErrInputFenceUnsupported, or, when req.AllowUnfenced,
+// delivered without the fence and reported unfenced.
+func fencedNudgeContext(ctx context.Context, req NudgeRequest, fencing func() (runtime.InputFencing, error)) (context.Context, bool, error) {
+	if req.Fence.IsZero() {
+		return ctx, false, nil
+	}
+	if err := req.Fence.Validate(); err != nil {
+		return ctx, false, err
+	}
+	if normalizeNudgeWakePolicy(req.Wake) != NudgeWakeLiveOnly || req.Delivery == NudgeDeliveryWaitIdle {
+		return ctx, false, ErrFencedNudgeShape
+	}
+	switch req.Delivery {
+	case "", NudgeDeliveryDefault, NudgeDeliveryImmediate:
+	default:
+		return ctx, false, ErrFencedNudgeShape
+	}
+	f, err := fencing()
+	if err != nil {
+		return ctx, false, err
+	}
+	if f == runtime.InputFencingNone {
+		if req.AllowUnfenced {
+			return ctx, true, nil
+		}
+		return ctx, false, runtime.ErrInputFenceUnsupported
+	}
+	return runtime.WithInputFence(ctx, req.Fence), false, nil
 }
 
 // nudgeDeliveryContext scopes req's delivery key to ctx for this one
@@ -229,6 +285,10 @@ type NudgeResult struct {
 	// not (yet) distinguish — a caller must treat it as a hint, never as a
 	// second copy of Delivered.
 	Undelivered NudgeUndeliveredReason `json:"undelivered,omitempty"`
+	// Unfenced reports a fenced request (NudgeRequest.Fence) delivered
+	// without its fence, as AllowUnfenced permits for a runtime that cannot
+	// fence the session. Set only when Delivered.
+	Unfenced bool `json:"unfenced,omitempty"`
 }
 
 // NudgeUndeliveredReason is the closed set of reasons a live nudge did not

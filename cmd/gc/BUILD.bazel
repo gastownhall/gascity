@@ -1601,6 +1601,7 @@ go_test(
         "pool_test.go",
         "pool_trigger_workdir_purity_test.go",
         "pool_trigger_worktree_owner_test.go",
+        "prepared_start_input_fence_test.go",
         "prepared_start_oversized_prompt_test.go",
         "prepared_start_priming_test.go",
         "prime_inbox_test.go",
