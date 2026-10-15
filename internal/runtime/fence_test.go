@@ -160,7 +160,8 @@ func TestInputFenceNeverShowsToken(t *testing.T) {
 func TestFenceMismatchIsNotSessionGone(t *testing.T) {
 	for _, found := range []string{runtime.FenceFoundAbsent, runtime.FenceFoundDead, runtime.FenceFoundUnproven, "1172ccc4fbf9f6a6"} {
 		for _, partial := range []bool{false, true} {
-			base := &runtime.FenceMismatchError{Session: "s", Found: found, Partial: partial}
+			// A session name a runtime allows may hold IsSessionGone's phrases.
+			base := &runtime.FenceMismatchError{Session: "agent not found not running", Found: found, Partial: partial}
 			for _, err := range []error{base, fmt.Errorf("delivering: %w", base), errors.Join(base)} {
 				if !errors.Is(err, runtime.ErrFenceMismatch) {
 					t.Errorf("%v: not ErrFenceMismatch", err)
@@ -247,5 +248,48 @@ func TestNudgeWithContextUnfencedDispatchUnchanged(t *testing.T) {
 				t.Fatalf("calls = %v, want [%s]", got, c.want)
 			}
 		})
+	}
+}
+
+// A ctx-fenced input method routed to a runtime that cannot fence is refused
+// before any input; an unfenced ctx, or a fencing runtime, passes.
+func TestRefuseUnfenceableCtx(t *testing.T) {
+	fence := runtime.InputFence{Generation: 1, Epoch: 1, Token: "tok"}
+	fenced := runtime.WithInputFence(context.Background(), fence)
+	none := runtime.NewFake()
+	none.InputFencingValue = runtime.InputFencingNone
+	if err := runtime.RefuseUnfenceableCtx(fenced, none, "s"); !errors.Is(err, runtime.ErrInputFenceUnsupported) {
+		t.Fatalf("fenced ctx to a none runtime = %v, want ErrInputFenceUnsupported", err)
+	}
+	if err := runtime.RefuseUnfenceableCtx(context.Background(), none, "s"); err != nil {
+		t.Fatalf("unfenced ctx = %v", err)
+	}
+	if err := runtime.RefuseUnfenceableCtx(fenced, runtime.NewFake(), "s"); err != nil {
+		t.Fatalf("fenced ctx to a fencing runtime = %v", err)
+	}
+}
+
+// A Fake that cannot fence refuses a ctx-fenced ClearInput,
+// DismissKnownDialogs or ResetInterruptedTurn instead of running it
+// unfenced, and records no call.
+func TestFakeNoneRefusesCtxFencedInput(t *testing.T) {
+	f := runtime.NewFake()
+	f.InputFencingValue = runtime.InputFencingNone
+	if err := f.Start(context.Background(), "s", runtime.Config{Env: map[string]string{"GC_INSTANCE_TOKEN": "tok"}}); err != nil {
+		t.Fatal(err)
+	}
+	f.Calls = nil
+	ctx := runtime.WithInputFence(context.Background(), runtime.InputFence{Generation: 1, Epoch: 1, Token: "tok"})
+	for name, err := range map[string]error{
+		"ClearInput":           f.ClearInput(ctx, "s", 0),
+		"DismissKnownDialogs":  f.DismissKnownDialogs(ctx, "s", 0),
+		"ResetInterruptedTurn": f.ResetInterruptedTurn(ctx, "s"),
+	} {
+		if !errors.Is(err, runtime.ErrInputFenceUnsupported) {
+			t.Errorf("%s under a fence on a none fake = %v, want ErrInputFenceUnsupported", name, err)
+		}
+	}
+	if calls := f.SnapshotCalls(); len(calls) != 0 {
+		t.Fatalf("refused calls recorded: %+v", calls)
 	}
 }

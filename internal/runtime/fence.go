@@ -14,9 +14,12 @@ import (
 // The environment keys that name a session incarnation. Session starts
 // publish all three (session.RuntimeEnv).
 const (
-	fenceGenerationEnv = "GC_RUNTIME_EPOCH"
-	fenceEpochEnv      = "GC_CONTINUATION_EPOCH"
-	fenceTokenEnv      = "GC_INSTANCE_TOKEN"
+	// RuntimeEpochEnv carries the incarnation's generation.
+	RuntimeEpochEnv = "GC_RUNTIME_EPOCH"
+	// ContinuationEpochEnv carries the incarnation's continuation epoch.
+	ContinuationEpochEnv = "GC_CONTINUATION_EPOCH"
+	// InstanceTokenEnv carries the incarnation's instance token.
+	InstanceTokenEnv = "GC_INSTANCE_TOKEN"
 )
 
 // inputFenceDigestTag versions the digest format. Live panes hold digests in
@@ -112,13 +115,13 @@ func (f InputFence) MarshalJSON() ([]byte, error) {
 // strconv.Atoi, where a missing, malformed or non-positive value reads as 1,
 // as the session layer's starts default them.
 func InputFenceFromEnv(env map[string]string) (InputFence, bool) {
-	token := env[fenceTokenEnv]
+	token := env[InstanceTokenEnv]
 	if token == "" {
 		return InputFence{}, false
 	}
 	return InputFence{
-		Generation: positiveOrOne(env[fenceGenerationEnv]),
-		Epoch:      positiveOrOne(env[fenceEpochEnv]),
+		Generation: positiveOrOne(env[RuntimeEpochEnv]),
+		Epoch:      positiveOrOne(env[ContinuationEpochEnv]),
 		Token:      token,
 	}, true
 }
@@ -170,8 +173,11 @@ const (
 
 // FenceMismatchError is ErrFenceMismatch with what the runtime found. Found
 // is the digest it found, or FenceFoundAbsent, FenceFoundDead or
-// FenceFoundUnproven. Partial reports that some input of the same operation
-// reached the fenced incarnation before the miss.
+// FenceFoundUnproven. Partial reports that some of the operation's effect
+// reached the fenced incarnation before the miss: a nudge's text, or any key
+// of a keys, interrupt or ctx-fenced operation. Input that only prepares a
+// nudge (a copy-mode exit, a composer clear, a dialog key before its text)
+// does not count: a nudge that missed before its text is not partial.
 type FenceMismatchError struct {
 	Session string
 	Found   string
@@ -204,10 +210,14 @@ type FencedNudge struct {
 // none, the runtime's ctx-taking input methods (InputClearProvider.ClearInput,
 // DialogProvider.DismissKnownDialogs and
 // InterruptedTurnResetProvider.ResetInterruptedTurn) apply the fence
-// InputFenceFrom(ctx) names, as these methods do. A fenced call never reports
-// success into an absent, dead or other incarnation: it returns a
-// *FenceMismatchError, ErrInvalidInputFence, or (InputFencing none)
-// ErrInputFenceUnsupported before any input.
+// InputFenceFrom(ctx) names, as these methods do; a runtime (or a
+// composite's routed backend) that cannot fence refuses them under a fence
+// (RefuseUnfenceableCtx). A fenced call never reports success into an
+// absent, dead or other incarnation: it returns a *FenceMismatchError,
+// ErrInvalidInputFence, or (InputFencing none) ErrInputFenceUnsupported
+// before any input. A runtime with no server to ask at all (tmux with no
+// server running) returns ErrRuntimeUnavailable instead of a mismatch: it
+// cannot tell absent from unreachable.
 type FencedInputProvider interface {
 	// InputFencing reports how the runtime fences session name's input. It
 	// is a static trait: it reads no runtime state.
@@ -248,6 +258,17 @@ func FencingBackend(backend Provider, name string) (FencedInputProvider, error) 
 		return nil, fmt.Errorf("session %q: %w", name, ErrInputFenceUnsupported)
 	}
 	return fp, nil
+}
+
+// RefuseUnfenceableCtx returns ErrInputFenceUnsupported when ctx carries an
+// input fence and p cannot fence session name, so a ctx-fenced ClearInput,
+// DismissKnownDialogs or ResetInterruptedTurn is never run unfenced. A
+// composite calls it before forwarding to the routed backend.
+func RefuseUnfenceableCtx(ctx context.Context, p Provider, name string) error {
+	if _, ok := InputFenceFrom(ctx); ok && InputFencingFor(p, name) == InputFencingNone {
+		return fmt.Errorf("session %q: %w", name, ErrInputFenceUnsupported)
+	}
+	return nil
 }
 
 type inputFenceContextKey struct{}

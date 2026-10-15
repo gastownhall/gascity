@@ -992,12 +992,13 @@ func (f *Fake) checkFenceLocked(name string, fence InputFence) error {
 	return &FenceMismatchError{Session: name, Found: found}
 }
 
-// ctxFenceLocked applies the input fence ctx carries, unless the fake is
-// configured as InputFencingNone (then a ctx fence is not its to apply). It
-// returns the fence applied, zero when none. The caller holds f.mu.
+// ctxFenceLocked applies the input fence ctx carries; a fake configured as
+// InputFencingNone refuses it with ErrInputFenceUnsupported rather than run
+// unfenced. It returns the fence applied, zero when none. The caller holds
+// f.mu.
 func (f *Fake) ctxFenceLocked(ctx context.Context, name string) (InputFence, error) {
 	fence, ok := InputFenceFrom(ctx)
-	if !ok || f.inputFencingLocked() == InputFencingNone {
+	if !ok {
 		return InputFence{}, nil
 	}
 	return fence, f.checkFenceLocked(name, fence)

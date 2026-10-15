@@ -498,14 +498,17 @@ func runFencedInputTests(t *testing.T, newSession Factory, opts Options) {
 		}
 	})
 
+	// Self-contained: a sibling session keeps the runtime up, so the probe
+	// asks a live runtime about a name it does not host. With no runtime
+	// server at all a provider answers ErrRuntimeUnavailable instead
+	// (FencedInputProvider), which this case does not test.
 	t.Run("FencedInput_AbsentSessionRefuses", func(t *testing.T) {
-		sp, _, name := newSession(t)
-		if runtime.InputFencingFor(sp, name) == runtime.InputFencingNone {
-			t.Skip("provider cannot fence session input")
-		}
+		sp, cfg, name := newSession(t)
+		_ = fencedStart(t, opts, sp, name, cfg)
+		absent := name + "-absent"
 		fp := sp.(runtime.FencedInputProvider)
 		fence := runtime.InputFence{Generation: 1, Epoch: 1, Token: "conformance-absent"}
-		err := fp.NudgeFenced(context.Background(), name, runtime.TextContent("hello"), runtime.FencedNudge{Fence: fence, Immediate: true})
+		err := fp.NudgeFenced(context.Background(), absent, runtime.TextContent("hello"), runtime.FencedNudge{Fence: fence, Immediate: true})
 		var miss *runtime.FenceMismatchError
 		if !errors.As(err, &miss) || miss.Found != runtime.FenceFoundAbsent {
 			t.Errorf("NudgeFenced to a session never started = %v, want a mismatch finding %s", err, runtime.FenceFoundAbsent)
