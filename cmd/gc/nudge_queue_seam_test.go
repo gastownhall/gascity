@@ -10,8 +10,10 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 )
 
@@ -229,5 +231,50 @@ func TestClaimTargetCensusIsTheCitysAndMemoized(t *testing.T) {
 	}
 	if _, ok := (nudgeTarget{}).claimTarget("/city-down").LiveFenceSessions(); ok {
 		t.Fatal("an unavailable census reported available")
+	}
+}
+
+// The controller hands the API the city's file queue over its nudges store: a
+// deferred submit lands in state.json, and a wait-nudge withdrawal closes the
+// shadow in that store.
+func TestControllerStateNudgeQueueIsTheCitysFileQueue(t *testing.T) {
+	city := t.TempDir()
+	store := beads.NewMemStore()
+	cs := &controllerState{cityPath: city, cfg: &config.City{}, cityBeadStore: store}
+	queue := cs.NudgeQueue()
+	if _, ok := queue.(*fileNudgeQueue); !ok {
+		t.Fatalf("NudgeQueue = %T, want the file queue", queue)
+	}
+
+	now := time.Now().UTC()
+	deferred := newQueuedNudgeWithOptions("alpha", "later", "session", now, queuedNudgeOptions{ID: "nudge-deferred01"})
+	if err := queue.EnqueueDeferred(deferred); err != nil {
+		t.Fatalf("EnqueueDeferred: %v", err)
+	}
+	wait := newQueuedNudgeWithOptions("alpha", "wait done", "wait", now, queuedNudgeOptions{ID: "wait-w1-0-1"})
+	beadID, _, err := nudgeShadows(beads.NudgesStore{Store: store}).Save(wait)
+	if err != nil {
+		t.Fatalf("saving the wait shadow: %v", err)
+	}
+	wait.BeadID = beadID
+	if err := queue.EnqueueDeferred(wait); err != nil {
+		t.Fatalf("EnqueueDeferred(wait): %v", err)
+	}
+	if err := queue.WithdrawQueuedWaitNudges([]string{wait.ID}); err != nil {
+		t.Fatalf("WithdrawQueuedWaitNudges: %v", err)
+	}
+	state, err := nudgequeue.LoadState(city)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if len(state.Pending) != 1 || state.Pending[0].ID != deferred.ID {
+		t.Fatalf("pending = %+v, want only the deferred submit", state.Pending)
+	}
+	shadow, err := store.Get(beadID)
+	if err != nil {
+		t.Fatalf("Get shadow: %v", err)
+	}
+	if shadow.Status != "closed" {
+		t.Fatalf("wait shadow status = %q, want closed by the withdrawal", shadow.Status)
 	}
 }

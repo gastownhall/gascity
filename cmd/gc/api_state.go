@@ -2040,6 +2040,12 @@ func (cs *controllerState) NudgesBeadStore() beads.NudgesStore {
 	return beads.NudgesStore{Store: resolveNudgesStore(cs.storageRoutes, cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)}
 }
 
+// NudgeQueue returns the city's nudge queue over its nudges-class store, for the
+// API's deferred submits and wait-nudge withdrawals.
+func (cs *controllerState) NudgeQueue() api.NudgeQueue {
+	return openNudgeQueue(cs.cityPath, cs.NudgesBeadStore()).Queue
+}
+
 // SessionsBeadStore returns the store backing session-class beads. At the default
 // backend resolveSessionStore returns cityBeadStore, so this is byte-identical to
 // CityBeadStore; when [beads.classes.sessions] is relocated it returns the per-class

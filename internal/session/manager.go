@@ -622,7 +622,8 @@ type Manager struct {
 	transportResolver       func(template, provider string) transportResolution
 	clk                     clock.Clock
 	staleKeyDetectionWaiter StaleKeyDetectionWaiter
-	leaseTTL                time.Duration // the runtime lease records' TTL (WithRuntimeLeaseTTL)
+	leaseTTL                time.Duration       // the runtime lease records' TTL (WithRuntimeLeaseTTL)
+	deferredSubmits         DeferredSubmitQueue // injected deferred-submit queue (WithDeferredSubmitQueue)
 }
 
 // PruneResult reports which sessions were pruned and which queued wait nudges

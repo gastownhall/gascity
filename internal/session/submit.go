@@ -101,7 +101,7 @@ func (m *Manager) SubmissionCapabilities(id string) (SubmissionCapabilities, err
 	if err != nil {
 		return SubmissionCapabilities{}, err
 	}
-	return SubmissionCapabilitiesForRuntime(b.Metadata, strings.TrimSpace(m.cityPath) != "", runtime.TurnInterruptModeFor(m.sp, sessName)), nil
+	return SubmissionCapabilitiesForRuntime(b.Metadata, m.deferredQueue() != nil, runtime.TurnInterruptModeFor(m.sp, sessName)), nil
 }
 
 // refusesTurnInterrupt reports whether a runtime with mode cannot replace the
@@ -220,7 +220,7 @@ func pendingConversationRestart(b beads.Bead) bool {
 func (m *Manager) supportsFollowUpLocked(b beads.Bead) bool {
 	return SubmissionCapabilitiesForMetadata(
 		b.Metadata,
-		strings.TrimSpace(m.cityPath) != "",
+		m.deferredQueue() != nil,
 	).SupportsFollowUp
 }
 
@@ -727,7 +727,8 @@ func needsDeferredStartupDialogVerification(b beads.Bead) bool {
 }
 
 func (m *Manager) enqueueDeferredSubmitLocked(b beads.Bead, sessName, message string) error {
-	if strings.TrimSpace(m.cityPath) == "" {
+	queue := m.deferredQueue()
+	if queue == nil {
 		return errors.New("deferred submit is unavailable without a city path")
 	}
 	now := time.Now().UTC()
@@ -742,11 +743,7 @@ func (m *Manager) enqueueDeferredSubmitLocked(b beads.Bead, sessName, message st
 		DeliverAfter:      now,
 		ExpiresAt:         now.Add(defaultQueuedSubmitTTL),
 	}
-	if err := nudgequeue.WithState(m.cityPath, func(state *nudgequeue.State) error {
-		state.Pending = append(state.Pending, item)
-		nudgequeue.SortState(state)
-		return nil
-	}); err != nil {
+	if err := queue.EnqueueDeferred(item); err != nil {
 		return fmt.Errorf("queueing deferred submit: %w", err)
 	}
 	if m.supportsFollowUpLocked(b) {

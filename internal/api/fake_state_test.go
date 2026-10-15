@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
+	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/orderdispatch"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
@@ -48,6 +49,9 @@ type fakeState struct {
 	sessionsBeadStore beads.Store // relocated sessions store; nil falls back to cityBeadStore (default backend)
 	graphBeadStore    beads.Store // relocated graph store; nil falls back to cityBeadStore (default backend)
 	ordersBeadStore   beads.Store // relocated orders store; nil falls back to cityBeadStore (default backend)
+	// nudgeQueue overrides NudgeQueue; nil is the city's state.json queue over
+	// the nudges store.
+	nudgeQueue NudgeQueue
 	// bindingRelics is the boot census a test wants replayed. Absent means
 	// uncensused, which means "assume relics" — see
 	// ClassBindingHasLegacyResidents.
@@ -149,6 +153,13 @@ func (f *fakeState) NudgesBeadStore() beads.NudgesStore {
 		return beads.NudgesStore{Store: f.nudgesBeadStore}
 	}
 	return beads.NudgesStore{Store: f.cityBeadStore}
+}
+
+func (f *fakeState) NudgeQueue() NudgeQueue {
+	if f.nudgeQueue != nil {
+		return f.nudgeQueue
+	}
+	return nudgequeue.StateFileQueue{CityPath: f.cityPath, Shadows: f.NudgesBeadStore().Store}
 }
 
 func (f *fakeState) SessionsBeadStore() beads.SessionStore {
