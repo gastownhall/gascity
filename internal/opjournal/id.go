@@ -85,6 +85,37 @@ func opIDSuffix(conversation, principal, clientKey string) string {
 	return hash16(opIDTag, conversation, principal, clientKey)
 }
 
+// pinnedIDFamilyRe is the shape of an id family: the infix between the mint
+// prefix and the hash.
+var pinnedIDFamilyRe = regexp.MustCompile(`^[a-z][a-z0-9]{0,15}$`)
+
+// PinnedID returns <prefix>-<family>-<hash>, the pinned id shape every
+// journal row shares, for a row family another package owns (the event-fact
+// and projector-checkpoint rows of internal/eventfact). hash is the lowercase
+// unpadded base32 of the first 16 bytes of sha256(lp(tag) lp(field)...), lp a
+// uvarint length prefix: 26 characters of [a-z2-7], the scheme DeriveID,
+// FactID and RuntimeRowID use. prefix is the mint prefix of the store that
+// holds the row, refused as DeriveID refuses it. family ([a-z][a-z0-9]*, at
+// most 16 bytes) keeps each family's ids disjoint from every other family's;
+// the families this package mints itself (op, fact, rt) are refused, so no
+// other package can mint an id in them. tag is the family's domain tag
+// ("gascity/<family>-id/v1" by convention); fields are hashed exactly as
+// given, and validating them is the caller's job.
+func PinnedID(prefix, family, tag string, fields ...string) (string, error) {
+	if err := validatePrefix(prefix); err != nil {
+		return "", err
+	}
+	switch {
+	case !pinnedIDFamilyRe.MatchString(family):
+		return "", invalidf("id family %q is not [a-z][a-z0-9]* of at most 16 bytes", family)
+	case "-"+family+"-" == opIDInfix || "-"+family+"-" == factIDInfix || "-"+family+"-" == runtimeIDInfix:
+		return "", invalidf("id family %q is minted only by this package", family)
+	case tag == "":
+		return "", invalidf("id tag is empty")
+	}
+	return prefix + "-" + family + "-" + hash16(tag, fields...), nil
+}
+
 // ValidateClientKey refuses a client key Propose would refuse: empty, longer
 // than 512 bytes, not UTF-8, with a control character, or with leading or
 // trailing space. Producers check a supplied key with it before proposing.

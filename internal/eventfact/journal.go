@@ -1,0 +1,64 @@
+package eventfact
+
+import (
+	"encoding/json"
+	"fmt"
+
+	"github.com/steveyegge/beads/journalops"
+
+	"github.com/gastownhall/gascity/internal/beads"
+)
+
+// journalOpCreate is the journal's op for a row's create (bd's
+// issueops.EventCreate). A fact row is written once, so its create carries
+// all of it.
+const journalOpCreate = "create"
+
+// journalImage is the part of a journal row's post-image (bd's issue, as
+// json.Marshal writes it into IssueJSON) that a fact row is read from. It is
+// gc's own struct, not bd's type: bd's is internal to the beads module.
+// Metadata decodes as the store's string projection does, a non-string value
+// as its JSON text.
+type journalImage struct {
+	ID        string          `json:"id"`
+	IssueType string          `json:"issue_type"`
+	Status    string          `json:"status"`
+	Labels    []string        `json:"labels"`
+	Metadata  beads.StringMap `json:"metadata"`
+	NoHistory bool            `json:"no_history"`
+}
+
+// DecodeJournalRow reads the event fact a journal row created, from the row's
+// post-image alone, with no store read. ok reports whether the row is the
+// create of an event-fact row; the projector skips every other row (other ops,
+// other row types). err is non-nil when the row cannot be read: an image that
+// is not JSON (ok false, since what it was cannot be told), or an event-fact
+// image that does not decode (ok true; ErrCorrupt or ErrUnsupportedSchema).
+func DecodeJournalRow(row journalops.Row) (f Fact, ok bool, err error) {
+	if row.Op != journalOpCreate {
+		return Fact{}, false, nil
+	}
+	var image journalImage
+	if err := json.Unmarshal([]byte(row.IssueJSON), &image); err != nil {
+		return Fact{}, false, fmt.Errorf("eventfact: journal row %d (%s): post-image is not an issue: %w", row.Seq, row.IssueID, err)
+	}
+	b := beads.Bead{
+		ID:        image.ID,
+		Type:      image.IssueType,
+		Status:    image.Status,
+		Labels:    image.Labels,
+		Metadata:  image.Metadata,
+		NoHistory: image.NoHistory,
+	}
+	if !IsEventFact(b) {
+		return Fact{}, false, nil
+	}
+	if image.ID != row.IssueID {
+		return Fact{}, true, corruptf(row.IssueID, "journal row %d's post-image is row %s", row.Seq, image.ID)
+	}
+	f, err = Decode(b)
+	if err != nil {
+		return Fact{}, true, err
+	}
+	return f, true, nil
+}

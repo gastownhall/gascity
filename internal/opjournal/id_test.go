@@ -123,3 +123,67 @@ func TestTargetKeys(t *testing.T) {
 		}
 	}
 }
+
+// PinnedID is the scheme DeriveID uses: the same tag and fields give the same
+// hash under another family.
+func TestPinnedIDIsTheDeriveIDScheme(t *testing.T) {
+	op, err := DeriveID("gc", "gc-1", "operator:alice", "k1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := PinnedID("gc", "x", opIDTag, "gc-1", "operator:alice", "k1")
+	if err != nil {
+		t.Fatalf("PinnedID: %v", err)
+	}
+	if strings.TrimPrefix(got, "gc-x-") != strings.TrimPrefix(op, "gc-op-") {
+		t.Fatalf("PinnedID hash %s differs from DeriveID's %s", got, op)
+	}
+}
+
+// Golden vectors, computed independently (Python hashlib + base64).
+func TestPinnedIDGoldenVectors(t *testing.T) {
+	const origin = "proc:0123456789abcdef0123456789abcdef"
+	cases := []struct {
+		prefix, family, tag string
+		fields              []string
+		want                string
+	}{
+		{"gc", "ev", "gascity/event-fact/v1", []string{"gc-a3f8e", "3", origin, "1"}, "gc-ev-e6o7rior5skvdx2d5w33iaddaq"},
+		{"gc", "ev", "gascity/event-fact/v1", []string{"gc-a3f8e", "3", origin, "2"}, "gc-ev-snridtrzpplc2mrpfenmqu4iyy"},
+		// Boundary pair: the same bytes split differently across fields.
+		{"gc", "ev", "gascity/event-fact/v1", []string{"gc-a3f8e", "31", "proc:x", "1"}, "gc-ev-e5ce2jdzkx5x4awsgn66mbab3q"},
+		{"gc", "ev", "gascity/event-fact/v1", []string{"gc-a3f8e3", "1", "proc:x", "1"}, "gc-ev-ox7e57t77drwu6iphld4bgguuq"},
+		{"my-city", "evproj", "gascity/event-projector/v1", []string{"my-city"}, "my-city-evproj-zrmdzquvb6wyt462o74fvejjda"},
+	}
+	for _, c := range cases {
+		got, err := PinnedID(c.prefix, c.family, c.tag, c.fields...)
+		if err != nil {
+			t.Fatalf("PinnedID(%q, %q, %q, %q): %v", c.prefix, c.family, c.tag, c.fields, err)
+		}
+		if got != c.want {
+			t.Errorf("PinnedID(%q, %q, %q, %q) = %s, want %s", c.prefix, c.family, c.tag, c.fields, got, c.want)
+		}
+	}
+}
+
+func TestPinnedIDRefuses(t *testing.T) {
+	cases := []struct{ name, prefix, family, tag string }{
+		{"empty prefix", "", "ev", "t"},
+		{"prefix trailing dash", "gc-", "ev", "t"},
+		{"prefix dot", "g.c", "ev", "t"},
+		{"empty family", "gc", "", "t"},
+		{"family with dash", "gc", "e-v", "t"},
+		{"family upper", "gc", "Ev", "t"},
+		{"family digit first", "gc", "1ev", "t"},
+		{"family too long", "gc", strings.Repeat("e", 17), "t"},
+		{"op family", "gc", "op", "t"},
+		{"fact family", "gc", "fact", "t"},
+		{"rt family", "gc", "rt", "t"},
+		{"empty tag", "gc", "ev", ""},
+	}
+	for _, c := range cases {
+		if _, err := PinnedID(c.prefix, c.family, c.tag, "f"); !errors.Is(err, ErrInvalidRequest) {
+			t.Errorf("%s: PinnedID = %v, want ErrInvalidRequest", c.name, err)
+		}
+	}
+}
