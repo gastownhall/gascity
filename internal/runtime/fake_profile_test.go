@@ -165,7 +165,8 @@ current-context: c
 // Kills a profile that drifts from its backend: one optional interface more
 // or fewer than the provider production builds, other capabilities, another
 // answer from a fixed trait (sleep capability, fresh reads, an identity
-// sidecar, a transport, an idle-proof budget, a turn-interrupt mode), or no
+// sidecar, a transport, an idle-proof budget, a turn-interrupt mode, input
+// fencing), or no
 // backend checked.
 func TestFakeProfilesMatchTheirBackends(t *testing.T) {
 	backends := productionBackends(t)
@@ -191,7 +192,7 @@ func TestFakeProfilesMatchTheirBackends(t *testing.T) {
 // traits are p's answers to the optional interfaces that report a backend's
 // fixed traits, "-" for one it does not implement.
 func traits(p runtime.Provider) string {
-	out := []string{"-", "-", "-", "-", "-", "-"}
+	out := []string{"-", "-", "-", "-", "-", "-", "-"}
 	if s, ok := p.(runtime.SleepCapabilityProvider); ok {
 		out[0] = string(s.SleepCapability("s"))
 	}
@@ -209,6 +210,9 @@ func traits(p runtime.Provider) string {
 	}
 	if f, ok := p.(runtime.TurnInterruptCapabilityProvider); ok {
 		out[5] = string(f.TurnInterruptMode("s"))
+	}
+	if f, ok := p.(runtime.FencedInputProvider); ok {
+		out[6] = string(f.InputFencing("s"))
 	}
 	return strings.Join(out, " ")
 }

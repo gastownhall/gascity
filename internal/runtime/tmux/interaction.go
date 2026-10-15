@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -883,7 +884,7 @@ func (t *Tmux) Respond(name string, response runtime.InteractionResponse) error 
 	// Exit copy-mode first if the pane is parked (the ga-c4w wheel binding),
 	// so the approval keystroke reaches the prompt instead of being swallowed
 	// by copy-mode.
-	t.cancelCopyModeIfParked(target)
+	t.cancelCopyModeIfParked(context.Background(), target)
 
 	// Send the keystroke once.
 	if _, err := t.run("send-keys", "-t", target, "-l", key); err != nil {

@@ -322,12 +322,18 @@ func (p *Provider) Stop(name string) error {
 // Interrupt sends Ctrl-C to the named tmux session.
 // Best-effort: returns nil if the session doesn't exist.
 func (p *Provider) Interrupt(name string) error {
+	return p.interrupt(context.Background(), name)
+}
+
+// interrupt is Interrupt under ctx. Inside a fenced operation a missing
+// session or server is reported (paneGuard.gone), never absorbed.
+func (p *Provider) interrupt(ctx context.Context, name string) error {
 	if p.tm.requiresHiddenAttachedInterrupt(name) && !p.tm.IsSessionAttached(name) {
 		if err := p.tm.ensureHiddenAttachedClient(name); err != nil {
 			return fmt.Errorf("preparing detached interrupt: %w", err)
 		}
 	}
-	if used, err := p.tm.sendHiddenAttachedKeys(name, "C-c"); used {
+	if used, err := p.tm.sendHiddenAttachedKeys(ctx, name, "C-c"); used {
 		if err != nil {
 			return err
 		}
@@ -337,12 +343,21 @@ func (p *Provider) Interrupt(name string) error {
 	// whatever a human is running in another window or split.
 	target, err := p.tm.agentPaneTarget(name)
 	if err == nil {
-		err = p.tm.SendKeysRaw(target, "C-c")
+		err = p.tm.sendKeysRawCtx(ctx, target, "C-c")
 	}
 	if err != nil && (errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer)) {
-		return nil
+		return absorbGone(ctx, err)
 	}
 	return err
+}
+
+// absorbGone is the best-effort answer to a session or server that is gone:
+// nil outside a fenced operation, and inside one what its guard reports.
+func absorbGone(ctx context.Context, err error) error {
+	if g := paneGuardFrom(ctx); g != nil {
+		return g.gone(err)
+	}
+	return nil
 }
 
 // IsRunning reports whether the named session has a live (non-dead) pane.
@@ -654,12 +669,17 @@ func (p *Provider) SnapshotIdle(name string) (bool, error) {
 // ClearInput empties a Claude Code session's input box, waiting up to
 // restoreWindow for Claude to restore an interrupted prompt into it. It
 // implements [runtime.InputClearProvider].
+//
+// Under a runtime input fence in ctx (runtime.WithInputFence) every key it
+// sends is fenced, and a missing session is reported instead of absorbed.
 func (p *Provider) ClearInput(ctx context.Context, name string, restoreWindow time.Duration) error {
-	err := p.tm.ClearInput(ctx, name, restoreWindow)
-	if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
-		return nil
-	}
-	return err
+	return p.fencedCtx(ctx, name, func(ctx context.Context) error {
+		err := p.tm.ClearInput(ctx, name, restoreWindow)
+		if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
+			return absorbGone(ctx, err)
+		}
+		return err
+	})
 }
 
 // WaitForInterruptBoundary waits for a provider-native interrupt acknowledgement
@@ -670,25 +690,33 @@ func (p *Provider) WaitForInterruptBoundary(ctx context.Context, name string, si
 
 // ResetInterruptedTurn discards the just-interrupted Gemini user turn without
 // restarting the session.
+//
+// Under a runtime input fence in ctx every key it sends is fenced.
 func (p *Provider) ResetInterruptedTurn(ctx context.Context, name string) error {
+	return p.fencedCtx(ctx, name, func(ctx context.Context) error {
+		return p.resetInterruptedTurn(ctx, name)
+	})
+}
+
+func (p *Provider) resetInterruptedTurn(ctx context.Context, name string) error {
 	if p.tm.requiresHiddenAttachedInterrupt(name) && !p.tm.IsSessionAttached(name) {
 		if err := p.tm.ensureHiddenAttachedClient(name); err != nil {
 			return fmt.Errorf("preparing detached gemini rewind: %w", err)
 		}
 	}
-	if err := p.NudgeNow(name, runtime.TextContent("/rewind")); err != nil {
+	if err := p.nudgeNow(ctx, name, runtime.TextContent("/rewind")); err != nil {
 		return fmt.Errorf("opening gemini rewind: %w", err)
 	}
 	if err := p.waitForPane(ctx, name, geminiRewindDialogVisible); err != nil {
 		return fmt.Errorf("waiting for gemini rewind picker: %w", err)
 	}
-	if err := p.SendKeys(name, "Up"); err != nil {
+	if err := p.sendKeys(ctx, name, "Up"); err != nil {
 		return fmt.Errorf("selecting interrupted gemini turn: %w", err)
 	}
 	if err := sleepWithContext(ctx, 100*time.Millisecond); err != nil {
 		return err
 	}
-	if err := p.SendKeys(name, "Enter"); err != nil {
+	if err := p.sendKeys(ctx, name, "Enter"); err != nil {
 		return fmt.Errorf("opening gemini rewind confirmation: %w", err)
 	}
 	if err := p.waitForPane(ctx, name, geminiRewindConfirmationVisible); err != nil {
@@ -699,14 +727,14 @@ func (p *Provider) ResetInterruptedTurn(ctx context.Context, name string) error 
 		return fmt.Errorf("capturing gemini rewind confirmation: %w", err)
 	}
 	if !strings.Contains(pane, "No code changes to revert.") {
-		if err := p.SendKeys(name, "Down"); err != nil {
+		if err := p.sendKeys(ctx, name, "Down"); err != nil {
 			return fmt.Errorf("choosing gemini rewind-only action: %w", err)
 		}
 		if err := sleepWithContext(ctx, 100*time.Millisecond); err != nil {
 			return err
 		}
 	}
-	if err := p.SendKeys(name, "Enter"); err != nil {
+	if err := p.sendKeys(ctx, name, "Enter"); err != nil {
 		return fmt.Errorf("confirming gemini rewind: %w", err)
 	}
 	if err := p.waitForPane(ctx, name, geminiRewindComplete); err != nil {
@@ -720,8 +748,11 @@ func (p *Provider) ResetInterruptedTurn(ctx context.Context, name string) error 
 
 // DismissKnownDialogs best-effort clears known trust/permissions dialogs on a
 // running session using a bounded timeout.
+// Under a runtime input fence in ctx every key it sends is fenced.
 func (p *Provider) DismissKnownDialogs(ctx context.Context, name string, timeout time.Duration) error {
-	return p.tm.DismissKnownDialogs(ctx, name, timeout)
+	return p.fencedCtx(ctx, name, func(ctx context.Context) error {
+		return p.tm.DismissKnownDialogs(ctx, name, timeout)
+	})
 }
 
 // Nudge sends a message to the named session to wake or redirect the agent.
@@ -732,6 +763,11 @@ func (p *Provider) DismissKnownDialogs(ctx context.Context, name string, timeout
 // multi-pane resolution, retry with backoff, and SIGWINCH wake.
 // Best-effort: returns nil if the session doesn't exist.
 func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
+	return p.nudge(context.Background(), name, content)
+}
+
+// nudge is Nudge under ctx, which bounds its idle wait.
+func (p *Provider) nudge(ctx context.Context, name string, content []runtime.ContentBlock) error {
 	// Wait for the agent to be idle before sending, unless disabled.
 	// This prevents interrupting active tool calls — the prompt is visible
 	// in scrollback during inter-tool-call gaps, so immediate send-keys
@@ -745,20 +781,26 @@ func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 		// Best-effort wait — if it fails (session gone, timeout), proceed
 		// with the nudge anyway. The message may arrive during active work,
 		// but Claude's cooperative queue will handle it at the next turn.
-		if err := p.tm.WaitForIdle(context.Background(), name, idleTimeout); err != nil {
+		if err := p.tm.WaitForIdle(ctx, name, idleTimeout); err != nil {
 			// Not idle within the window. A mid-session Codex/GPT model-switch
 			// modal ("approaching rate limits — switch model?") blocks input and
 			// would otherwise hang the session; dismiss it (keep current model,
 			// no downgrade) so the nudge can land. No-op if the modal is absent,
 			// so this never disturbs a genuinely busy pane.
-			p.tm.DismissModelSwitchModalIfPresent(name)
+			p.tm.dismissModelSwitchModalIfPresentCtx(ctx, name)
 		}
 	}
-	return p.NudgeNow(name, content)
+	return p.nudgeNow(ctx, name, content)
 }
 
 // NudgeNow sends a message immediately without performing a wait-idle check.
 func (p *Provider) NudgeNow(name string, content []runtime.ContentBlock) error {
+	return p.nudgeNow(context.Background(), name, content)
+}
+
+// nudgeNow is NudgeNow under ctx. Inside a fenced operation a missing
+// session or server is reported, never absorbed.
+func (p *Provider) nudgeNow(ctx context.Context, name string, content []runtime.ContentBlock) error {
 	var parts []string
 	for _, b := range content {
 		switch b.Type {
@@ -788,7 +830,7 @@ func (p *Provider) NudgeNow(name string, content []runtime.ContentBlock) error {
 	// highlighted option ("Yes") and digits would pick others (#2892).
 	if err := p.tm.checkNoApprovalPrompt(name); err != nil {
 		if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
-			return nil
+			return absorbGone(ctx, err)
 		}
 		if errors.Is(err, runtime.ErrPendingInteraction) {
 			return err
@@ -796,16 +838,16 @@ func (p *Provider) NudgeNow(name string, content []runtime.ContentBlock) error {
 		return fmt.Errorf("checking %q for a pending permission prompt before sending text: %w", name, err)
 	}
 
-	if used, err := p.tm.sendHiddenAttachedText(name, message); used {
+	if used, err := p.tm.sendHiddenAttachedText(ctx, name, message); used {
 		if err != nil {
 			return err
 		}
 		return nil
 	}
 
-	err := p.tm.NudgeSession(name, message)
+	err := p.tm.nudgeSessionCtx(ctx, name, message)
 	if err != nil && (errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer)) {
-		return nil
+		return absorbGone(ctx, err)
 	}
 	return err
 }
@@ -1169,7 +1211,13 @@ func sleepWithContext(ctx context.Context, d time.Duration) error {
 // as a separate tmux send-keys invocation (e.g., "Enter", "Down", "C-c").
 // Best-effort: returns nil if the session doesn't exist.
 func (p *Provider) SendKeys(name string, keys ...string) error {
-	if used, err := p.tm.sendHiddenAttachedKeys(name, keys...); used {
+	return p.sendKeys(context.Background(), name, keys...)
+}
+
+// sendKeys is SendKeys under ctx. Inside a fenced operation a missing
+// session or server is reported, never absorbed.
+func (p *Provider) sendKeys(ctx context.Context, name string, keys ...string) error {
+	if used, err := p.tm.sendHiddenAttachedKeys(ctx, name, keys...); used {
 		if err != nil {
 			return err
 		}
@@ -1178,15 +1226,15 @@ func (p *Provider) SendKeys(name string, keys ...string) error {
 	// Resolve the agent pane once, so every key lands in the same pane.
 	target, err := p.tm.agentPaneTarget(name)
 	if err != nil && (errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer)) {
-		return nil // best-effort
+		return absorbGone(ctx, err) // best-effort when unfenced
 	}
 	if err != nil {
 		return err
 	}
 	for _, k := range keys {
-		err := p.tm.SendKeysRaw(target, k)
+		err := p.tm.sendKeysRawCtx(ctx, target, k)
 		if err != nil && (errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer)) {
-			return nil // best-effort
+			return absorbGone(ctx, err) // best-effort when unfenced
 		}
 		if err != nil {
 			return err
@@ -1395,7 +1443,13 @@ func (o *tmuxStartOps) respawnAgent(name, workDir, command string, env map[strin
 	// A warm box created before the agent-pane marker (or whose mark failed)
 	// is marked here while it still has only the agent's pane.
 	o.tm.adoptAgentPane(name)
-	return o.tm.RespawnPaneWithWorkDir(name, workDir, command)
+	if err := o.tm.RespawnPaneWithWorkDir(name, workDir, command); err != nil {
+		return err
+	}
+	// The respawned process inherits the session environment's identity;
+	// the pane's fence names it (best-effort, see republishInputFence).
+	o.tm.republishInputFence(name)
+	return nil
 }
 
 func (o *tmuxStartOps) isSessionRunning(name string) bool {

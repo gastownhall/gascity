@@ -148,3 +148,32 @@ func TestFakeFenceRefusesEveryMiss(t *testing.T) {
 		}
 	}
 }
+
+// maxUnfencedBackends bounds the production backends that cannot fence
+// session input. Lower it as backends gain a fence (OJ-12a2: acp,
+// subprocess, t3bridge); never raise it.
+const maxUnfencedBackends = 7
+
+// Kills a backend that loses its input fence, and a new backend that ships
+// without one: tmux fences atomically, every other production backend
+// reports none (the conformance cases skip it), and the set of those only
+// shrinks.
+func TestInputFencingByProductionBackend(t *testing.T) {
+	unfenced := 0
+	for p, backend := range productionBackends(t) {
+		got := runtime.InputFencingFor(backend, "s")
+		want := runtime.InputFencingNone
+		if p == runtime.ProfileTmux {
+			want = runtime.InputFencingAtomic
+		}
+		if got != want {
+			t.Errorf("%s fences input %q, want %q", p, got, want)
+		}
+		if got == runtime.InputFencingNone {
+			unfenced++
+		}
+	}
+	if unfenced > maxUnfencedBackends {
+		t.Errorf("%d production backends cannot fence input, more than the ratchet's %d", unfenced, maxUnfencedBackends)
+	}
+}
