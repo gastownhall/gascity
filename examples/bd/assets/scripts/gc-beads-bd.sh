@@ -4398,7 +4398,24 @@ else
         tail -n 1000 "$LOG_FILE" 2>/dev/null \
             | grep -qE 'no space left on device|copy_file_range:.*no space|ENOSPC' \
             || return 1
+        enospc_disk_has_headroom && return 1
         return 0
+    }
+
+    enospc_disk_has_headroom() {
+        enospc_dir="${DATA_DIR:-}"
+        if [ -z "$enospc_dir" ] || [ ! -d "$enospc_dir" ]; then
+            enospc_dir=$(dirname "$LOG_FILE")
+        fi
+        enospc_floor="${GC_DOLT_WARN_FREE_BYTES:-2147483648}"
+        case "$enospc_floor" in
+            ''|*[!0-9]*) enospc_floor=2147483648 ;;
+        esac
+        enospc_avail_kb=$(df -Pk "$enospc_dir" 2>/dev/null | awk 'NR == 2 { print $4 }')
+        case "$enospc_avail_kb" in
+            ''|*[!0-9]*) return 1 ;;
+        esac
+        [ "$enospc_avail_kb" -ge $((enospc_floor / 1024)) ]
     }
 fi
 
@@ -4415,7 +4432,8 @@ op_recover() {
     # itself amplifies the failure: each restart triggers a conjoin/backup
     # sync that writes another partial table file to the backup remote.
     # Require manual intervention (free disk space) before recovery
-    # resumes. See gastownhall/gascity#2158.
+    # resumes; the skip lifts once the data dir is back above the free-space
+    # floor (see dolt-enospc.sh). See gastownhall/gascity#2158.
     if recovery_should_skip_due_to_enospc; then
         echo "skipping dolt recovery: recent dolt log shows ENOSPC — manual intervention required" >&2
         echo "  free disk space, then re-run health checks" >&2
