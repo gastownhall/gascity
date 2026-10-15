@@ -17,9 +17,9 @@ var crossRigDepsEnvKeys = map[string]struct{}{
 	"GC_BD_TRACE_JSON":   {},
 }
 
-func runCrossRigDeps(t *testing.T, binDir string, extraEnv ...string) (string, error) {
+func runCrossRigDeps(t *testing.T, binDir string) (string, error) {
 	t.Helper()
-	return runPackScript(t, crossRigDepsScriptPath, binDir, crossRigDepsEnvKeys, extraEnv)
+	return runPackScript(t, crossRigDepsScriptPath, binDir, crossRigDepsEnvKeys, nil)
 }
 
 // TestCrossRigDepsUsesQueryNotClosedAfter pins the HTTP-store fix: the script
