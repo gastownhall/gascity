@@ -9,6 +9,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -51,31 +52,62 @@ func startRawCat(t *testing.T, p *Provider, name string, f runtime.InputFence, e
 		t.Fatalf("Start %s: %v", name, err)
 	}
 	t.Cleanup(func() { _ = p.Stop(name) })
-	waitPaneCommand(t, p, name, "cat")
+	waitCaptureFile(t, file)
 	return file
 }
 
-func waitPaneCommand(t *testing.T, p *Provider, name, cmd string) {
+// eventually polls cond until it holds, failing after 10s: each wait ends on
+// the signal the test is about, not on elapsed time.
+func eventually(t *testing.T, what string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if got, err := p.tm.GetPaneCommand(name); err == nil && got == cmd {
-			time.Sleep(100 * time.Millisecond) // stty has run before exec
-			return
+	tick := time.NewTicker(25 * time.Millisecond)
+	defer tick.Stop()
+	deadline := time.After(10 * time.Second)
+	for !cond() {
+		select {
+		case <-tick.C:
+		case <-deadline:
+			t.Fatalf("timed out waiting for %s", what)
 		}
-		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatalf("pane %s never ran %s", name, cmd)
 }
 
-func readTyped(t *testing.T, file string) string {
+// waitCaptureFile waits for rawCatCommand's shell to open file: stty has
+// run, and cat reads the raw tty from here on.
+func waitCaptureFile(t *testing.T, file string) {
 	t.Helper()
-	time.Sleep(300 * time.Millisecond)
-	data, err := os.ReadFile(file)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		t.Fatal(err)
-	}
+	eventually(t, "the pane to open "+file, func() bool {
+		_, err := os.Stat(file)
+		return err == nil
+	})
+}
+
+func typedSoFar(file string) string {
+	data, _ := os.ReadFile(file)
 	return string(data)
+}
+
+// waitTyped waits until file's typed bytes satisfy cond and returns them.
+func waitTyped(t *testing.T, file string, cond func(string) bool) string {
+	t.Helper()
+	tick := time.NewTicker(25 * time.Millisecond)
+	defer tick.Stop()
+	deadline := time.After(10 * time.Second)
+	for {
+		got := typedSoFar(file)
+		if cond(got) {
+			return got
+		}
+		select {
+		case <-tick.C:
+		case <-deadline:
+			t.Fatalf("typed into %s: %q, never what the test waits for", file, got)
+		}
+	}
+}
+
+func containsFn(want string) func(string) bool {
+	return func(got string) bool { return strings.Contains(got, want) }
 }
 
 func listBuffers(t *testing.T, p *Provider) string {
@@ -110,17 +142,15 @@ func TestFencedNudgeRealTmuxRespawnBetweenTakeAndDelivery(t *testing.T) {
 	if !errors.As(err, &miss) || miss.Found != fb.Digest() || miss.Partial {
 		t.Fatalf("NudgeFenced(A's fence) = %v, want a non-partial miss finding B", err)
 	}
-	if got := readTyped(t, fileB); got != "" {
-		t.Fatalf("B received %q under A's fence", got)
-	}
 	if b := listBuffers(t, p); b != "" {
 		t.Fatalf("buffers left: %q", b)
 	}
 	if err := p.NudgeFenced(context.Background(), name, runtime.TextContent("for-b"), immediate(fb)); err != nil {
 		t.Fatalf("NudgeFenced(B's fence) = %v", err)
 	}
-	if got := readTyped(t, fileB); !strings.Contains(got, "for-b\r") {
-		t.Fatalf("B received %q, want for-b and its submit", got)
+	// B's own delivery is the signal that anything sent before it has landed.
+	if got := waitTyped(t, fileB, containsFn("for-b\r")); strings.Contains(got, "for-a") {
+		t.Fatalf("B received %q: A's fenced nudge reached it", got)
 	}
 }
 
@@ -136,13 +166,11 @@ func TestFencedNudgeRealTmuxSameIdentityRelaunchDelivers(t *testing.T) {
 	if err := p.Relaunch(context.Background(), name, runtime.Config{Command: rawCatCommand(file), WorkDir: dir}); err != nil {
 		t.Fatalf("Relaunch: %v", err)
 	}
-	waitPaneCommand(t, p, name, "cat")
+	waitCaptureFile(t, file)
 	if err := p.NudgeFenced(context.Background(), name, runtime.TextContent("after-relaunch"), immediate(f)); err != nil {
 		t.Fatalf("NudgeFenced after a same-identity relaunch = %v", err)
 	}
-	if got := readTyped(t, file); !strings.Contains(got, "after-relaunch\r") {
-		t.Fatalf("relaunched process received %q", got)
-	}
+	waitTyped(t, file, containsFn("after-relaunch\r"))
 }
 
 // A pane without its own fence (an older gc, a failed publish) is adopted
@@ -162,9 +190,7 @@ func TestFencedNudgeRealTmuxAdoptsUnfencedPane(t *testing.T) {
 	if err := p.NudgeFenced(context.Background(), name, runtime.TextContent("adopted"), immediate(f)); err != nil {
 		t.Fatalf("NudgeFenced into an unfenced pane = %v", err)
 	}
-	if got := readTyped(t, file); !strings.Contains(got, "adopted\r") {
-		t.Fatalf("pane received %q", got)
-	}
+	waitTyped(t, file, containsFn("adopted\r"))
 	out, err := p.tm.run("display-message", "-p", "-t", target, fenceReadFormat)
 	if err != nil {
 		t.Fatal(err)
@@ -189,9 +215,7 @@ func TestFencedNudgeRealTmuxTextIsByteExact(t *testing.T) {
 		if err := p.NudgeFenced(context.Background(), name, runtime.TextContent(text), immediate(f)); err != nil {
 			t.Fatalf("NudgeFenced(%q) = %v", text, err)
 		}
-		if got := readTyped(t, file); !strings.HasSuffix(got, text+"\r") {
-			t.Fatalf("typed %q, want it to end with %q", got, text+"\r")
-		}
+		waitTyped(t, file, func(got string) bool { return strings.HasSuffix(got, text+"\r") })
 	}
 	// E5: the unfenced path loses a trailing ";" today.
 	name := "gc-fence-exact-unfenced"
@@ -199,7 +223,7 @@ func TestFencedNudgeRealTmuxTextIsByteExact(t *testing.T) {
 	if err := p.NudgeNow(name, runtime.TextContent("x;")); err != nil {
 		t.Fatal(err)
 	}
-	if got := readTyped(t, file); strings.HasSuffix(got, "x;\r") {
+	if got := waitTyped(t, file, containsFn("\r")); strings.HasSuffix(got, "x;\r") {
 		t.Logf("unfenced send-keys -l kept the trailing ';' (%q): E5 is fixed, update this test", got)
 	}
 }
@@ -217,13 +241,10 @@ func TestFencedInputRealTmuxDeadPaneMisses(t *testing.T) {
 	if err := p.tm.SetRemainOnExit(name, true); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	for dead, _ := p.tm.IsPaneDead(name); !dead; dead, _ = p.tm.IsPaneDead(name) {
-		if time.Now().After(deadline) {
-			t.Fatal("pane never died")
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+	eventually(t, "the pane to die", func() bool {
+		dead, _ := p.tm.IsPaneDead(name)
+		return dead
+	})
 	for op, err := range map[string]error{
 		"nudge":     p.NudgeFenced(context.Background(), name, runtime.TextContent("x"), immediate(f)),
 		"keys":      p.SendKeysFenced(context.Background(), name, f, "Enter"),
@@ -249,14 +270,12 @@ func TestFencedSendKeysAndInterruptRealTmuxMismatch(t *testing.T) {
 	if err := p.InterruptFenced(context.Background(), name, other); !errors.Is(err, runtime.ErrFenceMismatch) {
 		t.Fatalf("InterruptFenced(other) = %v", err)
 	}
-	if got := readTyped(t, file); got != "" {
-		t.Fatalf("pane received %q under another fence", got)
-	}
 	if err := p.SendKeysFenced(context.Background(), name, f, "Enter"); err != nil {
 		t.Fatalf("SendKeysFenced(own) = %v", err)
 	}
-	if got := readTyped(t, file); got != "\r" {
-		t.Fatalf("pane received %q, want one Enter", got)
+	// The own-fence Enter is the signal; anything before it was misfenced.
+	if got := waitTyped(t, file, containsFn("\r")); got != "\r" {
+		t.Fatalf("pane received %q, want only the own-fence Enter", got)
 	}
 }
 
@@ -304,7 +323,7 @@ func TestFencedNudgeParityRealTmux(t *testing.T) {
 		t.Skip("tmux not installed")
 	}
 	f := runtime.InputFence{Generation: 1, Epoch: 1, Token: "token-parity"}
-	start := func(t *testing.T, tm *Tmux, name, command string, env map[string]string) {
+	start := func(t *testing.T, tm *Tmux, name, command, process string, env map[string]string) {
 		t.Helper()
 		maps.Copy(env, fenceEnv(f))
 		_ = tm.KillSession(name)
@@ -312,25 +331,35 @@ func TestFencedNudgeParityRealTmux(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = tm.KillSession(name) })
-		time.Sleep(300 * time.Millisecond)
+		eventually(t, name+" to run "+process, func() bool {
+			cmd, err := tm.GetPaneCommand(name)
+			return err == nil && cmd == process
+		})
+	}
+	captureHas := func(tm *Tmux, name string, cond func(string) bool) func() bool {
+		return func() bool {
+			out, err := tm.CapturePaneAll(name)
+			return err == nil && cond(out)
+		}
 	}
 	ctx := context.Background()
 
 	t.Run("clear before paste", func(t *testing.T) {
 		tm := testTmux()
 		name := fmt.Sprintf("gt-fence-clear-%d", time.Now().UnixNano()%100000)
-		start(t, tm, name, "cat -v", map[string]string{"GC_PROVIDER": "opencode"})
+		start(t, tm, name, "cat -v", "cat", map[string]string{"GC_PROVIDER": "opencode"})
 		if _, err := tm.run("send-keys", "-t", name, "-l", "leftover-draft"); err != nil {
 			t.Fatal(err)
 		}
-		time.Sleep(200 * time.Millisecond)
+		eventually(t, "the leftover draft", captureHas(tm, name, containsFn("leftover-draft")))
 		if err := fencedTmuxProvider(tm).NudgeFenced(ctx, name, runtime.TextContent("fresh-message"), immediate(f)); err != nil {
 			t.Fatal(err)
 		}
-		time.Sleep(300 * time.Millisecond)
-		out, _ := tm.CapturePaneAll(name)
-		if strings.Contains(out, "leftover-draftfresh-message") || !strings.Contains(out, "\nfresh-message") {
-			t.Fatalf("pane:\n%s", out)
+		eventually(t, "the submitted message", captureHas(tm, name, func(out string) bool {
+			return slices.ContainsFunc(strings.Split(out, "\n"), func(l string) bool { return strings.TrimSpace(l) == "fresh-message" })
+		}))
+		if out, _ := tm.CapturePaneAll(name); strings.Contains(out, "leftover-draftfresh-message") {
+			t.Fatalf("pending input was not cleared before the paste:\n%s", out)
 		}
 	})
 
@@ -339,7 +368,7 @@ func TestFencedNudgeParityRealTmux(t *testing.T) {
 		dir := t.TempDir()
 		fake := buildBusyOnEnterBinary(t, dir, "fakeclaude")
 		name := fmt.Sprintf("gt-fence-confirm-%d", time.Now().UnixNano()%100000)
-		start(t, tm, name, fake, map[string]string{"GC_PROVIDER": "claude", "GC_TEST_BUSY_AFTER": "1"})
+		start(t, tm, name, fake, "fakeclaude", map[string]string{"GC_PROVIDER": "claude", "GC_TEST_BUSY_AFTER": "1"})
 		if err := fencedTmuxProvider(tm).NudgeFenced(ctx, name, runtime.TextContent("hello-confirm"), immediate(f)); err != nil {
 			t.Fatal(err)
 		}
@@ -354,7 +383,7 @@ func TestFencedNudgeParityRealTmux(t *testing.T) {
 		dir := t.TempDir()
 		fake := buildBusyOnEnterBinary(t, dir, "fakeclaude")
 		name := fmt.Sprintf("gt-fence-reenter-%d", time.Now().UnixNano()%100000)
-		start(t, tm, name, fake, map[string]string{"GC_PROVIDER": "claude", "GC_TEST_BUSY_AFTER": "2"})
+		start(t, tm, name, fake, "fakeclaude", map[string]string{"GC_PROVIDER": "claude", "GC_TEST_BUSY_AFTER": "2"})
 		if err := fencedTmuxProvider(tm).NudgeFenced(ctx, name, runtime.TextContent("hello-reenter"), immediate(f)); err != nil {
 			t.Fatal(err)
 		}
@@ -369,7 +398,7 @@ func TestFencedNudgeParityRealTmux(t *testing.T) {
 		dir := t.TempDir()
 		fake := buildBusyOnEnterBinary(t, dir, "fakeclaude-neverbusy")
 		name := fmt.Sprintf("gt-fence-unconfirmed-%d", time.Now().UnixNano()%100000)
-		start(t, tm, name, fake, map[string]string{"GC_PROVIDER": "claude", "GC_TEST_BUSY_AFTER": "100"})
+		start(t, tm, name, fake, "fakeclaude-neverbusy", map[string]string{"GC_PROVIDER": "claude", "GC_TEST_BUSY_AFTER": "100"})
 		err := fencedTmuxProvider(tm).NudgeFenced(ctx, name, runtime.TextContent("hello-unconfirmed"), immediate(f))
 		if !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
 			t.Fatalf("err = %v, want ErrNudgeSubmitUnconfirmed", err)
@@ -385,13 +414,10 @@ func TestFencedNudgeParityRealTmux(t *testing.T) {
 		defer func() { providersSkippingEscapeBeforeEnter = origSkip }()
 		tm := testTmux()
 		name := fmt.Sprintf("gt-fence-testfam-%d", time.Now().UnixNano()%10000)
-		start(t, tm, name, "cat -v", map[string]string{"GC_PROVIDER": "testfam"})
+		start(t, tm, name, "cat -v", "cat", map[string]string{"GC_PROVIDER": "testfam"})
 		if err := fencedTmuxProvider(tm).NudgeFenced(ctx, name, runtime.TextContent("hello"), immediate(f)); err != nil {
 			t.Fatal(err)
 		}
-		time.Sleep(300 * time.Millisecond)
-		if out, _ := tm.CapturePaneAll(name); !strings.Contains(out, "^[") {
-			t.Fatalf("pane missing the declared Escape:\n%s", out)
-		}
+		eventually(t, "the declared Escape", captureHas(tm, name, containsFn("^[")))
 	})
 }
