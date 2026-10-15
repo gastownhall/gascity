@@ -437,8 +437,15 @@ is_known_agent() {
 # not answer. Identities are asked in sorted order rotated by the clock, so a
 # backlog of foreign identities cannot starve the same local dead claim of a
 # gate answer on every sweep.
+#
+# The budget is a whole number of seconds that bash arithmetic can hold, read
+# in base 10: bash reads a leading zero as octal and rejects "08" outright,
+# which would leave the sweep no deadline at all. Anything else gets the
+# default, never no budget.
 GATE_BUDGET_SECONDS="${GC_ORPHAN_SWEEP_GATE_BUDGET_SECONDS:-120}"
 case "$GATE_BUDGET_SECONDS" in '' | *[!0-9]*) GATE_BUDGET_SECONDS=120 ;; esac
+[ "${#GATE_BUDGET_SECONDS}" -le 18 ] || GATE_BUDGET_SECONDS=120
+GATE_BUDGET_SECONDS=$((10#$GATE_BUDGET_SECONDS))
 GATE_DEADLINE=""
 GATE_BUDGET_SKIPPED=0
 GATE_LOCAL=""

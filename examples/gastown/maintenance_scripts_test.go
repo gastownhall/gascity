@@ -12536,15 +12536,42 @@ func TestOrphanSweepStopsAskingTheGateOnceTheBudgetRunsOut(t *testing.T) {
 }
 
 // TestOrphanSweepIgnoresAMalformedGateBudget falls back to the default budget
-// for a value that is not a whole number of seconds, rather than to no gate.
+// for a value that is not a whole number of seconds, or is too long for bash
+// arithmetic to hold, rather than to no gate or to a deadline that wrapped
+// into the past before the first claimant was asked.
 func TestOrphanSweepIgnoresAMalformedGateBudget(t *testing.T) {
+	for _, budget := range []string{"-5s", "9223372036854775808"} {
+		t.Run(budget, func(t *testing.T) {
+			run := runOrphanSweepGateFixture(t, nil,
+				[]orphanSweepGateRow{inProgress("sh-local-dead", "gastown__polecat-gc-d34d1")},
+				nil, nil, map[string]string{"GC_ORPHAN_SWEEP_GATE_BUDGET_SECONDS": budget})
+			if run.err != nil {
+				t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+			}
+			if !run.released("sh-local-dead") {
+				t.Fatalf("dead local claim was not released under the default budget\n%s", run.context())
+			}
+		})
+	}
+}
+
+// TestOrphanSweepReadsAZeroPaddedGateBudgetInBaseTen keeps a zero-padded
+// budget a number of seconds. Bash arithmetic reads a leading zero as octal
+// and rejects "08" outright; the failed deadline then disabled the budget for
+// the whole sweep, so every claimant was asked however long the gate took.
+func TestOrphanSweepReadsAZeroPaddedGateBudgetInBaseTen(t *testing.T) {
 	run := runOrphanSweepGateFixture(t, nil,
 		[]orphanSweepGateRow{inProgress("sh-local-dead", "gastown__polecat-gc-d34d1")},
-		nil, nil, map[string]string{"GC_ORPHAN_SWEEP_GATE_BUDGET_SECONDS": "-5s"})
+		nil, nil, map[string]string{"GC_ORPHAN_SWEEP_GATE_BUDGET_SECONDS": "08"})
 	if run.err != nil {
 		t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
 	}
+	for _, symptom := range []string{"value too great for base", "integer expression expected"} {
+		if strings.Contains(run.out, symptom) {
+			t.Fatalf("a zero-padded budget broke the deadline arithmetic (%q):\n%s", symptom, run.out)
+		}
+	}
 	if !run.released("sh-local-dead") {
-		t.Fatalf("dead local claim was not released under the default budget\n%s", run.context())
+		t.Fatalf("dead local claim was not released under an 8s budget\n%s", run.context())
 	}
 }
