@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/git"
@@ -96,17 +97,21 @@ func addGoCommentsFiltered(r *jsonschema.Reflector, module, root string) error {
 	return nil
 }
 
-// newReflector creates a jsonschema.Reflector configured for TOML field
-// names with Go doc comments extracted from the source tree.
-//
-// AddGoComments requires CWD to be set to the module root so that
-// filepath.Walk produces paths like "internal/config" which map to the
-// correct import paths. Hidden directories (names beginning with ".") are
-// excluded via addGoCommentsFiltered.
-func newReflector() (*jsonschema.Reflector, error) {
-	root, err := ModuleRoot()
-	if err != nil {
-		return nil, err
+var (
+	cachedCommentMapMu   sync.Mutex
+	cachedCommentMap     map[string]string
+	cachedCommentMapRoot string
+)
+
+func loadCachedCommentMap(root string) (map[string]string, error) {
+	cachedCommentMapMu.Lock()
+	defer cachedCommentMapMu.Unlock()
+	if cachedCommentMap != nil && cachedCommentMapRoot == root {
+		res := make(map[string]string, len(cachedCommentMap))
+		for k, v := range cachedCommentMap {
+			res[k] = v
+		}
+		return res, nil
 	}
 
 	// Save and restore CWD — AddGoComments needs CWD at module root.
@@ -125,7 +130,35 @@ func newReflector() (*jsonschema.Reflector, error) {
 	if err := addGoCommentsFiltered(r, "github.com/gastownhall/gascity", "."); err != nil {
 		return nil, fmt.Errorf("extracting Go comments: %w", err)
 	}
-	return r, nil
+	cachedCommentMap = r.CommentMap
+	cachedCommentMapRoot = root
+	res := make(map[string]string, len(cachedCommentMap))
+	for k, v := range cachedCommentMap {
+		res[k] = v
+	}
+	return res, nil
+}
+
+// newReflector creates a jsonschema.Reflector configured for TOML field
+// names with Go doc comments extracted from the source tree.
+//
+// AddGoComments requires CWD to be set to the module root so that
+// filepath.Walk produces paths like "internal/config" which map to the
+// correct import paths. Hidden directories (names beginning with ".") are
+// excluded via addGoCommentsFiltered.
+func newReflector() (*jsonschema.Reflector, error) {
+	root, err := ModuleRoot()
+	if err != nil {
+		return nil, err
+	}
+	cm, err := loadCachedCommentMap(root)
+	if err != nil {
+		return nil, err
+	}
+	return &jsonschema.Reflector{
+		FieldNameTag: "toml",
+		CommentMap:   cm,
+	}, nil
 }
 
 // GenerateCitySchema produces a JSON Schema for the city.toml config format.

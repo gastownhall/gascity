@@ -999,6 +999,7 @@ func TestSessionHandleNudgeWaitIdleLiveOnlyDoesNotResumeStoppedSession(t *testin
 }
 
 func TestSessionHandlePendingRespondAndBlockedState(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	handle, _, sp, mgr := newTestSessionHandle(t, SessionSpec{
 		Profile:  ProfileCodexTmuxCLI,
 		Template: "probe",
@@ -2639,7 +2640,10 @@ func newTestSessionHandleWithRecorder(t *testing.T, spec SessionSpec, recorder e
 
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()))
+	manager := sessionpkg.NewManagerWithOptions(store, sp,
+		sessionpkg.WithCityPath(t.TempDir()),
+		sessionpkg.WithStaleKeyDetectionWaiter(func(context.Context, string) error { return nil }),
+	)
 	handle, err := NewSessionHandle(SessionHandleConfig{
 		Manager:  manager,
 		Recorder: recorder,

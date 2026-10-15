@@ -212,8 +212,8 @@ func startDistinctLiveProcess(t *testing.T, pid int) int {
 		}
 		t.Cleanup(func() {
 			_ = cmd.Process.Kill()
-			_ = cmd.Wait()
 		})
+		go func() { _ = cmd.Wait() }()
 		started, err := pidutil.StartTime(cmd.Process.Pid)
 		if err != nil || started == "" {
 			t.Fatalf("start time of stand-in pid %d: %q, %v", cmd.Process.Pid, started, err)

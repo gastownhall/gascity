@@ -131,6 +131,7 @@ func TestLogFileWatcherPollsWhileFsnotifyActive(t *testing.T) {
 			return false
 		},
 		func() {},
+		RunOpts{PollInterval: 50 * time.Millisecond},
 	)
 
 	select {
@@ -141,7 +142,7 @@ func TestLogFileWatcherPollsWhileFsnotifyActive(t *testing.T) {
 
 	select {
 	case <-emits:
-	case <-time.After(outputStreamPollInterval + time.Second):
+	case <-time.After(500 * time.Millisecond):
 		t.Fatal("active fsnotify watcher did not perform backup polling")
 	}
 }

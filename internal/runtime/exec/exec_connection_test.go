@@ -73,7 +73,7 @@ func TestProviderExec_UnimplementedReturnsErrExecUnsupported(t *testing.T) {
 func TestProviderExec_TimeoutIsTransportError(t *testing.T) {
 	// A command killed by the op timeout must surface as an error, not a
 	// silent (output, -1) "command result". Guards the cmdCtx.Err() branch.
-	p := NewProvider(writeExecOpScript(t, `  exec) sleep 5 ;;`))
+	p := NewProvider(writeExecOpScript(t, `  exec) exec sleep 5 ;;`))
 	p.timeout = 50 * time.Millisecond
 	_, _, err := p.Exec(context.Background(), "s", []string{"true"})
 	if err == nil {

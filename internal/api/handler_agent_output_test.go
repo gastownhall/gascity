@@ -390,11 +390,11 @@ func TestAgentOutputStreamSSEHeaders(t *testing.T) {
 	srv := newServerWithSearchPaths(state, searchBase)
 	h := newTestCityHandlerWith(t, state, srv)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	req := httptest.NewRequest("GET", cityURL(state, "/agent/myrig/worker/output/stream"), nil).WithContext(ctx)
-	rec := httptest.NewRecorder()
+	rec := newSyncResponseRecorder()
 
 	done := make(chan struct{})
 	go func() {
@@ -402,13 +402,14 @@ func TestAgentOutputStreamSSEHeaders(t *testing.T) {
 		close(done)
 	}()
 
+	body := waitForRecorderSubstring(t, rec, "hello", 2*time.Second)
+	cancel()
 	<-done
 
 	if ct := rec.Header().Get("Content-Type"); ct != "text/event-stream" {
 		t.Errorf("Content-Type = %q, want %q", ct, "text/event-stream")
 	}
 
-	body := rec.Body.String()
 	if !strings.Contains(body, "event: turn") {
 		t.Errorf("body should contain SSE turn event, got: %s", body)
 	}
@@ -520,27 +521,30 @@ func TestAgentOutputStreamStoppedAgent(t *testing.T) {
 	srv := newServerWithSearchPaths(state, searchBase)
 	h := newTestCityHandlerWith(t, state, srv)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	req := httptest.NewRequest("GET", cityURL(state, "/agent/myrig/worker/output/stream"), nil).WithContext(ctx)
-	rec := httptest.NewRecorder()
+	rec := newSyncResponseRecorder()
 
 	done := make(chan struct{})
 	go func() {
 		h.ServeHTTP(rec, req)
 		close(done)
 	}()
+
+	body := waitForRecorderSubstring(t, rec, "hello", 2*time.Second)
+	cancel()
 	<-done
 
 	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, body)
 	}
 	if got := rec.Result().Header.Get("GC-Agent-Status"); got != "stopped" {
 		t.Errorf("committed GC-Agent-Status = %q, want %q", got, "stopped")
 	}
-	if !strings.Contains(rec.Body.String(), "hello") {
-		t.Errorf("body should contain session data, got: %s", rec.Body.String())
+	if !strings.Contains(body, "hello") {
+		t.Errorf("body should contain session data, got: %s", body)
 	}
 }
 

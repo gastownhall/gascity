@@ -91,9 +91,14 @@ func (c *historyProtectionCity) tag() string {
 
 func (c *historyProtectionCity) addCommits(from, n int) {
 	c.t.Helper()
-	for i := from; i < from+n; i++ {
-		c.sql(fmt.Sprintf("INSERT INTO beads VALUES (%d, 'c%d'); CALL DOLT_COMMIT('-Am', 'city commit %d');", i, i, i))
+	if n <= 0 {
+		return
 	}
+	var sb strings.Builder
+	for i := from; i < from+n; i++ {
+		fmt.Fprintf(&sb, "INSERT INTO beads VALUES (%d, 'c%d'); CALL DOLT_COMMIT('-Am', 'city commit %d'); ", i, i, i)
+	}
+	c.sql(sb.String())
 }
 
 func (c *historyProtectionCity) compactCommand(extraEnv ...string) (string, error) {
@@ -133,16 +138,16 @@ func seedTeamHistoryWithDates(t *testing.T, doltPath, dir string, n int, dates m
 		t.Fatalf("mkdir %s: %v", dir, err)
 	}
 	runDoltForCompactTest(t, doltPath, dir, "init", "--name", "Team", "--email", "team@example.com")
-	runDoltForCompactTest(t, doltPath, dir, "sql", "-q", "CREATE TABLE beads (id int primary key, name varchar(20));")
-	runDoltForCompactTest(t, doltPath, dir, "commit", "-Am", "schema")
+	var sb strings.Builder
+	sb.WriteString("CREATE TABLE beads (id int primary key, name varchar(20)); CALL DOLT_COMMIT('-Am', 'schema'); ")
 	for i := 1; i <= n; i++ {
-		runDoltForCompactTest(t, doltPath, dir, "sql", "-q", fmt.Sprintf("INSERT INTO beads VALUES (%d, 'b%d');", i, i))
-		args := []string{"commit", "-Am", fmt.Sprintf("team commit %d", i)}
 		if date, ok := dates[i]; ok {
-			args = append(args, "--date", date)
+			fmt.Fprintf(&sb, "INSERT INTO beads VALUES (%d, 'b%d'); CALL DOLT_COMMIT('-Am', 'team commit %d', '--date', %q); ", i, i, i, date)
+		} else {
+			fmt.Fprintf(&sb, "INSERT INTO beads VALUES (%d, 'b%d'); CALL DOLT_COMMIT('-Am', 'team commit %d'); ", i, i, i)
 		}
-		runDoltForCompactTest(t, doltPath, dir, args...)
 	}
+	runDoltForCompactTest(t, doltPath, dir, "sql", "-q", sb.String())
 }
 
 func doltLogCount(t *testing.T, doltPath, dir string) int {

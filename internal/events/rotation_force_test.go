@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -156,13 +157,30 @@ func TestForceRotateConcurrentWithRecord(t *testing.T) {
 			defer wg.Done()
 			for i := 0; i < perWriter; i++ {
 				rec.Record(Event{Type: BeadCreated, Actor: "human"})
+				runtime.Gosched()
 			}
 		}()
 	}
 
+	writersDone := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(writersDone)
+	}()
+
 	rotated := 0
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for {
+		select {
+		case <-writersDone:
+			if rotated > 0 {
+				goto done
+			}
+		default:
+		}
+		if time.Now().After(deadline) {
+			break
+		}
 		res, err := rec.ForceRotate()
 		if err != nil {
 			t.Errorf("ForceRotate: %v", err)
@@ -174,8 +192,10 @@ func TestForceRotateConcurrentWithRecord(t *testing.T) {
 				<-res.Done
 			}
 		}
+		runtime.Gosched()
 	}
-	wg.Wait()
+done:
+	<-writersDone
 
 	res, err := rec.ForceRotate()
 	if err != nil {

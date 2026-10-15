@@ -1055,6 +1055,7 @@ func TestFindSessionFile(t *testing.T) {
 }
 
 func TestFindSessionFileNotFound(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	got := FindSessionFile([]string{t.TempDir()}, "/nonexistent/path")
 	if got != "" {
 		t.Errorf("got %q, want empty string", got)
@@ -2215,6 +2216,7 @@ func TestCodexSessionCWD(t *testing.T) {
 }
 
 func TestFindSessionFileFallsBackToCodex(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	// No slug-based files exist and no Codex roots match, so resolution should
 	// return empty.
 	got := FindSessionFile([]string{t.TempDir()}, "/nonexistent/codex/project")
@@ -2224,6 +2226,7 @@ func TestFindSessionFileFallsBackToCodex(t *testing.T) {
 }
 
 func TestFindSessionFileFallsBackToPi(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	base := t.TempDir()
 	workDir := filepath.Join(t.TempDir(), "pi-project")
 	want := filepath.Join(base, "session.jsonl")

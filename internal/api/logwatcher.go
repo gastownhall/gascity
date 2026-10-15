@@ -121,6 +121,8 @@ type RunOpts struct {
 	// Used to fold external signals like worker operation events into the same
 	// stream loop without adding another ticker.
 	Wake <-chan struct{}
+	// PollInterval overrides outputStreamPollInterval for backup polling.
+	PollInterval time.Duration
 }
 
 // Run executes the main event loop. It calls readAndEmit on file changes
@@ -128,7 +130,11 @@ type RunOpts struct {
 func (lw *logFileWatcher) Run(ctx context.Context, readAndEmit func() bool, writeKeepalive func(), opts ...RunOpts) {
 	keepalive := time.NewTicker(sseKeepalive)
 	defer keepalive.Stop()
-	watcherPoll := time.NewTicker(outputStreamPollInterval)
+	pollInterval := outputStreamPollInterval
+	if len(opts) > 0 && opts[0].PollInterval > 0 {
+		pollInterval = opts[0].PollInterval
+	}
+	watcherPoll := time.NewTicker(pollInterval)
 	defer watcherPoll.Stop()
 
 	// Stall detection: fires when no data arrives for stallTimeout,

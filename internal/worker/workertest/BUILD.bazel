@@ -28,6 +28,8 @@ go_library(
 
 go_test(
     name = "workertest_test",
+    size = "medium",
+    shard_count = 2,
     srcs = [
         "actor_helpers_test.go",
         "catalog_phase2_data_test.go",

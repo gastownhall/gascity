@@ -7748,6 +7748,7 @@ func runGcBeadsBdInitForTest(t *testing.T, script, cityPath, binDir string, extr
 }
 
 func TestGcBeadsBdInitMetadataOnlyFallsThroughToForcedBdInitWithPinnedDatabaseWhenSchemaMissing(t *testing.T) {
+	t.Parallel()
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
@@ -7890,10 +7891,13 @@ esac
 // caller names the database or leaves the script to resolve it from
 // metadata.json, as the provider does for a scope with no database configured.
 func TestGcBeadsBdInitDoesNotSeedVersionWitnessForAdoptedPreExistingDatabase(t *testing.T) {
+	t.Parallel()
 	t.Run("explicit database", func(t *testing.T) {
+		t.Parallel()
 		assertGcBeadsBdInitSeedsNoWitnessForAdoptedDatabase(t, "gc", "hq")
 	})
 	t.Run("database resolved from metadata", func(t *testing.T) {
+		t.Parallel()
 		assertGcBeadsBdInitSeedsNoWitnessForAdoptedDatabase(t, "gc")
 	})
 }
@@ -7997,6 +8001,10 @@ case "$query" in
       echo "table not found: config" >&2
       exit 1
     fi
+    exit 0
+    ;;
+  *'FROM information_schema.tables'*)
+    printf 'cnt\n0\n'
     exit 0
     ;;
   'USE `+"`hq`"+`; INSERT INTO config (`+"`key`"+`, value) VALUES ('\''types.custom'\'', '\''molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step,startup-health-episode,op'\'') ON DUPLICATE KEY UPDATE value = VALUES(value)')

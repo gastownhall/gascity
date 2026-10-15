@@ -2993,6 +2993,7 @@ func (c *DoltVersionCheck) Run(_ *CheckContext) *CheckResult {
 			ctx, cancel := context.WithTimeout(context.Background(), doltVersionCommandTimeout)
 			defer cancel()
 			cmd := exec.CommandContext(ctx, path, "version")
+			cmd.WaitDelay = 200 * time.Millisecond
 			out, err := cmd.CombinedOutput()
 			if ctx.Err() == context.DeadlineExceeded {
 				return string(out), fmt.Errorf("dolt version timed out after %s", doltVersionCommandTimeout)

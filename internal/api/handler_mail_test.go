@@ -19,8 +19,8 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 )
 
-// mailPartialReadTestDeadline is load-tolerant (2s vs 5ms); 5ms fails under CI CPU saturation (ga-97aayp).
-const mailPartialReadTestDeadline = 2 * time.Second
+// mailPartialReadTestDeadline is load-tolerant (100ms vs 5ms); 5ms fails under CI CPU saturation (ga-97aayp).
+const mailPartialReadTestDeadline = 100 * time.Millisecond
 
 type exactRecipientMailProvider struct {
 	messages map[string][]mail.Message

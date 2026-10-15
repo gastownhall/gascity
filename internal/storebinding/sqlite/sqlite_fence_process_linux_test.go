@@ -103,6 +103,7 @@ func TestSQLiteFenceHelperProcess(t *testing.T) {
 }
 
 func TestSQLiteLegacySnapshotSIGKILLAtBoundaries(t *testing.T) {
+	t.Parallel()
 	for _, boundary := range []string{
 		"legacy-snapshot-root-created",
 		"legacy-snapshot-copy-before",
@@ -113,6 +114,7 @@ func TestSQLiteLegacySnapshotSIGKILLAtBoundaries(t *testing.T) {
 		"legacy-claim-release-after",
 	} {
 		t.Run(boundary, func(t *testing.T) {
+			t.Parallel()
 			city := t.TempDir()
 			databasePath := filepath.Join(city, ".gc", "infra", ".beads", legacyCombinedDatabaseFilename)
 			source := startSQLiteFenceChild(t,
@@ -175,6 +177,7 @@ func TestSQLiteLegacySnapshotSIGKILLAtBoundaries(t *testing.T) {
 }
 
 func TestSQLiteGraphSnapshotSIGKILLAtBoundaries(t *testing.T) {
+	t.Parallel()
 	for _, boundary := range []string{
 		"graph-snapshot-root-created",
 		"graph-snapshot-copy-before",
@@ -183,6 +186,7 @@ func TestSQLiteGraphSnapshotSIGKILLAtBoundaries(t *testing.T) {
 		"graph-private-recovery-after",
 	} {
 		t.Run(boundary, func(t *testing.T) {
+			t.Parallel()
 			root := t.TempDir()
 			databasePath := filepath.Join(root, graphDirectoryName, graphFilename)
 			source := startSQLiteFenceChild(t,
@@ -236,6 +240,7 @@ func TestSQLiteGraphSnapshotSIGKILLAtBoundaries(t *testing.T) {
 }
 
 func TestSQLiteWriterFenceSIGKILLAtReservationBoundaries(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name       string
 		sourceKind string
@@ -301,6 +306,7 @@ func TestSQLiteWriterFenceSIGKILLAtReservationBoundaries(t *testing.T) {
 	for _, test := range tests {
 		for _, boundary := range test.boundaries {
 			t.Run(test.name+"/"+boundary, func(t *testing.T) {
+				t.Parallel()
 				root := t.TempDir()
 				databasePath := filepath.Join(root, graphDirectoryName, graphFilename)
 				switch test.sourceKind {

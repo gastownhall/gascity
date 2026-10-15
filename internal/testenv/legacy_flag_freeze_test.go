@@ -1,6 +1,7 @@
 package testenv_test
 
 import (
+	"bytes"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -62,10 +63,14 @@ var legacyFlagTestFileCeilings = map[string]int{
 // new coupled test package fails; both directions force a deliberate update (or
 // the S5 migration).
 func TestLegacyFormulaV2MechanismFrozen(t *testing.T) {
+	t.Parallel()
+
 	root := repoRoot(t)
 	matchers := make([]*regexp.Regexp, len(legacyFlagNeedles))
+	needleBytes := make([][]byte, len(legacyFlagNeedles))
 	for i, n := range legacyFlagNeedles {
 		matchers[i] = regexp.MustCompile(`\b` + regexp.QuoteMeta(n) + `\b`)
+		needleBytes[i] = []byte(n)
 	}
 
 	var prod []string
@@ -102,11 +107,14 @@ func TestLegacyFormulaV2MechanismFrozen(t *testing.T) {
 			}
 			return rerr
 		}
-		content := string(data)
+		// Fast pre-filter: all legacy needles contain either "V2" or "graphApply" or "GraphApply".
+		if !bytes.Contains(data, []byte("V2")) && !bytes.Contains(data, []byte("graphApply")) && !bytes.Contains(data, []byte("GraphApply")) {
+			return nil
+		}
 		isTest := strings.HasSuffix(path, "_test.go")
 		dir := filepath.ToSlash(filepath.Dir(rel))
 		for i, m := range matchers {
-			if !m.MatchString(content) {
+			if !bytes.Contains(data, needleBytes[i]) || !m.Match(data) {
 				continue
 			}
 			if isTest {

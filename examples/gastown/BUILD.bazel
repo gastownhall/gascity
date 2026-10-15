@@ -47,7 +47,7 @@ go_test(
     # the longest 15-25 s each. The guard
     # scripts/integration_packages_shards_test.go keeps the tests in
     # heavy_tests.txt apart.
-    shard_count = 5,
+    shard_count = 8,
     deps = [
         "//examples/bd/dolt",
         "//internal/bazeltest",

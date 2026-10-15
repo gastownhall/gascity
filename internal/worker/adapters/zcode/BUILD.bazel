@@ -10,10 +10,12 @@ go_library(
 
 go_test(
     name = "zcode_test",
+    size = "medium",
     srcs = [
         "adapter_test.go",
         "testenv_import_test.go",
     ],
+    shard_count = 2,
     deps = [
         ":zcode",
         "//internal/pathutil",

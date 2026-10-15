@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -527,6 +528,7 @@ func TestCustomTypesCheck_ServerBackedStoreIgnoresAmbientEndpoint(t *testing.T) 
 	decoyDir := guardedTempDir(t)
 	var targetPort, decoyPort string
 	t.Cleanup(func() {
+		var stopWg sync.WaitGroup
 		for _, store := range []struct {
 			dir  string
 			port string
@@ -534,18 +536,44 @@ func TestCustomTypesCheck_ServerBackedStoreIgnoresAmbientEndpoint(t *testing.T) 
 			{targetDir, targetPort},
 			{decoyDir, decoyPort},
 		} {
-			env := os.Environ()
 			if store.port != "" {
-				env = customTypesTestEnv(env, "127.0.0.1", store.port)
+				stopWg.Add(1)
+				go func(s struct{ dir, port string }) {
+					defer stopWg.Done()
+					env := customTypesTestEnv(os.Environ(), "127.0.0.1", s.port)
+					_, _ = runBD(s.dir, env, "dolt", "stop")
+				}(store)
 			}
-			_, _ = runBD(store.dir, env, "dolt", "stop")
 		}
+		stopWg.Wait()
 	})
 
-	targetInit := mustRunBD(targetDir, nil,
-		"init", "--server", "--non-interactive",
-		"-p", "target", "--skip-hooks", "--skip-agents")
+	var targetInit, decoyInit string
+	var targetInitErr, decoyInitErr error
+	var initWg sync.WaitGroup
+	initWg.Add(2)
+	go func() {
+		defer initWg.Done()
+		targetInit, targetInitErr = runBD(targetDir, nil,
+			"init", "--server", "--non-interactive",
+			"-p", "target", "--skip-hooks", "--skip-agents")
+	}()
+	go func() {
+		defer initWg.Done()
+		decoyInit, decoyInitErr = runBD(decoyDir, nil,
+			"init", "--server", "--non-interactive",
+			"-p", "decoy", "--skip-hooks", "--skip-agents")
+	}()
+	initWg.Wait()
+	if targetInitErr != nil {
+		t.Fatalf("target init: %v\n%s", targetInitErr, targetInit)
+	}
+	if decoyInitErr != nil {
+		t.Fatalf("decoy init: %v\n%s", decoyInitErr, decoyInit)
+	}
+
 	targetPort = customTypesTestServerPort(t, targetInit)
+	decoyPort = customTypesTestServerPort(t, decoyInit)
 	if _, err := contract.EnsureCanonicalConfig(fsys.OSFS{}, filepath.Join(targetDir, ".beads", "config.yaml"), contract.ConfigState{
 		IssuePrefix:    "target",
 		EndpointOrigin: contract.EndpointOriginCityCanonical,
@@ -555,15 +583,28 @@ func TestCustomTypesCheck_ServerBackedStoreIgnoresAmbientEndpoint(t *testing.T) 
 	}); err != nil {
 		t.Fatal(err)
 	}
-	targetEnv := customTypesTestEnv(os.Environ(), "127.0.0.1", targetPort)
-	mustRunBD(targetDir, targetEnv, "config", "set", "types.custom", "user-defined")
 
-	decoyInit := mustRunBD(decoyDir, nil,
-		"init", "--server", "--non-interactive",
-		"-p", "decoy", "--skip-hooks", "--skip-agents")
-	decoyPort = customTypesTestServerPort(t, decoyInit)
+	targetEnv := customTypesTestEnv(os.Environ(), "127.0.0.1", targetPort)
 	decoyEnv := customTypesTestEnv(os.Environ(), "127.0.0.1", decoyPort)
-	mustRunBD(decoyDir, decoyEnv, "config", "set", "types.custom", "decoy-only")
+
+	var setWg sync.WaitGroup
+	var targetSetErr, decoySetErr error
+	setWg.Add(2)
+	go func() {
+		defer setWg.Done()
+		_, targetSetErr = runBD(targetDir, targetEnv, "config", "set", "types.custom", "user-defined")
+	}()
+	go func() {
+		defer setWg.Done()
+		_, decoySetErr = runBD(decoyDir, decoyEnv, "config", "set", "types.custom", "decoy-only")
+	}()
+	setWg.Wait()
+	if targetSetErr != nil {
+		t.Fatalf("target config set: %v", targetSetErr)
+	}
+	if decoySetErr != nil {
+		t.Fatalf("decoy config set: %v", decoySetErr)
+	}
 
 	setCustomTypesTestEndpoint(t, "127.0.0.1", decoyPort)
 	t.Setenv("BEADS_DOLT_SERVER_TLS", "1")

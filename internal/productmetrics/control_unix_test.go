@@ -88,7 +88,7 @@ func TestDisableAndPurgeCommitsBeforeUploaderWaitWithoutHoldingStateLock(t *test
 	}
 	defer func() { _ = uploader.Release() }()
 	defer func() { _ = root.Close() }()
-	service.deps.disableUploaderWait = 2 * time.Second
+	service.deps.disableUploaderWait = 150 * time.Millisecond
 	attempts := make(chan struct{}, 1)
 	service.deps.beforeDisableUploaderLock = func() { attempts <- struct{}{} }
 
@@ -103,7 +103,7 @@ func TestDisableAndPurgeCommitsBeforeUploaderWaitWithoutHoldingStateLock(t *test
 	}
 
 	probeRoot := mustOpenMutableRoot(t, home)
-	probeContext, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	probeContext, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	probe, probeErr := probeRoot.acquireLock(probeContext, stateLockName)
 	cancel()
 	if probeErr != nil {
@@ -117,7 +117,7 @@ func TestDisableAndPurgeCommitsBeforeUploaderWaitWithoutHoldingStateLock(t *test
 	}
 	select {
 	case early := <-call:
-		t.Fatalf("off stopped waiting before the two-second uploader bound: %+v err=%v", early.result, early.err)
+		t.Fatalf("off stopped waiting before the uploader bound: %+v err=%v", early.result, early.err)
 	default:
 	}
 

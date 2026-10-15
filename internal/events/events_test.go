@@ -540,7 +540,7 @@ func TestDiscardDoesNothing(_ *testing.T) {
 
 func TestReadAllEmpty(t *testing.T) {
 	// Missing file → nil, nil.
-	events, err := ReadAll("/nonexistent/path/events.jsonl")
+	events, err := ReadAll(filepath.Join(t.TempDir(), "nonexistent", "events.jsonl"))
 	if err != nil {
 		t.Fatalf("ReadAll(missing) error: %v", err)
 	}
@@ -1017,7 +1017,7 @@ func TestReadLatestSeq(t *testing.T) {
 
 func TestReadLatestSeqEmpty(t *testing.T) {
 	// Missing file → (0, nil)
-	seq, err := ReadLatestSeq("/nonexistent/path/events.jsonl")
+	seq, err := ReadLatestSeq(filepath.Join(t.TempDir(), "nonexistent", "events.jsonl"))
 	if err != nil {
 		t.Fatalf("ReadLatestSeq(missing) error: %v", err)
 	}
@@ -1123,7 +1123,7 @@ func TestReadFrom(t *testing.T) {
 }
 
 func TestReadFromMissingFile(t *testing.T) {
-	evts, off, err := ReadFrom("/nonexistent/path/events.jsonl", 0)
+	evts, off, err := ReadFrom(filepath.Join(t.TempDir(), "nonexistent", "events.jsonl"), 0)
 	if err != nil {
 		t.Fatalf("ReadFrom(missing) error: %v", err)
 	}
@@ -1480,6 +1480,7 @@ func TestWatchNextBlockedThenContextEndsReturnsContextErr(t *testing.T) {
 	}
 
 	t.Run("canceled", func(t *testing.T) {
+		t.Parallel()
 		ctx, cancel := context.WithCancel(context.Background())
 		w, cleanup := newBlockedWatcher(t, ctx)
 		defer cleanup()
@@ -1492,7 +1493,7 @@ func TestWatchNextBlockedThenContextEndsReturnsContextErr(t *testing.T) {
 		// End the context from a timer so Next is already parked in its poll
 		// sleep when cancellation lands, exercising the blocked-Next path
 		// without a wall-clock time.Sleep (mirrors the deadline subtest below).
-		time.AfterFunc(50*time.Millisecond, cancel)
+		time.AfterFunc(20*time.Millisecond, cancel)
 		select {
 		case err := <-errCh:
 			if !errors.Is(err, context.Canceled) {
@@ -1504,7 +1505,8 @@ func TestWatchNextBlockedThenContextEndsReturnsContextErr(t *testing.T) {
 	})
 
 	t.Run("deadline", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
+		t.Parallel()
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 		defer cancel()
 		w, cleanup := newBlockedWatcher(t, ctx)
 		defer cleanup()

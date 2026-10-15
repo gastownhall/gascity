@@ -1,6 +1,8 @@
 package doctor
 
 import (
+	"bufio"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -112,7 +114,25 @@ func TestOrderFiringCurrent_LargeEventLogStaysInsideBudget(t *testing.T) {
 		})
 	}
 	evts = append(evts, events.Event{Type: events.OrderFired, Subject: "cleanup-cooldown", Ts: now.Add(-10 * time.Minute)})
-	writeOrderFiringTestEvents(t, cityPath, evts...)
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	eventFile, err := os.OpenFile(filepath.Join(cityPath, ".gc", "events.jsonl"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		t.Fatalf("OpenFile: %v", err)
+	}
+	w := bufio.NewWriter(eventFile)
+	enc := json.NewEncoder(w)
+	for seq, e := range evts {
+		e.Seq = uint64(seq + 1)
+		if err := enc.Encode(e); err != nil {
+			t.Fatalf("encode event: %v", err)
+		}
+	}
+	if err := w.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	_ = eventFile.Close()
 
 	check := NewOrderFiringCurrentCheck(cfg, cityPath)
 	check.clock = func() time.Time { return now }

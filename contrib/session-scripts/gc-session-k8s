@@ -219,7 +219,7 @@ case "$op" in
     # the city dir and running gc init. Without this wait, Claude starts
     # before .beads/ is configured and exits immediately.
     cred_copy="mkdir -p \$HOME/.claude && cp -rL /tmp/claude-secret/. \$HOME/.claude/ 2>/dev/null; "
-    ws_wait="while [ ! -f /workspace/.gc-workspace-ready ]; do sleep 0.5; done; "
+    ws_wait="while [ ! -f /workspace/.gc-workspace-ready ]; do sleep 0.05; done; "
 
     # Map controller-side work_dir to pod-side /workspace path.
     # Controller resolves agent dirs relative to its cityPath (e.g., /city),
@@ -377,7 +377,7 @@ case "$op" in
               image: $image,
               imagePullPolicy: "IfNotPresent",
               command: ["sh", "-c",
-                "while [ ! -f /workspace/.gc-ready ]; do sleep 0.5; done"],
+                "while [ ! -f /workspace/.gc-ready ]; do sleep 0.05; done"],
               volumeMounts: '"$init_vol_mounts"'
             }],
             containers: [{
@@ -466,15 +466,15 @@ case "$op" in
     # --- File staging via init container ---
     if [ "$needs_staging" = "true" ]; then
       # Wait for the init container to be running.
-      for i in $(seq 1 60); do
+      for i in $(seq 1 600); do
         phase=$("${KUBECTL[@]}" get pod "$pod" \
           -o jsonpath='{.status.initContainerStatuses[0].state.running}' 2>/dev/null || true)
         [ -n "$phase" ] && break
-        if [ "$i" -eq 60 ]; then
+        if [ "$i" -eq 600 ]; then
           echo "start: init container not running in pod $pod after 60s" >&2
           exit 1
         fi
-        sleep 1
+        sleep 0.1
       done
 
       # Copy rig work_dir into the pod so rig agents get the full directory
@@ -563,15 +563,15 @@ case "$op" in
 
     # Wait for tmux session to be available inside the pod.
     # The entrypoint creates tmux after .gc-workspace-ready is touched.
-    for i in $(seq 1 60); do
+    for i in $(seq 1 600); do
       if "${KUBECTL[@]}" exec "$pod" -- tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
         break
       fi
-      if [ "$i" -eq 60 ]; then
+      if [ "$i" -eq 600 ]; then
         echo "start: tmux session not ready in pod $pod after 60s" >&2
         exit 1
       fi
-      sleep 1
+      sleep 0.1
     done
 
     # Capture pane output to a log file for post-mortem diagnostics.

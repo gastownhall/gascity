@@ -1548,6 +1548,7 @@ func TestCityRuntimeRun_InventoryLaneLifecycle(t *testing.T) {
 	// No backstop pass inside the test: the only lane pass after the prime is
 	// the one the session-event pump wakes.
 	cfg.Daemon.PatrolInterval = "1h"
+	cfg.Daemon.ShutdownTimeout = "50ms"
 	sp := &eventedInventoryProvider{
 		scriptedInventoryProvider: newScriptedInventoryProvider("gc-stray"),
 		events:                    make(chan runtime.SessionEvent, 1),

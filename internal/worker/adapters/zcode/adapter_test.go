@@ -420,6 +420,11 @@ func (s *session) waitForOutput(needle string, timeout time.Duration) {
 }
 
 func (s *session) alive() bool {
+	select {
+	case <-s.done:
+		return false
+	default:
+	}
 	return s.cmd.ProcessState == nil && syscall.Kill(-s.cmd.Process.Pid, 0) == nil
 }
 
@@ -578,7 +583,7 @@ func TestIdleSeparatedPromptsStaySeparate(t *testing.T) {
 	h := newHarness(t, nil)
 	s := h.start()
 	s.send("first prompt")
-	time.Sleep(2500 * time.Millisecond)
+	s.waitForTurns(1)
 	s.send("second prompt")
 	s.waitForTurns(2)
 	if _, code := s.closeAndWait(); code != 0 {
@@ -1370,9 +1375,9 @@ func TestInterruptMidTurnContinuesTheLoop(t *testing.T) {
 	h := newHarness(t, map[string]string{"STUB_SLEEP": "5", "STUB_SID": "sess_int"})
 	s := h.start()
 	s.send("slow turn")
-	time.Sleep(3 * time.Second) // inside the stub's sleep
+	s.waitForOutput("zcode-repl turn in flight", 20*time.Second)
 	s.signal(syscall.SIGINT)
-	time.Sleep(2 * time.Second)
+	s.waitForOutput("zcode-repl error rc=", 20*time.Second)
 
 	if !s.alive() {
 		t.Fatalf("adapter exited on SIGINT; it must absorb it:\n%s", s.output())
@@ -1444,9 +1449,8 @@ func TestInterruptWhileIdleDoesNotExit(t *testing.T) {
 
 	h := newHarness(t, nil)
 	s := h.start()
-	time.Sleep(2 * time.Second) // idle, blocked in read
+	s.waitForTurns(0) // idle, blocked in read after startup ready marker
 	s.signal(syscall.SIGINT)
-	time.Sleep(2 * time.Second)
 
 	if !s.alive() {
 		t.Fatalf("adapter exited on an idle SIGINT:\n%s", s.output())

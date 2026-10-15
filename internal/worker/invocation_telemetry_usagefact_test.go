@@ -308,7 +308,7 @@ func TestModelAndComputeFactsShareSessionIDJoinKey(t *testing.T) {
 // prompt op indefinitely on a hung exec: sink (the sink enforces its own
 // deadline).
 func TestRecordModelUsageFactHungSinkReturnsPromptly(t *testing.T) {
-	script := writeUsageSinkScript(t, "sleep 30")
+	script := writeUsageSinkScript(t, "exec sleep 30")
 	h := &SessionHandle{usageSink: usage.NewExecSinkWithTimeout(script, 100*time.Millisecond)}
 	f := usage.Fact{RunID: "r1", Kind: usage.KindModel, InputTokens: 10, UpstreamReqID: "msg-1"}
 

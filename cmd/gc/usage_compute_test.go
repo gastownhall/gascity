@@ -264,7 +264,7 @@ func TestEmitComputeFactForBeadNoOps(t *testing.T) {
 // fact retries on a later tick.
 func TestEmitComputeFactForBeadHungSinkReturnsPromptly(t *testing.T) {
 	script := filepath.Join(t.TempDir(), "hang.sh")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\nsleep 30\n"), 0o755); err != nil {
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nexec sleep 30\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	store := beads.NewMemStore()

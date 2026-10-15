@@ -1243,9 +1243,10 @@ func TestDrainPending_Idempotent(t *testing.T) {
 
 func TestStderrCaptured_InHandshakeError(t *testing.T) {
 	p := newTestProvider(t)
+	p.cfg.HandshakeTimeout = 50 * time.Millisecond
 	name := testName()
 
-	// Use a command that writes to stderr then exits.
+	// Use a command that writes to stderr and fails the handshake.
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	err := p.Start(ctx, name, runtime.Config{
