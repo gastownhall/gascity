@@ -886,7 +886,7 @@ func TestEffectSpecsCoverEveryKind(t *testing.T) {
 			t.Errorf("%s: only the create has a body, and a body declares no needs or sections", kind)
 		}
 	}
-	if want := []string{intentAdopt, intentBaseline, intentClose, intentCreate, intentDrainBegin, intentDrainBeginFresh, intentDrainCancel, intentDrainVoid, intentDriftRelaunch, intentDriftRepair, intentDriftRestart, intentLiveApply, intentRekey, intentRollback, intentRowHeal, intentRowHealFresh, intentRowMetadata, intentRuntimeAlias, intentSignal, intentSignalAck, intentSignalFresh, intentStart, intentStop, intentZombie}; !slices.Equal(running, want) {
+	if want := []string{intentAdopt, intentBaseline, intentClose, intentCreate, intentDrainBegin, intentDrainBeginFresh, intentDrainCancel, intentDrainVoid, intentDriftRelaunch, intentDriftRepair, intentDriftRestart, intentLiveApply, intentMarkerClear, intentRekey, intentRollback, intentRowHeal, intentRowHealFresh, intentRowMetadata, intentRuntimeAlias, intentSignal, intentSignalAck, intentSignalFresh, intentStart, intentStop, intentZombie}; !slices.Equal(running, want) {
 		t.Fatalf("running kinds %v, want %v", running, want)
 	}
 	p := &effectPass{held: heldCaps{create: &createPass{}, creates: &createEffects{}}}
@@ -909,7 +909,8 @@ var effectCapGrants = map[string]caps{
 	intentRollback:    capProviderStart | capRetire,
 	intentClose:       capReadStores | capRelease,
 	intentRowMetadata: capReadStores, intentRuntimeAlias: capProviderStart, // the alias probe's store; the runtime alias sync
-	intentStop:         capReadStores | capProviderStop,
+	intentMarkerClear:  capProviderStart,                                                                                         // the pinned skip's runtime marker clear (mc-nm6yt)
+	intentStop:         capReadStores | capProviderStop | capRelease,                                                             // an execution-stalled stop gives back its claim in its Call (v5.10x)
 	intentSignalFresh:  capReadStores,                                                                                            // an idle-respawn signal's claim revalidation (C6d)
 	intentDriftRestart: capReadStores | capProviderStop, intentDriftRelaunch: capReadStores | capProviderStart | capProviderStop, // the prepare's stores; the relaunch; the stop
 }
@@ -1131,13 +1132,15 @@ func TestOnlyStagingCodeAssignsTheStagingSeam(t *testing.T) {
 // Call's handles (provider start, routing, kill) go on txCaps alone. The one
 // write handle an around holds is the close's release (capRelease), for the
 // post-close cascade it runs only once its close landed (settlement.Closed),
-// as runTx's design names; only the close's spec grants it.
+// as runTx's design names; only the close's spec grants it to an around. The
+// stop holds it too, for its Call alone (an execution-stalled stop gives back
+// its claim under the name lock, v5.10x), and has no around.
 func TestAroundCapsAreScoped(t *testing.T) {
 	if got := reflect.TypeOf(section{}.probe).In(1); got != reflect.TypeFor[effectReads]() {
 		t.Errorf("a Probe holds %v, want effectReads alone", got)
 	}
 	for kind, spec := range effectSpecs {
-		if spec.caps&capRelease != 0 && kind != intentClose {
+		if spec.caps&capRelease != 0 && kind != intentClose && (kind != intentStop || spec.around != nil) {
 			t.Errorf("%s holds the close's release handles", kind)
 		}
 	}

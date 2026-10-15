@@ -22,6 +22,8 @@ func TestContractStringsMatchCanonical(t *testing.T) {
 		{"session type", typeSession, session.BeadType},
 		{"wait label", labelWait, session.WaitBeadLabel},
 		{"startup-health episode type", typeStartupHealthEpisode, session.StartupHealthEpisodeType},
+		{"wait type", typeWait, session.WaitBeadType},
+		{"legacy wait type", typeWaitLegacy, session.LegacyWaitBeadType},
 	}
 	for _, c := range checks {
 		if c.mirrored != c.canonical {

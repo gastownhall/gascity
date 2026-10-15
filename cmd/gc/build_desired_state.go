@@ -294,7 +294,7 @@ func recoverLeg(dst *error, label string, stderr io.Writer) {
 	// they run (each fold prints after Wait), so serializing here is enough.
 	recoverLegMu.Lock()
 	defer recoverLegMu.Unlock()
-	fmt.Fprintf(stderr, "buildDesiredState: %s panicked: %v\n%s", label, r, debug.Stack()) //nolint:errcheck
+	fmt.Fprintf(stderr, "%s panicked: %v\n%s", label, r, debug.Stack()) //nolint:errcheck // the label names the leg: desired state, seat work, the ready fan-out
 }
 
 var recoverLegMu sync.Mutex
@@ -831,6 +831,7 @@ func buildDesiredStateWithSessionBeadsAt(
 			continue
 		}
 		applyNamedTemplateOverrides(&tp, spec, identity, named.workBeadID[identity])
+		tp.NamedCanonicalOnly = spec.Mode != "always" && !named.workReady[identity]
 		// When a canonical bead exists, use ITS session_name as the
 		// desiredState key so syncSessionBeads finds it in bySessionName
 		// and takes the UPDATE path. Without this, resolveSessionName
@@ -1102,6 +1103,45 @@ type demandTargets struct {
 // (controllerQueryRuntimeEnv).
 type probeEnvFunc func(cityPath string, cfg *config.City, agent *config.Agent) (map[string]string, error)
 
+// livePoolSessions counts the live pool sessions of allOpenSessionInfos by
+// normalized template identity (normalizeAgentTemplateIdentity).
+type livePoolSessions map[string]int
+
+// livePoolSessionsByIdentity counts infos' live pool sessions once, by
+// normalized template identity, so each agent's count is one lookup rather
+// than a walk of every session that normalizes each (which scans every agent:
+// agents x sessions x agents, 1.2s of maintainer-city's 1.45s pass at 636
+// agents). Match by identity equivalence: infos is aggregated across the city
+// and every rig store, and pool session beads store the qualified name
+// (agent.QualifiedName(), see session_sleep.go); adopted beads may still carry
+// a legacy bound form of the same identity, which must count or the cold-wake
+// probe over-wakes a pool that already has a live session. Equivalence keeps
+// the cross-rig guarantee: an unqualified base name never normalizes to a
+// dir-scoped agent, and a same-base-name pool in another rig (rigB/planner)
+// normalizes to itself, so neither inflates this rig's count.
+func livePoolSessionsByIdentity(lookup agentLookup, infos []session.Info) livePoolSessions {
+	out := make(livePoolSessions)
+	for _, si := range infos {
+		if !isPoolManagedSessionInfo(si) || !poolSessionIsLiveInfo(si) {
+			continue
+		}
+		if t := strings.TrimSpace(si.Template); t != "" {
+			out[lookup.normalize(t)]++
+		}
+	}
+	return out
+}
+
+// count is the number of live pool sessions whose template is equivalent to
+// template (agentTemplateIdentitiesEquivalent): equal trimmed identities
+// normalize equally, so the normalized count is exactly the equivalence count.
+func (l livePoolSessions) count(lookup agentLookup, template string) int {
+	if t := strings.TrimSpace(template); t != "" {
+		return l[lookup.normalize(t)]
+	}
+	return 0
+}
+
 // buildDemandTargets runs the demand pass's agent loop. allOpenSessionInfos is
 // the cross-store session census; it decides which pools are cold. queryEnv
 // builds each custom scale_check pool's probe env.
@@ -1140,6 +1180,10 @@ func buildDemandTargets(
 	// authoritative, so each such template is reported partial (retain, don't
 	// drain) and the error reaches the demand pass's error list instead of
 	// being dropped here.
+	// One agent index for the build: every normalization below is a map
+	// lookup, not a scan of every agent (Gate S fix 3).
+	lookup := newAgentLookup(cfg)
+	livePools := livePoolSessionsByIdentity(lookup, allOpenSessionInfos)
 	var cityLegs []classStoreCandidate
 	var cityLegsErr error
 	if store != nil {
@@ -1225,24 +1269,7 @@ func buildDemandTargets(
 		hasCustomScaleCheck := strings.TrimSpace(cfg.Agents[i].ScaleCheck) != ""
 		template := cfg.Agents[i].QualifiedName()
 		storeScopedControlDispatcher := cfg.Agents[i].Name == config.ControlDispatcherAgentName
-		runningSessions := 0
-		for _, si := range allOpenSessionInfos {
-			if isPoolManagedSessionInfo(si) && poolSessionIsLiveInfo(si) {
-				// Match the qualified template by identity equivalence.
-				// allOpenSessionInfos is aggregated across the city + every rig
-				// store, and pool session beads store the qualified name
-				// (agent.QualifiedName(), see session_sleep.go); adopted beads may
-				// still carry a legacy bound form of the same identity, which must
-				// count here or the cold-wake probe over-wakes a pool that already
-				// has a live session. Equivalence preserves the cross-rig guarantee:
-				// an unqualified base name never normalizes to a dir-scoped agent,
-				// and a same-base-name pool in another rig (e.g. rigB/planner)
-				// normalizes to itself, so neither inflates this rig's count.
-				if agentTemplateIdentitiesEquivalent(cfg, si.Template, template) {
-					runningSessions++
-				}
-			}
-		}
+		runningSessions := livePools.count(lookup, template)
 
 		// Cold-pool wake probe (FR-S0.1): a pool with a custom scale_check that
 		// returns 0 while it has zero running sessions and min=0 would never wake
@@ -2635,6 +2662,9 @@ func defaultNamedSessionDemand(targets []defaultScaleCheckTarget, _ *config.City
 // that helper for identity, not claimability, and must keep resolving an
 // expanded root's target.
 func controllerDemandRouteCandidates(b beads.Bead) []string {
+	if workflowTopologyIsNonExecutable(b.Metadata[beadmeta.KindMetadataKey], b.Metadata[beadmeta.WorkflowExpandedMetadataKey]) {
+		return nil
+	}
 	candidates := routedToAndLegacyWorkflowCandidates(b)
 	if len(candidates) == 0 {
 		return nil
@@ -3465,7 +3495,27 @@ func resolveDiscoveredSessionTemplate(bp *agentBuildParams, cfg *config.City, cf
 		}
 		tp.Env["GC_SESSION_ORIGIN"] = "named"
 	}
+	applyClientProviderChatStartupPrompt(bp, cfgAgent, resolveAgent, sessionQualifiedName, info.Alias, &tp)
 	return tp, nil
+}
+
+// applyClientProviderChatStartupPrompt applies the SessionStart hook's
+// predicate (see doPrimeWithHookFormatOpts) to the launch channel: when tp, the
+// resolved template of one of cfgAgent's sessions, is a client's provider chat
+// (isClientProviderChat), the chat starts, and resumes, with the beacon alone.
+// The beacon is still a delivered prompt, which stands the hook down, and it
+// drops the "Run `gc prime`" instruction, since an explicit `gc prime` hands
+// the worker persona back. It drops the assigned-skills appendix as well, which
+// only describes skills the session still materializes. Both resolutions of a
+// manual session's template call it, resolveDiscoveredSessionTemplate and the
+// pool realization of a session resumed for work assigned to it, so the two
+// cannot drift. identity is the session's qualified name, alias its GC_ALIAS.
+func applyClientProviderChatStartupPrompt(bp *agentBuildParams, cfgAgent, resolveAgent *config.Agent, identity, alias string, tp *TemplateParams) {
+	if !isClientProviderChat(cfgAgent, templateParamsSessionOrigin(*tp), alias) {
+		return
+	}
+	beacon := runtime.FormatBeaconAt(bp.cityName, identity, false, bp.beaconTime)
+	tp.Prompt = composeStartupPrompt(beacon, "", suppressStartupPromptForAgent(resolveAgent))
 }
 
 // overlayVerdict is classifyOverlaySession's answer for one open session row.
@@ -4037,6 +4087,7 @@ func realizePoolDesiredSessionsAt(
 		} else {
 			applyPoolInstanceIdentity(&tp, cfgAgent, qualifiedInstance, poolSlot, sbInfo)
 		}
+		applyClientProviderChatStartupPrompt(bp, cfgAgent, resolveAgent, qualifiedInstance, sbInfo.Alias, &tp)
 		segmentStart = bp.realizeNow()
 		installAgentSideEffects(bp, resolveAgent, tp, stderr)
 		stats.sideEffects += bp.realizeNow().Sub(segmentStart)

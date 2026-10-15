@@ -62,12 +62,16 @@ var ErrStoreClosed = errors.New("bead store closed")
 // BUSY. The error's message stays the driver's.
 var ErrSQLiteBusyExhausted = errors.New("sqlite busy retries exhausted")
 
-// ErrStoreUnavailable reports that the backing bead store could not be read,
-// which is not the same as finding nothing. gc hook's work-query classifier
-// wraps a failure that got no answer from the store (a connection error, a
-// timeout, bd's breaker failing fast) with it and exits 2, distinct from the
-// exit-1 no-work answer. Treat it as "unknown", never as "empty". Check with
-// errors.Is.
+// ErrStoreUnavailable marks a bead-store read whose answer is unknown because
+// the store could not be reached, as distinct from a store that answered with
+// no rows. Consumers must treat it as "unknown", never as "empty". Its producer
+// today is gc hook's work-query classification, which wraps a failure that got
+// no answer from the store (a connection error, a timeout, bd's breaker failing
+// fast) and renders it as exit 2 instead of the exit-1 no-work answer, with or
+// without --claim. Check with errors.Is. The control dispatcher's
+// ClassifyControllerError (internal/dispatch) does not check it yet; the first
+// producer whose error can reach the dispatcher adds it there as
+// TierAvailability.
 var ErrStoreUnavailable = errors.New("bead store unavailable")
 
 // ErrParentProjectionSuperseded reports that a parent update was overtaken by a
@@ -746,6 +750,7 @@ var readyExcludeTypes = map[string]bool{
 	"role":                   true, // agent role definitions
 	"rig":                    true, // rig identity beads
 	"startup-health-episode": true, // per-session-name bookkeeping record, never actionable Ready work (ga-o04bfr.1.1)
+	"op":                     true, // conversation operation journal op, fact and runtime rows; lanes execute them, never Ready (internal/opjournal)
 }
 
 var readyBlockingDependencyTypes = map[string]bool{
@@ -841,15 +846,16 @@ func IsReadyExcludedBead(b Bead) bool {
 }
 
 // HasReadyExcludedLabel reports whether a bead carries a label that marks it
-// as infrastructure bookkeeping (session continuity, order tracking) rather
-// than actionable Ready work. Distinct from IsReadyExcludedType: a bead may be
-// label-excluded regardless of its type. Callers that have already constrained
-// the bead's type (e.g. iterating known-convoy beads) use this to test only
-// the label dimension.
+// as infrastructure bookkeeping (session continuity, order tracking,
+// conversation operation journal rows) rather than actionable Ready work.
+// Distinct from IsReadyExcludedType: a bead may be label-excluded regardless
+// of its type. Callers that have already constrained the bead's type (e.g.
+// iterating known-convoy beads) use this to test only the label dimension.
 func HasReadyExcludedLabel(b Bead) bool {
 	for _, label := range b.Labels {
 		switch label {
-		case "gc:session", "gc:order-tracking", "order-tracking":
+		case "gc:session", "gc:order-tracking", "order-tracking",
+			"gc:op", "gc:fact", "gc:rt": // op, fact and runtime rows; canonical: internal/opjournal
 			return true
 		}
 	}

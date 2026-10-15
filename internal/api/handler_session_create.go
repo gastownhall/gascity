@@ -97,10 +97,9 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusServiceUnavailable, "provider_unavailable", err.Error())
 			return
 		}
-		// Agent track stores a transport-aligned base command only.
-		// Do NOT inject OptionsSchema defaults or explicit overrides here.
-		// Options are stored as template_overrides and applied at start time
-		// by the session lifecycle via ResolveExplicitOptions.
+		// Persist the resolved template defaults as the controller startup
+		// command baseline. Explicit session options stay in template_overrides
+		// and are applied at launch without changing that drift baseline.
 		if len(body.Options) > 0 {
 			if len(resolved.OptionsSchema) == 0 {
 				s.idem.unreserve(idemKey)
@@ -158,13 +157,12 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	launchCommand, err := config.BuildProviderLaunchCommandWithoutOptions(s.state.CityPath(), resolved, transport)
+	command, err := s.agentTemplateLaunchCommand(createCtx.Agent, resolved, transport)
 	if err != nil {
 		s.idem.unreserve(idemKey)
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
-	command := launchCommand.Command
 
 	// Build template_overrides metadata. Includes schema overrides AND
 	// the initial message (as "initial_message" key). The reconciler

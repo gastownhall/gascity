@@ -728,7 +728,11 @@ func (e *Editor) ResumeRig(name string) error {
 // named name. SuspendRig and ResumeRig write the runtime state file only after
 // it returns: that write can wait on the suspension fence while a controller
 // stops a scope's store, and the wait must not hold up every other Editor
-// mutation. The state write orders itself (suspensionstate.Update).
+// mutation. A caller that serializes its mutations above the Editor (the
+// controller API's publication lock) still holds them up for that wait; the
+// stall is accepted because the fence holder never waits on such a lock, so it
+// ends when the store stop does. The state write orders itself
+// (suspensionstate.Update).
 func (e *Editor) requireRig(name string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()

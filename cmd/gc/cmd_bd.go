@@ -433,6 +433,11 @@ func bdRigQualifiedMetadataRefusal(cfg *config.City, bdArgs []string) (string, b
 func doBd(args []string, stdout, stderr io.Writer) int {
 	cityName, rigName, bdArgs := extractBdScopeFlags(args)
 
+	// From here on the passthrough only reads the city config, so the guards
+	// and env builders below share one composed load instead of each walking
+	// the packs again (see invocationConfigMemo for which loads it answers).
+	defer beginInvocationConfigMemo()()
+
 	bdArgs, err := rewriteBdHeartbeatArgs(bdArgs)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr

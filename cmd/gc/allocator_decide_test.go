@@ -1146,3 +1146,139 @@ func TestAllocator_ConfigSleepSuppressionWakesAReadyWaiter(t *testing.T) {
 		}
 	}
 }
+
+// Kills: an honored explicit wake drained or closed (CONTRACT D7 rule 4,
+// v5.10n, §12.2 row 26; J26 D/E): a pool row the desired set did not pick,
+// holding a pending explicit wake, wakes and carries WakeHonored; a wake
+// served by a sleep since, a suspended agent's row and a dependency-only
+// row still drain.
+func TestAllocator_HonoredExplicitWakeIsNeverDrained(t *testing.T) {
+	fresh := []string{"state", "asleep", "sleep_reason", "drained", "slept_at", ago(time.Hour), "wake_request", "explicit", "wake_requested_at", ago(time.Minute)}
+	served := []string{"state", "asleep", "sleep_reason", "drained", "slept_at", ago(time.Minute), "wake_request", "explicit", "wake_requested_at", ago(time.Hour)}
+	for _, c := range []struct {
+		name      string
+		meta      []string
+		suspended bool
+		want      desire
+		honored   bool
+	}{
+		{"a pending wake", fresh, false, desireWake, true},
+		{"a wake served by a sleep since", served, false, desireDrain, false},
+		{"a suspended agent's pending wake", fresh, true, desireDrain, false},
+		{"a dependency-only row's pending wake", append(slices.Clone(fresh), "dependency_only", "true"), false, desireDrain, false},
+	} {
+		agent := allocPoolAgent("worker", 3)
+		agent.Suspended = c.suspended
+		cfg := &config.City{Agents: []config.Agent{agent}}
+		d := newAllocFixture(t, cfg).sessions(poolRow("gc-1", "worker", 1, c.meta[1], c.meta[2:]...)).decideSelecting()
+		if e := entryOf(t, d, "gc-1"); e.Desired != c.want || e.WakeHonored != c.honored || (c.honored && e.DrainReason != "") {
+			t.Errorf("%s: %s/%s honored %t drain %q, want %s honored %t", c.name, e.Desired, e.Reason, e.WakeHonored, e.DrainReason, c.want, c.honored)
+		}
+	}
+}
+
+// Kills: an honored wake that overruns max_active_sessions (v5.10n): with
+// the template at its max (rows woken or alive), the honored row is Keep,
+// never Wake and never Drain, and wakes once a slot frees.
+func TestAllocator_HonoredExplicitWakeRespectsMaxActive(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 2)}}
+	woken := func(alive ...string) *allocFixture {
+		f := newAllocFixture(t, cfg).sessions(
+			poolRow("gc-1", "worker", 1, "active"), poolRow("gc-2", "worker", 2, "active"),
+			poolRow("gc-3", "worker", 3, "asleep", "sleep_reason", "drained", "slept_at", ago(time.Hour), "wake_request", "explicit", "wake_requested_at", ago(time.Minute)))
+		for _, name := range alive {
+			f = f.alive(name, InventoryAttrs{AttachedKnown: true})
+		}
+		return f
+	}
+	if e := entryOf(t, woken("s-gc-1", "s-gc-2").decideSelecting("gc-1", "gc-2"), "gc-3"); e.Desired != desireKeep || !e.WakeHonored {
+		t.Errorf("at the max: gc-3 = %s/%s honored %t, want keep (the wake waits)", e.Desired, e.Reason, e.WakeHonored)
+	}
+	if e := entryOf(t, woken("s-gc-1").decideSelecting("gc-1"), "gc-3"); e.Desired != desireWake {
+		t.Errorf("a slot free: gc-3 = %s/%s, want wake", e.Desired, e.Reason)
+	}
+}
+
+// honoredWakeMeta is an asleep drained row's pending explicit wake.
+func honoredWakeMeta() []string {
+	return []string{"sleep_reason", "drained", "slept_at", ago(time.Hour), "wake_request", "explicit", "wake_requested_at", ago(time.Minute)}
+}
+
+// Kills an honored wake that overruns max_active_sessions through what the
+// bound must count beside woken and alive rows (#7807 review, v5.10n): the
+// creates this pass plans, the creates in flight the census does not show
+// yet, and rows of unknown liveness (the awake set reads unknown as
+// running). In each case the honored row is Keep, its wake waiting.
+func TestAllocator_HonoredExplicitWakeCountsEverySessionTowardMax(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 2)}}
+	t.Run("a create this pass plans", func(t *testing.T) {
+		d := newAllocFixture(t, cfg).sessions(
+			poolRow("gc-1", "worker", 1, "active"),
+			poolRow("gc-3", "worker", 3, "asleep", honoredWakeMeta()...),
+		).alive("s-gc-1", InventoryAttrs{AttachedKnown: true}).demand("worker", "w-1", "w-2").decide()
+		plans := 0
+		for _, p := range d.Plans {
+			if p.Template == "worker" {
+				plans++
+			}
+		}
+		if e := entryOf(t, d, "gc-3"); plans > 0 && e.Desired == desireWake {
+			t.Errorf("gc-3 woken beside gc-1 and %d planned create(s): over max_active_sessions 2", plans)
+		}
+	})
+	t.Run("a create in flight", func(t *testing.T) {
+		f := newAllocFixture(t, cfg).sessions(
+			poolRow("gc-1", "worker", 1, "active"),
+			poolRow("gc-3", "worker", 3, "asleep", honoredWakeMeta()...),
+		).alive("s-gc-1", InventoryAttrs{AttachedKnown: true})
+		f.in.InFlight = inflightView{Entries: []inflightEntry{{Kind: inflightCreate, Token: "tok-new", Template: "worker", Identity: "worker:new"}}}
+		if e := entryOf(t, f.decide(), "gc-3"); e.Desired != desireKeep || !e.WakeHonored {
+			t.Errorf("gc-3 = %s/%s honored %t, want keep beside gc-1 and a create in flight", e.Desired, e.Reason, e.WakeHonored)
+		}
+	})
+	t.Run("a named create the census already shows counts once", func(t *testing.T) {
+		// A named reopen keeps its row's own token: the in-flight create and
+		// its open row are one session, not two (#7807 review, mc-mhloj).
+		f := newAllocFixture(t, cfg).sessions(
+			poolRow("gc-1", "worker", 1, "active", "configured_named_session", "true", "configured_named_identity", "chat", "instance_token", "tok-row"),
+			poolRow("gc-3", "worker", 3, "asleep", honoredWakeMeta()...),
+		).alive("s-gc-1", InventoryAttrs{AttachedKnown: true})
+		f.in.InFlight = inflightView{Entries: []inflightEntry{{Kind: inflightCreate, Token: "tok-reopen", Template: "worker", Identity: createIdentity{QualifiedInstance: "chat", Named: true}.key()}}}
+		if e := entryOf(t, f.decide(), "gc-3"); e.Desired != desireWake {
+			t.Errorf("gc-3 = %s/%s, want wake: the named create is gc-1's own row, one of max_active_sessions 2", e.Desired, e.Reason)
+		}
+	})
+	t.Run("rows of unknown liveness", func(t *testing.T) {
+		d := newAllocFixture(t, cfg).sessions(
+			poolRow("gc-1", "worker", 1, "active"), poolRow("gc-2", "worker", 2, "active"),
+			poolRow("gc-3", "worker", 3, "asleep", honoredWakeMeta()...),
+		).alive("s-gc-1", InventoryAttrs{AttachedKnown: true}).alive("s-gc-2", InventoryAttrs{AttachedKnown: true}).
+			unread("s-gc-1").unread("s-gc-2").decideSelecting("gc-1", "gc-2")
+		if e := entryOf(t, d, "gc-3"); e.Desired == desireWake {
+			t.Errorf("gc-3 woken while gc-1 and gc-2 run under unread identities (liveness unknown)")
+		}
+	})
+}
+
+// Kills a last slot given to a second honored row, or by map order (#7807
+// review): honored rows compete for one slot; the lowest key wakes and every
+// other keeps. Twelve competitors make an unsorted map walk pick the lowest
+// with probability 1/12 a run, so 20 runs cannot pass by chance
+// ((1/12)^20), as two competitors could ((1/2)^20 was the k6 survivor).
+func TestAllocator_HonoredExplicitWakeLastSlotIsDeterministic(t *testing.T) {
+	const competitors = 12
+	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 2)}}
+	for i := range 20 {
+		rows := []beads.Bead{poolRow("gc-01", "worker", 1, "active")}
+		for c := range competitors {
+			rows = append(rows, poolRow(fmt.Sprintf("gc-%02d", 10+c), "worker", 10+c, "asleep", honoredWakeMeta()...))
+		}
+		d := newAllocFixture(t, cfg).sessions(rows...).alive("s-gc-01", InventoryAttrs{AttachedKnown: true}).decideSelecting("gc-01")
+		for c := range competitors {
+			id := fmt.Sprintf("gc-%02d", 10+c)
+			if want := map[bool]desire{true: desireWake, false: desireKeep}[c == 0]; entryOf(t, d, id).Desired != want {
+				t.Fatalf("run %d: %s %s, want %s (the lowest key, gc-10, takes the last slot)", i, id, entryOf(t, d, id).Desired, want)
+			}
+		}
+	}
+}

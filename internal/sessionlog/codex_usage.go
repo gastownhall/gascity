@@ -102,7 +102,8 @@ const codexLifecycleScanBudget = 16 << 20 // 16 MiB
 
 // codexLifecycleTypes are the event_msg payload types that decide activity,
 // quoted as they appear in a rollout line. A line naming none of them is
-// skipped without being parsed.
+// skipped without being parsed. The turn scan's line filter
+// (parseCodexTurnRecord) reuses them.
 var codexLifecycleTypes = [][]byte{
 	[]byte(`"task_started"`),
 	[]byte(`"task_complete"`),

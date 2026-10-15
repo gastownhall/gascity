@@ -185,17 +185,17 @@ var pendingRuntimeOps = []struct {
 	}},
 }
 
-// pickExternalOp is a step's outside move: externalOps, plus the pending
-// creates' when the sim seeds them. A sim that seeds none (the floored
-// corpus) draws from externalOps alone, so its RNG stream, and the
-// scenarios it reaches, are main's.
+// pickExternalOp is a step's outside move: externalOps and the config
+// drifts (reconcile_sim_drift_test.go), plus the pending creates' when the
+// sim seeds them. A sim that seeds none (the floored corpus) draws no
+// pending create.
 func (s *sim) pickExternalOp() struct {
 	name string
 	fn   func(s *sim, l *simLeg, b beads.Bead)
 } {
-	ops := externalOps
+	ops := slices.Concat(externalOps, driftOps) // reconcile_sim_drift_test.go
 	if !s.noPendingCreates {
-		ops = slices.Concat(externalOps, pendingCreateOps)
+		ops = slices.Concat(ops, pendingCreateOps)
 	}
 	return ops[s.rng.IntN(len(ops))]
 }
@@ -368,12 +368,42 @@ func (s *sim) checkStaleCreates() {
 }
 
 // pendingCreateRollback reports a v2 close as failed-create of a row
-// holding its pending create's claim: a rollback (A10, S3) or A21's
-// failed-create close, which end the row and its holds with the Retire
-// cell, as legacy's failedCreateClosePatch does whatever holds the row
-// (SESS-061). I15 leaves the holds to it; PC1 judges when it may land.
+// holding its pending create's claim, or of a row already failed-create
+// whose claim a partial rollback or an attach's confirm cleared: a rollback
+// (A10, S3) or A21's failed-create close, which end the row and its holds
+// with the Retire cell, as legacy's failedCreateClosePatch does whatever
+// holds the row (SESS-061). I15 leaves the holds to it; PC1 judges when it
+// may land.
 func pendingCreateRollback(w simWrite) bool {
-	return w.Before.Metadata["pending_create_claim"] == "true" && w.After.Metadata["state"] == string(session.StateFailedCreate)
+	failed := string(session.StateFailedCreate)
+	return w.After.Metadata["state"] == failed && (w.Before.Metadata["pending_create_claim"] == "true" || w.Before.Metadata["state"] == failed)
+}
+
+// pendingCreateScreenPark reports A10's rollback screen parking a pending
+// create instead of closing it (SESS-051/092; CONTRACT v5.9z-1 (i), "close
+// or park"): a write of a row holding its claim that leaves it open and
+// asleep with a provider terminal error's park or a rate-limit quarantine,
+// which legacy's checkRateLimitStability writes whatever holds the row. I15
+// leaves it the hold's reason alone: no other held key, no wake, and no
+// quarantine shortened (an extension is no change).
+func pendingCreateScreenPark(w simWrite, stable bool) bool {
+	b, a := w.Before.Metadata, w.After.Metadata
+	if b["pending_create_claim"] != "true" || w.After.Status == "closed" || a["state"] != string(session.StateAsleep) {
+		return false
+	}
+	switch session.SleepReason(a["sleep_reason"]) {
+	case session.SleepReasonProviderTerminalError:
+		if a[sessionProviderTerminalErrorMetadataKey] == "" {
+			return false
+		}
+	case session.SleepReasonRateLimit:
+		if a["quarantined_until"] == "" {
+			return false
+		}
+	default:
+		return false
+	}
+	return slices.Equal(dormantChanges(w.Before, a, w.At, stable), []string{"sleep_reason"})
 }
 
 // pendingCreateAdopt reports v2's adopt (A10, S2) of a pending create whose
@@ -415,15 +445,15 @@ func (s *sim) pendingCreateTimers() []time.Time {
 	return out
 }
 
-// markEffect records, for the provider's kills, the kind of the v2 effect
-// now running (simKill.Effect), until it settles.
+// markEffect records, for the provider's kills, the kind and reason of the
+// v2 effect now running (simKill.Effect, Reason), until it settles.
 func (s *sim) markEffect(e *simEffect) func(settlement) {
 	s.sp.mu.Lock()
-	s.sp.effect = e.it.Kind
+	s.sp.effect, s.sp.reason = e.it.Kind, e.it.Reason
 	s.sp.mu.Unlock()
 	return func(settlement) {
 		s.sp.mu.Lock()
-		s.sp.effect = ""
+		s.sp.effect, s.sp.reason = "", ""
 		s.sp.mu.Unlock()
 	}
 }
@@ -441,10 +471,11 @@ func (s *sim) ownRuntimeException(k simKill, row beads.Bead, own bool) bool {
 }
 
 // ownRuntimeEffect reports a Stop made by an effect the own-runtime
-// exception covers: a rollback (its teardown, S7's exit) or a start (its
-// lost commit, its abandon's teardown).
+// exception covers: a rollback (its teardown, S7's exit), a start (its
+// lost commit, its abandon's teardown), or A13's restart, which waives the
+// attach leg (CONTRACT v5.10u).
 func ownRuntimeEffect(k simKill) bool {
-	return k.Method == "Stop" && (k.Effect == intentRollback || k.Effect == intentStart)
+	return k.Method == "Stop" && (k.Effect == intentRollback || k.Effect == intentStart || k.Effect == intentStop && k.Reason == decideRestartRequested)
 }
 
 // stopAdmission is a stop a pass admitted (sim.stopAdmissions): whether
@@ -572,6 +603,14 @@ func TestSimPendingRelaxationsBite(t *testing.T) {
 			s.prev = map[string]beads.Bead{"city/x": row("x", "session_name", "chat", "pending_create_claim", "true")}
 			s.sp.kills = append(s.sp.kills, simKill{Method: "Stop", Name: "chat", Effect: intentRollback, Hit: &simRuntime{id: "x", epoch: "1", token: "tok-1"}})
 		}},
+		// I4's just-closed own-teardown exception (v5.10e): only a rollback's
+		// or a start's stop of the row's own StaleSelf at its generation; at
+		// another generation it still fails.
+		{"I4: a rollback kills a just-closed row's StaleSelf runtime at another generation", "I4 ", func(s *sim) {
+			s.prev = map[string]beads.Bead{}
+			s.closedInStep = map[string]beads.Bead{"s-x": row("x")}
+			s.sp.kills = append(s.sp.kills, simKill{Method: "Stop", Name: "s-x", Effect: intentRollback, Hit: &simRuntime{id: "x", epoch: "1", token: "tok-old"}})
+		}},
 		{"I4: a stop verb kills another row's runtime under a just-closed pending create's name", "I4 ", func(s *sim) {
 			s.prev = map[string]beads.Bead{}
 			s.closedInStep = map[string]beads.Bead{"s-x": row("x", "pending_create_claim", "true", "pool_managed", "true")}
@@ -595,6 +634,26 @@ func TestSimPendingRelaxationsBite(t *testing.T) {
 			k := rowKey{Leg: rowLeg, ID: "gc-1"}
 			s.stopAdmissions = map[rowKey]stopAdmission{k: {moves: len(s.basisMoves)}}
 			s.checkFinalized(&simEffect{it: intent{Kind: intentStop, Key: k}})(settlement{Outcome: settledRefused, Cause: causePremise})
+		}},
+		// I15's named-reopen exception (mc-i7efm): only a configured named
+		// session's closed row reopened; a reopen of another closed row, or
+		// a named row's open write, that clears a hold still fails.
+		{"I15: a reopen of a closed row no configured named session holds", "I15 ", func(s *sim) {
+			b := row("x", held...)
+			b.Status = "closed"
+			s.checkWrite(simWrite{Leg: "city", At: s.clk.Now(), Before: b, After: row("x", "state", "stopped")})
+		}},
+		{"I15: a named row's open write that clears its hold", "I15 ", func(s *sim) {
+			b := row("x", append(held, "configured_named_session", "true")...)
+			s.checkWrite(simWrite{Leg: "city", At: s.clk.Now(), Before: b, After: row("x", "configured_named_session", "true", "state", "stopped")})
+		}},
+		// I16's deadline exception (mc-i7efm): a stop abandoned at its
+		// deadline only; one that failed on any other cause still fails.
+		{"I16: a stop failed on its write with no pane, left signaled", "I16 ", func(s *sim) {
+			s.setMeta(s.legs[0], "gc-1", signaled...)
+			s.sp.drop("s-gc-1")
+			k := rowKey{Leg: rowLeg, ID: "gc-1"}
+			s.checkFinalized(&simEffect{it: intent{Kind: intentStop, Key: k}})(settlement{Outcome: settledFailed, Cause: causeWrite})
 		}},
 		{"I16: signaled at quiescence with no pane, its probe answering", "I16 ", func(s *sim) {
 			s.setMeta(s.legs[0], "gc-1", signaled...)
@@ -624,8 +683,9 @@ func TestSimPendingRelaxationsBite(t *testing.T) {
 // the code's own cause: it is quiescent only at or past its row's backoff
 // expiry with no change but the runtime lease record, and only when the
 // sim's own hold model holds the row (simHeld). A refusal the model does not
-// back (planted X1), and a start refused attached (planted X2), are no
-// pacing. A rollback refused liveness-unknown is paced only over a
+// back (planted X1), and a start refused attached on an unattached pane
+// (planted X2), are no pacing; one refused attached under an attached pane
+// is. A rollback refused liveness-unknown is paced only over a
 // probe that keeps erroring.
 func TestSimPendingPacedRetries(t *testing.T) {
 	k := rowKey{Leg: rowLeg, ID: "gc-1"}
@@ -645,7 +705,8 @@ func TestSimPendingPacedRetries(t *testing.T) {
 		{"a held start at the expiry", intentStart, causeHeld, -time.Second, false, false, row("runtime_lease_epoch", "3", "sleep_intent", "user-hold"), row("runtime_lease_epoch", "4", "sleep_intent", "user-hold"), true},
 		{"a start refused held on a row the hold model holds not (X1)", intentStart, causeHeld, -time.Second, false, false, row("runtime_lease_epoch", "3", "sleep_reason", "idle"), row("runtime_lease_epoch", "4", "sleep_reason", "idle"), false},
 		{"a held start before the expiry", intentStart, causeHeld, time.Second, false, false, row("runtime_lease_epoch", "3", "sleep_intent", "user-hold"), row("runtime_lease_epoch", "4", "sleep_intent", "user-hold"), false},
-		{"an attached start at the expiry (no pacing: no seed needs it)", intentStart, causeAttached, -time.Second, true, false, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4"), false},
+		{"an attached start at the expiry (paced: shifted seed 474)", intentStart, causeAttached, -time.Second, true, false, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4"), true},
+		{"an attached start before the expiry", intentStart, causeAttached, time.Second, true, false, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4"), false},
 		{"a start refused attached on an unattached pane (X2)", intentStart, causeAttached, -time.Second, false, false, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4"), false},
 		{"a held start that moved another key", intentStart, causeHeld, -time.Second, false, false, row("runtime_lease_epoch", "3", "sleep_intent", "user-hold"), row("runtime_lease_epoch", "4", "sleep_intent", "user-hold", "state", "asleep"), false},
 		{"a start refused for another cause", intentStart, causePrepare, -time.Second, false, false, row("runtime_lease_epoch", "3"), row("runtime_lease_epoch", "4"), false},
@@ -865,4 +926,134 @@ func TestSimPC3CatchesALostCommitLeftRunning(t *testing.T) {
 		return
 	}
 	t.Fatal("no seed reached the lost commit")
+}
+
+// Kills I15's failed-create exception narrowed to a held claim (shifted
+// seeds 329, 665; SESS-061): A21's close of a row already failed-create,
+// its claim cleared, retires a heartbeat's hold as legacy's
+// failedCreateClosePatch does; the same close of a committed row still
+// fails I15, and so does a hold rewritten without a close.
+func TestFailedCreateCloseRetiresHolds(t *testing.T) {
+	held := rowAt(time.Hour)
+	closed := func(state string, closes bool, meta ...string) simWrite {
+		before := poolRow("gc-1", "worker", 1, state, append([]string{"held_until", held}, meta...)...)
+		after := poolRow("gc-1", "worker", 1, string(session.StateFailedCreate), "held_until", "")
+		if closes {
+			after.Status = "closed"
+		}
+		return simWrite{Leg: simCityLeg, Before: before, After: after, At: plannerT0}
+	}
+	for _, c := range []struct {
+		name  string
+		w     simWrite
+		fails bool
+	}{
+		{"a held claim", closed("creating", true, "pending_create_claim", "true"), false},
+		{"already failed-create, its claim cleared", closed(string(session.StateFailedCreate), true), false},
+		{"a committed row", closed("awake", true), true},
+		{"already failed-create, no close", closed(string(session.StateFailedCreate), false), true},
+	} {
+		s := scripted(t, nil, poolRow("gc-1", "worker", 1, "asleep"))
+		s.checkWrite(c.w)
+		failed := slices.ContainsFunc(s.failures, func(f string) bool { return strings.HasPrefix(f, "I15 ") })
+		if failed != c.fails {
+			t.Errorf("%s: failures %q, want an I15 failure %t", c.name, s.failures, c.fails)
+		}
+	}
+}
+
+// Kills I15's failed-create exception covering a close only (CONTRACT
+// v5.9z-1 (i), "close or park"): A10's rollback screen that parks a held
+// pending create with a provider terminal error, or quarantines it for a
+// rate limit, may rewrite the hold's sleep reason; the same park of a row
+// holding no claim, or a park that also rewrites the hold's timer, fails
+// I15.
+func TestRollbackScreenParkRewritesHolds(t *testing.T) {
+	held := []string{"sleep_intent", "user-hold", "held_until", rowAt(1000 * time.Hour), "sleep_reason", "user-hold"}
+	quarantined := func(d time.Duration) []string { return append(slices.Clone(held), "quarantined_until", rowAt(d)) }
+	park := func(claim bool, base []string, patch map[string]string) simWrite {
+		before := poolRow("gc-1", "worker", 1, "creating", base...)
+		if claim {
+			before.Metadata["pending_create_claim"] = "true"
+		}
+		after := poolRow("gc-1", "worker", 1, "creating", base...)
+		maps.Copy(after.Metadata, patch)
+		return simWrite{Leg: simCityLeg, Before: before, After: after, At: plannerT0}
+	}
+	closed := func(w simWrite) simWrite { w.After.Status = "closed"; return w }
+	// The parks are production's: A10's screen writes these patches.
+	terminal := providerTerminalErrorPatch("model_not_found", plannerT0)
+	rateLimit := maps.Clone(session.RateLimitQuarantinePatch())
+	rateLimit["quarantined_until"] = rowAt(30 * time.Minute)
+	with := func(p map[string]string, kv ...string) map[string]string {
+		p = maps.Clone(p)
+		for i := 0; i+1 < len(kv); i += 2 {
+			p[kv[i]] = kv[i+1]
+		}
+		return p
+	}
+	without := func(p map[string]string, k string) map[string]string { p = maps.Clone(p); delete(p, k); return p }
+	for _, c := range []struct {
+		name  string
+		w     simWrite
+		fails bool
+	}{
+		{"a terminal-error park of a held pending create", park(true, held, terminal), false},
+		{"a rate-limit quarantine of a held pending create", park(true, held, rateLimit), false},
+		{"a rate-limit park extending an operator's quarantine", park(true, quarantined(10*time.Minute), rateLimit), false},
+		{"the same park of a row holding no claim", park(false, held, terminal), true},
+		{"a park that also clears the hold's timer", park(true, held, with(terminal, "held_until", "")), true},
+		{"a park that closes the row", closed(park(true, held, terminal)), true},
+		{"an asleep write with another reason", park(true, held, with(terminal, "sleep_reason", string(session.SleepReasonIdle))), true},
+		{"a terminal-error park with no terminal error", park(true, held, without(terminal, sessionProviderTerminalErrorMetadataKey)), true},
+		{"a rate-limit park with no quarantine", park(true, held, without(rateLimit, "quarantined_until")), true},
+		{"a rate-limit park shortening an operator's quarantine", park(true, quarantined(24*time.Hour), rateLimit), true},
+		{"a terminal-error write that wakes the held row", park(true, held, with(terminal, "state", "active")), true},
+		{"a rate-limit write that wakes the held row", park(true, held, with(rateLimit, "state", "active")), true},
+		{"a terminal-error park that leaves the row creating", park(true, held, without(terminal, "state")), true},
+		{"a rate-limit park that leaves the row creating", park(true, held, without(rateLimit, "state")), true},
+	} {
+		s := scripted(t, nil, poolRow("gc-1", "worker", 1, "asleep"))
+		s.checkWrite(c.w)
+		failed := slices.ContainsFunc(s.failures, func(f string) bool { return strings.HasPrefix(f, "I15 ") })
+		if failed != c.fails {
+			t.Errorf("%s: failures %q, want an I15 failure %t", c.name, s.failures, c.fails)
+		}
+	}
+}
+
+// Kills I10's timer table counting what holds no plan back (mc-i7efm): an
+// ambiguous create's hard bound counts, a landed create's entry does not;
+// a fresh pool create's post-create protection counts, a committed row
+// past its creation_complete does not.
+func TestSimLastTimerCounts(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		arrange func(s *sim)
+		want    time.Duration
+	}{
+		{"nothing", func(*sim) {}, 0},
+		{"an ambiguous create", func(s *sim) {
+			s.inflight.creates["tok-a"] = inflightEntry{Kind: inflightCreate, Token: "tok-a", Ambiguous: true, SettledAt: s.clk.Now()}
+		}, inflightHardBound},
+		{"a running create", func(s *sim) {
+			s.inflight.creates["tok-a"] = inflightEntry{Kind: inflightCreate, Token: "tok-a", SettledAt: s.clk.Now()}
+		}, 0},
+		{"a fresh pool create", func(s *sim) {
+			s.setMeta(s.legs[0], "gc-1", "state", "awake", "state_reason", "creation_complete", "creation_complete_at", s.rel(0))
+		}, postCreateProtectionTimeout},
+		{"a committed row past its creation", func(s *sim) {
+			s.setMeta(s.legs[0], "gc-1", "state", "awake", "state_reason", "", "creation_complete_at", s.rel(0))
+		}, 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s := newSim(t, 3, simOpts{rows: func(*sim) ([]beads.Bead, []beads.Bead) {
+				return []beads.Bead{poolRow("gc-1", "worker", 1, "asleep", "instance_token", "tok-gc-1-1")}, nil
+			}})
+			c.arrange(s)
+			if got := s.lastTimer().Sub(s.clk.Now()); got != c.want {
+				t.Errorf("lastTimer = now+%s, want now+%s", got, c.want)
+			}
+		})
+	}
 }

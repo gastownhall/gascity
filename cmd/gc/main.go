@@ -283,8 +283,12 @@ func commandFailureMessage(err error) string {
 	if err == nil {
 		return "command failed"
 	}
+	// errExit and commandExitError carry only an exit code: the command has
+	// already written its diagnostics to stderr, so point there instead of
+	// echoing "exit N" back as the message.
+	var exitErr *commandExitError
 	msg := strings.TrimSpace(err.Error())
-	if msg == "" || errors.Is(err, errExit) {
+	if msg == "" || errors.Is(err, errExit) || errors.As(err, &exitErr) {
 		return "command failed; see stderr for diagnostics"
 	}
 	return msg

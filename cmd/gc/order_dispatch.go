@@ -1396,7 +1396,9 @@ func (idx *orderDispatchTrackingIndex) entriesForStore(store beads.Store, storeK
 	}
 	entries := make(map[string]orderTrackingSummary)
 	for _, b := range items {
-		if b.Status == "closed" {
+		// A plain bead carrying an order-run label is no run of the order
+		// (orders.IsRunRecord, mc-v8g4p): it holds no single-flight.
+		if b.Status == "closed" || !orders.IsRunRecord(b) {
 			continue
 		}
 		tracking := orders.IsTrackingBead(b)

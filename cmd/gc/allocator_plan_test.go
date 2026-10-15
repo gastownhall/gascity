@@ -870,6 +870,18 @@ func TestAllocator_NamedPlan_OccupancyFromObservation(t *testing.T) {
 		{"absent", func(*allocFixture) {}, true, false, ""},
 		{"corpse", func(f *allocFixture) { f.corpse(name) }, true, false, ""},
 		{"zombie", func(f *allocFixture) { f.alive(name, InventoryAttrs{}).fact(name, FactProcessAlive, ObsNo) }, true, false, ""},
+		// Another session's dead runtime holds the name (CONTRACT v5.10e): the
+		// A14 generator's seed 892 created, rolled back and created again.
+		{"zombie-foreign", func(f *allocFixture) {
+			f.alive(name, InventoryAttrs{Identity: runtimeIdentity{Known: true, SessionID: "gc-other", Token: "other-tok"}}).fact(name, FactProcessAlive, ObsNo)
+		}, false, false, gateNameHeld + "gc-other"},
+		{"corpse-foreign", func(f *allocFixture) {
+			f.corpse(name)
+			delete(f.own, name) // its identity is the one set below, not the census row's
+			a := f.attrs[name]
+			a.Identity = runtimeIdentity{Known: true, SessionID: "gc-other", Token: "other-tok"}
+			f.attrs[name] = a
+		}, false, false, gateNameHeld + "gc-other"},
 		{"alive-ownerless", func(f *allocFixture) { f.alive(name, InventoryAttrs{Identity: runtimeIdentity{Known: true}}) }, true, true, ""},
 		{"alive-legacy-adopted", func(f *allocFixture) {
 			f.alive(name, InventoryAttrs{Identity: runtimeIdentity{Known: true, Token: "rt-tok"}})

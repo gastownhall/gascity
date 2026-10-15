@@ -95,15 +95,26 @@ func TestAbandonKeepsConversationUnderObservePaths(t *testing.T) {
 // resume launch counts and resets at the third in a row, and a capacity
 // refusal (a CapacityError wrapping the startup death included), a deadline,
 // a name collision, a spawn error, or any failure of a fresh launch neither
-// resets nor counts. v2's abandon matches legacy's recordWakeFailure on every
+// resets nor counts. A committed manual conversation is kept and bounded so
+// whatever its transcript reads; an always-named one, like a pool one, is
+// kept only while its transcript reads present, and with it absent any
+// failure resets it. v2's abandon matches legacy's recordWakeFailure on every
 // key, and a committed manual conversation's reset alone records
 // session.conversation_reset{reason:resume-failed}.
 func TestResumeBackstopOnAFailedStart(t *testing.T) {
 	prev := staleResumeKeyProbe
-	staleResumeKeyProbe = func([]string, string, string, string) (bool, bool) { return true, true }
 	t.Cleanup(func() { staleResumeKeyProbe = prev })
 	died := fmt.Errorf("session %q: %w", "s-gc-1", runtime.ErrSessionDiedDuringStartup)
 	refusal := fmt.Errorf("%w; last pane output: No conversation found with session ID: k-1", runtime.ErrSessionDiedDuringStartup)
+	owners := []struct {
+		name   string
+		meta   []string
+		manual bool // a committed manual conversation: kept whatever its transcript reads
+	}{
+		{"manual", []string{"session_origin", "manual"}, true},
+		{"always-named", []string{session.NamedSessionMetadataKey, "true", session.NamedSessionModeMetadata, "always"}, false},
+		{"pool", nil, false},
+	}
 	for _, c := range []struct {
 		name     string
 		resumed  bool
@@ -123,40 +134,49 @@ func TestResumeBackstopOnAFailedStart(t *testing.T) {
 		{"a spawn error", true, errors.New("tmux: exec failed"), "2", false, "2"},
 		{"a fresh launch's startup death", false, refusal, "2", false, "2"},
 	} {
-		for _, manual := range []bool{true, false} {
-			name := fmt.Sprintf("%s, manual %v", c.name, manual)
-			meta := []string{"generation", "4", "instance_token", "tok-4", "provider", "claude", "work_dir", "/work", "session_key", "k-1", "started_config_hash", "h-1", "wake_attempts", "0", "resume_failures", c.failures}
-			if manual {
-				meta = append(meta, "session_origin", "manual")
-			}
-			row := poolRow("gc-1", "worker", 1, "creating", meta...)
-			rf := startResumeFailure(c.resumed, false, "k-1", c.err, "")
-
-			rec := events.NewFake()
-			m := beads.NewMemStoreFrom(0, []beads.Bead{withMeta(row)}, nil)
-			recordWakeFailure(sessionInfoFromBead(row), sessionTranscriptSearchPaths(nil), sessionFrontDoor(m), &clock.Fake{Time: gatherNow}, "worker", rf, rec)
-			legacy, _ := m.Get(row.ID)
-			if reset := legacy.Metadata["session_key"] == ""; reset != c.reset || legacy.Metadata["resume_failures"] != c.count {
-				t.Fatalf("%s: legacy reset %v resume_failures %q, want reset %v and %q", name, reset, legacy.Metadata["resume_failures"], c.reset, c.count)
-			}
-			want := 0
-			if c.reset && manual {
-				want = 1
-			}
-			if got := resumeFailedEvents(t, rec.Events, "worker"); got != want {
-				t.Fatalf("%s: legacy recorded %d resume-failed resets, want %d", name, got, want)
-			}
-
-			k := startKit(t, intentStart, "creating")
-			read := startFailureRead{startFailure: startFailure{cause: causeStartError, err: c.err, display: "worker", relaunched: true}, keeps: true, resume: rf}
-			step := abandonStep(abandonView(k, row, txRuntime{Class: rtAbsent}, read))
-			for key, v := range legacy.Metadata {
-				if v != row.Metadata[key] && step.Write[key] != v {
-					t.Errorf("%s: v2 writes %s = %q, legacy writes %q", name, key, step.Write[key], v)
+		for _, owner := range owners {
+			for _, present := range []bool{true, false} {
+				staleResumeKeyProbe = func([]string, string, string, string) (bool, bool) { return present, true }
+				name := fmt.Sprintf("%s, %s, transcript present %v", c.name, owner.name, present)
+				meta := []string{"generation", "4", "instance_token", "tok-4", "provider", "claude", "work_dir", "/work", "session_key", "k-1", "started_config_hash", "h-1", "wake_attempts", "0", "resume_failures", c.failures}
+				row := poolRow("gc-1", "worker", 1, "creating", append(meta, owner.meta...)...)
+				rf := startResumeFailure(c.resumed, false, "k-1", c.err, "")
+				reset, count := c.reset, c.count
+				if !owner.manual && !present {
+					reset, count = true, ""
 				}
-			}
-			if got := resumeFailedEvents(t, step.Facts.Events, "worker"); got != want {
-				t.Fatalf("%s: v2 recorded %d resume-failed resets, want %d", name, got, want)
+
+				rec := events.NewFake()
+				m := beads.NewMemStoreFrom(0, []beads.Bead{withMeta(row)}, nil)
+				recordWakeFailure(sessionInfoFromBead(row), sessionTranscriptSearchPaths(nil), sessionFrontDoor(m), &clock.Fake{Time: gatherNow}, "worker", rf, rec)
+				legacy, _ := m.Get(row.ID)
+				if got := legacy.Metadata["session_key"] == ""; got != reset || legacy.Metadata["resume_failures"] != count {
+					t.Fatalf("%s: legacy reset %v resume_failures %q, want reset %v and %q", name, got, legacy.Metadata["resume_failures"], reset, count)
+				}
+				want := 0
+				if reset && owner.manual {
+					want = 1
+				}
+				if got := resumeFailedEvents(t, rec.Events); got != want {
+					t.Fatalf("%s: legacy recorded %d resume-failed resets, want %d", name, got, want)
+				}
+
+				k := startKit(t, intentStart, "creating")
+				read := startFailureRead{startFailure: startFailure{cause: causeStartError, err: c.err, display: "worker", relaunched: true}, keeps: present, resume: rf}
+				step := abandonStep(abandonView(k, row, txRuntime{Class: rtAbsent}, read))
+				for key, v := range legacy.Metadata {
+					if v != row.Metadata[key] && step.Write[key] != v {
+						t.Errorf("%s: v2 writes %s = %q, legacy writes %q", name, key, step.Write[key], v)
+					}
+				}
+				for _, key := range []string{"session_key", "started_config_hash", "resume_failures"} {
+					if v, ok := step.Write[key]; ok && v != legacy.Metadata[key] {
+						t.Errorf("%s: v2 writes %s = %q, legacy leaves %q", name, key, v, legacy.Metadata[key])
+					}
+				}
+				if got := resumeFailedEvents(t, step.Facts.Events); got != want {
+					t.Fatalf("%s: v2 recorded %d resume-failed resets, want %d", name, got, want)
+				}
 			}
 		}
 	}
@@ -238,9 +258,9 @@ func TestFailureCallClassifiesTheResume(t *testing.T) {
 }
 
 // resumeFailedEvents counts evs' session.conversation_reset events, each
-// checked for gc-1, subject, the template worker and the resume-failed
+// checked for gc-1, the subject and template worker and the resume-failed
 // reason.
-func resumeFailedEvents(t *testing.T, evs []events.Event, subject string) int {
+func resumeFailedEvents(t *testing.T, evs []events.Event) int {
 	t.Helper()
 	n := 0
 	for _, e := range evs {
@@ -248,8 +268,8 @@ func resumeFailedEvents(t *testing.T, evs []events.Event, subject string) int {
 			continue
 		}
 		var p api.SessionLifecyclePayload
-		if err := json.Unmarshal(e.Payload, &p); err != nil || e.SessionID != "gc-1" || e.Subject != subject || p.Template != "worker" || p.Reason != "resume-failed" {
-			t.Fatalf("event %+v (payload %+v, err %v), want gc-1, subject %q, template worker, reason resume-failed", e, p, err, subject)
+		if err := json.Unmarshal(e.Payload, &p); err != nil || e.SessionID != "gc-1" || e.Subject != "worker" || p.Template != "worker" || p.Reason != "resume-failed" {
+			t.Fatalf("event %+v (payload %+v, err %v), want gc-1, subject and template worker, reason resume-failed", e, p, err)
 		}
 		n++
 	}
@@ -1260,5 +1280,207 @@ func TestStrandedComposedStartStaysCommitted(t *testing.T) {
 	k.runKind()
 	if got := k.meta("state"); got != "active" {
 		t.Fatalf("state %q, want the stranded seat still committed", got)
+	}
+}
+
+// strandedTimerStart is a committed pool seat whose runtime is gone and whose
+// late quarantine expired at the pass (A6's timer heal), composed into its
+// start (startHealed); a stranded one has no work.
+func strandedTimerStart(t *testing.T, stranded bool, woke time.Duration) (*txKit, intent) {
+	t.Helper()
+	k, _ := launchKit(t, "active", "session_key", "k-1", "started_config_hash", "h",
+		"last_woke_at", gatherNow.Add(-woke).Format(time.RFC3339),
+		"quarantined_until", gatherNow.Add(-time.Minute).Format(time.RFC3339),
+		"sleep_reason", "quarantine", "wake_attempts", "3", "churn_count", "2")
+	row := k.p.World.Census.Rows[k.it.Key]
+	healPatch, healClass, _ := timerHealPatch(row.Info, gatherNow)
+	heal := intent{Kind: intentRowHeal, Reason: decideTimerHeal, Key: k.it.Key, Patch: healPatch, Class: healClass}
+	e := &selectionEntry{Key: k.it.Key, Liveness: livenessGone, Desired: desireWake, Template: "worker"}
+	if !stranded {
+		e.AssignedWork = &assignedWorkView{BeadID: "gw-1"}
+	}
+	it := (&rowFacts{w: k.p.World, k: k.it.Key, row: row, found: true, entry: e}).startHealed(heal)
+	if it.Kind != intentStart {
+		t.Fatalf("startHealed = %+v, want a start", it)
+	}
+	it.Deadline = k.it.Deadline
+	return k, it
+}
+
+// rearmedTimerStart is a start composed over an expired hold's timer heal on
+// a dead runtime, whose hold an agent's heartbeat re-arms after the first
+// section's read: the recycle section writes first, and the PreWake reads
+// the re-armed hold.
+func rearmedTimerStart(t *testing.T) (*txKit, time.Time) {
+	t.Helper()
+	k, _, _ := deadKit(t, false, "gc-1", "tok", "", "held_until", gatherNow.Add(-time.Minute).Format(time.RFC3339))
+	healPatch, healClass, _ := timerHealPatch(k.p.World.Census.Rows[k.it.Key].Info, gatherNow)
+	heal := intent{Kind: intentRowHeal, Reason: decideTimerHeal, Key: k.it.Key, Patch: healPatch, Class: healClass}
+	r := &rowFacts{w: k.p.World, k: k.it.Key, row: k.p.World.Census.Rows[k.it.Key], found: true, entry: &selectionEntry{Key: k.it.Key, Liveness: livenessGone, Desired: desireWake, Template: "worker"}}
+	it := r.startHealed(heal)
+	if it.Kind != intentStart || !it.Class.Has("held_until") {
+		t.Fatalf("startHealed = %+v, want a start carrying the hold's clear", it)
+	}
+	it.Deadline = k.it.Deadline
+	k.it = it
+	beat := gatherNow.Add(time.Minute)
+	k.on(seamAfterRowRead, func() {
+		if _, err := session.NewStore(beads.SessionStore{Store: k.backing}).ApplyDispositionFresh("gc-1", session.ActorAgent, session.DispEvent{Kind: session.EvHeartbeat, Until: beat}, nil, gatherNow); err != nil {
+			t.Error(err)
+		}
+	})
+	return k, beat
+}
+
+// Kills a start's carried timer heal applied stale over a re-armed hold (the
+// creates generator's seed 613 of the floored corpus, mc-i7efm), and a
+// re-derivation that rewrites the start's own cells when nothing raced (the
+// #7760 review): a heartbeat re-arming the hold the pass read expired
+// refuses the start held, a refusal that backs the row off, writing no heal
+// at the PreWake nor at the verb section's refusal after the recycle's
+// stop; with no race, a stranded seat's crash accrual and a failed launch's
+// restore are the composed start's own.
+func TestComposedStartTimerHealDrift(t *testing.T) {
+	t.Run("re-armed: refused held, no heal", func(t *testing.T) {
+		k, beat := rearmedTimerStart(t)
+		if s := k.runKind(); s.Outcome != settledRefused || s.Cause != causeHeld || len(k.starts()) != 0 || k.meta("held_until") != beat.Format(time.RFC3339) {
+			t.Fatalf("settlement %+v starts %d held_until %q, want refused held, the heartbeat's hold kept and no start", s, len(k.starts()), k.meta("held_until"))
+		}
+	})
+	t.Run("re-armed: the verb section's refusal writes no heal", func(t *testing.T) {
+		k, beat := rearmedTimerStart(t)
+		k.p.World.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{}} // the verb section refuses template-unresolved
+		if s := k.runKind(); s.Outcome != settledRefused || k.meta("held_until") != beat.Format(time.RFC3339) {
+			t.Fatalf("settlement %+v held_until %q, want refused with the heartbeat's hold kept", s, k.meta("held_until"))
+		}
+	})
+	t.Run("no race: a stranded seat's crash accrual rides the PreWake", func(t *testing.T) {
+		k, it := strandedTimerStart(t, true, 10*time.Second)
+		k.it = it
+		if s := k.runKind(); s.Outcome != settledLanded || k.meta("wake_attempts") != "1" || len(k.starts()) != 1 {
+			t.Fatalf("settlement %+v starts %d wake_attempts %q, want landed with the death's accrual 1", s, len(k.starts()), k.meta("wake_attempts"))
+		}
+	})
+	t.Run("no race: a failed launch restores the healed row", func(t *testing.T) {
+		k, it := strandedTimerStart(t, false, time.Hour)
+		k.it = it
+		k.sp.nextStart = errors.New("boom")
+		if s := k.runKind(); k.meta("sleep_reason") != "runtime-missing" {
+			t.Fatalf("settlement %+v sleep_reason %q, want the healed row's runtime-missing restored", s, k.meta("sleep_reason"))
+		}
+	})
+}
+
+// Kills A10 proposing the occupant rollback over another session's corpse
+// inside the pending create's lease (CONTRACT v5.10i; the A14 generator's
+// seed 533 of the floored corpus, mc-i7efm): the effect takes a corpse for
+// an occupant that left and refuses redecided while the lease holds, every
+// pass. Inside the lease the row holds, asking for a pass when it lapses;
+// past it, under an anchor stamped ahead (the skew guard), or under a
+// foreign runtime alive or a zombie, the rollback is proposed.
+func TestArmRollbackHoldsOverAForeignCorpseInsideTheLease(t *testing.T) {
+	foreign := runtimeIdentity{Known: true, SessionID: "gc-other", Epoch: "1", Token: "tok-other"}
+	for _, c := range []struct {
+		name    string
+		runtime func(f *allocFixture, name string)
+		started time.Duration // pending_create_started_at, before now
+		held    bool
+	}{
+		{"a corpse inside the lease", func(f *allocFixture, name string) { f.corpse(name); delete(f.own, name) }, time.Minute, true},
+		// The skew guard (pendingCreateAnchorAhead): an anchor stamped ahead
+		// of now by a stepped clock holds no lease, so no hold.
+		{"a corpse under an anchor 2h ahead", func(f *allocFixture, name string) { f.corpse(name); delete(f.own, name) }, -2 * time.Hour, false},
+		{"a corpse past the lease", func(f *allocFixture, name string) { f.corpse(name); delete(f.own, name) }, 11 * time.Minute, false},
+		{"alive inside the lease", func(f *allocFixture, name string) { f.alive(name, InventoryAttrs{Identity: foreign}) }, time.Minute, false},
+		{"a zombie inside the lease", func(f *allocFixture, name string) {
+			f.alive(name, InventoryAttrs{Identity: foreign}).fact(name, FactProcessAlive, ObsNo)
+		}, time.Minute, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			row := poolRow("gc-1", "worker", 1, "creating", "instance_token", "tok", "pending_create_claim", "true",
+				"pending_create_started_at", allocNow.Add(-c.started).UTC().Format(time.RFC3339))
+			k := rowKeyOf(row.ID)
+			info := sessionInfoFromBead(row)
+			f := newAllocFixture(t, workerCity(3))
+			c.runtime(f, info.SessionName)
+			w := &World{
+				Now: allocNow, Obs: f.observation(), ObsMaxAge: observeMaxAge, Env: &reconcileEnv{Cfg: workerCity(3)},
+				Observed: map[rowKey]rowObservation{k: {Liveness: livenessOccupied, Identity: foreign}},
+			}
+			r := &rowFacts{w: w, k: k, row: newCensusRow(k, info), found: true, entry: &selectionEntry{Key: k, Desired: desireNone, Reason: reasonNameOccupied, Liveness: livenessOccupied}}
+			it, ok := armRollback(r)
+			switch {
+			case !ok:
+				t.Fatalf("armRollback declined, want a decision")
+			case c.held && (it.Kind != "" || it.Reason != decideRollbackHeld):
+				t.Fatalf("armRollback = (%q, %q), want held %q", it.Kind, it.Reason, decideRollbackHeld)
+			case c.held && !r.next.Equal(allocNow.Add(-c.started).Add(pendingCreateNeverStartedTimeout+time.Second)):
+				t.Fatalf("held with next pass %v, want the never-started lease's end %v", r.next, allocNow.Add(-c.started).Add(pendingCreateNeverStartedTimeout+time.Second))
+			case !c.held && (it.Kind != intentRollback || !it.Occupant):
+				t.Fatalf("armRollback = (%q, %q), want the occupant rollback", it.Kind, it.Reason)
+			}
+		})
+	}
+}
+
+// Kills the corpse hold's deadline (v5.10i, the #7782 review) drifting from
+// the lease pendingCreateLeaseActive decides: a never-started create's lease
+// ends a second past pendingCreateNeverStartedTimeout from its anchor; a
+// started one's at the later of its start in flight (last_woke_at plus the
+// startup timeout and the stale-key and settle allowances) and its fresh
+// attempt (the anchor plus staleCreatingStateTimeout). At each end the lease
+// has lapsed, a second before it holds.
+func TestPendingCreateLeaseEnd(t *testing.T) {
+	cfg := workerCity(3)
+	startup := cfg.Session.StartupTimeoutDuration()
+	if startup <= 0 {
+		startup = time.Minute
+	}
+	ts := func(d time.Duration) string { return allocNow.Add(d).UTC().Format(time.RFC3339) }
+	for _, c := range []struct {
+		name string
+		meta []string
+		want time.Time
+	}{
+		{"never started", []string{"pending_create_started_at", ts(-time.Minute)}, allocNow.Add(-time.Minute + pendingCreateNeverStartedTimeout + time.Second)},
+		{"started, in flight ends later", []string{"pending_create_started_at", ts(-30 * time.Second), "last_woke_at", ts(-10 * time.Second)}, allocNow.Add(-10*time.Second + startup + staleKeyDetectDelay + 5*time.Second)},
+		{"started, the fresh attempt ends later", []string{"pending_create_started_at", ts(time.Minute), "last_woke_at", ts(-time.Hour)}, allocNow.Add(time.Minute + staleCreatingStateTimeout)},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			row := poolRow("gc-1", "worker", 1, "creating", append([]string{"instance_token", "tok", "pending_create_claim", "true"}, c.meta...)...)
+			k := rowKeyOf(row.ID)
+			info := sessionInfoFromBead(row)
+			r := &rowFacts{w: &World{Now: allocNow, Env: &reconcileEnv{Cfg: cfg}}, k: k, row: newCensusRow(k, info), found: true}
+			end := r.pendingCreateLeaseEnd()
+			if !end.Equal(c.want) {
+				t.Fatalf("lease end %v, want %v", end, c.want)
+			}
+			if pendingCreateLeaseActiveAt(info, end, startup) || !pendingCreateLeaseActiveAt(info, end.Add(-time.Second), startup) {
+				t.Fatalf("at %v the lease is active %t, a second before %t; want lapsed, then held", end, pendingCreateLeaseActiveAt(info, end, startup), pendingCreateLeaseActiveAt(info, end.Add(-time.Second), startup))
+			}
+		})
+	}
+}
+
+// Kills the drift check deriving the fresh heal at the effect's time (the
+// #7760 review, probe P5): an agent heartbeat's hold that merely expires
+// between the pass and the PreWake moved nothing on the row, so A17's start
+// composed over an expired quarantine's timer heal lands as on main.
+func TestComposedStartHeartbeatExpiringBeforePreWakeIsNoDrift(t *testing.T) {
+	k, _ := launchKit(t, "asleep", "held_until", gatherNow.Add(30*time.Second).Format(time.RFC3339),
+		"quarantined_until", gatherNow.Add(-time.Minute).Format(time.RFC3339), "sleep_reason", "quarantine")
+	row := k.p.World.Census.Rows[k.it.Key]
+	healPatch, healClass, _ := timerHealPatch(row.Info, gatherNow)
+	heal := intent{Kind: intentRowHeal, Reason: decideTimerHeal, Key: k.it.Key, Patch: healPatch, Class: healClass}
+	e := &selectionEntry{Key: k.it.Key, Liveness: livenessGone, Desired: desireSleep, Template: "worker", AssignedWork: &assignedWorkView{BeadID: "gw-1"}}
+	it := (&rowFacts{w: k.p.World, k: k.it.Key, row: row, found: true, entry: e}).startHealed(heal)
+	if it.Kind != intentStart || it.Reason != decideHeartbeatRespawn {
+		t.Fatalf("startHealed = %+v, want A17's start carrying the quarantine's clear", it)
+	}
+	it.Deadline = gatherNow.Add(10 * time.Minute)
+	k.it = it
+	k.p.Clock = newFakePlannerClock(gatherNow.Add(time.Minute)) // the heartbeat's hold has ended by the PreWake
+	if s := k.runKind(); s.Outcome != settledLanded || len(k.starts()) != 1 {
+		t.Fatalf("settlement %+v starts %d, want the start landed as on main", s, len(k.starts()))
 	}
 }

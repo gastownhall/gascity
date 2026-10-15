@@ -81,7 +81,7 @@ func TestLastRunCursorUnionAcrossDistinctStores(t *testing.T) {
 // not double-read, so the verdict stays byte-identical to the pre-split behavior.
 func TestMixedLegStoresDedupsSharedStore(t *testing.T) {
 	shared := &listSpyStore{Store: beads.NewMemStore()}
-	if _, err := shared.Create(beads.Bead{Title: "order:digest", Status: "closed", Labels: []string{"order-run:digest"}}); err != nil {
+	if _, err := shared.Create(beads.Bead{Title: "order:digest", Status: "closed", Labels: []string{"order-run:digest", "order-tracking"}}); err != nil {
 		t.Fatal(err)
 	}
 	shared.queries = nil
@@ -107,7 +107,7 @@ func TestMixedLegStoresDedupsSharedStore(t *testing.T) {
 // letting ApplyListQuery cut the canonical (created_at DESC, id DESC) prefix.
 func TestCursorDoesNotOptIntoBackingCreatedLimit(t *testing.T) {
 	spy := &listSpyStore{Store: beads.NewMemStore()}
-	if _, err := spy.Create(beads.Bead{Title: "run", Labels: []string{"order-run:digest", "seq:9"}}); err != nil {
+	if _, err := spy.Create(beads.Bead{Title: "run", Labels: []string{"order-run:digest", "order-tracking", "seq:9"}}); err != nil {
 		t.Fatal(err)
 	}
 	spy.queries = nil
@@ -292,7 +292,7 @@ func TestGetAndRunDetail(t *testing.T) {
 	mem := beads.NewMemStore()
 	created, err := mem.Create(beads.Bead{
 		Title:  "order:digest",
-		Labels: []string{"order-run:digest", "exec"},
+		Labels: []string{"order-run:digest", "order-tracking", "exec"},
 	})
 	if err != nil {
 		t.Fatal(err)

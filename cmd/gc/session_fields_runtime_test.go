@@ -160,7 +160,7 @@ func TestSessionFieldsFlowsWriteTheirKeys(t *testing.T) {
 			plan := namedPlan(t, cfg, "c1", "mayor")
 			plan.Named.BoundStepID = "gc-step"
 			rec.reset()
-			h.runAll(t, &createPass{cfg: cfg, store: rec}, plan)
+			h.runAll(t, &createPass{cfg: cfg, sp: newSimProvider(), store: rec}, plan)
 		}},
 		{"v2 heal effect", "stranded_event_emitted_at", []string{"cmd/gc/reconcile_arms_heals.go:armStrandedClear"}, func(t *testing.T, rec *sessionKeyRecorder) {
 			heal := newHealCase(t, livenessAlive, desireKeep, "state", "active", strandedEventEmittedKey, now.Format(time.RFC3339))
@@ -190,7 +190,8 @@ func TestSessionFieldsFlowsWriteTheirKeys(t *testing.T) {
 			withoutA7(t)
 			named := []string{"configured_named_session", "true", "configured_named_identity", "worker", "configured_named_mode", "always"}
 			c, _ := baselineCase(t, livenessGone, desireKeep, nil, append([]string{
-				"state", "asleep", "started_config_hash", runtime.FingerprintVersion + ":stale", "restart_requested", "true",
+				"state", "asleep", "started_config_hash", runtime.FingerprintVersion + ":stale", // no restart_requested: A13 would restart the row ahead of A14
+
 				"config_drift_deferred_key", "k", "config_drift_deferred_at", rowAt(-time.Hour), "attached_config_drift_deferred_key", "k", "attached_config_drift_deferred_at", rowAt(-time.Hour),
 			}, named...)...)
 			c.w.Env = &reconcileEnv{Cfg: workerCity(1)}
@@ -209,7 +210,7 @@ func TestSessionFieldsFlowsWriteTheirKeys(t *testing.T) {
 			}
 			rec.keys = baseRec.keys
 		}},
-		{"waits, claim markers and the circuit breaker", "continuation_claim_nudge_at continuation_claim_nudge_count continuation_claim_nudge_generation continuation_claim_nudge_root continuation_claim_nudge_store_ref continuation_claim_nudge_work execution_claim_nudge_at execution_claim_nudge_count execution_claim_nudge_root execution_claim_nudge_store_ref execution_claim_nudge_work session_circuit_last_observed session_circuit_last_progress session_circuit_last_restart session_circuit_open_restart_count session_circuit_opened_at session_circuit_progress_signature session_circuit_reset_generation session_circuit_restarts session_circuit_state sleep_intent wait_hold wait_lookup_capped_at wait_lookup_capped_label wait_lookup_capped_limit wait_lookup_capped_source", []string{"cmd/gc/reconcile_steps_waits.go:clearSessionWaitHoldFenced", "cmd/gc/cmd_wait.go:doSessionWait", "internal/session/waits.go:StampWaitLookupCapMetadata", "cmd/gc/idle_nudge.go:writeContinuationClaimMarker", "cmd/gc/execution_backstop.go:writeExecutionClaimMarker", "cmd/gc/session_circuit_breaker.go:sessionCircuitBreaker.metadataLocked"}, func(t *testing.T, rec *sessionKeyRecorder) {
+		{"waits, claim markers and the circuit breaker", "continuation_claim_nudge_at continuation_claim_nudge_count continuation_claim_nudge_generation continuation_claim_nudge_root continuation_claim_nudge_store_ref continuation_claim_nudge_work execution_claim_nudge_at execution_claim_nudge_count execution_claim_nudge_root execution_claim_nudge_store_ref execution_claim_nudge_token execution_claim_nudge_work session_circuit_last_observed session_circuit_last_progress session_circuit_last_restart session_circuit_open_restart_count session_circuit_opened_at session_circuit_progress_signature session_circuit_reset_generation session_circuit_restarts session_circuit_state sleep_intent wait_hold wait_lookup_capped_at wait_lookup_capped_label wait_lookup_capped_limit wait_lookup_capped_source", []string{"cmd/gc/reconcile_steps_waits.go:clearSessionWaitHoldFenced", "cmd/gc/cmd_wait.go:doSessionWait", "internal/session/waits.go:StampWaitLookupCapMetadata", "cmd/gc/idle_nudge.go:writeContinuationClaimMarker", "cmd/gc/execution_backstop.go:writeExecutionClaimMarker", "cmd/gc/session_circuit_breaker.go:sessionCircuitBreaker.metadataLocked"}, func(t *testing.T, rec *sessionKeyRecorder) {
 			id := fieldRow(t, rec.MemStore, "state", "active", "wait_hold", "true", "sleep_intent", "wait-hold")
 			front := sessionFrontDoor(rec)
 			must(t, clearSessionWaitHoldFenced(front, id))
@@ -360,6 +361,20 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 				newFakeDrainOps(), env.dt, env.clk, env.rec, io.Discard)
 			return fieldBead(t, env.store, b.ID).Metadata
 		}},
+		"cmd/gc/reconcile_arms_lifecycle.go:restartHandoff": {[]string{"restart_requested", "true"}, patchSite(func(session.Info) session.MetadataPatch {
+			return restartHandoff("", true, finalizeFacts{Now: now})
+		})},
+		"cmd/gc/reconcile_arms_lifecycle.go:armRestartRequested": { // a pinned named row's collateral clear (SESS-521)
+			[]string{"restart_requested", "true", "configured_named_session", "true", "configured_named_identity", "worker", "pin_awake", "true"},
+			func(t *testing.T, meta []string) map[string]string {
+				c := newHealCase(t, livenessAlive, desireKeep, meta...)
+				it, _ := armRestartRequested(&rowFacts{w: c.w, k: c.k, row: c.w.Census.Rows[c.k], entry: c.a.Snapshot.Entries[c.k], found: true})
+				if err := c.store.SetMetadataBatch(c.k.ID, it.Patch); err != nil {
+					t.Fatal(err)
+				}
+				return c.meta(t)
+			},
+		},
 		"internal/session/lifecycle_transition.go:PreWakePatch": {
 			[]string{
 				"wake_request", "explicit", "wake_requested_at", ago(time.Minute), "detached_at", ago(time.Hour), "sleep_intent", "idle-stop-pending",
@@ -383,7 +398,7 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 				closed := seedClosedNamedRow(t, store, cfg, pairs(meta))
 				h := newNamedHarness(t, t.TempDir(), nil)
 				h.reserve(t, "c1")
-				h.runAll(t, &createPass{cfg: cfg, store: store}, namedPlan(t, cfg, "c1", "mayor"))
+				h.runAll(t, &createPass{cfg: cfg, sp: newSimProvider(), store: store}, namedPlan(t, cfg, "c1", "mayor"))
 				return fieldBead(t, store, closed.ID).Metadata
 			},
 		},
@@ -501,6 +516,20 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 				it, ok := armAwakeHeal(&rowFacts{w: c.w, k: c.k, row: c.w.Census.Rows[c.k], entry: c.a.Snapshot.Entries[c.k]})
 				if !ok || it.folded()["state"] != "awake" {
 					t.Fatalf("the awake heal did not fire: %+v", it)
+				}
+				if err := c.store.SetMetadataBatch(c.k.ID, it.folded()); err != nil {
+					t.Fatal(err)
+				}
+				return c.meta(t)
+			},
+		},
+		"cmd/gc/reconcile_arms_heals.go:armSatisfiedWake": { // D7 rule 2
+			[]string{"state", "active", "wake_request", "explicit", "wake_requested_at", ago(time.Minute)},
+			func(t *testing.T, meta []string) map[string]string {
+				c := ownRuntimeCase(t, "tok-3", meta...)
+				it, ok := armSatisfiedWake(&rowFacts{w: c.w, k: c.k, row: c.w.Census.Rows[c.k], entry: c.a.Snapshot.Entries[c.k]})
+				if !ok || it.Reason != decideSatisfiedWake {
+					t.Fatalf("the satisfied-wake clear did not fire: %+v", it)
 				}
 				if err := c.store.SetMetadataBatch(c.k.ID, it.folded()); err != nil {
 					t.Fatal(err)

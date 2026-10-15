@@ -43,6 +43,7 @@ const (
 	intentRollback        = "rollback"          // A10 (C3)
 	intentRowMetadata     = "row-metadata"      // A7 (M1)
 	intentRuntimeAlias    = "runtime-alias"     // A7's runtime alias sync, after its alias write (M1)
+	intentMarkerClear     = "marker-clear"      // A13's pinned skip: clears the runtime's restart marker (SESS-521)
 	intentBaseline        = "baseline"          // A8 (M2)
 	intentRowHeal         = "row-heal"          // A6's heals and markers, and other row writes
 	intentRowHealFresh    = "row-heal-fresh"    // A6's not-alive heals: a fresh read under the name lock first
@@ -203,13 +204,16 @@ type admitInput struct {
 
 // admitResult is admit's output: the intents to submit, the rest with their
 // causes, and the planner state for the next pass. NextToken, when a start
-// waited for a token, is when the bucket next holds one: a pass to schedule.
+// waited for a token, is when the bucket next holds one; NextBackoff, when a
+// row backoff deferred an intent, is the earliest such deferral's expiry
+// (CONTRACT v5.10d (b)): each a pass to schedule.
 type admitResult struct {
-	Admitted  []intent
-	Deferred  []intent
-	Bucket    bucketState
-	FairSeed  uint64
-	NextToken time.Time
+	Admitted    []intent
+	Deferred    []intent
+	Bucket      bucketState
+	FairSeed    uint64
+	NextToken   time.Time
+	NextBackoff time.Time
 }
 
 // admission is one admit's working state.
@@ -222,6 +226,9 @@ type admission struct {
 	bucket   bucketState
 	seen     map[rowKey]bool // rows with an intent this pass
 	starved  bool            // a start waited for a token
+	// nextBackoff is the earliest expiry of a row backoff that deferred an
+	// intent.
+	nextBackoff time.Time
 	// inFlight is the city in-flight count, and counted the rows holding a
 	// slot in it.
 	inFlight    int
@@ -293,7 +300,7 @@ func admit(in admitInput, intents []intent) admitResult {
 		}
 		res.Admitted = append(res.Admitted, it)
 	}
-	res.Bucket, res.FairSeed = a.bucket, in.FairSeed
+	res.Bucket, res.FairSeed, res.NextBackoff = a.bucket, in.FairSeed, a.nextBackoff
 	if a.starved {
 		res.NextToken = a.bucket.nextToken(a.capacity, a.interval)
 	}
@@ -370,12 +377,20 @@ func (a *admission) admitOne(it *intent) string {
 	if k := settledBackoffKey(it.Kind, it.Reason, it.Key); k != rowBackoffKey(it.Key) {
 		own = a.in.Backoff[k] // a drift kind's or an idle stop's own key holds it alone
 	}
+	var held time.Time // when the row's live backoff records release it
+	if it.Key.ID != "" && !it.finalizesOnly(backoff) && backoff.live(a.in.Now) {
+		held = backoff.Until
+	}
+	if it.Key.ID != "" && own.live(a.in.Now) && own.Until.After(held) {
+		held = own.Until
+	}
 	switch {
 	case !ok:
 		return causeUnknownKind
 	case spec.bootGated && !a.in.BootOpen:
 		return causeBootGate
-	case it.Key.ID != "" && (!it.finalizesOnly(backoff) && backoff.live(a.in.Now) || own.live(a.in.Now)):
+	case !held.IsZero():
+		a.nextBackoff = earliest(a.nextBackoff, held)
 		return causeRowBackoff
 	case a.in.Paused && (spec.class == capStarts || spec.class == capCreates):
 		return causeSwapPause

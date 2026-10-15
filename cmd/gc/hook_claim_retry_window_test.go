@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -183,54 +184,95 @@ func TestClaimReadRetryWithoutAnInvocationWindowKeepsFullBudget(t *testing.T) {
 
 // End to end through the claim loop: a read that would recover on retry, but
 // only after the window closed, must not be retried into a claim. The
-// invocation keeps the failed-read contract: exit 1, no drain result, no
-// drain-ack, no claim mutation, and the event bus still records the failure.
+// invocation keeps the failed-read contract: no drain result, no drain-ack, no
+// claim mutation, and the event bus still records the failure. The exit code
+// follows the read's classification through the window annotation: 2 with the
+// store-unavailable token for a timed-out or transport-class read, else 1. The
+// typed-deadline read carries no timeout text, so only the annotation's %w
+// wrap keeps it classified.
 func TestHookClaimRetryCutByWindowExitsWithoutClaimOrDrain(t *testing.T) {
-	withProductionClaimRetryPacing(t)
-	clock := newRetryWindowClock(0)
-	h := newFailureHookHarness()
-	h.script("/rig",
-		hookRunnerAnswer{err: errors.New("bd ready: exit status 1")},
-		hookRunnerAnswer{out: routedRowJSON("wb-1")},
-	)
-	run := func(command, dir string, env []string) (string, error) {
-		clock.readStarts = append(clock.readStarts, clock.now.Sub(clock.invokedAt))
-		clock.now = clock.now.Add(156 * time.Second)
-		return h.run(command, dir, env)
+	cases := []struct {
+		name      string
+		readErr   error
+		wantCode  int
+		wantToken bool
+	}{
+		{
+			name:     "application error keeps exit 1",
+			readErr:  errors.New("bd ready: exit status 1"),
+			wantCode: 1,
+		},
+		{
+			name:      "transport error exits 2",
+			readErr:   errors.New("bd ready: exit status 1: Error: dial tcp 127.0.0.1:3307: connect: connection refused"),
+			wantCode:  2,
+			wantToken: true,
+		},
+		{
+			name:      "timed-out read exits 2",
+			readErr:   fmt.Errorf("running work query %q: timed out after 150s: %w", "work-query", context.DeadlineExceeded),
+			wantCode:  2,
+			wantToken: true,
+		},
+		{
+			name:      "typed deadline read exits 2",
+			readErr:   fmt.Errorf("bd ready: %w", context.DeadlineExceeded),
+			wantCode:  2,
+			wantToken: true,
+		},
 	}
-	claimed := false
-	ops := h.ops()
-	ops.Claim = func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
-		claimed = true
-		return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee}, true, nil
-	}
-	ops.Now, ops.Sleep = clock.Now, clock.Sleep
-	ops.InvokedAt, ops.ClaimWindow = clock.invokedAt, retryWindowTestWindow
-	stores := []hookStore{{dir: "/rig", env: []string{"BEADS_DIR=/rig"}}}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			withProductionClaimRetryPacing(t)
+			clock := newRetryWindowClock(0)
+			h := newFailureHookHarness()
+			h.script("/rig",
+				hookRunnerAnswer{err: tc.readErr},
+				hookRunnerAnswer{out: routedRowJSON("wb-1")},
+			)
+			run := func(command, dir string, env []string) (string, error) {
+				clock.readStarts = append(clock.readStarts, clock.now.Sub(clock.invokedAt))
+				clock.now = clock.now.Add(156 * time.Second)
+				return h.run(command, dir, env)
+			}
+			claimed := false
+			ops := h.ops()
+			ops.Claim = func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+				claimed = true
+				return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee}, true, nil
+			}
+			ops.Now, ops.Sleep = clock.Now, clock.Sleep
+			ops.InvokedAt, ops.ClaimWindow = clock.invokedAt, retryWindowTestWindow
+			stores := []hookStore{{dir: "/rig", env: []string{"BEADS_DIR=/rig"}}}
 
-	var stdout, stderr bytes.Buffer
-	code := claimHookWorkWithRunner("work-query", "/rig", stores[0].env, stores, failureClaimOptions(), ops,
-		run, h.emitFailure, &stdout, &stderr)
+			var stdout, stderr bytes.Buffer
+			code := claimHookWorkWithRunner("work-query", "/rig", stores[0].env, stores, failureClaimOptions(), ops,
+				run, h.emitFailure, &stdout, &stderr)
 
-	if code != 1 {
-		t.Fatalf("exit = %d, want 1; stderr=%s", code, stderr.String())
-	}
-	if len(clock.readStarts) != 1 || len(clock.sleeps) != 0 {
-		t.Fatalf("reads = %v, sleeps = %v; want one read and no retry past the window", clock.readStarts, clock.sleeps)
-	}
-	if claimed {
-		t.Fatal("a claim mutation ran after the claim window closed")
-	}
-	if stdout.Len() != 0 {
-		t.Fatalf("stdout = %q, want no drain result for a failed read", stdout.String())
-	}
-	if h.drained {
-		t.Fatal("drain was acknowledged for a failed read; the seat must be retained")
-	}
-	if len(h.events) == 0 {
-		t.Fatal("no work-query failure event recorded")
-	}
-	if !strings.Contains(stderr.String(), "claim window") {
-		t.Fatalf("stderr = %q, want the claim window named as why retries stopped", stderr.String())
+			if code != tc.wantCode {
+				t.Fatalf("exit = %d, want %d; stderr=%s", code, tc.wantCode, stderr.String())
+			}
+			if got := strings.Contains(stderr.String(), hookStoreUnavailableToken); got != tc.wantToken {
+				t.Fatalf("stderr carries %s = %v, want %v; stderr=%s", hookStoreUnavailableToken, got, tc.wantToken, stderr.String())
+			}
+			if len(clock.readStarts) != 1 || len(clock.sleeps) != 0 {
+				t.Fatalf("reads = %v, sleeps = %v; want one read and no retry past the window", clock.readStarts, clock.sleeps)
+			}
+			if claimed {
+				t.Fatal("a claim mutation ran after the claim window closed")
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("stdout = %q, want no drain result for a failed read", stdout.String())
+			}
+			if h.drained {
+				t.Fatal("drain was acknowledged for a failed read; the seat must be retained")
+			}
+			if len(h.events) == 0 {
+				t.Fatal("no work-query failure event recorded")
+			}
+			if !strings.Contains(stderr.String(), "claim window") {
+				t.Fatalf("stderr = %q, want the claim window named as why retries stopped", stderr.String())
+			}
+		})
 	}
 }

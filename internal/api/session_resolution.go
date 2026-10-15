@@ -800,7 +800,7 @@ func (s *Server) sendBackgroundMessageToSession(ctx context.Context, store beads
 		return err
 	}
 	result, err := handle.Nudge(ctx, s.actor(session.ActorBackground), worker.NudgeRequest{Text: message})
-	if err == nil && result.Undelivered == worker.NudgeQueuedHeld {
+	if err == nil && result.Undelivered == worker.NudgeQueued {
 		s.deferToController(store, id)
 	}
 	return err

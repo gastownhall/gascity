@@ -51,6 +51,11 @@ func TestContainsWorkspaceTrustDialog(t *testing.T) {
 			want:    true,
 		},
 		{
+			name:    "codex 0.156 trust dialog",
+			content: codex0156TrustDialog,
+			want:    true,
+		},
+		{
 			name:    "gemini trust dialog",
 			content: "Do you trust the files in this folder?\n1. Trust folder",
 			want:    true,
@@ -91,6 +96,32 @@ func TestAcceptStartupDialogsAcceptsCodexTrustDialog(t *testing.T) {
 				return "Do you trust the contents of this directory?", nil
 			}
 			return "user@host $", nil
+		},
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogs() error = %v", err)
+	}
+	if !reflect.DeepEqual(sent, []string{"Enter"}) {
+		t.Fatalf("sent keys = %v, want [Enter]", sent)
+	}
+}
+
+func TestAcceptStartupDialogsAcceptsCodex0156TrustDialogDespitePrompt(t *testing.T) {
+	withZeroDialogTimings(t)
+	dialogPollTimeout = time.Second
+
+	var sent []string
+	err := AcceptStartupDialogs(
+		context.Background(),
+		func(_ int) (string, error) {
+			if len(sent) == 0 {
+				return codex0156TrustDialog, nil
+			}
+			return "› Ask Codex to do anything", nil
 		},
 		func(keys ...string) error {
 			sent = append(sent, keys...)
@@ -969,6 +1000,35 @@ func TestAcceptStartupDialogsFromStreamAcceptsTrustDialog(t *testing.T) {
 	}
 	if !reflect.DeepEqual(sent, []string{"Enter"}) {
 		t.Fatalf("sent keys = %v, want [Enter]", sent)
+	}
+}
+
+// TestAcceptStartupDialogsFromStreamAcceptsCodex0156TrustDialog covers the
+// exec provider's stream path with the trust row pre-selected: the frame
+// shows the cursor on the trust row, so the stream confirms it with Enter
+// even though the composer line above the dialog reads as a ready prompt.
+func TestAcceptStartupDialogsFromStreamAcceptsCodex0156TrustDialog(t *testing.T) {
+	withZeroDialogTimings(t)
+	var sent []string
+	snapshots := make(chan string, 2)
+	snapshots <- codex0156TrustDialog
+	snapshots <- "› Ask Codex to do anything"
+	close(snapshots)
+
+	observed, err := AcceptStartupDialogsFromStreamWithStatus(
+		context.Background(),
+		time.Second,
+		snapshots,
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogsFromStreamWithStatus() error = %v", err)
+	}
+	if !observed || !reflect.DeepEqual(sent, []string{"Enter"}) {
+		t.Fatalf("observed = %v sent keys = %v, want observed with [Enter]", observed, sent)
 	}
 }
 
