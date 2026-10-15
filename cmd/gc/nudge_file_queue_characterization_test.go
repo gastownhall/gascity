@@ -60,16 +60,10 @@ var nqCharVerbs = struct {
 	release:       releaseQueuedNudgeClaimsUntil,
 	recordFailure: recordQueuedNudgeFailureDetailed,
 	ack:           ackQueuedNudgesWithOutcome,
-	rollback: func(city string, store beads.NudgesStore, item queuedNudge, reason string) error {
-		return rollbackQueuedNudge(city, nudgeFrontDoor(store), item, reason)
-	},
-	withdrawWait: withdrawQueuedWaitNudges,
+	rollback:      rollbackQueuedNudge,
+	withdrawWait:  withdrawQueuedWaitNudges,
 	deferred: func(city string, item queuedNudge) error {
-		return nudgequeue.WithState(city, func(state *nudgequeue.State) error {
-			state.Pending = append(state.Pending, item)
-			nudgequeue.SortState(state)
-			return nil
-		})
+		return openNudgeQueue(city, beads.NudgesStore{}).Queue.EnqueueDeferred(item)
 	},
 	sweep:        runNudgeQueueMaintenanceSweep,
 	classify:     classifyQueuedNudgeIDs,

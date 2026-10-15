@@ -130,6 +130,8 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 		return 0, nil
 	}
 	now := time.Now()
+	queue := openNudgeQueue(cityPath, beads.NudgesStore{Store: store})
+	defer queue.Close() //nolint:errcheck // the file queue's Close does nothing
 	// Run the queue's TTL/max-attempts maintenance sweep unconditionally,
 	// independent of whether any item below matches an open session. The
 	// per-session loop's only path to recover/prune is a successful claim in
@@ -137,40 +139,22 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 	// (target agent has no open session, and never will again) can never
 	// reach — leaving it in Pending past its ExpiresAt forever. See
 	// ra-oudpha finding-3.
-	if err := runNudgeQueueMaintenanceSweep(cityPath, now); err != nil {
+	if _, err := queue.Queue.Maintain(context.Background(), now); err != nil {
 		return 0, fmt.Errorf("nudge queue maintenance sweep: %w", err)
 	}
-	state, err := nudgequeue.LoadState(cityPath)
+	// The agents with a due pending item, or with an in-flight item whose
+	// lease has expired: that one is recoverable on the next claim attempt,
+	// so including its agent retries without waiting for the patrol tick.
+	dueKeys, err := queue.Queue.DueKeys(now)
 	if err != nil {
 		return 0, fmt.Errorf("loading nudge queue: %w", err)
 	}
-	if len(state.Pending) == 0 && len(state.InFlight) == 0 {
+	if len(dueKeys) == 0 {
 		return 0, nil
 	}
-	pendingAgents := make(map[string]bool, len(state.Pending))
-	for _, item := range state.Pending {
-		if item.Agent == "" {
-			continue
-		}
-		if !item.DeliverAfter.IsZero() && item.DeliverAfter.After(now) {
-			continue
-		}
-		pendingAgents[item.Agent] = true
-	}
-	// In-flight items with expired leases are recoverable on the next
-	// claim attempt. Including their agents lets us retry without waiting
-	// for the patrol tick to discover them.
-	for _, item := range state.InFlight {
-		if item.Agent == "" {
-			continue
-		}
-		if item.LeaseUntil.IsZero() || !item.LeaseUntil.Before(now) {
-			continue
-		}
-		pendingAgents[item.Agent] = true
-	}
-	if len(pendingAgents) == 0 {
-		return 0, nil
+	pendingAgents := make(map[string]bool, len(dueKeys))
+	for _, key := range dueKeys {
+		pendingAgents[key] = true
 	}
 
 	// The dispatcher receives the nudges-class store (store) PLUS the session-class
@@ -266,7 +250,7 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 		}
 		logNudgeDispatchSkip(debugOut, reason, target.agentKey(), target.sessionName, detail)
 	}
-	if err := recordNudgeDispatchSkips(cityPath, skipCounts); err != nil && firstErr == nil {
+	if err := queue.Skips.RecordDispatchSkips(skipCounts); err != nil && firstErr == nil {
 		firstErr = fmt.Errorf("recording nudge dispatch skip counters: %w", err)
 	}
 	return delivered, firstErr

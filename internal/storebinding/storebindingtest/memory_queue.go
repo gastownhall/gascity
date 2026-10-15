@@ -596,7 +596,9 @@ func (q *MemoryNudgeQueue) insert(item nudgequeue.Item, state memoryQueueState) 
 }
 
 // expireLeases records the lease recovery the reads already project: in-flight
-// items whose lease has run out return to pending. It runs only in Maintain.
+// items whose lease has run out return to pending. It runs in Maintain, and in
+// every verb's prologue under VerbsMaintain, where, as the file queue does, the
+// recovered item is due again from the recovering verb's clock.
 func (q *MemoryNudgeQueue) expireLeases(now time.Time) {
 	for _, entry := range q.entries {
 		if entry.state != memoryQueueInFlight {
@@ -608,6 +610,9 @@ func (q *MemoryNudgeQueue) expireLeases(now time.Time) {
 		entry.state = memoryQueuePending
 		entry.item.ClaimedAt = time.Time{}
 		entry.item.LeaseUntil = time.Time{}
+		if q.policy.VerbsMaintain {
+			entry.item.DeliverAfter = now
+		}
 	}
 }
 

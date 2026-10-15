@@ -14,7 +14,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"text/tabwriter"
 	"time"
@@ -22,7 +21,6 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
-	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -34,6 +32,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/tmux"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/storebinding"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/gastownhall/gascity/internal/worker"
 	"github.com/spf13/cobra"
@@ -100,7 +99,10 @@ const (
 	nudgePollFreeOSInterval = 30 * time.Second
 )
 
-var errNudgeSessionFenceMismatch = errors.New("queued nudge session fence mismatch")
+// errNudgeSessionFenceMismatch is the contract's fence-mismatch cause, so every
+// queue dead-letters on it at once. Its text is what state.json last_error
+// has always carried.
+var errNudgeSessionFenceMismatch = storebinding.ErrNudgeSessionFenceMismatch
 
 // nudgeManualDropCause is the failure cause `gc nudge drop` passes to
 // recordQueuedNudgeFailureWithStore. Its Is method reports equivalence to
@@ -152,6 +154,10 @@ type nudgeTarget struct {
 	sessionID         string
 	continuationEpoch string
 	sessionName       string
+	// fromClaim marks a target built from a contract ClaimTarget
+	// (fileClaimTarget): its queue keys are exactly claimKeys.
+	fromClaim bool
+	claimKeys []string
 }
 
 type nudgeStatusJSON struct {
@@ -208,23 +214,21 @@ func (t nudgeTarget) pollerKey() string {
 }
 
 func (t nudgeTarget) queueKeys() []string {
+	sources := [][]string{t.claimKeys}
+	if !t.fromClaim {
+		sources = [][]string{{t.alias, t.sessionID, t.agent.QualifiedName(), t.identity, t.sessionName}, t.aliasHistory}
+	}
 	var keys []string
 	seen := map[string]bool{}
-	for _, key := range []string{t.alias, t.sessionID, t.agent.QualifiedName(), t.identity, t.sessionName} {
-		key = strings.TrimSpace(key)
-		if key == "" || seen[key] {
-			continue
+	for _, source := range sources {
+		for _, key := range source {
+			key = strings.TrimSpace(key)
+			if key == "" || seen[key] {
+				continue
+			}
+			seen[key] = true
+			keys = append(keys, key)
 		}
-		seen[key] = true
-		keys = append(keys, key)
-	}
-	for _, key := range t.aliasHistory {
-		key = strings.TrimSpace(key)
-		if key == "" || seen[key] {
-			continue
-		}
-		seen[key] = true
-		keys = append(keys, key)
 	}
 	return keys
 }
@@ -440,8 +444,8 @@ func cmdNudgeStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) in
 	// above already ran. Best-effort: a load failure here must not fail the
 	// whole status command over a diagnostics-only field.
 	var dispatchSkips map[string]int64
-	if qs, qsErr := nudgequeue.LoadState(target.cityPath); qsErr == nil {
-		dispatchSkips = qs.DispatchSkips
+	if skips, skipsErr := openNudgeQueue(target.cityPath, beads.NudgesStore{}).Skips.DispatchSkips(); skipsErr == nil {
+		dispatchSkips = skips
 	}
 
 	if jsonOutput {
@@ -650,46 +654,22 @@ func doNudgeDrop(cityPath string, ids []string, jsonOutput bool, stdout, stderr 
 
 // classifyQueuedNudgeIDs reports, for each of the given IDs, whether it is
 // currently droppable (pending or in-flight), already dead-lettered, or not
-// found in the queue at all. It runs the same maintenance sweep every other
+// found in the queue at all. The lookup runs the same maintenance every other
 // queue read does, so a since-expired or since-recovered item is classified
 // against current state rather than a stale snapshot.
 func classifyQueuedNudgeIDs(cityPath string, ids []string, now time.Time) (map[string]nudgeDropStatus, error) {
-	maint := nudgeMaintenanceStore{cityPath: cityPath}
-	defer maint.close() //nolint:errcheck // best-effort
-	want := make(map[string]bool, len(ids))
-	for _, id := range ids {
-		want[id] = true
+	h := openNudgeQueue(cityPath, beads.NudgesStore{})
+	defer h.Close() //nolint:errcheck // the file queue's Close does nothing
+	buckets, err := h.Queue.Lookup(ids, now)
+	statuses := make(map[string]nudgeDropStatus, len(buckets))
+	for id, bucket := range buckets {
+		switch bucket {
+		case nudgequeue.BucketPending, nudgequeue.BucketInFlight:
+			statuses[id] = nudgeDropStatusDroppable
+		case nudgequeue.BucketDead:
+			statuses[id] = nudgeDropStatusAlreadyDead
+		}
 	}
-	statuses := make(map[string]nudgeDropStatus, len(ids))
-	err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
-		front := maint.frontForState(state)
-		deadline := noMaintenanceDeadline()
-		if err := recoverExpiredInFlightNudges(state, front, now, deadline); err != nil {
-			return err
-		}
-		if err := pruneExpiredQueuedNudges(state, front, now, deadline); err != nil {
-			return err
-		}
-		if err := pruneDeadQueuedNudges(state, front, now, deadline); err != nil {
-			return err
-		}
-		for _, item := range state.Pending {
-			if want[item.ID] {
-				statuses[item.ID] = nudgeDropStatusDroppable
-			}
-		}
-		for _, item := range state.InFlight {
-			if want[item.ID] {
-				statuses[item.ID] = nudgeDropStatusDroppable
-			}
-		}
-		for _, item := range state.Dead {
-			if want[item.ID] {
-				statuses[item.ID] = nudgeDropStatusAlreadyDead
-			}
-		}
-		return nil
-	})
 	return statuses, err
 }
 
@@ -1135,7 +1115,7 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 			if pollErr != nil {
 				skipReason = "not-delivered-error"
 			}
-			if recErr := recordNudgeDispatchSkips(target.cityPath, map[string]int64{skipReason: 1}); recErr != nil {
+			if recErr := openNudgeQueue(target.cityPath, beads.NudgesStore{}).Skips.RecordDispatchSkips(map[string]int64{skipReason: 1}); recErr != nil {
 				fmt.Fprintf(stderr, "gc nudge poll: recording dispatch skip counter: %v\n", recErr) //nolint:errcheck
 			}
 		}
@@ -1151,27 +1131,14 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 // Read-only on purpose: the skip counter must not take the queue flock on
 // every tick.
 func nudgePollTargetHasDueWork(target nudgeTarget, now time.Time) bool {
-	state, err := nudgequeue.LoadState(target.cityPath)
+	keys, err := openNudgeQueue(target.cityPath, beads.NudgesStore{}).Queue.DueKeys(now)
 	if err != nil {
 		return false
 	}
-	for _, item := range state.Pending {
-		if !target.matchesQueueAgent(item.Agent) {
-			continue
+	for _, key := range keys {
+		if target.matchesQueueAgent(key) {
+			return true
 		}
-		if !item.DeliverAfter.IsZero() && item.DeliverAfter.After(now) {
-			continue
-		}
-		return true
-	}
-	for _, item := range state.InFlight {
-		if !target.matchesQueueAgent(item.Agent) {
-			continue
-		}
-		if item.LeaseUntil.IsZero() || !item.LeaseUntil.Before(now) {
-			continue
-		}
-		return true
 	}
 	return false
 }
@@ -1436,14 +1403,14 @@ func enqueueManagedNudgeThenWake(target nudgeTarget, store beads.Store, item que
 	// into the typed NudgesStore), while the wake arm reads the session bead and
 	// wakes it (sessions class), so it routes through the session coordination-class
 	// store via cliSessionStore (identity today). enqueue (NudgesStore wrap) and
-	// rollback (nudgeFrontDoor) stay nudges.
+	// rollback stay nudges.
 	nudges := beads.NudgesStore{Store: store}
 	if err := enqueueQueuedNudgeWithStore(target.cityPath, nudges, item); err != nil {
 		return 0, err
 	}
 	outcome, err := requestManagedNudgeWake(target, cliSessionFrontDoor(store, target.cfg, target.cityPath))
 	if err != nil {
-		if rollbackErr := rollbackQueuedNudge(target.cityPath, nudgeFrontDoor(nudges), item, "managed wake failed: "+err.Error()); rollbackErr != nil {
+		if rollbackErr := rollbackQueuedNudge(target.cityPath, nudges, item, "managed wake failed: "+err.Error()); rollbackErr != nil {
 			return 0, errors.Join(err, fmt.Errorf("rolling back queued nudge %q after managed wake failure: %w", item.ID, rollbackErr))
 		}
 		return 0, err
@@ -1639,7 +1606,7 @@ func writeQueuedSessionNudgeResult(target nudgeTarget, mode nudgeDeliveryMode, j
 	}
 	fmt.Fprintf(stdout, //nolint:errcheck // best-effort stdout
 		"Queued nudge for %s in %s%s\n",
-		target.agentKey(), nudgequeue.StatePath(target.cityPath), queuedNudgeDowngradeNote(target, undelivered))
+		target.agentKey(), openNudgeQueue(target.cityPath, beads.NudgesStore{}).Location, queuedNudgeDowngradeNote(target, undelivered))
 	return 0
 }
 
@@ -2618,7 +2585,7 @@ func rekeyQueuedNudgesAfterFailedBookkeeping(cityPath string, items []queuedNudg
 		return items, bookkeepErr
 	}
 	batch := newQueuedNudgeBatchID()
-	if err := pinQueuedNudgeClaims(cityPath, queuedNudgeIDs(items), batch); err != nil {
+	if err := openNudgeQueue(cityPath, beads.NudgesStore{}).Repin.RepinClaims(queuedNudgeIDs(items), batch); err != nil {
 		relErr := releaseQueuedNudgeClaims(cityPath, queuedNudgeIDs(items))
 		return nil, errors.Join(bookkeepErr, fmt.Errorf("moving the delivery onto a new key: %w", err), relErr)
 	}
@@ -2705,8 +2672,8 @@ func sessionHoldsNudgeFence(info session.Info) bool {
 // pending, in-flight, or dead item. It reads the atomically replaced state file
 // without taking the queue lock; an unreadable queue is not empty.
 func nudgeQueueIsEmpty(cityPath string) bool {
-	state, err := nudgequeue.LoadState(cityPath)
-	return err == nil && !nudgeQueueHasWork(&state)
+	empty, err := openNudgeQueue(cityPath, beads.NudgesStore{}).Queue.Empty()
+	return err == nil && empty
 }
 
 // nudgeDrainExplicitCityPath returns the city resolveCity would pick when the
@@ -2728,7 +2695,9 @@ func nudgeDrainExplicitCityPath() (string, bool) {
 // replays a receipt of the whole batch or commits the rest as new. A delivery
 // under a key claims through claimDueQueuedNudgeBatchForTarget instead.
 func claimDueQueuedNudgesForTarget(cityPath string, target nudgeTarget, now time.Time) ([]queuedNudge, error) {
-	return claimDueQueuedNudgesMatching(cityPath, now, queuedNudgeTargetMatcher(cityPath, target))
+	h := openNudgeQueue(cityPath, beads.NudgesStore{})
+	defer h.Close() //nolint:errcheck // the file queue's Close does nothing
+	return h.Queue.ClaimDue(target.claimTarget(cityPath), now)
 }
 
 // claimDueQueuedNudgeBatchForTarget claims target's next delivery batch and
@@ -2747,23 +2716,9 @@ func claimDueQueuedNudgesForTarget(cityPath string, target nudgeTarget, now time
 // predecessor's fence to keep that fence, the predecessor waking again would
 // leave the batch split for both sessions (wholePinnedBatch) until it expired.
 func claimDueQueuedNudgeBatchForTarget(cityPath string, target nudgeTarget, now time.Time) ([]queuedNudge, error) {
-	return claimDueQueuedNudges(cityPath, now, queuedNudgeTargetMatcher(cityPath, target), &target)
-}
-
-func queuedNudgeTargetMatcher(cityPath string, target nudgeTarget) func(queuedNudge) bool {
-	var (
-		liveOnce sync.Once
-		liveIDs  map[string]struct{}
-	)
-	liveSessions := func() map[string]struct{} {
-		liveOnce.Do(func() {
-			liveIDs = liveNudgeFenceSessionIDsForCity(cityPath)
-		})
-		return liveIDs
-	}
-	return func(item queuedNudge) bool {
-		return queuedNudgeClaimableForTarget(target, item, liveSessions)
-	}
+	h := openNudgeQueue(cityPath, beads.NudgesStore{})
+	defer h.Close() //nolint:errcheck // the file queue's Close does nothing
+	return h.Queue.ClaimBatch(target.claimTarget(cityPath), now)
 }
 
 // listQueuedNudgesForTargetSnapshot returns target's queue buckets from a
@@ -2783,7 +2738,7 @@ func queuedNudgeTargetMatcher(cityPath string, target nudgeTarget) func(queuedNu
 // mirrored: it depends on the bead store, and treating a not-yet-swept dead
 // letter as still dead is harmless for a liveness check.
 func listQueuedNudgesForTargetSnapshot(cityPath string, target nudgeTarget, now time.Time) ([]queuedNudge, []queuedNudge, []queuedNudge, error) {
-	state, err := nudgequeue.LoadState(cityPath)
+	state, err := openNudgeQueue(cityPath, beads.NudgesStore{}).Queue.Snapshot()
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -2829,47 +2784,27 @@ func listQueuedNudgesForTargetSnapshot(cityPath string, target nudgeTarget, now 
 }
 
 func listQueuedNudgesForTarget(cityPath string, target nudgeTarget, now time.Time) ([]queuedNudge, []queuedNudge, []queuedNudge, error) {
-	return listQueuedNudgesForTargetWithClock(cityPath, target, now, clock.Real{})
+	h := openNudgeQueue(cityPath, beads.NudgesStore{})
+	defer h.Close() //nolint:errcheck // the file queue's Close does nothing
+	return h.Queue.ListFor(target.claimTarget(cityPath), now)
 }
 
 func enqueueQueuedNudge(cityPath string, item queuedNudge) error {
 	return enqueueQueuedNudgeWithStore(cityPath, beads.NudgesStore{}, item)
 }
 
-func rollbackQueuedNudge(cityPath string, front *nudgequeue.Store, item queuedNudge, reason string) error {
-	if cityPath == "" || item.ID == "" {
-		return nil
-	}
-	now := time.Now()
-	found := false
-	err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
-		removed := []queuedNudge(nil)
-		state.Pending, removed = takeQueuedNudgesByID(state.Pending, item.ID, removed)
-		state.InFlight, removed = takeQueuedNudgesByID(state.InFlight, item.ID, removed)
-		for _, queued := range removed {
-			found = true
-			queued.LastError = reason
-			queued.DeadAt = now.UTC()
-			state.Dead = append(state.Dead, queued)
-			if err := front.Terminalize(queued, "failed", reason, "", now); err != nil {
-				return err
-			}
-		}
-		sortQueuedNudges(state)
-		return nil
-	})
-	if err != nil {
+func enqueueQueuedNudgeWithStore(cityPath string, store beads.NudgesStore, item queuedNudge) error {
+	h := openNudgeQueue(cityPath, store)
+	defer h.Close() //nolint:errcheck // the file queue's Close does nothing
+	if err := h.Queue.Enqueue(item); err != nil {
 		return err
 	}
-	if found {
-		return nil
-	}
-	item.LastError = reason
-	return front.Terminalize(item, "failed", reason, "", now)
-}
-
-func enqueueQueuedNudgeWithStore(cityPath string, store beads.NudgesStore, item queuedNudge) error {
-	return enqueueQueuedNudgeWithStoreAndClock(cityPath, store, item, clock.Real{})
+	// Best-effort wake of the supervisor's nudge dispatcher, only once the item
+	// is durable. Legacy-mode cities and ad-hoc invocations (no listener) get a
+	// fast dial failure and fall through to the per-session poller / patrol
+	// tick.
+	pingNudgeWakeSocket(cityPath)
+	return nil
 }
 
 func ackQueuedNudges(cityPath string, ids []string) error {
@@ -2877,57 +2812,9 @@ func ackQueuedNudges(cityPath string, ids []string) error {
 }
 
 func ackQueuedNudgesWithOutcome(cityPath string, ids []string, outcome, reason, commitBoundary string) error {
-	if len(ids) == 0 {
-		return nil
-	}
-	maint := nudgeMaintenanceStore{cityPath: cityPath}
-	defer maint.close() //nolint:errcheck // best-effort
-	want := make(map[string]bool, len(ids))
-	for _, id := range ids {
-		want[id] = true
-	}
-	return withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
-		now := time.Now()
-		front := maint.frontForState(state)
-		deadline := now.Add(nudgeEnqueueMaintenanceBudget)
-		if err := recoverExpiredInFlightNudges(state, front, now, deadline); err != nil {
-			return err
-		}
-		if err := pruneExpiredQueuedNudges(state, front, now, deadline); err != nil {
-			return err
-		}
-		if err := pruneDeadQueuedNudges(state, front, now, deadline); err != nil {
-			return err
-		}
-		var terminal []queuedNudge
-		filtered := state.Pending[:0]
-		for _, item := range state.Pending {
-			if want[item.ID] {
-				terminal = append(terminal, item)
-				continue
-			}
-			filtered = append(filtered, item)
-		}
-		state.Pending = filtered
-		inFlight := state.InFlight[:0]
-		for _, item := range state.InFlight {
-			if want[item.ID] {
-				terminal = append(terminal, item)
-				continue
-			}
-			inFlight = append(inFlight, item)
-		}
-		state.InFlight = inFlight
-		for _, item := range terminal {
-			// terminal items come from a non-empty Pending/InFlight, so the
-			// store is already open; ensureOpen is idempotent and just returns
-			// the cached handle here.
-			if err := markQueuedNudgeTerminal(maint.ensureOpen(), item, outcome, reason, commitBoundary, now); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+	h := openNudgeQueue(cityPath, beads.NudgesStore{})
+	defer h.Close() //nolint:errcheck // the file queue's Close does nothing
+	return h.Queue.Ack(ids, outcome, reason, commitBoundary)
 }
 
 // queuedNudgeReleaseAfter reports whether a delivery error leaves the nudges
@@ -2967,47 +2854,9 @@ func releaseQueuedNudgeClaims(cityPath string, ids []string) error {
 // releaseQueuedNudgeClaimsUntil returns claimed nudges to pending. A non-zero
 // deliverAfter keeps them from being claimed again before then.
 func releaseQueuedNudgeClaimsUntil(cityPath string, ids []string, deliverAfter time.Time) error {
-	if len(ids) == 0 {
-		return nil
-	}
-	maint := nudgeMaintenanceStore{cityPath: cityPath}
-	defer maint.close() //nolint:errcheck // best-effort
-	want := make(map[string]bool, len(ids))
-	for _, id := range ids {
-		want[id] = true
-	}
-	return withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
-		now := time.Now()
-		front := maint.frontForState(state)
-		deadline := now.Add(nudgeEnqueueMaintenanceBudget)
-		if err := recoverExpiredInFlightNudges(state, front, now, deadline); err != nil {
-			return err
-		}
-		if err := pruneExpiredQueuedNudges(state, front, now, deadline); err != nil {
-			return err
-		}
-		if err := pruneDeadQueuedNudges(state, front, now, deadline); err != nil {
-			return err
-		}
-		var released []queuedNudge
-		inFlight := state.InFlight[:0]
-		for _, item := range state.InFlight {
-			if !want[item.ID] {
-				inFlight = append(inFlight, item)
-				continue
-			}
-			item.ClaimedAt = time.Time{}
-			item.LeaseUntil = time.Time{}
-			if !deliverAfter.IsZero() {
-				item.DeliverAfter = deliverAfter.UTC()
-			}
-			released = append(released, item)
-		}
-		state.InFlight = inFlight
-		state.Pending = append(state.Pending, released...)
-		sortQueuedNudges(state)
-		return nil
-	})
+	h := openNudgeQueue(cityPath, beads.NudgesStore{})
+	defer h.Close() //nolint:errcheck // the file queue's Close does nothing
+	return h.Queue.ReleaseClaims(ids, deliverAfter)
 }
 
 func recordQueuedNudgeFailure(cityPath string, ids []string, cause error, now time.Time) error {
@@ -3019,98 +2868,23 @@ func recordQueuedNudgeFailureWithStore(cityPath string, store beads.NudgesStore,
 	return err
 }
 
-// The dead-lettered slice reports which of the given IDs actually reached the
-// dead letter queue in this pass, which is not the same set the caller asked
-// for: an item delivered and acked since the caller last read the queue is
-// simply gone by the time the write pass takes the lock. doNudgeDrop reports
-// per-ID outcomes from this slice for exactly that reason;
-// recordQueuedNudgeFailureWithStore discards it.
+// recordQueuedNudgeFailureDetailed charges one failed delivery attempt to ids
+// and returns the ones it dead-lettered, which is not the set the caller asked
+// for: an item acked since the caller last read the queue is gone by the time
+// the write takes the lock. doNudgeDrop reports per-ID outcomes from it for
+// exactly that reason.
 func recordQueuedNudgeFailureDetailed(cityPath string, store beads.NudgesStore, ids []string, cause error, now time.Time) ([]queuedNudge, error) {
-	if len(ids) == 0 {
-		return nil, nil
-	}
-	ownStore := false
-	var opened beads.Store
-	if store.Store == nil {
-		store, opened = openOwnedNudgeBeadStore(cityPath)
-		ownStore = true
-	}
-	if ownStore {
-		defer closeBeadStoreHandle(opened) //nolint:errcheck // best-effort
-	}
-	var front *nudgequeue.Store
-	if store.Store != nil {
-		front = nudgeFrontDoor(store)
-	}
-	want := make(map[string]bool, len(ids))
-	for _, id := range ids {
-		want[id] = true
-	}
-	var deadLettered []queuedNudge
-	err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
-		deadLettered = deadLettered[:0]
-		deadline := now.Add(nudgeEnqueueMaintenanceBudget)
-		if err := recoverExpiredInFlightNudges(state, front, now, deadline); err != nil {
-			return err
-		}
-		if err := pruneExpiredQueuedNudges(state, front, now, deadline); err != nil {
-			return err
-		}
-		if err := pruneDeadQueuedNudges(state, front, now, deadline); err != nil {
-			return err
-		}
-		var requeued []queuedNudge
-		var dead []queuedNudge
-		pending := state.Pending[:0]
-		for _, item := range state.Pending {
-			if !want[item.ID] {
-				pending = append(pending, item)
-				continue
-			}
-			updated, deadLetter := failedQueuedNudge(item, cause, now)
-			if deadLetter {
-				dead = append(dead, updated)
-				deadLettered = append(deadLettered, updated)
-				continue
-			}
-			requeued = append(requeued, updated)
-		}
-		state.Pending = pending
-		inFlight := state.InFlight[:0]
-		for _, item := range state.InFlight {
-			if !want[item.ID] {
-				inFlight = append(inFlight, item)
-				continue
-			}
-			updated, deadLetter := failedQueuedNudge(item, cause, now)
-			if deadLetter {
-				dead = append(dead, updated)
-				deadLettered = append(deadLettered, updated)
-				continue
-			}
-			requeued = append(requeued, updated)
-		}
-		state.InFlight = inFlight
-		state.Pending = append(state.Pending, requeued...)
-		state.Dead = append(state.Dead, dead...)
-		sortQueuedNudges(state)
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	// Mark backing beads terminal outside the queue lock, best-effort. The
-	// dead-letter transition above is authoritative; a failed bead write must
-	// not roll it back, or the items bounce between InFlight and Pending
-	// forever and stale backlogs wedge every delivery pass that claims them.
-	// pruneDeadQueuedNudges repairs dead entries whose backing bead missed
-	// terminal state, so drift converges on later queue operations.
-	for _, item := range deadLettered {
-		if markErr := markQueuedNudgeTerminal(store, item, "failed", item.LastError, "", now); markErr != nil && nudgeWarningWriter != nil {
-			fmt.Fprintf(nudgeWarningWriter, "gc nudge: warning: marking dead-lettered nudge %q terminal: %v\n", item.ID, markErr) //nolint:errcheck
-		}
-	}
-	return deadLettered, nil
+	h := openNudgeQueue(cityPath, store)
+	defer h.Close() //nolint:errcheck // the file queue's Close does nothing
+	return h.Queue.RecordFailure(ids, cause, now)
+}
+
+// rollbackQueuedNudge dead-letters item after the action that queued it (a
+// managed wake) failed, and closes its shadow in store as failed with reason.
+func rollbackQueuedNudge(cityPath string, store beads.NudgesStore, item queuedNudge, reason string) error {
+	h := openNudgeQueue(cityPath, store)
+	defer h.Close() //nolint:errcheck // the file queue's Close does nothing
+	return h.Queue.Rollback(item, reason)
 }
 
 func nudgePollerPIDPath(cityPath, sessionName, agentName string) string {

@@ -1192,7 +1192,14 @@ func runNudgeBatchTests(r Runner, suite NudgesSuite) {
 		if err := queue.ReleaseClaims([]string{"n-lapsed"}, now.Add(10*time.Minute)); err != nil {
 			r.Fatalf("ReleaseClaims: %v", err)
 		}
-		claimed, err := queue.ClaimDue(target, now)
+		// A queue whose verbs maintain recovers the lapsed lease inside
+		// ReleaseClaims, against the wall clock, and the item is due from that
+		// instant; a claim at the earlier now would read it as not yet due.
+		claimAt := now
+		if suite.Policy.VerbsMaintain {
+			claimAt = time.Now().UTC()
+		}
+		claimed, err := queue.ClaimDue(target, claimAt)
 		if err != nil {
 			r.Fatalf("ClaimDue after the release: %v", err)
 		}
