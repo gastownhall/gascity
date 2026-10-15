@@ -1166,3 +1166,27 @@ func TestFencedDeliverNowSettlesTheMessageExactlyOnce(t *testing.T) {
 		}
 	}
 }
+
+// Only interrupt_now reads the turn: a default or follow_up submit to a
+// session whose runtime reports turns, bare or behind a composite, makes no
+// turn read, with a turn running or not.
+func TestSubmitOtherIntentsReadNoTurn(t *testing.T) {
+	for _, wrapName := range []string{"t3bridge", "auto", "hybrid"} {
+		for _, intent := range []SubmitIntent{"", SubmitIntentDefault, SubmitIntentFollowUp} {
+			for _, turn := range []string{"", "t1"} {
+				t.Run(fmt.Sprintf("%s/%q/turn=%q", wrapName, intent, turn), func(t *testing.T) {
+					x := newFenceFixture(t, fenceFixtureOpts{wrap: t3bridgeComposites[wrapName]})
+					x.script(turn)
+					if _, err := x.mgr.Submit(context.Background(), x.actor(t, ActorOperator), x.info.ID, fenceMsg, BuildResumeCommand(x.info), x.hints, intent); err != nil {
+						t.Fatalf("Submit(%q): %v", intent, err)
+					}
+					for _, m := range []string{"ObserveTurn", "InterruptTurn", "WaitTurnEnded"} {
+						if n := countMethod(x.f.Calls, m); n != 0 {
+							t.Fatalf("%s calls = %d, want none; calls %v", m, n, callMethods(x.f.Calls))
+						}
+					}
+				})
+			}
+		}
+	}
+}
