@@ -362,7 +362,10 @@ func (e *fenceUnavailableError) Unwrap() []error {
 	return []error{runtime.ErrRuntimeUnavailable, e.cause}
 }
 
-// fenceRead is one read of a pane's fence.
+// fenceRead is one read of a pane's fence. A read with no pane id found no
+// session: tmux answers display-message -t and if-shell -F -t for a session
+// that no longer exists (while the server lives) with exit 0 and every
+// field empty.
 type fenceRead struct {
 	value, pane string
 	dead        bool
@@ -370,11 +373,19 @@ type fenceRead struct {
 
 func parseFenceRead(out string) (fenceRead, bool) {
 	parts := strings.Split(strings.TrimSpace(out), "|")
-	if len(parts) != 3 || !wellFormedTmuxID(parts[1], '%') {
+	switch {
+	case len(parts) != 3:
+		return fenceRead{}, false
+	case parts[1] == "":
+		return fenceRead{}, true
+	case !wellFormedTmuxID(parts[1], '%'):
 		return fenceRead{}, false
 	}
 	return fenceRead{value: parts[0], pane: parts[1], dead: parts[2] == "1"}, true
 }
+
+// absent reports whether the read found no session.
+func (r fenceRead) absent() bool { return r.pane == "" }
 
 // own is the digest the pane holds as its own fence, "" when it holds none
 // (no value, or one inherited from another scope or another pane).
@@ -389,6 +400,8 @@ func (r fenceRead) own() string {
 // found is what a miss on r reports.
 func (r fenceRead) found() string {
 	switch {
+	case r.absent():
+		return runtime.FenceFoundAbsent
 	case r.dead:
 		return runtime.FenceFoundDead
 	case r.own() != "":
@@ -415,8 +428,9 @@ func (g *paneGuard) read(ctx context.Context, t *Tmux) (string, fenceRead, error
 	if !ok {
 		return "", fenceRead{}, fmt.Errorf("reading input fence of %q: unexpected tmux output %q", g.name, out)
 	}
-	if r.pane != guardPaneID(target) {
-		// tmux answered for the window's active pane: the agent pane is gone.
+	if r.absent() || r.pane != guardPaneID(target) {
+		// No session, or tmux answered for the window's active pane: the
+		// agent pane is gone.
 		return "", fenceRead{}, g.gone(errAgentPaneGone)
 	}
 	return target, r, nil
@@ -485,8 +499,9 @@ func (g *paneGuard) adopt(ctx context.Context, t *Tmux, target string) (string, 
 		return envDigest, nil
 	case strings.HasPrefix(out, fenceOwnPrefix):
 		r, ok := parseFenceRead(strings.TrimPrefix(out, fenceOwnPrefix))
-		if ok && r.pane != guardPaneID(target) {
-			// tmux evaluated the window's active pane: the agent pane is gone.
+		if ok && (r.absent() || r.pane != guardPaneID(target)) {
+			// No session, or tmux evaluated the window's active pane: the
+			// agent pane is gone.
 			return "", g.gone(errAgentPaneGone)
 		}
 		if ok && r.own() != "" {
@@ -514,6 +529,8 @@ func (g *paneGuard) checkLive(ctx context.Context, t *Tmux) error {
 	switch {
 	case !ok:
 		return fmt.Errorf("reading input fence of %q: unexpected tmux output %q", g.name, out)
+	case r.absent():
+		return g.gone(ErrSessionNotFound)
 	case r.pane != g.verifiedPane():
 		// Another pane has the client's input: the target is not the agent.
 		return g.recordMiss(runtime.FenceFoundUnproven)
@@ -695,8 +712,9 @@ func (g *paneGuard) run(ctx context.Context, t *Tmux, args []string) (string, er
 		return "", nil
 	case strings.HasPrefix(out, fenceMissPrefix):
 		if r, ok := parseFenceRead(strings.TrimPrefix(out, fenceMissPrefix)); ok {
-			if r.pane != guardPaneID(in.target) {
-				// tmux evaluated the window's active pane: the agent pane is gone.
+			if r.absent() || r.pane != guardPaneID(in.target) {
+				// No session, or tmux evaluated the window's active pane: the
+				// agent pane is gone.
 				return "", g.recordMiss(runtime.FenceFoundAbsent)
 			}
 			return "", g.recordMiss(r.found())

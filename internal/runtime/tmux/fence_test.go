@@ -175,6 +175,78 @@ func TestFencedGoneAndNoServerNeverSucceed(t *testing.T) {
 	}
 }
 
+// A session that vanishes while the server lives makes tmux 3.4 answer
+// if-shell -F -t and display-message -t with exit 0 and every pane field
+// empty. Wherever that lands in a fenced operation (its fence read, its
+// adoption, a guard, a hidden write's check) it is an absent, non-partial
+// miss: nothing typed, no buffer left. Kills a parse of the empty report as
+// unproven or as an unexpected-output error.
+func TestFencedOperationMissesAbsentWhenSessionVanishes(t *testing.T) {
+	gone := func(m *fenceModel) { m.gone = true }
+	cases := []struct {
+		name   string
+		hidden bool
+		set    func(m *fenceModel)
+	}{
+		{"before the fence read", false, func(m *fenceModel) {
+			m.beforeRead = func(m *fenceModel, n int) {
+				if n == 1 {
+					gone(m)
+				}
+			}
+		}},
+		{"before the adoption", false, func(m *fenceModel) {
+			m.own = ""
+			m.beforeAdopt = gone
+		}},
+		{"before the first guard", false, func(m *fenceModel) {
+			m.beforeGuard = func(m *fenceModel, _ int) { gone(m) }
+		}},
+		{"before a hidden write's check", true, func(m *fenceModel) {
+			m.beforeRead = func(m *fenceModel, n int) {
+				if n == 2 { // verify read the pane first; this is the write's check
+					gone(m)
+				}
+			}
+		}},
+	}
+	for _, c := range cases {
+		ops := map[string]func(*Provider) error{
+			"text": func(p *Provider) error {
+				return p.NudgeFenced(context.Background(), fenceModelSession, runtime.TextContent("hello"), runtime.FencedNudge{Fence: testFence, Immediate: true})
+			},
+			"keys": func(p *Provider) error {
+				return p.SendKeysFenced(context.Background(), fenceModelSession, testFence, "Enter")
+			},
+		}
+		if c.hidden {
+			ops = hiddenFenceOps
+		}
+		for opName, op := range ops {
+			t.Run(c.name+"/"+opName, func(t *testing.T) {
+				m := claudeModel("")()
+				c.set(m)
+				p := fenceModelProvider(m)
+				var hidden *syncBuffer
+				if c.hidden {
+					hidden = installHiddenClient(t, p)
+				}
+				err := op(p)
+				var miss *runtime.FenceMismatchError
+				if !errors.As(err, &miss) || miss.Found != runtime.FenceFoundAbsent || miss.Partial {
+					t.Fatalf("err = %v, want a non-partial absent miss", err)
+				}
+				if _, events, buffers := m.snapshot(); len(events) != 0 || buffers != 0 {
+					t.Fatalf("typed %q, left %d buffers", events, buffers)
+				}
+				if hidden != nil && hidden.String() != "" {
+					t.Fatalf("hidden client received %q", hidden.String())
+				}
+			})
+		}
+	}
+}
+
 // Kills adoption that trusts anything but the pane's own value or the
 // session's environment, writes over an own value, or adopts more than once.
 func TestFenceAdoptionFromSessionEnv(t *testing.T) {

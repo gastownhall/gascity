@@ -138,7 +138,10 @@ func (m *fenceModel) dispatch(args []string, nested bool) (string, error) {
 		delete(m.buffers, flagValue(args, "-b"))
 		return "", nil
 	}
-	if m.gone {
+	// tmux 3.4 answers display-message -t and if-shell -F -t for a session
+	// that no longer exists (while the server lives) with exit 0 and every
+	// pane field empty; the other commands fail to find their target.
+	if m.gone && args[0] != "display-message" && args[0] != "if-shell" {
 		return "", ErrSessionNotFound
 	}
 	switch args[0] {
@@ -167,6 +170,8 @@ func (m *fenceModel) dispatch(args []string, nested bool) (string, error) {
 				}
 			}
 			return m.expandAt(flagValue(args, "-t"), format), nil
+		case m.gone:
+			return m.expand(format), nil
 		case m.detached && format == "#{session_name}|#{session_attached}":
 			return fenceModelSession + "|0", nil
 		case format == "#{pane_in_mode}":
@@ -286,9 +291,6 @@ func (m *fenceModel) ifShell(args []string) (string, error) {
 		if m.beforeGuard != nil {
 			m.beforeGuard(m, m.guards)
 		}
-		if m.gone {
-			return "", ErrSessionNotFound
-		}
 	}
 	if cond == fenceNotOwnCondition && m.beforeAdopt != nil {
 		m.beforeAdopt(m)
@@ -379,6 +381,9 @@ func (m *fenceModel) evalFormat(f string) string {
 			matched, _ := path.Match(a, b)
 			return bool01(matched)
 		}
+	}
+	if m.gone {
+		return "" // no session: tmux expands every pane field empty
 	}
 	if m.onSurvivor {
 		switch f {

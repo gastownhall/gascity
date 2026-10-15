@@ -462,8 +462,9 @@ func TestFencedNudgeParityRealTmux(t *testing.T) {
 // The guard's false branch on real tmux: between an operation's precheck and
 // its first guarded command the pane's fence changes, or the agent pane is
 // killed while a human's split survives in its window holding the same
-// digest (tmux evaluates if-shell in the survivor then). Each misses, typed
-// nothing anywhere, and leaves no buffer.
+// digest (tmux evaluates if-shell in the survivor then), or the whole session
+// is killed while the server lives (tmux answers with empty fields then).
+// Each misses, typed nothing anywhere, and leaves no buffer.
 func TestFencedGuardFalseBranchRealTmux(t *testing.T) {
 	p := fenceTestProvider(t, "fg")
 	f := runtime.InputFence{Generation: 1, Epoch: 1, Token: "token-g"}
@@ -503,6 +504,38 @@ func TestFencedGuardFalseBranchRealTmux(t *testing.T) {
 		}
 		if got := waitTyped(t, file, containsFn("\r")); got != "\r" {
 			t.Fatalf("pane received %q", got)
+		}
+	})
+
+	t.Run("session killed, server survives", func(t *testing.T) {
+		const name = "gc-fence-vanish"
+		// A sibling session keeps the server up: tmux then answers the
+		// guard's if-shell and miss report for the gone session with exit 0
+		// and empty fields, not an error.
+		sibling := startRawCat(t, p, "gc-fence-sibling", f, nil)
+		_ = startRawCat(t, p, name, f, nil)
+		ctx, target := verified(t, name)
+		hiddenCtx, _ := verified(t, name)
+		if _, err := p.tm.run("kill-session", "-t", "="+name); err != nil {
+			t.Fatal(err)
+		}
+		var miss *runtime.FenceMismatchError
+		if err := paneGuardFrom(hiddenCtx).checkLive(hiddenCtx, p.tm); !errors.As(err, &miss) || miss.Found != runtime.FenceFoundAbsent || miss.Partial {
+			t.Fatalf("hidden write check on a killed session = %v, want a non-partial absent miss", err)
+		}
+		_, err := p.tm.runCtx(ctx, "send-keys", "-t", target, "-l", "for-agent")
+		if !errors.As(err, &miss) || miss.Found != runtime.FenceFoundAbsent || miss.Partial {
+			t.Fatalf("guarded paste into a killed session = %v, want a non-partial absent miss", err)
+		}
+		if b := listBuffers(t, p); b != "" {
+			t.Fatalf("buffers left: %q", b)
+		}
+		// The sibling's own-fence delivery is the signal anything earlier landed.
+		if err := p.SendKeysFenced(context.Background(), "gc-fence-sibling", f, "Enter"); err != nil {
+			t.Fatal(err)
+		}
+		if got := waitTyped(t, sibling, containsFn("\r")); got != "\r" {
+			t.Fatalf("the sibling received %q", got)
 		}
 	})
 
