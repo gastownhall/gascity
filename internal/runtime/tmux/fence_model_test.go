@@ -93,9 +93,9 @@ func newFenceModel(inner executor, env map[string]string) *fenceModel {
 // fenceEnv is a session environment naming f.
 func fenceEnv(f runtime.InputFence) map[string]string {
 	return map[string]string{
-		"GC_RUNTIME_EPOCH":      fmt.Sprint(f.Generation),
-		"GC_CONTINUATION_EPOCH": fmt.Sprint(f.Epoch),
-		"GC_INSTANCE_TOKEN":     f.Token,
+		runtime.RuntimeEpochEnv:      fmt.Sprint(f.Generation),
+		runtime.ContinuationEpochEnv: fmt.Sprint(f.Epoch),
+		runtime.InstanceTokenEnv:     f.Token,
 	}
 }
 

@@ -18,7 +18,7 @@ import (
 // ErrInputFenceUnsupported and records no input at all.
 func TestFencedHelpersNeverDeliverUnfenced(t *testing.T) {
 	fence := runtime.InputFence{Generation: 2, Epoch: 3, Token: "tok"}
-	env := map[string]string{"GC_RUNTIME_EPOCH": "2", "GC_CONTINUATION_EPOCH": "3", "GC_INSTANCE_TOKEN": "tok"}
+	env := map[string]string{runtime.RuntimeEpochEnv: "2", runtime.ContinuationEpochEnv: "3", runtime.InstanceTokenEnv: "tok"}
 	type shape struct {
 		build    func(leaf *runtime.Fake) runtime.Provider
 		canFence bool

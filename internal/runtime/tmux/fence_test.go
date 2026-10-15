@@ -261,10 +261,10 @@ func TestFenceAdoptionFromSessionEnv(t *testing.T) {
 		{"own value differs, env ignored", func(m *fenceModel) { m.ownFenced(other) }, other.Digest(), other.Digest() + ".%1"},
 		{"no value adopts the env", func(*fenceModel) {}, "", testFence.Digest() + ".%1"},
 		{"inherited value is not own", func(m *fenceModel) { m.inherited = other.Digest() + ".%9" }, "", testFence.Digest() + ".%1"},
-		{"env with no token is unproven", func(m *fenceModel) { delete(m.env, "GC_INSTANCE_TOKEN") }, runtime.FenceFoundUnproven, ""},
+		{"env with no token is unproven", func(m *fenceModel) { delete(m.env, runtime.InstanceTokenEnv) }, runtime.FenceFoundUnproven, ""},
 		{"incomplete env defaults counters", func(m *fenceModel) {
-			delete(m.env, "GC_RUNTIME_EPOCH")
-			delete(m.env, "GC_CONTINUATION_EPOCH")
+			delete(m.env, runtime.RuntimeEpochEnv)
+			delete(m.env, runtime.ContinuationEpochEnv)
 		}, runtime.InputFence{Generation: 1, Epoch: 1, Token: testFence.Token}.Digest(), runtime.InputFence{Generation: 1, Epoch: 1, Token: testFence.Token}.Digest() + ".%1"},
 		{"env names another incarnation", func(m *fenceModel) { m.env = fenceEnv(other) }, other.Digest(), other.Digest() + ".%1"},
 	}

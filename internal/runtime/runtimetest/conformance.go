@@ -452,9 +452,9 @@ func fencedStart(t *testing.T, opts Options, sp runtime.Provider, name string, c
 	for k, v := range cfg.Env {
 		env[k] = v
 	}
-	env["GC_RUNTIME_EPOCH"] = "2"
-	env["GC_CONTINUATION_EPOCH"] = "3"
-	env["GC_INSTANCE_TOKEN"] = fence.Token
+	env[runtime.RuntimeEpochEnv] = "2"
+	env[runtime.ContinuationEpochEnv] = "3"
+	env[runtime.InstanceTokenEnv] = fence.Token
 	cfg.Env = env
 	startOrSkip(t, opts, sp, name, cfg, "Start fenced session")
 	return fence
