@@ -37,9 +37,10 @@ import (
 //
 // A worker site's recorder (D13's factRecorder) drops every Ledger and
 // Controller type at the source, and its RecordAck must return a non-nil
-// error for each type it drops, as events.AckRecorder requires: a caller that
-// marks durable state on a nil ack (executionevent.EmitCurrent's
-// step_defined marker) would otherwise lose the fact for good.
+// error for each event it does not write, a dropped type included, as
+// events.AckRecorder requires: a caller that marks durable state on a nil ack
+// (executionevent.EmitCurrent's step_defined marker) would otherwise lose the
+// fact for good.
 type Authorship string
 
 // The authorship classes.
@@ -154,6 +155,16 @@ var builtinAuthorship = map[string]Authorship{
 	MoleculeResolved:               AuthorWorker,
 	BackendCredentialResolved:      AuthorWorker,
 	BeadsConditionalWritesDegraded: AuthorWorker,
+	// Worker by D13 (rule 1, the BX-4a decision), as rule 3 says too:
+	// executionevent.EmitCurrent records the execution topology, and gc
+	// sling, gc formula cook and the control-dispatcher session (gc convoy
+	// control --serve) call it through the city recorder at worker sites. A
+	// box that dropped them would break the runs view, and a forged copy only
+	// annotates; execution.step_completed, which mints a completion, stays
+	// Controller below.
+	ExecutionWorkAssociated: AuthorWorker,
+	ExecutionRunAnchored:    AuthorWorker,
+	ExecutionStepDefined:    AuthorWorker,
 	// gc session close strands a closed seat's unserved claims and records
 	// it (cmd/gc work_release.go, strandedClaimAlerts.observe), as the
 	// controller's detector does; a box's copy would otherwise be dropped
@@ -185,7 +196,8 @@ var builtinAuthorship = map[string]Authorship{
 
 	// Controller: bead repairs and graph execution facts the controller
 	// derives. A logged execution.step_completed is read as journal-confirmed
-	// (executionevent's CompletedFactIndex), so a copy from a box is a forgery.
+	// (executionevent's CompletedFactIndex.Absorb), so a copy from a box would
+	// mint a completion: Controller by D13, against rule 3.
 	BeadWorktreeReaped:       AuthorController,
 	BeadWorktreeReapSkipped:  AuthorController,
 	BeadDeadAssigneeReopened: AuthorController,
@@ -193,17 +205,6 @@ var builtinAuthorship = map[string]Authorship{
 	BeadsBlockedRecomputed: AuthorController,
 	ExecutionStepCompleted: AuthorController,
 	ExecutionStepStalled:   AuthorController,
-	// Controller by D13 (rule 1), against rule 3: executionevent.EmitCurrent
-	// records all three, and the control-dispatcher session (gc convoy
-	// control --serve), gc sling and gc formula cook call it through the
-	// city recorder. On a worker site those copies are dropped at the source
-	// and the controller re-derives none of them (the completions backstop
-	// re-derives step_completed only). Escalated to the DES-BX owner before
-	// the recorder half lands: either they become Worker, or the controller
-	// re-derives them for roots whose steps are unmarked.
-	ExecutionWorkAssociated: AuthorController,
-	ExecutionRunAnchored:    AuthorController,
-	ExecutionStepDefined:    AuthorController,
 
 	// Controller: the controller, the city, orders, async requests and the
 	// API server's integrations. city.* by D13; gc suspend, gc resume and gc

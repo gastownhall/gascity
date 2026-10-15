@@ -89,8 +89,7 @@ func TestAuthorshipKeepsTheRecordedDecisions(t *testing.T) {
 	want := map[Authorship][]string{
 		AuthorLedger: {BeadCreated, BeadUpdated, BeadClosed, BeadDeleted},
 		AuthorController: {
-			ExecutionStepCompleted, ExecutionStepDefined, ExecutionWorkAssociated,
-			ExecutionRunAnchored, ExecutionStepStalled,
+			ExecutionStepCompleted, ExecutionStepStalled,
 			RequestResultCityCreate, RequestResultCityUnregister, RequestResultSessionCreate,
 			RequestResultSessionMessage, RequestResultSessionSubmit, RequestResultRigCreate,
 			BeadDeadAssigneeReopened, BeadWorktreeReaped, BeadWorktreeReapSkipped,
@@ -104,6 +103,7 @@ func TestAuthorshipKeepsTheRecordedDecisions(t *testing.T) {
 		AuthorWorker: {
 			BeadClaimRejected, BeadClaimReleased, HookClaimReclaimedStale,
 			ExecutionClaimWindowExpired, ExecutionStepStarted,
+			ExecutionWorkAssociated, ExecutionRunAnchored, ExecutionStepDefined,
 			MailSent, MailRead, MailArchived, MailMarkedRead, MailMarkedUnread, MailReplied, MailDeleted,
 			SessionDraining, SessionUndrained, SessionStopped,
 		},
@@ -165,6 +165,23 @@ func TestAuthorshipValid(t *testing.T) {
 		if a.Valid() {
 			t.Errorf("%q is Valid", a)
 		}
+	}
+}
+
+// The execution topology facts are Worker by the BX-4a decision: gc sling,
+// gc formula cook and the control-dispatcher session record them through
+// executionevent.EmitCurrent at worker sites, and a box that dropped them would
+// break the runs view. They only annotate, so a forged copy is low-harm. A
+// logged execution.step_completed is read as journal-confirmed, so a forged
+// copy would mint a completion: it stays Controller.
+func TestExecutionTopologyIsWorkerAndCompletionIsController(t *testing.T) {
+	for _, eventType := range []string{ExecutionWorkAssociated, ExecutionRunAnchored, ExecutionStepDefined} {
+		if got := AuthorshipOf(eventType); got != AuthorWorker {
+			t.Errorf("AuthorshipOf(%q) = %s, want worker", eventType, got)
+		}
+	}
+	if got := AuthorshipOf(ExecutionStepCompleted); got != AuthorController {
+		t.Errorf("AuthorshipOf(%q) = %s, want controller", ExecutionStepCompleted, got)
 	}
 }
 
