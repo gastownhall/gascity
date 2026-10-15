@@ -43,6 +43,100 @@ func TestApplyTrapRunsBeforeKill(t *testing.T) {
 	}
 }
 
+// TestApplyTrapRunsWhenSIGINTIgnoredOnEntry proves cancellation still reaches
+// a rollback trap when the command inherited SIGINT ignored. That is the
+// normal state for anything launched as a background job of a non-interactive
+// shell (POSIX: asynchronous lists start with SIGINT and SIGQUIT ignored), and
+// a non-interactive shell cannot trap a signal that was ignored on entry, so a
+// SIGINT-based cancellation could never run the trap and every rollback was
+// lost to the WaitDelay SIGKILL. SIGTERM is never ignored this way.
+//
+// The launcher ignores SIGINT and execs the adapter shell, which reproduces
+// the inherited disposition deterministically. The readiness file is the
+// barrier: cancellation fires only once the adapter has installed its trap
+// and is blocked on its foreground child.
+func TestApplyTrapRunsWhenSIGINTIgnoredOnEntry(t *testing.T) {
+	t.Parallel()
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not available")
+	}
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "rolled-back")
+	ready := filepath.Join(dir, "ready")
+	// The foreground child writes the readiness file itself before exec'ing
+	// sleep, so the barrier also proves the child exists: a signal that lands
+	// while the shell is still forking it would reach only the shell, whose
+	// trap then waits for the 30s child to finish.
+	adapter := `trap 'echo rolled-back > "$MARKER"; exit 1' INT TERM
+"$BASH" -c ': > "$READY"; exec sleep 30'`
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	launcher := `trap '' INT; exec "$BASH" -c "$ADAPTER"`
+	cmd := exec.CommandContext(ctx, bash, "-c", launcher)
+	cmd.Env = append(os.Environ(), "MARKER="+marker, "READY="+ready, "ADAPTER="+adapter)
+	result := Apply(cmd, 2*time.Second)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitErr := make(chan error, 1)
+	go func() { waitErr <- cmd.Wait() }()
+
+	readyDeadline := time.NewTimer(10 * time.Second)
+	defer readyDeadline.Stop()
+	readyPoll := time.NewTicker(5 * time.Millisecond)
+	defer readyPoll.Stop()
+	for {
+		if _, err := os.Stat(ready); err == nil {
+			break
+		}
+		select {
+		case err := <-waitErr:
+			t.Fatalf("command exited before the readiness barrier: %v", err)
+		case <-readyDeadline.C:
+			t.Fatal("timed out waiting for the adapter to install its trap")
+		case <-readyPoll.C:
+		}
+	}
+
+	cancel()
+	if err := <-waitErr; err == nil {
+		t.Fatal("expected the canceled command to report an error")
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("rollback trap never ran — the cancellation signal cannot reach a shell that inherited it ignored: %v", err)
+	}
+	if outcome := result.Outcome(); outcome != CancelGroupSignaled {
+		t.Fatalf("expected CancelGroupSignaled, got %v", outcome)
+	}
+}
+
+// TestApplyCooperativeSignalIsSIGTERM pins the adapter cancellation contract:
+// the process group receives SIGTERM, so a command that installs no handler
+// dies of SIGTERM rather than of SIGINT or the WaitDelay SIGKILL.
+func TestApplyCooperativeSignalIsSIGTERM(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "sleep", "30")
+	result := Apply(cmd, 5*time.Second)
+	if err := cmd.Run(); err == nil {
+		t.Fatal("expected the canceled command to report an error")
+	}
+	if outcome := result.Outcome(); outcome != CancelGroupSignaled {
+		t.Fatalf("expected CancelGroupSignaled, got %v", outcome)
+	}
+	status, ok := cmd.ProcessState.Sys().(syscall.WaitStatus)
+	if !ok {
+		t.Fatalf("expected a syscall.WaitStatus, got %T", cmd.ProcessState.Sys())
+	}
+	if !status.Signaled() || status.Signal() != syscall.SIGTERM {
+		t.Fatalf("expected the group to be terminated by SIGTERM, got signaled=%v signal=%v", status.Signaled(), status.Signal())
+	}
+}
+
 // TestApplyForceKillsUncooperative proves the grace escalation: a command that
 // ignores the interrupt must still die within WaitDelay rather than hanging
 // the caller forever.
@@ -132,6 +226,13 @@ func TestApplyLeaderSignaledOnlyWhenGetpgidFails(t *testing.T) {
 	}
 	if outcome := result.Outcome(); outcome != CancelLeaderSignaledOnly {
 		t.Fatalf("expected CancelLeaderSignaledOnly, got %v", outcome)
+	}
+	status, ok := cmd.ProcessState.Sys().(syscall.WaitStatus)
+	if !ok {
+		t.Fatalf("expected a syscall.WaitStatus, got %T", cmd.ProcessState.Sys())
+	}
+	if !status.Signaled() || status.Signal() != syscall.SIGTERM {
+		t.Fatalf("expected the leader to be terminated by SIGTERM, got signaled=%v signal=%v", status.Signaled(), status.Signal())
 	}
 }
 
