@@ -13,8 +13,8 @@
 # nothing, so its last ENOSPC line stays in the tail for good. The evidence
 # therefore counts only while free space on the data dir (DATA_DIR, else the
 # log's directory) is below GC_DOLT_WARN_FREE_BYTES (default 2 GiB, the level
-# below which gc warns about Dolt disk space). When free space cannot be read,
-# the evidence counts.
+# below which gc warns about Dolt disk space; unset, malformed or 0 means the
+# default). When free space cannot be read, the evidence counts.
 #
 # Returns 1 (false) when no ENOSPC signature is found in the recent log tail,
 # when free space is back at or above the floor, or when LOG_FILE is unset or
@@ -42,6 +42,8 @@ enospc_disk_has_headroom() {
     case "$enospc_floor" in
         ''|*[!0-9]*) enospc_floor=2147483648 ;;
     esac
+    # 0 means "no disk warning" to gc; it must not switch the skip off.
+    [ "$enospc_floor" -gt 0 ] || enospc_floor=2147483648
     enospc_avail_kb=$(df -Pk "$enospc_dir" 2>/dev/null | awk 'NR == 2 { print $4 }')
     case "$enospc_avail_kb" in
         ''|*[!0-9]*) return 1 ;;

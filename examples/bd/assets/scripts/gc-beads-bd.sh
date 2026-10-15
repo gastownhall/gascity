@@ -4411,6 +4411,8 @@ else
         case "$enospc_floor" in
             ''|*[!0-9]*) enospc_floor=2147483648 ;;
         esac
+        # 0 means "no disk warning" to gc; it must not switch the skip off.
+        [ "$enospc_floor" -gt 0 ] || enospc_floor=2147483648
         enospc_avail_kb=$(df -Pk "$enospc_dir" 2>/dev/null | awk 'NR == 2 { print $4 }')
         case "$enospc_avail_kb" in
             ''|*[!0-9]*) return 1 ;;

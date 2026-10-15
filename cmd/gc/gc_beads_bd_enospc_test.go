@@ -60,6 +60,9 @@ func TestENOSPCSkipHoldsOnlyWhileTheDiskIsShort(t *testing.T) {
 		{name: "ENOSPC and df fails", log: "copy_file_range: no space\n", availKB: "", wantSkip: true},
 		{name: "ENOSPC with a raised floor", log: "ENOSPC\n", availKB: strconv.Itoa(3 * gib), floor: "4294967296", wantSkip: true},
 		{name: "ENOSPC with a lowered floor", log: "ENOSPC\n", availKB: strconv.Itoa(gib), floor: "536870912", wantSkip: false},
+		// 0 turns gc's disk warning off; it must leave the skip on the default floor.
+		{name: "ENOSPC with floor 0 and disk short", log: "ENOSPC\n", availKB: strconv.Itoa(gib), floor: "0", wantSkip: true},
+		{name: "ENOSPC with floor 0 and space back", log: "ENOSPC\n", availKB: strconv.Itoa(3 * gib), floor: "0", wantSkip: false},
 	}
 	for label, detector := range enospcDetectors(t) {
 		for _, tc := range cases {
