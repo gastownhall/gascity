@@ -217,7 +217,7 @@ func sample(cityPath string) {
 }
 
 // openNudgeQueue builds the file queue: its location is the state.json path,
-// and its shadow view, dispatch skip counters and repin capability are present.
+// and its dispatch skip counters and repin capability are present.
 func TestOpenNudgeQueueBuildsTheFileQueue(t *testing.T) {
 	city := t.TempDir()
 	h := openNudgeQueue(city, beads.NudgesStore{})
@@ -227,11 +227,8 @@ func TestOpenNudgeQueueBuildsTheFileQueue(t *testing.T) {
 	if h.Location != nudgequeue.StatePath(city) {
 		t.Fatalf("Location = %q, want %q", h.Location, nudgequeue.StatePath(city))
 	}
-	if h.Shadows == nil || h.Skips == nil || h.Repin == nil {
-		t.Fatalf("handle = %+v, want shadows, skips and repin", h)
-	}
-	if err := h.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
+	if h.Skips == nil || h.Repin == nil {
+		t.Fatalf("handle = %+v, want skips and repin", h)
 	}
 	if _, err := os.Stat(nudgequeue.StatePath(city)); !os.IsNotExist(err) {
 		t.Fatalf("opening the queue touched state.json (stat err %v); it must open nothing up front", err)

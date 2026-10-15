@@ -131,7 +131,6 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 	}
 	now := time.Now()
 	queue := openNudgeQueue(cityPath, beads.NudgesStore{Store: store})
-	defer queue.Close() //nolint:errcheck // the file queue's Close does nothing
 	// Run the queue's TTL/max-attempts maintenance sweep unconditionally,
 	// independent of whether any item below matches an open session. The
 	// per-session loop's only path to recover/prune is a successful claim in

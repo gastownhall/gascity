@@ -12,8 +12,6 @@ import (
 type nudgeQueueHandle struct {
 	// Queue is the queue's contract surface.
 	Queue storebinding.NudgeQueue
-	// Shadows is the queue's shadow projection.
-	Shadows storebinding.NudgeShadows
 	// Location tells an operator where a queued item lives.
 	Location string
 	// Skips persists the dispatch tick's skip counters, an operator
@@ -22,9 +20,6 @@ type nudgeQueueHandle struct {
 	// Repin moves in-flight claims onto a new delivery key without a
 	// maintenance pass or a store open (rekeyQueuedNudgesAfterFailedBookkeeping).
 	Repin nudgeClaimRepinner
-	// Close releases what openNudgeQueue opened. The file queue opens nothing
-	// up front, so its Close does nothing.
-	Close func() error
 }
 
 // nudgeDispatchSkipRecorder persists and reads the dispatch skip counters.
@@ -48,11 +43,9 @@ func openNudgeQueue(cityPath string, store beads.NudgesStore) nudgeQueueHandle {
 	q := &fileNudgeQueue{cityPath: cityPath, store: store, clk: clock.Real{}}
 	return nudgeQueueHandle{
 		Queue:    q,
-		Shadows:  nudgeShadows(store),
 		Location: q.location(),
 		Skips:    q,
 		Repin:    q,
-		Close:    func() error { return nil },
 	}
 }
 

@@ -658,9 +658,7 @@ func doNudgeDrop(cityPath string, ids []string, jsonOutput bool, stdout, stderr 
 // queue read does, so a since-expired or since-recovered item is classified
 // against current state rather than a stale snapshot.
 func classifyQueuedNudgeIDs(cityPath string, ids []string, now time.Time) (map[string]nudgeDropStatus, error) {
-	h := openNudgeQueue(cityPath, beads.NudgesStore{})
-	defer h.Close() //nolint:errcheck // the file queue's Close does nothing
-	buckets, err := h.Queue.Lookup(ids, now)
+	buckets, err := openNudgeQueue(cityPath, beads.NudgesStore{}).Queue.Lookup(ids, now)
 	statuses := make(map[string]nudgeDropStatus, len(buckets))
 	for id, bucket := range buckets {
 		switch bucket {
@@ -2695,9 +2693,7 @@ func nudgeDrainExplicitCityPath() (string, bool) {
 // replays a receipt of the whole batch or commits the rest as new. A delivery
 // under a key claims through claimDueQueuedNudgeBatchForTarget instead.
 func claimDueQueuedNudgesForTarget(cityPath string, target nudgeTarget, now time.Time) ([]queuedNudge, error) {
-	h := openNudgeQueue(cityPath, beads.NudgesStore{})
-	defer h.Close() //nolint:errcheck // the file queue's Close does nothing
-	return h.Queue.ClaimDue(target.claimTarget(cityPath), now)
+	return openNudgeQueue(cityPath, beads.NudgesStore{}).Queue.ClaimDue(target.claimTarget(cityPath), now)
 }
 
 // claimDueQueuedNudgeBatchForTarget claims target's next delivery batch and
@@ -2716,9 +2712,7 @@ func claimDueQueuedNudgesForTarget(cityPath string, target nudgeTarget, now time
 // predecessor's fence to keep that fence, the predecessor waking again would
 // leave the batch split for both sessions (wholePinnedBatch) until it expired.
 func claimDueQueuedNudgeBatchForTarget(cityPath string, target nudgeTarget, now time.Time) ([]queuedNudge, error) {
-	h := openNudgeQueue(cityPath, beads.NudgesStore{})
-	defer h.Close() //nolint:errcheck // the file queue's Close does nothing
-	return h.Queue.ClaimBatch(target.claimTarget(cityPath), now)
+	return openNudgeQueue(cityPath, beads.NudgesStore{}).Queue.ClaimBatch(target.claimTarget(cityPath), now)
 }
 
 // listQueuedNudgesForTargetSnapshot returns target's queue buckets from a
@@ -2784,9 +2778,7 @@ func listQueuedNudgesForTargetSnapshot(cityPath string, target nudgeTarget, now 
 }
 
 func listQueuedNudgesForTarget(cityPath string, target nudgeTarget, now time.Time) ([]queuedNudge, []queuedNudge, []queuedNudge, error) {
-	h := openNudgeQueue(cityPath, beads.NudgesStore{})
-	defer h.Close() //nolint:errcheck // the file queue's Close does nothing
-	return h.Queue.ListFor(target.claimTarget(cityPath), now)
+	return openNudgeQueue(cityPath, beads.NudgesStore{}).Queue.ListFor(target.claimTarget(cityPath), now)
 }
 
 func enqueueQueuedNudge(cityPath string, item queuedNudge) error {
@@ -2794,9 +2786,7 @@ func enqueueQueuedNudge(cityPath string, item queuedNudge) error {
 }
 
 func enqueueQueuedNudgeWithStore(cityPath string, store beads.NudgesStore, item queuedNudge) error {
-	h := openNudgeQueue(cityPath, store)
-	defer h.Close() //nolint:errcheck // the file queue's Close does nothing
-	if err := h.Queue.Enqueue(item); err != nil {
+	if err := openNudgeQueue(cityPath, store).Queue.Enqueue(item); err != nil {
 		return err
 	}
 	// Best-effort wake of the supervisor's nudge dispatcher, only once the item
@@ -2812,9 +2802,7 @@ func ackQueuedNudges(cityPath string, ids []string) error {
 }
 
 func ackQueuedNudgesWithOutcome(cityPath string, ids []string, outcome, reason, commitBoundary string) error {
-	h := openNudgeQueue(cityPath, beads.NudgesStore{})
-	defer h.Close() //nolint:errcheck // the file queue's Close does nothing
-	return h.Queue.Ack(ids, outcome, reason, commitBoundary)
+	return openNudgeQueue(cityPath, beads.NudgesStore{}).Queue.Ack(ids, outcome, reason, commitBoundary)
 }
 
 // queuedNudgeReleaseAfter reports whether a delivery error leaves the nudges
@@ -2854,9 +2842,7 @@ func releaseQueuedNudgeClaims(cityPath string, ids []string) error {
 // releaseQueuedNudgeClaimsUntil returns claimed nudges to pending. A non-zero
 // deliverAfter keeps them from being claimed again before then.
 func releaseQueuedNudgeClaimsUntil(cityPath string, ids []string, deliverAfter time.Time) error {
-	h := openNudgeQueue(cityPath, beads.NudgesStore{})
-	defer h.Close() //nolint:errcheck // the file queue's Close does nothing
-	return h.Queue.ReleaseClaims(ids, deliverAfter)
+	return openNudgeQueue(cityPath, beads.NudgesStore{}).Queue.ReleaseClaims(ids, deliverAfter)
 }
 
 func recordQueuedNudgeFailure(cityPath string, ids []string, cause error, now time.Time) error {
@@ -2874,17 +2860,13 @@ func recordQueuedNudgeFailureWithStore(cityPath string, store beads.NudgesStore,
 // the write takes the lock. doNudgeDrop reports per-ID outcomes from it for
 // exactly that reason.
 func recordQueuedNudgeFailureDetailed(cityPath string, store beads.NudgesStore, ids []string, cause error, now time.Time) ([]queuedNudge, error) {
-	h := openNudgeQueue(cityPath, store)
-	defer h.Close() //nolint:errcheck // the file queue's Close does nothing
-	return h.Queue.RecordFailure(ids, cause, now)
+	return openNudgeQueue(cityPath, store).Queue.RecordFailure(ids, cause, now)
 }
 
 // rollbackQueuedNudge dead-letters item after the action that queued it (a
 // managed wake) failed, and closes its shadow in store as failed with reason.
 func rollbackQueuedNudge(cityPath string, store beads.NudgesStore, item queuedNudge, reason string) error {
-	h := openNudgeQueue(cityPath, store)
-	defer h.Close() //nolint:errcheck // the file queue's Close does nothing
-	return h.Queue.Rollback(item, reason)
+	return openNudgeQueue(cityPath, store).Queue.Rollback(item, reason)
 }
 
 func nudgePollerPIDPath(cityPath, sessionName, agentName string) string {
