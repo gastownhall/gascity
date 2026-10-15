@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"maps"
+	"math"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -204,6 +206,8 @@ func TestEncodeRefuses(t *testing.T) {
 		"empty type":         func(f *Fact) { f.Event.Type = "" },
 		"type space":         func(f *Fact) { f.Event.Type = "a b" },
 		"type too long":      func(f *Fact) { f.Event.Type = strings.Repeat("t", 201) },
+		"controller type":    func(f *Fact) { f.Event.Type = events.ExecutionStepCompleted },
+		"ledger type":        func(f *Fact) { f.Event.Type = events.BeadCreated },
 		"zero time":          func(f *Fact) { f.Event.Ts = time.Time{} },
 		"time past 9999":     func(f *Fact) { f.Event.Ts = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC) },
 		// The year is checked in UTC, the zone the row stores.
@@ -465,6 +469,8 @@ func TestDecodeRefusesWhatEncodeRefuses(t *testing.T) {
 		"type over limit":           set(keyType, strings.Repeat("t", maxTypeLen+1)),
 		"type with a space":         set(keyType, "a b"),
 		"type with a tab":           set(keyType, "a\tb"),
+		"controller type":           set(keyType, events.ExecutionStepCompleted),
+		"ledger type":               set(keyType, events.BeadCreated),
 		"actor over limit":          set(keyActor, strings.Repeat("a", maxActorLen+1)),
 		"subject over limit":        set(keySubject, strings.Repeat("s", maxSubjectLen+1)),
 		"message over limit":        set(keyMessage, strings.Repeat("m", MaxMessage+1)),
@@ -493,6 +499,75 @@ func TestDecodeRefusesWhatEncodeRefuses(t *testing.T) {
 				t.Fatalf("Decode = %v, want ErrCorrupt", err)
 			}
 		})
+	}
+}
+
+// A fact carries only a type a worker site may author. A box can write a row
+// without the recorder (D-TRUST), so the codec, not only the recorder, keeps a
+// forged controller observation such as a step completion, or a copy of a
+// ledger-derived bead event, out of the city's log. For every type this build
+// declares, Encode and Decode accept it exactly when events.AuthorshipOf calls
+// it Worker.
+func TestCodecAcceptsOnlyWorkerAuthoredTypes(t *testing.T) {
+	good, err := Encode("gc", testFact())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var accepted, refused int
+	for _, eventType := range events.KnownEventTypes {
+		f := testFact()
+		f.Event.Type = eventType
+		_, encodeErr := Encode("gc", f)
+		b := cloneRow(good)
+		b.Metadata[keyType] = eventType
+		_, decodeErr := Decode(b)
+		if a := events.AuthorshipOf(eventType); a != events.AuthorWorker {
+			refused++
+			if !errors.Is(encodeErr, ErrInvalid) || !errors.Is(decodeErr, ErrCorrupt) {
+				t.Errorf("%s is %s-authored: Encode = %v, Decode = %v; want ErrInvalid and ErrCorrupt", eventType, a, encodeErr, decodeErr)
+			}
+			continue
+		}
+		accepted++
+		if encodeErr != nil || decodeErr != nil {
+			t.Errorf("%s is worker-authored: Encode = %v, Decode = %v; want both to accept it", eventType, encodeErr, decodeErr)
+		}
+	}
+	if accepted == 0 || refused == 0 {
+		t.Fatalf("%d types accepted and %d refused; the registry must yield both", accepted, refused)
+	}
+}
+
+// A dropped size that does not fit this platform's int is a corrupt row,
+// never a silently wrapped size.
+func TestDecodePayloadDroppedOutsideIntIsRefused(t *testing.T) {
+	big := testFact()
+	big.Event.Payload = json.RawMessage(`"` + strings.Repeat("x", MaxPayload) + `"`)
+	good, err := Encode("gc", big)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		dropped string
+		fits    bool
+	}{
+		{strconv.Itoa(math.MaxInt), true},
+		{"4294987296", strconv.IntSize == 64}, // 2^32+20000 wraps to 20000, a size over MaxPayload, in a 32-bit int
+		{strconv.FormatUint(uint64(math.MaxInt)+1, 10), false},
+	}
+	for _, c := range cases {
+		b := cloneRow(good)
+		b.Metadata[keyPayloadDropped] = c.dropped
+		f, err := Decode(b)
+		if !c.fits {
+			if !errors.Is(err, ErrCorrupt) {
+				t.Errorf("dropped %s: Decode = (%d, %v), want ErrCorrupt", c.dropped, f.PayloadDropped, err)
+			}
+			continue
+		}
+		if err != nil || strconv.Itoa(f.PayloadDropped) != c.dropped {
+			t.Errorf("dropped %s: Decode = (%d, %v), want the size back", c.dropped, f.PayloadDropped, err)
+		}
 	}
 }
 
@@ -655,6 +730,7 @@ func FuzzDecode(f *testing.F) {
 		{keyTs, "2026-10-15T14:30:45+02:00"},
 		{keyDependsOnStepIDs, `[ "a" ]`},
 		{keyType, "a b"},
+		{keyType, events.ExecutionStepCompleted},
 		{keyActor, strings.Repeat("a", maxActorLen+1)},
 		{keyMessage, "\xff"},
 		{keySchema, "01"},

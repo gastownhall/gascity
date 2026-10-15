@@ -26,6 +26,13 @@ const (
 	checkpointFamily = "evproj"
 	checkpointTag    = "gascity/event-projector/v1"
 	maxCityLen       = 200
+
+	// Fingerprint field limits, in bytes. The journal's issue_id and op are
+	// VARCHAR(255) and VARCHAR(32), which count characters, and its ts is a
+	// DATETIME that bd renders as UTC RFC 3339, 30 bytes at most.
+	maxLastIssueLen = 255 * utf8.UTFMax
+	maxLastOpLen    = 32 * utf8.UTFMax
+	maxLastTSLen    = 64
 )
 
 // Checkpoint metadata keys: the whole ledgerfeed.Checkpoint, so a resumed
@@ -210,9 +217,22 @@ func validateCity(city string) error {
 }
 
 // validateFeed accepts the shapes a ledgerfeed.Tailer hands out: a seq, and
-// either no fingerprint or the fingerprint of the row at that seq.
+// either no fingerprint or the fingerprint of the row at that seq, whose text
+// fits the journal's columns.
 func validateFeed(cp ledgerfeed.Checkpoint) error {
 	last := cp.Last
+	for _, field := range []struct {
+		name, value string
+		max         int
+	}{
+		{"checkpoint fingerprint issue", last.IssueID, maxLastIssueLen},
+		{"checkpoint fingerprint ts", last.TS, maxLastTSLen},
+		{"checkpoint fingerprint op", last.Op, maxLastOpLen},
+	} {
+		if err := checkText(field.name, field.value, field.max); err != nil {
+			return err
+		}
+	}
 	switch {
 	case cp.Seq < 0:
 		return invalidf("checkpoint seq %d is negative", cp.Seq)

@@ -127,8 +127,9 @@ type Fact struct {
 	// Origin is the writer, and N counts its facts from 1.
 	Origin Origin
 	N      uint64
-	// Event is the event as the writer recorded it. Ts is required; Seq is
-	// never stored, since the projector's recorder assigns it.
+	// Event is the event as the writer recorded it. Its type is one
+	// events.AuthorshipOf calls AuthorWorker. Ts is required; Seq is never
+	// stored, since the projector's recorder assigns it.
 	Event events.Event
 	// PayloadDropped is the compacted size of a payload over MaxPayload that
 	// the row omits. Decode sets it; Encode computes it and refuses a fact
@@ -175,8 +176,9 @@ func (f Fact) validateIdentity() error {
 	return f.Origin.Validate()
 }
 
-// validateEvent checks the event's fields against their limits. The payload
-// is checked by the codec, which compacts it first.
+// validateEvent checks the event's fields against their limits, and its type
+// against events.AuthorshipOf: a fact carries only a type a worker site may
+// author. The payload is checked by the codec, which compacts it first.
 func validateEvent(e events.Event) error {
 	if err := checkText("type", e.Type, maxTypeLen); err != nil {
 		return err
@@ -190,6 +192,9 @@ func validateEvent(e events.Event) error {
 		return invalidf("event time is zero")
 	case e.Ts.UTC().Year() < 0 || e.Ts.UTC().Year() > 9999:
 		return invalidf("event time %v is outside RFC 3339's years", e.Ts)
+	}
+	if a := events.AuthorshipOf(e.Type); a != events.AuthorWorker {
+		return invalidf("event type %q is %s-authored; a fact carries only %s types", e.Type, a, events.AuthorWorker)
 	}
 	for _, field := range []struct {
 		name, value string

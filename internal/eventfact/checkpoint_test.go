@@ -22,6 +22,17 @@ func fingerprint(seq int64) ledgerfeed.Fingerprint {
 	return ledgerfeed.Fingerprint{Seq: seq, IssueID: "gc-ev-x", TS: "2026-10-15 12:00:00", Op: "create", Digest: strings.Repeat("ab", 32)}
 }
 
+// longestFingerprint is the most text a tailer can hand out: the journal's
+// VARCHAR(255) issue_id and VARCHAR(32) op full of four-byte characters, and
+// the longest ts bd renders.
+func longestFingerprint(seq int64) ledgerfeed.Fingerprint {
+	last := fingerprint(seq)
+	last.IssueID = strings.Repeat("\U0001F600", 255)
+	last.Op = strings.Repeat("\U0001F600", 32)
+	last.TS = "2026-10-15T12:00:00.123456789Z"
+	return last
+}
+
 func sameCheckpoint(t *testing.T, got, want Checkpoint) {
 	t.Helper()
 	if !got.At.Equal(want.At) {
@@ -50,6 +61,7 @@ func TestCheckpointRoundTrip(t *testing.T) {
 	for name, feed := range map[string]ledgerfeed.Checkpoint{
 		"empty journal":       {},
 		"at a row":            {Seq: 41, Last: fingerprint(41)},
+		"longest row text":    {Seq: 41, Last: longestFingerprint(41)},
 		"unknown fingerprint": {Seq: 41},
 		"lapsed":              {Seq: 41, Last: fingerprint(41), Lapsed: true},
 	} {
@@ -145,6 +157,44 @@ func TestCheckpointRefuses(t *testing.T) {
 	newer.Metadata["gc.evproj.schema"] = "2"
 	if _, err := DecodeCheckpoint(newer); !errors.Is(err, ErrUnsupportedSchema) {
 		t.Errorf("schema 2: %v, want ErrUnsupportedSchema", err)
+	}
+}
+
+// A fingerprint's text fits the journal column it came from, so neither the
+// projector nor a row it reads back hands the tailer an unbounded value.
+func TestCheckpointRefusesFingerprintText(t *testing.T) {
+	good, err := EncodeCheckpoint("gc", Checkpoint{City: "my-city", Feed: ledgerfeed.Checkpoint{Seq: 41, Last: fingerprint(41)}, At: cpAt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []struct {
+		key string
+		set func(*ledgerfeed.Fingerprint, string)
+		max int
+	}{
+		{"gc.evproj.last_issue", func(l *ledgerfeed.Fingerprint, v string) { l.IssueID = v }, maxLastIssueLen},
+		{"gc.evproj.last_ts", func(l *ledgerfeed.Fingerprint, v string) { l.TS = v }, maxLastTSLen},
+		{"gc.evproj.last_op", func(l *ledgerfeed.Fingerprint, v string) { l.Op = v }, maxLastOpLen},
+	} {
+		for name, v := range map[string]string{
+			"over its limit": strings.Repeat("x", field.max+1),
+			"not UTF-8":      "gc-\xff",
+		} {
+			t.Run(field.key+" "+name, func(t *testing.T) {
+				last := fingerprint(41)
+				field.set(&last, v)
+				cp := Checkpoint{City: "my-city", Feed: ledgerfeed.Checkpoint{Seq: 41, Last: last}, At: cpAt}
+				if _, err := EncodeCheckpoint("gc", cp); !errors.Is(err, ErrInvalid) {
+					t.Errorf("EncodeCheckpoint = %v, want ErrInvalid", err)
+				}
+				b := good
+				b.Metadata = maps.Clone(good.Metadata)
+				b.Metadata[field.key] = v
+				if _, err := DecodeCheckpoint(b); !errors.Is(err, ErrCorrupt) {
+					t.Errorf("DecodeCheckpoint = %v, want ErrCorrupt", err)
+				}
+			})
+		}
 	}
 }
 

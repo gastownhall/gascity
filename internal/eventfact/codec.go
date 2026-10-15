@@ -41,7 +41,8 @@ const (
 // mint prefix: a closed, no-history create, ready for a guarded batch or a
 // plain Create. The payload is stored compacted, or omitted with its size
 // recorded when it is larger than MaxPayload. A fact outside the schema is
-// ErrInvalid.
+// ErrInvalid, and so is one whose type events.AuthorshipOf does not call
+// AuthorWorker.
 func Encode(prefix string, f Fact) (beads.Bead, error) {
 	if err := f.validateIdentity(); err != nil {
 		return beads.Bead{}, err
@@ -156,9 +157,10 @@ func IsEventFact(b beads.Bead) bool {
 // Decode reads an event-fact row. It is the projector's trust boundary: a
 // box can write a fact row without Encode (D-TRUST), so Decode accepts only a
 // row Encode writes, every field in its canonical stored form and within its
-// limit. A row that is not one, is malformed or out of bounds, or whose id is
-// not <prefix>-ev-<hash of its writer> under a valid prefix is ErrCorrupt; a
-// later schema is ErrUnsupportedSchema. A gc.ev.* key this build does not
+// limit, and the type one a worker site may author. A row that is not one, is
+// malformed or out of bounds, carries a Controller or Ledger type, or whose id
+// is not <prefix>-ev-<hash of its writer> under a valid prefix is ErrCorrupt;
+// a later schema is ErrUnsupportedSchema. A gc.ev.* key this build does not
 // know is ignored (doc.go, "Schema evolution"). The row's status is not read:
 // a store that creates rows open leaves a fact open until its writer closes
 // it, and the fact is the same.
@@ -187,7 +189,7 @@ func Decode(b beads.Bead) (Fact, error) {
 			SessionID: d.meta[keySessionID],
 			StepID:    d.meta[keyStepID],
 		},
-		PayloadDropped: int(d.int64(keyPayloadDropped)),
+		PayloadDropped: d.int(keyPayloadDropped),
 	}
 	origin := d.required(keyOrigin)
 	d.required(keyTs)
@@ -303,6 +305,20 @@ func (d *metaReader) int64(key string) int64 {
 	n, err := strconv.ParseInt(v, 10, 64)
 	if err != nil || strconv.FormatInt(n, 10) != v {
 		d.fail(key, "%q is not a canonical integer", v)
+	}
+	return n
+}
+
+// int reads an integer that must fit this platform's int: a wider value is
+// refused, never wrapped.
+func (d *metaReader) int(key string) int {
+	v := d.meta[key]
+	if v == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || strconv.Itoa(n) != v {
+		d.fail(key, "%q is not a canonical integer within int range", v)
 	}
 	return n
 }

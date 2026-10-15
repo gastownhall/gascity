@@ -20,7 +20,8 @@
 // event it does not write, a dropped type included, as events.AckRecorder
 // requires: a caller that marks durable state on a nil ack
 // (executionevent.EmitCurrent's step_defined marker) would otherwise
-// suppress the fact for good.
+// suppress the fact for good. Encode refuses those types as well, and Decode
+// refuses a row that carries one, since a box need not use the recorder.
 //
 // # The fact row
 //
@@ -57,10 +58,13 @@
 //
 // Decode is the projector's trust boundary: a box writes rows with its own
 // bearer and need not go through Encode. So Decode accepts only a row Encode
-// writes: every limit above, the identity rules, compacted payload JSON, the
-// depends-on list exactly as Encode marshals it, canonical integers, and the
-// time in canonical UTC RFC 3339 with nanoseconds. Anything else is
-// ErrCorrupt.
+// writes: a type a worker site may author (events.AuthorshipOf is
+// AuthorWorker), every limit above, the identity rules, compacted payload
+// JSON, the depends-on list exactly as Encode marshals it, canonical
+// integers, and the time in canonical UTC RFC 3339 with nanoseconds.
+// Anything else is ErrCorrupt. The type check reads the authorship registry,
+// so it knows a type registered outside internal/events only in a binary that
+// links the package registering it.
 //
 // # Schema evolution
 //
@@ -84,9 +88,26 @@
 // One per city: <prefix>-evproj-<hash16("gascity/event-projector/v1", city)>,
 // closed, no-history, type "op", label gc:event-projector, holding the
 // projector's whole ledgerfeed.Checkpoint (its seq, the fingerprint of the row
-// at that seq, and the lapse mark) in gc.evproj.* metadata. The projector is
-// its only writer and moves it by a revision-guarded update
-// (CheckpointMetadata), which leaves the city the create wrote.
+// at that seq, and the lapse mark) in gc.evproj.* metadata. The projector
+// creates it and moves it by a revision-guarded update (CheckpointMetadata),
+// which leaves the city the create wrote.
+//
+// DecodeCheckpoint checks the row's shape, not its writer. The id derives
+// from the mint prefix and the city, which a box writing facts in the same
+// store knows too, so a row a box created or moved decodes like the
+// projector's own, and its seq would move the city's resume point, dropping
+// facts or replaying them. Before resuming from a checkpoint row, the
+// projector (BX-4b) must verify the row is its own by a check that holds
+// under D-TRUST, or record the gap as accepted under D-TRUST. The journal
+// actor of the row's writes is no such check: until BD-8 it is what the
+// writer asserts (BUILD-PLAN X5). Nor is refusing a row that exists before
+// the projector's create, which stops a box before the create but not an
+// update after it. A MAC over the gc.evproj.* fields, keyed by a secret
+// boxes never hold, holds only if it also stops a box writing back an
+// earlier checkpoint the projector wrote, which the journal records. An
+// authenticator kept in the row is a required field, so it belongs in
+// revision 1, before anything writes the row, or it costs a
+// CheckpointSchemaRev bump.
 //
 // The row lives in the store whose journal the projector tails, and bd
 // journals every update, no-history rows included, so each checkpoint write
@@ -96,8 +117,8 @@
 // that is not its own checkpoint write (DES-BX D14 step 6). A page holding
 // only its own checkpoint rows moves the cursor in memory and writes nothing,
 // so a quiet journal reaches a steady state with no writes. The cache-
-// notification bridge (OJ-20) skips gc:event-projector rows as it skips
-// gc:event-fact rows, for bead.* as well as op.changed.
+// notification bridge (OJ-20), when it lands, must skip both gc:event-fact
+// and gc:event-projector rows, for bead.* as well as op.changed.
 //
 // # Rows that do not decode
 //
