@@ -141,6 +141,7 @@ func TestTmuxRuntimeInventory_MalformedLineIsError(t *testing.T) {
 		"s\t$1\t1700000001\t0\t0.1",
 		"s\t$1\t1700000001\t0\tx.0\t0\t101\t1700000100\t",
 		"\t$1\t1700000001\t0\t0.1\t0\t101",
+		"s\t$1\t1700000001\t0\t0.1\t0\t101", // short in a required field, not just the marker
 	} {
 		got, err := runtimeInventoryFrom(t, &fakeExecutor{out: inventoryLines(
 			"s\t$1\t1700000001\t0\t0.0\t1\t100\t1700000100\t",
@@ -530,6 +531,61 @@ func TestTmuxRuntimeInventory_ReadsTheRestartMarker(t *testing.T) {
 	}
 	if !strings.HasSuffix(runtimeInventoryFormat, "\t#{@GC_RESTART_REQUESTED}") {
 		t.Fatalf("format %q does not read the marker's option", runtimeInventoryFormat)
+	}
+}
+
+// Regression (#7871): the real executor returns strings.TrimSpace(stdout),
+// and tmux ends every line with the marker field, so an unmarked LAST session
+// arrives with its trailing tab trimmed away: eight fields, not nine. That
+// line must still read as an unmarked session rather than fail the whole
+// inventory (which left every tmux seat liveness-unknown). The fixtures are
+// tmux's raw stdout, trimmed exactly as realExecutor trims it.
+// Kills: a parser that needs the empty trailing marker's tab.
+func TestTmuxRuntimeInventory_ExecutorTrimmedEmptyMarker(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		stdout string
+		asked  map[string]bool
+	}{
+		{
+			name:   "empty marker on the last line",
+			stdout: "asked\t$1\t1700000001\t0\t0.0\t0\t101\t1700000100\t1700000050\nquiet\t$2\t1700000002\t0\t0.0\t0\t201\t1700000100\t\n",
+			asked:  map[string]bool{"asked": true, "quiet": false},
+		},
+		{
+			name:   "empty marker on a middle line",
+			stdout: "quiet\t$2\t1700000002\t0\t0.0\t0\t201\t1700000100\t\nasked\t$1\t1700000001\t0\t0.0\t0\t101\t1700000100\t1700000050\n",
+			asked:  map[string]bool{"asked": true, "quiet": false},
+		},
+		{
+			name:   "no marker anywhere",
+			stdout: "a\t$1\t1700000001\t0\t0.0\t0\t101\t1700000100\t\nb\t$2\t1700000002\t0\t0.0\t0\t201\t1700000100\t\nb\t$2\t1700000002\t0\t0.1\t0\t202\t1700000100\t\n",
+			asked:  map[string]bool{"a": false, "b": false},
+		},
+		{
+			name:   "one unmarked session",
+			stdout: "only\t$1\t1700000001\t0\t0.0\t0\t101\t1700000100\t\n",
+			asked:  map[string]bool{"only": false},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := runtimeInventoryFrom(t, &fakeExecutor{out: strings.TrimSpace(tc.stdout)})
+			if err != nil {
+				t.Fatalf("RuntimeInventory: %v", err)
+			}
+			if len(got) != len(tc.asked) {
+				t.Fatalf("RuntimeInventory = %#v, want sessions %v", got, tc.asked)
+			}
+			for name, asked := range tc.asked {
+				e, ok := got[name]
+				if !ok {
+					t.Fatalf("session %q missing from %#v", name, got)
+				}
+				if e.RestartRequested != asked || !e.DeadKnown || e.AllPanesDead || !e.ActivityKnown || e.Incarnation == "" {
+					t.Errorf("%s = %#v, want a live, known session with RestartRequested=%t", name, e, asked)
+				}
+			}
+		})
 	}
 }
 

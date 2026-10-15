@@ -1496,7 +1496,8 @@ func (t *Tmux) listSessionNames() ([]string, error) {
 
 // runtimeInventoryFormat is the per-pane line listRuntimeInventory reads:
 // session name, session id, creation time, attached client count,
-// window.pane index, pane_dead, pane pid and the pane's window activity.
+// window.pane index, pane_dead, pane pid, the pane's window activity and the
+// restart marker's option mirror (empty when unset).
 const runtimeInventoryFormat = "#{session_name}\t#{session_id}\t#{session_created}\t#{session_attached}\t#{window_index}.#{pane_index}\t#{pane_dead}\t#{pane_pid}\t#{window_activity}\t#{" + restartRequestedOption + "}"
 
 // listRuntimeInventory reads every pane on the server with one untargeted
@@ -1538,6 +1539,13 @@ func parseRuntimeInventory(out string) (map[string]runtime.InventoryEntry, error
 			continue
 		}
 		fields := strings.Split(line, "\t")
+		if len(fields) == 8 {
+			// The marker is the last field and usually empty, and the
+			// executor trims its output: the last line's empty marker
+			// arrives with its tab gone (#7871). It is unset, not a short
+			// line; a line short in any other field is still malformed.
+			fields = append(fields, "")
+		}
 		if len(fields) != 9 || fields[0] == "" {
 			return nil, fmt.Errorf("tmux list-panes: malformed inventory line %q", line)
 		}
