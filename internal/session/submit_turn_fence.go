@@ -13,7 +13,7 @@ import (
 )
 
 // TurnInterruptOutcome is what a turn-fenced deliver-now did about the turn
-// it targeted (SESSION-RUNTIME-TURN-FENCE).
+// it targeted (SESSION-RUNTIME-020).
 type TurnInterruptOutcome string
 
 const (
@@ -125,7 +125,7 @@ func (m *Manager) turnFenceFor(ctx context.Context, by Actor, id string, b beads
 }
 
 // fencedInterruptAndSubmitLocked is deliver-now on a runtime that reports
-// turns (SESSION-RUNTIME-TURN-FENCE). Under the session mutation lock and the
+// turns (SESSION-RUNTIME-020). Under the session mutation lock and the
 // runtime lease it interrupts at most the sighted turn, waits for it to end,
 // and delivers the message through the send path, or queues it for the next
 // boundary when a turn may still run.

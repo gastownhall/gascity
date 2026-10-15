@@ -78,7 +78,7 @@ type recorderInstruments struct {
 	// Operation journal recording (O0 shadow ops)
 	opsRecordTotal metric.Int64Counter
 
-	// Turn-fenced deliver-now (SESSION-RUNTIME-TURN-FENCE)
+	// Turn-fenced deliver-now (SESSION-RUNTIME-020)
 	turnInterruptTotal metric.Int64Counter
 }
 

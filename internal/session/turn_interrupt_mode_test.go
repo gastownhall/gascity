@@ -210,7 +210,7 @@ func interruptNowEffects(t *testing.T, fam turnInterruptFamily, mode runtime.Tur
 // A keystroke runtime behind auto or hybrid, which always answer
 // runtime.TurnFenceProvider, keeps its bare provider sequence for "deliver
 // now": the turn fence is for protocol-mode sessions only
-// (SESSION-RUNTIME-TURN-FENCE), so the composite's capability must not turn
+// (SESSION-RUNTIME-020), so the composite's capability must not turn
 // the interrupt into a turn read that the keystroke backend cannot answer.
 func TestKeystrokeTurnInterruptBehindCompositesKeepsProviderSequences(t *testing.T) {
 	bare := func(f *runtime.Fake) runtime.Provider { return f }
@@ -432,7 +432,7 @@ func countMethod(calls []runtime.Call, method string) int {
 
 // The production t3bridge runtime, bare and behind auto or hybrid as cmd/gc
 // wires it, fences "deliver now" to the turn it arrived during for every
-// family that takes it (SESSION-RUNTIME-TURN-FENCE): an idle session gets the
+// family that takes it (SESSION-RUNTIME-020): an idle session gets the
 // message alone; a running turn gets one InterruptTurn naming it, then the
 // message once it ended. No keys, no untargeted Interrupt, no hard restart.
 func TestT3BridgeProfileTurnInterruptSequence(t *testing.T) {
