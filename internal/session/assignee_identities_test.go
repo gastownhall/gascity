@@ -426,3 +426,178 @@ func TestHasRecordAnsweringTo_NothingToLookUp(t *testing.T) {
 		t.Fatalf("blank identity = %v, %v after %d lookups; want false, nil and no lookup", got, err, len(store.queries))
 	}
 }
+
+// getCountingStore counts Get calls and fails them with err when it is set,
+// on top of recordLookupStore's listing record.
+type getCountingStore struct {
+	*recordLookupStore
+	gets   int
+	getErr error
+}
+
+func (s *getCountingStore) Get(id string) (beads.Bead, error) {
+	s.gets++
+	if s.getErr != nil {
+		return beads.Bead{}, s.getErr
+	}
+	return s.recordLookupStore.Get(id)
+}
+
+// seedRecordWithID is seedRecord for a record whose bead ID the test pins.
+func seedRecordWithID(t *testing.T, store *beads.MemStore, id, beadType string, labeled, open bool, metadata map[string]string) beads.Bead {
+	t.Helper()
+	store.HonorExplicitIDs = true
+	var labels []string
+	if labeled {
+		labels = []string{LabelSession}
+	}
+	b, err := store.Create(beads.Bead{ID: id, Title: "record", Type: beadType, Labels: labels, Metadata: metadata})
+	if err != nil {
+		t.Fatalf("Create record %s: %v", id, err)
+	}
+	if !open {
+		if err := store.Close(b.ID); err != nil {
+			t.Fatalf("Close record: %v", err)
+		}
+	}
+	return b
+}
+
+// TestRecordAnsweringTo pins which session records vouch for an identity of
+// any shape, and that the answer is the record's ID: a session bead, open or
+// closed, under its bead ID, session_name, alias, configured named identity or
+// sole alias-history entry. A bead that is not a session record never counts.
+func TestRecordAnsweringTo(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		id       string
+		beadType string
+		labeled  bool
+		open     bool
+		metadata map[string]string
+		identity string
+		want     bool
+	}{
+		{"open record by its ID", "gc-live1", BeadType, true, true, nil, "gc-live1", true},
+		{"closed record by its ID", "gc-dead2", BeadType, true, false, nil, "gc-dead2", true},
+		{"closed record by session_name", "gc-d34d1", BeadType, true, false, map[string]string{"session_name": "worker-gc-d34d1"}, "worker-gc-d34d1", true},
+		{"closed record by bare alias", "gc-a1", BeadType, true, false, map[string]string{"alias": "nux"}, "nux", true},
+		{"closed record by configured named identity", "gc-n1", BeadType, true, false, map[string]string{NamedSessionIdentityMetadata: "lana"}, "lana", true},
+		{"closed record by sole alias-history entry", "gc-h1", BeadType, true, false, map[string]string{"alias": "furiosa", "alias_history": "nux"}, "nux", true},
+		{"qualified identity by alias", "gc-q1", BeadType, true, false, map[string]string{"alias": "repo/nux"}, "repo/nux", true},
+		{"non-session bead whose ID is the identity", "gc-task1", "task", false, true, nil, "gc-task1", false},
+		{"work bead carrying the session_name", "gc-task2", "task", false, true, map[string]string{"session_name": "worker-gc-d34d1"}, "worker-gc-d34d1", false},
+		{"no record answers", "gc-other", BeadType, true, false, map[string]string{"session_name": "worker-gc-other"}, "bt-q7m3v", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := beads.NewMemStore()
+			record := seedRecordWithID(t, mem, tc.id, tc.beadType, tc.labeled, tc.open, tc.metadata)
+			store := &getCountingStore{recordLookupStore: &recordLookupStore{Store: mem}}
+
+			got, err := RecordAnsweringTo(store, " "+tc.identity+" ")
+			if err != nil {
+				t.Fatalf("RecordAnsweringTo(%s): %v", tc.identity, err)
+			}
+			want := ""
+			if tc.want {
+				want = record.ID
+			}
+			if got != want {
+				t.Fatalf("RecordAnsweringTo(%s) = %q, want %q", tc.identity, got, want)
+			}
+			for _, q := range store.queries {
+				if !q.Live || !q.IncludeClosed || len(q.Metadata) != 1 {
+					t.Fatalf("listing %+v, want one Live, closed-inclusive exact-metadata lookup", q)
+				}
+			}
+		})
+	}
+}
+
+// TestRecordAnsweringTo_QualifiedIdentityMatchesHasRecordAnsweringTo keeps a
+// "<rig>/<name>" identity on exactly HasRecordAnsweringTo's lookups: no Get
+// (a bead ID never contains "/") and no session_name listing.
+func TestRecordAnsweringTo_QualifiedIdentityMatchesHasRecordAnsweringTo(t *testing.T) {
+	for _, identity := range []string{"repo/nux", "repo/dalinar"} {
+		mem := beads.NewMemStore()
+		seedRecord(t, mem, BeadType, true, false, map[string]string{"alias": "repo/nux"})
+
+		anyShape := &getCountingStore{recordLookupStore: &recordLookupStore{Store: mem}}
+		id, err := RecordAnsweringTo(anyShape, identity)
+		if err != nil {
+			t.Fatalf("RecordAnsweringTo(%s): %v", identity, err)
+		}
+		qualified := &getCountingStore{recordLookupStore: &recordLookupStore{Store: mem}}
+		found, err := HasRecordAnsweringTo(qualified, identity)
+		if err != nil {
+			t.Fatalf("HasRecordAnsweringTo(%s): %v", identity, err)
+		}
+		if (id != "") != found {
+			t.Fatalf("%s: RecordAnsweringTo = %q, HasRecordAnsweringTo = %v; want agreement", identity, id, found)
+		}
+		if anyShape.gets != 0 {
+			t.Fatalf("%s: %d Get calls, want none for a qualified identity", identity, anyShape.gets)
+		}
+		if !reflect.DeepEqual(anyShape.queries, qualified.queries) {
+			t.Fatalf("%s: listings %+v, want HasRecordAnsweringTo's %+v", identity, anyShape.queries, qualified.queries)
+		}
+	}
+}
+
+// TestRecordAnsweringTo_Errors keeps a failed lookup from reading as "no
+// record": a non-NotFound Get error and a hard listing error both return ""
+// with the error, while a partial result still credits a matching row.
+func TestRecordAnsweringTo_Errors(t *testing.T) {
+	unreachable := errors.New("session store unreachable")
+	partial := &beads.PartialResultError{Op: "bd list", Err: errors.New("one row failed to parse")}
+
+	t.Run("Get error", func(t *testing.T) {
+		mem := beads.NewMemStore()
+		store := &getCountingStore{recordLookupStore: &recordLookupStore{Store: mem}, getErr: unreachable}
+		got, err := RecordAnsweringTo(store, "gc-d34d1")
+		if got != "" || !errors.Is(err, unreachable) {
+			t.Fatalf("RecordAnsweringTo = %q, %v; want \"\" and the Get error", got, err)
+		}
+		if len(store.queries) != 0 {
+			t.Fatalf("%d listings after a hard Get error, want none", len(store.queries))
+		}
+	})
+	t.Run("hard listing error", func(t *testing.T) {
+		mem := beads.NewMemStore()
+		seedRecordWithID(t, mem, "gc-d34d1", BeadType, true, false, map[string]string{"session_name": "worker-gc-d34d1"})
+		store := &getCountingStore{recordLookupStore: &recordLookupStore{Store: mem, err: unreachable}}
+		got, err := RecordAnsweringTo(store, "worker-gc-d34d1")
+		if got != "" || !errors.Is(err, unreachable) {
+			t.Fatalf("RecordAnsweringTo = %q, %v; want \"\" and the listing error", got, err)
+		}
+	})
+	t.Run("partial result with a matching row", func(t *testing.T) {
+		mem := beads.NewMemStore()
+		record := seedRecordWithID(t, mem, "gc-d34d1", BeadType, true, false, map[string]string{"session_name": "worker-gc-d34d1"})
+		store := &getCountingStore{recordLookupStore: &recordLookupStore{Store: mem, err: partial}}
+		got, err := RecordAnsweringTo(store, "worker-gc-d34d1")
+		if got != record.ID || !errors.Is(err, partial) {
+			t.Fatalf("RecordAnsweringTo = %q, %v; want %q and the partial error", got, err, record.ID)
+		}
+	})
+	t.Run("nothing to look up", func(t *testing.T) {
+		if got, err := RecordAnsweringTo(nil, "gc-d34d1"); got != "" || err != nil {
+			t.Fatalf("nil store = %q, %v; want \"\", nil", got, err)
+		}
+		store := &getCountingStore{recordLookupStore: &recordLookupStore{Store: beads.NewMemStore()}}
+		if got, err := RecordAnsweringTo(store, " "); got != "" || err != nil || store.gets != 0 || len(store.queries) != 0 {
+			t.Fatalf("blank identity = %q, %v; want no lookup", got, err)
+		}
+	})
+	t.Run("identities that cannot be a bead ID skip the Get", func(t *testing.T) {
+		for _, identity := range []string{"Pat Example", "-odd"} {
+			store := &getCountingStore{recordLookupStore: &recordLookupStore{Store: beads.NewMemStore()}}
+			if _, err := RecordAnsweringTo(store, identity); err != nil {
+				t.Fatalf("RecordAnsweringTo(%q): %v", identity, err)
+			}
+			if store.gets != 0 {
+				t.Fatalf("RecordAnsweringTo(%q) issued %d Get calls, want none", identity, store.gets)
+			}
+		}
+	})
+}

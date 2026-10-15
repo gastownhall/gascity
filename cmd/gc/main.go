@@ -1474,6 +1474,18 @@ func openCityStoreAt(cityPath string) (beads.Store, error) {
 	return result.Store, nil
 }
 
+// openCityStoreAtWithConfig is openCityStoreAt for a one-shot caller that has
+// already loaded this city's config in the same invocation: the open reuses cfg
+// instead of reloading city.toml and every pack include. A nil cfg loads, like
+// openCityStoreAt. Long-lived callers must keep openCityStoreAt.
+//
+// On this branch it is a thin wrapper over openStoreAtForCityWithConfig: the
+// bd provider's city-scope open still re-reads the config for its issue prefix
+// and store options (main avoids that reload with #6536's one-shot bd open).
+func openCityStoreAtWithConfig(cityPath string, cfg *config.City) (beads.Store, error) {
+	return openStoreAtForCityWithConfig(cityPath, cityPath, cfg)
+}
+
 func openCityStoreResultAt(cityPath string) (beads.StoreOpenResult, error) {
 	return openStoreResultAtForCity(cityPath, cityPath)
 }
