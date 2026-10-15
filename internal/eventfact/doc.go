@@ -89,17 +89,21 @@
 // (CheckpointMetadata), which leaves the city the create wrote.
 //
 // The row lives in the store whose journal the projector tails, and bd
-// journals every update, no-history rows included. A write after every page
-// would make the next page, whose only row is that write, and so on forever.
-// So the projector writes the checkpoint only:
+// journals every update, no-history rows included, so each checkpoint write
+// appends a journal row. A write after every page would make the next page,
+// whose only row is that write, and so on forever. So after an applied page
+// the projector writes the checkpoint only when the page advanced past a row
+// that is not its own checkpoint write (DES-BX D14 step 6). A page holding
+// only its own checkpoint rows moves the cursor in memory and writes nothing,
+// so a quiet journal reaches a steady state with no writes. The cache-
+// notification bridge (OJ-20) skips gc:event-projector rows as it skips
+// gc:event-fact rows, for bead.* as well as op.changed.
 //
-//   - after a page that recorded at least one fact;
-//   - when the lapse mark changed;
-//   - on a bounded timer, which keeps the checkpoint inside the journal's
-//     retention on a city with no facts, and at shutdown.
+// # Rows that do not decode
 //
-// A page with no facts, the projector's own checkpoint update included, is
-// never followed by a write, so a quiet journal reaches a steady state with
-// no writes. The cache-notification bridge (OJ-20) skips gc:event-projector
-// rows as it skips gc:event-fact rows, for bead.* as well as op.changed.
+// Any worker site can write a row that Decode refuses with ErrCorrupt or
+// ErrUnsupportedSchema. Such a row is refused, never skipped silently; the
+// projector must not stall on it either, since one box could then halt fact
+// projection for the whole city. It skips and counts the row loudly (a
+// warning, a counter, gc doctor) and moves on.
 package eventfact

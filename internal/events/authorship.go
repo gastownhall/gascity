@@ -34,6 +34,9 @@ import (
 //
 // Worker types carry what the writer asserts: until bd principals (BD-8) a
 // box's actor, subject and session are attributed by assertion (D-TRUST).
+// One Worker type is not recorded as asserted: execution.step_started is
+// accepted as a subject-only intent, and the projector re-derives it from a
+// live step read (D13, CD §5) instead of recording the box's copy.
 //
 // A worker site's recorder (D13's factRecorder) drops every Ledger and
 // Controller type at the source, and its RecordAck must return a non-nil
@@ -137,7 +140,7 @@ var builtinAuthorship = map[string]Authorship{
 	BeadClaimRejected:              AuthorWorker,
 	BeadClaimReleased:              AuthorWorker,
 	HookClaimReclaimedStale:        AuthorWorker,
-	ExecutionStepStarted:           AuthorWorker,
+	ExecutionStepStarted:           AuthorWorker, // re-derived by the projector from a live step read (D13, CD §5)
 	ExecutionClaimWindowExpired:    AuthorWorker,
 	MailSent:                       AuthorWorker,
 	MailRead:                       AuthorWorker,
