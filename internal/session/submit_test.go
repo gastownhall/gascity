@@ -2710,3 +2710,17 @@ func TestIsGoTestExecutableForBazelRunfilesSymlink(t *testing.T) {
 		})
 	}
 }
+
+// TestIsGoTestExecutableRecognizesRunningTestBinary pins the argv0 and
+// TEST_SRCDIR wiring in isGoTestExecutable, which the table above bypasses by
+// calling isGoTestExecutableFor. Plain go test names the binary *.test, which
+// matches without that wiring, so the wiring is only exercised under bazel.
+func TestIsGoTestExecutableRecognizesRunningTestBinary(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	if !isGoTestExecutable(exe) {
+		t.Fatalf("isGoTestExecutable(%q) = false (argv0 %q, TEST_SRCDIR %q), want true for the running test binary", exe, os.Args[0], os.Getenv("TEST_SRCDIR"))
+	}
+}

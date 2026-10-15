@@ -836,17 +836,21 @@ func isGoTestExecutable(path string) bool {
 func isGoTestExecutableFor(path, argv0, testSrcdir string) bool {
 	// The running bazel test binary drops the .test suffix but keeps the
 	// <target>_test name and exports TEST_SRCDIR; probes that exec a renamed
-	// spy binary must not match.
+	// spy binary must not match. Sibling gates such as internal/testenv and
+	// cmd/gc/test_guard.go need no symlink comparison: they classify only the
+	// running process, by an argv0 basename that is <target>_test whether or
+	// not bazel exec'd it through a symlink.
 	if testSrcdir != "" && strings.HasSuffix(filepath.Base(path), "_test") && isRunningBinary(path, argv0) {
 		return true
 	}
 	return strings.HasSuffix(filepath.Base(path), ".test")
 }
 
-// isRunningBinary reports whether path (as reported by os.Executable, with
-// symlinks resolved) is the binary argv0 names. Bazel execs a test through its
-// runfiles path, which is a symlink under local execution, so argv0 is also
-// compared after resolving symlinks.
+// isRunningBinary reports whether path, as reported by os.Executable, is the
+// binary argv0 names. Bazel execs a test through its runfiles path, which is a
+// symlink under local execution; on Linux os.Executable reads /proc/self/exe,
+// which names the symlink's resolved target, so argv0 is also compared after
+// resolving symlinks.
 func isRunningBinary(path, argv0 string) bool {
 	if path == argv0 {
 		return true
