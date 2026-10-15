@@ -129,8 +129,14 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 	if !nudgeDispatcherIsSupervisor(cfg) {
 		return 0, nil
 	}
+	return dispatchQueuedNudges(openNudgeQueue(cityPath, beads.NudgesStore{Store: store}), cityPath, cfg, store, sessStore, sp, sessionBeads, debugOut)
+}
+
+// dispatchQueuedNudges is the dispatcher pass of dispatchAllQueuedNudges over
+// queue. A DueKeys read that comes back partial still dispatches the agents it
+// read, and the pass reports its error.
+func dispatchQueuedNudges(queue nudgeQueueHandle, cityPath string, cfg *config.City, store, sessStore beads.Store, sp runtime.Provider, sessionBeads *sessionBeadSnapshot, debugOut io.Writer) (int, error) {
 	now := time.Now()
-	queue := openNudgeQueue(cityPath, beads.NudgesStore{Store: store})
 	// Run the queue's TTL/max-attempts maintenance sweep unconditionally,
 	// independent of whether any item below matches an open session. The
 	// per-session loop's only path to recover/prune is a successful claim in
@@ -144,12 +150,18 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 	// The agents with a due pending item, or with an in-flight item whose
 	// lease has expired: that one is recoverable on the next claim attempt,
 	// so including its agent retries without waiting for the patrol tick.
+	// A record DueKeys cannot decode costs only its own agent this pass: the
+	// agents it did read are dispatched, and the partial result is reported.
+	var firstErr error
 	dueKeys, err := queue.Queue.DueKeys(now)
 	if err != nil {
-		return 0, fmt.Errorf("loading nudge queue: %w", err)
+		if !beads.IsPartialResult(err) {
+			return 0, fmt.Errorf("loading nudge queue: %w", err)
+		}
+		firstErr = fmt.Errorf("loading nudge queue: %w", err)
 	}
 	if len(dueKeys) == 0 {
-		return 0, nil
+		return 0, firstErr
 	}
 	pendingAgents := make(map[string]bool, len(dueKeys))
 	for _, key := range dueKeys {
@@ -165,7 +177,6 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 	// (deriving sessStore from the nudges base would mis-resolve session beads once
 	// nudges relocates independently of sessions).
 	delivered := 0
-	var firstErr error
 	// skipCounts accumulates this tick's silent-skip reasons in memory; it is
 	// merged into the persisted queue state's running totals once, after the
 	// loop, rather than on every skip — recordNudgeDispatchSkips takes the

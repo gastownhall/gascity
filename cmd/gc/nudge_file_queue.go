@@ -1059,9 +1059,10 @@ func fileRecordQueuedNudgeFailure(cityPath string, store beads.NudgesStore, ids 
 // fileNudgeQueue is the flock'd state.json queue behind the NudgeQueue
 // contract. Each verb is the queue mechanic its facade always ran, so file
 // mode behaves as it did before the seam. It keeps two behaviors the contract
-// does not have, declared to the conformance suite: every verb first runs the
-// whole-queue recovery (VerbsMaintain), and an acked id is forgotten
-// (ForgetsRetiredIDs).
+// does not have, declared to the conformance suite: Enqueue, ClaimDue,
+// ClaimBatch, ListFor, ListForAgent, Lookup, Ack, ReleaseClaims and
+// RecordFailure first run the whole-queue recovery (VerbsMaintain), and an
+// acked id is forgotten (ForgetsRetiredIDs).
 //
 // store is forwarded only to the verbs that always took one (Enqueue,
 // RecordFailure, Rollback, WithdrawQueuedWaitNudges); the others open and close

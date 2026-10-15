@@ -46,12 +46,14 @@ type NudgesSuite struct {
 // only the legacy file queue may set either field, and the cases that cover
 // them assert the declared behavior in both directions.
 type NudgeQueuePolicy struct {
-	// VerbsMaintain: every verb first runs the whole-queue recovery, so a
-	// read past retention ages a dead letter out, and a lapsed lease is
-	// recovered inside whichever verb meets it and made due at that verb's
-	// clock: the caller's now for the verbs that take one, the wall clock for
-	// Enqueue, Ack, ReleaseClaims, Rollback, WithdrawQueuedWaitNudges and
-	// Empty.
+	// VerbsMaintain: Enqueue, ClaimDue, ClaimBatch, ListFor, ListForAgent,
+	// Lookup, Ack, ReleaseClaims and RecordFailure each first run the
+	// whole-queue recovery, so a listing past retention ages a dead letter
+	// out, and a lapsed lease is recovered inside whichever of them meets it
+	// and made due at that verb's clock: the caller's now for those that take
+	// one, the wall clock for Enqueue, Ack and ReleaseClaims. EnqueueDeferred,
+	// Rollback, WithdrawQueuedWaitNudges, DueKeys, Empty and Snapshot run no
+	// recovery under any policy.
 	VerbsMaintain bool
 	// ForgetsRetiredIDs: an acked id enqueued again before any sweep is
 	// queued again.
@@ -603,6 +605,63 @@ func RunNudgeFrontDoorTests(r Runner, suite NudgesSuite) {
 			}
 			if item.LastError != "expired" || item.Attempts != 0 {
 				r.Errorf("%s dead with LastError=%q Attempts=%d, want expired with no attempt charged", id, item.LastError, item.Attempts)
+			}
+		}
+	})
+
+	// The verbs outside the recovery set leave a lapsed lease as they found
+	// it, under any declared policy: the whole-queue reads are read-only, and
+	// EnqueueDeferred, Rollback and WithdrawQueuedWaitNudges touch only the
+	// records they are given. A Lookup at the claim instant, where the lease
+	// still holds so even a queue whose reads maintain recovers nothing, tells
+	// the two apart: the untouched claim reads as in flight, and a recovered
+	// item as pending whenever it was made due.
+	r.Run("NonMaintainingVerbsLeaveALapsedLeaseAlone", func(r Runner) {
+		wall := time.Now().UTC()
+		claimedAt := wall.Add(-time.Hour)
+		bystander := func(id string) nudgequeue.Item {
+			item := nudgeItem(id, "", wall)
+			item.Agent = "alpha/bystander"
+			return item
+		}
+		verbs := []struct {
+			name string
+			run  func(storebinding.NudgeQueue) error
+		}{
+			{"EnqueueDeferred", func(q storebinding.NudgeQueue) error {
+				return q.EnqueueDeferred(bystander("n-deferred"))
+			}},
+			{"Rollback", func(q storebinding.NudgeQueue) error {
+				return q.Rollback(bystander("n-bystander"), "conformance rollback")
+			}},
+			{"WithdrawQueuedWaitNudges", func(q storebinding.NudgeQueue) error {
+				return q.WithdrawQueuedWaitNudges([]string{"n-bystander"})
+			}},
+			{"DueKeys", func(q storebinding.NudgeQueue) error { _, err := q.DueKeys(wall); return err }},
+			{"Empty", func(q storebinding.NudgeQueue) error { _, err := q.Empty(); return err }},
+			{"Snapshot", func(q storebinding.NudgeQueue) error { _, err := q.Snapshot(); return err }},
+		}
+		for _, verb := range verbs {
+			queue := mustQueue(r, suite)
+			for _, item := range []nudgequeue.Item{nudgeItem("n-lapsed", "", claimedAt), bystander("n-bystander")} {
+				if err := queue.Enqueue(item); err != nil {
+					r.Fatalf("%s: Enqueue(%s): %v", verb.name, item.ID, err)
+				}
+			}
+			claimed, err := queue.ClaimDue(storebinding.ClaimTarget{QueueKeys: []string{ConformanceNudgeAgent}}, claimedAt)
+			if err != nil || len(claimed) != 1 || claimed[0].ID != "n-lapsed" {
+				r.Fatalf("%s: ClaimDue an hour ago = %v, %v; want n-lapsed", verb.name, nudgeIDs(claimed), err)
+			}
+			if err := verb.run(queue); err != nil {
+				r.Fatalf("%s: %v", verb.name, err)
+			}
+			buckets, err := queue.Lookup([]string{"n-lapsed"}, claimedAt)
+			if err != nil {
+				r.Fatalf("%s: Lookup: %v", verb.name, err)
+			}
+			if got := buckets["n-lapsed"]; got != nudgequeue.BucketInFlight {
+				r.Errorf("after %s n-lapsed reads %q at its claim, want %q: the verb recovered the lapsed lease",
+					verb.name, got, nudgequeue.BucketInFlight)
 			}
 		}
 	})
