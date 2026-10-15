@@ -30,7 +30,7 @@ type fenceScript struct {
 	sighting string // skipped, renamed, failed, none, active
 	alive    string // up, down, error
 	observe  string // none, t2, not_found, error
-	fence    string // t1, none, t2, bare, not_found, error
+	fence    string // t1, none, t2, bare, not_found, gone_after_attempt, error
 	dispatch string // ok, error
 	fenced   bool
 	wait     string // none, t3, not_ended, ctx, not_found
@@ -108,6 +108,11 @@ func (s *scriptedTurnFence) InterruptTurn(ctx context.Context, name, turnID stri
 		return runtime.TurnInterrupt{}, fmt.Errorf("bridge: %w", runtime.ErrTurnNotCurrent)
 	case "not_found":
 		return runtime.TurnInterrupt{}, fmt.Errorf("%w: gone", runtime.ErrSessionNotFound)
+	case "gone_after_attempt":
+		// A dispatch attempt failed, maybe after reaching the runtime, and
+		// the re-read before the retry found the session gone (t3bridge's
+		// refence): both sentinels at once.
+		return runtime.TurnInterrupt{}, fmt.Errorf("%w: dispatch failed: %w: gone", runtime.ErrRuntimeUnavailable, runtime.ErrSessionNotFound)
 	case "error":
 		return runtime.TurnInterrupt{}, runtime.ErrRuntimeUnavailable
 	}
@@ -169,7 +174,7 @@ func fenceOracle(c fenceScript) (outcome TurnInterruptOutcome, send, interrupt b
 		return TurnInterruptStale, true, false
 	case "t2", "bare":
 		return TurnInterruptStale, false, false
-	case "error":
+	case "error", "gone_after_attempt": // the interrupt may have reached the runtime
 		return TurnInterruptUnavailable, false, false
 	}
 	if c.dispatch == "error" {
@@ -195,7 +200,7 @@ func TestFenceTurnHoldsTheDeliverNowInvariants(t *testing.T) {
 	for _, sighting := range []string{"skipped", "renamed", "failed", "none", "active"} {
 		for _, alive := range []string{"up", "down", "error"} {
 			for _, observe := range []string{"none", "t2", "not_found", "error"} {
-				for _, fence := range []string{"t1", "none", "t2", "bare", "not_found", "error"} {
+				for _, fence := range []string{"t1", "none", "t2", "bare", "not_found", "gone_after_attempt", "error"} {
 					for _, dispatch := range []string{"ok", "error"} {
 						for _, fenced := range []bool{true, false} {
 							for _, wait := range []string{"none", "t3", "not_ended", "ctx", "not_found"} {
@@ -208,8 +213,8 @@ func TestFenceTurnHoldsTheDeliverNowInvariants(t *testing.T) {
 			}
 		}
 	}
-	if cases != 7200 {
-		t.Fatalf("enumerated %d cases, want 7200", cases)
+	if cases != 8400 {
+		t.Fatalf("enumerated %d cases, want 8400", cases)
 	}
 }
 
@@ -311,6 +316,9 @@ type fenceFixtureOpts struct {
 	wrap     func(*runtime.Fake) runtime.Provider // default: bare t3bridge
 	store    beads.Store                          // default: a MemStore
 	provider string                               // default: claude
+	// noQueue gives the Manager no city path, so its follow-up queue
+	// write fails; the actor still leases in the fixture's city.
+	noQueue bool
 }
 
 func newFenceFixture(t *testing.T, o fenceFixtureOpts) fenceFixture {
@@ -326,7 +334,11 @@ func newFenceFixture(t *testing.T, o fenceFixtureOpts) fenceFixture {
 	}
 	f := runtime.NewFake()
 	city := t.TempDir()
-	mgr := newTestManager(t, o.store, o.wrap(f), WithCityPath(city))
+	mgrCity := city
+	if o.noQueue {
+		mgrCity = ""
+	}
+	mgr := newTestManager(t, o.store, o.wrap(f), WithCityPath(mgrCity))
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: o.provider, WorkDir: t.TempDir(), Provider: o.provider, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -349,7 +361,17 @@ func (x fenceFixture) script(turns ...string) { x.f.TurnScripts[x.info.SessionNa
 
 func (x fenceFixture) submit(t *testing.T, msg string) (SubmitOutcome, error) {
 	t.Helper()
-	return x.mgr.Submit(context.Background(), testActor(x.mgr, ActorOperator), x.info.ID, msg, BuildResumeCommand(x.info), x.hints, SubmitIntentInterruptNow)
+	return x.mgr.Submit(context.Background(), x.actor(t, ActorOperator), x.info.ID, msg, BuildResumeCommand(x.info), x.hints, SubmitIntentInterruptNow)
+}
+
+// actor is an Actor of kind leasing in the fixture's city.
+func (x fenceFixture) actor(t *testing.T, kind ActorKind) Actor {
+	t.Helper()
+	city, err := NewCityDir(x.city)
+	if err != nil {
+		t.Fatalf("NewCityDir: %v", err)
+	}
+	return Actor{Kind: kind, City: city}
 }
 
 func (x fenceFixture) pending(t *testing.T) []nudgequeue.Item {
@@ -386,6 +408,7 @@ func expectFence(t *testing.T, x fenceFixture, out SubmitOutcome, err error, eff
 	if err != nil {
 		t.Fatalf("Submit(interrupt_now): %v", err)
 	}
+	expectLeaseReleased(t, x)
 	if got := fenceEffects(x.f.Calls); got != effects {
 		t.Fatalf("effects = %q, want %q; calls %v", got, effects, callMethods(x.f.Calls))
 	}
@@ -405,6 +428,18 @@ func expectFence(t *testing.T, x fenceFixture, out SubmitOutcome, err error, eff
 	if len(pending) != 1 || pending[0].Message != fenceMsg || pending[0].SessionID != x.info.ID {
 		t.Fatalf("pending %+v, want the message queued for %s", pending, x.info.ID)
 	}
+}
+
+// expectLeaseReleased checks that the deliver-now gave its runtime lease
+// back: a leaked lease blocks every later start, stop or delivery of the
+// runtime until the process exits.
+func expectLeaseReleased(t *testing.T, x fenceFixture) {
+	t.Helper()
+	l, err := TryRuntimeLease(nil, RuntimeLeaseRequest{City: x.city, Name: x.info.SessionName})
+	if err != nil {
+		t.Fatalf("runtime lease after Submit: %v, want it released", err)
+	}
+	l.Release()
 }
 
 // unfencedT1 is the report of an interrupt of t1 the runtime did not fence.
@@ -483,6 +518,24 @@ func TestFencedDeliverNowSightingFailureNeverInterrupts(t *testing.T) {
 			x.script(tc.turn)
 			out, err := x.submit(t, fenceMsg)
 			expectFence(t, x, out, err, tc.effects, TurnInterruptReport{Outcome: TurnInterruptUnavailable}, tc.queued, false)
+		})
+	}
+}
+
+// A dormant row whose turn reads both failed gets the message queued
+// Deferred: the follow-up poller delivers only to live sessions, so the
+// caller must have the controller wake it (the API records the wake).
+func TestFencedDeliverNowUnreadableDormantRowQueuesDeferred(t *testing.T) {
+	for _, state := range []State{StateAsleep, StateDrained} {
+		t.Run(string(state), func(t *testing.T) {
+			x := newFenceFixture(t, fenceFixtureOpts{})
+			if err := x.mgr.store.SetMetadataBatch(x.info.ID, map[string]string{"state": string(state)}); err != nil {
+				t.Fatal(err)
+			}
+			x.f.TurnReadErrors[x.info.SessionName] = []error{runtime.ErrRuntimeUnavailable, runtime.ErrRuntimeUnavailable}
+			x.script("t1")
+			out, err := x.submit(t, fenceMsg)
+			expectFence(t, x, out, err, "", TurnInterruptReport{Outcome: TurnInterruptUnavailable}, true, true)
 		})
 	}
 }
@@ -672,6 +725,14 @@ func checkFencedRefusal(t *testing.T, meta map[string]string, want error) {
 		t.Fatal(err)
 	}
 	x.script("t1")
+	// The row's stop holds the runtime lease: the refusal must come before
+	// the lease wait, not as ErrSessionStarting after it.
+	held, err := TryRuntimeLease(nil, RuntimeLeaseRequest{City: x.city, Name: x.info.SessionName})
+	if err != nil {
+		t.Fatalf("holding the runtime lease: %v", err)
+	}
+	defer held.Release()
+	t.Cleanup(SetOperatorLeaseWaitForTest(50 * time.Millisecond))
 	out, err := x.submit(t, fenceMsg)
 	if !errors.Is(err, want) || out.Queued || out.Interrupt != nil {
 		t.Fatalf("Submit = %+v, %v; want %v, nothing queued, no report", out, err, want)
@@ -684,6 +745,88 @@ func checkFencedRefusal(t *testing.T, meta map[string]string, want error) {
 	}
 	if pending := x.pending(t); len(pending) != 0 {
 		t.Fatalf("pending %+v, want nothing queued", pending)
+	}
+}
+
+// A pending prompt is answered explicitly before deliver-now acts: a fenced
+// runtime that also asks questions sends no turn interrupt over one.
+func TestFencedDeliverNowRefusesOverAPendingInteraction(t *testing.T) {
+	x := newFenceFixture(t, fenceFixtureOpts{wrap: func(f *runtime.Fake) runtime.Provider {
+		f.TurnInterruptModeValue = runtime.TurnInterruptProtocol
+		return runtime.FullFake{Fake: f}
+	}})
+	x.f.SetPendingInteraction(x.info.SessionName, &runtime.PendingInteraction{RequestID: "r1", Kind: "approval"})
+	x.script("t1", "t1", "")
+	out, err := x.submit(t, fenceMsg)
+	if !errors.Is(err, ErrPendingInteraction) || out.Queued || out.Interrupt != nil {
+		t.Fatalf("Submit = %+v, %v; want ErrPendingInteraction, nothing queued, no report", out, err)
+	}
+	if got := fenceEffects(x.f.Calls); got != "" {
+		t.Fatalf("effects = %q, want none", got)
+	}
+	if pending := x.pending(t); len(pending) != 0 {
+		t.Fatalf("pending %+v, want nothing queued", pending)
+	}
+}
+
+// A suspended row has no turn to fence: deliver-now reads no turn and takes
+// the unfenced path, whose send resumes it for an operator.
+func TestFencedDeliverNowSkipsASuspendedRow(t *testing.T) {
+	x := newFenceFixture(t, fenceFixtureOpts{})
+	if err := x.mgr.store.SetMetadataBatch(x.info.ID, map[string]string{"state": string(StateSuspended)}); err != nil {
+		t.Fatal(err)
+	}
+	x.script("t1")
+	out, err := x.submit(t, fenceMsg)
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	if out.Interrupt != nil {
+		t.Fatalf("report = %+v, want none for a suspended row", out.Interrupt)
+	}
+	for _, m := range []string{"ObserveTurn", "InterruptTurn", "WaitTurnEnded"} {
+		if n := countMethod(x.f.Calls, m); n != 0 {
+			t.Fatalf("%s calls = %d, want none; calls %v", m, n, callMethods(x.f.Calls))
+		}
+	}
+}
+
+// TestFencedDeliverNowAfterTheInterruptStopsTheRuntime pins the delivery
+// when the runtime reads as not running once the interrupt landed, as a
+// runtime that reports an interrupted session as absent would (a T3-2
+// residual, des-t3-interim-interrupt §12; the pinned bridge does not). The
+// send treats it as a stopped session: an operator's starts it and
+// delivers; a background caller's is queued Deferred, for the controller.
+func TestFencedDeliverNowAfterTheInterruptStopsTheRuntime(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		kind             ActorKind
+		effects          string
+		queued, deferred bool
+	}{
+		{"operator", ActorOperator, "IT(t1:sent) Start N(msg)", false, false},
+		{"background", ActorBackground, "IT(t1:sent)", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var x fenceFixture
+			x = newFenceFixture(t, fenceFixtureOpts{wrap: probed(func(method string, _ context.Context, _ time.Duration) {
+				if method == "InterruptTurn" {
+					// The runtime stops reporting the session as running.
+					if err := x.f.Stop(x.info.SessionName); err != nil {
+						t.Errorf("Stop: %v", err)
+					}
+				}
+			})})
+			x.script("t1", "t1", "")
+			out, err := x.mgr.Submit(context.Background(), x.actor(t, tc.kind), x.info.ID, fenceMsg, BuildResumeCommand(x.info), x.hints, SubmitIntentInterruptNow)
+			// The fixture's own Stop stands for the runtime's state change.
+			calls := x.f.Calls
+			if i := callIndex(calls, "Stop", x.info.SessionName); i >= 0 {
+				calls = append(append([]runtime.Call{}, calls[:i]...), calls[i+1:]...)
+			}
+			x.f.Calls = calls
+			expectFence(t, x, out, err, tc.effects, unfencedT1(TurnInterruptSettled), tc.queued, tc.deferred)
+		})
 	}
 }
 
@@ -802,55 +945,94 @@ func TestFencedDeliverNowSendsTheMessageVerbatim(t *testing.T) {
 	}
 }
 
+// Every exit of a fenced deliver-now writes exactly one log line and one
+// datapoint, its message disposition labeled as what became of the message.
 func TestFencedDeliverNowRecordsOneOutcome(t *testing.T) {
-	reader := sdkmetric.NewManualReader()
-	prev := otel.GetMeterProvider()
-	otel.SetMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)))
-	telemetry.ResetInstrumentsForTest()
-	t.Cleanup(func() {
-		otel.SetMeterProvider(prev)
-		telemetry.ResetInstrumentsForTest()
-	})
-	logs := captureLog(t)
-	x := newFenceFixture(t, fenceFixtureOpts{})
-	x.script("t1", "t1", "t3")
-	out, err := x.submit(t, fenceMsg)
-	if err != nil {
-		t.Fatalf("Submit: %v", err)
-	}
-	var lines []string
-	for _, line := range strings.Split(logs.String(), "\n") {
-		if strings.Contains(line, "deliver now for") {
-			lines = append(lines, line)
-		}
-	}
-	wantLine := fmt.Sprintf("session: deliver now for %q: interrupt settled (turn \"t1\"), unfenced_interrupt; message queued", x.info.SessionName)
-	if len(lines) != 1 || lines[0] != wantLine {
-		t.Fatalf("log lines = %q, want [%q]", lines, wantLine)
-	}
-	var rm metricdata.ResourceMetrics
-	if err := reader.Collect(context.Background(), &rm); err != nil {
-		t.Fatalf("Collect: %v", err)
-	}
-	var points []string
-	for _, sm := range rm.ScopeMetrics {
-		for _, m := range sm.Metrics {
-			if m.Name != "gc.session.turn_interrupts.total" {
-				continue
+	rejected := errors.New("thread rejected the message")
+	for _, tc := range []struct {
+		name    string
+		opts    fenceFixtureOpts
+		script  []string
+		arrange func(fenceFixture)
+		wantErr bool
+		// line is the log line after `deliver now for "<session>": `.
+		line, point string
+	}{
+		{
+			name: "delivered", line: `interrupt no_turn (turn ""); message delivered`, point: "no_turn||delivered=1",
+		},
+		{
+			name: "deferred over a dead agent", script: []string{"t1"},
+			arrange: func(x fenceFixture) { x.f.Zombies[x.info.SessionName] = true },
+			line:    `interrupt stale (turn "t1"); message deferred`, point: "stale||deferred=1",
+		},
+		{
+			name: "queued at the boundary", script: []string{"t1", "t1", "t3"},
+			line: `interrupt settled (turn "t1"), unfenced_interrupt; message queued`, point: "settled|unfenced_interrupt|queued=1",
+		},
+		{
+			name: "send rejected", wantErr: true,
+			arrange: func(x fenceFixture) { x.f.NudgeErrors[x.info.SessionName] = rejected },
+			line:    `interrupt no_turn (turn ""); message failed: sending message to session: ` + rejected.Error(), point: "no_turn||failed=1",
+		},
+		{
+			name: "queue write failed", opts: fenceFixtureOpts{noQueue: true}, script: []string{"t1", "t1", "t3"}, wantErr: true,
+			line:  `interrupt settled (turn "t1"), unfenced_interrupt; message failed: deferred submit is unavailable without a city path`,
+			point: "settled|unfenced_interrupt|failed=1",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reader := sdkmetric.NewManualReader()
+			prev := otel.GetMeterProvider()
+			otel.SetMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)))
+			telemetry.ResetInstrumentsForTest()
+			t.Cleanup(func() {
+				otel.SetMeterProvider(prev)
+				telemetry.ResetInstrumentsForTest()
+			})
+			logs := captureLog(t)
+			x := newFenceFixture(t, tc.opts)
+			x.script(tc.script...)
+			if tc.arrange != nil {
+				tc.arrange(x)
 			}
-			for _, dp := range m.Data.(metricdata.Sum[int64]).DataPoints {
-				var kv []string
-				for _, k := range []attribute.Key{"outcome", "degradation", "message_disposition"} {
-					v, _ := dp.Attributes.Value(k)
-					kv = append(kv, v.AsString())
+			if _, err := x.submit(t, fenceMsg); (err != nil) != tc.wantErr {
+				t.Fatalf("Submit error = %v, want error %t", err, tc.wantErr)
+			}
+			var lines []string
+			for _, line := range strings.Split(logs.String(), "\n") {
+				if strings.Contains(line, "deliver now for") {
+					lines = append(lines, line)
 				}
-				points = append(points, fmt.Sprintf("%s=%d", strings.Join(kv, "|"), dp.Value))
 			}
-		}
-	}
-	want := string(out.Interrupt.Outcome) + "|" + out.Interrupt.Degradation + "|queued=1"
-	if len(points) != 1 || points[0] != want {
-		t.Fatalf("turn_interrupts datapoints = %q, want [%q]", points, want)
+			wantLine := fmt.Sprintf("session: deliver now for %q: %s", x.info.SessionName, tc.line)
+			if len(lines) != 1 || lines[0] != wantLine {
+				t.Fatalf("log lines = %q, want [%q]", lines, wantLine)
+			}
+			var rm metricdata.ResourceMetrics
+			if err := reader.Collect(context.Background(), &rm); err != nil {
+				t.Fatalf("Collect: %v", err)
+			}
+			var points []string
+			for _, sm := range rm.ScopeMetrics {
+				for _, m := range sm.Metrics {
+					if m.Name != "gc.session.turn_interrupts.total" {
+						continue
+					}
+					for _, dp := range m.Data.(metricdata.Sum[int64]).DataPoints {
+						var kv []string
+						for _, k := range []attribute.Key{"outcome", "degradation", "message_disposition"} {
+							v, _ := dp.Attributes.Value(k)
+							kv = append(kv, v.AsString())
+						}
+						points = append(points, fmt.Sprintf("%s=%d", strings.Join(kv, "|"), dp.Value))
+					}
+				}
+			}
+			if len(points) != 1 || points[0] != tc.point {
+				t.Fatalf("turn_interrupts datapoints = %q, want [%q]", points, tc.point)
+			}
+		})
 	}
 }
 

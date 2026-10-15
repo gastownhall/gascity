@@ -136,6 +136,10 @@ func (m *Manager) fencedInterruptAndSubmitLocked(ctx context.Context, by Actor, 
 	if now {
 		queued, sendErr := m.sendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints, true)
 		// A send the runtime refused as unavailable sent nothing: queue it.
+		// Precondition, not yet in the runtime contract: a
+		// TurnFenceProvider's Nudge returns ErrRuntimeUnavailable only
+		// before dispatch. One that returned it after the text left would
+		// have this message delivered twice, once sent and once queued.
 		if !errors.Is(sendErr, runtime.ErrRuntimeUnavailable) {
 			out.Queued, out.Deferred = queued, queued
 			recordTurnInterrupt(ctx, sessName, report, out, sendErr)
@@ -146,9 +150,19 @@ func (m *Manager) fencedInterruptAndSubmitLocked(ctx context.Context, by Actor, 
 		recordTurnInterrupt(ctx, sessName, report, out, err)
 		return out, err
 	}
-	out.Queued = true // the boundary queue: not Deferred, the session is live
+	// The boundary queue. The follow-up poller delivers only to a live
+	// session, so on a dormant row the caller must have the controller wake
+	// it: Deferred. A live row's next boundary delivers it.
+	out.Queued = true
+	out.Deferred = dormantState(State(b.Metadata["state"]))
 	recordTurnInterrupt(ctx, sessName, report, out, nil)
 	return out, nil
+}
+
+// dormantState reports whether a row in state needs a wake to run: asleep or
+// drained, the rows a wake request applies to.
+func dormantState(state State) bool {
+	return state == StateAsleep || state == StateDrained
 }
 
 // fenceTurn is deliver-now's fence. It interrupts only the sighted turn, and
@@ -191,7 +205,9 @@ func fenceTurn(ctx context.Context, tf runtime.TurnFenceProvider, sessName strin
 		case errors.Is(err, runtime.ErrTurnNotCurrent): // the current turn is unreported
 			r.Outcome = TurnInterruptStale
 			return r, false
-		case errors.Is(err, runtime.ErrSessionNotFound):
+		case errors.Is(err, runtime.ErrSessionNotFound) && !errors.Is(err, runtime.ErrRuntimeUnavailable):
+			// Gone before any dispatch. Gone after a failed attempt (both
+			// sentinels) may have reached the runtime: unavailable below.
 			r.Outcome = TurnInterruptStale
 			return r, true
 		}

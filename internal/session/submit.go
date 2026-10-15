@@ -60,8 +60,10 @@ type SubmitOutcome struct {
 	// or resume the session (CONTRACT v5.9 D8 rule 1), so a controller should.
 	Deferred bool
 	// Interrupt is what an interrupt_now did about the turn it targeted when
-	// the session's runtime reports turns (SESSION-RUNTIME-TURN-FENCE); nil
-	// when the submit took no turn-fenced path. Set on an error too.
+	// the session's runtime reports turns (SESSION-RUNTIME-TURN-FENCE). It is
+	// set once the fence ran, a failed send or queue write included; nil when
+	// the submit took no turn-fenced path or was refused before the fence (a
+	// stopping or kill-pending row, the runtime lease not taken).
 	Interrupt *TurnInterruptReport
 }
 

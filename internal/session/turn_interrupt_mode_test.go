@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/runtime/hybrid"
@@ -144,6 +145,91 @@ func TestKeystrokeTurnInterruptKeepsProviderSequences(t *testing.T) {
 				mgr, sp, info := newTurnInterruptSession(t, fam, mode)
 				checkInterruptNow(t, fam, mgr, sp, info, want.now)
 			})
+		}
+	}
+}
+
+// keystrokeComposites route a keystroke Fake through each composite cmd/gc
+// wraps the base runtime in: auto whenever a city has ACP targets, hybrid for
+// a local/remote split (its other leg a t3bridge runtime, on either side).
+// Every composite answers runtime.TurnFenceProvider, whatever it routes to.
+var keystrokeComposites = map[string]func(*runtime.Fake) runtime.Provider{
+	"auto": func(f *runtime.Fake) runtime.Provider {
+		return auto.New(f, runtime.NewFakeProfile(runtime.ProfileACP, runtime.FullFake{Fake: runtime.NewFake()}))
+	},
+	"hybrid-local": func(f *runtime.Fake) runtime.Provider {
+		return hybrid.New(f, runtime.NewFakeProfile(runtime.ProfileT3Bridge, runtime.FullFake{Fake: runtime.NewFake()}), func(string) bool { return false })
+	},
+	"hybrid-remote": func(f *runtime.Fake) runtime.Provider {
+		return hybrid.New(runtime.NewFakeProfile(runtime.ProfileT3Bridge, runtime.FullFake{Fake: runtime.NewFake()}), f, func(string) bool { return true })
+	},
+}
+
+// interruptNowEffects runs "deliver now" for fam on a keystroke Fake wrapped
+// by wrap and returns its turn-affecting calls, after checking that it took
+// the unfenced path: no turn report, nothing queued.
+func interruptNowEffects(t *testing.T, fam turnInterruptFamily, mode runtime.TurnInterruptMode, wrap func(*runtime.Fake) runtime.Provider) string {
+	t.Helper()
+	f := runtime.NewFake()
+	f.TurnInterruptModeValue = mode
+	mgr := newTestManager(t, beads.NewMemStore(), wrap(f))
+	meta := map[string]string{"session_origin": "manual"}
+	for k, v := range fam.meta {
+		meta[k] = v
+	}
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: fam.provider, WorkDir: t.TempDir(), Provider: fam.provider, ExtraMeta: meta})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	f.Calls = nil
+	out, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "msg", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow)
+	if err != nil {
+		t.Fatalf("Submit(interrupt_now): %v", err)
+	}
+	if out.Interrupt != nil || out.Queued || out.Deferred {
+		t.Fatalf("outcome %+v (report %+v), want the unfenced path: no report, nothing queued", out, out.Interrupt)
+	}
+	state, err := nudgequeue.LoadState(mgr.cityPath)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if len(state.Pending) != 0 {
+		t.Fatalf("pending %+v, want nothing queued", state.Pending)
+	}
+	var effects []string
+	for _, c := range turnEffectCalls(f.Calls) {
+		// A process-table scan is a read; composites answer it from their
+		// own legs.
+		if c != "FindRuntimesBySessionID" {
+			effects = append(effects, c)
+		}
+	}
+	return strings.Join(effects, " ")
+}
+
+// A keystroke runtime behind auto or hybrid, which always answer
+// runtime.TurnFenceProvider, keeps its bare provider sequence for "deliver
+// now": the turn fence is for protocol-mode sessions only
+// (SESSION-RUNTIME-TURN-FENCE), so the composite's capability must not turn
+// the interrupt into a turn read that the keystroke backend cannot answer.
+func TestKeystrokeTurnInterruptBehindCompositesKeepsProviderSequences(t *testing.T) {
+	bare := func(f *runtime.Fake) runtime.Provider { return f }
+	for _, mode := range []runtime.TurnInterruptMode{"", runtime.TurnInterruptKeystroke} {
+		for _, fam := range turnInterruptFamilies {
+			if fam.refusesInterruptNow {
+				continue
+			}
+			for cname, wrap := range keystrokeComposites {
+				t.Run(string(mode)+"/"+fam.name+"/"+cname, func(t *testing.T) {
+					want := interruptNowEffects(t, fam, mode, bare)
+					if !strings.HasSuffix(want, " NudgeNow(msg)") {
+						t.Fatalf("bare effects %q are not an interrupt then the message", want)
+					}
+					if got := interruptNowEffects(t, fam, mode, wrap); got != want {
+						t.Fatalf("turn-affecting calls\n got: %s\nwant: %s (bare)", got, want)
+					}
+				})
+			}
 		}
 	}
 }
