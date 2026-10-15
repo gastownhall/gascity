@@ -4066,8 +4066,25 @@ func standingRowRuntimeHold(dt *drainTracker, stderr io.Writer, id string, now t
 // to stderr.
 //
 // probes bounds the manual arm's identity reads and post-stop confirmation; a
-// nil probes makes them unbounded (a commit caller, already bounded by its
-// start).
+// nil probes leaves them unbounded. A commit caller (the shutdown arm, and
+// commitStartFailure's terminal-error and rollback arms) passes nil: its
+// reads are unbounded like the commit's other provider calls, so a read that
+// hangs holds the commit, and with it the name's flock and an async start's
+// slot, until it returns or the controller exits. Meanwhile the tick's
+// rollback (releaseRowOwnedRuntimeLeased) holds the row without waiting for
+// the flock, and settles it with bounded reads once the flock is free.
+//
+// A commit caller passes no lease gate either, unlike the stale-start stop,
+// which runs once the row has moved on (staleAsyncStartRuntimeAttribution's
+// leaseHeld). A commit decides under the name's flock, which its start holds
+// from before PreWake through the commit (I-LEASE), so no other starter on
+// this host can have put a box under the name since. A starter on another
+// host is excluded by the start's record until it lapses, and it wakes the
+// row (a new instance token) before it starts; the async commit refreshes the
+// row first and reads that as stale, leaving the box to the lease-gated stop.
+// Only a start that outlives its record leaves a window, from that refresh
+// (a synchronous commit has none) to the stop here, in which another host's
+// box under the name can be stopped.
 func releaseRowOwnedRuntime(info sessionpkg.Info, sp runtime.Provider, stderr io.Writer, hold rowRuntimeHoldLog, probes *rowRuntimeProbes) bool {
 	if sp == nil {
 		return true
@@ -4262,9 +4279,12 @@ func holdManualRowRouteUnknown(info sessionpkg.Info, name string, hold rowRuntim
 // carries another session's GC_SESSION_ID or a gone token, is not this row's
 // and is left alone, as before. One whose identity cannot be read holds the
 // row: it may be a live start's. Any other runtime (no identity, this row's,
-// or another incarnation of this row) is stopped by name. A stop that fails,
-// or a runtime that still reads running or cannot be observed after it,
-// holds the row; its claim stays, so the level-triggered rollback retries.
+// or another incarnation of this row) is stopped by name. That includes a
+// runtime that carries an instance token other than this row's and no
+// GC_SESSION_ID: the name is reserved to the row, so such a stamp is read as
+// an earlier incarnation of it. A stop that fails, or a runtime that still
+// reads running or cannot be observed after it, holds the row; its claim
+// stays, so the level-triggered rollback retries.
 func tearDownManualRowRuntime(info sessionpkg.Info, sp runtime.Provider, hold rowRuntimeHoldLog, probes *rowRuntimeProbes) bool {
 	applies, routeKnown := manualRowTearsDownUnattributedRuntime(info, sp)
 	if !applies {

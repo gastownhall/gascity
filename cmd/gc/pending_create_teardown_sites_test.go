@@ -90,6 +90,50 @@ func rowClosed(t *testing.T, env *reconcilerTestEnv, id string) bool {
 	return b.Status == "closed"
 }
 
+// commitAtShutdown commits result as the async commit does once the
+// controller's context is canceled: the start succeeded, so the create rolls
+// back.
+func commitAtShutdown(env *reconcilerTestEnv, sp runtime.Provider, result startResult) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	commitAsyncStartResultWithContext(ctx, result, sp, env.store, env.clk, events.Discard, 0, io.Discard, &env.stderr, nil)
+}
+
+// commitFailedStart commits result as a start that failed with err and rolls
+// its create back; terminal says whether err is a terminal provider error.
+func commitFailedStart(t *testing.T, env *reconcilerTestEnv, sp runtime.Provider, result startResult, err error, terminal bool) {
+	t.Helper()
+	if got := runtime.ProviderTerminalErrorReason(err.Error()) != ""; got != terminal {
+		t.Fatalf("fixture: %q reads as a terminal provider error = %v, want %v", err, got, terminal)
+	}
+	result.err = err
+	result.outcome = TraceOutcomeProviderError
+	result.rollbackPending = true
+	result.provider = sp
+	commitStartFailure(result, sessionFrontDoor(env.store), env.clk, events.Discard, 0, &env.stderr, nil)
+}
+
+// releasedStartLease is a lease on name that its start has already released,
+// so it no longer excludes other starters: the stand-in for a lease that
+// outlived its record, which a test cannot age.
+func releasedStartLease(t *testing.T, env *reconcilerTestEnv, name string) *sessionpkg.RuntimeLease {
+	t.Helper()
+	lease, release, err := tryRuntimeLease(nil, env.city, name, "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+	if lease == nil || startLeaseStillHeld(lease, time.Now()) {
+		t.Fatal("fixture: want a start lease that no longer excludes other starters")
+	}
+	return lease
+}
+
+var (
+	errTerminalStart = errors.New("provider error: model_not_found")
+	errFailedStart   = errors.New("readiness probe failed")
+)
+
 func manualCloseSites() []manualCloseSite {
 	return []manualCloseSite{
 		{
@@ -97,24 +141,45 @@ func manualCloseSites() []manualCloseSite {
 			// context was canceled, so the create rolls back.
 			name: "shutdown arm",
 			run: func(t *testing.T, env *reconcilerTestEnv, sp *rowCloseOrderProvider, id, name string) manualSiteResult {
-				ctx, cancel := context.WithCancel(context.Background())
-				cancel()
-				commitAsyncStartResultWithContext(ctx, manualStartResult(env, id, name, nil), sp, env.store, env.clk, events.Discard, 0, io.Discard, &env.stderr, nil)
+				commitAtShutdown(env, sp, manualStartResult(env, id, name, nil))
 				return manualSiteResult{closedOrCleared: rowClosed(t, env, id)}
 			},
 		},
 		{
 			name: "terminal provider error arm",
 			run: func(t *testing.T, env *reconcilerTestEnv, sp *rowCloseOrderProvider, id, name string) manualSiteResult {
-				result := manualStartResult(env, id, name, nil)
-				result.err = errors.New("provider error: model_not_found")
-				if runtime.ProviderTerminalErrorReason(result.err.Error()) == "" {
-					t.Fatal("fixture: the error must hit the terminal-provider-error arm")
-				}
-				result.outcome = TraceOutcomeProviderError
-				result.rollbackPending = true
-				result.provider = sp
-				commitStartFailure(result, sessionFrontDoor(env.store), env.clk, events.Discard, 0, &env.stderr, nil)
+				commitFailedStart(t, env, sp, manualStartResult(env, id, name, nil), errTerminalStart, true)
+				return manualSiteResult{closedOrCleared: rowClosed(t, env, id)}
+			},
+		},
+		{
+			name: "rollback arm",
+			run: func(t *testing.T, env *reconcilerTestEnv, sp *rowCloseOrderProvider, id, name string) manualSiteResult {
+				commitFailedStart(t, env, sp, manualStartResult(env, id, name, nil), errFailedStart, false)
+				return manualSiteResult{closedOrCleared: rowClosed(t, env, id)}
+			},
+		},
+		// A commit tears down under its start's flock with no lease gate
+		// (releaseRowOwnedRuntime), so a lease that no longer excludes other
+		// starters stops the box all the same.
+		{
+			name: "shutdown arm, lease released",
+			run: func(t *testing.T, env *reconcilerTestEnv, sp *rowCloseOrderProvider, id, name string) manualSiteResult {
+				commitAtShutdown(env, sp, manualStartResult(env, id, name, releasedStartLease(t, env, name)))
+				return manualSiteResult{closedOrCleared: rowClosed(t, env, id)}
+			},
+		},
+		{
+			name: "terminal provider error arm, lease released",
+			run: func(t *testing.T, env *reconcilerTestEnv, sp *rowCloseOrderProvider, id, name string) manualSiteResult {
+				commitFailedStart(t, env, sp, manualStartResult(env, id, name, releasedStartLease(t, env, name)), errTerminalStart, true)
+				return manualSiteResult{closedOrCleared: rowClosed(t, env, id)}
+			},
+		},
+		{
+			name: "rollback arm, lease released",
+			run: func(t *testing.T, env *reconcilerTestEnv, sp *rowCloseOrderProvider, id, name string) manualSiteResult {
+				commitFailedStart(t, env, sp, manualStartResult(env, id, name, releasedStartLease(t, env, name)), errFailedStart, false)
 				return manualSiteResult{closedOrCleared: rowClosed(t, env, id)}
 			},
 		},
@@ -163,11 +228,13 @@ func manualCloseSites() []manualCloseSite {
 
 // TestManualRowTeardown_EveryCloseSite: every site that may close a manual
 // pending create on a runtime that cannot vouch for identity stops the row's
-// unattributed box first, and holds the row while the stop fails.
+// unattributed box first, and holds the row while the stop fails. A commit
+// site does so with a lease its start no longer holds too.
 //
 // Kills: no manual teardown at the shutdown arm, the terminal-error arm, the
-// failed-create close or the stuck-creating reaper; the drift rollback
-// ignoring the stale-start override.
+// rollback arm, the failed-create close or the stuck-creating reaper; a commit
+// site's teardown gated on startLeaseStillHeld; the drift rollback ignoring
+// the stale-start override.
 func TestManualRowTeardown_EveryCloseSite(t *testing.T) {
 	for _, site := range manualCloseSites() {
 		for _, stopFails := range []bool{false, true} {
@@ -213,13 +280,14 @@ func (listErrProvider) ListRunning(string) ([]string, error) {
 }
 
 // TestTearDownManualRowRuntime_Edges pins the teardown's answers to a gone
-// identity, a stop answering gone, an unconfirmable stop, and the stale-start
-// override's route and name checks.
+// identity, another incarnation's token with no session ID, a stop answering
+// gone, an unconfirmable stop, and the stale-start override's route and name
+// checks.
 //
-// Kills: no "gone" exclusion; a stop answering gone treated as a failure;
-// confirmRuntimeStopped without its ListRunning check; the stale-start
-// override ignoring an unknown route; the override without its session-name
-// check.
+// Kills: no "gone" exclusion; a token-only stamp left alone as another
+// session's; a stop answering gone treated as a failure; confirmRuntimeStopped
+// without its ListRunning check; the stale-start override ignoring an unknown
+// route; the override without its session-name check.
 func TestTearDownManualRowRuntime_Edges(t *testing.T) {
 	gone := fmt.Errorf("reading meta: %w", runtime.ErrSessionNotFound)
 	manual := func(f *runtime.Fake) sessionpkg.Info {
@@ -242,6 +310,23 @@ func TestTearDownManualRowRuntime_Edges(t *testing.T) {
 		}
 		if n := countCalls(f, "Stop"); n != 0 {
 			t.Fatalf("Stop called %d times for a runtime whose identity reads gone", n)
+		}
+	})
+
+	// The name is reserved to the row, so a box stamped with only another
+	// instance token is an earlier incarnation of it.
+	t.Run("another incarnation's token, no session ID: stopped, then released", func(t *testing.T) {
+		f := runtime.NewFake()
+		info := manual(f)
+		if err := f.SetMeta("worker", "GC_INSTANCE_TOKEN", "tok-0"); err != nil {
+			t.Fatal(err)
+		}
+		var holds []string
+		if !tearDownManualRowRuntime(info, execProfile(f), func(_, line string) { holds = append(holds, line) }, nil) {
+			t.Fatalf("held, want the row released: %v", holds)
+		}
+		if n := countCalls(f, "Stop"); n != 1 || f.IsRunning("worker") {
+			t.Fatalf("Stop called %d times, running=%v; want the box stopped once", n, f.IsRunning("worker"))
 		}
 	})
 
@@ -295,14 +380,21 @@ func TestTearDownManualRowRuntime_Edges(t *testing.T) {
 // decides from its snapshot, so a start that commits the row (or a writer that
 // closes it) after the snapshot must not have its box stopped. The tick
 // re-reads the row under the name's flock and stops only while it still
-// matches.
+// matches; a re-read that fails holds the row.
 //
-// Kills: no fresh re-read under the flock.
+// Kills: no fresh re-read under the flock; manualTeardownSnapshotCurrent
+// without any one of its terms; a failed re-read that tears down.
 func TestReleaseRowOwnedRuntimeLeased_ManualRowDecidesAgainUnderTheFlock(t *testing.T) {
 	for _, tc := range []struct {
-		name     string
-		after    func(t *testing.T, env *reconcilerTestEnv, session *beads.Bead)
+		name  string
+		after func(t *testing.T, env *reconcilerTestEnv, session *beads.Bead)
+		// meta, when set, is written to the row after the snapshot.
+		meta map[string]string
+		// store, when set, is the store the row is re-read from.
+		store    func(store beads.Store, id string) beads.Store
 		wantStop bool
+		// wantHold, when set, is the one hold kind the tick logs.
+		wantHold string
 	}{
 		{name: "row unchanged", wantStop: true},
 		{
@@ -325,6 +417,20 @@ func TestReleaseRowOwnedRuntimeLeased_ManualRowDecidesAgainUnderTheFlock(t *test
 				env.setSessionMetadata(session, map[string]string{"last_woke_at": env.clk.Now().UTC().Format(time.RFC3339)})
 			},
 		},
+		// Each changes one compared field alone. last_woke_at has one-second
+		// resolution, so two wakes in the same second differ only in token
+		// and generation.
+		{name: "instance token rotated", meta: map[string]string{"instance_token": "test-token-2"}},
+		{name: "generation bumped", meta: map[string]string{"generation": "2"}},
+		{name: "claim cleared", meta: map[string]string{"pending_create_claim": ""}},
+		{name: "active with its claim kept", meta: map[string]string{"state": string(sessionpkg.StateActive)}},
+		{
+			name: "re-read fails",
+			store: func(store beads.Store, id string) beads.Store {
+				return &failingGetStore{Store: store, failID: id, err: errors.New("store unavailable")}
+			},
+			wantHold: "row_reread_failed.pending_create_teardown",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			env, session, name := newRestartedPendingCreate(t, rowManual)
@@ -332,8 +438,20 @@ func TestReleaseRowOwnedRuntimeLeased_ManualRowDecidesAgainUnderTheFlock(t *test
 			if tc.after != nil {
 				tc.after(t, env, &session)
 			}
+			if tc.meta != nil {
+				env.setSessionMetadata(&session, tc.meta)
+			}
+			store := env.store
+			if tc.store != nil {
+				store = tc.store(env.store, session.ID)
+			}
 			var stderr bytes.Buffer
-			released := releaseRowOwnedRuntimeLeased(env.city, env.store, snapshot, execProfile(env.sp), &stderr, nil)
+			var holds []string
+			hold := func(kind, line string) {
+				holds = append(holds, kind)
+				fmt.Fprintln(&stderr, line) //nolint:errcheck
+			}
+			released := releaseRowOwnedRuntimeLeased(env.city, store, snapshot, execProfile(env.sp), &stderr, hold)
 			stopped := countCalls(env.sp, "Stop") > 0
 			if stopped != tc.wantStop || released != tc.wantStop {
 				t.Fatalf("stopped=%v released=%v, want %v; stderr=%s", stopped, released, tc.wantStop, stderr.String())
@@ -341,6 +459,47 @@ func TestReleaseRowOwnedRuntimeLeased_ManualRowDecidesAgainUnderTheFlock(t *test
 			if !tc.wantStop && !env.sp.IsRunning(name) {
 				t.Fatal("the box of a row that moved on was stopped")
 			}
+			if tc.wantHold != "" && (len(holds) != 1 || holds[0] != tc.wantHold) {
+				t.Fatalf("holds = %q, want [%s]; stderr=%s", holds, tc.wantHold, stderr.String())
+			}
 		})
+	}
+}
+
+// TestReleaseRowOwnedRuntimeLeased_ManualRowBoundsItsReads: a tick's identity
+// reads go through the session's bounded observation, so while an earlier
+// observation of the session has not returned they answer at once as
+// unverifiable, and the row is held without a stop.
+//
+// Kills: unbounded probes at the tick sites.
+func TestReleaseRowOwnedRuntimeLeased_ManualRowBoundsItsReads(t *testing.T) {
+	env, session, name := newRestartedPendingCreate(t, rowManual)
+	observing, unblock, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = observeSessionBounded(context.Background(), env.city, name, func() (struct{}, error) {
+			close(observing)
+			<-unblock
+			return struct{}{}, nil
+		})
+	}()
+	t.Cleanup(func() {
+		close(unblock)
+		<-done
+	})
+	<-observing
+	var holds []string
+	hold := func(kind, line string) {
+		holds = append(holds, kind)
+		fmt.Fprintln(&env.stderr, line) //nolint:errcheck
+	}
+	if releaseRowOwnedRuntimeLeased(env.city, env.store, env.sessionInfo(session.ID), execProfile(env.sp), &env.stderr, hold) {
+		t.Fatalf("released while the identity reads could not answer; stderr=%s", env.stderr.String())
+	}
+	if n := countCalls(env.sp, "Stop"); n != 0 || !env.sp.IsRunning(name) {
+		t.Fatalf("Stop called %d times, running=%v; want the box left alone", n, env.sp.IsRunning(name))
+	}
+	if len(holds) != 1 || holds[0] != "attribution_unknown.pending_create_teardown" {
+		t.Fatalf("holds = %q, want [attribution_unknown.pending_create_teardown]; stderr=%s", holds, env.stderr.String())
 	}
 }
