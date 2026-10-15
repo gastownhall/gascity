@@ -4107,31 +4107,38 @@ func TestProcessWorkflowFinalizeClosesCrossStoreSourceBead(t *testing.T) {
 	}
 }
 
-func TestProcessWorkflowFinalizeMapsSourceWorkOutcomeToStatus(t *testing.T) {
+func TestProcessWorkflowFinalizeStopsSourceChainAtBlockedWorkOutcome(t *testing.T) {
 	t.Parallel()
 
 	for _, tt := range []struct {
-		name          string
-		formula       string
-		initialStatus string
-		workOutcome   string
-		wantStatus    string
+		name             string
+		formula          string
+		initialStatus    string
+		workOutcome      string
+		wantParentStatus string
 	}{
-		{name: "completed", formula: "mol-do-work", wantStatus: "closed"},
-		{name: "no-op", formula: "mol-polecat-report", workOutcome: beadmeta.WorkOutcomeNoOp, wantStatus: "closed"},
-		{name: "blocked do-work", formula: "mol-do-work", workOutcome: beadmeta.WorkOutcomeBlocked, wantStatus: "blocked"},
-		{name: "blocked report", formula: "mol-polecat-report", workOutcome: beadmeta.WorkOutcomeBlocked, wantStatus: "blocked"},
-		{name: "preclosed blocked", formula: "mol-do-work", initialStatus: "closed", workOutcome: beadmeta.WorkOutcomeBlocked, wantStatus: "closed"},
+		{name: "completed", formula: "mol-do-work", wantParentStatus: "closed"},
+		{name: "no-op", formula: "mol-polecat-report", workOutcome: beadmeta.WorkOutcomeNoOp, wantParentStatus: "closed"},
+		{name: "blocked do-work", formula: "mol-do-work", workOutcome: beadmeta.WorkOutcomeBlocked, wantParentStatus: "open"},
+		{name: "blocked report", formula: "mol-polecat-report", workOutcome: beadmeta.WorkOutcomeBlocked, wantParentStatus: "open"},
+		{name: "preclosed blocked", formula: "mol-do-work", initialStatus: "closed", workOutcome: beadmeta.WorkOutcomeBlocked, wantParentStatus: "open"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
 			store := beads.NewMemStore()
+			parent := mustCreateWorkflowBead(t, store, beads.Bead{
+				Title: "parent work",
+				Type:  "task",
+			})
 			source := mustCreateWorkflowBead(t, store, beads.Bead{
-				Title:    "source work",
-				Type:     "task",
-				Status:   tt.initialStatus,
-				Metadata: map[string]string{beadmeta.WorkOutcomeMetadataKey: tt.workOutcome},
+				Title:  "source work",
+				Type:   "task",
+				Status: tt.initialStatus,
+				Metadata: map[string]string{
+					beadmeta.WorkOutcomeMetadataKey:  tt.workOutcome,
+					beadmeta.SourceBeadIDMetadataKey: parent.ID,
+				},
 			})
 			root := mustCreateWorkflowBead(t, store, beads.Bead{
 				Title: tt.formula,
@@ -4159,8 +4166,15 @@ func TestProcessWorkflowFinalizeMapsSourceWorkOutcomeToStatus(t *testing.T) {
 			if !result.Processed || result.Action != "workflow-pass" {
 				t.Fatalf("workflow result = %+v, want processed workflow-pass", result)
 			}
-			if got := mustGetBead(t, store, source.ID).Status; got != tt.wantStatus {
-				t.Fatalf("source status = %q, want %q for gc.work_outcome=%q", got, tt.wantStatus, tt.workOutcome)
+			gotSource := mustGetBead(t, store, source.ID)
+			if gotSource.Status != "closed" {
+				t.Fatalf("source status = %q, want closed for gc.work_outcome=%q", gotSource.Status, tt.workOutcome)
+			}
+			if got := gotSource.Metadata[beadmeta.WorkOutcomeMetadataKey]; got != tt.workOutcome {
+				t.Fatalf("source gc.work_outcome = %q, want %q", got, tt.workOutcome)
+			}
+			if got := mustGetBead(t, store, parent.ID).Status; got != tt.wantParentStatus {
+				t.Fatalf("parent status = %q, want %q for source gc.work_outcome=%q", got, tt.wantParentStatus, tt.workOutcome)
 			}
 		})
 	}
