@@ -406,6 +406,7 @@ go_library(
         "nudge_backstop.go",
         "nudge_beads.go",
         "nudge_dispatcher.go",
+        "nudge_file_queue.go",
         "nudge_mail_sweep.go",
         "nudge_poller_city_stop.go",
         "order_dispatch.go",
