@@ -144,6 +144,9 @@ func TestSubmitFollowUpReportsAnInjectedQueueFailure(t *testing.T) {
 // The city path still gates the deferred queue: an injected queue does not
 // make a Manager with no city path offer follow-ups.
 func TestDeferredSubmitQueueNeedsACityPath(t *testing.T) {
+	origPoller := startSessionSubmitPoller
+	startSessionSubmitPoller = func(string, string, string) error { return nil }
+	t.Cleanup(func() { startSessionSubmitPoller = origPoller })
 	queue := &recordingDeferredQueue{}
 	for _, tc := range []struct {
 		name     string

@@ -21,6 +21,12 @@ func (q *recordingDeferredSubmits) EnqueueDeferred(item nudgequeue.Item) error {
 
 // queueFollowUpThroughFactory submits a follow-up the session cannot take yet
 // through the factory's manager, so it is deferred.
+//
+// Deferring a codex follow-up also starts the session's nudge poller, and the
+// session package's poller seam is unexported, so this package cannot stub
+// it. These tests rely on ensureSessionSubmitPoller refusing to exec a Go test
+// binary (isGoTestExecutable), under go test and under bazel alike; the
+// refusal is swallowed by the submit path, so no poller child is spawned.
 func queueFollowUpThroughFactory(t *testing.T, factory *Factory, cityPath string) {
 	t.Helper()
 	ctx := context.Background()
