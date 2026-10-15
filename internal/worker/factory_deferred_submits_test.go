@@ -25,8 +25,11 @@ func (q *recordingDeferredSubmits) EnqueueDeferred(item nudgequeue.Item) error {
 // Deferring a codex follow-up also starts the session's nudge poller, and the
 // session package's poller seam is unexported, so this package cannot stub
 // it. These tests rely on ensureSessionSubmitPoller refusing to exec a Go test
-// binary (isGoTestExecutable), under go test and under bazel alike; the
-// refusal is swallowed by the submit path, so no poller child is spawned.
+// binary (isGoTestExecutable); the refusal is swallowed by the submit path, so
+// no poller child is spawned. The guard holds under go test and under remote
+// execution, but not when the test binary runs through a symlinked Bazel
+// runfiles tree (local Bazel): there os.Executable resolves the symlink, the
+// guard misses, and each deferring test starts one detached poller child.
 func queueFollowUpThroughFactory(t *testing.T, factory *Factory, cityPath string) {
 	t.Helper()
 	ctx := context.Background()
