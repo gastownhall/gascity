@@ -546,30 +546,41 @@ protected_claims_json() {
     ' <<<"$PROTECTED_ROWS"
 }
 
-# The claims to consider, one "<bead>\t<assignee>" row each.
+# The claims to consider, one "<bead>\t<assignee>" row each: those whose
+# holder neither the roster nor a live session recognizes. Each claim is
+# classified once, here; a recognized holder's claim is never released, so it
+# needs no gate answer and no probe.
 CLAIM_ROWS=$(echo "$IN_PROGRESS" | jq -r '.[] | select(.assignee != null and .assignee != "") | "\(.id)\t\(.assignee)"' 2>/dev/null) || CLAIM_ROWS=""
-
-# Ask the gate about every distinct claimant the roster and live sessions do
-# not recognize, before any per-bead read, in sorted order rotated by the
-# clock. The sweep below reads the memo; an identity the budget did not reach
-# is protected there.
-GATE_DEADLINE=$((SECONDS + GATE_BUDGET_SECONDS))
-UNRECOGNIZED=()
+UNRECOGNIZED_ROWS=""
 if [ -n "$CLAIM_ROWS" ]; then
+    UNRECOGNIZED_ROWS=$(while IFS=$'\t' read -r _bead _assignee; do
+        is_known_agent "$_assignee" || printf '%s\t%s\n' "$_bead" "$_assignee"
+    done <<<"$CLAIM_ROWS")
+fi
+
+# Ask the gate about every distinct unrecognized claimant, before any per-bead
+# read, in sorted order rotated by the clock. The sweep below reads the memo;
+# an identity the budget did not reach is protected there.
+UNRECOGNIZED=()
+if [ -n "$UNRECOGNIZED_ROWS" ]; then
     while IFS= read -r _identity; do
         [ -n "$_identity" ] && UNRECOGNIZED+=("$_identity")
     done < <(while IFS=$'\t' read -r _bead _assignee; do
-        is_known_agent "$_assignee" || printf '%s\n' "$_assignee"
-    done <<<"$CLAIM_ROWS" | jq -R -s -r 'split("\n") | map(select(length > 0)) | unique | .[]' 2>/dev/null)
+        printf '%s\n' "$_assignee"
+    done <<<"$UNRECOGNIZED_ROWS" | jq -R -s -r 'split("\n") | map(select(length > 0)) | unique | .[]' 2>/dev/null)
 fi
+_gate_offset=0
 if [ "${#UNRECOGNIZED[@]}" -gt 0 ]; then
     _now=$(date +%s 2>/dev/null) || _now=0
     case "$_now" in '' | *[!0-9]*) _now=0 ;; esac
     _gate_offset=$((_now % ${#UNRECOGNIZED[@]}))
-    for ((_i = 0; _i < ${#UNRECOGNIZED[@]}; _i++)); do
-        claim_gate_verdict "${UNRECOGNIZED[$(((_gate_offset + _i) % ${#UNRECOGNIZED[@]}))]}"
-    done
 fi
+# The budget runs from the first ask: classifying a large sweep's claims is not
+# gate time, and must not spend the budget before any claimant is asked.
+GATE_DEADLINE=$((SECONDS + GATE_BUDGET_SECONDS))
+for ((_i = 0; _i < ${#UNRECOGNIZED[@]}; _i++)); do
+    claim_gate_verdict "${UNRECOGNIZED[$(((_gate_offset + _i) % ${#UNRECOGNIZED[@]}))]}"
+done
 
 ORPHANED=0
 UNVERIFIABLE=0
@@ -578,40 +589,38 @@ FAILED=0
 # Process substitution (not a pipe) keeps the loop body in the parent
 # shell so $ORPHANED survives for the summary message below.
 while IFS=$'\t' read -r bead_id assignee; do
-    if ! is_known_agent "$assignee"; then
-        claim_gate_verdict "$assignee"
-        if [ "$GATE_VERDICT" != "local" ]; then
-            record_protected_claim "$assignee" "$bead_id"
-            continue
+    claim_gate_verdict "$assignee"
+    if [ "$GATE_VERDICT" != "local" ]; then
+        record_protected_claim "$assignee" "$bead_id"
+        continue
+    fi
+    if work_bead_still_resettable "$bead_id" "$assignee"; then
+        :
+    else
+        recheck_status=$?
+        if [ "$recheck_status" != "2" ]; then
+            UNVERIFIABLE=$((UNVERIFIABLE + 1))
         fi
-        if work_bead_still_resettable "$bead_id" "$assignee"; then
-            :
-        else
-            recheck_status=$?
-            if [ "$recheck_status" != "2" ]; then
-                UNVERIFIABLE=$((UNVERIFIABLE + 1))
-            fi
+        continue
+    fi
+    if session_bead_shows_live_assignment "$assignee" "$CURRENT_BEAD_JSON"; then
+        continue
+    else
+        session_status=$?
+        if [ "$session_status" = "2" ]; then
+            UNVERIFIABLE=$((UNVERIFIABLE + 1))
             continue
-        fi
-        if session_bead_shows_live_assignment "$assignee" "$CURRENT_BEAD_JSON"; then
-            continue
-        else
-            session_status=$?
-            if [ "$session_status" = "2" ]; then
-                UNVERIFIABLE=$((UNVERIFIABLE + 1))
-                continue
-            fi
-        fi
-        if reset_orphan_if_current "$bead_id" "$assignee"; then
-            ORPHANED=$((ORPHANED + 1))
-        else
-            reset_status=$?
-            if [ "$reset_status" != "2" ]; then
-                UNVERIFIABLE=$((UNVERIFIABLE + 1))
-            fi
         fi
     fi
-done < <([ -z "$CLAIM_ROWS" ] || printf '%s\n' "$CLAIM_ROWS")
+    if reset_orphan_if_current "$bead_id" "$assignee"; then
+        ORPHANED=$((ORPHANED + 1))
+    else
+        reset_status=$?
+        if [ "$reset_status" != "2" ]; then
+            UNVERIFIABLE=$((UNVERIFIABLE + 1))
+        fi
+    fi
+done < <([ -z "$UNRECOGNIZED_ROWS" ] || printf '%s\n' "$UNRECOGNIZED_ROWS")
 
 PROTECTED_DETAIL=""
 if [ "$PROTECTED" -gt 0 ]; then

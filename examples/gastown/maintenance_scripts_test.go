@@ -12535,6 +12535,41 @@ func TestOrphanSweepStopsAskingTheGateOnceTheBudgetRunsOut(t *testing.T) {
 	}
 }
 
+// TestOrphanSweepStartsTheGateBudgetAtTheFirstAsk keeps the claims'
+// classification from spending the gate budget. Matching every in-progress
+// claim against the roster and the live sessions takes real time on a large
+// sweep; a budget that ran from before it could be spent before any claimant
+// was asked, protecting every unrecognized claim, dead local ones included,
+// on every sweep. A grep that takes 1.5s per match of the dead local claimant
+// stands in for that volume.
+func TestOrphanSweepStartsTheGateBudgetAtTheFirstAsk(t *testing.T) {
+	const deadLocal = "gastown__polecat-gc-d34d1"
+	binDir := t.TempDir()
+	writeExecutable(t, filepath.Join(binDir, "gc"), orphanSweepSharedRigFakeGC)
+	writeExecutable(t, filepath.Join(binDir, "grep"), `#!/bin/sh
+for arg; do
+  if [ "$arg" = "`+deadLocal+`" ]; then sleep 1.5; break; fi
+done
+PATH=${PATH#*:}
+exec grep "$@"
+`)
+	run := runOrphanSweepGateFixture(t, nil,
+		[]orphanSweepGateRow{inProgress("sh-local-dead", deadLocal)},
+		nil, nil, map[string]string{
+			"GC_ORPHAN_SWEEP_GATE_BUDGET_SECONDS": "2",
+			"PATH":                                binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		})
+	if run.err != nil {
+		t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+	}
+	if got := run.gateCalls(); got != 1 {
+		t.Fatalf("gate consulted %d times, want 1: classifying the claims spent the gate budget\n%s", got, run.context())
+	}
+	if !run.released("sh-local-dead") {
+		t.Fatalf("dead local claim was not released\n%s", run.context())
+	}
+}
+
 // TestOrphanSweepIgnoresAMalformedGateBudget falls back to the default budget
 // for a value that is not a whole number of seconds, or is too long for bash
 // arithmetic to hold, rather than to no gate or to a deadline that wrapped
