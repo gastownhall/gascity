@@ -47,7 +47,11 @@ type NudgesSuite struct {
 // them assert the declared behavior in both directions.
 type NudgeQueuePolicy struct {
 	// VerbsMaintain: every verb first runs the whole-queue recovery, so a
-	// read past retention ages a dead letter out.
+	// read past retention ages a dead letter out, and a lapsed lease is
+	// recovered inside whichever verb meets it and made due at that verb's
+	// clock: the caller's now for the verbs that take one, the wall clock for
+	// Enqueue, Ack, ReleaseClaims, Rollback, WithdrawQueuedWaitNudges and
+	// Empty.
 	VerbsMaintain bool
 	// ForgetsRetiredIDs: an acked id enqueued again before any sweep is
 	// queued again.
@@ -1195,9 +1199,12 @@ func runNudgeBatchTests(r Runner, suite NudgesSuite) {
 		// A queue whose verbs maintain recovers the lapsed lease inside
 		// ReleaseClaims, against the wall clock, and the item is due from that
 		// instant; a claim at the earlier now would read it as not yet due.
+		// The second's margin absorbs a wall-clock step between the two
+		// readings (UTC drops the monotonic one) and stays far inside the
+		// ten-minute backoff this case guards against.
 		claimAt := now
 		if suite.Policy.VerbsMaintain {
-			claimAt = time.Now().UTC()
+			claimAt = time.Now().UTC().Add(time.Second)
 		}
 		claimed, err := queue.ClaimDue(target, claimAt)
 		if err != nil {
