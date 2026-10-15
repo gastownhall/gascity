@@ -230,7 +230,12 @@ becoming more useful as models improve — it becomes LESS useful instead.
 - **Tmux safety:** Never run bare `tmux kill-server` as cleanup. Never kill the
   default tmux server. If tmux cleanup is required, target only the known
   city/test socket explicitly with `tmux -L <socket> ...`, or prefer `gc stop`
-  for city shutdown. Treat personal tmux servers as out of bounds.
+  for city shutdown. Treat personal tmux servers as out of bounds. Test-harness
+  cross-run startup sweeps must use the canonical, private mode-0700
+  `GC_TEST_TMUX_SOCKET_PARENT_ROOT` (or a private root explicitly passed to a
+  focused helper); a present invalid environment scope fails closed. Without
+  it, the legacy shared `/tmp` fallback permits current-run cleanup only and
+  is never a sweep or process-discovery scope.
 - **Git safety:** Never run `git checkout <ref> -- .` (or any pathspec
   checkout) in a worktree you do not own — above all the shared rig root
   (`$GC_RIG_ROOT`). Unlike `git checkout <ref>`, the pathspec form overwrites
@@ -238,7 +243,9 @@ becoming more useful as models improve — it becomes LESS useful instead.
   entry) and stages nothing (so no dangling blob): overwritten uncommitted
   work is unrecoverable. To read a file at a ref use `git show <ref>:<path>`.
   To check something out, use your own worktree or a disposable
-  `git worktree add`.
+  `git worktree add`. Native managed `gc worktree ensure`/`verify` must
+  retain the recorded input commit in HEAD's ancestry; refusal preserves
+  existing work. Workflows own input selection and behavioral acceptance.
 - **Non-interactive shell:** `cp`, `mv`, and `rm` may be aliased to `-i` and
   hang an agent; use `cp -f`, `mv -f`, `rm -f`, `rm -rf`, `cp -rf`. Use
   `-o BatchMode=yes` for `ssh`/`scp`, `-y` for `apt-get`, and

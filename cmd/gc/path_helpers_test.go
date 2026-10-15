@@ -983,15 +983,22 @@ func startFakeDoltSQLServer(t *testing.T, cityPath string) *exec.Cmd {
 	if err := os.WriteFile(configPath, []byte("fake dolt config\n"), 0o644); err != nil {
 		t.Fatalf("write %s: %v", configPath, err)
 	}
+	return startFakeDoltSQLServerWithArgs(t, []string{"dolt", "sql-server", "--config", configPath})
+}
+
+// startFakeDoltSQLServerWithArgs shares the readiness handshake across the
+// config-file and standalone data-directory process fixtures.
+func startFakeDoltSQLServerWithArgs(t *testing.T, args []string) *exec.Cmd {
+	t.Helper()
 	self, err := os.Executable()
 	if err != nil {
 		t.Fatalf("resolve test binary path: %v", err)
 	}
 	cmd := exec.Command(self)
-	// Override argv so /proc/<pid>/cmdline reads as "dolt sql-server --config
-	// <configPath>" — maybeRunFakeDoltSQLServer never looks at os.Args, so
+	// Override argv so /proc/<pid>/cmdline shows the caller's dolt sql-server
+	// config-file or data-directory identity. The fake never looks at os.Args, so
 	// the spoofed content is never parsed or validated by anything.
-	cmd.Args = []string{"dolt", "sql-server", "--config", configPath}
+	cmd.Args = args
 	cmd.Env = append(os.Environ(), fakeDoltSQLServerMarkerEnv+"=1")
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr

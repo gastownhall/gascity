@@ -1,0 +1,131 @@
+# Real native initialization and CLI lineage with concurrent worker stand-ins.
+# This fixture exercises workspace plumbing, not PM intake or model acceptance.
+env GC_SESSION=fake
+env GC_BEADS=file
+env GC_DOLT=skip
+
+exec gc init --file $WORK/config.toml --no-start --skip-provider-readiness $WORK/city
+exists $WORK/city/pack.toml
+exec python3 $WORK/lineage.py $WORK
+stdout 'managed A/B -> C -> D fixture passed'
+
+-- config.toml --
+[workspace]
+name = "managed-lineage-fixture"
+
+-- lineage.py --
+import concurrent.futures
+import json
+from pathlib import Path
+import subprocess
+import sys
+import threading
+
+root = Path(sys.argv[1])
+repo = root / "product"
+workspaces = root / "city" / ".gc" / "worktrees" / "fixture"
+
+def command(args, cwd=None, check=True):
+    result = subprocess.run(args, cwd=cwd, text=True, capture_output=True, timeout=20)
+    if check and result.returncode:
+        raise AssertionError(f"{args!r}: {result.stdout}\n{result.stderr}")
+    return result
+
+def git(*args, cwd=repo):
+    return command(["git", *args], cwd).stdout.strip()
+
+repo.mkdir()
+git("init", "-b", "integration")
+git("config", "user.name", "Worktree fixture")
+git("config", "user.email", "fixture@example.invalid")
+git("config", "core.hooksPath", "/dev/null")
+(repo / "README").write_text("Deterministic managed-worktree fixture.\n")
+git("add", "README")
+git("commit", "-m", "seed")
+seed = git("rev-parse", "HEAD")
+
+def flags(stage, base):
+    return [
+        "--repo", str(repo), "--root", str(workspaces),
+        "--path", str(workspaces / stage), "--branch", f"work/fixture-{stage}",
+        "--base", base, "--base-sha", base,
+        "--bead", f"fixture-source-{stage}", "--store-ref", "city:fixture",
+        "--creator", "fixture", "--owner", "fixture-provisioner",
+        "--generation", "1", "--json",
+    ]
+
+def ensure(stage, base):
+    report = json.loads(command(["gc", "worktree", "ensure", *flags(stage, base)]).stdout)
+    assert report["provenance"]["base_sha"] == base
+    assert report["provenance"]["bead_id"] == f"fixture-source-{stage}"
+    assert report["provenance"]["attempt_id"]
+    assert report["head"] == base
+    return Path(report["path"])
+
+def verify(stage, base):
+    return json.loads(command(["gc", "worktree", "verify", *flags(stage, base)]).stdout)
+
+def commit(path, name, contents):
+    (path / name).write_text(contents)
+    git("add", name, cwd=path)
+    git("commit", "-m", name, cwd=path)
+    return git("rev-parse", "HEAD", cwd=path)
+
+paths = {stage: ensure(stage, seed) for stage in ("a", "b")}
+barrier = threading.Barrier(2)
+
+def independent_worker(stage):
+    assert verify(stage, seed)["head"] == seed
+    barrier.wait(timeout=20)
+    value = {"a": "alpha=17\n", "b": "beta=29\n"}[stage]
+    return commit(paths[stage], f"{stage}.txt", value)
+
+with concurrent.futures.ThreadPoolExecutor(max_workers=2) as workers:
+    futures = {stage: workers.submit(independent_worker, stage) for stage in ("a", "b")}
+    outputs = {stage: result.result(timeout=20) for stage, result in futures.items()}
+for stage in ("a", "b"):
+    assert git("rev-parse", f'{outputs[stage]}^') == seed
+    assert verify(stage, seed)["head"] == outputs[stage]
+    git("merge", "--no-ff", "--no-edit", f"work/fixture-{stage}")
+integrated_ab = git("rev-parse", "HEAD")
+for output in outputs.values():
+    git("merge-base", "--is-ancestor", output, integrated_ab)
+
+# A pre-existing downstream branch at the seed must not claim the A/B base,
+# even in dry-run. Refusal preserves the branch and creates no workspace.
+git("branch", "work/fixture-stale", seed)
+for dry_run in (["--dry-run"], []):
+    refused = command(["gc", "worktree", "ensure", *flags("stale", integrated_ab),
+                       *dry_run], check=False)
+    assert refused.returncode != 0, "stale downstream branch was accepted"
+    assert integrated_ab in refused.stdout + refused.stderr
+    assert not (workspaces / "stale").exists()
+    assert git("rev-parse", "work/fixture-stale") == seed
+
+c = ensure("c", integrated_ab)
+assert verify("c", integrated_ab)["head"] == integrated_ab
+assert (c / "a.txt").read_text() == "alpha=17\n"
+assert (c / "b.txt").read_text() == "beta=29\n"
+c_output = commit(c, "sum.txt", "sum=46\n")
+assert verify("c", integrated_ab)["head"] == c_output
+
+d = ensure("d", c_output)
+assert verify("d", c_output)["head"] == c_output
+assert (d / "sum.txt").read_text() == "sum=46\n"
+d_output = commit(d, "checksum.txt", "checksum=46\n")
+assert verify("d", c_output)["head"] == d_output
+git("merge", "--no-ff", "--no-edit", "work/fixture-d")
+integrated_head = git("rev-parse", "HEAD")
+assert integrated_head != d_output
+git("merge-base", "--is-ancestor", d_output, integrated_head)
+
+# The read-only oracle checks the actual integrated head in a fresh workspace.
+review = ensure("review", integrated_head)
+before = git("rev-parse", "HEAD", cwd=review)
+for name, value in {"a.txt": "alpha=17\n", "b.txt": "beta=29\n",
+                    "sum.txt": "sum=46\n", "checksum.txt": "checksum=46\n"}.items():
+    assert (review / name).read_text() == value
+assert git("status", "--porcelain", cwd=review) == ""
+assert git("rev-parse", "HEAD", cwd=review) == before == integrated_head
+assert git("status", "--porcelain") == ""
+print("managed A/B -> C -> D fixture passed")

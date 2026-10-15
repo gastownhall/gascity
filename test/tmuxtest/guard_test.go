@@ -39,12 +39,17 @@ func TestConfigureProcessEnvIsolatesTmuxSocketRoot(t *testing.T) {
 
 func TestListTestSocketPathsSkipsLiveSiblingRoots(t *testing.T) {
 	tmp := t.TempDir()
-	currentRun := filepath.Join(tmp, "gc-integration-current")
+	scope := filepath.Join(tmp, "owned-scope")
+	if err := os.Mkdir(scope, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(SocketParentRootEnv, scope)
+	currentRun := filepath.Join(scope, "gc-integration-current")
 	t.Setenv("TMPDIR", currentRun)
 	currentRoot := filepath.Join(currentRun, "tmux")
-	staleRoot := filepath.Join(tmp, "gc-integration-stale", "tmux")
-	liveRoot := filepath.Join(tmp, "gc-integration-live", "tmux")
-	otherRoot := filepath.Join(tmp, "not-gc", "tmux")
+	staleRoot := filepath.Join(scope, "gc-integration-stale", "tmux")
+	liveRoot := filepath.Join(scope, "gc-integration-live", "tmux")
+	otherRoot := filepath.Join(scope, "not-gc", "tmux")
 	t.Setenv(tmuxTmpEnv, currentRoot)
 
 	uid := strconv.Itoa(os.Getuid())
@@ -61,9 +66,20 @@ func TestListTestSocketPathsSkipsLiveSiblingRoots(t *testing.T) {
 		}
 	}
 	staleTime := time.Now().Add(-tmuxSiblingSocketStaleAfter - time.Minute)
-	if err := os.Chtimes(staleSocket, staleTime, staleTime); err != nil {
-		t.Fatalf("Chtimes(%s): %v", staleSocket, err)
+	for _, socketPath := range []string{staleSocket, liveSocket} {
+		if err := os.Chtimes(socketPath, staleTime, staleTime); err != nil {
+			t.Fatalf("Chtimes(%s): %v", socketPath, err)
+		}
 	}
+	liveSentinel, err := HoldAliveSentinel(filepath.Dir(liveRoot))
+	if err != nil {
+		t.Fatalf("HoldAliveSentinel(%s): %v", filepath.Dir(liveRoot), err)
+	}
+	t.Cleanup(func() {
+		if err := liveSentinel.Close(); err != nil {
+			t.Errorf("closing live sibling sentinel: %v", err)
+		}
+	})
 
 	got := listTestSocketPaths()
 
@@ -78,6 +94,81 @@ func TestListTestSocketPathsSkipsLiveSiblingRoots(t *testing.T) {
 	}
 	if slices.Contains(got, otherSocket) {
 		t.Fatalf("listTestSocketPaths() included unrelated socket %s in %v", otherSocket, got)
+	}
+}
+
+func TestListTestSocketPathsRejectsActiveRootOutsideConfiguredScope(t *testing.T) {
+	parent := t.TempDir()
+	scope := filepath.Join(parent, "owned-scope")
+	if err := os.Mkdir(scope, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	foreign := filepath.Join(parent, "gct-4242-foreign", "tmux")
+	foreignSocket := filepath.Join(foreign, "tmux-"+strconv.Itoa(os.Getuid()), "gctest-foreign")
+	if err := os.MkdirAll(filepath.Dir(foreignSocket), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(foreignSocket, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-tmuxSiblingSocketStaleAfter - time.Minute)
+	if err := os.Chtimes(foreignSocket, old, old); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(SocketParentRootEnv, scope)
+	t.Setenv(tmuxTmpEnv, filepath.Join(parent, "gct-1234-current", "tmux"))
+	if got := listTestSocketPaths(); len(got) != 0 {
+		t.Fatalf("listTestSocketPaths() widened beyond configured scope: %v", got)
+	}
+}
+
+func TestSocketRootWithinParentUsesCanonicalContainmentForMissingTails(t *testing.T) {
+	parent := t.TempDir()
+	scope := filepath.Join(parent, "owned")
+	if err := os.Mkdir(scope, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ownedMissing := filepath.Join(scope, "gct-42-owned", "tmux")
+	if !SocketRootWithinParent(scope, ownedMissing) {
+		t.Fatalf("missing owned socket root %q was not contained", ownedMissing)
+	}
+	foreign := filepath.Join(parent, "foreign")
+	if err := os.Mkdir(foreign, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(scope, "escape")
+	if err := os.Symlink(foreign, link); err != nil {
+		t.Fatal(err)
+	}
+	escapedMissing := filepath.Join(link, "gct-43-foreign", "tmux")
+	if SocketRootWithinParent(scope, escapedMissing) {
+		t.Fatalf("symlinked missing tail escaped scope: %q", escapedMissing)
+	}
+	if SocketRootWithinParent(scope, filepath.Join(scope, "gct-0-default", "tmux")) {
+		t.Fatal("zero-PID socket root was considered test-owned")
+	}
+	if SocketRootWithinParent(scope, filepath.Join(scope, "tmux-"+strconv.Itoa(os.Getuid()))) {
+		t.Fatal("default tmux server root was considered test-owned")
+	}
+	if SocketRootWithinParent(scope, filepath.Join(scope, "gct-44-nested", "child", "tmux")) {
+		t.Fatal("nested non-run root was considered test-owned")
+	}
+}
+
+func TestSocketParentRootFromEnvRejectsInvalidExplicitScope(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(SocketParentRootEnv, root)
+	got, err := SocketParentRootFromEnv("/tmp")
+	if err == nil || got != "" {
+		t.Fatalf("SocketParentRootFromEnv() = (%q, %v), want fail-closed error", got, err)
+	}
+	missing := filepath.Join(t.TempDir(), "missing")
+	t.Setenv(SocketParentRootEnv, missing)
+	if got, err = SocketParentRootFromEnv("/tmp"); err == nil || got != "" {
+		t.Fatalf("missing explicit scope resolved to (%q, %v), want error", got, err)
 	}
 }
 

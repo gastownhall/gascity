@@ -19,13 +19,18 @@ import (
 func TestMain(m *testing.M) {
 	_ = os.Unsetenv(AgentSliceEnv)
 
-	// NewSocketParentDir sweeps orphaned siblings left by a prior SIGKILL'd
-	// run before creating this run's own dir. tmuxSocketAliveSentinel must
+	// NewSocketParentDir sweeps only within the configured private parent.
+	// The legacy /tmp fallback still creates this run's private child but does
+	// not sweep siblings. tmuxSocketAliveSentinel must
 	// stay referenced for the process lifetime: the runtime finalizes
 	// unreachable os.Files, which would close the descriptor and release
 	// the lock, letting a concurrent sibling's sweep reclaim this still-
 	// active directory (ga-djbcqt).
-	tmuxSocketParent, sentinel, err := tmuxtest.NewSocketParentDir("/tmp", io.Discard)
+	socketParentRoot, err := tmuxtest.SocketParentRootFromEnv("/tmp")
+	if err != nil {
+		panic("tmux tests: invalid socket-parent scope: " + err.Error())
+	}
+	tmuxSocketParent, sentinel, err := tmuxtest.NewSocketParentDir(socketParentRoot, io.Discard)
 	if err != nil {
 		panic("tmux tests: creating socket parent: " + err.Error())
 	}

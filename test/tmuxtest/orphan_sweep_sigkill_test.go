@@ -62,6 +62,9 @@ func TestSweepOrphanReapsRealSIGKILLedProcess(t *testing.T) {
 	}
 
 	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	const prefix = "gct-sigkill-"
 
 	cmd := exec.Command(exe, "-test.run=^TestHelperHoldSentinel$")
