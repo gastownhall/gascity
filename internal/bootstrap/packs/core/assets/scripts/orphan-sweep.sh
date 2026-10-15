@@ -434,9 +434,9 @@ is_known_agent() {
 # GC_ORPHAN_SWEEP_GATE_BUDGET_SECONDS (default 120, well under the 300s exec
 # order timeout) per sweep; once it is spent no identity is asked about, and
 # every claim whose holder was not asked is protected like one the gate could
-# not answer. Identities are asked in sorted order rotated by the clock, so a
-# backlog of foreign identities cannot starve the same local dead claim of a
-# gate answer on every sweep.
+# not answer. Identities are asked in sorted order rotated from a random
+# start, so a backlog of foreign identities cannot starve the same local dead
+# claim of a gate answer on every sweep.
 #
 # The budget is a whole number of seconds that bash arithmetic can hold, read
 # in base 10: bash reads a leading zero as octal and rejects "08" outright,
@@ -559,7 +559,7 @@ if [ -n "$CLAIM_ROWS" ]; then
 fi
 
 # Ask the gate about every distinct unrecognized claimant, before any per-bead
-# read, in sorted order rotated by the clock. The sweep below reads the memo;
+# read, in sorted order rotated from a random start. The sweep below reads the memo;
 # an identity the budget did not reach is protected there.
 UNRECOGNIZED=()
 if [ -n "$UNRECOGNIZED_ROWS" ]; then
@@ -571,9 +571,9 @@ if [ -n "$UNRECOGNIZED_ROWS" ]; then
 fi
 _gate_offset=0
 if [ "${#UNRECOGNIZED[@]}" -gt 0 ]; then
-    _now=$(date +%s 2>/dev/null) || _now=0
-    case "$_now" in '' | *[!0-9]*) _now=0 ;; esac
-    _gate_offset=$((_now % ${#UNRECOGNIZED[@]}))
+    # A uniform random start (no state file) gives every claimant the same
+    # chance to be asked each sweep, whatever the order's run cadence.
+    _gate_offset=$(((RANDOM * 32768 + RANDOM) % ${#UNRECOGNIZED[@]}))
 fi
 # The budget runs from the first ask: classifying a large sweep's claims is not
 # gate time, and must not spend the budget before any claimant is asked.
