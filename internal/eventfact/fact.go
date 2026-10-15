@@ -21,9 +21,9 @@ const (
 	BeadType = opjournal.BeadType
 	// Label marks an event-fact row.
 	Label = "gc:event-fact"
-	// SchemaRev is the fact and checkpoint schema revision this build writes
-	// and reads.
-	SchemaRev = 1
+	// FactSchemaRev is the fact-row schema revision this build writes. It
+	// reads every revision from 1 up to it (doc.go, "Schema evolution").
+	FactSchemaRev = 1
 
 	labelSessionPrefix = "gc:event-fact-conv:"
 	idFamily           = "ev"

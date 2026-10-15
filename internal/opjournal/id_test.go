@@ -2,6 +2,11 @@ package opjournal
 
 import (
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -186,4 +191,68 @@ func TestPinnedIDRefuses(t *testing.T) {
 			t.Errorf("%s: PinnedID = %v, want ErrInvalidRequest", c.name, err)
 		}
 	}
+}
+
+// Every id infix this package mints is one of ownIDFamilies, so PinnedID
+// refuses it to every other package. A new <name>IDInfix constant fails here
+// until it is listed below, and listing it requires its family to be reserved.
+func TestOwnIDFamiliesCoverEveryInfix(t *testing.T) {
+	infixes := map[string]string{
+		"opIDInfix":      opIDInfix,
+		"factIDInfix":    factIDInfix,
+		"runtimeIDInfix": runtimeIDInfix,
+	}
+	for name, infix := range infixes {
+		family := strings.TrimSuffix(strings.TrimPrefix(infix, "-"), "-")
+		if "-"+family+"-" != infix || !slices.Contains(ownIDFamilies, family) {
+			t.Errorf("%s = %q is not -<family>- for a family in ownIDFamilies %v", name, infix, ownIDFamilies)
+		}
+		if _, err := PinnedID("gc", family, "t", "f"); !errors.Is(err, ErrInvalidRequest) {
+			t.Errorf("PinnedID mints in %s's family %q: %v", name, family, err)
+		}
+	}
+	for _, name := range declaredIDInfixConstants(t) {
+		if _, ok := infixes[name]; !ok {
+			t.Errorf("constant %s is not listed in this test: reserve its family in ownIDFamilies and list it", name)
+		}
+	}
+}
+
+// declaredIDInfixConstants returns the name of every package-level constant
+// in this package's non-test files that ends in IDInfix.
+func declaredIDInfixConstants(t *testing.T) []string {
+	t.Helper()
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	parsed := 0
+	for _, path := range files {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", path, err)
+		}
+		parsed++
+		for _, decl := range file.Decls {
+			gen, ok := decl.(*ast.GenDecl)
+			if !ok || gen.Tok != token.CONST {
+				continue
+			}
+			for _, spec := range gen.Specs {
+				for _, name := range spec.(*ast.ValueSpec).Names {
+					if strings.HasSuffix(name.Name, "IDInfix") {
+						names = append(names, name.Name)
+					}
+				}
+			}
+		}
+	}
+	if len(names) < 3 {
+		t.Fatalf("found %d IDInfix constants in %d files; the scan is broken (are the package sources in the test's data?)", len(names), parsed)
+	}
+	return names
 }

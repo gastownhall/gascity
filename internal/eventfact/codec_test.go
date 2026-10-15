@@ -220,6 +220,10 @@ func TestEncodeRefuses(t *testing.T) {
 		"subject invalid utf8":    func(f *Fact) { f.Event.Subject = string(bad) },
 		"run id invalid utf8":     func(f *Fact) { f.Event.RunID = string(bad) },
 		"session id invalid utf8": func(f *Fact) { f.Event.SessionID = string(bad) },
+		// json.Compact keeps invalid UTF-8 inside a string, and the store's
+		// JSON would rewrite it to U+FFFD, so the row could not come back as
+		// written.
+		"payload invalid utf8": func(f *Fact) { f.Event.Payload = json.RawMessage("{\"k\":\"" + string(bad) + "\"}") },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -401,4 +405,278 @@ func TestEncodeKeepsThePinnedIDError(t *testing.T) {
 	if !errors.Is(err, ErrInvalid) || !errors.Is(err, opjournal.ErrInvalidRequest) {
 		t.Fatalf("Encode(bad prefix) = %v, want ErrInvalid wrapping opjournal.ErrInvalidRequest", err)
 	}
+}
+
+// rehash re-derives b's id and session label from its own identity metadata,
+// so a refusal test reaches the check it targets instead of failing on the id.
+func rehash(t *testing.T, b *beads.Bead) {
+	t.Helper()
+	m := b.Metadata
+	id, err := opjournal.PinnedID("gc", idFamily, idTag, m[keySession], m[keyGen], m[keyOrigin], m[keyN])
+	if err != nil {
+		t.Fatalf("rehash: %v", err)
+	}
+	b.ID = id
+	b.Labels = []string{Label, SessionLabel(m[keySession])}
+}
+
+func cloneRow(b beads.Bead) beads.Bead {
+	b.Labels = slices.Clone(b.Labels)
+	b.Metadata = maps.Clone(b.Metadata)
+	return b
+}
+
+// Decode is the projector's trust boundary: a box can write a fact row
+// without Encode, so Decode refuses every row outside schema 1's limits,
+// with the id re-derived so that only the targeted check can refuse it.
+func TestDecodeRefusesWhatEncodeRefuses(t *testing.T) {
+	good, err := Encode("gc", testFact())
+	if err != nil {
+		t.Fatal(err)
+	}
+	set := func(key, value string) func(map[string]string) {
+		return func(m map[string]string) { m[key] = value }
+	}
+	del := func(key string) func(map[string]string) {
+		return func(m map[string]string) { delete(m, key) }
+	}
+	depsJSON := func(ids []string) string {
+		data, _ := json.Marshal(ids)
+		return string(data)
+	}
+	cases := map[string]func(map[string]string){
+		"payload over MaxPayload":   set(keyPayload, `"`+strings.Repeat("x", MaxPayload-1)+`"`),
+		"payload not compacted":     set(keyPayload, `{ "k": "v" }`),
+		"payload not utf8":          set(keyPayload, "{\"k\":\"\xff\"}"),
+		"gen absent":                del(keyGen),
+		"gen 0":                     set(keyGen, "0"),
+		"gen negative":              set(keyGen, "-1"),
+		"n absent":                  del(keyN),
+		"n 0":                       set(keyN, "0"),
+		"session over limit":        set(keySession, strings.Repeat("s", maxSessionLen+1)),
+		"type over limit":           set(keyType, strings.Repeat("t", maxTypeLen+1)),
+		"type with a space":         set(keyType, "a b"),
+		"type with a tab":           set(keyType, "a\tb"),
+		"actor over limit":          set(keyActor, strings.Repeat("a", maxActorLen+1)),
+		"subject over limit":        set(keySubject, strings.Repeat("s", maxSubjectLen+1)),
+		"message over limit":        set(keyMessage, strings.Repeat("m", MaxMessage+1)),
+		"run_id over limit":         set(keyRunID, strings.Repeat("r", maxIDFieldLen+1)),
+		"session_id over limit":     set(keySessionID, strings.Repeat("s", maxIDFieldLen+1)),
+		"step_id over limit":        set(keyStepID, strings.Repeat("s", maxIDFieldLen+1)),
+		"depends-on over 8 KiB":     set(keyDependsOnStepIDs, depsJSON(slices.Repeat([]string{strings.Repeat("s", maxIDFieldLen)}, 40))),
+		"depends-on entry too long": set(keyDependsOnStepIDs, depsJSON([]string{strings.Repeat("s", maxIDFieldLen+1)})),
+		"depends-on not compacted":  set(keyDependsOnStepIDs, `[ "step-a" ]`),
+		"depends-on not utf8":       set(keyDependsOnStepIDs, "[\"\xff\"]"),
+		"ts with an offset":         set(keyTs, "2026-10-15T14:30:45.123456789+02:00"),
+		"ts with trailing zeros":    set(keyTs, "2026-10-15T12:30:45.100Z"),
+		"ts the zero time":          set(keyTs, "0001-01-01T00:00:00Z"),
+		"schema 0":                  set(keySchema, "0"),
+		"schema non-canonical":      set(keySchema, "01"),
+		"dropped non-canonical":     func(m map[string]string) { delete(m, keyPayload); m[keyPayloadDropped] = "016385" },
+		"dropped 0":                 func(m map[string]string) { delete(m, keyPayload); m[keyPayloadDropped] = "0" },
+		"dropped negative":          func(m map[string]string) { delete(m, keyPayload); m[keyPayloadDropped] = "-20000" },
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			b := cloneRow(good)
+			mutate(b.Metadata)
+			rehash(t, &b)
+			if _, err := Decode(b); !errors.Is(err, ErrCorrupt) {
+				t.Fatalf("Decode = %v, want ErrCorrupt", err)
+			}
+		})
+	}
+}
+
+// Fact rows are schema 1. A later revision is ErrUnsupportedSchema, so a
+// projector older than its writers stops on the row instead of skipping it.
+func TestDecodeSchemaRevisions(t *testing.T) {
+	good, err := Encode("gc", testFact())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if good.Metadata[keySchema] != "1" || FactSchemaRev != 1 {
+		t.Fatalf("schema = %q, FactSchemaRev = %d", good.Metadata[keySchema], FactSchemaRev)
+	}
+	newer := cloneRow(good)
+	newer.Metadata[keySchema] = "2"
+	if _, err := Decode(newer); !errors.Is(err, ErrUnsupportedSchema) {
+		t.Fatalf("schema 2: %v, want ErrUnsupportedSchema", err)
+	}
+}
+
+// A gc.ev.* key this build does not know is ignored: a new optional field is
+// additive within schema 1, so a projector older than its writers still
+// records the event, without the field (doc.go, "Schema evolution").
+func TestDecodeIgnoresUnknownKeys(t *testing.T) {
+	b, err := Encode("gc", testFact())
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.Metadata["gc.ev.a_later_field"] = "x"
+	b.Metadata["gc.other"] = "y"
+	got, err := Decode(b)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	want := testFact()
+	want.ID = b.ID
+	sameFact(t, got, want)
+}
+
+// Every events.Event field except Seq has a gc.ev.<json tag> key, and a fact
+// that sets every field round-trips. A field added to events.Event fails here
+// until testFact sets it and the codec stores it.
+func TestCodecCoversEveryEventField(t *testing.T) {
+	f := testFact()
+	ev := reflect.ValueOf(f.Event)
+	b, err := Encode("gc", f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range ev.NumField() {
+		field := ev.Type().Field(i)
+		tag, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+		if tag == "" || tag == "-" {
+			t.Fatalf("events.Event.%s has no JSON tag; decide its gc.ev key", field.Name)
+		}
+		if tag == "seq" {
+			continue
+		}
+		if ev.Field(i).IsZero() {
+			t.Errorf("testFact leaves events.Event.%s unset; set it so the codec is checked to carry it", field.Name)
+			continue
+		}
+		if _, ok := b.Metadata["gc.ev."+tag]; !ok {
+			t.Errorf("events.Event.%s is not stored as gc.ev.%s", field.Name, tag)
+		}
+	}
+	got, err := Decode(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.ID = b.ID
+	sameFact(t, got, f)
+}
+
+// factKeys is every key a fact row carries under schema 1.
+var factKeys = []string{
+	keySchema, keySession, keyGen, keyOrigin, keyN,
+	keyType, keyTs, keyActor, keySubject, keyMessage, keyPayload, keyPayloadDropped,
+	keyRunID, keySessionID, keyStepID, keyDependsOnStepIDs,
+}
+
+// assertReencodes is the structural guard on Decode: a row it accepts is a
+// row Encode writes. Its fact re-encodes, and the re-encoded row carries the
+// same value under every key this build knows.
+func assertReencodes(t *testing.T, b beads.Bead, f Fact) {
+	t.Helper()
+	prefix := b.ID[:strings.LastIndex(b.ID, "-"+idFamily+"-")]
+	dropped := f.PayloadDropped
+	f.PayloadDropped = 0
+	again, err := Encode(prefix, f)
+	if err != nil {
+		t.Fatalf("Decode accepted a row whose fact Encode refuses: %v\nrow: %v", err, b.Metadata)
+	}
+	if again.ID != b.ID {
+		t.Fatalf("re-encoded id %s, row id %s", again.ID, b.ID)
+	}
+	for _, key := range factKeys {
+		want := b.Metadata[key]
+		if key == keyPayloadDropped && dropped > 0 {
+			continue // the re-encode has no payload to drop
+		}
+		if got := again.Metadata[key]; got != want {
+			t.Errorf("%s: re-encoded %q, row %q", key, got, want)
+		}
+	}
+}
+
+// Every row Decode accepts, from every accepting case in this file and from
+// the seed corpus of FuzzDecode, re-encodes.
+func TestDecodeAcceptsOnlyEncodableRows(t *testing.T) {
+	for name, b := range acceptedRows(t) {
+		t.Run(name, func(t *testing.T) {
+			f, err := Decode(b)
+			if err != nil {
+				t.Fatalf("Decode: %v", err)
+			}
+			assertReencodes(t, b, f)
+		})
+	}
+}
+
+func acceptedRows(t *testing.T) map[string]beads.Bead {
+	t.Helper()
+	out := map[string]beads.Bead{}
+	full, err := Encode("gc", testFact())
+	if err != nil {
+		t.Fatal(err)
+	}
+	out["full"] = full
+	minimal := Fact{
+		Session: "gc-1", Generation: 1, Origin: Origin{Kind: OriginDaemon, Nonce: "abcdefgh"}, N: 7,
+		Event: events.Event{Type: "mail.sent", Ts: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)},
+	}
+	if out["minimal"], err = Encode("my-city", minimal); err != nil {
+		t.Fatal(err)
+	}
+	big := testFact()
+	big.Event.Payload = json.RawMessage(`"` + strings.Repeat("x", MaxPayload) + `"`)
+	if out["payload dropped"], err = Encode("gc", big); err != nil {
+		t.Fatal(err)
+	}
+	unknown := cloneRow(full)
+	unknown.Metadata["gc.ev.a_later_field"] = "x"
+	out["unknown key"] = unknown
+	scalar := cloneRow(full)
+	scalar.Metadata[keyPayload] = `1`
+	out["scalar payload"] = scalar
+	return out
+}
+
+// FuzzDecode sets one metadata key of a valid row to an arbitrary value, with
+// the id re-derived; whatever Decode accepts must re-encode.
+func FuzzDecode(f *testing.F) {
+	for _, seed := range [][2]string{
+		{keyPayload, `{ "k": "v" }`},
+		{keyPayload, "{\"k\":\"\xff\"}"},
+		{keyGen, "0"},
+		{keyN, ""},
+		{keyTs, "2026-10-15T14:30:45+02:00"},
+		{keyDependsOnStepIDs, `[ "a" ]`},
+		{keyType, "a b"},
+		{keyActor, strings.Repeat("a", maxActorLen+1)},
+		{keyMessage, "\xff"},
+		{keySchema, "01"},
+		{keyPayloadDropped, "16385"},
+		{keyPayloadDropped, "0"},
+		{"gc.ev.a_later_field", "x"},
+	} {
+		f.Add(seed[0], seed[1])
+	}
+	good, err := Encode("gc", testFact())
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Fuzz(func(t *testing.T, key, value string) {
+		b := cloneRow(good)
+		if value == "" {
+			delete(b.Metadata, key)
+		} else {
+			b.Metadata[key] = value
+		}
+		if _, err := opjournal.PinnedID("gc", idFamily, idTag, b.Metadata[keySession], b.Metadata[keyGen], b.Metadata[keyOrigin], b.Metadata[keyN]); err != nil {
+			t.Skip()
+		}
+		rehash(t, &b)
+		fact, err := Decode(b)
+		if err != nil {
+			if !errors.Is(err, ErrCorrupt) && !errors.Is(err, ErrUnsupportedSchema) {
+				t.Fatalf("Decode error %v is neither ErrCorrupt nor ErrUnsupportedSchema", err)
+			}
+			return
+		}
+		assertReencodes(t, b, fact)
+	})
 }

@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode"
@@ -29,11 +30,23 @@ const (
 	maxTokenLen        = 128
 )
 
+// The id families this package mints itself. ownIDFamilies is the one list of
+// them: PinnedID refuses each, and every <family>IDInfix of this package is
+// "-" + one of them + "-" (TestOwnIDFamiliesCoverEveryInfix), so a family
+// added here is reserved by adding it to the list.
+const (
+	opIDFamily      = "op"
+	factIDFamily    = "fact"
+	runtimeIDFamily = "rt"
+)
+
+var ownIDFamilies = []string{opIDFamily, factIDFamily, runtimeIDFamily}
+
 // opIDInfix and factIDInfix separate the mint prefix from the hash. They keep
 // pinned ids out of SQLite's numeric sequence parsing.
 const (
-	opIDInfix   = "-op-"
-	factIDInfix = "-fact-"
+	opIDInfix   = "-" + opIDFamily + "-"
+	factIDInfix = "-" + factIDFamily + "-"
 )
 
 var (
@@ -98,9 +111,10 @@ var pinnedIDFamilyRe = regexp.MustCompile(`^[a-z][a-z0-9]{0,15}$`)
 // holds the row, refused as DeriveID refuses it. family ([a-z][a-z0-9]*, at
 // most 16 bytes) keeps each family's ids disjoint from every other family's;
 // the families this package mints itself (op, fact, rt) are refused, so no
-// other package can mint an id in them. tag is the family's domain tag
-// ("gascity/<family>-id/v1" by convention); fields are hashed exactly as
-// given, and validating them is the caller's job.
+// other package can mint an id in them. tag is the family's domain tag, a
+// "gascity/<name>/v<n>" string no other scheme uses (eventfact's are
+// "gascity/event-fact/v1" and "gascity/event-projector/v1"); fields are
+// hashed exactly as given, and validating them is the caller's job.
 func PinnedID(prefix, family, tag string, fields ...string) (string, error) {
 	if err := validatePrefix(prefix); err != nil {
 		return "", err
@@ -108,7 +122,7 @@ func PinnedID(prefix, family, tag string, fields ...string) (string, error) {
 	switch {
 	case !pinnedIDFamilyRe.MatchString(family):
 		return "", invalidf("id family %q is not [a-z][a-z0-9]* of at most 16 bytes", family)
-	case "-"+family+"-" == opIDInfix || "-"+family+"-" == factIDInfix || "-"+family+"-" == runtimeIDInfix:
+	case slices.Contains(ownIDFamilies, family):
 		return "", invalidf("id family %q is minted only by this package", family)
 	case tag == "":
 		return "", invalidf("id tag is empty")

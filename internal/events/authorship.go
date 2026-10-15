@@ -11,13 +11,35 @@ import (
 // projector refuses the rest (engdocs/design/des-box-daemon-v0.md D13, D14;
 // remote-worker-coherence-and-door.md §5).
 //
-// The rule that assigns a type is mechanical: Ledger for the bead mutation
-// types the controller derives from the ledger itself; Controller when every
-// emitter runs in the controller or supervisor process (the reconciler, order
-// dispatch, the API server, supervisor loops); Worker when any session or CLI
-// process emits it, wherever it also runs. Worker types carry what the writer
-// asserts: until bd principals (BD-8) a box's actor, subject and session are
-// attributed by assertion (D-TRUST).
+// The rule that assigns a type, in order:
+//
+//  1. A decision the design records binds, whatever the rule below would
+//     say: DES-BX D13 and CD §5 (remote-worker-coherence-and-door.md). Those
+//     entries are pinned by TestAuthorshipKeepsTheRecordedDecisions.
+//  2. Ledger for the bead mutation types the controller derives from the
+//     ledger itself.
+//  3. Worker when any emitter can run at a worker site: in a session, or in
+//     an agent-facing command a session runs (gc hook, gc mail, gc session,
+//     gc sling, gc formula, gc convoy control --serve, gc event emit).
+//  4. Controller otherwise: every emitter runs in the controller or the
+//     supervisor (the reconciler, order dispatch, the API server, supervisor
+//     loops) or is a city-host admin command run beside them (gc start, gc
+//     init, gc rig add, gc suspend and gc resume, gc storage migrate, gc
+//     dolt-state, the bd provider script), never at a worker site.
+//
+// The emitters are found by following each constant through its references,
+// helpers included, not only through events.Event literals. Entries below
+// whose emitters include an admin command or contradict rule 3 under a
+// recorded decision say so.
+//
+// Worker types carry what the writer asserts: until bd principals (BD-8) a
+// box's actor, subject and session are attributed by assertion (D-TRUST).
+//
+// A worker site's recorder (D13's factRecorder) drops every Ledger and
+// Controller type at the source, and its RecordAck must return a non-nil
+// error for each type it drops, as events.AckRecorder requires: a caller that
+// marks durable state on a nil ack (executionevent.EmitCurrent's
+// step_defined marker) would otherwise lose the fact for good.
 type Authorship string
 
 // The authorship classes.
@@ -101,9 +123,10 @@ var builtinAuthorship = map[string]Authorship{
 	BeadClosed:  AuthorLedger,
 	BeadDeleted: AuthorLedger,
 
-	// Worker: emitted by session and CLI processes (the claim hook, mail,
-	// handoff, runtime drain, the control-dispatcher session, worker
-	// operations, a store's composition root).
+	// Worker: emitted by session and agent-facing command processes (the
+	// claim hook, mail, handoff, runtime drain, the control-dispatcher
+	// session, worker operations, a store's composition root). Worker by
+	// rule 3, and session.draining, undrained and stopped by D13 too.
 	SessionStopped:                 AuthorWorker,
 	SessionDraining:                AuthorWorker,
 	SessionUndrained:               AuthorWorker,
@@ -131,6 +154,11 @@ var builtinAuthorship = map[string]Authorship{
 	MoleculeResolved:               AuthorWorker,
 	BackendCredentialResolved:      AuthorWorker,
 	BeadsConditionalWritesDegraded: AuthorWorker,
+	// gc session close strands a closed seat's unserved claims and records
+	// it (cmd/gc work_release.go, strandedClaimAlerts.observe), as the
+	// controller's detector does; a box's copy would otherwise be dropped
+	// and wait for the detector's next pass.
+	SessionStrandedClaims: AuthorWorker,
 
 	// Controller: the reconciler's session lifecycle.
 	SessionWoke:                           AuthorController,
@@ -144,7 +172,6 @@ var builtinAuthorship = map[string]Authorship{
 	SessionDrainStopEscalated:             AuthorController,
 	SessionStranded:                       AuthorController,
 	SessionPoolSlotRetiredAtDrainDeadline: AuthorController,
-	SessionStrandedClaims:                 AuthorController,
 	SessionUnknownState:                   AuthorController,
 	SessionWakeRefused:                    AuthorController,
 	SessionResetStalled:                   AuthorController,
@@ -162,15 +189,25 @@ var builtinAuthorship = map[string]Authorship{
 	BeadWorktreeReaped:       AuthorController,
 	BeadWorktreeReapSkipped:  AuthorController,
 	BeadDeadAssigneeReopened: AuthorController,
-	BeadsBlockedRecomputed:   AuthorController,
-	ExecutionWorkAssociated:  AuthorController,
-	ExecutionRunAnchored:     AuthorController,
-	ExecutionStepDefined:     AuthorController,
-	ExecutionStepCompleted:   AuthorController,
-	ExecutionStepStalled:     AuthorController,
+	// Also recorded by gc rig add, a city-host admin command (rule 4).
+	BeadsBlockedRecomputed: AuthorController,
+	ExecutionStepCompleted: AuthorController,
+	ExecutionStepStalled:   AuthorController,
+	// Controller by D13 (rule 1), against rule 3: executionevent.EmitCurrent
+	// records all three, and the control-dispatcher session (gc convoy
+	// control --serve), gc sling and gc formula cook call it through the
+	// city recorder. On a worker site those copies are dropped at the source
+	// and the controller re-derives none of them (the completions backstop
+	// re-derives step_completed only). Escalated to the DES-BX owner before
+	// the recorder half lands: either they become Worker, or the controller
+	// re-derives them for roots whose steps are unmarked.
+	ExecutionWorkAssociated: AuthorController,
+	ExecutionRunAnchored:    AuthorController,
+	ExecutionStepDefined:    AuthorController,
 
 	// Controller: the controller, the city, orders, async requests and the
-	// API server's integrations.
+	// API server's integrations. city.* by D13; gc suspend, gc resume and gc
+	// init record them too, as city-host admin commands (rule 4).
 	ControllerStarted:             AuthorController,
 	ControllerStopped:             AuthorController,
 	ControlDispatcherScopeGap:     AuthorController,
@@ -203,7 +240,10 @@ var builtinAuthorship = map[string]Authorship{
 	EmergencySignaled:             AuthorController,
 	EmergencyAcked:                AuthorController,
 
-	// Controller: the supervisor, the event log and storage.
+	// Controller: the supervisor, the event log and storage. storage.* by
+	// D13, also recorded by gc storage migrate; project.identity.stamped
+	// also by gc dolt-state ensure-project-id, which the bd provider script
+	// runs on the city host (both rule 4).
 	SupervisorStarted:               AuthorController,
 	SupervisorShutdownRequested:     AuthorController,
 	SupervisorRequest:               AuthorController,

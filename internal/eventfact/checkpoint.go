@@ -18,6 +18,10 @@ import (
 const (
 	// LabelProjector marks the projector's checkpoint row.
 	LabelProjector = "gc:event-projector"
+	// CheckpointSchemaRev is the checkpoint-row schema revision this build
+	// writes. It is apart from FactSchemaRev, so a fact-schema bump leaves
+	// the checkpoint readable; a reader reads every revision from 1 up to it.
+	CheckpointSchemaRev = 1
 
 	checkpointFamily = "evproj"
 	checkpointTag    = "gascity/event-projector/v1"
@@ -76,6 +80,7 @@ func EncodeCheckpoint(prefix string, cp Checkpoint) (beads.Bead, error) {
 	if err != nil {
 		return beads.Bead{}, err
 	}
+	meta[keyCPCity] = cp.City
 	for k, v := range meta {
 		if v == "" {
 			delete(meta, k)
@@ -93,8 +98,11 @@ func EncodeCheckpoint(prefix string, cp Checkpoint) (beads.Bead, error) {
 }
 
 // CheckpointMetadata is the metadata that moves an existing checkpoint row to
-// cp, for the projector's revision-guarded update. It names every key, the
-// absent ones as "", so no value of an earlier checkpoint survives.
+// cp, for the projector's revision-guarded update. It names every key the
+// update moves, the absent ones as "", so no value of an earlier checkpoint
+// survives. It leaves out the city: the row id pins it and the create wrote
+// it, and an update reaches bd as --set-metadata k=v, where bd types a value
+// by its spelling, so a city named "null" would read back empty.
 func CheckpointMetadata(cp Checkpoint) (map[string]string, error) {
 	if err := validateCity(cp.City); err != nil {
 		return nil, err
@@ -107,8 +115,7 @@ func CheckpointMetadata(cp Checkpoint) (map[string]string, error) {
 	}
 	last := cp.Feed.Last
 	meta := map[string]string{
-		keyCPSchema:     strconv.Itoa(SchemaRev),
-		keyCPCity:       cp.City,
+		keyCPSchema:     strconv.Itoa(CheckpointSchemaRev),
 		keyCPSeq:        strconv.FormatInt(cp.Feed.Seq, 10),
 		keyCPLastSeq:    "",
 		keyCPLastIssue:  "",
@@ -139,7 +146,7 @@ func DecodeCheckpoint(b beads.Bead) (Checkpoint, error) {
 		return Checkpoint{}, corruptf(b.ID, "not an event-projector row (type %q, labels %v)", b.Type, b.Labels)
 	}
 	d := metaReader{id: b.ID, meta: b.Metadata}
-	if err := d.schema(keyCPSchema); err != nil {
+	if err := d.schema(keyCPSchema, CheckpointSchemaRev); err != nil {
 		return Checkpoint{}, err
 	}
 	cp := Checkpoint{

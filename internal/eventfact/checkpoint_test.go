@@ -2,6 +2,7 @@ package eventfact
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"maps"
 	"reflect"
@@ -208,5 +209,91 @@ func TestStoredCheckpointResumesWithoutAGap(t *testing.T) {
 	}
 	if want := []int64{1, 2, 3, 4, 5}; !reflect.DeepEqual(applied, want) {
 		t.Fatalf("applied %v, want %v", applied, want)
+	}
+}
+
+// bdSetMetadata applies patch the way `bd update --set-metadata k=v` stores
+// it (BdStore.UpdateIfMatch): bd types each value by its spelling, so "null"
+// reads back as "" and a number or boolean spelling reads back as its JSON
+// text.
+func bdSetMetadata(t *testing.T, meta map[string]string, patch map[string]string) {
+	t.Helper()
+	for k, v := range patch {
+		var scalar any
+		if err := json.Unmarshal([]byte(v), &scalar); err == nil {
+			switch scalar.(type) {
+			case nil:
+				v = ""
+			case bool, float64:
+				data, _ := json.Marshal(scalar)
+				v = string(data)
+			}
+		}
+		if v == "" {
+			delete(meta, k)
+			continue
+		}
+		meta[k] = v
+	}
+}
+
+// The update that moves the row leaves the city alone: the row id pins it and
+// the create wrote it. A city whose name reads as a JSON scalar ("null",
+// "true", "42") then survives every update through bd.
+func TestCheckpointUpdateLeavesTheCity(t *testing.T) {
+	for _, city := range []string{"my-city", "null", "true", "42"} {
+		t.Run(city, func(t *testing.T) {
+			first := Checkpoint{City: city, Feed: ledgerfeed.Checkpoint{Seq: 41, Last: fingerprint(41)}, At: cpAt}
+			b, err := EncodeCheckpoint("gc", first)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if b.Metadata[keyCPCity] != city {
+				t.Fatalf("the create carries city %q, want %q", b.Metadata[keyCPCity], city)
+			}
+			next := Checkpoint{City: city, Feed: ledgerfeed.Checkpoint{Seq: 90}, At: cpAt.Add(time.Second)}
+			patch, err := CheckpointMetadata(next)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := patch[keyCPCity]; ok {
+				t.Fatalf("the update patch rewrites the city: %v", patch)
+			}
+			bdSetMetadata(t, b.Metadata, patch)
+			got, err := DecodeCheckpoint(b)
+			if err != nil {
+				t.Fatalf("DecodeCheckpoint after the update: %v", err)
+			}
+			sameCheckpoint(t, got, next)
+		})
+	}
+}
+
+func TestDecodeCheckpointSchemaAndCanonicalForm(t *testing.T) {
+	good, err := EncodeCheckpoint("gc", Checkpoint{City: "my-city", Feed: ledgerfeed.Checkpoint{Seq: 41, Last: fingerprint(41)}, At: cpAt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if good.Metadata[keyCPSchema] != "1" || CheckpointSchemaRev != 1 {
+		t.Fatalf("schema = %q, CheckpointSchemaRev = %d", good.Metadata[keyCPSchema], CheckpointSchemaRev)
+	}
+	for name, value := range map[string]map[string]string{
+		"schema 0":           {keyCPSchema: "0"},
+		"at with an offset":  {keyCPAt: "2026-10-15T14:00:00+02:00"},
+		"at trailing zeroes": {keyCPAt: "2026-10-15T12:00:00.500Z"},
+		"seq non-canonical":  {keyCPSeq: "041", keyCPLastSeq: "041"},
+	} {
+		b := good
+		b.Metadata = maps.Clone(good.Metadata)
+		maps.Copy(b.Metadata, value)
+		if _, err := DecodeCheckpoint(b); !errors.Is(err, ErrCorrupt) {
+			t.Errorf("%s: DecodeCheckpoint = %v, want ErrCorrupt", name, err)
+		}
+	}
+	newer := good
+	newer.Metadata = maps.Clone(good.Metadata)
+	newer.Metadata[keyCPSchema] = "2"
+	if _, err := DecodeCheckpoint(newer); !errors.Is(err, ErrUnsupportedSchema) {
+		t.Errorf("schema 2: %v, want ErrUnsupportedSchema", err)
 	}
 }

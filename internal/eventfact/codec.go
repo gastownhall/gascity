@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
@@ -68,7 +69,7 @@ func Encode(prefix string, f Fact) (beads.Bead, error) {
 		return beads.Bead{}, err
 	}
 	meta := map[string]string{
-		keySchema:           strconv.Itoa(SchemaRev),
+		keySchema:           strconv.Itoa(FactSchemaRev),
 		keySession:          f.Session,
 		keyGen:              strconv.FormatInt(f.Generation, 10),
 		keyOrigin:           f.Origin.String(),
@@ -105,7 +106,9 @@ func Encode(prefix string, f Fact) (beads.Bead, error) {
 
 // storedPayload returns the payload as the row stores it: compacted, or empty
 // with its compacted size when that is over MaxPayload. A payload that is not
-// JSON is ErrInvalid; the recorder could not write it either.
+// JSON is ErrInvalid; the recorder could not write it either. So is one with
+// invalid UTF-8 inside a string: json.Compact keeps it, and the store's JSON
+// would rewrite it to U+FFFD, so the row could not come back as written.
 func storedPayload(raw json.RawMessage) (payload string, dropped int, err error) {
 	if len(raw) == 0 {
 		return "", 0, nil
@@ -113,6 +116,9 @@ func storedPayload(raw json.RawMessage) (payload string, dropped int, err error)
 	var buf bytes.Buffer
 	if err := json.Compact(&buf, raw); err != nil {
 		return "", 0, invalidf("payload is not JSON: %v", err)
+	}
+	if !utf8.Valid(buf.Bytes()) {
+		return "", 0, invalidf("payload is not valid UTF-8")
 	}
 	if buf.Len() > MaxPayload {
 		return "", buf.Len(), nil
@@ -147,19 +153,25 @@ func IsEventFact(b beads.Bead) bool {
 	return b.Type == BeadType && slices.Contains(b.Labels, Label)
 }
 
-// Decode reads an event-fact row. A row that is not one, is malformed, or
-// whose id is not <prefix>-ev-<hash of its writer> under a valid prefix is
-// ErrCorrupt; a newer schema is ErrUnsupportedSchema. The row's status is not
-// read: a store that creates rows open leaves a fact open until its writer
-// closes it, and the fact is the same.
+// Decode reads an event-fact row. It is the projector's trust boundary: a
+// box can write a fact row without Encode (D-TRUST), so Decode accepts only a
+// row Encode writes, every field in its canonical stored form and within its
+// limit. A row that is not one, is malformed or out of bounds, or whose id is
+// not <prefix>-ev-<hash of its writer> under a valid prefix is ErrCorrupt; a
+// later schema is ErrUnsupportedSchema. A gc.ev.* key this build does not
+// know is ignored (doc.go, "Schema evolution"). The row's status is not read:
+// a store that creates rows open leaves a fact open until its writer closes
+// it, and the fact is the same.
 func Decode(b beads.Bead) (Fact, error) {
 	if !IsEventFact(b) {
 		return Fact{}, corruptf(b.ID, "not an event-fact row (type %q, labels %v)", b.Type, b.Labels)
 	}
 	d := metaReader{id: b.ID, meta: b.Metadata}
-	if err := d.schema(keySchema); err != nil {
+	if err := d.schema(keySchema, FactSchemaRev); err != nil {
 		return Fact{}, err
 	}
+	d.required(keyGen)
+	d.required(keyN)
 	f := Fact{
 		ID:         b.ID,
 		Session:    d.required(keySession),
@@ -178,6 +190,7 @@ func Decode(b beads.Bead) (Fact, error) {
 		PayloadDropped: int(d.int64(keyPayloadDropped)),
 	}
 	origin := d.required(keyOrigin)
+	d.required(keyTs)
 	if d.err != nil {
 		return Fact{}, d.err
 	}
@@ -187,24 +200,34 @@ func Decode(b beads.Bead) (Fact, error) {
 	}
 	f.Origin = o
 	if payload := d.meta[keyPayload]; payload != "" {
-		if !json.Valid([]byte(payload)) {
-			return Fact{}, corruptf(b.ID, "%s is not JSON", keyPayload)
-		}
-		if len(payload) > MaxPayload {
-			return Fact{}, corruptf(b.ID, "%s is %d bytes, max %d", keyPayload, len(payload), MaxPayload)
-		}
 		if f.PayloadDropped != 0 {
 			return Fact{}, corruptf(b.ID, "%s and %s are both set", keyPayload, keyPayloadDropped)
 		}
+		stored, dropped, err := storedPayload(json.RawMessage(payload))
+		switch {
+		case err != nil:
+			return Fact{}, corruptf(b.ID, "%s: %v", keyPayload, err)
+		case dropped > 0:
+			return Fact{}, corruptf(b.ID, "%s is %d bytes, max %d", keyPayload, dropped, MaxPayload)
+		case stored != payload:
+			return Fact{}, corruptf(b.ID, "%s is not compacted JSON", keyPayload)
+		}
 		f.Event.Payload = json.RawMessage(payload)
 	}
-	if f.PayloadDropped < 0 || (f.PayloadDropped > 0 && f.PayloadDropped <= MaxPayload) {
+	if d.meta[keyPayloadDropped] != "" && f.PayloadDropped <= MaxPayload {
 		return Fact{}, corruptf(b.ID, "%s %d is not a size over %d", keyPayloadDropped, f.PayloadDropped, MaxPayload)
 	}
 	if raw := d.meta[keyDependsOnStepIDs]; raw != "" {
 		var ids []string
 		if err := json.Unmarshal([]byte(raw), &ids); err != nil || ids == nil {
 			return Fact{}, corruptf(b.ID, "%s %q is not a JSON array of strings", keyDependsOnStepIDs, raw)
+		}
+		stored, err := encodeDependsOn(&ids)
+		if err != nil {
+			return Fact{}, corruptf(b.ID, "%v", err)
+		}
+		if stored != raw {
+			return Fact{}, corruptf(b.ID, "%s is not the array as Encode writes it", keyDependsOnStepIDs)
 		}
 		f.Event.DependsOnStepIDs = &ids
 	}
@@ -245,17 +268,21 @@ func (d *metaReader) fail(key, format string, args ...any) {
 	}
 }
 
-func (d *metaReader) schema(key string) error {
+// schema reads a row's schema revision. A revision from 1 up to current is
+// one this build reads (each later revision only adds to the one before it,
+// or its reader keeps decoding the earlier ones); a later revision is a newer
+// build's row, ErrUnsupportedSchema, never skipped silently.
+func (d *metaReader) schema(key string, current int) error {
 	v := d.meta[key]
 	if v == "" {
 		return corruptf(d.id, "%s is missing", key)
 	}
 	rev, err := strconv.Atoi(v)
-	if err != nil {
-		return corruptf(d.id, "%s %q is not a number", key, v)
+	if err != nil || strconv.Itoa(rev) != v || rev < 1 {
+		return corruptf(d.id, "%s %q is not a revision", key, v)
 	}
-	if rev != SchemaRev {
-		return fmt.Errorf("%w: row %s has revision %d, this build reads %d", ErrUnsupportedSchema, d.id, rev, SchemaRev)
+	if rev > current {
+		return fmt.Errorf("%w: row %s has revision %d, this build reads up to %d", ErrUnsupportedSchema, d.id, rev, current)
 	}
 	return nil
 }
@@ -292,6 +319,8 @@ func (d *metaReader) uint64(key string) uint64 {
 	return n
 }
 
+// time reads a timestamp in the one form the codecs write: RFC 3339 with
+// nanoseconds, in UTC.
 func (d *metaReader) time(key string) time.Time {
 	v := d.meta[key]
 	if v == "" {
@@ -300,6 +329,10 @@ func (d *metaReader) time(key string) time.Time {
 	t, err := time.Parse(time.RFC3339Nano, v)
 	if err != nil {
 		d.fail(key, "%q: %v", v, err)
+		return time.Time{}
+	}
+	if t.UTC().Format(time.RFC3339Nano) != v {
+		d.fail(key, "%q is not a canonical UTC RFC 3339 time", v)
 	}
 	return t
 }

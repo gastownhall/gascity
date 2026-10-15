@@ -12,6 +12,16 @@
 // (BX-4a), under the user decision D-TRUST: until bd principals (BD-8) a
 // fact's actor, subject and session are what the box asserts.
 //
+// # The recorder contract
+//
+// The worker-site recorder (D13's factRecorder) writes a fact only for a type
+// events.AuthorshipOf calls AuthorWorker; Ledger and Controller types are
+// dropped at the source. Its RecordAck returns a non-nil error for every
+// event it does not write, a dropped type included, as events.AckRecorder
+// requires: a caller that marks durable state on a nil ack
+// (executionevent.EmitCurrent's step_defined marker) would otherwise
+// suppress the fact for good.
+//
 // # The fact row
 //
 // A closed, no-history row of type "op", the journal row type, so it is
@@ -41,7 +51,33 @@
 // gc.ev.payload_dropped records its size, so the event still reaches the log.
 // Every other field has a hard limit, and Encode refuses a fact over one
 // (ErrInvalid): the writer drops that event with a reason rather than store a
-// row the projector could not record.
+// row the projector could not record. A string must be valid UTF-8, the
+// payload's strings included, since the store's JSON would rewrite anything
+// else.
+//
+// Decode is the projector's trust boundary: a box writes rows with its own
+// bearer and need not go through Encode. So Decode accepts only a row Encode
+// writes: every limit above, the identity rules, compacted payload JSON, the
+// depends-on list exactly as Encode marshals it, canonical integers, and the
+// time in canonical UTC RFC 3339 with nanoseconds. Anything else is
+// ErrCorrupt.
+//
+// # Schema evolution
+//
+// gc.ev.schema and gc.evproj.schema carry separate revisions (FactSchemaRev,
+// CheckpointSchemaRev), so a change to one row kind leaves the other
+// readable. A reader reads every revision from 1 up to its own and refuses a
+// later one with ErrUnsupportedSchema, never skipping the row silently; the
+// controller is upgraded before its boxes, so a projector meets a later
+// revision only on a downgrade. Within a revision a field may only be added,
+// and only as an optional gc.ev.* key whose absence keeps the meaning it had:
+// a reader ignores a key it does not know and records the event without it.
+// A change that a reader ignoring the key would get wrong (a new required
+// field, a changed limit or form, a changed meaning) bumps the revision, and
+// the reader that introduces it keeps decoding the earlier ones, since facts
+// stay in the store for a day and the checkpoint row for good. Every
+// events.Event field but Seq has a gc.ev.<json tag> key
+// (TestCodecCoversEveryEventField fails until a new one does).
 //
 // # The checkpoint row
 //
@@ -49,5 +85,21 @@
 // closed, no-history, type "op", label gc:event-projector, holding the
 // projector's whole ledgerfeed.Checkpoint (its seq, the fingerprint of the row
 // at that seq, and the lapse mark) in gc.evproj.* metadata. The projector is
-// its only writer and moves it by a revision-guarded update after each page.
+// its only writer and moves it by a revision-guarded update
+// (CheckpointMetadata), which leaves the city the create wrote.
+//
+// The row lives in the store whose journal the projector tails, and bd
+// journals every update, no-history rows included. A write after every page
+// would make the next page, whose only row is that write, and so on forever.
+// So the projector writes the checkpoint only:
+//
+//   - after a page that recorded at least one fact;
+//   - when the lapse mark changed;
+//   - on a bounded timer, which keeps the checkpoint inside the journal's
+//     retention on a city with no facts, and at shutdown.
+//
+// A page with no facts, the projector's own checkpoint update included, is
+// never followed by a write, so a quiet journal reaches a steady state with
+// no writes. The cache-notification bridge (OJ-20) skips gc:event-projector
+// rows as it skips gc:event-fact rows, for bead.* as well as op.changed.
 package eventfact

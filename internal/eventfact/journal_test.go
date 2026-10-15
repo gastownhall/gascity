@@ -180,6 +180,12 @@ func TestDecodeJournalRowReadsARealStoresPostImage(t *testing.T) {
 			t.Fatalf("closing the fact the store created open: %v", err)
 		}
 	}
+	// A second create of the same pinned id is refused, so a sealed batch
+	// retried after an ambiguous failure cannot record a fact twice; the
+	// journal check below sees exactly one create.
+	if _, err := store.Create(b); err == nil {
+		t.Fatal("a second create of the same pinned id succeeded")
+	}
 	stored, err := store.Get(b.ID)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
@@ -202,7 +208,11 @@ func TestDecodeJournalRowReadsARealStoresPostImage(t *testing.T) {
 		}
 	}
 	var decoded []Fact
+	creates := 0
 	for _, row := range rows {
+		if row.IssueID == b.ID && row.Op == "create" {
+			creates++
+		}
 		got, ok, err := DecodeJournalRow(row)
 		if err != nil {
 			t.Fatalf("DecodeJournalRow(seq %d, %s): %v\npost-image: %s", row.Seq, row.Op, err, row.IssueJSON)
@@ -210,6 +220,9 @@ func TestDecodeJournalRowReadsARealStoresPostImage(t *testing.T) {
 		if ok {
 			decoded = append(decoded, got)
 		}
+	}
+	if creates != 1 {
+		t.Fatalf("the journal holds %d creates of %s, want 1: %+v", creates, b.ID, rows)
 	}
 	if len(decoded) != 1 {
 		t.Fatalf("decoded %d facts from %d journal rows, want 1: %+v", len(decoded), len(rows), rows)
@@ -219,5 +232,44 @@ func TestDecodeJournalRowReadsARealStoresPostImage(t *testing.T) {
 	sameFact(t, decoded[0], want)
 	if !decoded[0].Event.Ts.Equal(time.Date(2026, 10, 15, 12, 30, 45, 123456789, time.UTC)) {
 		t.Fatalf("Ts = %v", decoded[0].Event.Ts)
+	}
+}
+
+// bd accepts any JSON as metadata, so a row that is not a fact can carry a
+// metadata array or string. Classification reads no metadata: such a row is
+// skipped, not an error the projector would stall on. A fact row whose
+// metadata is not an object is corrupt.
+func TestDecodeJournalRowClassifiesBeforeReadingMetadata(t *testing.T) {
+	withMetadata := func(b beads.Bead, metadata string) string {
+		var image map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(bdImage(t, b)), &image); err != nil {
+			t.Fatal(err)
+		}
+		image["metadata"] = json.RawMessage(metadata)
+		data, err := json.Marshal(image)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
+	task := beads.Bead{ID: "gc-1", Title: "t", Status: "open", Type: "task"}
+	opRow := beads.Bead{ID: "gc-op-x", Title: "o", Status: "open", Type: "op", Labels: []string{"gc:op"}}
+	for _, metadata := range []string{`"oops"`, `[1,2]`, `7`, `null`} {
+		for _, b := range []beads.Bead{task, opRow} {
+			row := journalops.Row{Seq: 1, Op: "create", IssueID: b.ID, IssueJSON: withMetadata(b, metadata)}
+			if _, ok, err := DecodeJournalRow(row); ok || err != nil {
+				t.Errorf("%s with metadata %s: DecodeJournalRow = %v, %v; want skipped", b.Type, metadata, ok, err)
+			}
+		}
+	}
+	fact, err := Encode("gc", testFact())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, metadata := range []string{`"oops"`, `[1,2]`, `null`} {
+		row := journalops.Row{Seq: 2, Op: "create", IssueID: fact.ID, IssueJSON: withMetadata(fact, metadata)}
+		if _, ok, err := DecodeJournalRow(row); !ok || !errors.Is(err, ErrCorrupt) {
+			t.Errorf("a fact with metadata %s: DecodeJournalRow = %v, %v; want ok and ErrCorrupt", metadata, ok, err)
+		}
 	}
 }
