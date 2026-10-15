@@ -1184,6 +1184,100 @@ enabled = false
 			t.Errorf("city-scoped orders.overrides not preserved: %#v", parsed.Orders.Overrides)
 		}
 	})
+
+	// TestRigAnywhere_RigRemove/preserves_comments pins #7899: cmdRigRemove
+	// used to write city.toml via a full MarshalForWrite round-trip, which
+	// drops every comment in the file (the reported repro went from 1575
+	// comment lines to 0). gc rig add stopped doing this for the common
+	// add path in #3414; this is the same fix for remove.
+	t.Run("preserves_comments", func(t *testing.T) {
+		gcHome := t.TempDir()
+		t.Setenv("GC_HOME", gcHome)
+		resetFlags(t)
+
+		cityPath := setupCity(t, "comment-city")
+		rigDir := filepath.Join(t.TempDir(), "comment-rig")
+		if err := os.MkdirAll(rigDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		keptRigDir := filepath.Join(t.TempDir(), "kept-rig")
+		if err := os.MkdirAll(keptRigDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		// Written directly (not through writeRigAnywhereCityToml, which
+		// parses and re-MarshalForWrite's its input — exactly the
+		// comment-dropping round-trip this test exists to catch, so using
+		// it here would erase the comments before cmdRigRemove ever ran).
+		toml := `# This is a city-level rationale comment.
+[workspace]
+name = "comment-city"
+
+# Provider rationale: claude is the only configured provider.
+[providers.claude]
+base = "builtin:claude"
+
+# comment-rig rationale: being removed by this test.
+[[rigs]]
+name = "comment-rig"
+
+# kept-rig rationale: must survive the removal untouched.
+[[rigs]]
+name = "kept-rig"
+
+# comment-rig's patch rationale.
+[[patches.agent]]
+dir = "comment-rig"
+name = "claude"
+suspended = true
+`
+		if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(toml), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := config.PersistRigSiteBindings(fsys.OSFS{}, cityPath, []config.Rig{
+			{Name: "comment-rig", Path: rigDir},
+			{Name: "kept-rig", Path: keptRigDir},
+		}); err != nil {
+			t.Fatalf("PersistRigSiteBindings: %v", err)
+		}
+		registerCityForRigResolution(t, gcHome, cityPath, "comment-city")
+
+		cityFlag = cityPath
+		var stdout, stderr bytes.Buffer
+		code := cmdRigRemove("comment-rig", &stdout, &stderr)
+		if code != 0 {
+			t.Fatalf("cmdRigRemove = %d, stderr: %s", code, stderr.String())
+		}
+
+		data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := string(data)
+		for _, want := range []string{
+			"# This is a city-level rationale comment.",
+			"# Provider rationale: claude is the only configured provider.",
+			"# kept-rig rationale: must survive the removal untouched.",
+			"kept-rig",
+		} {
+			if !strings.Contains(got, want) {
+				t.Errorf("city.toml missing %q after rig remove:\n%s", want, got)
+			}
+		}
+		for _, mustBeGone := range []string{
+			"comment-rig",
+			"# comment-rig rationale: being removed by this test.",
+			"# comment-rig's patch rationale.",
+		} {
+			if strings.Contains(got, mustBeGone) {
+				t.Errorf("city.toml still contains %q after removing comment-rig:\n%s", mustBeGone, got)
+			}
+		}
+
+		if _, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml")); err != nil {
+			t.Fatalf("LoadWithIncludes after rig remove failed: %v", err)
+		}
+	})
 }
 
 // ===========================================================================
