@@ -9,6 +9,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/auto"
+	"github.com/gastownhall/gascity/internal/runtime/hybrid"
 )
 
 // turnInterruptFamily is one provider family as the session bead records it.
@@ -343,48 +344,69 @@ func countMethod(calls []runtime.Call, method string) int {
 	return n
 }
 
-// The production t3bridge runtime, bare and behind auto as cmd/gc wires it,
-// interrupts every family that takes "deliver now" with one Interrupt and
-// then delivers the message: no keys, no waits it does not implement, no
-// hard restart.
+// The production t3bridge runtime, bare and behind auto or hybrid as cmd/gc
+// wires it, fences "deliver now" to the turn it arrived during for every
+// family that takes it (SESSION-RUNTIME-TURN-FENCE): an idle session gets the
+// message alone; a running turn gets one InterruptTurn naming it, then the
+// message once it ended. No keys, no untargeted Interrupt, no hard restart.
 func TestT3BridgeProfileTurnInterruptSequence(t *testing.T) {
-	providers := map[string]func(*runtime.Fake) runtime.Provider{
-		"t3bridge": func(f *runtime.Fake) runtime.Provider {
-			return runtime.NewFakeProfile(runtime.ProfileT3Bridge, runtime.FullFake{Fake: f})
-		},
-		"auto": func(f *runtime.Fake) runtime.Provider {
-			return auto.New(
-				runtime.NewFakeProfile(runtime.ProfileT3Bridge, runtime.FullFake{Fake: f}),
-				runtime.NewFakeProfile(runtime.ProfileACP, runtime.FullFake{Fake: runtime.NewFake()}),
-			)
-		},
-	}
-	for pname, wrap := range providers {
+	for pname, wrap := range t3bridgeComposites {
 		for _, fam := range turnInterruptFamilies {
 			if fam.refusesInterruptNow {
 				continue
 			}
-			t.Run(pname+"/"+fam.name, func(t *testing.T) {
-				f := runtime.NewFake()
-				mgr := newTestManager(t, beads.NewMemStore(), wrap(f))
-				meta := map[string]string{"session_origin": "manual"}
-				for k, v := range fam.meta {
-					meta[k] = v
-				}
-				info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: fam.provider, WorkDir: t.TempDir(), Provider: fam.provider, ExtraMeta: meta})
-				if err != nil {
-					t.Fatalf("Create: %v", err)
-				}
-				f.Calls = nil
-				if err := submitInterruptNow(mgr, info); err != nil {
-					t.Fatalf("Submit(interrupt_now): %v", err)
-				}
-				if got := strings.Join(turnEffectCalls(f.Calls), " "); got != "Interrupt Nudge(msg)" {
-					t.Fatalf("turn-affecting calls = %q, want %q; all calls = %v", got, "Interrupt Nudge(msg)", callMethods(f.Calls))
-				}
-			})
+			for _, tc := range []struct {
+				name   string
+				script []string
+				want   string
+			}{
+				{"idle", nil, "Nudge(msg)"},
+				{"running", []string{"t1", "t1", ""}, "InterruptTurn Nudge(msg)"},
+			} {
+				t.Run(pname+"/"+fam.name+"/"+tc.name, func(t *testing.T) {
+					f := runtime.NewFake()
+					mgr := newTestManager(t, beads.NewMemStore(), wrap(f))
+					meta := map[string]string{"session_origin": "manual"}
+					for k, v := range fam.meta {
+						meta[k] = v
+					}
+					info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: fam.provider, WorkDir: t.TempDir(), Provider: fam.provider, ExtraMeta: meta})
+					if err != nil {
+						t.Fatalf("Create: %v", err)
+					}
+					f.Calls = nil
+					f.TurnScripts = map[string][]string{info.SessionName: tc.script}
+					if err := submitInterruptNow(mgr, info); err != nil {
+						t.Fatalf("Submit(interrupt_now): %v", err)
+					}
+					if got := strings.Join(turnEffectCalls(f.Calls), " "); got != tc.want {
+						t.Fatalf("turn-affecting calls = %q, want %q; all calls = %v", got, tc.want, callMethods(f.Calls))
+					}
+				})
+			}
 		}
 	}
+}
+
+// t3bridgeComposites wrap a FullFake as the t3bridge runtime, bare and behind
+// each composite cmd/gc routes it through.
+var t3bridgeComposites = map[string]func(*runtime.Fake) runtime.Provider{
+	"t3bridge": func(f *runtime.Fake) runtime.Provider {
+		return runtime.NewFakeProfile(runtime.ProfileT3Bridge, runtime.FullFake{Fake: f})
+	},
+	"auto": func(f *runtime.Fake) runtime.Provider {
+		return auto.New(
+			runtime.NewFakeProfile(runtime.ProfileT3Bridge, runtime.FullFake{Fake: f}),
+			runtime.NewFakeProfile(runtime.ProfileACP, runtime.FullFake{Fake: runtime.NewFake()}),
+		)
+	},
+	"hybrid": func(f *runtime.Fake) runtime.Provider {
+		return hybrid.New(
+			runtime.NewFake(),
+			runtime.NewFakeProfile(runtime.ProfileT3Bridge, runtime.FullFake{Fake: f}),
+			func(string) bool { return true },
+		)
+	},
 }
 
 // turnEffectCalls keeps the calls that act on the agent's turn or runtime,
@@ -393,7 +415,8 @@ func turnEffectCalls(calls []runtime.Call) []string {
 	var out []string
 	for i, m := range callMethods(calls) {
 		switch calls[i].Method {
-		case "IsRunning", "Pending", "ProcessAlive", "GetMeta", "SetMeta", "ObserveLivenessWithError", "Capabilities", "DismissKnownDialogs":
+		case "IsRunning", "Pending", "ProcessAlive", "GetMeta", "SetMeta", "ObserveLivenessWithError", "Capabilities", "DismissKnownDialogs",
+			"ObserveTurn", "WaitTurnEnded":
 			continue
 		}
 		out = append(out, m)

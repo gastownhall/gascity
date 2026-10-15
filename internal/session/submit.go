@@ -59,6 +59,10 @@ type SubmitOutcome struct {
 	// Deferred marks a queue the actor caused: the call may not start
 	// or resume the session (CONTRACT v5.9 D8 rule 1), so a controller should.
 	Deferred bool
+	// Interrupt is what an interrupt_now did about the turn it targeted when
+	// the session's runtime reports turns (SESSION-RUNTIME-TURN-FENCE); nil
+	// when the submit took no turn-fenced path. Set on an error too.
+	Interrupt *TurnInterruptReport
 }
 
 // SubmissionCapabilitiesForMetadata derives runtime submit affordances from
@@ -121,6 +125,10 @@ func (m *Manager) submit(ctx context.Context, by Actor, id, message, resumeComma
 	if err := m.checkStarter(by); err != nil {
 		return SubmitOutcome{}, err
 	}
+	var seen turnSighting // lock waits and lease retries fall after it
+	if intent == SubmitIntentInterruptNow {
+		seen = m.sightTurn(ctx, id)
+	}
 	var outcome SubmitOutcome
 	err := withSessionStartLock(ctx, id, func() error {
 		b, sessName, err := m.sessionBead(id)
@@ -159,6 +167,10 @@ func (m *Manager) submit(ctx context.Context, by Actor, id, message, resumeComma
 				if err := m.pendingInteractionLocked(sessName); err != nil {
 					return err
 				}
+			}
+			if tf := m.turnFenceFor(b, sessName, seen); tf != nil {
+				outcome, err = m.fencedInterruptAndSubmitLocked(ctx, by, id, b, sessName, message, resumeCommand, hints, tf, seen)
+				return err
 			}
 			outcome.Queued, err = m.interruptAndSubmitLocked(ctx, by, id, b, sessName, message, resumeCommand, hints)
 			outcome.Deferred = outcome.Queued
