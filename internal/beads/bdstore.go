@@ -1215,6 +1215,7 @@ func (b *bdIssue) toBead() Bead {
 		IsBlocked:            b.IsBlocked.ptr(),
 		CloseReason:          bdCloseReason(status, b.CloseReason),
 		IndefinitelyDeferred: indefinitelyDeferred,
+		SourceStatus:         b.Status,
 		Revision:             int64(b.Revision),
 	}
 }

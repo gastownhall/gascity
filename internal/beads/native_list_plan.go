@@ -103,9 +103,25 @@ func nativeListPushableStatus(status string) bool {
 // parked beads as live work. A seat holding only a blocked bead never drained,
 // never took a config change, and was re-offered the bead on every wake.
 //
-// A cached read keeps the folded answer: PrimeActive lists without Live, so
-// the cache still holds blocked rows as "open". So does Count, which renders
-// its own filter (nativeIssueFilterFromListQuery).
+// The readers that move or flag a session's work read the same answer, so
+// parked work is left assigned where it is: the retirement reassignments
+// (cmd/gc session_beads.go, internal/api session_resolution.go), the
+// stranded-repair unclaim through SeatWork, and the identity-residue doctor;
+// a seat the close gate lets go with only parked work keeps it too. That is
+// BdStore's behavior, accepted here as parity; ga-7uf6c7 tracks moving parked
+// work as well.
+//
+// A non-Live read keeps the folded answer while CachingStore serves it from
+// the cache: PrimeActive lists without Live, so the cache holds blocked rows
+// as "open". The cache's fallback re-issues the read Live, though, so a cold
+// or degraded cache, more than dirtyOverlayMaxGets dirty rows, or a failed
+// overlay read returns the raw answer (ga-4w9wpf). Count declines the open
+// shape (nativeDoltCountSupported); callers keep the folded answer through the
+// List fallback, or the raw one when that List is Live.
+//
+// CachingStore's Live stale-row sweep (staleLiveCacheIDs) skips a cached row
+// whose SourceStatus is another status, so the parked rows this leaves out
+// cost no read.
 //
 // This is the one plan predicate that is not a superset of the query: it
 // leaves out rows that ApplyListQuery's folded "open" would keep. That is

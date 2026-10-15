@@ -524,6 +524,17 @@ func (c *CachingStore) staleLiveCacheIDs(query ListQuery, fresh []Bead) []string
 		if !query.Matches(bead) {
 			continue
 		}
+		// Matches compares the folded status, but a bd-backed store matches a
+		// named status against the one it recorded: a NativeDoltStore Live
+		// "open" is bd's raw open (nativeListPushesRawOpen), as is BdStore's
+		// --status. A row last read with another recorded status is absent by
+		// design, and re-reading it would only fold it back to "open" on every
+		// call. If another process closes or claims such a parked row, the
+		// cache holds it as "open" until that change's event or the next
+		// reconcile installs it; this sweep does not.
+		if query.Status != "" && bead.SourceStatus != "" && bead.SourceStatus != query.Status {
+			continue
+		}
 		stale = append(stale, id)
 	}
 	return stale

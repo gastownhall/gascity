@@ -2944,6 +2944,9 @@ func TestBdStoreStatusMapping(t *testing.T) {
 			if b.IndefinitelyDeferred != tt.wantIndefiniteHold {
 				t.Errorf("IndefinitelyDeferred = %v, want %v", b.IndefinitelyDeferred, tt.wantIndefiniteHold)
 			}
+			if b.SourceStatus != tt.bdStatus {
+				t.Errorf("SourceStatus = %q, want bd's %q", b.SourceStatus, tt.bdStatus)
+			}
 		})
 	}
 }

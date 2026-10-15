@@ -589,6 +589,10 @@ func mergeCacheEventPatch(base, patch Bead, fields map[string]json.RawMessage) B
 	if hasCacheEventField(fields, "status") {
 		merged.Status = patch.Status
 		merged.IndefinitelyDeferred = patch.IndefinitelyDeferred
+		// An event's status is bd's raw one (decodeRawBead keeps all but
+		// deferred) or gc's folded one, so it does not say what the store
+		// recorded; the next backing read does.
+		merged.SourceStatus = ""
 	}
 	if hasCacheEventField(fields, "issue_type") || hasCacheEventField(fields, "type") {
 		merged.Type = patch.Type

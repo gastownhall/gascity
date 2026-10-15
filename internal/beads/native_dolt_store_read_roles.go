@@ -746,7 +746,8 @@ func filterReadyByWorkOutcomeFetchBlockers(ctx context.Context, reader issueops.
 //     ExcludeStatus and gc's "open" is every bd status but closed and
 //     in_progress. "in_progress" and "closed" are exact: mapBdStatus maps them
 //     one-to-one, and AllFlag keeps the pinned-flag default lifted under a
-//     named status. See nativeListReadRequest.
+//     named status. See nativeListReadRequest. The exception is a Live
+//     "open", which travels as bd's raw "open" (nativeListPushesRawOpen).
 //   - TYPE outside the store's pushable set (nativeListPushableTypesFor),
 //     because BuildListFilter VALIDATES it against the workspace vocabulary
 //     and fails a request naming an unknown one, where the raw filter answered
@@ -816,9 +817,10 @@ func nativeListLimitPushdown(query ListQuery) int {
 		return 0
 	}
 	// The status, type and tier predicates below are applied, or re-applied,
-	// by ApplyListQuery: gc's "open" and the tier never reach the backing, and
-	// a pushed type is dropped again if the backend refuses it. A backing limit
-	// under any of them would cut rows before the residual filter.
+	// by ApplyListQuery: gc's "open" and the tier never reach the backing (a
+	// Live "open" reaches it only as bd's raw status, nativeListPushesRawOpen),
+	// and a pushed type is dropped again if the backend refuses it. A backing
+	// limit under any of them would cut rows before the residual filter.
 	if query.Status != "" || !query.IncludeClosed || query.Type != "" || query.TierMode != TierBoth {
 		return 0
 	}
