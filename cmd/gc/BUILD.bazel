@@ -1522,6 +1522,7 @@ go_test(
         "native_dolt_env_cfg_reuse_test.go",
         "native_dolt_rebind_integration_test.go",
         "native_reopen_wiring_test.go",
+        "nudge_claim_census_test.go",
         "nudge_dispatcher_test.go",
         "nudge_honesty_test.go",
         "nudge_mail_sweep_test.go",

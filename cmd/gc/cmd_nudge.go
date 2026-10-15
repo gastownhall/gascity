@@ -2929,7 +2929,9 @@ func claimDueQueuedNudges(cityPath string, now time.Time, match func(queuedNudge
 		due := func(item queuedNudge) bool {
 			return item.DeliverAfter.IsZero() || !item.DeliverAfter.After(now)
 		}
-		claim := func(item queuedNudge) bool { return match(item) && due(item) }
+		// due before match: match may list the city's sessions (the Leg-B
+		// census), which a candidate that is not yet due never needs.
+		claim := func(item queuedNudge) bool { return due(item) && match(item) }
 		stamp := func(item queuedNudge) queuedNudge { return item }
 		if batchTarget != nil {
 			pinned := wholePinnedBatch(state, claim, match)
@@ -2938,7 +2940,7 @@ func claimDueQueuedNudges(cityPath string, now time.Time, match func(queuedNudge
 				claim = func(item queuedNudge) bool { return item.DeliveryBatch == pinned && match(item) }
 			} else {
 				batch = newQueuedNudgeBatchID()
-				claim = func(item queuedNudge) bool { return item.DeliveryBatch == "" && match(item) && due(item) }
+				claim = func(item queuedNudge) bool { return item.DeliveryBatch == "" && due(item) && match(item) }
 			}
 			stamp = func(item queuedNudge) queuedNudge {
 				item = refencedQueuedNudge(*batchTarget, item)
