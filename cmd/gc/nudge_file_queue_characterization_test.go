@@ -74,11 +74,11 @@ var nqCharVerbs = struct {
 	listForAgent: listQueuedNudges,
 	recordSkips:  recordNudgeDispatchSkips,
 	dispatchSkips: func(city string) map[string]int64 {
-		state, err := nudgequeue.LoadState(city)
+		skips, err := openNudgeQueue(city, beads.NudgesStore{}).Skips.DispatchSkips()
 		if err != nil {
 			return nil
 		}
-		return state.DispatchSkips
+		return skips
 	},
 	rekey: rekeyQueuedNudgesAfterFailedBookkeeping,
 }
@@ -789,4 +789,43 @@ func TestNudgeFileQueueCharacterizationCLI(t *testing.T) {
 		return fmt.Sprintf("exit=%d\nstdout:\n%sstderr:\n%s", code, stdout.String(), stderr.String())
 	})
 	h.finish("cli")
+}
+
+// TestNudgeFileQueueCharacterizationDispatch drives the supervisor
+// dispatcher's queue reads end to end: its maintenance sweep, the due-key
+// pre-check that matches an open session's trimmed queue keys against the raw
+// queued agents (so a padded agent matches no session), and the skip
+// counters it persists, read back the way gc nudge status reads them.
+func TestNudgeFileQueueCharacterizationDispatch(t *testing.T) {
+	h := newNQCharHarness(t)
+	v := nqCharVerbs
+	later := h.item("n-later", "beta", -time.Minute, queuedNudgeOptions{})
+	later.DeliverAfter = h.at(time.Hour)
+	for _, item := range []queuedNudge{
+		h.item("n-alpha", "alpha", -time.Minute, queuedNudgeOptions{}),
+		later,
+		h.item("n-padded", " gamma ", -time.Minute, queuedNudgeOptions{}),
+	} {
+		h.step("enqueue "+item.ID, func() string { return nqCharErr(v.enqueue(h.city, h.shadow(), item)) })
+	}
+	session := func(id, agent string) beads.Bead {
+		return beads.Bead{ID: id, Status: "open", Metadata: map[string]string{
+			"session_name": agent + "-session", "agent_name": agent, "template": agent,
+		}}
+	}
+	snapshot := newSessionBeadSnapshot([]beads.Bead{session("s-alpha", "alpha"), session("s-beta", "beta"), session("s-gamma", "gamma")})
+	h.step("dispatch one supervisor pass", func() string {
+		delivered, err := dispatchAllQueuedNudges(h.city, supervisorCfg(), h.store(), nil, runtime.NewFake(), snapshot, nil)
+		return fmt.Sprintf("delivered=%d err=%s", delivered, nqCharErr(err))
+	})
+	h.step("read the dispatch skip counters", func() string {
+		skips := v.dispatchSkips(h.city)
+		keys := make([]string, 0, len(skips))
+		for key, count := range skips {
+			keys = append(keys, fmt.Sprintf("%s=%d", key, count))
+		}
+		sort.Strings(keys)
+		return "{" + strings.Join(keys, " ") + "}"
+	})
+	h.finish("dispatch")
 }
