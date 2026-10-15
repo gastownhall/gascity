@@ -2645,7 +2645,11 @@ func TestIsGoTestExecutableForBazelRunfilesSymlink(t *testing.T) {
 	dir := t.TempDir()
 	realBin := filepath.Join(dir, "bin", "session_test_", "session_test")
 	spyBin := filepath.Join(dir, "spy", "session_test")
-	for _, p := range []string{realBin, spyBin} {
+	// A real gc started by a bazel integration test runs with TEST_SRCDIR set
+	// and is exec'd through its runfiles symlink; only the _test name gate
+	// keeps it from being treated as a test binary.
+	gcBin := filepath.Join(dir, "bin", "gc_", "gc")
+	for _, p := range []string{realBin, spyBin, gcBin} {
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 			t.Fatalf("MkdirAll: %v", err)
 		}
@@ -2663,7 +2667,18 @@ func TestIsGoTestExecutableForBazelRunfilesSymlink(t *testing.T) {
 	if err := os.Symlink(realBin, runfilesLink); err != nil {
 		t.Fatalf("Symlink: %v", err)
 	}
+	gcRunfilesLink := filepath.Join(dir, "runfiles", "_main", "cmd", "gc", "gc_", "gc")
+	if err := os.MkdirAll(filepath.Dir(gcRunfilesLink), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.Symlink(gcBin, gcRunfilesLink); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
 	resolvedReal, err := filepath.EvalSymlinks(realBin)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	resolvedGC, err := filepath.EvalSymlinks(gcBin)
 	if err != nil {
 		t.Fatalf("EvalSymlinks: %v", err)
 	}
@@ -2684,6 +2699,8 @@ func TestIsGoTestExecutableForBazelRunfilesSymlink(t *testing.T) {
 		{"renamed spy binary direct argv0", spyBin, realBin, srcdir, false},
 		{"unresolvable argv0", resolvedReal, filepath.Join(dir, "missing", "session_test"), srcdir, false},
 		{"production gc binary", "/usr/local/bin/gc", "/usr/local/bin/gc", "", false},
+		{"gc under bazel runfiles symlink exec", resolvedGC, gcRunfilesLink, srcdir, false},
+		{"gc under bazel direct exec", resolvedGC, resolvedGC, srcdir, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

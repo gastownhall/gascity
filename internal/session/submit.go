@@ -824,7 +824,11 @@ func newSessionSubmitPollerCommand(exe string, environ []string, cityPath, sessi
 }
 
 func isGoTestExecutable(path string) bool {
-	return isGoTestExecutableFor(path, os.Args[0], os.Getenv("TEST_SRCDIR"))
+	argv0 := ""
+	if len(os.Args) > 0 {
+		argv0 = os.Args[0]
+	}
+	return isGoTestExecutableFor(path, argv0, os.Getenv("TEST_SRCDIR"))
 }
 
 // isGoTestExecutableFor reports whether path names a Go test binary, given the
