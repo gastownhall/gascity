@@ -33,26 +33,67 @@ var nudgeQueueRawAccess = map[string]bool{
 	"nudgequeue.StateFileQueue{}":   true,
 }
 
-// nudgeQueueRawAccessAllowed is where cmd/gc may reach the queue directly.
-// Every entry must still be in use, so a retired exception is removed here.
-var nudgeQueueRawAccessAllowed = map[string]map[string]bool{
+// nudgeQueueShadowWriters write a queue item's shadow outside the queue's
+// verbs. They are reached through the queue (Enqueue, Ack, RecordFailure,
+// Rollback), never directly, so a queue selected at the seam owns its shadows.
+var nudgeQueueShadowWriters = []string{"ensureQueuedNudgeBead", "markQueuedNudgeTerminal"}
+
+// nudgeFileQueueFile declares the file queue's mechanics. Its top-level
+// functions are the queue's internals: outside it and the seam, a call to one
+// bypasses openNudgeQueue as surely as a raw state.json read does.
+const nudgeFileQueueFile = "nudge_file_queue.go"
+
+// nudgeQueueRawAccessAllowed is where cmd/gc may reach the queue directly,
+// and how many times. A nil entry allows every access. Every count must match
+// exactly, so a retired exception is removed here and a second call beside an
+// excepted one fails rather than riding on the exception.
+var nudgeQueueRawAccessAllowed = map[string]map[string]int{
 	// The file queue itself.
-	"nudge_file_queue.go": nil,
+	nudgeFileQueueFile: nil,
 	// openNudgeQueue and nudgeShadows.
-	"nudge_queue_seam.go": {"fileNudgeQueue{}": true, "nudgeFrontDoor": true},
+	"nudge_queue_seam.go": {"fileNudgeQueue{}": 1, "nudgeFrontDoor": 1},
 	// The shadow front door's definition and its two leaf helpers.
-	"nudge_beads.go": {"nudgequeue.NewStore": true, "nudgeFrontDoor": true},
+	"nudge_beads.go": {"nudgequeue.NewStore": 1, "nudgeFrontDoor": 2},
 	// The legacy shadow sweep reads shadows, not the queue (DES-NQ D11).
-	"nudge_mail_sweep.go": {"nudgequeue.NewStore": true},
-	// The mail-sweep watchdog's snapshot; city_runtime.go is owned by the
-	// session-reconciler work, which has not yet taken the one-line change
-	// to openNudgeQueue (V2-14).
-	"city_runtime.go": {"nudgequeue.LoadState": true},
+	"nudge_mail_sweep.go": {"nudgequeue.NewStore": 2},
+	// The mail-sweep watchdog's snapshot in runNudgeMailSweepWatchdog;
+	// city_runtime.go is owned by the session-reconciler work, which has not
+	// yet taken the one-line change to openNudgeQueue (V2-14). Exactly one.
+	"city_runtime.go": {"nudgequeue.LoadState": 1},
 }
 
-// nudgeQueueRawAccessIn returns the raw queue accesses in one Go file, as
-// "name" entries, in source order.
-func nudgeQueueRawAccessIn(t *testing.T, path string) []string {
+// nudgeQueueForbidden is every raw access the ratchet rejects: the raw
+// primitives, the shadow writers, and the file queue's top-level functions.
+func nudgeQueueForbidden(t *testing.T, dir string) map[string]bool {
+	t.Helper()
+	forbidden := make(map[string]bool, len(nudgeQueueRawAccess))
+	for name := range nudgeQueueRawAccess {
+		forbidden[name] = true
+	}
+	for _, name := range nudgeQueueShadowWriters {
+		forbidden[name] = true
+	}
+	path := filepath.Join(dir, nudgeFileQueueFile)
+	file, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("parsing %s: %v", path, err)
+	}
+	funcs := 0
+	for _, decl := range file.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Recv == nil {
+			forbidden[fn.Name.Name] = true
+			funcs++
+		}
+	}
+	if funcs == 0 {
+		t.Fatalf("%s declares no top-level functions; the ratchet would guard nothing", path)
+	}
+	return forbidden
+}
+
+// nudgeQueueRawAccessIn returns the accesses in one Go file that forbidden
+// names, as "name" entries, in source order.
+func nudgeQueueRawAccessIn(t *testing.T, path string, forbidden map[string]bool) []string {
 	t.Helper()
 	file, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.SkipObjectResolution)
 	if err != nil {
@@ -81,7 +122,7 @@ func nudgeQueueRawAccessIn(t *testing.T, path string) []string {
 				}
 			}
 		}
-		if nudgeQueueRawAccess[name] {
+		if forbidden[name] {
 			found = append(found, name)
 		}
 		return true
@@ -91,7 +132,8 @@ func nudgeQueueRawAccessIn(t *testing.T, path string) []string {
 
 // TestNudgeQueueIsReachedOnlyThroughTheSeam keeps openNudgeQueue the one
 // constructor of the city's nudge queue in cmd/gc: no other non-test file
-// reads or writes state.json, takes its lock, or builds a queue value, so a
+// reads or writes state.json, takes its lock, builds a queue value, calls the
+// file queue's internals, or writes a shadow behind the queue's back, so a
 // queue selected at the seam is the queue every caller uses.
 func TestNudgeQueueIsReachedOnlyThroughTheSeam(t *testing.T) {
 	_, currentFile, _, ok := runtime.Caller(0)
@@ -103,7 +145,8 @@ func TestNudgeQueueIsReachedOnlyThroughTheSeam(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadDir(%q): %v", dir, err)
 	}
-	used := map[string]map[string]bool{}
+	forbidden := nudgeQueueForbidden(t, dir)
+	used := map[string]map[string]int{}
 	var violations []string
 	for _, entry := range entries {
 		name := entry.Name()
@@ -111,14 +154,14 @@ func TestNudgeQueueIsReachedOnlyThroughTheSeam(t *testing.T) {
 			continue
 		}
 		allowed, listed := nudgeQueueRawAccessAllowed[name]
-		for _, access := range nudgeQueueRawAccessIn(t, filepath.Join(dir, name)) {
+		for _, access := range nudgeQueueRawAccessIn(t, filepath.Join(dir, name), forbidden) {
 			switch {
 			case listed && allowed == nil:
-			case allowed[access]:
+			case allowed[access] > 0:
 				if used[name] == nil {
-					used[name] = map[string]bool{}
+					used[name] = map[string]int{}
 				}
-				used[name][access] = true
+				used[name][access]++
 			default:
 				violations = append(violations, name+": "+access)
 			}
@@ -129,9 +172,9 @@ func TestNudgeQueueIsReachedOnlyThroughTheSeam(t *testing.T) {
 		t.Errorf("reach the nudge queue through openNudgeQueue (nudge_queue_seam.go), not directly:\n  %s", strings.Join(violations, "\n  "))
 	}
 	for file, accesses := range nudgeQueueRawAccessAllowed {
-		for access := range accesses {
-			if !used[file][access] {
-				t.Errorf("%s no longer calls %s; remove the exception from nudgeQueueRawAccessAllowed", file, access)
+		for access, want := range accesses {
+			if got := used[file][access]; got != want {
+				t.Errorf("%s calls %s %d times, want exactly %d: route a new call through openNudgeQueue, or remove a retired exception from nudgeQueueRawAccessAllowed", file, access, got, want)
 			}
 		}
 	}
@@ -152,13 +195,22 @@ func sample(cityPath string) {
 	_ = &fileNudgeQueue{cityPath: cityPath}
 	_ = nudgequeue.StateFileQueue{CityPath: cityPath}
 	_ = nudgeShadows(beads.NudgesStore{})
+	_, _ = claimDueQueuedNudgesMatching(cityPath, time.Time{}, nil)
+	_ = runNudgeQueueMaintenanceSweep(cityPath, time.Time{})
+	_, _, _ = ensureQueuedNudgeBead(beads.NudgesStore{}, queuedNudge{})
+	_ = markQueuedNudgeTerminal(beads.NudgesStore{}, queuedNudge{}, "", "", "", time.Time{})
 }
 `
 	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
 		t.Fatalf("writing the sample: %v", err)
 	}
-	got := strings.Join(nudgeQueueRawAccessIn(t, path), ",")
-	want := "nudgequeue.LoadState,withNudgeQueueState,fileNudgeQueue{},nudgequeue.StateFileQueue{}"
+	_, currentFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	got := strings.Join(nudgeQueueRawAccessIn(t, path, nudgeQueueForbidden(t, gcCallerDir(currentFile))), ",")
+	want := "nudgequeue.LoadState,withNudgeQueueState,fileNudgeQueue{},nudgequeue.StateFileQueue{}," +
+		"claimDueQueuedNudgesMatching,runNudgeQueueMaintenanceSweep,ensureQueuedNudgeBead,markQueuedNudgeTerminal"
 	if got != want {
 		t.Fatalf("raw accesses = %s, want %s", got, want)
 	}

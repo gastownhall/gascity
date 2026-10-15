@@ -164,8 +164,11 @@ func TestSessionWakeWithdrawsThroughStateNudgeQueue(t *testing.T) {
 	}
 }
 
-// No non-test file in internal/api touches the state.json queue directly: the
-// API writes through State.NudgeQueue.
+// No non-test file in internal/api touches the state.json queue directly or
+// picks the file queue itself: the API writes through State.NudgeQueue, so the
+// controller, not the API, decides the queue's mode (DES-NQ D8). The one
+// StateFileQueue the API builds is seededState's (dashport_support.go), which
+// stands in for a controller over a seeded single-store city.
 func TestAPIReachesTheNudgeQueueOnlyThroughState(t *testing.T) {
 	var dir string
 	if root := bazeltest.OverrideRoot(); root != "" {
@@ -178,6 +181,8 @@ func TestAPIReachesTheNudgeQueueOnlyThroughState(t *testing.T) {
 		dir = filepath.Dir(file)
 	}
 	forbidden := map[string]bool{"WithState": true, "LoadState": true, "WithdrawWaitNudges": true, "StatePath": true, "SortState": true}
+	allowedFileQueues := map[string]int{"dashport_support.go": 1}
+	fileQueues := map[string]int{}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatalf("ReadDir(%q): %v", dir, err)
@@ -192,6 +197,14 @@ func TestAPIReachesTheNudgeQueueOnlyThroughState(t *testing.T) {
 			t.Fatalf("parsing %s: %v", name, err)
 		}
 		ast.Inspect(file, func(n ast.Node) bool {
+			if lit, ok := n.(*ast.CompositeLit); ok {
+				if typ, ok := lit.Type.(*ast.SelectorExpr); ok {
+					if pkg, ok := typ.X.(*ast.Ident); ok && pkg.Name == "nudgequeue" && typ.Sel.Name == "StateFileQueue" {
+						fileQueues[name]++
+					}
+				}
+				return true
+			}
 			call, ok := n.(*ast.CallExpr)
 			if !ok {
 				return true
@@ -205,5 +218,15 @@ func TestAPIReachesTheNudgeQueueOnlyThroughState(t *testing.T) {
 			}
 			return true
 		})
+	}
+	for name, got := range fileQueues {
+		if got != allowedFileQueues[name] {
+			t.Errorf("%s builds nudgequeue.StateFileQueue %d times; take the queue from State.NudgeQueue", name, got)
+		}
+	}
+	for name, want := range allowedFileQueues {
+		if fileQueues[name] != want {
+			t.Errorf("%s builds nudgequeue.StateFileQueue %d times, want exactly %d; remove a retired exception", name, fileQueues[name], want)
+		}
 	}
 }
