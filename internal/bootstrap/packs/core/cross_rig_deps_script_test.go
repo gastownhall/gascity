@@ -84,15 +84,15 @@ exit 0
 	}
 }
 
-// TestCrossRigDepsRefusalReachesStderr pins the other half of the HTTP-store
+// TestCrossRigDepsRefusalFailsLoudly pins the other half of the HTTP-store
 // fix: a real bd refusal (not just "nothing closed recently") must not be
 // swallowed. Before this fix the lookup redirected stderr to /dev/null and
 // then exited 0 on any failure, so an HTTP store's refusal of the whole
-// query shape looked identical, in the order log, to an empty result. The
-// script still must exit 0 (a refusal must not fail the order), but the
-// refusal text must reach the combined output so it is visible to whoever
-// reads the order's log.
-func TestCrossRigDepsRefusalReachesStderr(t *testing.T) {
+// query shape looked identical, in the order log, to an empty result and the
+// order went green while doing nothing. Now the script must exit non-zero
+// (so the order fails visibly) and the refusal text must still reach the
+// combined output so an operator can see why.
+func TestCrossRigDepsRefusalFailsLoudly(t *testing.T) {
 	binDir, _ := fakeGCBin(t, `case "$*" in
 bd\ query\ status=closed*)
     echo "Error: bd query is not supported against HTTP workspace: part of this command is not served over HTTP" >&2
@@ -102,8 +102,8 @@ esac
 exit 0
 `)
 	out, err := runCrossRigDeps(t, binDir)
-	if err != nil {
-		t.Fatalf("a real bd refusal must still exit 0 (no-work semantics), got error: %v\n%s", err, out)
+	if err == nil {
+		t.Fatalf("a real bd refusal must fail the order (non-zero exit), got success:\n%s", out)
 	}
 	if !strings.Contains(out, "not supported against HTTP workspace") {
 		t.Fatalf("a real bd refusal must reach the order's log, not be swallowed; got:\n%s", out)

@@ -31,10 +31,11 @@ SINCE=$(date -u -d "-${LOOKBACK%m} minutes" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || \
 # Use the query language rather than --closed-after: HTTP-backed stores
 # (e.g. maintainer-city) don't serve the listIssues ClosedAfter filter, but
 # they do serve bd query. Dolt/local rigs support both; query gives one
-# shape that works everywhere. Stderr is left unredirected so a real bd
-# refusal (as opposed to "no recently-closed issues") is visible in the
-# order's log instead of being swallowed.
-CLOSED=$(gc bd query "status=closed AND closed>\"$SINCE\"" --json) || exit 0
+# shape that works everywhere. No `|| exit 0` here: a real bd refusal must
+# fail the order (and its message, left unredirected, must reach stderr),
+# not look like "nothing closed recently". `set -e` surfaces that failure
+# with bd's own exit code. Only a genuine empty result exits 0.
+CLOSED=$(gc bd query "status=closed AND closed>\"$SINCE\"" --json)
 if [ -z "$CLOSED" ] || [ "$CLOSED" = "[]" ]; then
     exit 0
 fi
