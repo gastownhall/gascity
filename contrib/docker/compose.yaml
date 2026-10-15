@@ -1,0 +1,42 @@
+# Build with `make docker-city` at the repository root, then configure .env.
+name: gascity
+services:
+  gascity:
+    image: gascity:latest
+    pull_policy: never
+    restart: unless-stopped
+    stop_grace_period: 2m
+    ports:
+      - "127.0.0.1:${GASCITY_PORT:-8372}:8372"
+    working_dir: ${GASCITY_WORKSPACE:?absolute host path of the directory holding your cities}
+    environment:
+      GASCITY_AUTHOR_NAME: ${GASCITY_AUTHOR_NAME:?git author name for commits the city makes}
+      GASCITY_AUTHOR_EMAIL: ${GASCITY_AUTHOR_EMAIL:?git author email for commits the city makes}
+    volumes:
+      - home:/home/gascity
+      # Keep the host path so registrations and worktrees agree on both sides.
+      - type: bind
+        source: ${GASCITY_WORKSPACE}
+        target: ${GASCITY_WORKSPACE}
+        bind:
+          create_host_path: false
+      # Remove the binds for clients you do not use. Selected sources must exist.
+      # Claude Code needs both its directory and its file.
+      - type: bind
+        source: ${GASCITY_CLAUDE_DIR:-~/.claude}
+        target: /home/gascity/.claude
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${GASCITY_CLAUDE_JSON:-~/.claude.json}
+        target: /home/gascity/.claude.json
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${GASCITY_CODEX_DIR:-~/.codex}
+        target: /home/gascity/.codex
+        bind:
+          create_host_path: false
+
+volumes:
+  home:

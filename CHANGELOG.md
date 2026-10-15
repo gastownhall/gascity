@@ -219,6 +219,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A single-container deployment under `contrib/docker`.** One image carries
+  `gc`, `bd`, Dolt, Claude Code, and Codex; `gc supervisor run` is the
+  foreground supervisor under `tini`, the workspace is bind-mounted at the
+  same absolute path inside and out, and client logins are mounted from the
+  host. Dolt is the same rebuilt binary the Kubernetes base image ships.
+  `make docker-city` builds the image for the current user,
+  `make test-docker-city` boots it without credentials, and the Container
+  Scan workflow covers it. See the new "Run a city in a container" guide.
+
 - **`[beads] proxied_idle_timeout` sets how long a bd-owned proxied scope's
   proxy and Dolt child stay up with no connections.** bd retires the pair
   after that much quiet and the next bd command restarts it. The value is a Go

@@ -10,6 +10,7 @@ description: Install Gas City from Homebrew, a release tarball, or source.
 | [Homebrew](#homebrew-recommended) | macOS / Linux daily use | Yes (runtime deps) | `brew upgrade` |
 | [Direct download](#direct-download) | CI, containers, air-gapped hosts | No | Manual |
 | [Source build](#build-from-source) | Contributors, bleeding-edge | No | Manual |
+| [Container](/guides/running-in-a-container) | Agent tools run in a container; mounted workspace and client profiles remain writable | Yes (in the image) | Rebuild |
 
 **Most users should use Homebrew.** It installs all runtime dependencies
 automatically and keeps `gc` on your PATH. Choose direct download when you
