@@ -4,7 +4,10 @@
 # to non-existent agents get reset to open/unassigned so they are routable
 # again. No worktree salvage — cities that staff a work-health patrol role
 # (e.g. the gastown pack's witness) handle that separately.
-# Set GC_ORPHAN_SWEEP_RIG_ASSIGNEE_REGEX to scope rig beads (see the script).
+# A claim whose assignee this city cannot vouch for (`gc agent is-foreign`:
+# not in its roster and no session record of its own answers to it, e.g.
+# another city's agent on a shared rig store) is never reset; each run that
+# keeps one names it and declares a partial outcome (order.skipped).
 [order]
 description = "Reset beads assigned to dead agents back to the work pool"
 trigger = "cooldown"

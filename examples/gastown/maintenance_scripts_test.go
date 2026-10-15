@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -89,7 +90,7 @@ func TestOrphanSweepPreservesQualifiedRigAssignees(t *testing.T) {
 
 	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
-if [ "$1" = "--rig" ]; then
+`+orphanSweepGateStubArm+`if [ "$1" = "--rig" ]; then
   shift 2
 fi
 case "$1" in
@@ -207,7 +208,7 @@ func orphanSweepBareShortFormGCStub(t *testing.T, binDir string, sessionLive boo
 	}
 	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
-if [ "$1" = "--rig" ]; then
+`+orphanSweepGateStubArm+`if [ "$1" = "--rig" ]; then
   shift 2
 fi
 case "$1" in
@@ -349,7 +350,7 @@ func orphanSweepOperatorAssigneeGCStub(t *testing.T, binDir, assignee string) {
 	t.Helper()
 	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
-if [ "$1" = "--rig" ]; then
+`+orphanSweepGateStubArm+`if [ "$1" = "--rig" ]; then
   shift 2
 fi
 case "$1" in
@@ -489,7 +490,7 @@ func TestOrphanSweepConfigShowFallbackPreservesQualifiedAssignees(t *testing.T) 
 
 	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
-if [ "$1" = "--rig" ]; then
+`+orphanSweepGateStubArm+`if [ "$1" = "--rig" ]; then
   shift 2
 fi
 case "$1" in
@@ -602,7 +603,7 @@ func TestOrphanSweepRefreshesLivenessAfterBeadList(t *testing.T) {
 
 	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
-case "$1" in
+`+orphanSweepGateStubArm+`case "$1" in
   config)
     if [ "$2" = "explain" ]; then
       cat <<'EOF'
@@ -693,7 +694,7 @@ func TestOrphanSweepRefreshesRigLivenessAfterBeadList(t *testing.T) {
 
 	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
-if [ "$1" = "--rig" ]; then
+`+orphanSweepGateStubArm+`if [ "$1" = "--rig" ]; then
   rig="$2"
   shift 2
 else
@@ -796,7 +797,7 @@ func TestOrphanSweepRevalidatesWorkBeadBeforeReset(t *testing.T) {
 
 	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
-case "$1" in
+`+orphanSweepGateStubArm+`case "$1" in
   config)
     if [ "$2" = "explain" ]; then
       cat <<'EOF'
@@ -881,7 +882,7 @@ func TestOrphanSweepUsesConditionalResetAfterRevalidation(t *testing.T) {
 
 	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
-case "$1" in
+`+orphanSweepGateStubArm+`case "$1" in
   config)
     if [ "$2" = "explain" ]; then
       cat <<'EOF'
@@ -981,7 +982,7 @@ func TestOrphanSweepUsesSessionBeadShowWhenSessionListLags(t *testing.T) {
 
 	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
-case "$1" in
+`+orphanSweepGateStubArm+`case "$1" in
   config)
     if [ "$2" = "explain" ]; then
       cat <<'EOF'
@@ -1079,7 +1080,7 @@ func TestOrphanSweepPreservesWorkWhenSessionBeadProbeErrors(t *testing.T) {
 
 	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
-case "$1" in
+`+orphanSweepGateStubArm+`case "$1" in
   config)
     if [ "$2" = "explain" ]; then
       cat <<'EOF'
@@ -1217,7 +1218,7 @@ func TestOrphanSweepTreatsPoolSessionNameSelfProbeAsUnverifiable(t *testing.T) {
 			// rather than ephemeral sessions.
 			writeExecutable(t, filepath.Join(binDir, "gc"), fmt.Sprintf(`#!/bin/sh
 printf '%%s\n' "$*" >> "$GC_CALL_LOG"
-case "$1" in
+`+orphanSweepGateStubArm+`case "$1" in
   config)
     if [ "$2" = "explain" ]; then
       cat <<'EOF'
@@ -1334,7 +1335,7 @@ func TestOrphanSweepUsesDirectSessionBeadCandidatesWhenSessionListLags(t *testin
 
 			writeExecutable(t, filepath.Join(binDir, "gc"), fmt.Sprintf(`#!/bin/sh
 printf '%%s\n' "$*" >> "$GC_CALL_LOG"
-case "$1" in
+`+orphanSweepGateStubArm+`case "$1" in
   config)
     if [ "$2" = "explain" ]; then
       cat <<'EOF'
@@ -1434,7 +1435,7 @@ func TestOrphanSweepPreservesRigScopedLiveEphemeralSessionAssigneesFromCurrentSc
 
 	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
-if [ "$1" = "--rig" ]; then
+`+orphanSweepGateStubArm+`if [ "$1" = "--rig" ]; then
   rig="$2"
   shift 2
 else
@@ -1561,7 +1562,7 @@ func TestOrphanSweepPreservesPascalCaseLiveSessionIdentitiesAsForwardCompat(t *t
 
 	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
-if [ "$1" = "--rig" ]; then
+`+orphanSweepGateStubArm+`if [ "$1" = "--rig" ]; then
   rig="$2"
   shift 2
 else
@@ -1687,7 +1688,7 @@ func TestOrphanSweepContinuesAfterSingleRigSessionListFailure(t *testing.T) {
 
 	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
-if [ "$1" = "--rig" ]; then
+`+orphanSweepGateStubArm+`if [ "$1" = "--rig" ]; then
   rig="$2"
   shift 2
 else
@@ -2049,6 +2050,10 @@ if [ -n "$rig" ]; then
 else
   printf '%s\n' "$*" >> "$GC_CALL_LOG"
 fi
+if [ "$*" = "agent is-foreign --json -- $ORPHAN_SWEEP_ORPHAN_ASSIGNEE" ]; then
+  echo '{"schema_version":"1","ok":true,"verdict":"local","reason":"session_record","roster_source":"stub"}'
+  exit 0
+fi
 if [ "$*" = "bd list --status=in_progress --json --limit=0" ]; then
   printf '%s\n' "$ORPHAN_SWEEP_HQ_JSON"
   exit 0
@@ -2279,7 +2284,7 @@ func TestOrphanSweepSkipsRigWhenSessionListSucceedsButReportsZeroSessions(t *tes
 
 	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
-if [ "$1" = "--rig" ]; then
+`+orphanSweepGateStubArm+`if [ "$1" = "--rig" ]; then
   rig="$2"
   shift 2
 else
@@ -2410,7 +2415,7 @@ func TestOrphanSweepPreservesPoolSeatWithOnlySessionNameMetadataWhenLive(t *test
 
 	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
-case "$1" in
+`+orphanSweepGateStubArm+`case "$1" in
   config)
     if [ "$2" = "explain" ]; then
       cat <<'EOF'
@@ -2511,7 +2516,7 @@ func TestOrphanSweepTreatsUnresolvableDoubleDashAssigneeAsUnverifiable(t *testin
 
 	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
-case "$1" in
+`+orphanSweepGateStubArm+`case "$1" in
   config)
     if [ "$2" = "explain" ]; then
       cat <<'EOF'
@@ -2603,7 +2608,7 @@ func TestOrphanSweepRecordsCauseNoteOnEveryReset(t *testing.T) {
 
 	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
-case "$1" in
+`+orphanSweepGateStubArm+`case "$1" in
   mail)
     exit 0
     ;;
@@ -11802,23 +11807,60 @@ exit 0
 	}
 }
 
-// orphanSweepRigAssigneeFakeGC serves one HQ bead, three beads in the shared
-// rig "shared" (this city's dead worker, another city's worker, a person) and
-// two in rig "other" (one matching the test regex, one not). No assignee is a
-// configured agent or a live session, so the unfiltered sweep releases all six.
-const orphanSweepRigAssigneeFakeGC = `#!/bin/sh
+// orphanSweepGateStubArm answers `gc agent is-foreign … <identity>` (the last
+// argument) the way this city's foreign-identity gate would: foreign (exit 1)
+// for identities listed in ORPHAN_SWEEP_FOREIGN_IDENTITIES, otherwise local
+// (exit 0), modeling a dead local claimant whose closed session record
+// survives. It uses echo, not printf, so it is safe inside fmt.Sprintf stubs.
+const orphanSweepGateStubArm = `if [ "$1" = "agent" ] && [ "$2" = "is-foreign" ]; then
+  for identity; do :; done
+  if [ -n "${ORPHAN_SWEEP_FOREIGN_IDENTITIES:-}" ] && echo "$ORPHAN_SWEEP_FOREIGN_IDENTITIES" | grep -Fxq -- "$identity"; then
+    echo '{"schema_version":"1","ok":true,"verdict":"foreign","reason":"absent_from_roster","roster_source":"stub"}'
+    exit 1
+  fi
+  echo '{"schema_version":"1","ok":true,"verdict":"local","reason":"session_record","roster_source":"stub"}'
+  exit 0
+fi
+`
+
+// orphanSweepSharedRigFakeGC fakes a city that shares the rig store "shared"
+// with a neighboring city (gastownhall/gascity#5955). This city configures
+// gastown.deacon and shared/gastown.polecat; nothing is live. The in-progress
+// rows come from ORPHAN_SWEEP_HQ_BEADS_JSON and ORPHAN_SWEEP_SHARED_BEADS_JSON,
+// and `bd show <id> --json` answers only for those work beads and for the
+// session beads in ORPHAN_SWEEP_SESSION_BEADS_JSON, so every other
+// session-bead probe the sweep derives from an assignee finds nothing, exactly
+// as it does for a neighbor's claim whose session record lives in the
+// neighbor's own unfederated HQ.
+//
+// `agent is-foreign [flags] [--] <identity>` stands in for this city's
+// foreign-identity gate (orphanSweepGateStubArm). ORPHAN_SWEEP_GATE_EXIT makes
+// it answer "unknown" with that exit code instead, and ORPHAN_SWEEP_GATE_ABSENT
+// models a binary without the verb (exit 1, no JSON). ORPHAN_SWEEP_MAIL_EXIT
+// is the exit code of `mail send`.
+const orphanSweepSharedRigFakeGC = `#!/bin/sh
 printf '%s\n' "$*" >> "$GC_CALL_LOG"
-if [ "$1" = "--rig" ]; then
+if [ "$1" = "agent" ] && [ -n "${ORPHAN_SWEEP_GATE_ABSENT:-}" ]; then
+  echo "gc agent: unknown subcommand \"$2\"" >&2
+  exit 1
+fi
+if [ "$1" = "agent" ] && [ -n "${ORPHAN_SWEEP_GATE_EXIT:-}" ]; then
+  echo '{"schema_version":"1","ok":true,"verdict":"unknown","reason":"lookup_failed","detail":"session store unreachable","roster_source":"stub"}'
+  exit "$ORPHAN_SWEEP_GATE_EXIT"
+fi
+` + orphanSweepGateStubArm + `if [ "$1" = "--rig" ]; then
   shift 2
 fi
 case "$1" in
   mail)
-    exit 0
+    exit "${ORPHAN_SWEEP_MAIL_EXIT:-0}"
     ;;
   config)
     if [ "$2" = "explain" ]; then
       cat <<'EOF'
-Agent: project/worker
+Agent: gastown.deacon
+  source: pack
+Agent: shared/gastown.polecat
   source: pack
 EOF
       exit 0
@@ -11826,7 +11868,7 @@ EOF
     ;;
   rig)
     if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
-      printf '{"rigs":[{"name":"hq","hq":true},{"name":"shared","hq":false},{"name":"other","hq":false}]}\n'
+      printf '{"rigs":[{"name":"hq","hq":true},{"name":"shared","hq":false}]}\n'
       exit 0
     fi
     ;;
@@ -11839,44 +11881,25 @@ EOF
   bd)
     if [ "$2" = "list" ]; then
       if [ "$3" = "--rig" ] && [ "$4" = "shared" ]; then
-        cat <<'EOF'
-[
-  {"id":"ga-own-orphan","status":"in_progress","assignee":"alice-dead-worker"},
-  {"id":"ga-foreign-claim","status":"in_progress","assignee":"bob-worker"},
-  {"id":"ga-person-claim","status":"in_progress","assignee":"Pat Example"}
-]
-EOF
-      elif [ "$3" = "--rig" ] && [ "$4" = "other" ]; then
-        cat <<'EOF'
-[
-  {"id":"ga-other-own","status":"in_progress","assignee":"alice-other-worker"},
-  {"id":"ga-other-foreign","status":"in_progress","assignee":"carol-worker"}
-]
-EOF
+        printf '%s\n' "${ORPHAN_SWEEP_SHARED_BEADS_JSON:-[]}"
       else
-        cat <<'EOF'
-[
-  {"id":"ga-hq-orphan","status":"in_progress","assignee":"missing-hq-session"}
-]
-EOF
+        printf '%s\n' "${ORPHAN_SWEEP_HQ_BEADS_JSON:-[]}"
       fi
       exit 0
     fi
     if [ "$2" = "show" ] && [ "$4" = "--json" ]; then
-      case "$3" in
-        ga-hq-orphan) a="missing-hq-session" ;;
-        ga-own-orphan) a="alice-dead-worker" ;;
-        ga-foreign-claim) a="bob-worker" ;;
-        ga-person-claim) a="Pat Example" ;;
-        ga-other-own) a="alice-other-worker" ;;
-        ga-other-foreign) a="carol-worker" ;;
-        *) exit 1 ;;
-      esac
-      printf '[{"id":"%s","status":"in_progress","assignee":"%s"}]\n' "$3" "$a"
-      exit 0
+      row=$(printf '%s\n%s\n%s\n' "${ORPHAN_SWEEP_HQ_BEADS_JSON:-[]}" "${ORPHAN_SWEEP_SHARED_BEADS_JSON:-[]}" "${ORPHAN_SWEEP_SESSION_BEADS_JSON:-[]}" | jq -c --arg id "$3" '.[] | select(.id == $id)' | head -n 1)
+      if [ -n "$row" ]; then
+        printf '[%s]\n' "$row"
+        exit 0
+      fi
+      exit 1
     fi
     if [ "$2" = "release-if-current" ]; then
       printf 'released\n'
+      exit 0
+    fi
+    if [ "$2" = "update" ]; then
       exit 0
     fi
     ;;
@@ -11884,136 +11907,477 @@ esac
 exit 1
 `
 
-// TestOrphanSweepRigAssigneeRegexScopesRigBeads verifies the opt-in regex
-// filters each rig's in-progress beads independently and never filters HQ.
-func TestOrphanSweepRigAssigneeRegexScopesRigBeads(t *testing.T) {
-	// The HQ bead's assignee deliberately does not match the regex, so its
-	// release proves HQ beads are never filtered.
-	cases := []struct {
-		name         string
-		regex        string // "" disables the filter
-		wantReset    int
-		wantReleased []string
-		wantKept     []string
+// TestOrphanSweepKeepsForeignClaimsOnSharedRigAndReleasesDeadLocal is the
+// gastownhall/gascity#5955 regression, with no opt-in configuration: ONE sweep
+// over a shared rig carries claims held by a neighboring city's identities in
+// every shape a claim can take, a dead local claimant, and a live-roster
+// control.
+//
+// The foreign shapes are the ones measured in the field or minted by gc for an
+// unaliased session: a foreign-binding pool instance (ga-8yi7ne), a foreign
+// named crew member (the #5952 incident), a runtime session name
+// (PoolSessionName, <base>-<bead id>), a bare session bead ID (ga-x1f77i), and
+// a rig-encoded session name ("--" for "/", "__" for ".").
+//
+// Split across sweeps, "keeps every foreign claim" is satisfiable by a sweep
+// that releases nothing and "releases the dead local claim" by one that
+// releases everything. Together in one sweep they are not. The skip must also
+// be LOUD: counted and named on stdout, and declared as a partial outcome so
+// the controller records an order.skipped event on an exit-0 run (exec-order
+// output is otherwise logged only on a non-zero exit, #4543). A decommissioned
+// local agent is also absent from the roster, and a silent skip would turn a
+// loud cross-city bug into a quiet local leak.
+func TestOrphanSweepKeepsForeignClaimsOnSharedRigAndReleasesDeadLocal(t *testing.T) {
+	foreign := []struct {
+		beadID   string
+		assignee string
 	}{
-		{
-			name:         "unset keeps the unfiltered sweep",
-			wantReset:    6,
-			wantReleased: []string{"ga-hq-orphan missing-hq-session", "ga-own-orphan alice-dead-worker", "ga-foreign-claim bob-worker", "ga-person-claim Pat Example", "ga-other-own alice-other-worker", "ga-other-foreign carol-worker"},
-		},
-		{
-			name:         "regex leaves foreign and person rig claims alone",
-			regex:        `^alice-`,
-			wantReset:    3,
-			wantReleased: []string{"ga-hq-orphan missing-hq-session", "ga-own-orphan alice-dead-worker", "ga-other-own alice-other-worker"},
-			wantKept:     []string{"ga-foreign-claim", "ga-person-claim", "ga-other-foreign"},
-		},
-		{
-			name:         "invalid regex releases nothing in the rig",
-			regex:        `(`,
-			wantReset:    1,
-			wantReleased: []string{"ga-hq-orphan missing-hq-session"},
-			wantKept:     []string{"ga-own-orphan", "ga-foreign-claim", "ga-person-claim", "ga-other-own", "ga-other-foreign"},
-		},
+		{"sh-foreign-pool", "shared/otherpack.polecat-3"},
+		{"sh-foreign-crew", "shared/dalinar"},
+		{"sh-foreign-session", "otherpack__polecat-bt-8x2kd"},
+		{"sh-foreign-bead-id", "bt-q7m3v"},
+		{"sh-foreign-rig-session", "shared--otherpack__polecat-4"},
 	}
-	for _, tc := range cases {
+	const (
+		localDeadID       = "sh-local-dead"
+		localDeadAssignee = "gastown__polecat-gc-d34d1"
+		rosterID          = "sh-local-roster"
+		rosterAssignee    = "shared/gastown.polecat-2"
+	)
+
+	type row struct {
+		ID       string `json:"id"`
+		Status   string `json:"status"`
+		Assignee string `json:"assignee"`
+	}
+	rows := []row{
+		{ID: localDeadID, Status: "in_progress", Assignee: localDeadAssignee},
+		{ID: rosterID, Status: "in_progress", Assignee: rosterAssignee},
+	}
+	foreignIdentities := make([]string, 0, len(foreign))
+	for _, f := range foreign {
+		rows = append(rows, row{ID: f.beadID, Status: "in_progress", Assignee: f.assignee})
+		foreignIdentities = append(foreignIdentities, f.assignee)
+	}
+	sharedJSON, err := json.Marshal(rows)
+	if err != nil {
+		t.Fatalf("Marshal(shared rig rows): %v", err)
+	}
+
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	outcomeFile := filepath.Join(t.TempDir(), "outcome.json")
+	writeExecutable(t, filepath.Join(binDir, "gc"), orphanSweepSharedRigFakeGC)
+
+	out, err := runScriptResult(t, coreScriptPath("orphan-sweep.sh"), map[string]string{
+		"GC_CITY":                         cityDir,
+		"GC_CITY_PATH":                    cityDir,
+		"GC_CALL_LOG":                     gcLog,
+		"GC_ORDER_OUTCOME_FILE":           outcomeFile,
+		"ORPHAN_SWEEP_HQ_BEADS_JSON":      "[]",
+		"ORPHAN_SWEEP_SHARED_BEADS_JSON":  string(sharedJSON),
+		"ORPHAN_SWEEP_FOREIGN_IDENTITIES": strings.Join(foreignIdentities, "\n"),
+		"PATH":                            binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	})
+	if err != nil {
+		t.Fatalf("orphan-sweep failed: %v\n%s", err, orphanSweepFailureContext(out, gcLog))
+	}
+	logData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	log := string(logData)
+
+	var released []string
+	for _, f := range foreign {
+		if strings.Contains(log, "bd release-if-current "+f.beadID+" ") {
+			released = append(released, f.beadID+" ("+f.assignee+")")
+		}
+	}
+	if len(released) > 0 {
+		t.Fatalf("orphan-sweep released claims held by another city's identities on the shared rig: %s\n%s",
+			strings.Join(released, ", "), orphanSweepFailureContext(out, gcLog))
+	}
+	if !strings.Contains(log, "bd release-if-current "+localDeadID+" "+localDeadAssignee) {
+		t.Fatalf("dead local claimant %s was not released\n%s", localDeadAssignee, orphanSweepFailureContext(out, gcLog))
+	}
+	if strings.Contains(log, "bd release-if-current "+rosterID+" ") {
+		t.Fatalf("roster-known claimant %s was released\n%s", rosterAssignee, orphanSweepFailureContext(out, gcLog))
+	}
+
+	// The gate is asked exactly once about every claimant the roster and live
+	// sessions did not recognize, and never about one they did.
+	gateCalls := func(identity string) int {
+		n := 0
+		for _, line := range nonEmptyLogLines(log) {
+			if strings.HasPrefix(line, "agent is-foreign ") && strings.HasSuffix(line, " "+identity) {
+				n++
+			}
+		}
+		return n
+	}
+	for _, f := range foreign {
+		if got := gateCalls(f.assignee); got != 1 {
+			t.Errorf("foreign-identity gate consulted %d times for %q, want 1\n%s", got, f.assignee, orphanSweepFailureContext(out, gcLog))
+		}
+	}
+	if got := gateCalls(rosterAssignee); got != 0 {
+		t.Errorf("foreign-identity gate consulted %d times for roster-known %q, want 0\n%s", got, rosterAssignee, orphanSweepFailureContext(out, gcLog))
+	}
+	// Like the Go sweep, the gate runs before revalidation and liveness
+	// probes, so a protected claim costs no per-bead reads.
+	for _, f := range foreign {
+		if strings.Contains(log, "bd show "+f.beadID+" --json") {
+			t.Errorf("protected claim %s was revalidated/probed before the gate\n%s", f.beadID, orphanSweepFailureContext(out, gcLog))
+		}
+	}
+
+	text := string(out)
+	for _, want := range []string{
+		"orphan-sweep: reset 1 orphaned beads",
+		"orphan-sweep: protected 5 foreign/unknown identities this pass (5 claims)",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("output missing %q:\n%s", want, text)
+		}
+	}
+	for _, f := range foreign {
+		if want := strconv.Quote(f.assignee) + " (1: " + f.beadID + ")"; !strings.Contains(text, want) {
+			t.Errorf("summary does not name protected identity and claim %s:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, strconv.Quote(localDeadAssignee)+" (") {
+		t.Errorf("released local claimant %q must not be reported as protected:\n%s", localDeadAssignee, text)
+	}
+
+	data, err := os.ReadFile(outcomeFile)
+	if err != nil || strings.TrimSpace(string(data)) == "" {
+		t.Fatalf("no outcome declaration written (err=%v): a sweep that protected claims and exited 0 must declare a partial outcome\n%s", err, text)
+	}
+	var outcome scriptOutcome
+	if err := json.Unmarshal(data, &outcome); err != nil {
+		t.Fatalf("outcome file is not the typed declaration: %v\n%s", err, data)
+	}
+	if outcome.Outcome != "partial" {
+		t.Errorf("outcome = %q, want partial (the sweep ran; a safety gate held claims back)", outcome.Outcome)
+	}
+	for _, f := range foreign {
+		found := false
+		for _, scope := range outcome.Scopes {
+			if scope.Scope == f.assignee && strings.Contains(scope.Reason, f.beadID) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("outcome declares no scope for protected identity %q naming %s: %+v", f.assignee, f.beadID, outcome.Scopes)
+		}
+	}
+}
+
+// orphanSweepGateRow is one in-progress work bead, or one session bead served
+// by `bd show`, in an orphanSweepSharedRigFakeGC fixture.
+type orphanSweepGateRow struct {
+	ID        string `json:"id"`
+	Status    string `json:"status"`
+	Assignee  string `json:"assignee,omitempty"`
+	IssueType string `json:"issue_type,omitempty"`
+}
+
+// orphanSweepGateRun is one orphanSweepSharedRigFakeGC sweep's results.
+type orphanSweepGateRun struct {
+	out         string
+	err         error
+	log         string
+	outcomeFile string
+	gcLog       string
+}
+
+func (r orphanSweepGateRun) context() string {
+	return orphanSweepFailureContext([]byte(r.out), r.gcLog)
+}
+
+func (r orphanSweepGateRun) released(beadID string) bool {
+	return strings.Contains(r.log, "bd release-if-current "+beadID+" ")
+}
+
+func (r orphanSweepGateRun) gateCalls() int {
+	n := 0
+	for _, line := range nonEmptyLogLines(r.log) {
+		if strings.HasPrefix(line, "agent is-foreign ") {
+			n++
+		}
+	}
+	return n
+}
+
+// outcome reads the typed outcome declaration; ok is false when none was
+// written.
+func (r orphanSweepGateRun) outcome(t *testing.T) (scriptOutcome, bool) {
+	t.Helper()
+	data, err := os.ReadFile(r.outcomeFile)
+	if errors.Is(err, os.ErrNotExist) || (err == nil && strings.TrimSpace(string(data)) == "") {
+		return scriptOutcome{}, false
+	}
+	if err != nil {
+		t.Fatalf("ReadFile(outcome): %v", err)
+	}
+	var outcome scriptOutcome
+	if err := json.Unmarshal(data, &outcome); err != nil {
+		t.Fatalf("outcome file is not the typed declaration: %v\n%s", err, data)
+	}
+	return outcome, true
+}
+
+func orphanSweepGateJSON(t *testing.T, rows []orphanSweepGateRow) string {
+	t.Helper()
+	if rows == nil {
+		return "[]"
+	}
+	data, err := json.Marshal(rows)
+	if err != nil {
+		t.Fatalf("Marshal(rows): %v", err)
+	}
+	return string(data)
+}
+
+// runOrphanSweepGateFixture runs one sweep over orphanSweepSharedRigFakeGC.
+func runOrphanSweepGateFixture(t *testing.T, hq, shared, sessionBeads []orphanSweepGateRow, foreign []string, extraEnv map[string]string) orphanSweepGateRun {
+	t.Helper()
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	outcomeFile := filepath.Join(t.TempDir(), "outcome.json")
+	writeExecutable(t, filepath.Join(binDir, "gc"), orphanSweepSharedRigFakeGC)
+	env := map[string]string{
+		"GC_CITY":                         cityDir,
+		"GC_CITY_PATH":                    cityDir,
+		"GC_CALL_LOG":                     gcLog,
+		"GC_ORDER_OUTCOME_FILE":           outcomeFile,
+		"ORPHAN_SWEEP_HQ_BEADS_JSON":      orphanSweepGateJSON(t, hq),
+		"ORPHAN_SWEEP_SHARED_BEADS_JSON":  orphanSweepGateJSON(t, shared),
+		"ORPHAN_SWEEP_SESSION_BEADS_JSON": orphanSweepGateJSON(t, sessionBeads),
+		"ORPHAN_SWEEP_FOREIGN_IDENTITIES": strings.Join(foreign, "\n"),
+		"ORPHAN_SWEEP_GATE_EXIT":          "",
+		"ORPHAN_SWEEP_GATE_ABSENT":        "",
+		"ORPHAN_SWEEP_MAIL_EXIT":          "0",
+		"PATH":                            binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+	for k, v := range extraEnv {
+		env[k] = v
+	}
+	out, err := runScriptResult(t, coreScriptPath("orphan-sweep.sh"), env)
+	logData, readErr := os.ReadFile(gcLog)
+	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		t.Fatalf("ReadFile(gc log): %v", readErr)
+	}
+	return orphanSweepGateRun{out: string(out), err: err, log: string(logData), outcomeFile: outcomeFile, gcLog: gcLog}
+}
+
+func inProgress(id, assignee string) orphanSweepGateRow {
+	return orphanSweepGateRow{ID: id, Status: "in_progress", Assignee: assignee}
+}
+
+// TestOrphanSweepProtectsHQClaimsItCannotVouchFor applies the gate in HQ, this
+// city's own store, as the Go sweep does for every store: a claim under an
+// identity this city cannot vouch for (a person, a typo, a decommissioned
+// agent) is kept and named, while a dead local claim whose closed session
+// record answers to it is still released.
+func TestOrphanSweepProtectsHQClaimsItCannotVouchFor(t *testing.T) {
+	run := runOrphanSweepGateFixture(t,
+		[]orphanSweepGateRow{inProgress("hq-retired", "retired-hand"), inProgress("hq-local-dead", "gc-d34d2")},
+		nil,
+		[]orphanSweepGateRow{{ID: "gc-d34d2", Status: "closed", IssueType: "session"}},
+		[]string{"retired-hand"}, nil)
+	if run.err != nil {
+		t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+	}
+	if run.released("hq-retired") {
+		t.Fatalf("HQ claim held by an identity this city cannot vouch for was released\n%s", run.context())
+	}
+	if !run.released("hq-local-dead") {
+		t.Fatalf("dead local HQ claim was not released\n%s", run.context())
+	}
+	if want := `"retired-hand" (1: hq-retired)`; !strings.Contains(run.out, want) {
+		t.Fatalf("output does not name the protected HQ claim %s:\n%s", want, run.out)
+	}
+	outcome, ok := run.outcome(t)
+	if !ok || outcome.Outcome != "partial" {
+		t.Fatalf("outcome = %+v (written %v), want partial\n%s", outcome, ok, run.context())
+	}
+	if len(outcome.Scopes) != 1 || outcome.Scopes[0].Scope != "retired-hand" || !strings.Contains(outcome.Scopes[0].Reason, "hq-retired") {
+		t.Fatalf("outcome scopes = %+v, want one for retired-hand naming hq-retired", outcome.Scopes)
+	}
+}
+
+// TestOrphanSweepProtectsEveryUnvouchedClaimWhenTheGateCannotAnswer is the
+// fail-closed contract: when the gate cannot answer -- exit 2, a binary
+// without the verb, or an exit code that disagrees with its JSON verdict --
+// no claim it was asked about is probed or released, and every one is named.
+// A bare exit 1 without a "foreign" verdict reads as "could not answer", not
+// as foreign.
+func TestOrphanSweepProtectsEveryUnvouchedClaimWhenTheGateCannotAnswer(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		env        map[string]string
+		wantReason string
+	}{
+		{"gate exits 2", map[string]string{"ORPHAN_SWEEP_GATE_EXIT": "2"}, "could not answer (exit 2): lookup_failed: session store unreachable"},
+		{"binary without the verb", map[string]string{"ORPHAN_SWEEP_GATE_ABSENT": "1"}, "could not answer (exit 1)"},
+		{"exit 0 with an unknown verdict", map[string]string{"ORPHAN_SWEEP_GATE_EXIT": "0"}, "could not answer (exit 0)"},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cityDir := t.TempDir()
-			binDir := t.TempDir()
-			gcLog := filepath.Join(t.TempDir(), "gc.log")
-			writeExecutable(t, filepath.Join(binDir, "gc"), orphanSweepRigAssigneeFakeGC)
-
-			env := map[string]string{
-				"GC_CITY":      cityDir,
-				"GC_CITY_PATH": cityDir,
-				"GC_CALL_LOG":  gcLog,
-				"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
-				// Always set, so an exported value cannot leak into the unset case.
-				"GC_ORPHAN_SWEEP_RIG_ASSIGNEE_REGEX": tc.regex,
+			run := runOrphanSweepGateFixture(t, nil,
+				[]orphanSweepGateRow{
+					inProgress("sh-local-dead", "gastown__polecat-gc-d34d1"),
+					inProgress("sh-foreign-crew", "shared/dalinar"),
+					inProgress("sh-local-roster", "shared/gastown.polecat-2"),
+				}, nil, nil, tc.env)
+			if run.err != nil {
+				t.Fatalf("orphan-sweep exited non-zero for a sweep that only protected: %v\n%s", run.err, run.context())
 			}
-
-			script := coreScriptPath("orphan-sweep.sh")
-			cmd := exec.Command(script)
-			cmd.Env = mergeTestEnv(env)
-			out, err := cmd.CombinedOutput()
-			if err != nil {
-				t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, out)
-			}
-			if want := fmt.Sprintf("orphan-sweep: reset %d orphaned bead", tc.wantReset); !strings.Contains(string(out), want) {
-				t.Fatalf("output missing %q:\n%s", want, out)
-			}
-
-			logData, err := os.ReadFile(gcLog)
-			if err != nil {
-				t.Fatalf("ReadFile(gc log): %v", err)
-			}
-			log := string(logData)
-			for _, released := range tc.wantReleased {
-				if !strings.Contains(log, "bd release-if-current "+released) {
-					t.Fatalf("expected release of %q:\n%s", released, log)
+			for _, bead := range []string{"sh-local-dead", "sh-foreign-crew", "sh-local-roster"} {
+				if run.released(bead) {
+					t.Fatalf("%s was released while the gate could not answer\n%s", bead, run.context())
+				}
+				if strings.Contains(run.log, "bd show "+bead+" --json") {
+					t.Fatalf("%s was probed while the gate could not answer\n%s", bead, run.context())
 				}
 			}
-			for _, kept := range tc.wantKept {
-				if strings.Contains(log, "bd release-if-current "+kept+" ") {
-					t.Fatalf("bead %s was released but the regex excludes it:\n%s", kept, log)
+			for _, want := range []string{
+				"orphan-sweep: reset 0 orphaned beads, protected 2 foreign/unknown claims",
+				`"gastown__polecat-gc-d34d1" (1: sh-local-dead)`,
+				`"shared/dalinar" (1: sh-foreign-crew)`,
+			} {
+				if !strings.Contains(run.out, want) {
+					t.Fatalf("output missing %q:\n%s", want, run.out)
 				}
-				if strings.Contains(log, "bd show "+kept+" ") {
-					t.Fatalf("bead %s was probed but the regex excludes it:\n%s", kept, log)
+			}
+			if strings.Contains(run.out, "shared/gastown.polecat-2") {
+				t.Fatalf("roster-known claimant reported as protected:\n%s", run.out)
+			}
+			if strings.Contains(run.log, "mail send") {
+				t.Fatalf("a sweep that only protected sent mail\n%s", run.context())
+			}
+			outcome, ok := run.outcome(t)
+			if !ok || outcome.Outcome != "partial" || len(outcome.Scopes) != 2 {
+				t.Fatalf("outcome = %+v (written %v), want partial with two scopes", outcome, ok)
+			}
+			for _, scope := range outcome.Scopes {
+				if !strings.Contains(scope.Reason, tc.wantReason) {
+					t.Fatalf("scope %q reason %q, want it to contain %q", scope.Scope, scope.Reason, tc.wantReason)
 				}
 			}
 		})
 	}
 }
 
-// TestOrphanSweepRigAssigneeRegexExampleMatchesIdentityShapes verifies the
-// example and any-rig patterns documented in the script match this city's
-// identity shapes and reject another city's and a person's assignee.
-func TestOrphanSweepRigAssigneeRegexExampleMatchesIdentityShapes(t *testing.T) {
-	src, err := os.ReadFile(coreScriptPath("orphan-sweep.sh"))
-	if err != nil {
-		t.Fatalf("ReadFile(orphan-sweep.sh): %v", err)
+// TestOrphanSweepConsultsTheGateOncePerIdentityAndBoundsTheSample keeps a
+// leaking identity cheap and readable: one gate call however many claims it
+// holds, and a summary sample capped at five IDs with an exact count.
+func TestOrphanSweepConsultsTheGateOncePerIdentityAndBoundsTheSample(t *testing.T) {
+	var rows []orphanSweepGateRow
+	for i := 1; i <= 7; i++ {
+		rows = append(rows, inProgress(fmt.Sprintf("sh-%d", i), "shared/dalinar"))
 	}
-	for _, p := range []struct {
-		name  string
-		find  string
-		cases map[string]bool
-	}{
-		{"example", `GC_ORPHAN_SWEEP_RIG_ASSIGNEE_REGEX = '([^']+)'`, map[string]bool{
-			"myrig/mycity.worker":        true,
-			"myrig--mycity__worker-pool": true,
-			"mycity__worker-gc-abc":      true,
-			"myrig/othercity.worker":     false,
-			"Pat Example":                false,
-		}},
-		{"any-rig", `(?m)^# instead: (\S+)$`, map[string]bool{
-			"my-rig/mycity.worker":           true,
-			"my-rig--mycity__worker-pool":    true,
-			"mycity.worker":                  true,
-			"my-rig/othercity.worker":        false,
-			"my-rig--othercity__worker-pool": false,
-			// Odd rig names, and a rig named like the city holding a foreign claim.
-			"rig_2/mycity.worker":                   true,
-			"rig.v2/mycity.worker":                  true,
-			"a/mycity.worker":                       true,
-			"alpha-beta-gamma--mycity__worker-pool": true,
-			"mycity/othercity.worker":               false,
-			"mycity--othercity__worker-pool":        false,
-			"my-rig/notmycity.worker":               false,
-			"my-rig--mycityx__worker-pool":          false,
-		}},
+	run := runOrphanSweepGateFixture(t, nil, rows, nil, []string{"shared/dalinar"}, nil)
+	if run.err != nil {
+		t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+	}
+	if got := run.gateCalls(); got != 1 {
+		t.Fatalf("gate consulted %d times for one identity, want 1\n%s", got, run.context())
+	}
+	if want := `orphan-sweep: protected 1 foreign/unknown identities this pass (7 claims): "shared/dalinar" (7: sh-1, sh-2, sh-3, sh-4, sh-5 +2 more)`; !strings.Contains(run.out, want) {
+		t.Fatalf("output missing %q:\n%s", want, run.out)
+	}
+	outcome, ok := run.outcome(t)
+	if !ok || len(outcome.Scopes) != 1 {
+		t.Fatalf("outcome = %+v (written %v), want one scope", outcome, ok)
+	}
+	if reason := outcome.Scopes[0].Reason; !strings.Contains(reason, "7 claim(s) kept") || !strings.Contains(reason, "+2 more") || !strings.Contains(reason, "absent_from_roster") {
+		t.Fatalf("scope reason %q, want the exact count, the bounded sample and the gate reason", reason)
+	}
+}
+
+// TestOrphanSweepDeclaresNoOutcomeWhenNothingIsProtected keeps a clean sweep
+// quiet: no partial outcome (so no order.skipped event) and no protected line.
+func TestOrphanSweepDeclaresNoOutcomeWhenNothingIsProtected(t *testing.T) {
+	run := runOrphanSweepGateFixture(t, nil,
+		[]orphanSweepGateRow{
+			inProgress("sh-local-dead", "gastown__polecat-gc-d34d1"),
+			inProgress("sh-local-roster", "shared/gastown.polecat-2"),
+		}, nil, nil, nil)
+	if run.err != nil {
+		t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+	}
+	if !run.released("sh-local-dead") {
+		t.Fatalf("dead local claim was not released\n%s", run.context())
+	}
+	if strings.Contains(run.out, "protected") {
+		t.Fatalf("a sweep that protected nothing reported protection:\n%s", run.out)
+	}
+	if outcome, ok := run.outcome(t); ok {
+		t.Fatalf("a sweep that protected nothing declared outcome %+v", outcome)
+	}
+}
+
+// TestOrphanSweepReportsProtectedIdentitiesWhenEscalationMailFails keeps the
+// protected summary ahead of the loud-fail exit for an undeliverable
+// escalation, so both reach the controller log.
+func TestOrphanSweepReportsProtectedIdentitiesWhenEscalationMailFails(t *testing.T) {
+	run := runOrphanSweepGateFixture(t,
+		[]orphanSweepGateRow{inProgress("ga-foreign", "project/dalinar"), inProgress("ga-local-dead", "gastown__polecat-gc-d34d1")},
+		nil, nil, []string{"project/dalinar"}, map[string]string{"ORPHAN_SWEEP_MAIL_EXIT": "1"})
+	var exitErr *exec.ExitError
+	if !errors.As(run.err, &exitErr) {
+		t.Fatalf("orphan-sweep err = %v, want a non-zero exit for an undeliverable escalation\n%s", run.err, run.context())
+	}
+	for _, want := range []string{
+		"orphan-sweep: reset 1 orphaned beads",
+		`orphan-sweep: protected 1 foreign/unknown identities this pass (1 claims): "project/dalinar" (1: ga-foreign)`,
+		"could not be delivered to 'human'",
 	} {
-		m := regexp.MustCompile(p.find).FindSubmatch(src)
-		if m == nil {
-			t.Fatalf("orphan-sweep.sh has no %s pattern matching %q", p.name, p.find)
+		if !strings.Contains(run.out, want) {
+			t.Fatalf("output missing %q:\n%s", want, run.out)
 		}
-		for s, want := range p.cases {
-			out, err := exec.Command("jq", "-n", "--arg", "re", string(m[1]), "--arg", "s", s, "$s | test($re)").Output()
-			if err != nil {
-				t.Fatalf("jq test(%q): %v", s, err)
+	}
+	if outcome, ok := run.outcome(t); !ok || outcome.Outcome != "partial" {
+		t.Fatalf("outcome = %+v (written %v), want partial declared before the loud-fail exit", outcome, ok)
+	}
+}
+
+// TestOrphanSweepSummaryQuotesUntrustedIdentities keeps an assignee written by
+// another city from forging structure in the summary line: identities are
+// JSON-quoted and tabs are neutralized.
+func TestOrphanSweepSummaryQuotesUntrustedIdentities(t *testing.T) {
+	forged := `evil, "x" (9: y)`
+	tabbed := "tab\tbed"
+	run := runOrphanSweepGateFixture(t, nil,
+		[]orphanSweepGateRow{inProgress("sh-forged", forged), inProgress("sh-tabbed", tabbed)},
+		nil, []string{forged, tabbed}, nil)
+	if run.err != nil {
+		t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+	}
+	var lineB string
+	for _, line := range strings.Split(run.out, "\n") {
+		if strings.HasPrefix(line, "orphan-sweep: protected ") {
+			if lineB != "" {
+				t.Fatalf("more than one protected line:\n%s", run.out)
 			}
-			if got := strings.TrimSpace(string(out)) == "true"; got != want {
-				t.Errorf("%s pattern on %q = %v, want %v", p.name, s, got, want)
-			}
+			lineB = line
 		}
+	}
+	if lineB == "" {
+		t.Fatalf("no protected line:\n%s", run.out)
+	}
+	if strings.Count(lineB, "protected ") != 1 {
+		t.Fatalf("protected line carries a forged prefix: %q", lineB)
+	}
+	if want := strconv.Quote(forged) + " (1: sh-forged)"; !strings.Contains(lineB, want) {
+		t.Fatalf("protected line %q does not JSON-quote %q", lineB, want)
+	}
+	if strings.Contains(lineB, "\t") || !strings.Contains(lineB, `"tab bed" (1: sh-tabbed)`) {
+		t.Fatalf("protected line %q does not neutralize the tab", lineB)
 	}
 }

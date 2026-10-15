@@ -6,6 +6,14 @@
 # that don't exist in ANY rig get reset to open/unassigned so they are
 # routable again.
 #
+# A claim is released only when this city can vouch for its holder: the
+# identity resolves against this city's roster, or one of this city's own
+# session records (open or closed) answers to it. `gc agent is-foreign`
+# answers that question with the Go foreign-identity gate. A claim it cannot
+# vouch for -- another city's agent on a shared rig store, a person, an agent
+# whose config and session records are gone -- is never released; it is
+# counted, named, and declared as a partial outcome (gastownhall/gascity#5955).
+#
 # Does NOT do worktree salvage — cities that staff a work-health patrol role
 # (e.g. the gastown pack's witness) handle that separately.
 #
@@ -19,34 +27,13 @@ case "${BASH_SOURCE[0]}" in
 esac
 # shellcheck disable=SC1091
 . "$__SCRIPT_DIR/_bd_trace.sh" "orphan-sweep"
+# shellcheck disable=SC1091
+. "$__SCRIPT_DIR/order_outcome.sh"
 
 # Where the recovery summary goes. Cities that staff a coordinator role (e.g.
 # the gastown pack's mayor) can point this at it; "human" is the reserved
 # recipient alias that resolves in every city, including core-only ones.
 ESCALATION_TARGET="${GC_ESCALATION_TARGET:-human}"
-
-# Optional rig-scope assignee filter. A rig store can be shared: other cities
-# attached to the same rig, and people, hold in-progress claims in it that
-# this city can neither resolve against its roster nor observe a session for.
-# This sweep would count those claims as dead and release them. When set, a
-# rig bead is considered only when its assignee matches this regex (jq/Oniguruma
-# syntax, matched with test()); every other rig bead is left alone. HQ beads
-# are never filtered. Unset or empty keeps the unfiltered behavior. An invalid
-# regex makes jq fail, which leaves that rig with no candidates (nothing is
-# released there) and logs one line to stderr. mycity and myrig are
-# placeholders: mycity stands for a prefix that only this city's identities
-# carry (for example its pack import binding), which need not be the city's
-# name. The example covers both the qualified name (myrig/mycity.x) and the
-# session-name encoding (myrig--mycity__x). Set it per city with an order
-# override, e.g.
-#   [[orders.overrides]]
-#   name = "orphan-sweep"
-#   [orders.overrides.env]
-#   GC_ORPHAN_SWEEP_RIG_ASSIGNEE_REGEX = '^(myrig/)?mycity\.|^(myrig--)?mycity__'
-# The one pattern applies to every rig this city sweeps, shared or not, and the
-# example names a single rig. To match any rig name, generalize the rig prefix
-# instead: ^([^/]+/)?mycity\.|^(.+--)?mycity__
-RIG_ASSIGNEE_REGEX="${GC_ORPHAN_SWEEP_RIG_ASSIGNEE_REGEX:-}"
 
 # Step 1: Collect in-progress beads from HQ and every rig whose session
 # liveness can be determined.
@@ -116,14 +103,7 @@ append_rig_scope() {
         rm -f "$bead_fetch_tmp"
         return 1
     }
-    if [ -n "$RIG_ASSIGNEE_REGEX" ]; then
-        gc bd list --rig "$rig" --status=in_progress --json --limit=0 2>/dev/null \
-            | jq -c --arg re "$RIG_ASSIGNEE_REGEX" '[.[]? | select((.assignee // "") | test($re))]' \
-                >"$bead_fetch_tmp" 2>/dev/null \
-            || echo "orphan-sweep: listing or filtering beads failed for rig $rig; skipping its beads" >&2
-    else
-        gc bd list --rig "$rig" --status=in_progress --json --limit=0 2>/dev/null >"$bead_fetch_tmp" || true
-    fi
+    gc bd list --rig "$rig" --status=in_progress --json --limit=0 2>/dev/null >"$bead_fetch_tmp" || true
     append_session_list gc --rig "$rig" session list --json || {
         rm -f "$bead_fetch_tmp"
         return 1
@@ -431,6 +411,104 @@ is_known_agent() {
     return 1
 }
 
+# Step 3a: the foreign-identity gate (gastownhall/gascity#5955).
+#
+# On a SHARED rig store this sweep sees claims held by another city's agents.
+# Their session records live in that city's own unfederated HQ, so the liveness
+# checks below find nothing for them and would release live work -- two cities
+# stripped each other's P0 claims this way within seconds. A claim whose holder
+# is neither known nor live is therefore released only when this city can
+# vouch for the holder: `gc agent is-foreign` exits 0 when the identity
+# resolves against this city's roster or one of its own session records, open
+# or closed, answers to it. Exit 1 (foreign) and any other exit (the gate could
+# not answer) both PROTECT the claim: it is not probed, not released, and is
+# counted and named below. The verdict is asked once per identity per sweep,
+# ahead of revalidation and liveness probes, as in the Go pool sweep.
+#
+# The skip has to be loud: a decommissioned local agent whose session records
+# are gone is indistinguishable from a foreign one, and a silent skip would
+# turn a loud cross-city bug into a quiet local leak.
+GATE_LOCAL=""
+GATE_FOREIGN=""
+GATE_UNKNOWN=""
+GATE_VERDICT=""
+GATE_REASONS=""
+PROTECTED=0
+PROTECTED_ROWS=""
+PROTECTED_ID_SAMPLE_LIMIT=5
+
+gate_list_has() {
+    local list="$1"
+    local candidate="$2"
+    [ -n "$list" ] && grep -Fxq -- "$candidate" <<<"$list"
+}
+
+# claim_gate_verdict sets GATE_VERDICT to local, foreign or unknown for an
+# assignee. It must be called directly, not in $(...), so its memo survives.
+claim_gate_verdict() {
+    local identity="$1"
+    local verdict_json=""
+    local rc=0
+    local answered=""
+    local reason=""
+    if gate_list_has "$GATE_LOCAL" "$identity"; then GATE_VERDICT=local; return 0; fi
+    if gate_list_has "$GATE_FOREIGN" "$identity"; then GATE_VERDICT=foreign; return 0; fi
+    if gate_list_has "$GATE_UNKNOWN" "$identity"; then GATE_VERDICT=unknown; return 0; fi
+    verdict_json=$(gc agent is-foreign --json -- "$identity" 2>/dev/null) || rc=$?
+    # The exit code is the verdict, and it must agree with the JSON verdict:
+    # a missing verb, a crash, or unparseable output reads as "could not
+    # answer" and protects the claim -- never as local.
+    answered=$(jq -r 'select(type == "object") | .verdict // empty' <<<"$verdict_json" 2>/dev/null) || answered=""
+    reason=$(jq -r 'select(type == "object") | [.reason, .detail] | map(select(. != null and . != "")) | join(": ")' <<<"$verdict_json" 2>/dev/null) || reason=""
+    case "$rc:$answered" in
+        0:local)
+            GATE_VERDICT=local
+            GATE_LOCAL="${GATE_LOCAL}${identity}"$'\n'
+            return 0
+            ;;
+        1:foreign)
+            GATE_VERDICT=foreign
+            GATE_FOREIGN="${GATE_FOREIGN}${identity}"$'\n'
+            ;;
+        *)
+            GATE_VERDICT=unknown
+            GATE_UNKNOWN="${GATE_UNKNOWN}${identity}"$'\n'
+            reason="the foreign-identity gate could not answer (exit $rc)${reason:+: $reason}"
+            ;;
+    esac
+    if [ -n "$reason" ]; then
+        # Keyed the way record_protected_claim spools the identity.
+        local key="${identity//$'\t'/ }"
+        reason="${reason//$'\t'/ }"
+        GATE_REASONS="${GATE_REASONS}${key//$'\n'/ }"$'\t'"${reason//$'\n'/ }"$'\n'
+    fi
+    return 0
+}
+
+# record_protected_claim spools one protected claim. Identity and bead are read
+# off beads another city may have written: tabs and newlines are neutralized so
+# they cannot re-key the grouping or forge a row in the summary.
+record_protected_claim() {
+    local identity="${1//$'\t'/ }"
+    local bead="${2//$'\t'/ }"
+    identity="${identity//$'\n'/ }"
+    bead="${bead//$'\n'/ }"
+    PROTECTED=$((PROTECTED + 1))
+    PROTECTED_ROWS="${PROTECTED_ROWS}${identity}"$'\t'"${bead}"$'\n'
+    return 0
+}
+
+# protected_claims_json groups the spool by identity, sorted, with each
+# identity's gate reason when the gate gave one.
+protected_claims_json() {
+    jq -R -s -c --arg reasons "$GATE_REASONS" '
+        ($reasons | split("\n") | map(select(length > 0) | split("\t") | {key: .[0], value: (.[1] // "")}) | from_entries) as $why
+        | split("\n") | map(select(length > 0) | split("\t") | {identity: .[0], bead: (.[1] // "")})
+        | group_by(.identity)
+        | map({identity: .[0].identity, beads: map(.bead), reason: ($why[.[0].identity] // "")})
+    ' <<<"$PROTECTED_ROWS"
+}
+
 ORPHANED=0
 UNVERIFIABLE=0
 # Count of undeliverable summaries. Load-bearing for the exit code below.
@@ -439,6 +517,11 @@ FAILED=0
 # shell so $ORPHANED survives for the summary message below.
 while IFS=$'\t' read -r bead_id assignee; do
     if ! is_known_agent "$assignee"; then
+        claim_gate_verdict "$assignee"
+        if [ "$GATE_VERDICT" != "local" ]; then
+            record_protected_claim "$assignee" "$bead_id"
+            continue
+        fi
         if work_bead_still_resettable "$bead_id" "$assignee"; then
             :
         else
@@ -468,16 +551,46 @@ while IFS=$'\t' read -r bead_id assignee; do
     fi
 done < <(echo "$IN_PROGRESS" | jq -r '.[] | select(.assignee != null and .assignee != "") | "\(.id)\t\(.assignee)"' 2>/dev/null)
 
-if [ "$ORPHANED" -gt 0 ] || [ "$UNVERIFIABLE" -gt 0 ]; then
+PROTECTED_DETAIL=""
+if [ "$PROTECTED" -gt 0 ]; then
+    PROTECTED_JSON=$(protected_claims_json) || PROTECTED_JSON=""
+    if [ -n "$PROTECTED_JSON" ]; then
+        PROTECTED_DETAIL=$(jq -r --argjson limit "$PROTECTED_ID_SAMPLE_LIMIT" --argjson claims "$PROTECTED" '
+            "orphan-sweep: protected \(length) foreign/unknown identities this pass (\($claims) claims): "
+            + (map("\(.identity | tojson) (\(.beads | length): \(.beads[:$limit] | join(", "))\(if (.beads | length) > $limit then " +\((.beads | length) - $limit) more" else "" end))") | join(", "))
+        ' <<<"$PROTECTED_JSON") || PROTECTED_DETAIL=""
+        order_outcome_set partial "protected $PROTECTED claim(s) held by identities this city cannot vouch for: not in its roster, and no session record of its own answers to them"
+        while IFS=$'\t' read -r scope reason; do
+            [ -n "$scope" ] || continue
+            order_outcome_scope_skipped "$scope" "$reason"
+        done < <(jq -r --argjson limit "$PROTECTED_ID_SAMPLE_LIMIT" '
+            .[] | [.identity,
+                   "\(.beads | length) claim(s) kept: \(.beads[:$limit] | join(", "))\(if (.beads | length) > $limit then " +\((.beads | length) - $limit) more" else "" end)\(if .reason != "" then " (\(.reason))" else "" end)"]
+            | @tsv' <<<"$PROTECTED_JSON")
+    fi
+    if [ -z "$PROTECTED_DETAIL" ]; then
+        PROTECTED_DETAIL="orphan-sweep: protected $PROTECTED claims this pass, but the per-identity summary is UNAVAILABLE"
+        order_outcome_set partial "protected $PROTECTED claim(s) held by identities this city cannot vouch for (per-identity summary unavailable)"
+    fi
+fi
+
+if [ "$ORPHANED" -gt 0 ] || [ "$UNVERIFIABLE" -gt 0 ] || [ "$PROTECTED" -gt 0 ]; then
     SUMMARY="orphan-sweep: reset $ORPHANED orphaned beads"
     if [ "$UNVERIFIABLE" -gt 0 ]; then
         SUMMARY="$SUMMARY, skipped $UNVERIFIABLE unverifiable"
     fi
+    if [ "$PROTECTED" -gt 0 ]; then
+        SUMMARY="$SUMMARY, protected $PROTECTED foreign/unknown claims"
+    fi
     echo "$SUMMARY"
+    if [ -n "$PROTECTED_DETAIL" ]; then
+        echo "$PROTECTED_DETAIL"
+    fi
     if [ "$ORPHANED" -gt 0 ]; then
         if ! gc mail send "$ESCALATION_TARGET" \
             -s "orphan-sweep: reset $ORPHANED orphaned beads" \
-            -m "$SUMMARY
+            -m "$SUMMARY${PROTECTED_DETAIL:+
+$PROTECTED_DETAIL}
 
 orphan-sweep resets in-progress beads whose assignee has no live session or
 known agent. Each reset bead now carries a one-line cause note (see its
@@ -491,6 +604,12 @@ misidentified live session -- inspect via gc bd show <id> --json." \
         fi
     fi
 fi
+
+# Declare protected claims as a partial outcome: the controller logs an exit-0
+# run's output nowhere, but turns this declaration into a typed order.skipped
+# event naming each protected identity (order_outcome.sh). A no-op when nothing
+# was protected or when run by hand without GC_ORDER_OUTCOME_FILE.
+order_outcome_write
 
 # Loud-fail: the summary has been printed above, so a non-zero exit now
 # surfaces the failure line to the controller log without losing the sweep's
