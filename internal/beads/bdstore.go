@@ -152,7 +152,9 @@ func execCommandRunner(parent context.Context, env map[string]string, withoutAmb
 				}
 			}
 		}
-		cmd.Env = execEnvFor(name, baseEnv, overrides)
+		cmd.Env = execEnvFor(name, baseEnv, overrides, func() bool {
+			return bdReadsStandardOTELEnv(ctx, execName)
+		})
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		out, err := cmd.Output()
@@ -764,10 +766,11 @@ const bdAutoBackupOptOutEnvKey = "BD_BACKUP_ENABLED"
 // Legacy and current bd OTEL env var names. gc's own telemetry
 // (SetProcessOTELAttrs, internal/telemetry/subprocess.go) sets the legacy
 // BD_OTEL_METRICS_URL / BD_OTEL_LOGS_URL names process-wide so every bd
-// subprocess inherits them; both beads main and bd-enterprise now deprecate
-// those names in favor of the standard OTEL_EXPORTER_OTLP_*_ENDPOINT names
-// gated by BD_OTEL_ENABLED=true, and log a stderr deprecation warning on
-// every invocation that still carries a legacy name.
+// subprocess inherits them. bd v1.2.0, v1.2.1 and v1.3.0+ deprecate those
+// names in favor of the standard OTEL_EXPORTER_OTLP_*_ENDPOINT names gated by
+// BD_OTEL_ENABLED=true, and log a stderr deprecation warning on every
+// invocation that still carries a legacy name; older bd reads only the legacy
+// names.
 //
 // The standard names are NOT set process-wide (e.g. in SetProcessOTELAttrs):
 // unlike the bd-specific legacy names, OTEL_EXPORTER_OTLP_METRICS_ENDPOINT /
@@ -780,6 +783,7 @@ const bdAutoBackupOptOutEnvKey = "BD_BACKUP_ENABLED"
 const (
 	bdLegacyOTELMetricsURLKey = "BD_OTEL_METRICS_URL"
 	bdLegacyOTELLogsURLKey    = "BD_OTEL_LOGS_URL"
+	bdLegacyOTELStdoutKey     = "BD_OTEL_STDOUT"
 	bdOTELEnabledEnvKey       = "BD_OTEL_ENABLED"
 	bdOTELMetricsEndpointKey  = "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"
 	bdOTELLogsEndpointKey     = "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"
@@ -789,40 +793,54 @@ const (
 // commands the auto-backup opt-out is injected as a baseline, replacing any
 // value inherited from the parent process (matching the unconditional
 // projected-env opt-out policy); an explicit per-call override still wins
-// because mergeEnv applies overrides last. Non-bd commands (e.g. direct dolt
-// queries) pass through untouched.
-func execEnvFor(name string, baseEnv []string, overrides map[string]string) []string {
-	if name == "bd" {
-		baseEnv = append(envWithout(baseEnv, bdAutoBackupOptOutEnvKey), bdAutoBackupOptOutEnvKey+"=false")
-		baseEnv = translateBdLegacyOTELEnv(baseEnv)
+// because mergeEnv applies overrides last. The merged bd environment then has
+// its legacy BD_OTEL_* telemetry names translated (translateBdLegacyOTELEnv),
+// so inherited and override-supplied names are treated alike;
+// readsStandardOTEL is consulted only when there is something to translate.
+// Non-bd commands (e.g. direct dolt queries) pass through untouched.
+func execEnvFor(name string, baseEnv []string, overrides map[string]string, readsStandardOTEL func() bool) []string {
+	if name != "bd" {
+		return mergeEnv(baseEnv, overrides)
 	}
-	return mergeEnv(baseEnv, overrides)
+	baseEnv = append(envWithout(baseEnv, bdAutoBackupOptOutEnvKey), bdAutoBackupOptOutEnvKey+"=false")
+	return translateBdLegacyOTELEnv(mergeEnv(baseEnv, overrides), readsStandardOTEL)
 }
 
 // translateBdLegacyOTELEnv rewrites the legacy BD_OTEL_METRICS_URL /
-// BD_OTEL_LOGS_URL names gc's own telemetry sets process-wide into the
-// current bd-honored names (OTEL_EXPORTER_OTLP_METRICS_ENDPOINT /
-// OTEL_EXPORTER_OTLP_LOGS_ENDPOINT, gated by BD_OTEL_ENABLED=true), scoped to
-// this bd child's environment only. No-op when neither legacy var is present,
-// so a bd child with no telemetry configured stays untouched and bd's
-// activation check (BD_OTEL_ENABLED=true or a legacy selector) stays false.
-func translateBdLegacyOTELEnv(environ []string) []string {
+// BD_OTEL_LOGS_URL names gc's own telemetry sets process-wide into the names a
+// current bd reads, scoped to this bd child's environment only. It applies the
+// same mapping bd itself applies at startup, so the bd exports exactly as it
+// would have, minus the deprecation warning:
+//
+//   - each legacy URL replaces its own signal's OTEL_EXPORTER_OTLP_*_ENDPOINT
+//     (the legacy name wins, as in bd), and the other signal's endpoint is
+//     left alone;
+//   - BD_OTEL_ENABLED is set to true, because a legacy URL enables bd's
+//     telemetry whatever BD_OTEL_ENABLED says.
+//
+// environ is returned unchanged when neither legacy URL is set (so a bd child
+// with no telemetry configured never gains BD_OTEL_ENABLED=true), when
+// BD_OTEL_STDOUT is true (bd's console-exporter mapping is left to bd), and
+// when readsStandardOTEL reports a bd that reads only the legacy names, whose
+// export would otherwise stop.
+func translateBdLegacyOTELEnv(environ []string, readsStandardOTEL func() bool) []string {
 	metricsURL := lastEnvValue(environ, bdLegacyOTELMetricsURLKey)
 	logsURL := lastEnvValue(environ, bdLegacyOTELLogsURLKey)
 	if metricsURL == "" && logsURL == "" {
 		return environ
 	}
+	if strings.EqualFold(lastEnvValue(environ, bdLegacyOTELStdoutKey), "true") || !readsStandardOTEL() {
+		return environ
+	}
 	out := envWithout(environ, bdLegacyOTELMetricsURLKey)
 	out = envWithout(out, bdLegacyOTELLogsURLKey)
-	out = envWithout(out, bdOTELMetricsEndpointKey)
-	out = envWithout(out, bdOTELLogsEndpointKey)
 	out = envWithout(out, bdOTELEnabledEnvKey)
 	out = append(out, bdOTELEnabledEnvKey+"=true")
 	if metricsURL != "" {
-		out = append(out, bdOTELMetricsEndpointKey+"="+metricsURL)
+		out = append(envWithout(out, bdOTELMetricsEndpointKey), bdOTELMetricsEndpointKey+"="+metricsURL)
 	}
 	if logsURL != "" {
-		out = append(out, bdOTELLogsEndpointKey+"="+logsURL)
+		out = append(envWithout(out, bdOTELLogsEndpointKey), bdOTELLogsEndpointKey+"="+logsURL)
 	}
 	return out
 }
