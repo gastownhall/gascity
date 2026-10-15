@@ -188,7 +188,7 @@ func validateEvent(e events.Event) error {
 		return invalidf("event type %q contains whitespace or control characters", e.Type)
 	case e.Ts.IsZero():
 		return invalidf("event time is zero")
-	case e.Ts.Year() < 0 || e.Ts.Year() > 9999:
+	case e.Ts.UTC().Year() < 0 || e.Ts.UTC().Year() > 9999:
 		return invalidf("event time %v is outside RFC 3339's years", e.Ts)
 	}
 	for _, field := range []struct {

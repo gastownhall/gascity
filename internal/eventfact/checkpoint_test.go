@@ -111,6 +111,9 @@ func TestCheckpointRefuses(t *testing.T) {
 		"fingerprint, no seq":   {City: "c", Feed: ledgerfeed.Checkpoint{Seq: 5, Last: ledgerfeed.Fingerprint{IssueID: "x"}}, At: cpAt},
 		"digest not sha256 hex": {City: "c", Feed: ledgerfeed.Checkpoint{Seq: 5, Last: ledgerfeed.Fingerprint{Seq: 5, Digest: "xyz"}}, At: cpAt},
 		"zero time":             {City: "c", Feed: ledgerfeed.Checkpoint{Seq: 1}},
+		// The year is checked in UTC, the zone the row stores.
+		"zoned time past 9999 in utc":     {City: "c", Feed: ledgerfeed.Checkpoint{Seq: 1}, At: time.Date(9999, 12, 31, 23, 0, 0, 0, time.FixedZone("", -5*3600))},
+		"zoned time before year 0 in utc": {City: "c", Feed: ledgerfeed.Checkpoint{Seq: 1}, At: time.Date(0, 1, 1, 1, 0, 0, 0, time.FixedZone("", 5*3600))},
 	} {
 		if _, err := EncodeCheckpoint("gc", cp); !errors.Is(err, ErrInvalid) {
 			t.Errorf("%s: EncodeCheckpoint = %v, want ErrInvalid", name, err)

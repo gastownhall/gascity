@@ -190,22 +190,29 @@ func TestPayloadRule(t *testing.T) {
 func TestEncodeRefuses(t *testing.T) {
 	bad := []byte{0xff}
 	cases := map[string]func(*Fact){
-		"empty session":       func(f *Fact) { f.Session = "" },
-		"session space":       func(f *Fact) { f.Session = "gc 1" },
-		"session comma":       func(f *Fact) { f.Session = "gc,1" },
-		"session quote":       func(f *Fact) { f.Session = `gc"1` },
-		"session newline":     func(f *Fact) { f.Session = "gc\n1" },
-		"session too long":    func(f *Fact) { f.Session = strings.Repeat("s", 201) },
-		"generation 0":        func(f *Fact) { f.Generation = 0 },
-		"n 0":                 func(f *Fact) { f.N = 0 },
-		"origin kind":         func(f *Fact) { f.Origin.Kind = "box" },
-		"origin nonce short":  func(f *Fact) { f.Origin.Nonce = "abc" },
-		"origin nonce upper":  func(f *Fact) { f.Origin.Nonce = strings.ToUpper(testNonce) },
-		"empty type":          func(f *Fact) { f.Event.Type = "" },
-		"type space":          func(f *Fact) { f.Event.Type = "a b" },
-		"type too long":       func(f *Fact) { f.Event.Type = strings.Repeat("t", 201) },
-		"zero time":           func(f *Fact) { f.Event.Ts = time.Time{} },
-		"time past 9999":      func(f *Fact) { f.Event.Ts = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC) },
+		"empty session":      func(f *Fact) { f.Session = "" },
+		"session space":      func(f *Fact) { f.Session = "gc 1" },
+		"session comma":      func(f *Fact) { f.Session = "gc,1" },
+		"session quote":      func(f *Fact) { f.Session = `gc"1` },
+		"session newline":    func(f *Fact) { f.Session = "gc\n1" },
+		"session too long":   func(f *Fact) { f.Session = strings.Repeat("s", 201) },
+		"generation 0":       func(f *Fact) { f.Generation = 0 },
+		"n 0":                func(f *Fact) { f.N = 0 },
+		"origin kind":        func(f *Fact) { f.Origin.Kind = "box" },
+		"origin nonce short": func(f *Fact) { f.Origin.Nonce = "abc" },
+		"origin nonce upper": func(f *Fact) { f.Origin.Nonce = strings.ToUpper(testNonce) },
+		"empty type":         func(f *Fact) { f.Event.Type = "" },
+		"type space":         func(f *Fact) { f.Event.Type = "a b" },
+		"type too long":      func(f *Fact) { f.Event.Type = strings.Repeat("t", 201) },
+		"zero time":          func(f *Fact) { f.Event.Ts = time.Time{} },
+		"time past 9999":     func(f *Fact) { f.Event.Ts = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC) },
+		// The year is checked in UTC, the zone the row stores.
+		"zoned time past 9999 in utc": func(f *Fact) {
+			f.Event.Ts = time.Date(9999, 12, 31, 23, 0, 0, 0, time.FixedZone("", -5*3600))
+		},
+		"zoned time before year 0 in utc": func(f *Fact) {
+			f.Event.Ts = time.Date(0, 1, 1, 1, 0, 0, 0, time.FixedZone("", 5*3600))
+		},
 		"actor not utf8":      func(f *Fact) { f.Event.Actor = string(bad) },
 		"message too long":    func(f *Fact) { f.Event.Message = strings.Repeat("m", MaxMessage+1) },
 		"step id too long":    func(f *Fact) { f.Event.StepID = strings.Repeat("s", 257) },
@@ -258,6 +265,7 @@ func TestDecodeRefuses(t *testing.T) {
 		"no origin":             func(b *beads.Bead) { delete(b.Metadata, "gc.ev.origin") },
 		"bad origin":            func(b *beads.Bead) { b.Metadata["gc.ev.origin"] = "box:" + testNonce },
 		"non-canonical gen":     func(b *beads.Bead) { b.Metadata["gc.ev.gen"] = "03" },
+		"non-canonical n":       func(b *beads.Bead) { b.Metadata["gc.ev.n"] = "01" },
 		"another n":             func(b *beads.Bead) { b.Metadata["gc.ev.n"] = "2" },
 		"another session":       func(b *beads.Bead) { b.Metadata["gc.ev.session"] = "gc-other" },
 		"bad prefix":            func(b *beads.Bead) { b.ID = "g.c" + strings.TrimPrefix(b.ID, "gc") },
@@ -489,7 +497,8 @@ func TestDecodeRefusesWhatEncodeRefuses(t *testing.T) {
 }
 
 // Fact rows are schema 1. A later revision is ErrUnsupportedSchema, so a
-// projector older than its writers stops on the row instead of skipping it.
+// projector older than its writers refuses the row, never skipping it
+// silently.
 func TestDecodeSchemaRevisions(t *testing.T) {
 	good, err := Encode("gc", testFact())
 	if err != nil {

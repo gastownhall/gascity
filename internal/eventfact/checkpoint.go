@@ -110,7 +110,7 @@ func CheckpointMetadata(cp Checkpoint) (map[string]string, error) {
 	if err := validateFeed(cp.Feed); err != nil {
 		return nil, err
 	}
-	if cp.At.IsZero() || cp.At.Year() < 0 || cp.At.Year() > 9999 {
+	if cp.At.IsZero() || cp.At.UTC().Year() < 0 || cp.At.UTC().Year() > 9999 {
 		return nil, invalidf("checkpoint time %v is zero or outside RFC 3339's years", cp.At)
 	}
 	last := cp.Feed.Last
