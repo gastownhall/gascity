@@ -4,6 +4,7 @@ go_library(
     name = "auto",
     srcs = [
         "auto.go",
+        "fence.go",
         "proctable.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/runtime/auto",
@@ -18,6 +19,7 @@ go_test(
         "composite_forward_test.go",
         "conformance_test.go",
         "corpse_fallthrough_test.go",
+        "fence_test.go",
         "liveness_forwarding_test.go",
         "nudge_keyed_test.go",
         "proctable_forwarding_test.go",

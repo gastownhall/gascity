@@ -38,6 +38,7 @@ var optionalInterfaces = map[string]reflect.Type{
 	"EnvironmentBatchProvider":        reflect.TypeFor[runtime.EnvironmentBatchProvider](),
 	"ExecProvider":                    reflect.TypeFor[runtime.ExecProvider](),
 	"FreshByConstruction":             reflect.TypeFor[runtime.FreshByConstruction](),
+	"FencedInputProvider":             reflect.TypeFor[runtime.FencedInputProvider](),
 	"FreshLivenessObserver":           reflect.TypeFor[runtime.FreshLivenessObserver](),
 	"IdentitySidecarProvider":         reflect.TypeFor[runtime.IdentitySidecarProvider](),
 	"IdleProbeBudgetProvider":         reflect.TypeFor[runtime.IdleProbeBudgetProvider](),
