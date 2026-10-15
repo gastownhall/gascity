@@ -583,3 +583,59 @@ func TestFencedGuardFalseBranchRealTmux(t *testing.T) {
 		}
 	})
 }
+
+// The hidden attach client types into its session's active pane. On real
+// tmux, with a human's split focused, fenced input through the client is
+// refused as unproven and reaches neither pane, even when the split holds a
+// copy of the agent's fence; with focus back on the agent
+// pane it reaches only the agent.
+func TestFencedHiddenAttachRealTmuxRefusesFocusedSplit(t *testing.T) {
+	p := fenceTestProvider(t, "fh")
+	f := runtime.InputFence{Generation: 1, Epoch: 1, Token: "token-h"}
+	const name = "gc-fence-hidden"
+	agent := startRawCat(t, p, name, f, nil)
+	target, err := p.tm.agentPaneTarget(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	human := filepath.Join(t.TempDir(), "human")
+	// No -d: the human's new pane takes focus.
+	out, err := p.tm.run("split-window", "-P", "-F", "#{pane_id}", "-t", target, rawCatCommand(human))
+	if err != nil {
+		t.Fatal(err)
+	}
+	humanPane := strings.TrimSpace(out)
+	waitCaptureFile(t, human)
+	// The human's pane even holds the agent's digest as its own fence: only
+	// the active-pane check can refuse it.
+	if _, err := p.tm.run("set-option", "-p", "-F", "-t", humanPane, inputFenceOption, f.Digest()+".#{pane_id}"); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.tm.ensureHiddenAttachedClient(name); err != nil {
+		t.Fatalf("ensureHiddenAttachedClient: %v", err)
+	}
+	t.Cleanup(func() { p.tm.CloseHiddenAttachClient(name) })
+
+	err = p.SendKeysFenced(context.Background(), name, f, "Enter")
+	var miss *runtime.FenceMismatchError
+	if !errors.As(err, &miss) || miss.Found != runtime.FenceFoundUnproven || miss.Partial {
+		t.Fatalf("fenced keys with the human's split focused = %v, want a non-partial unproven miss", err)
+	}
+
+	if _, err := p.tm.run("select-pane", "-t", target); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.SendKeysFenced(context.Background(), name, f, "Enter"); err != nil {
+		t.Fatalf("fenced keys with the agent focused: %v", err)
+	}
+	// Each pane's first byte is the signal that nothing earlier landed there.
+	if got := waitTyped(t, agent, containsFn("\r")); got != "\r" {
+		t.Fatalf("the agent's pane received %q", got)
+	}
+	if _, err := p.tm.run("send-keys", "-t", humanPane, "Enter"); err != nil {
+		t.Fatal(err)
+	}
+	if got := waitTyped(t, human, containsFn("\r")); got != "\r" {
+		t.Fatalf("the human's pane received %q", got)
+	}
+}
