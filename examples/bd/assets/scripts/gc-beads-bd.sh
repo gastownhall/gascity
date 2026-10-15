@@ -2435,6 +2435,38 @@ wait_for_managed_pid_ready() {
     return 1
 }
 
+# launch_dolt_sql_server_detached starts dolt sql-server for the start path
+# that runs without the gc helper and prints the server PID. The server is
+# city infrastructure, not part of whatever process ran the start, so it is
+# detached the way the managed start detaches it: it leads its own session
+# (setsid) or, where setsid is missing, its own process group (job control),
+# so a kill aimed at the caller's process group leaves it running; and it
+# drops the per-session identity variables, so a process-table sweep keyed on
+# GC_SESSION_ID does not count it as the caller's. The variable list mirrors
+# managedDoltSessionScopedEnvKeys in cmd/gc/dolt_start_managed.go. Close the
+# startup lock fd in the child so the flock is released when this starter
+# exits.
+launch_dolt_sql_server_detached() {
+    (
+        for key in GC_HOOK_DEADLINE GC_SESSION_ID GC_SESSION_NAME GC_ALIAS \
+            GC_AGENT GC_TEMPLATE GC_SESSION_ORIGIN GC_RUNTIME_EPOCH \
+            GC_CONTINUATION_EPOCH GC_INSTANCE_TOKEN BEADS_HOLDER_TOKEN \
+            BEADS_ACTOR CLAUDE_CODE_SESSION_ID; do
+            unset "$key"
+        done
+        if command -v setsid >/dev/null 2>&1; then
+            # Without job control the background child is not a process
+            # group leader, so setsid(1) calls setsid(2) in place and the
+            # PID below is the server's.
+            nohup setsid sh -c 'exec 9>&-; exec dolt sql-server --config "$1"' sh "$CONFIG_FILE" < /dev/null >> "$LOG_FILE" 2>&1 &
+        else
+            set -m
+            nohup sh -c 'exec 9>&-; exec dolt sql-server --config "$1"' sh "$CONFIG_FILE" < /dev/null >> "$LOG_FILE" 2>&1 &
+        fi
+        echo "$!"
+    )
+}
+
 load_start_managed_from_gc() {
     local gc_bin host output key value status parsed=false
     host=$(connect_host)
@@ -3215,10 +3247,8 @@ op_start() {
             log_offset=$(wc -c < "$LOG_FILE" 2>/dev/null || echo 0)
         fi
 
-        # Start dolt sql-server with config file. Close the startup lock fd in
-        # the child so the flock is released when this starter exits.
-        nohup sh -c 'exec 9>&-; exec dolt sql-server --config "$1"' sh "$CONFIG_FILE" >> "$LOG_FILE" 2>&1 &
-        local server_pid=$!
+        local server_pid
+        server_pid=$(launch_dolt_sql_server_detached)
 
         # Write PID file.
         echo "$server_pid" > "$PID_FILE"
