@@ -40,6 +40,10 @@ evidence from tests, source, an issue, or a commit.
   extraction candidates unless they are tests, fixtures, or migration/doctor
   repair code.
 - Keep provider-specific runtime behavior behind `internal/runtime`.
+- Deferred submits go through the Manager's `DeferredSubmitQueue`
+  (`WithDeferredSubmitQueue`); no non-test session file touches the
+  state.json nudge queue directly. Enforced by
+  `TestSessionReachesTheNudgeQueueOnlyThroughDeferredSubmitQueue`.
 - Keep production CLI session creation and lifecycle operations on the
   `internal/worker/handle.go` boundary unless root `AGENTS.md` names an active
   exception.
