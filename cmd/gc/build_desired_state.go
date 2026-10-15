@@ -2246,24 +2246,40 @@ type controllerDemandReadyResult struct {
 // the results index-aligned with legs. Each read is a store round trip (a bd
 // subprocess on a Dolt-backed store), so a serial loop paid the sum of them on
 // every pass. A store named by two legs is read once when cache is non-nil,
-// because the cache memoizes per store. A panicking leg is that leg's error.
+// because the cache memoizes per store.
+//
+// A panicking read is re-raised on the caller's goroutine once every leg has
+// returned, exactly as the serial loop let it escape: the demand gather turns
+// an inline probe panic into the whole gather's error with an empty view
+// (TestGatherDemandSurvivesCollectorPanic), and a panic left on a spawned
+// goroutine would instead kill the process.
 func readControllerDemandReadyLegs(cache *readyDemandCache, legs []controllerDemandReadyLeg) []controllerDemandReadyResult {
 	results := make([]controllerDemandReadyResult, len(legs))
 	if len(legs) == 1 {
 		results[0].rows, results[0].err = cache.controllerDemandReady(legs[0].store, legs[0].label)
 		return results
 	}
+	panics := make([]any, len(legs))
 	var wg sync.WaitGroup
 	for idx, leg := range legs {
 		idx, leg := idx, leg
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			defer recoverLeg(&results[idx].err, "demand ready leg "+leg.label, log.Writer())
+			defer func() {
+				if p := recover(); p != nil {
+					panics[idx] = p
+				}
+			}()
 			results[idx].rows, results[idx].err = cache.controllerDemandReady(leg.store, leg.label)
 		}()
 	}
 	wg.Wait()
+	for _, p := range panics {
+		if p != nil {
+			panic(p)
+		}
+	}
 	return results
 }
 
