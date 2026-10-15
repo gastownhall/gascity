@@ -822,7 +822,7 @@ func (p *Provider) SetMeta(name, key, value string) error {
 	if err := p.tm.SetEnvironment(name, key, value); err != nil || key != "GC_RESTART_REQUESTED" {
 		return err
 	}
-	_, err := p.tm.run("set-option", "-t", sessionTarget(name), restartRequestedOption, value)
+	_, err := p.tm.run("set-option", "-t", paneTarget(name), restartRequestedOption, value)
 	return err
 }
 
@@ -1028,7 +1028,7 @@ func (p *Provider) RemoveMeta(name, key string) error {
 	if err := p.tm.RemoveEnvironment(name, key); err != nil || key != "GC_RESTART_REQUESTED" {
 		return err
 	}
-	_, err := p.tm.run("set-option", "-t", sessionTarget(name), "-u", restartRequestedOption)
+	_, err := p.tm.run("set-option", "-t", paneTarget(name), "-u", restartRequestedOption)
 	return err
 }
 

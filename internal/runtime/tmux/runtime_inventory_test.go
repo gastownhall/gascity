@@ -558,4 +558,11 @@ func TestTmuxRestartMarkerIsMirroredToAnOption(t *testing.T) {
 	if len(options) != 2 || !strings.Contains(options[0], "@GC_RESTART_REQUESTED 1700000050") || !strings.Contains(options[1], "-u @GC_RESTART_REQUESTED") {
 		t.Fatalf("option writes %q, want the marker set then unset, and nothing else", options)
 	}
+	// set-option's -t is a target-pane: tmux 3.4 answers "no such session"
+	// for a bare "=s", so the session is fenced as "=s:" (paneTarget).
+	for _, option := range options {
+		if !strings.Contains(option, "-t =s: ") {
+			t.Errorf("option write %q, want the session fenced as a pane target (-t =s:)", option)
+		}
+	}
 }
