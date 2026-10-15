@@ -292,3 +292,89 @@ func TestRestartRejectsRemoteHostWithDiagnostic(t *testing.T) {
 		t.Fatalf("restart invoked gc-beads-bd despite remote-host refusal; ops log:\n%s\noutput:\n%s", data, out)
 	}
 }
+
+// TestRestartENOSPCRefusalLiftsOnceDiskSpaceIsBack runs gc dolt restart with
+// the real dolt-enospc.sh helper and a fake df: ENOSPC evidence refuses the
+// restart while the data dir is short of space, and no longer refuses once
+// space is back. df must be asked about GC_DOLT_DATA_DIR, not the log's
+// directory.
+func TestRestartENOSPCRefusalLiftsOnceDiskSpaceIsBack(t *testing.T) {
+	root := repoRoot(t)
+	helper, err := os.ReadFile(filepath.Join(root, "..", "assets", "scripts", "dolt-enospc.sh"))
+	if err != nil {
+		t.Fatalf("read real enospc helper: %v", err)
+	}
+	const gib = 1 << 20 // in the 1024-byte blocks df -Pk reports
+	for _, tc := range []struct {
+		name       string
+		availKB    int
+		wantRefuse bool
+	}{
+		{name: "disk still short", availKB: gib, wantRefuse: true},
+		{name: "space is back", availKB: 3 * gib, wantRefuse: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			port, cleanup := startReachableTCPListener(t)
+			defer cleanup()
+
+			cityPath := t.TempDir()
+			bdLog := writeFakeBeadsBDForRestart(t, cityPath, map[string]int{"stop": 0, "start": 0})
+			// Replace the stub helper with the real one.
+			if err := os.WriteFile(filepath.Join(cityPath, ".gc", "scripts", "dolt-enospc.sh"), helper, 0o644); err != nil {
+				t.Fatalf("write real enospc helper: %v", err)
+			}
+			logPath := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "dolt.log")
+			if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+				t.Fatalf("mkdir dolt log dir: %v", err)
+			}
+			if err := os.WriteFile(logPath, []byte("fatal: no space left on device\n"), 0o644); err != nil {
+				t.Fatalf("write dolt log: %v", err)
+			}
+			dataDir := filepath.Join(cityPath, "dolt-data")
+			if err := os.MkdirAll(dataDir, 0o755); err != nil {
+				t.Fatalf("mkdir data dir: %v", err)
+			}
+			binDir := filepath.Join(cityPath, "bin")
+			if err := os.MkdirAll(binDir, 0o755); err != nil {
+				t.Fatalf("mkdir bin: %v", err)
+			}
+			dfLog := filepath.Join(cityPath, "df.log")
+			writeExecutable(t, filepath.Join(binDir, "df"), fmt.Sprintf(`#!/bin/sh
+for arg in "$@"; do last=$arg; done
+printf '%%s\n' "$last" >> %q
+echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
+echo "/dev/fake 99999999 1 %d 1%% /"
+`, dfLog, tc.availKB))
+
+			out, err := runRestartWithEnv(t, cityPath, root, []string{
+				fmt.Sprintf("GC_DOLT_PORT=%d", port),
+				"GC_DOLT_DATA_DIR=" + dataDir,
+				"PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+			})
+			ops, _ := os.ReadFile(bdLog)
+			gotOps := strings.Join(strings.Fields(string(ops)), " ")
+			if tc.wantRefuse {
+				if err == nil || !strings.Contains(string(out), "recent Dolt log shows ENOSPC") {
+					t.Fatalf("restart with the disk short did not refuse (err=%v):\n%s", err, out)
+				}
+				if gotOps != "" {
+					t.Fatalf("restart invoked gc-beads-bd despite ENOSPC refusal: %q\n%s", gotOps, out)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("restart with space back failed without --force: %v\n%s", err, out)
+				}
+				if gotOps != "stop start" {
+					t.Fatalf("expected restart to call stop then start, got %q\n%s", gotOps, out)
+				}
+			}
+			dfArgs, err := os.ReadFile(dfLog)
+			if err != nil {
+				t.Fatalf("df was never called: %v\n%s", err, out)
+			}
+			if got := strings.TrimSpace(string(dfArgs)); got != dataDir {
+				t.Fatalf("df measured %q, want GC_DOLT_DATA_DIR %q", got, dataDir)
+			}
+		})
+	}
+}
