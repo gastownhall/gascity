@@ -72,7 +72,11 @@ exit 0
 		"GC_DOLT_PASSWORD":   "",
 		"FAKE_RIG_LIST_JSON": `{"rigs":[{"name":"rig-with-db-alias","hq":false}]}`,
 		"FAKE_SCOPE_DBS":     "city=citydb rig:rig-with-db-alias=rigdb",
-		"PATH":               binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		// Each census starts at its second candidate, so its first one
+		// (wisp-city-store-root, issue-city-store-root, rig-wisp-close)
+		// closes only through the real start lookup and the wrapped page.
+		"GC_REAPER_WORKFLOW_ROOT_CENSUS_START": "1",
+		"PATH":                                 binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 	runScript(t, coreScriptPath("reaper.sh"), env)
 

@@ -47,6 +47,9 @@ type Provider struct {
 	store        beads.Store
 	sessions     session.AddressDirectory
 	sessionCache *sessionInfoCache
+	// sender is the calling session, already resolved by the command; see
+	// PinSender.
+	sender *session.Info
 }
 
 type sessionInfoCache struct {
@@ -280,10 +283,46 @@ func (p *Provider) createMessageBead(title, body, from, to string, labels []stri
 	})
 }
 
+// PinSender records the calling session, which the command has already
+// resolved from its own bead. A send whose sender names that session — by bead
+// id always, and by current alias or session name while the session is open —
+// takes its sender route from it rather than resolving the address again.
+//
+// The pin is the proven sender, so it wins where resolving would not agree: a
+// sender address that another live session also claims (its session name equal
+// to the pinned session's alias, say) records the pinned session, where
+// [session.AddressDirectory.ResolveAddress] could pick the other one. Any other
+// sender — a historical alias included — still resolves.
+func (p *Provider) PinSender(info session.Info) {
+	pinned := info
+	p.sender = &pinned
+}
+
+// pinnedSenderFor returns the pinned sender when from names it.
+func (p *Provider) pinnedSenderFor(from string) (session.Info, bool) {
+	if p.sender == nil || from == "" {
+		return session.Info{}, false
+	}
+	info := *p.sender
+	if from == strings.TrimSpace(info.ID) {
+		return info, true
+	}
+	if info.Closed {
+		return session.Info{}, false
+	}
+	if from == strings.TrimSpace(info.Alias) || from == strings.TrimSpace(info.SessionNameMetadata) {
+		return info, true
+	}
+	return session.Info{}, false
+}
+
 func (p *Provider) resolveSenderRoute(from string) (string, map[string]string, error) {
 	from = strings.TrimSpace(from)
 	if from == "" || from == "human" || p.sessions == nil {
 		return from, nil, nil
+	}
+	if info, ok := p.pinnedSenderFor(from); ok {
+		return senderRouteFromInfo(info, from)
 	}
 	info, err := p.sessions.ResolveAddress(from, false)
 	if err != nil {
@@ -292,6 +331,11 @@ func (p *Provider) resolveSenderRoute(from string) (string, map[string]string, e
 		}
 		return "", nil, fmt.Errorf("resolving sender %q: %w", from, err)
 	}
+	return senderRouteFromInfo(info, from)
+}
+
+// senderRouteFromInfo is the sender route of a resolved sending session.
+func senderRouteFromInfo(info session.Info, from string) (string, map[string]string, error) {
 	display := senderDisplayAddress(info, from)
 	metadata := map[string]string{fromSessionIDMetadataKey: info.ID}
 	if display != "" {
@@ -521,7 +565,10 @@ func (p *Provider) ArchiveMatching(filter ArchiveFilter) ([]mail.Message, []mail
 // read-gated TTL sweep (PurgeReadMessageWisps) reclaims it later — one unified
 // retention path, no special-case delete, no permanent data loss.
 func (p *Provider) ArchiveInjectedAutoHandoffs(ids []string) error {
-	var errs []error
+	var (
+		errs     []error
+		handoffs []string
+	)
 	for _, id := range ids {
 		id = strings.TrimSpace(id)
 		if id == "" {
@@ -535,29 +582,68 @@ func (p *Provider) ArchiveInjectedAutoHandoffs(ids []string) error {
 			errs = append(errs, fmt.Errorf("loading %s: %w", id, err))
 			continue
 		}
-		if b.Type != messageBeadType ||
-			!hasLabel(b.Labels, mail.AutoHandoffLabel) ||
-			!hasLabel(b.Labels, mail.ArchiveAfterInjectLabel) {
+		if !isInjectedAutoHandoff(b) {
 			continue
 		}
-		// Mark read (label + metadata) so a later SessionStart does not re-inject
-		// it and the read-gated TTL sweep can later reclaim it.
-		if err := p.store.Update(id, beads.UpdateOpts{
-			Labels:   []string{"read"},
-			Metadata: map[string]string{mail.ReadMetadataKey: "true"},
-		}); err != nil && !errors.Is(err, beads.ErrNotFound) {
-			errs = append(errs, fmt.Errorf("marking %s read: %w", id, err))
+		handoffs = append(handoffs, id)
+	}
+	errs = append(errs, p.archiveInjectedAutoHandoffs(handoffs, nil))
+	return errors.Join(errs...)
+}
+
+// isInjectedAutoHandoff reports whether b is auto-handoff mail that opted into
+// being archived once injected.
+func isInjectedAutoHandoff(b beads.Bead) bool {
+	return b.Type == messageBeadType &&
+		hasLabel(b.Labels, mail.AutoHandoffLabel) &&
+		hasLabel(b.Labels, mail.ArchiveAfterInjectLabel)
+}
+
+// archiveInjectedAutoHandoffs marks each injected handoff read and closes it,
+// retain-addressable, mirroring SweepReadMessagesBefore: mail.read (so a later
+// SessionStart does not re-inject it, a read-back reports it read, and the
+// read-gated purge can reclaim it), the retention close_reason (so
+// isRemovedMessageBead keeps the closed handoff addressable — recoverable —
+// until PurgeReadMessageWisps reclaims it) and the "read" label. Never a hard
+// delete.
+//
+// It writes in two phases. First every handoff is closed, each by one
+// close-with-metadata write ([beads.Store.CloseAll] of its id) carrying
+// mail.read and the close_reason. Then each is given the "read" label, which
+// is what hides OPEN mail from a label-based inbox read, while mayLabel (nil:
+// always) allows it. Stopped before a handoff's close, it is open and unread:
+// the next hook delivers it again. A store that applies the metadata and the
+// close as two operations underneath can stop between them, leaving the
+// handoff open with mail.read=true but no label: a label-based inbox read
+// delivers it again, a read-back reports it read, and once past retention
+// PurgeReadMessageWisps may delete it. Stopped after the close — or with
+// mayLabel refusing — it is closed and read through mail.read, missing the
+// label for good: a closed handoff never returns to an inbox, so nothing
+// archives it again. That costs nothing a reader sees, which is why a hook
+// near its deadline skips the label rather than risk its output.
+func (p *Provider) archiveInjectedAutoHandoffs(ids []string, mayLabel func() bool) error {
+	var (
+		errs   []error
+		closed []string
+	)
+	for _, id := range ids {
+		if _, err := p.store.CloseAll([]string{id}, map[string]string{
+			mail.ReadMetadataKey: "true",
+			"close_reason":       RetentionSweepCloseReason,
+		}); err != nil {
+			if !errors.Is(err, beads.ErrNotFound) {
+				errs = append(errs, fmt.Errorf("archiving %s: %w", id, err))
+			}
 			continue
 		}
-		// Stamp the retention marker then close, mirroring SweepReadMessagesBefore
-		// so isRemovedMessageBead keeps the closed handoff addressable (recoverable)
-		// until PurgeReadMessageWisps reclaims it — never a hard delete here.
-		if err := p.store.SetMetadata(id, "close_reason", RetentionSweepCloseReason); err != nil && !errors.Is(err, beads.ErrNotFound) {
-			errs = append(errs, fmt.Errorf("stamping %s close_reason: %w", id, err))
-			continue
+		closed = append(closed, id)
+	}
+	for _, id := range closed {
+		if mayLabel != nil && !mayLabel() {
+			break
 		}
-		if err := p.store.Close(id); err != nil && !errors.Is(err, beads.ErrNotFound) {
-			errs = append(errs, fmt.Errorf("archiving %s: %w", id, err))
+		if err := p.store.Update(id, beads.UpdateOpts{Labels: []string{"read"}}); err != nil && !errors.Is(err, beads.ErrNotFound) {
+			errs = append(errs, fmt.Errorf("labeling archived %s read: %w", id, err))
 		}
 	}
 	return errors.Join(errs...)

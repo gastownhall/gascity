@@ -186,19 +186,17 @@ func (p *decidePass) decidableSnapshot() *sessionBeadSnapshot {
 }
 
 // inFlightCreates is the planning reservation of each running or ambiguous
-// create in the in-flight view whose token no census row carries, keyed by
-// its token. Once a census row carries the token, that row holds the slot,
-// the name and the work instead.
+// create in the in-flight view that the census does not show, keyed by its
+// token. Once a census row carries the token, or a named create's identity
+// has its open row, that row holds the slot, the name and the work instead.
 func (p *decidePass) inFlightCreates() []planReservation {
-	tokens := make(map[string]bool)
-	for _, row := range p.in.Census.Rows {
-		if row.InstanceToken != "" {
-			tokens[row.InstanceToken] = true
-		}
-	}
+	shown := inflightCensusOf(p.in.Census)
 	var out []planReservation
 	for _, e := range p.in.InFlight.Entries {
-		if e.Kind != inflightCreate || tokens[e.Token] {
+		// A create the census already shows, by its token or, for a named
+		// one, by its identity's open row (a reopen keeps the row's own
+		// token), counts as that row, not again (#7807 review).
+		if e.Kind != inflightCreate || shown.Tokens[e.Token] || shown.Named[e.Identity] {
 			continue
 		}
 		r := planReservation{ID: e.Token, Template: e.Template, QualifiedInstance: e.QualifiedInstance, Slot: e.Slot, WorkBeadID: e.WorkBeadID}
@@ -431,6 +429,7 @@ func (p *decidePass) selectPoolRow(cfgAgent *config.Agent, info session.Info, sl
 		}
 		if patch := computePoolTriggerBindingPatch(info, request, workDir); len(patch) > 0 {
 			sel.binding = bindingOf(request, workDir)
+			sel.binding.Patch = patch
 		}
 	}
 	p.selected[k] = sel
@@ -579,7 +578,7 @@ func (p *decidePass) planNamed() {
 // namedGate returns why a named plan is refused, or "". It sets the plan's
 // AdoptLive from I3 by the AM-N6 table, on the identity the lane read: an
 // alive runtime is adopted only by adoptableIdentity's rule, and any other
-// identity holds the name.
+// identity holds the name, as another session's dead one does.
 func (p *decidePass) namedGate(ap allocPlan, spec namedSessionSpec) string {
 	plan := ap.Named
 	for _, r := range p.inFlight {
@@ -600,14 +599,23 @@ func (p *decidePass) namedGate(ap allocPlan, spec namedSessionSpec) string {
 		return gateEndpointShut
 	}
 	r := readRuntimeName(p.in.Obs, plan.SessionName, p.in.Now, p.in.ObsMaxAge)
+	// No row exists yet, so any session ID is Foreign (v5 O2).
+	rt := r.obs.Identity
 	switch r.state {
 	case nameUnknown:
 		return gateLivenessUnknown
-	case nameAbsent, nameCorpse, nameZombie:
+	case nameCorpse, nameZombie:
+		// A dead runtime of another session holds the name too: a create
+		// over it would read occupied and roll back, again each pass. The
+		// row stays down until the name frees (CONTRACT v5.10e, §12.2 #23).
+		if compareIdentity(session.Info{}, rt) == identityForeign {
+			return gateNameHeld + strings.TrimSpace(rt.SessionID)
+		}
+		return ""
+	case nameAbsent:
 		return ""
 	}
-	// No row exists yet, so any session ID is Foreign (v5 O2).
-	switch rt := r.obs.Identity; {
+	switch {
 	case adoptableIdentity(rt):
 		plan.AdoptLive = true
 		return ""

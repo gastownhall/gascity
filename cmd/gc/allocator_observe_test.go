@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"io"
 	"testing"
 	"time"
 
@@ -190,9 +191,10 @@ func TestObserveDeadPaneIsAStartCandidateNotUncertain(t *testing.T) {
 	c := observeRows(t, map[string]string{"gc-1": "s1"})
 	cache := newObserveCache()
 	cache.publish(censusNow, map[string]InventoryAttrs{"s1": {DeadKnown: true, AttachedKnown: true, Attached: true, Identity: readIdentity("gc-1")}}, completeBackend("tmux", "s1"))
-	cache.Note("s1", FactProcessAlive, ObsNo, censusNow, SourceProbe, "")
-	cache.Note("s1", FactPending, ObsYes, censusNow, SourceProbe, "")
-	if got := observed(t, cache.Snapshot(), c, censusNow, "gc-1"); got.Liveness != livenessDead || got.Uncertain || got.Attached || got.Pending {
+	probed := censusNow.Add(time.Millisecond) // after the pass: a tie is the pass's (Note)
+	cache.Note("s1", FactProcessAlive, ObsNo, probed, SourceProbe, "")
+	cache.Note("s1", FactPending, ObsYes, probed, SourceProbe, "")
+	if got := observed(t, cache.Snapshot(), c, probed, "gc-1"); got.Liveness != livenessDead || got.Uncertain || got.Attached || got.Pending {
 		t.Fatalf("process dead in a live pane: %+v, want dead, certain, neither attached nor pending", got)
 	}
 }
@@ -454,6 +456,144 @@ func TestObserveListedAfterPassStartIsNotGone(t *testing.T) {
 	if got := observed(t, cache.Snapshot(), c, censusNow.Add(time.Second), "gc-1"); got.Liveness == livenessGone || got.Liveness.startCandidate() {
 		t.Fatalf("listed after the pass: %+v, want present, not gone", got)
 	}
+}
+
+// Kills a dormant stop's gone note the next pass reads past (CONTRACT
+// v5.10d (a)): a name the latest pass listed alive, which the stop's fresh
+// read since found absent (the planner's applyFacts), reads gone, a start
+// candidate, in observeRow and readRuntimeName alike; a pass that started
+// after the read overrides it.
+func TestObserveUnlistedAfterPassStartIsGone(t *testing.T) {
+	c := observeRows(t, map[string]string{"gc-1": "s1"})
+	cache := newObserveCache()
+	alive := map[string]InventoryAttrs{"s1": {DeadKnown: true, Identity: readIdentity("gc-1")}}
+	cache.publish(censusNow, alive, completeBackend("tmux", "s1"))
+	p := newPlanner(newFakePlannerClock(plannerT0), func() time.Duration { return time.Minute }, nil, newInflightMap(), nil, io.Discard)
+	p.observations = func() *ObservationCache { return cache.ObservationCache }
+	read := censusNow.Add(time.Second)
+	p.applyFacts(effectFacts{Noted: &notedRuntime{Name: "s1", At: read, Gone: true}}, read)
+	if got := observed(t, cache.Snapshot(), c, read, "gc-1"); got.Liveness != livenessGone {
+		t.Fatalf("noted gone after the pass: %+v, want gone", got)
+	}
+	if got := readRuntimeName(cache.Snapshot(), "s1", read, observeMaxAge).state; got != nameAbsent {
+		t.Fatalf("noted gone after the pass: readRuntimeName state %d, want absent", got)
+	}
+	later := read.Add(time.Second)
+	cache.publish(later, alive, completeBackend("tmux", "s1"))
+	if got := observed(t, cache.Snapshot(), c, later, "gc-1"); got.Liveness != livenessAlive {
+		t.Fatalf("listed by a pass that started after the note: %+v, want alive", got)
+	}
+}
+
+// TestNoteLosesATieToTheInventory (the #7799 review). Kills a note that
+// wins a tie with an inventory pass: a probe noted at the pass's own start
+// leaves the pass's fact, as PublishInventory leaves a pass's over a note at
+// its start; a note strictly after it, or a second note at the same
+// instant as a first, is written.
+func TestNoteLosesATieToTheInventory(t *testing.T) {
+	cache := newObserveCache()
+	alive := map[string]InventoryAttrs{"s1": {DeadKnown: true, Identity: readIdentity("gc-1")}}
+	cache.publish(censusNow, alive, completeBackend("tmux", "s1"))
+	cache.Note("s1", FactListed, ObsNo, censusNow, SourceProbe, "")
+	if f := cache.Snapshot().ByName["s1"].Listed; f.Value != ObsYes || f.Source != SourcePoller {
+		t.Fatalf("a note tied with the pass: %+v, want the pass's listing", f)
+	}
+	later := censusNow.Add(time.Second)
+	cache.Note("s1", FactListed, ObsNo, later, SourceProbe, "")
+	cache.Note("s1", FactListed, ObsYes, later, SourceProbe, "")
+	if f := cache.Snapshot().ByName["s1"].Listed; f.Value != ObsYes || f.Source != SourceProbe {
+		t.Fatalf("two notes at one instant after the pass: %+v, want the second note", f)
+	}
+}
+
+// TestEffectAliveNoteOnlyClearsAGoneNote (the #7799 review, round 2).
+// Kills an effect's alive-and-Current note written over an inventory that
+// lists the runtime, which would drop the row's identity (its listing not
+// the pass's enrichment: "identity-unread", A9 holding the row a patrol):
+// such a note leaves the row alive and known; over an effect's gone note it
+// is written and clears it. A start's own alive note (not Clears) is
+// written as before.
+func TestEffectAliveNoteOnlyClearsAGoneNote(t *testing.T) {
+	c := observeRows(t, map[string]string{"gc-1": "s1"})
+	alive := map[string]InventoryAttrs{"s1": {DeadKnown: true, Identity: readIdentity("gc-1")}}
+	apply := func(cache *observeCache, n notedRuntime) {
+		p := newPlanner(newFakePlannerClock(plannerT0), func() time.Duration { return time.Minute }, nil, newInflightMap(), nil, io.Discard)
+		p.observations = func() *ObservationCache { return cache.ObservationCache }
+		p.applyFacts(effectFacts{Noted: &n}, n.At)
+	}
+	cache := newObserveCache()
+	cache.publish(censusNow, alive, completeBackend("tmux", "s1"))
+	read := censusNow.Add(time.Second)
+	apply(cache, notedRuntime{Name: "s1", At: read, Clears: true})
+	if got := observed(t, cache.Snapshot(), c, read, "gc-1"); got.Liveness != livenessAlive || got.Uncertain || !got.Identity.Known {
+		t.Fatalf("an effect's alive note over a listed runtime: %+v, want alive with its identity", got)
+	}
+	apply(cache, notedRuntime{Name: "s1", At: read.Add(time.Second), Gone: true})
+	if got := observed(t, cache.Snapshot(), c, read.Add(time.Second), "gc-1"); got.Liveness != livenessGone {
+		t.Fatalf("premise: after the gone note %+v, want gone", got)
+	}
+	back := read.Add(2 * time.Second)
+	apply(cache, notedRuntime{Name: "s1", At: back, Clears: true})
+	if got := observed(t, cache.Snapshot(), c, back, "gc-1"); got.Liveness == livenessGone {
+		t.Fatalf("an effect's alive note over a gone note: %+v, want the gone note cleared", got)
+	}
+	if f := cache.Snapshot().ByName["s1"].Listed; f.Value != ObsYes || !f.ObservedAt.Equal(back) {
+		t.Fatalf("listing %+v, want the alive note written at %v", f, back)
+	}
+	fresh := newObserveCache()
+	fresh.publish(censusNow, alive, completeBackend("tmux", "s1"))
+	apply(fresh, notedRuntime{Name: "s1", At: read}) // a start's commit
+	if f := fresh.Snapshot().ByName["s1"].Listed; f.Source != SourceProbe || !f.ObservedAt.Equal(read) {
+		t.Fatalf("a start's alive note: listing %+v, want it written", f)
+	}
+}
+
+// TestObserveAbsenceNoteBoundaries (CONTRACT v5.10g; the #7775 review's
+// P3 and P4). Kills: a note read gone past maxAge (or lapsed at it), and a
+// note that does not lose to a pass that started after it: an absence noted
+// before the latest pass started loses to its listing; one noted after the
+// listing pass started, which published after it, beats that listing; and
+// a note reads gone through maxAge and lapses after it with no pass since.
+func TestObserveAbsenceNoteBoundaries(t *testing.T) {
+	c := observeRows(t, map[string]string{"gc-1": "s1"})
+	alive := map[string]InventoryAttrs{"s1": {DeadKnown: true, Identity: readIdentity("gc-1")}}
+	note := func(cache *observeCache, at time.Time) {
+		p := newPlanner(newFakePlannerClock(plannerT0), func() time.Duration { return time.Minute }, nil, newInflightMap(), nil, io.Discard)
+		p.observations = func() *ObservationCache { return cache.ObservationCache }
+		p.applyFacts(effectFacts{Noted: &notedRuntime{Name: "s1", At: at, Gone: true}}, at)
+	}
+	t.Run("an older absence loses to a newer listing", func(t *testing.T) {
+		cache := newObserveCache()
+		cache.publish(censusNow, alive, completeBackend("tmux", "s1"))
+		note(cache, censusNow.Add(time.Second))
+		later := censusNow.Add(2 * time.Second)
+		cache.publish(later, alive, completeBackend("tmux", "s1"))
+		if got := observed(t, cache.Snapshot(), c, later, "gc-1"); got.Liveness != livenessAlive {
+			t.Fatalf("%+v, want alive: the pass started after the note", got)
+		}
+	})
+	t.Run("a newer absence beats an older listing", func(t *testing.T) {
+		cache := newObserveCache()
+		cache.publish(censusNow, alive, completeBackend("tmux", "s1"))
+		read := censusNow.Add(2 * time.Second)
+		note(cache, read)
+		cache.publish(censusNow.Add(time.Second), alive, completeBackend("tmux", "s1")) // started before the read, published after
+		if got := observed(t, cache.Snapshot(), c, read.Add(time.Second), "gc-1"); got.Liveness != livenessGone {
+			t.Fatalf("%+v, want gone: the listing pass started before the read", got)
+		}
+	})
+	t.Run("maxAge", func(t *testing.T) {
+		cache := newObserveCache()
+		cache.publish(censusNow, alive, completeBackend("tmux", "s1"))
+		read := censusNow.Add(time.Second)
+		note(cache, read)
+		if got := unlistedSincePass(cache.Snapshot(), "s1", read.Add(observeMaxAge), observeMaxAge); !got {
+			t.Fatal("at maxAge: the note lapsed, want it still gone")
+		}
+		if got := observed(t, cache.Snapshot(), c, read.Add(observeMaxAge+time.Second), "gc-1"); got.Liveness == livenessGone {
+			t.Fatalf("past maxAge with no pass since: %+v, want the note lapsed", got)
+		}
+	})
 }
 
 // Kills: an identity change that does not count as a change, so an

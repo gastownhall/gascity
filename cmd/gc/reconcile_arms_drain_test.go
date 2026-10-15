@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 // The drain arms' tests (CONTRACT v5 D2; arms A19 and A20).
@@ -20,6 +22,7 @@ import (
 func decideDrain(t *testing.T, meta []string, entry func(*selectionEntry), world ...func(*World)) (intent, time.Time) {
 	t.Helper()
 	w, a := rowWorld(t, drainRow(meta...))
+	w.Obs, w.ObsMaxAge = observedOwn(w, "gc-1"), observeMaxAge
 	if entry != nil {
 		entry(a.Snapshot.Entries[rowKeyOf("gc-1")])
 	}
@@ -29,9 +32,93 @@ func decideDrain(t *testing.T, meta []string, entry func(*selectionEntry), world
 	return decideRow(w, a, rowKeyOf("gc-1"))
 }
 
+// observedOwn is the inventory reading row id's runtime under its own
+// identity (O2 Current) at w.Now, which a fresh begin rests on.
+func observedOwn(w *World, id string) *ObservationSnapshot {
+	info := w.Census.Rows[rowKeyOf(id)].Info
+	ident := runtimeIdentity{Known: true, SessionID: id, Token: info.InstanceToken}
+	return newObserveCache().publish(w.Now, map[string]InventoryAttrs{info.SessionName: {Identity: ident}}, completeBackend("tmux", info.SessionName))
+}
+
 // undesired is a Drain entry for reason.
 func undesired(reason string) func(*selectionEntry) {
 	return func(e *selectionEntry) { e.Desired, e.DrainReason = desireDrain, reason }
+}
+
+func wokeAt(d time.Duration) []string { return []string{"last_woke_at", rowAt(d)} }
+
+// TestDecideRow_INC003_UndesiredWokeUnder5mDefers. Kills a grace for one
+// undesired reason only, or a deadline other than the grace's end.
+func TestDecideRow_INC003_UndesiredWokeUnder5mDefers(t *testing.T) {
+	for _, reason := range []string{drainOrphaned, drainSuspended} {
+		it, next := decideDrain(t, wokeAt(-time.Minute), undesired(reason))
+		if it.Kind != "" || it.Reason != decideWakeGrace || !next.Equal(gatherNow.Add(4*time.Minute)) {
+			t.Fatalf("%s woken 1m ago: %+v next %v, want the grace until +4m", reason, it, next)
+		}
+	}
+}
+
+// TestDecideRow_INC003_DrainsAfterGrace. Kills a grace that never ends, or
+// one that an empty or unparseable last_woke_at earns.
+func TestDecideRow_INC003_DrainsAfterGrace(t *testing.T) {
+	for _, reason := range []string{drainOrphaned, drainSuspended} {
+		for _, woke := range [][]string{wokeAt(-5 * time.Minute), wokeAt(-time.Hour), nil, {"last_woke_at", "yesterday"}} {
+			it, _ := decideDrain(t, woke, undesired(reason))
+			if it.Kind != intentDrainBegin || it.Reason != decideDrainBegin+reason || it.Patch[session.DrainIntentReasonKey] != reason {
+				t.Fatalf("%s woke %v: %+v, want the begin", reason, woke, it)
+			}
+		}
+	}
+}
+
+// TestINC003SkewGuardBothDirections. Kills a future last_woke_at that pins
+// a row forever: up to 5m ahead defers, 5m or more drains.
+func TestINC003SkewGuardBothDirections(t *testing.T) {
+	for _, c := range []struct {
+		ahead    time.Duration
+		deferred bool
+	}{{time.Minute, true}, {4*time.Minute + 59*time.Second, true}, {5 * time.Minute, false}, {time.Hour, false}} {
+		it, next := decideDrain(t, wokeAt(c.ahead), undesired(drainOrphaned))
+		switch {
+		case c.deferred && (it.Reason != decideWakeGrace || !next.Equal(gatherNow.Add(c.ahead+wakeUndesiredGrace))):
+			t.Fatalf("woken %v ahead: %+v next %v, want the grace", c.ahead, it, next)
+		case !c.deferred && it.Kind != intentDrainBegin:
+			t.Fatalf("woken %v ahead: %+v, want the begin", c.ahead, it)
+		}
+	}
+}
+
+// TestOperatorSuspendSkipsINC003Grace (scenario R16b, v5.4). A rig, an agent
+// and a city suspend of a row woken a minute ago each drain on the first
+// pass through E2b's operatorSuspendCause; an unsuspended orphan still
+// waits. Kills a suspend that cannot drain a just-woken row.
+func TestOperatorSuspendSkipsINC003Grace(t *testing.T) {
+	on := true
+	const cityPath = "/city"
+	rig := config.Rig{Name: "myrig", Path: "/city/myrig"}
+	for _, c := range []struct {
+		name, template string
+		cfg            config.City
+		st             suspensionstate.State
+		grace          bool
+	}{
+		{
+			name: "rig", template: "myrig/polecat", cfg: config.City{Rigs: []config.Rig{rig}, Agents: []config.Agent{{Name: "polecat", Dir: "myrig"}}},
+			st: suspensionstate.State{Rigs: map[string]suspensionstate.Override{"myrig": {Suspended: &on}}},
+		},
+		{name: "agent", template: "worker", cfg: config.City{Agents: []config.Agent{{Name: "worker", Suspended: true}}}},
+		{name: "city", template: "worker", cfg: config.City{Agents: []config.Agent{{Name: "worker"}}}, st: suspensionstate.State{City: suspensionstate.Override{Suspended: &on}}},
+		{name: "unsuspended orphan", template: "worker", cfg: config.City{Agents: []config.Agent{{Name: "worker"}}}, grace: true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			it, _ := decideDrain(t, append(wokeAt(-time.Minute), "template", c.template), undesired(drainOrphaned), func(w *World) {
+				w.OperatorSuspend = operatorSuspendCauses(&c.cfg, cityPath, w.Census.Canonical(), c.st, gatherNow)
+			})
+			if got := it.Reason == decideWakeGrace; got != c.grace || (!c.grace && it.Kind != intentDrainBegin) {
+				t.Fatalf("%+v, want grace=%v", it, c.grace)
+			}
+		})
+	}
 }
 
 // TestResumeVoidsSuspendedDrain (scenario R16, owner ruling 4). Kills a
@@ -39,8 +126,8 @@ func undesired(reason string) func(*selectionEntry) {
 // still suspended; the void clears the controller half alone.
 func TestResumeVoidsSuspendedDrain(t *testing.T) {
 	meta := intentAt(drainSuspended, "3")
-	if it, _ := decideDrain(t, meta, undesired(drainSuspended)); it.Kind != "" {
-		t.Fatalf("still suspended: %+v, want the request kept", it)
+	if it, _ := decideDrain(t, meta, undesired(drainSuspended)); it.Kind != intentSignal {
+		t.Fatalf("still suspended: %+v, want the request kept and signaled", it)
 	}
 	store, _ := stampedMem(t, gate.Require)
 	b, err := store.Create(drainRow(meta...))
@@ -77,6 +164,7 @@ func TestConfigDriftResolvedCancels(t *testing.T) {
 	tp := TemplateParams{TemplateName: "worker", Command: "run"}
 	info := censusRowOf(t, drainRow()).Info
 	current := runtime.CoreFingerprint(sessionCoreConfigForHashInfo(tp, info))
+	live := runtime.LiveFingerprint(sessionCoreConfigForHashInfo(tp, info)) // A8 leaves a stored live hash alone
 	resolved := func(w *World) {
 		w.Env = &reconcileEnv{Cfg: cfg}
 		w.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(info): {TP: tp}}}
@@ -85,7 +173,8 @@ func TestConfigDriftResolvedCancels(t *testing.T) {
 		w.Observed = map[rowKey]rowObservation{rowKeyOf("gc-1"): {Liveness: livenessAlive, Attached: true}}
 	}
 	pending := func(e *selectionEntry) { e.WakeReasons = []WakeReason{WakePending} }
-	deferred := []string{"attached_config_drift_deferred_key", "stale:" + current, "attached_config_drift_deferred_at", rowAt(-time.Minute)}
+	stale := runtime.FingerprintVersion + ":stale" // a real drift, never a version artifact (A8)
+	deferred := []string{"attached_config_drift_deferred_key", stale + ":" + current, "attached_config_drift_deferred_at", rowAt(-time.Minute)}
 	for _, c := range []struct {
 		name   string
 		hash   string
@@ -94,17 +183,17 @@ func TestConfigDriftResolvedCancels(t *testing.T) {
 		world  []func(*World)
 		cancel bool
 	}{
-		{name: "drift persists", hash: "stale", world: []func(*World){resolved}},
+		{name: "drift persists", hash: stale, world: []func(*World){resolved}},
 		{name: "template unresolved", hash: current},
 		{name: "drift resolved", hash: current, world: []func(*World){resolved}, cancel: true},
-		{name: "attached", hash: "stale", world: []func(*World){resolved, attached}, cancel: true},
-		{name: "recently attached-deferred", hash: "stale", extra: deferred, world: []func(*World){resolved}, cancel: true},
-		{name: "pending interaction", hash: "stale", entry: pending, world: []func(*World){resolved}, cancel: true},
+		{name: "attached", hash: stale, world: []func(*World){resolved, attached}, cancel: true},
+		{name: "recently attached-deferred", hash: stale, extra: deferred, world: []func(*World){resolved}, cancel: true},
+		{name: "pending interaction", hash: stale, entry: pending, world: []func(*World){resolved}, cancel: true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			meta := slices.Concat(intentAt(drainConfigDrift, "3"), []string{"started_config_hash", c.hash}, c.extra)
+			meta := slices.Concat(intentAt(drainConfigDrift, "3"), []string{"started_config_hash", c.hash, "started_live_hash", live}, c.extra)
 			it, _ := decideDrain(t, meta, c.entry, c.world...)
-			if got := it.Kind == intentDrainCancel; got != c.cancel || (!c.cancel && it.Kind != "") {
+			if got := it.Kind == intentDrainCancel; got != c.cancel || (!c.cancel && it.Kind != intentSignal) {
 				t.Fatalf("%+v, want cancel=%v", it, c.cancel)
 			}
 		})
@@ -136,7 +225,7 @@ func TestDrainCancelLensesMatchLegacy(t *testing.T) {
 				case lens:
 					want = intentDrainCancel
 				case reason == drainConfigDrift || reason == executionStalledDrainReason:
-					want = "" // still authorized
+					want = intentSignal // still authorized, past its grace
 				}
 				if it, _ := decideDrain(t, intentAt(reason, "3"), entry); it.Kind != want {
 					t.Errorf("%s, %s lens, keep=%v: %+v, want kind %q", reason, name, keep, it, want)
@@ -190,5 +279,474 @@ func TestLensCancelsAnAuthorizedDrain(t *testing.T) {
 	}
 	if it, _ := decideDrain(t, intentAt(drainIdle, "3"), idle); it.Kind != intentDrainCancel {
 		t.Errorf("idle drain with a wake reason: %+v, want the cancel", it)
+	}
+}
+
+// TestNoDrainOnKeepOrUnknownLiveness (P-3, GUAR-053). Kills a begin under
+// Keep, on a runtime not read alive, on a row with open assigned work
+// (SESS-074), on a row that no longer claims its runtime, on a Sleep row
+// under a heartbeat hold (SESS-617), or on an operator's user-hold row,
+// which C6b2's direct stop owns.
+func TestNoDrainOnKeepOrUnknownLiveness(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		meta  []string
+		entry func(*selectionEntry)
+		want  string
+		world func(*World)
+	}{
+		{name: "keep", entry: func(e *selectionEntry) { e.Desired = desireKeep }, want: decideNoAction},
+		{name: "unknown", entry: func(e *selectionEntry) { e.Desired, e.Liveness = desireDrain, livenessUnknown }, want: decideLivenessUnknown},
+		{name: "gone", entry: func(e *selectionEntry) { e.Desired, e.Liveness = desireDrain, livenessGone }, want: decideNoAction},
+		{name: "open work", entry: func(e *selectionEntry) { undesired(drainOrphaned)(e); e.OpenWork = &assignedWorkView{BeadID: "w"} }, want: decideDrainWorkKept},
+		// No own runtime read: A6's awake heal would take an asleep row whose
+		// own runtime the inventory reads alive.
+		{name: "asleep", meta: []string{"state", "asleep"}, entry: undesired(drainOrphaned), want: decideNoAction, world: func(w *World) { w.Obs = nil }},
+		{name: "heartbeat hold (SESS-617)", meta: []string{"held_until", rowAt(time.Minute)}, entry: func(e *selectionEntry) { e.Desired = desireSleep }, want: decideNoAction},
+	} {
+		var world []func(*World)
+		if c.world != nil {
+			world = append(world, c.world)
+		}
+		it, _ := decideDrain(t, c.meta, c.entry, world...)
+		if it.Kind != "" || it.Reason != c.want {
+			t.Errorf("%s: %+v, want hold %q", c.name, it, c.want)
+		}
+	}
+	// A user-hold intent on a live own runtime is A4's direct stop (C6b2),
+	// never a drain begin.
+	if it, _ := decideDrain(t, []string{"sleep_intent", "user-hold"}, undesired(drainOrphaned)); it.Kind != intentStop || it.Reason != decideDormantStop {
+		t.Errorf("user-hold intent: %+v, want A4's direct stop", it)
+	}
+}
+
+// TestINC003IsDrainOnly. Kills the grace applied to a Sleep entry: legacy's
+// grace guards only the undesired (orphaned, suspended) begin.
+func TestINC003IsDrainOnly(t *testing.T) {
+	sleep := func(e *selectionEntry) { e.Desired = desireSleep }
+	if it, _ := decideDrain(t, wokeAt(-time.Minute), sleep); it.Kind != intentDrainBeginFresh || it.Reason != decideDrainBegin+reasonNoWake {
+		t.Fatalf("Sleep woken 1m ago: %+v, want the no-wake-reason begin", it)
+	}
+}
+
+// TestWokenRowClearsIdleStopPending (SESS-616). Kills a leftover legacy
+// idle-stop-pending mark surviving a re-wake, where a later idle decision
+// would bypass its probe on it.
+func TestWokenRowClearsIdleStopPending(t *testing.T) {
+	wake := func(e *selectionEntry) { e.Desired = desireWake }
+	it, _ := decideDrain(t, []string{"sleep_intent", sleepIntentIdle}, wake)
+	if w := it.folded(); it.Kind != intentRowHeal || it.Reason != decideIdleStopClear || len(w) != 1 || w["sleep_intent"] != "" || !it.Class.Has("sleep_intent") {
+		t.Fatalf("%+v, want the sleep_intent clear alone", it)
+	}
+}
+
+// TestEmptyGenerationDrainsAtZero. Kills a row with no generation pinned
+// undrained: legacy drains it at generation 0, and so does the request.
+func TestEmptyGenerationDrainsAtZero(t *testing.T) {
+	it, _ := decideDrain(t, []string{"generation", ""}, undesired(drainOrphaned))
+	if it.Kind != intentDrainBegin || it.Patch[session.DrainIntentIncarnationKey] != "0" {
+		t.Fatalf("%+v, want a begin at incarnation 0", it)
+	}
+	if req, ok := activeStop(censusRowOf(t, drainRow(append([]string{"generation", ""}, intentAt(drainOrphaned, "0")...)...))); !ok || req.Phase != stopRequested {
+		t.Fatalf("activeStop = %+v, %v; want the request at generation 0", req, ok)
+	}
+}
+
+// TestIdleBeginGates (SESS-621, decide side). Kills an idle begin for a
+// session whose idleness cannot be proven: a non-interactive one begins, an
+// interactive one only with Full sleep capability, and a row with no
+// resolved policy never.
+func TestIdleBeginGates(t *testing.T) {
+	idle := func(e *selectionEntry) { e.Desired, e.Reason = desireSleep, reasonIdleSleep }
+	for _, c := range []struct {
+		name   string
+		policy *resolvedSessionSleepPolicy
+		begins bool
+	}{
+		{"no policy", nil, false},
+		{"non-interactive", &resolvedSessionSleepPolicy{Class: config.SessionSleepNonInteractive}, true},
+		{"interactive, not Full", &resolvedSessionSleepPolicy{Class: config.SessionSleepInteractiveResume, Capability: runtime.SessionSleepCapabilityDisabled}, false},
+		{"interactive, Full", &resolvedSessionSleepPolicy{Class: config.SessionSleepInteractiveResume, Capability: runtime.SessionSleepCapabilityFull}, true},
+	} {
+		it, _ := decideDrain(t, nil, idle, func(w *World) {
+			if c.policy != nil {
+				w.SleepPolicies = map[string]resolvedSessionSleepPolicy{"gc-1": *c.policy}
+			}
+		})
+		if begins := it.Kind == intentDrainBeginFresh; begins != c.begins || (!begins && it.Reason != decideIdleUnprovable) {
+			t.Errorf("%s: %+v, want begin=%v", c.name, it, c.begins)
+		}
+	}
+}
+
+// TestDrainBeginKeepsUndesiredRowWithOpenWork (SESS-074), through the real
+// allocation. Kills the keep read off the awake decision's anchor instead
+// of legacy's predicate: a suspended agent's or a suspended rig's row, and
+// an unselected row, with open work that is not ready are kept open.
+func TestDrainBeginKeepsUndesiredRowWithOpenWork(t *testing.T) {
+	agent := allocPoolAgent("worker", 3)
+	agent.Suspended = true
+	rigCfg := &config.City{
+		Rigs:   []config.Rig{{Name: "r", Path: "/rigs/r"}},
+		Agents: []config.Agent{{Name: "worker", Dir: "r", MaxActiveSessions: intPtr(3)}},
+	}
+	for _, c := range []struct {
+		name, template string
+		cfg            *config.City
+		rigSuspended   bool
+	}{
+		{"agent suspended", "worker", &config.City{Agents: []config.Agent{agent}}, false},
+		{"rig suspended", "r/worker", rigCfg, true},
+		{"unselected", "worker", &config.City{Agents: []config.Agent{allocPoolAgent("worker", 3)}}, false},
+	} {
+		f := newAllocFixture(t, c.cfg).sessions(poolRow("gc-1", c.template, 1, "active")).alive("s-gc-1", InventoryAttrs{AttachedKnown: true})
+		if c.rigSuspended {
+			f.in.SuspendedRigPaths = map[string]bool{"/rigs/r": true}
+		}
+		f.in.Demand.AssignedWork = []beads.Bead{{ID: "w-1", Status: "open", Assignee: "gc-1"}} // blocked: not ready
+		f.in.Demand.AssignedStoreRefs = []string{""}
+		d := f.decideSelecting()
+		k := rowKey{Leg: allocSessionsLeg, ID: "gc-1"}
+		if e := d.Snapshot.Entries[k]; e.Desired != desireDrain || e.OpenWork == nil {
+			t.Fatalf("%s: entry %s %+v, want a Drain with its open work", c.name, e.Desired, e.OpenWork)
+		}
+		w := &World{Now: allocNow, Census: f.census()}
+		if it, _ := decideRow(w, &d, k); it.Kind != "" || it.Reason != decideDrainWorkKept {
+			t.Errorf("%s: %+v, want the row kept open", c.name, it)
+		}
+	}
+}
+
+// TestGatherReadsOperatorSuspendOnlyInsideGrace (v5.4; review: 263 ms at
+// 1,000 rows). Kills the operator-suspend resolver run for every row: of two
+// rows of a suspended agent, only the one inside INC-003's grace is read.
+func TestGatherReadsOperatorSuspendOnlyInsideGrace(t *testing.T) {
+	f := newGatherFixture(t,
+		sessionRow("gc-1", "template", "worker", "session_name", "s-gc-1", "state", "active", "last_woke_at", rowAt(-time.Minute)),
+		sessionRow("gc-2", "template", "worker", "session_name", "s-gc-2", "state", "active", "last_woke_at", rowAt(-time.Hour)))
+	env := *f.cur.Load()
+	cfg := *env.Cfg
+	cfg.Agents = slices.Clone(cfg.Agents)
+	cfg.Agents[0].Suspended = true
+	env.Cfg = &cfg
+	f.cur.Store(&env)
+	w := f.gather(t)
+	if len(w.OperatorSuspend) != 1 || w.OperatorSuspend[rowKeyOf("gc-1")] != "agent" {
+		t.Fatalf("OperatorSuspend = %v, want only gc-1's agent cause", w.OperatorSuspend)
+	}
+}
+
+// TestDrainBeginsUnderHoldOrQuarantineAsLegacy (owner ruling: an unexpired
+// hold or quarantine is not operator-dormant, D1 rule 2). Kills a begin
+// withheld where legacy drains: a live quarantined row the allocation
+// sleeps, and an orphaned row under a hold.
+func TestDrainBeginsUnderHoldOrQuarantineAsLegacy(t *testing.T) {
+	quarantined := []string{"quarantined_until", rowAt(time.Minute), "sleep_reason", "quarantine"}
+	for _, c := range []struct {
+		name, reason string
+		meta         []string
+		entry        func(*selectionEntry)
+	}{
+		{"live quarantined row", reasonNoWake, quarantined, func(e *selectionEntry) { e.Desired = desireSleep }},
+		{"orphaned row under a hold", drainOrphaned, []string{"held_until", rowAt(time.Minute), "sleep_reason", "user-hold"}, undesired(drainOrphaned)},
+	} {
+		it, _ := decideDrain(t, c.meta, c.entry)
+		if it.Reason != decideDrainBegin+c.reason || it.Patch[session.DrainIntentReasonKey] != c.reason {
+			t.Errorf("%s: %+v, want the %s begin", c.name, it, c.reason)
+		}
+	}
+	// A live quarantined row with assigned work, claimed or not: legacy's
+	// assigned-work lens cancels its begin in the tick (DRAIN-046), so v2
+	// never begins it (ruling at the C6a2 review: match legacy).
+	for _, claimed := range []bool{true, false} {
+		it, _ := decideDrain(t, quarantined, func(e *selectionEntry) {
+			e.Desired, e.AssignedWork = desireSleep, &assignedWorkView{BeadID: "gw-1", Claimed: claimed}
+		})
+		if it.Kind != "" || it.Reason != decideDrainWorkKept {
+			t.Errorf("quarantined row with work claimed=%v: %+v, want it kept", claimed, it)
+		}
+	}
+	// Blocked in-progress work, which the allocation does not count awake
+	// and legacy's cancel does (C6a2 review 1b), keeps it too.
+	it, _ := decideDrain(t, quarantined, func(e *selectionEntry) { e.Desired = desireSleep }, blockedClaim)
+	if it.Kind != "" || it.Reason != decideDrainWorkKept {
+		t.Errorf("quarantined row with blocked in-progress work: %+v, want it kept", it)
+	}
+}
+
+// blockedClaim gives gc-1 in-progress work the allocation does not count
+// awake: it is blocked.
+func blockedClaim(w *World) {
+	w.Demand.AssignedWork = []beads.Bead{{ID: "gw-1", Status: "in_progress", Assignee: "gc-1"}, {ID: "gw-2", Status: "in_progress", Assignee: "gc-9"}}
+}
+
+// TestNoWakeRequestCancelsOnAssignedWork (C6a2 review 1b; DRAIN-046).
+// Kills a no-wake-reason request that stands once work is assigned to its
+// row, which C6b1's signal would then stop: work assigned after the begin
+// cancels it, as legacy's assigned-work cancel at its ack does, whether the
+// allocation counts it awake or it is blocked in progress; with no work, or
+// only another row's, it holds.
+func TestNoWakeRequestCancelsOnAssignedWork(t *testing.T) {
+	quarantined := append(intentAt(reasonNoWake, "3"), "quarantined_until", rowAt(time.Minute), "sleep_reason", "quarantine")
+	sleep := func(e *selectionEntry) { e.Desired = desireSleep }
+	awake := func(e *selectionEntry) { e.Desired, e.AssignedWork = desireSleep, &assignedWorkView{BeadID: "gw-1"} }
+	other := func(w *World) {
+		w.Demand.AssignedWork = []beads.Bead{{ID: "gw-2", Status: "in_progress", Assignee: "gc-9"}, {ID: "gw-3", Status: "open", Assignee: "gc-1"}}
+	}
+	for _, c := range []struct {
+		name   string
+		entry  func(*selectionEntry)
+		world  []func(*World)
+		cancel bool
+	}{
+		{"no work", sleep, nil, false},
+		{"another row's work, or open unready work", sleep, []func(*World){other}, false},
+		{"awake work", awake, nil, true},
+		{"blocked in-progress work", sleep, []func(*World){blockedClaim}, true},
+	} {
+		it, _ := decideDrain(t, quarantined, c.entry, c.world...)
+		// A request no work cancels stands, and is signaled past its grace.
+		if got := it.Kind == intentDrainCancel; got != c.cancel || (!c.cancel && it.Kind != intentSignalFresh) {
+			t.Errorf("%s: %+v, want cancel=%v", c.name, it, c.cancel)
+		}
+	}
+}
+
+// TestIdleBeginWritesTheIdleLatch (D2's idle latch, SESS-601). Kills a latch
+// that is missing, stale or spread: an idle begin's CAS writes the row's
+// resolved sleep policy fingerprint, and a begin under any other reason
+// writes none.
+func TestIdleBeginWritesTheIdleLatch(t *testing.T) {
+	policy := resolvedSessionSleepPolicy{Class: config.SessionSleepNonInteractive, Fingerprint: "value=5m|class=non_interactive"}
+	withPolicy := func(w *World) { w.SleepPolicies = map[string]resolvedSessionSleepPolicy{"gc-1": policy} }
+	idle := func(e *selectionEntry) { e.Desired, e.Reason = desireSleep, reasonIdleSleep }
+	it, _ := decideDrain(t, nil, idle, withPolicy)
+	if it.Reason != decideDrainBegin+drainIdle || it.Patch["sleep_policy_fingerprint"] != policy.Fingerprint {
+		t.Fatalf("idle begin %+v, want the latch %q in its patch", it, policy.Fingerprint)
+	}
+	for _, entry := range []func(*selectionEntry){func(e *selectionEntry) { e.Desired = desireSleep }, undesired(drainOrphaned)} {
+		it, _ := decideDrain(t, nil, entry, withPolicy)
+		if _, ok := it.Patch["sleep_policy_fingerprint"]; ok || it.Kind == "" {
+			t.Errorf("%s begin %+v, want a begin with no latch", it.Reason, it)
+		}
+	}
+}
+
+// TestSignaledStopIsNotA20s. Kills A20 holding a signaled stop: a requested
+// or acked drain is signaled there, but a signaled one (legacy's
+// stop-pending projection) falls through to A4's stop verb (C6b2).
+func TestSignaledStopIsNotA20s(t *testing.T) {
+	stopPending := []string{"state", "draining", "state_reason", session.DrainAckStopPendingReason, "drain_at", rowAt(-time.Minute)}
+	if it, _ := decideDrain(t, stopPending, undesired(drainOrphaned)); it.Reason == decideStopActive {
+		t.Fatalf("signaled stop: %+v, want A20 to yield to A4", it)
+	}
+	if it, _ := decideDrain(t, intentAt(drainOrphaned, "3"), undesired(drainOrphaned)); it.Kind != intentSignal {
+		t.Fatalf("requested stop: %+v, want A20 signaling it", it)
+	}
+}
+
+// TestFreshBeginRestsOnTheRuntime. Kills a fresh begin (idle,
+// no-wake-reason) that records no rest, which admission defers as
+// rests-missing on every pass so it never runs, and a plain begin that
+// records one (rests-unread): each passes splitRegistered as proposed, and a
+// fresh begin with no own runtime read is no begin.
+func TestFreshBeginRestsOnTheRuntime(t *testing.T) {
+	sleep := func(e *selectionEntry) { e.Desired = desireSleep }
+	for _, c := range []struct {
+		name  string
+		entry func(*selectionEntry)
+		kind  string
+	}{
+		{"no-wake-reason", sleep, intentDrainBeginFresh},
+		{"orphaned", undesired(drainOrphaned), intentDrainBegin},
+	} {
+		var w *World
+		it, _ := decideDrain(t, nil, c.entry, func(got *World) { w = got })
+		if it.Kind != c.kind {
+			t.Fatalf("%s: %+v, want a %s", c.name, it, c.kind)
+		}
+		if registered, deferred := splitRegistered(w, []intent{it}, false); len(registered) != 1 {
+			t.Fatalf("%s: deferred %+v before admission, want it registered", c.name, deferred)
+		}
+	}
+	if it, _ := decideDrain(t, nil, sleep, func(w *World) { w.Obs = nil }); it.Kind != "" {
+		t.Fatalf("no own runtime read: %+v, want no fresh begin", it)
+	}
+}
+
+// TestIdleStopPendingIsTheIdleProof (C6a2 review, mutant M18). Kills an idle
+// begin that probes again a row legacy already marked idle-stop-pending, or
+// refuses it for its capability: the mark is the proof.
+func TestIdleStopPendingIsTheIdleProof(t *testing.T) {
+	notFull := resolvedSessionSleepPolicy{Class: config.SessionSleepInteractiveResume, Capability: runtime.SessionSleepCapabilityDisabled}
+	w := &World{SleepPolicies: map[string]resolvedSessionSleepPolicy{"gc-1": notFull}}
+	marked := session.Info{ID: "gc-1", SleepIntent: sleepIntentIdle}
+	if allowed, probe := idleProof(w, marked, drainIdle); !allowed || probe {
+		t.Fatalf("idleProof on an idle-stop-pending row = %v, %v; want allowed, no probe", allowed, probe)
+	}
+	if allowed, _ := idleProof(w, session.Info{ID: "gc-1"}, drainIdle); allowed {
+		t.Fatal("an unmarked interactive row without Full capability is allowed")
+	}
+}
+
+// Kills an orphaned named row stuck over its own zombie (mc-q64l4): A21
+// never closes a named row's dead runtime and A12 classifies it once, so
+// A20 begins its orphan drain (D2's orphaned row: Drain, after INC-003's
+// grace), whose stop A4 runs on any liveness but gone, as legacy drains it
+// and stops it by name. Unclassified, the zombie is A12's first.
+func TestOrphanedNamedZombieDrains(t *testing.T) {
+	for _, classified := range []bool{true, false} {
+		c := newCloseCase(t, livenessDead, desireDrain, "state", "active", "last_woke_at", gatherNow.Add(-time.Hour).Format(time.RFC3339),
+			"configured_named_session", "true", "configured_named_identity", "gone-chat", "pool_managed", "")
+		c.entry().DrainReason = drainOrphaned
+		id := runtimeIdentity{Known: true, SessionID: c.k.ID, Epoch: "3", Token: "tok-3"}
+		c.w.Observed = map[rowKey]rowObservation{c.k: {Liveness: livenessDead, Identity: id}}
+		if classified {
+			c.w.Classified = map[rowKey]classifiedRuntime{c.k: {Token: deadToken(id)}}
+		}
+		it := c.decide()
+		want := intentZombie
+		if classified {
+			want = intentDrainBegin
+		}
+		if it.Kind != want {
+			t.Fatalf("classified %v: decideRow = (%q, %q), want %q", classified, it.Kind, it.Reason, want)
+		}
+	}
+	// A Sleep named row's classified zombie is A6's heal, never a drain.
+	c0 := newCloseCase(t, livenessDead, desireSleep, "state", "active", "last_woke_at", gatherNow.Add(-time.Hour).Format(time.RFC3339),
+		"configured_named_session", "true", "configured_named_identity", "chat", "pool_managed", "")
+	id0 := runtimeIdentity{Known: true, SessionID: c0.k.ID, Epoch: "3", Token: "tok-3"}
+	c0.w.Observed = map[rowKey]rowObservation{c0.k: {Liveness: livenessDead, Identity: id0}}
+	c0.w.Classified = map[rowKey]classifiedRuntime{c0.k: {Token: deadToken(id0)}}
+	if it := c0.decide(); it.Reason != decideDeadRuntimeHeal {
+		t.Fatalf("Sleep named: decideRow = (%q, %q), want A6's dead-runtime heal", it.Kind, it.Reason)
+	}
+	// An unnamed orphan's dead runtime is A21's close, never a drain.
+	c := newCloseCase(t, livenessDead, desireDrain, "state", "active", "last_woke_at", gatherNow.Add(-time.Hour).Format(time.RFC3339))
+	c.entry().DrainReason = drainOrphaned
+	id := runtimeIdentity{Known: true, SessionID: c.k.ID, Epoch: "3", Token: "tok-3"}
+	c.w.Observed = map[rowKey]rowObservation{c.k: {Liveness: livenessDead, Identity: id}}
+	c.w.Classified = map[rowKey]classifiedRuntime{c.k: {Token: deadToken(id)}}
+	if it := c.decide(); it.Kind != intentClose {
+		t.Fatalf("unnamed: decideRow = (%q, %q), want A21's close", it.Kind, it.Reason)
+	}
+}
+
+// Kills the dead-runtime drain reaching past named rows or Drain rows (the
+// #7693 review): a held pool orphan's classified dead runtime (a
+// quarantine, an agent heartbeat, a wait hold) is left alone, its slot kept
+// (§12.2 #27); a named pending create AL1 wants asleep with a suspended
+// reason (Q1) gets no drain begin.
+func TestDeadRuntimeDrainOnlyNamedDrainRows(t *testing.T) {
+	future := gatherNow.Add(30 * time.Minute).Format(time.RFC3339)
+	woke := gatherNow.Add(-time.Hour).Format(time.RFC3339)
+	named := []string{"configured_named_session", "true", "configured_named_identity", "chat", "pool_managed", ""}
+	for _, c := range []struct {
+		name    string
+		desired desire
+		reason  string
+		meta    []string
+	}{
+		{"a quarantined pool orphan", desireDrain, drainOrphaned, []string{"state", "active", "last_woke_at", woke, "quarantined_until", future, "sleep_reason", "quarantine"}},
+		{"a heartbeat-held pool orphan", desireDrain, drainOrphaned, []string{"state", "active", "last_woke_at", woke, "held_until", future}},
+		{"a wait-held pool orphan", desireDrain, drainOrphaned, []string{"state", "active", "last_woke_at", woke, "wait_hold", "true"}},
+		{"a named pending create AL1 wants asleep (Q1)", desireSleep, drainSuspended, append([]string{"state", "creating", "pending_create_claim", "true", "pending_create_started_at", gatherNow.Add(-time.Minute).Format(time.RFC3339)}, named...)},
+	} {
+		cc := newCloseCase(t, livenessDead, c.desired, c.meta...)
+		cc.entry().DrainReason = c.reason
+		cc.w.Env = &reconcileEnv{Cfg: cc.cfg}
+		id := runtimeIdentity{Known: true, SessionID: cc.k.ID, Epoch: "3", Token: "tok-3"}
+		cc.w.Observed = map[rowKey]rowObservation{cc.k: {Liveness: livenessDead, Identity: id}}
+		cc.w.Classified = map[rowKey]classifiedRuntime{cc.k: {Token: deadToken(id)}}
+		if it := cc.decide(); it.Kind != "" || it.Reason != decideNoAction {
+			t.Fatalf("%s: decideRow = (%q, %q), want no-action", c.name, it.Kind, it.Reason)
+		}
+	}
+}
+
+// Kills A9 holding an acked row over a token-less corpse, and an exemption
+// wider than R46 (mc-phuxq; CONTRACT R46, I23, M1, O1): an acked row whose
+// name the inventory lists as a corpse with an identity read but not the
+// row's falls through to A11's signal; the same corpse under a stop only
+// requested, a corpse whose identity was never read, and a live pane
+// carrying the row's ID but no token all hold (an Ownerless live pane is
+// v5.10c's squatter).
+func TestAckedRowOverATokenlessCorpseIsSignaled(t *testing.T) {
+	acked := []string{"state", "awake", session.OperatorDrainKey, "3", session.DrainAckIncarnationKey, "3", session.DrainAckAtKey, rowAt(-time.Second)}
+	requested := []string{"state", "awake", session.DrainIntentReasonKey, drainOrphaned, session.DrainIntentAtKey, rowAt(-time.Second), session.DrainIntentIncarnationKey, "3"}
+	tokenless := runtimeIdentity{Known: true, SessionID: "", Token: ""}
+	for _, c := range []struct {
+		name   string
+		meta   []string
+		id     runtimeIdentity
+		own    bool // the runtime carries the row's ID
+		corpse bool
+		want   string // the decided kind, "" for a hold
+	}{
+		{"acked over a token-less corpse", acked, tokenless, false, true, intentSignalAck},
+		{"acked over a corpse with the row's ID and no token", acked, tokenless, true, true, intentSignalAck},
+		{"requested over a token-less corpse", requested, tokenless, false, true, ""},
+		{"acked over a corpse never read", acked, runtimeIdentity{}, false, true, ""},
+		{"acked over a live pane with the row's ID and no token", acked, tokenless, true, false, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			hc := newHealCase(t, livenessUnknown, desireNone, c.meta...)
+			hc.w.Now, hc.w.ObsMaxAge = censusNow, observeMaxAge
+			id := c.id
+			if c.own {
+				id.SessionID = hc.k.ID
+			}
+			attrs := InventoryAttrs{Identity: id, DeadKnown: true, AllPanesDead: c.corpse}
+			hc.w.Obs = newObserveCache().publish(censusNow, map[string]InventoryAttrs{"s-heal": attrs}, completeBackend("tmux", "s-heal"))
+			hc.w.Observed = observeCensus(hc.w.Obs, hc.w.Census, hc.w.Now, hc.w.ObsMaxAge)
+			if l := hc.w.Observed[hc.k].Liveness; l != livenessUnknown {
+				t.Fatalf("fixture: the census reads %v, want unknown", l)
+			}
+			it := hc.decide()
+			if it.Kind != c.want || c.want == "" && it.Reason != decideLivenessUnknown {
+				t.Fatalf("decideRow = (%q, %q), want kind %q", it.Kind, it.Reason, c.want)
+			}
+		})
+	}
+}
+
+// TestFloorAckOverATokenlessCorpseIsSignaled (CONTRACT v5.10w, §12.2 row
+// 66; mc-4gyej). Kills a floor seat's bare ack over a corpse no token
+// attributes canceled by the floor check (the ack voided, A9 then holding
+// the row over the corpse for good): it is signaled, so its stop finalizes
+// the row and the floor recreates the seat. A floor seat whose own ack sits
+// over a live pane is still canceled (DRAIN-010).
+func TestFloorAckOverATokenlessCorpseIsSignaled(t *testing.T) {
+	bare := []string{"state", "awake", session.DrainAckIncarnationKey, "3", session.DrainAckAtKey, rowAt(-time.Second)}
+	for _, c := range []struct {
+		name   string
+		own    bool // the runtime carries the row's ID (no token)
+		corpse bool
+		want   string // decided reason
+	}{
+		{"a corpse with no identity", false, true, decideDrainSignal},
+		{"a corpse with the row's ID and no token", true, true, decideDrainSignal},
+		{"a live pane with the row's ID and no token", true, false, decideLivenessUnknown},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			hc := newHealCase(t, livenessUnknown, desireNone, bare...)
+			hc.w.Now, hc.w.ObsMaxAge = censusNow, observeMaxAge
+			hc.a.Snapshot.Entries[hc.k].Floor = &floorView{Rank: 0, MinActive: 1}
+			id := runtimeIdentity{Known: true}
+			if c.own {
+				id.SessionID = hc.k.ID
+			}
+			attrs := InventoryAttrs{Identity: id, DeadKnown: true, AllPanesDead: c.corpse}
+			hc.w.Obs = newObserveCache().publish(censusNow, map[string]InventoryAttrs{"s-heal": attrs}, completeBackend("tmux", "s-heal"))
+			hc.w.Observed = observeCensus(hc.w.Obs, hc.w.Census, hc.w.Now, hc.w.ObsMaxAge)
+			if l := hc.w.Observed[hc.k].Liveness; l != livenessUnknown {
+				t.Fatalf("fixture: the census reads %v, want unknown", l)
+			}
+			it := hc.decide()
+			if !strings.HasPrefix(it.Reason, c.want) || c.want == decideDrainSignal && (it.Kind != intentSignalAck || it.Patch["state"] != string(session.StateDraining)) {
+				t.Fatalf("decideRow = (%q, %q) %v, want reason %q", it.Kind, it.Reason, it.Patch, c.want)
+			}
+		})
 	}
 }

@@ -362,6 +362,13 @@ func createHandoffMail(msgStore, sessStore beads.Store, rec events.Recorder, sen
 	// two-store provider (mirroring newCityMailProvider): the message bead is
 	// ClassMessaging, beadmail's addressing reads are ClassSessions.
 	provider := beadmail.NewWithStores(msgStore, sessStore)
+	// Handoff mail is sent from the calling session. When its own bead id
+	// resolves, the provider takes the sender route from that bead instead of
+	// resolving senderAddress again. A failed lookup pins nothing: the sender
+	// resolution below asks the store itself and reports what it finds.
+	if identity, ok, err := resolveHookIdentity(sessStore); err == nil && ok {
+		identity.pinSender(provider)
+	}
 	msg, err := provider.SendHandoff(mail.HandoffIntent{
 		From:        senderAddress,
 		To:          recipientAddress,

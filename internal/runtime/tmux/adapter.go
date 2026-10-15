@@ -56,6 +56,7 @@ var (
 	_ runtime.ImmediateNudgeProvider        = (*Provider)(nil)
 	_ runtime.InterruptBoundaryWaitProvider = (*Provider)(nil)
 	_ runtime.InterruptedTurnResetProvider  = (*Provider)(nil)
+	_ runtime.InputClearProvider            = (*Provider)(nil)
 	_ runtime.ProcessTableScanner           = (*Provider)(nil)
 	_ runtime.ServerLifecycleProvider       = (*Provider)(nil)
 	_ runtime.UnattendedSessionStopper      = (*Provider)(nil)
@@ -332,7 +333,12 @@ func (p *Provider) Interrupt(name string) error {
 		}
 		return nil
 	}
-	err := p.tm.SendKeysRaw(name, "C-c")
+	// Ctrl-C the agent pane: sent to the active pane it would interrupt
+	// whatever a human is running in another window or split.
+	target, err := p.tm.agentPaneTarget(name)
+	if err == nil {
+		err = p.tm.SendKeysRaw(target, "C-c")
+	}
 	if err != nil && (errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer)) {
 		return nil
 	}
@@ -637,9 +643,23 @@ func (p *Provider) WaitForIdle(ctx context.Context, name string, timeout time.Du
 
 // SnapshotIdle reports, in a single non-blocking observation, whether the named
 // session is at an idle interactive boundary right now. It implements
-// [runtime.IdleSnapshotProvider].
+// [runtime.IdleSnapshotProvider] by forwarding to [Tmux.SnapshotIdle], so the
+// tri-state contract is the leaf's: (false, nil) means the capture contains a
+// busy-indicator string, and a pane showing neither that nor the ready prompt
+// returns [runtime.ErrIdleIndeterminate].
 func (p *Provider) SnapshotIdle(name string) (bool, error) {
 	return p.tm.SnapshotIdle(name)
+}
+
+// ClearInput empties a Claude Code session's input box, waiting up to
+// restoreWindow for Claude to restore an interrupted prompt into it. It
+// implements [runtime.InputClearProvider].
+func (p *Provider) ClearInput(ctx context.Context, name string, restoreWindow time.Duration) error {
+	err := p.tm.ClearInput(ctx, name, restoreWindow)
+	if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
+		return nil
+	}
+	return err
 }
 
 // WaitForInterruptBoundary waits for a provider-native interrupt acknowledgement
@@ -717,6 +737,11 @@ func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 	// in scrollback during inter-tool-call gaps, so immediate send-keys
 	// would inject text mid-execution. See upstream dfd945e9/6bc898ce.
 	if idleTimeout := p.tm.cfg.NudgeIdleTimeout; idleTimeout > 0 {
+		// A pending permission prompt does not turn idle on its own, and
+		// NudgeNow refuses it anyway: refuse it now, not after the whole wait.
+		if err := p.tm.checkNoApprovalPrompt(name); errors.Is(err, runtime.ErrPendingInteraction) {
+			return err
+		}
 		// Best-effort wait — if it fails (session gone, timeout), proceed
 		// with the nudge anyway. The message may arrive during active work,
 		// but Claude's cooperative queue will handle it at the next turn.
@@ -759,6 +784,18 @@ func (p *Provider) NudgeNow(name string, content []runtime.ContentBlock) error {
 		return nil
 	}
 
+	// Never type into a pending permission prompt: Enter would pick the
+	// highlighted option ("Yes") and digits would pick others (#2892).
+	if err := p.tm.checkNoApprovalPrompt(name); err != nil {
+		if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
+			return nil
+		}
+		if errors.Is(err, runtime.ErrPendingInteraction) {
+			return err
+		}
+		return fmt.Errorf("checking %q for a pending permission prompt before sending text: %w", name, err)
+	}
+
 	if used, err := p.tm.sendHiddenAttachedText(name, message); used {
 		if err != nil {
 			return err
@@ -773,9 +810,20 @@ func (p *Provider) NudgeNow(name string, content []runtime.ContentBlock) error {
 	return err
 }
 
-// SetMeta stores a key-value pair in the named session's tmux environment.
+// restartRequestedOption is GC_RESTART_REQUESTED's mirror as a session user
+// option, which the batched inventory reads in its one list-panes
+// (#{@GC_RESTART_REQUESTED}, CONTRACT v5.10q C7a-2b). The environment stays
+// the copy GetMeta reads.
+const restartRequestedOption = "@GC_RESTART_REQUESTED"
+
+// SetMeta stores a key-value pair in the named session's tmux environment,
+// and the restart marker in its user-option mirror too.
 func (p *Provider) SetMeta(name, key, value string) error {
-	return p.tm.SetEnvironment(name, key, value)
+	if err := p.tm.SetEnvironment(name, key, value); err != nil || key != "GC_RESTART_REQUESTED" {
+		return err
+	}
+	_, err := p.tm.run("set-option", "-t", paneTarget(name), restartRequestedOption, value)
+	return err
 }
 
 // GetMeta retrieves a value from the named session's tmux environment.
@@ -977,7 +1025,11 @@ func parseNonnegativeTmuxCount(value string) (int, error) {
 
 // RemoveMeta removes a key from the named session's tmux environment.
 func (p *Provider) RemoveMeta(name, key string) error {
-	return p.tm.RemoveEnvironment(name, key)
+	if err := p.tm.RemoveEnvironment(name, key); err != nil || key != "GC_RESTART_REQUESTED" {
+		return err
+	}
+	_, err := p.tm.run("set-option", "-t", paneTarget(name), "-u", restartRequestedOption)
+	return err
 }
 
 // Peek captures the last N lines of output from the named session.
@@ -1123,8 +1175,16 @@ func (p *Provider) SendKeys(name string, keys ...string) error {
 		}
 		return nil
 	}
+	// Resolve the agent pane once, so every key lands in the same pane.
+	target, err := p.tm.agentPaneTarget(name)
+	if err != nil && (errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer)) {
+		return nil // best-effort
+	}
+	if err != nil {
+		return err
+	}
 	for _, k := range keys {
-		err := p.tm.SendKeysRaw(name, k)
+		err := p.tm.SendKeysRaw(target, k)
 		if err != nil && (errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer)) {
 			return nil // best-effort
 		}
@@ -1314,9 +1374,10 @@ func (o *tmuxStartOps) createSession(name, workDir, command string, env map[stri
 	return o.tm.NewSession(name, workDir)
 }
 
-// respawnAgent relaunches the agent command in the session's existing pane
-// (respawn-pane -k), reusing the warm box and its session environment. The
-// launch-half of the un-weld relaunch path.
+// respawnAgent relaunches the agent command in the session's existing agent
+// pane (respawn-pane -k on the agentPaneTarget pane, never the active one),
+// reusing the warm box and its session environment. The launch-half of the
+// un-weld relaunch path.
 //
 // respawn-pane takes no env argument: the new process inherits the tmux server's
 // global environment as filtered by the SESSION environment, so a withheld
@@ -1331,6 +1392,9 @@ func (o *tmuxStartOps) respawnAgent(name, workDir, command string, env map[strin
 	if err := o.tm.markSessionEnvRemoved(name, durableWithholdKeys(env)); err != nil {
 		return err
 	}
+	// A warm box created before the agent-pane marker (or whose mark failed)
+	// is marked here while it still has only the agent's pane.
+	o.tm.adoptAgentPane(name)
 	return o.tm.RespawnPaneWithWorkDir(name, workDir, command)
 }
 
@@ -1354,8 +1418,14 @@ func (o *tmuxStartOps) acceptStartupDialogs(ctx context.Context, name string) er
 	return o.tm.AcceptStartupDialogs(ctx, name)
 }
 
+// waitForReady polls the agent pane, not the active one: a human's split or
+// window showing a prompt must not pass for the agent being ready.
 func (o *tmuxStartOps) waitForReady(ctx context.Context, name string, rc *RuntimeConfig, timeout time.Duration) error {
-	return o.tm.WaitForRuntimeReady(ctx, name, rc, timeout)
+	target, err := o.tm.agentPaneTarget(name)
+	if err != nil {
+		return err
+	}
+	return o.tm.WaitForRuntimeReady(ctx, target, rc, timeout)
 }
 
 func (o *tmuxStartOps) hasSession(name string) (bool, error) {
@@ -1371,7 +1441,12 @@ func (o *tmuxStartOps) hasSession(name string) (bool, error) {
 // width, and a credential split across two lines by a newline tmux inserted is
 // a credential substring matching cannot find.
 func (o *tmuxStartOps) capturePane(name string, lines int) (string, error) {
-	content, err := o.tm.CapturePaneJoined(name, lines)
+	// The agent pane's output, never a human split's (agentPaneTarget).
+	target, err := o.tm.agentPaneTarget(name)
+	if err != nil {
+		return "", err
+	}
+	content, err := o.tm.CapturePaneJoined(target, lines)
 	return runtime.RedactSecrets(content, o.secrets), err
 }
 
@@ -1527,9 +1602,9 @@ func (o *tmuxStartOps) sendKeys(name, text string) error {
 // avoid blindly re-running the full C-u/paste/submit cycle against a pane
 // that already went busy (see sendStartupNudgeWithRetry).
 func (o *tmuxStartOps) paneBusy(name string) (bool, error) {
-	target := name
-	if agentPane, err := o.tm.FindAgentPane(name); err == nil && agentPane != "" {
-		target = agentPane
+	target, err := o.tm.agentInputTarget(name)
+	if err != nil {
+		return false, err
 	}
 	return o.tm.paneBusy(target)
 }

@@ -1,0 +1,507 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"maps"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
+)
+
+// The start's abandon table and C3's rollback (CONTRACT v5 S3, C3, S7; plan
+// C5a2). A start that did not commit writes its class's patch by CAS under
+// its own token and still settles failed with its cause (an abandon,
+// txStep.Fail with a Write):
+//   - a capacity refusal restores what PreWake wrote (commitStep);
+//   - a prepare failure clears last_woke_at and accrues #46;
+//   - a terminal provider error parks the row (START-028); a rate-limit
+//     screen quarantines it (START-022/029);
+//   - a pending create tears down its own runtime and rolls the row back,
+//     accruing #46 (START-031/033); a configured named one that did not
+//     die keeps its row and clears last_woke_at;
+//   - any other failure restores PreWake, unless PreWake found the row
+//     already creating (#7570's kept marker), and accrues a wake failure,
+//     resetting the conversation unless its transcript is on disk
+//     (START-035).
+//
+// A deferred outcome, an MCP persist error and a commit-time error write
+// nothing: S1 adopts or launches next pass. A10's rollback is the same
+// teardown and close.
+
+// startFailure is a start that did not commit, as its commit's Decide read
+// it, for the failure Call (afterStart) and the abandon.
+type startFailure struct {
+	cause, terminal string // the settlement's cause; the error's terminal reason (START-028)
+	err             error
+	pending         bool // a pending create
+	configured      bool // a configured named row with its spec
+	died            bool // died during startup
+	resumed         bool // the launch resumed the row's own conversation (preparedStart.resumed)
+	peek            bool // a rate-limit screen may show: the pane is listed (START-022)
+	relaunched      bool // PreWake found the row creating (#7570): its marker stays
+	undo            preWakeUndo
+	row             session.Info   // the fresh row, for the conversation probe
+	cfg             *config.City   // the city and the launch, for the probe's transcript roots (launchTranscriptRoots)
+	launch          TemplateParams // its template
+	name, display   string         // the runtime name; the agent, for the quarantine metric
+	episode         string         // the #46 episode key
+}
+
+// startFailureRead is what the failure Call read, past what it accrued.
+type startFailureRead struct {
+	startFailure
+	rateLimit bool          // the pane shows a provider rate-limit screen
+	keeps     bool          // the conversation's transcript is on disk (wakeFailureKeepsConversation)
+	resume    resumeFailure // what the failure tells the resume backstop (startResumeFailure)
+	lost      *bool         // a lost commit's stop (lostCommit): whether it was confirmed
+}
+
+// startEnd is what the commit hands its Call: the landed commit, the start
+// that failed, or the lost commit's own-runtime stop.
+type startEnd struct {
+	landed *landedCommit
+	failed *startFailure
+	lost   *teardown
+}
+
+// failStart is the start that did not commit with cause, handed to the
+// failure Call and then to the abandon.
+func failStart(v txView, out startOutcome, cause string, err error) txStep {
+	name := strings.TrimSpace(v.Row.SessionName)
+	if err == nil { // a nil Start whose runtime died: legacy's error
+		err = fmt.Errorf("session %q died during startup", name)
+	}
+	f := startFailure{
+		cause: cause, err: err, pending: v.Row.PendingCreateClaim, died: cause == causeDiedDuringStartup, relaunched: out.relaunched, undo: out.undo,
+		row: v.Row, name: name, display: out.tp.DisplayName(), episode: startupHealthEpisodeKey(v.Row, name), launch: out.tp,
+		resumed: out.prepared != nil && out.prepared.resumed,
+	}
+	started := cause != causePrepare && cause != causeAttribution // a Start's own failure, which the provider screens
+	if started {
+		f.terminal = runtime.ProviderTerminalErrorReason(err.Error())
+	}
+	if env := v.World.Env; env != nil && env.Cfg != nil {
+		f.cfg = env.Cfg
+		f.configured = configuredNamedSessionBeadHasSpecInfo(v.Row, env.Cfg, config.EffectiveCityName(env.Cfg, ""))
+		f.peek = started && f.terminal == "" && env.Cfg.Session.Provider != "subprocess" && v.RT.Class != rtAbsent
+	}
+	return txStep{Pass: startEnd{failed: &f}}
+}
+
+// readStartFailure is the failure Call's reads and the #46 accrual (a lost
+// accrual only delays its quarantine, v5 §13): the screen peek, and for the
+// classes that accrue a wake failure the transcript probe.
+func readStartFailure(ctx context.Context, c txCaps, f startFailure) startFailureRead {
+	r := startFailureRead{startFailure: f}
+	var pane string
+	if f.peek {
+		// The dead pane's own screen (§12.2 #19, C5a3): a terminal provider
+		// error parks the row, as the zombie capture does; a rate-limit
+		// screen quarantines it (START-022/029).
+		pane = peekPane(ctx, c.start.sp, f.name)
+		r.terminal = runtime.ProviderTerminalErrorReason(pane)
+		r.rateLimit = r.terminal == "" && runtime.ContainsProviderRateLimitScreen(pane)
+	}
+	switch {
+	case r.rateLimit, r.terminal != "", f.cause == causeAttribution && errors.Is(f.err, runtime.ErrSessionExists):
+	case f.pending, f.cause == causePrepare, f.cause == causeAttribution:
+		_ = c.episode.fail(f.episode, f.err, c.start.clock.Now())
+	default:
+		r.keeps = wakeFailureKeepsConversation(f.row, launchTranscriptRoots(f.cfg, f.launch))
+		r.resume = startResumeFailure(f.resumed, f.died, f.row.SessionKey, f.err, pane)
+	}
+	return r
+}
+
+// peekPane is name's pane, bounded; a peek that fails or does not answer
+// reads empty.
+func peekPane(ctx context.Context, sp runtime.Provider, name string) string {
+	leaf, _, known := runtime.ResolveBackend(sp, name)
+	if sp == nil || !known || leaf == nil {
+		return ""
+	}
+	content, _ := boundedProbeCtx(ctx, func(context.Context) string {
+		s, err := leaf.Peek(name, rateLimitPeekLines)
+		if err != nil {
+			return ""
+		}
+		return s
+	})
+	return content
+}
+
+// abandonStep is S3's abandon on the fresh row under the start's own token
+// (the premise): the class's patch, written with the start's failure. A
+// pending create's rollback goes on to its teardown and close.
+func abandonStep(v txView) txStep {
+	f, err := callResult[startFailureRead](v)
+	switch {
+	case err != nil:
+		return txStep{Fail: causeCallError, Err: err}
+	case f.lost != nil: // the row moved back between the sections: still lost
+		return lostCommitStep(f)
+	}
+	abandon := func(patch session.MetadataPatch, class session.DispositionPatch, facts effectFacts) txStep {
+		return txStep{Write: patch, Class: class, Fail: f.cause, Err: f.err, Facts: facts}
+	}
+	var facts effectFacts
+	if f.pending && f.terminal == "" && errors.Is(f.err, context.DeadlineExceeded) {
+		facts.Events = []events.Event{{Type: events.SessionColdStartTimeout, Actor: "controller", Subject: f.name, Message: fmt.Sprintf("session %q cold start timed out", f.name)}}
+	}
+	switch {
+	case f.cause == causeAttribution: // deferred: S1 attributes it next pass
+		return txStep{Refuse: causeAttribution, Err: f.err}
+	case f.terminal != "" && !f.pending:
+		return abandon(providerTerminalErrorPatch(f.terminal, v.Now), session.DispositionPatch{}, facts)
+	case f.rateLimit:
+		patch, class := rateLimitQuarantine(v.Row, v.Now)
+		return abandon(patch, class, facts)
+	case f.cause == causePrepare, f.pending && f.terminal == "" && f.configured && !f.died:
+		return abandon(session.MetadataPatch{"last_woke_at": ""}, session.DispositionPatch{}, facts)
+	case f.pending:
+		td, cause := ownTeardown(v)
+		if cause != "" {
+			return txStep{Refuse: cause, Err: f.err, Facts: facts}
+		}
+		td.fail, td.err = f.cause, f.err
+		if f.terminal != "" {
+			td.more = providerTerminalErrorPatch(f.terminal, v.Now)
+		}
+		return txStep{Pass: td, Facts: facts}
+	}
+	patch, class, quarantined := otherFailurePatch(v.Row, v.Meta, f, v.Now)
+	if quarantined {
+		facts.Quarantined = f.display
+	}
+	if resumeFailedReset(v.Row, f) && session.HasStartedManualConversation(v.Row) {
+		facts.Events = append(facts.Events, resumeFailedConversationResetEvent(v.Row, f.display))
+	}
+	return abandon(patch, class, facts)
+}
+
+// otherFailurePatch is S3's any-other class: PreWake restored, unless it
+// found the row creating (#7570), then legacy's recordWakeFailure on a row
+// still creating (an operator who killed it mid-start owns it): the
+// conversation reset unless the failure keeps it (failureKeepsConversation;
+// unprobeable providers included) short of the resume backstop, and one
+// wake attempt more, quarantined at the threshold.
+func otherFailurePatch(row session.Info, meta map[string]string, f startFailureRead, now time.Time) (_ session.MetadataPatch, _ session.DispositionPatch, quarantined bool) {
+	patch := session.MetadataPatch{}
+	var class session.DispositionPatch
+	if !f.relaunched {
+		patch, class = restorePatch(f.undo, meta)
+	}
+	if !creating(row) {
+		return patch, class, false
+	}
+	if row.SessionKey != "" || row.StartedConfigHash != "" {
+		failures, _ := strconv.Atoi(row.ResumeFailures)
+		kept := failureKeepsConversation(row, f)
+		backstop, count := resumeBackstop(failures, kept, f.resume)
+		if !kept || backstop {
+			maps.Copy(patch, session.ConversationResetPatch(true))
+			count = 0
+		}
+		maps.Copy(patch, resumeFailuresPatch(row, count))
+	}
+	attempts, _ := strconv.Atoi(row.WakeAttemptsMetadata)
+	accrual := session.WakeFailureAccrualPatch(attempts, defaultMaxWakeAttempts, now.Add(defaultQuarantineDuration))
+	maps.Copy(patch, accrual.Over(row, now)) // a live quarantine keeps its reason (v5.9z)
+	return patch, class.With(accrual.Class(row, now)), accrual.Quarantined
+}
+
+// failureKeepsConversation reports that the any-other failure f leaves
+// row's conversation in place, as legacy's recordWakeFailure does: a
+// committed manual conversation (SESSION-LIFE-MANUAL-LOSS) or one whose
+// transcript is on disk. The resume backstop still bounds either.
+// recordWakeFailure and deadRuntimePatch's rapid crash keep by the same rule;
+// change the three together.
+func failureKeepsConversation(row session.Info, f startFailureRead) bool {
+	return f.keeps || session.HasStartedManualConversation(row)
+}
+
+// resumeFailedReset reports that the any-other failure f of row resets a
+// conversation the failure keeps, by the resume backstop (resumeBackstop),
+// as legacy's recordWakeFailure does.
+func resumeFailedReset(row session.Info, f startFailureRead) bool {
+	failures, _ := strconv.Atoi(row.ResumeFailures)
+	backstop, _ := resumeBackstop(failures, failureKeepsConversation(row, f), f.resume)
+	return creating(row) && (row.SessionKey != "" || row.StartedConfigHash != "") && backstop
+}
+
+// restorePatch is restorePreWakeState's decide on the fresh row's
+// metadata: each key PreWake wrote goes back while it still holds PreWake's
+// value, so anything written since wins.
+func restorePatch(u preWakeUndo, meta map[string]string) (session.MetadataPatch, session.DispositionPatch) {
+	patch := make(session.MetadataPatch, len(u.restore))
+	for key, value := range u.restore {
+		if written := u.written[key]; meta[key] == written && value != written {
+			patch[key] = value
+		}
+	}
+	// The PreWake cell's undo, typed: the write mints it.
+	return patch, session.UndoDisposition(u.before, u.class, meta)
+}
+
+// teardown is a rollback's own-runtime stop, when it has one, and what its
+// close settles with.
+type teardown struct {
+	stop   *fenceVerdict // L1 alone on the own runtime (the rollback exception, F2); nil: nothing to stop
+	corpse corpseKill    // a corpse under the name, removed by exact object (the corpse exception)
+	names  []string      // its template's process names, for C8.8
+	fail   string        // the start's failure the close settles with; "" for A10's rollback
+	err    error
+	more   session.MetadataPatch // folded under the failed-create close: a terminal mark (START-028)
+}
+
+// ownTeardown is the teardown of v's pending create on its fresh read, or
+// the cause that holds the rollback (rollbackRuntime).
+func ownTeardown(v txView) (teardown, string) {
+	stop, cause := rollbackRuntime(v.Row, v.RT)
+	switch {
+	case cause != "":
+		return teardown{}, cause
+	case v.RT.Class == rtCorpse && v.RT.Same: // counted stopped (C8.8), and removed
+		return teardown{corpse: corpseKill{leaf: v.RT.leaf, name: strings.TrimSpace(v.Row.SessionName), live: v.RT.Again, now: v.Now}}, ""
+	case !stop:
+		return teardown{}, ""
+	}
+	verdict := ownRuntimeFence(v.RT, v.Row)
+	return teardown{stop: &verdict, names: processNamesFor(v.World, v.Row)}, ""
+}
+
+// rollbackRuntime is C3's attribution of a pending create's fresh read: stop
+// for its own runtime (O2's own-runtime test, or C8.2(a)'s bead-scoped name,
+// stopped whatever its identity, SESS-091); neither for nothing running, a
+// corpse (C8.8 counts it stopped) or another row's runtime (F3: rolled back
+// without a stop, a stale epoch included, S7); else the cause that holds.
+// A corpse counts stopped; the teardown removes it (ownTeardown), so a
+// crash-looping pool create's corpses do not pile up.
+func rollbackRuntime(row session.Info, rt *txRuntime) (stop bool, cause string) {
+	switch rt.Class {
+	case rtUnsupported:
+		return false, causeLivenessUnsupported
+	case rtAbsent, rtCorpse:
+		return false, ""
+	case rtUnknown:
+		return false, causeLivenessUnknown
+	}
+	v := compareIdentity(row, rt.Identity)
+	switch {
+	case ownsName(row, row.SessionName), ownRuntime(v, row, rt.Identity):
+		return true, ""
+	case v == identityForeign, v == identityStaleSelf:
+		return false, ""
+	case v == identityNewerSelf:
+		return false, causeNewerSelf
+	}
+	return false, causeAttribution
+}
+
+// stopOwnRuntime is the rollback's Call: the own runtime's fenced stop,
+// confirmed (C8.8), when the teardown has one. The close reads the runtime
+// fresh again, and holds the row open while its own runtime stays (ga-vcjr9).
+func stopOwnRuntime(ctx context.Context, c txCaps, in teardown) (teardown, error) {
+	switch {
+	case in.stop != nil:
+		stopFenced(ctx, c.start.sp, *in.stop, in.names, c.start.clock.Now)
+	case in.corpse.found():
+		_, _ = killCorpse(ctx, c, in.corpse) // a refused kill leaves it, counted stopped all the same
+	}
+	return in, nil
+}
+
+// rollbackClose is C3's rollback, the failed-create close, while the fresh
+// row may still roll back (CanRollback) and its fresh read finds no runtime
+// of its own; S7's relaunch keeps the row once its runtime is stopped. An
+// occupant the Call left alone (no stop, no corpse kill: a name the row does
+// not own) is F1's again on this read (occupantLeft, STALE-READ 7.3); one
+// the Call stopped is gone by design.
+func rollbackClose(v txView) txStep {
+	td, err := callResult[teardown](v)
+	stop, cause := rollbackRuntime(v.Row, v.RT)
+	switch {
+	case err != nil:
+		return txStep{Fail: causeCallError, Err: err}
+	case !rollbackable(v.Row):
+		return txStep{Refuse: causeRedecided}
+	case td.stop == nil && !td.corpse.found() && occupantLeft(v):
+		return txStep{Refuse: causeRedecided} // F1 again: an occupant the Call left alone may have left since
+	case cause != "":
+		return txStep{Refuse: cause}
+	case stop:
+		return txStep{Refuse: causeRuntimePresent}
+	case v.It.Relaunch: // S7: the configured named row stays for A18's relaunch
+		return txStep{Done: true, Cause: decideStaleCreate}
+	}
+	patch, class := rollbackPatch(v.Row, v.Now, td.more)
+	return txStep{Terminal: patch, Class: class, Fail: td.fail, Err: td.err}
+}
+
+// rollbackable is CanRollback on the row the premise holds to the expected
+// incarnation: open, not active, and still claimed (or failed-create, a
+// partial rollback's retry).
+func rollbackable(row session.Info) bool {
+	return session.LeaseFromInfo(row).CanRollback(session.LeaseFromInfo(row))
+}
+
+// rateLimitQuarantine is legacy's recordRateLimitQuarantine for row at now: its
+// lifecycle and the Quarantine cell's quarantined_until, never shortening one
+// in force (class, minted by the write).
+func rateLimitQuarantine(row session.Info, now time.Time) (session.MetadataPatch, session.DispositionPatch) {
+	return session.RateLimitQuarantinePatch(), session.ExtendQuarantine(row, now.Add(defaultRateLimitQuarantineDuration), now)
+}
+
+// rollbackPatch is legacy's rollbackPendingCreateClears as one atomic close:
+// last_woke_at cleared, more, then failedCreateClosePatch over them, and an
+// explicit session name cleared in the same write (legacy clears it in a
+// second write once the close landed).
+func rollbackPatch(row session.Info, now time.Time, more session.MetadataPatch) (session.MetadataPatch, session.DispositionPatch) {
+	patch := session.MetadataPatch{"last_woke_at": ""}
+	maps.Copy(patch, more)
+	maps.Copy(patch, failedCreateCloseLife(now))
+	if strings.TrimSpace(row.SessionNameExplicit) == "true" {
+		patch["session_name"] = ""
+	}
+	// The row ends: its holds are the disposition's Retire cell.
+	return patch, session.CellInfo(row, session.ActorController, session.DispEvent{Kind: session.EvRetire}, now)
+}
+
+// rollbackSections are A10's rollback (C3): a screen on its listed dead pane
+// parks the row instead (SESS-051/092); else the own runtime's stop, when
+// the fresh read finds one, then the close.
+var rollbackSections = []section{
+	called(0, probed(paneScreen, rollbackStep), stopOwnRuntime),
+	{Premise: premiseClose, Decide: rollbackClose},
+}
+
+// paneScreen is legacy's checkRateLimitStability on the rollback's fresh
+// read: a crash candidate whose pane is listed but not alive is peeked; a
+// terminal provider error parks it, a rate-limit screen quarantines it.
+// screenWrite is a pane screen's write: its patch and its cells' keys.
+type screenWrite struct {
+	patch session.MetadataPatch
+	class session.DispositionPatch
+}
+
+func paneScreen(ctx context.Context, _ effectReads, v txView) (screenWrite, error) {
+	if v.RT == nil || v.RT.Class != rtZombie && v.RT.Class != rtCorpse || v.World.Env == nil || v.World.Env.Cfg == nil {
+		return screenWrite{}, nil
+	}
+	facts := session.ExitFacts{SubprocessProvider: v.World.Env.Cfg.Session.Provider == "subprocess", LastWokeAt: v.Row.LastWokeAt, Now: v.Now, ScreenAvailable: true}
+	if session.DecideSessionExit(facts) != session.ExitGatherScreen {
+		return screenWrite{}, nil
+	}
+	content := peekPane(ctx, v.RT.leaf, strings.TrimSpace(v.Row.SessionName))
+	if reason := runtime.ProviderTerminalErrorReason(content); reason != "" {
+		return screenWrite{patch: providerTerminalErrorPatch(reason, v.Now)}, nil
+	}
+	if facts.Screen = session.ScreenOther; runtime.ContainsProviderRateLimitScreen(content) {
+		facts.Screen = session.ScreenRateLimit
+	}
+	if session.DecideSessionExit(facts) == session.ExitRateLimitQuarantine {
+		patch, class := rateLimitQuarantine(v.Row, v.Now)
+		return screenWrite{patch: patch, class: class}, nil
+	}
+	return screenWrite{}, nil
+}
+
+// staleSelfOwn reports the effect's own read finding the row's runtime alive
+// and StaleSelf at the row's generation (S7): not one an operator re-attached
+// on the row's token since the pass, which reads Current.
+func staleSelfOwn(v txView) bool {
+	verdict := compareIdentity(v.Row, v.RT.Identity)
+	return v.RT.Alive() && verdict == identityStaleSelf && ownRuntime(verdict, v.Row, v.RT.Identity)
+}
+
+// occupantStays reports whether the rollback's fresh read still finds
+// another runtime under the row's name, the one an occupant rollback (A10's
+// Occupied or S7 row, intent.Occupant) rested on: Foreign or StaleSelf, alive
+// or a zombie. Gone, a corpse, the row's own Current runtime, or an
+// unattributable one is no occupant: the pass read a runtime that has since
+// left, and rolling back a pending create inside its lease would orphan
+// nothing but close a create legacy keeps, deciding on one live read (F1).
+// rollbackStep refuses on it only inside the lease or over a live
+// non-occupant (occupantLeaseHolds, liveNonOccupant).
+func occupantStays(v txView) bool {
+	if v.RT == nil || v.RT.Class != rtAlive && v.RT.Class != rtZombie {
+		return false
+	}
+	switch compareIdentity(v.Row, v.RT.Identity) {
+	case identityForeign, identityStaleSelf:
+		return true
+	}
+	return false
+}
+
+// occupantLeaseHolds reports whether a pending create whose occupant left
+// is still inside its lease (legacy's pendingCreateSessionStillLeasedAt,
+// with no lease anchor past the skew bound), which keeps it as legacy does.
+// Past the lease, a gone or dead occupant leaves nothing to wait for: the
+// rollback proceeds, as main and legacy roll it back, so a started create
+// whose name a corpse holds is never stranded.
+func occupantLeaseHolds(v txView) bool {
+	var cfg *config.City
+	if v.World != nil && v.World.Env != nil {
+		cfg = v.World.Env.Cfg
+	}
+	return !pendingCreateAnchorAhead(v.Row, v.Now) && pendingCreateSessionStillLeasedAt(v.Row, cfg, v.Now)
+}
+
+// liveNonOccupant reports a runtime present under the name, alive or a
+// zombie, that is no occupant: the row's own Current runtime or an
+// unattributable one, which a rollback must not close over at any lease.
+func liveNonOccupant(v txView) bool {
+	return v.RT != nil && (v.RT.Class == rtAlive || v.RT.Class == rtZombie) && !occupantStays(v)
+}
+
+// occupantLeft is F1 on the current attempt's fresh read: a rollback the
+// arm rested on an occupant (intent.Occupant) whose occupant is gone, inside
+// the pending create's lease or over a live runtime that is no occupant.
+// The close decides it again on its own read when its Call left the
+// occupant alone (STALE-READ 7.3), as the occupant can leave between
+// sections.
+func occupantLeft(v txView) bool {
+	return v.It.Occupant && !occupantStays(v) && (occupantLeaseHolds(v) || liveNonOccupant(v))
+}
+
+// rollbackStep is the rollback's first Decide: a screen's patch, or the
+// teardown of the fresh read's own runtime for the Call.
+func rollbackStep(v txView, screen screenWrite, _ error) txStep {
+	td, cause := ownTeardown(v)
+	switch {
+	case !rollbackable(v.Row):
+		return txStep{Refuse: causeRedecided}
+	case v.It.Reason == decideStaleCreate && v.RT.Alive() && compareIdentity(v.Row, v.RT.Identity) == identityCurrent:
+		return txStep{Refuse: causeRedecided} // S7: a runtime Current since the pass is A10's adopt's, next pass
+	case v.It.Relaunch && v.RT.Class == rtAbsent:
+		return txStep{Done: true, Cause: decideStaleCreate} // gone already: A18 relaunches it, no backoff between
+	case v.It.Relaunch && !staleSelfOwn(v):
+		return txStep{Refuse: causeRedecided} // S7's relaunch stops only a runtime its own read still finds StaleSelf, its own
+	case occupantLeft(v):
+		return txStep{Refuse: causeRedecided} // F1: the occupant the arm rested on is gone; the lease, or the live runtime, decides next pass
+	case len(screen.patch) > 0 || screen.class.Len() > 0:
+		return txStep{Write: screen.patch, Class: screen.class, Done: true}
+	case cause != "":
+		return txStep{Refuse: cause}
+	}
+	return txStep{Pass: td}
+}
+
+// retireAround runs a start or a rollback, then, once it closed the row,
+// legacy's retired-session cleanup: its waits canceled and its external
+// message bindings closed.
+func retireAround(_ context.Context, a aroundCaps, run func() settlement) settlement {
+	s := run()
+	if s.Closed && a.retire != nil {
+		a.retire.cleanup(a.it.Key.ID)
+	}
+	return s
+}

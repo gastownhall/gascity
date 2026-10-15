@@ -155,7 +155,8 @@ func killProvider(t *testing.T) (*Provider, *fakeExecutor) {
 // observed id verbatim, pinned to its creation time, and each outcome maps to
 // its typed result.
 // Kills: '$'+id; an unquoted id (tmux expands $N); a kill without the
-// re-check or without the creation time in either condition; a refusal or a
+// re-check, without the creation time or without the no-client check (J17)
+// in either condition; a refusal or a
 // stale or reused id read as killed or as refused live; a kill not evicted.
 func TestKillSessionObjectOneCommandAndOutcomes(t *testing.T) {
 	p, fe := killProvider(t)
@@ -164,7 +165,7 @@ func TestKillSessionObjectOneCommandAndOutcomes(t *testing.T) {
 	}
 	want := []string{
 		"-u", "-L", "x", "if-shell", "-F", "-t", "$7",
-		"#{&&:#{==:#{session_created},900},#{&&:#{==:#{session_name},corpse},#{&&:#{==:#{session_windows},1},#{&&:#{==:#{window_panes},1},#{pane_dead}}}}}",
+		"#{&&:#{==:#{session_created},900},#{&&:#{==:#{session_name},corpse},#{&&:#{==:#{session_attached},0},#{&&:#{==:#{session_windows},1},#{&&:#{==:#{window_panes},1},#{pane_dead}}}}}}",
 		"kill-session -t '$7'", "display-message -t '$7' -p 'refused #{session_created} #{session_name}'",
 	}
 	if len(fe.calls) != 1 || strings.Join(fe.calls[0], "\x00") != strings.Join(want, "\x00") {
@@ -173,8 +174,8 @@ func TestKillSessionObjectOneCommandAndOutcomes(t *testing.T) {
 	if _, listed := p.cache.observation().state.Sessions["corpse"]; listed {
 		t.Fatal("killed session still in the cache")
 	}
-	if _, err := p.KillZombieObject("corpse", "$7", "900", "201"); err != nil || !strings.HasPrefix(fe.calls[1][7], "#{&&:#{==:#{session_created},900},") || !strings.Contains(fe.calls[1][7], "#{!=:#{pane_dead},1},#{==:#{pane_pid},201}") {
-		t.Fatalf("zombie condition = %q, %v; want created 900 and a live pane with pid 201", fe.calls[1][7], err)
+	if _, err := p.KillZombieObject("corpse", "$7", "900", "201"); err != nil || !strings.HasPrefix(fe.calls[1][7], "#{&&:#{==:#{session_created},900},") || !strings.Contains(fe.calls[1][7], "#{!=:#{pane_dead},1},#{==:#{pane_pid},201}") || !strings.Contains(fe.calls[1][7], "#{==:#{session_attached},0}") {
+		t.Fatalf("zombie condition = %q, %v; want created 900, no client attached and a live pane with pid 201", fe.calls[1][7], err)
 	}
 
 	for _, tc := range []struct {

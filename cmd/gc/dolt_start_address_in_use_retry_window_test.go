@@ -169,25 +169,22 @@ func TestManagedDoltStartAddressInUsePollInterval(t *testing.T) {
 // once, AND the flag flip to happen between the first sleep and the second
 // poll. Setup:
 //
-//   - window = 200ms, poll = 20ms (managedDoltStartAddressInUseDefaultPoll)
-//   - flag flips to "free" at 10ms (during the first sleep)
-//   - first poll at t=0 returns busy, then sleep(20ms)
-//   - second poll at t=20ms returns free → in-loop return true
+//   - window = 5s, so poll = default 2s (managedDoltStartAddressInUsePollInterval)
+//   - flag flips to "free" at 1s (during the first sleep)
+//   - first poll at t=0 returns busy, then sleep(2s)
+//   - second poll at t=2s returns free → in-loop return true
 //
-// We assert elapsed roughly matches that second-poll wake (~20ms), well below
-// the 200ms deadline; if the post-deadline check were the only path, elapsed
-// would be ≥ 200ms. We also assert at least one sleep happened (elapsed >= 10ms),
+// We assert elapsed roughly matches that second-poll wake (~2s), well below
+// the 5s deadline; if the post-deadline check were the only path, elapsed
+// would be ≥ 5s. We also assert at least one sleep happened (elapsed > 1.5s),
 // so a degenerate "first poll already true" wouldn't accidentally pass.
 func TestManagedDoltStartWaitForPortFree_WakesMidWindowOnInLoopCheck(t *testing.T) {
 	orig := managedDoltPortAvailableFn
 	defer func() { managedDoltPortAvailableFn = orig }()
-	origPoll := managedDoltStartAddressInUseDefaultPoll
-	managedDoltStartAddressInUseDefaultPoll = 20 * time.Millisecond
-	defer func() { managedDoltStartAddressInUseDefaultPoll = origPoll }()
 
 	var free int32
 	go func() {
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(1 * time.Second)
 		atomic.StoreInt32(&free, 1)
 	}()
 	managedDoltPortAvailableFn = func(_ string, _ int) bool {
@@ -195,16 +192,16 @@ func TestManagedDoltStartWaitForPortFree_WakesMidWindowOnInLoopCheck(t *testing.
 	}
 
 	start := time.Now()
-	got := managedDoltStartWaitForPortFree("0.0.0.0", 17360, 200*time.Millisecond)
+	got := managedDoltStartWaitForPortFree("0.0.0.0", 17360, 5*time.Second)
 	elapsed := time.Since(start)
 	if !got {
 		t.Fatalf("expected port to become free within window, got false (elapsed=%s)", elapsed)
 	}
-	if elapsed < 10*time.Millisecond {
-		t.Fatalf("expected at least one sleep before wake (~20ms); only waited %s — degenerate first-poll-true path?", elapsed)
+	if elapsed < 1500*time.Millisecond {
+		t.Fatalf("expected at least one sleep before wake (~2s); only waited %s — degenerate first-poll-true path?", elapsed)
 	}
-	if elapsed > 150*time.Millisecond {
-		t.Fatalf("wake should fire on second poll (~20ms), but waited %s; in-loop wake path may be broken (post-deadline final check would be ~200ms)", elapsed)
+	if elapsed > 4*time.Second {
+		t.Fatalf("wake should fire on second poll (~2s), but waited %s; in-loop wake path may be broken (post-deadline final check would be ~5s)", elapsed)
 	}
 }
 
@@ -310,6 +307,89 @@ func TestManagedDoltPortAvailableForHost_NormalizesEmptyHost(t *testing.T) {
 	}
 	if !wildcardAvailable {
 		t.Errorf("none of {\"\", \"*\", \"0.0.0.0\"} reported port %d available after Close(); host normalization may be broken", port)
+	}
+}
+
+// TestManagedDoltStartupPortInUse pins which dolt startup diagnostics count as
+// "the port is taken". dolt reports a taken port in two shapes: the kernel's
+// bind error ("listen tcp ...: bind: address already in use") and, since
+// dolt 2.3.3, its own pre-bind check ("Port N already in use."). Both must
+// send the start loop to the retry/bump path; an unrelated "already in use"
+// complaint (a database lock, say) must not, or the loop would burn its
+// attempts re-binding ports that were never the problem.
+func TestManagedDoltStartupPortInUse(t *testing.T) {
+	tests := []struct {
+		name   string
+		output string
+		want   bool
+	}{
+		{
+			name:   "kernel-bind-error",
+			output: "panic: listen tcp 0.0.0.0:17777: bind: address already in use\n",
+			want:   true,
+		},
+		{
+			name:   "kernel-bind-error-mixed-case",
+			output: "Listen tcp 127.0.0.1:3307: bind: Address Already In Use",
+			want:   true,
+		},
+		{
+			name:   "dolt-2.3.3-port-check",
+			output: "Port 17777 already in use.\n",
+			want:   true,
+		},
+		{
+			name:   "dolt-2.3.3-port-check-after-startup-banner",
+			output: "Starting server with Config HP=\"0.0.0.0:17777\"|T=\"300000\"|R=\"false\"|L=\"warning\"\nPort 17777 already in use.\n",
+			want:   true,
+		},
+		{
+			name:   "dolt-2.3.3-port-check-case-insensitive",
+			output: "PORT 3307 ALREADY IN USE",
+			want:   true,
+		},
+		{
+			name:   "empty-output",
+			output: "",
+			want:   false,
+		},
+		{
+			name:   "ordinary-startup-banner",
+			output: "Starting server with Config HP=\"0.0.0.0:17777\"|T=\"300000\"|R=\"false\"|L=\"warning\"\n",
+			want:   false,
+		},
+		{
+			name:   "database-in-use-by-another-process",
+			output: "database already in use by another process\n",
+			want:   false,
+		},
+		{
+			name:   "port-without-a-number",
+			output: "Port already in use.\n",
+			want:   false,
+		},
+		{
+			name:   "port-with-a-non-numeric-name",
+			output: "Port http already in use.\n",
+			want:   false,
+		},
+		{
+			name:   "port-mentioned-without-in-use-complaint",
+			output: "listening on port 3307\n",
+			want:   false,
+		},
+		{
+			name:   "word-ending-in-port",
+			output: "support 3307 already in use\n",
+			want:   false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := doltStartupPortInUse(tt.output); got != tt.want {
+				t.Errorf("doltStartupPortInUse(%q) = %v, want %v", tt.output, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -466,6 +546,60 @@ func TestStartManagedDoltProcessWithOptions_AddressInUseBumpsPortWhenWaitTimesOu
 		logSuffixFn: func(_ string, _ int64) (string, error) {
 			// Only attempt 1 should reach the log-read; attempt 2 returns Ready.
 			return "address already in use", nil
+		},
+		// Probe BUSY for first 2 calls (the wait helper's in-loop + post-deadline
+		// checks), then AVAILABLE for the port-bump probe.
+		portAvailableFn: portBusyForFirstNCallsThenAvailable(2),
+		retryWindow:     50 * time.Millisecond,
+	})
+
+	report, err := startManagedDoltProcessWithOptions(cityPath, "0.0.0.0", strconv.Itoa(originalPort), "root", "warning", -1, 1*time.Second, false)
+	if err != nil {
+		t.Fatalf("expected success on attempt 2 (bumped port); got %v", err)
+	}
+	if !report.Ready {
+		t.Errorf("report.Ready=false; expected true")
+	}
+	if report.Port == originalPort {
+		t.Errorf("report.Port=%d; expected bump away from original (%d)", report.Port, originalPort)
+	}
+	if report.Attempts != 2 {
+		t.Errorf("report.Attempts=%d; expected 2", report.Attempts)
+	}
+	if startCalls != 2 {
+		t.Errorf("startCalls=%d; expected 2 (one start per attempt)", startCalls)
+	}
+}
+
+// TestStartManagedDoltProcessWithOptions_PortInUseTextBumpsPortWhenWaitTimesOut
+// is the AddressInUseBumpsPortWhenWaitTimesOut scenario with dolt 2.3.3's own
+// diagnostic ("Port N already in use.", exit 1) in the startup log instead of
+// the kernel's bind error. A foreign process holds the requested port, so the
+// wait window expires busy and the start must retry on a new port rather than
+// fail with "dolt server exited during startup". PR contract:
+//
+//   - err == nil
+//   - report.Ready == true
+//   - report.Port != originalPort (bumped via nextAvailableManagedDoltPortForHost)
+//   - report.Attempts == 2 (one bump happened)
+//   - startCalls == 2 (start invoked once per attempt)
+func TestStartManagedDoltProcessWithOptions_PortInUseTextBumpsPortWhenWaitTimesOut(t *testing.T) {
+	const originalPort = 17777
+	var startCalls int32
+	cityPath := installStartManagedDoltLoopStubs(t, startManagedDoltLoopStubs{
+		startFn: func(cityPath, _, _ string, _ *os.File) (managedDoltStartedProcess, error) {
+			atomic.AddInt32(&startCalls, 1)
+			return managedDoltStartedProcess{CityPath: cityPath, PID: 0}, nil
+		},
+		waitReadyFn: func(_, _, _, _ string, _ int, _ time.Duration, _ bool) (managedDoltWaitReadyReport, error) {
+			if atomic.LoadInt32(&startCalls) >= 2 {
+				return managedDoltWaitReadyReport{Ready: true, PIDAlive: true}, nil
+			}
+			return managedDoltWaitReadyReport{Ready: false, PIDAlive: false}, nil
+		},
+		logSuffixFn: func(_ string, _ int64) (string, error) {
+			// Only attempt 1 should reach the log-read; attempt 2 returns Ready.
+			return "Starting server with Config HP=\"0.0.0.0:17777\"|T=\"300000\"|R=\"false\"|L=\"warning\"\nPort 17777 already in use.\n", nil
 		},
 		// Probe BUSY for first 2 calls (the wait helper's in-loop + post-deadline
 		// checks), then AVAILABLE for the port-bump probe.

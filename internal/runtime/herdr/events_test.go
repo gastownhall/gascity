@@ -476,10 +476,6 @@ func TestSessionEventStreamResubscribesForNewAgentPane(t *testing.T) {
 // subscription ends — is invisible to teardown-time checks, so the count is
 // taken while the stream is still live.
 func TestSessionEventStreamReaderGoroutinesReleased(t *testing.T) {
-	origDebounce := sessionEventRelistDebounce
-	sessionEventRelistDebounce = 10 * time.Millisecond
-	defer func() { sessionEventRelistDebounce = origDebounce }()
-
 	f, sock := newFakeHerdrServer(t)
 	agents := []agentInfo{{Name: "a0", PaneID: "w0:p1"}}
 	f.setAgents(agents...)
@@ -498,7 +494,7 @@ func TestSessionEventStreamReaderGoroutinesReleased(t *testing.T) {
 			_ = ev
 		}
 	}()
-	time.Sleep(20 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
 	baseline := goroutineCount()
 
 	const cycles = 5
@@ -526,7 +522,7 @@ func TestSessionEventStreamReaderGoroutinesReleased(t *testing.T) {
 		if time.Now().After(deadline) {
 			break
 		}
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 	}
 	t.Errorf("goroutines still %d above baseline after %d resubscribe cycles (leak: ~1 stranded reader per cycle)", grew, cycles)
 }

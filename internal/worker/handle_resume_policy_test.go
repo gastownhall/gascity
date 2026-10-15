@@ -30,13 +30,13 @@ func TestNudgeToHeldSessionQueues(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			result, err := handle.Nudge(context.Background(), NudgeRequest{Text: "hello", Delivery: delivery})
+			result, err := handle.Nudge(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent), NudgeRequest{Text: "hello", Delivery: delivery})
 			if err != nil {
 				t.Fatalf("Nudge: %v", err)
 			}
 			// The session queues a sent nudge itself; a wait-idle nudge is
 			// left for the caller to queue.
-			want := NudgeQueuedHeld
+			want := NudgeQueued
 			if delivery == NudgeDeliveryWaitIdle {
 				want = NudgeUndeliveredHeld
 			}

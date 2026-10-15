@@ -464,10 +464,6 @@ fetch("/token", {
 </html>`
 }
 
-var registryDevicePollInterval = func(intervalSeconds int) time.Duration {
-	return time.Duration(intervalSeconds) * time.Second
-}
-
 func registryDeviceLogin(ctx context.Context, client *http.Client, baseURL, label string, stdout io.Writer) (string, error) {
 	body, err := json.Marshal(map[string]string{"label": label})
 	if err != nil {
@@ -522,7 +518,7 @@ func registryDeviceLogin(ctx context.Context, client *http.Client, baseURL, labe
 			return "", errors.New("device login expired")
 		}
 		select {
-		case <-time.After(registryDevicePollInterval(code.Interval)):
+		case <-time.After(time.Duration(code.Interval) * time.Second):
 		case <-ctx.Done():
 			return "", errors.New("timed out waiting for device login")
 		}

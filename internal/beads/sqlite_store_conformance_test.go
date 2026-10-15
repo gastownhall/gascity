@@ -33,7 +33,9 @@ func TestSQLiteStoreConformance(t *testing.T) {
 	beadstest.RunDepTests(t, factory)
 	beadstest.RunMetadataTests(t, factory)
 	beadstest.RunCloseReasonTests(t, factory)
+	beadstest.RunCloseNotificationTests(t, func(t *testing.T) beads.Store { return newSQLiteForConformance(t) })
 	beadstest.RunCloseReasonAfterReopenTests(t, factory)
+	beadstest.RunPinnedIDDuplicateConformance(t, func(t *testing.T) beads.Store { return newSQLiteForConformance(t) })
 }
 
 // TestSQLiteStoreReadyParityConformance proves a primed CachingStore over the

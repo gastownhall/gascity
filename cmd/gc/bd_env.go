@@ -802,8 +802,10 @@ var hostedCredentialProbeLoad = config.LoadOptions{SkipRevisionSnapshot: true}
 // next call without a restart. Errors are never cached.
 var hostedCredentialProbeCache sync.Map // normalized city.toml path → *hostedCredentialProbeEntry
 
-// hostedCredentialProbeLoads counts real config loads so tests can assert
-// that repeated probes reuse the entry.
+// hostedCredentialProbeLoads counts the probe's config loads (its cache misses)
+// so tests can assert that repeated probes reuse the entry. Inside an
+// invocation scope a miss is answered by the memo rather than composed again;
+// composedCityConfigLoads counts real compositions.
 var hostedCredentialProbeLoads atomic.Int64
 
 type hostedCredentialProbeEntry struct {
@@ -860,7 +862,10 @@ func citySelectsHostedBeadsCredentialProvider(cityPath string) (bool, error) {
 		}
 		hostedCredentialProbeCache.Delete(key)
 	}
-	cfg, prov, err := config.LoadWithIncludesOptions(fsys.OSFS{}, cityConfigPath, hostedCredentialProbeLoad)
+	// Inside an invocation scope (a `gc bd` passthrough) this is answered from
+	// the composition the rest of the command already read; see
+	// invocationConfigMemo. Outside one it is a plain composed load.
+	cfg, prov, err := loadComposedCityConfig(fsys.OSFS{}, cityConfigPath, hostedCredentialProbeLoad)
 	hostedCredentialProbeLoads.Add(1)
 	if err != nil {
 		return false, fmt.Errorf("load hosted Beads credential configuration: %w", err)
@@ -878,7 +883,10 @@ func citySelectsHostedBeadsCredentialProvider(cityPath string) (bool, error) {
 	}
 	// A city.toml rewritten while the load was in flight could leave an
 	// entry whose stat describes the new file but whose answer came from the
-	// old one; skip caching so the next call reloads.
+	// old one; skip caching so the next call reloads. A memo answer inside an
+	// invocation scope can predate both stats, which this cannot see; only
+	// the same one-shot command reads such an entry again, and it already
+	// shares that composition.
 	if after, ok := statHostedCredentialProbeSource(cityConfigPath); !ok || after != before {
 		cacheable = false
 	}
@@ -1537,11 +1545,13 @@ func bdTransportErrorMatches(cityPath, scopeRoot string, env map[string]string, 
 // bdSilentFallbackMarkerImport and bdSilentFallbackMarkerEmptyDB are the
 // substring pair bd emits when it loses the managed Dolt server and silently
 // falls back to opening the on-disk store with a JSONL auto-import. They are
-// load-bearing in three places — the two transport-error classifiers below
-// and bdOutputIndicatesSilentFallback — so they live here as the single
-// source of truth. If bd's banner wording ever changes, this is the only
-// edit site. (The root cause is fixed upstream in beads post-#3691; these
-// markers remain the symptom detector for deployments still on stable bd.)
+// load-bearing in four places — the two transport-error classifiers below,
+// gc hook's store-unavailable classification (through
+// bdTransportRetryableMarkers), and bdOutputIndicatesSilentFallback — so they
+// live here as the single source of truth. If bd's banner wording ever changes,
+// this is the only edit site. (The root cause is fixed upstream in beads
+// post-#3691; these markers remain the symptom detector for deployments still
+// on stable bd.)
 const (
 	bdSilentFallbackMarkerImport  = "auto-importing"
 	bdSilentFallbackMarkerEmptyDB = "into empty database"
@@ -1551,26 +1561,59 @@ const (
 
 var bdCommandRetrySleep = time.Sleep
 
-func bdTransportRetryableError(cityPath, scopeRoot string, env map[string]string, err error) bool {
-	return bdTransportErrorMatches(cityPath, scopeRoot, env, err, []string{
-		"server unreachable",
-		"dial tcp",
-		"connection refused",
-		"broken pipe",
-		"unexpected eof",
-		"bad connection",
-		"use of closed network connection",
-		// bd silently falls back to opening the on-disk store when it cannot
-		// reach the managed Dolt server. On an empty .beads/dolt/ that fallback
-		// triggers a JSONL auto-import, which presents as a 2m command timeout
-		// rather than a network error. Treat the auto-import marker as a
-		// transport failure so the managed-retry path republishes the correct
-		// port and retries against the live server. See gastownhall/gascity#1930.
-		bdSilentFallbackMarkerImport,
-		bdSilentFallbackMarkerEmptyDB,
-	})
+// bdTransportRetryableMarkers is the bd stderr/error string table gc uses
+// to classify transport-class failures. The managed retry below and gc
+// hook's store-unavailable signal both read it, so it is hoisted out of
+// bdTransportRetryableError rather than inlined: a marker added for one
+// consumer must classify for the other. gc hook classifies more than this
+// table lists (classifyWorkQueryStoreUnavailable): the dispatch availability
+// tier, which includes bd's circuit-breaker fail-fast, and bd's own
+// connection-error messages (bdConnectionErrorMarkers). Those are deliberately
+// not listed here, because the managed retry would fire on them too: it re-runs
+// any bd command, writes included, and a retry against a server whose breaker
+// is open lands inside the cooldown and fails fast again.
+//
+// The two consumers apply the table under different gates on purpose. The
+// managed retry runs only for a bd-contract store gc may recover
+// (bdTransportErrorMatches), while gc hook applies it to every failed work
+// query whatever the provider: a work query is an arbitrary shell command, and
+// a transport marker in its error leaves the answer unknown whichever store
+// printed it.
+//
+// It is an explicit compatibility surface with the bd CLI, and remains the
+// classification mechanism until bd ships a typed machine-readable error
+// envelope (a reserved exit-code contract distinguishing transport from
+// application failures; bd currently exits 1 for both, so exit codes carry
+// no transport signal today).
+var bdTransportRetryableMarkers = []string{
+	"server unreachable",
+	"dial tcp",
+	"connection refused",
+	"broken pipe",
+	"unexpected eof",
+	"bad connection",
+	"use of closed network connection",
+	// bd silently falls back to opening the on-disk store when it cannot
+	// reach the managed Dolt server. On an empty .beads/dolt/ that fallback
+	// triggers a JSONL auto-import, which presents as a 2m command timeout
+	// rather than a network error. Treat the auto-import marker as a
+	// transport failure so the managed-retry path republishes the correct
+	// port and retries against the live server. See gastownhall/gascity#1930.
+	bdSilentFallbackMarkerImport,
+	bdSilentFallbackMarkerEmptyDB,
 }
 
+func bdTransportRetryableError(cityPath, scopeRoot string, env map[string]string, err error) bool {
+	return bdTransportErrorMatches(cityPath, scopeRoot, env, err, bdTransportRetryableMarkers)
+}
+
+// bdTransportRecoverableError is the deliberately narrower trigger for managed
+// Dolt recovery: only markers that name an unreachable endpoint, or bd's silent
+// fallback after losing the server. The connection-teardown markers in
+// bdTransportRetryableMarkers ("broken pipe", "unexpected eof", "bad
+// connection", "use of closed network connection") are transient disconnects
+// that are retried but must not restart the managed server (#1878), so a marker
+// added to the shared table does not join this list by default.
 func bdTransportRecoverableError(cityPath, scopeRoot string, env map[string]string, err error) bool {
 	return bdTransportErrorMatches(cityPath, scopeRoot, env, err, []string{
 		"server unreachable",

@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -183,6 +184,7 @@ func TestRuntimeLeaseExcludesSharersAndKeepsTheEpoch(t *testing.T) {
 // TestRuntimeLeaseNameFlockOnly: a lease with no row (the closed-row reaper)
 // still excludes every holder of the name's flock.
 func TestRuntimeLeaseNameFlockOnly(t *testing.T) {
+	ExpectNoCityRefusalsForTest(t) // it checks a request with no city is refused
 	f, city := newLeaseFixture(t), t.TempDir()
 	reaper, err := TryRuntimeLease(nil, RuntimeLeaseRequest{City: city, Name: "s-lease"})
 	if err != nil || reaper.Epoch() != 0 {
@@ -505,6 +507,60 @@ func TestRuntimeLeaseWatch(t *testing.T) {
 	}
 }
 
+// TestRuntimeLeaseWatchCancelWaitsForItsRead (mc-rj2fc). Kills a cancel
+// that returns while the watch's read is still in flight: the caller then
+// closes the store under the read (CI's nil-DB panic in TestRuntimeLeaseWatch,
+// whose deferred cancel runs before the store's cleanup closes it). A cancel
+// over a blocked read returns only once that read has.
+func TestRuntimeLeaseWatchCancelWaitsForItsRead(t *testing.T) {
+	backing := openLeaseStore(t, t.TempDir())
+	store := &blockingReadStore{rowWriteRecorder: &rowWriteRecorder{Store: backing}, entered: make(chan struct{}, 1), release: make(chan struct{})}
+	var unblock sync.Once
+	unblockReads := func() { unblock.Do(func() { store.block.Store(false); close(store.release) }) }
+	f := leaseFixtureOver(t, store)
+	l, err := TryRuntimeLease(f.front, f.req(t.TempDir(), leaseT0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Release()
+	defer unblockReads() // before the Release, which reads too
+	store.block.Store(true)
+	_, cancel, err := l.Watch(context.Background(), time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-store.entered // the watch's read is in flight
+	canceled := make(chan struct{})
+	go func() { cancel(); close(canceled) }()
+	select {
+	case <-canceled:
+		t.Fatal("cancel returned while the watch's read was still in flight")
+	case <-time.After(50 * time.Millisecond):
+	}
+	unblockReads()
+	<-canceled
+}
+
+// blockingReadStore blocks every read while block is set, until release
+// closes, signaling entered as each blocked read starts.
+type blockingReadStore struct {
+	*rowWriteRecorder
+	block   atomic.Bool
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (s *blockingReadStore) Get(id string) (beads.Bead, error) {
+	if s.block.Load() {
+		select {
+		case s.entered <- struct{}{}:
+		default:
+		}
+		<-s.release
+	}
+	return s.rowWriteRecorder.Get(id)
+}
+
 // failingReadStore fails every read while fail is set.
 type failingReadStore struct {
 	*rowWriteRecorder
@@ -820,6 +876,80 @@ func (s *failingWriteStore) SetMetadataBatch(id string, kvs map[string]string) e
 	return s.Store.SetMetadataBatch(id, kvs)
 }
 
+// TestRuntimeLeaseHeld: only a live holder holds a lease. A holder on this
+// host holds the name's flock; another host's unexpired record holds; a
+// record that expired, or whose holder's flock this host now holds (it died),
+// is free, so a start it names was abandoned (mc-5a1ma). The probe writes
+// nothing and keeps the lock file's proof for the takeover that follows.
+func TestRuntimeLeaseHeld(t *testing.T) {
+	f, city := newLeaseFixture(t), t.TempDir()
+	held := func(now time.Time) bool {
+		t.Helper()
+		got, err := RuntimeLeaseHeld(f.front, f.req(city, now))
+		if err != nil {
+			t.Fatalf("RuntimeLeaseHeld: %v", err)
+		}
+		return got
+	}
+	if held(leaseT0) {
+		t.Fatal("a row nobody leased reads held")
+	}
+	live, err := TryRuntimeLease(f.front, f.req(city, leaseT0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !held(leaseT0) {
+		t.Fatal("a live holder on this host reads unheld")
+	}
+	if got, err := RuntimeLeaseHeld(nil, RuntimeLeaseRequest{City: city, Name: "s-lease"}); err != nil || !got {
+		t.Fatalf("the name's flock alone under a live holder = %v, %v; want held", got, err)
+	}
+	live.Release()
+
+	remote := MetadataPatch{
+		RuntimeLeaseHolderKey: "host-b/7/n", RuntimeLeaseEpochKey: "4", RuntimeLeaseTTLKey: "240",
+		RuntimeLeaseExpiresKey: leaseT0.Add(time.Minute).Format(time.RFC3339), RuntimeLeaseFlockKey: "another-boot/1/2/0123",
+	}
+	f.write(t, remote)
+	before := f.meta(t)
+	if !held(leaseT0) {
+		t.Fatal("another host's unexpired record reads unheld")
+	}
+	if held(leaseT0.Add(time.Minute)) {
+		t.Fatal("another host's expired record reads held; it must be reclaimable")
+	}
+	if after := f.meta(t); after[RuntimeLeaseHolderKey] != before[RuntimeLeaseHolderKey] || after[RuntimeLeaseEpochKey] != "4" {
+		t.Fatalf("the probe wrote the record: %v", after)
+	}
+
+	if runtimeLeaseBootID() != "" {
+		dead, err := TryRuntimeLease(f.front, f.req(city, leaseT0.Add(2*time.Minute)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		flock := lockFileIdentity(t, dead)
+		dead.Release()
+		remote[RuntimeLeaseHolderKey], remote[RuntimeLeaseFlockKey] = "host-a/99999/dead", flock
+		f.write(t, remote)
+		if held(leaseT0) {
+			t.Fatal("a dead holder on this host (its flock free, its record naming it) reads held")
+		}
+		// The probe kept the lock file's token: the takeover is immediate.
+		l, err := TryRuntimeLease(f.front, f.req(city, leaseT0))
+		if err != nil {
+			t.Fatalf("takeover after the probe: %v; want the dead holder taken over", err)
+		}
+		l.Release()
+	}
+
+	if err := f.store.Close(f.id); err != nil {
+		t.Fatal(err)
+	}
+	if held(leaseT0) {
+		t.Fatal("a closed row reads held")
+	}
+}
+
 // TestRuntimeLeaseFailedAcquireKeepsTheProof: an acquire whose record write
 // fails restores the lock file's token, so a dead holder's record is still
 // taken over at once afterwards.
@@ -902,5 +1032,153 @@ func TestClearRuntimeLeaseForReopen(t *testing.T) {
 	}
 	if b, _ := f.store.Get(other.ID); b.Metadata[RuntimeLeaseHolderKey] != "h/1/n" {
 		t.Fatalf("a non-session bead was touched: %v", b.Metadata)
+	}
+}
+
+// TestTakeRecordFailureKeepsTheProof (#7565 review): a TakeRecord whose
+// record write fails restores the lock file's token, as a failed
+// TryRuntimeLease does, so a dead holder's record is still taken over at once
+// afterwards instead of blocking until its expiry.
+func TestTakeRecordFailureKeepsTheProof(t *testing.T) {
+	if runtimeLeaseBootID() == "" {
+		t.Skip("no boot ID on this platform")
+	}
+	store := &failingWriteStore{Store: beads.NewMemStore()}
+	f, city := leaseFixtureOver(t, store), t.TempDir()
+	dead, err := TryRuntimeLease(f.front, f.req(city, leaseT0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	flock := lockFileIdentity(t, dead)
+	dead.Release()
+	f.write(t, MetadataPatch{
+		RuntimeLeaseHolderKey: "host-a/99999/dead", RuntimeLeaseEpochKey: "1", RuntimeLeaseTTLKey: "240",
+		RuntimeLeaseExpiresKey: leaseT0.Add(time.Minute).Format(time.RFC3339), RuntimeLeaseFlockKey: flock,
+	})
+	flockOnly, err := TryRuntimeLease(nil, RuntimeLeaseRequest{City: city, Name: "s-lease"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.fail = true
+	if err := flockOnly.TakeRecord(f.front, f.req(city, leaseT0)); err == nil || errors.Is(err, ErrRuntimeLeaseBusy) {
+		t.Fatalf("TakeRecord over a failing write = %v, want the write's error", err)
+	}
+	flockOnly.Release()
+	store.fail = false
+	l, err := TryRuntimeLease(f.front, f.req(city, leaseT0))
+	if err != nil || l.Epoch() != 2 {
+		t.Fatalf("takeover after a failed TakeRecord: %v, %v; want the dead holder taken over", err, l)
+	}
+	l.Release()
+}
+
+// TestRuntimeStartAbandoned (#7565 review must-fix): a start is abandoned only
+// when no live holder has its lease and the row, read under the flock, still
+// carries the in-flight marker the caller decided on: its state, its token
+// and its last_woke_at. A commit, a failure, a relaunch or a close since the
+// caller's read is no abandoned start.
+func TestRuntimeStartAbandoned(t *testing.T) {
+	f, city := newLeaseFixture(t), t.TempDir()
+	marker := MetadataPatch{"state": "creating", "instance_token": "T1", "last_woke_at": "2099-10-09T11:59:50Z"}
+	f.write(t, marker)
+	decided := infoFromPersistedBead(mustBead(t, f.store, f.id))
+	abandoned := func() bool {
+		t.Helper()
+		got, err := RuntimeStartAbandoned(f.front, f.req(city, leaseT0), decided)
+		if err != nil {
+			t.Fatalf("RuntimeStartAbandoned: %v", err)
+		}
+		return got
+	}
+	if !abandoned() {
+		t.Fatal("an unheld row still carrying the marker reads in flight")
+	}
+	live, err := TryRuntimeLease(f.front, f.req(city, leaseT0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if abandoned() {
+		t.Fatal("a start a live holder runs reads abandoned")
+	}
+	live.Release()
+	for _, moved := range []MetadataPatch{{"state": "active"}, {"instance_token": "T2"}, {"last_woke_at": ""}} {
+		f.write(t, moved)
+		if abandoned() {
+			t.Errorf("a row moved by %v since the decision reads abandoned", moved)
+		}
+		f.write(t, marker)
+	}
+	if err := f.store.Close(f.id); err != nil {
+		t.Fatal(err)
+	}
+	if abandoned() {
+		t.Fatal("a closed row reads abandoned")
+	}
+}
+
+func mustBead(t *testing.T, s beads.Store, id string) beads.Bead {
+	t.Helper()
+	b, err := s.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// clearRefusingStore refuses a runtime lease record's clear, and passes the
+// rest. It hides conditional writes, so the clear is a plain batch write.
+type clearRefusingStore struct{ beads.Store }
+
+func (s clearRefusingStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if h, ok := kvs[RuntimeLeaseHolderKey]; ok && h == "" {
+		return errors.New("store unavailable")
+	}
+	return s.Store.SetMetadataBatch(id, kvs)
+}
+
+// TestRuntimeLeaseReleaseChecked (CONTRACT v5.10p). Kills a release that
+// hides a failed clear from the kill (which then lifts its fence over the
+// record), or that reports a record another holder took as a failure (the
+// fence would stay for nothing), and a Release that stops logging what it
+// cannot report: ReleaseChecked returns the failed clear once, nil for a
+// lost record; Release logs the failed clear.
+func TestRuntimeLeaseReleaseChecked(t *testing.T) {
+	onHost(t, "host-a")
+	city := t.TempDir()
+	f := leaseFixtureOver(t, beads.NewMemStore())
+	refusing := NewStore(beads.SessionStore{Store: clearRefusingStore{f.store}})
+	l, err := TryRuntimeLease(refusing, f.req(city, leaseT0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := l.ReleaseChecked(); err == nil || f.meta(t)[RuntimeLeaseHolderKey] == "" {
+		t.Fatalf("ReleaseChecked = %v over a refused clear, record %v; want the error and the record left", err, f.meta(t))
+	}
+	if err := l.ReleaseChecked(); err != nil {
+		t.Fatalf("a second ReleaseChecked = %v, want nil: only the release reports", err)
+	}
+
+	f.write(t, RuntimeLeaseClearPatch())
+	lost, err := TryRuntimeLease(f.front, f.req(city, leaseT0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.write(t, MetadataPatch{RuntimeLeaseHolderKey: "host-b/1/other", RuntimeLeaseEpochKey: "9"}) // another host took it
+	if err := lost.ReleaseChecked(); err != nil || f.meta(t)[RuntimeLeaseHolderKey] != "host-b/1/other" {
+		t.Fatalf("ReleaseChecked of a lost record = %v, record %v; want nil and the taker's record kept", err, f.meta(t))
+	}
+
+	f.write(t, RuntimeLeaseClearPatch())
+	logged, err := TryRuntimeLease(refusing, f.req(city, leaseT0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(prev) })
+	logged.Release()
+	if !strings.Contains(buf.String(), "clearing the record at release") {
+		t.Fatalf("Release over a refused clear logged %q, want the failure", buf.String())
 	}
 }

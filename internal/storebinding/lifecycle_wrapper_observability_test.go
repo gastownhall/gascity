@@ -167,6 +167,49 @@ func TestShadowSweepFailureIsReportedAsMaintenance(t *testing.T) {
 	}
 }
 
+// failingQueueMaintain fails the queue's whole-queue maintenance pass.
+type failingQueueMaintain struct {
+	storebinding.NudgeQueue
+	err   error
+	calls int
+}
+
+func (q *failingQueueMaintain) Maintain(context.Context, time.Time) (storebinding.NudgeMaintenance, error) {
+	q.calls++
+	return storebinding.NudgeMaintenance{}, q.err
+}
+
+// TestQueueMaintainFailureIsReportedAsMaintenance pins the queue's own
+// maintenance pass to the maintenance kind. A wrapper that did not intercept
+// Maintain would promote the binding's method and report nothing at all.
+func TestQueueMaintainFailureIsReportedAsMaintenance(t *testing.T) {
+	observer := &recordingObserver{}
+	failure := errors.New("queue maintenance could not reach the store")
+	adapters := storebindingtest.ReferenceAdapters(storebindingtest.Wrap(t))
+	inner := adapters.Nudges
+	maintain := &failingQueueMaintain{NudgeQueue: inner.Queue, err: failure}
+	inner.Queue = maintain
+	wrapped, err := storebinding.WrapNudges(inner, storebinding.ClassWrapping{
+		Binding:    wrappedBindingName,
+		Capability: storebindingtest.ReferenceCapability,
+		Observer:   observer,
+	})
+	if err != nil {
+		t.Fatalf("wrapping the Nudges front doors: %v", err)
+	}
+	_, got := wrapped.Queue.Maintain(context.Background(), time.Now().UTC())
+	if !errors.Is(got, failure) || got.Error() != failure.Error() {
+		t.Fatalf("Maintain = %v, want the binding's own failure verbatim", got)
+	}
+	if maintain.calls != 1 {
+		t.Fatalf("a failing queue maintenance pass was attempted %d times, want exactly 1", maintain.calls)
+	}
+	want := "nudges/wrapped maintenance Maintain failed"
+	if !containsString(observer.stream(), want) {
+		t.Errorf("the observed stream never reports %q; it is:\n%s", want, formatStream(observer.stream()))
+	}
+}
+
 // flakyGraphStore fails its first Get and then serves normally.
 type flakyGraphStore struct {
 	storebinding.GraphStore

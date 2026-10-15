@@ -95,9 +95,27 @@ func preWakeCommitWith(
 		return 0, "", nil, fmt.Errorf("invalid session_name %q", name)
 	}
 
+	newGen, token, batch, class := preWakePatch(info, clk.Now(), sessions.NewInstanceToken())
+	batch = class.Into(info.ID, batch)
+	freshWake := info.WakeMode == "fresh" || pendingContinuationResetNeedsFreshStart(info)
+	if writeErr := write(batch); writeErr != nil {
+		return 0, "", nil, fmt.Errorf("pre-wake metadata commit: %w", writeErr)
+	}
+	traceFreshWakeMetadataReset(name, freshWakeResetPriorValues(info), batch, freshWake)
+
+	return newGen, token, batch, nil
+}
+
+// preWakePatch is the PreWakePatch preWakeCommit writes for info at now with
+// token as the new instance token, the generation it advances to, and the
+// disposition's PreWake cell (class) beside it: the idle stop's and a wait's
+// intent and a soft suspend go; an operator's suspend refuses it, and the
+// controller never starts that row (errStartUserHeld). The v2 start effect
+// decides the same patch in its PreWake CAS (CONTRACT v5 S1). It mints
+// nothing: the writer puts class in its write.
+func preWakePatch(info sessions.Info, now time.Time, token string) (newGen int, _ string, batch sessions.MetadataPatch, class sessions.DispositionPatch) {
 	gen, _ := strconv.Atoi(info.Generation)
 	newGen = gen + 1
-	token = sessions.NewInstanceToken()
 	continuationEpoch, _ := strconv.Atoi(info.ContinuationEpoch)
 	if continuationEpoch <= 0 {
 		continuationEpoch = sessions.DefaultContinuationEpoch
@@ -113,24 +131,18 @@ func preWakeCommitWith(
 		sleepReason = string(sessions.SleepReasonIdleTimeout)
 	}
 
-	freshWake := info.WakeMode == "fresh" || pendingContinuationResetNeedsFreshStart(info)
-	batch := sessions.PreWakePatch(sessions.PreWakePatchInput{
+	batch = sessions.PreWakePatch(sessions.PreWakePatchInput{
 		Generation:        newGen,
 		InstanceToken:     token,
 		ContinuationEpoch: continuationEpoch,
-		Now:               clk.Now(),
+		Now:               now,
 		SleepReason:       sleepReason,
-		FreshWake:         freshWake,
+		FreshWake:         info.WakeMode == "fresh" || pendingContinuationResetNeedsFreshStart(info),
 		// A retry of a claimed pending create continues its episode, so the
 		// stale-create bound must keep measuring from the episode start.
 		EpisodePendingCreateStartedAt: pendingCreateEpisodeStartedAt(info),
 	})
-	if writeErr := write(batch); writeErr != nil {
-		return 0, "", nil, fmt.Errorf("pre-wake metadata commit: %w", writeErr)
-	}
-	traceFreshWakeMetadataReset(name, freshWakeResetPriorValues(info), batch, freshWake)
-
-	return newGen, token, batch, nil
+	return newGen, token, batch, sessions.CellInfo(info, sessions.ActorController, sessions.DispEvent{Kind: sessions.EvPreWake}, now)
 }
 
 // pendingCreateEpisodeStartedAt returns the pending_create_started_at a wake
@@ -172,6 +184,9 @@ func freshWakeResetPriorValues(info sessions.Info) map[string]string {
 		"primed_at":            info.PrimedAtMetadata,
 		"priming_attempted_at": info.PrimingAttemptedAtMetadata,
 		"prompt_hash":          info.PromptHashMetadata,
+		// The resume backstop's run is cleared with the conversation (mc-bm1af).
+		"resume_failures": info.ResumeFailures,
+		"resume_launch":   info.ResumeLaunch,
 	}
 }
 
@@ -378,6 +393,12 @@ func setReconcilerDrainAckMetadata(sp runtime.Provider, name string, ds *drainSt
 		return err
 	}
 	if err := sp.SetMeta(name, "GC_DRAIN_ACK", "1"); err != nil {
+		if runtime.OnlyMetadataNotMirrored(err) {
+			// An ack that landed is an ack; only the runtime's view of it lags,
+			// and the log reports that.
+			log.Printf("session wake: setting reconciler drain ack metadata GC_DRAIN_ACK for %s: %v", name, err)
+			return nil
+		}
 		_ = clearReconcilerDrainAckMetadata(sp, name)
 		return err
 	}
@@ -401,7 +422,11 @@ func clearReconcilerDrainAckMetadata(sp runtime.Provider, name string) error {
 	} {
 		if err := sp.RemoveMeta(name, key); err != nil {
 			log.Printf("session wake: clearing reconciler drain ack metadata %s for %s: %v", key, name, err)
-			errs = append(errs, fmt.Errorf("removing %s: %w", key, err))
+			// A removal that landed is a removal; only the runtime's view of it
+			// lags, and the log above reports that.
+			if !runtime.OnlyMetadataNotMirrored(err) {
+				errs = append(errs, fmt.Errorf("removing %s: %w", key, err))
+			}
 		}
 	}
 	return errors.Join(errs...)
@@ -674,10 +699,10 @@ func cancelRecoveredDrainForAssignedWorkInfo(info sessions.Info, sp runtime.Prov
 }
 
 // userHoldDrainReleased reports a user-hold drain whose row no longer carries
-// the operator's intent (HoldUser): a resume consumed the hold after the drain
-// began.
-func userHoldDrainReleased(reason string, info sessions.Info, now time.Time) bool {
-	return reason == string(sessions.SleepReasonUserHold) && sessions.HoldsInfo(info, now).In&sessions.HoldUser == 0
+// the operator's suspend (Disposition.KeepsSlot): a resume consumed the hold
+// after the drain began.
+func userHoldDrainReleased(reason string, info sessions.Info) bool {
+	return reason == string(sessions.SleepReasonUserHold) && !sessions.DispositionOfInfo(info).KeepsSlot()
 }
 
 func advanceSessionDrainsWithSessionsTraced(
@@ -735,7 +760,7 @@ func advanceSessionDrainsWithSessionsTraced(
 
 		// An operator's resume consumed the hold this drain was for: cancel
 		// it, so neither its ack nor its completion acts on the resumed row.
-		if userHoldDrainReleased(ds.reason, info, clk.Now()) {
+		if userHoldDrainReleased(ds.reason, info) {
 			dt.clearIdleProbe(id)
 			if ds.ackSet {
 				_ = clearReconcilerDrainAckMetadata(sp, name)
@@ -945,7 +970,7 @@ func completeDrain(info sessions.Info, sessFront *sessions.Store, ds *drainState
 		return
 	}
 	batch := sessions.CompleteDrainPatch(clk.Now(), ds.reason, info.WakeMode == "fresh")
-	_, _ = sessFront.ApplyKeepingUserHold(info.ID, batch)
+	_, _ = sessFront.ApplySleep(info.ID, batch)
 }
 
 // verifiedStop stops the session d decided on after verifying the

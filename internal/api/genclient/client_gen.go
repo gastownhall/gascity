@@ -510,6 +510,45 @@ func (e SessionTranscriptRawResponseFormat) Valid() bool {
 	}
 }
 
+// Defines values for SlingChildOutcomeOutcome.
+const (
+	Failed  SlingChildOutcomeOutcome = "failed"
+	Routed  SlingChildOutcomeOutcome = "routed"
+	Skipped SlingChildOutcomeOutcome = "skipped"
+)
+
+// Valid indicates whether the value is a known member of the SlingChildOutcomeOutcome enum.
+func (e SlingChildOutcomeOutcome) Valid() bool {
+	switch e {
+	case Failed:
+		return true
+	case Routed:
+		return true
+	case Skipped:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SlingResponseStatus.
+const (
+	Partial SlingResponseStatus = "partial"
+	Slung   SlingResponseStatus = "slung"
+)
+
+// Valid indicates whether the value is a known member of the SlingResponseStatus enum.
+func (e SlingResponseStatus) Valid() bool {
+	switch e {
+	case Partial:
+		return true
+	case Slung:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for StatusConditionalWriteStoreVerdictLatch.
 const (
 	StatusConditionalWriteStoreVerdictLatchIncapable StatusConditionalWriteStoreVerdictLatch = "incapable"
@@ -983,60 +1022,60 @@ type AgentOutputResponse struct {
 
 // AgentPatch defines model for AgentPatch.
 type AgentPatch struct {
-	AppendFragments         *[]string         `json:"AppendFragments"`
-	Args                    *[]string         `json:"Args"`
-	AssignedWorkDeferLimit  *int64            `json:"AssignedWorkDeferLimit"`
-	Attach                  *bool             `json:"Attach"`
-	AutoReclaimStaleClaims  *bool             `json:"AutoReclaimStaleClaims"`
-	ContextAdvisory         ContextAdvisory   `json:"ContextAdvisory"`
-	DefaultSlingFormula     *string           `json:"DefaultSlingFormula"`
-	DependsOn               *[]string         `json:"DependsOn"`
-	Dir                     string            `json:"Dir"`
-	Env                     map[string]string `json:"Env"`
-	EnvRemove               *[]string         `json:"EnvRemove"`
-	HooksInstalled          *bool             `json:"HooksInstalled"`
-	IdleTimeout             *string           `json:"IdleTimeout"`
-	InjectAssignedSkills    *bool             `json:"InjectAssignedSkills"`
-	InjectFragments         *[]string         `json:"InjectFragments"`
-	InjectFragmentsAppend   *[]string         `json:"InjectFragmentsAppend"`
-	InstallAgentHooks       *[]string         `json:"InstallAgentHooks"`
-	InstallAgentHooksAppend *[]string         `json:"InstallAgentHooksAppend"`
-	Lifecycle               *string           `json:"Lifecycle"`
-	MCP                     *[]string         `json:"MCP"`
-	MCPAppend               *[]string         `json:"MCPAppend"`
-	MaxActiveSessions       *int64            `json:"MaxActiveSessions"`
-	MaxSessionAge           *string           `json:"MaxSessionAge"`
-	MaxSessionAgeJitter     *string           `json:"MaxSessionAgeJitter"`
-	MinActiveSessions       *int64            `json:"MinActiveSessions"`
-	MouseMode               *string           `json:"MouseMode"`
-	Name                    string            `json:"Name"`
-	Nudge                   *string           `json:"Nudge"`
-	OptionDefaults          map[string]string `json:"OptionDefaults"`
-	OverlayDir              *string           `json:"OverlayDir"`
-	Pool                    PoolOverride      `json:"Pool"`
-	PreStart                *[]string         `json:"PreStart"`
-	PreStartAppend          *[]string         `json:"PreStartAppend"`
-	PromptTemplate          *string           `json:"PromptTemplate"`
-	Provider                *string           `json:"Provider"`
-	ResumeCommand           *string           `json:"ResumeCommand"`
-	Rig                     string            `json:"Rig"`
-	ScaleCheck              *string           `json:"ScaleCheck"`
-	Scope                   *string           `json:"Scope"`
-	Session                 *string           `json:"Session"`
-	SessionLive             *[]string         `json:"SessionLive"`
-	SessionLiveAppend       *[]string         `json:"SessionLiveAppend"`
-	SessionSetup            *[]string         `json:"SessionSetup"`
-	SessionSetupAppend      *[]string         `json:"SessionSetupAppend"`
-	SessionSetupScript      *string           `json:"SessionSetupScript"`
-	Skills                  *[]string         `json:"Skills"`
-	SkillsAppend            *[]string         `json:"SkillsAppend"`
-	SleepAfterIdle          *string           `json:"SleepAfterIdle"`
-	StartCommand            *string           `json:"StartCommand"`
-	Suspended               *bool             `json:"Suspended"`
-	TmuxAlias               *string           `json:"TmuxAlias"`
-	Upstream                *string           `json:"Upstream"`
-	WakeMode                *string           `json:"WakeMode"`
-	WorkDir                 *string           `json:"WorkDir"`
+	AppendFragments         *[]string          `json:"AppendFragments"`
+	Args                    *[]string          `json:"Args"`
+	AssignedWorkDeferLimit  *int64             `json:"AssignedWorkDeferLimit"`
+	Attach                  *bool              `json:"Attach"`
+	AutoReclaimStaleClaims  *bool              `json:"AutoReclaimStaleClaims"`
+	ContextAdvisory         *ContextAdvisory   `json:"ContextAdvisory,omitempty"`
+	DefaultSlingFormula     *string            `json:"DefaultSlingFormula"`
+	DependsOn               *[]string          `json:"DependsOn"`
+	Dir                     string             `json:"Dir"`
+	Env                     *map[string]string `json:"Env,omitempty"`
+	EnvRemove               *[]string          `json:"EnvRemove"`
+	HooksInstalled          *bool              `json:"HooksInstalled"`
+	IdleTimeout             *string            `json:"IdleTimeout"`
+	InjectAssignedSkills    *bool              `json:"InjectAssignedSkills"`
+	InjectFragments         *[]string          `json:"InjectFragments"`
+	InjectFragmentsAppend   *[]string          `json:"InjectFragmentsAppend"`
+	InstallAgentHooks       *[]string          `json:"InstallAgentHooks"`
+	InstallAgentHooksAppend *[]string          `json:"InstallAgentHooksAppend"`
+	Lifecycle               *string            `json:"Lifecycle"`
+	MCP                     *[]string          `json:"MCP"`
+	MCPAppend               *[]string          `json:"MCPAppend"`
+	MaxActiveSessions       *int64             `json:"MaxActiveSessions"`
+	MaxSessionAge           *string            `json:"MaxSessionAge"`
+	MaxSessionAgeJitter     *string            `json:"MaxSessionAgeJitter"`
+	MinActiveSessions       *int64             `json:"MinActiveSessions"`
+	MouseMode               *string            `json:"MouseMode"`
+	Name                    string             `json:"Name"`
+	Nudge                   *string            `json:"Nudge"`
+	OptionDefaults          *map[string]string `json:"OptionDefaults,omitempty"`
+	OverlayDir              *string            `json:"OverlayDir"`
+	Pool                    *PoolOverride      `json:"Pool,omitempty"`
+	PreStart                *[]string          `json:"PreStart"`
+	PreStartAppend          *[]string          `json:"PreStartAppend"`
+	PromptTemplate          *string            `json:"PromptTemplate"`
+	Provider                *string            `json:"Provider"`
+	ResumeCommand           *string            `json:"ResumeCommand"`
+	Rig                     string             `json:"Rig"`
+	ScaleCheck              *string            `json:"ScaleCheck"`
+	Scope                   *string            `json:"Scope"`
+	Session                 *string            `json:"Session"`
+	SessionLive             *[]string          `json:"SessionLive"`
+	SessionLiveAppend       *[]string          `json:"SessionLiveAppend"`
+	SessionSetup            *[]string          `json:"SessionSetup"`
+	SessionSetupAppend      *[]string          `json:"SessionSetupAppend"`
+	SessionSetupScript      *string            `json:"SessionSetupScript"`
+	Skills                  *[]string          `json:"Skills"`
+	SkillsAppend            *[]string          `json:"SkillsAppend"`
+	SleepAfterIdle          *string            `json:"SleepAfterIdle"`
+	StartCommand            *string            `json:"StartCommand"`
+	Suspended               *bool              `json:"Suspended"`
+	TmuxAlias               *string            `json:"TmuxAlias"`
+	Upstream                *string            `json:"Upstream"`
+	WakeMode                *string            `json:"WakeMode"`
+	WorkDir                 *string            `json:"WorkDir"`
 }
 
 // AgentPatchSetInputBody defines model for AgentPatchSetInputBody.
@@ -1631,7 +1670,7 @@ type ConversationTranscriptRecord struct {
 
 	// Kind Direction of a transcript entry.
 	Kind     TranscriptMessageKind `json:"Kind"`
-	Metadata map[string]string     `json:"Metadata"`
+	Metadata *map[string]string    `json:"Metadata,omitempty"`
 
 	// Provenance Provenance of a transcript entry (freshly observed vs. replayed from persisted history).
 	Provenance        TranscriptProvenance `json:"Provenance"`
@@ -1707,15 +1746,15 @@ type Cursors struct {
 
 // DeliveryContextRecord defines model for DeliveryContextRecord.
 type DeliveryContextRecord struct {
-	BindingGeneration int64             `json:"BindingGeneration"`
-	Conversation      ConversationRef   `json:"Conversation"`
-	ID                string            `json:"ID"`
-	LastMessageID     string            `json:"LastMessageID"`
-	LastPublishedAt   time.Time         `json:"LastPublishedAt"`
-	Metadata          map[string]string `json:"Metadata"`
-	SchemaVersion     int64             `json:"SchemaVersion"`
-	SessionID         string            `json:"SessionID"`
-	SourceSessionID   string            `json:"SourceSessionID"`
+	BindingGeneration int64              `json:"BindingGeneration"`
+	Conversation      ConversationRef    `json:"Conversation"`
+	ID                string             `json:"ID"`
+	LastMessageID     string             `json:"LastMessageID"`
+	LastPublishedAt   time.Time          `json:"LastPublishedAt"`
+	Metadata          *map[string]string `json:"Metadata,omitempty"`
+	SchemaVersion     int64              `json:"SchemaVersion"`
+	SessionID         string             `json:"SessionID"`
+	SourceSessionID   string             `json:"SourceSessionID"`
 }
 
 // Dep defines model for Dep.
@@ -2254,12 +2293,12 @@ type InboundEventPayload struct {
 
 // InboundResult defines model for InboundResult.
 type InboundResult struct {
-	Binding         SessionBindingRecord         `json:"Binding"`
-	GroupRoute      GroupRouteDecision           `json:"GroupRoute"`
-	Message         ExternalInboundMessage       `json:"Message"`
-	TargetAgentName string                       `json:"TargetAgentName"`
-	TargetSessionID string                       `json:"TargetSessionID"`
-	TranscriptEntry ConversationTranscriptRecord `json:"TranscriptEntry"`
+	Binding         *SessionBindingRecord         `json:"Binding,omitempty"`
+	GroupRoute      *GroupRouteDecision           `json:"GroupRoute,omitempty"`
+	Message         ExternalInboundMessage        `json:"Message"`
+	TargetAgentName string                        `json:"TargetAgentName"`
+	TargetSessionID string                        `json:"TargetSessionID"`
+	TranscriptEntry *ConversationTranscriptRecord `json:"TranscriptEntry,omitempty"`
 }
 
 // ListBodyAgentPatch defines model for ListBodyAgentPatch.
@@ -2561,7 +2600,7 @@ type MailReplyInputBody struct {
 	// Body Reply body.
 	Body *string `json:"body,omitempty"`
 
-	// From Sender name.
+	// From Sender: the operator (human, or the dashboard's wire alias DASHBOARD_OPERATOR_WIRE_ALIAS), a configured agent, a configured named session, or a live session of a configured agent. Optional in the schema, but an empty or unconfigured sender is refused (422 at body.from).
 	From *string `json:"from,omitempty"`
 
 	// Subject Reply subject.
@@ -2573,7 +2612,7 @@ type MailSendInputBody struct {
 	// Body Message body.
 	Body *string `json:"body,omitempty"`
 
-	// From Sender name.
+	// From Sender: the operator (human, or the dashboard's wire alias DASHBOARD_OPERATOR_WIRE_ALIAS), a configured agent, a configured named session, or a live session of a configured agent. Optional in the schema, but an empty or unconfigured sender is refused (422 at body.from).
 	From *string `json:"from,omitempty"`
 
 	// Rig Rig name.
@@ -2884,13 +2923,14 @@ type OutboundEventPayload struct {
 
 // OutboundResult defines model for OutboundResult.
 type OutboundResult struct {
-	DeliveryContext DeliveryContextRecord        `json:"DeliveryContext"`
-	Receipt         PublishReceipt               `json:"Receipt"`
-	TranscriptEntry ConversationTranscriptRecord `json:"TranscriptEntry"`
+	DeliveryContext *DeliveryContextRecord        `json:"DeliveryContext,omitempty"`
+	Receipt         PublishReceipt                `json:"Receipt"`
+	TranscriptEntry *ConversationTranscriptRecord `json:"TranscriptEntry,omitempty"`
 }
 
 // OutputTurn defines model for OutputTurn.
 type OutputTurn struct {
+	Id        *string `json:"id,omitempty"`
 	Role      string  `json:"role"`
 	Text      string  `json:"text"`
 	Timestamp *string `json:"timestamp,omitempty"`
@@ -3084,21 +3124,21 @@ type ProviderOptionDTO struct {
 
 // ProviderPatch defines model for ProviderPatch.
 type ProviderPatch struct {
-	ACPArgs              *[]string         `json:"ACPArgs"`
-	ACPCommand           *string           `json:"ACPCommand"`
-	AcceptStartupDialogs *bool             `json:"AcceptStartupDialogs"`
-	Args                 *[]string         `json:"Args"`
-	ArgsAppend           *[]string         `json:"ArgsAppend"`
-	Base                 *string           `json:"Base"`
-	Command              *string           `json:"Command"`
-	Env                  map[string]string `json:"Env"`
-	EnvRemove            *[]string         `json:"EnvRemove"`
-	Name                 string            `json:"Name"`
-	OptionsSchemaMerge   *string           `json:"OptionsSchemaMerge"`
-	PromptFlag           *string           `json:"PromptFlag"`
-	PromptMode           *string           `json:"PromptMode"`
-	ReadyDelayMs         *int64            `json:"ReadyDelayMs"`
-	Replace              bool              `json:"Replace"`
+	ACPArgs              *[]string          `json:"ACPArgs"`
+	ACPCommand           *string            `json:"ACPCommand"`
+	AcceptStartupDialogs *bool              `json:"AcceptStartupDialogs"`
+	Args                 *[]string          `json:"Args"`
+	ArgsAppend           *[]string          `json:"ArgsAppend"`
+	Base                 *string            `json:"Base"`
+	Command              *string            `json:"Command"`
+	Env                  *map[string]string `json:"Env,omitempty"`
+	EnvRemove            *[]string          `json:"EnvRemove"`
+	Name                 string             `json:"Name"`
+	OptionsSchemaMerge   *string            `json:"OptionsSchemaMerge"`
+	PromptFlag           *string            `json:"PromptFlag"`
+	PromptMode           *string            `json:"PromptMode"`
+	ReadyDelayMs         *int64             `json:"ReadyDelayMs"`
+	Replace              bool               `json:"Replace"`
 }
 
 // ProviderPatchSetInputBody defines model for ProviderPatchSetInputBody.
@@ -3259,12 +3299,12 @@ type ProxiedEndpointStamp struct {
 
 // PublishReceipt defines model for PublishReceipt.
 type PublishReceipt struct {
-	Conversation ConversationRef   `json:"Conversation"`
-	Delivered    bool              `json:"Delivered"`
-	FailureKind  string            `json:"FailureKind"`
-	MessageID    string            `json:"MessageID"`
-	Metadata     map[string]string `json:"Metadata"`
-	RetryAfter   int64             `json:"RetryAfter"`
+	Conversation ConversationRef    `json:"Conversation"`
+	Delivered    bool               `json:"Delivered"`
+	FailureKind  string             `json:"FailureKind"`
+	MessageID    string             `json:"MessageID"`
+	Metadata     *map[string]string `json:"Metadata,omitempty"`
+	RetryAfter   int64              `json:"RetryAfter"`
 }
 
 // ReadinessItem defines model for ReadinessItem.
@@ -3308,6 +3348,9 @@ type RequestFailedPayload struct {
 
 	// RequestId Correlation ID from the 202 response.
 	RequestId string `json:"request_id"`
+
+	// SessionId Session a failed session.create had already written, when the server could identify it, so the client can inspect or clean it up instead of retrying into a duplicate. Absence does not prove that no session was written. The event subject does not carry this ID; match the event to its request by request_id.
+	SessionId *string `json:"session_id,omitempty"`
 }
 
 // RequestFailedPayloadOperation Which operation failed.
@@ -3393,15 +3436,15 @@ type RigCreateSucceededPayload struct {
 
 // RigPatch defines model for RigPatch.
 type RigPatch struct {
-	BeadsProxiedIdleTimeout *string           `json:"BeadsProxiedIdleTimeout"`
-	DefaultBranch           *string           `json:"DefaultBranch"`
-	DefaultMergeStrategy    *string           `json:"DefaultMergeStrategy"`
-	FormulaVars             map[string]string `json:"FormulaVars"`
-	Name                    string            `json:"Name"`
-	Path                    *string           `json:"Path"`
-	Prefix                  *string           `json:"Prefix"`
-	Suspended               *bool             `json:"Suspended"`
-	SuspendedOnStart        *bool             `json:"SuspendedOnStart"`
+	BeadsProxiedIdleTimeout *string            `json:"BeadsProxiedIdleTimeout"`
+	DefaultBranch           *string            `json:"DefaultBranch"`
+	DefaultMergeStrategy    *string            `json:"DefaultMergeStrategy"`
+	FormulaVars             *map[string]string `json:"FormulaVars,omitempty"`
+	Name                    string             `json:"Name"`
+	Path                    *string            `json:"Path"`
+	Prefix                  *string            `json:"Prefix"`
+	Suspended               *bool              `json:"Suspended"`
+	SuspendedOnStart        *bool              `json:"SuspendedOnStart"`
 }
 
 // RigPatchSetInputBody defines model for RigPatchSetInputBody.
@@ -3702,6 +3745,9 @@ type SessionCreateBody struct {
 	// Message Initial message to send to the session.
 	Message *string `json:"message,omitempty"`
 
+	// Metadata External client metadata: real_world_app_* keys only (any other key is refused with 422). The generic bead API never writes a session row.
+	Metadata *map[string]string `json:"metadata,omitempty"`
+
 	// Name Agent or provider name.
 	Name *string `json:"name,omitempty"`
 
@@ -3803,6 +3849,9 @@ type SessionMessageSucceededPayload struct {
 type SessionPatchBody struct {
 	// Alias Session alias. Empty string clears the alias.
 	Alias *string `json:"alias,omitempty"`
+
+	// Metadata External client metadata: real_world_app_* keys only (any other key is refused with 422); an empty value clears the key.
+	Metadata *map[string]string `json:"metadata,omitempty"`
 
 	// Title Session title. If provided, must be non-empty.
 	Title *string `json:"title,omitempty"`
@@ -3961,6 +4010,24 @@ type SessionResponse struct {
 	Template               string                  `json:"template"`
 	Title                  string                  `json:"title"`
 	WorkDir                *string                 `json:"work_dir,omitempty"`
+}
+
+// SessionStrandedClaimsPayload defines model for SessionStrandedClaimsPayload.
+type SessionStrandedClaimsPayload struct {
+	// Claims The stranded claims, sorted by bead ID.
+	Claims *[]StrandedClaim `json:"claims"`
+
+	// Kind What left the claims on the seat: its close reason (drained, orphaned, ...), killed, retired, or manual (gc session close).
+	Kind string `json:"kind"`
+
+	// SessionId Canonical session bead ID of the closed or retired seat holding the claims.
+	SessionId string `json:"session_id"`
+
+	// SessionName Runtime session name from the session bead metadata, when set.
+	SessionName *string `json:"session_name,omitempty"`
+
+	// Template Template of the seat, when set.
+	Template *string `json:"template,omitempty"`
 }
 
 // SessionStrandedPayload defines model for SessionStrandedPayload.
@@ -4975,6 +5042,46 @@ type SlingBatchSummary struct {
 	Total int64 `json:"total"`
 }
 
+// SlingChildConflict defines model for SlingChildConflict.
+type SlingChildConflict struct {
+	// BlockingWorkflowIds Live workflow roots that refused the launch.
+	BlockingWorkflowIds *[]string `json:"blocking_workflow_ids"`
+
+	// Hint Command that deletes the blocking workflows. Re-slinging with force launches beside them instead.
+	Hint string `json:"hint"`
+
+	// SourceBeadId Source bead whose live workflow refused the launch.
+	SourceBeadId string `json:"source_bead_id"`
+}
+
+// SlingChildOutcome defines model for SlingChildOutcome.
+type SlingChildOutcome struct {
+	// BeadId Child bead ID.
+	BeadId   string              `json:"bead_id"`
+	Conflict *SlingChildConflict `json:"conflict,omitempty"`
+
+	// Formula Formula attached to the child, when one was.
+	Formula *string `json:"formula,omitempty"`
+
+	// MoleculeId Root of the formula wisp attached to the child, when a non-graph formula was attached.
+	MoleculeId *string `json:"molecule_id,omitempty"`
+
+	// Outcome routed: this sling routed the child (or attached a formula to it). failed: routing it failed; see reason. skipped: already routed to the target, or not open (see status).
+	Outcome SlingChildOutcomeOutcome `json:"outcome"`
+
+	// Reason Why routing the child failed. Present only for outcome failed.
+	Reason *string `json:"reason,omitempty"`
+
+	// Status The child's bead status when it was skipped because it was not open.
+	Status *string `json:"status,omitempty"`
+
+	// WorkflowId Graph workflow launched for the child, when one was.
+	WorkflowId *string `json:"workflow_id,omitempty"`
+}
+
+// SlingChildOutcomeOutcome routed: this sling routed the child (or attached a formula to it). failed: routing it failed; see reason. skipped: already routed to the target, or not open (see status).
+type SlingChildOutcomeOutcome string
+
 // SlingInputBody defines model for SlingInputBody.
 type SlingInputBody struct {
 	// AttachedBeadId Bead or convoy ID to attach formula to, in place of bead (gc sling --on).
@@ -5029,6 +5136,9 @@ type SlingResponse struct {
 	Batch          *SlingBatchSummary `json:"batch,omitempty"`
 	Bead           *string            `json:"bead,omitempty"`
 
+	// Children One entry per child of the expanded convoy, in the order gc sling reports them: routed, failed (with the reason) or skipped. Present whenever batch is.
+	Children *[]SlingChildOutcome `json:"children,omitempty"`
+
 	// ConvoyId Auto-convoy tracking the routed bead, when one was created or reused. Matches gc sling --json convoy_id.
 	ConvoyId *string `json:"convoy_id,omitempty"`
 
@@ -5038,14 +5148,19 @@ type SlingResponse struct {
 	Mode         *string `json:"mode,omitempty"`
 
 	// MoleculeId Root of the formula wisp attached to the bead, when a non-graph (v1) formula was attached. Matches gc sling --json molecule_id.
-	MoleculeId *string   `json:"molecule_id,omitempty"`
-	RootBeadId *string   `json:"root_bead_id,omitempty"`
-	Run        *RunRef   `json:"run,omitempty"`
-	Status     string    `json:"status"`
-	Target     string    `json:"target"`
-	Warnings   *[]string `json:"warnings,omitempty"`
-	WorkflowId *string   `json:"workflow_id,omitempty"`
+	MoleculeId *string `json:"molecule_id,omitempty"`
+	RootBeadId *string `json:"root_bead_id,omitempty"`
+	Run        *RunRef `json:"run,omitempty"`
+
+	// Status slung: the sling completed. partial: a convoy sling routed some children and failed others; the request changed state, so do not retry it as a whole. children names each child's outcome, and batch.failed counts the failures.
+	Status     SlingResponseStatus `json:"status"`
+	Target     string              `json:"target"`
+	Warnings   *[]string           `json:"warnings,omitempty"`
+	WorkflowId *string             `json:"workflow_id,omitempty"`
 }
+
+// SlingResponseStatus slung: the sling completed. partial: a convoy sling routed some children and failed others; the request changed state, so do not retry it as a whole. children names each child's outcome, and batch.failed counts the failures.
+type SlingResponseStatus string
 
 // Status defines model for Status.
 type Status struct {
@@ -5383,6 +5498,18 @@ type StoreMaintenanceFailedPayload struct {
 	ErrorMsg     string  `json:"error_msg"`
 	SnapshotPath *string `json:"snapshot_path,omitempty"`
 	Stage        string  `json:"stage"`
+}
+
+// StrandedClaim defines model for StrandedClaim.
+type StrandedClaim struct {
+	// BeadId The claim's work bead ID.
+	BeadId string `json:"bead_id"`
+
+	// Reason Why it was kept: unserved-route.
+	Reason string `json:"reason"`
+
+	// Route The route the claim would be released into, when it has one: no configured agent serves it.
+	Route *string `json:"route,omitempty"`
 }
 
 // SubmissionCapabilities defines model for SubmissionCapabilities.
@@ -6699,6 +6826,22 @@ type TypedEventStreamEnvelopeSessionColdStartTimeout struct {
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeSessionConversationReset defines model for TypedEventStreamEnvelopeSessionConversationReset.
+type TypedEventStreamEnvelopeSessionConversationReset struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          SessionLifecyclePayload  `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeSessionCrashed defines model for TypedEventStreamEnvelopeSessionCrashed.
 type TypedEventStreamEnvelopeSessionCrashed struct {
 	Actor            string                   `json:"actor"`
@@ -6937,6 +7080,22 @@ type TypedEventStreamEnvelopeSessionStranded struct {
 	Ts               time.Time                `json:"ts"`
 	Type             string                   `json:"type"`
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeSessionStrandedClaims defines model for TypedEventStreamEnvelopeSessionStrandedClaims.
+type TypedEventStreamEnvelopeSessionStrandedClaims struct {
+	Actor            string                       `json:"actor"`
+	DependsOnStepIds *[]string                    `json:"depends_on_step_ids,omitempty"`
+	Message          *string                      `json:"message,omitempty"`
+	Payload          SessionStrandedClaimsPayload `json:"payload"`
+	RunId            *string                      `json:"run_id,omitempty"`
+	Seq              int64                        `json:"seq"`
+	SessionId        *string                      `json:"session_id,omitempty"`
+	StepId           *string                      `json:"step_id,omitempty"`
+	Subject          *string                      `json:"subject,omitempty"`
+	Ts               time.Time                    `json:"ts"`
+	Type             string                       `json:"type"`
+	Workflow         *WorkflowEventProjection     `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeSessionSuspended defines model for TypedEventStreamEnvelopeSessionSuspended.
@@ -8455,6 +8614,23 @@ type TypedTaggedEventStreamEnvelopeSessionColdStartTimeout struct {
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedTaggedEventStreamEnvelopeSessionConversationReset defines model for TypedTaggedEventStreamEnvelopeSessionConversationReset.
+type TypedTaggedEventStreamEnvelopeSessionConversationReset struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          SessionLifecyclePayload  `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // TypedTaggedEventStreamEnvelopeSessionCrashed defines model for TypedTaggedEventStreamEnvelopeSessionCrashed.
 type TypedTaggedEventStreamEnvelopeSessionCrashed struct {
 	Actor            string                   `json:"actor"`
@@ -8708,6 +8884,23 @@ type TypedTaggedEventStreamEnvelopeSessionStranded struct {
 	Ts               time.Time                `json:"ts"`
 	Type             string                   `json:"type"`
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeSessionStrandedClaims defines model for TypedTaggedEventStreamEnvelopeSessionStrandedClaims.
+type TypedTaggedEventStreamEnvelopeSessionStrandedClaims struct {
+	Actor            string                       `json:"actor"`
+	City             string                       `json:"city"`
+	DependsOnStepIds *[]string                    `json:"depends_on_step_ids,omitempty"`
+	Message          *string                      `json:"message,omitempty"`
+	Payload          SessionStrandedClaimsPayload `json:"payload"`
+	RunId            *string                      `json:"run_id,omitempty"`
+	Seq              int64                        `json:"seq"`
+	SessionId        *string                      `json:"session_id,omitempty"`
+	StepId           *string                      `json:"step_id,omitempty"`
+	Subject          *string                      `json:"subject,omitempty"`
+	Ts               time.Time                    `json:"ts"`
+	Type             string                       `json:"type"`
+	Workflow         *WorkflowEventProjection     `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeSessionSuspended defines model for TypedTaggedEventStreamEnvelopeSessionSuspended.
@@ -9494,7 +9687,7 @@ type GetV0CityByCityNameAgentsParams struct {
 	// Index Event sequence number; when provided, blocks until a newer event arrives.
 	Index *string `form:"index,omitempty" json:"index,omitempty"`
 
-	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
+	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.
 	Wait *string `form:"wait,omitempty" json:"wait,omitempty"`
 
 	// Pool Filter by pool name.
@@ -9563,7 +9756,7 @@ type GetV0CityByCityNameBeadsParams struct {
 	// Index Event sequence number; when provided, blocks until a newer event arrives.
 	Index *string `form:"index,omitempty" json:"index,omitempty"`
 
-	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
+	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.
 	Wait *string `form:"wait,omitempty" json:"wait,omitempty"`
 
 	// Cursor Opaque keyset pagination token from a previous response's next_cursor field. Invalid or legacy tokens are rejected with a typed 400 (invalid-cursor); re-fetch the first page.
@@ -9605,7 +9798,7 @@ type GetV0CityByCityNameBeadsReadyParams struct {
 	// Index Event sequence number; when provided, blocks until a newer event arrives.
 	Index *string `form:"index,omitempty" json:"index,omitempty"`
 
-	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
+	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.
 	Wait *string `form:"wait,omitempty" json:"wait,omitempty"`
 }
 
@@ -9638,7 +9831,7 @@ type GetV0CityByCityNameConvoysParams struct {
 	// Index Event sequence number; when provided, blocks until a newer event arrives.
 	Index *string `form:"index,omitempty" json:"index,omitempty"`
 
-	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
+	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.
 	Wait *string `form:"wait,omitempty" json:"wait,omitempty"`
 
 	// Cursor Opaque keyset pagination token from a previous response's next_cursor field. Invalid or legacy tokens are rejected with a typed 400 (invalid-cursor); re-fetch the first page.
@@ -9662,7 +9855,7 @@ type GetV0CityByCityNameEventsParams struct {
 	// Index Event sequence number; when provided, blocks until a newer event arrives.
 	Index *string `form:"index,omitempty" json:"index,omitempty"`
 
-	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
+	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.
 	Wait *string `form:"wait,omitempty" json:"wait,omitempty"`
 
 	// Cursor Opaque keyset pagination token from a previous response's next_cursor field. Invalid or legacy tokens are rejected with a typed 400 (invalid-cursor); re-fetch the first page.
@@ -9914,7 +10107,7 @@ type GetV0CityByCityNameMailParams struct {
 	// Index Event sequence number; when provided, blocks until a newer event arrives.
 	Index *string `form:"index,omitempty" json:"index,omitempty"`
 
-	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
+	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.
 	Wait *string `form:"wait,omitempty" json:"wait,omitempty"`
 
 	// Cursor Opaque keyset pagination token from a previous response's next_cursor field. Invalid or legacy tokens are rejected with a typed 400 (invalid-cursor); re-fetch the first page.
@@ -10202,7 +10395,7 @@ type GetV0CityByCityNameRigsParams struct {
 	// Index Event sequence number; when provided, blocks until a newer event arrives.
 	Index *string `form:"index,omitempty" json:"index,omitempty"`
 
-	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
+	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.
 	Wait *string `form:"wait,omitempty" json:"wait,omitempty"`
 
 	// Git Include git status.
@@ -10284,6 +10477,12 @@ type PostV0CityByCityNameSessionByIdPermissionModeParams struct {
 	XGCRequest string `json:"X-GC-Request"`
 }
 
+// PostV0CityByCityNameSessionByIdPinParams defines parameters for PostV0CityByCityNameSessionByIdPin.
+type PostV0CityByCityNameSessionByIdPinParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
 // PostV0CityByCityNameSessionByIdRenameParams defines parameters for PostV0CityByCityNameSessionByIdRename.
 type PostV0CityByCityNameSessionByIdRenameParams struct {
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
@@ -10309,6 +10508,9 @@ type RespondSessionParams struct {
 type PostV0CityByCityNameSessionByIdStopParams struct {
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
 	XGCRequest string `json:"X-GC-Request"`
+
+	// IdempotencyKey Idempotency key for safe retries.
+	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
 }
 
 // StreamSessionParams defines parameters for StreamSession.
@@ -10365,10 +10567,19 @@ type GetV0CityByCityNameSessionByIdTranscriptParams struct {
 // GetV0CityByCityNameSessionByIdTranscriptParamsFormat defines parameters for GetV0CityByCityNameSessionByIdTranscript.
 type GetV0CityByCityNameSessionByIdTranscriptParamsFormat string
 
+// PostV0CityByCityNameSessionByIdUnpinParams defines parameters for PostV0CityByCityNameSessionByIdUnpin.
+type PostV0CityByCityNameSessionByIdUnpinParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
 // PostV0CityByCityNameSessionByIdWakeParams defines parameters for PostV0CityByCityNameSessionByIdWake.
 type PostV0CityByCityNameSessionByIdWakeParams struct {
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
 	XGCRequest string `json:"X-GC-Request"`
+
+	// IdempotencyKey Idempotency key for safe retries.
+	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
 }
 
 // GetV0CityByCityNameSessionsParams defines parameters for GetV0CityByCityNameSessions.
@@ -10406,7 +10617,7 @@ type GetV0CityByCityNameStatusParams struct {
 	// Index Event sequence number; when provided, blocks until a newer event arrives.
 	Index *string `form:"index,omitempty" json:"index,omitempty"`
 
-	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
+	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m.
 	Wait *string `form:"wait,omitempty" json:"wait,omitempty"`
 
 	// Lite When true, omit the expensive store-health, session-count, and work-count blocks for low-cost dashboard polls.
@@ -11766,6 +11977,32 @@ func (t *EventPayload) FromSessionResetStalledPayload(v SessionResetStalledPaylo
 
 // MergeSessionResetStalledPayload performs a merge with any union data inside the EventPayload, using the provided SessionResetStalledPayload
 func (t *EventPayload) MergeSessionResetStalledPayload(v SessionResetStalledPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionStrandedClaimsPayload returns the union data inside the EventPayload as a SessionStrandedClaimsPayload
+func (t EventPayload) AsSessionStrandedClaimsPayload() (SessionStrandedClaimsPayload, error) {
+	var body SessionStrandedClaimsPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionStrandedClaimsPayload overwrites any union data inside the EventPayload as the provided SessionStrandedClaimsPayload
+func (t *EventPayload) FromSessionStrandedClaimsPayload(v SessionStrandedClaimsPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionStrandedClaimsPayload performs a merge with any union data inside the EventPayload, using the provided SessionStrandedClaimsPayload
+func (t *EventPayload) MergeSessionStrandedClaimsPayload(v SessionStrandedClaimsPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -15853,6 +16090,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionColdStart
 	return err
 }
 
+// AsTypedEventStreamEnvelopeSessionConversationReset returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionConversationReset
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionConversationReset() (TypedEventStreamEnvelopeSessionConversationReset, error) {
+	var body TypedEventStreamEnvelopeSessionConversationReset
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSessionConversationReset overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSessionConversationReset
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionConversationReset(v TypedEventStreamEnvelopeSessionConversationReset) error {
+	v.Type = "session.conversation_reset"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSessionConversationReset performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionConversationReset
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionConversationReset(v TypedEventStreamEnvelopeSessionConversationReset) error {
+	v.Type = "session.conversation_reset"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeSessionCrashed returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionCrashed
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionCrashed() (TypedEventStreamEnvelopeSessionCrashed, error) {
 	var body TypedEventStreamEnvelopeSessionCrashed
@@ -16263,6 +16528,34 @@ func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionStranded(v
 // MergeTypedEventStreamEnvelopeSessionStranded performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionStranded
 func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionStranded(v TypedEventStreamEnvelopeSessionStranded) error {
 	v.Type = "session.stranded"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeSessionStrandedClaims returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionStrandedClaims
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionStrandedClaims() (TypedEventStreamEnvelopeSessionStrandedClaims, error) {
+	var body TypedEventStreamEnvelopeSessionStrandedClaims
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSessionStrandedClaims overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSessionStrandedClaims
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionStrandedClaims(v TypedEventStreamEnvelopeSessionStrandedClaims) error {
+	v.Type = "session.stranded_claims"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSessionStrandedClaims performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionStrandedClaims
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionStrandedClaims(v TypedEventStreamEnvelopeSessionStrandedClaims) error {
+	v.Type = "session.stranded_claims"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -16989,6 +17282,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeRigProvisionProgress()
 	case "session.cold_start_timeout":
 		return t.AsTypedEventStreamEnvelopeSessionColdStartTimeout()
+	case "session.conversation_reset":
+		return t.AsTypedEventStreamEnvelopeSessionConversationReset()
 	case "session.crashed":
 		return t.AsTypedEventStreamEnvelopeSessionCrashed()
 	case "session.demand_claim_divergence":
@@ -17019,6 +17314,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeSessionStopped()
 	case "session.stranded":
 		return t.AsTypedEventStreamEnvelopeSessionStranded()
+	case "session.stranded_claims":
+		return t.AsTypedEventStreamEnvelopeSessionStrandedClaims()
 	case "session.suspended":
 		return t.AsTypedEventStreamEnvelopeSessionSuspended()
 	case "session.undrained":
@@ -19032,6 +19329,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSess
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeSessionConversationReset returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionConversationReset
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionConversationReset() (TypedTaggedEventStreamEnvelopeSessionConversationReset, error) {
+	var body TypedTaggedEventStreamEnvelopeSessionConversationReset
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSessionConversationReset overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSessionConversationReset
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessionConversationReset(v TypedTaggedEventStreamEnvelopeSessionConversationReset) error {
+	v.Type = "session.conversation_reset"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSessionConversationReset performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionConversationReset
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionConversationReset(v TypedTaggedEventStreamEnvelopeSessionConversationReset) error {
+	v.Type = "session.conversation_reset"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeSessionCrashed returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionCrashed
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionCrashed() (TypedTaggedEventStreamEnvelopeSessionCrashed, error) {
 	var body TypedTaggedEventStreamEnvelopeSessionCrashed
@@ -19442,6 +19767,34 @@ func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessi
 // MergeTypedTaggedEventStreamEnvelopeSessionStranded performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionStranded
 func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionStranded(v TypedTaggedEventStreamEnvelopeSessionStranded) error {
 	v.Type = "session.stranded"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeSessionStrandedClaims returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionStrandedClaims
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionStrandedClaims() (TypedTaggedEventStreamEnvelopeSessionStrandedClaims, error) {
+	var body TypedTaggedEventStreamEnvelopeSessionStrandedClaims
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSessionStrandedClaims overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSessionStrandedClaims
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessionStrandedClaims(v TypedTaggedEventStreamEnvelopeSessionStrandedClaims) error {
+	v.Type = "session.stranded_claims"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSessionStrandedClaims performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionStrandedClaims
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionStrandedClaims(v TypedTaggedEventStreamEnvelopeSessionStrandedClaims) error {
+	v.Type = "session.stranded_claims"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -20168,6 +20521,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeRigProvisionProgress()
 	case "session.cold_start_timeout":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionColdStartTimeout()
+	case "session.conversation_reset":
+		return t.AsTypedTaggedEventStreamEnvelopeSessionConversationReset()
 	case "session.crashed":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionCrashed()
 	case "session.demand_claim_divergence":
@@ -20198,6 +20553,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeSessionStopped()
 	case "session.stranded":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionStranded()
+	case "session.stranded_claims":
+		return t.AsTypedTaggedEventStreamEnvelopeSessionStrandedClaims()
 	case "session.suspended":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionSuspended()
 	case "session.undrained":
@@ -20828,6 +21185,9 @@ type ClientInterface interface {
 
 	PostV0CityByCityNameSessionByIdPermissionMode(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdPermissionModeParams, body PostV0CityByCityNameSessionByIdPermissionModeJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// PostV0CityByCityNameSessionByIdPin request
+	PostV0CityByCityNameSessionByIdPin(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdPinParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// PostV0CityByCityNameSessionByIdRenameWithBody request with any body
 	PostV0CityByCityNameSessionByIdRenameWithBody(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdRenameParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -20857,6 +21217,9 @@ type ClientInterface interface {
 
 	// GetV0CityByCityNameSessionByIdTranscript request
 	GetV0CityByCityNameSessionByIdTranscript(ctx context.Context, cityName string, id string, params *GetV0CityByCityNameSessionByIdTranscriptParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// PostV0CityByCityNameSessionByIdUnpin request
+	PostV0CityByCityNameSessionByIdUnpin(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdUnpinParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameSessionByIdWake request
 	PostV0CityByCityNameSessionByIdWake(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdWakeParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -23080,6 +23443,18 @@ func (c *Client) PostV0CityByCityNameSessionByIdPermissionMode(ctx context.Conte
 	return c.Client.Do(req)
 }
 
+func (c *Client) PostV0CityByCityNameSessionByIdPin(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdPinParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameSessionByIdPinRequest(c.Server, cityName, id, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) PostV0CityByCityNameSessionByIdRenameWithBody(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdRenameParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewPostV0CityByCityNameSessionByIdRenameRequestWithBody(c.Server, cityName, id, params, contentType, body)
 	if err != nil {
@@ -23202,6 +23577,18 @@ func (c *Client) PostV0CityByCityNameSessionByIdSuspend(ctx context.Context, cit
 
 func (c *Client) GetV0CityByCityNameSessionByIdTranscript(ctx context.Context, cityName string, id string, params *GetV0CityByCityNameSessionByIdTranscriptParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetV0CityByCityNameSessionByIdTranscriptRequest(c.Server, cityName, id, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PostV0CityByCityNameSessionByIdUnpin(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdUnpinParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameSessionByIdUnpinRequest(c.Server, cityName, id, params)
 	if err != nil {
 		return nil, err
 	}
@@ -32262,6 +32649,60 @@ func NewPostV0CityByCityNameSessionByIdPermissionModeRequestWithBody(server stri
 	return req, nil
 }
 
+// NewPostV0CityByCityNameSessionByIdPinRequest generates requests for PostV0CityByCityNameSessionByIdPin
+func NewPostV0CityByCityNameSessionByIdPinRequest(server string, cityName string, id string, params *PostV0CityByCityNameSessionByIdPinParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/session/%s/pin", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
+	return req, nil
+}
+
 // NewPostV0CityByCityNameSessionByIdRenameRequest calls the generic PostV0CityByCityNameSessionByIdRename builder with application/json body
 func NewPostV0CityByCityNameSessionByIdRenameRequest(server string, cityName string, id string, params *PostV0CityByCityNameSessionByIdRenameParams, body PostV0CityByCityNameSessionByIdRenameJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -32509,6 +32950,17 @@ func NewPostV0CityByCityNameSessionByIdStopRequest(server string, cityName strin
 		}
 
 		req.Header.Set("X-GC-Request", headerParam0)
+
+		if params.IdempotencyKey != nil {
+			var headerParam1 string
+
+			headerParam1, err = runtime.StyleParamWithOptions("simple", false, "Idempotency-Key", *params.IdempotencyKey, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("Idempotency-Key", headerParam1)
+		}
 
 	}
 
@@ -32884,6 +33336,60 @@ func NewGetV0CityByCityNameSessionByIdTranscriptRequest(server string, cityName 
 	return req, nil
 }
 
+// NewPostV0CityByCityNameSessionByIdUnpinRequest generates requests for PostV0CityByCityNameSessionByIdUnpin
+func NewPostV0CityByCityNameSessionByIdUnpinRequest(server string, cityName string, id string, params *PostV0CityByCityNameSessionByIdUnpinParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/session/%s/unpin", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
+	return req, nil
+}
+
 // NewPostV0CityByCityNameSessionByIdWakeRequest generates requests for PostV0CityByCityNameSessionByIdWake
 func NewPostV0CityByCityNameSessionByIdWakeRequest(server string, cityName string, id string, params *PostV0CityByCityNameSessionByIdWakeParams) (*http.Request, error) {
 	var err error
@@ -32932,6 +33438,17 @@ func NewPostV0CityByCityNameSessionByIdWakeRequest(server string, cityName strin
 		}
 
 		req.Header.Set("X-GC-Request", headerParam0)
+
+		if params.IdempotencyKey != nil {
+			var headerParam1 string
+
+			headerParam1, err = runtime.StyleParamWithOptions("simple", false, "Idempotency-Key", *params.IdempotencyKey, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("Idempotency-Key", headerParam1)
+		}
 
 	}
 
@@ -34507,6 +35024,9 @@ type ClientWithResponsesInterface interface {
 
 	PostV0CityByCityNameSessionByIdPermissionModeWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdPermissionModeParams, body PostV0CityByCityNameSessionByIdPermissionModeJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdPermissionModeResponse, error)
 
+	// PostV0CityByCityNameSessionByIdPinWithResponse request
+	PostV0CityByCityNameSessionByIdPinWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdPinParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdPinResponse, error)
+
 	// PostV0CityByCityNameSessionByIdRenameWithBodyWithResponse request with any body
 	PostV0CityByCityNameSessionByIdRenameWithBodyWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdRenameParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdRenameResponse, error)
 
@@ -34536,6 +35056,9 @@ type ClientWithResponsesInterface interface {
 
 	// GetV0CityByCityNameSessionByIdTranscriptWithResponse request
 	GetV0CityByCityNameSessionByIdTranscriptWithResponse(ctx context.Context, cityName string, id string, params *GetV0CityByCityNameSessionByIdTranscriptParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameSessionByIdTranscriptResponse, error)
+
+	// PostV0CityByCityNameSessionByIdUnpinWithResponse request
+	PostV0CityByCityNameSessionByIdUnpinWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdUnpinParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdUnpinResponse, error)
 
 	// PostV0CityByCityNameSessionByIdWakeWithResponse request
 	PostV0CityByCityNameSessionByIdWakeWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdWakeParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdWakeResponse, error)
@@ -34855,6 +35378,7 @@ type PostV0CityByCityNameAgentByBaseByActionResponse struct {
 	ApplicationproblemJSON401 *ErrorModel
 	ApplicationproblemJSON403 *ErrorModel
 	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON409 *ErrorModel
 	ApplicationproblemJSON422 *ErrorModel
 	ApplicationproblemJSON500 *ErrorModel
 	ApplicationproblemJSON501 *ErrorModel
@@ -35016,6 +35540,7 @@ type PostV0CityByCityNameAgentByDirByBaseByActionResponse struct {
 	ApplicationproblemJSON401 *ErrorModel
 	ApplicationproblemJSON403 *ErrorModel
 	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON409 *ErrorModel
 	ApplicationproblemJSON422 *ErrorModel
 	ApplicationproblemJSON500 *ErrorModel
 	ApplicationproblemJSON501 *ErrorModel
@@ -35159,6 +35684,8 @@ type PatchV0CityByCityNameBeadByIdResponse struct {
 	ApplicationproblemJSON409 *ErrorModel
 	ApplicationproblemJSON422 *ErrorModel
 	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON503 *ErrorModel
+	ApplicationproblemJSON504 *ErrorModel
 }
 
 // Status returns HTTPResponse.Status
@@ -35298,6 +35825,8 @@ type PostV0CityByCityNameBeadByIdUpdateResponse struct {
 	ApplicationproblemJSON409 *ErrorModel
 	ApplicationproblemJSON422 *ErrorModel
 	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON503 *ErrorModel
+	ApplicationproblemJSON504 *ErrorModel
 }
 
 // Status returns HTTPResponse.Status
@@ -38440,6 +38969,36 @@ func (r PostV0CityByCityNameSessionByIdPermissionModeResponse) StatusCode() int 
 	return 0
 }
 
+type PostV0CityByCityNameSessionByIdPinResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON200                   *SessionResponse
+	ApplicationproblemJSON400 *ErrorModel
+	ApplicationproblemJSON401 *ErrorModel
+	ApplicationproblemJSON403 *ErrorModel
+	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON409 *ErrorModel
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON503 *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r PostV0CityByCityNameSessionByIdPinResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PostV0CityByCityNameSessionByIdPinResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type PostV0CityByCityNameSessionByIdRenameResponse struct {
 	Body                      []byte
 	HTTPResponse              *http.Response
@@ -38539,6 +39098,7 @@ type PostV0CityByCityNameSessionByIdStopResponse struct {
 	ApplicationproblemJSON409 *ErrorModel
 	ApplicationproblemJSON422 *ErrorModel
 	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON501 *ErrorModel
 	ApplicationproblemJSON503 *ErrorModel
 }
 
@@ -38659,6 +39219,36 @@ func (r GetV0CityByCityNameSessionByIdTranscriptResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r GetV0CityByCityNameSessionByIdTranscriptResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type PostV0CityByCityNameSessionByIdUnpinResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON200                   *SessionResponse
+	ApplicationproblemJSON400 *ErrorModel
+	ApplicationproblemJSON401 *ErrorModel
+	ApplicationproblemJSON403 *ErrorModel
+	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON409 *ErrorModel
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON503 *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r PostV0CityByCityNameSessionByIdUnpinResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PostV0CityByCityNameSessionByIdUnpinResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -40642,6 +41232,15 @@ func (c *ClientWithResponses) PostV0CityByCityNameSessionByIdPermissionModeWithR
 	return ParsePostV0CityByCityNameSessionByIdPermissionModeResponse(rsp)
 }
 
+// PostV0CityByCityNameSessionByIdPinWithResponse request returning *PostV0CityByCityNameSessionByIdPinResponse
+func (c *ClientWithResponses) PostV0CityByCityNameSessionByIdPinWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdPinParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdPinResponse, error) {
+	rsp, err := c.PostV0CityByCityNameSessionByIdPin(ctx, cityName, id, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostV0CityByCityNameSessionByIdPinResponse(rsp)
+}
+
 // PostV0CityByCityNameSessionByIdRenameWithBodyWithResponse request with arbitrary body returning *PostV0CityByCityNameSessionByIdRenameResponse
 func (c *ClientWithResponses) PostV0CityByCityNameSessionByIdRenameWithBodyWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdRenameParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdRenameResponse, error) {
 	rsp, err := c.PostV0CityByCityNameSessionByIdRenameWithBody(ctx, cityName, id, params, contentType, body, reqEditors...)
@@ -40736,6 +41335,15 @@ func (c *ClientWithResponses) GetV0CityByCityNameSessionByIdTranscriptWithRespon
 		return nil, err
 	}
 	return ParseGetV0CityByCityNameSessionByIdTranscriptResponse(rsp)
+}
+
+// PostV0CityByCityNameSessionByIdUnpinWithResponse request returning *PostV0CityByCityNameSessionByIdUnpinResponse
+func (c *ClientWithResponses) PostV0CityByCityNameSessionByIdUnpinWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdUnpinParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdUnpinResponse, error) {
+	rsp, err := c.PostV0CityByCityNameSessionByIdUnpin(ctx, cityName, id, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostV0CityByCityNameSessionByIdUnpinResponse(rsp)
 }
 
 // PostV0CityByCityNameSessionByIdWakeWithResponse request returning *PostV0CityByCityNameSessionByIdWakeResponse
@@ -41478,6 +42086,13 @@ func ParsePostV0CityByCityNameAgentByBaseByActionResponse(rsp *http.Response) (*
 		}
 		response.ApplicationproblemJSON404 = &dest
 
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest ErrorModel
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
@@ -41836,6 +42451,13 @@ func ParsePostV0CityByCityNameAgentByDirByBaseByActionResponse(rsp *http.Respons
 			return nil, err
 		}
 		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest ErrorModel
@@ -42198,6 +42820,20 @@ func ParsePatchV0CityByCityNameBeadByIdResponse(rsp *http.Response) (*PatchV0Cit
 		}
 		response.ApplicationproblemJSON500 = &dest
 
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 504:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON504 = &dest
+
 	}
 
 	return response, nil
@@ -42530,6 +43166,20 @@ func ParsePostV0CityByCityNameBeadByIdUpdateResponse(rsp *http.Response) (*PostV
 			return nil, err
 		}
 		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 504:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON504 = &dest
 
 	}
 
@@ -49684,6 +50334,88 @@ func ParsePostV0CityByCityNameSessionByIdPermissionModeResponse(rsp *http.Respon
 	return response, nil
 }
 
+// ParsePostV0CityByCityNameSessionByIdPinResponse parses an HTTP response from a PostV0CityByCityNameSessionByIdPinWithResponse call
+func ParsePostV0CityByCityNameSessionByIdPinResponse(rsp *http.Response) (*PostV0CityByCityNameSessionByIdPinResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PostV0CityByCityNameSessionByIdPinResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest SessionResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON400 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON401 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParsePostV0CityByCityNameSessionByIdRenameResponse parses an HTTP response from a PostV0CityByCityNameSessionByIdRenameWithResponse call
 func ParsePostV0CityByCityNameSessionByIdRenameResponse(rsp *http.Response) (*PostV0CityByCityNameSessionByIdRenameResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -49986,6 +50718,13 @@ func ParsePostV0CityByCityNameSessionByIdStopResponse(rsp *http.Response) (*Post
 		}
 		response.ApplicationproblemJSON500 = &dest
 
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 501:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON501 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
 		var dest ErrorModel
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
@@ -50194,6 +50933,88 @@ func ParseGetV0CityByCityNameSessionByIdTranscriptResponse(rsp *http.Response) (
 			return nil, err
 		}
 		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParsePostV0CityByCityNameSessionByIdUnpinResponse parses an HTTP response from a PostV0CityByCityNameSessionByIdUnpinWithResponse call
+func ParsePostV0CityByCityNameSessionByIdUnpinResponse(rsp *http.Response) (*PostV0CityByCityNameSessionByIdUnpinResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PostV0CityByCityNameSessionByIdUnpinResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest SessionResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON400 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON401 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON403 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
 		var dest ErrorModel

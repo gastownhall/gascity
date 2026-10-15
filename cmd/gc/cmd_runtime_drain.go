@@ -50,6 +50,9 @@ type runtimeDrainCheckJSON struct {
 	Session       string `json:"session"`
 	Target        string `json:"target,omitempty"`
 	Draining      bool   `json:"draining"`
+	// Source names the deciding source: drainCheckSourceRow,
+	// drainCheckSourceRuntime, or drainCheckSourceBoth when neither drains.
+	Source string `json:"source"`
 }
 
 type runtimeActionJSON struct {
@@ -257,7 +260,9 @@ func newRuntimeDrainCmd(stdout, stderr io.Writer) *cobra.Command {
 Sets a GC_DRAIN metadata flag on the session. The agent should check
 for drain status periodically (via "gc runtime drain-check") and finish
 its current task before exiting. Pass a session alias or ID. Use
-"gc runtime undrain" to cancel.`,
+"gc runtime undrain" to cancel. Under session_reconciler = "v2" it also
+marks the session row, so the agent's drain-ack stops the session even on a
+min_active_sessions floor.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdRuntimeDrain(args, jsonOutput, stdout, stderr) != 0 {
@@ -285,13 +290,69 @@ func cmdRuntimeDrain(args []string, jsonOutput bool, stdout, stderr io.Writer) i
 		fmt.Fprintf(stderr, "gc runtime drain: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	dops := newDrainOps(sp)
-	rec := openCityRecorder(stderr)
-	return doRuntimeDrain(dops, sp, rec, target.display, target.sessionName, jsonOutput, stdout, stderr)
+	return runtimeDrain(newDrainOps(sp), sp, openCityRecorder(stderr), target, jsonOutput, stdout, stderr)
 }
 
-// doRuntimeDrain sets the drain signal on a session.
+// runtimeDrain decides the city's mode once. A legacy city runs
+// doRuntimeDrain exactly as before; a v2 city also writes the row's
+// operator drain mark.
+func runtimeDrain(dops drainOps, sp runtime.Provider, rec events.Recorder, target sessionRuntimeTarget, jsonOutput bool, stdout, stderr io.Writer) int {
+	cfg, strict := drainAckCityMode(target.cityPath)
+	if !strict {
+		return doRuntimeDrain(dops, sp, rec, target.display, target.sessionName, jsonOutput, stdout, stderr)
+	}
+	// A v2 city reads no GC_DRAIN: the row carries the operator's mark
+	// (session.OperatorDrainKey), which explains the agent's ack (A11). The
+	// env flag stays, for drain-check, legacy and a rollback.
+	writeRow := func() error {
+		store, id, err := drainAckOpenSessionRow(target.cityPath, cfg, target.sessionName, target.sessionID)
+		if err != nil {
+			return err
+		}
+		return writeOperatorDrainRow(store, id)
+	}
+	return drainRuntime(dops, writeRow, sp, rec, target.display, target.sessionName, jsonOutput, stdout, stderr)
+}
+
+// writeOperatorDrainRow writes the operator's drain mark on the row by CAS
+// at the revision each attempt reads (operatorDrainPatch); no name lock: a
+// controller's write in between loses the fence or re-decides. A store with
+// no conditional writer is left untouched, as the row ack is (v2 refuses to
+// boot on one, C0.7).
+func writeOperatorDrainRow(store beads.Store, sessionID string) error {
+	writer, _, err := beads.ResolveConditionalWriter(store)
+	if err != nil || writer == nil {
+		return err
+	}
+	return casDrainAckRow(store, writer, sessionID, func(b beads.Bead) (map[string]string, error) {
+		return operatorDrainPatch(b.Metadata), nil
+	})
+}
+
+// clearOperatorDrainRow clears the operator's drain mark by CAS
+// (operatorUndrainPatch); a controller's request stands.
+func clearOperatorDrainRow(store beads.Store, sessionID string) error {
+	writer, _, err := beads.ResolveConditionalWriter(store)
+	if err != nil || writer == nil {
+		return err
+	}
+	return casDrainAckRow(store, writer, sessionID, func(b beads.Bead) (map[string]string, error) {
+		return operatorUndrainPatch(b.Metadata), nil
+	})
+}
+
+// doRuntimeDrain sets the drain signal on a session. It is the whole drain
+// in a legacy city.
 func doRuntimeDrain(dops drainOps, sp runtime.Provider, rec events.Recorder,
+	targetName, sn string, jsonOutput bool, stdout, stderr io.Writer,
+) int {
+	return drainRuntime(dops, nil, sp, rec, targetName, sn, jsonOutput, stdout, stderr)
+}
+
+// drainRuntime writes, in a v2 city (writeRow set), the row's operator
+// drain mark, then sets the runtime drain flag. A failed row write sets
+// nothing and exits non-zero.
+func drainRuntime(dops drainOps, writeRow func() error, sp runtime.Provider, rec events.Recorder,
 	targetName, sn string, jsonOutput bool, stdout, stderr io.Writer,
 ) int {
 	running, err := workerSessionTargetRunningWithConfig("", nil, sp, nil, sn)
@@ -303,9 +364,21 @@ func doRuntimeDrain(dops drainOps, sp runtime.Provider, rec events.Recorder,
 		fmt.Fprintf(stderr, "gc runtime drain: session %q is not running\n", targetName) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	// The row first: an ack landing between the two writes would find no
+	// mark and be canceled on a floor seat.
+	if writeRow != nil {
+		if err := writeRow(); err != nil {
+			fmt.Fprintf(stderr, "gc runtime drain: writing the row's drain mark: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	}
 	if err := dops.setDrain(sn); err != nil {
-		fmt.Fprintf(stderr, "gc runtime drain: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+		if !runtime.OnlyMetadataNotMirrored(err) {
+			fmt.Fprintf(stderr, "gc runtime drain: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		// The drain flag is in force; only the runtime's view of it lags.
+		fmt.Fprintf(stderr, "gc runtime drain: warning: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
 	rec.Record(events.Event{
 		Type:    events.SessionDraining,
@@ -344,7 +417,8 @@ func newRuntimeUndrainCmd(stdout, stderr io.Writer) *cobra.Command {
 
 Clears the GC_DRAIN and GC_DRAIN_ACK metadata flags, allowing the
 session to continue normal operation. Pass a session alias or ID. Under
-session_reconciler = "v2" it also clears the session row's drain-ack.`,
+session_reconciler = "v2" it also clears the session row's drain-ack and
+its operator drain mark.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdRuntimeUndrain(args, jsonOutput, stdout, stderr) != 0 {
@@ -375,11 +449,13 @@ func cmdRuntimeUndrain(args []string, jsonOutput bool, stdout, stderr io.Writer)
 	return runtimeUndrain(newDrainOps(sp), sp, openCityRecorder(stderr), target, jsonOutput, stdout, stderr)
 }
 
-// runtimeUndrain decides the city's mode once. A legacy city runs
-// doRuntimeUndrain exactly as before E3; a v2 city also clears the row ack.
+// runtimeUndrain clears the runtime drain keys and, in any city, the row's
+// drain-ack and operator drain mark: a v2 city fails on a row clear that
+// fails, a legacy city (which reads neither) only warns. A path that is not
+// a city runs doRuntimeUndrain.
 func runtimeUndrain(dops drainOps, sp runtime.Provider, rec events.Recorder, target sessionRuntimeTarget, jsonOutput bool, stdout, stderr io.Writer) int {
 	cfg, strict := drainAckCityMode(target.cityPath)
-	if !strict {
+	if cfg == nil {
 		return doRuntimeUndrain(dops, sp, rec, target.display, target.sessionName, jsonOutput, stdout, stderr)
 	}
 	clearRow := func() error {
@@ -387,7 +463,19 @@ func runtimeUndrain(dops drainOps, sp runtime.Provider, rec events.Recorder, tar
 		if err != nil {
 			return err
 		}
-		return clearDrainAckRow(store, id)
+		return errors.Join(clearDrainAckRow(store, id), clearOperatorDrainRow(store, id))
+	}
+	if !strict {
+		// A legacy city ignores the row keys, but clears them too, so a mark
+		// left by a v2 run (a mode switch, a config that failed to load) does
+		// not outlive the undrain; a failure there only warns.
+		legacy := clearRow
+		clearRow = func() error {
+			if err := legacy(); err != nil {
+				fmt.Fprintf(stderr, "gc runtime undrain: warning: clearing the row's drain keys: %v\n", err) //nolint:errcheck // best-effort stderr
+			}
+			return nil
+		}
 	}
 	return undrainRuntime(dops, clearRow, sp, rec, target.display, target.sessionName, jsonOutput, stdout, stderr)
 }
@@ -416,8 +504,12 @@ func undrainRuntime(dops drainOps, clearRow func() error, sp runtime.Provider, r
 		return 1
 	}
 	if err := dops.clearDrain(sn); err != nil {
-		fmt.Fprintf(stderr, "gc runtime undrain: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+		if !runtime.OnlyMetadataNotMirrored(err) {
+			fmt.Fprintf(stderr, "gc runtime undrain: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		// The drain is cleared; only the runtime's view of it lags.
+		fmt.Fprintf(stderr, "gc runtime undrain: warning: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
 	rec.Record(events.Event{
 		Type:    events.SessionUndrained,
@@ -453,6 +545,21 @@ func undrainRuntime(dops drainOps, clearRow func() error, sp runtime.Provider, r
 // gc runtime drain-check
 // ---------------------------------------------------------------------------
 
+// Sources drain-check consults, as named in its JSON "source" field and in
+// its unknown diagnostics.
+const (
+	drainCheckSourceRow     = "session_row"
+	drainCheckSourceRuntime = "runtime_meta"
+	drainCheckSourceBoth    = drainCheckSourceRow + "+" + drainCheckSourceRuntime
+)
+
+// drainCheckUnknownExit is drain-check's exit code when no source that
+// answered says draining and at least one source could not answer.
+const drainCheckUnknownExit = 3
+
+// drainCheckUnknownCode is the JSON error code for drainCheckUnknownExit.
+const drainCheckUnknownCode = "drain_state_unknown"
+
 func newRuntimeDrainCheckCmd(stdout, stderr io.Writer) *cobra.Command {
 	var jsonOutput bool
 	cmd := &cobra.Command{
@@ -460,15 +567,32 @@ func newRuntimeDrainCheckCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "Check if a session is draining (exit 0 = draining)",
 		Long: `Check if a session is currently draining.
 
-Returns exit code 0 if draining, 1 if not. Designed for use in
-conditionals: "if gc runtime drain-check; then finish-up; fi". Without
-arguments, uses the current session context.`,
+Consults two sources: the runtime's GC_DRAIN metadata flag, which
+"gc runtime drain" sets, and the session row's state, which reads
+draining once the controller has begun stopping the session. Controller
+drain intents recorded before that point are not consulted yet. Designed
+for use in conditionals: "if gc runtime drain-check; then finish-up; fi".
+Without arguments, uses the current session context.
+
+Exit codes:
+  0  draining: a source that answered says draining
+  1  not draining: both sources answered and neither says draining;
+     or there is no current session context; or the named session
+     does not exist in a session store that opened; or the --json
+     result could not be written
+  3  unknown: a source could not be read, or the named session could
+     not be resolved, and no source says draining; one stderr line
+     names the source that failed
+
+A runtime that reports the session absent, or keeps no metadata, counts
+as an answer of "no GC_DRAIN"; any other runtime error, including a
+runtime that is not running, is a failure to answer. With --json, the
+result carries a "source" field naming the deciding source; an unknown
+result is the JSON error envelope with code "drain_state_unknown" and
+exit code 3.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdRuntimeDrainCheck(args, jsonOutput, stdout, stderr) != 0 {
-				return errExit
-			}
-			return nil
+			return exitForCode(cmdRuntimeDrainCheck(args, jsonOutput, stdout, stderr))
 		},
 	}
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output as JSON")
@@ -476,71 +600,211 @@ arguments, uses the current session context.`,
 }
 
 func cmdRuntimeDrainCheck(args []string, jsonOutput bool, stdout, stderr io.Writer) int {
+	var (
+		target  sessionRuntimeTarget
+		readRow func() (bool, error)
+	)
 	if len(args) > 0 {
-		target, err := resolveSessionRuntimeTarget(args[0], stderr)
-		if err != nil {
-			fmt.Fprintf(stderr, "gc runtime drain-check: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1                                                 // silent — same as current "not draining" behavior
-		}
-		sp, err := newSessionProvider()
-		if err != nil {
+		named, cfg, err := resolveDrainCheckNamedTarget(args[0], stderr)
+		switch {
+		case errors.Is(err, session.ErrSessionNotFound):
+			// Only a store that opened can say a session does not exist.
 			fmt.Fprintf(stderr, "gc runtime drain-check: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
+		case err != nil:
+			return writeRuntimeDrainCheckUnknown(args[0], []string{drainCheckFailure(drainCheckSourceRow, err)}, jsonOutput, stdout, stderr)
 		}
-		dops := newDrainOps(sp)
-		return doRuntimeDrainCheck(dops, target.display, target.sessionName, jsonOutput, stdout, stderr)
-	}
-
-	current, err := currentSessionRuntimeTarget()
-	if err != nil {
-		return 1 // not in agent context → not draining
+		target = named
+		readRow = drainCheckRowReader(target.cityPath, func() (*config.City, error) { return cfg, nil }, target.sessionName, target.sessionID)
+	} else {
+		current, rowName, err := currentDrainCheckTarget()
+		if err != nil {
+			return 1 // no session to check; silent without context, as before
+		}
+		target = current
+		readRow = drainCheckRowReader(target.cityPath, func() (*config.City, error) {
+			return loadCityConfigWithoutBuiltinPackRefresh(current.cityPath, io.Discard)
+		}, rowName, target.sessionID)
 	}
 	sp, err := newSessionProvider()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc runtime drain-check: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+		return reportRuntimeDrainCheck(false, fmt.Errorf("opening the session provider: %w", err),
+			readRow, target.display, target.sessionName, jsonOutput, stdout, stderr)
 	}
-	dops := newDrainOps(sp)
-	return doRuntimeDrainCheck(dops, current.display, current.sessionName, jsonOutput, stdout, stderr)
+	return doRuntimeDrainCheck(newDrainOps(sp), readRow, target.display, target.sessionName, jsonOutput, stdout, stderr)
 }
 
-// doRuntimeDrainCheck returns 0 if the session is draining, 1 otherwise.
-// Silent on stdout — designed for `if gc runtime drain-check; then ...`.
-func doRuntimeDrainCheck(dops drainOps, targetName, sn string, jsonOutput bool, stdout, stderr io.Writer) int {
-	draining, err := dops.isDraining(sn)
+// resolveDrainCheckNamedTarget resolves drain-check's named session and
+// returns the city config it loaded. session.ErrSessionNotFound means a store
+// that opened has no such session; any other error means drain-check could not
+// find out.
+func resolveDrainCheckNamedTarget(identifier string, stderr io.Writer) (sessionRuntimeTarget, *config.City, error) {
+	cityPath, err := resolveCity()
 	if err != nil {
-		return 1
+		return sessionRuntimeTarget{}, nil, fmt.Errorf("resolving the city: %w", err)
 	}
-	if !draining {
-		if jsonOutput {
-			if err := writeCLIJSONLine(stdout, runtimeDrainCheckJSON{
-				SchemaVersion: "1",
-				OK:            true,
-				Command:       "runtime drain-check",
-				Session:       sn,
-				Target:        targetName,
-				Draining:      false,
-			}); err != nil {
-				fmt.Fprintf(stderr, "gc runtime drain-check: writing JSON: %v\n", err) //nolint:errcheck // best-effort stderr
-				return 1
-			}
+	cfg, err := loadCityConfig(cityPath, stderr)
+	if err != nil {
+		return sessionRuntimeTarget{}, nil, fmt.Errorf("loading the city config: %w", err)
+	}
+	target, err := resolveSessionRuntimeTargetInCity(cityPath, cfg, identifier)
+	if err != nil {
+		return sessionRuntimeTarget{}, nil, err
+	}
+	return target, cfg, nil
+}
+
+// currentDrainCheckTarget resolves drain-check's current session context and
+// the name its session row is looked up by when GC_SESSION_ID is unset. That
+// name is GC_SESSION_NAME, else the display identity; never GC_TMUX_SESSION,
+// which in a container names the tmux session inside it ("main"), not the row.
+func currentDrainCheckTarget() (sessionRuntimeTarget, string, error) {
+	target, err := currentSessionRuntimeTarget()
+	if err != nil {
+		return sessionRuntimeTarget{}, "", err
+	}
+	target.sessionID = strings.TrimSpace(os.Getenv("GC_SESSION_ID"))
+	rowName := strings.TrimSpace(os.Getenv("GC_SESSION_NAME"))
+	if rowName == "" {
+		rowName = target.display
+	}
+	return target, rowName, nil
+}
+
+// drainCheckOpenSessionLeg is a mutable global test seam over
+// openCitySessionLeg. Tests that swap it MUST NOT call t.Parallel().
+var drainCheckOpenSessionLeg = openCitySessionLeg
+
+// drainCheckRowReader returns the session-row source: it loads the city
+// config through loadCfg, opens the city's routed session leg and reads the
+// row by sessionID, or by rowName when sessionID is empty.
+func drainCheckRowReader(cityPath string, loadCfg func() (*config.City, error), rowName, sessionID string) func() (bool, error) {
+	return func() (bool, error) {
+		cfg, err := loadCfg()
+		if err != nil {
+			return false, fmt.Errorf("loading the city config: %w", err)
 		}
-		return 1
+		sessStore, err := drainCheckOpenSessionLeg(cityPath, cfg)
+		if err != nil {
+			return false, err
+		}
+		return drainCheckRowDraining(sessionFrontDoor(sessStore), rowName, sessionID)
 	}
+}
+
+// drainCheckRowDraining reports whether the session row is in state draining.
+// An empty sessionID resolves the row by sessionName, live rows first and then
+// closed ones, so a closed row reads the same by name as by id: it is not
+// draining. A row that cannot be found or read is an error.
+func drainCheckRowDraining(front *session.Store, sessionName, sessionID string) (bool, error) {
+	id := strings.TrimSpace(sessionID)
+	if id == "" {
+		resolved, err := front.ResolveIDAllowClosed(sessionName)
+		if err != nil {
+			return false, fmt.Errorf("resolving session %q: %w", sessionName, err)
+		}
+		id = resolved
+	}
+	state, closed, err := front.GetState(id)
+	if err != nil {
+		return false, fmt.Errorf("reading session %q: %w", id, err)
+	}
+	return !closed && state == session.StateDraining, nil
+}
+
+// drainCheckRuntimeAbsent reports whether a GC_DRAIN read failed because the
+// runtime has no such session, or keeps no metadata: definitive answers of "no
+// GC_DRAIN". Only the typed sentinels count; an error that merely reads like
+// absence (an adapter's "command not found") or that also says the runtime
+// could not be observed is a failure to answer.
+func drainCheckRuntimeAbsent(err error) bool {
+	if errors.Is(err, runtime.ErrMetaUnsupported) {
+		return true
+	}
+	return errors.Is(err, runtime.ErrSessionNotFound) && !errors.Is(err, runtime.ErrRuntimeUnavailable)
+}
+
+// doRuntimeDrainCheck reads the runtime's GC_DRAIN through dops and, unless
+// that already says draining, the session row through readRow. It returns 0
+// if a source that answered says draining, 1 if both answered and neither
+// does, and drainCheckUnknownExit otherwise. Silent on stdout without
+// --json — designed for `if gc runtime drain-check; then ...`.
+func doRuntimeDrainCheck(dops drainOps, readRow func() (bool, error), targetName, sn string, jsonOutput bool, stdout, stderr io.Writer) int {
+	metaDraining, metaErr := dops.isDraining(sn)
+	if drainCheckRuntimeAbsent(metaErr) {
+		metaDraining, metaErr = false, nil
+	}
+	return reportRuntimeDrainCheck(metaDraining, metaErr, readRow, targetName, sn, jsonOutput, stdout, stderr)
+}
+
+// reportRuntimeDrainCheck combines the runtime answer with the session row's
+// and writes the result. The row is not read when the runtime already says
+// draining.
+func reportRuntimeDrainCheck(metaDraining bool, metaErr error, readRow func() (bool, error),
+	targetName, sn string, jsonOutput bool, stdout, stderr io.Writer,
+) int {
+	if metaErr == nil && metaDraining {
+		return writeRuntimeDrainCheck(true, drainCheckSourceRuntime, targetName, sn, jsonOutput, stdout, stderr)
+	}
+	rowDraining, rowErr := readRow()
+	switch {
+	case rowErr == nil && rowDraining:
+		return writeRuntimeDrainCheck(true, drainCheckSourceRow, targetName, sn, jsonOutput, stdout, stderr)
+	case rowErr == nil && metaErr == nil:
+		return writeRuntimeDrainCheck(false, drainCheckSourceBoth, targetName, sn, jsonOutput, stdout, stderr)
+	}
+	var failed []string
+	if rowErr != nil {
+		failed = append(failed, drainCheckFailure(drainCheckSourceRow, rowErr))
+	}
+	if metaErr != nil {
+		failed = append(failed, drainCheckFailure(drainCheckSourceRuntime, metaErr))
+	}
+	return writeRuntimeDrainCheckUnknown(targetName, failed, jsonOutput, stdout, stderr)
+}
+
+// drainCheckFailure names a source that could not answer and why.
+func drainCheckFailure(source string, err error) string {
+	return fmt.Sprintf("%s: %v", source, err)
+}
+
+// writeRuntimeDrainCheckUnknown writes the unknown result for the failed
+// sources as one line: on stderr, or as the JSON error envelope under --json.
+// Embedded errors (an adapter's stderr, a multi-line store error) are
+// collapsed onto that line.
+func writeRuntimeDrainCheckUnknown(targetName string, failed []string, jsonOutput bool, stdout, stderr io.Writer) int {
+	msg := fmt.Sprintf("gc runtime drain-check: drain state of %q unknown: %s", targetName, strings.Join(failed, "; "))
+	msg = strings.Join(strings.Fields(msg), " ")
 	if jsonOutput {
-		if err := writeCLIJSONLine(stdout, runtimeDrainCheckJSON{
-			SchemaVersion: "1",
-			OK:            true,
-			Command:       "runtime drain-check",
-			Session:       sn,
-			Target:        targetName,
-			Draining:      true,
-		}); err != nil {
-			fmt.Fprintf(stderr, "gc runtime drain-check: writing JSON: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
+		return writeJSONError(stdout, stderr, drainCheckUnknownCode, msg, drainCheckUnknownExit)
 	}
-	return 0
+	fmt.Fprintln(stderr, msg) //nolint:errcheck // best-effort stderr
+	return drainCheckUnknownExit
+}
+
+// writeRuntimeDrainCheck writes a definitive drain-check answer and returns
+// its exit code: 0 when draining, 1 when not.
+func writeRuntimeDrainCheck(draining bool, source, targetName, sn string, jsonOutput bool, stdout, stderr io.Writer) int {
+	code := 1
+	if draining {
+		code = 0
+	}
+	if !jsonOutput {
+		return code
+	}
+	if err := writeCLIJSONLine(stdout, runtimeDrainCheckJSON{
+		SchemaVersion: "1",
+		OK:            true,
+		Command:       "runtime drain-check",
+		Session:       sn,
+		Target:        targetName,
+		Draining:      draining,
+		Source:        source,
+	}); err != nil {
+		fmt.Fprintf(stderr, "gc runtime drain-check: writing JSON: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	return code
 }
 
 // ---------------------------------------------------------------------------
@@ -886,7 +1150,7 @@ func releaseUnexecutedClaimsForSession(cityPath, sessionName string, stderr io.W
 		}
 		return buildStandaloneRigStoresWithConfig(cfg, cityPath, io.Discard)
 	}
-	releaseUnexecutedClaimsForSessionStore(cityPath, cfg, store, rigStores, sessionName, drainAckReleaseBudget, stderr)
+	releaseUnexecutedClaimsForSessionStore(cityPath, cfg, store, rigStores, sessionName, stderr)
 }
 
 // releaseUnexecutedClaimsForSessionStore resolves a runtime session name to the
@@ -905,7 +1169,6 @@ func releaseUnexecutedClaimsForSessionStore(
 	store beads.Store,
 	rigStores func() map[string]beads.Store,
 	sessionName string,
-	budget time.Duration,
 	stderr io.Writer,
 ) {
 	sessStore := cliSessionStore(store, cfg, cityPath)
@@ -926,7 +1189,7 @@ func releaseUnexecutedClaimsForSessionStore(
 	if rigStores != nil {
 		rigs = rigStores()
 	}
-	releaseUnexecutedClaimsOnDrainAck(cityPath, cfg, store, rigs, sessionBead, budget, stderr)
+	releaseUnexecutedClaimsOnDrainAck(workLegsFromCensus(cityPath, cfg, cityWorkLegOf(beads.WorkStore{Store: store}), rigs), sessionBead, drainAckReleaseBudget, stderr)
 }
 
 // drainAckReleaseBudget bounds the whole held-claim release pass.
@@ -957,8 +1220,12 @@ func doRuntimeDrainAck(dops drainOps, cityPath, targetName, sn, sessionID string
 // and the report.
 func finishRuntimeDrainAck(dops drainOps, cityPath, targetName, sn, sessionID string, jsonOutput bool, stdout, stderr io.Writer) int {
 	if err := dops.setDrainAck(sn); err != nil {
-		fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+		if !runtime.OnlyMetadataNotMirrored(err) {
+			fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		// The ack is in force; only the runtime's view of it lags.
+		fmt.Fprintf(stderr, "gc runtime drain-ack: warning: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
 	if err := drainAckPokeController(cityPath, reconcilekey.SessionRef(sessionID, sn)); err != nil {
 		fmt.Fprintf(stderr, "gc runtime drain-ack: warning: poke failed: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -988,12 +1255,6 @@ func finishRuntimeDrainAck(dops drainOps, cityPath, targetName, sn, sessionID st
 // distinct value lets the hook tell a refusal from a failed ack.
 const drainAckRefused = 2
 
-// drainAckModeLookupEnv is the environment drainAckCityMode latches the mode
-// with. Nil in production, so the mode is v2 only when this build admits v2
-// on its own; tests set the developer override instead of the process
-// environment and MUST NOT call t.Parallel().
-var drainAckModeLookupEnv func(string) (string, bool)
-
 // drainAckCityMode reports whether the city at cityPath runs the v2 session
 // reconciler, the only reader of the row ack, and returns the config it read.
 // A path that is not a city, a config that does not load, or a mode the
@@ -1014,7 +1275,7 @@ func drainAckCityMode(cityPath string) (*config.City, bool) {
 
 // drainAckStrictConfig reports whether cfg latches the v2 reconciler.
 func drainAckStrictConfig(cfg *config.City) bool {
-	mode, err := latchReconcilerMode(cfg, drainAckModeLookupEnv)
+	mode, err := latchReconcilerMode(cfg, reconcilerModeLookupEnv) // as the controller latches it
 	return err == nil && mode == reconcilerV2
 }
 
@@ -1049,20 +1310,30 @@ var drainAckOpenSessionRow = drainAckSessionRow
 // drainAckSessionRow opens the session leg of the city and resolves the
 // target's row. An empty sessionID resolves by name.
 func drainAckSessionRow(cityPath string, cfg *config.City, sessionName, sessionID string) (beads.Store, string, error) {
-	store, err := openCityStoreAtWithConfig(cityPath, cfg)
+	sessStore, err := openCitySessionLeg(cityPath, cfg)
 	if err != nil {
-		return nil, "", fmt.Errorf("opening the session store: %w", err)
+		return nil, "", err
 	}
-	if store == nil {
-		return nil, "", errors.New("opening the session store: no store")
-	}
-	sessStore := cliSessionStore(store, cfg, cityPath)
 	if sessionID == "" {
 		if sessionID, err = resolveSessionID(sessStore, sessionName); err != nil {
 			return nil, "", fmt.Errorf("resolving session %q: %w", sessionName, err)
 		}
 	}
 	return sessStore, sessionID, nil
+}
+
+// openCitySessionLeg opens the store of the city at cityPath with cfg and
+// routes it to the session class, so a [beads.classes.sessions] relocation is
+// honored.
+func openCitySessionLeg(cityPath string, cfg *config.City) (beads.Store, error) {
+	store, err := openCityStoreAtWithConfig(cityPath, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("opening the session store: %w", err)
+	}
+	if store == nil {
+		return nil, errors.New("opening the session store: no store")
+	}
+	return cliSessionStore(store, cfg, cityPath), nil
 }
 
 // errDrainAckRowUnfenced reports a matching ack on a store with no
@@ -1115,13 +1386,13 @@ func clearDrainAckRow(store beads.Store, sessionID string) error {
 }
 
 // casDrainAckRow is the kill fence's re-read/re-decide loop
-// (applySessionKillFencePatch) without its unconditional fallback: every
+// (session.ApplyKillFencePatch) without its unconditional fallback: every
 // write is an UpdateIfMatch at the revision just read.
 func casDrainAckRow(store beads.Store, writer beads.ConditionalWriter, sessionID string,
 	decide func(beads.Bead) (map[string]string, error),
 ) error {
 	var lastErr error
-	for attempt := 0; attempt < sessionKillFenceAttempts; attempt++ {
+	for attempt := 0; attempt < session.KillFenceAttempts; attempt++ {
 		b, err := store.Get(sessionID)
 		if err != nil {
 			return err

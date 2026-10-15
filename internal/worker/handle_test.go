@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -38,7 +39,7 @@ func TestSessionHandleStartStopState(t *testing.T) {
 		t.Fatalf("State(before start) = %s, want %s", state.Phase, PhaseStopped)
 	}
 
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	if handle.sessionID == "" {
@@ -87,7 +88,7 @@ func TestSessionHandleStartStopState(t *testing.T) {
 		t.Fatalf("State.SessionName = %q, want %q", state.SessionName, info.SessionName)
 	}
 
-	if err := handle.Stop(context.Background()); err != nil {
+	if err := handle.Stop(context.Background(), handleActor(t, handle, sessionpkg.ActorOperator)); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
 	callCount := len(sp.Calls)
@@ -126,7 +127,7 @@ func TestSessionHandleStateBusyDoesNotPrimeHistoryCache(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSessionHandle: %v", err)
 	}
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	info, err := manager.Get(handle.sessionID)
@@ -183,7 +184,6 @@ func TestSessionHandleStateReusesDerivedActivityAcrossPolls(t *testing.T) {
 	requestFactory := func() *Factory {
 		t.Helper()
 		factory, err := NewFactory(FactoryConfig{
-			CityPath:     t.TempDir(),
 			Store:        store,
 			Provider:     sp,
 			SearchPaths:  []string{searchBase},
@@ -205,7 +205,7 @@ func TestSessionHandleStateReusesDerivedActivityAcrossPolls(t *testing.T) {
 	if err != nil {
 		t.Fatalf("factory.Session: %v", err)
 	}
-	if err := seat.Start(context.Background()); err != nil {
+	if err := seat.Start(context.Background(), handleActor(t, seat, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	info, err := seat.manager.Get(seat.sessionID)
@@ -287,7 +287,7 @@ func TestSessionHandleAttachUsesWorkerBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create(deferred): %v", err)
 	}
-	if err := handle.Attach(context.Background()); err != nil {
+	if err := handle.Attach(context.Background(), handleActor(t, handle, sessionpkg.ActorOperator)); err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
 
@@ -507,7 +507,7 @@ func TestSessionHandleKillUsesWorkerBoundary(t *testing.T) {
 		Provider: "claude",
 	})
 
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	info, err := mgr.Get(handle.sessionID)
@@ -516,7 +516,7 @@ func TestSessionHandleKillUsesWorkerBoundary(t *testing.T) {
 	}
 
 	sp.Calls = nil
-	if err := handle.Kill(context.Background()); err != nil {
+	if err := handle.Kill(context.Background(), handleActor(t, handle, sessionpkg.ActorOperator)); err != nil {
 		t.Fatalf("Kill: %v", err)
 	}
 	stop := firstCall(sp.Calls, "Stop")
@@ -542,7 +542,7 @@ func TestSessionHandleCloseUsesWorkerBoundary(t *testing.T) {
 		Provider: "claude",
 	})
 
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	info, err := mgr.Get(handle.sessionID)
@@ -551,7 +551,7 @@ func TestSessionHandleCloseUsesWorkerBoundary(t *testing.T) {
 	}
 
 	sp.Calls = nil
-	if err := handle.Close(context.Background()); err != nil {
+	if err := handle.Close(context.Background(), handleActor(t, handle, sessionpkg.ActorOperator)); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 	stop := firstCall(sp.Calls, "Stop")
@@ -602,7 +602,7 @@ func TestSessionHandlePeekUsesWorkerBoundary(t *testing.T) {
 		Provider: "claude",
 	})
 
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	info, err := mgr.Get(handle.sessionID)
@@ -734,7 +734,7 @@ func TestSessionHandleMessageInterruptNowUsesWorkerBoundary(t *testing.T) {
 		Provider: "claude",
 	})
 
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	info, err := mgr.Get(handle.sessionID)
@@ -744,7 +744,7 @@ func TestSessionHandleMessageInterruptNowUsesWorkerBoundary(t *testing.T) {
 	sp.WaitForIdleErrors[info.SessionName] = nil
 
 	startCalls := len(sp.Calls)
-	if _, err := handle.Message(context.Background(), MessageRequest{
+	if _, err := handle.Message(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent), MessageRequest{
 		Text:     "replacement task",
 		Delivery: DeliveryIntentInterruptNow,
 	}); err != nil {
@@ -756,12 +756,14 @@ func TestSessionHandleMessageInterruptNowUsesWorkerBoundary(t *testing.T) {
 	for _, call := range calls {
 		methods = append(methods, call.Method)
 	}
-	want := []string{"IsRunning", "Interrupt", "WaitForIdle", "SendKeys", "Pending", "NudgeNow"}
+	// Claude's interrupted prompt is cleared with the verified ClearInput,
+	// not a single Ctrl-U (one Ctrl-U removes only one wrapped row).
+	want := []string{"IsRunning", "Interrupt", "WaitForIdle", "ClearInput", "Pending", "NudgeNow"}
 	if !containsSubsequence(methods, want) {
 		t.Fatalf("methods = %v, want subsequence %v", methods, want)
 	}
-	if !hasCall(calls, "SendKeys", "C-u") {
-		t.Fatalf("calls = %#v, want SendKeys C-u", calls)
+	if hasCall(calls, "SendKeys", "C-u") {
+		t.Fatalf("methods = %v, want no single SendKeys C-u", methods)
 	}
 }
 
@@ -775,7 +777,7 @@ func TestSessionHandleNudgeImmediateUsesWorkerBoundary(t *testing.T) {
 		Provider: "claude",
 	})
 
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	info, err := mgr.Get(handle.sessionID)
@@ -784,7 +786,7 @@ func TestSessionHandleNudgeImmediateUsesWorkerBoundary(t *testing.T) {
 	}
 
 	startCalls := len(sp.Calls)
-	result, err := handle.Nudge(context.Background(), NudgeRequest{
+	result, err := handle.Nudge(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent), NudgeRequest{
 		Text:     "check deploy status",
 		Delivery: NudgeDeliveryImmediate,
 	})
@@ -820,7 +822,7 @@ func TestSessionHandleNudgeWaitIdleUsesWorkerBoundary(t *testing.T) {
 		Provider: "claude",
 	})
 
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	info, err := mgr.Get(handle.sessionID)
@@ -830,7 +832,7 @@ func TestSessionHandleNudgeWaitIdleUsesWorkerBoundary(t *testing.T) {
 	sp.WaitForIdleErrors[info.SessionName] = nil
 
 	startCalls := len(sp.Calls)
-	result, err := handle.Nudge(context.Background(), NudgeRequest{
+	result, err := handle.Nudge(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent), NudgeRequest{
 		Text:     "check deploy status",
 		Delivery: NudgeDeliveryWaitIdle,
 		Source:   "mail",
@@ -872,12 +874,12 @@ func TestSessionHandleNudgeWaitIdleReturnsUndeliveredForUnsupportedProvider(t *t
 		Provider: "codex",
 	})
 
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
 	startCalls := len(sp.Calls)
-	result, err := handle.Nudge(context.Background(), NudgeRequest{
+	result, err := handle.Nudge(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent), NudgeRequest{
 		Text:     "check deploy status",
 		Delivery: NudgeDeliveryWaitIdle,
 	})
@@ -905,7 +907,7 @@ func TestSessionHandleLiveObservationUsesProviderRuntimeState(t *testing.T) {
 		Provider: "claude",
 	})
 
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	info, err := mgr.Get(handle.sessionID)
@@ -941,7 +943,7 @@ func TestSessionHandleLiveObservationTracksProcessLiveness(t *testing.T) {
 		},
 	})
 
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	info, err := mgr.Get(handle.sessionID)
@@ -977,7 +979,7 @@ func TestSessionHandleNudgeWaitIdleLiveOnlyDoesNotResumeStoppedSession(t *testin
 	}
 
 	startCalls := len(sp.Calls)
-	result, err := handle.Nudge(context.Background(), NudgeRequest{
+	result, err := handle.Nudge(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent), NudgeRequest{
 		Text:     "queued reminder",
 		Delivery: NudgeDeliveryWaitIdle,
 		Source:   "mail",
@@ -1007,7 +1009,7 @@ func TestSessionHandlePendingRespondAndBlockedState(t *testing.T) {
 		Provider: "codex",
 	})
 
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	info, err := mgr.Get(handle.sessionID)
@@ -1083,7 +1085,7 @@ func TestSessionHandleHistoryLoadsNormalizedTranscript(t *testing.T) {
 		filepath.Join("workertest", "testdata", "fixtures", "claude", "fresh"),
 	}
 
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
@@ -1138,7 +1140,7 @@ func TestSessionHandleHistoryDoesNotPersistCodexResumeKeyFromTranscript(t *testi
 	})
 	handle.adapter.SearchPaths = []string{base}
 
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start(first): %v", err)
 	}
 
@@ -1161,11 +1163,11 @@ func TestSessionHandleHistoryDoesNotPersistCodexResumeKeyFromTranscript(t *testi
 		t.Fatalf("session_key = %q, want empty; Codex resume keys come from SessionStart hook stdin", got)
 	}
 
-	if err := handle.Stop(context.Background()); err != nil {
+	if err := handle.Stop(context.Background(), handleActor(t, handle, sessionpkg.ActorOperator)); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
 	// Resuming a suspended session is an operator's own act (D8): Attach.
-	if err := handle.Attach(context.Background()); err != nil {
+	if err := handle.Attach(context.Background(), handleActor(t, handle, sessionpkg.ActorOperator)); err != nil {
 		t.Fatalf("Attach(second): %v", err)
 	}
 
@@ -1212,7 +1214,7 @@ func TestSessionHandleStateDoesNotPersistCodexResumeKeyWithoutPrimingHistoryCach
 	})
 	handle.adapter.SearchPaths = []string{base}
 
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start(first): %v", err)
 	}
 
@@ -1235,11 +1237,11 @@ func TestSessionHandleStateDoesNotPersistCodexResumeKeyWithoutPrimingHistoryCach
 		t.Fatalf("session_key = %q, want empty; Codex resume keys come from SessionStart hook stdin", got)
 	}
 
-	if err := handle.Stop(context.Background()); err != nil {
+	if err := handle.Stop(context.Background(), handleActor(t, handle, sessionpkg.ActorOperator)); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
 	// Resuming a suspended session is an operator's own act (D8): Attach.
-	if err := handle.Attach(context.Background()); err != nil {
+	if err := handle.Attach(context.Background(), handleActor(t, handle, sessionpkg.ActorOperator)); err != nil {
 		t.Fatalf("Attach(second): %v", err)
 	}
 
@@ -1266,7 +1268,7 @@ func TestSessionHandleAgentMappingsAndTranscriptUseWorkerBoundary(t *testing.T) 
 	})
 	handle.adapter.SearchPaths = []string{base}
 
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	info, err := mgr.Get(handle.sessionID)
@@ -1334,7 +1336,6 @@ func TestRuntimeHandleUsesWorkerBoundaryForLegacyRuntimeSession(t *testing.T) {
 	})
 
 	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
-		CityPath:     t.TempDir(),
 		Provider:     sp,
 		SessionName:  "legacy-worker",
 		ProviderName: "stub",
@@ -1357,7 +1358,7 @@ func TestRuntimeHandleUsesWorkerBoundaryForLegacyRuntimeSession(t *testing.T) {
 	if err := handle.Interrupt(context.Background(), InterruptRequest{}); err != nil {
 		t.Fatalf("Interrupt: %v", err)
 	}
-	if err := handle.Kill(context.Background()); err != nil {
+	if err := handle.Kill(context.Background(), handleActor(t, handle, sessionpkg.ActorOperator)); err != nil {
 		t.Fatalf("Kill: %v", err)
 	}
 	if sp.IsRunning("legacy-worker") {
@@ -1385,10 +1386,10 @@ func TestRuntimeHandleExpandedWorkerSurface(t *testing.T) {
 		t.Fatalf("NewRuntimeHandle: %v", err)
 	}
 
-	if err := handle.Attach(context.Background()); err != nil {
+	if err := handle.Attach(context.Background(), handleActor(t, handle, sessionpkg.ActorOperator)); err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
-	if err := handle.StartResolved(context.Background(), "/bin/echo", runtime.Config{}); err != nil {
+	if err := handle.StartResolved(context.Background(), startLeaseActor(t, handle), "/bin/echo", runtime.Config{}); err != nil {
 		t.Fatalf("StartResolved: %v", err)
 	}
 	pending, supported, err := handle.PendingStatus(context.Background())
@@ -1421,7 +1422,6 @@ func TestRuntimeHandleCloseDetailedStopsRuntimeAndReturnsZeroResult(t *testing.T
 		t.Fatalf("Start: %v", err)
 	}
 	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
-		CityPath:     t.TempDir(),
 		Provider:     sp,
 		SessionName:  "legacy-worker",
 		ProviderName: "stub",
@@ -1430,7 +1430,7 @@ func TestRuntimeHandleCloseDetailedStopsRuntimeAndReturnsZeroResult(t *testing.T
 		t.Fatalf("NewRuntimeHandle: %v", err)
 	}
 
-	result, err := handle.CloseDetailed(context.Background())
+	result, err := handle.CloseDetailed(context.Background(), handleActor(t, handle, sessionpkg.ActorOperator))
 	if err != nil {
 		t.Fatalf("CloseDetailed: %v", err)
 	}
@@ -1454,7 +1454,7 @@ func TestRuntimeHandleTeardownAbsorbsOnlySessionGone(t *testing.T) {
 	realFailure := errors.New("permission denied")
 	ops := []struct {
 		name string
-		run  func(*RuntimeHandle, context.Context) error
+		run  func(*RuntimeHandle, context.Context, sessionpkg.Actor) error
 	}{
 		{name: "Stop", run: (*RuntimeHandle).Stop},
 		{name: "Kill", run: (*RuntimeHandle).Kill},
@@ -1479,7 +1479,6 @@ func TestRuntimeHandleTeardownAbsorbsOnlySessionGone(t *testing.T) {
 				}
 				sp.StopErrors["legacy-worker"] = stop.stopErr
 				handle, err := NewRuntimeHandle(RuntimeHandleConfig{
-					CityPath:     t.TempDir(),
 					Provider:     sp,
 					SessionName:  "legacy-worker",
 					ProviderName: "stub",
@@ -1488,7 +1487,7 @@ func TestRuntimeHandleTeardownAbsorbsOnlySessionGone(t *testing.T) {
 					t.Fatalf("NewRuntimeHandle: %v", err)
 				}
 
-				err = op.run(handle, context.Background())
+				err = op.run(handle, context.Background(), testOperator(t))
 				if stop.wantErr == nil && err != nil {
 					t.Fatalf("%s against %s: %v, want nil", op.name, stop.name, err)
 				}
@@ -1578,6 +1577,95 @@ func TestRuntimeHandlePendingStatusKeysOnSentinel(t *testing.T) {
 				t.Fatalf("PendingStatus error = %v, want %v", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+// respondErrorProvider is a runtime fake whose Respond fails with err.
+type respondErrorProvider struct {
+	*runtime.Fake
+	err error
+}
+
+func (p *respondErrorProvider) Respond(string, runtime.InteractionResponse) error {
+	return p.err
+}
+
+// TestRuntimeHandleReportsInteractionRefusalsInSessionVocabulary pins that a
+// runtime-only handle reports the provider's interaction refusals as
+// session.Manager does, so a caller mapping the session sentinels (the API
+// answers them 409) treats both handle kinds alike while the runtime sentinel
+// stays matchable. Any other error passes through untranslated.
+func TestRuntimeHandleReportsInteractionRefusalsInSessionVocabulary(t *testing.T) {
+	ctx := context.Background()
+	sp := &respondErrorProvider{
+		Fake: runtime.NewFake(),
+		err:  fmt.Errorf("%w: unknown action %q", runtime.ErrInteractionResponseInvalid, "bogus"),
+	}
+	if err := sp.Start(ctx, "legacy-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	sp.NudgeErrors = map[string]error{"legacy-worker": fmt.Errorf("%w: legacy-worker", runtime.ErrNudgeRefusedPendingInteraction)}
+	sp.WaitForIdleErrors["legacy-worker"] = nil
+	handle, err := NewRuntimeHandle(RuntimeHandleConfig{Provider: sp, SessionName: "legacy-worker", ProviderName: "stub", Transport: "acp"})
+	if err != nil {
+		t.Fatalf("NewRuntimeHandle: %v", err)
+	}
+	idleBoundaryHandle, err := NewRuntimeHandle(RuntimeHandleConfig{Provider: sp, SessionName: "legacy-worker", ProviderName: "claude"})
+	if err != nil {
+		t.Fatalf("NewRuntimeHandle(claude): %v", err)
+	}
+	actor := testOperator(t)
+	deliveries := []struct {
+		name string
+		run  func() error
+	}{
+		{"Message", func() error {
+			_, err := handle.Message(ctx, actor, MessageRequest{Text: "hello"})
+			return err
+		}},
+		{"Nudge default", func() error {
+			_, err := handle.Nudge(ctx, actor, NudgeRequest{Text: "hello"})
+			return err
+		}},
+		{"Nudge immediate", func() error {
+			_, err := handle.Nudge(ctx, actor, NudgeRequest{Text: "hello", Delivery: NudgeDeliveryImmediate})
+			return err
+		}},
+		{"Nudge wait-idle", func() error {
+			_, err := handle.Nudge(ctx, actor, NudgeRequest{Text: "hello", Delivery: NudgeDeliveryWaitIdle})
+			return err
+		}},
+		{"Nudge wait-idle at an idle boundary", func() error {
+			_, err := idleBoundaryHandle.Nudge(ctx, actor, NudgeRequest{Text: "hello", Delivery: NudgeDeliveryWaitIdle})
+			return err
+		}},
+	}
+	for _, d := range deliveries {
+		err := d.run()
+		if !errors.Is(err, sessionpkg.ErrPendingInteraction) || !errors.Is(err, runtime.ErrNudgeRefusedPendingInteraction) {
+			t.Errorf("%s = %v, want session.ErrPendingInteraction wrapping runtime.ErrNudgeRefusedPendingInteraction", d.name, err)
+		}
+	}
+	err = handle.Respond(ctx, InteractionResponse{Action: "bogus"})
+	if !errors.Is(err, sessionpkg.ErrInteractionMismatch) || !errors.Is(err, runtime.ErrInteractionResponseInvalid) {
+		t.Errorf("Respond = %v, want session.ErrInteractionMismatch wrapping runtime.ErrInteractionResponseInvalid", err)
+	}
+	sp.err = fmt.Errorf("%w: no option for %q", runtime.ErrInteractionActionUnavailable, "approve")
+	err = handle.Respond(ctx, InteractionResponse{Action: "approve"})
+	if !errors.Is(err, sessionpkg.ErrInteractionMismatch) || !errors.Is(err, runtime.ErrInteractionActionUnavailable) {
+		t.Errorf("Respond to a prompt without that action = %v, want session.ErrInteractionMismatch wrapping runtime.ErrInteractionActionUnavailable", err)
+	}
+
+	other := errors.New("session unavailable")
+	sp.NudgeErrors = map[string]error{"legacy-worker": other}
+	sp.err = other
+	_, err = handle.Nudge(ctx, actor, NudgeRequest{Text: "hello"})
+	if !errors.Is(err, other) || errors.Is(err, sessionpkg.ErrPendingInteraction) {
+		t.Errorf("Nudge with another failure = %v, want it untranslated", err)
+	}
+	err = handle.Respond(ctx, InteractionResponse{Action: "approve"})
+	if !errors.Is(err, other) || errors.Is(err, sessionpkg.ErrInteractionMismatch) {
+		t.Errorf("Respond with another failure = %v, want it untranslated", err)
 	}
 }
 
@@ -1759,7 +1847,6 @@ func TestRuntimeHandleStartResolvedStartsLegacyRuntimeSession(t *testing.T) {
 	sp := runtime.NewFake()
 
 	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
-		CityPath:     t.TempDir(),
 		Provider:     sp,
 		SessionName:  "legacy-worker",
 		ProviderName: "stub",
@@ -1768,7 +1855,7 @@ func TestRuntimeHandleStartResolvedStartsLegacyRuntimeSession(t *testing.T) {
 		t.Fatalf("NewRuntimeHandle: %v", err)
 	}
 
-	if err := handle.StartResolved(context.Background(), "legacy --resume seeded", runtime.Config{
+	if err := handle.StartResolved(context.Background(), startLeaseActor(t, handle), "legacy --resume seeded", runtime.Config{
 		WorkDir: "/tmp/runtime-worker",
 	}); err != nil {
 		t.Fatalf("StartResolved: %v", err)
@@ -1803,7 +1890,7 @@ func TestRuntimeHandleNudgeImmediateUsesImmediateProvider(t *testing.T) {
 		t.Fatalf("NewRuntimeHandle: %v", err)
 	}
 
-	result, err := handle.Nudge(context.Background(), NudgeRequest{
+	result, err := handle.Nudge(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent), NudgeRequest{
 		Text:     "check deploy status",
 		Delivery: NudgeDeliveryImmediate,
 	})
@@ -1847,7 +1934,7 @@ func TestRuntimeHandleNudgeWaitIdleClaudeWrapsReminder(t *testing.T) {
 		t.Fatalf("NewRuntimeHandle: %v", err)
 	}
 
-	result, err := handle.Nudge(context.Background(), NudgeRequest{
+	result, err := handle.Nudge(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent), NudgeRequest{
 		Text:     "check deploy status",
 		Delivery: NudgeDeliveryWaitIdle,
 		Source:   "mail",
@@ -1911,7 +1998,7 @@ func TestRuntimeHandleNudgeWaitIdleHonorsCallerContext(t *testing.T) {
 		cancel()
 	}()
 
-	result, err := handle.Nudge(ctx, NudgeRequest{
+	result, err := handle.Nudge(ctx, handleActor(t, handle, sessionpkg.ActorAgent), NudgeRequest{
 		Text:     "check deploy status",
 		Delivery: NudgeDeliveryWaitIdle,
 		Source:   "mail",
@@ -1945,7 +2032,7 @@ func TestRuntimeHandleNudgeWaitIdleInternalTimeoutReturnsUndeliveredWithoutError
 		t.Fatalf("NewRuntimeHandle: %v", err)
 	}
 
-	result, err := handle.Nudge(context.Background(), NudgeRequest{
+	result, err := handle.Nudge(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent), NudgeRequest{
 		Text:     "check deploy status",
 		Delivery: NudgeDeliveryWaitIdle,
 		Source:   "mail",
@@ -1959,6 +2046,43 @@ func TestRuntimeHandleNudgeWaitIdleInternalTimeoutReturnsUndeliveredWithoutError
 	for _, call := range sp.Calls {
 		if call.Method == "Nudge" || call.Method == "NudgeNow" {
 			t.Fatalf("calls = %#v, want no delivery after internal timeout", sp.Calls)
+		}
+	}
+}
+
+// A provider type that implements the idle wait but whose runtime cannot
+// provide one answers ErrInteractionUnsupported; that is the permanent
+// live_delivery_unsupported reason, not a missed idle boundary.
+// Kills: reporting it as no_idle_boundary, or delivering anyway.
+func TestRuntimeHandleNudgeWaitIdleInteractionUnsupportedReturnsProviderUnsupported(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "legacy-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	sp.WaitForIdleErrors["legacy-worker"] = fmt.Errorf("routed backend: %w", runtime.ErrInteractionUnsupported)
+
+	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
+		Provider:     sp,
+		SessionName:  "legacy-worker",
+		ProviderName: "claude",
+	})
+	if err != nil {
+		t.Fatalf("NewRuntimeHandle: %v", err)
+	}
+
+	result, err := handle.Nudge(context.Background(), testActor(t, sessionpkg.ActorAgent), NudgeRequest{
+		Text:     "check deploy status",
+		Delivery: NudgeDeliveryWaitIdle,
+	})
+	if err != nil {
+		t.Fatalf("Nudge(wait_idle): %v", err)
+	}
+	if result.Delivered || result.Undelivered != NudgeUndeliveredProviderUnsupported {
+		t.Fatalf("Nudge(wait_idle) = %+v, want undelivered %q", result, NudgeUndeliveredProviderUnsupported)
+	}
+	for _, call := range sp.Calls {
+		if call.Method == "Nudge" || call.Method == "NudgeNow" {
+			t.Fatalf("calls = %#v, want no delivery when the idle wait is unsupported", sp.Calls)
 		}
 	}
 }
@@ -1978,7 +2102,7 @@ func TestRuntimeHandleNudgeWaitIdleUnsupportedProviderReturnsUndelivered(t *test
 		t.Fatalf("NewRuntimeHandle: %v", err)
 	}
 
-	result, err := handle.Nudge(context.Background(), NudgeRequest{
+	result, err := handle.Nudge(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent), NudgeRequest{
 		Text:     "check deploy status",
 		Delivery: NudgeDeliveryWaitIdle,
 	})
@@ -2098,7 +2222,7 @@ func TestSessionHandleHistoryStitchesGeminiRotatedTranscriptAcrossRestart(t *tes
 	})
 	handle.adapter.SearchPaths = []string{searchRoot}
 
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
@@ -2110,7 +2234,7 @@ func TestSessionHandleHistoryStitchesGeminiRotatedTranscriptAcrossRestart(t *tes
 		t.Fatalf("History(before).TranscriptStreamID = %q, want %q", before.TranscriptStreamID, firstTranscript)
 	}
 	if got := len(before.Entries); got != 2 {
-		t.Fatalf("len(History(before).Entries) = %d, want 2", got)
+		t.Fatalf("len(History(before).Entries) = %d, want 2: %+v", got, before.Entries)
 	}
 
 	secondTranscript := filepath.Join(chatsDir, "session-2026-04-17T03-15-after.json")
@@ -2188,7 +2312,7 @@ func TestSessionHandleHistoryRetainsStitchedHistoryAcrossPostRotationRewrite(t *
 	})
 	handle.adapter.SearchPaths = []string{searchRoot}
 
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
@@ -2287,7 +2411,7 @@ func TestSessionHandleHistoryTreatsSameGeminiTranscriptRewriteAsReplacement(t *t
 		Provider: "gemini",
 	})
 	handle.adapter.SearchPaths = []string{searchRoot}
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
@@ -2339,7 +2463,7 @@ func TestSessionHandleStartPassesSessionEnv(t *testing.T) {
 		},
 	})
 
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	var start *runtime.Call
@@ -2374,7 +2498,7 @@ func TestSessionHandleStartResolvedUsesProvidedRuntime(t *testing.T) {
 			"GC_WORKER_BOUNDARY": "start_resolved",
 		},
 	}
-	if err := handle.StartResolved(context.Background(), resolved.Command, resolved); err != nil {
+	if err := handle.StartResolved(context.Background(), startLeaseActor(t, handle), resolved.Command, resolved); err != nil {
 		t.Fatalf("StartResolved: %v", err)
 	}
 
@@ -2405,7 +2529,7 @@ func TestSessionHandleStartUsesSessionIDOnFirstStartAndResumeAfterSuspend(t *tes
 		},
 	})
 
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start(first): %v", err)
 	}
 	firstStart := firstCall(sp.Calls, "Start")
@@ -2420,11 +2544,11 @@ func TestSessionHandleStartUsesSessionIDOnFirstStartAndResumeAfterSuspend(t *tes
 		t.Fatalf("first start command = %q, want no --resume", firstCommand)
 	}
 
-	if err := handle.Stop(context.Background()); err != nil {
+	if err := handle.Stop(context.Background(), handleActor(t, handle, sessionpkg.ActorOperator)); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
 	// Resuming a suspended session is an operator's own act (D8): Attach.
-	if err := handle.Attach(context.Background()); err != nil {
+	if err := handle.Attach(context.Background(), handleActor(t, handle, sessionpkg.ActorOperator)); err != nil {
 		t.Fatalf("Attach(second): %v", err)
 	}
 	if len(sp.Calls) < 3 {
@@ -2453,7 +2577,7 @@ func TestSessionHandleStartUsesCurrentResumeOverridesAfterSuspend(t *testing.T) 
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := manager.Suspend(info.ID); err != nil {
+	if err := manager.Suspend(context.Background(), managerActor(t, manager, sessionpkg.ActorOperator), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
@@ -2477,7 +2601,7 @@ func TestSessionHandleStartUsesCurrentResumeOverridesAfterSuspend(t *testing.T) 
 
 	sp.Calls = nil
 	// Resuming a suspended session is an operator's own act (D8): Attach.
-	if err := handle.Attach(context.Background()); err != nil {
+	if err := handle.Attach(context.Background(), handleActor(t, handle, sessionpkg.ActorOperator)); err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
 	start := firstCall(sp.Calls, "Start")
@@ -2652,7 +2776,7 @@ func TestSessionHandleLiveObservationCarriesAttachError(t *testing.T) {
 		WorkDir:  t.TempDir(),
 		Provider: "claude",
 	})
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	info, err := mgr.Get(handle.sessionID)
@@ -2671,5 +2795,328 @@ func TestSessionHandleLiveObservationCarriesAttachError(t *testing.T) {
 	}
 	if obs.Attached || !errors.Is(obs.AttachedErr, probeErr) {
 		t.Fatalf("Attached, AttachedErr = %v, %v; want false, %v", obs.Attached, obs.AttachedErr, probeErr)
+	}
+}
+
+// TestRuntimeHandleWaitIdleGateTakesTheProviderFamily pins that the runtime
+// handle compares the name it is given with "claude", so callers pass the
+// builtin provider family and resolve a wrapped alias first.
+func TestRuntimeHandleWaitIdleGateTakesTheProviderFamily(t *testing.T) {
+	for _, tc := range []struct {
+		providerName    string
+		wantDelivered   bool
+		wantUndelivered NudgeUndeliveredReason
+		wantWaitCalls   int
+	}{
+		{providerName: "claude", wantDelivered: true, wantWaitCalls: 1},
+		{providerName: "claude-mux", wantUndelivered: NudgeUndeliveredProviderUnsupported},
+	} {
+		t.Run(tc.providerName, func(t *testing.T) {
+			sp := runtime.NewFake()
+			if err := sp.Start(context.Background(), "legacy-worker", runtime.Config{}); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			sp.WaitForIdleErrors["legacy-worker"] = nil // the pane is idle
+			handle, err := NewRuntimeHandle(RuntimeHandleConfig{Provider: sp, SessionName: "legacy-worker", ProviderName: tc.providerName})
+			if err != nil {
+				t.Fatalf("NewRuntimeHandle: %v", err)
+			}
+			result, err := handle.Nudge(context.Background(), testOperator(t), NudgeRequest{Text: "hello", Delivery: NudgeDeliveryWaitIdle})
+			if err != nil {
+				t.Fatalf("Nudge: %v", err)
+			}
+			waits := 0
+			for _, call := range sp.Calls {
+				if call.Method == "WaitForIdle" {
+					waits++
+				}
+			}
+			if result.Delivered != tc.wantDelivered || result.Undelivered != tc.wantUndelivered || waits != tc.wantWaitCalls {
+				t.Fatalf("Delivered=%v Undelivered=%q WaitForIdle=%d, want %v %q %d",
+					result.Delivered, result.Undelivered, waits, tc.wantDelivered, tc.wantUndelivered, tc.wantWaitCalls)
+			}
+		})
+	}
+}
+
+func TestSessionHandleHistoryIdentitySurvivesLateCodexResumeKey(t *testing.T) {
+	base := t.TempDir()
+	dayDir := filepath.Join(base, "2026", "04", "14")
+	if err := os.MkdirAll(dayDir, 0o755); err != nil {
+		t.Fatalf("mkdir dayDir: %v", err)
+	}
+
+	workDir := "/tmp/codex-project"
+	resumeID := "019d8afb-efe8-7280-abf9-5901fd92e0cd"
+	transcriptPath := filepath.Join(dayDir, "rollout-2026-04-14T09-54-20-"+resumeID+".jsonl")
+	transcript := strings.Join([]string{
+		fmt.Sprintf(`{"timestamp":"2026-04-14T09:54:20Z","type":"session_meta","payload":{"cwd":%q}}`, workDir),
+		`{"timestamp":"2026-04-14T09:54:21Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"text":"remember alpha"}]}}`,
+		`{"timestamp":"2026-04-14T09:54:22Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"text":"remembered"}]}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(transcriptPath, []byte(transcript), 0o644); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
+	handle, _, _, _ := newTestSessionHandle(t, SessionSpec{
+		Profile:  ProfileCodexTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "codex --dangerously-bypass-approvals-and-sandbox",
+		WorkDir:  workDir,
+		Provider: "codex",
+		Resume: sessionpkg.ProviderResume{
+			ResumeFlag:  "resume",
+			ResumeStyle: "subcommand",
+		},
+	})
+	handle.adapter.SearchPaths = []string{base}
+
+	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
+		t.Fatalf("Start(first): %v", err)
+	}
+
+	history, err := handle.History(context.Background(), HistoryRequest{})
+	if err != nil {
+		t.Fatalf("History: %v", err)
+	}
+	if history.GCSessionID == resumeID {
+		t.Fatalf("History().GCSessionID = %q, want Gas City session id, not transcript-derived Codex resume id", history.GCSessionID)
+	}
+	if history.LogicalConversationID == resumeID {
+		t.Fatalf("History().LogicalConversationID = %q, want non-Codex-derived logical id", history.LogicalConversationID)
+	}
+
+	if err := handle.manager.PersistSessionKey(handle.sessionID, resumeID); err != nil {
+		t.Fatalf("PersistSessionKey: %v", err)
+	}
+	// The real hook records the resume key while the CLI continues appending.
+	// A new generation must preserve the GC identity even after that metadata write.
+	transcript += `{"timestamp":"2026-04-14T09:54:23Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"text":"next turn"}]}}` + "\n"
+	if err := os.WriteFile(transcriptPath, []byte(transcript), 0o644); err != nil {
+		t.Fatalf("append transcript: %v", err)
+	}
+	after, err := handle.History(context.Background(), HistoryRequest{})
+	if err != nil {
+		t.Fatalf("History(after hook): %v", err)
+	}
+	if after.GCSessionID != history.GCSessionID || after.LogicalConversationID != history.LogicalConversationID {
+		t.Fatalf("native resume-key discovery changed GC identity: before=%q/%q after=%q/%q", history.GCSessionID, history.LogicalConversationID, after.GCSessionID, after.LogicalConversationID)
+	}
+	if after.GCSessionID != handle.sessionID {
+		t.Fatalf("GCSessionID=%q, want bead ID %q", after.GCSessionID, handle.sessionID)
+	}
+	if after.ProviderSessionID != history.ProviderSessionID || after.TranscriptStreamID != history.TranscriptStreamID {
+		t.Fatal("same provider transcript changed identity")
+	}
+}
+
+// keyedClaudeHistorySession is a started Claude session whose key gc minted
+// before launch, with its first conversation's transcript already read once
+// through handle, the long-lived reader these tests stitch against.
+type keyedClaudeHistorySession struct {
+	handle  *SessionHandle
+	store   *beads.MemStore
+	slugDir string
+	key     string
+	before  *HistorySnapshot
+}
+
+var (
+	keyedClaudeBeforeTurns = []map[string]any{
+		{"uuid": "before-user", "type": "user", "message": map[string]any{"role": "user", "content": "remember alpha"}},
+		{"uuid": "before-assistant", "parentUuid": "before-user", "type": "assistant", "message": map[string]any{"role": "assistant", "content": "remembered alpha"}},
+	}
+	keyedClaudeAfterTurns = []map[string]any{
+		{"uuid": "after-user", "type": "user", "message": map[string]any{"role": "user", "content": "fresh start"}},
+		{"uuid": "after-assistant", "parentUuid": "after-user", "type": "assistant", "message": map[string]any{"role": "assistant", "content": "hello again"}},
+	}
+)
+
+func startKeyedClaudeHistorySession(t *testing.T) keyedClaudeHistorySession {
+	t.Helper()
+	searchBase := t.TempDir()
+	workDir := t.TempDir()
+	store := beads.NewMemStore()
+	// The stale-resume-key probe delay is production timing, not what these
+	// tests own; skip it so the keyed (session-id) start does not sleep.
+	manager := sessionpkg.NewManagerWithOptions(store, runtime.NewFake(), sessionpkg.WithStaleKeyDetectionWaiter(
+		func(context.Context, string) error { return nil },
+	), sessionpkg.WithCityPath(t.TempDir()))
+	handle, err := NewSessionHandle(SessionHandleConfig{
+		Manager:     manager,
+		SearchPaths: []string{searchBase},
+		Session: SessionSpec{
+			Profile:  ProfileClaudeTmuxCLI,
+			Template: "probe",
+			Title:    "Probe",
+			Command:  "claude",
+			WorkDir:  workDir,
+			Provider: "claude",
+			Resume: sessionpkg.ProviderResume{
+				ResumeFlag:    "--resume",
+				ResumeStyle:   "flag",
+				SessionIDFlag: "--session-id",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewSessionHandle: %v", err)
+	}
+	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	info, err := manager.Get(handle.sessionID)
+	if err != nil {
+		t.Fatalf("Get(%q): %v", handle.sessionID, err)
+	}
+	if info.SessionKey == "" {
+		t.Fatal("session_key is empty, want a keyed Claude transcript")
+	}
+
+	slugDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
+	if err := os.MkdirAll(slugDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", slugDir, err)
+	}
+	writeWorkerTestJSONL(t, filepath.Join(slugDir, info.SessionKey+".jsonl"), keyedClaudeBeforeTurns)
+	before, err := handle.History(context.Background(), HistoryRequest{})
+	if err != nil {
+		t.Fatalf("History(before): %v", err)
+	}
+	if got := historyEntryIDs(before); !reflect.DeepEqual(got, []string{"before-user", "before-assistant"}) {
+		t.Fatalf("History(before) IDs = %v, want [before-user before-assistant]", got)
+	}
+	return keyedClaudeHistorySession{handle: handle, store: store, slugDir: slugDir, key: info.SessionKey, before: before}
+}
+
+// A long-lived handle (the structured transcript stream holds one) must not
+// stitch the conversation a fresh reset abandoned in front of the new one. The
+// reset keeps the bead but starts a new continuation epoch, so the logical
+// conversation changes even though GCSessionID stays the bead ID (WC-CONT-002).
+func TestSessionHandleHistoryDoesNotStitchAcrossFreshReset(t *testing.T) {
+	s := startKeyedClaudeHistorySession(t)
+	handle, store, slugDir, before := s.handle, s.store, s.slugDir, s.before
+
+	// The state every fresh reset leaves: the reset clears session_key and the
+	// next launch mints a new one, and the start that consumes
+	// continuation_reset_pending advances continuation_epoch once.
+	const resetKey = "11111111-2222-4333-8444-555555555555"
+	if err := store.SetMetadataBatch(handle.sessionID, map[string]string{
+		"session_key":        resetKey,
+		"continuation_epoch": "2",
+	}); err != nil {
+		t.Fatalf("SetMetadataBatch(reset): %v", err)
+	}
+	writeWorkerTestJSONL(t, filepath.Join(slugDir, resetKey+".jsonl"), keyedClaudeAfterTurns)
+
+	after, err := handle.History(context.Background(), HistoryRequest{})
+	if err != nil {
+		t.Fatalf("History(after): %v", err)
+	}
+	if got := historyEntryIDs(after); !reflect.DeepEqual(got, []string{"after-user", "after-assistant"}) {
+		t.Fatalf("History(after) IDs = %v, want only the reset conversation [after-user after-assistant]", got)
+	}
+	if after.LogicalConversationID == before.LogicalConversationID {
+		t.Fatalf("LogicalConversationID = %q before and after a fresh reset, want a new logical conversation", after.LogicalConversationID)
+	}
+	if before.GCSessionID != handle.sessionID || after.GCSessionID != handle.sessionID {
+		t.Fatalf("GCSessionID before/after = %q/%q, want bead ID %q", before.GCSessionID, after.GCSessionID, handle.sessionID)
+	}
+
+	repeat, err := handle.History(context.Background(), HistoryRequest{})
+	if err != nil {
+		t.Fatalf("History(repeat): %v", err)
+	}
+	if got := historyEntryIDs(repeat); !reflect.DeepEqual(got, []string{"after-user", "after-assistant"}) {
+		t.Fatalf("History(repeat) IDs = %v, want stable [after-user after-assistant]", got)
+	}
+}
+
+// A fresh reset's start commits the new epoch and clears session_key before it
+// mints the key the new conversation launches under. A read in that window
+// must not hand the long-lived handle the abandoned transcript as the new
+// conversation, or the read after the mint stitches the two together.
+func TestSessionHandleHistoryDoesNotStitchAbandonedTranscriptBeforeKeyMint(t *testing.T) {
+	s := startKeyedClaudeHistorySession(t)
+	// The abandoned conversation's last write lands after the handle cached
+	// it, so the cached generation no longer short-circuits the next load.
+	writeWorkerTestJSONL(t, filepath.Join(s.slugDir, s.key+".jsonl"), append(slices.Clone(keyedClaudeBeforeTurns),
+		map[string]any{"uuid": "before-late", "parentUuid": "before-assistant", "type": "user", "message": map[string]any{"role": "user", "content": "one more"}},
+	))
+	if err := s.store.SetMetadataBatch(s.handle.sessionID, map[string]string{
+		"session_key":        "",
+		"continuation_epoch": "2",
+		"state":              string(sessionpkg.StateCreating),
+	}); err != nil {
+		t.Fatalf("SetMetadataBatch(pre-wake): %v", err)
+	}
+	if _, err := s.handle.History(context.Background(), HistoryRequest{}); !errors.Is(err, ErrHistoryUnavailable) {
+		t.Fatalf("History(before key mint) err = %v, want ErrHistoryUnavailable", err)
+	}
+
+	const resetKey = "11111111-2222-4333-8444-555555555555"
+	if err := s.store.SetMetadataBatch(s.handle.sessionID, map[string]string{
+		"session_key": resetKey,
+		"state":       string(sessionpkg.StateActive),
+	}); err != nil {
+		t.Fatalf("SetMetadataBatch(key mint): %v", err)
+	}
+	writeWorkerTestJSONL(t, filepath.Join(s.slugDir, resetKey+".jsonl"), keyedClaudeAfterTurns)
+	after, err := s.handle.History(context.Background(), HistoryRequest{})
+	if err != nil {
+		t.Fatalf("History(after): %v", err)
+	}
+	if got := historyEntryIDs(after); !reflect.DeepEqual(got, []string{"after-user", "after-assistant"}) {
+		t.Fatalf("History(after) IDs = %v, want only the reset conversation [after-user after-assistant]", got)
+	}
+}
+
+// A wake_mode=fresh session that slept with no reset pending wakes into a new
+// conversation without advancing its continuation epoch; only the key gc mints
+// for the new launch differs. The long-lived handle must still not stitch the
+// previous conversation in front of it.
+func TestSessionHandleHistoryDoesNotStitchFreshWakeThatKeepsEpoch(t *testing.T) {
+	s := startKeyedClaudeHistorySession(t)
+	// A sleep keeps the key and the epoch: still the same conversation.
+	if err := s.store.SetMetadataBatch(s.handle.sessionID, map[string]string{"state": string(sessionpkg.StateAsleep)}); err != nil {
+		t.Fatalf("SetMetadataBatch(sleep): %v", err)
+	}
+	asleep, err := s.handle.History(context.Background(), HistoryRequest{})
+	if err != nil {
+		t.Fatalf("History(asleep): %v", err)
+	}
+	if got := historyEntryIDs(asleep); !reflect.DeepEqual(got, []string{"before-user", "before-assistant"}) || asleep.LogicalConversationID != s.before.LogicalConversationID {
+		t.Fatalf("History(asleep) = %v as %q, want [before-user before-assistant] as %q", got, asleep.LogicalConversationID, s.before.LogicalConversationID)
+	}
+
+	// The fresh wake's pre-wake commit clears the key and leaves the epoch;
+	// the start then mints the new key.
+	if err := s.store.SetMetadataBatch(s.handle.sessionID, map[string]string{
+		"session_key": "",
+		"state":       string(sessionpkg.StateCreating),
+	}); err != nil {
+		t.Fatalf("SetMetadataBatch(pre-wake): %v", err)
+	}
+	if _, err := s.handle.History(context.Background(), HistoryRequest{}); !errors.Is(err, ErrHistoryUnavailable) {
+		t.Fatalf("History(before key mint) err = %v, want ErrHistoryUnavailable", err)
+	}
+	const wakeKey = "66666666-7777-4888-9999-aaaaaaaaaaaa"
+	if err := s.store.SetMetadataBatch(s.handle.sessionID, map[string]string{
+		"session_key": wakeKey,
+		"state":       string(sessionpkg.StateActive),
+	}); err != nil {
+		t.Fatalf("SetMetadataBatch(key mint): %v", err)
+	}
+	writeWorkerTestJSONL(t, filepath.Join(s.slugDir, wakeKey+".jsonl"), keyedClaudeAfterTurns)
+
+	after, err := s.handle.History(context.Background(), HistoryRequest{})
+	if err != nil {
+		t.Fatalf("History(after): %v", err)
+	}
+	if got := historyEntryIDs(after); !reflect.DeepEqual(got, []string{"after-user", "after-assistant"}) {
+		t.Fatalf("History(after) IDs = %v, want only the woken conversation [after-user after-assistant]", got)
+	}
+	if after.LogicalConversationID == s.before.LogicalConversationID {
+		t.Fatalf("LogicalConversationID = %q before and after a fresh wake, want a new logical conversation", after.LogicalConversationID)
 	}
 }

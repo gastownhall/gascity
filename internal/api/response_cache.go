@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 var responseCacheTTL = 2 * time.Second
@@ -138,6 +140,23 @@ func collectCacheKeyParts(v reflect.Value, parts *[]string) {
 		}
 		*parts = append(*parts, fmt.Sprintf("%s=%v", tagName, fv.Interface()))
 	}
+}
+
+// configGeneration returns a counter that advances whenever the state serves a
+// different config snapshot than the previous call saw. A config swap (an API
+// config mutation, or a reload) does not advance the event index, so caches of
+// config-derived projections must key on this as well as the index. Snapshots
+// are told apart by pointer, which relies on State.Config serving a changed
+// config as a new snapshot. Holding the last snapshot keeps its address from
+// being reused by a later one.
+func (s *Server) configGeneration(cfg *config.City) uint64 {
+	s.responseCacheMu.Lock()
+	defer s.responseCacheMu.Unlock()
+	if cfg != s.responseCacheCfg {
+		s.responseCacheCfg = cfg
+		s.responseCacheCfgGen++
+	}
+	return s.responseCacheCfgGen
 }
 
 // cachedResponse returns the cached typed value for (key, index) if present
@@ -294,6 +313,16 @@ func (s *Server) endResponseRefresh(key string) {
 	s.responseCacheMu.Lock()
 	defer s.responseCacheMu.Unlock()
 	delete(s.responseRefreshing, key)
+}
+
+// indexedResponse pairs a cached body with the event index captured before
+// the body was built. A cache hit or an Idempotency-Key replay must report
+// that index, not the current head: X-GC-Index tells a client where to resume
+// or block, and a head newer than the body would skip the changes the body
+// lacks.
+type indexedResponse[T any] struct {
+	Index uint64 `json:"index"`
+	Body  T      `json:"body"`
 }
 
 // cachedResponseAs is a generic helper: retrieve the cached value and

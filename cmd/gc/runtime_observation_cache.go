@@ -166,6 +166,13 @@ type RuntimeObservation struct {
 	PendingInteraction RuntimeFact
 	LastActivity       time.Time
 	LastActivityKnown  bool
+	// Content is the pass's read of the pane's content, for a name the
+	// planner asked the lane to read (WantContent): A15's content clock.
+	Content contentState
+	// RestartRequested is the runtime's restart marker as the pass that
+	// enriched the name read it (InventoryAttrs.RestartRequested): A13's
+	// trigger when the row write failed (C7a-2b).
+	RestartRequested bool
 	// FirstListedAt is the first pass in this epoch that listed this
 	// incarnation; LastListedAt the latest.
 	FirstListedAt time.Time
@@ -312,7 +319,29 @@ type InventoryAttrs struct {
 	ProcessProbed           bool
 	ProcessKnown            bool
 	ProcessAlive            bool
+	// ActivityKnown says the pass read the runtime's last activity
+	// (GetLastActivity, legacy's idle reference) error-free and non-zero;
+	// LastActivity is then that time. Anything else leaves it unknown.
+	ActivityKnown bool
+	LastActivity  time.Time
+	Content       contentState
+	// RestartRequested is the runtime's own restart marker
+	// (GC_RESTART_REQUESTED) as the pass read it: the batched inventory's,
+	// or a local sidecar's GetMeta (C7a-2b).
+	RestartRequested bool
 }
+
+// contentState is a pane content read (runtime.IdleSnapshotProvider), a
+// digest of legacy's checkIdleByContent's observation.
+type contentState uint8
+
+const (
+	contentUnread        contentState = iota // not asked for, not read, or past the bound
+	contentIdle                              // a ready prompt
+	contentBusy                              // an active-processing indicator
+	contentIndeterminate                     // neither (runtime.ErrIdleIndeterminate)
+	contentError                             // any other error: the anchor stands
+)
 
 // runtimeIdentity is one read of a runtime's identity env (v5 O2, O3):
 // GC_SESSION_ID, GC_RUNTIME_EPOCH, GC_INSTANCE_TOKEN and GT_PROCESS_NAMES.
@@ -465,6 +494,28 @@ type ObservationCache struct {
 	unlisted map[string]int
 	// everListed records backends that listed a name this epoch, for health.
 	everListed map[string]bool
+	// wantContent are the names whose pane content the lane reads, as the
+	// planner last asked (WantContent).
+	wantContent atomic.Pointer[map[string]bool]
+}
+
+// WantContent sets the names whose pane content the lane reads each pass:
+// the planner's rows on A15's content clock.
+func (c *ObservationCache) WantContent(names map[string]bool) {
+	if c != nil {
+		c.wantContent.Store(&names)
+	}
+}
+
+// contentWanted is the names the planner last asked the lane to read.
+func (c *ObservationCache) contentWanted() map[string]bool {
+	if c == nil {
+		return nil
+	}
+	if p := c.wantContent.Load(); p != nil {
+		return *p
+	}
+	return nil
 }
 
 // NewObservationCache returns an empty cache whose reads treat facts older
@@ -497,8 +548,12 @@ func (c *ObservationCache) PublishInventory(pass InventoryPass, attrs map[string
 	at := pass.StartedAt
 	swapped := pass.ProviderGen != prev.Inventory.ProviderGen
 
+	// Activity is this pass's read or unknown: a stale reading never
+	// carries over, enriched or not, so a missed read cannot make a row
+	// look idle.
 	byName := make(map[string]RuntimeObservation, len(prev.ByName))
 	for name, obs := range prev.ByName {
+		obs.LastActivity, obs.LastActivityKnown, obs.Content = time.Time{}, false, contentUnread
 		byName[name] = obs
 	}
 
@@ -537,6 +592,7 @@ func (c *ObservationCache) PublishInventory(pass InventoryPass, attrs map[string
 		if enriched {
 			applyInventoryAttrs(&obs, a, at)
 		}
+		keepNewerFacts(&obs, old, at)
 		if observationChanged(old, obs, had) {
 			flips++
 		}
@@ -556,6 +612,7 @@ func (c *ObservationCache) PublishInventory(pass InventoryPass, attrs map[string
 		case unrefreshed[obs.Backend] != "":
 			obs.Listed.Reason = unrefreshed[obs.Backend]
 		}
+		keepNewerFacts(&obs, old, at)
 		if observationChanged(old, obs, true) {
 			flips++
 		}
@@ -590,6 +647,17 @@ func (c *ObservationCache) PublishInventory(pass InventoryPass, attrs map[string
 	}
 	c.store(next, flips > 0 || primedChanged(prev.Primed, primed), at)
 	return flips
+}
+
+// keepNewerFacts restores onto obs each of old's facts observed after at, a
+// pass's start: a fresh read Note wrote after the pass began wins over the
+// pass, and a pass that started later overrides it (v5 O4).
+func keepNewerFacts(obs *RuntimeObservation, old RuntimeObservation, at time.Time) {
+	for _, kind := range allFactKinds {
+		if f := old.fact(kind); f.ObservedAt.After(at) {
+			*obs.fact(kind) = *f
+		}
+	}
 }
 
 // primedChanged reports whether any backend's primed state differs, which
@@ -631,6 +699,10 @@ func applyInventoryAttrs(obs *RuntimeObservation, a InventoryAttrs, at time.Time
 	if a.AttachedKnown {
 		obs.Attached = poller(obsFactOf(a.Attached))
 	}
+	if a.ActivityKnown {
+		obs.LastActivity, obs.LastActivityKnown = a.LastActivity, true
+	}
+	obs.Content, obs.RestartRequested = a.Content, a.RestartRequested
 	obs.OwnerState, obs.Owner, obs.InstanceToken, obs.Identity = a.OwnerState, reconcilekey.Key{}, a.InstanceToken, a.Identity
 	if a.OwnerState == OwnerSession {
 		obs.Owner = reconcilekey.SessionRef(a.OwnerID, obs.SessionName)
@@ -648,7 +720,7 @@ func observationChanged(old, next RuntimeObservation, had bool) bool {
 			return true
 		}
 	}
-	return old.Incarnation != next.Incarnation || old.OwnerState != next.OwnerState || old.Owner != next.Owner ||
+	return old.Incarnation != next.Incarnation || old.OwnerState != next.OwnerState || old.Owner != next.Owner || old.RestartRequested != next.RestartRequested ||
 		!sameIdentity(old.Identity, next.Identity)
 }
 
@@ -675,7 +747,10 @@ func (c *ObservationCache) store(next *ObservationSnapshot, flipped bool, at tim
 }
 
 // Note writes one fact from a fresh three-outcome probe. A write observed
-// before the stored fact loses.
+// before the stored fact loses, and so does one observed at the same instant
+// as an inventory pass's fact: the inventory wins a tie, as PublishInventory
+// keeps only facts strictly newer than its start and unlistedSincePass and
+// listedSincePass read a note only strictly after it (#7799 review).
 func (c *ObservationCache) Note(name string, kind FactKind, v ObsFact, at time.Time, src ObsSource, reason string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -685,7 +760,7 @@ func (c *ObservationCache) Note(name string, kind FactKind, v ObsFact, at time.T
 		obs = RuntimeObservation{SessionName: name}
 	}
 	f := obs.fact(kind)
-	if at.Before(f.ObservedAt) {
+	if at.Before(f.ObservedAt) || at.Equal(f.ObservedAt) && f.Source == SourcePoller {
 		return
 	}
 	flipped := f.Value != v

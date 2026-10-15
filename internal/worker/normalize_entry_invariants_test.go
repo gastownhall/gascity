@@ -6,11 +6,14 @@ import (
 	"github.com/gastownhall/gascity/internal/sessionlog"
 )
 
-// TestNormalizeEntryCarriesModelStopReasonAndDerivedFlag covers three
+// TestNormalizeEntryCarriesModelStopReasonAndDerivedFlag covers four
 // normalized-history invariants that previously had no direct assertion: model
-// and stop_reason are extracted from the provider message, and the
+// and stop_reason are extracted from the provider message, the
 // Provenance.Derived flag distinguishes provider-supplied identity from
-// GC-synthesized identity.
+// GC-synthesized identity, and Provenance.RawEntryID carries only the provider
+// UUID. The API emits RawEntryID as the turn id that transcript cursors match,
+// so a synthesized ID must never reach it
+// (TestHistorySnapshotTurnsCarryProviderEntryID pins the API side).
 func TestNormalizeEntryCarriesModelStopReasonAndDerivedFlag(t *testing.T) {
 	message := mustMarshalStructuredToolTest(t, map[string]any{
 		"role":        "assistant",
@@ -32,6 +35,9 @@ func TestNormalizeEntryCarriesModelStopReasonAndDerivedFlag(t *testing.T) {
 	if got.Provenance.Derived {
 		t.Fatal("Provenance.Derived = true, want false for an entry with a provider-supplied UUID")
 	}
+	if got.Provenance.RawEntryID != "entry-1" {
+		t.Fatalf("Provenance.RawEntryID = %q, want the provider UUID entry-1", got.Provenance.RawEntryID)
+	}
 
 	// An entry without a UUID is given a synthesized ID and must be flagged as
 	// derived so consumers can tell GC-minted identity from provider identity.
@@ -42,6 +48,9 @@ func TestNormalizeEntryCarriesModelStopReasonAndDerivedFlag(t *testing.T) {
 	}
 	if derived.ID == "" {
 		t.Fatal("derived entry must still receive a synthesized ID")
+	}
+	if derived.Provenance.RawEntryID != "" {
+		t.Fatalf("Provenance.RawEntryID = %q, want empty for an entry without a UUID", derived.Provenance.RawEntryID)
 	}
 }
 

@@ -106,14 +106,11 @@ func startSharedDoltServer(t *testing.T, env []string, dataDir string) string {
 		t.Fatalf("creating dolt data dir: %v", err)
 	}
 
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	reserved, err := reserveLoopbackPort()
 	if err != nil {
 		t.Fatalf("allocating dolt port: %v", err)
 	}
-	port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
-	if err := listener.Close(); err != nil {
-		t.Fatalf("closing dolt port probe: %v", err)
-	}
+	port := strconv.Itoa(reserved)
 
 	logPath := filepath.Join(dataDir, "sql-server.log")
 	logFile, err := os.Create(logPath)

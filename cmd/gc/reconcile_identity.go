@@ -127,3 +127,14 @@ func ownsName(row session.Info, name string) bool {
 	return isPoolManagedSessionInfo(row) && infoOwnsPoolSessionName(row) &&
 		strings.TrimSpace(row.SessionNameMetadata) == strings.TrimSpace(name)
 }
+
+// deadToken is a dead runtime's identity key for the classified set (v5 S5,
+// X10): its session ID and token.
+func deadToken(id runtimeIdentity) string {
+	return strings.TrimSpace(id.SessionID) + "/" + strings.TrimSpace(id.Token)
+}
+
+// classifies reports that c, a classified set's entry, is id's dead runtime.
+func (c classifiedRuntime) classifies(id runtimeIdentity) bool {
+	return c.Token == deadToken(id)
+}

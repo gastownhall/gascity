@@ -23,8 +23,12 @@ import (
 //	FAKE_UNREACHABLE_SCOPES  scopes whose bd calls fail
 //	FAKE_UNSUPPORTED_SCOPES  scopes where backup is refused (proxied, bd v1.3.0)
 //	FAKE_CONFIGURED_DBS      databases that already have a backup destination
+//	FAKE_STATUS_FAIL_DBS     databases whose backup status fails
 //	FAKE_INIT_FAIL_DBS       databases whose backup init fails
+//	FAKE_FAILURE_DETAIL      text appended to the unreachable, status, and init errors
 //	FAKE_SYNC_FAIL_UNTIL     fail each database's first N syncs (default 0)
+//	FAKE_SYNC_STDERR         stderr line a failing sync prints (default: a closed connection)
+//	FAKE_SYNC_FIRST_STDERR   overrides FAKE_SYNC_STDERR on a database's first sync
 //	FAKE_SYNC_STARTED/FAKE_SYNC_RELEASE  block sync until the release file exists
 type backupFakeGC struct {
 	logPath string
@@ -59,7 +63,7 @@ case " ${FAKE_NOT_BD_SCOPES:-} " in
   *" $scope "*) printf 'gc bd: only supported for bd-backed beads providers (resolved "file" for %%s)\n' "$scope" >&2; exit 1 ;;
 esac
 case " ${FAKE_UNREACHABLE_SCOPES:-} " in
-  *" $scope "*) printf 'fake gc: %%s unreachable\n' "$scope" >&2; exit 1 ;;
+  *" $scope "*) printf 'fake gc: %%s unreachable%%s\n' "$scope" "${FAKE_FAILURE_DETAIL:+ $FAKE_FAILURE_DETAIL}" >&2; exit 1 ;;
 esac
 db=prod
 for pair in ${FAKE_SCOPE_DBS:-}; do
@@ -78,6 +82,9 @@ case "${1:-} ${2:-}" in
     esac
     case "$2" in
       status)
+        case " ${FAKE_STATUS_FAIL_DBS:-} " in
+          *" $db "*) printf 'Error: backup status failed for %%s%%s\n' "$db" "${FAKE_FAILURE_DETAIL:+ $FAKE_FAILURE_DETAIL}" >&2; exit 1 ;;
+        esac
         configured=false
         case " ${FAKE_CONFIGURED_DBS:-} " in *" $db "*) configured=true ;; esac
         [ -f "$state/$db.configured" ] && configured=true
@@ -85,7 +92,7 @@ case "${1:-} ${2:-}" in
         ;;
       init)
         case " ${FAKE_INIT_FAIL_DBS:-} " in
-          *" $db "*) printf 'Error: failed to add backup destination for %%s\n' "$db" >&2; exit 1 ;;
+          *" $db "*) printf 'Error: failed to add backup destination for %%s%%s\n' "$db" "${FAKE_FAILURE_DETAIL:+ $FAKE_FAILURE_DETAIL}" >&2; exit 1 ;;
         esac
         printf '%%s\n' "$3" > "$state/$db.configured"
         printf '{"backup_name":"default","backup_url":"%%s","initialized":true}\n' "$3"
@@ -98,7 +105,10 @@ case "${1:-} ${2:-}" in
         fi
         attempts=$(wc -c < "$state/$db.syncs" | tr -d ' ')
         if [ "$attempts" -le "${FAKE_SYNC_FAIL_UNTIL:-0}" ]; then
-          printf 'Error: backup sync failed: Error 1105 (HY000): connection was closed\n' >&2
+          sync_err='Error: backup sync failed: Error 1105 (HY000): connection was closed'
+          if [ -n "${FAKE_SYNC_STDERR:-}" ]; then sync_err=$FAKE_SYNC_STDERR; fi
+          if [ "$attempts" -eq 1 ] && [ -n "${FAKE_SYNC_FIRST_STDERR:-}" ]; then sync_err=$FAKE_SYNC_FIRST_STDERR; fi
+          printf '%%s\n' "$sync_err" >&2
           exit 1
         fi
         printf '{"synced":true,"duration":"1ms"}\n'
@@ -318,6 +328,182 @@ func TestBackupOrderEscalatesFailedSyncWithDiagnostic(t *testing.T) {
 	} {
 		if !strings.Contains(log, want) {
 			t.Fatalf("failure escalation missing %q:\n%s", want, log)
+		}
+	}
+}
+
+func TestBackupOrderEscalatesFirstSyncFailureWithCredentialsRedacted(t *testing.T) {
+	cityPath := resolvedTempDir(t)
+	binDir := t.TempDir()
+	gc := writeBackupFakeGC(t, binDir)
+
+	out := mustRunBackupOrder(t, binDir, cityPath,
+		"FAKE_CONFIGURED_DBS=prod",
+		"FAKE_SYNC_FAIL_UNTIL=99",
+		"GC_DOLT_BACKUP_SYNC_ATTEMPTS=2",
+		`FAKE_SYNC_FIRST_STDERR=sync failed Password=first-secret postgres://user:first-url-secret@example.test/repo {"token":"json-secret"} --password cli-secret Authorization: Bearer bearer-secret`,
+		"FAKE_SYNC_STDERR=later failure TOKEN=second-secret",
+	)
+	if got := syncAttempts(t, binDir, "prod"); got != 2 {
+		t.Fatalf("backup sync attempted %d times, want GC_DOLT_BACKUP_SYNC_ATTEMPTS=2", got)
+	}
+	log := gc.log(t)
+	if !strings.Contains(log, "mail send human -s Dolt backup: 1/1 databases failed to sync [MEDIUM]") {
+		t.Fatalf("sync failure did not escalate:\n%s", log)
+	}
+	for _, secret := range []string{"first-secret", "first-url-secret", "json-secret", "cli-secret", "bearer-secret", "second-secret"} {
+		if strings.Contains(log, secret) || strings.Contains(out, secret) {
+			t.Fatalf("sync stderr credential %q leaked into the order output or escalation:\nlog:\n%s\noutput:\n%s", secret, log, out)
+		}
+	}
+	for _, want := range []string{
+		"sync failed Password=[redacted]",
+		"postgres://[redacted]@example.test/repo",
+		`"token":"[redacted]"`,
+		"--password [redacted]",
+		"Authorization: [redacted]",
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("escalation missing the first attempt's redacted diagnostic %q:\n%s", want, log)
+		}
+	}
+	if strings.Contains(log, "later failure") {
+		t.Fatalf("escalation must report the first failed attempt, not a later one:\n%s", log)
+	}
+}
+
+func TestBackupOrderRaisesUnchangedSyncFailureAsOneIncident(t *testing.T) {
+	cityPath := resolvedTempDir(t)
+	binDir := t.TempDir()
+	gc := writeBackupFakeGC(t, binDir)
+	failing := []string{"FAKE_CONFIGURED_DBS=prod", "FAKE_SYNC_FAIL_UNTIL=99", "GC_DOLT_BACKUP_SYNC_ATTEMPTS=1"}
+	const notified = "mail send human -s Dolt backup: 1/1 databases failed to sync [MEDIUM]"
+
+	mustRunBackupOrder(t, binDir, cityPath, failing...)
+	mustRunBackupOrder(t, binDir, cityPath, failing...)
+	if got := strings.Count(gc.log(t), notified); got != 1 {
+		t.Fatalf("an unchanged sync failure notified %d times over two runs, want 1:\n%s", got, gc.log(t))
+	}
+	states, err := filepath.Glob(filepath.Join(cityPath, ".gc", "incidents", "*.state"))
+	if err != nil {
+		t.Fatalf("glob incident state: %v", err)
+	}
+	if len(states) != 1 {
+		t.Fatalf("incident state files = %v, want one incident for the sync failure", states)
+	}
+
+	mustRunBackupOrder(t, binDir, cityPath, append(failing, "FAKE_SYNC_STDERR=Error: backup sync failed: remote rejected the push")...)
+	if got := strings.Count(gc.log(t), notified); got != 2 {
+		t.Fatalf("a changed sync failure notified %d times in total, want a second notification:\n%s", got, gc.log(t))
+	}
+}
+
+// TestBackupOrderAlertsWhenASyncFailureReturnsAfterRecovery pins the recovery
+// half of the incident. A clean run resolves it, so the same failure coming
+// back inside the reminder interval notifies again rather than being
+// suppressed as unchanged.
+func TestBackupOrderAlertsWhenASyncFailureReturnsAfterRecovery(t *testing.T) {
+	cityPath := resolvedTempDir(t)
+	binDir := t.TempDir()
+	gc := writeBackupFakeGC(t, binDir)
+	const notified = "mail send human -s Dolt backup: 1/1 databases failed to sync [MEDIUM]"
+	// The fake counts sync attempts across runs, so FAKE_SYNC_FAIL_UNTIL=99
+	// fails every later run and 0 lets the next one succeed.
+	run := func(failUntil string) {
+		t.Helper()
+		mustRunBackupOrder(t, binDir, cityPath,
+			"FAKE_CONFIGURED_DBS=prod", "GC_DOLT_BACKUP_SYNC_ATTEMPTS=1", "FAKE_SYNC_FAIL_UNTIL="+failUntil)
+	}
+
+	run("99")
+	run("0")
+	if got := strings.Count(gc.log(t), notified); got != 1 {
+		t.Fatalf("fail then recover notified %d times, want 1:\n%s", got, gc.log(t))
+	}
+	run("99")
+	if got := strings.Count(gc.log(t), notified); got != 2 {
+		t.Fatalf("a failure that returned after a clean run notified %d times in total, want 2:\n%s", got, gc.log(t))
+	}
+}
+
+// TestBackupOrderRedactsEveryCredentialShape pins the redactor against each
+// credential shape a sync error can carry. Each shape runs in its own city so
+// a match in one row cannot mask a miss in another, and both the escalation
+// and the order log must keep the key and lose the value.
+func TestBackupOrderRedactsEveryCredentialShape(t *testing.T) {
+	cases := []struct {
+		name     string
+		stderr   string
+		secret   string
+		redacted string
+	}{
+		{"authorization with any scheme", "Authorization: Basic basic-cred-sentinel", "basic-cred-sentinel", "Authorization: [redacted]"},
+		{"quoted multi-word value", `password: "two-word secret-sentinel-dq"`, "secret-sentinel-dq", "password: [redacted]"},
+		{"spaces around the separator", "token = space-sentinel", "space-sentinel", "token = [redacted]"},
+		{"prefixed JSON token key", `{"access_token":"json-prefix-sentinel"}`, "json-prefix-sentinel", `"access_token":"[redacted]"`},
+		{"prefixed JSON secret key", `{"client_secret": "json-secret-sentinel"}`, "json-secret-sentinel", `"client_secret": "[redacted]"`},
+		{"secret access key", "aws_secret_access_key=aws-sentinel", "aws-sentinel", "aws_secret_access_key=[redacted]"},
+		{"prefixed flag", "--db-password cli-prefix-sentinel", "cli-prefix-sentinel", "--db-password [redacted]"},
+		{"JSON authorization", `"Authorization": "Bearer json-auth-sentinel"`, "json-auth-sentinel", `"Authorization": "[redacted]"`},
+		{"URL userinfo with @ in the password", "https://user:p@ss-sentinel@example.test/repo", "ss-sentinel", "https://[redacted]@example.test/repo"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := resolvedTempDir(t)
+			binDir := t.TempDir()
+			gc := writeBackupFakeGC(t, binDir)
+
+			out := mustRunBackupOrder(t, binDir, cityPath,
+				"FAKE_CONFIGURED_DBS=prod",
+				"FAKE_SYNC_FAIL_UNTIL=99",
+				"GC_DOLT_BACKUP_SYNC_ATTEMPTS=1",
+				"FAKE_SYNC_STDERR=Error: backup sync failed: "+tc.stderr,
+			)
+			log := gc.log(t)
+			if strings.Contains(log, tc.secret) || strings.Contains(out, tc.secret) {
+				t.Fatalf("credential %q leaked:\nlog:\n%s\noutput:\n%s", tc.secret, log, out)
+			}
+			if !strings.Contains(log, tc.redacted) || !strings.Contains(out, tc.redacted) {
+				t.Fatalf("want %q in both the escalation and the order log:\nlog:\n%s\noutput:\n%s", tc.redacted, log, out)
+			}
+		})
+	}
+}
+
+// TestBackupOrderRedactsEveryFailureDiagnostic pins that redaction covers
+// every diagnostic the escalation carries, not only sync stderr. A failed
+// backup status, an unreachable scope, and a failed destination registration
+// each reach the mail through the same filter.
+func TestBackupOrderRedactsEveryFailureDiagnostic(t *testing.T) {
+	cityPath := resolvedTempDir(t)
+	binDir := t.TempDir()
+	gc := writeBackupFakeGC(t, binDir)
+
+	out := mustRunBackupOrder(t, binDir, cityPath,
+		`FAKE_RIG_LIST_JSON={"rigs":[{"name":"api","hq":false},{"name":"archive","hq":false}]}`,
+		"FAKE_SCOPE_DBS=city=prod rig:api=apidb rig:archive=archive",
+		"FAKE_STATUS_FAIL_DBS=prod",
+		"FAKE_UNREACHABLE_SCOPES=rig:api",
+		"FAKE_INIT_FAIL_DBS=archive",
+		"FAKE_FAILURE_DETAIL=token=diag-token-sentinel Authorization: Basic diag-basic-sentinel",
+	)
+	if !strings.Contains(out, "synced: 0/3") {
+		t.Fatalf("unexpected backup summary:\n%s", out)
+	}
+	log := gc.log(t)
+	for _, secret := range []string{"diag-token-sentinel", "diag-basic-sentinel"} {
+		if strings.Contains(log, secret) || strings.Contains(out, secret) {
+			t.Fatalf("diagnostic credential %q leaked:\nlog:\n%s\noutput:\n%s", secret, log, out)
+		}
+	}
+	for _, want := range []string{
+		"backup status failed for prod token=[redacted] Authorization: [redacted]",
+		"rig:api unreachable token=[redacted] Authorization: [redacted]",
+		"failed to add backup destination for archive token=[redacted] Authorization: [redacted]",
+		"common credential shapes redacted",
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("escalation missing %q:\n%s", want, log)
 		}
 	}
 }

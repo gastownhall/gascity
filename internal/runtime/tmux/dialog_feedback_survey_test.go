@@ -277,6 +277,9 @@ type staleSurveyScrollbackExecutor struct {
 
 func (s *staleSurveyScrollbackExecutor) execute(args []string) (string, error) {
 	s.calls = append(s.calls, slices.Clone(args))
+	if row, ok := fakeAgentPaneRow(args); ok {
+		return row, nil
+	}
 	if slices.Contains(args, "capture-pane") {
 		if slices.Contains(args, "-S") {
 			return feedbackSurveySessionFixture, nil
@@ -303,7 +306,7 @@ func TestDismissFeedbackSurveyModalIgnoresSurveyOnlyInScrollback(t *testing.T) {
 			t.Fatalf("stale survey scrollback sent stray keys: %v", executor.calls)
 		}
 	}
-	wantCapture := []string{"-u", "capture-pane", "-p", "-t", "=agent-pane:"}
+	wantCapture := []string{"-u", "capture-pane", "-p", "-t", fakeAgentPane("agent-pane")}
 	if len(executor.calls) != 2 || !slices.Equal(executor.calls[1], wantCapture) {
 		t.Fatalf("calls = %v, want pane lookup then visible capture %v", executor.calls, wantCapture)
 	}
@@ -311,7 +314,7 @@ func TestDismissFeedbackSurveyModalIgnoresSurveyOnlyInScrollback(t *testing.T) {
 
 func TestDismissFeedbackSurveyModalSendsOneDigitWhileSurveyPersists(t *testing.T) {
 	executor := &scriptedTargetExecutor{capture: feedbackSurveySessionFixture, display: "agent-pane|0"}
-	tm := &Tmux{cfg: DefaultConfig(), exec: executor, sleep: func(time.Duration) {}}
+	tm := &Tmux{cfg: DefaultConfig(), exec: executor}
 
 	if err := tm.DismissFeedbackSurveyModalIfPresent("agent-pane"); err != nil {
 		t.Fatalf("DismissFeedbackSurveyModalIfPresent error = %v", err)
@@ -356,13 +359,16 @@ func TestDismissFeedbackSurveyModalLeavesHumanSessionsAlone(t *testing.T) {
 type failingRecaptureExecutor struct {
 	scriptedTargetExecutor
 	captureFails bool
+	// visibleOnly fails only captures of the visible pane (no -S), the
+	// survey peek's, so the nudge's looks for a permission prompt still read.
+	visibleOnly bool
 }
 
 func (f *failingRecaptureExecutor) execute(args []string) (string, error) {
 	if slices.Contains(args, "send-keys") && slices.Contains(args, "0") {
 		f.captureFails = true
 	}
-	if f.captureFails && slices.Contains(args, "capture-pane") {
+	if f.captureFails && slices.Contains(args, "capture-pane") && (!f.visibleOnly || !slices.Contains(args, "-S")) {
 		f.calls = append(f.calls, slices.Clone(args))
 		return "", errors.New("capture-pane failed")
 	}
@@ -375,7 +381,7 @@ func (f *failingRecaptureExecutor) executeCtx(_ context.Context, args []string) 
 
 func TestDismissFeedbackSurveyModalReportsUnresolvedDigit(t *testing.T) {
 	executor := &failingRecaptureExecutor{scriptedTargetExecutor: scriptedTargetExecutor{capture: feedbackSurveySessionFixture, display: "agent-pane|0"}}
-	tm := &Tmux{cfg: DefaultConfig(), exec: executor, sleep: func(time.Duration) {}}
+	tm := &Tmux{cfg: DefaultConfig(), exec: executor}
 
 	if err := tm.DismissFeedbackSurveyModalIfPresent("agent-pane"); err == nil {
 		t.Fatal("DismissFeedbackSurveyModalIfPresent error = nil after the post-digit capture failed, want an error so the nudge does not paste onto the digit")
@@ -428,7 +434,7 @@ func TestNudgeSessionDoesNotPasteOntoUnresolvedSurveyDigit(t *testing.T) {
 	executor := &failingRecaptureExecutor{scriptedTargetExecutor: scriptedTargetExecutor{capture: feedbackSurveySessionFixture, display: "agent-pane|0"}}
 	cfg := DefaultConfig()
 	cfg.NudgeReadyTimeout = 10 * time.Millisecond
-	tm := &Tmux{cfg: cfg, exec: executor, sleep: func(time.Duration) {}}
+	tm := &Tmux{cfg: cfg, exec: executor}
 
 	if err := tm.NudgeSession("agent-pane", "hello"); err == nil {
 		t.Fatal("NudgeSession error = nil after the survey digit was left unresolved")
@@ -441,10 +447,10 @@ func TestNudgeSessionDoesNotPasteOntoUnresolvedSurveyDigit(t *testing.T) {
 }
 
 func TestNudgeSessionDeliversWhenSurveyPeekFails(t *testing.T) {
-	executor := &failingRecaptureExecutor{scriptedTargetExecutor: scriptedTargetExecutor{display: "agent-pane|0"}, captureFails: true}
+	executor := &failingRecaptureExecutor{scriptedTargetExecutor: scriptedTargetExecutor{display: "agent-pane|0"}, captureFails: true, visibleOnly: true}
 	cfg := DefaultConfig()
 	cfg.NudgeReadyTimeout = 10 * time.Millisecond
-	tm := &Tmux{cfg: cfg, exec: executor, sleep: func(time.Duration) {}}
+	tm := &Tmux{cfg: cfg, exec: executor}
 
 	_ = tm.NudgeSession("agent-pane", "hello")
 

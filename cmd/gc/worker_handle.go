@@ -495,10 +495,18 @@ func runtimeWorkerHandleWithConfig(
 	return factory.RuntimeHandle(sessionName, providerName, transport, processNames)
 }
 
+// sessionActor is kind's Actor on cityPath. A cityPath that names no city
+// directory gives an Actor with no City, whose verbs that take the runtime
+// lease refuse with session.ErrRuntimeLeaseNoCity.
+func sessionActor(kind session.ActorKind, cityPath string) session.Actor {
+	city, _ := session.NewCityDir(cityPath)
+	return session.Actor{Kind: kind, City: city}
+}
+
 // workerKillSessionTargetWithConfig is an operator's kill: it waits for the
 // session's runtime lease (CONTRACT O3).
 func workerKillSessionTargetWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string) error {
-	return workerKillSessionTargetCtx(context.Background(), cityPath, store, sp, cfg, target)
+	return workerKillSessionTargetCtx(context.Background(), sessionActor(session.ActorOperator, cityPath), cityPath, store, sp, cfg, target)
 }
 
 // controllerKillSessionRow is the controller's kill of the row it decided
@@ -510,10 +518,11 @@ func controllerKillSessionRow(cityPath string, store beads.Store, sp runtime.Pro
 	return legacyAct{cityPath: cityPath, store: store, sp: sp, cfg: cfg}.Stop(session.Decide(decided, session.FactsLegacyKill))
 }
 
-// controllerKillRowCtx is a controller kill under ctx, resolved strictly by
-// the row's ID: a row that does not resolve (gone, unreadable) is an error
-// the caller defers on, never a runtime handle named after the ID.
-func controllerKillRowCtx(ctx context.Context, cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, id string) error {
+// controllerKillRowCtx is a controller kill by by (ActorController, and
+// by.Lease when the caller holds one), under ctx's kill premise, resolved
+// strictly by the row's ID: a row that does not resolve (gone, unreadable) is
+// an error the caller defers on, never a runtime handle named after the ID.
+func controllerKillRowCtx(ctx context.Context, by session.Actor, cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, id string) error {
 	if store == nil || strings.TrimSpace(id) == "" {
 		return fmt.Errorf("controller kill: no session row to resolve (id %q)", id)
 	}
@@ -521,18 +530,16 @@ func controllerKillRowCtx(ctx context.Context, cityPath string, store beads.Stor
 	if err != nil {
 		return err
 	}
-	return handle.Kill(ctx)
+	return handle.Kill(ctx, by)
 }
 
-// workerKillSessionTargetCtx kills target under ctx's lease mode
-// (session.WithoutLeaseWait, session.ContextWithRuntimeLease,
-// session.CitySweepContext).
-func workerKillSessionTargetCtx(ctx context.Context, cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string) error {
+// workerKillSessionTargetCtx kills target in by's lease mode.
+func workerKillSessionTargetCtx(ctx context.Context, by session.Actor, cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string) error {
 	handle, err := workerHandleForSessionTargetWithConfig(cityPath, store, sp, cfg, target)
 	if err != nil {
 		return err
 	}
-	return handle.Kill(ctx)
+	return handle.Kill(ctx, by)
 }
 
 // workerStopSessionTargetForShutdownWithConfig is the city stop/restart sweep's

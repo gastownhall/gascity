@@ -972,7 +972,8 @@ func TestResolveSessionIDMaterializingNamed_RecreatesClosedConfiguredNamedSessio
 			Template: "mayor",
 		}},
 	}
-	mgr := session.NewManagerWithOptions(store, runtime.NewFake(), session.WithCityPath(t.TempDir()))
+	city := t.TempDir()
+	mgr := session.NewManagerWithOptions(store, runtime.NewFake(), session.WithCityPath(city))
 	info, err := mgr.CreateSession(
 		context.Background(), session.CreateOptions{Alias: "mayor", ExplicitName: config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, "mayor"), Template: "mayor", Title: "Mayor", Command: "true", WorkDir: t.TempDir(), Provider: "shell", Transport: "", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{
 			namedSessionMetadataKey:      "true",
@@ -982,7 +983,7 @@ func TestResolveSessionIDMaterializingNamed_RecreatesClosedConfiguredNamedSessio
 	if err != nil {
 		t.Fatalf("CreateSessionAliasedNamedWithTransportAndMetadata: %v", err)
 	}
-	if err := mgr.Close(info.ID); err != nil {
+	if err := mgr.Close(context.Background(), testOperatorIn(t, city), info.ID); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 

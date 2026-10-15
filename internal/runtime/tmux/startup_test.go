@@ -2244,7 +2244,6 @@ func TestRunSetupCommandIncludesBothStreamDetails(t *testing.T) {
 }
 
 func TestRunSetupCommandTimeoutMatchesDeadlineExceeded(t *testing.T) {
-	t.Parallel()
 	ops := &tmuxStartOps{tm: &Tmux{}}
 
 	err := ops.runSetupCommand(
@@ -2270,7 +2269,6 @@ func TestRunSetupCommandTimeoutMatchesDeadlineExceeded(t *testing.T) {
 // descendant exits, far past setup_timeout. The command itself exits 0, so
 // it must be reported as success once the pipes are force-closed.
 func TestRunSetupCommandBackgroundChildSucceedsBounded(t *testing.T) {
-	t.Parallel()
 	ops := &tmuxStartOps{tm: &Tmux{}}
 
 	start := time.Now()
@@ -2290,7 +2288,6 @@ func TestRunSetupCommandBackgroundChildSucceedsBounded(t *testing.T) {
 }
 
 func TestRunSetupCommandBackgroundChildFailureBounded(t *testing.T) {
-	t.Parallel()
 	ops := &tmuxStartOps{tm: &Tmux{}}
 
 	start := time.Now()
@@ -3216,7 +3213,7 @@ func TestTmuxStartOpsRunSetupCommandUsesGC_DIRAsWorkingDirectory(t *testing.T) {
 
 func TestPaneDeadInfoParsesStatusAndSignal(t *testing.T) {
 	tm := NewTmux()
-	exec := &fakeExecutor{out: "139|SIGSEGV\n"}
+	exec := &fakeExecutor{out: "pane\t139|SIGSEGV\n"}
 	tm.exec = exec
 
 	status, signal := tm.PaneDeadInfo("mayor")
@@ -3278,7 +3275,6 @@ func TestRecordStartCrashDisabledWhenNoRuntimeDir(t *testing.T) {
 // clock, so a command that streams for 3x the idle window and exits 0 must
 // succeed.
 func TestRunSetupCommandActivityStreamingSurvivesIdleWindow(t *testing.T) {
-	t.Parallel()
 	ops := &tmuxStartOps{tm: &Tmux{}, setupMaxTimeout: 30 * time.Second}
 
 	err := ops.runSetupCommand(
@@ -3296,7 +3292,6 @@ func TestRunSetupCommandActivityStreamingSurvivesIdleWindow(t *testing.T) {
 // protection survives the activity mode: a command producing no output still
 // dies after the idle budget, well before its own runtime.
 func TestRunSetupCommandActivityIdleKillsSilentHang(t *testing.T) {
-	t.Parallel()
 	ops := &tmuxStartOps{tm: &Tmux{}, setupMaxTimeout: 30 * time.Second}
 
 	start := time.Now()
@@ -3323,7 +3318,6 @@ func TestRunSetupCommandActivityIdleKillsSilentHang(t *testing.T) {
 // TestRunSetupCommandActivityCeilingKillsRunaway proves the runaway backstop:
 // continuous output must not extend a command past the absolute ceiling.
 func TestRunSetupCommandActivityCeilingKillsRunaway(t *testing.T) {
-	t.Parallel()
 	ops := &tmuxStartOps{tm: &Tmux{}, setupMaxTimeout: 700 * time.Millisecond}
 
 	start := time.Now()
@@ -3471,6 +3465,9 @@ type partialPasteExecutor struct {
 func (f *partialPasteExecutor) execute(args []string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if row, ok := fakeAgentPaneRow(args); ok {
+		return row, nil
+	}
 	// tmux invocations carry leading flags (-u, socket selection), so match the
 	// subcommand anywhere in the argument list rather than at a fixed index.
 	switch {

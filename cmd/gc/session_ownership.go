@@ -79,7 +79,7 @@ func sessionOwnsLiveClaim(
 	cityPath string,
 	cfg *config.City,
 	store beads.Store,
-	rigStores map[string]beads.Store,
+	sw *SeatWork,
 	info sessionpkg.Info,
 ) (owns bool, claimID string, err error) {
 	if store == nil || strings.TrimSpace(info.ID) == "" {
@@ -99,8 +99,11 @@ func sessionOwnsLiveClaim(
 	// store, even once it is closed and the stamp lingers. The first leg that
 	// holds the bead answers for it — ids are unique, so its own state is final
 	// — and only NotFound moves on.
-	serving := servingRigStores(cfg, rigStores, buildSuspendedRigPathsForCity(cfg, cityPath))
-	owner, err := byIDOwnerRowForTopology(byIDResidencyTopology(cityPath, cfg, censusWorkLeg(cityPath, store), serving, claimID), claimID)
+	legs := sw.Legs()
+	if err := legs.unusable(); err != nil {
+		return true, claimID, fmt.Errorf("reading claimed bead %s: %w", claimID, err)
+	}
+	owner, err := byIDOwnerRowForTopology(byIDResidencyTopology(cityPath, cfg, legs.workStore(), legs.rigs, claimID), claimID)
 	if errors.Is(err, beads.ErrNotFound) {
 		return false, claimID, nil
 	}
@@ -134,17 +137,45 @@ func claimedWorkStillHeldBy(work beads.Bead, sessionID string) bool {
 }
 
 // liveBeadRead reads one bead through the store's authoritative live handle,
-// bypassing a caching layer. The typed class wrappers (beads.SessionStore,
-// beads.WorkStore) do not promote the Handles capability, so they are peeled
-// first; without that the read would silently fall back to the cache.
+// bypassing a caching layer (liveReads): without the peel the read would
+// silently fall back to the cache, as CachingStore.Get serves the cache first.
 func liveBeadRead(store beads.Store, id string) (beads.Bead, error) {
-	switch v := store.(type) {
-	case beads.SessionStore:
-		store = v.Store
-	case beads.WorkStore:
-		store = v.Store
+	return liveReads(store).Get(id)
+}
+
+// liveRead is a read-only live handle on a store under its wrappers
+// (liveReads). It offers reads only, so a wrapper that refuses writes
+// (a v2 effect's read-only store) never hands its writable inner store on.
+type liveRead struct{ store beads.Store }
+
+// Get reads id through the peeled store's live handle, past any cache.
+func (r liveRead) Get(id string) (beads.Bead, error) { return beads.HandlesFor(r.store).Live.Get(id) }
+
+// Ready is beads.ReadyLive on the peeled store: its Backing() fast path
+// where it has one.
+func (r liveRead) Ready(q ...beads.ReadyQuery) ([]beads.Bead, error) {
+	return beads.ReadyLive(r.store, q...)
+}
+
+// liveReads is store's live read handle under the wrappers that do not
+// promote its live capabilities (Handles, Backing): the typed class wrappers
+// (beads.SessionStore, beads.WorkStore) and v2's read-only wrappers
+// (readOnlyStore, blindWriteRefusingStore: a v2 effect's stores).
+func liveReads(store beads.Store) liveRead {
+	for {
+		switch v := store.(type) {
+		case beads.SessionStore:
+			store = v.Store
+		case beads.WorkStore:
+			store = v.Store
+		case readOnlyStore:
+			store = v.Store
+		case blindWriteRefusingStore:
+			store = v.inner
+		default:
+			return liveRead{store: store}
+		}
 	}
-	return beads.HandlesFor(store).Live.Get(id)
 }
 
 // liveClaimVeto runs the ownership check for a demand-class drain decider and
@@ -155,13 +186,13 @@ func liveClaimVeto(
 	cityPath string,
 	cfg *config.City,
 	store beads.Store,
-	rigStores map[string]beads.Store,
+	sw *SeatWork,
 	info sessionpkg.Info,
 	dt *drainTracker,
 	name, reason string,
 	stdout, stderr io.Writer,
 ) (vetoed bool, claimID string) {
-	owns, claimID, err := sessionOwnsLiveClaim(cityPath, cfg, store, rigStores, info)
+	owns, claimID, err := sessionOwnsLiveClaim(cityPath, cfg, store, sw, info)
 	if !owns {
 		if dt != nil {
 			dt.clearLiveClaimVeto(info.ID)

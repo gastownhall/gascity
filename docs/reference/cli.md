@@ -1141,6 +1141,15 @@ Scan open convoys and auto-close any where all child issues are resolved.
 Evaluates each open convoy's children. If all children have status
 "closed", the convoy is automatically closed and an event is recorded.
 
+The check skips a suspended rig's store, naming the rig on stderr, and
+checks its convoys once the rig resumes. A store it cannot open or list,
+or a convoy it cannot read or close, is named on stderr and the check
+goes on with the rest, then exits 1. The exception is a city whose
+convoys moved to a class binding: if the binding cannot be read, the
+check closes nothing and exits 1. A convoy that changed or disappeared
+after the check listed it is left for the next run and does not fail
+the check.
+
 ```
 gc convoy check [flags]
 ```
@@ -1469,8 +1478,13 @@ reaps orphaned dolt sql-server processes left over from leaked test
 harnesses. Invalid explicit ports, invalid city port settings, and
 live-resolution errors (ambiguous listeners, discovery failures) fail
 closed before cleanup stages run; only a clean live-resolution miss can
-reach the legacy default. The legacy default is a connection fallback
-only; it does not protect port 3307 from orphan-process reaping.
+reach the legacy default. Nothing proves the city's server listens on
+the legacy default, so a run that reaches it opens no SQL connection,
+drops and purges nothing, and records a legacy-fallback-port force
+blocker (--force then exits nonzero). Start the city's managed dolt;
+for an external server, pass --port or pin it with
+"gc beads city use-external". The legacy default does not protect port
+3307 from orphan-process reaping.
 
 Dry-run by default. Pass --force to actually drop, purge, and kill.
 Pass --max-orphan-dbs with --force to refuse all destructive cleanup
@@ -1533,10 +1547,25 @@ gc event
 
 Record a custom event to the city event log.
 
-Best-effort: always exits 0 so bead hooks never fail. Supports
-attaching arbitrary JSON payloads. JSON summaries report whether submission to
-the configured provider was attempted; the event bus does not acknowledge
-durable persistence.
+Recording is best-effort: once an event is accepted, a provider or payload
+error is reported on stderr and the command still exits 0, so bead hooks never
+fail on it. JSON summaries report whether submission to the configured provider
+was attempted; the event bus does not acknowledge durable persistence.
+
+Two requests are refused with exit 1 and nothing is recorded. In --json mode
+the failure object carries the code.
+
+- reserved_actor: --actor starts with "cache-", or the default actor is one
+  of the controller cache's own actors (cache-local, cache-reconcile).
+- bead_payload_refused: --payload on bead.created, bead.updated, bead.closed
+  or bead.deleted. Their payload is the bead row; use --bead-payload &lt;id&gt; so
+  gc reads it from the store.
+- bead_payload_not_found: --bead-payload names a bead the store it resolves
+  to does not hold (bead.deleted excepted: the event is recorded with its
+  subject alone). Any other failure to read it is reported on stderr and the
+  event is still recorded, without the payload.
+
+--payload attaches arbitrary JSON to any other event type.
 
 ```
 gc event emit <type> [flags]
@@ -1545,7 +1574,7 @@ gc event emit <type> [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--actor` | string |  | Actor name (default: $GC_ALIAS, else $GC_AGENT, else $GC_SESSION_ID, else "human") |
-| `--bead-payload` | string |  | Best-effort bead ID fallback for hook payloads |
+| `--bead-payload` | string |  | Bead ID whose stored row becomes the payload (the only payload source for bead.created/updated/closed/deleted) |
 | `--json` | bool |  | emit JSON summary |
 | `--message` | string |  | Event message |
 | `--payload` | string |  | JSON payload to attach to the event |
@@ -1913,6 +1942,7 @@ gc github pr backfill [monitor-name] [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--all` | bool |  | include clean and pending-only PRs |
+| `--author` | stringArray |  | restrict to PRs by this GitHub author login (repeatable); fail-closed and unions with each monitor's configured authors |
 | `--create-repair-beads` | bool |  | create deduped repair beads for actionable PRs |
 | `--json` | bool |  | emit JSON |
 | `--timeout` | duration | `45s` | GitHub query timeout |
@@ -2018,7 +2048,17 @@ Without --inject: prints normalized ready-only output, exits 0 if work exists, 1
 With --inject: silent legacy Stop-hook compatibility; skips the work query and always exits 0.
 With --claim: runs the standard startup claim protocol for one work item.
 
-		The agent is determined from $GC_AGENT or a positional argument.
+A work query that gets no answer from the bead store (a connection error, a
+timeout, a killed query, a locked database, or bd's circuit breaker failing
+fast) exits 2 and prints GC_HOOK_STORE_UNAVAILABLE on stderr: the answer is
+unknown, not empty. Any other work-query failure exits 1. This applies with and
+without --claim, and neither writes a drain result. The generated default work
+query discards bd's errors in its single-store tiers, so there a store that
+fails fast still reads as no work; only a deadline overrun exits 2. Only the
+agent's own store reports: other stores the hook also searches are
+best-effort, and one that fails reads as having no work.
+
+The agent is determined from $GC_AGENT or a positional argument.
 
 ```
 gc hook [agent] [flags]
@@ -3364,14 +3404,17 @@ When agent-name is omitted, `GC_ALIAS` is used (falling back to `GC_AGENT`).
 If agent-name matches a configured agent with a prompt_template,
 that template is output. Otherwise outputs a default worker prompt.
 
-Pass --strict to fail on debugging mistakes instead of silently falling
-back to the default prompt. Strict errors on:
+Pass --strict to fail on debugging mistakes instead of falling back to
+the default prompt. Strict errors on:
 
   - no city config found
   - city config fails to load
   - no agent name given (from args, GC_ALIAS, or GC_AGENT)
   - agent name not in city config (typo detection — the main use case)
   - agent's prompt_template points at a file that cannot be read
+
+Without --strict, a prompt_template that cannot be read is reported on
+stderr and the default prompt is output.
 
 Strict does NOT error on agents whose config intentionally lacks a
 prompt_template (a supported minimal config), on templates that render
@@ -3492,7 +3535,8 @@ class it reads the one store, unchanged.
 The flags mirror the "bd ready" contract the default work_query builds:
   gc ready --metadata-field "gc.routed_to=$target" --unassigned \
            --exclude-type=epic --exclude-label "hold:mayor" \
-           --sort oldest --limit 20 --json
+           --exclude-label "hold:external" --exclude-label "human" \
+           --json --limit=20
 
 Rows are emitted in canonical ready order (priority, created_at, id) unless
 --sort selects a created_at order, and --limit is applied last, so a bounded
@@ -3792,7 +3836,9 @@ will no longer track the managed city Dolt.
 
 This command owns the rig's canonical .beads/config.yaml topology state. It
 refuses a rig whose store the beads provider owns: that rig's endpoint lives in
-bd's own files and is bd's to change.
+bd's own files and is bd's to change. It also refuses a rig whose
+.beads/metadata.json records embedded Dolt storage: that rig serves its own
+store and has no server endpoint.
 
 ```
 gc rig set-endpoint <rig> [flags]
@@ -3861,8 +3907,10 @@ These commands read and write session metadata to coordinate lifecycle
 events (drain, restart) between agents and the controller. They are
 designed to be called from within running agent sessions, not by humans.
 
-The exception is "gc runtime check", which validates a Runtime Provider
-Protocol executable — run by humans and runtime-pack CIs.
+The exceptions are "gc runtime check" and "gc runtime conformance", which
+validate a Runtime Provider Protocol executable — run by humans and
+runtime-pack CIs — and "gc runtime workdir-export", which runtime packs call
+to list the work-dir entries they may copy off the orchestrator host.
 
 ```
 gc runtime
@@ -3878,6 +3926,7 @@ gc runtime
 | [gc runtime heartbeat](#gc-runtime-heartbeat) | Extend idle-timeout window during a long operation |
 | [gc runtime request-restart](#gc-runtime-request-restart) | Request controller restart this session (returns immediately) |
 | [gc runtime undrain](#gc-runtime-undrain) | Cancel drain on a session |
+| [gc runtime workdir-export](#gc-runtime-workdir-export) | List the work-dir entries a runtime may copy off the orchestrator host |
 
 ## gc runtime check
 
@@ -3946,7 +3995,9 @@ Signal a session to drain — wind down its current work gracefully.
 Sets a GC_DRAIN metadata flag on the session. The agent should check
 for drain status periodically (via "gc runtime drain-check") and finish
 its current task before exiting. Pass a session alias or ID. Use
-"gc runtime undrain" to cancel.
+"gc runtime undrain" to cancel. Under session_reconciler = "v2" it also
+marks the session row, so the agent's drain-ack stops the session even on a
+min_active_sessions floor.
 
 ```
 gc runtime drain <name> [flags]
@@ -3986,9 +4037,29 @@ gc runtime drain-ack [name] [flags]
 
 Check if a session is currently draining.
 
-Returns exit code 0 if draining, 1 if not. Designed for use in
-conditionals: "if gc runtime drain-check; then finish-up; fi". Without
-arguments, uses the current session context.
+Consults two sources: the runtime's GC_DRAIN metadata flag, which
+"gc runtime drain" sets, and the session row's state, which reads
+draining once the controller has begun stopping the session. Controller
+drain intents recorded before that point are not consulted yet. Designed
+for use in conditionals: "if gc runtime drain-check; then finish-up; fi".
+Without arguments, uses the current session context.
+
+Exit codes:
+  0  draining: a source that answered says draining
+  1  not draining: both sources answered and neither says draining;
+     or there is no current session context; or the named session
+     does not exist in a session store that opened; or the --json
+     result could not be written
+  3  unknown: a source could not be read, or the named session could
+     not be resolved, and no source says draining; one stderr line
+     names the source that failed
+
+A runtime that reports the session absent, or keeps no metadata, counts
+as an answer of "no GC_DRAIN"; any other runtime error, including a
+runtime that is not running, is a failure to answer. With --json, the
+result carries a "source" field naming the deciding source; an unknown
+result is the JSON error envelope with code "drain_state_unknown" and
+exit code 3.
 
 ```
 gc runtime drain-check [name] [flags]
@@ -4052,7 +4123,8 @@ Cancel a pending drain signal on a session.
 
 Clears the GC_DRAIN and GC_DRAIN_ACK metadata flags, allowing the
 session to continue normal operation. Pass a session alias or ID. Under
-session_reconciler = "v2" it also clears the session row's drain-ack.
+session_reconciler = "v2" it also clears the session row's drain-ack and
+its operator drain mark.
 
 ```
 gc runtime undrain <name> [flags]
@@ -4061,6 +4133,57 @@ gc runtime undrain <name> [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | Output as JSON |
+
+## gc runtime workdir-export
+
+List the entries of a session work dir that a runtime may copy into another
+filesystem (a remote sandbox, a container image).
+
+Orchestrator-local state named by the work_dir_exclude start-config field
+(secrets, the event log, the nudge queue, ledger stores, sockets, other
+sessions' worktrees) is left out; an excluded directory is pruned with
+everything below it. Paths are relative to &lt;work_dir&gt; and slash-separated,
+in depth-first walk order with each directory's entries sorted by name.
+
+Every surviving file and symlink is listed, plus every surviving directory
+that is empty on disk. A non-empty directory is never listed, so a consumer
+that recurses into listed entries still copies nothing excluded. Symlinks
+are listed, never followed; copy them as links.
+
+Scripts must use --null, which terminates entries with NUL. The default
+newline-terminated output is for humans only: no byte filter makes it safe
+for a consumer that splits on blanks or quotes, such as xargs. As a backstop
+it fails, printing nothing, when an entry contains a newline, a carriage
+return, or a backslash (GNU tar -T reads "\057" as "/"), or starts with "-".
+Run the gc that produced the start config (its env.GC_BIN) and check its
+exit status, for example:
+
+  set -o pipefail
+  "$GC_BIN" runtime workdir-export --null "$WORK_DIR" |
+    tar -C "$WORK_DIR" --null --no-recursion -T - -czf -
+
+GNU tar reads a --null list verbatim only from 1.30; bsdtar always does.
+Older GNU tar unquotes backslash escapes even with --null, so a crafted
+file name can make it archive .gc/controller.token or a file above the
+work dir. Where GNU tar may predate 1.30, use the form below: 1.29 reads
+the list verbatim with it, and older releases reject its options, which
+fails the pipeline. bsdtar rejects those options, so keep the form above
+there.
+
+  set -o pipefail
+  "$GC_BIN" runtime workdir-export --null "$WORK_DIR" |
+    tar -C "$WORK_DIR" --null --verbatim-files-from --no-unquote \
+      --no-recursion -T - -czf -
+
+The protocol contract is docs/reference/exec-session-provider.md.
+
+```
+gc runtime workdir-export <work_dir> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `-0`, `--null` | bool |  | terminate entries with NUL instead of newline (required for scripts) |
 
 ## gc service
 
@@ -5032,16 +5155,23 @@ Stop the running machine-wide supervisor and all its cities.
 
 By default, returns as soon as the supervisor acknowledges the stop
 request — shutdown continues asynchronously. Pass --wait to block
-until the supervisor socket is no longer answering, which is what
-most callers that need deterministic cleanup want (e.g., integration
-tests that then expect to remove temp directories without racing
-against lingering supervisor / controller subprocesses).
+until the supervisor process has exited and released its
+single-instance lock, which is what most callers that need
+deterministic cleanup want (e.g., integration tests that then expect
+to remove temp directories without racing against lingering
+supervisor / controller subprocesses, or a 'gc supervisor start'
+right after the stop). --wait waits for the control socket to stop
+answering and then for the process to exit, within --wait-timeout,
+except that the process always gets at least 10s after its socket
+closes to finish shutting down. A supervisor process this host
+cannot see (one in another PID namespace) is waited for only until
+its socket stops answering.
 
 Stopping the supervisor also stops the platform service that manages
 it, and stop exits non-zero when that fails; with --wait, gc further
 verifies on macOS that the launchd job is really gone before
-returning, sharing the same --wait-timeout deadline as the socket
-wait, and fails when it cannot confirm that. An operator stop also
+returning, sharing the same --wait-timeout deadline, and fails when
+it cannot confirm that. An operator stop also
 disables the launchd job, so it will not come back at the next login
 until 'gc supervisor install' — or 'gc start', which routes through
 install — re-enables it.
@@ -5060,8 +5190,8 @@ gc supervisor stop [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSONL summary |
-| `--wait` | bool |  | Wait for the supervisor to finish stopping all managed cities and release its socket before returning |
-| `--wait-timeout` | duration | `30s` | Maximum time to wait when --wait is set (in delegated mode, bounds the synchronous systemctl stop regardless of --wait) |
+| `--wait` | bool |  | Wait for the supervisor to finish stopping all managed cities and for its process to exit before returning |
+| `--wait-timeout` | duration | `30s` | Maximum time to wait when --wait is set, except that the supervisor process gets at least 10s to exit after its socket closes (in delegated mode, bounds the synchronous systemctl stop regardless of --wait) |
 
 ## gc supervisor uninstall
 

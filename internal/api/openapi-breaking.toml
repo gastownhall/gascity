@@ -60,3 +60,213 @@ reason = "the event-type vocabulary is an open set; new event types are additive
 check = "response-property-one-of-added"
 level = "info"
 reason = "new typed event variants are additive"
+
+# PR #7084: response fields the server already omitted or sent as null are
+# now declared optional, so the spec matches the wire.
+[[waiver]]
+fingerprint = "30d3f58b9e04"
+check = "response-property-became-optional"
+target = "GET /v0/city/{cityName}/extmsg/transcript"
+# the response property `items/items/Metadata` became optional for the status `200`
+reason = "the handler sent null for absent records where the spec declared a required non-nullable object; it now omits them and the spec marks them optional to match the wire (ga-1up872)"
+pr = "#7084"
+
+[[waiver]]
+fingerprint = "38601c49d33d"
+check = "response-property-became-optional"
+target = "GET /v0/city/{cityName}/patches/agent/{base}"
+# the response property `ContextAdvisory` became optional for the status `200`
+reason = "unset patch fields serialized as null where the spec declared required non-nullable objects; they are now omitted and the spec marks them optional to match the wire (ga-8hk1fe)"
+pr = "#7084"
+
+[[waiver]]
+fingerprint = "f0a630160db9"
+check = "response-property-became-optional"
+target = "GET /v0/city/{cityName}/patches/agent/{base}"
+# the response property `Env` became optional for the status `200`
+reason = "unset patch fields serialized as null where the spec declared required non-nullable objects; they are now omitted and the spec marks them optional to match the wire (ga-8hk1fe)"
+pr = "#7084"
+
+[[waiver]]
+fingerprint = "7193d428fcb9"
+check = "response-property-became-optional"
+target = "GET /v0/city/{cityName}/patches/agent/{base}"
+# the response property `OptionDefaults` became optional for the status `200`
+reason = "unset patch fields serialized as null where the spec declared required non-nullable objects; they are now omitted and the spec marks them optional to match the wire (ga-8hk1fe)"
+pr = "#7084"
+
+[[waiver]]
+fingerprint = "834632684a79"
+check = "response-property-became-optional"
+target = "GET /v0/city/{cityName}/patches/agent/{base}"
+# the response property `Pool` became optional for the status `200`
+reason = "unset patch fields serialized as null where the spec declared required non-nullable objects; they are now omitted and the spec marks them optional to match the wire (ga-8hk1fe)"
+pr = "#7084"
+
+[[waiver]]
+fingerprint = "3921bfd8cba9"
+check = "response-property-became-optional"
+target = "GET /v0/city/{cityName}/patches/agent/{dir}/{base}"
+# the response property `ContextAdvisory` became optional for the status `200`
+reason = "unset patch fields serialized as null where the spec declared required non-nullable objects; they are now omitted and the spec marks them optional to match the wire (ga-8hk1fe)"
+pr = "#7084"
+
+[[waiver]]
+fingerprint = "5c92761d787b"
+check = "response-property-became-optional"
+target = "GET /v0/city/{cityName}/patches/agent/{dir}/{base}"
+# the response property `Env` became optional for the status `200`
+reason = "unset patch fields serialized as null where the spec declared required non-nullable objects; they are now omitted and the spec marks them optional to match the wire (ga-8hk1fe)"
+pr = "#7084"
+
+[[waiver]]
+fingerprint = "dfb786f67c6b"
+check = "response-property-became-optional"
+target = "GET /v0/city/{cityName}/patches/agent/{dir}/{base}"
+# the response property `OptionDefaults` became optional for the status `200`
+reason = "unset patch fields serialized as null where the spec declared required non-nullable objects; they are now omitted and the spec marks them optional to match the wire (ga-8hk1fe)"
+pr = "#7084"
+
+[[waiver]]
+fingerprint = "a629847c39ca"
+check = "response-property-became-optional"
+target = "GET /v0/city/{cityName}/patches/agent/{dir}/{base}"
+# the response property `Pool` became optional for the status `200`
+reason = "unset patch fields serialized as null where the spec declared required non-nullable objects; they are now omitted and the spec marks them optional to match the wire (ga-8hk1fe)"
+pr = "#7084"
+
+[[waiver]]
+fingerprint = "24a93f22d38a"
+check = "response-property-became-optional"
+target = "GET /v0/city/{cityName}/patches/agents"
+# the response property `items/items/ContextAdvisory` became optional for the status `200`
+reason = "unset patch fields serialized as null where the spec declared required non-nullable objects; they are now omitted and the spec marks them optional to match the wire (ga-8hk1fe)"
+pr = "#7084"
+
+[[waiver]]
+fingerprint = "7a061425d466"
+check = "response-property-became-optional"
+target = "GET /v0/city/{cityName}/patches/agents"
+# the response property `items/items/Env` became optional for the status `200`
+reason = "unset patch fields serialized as null where the spec declared required non-nullable objects; they are now omitted and the spec marks them optional to match the wire (ga-8hk1fe)"
+pr = "#7084"
+
+[[waiver]]
+fingerprint = "ecd2b304a6fc"
+check = "response-property-became-optional"
+target = "GET /v0/city/{cityName}/patches/agents"
+# the response property `items/items/OptionDefaults` became optional for the status `200`
+reason = "unset patch fields serialized as null where the spec declared required non-nullable objects; they are now omitted and the spec marks them optional to match the wire (ga-8hk1fe)"
+pr = "#7084"
+
+[[waiver]]
+fingerprint = "5365d6991f92"
+check = "response-property-became-optional"
+target = "GET /v0/city/{cityName}/patches/agents"
+# the response property `items/items/Pool` became optional for the status `200`
+reason = "unset patch fields serialized as null where the spec declared required non-nullable objects; they are now omitted and the spec marks them optional to match the wire (ga-8hk1fe)"
+pr = "#7084"
+
+[[waiver]]
+fingerprint = "8bd9f303836b"
+check = "response-property-became-optional"
+target = "GET /v0/city/{cityName}/patches/provider/{name}"
+# the response property `Env` became optional for the status `200`
+reason = "unset patch fields serialized as null where the spec declared required non-nullable objects; they are now omitted and the spec marks them optional to match the wire (ga-8hk1fe)"
+pr = "#7084"
+
+[[waiver]]
+fingerprint = "42026337a7e1"
+check = "response-property-became-optional"
+target = "GET /v0/city/{cityName}/patches/providers"
+# the response property `items/items/Env` became optional for the status `200`
+reason = "unset patch fields serialized as null where the spec declared required non-nullable objects; they are now omitted and the spec marks them optional to match the wire (ga-8hk1fe)"
+pr = "#7084"
+
+[[waiver]]
+fingerprint = "59b8b49839a9"
+check = "response-property-became-optional"
+target = "GET /v0/city/{cityName}/patches/rig/{name}"
+# the response property `FormulaVars` became optional for the status `200`
+reason = "unset patch fields serialized as null where the spec declared required non-nullable objects; they are now omitted and the spec marks them optional to match the wire (ga-8hk1fe)"
+pr = "#7084"
+
+[[waiver]]
+fingerprint = "637a90e9dae3"
+check = "response-property-became-optional"
+target = "GET /v0/city/{cityName}/patches/rigs"
+# the response property `items/items/FormulaVars` became optional for the status `200`
+reason = "unset patch fields serialized as null where the spec declared required non-nullable objects; they are now omitted and the spec marks them optional to match the wire (ga-8hk1fe)"
+pr = "#7084"
+
+[[waiver]]
+fingerprint = "18aa0025e671"
+check = "response-property-became-optional"
+target = "POST /v0/city/{cityName}/extmsg/inbound"
+# the response property `Binding` became optional for the status `200`
+reason = "the handler sent null for absent records where the spec declared a required non-nullable object; it now omits them and the spec marks them optional to match the wire (ga-1up872)"
+pr = "#7084"
+
+[[waiver]]
+fingerprint = "f21ccc90ce83"
+check = "response-property-became-optional"
+target = "POST /v0/city/{cityName}/extmsg/inbound"
+# the response property `GroupRoute` became optional for the status `200`
+reason = "the handler sent null for absent records where the spec declared a required non-nullable object; it now omits them and the spec marks them optional to match the wire (ga-1up872)"
+pr = "#7084"
+
+[[waiver]]
+fingerprint = "46b207480dc1"
+check = "response-property-became-optional"
+target = "POST /v0/city/{cityName}/extmsg/inbound"
+# the response property `TranscriptEntry/Metadata` became optional for the status `200`
+reason = "the handler sent null for absent records where the spec declared a required non-nullable object; it now omits them and the spec marks them optional to match the wire (ga-1up872)"
+pr = "#7084"
+
+[[waiver]]
+fingerprint = "1c543a3f90b8"
+check = "response-property-became-optional"
+target = "POST /v0/city/{cityName}/extmsg/inbound"
+# the response property `TranscriptEntry` became optional for the status `200`
+reason = "the handler sent null for absent records where the spec declared a required non-nullable object; it now omits them and the spec marks them optional to match the wire (ga-1up872)"
+pr = "#7084"
+
+[[waiver]]
+fingerprint = "7a4a464a6353"
+check = "response-property-became-optional"
+target = "POST /v0/city/{cityName}/extmsg/outbound"
+# the response property `DeliveryContext/Metadata` became optional for the status `200`
+reason = "the handler sent null for absent records where the spec declared a required non-nullable object; it now omits them and the spec marks them optional to match the wire (ga-1up872)"
+pr = "#7084"
+
+[[waiver]]
+fingerprint = "cd043893bbbc"
+check = "response-property-became-optional"
+target = "POST /v0/city/{cityName}/extmsg/outbound"
+# the response property `DeliveryContext` became optional for the status `200`
+reason = "the handler sent null for absent records where the spec declared a required non-nullable object; it now omits them and the spec marks them optional to match the wire (ga-1up872)"
+pr = "#7084"
+
+[[waiver]]
+fingerprint = "d10f4feeac33"
+check = "response-property-became-optional"
+target = "POST /v0/city/{cityName}/extmsg/outbound"
+# the response property `Receipt/Metadata` became optional for the status `200`
+reason = "the handler sent null for absent records where the spec declared a required non-nullable object; it now omits them and the spec marks them optional to match the wire (ga-1up872)"
+pr = "#7084"
+
+[[waiver]]
+fingerprint = "99faa088ae98"
+check = "response-property-became-optional"
+target = "POST /v0/city/{cityName}/extmsg/outbound"
+# the response property `TranscriptEntry/Metadata` became optional for the status `200`
+reason = "the handler sent null for absent records where the spec declared a required non-nullable object; it now omits them and the spec marks them optional to match the wire (ga-1up872)"
+pr = "#7084"
+
+[[waiver]]
+fingerprint = "e4c6ed004970"
+check = "response-property-became-optional"
+target = "POST /v0/city/{cityName}/extmsg/outbound"
+# the response property `TranscriptEntry` became optional for the status `200`
+reason = "the handler sent null for absent records where the spec declared a required non-nullable object; it now omits them and the spec marks them optional to match the wire (ga-1up872)"
+pr = "#7084"

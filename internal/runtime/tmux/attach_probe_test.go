@@ -249,6 +249,9 @@ type attachProbeFailsExecutor struct {
 
 func (e *attachProbeFailsExecutor) execute(args []string) (string, error) {
 	e.calls = append(e.calls, slices.Clone(args))
+	if row, ok := fakeAgentPaneRow(args); ok {
+		return row, nil
+	}
 	switch {
 	case slices.Contains(args, "#{session_name}|#{session_attached}"):
 		return "", errors.New("server busy")
@@ -270,7 +273,7 @@ func (e *attachProbeFailsExecutor) executeCtx(_ context.Context, args []string) 
 // operator's draft.
 func TestNudgeSessionAttachProbeErrorKeepsInput(t *testing.T) {
 	ex := &attachProbeFailsExecutor{}
-	tm := &Tmux{cfg: DefaultConfig(), exec: ex, sleep: func(time.Duration) {}}
+	tm := &Tmux{cfg: DefaultConfig(), exec: ex}
 
 	err := tm.NudgeSession("worker-1", "hello world")
 	if !errors.Is(err, ErrNudgeSubmitUnconfirmed) {

@@ -76,7 +76,7 @@ func (l *externalReadsLane) nudges(ctx context.Context, env externalReadsEnv) {
 	refs := make([]string, len(claim))
 	copy(refs, s.AssignedStoreRefs)
 	copy(refs[len(s.AssignedWork):], s.ReadyRoutedRefs)
-	nudgeStalledPoolClaims(env.SP, env.Cfg, sessStore, raw, claim, refs, now, l.stderr)
+	nudgeStalledPoolClaims(env.SP, env.Cfg, sessStore, raw, claim, refs, now, poolClaimDrainOver(env.WorkLegs, l.requestExecutionStalled(env)), l.stderr)
 	if ctx.Err() != nil {
 		return
 	}
@@ -124,9 +124,10 @@ func (l *externalReadsLane) orphanRelease(_ context.Context, env externalReadsEn
 	}
 	wake, wakeRefs := filterAssignedWorkBeadsForSessionWake(env.Cfg, env.CityPath, work, s.OpenSessions, s.AssignedWork, s.AssignedStoreRefs)
 	snapshot := DesiredStateResult{AssignedWorkBeads: s.AssignedWork, AssignedWorkStores: s.AssignedStores, AssignedWorkStoreRefs: s.AssignedStoreRefs, StoreQueryPartial: s.Partial}
-	released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(work, beads.SessionStore{Store: env.CityStore}, env.Cfg, env.CityPath, s.OpenSessions, snapshot, env.RigStores, protectedWakeWorkKeys(wake, wakeRefs), nil)
+	released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(work, beads.SessionStore{Store: env.CityStore}, env.Cfg, env.CityPath, s.OpenSessions, snapshot, env.RigStores, protectedWakeWorkKeys(wake, wakeRefs), nil, &l.deadAssigneeKeeps)
 	for _, r := range released {
 		fmt.Fprintf(l.stderr, "released orphaned pool work: %s\n", r.ID) //nolint:errcheck // best-effort stderr
 	}
 	emitDeadAssigneeReopenedEvents(l.events, s.AssignedWork, released, l.now())
+	detectStrandedClaims(env.WorkLegs, env.CityStore, s.OpenSessions, l.stranded, l.now())
 }

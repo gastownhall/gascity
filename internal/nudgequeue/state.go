@@ -42,11 +42,18 @@ type Item struct {
 	DeliverAfter      time.Time  `json:"deliver_after"`
 	ExpiresAt         time.Time  `json:"expires_at"`
 	Attempts          int        `json:"attempts,omitempty"`
-	LastAttemptAt     time.Time  `json:"last_attempt_at,omitempty"`
-	LastError         string     `json:"last_error,omitempty"`
-	ClaimedAt         time.Time  `json:"claimed_at,omitempty"`
-	LeaseUntil        time.Time  `json:"lease_until,omitempty"`
-	DeadAt            time.Time  `json:"dead_at,omitempty"`
+	// DeliveryBatch is the delivery key of the batch this item was claimed
+	// in, pinned at claim time. Until the batch is acked, dead-lettered or
+	// definitively rejected, its items are claimed and delivered together
+	// under this key, so a redelivery after an unknown outcome is the same
+	// delivery to a runtime that deduplicates by key. A rejection clears it,
+	// and the next claim pins a new batch.
+	DeliveryBatch string    `json:"delivery_batch,omitempty"`
+	LastAttemptAt time.Time `json:"last_attempt_at,omitempty"`
+	LastError     string    `json:"last_error,omitempty"`
+	ClaimedAt     time.Time `json:"claimed_at,omitempty"`
+	LeaseUntil    time.Time `json:"lease_until,omitempty"`
+	DeadAt        time.Time `json:"dead_at,omitempty"`
 }
 
 // State is the persisted nudge queue snapshot.
@@ -107,7 +114,7 @@ func SortState(state *State) {
 // lazy bead-store open in nudgeMaintenanceStore.frontForState runs inside
 // the locked callback, before the first per-item deadline check, with no
 // budget of its own. A waiter can legitimately time out behind either.
-var defaultLockWaitTimeout = 8 * time.Second
+const defaultLockWaitTimeout = 8 * time.Second
 
 // WithState locks, loads, mutates, and atomically rewrites the queue state.
 // The wait to acquire the lock is bounded to defaultLockWaitTimeout

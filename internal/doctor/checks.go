@@ -1294,6 +1294,33 @@ func doctorScopeHasFileStoreMarker(scopePath string) bool {
 	return err == nil && !info.IsDir()
 }
 
+// scopeNonDoltBackend reports the backend a scope's .beads/metadata.json names
+// when that backend is not Dolt, so a Dolt-only check can answer "not
+// applicable" instead of dialing a server that does not exist. It decides from
+// metadata alone and names no backend: "is Dolt" is contract.IsDoltBackend, the
+// predicate the store factory and the provider lifecycle route on, so every
+// spelling they serve as Dolt ("dolt", "bd", in any case) keeps its dial and
+// any other name is not Dolt. Metadata that names nothing, or cannot be read,
+// stays with the Dolt checks: an unnamed backend is the Dolt default, and an
+// unreadable file must not silence a check that would report it.
+func scopeNonDoltBackend(scopeRoot string) (string, bool) {
+	backend, named, err := contract.ReadMetadataBackend(fsys.OSFS{}, filepath.Join(scopeRoot, ".beads", "metadata.json"))
+	if err != nil || !named || contract.IsDoltBackend(backend) {
+		return "", false
+	}
+	return backend, true
+}
+
+// nonDoltScopeResult is the not-applicable answer for a Dolt-server check on a
+// scope bound to a non-Dolt backend.
+func nonDoltScopeResult(name, backend string) *CheckResult {
+	return &CheckResult{
+		Name:    name,
+		Status:  StatusOK,
+		Message: fmt.Sprintf("not applicable (beads backend %q is not Dolt)", backend),
+	}
+}
+
 // DoltServerCheck verifies the dolt server is running and reachable.
 type DoltServerCheck struct {
 	cityPath string
@@ -1321,6 +1348,9 @@ func (c *DoltServerCheck) Run(_ *CheckContext) *CheckResult {
 		r.Status = StatusOK
 		r.Message = "not required (bd backend=doltlite)"
 		return r
+	}
+	if backend, ok := scopeNonDoltBackend(c.cityPath); ok {
+		return nonDoltScopeResult(c.Name(), backend)
 	}
 	if pending := pendingScopeInitResult(c.Name(), c.cityPath, c.cityPath); pending != nil {
 		return pending
@@ -1390,6 +1420,9 @@ func (c *RigDoltServerCheck) Run(_ *CheckContext) *CheckResult {
 		r.Status = StatusOK
 		r.Message = "not required (bd backend=doltlite)"
 		return r
+	}
+	if backend, ok := scopeNonDoltBackend(rigPath); ok {
+		return nonDoltScopeResult(c.Name(), backend)
 	}
 	if pending := pendingScopeInitResult(c.Name(), c.cityPath, rigPath); pending != nil {
 		return pending

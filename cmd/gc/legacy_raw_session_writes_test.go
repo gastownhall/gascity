@@ -32,8 +32,7 @@ type rawWriteVerb struct {
 // its caller's patch to a verb here must be listed itself.
 var rawSessionWriteVerbs = map[string]rawWriteVerb{
 	"ApplyPatch": {1, true}, "ApplyPatchInfo": {1, true}, "SetMarker": {1, true},
-	"ApplyKeepingUserHold": {1, true},
-	"applyStore":           {2, true}, "applySleepOptimistic": {2, true},
+	"applyStore": {2, true}, "applySleepOptimistic": {2, true},
 	"setMetaBatch": {2, true}, "writeSessionMetadata": {2, true},
 	"setMeta": {2, true}, "setMetadataValue": {1, true},
 	"SetMetadataBatch": {1, false}, "SetMetadata": {1, false}, "setWaitTerminalState": {1, false},
@@ -52,7 +51,7 @@ var rawWriteFenced = map[string]string{
 	"internal/session/store.go:commitIf":                    "Store.Commit's and ApplyPatchIfLifecycleUnchanged's loop",
 	"internal/session/store.go:CommitStartedIfCurrentUnder": "the start commit (v5 S2)",
 	"internal/session/store.go:applyPatchIfClosed":          "writes only a row still closed",
-	"internal/session/store.go:CloseWithTerminalPatchUnder": "the terminal close: guarded on its read (closePremiseHolds), atomic where the store can close conditionally (R8b's CommitClose)",
+	"internal/session/store.go:CommitClose":                 "the terminal close: guarded on every read by its decision's site, atomic where the store can close conditionally",
 }
 
 // rawWriteNotSession are writes the scan's name match counts that do not

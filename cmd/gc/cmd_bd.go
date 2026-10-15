@@ -259,11 +259,13 @@ func pinBdGCEnvironmentBestEffort(env map[string]string) {
 // carries.
 //
 // Each link has to name a binary that still runs. gc-beads-bd.sh treats any
-// non-empty GC_BIN as authoritative (resolve_gc_helper_bin) and `die`s when the
-// exec fails, so handing it the removed path the strict resolver just rejected
-// turns a recover that would have completed through the script's shell-native
-// fallbacks into one that SIGTERMs the managed Dolt and exits before restarting
-// it. An empty GC_BIN is the better answer than a dead one.
+// non-empty GC_BIN as authoritative (resolve_gc_helper_bin), and its
+// require_executable_gc_bin guard refuses one that is not executable before
+// any side effect: stop and shutdown clear it and continue on the script's
+// shell-native fallbacks, and every other operation dies. Handing it the
+// removed path the strict resolver just rejected therefore turns a recover
+// that would have completed through those fallbacks into a refusal. An empty
+// GC_BIN is the better answer than a dead one.
 func bestEffortInvokingGCBinary() string {
 	if executable, err := resolveInvokingExecutable(); err == nil && filepath.IsAbs(executable) && runnableGCBinary(executable) {
 		return executable
@@ -430,6 +432,11 @@ func bdRigQualifiedMetadataRefusal(cfg *config.City, bdArgs []string) (string, b
 
 func doBd(args []string, stdout, stderr io.Writer) int {
 	cityName, rigName, bdArgs := extractBdScopeFlags(args)
+
+	// From here on the passthrough only reads the city config, so the guards
+	// and env builders below share one composed load instead of each walking
+	// the packs again (see invocationConfigMemo for which loads it answers).
+	defer beginInvocationConfigMemo()()
 
 	bdArgs, err := rewriteBdHeartbeatArgs(bdArgs)
 	if err != nil {

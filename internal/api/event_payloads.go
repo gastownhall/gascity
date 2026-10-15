@@ -8,6 +8,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
+	"github.com/gastownhall/gascity/internal/pendingwatch"
 
 	// Blank import: emergency's init() registers emergency.Record as the payload
 	// type for EmergencySignaled and EmergencyAcked events.
@@ -201,6 +202,7 @@ type RequestFailedPayload struct {
 	Operation    string `json:"operation" enum:"city.create,city.unregister,session.create,session.message,session.submit,rig.create" doc:"Which operation failed."`
 	ErrorCode    string `json:"error_code" doc:"Machine-readable error code."`
 	ErrorMessage string `json:"error_message" doc:"Human-readable error description."`
+	SessionID    string `json:"session_id,omitempty" doc:"Session a failed session.create had already written, when the server could identify it, so the client can inspect or clean it up instead of retrying into a duplicate. Absence does not prove that no session was written. The event subject does not carry this ID; match the event to its request by request_id."`
 }
 
 // IsEventPayload marks RequestFailedPayload as an events.Payload variant.
@@ -576,6 +578,40 @@ func SessionPoolSlotRetiredAtDrainDeadlinePayloadJSON(sessionID, sessionName, te
 	return b
 }
 
+// SessionStrandedClaimsPayload carries the machine-readable context for a
+// session.stranded_claims event: claims no lane serves that stay assigned to
+// a closed or retired session rather than being released into no lane.
+type SessionStrandedClaimsPayload struct {
+	SessionID   string          `json:"session_id" doc:"Canonical session bead ID of the closed or retired seat holding the claims."`
+	SessionName string          `json:"session_name,omitempty" doc:"Runtime session name from the session bead metadata, when set."`
+	Template    string          `json:"template,omitempty" doc:"Template of the seat, when set."`
+	Kind        string          `json:"kind" doc:"What left the claims on the seat: its close reason (drained, orphaned, ...), killed, retired, or manual (gc session close)."`
+	Claims      []StrandedClaim `json:"claims" doc:"The stranded claims, sorted by bead ID."`
+}
+
+// StrandedClaim is one claim a session.stranded_claims event reports.
+type StrandedClaim struct {
+	BeadID string `json:"bead_id" doc:"The claim's work bead ID."`
+	Route  string `json:"route,omitempty" doc:"The route the claim would be released into, when it has one: no configured agent serves it."`
+	Reason string `json:"reason" doc:"Why it was kept: unserved-route."`
+}
+
+// IsEventPayload marks SessionStrandedClaimsPayload as an events.Payload variant.
+func (SessionStrandedClaimsPayload) IsEventPayload() {}
+
+// SessionStrandedClaimsPayloadJSON builds the JSON wire form for attachment
+// to an events.Event.Payload field.
+func SessionStrandedClaimsPayloadJSON(sessionID, sessionName, template, kind string, claims []StrandedClaim) json.RawMessage {
+	b, _ := json.Marshal(SessionStrandedClaimsPayload{
+		SessionID:   sessionID,
+		SessionName: sessionName,
+		Template:    template,
+		Kind:        kind,
+		Claims:      claims,
+	})
+	return b
+}
+
 // BeadDeadAssigneeReopenedPayload is the typed payload for
 // bead.dead_assignee_reopened events. Emitted when the reconciler reopens a
 // routed work bead whose assignee no longer maps to any open session bead —
@@ -644,13 +680,13 @@ const (
 	// PendingClearedResolved: the session is still probed but no longer
 	// reports an interaction — it was answered (POST .../respond or at the
 	// terminal) or withdrawn by the session itself.
-	PendingClearedResolved = "resolved"
+	PendingClearedResolved = pendingwatch.ReasonResolved
 	// PendingClearedReplaced: the session now reports a different request_id.
 	// A session.pending for the new interaction follows immediately.
-	PendingClearedReplaced = "replaced"
+	PendingClearedReplaced = pendingwatch.ReasonReplaced
 	// PendingClearedSessionGone: the session left the probed set (closed,
 	// asleep, suspended, or otherwise no longer active).
-	PendingClearedSessionGone = "session_gone"
+	PendingClearedSessionGone = pendingwatch.ReasonSessionGone
 )
 
 // SessionPendingPayload is the typed payload for session.pending: a session
@@ -750,12 +786,14 @@ func init() {
 	events.RegisterPayload(events.SessionDrainStopEscalated, SessionLifecyclePayload{})
 	events.RegisterPayload(events.SessionStranded, SessionStrandedPayload{})
 	events.RegisterPayload(events.SessionPoolSlotRetiredAtDrainDeadline, SessionPoolSlotRetiredAtDrainDeadlinePayload{})
+	events.RegisterPayload(events.SessionStrandedClaims, SessionStrandedClaimsPayload{})
 	events.RegisterPayload(events.SessionUnknownState, SessionUnknownStatePayload{})
 	events.RegisterPayload(events.SessionWakeRefused, SessionWakeRefusedPayload{})
 	events.RegisterPayload(events.SessionResetStalled, events.SessionResetStalledPayload{})
 	events.RegisterPayload(events.SessionWorkQueryFailed, SessionLifecyclePayload{})
 	events.RegisterPayload(events.SessionDrainFenceUnavailable, SessionLifecyclePayload{})
 	events.RegisterPayload(events.SessionColdStartTimeout, events.NoPayload{})
+	events.RegisterPayload(events.SessionConversationReset, SessionLifecyclePayload{})
 	events.RegisterPayload(events.SessionPending, SessionPendingPayload{})
 	events.RegisterPayload(events.SessionPendingCleared, SessionPendingClearedPayload{})
 	events.RegisterPayload(events.ConvoyCreated, events.NoPayload{})

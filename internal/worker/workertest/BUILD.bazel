@@ -31,6 +31,7 @@ go_test(
     size = "medium",
     shard_count = 2,
     srcs = [
+        "actor_helpers_test.go",
         "catalog_phase2_data_test.go",
         "hangbudget_test.go",
         "nocity_guard_test.go",

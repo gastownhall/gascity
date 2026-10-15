@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
 // fakeRunner returns a CommandRunner that returns canned output for specific
@@ -588,6 +589,106 @@ func TestBdStoreGetCLINotFound(t *testing.T) {
 	}
 }
 
+func TestBdStoreGetWispTierFailureIsNotNotFound(t *testing.T) {
+	// bd show misses (the bead may be a wisp), then the wisp-tier lookup
+	// itself fails. Absence is unproven, so Get must not report ErrNotFound.
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		if args[0] == "show" {
+			return nil, fmt.Errorf("exit status 1: Error fetching gc-1: no issue found matching \"gc-1\"")
+		}
+		return nil, fmt.Errorf("exit status 1: dial tcp 127.0.0.1:3307: connection refused")
+	}
+	s := beads.NewBdStore("/city", runner)
+	_, err := s.Get("gc-1")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if errors.Is(err, beads.ErrNotFound) {
+		t.Errorf("error = %v, want the wisp-tier failure, not ErrNotFound", err)
+	}
+	if !strings.Contains(err.Error(), "connection refused") {
+		t.Errorf("error = %v, want it to carry the wisp-tier failure", err)
+	}
+}
+
+func TestBdStoreGetWispTierSchemaErrorIsNotNotFound(t *testing.T) {
+	// "not found" in a failure message is not bd reporting a missing bead.
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		if args[0] == "show" {
+			return nil, fmt.Errorf("exit status 1: Error fetching gc-1: no issue found matching \"gc-1\"")
+		}
+		return nil, fmt.Errorf("exit status 1: Error 1146: table wisps not found")
+	}
+	_, err := beads.NewBdStore("/city", runner).Get("gc-1")
+	if err == nil || errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("Get with an unreadable wisp table = %v, want the query failure, not ErrNotFound", err)
+	}
+}
+
+func TestBdStoreGetMalformedWispTierOutputIsNotNotFound(t *testing.T) {
+	// Truncated output that happens to contain bd's no-match wording is a
+	// parse failure, not bd reporting a missing bead.
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		if args[0] == "show" {
+			return nil, fmt.Errorf("exit status 1: Error fetching gc-1: no issue found matching \"gc-1\"")
+		}
+		return []byte(`[{"id":"gc-1","title":"no issue found","status":"open"`), nil
+	}
+	_, err := beads.NewBdStore("/city", runner).Get("gc-1")
+	if err == nil || errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("Get with malformed wisp-tier output = %v, want the parse failure, not ErrNotFound", err)
+	}
+}
+
+func TestBdStoreGetRetriesTransientWispTierFailure(t *testing.T) {
+	queries := 0
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		if args[0] == "show" {
+			return nil, fmt.Errorf("exit status 1: Error fetching gc-1: no issue found matching \"gc-1\"")
+		}
+		queries++
+		if queries == 1 {
+			return nil, fmt.Errorf("exit status 1: invalid connection")
+		}
+		return []byte(`[{"id":"gc-1","title":"wisp","status":"open","issue_type":"task","ephemeral":true}]`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.Get("gc-1")
+	if err != nil {
+		t.Fatalf("Get after one transient wisp-tier failure: %v", err)
+	}
+	if got.ID != "gc-1" || queries != 2 {
+		t.Fatalf("Get = %+v after %d wisp queries, want gc-1 after a retry", got, queries)
+	}
+}
+
+func TestBdStoreGetWispTierFailureWithNoMatchTextIsNotNotFound(t *testing.T) {
+	// A failure can carry bd's no-match wording without bd having answered:
+	// a transport fault that outlasted the read retries, or an infrastructure
+	// failure. Nor does bd show's "issue X not found" wording count: bd query
+	// answers a miss with an empty list, so that text on its failure path came
+	// from somewhere other than a lookup. Absence is unproven, so Get must not
+	// report ErrNotFound.
+	for name, failure := range map[string]string{
+		"transport":      "exit status 1: connection reset by peer; no issues found in retry",
+		"infrastructure": "exit status 1: database not found; no issues found",
+		"show wording":   "exit status 1: issue gc-1 not found",
+	} {
+		t.Run(name, func(t *testing.T) {
+			runner := func(_, _ string, args ...string) ([]byte, error) {
+				if args[0] == "show" {
+					return nil, fmt.Errorf("exit status 1: Error fetching gc-1: no issue found matching \"gc-1\"")
+				}
+				return nil, errors.New(failure)
+			}
+			_, err := beads.NewBdStore("/city", runner).Get("gc-1")
+			if err == nil || errors.Is(err, beads.ErrNotFound) || !strings.Contains(err.Error(), failure) {
+				t.Fatalf("Get with wisp-tier failure %q = %v, want that failure, not ErrNotFound", failure, err)
+			}
+		})
+	}
+}
+
 func TestBdStoreGetBadJSON(t *testing.T) {
 	runner := func(_, _ string, _ ...string) ([]byte, error) {
 		return []byte(`not json`), nil
@@ -775,6 +876,38 @@ func TestBdStoreReopenUsesReopenCommand(t *testing.T) {
 	s := beads.NewBdStore("/city", runner)
 	if err := s.Reopen("bd-abc-123"); err != nil {
 		t.Fatalf("Reopen() error = %v", err)
+	}
+}
+
+// TestBdStoreReopenClearsStaleCloseReasonFirst pins that a reopen clears the
+// metadata.close_reason Close forwards as --reason, before bd reopen runs, so a
+// later close without a reason does not report the previous close's reason.
+func TestBdStoreReopenClearsStaleCloseReasonFirst(t *testing.T) {
+	var calls []string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if name != "bd" {
+			return nil, fmt.Errorf("unexpected command name: %s", name)
+		}
+		call := strings.Join(args, " ")
+		calls = append(calls, call)
+		switch call {
+		case "show --json bd-abc-123":
+			return []byte(`[{"id":"bd-abc-123","title":"test","status":"closed","issue_type":"task","created_at":"2025-01-15T10:30:00Z","close_reason":"duplicate of bd-1","metadata":{"close_reason":"duplicate of bd-1"}}]`), nil
+		case "update --json bd-abc-123 --set-metadata close_reason=":
+			return []byte(`[{"id":"bd-abc-123","status":"closed"}]`), nil
+		case "reopen --json bd-abc-123":
+			return []byte(`{"id":"bd-abc-123","status":"open"}`), nil
+		default:
+			return nil, fmt.Errorf("unexpected command: bd %s", call)
+		}
+	}
+	s := beads.NewBdStore("/city", runner)
+	if err := s.Reopen("bd-abc-123"); err != nil {
+		t.Fatalf("Reopen() error = %v", err)
+	}
+	want := []string{"show --json bd-abc-123", "update --json bd-abc-123 --set-metadata close_reason=", "reopen --json bd-abc-123"}
+	if fmt.Sprint(calls) != fmt.Sprint(want) {
+		t.Fatalf("bd calls = %q, want %q", calls, want)
 	}
 }
 
@@ -1351,7 +1484,7 @@ func TestBdStoreWaitForParentProjection(t *testing.T) {
 				return []byte(`[{"id":"bd-child","title":"child","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
 			}
 			return []byte(`[{"id":"bd-child","title":"child","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","parent":"bd-parent"}]`), nil
-		case "list --json --include-infra --include-gates --limit 0 --parent bd-parent":
+		case "list --json --all --include-infra --include-gates --limit 0 --parent bd-parent":
 			parentListCalls++
 			if parentListCalls == 1 {
 				return []byte(`[]`), nil
@@ -1389,7 +1522,7 @@ func TestBdStoreWaitForParentRemovalProjection(t *testing.T) {
 				return []byte(`[{"id":"bd-child","title":"child","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","parent":"bd-parent"}]`), nil
 			}
 			return []byte(`[{"id":"bd-child","title":"child","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
-		case "list --json --include-infra --include-gates --limit 0 --parent bd-parent":
+		case "list --json --all --include-infra --include-gates --limit 0 --parent bd-parent":
 			oldParentListCalls++
 			if oldParentListCalls == 1 {
 				return []byte(`[{"id":"bd-child","title":"child","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","parent":"bd-parent"}]`), nil
@@ -1413,9 +1546,9 @@ func TestBdStoreWaitForParentProjectionDetectsSupersededParent(t *testing.T) {
 	runner := func(_, _ string, args ...string) ([]byte, error) {
 		cmd := strings.Join(args, " ")
 		switch cmd {
-		case "list --json --include-infra --include-gates --limit 0 --parent bd-new":
+		case "list --json --all --include-infra --include-gates --limit 0 --parent bd-new":
 			return []byte(`[]`), nil
-		case "list --json --include-infra --include-gates --limit 0 --parent bd-old":
+		case "list --json --all --include-infra --include-gates --limit 0 --parent bd-old":
 			return []byte(`[]`), nil
 		case "show --json bd-child":
 			return []byte(`[{"id":"bd-child","title":"child","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","parent":"bd-other"}]`), nil
@@ -1449,12 +1582,12 @@ func TestBdStoreWaitForParentProjectionGetsBeforeListing(t *testing.T) {
 				return []byte(`[{"id":"bd-child","title":"child","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","parent":"bd-old"}]`), nil
 			}
 			return []byte(`[{"id":"bd-child","title":"child","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","parent":"bd-new"}]`), nil
-		case "list --json --include-infra --include-gates --limit 0 --parent bd-old":
+		case "list --json --all --include-infra --include-gates --limit 0 --parent bd-old":
 			if showCalls < 2 {
 				listedBeforeCurrentParentChanged = true
 			}
 			return []byte(`[]`), nil
-		case "list --json --include-infra --include-gates --limit 0 --parent bd-new":
+		case "list --json --all --include-infra --include-gates --limit 0 --parent bd-new":
 			if showCalls < 2 {
 				listedBeforeCurrentParentChanged = true
 			}
@@ -5568,4 +5701,13 @@ func TestBdStoreListReadsCloseReason(t *testing.T) {
 	if reasons["bd-open"] != "" {
 		t.Errorf("bd-open CloseReason = %q, want empty", reasons["bd-open"])
 	}
+}
+
+// TestBdStoreCloseNotificationConformance runs the close-notification contract
+// through a CachingStore over a BdStore driving a fake bd, so bd's row shapes
+// (JSON rows, show/list refreshes, close --reason forwarding) are covered.
+func TestBdStoreCloseNotificationConformance(t *testing.T) {
+	beadstest.RunCloseNotificationTests(t, func(*testing.T) beads.Store {
+		return beadstest.NewFakeBd().NewBdStore()
+	})
 }

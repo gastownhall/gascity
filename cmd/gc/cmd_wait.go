@@ -1251,7 +1251,33 @@ func prepareWaitWakeStateHooked(sessFront *sessionpkg.Store, dependencies waitDe
 		}
 		pending(wait)
 	}
+	clearOrphanedWaitHolds(sessFront, sessionBeads, waits, clearHold)
 	return readyWaitSet, nil
+}
+
+// clearOrphanedWaitHolds re-derives the wait holds owed a clear (mc-q6x43):
+// an open row that still carries a wait hold with no non-terminal wait left
+// among this pass's waits has its hold cleared, whatever pass ended the wait
+// and whether its own clear then lost. clearHold reads the waits again
+// fresh, so a wait registered since keeps its hold. A clear that loses every
+// CAS, or fails, is owed again and retried on the next pass; a failure is
+// logged and spends no other row's clear nor the pass's ready waits.
+func clearOrphanedWaitHolds(sessFront *sessionpkg.Store, sessionBeads *sessionBeadSnapshot, waits []sessionpkg.WaitInfo, clearHold func(*sessionpkg.Store, string) error) {
+	live := make(map[string]bool, len(waits))
+	for _, w := range waits {
+		if !isWaitTerminal(w.State) {
+			live[w.SessionID] = true
+		}
+	}
+	for _, info := range sessionBeads.OpenInfos() {
+		d := sessionpkg.DispositionOfInfo(info)
+		if live[info.ID] || (!d.Wait && !d.WaitIntent) {
+			continue
+		}
+		if err := clearHold(sessFront, info.ID); err != nil && !errors.Is(err, errWaitHoldClearContended) {
+			log.Printf("gc wait: clearing session %s's orphaned wait hold: %v", info.ID, err)
+		}
+	}
 }
 
 // lookupSessionBeadByIDInfo is the wait-diagnostic fallback that reads a single
@@ -1317,7 +1343,7 @@ func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, sess
 		if nudgeID == "" {
 			continue
 		}
-		_, ok, err := nudgeFrontDoor(nudges).Find(nudgeID)
+		queued, err := waitNudgeAttemptQueuedOrResolved(nudgeFrontDoor(nudges), nudgeID)
 		if err != nil {
 			if beads.IsLookupLimitError(err) {
 				stampWaitLookupCapDiagnostic(sessFront, sessionID, err, now, "ready-wait-nudge")
@@ -1325,7 +1351,7 @@ func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, sess
 			}
 			return err
 		}
-		if ok {
+		if queued {
 			continue
 		}
 		message := strings.TrimSpace(wait.Note)
@@ -1356,6 +1382,36 @@ func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, sess
 		}
 	}
 	return nil
+}
+
+// waitNudgeAttemptQueuedOrResolved reports whether the wait nudge attempt
+// nudgeID needs no new enqueue: an open shadow is already queued, or a terminal
+// shadow already delivered or failed this attempt. The id embeds the delivery
+// attempt, so a resolved shadow means a delivery acked after this tick's wait
+// prepare; the next prepare finalizes the wait from it. A superseded shadow did
+// not resolve the attempt and is re-queued. A capped terminal lookup is also
+// unresolved: FindIncludingTerminal returns the newest terminal shadow before
+// it checks the cap, so the cap means none of the newest closed shadows
+// delivered or failed the attempt (for example, enqueues rolled back by
+// RollbackEnqueue), and the reminder is re-queued.
+func waitNudgeAttemptQueuedOrResolved(front *nudgequeue.Store, nudgeID string) (bool, error) {
+	_, open, err := front.Find(nudgeID)
+	if err != nil || open {
+		return open, err
+	}
+	shadow, ok, err := front.FindIncludingTerminal(nudgeID)
+	if beads.IsLookupLimitError(err) {
+		return false, nil
+	}
+	if err != nil || !ok {
+		return false, err
+	}
+	switch nudgequeue.ClassifyTerminalState(shadow.State) {
+	case nudgequeue.OutcomeDelivered, nudgequeue.OutcomeFailed:
+		return true, nil
+	default:
+		return false, nil
+	}
 }
 
 func waitNudgeProviderNeedsPoller(info sessionpkg.Info) bool {
@@ -1399,10 +1455,10 @@ func finalizeReadyWaitFromNudge(sessFront *sessionpkg.Store, nudges beads.Nudges
 	if !ok {
 		return false, err
 	}
-	switch nudge.State {
-	case "injected", "accepted_for_injection":
+	switch nudgequeue.ClassifyTerminalState(nudge.State) {
+	case nudgequeue.OutcomeDelivered:
 		return true, sessFront.CloseWaitFromNudge(wait.ID, now, nudgeID, nudge.CommitBoundary)
-	case "expired", "failed":
+	case nudgequeue.OutcomeFailed:
 		return true, sessFront.FailWaitFromNudge(wait.ID, now, nudgeID, nudge.TerminalReason, nudge.CommitBoundary)
 	default:
 		return false, nil
@@ -1427,22 +1483,12 @@ func cancelWaitsForSession(sessFront *sessionpkg.Store, sessionID string) error 
 	return err
 }
 
-// setSessionWaitHold parks the session for a wait: wait_hold, and
-// sleep_intent=wait-hold unless an operator's user hold (HoldUser) already
-// explains the row, so a wait never turns a user hold into a heartbeat hold.
-// It is decided from a fresh read and fenced.
+// setSessionWaitHold parks the session for a wait: the disposition's
+// WaitBegin cell (wait_hold, and sleep_intent=wait-hold unless an operator's
+// user hold already explains the row, so a wait never turns a user hold into
+// a heartbeat hold), decided on a fresh read and fenced.
 func setSessionWaitHold(sessFront *sessionpkg.Store, sessionID string) error {
-	ok, err := sessFront.UpdateMetadataFenced(sessionID, 3, func(info sessionpkg.Info, _ sessionpkg.PersistedResponse) sessionpkg.MetadataPatch {
-		patch := sessionpkg.MetadataPatch{"wait_hold": "true"}
-		if sessionpkg.HoldsInfo(info, time.Now()).In&sessionpkg.HoldUser == 0 {
-			patch["sleep_intent"] = string(sessionpkg.SleepReasonWaitHold)
-		}
-		return patch
-	})
-	if err == nil && !ok {
-		err = fmt.Errorf("session %s: wait hold lost to concurrent writes; retry", sessionID)
-	}
-	return err
+	return sessFront.SetWaitHold(sessionID, true, "")
 }
 
 // clearSessionWaitHoldIfIdle drops the wait hold once no wait is pending,
@@ -1530,8 +1576,13 @@ func nextWaitDeliveryAttempt(front *nudgequeue.Store, wait sessionpkg.WaitInfo) 
 	return "", nil
 }
 
+// withdrawQueuedWaitNudges withdraws the queued nudges a wait registered. It
+// closes only the work store handle it opened, never the nudges-class store
+// (see openOwnedNudgeBeadStore).
 func withdrawQueuedWaitNudges(cityPath string, nudgeIDs []string) error {
-	return nudgequeue.WithdrawWaitNudges(openNudgeBeadStore(cityPath).Store, cityPath, nudgeIDs)
+	store, opened := openOwnedNudgeBeadStore(cityPath)
+	defer func() { _ = closeBeadStoreHandle(opened) }()
+	return nudgequeue.WithdrawWaitNudges(store.Store, cityPath, nudgeIDs)
 }
 
 func waitLifecycleEnabled() error {

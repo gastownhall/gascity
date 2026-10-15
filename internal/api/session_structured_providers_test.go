@@ -1265,7 +1265,7 @@ func TestHandleSessionStreamStructuredClosedWithoutHistoryMatchesTranscriptSnaps
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Close(info.ID); err != nil {
+	if err := mgr.Close(context.Background(), testOperatorIn(t, fs.cityPath), info.ID); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 
@@ -1462,7 +1462,7 @@ func TestHandleSessionStreamStructuredResumesFromPaginatedRESTSnapshot(t *testin
 		t.Fatalf("close transcript: %v", closeErr)
 	}
 
-	body := waitForRecorderSubstring(t, rec, "event: structured", hangBudget)
+	body := waitForRecorderFrame(t, rec, "event: structured\n", hangBudget)
 	cancel()
 	<-done
 	frame := firstSSETestFrame(t, body, "structured")
@@ -1540,7 +1540,7 @@ func TestHandleSessionStreamStructuredResumesFromEmptyPaginatedRESTSnapshot(t *t
 		close(done)
 	}()
 
-	initialBody := waitForRecorderSubstring(t, rec, "event: structured", hangBudget)
+	initialBody := waitForRecorderFrame(t, rec, "event: structured\n", hangBudget)
 	initialFrame := firstSSETestFrame(t, initialBody, "structured")
 	var initialUpdate SessionStreamStructuredMessageEvent
 	if err := json.Unmarshal([]byte(initialFrame.Data), &initialUpdate); err != nil {
@@ -1633,7 +1633,7 @@ func TestHandleSessionStreamStructuredInvalidCursorEmitsResetSnapshot(t *testing
 	writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
 		`{"uuid":"m1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"hello\"}","timestamp":"2025-01-01T00:00:00Z"}`,
 	)
-	if err := mgr.Close(info.ID); err != nil {
+	if err := mgr.Close(context.Background(), testOperatorIn(t, fs.cityPath), info.ID); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 
@@ -1733,7 +1733,7 @@ func TestHandleSessionStreamStructuredResumeEmitsInclusiveTailUpsert(t *testing.
 		t.Fatalf("close transcript: %v", closeErr)
 	}
 
-	body := waitForRecorderSubstring(t, rec, "event: structured", 10*time.Second)
+	body := waitForRecorderFrame(t, rec, "event: structured\n", 10*time.Second)
 	cancel()
 	<-done
 	frame := firstSSETestFrame(t, body, "structured")

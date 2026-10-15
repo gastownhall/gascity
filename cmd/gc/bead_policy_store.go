@@ -28,6 +28,10 @@ const (
 type beadPolicyStore struct {
 	beads.Store
 	cfg *config.City
+	// borrowed marks a handle over a store the invocation memo owns
+	// (invocation_store_memo.go). closeBeadStoreHandle leaves its store open;
+	// the memo closes it when the invocation ends.
+	borrowed bool
 }
 
 type beadPolicyGraphStore struct {
@@ -51,19 +55,32 @@ var (
 func (s *beadPolicyStore) ConditionalWritesResolveTarget() beads.Store { return s.Store }
 
 var (
-	_ beads.BatchDeleter      = (*beadPolicyStore)(nil)
-	_ beads.BatchDeleter      = (*beadPolicyGraphStore)(nil)
-	_ beads.DepMetadataReader = (*beadPolicyStore)(nil)
-	_ beads.DepMetadataReader = (*beadPolicyGraphStore)(nil)
+	_ beads.BatchDeleter           = (*beadPolicyStore)(nil)
+	_ beads.BatchDeleter           = (*beadPolicyGraphStore)(nil)
+	_ beads.DepMetadataReader      = (*beadPolicyStore)(nil)
+	_ beads.DepMetadataReader      = (*beadPolicyGraphStore)(nil)
+	_ beads.ParentProjectionWaiter = (*beadPolicyStore)(nil)
+	_ beads.ParentProjectionWaiter = (*beadPolicyGraphStore)(nil)
 )
 
 func wrapStoreWithBeadPolicies(store beads.Store, cfg *config.City) beads.Store {
+	return wrapStoreWithBeadPoliciesOwnership(store, cfg, false)
+}
+
+// borrowedStoreWithBeadPolicies is wrapStoreWithBeadPolicies for a store the
+// invocation memo owns: the handle's close leaves the store open.
+func borrowedStoreWithBeadPolicies(store beads.Store, cfg *config.City) beads.Store {
+	return wrapStoreWithBeadPoliciesOwnership(store, cfg, true)
+}
+
+func wrapStoreWithBeadPoliciesOwnership(store beads.Store, cfg *config.City, borrowed bool) beads.Store {
 	if store == nil {
 		return nil
 	}
 	policyStore := &beadPolicyStore{
-		Store: store,
-		cfg:   cfg,
+		Store:    store,
+		cfg:      cfg,
+		borrowed: borrowed,
 	}
 	if applier, ok := beads.GraphApplyFor(store); ok {
 		return &beadPolicyGraphStore{
@@ -176,6 +193,17 @@ func (s *beadPolicyStore) DeleteBatch(ids []string) error {
 	return deleter.DeleteBatch(ids)
 }
 
+// WaitForParentProjection preserves the wrapped store's optional projection
+// wait. An inner store without that capability keeps the existing no-wait
+// behavior. beadPolicyGraphStore inherits this method through its embedding.
+func (s *beadPolicyStore) WaitForParentProjection(ctx context.Context, id, oldParentID, newParentID string) error {
+	waiter, ok := s.Store.(beads.ParentProjectionWaiter)
+	if !ok {
+		return nil
+	}
+	return waiter.WaitForParentProjection(ctx, id, oldParentID, newParentID)
+}
+
 // GetExactBatch forwards the exact batch read to the wrapped store. The policy
 // layer shapes creation and listing, not exact reads by id.
 func (s *beadPolicyStore) GetExactBatch(ids []string) (map[string]beads.Bead, []string, error) {
@@ -235,6 +263,15 @@ func (s *beadPolicyStore) DepListBatch(ids []string) (map[string][]beads.Dep, er
 		return nil, beads.ErrDepListBatchUnsupported
 	}
 	return batch.DepListBatch(ids)
+}
+
+// ReadyPreferCache forwards the cache-preferred ready read with the policy's
+// expanded read tier, exactly as Ready and both handles do. An inner store
+// with no ready cache is read live, as beads.ReadyPreferCache reads any
+// cache-less store. Explicit for the reason DeleteBatch is: the embedded Store
+// interface does not promote optional capabilities.
+func (s *beadPolicyStore) ReadyPreferCache(query beads.ReadyQuery) ([]beads.Bead, error) {
+	return beads.ReadyPreferCache(s.Store, expandPolicyReadyQuery(query))
 }
 
 func (s *beadPolicyStore) Handles() beads.StoreHandles {
@@ -538,7 +575,13 @@ func beadStorageClass(storage string) beads.StorageClass {
 }
 
 func applyBeadStorage(b beads.Bead, storage string) beads.Bead {
-	switch beadStorageClass(storage) {
+	return applyStorageClass(b, beadStorageClass(storage))
+}
+
+// applyStorageClass sets the bead's own storage flags to storage, for a store
+// that has no storage-class create. StorageDefault leaves them as they are.
+func applyStorageClass(b beads.Bead, storage beads.StorageClass) beads.Bead {
+	switch storage {
 	case beads.StorageEphemeral:
 		b.Ephemeral = true
 		b.NoHistory = false

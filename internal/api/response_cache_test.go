@@ -84,6 +84,10 @@ func TestHandleStatusCachesAcrossIndexChanges(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("first status = %d, want 200", rec.Code)
 	}
+	builtIndex := rec.Header().Get("X-GC-Index")
+	if builtIndex == "" {
+		t.Fatal("first status missing X-GC-Index")
+	}
 
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -108,10 +112,12 @@ func TestHandleStatusCachesAcrossIndexChanges(t *testing.T) {
 		t.Fatalf("List calls after %d index changes = %d, want 1 (time-bucketed cache must survive sequence churn)", 5, store.listCalls)
 	}
 
-	// The X-GC-Index header still reflects the live sequence even on a cache
-	// hit, so blocking/long-poll consumers see fresh index values.
-	if got := rec.Header().Get("X-GC-Index"); got == "" || got == "0" {
-		t.Fatalf("X-GC-Index = %q, want live sequence on cache hit", got)
+	// A cache hit reports the index its body was built at, not the live
+	// sequence. The body predates the recorded events, so a long-poll or
+	// stream resume after the live head would skip them; after the build
+	// index it returns at once with a fresh body.
+	if got := rec.Header().Get("X-GC-Index"); got != builtIndex {
+		t.Fatalf("X-GC-Index = %q, want build index %q on cache hit", got, builtIndex)
 	}
 }
 
@@ -149,6 +155,52 @@ func TestHandleStatusCacheExpiresOnTTL(t *testing.T) {
 	}
 	if store.listCalls != 1 {
 		t.Fatalf("List calls after cold first request = %d, want 1", store.listCalls)
+	}
+}
+
+// TestHandleStatusTTLFloorHitReportsBuildIndex pins the index the TTL-floor
+// tier serves. With the time bucket rolling over on every request, a repeat
+// inside statusResponseTTLFloor is served the cached body, which predates any
+// event recorded since its build, so it must carry the build index rather
+// than the live head.
+func TestHandleStatusTTLFloorHitReportsBuildIndex(t *testing.T) {
+	oldTTL := timeBucketResponseCacheTTL
+	timeBucketResponseCacheTTL = time.Nanosecond // every request lands in a new bucket
+	oldFloor := statusResponseTTLFloor
+	statusResponseTTLFloor = time.Hour // only the TTL floor can hit
+	t.Cleanup(func() {
+		timeBucketResponseCacheTTL = oldTTL
+		statusResponseTTLFloor = oldFloor
+	})
+
+	state := newFakeState(t)
+	store := &countingStore{Store: beads.NewMemStore()}
+	state.stores["myrig"] = store
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
+
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/status"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first status = %d, want 200", rec.Code)
+	}
+	builtIndex := responseIndex(t, rec)
+	state.eventProv.Record(events.Event{Type: events.BeadCreated, Actor: "human"})
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("second status = %d, want 200", rec.Code)
+	}
+	// No rebuild, inline or in the background: the repeat was a TTL-floor
+	// hit, not a stale-while-revalidate serve.
+	srv.waitForBackground()
+	if store.listCalls != 1 {
+		t.Fatalf("List calls = %d, want 1: the repeat was rebuilt instead of served from the TTL floor", store.listCalls)
+	}
+	if got := responseIndex(t, rec); got != builtIndex {
+		t.Fatalf("X-GC-Index = %d, want the build index %d on a TTL-floor hit", got, builtIndex)
 	}
 }
 
@@ -201,6 +253,18 @@ func TestHandleStatusServesStaleAndRefreshesInBackground(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &primed); err != nil {
 		t.Fatalf("decode priming response: %v", err)
 	}
+	primedIndex := responseIndex(t, rec)
+
+	// Advance the event head past the primed build, then arm a session
+	// provider that records one more event in the middle of the next build.
+	// The stale body predates the first event, so it must be served with the
+	// primed index. The background refresh captures its index before it
+	// builds, so the mid-build event must stay above the refreshed entry's
+	// index.
+	ep := state.eventProv.(*events.Fake)
+	ep.Record(events.Event{Type: events.BeadCreated, Actor: "human"})
+	lateProvider := &lateEventProvider{Provider: state.sp, ep: ep}
+	state.sessionProvider = lateProvider
 
 	// Swap in a store that blocks List until released, then issue the
 	// cache-miss request. If the handler still blocks on a rebuild, this
@@ -228,6 +292,9 @@ func TestHandleStatusServesStaleAndRefreshesInBackground(t *testing.T) {
 	}
 	if stale.UptimeSec != primed.UptimeSec || stale.Name != primed.Name {
 		t.Fatalf("stale-served body = %+v, want a copy of the primed body %+v", stale, primed)
+	}
+	if got := responseIndex(t, rec2); got != primedIndex {
+		t.Fatalf("stale-served X-GC-Index = %d, want the primed build index %d: the stale body predates every later event", got, primedIndex)
 	}
 
 	// The stale-served response still carries the existing X-GC-Cache-Age-S
@@ -296,12 +363,45 @@ func TestHandleStatusServesStaleAndRefreshesInBackground(t *testing.T) {
 	if got := fastStore.listCalls - listCallsBeforeRefresh; got != 1 {
 		t.Fatalf("rig List calls during background refresh = %d, want exactly 1 (%d concurrent misses must coalesce onto one rebuild)", got, concurrentMisses+1)
 	}
+	refreshed, _, ok := staleResponseAs[indexedResponse[StatusBody]](srv, "status")
+	if !ok {
+		t.Fatal("no cached /status entry after the background refresh")
+	}
+	if lateProvider.lateSeq == 0 {
+		t.Fatal("the mid-build event did not fire; the refresh no longer asks the session provider")
+	}
+	if refreshed.Index <= primedIndex || refreshed.Index >= lateProvider.lateSeq {
+		t.Fatalf("refreshed entry index = %d, want above the primed index %d (a new entry was stored) and below %d (the event recorded during its build)", refreshed.Index, primedIndex, lateProvider.lateSeq)
+	}
 
 	// The in-flight guard must clear after completion; a leaked guard would
 	// wedge every future refresh for this key.
 	if srv.responseRefreshing["status"] {
 		t.Fatal("responseRefreshing[\"status\"] still true after background refresh completed (leaked guard)")
 	}
+}
+
+// lateEventProvider records one event the first time IsRunning is asked.
+// buildStatusBody asks synchronously on its own goroutine while counting
+// agents, so the event lands in the middle of a /status build, as a
+// concurrent session wake would.
+type lateEventProvider struct {
+	runtime.Provider
+	ep      *events.Fake
+	once    sync.Once
+	lateSeq uint64
+}
+
+func (p *lateEventProvider) IsRunning(name string) bool {
+	p.once.Do(func() {
+		p.ep.Record(events.Event{Type: events.SessionWoke, Actor: "test", Subject: name})
+		seq, err := p.ep.LatestSeq()
+		if err != nil {
+			panic(err)
+		}
+		p.lateSeq = seq
+	})
+	return p.Provider.IsRunning(name)
 }
 
 // panicOnIsRunningProvider panics from IsRunning, which buildStatusBody calls

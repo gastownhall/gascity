@@ -5,6 +5,7 @@ package beadstest
 
 import (
 	"errors"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -332,6 +333,34 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 		}
 		if got.Metadata["closed_by"] != "conformance" {
 			t.Errorf("closed_by = %q on the bead the batch closed, want %q", got.Metadata["closed_by"], "conformance")
+		}
+	})
+
+	// UpdateAddsLabelToClosedBead pins that a label can be appended to a bead
+	// after it is closed, leaving it closed. Mail archiving relies on it: it
+	// closes a message first and labels it "read" second, so no write ever
+	// leaves it read but still open.
+	t.Run("UpdateAddsLabelToClosedBead", func(t *testing.T) {
+		s := newStore()
+		b, err := s.Create(beads.Bead{Title: "label after close"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Close(b.ID); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Update(b.ID, beads.UpdateOpts{Labels: []string{"read"}}); err != nil {
+			t.Fatalf("Update(labels) on a closed bead: %v", err)
+		}
+		got, err := s.Get(b.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status != "closed" {
+			t.Errorf("Status = %q after labeling, want %q", got.Status, "closed")
+		}
+		if !slices.Contains(got.Labels, "read") {
+			t.Errorf("Labels = %v, want %q", got.Labels, "read")
 		}
 	})
 
@@ -852,7 +881,7 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 			t.Fatal(err)
 		}
 		// Create beads with types that bd ready excludes.
-		for _, typ := range []string{"molecule", "step", "convoy", "message", "gate", "merge-request", "session", "agent", "role", "rig"} {
+		for _, typ := range []string{"molecule", "step", "convoy", "message", "gate", "merge-request", "session", "agent", "role", "rig", "op"} {
 			if _, err := s.Create(beads.Bead{Title: typ, Type: typ}); err != nil {
 				t.Fatal(err)
 			}
@@ -1432,6 +1461,35 @@ func RunCloseReasonTests(t *testing.T, newStore func() beads.Store) {
 			t.Errorf("CloseReason after Reopen = %q, want empty", got.CloseReason)
 		}
 	})
+
+	// The closer's metadata.close_reason is the close's input: a store that
+	// kept it across Reopen handed the old reason to the next close made
+	// without one (bd close, a controller close), so that close reported why
+	// the PREVIOUS close happened.
+	t.Run("ReopenClearsCloseReasonMetadataSoTheNextCloseHasNone", func(t *testing.T) {
+		s := newStore()
+		b := closeWithReason(t, s, "reopened then closed again")
+		if err := s.Reopen(b.ID); err != nil {
+			t.Fatal(err)
+		}
+		reopened, err := s.Get(b.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := reopened.Metadata["close_reason"]; got != "" {
+			t.Errorf("metadata.close_reason after Reopen = %q, want it cleared", got)
+		}
+		if err := s.Close(b.ID); err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.Get(b.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.CloseReason != "" {
+			t.Errorf("CloseReason after reopen and a close without a reason = %q, want empty", got.CloseReason)
+		}
+	})
 }
 
 // RunCloseReasonAfterReopenTests pins that a reopen, by Reopen or by an Update
@@ -1439,11 +1497,11 @@ func RunCloseReasonTests(t *testing.T, newStore func() beads.Store) {
 // gives no reason, by Close or by an Update to closed, reports none. Call it
 // for the stores whose reopen drops metadata.close_reason: MemStore, FileStore
 // and SQLiteStore. BdStore and NativeDoltStore hand that key to bd as the close
-// reason, and bd's reopen clears its close_reason column but not the key, so
-// their next close reports the old reason (ga-c8fe4w). NativeDoltStore's
-// conformance fixture is not a caller either: its storage is a MemStore that
-// drops the key and ignores the reason it is handed, so it would pass on
-// MemStore's behalf.
+// reason; their Reopen clears it first (staleCloseReasonToClear), but an Update
+// to open keeps it, so their next close after one reports the old reason
+// (ga-c8fe4w). NativeDoltStore's conformance fixture is not a caller either:
+// its storage is a MemStore that drops the key and ignores the reason it is
+// handed, so it would pass on MemStore's behalf.
 func RunCloseReasonAfterReopenTests(t *testing.T, newStore func() beads.Store) {
 	t.Helper()
 
@@ -1487,6 +1545,48 @@ func RunCloseReasonAfterReopenTests(t *testing.T, newStore func() beads.Store) {
 				}
 			})
 		}
+	}
+	runReopenRemovesCloseReasonKeyTests(t, newStore)
+}
+
+// runReopenRemovesCloseReasonKeyTests pins that Reopen removes
+// metadata.close_reason whatever status it reopens from, as CachingStore's
+// reopen patch does (dropCloseReasonMetadata). A key left present but empty
+// differs from that patch, so the next reconcile reads the backing row as
+// changed and announces a bead.updated nothing made.
+func runReopenRemovesCloseReasonKeyTests(t *testing.T, newStore func() beads.Store) {
+	t.Helper()
+	for _, from := range []struct{ name, status string }{
+		{name: "Closed", status: "closed"},
+		{name: "InProgress", status: "in_progress"},
+	} {
+		t.Run("ReopenFrom"+from.name+"RemovesCloseReasonKey", func(t *testing.T) {
+			s := newStore()
+			b, err := s.Create(beads.Bead{Title: "reopened from " + from.status})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := s.SetMetadata(b.ID, "close_reason", closeReason); err != nil {
+				t.Fatal(err)
+			}
+			status := from.status
+			if err := s.Update(b.ID, beads.UpdateOpts{Status: &status}); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.Reopen(b.ID); err != nil {
+				t.Fatal(err)
+			}
+			got, err := s.Get(b.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Status != "open" {
+				t.Fatalf("Status = %q, want open", got.Status)
+			}
+			if v, ok := got.Metadata["close_reason"]; ok {
+				t.Errorf("metadata.close_reason after Reopen = %q, want the key removed", v)
+			}
+		})
 	}
 }
 

@@ -66,9 +66,11 @@ func newGatherFixture(t *testing.T, rows ...beads.Bead) *gatherFixture {
 		Recording:    f.rec.Load,
 		Observations: func() *ObservationCache { return obs },
 		Episodes:     func() (map[string]session.StartupHealthEpisode, error) { return readStartupHealthEpisodes(f.cache) },
-		ResolveTemplate: func(_ *reconcileEnv, info session.Info) (TemplateParams, error) {
-			f.resolves.Add(1)
-			return TemplateParams{SessionName: info.SessionNameMetadata}, nil
+		Templates: func(*reconcileEnv, time.Time) templateResolver {
+			return templateResolver{Resolve: func(info session.Info) templateResolution {
+				f.resolves.Add(1)
+				return templateResolution{TP: TemplateParams{SessionName: info.SessionNameMetadata}}
+			}}
 		},
 		LookPath: func(name string) (string, error) { f.looks.Add(1); return "/bin/" + name, nil },
 	}
@@ -403,5 +405,68 @@ func TestMislabelledRowFlagged(t *testing.T) {
 	}
 	if _, ok := w.Templates.lookup(w.Census.Rows[rowKey{Leg: "city:test-city", ID: "gc-task"}].Info); ok {
 		t.Error("a mislabelled row's template was resolved")
+	}
+}
+
+// Kills a v2 lane env whose detector has no work legs: with a city work
+// store the env mints its legs over it, as gather does; without one they
+// are the zero WorkLegs, which detects nothing.
+func TestGatherK1EnvMintsTheWorkLegs(t *testing.T) {
+	f := newGatherFixture(t, poolRow("gc-1", "worker", 1, "active"))
+	env, err := f.env.externalReadsEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if env.WorkLegs.unusable() == nil {
+		t.Fatal("no work store, yet the lane's work legs are usable")
+	}
+	work := beads.NewMemStore()
+	f.env.WorkStore = func() beads.Store { return work }
+	if env, err = f.env.externalReadsEnv(); err != nil || env.WorkLegs.unusable() != nil || !env.WorkLegs.isWork(work) {
+		t.Fatalf("work legs over the city work store: %v / %v", err, env.WorkLegs.unusable())
+	}
+}
+
+// Kills a World that drops the pass's suspension state (#7771 review): the
+// orphaned signal's live-claim veto reads its scope from World.Suspension,
+// which gather sets from the suspension reader, rig overrides included.
+func TestGatherCarriesTheSuspensionState(t *testing.T) {
+	yes := true
+	st := suspensionstate.State{Rigs: map[string]suspensionstate.Override{"rig-a": {Suspended: &yes}}}
+	f := newGatherFixture(t, poolRow("gc-1", "worker", 1, "active"))
+	f.env.Suspension = func() suspensionstate.State { return st }
+	if w := f.gather(t); !reflect.DeepEqual(w.Suspension, st) {
+		t.Fatalf("World.Suspension = %+v, want the reader's %+v", w.Suspension, st)
+	}
+}
+
+// TestGatherReusesTheDemandProbeStores (Gate S fix 2). Kills gather's
+// lane-fed check reading anything but what k1Env would build: the demand
+// gather's probe stores (demandView.ProbeStores) are the default scale-check
+// probe stores the demand targets name, so the lane env built from them
+// equals k1Env's, which builds the targets again, on the city's pool and on
+// a rig's lane-fed store.
+func TestGatherReusesTheDemandProbeStores(t *testing.T) {
+	for name, arrange := range map[string]func(*testing.T, *gatherFixture){"city": nil, "lane-fed rig": laneFedRig} {
+		t.Run(name, func(t *testing.T) {
+			f := newGatherFixture(t, poolRow("gc-1", "worker", 1, "active"))
+			if arrange != nil {
+				arrange(t, f)
+			}
+			w, err := gather(f.env, f.p, gatherNow)
+			if err != nil {
+				t.Fatal(err)
+			}
+			env := f.env.Env()
+			dg := censusDemandEnv(w.Census, f.env.Sessions(), f.env.RigStores())
+			dg.CityName, dg.CityPath, dg.Cfg, dg.SuspendedRigPaths = f.env.CityName, f.env.CityPath, env.Cfg, w.SuspendedRigPaths
+			want := k1Env(f.env, env, w.SuspendedRigPaths, dg)
+			if len(want.ProbeStores) == 0 {
+				t.Fatal("premise: the demand targets name no probe store")
+			}
+			if got := k1EnvWith(f.env, env, w.SuspendedRigPaths, dg, w.Demand.ProbeStores); !reflect.DeepEqual(got.ProbeStores, want.ProbeStores) {
+				t.Errorf("probe stores %v, want k1Env's %v", got.ProbeStores, want.ProbeStores)
+			}
+		})
 	}
 }

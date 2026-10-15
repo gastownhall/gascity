@@ -2,6 +2,7 @@ package exec //nolint:revive // internal package, always imported with alias
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -586,6 +587,101 @@ esac
 	if !strings.Contains(string(data), "send-keys test-sess Down") ||
 		!strings.Contains(string(data), "send-keys test-sess Enter") {
 		t.Fatalf("send-keys log = %q, want delayed bypass dismissal", string(data))
+	}
+}
+
+// Codex 0.162.1 startup screens: the composer is drawn before the status line
+// under it ("<model> · <dir>"), and a startup dialog can replace it in between.
+const (
+	codexEarlyComposerScreen = `  >_ OpenAI Codex (v0.162.1)
+     ~/city
+
+› Ask Codex to do anything
+  ? for shortcuts`
+	codexSettledComposerScreen = `  >_ OpenAI Codex (v0.162.1)
+     ~/city
+  permissions: YOLO mode
+
+› Ask Codex to do anything
+  GPT-6.1-Sol default · ~/city
+  ? for shortcuts`
+	codexHookReviewScreen = `  Hooks need review
+  4 hooks are new or changed.
+  Hooks can run outside the sandbox after you trust them.
+› 1. Review hooks
+  2. Trust all and continue
+  3. Continue without trusting (hooks won't run)
+  enter confirm · esc skip`
+)
+
+// TestStartAnswersCodexDialogDrawnAfterWatchedComposer pins the watch-startup
+// path of #6464: the watcher reports only Codex's early composer, whose "› "
+// the stream handlers read as ready, and "Hooks need review" replaces it once
+// that composer has been read. Start must still answer the dialog.
+func TestStartAnswersCodexDialogDrawnAfterWatchedComposer(t *testing.T) {
+	dir := t.TempDir()
+	screenFile := filepath.Join(dir, "screen")
+	lateFile := filepath.Join(dir, "late")
+	settledFile := filepath.Join(dir, "settled")
+	watchFile := filepath.Join(dir, "watch.jsonl")
+	sendKeysFile := filepath.Join(dir, "send-keys.log")
+	event, err := json.Marshal(startupWatchEvent{Content: codexEarlyComposerScreen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for path, content := range map[string]string{
+		screenFile:  codexEarlyComposerScreen,
+		lateFile:    codexHookReviewScreen,
+		settledFile: codexSettledComposerScreen,
+		watchFile:   string(event) + "\n",
+	} {
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The watcher stays up after its only snapshot, as a live one does. Codex
+	// draws the dialog over the composer once a peek has read the composer,
+	// and confirming the dialog lets Codex finish starting.
+	script := writeScript(t, dir, `
+op="$1"
+
+case "$op" in
+  start)
+    cat > /dev/null
+    ;;
+  watch-startup)
+    cat "`+watchFile+`"
+    exec sleep `+startupWatchBlockingSleep+`
+    ;;
+  peek)
+    cat "`+screenFile+`"
+    if [ -f "`+lateFile+`" ]; then
+      mv -f "`+lateFile+`" "`+screenFile+`"
+    fi
+    ;;
+  send-keys)
+    echo "$*" >> "`+sendKeysFile+`"
+    if [ "$3" = Enter ]; then
+      cp -f "`+settledFile+`" "`+screenFile+`.tmp" && mv -f "`+screenFile+`.tmp" "`+screenFile+`"
+    fi
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewProvider(script)
+
+	if err := p.Start(context.Background(), "test-sess", runtime.Config{
+		EmitsPermissionWarning: true,
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	data, err := os.ReadFile(sendKeysFile)
+	if err != nil {
+		t.Fatalf("read send-keys log (Start returned without answering the late dialog): %v", err)
+	}
+	if want := "send-keys test-sess Down\nsend-keys test-sess Enter\n"; string(data) != want {
+		t.Fatalf("send-keys log = %q, want %q (Down+Enter trusts the hooks)", string(data), want)
 	}
 }
 
