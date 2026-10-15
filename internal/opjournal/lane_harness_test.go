@@ -68,12 +68,16 @@ var errLinkDropped = errors.New("connection reset mid-batch")
 var errFlakyRead = errors.New("transient read error")
 
 // flakyGetStore fails Get while fail says so for the id, as a store hiccup
-// would.
+// would. Its guarded batches go through a batcher the test can fault.
 type flakyGetStore struct {
 	*beads.MemStore
-	mu   sync.Mutex
-	fail func(id string) bool
+	batcher *faultBatcher
+	mu      sync.Mutex
+	fail    func(id string) bool
 }
+
+// GuardedBatcherHandle forwards guarded batches to the fault batcher.
+func (s *flakyGetStore) GuardedBatcherHandle() (beads.GuardedBatcher, bool) { return s.batcher, true }
 
 func (s *flakyGetStore) Get(id string) (beads.Bead, error) {
 	s.mu.Lock()
@@ -96,13 +100,14 @@ func (s *flakyGetStore) setFail(fn func(id string) bool) {
 func newLaneHarnessFlaky(t *testing.T) (*laneHarness, *flakyGetStore) {
 	t.Helper()
 	mem := &beads.MemStore{IDPrefix: "gc", HonorExplicitIDs: true}
-	fs := &flakyGetStore{MemStore: mem}
+	fb := &faultBatcher{inner: mem}
+	fs := &flakyGetStore{MemStore: mem, batcher: fb}
 	clk := &clock.Fake{Time: t0}
 	s, err := NewLaneStore(beads.SessionStore{Store: fs}, clk, WithIDPrefix("gc"))
 	if err != nil {
 		t.Fatalf("NewLaneStore: %v", err)
 	}
-	return &laneHarness{mem: mem, clk: clk, store: s}, fs
+	return &laneHarness{mem: mem, batcher: fb, clk: clk, store: s}, fs
 }
 
 type laneHarness struct {
@@ -283,4 +288,18 @@ func (f *fakeExec) delivered() []Delivery {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]Delivery(nil), f.deliveries...)
+}
+
+// staleProbeExec runs during once, after its first probe returns: the probe
+// is then stale when the pass acts on it.
+type staleProbeExec struct {
+	*fakeExec
+	once   sync.Once
+	during func()
+}
+
+func (s *staleProbeExec) Probe(ctx context.Context, conv ConversationView) (Probe, error) {
+	p, err := s.fakeExec.Probe(ctx, conv)
+	s.once.Do(s.during)
+	return p, err
 }

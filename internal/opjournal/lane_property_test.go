@@ -183,6 +183,8 @@ func (e propExec) Deliver(_ context.Context, d Delivery) DeliveryResult {
 		w.cov.add("note")
 	}
 	res, landed := w.contentRes(d)
+	// The executor contract (Rejected): a runtime refuses only a key that
+	// never landed, and answers one it already applied as Delivered.
 	if rej, ok := res.(Rejected); ok && rej.KeyRejected && conv.receipts[d.Key] {
 		res = Delivered{Record: DeliveryRecord{At: w.h.clk.Now(), Ack: AckDelivered}}
 		landed = true
@@ -603,6 +605,11 @@ func (w *propWorld) check() {
 			if op.Outcome.Reason == ReasonPoison && op.Failures != MaxFailures {
 				w.fail("op %s poisoned with %d failures", id, op.Failures)
 			}
+			// A probe close records that the op never ran: never one that
+			// may have reached the executor.
+			if op.MaybeDelivered > 0 && (op.Outcome.Reason == ReasonBusy || op.Outcome.Reason == ReasonUnsupported) {
+				w.fail("op %s closed %s{%s} after attempt %d may have been delivered", id, op.Outcome.Arm, op.Outcome.Reason, op.MaybeDelivered)
+			}
 		}
 		if op.LaneSeq > 0 {
 			take := fmt.Sprintf("%s:%d", id, op.Attempt)
@@ -711,7 +718,9 @@ func (w *propWorld) drain() {
 		case next.After(w.h.clk.Now()):
 			w.h.clk.Advance(next.Sub(w.h.clk.Now()))
 		default:
-			w.h.clk.Advance(time.Millisecond)
+			// A host sleeps until Next: a quiet round whose timer is not
+			// ahead would make it spin.
+			w.t.Fatalf("drain: a quiet round's next timer %s is not after now %s", next, w.h.clk.Now())
 		}
 	}
 settled:

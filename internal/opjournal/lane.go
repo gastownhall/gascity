@@ -58,7 +58,13 @@ const (
 	doneBudgetSlack   = time.Second
 	doneBackoffStart  = 100 * time.Millisecond
 	doneBackoffMax    = 2 * time.Second
-	laneLeaseNonceLen = 6 // bytes; 12 hex characters
+	laneLeaseNonceLen = 6  // bytes; 12 hex characters
+	maxLaneHostLen    = 16 // laneHostRe
+	// maxLaneLeaseOverhead is the most a lane lease adds around its
+	// conversation id: the lane, the largest generation, the longest host
+	// and nonce, and a deadline with all nine fractional digits.
+	maxLaneLeaseOverhead = len(LaneConversation+"@#9223372036854775807#") + maxLaneHostLen +
+		len(".") + 2*laneLeaseNonceLen + len("@2006-01-02T15:04:05.999999999Z")
 )
 
 // FenceMode is how a runtime fences input to an incarnation (DES-O1 §6).
@@ -106,7 +112,9 @@ type Caps struct {
 	InBand  bool
 	Steer   bool
 	Respond bool
-	// Dedup deduplicates deliveries by delivery key.
+	// Dedup deduplicates deliveries by delivery key: a send under a key the
+	// runtime already applied is answered Delivered and not applied again,
+	// never KeyRejected (see Rejected).
 	Dedup bool
 	// Input is the incarnation fence for input (DES-O1 §6.3's
 	// Caps.Fencing).
@@ -199,22 +207,26 @@ type Delivery struct {
 	Text string
 }
 
-// InterruptCall is one interrupt effect.
+// InterruptCall is one interrupt effect. It carries no delivery key: Op.ID
+// is the idempotency key, the same on every re-take of the op.
 type InterruptCall struct {
 	Fence Fence
 	Op    Op
 	// Turn is the turn the op names, "" for the current turn.
 	Turn string
-	Seq  uint64
+	// Seq is this attempt's lane_seq; every Take assigns a new one.
+	Seq uint64
 }
 
-// RespondCall is one respond effect.
+// RespondCall is one respond effect. It carries no delivery key: Op.ID is
+// the idempotency key, the same on every re-take of the op.
 type RespondCall struct {
 	Fence       Fence
 	Op          Op
 	Interaction string
 	Payload     string
-	Seq         uint64
+	// Seq is this attempt's lane_seq; every Take assigns a new one.
+	Seq uint64
 }
 
 // DeliveryResult is a content effect's result: Delivered, NotDelivered,
@@ -255,7 +267,10 @@ type NotDelivered struct {
 // Rejected is a definitive answer: the op closes Arm{Reason} (Arm is failed
 // or skipped). KeyRejected instead says the runtime refused the delivery key;
 // the op is released, a failure counted, and its next delivery uses a new
-// key.
+// key. A runtime refuses only a key that never landed; one that already
+// applied a send under the key answers Delivered. The send under the new key
+// then repeats nothing, which matters on a deduplicating runtime: its
+// redeliveries carry no RedeliveryNote.
 type Rejected struct {
 	Arm         Arm
 	Reason      string
@@ -326,6 +341,10 @@ const (
 	WaitSettling           WaitReason = "settling"
 	WaitBlocked            WaitReason = "blocked"
 	WaitBatchFull          WaitReason = "batch_full"
+	// WaitUnsupported is a respond the runtime cannot perform now, one
+	// attempt of which may already have reached it: closing it
+	// failed{unsupported} would record that it never ran.
+	WaitUnsupported WaitReason = "unsupported"
 	// WaitReplayGroup is the head of a maybe-delivered group that a
 	// deduplicating runtime must get whole: another open member of the group
 	// is not eligible yet, and a part sent under the group's key would make
@@ -357,7 +376,11 @@ type PassResult struct {
 	Taken []string
 	// Done is how the Take ended; "" when nothing was taken, or when Done
 	// could not settle it (the pass then returns the error).
-	Done        DoneArm
+	Done DoneArm
+	// Closed are the ops this pass closed: its Done's closes and the rule
+	// closes it saw land. A rule close batch that ended with an unknown
+	// error goes unreported even when it committed, since the re-read no
+	// longer sees the ops it closed.
 	Closed      []ClosedOp
 	Waits       []OpWait
 	Quarantined []QuarantinedRow
@@ -369,8 +392,8 @@ type PassResult struct {
 	Busy bool
 	// More: something else is eligible now; pass again at once.
 	More bool
-	// Next is the earliest time a waiting op can change by itself; zero
-	// means none.
+	// Next is the earliest time a waiting op can change by itself, always
+	// after the instant the pass planned at; zero means none.
 	Next time.Time
 }
 
@@ -463,7 +486,6 @@ func (l *ConversationLane) Pass(ctx context.Context, conv ConversationView, exec
 	if exec == nil {
 		return res, errors.New("lane pass: executor is required")
 	}
-	var probe *Probe
 	for range casAttempts {
 		// A write that ended unknown under a canceled context re-plans;
 		// the context's error, not contention, is why the pass ends.
@@ -493,17 +515,16 @@ func (l *ConversationLane) Pass(ctx context.Context, conv ConversationView, exec
 		if !rp.takePossible {
 			return res, nil
 		}
-		if probe == nil {
-			p, err := exec.Probe(ctx, conv)
-			if err == nil {
-				err = p.Caps.validate()
-			}
-			if err != nil {
-				return res, fmt.Errorf("probing conversation %s: %w", conv.ID, err)
-			}
-			probe = &p
+		// Every attempt probes: a probe answers for the state its attempt
+		// read, and an attempt after a lost race read a moved state.
+		probe, err := exec.Probe(ctx, conv)
+		if err == nil {
+			err = probe.Caps.validate()
 		}
-		tp, err := planTake(rp, *probe, conv, now)
+		if err != nil {
+			return res, fmt.Errorf("probing conversation %s: %w", conv.ID, err)
+		}
+		tp, err := planTake(rp, probe, conv, now)
 		if err != nil {
 			return res, err
 		}
@@ -541,11 +562,13 @@ func (l *ConversationLane) Pass(ctx context.Context, conv ConversationView, exec
 
 func (l *ConversationLane) now() time.Time { return utc(l.clk.Now()) }
 
-// fillWaits replaces the result's waits and timers with a plan's.
+// fillWaits replaces the result's waits and timers with a plan's, and clears
+// Busy and More, which only planTake sets.
 func (l *ConversationLane) fillWaits(res *PassResult, waits []OpWait, wake bool, next time.Time) {
 	res.Waits = append([]OpWait(nil), waits...)
 	res.Wake = wake
 	res.Next = next
+	res.Busy, res.More = false, false
 }
 
 // minTime is the earlier non-zero time.

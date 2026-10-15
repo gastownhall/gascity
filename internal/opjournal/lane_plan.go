@@ -54,6 +54,12 @@ type entry struct {
 
 func (e entry) candidate() bool { return e.wait == "" }
 
+// maybeDelivered reports whether an earlier attempt may have reached the
+// executor: a re-take, or an op released after an Unknown result. The probe
+// closes of a fresh op would record that it never ran, so it waits instead,
+// and it goes only as a replay head, never in a fresh batch.
+func (e entry) maybeDelivered() bool { return e.retake || e.cur.MaybeDelivered > 0 }
+
 // ruleClose is one close the planner decided: cur as read (its revision
 // guards the write), next the closed op.
 type ruleClose struct {
@@ -162,19 +168,15 @@ func planRules(snap laneSnapshot, conv ConversationView, now time.Time, by strin
 			cur.LastError = lastErrorLeaseExpired
 		}
 		if !live && !now.After(op.StartBy) {
-			// start_by closes an op once now is past it; at start_by
-			// itself the timer is the next instant.
-			at := op.StartBy
-			if !at.After(now) {
-				at = now.Add(time.Nanosecond)
-			}
-			rp.next = minTime(rp.next, at)
+			// start_by closes an op once now is past it.
+			rp.next = minTime(rp.next, timerAt(op.StartBy, now))
 		}
 		canceled := Outcome{Arm: ArmCanceled}
 		switch {
 		case live:
-			inFlight = minTime(inFlight, op.Lease.Deadline.Add(LeaseSkew))
-			waitOp(op, WaitInFlight, op.Lease.Deadline.Add(LeaseSkew))
+			end := timerAt(op.Lease.Deadline.Add(LeaseSkew), now)
+			inFlight = minTime(inFlight, end)
+			waitOp(op, WaitInFlight, end)
 			continue
 		case conv.Closed:
 			closeOp(op, cur, Outcome{Arm: ArmSkipped, Reason: ReasonConversationClosed})
@@ -279,6 +281,16 @@ func planRules(snap laneSnapshot, conv ConversationView, now time.Time, by strin
 	return rp
 }
 
+// timerAt is the pass timer of a rule that applies once now is past at, for
+// an at not before now: at, or the next instant when now is at. A host sleeps
+// until the timer, so a timer at now would make it spin.
+func timerAt(at, now time.Time) time.Time {
+	if !at.After(now) {
+		return now.Add(time.Nanosecond)
+	}
+	return at
+}
+
 // replayGroups maps each delivery key to the maybe-delivered ops under it
 // among ops, less the ones closes close.
 func replayGroups(ops []Op, closes []ruleClose) map[string][]Op {
@@ -316,12 +328,15 @@ func (rp *rulesPlan) decideTake(conv ConversationView, rt runtimeSnap, rowOK boo
 	cellHeld := rowOK && !rt.row.Lease.IsZero() && !now.After(rt.row.Lease.Deadline.Add(LeaseSkew))
 	switch {
 	case cellHeld:
-		until := rt.row.Lease.Deadline.Add(LeaseSkew)
+		until := timerAt(rt.row.Lease.Deadline.Add(LeaseSkew), now)
 		rp.waitCandidates(WaitInFlight, until, false)
 		rp.next = minTime(rp.next, until)
 	case view.cmp(rp.inc) != 0:
-		rp.waitCandidates(WaitIncarnation, time.Time{}, false)
-		rp.next = now
+		// The view is behind the row, and nothing rings when the host's
+		// view catches up: retry on a timer.
+		until := now.Add(TransientBackoffBase)
+		rp.waitCandidates(WaitIncarnation, until, false)
+		rp.next = minTime(rp.next, until)
 	case conv.Generation < 1:
 		rp.waitCandidates(WaitNoSession, time.Time{}, true)
 	case conv.Dormant:
@@ -452,12 +467,14 @@ func planTake(rp rulesPlan, probe Probe, conv ConversationView, now time.Time) (
 	}
 	caps := probe.Caps
 	if f := probe.Fence; f != (Fence{}) && (f.Conversation != conv.ID || f.Generation != conv.Generation || f.Epoch != conv.Epoch) {
-		tp.waitAll(rp, WaitIncarnation)
-		tp.next = now
+		// Nothing rings when the runtime and the view agree again: retry on
+		// a timer.
+		tp.next = now.Add(TransientBackoffBase)
+		tp.waitAll(rp, WaitIncarnation, tp.next)
 		return tp, nil
 	}
 	if !probe.Available {
-		tp.waitAll(rp, WaitUnavailable)
+		tp.waitAll(rp, WaitUnavailable, time.Time{})
 		return tp, nil
 	}
 	spec := takeSpec{
@@ -501,12 +518,12 @@ func planTake(rp rulesPlan, probe Probe, conv ConversationView, now time.Time) (
 	return tp, nil
 }
 
-// waitAll reports every candidate of both classes as waiting r.
-func (tp *takePlan) waitAll(rp rulesPlan, r WaitReason) {
+// waitAll reports every candidate of both classes as waiting r, until until.
+func (tp *takePlan) waitAll(rp rulesPlan, r WaitReason, until time.Time) {
 	for _, list := range [][]entry{rp.control, rp.content} {
 		for _, e := range list {
 			if e.candidate() {
-				tp.waits = append(tp.waits, OpWait{ID: e.op.ID, Reason: r})
+				tp.waits = append(tp.waits, OpWait{ID: e.op.ID, Reason: r, Until: until})
 			}
 		}
 	}
@@ -521,7 +538,8 @@ func (tp *takePlan) close(rp rulesPlan, e entry, o Outcome, now time.Time) {
 }
 
 // planControl picks the first takeable control op (I10), closing a respond
-// the runtime cannot perform. Control takes one op.
+// the runtime cannot perform unless it may have been delivered (that one
+// waits). Control takes one op.
 func (tp *takePlan) planControl(rp rulesPlan, probe Probe, now time.Time) *entry {
 	var picked *entry
 	blocked := false
@@ -539,6 +557,8 @@ func (tp *takePlan) planControl(rp rulesPlan, probe Probe, now time.Time) *entry
 			tp.wait(e.op, WaitNotLive, "")
 		case !probe.Running:
 			tp.wait(e.op, WaitNotRunning, "")
+		case e.op.Kind == KindRespond && !probe.Caps.Respond && e.maybeDelivered():
+			tp.wait(e.op, WaitUnsupported, "")
 		case e.op.Kind == KindRespond && !probe.Caps.Respond:
 			tp.close(rp, e, Outcome{Arm: ArmFailed, Reason: ReasonUnsupported}, now)
 		case picked == nil:
@@ -620,9 +640,14 @@ func (tp *takePlan) planContent(rp rulesPlan, probe Probe, now time.Time) *conte
 				tp.busy = true
 			}
 		case m.When == WhenIfIdle:
-			if boundary == TriYes {
+			switch {
+			case boundary == TriYes:
 				it.eligible, it.starter = true, true
-			} else {
+			case e.maybeDelivered():
+				// Its own delivery may have started the busy turn.
+				tp.wait(op, WaitBusy, "")
+				tp.busy = true
+			default:
 				tp.close(rp, e, Outcome{Arm: ArmSkipped, Reason: ReasonBusy}, now)
 				it.closing = true
 			}
@@ -632,7 +657,7 @@ func (tp *takePlan) planContent(rp rulesPlan, probe Probe, now time.Time) *conte
 				it.eligible, it.starter = true, true
 			case caps.Steer:
 				it.eligible = true
-			case m.OnUnsupported == FallbackFail:
+			case m.OnUnsupported == FallbackFail && !e.maybeDelivered():
 				tp.close(rp, e, Outcome{Arm: ArmFailed, Reason: ReasonUnsupported}, now)
 				it.closing = true
 			default:
@@ -676,7 +701,7 @@ func (tp *takePlan) formBatch(items []contentItem, mode LinkMode, ridersFree boo
 		}
 		var picked []int
 		full := false
-		replay := items[head].e.cur.MaybeDelivered > 0
+		replay := items[head].e.maybeDelivered()
 		group := groups[items[head].e.op.DeliveryKey]
 		if replay {
 			var split bool
@@ -713,9 +738,11 @@ func (tp *takePlan) formBatch(items []contentItem, mode LinkMode, ridersFree boo
 		}
 		headOp := b.ops[0].op
 		b.key = headOp.DeliveryKey
-		// A released head whose last attempt had its key refused gets a new
-		// key. A re-take's last attempt is the expired one, under the stored
-		// key, whatever an earlier attempt's last_error says (L3).
+		// A released head whose last attempt had its key refused, or a
+		// replay head with no stored key (a re-take that never had an
+		// attempt), gets a new key. A re-take's last attempt is the expired
+		// one, under the stored key, whatever an earlier attempt's last_error
+		// says (L3).
 		keyRefused := !b.ops[0].retake && strings.HasPrefix(headOp.LastError, lastErrorKeyRejected)
 		if !replay || b.key == "" || keyRefused {
 			b.key = headOp.ID + ":" + strconv.FormatUint(baseSeq+1, 10)
@@ -802,7 +829,7 @@ func pickFresh(items []contentItem, head int) ([]int, bool) {
 		if !it.eligible {
 			continue
 		}
-		if it.e.cur.MaybeDelivered > 0 {
+		if it.e.maybeDelivered() {
 			break
 		}
 		if !lim.admit(it.e.op) {

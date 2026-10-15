@@ -46,8 +46,8 @@ func takenIDs(tb *takenBatch) []string {
 	return out
 }
 
-// newLease mints this Take's lease. A conversation id long enough to push the
-// lease past bd's assignee limit is refused before any write.
+// newLease mints this Take's lease. maxConversationLen keeps it within bd's
+// assignee limit; validate still refuses an invalid lease before any write.
 func (l *ConversationLane) newLease(conv ConversationView, ttl time.Duration, now time.Time) (Lease, error) {
 	n, err := l.nonce()
 	if err != nil {
@@ -119,26 +119,33 @@ func (l *ConversationLane) take(ctx context.Context, snap laneSnapshot, spec *ta
 	case batchInvalid:
 		return nil, takeFailed, fmt.Errorf("taking ops of conversation %s: %w", conv.ID, err)
 	}
-	return l.resolveAmbiguousTake(conv.ID, spec, lease, ops, err)
+	return l.resolveAmbiguousTake(ctx, conv.ID, spec, lease, ops, err)
 }
 
 // resolveAmbiguousTake decides whether a Take that ended with an unknown error
 // committed, by re-reading the runtime row and, when it holds the lease, each
-// op. The batch goes on with the ops as re-read, so a cancel recorded in the
-// window reaches the effect and Done. An op that no longer holds the lease
-// closed in the window: it is dropped, and the rest are released without the
-// effect.
-func (l *ConversationLane) resolveAmbiguousTake(conv string, spec *takeSpec, lease Lease, ops []Op, cause error) (*takenBatch, takeOutcome, error) {
-	b, found, err := l.store.runtimeBead(conv)
-	if err != nil {
+// op; a read that fails is retried (reread). The batch goes on with the ops as
+// re-read, so a cancel recorded in the window reaches the effect and Done. An
+// op that no longer holds the lease closed in the window: it is dropped, and
+// the rest are released without the effect. An error names cause too.
+func (l *ConversationLane) resolveAmbiguousTake(ctx context.Context, conv string, spec *takeSpec, lease Lease, ops []Op, cause error) (*takenBatch, takeOutcome, error) {
+	failed := func(err error) (*takenBatch, takeOutcome, error) {
 		return nil, takeFailed, errors.Join(fmt.Errorf("taking ops of conversation %s: %w", conv, cause), err)
+	}
+	var b beads.Bead
+	var found bool
+	if err := l.reread(ctx, lease, func() (err error) {
+		b, found, err = l.store.runtimeBead(conv)
+		return err
+	}); err != nil {
+		return failed(err)
 	}
 	if !found {
 		return nil, takeLost, nil
 	}
 	row, err := DecodeRuntimeRow(b)
 	if err != nil {
-		return nil, takeFailed, errors.Join(fmt.Errorf("taking ops of conversation %s: %w", conv, cause), err)
+		return failed(err)
 	}
 	if row.Lease != lease {
 		return nil, takeLost, nil
@@ -146,13 +153,16 @@ func (l *ConversationLane) resolveAmbiguousTake(conv string, spec *takeSpec, lea
 	tb := &takenBatch{spec: spec, lease: lease, row: b}
 	var lost []string
 	for _, op := range ops {
-		ob, err := l.store.store.Get(op.ID)
-		if err != nil {
-			return nil, takeFailed, fmt.Errorf("re-reading op %s after an ambiguous Take: %w", op.ID, err)
+		var ob beads.Bead
+		if err := l.reread(ctx, lease, func() (err error) {
+			ob, err = l.store.store.Get(op.ID)
+			return err
+		}); err != nil {
+			return failed(fmt.Errorf("re-reading op %s after an ambiguous Take: %w", op.ID, err))
 		}
 		got, err := DecodeOp(ob)
 		if err != nil {
-			return nil, takeFailed, err
+			return failed(err)
 		}
 		if got.Lease != lease || got.Status != StatusExecuting {
 			lost = append(lost, op.ID)
@@ -164,6 +174,23 @@ func (l *ConversationLane) resolveAmbiguousTake(conv string, spec *takeSpec, lea
 		tb.abandon = fmt.Errorf("op %s closed between the Take and its effect", strings.Join(lost, ", "))
 	}
 	return tb, takeOK, nil
+}
+
+// reread runs read, a re-read that resolves an unknown Take, and retries it
+// on Done's backoff while it fails, up to casAttempts tries and while the
+// lease lasts: past it the effect cannot run, so the error stands.
+func (l *ConversationLane) reread(ctx context.Context, lease Lease, read func() error) error {
+	backoff := doneBackoffStart
+	for try := 1; ; try++ {
+		err := read()
+		if err == nil || try == casAttempts || !l.now().Before(lease.Deadline) {
+			return err
+		}
+		if serr := l.sleep(ctx, backoff); serr != nil {
+			return errors.Join(err, serr)
+		}
+		backoff = min(2*backoff, doneBackoffMax)
+	}
 }
 
 // takeRowItem is the Take's runtime-row item and the row as the Take leaves
@@ -211,21 +238,16 @@ func opUpdateItem(cur, next Op) (beads.GuardedItem, error) {
 	return beads.GuardedItem{Update: &beads.GuardedUpdate{ID: cur.ID, Opts: opts, ExpectedRevision: &rev}}, nil
 }
 
-// applyLocal returns b with opts applied as a store applies them: metadata
-// merged (an empty value removes the key), then assignee and status.
+// applyLocal returns b with opts applied as the stores' appliers apply them:
+// metadata merged by assignment, so an empty value stays and clears the key
+// (a store's callers read absent and empty alike), then assignee and status.
 func applyLocal(b beads.Bead, opts beads.UpdateOpts) beads.Bead {
 	out := b
 	out.Metadata = maps.Clone(b.Metadata)
 	if out.Metadata == nil {
 		out.Metadata = map[string]string{}
 	}
-	for k, v := range opts.Metadata {
-		if v == "" {
-			delete(out.Metadata, k)
-			continue
-		}
-		out.Metadata[k] = v
-	}
+	maps.Copy(out.Metadata, opts.Metadata)
 	if opts.Assignee != nil {
 		out.Assignee = *opts.Assignee
 	}

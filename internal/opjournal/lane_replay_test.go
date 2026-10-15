@@ -113,6 +113,47 @@ func TestLaneDedupReplayGroupIsNotSplitByContentHold(t *testing.T) {
 	assertShownIfSucceeded(t, h, rt, s.ID, b.ID)
 }
 
+// A shown [after_turn rider, if_idle starter] group whose lease expired stays
+// whole: mid-turn the starter waits with its rider instead of closing
+// skipped{busy}, which would leave the rider to replay alone, and at the
+// boundary the group replays under its key.
+func TestLaneDedupReplayGroupKeepsItsIfIdleStarter(t *testing.T) {
+	h := newLaneHarness(t)
+	r := h.propose(t, laneMsg("r", RoleNotice, "when this turn ends", withWhen(WhenAfterTurn)))
+	h.clk.Advance(time.Millisecond)
+	s := h.propose(t, laneMsg("s", RolePrompt, "if idle", withWhen(WhenIfIdle)))
+	exec := newFakeExec(h.clk)
+	rt := newDedupRuntime(h, exec)
+	rt.failFirst = false
+	a := h.lane(t, "ctl")
+	a.hooks.at = crashAt(stageAfterEffect)
+	if _, err := a.Pass(context.Background(), view(), exec); !errors.Is(err, errCrash) {
+		t.Fatalf("pass = %v", err)
+	}
+	h.clk.Advance(DefaultLeaseTTL + LeaseSkew + time.Second)
+
+	l := h.lane(t, "cli")
+	exec.probe.Boundary = TriNo
+	res := mustPass(t, l, view(), exec)
+	if w := waitsOf(res.Waits); res.Took != TakeNone || w[r.ID] != WaitBusy || w[s.ID] != WaitBusy {
+		t.Fatalf("mid-turn pass took %v, waits %v", res.Taken, res.Waits)
+	}
+	exec.probe.Boundary = TriYes
+	res = mustPass(t, l, view(), exec)
+	if !slices.Equal(res.Taken, []string{r.ID, s.ID}) {
+		t.Fatalf("boundary pass took %v", res.Taken)
+	}
+	if ds := exec.delivered(); len(ds) != 2 || ds[1].Key != ds[0].Key || !ds[1].Redelivery {
+		t.Fatalf("%d deliveries; the replay must go under the first key", len(ds))
+	}
+	for _, id := range []string{r.ID, s.ID} {
+		if got := h.get(t, id); got.Outcome.Arm != ArmSucceeded {
+			t.Fatalf("op %s %+v", id, got.Outcome)
+		}
+	}
+	assertShownIfSucceeded(t, h, rt, r.ID, s.ID)
+}
+
 // A member that closed leaves the group; the rest replays under the key.
 func TestLaneDedupReplayGroupDropsClosedMembers(t *testing.T) {
 	h := newLaneHarness(t)
@@ -171,10 +212,10 @@ func TestLaneRetakeAfterKeyRejectedKeepsTheNewKey(t *testing.T) {
 	exec.probe.Caps.Dedup = true
 	l := h.lane(t, "ctl")
 	exec.deliver = func(Delivery) DeliveryResult { return Unknown{Cause: errors.New("bridge timeout")} }
-	mustPass(t, l, view(), exec) // :1 may have landed
+	mustPass(t, l, view(), exec) // unknown: the lane cannot tell whether :1 landed
 	h.clk.Advance(ExecutorErrorBackoff + time.Millisecond)
 	exec.deliver = func(Delivery) DeliveryResult { return Rejected{KeyRejected: true, Reason: "nudge_rejected"} }
-	mustPass(t, l, view(), exec) // :1 is refused: the next send re-keys
+	mustPass(t, l, view(), exec) // :1 is refused, so it never landed: the next send re-keys
 	if got := h.get(t, op.ID); !strings.HasPrefix(got.LastError, lastErrorKeyRejected) {
 		t.Fatalf("last_error %q", got.LastError)
 	}

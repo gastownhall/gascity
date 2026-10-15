@@ -47,10 +47,10 @@ func unknownResult(contract error) effectResult {
 	return effectResult{kind: resultUnknown, contractErr: contract}
 }
 
-// effect runs the taken batch's effect inside the lease: its context ends
-// ExecutorMargin before the lease does, measured on the lane's clock. With no
-// time left, or an abandoned Take, nothing runs and the batch is released as
-// transient.
+// effect runs the taken batch's effect inside the lease: its context gets
+// the lease's time left on the lane's clock, less ExecutorMargin, as a
+// wall-clock timeout. With no time left, or an abandoned Take, nothing runs
+// and the batch is released as transient.
 func (l *ConversationLane) effect(ctx context.Context, exec Executor, tb *takenBatch) (effectResult, time.Time) {
 	now := l.now()
 	if tb.abandon != nil {
@@ -482,9 +482,7 @@ func (l *ConversationLane) writeDone(ctx context.Context, tb *takenBatch, er eff
 			// A store refuses the whole batch at its first stale item, so
 			// every pending item is re-read: k moved rows cost one retry,
 			// not k.
-			var item *beads.BatchItemError
-			errors.As(err, &item)
-			if !slices.ContainsFunc(pending, func(it *doneItem) bool { return it.id == item.ID }) {
+			if !refusedByPending(err, pending) {
 				return fmt.Errorf("settling ops of conversation %s: refused by a row it did not write: %w", tb.spec.view.ID, err)
 			}
 			lastErr = err
@@ -500,6 +498,13 @@ func (l *ConversationLane) writeDone(ctx context.Context, tb *takenBatch, er eff
 		}
 	}
 	return fmt.Errorf("%w: settling ops of conversation %s lost %d tries: %w", ErrContention, tb.spec.view.ID, casAttempts, lastErr)
+}
+
+// refusedByPending reports whether err, a batch refusal, names a row of
+// pending.
+func refusedByPending(err error, pending []*doneItem) bool {
+	var item *beads.BatchItemError
+	return errors.As(err, &item) && slices.ContainsFunc(pending, func(it *doneItem) bool { return it.id == item.ID })
 }
 
 // doneGuardedItem renders a Done item as a guarded batch item.

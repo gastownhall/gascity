@@ -4,11 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"math"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/beads"
 )
@@ -192,6 +195,25 @@ func TestLaneTransientBackoffSequence(t *testing.T) {
 	}
 	if cur := h.get(t, op.ID); cur.Failures != 0 || cur.Attempt != 10 {
 		t.Fatalf("transient releases charged failures: %+v", cur)
+	}
+}
+
+// A failed attempt does not count toward the transient backoff: after one,
+// the first transient release backs off TransientBackoffBase (attempt 2 −
+// failures 1).
+func TestLaneTransientBackoffSkipsFailedAttempts(t *testing.T) {
+	h := newLaneHarness(t)
+	op := h.propose(t, laneMsg("p", RolePrompt, "x"))
+	exec := newFakeExec(h.clk)
+	l := h.lane(t, "ctl")
+	exec.deliver = func(Delivery) DeliveryResult { return NotDelivered{Cause: errors.New("boom")} }
+	mustPass(t, l, view(), exec)
+	h.clk.Advance(ExecutorErrorBackoff + time.Millisecond)
+	exec.deliver = func(Delivery) DeliveryResult { return NotDelivered{Transient: true} }
+	mustPass(t, l, view(), exec)
+	cur := h.get(t, op.ID)
+	if backoff := cur.RetryAt.Sub(h.clk.Now()); cur.Attempt != 2 || cur.Failures != 1 || backoff != TransientBackoffBase {
+		t.Fatalf("attempt %d, failures %d, backoff %s; want 2, 1, %s", cur.Attempt, cur.Failures, backoff, TransientBackoffBase)
 	}
 }
 
@@ -423,6 +445,188 @@ func TestLaneAmbiguousTakeNotCommitted(t *testing.T) {
 	if got := h.get(t, op.ID); got.Outcome.Arm != ArmSucceeded || got.Attempt != 1 || got.LaneSeq != 1 {
 		t.Fatalf("op %+v", got)
 	}
+}
+
+// A Take that did not commit while another lane took the conversation
+// resolves as lost: it leaves the other lane's lease on the runtime row (I3).
+func TestLaneAmbiguousTakeLeavesAnotherLanesLease(t *testing.T) {
+	h := newLaneHarness(t)
+	h.propose(t, laneMsg("a", RolePrompt, "x"))
+	mustPass(t, h.lane(t, "ctl"), view(), newFakeExec(h.clk)) // the runtime row now exists
+	h.clk.Advance(time.Millisecond)
+	h.propose(t, laneMsg("b", RolePrompt, "y"))
+	n0 := len(h.batcher.batches())
+	var other Lease
+	nested := -1
+	h.batcher.setFault(func(n int, _ beads.GuardedBatch) (bool, error) {
+		switch {
+		case n == n0: // ctl's Take does not commit; meanwhile lane other takes b
+			nested = 0
+			_, _ = h.lane(t, "other").Pass(context.Background(), view(), newFakeExec(h.clk))
+			other = h.runtime(t).Lease
+			nested = -1
+			return false, errLinkDropped
+		case nested >= 0: // other's Take commits; its Done never lands
+			nested++
+			if nested == 1 {
+				return false, nil
+			}
+			return false, errLinkDropped
+		}
+		return false, nil
+	})
+	mustPass(t, h.lane(t, "ctl"), view(), newFakeExec(h.clk))
+	if other.IsZero() {
+		t.Fatal("setup: lane other holds no lease")
+	}
+	if got := h.runtime(t).Lease; got != other {
+		t.Fatalf("row lease %v after ctl's ambiguous Take, want lane other's %v", got, other)
+	}
+}
+
+// A rule close batch that ends unknown re-plans: one that did not commit is
+// written again and reported; one that committed is not reported, since the
+// re-read no longer sees the op it closed (PassResult.Closed).
+func TestLaneAmbiguousRuleClose(t *testing.T) {
+	for _, commit := range []bool{false, true} {
+		t.Run(fmt.Sprintf("commit=%v", commit), func(t *testing.T) {
+			h := newLaneHarness(t)
+			op := h.propose(t, laneMsg("old", RolePrompt, "x", func(r *Request) { r.StartBy = t0.Add(time.Minute) }))
+			h.clk.Advance(2 * time.Minute)
+			n0 := len(h.batcher.batches())
+			h.batcher.setFault(func(n int, _ beads.GuardedBatch) (bool, error) {
+				if n == n0 {
+					return commit, errLinkDropped
+				}
+				return false, nil
+			})
+			res := mustPass(t, h.lane(t, "ctl"), view(), newFakeExec(h.clk))
+			if got := h.get(t, op.ID); got.Status != StatusClosed || got.Outcome.Reason != ReasonExpiredBeforeStart {
+				t.Fatalf("op %s/%s{%s}, want closed{%s}", got.Status, got.Outcome.Arm, got.Outcome.Reason, ReasonExpiredBeforeStart)
+			}
+			var want []ClosedOp
+			if !commit {
+				want = []ClosedOp{{ID: op.ID, Arm: ArmFailed, Reason: ReasonExpiredBeforeStart}}
+			}
+			if !slices.Equal(res.Closed, want) {
+				t.Fatalf("closed %v, want %v", res.Closed, want)
+			}
+		})
+	}
+}
+
+// TestLaneAmbiguousTakeRereadRetries: the re-reads that resolve an unknown
+// Take retry a failed read on Done's backoff while the lease lasts, and the
+// error they end with names the batch's cause too.
+func TestLaneAmbiguousTakeRereadRetries(t *testing.T) {
+	rowID, err := RuntimeRowID("gc", "gc-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// ambiguous commits the Take, reports a dropped link and from then on
+	// fails the reads fail says to.
+	ambiguous := func(h *laneHarness, fs *flakyGetStore, fail func(id string) bool) {
+		h.batcher.setFault(func(n int, _ beads.GuardedBatch) (bool, error) {
+			if n > 0 {
+				return false, nil
+			}
+			fs.setFail(fail)
+			return true, errLinkDropped
+		})
+	}
+	for name, target := range map[string]func(Op) string{
+		"runtime row": func(Op) string { return rowID },
+		"op row":      func(op Op) string { return op.ID },
+	} {
+		t.Run(name+" fails once", func(t *testing.T) {
+			h, fs := newLaneHarnessFlaky(t)
+			op := h.propose(t, laneMsg("p", RolePrompt, "x"))
+			id, fails := target(op), 0
+			ambiguous(h, fs, func(got string) bool {
+				if got != id || fails > 0 {
+					return false
+				}
+				fails++
+				return true
+			})
+			exec := newFakeExec(h.clk)
+			res := mustPass(t, h.lane(t, "ctl"), view(), exec)
+			if fails != 1 || res.Done != DoneAccepted || len(exec.delivered()) != 1 {
+				t.Fatalf("%d failed reads; pass %+v, %d deliveries", fails, res, len(exec.delivered()))
+			}
+			if got := h.get(t, op.ID); got.Outcome.Arm != ArmSucceeded || got.Attempt != 1 {
+				t.Fatalf("op %+v", got)
+			}
+		})
+	}
+	t.Run("op row keeps failing", func(t *testing.T) {
+		h, fs := newLaneHarnessFlaky(t)
+		op := h.propose(t, laneMsg("p", RolePrompt, "x"))
+		fails := 0
+		ambiguous(h, fs, func(got string) bool {
+			if got != op.ID {
+				return false
+			}
+			fails++
+			return true
+		})
+		exec := newFakeExec(h.clk)
+		l := h.lane(t, "ctl")
+		var slept []time.Duration
+		l.sleep = func(_ context.Context, d time.Duration) error {
+			slept = append(slept, d)
+			return nil
+		}
+		_, err := l.Pass(context.Background(), view(), exec)
+		if !errors.Is(err, errLinkDropped) || !errors.Is(err, errFlakyRead) || fails != casAttempts || len(exec.delivered()) != 0 {
+			t.Fatalf("Pass = %v after %d failed reads, %d deliveries", err, fails, len(exec.delivered()))
+		}
+		ms := time.Millisecond
+		if want := []time.Duration{100 * ms, 200 * ms, 400 * ms, 800 * ms, 1600 * ms, 2 * time.Second, 2 * time.Second}; !slices.Equal(slept, want) {
+			t.Fatalf("slept %v between re-reads, want %v", slept, want)
+		}
+	})
+	t.Run("canceled mid re-read", func(t *testing.T) {
+		h, fs := newLaneHarnessFlaky(t)
+		op := h.propose(t, laneMsg("p", RolePrompt, "x"))
+		fails := 0
+		ambiguous(h, fs, func(got string) bool {
+			if got != op.ID {
+				return false
+			}
+			fails++
+			return true
+		})
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		exec := newFakeExec(h.clk)
+		l := h.lane(t, "ctl")
+		l.sleep = func(ctx context.Context, _ time.Duration) error {
+			cancel()
+			return ctx.Err()
+		}
+		_, err := l.Pass(ctx, view(), exec)
+		if !errors.Is(err, context.Canceled) || !errors.Is(err, errLinkDropped) || !errors.Is(err, errFlakyRead) || fails != 1 || len(exec.delivered()) != 0 {
+			t.Fatalf("Pass = %v after %d failed reads, %d deliveries; want the cancel to end the re-reads after one", err, fails, len(exec.delivered()))
+		}
+	})
+	t.Run("past the lease", func(t *testing.T) {
+		h, fs := newLaneHarnessFlaky(t)
+		op := h.propose(t, laneMsg("p", RolePrompt, "x"))
+		fails := 0
+		ambiguous(h, fs, func(got string) bool {
+			if got != op.ID {
+				return false
+			}
+			fails++
+			h.clk.Advance(DefaultLeaseTTL)
+			return true
+		})
+		_, err := h.lane(t, "ctl").Pass(context.Background(), view(), newFakeExec(h.clk))
+		if !errors.Is(err, errLinkDropped) || !errors.Is(err, errFlakyRead) || fails != 1 {
+			t.Fatalf("Pass = %v after %d failed reads, want one: the lease is over", err, fails)
+		}
+	})
 }
 
 func TestLaneAmbiguousDone(t *testing.T) {
@@ -673,9 +877,56 @@ func TestLaneGenerationAdvanceSkipsStaleOps(t *testing.T) {
 	// A stale view (the row says generation 2) never lowers the row.
 	h.propose(t, laneMsg("late", RoleNotice, "z"))
 	res = mustPass(t, h.lane(t, "cli"), view(), exec)
-	if res.Took != TakeNone || res.Waits[0].Reason != WaitIncarnation || !res.Next.Equal(h.clk.Now()) {
-		t.Fatalf("stale view pass %+v", res)
+	if want := h.clk.Now().Add(TransientBackoffBase); res.Took != TakeNone || res.Waits[0].Reason != WaitIncarnation || !res.Next.Equal(want) {
+		t.Fatalf("stale view pass %+v, want next %s", res, want)
 	}
+}
+
+// TestLaneIncarnationMismatchRetriesOnATimer: no re-pass clears a mismatch
+// between the view and the row or the probe's fence, so the wait retries on
+// a timer ahead of now, and a host sleeping until Next does not spin.
+func TestLaneIncarnationMismatchRetriesOnATimer(t *testing.T) {
+	waitsOnTimer := func(t *testing.T, h *laneHarness, l *ConversationLane, exec Executor) {
+		t.Helper()
+		for range 3 {
+			now := h.clk.Now()
+			res := mustPass(t, l, view(), exec)
+			if res.Took != TakeNone || len(res.Waits) != 1 || res.Waits[0].Reason != WaitIncarnation ||
+				!res.Next.After(now) || !res.Waits[0].Until.Equal(res.Next) {
+				t.Fatalf("pass at %s: %+v", now, res)
+			}
+			h.clk.Advance(res.Next.Sub(now))
+		}
+	}
+	t.Run("view behind the row", func(t *testing.T) {
+		h := newLaneHarness(t)
+		h.propose(t, laneMsg("first", RoleNotice, "x"))
+		exec := newFakeExec(h.clk)
+		v2 := view()
+		v2.Generation = 2
+		mustPass(t, h.lane(t, "ctl"), v2, exec)
+		late := h.propose(t, laneMsg("late", RoleNotice, "y"))
+		l := h.lane(t, "cli")
+		waitsOnTimer(t, h, l, exec)
+		if res := mustPass(t, l, v2, exec); res.Took != TakeContent || !slices.Equal(res.Taken, []string{late.ID}) {
+			t.Fatalf("pass with the current view %+v", res)
+		}
+	})
+	t.Run("probe fence ahead of the view", func(t *testing.T) {
+		h := newLaneHarness(t)
+		op := h.propose(t, laneMsg("p", RolePrompt, "x"))
+		exec := newFakeExec(h.clk)
+		exec.probe.Fence = Fence{Conversation: "gc-1", Generation: 2, Epoch: 1}
+		l := h.lane(t, "ctl")
+		waitsOnTimer(t, h, l, exec)
+		if exec.probes != 3 {
+			t.Fatalf("%d probes over 3 passes", exec.probes)
+		}
+		exec.probe.Fence = Fence{}
+		if res := mustPass(t, l, view(), exec); res.Took != TakeContent || !slices.Equal(res.Taken, []string{op.ID}) {
+			t.Fatalf("pass once the fence agrees %+v", res)
+		}
+	})
 }
 
 func TestLaneConcurrentPassesTakeOnce(t *testing.T) {
@@ -724,6 +975,120 @@ func TestLaneConcurrentPassesTakeOnce(t *testing.T) {
 	if got := h.get(t, op.ID); got.Outcome.Arm != ArmSucceeded || got.Attempt != 1 {
 		t.Fatalf("op %+v", got)
 	}
+}
+
+// TestLaneLostTakeReportsTheFreshPlan: a pass that loses its Take re-plans
+// from a fresh read, and Busy and More come from that plan, not from the
+// lost one.
+func TestLaneLostTakeReportsTheFreshPlan(t *testing.T) {
+	for name, boundary := range map[string]Tri{"busy": TriNo, "more": TriYes} {
+		t.Run(name, func(t *testing.T) {
+			h := newLaneHarness(t)
+			h.propose(t, interruptReq())
+			h.propose(t, laneMsg("n", RoleNotice, "x"))
+			exec := newFakeExec(h.clk)
+			exec.probe.Boundary = boundary
+			winner := h.lane(t, "winner")
+			taken, release := make(chan struct{}), make(chan struct{})
+			winner.hooks.at = func(s laneStage) error {
+				if s == stageAfterTake {
+					close(taken)
+					<-release
+				}
+				return nil
+			}
+			var wres PassResult
+			var werr error
+			wdone := make(chan struct{})
+			loser := h.lane(t, "loser")
+			first := true
+			loser.hooks.at = func(s laneStage) error {
+				if s != stageAfterRead || !first {
+					return nil
+				}
+				// The winner takes the interrupt this pass read as open.
+				first = false
+				go func() {
+					defer close(wdone)
+					wres, werr = winner.Pass(context.Background(), view(), exec)
+				}()
+				select {
+				case <-taken:
+				case <-wdone:
+				}
+				return nil
+			}
+			res, err := loser.Pass(context.Background(), view(), exec)
+			close(release)
+			<-wdone
+			if err != nil || werr != nil || wres.Took != TakeControl {
+				t.Fatalf("loser: %v; winner %+v, %v", err, wres, werr)
+			}
+			if res.Took != TakeNone || res.Busy || res.More || len(res.Waits) != 2 {
+				t.Fatalf("loser %+v", res)
+			}
+			for _, w := range res.Waits {
+				if w.Reason != WaitInFlight {
+					t.Fatalf("loser waits %+v", res.Waits)
+				}
+			}
+		})
+	}
+}
+
+// TestLaneLostTakeProbesAgain: a probe answers for the state its pass read,
+// so a pass that re-reads, after losing its Take or a close planTake
+// decided, probes again.
+func TestLaneLostTakeProbesAgain(t *testing.T) {
+	t.Run("lost take", func(t *testing.T) {
+		h := newLaneHarness(t)
+		first := h.propose(t, laneMsg("n1", RoleNotice, "x"))
+		exec := newFakeExec(h.clk)
+		var second Op
+		stale := &staleProbeExec{fakeExec: exec, during: func() {
+			// Another host delivers the first notice, a second one
+			// arrives and the session starts a turn.
+			mustPass(t, h.lane(t, "winner"), view(), newFakeExec(h.clk))
+			second = h.propose(t, laneMsg("n2", RoleNotice, "y"))
+			exec.mu.Lock()
+			exec.probe.Boundary = TriNo
+			exec.mu.Unlock()
+		}}
+		res := mustPass(t, h.lane(t, "loser"), view(), stale)
+		if n := len(exec.delivered()); n != 0 || exec.probes != 2 {
+			t.Fatalf("%d deliveries after %d probes", n, exec.probes)
+		}
+		if res.Took != TakeNone || !res.Busy || waitsOf(res.Waits)[second.ID] != WaitBusy {
+			t.Fatalf("pass %+v", res)
+		}
+		if got := h.get(t, first.ID); got.Outcome.Arm != ArmSucceeded || got.Attempt != 1 {
+			t.Fatalf("first %+v", got)
+		}
+	})
+	t.Run("refused close", func(t *testing.T) {
+		h := newLaneHarness(t)
+		op := h.propose(t, laneMsg("n", RoleNotice, "x", withWhen(WhenIfIdle)))
+		exec := newFakeExec(h.clk)
+		exec.probe.Boundary = TriNo
+		h.batcher.setFault(func(n int, b beads.GuardedBatch) (bool, error) {
+			if n > 0 {
+				return false, nil
+			}
+			// The busy close of the if_idle op is refused, and the session
+			// goes idle before the pass re-reads.
+			exec.mu.Lock()
+			exec.probe.Boundary = TriYes
+			exec.mu.Unlock()
+			return false, &beads.BatchItemError{ID: b.Items[0].Update.ID, Err: errors.New("revision moved")}
+		})
+		res := mustPass(t, h.lane(t, "ctl"), view(), exec)
+		if res.Took != TakeContent || len(exec.delivered()) != 1 || exec.probes != 2 {
+			t.Fatalf("pass %+v, %d deliveries after %d probes", res, len(exec.delivered()), exec.probes)
+		}
+		if got := h.get(t, op.ID); got.Outcome.Arm != ArmSucceeded {
+			t.Fatalf("op %+v", got)
+		}
+	})
 }
 
 func TestLaneQuarantinesUndecodableRows(t *testing.T) {
@@ -974,18 +1339,27 @@ func TestLaneSettledContractBreachStillSettles(t *testing.T) {
 	}
 }
 
-func TestLaneLeaseTooLongForTheConversationIsRefused(t *testing.T) {
+// The longest conversation id Propose accepts leaves room for the longest
+// lane lease around it: the largest generation, the longest host and a
+// deadline with nine fractional digits make a lease of exactly bd's assignee
+// limit, and the Take that writes it goes through.
+func TestLaneLeaseAtTheConversationLimitFits(t *testing.T) {
 	h := newLaneHarness(t)
 	long := strings.Repeat("c", maxConversationLen)
+	if _, _, err := h.store.Propose(laneMsg("p", RolePrompt, "x", func(r *Request) { r.Conversation = long + "c" })); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("Propose(%d-byte conversation) = %v, want ErrInvalidRequest", maxConversationLen+1, err)
+	}
 	h.propose(t, laneMsg("p", RolePrompt, "x", func(r *Request) { r.Conversation = long }))
 	v := view()
-	v.ID = long
-	h.clk.Advance(123456789) // a deadline with nanoseconds pushes the lease past 255 runes
-	if _, err := h.lane(t, "ctl").Pass(context.Background(), v, newFakeExec(h.clk)); !errors.Is(err, ErrInvalidRequest) {
-		t.Fatalf("pass = %v", err)
+	v.ID, v.Generation = long, math.MaxInt64
+	h.clk.Advance(123456789) // a deadline with nanoseconds
+	exec := newFakeExec(h.clk)
+	res := mustPass(t, h.lane(t, strings.Repeat("h", maxLaneHostLen)), v, exec)
+	if res.Took != TakeContent || res.Done != DoneAccepted {
+		t.Fatalf("pass %+v", res)
 	}
-	if n := len(h.batcher.batches()); n != 0 {
-		t.Fatalf("%d batches written", n)
+	if n := utf8.RuneCountInString(exec.delivered()[0].Ops[0].Lease.String()); n != maxLeaseLen {
+		t.Fatalf("lease is %d runes, want exactly %d", n, maxLeaseLen)
 	}
 }
 
@@ -998,7 +1372,7 @@ func TestNewLaneRefusals(t *testing.T) {
 	if _, err := NewLane(plain, "ctl", h.clk); !errors.Is(err, beads.ErrGuardedBatchUnsupported) {
 		t.Errorf("NewLane(non-lane store) = %v", err)
 	}
-	for _, host := range []string{"", "CTL", "1ctl", "ctl.x", strings.Repeat("a", 17)} {
+	for _, host := range []string{"", "CTL", "1ctl", "ctl.x", strings.Repeat("a", maxLaneHostLen+1)} {
 		if _, err := NewLane(h.store, host, h.clk); err == nil {
 			t.Errorf("NewLane accepted host %q", host)
 		}
@@ -1008,56 +1382,165 @@ func TestNewLaneRefusals(t *testing.T) {
 	}
 }
 
-// An expired op that planTake closes keeps the expiry bookkeeping every
-// planRules close of an expired op records: maybe_delivered, failures and
-// last_error.
-func TestLanePlanTakeClosesOfExpiredOpsKeepMaybeDelivered(t *testing.T) {
-	ifIdle := laneMsg("p", RolePrompt, "x", withWhen(WhenIfIdle))
-	steerFail := laneMsg("s", RolePrompt, "x", withWhen(WhenSteer), func(r *Request) {
-		r.Policy.Message.OnUnsupported = FallbackFail
-	})
+// A fresh op the probe rules out closes (TestPlanTakeWhenTable), recording
+// that it never ran. Once an attempt may have reached the executor, because
+// its lease expired or it was released after an Unknown result, the op waits
+// instead, busy or unsupported, with its bookkeeping kept: it is replayed
+// when the probe allows it, or start_by closes it failed{deadline_in_flight}.
+func TestLaneMaybeDeliveredOpWaitsForTheProbe(t *testing.T) {
 	respond := Request{
 		Conversation: "gc-1", Kind: KindRespond, Executor: ExecutorLane, ClientKey: "r1",
 		Producer: Producer{Principal: "operator", Actor: ActorOperator}, Payload: "allow",
 		Scope: Scope{Kind: ScopeSession, Generation: 1, Interaction: "perm-1"},
 	}
-	for name, tc := range map[string]struct {
-		req    Request
-		before func(*Probe)
-		after  func(*Probe)
-		want   string
+	kinds := []struct {
+		name    string
+		req     Request
+		content bool
+		deny    func(*Probe)
+		wait    WaitReason
 	}{
-		"if_idle busy":      {req: ifIdle, after: func(p *Probe) { p.Boundary = TriNo }, want: ReasonBusy},
-		"steer unsupported": {req: steerFail, after: func(p *Probe) { p.Boundary, p.Caps.Steer = TriNo, false }, want: ReasonUnsupported},
-		"respond unsupported": {
-			req: respond, before: func(p *Probe) { p.Caps.Respond = true },
-			after: func(p *Probe) { p.Caps.Respond = false }, want: ReasonUnsupported,
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			h := newLaneHarness(t)
-			op := h.propose(t, tc.req)
-			exec := newFakeExec(h.clk)
-			if tc.before != nil {
-				tc.before(&exec.probe)
-			}
+		{"if_idle", laneMsg("p", RolePrompt, "x", withWhen(WhenIfIdle)), true, func(p *Probe) { p.Boundary = TriNo }, WaitBusy},
+		{"steer fallback_fail", laneMsg("s", RolePrompt, "x", withWhen(WhenSteer), func(r *Request) {
+			r.Policy.Message.OnUnsupported = FallbackFail
+		}), true, func(p *Probe) { p.Boundary, p.Caps.Steer = TriNo, false }, WaitBusy},
+		{"respond", respond, false, func(p *Probe) { p.Caps.Respond = false }, WaitUnsupported},
+	}
+	ways := []struct {
+		name string
+		// attempt runs the attempt that may reach the executor, then lets
+		// the clock pass until the op can be taken again.
+		attempt func(t *testing.T, h *laneHarness, exec *fakeExec)
+		lastErr func(string) bool
+	}{
+		{"lease expired", func(t *testing.T, h *laneHarness, exec *fakeExec) {
 			a := h.lane(t, "ctl")
 			a.hooks.at = crashAt(stageAfterEffect)
 			if _, err := a.Pass(context.Background(), view(), exec); !errors.Is(err, errCrash) {
 				t.Fatalf("pass = %v", err)
 			}
 			h.clk.Advance(DefaultLeaseTTL + LeaseSkew + time.Second)
-			tc.after(&exec.probe)
-			mustPass(t, h.lane(t, "cli"), view(), exec)
-			got := h.get(t, op.ID)
-			if got.Status != StatusClosed || got.Outcome.Reason != tc.want {
-				t.Fatalf("op %s %+v", got.Status, got.Outcome)
+		}, func(s string) bool { return s == lastErrorLeaseExpired }},
+		{"released after unknown", func(t *testing.T, h *laneHarness, exec *fakeExec) {
+			exec.deliver = func(Delivery) DeliveryResult { return Unknown{Cause: errors.New("bridge timeout")} }
+			exec.respond = func(RespondCall) ControlResult { return Unknown{Cause: errors.New("bridge timeout")} }
+			mustPass(t, h.lane(t, "ctl"), view(), exec)
+			exec.deliver, exec.respond = nil, nil
+			h.clk.Advance(ExecutorErrorBackoff + time.Millisecond)
+		}, func(s string) bool { return strings.HasPrefix(s, lastErrorUnknown+": ") }},
+	}
+	for _, k := range kinds {
+		effects := func(exec *fakeExec) int {
+			if k.content {
+				return len(exec.delivered())
 			}
-			if got.MaybeDelivered != got.Attempt || got.Failures != 1 || got.LastError != lastErrorLeaseExpired {
-				t.Fatalf("expiry bookkeeping lost: attempt %d maybe %d failures %d last_error %q",
-					got.Attempt, got.MaybeDelivered, got.Failures, got.LastError)
+			return len(exec.responds)
+		}
+		for _, w := range ways {
+			for _, replayed := range []bool{true, false} {
+				ending := "start_by"
+				if replayed {
+					ending = "replayed"
+				}
+				t.Run(k.name+"/"+w.name+"/"+ending, func(t *testing.T) {
+					h := newLaneHarness(t)
+					op := h.propose(t, k.req)
+					exec := newFakeExec(h.clk)
+					exec.probe.Caps.Respond = true
+					allow := exec.probe
+					w.attempt(t, h, exec)
+					if n := effects(exec); n != 1 {
+						t.Fatalf("%d effects on the first attempt", n)
+					}
+
+					k.deny(&exec.probe)
+					res := mustPass(t, h.lane(t, "cli"), view(), exec)
+					got := h.get(t, op.ID)
+					if got.Status == StatusClosed {
+						t.Fatalf("an op that may have been delivered closed %+v", got.Outcome)
+					}
+					if res.Took != TakeNone || waitsOf(res.Waits)[op.ID] != k.wait || res.Busy != (k.wait == WaitBusy) || effects(exec) != 1 {
+						t.Fatalf("pass %+v after %d effects; want a %s wait", res, effects(exec), k.wait)
+					}
+					if !res.Next.Equal(got.StartBy) {
+						t.Fatalf("next %s, want start_by %s", res.Next, got.StartBy)
+					}
+
+					if replayed {
+						exec.probe = allow
+						res = mustPass(t, h.lane(t, "cli"), view(), exec)
+						if !slices.Equal(res.Taken, []string{op.ID}) || effects(exec) != 2 {
+							t.Fatalf("took %v, %d effects", res.Taken, effects(exec))
+						}
+						got = h.get(t, op.ID)
+						if got.Outcome.Arm != ArmSucceeded || got.Attempt != 2 {
+							t.Fatalf("op attempt %d %+v", got.Attempt, got.Outcome)
+						}
+						if ds := exec.delivered(); k.content && (!ds[1].Redelivery || ds[1].Key != ds[0].Key) {
+							t.Fatalf("replay redelivery %v key %s, first key %s", ds[1].Redelivery, ds[1].Key, ds[0].Key)
+						}
+					} else {
+						h.clk.Advance(got.StartBy.Sub(h.clk.Now()) + time.Nanosecond)
+						mustPass(t, h.lane(t, "cli"), view(), exec)
+						got = h.get(t, op.ID)
+						if got.Status != StatusClosed || got.Outcome.Arm != ArmFailed || got.Outcome.Reason != ReasonDeadlineInFlight {
+							t.Fatalf("op past start_by: %s %+v", got.Status, got.Outcome)
+						}
+					}
+					if got.MaybeDelivered != 1 || got.Failures != 1 || !w.lastErr(got.LastError) {
+						t.Fatalf("bookkeeping lost: maybe %d failures %d last_error %q", got.MaybeDelivered, got.Failures, got.LastError)
+					}
+				})
 			}
-		})
+		}
+	}
+}
+
+// applyLocal leaves a row as the store's own applier does, an emptied key
+// included, so the row a Take keeps for Done is the row it wrote.
+func TestApplyLocalMatchesTheStore(t *testing.T) {
+	mem := &beads.MemStore{IDPrefix: "gc"}
+	b, err := mem.Create(beads.Bead{Title: "row", Metadata: map[string]string{"gc.a": "1", "gc.b": "2"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assignee, status := "conversation@gc-1#1#ctl.n@2026-10-13T12:02:00Z", "in_progress"
+	opts := beads.UpdateOpts{Metadata: map[string]string{"gc.a": "", "gc.c": "3"}, Assignee: &assignee, Status: &status}
+	want := applyLocal(b, opts)
+	rev := b.Revision
+	item := beads.GuardedItem{Update: &beads.GuardedUpdate{ID: b.ID, Opts: opts, ExpectedRevision: &rev}}
+	if _, err := mem.ApplyGuarded(context.Background(), beads.GuardedBatch{Reason: "test", Items: []beads.GuardedItem{item}}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := mem.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !maps.Equal(got.Metadata, want.Metadata) || got.Assignee != want.Assignee || got.Status != want.Status {
+		t.Fatalf("store row metadata %v assignee %q status %q; applyLocal %v %q %q",
+			got.Metadata, got.Assignee, got.Status, want.Metadata, want.Assignee, want.Status)
+	}
+}
+
+// Done re-reads its items after a refusal only when the refused row is one
+// of them; a refusal that names no row is never taken for one of its own.
+func TestRefusedByPending(t *testing.T) {
+	pending := []*doneItem{{id: "gc-op-a"}, {id: "gc-row-1"}}
+	refusal := func(id string) error {
+		return fmt.Errorf("applying: %w", &beads.BatchItemError{Index: 1, ID: id, Err: errors.New("revision moved")})
+	}
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"a pending row", refusal("gc-row-1"), true},
+		{"another row", refusal("gc-op-z"), false},
+		{"no row named", errors.New("refused"), false},
+	} {
+		if got := refusedByPending(tc.err, pending); got != tc.want {
+			t.Errorf("%s: refusedByPending(%v) = %v, want %v", tc.name, tc.err, got, tc.want)
+		}
 	}
 }
 
@@ -1112,6 +1595,27 @@ func TestLaneCanceledContextIsReported(t *testing.T) {
 			t.Fatalf("%d batches written", n)
 		}
 	})
+}
+
+// Done outlives a pass canceled during its effect: the effect ran, so Done
+// still records it.
+func TestLaneDoneOutlivesACanceledPass(t *testing.T) {
+	h := newLaneHarness(t)
+	op := h.propose(t, laneMsg("p", RolePrompt, "x"))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ex := newFakeExec(h.clk)
+	ex.onEffect = cancel
+	res, err := h.lane(t, "ctl").Pass(ctx, view(), ex)
+	if err != nil || res.Done != DoneAccepted {
+		t.Fatalf("pass %+v, %v", res, err)
+	}
+	if got := h.get(t, op.ID); got.Status != StatusClosed || got.Outcome.Arm != ArmSucceeded {
+		t.Fatalf("op %s/%s after a pass canceled during its effect, want closed/succeeded", got.Status, got.Outcome.Arm)
+	}
+	if n := len(ex.delivered()); n != 1 {
+		t.Fatalf("%d deliveries", n)
+	}
 }
 
 // While an op is in flight, every candidate is reported waiting in_flight
