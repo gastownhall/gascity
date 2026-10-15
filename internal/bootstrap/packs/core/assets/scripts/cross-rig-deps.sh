@@ -28,7 +28,13 @@ LOOKBACK="${CROSS_RIG_LOOKBACK:-15m}"
 SINCE=$(date -u -d "-${LOOKBACK%m} minutes" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || \
         date -u -v-"${LOOKBACK%m}"M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) || exit 0
 
-CLOSED=$(gc bd list --status=closed --closed-after="$SINCE" --json 2>/dev/null) || exit 0
+# Use the query language rather than --closed-after: HTTP-backed stores
+# (e.g. maintainer-city) don't serve the listIssues ClosedAfter filter, but
+# they do serve bd query. Dolt/local rigs support both; query gives one
+# shape that works everywhere. Stderr is left unredirected so a real bd
+# refusal (as opposed to "no recently-closed issues") is visible in the
+# order's log instead of being swallowed.
+CLOSED=$(gc bd query "status=closed AND closed>\"$SINCE\"" --json) || exit 0
 if [ -z "$CLOSED" ] || [ "$CLOSED" = "[]" ]; then
     exit 0
 fi

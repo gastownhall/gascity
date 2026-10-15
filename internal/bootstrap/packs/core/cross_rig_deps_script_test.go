@@ -1,0 +1,136 @@
+package core
+
+import (
+	"os"
+	"strings"
+	"testing"
+)
+
+// crossRigDepsScriptPath is the on-disk copy of the cross-rig-deps order's
+// script. The test runs it, so it needs a real path.
+const crossRigDepsScriptPath = "assets/scripts/cross-rig-deps.sh"
+
+// crossRigDepsEnvKeys are the settings each test supplies itself.
+var crossRigDepsEnvKeys = map[string]struct{}{
+	"GC_CITY":            {},
+	"CROSS_RIG_LOOKBACK": {},
+	"GC_BD_TRACE_JSON":   {},
+}
+
+func runCrossRigDeps(t *testing.T, binDir string, extraEnv ...string) (string, error) {
+	t.Helper()
+	return runPackScript(t, crossRigDepsScriptPath, binDir, crossRigDepsEnvKeys, extraEnv)
+}
+
+// TestCrossRigDepsUsesQueryNotClosedAfter pins the HTTP-store fix: the script
+// must ask for recently-closed issues with `bd query`, not
+// `bd list --closed-after`. maintainer-city's HTTP-backed city store refuses
+// the ClosedAfter listIssues filter outright (no wire member for it), so a
+// script still calling --closed-after would always hit the error path and,
+// before this fix, silently convert zero cross-rig deps on every run.
+func TestCrossRigDepsUsesQueryNotClosedAfter(t *testing.T) {
+	binDir, logPath := fakeGCBin(t, `case "$*" in
+bd\ query\ status=closed*) printf '[]\n' ;;
+rig\ list*) printf '{"rigs":[]}\n' ;;
+esac
+exit 0
+`)
+	out, err := runCrossRigDeps(t, binDir)
+	if err != nil {
+		t.Fatalf("cross-rig-deps.sh failed: %v\n%s", err, out)
+	}
+	logged, readErr := os.ReadFile(logPath)
+	if readErr != nil {
+		t.Fatalf("read gc log: %v", readErr)
+	}
+	if !strings.Contains(string(logged), "gc bd query status=closed") {
+		t.Fatalf("script must call `bd query`, got:\n%s", logged)
+	}
+	if strings.Contains(string(logged), "closed-after") {
+		t.Fatalf("script must not call the refused --closed-after flag, got:\n%s", logged)
+	}
+}
+
+// TestCrossRigDepsConvertsExternalBlockOnQueryHit pins the happy path end to
+// end with the new query-based lookup: a closed issue with an external
+// (cross-rig) blocker dependent gets that dependency converted from blocks to
+// related.
+func TestCrossRigDepsConvertsExternalBlockOnQueryHit(t *testing.T) {
+	binDir, logPath := fakeGCBin(t, `case "$*" in
+bd\ query\ status=closed*) printf '[{"id":"ga-blocker","status":"closed"}]\n' ;;
+rig\ list*) printf '{"rigs":[]}\n' ;;
+bd\ dep\ list\ ga-blocker*) printf '[{"id":"external:dep-1"}]\n' ;;
+bd\ dep\ remove*) ;;
+bd\ dep\ add*) ;;
+esac
+exit 0
+`)
+	out, err := runCrossRigDeps(t, binDir)
+	if err != nil {
+		t.Fatalf("cross-rig-deps.sh failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "resolved 1 cross-rig dependencies") {
+		t.Fatalf("expected one resolved dependency, got:\n%s", out)
+	}
+	logged, readErr := os.ReadFile(logPath)
+	if readErr != nil {
+		t.Fatalf("read gc log: %v", readErr)
+	}
+	if !strings.Contains(string(logged), "gc bd dep remove external:dep-1 external:ga-blocker") {
+		t.Fatalf("expected the blocks dep to be removed, got:\n%s", logged)
+	}
+	if !strings.Contains(string(logged), "gc bd dep add external:dep-1 external:ga-blocker --type=related") {
+		t.Fatalf("expected the related dep to be added, got:\n%s", logged)
+	}
+}
+
+// TestCrossRigDepsRefusalReachesStderr pins the other half of the HTTP-store
+// fix: a real bd refusal (not just "nothing closed recently") must not be
+// swallowed. Before this fix the lookup redirected stderr to /dev/null and
+// then exited 0 on any failure, so an HTTP store's refusal of the whole
+// query shape looked identical, in the order log, to an empty result. The
+// script still must exit 0 (a refusal must not fail the order), but the
+// refusal text must reach the combined output so it is visible to whoever
+// reads the order's log.
+func TestCrossRigDepsRefusalReachesStderr(t *testing.T) {
+	binDir, _ := fakeGCBin(t, `case "$*" in
+bd\ query\ status=closed*)
+    echo "Error: bd query is not supported against HTTP workspace: part of this command is not served over HTTP" >&2
+    exit 1
+    ;;
+esac
+exit 0
+`)
+	out, err := runCrossRigDeps(t, binDir)
+	if err != nil {
+		t.Fatalf("a real bd refusal must still exit 0 (no-work semantics), got error: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "not supported against HTTP workspace") {
+		t.Fatalf("a real bd refusal must reach the order's log, not be swallowed; got:\n%s", out)
+	}
+}
+
+// TestCrossRigDepsNoRecentClosesIsQuiet pins that an empty query result (the
+// ordinary idle case) exits 0 with no "resolved" line and no attempt to walk
+// dependencies.
+func TestCrossRigDepsNoRecentClosesIsQuiet(t *testing.T) {
+	binDir, logPath := fakeGCBin(t, `case "$*" in
+bd\ query\ status=closed*) printf '[]\n' ;;
+esac
+exit 0
+`)
+	out, err := runCrossRigDeps(t, binDir)
+	if err != nil {
+		t.Fatalf("cross-rig-deps.sh failed: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "resolved") {
+		t.Fatalf("an empty result must not report anything resolved, got:\n%s", out)
+	}
+	logged, readErr := os.ReadFile(logPath)
+	if readErr != nil {
+		t.Fatalf("read gc log: %v", readErr)
+	}
+	if strings.Contains(string(logged), "dep list") {
+		t.Fatalf("an empty result must not attempt to walk dependencies, got:\n%s", logged)
+	}
+}
