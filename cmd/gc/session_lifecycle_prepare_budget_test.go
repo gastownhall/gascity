@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/resilience"
 )
 
 // The cumulative prepare-time budget (ga-r7s62t, Refs #7170): one planner call
@@ -50,14 +51,18 @@ func (c *budgetClock) Advance(d time.Duration) {
 // id in latency made from inside prepareStartCandidateForCity advances the
 // clock by that duration, and every such Get of an id in failGet fails. Gets from
 // elsewhere in the pass (the runtime lease's fresh read, the commit) are free,
-// so the cost of a prepare is exact whatever else reads the row.
+// so the cost of a prepare is exact whatever else reads the row. The first
+// metadata batch written to an id in writeLatency from OUTSIDE prepare (the
+// identity breaker's restart accounting) advances the clock the same way: time
+// the pass spends between the budget gate and prepare, which is not prepare time.
 type prepareLatencyStore struct {
 	beads.Store
-	clk     *budgetClock
-	mu      sync.Mutex
-	latency map[string]time.Duration
-	failGet map[string]error
-	charged map[string]bool
+	clk          *budgetClock
+	mu           sync.Mutex
+	latency      map[string]time.Duration
+	failGet      map[string]error
+	charged      map[string]bool
+	writeLatency map[string]time.Duration
 }
 
 // inPrepare reports whether the calling goroutine is inside
@@ -97,6 +102,22 @@ func (s *prepareLatencyStore) Get(id string) (beads.Bead, error) {
 	return s.Store.Get(id)
 }
 
+// SetMetadataBatch charges the first write of an id in writeLatency made from
+// outside prepareStartCandidateForCity.
+func (s *prepareLatencyStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	s.mu.Lock()
+	var d time.Duration
+	if !inPrepare() {
+		d = s.writeLatency[id]
+		delete(s.writeLatency, id)
+	}
+	s.mu.Unlock()
+	if d != 0 {
+		s.clk.Advance(d)
+	}
+	return s.Store.SetMetadataBatch(id, kvs)
+}
+
 // prepareBudgetEnv is a capacityEnv whose store injects prepare latency and
 // whose clock is goroutine-safe.
 type prepareBudgetEnv struct {
@@ -107,14 +128,25 @@ type prepareBudgetEnv struct {
 
 func newPrepareBudgetEnv(t *testing.T, names ...string) *prepareBudgetEnv {
 	t.Helper()
-	e := newCapacityEnv(t, false, names...)
+	return withPrepareLatency(newCapacityEnv(t, false, names...))
+}
+
+// newGuardedPrepareBudgetEnv is newPrepareBudgetEnv over an endpoint-guarded
+// capacityEnv, so a candidate on an upstream asks the endpoint for a ticket.
+func newGuardedPrepareBudgetEnv(t *testing.T, names ...string) *prepareBudgetEnv {
+	t.Helper()
+	return withPrepareLatency(newCapacityEnv(t, true, names...))
+}
+
+func withPrepareLatency(e *capacityEnv) *prepareBudgetEnv {
 	lc := &budgetClock{f: e.clk}
 	lat := &prepareLatencyStore{
-		Store:   e.store,
-		clk:     lc,
-		latency: map[string]time.Duration{},
-		failGet: map[string]error{},
-		charged: map[string]bool{},
+		Store:        e.store,
+		clk:          lc,
+		latency:      map[string]time.Duration{},
+		failGet:      map[string]error{},
+		charged:      map[string]bool{},
+		writeLatency: map[string]time.Duration{},
 	}
 	maxWakes := 10
 	e.cfg.Daemon.MaxWakesPerTick = &maxWakes
@@ -361,9 +393,11 @@ func TestExecutePlannedStarts_PrepareBudgetCountsSlowFailingPrepare(t *testing.T
 	e.requireUntouched(t, b, bBefore)
 }
 
-// A deferral is not a failure: no breaker accounting, named-session state or
-// metadata moves for the deferred candidate, while the same candidate within
-// budget does write (the contrast that proves the check is not vacuous).
+// A deferral is not a failure: the deferred candidate's bead row and in-memory
+// info do not move, while the same candidate within budget does write (the
+// contrast that proves the check is not vacuous). This test uses an unnamed
+// candidate in a breaker-disabled harness; the breaker accounting and the
+// named-session row are covered by ..._DeferralRecordsNoBreakerRestart.
 func TestExecutePlannedStarts_PrepareBudgetDeferralWritesNothingButStartDoes(t *testing.T) {
 	deferred := newPrepareBudgetEnv(t, "a", "b")
 	a := deferred.candidate(t, "a", testPrepareBudget+time.Second)
@@ -472,6 +506,172 @@ func TestExecutePlannedStarts_PrepareBudgetIgnoresBackwardsClock(t *testing.T) {
 	}
 	if n := e.sp.CountCalls("Start", "c"); n != 1 {
 		t.Fatalf("c Start calls = %d, want 1", n)
+	}
+}
+
+// Design item 7: a named session the prepare budget defers records no breaker
+// restart, in memory or persisted; the same session within budget does. The
+// contrast is what makes a gate placed after the accounting fail.
+func TestExecutePlannedStarts_PrepareBudgetDeferralRecordsNoBreakerRestart(t *testing.T) {
+	cases := []struct {
+		name         string
+		slowLatency  time.Duration
+		wantRestarts int
+		wantWritten  bool
+	}{
+		{"deferred by the budget", testPrepareBudget + time.Second, 0, false},
+		{"within budget (contrast)", time.Second, 1, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newPrepareBudgetEnv(t, "a", "template-a")
+			cb := e.namedIdentityBreaker(t)
+			a := e.candidate(t, "a", tc.slowLatency)
+			named := e.namedCandidate(t)
+			e.lat.latency[named.info.ID] = time.Second
+			before := e.bead(t, named.info.ID)
+
+			e.run(testPrepareBudget, false, nil, a, named)
+
+			restarts := 0
+			for _, snap := range cb.Snapshot(e.clk.Now().UTC()) {
+				if snap.Identity == "rig-a/session-a" {
+					restarts = snap.RestartCount
+				}
+			}
+			if restarts != tc.wantRestarts {
+				t.Fatalf("in-memory breaker restarts for the named session = %d, want %d\nlog:\n%s", restarts, tc.wantRestarts, e.log.String())
+			}
+			after := e.bead(t, named.info.ID)
+			if written := !maps.Equal(after.Metadata, before.Metadata); written != tc.wantWritten {
+				t.Fatalf("named row written = %v, want %v\nbefore %v\nafter  %v", written, tc.wantWritten, before.Metadata, after.Metadata)
+			}
+			if !tc.wantWritten {
+				if n := e.sp.CountCalls("Start", "session-a"); n != 0 {
+					t.Fatalf("deferred named session started %d times", n)
+				}
+			}
+		})
+	}
+}
+
+// Only prepareStartCandidateForCity is charged: time the pass spends between
+// the gate and prepare (here the named session's breaker write) is not prepare
+// time and must not use up the budget.
+func TestExecutePlannedStarts_PrepareBudgetChargesOnlyPrepare(t *testing.T) {
+	e := newPrepareBudgetEnv(t, "b", "template-a")
+	e.namedIdentityBreaker(t)
+	named := e.namedCandidate(t)
+	e.lat.latency[named.info.ID] = time.Second
+	e.lat.writeLatency[named.info.ID] = testPrepareBudget + time.Second
+	b := e.candidate(t, "b", time.Second)
+
+	if woken := e.run(testPrepareBudget, false, nil, named, b); woken != 2 {
+		t.Fatalf("woken = %d, want 2: the breaker write is not prepare time\n%s", woken, e.log.String())
+	}
+	if got := e.deferredByBudget(); len(got) != 0 {
+		t.Fatalf("deferred = %v, want none: only prepare is charged", got)
+	}
+}
+
+// Design item 2: the budget gate sits before endpoint-capacity admission. On a
+// half-open endpoint whose probe the slow first candidate took, the second
+// candidate on the same endpoint is deferred by the BUDGET (no ticket asked
+// for); a gate placed after admission would report it deferred by endpoint
+// capacity.
+func TestExecutePlannedStarts_PrepareBudgetDeferralTakesNoCapacityTicket(t *testing.T) {
+	setup := func(t *testing.T) (*prepareBudgetEnv, startCandidate, startCandidate) {
+		e := newGuardedPrepareBudgetEnv(t, "a", "b")
+		a := e.pendingCreate(t, "a", "e", nil)
+		e.lat.latency[a.info.ID] = testPrepareBudget + time.Second
+		b := e.pendingCreate(t, "b", "e", nil)
+		e.lat.latency[b.info.ID] = time.Second
+		e.openEndpoint(t)
+		e.makeProbeDue()
+		return e, a, b
+	}
+	capacityDeferred := func(e *prepareBudgetEnv) []string {
+		var names []string
+		for _, r := range e.records(TraceSiteLifecycleStartRun) {
+			if r.OutcomeCode == TraceOutcomeDeferredByEndpointCapacity {
+				names = append(names, r.SessionName)
+			}
+		}
+		return names
+	}
+
+	t.Run("budget spent", func(t *testing.T) {
+		e, a, b := setup(t)
+		e.run(testPrepareBudget, false, nil, a, b)
+		if n := e.sp.CountCalls("Start", "a"); n != 1 {
+			t.Fatalf("Start calls for the probe taker a = %d, want 1\n%s", n, e.log.String())
+		}
+		e.requireDeferred(t, false, "b")
+		if got := capacityDeferred(e); len(got) != 0 {
+			t.Fatalf("deferred_by_endpoint_capacity for %v, want none (the budget gate precedes admission)\n%s", got, e.log.String())
+		}
+	})
+	t.Run("no budget (contrast)", func(t *testing.T) {
+		e, a, b := setup(t)
+		e.runWith(nil, false, a, b)
+		if got := capacityDeferred(e); len(got) != 1 || got[0] != "b" {
+			t.Fatalf("deferred_by_endpoint_capacity = %v, want [b]: the scenario must expose the admission order\n%s", got, e.log.String())
+		}
+	})
+}
+
+// Design item 2, direct form: the deferred candidate asked the endpoint for no
+// ticket, so the due half-open probe is still there for the next planner call.
+// A gate placed after admission leaves b holding (and dropping) the probe.
+func TestExecutePlannedStarts_PrepareBudgetDeferralLeavesDueProbeUntaken(t *testing.T) {
+	e := newGuardedPrepareBudgetEnv(t, "a", "b")
+	a := e.candidate(t, "a", testPrepareBudget+time.Second) // no upstream: no ticket
+	b := e.pendingCreate(t, "b", "e", nil)
+	e.lat.latency[b.info.ID] = time.Second
+	e.openEndpoint(t)
+	e.makeProbeDue()
+
+	e.run(testPrepareBudget, false, nil, a, b)
+
+	e.requireDeferred(t, false, "b")
+	if st := e.breakerStatus(capacityTestEndpoint); st.State != resilience.StateOpen {
+		t.Fatalf("endpoint state after the deferral = %v, want open (b must not have been admitted as the probe)\n%s", st.State, e.log.String())
+	}
+	ticket, ok := e.guard.Admit(capacityTestEndpoint, "later", "later")
+	if !ok || ticket == nil || !ticket.probe {
+		t.Fatalf("the due probe was not available to the next planner call (ok=%v)\n%s", ok, e.log.String())
+	}
+	ticket.Resolve(verdictCapacity)
+}
+
+// The deferral record carries the spend and the limit (AC3, AC7), and the one
+// summary line on stderr names the spend where it says spent=.
+func TestExecutePlannedStarts_PrepareBudgetDeferralPayload(t *testing.T) {
+	e := newPrepareBudgetEnv(t, "a", "b")
+	a := e.candidate(t, "a", testPrepareBudget+time.Second)
+	b := e.candidate(t, "b", time.Second)
+
+	e.run(testPrepareBudget, false, nil, a, b)
+
+	e.requireDeferred(t, false, "b")
+	var found int
+	for _, r := range e.records(TraceSiteLifecycleStartRun) {
+		if string(r.OutcomeCode) != prepareBudgetOutcome {
+			continue
+		}
+		found++
+		if got, want := r.Fields["spent_ms"], (testPrepareBudget + time.Second).Milliseconds(); got != want {
+			t.Fatalf("trace spent_ms = %v (%T), want %v", got, got, want)
+		}
+		if got, want := r.Fields["budget_ms"], testPrepareBudget.Milliseconds(); got != want {
+			t.Fatalf("trace budget_ms = %v (%T), want %v", got, got, want)
+		}
+	}
+	if found != 1 {
+		t.Fatalf("deferral records = %d, want 1", found)
+	}
+	if want := "(spent=1m1s, budget=1m0s)"; !strings.Contains(e.log.String(), want) {
+		t.Fatalf("stderr summary lacks %q:\n%s", want, e.log.String())
 	}
 }
 
