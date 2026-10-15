@@ -61,9 +61,10 @@ func TestEligibleTokenRowCoversEveryBaseState(t *testing.T) {
 	}
 }
 
-// TestEligibleTokenRowNormalizesGenerationAsTheStartPath pins the start
-// path's rule (cmd/gc/session_lifecycle_parallel.go: strconv.Atoi, then
-// session.DefaultGeneration when the result is at most 0).
+// TestEligibleTokenRowNormalizesGenerationAsTheStartPath pins the rule
+// session.Manager applies when it starts a runtime (internal/session/chat.go:
+// strconv.Atoi, then session.DefaultGeneration on an error or a result at
+// most 0).
 func TestEligibleTokenRowNormalizesGenerationAsTheStartPath(t *testing.T) {
 	cases := []struct {
 		raw     *string
@@ -75,6 +76,7 @@ func TestEligibleTokenRowNormalizesGenerationAsTheStartPath(t *testing.T) {
 		{ptr("-3"), session.DefaultGeneration, "negative"},
 		{ptr("abc"), session.DefaultGeneration, "unparsable"},
 		{ptr(" 7"), session.DefaultGeneration, "untrimmed (Atoi refuses it)"},
+		{ptr("99999999999999999999"), session.DefaultGeneration, "overflowing (Atoi returns the maximum int with its error)"},
 		{ptr("7"), 7, "positive"},
 		{ptr("130"), 130, "multi-digit"},
 	}

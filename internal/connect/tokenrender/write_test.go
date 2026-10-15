@@ -498,3 +498,29 @@ func setGeteuid(t *testing.T, f func() int) {
 	geteuid = f
 	t.Cleanup(func() { geteuid = prev })
 }
+
+// TestTempFileErrNamesNoTempFile pins that an error on a temp file keeps its
+// operation and cause but not the file's random name, for both error shapes
+// the temp file's calls return.
+func TestTempFileErrNamesNoTempFile(t *testing.T) {
+	const tmp = "/run/gc/.serve-tokens.tmp-123456"
+	cases := []struct {
+		err   error
+		want  string
+		cause error
+	}{
+		{&os.PathError{Op: "open", Path: tmp, Err: syscall.EACCES}, "open temp file: " + syscall.EACCES.Error(), syscall.EACCES},
+		{&os.PathError{Op: "write", Path: tmp, Err: syscall.ENOSPC}, "write temp file: " + syscall.ENOSPC.Error(), syscall.ENOSPC},
+		{&os.LinkError{Op: "rename", Old: tmp, New: "/run/gc/serve-tokens", Err: syscall.EROFS}, "rename temp file: " + syscall.EROFS.Error(), syscall.EROFS},
+	}
+	for _, tc := range cases {
+		got := tempFileErr(tc.err)
+		if got.Error() != tc.want || !errors.Is(got, tc.cause) {
+			t.Errorf("tempFileErr(%v) = %q, want %q wrapping %v", tc.err, got, tc.want, tc.cause)
+		}
+	}
+	plain := errors.New("no file named")
+	if got := tempFileErr(plain); !errors.Is(got, plain) || got.Error() != plain.Error() {
+		t.Errorf("tempFileErr changed an error that names no file: %v", got)
+	}
+}

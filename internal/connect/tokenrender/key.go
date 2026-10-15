@@ -35,7 +35,7 @@ func LoadKey(path string) ([]byte, error) {
 		return nil, fmt.Errorf("loading connect key %s: %w", path, err)
 	}
 	if perm := info.Mode().Perm(); perm&0o077 != 0 {
-		return nil, fmt.Errorf("loading connect key %s: mode %04o is accessible to group or others; want 0600", path, perm)
+		return nil, fmt.Errorf("loading connect key %s: mode %04o is accessible to group or others; strip its group and other permission bits", path, perm)
 	}
 	dir := filepath.Dir(path)
 	dirInfo, err := os.Stat(dir)
@@ -43,7 +43,7 @@ func LoadKey(path string) ([]byte, error) {
 		return nil, fmt.Errorf("loading connect key %s: %w", path, err)
 	}
 	if perm := dirInfo.Mode().Perm(); perm&0o077 != 0 {
-		return nil, fmt.Errorf("loading connect key %s: directory %s mode %04o is accessible to group or others; want 0700", path, dir, perm)
+		return nil, fmt.Errorf("loading connect key %s: directory %s mode %04o is accessible to group or others; strip its group and other permission bits", path, dir, perm)
 	}
 	if len(data) > maxKeyFileBytes {
 		return nil, fmt.Errorf("loading connect key %s: file exceeds %d bytes", path, maxKeyFileBytes)
@@ -65,8 +65,9 @@ func LoadKey(path string) ([]byte, error) {
 // base64url text and a newline: a 0600 file created exclusively (an existing
 // file refuses with an error wrapping os.ErrExist), under 0700 directories.
 // A parent directory that already exists must not be accessible to group or
-// others. Only the controller creates keys, and only when no token file it
-// renders holds a gc line (DES-CN D7, OutputsHoldGCLines).
+// others. A key that cannot be written or made durable is removed, so a retry
+// creates a fresh one. Only the controller creates keys, and only when no
+// token file it renders holds a gc line (DES-CN D7, OutputsHoldGCLines).
 func CreateKey(path string) ([]byte, error) {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, keyDirMode); err != nil {
@@ -77,7 +78,7 @@ func CreateKey(path string) ([]byte, error) {
 		return nil, fmt.Errorf("creating connect key %s: %w", path, err)
 	}
 	if perm := dirInfo.Mode().Perm(); perm&0o077 != 0 {
-		return nil, fmt.Errorf("creating connect key %s: directory %s mode %04o is accessible to group or others; want 0700", path, dir, perm)
+		return nil, fmt.Errorf("creating connect key %s: directory %s mode %04o is accessible to group or others; strip its group and other permission bits", path, dir, perm)
 	}
 	key := make([]byte, newKeyLen)
 	if _, err := rand.Read(key); err != nil {
@@ -92,6 +93,9 @@ func CreateKey(path string) ([]byte, error) {
 		return nil, fmt.Errorf("creating connect key %s: %w", path, err)
 	}
 	if err := syncDir(dir); err != nil {
+		if rmErr := os.Remove(path); rmErr != nil {
+			return nil, fmt.Errorf("creating connect key %s: syncing directory: %w; removing the key: %w", path, err, rmErr)
+		}
 		return nil, fmt.Errorf("creating connect key %s: syncing directory: %w", path, err)
 	}
 	return key, nil

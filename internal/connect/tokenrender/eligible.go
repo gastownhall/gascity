@@ -25,11 +25,12 @@ var ineligibleStates = map[session.BaseState]bool{
 
 // EligibleTokenRow reports whether a session bead earns a bearer line and,
 // if so, its row. The base state is session.ProjectLifecycle's projection of
-// the bead's status and metadata; the generation is normalized exactly as the
-// start path normalizes it (an unparsable or non-positive value becomes
-// session.DefaultGeneration), so the line matches the bearer minted for that
-// start. Eligibility is D6's lifecycle rule alone: a bead whose id no bearer
-// can carry is still returned, so the renderer drops and counts it
+// the bead's status and metadata; the generation is normalized as
+// session.Manager normalizes it when it starts a runtime (a value
+// strconv.Atoi rejects, an overflowing one included, or one at most 0
+// becomes session.DefaultGeneration), so the line matches the bearer minted
+// for that start. Eligibility is D6's lifecycle rule alone: a bead whose id
+// no bearer can carry is still returned, so the renderer drops and counts it
 // (Report.DroppedRows) and gc doctor sees it, rather than a source dropping
 // it uncounted.
 func EligibleTokenRow(b beads.Bead) (connect.TokenRow, bool) {
@@ -37,8 +38,8 @@ func EligibleTokenRow(b beads.Bead) (connect.TokenRow, bool) {
 	if ineligibleStates[base] {
 		return connect.TokenRow{}, false
 	}
-	generation, _ := strconv.Atoi(b.Metadata["generation"])
-	if generation <= 0 {
+	generation, err := strconv.Atoi(b.Metadata["generation"])
+	if err != nil || generation <= 0 {
 		generation = session.DefaultGeneration
 	}
 	return connect.TokenRow{SessionID: b.ID, Generation: generation}, true

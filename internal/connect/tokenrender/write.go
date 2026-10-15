@@ -256,7 +256,7 @@ func writeTokenFile(path string, content []byte, now func() time.Time) (bool, er
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
 	if err != nil {
-		return false, fmt.Errorf("writing token file %s: %w", path, err)
+		return false, fmt.Errorf("writing token file %s: %w", path, tempFileErr(err))
 	}
 	tmpName := tmp.Name()
 	committed := false
@@ -266,22 +266,37 @@ func writeTokenFile(path string, content []byte, now func() time.Time) (bool, er
 		}
 	}()
 	if err := keepOwner(tmp, uid, gid); err != nil {
-		return false, fmt.Errorf("writing token file %s: keeping owner %d:%d: %w", path, uid, gid, err)
+		return false, fmt.Errorf("writing token file %s: keeping owner %d:%d: %w", path, uid, gid, tempFileErr(err))
 	}
 	if err := writeAndSync(tmp, content, mode); err != nil {
-		return false, fmt.Errorf("writing token file %s: %w", path, err)
+		return false, fmt.Errorf("writing token file %s: %w", path, tempFileErr(err))
 	}
 	if err := advanceMtime(tmpName, prev, now()); err != nil {
-		return false, fmt.Errorf("writing token file %s: %w", path, err)
+		return false, fmt.Errorf("writing token file %s: %w", path, tempFileErr(err))
 	}
 	if err := os.Rename(tmpName, path); err != nil {
-		return false, fmt.Errorf("writing token file %s: %w", path, err)
+		return false, fmt.Errorf("writing token file %s: %w", path, tempFileErr(err))
 	}
 	committed = true
 	if err := syncDir(dir); err != nil {
 		return true, fmt.Errorf("writing token file %s: syncing directory: %w", path, err)
 	}
 	return true, nil
+}
+
+// tempFileErr drops the temp file's random name from an error on it, keeping
+// the operation and its cause, so a persistent failure reads the same on
+// every render and Run logs it once.
+func tempFileErr(err error) error {
+	var pe *os.PathError
+	if errors.As(err, &pe) {
+		return fmt.Errorf("%s temp file: %w", pe.Op, pe.Err)
+	}
+	var le *os.LinkError
+	if errors.As(err, &le) {
+		return fmt.Errorf("%s temp file: %w", le.Op, le.Err)
+	}
+	return err
 }
 
 // keepOwner gives f the owner uid and group gid where they differ from f's;

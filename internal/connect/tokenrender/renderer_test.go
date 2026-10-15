@@ -684,6 +684,54 @@ func TestRunLogsEachCauseOnceUntilItClears(t *testing.T) {
 	}
 }
 
+// TestAPersistentWriteFailureIsLoggedOnce pins the log-once rule across
+// repeated write failures: the cause names no temp file, whose random name
+// would make each render's failure a new cause.
+func TestAPersistentWriteFailureIsLoggedOnce(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root writes into a read-only directory")
+	}
+	work := output(t, "work")
+	src := &fakeSource{}
+	h := newHarness(t, []Output{work}, src)
+	if _, err := h.r.RenderOnce(context.Background()); err != nil {
+		t.Fatalf("seeding render: %v", err)
+	}
+	dir := filepath.Dir(work.TokenFile)
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(dir, 0o700); err != nil {
+			t.Error(err)
+		}
+	})
+	src.set(live("mc-1", 1))
+	for range 3 {
+		rep, err := h.r.RenderOnce(context.Background())
+		if err == nil || !errors.Is(rep.Outputs[0].Err, os.ErrPermission) {
+			t.Fatalf("render into a read-only directory = %v (output: %v), want a permission failure", err, rep.Outputs[0].Err)
+		}
+	}
+	if n := h.logs.count("(ledger work, city maintainer-city)"); n != 1 {
+		t.Fatalf("a persistent write failure logged %d times over 3 renders, want 1:\n%s", n, strings.Join(h.logs.lines, "\n"))
+	}
+	for _, line := range h.logs.lines {
+		if strings.Contains(line, ".tmp-") {
+			t.Fatalf("a log line names a temp file: %s", line)
+		}
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.r.RenderOnce(context.Background()); err != nil {
+		t.Fatalf("render into the writable directory: %v", err)
+	}
+	if n := h.logs.count("(ledger work, city maintainer-city): cleared"); n != 1 {
+		t.Fatalf("recovery logged %d times:\n%s", n, strings.Join(h.logs.lines, "\n"))
+	}
+}
+
 func TestRunReturnsWhenTheContextEnds(t *testing.T) {
 	h := newHarness(t, []Output{output(t, "work")}, nil)
 	ctx, cancel := context.WithCancel(context.Background())

@@ -97,6 +97,9 @@ func TestLoadKeyRefusals(t *testing.T) {
 			if strings.Contains(err.Error(), good) {
 				t.Fatalf("error echoes the key: %v", err)
 			}
+			if (tc.mode|tc.dirMode)&0o077 != 0 && !strings.Contains(err.Error(), looseModeRemedy) {
+				t.Fatalf("error %q does not say to strip the group and other bits", err)
+			}
 		})
 	}
 	if _, err := LoadKey(filepath.Join(keyDir(t), "missing.key")); !errors.Is(err, os.ErrNotExist) {
@@ -154,11 +157,52 @@ func TestCreateKeyRefusesLooseParent(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(dir, "city.key")
-	if _, err := CreateKey(path); err == nil {
+	_, err := CreateKey(path)
+	if err == nil {
 		t.Fatal("CreateKey wrote a key into a 0755 directory")
+	}
+	if !strings.Contains(err.Error(), looseModeRemedy) {
+		t.Fatalf("error %q does not say to strip the group and other bits", err)
 	}
 	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("a refused CreateKey left a file: %v", err)
+	}
+}
+
+// looseModeRemedy is what a mode refusal tells the operator: any owner-only
+// mode passes, so the remedy is the bits to clear, not one exact mode.
+const looseModeRemedy = "strip its group and other permission bits"
+
+// TestCreateKeyRemovesAKeyItCannotMakeDurable pins that a key whose
+// directory sync fails is removed, so a retry creates a fresh key instead of
+// failing on the leftover file with os.ErrExist.
+func TestCreateKeyRemovesAKeyItCannotMakeDurable(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root opens an unreadable directory, so its sync cannot be made to fail")
+	}
+	dir := keyDir(t)
+	// Write and search without read: the key file can be created and
+	// removed, but the directory cannot be opened to sync it.
+	if err := os.Chmod(dir, 0o300); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(dir, 0o700); err != nil {
+			t.Error(err)
+		}
+	})
+	path := filepath.Join(dir, "city.key")
+	if _, err := CreateKey(path); err == nil {
+		t.Fatal("CreateKey succeeded although its directory could not be synced")
+	}
+	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a key that was never made durable survived: %v", err)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CreateKey(path); err != nil {
+		t.Fatalf("CreateKey after the failed one: %v", err)
 	}
 }
 
