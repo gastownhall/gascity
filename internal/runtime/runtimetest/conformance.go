@@ -667,8 +667,8 @@ func RunSessionTests(t *testing.T, sp runtime.Provider, cfg runtime.Config, name
 	})
 
 	t.Run("Interrupt_MissingSession", func(t *testing.T) {
-		if err := sp.Interrupt("nonexistent-conformance-session"); err != nil {
-			t.Errorf("Interrupt on missing session should not error: %v", err)
+		if err := sp.Interrupt("nonexistent-conformance-session"); err != nil && !errors.Is(err, runtime.ErrSessionNotFound) {
+			t.Errorf("Interrupt on missing session error = %v, want nil or ErrSessionNotFound", err)
 		}
 	})
 

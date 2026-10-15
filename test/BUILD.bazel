@@ -43,6 +43,7 @@ test_suite(
         "//internal/runtime/tmux:tmux_test",
         "//internal/session:session_test",
         "//internal/storebinding/beadsworkspace:beadsworkspace_test",
+        "//internal/storebinding:storebinding_test",
         "//test/containerhost:containerhost_test",
         "//test/dashport:dashport_test",
     ],

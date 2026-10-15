@@ -286,6 +286,10 @@ type preparedStart struct {
 	// manual conversation, which the caller records as
 	// session.conversation_reset (staleKeyConversationResetEvent).
 	conversationReset bool
+	// runtimeBinding is the patch recording the thread the runtime hosts
+	// the session in, read once the start succeeded (startedRuntimeBinding);
+	// the start commit applies it.
+	runtimeBinding sessionpkg.MetadataPatch
 }
 
 type startResult struct {
@@ -1940,6 +1944,7 @@ func runPreparedStartCandidate(
 		attribution = identity.attribution()
 	}
 	if attribution == pendingCreateRuntimeOurs {
+		item.runtimeBinding = startedRuntimeBinding(ctx, cityPath, sp, item.candidate.name())
 		return startResult{
 			prepared:            item,
 			err:                 nil,
@@ -2000,6 +2005,9 @@ func runPreparedStartCandidate(
 	}
 	if err == nil {
 		rateLimitScreen = false
+	}
+	if outcome == TraceOutcomeSuccess || (err == nil && outcome == TraceOutcomeSessionExists) {
+		item.runtimeBinding = startedRuntimeBinding(ctx, cityPath, sp, item.candidate.name())
 	}
 	return startResult{
 		prepared:            item,
@@ -3084,6 +3092,7 @@ func startCommitPatch(prepared *preparedStart, info sessionpkg.Info, now time.Ti
 		Now:                 now,
 		PrimedAt:            primedAt,
 		PromptHash:          promptHash,
+		RuntimeBinding:      prepared.runtimeBinding,
 	})
 	// The resume backstop (mc-bm1af): whether this incarnation was launched
 	// as a resume, for a later rapid crash; a fresh launch starts a new
@@ -3551,6 +3560,9 @@ func recoverRunningPendingCreate(
 		Now:                 now,
 		PrimedAt:            primedAt,
 		PromptHash:          promptHash,
+		// The runtime is already live: record the thread it hosts the
+		// session in, as every confirmed start does.
+		RuntimeBinding: startedRuntimeBinding(context.Background(), cityPath, sp, prepared.candidate.name()),
 	})
 	applied, err := sessionFrontDoor(store).CommitStartedIfCurrentUnder(prepared.candidate.info, metadata, lease, sessionpkg.StartCommitRefusingHolds())
 	if errors.Is(err, sessionpkg.ErrStartCommitHeld) {

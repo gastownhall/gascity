@@ -714,6 +714,13 @@ func TestCachingStoreScanFencesStress(t *testing.T) {
 		}
 	})
 	wg.Wait()
+	// The ordering macOS hit, forced on one row so every run checks it: the
+	// row's last local write, then a backing write behind the cache's back.
+	if b, err := cache.Get(ids[0]); err == nil {
+		title := "last-local"
+		_ = cache.UpdateIfMatch(ids[0], b.Revision, UpdateOpts{Title: &title})
+	}
+	_ = mem.SetMetadata(ids[0], "k", "after-local")
 
 	// Writers stopped: reads alone must drain every mark.
 	for round := 0; round < 3; round++ {
@@ -730,6 +737,16 @@ func TestCachingStoreScanFencesStress(t *testing.T) {
 		t.Fatalf("%d dirty marks survived reads no scan overlapped", dirty)
 	}
 
+	// A row written through the cache in the last five seconds keeps its
+	// cached copy against a snapshot (recentLocalMutation, the reconcile's
+	// mergeSkipRecentLocal): a backing write the stress landed after the
+	// row's last local write stays masked until that window passes. Which of
+	// the two wrote last is the schedule's choice (mc-80y4a: macOS ended on
+	// the backing's), so age the local writes, as after the creates, and the
+	// settling reconcile owes every row the backing's state.
+	for _, id := range ids {
+		ageLocalWrite(cache, id)
+	}
 	cache.ReconcileNowForTest()
 	for _, id := range ids {
 		truth, err := mem.Get(id)

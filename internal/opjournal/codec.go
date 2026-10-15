@@ -29,8 +29,8 @@ const (
 	beadStatusClosed    = "closed"
 )
 
-// ConversationLabel is the per-conversation key label of op rows; ListOpen
-// reads by it alone.
+// ConversationLabel is the per-conversation label of op rows. It stays on the
+// row for history reads; ListOpen reads by gc.op.open instead.
 func ConversationLabel(conv string) string { return labelOpConvPrefix + conv }
 
 // FactConversationLabel is the per-conversation key label of fact rows.
@@ -40,6 +40,8 @@ func FactConversationLabel(conv string) string { return labelFactConvPrefix + co
 const (
 	keySchema        = "gc.op.schema"
 	keyKind          = "gc.op.kind"
+	keyExecutor      = "gc.op.executor"
+	keyOpen          = "gc.op.open"
 	keyConversation  = "gc.op.conversation"
 	keyPrincipal     = "gc.op.principal"
 	keyActor         = "gc.op.actor"
@@ -53,6 +55,8 @@ const (
 	keyWake          = "gc.op.wake"
 	keyRole          = "gc.op.role"
 	keyOnUnsupported = "gc.op.on_unsupported"
+	keyNowGeneration = "gc.op.now_gen"
+	keyNowTurn       = "gc.op.now_turn"
 	keyOnFailure     = "gc.op.on_failure"
 	keyRestartMode   = "gc.op.restart_mode"
 	keyKillGrace     = "gc.op.kill_grace"
@@ -74,7 +78,6 @@ const (
 
 	keyStatus      = "gc.op.status"
 	keyTransitions = "gc.op.transitions"
-	keyArrivalSeq  = "gc.op.arrival_seq"
 	keyLaneSeq     = "gc.op.lane_seq"
 	keyAttempt     = "gc.op.attempt"
 
@@ -93,7 +96,8 @@ const (
 )
 
 // requestFields returns the digest-covered metadata of op: kind, policy,
-// scope, after and payload. Empty values mean "absent".
+// scope, after and payload. Empty values mean "absent". The executor is not
+// covered.
 func requestFields(op Op) map[string]string {
 	p, s := op.Policy, op.Scope
 	return map[string]string{
@@ -102,6 +106,8 @@ func requestFields(op Op) map[string]string {
 		keyWake:             string(p.Message.Wake),
 		keyRole:             string(p.Message.Role),
 		keyOnUnsupported:    string(p.Message.OnUnsupported),
+		keyNowGeneration:    formatInt(p.Message.NowGeneration),
+		keyNowTurn:          p.Message.NowTurn,
 		keyOnFailure:        string(p.Interrupt.OnFailure),
 		keyRestartMode:      string(p.Restart.Mode),
 		keyKillGrace:        formatDuration(p.Kill.Grace),
@@ -124,7 +130,9 @@ type transitionJSON struct {
 
 // EncodeOp renders op as its bead row. It refuses an op that would not decode
 // back: an unknown kind, an id that does not match its key, or any field
-// outside the schema.
+// outside the schema. It writes gc.op.open, the conversation id, while the op
+// is not closed, so ListOpen reads open rows by one metadata key; Revision is
+// never encoded.
 func EncodeOp(op Op) (beads.Bead, error) {
 	spec, err := Lookup(op.Kind)
 	if err != nil {
@@ -150,8 +158,14 @@ func EncodeOp(op Op) (beads.Bead, error) {
 		return beads.Bead{}, err
 	}
 	meta := requestFields(op)
+	open := op.Conversation
+	if op.Status == StatusClosed {
+		open = ""
+	}
 	fields := map[string]string{
 		keySchema:        strconv.Itoa(SchemaRev),
+		keyExecutor:      string(op.Executor),
+		keyOpen:          open,
 		keyConversation:  op.Conversation,
 		keyPrincipal:     op.Producer.Principal,
 		keyActor:         op.Producer.Actor,
@@ -167,7 +181,6 @@ func EncodeOp(op Op) (beads.Bead, error) {
 		keyCreatedAt:     formatOptionalTime(op.CreatedAt),
 		keyStatus:        string(op.Status),
 		keyTransitions:   transitions,
-		keyArrivalSeq:    formatUint(op.ArrivalSeq),
 		keyLaneSeq:       formatUint(op.LaneSeq),
 		keyAttempt:       formatInt(int64(op.Attempt)),
 	}
@@ -235,7 +248,8 @@ func checkOpID(op Op) error {
 	return nil
 }
 
-// DecodeOp reads an op row. It fails loudly — ErrUnsupportedKind for a kind
+// DecodeOp reads an op row. A row without gc.op.executor reads
+// ExecutorLegacy, and Revision is the bead's. It fails loudly — ErrUnsupportedKind for a kind
 // this build does not know, ErrUnsupportedSchema for a newer schema,
 // ErrUnsupportedValue for a vocabulary value it does not know, and
 // ErrCorruptOp for anything malformed — and never skips a row silently.
@@ -262,10 +276,16 @@ func DecodeOp(b beads.Bead) (Op, error) {
 	if err != nil {
 		return Op{}, fmt.Errorf("%w: row %s has kind %q", ErrUnsupportedKind, b.ID, kind)
 	}
+	executor := ExecutorKind(d.meta[keyExecutor])
+	if executor == "" {
+		executor = ExecutorLegacy
+	}
 	op := Op{
 		ID:            b.ID,
 		Conversation:  d.required(keyConversation),
 		Kind:          kind,
+		Executor:      executor,
+		Revision:      b.Revision,
 		SchemaRev:     SchemaRev,
 		ClientKey:     d.required(keyClientKey),
 		Payload:       d.meta[keyPayload],
@@ -275,6 +295,7 @@ func DecodeOp(b beads.Bead) (Op, error) {
 			Message: MessagePolicy{
 				When: When(d.meta[keyWhen]), Wake: Wake(d.meta[keyWake]),
 				Role: Role(d.meta[keyRole]), OnUnsupported: Fallback(d.meta[keyOnUnsupported]),
+				NowGeneration: d.int64(keyNowGeneration), NowTurn: d.meta[keyNowTurn],
 			},
 			Interrupt: InterruptPolicy{OnFailure: OnFailure(d.meta[keyOnFailure])},
 			Restart:   RestartPolicy{Mode: RestartMode(d.meta[keyRestartMode])},
@@ -301,7 +322,6 @@ func DecodeOp(b beads.Bead) (Op, error) {
 		Correlation: d.meta[keyCorrelation],
 		CreatedAt:   d.time(keyCreatedAt),
 		Status:      Status(d.required(keyStatus)),
-		ArrivalSeq:  d.uint64(keyArrivalSeq),
 		LaneSeq:     d.uint64(keyLaneSeq),
 		Attempt:     d.int(keyAttempt),
 		Cancel: Cancel{
@@ -338,6 +358,9 @@ func DecodeOp(b beads.Bead) (Op, error) {
 	}
 	if !slices.Contains(b.Labels, ConversationLabel(op.Conversation)) {
 		return Op{}, corruptf(b.ID, "missing label %s", ConversationLabel(op.Conversation))
+	}
+	if open := d.meta[keyOpen]; open != "" && open != op.Conversation {
+		return Op{}, corruptf(b.ID, "%s %q is not its conversation %s", keyOpen, open, op.Conversation)
 	}
 	if err := checkOpID(op); err != nil {
 		return Op{}, err
@@ -381,6 +404,7 @@ func checkVocabulary(id string, op Op) error {
 		{keyRestartMode, string(p.Restart.Mode), slices.Contains(restartModes, p.Restart.Mode)},
 		{keyGuarantee, string(p.Guarantee), slices.Contains(guarantees, p.Guarantee)},
 		{keyScope, string(op.Scope.Kind), slices.Contains(scopeKinds, op.Scope.Kind)},
+		{keyExecutor, string(op.Executor), op.Executor.Valid()},
 	} {
 		if f.value != "" && !f.known {
 			return fmt.Errorf("%w: row %s has %s %q", ErrUnsupportedValue, id, f.key, f.value)

@@ -1974,6 +1974,15 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			// carrying its old alias and runtime name.
 			continue
 		}
+		if !exists && tp.NamedCanonicalOnly {
+			// The canonical bead that made this on_demand session desired was
+			// in the tick's snapshot, but the fresh read above found it gone:
+			// an operator close won the race. Without work it is no longer
+			// desired, so neither reopen nor mint a row, which would sit open
+			// and asleep answering to the name until someone closed it again
+			// (mc-58gr9). The next tick no longer materializes it.
+			continue
+		}
 		state := syncSessionCachedState(sn, b, exists, sp)
 		if !exists && isConfiguredNamed {
 			extraMeta := startupKickoffReopenMetadata(tp.BoundStepID, now)
@@ -3518,8 +3527,29 @@ func reapRuntimesBoundToClosedBeads(
 	cityPath string,
 	stderr io.Writer,
 ) int {
+	return reapRuntimesBoundToClosedBeadsWith(store, sessionBeads, dt, sp, inv, cityPath, nil, stderr)
+}
+
+// reapRuntimesBoundToClosedBeadsWith is reapRuntimesBoundToClosedBeads that,
+// with ownerless (the controller's sightings and owner lookup) set, also
+// reaps a dead runtime whose owner no session store holds at all
+// (reapOwnerlessRuntime, CONTRACT v5.10j).
+func reapRuntimesBoundToClosedBeadsWith(
+	store beads.Store,
+	sessionBeads *sessionBeadSnapshot,
+	dt *drainTracker,
+	sp runtime.Provider,
+	inv *runtimeInventoryView,
+	cityPath string,
+	ownerless *ownerlessReap,
+	stderr io.Writer,
+) int {
 	if store == nil || sp == nil {
 		return 0
+	}
+	if ownerless != nil {
+		ownerless.sightings.begin()
+		defer ownerless.sightings.end()
 	}
 	if stderr == nil {
 		stderr = io.Discard
@@ -3591,6 +3621,19 @@ func reapRuntimesBoundToClosedBeads(
 		// goes past any cache: a reopen another process wrote without an
 		// event leaves a cached row still saying closed.
 		bead, err := beads.HandlesFor(store).Live.Get(liveID)
+		if errors.Is(err, beads.ErrNotFound) && ownerless != nil {
+			// No row at all: no closed owner to reap it, and no row's arm
+			// sees it. Only a dead runtime of this city, confirmed across
+			// sightings, is reaped (CONTRACT v5.10j).
+			var nameOwnerID string
+			if owner, ok := sessionBeads.FindInfoBySessionName(name); ok {
+				nameOwnerID = owner.ID
+			}
+			if reapOwnerlessRuntime(store, cityPath, name, liveID, nameOwnerID, sp, ownerless, stderr) {
+				reaped++
+			}
+			continue
+		}
 		if err != nil {
 			continue
 		}
@@ -3787,6 +3830,43 @@ func processRootReapable(live runtime.LiveRuntime, selfPID, subreaperPID int) bo
 		!live.ParentIsProviderInfrastructure && pidutil.IsReparentedOrphan(live.PPID, subreaperPID)
 }
 
+// processScanErrorLogRepeat is how often the orphan sweep repeats a scan
+// error of an unchanged shape (mc-ygved): unreadable entries recur every
+// tick on a busy host and say nothing new.
+const processScanErrorLogRepeat = 10 * time.Minute
+
+// processScanErrorLogs paces the orphan sweep's scan-error line per city.
+var processScanErrorLogs = &scanErrorLog{last: map[string]scanErrorLogged{}}
+
+// scanErrorLog remembers, per city, the last scan error the sweep logged.
+type scanErrorLog struct {
+	mu   sync.Mutex
+	last map[string]scanErrorLogged
+}
+
+type scanErrorLogged struct {
+	shape string
+	at    time.Time
+}
+
+// report reports whether err is logged now: a failure of the whole scan
+// always is (it bars rule 2 and must never be hidden); unreadable entries
+// are, the first time their shape (proctable.ScanErrorShape) is seen, and
+// again once processScanErrorLogRepeat has passed.
+func (l *scanErrorLog) report(city string, err error, now time.Time) bool {
+	if proctable.HasWholeScanFailure(err) {
+		return true
+	}
+	shape := proctable.ScanErrorShape(err)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if prev, ok := l.last[city]; ok && prev.shape == shape && now.Sub(prev.at) < processScanErrorLogRepeat {
+		return false
+	}
+	l.last[city] = scanErrorLogged{shape: shape, at: now}
+	return true
+}
+
 // sweepProcessTableOrphans terminates untracked, reparented process roots of
 // this city whose incarnation is over (processRootIncarnationOver). inv, when
 // set, is the tick's inventory view; without it, or when its pass is
@@ -3824,7 +3904,7 @@ func sweepProcessTableOrphans(
 		return 0
 	}
 	found, err := scanner.FindRuntimesBySessionID("")
-	if err != nil {
+	if err != nil && processScanErrorLogs.report(cityPath, err, time.Now()) {
 		fmt.Fprintf(stderr, "session reconciler: scanning process table for orphaned runtimes: %s\n", proctable.SummarizeScanError(err)) //nolint:errcheck
 	}
 	// IsTracked rests on the provider's session listing and per-session

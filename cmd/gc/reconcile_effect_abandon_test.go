@@ -1461,3 +1461,26 @@ func TestPendingCreateLeaseEnd(t *testing.T) {
 		})
 	}
 }
+
+// Kills the drift check deriving the fresh heal at the effect's time (the
+// #7760 review, probe P5): an agent heartbeat's hold that merely expires
+// between the pass and the PreWake moved nothing on the row, so A17's start
+// composed over an expired quarantine's timer heal lands as on main.
+func TestComposedStartHeartbeatExpiringBeforePreWakeIsNoDrift(t *testing.T) {
+	k, _ := launchKit(t, "asleep", "held_until", gatherNow.Add(30*time.Second).Format(time.RFC3339),
+		"quarantined_until", gatherNow.Add(-time.Minute).Format(time.RFC3339), "sleep_reason", "quarantine")
+	row := k.p.World.Census.Rows[k.it.Key]
+	healPatch, healClass, _ := timerHealPatch(row.Info, gatherNow)
+	heal := intent{Kind: intentRowHeal, Reason: decideTimerHeal, Key: k.it.Key, Patch: healPatch, Class: healClass}
+	e := &selectionEntry{Key: k.it.Key, Liveness: livenessGone, Desired: desireSleep, Template: "worker", AssignedWork: &assignedWorkView{BeadID: "gw-1"}}
+	it := (&rowFacts{w: k.p.World, k: k.it.Key, row: row, found: true, entry: e}).startHealed(heal)
+	if it.Kind != intentStart || it.Reason != decideHeartbeatRespawn {
+		t.Fatalf("startHealed = %+v, want A17's start carrying the quarantine's clear", it)
+	}
+	it.Deadline = gatherNow.Add(10 * time.Minute)
+	k.it = it
+	k.p.Clock = newFakePlannerClock(gatherNow.Add(time.Minute)) // the heartbeat's hold has ended by the PreWake
+	if s := k.runKind(); s.Outcome != settledLanded || len(k.starts()) != 1 {
+		t.Fatalf("settlement %+v starts %d, want the start landed as on main", s, len(k.starts()))
+	}
+}

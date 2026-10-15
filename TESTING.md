@@ -370,15 +370,19 @@ endpoints, credentials, timeouts, download and parallelism policy.
 
 | `GC_PREPUSH_SUITE` | runs |
 |---|---|
-| `auto` | `bazel test //... --config=remote-exec` when any rc file Bazel reads names a remote executor and the checkout's `worker-env` pin is current; `bazel test //... --config=fork-cache` otherwise; `make test-fast-parallel` when bazel is not installed, or for `fork-cache` when the pinned test `PATH` has no `go` |
+| `auto` | `bazel test //... --config=remote-exec` when any rc file Bazel reads names a remote executor and the checkout's `worker-env` pin is current; `bazel test //... --config=fork-cache` otherwise; `make test-fast-parallel` when bazel is not installed, or for `fork-cache` when the pinned test `PATH` has no `go` or this host's loader cannot resolve the pinned ICU runtime (or cannot say; see "Hosts that cannot load the pinned ICU runtime") |
 | `rbe` | `bazel test //... --config=remote-exec`; fails when no rc file names an executor or the `worker-env` pin is not current |
 | `cache` | `bazel test //... --config=fork-cache` |
 | `go` | `make test-fast-parallel` (plain `go test`, the pre-Bazel suite), behind a banner saying it is not what CI enforces |
 
 Whenever the push runs `make test-fast-parallel` instead of Bazel, whether
-by `auto`'s fallback or an explicit `go`, it prints a banner with the reason
-and the fix, and says CI runs `bazel test //...`: a push that passes the go
-suite can still fail nogo, formatting or a generated-artifact target.
+by `auto`'s fallback or an explicit `go`, it prints a banner before running
+anything. The banner names the engine, the reason, what CI still enforces and
+the knob that forces Bazel, and says CI runs `bazel test //...`: a push that
+passes the go suite can still fail nogo, formatting or a generated-artifact
+target. A green go run is not the Bazel suite; read it as "the go tests
+passed", never as "the push is clean". There is no value that skips the
+suite.
 
 `auto` asks Bazel which options its rc files set (`bazel info --announce_rc
 --config=remote-exec`, which contacts no remote): a non-empty
@@ -400,6 +404,98 @@ executed tests use the pinned test `PATH`, so Go must be at `/usr/local/go`
 `make test-fast-parallel` instead of the cache mode); overriding
 `--test_env=PATH` in `.bazelrc.local` works but gives your machine its own
 action keys, so nothing CI ran is a hit.
+
+**Hosts that cannot load the pinned ICU runtime.** Bazel-built test binaries
+load the ICU 74 runtime (`libicui18n.so.74`, `libicuuc.so.74`,
+`libicudata.so.74`) that `MODULE.bazel`'s pinned sysroot ships. A Linux x86_64
+host whose dynamic loader cannot resolve them (Fedora with only ICU 77, Debian
+12, Ubuntu 22.04) fails every locally executed test at startup, so the
+hooks do not launch Bazel there. Before choosing a local Bazel run they ask
+the loader itself (`.githooks/lib/local-runtime.sh`): it preloads the three
+sonames, plus a library that cannot exist, into `/usr/bin/true` and reads
+which preloads the loader refuses, bounded to 10s, without starting Bazel.
+The verdict is one of:
+
+| Verdict | Meaning | Hook acts as |
+|---|---|---|
+| `ok` | the loader resolves all three | the Bazel path |
+| `missing <sonames>` | the loader cannot resolve those | the go twin, behind a banner naming them |
+| `unknown <reason>` | no `timeout`/`gtimeout`/`perl` to bound the probe, no probe carrier (NixOS has no `/usr/bin/true`), a timeout, or loader output it does not recognize | the go twin, behind a banner naming the reason; never read as `ok` |
+| `n/a <os>/<arch>` | macOS and Linux arm64 are not probed: they build against their own libraries and their action keys never matched CI's | the Bazel path, as before |
+
+Only `auto` probes, and only on the local path: a remote executor needs
+nothing from the host loader, so `rbe` (and `auto` when it picks remote
+execution) never probes, and an explicit `rbe`, `cache`, `bazel` or `go` is
+never replaced. The probe checks the hook's own environment, so a Bazel
+server started earlier outside a private runtime can still differ. It does
+not detect other local-run failures, such as a host glibc older than the
+sysroot's.
+
+What each hook runs, by `auto`:
+
+| Host | Pre-push (`GC_PREPUSH_SUITE`) | Pre-commit docs (`GC_PRECOMMIT_DOCS`) |
+|---|---|---|
+| bazel not installed | `make test-fast-parallel` | `make check-docs-go` |
+| remote executor in an rc file, `worker-env` pin current | `bazel test //... --config=remote-exec` | probes anyway: `make check-docs` only if the local runtime is `ok` |
+| no executor, `go` absent from the pinned test `PATH` | `make test-fast-parallel` | not affected by the pinned `PATH`; decided by the probe, as in the rows below |
+| no executor, runtime `ok` or `n/a` | `bazel test //... --config=fork-cache` | `make check-docs` |
+| no executor, runtime `missing` or `unknown` | `make test-fast-parallel` | `make check-docs-go` |
+
+`GC_PRECOMMIT_DOCS` takes `auto`, `bazel` or `go` and, like
+`GC_PREPUSH_SUITE`, has no value that skips the check. With `go`, or when
+`auto` falls back, the hook runs `make check-docs-go` (`go test
+./test/docsync`) behind a banner of the same shape. A real docs failure still
+blocks the commit. What does not carry over: the Bazel target runs
+hermetically on its declared inputs, while the go run reads this host's whole
+tree and ICU, so a commit can pass here and still fail in CI
+(`TestNestedAgentsFilesHaveClaudeSymlink` is stricter under go, but an
+undeclared-input regression passes under go and fails under Bazel). Nothing
+on this path runs the rest of `bazel test //...`: nogo, formatting,
+generated-artifact and policy targets stay CI-only until you can run Bazel.
+The docs gate is the only pre-commit step that depends on the ICU runtime.
+
+What a banner looks like, from `.githooks/lib/push-suite.sh` run on a Fedora
+host with only ICU 77 and no remote executor (bazel and make stubbed so
+nothing built):
+
+```text
+pre-push: ========================================================================
+pre-push: running make test-fast-parallel (plain go test): NOT the bazel suite CI gates on.
+pre-push: why: this host cannot load libicui18n.so.74 libicuuc.so.74 libicudata.so.74, the ICU runtime that MODULE.bazel's sysroot pins (libicu74) and every Bazel-built test binary needs, so a local bazel test fails at startup
+pre-push: CI runs bazel test //... (.github/workflows/bazel.yml); a push that passes
+pre-push: here can still fail there (nogo lint/vet, formatting, generated artifacts).
+pre-push: fix: use a remote executor (GC_PREPUSH_SUITE=rbe, or build:remote-exec in .bazelrc.local), or make libicu74 resolvable to the loader (a side-by-side libicu74 install, or a private runtime with bazel --batch); GC_PREPUSH_SUITE=cache forces the local bazel suite regardless
+pre-push: ========================================================================
+```
+
+Pre-commit prints the same shape with a `pre-commit:` prefix for
+`make check-docs-go`. The fixes that yield a passing local Bazel suite, in the
+order to try them:
+
+1. A remote executor. For the push, `GC_PREPUSH_SUITE=rbe` or `build:remote-exec`
+   in `.bazelrc.local`. For commits that stage docs, `GC_PRECOMMIT_DOCS=bazel`
+   (`make check-docs` carries no `--config`, so a host whose rc files already
+   make plain `bazel` remote needs nothing else), plus
+   `BAZEL_FLAGS=--config=remote-exec` when the executor lives under
+   `build:remote-exec`. Pre-commit's `auto` does not look for an executor, so
+   such a host falls back to the go twin until `GC_PRECOMMIT_DOCS=bazel` is set.
+2. Make ICU 74 resolvable to the host loader: a side-by-side `libicu74`
+   install, which is the host operator's decision, or a process-private
+   runtime, running Bazel under it with `--batch` so Bazel starts a fresh
+   server in that environment instead of reusing one started outside it.
+
+`GC_PREPUSH_SUITE=cache` and `GC_PRECOMMIT_DOCS=bazel` force the local Bazel
+run regardless of the probe. On a host the probe called `missing`, the tests
+then fail at startup, so use them only after one of the fixes above.
+
+Do not work around a banner with a blanket `git commit --no-verify` or `git
+push --no-verify`: that skips every gate, including the ones that still work
+on this host. Do not edit the sysroot pin in `MODULE.bazel` or install host
+packages without the host operator's say-so.
+
+`TestBazelLocalRuntimePinMatchesProbe` fails when the probe's ICU major, the
+`MODULE.bazel` sysroot pin and `engdocs/bazel-quickstart.md`'s runtime line
+disagree; change them together.
 
 **Stale `worker-env` pin.** Every remote action requests
 `//platforms:rbe_worker`'s `worker-env` pin, and rbe-west's workers
@@ -1962,7 +2058,9 @@ Run them with `make check-docs`, which is:
 bazel test //test/docsync:docsync_test
 ```
 
-(`go test ./test/docsync` works for a quick local iteration.)
+(`go test ./test/docsync` works for a quick local iteration; it is also what
+the pre-commit hook runs, behind a banner, on a host that cannot run Bazel's
+test binaries. See "Hosts that cannot load the pinned ICU runtime".)
 
 ### Additional integration guidance
 

@@ -63,6 +63,11 @@ func TestIsPoolSessionSlotFreeable_Matrix(t *testing.T) {
 		{"asleep+runtime-missing", map[string]string{"state": "asleep", "sleep_reason": string(sessionpkg.SleepReasonRuntimeMissing)}, true},
 		{"asleep+provider-terminal-error", map[string]string{"state": "asleep", "sleep_reason": string(sessionpkg.SleepReasonProviderTerminalError)}, true},
 		{"asleep+max-session-age", map[string]string{"state": "asleep", "sleep_reason": string(sessionpkg.SleepReasonMaxSessionAge)}, true},
+		// A config-drifted pool session is never woken in place (that would run
+		// stale config), so it must be freeable or the pool's slot is lost
+		// forever once every seat drifts (srvcity sr-sxbc7: st/support.dispatch
+		// dark 17.5h with both slots asleep-for-drift and 59 ready steps queued).
+		{"asleep+config-drift", map[string]string{"state": "asleep", "sleep_reason": string(sessionpkg.SleepReasonConfigDrift)}, true},
 		// Owner ruling B1: a killed seat frees its slot unless the kill still
 		// owns the row (an honored kill fence). A fence past KillPendingGrace,
 		// or a malformed one, is not honored.

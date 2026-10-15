@@ -73,7 +73,8 @@ var allowed = map[string]Allowance{
 		Callers: []string{"commitAsyncStartResultWithContext", "commitStartFailure", "releaseBeadScopedPoolRuntimeLeased"},
 	},
 	cmdGC + ":cleanDeadRuntimeCorpse":            {Reason: "a dead runtime's cleanup, under the name's flock", Callers: []string{"cleanupDeadRuntimeSessionCorpses"}},
-	cmdGC + ":stopStillBoundClosedRuntimeLeased": {Reason: "the closed-row reaper: takes the lease itself, and decides again under it", Callers: []string{"reapRuntimesBoundToClosedBeads", "stopStillBoundClosedRuntime"}},
+	cmdGC + ":stopStillBoundClosedRuntimeLeased": {Reason: "the closed-row reaper: takes the lease itself, and decides again under it", Callers: []string{"reapRuntimesBoundToClosedBeadsWith", "stopStillBoundClosedRuntime"}},
+	cmdGC + ":reapOwnerlessRuntime":              {Reason: "the ownerless reap (CONTRACT v5.10j): takes the name's lease itself (tryRuntimeLease), and decides again under it"},
 	cmdGC + ":terminateDrainAckRuntimeByProcessTable": {
 		Reason:  "the drain-ack escalation's process kill, under controllerStopLease",
 		Callers: []string{"queueDrainAckForcedTermination"},
@@ -88,15 +89,15 @@ var allowed = map[string]Allowance{
 	cmdGC + ":statusProvider.Start":               {Reason: "the status wrapper forwarding to its base provider; its callers hold the lease"},
 	cmdGC + ":statusProvider.Stop":                {Reason: "the status wrapper forwarding to its base provider; its callers hold the lease"},
 	// internal/session: the Manager.
-	session + ":Manager.ensureRunning": {Reason: "takes the runtime lease (leaseRuntime) before its start, or runs under its caller's"},
+	session + ":Manager.ensureRunningOn": {Reason: "takes the runtime lease (leaseRuntime) before its start, or runs under its caller's (ensureRunning and ensureDeliverable delegate to it)"},
 	session + ":Manager.retryFreshStartAfterStaleKey": {
 		Reason:  "a start's stale-key retry, under the start's lease",
-		Callers: []string{"Manager.ensureRunning", "Manager.ensureRunningRuntimeOnly"},
+		Callers: []string{"Manager.ensureRunningOn", "Manager.ensureRunningRuntimeOnly"},
 	},
 	session + ":Manager.ensureRunningRuntimeOnly": {Reason: "the legacy start's runtime bring-up, under the candidate's lease", Callers: []string{"Manager.StartRuntimeOnly"}},
 	session + ":Manager.killExistingOrphans": {
 		Reason:  "a start's pre-start orphan kill, under the start's lease (CreateSession's: a residual)",
-		Callers: []string{"Manager.createStarted", "Manager.ensureRunning", "Manager.ensureRunningRuntimeOnly", "Manager.retryFreshStartAfterStaleKey"},
+		Callers: []string{"Manager.createStarted", "Manager.ensureRunningOn", "Manager.ensureRunningRuntimeOnly", "Manager.retryFreshStartAfterStaleKey"},
 	},
 	session + ":Manager.createStarted":             {Reason: "CreateSession's first start of a new row (a residual, CONTRACT §12.5)", Callers: []string{"Manager.CreateSession"}},
 	session + ":Manager.Suspend":                   {Reason: "a suspend takes the lease (leaseForStop); the city stop's sweep (ActorSweep) takes none"},

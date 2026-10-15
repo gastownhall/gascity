@@ -837,6 +837,33 @@ func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	if readyQueryFromArgs(query) != (ReadyQuery{}) {
 		return c.backing.Ready(query...)
 	}
+	if rows, ok := c.readyFromCache(ReadyQuery{}); ok {
+		return rows, nil
+	}
+	return c.backing.Ready(query...)
+}
+
+// ReadyPreferCache answers any ready query (tier, assignee, limit) from the
+// cache when the cache can vouch for it, under exactly the rules the
+// zero-query Ready applies: a fully live, dependency-complete cache whose
+// ready projection is not degraded, with dirty rows refreshed through the
+// bounded overlay first. When the cache is cold, partial, invalidated past the
+// overlay, or cannot vouch for one candidate's verdict, it reads the backing
+// with the caller's query, as Live.Ready does.
+//
+// It is a separate entry rather than a widening of Ready because Ready with
+// arguments has always meant "authoritative" to its existing callers; the
+// native Ready endpoint opts in explicitly.
+func (c *CachingStore) ReadyPreferCache(query ReadyQuery) ([]Bead, error) {
+	if rows, ok := c.readyFromCache(query); ok {
+		return rows, nil
+	}
+	return c.backing.Ready(query)
+}
+
+// readyFromCache computes query's ready set from the cache, reporting false
+// when the cache cannot answer and the caller must read the backing.
+func (c *CachingStore) readyFromCache(query ReadyQuery) ([]Bead, bool) {
 	var (
 		statusByID      map[string]string
 		workOutcomeByID map[string]string
@@ -864,13 +891,17 @@ func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 				}
 				statusByID[b.ID] = b.Status
 				workOutcomeByID[b.ID] = ReadinessWorkOutcome(b.Metadata)
-				if IsReadyCandidate(b, now) {
-					if c.readyProjectionUnknownLocked(b.ID) {
-						unanswerable = true
-						return
-					}
-					openBeads = append(openBeads, cloneBead(b))
+				if !IsReadyCandidateForTier(b, now, query.TierMode) {
+					continue
 				}
+				if query.Assignee != "" && b.Assignee != query.Assignee {
+					continue
+				}
+				if c.readyProjectionUnknownLocked(b.ID) {
+					unanswerable = true
+					return
+				}
+				openBeads = append(openBeads, cloneBead(b))
 			}
 			depsByID = make(map[string][]Dep, len(openBeads))
 			for _, b := range openBeads {
@@ -878,12 +909,12 @@ func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 			}
 		},
 	); err != nil {
-		return c.backing.Ready(query...)
+		return nil, false
 	}
 	if unanswerable {
 		// One candidate whose verdict the cache cannot vouch for costs this
 		// read the cache, not correctness: the live scan is slower and right.
-		return c.backing.Ready(query...)
+		return nil, false
 	}
 
 	var result []Bead
@@ -896,7 +927,10 @@ func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	// call; impose the canonical ready order so cache-served results
 	// match the SQL-backed ready readers (#3208).
 	sortBeadsReadyOrder(result)
-	return result, nil
+	if query.Limit > 0 && len(result) > query.Limit {
+		result = result[:query.Limit]
+	}
+	return result, true
 }
 
 // ReadyContext answers only from the dependency-complete active cache. It

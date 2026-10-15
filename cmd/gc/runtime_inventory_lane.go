@@ -407,6 +407,8 @@ func (l *runtimeInventoryLane) publish(ctx context.Context, listing inventoryLis
 	report.processProbes = probeProcesses(enrichCtx, attrs, hosts, concurrency)
 	report.processProbe = l.clock.Now().Sub(phase)
 
+	readSidecarRestartMarkers(enrichCtx, attrs, hosts, concurrency)
+
 	phase = l.clock.Now()
 	report.activityReads = readActivities(enrichCtx, attrs, hosts, concurrency)
 	report.activityRead = l.clock.Now().Sub(phase)
@@ -658,13 +660,14 @@ func (l *runtimeInventoryLane) enrich(ctx context.Context, leaves []inventoryBac
 				continue
 			}
 			attrs[name] = InventoryAttrs{
-				Incarnation:   e.Incarnation,
-				DeadKnown:     e.DeadKnown,
-				AllPanesDead:  e.AllPanesDead,
-				AttachedKnown: e.AttachedKnown,
-				Attached:      e.Attached,
-				ActivityKnown: e.ActivityKnown,
-				LastActivity:  e.LastActivity,
+				Incarnation:      e.Incarnation,
+				DeadKnown:        e.DeadKnown,
+				AllPanesDead:     e.AllPanesDead,
+				AttachedKnown:    e.AttachedKnown,
+				Attached:         e.Attached,
+				ActivityKnown:    e.ActivityKnown,
+				LastActivity:     e.LastActivity,
+				RestartRequested: e.RestartRequested,
 			}
 			hosts[name] = leaf.provider
 		}
@@ -929,6 +932,70 @@ func probeProcesses(ctx context.Context, attrs map[string]InventoryAttrs, hosts 
 		attrs[got.name] = a
 	}
 	return len(names)
+}
+
+// readSidecarRestartMarkers is the restart marker's GetMeta fallback
+// (CONTRACT v5.10q C7a-2b): a name on a leaf whose identity is cheap to
+// read (identityReadable: a local sidecar, acp or subprocess) and which has
+// no batched inventory to carry the marker has GC_RESTART_REQUESTED read
+// through GetMeta every pass. At
+// most concurrency run at a time within ctx, each on its own goroutine; an
+// error, a panic or a read past ctx leaves the marker unread, which A13 reads
+// as not requested.
+func readSidecarRestartMarkers(ctx context.Context, attrs map[string]InventoryAttrs, hosts map[string]runtime.Provider, concurrency int) {
+	var names []string
+	for name := range attrs {
+		leaf := hosts[name]
+		if _, batched := leaf.(runtime.InventoryProvider); batched {
+			continue
+		}
+		if identityReadable(leaf) {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	type answer struct {
+		name string
+		set  bool
+	}
+	answers := make(chan answer, len(names))
+	sem := make(chan struct{}, max(concurrency, 1))
+	reads := 0
+	for _, name := range names {
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+		}
+		if ctx.Err() != nil {
+			break
+		}
+		reads++
+		go func(leaf runtime.Provider) {
+			defer func() { <-sem }()
+			done := make(chan answer, 1)
+			go func() {
+				got := answer{name: name}
+				defer func() {
+					_ = recover()
+					done <- got
+				}()
+				v, err := leaf.GetMeta(name, "GC_RESTART_REQUESTED")
+				got.set = err == nil && strings.TrimSpace(v) != ""
+			}()
+			select {
+			case got := <-done:
+				answers <- got
+			case <-ctx.Done():
+				answers <- answer{name: name}
+			}
+		}(hosts[name])
+	}
+	for range reads {
+		got := <-answers
+		a := attrs[got.name]
+		a.RestartRequested = got.set
+		attrs[got.name] = a
+	}
 }
 
 // readActivities reads the last activity of every enriched name on a leaf

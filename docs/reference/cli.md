@@ -1478,8 +1478,13 @@ reaps orphaned dolt sql-server processes left over from leaked test
 harnesses. Invalid explicit ports, invalid city port settings, and
 live-resolution errors (ambiguous listeners, discovery failures) fail
 closed before cleanup stages run; only a clean live-resolution miss can
-reach the legacy default. The legacy default is a connection fallback
-only; it does not protect port 3307 from orphan-process reaping.
+reach the legacy default. Nothing proves the city's server listens on
+the legacy default, so a run that reaches it opens no SQL connection,
+drops and purges nothing, and records a legacy-fallback-port force
+blocker (--force then exits nonzero). Start the city's managed dolt;
+for an external server, pass --port or pin it with
+"gc beads city use-external". The legacy default does not protect port
+3307 from orphan-process reaping.
 
 Dry-run by default. Pass --force to actually drop, purge, and kill.
 Pass --max-orphan-dbs with --force to refuse all destructive cleanup
@@ -1555,6 +1560,10 @@ the failure object carries the code.
 - bead_payload_refused: --payload on bead.created, bead.updated, bead.closed
   or bead.deleted. Their payload is the bead row; use --bead-payload &lt;id&gt; so
   gc reads it from the store.
+- bead_payload_not_found: --bead-payload names a bead the store it resolves
+  to does not hold (bead.deleted excepted: the event is recorded with its
+  subject alone). Any other failure to read it is reported on stderr and the
+  event is still recorded, without the payload.
 
 --payload attaches arbitrary JSON to any other event type.
 

@@ -200,6 +200,24 @@ type NudgeRequest struct {
 	Delivery NudgeDelivery   `json:"delivery,omitempty"`
 	Source   string          `json:"source,omitempty"`
 	Wake     NudgeWakePolicy `json:"wake,omitempty"`
+	// DeliveryKey is the caller's stable identity for this one delivery. A
+	// caller that redelivers the same content after an unknown outcome
+	// passes the same key, so a runtime that deduplicates keyed deliveries
+	// ([runtime.KeyedNudgeProvider]) replays the first delivery instead of
+	// delivering twice. Distinct content needs a distinct key. Empty
+	// delivers unkeyed. Only default delivery is sure to carry the key:
+	// immediate and wait-idle delivery can go out unkeyed, as through
+	// [runtime.ImmediateNudgeProvider], whose NudgeNow takes no key.
+	DeliveryKey string `json:"delivery_key,omitempty"`
+}
+
+// nudgeDeliveryContext scopes req's delivery key to ctx for this one
+// delivery (see [runtime.WithNudgeDeliveryKey]).
+func nudgeDeliveryContext(ctx context.Context, req NudgeRequest) context.Context {
+	if req.DeliveryKey == "" {
+		return ctx
+	}
+	return runtime.WithNudgeDeliveryKey(ctx, req.DeliveryKey)
 }
 
 // NudgeResult reports whether the requested live delivery actually happened.

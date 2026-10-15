@@ -41,6 +41,9 @@ var (
 	ErrStatusMismatch = errors.New("opjournal: op status mismatch")
 	// ErrContention reports that a revision-fenced write lost every retry.
 	ErrContention = errors.New("opjournal: revision contention")
+	// ErrAttemptMoved reports an adoption that lost to another adopter: the
+	// op's attempt is no longer the one the adopter read.
+	ErrAttemptMoved = errors.New("opjournal: op attempt moved")
 	// ErrAlreadyTerminal reports a second, different outcome for a closed op.
 	ErrAlreadyTerminal = errors.New("opjournal: op already closed with another outcome")
 	// ErrBeadTypeUnregistered reports a store that refuses the "op" bead type.

@@ -216,3 +216,49 @@ func TestResolveBdScopeTargetSkipsProbesThatCannotChangeTheAnswer(t *testing.T) 
 		})
 	}
 }
+
+// TestGcBdPassthroughLoadsCityConfigOnce pins the passthrough's config cost: a
+// `gc bd` invocation composes the city config (packs, includes, site binding)
+// once, and every guard and env builder before the exec shares it. The
+// passthrough used to compose it once per helper (doBd, the by-id twin census,
+// the pinned-bd resolver twice, the hosted-credential probe), about 60 ms each
+// on a production-sized city, which was most of gc's own share of the command.
+//
+// The probe's own load count keeps it on the measured path: its one load runs
+// inside the scope. That the load is a memo answer rather than a composition of
+// its own is pinned by TestHostedCredentialProbeReadsThroughTheInvocationMemo,
+// because these counts cannot tell the two apart: a direct
+// config.LoadWithIncludesOptions call moves them exactly as a memo answer
+// does, the probe's by one and the composed count by none.
+func TestGcBdPassthroughLoadsCityConfigOnce(t *testing.T) {
+	for _, args := range [][]string{
+		{"show", "demo-abc"},
+		{"show", "demo-abc", "--json"},
+		{"list", "--json"},
+		{"show", "fe-abc"},
+		{"update", "demo-abc", "--status", "in_progress"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			newSingleExecTestCity(t)
+			// The probe's cache is process-wide; start it empty so this
+			// passthrough's probe loads.
+			resetHostedCredentialProbeCache()
+			t.Cleanup(resetHostedCredentialProbeCache)
+			before := composedCityConfigLoads.Load()
+			probesBefore := hostedCredentialProbeLoads.Load()
+			var stdout, stderr bytes.Buffer
+			if got := doBd(args, &stdout, &stderr); got != 0 {
+				t.Fatalf("doBd(%v) = %d, want 0; stderr=%q", args, got, stderr.String())
+			}
+			if loads := composedCityConfigLoads.Load() - before; loads != 1 {
+				t.Fatalf("doBd(%v) composed the city config %d times, want 1", args, loads)
+			}
+			if probes := hostedCredentialProbeLoads.Load() - probesBefore; probes != 1 {
+				t.Fatalf("doBd(%v) ran the hosted-credential probe's load %d times, want 1", args, probes)
+			}
+			if currentInvocationConfigMemo() != nil {
+				t.Fatal("doBd left its invocation config memo open")
+			}
+		})
+	}
+}

@@ -8863,7 +8863,7 @@ func TestControllerRuntimeSweepsProcessTableOrphansAfterClosedBeadReap(t *testin
 	lines := strings.Split(string(data), "\n")
 	reapCalls := 0
 	for i, line := range lines {
-		if !strings.Contains(line, "reapRuntimesBoundToClosedBeads(") {
+		if !strings.Contains(line, "reapRuntimesBoundToClosedBeads(") && !strings.Contains(line, "reapRuntimesBoundToClosedBeadsWith(") {
 			continue
 		}
 		reapCalls++

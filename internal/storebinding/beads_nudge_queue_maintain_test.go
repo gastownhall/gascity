@@ -380,3 +380,53 @@ func TestBeadsNudgeQueueStaleLeaseReclaimHasExactlyOneWinner(t *testing.T) {
 		}
 	}
 }
+
+// TestBeadsNudgeQueueSweepDeletesOverAnUnstampedList pins the sweep over a
+// store whose List carries no revision, as the native store's does: the delete
+// presents the revision of a fresh read, so a retired record past retention is
+// removed rather than skipped as stale on every pass.
+func TestBeadsNudgeQueueSweepDeletesOverAnUnstampedList(t *testing.T) {
+	backing := &unstampedListStore{SQLiteStore: openSQLiteNudgeQueueStore(t)}
+	queue := newNudgeQueue(t, backing)
+	now := time.Now().UTC()
+	// Delivered and acked, so the record's revision has moved past zero.
+	if err := queue.Enqueue(testNudgeItem("n-retired", "", now)); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if err := queue.Ack([]string{"n-retired"}, "delivered", "", "commit"); err != nil {
+		t.Fatalf("Ack: %v", err)
+	}
+	if _, err := queue.Maintain(context.Background(), now.Add(nudgeQueueTerminalRetention).Add(time.Hour)); err != nil {
+		t.Fatalf("Maintain: %v", err)
+	}
+	if got := queueRecordIDs(t, backing.SQLiteStore); len(got) != 0 {
+		t.Fatalf("records after the sweep = %v, want the retired record deleted", got)
+	}
+}
+
+// A retired record whose delete is refused on every attempt, while it stays
+// closed, terminal and past retention, is a fault Maintain reports rather than
+// a record it silently keeps forever.
+func TestBeadsNudgeQueueSweepReportsExhaustedRetries(t *testing.T) {
+	backing := &refusingGuardedWriteStore{SQLiteStore: openSQLiteNudgeQueueStore(t)}
+	queue := newNudgeQueue(t, backing)
+	now := time.Now().UTC()
+	if err := queue.Enqueue(testNudgeItem("n-retired", "", now)); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if err := queue.Ack([]string{"n-retired"}, "delivered", "", "commit"); err != nil {
+		t.Fatalf("Ack: %v", err)
+	}
+
+	backing.refuseDeletes = true
+	_, err := queue.Maintain(context.Background(), now.Add(nudgeQueueTerminalRetention).Add(time.Hour))
+	if err == nil {
+		t.Fatalf("Maintain = nil after %d refused deletes; want the exhausted retries reported", backing.refused)
+	}
+	if !strings.Contains(err.Error(), "revision conflicts") {
+		t.Fatalf("Maintain error = %v, want it to name the revision conflicts", err)
+	}
+	if backing.refused != nudgeQueueCASAttempts {
+		t.Fatalf("the sweep made %d guarded deletes, want %d", backing.refused, nudgeQueueCASAttempts)
+	}
+}

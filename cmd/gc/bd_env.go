@@ -802,8 +802,10 @@ var hostedCredentialProbeLoad = config.LoadOptions{SkipRevisionSnapshot: true}
 // next call without a restart. Errors are never cached.
 var hostedCredentialProbeCache sync.Map // normalized city.toml path → *hostedCredentialProbeEntry
 
-// hostedCredentialProbeLoads counts real config loads so tests can assert
-// that repeated probes reuse the entry.
+// hostedCredentialProbeLoads counts the probe's config loads (its cache misses)
+// so tests can assert that repeated probes reuse the entry. Inside an
+// invocation scope a miss is answered by the memo rather than composed again;
+// composedCityConfigLoads counts real compositions.
 var hostedCredentialProbeLoads atomic.Int64
 
 type hostedCredentialProbeEntry struct {
@@ -860,7 +862,10 @@ func citySelectsHostedBeadsCredentialProvider(cityPath string) (bool, error) {
 		}
 		hostedCredentialProbeCache.Delete(key)
 	}
-	cfg, prov, err := config.LoadWithIncludesOptions(fsys.OSFS{}, cityConfigPath, hostedCredentialProbeLoad)
+	// Inside an invocation scope (a `gc bd` passthrough) this is answered from
+	// the composition the rest of the command already read; see
+	// invocationConfigMemo. Outside one it is a plain composed load.
+	cfg, prov, err := loadComposedCityConfig(fsys.OSFS{}, cityConfigPath, hostedCredentialProbeLoad)
 	hostedCredentialProbeLoads.Add(1)
 	if err != nil {
 		return false, fmt.Errorf("load hosted Beads credential configuration: %w", err)
@@ -878,7 +883,10 @@ func citySelectsHostedBeadsCredentialProvider(cityPath string) (bool, error) {
 	}
 	// A city.toml rewritten while the load was in flight could leave an
 	// entry whose stat describes the new file but whose answer came from the
-	// old one; skip caching so the next call reloads.
+	// old one; skip caching so the next call reloads. A memo answer inside an
+	// invocation scope can predate both stats, which this cannot see; only
+	// the same one-shot command reads such an entry again, and it already
+	// shares that composition.
 	if after, ok := statHostedCredentialProbeSource(cityConfigPath); !ok || after != before {
 		cacheable = false
 	}

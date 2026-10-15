@@ -5277,6 +5277,47 @@ func TestStopManagedCityDoesNotUseStartupOrDriftTimeouts(t *testing.T) {
 	assertSingleStopWithBenignNoise(t, ops)
 }
 
+// stampedWriter is a Writer that records when each line was written.
+type stampedWriter struct {
+	mu     sync.Mutex
+	buf    bytes.Buffer
+	lines  []stampedLine
+	onLine func(string) // called with each line as it is written
+}
+
+type stampedLine struct {
+	at   time.Time
+	text string
+}
+
+func (w *stampedWriter) Write(p []byte) (int, error) {
+	if w.onLine != nil {
+		w.onLine(string(p))
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.lines = append(w.lines, stampedLine{at: time.Now(), text: string(p)})
+	return w.buf.Write(p)
+}
+
+// at is when the first write containing sub landed; zero when none did.
+func (w *stampedWriter) at(sub string) time.Time {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, l := range w.lines {
+		if strings.Contains(l.text, sub) {
+			return l.at
+		}
+	}
+	return time.Time{}
+}
+
+func (w *stampedWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.String()
+}
+
 // hangingListProvider wraps a runtime.Provider but makes ListRunning block
 // forever. This simulates a session/beads dependency call inside
 // CityRuntime.shutdown that never returns (#5256) — ListRunning has no
@@ -5317,23 +5358,39 @@ func TestStopManagedCityBoundsForcedShutdownWhenRuntimeHangs(t *testing.T) {
 		},
 	}
 
-	var stderr bytes.Buffer
+	// A sibling 100ms timer, armed as the forced phase begins (the grace's
+	// warning), fires as late as the forced wait's own timer on a loaded
+	// host: the forced phase is judged against it, not the wall clock.
+	var sibling atomic.Int64
+	stderr := &stampedWriter{onLine: func(line string) {
+		if strings.Contains(line, "after cancel") {
+			time.AfterFunc(100*time.Millisecond, func() { sibling.Store(time.Now().UnixNano()) })
+		}
+	}}
 	result := make(chan error, 1)
-	start := time.Now()
 	go func() {
-		result <- stopManagedCity(mc, cityPath, &stderr)
+		result <- stopManagedCity(mc, cityPath, stderr)
 	}()
 
 	select {
 	case err := <-result:
 		// ShutdownTimeout is 20ms, so the forced-stop timeout (5x) is
-		// 100ms: the promised ceiling is grace(20ms) + forced(100ms) =
-		// 120ms. A double wait on the forced timeout — the regression
-		// this test guards against — pushes that to ~220ms, so the bound
-		// here must sit strictly below that, not at the old, much looser
-		// 500ms that a doubled wait still passed.
-		if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
-			t.Fatalf("stopManagedCity took %s, want bounded near grace+forced (~120ms) even when CityRuntime.shutdown hangs", elapsed)
+		// 100ms, and with CityRuntime.shutdown hung the forced phase is
+		// one 100ms wait. A second full wait on the forced timeout, the
+		// regression this test guards against, ends it a further 100ms
+		// after the sibling timer. Timing the phase against that sibling
+		// leaves out timer lateness on a loaded host, and the bead
+		// provider's shutdown (an exec subprocess) after the phase.
+		forcedAt := stderr.at("after forced shutdown")
+		if stderr.at("after cancel").IsZero() || forcedAt.IsZero() {
+			t.Fatalf("stderr = %q, want the grace and forced-shutdown warnings", stderr.String())
+		}
+		siblingAt := time.Unix(0, sibling.Load())
+		if sibling.Load() == 0 {
+			siblingAt = time.Now() // not fired yet: the forced phase ended before it
+		}
+		if after := forcedAt.Sub(siblingAt); after >= 50*time.Millisecond {
+			t.Fatalf("the forced phase ended %s after one forced wait would have, want one forced wait (~100ms), not two (~200ms), even when CityRuntime.shutdown hangs", after)
 		}
 		if err == nil {
 			t.Fatal("stopManagedCity err = nil, want non-nil because city never exited and shutdown hung")

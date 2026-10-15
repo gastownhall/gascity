@@ -24,6 +24,9 @@ type finalizeFacts struct {
 	HonoredWake      bool
 	FreshWake        bool // wake_mode=fresh
 	RestartRequested bool
+	// AssignedBead is the work the allocation assigns the row, which
+	// SESS-612's fresh cycle anchors the row to.
+	AssignedBead string
 }
 
 // stopFinish builds a stopped row's finalize from its facts.

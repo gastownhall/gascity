@@ -191,7 +191,21 @@ func TestArmCloseDecides(t *testing.T) {
 		},
 		{name: "a user-held slot keeps it", liveness: livenessGone, desired: desireSleep, meta: []string{"state", "asleep", "sleep_reason", "idle", "slept_at", at(-time.Hour), "sleep_intent", "user-hold"}},
 		{name: "a desired floor seat asleep for no wake reason keeps its slot", liveness: livenessGone, desired: desireSleep, meta: []string{"state", "asleep", "sleep_reason", "no-wake-reason", "slept_at", at(-time.Hour)}},
-		{name: "a desired seat asleep for config drift keeps its slot", liveness: livenessGone, desired: desireSleep, meta: []string{"state", "asleep", "sleep_reason", "config-drift", "slept_at", at(-time.Hour)}},
+		{
+			// Unlike no-wake-reason (a genuine warm-standby: zero demand, cheap
+			// re-wake with unchanged config), a config-drifted seat is never
+			// woken in place (that would run stale config), so it must free its
+			// slot for a fresh seat against the current config — otherwise a
+			// pool whose every slot drifts goes dark forever (srvcity sr-sxbc7:
+			// st/support.dispatch dark 17.5h, both slots asleep-for-drift, 59
+			// ready routed steps queued, nothing closed or replaced it).
+			name: "a desired seat asleep for config drift frees its slot (srvcity sr-sxbc7)", liveness: livenessGone, desired: desireSleep, meta: []string{"state", "asleep", "sleep_reason", "config-drift", "slept_at", at(-time.Hour)},
+			want: decideClosePoolSlot, check: func(t *testing.T, it intent) {
+				if it.Patch["state"] != "config-drift" || it.Closing.Repair || it.Closing.Killed {
+					t.Errorf("patch %v closing %+v, want a config-drift close, no repair, not killed", it.Patch, it.Closing)
+				}
+			},
+		},
 		{name: "an undesired pool row under a user hold keeps its slot (§12.2 #27)", liveness: livenessGone, desired: desireDrain, drain: drainOrphaned, meta: []string{"state", "asleep", "sleep_intent", "user-hold"}},
 		{name: "an undesired pool row under a wait hold keeps its slot", liveness: livenessGone, desired: desireDrain, drain: drainOrphaned, meta: []string{"state", "asleep", "wait_hold", "w-1"}},
 		{name: "an undesired pool row under a quarantine keeps its slot", liveness: livenessGone, desired: desireDrain, drain: drainOrphaned, meta: []string{"state", "asleep", "quarantined_until", at(time.Hour)}},

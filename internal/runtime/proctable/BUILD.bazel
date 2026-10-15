@@ -32,21 +32,57 @@ go_library(
     importpath = "github.com/gastownhall/gascity/internal/runtime/proctable",
     visibility = ["//:__subpackages__"],
     deps = [
-        "//internal/runtime",
+        "//internal/pidutil",
     ] + select({
+        "@rules_go//go/platform:aix": [
+            "//internal/runtime",
+        ],
         "@rules_go//go/platform:android": [
-            "//internal/pidutil",
+            "//internal/runtime",
         ],
         "@rules_go//go/platform:darwin": [
-            "//internal/pidutil",
+            "//internal/runtime",
             "@org_golang_x_sys//unix",
+        ],
+        "@rules_go//go/platform:dragonfly": [
+            "//internal/runtime",
+        ],
+        "@rules_go//go/platform:freebsd": [
+            "//internal/runtime",
+        ],
+        "@rules_go//go/platform:illumos": [
+            "//internal/runtime",
         ],
         "@rules_go//go/platform:ios": [
-            "//internal/pidutil",
+            "//internal/runtime",
             "@org_golang_x_sys//unix",
         ],
+        "@rules_go//go/platform:js": [
+            "//internal/runtime",
+        ],
         "@rules_go//go/platform:linux": [
-            "//internal/pidutil",
+            "//internal/runtime",
+        ],
+        "@rules_go//go/platform:netbsd": [
+            "//internal/runtime",
+        ],
+        "@rules_go//go/platform:openbsd": [
+            "//internal/runtime",
+        ],
+        "@rules_go//go/platform:osx": [
+            "//internal/runtime",
+        ],
+        "@rules_go//go/platform:plan9": [
+            "//internal/runtime",
+        ],
+        "@rules_go//go/platform:qnx": [
+            "//internal/runtime",
+        ],
+        "@rules_go//go/platform:solaris": [
+            "//internal/runtime",
+        ],
+        "@rules_go//go/platform:windows": [
+            "//internal/runtime",
         ],
         "//conditions:default": [],
     }),

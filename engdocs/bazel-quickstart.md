@@ -89,7 +89,16 @@ certificate, so plain `bazel test` already executes remotely.
 The pre-push hook picks the mode automatically: remote execution when any rc
 file (`.bazelrc.local`, `~/.bazelrc`, `/etc/bazel.bazelrc`) names a remote
 executor and the checkout's `worker-env` pin is main's, the read-only cache
-otherwise.
+otherwise. The cache mode runs misses on this machine, so it needs the
+runtime libraries above: on a Linux x86_64 host whose dynamic loader cannot
+resolve ICU 74 (`libicui18n.so.74`, `libicuuc.so.74`, `libicudata.so.74`),
+`auto` runs the plain-Go suite behind a banner instead, and pre-commit runs
+`make check-docs-go` instead of `make check-docs`. Neither is the Bazel suite
+CI gates on. A remote executor needs nothing from the host loader; otherwise
+make `libicu74` resolvable (a side-by-side install, or a private runtime with
+`bazel --batch`). `GC_PREPUSH_SUITE` and `GC_PRECOMMIT_DOCS` force an engine;
+TESTING.md "Hosts that cannot load the pinned ICU runtime" has the full
+matrix.
 
 ### 3. Verify
 

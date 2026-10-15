@@ -26,6 +26,9 @@ import (
 // hot per-tick paths (order dispatch) must reuse an already-resolved
 // *config.City instead of driving this counter once per scope per tick
 // (ga-237xpr) — tests assert on this counter to guard against a regression.
+// It counts loader calls: inside an invocation scope a call the memo answers
+// still counts here (see invocationConfigMemo). composedCityConfigLoads counts
+// the compositions actually performed.
 var loadCityConfigCalls atomic.Int64
 
 const agentAddPromptScaffold = `You are the {{ .AgentName }} agent.
@@ -63,7 +66,7 @@ func loadCityConfigFS(fs fsys.FS, tomlPath string, warningWriter ...io.Writer) (
 	if err := ensureBuiltinPacksForConfigLoad(fs, tomlPath, resolveLoadCityConfigWarningWriter(warningWriter...)); err != nil {
 		return nil, err
 	}
-	cfg, prov, err := config.LoadWithIncludesOptions(fs, tomlPath, skipRevisionSnapshot)
+	cfg, prov, err := loadComposedCityConfig(fs, tomlPath, skipRevisionSnapshot)
 	if err != nil {
 		return nil, err
 	}
@@ -94,7 +97,7 @@ func loadCityConfigWithoutBuiltinPackRefresh(cityPath string, warningWriter ...i
 // only in skipping the refresh; opts is what separates a blocking load from an
 // advisory one.
 func loadPrematerializedCityConfig(fs fsys.FS, tomlPath string, opts config.LoadOptions, warnings io.Writer) (*config.City, error) {
-	cfg, prov, err := config.LoadWithIncludesOptions(fs, tomlPath, opts)
+	cfg, prov, err := loadComposedCityConfig(fs, tomlPath, opts)
 	if err != nil {
 		return nil, err
 	}
