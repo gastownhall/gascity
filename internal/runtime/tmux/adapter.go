@@ -118,6 +118,9 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		return err
 	}
 
+	// Start types into the incarnation it creates, never under a caller's
+	// input fence (FI9).
+	ctx = withoutInputFence(ctx)
 	err = doStartSession(ctx, p.startOps(cfg, true), name, cfg, p.cfg.SetupTimeout)
 	if err == nil {
 		p.cache.Invalidate()
@@ -285,7 +288,8 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 	// launchOrchestration and then recorded nowhere: success returned with
 	// neither confirmed delivery nor the durable evidence that suppression
 	// is predicated on.
-	if err := doRelaunchSession(ctx, p.startOps(cfg, false), name, cfg, p.cfg.SetupTimeout); err != nil {
+	// Like Start, never under a caller's input fence (FI9).
+	if err := doRelaunchSession(withoutInputFence(ctx), p.startOps(cfg, false), name, cfg, p.cfg.SetupTimeout); err != nil {
 		return err
 	}
 	p.cache.Invalidate()
@@ -704,19 +708,22 @@ func (p *Provider) resetInterruptedTurn(ctx context.Context, name string) error 
 			return fmt.Errorf("preparing detached gemini rewind: %w", err)
 		}
 	}
-	if err := p.nudgeNow(ctx, name, runtime.TextContent("/rewind")); err != nil {
+	// Input runs under ctx only inside a fenced operation; unfenced it runs
+	// under Background, as it always has (FI7). ctx bounds the waits.
+	in := inputCtx(ctx)
+	if err := p.nudgeNow(in, name, runtime.TextContent("/rewind")); err != nil {
 		return fmt.Errorf("opening gemini rewind: %w", err)
 	}
 	if err := p.waitForPane(ctx, name, geminiRewindDialogVisible); err != nil {
 		return fmt.Errorf("waiting for gemini rewind picker: %w", err)
 	}
-	if err := p.sendKeys(ctx, name, "Up"); err != nil {
+	if err := p.sendKeys(in, name, "Up"); err != nil {
 		return fmt.Errorf("selecting interrupted gemini turn: %w", err)
 	}
 	if err := sleepWithContext(ctx, 100*time.Millisecond); err != nil {
 		return err
 	}
-	if err := p.sendKeys(ctx, name, "Enter"); err != nil {
+	if err := p.sendKeys(in, name, "Enter"); err != nil {
 		return fmt.Errorf("opening gemini rewind confirmation: %w", err)
 	}
 	if err := p.waitForPane(ctx, name, geminiRewindConfirmationVisible); err != nil {
@@ -727,14 +734,14 @@ func (p *Provider) resetInterruptedTurn(ctx context.Context, name string) error 
 		return fmt.Errorf("capturing gemini rewind confirmation: %w", err)
 	}
 	if !strings.Contains(pane, "No code changes to revert.") {
-		if err := p.sendKeys(ctx, name, "Down"); err != nil {
+		if err := p.sendKeys(in, name, "Down"); err != nil {
 			return fmt.Errorf("choosing gemini rewind-only action: %w", err)
 		}
 		if err := sleepWithContext(ctx, 100*time.Millisecond); err != nil {
 			return err
 		}
 	}
-	if err := p.sendKeys(ctx, name, "Enter"); err != nil {
+	if err := p.sendKeys(in, name, "Enter"); err != nil {
 		return fmt.Errorf("confirming gemini rewind: %w", err)
 	}
 	if err := p.waitForPane(ctx, name, geminiRewindComplete); err != nil {

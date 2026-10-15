@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -405,6 +406,42 @@ func TestFencedNudgeParityRealTmux(t *testing.T) {
 		}
 	})
 
+	// TestNudgeRecoversStagedDraftSwallowedByPasteIngest's recovery case on
+	// the fenced path: a codex-shaped TUI eats the first submits of a large
+	// paste, and the fenced nudge still lands it exactly once.
+	t.Run("staged draft recovered", func(t *testing.T) {
+		if _, err := exec.LookPath("python3"); err != nil {
+			t.Skip("python3 required for the fake TUI")
+		}
+		script, err := filepath.Abs(filepath.Join("testdata", "nudge_faketui_codex.py"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		tm := testTmux()
+		tm.cfg.NudgeReadyTimeout = 10 * time.Second
+		tm.cfg.NudgeLockTimeout = 30 * time.Second
+		logPath := filepath.Join(t.TempDir(), "tui.log")
+		const swallow = submitEnterMaxSends + 2
+		name := fmt.Sprintf("gt-fence-staged-%d", time.Now().UnixNano()%100000)
+		cmd := fmt.Sprintf("python3 %s %s %d %.3f 30", shellQuote(script), shellQuote(logPath), swallow, 0.1)
+		start(t, tm, name, cmd, "python3", map[string]string{"GC_PROVIDER": "codex"})
+		eventually(t, "the fake TUI to paint", captureHas(tm, name, containsFn("fake-codex-tui")))
+		large := "gc-staged-draft-probe " + strings.Repeat("work the claimed bead ", 60)
+		if err := fencedTmuxProvider(tm).NudgeFenced(ctx, name, runtime.TextContent(large), immediate(f)); err != nil {
+			t.Fatalf("NudgeFenced = %v, want the staged draft recovered", err)
+		}
+		raw, err := os.ReadFile(logPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Count(string(raw), "\tSUBMIT\t"); got != 1 {
+			t.Fatalf("TUI submits = %d, want exactly 1", got)
+		}
+		if got := strings.Count(string(raw), "\tSWALLOWED\t"); got != swallow {
+			t.Fatalf("TUI swallowed submits = %d, want %d", got, swallow)
+		}
+	})
+
 	t.Run("declared submit sequence", func(t *testing.T) {
 		origSeq := nudgeSubmitKeySequences
 		nudgeSubmitKeySequences = map[string][]string{"testfam": {"Escape", "Enter"}}
@@ -419,5 +456,97 @@ func TestFencedNudgeParityRealTmux(t *testing.T) {
 			t.Fatal(err)
 		}
 		eventually(t, "the declared Escape", captureHas(tm, name, containsFn("^[")))
+	})
+}
+
+// The guard's false branch on real tmux: between an operation's precheck and
+// its first guarded command the pane's fence changes, or the agent pane is
+// killed while a human's split survives in its window holding the same
+// digest (tmux evaluates if-shell in the survivor then). Each misses, typed
+// nothing anywhere, and leaves no buffer.
+func TestFencedGuardFalseBranchRealTmux(t *testing.T) {
+	p := fenceTestProvider(t, "fg")
+	f := runtime.InputFence{Generation: 1, Epoch: 1, Token: "token-g"}
+	newer := runtime.InputFence{Generation: 2, Epoch: 1, Token: "token-g"}
+	verified := func(t *testing.T, name string) (context.Context, string) {
+		t.Helper()
+		g := newPaneGuard(name, f.Digest(), false)
+		ctx := withPaneGuard(context.Background(), g)
+		if err := g.verify(ctx, p.tm); err != nil {
+			t.Fatalf("verify: %v", err)
+		}
+		target, err := p.tm.agentPaneTarget(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ctx, target
+	}
+
+	t.Run("fence changed after verify", func(t *testing.T) {
+		const name = "gc-fence-flip"
+		file := startRawCat(t, p, name, f, nil)
+		ctx, target := verified(t, name)
+		if _, err := p.tm.run("set-option", "-p", "-F", "-t", target, inputFenceOption, newer.Digest()+".#{pane_id}"); err != nil {
+			t.Fatal(err)
+		}
+		_, err := p.tm.runCtx(ctx, "send-keys", "-t", target, "-l", "for-old")
+		var miss *runtime.FenceMismatchError
+		if !errors.As(err, &miss) || miss.Found != newer.Digest() || miss.Partial {
+			t.Fatalf("guarded paste = %v, want a non-partial miss finding the new fence", err)
+		}
+		if b := listBuffers(t, p); b != "" {
+			t.Fatalf("buffers left: %q", b)
+		}
+		// An own-fence delivery is the signal that anything earlier landed.
+		if err := p.SendKeysFenced(context.Background(), name, newer, "Enter"); err != nil {
+			t.Fatal(err)
+		}
+		if got := waitTyped(t, file, containsFn("\r")); got != "\r" {
+			t.Fatalf("pane received %q", got)
+		}
+	})
+
+	t.Run("agent pane killed, split survives", func(t *testing.T) {
+		const name = "gc-fence-split"
+		_ = startRawCat(t, p, name, f, nil)
+		dir := t.TempDir()
+		human := filepath.Join(dir, "human")
+		if _, err := p.tm.run("split-window", "-d", "-t", paneTarget(name), rawCatCommand(human)); err != nil {
+			t.Fatal(err)
+		}
+		waitCaptureFile(t, human)
+		ctx, target := verified(t, name)
+		out, err := p.tm.run("list-panes", "-t", paneTarget(name), "-F", "#{pane_id}")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var survivor string
+		for _, id := range strings.Fields(out) {
+			if !strings.HasSuffix(target, "."+id) {
+				survivor = id
+			}
+		}
+		// The survivor even holds the agent's digest as its own fence.
+		if _, err := p.tm.run("set-option", "-p", "-F", "-t", survivor, inputFenceOption, f.Digest()+".#{pane_id}"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := p.tm.run("kill-pane", "-t", target); err != nil {
+			t.Fatal(err)
+		}
+		_, err = p.tm.runCtx(ctx, "send-keys", "-t", target, "-l", "for-agent")
+		var miss *runtime.FenceMismatchError
+		if !errors.As(err, &miss) || miss.Found != runtime.FenceFoundAbsent {
+			t.Fatalf("guarded paste into a killed pane = %v, want an absent miss", err)
+		}
+		if b := listBuffers(t, p); b != "" {
+			t.Fatalf("buffers left: %q", b)
+		}
+		// Unfenced keys to the survivor are the signal anything earlier landed.
+		if _, err := p.tm.run("send-keys", "-t", survivor, "Enter"); err != nil {
+			t.Fatal(err)
+		}
+		if got := waitTyped(t, human, containsFn("\r")); got != "\r" {
+			t.Fatalf("the human's pane received %q", got)
+		}
 	})
 }

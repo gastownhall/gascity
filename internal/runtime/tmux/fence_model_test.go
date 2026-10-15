@@ -46,6 +46,29 @@ type fenceModel struct {
 	// beforeGuard runs before the n-th guard condition (1-based) is
 	// evaluated, with m locked: a test respawns or kills the pane there.
 	beforeGuard func(m *fenceModel, n int)
+	// failGuard makes the n-th guard (1-based) fail with its error, unrun.
+	failGuard map[int]error
+	// beforeRead runs before the n-th read of a pane's fence (1-based;
+	// display-message of fenceReadFormat), with m locked.
+	beforeRead func(m *fenceModel, n int)
+	reads      int
+	// beforeAdopt runs before an adoption's if-shell, with m locked.
+	beforeAdopt func(m *fenceModel)
+
+	// The window's other pane, a human's split: survivorOwn is its own
+	// @gc_fence value. active names the session's active pane ("" is the
+	// agent pane). paneGone kills the agent pane while the window lives:
+	// lenient commands (display-message, if-shell) then fall back to the
+	// survivor, as tmux does, strict ones (send-keys, paste-buffer,
+	// set-option) fail, counted in strictGone. orphan lists the session's
+	// panes with no agent pane (errAgentPaneGone).
+	survivorOwn      string
+	active           string
+	paneGone, orphan bool
+	strictGone       int
+	onSurvivor       bool // formats expand for the survivor
+	// detached answers the attachment probe: no client attached.
+	detached bool
 	// overlay is captured instead of the pane until key overlayUntil lands.
 	overlay, overlayUntil string
 	// onEvent lets a static pane react to input (screen transitions).
@@ -53,6 +76,9 @@ type fenceModel struct {
 }
 
 const fenceModelSession = "lab"
+
+// fenceModelSurvivor is the id of the agent pane's window's other pane.
+const fenceModelSurvivor = "%0"
 
 func newFenceModel(inner executor, env map[string]string) *fenceModel {
 	return &fenceModel{
@@ -116,6 +142,13 @@ func (m *fenceModel) dispatch(args []string, nested bool) (string, error) {
 		return "", ErrSessionNotFound
 	}
 	switch args[0] {
+	case "send-keys", "paste-buffer", "set-option":
+		if m.paneGone && m.namesAgentPane(flagValue(args, "-t")) {
+			m.strictGone++
+			return "", ErrSessionNotFound // tmux: can't find pane / no such pane
+		}
+	}
+	switch args[0] {
 	case "if-shell":
 		return m.ifShell(args)
 	case "set-option":
@@ -127,7 +160,15 @@ func (m *fenceModel) dispatch(args []string, nested bool) (string, error) {
 		format := args[len(args)-1]
 		switch {
 		case strings.Contains(format, inputFenceOption), strings.HasPrefix(format, fenceAdoptMissPrefix):
-			return m.expand(format), nil
+			if format == fenceReadFormat {
+				m.reads++
+				if m.beforeRead != nil {
+					m.beforeRead(m, m.reads)
+				}
+			}
+			return m.expandAt(flagValue(args, "-t"), format), nil
+		case m.detached && format == "#{session_name}|#{session_attached}":
+			return fenceModelSession + "|0", nil
 		case format == "#{pane_in_mode}":
 			if m.inMode {
 				return "1", nil
@@ -166,6 +207,9 @@ func (m *fenceModel) dispatch(args []string, nested bool) (string, error) {
 		}
 	case "list-panes":
 		if row, ok := fakeAgentPaneRow(args); ok {
+			if m.orphan || m.paneGone {
+				return "orphan\t@1.%0", nil
+			}
 			return row, nil
 		}
 	}
@@ -236,6 +280,9 @@ func (m *fenceModel) ifShell(args []string) (string, error) {
 	cond := args[4]
 	if strings.HasPrefix(cond, "#{&&:") {
 		m.guards++
+		if err := m.failGuard[m.guards]; err != nil {
+			return "", err
+		}
 		if m.beforeGuard != nil {
 			m.beforeGuard(m, m.guards)
 		}
@@ -243,8 +290,11 @@ func (m *fenceModel) ifShell(args []string) (string, error) {
 			return "", ErrSessionNotFound
 		}
 	}
+	if cond == fenceNotOwnCondition && m.beforeAdopt != nil {
+		m.beforeAdopt(m)
+	}
 	branch := args[6]
-	if v := m.expand(cond); v != "" && v != "0" {
+	if v := m.expandAt(args[3], cond); v != "" && v != "0" {
 		branch = args[5]
 	}
 	cmds, err := parseCommandString(branch)
@@ -262,6 +312,22 @@ func (m *fenceModel) ifShell(args []string) (string, error) {
 		}
 	}
 	return strings.Join(outs, "\n"), nil
+}
+
+// namesAgentPane reports whether target addresses the agent pane by id.
+func (m *fenceModel) namesAgentPane(target string) bool {
+	return strings.HasSuffix(target, "."+m.paneID)
+}
+
+// expandAt expands s in target's context: the agent pane, or the survivor
+// when target is the session's active pane and that is the survivor, or
+// when it names the agent pane and that is gone (tmux's fallback to the
+// window's active pane).
+func (m *fenceModel) expandAt(target, s string) string {
+	survivor := m.paneGone || (!m.namesAgentPane(target) && m.active != "" && m.active != m.paneID)
+	m.onSurvivor = survivor
+	defer func() { m.onSurvivor = false }()
+	return m.expand(s)
 }
 
 // expand expands the tmux formats the fence uses.
@@ -312,6 +378,18 @@ func (m *fenceModel) evalFormat(f string) string {
 		default:
 			matched, _ := path.Match(a, b)
 			return bool01(matched)
+		}
+	}
+	if m.onSurvivor {
+		switch f {
+		case inputFenceOption:
+			return m.survivorOwn
+		case "pane_id":
+			return fenceModelSurvivor
+		case "pane_dead":
+			return "0"
+		case "pane_pid":
+			return "777"
 		}
 	}
 	switch f {

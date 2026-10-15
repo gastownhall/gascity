@@ -475,10 +475,15 @@ func (t *Tmux) approvalDedup() *approvalDedup {
 //
 // Inside a fenced operation (see Provider.fenced) every pane input command
 // (send-keys, paste-buffer) runs through the operation's guard instead, so
-// it lands only in the incarnation the fence names.
+// it lands only in the incarnation the fence names. Outside one, an input
+// command runs under context.Background(), as it always has (FI7): a
+// caller's canceled context never cuts an unfenced key sequence short.
 func (t *Tmux) runCtx(ctx context.Context, args ...string) (string, error) {
-	if g := paneGuardFrom(ctx); g != nil && isPaneInputCommand(args) {
-		return g.run(ctx, t, args)
+	if isPaneInputCommand(args) {
+		if g := paneGuardFrom(ctx); g != nil {
+			return g.run(ctx, t, args)
+		}
+		ctx = context.Background()
 	}
 	return t.runCtxRaw(ctx, args...)
 }
@@ -534,7 +539,8 @@ func wrapError(err error, stderr string, args []string) error {
 		strings.Contains(stderr, "no such session") ||
 		strings.Contains(stderr, "can't find session") ||
 		strings.Contains(stderr, "can't find window") ||
-		strings.Contains(stderr, "can't find pane") {
+		strings.Contains(stderr, "can't find pane") ||
+		strings.Contains(stderr, "no such pane") {
 		return ErrSessionNotFound
 	}
 
@@ -2355,9 +2361,11 @@ func hiddenAttachedKeyBytes(key string) ([]byte, bool) {
 // created with a single pane, so the two agree unless a human splits or adds
 // windows in a Gemini session; send-keys paths are resolved instead.
 //
-// Inside a fenced operation each write is preceded by a check of the agent
-// pane's fence (paneGuard.checkLive): a PTY write cannot be made conditional
-// inside tmux, so this path is checked rather than atomic.
+// Inside a fenced operation each write is preceded by a check that the
+// session's active pane, which receives the bytes, is the verified agent pane
+// holding the fence (paneGuard.checkLive), so a human's focused split gets
+// nothing. A PTY write cannot be made conditional inside tmux, so this path
+// is checked rather than atomic.
 func (t *Tmux) sendHiddenAttachedKeys(ctx context.Context, target string, keys ...string) (bool, error) {
 	client := t.hiddenAttachClient(target)
 	if client == nil {
@@ -2388,7 +2396,7 @@ func (t *Tmux) sendHiddenAttachedKeys(ctx context.Context, target string, keys .
 	// after the last key lands. A failed write records nothing.
 	commitPoke := t.beginPoke(target)
 	for _, seq := range seqs {
-		if err := t.writeHiddenAttached(ctx, client, seq); err != nil {
+		if err := t.writeHiddenAttached(ctx, client, seq, false); err != nil {
 			return true, err
 		}
 	}
@@ -2396,9 +2404,9 @@ func (t *Tmux) sendHiddenAttachedKeys(ctx context.Context, target string, keys .
 	return true, nil
 }
 
-// writeHiddenAttached writes input through a hidden attach client, after a
-// fenced operation's check of the agent pane's fence.
-func (t *Tmux) writeHiddenAttached(ctx context.Context, client *hiddenAttachClient, input []byte) error {
+// writeHiddenAttached writes input (text, or else keys) through a hidden
+// attach client, after a fenced operation's check of the agent pane's fence.
+func (t *Tmux) writeHiddenAttached(ctx context.Context, client *hiddenAttachClient, input []byte, text bool) error {
 	g := paneGuardFrom(ctx)
 	if g != nil {
 		if err := g.checkLive(ctx, t); err != nil {
@@ -2409,7 +2417,7 @@ func (t *Tmux) writeHiddenAttached(ctx context.Context, client *hiddenAttachClie
 		return err
 	}
 	if g != nil {
-		g.markApplied()
+		g.markApplied(text)
 	}
 	return nil
 }
@@ -2420,7 +2428,8 @@ func (t *Tmux) writeHiddenAttached(ctx context.Context, client *hiddenAttachClie
 // no look for a permission prompt between the text and Enter; it must gain
 // NudgeSession's (#2892) before it serves a Claude session. Like
 // sendHiddenAttachedKeys it reaches the client's active pane, not necessarily
-// the marked agent pane.
+// the marked agent pane; inside a fenced operation each write first checks
+// that the active pane is the verified agent pane (paneGuard.checkLive).
 func (t *Tmux) sendHiddenAttachedText(ctx context.Context, target, text string) (bool, error) {
 	client := t.hiddenAttachClient(target)
 	if client == nil {
@@ -2436,13 +2445,13 @@ func (t *Tmux) sendHiddenAttachedText(ctx context.Context, target, text string) 
 	// echo instead of counting this nudge as the agent responding (see
 	// discountPokeActivity). A failed write records nothing.
 	commitPoke := t.beginPoke(target)
-	if err := t.writeHiddenAttached(ctx, client, []byte(text)); err != nil {
+	if err := t.writeHiddenAttached(ctx, client, []byte(text), true); err != nil {
 		return true, err
 	}
 	if t.cfg.DebounceMs > 0 {
 		time.Sleep(time.Duration(t.cfg.DebounceMs) * time.Millisecond)
 	}
-	if err := t.writeHiddenAttached(ctx, client, []byte{'\r'}); err != nil {
+	if err := t.writeHiddenAttached(ctx, client, []byte{'\r'}, false); err != nil {
 		return true, err
 	}
 	commitPoke()

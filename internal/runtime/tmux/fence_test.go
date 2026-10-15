@@ -6,7 +6,6 @@ import (
 	"slices"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -21,7 +20,7 @@ func TestGuardedInputArgsGolden(t *testing.T) {
 	}
 	want := []string{
 		"if-shell", "-F", "-t", "=lab:@1.%1",
-		"#{&&:#{==:#{@gc_fence},1172ccc4fbf9f6a6.#{pane_id}},#{!=:#{pane_dead},1}}",
+		"#{&&:#{==:#{pane_id},%1},#{&&:#{==:#{@gc_fence},1172ccc4fbf9f6a6.#{pane_id}},#{!=:#{pane_dead},1}}}",
 		"'paste-buffer' '-d' '-r' '-b' 'gc-nudge-1-2' '-t' '=lab:@1.%1'",
 		"'delete-buffer' '-b' 'gc-nudge-1-2' ; 'display-message' '-p' '-t' '=lab:@1.%1' 'gc-fence-miss:#{@gc_fence}|#{pane_id}|#{pane_dead}'",
 	}
@@ -56,7 +55,7 @@ func TestGuardedInputArgsRefusesUnsafeArgs(t *testing.T) {
 func TestFencedSendKeysRefusesNonKeysAndForeignTargets(t *testing.T) {
 	m := newFenceModel(nil, fenceEnv(testFence)).ownFenced(testFence)
 	p := fenceModelProvider(m)
-	g := newPaneGuard(fenceModelSession, testFence.Digest())
+	g := newPaneGuard(fenceModelSession, testFence.Digest(), false)
 	ctx := withPaneGuard(context.Background(), g)
 	for _, args := range [][]string{
 		{"send-keys", "-t", "=lab:@1.%1", "hello world"},
@@ -149,7 +148,8 @@ func TestFencedGoneAndNoServerNeverSucceed(t *testing.T) {
 				return errors.As(err, &miss) && miss.Found == runtime.FenceFoundDead
 			}},
 			{"no server", func(m *fenceModel) { m.noServer = true }, func(err error) bool {
-				return errors.Is(err, runtime.ErrRuntimeUnavailable) && !errors.Is(err, runtime.ErrFenceMismatch)
+				return errors.Is(err, runtime.ErrRuntimeUnavailable) && errors.Is(err, ErrNoServer) &&
+					!errors.Is(err, runtime.ErrFenceMismatch) && !runtime.IsSessionGone(err)
 			}},
 			{"gone mid-operation", func(m *fenceModel) { m.beforeGuard = func(m *fenceModel, _ int) { m.gone = true } }, func(err error) bool {
 				var miss *runtime.FenceMismatchError
@@ -304,24 +304,38 @@ func TestAdoptInputFenceRequiresProvenPanePID(t *testing.T) {
 	}
 }
 
-// FI9: Start's keystrokes (the startup dialogs, the startup prompt) are
-// never guarded by a caller's fence, even when Start's context carries one:
-// they type into the incarnation Start is creating.
+// FI9: Start's and Relaunch's keystrokes (the startup dialogs, the startup
+// prompt) are never guarded by a caller's fence, even when their context
+// carries one, or a fenced operation's guard: they type into the
+// incarnation they are creating.
 func TestStartRelaunchNeverGuardedByCallerFence(t *testing.T) {
-	m := newFenceModel(nil, fenceEnv(testFence))
-	m.overlay, m.overlayUntil = "Resume from summary\nResume full session as-is\nEnter to confirm", "Enter"
-	m.screen = staticShellScreen
-	tm := fenceModelProvider(m).tm
-	ops := &tmuxStartOps{tm: tm}
-	ctx := runtime.WithInputFence(context.Background(), runtime.InputFence{Generation: 9, Epoch: 9, Token: "caller"})
-	_ = tm.DismissKnownDialogs(ctx, fenceModelSession, 10*time.Millisecond)
-	_ = ops.sendKeys(fenceModelSession, "startup prompt")
-	bare, events, _ := m.snapshot()
-	if len(bare) == 0 || !slices.Contains(events, "text:startup prompt") || !slices.Contains(events, "key:Enter") {
-		t.Fatalf("bare %q, events %q: want the startup keys sent directly", bare, events)
-	}
-	if m.guards != 0 {
-		t.Fatalf("%d startup commands ran under a guard", m.guards)
+	accept := true
+	caller := runtime.InputFence{Generation: 9, Epoch: 9, Token: "caller"}
+	for name, launch := range map[string]func(ctx context.Context, p *Provider, cfg runtime.Config) error{
+		"start": func(ctx context.Context, p *Provider, cfg runtime.Config) error {
+			return p.Start(ctx, fenceModelSession, cfg)
+		},
+		"relaunch": func(ctx context.Context, p *Provider, cfg runtime.Config) error {
+			return p.Relaunch(ctx, fenceModelSession, cfg)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			m := newFenceModel(nil, fenceEnv(testFence))
+			m.overlay, m.overlayUntil = "Resume from summary\nResume full session as-is\nEnter to confirm", "Enter"
+			m.screen = staticShellScreen
+			p := fenceModelProvider(m)
+			ctx := runtime.WithInputFence(context.Background(), caller)
+			ctx = withPaneGuard(ctx, newPaneGuard(fenceModelSession, caller.Digest(), false))
+			cfg := runtime.Config{Command: "sh", WorkDir: t.TempDir(), Env: fenceEnv(testFence), Nudge: "startup prompt", AcceptStartupDialogs: &accept}
+			_ = launch(ctx, p, cfg)
+			bare, events, _ := m.snapshot()
+			if len(bare) == 0 || !slices.Contains(events, "key:Enter") {
+				t.Fatalf("bare %q, events %q: want the startup keys sent directly", bare, events)
+			}
+			if m.guards != 0 {
+				t.Fatalf("%d startup commands ran under a guard", m.guards)
+			}
+		})
 	}
 }
 
@@ -329,5 +343,254 @@ func TestStartRelaunchNeverGuardedByCallerFence(t *testing.T) {
 func TestTmuxInputFencingIsStatic(t *testing.T) {
 	if got := (&Provider{}).InputFencing("anything"); got != runtime.InputFencingAtomic {
 		t.Fatalf("InputFencing = %q, want atomic", got)
+	}
+}
+
+// hiddenFenceOps are the fenced operations that type through a hidden
+// attach client when the session has one.
+var hiddenFenceOps = map[string]func(p *Provider) error{
+	"text": func(p *Provider) error {
+		return p.NudgeFenced(context.Background(), fenceModelSession, runtime.TextContent("hello"), runtime.FencedNudge{Fence: testFence, Immediate: true})
+	},
+	"keys": func(p *Provider) error {
+		return p.SendKeysFenced(context.Background(), fenceModelSession, testFence, "Up", "Enter")
+	},
+	"interrupt": func(p *Provider) error { return p.InterruptFenced(context.Background(), fenceModelSession, testFence) },
+}
+
+// The hidden attach client's PTY writes cannot be conditional inside tmux,
+// so each is checked right before it: a new incarnation that takes the pane
+// after the precheck and before the first write gets nothing, and the miss
+// is not partial. Kills a hidden path that skips its check.
+func TestHiddenAttachInputChecksFenceBeforeEachWrite(t *testing.T) {
+	newer := runtime.InputFence{Generation: 3, Epoch: 1, Token: "newer"}
+	for name, op := range hiddenFenceOps {
+		t.Run(name, func(t *testing.T) {
+			m := claudeModel("")()
+			m.beforeRead = func(m *fenceModel, n int) {
+				if n == 2 { // verify read the pane first; this is the write's check
+					m.own = newer.Digest() + "." + m.paneID
+				}
+			}
+			p := fenceModelProvider(m)
+			hidden := installHiddenClient(t, p)
+			err := op(p)
+			var miss *runtime.FenceMismatchError
+			if !errors.As(err, &miss) || miss.Found != newer.Digest() || miss.Partial {
+				t.Fatalf("err = %v, want a non-partial miss finding the new incarnation", err)
+			}
+			if got := hidden.String(); got != "" {
+				t.Fatalf("hidden client received %q", got)
+			}
+		})
+	}
+}
+
+// tmux delivers a client's input to its active pane: a human who split a
+// session and left focus on their own pane gets no fenced input through the
+// hidden client, and the miss says the target is unproven.
+func TestHiddenAttachInputRefusesActivePaneOtherThanAgent(t *testing.T) {
+	for name, op := range hiddenFenceOps {
+		t.Run(name, func(t *testing.T) {
+			m := claudeModel("")()
+			m.active = fenceModelSurvivor
+			m.survivorOwn = testFence.Digest() + "." + fenceModelSurvivor // even a copied value
+			p := fenceModelProvider(m)
+			hidden := installHiddenClient(t, p)
+			err := op(p)
+			var miss *runtime.FenceMismatchError
+			if !errors.As(err, &miss) || miss.Found != runtime.FenceFoundUnproven || miss.Partial {
+				t.Fatalf("err = %v, want a non-partial unproven miss", err)
+			}
+			if got := hidden.String(); got != "" {
+				t.Fatalf("hidden client received %q", got)
+			}
+		})
+	}
+}
+
+// tmux evaluates if-shell -t and display-message -t in the window's active
+// pane when the target pane is gone. A guard must still miss (absent), from
+// its condition and not only from the inner command's strict target, even
+// when the surviving pane holds the same digest.
+func TestGuardMissesWhenAgentPaneGoneInLiveWindow(t *testing.T) {
+	m := newFenceModel(nil, fenceEnv(testFence)).ownFenced(testFence)
+	m.screen = staticShellScreen
+	m.survivorOwn = testFence.Digest() + "." + fenceModelSurvivor
+	m.beforeGuard = func(m *fenceModel, _ int) { m.paneGone = true }
+	err := fenceModelProvider(m).SendKeysFenced(context.Background(), fenceModelSession, testFence, "Enter")
+	var miss *runtime.FenceMismatchError
+	if !errors.As(err, &miss) || miss.Found != runtime.FenceFoundAbsent || miss.Partial {
+		t.Fatalf("err = %v, want a non-partial absent miss", err)
+	}
+	if _, events, _ := m.snapshot(); len(events) != 0 {
+		t.Fatalf("events %q", events)
+	}
+	if m.strictGone != 0 {
+		t.Fatalf("the guard's condition passed in the survivor: %d inner commands tried the gone pane", m.strictGone)
+	}
+}
+
+// verify's read falls back the same way: a pane killed between the agent
+// pane lookup and the fence read reads as absent, not as the survivor.
+func TestVerifyReadOfGonePaneIsAbsent(t *testing.T) {
+	m := newFenceModel(nil, fenceEnv(testFence)).ownFenced(testFence)
+	m.screen = staticShellScreen
+	m.survivorOwn = testFence.Digest() + "." + fenceModelSurvivor
+	m.beforeRead = func(m *fenceModel, _ int) { m.paneGone = true }
+	err := fenceModelProvider(m).SendKeysFenced(context.Background(), fenceModelSession, testFence, "Enter")
+	var miss *runtime.FenceMismatchError
+	if !errors.As(err, &miss) || miss.Found != runtime.FenceFoundAbsent {
+		t.Fatalf("err = %v, want an absent miss", err)
+	}
+	if m.guards != 0 {
+		t.Fatalf("%d guarded commands ran after a failed verify", m.guards)
+	}
+}
+
+// Adoption whose pane dies before its if-shell: the fallback either reports
+// the survivor's own value or fails the strict set-option; both are absent.
+func TestAdoptionOfGonePaneIsAbsent(t *testing.T) {
+	for _, survivorOwn := range []string{"", "1234567890abcdef." + fenceModelSurvivor} {
+		m := newFenceModel(nil, fenceEnv(testFence))
+		m.screen = staticShellScreen
+		m.survivorOwn = survivorOwn
+		m.beforeAdopt = func(m *fenceModel) { m.paneGone = true }
+		err := fenceModelProvider(m).SendKeysFenced(context.Background(), fenceModelSession, testFence, "Enter")
+		var miss *runtime.FenceMismatchError
+		if !errors.As(err, &miss) || miss.Found != runtime.FenceFoundAbsent {
+			t.Fatalf("survivor own %q: err = %v, want an absent miss", survivorOwn, err)
+		}
+		if m.guards != 0 {
+			t.Fatalf("survivor own %q: %d guarded commands ran", survivorOwn, m.guards)
+		}
+	}
+}
+
+// A marked session whose agent pane is gone is absent.
+func TestFencedInputToMarkedSessionWithoutAgentPaneIsAbsent(t *testing.T) {
+	m := newFenceModel(nil, fenceEnv(testFence)).ownFenced(testFence)
+	m.orphan = true
+	err := fenceModelProvider(m).SendKeysFenced(context.Background(), fenceModelSession, testFence, "Enter")
+	var miss *runtime.FenceMismatchError
+	if !errors.As(err, &miss) || miss.Found != runtime.FenceFoundAbsent {
+		t.Fatalf("err = %v, want an absent miss", err)
+	}
+}
+
+// A server lost on a send the body swallows (the copy-mode exit) is still
+// the operation's result: a fenced call never reports success it could not
+// deliver.
+func TestFencedSwallowedNoServerIsUnavailable(t *testing.T) {
+	m := claudeModel("")()
+	m.inMode = true
+	m.failGuard = map[int]error{1: ErrNoServer}
+	err := fenceModelProvider(m).NudgeFenced(context.Background(), fenceModelSession, runtime.TextContent("hello"), runtime.FencedNudge{Fence: testFence, Immediate: true})
+	if !errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.Is(err, runtime.ErrFenceMismatch) {
+		t.Fatalf("err = %v, want ErrRuntimeUnavailable", err)
+	}
+	if _, events, _ := m.snapshot(); !slices.Contains(events, "text:hello") {
+		t.Fatalf("events %q: want the body to have run past the swallowed failure", events)
+	}
+}
+
+// Partial counts only what carries the operation's effect: a nudge's text
+// (and what follows it), and any key of a keys, interrupt or ctx-fenced
+// operation. A copy-mode exit, a composer clear or a dialog key before a
+// nudge's text never makes a miss partial.
+func TestFencePartialCountsOnlyEffectInput(t *testing.T) {
+	t.Run("nudge miss after the composer clear", func(t *testing.T) {
+		m := newFenceModel(nil, fenceEnv(testFence)).ownFenced(testFence)
+		m.env["GC_PROVIDER"] = "opencode"
+		m.screen = staticShellScreen
+		m.inMode, m.detached = true, true
+		m.beforeGuard = func(m *fenceModel, _ int) {
+			if slices.Contains(m.events, "key:C-u") {
+				m.dead = true
+			}
+		}
+		err := fenceModelProvider(m).NudgeFenced(context.Background(), fenceModelSession, runtime.TextContent("hello"), runtime.FencedNudge{Fence: testFence, Immediate: true})
+		var miss *runtime.FenceMismatchError
+		if !errors.As(err, &miss) || miss.Partial {
+			_, events, _ := m.snapshot()
+			t.Fatalf("err = %v (events %q), want a non-partial miss", err, events)
+		}
+		if _, events, _ := m.snapshot(); !slices.Equal(events, []string{"copy:cancel", "key:C-u"}) {
+			t.Fatalf("events %q, want the copy-mode exit and the clear before the miss", events)
+		}
+	})
+	t.Run("nudge miss after the text", func(t *testing.T) {
+		m := newFenceModel(nil, fenceEnv(testFence)).ownFenced(testFence)
+		m.env["GC_PROVIDER"] = "opencode"
+		m.screen = staticShellScreen
+		m.beforeGuard = func(m *fenceModel, _ int) {
+			if slices.Contains(m.events, "text:hello") {
+				m.dead = true
+			}
+		}
+		err := fenceModelProvider(m).NudgeFenced(context.Background(), fenceModelSession, runtime.TextContent("hello"), runtime.FencedNudge{Fence: testFence, Immediate: true})
+		var miss *runtime.FenceMismatchError
+		if !errors.As(err, &miss) || !miss.Partial {
+			t.Fatalf("err = %v, want a partial miss", err)
+		}
+	})
+	t.Run("copy-mode exit never counts", func(t *testing.T) {
+		m := newFenceModel(nil, fenceEnv(testFence)).ownFenced(testFence)
+		p := fenceModelProvider(m)
+		g := newPaneGuard(fenceModelSession, testFence.Digest(), false)
+		ctx := withPaneGuard(context.Background(), g)
+		if err := g.verify(ctx, p.tm); err != nil {
+			t.Fatal(err)
+		}
+		target := fakeAgentPane(fenceModelSession)
+		if _, err := p.tm.runCtx(ctx, "send-keys", "-t", target, "-X", "cancel"); err != nil {
+			t.Fatal(err)
+		}
+		m.dead = true
+		_, err := p.tm.runCtx(ctx, "send-keys", "-t", target, "Enter")
+		var miss *runtime.FenceMismatchError
+		if !errors.As(err, &miss) || miss.Partial {
+			t.Fatalf("err = %v, want a non-partial miss", err)
+		}
+	})
+}
+
+// Fenced literal text that looks like a flag is text.
+func TestFencedLiteralTextThatLooksLikeAFlag(t *testing.T) {
+	for _, text := range []string{"-t", "-l", "-X", "-H"} {
+		m := newFenceModel(nil, fenceEnv(testFence)).ownFenced(testFence)
+		m.env["GC_PROVIDER"] = "opencode"
+		m.screen = staticShellScreen
+		err := fenceModelProvider(m).NudgeFenced(context.Background(), fenceModelSession, runtime.TextContent(text), runtime.FencedNudge{Fence: testFence, Immediate: true})
+		if err != nil {
+			t.Fatalf("NudgeFenced(%q) = %v", text, err)
+		}
+		if _, events, _ := m.snapshot(); !slices.Contains(events, "text:"+text) {
+			t.Fatalf("NudgeFenced(%q) typed %q", text, events)
+		}
+	}
+}
+
+// FI7: unfenced input commands keep main's behavior, never cut short by the
+// caller's context; only a fenced operation's input runs under it.
+func TestUnfencedInputCommandIgnoresCallerContext(t *testing.T) {
+	m := newFenceModel(nil, fenceEnv(testFence))
+	tm := fenceModelProvider(m).tm
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := tm.runCtx(ctx, "send-keys", "-t", fakeAgentPane(fenceModelSession), "Enter"); err != nil {
+		t.Fatalf("unfenced send-keys under a canceled ctx = %v", err)
+	}
+	if _, events, _ := m.snapshot(); !slices.Equal(events, []string{"key:Enter"}) {
+		t.Fatalf("events %q", events)
+	}
+}
+
+// wrapError classifies set-option's missing-pane answer as a missing
+// session, as it does tmux's other "can't find" answers.
+func TestWrapErrorNoSuchPane(t *testing.T) {
+	err := wrapError(errors.New("exit status 1"), "no such pane: =lab:@0.%1", []string{"set-option"})
+	if !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("wrapError(no such pane) = %v, want ErrSessionNotFound", err)
 	}
 }
