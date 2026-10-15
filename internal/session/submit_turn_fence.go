@@ -58,8 +58,8 @@ const (
 // Message dispositions of a turn-fenced deliver-now (telemetry label values).
 const (
 	turnInterruptMessageDelivered = "delivered"
-	turnInterruptMessageQueued    = "queued"   // follow-up queue, next boundary
-	turnInterruptMessageDeferred  = "deferred" // queued by the send (held actor, dead agent)
+	turnInterruptMessageQueued    = "queued"   // follow-up queue of a live row, next boundary
+	turnInterruptMessageDeferred  = "deferred" // queued for a wake: by the send (held actor, dead agent), or at the boundary on an asleep or drained row
 	turnInterruptMessageFailed    = "failed"
 )
 

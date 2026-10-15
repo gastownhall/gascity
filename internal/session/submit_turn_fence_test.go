@@ -953,7 +953,7 @@ func TestFencedDeliverNowRecordsOneOutcome(t *testing.T) {
 		name    string
 		opts    fenceFixtureOpts
 		script  []string
-		arrange func(fenceFixture)
+		arrange func(*testing.T, fenceFixture)
 		wantErr bool
 		// line is the log line after `deliver now for "<session>": `.
 		line, point string
@@ -963,7 +963,7 @@ func TestFencedDeliverNowRecordsOneOutcome(t *testing.T) {
 		},
 		{
 			name: "deferred over a dead agent", script: []string{"t1"},
-			arrange: func(x fenceFixture) { x.f.Zombies[x.info.SessionName] = true },
+			arrange: func(_ *testing.T, x fenceFixture) { x.f.Zombies[x.info.SessionName] = true },
 			line:    `interrupt stale (turn "t1"); message deferred`, point: "stale||deferred=1",
 		},
 		{
@@ -971,8 +971,19 @@ func TestFencedDeliverNowRecordsOneOutcome(t *testing.T) {
 			line: `interrupt settled (turn "t1"), unfenced_interrupt; message queued`, point: "settled|unfenced_interrupt|queued=1",
 		},
 		{
+			name: "deferred at the boundary on a dormant row",
+			arrange: func(t *testing.T, x fenceFixture) {
+				if err := x.mgr.store.SetMetadataBatch(x.info.ID, map[string]string{"state": string(StateAsleep)}); err != nil {
+					t.Fatal(err)
+				}
+				x.f.TurnReadErrors[x.info.SessionName] = []error{runtime.ErrRuntimeUnavailable, runtime.ErrRuntimeUnavailable}
+			},
+			script: []string{"t1"},
+			line:   `interrupt unavailable (turn ""); message deferred`, point: "unavailable||deferred=1",
+		},
+		{
 			name: "send rejected", wantErr: true,
-			arrange: func(x fenceFixture) { x.f.NudgeErrors[x.info.SessionName] = rejected },
+			arrange: func(_ *testing.T, x fenceFixture) { x.f.NudgeErrors[x.info.SessionName] = rejected },
 			line:    `interrupt no_turn (turn ""); message failed: sending message to session: ` + rejected.Error(), point: "no_turn||failed=1",
 		},
 		{
@@ -994,7 +1005,7 @@ func TestFencedDeliverNowRecordsOneOutcome(t *testing.T) {
 			x := newFenceFixture(t, tc.opts)
 			x.script(tc.script...)
 			if tc.arrange != nil {
-				tc.arrange(x)
+				tc.arrange(t, x)
 			}
 			if _, err := x.submit(t, fenceMsg); (err != nil) != tc.wantErr {
 				t.Fatalf("Submit error = %v, want error %t", err, tc.wantErr)
@@ -1092,7 +1103,8 @@ func TestT3BridgeProfileStopTurnStaysUnfenced(t *testing.T) {
 // or live agent, send failures and the composites, every deliver-now ends in
 // exactly one of delivered, queued or an error with nothing queued; sends at
 // most one interrupt and never names an empty turn; carries the text
-// verbatim; and reports Deferred only when the send queued it.
+// verbatim; and on these live rows reports Deferred only when the send queued
+// it over a dead agent.
 func TestFencedDeliverNowSettlesTheMessageExactlyOnce(t *testing.T) {
 	scripts := [][]string{nil, {"t1", "t1", ""}, {"t1", "t2"}, {"t1"}, {"", "t2"}, {"t1", ""}, {"t1", "t1", "t3"}}
 	sendErrs := map[string]error{
