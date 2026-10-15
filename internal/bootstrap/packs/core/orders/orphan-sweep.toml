@@ -10,8 +10,9 @@
 # keeps one names it and declares a partial outcome (order.skipped).
 # The gate is asked at most once per identity per run, within
 # GC_ORPHAN_SWEEP_GATE_BUDGET_SECONDS (default 120, under the 300s exec order
-# timeout); claimants it did not get to are kept, named,
-# and retried on a later run.
+# timeout; where timeout(1) exists, an ask still running at the deadline is
+# abandoned); claimants it did not get to or did not hear back from are kept,
+# named, and retried on a later run.
 [order]
 description = "Reset beads assigned to dead agents back to the work pool"
 trigger = "cooldown"

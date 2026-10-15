@@ -32,7 +32,7 @@
     },
     "reason": {
       "type": "string",
-      "description": "The test that decided the verdict. 'roster' and 'session_record' are local; 'foreign_binding' (another city's canonical naming, ga-8yi7ne; 'detail' names the binding) and 'absent_from_roster' (possibly one of ours whose config and records are gone) are foreign; 'no_config' and 'lookup_failed' are unknown.",
+      "description": "The test that decided the verdict. 'roster' and 'session_record' are local; 'foreign_binding' (another city's canonical naming, ga-8yi7ne; 'detail' names the binding) and 'absent_from_roster' (possibly one of ours whose config and records are gone) are foreign; 'no_config' (bad usage, an unresolvable city, or a city config that would not load or carries no roster; 'detail' says which) and 'lookup_failed' are unknown.",
       "enum": [
         "roster",
         "session_record",

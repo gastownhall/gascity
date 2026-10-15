@@ -11813,7 +11813,9 @@ exit 0
 // (exit 0), modeling a dead local claimant whose closed session record
 // survives. An empty identity gets the verb's usage answer (exit 2, unknown).
 // ORPHAN_SWEEP_GATE_SLEEP makes every answer take that many seconds, modeling
-// a slow store. It uses echo, not printf, so it is safe inside fmt.Sprintf
+// a slow store. ORPHAN_SWEEP_GATE_LINGER keeps the gate running that many
+// seconds after it prints a local answer, modeling a gc that answered but hung
+// on its way out. It uses echo, not printf, so it is safe inside fmt.Sprintf
 // stubs.
 const orphanSweepGateStubArm = `if [ "$1" = "agent" ] && [ "$2" = "is-foreign" ]; then
   if [ -n "${ORPHAN_SWEEP_GATE_SLEEP:-}" ]; then sleep "$ORPHAN_SWEEP_GATE_SLEEP"; fi
@@ -11827,6 +11829,7 @@ const orphanSweepGateStubArm = `if [ "$1" = "agent" ] && [ "$2" = "is-foreign" ]
     exit 1
   fi
   echo '{"schema_version":"1","ok":true,"verdict":"local","reason":"session_record","roster_source":"stub"}'
+  if [ -n "${ORPHAN_SWEEP_GATE_LINGER:-}" ]; then sleep "$ORPHAN_SWEEP_GATE_LINGER"; fi
   exit 0
 fi
 `
@@ -12496,8 +12499,9 @@ func TestOrphanSweepProtectsUngatedClaimsWhenTheGateBudgetIsExhausted(t *testing
 }
 
 // TestOrphanSweepStopsAskingTheGateOnceTheBudgetRunsOut asks a slow gate (3s
-// per answer) under a 2s budget: the first identity is answered, and the sweep
-// asks about no other identity once the budget is spent, protecting the rest.
+// per answer) under a 2s budget: the sweep asks about one identity and no
+// other once the budget is spent, protecting the rest. Where timeout(1)
+// exists, that one ask is abandoned at the deadline instead of answered.
 func TestOrphanSweepStopsAskingTheGateOnceTheBudgetRunsOut(t *testing.T) {
 	foreign := []string{"shared/dalinar", "shared/kaladin", "shared/shallan"}
 	var rows []orphanSweepGateRow
@@ -12521,17 +12525,84 @@ func TestOrphanSweepStopsAskingTheGateOnceTheBudgetRunsOut(t *testing.T) {
 	if !ok || len(outcome.Scopes) != 3 {
 		t.Fatalf("outcome = %+v (written %v), want three scopes", outcome, ok)
 	}
-	answered, budgeted := 0, 0
+	askedReason := "absent_from_roster"
+	if _, err := exec.LookPath("timeout"); err == nil {
+		askedReason = "2s budget and was abandoned"
+	}
+	asked, budgeted := 0, 0
 	for _, scope := range outcome.Scopes {
 		switch {
-		case strings.Contains(scope.Reason, "absent_from_roster"):
-			answered++
+		case strings.Contains(scope.Reason, askedReason):
+			asked++
 		case strings.Contains(scope.Reason, "gate budget of 2s exhausted"):
 			budgeted++
 		}
 	}
-	if answered != 1 || budgeted != 2 {
-		t.Fatalf("scopes %+v: %d answered and %d budget-protected, want 1 and 2", outcome.Scopes, answered, budgeted)
+	if asked != 1 || budgeted != 2 {
+		t.Fatalf("scopes %+v: %d asked (%q) and %d budget-protected, want 1 and 2", outcome.Scopes, asked, askedReason, budgeted)
+	}
+}
+
+// TestOrphanSweepAbandonsAGateAskThatOutlivesTheBudget bounds each ask, not
+// only when asks start. A store-open stuck behind an unresponsive server
+// would otherwise hold one ask until the order timeout killed the sweep, and
+// the kill reports nothing the sweep protected. Past the budget the ask is
+// abandoned and its claim kept and named, even for a dead local claimant the
+// gate would vouch for given time, and even after the gate printed that
+// verdict: only an exit code that agrees with it is an answer.
+func TestOrphanSweepAbandonsAGateAskThatOutlivesTheBudget(t *testing.T) {
+	if _, err := exec.LookPath("timeout"); err != nil {
+		t.Skipf("timeout(1) not available: %v", err)
+	}
+	const (
+		deadLocal = "gastown__polecat-gc-d34d1"
+		gateHang  = 30 * time.Second
+	)
+	for _, tc := range []struct {
+		name string
+		knob string
+	}{
+		{name: "silent until abandoned", knob: "ORPHAN_SWEEP_GATE_SLEEP"},
+		{name: "answered local then hung", knob: "ORPHAN_SWEEP_GATE_LINGER"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			start := time.Now()
+			run := runOrphanSweepGateFixture(t, nil,
+				[]orphanSweepGateRow{inProgress("sh-local-dead", deadLocal)},
+				nil, nil, map[string]string{
+					"GC_ORPHAN_SWEEP_GATE_BUDGET_SECONDS": "2",
+					tc.knob:                               strconv.Itoa(int(gateHang / time.Second)),
+				})
+			elapsed := time.Since(start)
+			if run.err != nil {
+				t.Fatalf("orphan-sweep exited non-zero for a sweep that only protected: %v\n%s", run.err, run.context())
+			}
+			if elapsed >= gateHang/2 {
+				t.Fatalf("sweep took %s under a 2s budget: the hung ask was not abandoned\n%s", elapsed, run.context())
+			}
+			if got := run.gateCalls(); got != 1 {
+				t.Fatalf("gate consulted %d times, want 1\n%s", got, run.context())
+			}
+			if run.released("sh-local-dead") {
+				t.Fatalf("claim released on an ask abandoned at the budget\n%s", run.context())
+			}
+			if strings.Contains(run.log, "bd show sh-local-dead --json") {
+				t.Fatalf("claim probed without a gate answer\n%s", run.context())
+			}
+			if want := `"` + deadLocal + `" (1: sh-local-dead)`; !strings.Contains(run.out, want) {
+				t.Fatalf("output does not name the protected claim %s:\n%s", want, run.out)
+			}
+			if strings.Contains(run.out, "not asked this pass") {
+				t.Fatalf("an abandoned ask was reported as never asked:\n%s", run.out)
+			}
+			outcome, ok := run.outcome(t)
+			if !ok || outcome.Outcome != "partial" || len(outcome.Scopes) != 1 {
+				t.Fatalf("outcome = %+v (written %v), want partial with one scope", outcome, ok)
+			}
+			if scope := outcome.Scopes[0]; scope.Scope != deadLocal || !strings.Contains(scope.Reason, "2s budget and was abandoned") {
+				t.Fatalf("scope = %+v, want %s kept as abandoned at the budget", scope, deadLocal)
+			}
+		})
 	}
 }
 

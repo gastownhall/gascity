@@ -434,9 +434,14 @@ is_known_agent() {
 # GC_ORPHAN_SWEEP_GATE_BUDGET_SECONDS (default 120, well under the 300s exec
 # order timeout) per sweep; once it is spent no identity is asked about, and
 # every claim whose holder was not asked is protected like one the gate could
-# not answer. Identities are asked in sorted order rotated from a random
-# start, so a backlog of foreign identities cannot starve the same local dead
-# claim of a gate answer on every sweep.
+# not answer. Where timeout(1) exists, an ask still running when the budget
+# runs out is abandoned and its claim protected, so one store-open stuck
+# behind an unresponsive server cannot run the sweep into the order timeout,
+# whose kill would report nothing this sweep protected. Without timeout(1)
+# (stock macOS) the budget bounds only when asks start. Identities are asked
+# in sorted order rotated from a random start, so a backlog of foreign
+# identities cannot starve the same local dead claim of a gate answer on
+# every sweep.
 #
 # The budget is a whole number of seconds that bash arithmetic can hold, read
 # in base 10: bash reads a leading zero as octal and rejects "08" outright,
@@ -474,17 +479,28 @@ claim_gate_verdict() {
     local rc=0
     local answered=""
     local reason=""
+    local remaining=0
+    local bounded=""
     if gate_list_has "$GATE_LOCAL" "$identity"; then GATE_VERDICT=local; return 0; fi
     if gate_list_has "$GATE_FOREIGN" "$identity"; then GATE_VERDICT=foreign; return 0; fi
     if gate_list_has "$GATE_UNKNOWN" "$identity"; then GATE_VERDICT=unknown; return 0; fi
-    if [ "$SECONDS" -ge "$GATE_DEADLINE" ]; then
+    # Read the clock once: the ask is bounded by the remainder this check
+    # passed, and a second read could find it spent -- `timeout 0` disables
+    # the bound instead of enforcing it.
+    remaining=$((GATE_DEADLINE - SECONDS))
+    if [ "$remaining" -le 0 ]; then
         GATE_VERDICT=unknown
         GATE_UNKNOWN="${GATE_UNKNOWN}${identity}"$'\n'
         GATE_BUDGET_SKIPPED=$((GATE_BUDGET_SKIPPED + 1))
         gate_record_reason "$identity" "the foreign-identity gate budget of ${GATE_BUDGET_SECONDS}s exhausted; not asked this pass"
         return 0
     fi
-    verdict_json=$(gc agent is-foreign --json -- "$identity" 2>/dev/null) || rc=$?
+    if command -v timeout >/dev/null 2>&1; then
+        bounded=1
+        verdict_json=$(timeout "$remaining" gc agent is-foreign --json -- "$identity" 2>/dev/null) || rc=$?
+    else
+        verdict_json=$(gc agent is-foreign --json -- "$identity" 2>/dev/null) || rc=$?
+    fi
     # The exit code is the verdict, and it must agree with the JSON verdict:
     # a missing verb, a crash, or unparseable output reads as "could not
     # answer" and protects the claim -- never as local.
@@ -503,7 +519,13 @@ claim_gate_verdict() {
         *)
             GATE_VERDICT=unknown
             GATE_UNKNOWN="${GATE_UNKNOWN}${identity}"$'\n'
-            reason="the foreign-identity gate could not answer (exit $rc)${reason:+: $reason}"
+            if [ -n "$bounded" ] && [ "$rc" -eq 124 ]; then
+                # Whatever it printed before the bound is not an answer: only
+                # an exit code that agrees with it is.
+                reason="the foreign-identity gate did not finish in the ${remaining}s left of its ${GATE_BUDGET_SECONDS}s budget and was abandoned"
+            else
+                reason="the foreign-identity gate could not answer (exit $rc)${reason:+: $reason}"
+            fi
             ;;
     esac
     gate_record_reason "$identity" "$reason"
@@ -671,7 +693,9 @@ if [ "$ORPHANED" -gt 0 ] || [ "$UNVERIFIABLE" -gt 0 ] || [ "$PROTECTED" -gt 0 ];
 $PROTECTED_DETAIL}
 
 orphan-sweep resets in-progress beads whose assignee has no live session or
-known agent. Each reset bead now carries a one-line cause note (see its
+known agent, and only once gc agent is-foreign vouches for the assignee as
+this city's own; claims it cannot vouch for are kept, and any kept this pass
+are listed above. Each reset bead now carries a one-line cause note (see its
 history). Repeated resets of the same bead may indicate a stuck or
 misidentified live session -- inspect via gc bd show <id> --json." \
             2>/dev/null; then

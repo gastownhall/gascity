@@ -368,9 +368,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `GC_ORPHAN_SWEEP_GATE_BUDGET_SECONDS` (default 120, under the order's 300s
   timeout); past it, the remaining claimants are not asked, their claims are
   kept and named with a "gate budget … exhausted" reason, and the sweep says
-  how many identities it did not ask. Identities are asked from a random
-  starting point each sweep, so a large set of foreign claimants delays, but
-  does not starve, release of a dead local claim. Unlike the Go
+  how many identities it did not ask. Where `timeout` is installed, an ask
+  still running when the budget runs out is abandoned and its claim kept and
+  named too, so one stalled store cannot run the sweep into the order's
+  timeout. Identities are asked from a random starting point each sweep, so a
+  large set of foreign claimants delays, but does not starve, release of a
+  dead local claim. Unlike the Go
   pool sweep, the order has no route filter, so it gives bare identities no
   shape exemption: a dead local ephemeral or bead-ID claim stays releasable
   through its own session record. Migration notes: a person's claim, or a
