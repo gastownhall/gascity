@@ -79,6 +79,100 @@ func TestExecEnvForNonBd_LeavesEnvAlone(t *testing.T) {
 	}
 }
 
+func TestExecEnvForBd_TranslatesLegacyOTELMetricsAndLogsURLs(t *testing.T) {
+	// gc's SetProcessOTELAttrs sets the legacy BD_OTEL_METRICS_URL /
+	// BD_OTEL_LOGS_URL names process-wide; both beads main and bd-enterprise
+	// now deprecate those in favor of the standard OTEL_EXPORTER_OTLP_*
+	// names gated by BD_OTEL_ENABLED=true, and warn on stderr whenever a
+	// legacy name is still present. Translate for the bd child only so the
+	// warning disappears without setting the standard (spec-wide) names on
+	// any other child gc spawns.
+	base := []string{
+		"PATH=/usr/bin",
+		"BD_OTEL_METRICS_URL=http://localhost:8428/opentelemetry/api/v1/push",
+		"BD_OTEL_LOGS_URL=http://localhost:9428/insert/opentelemetry/v1/logs",
+	}
+	got := execEnvFor("bd", base, nil)
+
+	if vals := envValues(got, "BD_OTEL_METRICS_URL"); len(vals) != 0 {
+		t.Errorf("legacy BD_OTEL_METRICS_URL leaked through: %v", vals)
+	}
+	if vals := envValues(got, "BD_OTEL_LOGS_URL"); len(vals) != 0 {
+		t.Errorf("legacy BD_OTEL_LOGS_URL leaked through: %v", vals)
+	}
+	if vals := envValues(got, "BD_OTEL_ENABLED"); len(vals) != 1 || vals[0] != "true" {
+		t.Errorf("BD_OTEL_ENABLED values = %v, want exactly [true]", vals)
+	}
+	if vals := envValues(got, "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"); len(vals) != 1 || vals[0] != "http://localhost:8428/opentelemetry/api/v1/push" {
+		t.Errorf("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT values = %v", vals)
+	}
+	if vals := envValues(got, "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"); len(vals) != 1 || vals[0] != "http://localhost:9428/insert/opentelemetry/v1/logs" {
+		t.Errorf("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT values = %v", vals)
+	}
+}
+
+func TestExecEnvForBd_TranslatesLegacyOTELMetricsOnlyWhenLogsUnset(t *testing.T) {
+	base := []string{
+		"PATH=/usr/bin",
+		"BD_OTEL_METRICS_URL=http://localhost:8428/opentelemetry/api/v1/push",
+	}
+	got := execEnvFor("bd", base, nil)
+
+	if vals := envValues(got, "BD_OTEL_ENABLED"); len(vals) != 1 || vals[0] != "true" {
+		t.Errorf("BD_OTEL_ENABLED values = %v, want exactly [true]", vals)
+	}
+	if vals := envValues(got, "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"); len(vals) != 1 || vals[0] != "http://localhost:8428/opentelemetry/api/v1/push" {
+		t.Errorf("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT values = %v", vals)
+	}
+	if vals := envValues(got, "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"); len(vals) != 0 {
+		t.Errorf("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT values = %v, want none (logs URL was never set)", vals)
+	}
+}
+
+func TestExecEnvForBd_NoOTELEnvWhenNeitherLegacyURLSet(t *testing.T) {
+	// A bd child with telemetry not configured must not be force-activated:
+	// bd's own Enabled() check requires BD_OTEL_ENABLED=true or a legacy
+	// selector, so we must never inject BD_OTEL_ENABLED=true unconditionally.
+	base := []string{"PATH=/usr/bin"}
+	got := execEnvFor("bd", base, nil)
+
+	for _, key := range []string{"BD_OTEL_ENABLED", "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"} {
+		if vals := envValues(got, key); len(vals) != 0 {
+			t.Errorf("%s values = %v, want none when telemetry is not configured", key, vals)
+		}
+	}
+}
+
+func TestExecEnvForNonBd_LeavesLegacyOTELEnvAlone(t *testing.T) {
+	// Non-bd commands (e.g. direct dolt queries) must never see the
+	// translated standard OTEL names injected on their behalf — only the bd
+	// exec path is scoped for this translation.
+	base := []string{"PATH=/usr/bin", "BD_OTEL_METRICS_URL=http://localhost:8428/opentelemetry/api/v1/push"}
+	got := execEnvFor("dolt", base, nil)
+
+	if vals := envValues(got, "BD_OTEL_METRICS_URL"); len(vals) != 1 || vals[0] != "http://localhost:8428/opentelemetry/api/v1/push" {
+		t.Errorf("legacy BD_OTEL_METRICS_URL values = %v, want untouched for non-bd commands", vals)
+	}
+	if vals := envValues(got, "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"); len(vals) != 0 {
+		t.Errorf("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT values = %v, want none for non-bd commands", vals)
+	}
+}
+
+func TestExecEnvForBd_ExplicitOTELOverrideWins(t *testing.T) {
+	// An explicit per-call override of the new standard name must still win
+	// over the translation, matching the existing override contract.
+	base := []string{
+		"PATH=/usr/bin",
+		"BD_OTEL_METRICS_URL=http://localhost:8428/opentelemetry/api/v1/push",
+	}
+	got := execEnvFor("bd", base, map[string]string{
+		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://override.example/v1/metrics",
+	})
+	if vals := envValues(got, "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"); len(vals) != 1 || vals[0] != "http://override.example/v1/metrics" {
+		t.Errorf("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT values = %v, want override to win", vals)
+	}
+}
+
 func TestExecCommandRunnerWithoutAmbientBeadsWithholdsNamespaceBeforeOverrides(t *testing.T) {
 	t.Setenv("BEADS_DB", "ambient-database")
 	t.Setenv("BEADS_DOLT_SERVER_HOST", "ambient.example")
