@@ -184,8 +184,9 @@ type InterruptRequest struct {
 	// Fence, when set, confines every key and interrupt to the incarnation
 	// it names (see runtime.InputFence). A runtime that cannot fence the
 	// session refuses with runtime.ErrInputFenceUnsupported before sending
-	// anything; a miss is a *runtime.FenceMismatchError. It is a capability
-	// and never serialized.
+	// anything; a miss is a *runtime.FenceMismatchError, and a session that
+	// is not running is one finding it absent (both handles). It is a
+	// capability and never serialized.
 	Fence runtime.InputFence `json:"-"`
 }
 
@@ -233,26 +234,42 @@ type NudgeRequest struct {
 // path cannot report a refused send.
 var ErrFencedNudgeShape = errors.New("a fenced nudge must be live-only with default or immediate delivery")
 
-// fencedNudgeContext applies req's fence to ctx. A request with no fence
-// returns ctx unchanged. Otherwise the fence must name an incarnation and
-// the request must have a fenced shape; then fencing (the runtime's
-// fencing of the session) decides: a runtime that cannot fence is refused
-// with runtime.ErrInputFenceUnsupported, or, when req.AllowUnfenced,
-// delivered without the fence and reported unfenced.
-func fencedNudgeContext(ctx context.Context, req NudgeRequest, fencing func() (runtime.InputFencing, error)) (context.Context, bool, error) {
+// validateFencedNudge refuses a fenced request that names no incarnation
+// or lacks the fenced shape. A request with no fence passes.
+func validateFencedNudge(req NudgeRequest) error {
 	if req.Fence.IsZero() {
-		return ctx, false, nil
+		return nil
 	}
 	if err := req.Fence.Validate(); err != nil {
-		return ctx, false, err
+		return err
 	}
 	if normalizeNudgeWakePolicy(req.Wake) != NudgeWakeLiveOnly || req.Delivery == NudgeDeliveryWaitIdle {
-		return ctx, false, ErrFencedNudgeShape
+		return ErrFencedNudgeShape
 	}
 	switch req.Delivery {
 	case "", NudgeDeliveryDefault, NudgeDeliveryImmediate:
-	default:
-		return ctx, false, ErrFencedNudgeShape
+		return nil
+	}
+	return ErrFencedNudgeShape
+}
+
+// fencedNudgeContext applies req's fence to ctx. The request's field is the
+// worker's only fence: a request with no fence returns ctx with any input
+// fence it carried cleared, so a caller's ctx fence never reaches a path
+// (wait-idle, a wake that starts the runtime) the fenced shape refuses.
+// Otherwise the request must pass validateFencedNudge; then fencing (the
+// runtime's fencing of the session) decides: a runtime that cannot fence is
+// refused with runtime.ErrInputFenceUnsupported, or, when req.AllowUnfenced,
+// delivered without the fence and reported unfenced.
+func fencedNudgeContext(ctx context.Context, req NudgeRequest, fencing func() (runtime.InputFencing, error)) (context.Context, bool, error) {
+	if req.Fence.IsZero() {
+		if _, ok := runtime.InputFenceFrom(ctx); ok {
+			ctx = runtime.WithInputFence(ctx, runtime.InputFence{})
+		}
+		return ctx, false, nil
+	}
+	if err := validateFencedNudge(req); err != nil {
+		return ctx, false, err
 	}
 	f, err := fencing()
 	if err != nil {
@@ -260,7 +277,7 @@ func fencedNudgeContext(ctx context.Context, req NudgeRequest, fencing func() (r
 	}
 	if f == runtime.InputFencingNone {
 		if req.AllowUnfenced {
-			return ctx, true, nil
+			return runtime.WithInputFence(ctx, runtime.InputFence{}), true, nil
 		}
 		return ctx, false, runtime.ErrInputFenceUnsupported
 	}

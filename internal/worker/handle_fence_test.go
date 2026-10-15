@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
@@ -230,5 +231,85 @@ func TestFencedRequestsNeverSerializeToken(t *testing.T) {
 		if strings.Contains(string(b), f.Token) || strings.Contains(string(b), f.Digest()) {
 			t.Fatalf("%T serialized the fence: %s", v, b)
 		}
+	}
+}
+
+// The request's Fence is the worker's only fence: a caller's ctx fence on a
+// request without one is cleared, so a wake that starts the runtime runs
+// unfenced and the nudge is not refused for its shape.
+func TestNudgeWithoutRequestFenceClearsCtxFence(t *testing.T) {
+	h, sp, name, f := fencedSessionHandle(t)
+	if err := sp.Stop(name); err != nil {
+		t.Fatal(err)
+	}
+	sp.Calls = nil
+	ctx := runtime.WithInputFence(context.Background(), f)
+	res, err := h.Nudge(ctx, handleActor(t, h, sessionpkg.ActorAgent), NudgeRequest{Text: "hi", Wake: NudgeWakeIfNeeded})
+	if err != nil || !res.Delivered {
+		t.Fatalf("Nudge(if_needed) under a ctx fence = %+v, %v; want delivered after a start", res, err)
+	}
+	calls := typedCalls(sp, name)
+	if len(calls) == 0 || calls[0].Method != "Start" {
+		t.Fatalf("calls %+v, want a start first", calls)
+	}
+	for _, c := range calls {
+		if !c.Fence.IsZero() {
+			t.Errorf("%s carries the caller's ctx fence", c.Method)
+		}
+	}
+}
+
+// A malformed fenced request is refused before the handle creates a session
+// row for a handle that has none yet.
+func TestFencedNudgeShapeRefusedBeforeSessionCreate(t *testing.T) {
+	h, store, _, _ := newTestSessionHandle(t, SessionSpec{Template: "probe", Title: "Probe", Command: "claude", WorkDir: t.TempDir(), Provider: "claude"})
+	f := runtime.InputFence{Generation: 1, Epoch: 1, Token: "t"}
+	if _, err := h.Nudge(context.Background(), handleActor(t, h, sessionpkg.ActorAgent), NudgeRequest{Text: "hi", Fence: f, Wake: NudgeWakeIfNeeded}); !errors.Is(err, ErrFencedNudgeShape) {
+		t.Fatalf("Nudge = %v, want ErrFencedNudgeShape", err)
+	}
+	if id := h.currentSessionID(); id != "" {
+		t.Fatalf("a refused fenced nudge created session %s", id)
+	}
+	all, err := store.List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 0 {
+		t.Fatalf("a refused fenced nudge left %d beads", len(all))
+	}
+}
+
+// Both handles answer a fenced interrupt of a session that is not running
+// alike: a miss finding it absent, never nil.
+func TestHandlesFencedInterruptOfStoppedSessionIsAbsent(t *testing.T) {
+	ctx := context.Background()
+	for name, build := range map[string]func(t *testing.T) (interrupter, runtime.InputFence){
+		"session": func(t *testing.T) (interrupter, runtime.InputFence) {
+			h, sp, sess, f := fencedSessionHandle(t)
+			if err := sp.Stop(sess); err != nil {
+				t.Fatal(err)
+			}
+			return h, f
+		},
+		"session without a row": func(t *testing.T) (interrupter, runtime.InputFence) {
+			h, _, _, _ := newTestSessionHandle(t, SessionSpec{Template: "probe", Title: "Probe", Command: "claude", WorkDir: t.TempDir(), Provider: "claude"})
+			return h, runtime.InputFence{Generation: 1, Epoch: 1, Token: "t"}
+		},
+		"runtime": func(t *testing.T) (interrupter, runtime.InputFence) {
+			h, sp, f := fencedRuntimeHandle(t)
+			if err := sp.Stop("rt"); err != nil {
+				t.Fatal(err)
+			}
+			return h, f
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h, f := build(t)
+			err := h.Interrupt(ctx, InterruptRequest{Fence: f})
+			var miss *runtime.FenceMismatchError
+			if !errors.As(err, &miss) || miss.Found != runtime.FenceFoundAbsent {
+				t.Fatalf("Interrupt = %v, want an absent miss", err)
+			}
+		})
 	}
 }

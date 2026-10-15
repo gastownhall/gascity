@@ -379,12 +379,19 @@ func (h *SessionHandle) Interrupt(ctx context.Context, req InterruptRequest) (er
 	defer func() { event.finish(err) }()
 
 	id := h.currentSessionID()
-	if id == "" {
-		return nil
-	}
 	if !req.Fence.IsZero() {
+		if err = req.Fence.Validate(); err != nil {
+			return err
+		}
+		if id == "" {
+			err = &runtime.FenceMismatchError{Session: firstNonEmpty(h.session.ExplicitName, h.session.Alias), Found: runtime.FenceFoundAbsent}
+			return err
+		}
 		err = h.manager.StopTurnFenced(ctx, id, req.Fence)
 		return err
+	}
+	if id == "" {
+		return nil
 	}
 	err = h.manager.StopTurn(id)
 	return err
@@ -404,6 +411,11 @@ func (h *SessionHandle) Nudge(ctx context.Context, by sessionpkg.Actor, req Nudg
 
 	if strings.TrimSpace(req.Text) == "" {
 		err = fmt.Errorf("nudge text is required")
+		return NudgeResult{}, err
+	}
+	// Refuse a malformed fenced request before ensureSessionID, which may
+	// create a session row.
+	if err = validateFencedNudge(req); err != nil {
 		return NudgeResult{}, err
 	}
 	id, err := h.ensureSessionID()
