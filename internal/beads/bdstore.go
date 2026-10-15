@@ -2893,16 +2893,21 @@ func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {
 	// scan of every row of the type for bdListRequiresClientLimit to force
 	// unbounded, which a route like "rig/agent" with two spellings turns into
 	// a full-type scan on every read (GH#7794). Fan out to one predicated read
-	// per assignee instead.
+	// per distinct assignee instead: the set nativeListFanOutAssignees picks
+	// for NativeDoltStore's plan, where an empty entry ("unassigned", which
+	// --assignee cannot say) keeps the scan.
 	//
-	// Not for TierWisps: that tier always merges this leg with a second,
-	// independently-fetched ephemeral leg (listWispsTier), which still falls
-	// back to a scan for multiple assignees on its own bd-query path — fixing
-	// only this leg would not avoid the overall scan for that tier, so it
-	// stays out of scope here (same TierWisps carve-out
-	// bdListRequiresClientLimit already documents).
-	if query.Assignee == "" && len(query.Assignees) >= 2 && query.TierMode != TierWisps {
-		return s.listViaBDListFannedOutByAssignee(query)
+	// That narrows this bd list leg only. TierWisps and TierBoth also read
+	// listEphemeral's bd query leg, which has no assignee clause for two or
+	// more assignees and still reads every ephemeral row the query's other
+	// filters match. GH#7794 stays open for that leg, and mail is ephemeral,
+	// so a multi-route inbox read still pays it. TierWisps keeps the scan on
+	// this leg too; that is a conservative scope choice, not a necessity, as
+	// its bd list leg could fan out the same way.
+	if query.TierMode != TierWisps && len(query.Assignees) >= 2 {
+		if assignees := nativeListFanOutAssignees(query); assignees != nil {
+			return s.listViaBDListFannedOutByAssignee(query, assignees)
+		}
 	}
 	result, partialErr, err := s.fetchViaBDList(query)
 	if err != nil {
@@ -2924,33 +2929,42 @@ func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {
 }
 
 // listViaBDListFannedOutByAssignee serves a List query with two or more
-// Assignees as N independently-predicated `bd list --assignee=X` reads
-// instead of the unpredicated full-type scan bdServerQueryForAssignees falls
-// back to (GH#7794). Each read reuses fetchViaBDList with a single Assignee,
-// so every other filter keeps the exact bd-side semantics it already has for
-// one assignee; Limit is forced to 0 on each so applyListQuery below — the
-// only place that can limit correctly across assignees — sees every
-// candidate row from every one of them, the same unbounded-fetch discipline
+// Assignees as one independently-predicated `bd list --assignee=X` read per
+// entry of assignees, the distinct set listViaBDList picked, instead of the
+// unpredicated full-type scan bdServerQueryForAssignees falls back to
+// (GH#7794). Each read reuses fetchViaBDList with a single Assignee, so every
+// other filter keeps the exact bd-side semantics it already has for one
+// assignee; Limit is forced to 0 on each so applyListQuery below — the only
+// place that can limit correctly across assignees — sees every candidate row
+// from every one of them, the same unbounded-fetch discipline
 // bdListRequiresClientLimit already applies to the single full-scan read this
-// replaces. Beads are single-assignee, so the N result sets cannot overlap
-// and need no dedup.
+// replaces.
 //
-// Results are concatenated in query.Assignees order before that shared
-// filter/sort/limit pass. For an explicit Sort, that pass sorts the combined
-// set into the requested order regardless of fan-out order. For SortDefault
-// it does not — sortBeadsForQuery is a no-op for SortDefault, same as it
-// already is for mergeListTierResults' own cross-read merge of the
-// listViaBDList and listEphemeral legs — so a SortDefault, Limit-bounded
-// multi-assignee read returns whichever assignees are earliest in
-// query.Assignees first, not a true recency merge across all of them. That
-// is the existing, already-accepted shape of this tradeoff elsewhere in this
-// file, not a new one.
-func (s *BdStore) listViaBDListFannedOutByAssignee(query ListQuery) ([]Bead, error) {
+// A FANNED-OUT READ IS SEVERAL SNAPSHOTS, as NativeListPlan says of the
+// native store's: a bead whose assignee moves between two of the reads can be
+// seen by both or by neither. The rows are unioned by ID, keeping the first
+// copy, and a caller that needs one instant's answer passes a singular
+// Assignee.
+//
+// bd list answers in bd's default listing order — priority ascending, then
+// created_at descending, then id (beads' sqlbuild.OrderByForColumns with no
+// sort key) — which sortBeadsNativeListDefaultOrder reproduces for
+// NativeDoltStore's union. For SortDefault this union is put back into that
+// order too, so a Limit keeps the prefix the single scan would have kept;
+// applyListQuery applies an explicit Sort. bd v1.0.4 orders its issues rows
+// and its wisps rows separately, issues rows first, so there that holds for a
+// read answered from one table, as every --type=message read is.
+//
+// A hard error from any one read fails the whole List and discards the rows
+// the earlier reads returned, as a hard error fails the single scan and
+// NativeDoltStore's fan-out.
+func (s *BdStore) listViaBDListFannedOutByAssignee(query ListQuery, assignees []string) ([]Bead, error) {
 	var (
 		merged  []Bead
 		partial *PartialResultError
 	)
-	for _, assignee := range query.Assignees {
+	seen := make(map[string]bool)
+	for _, assignee := range assignees {
 		single := query
 		single.Assignees = nil
 		single.Assignee = assignee
@@ -2959,10 +2973,19 @@ func (s *BdStore) listViaBDListFannedOutByAssignee(query ListQuery) ([]Bead, err
 		if err != nil {
 			return nil, err
 		}
-		merged = append(merged, rows...)
+		for _, row := range rows {
+			if seen[row.ID] {
+				continue
+			}
+			seen[row.ID] = true
+			merged = append(merged, row)
+		}
 		if perCallPartial != nil && partial == nil {
 			partial = perCallPartial
 		}
+	}
+	if query.Sort == SortDefault {
+		sortBeadsNativeListDefaultOrder(merged)
 	}
 	filtered := applyListQuery(merged, query)
 	if partial != nil {

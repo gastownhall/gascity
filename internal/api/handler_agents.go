@@ -454,13 +454,12 @@ func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, live bool, 
 }
 
 // findLiveActiveBeadInStores makes one live List call per store for all
-// identities instead of one per identity, because each live read can spawn
-// database commands. How far a store narrows that call varies:
-// DoltliteReadStore filters with assignee IN (...), NativeDoltStore issues one
-// keyed read per identity, and BdStore (given more than one identity) and
-// SQLiteStore read the store's whole in_progress set and filter it
-// client-side. Precedence matches the cached path. Reading stops once the
-// first identity has a match, since no later store can outrank it.
+// identities, not one per identity. That bounds the calls, not the backend
+// work: how far a store narrows its call varies. DoltliteReadStore filters
+// with assignee IN (...), NativeDoltStore and BdStore issue one keyed read per
+// identity, and SQLiteStore reads the store's whole in_progress set and
+// filters it client-side. Precedence matches the cached path. Reading stops
+// once the first identity has a match, since no later store can outrank it.
 func findLiveActiveBeadInStores(stores map[string]beads.Store, rigNames, identities []string) string {
 	if len(identities) == 0 {
 		return ""
