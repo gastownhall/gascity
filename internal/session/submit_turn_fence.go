@@ -102,13 +102,25 @@ func (m *Manager) sightTurn(ctx context.Context, id string) turnSighting {
 
 // turnFenceFor returns the runtime's turn fence when a deliver-now on b takes
 // the fenced path: an unsuspended protocol-mode session whose runtime reports
-// turns and did not answer the sighting as unsupported. Otherwise nil.
-func (m *Manager) turnFenceFor(b beads.Bead, sessName string, seen turnSighting) runtime.TurnFenceProvider {
+// turns and does not answer as unsupported. Otherwise nil. A sighting that
+// was skipped or read another runtime name says nothing about the
+// capability, so a row the fenced path would not refuse has it read here,
+// under the session mutation lock: a composite may route sessName to a
+// backend without it.
+func (m *Manager) turnFenceFor(ctx context.Context, by Actor, id string, b beads.Bead, sessName string, seen turnSighting) runtime.TurnFenceProvider {
 	if seen.unsupported || State(b.Metadata["state"]) == StateSuspended ||
 		runtime.TurnInterruptModeFor(m.sp, sessName) != runtime.TurnInterruptProtocol {
 		return nil
 	}
-	tf, _ := m.sp.(runtime.TurnFenceProvider)
+	tf, ok := m.sp.(runtime.TurnFenceProvider)
+	if !ok {
+		return nil
+	}
+	if (!seen.taken || seen.name != sessName) && m.startRefusal(by, id, b) == nil {
+		if _, err := observeTurn(ctx, tf, sessName); errors.Is(err, runtime.ErrInteractionUnsupported) {
+			return nil
+		}
+	}
 	return tf
 }
 

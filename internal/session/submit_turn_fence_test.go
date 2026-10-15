@@ -1067,6 +1067,31 @@ func TestFencedDeliverNowCompositeWithoutCapabilityKeepsProtocolSequence(t *test
 	}
 }
 
+// A composite routing to a backend without the capability keeps
+// SESSION-RUNTIME-016 even when the sighting was skipped (here the unlocked
+// row read failed): the capability is re-read under the lock.
+func TestFencedDeliverNowCompositeWithoutCapabilityAndASkippedSightingKeepsProtocolSequence(t *testing.T) {
+	store := &failingGetStore{Store: beads.NewMemStore()}
+	x := newFenceFixture(t, fenceFixtureOpts{store: store, wrap: func(f *runtime.Fake) runtime.Provider {
+		f.TurnInterruptModeValue = runtime.TurnInterruptProtocol
+		return auto.New(f, runtime.NewFakeProfile(runtime.ProfileACP, runtime.FullFake{Fake: runtime.NewFake()}))
+	}})
+	store.armed.Store(true)
+	out, err := x.submit(t, fenceMsg)
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	if out.Interrupt != nil || out.Queued {
+		t.Fatalf("outcome %+v (report %+v), want the unfenced delivery", out, out.Interrupt)
+	}
+	if got := fenceEffects(x.f.Calls); got != "Interrupt N(msg)" {
+		t.Fatalf("effects = %q, want the protocol Interrupt then the message", got)
+	}
+	if pending := x.pending(t); len(pending) != 0 {
+		t.Fatalf("pending %+v, want nothing queued", pending)
+	}
+}
+
 func TestFencedDeliverNowRefusedFamilyReadsNothing(t *testing.T) {
 	x := newFenceFixture(t, fenceFixtureOpts{provider: "antigravity"})
 	x.script("t1")

@@ -170,7 +170,7 @@ func (m *Manager) submit(ctx context.Context, by Actor, id, message, resumeComma
 					return err
 				}
 			}
-			if tf := m.turnFenceFor(b, sessName, seen); tf != nil {
+			if tf := m.turnFenceFor(ctx, by, id, b, sessName, seen); tf != nil {
 				outcome, err = m.fencedInterruptAndSubmitLocked(ctx, by, id, b, sessName, message, resumeCommand, hints, tf, seen)
 				return err
 			}
