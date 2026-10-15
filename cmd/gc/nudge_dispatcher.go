@@ -30,7 +30,11 @@ const pingNudgeWakeSocketDialTimeout = 200 * time.Millisecond
 // are intentionally silent: the patrol-tick fallback in supervisor mode
 // and the per-session poller in legacy mode each guarantee eventual
 // delivery without the wake.
-func pingNudgeWakeSocket(cityPath string) {
+//
+// It is a variable so the file queue's characterization tests can count the
+// pings a queue verb sends without opening a listener; tests that replace it
+// must stay serial.
+var pingNudgeWakeSocket = func(cityPath string) {
 	if cityPath == "" {
 		return
 	}

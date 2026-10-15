@@ -1524,6 +1524,7 @@ go_test(
         "native_reopen_wiring_test.go",
         "nudge_claim_census_test.go",
         "nudge_dispatcher_test.go",
+        "nudge_file_queue_characterization_test.go",
         "nudge_honesty_test.go",
         "nudge_mail_sweep_test.go",
         "nudge_poller_city_stop_test.go",
