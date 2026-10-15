@@ -211,3 +211,35 @@ func TestExecCommandRunnerWithExactEnvContextExcludesParentValues(t *testing.T) 
 		t.Fatalf("exact runner output = %q, want %q", got, want)
 	}
 }
+
+func TestBdStorePurgeEnvUsesBdExecEnvPolicy(t *testing.T) {
+	// bd purge used to build its child env by hand, bypassing execEnvFor, so
+	// it missed the auto-backup opt-out (and any later bd env policy such as
+	// legacy OTEL name translation). It must get exactly the env every other
+	// bd exec gets, plus its BEADS_DIR selection.
+	t.Setenv("BD_BACKUP_ENABLED", "true")
+	t.Setenv("BEADS_DIR", "/ambient/.beads")
+
+	const beadsDir = "/city/rigs/fe/.beads"
+	var gotEnv []string
+	s := NewBdStore("/city", nil)
+	s.SetPurgeRunner(func(_ string, env []string, _ ...string) ([]byte, error) {
+		gotEnv = env
+		return []byte(`{"purged_count": 0}`), nil
+	})
+	if _, err := s.Purge(beadsDir, true); err != nil {
+		t.Fatalf("Purge: %v", err)
+	}
+
+	if vals := envValues(gotEnv, "BD_BACKUP_ENABLED"); len(vals) != 1 || vals[0] != "false" {
+		t.Errorf("purge BD_BACKUP_ENABLED values = %v, want exactly [false]", vals)
+	}
+	if vals := envValues(gotEnv, "BEADS_DIR"); len(vals) != 1 || vals[0] != beadsDir {
+		t.Errorf("purge BEADS_DIR values = %v, want exactly [%s]", vals, beadsDir)
+	}
+	want := execEnvFor("bd", processEnvSnapshotExcludingNativeDoltOpen(), map[string]string{"BEADS_DIR": beadsDir})
+	if strings.Join(gotEnv, "\n") != strings.Join(want, "\n") {
+		t.Errorf("purge env diverges from execEnvFor(bd) policy: got %d entries, want %d (BD_BACKUP_ENABLED got %v)",
+			len(gotEnv), len(want), envValues(gotEnv, "BD_BACKUP_ENABLED"))
+	}
+}
